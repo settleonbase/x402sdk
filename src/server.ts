@@ -139,10 +139,6 @@ export class x402Server {
 
         })
 
-
-
-
-
         app.all ('/', (req: any, res: any) => {
 			
 			return res.status(404).end ()
