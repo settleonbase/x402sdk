@@ -1,0 +1,29 @@
+{
+	"name": "@settle402/sdk",
+	"version": "1.0.0",
+	"description": "Settle on Base SDK",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"license": "MIT",
+	"publishConfig": {
+		"access": "public"
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc --outDir dist",
+		"start": "node dist/index.js"
+	},
+	"devDependencies": {
+		"@types/express": "^5.0.5",
+		"@types/node": "^24.9.2"
+	},
+	"dependencies": {
+		"express": "^5.1.0",
+		"colors": "^1.4.0",
+		"uuid": "^13.0.0",
+		"ethers": "^6.15.0",
+		"hexdump-nodejs": "^0.1.0"
+	}
+}
