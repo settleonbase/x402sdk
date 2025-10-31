@@ -10,6 +10,7 @@ const safe_1 = __importDefault(require("colors/safe"));
 const node_util_1 = require("node:util");
 const logger_1 = require("./logger");
 const node_fs_1 = __importDefault(require("node:fs"));
+const x402_express_1 = require("x402-express");
 const routes = {
     "/api/weather": {
         price: "$0.001",
@@ -39,15 +40,11 @@ const routes = {
 };
 const initialize = async (reactBuildFolder, PORT, serverRoute) => {
     console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder);
-    // --- 关键逻辑开始 ---
-    // 1. 定义默认路径（只读的应用包内部）
     const defaultPath = (0, node_path_1.join)(__dirname, 'workers');
     console.log('📁 defaultPath:', defaultPath);
-    // 2. 定义更新路径（可写的 userData 目录内部）
     const userDataPath = reactBuildFolder;
     const updatedPath = (0, node_path_1.join)(userDataPath, 'workers');
     console.log('📁 updatedPath:', updatedPath);
-    // 3. 检查更新路径是否存在，然后决定使用哪个路径
     let staticFolder = node_fs_1.default.existsSync(updatedPath) ? updatedPath : defaultPath;
     (0, logger_1.logger)(`staticFolder = ${staticFolder}`);
     console.log('📁 staticFolder:', staticFolder);
@@ -60,6 +57,25 @@ const initialize = async (reactBuildFolder, PORT, serverRoute) => {
         (0, logger_1.logger)(safe_1.default.blue(`${req.url}`));
         return next();
     });
+    app.use((0, x402_express_1.paymentMiddleware)('0xFd60936707cb4583c08D8AacBA19E4bfaEE446B8', { "/api/weather": {
+            price: "$0.001",
+            network: "base",
+            config: {
+                discoverable: true, // make your endpoint discoverable
+                description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+                inputSchema: {
+                    queryParams: {}
+                },
+                outputSchema: {
+                    type: "object",
+                    properties: {
+                        temperature: { type: "number" },
+                        conditions: { type: "string" },
+                        humidity: { type: "number" }
+                    }
+                }
+            }
+        } }));
     const router = express_1.default.Router();
     app.use('/api', router);
     serverRoute(router);
@@ -71,7 +87,6 @@ const initialize = async (reactBuildFolder, PORT, serverRoute) => {
     app.all('/', (req, res) => {
         return res.status(404).end();
     });
-    // 关键修复：保存 server 实例
     console.log('🚀 Starting express.listen on port:', PORT);
     const server = app.listen(PORT, () => {
         console.log('✅ Server started successfully!');
@@ -139,7 +154,6 @@ class x402Server {
     }
 }
 exports.x402Server = x402Server;
-// 关键修复：使用 async IIFE 等待初始化完成
 console.log('📌 Script started');
 (async () => {
     try {
@@ -148,13 +162,11 @@ console.log('📌 Script started');
         console.log('⏳ Calling server.start()...');
         await server.start();
         console.log('✅ Server started successfully!');
-        // 优雅关闭
         process.on('SIGINT', async () => {
             (0, logger_1.logger)('Shutting down gracefully...');
             await server.end();
             process.exit(0);
         });
-        // 防止进程退出
         console.log('🎯 Server is now running. Press Ctrl+C to exit.');
     }
     catch (error) {
