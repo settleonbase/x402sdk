@@ -261,7 +261,40 @@ const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (
 
 const x402ProcessPool: IEIP3009depositWithUSDCAuthorization[] = []
 
+const process_x402 = async () => {
+	const obj = x402ProcessPool.shift()
+	if (!obj) {
+		return
+	}
 
+	const SC = Settle_testnet_pool.shift()
+	if (!SC) {
+		logger(`process_x402 got empty Settle_testnet_pool`)
+		x402ProcessPool.unshift(obj)
+		return
+	}
+
+	try {
+		const tx = await SC.depositWithUSDCAuthorization(
+			obj.address,
+			obj.usdcAmount,
+			obj.validAfter,
+			obj.validBefore,
+			obj.nonce,
+			obj.v,
+			obj.r,
+			obj.s
+		)
+
+		await tx.wait()
+		logger(`process_x402 success! ${tx.hash}`)
+	} catch (ex: any) {
+		logger(`Error process_x402 `, ex.message)
+	}
+	Settle_testnet_pool.unshift(SC)
+	setTimeout(() => process_x402(), 1000)
+
+}
 
 export class x402Server {
 
@@ -339,6 +372,8 @@ export class x402Server {
 				validBefore: message.validBefore,
 				nonce: message.nonce
 			})
+
+			process_x402()
 			// 返回签名验证结果
 			res.status(200).json({
 				success: true,
