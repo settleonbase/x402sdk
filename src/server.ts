@@ -334,7 +334,11 @@ export class x402Server {
 
 			const ercObj: body402 = req.body
 			
+			logger(Colors.red(`message or domain Data format error!:`), inspect(ercObj, false, 3, true))
+			
 			if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
+
+				logger(Colors.red(`message or domain Data format error!:`), inspect(ercObj, false, 3, true))
 				return res.status(200).json({error: `Data format error!`}).end()
 			}
 
@@ -378,7 +382,7 @@ export class x402Server {
 
 			process_x402()
 			// 返回签名验证结果
-			
+
 			res.status(200).json({
 				success: true,
 				message: 'Signature verified successfully',
