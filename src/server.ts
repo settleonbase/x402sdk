@@ -199,12 +199,23 @@ const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (
 
 
 
-	app.use ( express.static ( staticFolder ))
+	// app.use ( express.static ( staticFolder ))
 	app.use ( express.json() )
+
 	app.use (async (req, res: any, next) => {
 		logger(Colors.blue(`${req.url}`))
 		return next()
 	})
+
+	const cors = require('cors')
+
+	app.use(cors({
+		origin: true,                   // 或者 ['http://localhost:5173','https://settleonbase.xyz']
+		methods: ['GET','POST','OPTIONS'],
+		allowedHeaders: ['Content-Type','Authorization'],
+		credentials: false              // 如果前端要带 cookie/凭证，设 true，并且不能用 origin: true/*
+	}));
+
 
 	app.use(paymentMiddleware(ownerWallet, {"/api/weather": {
       price: "$0.001",
@@ -232,6 +243,8 @@ const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (
 
 	app.use( '/api', router )
 	serverRoute(router)
+
+	logger(`🧭 public router after serverRoute(router)`)
 
 	app.once ( 'error', ( err: any ) => {
 		logger (err)
@@ -321,8 +334,9 @@ export class x402Server {
 	}
 
 	public router ( router: express.Router ) {
-
+		
         router.get('/info', async (req,res) => {
+			logger(Colors.red(`/info`), inspect(req.body, false, 3, true))
             res.status(200).json({ 'x402 Server': `http://localhost: 4088`, 'Serving files from': '' }).end()
         })
 
@@ -330,12 +344,12 @@ export class x402Server {
 			res.status(200).json({routes}).end()
 		})
 
-		router.post('/mint-testnet', async (req, res) => {
+		router.post('/mintTestnet', async (req, res) => {
+			logger(Colors.red(`/mintTestnet coming in`), inspect(req.body, false, 3, true))
 
 			const ercObj: body402 = req.body
 			
-			logger(Colors.red(`message or domain Data format error!:`), inspect(ercObj, false, 3, true))
-
+			
 			if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
 
 				logger(Colors.red(`message or domain Data format error!:`), inspect(ercObj, false, 3, true))
