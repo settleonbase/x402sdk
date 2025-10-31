@@ -5,14 +5,14 @@ exports.launchDaemon = void 0;
 const server_1 = require("./server");
 const yargs = require('yargs');
 const argv = yargs(process.argv.slice(2))
-    .usage('Usage: yarn run seguro-gateway --port [number] --path [string]')
+    .usage('Usage: yarn run x402 --port [number] --path [string]')
     .help('h')
     .alias('h', 'help')
-    .describe('port', 'Run Seguro Gateway on this port.')
+    .describe('port', 'Run x402 on this port.')
     .describe('path', 'Read worker files on this path.')
-    .example('seguro-gateway --port 3001', 'Run Seguro Gateway on PORT 3001')
-    .example('seguro-gateway --path ./', 'Read worker files on current directory.')
-    .example('seguro-gateway --port 3001 --path ./', 'Read worker files on current directory & run Seguro Gateway on PORT 3001.')
+    .example('x402 --port 3001', 'Run x402 on PORT 3001')
+    .example('x402 --path ./', 'Read worker files on current directory.')
+    .example('x402 --port 3001 --path ./', 'Read worker files on current directory & run x402 Gateway on PORT 3001.')
     .check(function (argv) {
     if (argv.port) {
         if (typeof argv.port !== 'number') {

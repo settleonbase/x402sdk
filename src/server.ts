@@ -5,26 +5,138 @@ import type {RequestOptions} from 'node:https'
 import { join } from 'node:path'
 import Colors from 'colors/safe'
 import { inspect } from 'node:util'
-import { v4 } from 'uuid'
 import {logger} from './logger'
 
 import {ethers} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
+import { paymentMiddleware, Network } from 'x402-express';
 
+
+const routes =  {
+    "/api/weather": {
+      price: "$0.001",
+      network: "base",
+      config: {
+        discoverable: true, // make your endpoint discoverable
+        description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+        inputSchema: {
+          queryParams: { 
+            location: { 
+              type: 'Canada', 
+              description: "Toronto", 
+              required: true
+            }
+          }
+        },
+        outputSchema: {
+          type: "object",
+          properties: { 
+            temperature: { type: "number" },
+            conditions: { type: "string" },
+            humidity: { type: "number" }
+          }
+        }
+      }
+    }
+}
+
+const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (router: any) => void) => {
+	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
+	
+
+
+	const defaultPath = join(__dirname, 'workers')
+	console.log('📁 defaultPath:', defaultPath)
+
+
+	const userDataPath = reactBuildFolder
+	const updatedPath = join(userDataPath, 'workers')
+	console.log('📁 updatedPath:', updatedPath)
+
+
+	let staticFolder = fs.existsSync(updatedPath) ? updatedPath : defaultPath
+	logger(`staticFolder = ${staticFolder}`)
+	console.log('📁 staticFolder:', staticFolder)
+
+	const app = express()
+	const cors = require('cors')
+
+	app.use( cors ())
+	app.use ( express.static ( staticFolder ))
+	app.use ( express.json() )
+	app.use (async (req, res: any, next) => {
+		logger(Colors.blue(`${req.url}`))
+		return next()
+	})
+
+	const router = express.Router ()
+
+	app.use( '/api', router )
+	serverRoute(router)
+
+	app.once ( 'error', ( err: any ) => {
+		logger (err)
+		logger (`Local server on ERROR, try restart!`)
+		return 
+	})
+
+
+
+	app.all ('/', (req: any, res: any) => {
+		return res.status(404).end ()
+	})
+
+
+	console.log('🚀 Starting express.listen on port:', PORT)
+	const server = app.listen( PORT, () => {
+		console.log('✅ Server started successfully!')
+		console.table([
+			{ 'x402 Server': `http://localhost:${PORT}`, 'Serving files from': staticFolder }
+		])
+	})
+
+	server.on('error', (err: any) => {
+		console.error('❌ Server error:', err)
+	})
+
+	return server
+}
 
 export class x402Server {
 
-
     private loginListening: express.Response|null = null
-    private localserver: Server
+    private localserver: Server | null = null
     private connect_peer_pool: any [] = []
     private worker_command_waiting_pool: Map<string, express.Response> = new Map()
-    private logStram = ''
+    private logStram: any
 
     constructor ( private PORT = 3000, private reactBuildFolder: string) {
-        this.initialize()
+		this.logStram = 
+        console.log('🏗️  x402Server constructor called')
     }
+
+	public async start(): Promise<void> {
+		console.log('⏳ start() called')
+		try {
+			this.localserver = await initialize(this.reactBuildFolder, this.PORT, this.router)
+			console.log('✨ start() completed successfully')
+		} catch (err) {
+			console.error('❌ start() error:', err)
+			throw err
+		}
+	}
+
+	public router ( router: express.Router ) {
+
+        router.get('/info', async (req,res) => {
+            res.status(200).json({ 'x402 Server': `http://localhost: 4088`, 'Serving files from': '' }).end()
+        })
+
+		router.get('/weather', async (req,res) => {
+			res.status(200).json({routes}).end()
+		})
+	}
 
 	public end = (): Promise<void> => new Promise(resolve => {
 		if (this.localserver) {
@@ -34,7 +146,6 @@ export class x402Server {
 				}
 			})
 		}
-		// 即使服务器不存在或关闭出错，也继续执行
 		resolve()
 	})
 
@@ -48,110 +159,34 @@ export class x402Server {
         console.log ( inspect ({ ws_send: sendData}, false, 3, true ))
         return ws.send ( JSON.stringify ( sendData ))
     }
-
-    private initialize = async () => {
-		// --- 关键逻辑开始 ---
-
-		// 1. 定义默认路径（只读的应用包内部）
-		const defaultPath = join(__dirname, 'workers')
-
-		// 2. 定义更新路径（可写的 userData 目录内部）
-		const userDataPath = this.reactBuildFolder
-		const updatedPath = join(userDataPath, 'workers')
-
-		// 3. 检查更新路径是否存在，然后决定使用哪个路径
-		//    如果 updatedPath 存在，就用它；否则，回退到 defaultPath。
-		let staticFolder = fs.existsSync(updatedPath) ? updatedPath : defaultPath
-		logger(`staticFolder = ${staticFolder}`)
-
-		
-		// --- 关键逻辑结束 ---
-
-        const app = express()
-		const cors = require('cors')
-
-        app.use( cors ())
-		app.use ( express.static ( staticFolder ))
-        //app.use ( express.static ( launcherFolder ))
-        app.use ( express.json() )
-		app.use (async (req, res: any, next) => {
-
-			logger(Colors.blue(`${req.url}`))
-				
-			return next()
-			
-		})
-        app.once ( 'error', ( err: any ) => {
-            logger (err)
-            logger (`Local server on ERROR, try restart!`)
-            return this.initialize ()
-        })
-
-
-        app.post('/connecting', (req: any, res: any) => {
-
-            const headerName=Colors.blue (`Local Server /connecting remoteAddress = ${req.socket?.remoteAddress}`)
-            logger(headerName,  inspect(req.body.data, false, 3, true))
-            let roop:  NodeJS.Timeout
-            if (this.loginListening) {
-                logger (`${headerName} Double connecting. drop connecting!`)
-                return res.sendStatus(403).end()
-
-            }
-            this.loginListening = res
-            res.setHeader('Cache-Control', 'no-cache')
-            res.setHeader('Content-Type', 'text/event-stream')
-            res.setHeader('Access-Control-Allow-Origin', '*')
-            res.setHeader('Connection', 'keep-alive')
-            res.flushHeaders() // flush the headers to establish SSE with client
-
-            const interValID = () => {
-
-                if (res.closed) {
-                    this.loginListening = null
-                    return logger (` ${headerName} lost connect! `)
-                }
-
-                res.write(`\r\n\r\n`, (err: any) => {
-                    if (err) {
-                        logger (`${headerName }res.write got Error STOP connecting`, err)
-                        res.end()
-                        this.loginListening = null
-                    }
-                    return roop = setTimeout(() => {
-                        interValID()
-                    }, 10000)
-                })
-            }
-
-            res.once('close', () => {
-                logger(`[${headerName}] Closed`)
-                res.end()
-                clearTimeout(roop)
-                this.loginListening = null
-            })
-
-            res.on('error', (err: any) => {
-                logger(`[${headerName}] on Error`, err)
-            })
-
-            return interValID()
-
-        })
-
-        app.all ('/', (req: any, res: any) => {
-			
-			return res.status(404).end ()
-		})
-
-        this.localserver = app.listen ( this.PORT, () => {
-            
-			return console.table([
-				{ 'x402 Server': `http://localhost:${this.PORT}` },
-				{ 'Serving files from': staticFolder } 
-			])
-        })
-
-        
-    }
 }
+
+
+console.log('📌 Script started')
+
+;(async () => {
+	try {
+		console.log('🌍 Creating x402Server instance...')
+		const server = new x402Server(4088, '')
+		
+		console.log('⏳ Calling server.start()...')
+		await server.start()
+		
+		console.log('✅ Server started successfully!')
+		
+		process.on('SIGINT', async () => {
+			logger('Shutting down gracefully...')
+			await server.end()
+			process.exit(0)
+		})
+		
+		console.log('🎯 Server is now running. Press Ctrl+C to exit.')
+		
+	} catch (error) {
+		logger(Colors.red('Failed to start server:'), error)
+		console.error('❌ Error details:', error)
+		process.exit(1)
+	}
+})()
+
+console.log('📌 Script setup completed')
