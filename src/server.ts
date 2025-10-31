@@ -342,6 +342,7 @@ export class x402Server {
 			const domain = ercObj.EIP712.domain
 
 			if (!message || !message?.value || domain?.verifyingContract?.toLowerCase() !== ownerContract_testnet.toLowerCase()) {
+				logger(Colors.red(`message or domain Data format error!:`))
 				return res.status(200).json({error: `message or domain Data format error!`}).end()
 			}
 
@@ -354,11 +355,13 @@ export class x402Server {
 			// 调用 checkSig 验证签名
 			const sigResult = checkSig(ercObj)
 			if (!sigResult || !sigResult.isValid) {
+				logger(Colors.red(`Signature verification failed: ${ownerWallet}, Got: ${message?.to}`))
 				return res.status(200).json({error: `Signature verification failed!`}).end()
 			}
 
 			const value = parseFloat(message.value)
 			if (value < 0.01) {
+				logger(Colors.red(`value failed: ${ownerWallet}, Got: ${message?.to}`))
 				return res.status(200).json({error: `value low error!`}).end()
 			}
 
@@ -375,6 +378,7 @@ export class x402Server {
 
 			process_x402()
 			// 返回签名验证结果
+			
 			res.status(200).json({
 				success: true,
 				message: 'Signature verified successfully',
