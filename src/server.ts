@@ -196,9 +196,9 @@ const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (
 	console.log('📁 staticFolder:', staticFolder)
 
 	const app = express()
-	const cors = require('cors')
 
-	app.use( cors ())
+
+
 	app.use ( express.static ( staticFolder ))
 	app.use ( express.json() )
 	app.use (async (req, res: any, next) => {
@@ -335,7 +335,7 @@ export class x402Server {
 			const ercObj: body402 = req.body
 			
 			logger(Colors.red(`message or domain Data format error!:`), inspect(ercObj, false, 3, true))
-			
+
 			if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
 
 				logger(Colors.red(`message or domain Data format error!:`), inspect(ercObj, false, 3, true))
