@@ -217,27 +217,27 @@ const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (
 	}));
 
 
-	app.use(paymentMiddleware(ownerWallet, {"/api/weather": {
-      price: "$0.001",
-      network: "base",
-      config: {
-        discoverable: true,
-        description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-        inputSchema: {
-          queryParams: {
+	// app.use(paymentMiddleware(ownerWallet, {"/api/weather": {
+    //   price: "$0.001",
+    //   network: "base",
+    //   config: {
+    //     discoverable: true,
+    //     description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+    //     inputSchema: {
+    //       queryParams: {
             
-          }
-        },
-        outputSchema: {
-          type: "object",
-          properties: { 
-            temperature: { type: "number" },
-            conditions: { type: "string" },
-            humidity: { type: "number" }
-          }
-        }
-      }
-    }}))
+    //       }
+    //     },
+    //     outputSchema: {
+    //       type: "object",
+    //       properties: { 
+    //         temperature: { type: "number" },
+    //         conditions: { type: "string" },
+    //         humidity: { type: "number" }
+    //       }
+    //     }
+    //   }
+    // }}))
 
 	const router = express.Router ()
 
