@@ -1,5 +1,7 @@
 type IMasterSetup = {
 	settle_admin: string
+	settle_u1: string
+	base_endpoint: string
 }
 
 /**

@@ -12,10 +12,13 @@ import os from 'node:os'
 import fs from 'node:fs'
 import { paymentMiddleware, Network } from 'x402-express'
 import {masterSetup} from './util'
-import Settle_ABI from './sellte-abi.json'
+import Settle_ABI from './ABI/sellte-abi.json'
+import USDC_ABI from './ABI/usdc_abi.json'
 
 const ownerWallet = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
-const ownerContract_testnet = `0xFd60936707cb4583c08D8AacBA19E4bfaEE446B8`
+
+const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+const SETTLEContract = '0x8C91cb04707c7E5C80f90634a778bd23C1bA1392'
 
 const routes =  {
     "/api/weather": {
@@ -67,6 +70,7 @@ type EIP712 = {
 	}
 }
 
+
 type body402 = {
 	EIP712: EIP712
 	sig: string
@@ -83,102 +87,150 @@ type SignatureComponents = {
 // ============================================
 // checkSig 函数：验证签名并获取 { v, r, s }
 // ============================================
-const checkSig = (ercObj: body402): SignatureComponents | null => {
-	try {
-		if (!ercObj?.sig || !ercObj?.EIP712) {
-			logger(Colors.red('Invalid ercObj format'))
-			return null
-		}
+const checkSig = (ercObj: any): {
+  v: number
+  r: string
+  s: string
+  recoveredAddress: string
+  isValid: boolean
+} | null => {
+  try {
+    // 基础字段校验
+    if (!ercObj || !ercObj.sig || !ercObj.EIP712) {
+      console.log('❌ Invalid ercObj: missing sig or EIP712')
+      return null
+    }
 
-		const sig = ercObj.sig
-		const eip712 = ercObj.EIP712
-		const message = eip712.message
+    const sigRaw: string = ercObj.sig
+    const eip712: any = ercObj.EIP712
+    const message: any = eip712?.message || {}
 
-		// 验证有效期时间戳
-		const currentTimestamp = Math.floor(Date.now() / 1000)
-		
-		if (!message?.validAfter || !message?.validBefore) {
-			logger(Colors.red('Missing validAfter or validBefore in message'))
-			return null
-		}
+    // 时间窗口校验（如果你的业务不需要，可移除）
+    const now = Math.floor(Date.now() / 1000)
+    const validAfter = BigInt((message?.validAfter ?? 0).toString())
+    const validBefore = BigInt((message?.validBefore ?? 0).toString())
+    if (now < Number(validAfter)) {
+      console.log(`❌ Signature not yet valid: now=${now}, validAfter=${validAfter}`)
+      return null
+    }
+    if (now > Number(validBefore)) {
+      console.log(`❌ Signature expired: now=${now}, validBefore=${validBefore}`)
+      return null
+    }
 
-		const validAfter = parseInt(message.validAfter.toString())
-		const validBefore = parseInt(message.validBefore.toString())
+    // 规范化 domain（ethers v6：chainId 推荐 number/bigint）
+    const domain = {
+      name: eip712?.domain?.name,
+      version: eip712?.domain?.version,
+      chainId:
+        typeof eip712?.domain?.chainId === 'string'
+          ? Number(eip712.domain.chainId)
+          : eip712?.domain?.chainId,
+      verifyingContract: eip712?.domain?.verifyingContract
+    }
 
-		// 检查当前时间是否在有效期内
-		if (currentTimestamp < validAfter) {
-			logger(Colors.red(`Signature not yet valid. validAfter: ${validAfter}, current: ${currentTimestamp}`))
-			return null
-		}
+    // 规范化 types：可能是对象，也可能被序列化为字符串
+    const typesObj: Record<string, Array<{ name: string; type: string }>> =
+      typeof eip712?.types === 'string'
+        ? JSON.parse(eip712.types)
+        : (eip712?.types as any)
 
-		if (currentTimestamp > validBefore) {
-			logger(Colors.red(`Signature has expired. validBefore: ${validBefore}, current: ${currentTimestamp}`))
-			return null
-		}
+    if (!typesObj || typeof typesObj !== 'object') {
+      console.log('❌ EIP712.types is not a valid object')
+      return null
+    }
 
-		logger(Colors.green(`✓ Timestamp validation passed. validAfter: ${validAfter}, validBefore: ${validBefore}, current: ${currentTimestamp}`))
+    // —— 首选：verifyTypedData（最高容错） ——
+    try {
+      const recovered = ethers.verifyTypedData(domain as any, typesObj as any, message, sigRaw)
+      const isValid = recovered?.toLowerCase?.() === message?.from?.toLowerCase?.()
+      if (isValid) {
+        // 拆分 v/r/s 以便后续链上使用
+        const normalizedSig = sigRaw.startsWith('0x') ? sigRaw : ('0x' + sigRaw)
+        const sig = ethers.Signature.from(normalizedSig)
+        // v 规范化到 27/28（有些钱包返回 0/1）
+        
+		let v: number = Number(sig.v)
+		if (v === 0 || v === 1) v += 27
 
-		// 验证签名格式（0x开头，长度为130）
-		if (!sig.startsWith('0x') || sig.length !== 132) {
-			logger(Colors.red('Invalid signature format'))
-			return null
-		}
+        console.log(`✅ verifyTypedData OK. recovered=${recovered}`)
+        return {
+          v,
+          r: sig.r,
+          s: sig.s,
+          recoveredAddress: recovered,
+          isValid: true
+        }
+      } else {
+        console.log(`⚠️ verifyTypedData recovered=${recovered}, expected=${message?.from}`)
+        // 继续走 fallback
+      }
+    } catch (e: any) {
+      console.log(`⚠️ verifyTypedData failed: ${e?.message || String(e)}`)
+      // 继续走 fallback
+    }
 
-		// 从签名中提取 v, r, s
-		const r = '0x' + sig.slice(2, 66)
-		const s = '0x' + sig.slice(66, 130)
-		const v = parseInt(sig.slice(130, 132), 16)
+    // —— fallback：手工 hash + recoverAddress ——
 
-		logger(`Extracted v: ${v}, r: ${r}, s: ${s}`)
+    // 1) 规范化签名并拆分 v/r/s
+    let hex = sigRaw.startsWith('0x') ? sigRaw : ('0x' + sigRaw)
+    if (hex.length !== 132) {
+      console.log(`⚠️ Unusual signature length=${hex.length}, still attempting recovery`)
+      // 尽力而为，不直接退出
+    }
+    const r = '0x' + hex.slice(2, 66)
+    const s = '0x' + hex.slice(66, 130)
+    let v = parseInt(hex.slice(130, 132) || '1b', 16) // 默认 0x1b(27)
+    if (v === 0 || v === 1) v += 27
+    if (v !== 27 && v !== 28) console.log(`⚠️ Unusual v=${v} after normalization`)
 
-		// 使用 ethers.js 构建 EIP-712 哈希
-		const domain = {
-			name: eip712.domain.name,
-			version: eip712.domain.version,
-			chainId: eip712.domain.chainId,
-			verifyingContract: eip712.domain.verifyingContract
-		}
+    // 2) 规范化 message（数值字段使用 BigInt，更符合 v6 编码）
+    const msgForHash: any = {
+      from: message.from,
+      to: message.to,
+      value: BigInt(message.value?.toString?.() ?? message.value ?? 0),
+      validAfter: BigInt(message.validAfter?.toString?.() ?? message.validAfter ?? 0),
+      validBefore: BigInt(message.validBefore?.toString?.() ?? message.validBefore ?? 0),
+      nonce: message.nonce
+    }
 
-		const messageTypes = {
-			Message: [
-				{ name: 'from', type: 'address' },
-				{ name: 'to', type: 'address' },
-				{ name: 'value', type: 'string' },
-				{ name: 'validAfter', type: 'uint256' },
-				{ name: 'validBefore', type: 'uint256' },
-				{ name: 'nonce', type: 'string' }
-			]
-		}
+    // 3) 计算 digest
+    let digest: string
+    try {
+      digest = ethers.TypedDataEncoder.hash(domain as any, typesObj as any, msgForHash)
+      console.log(`📋 digest=${digest}`)
+    } catch (e: any) {
+      console.log(`❌ TypedDataEncoder.hash error: ${e?.message || String(e)}`)
+      return null
+    }
 
+    // 4) 恢复地址
+    let recoveredAddress: string
+    try {
+      recoveredAddress = ethers.recoverAddress(digest, { v, r, s })
+      console.log(`✅ fallback recovered=${recoveredAddress}`)
+    } catch (e: any) {
+      console.log(`❌ recoverAddress error: ${e?.message || String(e)}`)
+      return null
+    }
 
-		// 计算 EIP-712 hash
-		const digest = ethers.TypedDataEncoder.hash(domain, messageTypes, message)
-		logger(`Computed digest: ${digest}`)
+    const isValid = recoveredAddress?.toLowerCase?.() === message?.from?.toLowerCase?.()
+    if (!isValid) {
+      console.log(`❌ INVALID signature. expected=${message?.from}, got=${recoveredAddress}`)
+    }
 
-		// 恢复签名者地址
-		const recoveredAddress = ethers.recoverAddress(digest, { v, r, s })
-		logger(Colors.green(`Recovered address: ${recoveredAddress}`))
-
-		// 验证签名的有效性
-		const isValid = recoveredAddress.toLowerCase() === message.from.toLowerCase()
-		logger(isValid ? Colors.green('✓ Signature is valid') : Colors.red('✗ Signature is invalid'))
-
-		return {
-			v,
-			r,
-			s,
-			recoveredAddress,
-			isValid
-		}
-	} catch (error) {
-		logger(Colors.red('checkSig error:'), error)
-		return null
-	}
+    return { v, r, s, recoveredAddress, isValid }
+  } catch (err: any) {
+    console.log(`❌ checkSig fatal error: ${err?.message || String(err)}`)
+    return null
+  }
 }
 
-const base_testnet_provide = new ethers.JsonRpcProvider('https://chain-proxy.wallet.coinbase.com?targetName=base-sepolia')
-const base_testnet_admin = new ethers.Wallet(masterSetup.settle_admin, base_testnet_provide)
-const Settle_testnet_pool = [new ethers.Contract(ownerContract_testnet, Settle_ABI, base_testnet_admin)]
+const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
+const SETTLE_admin = new ethers.Wallet(masterSetup.settle_admin, baseProvider)
+const Settle_ContractPool = [new ethers.Contract(SETTLEContract, Settle_ABI, SETTLE_admin)]
+
+logger(`base admin ${SETTLE_admin.address}`)
 
 const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (router: any) => void) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
@@ -280,7 +332,7 @@ const process_x402 = async () => {
 		return
 	}
 
-	const SC = Settle_testnet_pool.shift()
+	const SC = Settle_ContractPool.shift()
 	if (!SC) {
 		logger(`process_x402 got empty Settle_testnet_pool`)
 		x402ProcessPool.unshift(obj)
@@ -304,10 +356,11 @@ const process_x402 = async () => {
 	} catch (ex: any) {
 		logger(`Error process_x402 `, ex.message)
 	}
-	Settle_testnet_pool.unshift(SC)
+	Settle_ContractPool.unshift(SC)
 	setTimeout(() => process_x402(), 1000)
 
 }
+
 
 export class x402Server {
 
@@ -352,15 +405,15 @@ export class x402Server {
 			
 			if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
 
-				logger(Colors.red(`message or domain Data format error!:`), inspect(ercObj, false, 3, true))
+				logger(Colors.red(`message or domain Data format error 1!:`), inspect(ercObj, false, 3, true))
 				return res.status(200).json({error: `Data format error!`}).end()
 			}
 
 			const message = ercObj.EIP712.message
 			const domain = ercObj.EIP712.domain
 
-			if (!message || !message?.value || domain?.verifyingContract?.toLowerCase() !== ownerContract_testnet.toLowerCase()) {
-				logger(Colors.red(`message or domain Data format error!:`))
+			if (!message || !message?.value || domain?.verifyingContract?.toLowerCase() !== USDCContract.toLowerCase()) {
+				logger(Colors.red(`message or domain Data format error 2 !: domain?.verifyingContract ${domain?.verifyingContract} USDC = ${USDCContract}`))
 				return res.status(200).json({error: `message or domain Data format error!`}).end()
 			}
 
@@ -373,7 +426,7 @@ export class x402Server {
 			// 调用 checkSig 验证签名
 			const sigResult = checkSig(ercObj)
 			if (!sigResult || !sigResult.isValid) {
-				logger(Colors.red(`Signature verification failed: ${ownerWallet}, Got: ${message?.to}`))
+				logger(Colors.red(`Signature verification failed: ${ownerWallet}, Got: ${message?.to}`), inspect(sigResult, false, 3, true))
 				return res.status(200).json({error: `Signature verification failed!`}).end()
 			}
 
@@ -460,4 +513,54 @@ console.log('📌 Script started')
 	}
 })()
 
+
+
 console.log('📌 Script setup completed')
+
+const callTransferWithAuthorization = async () => {
+	const u1 = new ethers.Wallet(masterSetup.settle_u1, baseProvider)
+	const USDC_SC = new ethers.Contract(USDCContract, USDC_ABI, u1)
+	try {
+
+		// const [name, ver] = await Promise.all([
+		// 	USDC_SC.name(),
+		// 	USDC_SC.version(),
+		// ])
+
+		// logger(`name ${name} ver ${ver}`)
+
+		// const tx = await USDC_SC.transferWithAuthorization(
+		// 	"0x4ec406c9cdf0952e95940c543943efcc76b8bff2",
+		// 	"0xDA28554C39575739Ea41A220198bA4a97e1e233e",
+		// 	"100000",
+		// 	"1762003950",
+		// 	"1762007550",
+		// 	"0x2cc326e837b0425c8a499baa5727b1b248eb91a0df3c0b42e0b2adc989798802",
+		// 	27,
+		// 	"0x6bd86f6fa43227cd6d8659c5d434f31e82d946bfed170aadb5dc755bb8527029",
+		// 	"0x71f9d25371b1a95d0d40654fff5eedaa74860bebd2a56afff637231d43ba0aff"
+		// )
+
+		const SC = Settle_ContractPool[0]
+		const tx =  await SC.depositWithUSDCAuthorization(
+			"0x4ec406c9cdf0952e95940c543943efcc76b8bff2",
+			"300000",
+			"1762010005",
+			"1762013605",
+			"0xb308f8cf7efbee7ef1d1e7354aaf1f6b41e44c0be03e753fd26f4584d096a508",
+			28,
+			"0x3d798f6dede1ebdb96df9545a7e3039b157f7f43be9e859b59ecfa6b0075eec4",
+			"0x3b226ea460139f5a0393a81133a65f2aae1aae66b741a01b16b091bcb2dfdbea"
+		)
+
+
+
+		await tx.wait()
+		logger(`callTransferWithAuthorization SUCCESS ${tx.hash}`)
+	} catch (ex: any) {
+		logger(`callTransferWithAuthorization Error!`, ex.message)
+	}
+}
+
+// callTransferWithAuthorization()
+
