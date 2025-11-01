@@ -232,7 +232,7 @@ const Settle_ContractPool = [new ethers.Contract(SETTLEContract, Settle_ABI, SET
 
 logger(`base admin ${SETTLE_admin.address}`)
 
-const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (router: any) => void) => {
+const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (router: any) => void) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
 	
 
@@ -294,7 +294,10 @@ const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (
 	const router = express.Router ()
 
 	app.use( '/api', router )
-	serverRoute(router)
+	setupRoutes(router)
+
+	logger('Router stack:', router.stack.map(r => r.route?.path))
+
 
 	logger(`🧭 public router after serverRoute(router)`)
 
