@@ -323,6 +323,83 @@ const initialize = async (reactBuildFolder: string, PORT: number, serverRoute: (
 	return server
 }
 
+const router = ( router: express.Router ) => {
+	
+	router.get('/info', async (req,res) => {
+		logger(Colors.red(`/info`), inspect(req.body, false, 3, true))
+		res.status(200).json({ 'x402 Server': `http://localhost: 4088`, 'Serving files from': '' }).end()
+	})
+
+	router.get('/weather', async (req,res) => {
+		res.status(200).json({routes}).end()
+	})
+
+	router.post('/mintTestnet', async (req, res) => {
+		logger(Colors.red(`/mintTestnet coming in`), inspect(req.body, false, 3, true))
+
+		const ercObj: body402 = req.body
+		
+		
+		if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
+
+			logger(Colors.red(`message or domain Data format error 1!:`), inspect(ercObj, false, 3, true))
+			return res.status(200).json({error: `Data format error!`}).end()
+		}
+
+		const message = ercObj.EIP712.message
+		const domain = ercObj.EIP712.domain
+
+		if (!message || !message?.value || domain?.verifyingContract?.toLowerCase() !== USDCContract.toLowerCase()) {
+			logger(Colors.red(`message or domain Data format error 2 !: domain?.verifyingContract ${domain?.verifyingContract} USDC = ${USDCContract}`))
+			return res.status(200).json({error: `message or domain Data format error!`}).end()
+		}
+
+		// 检查收款人必须是 ownerWallet
+		if (!message?.to || message.to.toLowerCase() !== ownerWallet.toLowerCase()) {
+			logger(Colors.red(`Recipient check failed! Expected: ${ownerWallet}, Got: ${message?.to}`))
+			return res.status(200).json({error: `Recipient must be ${ownerWallet}!`}).end()
+		}
+
+		// 调用 checkSig 验证签名
+		const sigResult = checkSig(ercObj)
+		if (!sigResult || !sigResult.isValid) {
+			logger(Colors.red(`Signature verification failed: ${ownerWallet}, Got: ${message?.to}`), inspect(sigResult, false, 3, true))
+			return res.status(200).json({error: `Signature verification failed!`}).end()
+		}
+
+		const value = parseFloat(message.value)
+		if (value < 0.01) {
+			logger(Colors.red(`value failed: ${ownerWallet}, Got: ${message?.to}`))
+			return res.status(200).json({error: `value low error!`}).end()
+		}
+
+		x402ProcessPool.push({
+			v: sigResult.v,
+			r: sigResult.r,
+			s: sigResult.s,
+			address: sigResult.recoveredAddress,
+			usdcAmount: message.value,
+			validAfter: message.validAfter,
+			validBefore: message.validBefore,
+			nonce: message.nonce
+		})
+
+		process_x402()
+		// 返回签名验证结果
+
+		res.status(200).json({
+			success: true,
+			message: 'Signature verified successfully',
+			signatureComponents: {
+				v: sigResult.v,
+				r: sigResult.r,
+				s: sigResult.s,
+				recoveredAddress: sigResult.recoveredAddress
+			}
+		}).end()
+	})
+}
+
 
 const x402ProcessPool: IEIP3009depositWithUSDCAuthorization[] = []
 
@@ -378,89 +455,12 @@ export class x402Server {
 	public async start(): Promise<void> {
 		console.log('⏳ start() called')
 		try {
-			this.localserver = await initialize(this.reactBuildFolder, this.PORT, this.router)
+			this.localserver = await initialize(this.reactBuildFolder, this.PORT, router)
 			console.log('✨ start() completed successfully')
 		} catch (err) {
 			console.error('❌ start() error:', err)
 			throw err
 		}
-	}
-
-	public router ( router: express.Router ) {
-		
-        router.get('/info', async (req,res) => {
-			logger(Colors.red(`/info`), inspect(req.body, false, 3, true))
-            res.status(200).json({ 'x402 Server': `http://localhost: 4088`, 'Serving files from': '' }).end()
-        })
-
-		router.get('/weather', async (req,res) => {
-			res.status(200).json({routes}).end()
-		})
-
-		router.post('/mintTestnet', async (req, res) => {
-			logger(Colors.red(`/mintTestnet coming in`), inspect(req.body, false, 3, true))
-
-			const ercObj: body402 = req.body
-			
-			
-			if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
-
-				logger(Colors.red(`message or domain Data format error 1!:`), inspect(ercObj, false, 3, true))
-				return res.status(200).json({error: `Data format error!`}).end()
-			}
-
-			const message = ercObj.EIP712.message
-			const domain = ercObj.EIP712.domain
-
-			if (!message || !message?.value || domain?.verifyingContract?.toLowerCase() !== USDCContract.toLowerCase()) {
-				logger(Colors.red(`message or domain Data format error 2 !: domain?.verifyingContract ${domain?.verifyingContract} USDC = ${USDCContract}`))
-				return res.status(200).json({error: `message or domain Data format error!`}).end()
-			}
-
-			// 检查收款人必须是 ownerWallet
-			if (!message?.to || message.to.toLowerCase() !== ownerWallet.toLowerCase()) {
-				logger(Colors.red(`Recipient check failed! Expected: ${ownerWallet}, Got: ${message?.to}`))
-				return res.status(200).json({error: `Recipient must be ${ownerWallet}!`}).end()
-			}
-
-			// 调用 checkSig 验证签名
-			const sigResult = checkSig(ercObj)
-			if (!sigResult || !sigResult.isValid) {
-				logger(Colors.red(`Signature verification failed: ${ownerWallet}, Got: ${message?.to}`), inspect(sigResult, false, 3, true))
-				return res.status(200).json({error: `Signature verification failed!`}).end()
-			}
-
-			const value = parseFloat(message.value)
-			if (value < 0.01) {
-				logger(Colors.red(`value failed: ${ownerWallet}, Got: ${message?.to}`))
-				return res.status(200).json({error: `value low error!`}).end()
-			}
-
-			x402ProcessPool.push({
-				v: sigResult.v,
-				r: sigResult.r,
-				s: sigResult.s,
-				address: sigResult.recoveredAddress,
-				usdcAmount: message.value,
-				validAfter: message.validAfter,
-				validBefore: message.validBefore,
-				nonce: message.nonce
-			})
-
-			process_x402()
-			// 返回签名验证结果
-
-			res.status(200).json({
-				success: true,
-				message: 'Signature verified successfully',
-				signatureComponents: {
-					v: sigResult.v,
-					r: sigResult.r,
-					s: sigResult.s,
-					recoveredAddress: sigResult.recoveredAddress
-				}
-			}).end()
-		})
 	}
 
 	public end = (): Promise<void> => new Promise(resolve => {
@@ -563,4 +563,5 @@ const callTransferWithAuthorization = async () => {
 }
 
 // callTransferWithAuthorization()
+//	curl -v https://api.settleonbase.xyz/api/info
 
