@@ -253,6 +253,7 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 	const isProd = process.env.NODE_ENV === "production";
 
 	const app = express()
+	app.set("trust proxy", true); 
 	if (!isProd) {
 			app.use((req, res, next) => {
 				res.setHeader('Access-Control-Allow-Origin', '*'); // 或你的白名单 Origin
@@ -303,33 +304,33 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 
 
 
-	app.use(paymentMiddleware(
-		owner, 
-		{
-			"/api/weather": {
-				price: "$0.001",
-				network: "base",
-				config: {
-					discoverable: true,
-					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-					inputSchema: {
-						queryParams: {
+	// app.use(paymentMiddleware(
+	// 	owner, 
+	// 	{
+	// 		"/api/weather": {
+	// 			price: "$0.001",
+	// 			network: "base",
+	// 			config: {
+	// 				discoverable: true,
+	// 				description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+	// 				inputSchema: {
+	// 					queryParams: {
 							
-						}
-					},
-					outputSchema: {
-						type: "object",
-						properties: { 
-							temperature: { type: "number" },
-							conditions: { type: "string" },
-							humidity: { type: "number" }
-						}
-					}
-				}
-			}
-		},
-		facilitator1
-	))
+	// 					}
+	// 				},
+	// 				outputSchema: {
+	// 					type: "object",
+	// 					properties: { 
+	// 						temperature: { type: "number" },
+	// 						conditions: { type: "string" },
+	// 						humidity: { type: "number" }
+	// 					}
+	// 				}
+	// 			}
+	// 		}
+	// 	},
+	// 	facilitator1
+	// ))
 
 	const router = express.Router ()
 
@@ -341,11 +342,22 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 
 	logger(`🧭 public router after serverRoute(router)`)
 
+		app.get('/_debug', (req, res) => {
+			res.json({
+				protocol: req.protocol,
+				secure: req.secure,
+				host: req.get('host'),
+				xfp: req.get('x-forwarded-proto'),
+			});
+		});
+
 	app.once ( 'error', ( err: any ) => {
 		logger (err)
 		logger (`Local server on ERROR, try restart!`)
 		return 
 	})
+
+
 
 	app.all ('/', (req: any, res: any) => {
 		return res.status(404).end ()
@@ -376,6 +388,8 @@ const router = ( router: express.Router ) => {
 	router.get('/weather', async (req,res) => {
 		res.status(200).json({routes}).end()
 	})
+
+
 
 	router.get('/settleHistory', async (req,res) => {
 		res.status(200).json(latestList.slice(0, 20)).end()
