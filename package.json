@@ -14,6 +14,7 @@
 	"author": "info@settleonbase.xyz",
 	"scripts": {
 		"build": "tsc --outDir dist",
+		"build1": "yarn node .yarn/sdks/typescript/bin/tsc -p tsconfig.json",
 		"start": "node dist/server.js"
 	},
 	"bin": {
