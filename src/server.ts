@@ -18,7 +18,7 @@ import USDC_ABI from './ABI/usdc_abi.json'
 const ownerWallet = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
-const SETTLEContract = '0x730c1232f15D70C0ebb6B8be23d607baFCed076D'
+const SETTLEContract = '0x540767C2a183871deb22333a271D5e65bF489F22'
 
 const routes =  {
     "/api/weather": {
