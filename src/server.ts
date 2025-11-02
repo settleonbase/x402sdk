@@ -340,7 +340,7 @@ const router = ( router: express.Router ) => {
 
 	router.get('/settleHistory', async (req,res) => {
 		const body = JSON.stringify(latestList.slice(0, 20), null, 2)
-		res.status(200).json({routes}).end()
+		res.status(200).json(body).end()
 	})
 
 	router.post('/mintTestnet', async (req, res) => {
