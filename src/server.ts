@@ -268,6 +268,13 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 				if (req.method === 'OPTIONS') return res.sendStatus(204);
 				next();
 			});
+	} else {
+		app.use((req, _res, next) => {
+			if (!req.get('x-forwarded-proto')) {
+				req.headers['x-forwarded-proto'] = 'https';
+			}
+			next();
+		});
 	}
 
 
