@@ -363,7 +363,7 @@ const router = ( router: express.Router ) => {
 		}
 
 		// 检查收款人必须是 ownerWallet
-		if (!message?.to || message.to.toLowerCase() !== ownerWallet.toLowerCase()) {
+		if (!message?.to || message.to.toLowerCase() !== SETTLEContract.toLowerCase()) {
 			logger(Colors.red(`Recipient check failed! Expected: ${ownerWallet}, Got: ${message?.to}`))
 			return res.status(200).json({error: `Recipient must be ${ownerWallet}!`}).end()
 		}
