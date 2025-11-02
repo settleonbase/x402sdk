@@ -16,6 +16,7 @@ import Settle_ABI from './ABI/sellte-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
 import { facilitator } from "@coinbase/x402"
 
+const x402_express = request('x402-express')
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
