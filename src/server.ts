@@ -16,6 +16,7 @@ import Settle_ABI from './ABI/sellte-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
 import { facilitator } from "@coinbase/x402"
 
+
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 const SETTLEContract = '0x730c1232f15D70C0ebb6B8be23d607baFCed076D'
@@ -227,11 +228,11 @@ const checkSig = (ercObj: any): {
   }
 }
 
-const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
-const SETTLE_admin = new ethers.Wallet(masterSetup.settle_admin, baseProvider)
-const Settle_ContractPool = [new ethers.Contract(SETTLEContract, Settle_ABI, SETTLE_admin)]
+// const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
+// const SETTLE_admin = new ethers.Wallet(masterSetup.settle_admin, baseProvider)
+// const Settle_ContractPool = [new ethers.Contract(SETTLEContract, Settle_ABI, SETTLE_admin)]
 
-logger(`base admin ${SETTLE_admin.address}`)
+// logger(`base admin ${SETTLE_admin.address}`)
 
 const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (router: any) => void) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
@@ -270,27 +271,33 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 	}));
 
 
-	app.use(paymentMiddleware(SETTLEContract, {"/api/weather": {
-      price: "$0.001",
-      network: "base",
-      config: {
-        discoverable: true,
-        description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-        inputSchema: {
-          queryParams: {
-            
-          }
-        },
-        outputSchema: {
-          type: "object",
-          properties: { 
-            temperature: { type: "number" },
-            conditions: { type: "string" },
-            humidity: { type: "number" }
-          }
-        }
-      }
-    }}))
+	app.use(paymentMiddleware(
+		SETTLEContract, 
+		{
+			"/api/weather": {
+				price: "$0.001",
+				network: "base",
+				config: {
+					discoverable: true,
+					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+					inputSchema: {
+						queryParams: {
+							
+						}
+					},
+					outputSchema: {
+						type: "object",
+						properties: { 
+							temperature: { type: "number" },
+							conditions: { type: "string" },
+							humidity: { type: "number" }
+						}
+					}
+				}
+			}
+		},
+		facilitator
+	))
 
 	const router = express.Router ()
 
@@ -343,108 +350,108 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.post('/mintTestnet', async (req, res) => {
-		logger(Colors.red(`/mintTestnet coming in`), inspect(req.body, false, 3, true))
+		// logger(Colors.red(`/mintTestnet coming in`), inspect(req.body, false, 3, true))
 
-		const ercObj: body402 = req.body
+		// const ercObj: body402 = req.body
 		
 		
-		if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
+		// if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
 
-			logger(Colors.red(`message or domain Data format error 1!:`), inspect(ercObj, false, 3, true))
-			return res.status(200).json({error: `Data format error!`}).end()
-		}
+		// 	logger(Colors.red(`message or domain Data format error 1!:`), inspect(ercObj, false, 3, true))
+		// 	return res.status(200).json({error: `Data format error!`}).end()
+		// }
 
-		const message = ercObj.EIP712.message
-		const domain = ercObj.EIP712.domain
+		// const message = ercObj.EIP712.message
+		// const domain = ercObj.EIP712.domain
 
-		if (!message || !message?.value || domain?.verifyingContract?.toLowerCase() !== USDCContract.toLowerCase()) {
-			logger(Colors.red(`message or domain Data format error 2 !: domain?.verifyingContract ${domain?.verifyingContract} USDC = ${USDCContract}`))
-			return res.status(200).json({error: `message or domain Data format error!`}).end()
-		}
+		// if (!message || !message?.value || domain?.verifyingContract?.toLowerCase() !== USDCContract.toLowerCase()) {
+		// 	logger(Colors.red(`message or domain Data format error 2 !: domain?.verifyingContract ${domain?.verifyingContract} USDC = ${USDCContract}`))
+		// 	return res.status(200).json({error: `message or domain Data format error!`}).end()
+		// }
 
-		// 检查收款人必须是 ownerWallet
-		if (!message?.to || message.to.toLowerCase() !== SETTLEContract.toLowerCase()) {
-			logger(Colors.red(`Recipient check failed! Expected: ${SETTLEContract}, Got: ${message?.to}`))
-			return res.status(200).json({error: `Recipient must be ${SETTLEContract}!`}).end()
-		}
+		// // 检查收款人必须是 ownerWallet
+		// if (!message?.to || message.to.toLowerCase() !== SETTLEContract.toLowerCase()) {
+		// 	logger(Colors.red(`Recipient check failed! Expected: ${SETTLEContract}, Got: ${message?.to}`))
+		// 	return res.status(200).json({error: `Recipient must be ${SETTLEContract}!`}).end()
+		// }
 
-		// 调用 checkSig 验证签名
-		const sigResult = checkSig(ercObj)
-		if (!sigResult || !sigResult.isValid) {
-			logger(Colors.red(`Signature verification failed:`), inspect(sigResult, false, 3, true))
-			return res.status(200).json({error: `Signature verification failed!`}).end()
-		}
+		// // 调用 checkSig 验证签名
+		// const sigResult = checkSig(ercObj)
+		// if (!sigResult || !sigResult.isValid) {
+		// 	logger(Colors.red(`Signature verification failed:`), inspect(sigResult, false, 3, true))
+		// 	return res.status(200).json({error: `Signature verification failed!`}).end()
+		// }
 
-		const value = parseFloat(message.value)
-		if (value < 0.01) {
-			logger(Colors.red(`value failed: ${value}`))
-			return res.status(200).json({error: `value low error!`}).end()
-		}
+		// const value = parseFloat(message.value)
+		// if (value < 0.01) {
+		// 	logger(Colors.red(`value failed: ${value}`))
+		// 	return res.status(200).json({error: `value low error!`}).end()
+		// }
 
-		x402ProcessPool.push({
-			v: sigResult.v,
-			r: sigResult.r,
-			s: sigResult.s,
-			address: sigResult.recoveredAddress,
-			usdcAmount: message.value,
-			validAfter: message.validAfter,
-			validBefore: message.validBefore,
-			nonce: message.nonce
-		})
+		// x402ProcessPool.push({
+		// 	v: sigResult.v,
+		// 	r: sigResult.r,
+		// 	s: sigResult.s,
+		// 	address: sigResult.recoveredAddress,
+		// 	usdcAmount: message.value,
+		// 	validAfter: message.validAfter,
+		// 	validBefore: message.validBefore,
+		// 	nonce: message.nonce
+		// })
 
-		process_x402()
-		// 返回签名验证结果
+		// process_x402()
+		// // 返回签名验证结果
 
-		res.status(200).json({
-			success: true,
-			message: 'Signature verified successfully',
-			signatureComponents: {
-				v: sigResult.v,
-				r: sigResult.r,
-				s: sigResult.s,
-				recoveredAddress: sigResult.recoveredAddress
-			}
-		}).end()
+		// res.status(200).json({
+		// 	success: true,
+		// 	message: 'Signature verified successfully',
+		// 	signatureComponents: {
+		// 		v: sigResult.v,
+		// 		r: sigResult.r,
+		// 		s: sigResult.s,
+		// 		recoveredAddress: sigResult.recoveredAddress
+		// 	}
+		// }).end()
 	})
 }
 
 
 const x402ProcessPool: IEIP3009depositWithUSDCAuthorization[] = []
 
-const process_x402 = async () => {
-	const obj = x402ProcessPool.shift()
-	if (!obj) {
-		return
-	}
+// const process_x402 = async () => {
+// 	const obj = x402ProcessPool.shift()
+// 	if (!obj) {
+// 		return
+// 	}
 
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-		logger(`process_x402 got empty Settle_testnet_pool`)
-		x402ProcessPool.unshift(obj)
-		return
-	}
+// 	const SC = Settle_ContractPool.shift()
+// 	if (!SC) {
+// 		logger(`process_x402 got empty Settle_testnet_pool`)
+// 		x402ProcessPool.unshift(obj)
+// 		return
+// 	}
 
-	try {
-		const tx = await SC.depositWithUSDCAuthorization(
-			obj.address,
-			obj.usdcAmount,
-			obj.validAfter,
-			obj.validBefore,
-			obj.nonce,
-			obj.v,
-			obj.r,
-			obj.s
-		)
+// 	try {
+// 		const tx = await SC.depositWithUSDCAuthorization(
+// 			obj.address,
+// 			obj.usdcAmount,
+// 			obj.validAfter,
+// 			obj.validBefore,
+// 			obj.nonce,
+// 			obj.v,
+// 			obj.r,
+// 			obj.s
+// 		)
 
-		await tx.wait()
-		logger(`process_x402 success! ${tx.hash}`)
-	} catch (ex: any) {
-		logger(`Error process_x402 `, ex.message)
-	}
-	Settle_ContractPool.unshift(SC)
-	setTimeout(() => process_x402(), 1000)
+// 		await tx.wait()
+// 		logger(`process_x402 success! ${tx.hash}`)
+// 	} catch (ex: any) {
+// 		logger(`Error process_x402 `, ex.message)
+// 	}
+// 	Settle_ContractPool.unshift(SC)
+// 	setTimeout(() => process_x402(), 1000)
 
-}
+// }
 
 
 export class x402Server {
@@ -571,38 +578,38 @@ function stageRecord(obj: ISettleEvent, event: any) {
 }
 
 
-const listenEvent = () => {
-	bootLoad()
-	scheduleFlush()
+// const listenEvent = () => {
+// 	bootLoad()
+// 	scheduleFlush()
 
-	const sc = Settle_ContractPool[0]
-	if (!sc) {
-		console.error("No SETTLE contract instance found in Settle_ContractPool[0]")
-		return
-	}
+// 	const sc = Settle_ContractPool[0]
+// 	if (!sc) {
+// 		console.error("No SETTLE contract instance found in Settle_ContractPool[0]")
+// 		return
+// 	}
 
-	sc.removeAllListeners("DepositWithAuthorization")
-	sc.removeAllListeners("PendingEnqueued")
+// 	sc.removeAllListeners("DepositWithAuthorization")
+// 	sc.removeAllListeners("PendingEnqueued")
 
-	sc.on("DepositWithAuthorization", (from, usdcAmount, sobAmount, event) => {
-		const txHash =
-			event?.transactionHash ||
-			event?.log?.transactionHash ||
-			event?.receipt?.transactionHash ||
-			"0x0"
+// 	sc.on("DepositWithAuthorization", (from, usdcAmount, sobAmount, event) => {
+// 		const txHash =
+// 			event?.transactionHash ||
+// 			event?.log?.transactionHash ||
+// 			event?.receipt?.transactionHash ||
+// 			"0x0"
 
-		const obj:ISettleEvent =  {
-			from,
-			amount: usdcAmount.toString(),
-			SETTLTAmount: sobAmount.toString(),
-			txHash
-		}
-		console.log(`[SETTLE] DepositWithAuthorization:`, inspect(obj, false, 3, true));
-		if (!event?.removed) stageRecord(obj, event)
-		saveLog(obj)
-	})
+// 		const obj:ISettleEvent =  {
+// 			from,
+// 			amount: usdcAmount.toString(),
+// 			SETTLTAmount: sobAmount.toString(),
+// 			txHash
+// 		}
+// 		console.log(`[SETTLE] DepositWithAuthorization:`, inspect(obj, false, 3, true));
+// 		if (!event?.removed) stageRecord(obj, event)
+// 		saveLog(obj)
+// 	})
 
-}
+// }
 
 function scheduleFlush() {
   if (flushTimer) clearInterval(flushTimer)
@@ -649,7 +656,7 @@ process.on?.("SIGTERM", flushNowAndExit)
 		const server = new x402Server(4088, '')
 		
 		console.log('⏳ Calling server.start()...')
-		listenEvent()
+		// listenEvent()
 		await server.start()
 		
 		console.log('✅ Server started successfully!')
