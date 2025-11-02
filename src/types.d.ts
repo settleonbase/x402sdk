@@ -2,6 +2,10 @@ type IMasterSetup = {
 	settle_admin: string
 	settle_u1: string
 	base_endpoint: string
+	base: {
+		CDP_API_KEY_ID: string
+		CDP_API_KEY_SECRET: string
+	}
 }
 
 /**

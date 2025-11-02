@@ -14,13 +14,14 @@ import { paymentMiddleware, Network } from 'x402-express'
 import {masterSetup} from './util'
 import Settle_ABI from './ABI/sellte-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
-import { facilitator } from "@coinbase/x402"
+import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 
+const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 const SETTLEContract = '0x730c1232f15D70C0ebb6B8be23d607baFCed076D'
-const owner = '0x8bd9BE7366EcE94CEf1E533727201B67C3E3cAD2'
+const owner = '0x8bd9BE7366EcE94CEf1E533727201B67C3E3cAD2'							//			base test2 wallet
 
 const routes =  {
     "/api/weather": {
@@ -249,9 +250,24 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 	let staticFolder = fs.existsSync(updatedPath) ? updatedPath : defaultPath
 	logger(`staticFolder = ${staticFolder}`)
 	console.log('📁 staticFolder:', staticFolder)
+	const isProd = process.env.NODE_ENV === "production";
 
 	const app = express()
-
+	if (!isProd) {
+			app.use((req, res, next) => {
+				res.setHeader('Access-Control-Allow-Origin', '*'); // 或你的白名单 Origin
+				res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+				res.setHeader(
+					'Access-Control-Allow-Headers',
+					// 允许二跳自定义头；顺手加 Access-Control-Expose-Headers 兜底某些客户端误发到预检
+					'Content-Type, Authorization, X-Requested-With, X-PAYMENT, Access-Control-Expose-Headers'
+				);
+				// 暴露自定义响应头，便于浏览器读取
+				res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, X-PAYMENT-RESPONSE');
+				if (req.method === 'OPTIONS') return res.sendStatus(204);
+				next();
+			});
+	}
 
 
 	// app.use ( express.static ( staticFolder ))
@@ -263,13 +279,28 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 	})
 
 	const cors = require('cors')
+	
 
-	app.use(cors({
-		origin: true,                   // 或者 ['http://localhost:5173','https://settleonbase.xyz']
-		methods: ['GET','POST','OPTIONS'],
-		allowedHeaders: ['Content-Type','Authorization'],
-		credentials: false              // 如果前端要带 cookie/凭证，设 true，并且不能用 origin: true/*
-	}));
+	if (!isProd) {
+	// 本地开发才由 Node 处理 CORS（例如直连 http://localhost:4088）
+		app.use(/.*/, cors({
+			origin: ['http://localhost:4088'],
+			methods: ['GET','POST','OPTIONS'],
+			allowedHeaders: [
+				'Content-Type',
+				'Authorization',
+				'X-Requested-With',
+				'X-PAYMENT',
+				'Access-Control-Expose-Headers',
+			],
+			exposedHeaders: ['X-PAYMENT-RESPONSE'],
+			credentials: false,
+			optionsSuccessStatus: 204,
+			maxAge: 600,
+		}));
+	}
+
+
 
 
 	app.use(paymentMiddleware(
@@ -297,7 +328,7 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 				}
 			}
 		},
-		facilitator
+		facilitator1
 	))
 
 	const router = express.Router ()
