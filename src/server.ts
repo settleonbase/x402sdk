@@ -18,7 +18,7 @@ import USDC_ABI from './ABI/usdc_abi.json'
 const ownerWallet = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
-const SETTLEContract = '0x8C91cb04707c7E5C80f90634a778bd23C1bA1392'
+const SETTLEContract = '0x543F0d39Fc2C7308558D2419790A0856fA499423'
 
 const routes =  {
     "/api/weather": {
@@ -47,6 +47,7 @@ const routes =  {
       }
     }
 }
+
 
 // ============================================
 // EIP-712 typedData
@@ -337,6 +338,11 @@ const router = ( router: express.Router ) => {
 		res.status(200).json({routes}).end()
 	})
 
+	router.get('/settleHistory', async (req,res) => {
+		const body = JSON.stringify(latestList.slice(0, 20), null, 2)
+		res.status(200).json({routes}).end()
+	})
+
 	router.post('/mintTestnet', async (req, res) => {
 		logger(Colors.red(`/mintTestnet coming in`), inspect(req.body, false, 3, true))
 
@@ -489,7 +495,149 @@ export class x402Server {
     }
 }
 
+
+const logPath = join(os.homedir(), "esttleEvent.json")
+
+function saveLog(obj:ISettleEvent ) {
+	try {
+		let logs = []
+		if (fs.existsSync(logPath)) {
+			const data = fs.readFileSync(logPath, "utf8")
+			logs = JSON.parse(data)
+			if (!Array.isArray(logs)) logs = []
+		}
+		logs.push({
+			...obj,
+			timestamp: new Date().toISOString(),
+		})
+		fs.writeFileSync(logPath, JSON.stringify(logs, null, 2))
+		console.log(`[SETTLE] Log saved to ${logPath}`)
+	} catch (err) {
+		console.error(`[SETTLE] Failed to save log:`, err)
+	}
+}
+
+// 运行期状态
+// --- 常量 ---
+const FLUSH_INTERVAL_MS = 5 * 60 * 1000  // 5分钟
+const FLUSH_BATCH_MAX   = 10             // 新增≥10条就立即落盘
+let flushTimer = null as null | NodeJS.Timeout
+let flushing = false                     // 防止并发落盘
+let latestList: any = []
+let newRecords1: any = [] 
+const history = new Map()
+
+// --- 启动加载：读取文件中最新 20 条，建 history ---
+function bootLoad() {
+	try {
+		if (!fs.existsSync(logPath)) {
+			fs.writeFileSync(logPath, "[]")
+			return
+		}
+		const raw = fs.readFileSync(logPath, "utf8")
+		const arr = JSON.parse(raw)
+		if (!Array.isArray(arr)) return
+		latestList = arr.slice(0, 20)
+		for (const item of latestList) {
+			const tx = item.txHash || item.transactionHash
+			if (tx && !history.has(tx)) {
+				history.set(tx, { blockNumber: item.blockNumber ?? 0, obj: item })
+			}
+		}
+		console.log(`[SETTLE] bootLoad: loaded ${latestList.length} recent records`)
+	} catch (e) {
+		console.error("[SETTLE] bootLoad failed:", e)
+	}
+}
+
+function stageRecord(obj: any, event: any) {
+	const txHash = event?.transactionHash
+	const blockNumber = event?.blockNumber ?? 0
+	if (!txHash) return
+	if (history.has(txHash)) return
+
+	history.set(txHash, { blockNumber, obj })
+	latestList.unshift({ ...obj, blockNumber, txHash, timestamp: new Date().toISOString() })
+
+	newRecords1.push({
+		...obj,
+		blockNumber,
+		txHash,
+		timestamp: new Date().toISOString(),
+	})
+
+	if (newRecords1.length >= FLUSH_BATCH_MAX) {
+		flushNow() // 触发批量阈值即刻写盘
+	}
+}
+
+
+const listenEvent = () => {
+	bootLoad()
+	scheduleFlush()
+
+	const sc = Settle_ContractPool[0]
+	if (!sc) {
+		console.error("No SETTLE contract instance found in Settle_ContractPool[0]")
+		return
+	}
+
+	sc.removeAllListeners("DepositWithAuthorization")
+	sc.removeAllListeners("PendingEnqueued")
+
+	sc.on("DepositWithAuthorization", (from, usdcAmount, sobAmount, event) => {
+
+		const obj:ISettleEvent =  {
+			from,
+			amount: usdcAmount.toString(),
+			SETTLTAmount: sobAmount.toString(),
+			txHash: event.transactionHash,
+		}
+		console.log(`[SETTLE] DepositWithAuthorization:`, inspect(obj, false, 3, true));
+		if (!event?.removed) stageRecord(obj, event)
+		saveLog(obj)
+	})
+
+}
+
+function scheduleFlush() {
+  if (flushTimer) clearInterval(flushTimer)
+  flushTimer = setInterval(flushNow, FLUSH_INTERVAL_MS)
+}
+
+function flushNow() {
+	if (newRecords1.length === 0) return
+	if (flushing) return                   // 简单并发保护
+	flushing = true
+	try {
+		let oldArr = []
+		if (fs.existsSync(logPath)) {
+			const raw = fs.readFileSync(logPath, "utf8")
+			const parsed = JSON.parse(raw)
+			oldArr = Array.isArray(parsed) ? parsed : []
+		}
+
+		newRecords1.sort((a: any, b: any) => (b.blockNumber ?? 0) - (a.blockNumber ?? 0))
+
+		const merged = [...newRecords1, ...oldArr]
+
+		fs.writeFileSync(logPath, JSON.stringify(merged, null, 2))
+		console.log(`[SETTLE] flush: wrote ${newRecords1.length} new records to ${logPath}`)
+		newRecords1 = []
+	} catch (e) {
+		console.error("[SETTLE] flush failed:", e)
+	} finally {
+		flushing = false
+  }
+}
+
 console.log('📌 Script started')
+export function flushNowAndExit() {
+	try { flushNow() } finally { process.exit(0) }
+}
+
+process.on?.("SIGINT", flushNowAndExit)
+process.on?.("SIGTERM", flushNowAndExit)
 
 ;(async () => {
 	try {
@@ -497,6 +645,7 @@ console.log('📌 Script started')
 		const server = new x402Server(4088, '')
 		
 		console.log('⏳ Calling server.start()...')
+		listenEvent()
 		await server.start()
 		
 		console.log('✅ Server started successfully!')
@@ -518,52 +667,9 @@ console.log('📌 Script started')
 
 
 
+
 console.log('📌 Script setup completed')
 
-const callTransferWithAuthorization = async () => {
-	const u1 = new ethers.Wallet(masterSetup.settle_u1, baseProvider)
-	const USDC_SC = new ethers.Contract(USDCContract, USDC_ABI, u1)
-	try {
-
-		// const [name, ver] = await Promise.all([
-		// 	USDC_SC.name(),
-		// 	USDC_SC.version(),
-		// ])
-
-		// logger(`name ${name} ver ${ver}`)
-
-		// const tx = await USDC_SC.transferWithAuthorization(
-		// 	"0x4ec406c9cdf0952e95940c543943efcc76b8bff2",
-		// 	"0xDA28554C39575739Ea41A220198bA4a97e1e233e",
-		// 	"100000",
-		// 	"1762003950",
-		// 	"1762007550",
-		// 	"0x2cc326e837b0425c8a499baa5727b1b248eb91a0df3c0b42e0b2adc989798802",
-		// 	27,
-		// 	"0x6bd86f6fa43227cd6d8659c5d434f31e82d946bfed170aadb5dc755bb8527029",
-		// 	"0x71f9d25371b1a95d0d40654fff5eedaa74860bebd2a56afff637231d43ba0aff"
-		// )
-
-		const SC = Settle_ContractPool[0]
-		const tx =  await SC.depositWithUSDCAuthorization(
-			"0x4ec406c9cdf0952e95940c543943efcc76b8bff2",
-			"300000",
-			"1762010005",
-			"1762013605",
-			"0xb308f8cf7efbee7ef1d1e7354aaf1f6b41e44c0be03e753fd26f4584d096a508",
-			28,
-			"0x3d798f6dede1ebdb96df9545a7e3039b157f7f43be9e859b59ecfa6b0075eec4",
-			"0x3b226ea460139f5a0393a81133a65f2aae1aae66b741a01b16b091bcb2dfdbea"
-		)
-
-
-
-		await tx.wait()
-		logger(`callTransferWithAuthorization SUCCESS ${tx.hash}`)
-	} catch (ex: any) {
-		logger(`callTransferWithAuthorization Error!`, ex.message)
-	}
-}
 
 // callTransferWithAuthorization()
 //	curl -v https://api.settleonbase.xyz/api/info

@@ -25,3 +25,10 @@ type IEIP3009depositWithUSDCAuthorization = {
 	r: string
 	s: string
 }
+
+type ISettleEvent = {
+	from: string
+	amount: string
+	SETTLTAmount:string
+	txHash: string
+}
