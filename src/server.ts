@@ -15,7 +15,7 @@ import {masterSetup} from './util'
 import Settle_ABI from './ABI/sellte-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
 
-const ownerWallet = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
+
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const SETTLEContract = '0x603A5dCB5B32129194e31097e329f934aF11eF28'
@@ -364,20 +364,20 @@ const router = ( router: express.Router ) => {
 
 		// 检查收款人必须是 ownerWallet
 		if (!message?.to || message.to.toLowerCase() !== SETTLEContract.toLowerCase()) {
-			logger(Colors.red(`Recipient check failed! Expected: ${ownerWallet}, Got: ${message?.to}`))
-			return res.status(200).json({error: `Recipient must be ${ownerWallet}!`}).end()
+			logger(Colors.red(`Recipient check failed! Expected: ${SETTLEContract}, Got: ${message?.to}`))
+			return res.status(200).json({error: `Recipient must be ${SETTLEContract}!`}).end()
 		}
 
 		// 调用 checkSig 验证签名
 		const sigResult = checkSig(ercObj)
 		if (!sigResult || !sigResult.isValid) {
-			logger(Colors.red(`Signature verification failed: ${ownerWallet}, Got: ${message?.to}`), inspect(sigResult, false, 3, true))
+			logger(Colors.red(`Signature verification failed:`), inspect(sigResult, false, 3, true))
 			return res.status(200).json({error: `Signature verification failed!`}).end()
 		}
 
 		const value = parseFloat(message.value)
 		if (value < 0.01) {
-			logger(Colors.red(`value failed: ${ownerWallet}, Got: ${message?.to}`))
+			logger(Colors.red(`value failed: ${value}`))
 			return res.status(200).json({error: `value low error!`}).end()
 		}
 
