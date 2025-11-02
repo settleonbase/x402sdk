@@ -20,6 +20,7 @@ import { facilitator } from "@coinbase/x402"
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 const SETTLEContract = '0x730c1232f15D70C0ebb6B8be23d607baFCed076D'
+const owner = '0x8bd9BE7366EcE94CEf1E533727201B67C3E3cAD2'
 
 const routes =  {
     "/api/weather": {
@@ -272,7 +273,7 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 
 
 	app.use(paymentMiddleware(
-		SETTLEContract, 
+		owner, 
 		{
 			"/api/weather": {
 				price: "$0.001",
