@@ -12,6 +12,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "lib": ["ES2022"],
+    "types": ["node"],
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true
   },
