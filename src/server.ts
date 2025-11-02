@@ -339,8 +339,7 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/settleHistory', async (req,res) => {
-		const body = JSON.stringify(latestList.slice(0, 20), null, 2)
-		res.status(200).json(body).end()
+		res.status(200).json(latestList.slice(0, 20)).end()
 	})
 
 	router.post('/mintTestnet', async (req, res) => {
@@ -550,7 +549,7 @@ function bootLoad() {
 	}
 }
 
-function stageRecord(obj: any, event: any) {
+function stageRecord(obj: ISettleEvent, event: any) {
 	const txHash = event?.transactionHash
 	const blockNumber = event?.blockNumber ?? 0
 	if (!txHash) return
@@ -586,12 +585,17 @@ const listenEvent = () => {
 	sc.removeAllListeners("PendingEnqueued")
 
 	sc.on("DepositWithAuthorization", (from, usdcAmount, sobAmount, event) => {
+		const txHash =
+			event?.transactionHash ||
+			event?.log?.transactionHash ||
+			event?.receipt?.transactionHash ||
+			"0x0"
 
 		const obj:ISettleEvent =  {
 			from,
 			amount: usdcAmount.toString(),
 			SETTLTAmount: sobAmount.toString(),
-			txHash: event.transactionHash,
+			txHash
 		}
 		console.log(`[SETTLE] DepositWithAuthorization:`, inspect(obj, false, 3, true));
 		if (!event?.removed) stageRecord(obj, event)
