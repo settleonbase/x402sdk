@@ -393,6 +393,8 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/weather', async (req,res) => {
+		logger(inspect(req.headers, false, 3, true))
+		logger(inspect(req.body, false, 3, true))
 		res.status(200).json({routes}).end()
 	})
 
