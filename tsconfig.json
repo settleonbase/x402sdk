@@ -11,6 +11,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "lib": ["ES2022"],
+    "types": ["node"],
 	"resolveJsonModule": true,        // ✅ 启用 JSON 模块导入
     "allowSyntheticDefaultImports": true,  // ✅ 允许默认导入
   },
