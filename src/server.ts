@@ -14,11 +14,12 @@ import { paymentMiddleware, Network } from 'x402-express'
 import {masterSetup} from './util'
 import Settle_ABI from './ABI/sellte-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
-
+import { facilitator } from "@coinbase/x402"
 
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
-const SETTLEContract = '0x603A5dCB5B32129194e31097e329f934aF11eF28'
+
+const SETTLEContract = '0x730c1232f15D70C0ebb6B8be23d607baFCed076D'
 
 const routes =  {
     "/api/weather": {
@@ -270,27 +271,27 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 	}));
 
 
-	// app.use(paymentMiddleware(ownerWallet, {"/api/weather": {
-    //   price: "$0.001",
-    //   network: "base",
-    //   config: {
-    //     discoverable: true,
-    //     description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-    //     inputSchema: {
-    //       queryParams: {
+	app.use(paymentMiddleware(SETTLEContract, {"/api/weather": {
+      price: "$0.001",
+      network: "base",
+      config: {
+        discoverable: true,
+        description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+        inputSchema: {
+          queryParams: {
             
-    //       }
-    //     },
-    //     outputSchema: {
-    //       type: "object",
-    //       properties: { 
-    //         temperature: { type: "number" },
-    //         conditions: { type: "string" },
-    //         humidity: { type: "number" }
-    //       }
-    //     }
-    //   }
-    // }}))
+          }
+        },
+        outputSchema: {
+          type: "object",
+          properties: { 
+            temperature: { type: "number" },
+            conditions: { type: "string" },
+            humidity: { type: "number" }
+          }
+        }
+      }
+    }}))
 
 	const router = express.Router ()
 

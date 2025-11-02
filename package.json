@@ -24,6 +24,7 @@
 		"@types/node": "^24.9.2"
 	},
 	"dependencies": {
+		"@coinbase/x402": "^0.7.1",
 		"colors": "^1.4.0",
 		"cors": "^2.8.5",
 		"ethers": "^6.15.0",
