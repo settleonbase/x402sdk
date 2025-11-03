@@ -13,6 +13,7 @@ import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
 import {masterSetup} from './util'
 import Settle_ABI from './ABI/sellte-abi.json'
+import Event_ABI from './ABI/event-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import { exact } from "x402/schemes";
@@ -35,15 +36,22 @@ const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 const SETTLEContract = '0x678F3570F9173373bB75e7544fcF383153aDAF4C'
 const owner = '0x8bd9BE7366EcE94CEf1E533727201B67C3E3cAD2'							//			base test2 wallet
+const eventContract = '0xcdaEA1594c9639aaCD165f3a45CC0Fdcf8526920'
 
 const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
-
+const eventProvider = new ethers.JsonRpcProvider(masterSetup.event_endpoint)
 
 const Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 	const admin = new ethers.Wallet(n, baseProvider)
+	const adminEvent = new ethers.Wallet(n, eventProvider)
 	logger(`address ${admin.address} added to Settle_ContractPool`)
-	return new ethers.Contract(SETTLEContract, Settle_ABI, admin)
+	return {
+		base: new ethers.Contract(SETTLEContract, Settle_ABI, admin), 
+		event: new ethers.Contract(eventContract, Event_ABI, adminEvent)
+	}
 })
+
+
 
 const x402Version = 1
 
@@ -884,12 +892,12 @@ const process_x402 = async () => {
 	}
 
 	try {
-		const tx = await SC.mint(
+		const tx = await SC.base.mint(
 			obj.wallet, obj.settle
 		)
 
 		await tx.wait()
-		logger(`process_x402 success! ${tx.hash}`)
+		
 		const SETTLE = ((parseFloat(obj.settle) * MINT_RATE) / USDC_decimals).toString()
 
 		reflashData.unshift({
@@ -900,12 +908,20 @@ const process_x402 = async () => {
 			SETTLE
 		})
 
+		
+
+		const ts = await SC.event.eventEmit(
+			obj.wallet, obj.settle, SETTLE, tx.hash
+		)
+		await ts.wait()
+
+		logger(`process_x402 success! ${tx.hash}`)
 
 	} catch (ex: any) {
 		logger(`Error process_x402 `, ex.message)
 		x402ProcessPool.unshift(obj)
 	}
-	
+
 	Settle_ContractPool.unshift(SC)
 	setTimeout(() => process_x402(), 1000)
 
@@ -1051,39 +1067,6 @@ function bootLoad() {
 	}
 }
 
-
-const listenEvent = () => {
-	bootLoad()
-	scheduleFlush()
-
-	const sc = Settle_ContractPool[0]
-	if (!sc) {
-		console.error("No SETTLE contract instance found in Settle_ContractPool[0]")
-		return
-	}
-
-	sc.removeAllListeners("DepositWithAuthorization")
-	sc.removeAllListeners("PendingEnqueued")
-
-	// sc.on("DepositWithAuthorization", (from, usdcAmount, sobAmount, event) => {
-	// 	const txHash =
-	// 		event?.transactionHash ||
-	// 		event?.log?.transactionHash ||
-	// 		event?.receipt?.transactionHash ||
-	// 		"0x0"
-
-	// 	const obj:ISettleEvent =  {
-	// 		from,
-	// 		amount: usdcAmount.toString(),
-	// 		SETTLTAmount: sobAmount.toString(),
-	// 		txHash
-	// 	}
-	// 	console.log(`[SETTLE] DepositWithAuthorization:`, inspect(obj, false, 3, true));
-	// 	if (!event?.removed) stageRecord(obj, event)
-	// 	saveLog(obj)
-	// })
-
-}
 
 function scheduleFlush() {
   if (flushTimer) clearInterval(flushTimer)

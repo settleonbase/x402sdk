@@ -7,6 +7,7 @@ type IMasterSetup = {
 		CDP_API_KEY_SECRET: string
 	}
 	settle_contractAdmin: string[]
+	event_endpoint: string
 }
 
 /**
