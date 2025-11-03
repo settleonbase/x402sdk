@@ -830,18 +830,24 @@ const loadSettleFile = async () => {
   try {
     const buf = await fs.readFileSync(SETTLE_FILE,'utf8');
     const arr = JSON.parse(buf);
+
+
     if (Array.isArray(arr)) {
+		logger(`loadSettleFile ${SETTLE_FILE}`, inspect(arr, false, 3, true))
       // 文件内按倒序（最新在前）保存
       fileCache = arr as reflashData[];
     } else {
       fileCache = [];
+	  logger(`loadSettleFile ${SETTLE_FILE} Empty array`)
     }
   } catch (e: any) {
+
+	logger(`loadSettleFile ${SETTLE_FILE} ERROR!`)
     if (e?.code === "ENOENT") {
       fileCache = [];
       await fs.writeFileSync(SETTLE_FILE, "[]", 'utf8');
     } else {
-      console.error("[settle.json] read error:", e?.message || e);
+      console.error(`[settle.json] ${SETTLE_FILE} read error: `, e?.message || e);
       fileCache = [];
     }
   }
