@@ -491,7 +491,7 @@ const MINT_RATE = 7000 * 10**18
 const USDC_decimals = 1e6
 
 
-const SETTLE_FILE = resolve(process.cwd(), "settle.json")
+const SETTLE_FILE = join(os.homedir(), "settle.json")
 
 // 已持久化的 hash 集
 const persistedHashes = new Set<string>()
