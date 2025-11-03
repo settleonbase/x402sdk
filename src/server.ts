@@ -685,24 +685,6 @@ export class x402Server {
 
 const logPath = join(os.homedir(), "esttleEvent.json")
 
-function saveLog(obj:ISettleEvent ) {
-	try {
-		let logs = []
-		if (fs.existsSync(logPath)) {
-			const data = fs.readFileSync(logPath, "utf8")
-			logs = JSON.parse(data)
-			if (!Array.isArray(logs)) logs = []
-		}
-		logs.push({
-			...obj,
-			timestamp: new Date().toISOString(),
-		})
-		fs.writeFileSync(logPath, JSON.stringify(logs, null, 2))
-		console.log(`[SETTLE] Log saved to ${logPath}`)
-	} catch (err) {
-		console.error(`[SETTLE] Failed to save log:`, err)
-	}
-}
 
 // 运行期状态
 // --- 常量 ---
@@ -734,27 +716,6 @@ function bootLoad() {
 		console.log(`[SETTLE] bootLoad: loaded ${latestList.length} recent records`)
 	} catch (e) {
 		console.error("[SETTLE] bootLoad failed:", e)
-	}
-}
-
-function stageRecord(obj: ISettleEvent, event: any) {
-	const txHash = event?.transactionHash
-	const blockNumber = event?.blockNumber ?? 0
-	if (!txHash) return
-	if (history.has(txHash)) return
-
-	history.set(txHash, { blockNumber, obj })
-	latestList.unshift({ ...obj, blockNumber, txHash, timestamp: new Date().toISOString() })
-
-	newRecords1.push({
-		...obj,
-		blockNumber,
-		txHash,
-		timestamp: new Date().toISOString(),
-	})
-
-	if (newRecords1.length >= FLUSH_BATCH_MAX) {
-		flushNow() // 触发批量阈值即刻写盘
 	}
 }
 
