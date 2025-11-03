@@ -546,7 +546,7 @@ const router = ( router: express.Router ) => {
 	router.get('/settle0001', async (req,res) => {
 		
 			const wallet = req?.query?.wallet
-			
+			logger(inspect(req.header, false, 3, true))
 			const isWallet = ethers.isAddress(wallet)
 
 			if (isWallet) {
