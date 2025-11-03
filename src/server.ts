@@ -316,8 +316,134 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 	app.use(paymentMiddleware(
 		owner, 
 		{
-			"/api/weather": {
+			"GET /api/weather": {
 				price: "$0.001",
+				network: "base",
+				config: {
+					discoverable: true,
+					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+					inputSchema: {
+						queryParams: {
+							
+						}
+					},
+					outputSchema: {
+						type: "object",
+						properties: { 
+							temperature: { type: "number" },
+							conditions: { type: "string" },
+							humidity: { type: "number" }
+						}
+					}
+				}
+			},
+			"GET /api/settle0001": {
+				price: "$0.001",
+				network: "base",
+				config: {
+					discoverable: true,
+					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+					inputSchema: {
+						queryParams: {
+							
+						}
+					},
+					outputSchema: {
+						type: "object",
+						properties: { 
+							temperature: { type: "number" },
+							conditions: { type: "string" },
+							humidity: { type: "number" }
+						}
+					}
+				}
+			},
+			"GET /api/settle001": {
+				price: "$0.01",
+				network: "base",
+				config: {
+					discoverable: true,
+					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+					inputSchema: {
+						queryParams: {
+							
+						}
+					},
+					outputSchema: {
+						type: "object",
+						properties: { 
+							temperature: { type: "number" },
+							conditions: { type: "string" },
+							humidity: { type: "number" }
+						}
+					}
+				}
+			},
+			"GET /api/settle01": {
+				price: "$0.1",
+				network: "base",
+				config: {
+					discoverable: true,
+					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+					inputSchema: {
+						queryParams: {
+							
+						}
+					},
+					outputSchema: {
+						type: "object",
+						properties: { 
+							temperature: { type: "number" },
+							conditions: { type: "string" },
+							humidity: { type: "number" }
+						}
+					}
+				}
+			},
+			"GET /api/settle1": {
+				price: "$1.00",
+				network: "base",
+				config: {
+					discoverable: true,
+					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+					inputSchema: {
+						queryParams: {
+							
+						}
+					},
+					outputSchema: {
+						type: "object",
+						properties: { 
+							temperature: { type: "number" },
+							conditions: { type: "string" },
+							humidity: { type: "number" }
+						}
+					}
+				}
+			},
+			"GET /api/settle10": {
+				price: "$10.00",
+				network: "base",
+				config: {
+					discoverable: true,
+					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+					inputSchema: {
+						queryParams: {
+							
+						}
+					},
+					outputSchema: {
+						type: "object",
+						properties: { 
+							temperature: { type: "number" },
+							conditions: { type: "string" },
+							humidity: { type: "number" }
+						}
+					}
+				}
+			},
+			"GET /api/settle100": {
+				price: "$100.00",
 				network: "base",
 				config: {
 					discoverable: true,
@@ -416,6 +542,115 @@ const router = ( router: express.Router ) => {
 	router.get('/settleHistory', async (req,res) => {
 		res.status(200).json(reflashData.slice(0, 20)).end()
 	})
+
+	router.get('/settle0001', async (req,res) => {
+		
+			const wallet = req?.query?.wallet
+			
+			const isWallet = ethers.isAddress(wallet)
+
+			if (isWallet) {
+				x402ProcessPool.push({
+					wallet,
+					settle: ethers.parseUnits('0.001', 6).toString()
+				})
+				process_x402()
+			}
+			
+			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		
+	})
+
+	router.get('/settle001', async (req,res) => {
+		
+			const wallet = req?.query?.wallet
+			
+			const isWallet = ethers.isAddress(wallet)
+
+			if (isWallet) {
+				x402ProcessPool.push({
+					wallet,
+					settle: ethers.parseUnits('0.01', 6).toString()
+				})
+				process_x402()
+			}
+			
+			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		
+	})
+
+	router.get('/settle01', async (req,res) => {
+		
+			const wallet = req?.query?.wallet
+			
+			const isWallet = ethers.isAddress(wallet)
+
+			if (isWallet) {
+				x402ProcessPool.push({
+					wallet,
+					settle: ethers.parseUnits('0.1', 6).toString()
+				})
+				process_x402()
+			}
+			
+			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		
+	})
+
+	router.get('/settle1', async (req,res) => {
+		
+			const wallet = req?.query?.wallet
+			
+			const isWallet = ethers.isAddress(wallet)
+
+			if (isWallet) {
+				x402ProcessPool.push({
+					wallet,
+					settle: ethers.parseUnits('1', 6).toString()
+				})
+				process_x402()
+			}
+			
+			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		
+	})
+
+	router.get('/settle10', async (req,res) => {
+		
+			const wallet = req?.query?.wallet
+			
+			const isWallet = ethers.isAddress(wallet)
+
+			if (isWallet) {
+				x402ProcessPool.push({
+					wallet,
+					settle: ethers.parseUnits('10', 6).toString()
+				})
+				process_x402()
+			}
+			
+			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		
+	})
+
+	router.get('/settle100', async (req,res) => {
+		
+			const wallet = req?.query?.wallet
+			
+			const isWallet = ethers.isAddress(wallet)
+
+			if (isWallet) {
+				x402ProcessPool.push({
+					wallet,
+					settle: ethers.parseUnits('100', 6).toString()
+				})
+				process_x402()
+			}
+			
+			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		
+	})
+
 
 	// router.post('/mintTestnet', async (req, res) => {
 	// 	// logger(Colors.red(`/mintTestnet coming in`), inspect(req.body, false, 3, true))
