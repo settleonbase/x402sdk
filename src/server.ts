@@ -10,14 +10,26 @@ import {logger} from './logger'
 import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
-import { paymentMiddleware, Network } from 'x402-express'
+import { useFacilitator } from "x402/verify"
 import {masterSetup} from './util'
 import Settle_ABI from './ABI/sellte-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
-import { timeStamp } from 'node:console'
+import { exact } from "x402/schemes";
+import {
+  Network,
+  PaymentPayload,
+  PaymentRequirements,
+  Price,
+  Resource,
+  settleResponseHeader,
+} from "x402/types"
+import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x402/shared";
+
 
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
+const {verify, settle} = useFacilitator(facilitator1)
+
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
@@ -27,71 +39,39 @@ const owner = '0x8bd9BE7366EcE94CEf1E533727201B67C3E3cAD2'							//			base test2
 const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
 const settle_admin = new ethers.Wallet(masterSetup.settle_contractAdmin, baseProvider)
 const Settle_ContractPool = [new ethers.Contract(SETTLEContract, Settle_ABI, settle_admin)]
+const x402Version = 1
 
-const routes =  {
-    "/api/weather": {
-      price: "$0.001",
-      network: "base",
-      config: {
-        discoverable: true, // make your endpoint discoverable
-        description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-        inputSchema: {
-          queryParams: { 
-            location: { 
-              type: 'Canada', 
-              description: "Toronto", 
-              required: true
-            }
-          }
-        },
-        outputSchema: {
-          type: "object",
-          properties: { 
-            temperature: { type: "number" },
-            conditions: { type: "string" },
-            humidity: { type: "number" }
-          }
-        }
-      }
-    }
-}
-
-
-// ============================================
-// EIP-712 typedData
-// ============================================
-type EIP712 = {
-	types: string
-	primaryType: string
-	domain: {
-		chainId: number
-		name: string
-		verifyingContract: string
-		version: string
+function createExactPaymentRequirements(
+	price: Price,
+	resource: Resource,
+	description = "",
+	): PaymentRequirements {
+	const atomicAmountForAsset = processPriceToAtomicAmount(price, 'base')
+	if ("error" in atomicAmountForAsset) {
+		throw new Error(atomicAmountForAsset.error);
 	}
-	message: {
-		from: string
-		to:string
-		value: string
-		validAfter: number
-		validBefore: number
-		nonce: string
-	}
+	const { maxAmountRequired, asset } = atomicAmountForAsset;
+
+	return {
+		scheme: "exact",
+		network:'base',
+		maxAmountRequired,
+		resource,
+		description,
+		mimeType: "",
+		payTo: SETTLEContract,
+		maxTimeoutSeconds: 60,
+		asset: asset.address,
+		outputSchema: undefined,
+		extra: {
+			name: 'USD Coin',
+			version: '2',
+		},
+	};
 }
 
 
-type body402 = {
-	EIP712: EIP712
-	sig: string
-}
 
-type SignatureComponents = {
-	v: number
-	r: string
-	s: string
-	recoveredAddress: string
-	isValid: boolean
-}
 
 // ============================================
 // checkSig 函数：验证签名并获取 { v, r, s }
@@ -313,159 +293,159 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 
 
 
-	app.use(paymentMiddleware(
-		owner, 
-		{
-			"GET /api/weather": {
-				price: "$0.001",
-				network: "base",
-				config: {
-					discoverable: true,
-					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-					inputSchema: {
-						queryParams: {
+	// app.use(paymentMiddleware(
+	// 	owner, 
+	// 	{
+	// 		"GET /api/weather": {
+	// 			price: "$0.001",
+	// 			network: "base",
+	// 			config: {
+	// 				discoverable: true,
+	// 				description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+	// 				inputSchema: {
+	// 					queryParams: {
 							
-						}
-					},
-					outputSchema: {
-						type: "object",
-						properties: { 
-							temperature: { type: "number" },
-							conditions: { type: "string" },
-							humidity: { type: "number" }
-						}
-					}
-				}
-			},
-			"GET /api/settle0001": {
-				price: "$0.001",
-				network: "base",
-				config: {
-					discoverable: true,
-					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-					inputSchema: {
-						queryParams: {
+	// 					}
+	// 				},
+	// 				outputSchema: {
+	// 					type: "object",
+	// 					properties: { 
+	// 						temperature: { type: "number" },
+	// 						conditions: { type: "string" },
+	// 						humidity: { type: "number" }
+	// 					}
+	// 				}
+	// 			}
+	// 		},
+	// 		"GET /api/settle0001": {
+	// 			price: "$0.001",
+	// 			network: "base",
+	// 			config: {
+	// 				discoverable: true,
+	// 				description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+	// 				inputSchema: {
+	// 					queryParams: {
 							
-						}
-					},
-					outputSchema: {
-						type: "object",
-						properties: { 
-							temperature: { type: "number" },
-							conditions: { type: "string" },
-							humidity: { type: "number" }
-						}
-					}
-				}
-			},
-			"GET /api/settle001": {
-				price: "$0.01",
-				network: "base",
-				config: {
-					discoverable: true,
-					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-					inputSchema: {
-						queryParams: {
+	// 					}
+	// 				},
+	// 				outputSchema: {
+	// 					type: "object",
+	// 					properties: { 
+	// 						temperature: { type: "number" },
+	// 						conditions: { type: "string" },
+	// 						humidity: { type: "number" }
+	// 					}
+	// 				}
+	// 			}
+	// 		},
+	// 		"GET /api/settle001": {
+	// 			price: "$0.01",
+	// 			network: "base",
+	// 			config: {
+	// 				discoverable: true,
+	// 				description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+	// 				inputSchema: {
+	// 					queryParams: {
 							
-						}
-					},
-					outputSchema: {
-						type: "object",
-						properties: { 
-							temperature: { type: "number" },
-							conditions: { type: "string" },
-							humidity: { type: "number" }
-						}
-					}
-				}
-			},
-			"GET /api/settle01": {
-				price: "$0.1",
-				network: "base",
-				config: {
-					discoverable: true,
-					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-					inputSchema: {
-						queryParams: {
+	// 					}
+	// 				},
+	// 				outputSchema: {
+	// 					type: "object",
+	// 					properties: { 
+	// 						temperature: { type: "number" },
+	// 						conditions: { type: "string" },
+	// 						humidity: { type: "number" }
+	// 					}
+	// 				}
+	// 			}
+	// 		},
+	// 		"GET /api/settle01": {
+	// 			price: "$0.1",
+	// 			network: "base",
+	// 			config: {
+	// 				discoverable: true,
+	// 				description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+	// 				inputSchema: {
+	// 					queryParams: {
 							
-						}
-					},
-					outputSchema: {
-						type: "object",
-						properties: { 
-							temperature: { type: "number" },
-							conditions: { type: "string" },
-							humidity: { type: "number" }
-						}
-					}
-				}
-			},
-			"GET /api/settle1": {
-				price: "$1.00",
-				network: "base",
-				config: {
-					discoverable: true,
-					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-					inputSchema: {
-						queryParams: {
+	// 					}
+	// 				},
+	// 				outputSchema: {
+	// 					type: "object",
+	// 					properties: { 
+	// 						temperature: { type: "number" },
+	// 						conditions: { type: "string" },
+	// 						humidity: { type: "number" }
+	// 					}
+	// 				}
+	// 			}
+	// 		},
+	// 		"GET /api/settle1": {
+	// 			price: "$1.00",
+	// 			network: "base",
+	// 			config: {
+	// 				discoverable: true,
+	// 				description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+	// 				inputSchema: {
+	// 					queryParams: {
 							
-						}
-					},
-					outputSchema: {
-						type: "object",
-						properties: { 
-							temperature: { type: "number" },
-							conditions: { type: "string" },
-							humidity: { type: "number" }
-						}
-					}
-				}
-			},
-			"GET /api/settle10": {
-				price: "$10.00",
-				network: "base",
-				config: {
-					discoverable: true,
-					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-					inputSchema: {
-						queryParams: {
+	// 					}
+	// 				},
+	// 				outputSchema: {
+	// 					type: "object",
+	// 					properties: { 
+	// 						temperature: { type: "number" },
+	// 						conditions: { type: "string" },
+	// 						humidity: { type: "number" }
+	// 					}
+	// 				}
+	// 			}
+	// 		},
+	// 		"GET /api/settle10": {
+	// 			price: "$10.00",
+	// 			network: "base",
+	// 			config: {
+	// 				discoverable: true,
+	// 				description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+	// 				inputSchema: {
+	// 					queryParams: {
 							
-						}
-					},
-					outputSchema: {
-						type: "object",
-						properties: { 
-							temperature: { type: "number" },
-							conditions: { type: "string" },
-							humidity: { type: "number" }
-						}
-					}
-				}
-			},
-			"GET /api/settle100": {
-				price: "$100.00",
-				network: "base",
-				config: {
-					discoverable: true,
-					description: "SETTLE: MINTS THAT SETTLE_ON BASE",
-					inputSchema: {
-						queryParams: {
+	// 					}
+	// 				},
+	// 				outputSchema: {
+	// 					type: "object",
+	// 					properties: { 
+	// 						temperature: { type: "number" },
+	// 						conditions: { type: "string" },
+	// 						humidity: { type: "number" }
+	// 					}
+	// 				}
+	// 			}
+	// 		},
+	// 		"GET /api/settle100": {
+	// 			price: "$100.00",
+	// 			network: "base",
+	// 			config: {
+	// 				discoverable: true,
+	// 				description: "SETTLE: MINTS THAT SETTLE_ON BASE",
+	// 				inputSchema: {
+	// 					queryParams: {
 							
-						}
-					},
-					outputSchema: {
-						type: "object",
-						properties: { 
-							temperature: { type: "number" },
-							conditions: { type: "string" },
-							humidity: { type: "number" }
-						}
-					}
-				}
-			}
-		},
-		facilitator1
-	))
+	// 					}
+	// 				},
+	// 				outputSchema: {
+	// 					type: "object",
+	// 					properties: { 
+	// 						temperature: { type: "number" },
+	// 						conditions: { type: "string" },
+	// 						humidity: { type: "number" }
+	// 					}
+	// 				}
+	// 			}
+	// 		}
+	// 	},
+	// 	facilitator1
+	// ))
 
 	const router = express.Router ()
 
@@ -511,33 +491,208 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 	return server
 }
 
+async function verifyPayment(
+	req: express.Request,
+	res: express.Response,
+	paymentRequirements: PaymentRequirements[],
+	): Promise<boolean> {
+	const payment = req.header("X-PAYMENT");
+	if (!payment) {
+		res.status(402).json({
+			x402Version,
+			error: "X-PAYMENT header is required",
+			accepts: paymentRequirements,
+		});
+		return false;
+	}
+
+	let decodedPayment: PaymentPayload;
+	try {
+		decodedPayment = exact.evm.decodePayment(payment);
+		decodedPayment.x402Version = x402Version;
+	} catch (error) {
+		res.status(402).json({
+		x402Version,
+		error: error || "Invalid or malformed payment header",
+		accepts: paymentRequirements,
+		});
+		return false;
+	}
+
+	try {
+		const selectedPaymentRequirement =
+			findMatchingPaymentRequirements(paymentRequirements, decodedPayment) ||
+			paymentRequirements[0];
+		const response = await verify(decodedPayment, selectedPaymentRequirement)
+
+		if (!response.isValid) {
+			res.status(402).json({
+				x402Version,
+				error: response.invalidReason,
+				accepts: paymentRequirements,
+				payer: response.payer,
+			})
+			return false
+		}
+	} catch (error) {
+		res.status(402).json({
+			x402Version,
+			error,
+			accepts: paymentRequirements,
+		});
+		return false
+	}
+
+	return true
+}
+
+type x402SettleResponse = {
+	network: string
+	payer: string
+	success: boolean
+	transaction: string
+}
+
+type x402Response = {
+	timestamp: string
+	network: string
+	payer: string
+	success: boolean
+	USDC_tx?: string
+	SETTLE_tx?: string
+}
+
+
+type x402paymentHeader = {
+	x402Version: number
+	scheme: 'exact',
+	network: string
+	payload: {
+		signature: string
+		authorization: {
+			from: string
+			to: string
+			value: string
+			validAfter: string
+			validBefore: string
+			nonce: string
+		}
+
+	}
+}
+
+const checkx402paymentHeader = (paymentHeader: x402paymentHeader, amount: number) => {
+	if (paymentHeader?.payload?.authorization?.to?.toLowerCase() !== SETTLEContract.toLowerCase()) {
+		return false
+	}
+	const _payAmount = paymentHeader?.payload?.authorization?.value
+	if (!_payAmount) {
+		return false
+	}
+
+	const payAmount = parseFloat(_payAmount)
+	if (isNaN(payAmount) || payAmount < amount) {
+		return false
+	}
+
+	return true
+}
+
+
+
+const processPaymebnt = async (req: any, res: any, price: string) => {
+	const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource
+
+		const paymentRequirements = [createExactPaymentRequirements(
+			price,
+			resource,
+			"weather"
+		)];
+
+		const isValid = await verifyPayment(req, res, paymentRequirements)
+
+		if (!isValid) return
+
+		let responseData: x402SettleResponse
+
+		const _routerName = '/weather'
+		
+		try {
+			const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
+			const saleRequirements = paymentRequirements[0]
+
+			const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, 1000)
+			if (!isValidPaymentHeader) {
+
+				logger(`${_routerName} checkx402paymentHeader Error!`,inspect(paymentHeader))
+				return res.status(402).end()
+			}
+
+			const settleResponse = await settle(
+				paymentHeader,
+				paymentRequirements[0]
+			)
+
+
+			const responseHeader = settleResponseHeader(settleResponse)
+
+			// In a real application, you would store this response header
+			// and associate it with the payment for later verification
+			
+			responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
+			
+			if (!responseData.success) {
+				logger(`${_routerName} responseData ERROR!`, inspect(responseData, false, 3, true))
+				return res.status(402).end()
+			}
+
+
+		} catch (error) {
+			console.error("Payment settlement failed:", error);
+			// In a real application, you would handle the failed payment
+			// by marking it for retry or notifying the user
+			return res.status(402).end()
+		}
+
+	
+		const wallet = responseData.payer
+		
+		const isWallet = ethers.isAddress(wallet)
+
+		
+		const ret: x402Response = {
+			success: true,
+			payer: wallet,
+			USDC_tx: responseData?.transaction,
+			network: responseData?.network,
+			timestamp: new Date().toISOString()
+		}
+
+		
+		if (isWallet) {
+
+
+			x402ProcessPool.push({
+				wallet,
+				settle: ethers.parseUnits('0.001', 6).toString()
+			})
+
+			logger(`${_routerName} success!`, inspect(responseData, false, 3, true))
+			process_x402()
+
+
+		}
+
+		
+		res.status(200).json(ret).end()
+}
+
+
 const router = ( router: express.Router ) => {
 	
-	router.get('/info', async (req,res) => {
-		logger(Colors.red(`/info`), inspect(req.body, false, 3, true))
-		res.status(200).json({ 'x402 Server': `http://localhost: 4088`, 'Serving files from': '' }).end()
-	})
 
 	router.get('/weather', async (req,res) => {
-		
-			const wallet = req?.query?.wallet
-			
-			const isWallet = ethers.isAddress(wallet)
-
-			const routes = [{ city: "San Francisco", temperature: 22, conditions: "Sunny" }]
-
-			if (isWallet) {
-				x402ProcessPool.push({
-					wallet,
-					settle: ethers.parseUnits('0.001', 6).toString()
-				})
-
-				logger(`/weather success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
-				process_x402()
-			}
-			
-			res.status(200).json({ wallet: wallet, routes }).end()
-		
+		return processPaymebnt(req, res, '0.001')
 	})
 
 
@@ -546,117 +701,31 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/settle0001', async (req,res) => {
-		
-			const wallet = req?.query?.wallet
-			logger(inspect(req.header, false, 3, true))
-			const isWallet = ethers.isAddress(wallet)
-
-			if (isWallet) {
-				x402ProcessPool.push({
-					wallet,
-					settle: ethers.parseUnits('0.001', 6).toString()
-				})
-
-				logger(`/settle0001 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
-				process_x402()
-			}
-			
-			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
-		
+		return processPaymebnt(req, res, '0.001')
 	})
 
 	router.get('/settle001', async (req,res) => {
-		
-			const wallet = req?.query?.wallet
-			
-			const isWallet = ethers.isAddress(wallet)
-
-			if (isWallet) {
-				x402ProcessPool.push({
-					wallet,
-					settle: ethers.parseUnits('0.01', 6).toString()
-				})
-				logger(`/settle001 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
-				process_x402()
-			}
-			
-			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
-		
+		return processPaymebnt(req, res, '0.01')
 	})
 
 	router.get('/settle01', async (req,res) => {
 		
-			const wallet = req?.query?.wallet
-			
-			const isWallet = ethers.isAddress(wallet)
-
-			if (isWallet) {
-				x402ProcessPool.push({
-					wallet,
-					settle: ethers.parseUnits('0.1', 6).toString()
-				})
-				logger(`/settle01 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
-				process_x402()
-			}
-			
-			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		return processPaymebnt(req, res, '0.1')
 		
 	})
 
 	router.get('/settle1', async (req,res) => {
-		
-			const wallet = req?.query?.wallet
-			
-			const isWallet = ethers.isAddress(wallet)
-
-			if (isWallet) {
-				x402ProcessPool.push({
-					wallet,
-					settle: ethers.parseUnits('1', 6).toString()
-				})
-				logger(`/settle1 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
-				process_x402()
-			}
-			
-			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		return processPaymebnt(req, res, '1.00')
 		
 	})
 
 	router.get('/settle10', async (req,res) => {
-		
-			const wallet = req?.query?.wallet
-			
-			const isWallet = ethers.isAddress(wallet)
-
-			if (isWallet) {
-				x402ProcessPool.push({
-					wallet,
-					settle: ethers.parseUnits('10', 6).toString()
-				})
-				logger(`/settle10 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
-				process_x402()
-			}
-			
-			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		return processPaymebnt(req, res, '10.00')
 		
 	})
 
 	router.get('/settle100', async (req,res) => {
-		
-			const wallet = req?.query?.wallet
-			
-			const isWallet = ethers.isAddress(wallet)
-
-			if (isWallet) {
-				x402ProcessPool.push({
-					wallet,
-					settle: ethers.parseUnits('100', 6).toString()
-				})
-				logger(`/settle100 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
-				process_x402()
-			}
-			
-			res.status(200).json({ wallet: wallet, success: '0.001'}).end()
+		return processPaymebnt(req, res, '100.00')
 		
 	})
 

@@ -50,3 +50,39 @@ type ISettleEvent = {
 	SETTLTAmount:string
 	txHash: string
 }
+
+// ============================================
+// EIP-712 typedData
+// ============================================
+type EIP712 = {
+	types: string
+	primaryType: string
+	domain: {
+		chainId: number
+		name: string
+		verifyingContract: string
+		version: string
+	}
+	message: {
+		from: string
+		to:string
+		value: string
+		validAfter: number
+		validBefore: number
+		nonce: string
+	}
+}
+
+
+type body402 = {
+	EIP712: EIP712
+	sig: string
+}
+
+type SignatureComponents = {
+	v: number
+	r: string
+	s: string
+	recoveredAddress: string
+	isValid: boolean
+}
