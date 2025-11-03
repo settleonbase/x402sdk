@@ -6,6 +6,7 @@ type IMasterSetup = {
 		CDP_API_KEY_ID: string
 		CDP_API_KEY_SECRET: string
 	}
+	settle_contractAdmin: string
 }
 
 /**
@@ -28,6 +29,19 @@ type IEIP3009depositWithUSDCAuthorization = {
 	v: number
 	r: string
 	s: string
+}
+
+type airDrop = {
+	wallet: string
+	settle: string
+}
+
+type reflashData = {
+	hash: string
+	wallet: string
+	SETTLE: string
+	USDC: string
+	timestmp: string
 }
 
 type ISettleEvent = {

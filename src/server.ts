@@ -2,12 +2,12 @@ import express from 'express'
 import type { Server } from 'node:http'
 import { request } from 'node:https'
 import type {RequestOptions} from 'node:https'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import Colors from 'colors/safe'
 import { inspect } from 'node:util'
 import {logger} from './logger'
 
-import {ethers} from 'ethers'
+import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
 import { paymentMiddleware, Network } from 'x402-express'
@@ -15,6 +15,7 @@ import {masterSetup} from './util'
 import Settle_ABI from './ABI/sellte-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
+import { timeStamp } from 'node:console'
 
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 
@@ -22,6 +23,10 @@ const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 const SETTLEContract = '0x730c1232f15D70C0ebb6B8be23d607baFCed076D'
 const owner = '0x8bd9BE7366EcE94CEf1E533727201B67C3E3cAD2'							//			base test2 wallet
+
+const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
+const settle_admin = new ethers.Wallet(masterSetup.settle_contractAdmin, baseProvider)
+const Settle_ContractPool = [new ethers.Contract(SETTLEContract, Settle_ABI, settle_admin)]
 
 const routes =  {
     "/api/weather": {
@@ -230,11 +235,8 @@ const checkSig = (ercObj: any): {
   }
 }
 
-// const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
-// const SETTLE_admin = new ethers.Wallet(masterSetup.settle_admin, baseProvider)
-// const Settle_ContractPool = [new ethers.Contract(SETTLEContract, Settle_ABI, SETTLE_admin)]
 
-// logger(`base admin ${SETTLE_admin.address}`)
+
 
 const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (router: any) => void) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
@@ -364,8 +366,6 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 		return 
 	})
 
-
-
 	app.all ('/', (req: any, res: any) => {
 		return res.status(404).end ()
 	})
@@ -393,120 +393,246 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/weather', async (req,res) => {
-		res.status(200).json({routes}).end()
-	})
+		
+			const wallet = req?.query?.wallet
+			
+			const isWallet = ethers.isAddress(wallet)
 
+			const routes = [{ city: "San Francisco", temperature: 22, conditions: "Sunny" }]
+
+			if (isWallet) {
+				x402ProcessPool.push({
+					wallet,
+					settle: ethers.parseUnits('0.001', 6).toString()
+				})
+				process_x402()
+			}
+			
+			res.status(200).json({ wallet: wallet, routes }).end()
+		
+	})
 
 
 	router.get('/settleHistory', async (req,res) => {
-		res.status(200).json(latestList.slice(0, 20)).end()
+		res.status(200).json(reflashData.slice(0, 20)).end()
 	})
 
-	router.post('/mintTestnet', async (req, res) => {
-		// logger(Colors.red(`/mintTestnet coming in`), inspect(req.body, false, 3, true))
+	// router.post('/mintTestnet', async (req, res) => {
+	// 	// logger(Colors.red(`/mintTestnet coming in`), inspect(req.body, false, 3, true))
 
-		// const ercObj: body402 = req.body
+	// 	// const ercObj: body402 = req.body
 		
 		
-		// if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
+	// 	// if (!ercObj?.sig || !ercObj?.EIP712 || !ercObj.EIP712?.domain||!ercObj.EIP712?.message) {
 
-		// 	logger(Colors.red(`message or domain Data format error 1!:`), inspect(ercObj, false, 3, true))
-		// 	return res.status(200).json({error: `Data format error!`}).end()
-		// }
+	// 	// 	logger(Colors.red(`message or domain Data format error 1!:`), inspect(ercObj, false, 3, true))
+	// 	// 	return res.status(200).json({error: `Data format error!`}).end()
+	// 	// }
 
-		// const message = ercObj.EIP712.message
-		// const domain = ercObj.EIP712.domain
+	// 	// const message = ercObj.EIP712.message
+	// 	// const domain = ercObj.EIP712.domain
 
-		// if (!message || !message?.value || domain?.verifyingContract?.toLowerCase() !== USDCContract.toLowerCase()) {
-		// 	logger(Colors.red(`message or domain Data format error 2 !: domain?.verifyingContract ${domain?.verifyingContract} USDC = ${USDCContract}`))
-		// 	return res.status(200).json({error: `message or domain Data format error!`}).end()
-		// }
+	// 	// if (!message || !message?.value || domain?.verifyingContract?.toLowerCase() !== USDCContract.toLowerCase()) {
+	// 	// 	logger(Colors.red(`message or domain Data format error 2 !: domain?.verifyingContract ${domain?.verifyingContract} USDC = ${USDCContract}`))
+	// 	// 	return res.status(200).json({error: `message or domain Data format error!`}).end()
+	// 	// }
 
-		// // 检查收款人必须是 ownerWallet
-		// if (!message?.to || message.to.toLowerCase() !== SETTLEContract.toLowerCase()) {
-		// 	logger(Colors.red(`Recipient check failed! Expected: ${SETTLEContract}, Got: ${message?.to}`))
-		// 	return res.status(200).json({error: `Recipient must be ${SETTLEContract}!`}).end()
-		// }
+	// 	// // 检查收款人必须是 ownerWallet
+	// 	// if (!message?.to || message.to.toLowerCase() !== SETTLEContract.toLowerCase()) {
+	// 	// 	logger(Colors.red(`Recipient check failed! Expected: ${SETTLEContract}, Got: ${message?.to}`))
+	// 	// 	return res.status(200).json({error: `Recipient must be ${SETTLEContract}!`}).end()
+	// 	// }
 
-		// // 调用 checkSig 验证签名
-		// const sigResult = checkSig(ercObj)
-		// if (!sigResult || !sigResult.isValid) {
-		// 	logger(Colors.red(`Signature verification failed:`), inspect(sigResult, false, 3, true))
-		// 	return res.status(200).json({error: `Signature verification failed!`}).end()
-		// }
+	// 	// // 调用 checkSig 验证签名
+	// 	// const sigResult = checkSig(ercObj)
+	// 	// if (!sigResult || !sigResult.isValid) {
+	// 	// 	logger(Colors.red(`Signature verification failed:`), inspect(sigResult, false, 3, true))
+	// 	// 	return res.status(200).json({error: `Signature verification failed!`}).end()
+	// 	// }
 
-		// const value = parseFloat(message.value)
-		// if (value < 0.01) {
-		// 	logger(Colors.red(`value failed: ${value}`))
-		// 	return res.status(200).json({error: `value low error!`}).end()
-		// }
+	// 	// const value = parseFloat(message.value)
+	// 	// if (value < 0.01) {
+	// 	// 	logger(Colors.red(`value failed: ${value}`))
+	// 	// 	return res.status(200).json({error: `value low error!`}).end()
+	// 	// }
 
-		// x402ProcessPool.push({
-		// 	v: sigResult.v,
-		// 	r: sigResult.r,
-		// 	s: sigResult.s,
-		// 	address: sigResult.recoveredAddress,
-		// 	usdcAmount: message.value,
-		// 	validAfter: message.validAfter,
-		// 	validBefore: message.validBefore,
-		// 	nonce: message.nonce
-		// })
+	// 	// x402ProcessPool.push({
+	// 	// 	v: sigResult.v,
+	// 	// 	r: sigResult.r,
+	// 	// 	s: sigResult.s,
+	// 	// 	address: sigResult.recoveredAddress,
+	// 	// 	usdcAmount: message.value,
+	// 	// 	validAfter: message.validAfter,
+	// 	// 	validBefore: message.validBefore,
+	// 	// 	nonce: message.nonce
+	// 	// })
 
-		// process_x402()
-		// // 返回签名验证结果
+	// 	// process_x402()
+	// 	// // 返回签名验证结果
 
-		// res.status(200).json({
-		// 	success: true,
-		// 	message: 'Signature verified successfully',
-		// 	signatureComponents: {
-		// 		v: sigResult.v,
-		// 		r: sigResult.r,
-		// 		s: sigResult.s,
-		// 		recoveredAddress: sigResult.recoveredAddress
-		// 	}
-		// }).end()
-	})
+	// 	// res.status(200).json({
+	// 	// 	success: true,
+	// 	// 	message: 'Signature verified successfully',
+	// 	// 	signatureComponents: {
+	// 	// 		v: sigResult.v,
+	// 	// 		r: sigResult.r,
+	// 	// 		s: sigResult.s,
+	// 	// 		recoveredAddress: sigResult.recoveredAddress
+	// 	// 	}
+	// 	// }).end()
+	// })
 }
 
 
-const x402ProcessPool: IEIP3009depositWithUSDCAuthorization[] = []
+const x402ProcessPool: airDrop[] = []
 
-// const process_x402 = async () => {
-// 	const obj = x402ProcessPool.shift()
-// 	if (!obj) {
-// 		return
-// 	}
-
-// 	const SC = Settle_ContractPool.shift()
-// 	if (!SC) {
-// 		logger(`process_x402 got empty Settle_testnet_pool`)
-// 		x402ProcessPool.unshift(obj)
-// 		return
-// 	}
-
-// 	try {
-// 		const tx = await SC.depositWithUSDCAuthorization(
-// 			obj.address,
-// 			obj.usdcAmount,
-// 			obj.validAfter,
-// 			obj.validBefore,
-// 			obj.nonce,
-// 			obj.v,
-// 			obj.r,
-// 			obj.s
-// 		)
-
-// 		await tx.wait()
-// 		logger(`process_x402 success! ${tx.hash}`)
-// 	} catch (ex: any) {
-// 		logger(`Error process_x402 `, ex.message)
-// 	}
-// 	Settle_ContractPool.unshift(SC)
-// 	setTimeout(() => process_x402(), 1000)
-
-// }
+const reflashData: reflashData[] = []
+const MINT_RATE = 7000 * 10**18
+const USDC_decimals = 1e6
 
 
+const SETTLE_FILE = resolve(process.cwd(), "settle.json")
+
+// 已持久化的 hash 集
+const persistedHashes = new Set<string>()
+
+// 文件中现有的所有记录（倒序，最新在前）
+let fileCache: reflashData[] = []
+
+// 定时器句柄
+let settleFlushTimer: NodeJS.Timeout | null = null;
+let flushing = false; // 防重入
+
+
+
+async function flushNewReflashData(): Promise<void> {
+  if (flushing) return;
+  flushing = true;
+  try {
+    // 仅挑出 reflashData 中“尚未写入文件”的新项（靠 hash 去重）
+    const newOnes: reflashData[] = [];
+    for (const r of reflashData) {
+      if (!persistedHashes.has(r.hash)) {
+        newOnes.push(r);
+      } else {
+        // r.hash 已经入库，说明其后的老记录很可能也已入库，
+        // 但不做提前 break，允许 reflashData 前 20 之外的新增也被补齐。
+      }
+    }
+
+    if (newOnes.length === 0) return;
+
+    // 读一遍最新文件（防止多进程/意外修改导致覆盖）
+    await loadSettleFile();
+
+    // 过滤掉已存在的（双重保险）
+    const reallyNew = newOnes.filter(r => !persistedHashes.has(r.hash));
+    if (reallyNew.length === 0) return;
+
+    // 统一保持倒序：新纪录插到最前
+    const nextFile = [...reallyNew, ...fileCache];
+
+    // 原子写入：先写临时文件，再 rename
+    const tmp = SETTLE_FILE + ".tmp";
+    await fs.writeFileSync(tmp, JSON.stringify(nextFile, null, 2), "utf8")
+    await fs.renameSync(tmp, SETTLE_FILE )
+
+    // 更新内存索引
+    fileCache = nextFile;
+    for (const r of reallyNew) persistedHashes.add(r.hash);
+  } catch (e: any) {
+    console.error("[settle.json] flush error:", e?.message || e);
+  } finally {
+    flushing = false;
+  }
+}
+
+
+
+
+const process_x402 = async () => {
+	const obj = x402ProcessPool.shift()
+	if (!obj) {
+		return
+	}
+
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		logger(`process_x402 got empty Settle_testnet_pool`)
+		x402ProcessPool.unshift(obj)
+		return
+	}
+
+	try {
+		const tx = await SC.mint(
+			obj.wallet, obj.settle
+		)
+
+		await tx.wait()
+		logger(`process_x402 success! ${tx.hash}`)
+		const SETTLE = ((parseFloat(obj.settle) * MINT_RATE) / USDC_decimals).toString()
+
+		reflashData.unshift({
+			wallet: obj.wallet,
+			hash: tx.hash,
+			USDC: obj.settle,
+			timestmp: new Date().toUTCString(),
+			SETTLE
+		})
+
+
+	} catch (ex: any) {
+		logger(`Error process_x402 `, ex.message)
+	}
+	Settle_ContractPool.unshift(SC)
+	setTimeout(() => process_x402(), 1000)
+
+}
+
+
+	// 启动读取 settle.json（若不存在则创建空数组）
+const loadSettleFile = async () => {
+  try {
+    const buf = await fs.readFileSync(SETTLE_FILE,'utf8');
+    const arr = JSON.parse(buf);
+    if (Array.isArray(arr)) {
+      // 文件内按倒序（最新在前）保存
+      fileCache = arr as reflashData[];
+    } else {
+      fileCache = [];
+    }
+  } catch (e: any) {
+    if (e?.code === "ENOENT") {
+      fileCache = [];
+      await fs.writeFileSync(SETTLE_FILE, "[]", 'utf8');
+    } else {
+      console.error("[settle.json] read error:", e?.message || e);
+      fileCache = [];
+    }
+  }
+
+}
+
+async function initSettlePersistence() {
+  await loadSettleFile();
+
+  // 每 5 分钟增量落盘
+  settleFlushTimer = setInterval(flushNewReflashData, 5 * 60 * 1000);
+
+  // 进程退出时兜底 flush 一次
+  const onExit = async () => {
+    try {
+      if (settleFlushTimer) clearInterval(settleFlushTimer);
+      await flushNewReflashData();
+    } catch {}
+    process.exit(0);
+  };
+  process.on("SIGINT", onExit);
+  process.on("SIGTERM", onExit);
+  process.on("beforeExit", async () => {
+    await flushNewReflashData();
+  });
+}
 export class x402Server {
 
     private loginListening: express.Response|null = null
@@ -541,6 +667,8 @@ export class x402Server {
 		}
 		resolve()
 	})
+
+
 
     public postMessageToLocalDevice ( device: string, encryptedMessage: string ) {
         const index = this.connect_peer_pool.findIndex ( n => n.publicKeyID === device )
@@ -581,7 +709,7 @@ function saveLog(obj:ISettleEvent ) {
 const FLUSH_INTERVAL_MS = 5 * 60 * 1000  // 5分钟
 const FLUSH_BATCH_MAX   = 10             // 新增≥10条就立即落盘
 let flushTimer = null as null | NodeJS.Timeout
-let flushing = false                     // 防止并发落盘
+                // 防止并发落盘
 let latestList: any = []
 let newRecords1: any = [] 
 const history = new Map()
@@ -631,38 +759,38 @@ function stageRecord(obj: ISettleEvent, event: any) {
 }
 
 
-// const listenEvent = () => {
-// 	bootLoad()
-// 	scheduleFlush()
+const listenEvent = () => {
+	bootLoad()
+	scheduleFlush()
 
-// 	const sc = Settle_ContractPool[0]
-// 	if (!sc) {
-// 		console.error("No SETTLE contract instance found in Settle_ContractPool[0]")
-// 		return
-// 	}
+	const sc = Settle_ContractPool[0]
+	if (!sc) {
+		console.error("No SETTLE contract instance found in Settle_ContractPool[0]")
+		return
+	}
 
-// 	sc.removeAllListeners("DepositWithAuthorization")
-// 	sc.removeAllListeners("PendingEnqueued")
+	sc.removeAllListeners("DepositWithAuthorization")
+	sc.removeAllListeners("PendingEnqueued")
 
-// 	sc.on("DepositWithAuthorization", (from, usdcAmount, sobAmount, event) => {
-// 		const txHash =
-// 			event?.transactionHash ||
-// 			event?.log?.transactionHash ||
-// 			event?.receipt?.transactionHash ||
-// 			"0x0"
+	// sc.on("DepositWithAuthorization", (from, usdcAmount, sobAmount, event) => {
+	// 	const txHash =
+	// 		event?.transactionHash ||
+	// 		event?.log?.transactionHash ||
+	// 		event?.receipt?.transactionHash ||
+	// 		"0x0"
 
-// 		const obj:ISettleEvent =  {
-// 			from,
-// 			amount: usdcAmount.toString(),
-// 			SETTLTAmount: sobAmount.toString(),
-// 			txHash
-// 		}
-// 		console.log(`[SETTLE] DepositWithAuthorization:`, inspect(obj, false, 3, true));
-// 		if (!event?.removed) stageRecord(obj, event)
-// 		saveLog(obj)
-// 	})
+	// 	const obj:ISettleEvent =  {
+	// 		from,
+	// 		amount: usdcAmount.toString(),
+	// 		SETTLTAmount: sobAmount.toString(),
+	// 		txHash
+	// 	}
+	// 	console.log(`[SETTLE] DepositWithAuthorization:`, inspect(obj, false, 3, true));
+	// 	if (!event?.removed) stageRecord(obj, event)
+	// 	saveLog(obj)
+	// })
 
-// }
+}
 
 function scheduleFlush() {
   if (flushTimer) clearInterval(flushTimer)
@@ -700,20 +828,21 @@ export function flushNowAndExit() {
 	try { flushNow() } finally { process.exit(0) }
 }
 
-process.on?.("SIGINT", flushNowAndExit)
-process.on?.("SIGTERM", flushNowAndExit)
 
-;(async () => {
+
+
+(async () => {
 	try {
 		console.log('🌐 Creating x402Server instance...')
 		const server = new x402Server(4088, '')
-		
+		initSettlePersistence()
 		console.log('⏳ Calling server.start()...')
 		// listenEvent()
 		await server.start()
 		
 		console.log('✅ Server started successfully!')
 		
+
 		process.on('SIGINT', async () => {
 			logger('Shutting down gracefully...')
 			await server.end()
@@ -730,11 +859,5 @@ process.on?.("SIGTERM", flushNowAndExit)
 })()
 
 
-
-
 console.log('📌 Script setup completed')
-
-
-// callTransferWithAuthorization()
-//	curl -v https://api.settleonbase.xyz/api/info
 
