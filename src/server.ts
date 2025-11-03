@@ -33,12 +33,18 @@ const {verify, settle} = useFacilitator(facilitator1)
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
-const SETTLEContract = '0x730c1232f15D70C0ebb6B8be23d607baFCed076D'
+const SETTLEContract = '0x678F3570F9173373bB75e7544fcF383153aDAF4C'
 const owner = '0x8bd9BE7366EcE94CEf1E533727201B67C3E3cAD2'							//			base test2 wallet
 
 const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
-const settle_admin = new ethers.Wallet(masterSetup.settle_contractAdmin, baseProvider)
-const Settle_ContractPool = [new ethers.Contract(SETTLEContract, Settle_ABI, settle_admin)]
+
+
+const Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
+	const admin = new ethers.Wallet(n, baseProvider)
+	logger(`address ${admin.address} added to Settle_ContractPool`)
+	return new ethers.Contract(SETTLEContract, Settle_ABI, admin)
+})
+
 const x402Version = 1
 
 function createExactPaymentRequirements(
@@ -897,7 +903,9 @@ const process_x402 = async () => {
 
 	} catch (ex: any) {
 		logger(`Error process_x402 `, ex.message)
+		x402ProcessPool.unshift(obj)
 	}
+	
 	Settle_ContractPool.unshift(SC)
 	setTimeout(() => process_x402(), 1000)
 
