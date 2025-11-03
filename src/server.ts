@@ -721,7 +721,7 @@ const router = ( router: express.Router ) => {
 
 const x402ProcessPool: airDrop[] = []
 
-const reflashData: reflashData[] = []
+
 const MINT_RATE = 7000 * 10**18
 const USDC_decimals = 1e6
 
@@ -825,7 +825,7 @@ const process_x402 = async () => {
 }
 
 
-	// 启动读取 settle.json（若不存在则创建空数组）
+const reflashData: reflashData[] = []
 const loadSettleFile = async () => {
   try {
     const buf = await fs.readFileSync(SETTLE_FILE,'utf8');
@@ -836,6 +836,8 @@ const loadSettleFile = async () => {
 		logger(`loadSettleFile ${SETTLE_FILE}`, inspect(arr, false, 3, true))
       // 文件内按倒序（最新在前）保存
       fileCache = arr as reflashData[];
+	  
+
     } else {
       fileCache = [];
 	  logger(`loadSettleFile ${SETTLE_FILE} Empty array`)
@@ -851,7 +853,9 @@ const loadSettleFile = async () => {
       fileCache = [];
     }
   }
-
+   // ✅ 初始化 reflashData 数组（最多前 20 条，倒序）
+  reflashData.splice(0, reflashData.length, ...fileCache.slice(0, 20))
+  logger(`reflashData initialized with ${reflashData.length} items`)
 }
 
 async function initSettlePersistence() {
