@@ -531,6 +531,8 @@ const router = ( router: express.Router ) => {
 					wallet,
 					settle: ethers.parseUnits('0.001', 6).toString()
 				})
+
+				logger(`/weather success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
 				process_x402()
 			}
 			
@@ -554,6 +556,8 @@ const router = ( router: express.Router ) => {
 					wallet,
 					settle: ethers.parseUnits('0.001', 6).toString()
 				})
+
+				logger(`/settle0001 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
 				process_x402()
 			}
 			
@@ -572,6 +576,7 @@ const router = ( router: express.Router ) => {
 					wallet,
 					settle: ethers.parseUnits('0.01', 6).toString()
 				})
+				logger(`/settle001 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
 				process_x402()
 			}
 			
@@ -590,6 +595,7 @@ const router = ( router: express.Router ) => {
 					wallet,
 					settle: ethers.parseUnits('0.1', 6).toString()
 				})
+				logger(`/settle01 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
 				process_x402()
 			}
 			
@@ -608,6 +614,7 @@ const router = ( router: express.Router ) => {
 					wallet,
 					settle: ethers.parseUnits('1', 6).toString()
 				})
+				logger(`/settle1 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
 				process_x402()
 			}
 			
@@ -626,6 +633,7 @@ const router = ( router: express.Router ) => {
 					wallet,
 					settle: ethers.parseUnits('10', 6).toString()
 				})
+				logger(`/settle10 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
 				process_x402()
 			}
 			
@@ -644,6 +652,7 @@ const router = ( router: express.Router ) => {
 					wallet,
 					settle: ethers.parseUnits('100', 6).toString()
 				})
+				logger(`/settle100 success! doing process_x402(${wallet})`, inspect(req.headers, false, 3, true))
 				process_x402()
 			}
 			
@@ -786,6 +795,7 @@ async function flushNewReflashData(): Promise<void> {
 
 
 const process_x402 = async () => {
+	console.debug(`process_x402`)
 	const obj = x402ProcessPool.shift()
 	if (!obj) {
 		return
