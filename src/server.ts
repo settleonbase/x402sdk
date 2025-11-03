@@ -34,7 +34,7 @@ const {verify, settle} = useFacilitator(facilitator1)
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
-const SETTLEContract = '0x678F3570F9173373bB75e7544fcF383153aDAF4C'
+const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
 
 const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
