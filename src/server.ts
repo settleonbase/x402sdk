@@ -900,6 +900,13 @@ const process_x402 = async () => {
 		
 		const SETTLE = ((parseFloat(obj.settle) * MINT_RATE) / USDC_decimals).toString()
 
+
+		
+		const ts = await SC.event.eventEmit(
+			obj.wallet, obj.settle, SETTLE, tx.hash
+		)
+		await ts.wait()
+
 		reflashData.unshift({
 			wallet: obj.wallet,
 			hash: tx.hash,
@@ -908,13 +915,6 @@ const process_x402 = async () => {
 			SETTLE
 		})
 
-		
-
-		const ts = await SC.event.eventEmit(
-			obj.wallet, obj.settle, SETTLE, tx.hash
-		)
-		await ts.wait()
-
 		logger(`process_x402 success! ${tx.hash}`)
 
 	} catch (ex: any) {
@@ -922,7 +922,7 @@ const process_x402 = async () => {
 		x402ProcessPool.unshift(obj)
 	}
 
-	Settle_ContractPool.unshift(SC)
+	Settle_ContractPool.push(SC)
 	setTimeout(() => process_x402(), 1000)
 
 }
