@@ -619,25 +619,25 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 		}
 
 		try {
-			throw new Error('facilitatorsPool')
+			// throw new Error('facilitatorsPool')
 
-			// const settleResponse = await settle(
-			// 	paymentHeader,
-			// 	saleRequirements
-			// )
+			const settleResponse = await settle(
+				paymentHeader,
+				saleRequirements
+			)
 
 
-			// const responseHeader = settleResponseHeader(settleResponse)
+			const responseHeader = settleResponseHeader(settleResponse)
 
-			// // In a real application, you would store this response header
-			// // and associate it with the payment for later verification
+			// In a real application, you would store this response header
+			// and associate it with the payment for later verification
 			
-			// responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
+			responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
 			
-			// if (!responseData.success) {
-			// 	logger(`${_routerName} responseData ERROR!`, inspect(responseData, false, 3, true))
-			// 	return res.status(402).end()
-			// }
+			if (!responseData.success) {
+				logger(`${_routerName} responseData ERROR!`, inspect(responseData, false, 3, true))
+				return res.status(402).end()
+			}
 
 
 		} catch (error) {
