@@ -625,26 +625,30 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 
 		const isValid = await verifyPayment(req, res, paymentRequirements)
 
-		if (!isValid) return
+		if (!isValid) {
+			return 
+		}
 
 		let responseData: x402SettleResponse
 
 		const _routerName = '/weather'
 		
+		const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
+		const saleRequirements = paymentRequirements[0]
+
+		const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, 1000)
+		if (!isValidPaymentHeader) {
+
+			logger(`${_routerName} checkx402paymentHeader Error!`,inspect(paymentHeader))
+			return res.status(402).end()
+		}
+
 		try {
-			const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
-			const saleRequirements = paymentRequirements[0]
-
-			const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, 1000)
-			if (!isValidPaymentHeader) {
-
-				logger(`${_routerName} checkx402paymentHeader Error!`,inspect(paymentHeader))
-				return res.status(402).end()
-			}
+			
 
 			const settleResponse = await settle(
 				paymentHeader,
-				paymentRequirements[0]
+				saleRequirements
 			)
 
 
@@ -663,8 +667,13 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 
 		} catch (error) {
 			console.error("Payment settlement failed:", error);
+
 			// In a real application, you would handle the failed payment
 			// by marking it for retry or notifying the user
+
+			logger(inspect({paymentHeader,
+				saleRequirements}, false, 3, true))
+
 			return res.status(402).end()
 		}
 
@@ -717,7 +726,7 @@ const router = ( router: express.Router ) => {
 	router.get('/settle0001', async (req,res) => {
 		return processPaymebnt(req, res, '0.001')
 	})
-
+	//	https://api.settleonbase.xyz/api/settle001
 	router.get('/settle001', async (req,res) => {
 		return processPaymebnt(req, res, '0.01')
 	})
