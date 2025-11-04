@@ -34,6 +34,7 @@ const {verify, settle} = useFacilitator(facilitator1)
 
 const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
+
 const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
 
 const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
@@ -46,8 +47,9 @@ const Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 	const adminEvent = new ethers.Wallet(n, eventProvider)
 	logger(`address ${admin.address} added to Settle_ContractPool`)
 	return {
-		base: new ethers.Contract(SETTLEContract, Settle_ABI, admin), 
-		event: new ethers.Contract(eventContract, Event_ABI, adminEvent)
+		base: new ethers.Contract(SETTLEContract, Settle_ABI, admin),
+		event: new ethers.Contract(eventContract, Event_ABI, adminEvent),
+		usdc: new ethers.Contract(USDCContract, USDC_ABI, admin)
 	}
 })
 
@@ -83,8 +85,6 @@ function createExactPaymentRequirements(
 		},
 	};
 }
-
-
 
 
 // ============================================
@@ -560,40 +560,7 @@ async function verifyPayment(
 	return true
 }
 
-type x402SettleResponse = {
-	network: string
-	payer: string
-	success: boolean
-	transaction: string
-}
 
-type x402Response = {
-	timestamp: string
-	network: string
-	payer: string
-	success: boolean
-	USDC_tx?: string
-	SETTLE_tx?: string
-}
-
-
-type x402paymentHeader = {
-	x402Version: number
-	scheme: 'exact',
-	network: string
-	payload: {
-		signature: string
-		authorization: {
-			from: string
-			to: string
-			value: string
-			validAfter: string
-			validBefore: string
-			nonce: string
-		}
-
-	}
-}
 
 const checkx402paymentHeader = (paymentHeader: x402paymentHeader, amount: number) => {
 	if (paymentHeader?.payload?.authorization?.to?.toLowerCase() !== SETTLEContract.toLowerCase()) {
@@ -615,12 +582,21 @@ const checkx402paymentHeader = (paymentHeader: x402paymentHeader, amount: number
 
 
 const processPaymebnt = async (req: any, res: any, price: string) => {
+	const _routerName = req.path
+
+	
 	const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource
+		const USDC_tokenValue = ethers.parseUnits(price, 6)
+		const SETTLE_tokenvalue = USDC_tokenValue * MINT_RATE
+		const SETTLE_token_ether = ethers.formatEther(SETTLE_tokenvalue)
+
+		logger(`processPaymebnt ${_routerName} price=${price} `)
+
 
 		const paymentRequirements = [createExactPaymentRequirements(
 			price,
 			resource,
-			"weather"
+			`SETTLE Mint / Early Access $SETTLE ${SETTLE_token_ether}`
 		)];
 
 		const isValid = await verifyPayment(req, res, paymentRequirements)
@@ -631,12 +607,11 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 
 		let responseData: x402SettleResponse
 
-		const _routerName = '/weather'
-		
 		const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
 		const saleRequirements = paymentRequirements[0]
 
 		const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, 1000)
+
 		if (!isValidPaymentHeader) {
 
 			logger(`${_routerName} checkx402paymentHeader Error!`,inspect(paymentHeader))
@@ -670,9 +645,21 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 
 			// In a real application, you would handle the failed payment
 			// by marking it for retry or notifying the user
-
-			logger(inspect({paymentHeader,
-				saleRequirements}, false, 3, true))
+			const payload: payload = paymentHeader?.payload as payload
+			if (payload?.authorization) {
+				facilitatorsPool.push({
+					from: payload.authorization.from,
+					value: payload.authorization.value,
+					validAfter: payload.authorization.validAfter,
+					validBefore: payload.authorization.validBefore,
+					nonce: payload.authorization.nonce,
+					signature: payload.signature,
+					res: res
+				})
+				return facilitators()
+			}
+			
+			logger(inspect({paymentHeader, saleRequirements}, false, 3, true))
 
 			return res.status(402).end()
 		}
@@ -708,6 +695,57 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 
 		
 		res.status(200).json(ret).end()
+}
+
+
+const facilitatorsPool: facilitatorsPoolType[] = []
+
+const facilitators = async () => {
+	const obj = facilitatorsPool.shift()
+	if (!obj) {
+		return
+	}
+
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		facilitatorsPool.unshift(obj)
+		return setTimeout(() => facilitators(), 1000)
+	}
+	const wallet = obj.from
+	try {
+		const tx = await SC.usdc.transferWithAuthorization(
+			obj.from, SETTLEContract, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature
+		)
+		await tx.wait()
+		logger(`facilitators success! ${tx.hash}`)
+
+		const ret: x402Response = {
+			success: true,
+			payer: wallet,
+			USDC_tx: tx.hash,
+			network: 'BASE',
+			timestamp: new Date().toISOString()
+		}
+
+		obj.res.status(200).json(ret).end()
+		Settle_ContractPool.push(SC)
+
+		x402ProcessPool.push({
+			wallet,
+			settle: ethers.parseUnits('0.001', 6).toString()
+		})
+			
+		await process_x402()
+		return setTimeout(() => facilitators(), 1000)
+
+	} catch (ex: any) {
+		logger(`facilitators Error!`, ex.message)
+	}
+
+	//	transferWithAuthorization
+
+	Settle_ContractPool.push(SC)
+	setTimeout(() => facilitators(), 1000)
 }
 
 
@@ -823,8 +861,8 @@ const router = ( router: express.Router ) => {
 const x402ProcessPool: airDrop[] = []
 
 
-const MINT_RATE = 7000 * 10**18
-const USDC_decimals = 1e6
+const MINT_RATE = ethers.parseUnits('7000', 18)
+const USDC_decimals = BigInt(10 ** 6)
 
 
 const SETTLE_FILE = join(os.homedir(), "settle.json")
@@ -907,7 +945,7 @@ const process_x402 = async () => {
 
 		await tx.wait()
 		
-		const SETTLE = ((parseFloat(obj.settle) * MINT_RATE) / USDC_decimals).toString()
+		const SETTLE = BigInt(obj.settle) * MINT_RATE / USDC_decimals
 
 
 		
@@ -921,7 +959,7 @@ const process_x402 = async () => {
 			hash: tx.hash,
 			USDC: obj.settle,
 			timestmp: new Date().toUTCString(),
-			SETTLE
+			SETTLE: SETTLE.toString(),
 		})
 
 		logger(`process_x402 success! ${tx.hash}`)
@@ -993,12 +1031,13 @@ async function initSettlePersistence() {
       await flushNewReflashData();
     } catch {}
     process.exit(0);
-  };
+  }
+
   process.on("SIGINT", onExit);
   process.on("SIGTERM", onExit);
   process.on("beforeExit", async () => {
     await flushNewReflashData();
-  });
+  })
 }
 export class x402Server {
 
@@ -1053,44 +1092,7 @@ export class x402Server {
 const logPath = join(os.homedir(), "esttleEvent.json")
 
 
-// 运行期状态
-// --- 常量 ---
-const FLUSH_INTERVAL_MS = 5 * 60 * 1000  // 5分钟
-const FLUSH_BATCH_MAX   = 10             // 新增≥10条就立即落盘
-let flushTimer = null as null | NodeJS.Timeout
-                // 防止并发落盘
-let latestList: any = []
 let newRecords1: any = [] 
-const history = new Map()
-
-// --- 启动加载：读取文件中最新 20 条，建 history ---
-function bootLoad() {
-	try {
-		if (!fs.existsSync(logPath)) {
-			fs.writeFileSync(logPath, "[]")
-			return
-		}
-		const raw = fs.readFileSync(logPath, "utf8")
-		const arr = JSON.parse(raw)
-		if (!Array.isArray(arr)) return
-		latestList = arr.slice(0, 20)
-		for (const item of latestList) {
-			const tx = item.txHash || item.transactionHash
-			if (tx && !history.has(tx)) {
-				history.set(tx, { blockNumber: item.blockNumber ?? 0, obj: item })
-			}
-		}
-		console.log(`[SETTLE] bootLoad: loaded ${latestList.length} recent records`)
-	} catch (e) {
-		console.error("[SETTLE] bootLoad failed:", e)
-	}
-}
-
-
-function scheduleFlush() {
-  if (flushTimer) clearInterval(flushTimer)
-  flushTimer = setInterval(flushNow, FLUSH_INTERVAL_MS)
-}
 
 function flushNow() {
 	if (newRecords1.length === 0) return

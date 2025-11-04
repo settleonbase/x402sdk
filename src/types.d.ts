@@ -75,6 +75,55 @@ type EIP712 = {
 	}
 }
 
+type x402SettleResponse = {
+	network: string
+	payer: string
+	success: boolean
+	transaction: string
+}
+
+type x402Response = {
+	timestamp: string
+	network: string
+	payer: string
+	success: boolean
+	USDC_tx?: string
+	SETTLE_tx?: string
+}
+
+type payload = {
+	
+		signature: string
+		authorization: {
+			from: string
+			to: string
+			value: string
+			validAfter: string
+			validBefore: string
+			nonce: string
+		}
+
+	
+}
+
+type x402paymentHeader = {
+	x402Version: number
+	scheme: 'exact',
+	network: string
+	payload: payload
+}
+
+
+type facilitatorsPoolType = {
+	from: string
+	value: string
+	validAfter: string
+	validBefore: string
+	nonce: string
+	signature: string
+	res: any
+}
+
 
 type body402 = {
 	EIP712: EIP712
