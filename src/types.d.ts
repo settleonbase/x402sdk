@@ -37,6 +37,7 @@ type airDrop = {
 	settle: string
 }
 
+
 type reflashData = {
 	hash: string
 	wallet: string
