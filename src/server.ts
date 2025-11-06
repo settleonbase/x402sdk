@@ -58,9 +58,10 @@ const Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 const x402Version = 1
 
 function createExactPaymentRequirements(
-	price: Price,
-	resource: Resource,
-	description = "",
+		price: Price,
+		resource: Resource,
+		description = "",
+		payto = SETTLEContract
 	): PaymentRequirements {
 	const atomicAmountForAsset = processPriceToAtomicAmount(price, 'base')
 	if ("error" in atomicAmountForAsset) {
@@ -75,7 +76,7 @@ function createExactPaymentRequirements(
 		resource,
 		description,
 		mimeType: "",
-		payTo: SETTLEContract,
+		payTo: payto,
 		maxTimeoutSeconds: 60,
 		asset: asset.address,
 		outputSchema: undefined,
@@ -591,14 +592,18 @@ const cashcodeGateway = async(req: any, res: any) => {
 		logger (`cashcodeGateway: `, inspect({amt, wallet}))
 
 		const _routerName = req.path
-		const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource
-		logger(`processPaymebnt ${_routerName} price=${amt} `)
+		const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
+
+		const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
+		
 		if (!amt) {
+			logger(`processPayment ${_routerName} price=${amt} Error!`)
 			return res.status(404).end()
 		}
 
-		const price = parseInt(amt)
-		if (isNaN(price) || price <= 0 || !wallet) {
+		const price = parseFloat(amt)
+		if (isNaN(price) || price < 0.01 || !wallet) {
+			logger(`processPayment isNaN(price) || price <= 0 || !wallet Error! `)
 			return res.status(200).json({success: 'Data format error!'}).end()
 		}
 
@@ -606,8 +611,10 @@ const cashcodeGateway = async(req: any, res: any) => {
 		const paymentRequirements = [createExactPaymentRequirements(
 			amt,
 			resource,
-			`Cashcode Payment Request for ${wallet}`
+			`Cashcode Payment Request for ${wallet}`,
+			wallet
 		)]
+
 
 		const isValid = await verifyPayment(req, res, paymentRequirements)
 
@@ -673,7 +680,7 @@ const cashcodeGateway = async(req: any, res: any) => {
 			return res.status(402).end()
 		}
 
-		
+
 		const ret: x402Response = {
 			success: true,
 			payer: wallet,
@@ -897,7 +904,7 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/settle', async (req,res) => {
-
+		return cashcodeGateway(req, res)
 		
 	})
 
