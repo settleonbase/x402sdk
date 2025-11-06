@@ -562,8 +562,8 @@ async function verifyPayment(
 
 
 
-const checkx402paymentHeader = (paymentHeader: x402paymentHeader, amount: number) => {
-	if (paymentHeader?.payload?.authorization?.to?.toLowerCase() !== SETTLEContract.toLowerCase()) {
+const checkx402paymentHeader = (paymentHeader: x402paymentHeader, amount: number, recipient: string) => {
+	if (paymentHeader?.payload?.authorization?.to?.toLowerCase() !== recipient.toLowerCase()) {
 		return false
 	}
 	const _payAmount = paymentHeader?.payload?.authorization?.value
@@ -579,7 +579,113 @@ const checkx402paymentHeader = (paymentHeader: x402paymentHeader, amount: number
 	return true
 }
 
+const cashcodeGateway = async(req: any, res: any) => {
+		const { id, amt, ccy, wallet, note } = req.query as {
+			id?: string
+			amt?: string
+			ccy?: string
+			wallet?: string
+			note?: string
+		}
 
+		logger (`cashcodeGateway: `, inspect({amt, wallet}))
+
+		const _routerName = req.path
+		const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource
+		logger(`processPaymebnt ${_routerName} price=${amt} `)
+		if (!amt) {
+			return res.status(404).end()
+		}
+
+		const price = parseInt(amt)
+		if (isNaN(price) || price <= 0 || !wallet) {
+			return res.status(200).json({success: 'Data format error!'}).end()
+		}
+
+
+		const paymentRequirements = [createExactPaymentRequirements(
+			amt,
+			resource,
+			`Cashcode Payment Request for ${wallet}`
+		)]
+
+		const isValid = await verifyPayment(req, res, paymentRequirements)
+
+		if (!isValid) {
+			return res.status(404).end()
+		}
+
+		let responseData: x402SettleResponse
+
+		const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
+		const saleRequirements = paymentRequirements[0]
+		
+		const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, price, wallet)
+
+		if (!isValidPaymentHeader) {
+			logger(`${_routerName} checkx402paymentHeader Error!`,inspect(paymentHeader))
+			return res.status(402).end()
+		}
+
+		try {
+			// throw new Error('facilitatorsPool')
+
+			const settleResponse = await settle(
+				paymentHeader,
+				saleRequirements
+			)
+
+
+			const responseHeader = settleResponseHeader(settleResponse)
+
+			// In a real application, you would store this response header
+			// and associate it with the payment for later verification
+			
+			responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
+			
+			if (!responseData.success) {
+				logger(`${_routerName} responseData ERROR!`, inspect(responseData, false, 3, true))
+				return res.status(402).end()
+			}
+
+
+		} catch (error) {
+			console.error("Payment settlement failed:", error);
+
+			// In a real application, you would handle the failed payment
+			// by marking it for retry or notifying the user
+			const payload: payload = paymentHeader?.payload as payload
+			if (payload?.authorization) {
+				facilitatorsPool.push({
+					from: payload.authorization.from,
+					value: payload.authorization.value,
+					validAfter: payload.authorization.validAfter,
+					validBefore: payload.authorization.validBefore,
+					nonce: payload.authorization.nonce,
+					signature: payload.signature,
+					res: res
+				})
+				return facilitators()
+			}
+			
+			logger(inspect({paymentHeader, saleRequirements}, false, 3, true))
+
+			return res.status(402).end()
+		}
+
+		
+		const ret: x402Response = {
+			success: true,
+			payer: wallet,
+			USDC_tx: responseData?.transaction,
+			network: responseData?.network,
+			timestamp: new Date().toISOString()
+		}
+		res.status(200).json(ret).end()
+
+
+
+}
 
 const processPaymebnt = async (req: any, res: any, price: string) => {
 	const _routerName = req.path
@@ -602,7 +708,7 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 		const isValid = await verifyPayment(req, res, paymentRequirements)
 
 		if (!isValid) {
-			return 
+			return res.status(404).end()
 		}
 
 		let responseData: x402SettleResponse
@@ -610,7 +716,7 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 		const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
 		const saleRequirements = paymentRequirements[0]
 
-		const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, 1000)
+		const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, parseInt(price), SETTLEContract)
 
 		if (!isValidPaymentHeader) {
 
@@ -787,6 +893,11 @@ const router = ( router: express.Router ) => {
 
 	router.get('/settle100', async (req,res) => {
 		return processPaymebnt(req, res, '100.00')
+		
+	})
+
+	router.get('/settle', async (req,res) => {
+
 		
 	})
 
