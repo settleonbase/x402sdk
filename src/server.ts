@@ -11,7 +11,7 @@ import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
-import {masterSetup} from './util'
+import {masterSetup, cashcode_request} from './util'
 import Settle_ABI from './ABI/sellte-abi.json'
 import Event_ABI from './ABI/event-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
@@ -905,6 +905,11 @@ const router = ( router: express.Router ) => {
 
 	router.get('/settle', async (req,res) => {
 		return cashcodeGateway(req, res)
+		
+	})
+
+	router.get('/cashCode', async (req,res) => {
+		return cashcode_request(req, res)
 		
 	})
 
