@@ -39,7 +39,7 @@ const USDC_conet = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
 const CashCodeCoNETAddr = '0xa7f37538de716e84e3ee3a9b51d675564b7531b3'
 const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
 const conetEndpoint = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network')
-const conet_CashCodeNote = '0xb7A5d95a50b799d70424777D6f7d7EAAE0Da06A1'
+const conet_CashCodeNote = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
 
 const {verify, settle} = useFacilitator(facilitator1)
 
@@ -95,6 +95,7 @@ async function verifyPayment (
 	const payment = req.header("X-PAYMENT")
 
 	if (!payment) {
+		logger(`verifyPayment send x402 payment information`)
 		res.status(402).json({
 			x402Version,
 			error: "X-PAYMENT header is required",
@@ -104,16 +105,18 @@ async function verifyPayment (
 	}
 
 	let decodedPayment: PaymentPayload
+
 	try {
 		decodedPayment = exact.evm.decodePayment(payment)
 		decodedPayment.x402Version = x402Version
 
 	} catch (error) {
+		logger(`verifyPayment catch Invalid or malformed payment header Error!`)
 		res.status(402).json({
 			x402Version,
 			error: error || "Invalid or malformed payment header",
 			accepts: paymentRequirements,
-		});
+		})
 		return false
 	}
 
@@ -122,8 +125,9 @@ async function verifyPayment (
 			findMatchingPaymentRequirements(paymentRequirements, decodedPayment) ||
 			paymentRequirements[0];
 		const response = await verify(decodedPayment, selectedPaymentRequirement)
-
+		
 		if (!response.isValid) {
+			logger(`verifyPayment verify decodedPayment Erro!`)
 			res.status(402).json({
 				x402Version,
 				error: response.invalidReason,
@@ -132,7 +136,11 @@ async function verifyPayment (
 			})
 			return false
 		}
+
 	} catch (error) {
+
+		logger(`verifyPayment catch error!`)
+
 		res.status(402).json({
 			x402Version,
 			error,
@@ -199,7 +207,7 @@ export const cashcode_request = async (req: Request, res: Response) => {
 
 	if (!isValid) {
 		logger(`${_routerName} !isValid ERROR!`)
-		return res.status(404).end()
+		return 
 	}
 
 	let responseData: x402SettleResponse
@@ -459,25 +467,38 @@ const processToBase: {
 	res: Response
 }[] = []
 
+const test1 = async () => {
+	const SC = Settle_ContractPool[0]
+	try {
+		const rx = await SC.conetSC.checkMemoGenerate(
+			'0x0e552817c21aaf22f4b8fd485399207cdde72774f53f5184d16f1831ae168da2',
+			'0x18d5a44dbb1d88af9f1cc7dbbf57851c0c65d0ea',
+			'110000',
+			'0xe5237425f0fc11f8f43196038716bb58eed30cc2199e273abd184150fb31d257',
+			'8453',
+			USDCContract_BASE,
+			'6',
+			'This is a Cashcode payment test'
+		)
+		
+		logger(`test success!`, inspect(rx, false, 3, true))
+	} catch (ex: any) {
+		logger(`test error`, ex.message)
+	}
+}
+const test = async () => {
+	const SC = Settle_ContractPool[0]
+	try {
+		const kkk = await SC.conetSC.getAddress()
+		logger(`kkk ${kkk}`)
+		const rx = await SC.conetSC.checkMemo(
+			'0x0e552817c21aaf22f4b8fd485399207cdde72774f53f5184d16f1831ae168da2'
+		)
+		
+		logger(`test success!`, inspect(rx, false, 3, true))
+	} catch (ex: any) {
+		logger(`test error`, ex.message)
+	}
+}
 
-// const test = async () => {
-// 	const SC = Settle_ContractPool[0]
-// 	try {
-// 		const rx = await SC.conetSC.checkMemoGenerate(
-// 			'0x244c06e0109b0fee58919b7f547a2c9d239ed293a8470b5046ad58f12a88a7f6',
-// 			'0x18d5a44dbb1d88af9f1cc7dbbf57851c0c65d0ea',
-// 			'110000',
-// 			'0xfe1e12e71113de3304f9bd7a8e614ab564674a1c7e50ae25032f83be8021bd70',
-// 			'8453',
-// 			USDCContract_BASE,
-// 			'6',
-// 			''
-// 		)
-// 		await rx.wait()
-// 		logger(`test success! ${rx.hash}`)
-// 	} catch (ex: any) {
-// 		logger(`test error`, ex.message)
-// 	}
-// }
-
-// test()
+test()
