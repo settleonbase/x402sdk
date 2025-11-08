@@ -452,6 +452,12 @@ const processCheck = async() => {
 		logger(`processCheck Error! ${ex.message}`)
 	}
 
+	Settle_ContractPool.push(SC)
+
+	setTimeout(() => {
+		processCheck()
+	}, 1000)
+
 }
 
 const processToBase: {
