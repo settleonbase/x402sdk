@@ -431,7 +431,7 @@ const processCheck = async() => {
 			obj.signature,
 			obj.hash
 		)
-		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
+		
 		await tx.wait()
 		logger(`processCheck BASE success! ${tx.hash}`)
 		const rx = await SC.conetSC.checkMemoGenerate(
@@ -445,6 +445,7 @@ const processCheck = async() => {
 			obj.note
 		)
 		await rx.wait()
+		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
 		logger(`processCheck CONET success! ${rx.hash}`)
 
 	} catch (ex: any) {
@@ -507,4 +508,4 @@ const test = async () => {
 	}
 }
 
-test()
+// test()
