@@ -31,7 +31,7 @@ const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,mas
 
 const x402Version = 1
 
-const CashCodeBaseAddr = '0xa720440D51bc0F95B42b4E2F520A0c7DbceD4c01'
+const CashCodeBaseAddr = '0xfFDc8d2021A41F4638Cb3eCf58B5155383EE9f6d'
 const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
 
@@ -474,38 +474,23 @@ const processToBase: {
 	res: Response
 }[] = []
 
-const test1 = async () => {
+const test2 = async () => {
 	const SC = Settle_ContractPool[0]
+	const code = '19SD0VZvAJt8u23KaHW2Xx'+ '111111'
+	const hash = ethers.solidityPackedKeccak256(['string'], [code])
 	try {
-		const rx = await SC.conetSC.checkMemoGenerate(
-			'0x0e552817c21aaf22f4b8fd485399207cdde72774f53f5184d16f1831ae168da2',
-			'0x18d5a44dbb1d88af9f1cc7dbbf57851c0c65d0ea',
-			'110000',
-			'0xe5237425f0fc11f8f43196038716bb58eed30cc2199e273abd184150fb31d257',
-			'8453',
-			USDCContract_BASE,
-			'6',
-			'This is a Cashcode payment test'
-		)
-		
-		logger(`test success!`, inspect(rx, false, 3, true))
-	} catch (ex: any) {
-		logger(`test error`, ex.message)
-	}
-}
-const test = async () => {
-	const SC = Settle_ContractPool[0]
-	try {
-		const kkk = await SC.conetSC.getAddress()
-		logger(`kkk ${kkk}`)
-		const rx = await SC.conetSC.checkMemo(
-			'0x0e552817c21aaf22f4b8fd485399207cdde72774f53f5184d16f1831ae168da2'
-		)
-		
-		logger(`test success!`, inspect(rx, false, 3, true))
-	} catch (ex: any) {
-		logger(`test error`, ex.message)
-	}
-}
+		// const tx = await SC.baseSC.withdrawWithCode(code, '0x18d5a44dbb1d88af9f1cc7dbbf57851c0c65d0ea')
+		// await tx.wait()	
+		// logger(`success! tx = ${tx.hash}`)
+		const tx = await SC.conetSC.finishedCheck(
 
-// test()
+			hash,
+			'0x589ec100fd5d5844828c1381abb9420cc711fc00ab1c740c18427cf325e406da'
+		)
+		await tx.wait()
+		logger(`success! tx = ${tx.hash}`)
+	}catch (ex: any) {
+		logger('error', ex.message)
+	}
+}
+test2()
