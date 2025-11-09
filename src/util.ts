@@ -37,7 +37,7 @@ const USDC_Base_DECIMALS = 6
 
 const USDC_conet = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
 const CashCodeCoNETAddr = '0xa7f37538de716e84e3ee3a9b51d675564b7531b3'
-const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
+const baseProvider = new ethers.JsonRpcProvider('https://chain-proxy.wallet.coinbase.com?targetName=base')
 const conetEndpoint = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network')
 const conet_CashCodeNote = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
 
