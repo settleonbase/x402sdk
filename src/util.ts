@@ -544,15 +544,15 @@ export const cashcode_check = (req: Request, res: Response) => {
 }
 
 
-// const test = async () => {
-// 	const SC = Settle_ContractPool[0]
-// 	try {
-// 		const ba = await SC.baseUSDC.balanceOf(USDC_conet)
-// 		const bas = ethers.formatUnits(ba, 6)
-// 		logger (`Balance ${bas}`)
-// 	} catch (ex: any) {
-// 		logger(`baseUSDC.balanceOf Error!`, ex.message)
-// 	}
-// }
+const test = async () => {
+	const SC = Settle_ContractPool[0]
+	try {
+		const ba = await SC.baseUSDC.balanceOf(USDC_conet)
+		const bas = ethers.formatUnits(ba, 6)
+		logger (`Balance ${bas}`)
+	} catch (ex: any) {
+		logger(`baseUSDC.balanceOf Error!`, ex.message)
+	}
+}
 
-// test()
+test()
