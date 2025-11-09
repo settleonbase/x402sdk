@@ -31,7 +31,7 @@ const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,mas
 
 const x402Version = 1
 
-const CashCodeBaseAddr = '0x6d8d3f77121cec90c528f93d3a79aa44c19bc7e5'
+const CashCodeBaseAddr = '0x3977f35c531895CeD50fAf5e02bd9e7EB890D2D1'
 const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
 
