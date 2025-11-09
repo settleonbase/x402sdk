@@ -476,7 +476,7 @@ const processToBase: {
 
 const test2 = async () => {
 	const SC = Settle_ContractPool[0]
-	const code = '19SD0VZvAJt8u23KaHW2Xx'+ '111111'
+	const code = '00'+ '111111'
 	const hash = ethers.solidityPackedKeccak256(['string'], [code])
 	try {
 		// const tx = await SC.baseSC.withdrawWithCode(code, '0x18d5a44dbb1d88af9f1cc7dbbf57851c0c65d0ea')
@@ -493,4 +493,4 @@ const test2 = async () => {
 		logger('error', ex.message)
 	}
 }
-test2()
+// test2()
