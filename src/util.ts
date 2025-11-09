@@ -508,6 +508,7 @@ const processCheckWithdraw = async () => {
 		logger(`processCheckWithdraw success! BASE = ${tx.hash} CONET = ${tr.hash}`)
 	} catch (ex: any) {
 		logger('processCheckWithdraw error!', ex.message)
+		obj.res.status(404).json({error: 'Server error!'}).end()
 	}
 
 	Settle_ContractPool.push(SC)
@@ -529,6 +530,8 @@ export const cashcode_check = (req: Request, res: Response) => {
 		logger(`cashcode_check Format Error!`)
 		return res.status(404).end()
 	}
+
+	logger(`cashcode_check`, inspect({address, code}, false, 3, true))
 
 	processCheckWithdrawPool.push({
 		address,
