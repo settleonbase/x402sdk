@@ -20,7 +20,10 @@ import {
 import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x402/shared"
 import { inspect } from 'node:util'
 const uuid62 = require('uuid62')
-
+import { createPublicClient, createWalletClient, http, getContract, parseEther, parseAbi } from 'viem'
+import { base } from 'viem/chains'
+import { privateKeyToAccount } from 'viem/accounts'
+import { defineChain } from 'viem'
 
 
 
@@ -30,30 +33,89 @@ export const masterSetup: IMasterSetup = require ( setupFile )
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 
 const x402Version = 1
-
+const conetEndpoint = 'https://mainnet-rpc.conet.network'
 const CashCodeBaseAddr = '0x3977f35c531895CeD50fAf5e02bd9e7EB890D2D1'
 const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
 
 const USDC_conet = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
 const CashCodeCoNETAddr = '0xa7f37538de716e84e3ee3a9b51d675564b7531b3'
-const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
-const conetEndpoint = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network')
+const baseProvider = new ethers.JsonRpcProvider('api.wallet.coinbase.com')
+
 const conet_CashCodeNote = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
 
 const {verify, settle} = useFacilitator(facilitator1)
 
+const headers: Record<string, string> = {
+	accept: 'application/json',
+	'content-type': 'application/json',
+	'accept-encoding': 'gzip, deflate, br, zstd',
+	'accept-language': 'en-US,en;q=0.9,ja;q=0.8,zh-CN;q=0.7,zh-TW;q=0.6,zh;q=0.5',
+	'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+	'x-app-version': '3.133.0',
+	'x-cb-device-id': 'a843cea5-ec23-49d0-86a0-6d69f2f6a2d9',
+	'x-cb-is-logged-in': 'true',
+	'x-cb-pagekey': 'send',
+	'x-cb-platform': 'extension',
+	'x-cb-project-name': 'wallet_extension',
+	'x-cb-session-uuid': '1267c3fe-8ce7-4221-b005-7b8869bc5168',
+	'x-cb-version-name': '3.133.0',
+	'x-platform-name': 'extension',
+	'x-release-stage': 'production',
+	'x-wallet-user-id': '98630690',
+	// 如需身份态就带上 cookie（注意隐私与时效）
+	cookie: 'cb_dm=abe7acae-e70b-4eea-93b9-4f1ffe09ec56; ...',
+	// 若需要伪装扩展来源（可能仍被服务端策略拦截）
+	origin: 'chrome-extension://hnfanknocfeofbddgcijnmhnfnkdnaad',
+}
+
+const conetMainnet = defineChain({
+	id: 224400, // 随便指定唯一的 chainId，例如 2550；如果有官方ID请填实际
+	name: 'CoNET Mainnet',
+	network: 'conet',
+	nativeCurrency: {
+		name: 'ETH',
+		symbol: 'ETH',
+		decimals: 18,
+	},
+	rpcUrls: {
+		default: { http: [conetEndpoint] },
+		public:  { http: [conetEndpoint] },
+	},
+	blockExplorers: {
+		default: { name: 'CoNET Explorer', url: 'https://mainnet.conet.network' }
+	}
+})
+
+const baseproceRpcUrl = 'https://chain-proxy.wallet.coinbase.com/?targetName=base'
+const transportBase = http(baseproceRpcUrl, {
+  	fetchOptions: { headers }
+})
+
+const conetClient = createPublicClient({chain: conetMainnet, transport: http(conetEndpoint)})
+const baseClient = createPublicClient({chain: base, transport: transportBase})
+
+const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
+const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
-	const admin_base = new ethers.Wallet(n, baseProvider)
-	const admin_conet = new ethers.Wallet(n, conetEndpoint)
 
-	logger(`address ${admin_base.address} added to Settle_ContractPool`)
+	const account = privateKeyToAccount('0x' + n as `0x${string}`)
+	const walletClientBase = createWalletClient({
+		account,
+		chain: base,
+		transport: transportBase,
+	})
+
+
+	const walletBase = new ethers.Wallet(n, providerBase)
+	const walletConet = new ethers.Wallet(n, providerConet)
+
 	return {
-		baseSC: new ethers.Contract(CashCodeBaseAddr, CoinCodeABI, admin_base),
-		baseUSDC: new ethers.Contract(USDCContract_BASE, USDC_ABI, admin_base),
-		conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, admin_conet),
-		conetSC: new ethers.Contract(conet_CashCodeNote, CashcodeNode_abi, admin_conet),
-
+		baseWalletClient: walletClientBase,
+		baseSC: new ethers.Contract(CashCodeBaseAddr, CoinCodeABI, walletBase),
+		baseUSDC: new ethers.Contract(USDCContract_BASE, USDC_ABI, walletBase),
+		conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
+		conetSC: new ethers.Contract(conet_CashCodeNote, CashcodeNode_abi, walletConet),
 	}
 })
 
@@ -127,7 +189,7 @@ async function verifyPayment (
 		const response = await verify(decodedPayment, selectedPaymentRequirement)
 		
 		if (!response.isValid) {
-			logger(`verifyPayment verify decodedPayment Erro!`)
+			logger(`verifyPayment verify decodedPayment Erro! ${response.invalidReason} `)
 			res.status(402).json({
 				x402Version,
 				error: response.invalidReason,
@@ -224,7 +286,34 @@ export const cashcode_request = async (req: Request, res: Response) => {
 
 	const payload: payload = paymentHeader?.payload as payload
 
+
+		// try {
+		
+
+		// 	const settleResponse = await settle(
+		// 		paymentHeader,
+		// 		saleRequirements)
+
+		// 	const responseHeader = settleResponseHeader(settleResponse)
+
+		// 	// In a real application, you would store this response header
+		// 	// and associate it with the payment for later verification
+			
+		// 	responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
+			
+		// 	if (!responseData.success) {
+		// 		logger(`${_routerName} responseData ERROR!`, inspect(responseData, false, 3, true))
+		// 		return res.status(402).end()
+		// 	}
+
+
+				
+		// } catch (ex: any) {
+		// 	console.error("Payment settlement failed:", ex.message)
+		// }
+
 	logger(inspect(payload, false, 3, true))
+
 	processToBase.push({
 		from: payload.authorization.from,
 		erc3009Addr: USDCContract_BASE,
@@ -408,8 +497,6 @@ const testInBase = async () => {
 	const kk = await AuthorizationSign ("0.11", CashCodeBaseAddr, masterSetup.settle_contractAdmin[0], USDC_Base_DECIMALS, conet_chainID, conet_USDC)
 }
 
-
-
 const processCheck = async() => {
 	const obj = processToBase.shift()
 	if (!obj) {
@@ -420,33 +507,53 @@ const processCheck = async() => {
 		processToBase.unshift(obj)
 		return
 	}
+
+
+
 	try {
-		const tx = await SC.baseSC.depositWith3009Authorization(
-			obj.from,
-			USDCContract_BASE,
-			obj.value,
-			obj.validAfter,
-			obj.validBefore,
-			obj.nonce,
-			obj.signature,
-			obj.hash
-		)
+
+		const hash = await SC.baseWalletClient.writeContract({
+			address: CashCodeBaseAddr,
+			abi: CoinCodeABI,
+			functionName: 'depositWith3009Authorization',
+			args: [obj.from, USDCContract_BASE, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature, obj.hash]
+		})
+
+
+
+
+		// const tx = await SC.baseSC.depositWith3009Authorization(
+		// 	obj.from,
+		// 	USDCContract_BASE,
+		// 	obj.value,
+		// 	obj.validAfter,
+		// 	obj.validBefore,
+		// 	obj.nonce,
+		// 	obj.signature,
+		// 	obj.hash
+		// )
 		
-		await tx.wait()
-		logger(`processCheck BASE success! ${tx.hash}`)
+		// await tx.wait()
+		
 		const rx = await SC.conetSC.checkMemoGenerate(
 			obj.hash,
 			obj.from,
 			obj.value,
-			tx.hash,
+			hash,
 			'8453',
 			USDCContract_BASE,
 			'6',
 			obj.note
 		)
-		await rx.wait()
-		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
-		logger(`processCheck CONET success! ${rx.hash}`)
+
+		await Promise.all([
+			rx.wait(),
+			baseClient.waitForTransactionReceipt({ hash })
+		])
+
+		logger(`processCheck BASE success! ${hash} processCheck CONET success! ${rx.hash}`)
+		
+		obj.res.status(200).json({success: true, USDC_tx: hash}).end()
 
 	} catch (ex: any) {
 		obj.res.status(404).json({error: 'CashCode Server Error'}).end()
@@ -495,17 +602,26 @@ const processCheckWithdraw = async () => {
 	}
 	try {
 		const hash = ethers.solidityPackedKeccak256(['string'], [obj.code])
-		const tx = await SC.baseSC.withdrawWithCode(obj.code, obj.address)
+
+		const baseHash = await SC.baseWalletClient.writeContract({
+			address: CashCodeBaseAddr,
+			abi: CoinCodeABI,
+			functionName: 'withdrawWithCode',
+			args: [obj.code, obj.address]
+		})
+
+		// const tx = await SC.baseSC.withdrawWithCode(obj.code, obj.address)
 		const tr = await SC.conetSC.finishedCheck(
 			hash,
-			tx.hash
+			baseHash
 		)
 		await Promise.all([
-			tx.wait(),
+			baseClient.waitForTransactionReceipt({ hash: baseHash }),
 			tr.wait()
 		])
-		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
-		logger(`processCheckWithdraw success! BASE = ${tx.hash} CONET = ${tr.hash}`)
+
+		obj.res.status(200).json({success: true, USDC_tx: baseHash}).end()
+		logger(`processCheckWithdraw success! BASE = ${baseHash} CONET = ${tr.hash}`)
 	} catch (ex: any) {
 		logger('processCheckWithdraw error!', ex.message)
 		obj.res.status(404).json({error: 'Server error!'}).end()
@@ -555,4 +671,10 @@ const test = async () => {
 	}
 }
 
-// test()
+const test1 = async () => {
+
+
+}
+
+
+// test1()
