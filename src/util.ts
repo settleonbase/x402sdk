@@ -474,23 +474,68 @@ const processToBase: {
 	res: Response
 }[] = []
 
-const test2 = async () => {
-	const SC = Settle_ContractPool[0]
-	const code = '00'+ '111111'
-	const hash = ethers.solidityPackedKeccak256(['string'], [code])
-	try {
-		// const tx = await SC.baseSC.withdrawWithCode(code, '0x18d5a44dbb1d88af9f1cc7dbbf57851c0c65d0ea')
-		// await tx.wait()	
-		// logger(`success! tx = ${tx.hash}`)
-		const tx = await SC.conetSC.finishedCheck(
 
-			hash,
-			'0x589ec100fd5d5844828c1381abb9420cc711fc00ab1c740c18427cf325e406da'
-		)
-		await tx.wait()
-		logger(`success! tx = ${tx.hash}`)
-	}catch (ex: any) {
-		logger('error', ex.message)
+const processCheckWithdrawPool: {
+	code: string
+	address: string
+	res: Response
+}[] = []
+
+const processCheckWithdraw = async () => {
+	const obj = processCheckWithdrawPool.shift()
+	if (!obj) {
+		return
 	}
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		processCheckWithdrawPool.unshift()
+		return setTimeout(() => {
+			processCheckWithdraw()
+		}, 1000)
+	}
+	try {
+		const hash = ethers.solidityPackedKeccak256(['string'], [obj.code])
+		const tx = await SC.baseSC.withdrawWithCode(obj.code, obj.address)
+		const tr = await SC.conetSC.finishedCheck(
+			hash,
+			tx.hash
+		)
+		await Promise.all([
+			tx.wait(),
+			tr.wait()
+		])
+		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
+		logger(`processCheckWithdraw success! BASE = ${tx.hash} CONET = ${tr.hash}`)
+	} catch (ex: any) {
+		logger('processCheckWithdraw error!', ex.message)
+	}
+
+	Settle_ContractPool.push(SC)
+
+	setTimeout(() => {
+		processCheckWithdraw()
+	}, 1000)
+
 }
-// test2()
+
+
+export const cashcode_check = (req: Request, res: Response) => {
+	const { code, address } = req.query as {
+		address?: string
+		code?: string
+	}
+
+	if (!code || !address || !ethers.isAddress(address)) {
+		logger(`cashcode_check Format Error!`)
+		return res.status(404).end()
+	}
+
+	processCheckWithdrawPool.push({
+		address,
+		res,
+		code
+	})
+
+	processCheckWithdraw()
+
+}
