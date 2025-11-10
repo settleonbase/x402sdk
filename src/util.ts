@@ -44,7 +44,7 @@ const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
 export const MINT_RATE = ethers.parseUnits('7000', 18)
 const USDC_decimals = BigInt(10 ** 6)
 
-const conet_CashCodeNote = '0xfFF31081991405A85F4153eb77ed19f79609601E'
+const conet_CashCodeNote = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
 const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)
@@ -621,8 +621,7 @@ const processCheckWithdraw = async () => {
 
 		const tr = await SC.conetSC.finishedCheck(
 			hash,
-			baseHash,
-			obj.address
+			baseHash
 		)
 
 		await Promise.all([

@@ -138,54 +138,6 @@
 					"internalType": "address",
 					"name": "",
 					"type": "address"
-				},
-				{
-					"internalType": "uint256",
-					"name": "",
-					"type": "uint256"
-				}
-			],
-			"name": "CheckMemosByAddress",
-			"outputs": [
-				{
-					"internalType": "bytes32",
-					"name": "",
-					"type": "bytes32"
-				}
-			],
-			"stateMutability": "view",
-			"type": "function"
-		},
-		{
-			"inputs": [
-				{
-					"internalType": "address",
-					"name": "",
-					"type": "address"
-				},
-				{
-					"internalType": "uint256",
-					"name": "",
-					"type": "uint256"
-				}
-			],
-			"name": "LinkMemosByAddress",
-			"outputs": [
-				{
-					"internalType": "bytes32",
-					"name": "",
-					"type": "bytes32"
-				}
-			],
-			"stateMutability": "view",
-			"type": "function"
-		},
-		{
-			"inputs": [
-				{
-					"internalType": "address",
-					"name": "",
-					"type": "address"
 				}
 			],
 			"name": "_admin",
@@ -276,11 +228,6 @@
 					"internalType": "uint256",
 					"name": "depositTimestamp",
 					"type": "uint256"
-				},
-				{
-					"internalType": "address",
-					"name": "to",
-					"type": "address"
 				}
 			],
 			"stateMutability": "view",
@@ -345,11 +292,6 @@
 					"internalType": "bytes32",
 					"name": "depositHash",
 					"type": "bytes32"
-				},
-				{
-					"internalType": "address",
-					"name": "to",
-					"type": "address"
 				}
 			],
 			"name": "finishedCheck",
@@ -368,356 +310,11 @@
 					"internalType": "bytes32",
 					"name": "depositHash",
 					"type": "bytes32"
-				},
-				{
-					"internalType": "address",
-					"name": "from",
-					"type": "address"
 				}
 			],
 			"name": "finishedLink",
 			"outputs": [],
 			"stateMutability": "nonpayable",
-			"type": "function"
-		},
-		{
-			"inputs": [
-				{
-					"internalType": "address",
-					"name": "account",
-					"type": "address"
-				},
-				{
-					"internalType": "uint256",
-					"name": "checkOffset",
-					"type": "uint256"
-				},
-				{
-					"internalType": "uint256",
-					"name": "checkLimit",
-					"type": "uint256"
-				},
-				{
-					"internalType": "uint256",
-					"name": "linkOffset",
-					"type": "uint256"
-				},
-				{
-					"internalType": "uint256",
-					"name": "linkLimit",
-					"type": "uint256"
-				}
-			],
-			"name": "getHistory",
-			"outputs": [
-				{
-					"internalType": "bytes32[]",
-					"name": "checkHashes",
-					"type": "bytes32[]"
-				},
-				{
-					"components": [
-						{
-							"internalType": "address",
-							"name": "from",
-							"type": "address"
-						},
-						{
-							"internalType": "bytes32",
-							"name": "successAuthorizationHash",
-							"type": "bytes32"
-						},
-						{
-							"internalType": "uint256",
-							"name": "chianID",
-							"type": "uint256"
-						},
-						{
-							"internalType": "address",
-							"name": "erc3009Address",
-							"type": "address"
-						},
-						{
-							"internalType": "string",
-							"name": "node",
-							"type": "string"
-						},
-						{
-							"internalType": "uint256",
-							"name": "amount",
-							"type": "uint256"
-						},
-						{
-							"internalType": "uint256",
-							"name": "decimals",
-							"type": "uint256"
-						},
-						{
-							"internalType": "uint256",
-							"name": "createTimestamp",
-							"type": "uint256"
-						},
-						{
-							"internalType": "bytes32",
-							"name": "depositHash",
-							"type": "bytes32"
-						},
-						{
-							"internalType": "uint256",
-							"name": "depositTimestamp",
-							"type": "uint256"
-						},
-						{
-							"internalType": "address",
-							"name": "to",
-							"type": "address"
-						}
-					],
-					"internalType": "struct CheckMemo[]",
-					"name": "checks",
-					"type": "tuple[]"
-				},
-				{
-					"internalType": "bytes32[]",
-					"name": "linkHashes",
-					"type": "bytes32[]"
-				},
-				{
-					"components": [
-						{
-							"internalType": "address",
-							"name": "to",
-							"type": "address"
-						},
-						{
-							"internalType": "bytes32",
-							"name": "successAuthorizationHash",
-							"type": "bytes32"
-						},
-						{
-							"internalType": "uint256",
-							"name": "chianID",
-							"type": "uint256"
-						},
-						{
-							"internalType": "address",
-							"name": "erc3009Address",
-							"type": "address"
-						},
-						{
-							"internalType": "string",
-							"name": "node",
-							"type": "string"
-						},
-						{
-							"internalType": "uint256",
-							"name": "amount",
-							"type": "uint256"
-						},
-						{
-							"internalType": "uint256",
-							"name": "decimals",
-							"type": "uint256"
-						},
-						{
-							"internalType": "uint256",
-							"name": "issueTimestamp",
-							"type": "uint256"
-						},
-						{
-							"internalType": "bytes32",
-							"name": "payHash",
-							"type": "bytes32"
-						},
-						{
-							"internalType": "uint256",
-							"name": "payTimestamp",
-							"type": "uint256"
-						},
-						{
-							"internalType": "address",
-							"name": "from",
-							"type": "address"
-						}
-					],
-					"internalType": "struct CashCodeNote.LinkMemo[]",
-					"name": "links",
-					"type": "tuple[]"
-				}
-			],
-			"stateMutability": "view",
-			"type": "function"
-		},
-		{
-			"inputs": [
-				{
-					"internalType": "address",
-					"name": "account",
-					"type": "address"
-				}
-			],
-			"name": "getHistoryAll",
-			"outputs": [
-				{
-					"internalType": "bytes32[]",
-					"name": "checkHashes",
-					"type": "bytes32[]"
-				},
-				{
-					"components": [
-						{
-							"internalType": "address",
-							"name": "from",
-							"type": "address"
-						},
-						{
-							"internalType": "bytes32",
-							"name": "successAuthorizationHash",
-							"type": "bytes32"
-						},
-						{
-							"internalType": "uint256",
-							"name": "chianID",
-							"type": "uint256"
-						},
-						{
-							"internalType": "address",
-							"name": "erc3009Address",
-							"type": "address"
-						},
-						{
-							"internalType": "string",
-							"name": "node",
-							"type": "string"
-						},
-						{
-							"internalType": "uint256",
-							"name": "amount",
-							"type": "uint256"
-						},
-						{
-							"internalType": "uint256",
-							"name": "decimals",
-							"type": "uint256"
-						},
-						{
-							"internalType": "uint256",
-							"name": "createTimestamp",
-							"type": "uint256"
-						},
-						{
-							"internalType": "bytes32",
-							"name": "depositHash",
-							"type": "bytes32"
-						},
-						{
-							"internalType": "uint256",
-							"name": "depositTimestamp",
-							"type": "uint256"
-						},
-						{
-							"internalType": "address",
-							"name": "to",
-							"type": "address"
-						}
-					],
-					"internalType": "struct CheckMemo[]",
-					"name": "checks",
-					"type": "tuple[]"
-				},
-				{
-					"internalType": "bytes32[]",
-					"name": "linkHashes",
-					"type": "bytes32[]"
-				},
-				{
-					"components": [
-						{
-							"internalType": "address",
-							"name": "to",
-							"type": "address"
-						},
-						{
-							"internalType": "bytes32",
-							"name": "successAuthorizationHash",
-							"type": "bytes32"
-						},
-						{
-							"internalType": "uint256",
-							"name": "chianID",
-							"type": "uint256"
-						},
-						{
-							"internalType": "address",
-							"name": "erc3009Address",
-							"type": "address"
-						},
-						{
-							"internalType": "string",
-							"name": "node",
-							"type": "string"
-						},
-						{
-							"internalType": "uint256",
-							"name": "amount",
-							"type": "uint256"
-						},
-						{
-							"internalType": "uint256",
-							"name": "decimals",
-							"type": "uint256"
-						},
-						{
-							"internalType": "uint256",
-							"name": "issueTimestamp",
-							"type": "uint256"
-						},
-						{
-							"internalType": "bytes32",
-							"name": "payHash",
-							"type": "bytes32"
-						},
-						{
-							"internalType": "uint256",
-							"name": "payTimestamp",
-							"type": "uint256"
-						},
-						{
-							"internalType": "address",
-							"name": "from",
-							"type": "address"
-						}
-					],
-					"internalType": "struct CashCodeNote.LinkMemo[]",
-					"name": "links",
-					"type": "tuple[]"
-				}
-			],
-			"stateMutability": "view",
-			"type": "function"
-		},
-		{
-			"inputs": [
-				{
-					"internalType": "address",
-					"name": "account",
-					"type": "address"
-				}
-			],
-			"name": "getHistoryCounts",
-			"outputs": [
-				{
-					"internalType": "uint256",
-					"name": "checkCount",
-					"type": "uint256"
-				},
-				{
-					"internalType": "uint256",
-					"name": "linkCount",
-					"type": "uint256"
-				}
-			],
-			"stateMutability": "view",
 			"type": "function"
 		},
 		{
@@ -751,7 +348,7 @@
 			"outputs": [
 				{
 					"internalType": "address",
-					"name": "to",
+					"name": "from",
 					"type": "address"
 				},
 				{
@@ -786,23 +383,13 @@
 				},
 				{
 					"internalType": "uint256",
-					"name": "issueTimestamp",
+					"name": "timestamp",
 					"type": "uint256"
 				},
 				{
 					"internalType": "bytes32",
-					"name": "payHash",
+					"name": "depositHash",
 					"type": "bytes32"
-				},
-				{
-					"internalType": "uint256",
-					"name": "payTimestamp",
-					"type": "uint256"
-				},
-				{
-					"internalType": "address",
-					"name": "from",
-					"type": "address"
 				}
 			],
 			"stateMutability": "view",
@@ -817,7 +404,7 @@
 				},
 				{
 					"internalType": "address",
-					"name": "to",
+					"name": "from",
 					"type": "address"
 				},
 				{
