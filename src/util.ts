@@ -41,12 +41,10 @@ const USDC_Base_DECIMALS = 6
 
 const USDC_conet = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
 const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
-const CashCodeCoNETAddr = '0xa7f37538de716e84e3ee3a9b51d675564b7531b3'
-const baseProvider = new ethers.JsonRpcProvider('api.wallet.coinbase.com')
 export const MINT_RATE = ethers.parseUnits('7000', 18)
 const USDC_decimals = BigInt(10 ** 6)
 
-const conet_CashCodeNote = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
+const conet_CashCodeNote = '0xad19800aFF164C7Be9158C56589d6Ee8bb404eB2'
 const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)

@@ -12,9 +12,6 @@ import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
 import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, process_x402, x402ProcessPool, MINT_RATE} from './util'
-import Settle_ABI from './ABI/sellte-abi.json'
-import Event_ABI from './ABI/event-abi.json'
-import USDC_ABI from './ABI/usdc_abi.json'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import { exact } from "x402/schemes";
 import {
