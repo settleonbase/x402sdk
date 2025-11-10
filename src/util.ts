@@ -24,8 +24,9 @@ import { createPublicClient, createWalletClient, http, getContract, parseEther, 
 import { base } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
 import { defineChain } from 'viem'
-
-
+import Settle_ABI from './ABI/sellte-abi.json'
+import Event_ABI from './ABI/event-abi.json'
+import {reflashData} from './server'
 
 const setupFile = join( homedir(),'.master.json' )
 export const masterSetup: IMasterSetup = require ( setupFile )
@@ -39,10 +40,14 @@ const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
 
 const USDC_conet = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
+const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
 const CashCodeCoNETAddr = '0xa7f37538de716e84e3ee3a9b51d675564b7531b3'
 const baseProvider = new ethers.JsonRpcProvider('api.wallet.coinbase.com')
+export const MINT_RATE = ethers.parseUnits('7000', 18)
+const USDC_decimals = BigInt(10 ** 6)
 
 const conet_CashCodeNote = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
+const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)
 
@@ -116,6 +121,7 @@ const Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 		baseUSDC: new ethers.Contract(USDCContract_BASE, USDC_ABI, walletBase),
 		conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
 		conetSC: new ethers.Contract(conet_CashCodeNote, CashcodeNode_abi, walletConet),
+		event: new ethers.Contract(eventContract, Event_ABI, walletConet),
 	}
 })
 
@@ -611,10 +617,13 @@ const processCheckWithdraw = async () => {
 		})
 
 		// const tx = await SC.baseSC.withdrawWithCode(obj.code, obj.address)
+
+
 		const tr = await SC.conetSC.finishedCheck(
 			hash,
 			baseHash
 		)
+
 		await Promise.all([
 			baseClient.waitForTransactionReceipt({ hash: baseHash }),
 			tr.wait()
@@ -660,6 +669,131 @@ export const cashcode_check = (req: Request, res: Response) => {
 }
 
 
+export const x402ProcessPool: airDrop[] = []
+export const facilitatorsPool: facilitatorsPoolType[] = []
+
+export const facilitators = async () => {
+	const obj = facilitatorsPool.shift()
+	if (!obj) {
+		return
+	}
+
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		facilitatorsPool.unshift(obj)
+		return setTimeout(() => facilitators(), 1000)
+	}
+	const wallet = obj.from
+	try {
+
+		const baseHash = await SC.baseWalletClient.writeContract({
+			address: USDCContract_BASE,
+			abi: USDC_ABI,
+			functionName: 'transferWithAuthorization',
+			args: [obj.from, obj.isSettle ? SETTLEContract: CashCodeBaseAddr, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature]
+		})
+
+		// const tx = await SC.usdc.transferWithAuthorization(
+		// 	obj.from, SETTLEContract, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature
+		// )
+
+
+		// await tx.wait()
+		await baseClient.waitForTransactionReceipt({ hash: baseHash })
+
+		logger(`facilitators success! ${baseHash}`)
+
+		const ret: x402Response = {
+			success: true,
+			payer: wallet,
+			USDC_tx: baseHash,
+			network: 'BASE',
+			timestamp: new Date().toISOString()
+		}
+
+		obj.res.status(200).json(ret).end()
+		Settle_ContractPool.push(SC)
+		if (obj.isSettle) {
+			x402ProcessPool.push({
+				wallet,
+				settle: ethers.parseUnits('0.001', 6).toString()
+			})
+		}
+		
+		await process_x402()
+		return setTimeout(() => facilitators(), 1000)
+
+	} catch (ex: any) {
+		logger(`facilitators Error!`, ex.message)
+	}
+
+	//	transferWithAuthorization
+
+	Settle_ContractPool.push(SC)
+	setTimeout(() => facilitators(), 1000)
+}
+
+
+export const process_x402 = async () => {
+	console.debug(`process_x402`)
+	const obj = x402ProcessPool.shift()
+	if (!obj) {
+		return
+	}
+
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		logger(`process_x402 got empty Settle_testnet_pool`)
+		x402ProcessPool.unshift(obj)
+		return
+	}
+
+	try {
+
+		const baseHash = await SC.baseWalletClient.writeContract({
+			address: SETTLEContract,
+			abi: Settle_ABI,
+			functionName: 'mint',
+			args: [obj.wallet, obj.settle]
+		})
+		await baseClient.waitForTransactionReceipt({ hash: baseHash })
+
+		// const tx = await SC.base.mint(
+		// 	obj.wallet, obj.settle
+		// )
+
+		// await tx.wait()
+
+		const SETTLE = BigInt(obj.settle) * MINT_RATE / USDC_decimals
+
+
+		
+		const ts = await SC.event.eventEmit(
+			obj.wallet, obj.settle, SETTLE, baseHash
+		)
+
+		await ts.wait()
+
+		reflashData.unshift({
+			wallet: obj.wallet,
+			hash: baseHash,
+			USDC: obj.settle,
+			timestmp: new Date().toUTCString(),
+			SETTLE: SETTLE.toString(),
+		})
+
+		logger(`process_x402 success! ${baseHash}`)
+
+	} catch (ex: any) {
+		logger(`Error process_x402 `, ex.message)
+		x402ProcessPool.unshift(obj)
+	}
+
+	Settle_ContractPool.push(SC)
+	setTimeout(() => process_x402(), 1000)
+
+}
+
 const test = async () => {
 	const SC = Settle_ContractPool[0]
 	try {
@@ -670,11 +804,3 @@ const test = async () => {
 		logger(`baseUSDC.balanceOf Error!`, ex.message)
 	}
 }
-
-const test1 = async () => {
-
-
-}
-
-
-// test1()

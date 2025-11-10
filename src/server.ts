@@ -11,7 +11,7 @@ import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
-import {masterSetup, cashcode_request, cashcode_check} from './util'
+import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, process_x402, x402ProcessPool, MINT_RATE} from './util'
 import Settle_ABI from './ABI/sellte-abi.json'
 import Event_ABI from './ABI/event-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
@@ -31,27 +31,8 @@ import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x40
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 const {verify, settle} = useFacilitator(facilitator1)
 
-
-const USDCContract = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
-
-
 const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
 
-const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
-
-const baseProvider = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
-const eventProvider = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network')
-
-const Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
-	const admin = new ethers.Wallet(n, baseProvider)
-	const adminEvent = new ethers.Wallet(n, eventProvider)
-	logger(`address ${admin.address} added to Settle_ContractPool`)
-	return {
-		base: new ethers.Contract(SETTLEContract, Settle_ABI, admin),
-		event: new ethers.Contract(eventContract, Event_ABI, adminEvent),
-		usdc: new ethers.Contract(USDCContract, USDC_ABI, admin)
-	}
-})
 
 
 
@@ -670,7 +651,8 @@ const cashcodeGateway = async(req: any, res: any) => {
 					validBefore: payload.authorization.validBefore,
 					nonce: payload.authorization.nonce,
 					signature: payload.signature,
-					res: res
+					res: res,
+					isSettle: false
 				})
 				return facilitators()
 			}
@@ -767,7 +749,8 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 					validBefore: payload.authorization.validBefore,
 					nonce: payload.authorization.nonce,
 					signature: payload.signature,
-					res: res
+					res: res,
+					isSettle: true
 				})
 				return facilitators()
 			}
@@ -810,56 +793,6 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 		res.status(200).json(ret).end()
 }
 
-
-const facilitatorsPool: facilitatorsPoolType[] = []
-
-const facilitators = async () => {
-	const obj = facilitatorsPool.shift()
-	if (!obj) {
-		return
-	}
-
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-		facilitatorsPool.unshift(obj)
-		return setTimeout(() => facilitators(), 1000)
-	}
-	const wallet = obj.from
-	try {
-		const tx = await SC.usdc.transferWithAuthorization(
-			obj.from, SETTLEContract, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature
-		)
-		await tx.wait()
-		logger(`facilitators success! ${tx.hash}`)
-
-		const ret: x402Response = {
-			success: true,
-			payer: wallet,
-			USDC_tx: tx.hash,
-			network: 'BASE',
-			timestamp: new Date().toISOString()
-		}
-
-		obj.res.status(200).json(ret).end()
-		Settle_ContractPool.push(SC)
-
-		x402ProcessPool.push({
-			wallet,
-			settle: ethers.parseUnits('0.001', 6).toString()
-		})
-			
-		await process_x402()
-		return setTimeout(() => facilitators(), 1000)
-
-	} catch (ex: any) {
-		logger(`facilitators Error!`, ex.message)
-	}
-
-	//	transferWithAuthorization
-
-	Settle_ContractPool.push(SC)
-	setTimeout(() => facilitators(), 1000)
-}
 
 
 const router = ( router: express.Router ) => {
@@ -986,11 +919,11 @@ const router = ( router: express.Router ) => {
 }
 
 
-const x402ProcessPool: airDrop[] = []
 
 
-const MINT_RATE = ethers.parseUnits('7000', 18)
-const USDC_decimals = BigInt(10 ** 6)
+
+
+
 
 
 const SETTLE_FILE = join(os.homedir(), "settle.json")
@@ -1052,58 +985,9 @@ async function flushNewReflashData(): Promise<void> {
 
 
 
-const process_x402 = async () => {
-	console.debug(`process_x402`)
-	const obj = x402ProcessPool.shift()
-	if (!obj) {
-		return
-	}
-
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-		logger(`process_x402 got empty Settle_testnet_pool`)
-		x402ProcessPool.unshift(obj)
-		return
-	}
-
-	try {
-		const tx = await SC.base.mint(
-			obj.wallet, obj.settle
-		)
-
-		await tx.wait()
-		
-		const SETTLE = BigInt(obj.settle) * MINT_RATE / USDC_decimals
 
 
-		
-		const ts = await SC.event.eventEmit(
-			obj.wallet, obj.settle, SETTLE, tx.hash
-		)
-		await ts.wait()
-
-		reflashData.unshift({
-			wallet: obj.wallet,
-			hash: tx.hash,
-			USDC: obj.settle,
-			timestmp: new Date().toUTCString(),
-			SETTLE: SETTLE.toString(),
-		})
-
-		logger(`process_x402 success! ${tx.hash}`)
-
-	} catch (ex: any) {
-		logger(`Error process_x402 `, ex.message)
-		x402ProcessPool.unshift(obj)
-	}
-
-	Settle_ContractPool.push(SC)
-	setTimeout(() => process_x402(), 1000)
-
-}
-
-
-const reflashData: reflashData[] = []
+export const reflashData: reflashData[] = []
 const loadSettleFile = async () => {
   try {
     const buf = await fs.readFileSync(SETTLE_FILE, 'utf8');

@@ -122,6 +122,7 @@ type facilitatorsPoolType = {
 	nonce: string
 	signature: string
 	res: any
+	isSettle: boolean
 }
 
 
