@@ -621,7 +621,8 @@ const processCheckWithdraw = async () => {
 
 		const tr = await SC.conetSC.finishedCheck(
 			hash,
-			baseHash
+			baseHash,
+			obj.address
 		)
 
 		await Promise.all([
