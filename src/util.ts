@@ -45,7 +45,7 @@ export const MINT_RATE = ethers.parseUnits('7000', 18)
 const USDC_decimals = BigInt(10 ** 6)
 
 const conet_CashCodeNote = '0x3CdF9055673Acd0F37A8560d884e9B1DB88C6dD2'
-const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
+const eventContract = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
 
 const {verify, settle} = useFacilitator(facilitator1)
 
@@ -514,10 +514,10 @@ const processCheck = async() => {
 	}
 
 
-
+	let baseHash: any
 	try {
 
-		const hash = await SC.baseWalletClient.writeContract({
+		baseHash = await SC.baseWalletClient.writeContract({
 			address: CashCodeBaseAddr,
 			abi: CoinCodeABI,
 			functionName: 'depositWith3009Authorization',
@@ -544,7 +544,7 @@ const processCheck = async() => {
 			obj.hash,
 			obj.from,
 			obj.value,
-			hash,
+			baseHash,
 			'8453',
 			USDCContract_BASE,
 			'6',
@@ -553,17 +553,17 @@ const processCheck = async() => {
 
 		await Promise.all([
 			rx.wait(),
-			baseClient.waitForTransactionReceipt({ hash })
+			baseClient.waitForTransactionReceipt({ hash: baseHash })
 		])
 
-		logger(`processCheck BASE success! ${hash} processCheck CONET success! ${rx.hash}`)
+		logger(`processCheck BASE success! ${baseHash} processCheck CONET success! ${rx.hash}`)
 		
-		obj.res.status(200).json({success: true, USDC_tx: hash}).end()
+		obj.res.status(200).json({success: true, USDC_tx: baseHash}).end()
 
 	} catch (ex: any) {
 		obj.res.status(404).json({error: 'CashCode Server Error'}).end()
 		logger(`processCheck Error! ${ex.message}`)
-		logger(inspect(obj, false, 3, true))
+		logger(inspect({codeHash: obj.hash,from: obj.from, value: obj.value, successAuthorizationHash: baseHash, chianID:'8453', erc3009Address: USDCContract_BASE, decimals: '6', note: obj.note }, false, 3, true))
 	}
 
 	Settle_ContractPool.push(SC)
