@@ -11,7 +11,7 @@ import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
-import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, process_x402, x402ProcessPool, MINT_RATE} from './util'
+import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, process_x402, x402ProcessPool, MINT_RATE, getBalance} from './util'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import { exact } from "x402/schemes";
 import {
@@ -845,6 +845,22 @@ const router = ( router: express.Router ) => {
 
 	router.get('/cashCodeCheck', async (req,res) => {
 		return cashcode_check(req, res)
+		
+	})
+
+	router.get('/getBalance', async (req,res) => {
+		const { address } = req.query as {
+			address?: string
+		}
+
+		if (!address || !ethers.isAddress(address)) {
+			return res.status(200).json({error: 'address format error!'}).end()
+		}
+
+		const balance = await getBalance(address)
+
+		return res.status(200).json({address, balance}).end()
+	
 		
 	})
 

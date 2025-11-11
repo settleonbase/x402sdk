@@ -27,6 +27,8 @@ import { defineChain } from 'viem'
 import Settle_ABI from './ABI/sellte-abi.json'
 import Event_ABI from './ABI/event-abi.json'
 import {reflashData} from './server'
+import GuardianOracle_ABI from './ABI/GuardianOracle_ABI.json'
+
 
 const setupFile = join( homedir(),'.master.json' )
 export const masterSetup: IMasterSetup = require ( setupFile )
@@ -45,6 +47,7 @@ export const MINT_RATE = ethers.parseUnits('7000', 18)
 const USDC_decimals = BigInt(10 ** 6)
 //	const conet_CashCodeNote = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
 const conet_CashCodeNote = '0xB8c526aC40f5BA9cC18706efE81AC7014A4aBB6d'
+const oracleSC_addr = '0xE9922F900Eef37635aF06e87708545ffD9C3aa99'
 const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)
@@ -98,8 +101,54 @@ const transportBase = http(baseproceRpcUrl, {
 const conetClient = createPublicClient({chain: conetMainnet, transport: http(conetEndpoint)})
 const baseClient = createPublicClient({chain: base, transport: transportBase})
 
+const oracle = {
+    bnb: 0,
+    eth: 0,
+	usdc: 0
+}
+
+let oracolPriceProcess = false
+const oracolPrice = async () => {
+	if (oracolPriceProcess) {
+		return
+	}
+	oracolPriceProcess = true
+	const assets = ['bnb', 'eth', 'usdc']
+	const process: any[] = []
+	assets.forEach(n =>{
+		process.push (oracleSC.GuardianPrice(n))
+	})
+
+	const price = await Promise.all(process)
+	const bnb = ethers.formatEther(price[0])
+	const eth = ethers.formatEther(price[1])
+	const usdc = ethers.formatEther(price[2])
+	logger(`oracolPrice BNB ${bnb} ETH ${eth} USDC ${usdc}`)
+	oracle.bnb = parseFloat(bnb)
+	oracle.eth = parseFloat(eth)
+	oracle.usdc = parseFloat(usdc)
+	oracolPriceProcess = false
+}
+
+const oracleBackoud = () => {
+	oracolPrice()
+	providerConet.on('block', async (blockNumber) => {
+
+		if (blockNumber % 20 !== 0) {
+			return
+		}
+
+		logger(`Oracle backoud blockNumber ${blockNumber}`)
+		await oracolPrice()
+		logger(`Oracle Price BNB ${oracle.bnb} ETH ${oracle.eth}`)
+	})
+
+}
+
 const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
+const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
+
 const Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 
 	const account = privateKeyToAccount('0x' + n as `0x${string}`)
@@ -795,6 +844,27 @@ export const process_x402 = async () => {
 
 }
 
+export const getBalance = async (address: string) => {
+	
+	try {
+		const [usdcRaw, ethRaw] = await Promise.all ([
+			baseClient.readContract({
+				address: USDCContract_BASE,
+				abi: USDC_ABI,
+				functionName: 'balanceOf',
+				args: [address]
+			}),
+			providerBase.getBalance(address)
+		])
+		const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
+		const eth = ethers.formatUnits(ethRaw, 18)
+		return { usdc, eth, oracle }
+	} catch (ex: any) {
+		logger(`baseUSDC.balanceOf Error!`, ex.message)
+		return null
+	}
+}
+
 const test = async () => {
 	const SC = Settle_ContractPool[0]
 	try {
@@ -805,3 +875,12 @@ const test = async () => {
 		logger(`baseUSDC.balanceOf Error!`, ex.message)
 	}
 }
+
+oracleBackoud()
+
+
+const test1 = async () => {
+	const ba = await getBalance('0xD36Fc9d529B9Cc0b230942855BA46BC9CA772A88')
+	logger(`getBalance`, inspect(ba, false, 3, true))
+}
+
