@@ -8,6 +8,7 @@ type IMasterSetup = {
 	}
 	settle_contractAdmin: string[]
 	event_endpoint: string
+	testPri: string
 }
 
 /**

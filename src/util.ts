@@ -203,11 +203,11 @@ function createExactPaymentRequirements(
 		}
 }
 
-async function verifyPayment (
+const verifyPayment = (
 		req: Request,
 		res: Response,
 		paymentRequirements: PaymentRequirements[],
-	): Promise<boolean> {
+	): Promise<boolean> => new Promise(async resolve =>  {
 	const payment = req.header("X-PAYMENT")
 
 	if (!payment) {
@@ -216,8 +216,8 @@ async function verifyPayment (
 			x402Version,
 			error: "X-PAYMENT header is required",
 			accepts: paymentRequirements,
-		});
-		return false;
+		})
+		return 
 	}
 
 	let decodedPayment: PaymentPayload
@@ -233,7 +233,7 @@ async function verifyPayment (
 			error: error || "Invalid or malformed payment header",
 			accepts: paymentRequirements,
 		})
-		return false
+		return resolve(false)
 	}
 
 	try {
@@ -250,7 +250,7 @@ async function verifyPayment (
 				accepts: paymentRequirements,
 				payer: response.payer,
 			})
-			return false
+			return resolve(false)
 		}
 
 	} catch (error) {
@@ -262,11 +262,11 @@ async function verifyPayment (
 			error,
 			accepts: paymentRequirements,
 		});
-		return false
+		return resolve (false)
 	}
 
-	return true
-}
+	return resolve (true)
+})
 
 
 const checkx402paymentHeader = (paymentHeader: x402paymentHeader, amount: bigint, recipient: string ) => {
