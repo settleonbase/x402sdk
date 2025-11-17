@@ -859,7 +859,7 @@ const router = ( router: express.Router ) => {
 			return res.status(403).json({error: 'format error!'}).end()
 		}
 		const ret = await estimateErc20TransferGas (amount, toAddress, address)
-		
+		return res.status(200).json(ret).end()
 	})
 
 	router.get('/getBalance', async (req,res) => {
