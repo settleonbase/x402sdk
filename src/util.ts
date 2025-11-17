@@ -26,12 +26,17 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { defineChain } from 'viem'
 import Settle_ABI from './ABI/sellte-abi.json'
 import Event_ABI from './ABI/event-abi.json'
-import {reflashData} from './server'
+
 import GuardianOracle_ABI from './ABI/GuardianOracle_ABI.json'
 
 
 const setupFile = join( homedir(),'.master.json' )
+
+
+
+logger( homedir())
 export const masterSetup: IMasterSetup = require ( setupFile )
+import {reflashData} from './server'
 
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 
@@ -844,6 +849,23 @@ export const process_x402 = async () => {
 
 }
 
+export const estimateErc20TransferGas = async (usdc: string, RecipientAddress: string, fromAddress: string ) => {
+	const [gas, price] = await Promise.all([
+		baseClient.estimateContractGas({
+			address: USDCContract_BASE,
+			abi: USDC_ABI,
+			functionName: 'transfer',
+			account: fromAddress as `0x${string}`,             // msg.sender
+			args: [
+				RecipientAddress,
+				ethers.parseUnits(usdc, 6),               // 100 USDC (6位)
+			],
+		}), 
+		baseClient.getGasPrice()
+	])
+	return {gas, price, ethPrice: oracle.eth}
+}
+
 export const getBalance = async (address: string) => {
 	
 	try {
@@ -858,7 +880,7 @@ export const getBalance = async (address: string) => {
 		])
 		const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
 		const eth = ethers.formatUnits(ethRaw, 18)
-		return { usdc, eth, oracle }
+		return { usdc, eth, oracle: oracle.eth }
 	} catch (ex: any) {
 		logger(`baseUSDC.balanceOf Error!`, ex.message)
 		return null
@@ -884,3 +906,9 @@ const test1 = async () => {
 	logger(`getBalance`, inspect(ba, false, 3, true))
 }
 
+const test2 = async () => {
+	const kkk = await estimateErc20TransferGas('0.1', '0xD36Fc9d529B9Cc0b230942855BA46BC9CA772A88', '0xC8F855Ff966F6Be05cD659A5c5c7495a66c5c015')
+	logger(inspect(kkk, false, 3, true))
+}
+
+// setTimeout(() => {test2()}, 2000)
