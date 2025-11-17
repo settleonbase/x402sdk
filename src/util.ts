@@ -863,7 +863,7 @@ export const estimateErc20TransferGas = async (usdc: string, RecipientAddress: s
 		}), 
 		baseClient.getGasPrice()
 	])
-	return {gas, price, ethPrice: oracle.eth}
+	return {gas: gas.toString(), price: price.toString(), ethPrice: oracle.eth}
 }
 
 export const getBalance = async (address: string) => {
