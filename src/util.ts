@@ -990,7 +990,7 @@ export const estimateErc20TransferGas = async (
 //  Balance Cache: 60 秒记忆
 // =============================
 const balanceCache: Record<string, {
-  data: { usdc: string; eth: string; oracle: number }
+  data: { usdc: string; eth: string; oracle: {eth: number, usdc: number} }
   ts: number
 }> = {}
 
@@ -1027,7 +1027,7 @@ export const getBalance = async (address: string) => {
     const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
     const eth = ethers.formatUnits(ethRaw, 18)
 
-    const result = { usdc, eth, oracle: oracle.eth }
+    const result = { usdc, eth, oracle: {eth: oracle.eth, usdc: oracle.usdc} }
 
     // 记忆：写入缓存
     balanceCache[address] = {
