@@ -940,6 +940,7 @@ export const estimateErc20TransferGas = async (
   const baseClient = createPublicClient({
     chain: base,
     transport: http(`http://${getRandomNode()}/base-rpc`)
+	// transport: http(`http://94.143.138.27/base-rpc`)
   })
 
   pendingEstimate = (async () => {
@@ -963,6 +964,7 @@ export const estimateErc20TransferGas = async (
       ethPrice: oracle.eth
     }
 
+	logger(inspect(result, false, 3, true))
     // 写入缓存
     lastGasEstimate = {
       data: result,
@@ -975,7 +977,10 @@ export const estimateErc20TransferGas = async (
   try {
     const data = await pendingEstimate
     return data
-  } finally {
+  } catch(ex: any) {
+		logger(ex.message)
+  }
+   finally {
     // 这次调用结束后，清空 pending 状态
     pendingEstimate = null
   }
@@ -1010,7 +1015,8 @@ export const getBalance = async (address: string) => {
   // =============================
   const baseClient = createPublicClient({
     chain: base,
-    transport: http(`http://${getRandomNode()}/base-rpc`)
+	transport: http(`http://${getRandomNode()}/base-rpc`)
+    // transport: http(`http://94.143.138.27/base-rpc`)
   })
 
   try {
@@ -1028,7 +1034,7 @@ export const getBalance = async (address: string) => {
     const eth = ethers.formatUnits(ethRaw, 18)
 
     const result = { usdc, eth, oracle: {eth: oracle.eth, usdc: oracle.usdc} }
-
+	logger(inspect(result, false, 3, true))
     // 记忆：写入缓存
     balanceCache[address] = {
       data: result,
@@ -1066,5 +1072,5 @@ const test2 = async () => {
 	const kkk = await estimateErc20TransferGas('0.1', '0xD36Fc9d529B9Cc0b230942855BA46BC9CA772A88', '0xC8F855Ff966F6Be05cD659A5c5c7495a66c5c015')
 	logger(inspect(kkk, false, 3, true))
 }
-setTimeout(() => test1(), 5000)
+// setTimeout(() => test1(), 5000)
 // setTimeout(() => {test2()}, 2000)
