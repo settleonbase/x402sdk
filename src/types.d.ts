@@ -139,3 +139,13 @@ type SignatureComponents = {
 	recoveredAddress: string
 	isValid: boolean
 }
+
+interface nodeInfo {
+	region: string
+	ip_addr: string
+	armoredPublicKey: string
+	nftNumber: number
+	domain: string
+	lastEposh?: number
+    owner?: string
+}

@@ -8,6 +8,7 @@ import CashcodeNode_abi from './ABI/cashcodeNote.abi.json'
 import { Request, Response} from 'express'
 import { exact } from "x402/schemes"
 import { useFacilitator } from "x402/verify"
+import {v4} from 'uuid'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import {
 	Network,
@@ -28,7 +29,7 @@ import Settle_ABI from './ABI/sellte-abi.json'
 import Event_ABI from './ABI/event-abi.json'
 
 import GuardianOracle_ABI from './ABI/GuardianOracle_ABI.json'
-
+import newNodeInfoABI from './ABI/newNodeInfoABI.json'
 
 const setupFile = join( homedir(),'.master.json' )
 
@@ -57,28 +58,67 @@ const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)
 
-const headers: Record<string, string> = {
-	accept: 'application/json',
-	'content-type': 'application/json',
-	'accept-encoding': 'gzip, deflate, br, zstd',
-	'accept-language': 'en-US,en;q=0.9,ja;q=0.8,zh-CN;q=0.7,zh-TW;q=0.6,zh;q=0.5',
-	'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-	'x-app-version': '3.133.0',
-	'x-cb-device-id': 'a843cea5-ec23-49d0-86a0-6d69f2f6a2d9',
-	'x-cb-is-logged-in': 'true',
-	'x-cb-pagekey': 'send',
-	'x-cb-platform': 'extension',
-	'x-cb-project-name': 'wallet_extension',
-	'x-cb-session-uuid': '1267c3fe-8ce7-4221-b005-7b8869bc5168',
-	'x-cb-version-name': '3.133.0',
-	'x-platform-name': 'extension',
-	'x-release-stage': 'production',
-	'x-wallet-user-id': '98630690',
-	// 如需身份态就带上 cookie（注意隐私与时效）
-	cookie: 'cb_dm=abe7acae-e70b-4eea-93b9-4f1ffe09ec56; ...',
-	// 若需要伪装扩展来源（可能仍被服务端策略拦截）
-	origin: 'chrome-extension://hnfanknocfeofbddgcijnmhnfnkdnaad',
+const GuardianNodeInfo_mainnet = '0x2DF3302d0c9aC19BE01Ee08ce3DDA841BdcF6F03'
+const CONET_MAINNET = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network') 
+const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNodeInfoABI, CONET_MAINNET)
+
+let Guardian_Nodes: nodeInfo[] = []
+
+const getRandomNode = () => {
+    const _node1 = Guardian_Nodes[Math.floor(Math.random() * (Guardian_Nodes.length - 1))]
+    // return `https://${_node1.domain}.conet.network/solana-rpc`
+    return _node1.ip_addr
 }
+
+const getAllNodes = () => new Promise(async resolve=> {
+
+	const _nodes = await GuardianNodesMainnet.getAllNodes(0, 1000)
+	for (let i = 0; i < _nodes.length; i ++) {
+		const node = _nodes[i]
+		const id = parseInt(node[0].toString())
+		const pgpString: string = Buffer.from( node[1], 'base64').toString()
+		const domain: string = node[2]
+		const ipAddr: string = node[3]
+		const region: string = node[4]
+		const itemNode = {
+			ip_addr: ipAddr,
+			armoredPublicKey: pgpString,
+			domain: domain,
+			nftNumber: id,
+			region: region
+		}
+	
+		Guardian_Nodes.push(itemNode)
+  	}
+	
+	resolve(true)
+	logger(`getAllNodes success total nodes = ${Guardian_Nodes.length}`)
+})
+
+// const headers: Record<string, string> = {
+// 	accept: 'application/json',
+// 	'content-type': 'application/json',
+// 	'accept-encoding': 'gzip, deflate, br, zstd',
+// 	'accept-language': 'en-US,en;q=0.9,ja;q=0.8,zh-CN;q=0.7,zh-TW;q=0.6,zh;q=0.5',
+// 	'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+// 	'x-app-version': '3.133.0',
+// 	'x-cb-device-id': v4(),
+// 	'x-cb-is-logged-in': 'true',
+// 	'x-cb-pagekey': 'send',
+// 	'x-cb-platform': 'extension',
+// 	'x-cb-project-name': 'wallet_extension',
+// 	'x-cb-session-uuid': v4(),
+// 	'x-cb-version-name': '3.133.0',
+// 	'x-platform-name': 'extension',
+// 	'x-release-stage': 'production',
+// 	'x-wallet-user-id': '98630690',
+// 	// 如需身份态就带上 cookie（注意隐私与时效）
+// 	cookie: `cb_dm=${v4()};`,
+// 	// 若需要伪装扩展来源（可能仍被服务端策略拦截）
+// 	origin: 'chrome-extension://hnfanknocfeofbddgcijnmhnfnkdnaad',
+// }
+
+
 
 const conetMainnet = defineChain({
 	id: 224400, // 随便指定唯一的 chainId，例如 2550；如果有官方ID请填实际
@@ -98,13 +138,11 @@ const conetMainnet = defineChain({
 	}
 })
 
-const baseproceRpcUrl = 'https://chain-proxy.wallet.coinbase.com/?targetName=base'
-const transportBase = http(baseproceRpcUrl, {
-  	fetchOptions: { headers }
-})
+
+
 
 const conetClient = createPublicClient({chain: conetMainnet, transport: http(conetEndpoint)})
-const baseClient = createPublicClient({chain: base, transport: transportBase})
+
 
 const oracle = {
     bnb: 0,
@@ -135,7 +173,32 @@ const oracolPrice = async () => {
 	oracolPriceProcess = false
 }
 
-const oracleBackoud = () => {
+const oracleBackoud = async () => {
+	await getAllNodes()
+	Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
+
+		const account = privateKeyToAccount('0x' + n as `0x${string}`)
+		const walletClientBase = createWalletClient({
+			account,
+			chain: base,
+			transport: http(`http://${getRandomNode()}/base-rpc`),
+		})
+		
+
+		const walletBase = new ethers.Wallet(n, providerBase)
+		const walletConet = new ethers.Wallet(n, providerConet)
+		logger(`address => ${walletBase.address}`)
+
+		return {
+			baseWalletClient: walletClientBase,
+			baseSC: new ethers.Contract(CashCodeBaseAddr, CoinCodeABI, walletBase),
+			baseUSDC: new ethers.Contract(USDCContract_BASE, USDC_ABI, walletBase),
+			conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
+			conetSC: new ethers.Contract(conet_CashCodeNote, CashcodeNode_abi, walletConet),
+			event: new ethers.Contract(eventContract, Event_ABI, walletConet),
+		}
+	})
+
 	oracolPrice()
 	providerConet.on('block', async (blockNumber) => {
 
@@ -154,29 +217,7 @@ const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
 
-const Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
-
-	const account = privateKeyToAccount('0x' + n as `0x${string}`)
-	const walletClientBase = createWalletClient({
-		account,
-		chain: base,
-		transport: transportBase,
-	})
-	
-
-	const walletBase = new ethers.Wallet(n, providerBase)
-	const walletConet = new ethers.Wallet(n, providerConet)
-	logger(`address => ${walletBase.address}`)
-
-	return {
-		baseWalletClient: walletClientBase,
-		baseSC: new ethers.Contract(CashCodeBaseAddr, CoinCodeABI, walletBase),
-		baseUSDC: new ethers.Contract(USDCContract_BASE, USDC_ABI, walletBase),
-		conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
-		conetSC: new ethers.Contract(conet_CashCodeNote, CashcodeNode_abi, walletConet),
-		event: new ethers.Contract(eventContract, Event_ABI, walletConet),
-	}
-})
+let Settle_ContractPool: any[] = []
 
 function createExactPaymentRequirements(
 		price: Price,
@@ -567,7 +608,7 @@ const processCheck = async() => {
 		return
 	}
 
-
+	const baseClient = createPublicClient({chain: base, transport: http(getRandomNode())})
 	let baseHash: any
 	try {
 
@@ -660,6 +701,8 @@ const processCheckWithdraw = async () => {
 			processCheckWithdraw()
 		}, 1000)
 	}
+
+	const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
 	try {
 		const hash = ethers.solidityPackedKeccak256(['string'], [obj.code])
 
@@ -752,7 +795,7 @@ export const facilitators = async () => {
 		// 	obj.from, SETTLEContract, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature
 		// )
 
-
+		const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
 		// await tx.wait()
 		await baseClient.waitForTransactionReceipt({ hash: baseHash })
 
@@ -802,7 +845,7 @@ export const process_x402 = async () => {
 		x402ProcessPool.unshift(obj)
 		return
 	}
-
+	const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
 	try {
 
 		const baseHash = await SC.baseWalletClient.writeContract({
@@ -850,6 +893,7 @@ export const process_x402 = async () => {
 }
 
 export const estimateErc20TransferGas = async (usdc: string, RecipientAddress: string, fromAddress: string ) => {
+	const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
 	const [gas, price] = await Promise.all([
 		baseClient.estimateContractGas({
 			address: USDCContract_BASE,
@@ -867,7 +911,7 @@ export const estimateErc20TransferGas = async (usdc: string, RecipientAddress: s
 }
 
 export const getBalance = async (address: string) => {
-	
+	const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
 	try {
 		const [usdcRaw, ethRaw] = await Promise.all ([
 			baseClient.readContract({
@@ -902,7 +946,8 @@ oracleBackoud()
 
 
 const test1 = async () => {
-	const ba = await getBalance('0xD36Fc9d529B9Cc0b230942855BA46BC9CA772A88')
+
+	const ba = await getBalance('0xC8F855Ff966F6Be05cD659A5c5c7495a66c5c015')
 	logger(`getBalance`, inspect(ba, false, 3, true))
 }
 
@@ -910,5 +955,5 @@ const test2 = async () => {
 	const kkk = await estimateErc20TransferGas('0.1', '0xD36Fc9d529B9Cc0b230942855BA46BC9CA772A88', '0xC8F855Ff966F6Be05cD659A5c5c7495a66c5c015')
 	logger(inspect(kkk, false, 3, true))
 }
-
+setTimeout(() => test1(), 5000)
 // setTimeout(() => {test2()}, 2000)
