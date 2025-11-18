@@ -21,7 +21,7 @@ import {
 import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x402/shared"
 import { inspect } from 'node:util'
 const uuid62 = require('uuid62')
-import { createPublicClient, createWalletClient, http, getContract, parseEther, parseAbi } from 'viem'
+import { createPublicClient, createWalletClient, http, getContract, parseEther, parseAbi, NumberToHexErrorType } from 'viem'
 import { base } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
 import { defineChain } from 'viem'
@@ -892,43 +892,154 @@ export const process_x402 = async () => {
 
 }
 
-export const estimateErc20TransferGas = async (usdc: string, RecipientAddress: string, fromAddress: string ) => {
-	const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
-	const [gas, price] = await Promise.all([
-		baseClient.estimateContractGas({
-			address: USDCContract_BASE,
-			abi: USDC_ABI,
-			functionName: 'transfer',
-			account: fromAddress as `0x${string}`,             // msg.sender
-			args: [
-				RecipientAddress,
-				ethers.parseUnits(usdc, 6),               // 100 USDC (6位)
-			],
-		}), 
-		baseClient.getGasPrice()
-	])
-	return {gas: gas.toString(), price: price.toString(), ethPrice: oracle.eth}
+let lastGasEstimate:
+  | { data: { gas: string; price: string; ethPrice: number }; ts: number }
+  | null = null
+
+// 当前是否有进行中的估算请求（用 Promise 复用同一次调用）
+let pendingEstimate:
+  | Promise<{ gas: string; price: string; ethPrice: number }>
+  | null = null
+
+
+
+
+
+export const estimateErc20TransferGas = async (
+  usdc: string,
+  RecipientAddress: string,
+  fromAddress: string
+) => {
+  const now = Date.now()
+
+  // 1）有 15 秒内的缓存 → 直接返回
+  if (lastGasEstimate && (now - lastGasEstimate.ts) < 15_000) {
+    return lastGasEstimate.data
+  }
+
+  // 2）如果已经有进行中的 RPC 调用 → 等待 1 秒，然后复用它的结果
+  if (pendingEstimate) {
+    // 等待 1 秒（你要求的延迟）
+    await new Promise(resolve => setTimeout(resolve, 1_000))
+
+    // 再次检查：如果 1 秒内 RPC 完成了，缓存就应该是最新的
+    if (lastGasEstimate && (Date.now() - lastGasEstimate.ts) < 15_000) {
+      return lastGasEstimate.data
+    }
+
+    // 如果缓存还是没更新，就直接等待那次进行中的调用完成
+    try {
+      const data = await pendingEstimate
+      return data
+    } catch {
+      // 如果那次进行中的请求失败，继续往下走，发起新的请求
+    }
+  }
+
+  // 3）没有缓存、也没有进行中的请求 → 发起新的 RPC 调用
+  const baseClient = createPublicClient({
+    chain: base,
+    transport: http(`http://${getRandomNode()}/base-rpc`)
+  })
+
+  pendingEstimate = (async () => {
+    const [gas, price] = await Promise.all([
+      baseClient.estimateContractGas({
+        address: USDCContract_BASE,
+        abi: USDC_ABI,
+        functionName: 'transfer',
+        account: fromAddress as `0x${string}`,
+        args: [
+          RecipientAddress,
+          ethers.parseUnits(usdc, 6)
+        ]
+      }),
+      baseClient.getGasPrice()
+    ])
+
+    const result = {
+      gas: gas.toString(),
+      price: price.toString(),
+      ethPrice: oracle.eth
+    }
+
+    // 写入缓存
+    lastGasEstimate = {
+      data: result,
+      ts: Date.now()
+    }
+
+    return result
+  })()
+
+  try {
+    const data = await pendingEstimate
+    return data
+  } finally {
+    // 这次调用结束后，清空 pending 状态
+    pendingEstimate = null
+  }
 }
 
+
+
+
+
+
+  // =============================
+//  Balance Cache: 60 秒记忆
+// =============================
+const balanceCache: Record<string, {
+  data: { usdc: string; eth: string; oracle: number }
+  ts: number
+}> = {}
+
 export const getBalance = async (address: string) => {
-	const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
-	try {
-		const [usdcRaw, ethRaw] = await Promise.all ([
-			baseClient.readContract({
-				address: USDCContract_BASE,
-				abi: USDC_ABI,
-				functionName: 'balanceOf',
-				args: [address]
-			}),
-			providerBase.getBalance(address)
-		])
-		const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
-		const eth = ethers.formatUnits(ethRaw, 18)
-		return { usdc, eth, oracle: oracle.eth }
-	} catch (ex: any) {
-		logger(`baseUSDC.balanceOf Error!`, ex.message)
-		return null
-	}
+  const now = Date.now()
+  const cached = balanceCache[address]
+
+  // 若有缓存，且时间在 60 秒内 → 直接返回缓存
+  if (cached && (now - cached.ts) < 60_000) {
+    return cached.data
+  }
+
+
+
+  // =============================
+  //      实际调用 RPC
+  // =============================
+  const baseClient = createPublicClient({
+    chain: base,
+    transport: http(`http://${getRandomNode()}/base-rpc`)
+  })
+
+  try {
+    const [usdcRaw, ethRaw] = await Promise.all([
+      baseClient.readContract({
+        address: USDCContract_BASE,
+        abi: USDC_ABI,
+        functionName: 'balanceOf',
+        args: [address]
+      }),
+      providerBase.getBalance(address)
+    ])
+
+    const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
+    const eth = ethers.formatUnits(ethRaw, 18)
+
+    const result = { usdc, eth, oracle: oracle.eth }
+
+    // 记忆：写入缓存
+    balanceCache[address] = {
+      data: result,
+      ts: now
+    }
+
+    return result
+  } catch (ex: any) {
+    logger(`baseUSDC.balanceOf Error!`, ex.message)
+    return null
+  }
 }
 
 const test = async () => {
