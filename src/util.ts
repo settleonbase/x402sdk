@@ -447,12 +447,93 @@ export const cashcode_request = async (req: Request, res: Response) => {
 
 
 export const BeamioTransfer = async (req: Request, res: Response) => {
-	const { payload} = req.query as {
-		payload: payload
+	const _routerName = req.path
+	const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
+	const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
+
+	const { amount, toAddress } = req.query as {
+		amount?: string
+		toAddress?: string
 	}
-	if (!payload||!payload?.signature|| !payload?.authorization|| Object.keys(payload.authorization).length !== 6) {
-		return res.status(403).end()
+
+	const _price = amount|| '0'
+	const price = ethers.parseUnits(_price, USDC_Base_DECIMALS)
+	
+	if ( !amount || price <=0 || !ethers.isAddress(toAddress)) {
+		logger(`${_routerName} Error! The minimum amount was not reached.`,inspect(req.query, false, 3, true))
+		return res.status(400).json({success: false, error: 'The minimum amount was not reached.'})
 	}
+
+
+	const paymentRequirements = [createExactPaymentRequirements(
+		amount,
+		resource,
+		`Beamio Transfer`,
+		toAddress
+	)]
+
+	const isValid = await verifyPaymentNew(req, res, paymentRequirements)
+
+	if (!isValid) {
+		logger(`${_routerName} !isValid ERROR!`)
+		return 
+	}
+
+	let responseData: x402SettleResponse
+
+	const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
+	const saleRequirements = paymentRequirements[0]
+
+	const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, price, CashCodeBaseAddr)
+
+	if (!isValidPaymentHeader) {
+		logger(`${_routerName} checkx402paymentHeader Error!`,inspect(paymentHeader))
+		return res.status(402).end()
+	}
+
+	const payload: payload = paymentHeader?.payload as payload
+
+	try {
+	
+
+		const settleResponse = await settle(
+			paymentHeader,
+			saleRequirements)
+
+		const responseHeader = settleResponseHeader(settleResponse)
+
+		// In a real application, you would store this response header
+		// and associate it with the payment for later verification
+		
+		responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
+		
+		if (!responseData.success) {
+			logger(`${_routerName} responseData ERROR!`, inspect(responseData, false, 3, true))
+			return res.status(402).end()
+		}
+
+
+			
+	} catch (ex: any) {
+		console.error("Payment settlement failed:", ex.message)
+	}
+
+	logger(inspect(payload, false, 3, true))
+
+	// processToBase.push({
+	// 	from: payload.authorization.from,
+	// 	erc3009Addr: USDCContract_BASE,
+	// 	value: payload.authorization.value,
+	// 	validAfter: payload.authorization.validAfter,
+	// 	validBefore: payload.authorization.validBefore,
+	// 	nonce: payload.authorization.nonce,
+	// 	signature: payload.signature,
+	// 	hash: hash,
+	// 	note: note||'',
+	// 	res
+	// })
+
+	// processCheck()
 
 
 
@@ -859,7 +940,6 @@ export const facilitators = async () => {
 	Settle_ContractPool.push(SC)
 	setTimeout(() => facilitators(), 1000)
 }
-
 
 export const process_x402 = async () => {
 	console.debug(`process_x402`)

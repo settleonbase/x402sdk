@@ -669,8 +669,6 @@ const cashcodeGateway = async(req: any, res: any) => {
 		}
 		res.status(200).json(ret).end()
 
-
-
 }
 
 const processPaymebnt = async (req: any, res: any, price: string) => {
@@ -848,93 +846,95 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/BeamioTransfer', async (req,res) => {
-		const payment = req.header("X-PAYMENT")
 
-		if (!payment) {
-			logger(`verifyPayment send x402 payment information`)
-			res.status(402).json({
-				x402Version,
-				error: "X-PAYMENT header is required",
-			})
-			return 
-		}
-		let decodedPayment: PaymentPayload
+		return BeamioTransfer(req, res)
+		// const payment = req.header("X-PAYMENT")
+
+		// if (!payment) {
+		// 	logger(`verifyPayment send x402 payment information`)
+		// 	res.status(402).json({
+		// 		x402Version,
+		// 		error: "X-PAYMENT header is required",
+		// 	})
+		// 	return 
+		// }
+		// let decodedPayment: PaymentPayload
 		
-		try {
-			decodedPayment = exact.evm.decodePayment(payment)
-			decodedPayment.x402Version = x402Version
+		// try {
+		// 	decodedPayment = exact.evm.decodePayment(payment)
+		// 	decodedPayment.x402Version = x402Version
 	
-		} catch (error) {
-			logger(`verifyPayment catch Invalid or malformed payment header Error!`)
-			res.status(402).json({
-				x402Version,
-				error: error || "Invalid or malformed payment header"
-			})
-			return
-		}
+		// } catch (error) {
+		// 	logger(`verifyPayment catch Invalid or malformed payment header Error!`)
+		// 	res.status(402).json({
+		// 		x402Version,
+		// 		error: error || "Invalid or malformed payment header"
+		// 	})
+		// 	return
+		// }
 
-		const amount = decodedPayment.payload
-		//@ts-ignore
-		.authorization.value
+		// const amount = decodedPayment.payload
+		// //@ts-ignore
+		// .authorization.value
 
-		const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
-		const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
+		// const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
+		// const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
 
-		const paymentRequirements = createExactPaymentRequirements(
-			amount,
-			resource,
-			`Cashcode Payment Request`,
-			decodedPayment.payload
-			//@ts-ignore
-			.authorization.to
-		)
-		const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
-		try {
-			// throw new Error('facilitatorsPool')
+		// const paymentRequirements = createExactPaymentRequirements(
+		// 	amount,
+		// 	resource,
+		// 	`Cashcode Payment Request`,
+		// 	decodedPayment.payload
+		// 	//@ts-ignore
+		// 	.authorization.to
+		// )
+		// const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
+		// try {
+		// 	// throw new Error('facilitatorsPool')
 
-			const settleResponse = await settle(
-				paymentHeader,
-				paymentRequirements
-			)
+		// 	const settleResponse = await settle(
+		// 		paymentHeader,
+		// 		paymentRequirements
+		// 	)
 
 
-			const responseHeader = settleResponseHeader(settleResponse)
+		// 	const responseHeader = settleResponseHeader(settleResponse)
 
-			// In a real application, you would store this response header
-			// and associate it with the payment for later verification
+		// 	// In a real application, you would store this response header
+		// 	// and associate it with the payment for later verification
 			
-			const responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
+		// 	const responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
 			
-			if (!responseData.success) {
-				logger(`/BeamioTransfer responseData ERROR!`, inspect(responseData, false, 3, true))
-				return res.status(402).end()
-			}
+		// 	if (!responseData.success) {
+		// 		logger(`/BeamioTransfer responseData ERROR!`, inspect(responseData, false, 3, true))
+		// 		return res.status(402).end()
+		// 	}
 
 
-		} catch (error) {
-			console.error("Payment settlement failed:", error);
+		// } catch (error) {
+		// 	console.error("Payment settlement failed:", error);
 
-			// In a real application, you would handle the failed payment
-			// by marking it for retry or notifying the user
-			const payload: payload = paymentHeader?.payload as payload
-			if (payload?.authorization) {
-				facilitatorsPool.push({
-					from: payload.authorization.from,
-					value: payload.authorization.value,
-					validAfter: payload.authorization.validAfter,
-					validBefore: payload.authorization.validBefore,
-					nonce: payload.authorization.nonce,
-					signature: payload.signature,
-					res: res,
-					isSettle: true
-				})
-				return facilitators()
-			}
+		// 	// In a real application, you would handle the failed payment
+		// 	// by marking it for retry or notifying the user
+		// 	const payload: payload = paymentHeader?.payload as payload
+		// 	if (payload?.authorization) {
+		// 		facilitatorsPool.push({
+		// 			from: payload.authorization.from,
+		// 			value: payload.authorization.value,
+		// 			validAfter: payload.authorization.validAfter,
+		// 			validBefore: payload.authorization.validBefore,
+		// 			nonce: payload.authorization.nonce,
+		// 			signature: payload.signature,
+		// 			res: res,
+		// 			isSettle: true
+		// 		})
+		// 		return facilitators()
+		// 	}
 			
-			logger(inspect({paymentHeader}, false, 3, true))
+		// 	logger(inspect({paymentHeader}, false, 3, true))
 
-			return res.status(402).end()
-		}
+		// 	return res.status(402).end()
+		// }
 		
 
 	})
