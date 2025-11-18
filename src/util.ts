@@ -431,6 +431,19 @@ export const cashcode_request = async (req: Request, res: Response) => {
 
 }
 
+
+export const BeamioTransfer = async (req: Request, res: Response) => {
+	const { payload} = req.query as {
+		payload: payload
+	}
+	if (!payload||!payload?.signature|| !payload?.authorization|| Object.keys(payload.authorization).length !== 6) {
+		return res.status(403).end()
+	}
+
+
+
+}
+
 const generateCODE = (passcode: string) => {
 	const code = uuid62.v4()
 	const hash = ethers.solidityPackedKeccak256(['string', 'string'], [code, passcode])
@@ -439,6 +452,8 @@ const generateCODE = (passcode: string) => {
 	})
 	
 }
+
+
 
 type AuthorizationPayload = {
 	from: string;
@@ -906,9 +921,9 @@ let pendingEstimate:
 
 
 export const estimateErc20TransferGas = async (
-  usdc: string,
-  RecipientAddress: string,
-  fromAddress: string
+	usdc: string,
+	RecipientAddress: string,
+	fromAddress: string
 ) => {
   const now = Date.now()
 
@@ -932,14 +947,15 @@ export const estimateErc20TransferGas = async (
       const data = await pendingEstimate
       return data
     } catch {
-      // 如果那次进行中的请求失败，继续往下走，发起新的请求
+		return null
     }
   }
 
   // 3）没有缓存、也没有进行中的请求 → 发起新的 RPC 调用
+  const node = getRandomNode()
   const baseClient = createPublicClient({
     chain: base,
-    transport: http(`http://${getRandomNode()}/base-rpc`)
+    transport: http(`http://${node}/base-rpc`)
 	// transport: http(`http://94.143.138.27/base-rpc`)
   })
 
@@ -957,6 +973,12 @@ export const estimateErc20TransferGas = async (
       }),
       baseClient.getGasPrice()
     ])
+
+	if (typeof gas !== 'bigint' || typeof price !== 'bigint' || !price || !gas) {
+		const error = new Error(`Node = ${node} return null result! gas = ${gas} price = ${price}`)
+		logger(error)
+		throw(error)
+	}
 
     const result = {
       gas: gas.toString(),

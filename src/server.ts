@@ -11,7 +11,7 @@ import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
-import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, process_x402, x402ProcessPool, MINT_RATE, getBalance, estimateErc20TransferGas} from './util'
+import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, process_x402, x402ProcessPool, MINT_RATE, getBalance, estimateErc20TransferGas, BeamioTransfer} from './util'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import { exact } from "x402/schemes";
 import {
@@ -485,9 +485,9 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 }
 
 async function verifyPayment(
-	req: express.Request,
-	res: express.Response,
-	paymentRequirements: PaymentRequirements[],
+		req: express.Request,
+		res: express.Response,
+		paymentRequirements: PaymentRequirements[],
 	): Promise<boolean> {
 	const payment = req.header("X-PAYMENT");
 	if (!payment) {
@@ -840,12 +840,32 @@ const router = ( router: express.Router ) => {
 
 	router.get('/cashCode', async (req,res) => {
 		return cashcode_request(req, res)
-		
 	})
 
 	router.get('/cashCodeCheck', async (req,res) => {
 		return cashcode_check(req, res)
 		
+	})
+
+	router.get('/BeamioTransfer', async (req,res) => {
+		const { payload} = req.query as {
+			payload: payload
+		}
+		if (!payload||!payload?.signature|| !payload?.authorization|| Object.keys(payload.authorization).length !== 6) {
+			return res.status(403).end()
+		}
+
+		const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource
+
+		const paymentRequirements = [createExactPaymentRequirements(
+			payload.authorization.value,
+			resource,
+			`Cashcode Payment Request for ${payload.authorization.to}`,
+			payload.authorization.to
+		)]
+		const isValid = await verifyPayment(req, res, paymentRequirements)
+		return BeamioTransfer(req, res)
+
 	})
 
 	router.get('/estimateNativeBaseTransferGas', async (req,res) => {
@@ -858,8 +878,22 @@ const router = ( router: express.Router ) => {
 		if (!ethers.isAddress(address) || !ethers.isAddress(toAddress) || !amount || isNaN(Number(amount)) ) {
 			return res.status(403).json({error: 'format error!'}).end()
 		}
-		const ret = await estimateErc20TransferGas (amount, toAddress, address)
-		return res.status(200).json(ret).end()
+
+		let process = 5
+		do {
+			const ret = await estimateErc20TransferGas (amount, toAddress, address)
+			if (!ret) {
+				process--
+			} else {
+				process = 0
+				res.status(200).json(ret).end()
+			}
+
+		} while (process)
+
+		
+		
+		
 	})
 
 	router.get('/getBalance', async (req,res) => {
@@ -877,6 +911,8 @@ const router = ( router: express.Router ) => {
 	
 		
 	})
+
+	
 
 
 	// router.post('/mintTestnet', async (req, res) => {
