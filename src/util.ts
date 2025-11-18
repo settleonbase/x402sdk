@@ -249,11 +249,11 @@ function createExactPaymentRequirements(
 		}
 }
 
-const verifyPayment = (
+export const verifyPaymentNew = (
 		req: Request,
 		res: Response,
 		paymentRequirements: PaymentRequirements[],
-	): Promise<boolean> => new Promise(async resolve =>  {
+	): Promise<false|any> => new Promise(async resolve =>  {
 	const payment = req.header("X-PAYMENT")
 
 	if (!payment) {
@@ -281,8 +281,22 @@ const verifyPayment = (
 		})
 		return resolve(false)
 	}
-
+	
 	try {
+
+		if (!paymentRequirements.length) {
+			//@ts-ignore
+			const amount = decodedPayment.payload.authorization.value
+			const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
+			const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
+			paymentRequirements = [createExactPaymentRequirements(
+				amount,
+				resource,
+				`Cashcode Payment Request`,
+				//@ts-ignore
+				decodedPayment.payload.authorization.to
+			)]
+		}
 		const selectedPaymentRequirement =
 			findMatchingPaymentRequirements(paymentRequirements, decodedPayment) ||
 			paymentRequirements[0];
@@ -311,7 +325,7 @@ const verifyPayment = (
 		return resolve (false)
 	}
 
-	return resolve (true)
+	return resolve (paymentRequirements)
 })
 
 
@@ -365,7 +379,7 @@ export const cashcode_request = async (req: Request, res: Response) => {
 		CashCodeBaseAddr
 	)]
 
-	const isValid = await verifyPayment(req, res, paymentRequirements)
+	const isValid = await verifyPaymentNew(req, res, paymentRequirements)
 
 	if (!isValid) {
 		logger(`${_routerName} !isValid ERROR!`)
@@ -907,6 +921,8 @@ export const process_x402 = async () => {
 
 }
 
+
+
 let lastGasEstimate:
   | { data: { gas: string; price: string; ethPrice: number }; ts: number }
   | null = null
@@ -1021,6 +1037,11 @@ const balanceCache: Record<string, {
   ts: number
 }> = {}
 
+export const getOracleRequest = () => {
+	logger(inspect(oracle, false, 3, true))
+	return oracle
+}
+
 export const getBalance = async (address: string) => {
   const now = Date.now()
   const cached = balanceCache[address]
@@ -1032,25 +1053,35 @@ export const getBalance = async (address: string) => {
 
 
 
+
   // =============================
   //      实际调用 RPC
   // =============================
   const baseClient = createPublicClient({
     chain: base,
-	transport: http(`http://${getRandomNode()}/base-rpc`)
-    // transport: http(`http://94.143.138.27/base-rpc`)
+	//transport: http(`http://${getRandomNode()}/base-rpc`)
+	transport: http(`http://94.143.138.27/base-rpc`)
   })
 
+  const baseEthers = new ethers.JsonRpcProvider('')
+  const SC = new ethers.Contract(USDCContract_BASE, USDC_ABI, baseEthers)
+
   try {
-    const [usdcRaw, ethRaw] = await Promise.all([
-      baseClient.readContract({
-        address: USDCContract_BASE,
-        abi: USDC_ABI,
-        functionName: 'balanceOf',
-        args: [address]
-      }),
-      providerBase.getBalance(address)
-    ])
+    // const [usdcRaw, ethRaw] = await Promise.all([
+    //   baseClient.readContract({
+    //     address: USDCContract_BASE,
+    //     abi: USDC_ABI,
+    //     functionName: 'balanceOf',
+    //     args: [address]
+    //   }),
+    //   providerBase.getBalance(address)
+    // ])
+
+	 const [usdcRaw, ethRaw] = await Promise.all([
+		SC.balanceOf (address),
+		baseEthers.getBalance(address)
+	 ])
+	
 
     const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
     const eth = ethers.formatUnits(ethRaw, 18)

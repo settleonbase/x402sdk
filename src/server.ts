@@ -11,7 +11,7 @@ import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
-import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, process_x402, x402ProcessPool, MINT_RATE, getBalance, estimateErc20TransferGas, BeamioTransfer} from './util'
+import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, process_x402, x402ProcessPool, MINT_RATE, getBalance, estimateErc20TransferGas, BeamioTransfer, getOracleRequest, verifyPaymentNew} from './util'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import { exact } from "x402/schemes";
 import {
@@ -848,68 +848,127 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/BeamioTransfer', async (req,res) => {
-		const { payload} = req.query as {
-			payload: payload
+		const payment = req.header("X-PAYMENT")
+
+		if (!payment) {
+			logger(`verifyPayment send x402 payment information`)
+			res.status(402).json({
+				x402Version,
+				error: "X-PAYMENT header is required",
+			})
+			return 
 		}
-		if (!payload||!payload?.signature|| !payload?.authorization|| Object.keys(payload.authorization).length !== 6) {
-			return res.status(403).end()
+		let decodedPayment: PaymentPayload
+		
+		try {
+			decodedPayment = exact.evm.decodePayment(payment)
+			decodedPayment.x402Version = x402Version
+	
+		} catch (error) {
+			logger(`verifyPayment catch Invalid or malformed payment header Error!`)
+			res.status(402).json({
+				x402Version,
+				error: error || "Invalid or malformed payment header"
+			})
+			return
 		}
 
-		const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource
+		const amount = decodedPayment.payload
+		//@ts-ignore
+		.authorization.value
 
-		const paymentRequirements = [createExactPaymentRequirements(
-			payload.authorization.value,
+		const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
+		const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
+
+		const paymentRequirements = createExactPaymentRequirements(
+			amount,
 			resource,
-			`Cashcode Payment Request for ${payload.authorization.to}`,
-			payload.authorization.to
-		)]
-		const isValid = await verifyPayment(req, res, paymentRequirements)
-		return BeamioTransfer(req, res)
+			`Cashcode Payment Request`,
+			decodedPayment.payload
+			//@ts-ignore
+			.authorization.to
+		)
+		const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
+		try {
+			// throw new Error('facilitatorsPool')
 
-	})
+			const settleResponse = await settle(
+				paymentHeader,
+				paymentRequirements
+			)
 
-	router.get('/estimateNativeBaseTransferGas', async (req,res) => {
-		const { address, toAddress, amount } = req.query as {
-			address?: string
-			toAddress?: string
-			amount?: string
-		}
 
-		if (!ethers.isAddress(address) || !ethers.isAddress(toAddress) || !amount || isNaN(Number(amount)) ) {
-			return res.status(403).json({error: 'format error!'}).end()
-		}
+			const responseHeader = settleResponseHeader(settleResponse)
 
-		let process = 5
-		do {
-			const ret = await estimateErc20TransferGas (amount, toAddress, address)
-			if (!ret) {
-				process--
-			} else {
-				process = 0
-				res.status(200).json(ret).end()
+			// In a real application, you would store this response header
+			// and associate it with the payment for later verification
+			
+			const responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
+			
+			if (!responseData.success) {
+				logger(`/BeamioTransfer responseData ERROR!`, inspect(responseData, false, 3, true))
+				return res.status(402).end()
 			}
 
-		} while (process)
 
+		} catch (error) {
+			console.error("Payment settlement failed:", error);
+
+			// In a real application, you would handle the failed payment
+			// by marking it for retry or notifying the user
+			const payload: payload = paymentHeader?.payload as payload
+			if (payload?.authorization) {
+				facilitatorsPool.push({
+					from: payload.authorization.from,
+					value: payload.authorization.value,
+					validAfter: payload.authorization.validAfter,
+					validBefore: payload.authorization.validBefore,
+					nonce: payload.authorization.nonce,
+					signature: payload.signature,
+					res: res,
+					isSettle: true
+				})
+				return facilitators()
+			}
+			
+			logger(inspect({paymentHeader}, false, 3, true))
+
+			return res.status(402).end()
+		}
 		
-		
-		
+
 	})
 
-	router.get('/getBalance', async (req,res) => {
-		const { address } = req.query as {
-			address?: string
-		}
+	// router.get('/estimateNativeBaseTransferGas', async (req,res) => {
+	// 	const { address, toAddress, amount } = req.query as {
+	// 		address?: string
+	// 		toAddress?: string
+	// 		amount?: string
+	// 	}
 
-		if (!address || !ethers.isAddress(address)) {
-			return res.status(200).json({error: 'address format error!'}).end()
-		}
+	// 	if (!ethers.isAddress(address) || !ethers.isAddress(toAddress) || !amount || isNaN(Number(amount)) ) {
+	// 		return res.status(403).json({error: 'format error!'}).end()
+	// 	}
 
-		const balance = await getBalance(address)
+	// 	let process = 5
+	// 	do {
+	// 		const ret = await estimateErc20TransferGas (amount, toAddress, address)
+	// 		if (!ret) {
+	// 			process--
+	// 		} else {
+	// 			process = 0
+	// 			res.status(200).json(ret).end()
+	// 		}
 
-		return res.status(200).json({address, balance}).end()
-	
+	// 	} while (process)
+
 		
+		
+		
+	// })
+
+	router.get('/getOracle', async (req,res) => {
+		res.status(200).json({eth: getOracleRequest()}).end()
 	})
 
 	
