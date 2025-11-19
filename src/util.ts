@@ -1163,6 +1163,46 @@ export const estimateErc20TransferGas = async (
 }
 
 
+const linkMemo: {
+	linkHash: string
+	to: string
+	value: string
+	note: string
+	res: Response
+}[]= []
+
+const baseChainID = 8453
+const linkMemoGenerate = async() => {
+	const obj = linkMemo.shift()
+	if (!obj) {
+		return
+	}
+
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		linkMemo.unshift(obj)
+		return setTimeout(() => linkMemoGenerate(), 1000)
+	}
+
+	try {
+		const tx = await SC.conetSC.linkMemoGenerate(
+			obj.linkHash, obj.to, obj.value, baseChainID, USDCContract_BASE, USDC_Base_DECIMALS, obj.note
+		)
+		obj.res.status(200).json({success: true, hash: tx.hash}).end()
+		await tx.wait()
+		logger(`linkMemoGenerate Success, ${tx.hash}!`)
+
+	} catch (ex: any) {
+		logger(`linkMemoGenerate Error, ${ex.message}`)
+		obj.res.status(200).json({success: false}).end()
+	}
+
+	Settle_ContractPool.push(SC)
+	setTimeout(() => linkMemoGenerate, 1000)
+
+
+}
+
   // =============================
 //  Balance Cache: 60 秒记忆
 // =============================
@@ -1233,6 +1273,31 @@ export const getBalance = async (address: string) => {
     logger(`baseUSDC.balanceOf Error!`, ex.message)
     return null
   }
+}
+
+export const BeamioPaymentLink = async (req: Request, res: Response) => {
+	const { code, amount, note, address } = req.query as {
+		amount?: string
+		code?: string
+		note?: string
+		address?: string
+	}
+	const value = Number(amount)
+	if (!amount || !code || !address|| isNaN(value) || value <= 0.02|| !ethers.isHexString(code)) {
+		return res.status(403).end()
+	}
+
+
+
+	linkMemo.push({
+		value: value.toString(),
+		note: note||'',
+		linkHash: code,
+		res,
+		to: address
+	})
+	linkMemoGenerate()
+
 }
 
 const test = async () => {
