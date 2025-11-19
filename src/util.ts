@@ -505,13 +505,45 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 			return res.status(402).end()
 		}
 
+		const wallet = responseData.payer
+		
+		const isWallet = ethers.isAddress(wallet)
 
+		
+		const ret: x402Response = {
+			success: true,
+			payer: wallet,
+			USDC_tx: responseData?.transaction,
+			network: responseData?.network,
+			timestamp: new Date().toISOString()
+		}
+
+		
+		// if (isWallet) {
+
+
+		// 	x402ProcessPool.push({
+		// 		wallet,
+		// 		settle: ethers.parseUnits('0.001', 6).toString()
+		// 	})
+
+		// 	logger(`${_routerName} success!`, inspect(responseData, false, 3, true))
+		// 	process_x402()
+
+
+		// }
+
+		
+		res.status(200).json(ret).end()
+
+		logger(inspect(ret, false, 3, true))
+		return 
 			
 	} catch (ex: any) {
 		console.error("Payment settlement failed:", ex.message)
 	}
 
-	logger(inspect(payload, false, 3, true))
+	
 
 	// processToBase.push({
 	// 	from: payload.authorization.from,
