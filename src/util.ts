@@ -484,13 +484,6 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 	const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
 	const saleRequirements = paymentRequirements[0]
 
-	const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, price, CashCodeBaseAddr)
-
-	if (!isValidPaymentHeader) {
-		logger(`${_routerName} checkx402paymentHeader Error!`,inspect(paymentHeader))
-		return res.status(402).end()
-	}
-
 	const payload: payload = paymentHeader?.payload as payload
 
 	try {
