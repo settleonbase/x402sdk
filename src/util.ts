@@ -30,6 +30,8 @@ import Event_ABI from './ABI/event-abi.json'
 
 import GuardianOracle_ABI from './ABI/GuardianOracle_ABI.json'
 import newNodeInfoABI from './ABI/newNodeInfoABI.json'
+import beamiobaseABI from './ABI/beamio-base-abi.json'
+import beamioConetABI from './ABI/beamio-conet.abi.json'
 
 const setupFile = join( homedir(),'.master.json' )
 
@@ -61,6 +63,14 @@ const {verify, settle} = useFacilitator(facilitator1)
 const GuardianNodeInfo_mainnet = '0x2DF3302d0c9aC19BE01Ee08ce3DDA841BdcF6F03'
 const CONET_MAINNET = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network') 
 const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNodeInfoABI, CONET_MAINNET)
+
+
+//					beamio	Contract
+
+const beamiobase = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
+const beamioConet = '0x100811F005Df33285eB508ae1BC770058EF2c6f0'
+
+
 
 let Guardian_Nodes: nodeInfo[] = []
 
@@ -178,11 +188,11 @@ const oracleBackoud = async () => {
 	Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 
 		const account = privateKeyToAccount('0x' + n as `0x${string}`)
-		const walletClientBase = createWalletClient({
-			account,
-			chain: base,
-			transport: http(`http://${getRandomNode()}/base-rpc`),
-		})
+		// const walletClientBase = createWalletClient({
+		// 	account,
+		// 	chain: base,
+		// 	transport: http(`http://${getRandomNode()}/base-rpc`),
+		// })
 		
 
 		const walletBase = new ethers.Wallet(n, providerBase)
@@ -190,12 +200,12 @@ const oracleBackoud = async () => {
 		logger(`address => ${walletBase.address}`)
 
 		return {
-			baseWalletClient: walletClientBase,
-			baseSC: new ethers.Contract(CashCodeBaseAddr, CoinCodeABI, walletBase),
+			// baseWalletClient: walletClientBase,
+			baseSC: new ethers.Contract(beamiobase, beamiobaseABI, walletBase),
 			baseUSDC: new ethers.Contract(USDCContract_BASE, USDC_ABI, walletBase),
-			conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
-			conetSC: new ethers.Contract(conet_CashCodeNote, CashcodeNode_abi, walletConet),
-			event: new ethers.Contract(eventContract, Event_ABI, walletConet),
+			// conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
+			conetSC: new ethers.Contract(beamioConet, beamioConetABI, walletConet),
+			// event: new ethers.Contract(eventContract, Event_ABI, walletConet),
 		}
 	})
 
@@ -217,7 +227,11 @@ const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
 
-let Settle_ContractPool: any[] = []
+let Settle_ContractPool: {
+	baseSC: ethers.Contract
+	baseUSDC: ethers.Contract
+	conetSC: ethers.Contract
+}[] = []
 
 function createExactPaymentRequirements(
 		price: Price,
@@ -519,50 +533,66 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 		}
 
 		
-		// if (isWallet) {
-
-
-		// 	x402ProcessPool.push({
-		// 		wallet,
-		// 		settle: ethers.parseUnits('0.001', 6).toString()
-		// 	})
-
-		// 	logger(`${_routerName} success!`, inspect(responseData, false, 3, true))
-		// 	process_x402()
-
-
-		// }
-
 		
 		res.status(200).json(ret).end()
 
 		logger(inspect(ret, false, 3, true))
+		const authorization = payload?.authorization
+		if (authorization) {
+
+			const from = authorization.from
+			const to = authorization.to
+			const amount = authorization.value
+
+			transferRecord.push({from, to, amount, finishedHash: responseData?.transaction})
+			transferRecordProcess()
+		}
+		
 		return 
 			
 	} catch (ex: any) {
 		console.error("Payment settlement failed:", ex.message)
 	}
 
-	
-
-	// processToBase.push({
-	// 	from: payload.authorization.from,
-	// 	erc3009Addr: USDCContract_BASE,
-	// 	value: payload.authorization.value,
-	// 	validAfter: payload.authorization.validAfter,
-	// 	validBefore: payload.authorization.validBefore,
-	// 	nonce: payload.authorization.nonce,
-	// 	signature: payload.signature,
-	// 	hash: hash,
-	// 	note: note||'',
-	// 	res
-	// })
-
-	// processCheck()
-
-
-
 }
+
+const transferRecord: {
+	from: string
+	to: string
+	amount: string
+	finishedHash: string
+}[] = []
+
+const transferRecordProcess = async () => {
+	const obj = transferRecord.shift()
+	if (!obj) {
+		return
+	}
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		transferRecord.unshift()
+		return setTimeout(() => {
+			transferRecordProcess()
+		}, 2000)
+	}
+
+	try {
+		const tx = await SC.conetSC.transferRecord(
+			obj.from,
+			obj.to,
+			obj.amount,
+			obj.finishedHash
+		)
+		await tx.wait()
+	} catch (ex: any) {
+		logger(`transferRecordProcess Error!`, ex.message, inspect(obj, false, 3, true))
+	}
+
+	Settle_ContractPool.push(SC)
+	setTimeout(() => {transferRecordProcess()}, 1000)
+}
+
+
 
 const generateCODE = (passcode: string) => {
 	const code = uuid62.v4()
@@ -648,24 +678,24 @@ export async function AuthorizationSign(
 	}
 }
 
-const AuthorizationCallUSDC = async (data: AuthorizationPayload) => {
-	const SC = Settle_ContractPool[0]
-	try {
-		const tx = await SC.conetUSDC.transferWithAuthorization(
-			data.from,
-			data.to,
-			data.value,
-			data.validAfter,
-			data.validBefore,
-			data.nonce,
-			data.signature
-		)
-		await tx.wait()
-		logger(`AuthorizationCall success ${tx.hash}`)
-	} catch (ex: any) {
-		logger(`Error! ${ex.message}`)
-	}
-}
+// const AuthorizationCallUSDC = async (data: AuthorizationPayload) => {
+// 	const SC = Settle_ContractPool[0]
+// 	try {
+// 		const tx = await SC.conetUSDC.transferWithAuthorization(
+// 			data.from,
+// 			data.to,
+// 			data.value,
+// 			data.validAfter,
+// 			data.validBefore,
+// 			data.nonce,
+// 			data.signature
+// 		)
+// 		await tx.wait()
+// 		logger(`AuthorizationCall success ${tx.hash}`)
+// 	} catch (ex: any) {
+// 		logger(`Error! ${ex.message}`)
+// 	}
+// }
 
 const AuthorizationCallCashCode = async (data: AuthorizationPayload, hash: string, erc3009Addr: string) => {
 	const SC = Settle_ContractPool[0]
@@ -747,26 +777,26 @@ const processCheck = async() => {
 	let baseHash: any
 	try {
 
-		baseHash = await SC.baseWalletClient.writeContract({
-			address: CashCodeBaseAddr,
-			abi: CoinCodeABI,
-			functionName: 'depositWith3009Authorization',
-			args: [obj.from, USDCContract_BASE, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature, obj.hash]
-		})
+		// baseHash = await SC.baseWalletClient.writeContract({
+		// 	address: CashCodeBaseAddr,
+		// 	abi: CoinCodeABI,
+		// 	functionName: 'depositWith3009Authorization',
+		// 	args: [obj.from, USDCContract_BASE, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature, obj.hash]
+		// })
 
 
 
 
-		// const tx = await SC.baseSC.depositWith3009Authorization(
-		// 	obj.from,
-		// 	USDCContract_BASE,
-		// 	obj.value,
-		// 	obj.validAfter,
-		// 	obj.validBefore,
-		// 	obj.nonce,
-		// 	obj.signature,
-		// 	obj.hash
-		// )
+		const tx = await SC.baseSC.depositWith3009Authorization(
+			obj.from,
+			USDCContract_BASE,
+			obj.value,
+			obj.validAfter,
+			obj.validBefore,
+			obj.nonce,
+			obj.signature,
+			obj.hash
+		)
 		
 		// await tx.wait()
 		
@@ -841,29 +871,29 @@ const processCheckWithdraw = async () => {
 	try {
 		const hash = ethers.solidityPackedKeccak256(['string'], [obj.code])
 
-		const baseHash = await SC.baseWalletClient.writeContract({
-			address: CashCodeBaseAddr,
-			abi: CoinCodeABI,
-			functionName: 'withdrawWithCode',
-			args: [obj.code, obj.address]
-		})
+		// const baseHash = await SC.baseWalletClient.writeContract({
+		// 	address: CashCodeBaseAddr,
+		// 	abi: CoinCodeABI,
+		// 	functionName: 'withdrawWithCode',
+		// 	args: [obj.code, obj.address]
+		// })
 
-		// const tx = await SC.baseSC.withdrawWithCode(obj.code, obj.address)
+		const tx = await SC.baseSC.withdrawWithCode(obj.code, obj.address)
 
 
 		const tr = await SC.conetSC.finishedCheck(
 			hash,
-			baseHash,
+			tx.hash,
 			obj.address
 		)
 
 		await Promise.all([
-			baseClient.waitForTransactionReceipt({ hash: baseHash }),
+			tx.wait(),
 			tr.wait()
 		])
 
-		obj.res.status(200).json({success: true, USDC_tx: baseHash}).end()
-		logger(`processCheckWithdraw success! BASE = ${baseHash} CONET = ${tr.hash}`)
+		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
+		logger(`processCheckWithdraw success! BASE = ${tx.hash} CONET = ${tr.hash}`)
 	} catch (ex: any) {
 		logger('processCheckWithdraw error!', ex.message)
 		obj.res.status(404).json({error: 'Server error!'}).end()
@@ -905,6 +935,8 @@ export const cashcode_check = (req: Request, res: Response) => {
 export const x402ProcessPool: airDrop[] = []
 export const facilitatorsPool: facilitatorsPoolType[] = []
 
+
+
 export const facilitators = async () => {
 	const obj = facilitatorsPool.shift()
 	if (!obj) {
@@ -919,32 +951,33 @@ export const facilitators = async () => {
 	const wallet = obj.from
 	try {
 
-		const baseHash = await SC.baseWalletClient.writeContract({
-			address: USDCContract_BASE,
-			abi: USDC_ABI,
-			functionName: 'transferWithAuthorization',
-			args: [obj.from, obj.isSettle ? SETTLEContract: CashCodeBaseAddr, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature]
-		})
+		// const baseHash = await SC.baseWalletClient.writeContract({
+		// 	address: USDCContract_BASE,
+		// 	abi: USDC_ABI,
+		// 	functionName: 'transferWithAuthorization',
+		// 	args: [obj.from, obj.isSettle ? SETTLEContract: CashCodeBaseAddr, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature]
+		// })
 
-		// const tx = await SC.usdc.transferWithAuthorization(
-		// 	obj.from, SETTLEContract, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature
-		// )
+		const tx = await SC.baseUSDC.transferWithAuthorization(
+			obj.from, SETTLEContract, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature
+		)
 
-		const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
-		// await tx.wait()
-		await baseClient.waitForTransactionReceipt({ hash: baseHash })
+		// const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
+		// // await tx.wait()
+		// await baseClient.waitForTransactionReceipt({ hash: baseHash })
 
-		logger(`facilitators success! ${baseHash}`)
+		// logger(`facilitators success! ${baseHash}`)
 
 		const ret: x402Response = {
 			success: true,
 			payer: wallet,
-			USDC_tx: baseHash,
+			USDC_tx: tx.hash,
 			network: 'BASE',
 			timestamp: new Date().toISOString()
 		}
 
 		obj.res.status(200).json(ret).end()
+
 		Settle_ContractPool.push(SC)
 		if (obj.isSettle) {
 			x402ProcessPool.push({
@@ -953,7 +986,7 @@ export const facilitators = async () => {
 			})
 		}
 		
-		await process_x402()
+		// await process_x402()
 		return setTimeout(() => facilitators(), 1000)
 
 	} catch (ex: any) {
@@ -966,65 +999,65 @@ export const facilitators = async () => {
 	setTimeout(() => facilitators(), 1000)
 }
 
-export const process_x402 = async () => {
-	console.debug(`process_x402`)
-	const obj = x402ProcessPool.shift()
-	if (!obj) {
-		return
-	}
+// export const process_x402 = async () => {
+// 	console.debug(`process_x402`)
+// 	const obj = x402ProcessPool.shift()
+// 	if (!obj) {
+// 		return
+// 	}
 
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-		logger(`process_x402 got empty Settle_testnet_pool`)
-		x402ProcessPool.unshift(obj)
-		return
-	}
-	const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
-	try {
+// 	const SC = Settle_ContractPool.shift()
+// 	if (!SC) {
+// 		logger(`process_x402 got empty Settle_testnet_pool`)
+// 		x402ProcessPool.unshift(obj)
+// 		return
+// 	}
+// 	const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
+// 	try {
 
-		const baseHash = await SC.baseWalletClient.writeContract({
-			address: SETTLEContract,
-			abi: Settle_ABI,
-			functionName: 'mint',
-			args: [obj.wallet, obj.settle]
-		})
-		await baseClient.waitForTransactionReceipt({ hash: baseHash })
+// 		// const baseHash = await SC.baseWalletClient.writeContract({
+// 		// 	address: SETTLEContract,
+// 		// 	abi: Settle_ABI,
+// 		// 	functionName: 'mint',
+// 		// 	args: [obj.wallet, obj.settle]
+// 		// })
+// 		// await baseClient.waitForTransactionReceipt({ hash: baseHash })
 
-		// const tx = await SC.base.mint(
-		// 	obj.wallet, obj.settle
-		// )
+// 		const tx = await SC.base.mint(
+// 			obj.wallet, obj.settle
+// 		)
 
-		// await tx.wait()
+// 		// await tx.wait()
 
-		const SETTLE = BigInt(obj.settle) * MINT_RATE / USDC_decimals
+// 		const SETTLE = BigInt(obj.settle) * MINT_RATE / USDC_decimals
 
 
 		
-		const ts = await SC.event.eventEmit(
-			obj.wallet, obj.settle, SETTLE, baseHash
-		)
+// 		const ts = await SC.event.eventEmit(
+// 			obj.wallet, obj.settle, SETTLE, baseHash
+// 		)
 
-		await ts.wait()
+// 		await ts.wait()
 
-		reflashData.unshift({
-			wallet: obj.wallet,
-			hash: baseHash,
-			USDC: obj.settle,
-			timestmp: new Date().toUTCString(),
-			SETTLE: SETTLE.toString(),
-		})
+// 		reflashData.unshift({
+// 			wallet: obj.wallet,
+// 			hash: baseHash,
+// 			USDC: obj.settle,
+// 			timestmp: new Date().toUTCString(),
+// 			SETTLE: SETTLE.toString(),
+// 		})
 
-		logger(`process_x402 success! ${baseHash}`)
+// 		logger(`process_x402 success! ${baseHash}`)
 
-	} catch (ex: any) {
-		logger(`Error process_x402 `, ex.message)
-		x402ProcessPool.unshift(obj)
-	}
+// 	} catch (ex: any) {
+// 		logger(`Error process_x402 `, ex.message)
+// 		x402ProcessPool.unshift(obj)
+// 	}
 
-	Settle_ContractPool.push(SC)
-	setTimeout(() => process_x402(), 1000)
+// 	Settle_ContractPool.push(SC)
+// 	setTimeout(() => process_x402(), 1000)
 
-}
+// }
 
 
 
@@ -1130,10 +1163,6 @@ export const estimateErc20TransferGas = async (
 }
 
 
-
-
-
-
   // =============================
 //  Balance Cache: 60 秒记忆
 // =============================
@@ -1230,5 +1259,6 @@ const test2 = async () => {
 	const kkk = await estimateErc20TransferGas('0.1', '0xD36Fc9d529B9Cc0b230942855BA46BC9CA772A88', '0xC8F855Ff966F6Be05cD659A5c5c7495a66c5c015')
 	logger(inspect(kkk, false, 3, true))
 }
+
 // setTimeout(() => test1(), 5000)
 // setTimeout(() => {test2()}, 2000)

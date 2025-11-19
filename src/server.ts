@@ -11,7 +11,7 @@ import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
-import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, process_x402, x402ProcessPool, MINT_RATE, getBalance, estimateErc20TransferGas, BeamioTransfer, getOracleRequest, verifyPaymentNew} from './util'
+import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, x402ProcessPool, MINT_RATE, getBalance, estimateErc20TransferGas, BeamioTransfer, getOracleRequest, verifyPaymentNew} from './util'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import { exact } from "x402/schemes";
 import {
@@ -779,7 +779,7 @@ const processPaymebnt = async (req: any, res: any, price: string) => {
 			})
 
 			logger(`${_routerName} success!`, inspect(responseData, false, 3, true))
-			process_x402()
+			// process_x402()
 
 
 		}
@@ -1258,9 +1258,6 @@ console.log('📌 Script started')
 export function flushNowAndExit() {
 	try { flushNow() } finally { process.exit(0) }
 }
-
-
-
 
 (async () => {
 	try {
