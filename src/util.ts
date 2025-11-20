@@ -1315,6 +1315,7 @@ export const BeamioFaucet = async (req: Request, res: Response) => {
 		address?: string
 	}
 	if (!address || address === ethers.ZeroAddress || !ethers.isAddress(address)) {
+		logger()
 		return res.status(403).end()
 	}
 	res.status(200).end()
@@ -1344,8 +1345,10 @@ export const BeamioPaymentLink = async (req: Request, res: Response) => {
 	}
 	const value = Number(amount)
 	if (!amount || !code || !address|| isNaN(value) || value <= 0.02|| !ethers.isHexString(code)) {
+
 		return res.status(403).end()
 	}
+	
 
 	linkMemo.push({
 		value: value.toString(),
