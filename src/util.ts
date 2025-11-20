@@ -68,7 +68,7 @@ const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNo
 //					beamio	Contract
 
 const beamiobase = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
-const beamioConet = '0xA6e6a0ac5F8b32E6ae786d969EC91C6bc1dba697'
+const beamioConet = '0xC0eE75027BF11fb43b89eE27E36303e00715c421'
 
 
 
@@ -218,8 +218,44 @@ const oracleBackoud = async () => {
 
 		logger(`Oracle backoud blockNumber ${blockNumber}`)
 		await oracolPrice()
+		await FaucetUserProcess()
 		logger(`Oracle Price BNB ${oracle.bnb} ETH ${oracle.eth}`)
 	})
+
+}
+
+
+const FaucetUserProcess = async () => {
+
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		return
+	}
+
+	const betchAddrs: string[] = []
+	FaucetUser.forEach((value, addr) => {
+		if (value) {
+			return
+		}
+		betchAddrs.push(addr)
+		FaucetUser.set (addr, true)
+	})
+
+	if (!betchAddrs.length) {
+		Settle_ContractPool.push(SC)
+		return
+	}
+
+	try {
+		const tx = await SC.conetSC.newUserBetch(betchAddrs)
+		await tx.wait()
+
+		console.log(`FaucetUserProcess success ${tx.hash} address number = ${betchAddrs.length}`)
+	}catch (ex: any) {
+		logger(`FaucetUserProcess Error! ${ex.message}`)
+	}
+	
+	Settle_ContractPool.push(SC)
 
 }
 
@@ -1071,9 +1107,6 @@ let pendingEstimate:
   | null = null
 
 
-
-
-
 export const estimateErc20TransferGas = async (
 	usdc: string,
 	RecipientAddress: string,
@@ -1172,6 +1205,7 @@ const linkMemo: {
 }[]= []
 
 const baseChainID = 8453
+
 const linkMemoGenerate = async() => {
 	const obj = linkMemo.shift()
 	if (!obj) {
@@ -1199,7 +1233,6 @@ const linkMemoGenerate = async() => {
 
 	Settle_ContractPool.push(SC)
 	setTimeout(() => linkMemoGenerate, 1000)
-
 
 }
 
@@ -1275,6 +1308,33 @@ export const getBalance = async (address: string) => {
   }
 }
 
+const FaucetUser: Map<string, boolean> = new Map()
+
+export const BeamioFaucet = async (req: Request, res: Response) => {
+	const { address } = req.query as {
+		address?: string
+	}
+	if (!address || address === ethers.ZeroAddress || !ethers.isAddress(address)) {
+		return res.status(403).end()
+	}
+	res.status(200).end()
+	const addr = address.toLowerCase()
+	const SC = Settle_ContractPool[0]
+
+	const isProcess = FaucetUser.get(addr)
+	if (typeof isProcess === 'boolean') return
+
+	try {
+		const isNew = await SC.conetSC.faucetClaimed(address)
+		if (!isNew) {
+			FaucetUser.set(address, false)
+		}
+	} catch (ex: any) {
+		logger(`BeamioFaucet call faucetClaimed error! ${ex.message}`)
+	}
+
+}
+
 export const BeamioPaymentLink = async (req: Request, res: Response) => {
 	const { code, amount, note, address } = req.query as {
 		amount?: string
@@ -1286,8 +1346,6 @@ export const BeamioPaymentLink = async (req: Request, res: Response) => {
 	if (!amount || !code || !address|| isNaN(value) || value <= 0.02|| !ethers.isHexString(code)) {
 		return res.status(403).end()
 	}
-
-
 
 	linkMemo.push({
 		value: value.toString(),
@@ -1324,6 +1382,9 @@ const test2 = async () => {
 	const kkk = await estimateErc20TransferGas('0.1', '0xD36Fc9d529B9Cc0b230942855BA46BC9CA772A88', '0xC8F855Ff966F6Be05cD659A5c5c7495a66c5c015')
 	logger(inspect(kkk, false, 3, true))
 }
+
+
+
 
 // setTimeout(() => test1(), 5000)
 // setTimeout(() => {test2()}, 2000)

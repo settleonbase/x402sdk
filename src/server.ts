@@ -11,7 +11,9 @@ import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
-import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, x402ProcessPool, MINT_RATE, getBalance, estimateErc20TransferGas, BeamioTransfer, getOracleRequest, verifyPaymentNew, BeamioPaymentLink} from './util'
+import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, x402ProcessPool, MINT_RATE, BeamioFaucet,
+	getBalance, estimateErc20TransferGas, BeamioTransfer, getOracleRequest, verifyPaymentNew, BeamioPaymentLink,
+} from './util'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import { exact } from "x402/schemes";
 import {
@@ -29,9 +31,6 @@ const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,mas
 const {verify, settle} = useFacilitator(facilitator1)
 
 const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
-
-
-
 
 const x402Version = 1
 
@@ -940,10 +939,11 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/BeamioPaymentLink', async (req,res) => {
-
 		return BeamioPaymentLink(req, res)
-		
+	})
 
+	router.get('/BeamioFaucet', async (req,res) => {
+		return BeamioFaucet(req, res)
 	})
 
 	// router.get('/estimateNativeBaseTransferGas', async (req,res) => {
