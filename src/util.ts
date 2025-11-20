@@ -226,7 +226,7 @@ const oracleBackoud = async () => {
 
 
 const FaucetUserProcess = async () => {
-
+	logger(`FaucetUserProcess starting!`)
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
 		return
