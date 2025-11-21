@@ -68,7 +68,7 @@ const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNo
 //					beamio	Contract
 
 const beamiobase = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
-const beamioConet = '0xC0eE75027BF11fb43b89eE27E36303e00715c421'
+const beamioConet = '0x85bee2234C3f537B2AA24e6421830F7d57203b35'
 
 
 
@@ -501,9 +501,10 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 	const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
 	const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
 
-	const { amount, toAddress } = req.query as {
+	const { amount, toAddress, note } = req.query as {
 		amount?: string
 		toAddress?: string
+		note?: string
 	}
 
 	const _price = amount|| '0'
@@ -580,7 +581,7 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 			const to = authorization.to
 			const amount = authorization.value
 
-			transferRecord.push({from, to, amount, finishedHash: responseData?.transaction})
+			transferRecord.push({from, to, amount, finishedHash: responseData?.transaction, note: note||''})
 			transferRecordProcess()
 		}
 		
@@ -597,6 +598,7 @@ const transferRecord: {
 	to: string
 	amount: string
 	finishedHash: string
+	note: string
 }[] = []
 
 const transferRecordProcess = async () => {

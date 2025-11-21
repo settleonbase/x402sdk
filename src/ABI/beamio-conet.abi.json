@@ -6,7 +6,72 @@
 	},
 	{
 		"inputs": [],
+		"name": "AlreadyFinished",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "EthTransferFailed",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "FaucetDisabled",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "InsufficientETH",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "InvalidDepositHash",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "InvalidFinishedHash",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "InvalidFrom",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "InvalidTo",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "LinkAlreadyExists",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "LinkNotFound",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "MemoAlreadyExists",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "MemoNotFound",
+		"type": "error"
+	},
+	{
+		"inputs": [],
 		"name": "NotAdmin",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "RecordExists",
 		"type": "error"
 	},
 	{
@@ -558,6 +623,63 @@
 	{
 		"inputs": [
 			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "finishedCheckAmountPerHour",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "finishedCheckCountPerHour",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "finishedFeesPerHour",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
 				"internalType": "bytes32",
 				"name": "linkHash",
 				"type": "bytes32"
@@ -581,6 +703,44 @@
 		"name": "finishedLink",
 		"outputs": [],
 		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "finishedLinkAmountPerHour",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "finishedLinkCountPerHour",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
 		"type": "function"
 	},
 	{
@@ -612,28 +772,13 @@
 	{
 		"inputs": [
 			{
-				"internalType": "address",
-				"name": "account",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "offset",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "limit",
-				"type": "uint256"
+				"internalType": "bytes32",
+				"name": "hash",
+				"type": "bytes32"
 			}
 		],
-		"name": "getCheckHistory",
+		"name": "getCheckMemo",
 		"outputs": [
-			{
-				"internalType": "bytes32[]",
-				"name": "checkHashes",
-				"type": "bytes32[]"
-			},
 			{
 				"components": [
 					{
@@ -692,9 +837,28 @@
 						"type": "address"
 					}
 				],
-				"internalType": "struct CheckMemo[]",
-				"name": "checks",
-				"type": "tuple[]"
+				"internalType": "struct CheckMemo",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "account",
+				"type": "address"
+			}
+		],
+		"name": "getCheckMemosLength",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
 			}
 		],
 		"stateMutability": "view",
@@ -728,159 +892,6 @@
 				"internalType": "uint256",
 				"name": "_totalAmountOfFees",
 				"type": "uint256"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "account",
-				"type": "address"
-			}
-		],
-		"name": "getHistoryAll",
-		"outputs": [
-			{
-				"internalType": "bytes32[]",
-				"name": "checkHashes",
-				"type": "bytes32[]"
-			},
-			{
-				"components": [
-					{
-						"internalType": "address",
-						"name": "from",
-						"type": "address"
-					},
-					{
-						"internalType": "bytes32",
-						"name": "successAuthorizationHash",
-						"type": "bytes32"
-					},
-					{
-						"internalType": "uint256",
-						"name": "chianID",
-						"type": "uint256"
-					},
-					{
-						"internalType": "address",
-						"name": "erc3009Address",
-						"type": "address"
-					},
-					{
-						"internalType": "string",
-						"name": "node",
-						"type": "string"
-					},
-					{
-						"internalType": "uint256",
-						"name": "amount",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint256",
-						"name": "decimals",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint256",
-						"name": "createTimestamp",
-						"type": "uint256"
-					},
-					{
-						"internalType": "bytes32",
-						"name": "depositHash",
-						"type": "bytes32"
-					},
-					{
-						"internalType": "uint256",
-						"name": "depositTimestamp",
-						"type": "uint256"
-					},
-					{
-						"internalType": "address",
-						"name": "to",
-						"type": "address"
-					}
-				],
-				"internalType": "struct CheckMemo[]",
-				"name": "checks",
-				"type": "tuple[]"
-			},
-			{
-				"internalType": "bytes32[]",
-				"name": "linkHashes",
-				"type": "bytes32[]"
-			},
-			{
-				"components": [
-					{
-						"internalType": "address",
-						"name": "to",
-						"type": "address"
-					},
-					{
-						"internalType": "bytes32",
-						"name": "successAuthorizationHash",
-						"type": "bytes32"
-					},
-					{
-						"internalType": "uint256",
-						"name": "chianID",
-						"type": "uint256"
-					},
-					{
-						"internalType": "address",
-						"name": "erc3009Address",
-						"type": "address"
-					},
-					{
-						"internalType": "string",
-						"name": "node",
-						"type": "string"
-					},
-					{
-						"internalType": "uint256",
-						"name": "amount",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint256",
-						"name": "decimals",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint256",
-						"name": "issueTimestamp",
-						"type": "uint256"
-					},
-					{
-						"internalType": "bytes32",
-						"name": "payHash",
-						"type": "bytes32"
-					},
-					{
-						"internalType": "uint256",
-						"name": "payTimestamp",
-						"type": "uint256"
-					},
-					{
-						"internalType": "address",
-						"name": "from",
-						"type": "address"
-					},
-					{
-						"internalType": "uint256",
-						"name": "payAmount",
-						"type": "uint256"
-					}
-				],
-				"internalType": "struct LinkMemo[]",
-				"name": "links",
-				"type": "tuple[]"
 			}
 		],
 		"stateMutability": "view",
@@ -951,28 +962,13 @@
 	{
 		"inputs": [
 			{
-				"internalType": "address",
-				"name": "account",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "offset",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "limit",
-				"type": "uint256"
+				"internalType": "bytes32",
+				"name": "hash",
+				"type": "bytes32"
 			}
 		],
-		"name": "getLinksHistory",
+		"name": "getLinkMemo",
 		"outputs": [
-			{
-				"internalType": "bytes32[]",
-				"name": "linkHashes",
-				"type": "bytes32[]"
-			},
 			{
 				"components": [
 					{
@@ -1036,9 +1032,28 @@
 						"type": "uint256"
 					}
 				],
-				"internalType": "struct LinkMemo[]",
-				"name": "links",
-				"type": "tuple[]"
+				"internalType": "struct LinkMemo",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "account",
+				"type": "address"
+			}
+		],
+		"name": "getLinkMemosLength",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
 			}
 		],
 		"stateMutability": "view",
@@ -1100,28 +1115,13 @@
 	{
 		"inputs": [
 			{
-				"internalType": "address",
-				"name": "account",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "offset",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "limit",
-				"type": "uint256"
+				"internalType": "bytes32",
+				"name": "hash",
+				"type": "bytes32"
 			}
 		],
-		"name": "getTransferHistory",
+		"name": "getTransferMemo",
 		"outputs": [
-			{
-				"internalType": "bytes32[]",
-				"name": "hashes",
-				"type": "bytes32[]"
-			},
 			{
 				"components": [
 					{
@@ -1148,11 +1148,35 @@
 						"internalType": "bytes32",
 						"name": "finisedHash",
 						"type": "bytes32"
+					},
+					{
+						"internalType": "string",
+						"name": "node",
+						"type": "string"
 					}
 				],
-				"internalType": "struct ItransferMemo[]",
-				"name": "items",
-				"type": "tuple[]"
+				"internalType": "struct ItransferMemo",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "account",
+				"type": "address"
+			}
+		],
+		"name": "getTransferMemosLength",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
 			}
 		],
 		"stateMutability": "view",
@@ -1318,6 +1342,25 @@
 		"name": "newUserBetch",
 		"outputs": [],
 		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "newUsersPerHour",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
 		"type": "function"
 	},
 	{
@@ -1541,6 +1584,11 @@
 				"internalType": "bytes32",
 				"name": "finisedHash",
 				"type": "bytes32"
+			},
+			{
+				"internalType": "string",
+				"name": "node",
+				"type": "string"
 			}
 		],
 		"stateMutability": "view",
@@ -1567,6 +1615,11 @@
 				"internalType": "bytes32",
 				"name": "finishedHash",
 				"type": "bytes32"
+			},
+			{
+				"internalType": "string",
+				"name": "note",
+				"type": "string"
 			}
 		],
 		"name": "transferRecord",
