@@ -619,7 +619,8 @@ const transferRecordProcess = async () => {
 			obj.from,
 			obj.to,
 			obj.amount,
-			obj.finishedHash
+			obj.finishedHash,
+			obj.note
 		)
 		await tx.wait()
 	} catch (ex: any) {
