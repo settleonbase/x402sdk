@@ -589,8 +589,9 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 			
 	} catch (ex: any) {
 		console.error("Payment settlement failed:", ex.message)
+		res.status(500).end()
 	}
-
+	
 }
 
 const transferRecord: {
