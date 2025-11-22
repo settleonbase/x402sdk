@@ -109,6 +109,11 @@
 						"internalType": "address",
 						"name": "to",
 						"type": "address"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "payHash",
+						"type": "bytes32"
 					}
 				],
 				"internalType": "struct CheckMemo[]",
@@ -205,6 +210,11 @@
 						"internalType": "address",
 						"name": "to",
 						"type": "address"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "payHash",
+						"type": "bytes32"
 					}
 				],
 				"internalType": "struct CheckMemo[]",
@@ -301,6 +311,11 @@
 						"internalType": "address",
 						"name": "to",
 						"type": "address"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "payHash",
+						"type": "bytes32"
 					}
 				],
 				"internalType": "struct CheckMemo[]",
@@ -397,6 +412,11 @@
 						"internalType": "address",
 						"name": "to",
 						"type": "address"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "payHash",
+						"type": "bytes32"
 					}
 				],
 				"internalType": "struct CheckMemo[]",
@@ -493,6 +513,11 @@
 						"internalType": "address",
 						"name": "to",
 						"type": "address"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "payHash",
+						"type": "bytes32"
 					}
 				],
 				"internalType": "struct CheckMemo[]",
@@ -589,6 +614,11 @@
 						"internalType": "address",
 						"name": "to",
 						"type": "address"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "payHash",
+						"type": "bytes32"
 					}
 				],
 				"internalType": "struct CheckMemo[]",
@@ -709,6 +739,11 @@
 						"internalType": "address",
 						"name": "to",
 						"type": "address"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "payHash",
+						"type": "bytes32"
 					}
 				],
 				"internalType": "struct CheckMemo[]",

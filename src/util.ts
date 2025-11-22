@@ -580,8 +580,11 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 			const from = authorization.from
 			const to = authorization.to
 			const amount = authorization.value
-
-			transferRecord.push({from, to, amount, finishedHash: responseData?.transaction, note: note||''})
+			const record = {
+				from, to, amount, finishedHash: responseData?.transaction, note: note||''
+			}
+			transferRecord.push(record)
+			logger(inspect(record, false, 3, true))
 			transferRecordProcess()
 		}
 		
