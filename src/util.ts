@@ -1228,7 +1228,7 @@ const linkMemoGenerate = async() => {
 		)
 		obj.res.status(200).json({success: true, hash: tx.hash}).end()
 		await tx.wait()
-		logger(`linkMemoGenerate Success, ${tx.hash}!`)
+		logger(`linkMemoGenerate Success, ${tx.hash}!`, inspect(obj, false, 3, true))
 
 	} catch (ex: any) {
 		logger(`linkMemoGenerate Error, ${ex.message}`)
