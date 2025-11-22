@@ -486,6 +486,11 @@
 				"internalType": "address",
 				"name": "to",
 				"type": "address"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "payHash",
+				"type": "bytes32"
 			}
 		],
 		"stateMutability": "view",
@@ -532,6 +537,11 @@
 				"internalType": "string",
 				"name": "note",
 				"type": "string"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "GenerateHash",
+				"type": "bytes32"
 			}
 		],
 		"name": "checkMemoGenerate",
@@ -835,6 +845,11 @@
 						"internalType": "address",
 						"name": "to",
 						"type": "address"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "payHash",
+						"type": "bytes32"
 					}
 				],
 				"internalType": "struct CheckMemo",
