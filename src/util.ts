@@ -1568,7 +1568,7 @@ const finishedPayLinkProcess = async () => {
 		finishedPayLinkPool.unshift(obj)
 		return setTimeout(() => {
 			finishedPayLinkProcess()
-		}, 2000)
+		}, 4000)
 	}
 	try {
 		const tx = await SC.conetSC.finishedLink(obj.linkHash, obj.depositHash, obj.from, obj.payAmount)
@@ -1576,10 +1576,11 @@ const finishedPayLinkProcess = async () => {
 		logger(`finishedPayLinkProcess success!`, tx.hash)
 	} catch (ex:any) {
 		logger(`finishedPayLinkProcess Error!`, ex.message)
+		finishedPayLinkPool.unshift(obj)
 	}
 
 	Settle_ContractPool.push(SC)
-	setTimeout(() => finishedPayLinkProcess(), 2000)
+	setTimeout(() => finishedPayLinkProcess(), 4000)
 
 
 }
