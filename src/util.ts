@@ -68,7 +68,7 @@ const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNo
 //					beamio	Contract
 
 const beamiobase = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
-const beamioConet = '0xd03ffdb687e9deA5965bBEc1e65c0301a68d1980'
+const beamioConet = '0x5156E93f44283CA584D09EA46E30ee14ca0abB37'
 
 
 
@@ -269,11 +269,11 @@ let Settle_ContractPool: {
 	conetSC: ethers.Contract
 }[] = []
 
-function createExactPaymentRequirements(
+function createBeamioExactPaymentRequirements(
 		price: Price,
 		resource: Resource,
 		description = "",
-		payto = CashCodeBaseAddr
+		payto: string
 	): PaymentRequirements {
 		const atomicAmountForAsset = processPriceToAtomicAmount(price, 'base')
 		if ("error" in atomicAmountForAsset) {
@@ -289,7 +289,7 @@ function createExactPaymentRequirements(
 			description,
 			mimeType: "",
 			payTo: payto,
-			maxTimeoutSeconds: 60,
+			maxTimeoutSeconds: 120,
 			asset: asset.address,
 			outputSchema: undefined,
 			extra: {
@@ -339,12 +339,13 @@ export const verifyPaymentNew = (
 			const amount = decodedPayment.payload.authorization.value
 			const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
 			const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
-			paymentRequirements = [createExactPaymentRequirements(
+			paymentRequirements = [createBeamioExactPaymentRequirements(
 				amount,
 				resource,
 				`Cashcode Payment Request`,
+				decodedPayment.payload
 				//@ts-ignore
-				decodedPayment.payload.authorization.to
+				.authorization.to
 			)]
 		}
 		const selectedPaymentRequirement =
@@ -393,7 +394,6 @@ const checkx402paymentHeader = (paymentHeader: x402paymentHeader, amount: bigint
 		return false
 	}
 	
-
 	return true
 }
 
@@ -422,11 +422,11 @@ export const cashcode_request = async (req: Request, res: Response) => {
 
 	
 
-	const paymentRequirements = [createExactPaymentRequirements(
+	const paymentRequirements = [createBeamioExactPaymentRequirements(
 		amount,
 		resource,
 		`Cashcode Payment Request`,
-		CashCodeBaseAddr
+		beamioConet
 	)]
 
 	const isValid = await verifyPaymentNew(req, res, paymentRequirements)
@@ -441,7 +441,7 @@ export const cashcode_request = async (req: Request, res: Response) => {
 	const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
 	const saleRequirements = paymentRequirements[0]
 
-	const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, price, CashCodeBaseAddr)
+	const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, price, beamioConet)
 
 	if (!isValidPaymentHeader) {
 		logger(`${_routerName} checkx402paymentHeader Error!`,inspect(paymentHeader))
@@ -516,7 +516,7 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 	}
 
 
-	const paymentRequirements = [createExactPaymentRequirements(
+	const paymentRequirements = [createBeamioExactPaymentRequirements(
 		amount,
 		resource,
 		`Beamio Transfer`,
@@ -634,6 +634,8 @@ const transferRecordProcess = async () => {
 	Settle_ContractPool.push(SC)
 	setTimeout(() => {transferRecordProcess()}, 1000)
 }
+
+
 
 
 
@@ -802,7 +804,7 @@ const testInConet = async () => {
 }
 
 const testInBase = async () => {
-	const kk = await AuthorizationSign ("0.11", CashCodeBaseAddr, masterSetup.settle_contractAdmin[0], USDC_Base_DECIMALS, conet_chainID, conet_USDC)
+	const kk = await AuthorizationSign ("0.11", beamioConet, masterSetup.settle_contractAdmin[0], USDC_Base_DECIMALS, conet_chainID, conet_USDC)
 }
 
 const processCheck = async() => {
@@ -1002,7 +1004,7 @@ export const facilitators = async () => {
 		// })
 
 		const tx = await SC.baseUSDC.transferWithAuthorization(
-			obj.from, SETTLEContract, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature
+			obj.from, beamiobase, obj.value, obj.validAfter, obj.validBefore, obj.nonce, obj.signature
 		)
 
 		// const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
@@ -1208,7 +1210,7 @@ const linkMemo: {
 	to: string
 	value: string
 	note: string
-	res: Response
+	res: Response|null
 }[]= []
 
 const baseChainID = 8453
@@ -1229,13 +1231,15 @@ const linkMemoGenerate = async() => {
 		const tx = await SC.conetSC.linkMemoGenerate(
 			obj.linkHash, obj.to, obj.value, baseChainID, USDCContract_BASE, USDC_Base_DECIMALS, obj.note
 		)
-		obj.res.status(200).json({success: true, hash: tx.hash}).end()
+
+		if (obj.res) obj.res.status(200).json({success: true, hash: tx.hash}).end()
+		
 		await tx.wait()
 		logger(`linkMemoGenerate Success, ${tx.hash}!`, inspect({linkHash: obj.linkHash, to:  obj.to, value: obj.value, note: obj.note}, false, 3, true))
 
 	} catch (ex: any) {
 		logger(`linkMemoGenerate Error, ${ex.message}`)
-		obj.res.status(200).json({success: false}).end()
+		if (obj.res) obj.res.status(200).json({success: false}).end()
 	}
 
 	Settle_ContractPool.push(SC)
@@ -1343,6 +1347,244 @@ export const BeamioFaucet = async (req: Request, res: Response) => {
 
 }
 
+const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: string): Promise<boolean> => {
+	
+		logger (`BeamioGateway: `, inspect({amt, wallet}))
+
+		const _routerName = req.path
+		const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
+
+		const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
+		
+		if (!amt) {
+			logger(`processPayment ${_routerName} price=${amt} Error!`)
+			res.status(404).end()
+			return false
+		}
+
+		const price = parseFloat(amt)
+		if (isNaN(price) || price <= 0.02 || !wallet) {
+			logger(`processPayment isNaN(price) || price <= 0 || !wallet Error! `)
+			res.status(403).json({success: 'Data format error!'}).end()
+			return false
+		}
+
+
+		const paymentRequirements = [createBeamioExactPaymentRequirements(
+			amt,
+			resource,
+			`Beamio Payment Request for ${wallet}`,
+			beamiobase
+		)]
+
+
+		const isValid = await verifyPaymentNew(req, res, paymentRequirements)
+
+		if (!isValid) {
+			res.status(402).end()
+			return false
+		}
+
+		let responseData: x402SettleResponse
+
+		const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
+		const saleRequirements = paymentRequirements[0]
+		
+		const isValidPaymentHeader = checkx402paymentHeader(paymentHeader as x402paymentHeader, BigInt(amt), beamiobase)
+
+		if (!isValidPaymentHeader) {
+			logger(`${_routerName} checkx402paymentHeader Error!`,inspect(paymentHeader))
+			res.status(402).end()
+			return false
+		}
+
+		try {
+			// throw new Error('facilitatorsPool')
+
+			const settleResponse = await settle(
+				paymentHeader,
+				saleRequirements
+			)
+
+
+			const responseHeader = settleResponseHeader(settleResponse)
+
+			// In a real application, you would store this response header
+			// and associate it with the payment for later verification
+			
+			responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
+			
+			if (!responseData.success) {
+				logger(`${_routerName} responseData ERROR!`, inspect(responseData, false, 3, true))
+				res.status(402).end()
+				return false
+			}
+
+
+		} catch (error) {
+			console.error("Payment settlement failed:", error);
+
+			// In a real application, you would handle the failed payment
+			// by marking it for retry or notifying the user
+			const payload: payload = paymentHeader?.payload as payload
+			if (payload?.authorization) {
+				facilitatorsPool.push({
+					from: payload.authorization.from,
+					value: payload.authorization.value,
+					validAfter: payload.authorization.validAfter,
+					validBefore: payload.authorization.validBefore,
+					nonce: payload.authorization.nonce,
+					signature: payload.signature,
+					res: res,
+					isSettle: false
+				})
+				facilitators()
+
+				return true
+			}
+			
+			logger(inspect({paymentHeader, saleRequirements}, false, 3, true))
+
+			res.status(402).end()
+			return false
+		}
+
+
+		const ret: x402Response = {
+			success: true,
+			payer: wallet,
+			USDC_tx: responseData?.transaction,
+			network: responseData?.network,
+			timestamp: new Date().toISOString()
+		}
+		res.status(200).json(ret).end()
+		return true
+}
+
+
+
+
+
+
+const declaneAddress = '0x1000000000000000000000000000000000000000'
+
+
+
+export const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
+	let { code, amount } = req.query as {
+		amount?: string
+		code?: string
+	}
+
+	const totalAmount = Number(amount)
+
+	//		check step 1
+	if (!code || !ethers.isHexString(code) || isNaN(totalAmount)) {
+		logger(`BeamioPaymentLinkFinish check step 1 Error! !code == ${!code} || !ethers.isHexString(code) == ${!ethers.isHexString(code)} || isNaN(totalAmount) ${isNaN(totalAmount)}`)
+		return res.status(404).end()
+	}
+
+	const SC = Settle_ContractPool[0]
+
+	try {
+		const getPayLink = await SC.conetSC.linkMemo(code)
+		const requestAmount = Number(getPayLink.amount.toString())
+
+		//			no request 
+		if (getPayLink.to === ethers.ZeroAddress) {
+			logger(`BeamioPaymentLinkFinish no request getPayLink.to === ethers.ZeroAddress Error! getPayLink.to ${getPayLink.to} `)
+			return res.status(404).end()
+		}
+
+		//			Insufficient request
+		if (totalAmount > 0 && totalAmount < requestAmount) {
+			logger(`BeamioPaymentLinkFinish totalAmount ${totalAmount} > 0 && totalAmount < requestAmount ${requestAmount} Error! `)
+			return res.status(403).end()
+		}
+
+		//				Already Used
+		if (getPayLink.from !== ethers.ZeroAddress) {
+			
+			const newCode = generateCODE('').hash
+
+			//		new Link request
+			linkMemo.push({
+				value: getPayLink.amount,
+				note: getPayLink.node,
+				linkHash: newCode,
+				res: null,
+				to: getPayLink.to
+			})
+			linkMemoGenerate()
+
+			logger(`BeamioPaymentLinkFinish Already Used create new ! ${code} ==> ${newCode}`)
+
+			code = newCode
+			//		Declane
+			
+		}
+		logger(`BeamioPaymentLinkFinish doing BeamioPayment code ${code} totalAmount ${totalAmount} !`)
+
+		if (!totalAmount) {
+			logger(`BeamioPaymentLinkFinish code ${code} Declane`)
+			finishedPayLinkPool.push({
+				linkHash: code,
+				from: declaneAddress,
+				depositHash: ethers.ZeroHash,
+				payAmount: '0'
+			})
+
+			res.status(200).json({success: true}).end()
+			return setTimeout(() => finishedPayLinkProcess(), 5000)
+		}
+
+		const requestX402 = await BeamioPayment(req, res, totalAmount.toString(), beamiobase)
+		if (!requestX402) {
+			logger(``)
+		}
+
+
+	} catch (ex: any) {
+		return res.status(403).end()
+	}
+
+}
+
+const finishedPayLinkPool: {
+	linkHash: string
+	depositHash: string
+	from: string
+	payAmount: string
+
+}[] = []
+
+const finishedPayLinkProcess = async () => {
+	const obj = finishedPayLinkPool.shift()
+	if (!obj) {
+		return
+	}
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		finishedPayLinkPool.unshift(obj)
+		return setTimeout(() => {
+			finishedPayLinkProcess()
+		}, 2000)
+	}
+	try {
+		const tx = await SC.conetSC.finishedLink(obj.linkHash, obj.depositHash, obj.from, obj.payAmount)
+		await tx.wait()
+		logger(`finishedPayLinkProcess success!`, tx.hash)
+	} catch (ex:any) {
+		logger(`finishedPayLinkProcess Error!`, ex.message)
+	}
+
+	Settle_ContractPool.push(SC)
+	setTimeout(() => finishedPayLinkProcess(), 2000)
+
+
+}
+
+
 export const BeamioPaymentLink = async (req: Request, res: Response) => {
 	const { code, amount, note, address } = req.query as {
 		amount?: string
@@ -1350,15 +1592,19 @@ export const BeamioPaymentLink = async (req: Request, res: Response) => {
 		note?: string
 		address?: string
 	}
-	const value = Number(amount)
-	if (!amount || !code || !address|| isNaN(value) || value <= 0.02|| !ethers.isHexString(code)) {
+	const totalAmount = Number(amount)
+	if (!amount || !code || !address|| isNaN(totalAmount) || !ethers.isHexString(code)) {
+		return res.status(404).end()
+	}
 
+	const value = Number(ethers.formatUnits(amount, 6))
+
+	if (value <= 0.02) {
 		return res.status(403).end()
 	}
-	
 
 	linkMemo.push({
-		value: value.toString(),
+		value: amount,
 		note: note||'',
 		linkHash: code,
 		res,
