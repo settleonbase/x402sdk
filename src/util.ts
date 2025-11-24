@@ -32,10 +32,18 @@ import GuardianOracle_ABI from './ABI/GuardianOracle_ABI.json'
 import newNodeInfoABI from './ABI/newNodeInfoABI.json'
 import beamiobaseABI from './ABI/beamio-base-abi.json'
 import beamioConetABI from './ABI/beamio-conet.abi.json'
+import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 
 const setupFile = join( homedir(),'.master.json' )
 
 
+const getIpAddressFromForwardHeader = (req: Request) => {
+	const ipaddress = req.headers['X-Real-IP'.toLowerCase()]
+	if (!ipaddress||typeof ipaddress !== 'string') {
+		return ''
+	}
+	return ipaddress
+}
 
 logger( homedir())
 export const masterSetup: IMasterSetup = require ( setupFile )
@@ -69,6 +77,7 @@ const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNo
 
 const beamiobase = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
 const beamioConet = '0x5156E93f44283CA584D09EA46E30ee14ca0abB37'
+const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
 
 
 
@@ -203,61 +212,142 @@ const oracleBackoud = async () => {
 			// baseWalletClient: walletClientBase,
 			baseSC: new ethers.Contract(beamiobase, beamiobaseABI, walletBase),
 			baseUSDC: new ethers.Contract(USDCContract_BASE, USDC_ABI, walletBase),
+			privateKey: n,
+			wallet: walletBase,
 			// conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
 			conetSC: new ethers.Contract(beamioConet, beamioConetABI, walletConet),
 			// event: new ethers.Contract(eventContract, Event_ABI, walletConet),
+			conetAirdrop: new ethers.Contract(airdropRecord, conetAirdropABI, walletConet),
 		}
 	})
 
 	oracolPrice()
 	providerConet.on('block', async (blockNumber) => {
 
-		if (blockNumber % 20 !== 0) {
+		if (blockNumber % 10 !== 0) {
 			return
 		}
 
 		logger(`Oracle backoud blockNumber ${blockNumber}`)
 		await oracolPrice()
-		await FaucetUserProcess()
 		logger(`Oracle Price BNB ${oracle.bnb} ETH ${oracle.eth}`)
 	})
 
 }
 
 
-const FaucetUserProcess = async () => {
-	logger(`FaucetUserProcess starting!`)
+
+const resource = `https://beamio.app/api/payment` as Resource
+
+const USDC_FaucetAmount = '0.1'
+const usdcFaucetAmount = ethers.parseUnits(USDC_FaucetAmount, 6)
+
+
+const processUSDC_Faucet = async () => {
+	const obj = FaucetUserPool.shift()
+	if (!obj) {
+		return
+	}
+
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
-		return
+		FaucetUserPool.unshift(obj)
+		return setTimeout(() => processUSDC_Faucet(), 2000)
 	}
 
-	const betchAddrs: string[] = []
-	FaucetUser.forEach((value, addr) => {
-		if (value) {
+	logger(`processUSDC_Faucet start! ${obj}`)
+	const paymentRequirements = createBeamioExactPaymentRequirements(
+		USDC_FaucetAmount.toString(),
+		resource,
+		`Beamio Transfer`,
+		obj.wallet
+	)
+
+	const paymentHeader = {
+			network: 'base',
+			payload: await AuthorizationSign(USDC_FaucetAmount, obj.wallet, SC.privateKey, 6, baseChainID.toString(), USDCContract_BASE),
+			scheme:'exact',
+			x402Version: 1
+		}
+	try {
+		
+		const settleResponse = await settle(
+			//@ts-ignore
+			paymentHeader,
+			paymentRequirements)
+		const responseHeader = settleResponseHeader(settleResponse)
+
+		// In a real application, you would store this response header
+		// and associate it with the payment for later verification
+		
+		const responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
+		
+		if (!responseData.success) {
+			logger(`processUSDC_Faucet responseData ERROR!`, inspect(responseData, false, 3, true))
 			return
 		}
-		betchAddrs.push(addr)
-		FaucetUser.set (addr, true)
-	})
 
-	if (!betchAddrs.length) {
-		Settle_ContractPool.push(SC)
-		return
-	}
+		logger(`processUSDC_Faucet processUSDC_Faucet success! ${responseData?.transaction}`)
 
-	try {
-		const tx = await SC.conetSC.newUserBetch(betchAddrs)
+		const tx = await SC.conetSC.transferRecord(
+			SC.wallet.address,
+			obj.wallet,
+			usdcFaucetAmount,
+			responseData?.transaction,
+			'Beamio.app Faucet'
+		)
+
+		
+		
 		await tx.wait()
-
-		console.log(`FaucetUserProcess success ${tx.hash} address number = ${betchAddrs.length}`)
-	}catch (ex: any) {
-		logger(`FaucetUserProcess Error! ${ex.message}`)
+		const tr = await SC.conetAirdrop.airdrop(obj.wallet, obj.ipaddress)
+		await tr.wait()
+		logger(`processUSDC_Faucet record to CoNET success ${tx.hash} ${tr.hash}`)
+		
+	} catch (ex: any) {
+		if (/500 Internal Server/i.test( ex.message)) {
+			FaucetUserPool.unshift(obj)
+		}
+		logger(`processUSDC_Faucet Error!`, ex.message)
+		
 	}
-	
 	Settle_ContractPool.push(SC)
-
+	setTimeout(() => processUSDC_Faucet(), 2000)
 }
+
+// const FaucetUserProcess = async () => {
+// 	logger(`FaucetUserProcess starting! length = ${FaucetUser.size}`)
+// 	const SC = Settle_ContractPool.shift()
+// 	if (!SC) {
+// 		return
+// 	}
+
+// 	const betchAddrs: string[] = []
+// 	FaucetUser.forEach((value, addr) => {
+// 		if (value) {
+// 			return
+// 		}
+// 		betchAddrs.push(addr)
+// 		USDC_FaucetPool.push(addr)
+// 		FaucetUser.set (addr, true)
+// 	})
+
+// 	if (!betchAddrs.length) {
+// 		Settle_ContractPool.push(SC)
+// 		return
+// 	}
+
+// 	try {
+// 		const tx = await SC.conetSC.newUserBetch(betchAddrs)
+// 		await tx.wait()
+// 		console.log(`FaucetUserProcess success ${tx.hash} address number = ${betchAddrs.length}`)
+// 	}catch (ex: any) {
+// 		logger(`FaucetUserProcess Error! ${ex.message}`)
+// 	}
+	
+// 	Settle_ContractPool.push(SC)
+// 	processUSDC_Faucet()
+// }
 
 const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
@@ -267,6 +357,9 @@ let Settle_ContractPool: {
 	baseSC: ethers.Contract
 	baseUSDC: ethers.Contract
 	conetSC: ethers.Contract
+	privateKey: string
+	wallet: ethers.Wallet
+	conetAirdrop: ethers.Contract
 }[] = []
 
 function createBeamioExactPaymentRequirements(
@@ -419,8 +512,6 @@ export const cashcode_request = async (req: Request, res: Response) => {
 		logger(`${_routerName} Error! The minimum amount was not reached.`,inspect(req.query, false, 3, true))
 		return res.status(400).json({success: false, error: 'The minimum amount was not reached.'})
 	}
-
-	
 
 	const paymentRequirements = [createBeamioExactPaymentRequirements(
 		amount,
@@ -651,12 +742,14 @@ const generateCODE = (passcode: string) => {
 
 
 type AuthorizationPayload = {
-	from: string;
-	to: string;
-	value: bigint;
-	validAfter: bigint;
-	validBefore: bigint;
-	nonce: `0x${string}`;
+	authorization: {
+		from: string
+		to: string
+		value: bigint
+		validAfter: bigint
+		validBefore: bigint
+		nonce: `0x${string}`
+	}
 	signature: `0x${string}`; // 65 字节 (r,s,v)
 }
 
@@ -676,17 +769,17 @@ export async function AuthorizationSign(
 	const value = ethers.parseUnits(amount, DECIMALS)     // bigint
 	const now = BigInt(Math.floor(Date.now() / 1000))
 	const validAfter = now - 60n
-	const validBefore = now      // 1 分钟有效
+	const validBefore = now + 60n     // 1 分钟有效
 
 	// 3) 随机 nonce（bytes32）
 	const nonce = ethers.hexlify(ethers.randomBytes(32)) as `0x${string}`
 
 	// 4) EIP-712 域 & 类型 & 数据（与你合约里的 TYPEHASH 字段严格一致）
 	const domain = {
-		name: "USDC",          // ERC20Permit(name) -> 你的合约构造里是 "USDC"
-		version: "1",          // OpenZeppelin ERC20Permit 的默认版本是 "1"
-		chainId: CHAIN_ID,     // 必须与链实际 ID 一致
-		verifyingContract: TOKEN_ADDRESS,
+		name: "USD Coin",          // ERC20Permit(name) -> 你的合约构造里是 "USDC"
+		version: "2",          // OpenZeppelin ERC20Permit 的默认版本是 "1"
+		chainId: 8453,     // 必须与链实际 ID 一致
+		verifyingContract: USDCContract_BASE,
 	} as const;
 
 	const AuthorizationTypes = {
@@ -713,13 +806,16 @@ export async function AuthorizationSign(
 	const signature = await wallet.signTypedData(domain, AuthorizationTypes, message) as `0x${string}`
 
 	return {
-		from,
-		to,
-		value,
-		validAfter,
-		validBefore,
-		nonce,
 		signature,
+		authorization:
+		{
+			from,
+			to,
+			value,
+			validAfter,
+			validBefore,
+			nonce,
+		}
 	}
 }
 
@@ -742,36 +838,6 @@ export async function AuthorizationSign(
 // 	}
 // }
 
-const AuthorizationCallCashCode = async (data: AuthorizationPayload, hash: string, erc3009Addr: string) => {
-	const SC = Settle_ContractPool[0]
-	try {
-		const tx = await SC.conetSC.depositWith3009Authorization(
-			data.from,
-			erc3009Addr,
-			data.value,
-			data.validAfter,
-			data.validBefore,
-			data.nonce,
-			data.signature,
-			hash
-		)
-		await tx.wait()
-		logger(`AuthorizationCallCashCode success ${tx.hash}`)
-	} catch (ex: any) {
-		logger(`AuthorizationCallCashCode Error! ${ex.message}`)
-	}
-}
-
-const getHashDetail = async (hash: string) => {
-	const SC = Settle_ContractPool[0]
-	try {
-		const tx = await SC.conetSC.hashAmount(hash)
-		
-		logger(inspect(tx, false, 3, true))
-	} catch (ex: any) {
-		logger(`getHashDetail Error! ${ex.message}`)
-	}
-}
 
 const withdrawWithCode = async(code: string, passcode: string, to: string) => {
 	const SC = Settle_ContractPool[0]
@@ -1319,32 +1385,55 @@ export const getBalance = async (address: string) => {
   }
 }
 
-const FaucetUser: Map<string, boolean> = new Map()
+const FaucetUser:string[] = []
+const FaucetIPAddress: string[] = []
+const FaucetUserPool: {
+	wallet: string
+	ipaddress: string
+}[] = []
 
 export const BeamioFaucet = async (req: Request, res: Response) => {
+	let ipaddress = getIpAddressFromForwardHeader(req)
 	const { address } = req.query as {
 		address?: string
 	}
 	if (!address || address === ethers.ZeroAddress || !ethers.isAddress(address)) {
-		logger()
+		logger(`BeamioFaucet Error@! !address || address === ethers.ZeroAddress || !ethers.isAddress(address)`)
 		return res.status(403).end()
 	}
-	res.status(200).end()
+	
 	const addr = address.toLowerCase()
 	const SC = Settle_ContractPool[0]
 
-	const isProcess = FaucetUser.get(addr)
-	if (typeof isProcess === 'boolean') return
+	
+
+	if (FaucetUser.indexOf(address)  > -1 || !ipaddress || FaucetIPAddress.indexOf(ipaddress) > -1 ) {
+		logger(`BeamioFaucet ${addr}:${ipaddress} already!`)
+		return res.status(403).end()
+	}
+	FaucetIPAddress.push(ipaddress)
+	FaucetUser.push(address)
 
 	try {
-		const isNew = await SC.conetSC.faucetClaimed(address)
-		if (!isNew) {
-			FaucetUser.set(address, false)
+		const isNew = await SC.conetAirdrop.mayAirdrop(address, ipaddress)
+		if (isNew) {
+			logger(`BeamioFaucet ${addr}:${ipaddress} added to Pool!`)
+			res.status(200).json({success: true}).end()
+			FaucetUserPool.push({
+				wallet: address,
+				ipaddress
+			})
+			processUSDC_Faucet()
+			return
 		}
+		res.status(403).end()
+		return logger(`BeamioFaucet ${addr}:${ipaddress} already in mayAirdrop !!`)
 	} catch (ex: any) {
 		logger(`BeamioFaucet call faucetClaimed error! ${ex.message}`)
-	}
 
+	}
+	res.status(500).end()
+	logger(`BeamioFaucet ${addr}:${ipaddress} error`)
 }
 
 const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: string): Promise<false|payload> => {
@@ -1459,8 +1548,6 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 	setTimeout(() => depositWith3009AuthorizationPayLinkProcess(), 3000)
 
 }
-
-
 
 
 const declaneAddress = '0x1000000000000000000000000000000000000000'
