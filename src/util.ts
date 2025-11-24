@@ -855,6 +855,43 @@ const withdrawWithCode = async(code: string, passcode: string, to: string) => {
 
 
 
+export const generateCheck = async (req: Request, res: Response) => {
+	const { amount, note, secureCode } = req.query as {
+		secureCode?: string
+		note?: string
+		amount?: string
+	}
+
+	const totalAmount = Number(amount)
+
+	if (!amount|| isNaN(totalAmount) || totalAmount <= 0.02 || !secureCode || !ethers.isHexString(secureCode)) {
+		logger(`generateCheck stage 1 error!`)
+		return res.status(403)
+	}
+	const SC = Settle_ContractPool[0]
+	try {
+		const [from] = await SC.conetSC.checkMemo(secureCode)
+		if (from !== ethers.ZeroAddress)
+		{
+			logger(`withdrawWithCode ${secureCode} is exiets `)
+			return res.status(403).end()
+		}
+
+		const requestX402 = await BeamioPayment(req, res, amount, beamiobase)
+		if (!requestX402|| !requestX402?.authorization) {
+			return res.status(403).end()
+		}
+		
+
+	} catch (ex) {
+		logger(`generateCheck SC.conetSC.checkMemo(secureCode) Error!`)
+	}
+	
+
+}
+
+
+
 const conet_chainID = '224400'
 const conet_USDC = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
 const conet_USDC_DECIMALS = 18
@@ -1712,30 +1749,9 @@ export const BeamioPaymentLink = async (req: Request, res: Response) => {
 
 }
 
-const test = async () => {
-	const SC = Settle_ContractPool[0]
-	try {
-		const ba = await SC.baseUSDC.balanceOf(USDC_conet)
-		const bas = ethers.formatUnits(ba, 6)
-		logger (`Balance ${bas}`)
-	} catch (ex: any) {
-		logger(`baseUSDC.balanceOf Error!`, ex.message)
-	}
-}
 
 oracleBackoud()
 
-
-const test1 = async () => {
-
-	const ba = await getBalance('0xC8F855Ff966F6Be05cD659A5c5c7495a66c5c015')
-	logger(`getBalance`, inspect(ba, false, 3, true))
-}
-
-const test2 = async () => {
-	const kkk = await estimateErc20TransferGas('0.1', '0xD36Fc9d529B9Cc0b230942855BA46BC9CA772A88', '0xC8F855Ff966F6Be05cD659A5c5c7495a66c5c015')
-	logger(inspect(kkk, false, 3, true))
-}
 
 
 

@@ -11,7 +11,7 @@ import {ethers, Wallet} from 'ethers'
 import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
-import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, x402ProcessPool, MINT_RATE, BeamioFaucet,
+import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, x402ProcessPool, MINT_RATE, BeamioFaucet, generateCheck,
 	getBalance, estimateErc20TransferGas, BeamioTransfer, getOracleRequest, verifyPaymentNew, BeamioPaymentLink, BeamioPaymentLinkFinish
 } from './util'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
@@ -980,6 +980,10 @@ const router = ( router: express.Router ) => {
 
 	router.get('/getOracle', async (req,res) => {
 		res.status(200).json({eth: getOracleRequest()}).end()
+	})
+
+	router.get('/generateCheck', async (req,res) => {
+		return generateCheck(req,res)
 	})
 
 	
