@@ -126,6 +126,18 @@ type facilitatorsPoolType = {
 	isSettle: boolean
 }
 
+type facilitatorsPayLinkPoolType = {
+	from: string
+	to: string
+	value: string
+	validAfter: string
+	validBefore: string
+	nonce: string
+	signature: string
+	res: any
+	linkHash: string
+}
+
 
 type body402 = {
 	EIP712: EIP712

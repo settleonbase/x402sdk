@@ -1347,7 +1347,7 @@ export const BeamioFaucet = async (req: Request, res: Response) => {
 
 }
 
-const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: string): Promise<boolean> => {
+const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: string): Promise<false|payload> => {
 	
 		logger (`BeamioGateway: `, inspect({amt, wallet}))
 
@@ -1362,7 +1362,7 @@ const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: s
 			return false
 		}
 
-		const price = parseFloat(amt)
+		const price = Number(ethers.formatUnits(amt, 6))
 		if (isNaN(price) || price <= 0.02 || !wallet) {
 			logger(`processPayment isNaN(price) || price <= 0 || !wallet Error! `)
 			res.status(403).json({success: 'Data format error!'}).end()
@@ -1371,7 +1371,7 @@ const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: s
 
 
 		const paymentRequirements = [createBeamioExactPaymentRequirements(
-			amt,
+			price,
 			resource,
 			`Beamio Payment Request for ${wallet}`,
 			beamiobase
@@ -1381,6 +1381,7 @@ const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: s
 		const isValid = await verifyPaymentNew(req, res, paymentRequirements)
 
 		if (!isValid) {
+			logger(`verifyPaymentNew Error!`)
 			res.status(402).end()
 			return false
 		}
@@ -1398,70 +1399,66 @@ const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: s
 			return false
 		}
 
-		try {
-			// throw new Error('facilitatorsPool')
-
-			const settleResponse = await settle(
-				paymentHeader,
-				saleRequirements
-			)
+		const payload: payload = paymentHeader?.payload as payload
+		return payload
 
 
-			const responseHeader = settleResponseHeader(settleResponse)
 
-			// In a real application, you would store this response header
-			// and associate it with the payment for later verification
-			
-			responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
-			
-			if (!responseData.success) {
-				logger(`${_routerName} responseData ERROR!`, inspect(responseData, false, 3, true))
-				res.status(402).end()
-				return false
-			}
-
-
-		} catch (error) {
-			console.error("Payment settlement failed:", error);
-
-			// In a real application, you would handle the failed payment
-			// by marking it for retry or notifying the user
-			const payload: payload = paymentHeader?.payload as payload
-			if (payload?.authorization) {
-				facilitatorsPool.push({
-					from: payload.authorization.from,
-					value: payload.authorization.value,
-					validAfter: payload.authorization.validAfter,
-					validBefore: payload.authorization.validBefore,
-					nonce: payload.authorization.nonce,
-					signature: payload.signature,
-					res: res,
-					isSettle: false
-				})
-				facilitators()
-
-				return true
-			}
-			
-			logger(inspect({paymentHeader, saleRequirements}, false, 3, true))
-
-			res.status(402).end()
-			return false
-		}
-
-
-		const ret: x402Response = {
-			success: true,
-			payer: wallet,
-			USDC_tx: responseData?.transaction,
-			network: responseData?.network,
-			timestamp: new Date().toISOString()
-		}
-		res.status(200).json(ret).end()
-		return true
 }
 
+const depositWith3009AuthorizationPayLinkPool: facilitatorsPayLinkPoolType[] = []
 
+const depositWith3009AuthorizationPayLinkProcess = async () => {
+	const obj = depositWith3009AuthorizationPayLinkPool.shift()
+	if (!obj) {
+		return 
+	}
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		return setTimeout(() => depositWith3009AuthorizationPayLinkProcess(), 3000)
+	}
+/**
+ * finishedPayLinkPool.push({
+			linkHash: code,
+			from: declaneAddress,
+			depositHash: ethers.ZeroHash,
+			payAmount: '0'
+		})
+ */
+	try {
+		const tx = await SC.baseSC.depositWith3009Authorization(
+			obj.from,
+			obj.to,
+			USDCContract_BASE,
+			obj.value,
+			obj.validAfter,
+			obj.validBefore,
+			obj.nonce,
+			obj.signature
+		)
+
+		
+		await tx.wait()
+
+		logger(`depositWith3009AuthorizationPayLinkProcess baseSC success!`, tx.hash)
+
+		obj.res.status(200).json({success: true, USDC_tx: tx.hash})
+
+		const tr = await SC.conetSC.finishedLink(
+			obj.linkHash, tx.hash, obj.from, obj.value
+		)
+		await tr.wait ()
+		logger(`depositWith3009AuthorizationPayLinkProcess conetSC success!`, tr.hash)
+
+	} catch (ex: any) {
+		logger(inspect({from:obj.from, to: obj.to, erc3009: USDCContract_BASE, usdcAmount: obj.value, validAfter: obj.validAfter, validBefore:obj.validBefore, nonce: obj.nonce, signature: obj.signature  }))
+		logger(`depositWith3009AuthorizationPayLinkProcess Error!`, ex.message)
+	}
+
+	Settle_ContractPool.unshift(SC)
+	setTimeout(() => depositWith3009AuthorizationPayLinkProcess(), 3000)
+
+}
 
 
 
@@ -1539,10 +1536,23 @@ export const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
 		}
 
 		const requestX402 = await BeamioPayment(req, res, totalAmount.toString(), beamiobase)
-		if (!requestX402) {
-			logger(``)
+		
+		if (!requestX402|| !requestX402?.authorization) {
+			return res.status(403).end()
 		}
-
+		const authorization = requestX402.authorization
+		depositWith3009AuthorizationPayLinkPool.push({
+			from: authorization.from,
+			to: getPayLink.to,
+			value: authorization.value,
+			validAfter: authorization.validAfter,
+			validBefore: authorization.validBefore,
+			nonce: authorization.nonce,
+			signature: requestX402.signature,
+			res: res,
+			linkHash: code
+		})
+		depositWith3009AuthorizationPayLinkProcess()
 
 	} catch (ex: any) {
 		return res.status(403).end()
