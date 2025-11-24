@@ -881,7 +881,7 @@ export const generateCheck = async (req: Request, res: Response) => {
 		if (!requestX402|| !requestX402?.authorization) {
 			return res.status(403).end()
 		}
-		
+
 
 	} catch (ex) {
 		logger(`generateCheck SC.conetSC.checkMemo(secureCode) Error!`)
@@ -1552,7 +1552,8 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 		})
  */
 	try {
-		const tx = await SC.baseSC.depositWith3009Authorization(
+		const tx = await SC.baseSC["depositWith3009Authorization(address,address,address,uint256,uint256,uint256,bytes32,bytes)"]
+		(
 			obj.from,
 			obj.to,
 			USDCContract_BASE,
