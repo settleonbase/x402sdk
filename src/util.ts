@@ -1594,7 +1594,7 @@ export const BeamioETHFaucet = async (req: Request, res: Response) => {
 		return res.status(404).end()
 	}
 
-	const _address = address.toLocaleUpperCase()
+	const _address = address.toLowerCase()
 	const index = totalFaucetETHRecord.indexOf(_address)
 	if (index > -1) {
 		return res.status(403).end()
