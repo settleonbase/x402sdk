@@ -135,7 +135,8 @@ type facilitatorsPayLinkPoolType = {
 	nonce: string
 	signature: string
 	res: any
-	linkHash: string
+	linkHash?: string
+	
 }
 
 

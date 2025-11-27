@@ -8,7 +8,7 @@ import CashcodeNode_abi from './ABI/cashcodeNote.abi.json'
 import { Request, Response} from 'express'
 import { exact } from "x402/schemes"
 import { useFacilitator } from "x402/verify"
-import {v4} from 'uuid'
+
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import {
 	Network,
@@ -38,6 +38,7 @@ const setupFile = join( homedir(),'.master.json' )
 
 
 const getIpAddressFromForwardHeader = (req: Request) => {
+	
 	const ipaddress = req.headers['X-Real-IP'.toLowerCase()]
 	if (!ipaddress||typeof ipaddress !== 'string') {
 		return ''
@@ -227,9 +228,9 @@ const oracleBackoud = async () => {
 		if (blockNumber % 10 !== 0) {
 			return
 		}
-
+		FaucetUserProcess()
 		logger(`Oracle backoud blockNumber ${blockNumber}`)
-		await oracolPrice()
+		oracolPrice()
 		logger(`Oracle Price BNB ${oracle.bnb} ETH ${oracle.eth}`)
 	})
 
@@ -315,39 +316,31 @@ const processUSDC_Faucet = async () => {
 	setTimeout(() => processUSDC_Faucet(), 2000)
 }
 
-// const FaucetUserProcess = async () => {
-// 	logger(`FaucetUserProcess starting! length = ${FaucetUser.size}`)
-// 	const SC = Settle_ContractPool.shift()
-// 	if (!SC) {
-// 		return
-// 	}
 
-// 	const betchAddrs: string[] = []
-// 	FaucetUser.forEach((value, addr) => {
-// 		if (value) {
-// 			return
-// 		}
-// 		betchAddrs.push(addr)
-// 		USDC_FaucetPool.push(addr)
-// 		FaucetUser.set (addr, true)
-// 	})
+const totalFaucetETHRecord: string [] = []
 
-// 	if (!betchAddrs.length) {
-// 		Settle_ContractPool.push(SC)
-// 		return
-// 	}
+let waitingFaucetUserProcessPool: string[] = []
 
-// 	try {
-// 		const tx = await SC.conetSC.newUserBetch(betchAddrs)
-// 		await tx.wait()
-// 		console.log(`FaucetUserProcess success ${tx.hash} address number = ${betchAddrs.length}`)
-// 	}catch (ex: any) {
-// 		logger(`FaucetUserProcess Error! ${ex.message}`)
-// 	}
+const FaucetUserProcess = async () => {
+	logger(`FaucetUserProcess starting! waitingFaucetUserProcessPool length = ${waitingFaucetUserProcessPool.length}`)
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		return
+	}
 	
-// 	Settle_ContractPool.push(SC)
-// 	processUSDC_Faucet()
-// }
+
+	try {
+		const tx = await SC.conetSC.newUserBetch(waitingFaucetUserProcessPool)
+		waitingFaucetUserProcessPool = []
+		await tx.wait()
+		console.log(`FaucetUserProcess success ${tx.hash} address number = ${waitingFaucetUserProcessPool.length}`)
+	}catch (ex: any) {
+		logger(`FaucetUserProcess Error! ${ex.message}`)
+	}
+	
+	Settle_ContractPool.push(SC)
+	processUSDC_Faucet()
+}
 
 const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
@@ -1422,6 +1415,8 @@ export const getBalance = async (address: string) => {
   }
 }
 
+//			FaucetUser for USDC 
+
 const FaucetUser:string[] = []
 const FaucetIPAddress: string[] = []
 const FaucetUserPool: {
@@ -1543,6 +1538,7 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 	if (!SC) {
 		return setTimeout(() => depositWith3009AuthorizationPayLinkProcess(), 3000)
 	}
+
 /**
  * finishedPayLinkPool.push({
 			linkHash: code,
@@ -1590,7 +1586,33 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 
 const declaneAddress = '0x1000000000000000000000000000000000000000'
 
+export const BeamioETHFaucet = async (req: Request, res: Response) => {
+	let { address } = req.query as {
+		address?: string
+	}
+	if (!address || !ethers.isAddress(address) || ethers.ZeroAddress === address) {
+		return res.status(404).end()
+	}
 
+	const _address = address.toLocaleUpperCase()
+	const index = totalFaucetETHRecord.indexOf(_address)
+	if (index > -1) {
+		return res.status(403).end()
+	}
+
+	const SC = Settle_ContractPool[0]
+	try {
+		const isClaimed = await SC.conetSC.faucetClaimed(_address)
+		if (isClaimed) {
+			return res.status(403).end()
+		}
+	} catch (ex: any) {
+		logger(` await SC.conetSC.faucetClaimed(${_address}) Error, ${ex.message}`)
+		return res.status(500).json({success: false}).end()
+	}
+	waitingFaucetUserProcessPool.push(_address)
+	res.status(200).end()
+}
 
 export const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
 	let { code, amount } = req.query as {
