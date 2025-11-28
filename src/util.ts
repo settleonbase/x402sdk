@@ -874,7 +874,7 @@ export const generateCheck = async (req: Request, res: Response) => {
 		if (!requestX402|| !requestX402?.authorization) {
 			return res.status(403).end()
 		}
-
+		
 
 	} catch (ex) {
 		logger(`generateCheck SC.conetSC.checkMemo(secureCode) Error!`)
@@ -1524,7 +1524,6 @@ const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: s
 		return payload
 
 
-
 }
 
 const depositWith3009AuthorizationPayLinkPool: facilitatorsPayLinkPoolType[] = []
@@ -1683,10 +1682,11 @@ export const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
 		}
 
 		const requestX402 = await BeamioPayment(req, res, totalAmount.toString(), beamiobase)
-		
+		logger(inspect(requestX402, false, 3, true))
 		if (!requestX402|| !requestX402?.authorization) {
 			return res.status(403).end()
 		}
+
 		const authorization = requestX402.authorization
 		depositWith3009AuthorizationPayLinkPool.push({
 			from: authorization.from,
