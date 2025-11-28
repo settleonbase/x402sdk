@@ -1520,7 +1520,15 @@ const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: s
 			return false
 		}
 
+		
+
 		const payload: payload = paymentHeader?.payload as payload
+		if (!payload.signature || payload.signature.length > 65) {
+			logger(`${_routerName} checkx402paymentHeader sign Error!`,inspect(payload, false, 3, true))
+			res.status(403).end()
+			return false
+		}
+
 		return payload
 
 
@@ -1573,7 +1581,7 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 		logger(`depositWith3009AuthorizationPayLinkProcess conetSC success!`, tr.hash)
 
 	} catch (ex: any) {
-		logger(inspect({from:obj.from, to: obj.to, erc3009: USDCContract_BASE, usdcAmount: obj.value, validAfter: obj.validAfter, validBefore:obj.validBefore, nonce: obj.nonce, signature: obj.signature  }))
+		logger(inspect({from:obj.from, to: obj.to, linkHash: obj.linkHash, usdcAmount: obj.value, validAfter: obj.validAfter, validBefore:obj.validBefore, nonce: obj.nonce, signature: obj.signature  }))
 		logger(`depositWith3009AuthorizationPayLinkProcess Error!`, ex.message)
 	}
 
@@ -1684,7 +1692,7 @@ export const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
 		const requestX402 = await BeamioPayment(req, res, totalAmount.toString(), beamiobase)
 		logger(inspect(requestX402, false, 3, true))
 		if (!requestX402|| !requestX402?.authorization) {
-			return res.status(403).end()
+			return 
 		}
 
 		const authorization = requestX402.authorization
