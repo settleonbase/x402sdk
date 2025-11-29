@@ -1523,7 +1523,7 @@ const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: s
 		
 
 		const payload: payload = paymentHeader?.payload as payload
-		if (!payload.signature || payload.signature.length > 65) {
+		if (!payload.signature || payload.signature.length > 132) {
 			logger(`${_routerName} checkx402paymentHeader sign Error!`,inspect(payload, false, 3, true))
 			res.status(403).end()
 			return false
