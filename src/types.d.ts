@@ -136,7 +136,7 @@ type facilitatorsPayLinkPoolType = {
 	signature: string
 	res: any
 	linkHash?: string
-	
+	note?: string
 }
 
 

@@ -871,16 +871,29 @@ export const generateCheck = async (req: Request, res: Response) => {
 		}
 
 		const requestX402 = await BeamioPayment(req, res, amount, beamiobase)
-		if (!requestX402|| !requestX402?.authorization) {
+		if (!requestX402 || !requestX402?.authorization) {
 			return res.status(403).end()
 		}
-		
+		const payload = requestX402.authorization
+		depositWith3009AuthorizationPayLinkPool.push({
+			from: payload.from,
+			to: '',
+			value: payload.value,
+			validAfter: payload.validAfter,
+			validBefore: payload.validBefore,
+			signature: requestX402.signature,
+			res: res,
+			note: note,
+			nonce: payload.nonce,
+			linkHash: secureCode,
+
+		})
+		depositWith3009AuthorizationPayLinkProcess()
 
 	} catch (ex) {
 		logger(`generateCheck SC.conetSC.checkMemo(secureCode) Error!`)
 	}
 	
-
 }
 
 
@@ -1555,7 +1568,10 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 		})
  */
 	try {
-		const tx = await SC.baseSC["depositWith3009Authorization(address,address,address,uint256,uint256,uint256,bytes32,bytes)"]
+
+
+
+		const tx = obj.to ? await SC.baseSC["depositWith3009Authorization(address,address,address,uint256,uint256,uint256,bytes32,bytes)"]
 		(
 			obj.from,
 			obj.to,
@@ -1565,19 +1581,24 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 			obj.validBefore,
 			obj.nonce,
 			obj.signature
+		) : await SC.baseSC["depositWith3009Authorization(address,address,uint256,uint256,uint256,bytes32,bytes,bytes32)"] 
+		(
+			obj.from, USDCContract_BASE, obj.value, obj.validAfter,obj.validBefore, obj.nonce,obj.signature, obj.linkHash
 		)
-
-		
-		await tx.wait()
 
 		logger(`depositWith3009AuthorizationPayLinkProcess baseSC success!`, tx.hash)
 
 		obj.res.status(200).json({success: true, USDC_tx: tx.hash})
 
-		const tr = await SC.conetSC.finishedLink(
+		const tr = obj.to? await SC.conetSC.finishedLink(
 			obj.linkHash, tx.hash, obj.from, obj.value
+		) : await SC.conetSC.checkMemoGenerate(
+			obj.linkHash, obj.from, obj.value, tx.hash, baseChainID, USDCContract_BASE, USDC_decimals, obj.note
 		)
-		await tr.wait ()
+		await Promise.all([
+			tx.wait(), tr.wait ()
+		])
+		
 		logger(`depositWith3009AuthorizationPayLinkProcess conetSC success!`, tr.hash)
 
 	} catch (ex: any) {
