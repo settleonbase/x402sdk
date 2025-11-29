@@ -890,8 +890,8 @@ export const generateCheck = async (req: Request, res: Response) => {
 		})
 		depositWith3009AuthorizationPayLinkProcess()
 
-	} catch (ex) {
-		logger(`generateCheck SC.conetSC.checkMemo(secureCode) Error!`)
+	} catch (ex: any) {
+		logger(`generateCheck SC.conetSC.checkMemo(secureCode) Error!, `, ex.message)
 	}
 	
 }
