@@ -1597,7 +1597,7 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 		const tr = obj.to? await SC.conetSC.finishedLink(
 			obj.linkHash, tx.hash, obj.from, obj.value
 		) : await SC.conetSC.checkMemoGenerate(
-			obj.linkHash, obj.from, obj.value, tx.hash, baseChainID, USDCContract_BASE, USDC_decimals, obj.note
+			obj.linkHash, obj.from, obj.value, tx.hash, baseChainID, USDCContract_BASE, USDC_decimals, obj.note, obj.linkHash
 		)
 		await Promise.all([
 			tx.wait(), tr.wait ()
