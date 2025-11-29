@@ -869,7 +869,7 @@ export const generateCheck = async (req: Request, res: Response) => {
 			logger(`withdrawWithCode ${secureCode} is exiets `)
 			return res.status(403).end()
 		}
-
+		const amt = ethers.parseUnits(amount, 6)
 		const requestX402 = await BeamioPayment(req, res, amount, beamiobase)
 		if (!requestX402 || !requestX402?.authorization) {
 			return res.status(403).end()
@@ -1481,7 +1481,7 @@ export const BeamioFaucet = async (req: Request, res: Response) => {
 	logger(`BeamioFaucet ${addr}:${ipaddress} error`)
 }
 
-const BeamioPayment = async (req: Request, res: Response, amt: string, wallet: string): Promise<false|payload> => {
+const BeamioPayment = async (req: Request, res: Response, amt: string|bigint, wallet: string): Promise<false|payload> => {
 	
 		logger (`BeamioGateway: `, inspect({amt, wallet}))
 
