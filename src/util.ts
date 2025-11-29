@@ -323,6 +323,10 @@ let waitingFaucetUserProcessPool: string[] = []
 
 const FaucetUserProcess = async () => {
 	logger(`FaucetUserProcess starting! waitingFaucetUserProcessPool length = ${waitingFaucetUserProcessPool.length}`)
+	if (!waitingFaucetUserProcessPool.length) {
+		return
+	}
+	
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
 		return
