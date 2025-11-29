@@ -861,7 +861,7 @@ export const generateCheck = async (req: Request, res: Response) => {
 
 	const totalAmount = Number(amount)
 
-	if (!amount|| isNaN(totalAmount) || totalAmount <= 0.02 || !secureCode || !ethers.isHexString(secureCode)) {
+	if (!amount|| isNaN(totalAmount) || totalAmount <= 0.03 || !secureCode || !ethers.isHexString(secureCode)) {
 		logger(`generateCheck stage 1 error!`)
 		return res.status(403)
 	}
