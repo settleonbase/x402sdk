@@ -870,7 +870,7 @@ export const generateCheck = async (req: Request, res: Response) => {
 			return res.status(403).end()
 		}
 		const amt = ethers.parseUnits(amount, 6)
-		const requestX402 = await BeamioPayment(req, res, amount, beamiobase)
+		const requestX402 = await BeamioPayment(req, res, amt, beamiobase)
 		if (!requestX402 || !requestX402?.authorization) {
 			return res.status(403).end()
 		}
