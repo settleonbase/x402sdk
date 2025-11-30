@@ -1817,7 +1817,8 @@ type hashAmount = {
 const redeemCheckPool: {
 	secureCode: string
 	address: string
-	res: Response
+	res: Response,
+	hash: string
 }[] = []
 
 const redeemCheckProcess = async () => {
@@ -1837,11 +1838,17 @@ const redeemCheckProcess = async () => {
 
 	try {
 		const tx = await SC.baseSC.withdrawWithCode(obj.secureCode, obj.address)
-		await tx.wait()
+		const tr = await SC.conetSC.finishedCheck(obj.hash, tx.hash, obj.address)
+		
 		if (obj.res.writable) {
 			obj.res.status(200).json({success: true, tx: tx.hash}).end()
 		}
-		logger(`redeemCheckProcess SUCCESS! ${tx.hash} to ${obj.address}`)
+		await Promise.all([
+			tx.wait(),
+			tr.wait()
+		])
+
+		logger(`redeemCheckProcess SUCCESS! BASE ${tx.hash} to ${obj.address} CoNET ${tr.hash}`)
 
 	} catch (ex: any) {
 		logger(`redeemCheckProcess Error! ${ex.message}`)
@@ -1879,7 +1886,8 @@ export const redeemCheck = async (req: Request, res: Response) => {
 		redeemCheckPool.push({
 			secureCode: secureCode + securityCodeDigits,
 			address,
-			res
+			res,
+			hash
 		})
 
 
