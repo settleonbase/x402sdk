@@ -1616,6 +1616,8 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 }
 
 
+
+
 const declaneAddress = '0x1000000000000000000000000000000000000000'
 
 export const BeamioETHFaucet = async (req: Request, res: Response) => {
@@ -1802,6 +1804,93 @@ export const BeamioPaymentLink = async (req: Request, res: Response) => {
 		to: address
 	})
 	linkMemoGenerate()
+
+}
+
+type hashAmount = {
+	from: string
+	amount: bigint
+	erc20: string
+}
+
+
+const redeemCheckPool: {
+	secureCode: string
+	address: string
+	res: Response
+}[] = []
+
+const redeemCheckProcess = async () => {
+	const obj = redeemCheckPool.shift()
+	if (!obj) {
+		return
+	}
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		redeemCheckPool.unshift(obj)
+		setTimeout(() => {
+			redeemCheckProcess()
+		}, 2000)
+		return 
+	}
+
+
+	try {
+		const tx = await SC.baseSC.withdrawWithCode(obj.secureCode, obj.address)
+		await tx.wait()
+		if (obj.res.writable) {
+			obj.res.status(200).json({success: true, tx: tx.hash}).end()
+		}
+		logger(`redeemCheckProcess SUCCESS! ${tx.hash} to ${obj.address}`)
+
+	} catch (ex: any) {
+		logger(`redeemCheckProcess Error! ${ex.message}`)
+		obj.res.status(500).json({success: false}).end()
+	}
+
+	Settle_ContractPool.push(SC)
+	setTimeout(() => {
+		redeemCheckProcess()
+	}, 2000)
+}
+
+
+export const redeemCheck = async (req: Request, res: Response) => {
+	const { secureCode, securityCodeDigits, address } = req.query as {
+		secureCode?: string
+		securityCodeDigits?: string
+		address?: string
+	}
+	if (!secureCode|| secureCode === ethers.ZeroHash || !address || !ethers.isAddress(address) || address === ethers.ZeroAddress) {
+		return res.status(404).end()
+	}
+
+	const hash = ethers.solidityPackedKeccak256(['string'], [secureCode+securityCodeDigits])
+	const SC = Settle_ContractPool[0]
+	try {
+		const obj: hashAmount  = await SC.baseSC.hashAmount(hash)
+
+		if (obj.from === ethers.ZeroAddress || obj.amount === BigInt(0) || obj.erc20.toLowerCase() !== USDCContract_BASE.toLowerCase()) {
+			logger(`/redeemCheck hash${hash} has zero from address error! `, inspect(obj, false, 3, true))
+			res.status(403).end()
+			return 
+		}
+
+		redeemCheckPool.push({
+			secureCode: secureCode + securityCodeDigits,
+			address,
+			res
+		})
+
+
+
+
+	} catch (ex: any) {
+		logger(`redeemCheck catch ex!! ${ex.message}`)
+		return 
+	}
+
+
 
 }
 
