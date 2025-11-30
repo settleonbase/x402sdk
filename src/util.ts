@@ -1890,7 +1890,7 @@ export const redeemCheck = async (req: Request, res: Response) => {
 			hash
 		})
 
-
+		redeemCheckProcess()
 
 
 	} catch (ex: any) {
