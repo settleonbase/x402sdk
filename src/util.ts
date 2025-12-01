@@ -77,7 +77,7 @@ const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNo
 //					beamio	Contract
 
 const beamiobase = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
-const beamioConet = '0x5156E93f44283CA584D09EA46E30ee14ca0abB37'
+const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
 
 
