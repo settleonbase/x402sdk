@@ -995,12 +995,17 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/debug/ip', (req, res) => {
+		console.log('CF-Connecting-IP:', req.headers['cf-connecting-ip'])
+		console.log('X-Real-IP:', req.headers['x-real-ip'])
+		console.log('X-Forwarded-For:', req.headers['x-forwarded-for'])
+		console.log('Remote Address:', req.socket.remoteAddress)
 		res.json({
 			realIp: getClientIp(req),
 			headers: {
 			'x-real-ip': req.headers['x-real-ip'],
 			'cf-connecting-ip': req.headers['cf-connecting-ip'],
 			'x-forwarded-for': req.headers['x-forwarded-for'],
+			'Remote Address:': req.socket.remoteAddress
 			},
 		})
 })

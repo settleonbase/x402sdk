@@ -38,6 +38,8 @@ const setupFile = join( homedir(),'.master.json' )
 
 
 export const getClientIp = (req: Request): string => {
+
+	
     // 1. X-Real-IP（Nginx 转发的）
     const realIp = req.headers['x-real-ip']
     if (realIp && typeof realIp === 'string' && realIp !== '') {
