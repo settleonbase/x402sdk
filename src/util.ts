@@ -277,13 +277,18 @@ const processUSDC_Faucet = async () => {
 	)
 
 	const paymentHeader = {
-			network: 'base',
-			payload: await AuthorizationSign(USDC_FaucetAmount, obj.wallet, SC.privateKey, 6, baseChainID.toString(), USDCContract_BASE),
-			scheme:'exact',
-			x402Version: 1
-		}
+		network: 'base',
+		payload: await AuthorizationSign(USDC_FaucetAmount, obj.wallet, SC.privateKey, 6, baseChainID.toString(), USDCContract_BASE),
+		scheme:'exact',
+		x402Version: 1
+	}
+
+
 	try {
-		
+
+		//	first 
+		const tr = await SC.conetAirdrop.airdrop(obj.wallet, obj.ipaddress)
+
 		const settleResponse = await settle(
 			//@ts-ignore
 			paymentHeader,
@@ -310,7 +315,7 @@ const processUSDC_Faucet = async () => {
 			'Thank you for joining Beamio Alpha Test!'
 		)
 
-		const tr = await SC.conetAirdrop.airdrop(obj.wallet, obj.ipaddress)
+		
 		await Promise.all([
 			tx.wait(), tr.wait()
 		])
