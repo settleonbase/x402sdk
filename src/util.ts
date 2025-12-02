@@ -1463,7 +1463,7 @@ export const BeamioFaucet = async (req: Request, res: Response) => {
 		address?: string
 	}
 	if (!address || address === ethers.ZeroAddress || !ethers.isAddress(address)) {
-		logger(`BeamioFaucet Error@! !address || address === ethers.ZeroAddress || !ethers.isAddress(address)`)
+		logger(`BeamioFaucet Error@! !address || address === ethers.ZeroAddress || !ethers.isAddress(${address})`)
 		return res.status(403).end()
 	}
 	
