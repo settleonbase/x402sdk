@@ -37,7 +37,7 @@ import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 const setupFile = join( homedir(),'.master.json' )
 
 
-const getClientIp = (req: Request): string => {
+export const getClientIp = (req: Request): string => {
 	// 1. nginx 转发的真实 IP（从 CF-Connecting-IP）
 	const realIp = req.headers['x-real-ip']
 	if (realIp && typeof realIp === 'string') {
