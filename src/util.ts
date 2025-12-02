@@ -253,7 +253,7 @@ const processUSDC_Faucet = async () => {
 		return setTimeout(() => processUSDC_Faucet(), 2000)
 	}
 
-	logger(`processUSDC_Faucet start! ${obj}`)
+	logger(`processUSDC_Faucet start! `, inspect(obj, false, 3, true))
 	const paymentRequirements = createBeamioExactPaymentRequirements(
 		USDC_FaucetAmount.toString(),
 		resource,
