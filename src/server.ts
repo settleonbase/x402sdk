@@ -1150,7 +1150,7 @@ const loadSettleFile = async () => {
     const arr = JSON.parse(buf);
 
     if (Array.isArray(arr)) {
-      logger(`loadSettleFile ${SETTLE_FILE}`, inspect(arr, false, 3, true));
+      //logger(`loadSettleFile ${SETTLE_FILE}`, inspect(arr, false, 3, true));
 
       // ✅ 先去重（按 tx 或 hash 唯一）
       const uniqueMap = new Map<string, reflashData>();
