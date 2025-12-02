@@ -38,26 +38,26 @@ const setupFile = join( homedir(),'.master.json' )
 
 
 export const getClientIp = (req: Request): string => {
-	// 1. nginx 转发的真实 IP（从 CF-Connecting-IP）
-	const realIp = req.headers['x-real-ip']
-	if (realIp && typeof realIp === 'string') {
-		return realIp
-	}
+    // 1. X-Real-IP（Nginx 转发的）
+    const realIp = req.headers['x-real-ip']
+    if (realIp && typeof realIp === 'string' && realIp !== '') {
+        return realIp
+    }
 
-	// 2. Cloudflare 原生 header（如果你未来直接用 Cloudflare Workers / bypass nginx）
-	const cfIp = req.headers['cf-connecting-ip']
-	if (cfIp && typeof cfIp === 'string') {
-		return cfIp
-	}
+    // 2. CF-Connecting-IP（Cloudflare 原生）
+    const cfIp = req.headers['cf-connecting-ip']
+    if (cfIp && typeof cfIp === 'string' && cfIp !== '') {
+        return cfIp
+    }
 
-	// 3. X-Forwarded-For（多级代理的链列表）
-	const xff = req.headers['x-forwarded-for']
-	if (xff && typeof xff === 'string') {
-		return xff.split(',')[0].trim()
-	}
+    // 3. X-Forwarded-For
+    const xff = req.headers['x-forwarded-for']
+    if (xff && typeof xff === 'string' && xff !== '') {
+        return xff.split(',')[0].trim()
+    }
 
-	// 4. 最后 fallback 到 Node 自己看到的 remoteAddress
-	return req.socket.remoteAddress || ''
+    // 4. 如果以上都没有，返回 socket 地址（本地测试会是 127.0.0.1）
+    return req.socket.remoteAddress || 'unknown'
 }
 
 
