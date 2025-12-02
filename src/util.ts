@@ -8,7 +8,7 @@ import CashcodeNode_abi from './ABI/cashcodeNote.abi.json'
 import { Request, Response} from 'express'
 import { exact } from "x402/schemes"
 import { useFacilitator } from "x402/verify"
-import {v4} from 'uuid'
+
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import {
 	Network,
@@ -237,7 +237,7 @@ const oracleBackoud = async () => {
 
 const resource = `https://beamio.app/api/payment` as Resource
 
-const USDC_FaucetAmount = '0.1'
+const USDC_FaucetAmount = '0.2'
 const usdcFaucetAmount = ethers.parseUnits(USDC_FaucetAmount, 6)
 
 
@@ -292,14 +292,13 @@ const processUSDC_Faucet = async () => {
 			obj.wallet,
 			usdcFaucetAmount,
 			responseData?.transaction,
-			'Beamio.app Faucet'
+			'Thank you for joining Beamio Alpha Test!'
 		)
 
-		
-		
-		await tx.wait()
 		const tr = await SC.conetAirdrop.airdrop(obj.wallet, obj.ipaddress)
-		await tr.wait()
+		await Promise.all([
+			tx.wait(), tr.wait()
+		])
 		logger(`processUSDC_Faucet record to CoNET success ${tx.hash} ${tr.hash}`)
 		
 	} catch (ex: any) {
@@ -329,7 +328,6 @@ const FaucetUserProcess = async () => {
 		return
 	}
 	
-
 	try {
 		const tx = await SC.conetSC.newUserBetch(waitingFaucetUserProcessPool)
 		waitingFaucetUserProcessPool = []
@@ -1460,7 +1458,7 @@ export const BeamioFaucet = async (req: Request, res: Response) => {
 
 	
 
-	const addressFixed = /73.189.157.190/.test(ipaddress) ? v4() : ipaddress
+	const addressFixed = /73.189.157.190/.test(ipaddress) ? uuid62.v4() : ipaddress
 	
 	FaucetIPAddress.push(addressFixed)
 	FaucetUser.push(address)
