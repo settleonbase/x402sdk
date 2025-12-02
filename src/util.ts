@@ -8,7 +8,7 @@ import CashcodeNode_abi from './ABI/cashcodeNote.abi.json'
 import { Request, Response} from 'express'
 import { exact } from "x402/schemes"
 import { useFacilitator } from "x402/verify"
-
+import {v4} from 'uuid'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import {
 	Network,
@@ -157,9 +157,6 @@ const conetMainnet = defineChain({
 		default: { name: 'CoNET Explorer', url: 'https://mainnet.conet.network' }
 	}
 })
-
-
-
 
 const conetClient = createPublicClient({chain: conetMainnet, transport: http(conetEndpoint)})
 
@@ -1443,6 +1440,7 @@ const FaucetUserPool: {
 
 export const BeamioFaucet = async (req: Request, res: Response) => {
 	let ipaddress = getIpAddressFromForwardHeader(req)
+
 	const { address } = req.query as {
 		address?: string
 	}
@@ -1454,33 +1452,40 @@ export const BeamioFaucet = async (req: Request, res: Response) => {
 	const addr = address.toLowerCase()
 	const SC = Settle_ContractPool[0]
 
-	
 
 	if (FaucetUser.indexOf(address)  > -1 || !ipaddress || FaucetIPAddress.indexOf(ipaddress) > -1 ) {
 		logger(`BeamioFaucet ${addr}:${ipaddress} already!`)
 		return res.status(403).end()
 	}
-	FaucetIPAddress.push(ipaddress)
+
+	
+
+	const addressFixed = /73.189.157.190/.test(ipaddress) ? v4() : ipaddress
+	
+	FaucetIPAddress.push(addressFixed)
 	FaucetUser.push(address)
+		
+		try {
+			const isNew = await SC.conetAirdrop.mayAirdrop(address, addressFixed)
+			
+			if (isNew) {
+				logger(`BeamioFaucet ${addr}:${ipaddress} added to Pool!`)
+				res.status(200).json({success: true}).end()
+				FaucetUserPool.push({
+					wallet: address,
+					ipaddress
+				})
+				processUSDC_Faucet()
+				return
+			}
+			res.status(403).end()
+			return logger(`BeamioFaucet ${addr}:${ipaddress} already in mayAirdrop !!`)
+		} catch (ex: any) {
+			logger(`BeamioFaucet call faucetClaimed error! ${ex.message}`)
 
-	try {
-		const isNew = await SC.conetAirdrop.mayAirdrop(address, ipaddress)
-		if (isNew) {
-			logger(`BeamioFaucet ${addr}:${ipaddress} added to Pool!`)
-			res.status(200).json({success: true}).end()
-			FaucetUserPool.push({
-				wallet: address,
-				ipaddress
-			})
-			processUSDC_Faucet()
-			return
 		}
-		res.status(403).end()
-		return logger(`BeamioFaucet ${addr}:${ipaddress} already in mayAirdrop !!`)
-	} catch (ex: any) {
-		logger(`BeamioFaucet call faucetClaimed error! ${ex.message}`)
+	
 
-	}
 	res.status(500).end()
 	logger(`BeamioFaucet ${addr}:${ipaddress} error`)
 }
