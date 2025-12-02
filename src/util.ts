@@ -37,14 +37,29 @@ import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 const setupFile = join( homedir(),'.master.json' )
 
 
-const getIpAddressFromForwardHeader = (req: Request) => {
-	
-	const ipaddress = req.headers['X-Real-IP'.toLowerCase()]
-	if (!ipaddress||typeof ipaddress !== 'string') {
-		return ''
+const getClientIp = (req: Request): string => {
+	// 1. nginx 转发的真实 IP（从 CF-Connecting-IP）
+	const realIp = req.headers['x-real-ip']
+	if (realIp && typeof realIp === 'string') {
+		return realIp
 	}
-	return ipaddress
+
+	// 2. Cloudflare 原生 header（如果你未来直接用 Cloudflare Workers / bypass nginx）
+	const cfIp = req.headers['cf-connecting-ip']
+	if (cfIp && typeof cfIp === 'string') {
+		return cfIp
+	}
+
+	// 3. X-Forwarded-For（多级代理的链列表）
+	const xff = req.headers['x-forwarded-for']
+	if (xff && typeof xff === 'string') {
+		return xff.split(',')[0].trim()
+	}
+
+	// 4. 最后 fallback 到 Node 自己看到的 remoteAddress
+	return req.socket.remoteAddress || ''
 }
+
 
 logger( homedir())
 export const masterSetup: IMasterSetup = require ( setupFile )
@@ -1437,7 +1452,7 @@ const FaucetUserPool: {
 }[] = []
 
 export const BeamioFaucet = async (req: Request, res: Response) => {
-	let ipaddress = getIpAddressFromForwardHeader(req)
+	let ipaddress = getClientIp(req)
 
 	const { address } = req.query as {
 		address?: string
