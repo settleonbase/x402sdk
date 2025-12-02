@@ -1462,45 +1462,45 @@ export const BeamioFaucet = async (req: Request, res: Response) => {
 		return res.status(403).end()
 	}
 	
-	const addr = address.toLowerCase()
+	const walletAddress = address.toLowerCase()
 	const SC = Settle_ContractPool[0]
+	const realIpAddress = /73.189.157.190/.test(ipaddress) ? uuid62.v4() : ipaddress
 
-
-	if (FaucetUser.indexOf(address)  > -1 || !ipaddress || FaucetIPAddress.indexOf(ipaddress) > -1 ) {
-		logger(`BeamioFaucet ${addr}:${ipaddress} already!`)
+	if (FaucetUser.indexOf(walletAddress)  > -1 || !realIpAddress || FaucetIPAddress.indexOf(realIpAddress) > -1 ) {
+		logger(`BeamioFaucet ${walletAddress}:${realIpAddress} already!`)
 		return res.status(403).end()
 	}
 
 	
 
-	const addressFixed = /73.189.157.190/.test(ipaddress) ? uuid62.v4() : ipaddress
 	
-	FaucetIPAddress.push(addressFixed)
-	FaucetUser.push(address)
+	
+	FaucetIPAddress.push(realIpAddress)
+	FaucetUser.push(walletAddress)
 		
 		try {
-			const isNew = await SC.conetAirdrop.mayAirdrop(address, addressFixed)
+			const isNew = await SC.conetAirdrop.mayAirdrop(walletAddress, realIpAddress)
 			
 			if (isNew) {
-				logger(`BeamioFaucet ${addr}:${ipaddress} added to Pool!`)
+				logger(`BeamioFaucet ${walletAddress}:${realIpAddress} added to Pool!`)
 				res.status(200).json({success: true}).end()
 				FaucetUserPool.push({
-					wallet: address,
-					ipaddress
+					wallet: walletAddress,
+					ipaddress: realIpAddress
 				})
 				processUSDC_Faucet()
 				return
 			}
 			res.status(403).end()
-			return logger(`BeamioFaucet ${addr}:${ipaddress} already in mayAirdrop !!`)
+			return logger(`BeamioFaucet ${walletAddress}:${realIpAddress} already in mayAirdrop !!`)
 		} catch (ex: any) {
 			logger(`BeamioFaucet call faucetClaimed error! ${ex.message}`)
-
+			
 		}
 	
 
 	res.status(500).end()
-	logger(`BeamioFaucet ${addr}:${ipaddress} error`)
+	logger(`BeamioFaucet ${walletAddress}:${realIpAddress} error`)
 }
 
 const BeamioPayment = async (req: Request, res: Response, amt: string|bigint, wallet: string): Promise<false|payload> => {
