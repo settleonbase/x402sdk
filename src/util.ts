@@ -39,17 +39,11 @@ const setupFile = join( homedir(),'.master.json' )
 
 export const getClientIp = (req: Request): string => {
 
-	
+
     // 1. X-Real-IP（Nginx 转发的）
     const realIp = req.headers['x-real-ip']
     if (realIp && typeof realIp === 'string' && realIp !== '') {
         return realIp
-    }
-
-    // 2. CF-Connecting-IP（Cloudflare 原生）
-    const cfIp = req.headers['cf-connecting-ip']
-    if (cfIp && typeof cfIp === 'string' && cfIp !== '') {
-        return cfIp
     }
 
     // 3. X-Forwarded-For
@@ -58,8 +52,14 @@ export const getClientIp = (req: Request): string => {
         return xff.split(',')[0].trim()
     }
 
+	 // 2. CF-Connecting-IP（Cloudflare 原生）
+    const cfIp = req.headers['cf-connecting-ip']
+    if (cfIp && typeof cfIp === 'string' && cfIp !== '') {
+        return cfIp
+    }
+
     // 4. 如果以上都没有，返回 socket 地址（本地测试会是 127.0.0.1）
-    return req.socket.remoteAddress || 'unknown'
+    return ''
 }
 
 
@@ -219,7 +219,7 @@ const oracleBackoud = async () => {
 		// })
 		
 
-		const walletBase = new ethers.Wallet(n, providerBase)
+		const walletBase = new ethers.Wallet(n, providerBaseBackup)
 		const walletConet = new ethers.Wallet(n, providerConet)
 		logger(`address => ${walletBase.address}`)
 
@@ -364,6 +364,8 @@ const FaucetUserProcess = async () => {
 }
 
 const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
+const providerBaseBackup = new ethers.JsonRpcProvider('https://1rpc.io/base')
+
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
 
