@@ -2,6 +2,9 @@ import { generateJwt } from '@coinbase/cdp-sdk/auth'
 import {masterSetup} from './util'
 import fetch from 'node-fetch'
 import { Request, Response} from 'express'
+import { getClientIp} from './util'
+import { logger } from './logger'
+import { inspect } from 'util'
 
 interface CDPAuthConfig {
 	requestMethod: string
@@ -19,8 +22,6 @@ interface CreateOnrampParams {
 
 const ONRAMP_API_BASE_URL = 'https://api.cdp.coinbase.com'
 const LEGACY_API_BASE_URL = 'https://api.developer.coinbase.com'
-
-
 
 export function getCDPCredentials() {
 	const apiKeyId = masterSetup.coinbase.CDP_API_KEY_ID
@@ -141,30 +142,59 @@ async function createSessionToken({
 }
 
 export const coinbaseToken = async (req: Request, res: Response) => {
+	const clientIp = getClientIp(req)
 	  try {
 		const { address } = req.body
 
 		if (!address || typeof address !== 'string') {
-		return res.status(400).json({ error: 'Missing or invalid address' })
+			return res.status(400).json({ error: 'Missing or invalid address' })
 		}
-
-		// 尽量拿真实客户端 IP（结合你现有的 Cloudflare / nginx 设定）
-		const clientIp =
-		(req.headers['cf-connecting-ip'] as string) ||
-		(req.headers['x-real-ip'] as string) ||
-		(req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
-		req.socket.remoteAddress ||
-		''
 
 		// 调用上面封装好的 createSessionToken
 		const sessionToken = await createSessionToken({
 			userAddress: address,
 			clientIp,
 		})
-
-		return res.json({ sessionToken })
+		logger(`coinbaseToken`, inspect(sessionToken, false, 3, true))
+		return res.json({ sessionToken }).end()
 	} catch (err: any) {
 		console.error('coinbaseToken error:', err)
 		return res.status(500).json({ error: 'Failed to create session token' })
 	}
+}
+
+
+export const coinbaseOnrampSession = async (req: Request, res: Response) => {
+  try {
+    const { address, country, subdivision, paymentAmount, userId } = req.body
+
+    if (!address || typeof address !== 'string') {
+      return res.status(400).json({ error: 'Missing or invalid address' })
+    }
+
+    const clientIp =
+      (req.headers['cf-connecting-ip'] as string) ||
+      (req.headers['x-real-ip'] as string) ||
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+      req.socket.remoteAddress ||
+      ''
+
+    const data = await createOnrampSession({
+      destinationAddress: address,
+      country: country || 'US',
+      subdivision: subdivision || 'CA',
+      paymentAmount: paymentAmount || '50.00',
+      partnerUserRef: userId || `beamio-${address}`,
+    })
+
+    // data.session.onrampUrl 就是你要丢给前端打开的 URL
+    return res.json({
+      onrampUrl: data.session.onrampUrl,
+      quote: data.quote ?? null,
+      clientIp, // 看情况要不要返回，仅用于调试
+    })
+  } catch (err: any) {
+    console.error('coinbaseOnrampSession error:', err)
+    return res.status(500).json({ error: 'Failed to create onramp session' })
+  }
 }
