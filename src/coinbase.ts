@@ -5,6 +5,7 @@ import { Request, Response} from 'express'
 import { getClientIp} from './util'
 import { logger } from './logger'
 import { inspect } from 'util'
+import {ethers} from 'ethers'
 
 interface CDPAuthConfig {
 	requestMethod: string
@@ -148,17 +149,23 @@ export const coinbaseToken = async (req: Request, res: Response) => {
 			address?: string
 		}
 
-		if (!address || typeof address !== 'string') {
+		if (!address || !ethers.isAddress(address) || address === ethers.ZeroAddress ) {
 			return res.status(400).json({ error: 'Missing or invalid address' })
 		}
 
 		// 调用上面封装好的 createSessionToken
-		const sessionToken = await createSessionToken({
-			userAddress: address,
-			clientIp,
+		 const data = await createOnrampSession({
+				destinationAddress: address,
+				country: 'US',
+				subdivision: 'CA',
+				paymentAmount: '50.00',
+				partnerUserRef: `beamio-${address}`,
+			})
+
+		return res.json({
+			onrampUrl: data.session.onrampUrl,
+			quote: data.quote ?? null,
 		})
-		logger(`coinbaseToken`, inspect(sessionToken, false, 3, true))
-		return res.json({ sessionToken }).end()
 	} catch (err: any) {
 		console.error('coinbaseToken error:', err)
 		return res.status(500).json({ error: 'Failed to create session token' })
