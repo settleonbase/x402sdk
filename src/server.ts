@@ -25,7 +25,7 @@ import {
   settleResponseHeader,
 } from "x402/types"
 import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x402/shared";
-
+import {coinbaseToken} from './coinbase'
 
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 const {verify, settle} = useFacilitator(facilitator1)
@@ -986,12 +986,16 @@ const router = ( router: express.Router ) => {
 		res.status(200).json({eth: getOracleRequest()}).end()
 	})
 
-	router.get('/generateCheck', async (req,res) => {
+	router.get('/generateCheck', (req,res) => {
 		return generateCheck(req,res)
 	})
 
-	router.get('/redeemCheck', async (req,res) => {
+	router.get('/redeemCheck', (req,res) => {
 		return redeemCheck(req,res)
+	})
+
+	router.get('/coinbase-token', (req,res) => {
+		return coinbaseToken(req, res)
 	})
 
 	router.get('/debug/ip', (req, res) => {

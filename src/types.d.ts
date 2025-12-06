@@ -9,6 +9,10 @@ type IMasterSetup = {
 	settle_contractAdmin: string[]
 	event_endpoint: string
 	testPri: string
+	coinbase: {
+		"CDP_API_KEY_ID": string
+		"CDP_API_KEY_SECRET":string
+	}
 }
 
 /**
