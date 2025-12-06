@@ -25,7 +25,7 @@ import {
   settleResponseHeader,
 } from "x402/types"
 import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x402/shared";
-import {coinbaseToken} from './coinbase'
+import {coinbaseToken, coinbaseOfframp} from './coinbase'
 
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 const {verify, settle} = useFacilitator(facilitator1)
@@ -996,6 +996,10 @@ const router = ( router: express.Router ) => {
 
 	router.get('/coinbase-token', (req,res) => {
 		return coinbaseToken(req, res)
+	})
+
+	router.get('/coinbase-usdc', (req,res) => {
+		return coinbaseOfframp(req, res)
 	})
 
 	router.get('/debug/ip', (req, res) => {

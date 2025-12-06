@@ -207,3 +207,82 @@ export const coinbaseOnrampSession = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Failed to create onramp session' })
   }
 }
+
+// ⭐ 使用 v1 token 生成 sessionToken，再拼 sell/offramp URL
+async function createOfframpSessionToken(userAddress: string, clientIp: string) {
+  const path = '/onramp/v1/token'
+  const host = 'api.developer.coinbase.com'
+
+  const jwt = await generateCDPJWT({
+    requestMethod: 'POST',
+    requestPath: path,
+    requestHost: host,
+  })
+
+  const body = {
+    addresses: [
+      {
+        address: userAddress,
+        blockchains: ['base'],
+      },
+    ],
+    assets: ['USDC'],   // 允许卖出的资产
+    clientIp,           // 真实 IP
+  }
+
+  const res = await fetch(`${LEGACY_API_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  if (!res.ok) {
+    const error = await res.text()
+    throw new Error(`Create session token failed: ${res.status} ${error}`)
+  }
+
+  const data = (await res.json()) as { token: string }
+  return data.token // sessionToken
+}
+
+// GET /api/coinbase-offramp?address=0x...
+export const coinbaseOfframp = async (req: Request, res: Response) => {
+  try {
+    const address = req.query.address as string
+
+    if (!address) {
+      return res.status(400).json({ error: 'Missing address' })
+    }
+
+    const clientIp =
+      (req.headers['cf-connecting-ip'] as string) ||
+      (req.headers['x-real-ip'] as string) ||
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+      req.socket.remoteAddress ||
+      ''
+
+    // 1) 生成 sessionToken
+    const sessionToken = await createOfframpSessionToken(address, clientIp)
+
+    // 2) 拼 Offramp / Sell URL
+    // 文档约定：sell / off-ramp 入口 path 一般类似 /v3/sell/input 或 /buy/select-asset 的变体
+    const url = new URL('https://pay.coinbase.com/v3/sell/input')
+    url.searchParams.set('sessionToken', sessionToken)
+    url.searchParams.set('partnerUserRef', `beamio-${address}`)
+    url.searchParams.set('defaultNetwork', 'base')
+    url.searchParams.set('defaultAsset', 'USDC')
+    url.searchParams.set('fiatCurrency', 'USD')
+    url.searchParams.set(
+      'redirectUrl',
+      'https://beamio.app/app/offramp/success'
+    )
+
+    return res.json({ offrampUrl: url.toString() })
+  } catch (err: any) {
+    console.error('coinbaseOfframp error:', err)
+    return res.status(500).json({ error: 'Failed to create offramp url' })
+  }
+}
