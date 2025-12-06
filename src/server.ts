@@ -998,7 +998,7 @@ const router = ( router: express.Router ) => {
 		return coinbaseToken(req, res)
 	})
 
-	router.get('/coinbase-usdc', (req,res) => {
+	router.get('/coinbase-offramp', (req,res) => {
 		return coinbaseOfframp(req, res)
 	})
 
