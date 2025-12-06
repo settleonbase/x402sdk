@@ -144,7 +144,9 @@ async function createSessionToken({
 export const coinbaseToken = async (req: Request, res: Response) => {
 	const clientIp = getClientIp(req)
 	  try {
-		const { address } = req.body
+		const { address } = req.query as {
+			address?: string
+		}
 
 		if (!address || typeof address !== 'string') {
 			return res.status(400).json({ error: 'Missing or invalid address' })
