@@ -374,7 +374,7 @@ const providerBaseBackup = new ethers.JsonRpcProvider('https://1rpc.io/base')
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
 
-let Settle_ContractPool: {
+export let Settle_ContractPool: {
 	baseSC: ethers.Contract
 	baseUSDC: ethers.Contract
 	conetSC: ethers.Contract

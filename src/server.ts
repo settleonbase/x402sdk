@@ -26,6 +26,11 @@ import {
 } from "x402/types"
 import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x402/shared";
 import {coinbaseToken, coinbaseOfframp} from './coinbase'
+import { searchUsers, addUser} from './db'
+
+
+
+
 
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 const {verify, settle} = useFacilitator(facilitator1)
@@ -208,7 +213,7 @@ const checkSig = (ercObj: any): {
 }
 
 
-
+const MAX_BODY_SIZE = 5 * 1024 * 1024 // 5MB
 
 const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (router: any) => void) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
@@ -256,8 +261,19 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 	app.use ( express.json() )
 
 	app.use (async (req, res: any, next) => {
+		
 		logger(Colors.blue(`${req.url}`))
-		return next()
+
+		const contentLength = Number(req.headers['content-length'] || 0)
+
+		if (contentLength > MAX_BODY_SIZE) {
+			return res.status(413).json({
+				ok: false,
+				error: `Request too large: ${contentLength} bytes (max 5MB)`
+			})
+		}
+
+		next()
 	})
 
 	const cors = require('cors')
@@ -281,9 +297,6 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 			maxAge: 600,
 		}));
 	}
-
-
-
 
 	// app.use(paymentMiddleware(
 	// 	owner, 
@@ -1000,6 +1013,14 @@ const router = ( router: express.Router ) => {
 
 	router.get('/coinbase-offramp', (req,res) => {
 		return coinbaseOfframp(req, res)
+	})
+
+	router.get('/search-users', (req,res) => {
+		return searchUsers(req, res)
+	})
+
+	router.post('/addUser', (req,res) => {
+		return addUser(req, res)
 	})
 
 	router.get('/debug/ip', (req, res) => {

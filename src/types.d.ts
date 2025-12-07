@@ -166,3 +166,15 @@ interface nodeInfo {
 	lastEposh?: number
     owner?: string
 }
+
+
+interface beamioAccount {
+	accountName: string
+	image: string
+	darkTheme: boolean
+	isUSDCFaucet: boolean
+	isETHFaucet: boolean
+	initialLoading: boolean
+	firstName: string
+	lastName: string
+}
