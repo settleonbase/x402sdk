@@ -258,23 +258,7 @@ const initialize = async (reactBuildFolder: string, PORT: number, setupRoutes: (
 
 
 	// app.use ( express.static ( staticFolder ))
-	app.use ( express.json() )
-
-	app.use (async (req, res: any, next) => {
-		
-		logger(Colors.blue(`${req.url}`))
-
-		const contentLength = Number(req.headers['content-length'] || 0)
-
-		if (contentLength > MAX_BODY_SIZE) {
-			return res.status(413).json({
-				ok: false,
-				error: `Request too large: ${contentLength} bytes (max 5MB)`
-			})
-		}
-
-		next()
-	})
+	app.use ( express.json({ limit: '5mb' }) )
 
 	const cors = require('cors')
 	
