@@ -177,4 +177,6 @@ interface beamioAccount {
 	initialLoading: boolean
 	firstName: string
 	lastName: string
+	address: string
+	createdAt?: BigInt
 }
