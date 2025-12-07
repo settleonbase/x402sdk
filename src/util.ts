@@ -33,6 +33,9 @@ import newNodeInfoABI from './ABI/newNodeInfoABI.json'
 import beamiobaseABI from './ABI/beamio-base-abi.json'
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import conetAirdropABI from './ABI/conet_airdrop.abi.json'
+import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
+
+
 
 const setupFile = join( homedir(),'.master.json' )
 
@@ -96,6 +99,7 @@ const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNo
 const beamiobase = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
+const beamioConetAccountRegistry = '0xF60473CB3209bd7892418A388901531A1b155B7A'
 
 
 
@@ -233,6 +237,7 @@ const oracleBackoud = async () => {
 			conetSC: new ethers.Contract(beamioConet, beamioConetABI, walletConet),
 			// event: new ethers.Contract(eventContract, Event_ABI, walletConet),
 			conetAirdrop: new ethers.Contract(airdropRecord, conetAirdropABI, walletConet),
+			constAccountRegistry: new ethers.Contract(beamioConetAccountRegistry, AccountRegistryABI, walletConet),
 		}
 	})
 
@@ -376,6 +381,7 @@ let Settle_ContractPool: {
 	privateKey: string
 	wallet: ethers.Wallet
 	conetAirdrop: ethers.Contract
+	constAccountRegistry: ethers.Contract
 }[] = []
 
 function createBeamioExactPaymentRequirements(
