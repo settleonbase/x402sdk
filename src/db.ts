@@ -334,7 +334,7 @@ const addUserPoolProcess = async () => {
 }
 
 export const addUser = async (req: Request, res: Response) => {
-	const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName } = req.query as {
+	const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName } = req.body as {
 		accountName?: string
 		wallet?: string
 		recover?: IAccountRecover
