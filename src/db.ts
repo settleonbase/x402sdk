@@ -12,7 +12,7 @@ const RPC_URL = "https://mainnet-rpc.conet.network"
 const CONTRACT_ADDRESS = "0x532d8A82b07d4091F8e045c017a4dF62b1019b1c"
 let initProcess = false
 
-const db = new Client({ connectionString: DB_URL })
+
 	
 
 const initDB = async () => {
@@ -21,8 +21,8 @@ const initDB = async () => {
 		return
 	}
 	initProcess = true
-
-
+	const db = new Client({ connectionString: DB_URL })
+	await db.connect()
 	const provider = new ethers.JsonRpcProvider(RPC_URL)
 	const contract = new ethers.Contract(CONTRACT_ADDRESS, AccountRegistryAbi, provider)
 
@@ -103,7 +103,8 @@ const initDB = async () => {
 
 const updateUserDB = async (account: beamioAccount) => {
 	const now = new Date()
-
+	const db = new Client({ connectionString: DB_URL })
+	await db.connect()
 	// 防御性：规范一下 address + createdAt
 	const address = account.address.toLowerCase()
 	const createdAtStr =
@@ -156,9 +157,8 @@ const updateUserDB = async (account: beamioAccount) => {
 		]
 	)
 	logger(`updateUserDB success! `, inspect(account, false, 3, true))
-
+	await db.end()
 }
-
 
 const getUserData = async (userName: string) => {
 
@@ -197,6 +197,7 @@ const getUserData = async (userName: string) => {
 			return null
 		}
 		logger(`getUserData Start save to DB!`)
+		const db = new Client({ connectionString: DB_URL })
 		await db.connect()
 		// 3. 写入本地 DB（accounts 表）
 		//    注意：created_at 是 BIGINT，用 string 传给 pg 最安全
@@ -250,7 +251,7 @@ const getUserData = async (userName: string) => {
 		logger(
 			`[getUserData] synced user ${userName} (${owner}) from chain to DB`
 		)
-
+		await db.end()
 		// 4. 返回一个整理好的对象给上层用（可选）
 		return {
 			address: owner.toLowerCase(),
@@ -426,6 +427,7 @@ export const searchUsers = async (req: Request, res: Response) => {
 	if (!_keywork) {
 		return res.status(404).end()
 	}
+	const db = new Client({ connectionString: DB_URL })
 	await db.connect()
 	const offset = (_page - 1) * _pageSize
 
@@ -445,7 +447,5 @@ export const searchUsers = async (req: Request, res: Response) => {
 		pageSize: _pageSize,
 		results: rows
 	})
-
+	await db.end()
 }
-
-initDB()
