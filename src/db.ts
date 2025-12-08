@@ -329,7 +329,7 @@ const addUserPoolProcess = async () => {
 
 				// 2. 等待这笔交易上链
 				const receipt = await tr.wait()
-				logger('addUserPoolProcess setBase64ByNameHash', receipt.transactionHash)
+				logger('addUserPoolProcess setBase64ByNameHash', tr.hash)
 			}
 		}
 
