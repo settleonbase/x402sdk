@@ -308,7 +308,16 @@ const addUserPoolProcess = async () => {
 	}
 	
 	try {
-		const tx = await SC.constAccountRegistry.setAccountByAdmin(account)
+		const tx = await SC.constAccountRegistry.setAccountByAdmin(
+			account.accountName, 
+			account.image,
+			account.darkTheme,
+			account.isUSDCFaucet,
+			account.isETHFaucet,
+			true,
+			account.firstName,
+			account.lastName
+		)
 		await tx.wait()
 		logger('addUserPoolProcess constAccountRegistry ', tx.hash)
 		if (obj.recover?.length) {
