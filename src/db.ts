@@ -278,7 +278,7 @@ type IAccountRecover = {
 }
 type IAddUserPool = {
 	account: beamioAccount
-	recover?: IAccountRecover
+	recover?: IAccountRecover[]
 }
 const addUserPool: IAddUserPool [] = []
 
@@ -306,20 +306,28 @@ const addUserPoolProcess = async () => {
 		firstName: obj.account.firstName,
 		lastName: obj.account.lastName
 	}
+	
 	try {
 		const tx = await SC.constAccountRegistry.setAccountByAdmin(account)
-		
-		if (obj.recover) {
-			const tr = await SC.constAccountRegistry.setBase64ByNameHash(obj.recover.hash, obj.recover.encrypto)
-			await Promise.all([
-				tr.wait(),
-				tx.wait()
-			])
-			logger(`addUserPoolProcess success ! setAccountByAdmin ${tx.hash} recover ${tr.hash}`)
-		} else {
-			await tx.wait()
-			logger(`addUserPoolProcess success ! setAccountByAdmin ${tx.hash} `)
+		await tx.wait()
+		logger('addUserPoolProcess constAccountRegistry ', tx.hash)
+		if (obj.recover?.length) {
+				
+			for (const n of obj.recover) {
+				if (!n?.encrypto || !n?.hash || n.hash === ethers.ZeroHash) continue
+
+				// 1. 发送交易（等待发出去）
+				const tx = await SC.constAccountRegistry.setBase64ByNameHash(
+					n.hash,
+					n.encrypto
+				)
+
+				// 2. 等待这笔交易上链
+				const receipt = await tx.wait()
+				logger('addUserPoolProcess setBase64ByNameHash', receipt.transactionHash)
+			}
 		}
+
 		updateUserDB(obj.account)
 
 	} catch (ex: any) {
@@ -337,7 +345,7 @@ export const addUser = async (req: Request, res: Response) => {
 	const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName } = req.body as {
 		accountName?: string
 		wallet?: string
-		recover?: IAccountRecover
+		recover?: IAccountRecover[]
 		image?: string
 		isUSDCFaucet?: boolean
 		darkTheme?: boolean
