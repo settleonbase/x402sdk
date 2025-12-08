@@ -277,6 +277,7 @@ type IAccountRecover = {
 	encrypto: string
 }
 type IAddUserPool = {
+	wallet: string
 	account: beamioAccount
 	recover?: IAccountRecover[]
 }
@@ -309,14 +310,7 @@ const addUserPoolProcess = async () => {
 	
 	try {
 		const tx = await SC.constAccountRegistry.setAccountByAdmin(
-			account.accountName, 
-			account.image,
-			account.darkTheme,
-			account.isUSDCFaucet,
-			account.isETHFaucet,
-			true,
-			account.firstName,
-			account.lastName
+			obj.wallet, account
 		)
 		await tx.wait()
 		logger('addUserPoolProcess constAccountRegistry ', tx.hash)
@@ -388,6 +382,7 @@ export const addUser = async (req: Request, res: Response) => {
 		
 
 		addUserPool.push({
+			wallet,
 			account: fullInput,
 			recover: recover
 
