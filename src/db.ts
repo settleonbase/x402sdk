@@ -196,6 +196,7 @@ const getUserData = async (userName: string) => {
 			)
 			return null
 		}
+		logger(`getUserData Start save to DB!`)
 		await db.connect()
 		// 3. 写入本地 DB（accounts 表）
 		//    注意：created_at 是 BIGINT，用 string 传给 pg 最安全
