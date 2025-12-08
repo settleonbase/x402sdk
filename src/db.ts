@@ -313,20 +313,20 @@ const addUserPoolProcess = async () => {
 			obj.wallet, account
 		)
 		await tx.wait()
-		logger('addUserPoolProcess constAccountRegistry ', tx.hash)
+		logger('addUserPoolProcess constAccountRegistry SUCCESS!', tx.hash)
 		if (obj.recover?.length) {
 				
 			for (const n of obj.recover) {
 				if (!n?.encrypto || !n?.hash || n.hash === ethers.ZeroHash) continue
 
 				// 1. 发送交易（等待发出去）
-				const tx = await SC.constAccountRegistry.setBase64ByNameHash(
+				const tr = await SC.constAccountRegistry.setBase64ByNameHash(
 					n.hash,
 					n.encrypto
 				)
 
 				// 2. 等待这笔交易上链
-				const receipt = await tx.wait()
+				const receipt = await tr.wait()
 				logger('addUserPoolProcess setBase64ByNameHash', receipt.transactionHash)
 			}
 		}
