@@ -9,7 +9,7 @@ import {Settle_ContractPool} from './util'
 
 const DB_URL = "postgres://account:accountpass@localhost:7434/accountdb"
 const RPC_URL = "https://mainnet-rpc.conet.network"
-const CONTRACT_ADDRESS = "0x50C525C5220e0fA9BeAcd391C345A15aed16bB17"
+const CONTRACT_ADDRESS = "0x532d8A82b07d4091F8e045c017a4dF62b1019b1c"
 let initProcess = false
 
 const db = new Client({ connectionString: DB_URL })
