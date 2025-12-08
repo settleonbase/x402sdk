@@ -9,7 +9,7 @@ import {Settle_ContractPool} from './util'
 
 const DB_URL = "postgres://account:accountpass@localhost:7434/accountdb"
 const RPC_URL = "https://mainnet-rpc.conet.network"
-const CONTRACT_ADDRESS = "0xF60473CB3209bd7892418A388901531A1b155B7A"
+const CONTRACT_ADDRESS = "0x50C525C5220e0fA9BeAcd391C345A15aed16bB17"
 let initProcess = false
 
 const db = new Client({ connectionString: DB_URL })
@@ -320,9 +320,11 @@ const addUserPoolProcess = async () => {
 				if (!n?.encrypto || !n?.hash || n.hash === ethers.ZeroHash) continue
 
 				// 1. 发送交易（等待发出去）
-				const tr = await SC.constAccountRegistry.setBase64ByNameHash(
+				const tr = await SC.constAccountRegistry.setBase64NameByAdmin(
 					n.hash,
-					n.encrypto
+					n.encrypto,
+					account.accountName,
+					obj.wallet
 				)
 
 				// 2. 等待这笔交易上链

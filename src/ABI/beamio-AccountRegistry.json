@@ -866,6 +866,24 @@
 		"inputs": [
 			{
 				"internalType": "bytes32",
+				"name": "hash",
+				"type": "bytes32"
+			},
+			{
+				"internalType": "string",
+				"name": "base64Data",
+				"type": "string"
+			}
+		],
+		"name": "setBase64",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bytes32",
 				"name": "nameHash",
 				"type": "bytes32"
 			},
@@ -876,6 +894,34 @@
 			}
 		],
 		"name": "setBase64ByNameHash",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bytes32",
+				"name": "hash",
+				"type": "bytes32"
+			},
+			{
+				"internalType": "string",
+				"name": "base64Data",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "accountName",
+				"type": "string"
+			},
+			{
+				"internalType": "address",
+				"name": "to",
+				"type": "address"
+			}
+		],
+		"name": "setBase64NameByAdmin",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
