@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp} from '../util'
+import {getClientIp, getOracleRequest, oracleBackoud} from '../util'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
@@ -72,6 +72,10 @@ const routing = ( router: Router ) => {
 		
 	})
 
+	router.get('/getOracle', async (req,res) => {
+		res.status(200).json({eth: getOracleRequest()}).end()
+	})
+
 	router.post('/addUser', async (req,res) => {
 		const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName } = req.body as {
 			accountName?: string
@@ -128,7 +132,7 @@ const routing = ( router: Router ) => {
 const initialize = async (reactBuildFolder: string, PORT: number) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
 	
-
+	oracleBackoud()
 	const defaultPath = join(__dirname, 'workers')
 	console.log('📁 defaultPath:', defaultPath)
 

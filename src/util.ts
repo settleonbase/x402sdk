@@ -189,6 +189,7 @@ const oracle = {
 }
 
 let oracolPriceProcess = false
+
 const oracolPrice = async () => {
 	if (oracolPriceProcess) {
 		return
@@ -211,7 +212,7 @@ const oracolPrice = async () => {
 	oracolPriceProcess = false
 }
 
-const oracleBackoud = async () => {
+export const oracleBackoud = async () => {
 	await getAllNodes()
 	Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 
@@ -254,8 +255,6 @@ const oracleBackoud = async () => {
 	})
 
 }
-
-
 
 const resource = `https://beamio.app/api/payment` as Resource
 
@@ -747,10 +746,6 @@ const transferRecordProcess = async () => {
 	Settle_ContractPool.push(SC)
 	setTimeout(() => {transferRecordProcess()}, 1000)
 }
-
-
-
-
 
 const generateCODE = (passcode: string) => {
 	const code = uuid62.v4()
@@ -1389,8 +1384,8 @@ const linkMemoGenerate = async() => {
 //  Balance Cache: 60 秒记忆
 // =============================
 const balanceCache: Record<string, {
-  data: { usdc: string; eth: string; oracle: {eth: number, usdc: number} }
-  ts: number
+	data: { usdc: string; eth: string; oracle: {eth: number, usdc: number} }
+	ts: number
 }> = {}
 
 export const getOracleRequest = () => {
@@ -1399,13 +1394,13 @@ export const getOracleRequest = () => {
 }
 
 export const getBalance = async (address: string) => {
-  const now = Date.now()
-  const cached = balanceCache[address]
+	const now = Date.now()
+	const cached = balanceCache[address]
 
-  // 若有缓存，且时间在 60 秒内 → 直接返回缓存
-  if (cached && (now - cached.ts) < 60_000) {
-    return cached.data
-  }
+	// 若有缓存，且时间在 60 秒内 → 直接返回缓存
+	if (cached && (now - cached.ts) < 60_000) {
+		return cached.data
+	}
 
 
 
@@ -1414,47 +1409,47 @@ export const getBalance = async (address: string) => {
   //      实际调用 RPC
   // =============================
   const baseClient = createPublicClient({
-    chain: base,
-	//transport: http(`http://${getRandomNode()}/base-rpc`)
-	transport: http(`http://94.143.138.27/base-rpc`)
-  })
+		chain: base,
+		//transport: http(`http://${getRandomNode()}/base-rpc`)
+		transport: http(`http://94.143.138.27/base-rpc`)
+	})
 
-  const baseEthers = new ethers.JsonRpcProvider('')
-  const SC = new ethers.Contract(USDCContract_BASE, USDC_ABI, baseEthers)
+	const baseEthers = new ethers.JsonRpcProvider('')
+	const SC = new ethers.Contract(USDCContract_BASE, USDC_ABI, baseEthers)
 
-  try {
-    // const [usdcRaw, ethRaw] = await Promise.all([
-    //   baseClient.readContract({
-    //     address: USDCContract_BASE,
-    //     abi: USDC_ABI,
-    //     functionName: 'balanceOf',
-    //     args: [address]
-    //   }),
-    //   providerBase.getBalance(address)
-    // ])
+	try {
+		// const [usdcRaw, ethRaw] = await Promise.all([
+		//   baseClient.readContract({
+		//     address: USDCContract_BASE,
+		//     abi: USDC_ABI,
+		//     functionName: 'balanceOf',
+		//     args: [address]
+		//   }),
+		//   providerBase.getBalance(address)
+		// ])
 
-	 const [usdcRaw, ethRaw] = await Promise.all([
-		SC.balanceOf (address),
-		baseEthers.getBalance(address)
-	 ])
-	
+		const [usdcRaw, ethRaw] = await Promise.all([
+			SC.balanceOf (address),
+			baseEthers.getBalance(address)
+		])
+		
 
-    const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
-    const eth = ethers.formatUnits(ethRaw, 18)
+		const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
+		const eth = ethers.formatUnits(ethRaw, 18)
 
-    const result = { usdc, eth, oracle: {eth: oracle.eth, usdc: oracle.usdc} }
-	logger(inspect(result, false, 3, true))
-    // 记忆：写入缓存
-    balanceCache[address] = {
-      data: result,
-      ts: now
-    }
+		const result = { usdc, eth, oracle: {eth: oracle.eth, usdc: oracle.usdc} }
+		logger(inspect(result, false, 3, true))
+		// 记忆：写入缓存
+		balanceCache[address] = {
+		data: result,
+		ts: now
+		}
 
-    return result
-  } catch (ex: any) {
-    logger(`baseUSDC.balanceOf Error!`, ex.message)
-    return null
-  }
+		return result
+	} catch (ex: any) {
+		logger(`baseUSDC.balanceOf Error!`, ex.message)
+		return null
+	}
 }
 
 //			FaucetUser for USDC 
@@ -1647,9 +1642,6 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 	setTimeout(() => depositWith3009AuthorizationPayLinkProcess(), 3000)
 
 }
-
-
-
 
 const declaneAddress = '0x1000000000000000000000000000000000000000'
 
@@ -1894,7 +1886,6 @@ const redeemCheckProcess = async () => {
 	}, 2000)
 }
 
-
 export const redeemCheck = async (req: Request, res: Response) => {
 	const { secureCode, securityCodeDigits, address } = req.query as {
 		secureCode?: string
@@ -1934,12 +1925,6 @@ export const redeemCheck = async (req: Request, res: Response) => {
 
 
 }
-
-
-oracleBackoud()
-
-
-
 
 
 // setTimeout(() => test1(), 5000)
