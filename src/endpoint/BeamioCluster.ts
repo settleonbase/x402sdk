@@ -26,6 +26,7 @@ if (Cluster.isPrimary) {
 		})
 		return (fork)
 	}
+	
 	forkWorker()
 
 	startMaster()

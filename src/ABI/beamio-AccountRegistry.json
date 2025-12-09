@@ -88,9 +88,40 @@
 				"internalType": "address",
 				"name": "followee",
 				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "operator",
+				"type": "address"
 			}
 		],
 		"name": "FollowAdded",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "follower",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "followee",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "operator",
+				"type": "address"
+			}
+		],
+		"name": "FollowRemoved",
 		"type": "event"
 	},
 	{
@@ -135,37 +166,6 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "toAccount",
-				"type": "address"
-			}
-		],
-		"name": "addFollow",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "toAccount",
-				"type": "address"
-			},
-			{
-				"internalType": "address",
-				"name": "follow",
-				"type": "address"
-			}
-		],
-		"name": "addFollowByAdmin",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address",
 				"name": "account",
 				"type": "address"
 			},
@@ -202,6 +202,37 @@
 	{
 		"inputs": [],
 		"name": "deleteMyAccount",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "toAccount",
+				"type": "address"
+			}
+		],
+		"name": "follow",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "follower",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "toAccount",
+				"type": "address"
+			}
+		],
+		"name": "followByAdmin",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
@@ -471,138 +502,6 @@
 	{
 		"inputs": [
 			{
-				"internalType": "address",
-				"name": "owner",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "cursor",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "pageSize",
-				"type": "uint256"
-			}
-		],
-		"name": "getFollowersPaginated",
-		"outputs": [
-			{
-				"internalType": "address[]",
-				"name": "followers",
-				"type": "address[]"
-			},
-			{
-				"internalType": "uint256[]",
-				"name": "timestamps",
-				"type": "uint256[]"
-			},
-			{
-				"internalType": "uint256",
-				"name": "nextCursor",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "total",
-				"type": "uint256"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "owner",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "cursor",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "pageSize",
-				"type": "uint256"
-			}
-		],
-		"name": "getFollowsPaginated",
-		"outputs": [
-			{
-				"internalType": "address[]",
-				"name": "follows",
-				"type": "address[]"
-			},
-			{
-				"internalType": "uint256[]",
-				"name": "timestamps",
-				"type": "uint256[]"
-			},
-			{
-				"internalType": "uint256",
-				"name": "nextCursor",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "total",
-				"type": "uint256"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "owner",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "cursor",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "pageSize",
-				"type": "uint256"
-			}
-		],
-		"name": "getMutualFollowsPaginated",
-		"outputs": [
-			{
-				"internalType": "address[]",
-				"name": "mutuals",
-				"type": "address[]"
-			},
-			{
-				"internalType": "uint256[]",
-				"name": "timestamps",
-				"type": "uint256[]"
-			},
-			{
-				"internalType": "uint256",
-				"name": "nextCursor",
-				"type": "uint256"
-			},
-			{
-				"internalType": "uint256",
-				"name": "totalFollows",
-				"type": "uint256"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
 				"internalType": "string",
 				"name": "accountName",
 				"type": "string"
@@ -654,12 +553,12 @@
 			},
 			{
 				"internalType": "uint256",
-				"name": "followCount",
+				"name": "_followCount",
 				"type": "uint256"
 			},
 			{
 				"internalType": "uint256",
-				"name": "followerCount",
+				"name": "_followerCount",
 				"type": "uint256"
 			}
 		],
@@ -935,6 +834,37 @@
 			}
 		],
 		"name": "setMyBase64",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "toAccount",
+				"type": "address"
+			}
+		],
+		"name": "unfollow",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "follower",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "toAccount",
+				"type": "address"
+			}
+		],
+		"name": "unfollowByAdmin",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
