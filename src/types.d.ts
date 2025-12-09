@@ -7,6 +7,8 @@ type IMasterSetup = {
 		CDP_API_KEY_SECRET: string
 	}
 	settle_contractAdmin: string[]
+	beamio_Admins: string[]
+
 	event_endpoint: string
 	testPri: string
 	coinbase: {
@@ -179,4 +181,15 @@ interface beamioAccount {
 	lastName: string
 	address: string
 	createdAt?: BigInt
+}
+
+
+type IAccountRecover = {
+	hash: string
+	encrypto: string
+}
+type IAddUserPool = {
+	wallet: string
+	account: beamioAccount
+	recover?: IAccountRecover[]
 }

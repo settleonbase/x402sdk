@@ -1,9 +1,9 @@
 import { generateJwt } from '@coinbase/cdp-sdk/auth'
-import {masterSetup} from './util'
+import {masterSetup} from '../dist/util'
 import fetch from 'node-fetch'
 import { Request, Response} from 'express'
-import { getClientIp} from './util'
-import { logger } from './logger'
+import { getClientIp} from '../dist/util'
+import { logger } from '../dist/logger'
 import { inspect } from 'util'
 import {ethers} from 'ethers'
 

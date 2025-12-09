@@ -4,16 +4,39 @@ import AccountRegistryAbi from "./ABI/beamio-AccountRegistry.json"
 import { logger } from "./logger"
 import { inspect } from "util"
 import { Request, Response} from 'express'
-import {Settle_ContractPool} from './util'
-
+import {masterSetup} from './util'
+import beamioConetABI from './ABI/beamio-conet.abi.json'
+import conetAirdropABI from './ABI/conet_airdrop.abi.json'
+import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
 
 const DB_URL = "postgres://account:accountpass@localhost:7434/accountdb"
 const RPC_URL = "https://mainnet-rpc.conet.network"
-const CONTRACT_ADDRESS = "0x532d8A82b07d4091F8e045c017a4dF62b1019b1c"
+
+const providerConet = new ethers.JsonRpcProvider(RPC_URL)
+
+const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
+const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
+const beamioConetAccountRegistry = '0x532d8A82b07d4091F8e045c017a4dF62b1019b1c'
+
+export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
+	const walletConet = new ethers.Wallet(n, providerConet)
+	logger(`address => ${walletConet.address}`)
+
+	return {
+		// baseWalletClient: walletClientBase,
+		
+		privateKey: n,
+		wallet: walletConet,
+		// conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
+		conetSC: new ethers.Contract(beamioConet, beamioConetABI, walletConet),
+		// event: new ethers.Contract(eventContract, Event_ABI, walletConet),
+		conetAirdrop: new ethers.Contract(airdropRecord, conetAirdropABI, walletConet),
+		constAccountRegistry: new ethers.Contract(beamioConetAccountRegistry, AccountRegistryABI, walletConet),
+	}
+})
+
+
 let initProcess = false
-
-
-	
 
 const initDB = async () => {
 
@@ -23,13 +46,12 @@ const initDB = async () => {
 	initProcess = true
 	const db = new Client({ connectionString: DB_URL })
 	await db.connect()
-	const provider = new ethers.JsonRpcProvider(RPC_URL)
-	const contract = new ethers.Contract(CONTRACT_ADDRESS, AccountRegistryAbi, provider)
+
 
 	// 1) 全量同步用户（用合约的 getAccountsPaginated，倒序也没关系）
 	let cursor = 0n
 	const pageSize = 500n
-
+	const contract = beamio_ContractPool[0].constAccountRegistry
 	while (true) {
 		const [owners, names, createdAts, nextCursor] =
 		await contract.getAccountsPaginated(cursor, pageSize)
@@ -162,7 +184,7 @@ const updateUserDB = async (account: beamioAccount) => {
 
 const getUserData = async (userName: string) => {
 
-	const SC = Settle_ContractPool[0].constAccountRegistry
+	const SC = beamio_ContractPool[0].constAccountRegistry
 	try {
 		// 1. 先通过 username 找到链上的 owner 地址
 		const owner: string = await SC.getOwnerByAccountName(userName)
@@ -274,15 +296,6 @@ const getUserData = async (userName: string) => {
 }
 
 
-type IAccountRecover = {
-	hash: string
-	encrypto: string
-}
-type IAddUserPool = {
-	wallet: string
-	account: beamioAccount
-	recover?: IAccountRecover[]
-}
 const addUserPool: IAddUserPool [] = []
 
 const addUserPoolProcess = async () => {
@@ -291,7 +304,7 @@ const addUserPoolProcess = async () => {
 		return
 	}
 
-	const SC = Settle_ContractPool.shift()
+	const SC = beamio_ContractPool.shift()
 	if (!SC) {
 		addUserPool.unshift(obj)
 		setTimeout(() => {
@@ -341,7 +354,7 @@ const addUserPoolProcess = async () => {
 		logger(`addUserPoolProcess Error: ${ex.message}`)
 	}
 
-	Settle_ContractPool.unshift(SC)
+	beamio_ContractPool.unshift(SC)
 	setTimeout(() => {
 		addUserPoolProcess()
 	}, 2000)
@@ -350,36 +363,32 @@ const addUserPoolProcess = async () => {
 
 export const addUser = async (req: Request, res: Response) => {
 	const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName } = req.body as {
-		accountName?: string
-		wallet?: string
-		recover?: IAccountRecover[]
-		image?: string
-		isUSDCFaucet?: boolean
-		darkTheme?: boolean
-		isETHFaucet?: boolean
-		firstName?: string
-		lastName?: string
+		accountName: string
+		wallet: string
+		recover: IAccountRecover[]
+		image: string
+		isUSDCFaucet: boolean
+		darkTheme: boolean
+		isETHFaucet: boolean
+		firstName: string
+		lastName: string
 	}
 
 	try {
 
-		if (!accountName || !ethers.isAddress(wallet) || wallet === ethers.ZeroAddress) {
-			return res.status(400).json({ error: "Invalid data format" })
-		}
 		const getExistsUserData = await getUserData(accountName)
 		
-
 		// 2. 填默认值，保证所有 field 都存在
 
 		const fullInput: beamioAccount = {
 			accountName: accountName,
-			image: image||getExistsUserData?.image||'',
-			darkTheme: typeof (darkTheme) === 'boolean' ? darkTheme : typeof (getExistsUserData?.darkTheme) === 'boolean' ? getExistsUserData.darkTheme: false,
-			isUSDCFaucet: typeof isUSDCFaucet === 'boolean' ? isUSDCFaucet: typeof (getExistsUserData?.isUSDCFaucet) === 'boolean' ? getExistsUserData.isUSDCFaucet: false,
-			isETHFaucet: typeof isETHFaucet === 'boolean' ? isETHFaucet: typeof (getExistsUserData?.isETHFaucet) === 'boolean' ? getExistsUserData.isETHFaucet: false,
+			image,
+			darkTheme,
+			isUSDCFaucet,
+			isETHFaucet,
 			initialLoading: true,
-			firstName: firstName||getExistsUserData?.firstName||'',
-			lastName: lastName||getExistsUserData?.lastName||'',
+			firstName,
+			lastName,
 			address: wallet,
 			createdAt: getExistsUserData?.createdAt
 		}
@@ -389,7 +398,6 @@ export const addUser = async (req: Request, res: Response) => {
 			wallet,
 			account: fullInput,
 			recover: recover
-
 		})
 
 		addUserPoolProcess()
@@ -449,3 +457,4 @@ export const searchUsers = async (req: Request, res: Response) => {
 	})
 	await db.end()
 }
+

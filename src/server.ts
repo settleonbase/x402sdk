@@ -29,9 +29,6 @@ import {coinbaseToken, coinbaseOfframp} from './coinbase'
 import { searchUsers, addUser} from './db'
 
 
-
-
-
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 const {verify, settle} = useFacilitator(facilitator1)
 
@@ -1162,6 +1159,8 @@ async function flushNewReflashData(): Promise<void> {
 
 
 export const reflashData: reflashData[] = []
+
+
 const loadSettleFile = async () => {
   try {
     const buf = await fs.readFileSync(SETTLE_FILE, 'utf8');
