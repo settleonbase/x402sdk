@@ -1,0 +1,95 @@
+
+✔ accounts 表
+
+字段等同于你合约的：
+
+accountName → username
+
+image
+
+darkTheme
+
+isUSDCFaucet
+
+isETHFaucet
+
+initialLoading
+
+firstName
+
+lastName
+
+createdAt（合约时间戳）
+
+并加了：
+
+updated_at（DB 级更新时间）
+
+用户名索引（支持搜索）
+
+创建时间索引（支持按新用户排序）
+
+
+
+BEGIN;
+
+-- ============================================================
+-- 1) 用户表：accounts   (钱包地址 → 用户信息)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS accounts (
+    address         VARCHAR(42) PRIMARY KEY,         -- 用户钱包地址（0x...）
+    username        TEXT NOT NULL,                   -- accountName
+    image           TEXT,
+    dark_theme      BOOLEAN NOT NULL DEFAULT false,
+    is_usdc_faucet  BOOLEAN NOT NULL DEFAULT false,
+    is_eth_faucet   BOOLEAN NOT NULL DEFAULT false,
+    initial_loading BOOLEAN NOT NULL DEFAULT false,
+    first_name      TEXT,
+    last_name       TEXT,
+    created_at      BIGINT NOT NULL,                 -- 合约记录的创建时间（block.timestamp）
+    updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- 常用索引：用于搜索 / 排序
+CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username);
+CREATE INDEX IF NOT EXISTS idx_accounts_created_at ON accounts(created_at);
+
+-- ============================================================
+-- 2) 关注关系表：follows  (follower → followee)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS follows (
+    follower     VARCHAR(42) NOT NULL,       -- 关注者
+    followee     VARCHAR(42) NOT NULL,       -- 被关注者
+    followed_at  BIGINT NOT NULL,            -- 合约 followTimestamp
+
+    PRIMARY KEY (follower, followee)
+);
+
+-- 索引：用于快速查粉丝 / 关注列表 / 时间排序
+CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower);
+CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee);
+CREATE INDEX IF NOT EXISTS idx_follows_followed_at ON follows(followed_at);
+
+COMMIT;
+
+
+
+2.2 关注关系表 follows
+CREATE TABLE follows (
+  follower        VARCHAR(42) NOT NULL,
+  followee        VARCHAR(42) NOT NULL,
+  followed_at     BIGINT NOT NULL,  -- 合约中的 followTimestamp
+  PRIMARY KEY (follower, followee)
+);
+
+CREATE INDEX idx_follows_follower ON follows (follower);
+CREATE INDEX idx_follows_followee ON follows (followee);
+CREATE INDEX idx_follows_followed_at ON follows (followed_at);
+
+
+
+
+ALTER TABLE accounts ADD COLUMN follow_count   BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN follower_count BIGINT NOT NULL DEFAULT 0;

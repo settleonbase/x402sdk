@@ -1949,3 +1949,5 @@ export const redeemCheck = async (req: Request, res: Response) => {
 
 // setTimeout(() => test1(), 5000)
 // setTimeout(() => {test2()}, 2000)
+
+oracleBackoud()

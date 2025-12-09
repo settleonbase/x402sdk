@@ -9,6 +9,13 @@ import beamioConetABI from './ABI/beamio-conet.abi.json'
 import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
 
+
+/**
+ * 
+ * 
+ * 
+ */
+
 const DB_URL = "postgres://account:accountpass@localhost:7434/accountdb"
 const RPC_URL = "https://mainnet-rpc.conet.network"
 
@@ -123,7 +130,69 @@ const initDB = async () => {
 	await db.end()
 }
 
+type BeamioFollow = {
+  follower: string      // 0x...
+  followee: string      // 0x...
+  followedAt: bigint    // 链上 timestamp（秒）
+}
+
+const updateUserFollowsDB = async (follows: BeamioFollow[], db: Client) => {
+	if (!follows.length) return
+
+	// 批量插入（这里简单循环，你以后可以优化成 multi-values）
+	for (const f of follows) {
+		const follower = f.follower.toLowerCase()
+		const followee = f.followee.toLowerCase()
+		const followedAtStr = f.followedAt.toString()
+
+		await db.query(
+		`
+		INSERT INTO follows (follower, followee, followed_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (follower, followee) DO UPDATE SET
+			followed_at = EXCLUDED.followed_at
+		`,
+		[follower, followee, followedAtStr]
+		)
+	}
+}
+
+const syncFollowsFromChainToDB = async (ownerAddress: string, db: Client) => {
+	const SC = beamio_ContractPool[0]
+	const registry = SC.constAccountRegistry
+
+	let cursor = 0n
+	const pageSize = 500n
+
+	const all: BeamioFollow[] = []
+
+	while (true) {
+		const [follows, timestamps, nextCursor, total] =
+		await registry.getFollowsPaginated(ownerAddress, cursor, pageSize)
+
+		if (!follows.length) break
+
+		for (let i = 0; i < follows.length; i++) {
+		all.push({
+			follower: ownerAddress,
+			followee: follows[i],
+			followedAt: timestamps[i] as bigint
+		})
+		}
+
+		const next = BigInt(nextCursor)
+		const totalBig = BigInt(total)
+
+		if (next === cursor || next >= totalBig) break
+		cursor = next
+	}
+
+	await updateUserFollowsDB(all, db)
+}
+
 const updateUserDB = async (account: beamioAccount) => {
+
+
 	const now = new Date()
 	const db = new Client({ connectionString: DB_URL })
 	await db.connect()
@@ -178,7 +247,10 @@ const updateUserDB = async (account: beamioAccount) => {
 			now
 		]
 	)
+
+	syncFollowsFromChainToDB(account.address, db)
 	logger(`updateUserDB success! `, inspect(account, false, 3, true))
+
 	await db.end()
 }
 
@@ -422,36 +494,94 @@ export const addUser = async (req: Request, res: Response) => {
 }
 
 export const searchUsers = async (req: Request, res: Response) => {
-	const { keyward} = req.query as {
+	const { keyward } = req.query as {
 		keyward?: string
 	}
 
-	const _keywork = String(keyward || "").trim().replace('@', '')
-	const _page =1
+	const _keywork = String(keyward || "").trim().replace("@", "")
+	const _page = 1
 	const _pageSize = 20
 
 	if (!_keywork) {
 		return res.status(404).end()
 	}
+
+	const isAddress = ethers.isAddress(_keywork)
 	const db = new Client({ connectionString: DB_URL })
-	await db.connect()
-	const offset = (_page - 1) * _pageSize
 
-	const { rows } = await db.query(
-		`
-			SELECT address, username, created_at, image, first_name, last_name
-			FROM accounts
-			WHERE username ILIKE $1
-			ORDER BY created_at DESC
-			LIMIT $2 OFFSET $3
-		`,
-		[`%${_keywork}%`, _pageSize, offset]
-  	)
+	try {
+		await db.connect()
 
-	res.json({
-		results: rows
-	})
+		const offset = (_page - 1) * _pageSize
 
-	await db.end()
+		let rows
+
+		if (isAddress) {
+			// 🔹 按地址精确查
+			const { rows: r } = await db.query(
+				`
+				SELECT
+				a.address,
+				a.username,
+				a.created_at,
+				a.image,
+				a.first_name,
+				a.last_name,
+				-- follow_count: 这个人关注了多少人
+				COALESCE(
+					(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
+					0
+				) AS follow_count,
+				-- follower_count: 有多少人关注了这个人
+				COALESCE(
+					(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
+					0
+				) AS follower_count
+				FROM accounts a
+				WHERE LOWER(a.address) = LOWER($1)
+				ORDER BY a.created_at DESC
+				LIMIT $2 OFFSET $3
+				`,
+				[_keywork, _pageSize, offset]
+			)
+			rows = r
+		} else {
+			// 🔹 按用户名模糊查
+			const { rows: r } = await db.query(
+				`
+				SELECT
+				a.address,
+				a.username,
+				a.created_at,
+				a.image,
+				a.first_name,
+				a.last_name,
+				COALESCE(
+					(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
+					0
+				) AS follow_count,
+				COALESCE(
+					(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
+					0
+				) AS follower_count
+				FROM accounts a
+				WHERE a.username ILIKE $1
+				ORDER BY a.created_at DESC
+				LIMIT $2 OFFSET $3
+				`,
+				[`%${_keywork}%`, _pageSize, offset]
+			)
+			rows = r
+		}
+
+		res.json({
+			results: rows
+		})
+	} catch (err) {
+		console.error("searchUsers error:", err)
+		res.status(500).json({ error: "internal_error" })
+	} finally {
+		await db.end()
+	}
 }
 
