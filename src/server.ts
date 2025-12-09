@@ -940,10 +940,6 @@ const router = ( router: express.Router ) => {
 		return BeamioPaymentLink(req, res)
 	})
 
-	router.get('/BeamioETHFaucet', async (req,res) => {
-		return BeamioETHFaucet(req, res)
-	})
-
 	router.get('/BeamioFaucet', async (req,res) => {
 		return BeamioFaucet(req, res)
 	})
@@ -994,14 +990,6 @@ const router = ( router: express.Router ) => {
 
 	router.get('/coinbase-offramp', (req,res) => {
 		return coinbaseOfframp(req, res)
-	})
-
-	router.get('/search-users', (req,res) => {
-		return searchUsers(req, res)
-	})
-
-	router.post('/addUser', (req,res) => {
-		return addUser(req, res)
 	})
 
 	router.get('/debug/ip', (req, res) => {

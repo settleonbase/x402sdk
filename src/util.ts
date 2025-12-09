@@ -101,8 +101,6 @@ const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
 const beamioConetAccountRegistry = '0x532d8A82b07d4091F8e045c017a4dF62b1019b1c'
 
-
-
 let Guardian_Nodes: nodeInfo[] = []
 
 const getRandomNode = () => {
@@ -185,7 +183,8 @@ const conetClient = createPublicClient({chain: conetMainnet, transport: http(con
 const oracle = {
     bnb: 0,
     eth: 0,
-	usdc: 0
+	usdc: 0,
+	timestamp: 0
 }
 
 let oracolPriceProcess = false
@@ -195,6 +194,7 @@ const oracolPrice = async () => {
 		return
 	}
 	oracolPriceProcess = true
+
 	const assets = ['bnb', 'eth', 'usdc']
 	const process: any[] = []
 	assets.forEach(n =>{
@@ -209,6 +209,7 @@ const oracolPrice = async () => {
 	oracle.bnb = parseFloat(bnb)
 	oracle.eth = parseFloat(eth)
 	oracle.usdc = parseFloat(usdc)
+
 	oracolPriceProcess = false
 }
 
@@ -1644,6 +1645,25 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 }
 
 const declaneAddress = '0x1000000000000000000000000000000000000000'
+
+export const BeamioETHFaucetTry = async (address: string) => {
+	const _address = address.toLowerCase()
+	const index = totalFaucetETHRecord.indexOf(_address)
+	if (index > -1) {
+		return
+	}
+	const SC = Settle_ContractPool[0]
+	try {
+		const isClaimed = await SC.conetSC.faucetClaimed(_address)
+		if (isClaimed) {
+			return
+		}
+	} catch (ex: any) {
+		logger(` await SC.conetSC.faucetClaimed(${_address}) Error, ${ex.message}`)
+		return
+	}
+	waitingFaucetUserProcessPool.push(_address)
+}
 
 export const BeamioETHFaucet = async (req: Request, res: Response) => {
 	let { address } = req.query as {

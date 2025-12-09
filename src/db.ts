@@ -4,7 +4,7 @@ import AccountRegistryAbi from "./ABI/beamio-AccountRegistry.json"
 import { logger } from "./logger"
 import { inspect } from "util"
 import { Request, Response} from 'express'
-import {masterSetup} from './util'
+import {masterSetup, BeamioETHFaucetTry} from './util'
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
@@ -401,7 +401,7 @@ export const addUser = async (req: Request, res: Response) => {
 		})
 
 		addUserPoolProcess()
-
+		BeamioETHFaucetTry(wallet)
 
 		// 3. 组装 calldata：ethers v6 struct 传参可以直接用对象
 		console.log("[setAccountByAdmin] sending tx for", accountName, fullInput)
@@ -422,15 +422,13 @@ export const addUser = async (req: Request, res: Response) => {
 }
 
 export const searchUsers = async (req: Request, res: Response) => {
-	const { keyward, page, pageSize } = req.query as {
+	const { keyward} = req.query as {
 		keyward?: string
-		page?: string
-		pageSize?: string
 	}
 
-	const _keywork = String(keyward || "").trim()
-	const _page = Number(page || 1)
-	const _pageSize = Math.min(Number(pageSize || 20), 100)
+	const _keywork = String(keyward || "").trim().replace('@', '')
+	const _page =1
+	const _pageSize = 20
 
 	if (!_keywork) {
 		return res.status(404).end()
@@ -441,20 +439,19 @@ export const searchUsers = async (req: Request, res: Response) => {
 
 	const { rows } = await db.query(
 		`
-		SELECT address, username, created_at
-		FROM accounts
-		WHERE username ILIKE $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
+			SELECT address, username, created_at, image, first_name, last_name
+			FROM accounts
+			WHERE username ILIKE $1
+			ORDER BY created_at DESC
+			LIMIT $2 OFFSET $3
 		`,
-		[`%${_keywork}%`, pageSize, offset]
+		[`%${_keywork}%`, _pageSize, offset]
   	)
 
 	res.json({
-		page: _page,
-		pageSize: _pageSize,
 		results: rows
 	})
+
 	await db.end()
 }
 

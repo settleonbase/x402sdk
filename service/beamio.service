@@ -1,0 +1,20 @@
+[Unit]
+Description=CONET SI Process
+After=network.target
+
+[Service]
+Type=simple
+Environment="NODE_ENV=production"
+ExecStart=/usr/bin/node dist/src/endpoint/BeamioCluster.js
+Restart=always
+RestartSec=10
+
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=conet-si
+WorkingDirectory=/home/peter/x402sdk
+User=peter
+Group=peter
+
+[Install]
+WantedBy=multi-user.target

@@ -8,7 +8,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool} from '../db'
+import {beamio_ContractPool, searchUsers} from '../db'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -68,8 +68,7 @@ const userOwnershipCheck = async (accountName: string, wallet: string) => {
 const routing = ( router: Router ) => {
 	
 	router.get('/search-users', (req,res) => {
-
-		
+		searchUsers(req,res)
 	})
 
 	router.get('/getOracle', async (req,res) => {
@@ -88,7 +87,7 @@ const routing = ( router: Router ) => {
 			firstName?: string
 			lastName?: string
 		}
-		const trimmed = accountName?.trim()
+		const trimmed = accountName?.trim().replace('@','')
 		if (!trimmed || !/^[a-zA-Z0-9_\.]{3,20}$/.test(trimmed) || !ethers.isAddress(wallet) || wallet === ethers.ZeroAddress) {
 			return res.status(400).json({ error: "Invalid data format" })
 		}

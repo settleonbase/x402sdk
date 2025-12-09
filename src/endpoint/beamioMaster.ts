@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp} from '../util'
+import {getClientIp, oracleBackoud, BeamioETHFaucetTry} from '../util'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
@@ -12,10 +12,6 @@ const masterServerPort = 1111
 
 
 const routing = ( router: Router ) => {
-	
-	router.get('/search-users', (req,res) => {
-		
-	})
 
 	router.post('/addUser', (req,res) => {
 		return addUser(req, res)
@@ -41,7 +37,7 @@ const routing = ( router: Router ) => {
 
 const initialize = async (reactBuildFolder: string, PORT: number) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
-	
+	oracleBackoud()
 
 	const defaultPath = join(__dirname, 'workers')
 	console.log('📁 defaultPath:', defaultPath)
