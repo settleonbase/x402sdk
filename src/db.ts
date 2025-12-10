@@ -157,38 +157,6 @@ const updateUserFollowsDB = async (follows: BeamioFollow[], db: Client) => {
 	}
 }
 
-const syncFollowsFromChainToDB = async (ownerAddress: string, db: Client) => {
-	const SC = beamio_ContractPool[0]
-	const registry = SC.constAccountRegistry
-
-	let cursor = 0n
-	const pageSize = 500n
-
-	const all: BeamioFollow[] = []
-
-	while (true) {
-		const [follows, timestamps, nextCursor, total] =
-		await registry.getFollowsPaginated(ownerAddress, cursor, pageSize)
-
-		if (!follows.length) break
-
-		for (let i = 0; i < follows.length; i++) {
-		all.push({
-			follower: ownerAddress,
-			followee: follows[i],
-			followedAt: timestamps[i] as bigint
-		})
-		}
-
-		const next = BigInt(nextCursor)
-		const totalBig = BigInt(total)
-
-		if (next === cursor || next >= totalBig) break
-		cursor = next
-	}
-
-	await updateUserFollowsDB(all, db)
-}
 
 const updateUserDB = async (account: beamioAccount) => {
 
@@ -248,7 +216,7 @@ const updateUserDB = async (account: beamioAccount) => {
 		]
 	)
 
-	syncFollowsFromChainToDB(account.address, db)
+	
 	logger(`updateUserDB success! `, inspect(account, false, 3, true))
 
 	await db.end()
@@ -617,8 +585,9 @@ const deleteAccountFromDB = async (address: string) => {
 		await db.query("ROLLBACK")
 		throw err
 	} finally {
+		logger(`deleteAccountFromDB success: ${addr}`)
 		await db.end()
 	}
 }
 
-deleteAccountFromDB('0x45edf712a5b7c4955d17c3211df629477c0edf8c')
+deleteAccountFromDB('0xb15e6983ee3e271fee153c5e91c38d987353655f')
