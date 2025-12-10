@@ -7,14 +7,18 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser} from '../db'
+import {addUser, addFollow, removeFollow} from '../db'
 const masterServerPort = 1111
 
 
 const routing = ( router: Router ) => {
 
 	router.get('/addFollow', (req,res) => {
-		return addUser(req, res)
+		return addFollow(req, res)
+	})
+
+	router.get('/removeFollow', (req,res) => {
+		return removeFollow(req, res)
 	})
 
 	router.post('/addUser', (req,res) => {

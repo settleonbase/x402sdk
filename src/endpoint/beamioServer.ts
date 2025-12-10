@@ -8,7 +8,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus} from '../db'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -65,6 +65,16 @@ const userOwnershipCheck = async (accountName: string, wallet: string) => {
 	return true
 }
 
+const getFollowCheck = async (wallet: string, followAddress: string) => {
+	try {
+		const isFollowing: boolean = await SC.isFollowingAddress(wallet, followAddress)
+		return isFollowing
+	} catch (ex: any) {
+		logger(`getFollowCheck Error! ${ex.message}`)
+	}
+	return null
+}
+
 const routing = ( router: Router ) => {
 	
 	router.get('/search-users', (req,res) => {
@@ -76,8 +86,6 @@ const routing = ( router: Router ) => {
 	})
 
 	router.post('/addUser', async (req,res) => {
-
-
 		const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, signMessage } = req.body as {
 			accountName?: string
 			wallet?: string
@@ -89,9 +97,7 @@ const routing = ( router: Router ) => {
 			firstName?: string
 			lastName?: string
 			signMessage?: string
-
 		}
-
 
 		const trimmed = accountName?.trim().replace('@','')
 		if (!trimmed || !/^[a-zA-Z0-9_\.]{3,20}$/.test(trimmed) || !ethers.isAddress(wallet) || wallet === ethers.ZeroAddress || !signMessage || signMessage?.trim() === '') {
@@ -121,6 +127,93 @@ const routing = ( router: Router ) => {
 			lastName: lastName?.trim() || ''
 		}
 		postLocalhost ('/api/addUser', obj, res)
+	})
+
+	router.get('/addFollow', async (req,res) => {
+		const { wallet, signMessage, followAddress } = req.body as {
+			wallet?: string
+			followAddress?: string
+			signMessage?: string
+		}
+
+		if (!ethers.isAddress(wallet) || wallet === ethers.ZeroAddress || !signMessage || signMessage?.trim() === ''|| !ethers.isAddress(followAddress) || followAddress === ethers.ZeroAddress) {
+			return res.status(400).json({ error: "Invalid data format" })
+		}
+
+		const isValid = checkSign(wallet, signMessage)
+		
+		if (!isValid||isValid === followAddress.toLowerCase()) {
+			return  res.status(400).json({ error: "Signature verification failed!" })
+		}
+		const followCheck = await getFollowCheck(wallet, followAddress)
+		if (followCheck === null) {
+			return res.status(400).json({ error: "Follow check Error!" })
+		}
+		if (followCheck) {
+			return res.status(200).json({ message: "Already following!" }).end()
+		}
+
+		
+		const obj = {
+			wallet: wallet.toLowerCase(),
+			followAddress: followAddress.toLowerCase()
+		}
+		postLocalhost ('/api/addFollow', obj, res)
+
+	})
+
+	router.get('/getFollowStatus', async (req,res) => {
+		const { wallet, followAddress } = req.body as {
+			wallet?: string
+			followAddress?: string
+		}
+
+		if (!ethers.isAddress(wallet) || wallet === ethers.ZeroAddress || !ethers.isAddress(followAddress) || followAddress === ethers.ZeroAddress) {
+			return res.status(400).json({ error: "Invalid data format" })
+		}
+
+		
+		const followStatus = await FollowerStatus(wallet, followAddress)
+		if (followStatus === null) {
+			return res.status(400).json({ error: "Follow status check Error!" })
+		}
+		
+		return res.status(200).json(followStatus).end()
+
+	})
+
+	router.get('/removeFollow', async (req,res) => {
+		const { wallet, signMessage, followAddress } = req.body as {
+			wallet?: string
+			followAddress?: string
+			signMessage?: string
+		}
+
+		if (!ethers.isAddress(wallet) || wallet === ethers.ZeroAddress || !signMessage || signMessage?.trim() === ''|| !ethers.isAddress(followAddress) || followAddress === ethers.ZeroAddress) {
+			return res.status(400).json({ error: "Invalid data format" })
+		}
+
+		const isValid = checkSign(wallet, signMessage)
+		
+		if (!isValid||isValid === followAddress.toLowerCase()) {
+			return  res.status(400).json({ error: "Signature verification failed!" })
+		}
+		const followCheck = await getFollowCheck(wallet, followAddress)
+		if (followCheck === null) {
+			return res.status(400).json({ error: "Follow check Error!" })
+		}
+
+		if (!followCheck) {
+			return res.status(200).json({ message: "Have not following!" }).end()
+		}
+
+		
+		const obj = {
+			wallet: wallet.toLowerCase(),
+			followAddress: followAddress.toLowerCase()
+		}
+		postLocalhost ('/api/removeFollow', obj, res)
+
 	})
 
 	router.get('/debug/ip', (req, res) => {

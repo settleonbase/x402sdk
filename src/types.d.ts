@@ -193,3 +193,9 @@ type IAddUserPool = {
 	account: beamioAccount
 	recover?: IAccountRecover[]
 }
+
+type IAddUserPool = {
+	wallet: string
+	account: beamioAccount
+	recover?: IAccountRecover[]
+}

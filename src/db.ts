@@ -42,7 +42,6 @@ export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 	}
 })
 
-
 let initProcess = false
 
 const initDB = async () => {
@@ -157,10 +156,7 @@ const updateUserFollowsDB = async (follows: BeamioFollow[], db: Client) => {
 	}
 }
 
-
 const updateUserDB = async (account: beamioAccount) => {
-
-
 	const now = new Date()
 	const db = new Client({ connectionString: DB_URL })
 	await db.connect()
@@ -337,6 +333,12 @@ const getUserData = async (userName: string) => {
 
 
 const addUserPool: IAddUserPool [] = []
+const addFollowPool: {
+	wallet: string
+	followAddress: string
+	remove: boolean
+}[] = []
+
 
 const addUserPoolProcess = async () => {
 	const obj = addUserPool.shift()
@@ -397,6 +399,43 @@ const addUserPoolProcess = async () => {
 	beamio_ContractPool.unshift(SC)
 	setTimeout(() => {
 		addUserPoolProcess()
+	}, 2000)
+
+}
+
+const addFollowPoolProcess = async () => {
+	const obj = addFollowPool.shift()
+	if (!obj) {
+		return
+	}
+
+	const SC = beamio_ContractPool.shift()
+	if (!SC) {
+		addFollowPool.unshift(obj)
+		setTimeout(() => {
+			addFollowPoolProcess()
+		}, 2000)
+		return
+	}
+	
+	try {
+		const tx = obj.remove ? await SC.constAccountRegistry.unfollowByAdmin(
+			obj.wallet, obj.followAddress
+		) : await SC.constAccountRegistry.followByAdmin(
+			obj.wallet, obj.followAddress
+		)
+
+		await tx.wait()
+		logger(`addFollowPoolProcess constAccountRegistry remove ${obj.remove} SUCCESS!`, tx.hash)
+
+
+	} catch (ex: any) {
+		logger(`addFollowPoolProcess Error: ${ex.message}`)
+	}
+
+	beamio_ContractPool.unshift(SC)
+	setTimeout(() => {
+		addFollowPoolProcess()
 	}, 2000)
 
 }
@@ -553,13 +592,278 @@ export const searchUsers = async (req: Request, res: Response) => {
 	}
 }
 
-export const addFollow = ( req: Request, res: Response) => {
-	const { follower, followee, followedAt } = req.query as {
-		follower: string
-		followee: string
-		followedAt: string
+const updateUserFollowDB = async (
+		accountAddress: string,   // follower
+		followAddress: string     // followee
+	) => {
+	const follower = accountAddress.toLowerCase()
+	const followee = followAddress.toLowerCase()
+	const nowSec = Math.floor(Date.now() / 1000)
+	const db = new Client({ connectionString: DB_URL })
+	await db.connect()
+
+
+	try {
+		await db.query("BEGIN")
+
+		// 1) 插入关注关系（如果已经存在则忽略）
+		const insertResult = await db.query(
+			`
+				INSERT INTO follows (follower, followee, followed_at)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (follower, followee) DO NOTHING
+			`,
+			[follower, followee, nowSec]
+		)
+
+		// 2) 只有在真正插入成功时（不是重复关注），才更新计数
+		if (insertResult.rowCount !== null && insertResult.rowCount > 0) {
+			await db.query(
+				`
+				UPDATE accounts
+				SET follow_count = follow_count + 1
+				WHERE address = $1
+				`,
+				[follower]
+			)
+
+			await db.query(
+				`
+				UPDATE accounts
+				SET follower_count = follower_count + 1
+				WHERE address = $1
+				`,
+				[followee]
+			)
+		}
+
+		await db.query("COMMIT")
+	} catch (err) {
+		await db.query("ROLLBACK")
+		throw err
+	} finally {
+		await db.end()
 	}
 }
+
+const updateUserFollowRemoveDB = async (
+	accountAddress: string,   // follower
+	followAddress: string     // followee
+	) => {
+	const follower = accountAddress.toLowerCase()
+	const followee = followAddress.toLowerCase()
+		const db = new Client({ connectionString: DB_URL })
+	await db.connect()
+
+	try {
+		await db.query("BEGIN")
+
+		// 1) 删除关注关系
+		const deleteResult = await db.query(
+			`
+				DELETE FROM follows
+				WHERE follower = $1 AND followee = $2
+			`,
+			[follower, followee]
+		)
+
+			// 如果本来就没有这条关系，就不用改计数，直接提交事务
+			if (deleteResult.rowCount === 0) {
+				await db.query("COMMIT")
+			return
+		}
+
+		// 2) 更新双方计数（做防御：确保不会 < 0）
+		await db.query(
+		`
+		UPDATE accounts
+		SET follow_count = GREATEST(follow_count - 1, 0)
+		WHERE address = $1
+		`,
+		[follower]
+		)
+
+		await db.query(
+		`
+		UPDATE accounts
+		SET follower_count = GREATEST(follower_count - 1, 0)
+		WHERE address = $1
+		`,
+		[followee]
+		)
+
+		await db.query("COMMIT")
+	} catch (err) {
+		await db.query("ROLLBACK")
+		throw err
+	} finally {
+		await db.end()
+	}
+}
+
+export const removeFollow = ( req: Request, res: Response) => {
+	const { wallet, followAddress } = req.body as {
+		wallet: string
+		followAddress: string
+	}
+	addFollowPool.push({
+		wallet,
+		followAddress,
+		remove: true
+	})
+	res.status(200).json({ok: true}).end()
+	addFollowPoolProcess()
+	updateUserFollowRemoveDB(wallet, followAddress)	
+}
+
+
+export const addFollow = ( req: Request, res: Response) => {
+	const { wallet, followAddress } = req.body as {
+		wallet: string
+		followAddress: string
+	}
+	addFollowPool.push({
+		wallet,
+		followAddress,
+		remove: false
+	})
+	res.status(200).json({ok: true}).end()
+	addFollowPoolProcess()
+	updateUserFollowDB(wallet, followAddress)
+}
+
+type FollowRecord = {
+	address: string      // 对方地址：following 里是 followee，followers 里是 follower
+	followedAt: number   // 秒级时间戳
+}
+
+type FollowPage = {
+	items: FollowRecord[]
+	page: number
+	pageSize: number
+	total: number        // 总条数，用于前端算总页数
+}
+
+
+//		我关注了谁」列表，按时间倒序（最新 follow 在前）
+const getFollowingPaginated = async (
+		address: string,
+		page: number,
+		pageSize: number
+	): Promise<FollowPage> => {
+
+	const db = new Client({ connectionString: DB_URL })
+	await db.connect()
+	const addr = address.toLowerCase()
+
+	const safePage = page > 0 ? page : 1
+	const safePageSize = pageSize > 0 ? pageSize : 20
+	const offset = (safePage - 1) * safePageSize
+
+	// 1) 查总数
+	const { rows: countRows } = await db.query(
+		`
+		SELECT COUNT(*)::BIGINT AS total
+		FROM follows
+		WHERE follower = $1
+		`,
+		[addr]
+	)
+
+	const total = Number(countRows[0]?.total ?? 0)
+	if (total === 0) {
+		return {
+		items: [],
+		page: safePage,
+		pageSize: safePageSize,
+		total: 0
+		}
+	}
+
+	// 2) 查当前页数据（按 followed_at DESC）
+	const { rows } = await db.query(
+		`
+		SELECT followee, followed_at
+		FROM follows
+		WHERE follower = $1
+		ORDER BY followed_at DESC
+		LIMIT $2 OFFSET $3
+		`,
+		[addr, safePageSize, offset]
+	)
+
+	const items: FollowRecord[] = rows.map((r: any) => ({
+		address: String(r.followee),
+		followedAt: Number(r.followed_at)
+	}))
+
+	return {
+		items,
+		page: safePage,
+		pageSize: safePageSize,
+		total
+	}
+}
+
+
+//		谁关注了我」列表，按时间倒序（最新 follow 在前）
+const getFollowersPaginated = async (
+	address: string,
+	page: number,
+	pageSize: number
+	): Promise<FollowPage> => {
+	const addr = address.toLowerCase()
+
+	const safePage = page > 0 ? page : 1
+	const safePageSize = pageSize > 0 ? pageSize : 20
+	const offset = (safePage - 1) * safePageSize
+	const db = new Client({ connectionString: DB_URL })
+	await db.connect()
+	// 1) 查总数
+	const { rows: countRows } = await db.query(
+		`
+		SELECT COUNT(*)::BIGINT AS total
+		FROM follows
+		WHERE followee = $1
+		`,
+		[addr]
+	)
+
+	const total = Number(countRows[0]?.total ?? 0)
+	if (total === 0) {
+		return {
+		items: [],
+		page: safePage,
+		pageSize: safePageSize,
+		total: 0
+		}
+	}
+
+	// 2) 查当前页数据（按 followed_at DESC）
+	const { rows } = await db.query(
+		`
+		SELECT follower, followed_at
+		FROM follows
+		WHERE followee = $1
+		ORDER BY followed_at DESC
+		LIMIT $2 OFFSET $3
+		`,
+		[addr, safePageSize, offset]
+	)
+
+	const items: FollowRecord[] = rows.map((r: any) => ({
+		address: String(r.follower),
+		followedAt: Number(r.followed_at)
+	}))
+
+	return {
+		items,
+		page: safePage,
+		pageSize: safePageSize,
+		total
+	}
+}
+
 
 const deleteAccountFromDB = async (address: string) => {
 	const addr = address.toLowerCase()
@@ -595,5 +899,75 @@ const deleteAccountFromDB = async (address: string) => {
 	} finally {
 		logger(`deleteAccountFromDB success: ${addr}`)
 		await db.end()
+	}
+}
+
+
+export const FollowerStatus = async (
+	myAddress: string,
+	followerAddress: string
+): Promise<{
+	isFollowing: boolean
+	following: FollowRecord[]    // followerAddress 关注了谁（最新 20）
+	followers: FollowRecord[]    // 谁关注了 followerAddress（最新 20）
+}> => {
+	const me = myAddress.toLowerCase()
+	const target = followerAddress.toLowerCase()
+	const db = new Client({ connectionString: DB_URL })
+	await db.connect()
+	// 并行查询，减少延迟
+	const [isFollowingResult, followingResult, followersResult] = await Promise.all([
+		// 1) myAddress 是否 follow 了 followerAddress
+		db.query(
+			`
+			SELECT 1
+			FROM follows
+			WHERE follower = $1 AND followee = $2
+			LIMIT 1
+			`,
+			[me, target]
+		),
+
+		// 2) followerAddress 的最新 20 个 following（它关注了谁）
+		db.query(
+			`
+			SELECT followee, followed_at
+			FROM follows
+			WHERE follower = $1
+			ORDER BY followed_at DESC
+			LIMIT 20
+			`,
+			[target]
+		),
+
+		// 3) followerAddress 的最新 20 个 followers（谁关注了它）
+		db.query(
+			`
+			SELECT follower, followed_at
+			FROM follows
+			WHERE followee = $1
+			ORDER BY followed_at DESC
+			LIMIT 20
+			`,
+		[target]
+		)
+	])
+
+	const isFollowing = isFollowingResult.rowCount && isFollowingResult.rowCount > 0 ? true : false
+
+	const following: FollowRecord[] = followingResult.rows.map((r: any) => ({
+		address: String(r.followee),
+		followedAt: Number(r.followed_at)
+	}))
+
+	const followers: FollowRecord[] = followersResult.rows.map((r: any) => ({
+		address: String(r.follower),
+		followedAt: Number(r.followed_at)
+	}))
+
+	return {
+		isFollowing,
+		following,
+		followers
 	}
 }
