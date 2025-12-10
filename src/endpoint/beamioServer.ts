@@ -129,7 +129,7 @@ const routing = ( router: Router ) => {
 		postLocalhost ('/api/addUser', obj, res)
 	})
 
-	router.get('/addFollow', async (req,res) => {
+	router.post('/addFollow', async (req,res) => {
 		const { wallet, signMessage, followAddress } = req.body as {
 			wallet?: string
 			followAddress?: string
@@ -163,7 +163,7 @@ const routing = ( router: Router ) => {
 	})
 
 	router.get('/getFollowStatus', async (req,res) => {
-		const { wallet, followAddress } = req.body as {
+		const { wallet, followAddress } = req.query as {
 			wallet?: string
 			followAddress?: string
 		}
