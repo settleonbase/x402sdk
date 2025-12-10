@@ -590,4 +590,4 @@ const deleteAccountFromDB = async (address: string) => {
 	}
 }
 
-deleteAccountFromDB('0x4b35ee2de530473897eec175d7d618ff200711e1')
+deleteAccountFromDB('0x73133157a33a5d5d1e4b621d419fce4326efe689')
