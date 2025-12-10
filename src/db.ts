@@ -585,3 +585,40 @@ export const searchUsers = async (req: Request, res: Response) => {
 	}
 }
 
+const deleteAccountFromDB = async (address: string) => {
+	const addr = address.toLowerCase()
+	const db = new Client({ connectionString: DB_URL })
+	
+	await db.connect()
+
+	try {
+		await db.query("BEGIN")
+
+		// 删关注关系
+		await db.query(
+		`
+		DELETE FROM follows
+		WHERE follower = $1 OR followee = $1
+		`,
+		[addr]
+		)
+
+		// 删账号
+		await db.query(
+		`
+		DELETE FROM accounts
+		WHERE address = $1
+		`,
+		[addr]
+		)
+
+		await db.query("COMMIT")
+	} catch (err) {
+		await db.query("ROLLBACK")
+		throw err
+	} finally {
+		await db.end()
+	}
+}
+
+deleteAccountFromDB('0x45edf712a5b7c4955d17c3211df629477c0edf8c')
