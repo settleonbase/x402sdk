@@ -881,11 +881,13 @@ export const generateCheck = async (req: Request, res: Response) => {
 	}
 
 	const totalAmount = Number(amount)
+	const checkNode = (!note || note.split('\r\n').length < 2)
 
-	if (!amount|| isNaN(totalAmount) || totalAmount < 0.1 || !secureCode || !ethers.isHexString(secureCode)) {
+	if (!amount|| isNaN(totalAmount) || totalAmount < 0.1 || !secureCode || checkNode || !ethers.isHexString(secureCode)) {
 		logger(`generateCheck stage 1 error!`)
-		return res.status(403)
+		return res.status(400)
 	}
+
 	const SC = Settle_ContractPool[0]
 	try {
 		const [from] = await SC.conetSC.checkMemo(secureCode)
@@ -894,11 +896,13 @@ export const generateCheck = async (req: Request, res: Response) => {
 			logger(`withdrawWithCode ${secureCode} is exiets `)
 			return res.status(403).end()
 		}
+		
 		const amt = ethers.parseUnits(amount, 6)
 		const requestX402 = await BeamioPayment(req, res, amt, beamiobase)
 		if (!requestX402 || !requestX402?.authorization) {
 			return res.status(403).end()
 		}
+
 		const payload = requestX402.authorization
 		depositWith3009AuthorizationPayLinkPool.push({
 			from: payload.from,
