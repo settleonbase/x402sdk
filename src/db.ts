@@ -553,6 +553,14 @@ export const searchUsers = async (req: Request, res: Response) => {
 	}
 }
 
+export const addFollow = ( req: Request, res: Response) => {
+	const { follower, followee, followedAt } = req.query as {
+		follower: string
+		followee: string
+		followedAt: string
+	}
+}
+
 const deleteAccountFromDB = async (address: string) => {
 	const addr = address.toLowerCase()
 	const db = new Client({ connectionString: DB_URL })
@@ -589,5 +597,3 @@ const deleteAccountFromDB = async (address: string) => {
 		await db.end()
 	}
 }
-
-deleteAccountFromDB('0x5f3ada971458d053535fdc4307daa26317bfc1b3')

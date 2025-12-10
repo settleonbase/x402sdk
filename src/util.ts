@@ -1950,8 +1950,33 @@ export const redeemCheck = async (req: Request, res: Response) => {
 
 }
 
+export const checkSign = (walletAddress: string, signMess: string) => {
+	let digest, recoverPublicKey, verifyMessage, obj: string
+	let wallet = ''
+	try {
+		
+		wallet = walletAddress.toLowerCase()
+		digest = ethers.id(walletAddress)
+		recoverPublicKey = ethers.recoverAddress(digest, signMess)
+		verifyMessage = ethers.verifyMessage(walletAddress, signMess)
+
+	} catch (ex: any) {
+		logger (`checkSignObj recoverPublicKey ERROR`, ex.message)
+		logger (`digest = ${digest} signMess = ${signMess}`)
+		return null
+	}
+	
+
+	if (wallet && (verifyMessage.toLowerCase() === wallet || recoverPublicKey.toLowerCase() === wallet)) {
+		obj = wallet
+		return obj
+	}
+	
+	logger (`checkSignObj recoveredAddress (${verifyMessage.toLowerCase()}) or recoverPublicKey ${recoverPublicKey.toLowerCase()} !== wallet (${wallet})`)
+	return null
+	
+}
 
 // setTimeout(() => test1(), 5000)
 // setTimeout(() => {test2()}, 2000)
 
-oracleBackoud()

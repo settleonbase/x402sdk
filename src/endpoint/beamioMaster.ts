@@ -13,6 +13,10 @@ const masterServerPort = 1111
 
 const routing = ( router: Router ) => {
 
+	router.get('/addFollow', (req,res) => {
+		return addUser(req, res)
+	})
+
 	router.post('/addUser', (req,res) => {
 		return addUser(req, res)
 	})

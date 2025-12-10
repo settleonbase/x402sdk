@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp, getOracleRequest, oracleBackoud} from '../util'
+import {getClientIp, getOracleRequest, oracleBackoud, checkSign} from '../util'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
@@ -76,7 +76,9 @@ const routing = ( router: Router ) => {
 	})
 
 	router.post('/addUser', async (req,res) => {
-		const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName } = req.body as {
+
+
+		const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, signMessage } = req.body as {
 			accountName?: string
 			wallet?: string
 			recover?: IAccountRecover[]
@@ -86,11 +88,22 @@ const routing = ( router: Router ) => {
 			isETHFaucet?: boolean
 			firstName?: string
 			lastName?: string
+			signMessage?: string
+
 		}
+
+
 		const trimmed = accountName?.trim().replace('@','')
-		if (!trimmed || !/^[a-zA-Z0-9_\.]{3,20}$/.test(trimmed) || !ethers.isAddress(wallet) || wallet === ethers.ZeroAddress) {
+		if (!trimmed || !/^[a-zA-Z0-9_\.]{3,20}$/.test(trimmed) || !ethers.isAddress(wallet) || wallet === ethers.ZeroAddress || !signMessage || signMessage?.trim() === '') {
 			return res.status(400).json({ error: "Invalid data format" })
 		}
+
+		const isValid = checkSign(wallet, signMessage)
+		
+		if (!isValid) {
+			return  res.status(400).json({ error: "Signature verification failed!" })
+		}
+
 		const ownship = await userOwnershipCheck(trimmed, wallet)
 		if (!ownship) {
 			return res.status(400).json({ error: "Wallet & accountName ownership Error!" })
