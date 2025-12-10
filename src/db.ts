@@ -911,79 +911,110 @@ export const FollowerStatus = async (
 	isFollowedBy: boolean         // 它是否关注我
 	following: FollowRecord[]     // 它关注了谁 (20 条)
 	followers: FollowRecord[]     // 谁关注了它 (20 条)
+	followingCount: number        // 它总共 follow 了多少人
+	followerCount: number         // 总共有多少人 follow 它
 }> => {
 	const me = myAddress.toLowerCase()
 	const target = followerAddress.toLowerCase()
 
 	const db = new Client({ connectionString: DB_URL })
 	await db.connect()
-	// 并行提高速度
-	const [
+
+	try {
+		// 并行查询
+		const [
 		isFollowingResult,
 		isFollowedByResult,
 		followingResult,
-		followersResult
-	] = await Promise.all([
+		followersResult,
+		countsResult
+		] = await Promise.all([
 		// 1) 我是否关注它？
 		db.query(
-		`
-		SELECT 1
-		FROM follows
-		WHERE follower = $1 AND followee = $2
-		LIMIT 1
-		`,
-		[me, target]
+			`
+			SELECT 1
+			FROM follows
+			WHERE follower = $1 AND followee = $2
+			LIMIT 1
+			`,
+			[me, target]
 		),
 
-		// 2) 它是否关注我？（新增字段）
+		// 2) 它是否关注我？
 		db.query(
-		`
-		SELECT 1
-		FROM follows
-		WHERE follower = $1 AND followee = $2
-		LIMIT 1
-		`,
-		[target, me]
+			`
+			SELECT 1
+			FROM follows
+			WHERE follower = $1 AND followee = $2
+			LIMIT 1
+			`,
+			[target, me]
 		),
 
 		// 3) 它的最新 following 列表（最新 20）
 		db.query(
-		`
-		SELECT followee, followed_at
-		FROM follows
-		WHERE follower = $1
-		ORDER BY followed_at DESC
-		LIMIT 20
-		`,
-		[target]
+			`
+			SELECT followee, followed_at
+			FROM follows
+			WHERE follower = $1
+			ORDER BY followed_at DESC
+			LIMIT 20
+			`,
+			[target]
 		),
 
 		// 4) 它的最新 followers 列表（最新 20）
 		db.query(
-		`
-		SELECT follower, followed_at
-		FROM follows
-		WHERE followee = $1
-		ORDER BY followed_at DESC
-		LIMIT 20
-		`,
-		[target]
+			`
+			SELECT follower, followed_at
+			FROM follows
+			WHERE followee = $1
+			ORDER BY followed_at DESC
+			LIMIT 20
+			`,
+			[target]
+		),
+
+		// 5) 它的总 follow_count / follower_count
+		// 如果你 accounts 表里没这两列，可以改成 COUNT(*) FROM follows ...
+		db.query(
+			`
+			SELECT
+			COALESCE(follow_count, 0)   AS follow_count,
+			COALESCE(follower_count, 0) AS follower_count
+			FROM accounts
+			WHERE address = $1
+			`,
+			[target]
 		)
-	])
+		])
 
-	return {
-		
-		isFollowing: isFollowingResult.rowCount && isFollowingResult.rowCount > 0 ? true : false,
-		isFollowedBy: isFollowedByResult.rowCount && isFollowedByResult.rowCount > 0 ? true : false,
+		const isFollowing = isFollowingResult.rowCount && isFollowingResult.rowCount > 0 ? true : false
+		const isFollowedBy = isFollowedByResult.rowCount && isFollowedByResult.rowCount > 0 ? true : false
 
-		following: followingResult.rows.map((r: any) => ({
-			address: String(r.followee),
-			followedAt: Number(r.followed_at)
-		})),
-
-		followers: followersResult.rows.map((r: any) => ({
-			address: String(r.follower),
-			followedAt: Number(r.followed_at)
+		const following: FollowRecord[] = followingResult.rows.map((r: any) => ({
+		address: String(r.followee),
+		followedAt: Number(r.followed_at)
 		}))
+
+		const followers: FollowRecord[] = followersResult.rows.map((r: any) => ({
+		address: String(r.follower),
+		followedAt: Number(r.followed_at)
+		}))
+
+		const countsRow = countsResult.rows[0] || { follow_count: 0, follower_count: 0 }
+		const followingCount = Number(countsRow.follow_count ?? 0)
+		const followerCount = Number(countsRow.follower_count ?? 0)
+
+		return {
+		isFollowing,
+		isFollowedBy,
+		following,
+		followers,
+		followingCount,
+		followerCount
+		}
+	} finally {
+		await db.end()
 	}
 }
