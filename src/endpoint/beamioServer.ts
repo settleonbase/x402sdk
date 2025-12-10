@@ -182,7 +182,7 @@ const routing = ( router: Router ) => {
 
 	})
 
-	router.get('/removeFollow', async (req,res) => {
+	router.post('/removeFollow', async (req,res) => {
 		const { wallet, signMessage, followAddress } = req.body as {
 			wallet?: string
 			followAddress?: string
