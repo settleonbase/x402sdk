@@ -907,67 +907,83 @@ export const FollowerStatus = async (
 	myAddress: string,
 	followerAddress: string
 ): Promise<{
-	isFollowing: boolean
-	following: FollowRecord[]    // followerAddress 关注了谁（最新 20）
-	followers: FollowRecord[]    // 谁关注了 followerAddress（最新 20）
+	isFollowing: boolean          // 我是否关注它
+	isFollowedBy: boolean         // 它是否关注我
+	following: FollowRecord[]     // 它关注了谁 (20 条)
+	followers: FollowRecord[]     // 谁关注了它 (20 条)
 }> => {
 	const me = myAddress.toLowerCase()
 	const target = followerAddress.toLowerCase()
+
 	const db = new Client({ connectionString: DB_URL })
 	await db.connect()
-	// 并行查询，减少延迟
-	const [isFollowingResult, followingResult, followersResult] = await Promise.all([
-		// 1) myAddress 是否 follow 了 followerAddress
+	// 并行提高速度
+	const [
+		isFollowingResult,
+		isFollowedByResult,
+		followingResult,
+		followersResult
+	] = await Promise.all([
+		// 1) 我是否关注它？
 		db.query(
-			`
-			SELECT 1
-			FROM follows
-			WHERE follower = $1 AND followee = $2
-			LIMIT 1
-			`,
-			[me, target]
+		`
+		SELECT 1
+		FROM follows
+		WHERE follower = $1 AND followee = $2
+		LIMIT 1
+		`,
+		[me, target]
 		),
 
-		// 2) followerAddress 的最新 20 个 following（它关注了谁）
+		// 2) 它是否关注我？（新增字段）
 		db.query(
-			`
-			SELECT followee, followed_at
-			FROM follows
-			WHERE follower = $1
-			ORDER BY followed_at DESC
-			LIMIT 20
-			`,
-			[target]
+		`
+		SELECT 1
+		FROM follows
+		WHERE follower = $1 AND followee = $2
+		LIMIT 1
+		`,
+		[target, me]
 		),
 
-		// 3) followerAddress 的最新 20 个 followers（谁关注了它）
+		// 3) 它的最新 following 列表（最新 20）
 		db.query(
-			`
-			SELECT follower, followed_at
-			FROM follows
-			WHERE followee = $1
-			ORDER BY followed_at DESC
-			LIMIT 20
-			`,
+		`
+		SELECT followee, followed_at
+		FROM follows
+		WHERE follower = $1
+		ORDER BY followed_at DESC
+		LIMIT 20
+		`,
+		[target]
+		),
+
+		// 4) 它的最新 followers 列表（最新 20）
+		db.query(
+		`
+		SELECT follower, followed_at
+		FROM follows
+		WHERE followee = $1
+		ORDER BY followed_at DESC
+		LIMIT 20
+		`,
 		[target]
 		)
 	])
 
-	const isFollowing = isFollowingResult.rowCount && isFollowingResult.rowCount > 0 ? true : false
-
-	const following: FollowRecord[] = followingResult.rows.map((r: any) => ({
-		address: String(r.followee),
-		followedAt: Number(r.followed_at)
-	}))
-
-	const followers: FollowRecord[] = followersResult.rows.map((r: any) => ({
-		address: String(r.follower),
-		followedAt: Number(r.followed_at)
-	}))
-
 	return {
-		isFollowing,
-		following,
-		followers
+		
+		isFollowing: isFollowingResult.rowCount && isFollowingResult.rowCount > 0 ? true : false,
+		isFollowedBy: isFollowedByResult.rowCount && isFollowedByResult.rowCount > 0 ? true : false,
+
+		following: followingResult.rows.map((r: any) => ({
+			address: String(r.followee),
+			followedAt: Number(r.followed_at)
+		})),
+
+		followers: followersResult.rows.map((r: any) => ({
+			address: String(r.follower),
+			followedAt: Number(r.followed_at)
+		}))
 	}
 }
