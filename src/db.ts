@@ -916,7 +916,7 @@ const deleteAccountFromDB = async (address: string) => {
 
 export const FollowerStatus = async (
 	myAddress: string,
-	followerAddress: string
+	followerAddress: string, db = new Client({ connectionString: DB_URL })
 ): Promise<{
 	isFollowing: boolean          // 我是否关注它
 	isFollowedBy: boolean         // 它是否关注我
@@ -928,7 +928,6 @@ export const FollowerStatus = async (
 	const me = myAddress.toLowerCase()
 	const target = followerAddress.toLowerCase()
 
-	const db = new Client({ connectionString: DB_URL })
 	await db.connect()
 
 	try {
@@ -1111,6 +1110,19 @@ export const getMyFollowStatus = async (
 		const followerCount = Number(
 			followerCountResult.rows[0]?.total ?? 0
 		)
+
+		    // ★ 等待所有 FollowerStatus 完成
+			await Promise.all(
+			following.map(async f => {
+				f.status = await FollowerStatus(addr, f.address)
+			})
+			)
+
+			await Promise.all(
+			followers.map(async f => {
+				f.status = await FollowerStatus(addr, f.address)
+			})
+			)
 
 		following.forEach(async f => f.status = await FollowerStatus(addr, f.address))
 		followers.forEach(async f => f.status = await FollowerStatus(addr, f.address))
