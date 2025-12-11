@@ -440,6 +440,9 @@ const addFollowPoolProcess = async () => {
 
 }
 
+
+const BeamioOfficial = '0xeabf0a98ac208647247eaa25fdd4eb0e67793d61'
+
 export const addUser = async (req: Request, res: Response) => {
 	const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName } = req.body as {
 		accountName: string
@@ -482,6 +485,13 @@ export const addUser = async (req: Request, res: Response) => {
 		addUserPoolProcess()
 		BeamioETHFaucetTry(wallet)
 
+		addFollowPool.push({
+			wallet,
+			followAddress: BeamioOfficial,
+			remove: false
+		})
+		addFollowPoolProcess()
+
 		// 3. 组装 calldata：ethers v6 struct 传参可以直接用对象
 		console.log("[setAccountByAdmin] sending tx for", accountName, fullInput)
 
@@ -507,7 +517,7 @@ export const searchUsers = async (req: Request, res: Response) => {
 
 	const _keywork = String(keyward || "").trim().replace("@", "")
 	const _page = 1
-	const _pageSize = 20
+	const _pageSize = 10
 
 	if (!_keywork) {
 		return res.status(404).end()
@@ -1115,3 +1125,5 @@ export const getMyFollowStatus = async (
 		await db.end()
 	}
 }
+
+
