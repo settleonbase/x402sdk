@@ -735,6 +735,7 @@ export const addFollow = ( req: Request, res: Response) => {
 type FollowRecord = {
 	address: string      // 对方地址：following 里是 followee，followers 里是 follower
 	followedAt: number   // 秒级时间戳
+	status?: any
 }
 
 type FollowPage = {
@@ -993,8 +994,8 @@ export const FollowerStatus = async (
 		const isFollowedBy = isFollowedByResult.rowCount && isFollowedByResult.rowCount > 0 ? true : false
 
 		const following: FollowRecord[] = followingResult.rows.map((r: any) => ({
-		address: String(r.followee),
-		followedAt: Number(r.followed_at)
+			address: String(r.followee),
+			followedAt: Number(r.followed_at)
 		}))
 
 		const followers: FollowRecord[] = followersResult.rows.map((r: any) => ({
@@ -1007,12 +1008,12 @@ export const FollowerStatus = async (
 		const followerCount = Number(countsRow.follower_count ?? 0)
 
 		return {
-		isFollowing,
-		isFollowedBy,
-		following,
-		followers,
-		followingCount,
-		followerCount
+			isFollowing,
+			isFollowedBy,
+			following,
+			followers,
+			followingCount,
+			followerCount
 		}
 	} finally {
 		await db.end()
@@ -1020,7 +1021,7 @@ export const FollowerStatus = async (
 }
 
 export const getMyFollowStatus = async (
-	myAddress: string
+		myAddress: string
 	): Promise<{
 	following: FollowRecord[]      // 我关注了谁（最新 20）
 	followers: FollowRecord[]      // 谁关注了我（最新 20）
@@ -1085,27 +1086,30 @@ export const getMyFollowStatus = async (
 		])
 
 		const following: FollowRecord[] = followingResult.rows.map((r: any) => ({
-		address: String(r.followee),
-		followedAt: Number(r.followed_at)
+			address: String(r.followee),
+			followedAt: Number(r.followed_at)
 		}))
 
 		const followers: FollowRecord[] = followersResult.rows.map((r: any) => ({
-		address: String(r.follower),
-		followedAt: Number(r.followed_at)
+			address: String(r.follower),
+			followedAt: Number(r.followed_at)
 		}))
 
 		const followingCount = Number(
-		followingCountResult.rows[0]?.total ?? 0
+			followingCountResult.rows[0]?.total ?? 0
 		)
 		const followerCount = Number(
-		followerCountResult.rows[0]?.total ?? 0
+			followerCountResult.rows[0]?.total ?? 0
 		)
 
+		following.forEach(async f => f.status = await FollowerStatus(addr, f.address))
+		followers.forEach(async f => f.status = await FollowerStatus(addr, f.address))
+
 		return {
-		following,
-		followers,
-		followingCount,
-		followerCount
+			following,
+			followers,
+			followingCount,
+			followerCount
 		}
 	} finally {
 		await db.end()
