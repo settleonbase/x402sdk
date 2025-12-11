@@ -232,7 +232,7 @@ const routing = ( router: Router ) => {
 		})
 	})
 
-	router.get('/getFollowStatus', async (req,res) => {
+	router.get('/getMyFollowStatus', async (req,res) => {
 		const { wallet } = req.query as {
 			wallet?: string
 		}
