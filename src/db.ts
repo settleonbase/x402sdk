@@ -1018,3 +1018,96 @@ export const FollowerStatus = async (
 		await db.end()
 	}
 }
+
+export const getMyFollowStatus = async (
+	myAddress: string
+	): Promise<{
+	following: FollowRecord[]      // 我关注了谁（最新 20）
+	followers: FollowRecord[]      // 谁关注了我（最新 20）
+	followingCount: number         // 我总共 follow 了多少人
+	followerCount: number          // 总共有多少人 follow 我
+	}> => {
+	const addr = myAddress.toLowerCase()
+
+	const db = new Client({ connectionString: DB_URL })
+	await db.connect()
+
+	try {
+		const [
+		followingResult,
+		followersResult,
+		followingCountResult,
+		followerCountResult
+		] = await Promise.all([
+		// 1) 我的最新 following（我关注了谁）
+		db.query(
+			`
+			SELECT followee, followed_at
+			FROM follows
+			WHERE follower = $1
+			ORDER BY followed_at DESC
+			LIMIT 20
+			`,
+			[addr]
+		),
+
+		// 2) 我最新的 followers（谁关注了我）
+		db.query(
+			`
+			SELECT follower, followed_at
+			FROM follows
+			WHERE followee = $1
+			ORDER BY followed_at DESC
+			LIMIT 20
+			`,
+			[addr]
+		),
+
+		// 3) 我一共 follow 了多少人
+		db.query(
+			`
+			SELECT COUNT(*)::BIGINT AS total
+			FROM follows
+			WHERE follower = $1
+			`,
+			[addr]
+		),
+
+		// 4) 一共有多少人 follow 我
+		db.query(
+			`
+			SELECT COUNT(*)::BIGINT AS total
+			FROM follows
+			WHERE followee = $1
+			`,
+			[addr]
+		)
+		])
+
+		const following: FollowRecord[] = followingResult.rows.map((r: any) => ({
+		address: String(r.followee),
+		followedAt: Number(r.followed_at)
+		}))
+
+		const followers: FollowRecord[] = followersResult.rows.map((r: any) => ({
+		address: String(r.follower),
+		followedAt: Number(r.followed_at)
+		}))
+
+		const followingCount = Number(
+		followingCountResult.rows[0]?.total ?? 0
+		)
+		const followerCount = Number(
+		followerCountResult.rows[0]?.total ?? 0
+		)
+
+		return {
+		following,
+		followers,
+		followingCount,
+		followerCount
+		}
+	} finally {
+		await db.end()
+	}
+}

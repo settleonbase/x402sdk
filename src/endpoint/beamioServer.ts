@@ -8,7 +8,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -230,6 +230,24 @@ const routing = ( router: Router ) => {
 			'Remote Address:': req.socket.remoteAddress
 			},
 		})
+	})
+
+	router.get('/getFollowStatus', async (req,res) => {
+		const { wallet } = req.query as {
+			wallet?: string
+		}
+
+		if (!ethers.isAddress(wallet) || wallet === ethers.ZeroAddress) {
+			return res.status(400).json({ error: "Invalid data format" })
+		}
+		
+		const followStatus = await getMyFollowStatus(wallet)
+		if (followStatus === null) {
+			return res.status(400).json({ error: "Follow status check Error!" })
+		}
+		
+		return res.status(200).json(followStatus).end()
+
 	})
 
 }
