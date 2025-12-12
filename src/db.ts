@@ -1030,112 +1030,135 @@ export const FollowerStatus = async (
 }
 
 export const getMyFollowStatus = async (
-		myAddress: string
-	): Promise<{
-	following: FollowRecord[]      // 我关注了谁（最新 20）
-	followers: FollowRecord[]      // 谁关注了我（最新 20）
-	followingCount: number         // 我总共 follow 了多少人
-	followerCount: number          // 总共有多少人 follow 我
-	}> => {
-	const addr = myAddress.toLowerCase()
+  	myAddress: string
+): Promise<{
+  following: FollowUserItem[]      // 我关注了谁（最新 20）
+  followers: FollowUserItem[]      // 谁关注了我（最新 20）
+  followingCount: number           // 我总共 follow 了多少人
+  followerCount: number            // 总共有多少人 follow 我
+}> => {
+  const addr = myAddress.toLowerCase()
 
-	const db = new Client({ connectionString: DB_URL })
-	await db.connect()
+  const db = new Client({ connectionString: DB_URL })
+  await db.connect()
 
-	try {
-		const [
-		followingResult,
-		followersResult,
-		followingCountResult,
-		followerCountResult
-		] = await Promise.all([
-		// 1) 我的最新 following（我关注了谁）
-		db.query(
-			`
-			SELECT followee, followed_at
-			FROM follows
-			WHERE follower = $1
-			ORDER BY followed_at DESC
-			LIMIT 20
-			`,
-			[addr]
-		),
+  try {
+    const [
+      followingResult,
+      followersResult,
+      myCountsResult
+    ] = await Promise.all([
+      // 1) 我关注了谁（最新 20）+ 对方的 profile + 对方的计数
+      db.query(
+        `
+        SELECT 
+          f.followee AS address,
+          f.followed_at,
+          a.username,
+          a.created_at,
+          a.image,
+          a.first_name,
+          a.last_name,
+          COALESCE(a.follow_count, 0)   AS following_count,
+          COALESCE(a.follower_count, 0) AS follower_count
+        FROM follows f
+        LEFT JOIN accounts a
+          ON a.address = f.followee
+        WHERE f.follower = $1
+        ORDER BY f.followed_at DESC
+        LIMIT 20
+        `,
+        [addr]
+      ),
 
-		// 2) 我最新的 followers（谁关注了我）
-		db.query(
-			`
-			SELECT follower, followed_at
-			FROM follows
-			WHERE followee = $1
-			ORDER BY followed_at DESC
-			LIMIT 20
-			`,
-			[addr]
-		),
+      // 2) 谁关注了我（最新 20）+ 对方的 profile + 对方的计数
+      db.query(
+        `
+        SELECT 
+          f.follower AS address,
+          f.followed_at,
+          a.username,
+          a.created_at,
+          a.image,
+          a.first_name,
+          a.last_name,
+          COALESCE(a.follow_count, 0)   AS following_count,
+          COALESCE(a.follower_count, 0) AS follower_count
+        FROM follows f
+        LEFT JOIN accounts a
+          ON a.address = f.follower
+        WHERE f.followee = $1
+        ORDER BY f.followed_at DESC
+        LIMIT 20
+        `,
+        [addr]
+      ),
 
-		// 3) 我一共 follow 了多少人
-		db.query(
-			`
-			SELECT COUNT(*)::BIGINT AS total
-			FROM follows
-			WHERE follower = $1
-			`,
-			[addr]
-		),
+      // 3) 我自己的 follow_count / follower_count
+      db.query(
+        `
+        SELECT
+          COALESCE(follow_count, 0)   AS following_count,
+          COALESCE(follower_count, 0) AS follower_count
+        FROM accounts
+        WHERE address = $1
+        `,
+        [addr]
+      )
+    ])
 
-		// 4) 一共有多少人 follow 我
-		db.query(
-			`
-			SELECT COUNT(*)::BIGINT AS total
-			FROM follows
-			WHERE followee = $1
-			`,
-			[addr]
-		)
-		])
+    const following: FollowUserItem[] = followingResult.rows.map((r: any) => ({
+      address: String(r.address),
+      followedAt: Number(r.followed_at),
+      username: r.username ?? null,
+      createdAt: r.created_at ? Number(r.created_at) : null,
+      image: r.image ?? null,
+      firstName: r.first_name ?? null,
+      lastName: r.last_name ?? null,
+      followingCount: Number(r.following_count ?? 0),
+      followerCount: Number(r.follower_count ?? 0)
+    }))
 
-		const following: FollowRecord[] = followingResult.rows.map((r: any) => ({
-			address: String(r.followee),
-			followedAt: Number(r.followed_at)
-		}))
+    const followers: FollowUserItem[] = followersResult.rows.map((r: any) => ({
+      address: String(r.address),
+      followedAt: Number(r.followed_at),
+      username: r.username ?? null,
+      createdAt: r.created_at ? Number(r.created_at) : null,
+      image: r.image ?? null,
+      firstName: r.first_name ?? null,
+      lastName: r.last_name ?? null,
+      followingCount: Number(r.following_count ?? 0),
+      followerCount: Number(r.follower_count ?? 0)
+    }))
 
-		const followers: FollowRecord[] = followersResult.rows.map((r: any) => ({
-			address: String(r.follower),
-			followedAt: Number(r.followed_at)
-		}))
+    const myCountsRow = myCountsResult.rows[0] || {
+      following_count: 0,
+      follower_count: 0
+    }
 
-		const followingCount = Number(
-			followingCountResult.rows[0]?.total ?? 0
-		)
-		const followerCount = Number(
-			followerCountResult.rows[0]?.total ?? 0
-		)
+    const followingCount = Number(myCountsRow.following_count ?? 0)
+    const followerCount = Number(myCountsRow.follower_count ?? 0)
 
-		    // ★ 等待所有 FollowerStatus 完成
-			await Promise.all(
-			following.map(async f => {
-				f.status = await FollowerStatus(addr, f.address)
-			})
-			)
-
-			await Promise.all(
-			followers.map(async f => {
-				f.status = await FollowerStatus(addr, f.address)
-			})
-			)
-
-		following.forEach(async f => f.status = await FollowerStatus(addr, f.address))
-		followers.forEach(async f => f.status = await FollowerStatus(addr, f.address))
-
-		return {
-			following,
-			followers,
-			followingCount,
-			followerCount
-		}
-	} finally {
-		await db.end()
-	}
+    return {
+      following,
+      followers,
+      followingCount,
+      followerCount
+    }
+  } finally {
+    await db.end()
+  }
 }
 
 
+export type FollowUserItem = {
+	address: string
+	followedAt: number
+	username: string | null
+	createdAt: number | null
+	image: string | null
+	firstName: string | null
+	lastName: string | null
+	followingCount: number
+	followerCount: number
+}
