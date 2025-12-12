@@ -427,7 +427,7 @@ const addFollowPoolProcess = async () => {
 
 		await tx.wait()
 		logger(`addFollowPoolProcess constAccountRegistry remove ${obj.remove} SUCCESS!`, tx.hash)
-
+		obj.remove ? await updateUserFollowRemoveDB(obj.wallet, obj.followAddress) : await updateUserFollowDB(obj.wallet, obj.followAddress)
 
 	} catch (ex: any) {
 		logger(`addFollowPoolProcess Error: ${ex.message}`)
@@ -739,7 +739,7 @@ export const addFollow = ( req: Request, res: Response) => {
 	})
 	res.status(200).json({ok: true}).end()
 	addFollowPoolProcess()
-	updateUserFollowDB(wallet, followAddress)
+	
 }
 
 type FollowRecord = {
