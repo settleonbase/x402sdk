@@ -9,7 +9,7 @@ import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
-import {coinbaseToken} from '../coinbase'
+import {coinbaseToken, coinbaseOfframp} from '../coinbase'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -187,6 +187,10 @@ const routing = ( router: Router ) => {
 		return coinbaseToken(req, res)
 	})
 
+	router.get('/coinbase-offramp', (req,res) => {
+		return coinbaseOfframp(req, res)
+	})
+
 	router.post('/removeFollow', async (req,res) => {
 		const { wallet, signMessage, followAddress } = req.body as {
 			wallet?: string
@@ -254,6 +258,8 @@ const routing = ( router: Router ) => {
 		return res.status(200).json(followStatus).end()
 
 	})
+
+
 
 }
 

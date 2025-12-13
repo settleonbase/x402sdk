@@ -41,6 +41,10 @@ const routing = ( router: Router ) => {
 		})
 	})
 
+	router.post('/coinbase-hooks', (req, res) => {
+		console.log (`/coinbase-hooks`, inspect(req.body) )
+	})
+
 }
 
 const initialize = async (reactBuildFolder: string, PORT: number) => {

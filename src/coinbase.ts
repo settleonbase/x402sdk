@@ -77,8 +77,8 @@ async function createOnrampSession(params: CreateOnrampParams) {
 	const res = await fetch(`${ONRAMP_API_BASE_URL}${path}`, {
 		method: 'POST',
 		headers: {
-		Authorization: `Bearer ${jwt}`,
-		'Content-Type': 'application/json',
+			Authorization: `Bearer ${jwt}`,
+			'Content-Type': 'application/json',
 		},
 		body: JSON.stringify(body),
 	})
@@ -127,7 +127,7 @@ async function createSessionToken({
 		method: 'POST',
 		headers: {
 		Authorization: `Bearer ${jwt}`,
-		'Content-Type': 'application/json',
+			'Content-Type': 'application/json',
 		},
 		body: JSON.stringify(body),
 	})
@@ -160,7 +160,7 @@ export const coinbaseToken = async (req: Request, res: Response) => {
 		}
 
 		// 调用上面封装好的 createSessionToken
-		 const data = await createOnrampSession({
+		const data = await createOnrampSession({
 			destinationAddress: address,
 			paymentAmount: amount.toFixed(2),
 			partnerUserRef: `beamio-${address}`,
@@ -215,39 +215,39 @@ export const coinbaseOnrampSession = async (req: Request, res: Response) => {
 
 // ⭐ 使用 v1 token 生成 sessionToken，再拼 sell/offramp URL
 async function createOfframpSessionToken(userAddress: string, clientIp: string) {
-  const path = '/onramp/v1/token'
-  const host = 'api.developer.coinbase.com'
+	const path = '/onramp/v1/token'
+	const host = 'api.developer.coinbase.com'
 
-  const jwt = await generateCDPJWT({
-    requestMethod: 'POST',
-    requestPath: path,
-    requestHost: host,
-  })
+	const jwt = await generateCDPJWT({
+			requestMethod: 'POST',
+			requestPath: path,
+			requestHost: host,
+	})
 
   const body = {
-    addresses: [
-      {
-        address: userAddress,
-        blockchains: ['base'],
-      },
-    ],
-    assets: ['USDC'],   // 允许卖出的资产
-    clientIp,           // 真实 IP
+		addresses: [
+			{
+				address: userAddress,
+				blockchains: ['base'],
+			},
+		],
+		assets: ['USDC'],   // 允许卖出的资产
+		clientIp,           // 真实 IP
   }
 
-  const res = await fetch(`${LEGACY_API_BASE_URL}${path}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${jwt}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
+	const res = await fetch(`${LEGACY_API_BASE_URL}${path}`, {
+		method: 'POST',
+		headers: {
+		Authorization: `Bearer ${jwt}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify(body),
+	})
 
-  if (!res.ok) {
-    const error = await res.text()
-    throw new Error(`Create session token failed: ${res.status} ${error}`)
-  }
+	if (!res.ok) {
+		const error = await res.text()
+		throw new Error(`Create session token failed: ${res.status} ${error}`)
+	}
 
   const data = (await res.json()) as { token: string }
   return data.token // sessionToken
@@ -263,10 +263,10 @@ export const coinbaseOfframp = async (req: Request, res: Response) => {
     }
 
     const clientIp =
-      (req.headers['cf-connecting-ip'] as string) ||
-      (req.headers['x-real-ip'] as string) ||
-      (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
-      req.socket.remoteAddress ||
+		(req.headers['cf-connecting-ip'] as string) ||
+		(req.headers['x-real-ip'] as string) ||
+		(req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+		req.socket.remoteAddress ||
       ''
 
     // 1) 生成 sessionToken
