@@ -15,9 +15,9 @@ interface CDPAuthConfig {
 
 interface CreateOnrampParams {
 	destinationAddress: string  // 用户钱包地址
-	country: string             // 'US'
+	country?: string             // 'US'
 	subdivision?: string        // 'CA' / 'NY' 等，美国必填
-	paymentAmount?: string      // 比如 '100.00'
+	paymentAmount: string      // 比如 '100.00'
 	partnerUserRef: string      // 你系统里的 userId
 }
 
@@ -65,13 +65,12 @@ async function createOnrampSession(params: CreateOnrampParams) {
 		purchaseCurrency: 'USDC',          // 买 USDC
 		destinationNetwork: 'base',        // 打到 Base
 		destinationAddress: params.destinationAddress,
-		paymentAmount: params.paymentAmount ?? '50.00',
+		paymentAmount: params.paymentAmount,
 		paymentCurrency: 'USD',
 		paymentMethod: 'CARD',             // CARD / ACH / APPLE_PAY / PAYPAL 等
 		country: params.country,
 		subdivision: params.subdivision ?? 'CA',
-		redirectUrl: 'https://beamio.app/app/onramp/success', // 完成后回调到你
-		clientIp: '203.0.113.10',          // 真实用户 IP
+		redirectUrl: 'https://beamio.app/app/onramp-success', // 完成后回调到你
 		partnerUserRef: params.partnerUserRef,
 	}
 
@@ -144,28 +143,34 @@ async function createSessionToken({
 
 export const coinbaseToken = async (req: Request, res: Response) => {
 	const clientIp = getClientIp(req)
-	  try {
-		const { address } = req.query as {
+	try {
+		const { address, paymentAmount } = req.query as {
 			address?: string
+			paymentAmount?: string
+
 		}
 
 		if (!address || !ethers.isAddress(address) || address === ethers.ZeroAddress ) {
 			return res.status(400).json({ error: 'Missing or invalid address' })
 		}
 
+		const amount = Number(paymentAmount)
+		if (isNaN(amount) || amount <= 0 || amount > 500) {
+			return res.status(400).json({ error: 'amount must less than 500' })
+		}
+
 		// 调用上面封装好的 createSessionToken
 		 const data = await createOnrampSession({
-				destinationAddress: address,
-				country: 'US',
-				subdivision: 'CA',
-				paymentAmount: '50.00',
-				partnerUserRef: `beamio-${address}`,
-			})
+			destinationAddress: address,
+			paymentAmount: amount.toFixed(2),
+			partnerUserRef: `beamio-${address}`,
+		})
 
 		return res.json({
 			onrampUrl: data.session.onrampUrl,
 			quote: data.quote ?? null,
 		})
+
 	} catch (err: any) {
 		console.error('coinbaseToken error:', err)
 		return res.status(500).json({ error: 'Failed to create session token' })
@@ -189,11 +194,11 @@ export const coinbaseOnrampSession = async (req: Request, res: Response) => {
       ''
 
     const data = await createOnrampSession({
-      destinationAddress: address,
-      country: country || 'US',
-      subdivision: subdivision || 'CA',
-      paymentAmount: paymentAmount || '50.00',
-      partnerUserRef: userId || `beamio-${address}`,
+		destinationAddress: address,
+		country: country || 'US',
+		subdivision: subdivision || 'CA',
+		paymentAmount: paymentAmount || '50.00',
+		partnerUserRef: userId || `beamio-${address}`,
     })
 
     // data.session.onrampUrl 就是你要丢给前端打开的 URL
