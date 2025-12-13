@@ -9,7 +9,7 @@ import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
-import {coinbaseToken, coinbaseOfframp} from '../coinbase'
+import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -260,8 +260,13 @@ const routing = ( router: Router ) => {
 
 	})
 
-	router.post('/coinbase-hooks', express.raw({ type: '*/*' }), (req, res) => {
-		postLocalhost ('/api/coinbase-hooks', req, res)
+	router.post('/coinbase-hooks', express.raw({ type: '*/*' }), async (req, res) => {
+		const ret = await coinbaseHooks(req,res)
+		if (!ret) {
+			return logger(`/coinbase-hooks Error!`)
+		}
+		
+
 	})
 
 }

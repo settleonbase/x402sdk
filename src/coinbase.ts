@@ -564,6 +564,8 @@ export const coinbaseHooks = (req: Request, res: Response) => {
 		// 你想直接“获得 destinationAddress 和状态”
 		// 这里返回给调用方（Coinbase）必须 200，且尽量快
 		// 你自己 debug 可以 log
+
+		
 		console.log('[coinbaseHooks]', {
 			eventId,
 			eventType,
@@ -571,21 +573,27 @@ export const coinbaseHooks = (req: Request, res: Response) => {
 			status,
 		})
 
-		return res.status(200).json({
+		res.status(200).json({
 			ok: true,
 			eventId,
 			eventType,
 			destinationAddress,
 			status,
 		})
+
+		return {destinationAddress, status}
+
 	} catch (e: any) {
 		console.error('[coinbaseHooks] error:', e?.message || e)
 
 		// 验签失败一般返回 401
 		if ((e?.message || '').includes('signature')) {
-			return res.status(401).json({ ok: false, error: 'invalid_signature' })
+
+			res.status(401).json({ ok: false, error: 'invalid_signature' })
+			return null
 		}
 
-		return res.status(400).json({ ok: false, error: 'bad_request' })
+		res.status(400).json({ ok: false, error: 'bad_request' })
+		return null
 	}
 }

@@ -42,8 +42,13 @@ const routing = ( router: Router ) => {
 		})
 	})
 
-	router.post('/coinbase-hooks',express.raw({ type: '*/*' }),  (req, res) => {
-		coinbaseHooks(req, res)
+	router.post('/coinbase-hooks', (req, res) => {
+		const { destinationAddress, status } = req.body as {
+			destinationAddress: string
+			status: string
+		}
+		
+		logger(``)
 	})
 
 }
