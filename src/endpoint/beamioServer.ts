@@ -259,7 +259,9 @@ const routing = ( router: Router ) => {
 
 	})
 
-
+	router.post('/coinbase-hooks', (req, res) => {
+		postLocalhost ('/api/coinbase-hooks', req, res)
+	})
 
 }
 
