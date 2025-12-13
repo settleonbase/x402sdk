@@ -539,7 +539,7 @@ function getRawBody(req: Request) {
 
 export const coinbaseHooks = (req: Request, res: Response) => {
 	const rawBody = getRawBody(req)
-
+	logger(`coinbaseHooks call`, inspect(rawBody, false, 3, true) )
 	try {
 		// 1) 验签
 		verifyCoinbaseWebhook(req, rawBody)
@@ -565,7 +565,7 @@ export const coinbaseHooks = (req: Request, res: Response) => {
 		// 这里返回给调用方（Coinbase）必须 200，且尽量快
 		// 你自己 debug 可以 log
 
-		
+
 		console.log('[coinbaseHooks]', {
 			eventId,
 			eventType,
