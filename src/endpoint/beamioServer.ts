@@ -51,6 +51,7 @@ const postLocalhost = async (path: string, obj: any, _res: Response)=> {
 	req.write(JSON.stringify(obj))
 	req.end()
 }
+
 const SC = beamio_ContractPool[0].constAccountRegistry
 
 const userOwnershipCheck = async (accountName: string, wallet: string) => {
@@ -259,7 +260,7 @@ const routing = ( router: Router ) => {
 
 	})
 
-	router.post('/coinbase-hooks', (req, res) => {
+	router.post('/coinbase-hooks', express.raw({ type: '*/*' }), (req, res) => {
 		postLocalhost ('/api/coinbase-hooks', req, res)
 	})
 

@@ -4,6 +4,8 @@
     "moduleResolution": "nodenext",
     "module": "nodenext",
     "outDir": "./build",
+    "rootDir": "./src",
+
     "allowJs": true,
     "strict": true,
     "strictPropertyInitialization": false,
@@ -15,5 +17,9 @@
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true
   },
-  "include": ["src/**/*.ts", "src/localServer/num.js", "src/localServer/workers/sw.ts.old"]
+  "include": [
+    "src/**/*.ts",
+    "src/localServer/num.js",
+    "src/localServer/workers/sw.ts.old"
+  ]
 }

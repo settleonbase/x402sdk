@@ -14,6 +14,7 @@ type IMasterSetup = {
 	coinbase: {
 		"CDP_API_KEY_ID": string
 		"CDP_API_KEY_SECRET":string
+		secret: string
 	}
 }
 

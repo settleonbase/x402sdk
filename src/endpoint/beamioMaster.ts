@@ -8,6 +8,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow} from '../db'
+import {coinbaseHooks} from '../coinbase'
 const masterServerPort = 1111
 
 
@@ -41,8 +42,8 @@ const routing = ( router: Router ) => {
 		})
 	})
 
-	router.post('/coinbase-hooks', (req, res) => {
-		console.log (`/coinbase-hooks`, inspect(req.body) )
+	router.post('/coinbase-hooks',express.raw({ type: '*/*' }),  (req, res) => {
+		coinbaseHooks(req, res)
 	})
 
 }
