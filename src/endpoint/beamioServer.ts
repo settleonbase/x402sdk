@@ -276,15 +276,15 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	
 	oracleBackoud()
 	const defaultPath = join(__dirname, 'workers')
-	console.log('📁 defaultPath:', defaultPath)
+	
 
 	const userDataPath = reactBuildFolder
 	const updatedPath = join(userDataPath, 'workers')
-	console.log('📁 updatedPath:', updatedPath)
+	
 
 	let staticFolder = fs.existsSync(updatedPath) ? updatedPath : defaultPath
-	logger(`staticFolder = ${staticFolder}`)
-	console.log('📁 staticFolder:', staticFolder)
+	
+	
 	const isProd = process.env.NODE_ENV === "production";
 
 	const app = express()
@@ -368,7 +368,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		return res.status(404).end ()
 	})
 
-	console.log('🚀 Starting express.listen on port:', PORT)
+	
 	const server = app.listen( PORT, () => {
 		console.log('✅ Server started successfully!')
 		console.table([
