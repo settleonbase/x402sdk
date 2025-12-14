@@ -318,7 +318,7 @@ export const coinbaseToken = async (req: Request, res: Response) => {
 		const data = await createOnrampSession({
 			destinationAddress: address,
 			paymentAmount: amount.toFixed(2),
-			partnerUserRef: `beamio-${address}`,
+			partnerUserRef: `${address}`,
 		})
 
 		return res.json({
@@ -435,7 +435,7 @@ export const coinbaseOfframp = async (req: Request, res: Response) => {
     // 文档约定：sell / off-ramp 入口 path 一般类似 /v3/sell/input 或 /buy/select-asset 的变体
     const url = new URL('https://pay.coinbase.com/v3/sell/input')
     url.searchParams.set('sessionToken', sessionToken)
-    url.searchParams.set('partnerUserRef', `beamio-${address}`)
+    url.searchParams.set('partnerUserRef', `${address}`)
     url.searchParams.set('defaultNetwork', 'base')
     url.searchParams.set('defaultAsset', 'USDC')
     url.searchParams.set('fiatCurrency', 'USD')
