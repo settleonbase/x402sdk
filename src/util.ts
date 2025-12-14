@@ -249,10 +249,11 @@ export const oracleBackoud = async () => {
 		if (blockNumber % 10 !== 0) {
 			return
 		}
+
 		FaucetUserProcess()
-		logger(`Oracle backoud blockNumber ${blockNumber}`)
+		
 		oracolPrice()
-		logger(`Oracle Price BNB ${oracle.bnb} ETH ${oracle.eth}`)
+
 	})
 
 }
