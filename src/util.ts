@@ -181,39 +181,51 @@ const conetClient = createPublicClient({chain: conetMainnet, transport: http(con
 
 
 const oracle = {
-    bnb: 0,
-    eth: 0,
-	usdc: 0,
-	timestamp: 0
+    bnb: '',
+    eth: '',
+	usdc: '',
+	timestamp: 0,
+	usdcad: '',
+	usdjpy: '',
+	usdcny: ''
 }
 
 let oracolPriceProcess = false
 
-const oracolPrice = async () => {
+export const oracolPrice = async () => {
 	if (oracolPriceProcess) {
 		return
 	}
 	oracolPriceProcess = true
 
-	const assets = ['bnb', 'eth', 'usdc']
+	const assets = ['bnb', 'eth', 'usdc','usd-cad', 'usd-jpy', 'usd-cny']
 	const process: any[] = []
-	assets.forEach(n =>{
+	assets.forEach(n => {
 		process.push (oracleSC.GuardianPrice(n))
 	})
 
-	const price = await Promise.all(process)
+	const price = await Promise.all([...process, oracleSC.lastUpdateEpoch()])
 	const bnb = ethers.formatEther(price[0])
 	const eth = ethers.formatEther(price[1])
 	const usdc = ethers.formatEther(price[2])
-	logger(`oracolPrice BNB ${bnb} ETH ${eth} USDC ${usdc}`)
-	oracle.bnb = parseFloat(bnb)
-	oracle.eth = parseFloat(eth)
-	oracle.usdc = parseFloat(usdc)
+	const usdcad = ethers.formatEther(price[3])
+	const usdjpy = ethers.formatEther(price[4])
+	const usdcny = ethers.formatEther(price[5])
+	const timestamp = price[6]
+
+	logger(`oracolPrice BNB ${bnb} ETH ${eth} USDC ${usdc} `)
+	oracle.bnb = bnb.toString()
+	oracle.eth = eth.toString()
+	oracle.usdc = usdc.toString()
+	oracle.usdcad = usdcad.toString()
+	oracle.usdjpy = usdjpy.toString()
+	oracle.usdcny = usdcny.toString()
+	oracle.timestamp = timestamp
 
 	oracolPriceProcess = false
 }
 
-export const oracleBackoud = async () => {
+export const oracleBackoud = async (FaucetProcess = true) => {
 	await getAllNodes()
 	Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 
@@ -250,7 +262,7 @@ export const oracleBackoud = async () => {
 			return
 		}
 
-		FaucetUserProcess()
+		if (FaucetProcess) FaucetUserProcess()
 		
 		oracolPrice()
 
@@ -1263,93 +1275,93 @@ let pendingEstimate:
   | null = null
 
 
-export const estimateErc20TransferGas = async (
-	usdc: string,
-	RecipientAddress: string,
-	fromAddress: string
-) => {
-  const now = Date.now()
+// export const estimateErc20TransferGas = async (
+// 	usdc: string,
+// 	RecipientAddress: string,
+// 	fromAddress: string
+// ) => {
+//   const now = Date.now()
 
-  // 1）有 15 秒内的缓存 → 直接返回
-  if (lastGasEstimate && (now - lastGasEstimate.ts) < 15_000) {
-    return lastGasEstimate.data
-  }
+//   // 1）有 15 秒内的缓存 → 直接返回
+//   if (lastGasEstimate && (now - lastGasEstimate.ts) < 15_000) {
+//     return lastGasEstimate.data
+//   }
 
-  // 2）如果已经有进行中的 RPC 调用 → 等待 1 秒，然后复用它的结果
-  if (pendingEstimate) {
-    // 等待 1 秒（你要求的延迟）
-    await new Promise(resolve => setTimeout(resolve, 1_000))
+//   // 2）如果已经有进行中的 RPC 调用 → 等待 1 秒，然后复用它的结果
+//   if (pendingEstimate) {
+//     // 等待 1 秒（你要求的延迟）
+//     await new Promise(resolve => setTimeout(resolve, 1_000))
 
-    // 再次检查：如果 1 秒内 RPC 完成了，缓存就应该是最新的
-    if (lastGasEstimate && (Date.now() - lastGasEstimate.ts) < 15_000) {
-      return lastGasEstimate.data
-    }
+//     // 再次检查：如果 1 秒内 RPC 完成了，缓存就应该是最新的
+//     if (lastGasEstimate && (Date.now() - lastGasEstimate.ts) < 15_000) {
+//       return lastGasEstimate.data
+//     }
 
-    // 如果缓存还是没更新，就直接等待那次进行中的调用完成
-    try {
-      const data = await pendingEstimate
-      return data
-    } catch {
-		return null
-    }
-  }
+//     // 如果缓存还是没更新，就直接等待那次进行中的调用完成
+//     try {
+//       const data = await pendingEstimate
+//       return data
+//     } catch {
+// 		return null
+//     }
+//   }
 
-  // 3）没有缓存、也没有进行中的请求 → 发起新的 RPC 调用
-  const node = getRandomNode()
-  const baseClient = createPublicClient({
-    chain: base,
-    transport: http(`http://${node}/base-rpc`)
-	// transport: http(`http://94.143.138.27/base-rpc`)
-  })
+//   // 3）没有缓存、也没有进行中的请求 → 发起新的 RPC 调用
+//   const node = getRandomNode()
+//   const baseClient = createPublicClient({
+//     chain: base,
+//     transport: http(`http://${node}/base-rpc`)
+// 	// transport: http(`http://94.143.138.27/base-rpc`)
+//   })
 
-  pendingEstimate = (async () => {
-    const [gas, price] = await Promise.all([
-      baseClient.estimateContractGas({
-        address: USDCContract_BASE,
-        abi: USDC_ABI,
-        functionName: 'transfer',
-        account: fromAddress as `0x${string}`,
-        args: [
-          RecipientAddress,
-          ethers.parseUnits(usdc, 6)
-        ]
-      }),
-      baseClient.getGasPrice()
-    ])
+//   pendingEstimate = (async () => {
+//     const [gas, price] = await Promise.all([
+//       baseClient.estimateContractGas({
+//         address: USDCContract_BASE,
+//         abi: USDC_ABI,
+//         functionName: 'transfer',
+//         account: fromAddress as `0x${string}`,
+//         args: [
+//           RecipientAddress,
+//           ethers.parseUnits(usdc, 6)
+//         ]
+//       }),
+//       baseClient.getGasPrice()
+//     ])
 
-	if (typeof gas !== 'bigint' || typeof price !== 'bigint' || !price || !gas) {
-		const error = new Error(`Node = ${node} return null result! gas = ${gas} price = ${price}`)
-		logger(error)
-		throw(error)
-	}
+// 	if (typeof gas !== 'bigint' || typeof price !== 'bigint' || !price || !gas) {
+// 		const error = new Error(`Node = ${node} return null result! gas = ${gas} price = ${price}`)
+// 		logger(error)
+// 		throw(error)
+// 	}
 
-    const result = {
-      gas: gas.toString(),
-      price: price.toString(),
-      ethPrice: oracle.eth
-    }
+//     const result = {
+//       gas: gas.toString(),
+//       price: price.toString(),
+//       ethPrice: oracle.eth
+//     }
 
-	logger(inspect(result, false, 3, true))
-    // 写入缓存
-    lastGasEstimate = {
-      data: result,
-      ts: Date.now()
-    }
+// 	logger(inspect(result, false, 3, true))
+//     // 写入缓存
+//     lastGasEstimate = {
+//       data: result,
+//       ts: Date.now()
+//     }
 
-    return result
-  })()
+//     return result
+//   })()
 
-  try {
-    const data = await pendingEstimate
-    return data
-  } catch(ex: any) {
-		logger(ex.message)
-  }
-   finally {
-    // 这次调用结束后，清空 pending 状态
-    pendingEstimate = null
-  }
-}
+//   try {
+//     const data = await pendingEstimate
+//     return data
+//   } catch(ex: any) {
+// 		logger(ex.message)
+//   }
+//    finally {
+//     // 这次调用结束后，清空 pending 状态
+//     pendingEstimate = null
+//   }
+// }
 
 
 const linkMemo: {
@@ -1407,64 +1419,64 @@ export const getOracleRequest = () => {
 	return oracle
 }
 
-export const getBalance = async (address: string) => {
-	const now = Date.now()
-	const cached = balanceCache[address]
+// const getBalance = async (address: string) => {
+// 	const now = Date.now()
+// 	const cached = balanceCache[address]
 
-	// 若有缓存，且时间在 60 秒内 → 直接返回缓存
-	if (cached && (now - cached.ts) < 60_000) {
-		return cached.data
-	}
-
-
+// 	// 若有缓存，且时间在 60 秒内 → 直接返回缓存
+// 	if (cached && (now - cached.ts) < 60_000) {
+// 		return cached.data
+// 	}
 
 
-  // =============================
-  //      实际调用 RPC
-  // =============================
-  const baseClient = createPublicClient({
-		chain: base,
-		//transport: http(`http://${getRandomNode()}/base-rpc`)
-		transport: http(`http://94.143.138.27/base-rpc`)
-	})
 
-	const baseEthers = new ethers.JsonRpcProvider('')
-	const SC = new ethers.Contract(USDCContract_BASE, USDC_ABI, baseEthers)
 
-	try {
-		// const [usdcRaw, ethRaw] = await Promise.all([
-		//   baseClient.readContract({
-		//     address: USDCContract_BASE,
-		//     abi: USDC_ABI,
-		//     functionName: 'balanceOf',
-		//     args: [address]
-		//   }),
-		//   providerBase.getBalance(address)
-		// ])
+//   // =============================
+//   //      实际调用 RPC
+//   // =============================
+// //   const baseClient = createPublicClient({
+// // 		chain: base,
+// // 		//transport: http(`http://${getRandomNode()}/base-rpc`)
+// // 		transport: http(`http://94.143.138.27/base-rpc`)
+// // 	})
 
-		const [usdcRaw, ethRaw] = await Promise.all([
-			SC.balanceOf (address),
-			baseEthers.getBalance(address)
-		])
+// 	const baseEthers = new ethers.JsonRpcProvider('')
+// 	const SC = new ethers.Contract(USDCContract_BASE, USDC_ABI, baseEthers)
+
+// 	try {
+// 		// const [usdcRaw, ethRaw] = await Promise.all([
+// 		//   baseClient.readContract({
+// 		//     address: USDCContract_BASE,
+// 		//     abi: USDC_ABI,
+// 		//     functionName: 'balanceOf',
+// 		//     args: [address]
+// 		//   }),
+// 		//   providerBase.getBalance(address)
+// 		// ])
+
+// 		const [usdcRaw, ethRaw] = await Promise.all([
+// 			SC.balanceOf (address),
+// 			baseEthers.getBalance(address)
+// 		])
 		
 
-		const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
-		const eth = ethers.formatUnits(ethRaw, 18)
+// 		const usdc = ethers.formatUnits(usdcRaw as bigint, 6)
+// 		const eth = ethers.formatUnits(ethRaw, 18)
 
-		const result = { usdc, eth, oracle: {eth: oracle.eth, usdc: oracle.usdc} }
-		logger(inspect(result, false, 3, true))
-		// 记忆：写入缓存
-		balanceCache[address] = {
-		data: result,
-		ts: now
-		}
+// 		const result = { usdc, eth, oracle: { eth: oracle.eth, usdc: oracle.usdc }}
+// 		logger(inspect(result, false, 3, true))
+// 		// 记忆：写入缓存
+// 		balanceCache [address] = {
+// 			data: result,
+// 			ts: now
+// 		}
 
-		return result
-	} catch (ex: any) {
-		logger(`baseUSDC.balanceOf Error!`, ex.message)
-		return null
-	}
-}
+// 		return result
+// 	} catch (ex: any) {
+// 		logger(`baseUSDC.balanceOf Error!`, ex.message)
+// 		return null
+// 	}
+// }
 
 //			FaucetUser for USDC 
 

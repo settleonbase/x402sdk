@@ -12,7 +12,7 @@ import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
 import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, x402ProcessPool, MINT_RATE, BeamioFaucet, generateCheck, redeemCheck,
-	getBalance, estimateErc20TransferGas, BeamioTransfer, getOracleRequest, verifyPaymentNew, BeamioPaymentLink, BeamioPaymentLinkFinish, BeamioETHFaucet, getClientIp, oracleBackoud
+	BeamioTransfer, getOracleRequest, verifyPaymentNew, BeamioPaymentLink, BeamioPaymentLinkFinish, BeamioETHFaucet, getClientIp, oracleBackoud
 } from './util'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import { exact } from "x402/schemes";

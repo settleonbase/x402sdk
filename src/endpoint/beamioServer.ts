@@ -82,11 +82,6 @@ const routing = ( router: Router ) => {
 	router.get('/search-users', (req,res) => {
 		searchUsers(req,res)
 	})
-
-	router.get('/getOracle', async (req,res) => {
-		res.status(200).json({eth: getOracleRequest()}).end()
-	})
-
 	router.post('/addUser', async (req,res) => {
 		const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, signMessage } = req.body as {
 			accountName?: string
@@ -242,6 +237,11 @@ const routing = ( router: Router ) => {
 		})
 	})
 
+	router.get('/getOracle', async (req,res) => {
+		res.status(200).json(getOracleRequest()).end()
+	})
+
+
 	router.get('/getMyFollowStatus', async (req,res) => {
 		const { wallet } = req.query as {
 			wallet?: string
@@ -364,6 +364,8 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		return 
 	})
 
+
+
 	app.all ('/', (req: any, res: any) => {
 		return res.status(404).end ()
 	})
@@ -385,4 +387,5 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 export const startServer = async () => {
 	initialize('', serverPort)
+	oracleBackoud(false)
 }
