@@ -890,6 +890,8 @@ export const generateCheck = async (req: Request, res: Response) => {
 	}
 
 	const SC = Settle_ContractPool[0]
+
+	logger(`secureCode : ${secureCode} , note : ${note} , amount ${amount}`)
 	try {
 		const [from] = await SC.conetSC.checkMemo(secureCode)
 		if (from !== ethers.ZeroAddress)
@@ -899,6 +901,7 @@ export const generateCheck = async (req: Request, res: Response) => {
 		}
 		
 		const amt = ethers.parseUnits(amount, 6)
+
 		const requestX402 = await BeamioPayment(req, res, amt, beamiobase)
 		if (!requestX402 || !requestX402?.authorization) {
 			return res.status(403).end()
