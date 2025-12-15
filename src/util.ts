@@ -874,6 +874,7 @@ const withdrawWithCode = async(code: string, passcode: string, to: string) => {
 
 
 
+
 export const generateCheck = async (req: Request, res: Response) => {
 	const { amount, note, secureCode } = req.query as {
 		secureCode?: string
@@ -894,11 +895,15 @@ export const generateCheck = async (req: Request, res: Response) => {
 	logger(`secureCode : ${secureCode} , note : ${note} , amount ${amount}`)
 	try {
 		const [from] = await SC.conetSC.checkMemo(secureCode)
+
+		logger(`generateCheck ${from} `)
 		if (from !== ethers.ZeroAddress)
 		{
 			logger(`withdrawWithCode ${secureCode} is exiets `)
 			return res.status(403).end()
 		}
+
+		
 		
 		const amt = ethers.parseUnits(amount, 6)
 
