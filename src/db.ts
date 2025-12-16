@@ -510,6 +510,97 @@ export const addUser = async (req: Request, res: Response) => {
 		
 }
 
+const _search = async (keyward: string) => {
+	const _keywork = String(keyward || "").trim().replace("@", "")
+	const _page = 1
+	const _pageSize = 10
+
+	if (!_keywork) {
+		return []
+	}
+
+	const isAddress = ethers.isAddress(_keywork)
+	const db = new Client({ connectionString: DB_URL })
+
+		try {
+		await db.connect()
+
+		const offset = (_page - 1) * _pageSize
+
+		let rows
+
+		if (isAddress) {
+			logger(`_search with address`)
+			// 🔹 按地址精确查
+			const { rows: r } = await db.query(
+				`
+				SELECT
+				a.address,
+				a.username,
+				a.created_at,
+				a.image,
+				a.first_name,
+				a.last_name,
+				-- follow_count: 这个人关注了多少人
+				COALESCE(
+					(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
+					0
+				) AS follow_count,
+				-- follower_count: 有多少人关注了这个人
+				COALESCE(
+					(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
+					0
+				) AS follower_count
+				FROM accounts a
+				WHERE LOWER(a.address) = LOWER($1)
+				ORDER BY a.created_at DESC
+				LIMIT $2 OFFSET $3
+				`,
+				[_keywork, _pageSize, offset]
+			)
+			rows = r
+		} else {
+			logger(`_search with keyword`)
+			// 🔹 按用户名模糊查
+			const { rows: r } = await db.query(
+				`
+				SELECT
+				a.address,
+				a.username,
+				a.created_at,
+				a.image,
+				a.first_name,
+				a.last_name,
+				COALESCE(
+					(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
+					0
+				) AS follow_count,
+				COALESCE(
+					(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
+					0
+				) AS follower_count
+				FROM accounts a
+				WHERE a.username ILIKE $1
+				ORDER BY a.created_at DESC
+				LIMIT $2 OFFSET $3
+				`,
+				[`%${_keywork}%`, _pageSize, offset]
+			)
+			rows = r
+		}
+		return {
+			results: rows
+		}
+		
+	} catch (err) {
+		console.error("searchUsers error:", err)
+		return({ error: "internal_error" })
+	} finally {
+		await db.end()
+	}
+
+}
+
 export const searchUsers = async (req: Request, res: Response) => {
 	const { keyward } = req.query as {
 		keyward?: string
@@ -1162,3 +1253,8 @@ export type FollowUserItem = {
 	followingCount: number
 	followerCount: number
 }
+
+
+_search(`0x5ce6B3aA98d312FFda906b32483A35bc2A9C9b1A`)
+
+
