@@ -530,6 +530,7 @@ const _search = async (keyward: string) => {
 		let rows
 
 		if (isAddress) {
+			const address = _keywork.toLowerCase()
 			logger(`_search with address`)
 			// 🔹 按地址精确查
 			const { rows: r } = await db.query(
@@ -556,7 +557,7 @@ const _search = async (keyward: string) => {
 				ORDER BY a.created_at DESC
 				LIMIT $2 OFFSET $3
 				`,
-				[_keywork, _pageSize, offset]
+				[address, _pageSize, offset]
 			)
 			rows = r
 		} else {
