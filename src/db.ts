@@ -1258,9 +1258,9 @@ export type FollowUserItem = {
 
 
 
-const test = async () => {
-	const result = await _search(`0x5ce6B3aA98d312FFda906b32483A35bc2A9C9b1A`)
-	logger(`result = `, inspect(result))
-}
+// const test = async () => {
+// 	const result = await _search(`0x5ce6B3aA98d312FFda906b32483A35bc2A9C9b1A`)
+// 	logger(`result = `, inspect(result))
+// }
 
-test()
+// test()

@@ -187,7 +187,11 @@ const oracle = {
 	timestamp: 0,
 	usdcad: '',
 	usdjpy: '',
-	usdcny: ''
+	usdcny: '',
+	usdhkd: '',
+	usdeur: '',
+	usdsgd: '',
+	usdtwd: ''
 }
 
 let oracolPriceProcess = false
@@ -198,7 +202,7 @@ export const oracolPrice = async () => {
 	}
 	oracolPriceProcess = true
 
-	const assets = ['bnb', 'eth', 'usdc','usd-cad', 'usd-jpy', 'usd-cny']
+	const assets = ['bnb', 'eth', 'usdc','usd-cad', 'usd-jpy', 'usd-cny', 'usd-hkd', 'usd-eur', 'usd-sgd', 'usd-twd']
 	const process: any[] = []
 	assets.forEach(n => {
 		process.push (oracleSC.GuardianPrice(n))
@@ -211,6 +215,10 @@ export const oracolPrice = async () => {
 	const usdcad = ethers.formatEther(price[3])
 	const usdjpy = ethers.formatEther(price[4])
 	const usdcny = ethers.formatEther(price[5])
+	const usdhkd = ethers.formatEther(price[6])
+	const usdeur = ethers.formatEther(price[7])
+	const usdsgd = ethers.formatEther(price[8])
+	const usdtwd = ethers.formatEther(price[9])
 	const timestamp = Number(price[6].toString())
 
 	logger(`oracolPrice BNB ${bnb} ETH ${eth} USDC ${usdc} `)
@@ -220,6 +228,10 @@ export const oracolPrice = async () => {
 	oracle.usdcad = usdcad.toString()
 	oracle.usdjpy = usdjpy.toString()
 	oracle.usdcny = usdcny.toString()
+	oracle.usdhkd = usdhkd.toString()
+	oracle.usdeur = usdeur.toString()
+	oracle.usdsgd = usdsgd.toString()
+	oracle.usdtwd = usdtwd.toString()
 	oracle.timestamp = timestamp
 
 	oracolPriceProcess = false
