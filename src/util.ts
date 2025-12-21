@@ -1757,10 +1757,10 @@ export const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
 		}
 
 		//			Insufficient request
-		if (totalAmount > 0 && totalAmount < requestAmount) {
-			logger(`BeamioPaymentLinkFinish totalAmount ${totalAmount} > 0 && totalAmount < requestAmount ${requestAmount} Error! `)
-			return res.status(403).end()
-		}
+		// if (totalAmount > 0 && totalAmount < requestAmount) {
+		// 	logger(`BeamioPaymentLinkFinish totalAmount ${totalAmount} > 0 && totalAmount < requestAmount ${requestAmount} Error! `)
+		// 	return res.status(403).end()
+		// }
 
 		//				Already Used
 		if (getPayLink.from !== ethers.ZeroAddress) {
