@@ -386,11 +386,11 @@ const addUserPoolProcess = async () => {
 
 				// 2. 等待这笔交易上链
 				const receipt = await tr.wait()
-				logger('addUserPoolProcess setBase64ByNameHash', tr.hash)
+				logger('addUserPoolProcess setBase64NameByAdmin', tr.hash)
 			}
 		}
 
-		updateUserDB(obj.account)
+		await updateUserDB(obj.account)
 
 	} catch (ex: any) {
 		logger(`addUserPoolProcess Error: ${ex.message}`)
