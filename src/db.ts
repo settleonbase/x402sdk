@@ -565,27 +565,31 @@ const _search = async (keyward: string) => {
 			// 🔹 按用户名模糊查
 			const { rows: r } = await db.query(
 				`
-				SELECT
-				a.address,
-				a.username,
-				a.created_at,
-				a.image,
-				a.first_name,
-				a.last_name,
-				COALESCE(
-					(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
-					0
-				) AS follow_count,
-				COALESCE(
-					(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
-					0
-				) AS follower_count
-				FROM accounts a
-				WHERE a.username ILIKE $1
-				ORDER BY a.created_at DESC
-				LIMIT $2 OFFSET $3
-				`,
-				[`%${_keywork}%`, _pageSize, offset]
+					SELECT
+						a.address,
+						a.username,
+						a.created_at,
+						a.image,
+						a.first_name,
+						a.last_name,
+						COALESCE(
+						(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
+						0
+						) AS follow_count,
+						COALESCE(
+						(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
+						0
+						) AS follower_count
+					FROM accounts a
+					WHERE
+						a.username ILIKE $1
+						OR a.first_name ILIKE $1
+						OR a.last_name ILIKE $1
+						OR (a.first_name || ' ' || a.last_name) ILIKE $1
+					ORDER BY a.created_at DESC
+					LIMIT $2 OFFSET $3
+					`,
+					[`%${_keywork}%`, _pageSize, offset]
 			)
 			rows = r
 		}
