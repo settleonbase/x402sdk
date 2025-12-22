@@ -583,10 +583,7 @@ const _search = async (keyward: string) => {
 						COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
 						COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count,
 
-						-- ====== 高亮字段（命中部分用 <mark> 包起来） ======
-						regexp_replace(a.username, '(' || q.raw_re || ')', '<mark>\1</mark>', 'gi') AS highlight_username,
-						regexp_replace(COALESCE(a.first_name, ''), '(' || q.raw_re || ')', '<mark>\1</mark>', 'gi') AS highlight_first_name,
-						regexp_replace(COALESCE(a.last_name, ''), '(' || q.raw_re || ')', '<mark>\1</mark>', 'gi') AS highlight_last_name,
+						
 
 						-- ====== 可选：告诉前端主要命中在哪里（username/name/fullname） ======
 						CASE
