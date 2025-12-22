@@ -565,29 +565,68 @@ const _search = async (keyward: string) => {
 			// 🔹 按用户名模糊查
 			const { rows: r } = await db.query(
 				`
-					SELECT
+											WITH q AS (
+						SELECT
+							$1::text AS raw,
+							$2::text AS contains_pat,
+							$3::text AS prefix_pat
+							AS raw_re
+						)
+						SELECT
 						a.address,
 						a.username,
 						a.created_at,
 						a.image,
 						a.first_name,
 						a.last_name,
-						COALESCE(
-						(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
-						0
-						) AS follow_count,
-						COALESCE(
-						(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
-						0
-						) AS follower_count
-					FROM accounts a
-					WHERE
-						a.username ILIKE $1
-						OR a.first_name ILIKE $1
-						OR a.last_name ILIKE $1
-						OR (a.first_name || ' ' || a.last_name) ILIKE $1
-					ORDER BY a.created_at DESC
-					LIMIT $2 OFFSET $3
+
+						COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
+						COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count,
+
+						-- ====== 高亮字段（命中部分用 <mark> 包起来） ======
+						regexp_replace(a.username, '(' || q.raw_re || ')', '<mark>\1</mark>', 'gi') AS highlight_username,
+						regexp_replace(COALESCE(a.first_name, ''), '(' || q.raw_re || ')', '<mark>\1</mark>', 'gi') AS highlight_first_name,
+						regexp_replace(COALESCE(a.last_name, ''), '(' || q.raw_re || ')', '<mark>\1</mark>', 'gi') AS highlight_last_name,
+
+						-- ====== 可选：告诉前端主要命中在哪里（username/name/fullname） ======
+						CASE
+							WHEN a.username ILIKE q.contains_pat THEN 'username'
+							WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat THEN 'name'
+							WHEN COALESCE(a.first_name, '') ILIKE q.contains_pat THEN 'first_name'
+							WHEN COALESCE(a.last_name, '') ILIKE q.contains_pat THEN 'last_name'
+							ELSE 'unknown'
+						END AS hit_field
+
+						FROM accounts a
+						CROSS JOIN q
+						WHERE
+						a.username ILIKE q.contains_pat
+						OR COALESCE(a.first_name, '') ILIKE q.contains_pat
+						OR COALESCE(a.last_name, '') ILIKE q.contains_pat
+						OR (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat
+
+						ORDER BY
+						-- ① 前缀优先：username 前缀最强
+						CASE
+							WHEN a.username ILIKE q.prefix_pat THEN 0
+							WHEN COALESCE(a.first_name, '') ILIKE q.prefix_pat THEN 1
+							WHEN COALESCE(a.last_name, '') ILIKE q.prefix_pat THEN 2
+							WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.prefix_pat THEN 3
+							ELSE 9
+						END,
+
+						-- ② 相关度：username > name（用 pg_trgm similarity）
+						GREATEST(
+							similarity(a.username, q.raw) * 2.0,  -- username 权重更高
+							similarity(COALESCE(a.first_name, ''), q.raw) * 1.0,
+							similarity(COALESCE(a.last_name, ''), q.raw) * 1.0,
+							similarity((COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')), q.raw) * 1.2
+						) DESC,
+
+						-- ③ 再兜底：更近创建的靠前（你原来的逻辑）
+						a.created_at DESC
+
+						LIMIT $4 OFFSET $5;
 					`,
 					[`%${_keywork}%`, _pageSize, offset]
 			)
