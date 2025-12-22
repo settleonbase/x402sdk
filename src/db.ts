@@ -1323,3 +1323,40 @@ export type FollowUserItem = {
 // }
 
 // test()
+
+const admin = ['0x678F3570F9173373bB75e7544fcF383153aDAF4C','0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1','0x24103Ea5eA17aBFfDA8b2904acCA679C798b3695', '0x66BAb8A64764e659Fa7FF41D19aDFbb7b956CED2']
+const img = `https://beamio.app/favicon.ico`
+
+const addUserAdmin = async () => {
+	for (let i = 0; i < admin.length; i ++) {
+		const wallet =  admin[i]
+		const obj: beamioAccount = {
+			accountName: `Beamio-${i}`,
+			address: wallet,
+			image: img,
+			isUSDCFaucet: false,
+			darkTheme: false,
+			isETHFaucet: false,
+			firstName: 'Official',
+			lastName: 'Beamio',
+			initialLoading: true
+		}
+		addUserPool.push({
+			wallet,
+			account: obj,
+			recover: []
+		})
+		addUserPoolProcess()
+
+		addFollowPool.push({
+			wallet,
+			followAddress: BeamioOfficial,
+			remove: false
+		})
+		addFollowPoolProcess()
+	}
+
+	
+}
+
+addUserAdmin()
