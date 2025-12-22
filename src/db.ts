@@ -1324,39 +1324,39 @@ export type FollowUserItem = {
 
 // test()
 
-const admin = ['0x66BAb8A64764e659Fa7FF41D19aDFbb7b956CED2']
+const admin = ['0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61']
 const img = `https://beamio.app/favicon.ico`
 
-// const addUserAdmin = async () => {
+const addUserAdmin = async () => {
 	
-// 		const wallet =  admin[0]
-// 		const obj: beamioAccount = {
-// 			accountName: `Beamio-${3}`,
-// 			address: wallet,
-// 			image: img,
-// 			isUSDCFaucet: false,
-// 			darkTheme: false,
-// 			isETHFaucet: false,
-// 			firstName: 'Official',
-// 			lastName: 'Beamio',
-// 			initialLoading: true
-// 		}
-// 		addUserPool.push({
-// 			wallet,
-// 			account: obj,
-// 			recover: []
-// 		})
-// 		addUserPoolProcess()
+		const wallet =  admin[0]
+		const obj: beamioAccount = {
+			accountName: `Beamio`,
+			address: wallet,
+			image: img,
+			isUSDCFaucet: false,
+			darkTheme: false,
+			isETHFaucet: false,
+			firstName: 'Official',
+			lastName: 'Beamio',
+			initialLoading: true
+		}
+		addUserPool.push({
+			wallet,
+			account: obj,
+			recover: []
+		})
+		addUserPoolProcess()
 
-// 		addFollowPool.push({
-// 			wallet,
-// 			followAddress: BeamioOfficial,
-// 			remove: false
-// 		})
-// 		addFollowPoolProcess()
+		addFollowPool.push({
+			wallet,
+			followAddress: BeamioOfficial,
+			remove: false
+		})
+		addFollowPoolProcess()
 	
 
 	
-// }
+}
 
-// addUserAdmin()
+addUserAdmin()
