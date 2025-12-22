@@ -567,55 +567,55 @@ const _search = async (keyward: string) => {
 			logger(`_search with keyword`)
 			// 🔹 按用户名模糊查
 			const { rows: r } = await db.query(
-  `
-  WITH q AS (
-    SELECT
-      $1::text AS raw,
-      $2::text AS contains_pat,
-      $3::text AS prefix_pat
-  )
-  SELECT
-    a.address,
-    a.username,
-    a.created_at,
-    a.image,
-    a.first_name,
-    a.last_name,
-    COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
-    COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count,
-    CASE
-      WHEN a.username ILIKE q.contains_pat THEN 'username'
-      WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat THEN 'name'
-      WHEN COALESCE(a.first_name, '') ILIKE q.contains_pat THEN 'first_name'
-      WHEN COALESCE(a.last_name, '') ILIKE q.contains_pat THEN 'last_name'
-      ELSE 'unknown'
-    END AS hit_field
-  FROM accounts a
-  CROSS JOIN q
-  WHERE
-    a.username ILIKE q.contains_pat
-    OR COALESCE(a.first_name, '') ILIKE q.contains_pat
-    OR COALESCE(a.last_name, '') ILIKE q.contains_pat
-    OR (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat
-  ORDER BY
-    CASE
-      WHEN a.username ILIKE q.prefix_pat THEN 0
-      WHEN COALESCE(a.first_name, '') ILIKE q.prefix_pat THEN 1
-      WHEN COALESCE(a.last_name, '') ILIKE q.prefix_pat THEN 2
-      WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.prefix_pat THEN 3
-      ELSE 9
-    END,
-    GREATEST(
-      similarity(a.username, q.raw) * 2.0,
-      similarity(COALESCE(a.first_name, ''), q.raw) * 1.0,
-      similarity(COALESCE(a.last_name, ''), q.raw) * 1.0,
-      similarity((COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')), q.raw) * 1.2
-    ) DESC,
-    a.created_at DESC
-  LIMIT $4 OFFSET $5;
-  `,
-  [raw, containsPat, prefixPat, _pageSize, offset]
-)
+				`
+				WITH q AS (
+					SELECT
+					$1::text AS raw,
+					$2::text AS contains_pat,
+					$3::text AS prefix_pat
+				)
+				SELECT
+					a.address,
+					a.username,
+					a.created_at,
+					a.image,
+					a.first_name,
+					a.last_name,
+					COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
+					COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count,
+					CASE
+					WHEN a.username ILIKE q.contains_pat THEN 'username'
+					WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat THEN 'name'
+					WHEN COALESCE(a.first_name, '') ILIKE q.contains_pat THEN 'first_name'
+					WHEN COALESCE(a.last_name, '') ILIKE q.contains_pat THEN 'last_name'
+					ELSE 'unknown'
+					END AS hit_field
+				FROM accounts a
+				CROSS JOIN q
+				WHERE
+					a.username ILIKE q.contains_pat
+					OR COALESCE(a.first_name, '') ILIKE q.contains_pat
+					OR COALESCE(a.last_name, '') ILIKE q.contains_pat
+					OR (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat
+				ORDER BY
+					CASE
+					WHEN a.username ILIKE q.prefix_pat THEN 0
+					WHEN COALESCE(a.first_name, '') ILIKE q.prefix_pat THEN 1
+					WHEN COALESCE(a.last_name, '') ILIKE q.prefix_pat THEN 2
+					WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.prefix_pat THEN 3
+					ELSE 9
+					END,
+					GREATEST(
+					similarity(a.username, q.raw) * 2.0,
+					similarity(COALESCE(a.first_name, ''), q.raw) * 1.0,
+					similarity(COALESCE(a.last_name, ''), q.raw) * 1.0,
+					similarity((COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')), q.raw) * 1.2
+					) DESC,
+					a.created_at DESC
+				LIMIT $4 OFFSET $5;
+				`,
+				[raw, containsPat, prefixPat, _pageSize, offset]
+				)
 
 	rows = r
 		}
@@ -640,6 +640,9 @@ export const searchUsers = async (req: Request, res: Response) => {
 	const _keywork = String(keyward || "").trim().replace("@", "")
 	const _page = 1
 	const _pageSize = 10
+	const raw = _keywork
+	const containsPat = `%${raw}%`
+	const prefixPat = `${raw}%`
 
 	if (!_keywork) {
 		return res.status(404).end()
@@ -688,27 +691,53 @@ export const searchUsers = async (req: Request, res: Response) => {
 			// 🔹 按用户名模糊查
 			const { rows: r } = await db.query(
 				`
+				WITH q AS (
+					SELECT
+					$1::text AS raw,
+					$2::text AS contains_pat,
+					$3::text AS prefix_pat
+				)
 				SELECT
-				a.address,
-				a.username,
-				a.created_at,
-				a.image,
-				a.first_name,
-				a.last_name,
-				COALESCE(
-					(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
-					0
-				) AS follow_count,
-				COALESCE(
-					(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
-					0
-				) AS follower_count
+					a.address,
+					a.username,
+					a.created_at,
+					a.image,
+					a.first_name,
+					a.last_name,
+					COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
+					COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count,
+					CASE
+					WHEN a.username ILIKE q.contains_pat THEN 'username'
+					WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat THEN 'name'
+					WHEN COALESCE(a.first_name, '') ILIKE q.contains_pat THEN 'first_name'
+					WHEN COALESCE(a.last_name, '') ILIKE q.contains_pat THEN 'last_name'
+					ELSE 'unknown'
+					END AS hit_field
 				FROM accounts a
-				WHERE a.username ILIKE $1
-				ORDER BY a.created_at DESC
-				LIMIT $2 OFFSET $3
+				CROSS JOIN q
+				WHERE
+					a.username ILIKE q.contains_pat
+					OR COALESCE(a.first_name, '') ILIKE q.contains_pat
+					OR COALESCE(a.last_name, '') ILIKE q.contains_pat
+					OR (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat
+				ORDER BY
+					CASE
+					WHEN a.username ILIKE q.prefix_pat THEN 0
+					WHEN COALESCE(a.first_name, '') ILIKE q.prefix_pat THEN 1
+					WHEN COALESCE(a.last_name, '') ILIKE q.prefix_pat THEN 2
+					WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.prefix_pat THEN 3
+					ELSE 9
+					END,
+					GREATEST(
+					similarity(a.username, q.raw) * 2.0,
+					similarity(COALESCE(a.first_name, ''), q.raw) * 1.0,
+					similarity(COALESCE(a.last_name, ''), q.raw) * 1.0,
+					similarity((COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')), q.raw) * 1.2
+					) DESC,
+					a.created_at DESC
+				LIMIT $4 OFFSET $5;
 				`,
-				[`%${_keywork}%`, _pageSize, offset]
+				[raw, containsPat, prefixPat, _pageSize, offset]
 			)
 			rows = r
 		}
@@ -1288,9 +1317,9 @@ export type FollowUserItem = {
 
 //		0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61			@Beamio
 
-const test = async () => {
-	const result = await _search(`Beamio`)
-	logger(`result = `, inspect(result))
-}
+// const test = async () => {
+// 	const result = await _search(`Beamio`)
+// 	logger(`result = `, inspect(result))
+// }
 
-test()
+// test()
