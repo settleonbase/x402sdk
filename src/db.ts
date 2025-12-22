@@ -1259,7 +1259,7 @@ export type FollowUserItem = {
 //		0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61			@Beamio
 
 const test = async () => {
-	const result = await _search(`0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61`)
+	const result = await _search(`Beamio`)
 	logger(`result = `, inspect(result))
 }
 
