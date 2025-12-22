@@ -1328,10 +1328,10 @@ const admin = ['0x66BAb8A64764e659Fa7FF41D19aDFbb7b956CED2']
 const img = `https://beamio.app/favicon.ico`
 
 const addUserAdmin = async () => {
-	for (let i = 0; i < admin.length; i ++) {
-		const wallet =  admin[i]
+	
+		const wallet =  admin[0]
 		const obj: beamioAccount = {
-			accountName: `Beamio-${i}`,
+			accountName: `Beamio-${3}`,
 			address: wallet,
 			image: img,
 			isUSDCFaucet: false,
@@ -1354,7 +1354,7 @@ const addUserAdmin = async () => {
 			remove: false
 		})
 		addFollowPoolProcess()
-	}
+	
 
 	
 }
