@@ -1873,7 +1873,7 @@ export const BeamioPaymentLink = async (req: Request, res: Response) => {
 	}
 
 	linkMemo.push({
-		value: totalAmount.toFixed(4),
+		value: totalAmount.toString(),
 		note: note||'',
 		linkHash: code,
 		res,
