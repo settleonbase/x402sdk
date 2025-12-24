@@ -1868,18 +1868,12 @@ export const BeamioPaymentLink = async (req: Request, res: Response) => {
 		address?: string
 	}
 	const totalAmount = Number(amount)
-	if (!amount || !code || !address|| isNaN(totalAmount) || !ethers.isHexString(code)) {
+	if (!code || !address|| isNaN(totalAmount) || !ethers.isHexString(code)) {
 		return res.status(404).end()
 	}
 
-	const value = Number(ethers.formatUnits(amount, 6))
-
-	if (value <= 0.02) {
-		return res.status(403).end()
-	}
-
 	linkMemo.push({
-		value: amount,
+		value: totalAmount.toFixed(4),
 		note: note||'',
 		linkHash: code,
 		res,
