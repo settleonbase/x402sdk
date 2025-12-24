@@ -310,7 +310,7 @@ export const coinbaseToken = async (req: Request, res: Response) => {
 		}
 
 		const amount = Number(paymentAmount)
-		if (isNaN(amount) || amount <= 0 || amount > 500) {
+		if (isNaN(amount) || amount < 0 || amount > 500) {
 			return res.status(400).json({ error: 'amount must less than 500' })
 		}
 
