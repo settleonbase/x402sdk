@@ -220,7 +220,7 @@ async function createOnrampSession(params: CreateOnrampParams) {
 		purchaseCurrency: 'USDC',          // 买 USDC
 		destinationNetwork: 'base',        // 打到 Base
 		destinationAddress: params.destinationAddress,
-		paymentAmount: params.paymentAmount,
+		// paymentAmount: params.paymentAmount,
 		paymentCurrency: 'USD',
 		paymentMethod: 'CARD',             // CARD / ACH / APPLE_PAY / PAYPAL 等
 		country: params.country,
@@ -310,14 +310,11 @@ export const coinbaseToken = async (req: Request, res: Response) => {
 		}
 
 		const amount = Number(paymentAmount)
-		if (isNaN(amount) || amount < 0 || amount > 500) {
-			return res.status(400).json({ error: 'amount must less than 500' })
-		}
+		
 
 		// 调用上面封装好的 createSessionToken
 		const data = await createOnrampSession({
 			destinationAddress: address,
-			paymentAmount: amount.toFixed(2),
 			partnerUserRef: `${address}`,
 		})
 
@@ -510,7 +507,7 @@ interface CreateOnrampParams {
 	destinationAddress: string  // 用户钱包地址
 	country?: string             // 'US'
 	subdivision?: string        // 'CA' / 'NY' 等，美国必填
-	paymentAmount: string      // 比如 '100.00'
+	paymentAmount?: string      // 比如 '100.00'
 	partnerUserRef: string      // 你系统里的 userId
 }
 
