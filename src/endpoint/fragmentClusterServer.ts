@@ -71,7 +71,7 @@ const getFragment = async (hash: string, res: Response) => {
 
 class server {
 
-	private PORT = 8081
+	private PORT = 8002
 	public ipaddressWallet: Map<string, string> = new Map()
 	public WalletIpaddress: Map<string, string> = new Map()
 	public regiestNodes: Map<string, string> = new Map()
