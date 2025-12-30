@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow} from '../db'
+import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess} from '../db'
 import {coinbaseHooks} from '../coinbase'
 const masterServerPort = 1111
 
@@ -40,6 +40,21 @@ const routing = ( router: Router ) => {
 			'Remote Address:': req.socket.remoteAddress
 			},
 		})
+	})
+
+	router.post('/storageFragment', (req, res) => {
+		const { hash, wallet, imageLength } = req.body as {
+			wallet: string
+			imageLength: number
+			hash: string
+		}
+		ipfsDataPool.push({
+			wallet, imageLength, hash
+		})
+
+		ipfsDataProcess()
+		res.status(200).end()
+
 	})
 
 	router.post('/coinbase-hooks', (req, res) => {

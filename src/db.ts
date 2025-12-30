@@ -8,7 +8,7 @@ import {masterSetup, BeamioETHFaucetTry} from './util'
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
-
+import IPFSAbi from './ABI/Ipfs.abi.json'
 
 /**
  * 
@@ -24,6 +24,7 @@ const providerConet = new ethers.JsonRpcProvider(RPC_URL)
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
 const beamioConetAccountRegistry = '0x09dfed722FBD199E9EC6ece19630DE02692eF572'
+const IpfsStorageRegistryGlobalDedup = '0x121c4dDCa92f07dc53Fd6Db9bc5A07c2918F9591'
 
 export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 	const walletConet = new ethers.Wallet(n, providerConet)
@@ -39,6 +40,7 @@ export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 		// event: new ethers.Contract(eventContract, Event_ABI, walletConet),
 		conetAirdrop: new ethers.Contract(airdropRecord, conetAirdropABI, walletConet),
 		constAccountRegistry: new ethers.Contract(beamioConetAccountRegistry, AccountRegistryABI, walletConet),
+		constIPFS: new ethers.Contract(IpfsStorageRegistryGlobalDedup, IPFSAbi, walletConet),
 	}
 })
 
@@ -510,7 +512,7 @@ export const addUser = async (req: Request, res: Response) => {
 		
 }
 
-const _search = async (keyward: string) => {
+export const _search = async (keyward: string) => {
 	const _keywork = String(keyward || "").trim().replace("@", "")
 	const _page = 1
 	const _pageSize = 10
@@ -519,7 +521,7 @@ const _search = async (keyward: string) => {
 	const prefixPat = `${raw}%`
 
 	if (!_keywork) {
-		return []
+		return({ error: "internal_error" })
 	}
 
 	const isAddress = ethers.isAddress(_keywork)
@@ -617,8 +619,9 @@ const _search = async (keyward: string) => {
 				[raw, containsPat, prefixPat, _pageSize, offset]
 				)
 
-	rows = r
+			rows = r
 		}
+
 		return {
 			results: rows
 		}
@@ -638,119 +641,14 @@ export const searchUsers = async (req: Request, res: Response) => {
 	}
 
 	const _keywork = String(keyward || "").trim().replace("@", "")
-	const _page = 1
-	const _pageSize = 10
-	const raw = _keywork
-	const containsPat = `%${raw}%`
-	const prefixPat = `${raw}%`
 
 	if (!_keywork) {
 		return res.status(404).end()
 	}
 
-	const isAddress = ethers.isAddress(_keywork)
-	const db = new Client({ connectionString: DB_URL })
-
-	try {
-		await db.connect()
-
-		const offset = (_page - 1) * _pageSize
-
-		let rows
-
-		if (isAddress) {
-			// 🔹 按地址精确查
-			const { rows: r } = await db.query(
-				`
-				SELECT
-				a.address,
-				a.username,
-				a.created_at,
-				a.image,
-				a.first_name,
-				a.last_name,
-				-- follow_count: 这个人关注了多少人
-				COALESCE(
-					(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
-					0
-				) AS follow_count,
-				-- follower_count: 有多少人关注了这个人
-				COALESCE(
-					(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
-					0
-				) AS follower_count
-				FROM accounts a
-				WHERE LOWER(a.address) = LOWER($1)
-				ORDER BY a.created_at DESC
-				LIMIT $2 OFFSET $3
-				`,
-				[_keywork, _pageSize, offset]
-			)
-			rows = r
-		} else {
-			// 🔹 按用户名模糊查
-			const { rows: r } = await db.query(
-				`
-				WITH q AS (
-					SELECT
-					$1::text AS raw,
-					$2::text AS contains_pat,
-					$3::text AS prefix_pat
-				)
-				SELECT
-					a.address,
-					a.username,
-					a.created_at,
-					a.image,
-					a.first_name,
-					a.last_name,
-					COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
-					COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count,
-					CASE
-					WHEN a.username ILIKE q.contains_pat THEN 'username'
-					WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat THEN 'name'
-					WHEN COALESCE(a.first_name, '') ILIKE q.contains_pat THEN 'first_name'
-					WHEN COALESCE(a.last_name, '') ILIKE q.contains_pat THEN 'last_name'
-					ELSE 'unknown'
-					END AS hit_field
-				FROM accounts a
-				CROSS JOIN q
-				WHERE
-					a.username ILIKE q.contains_pat
-					OR COALESCE(a.first_name, '') ILIKE q.contains_pat
-					OR COALESCE(a.last_name, '') ILIKE q.contains_pat
-					OR (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat
-				ORDER BY
-					CASE
-					WHEN a.username ILIKE q.prefix_pat THEN 0
-					WHEN COALESCE(a.first_name, '') ILIKE q.prefix_pat THEN 1
-					WHEN COALESCE(a.last_name, '') ILIKE q.prefix_pat THEN 2
-					WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.prefix_pat THEN 3
-					ELSE 9
-					END,
-					GREATEST(
-					similarity(a.username, q.raw) * 2.0,
-					similarity(COALESCE(a.first_name, ''), q.raw) * 1.0,
-					similarity(COALESCE(a.last_name, ''), q.raw) * 1.0,
-					similarity((COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')), q.raw) * 1.2
-					) DESC,
-					a.created_at DESC
-				LIMIT $4 OFFSET $5;
-				`,
-				[raw, containsPat, prefixPat, _pageSize, offset]
-			)
-			rows = r
-		}
-
-		res.json({
-			results: rows
-		})
-	} catch (err) {
-		console.error("searchUsers error:", err)
-		res.status(500).json({ error: "internal_error" })
-	} finally {
-		await db.end()
-	}
+	const ret = await _search (_keywork)
+	return res.status(200).json(ret).end()
+	
 }
 
 const updateUserFollowDB = async (
@@ -1299,6 +1197,81 @@ export const getMyFollowStatus = async (
   } finally {
     await db.end()
   }
+}
+
+export const ipfsDataPool: {
+	wallet: string,
+	imageLength: number
+	hash: string
+}[] = []
+
+export const ipfsAccessPool: {
+	hash: string
+}[] = []
+
+export const ipfsAccessProcess = async () => {
+	const obj = ipfsAccessPool.shift()
+	if (!obj) {
+		return
+	}
+	const SC = beamio_ContractPool.shift()
+	if (!SC) {
+		ipfsAccessPool.unshift(obj)
+		return setTimeout(() => {
+			ipfsAccessProcess()
+		}, 3000)
+	}
+
+	try {
+
+		const tx = await SC.constIPFS.updateAccess(
+			obj.hash
+		)
+
+		await tx.wait ()
+		logger(`ipfsAccessProcess SUCCESS! ${tx.hash}`)
+	} catch(ex: any) {
+		logger(`ipfsAccessProcess Error ${ex.message}`)
+	}
+
+	beamio_ContractPool.push(SC)
+	return setTimeout(() => {
+		ipfsAccessProcess()
+	}, 3000)
+
+}
+
+
+
+export const ipfsDataProcess = async () => {
+	const obj = ipfsDataPool.shift()
+	if (!obj) {
+		return
+	}
+
+	const SC = beamio_ContractPool.shift()
+	if (!SC) {
+		ipfsDataPool.unshift(obj)
+		return setTimeout(() => {
+			ipfsDataProcess()
+		}, 3000)
+	}
+
+	try {
+
+		const tx = await SC.constIPFS.storeAdmin(
+			obj.hash, obj.imageLength, obj.wallet
+		)
+		await tx.wait ()
+		logger(`ipfsDataProcess SUCCESS! ${tx.hash}`)
+	} catch(ex: any) {
+		logger(`ipfsDataProcess Error ${ex.message}`)
+	}
+
+	beamio_ContractPool.push(SC)
+	return setTimeout(() => {
+		ipfsDataProcess()
+	}, 3000)
 }
 
 

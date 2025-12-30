@@ -14,7 +14,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 const masterServerPort = 1111
 const serverPort = 2222
 
-const postLocalhost = async (path: string, obj: any, _res: Response)=> {
+export const postLocalhost = async (path: string, obj: any, _res: Response)=> {
 	
 	const option: RequestOptions = {
 		hostname: 'localhost',
@@ -123,6 +123,7 @@ const routing = ( router: Router ) => {
 			firstName: firstName?.trim() || '',
 			lastName: lastName?.trim() || ''
 		}
+		
 		postLocalhost ('/api/addUser', obj, res)
 	})
 

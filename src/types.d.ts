@@ -16,6 +16,8 @@ type IMasterSetup = {
 		"CDP_API_KEY_SECRET":string
 		secret: string
 	}
+	storagePATH: string
+
 }
 
 /**
