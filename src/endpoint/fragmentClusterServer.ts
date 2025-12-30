@@ -106,7 +106,7 @@ class server {
 
 		this.router (router)
 
-		app.all ('*', (req: any, res: any) => {
+		app.all ('/', (req: any, res: any) => {
 			//logger (Colors.red(`get unknow router from ${ipaddress} => ${ req.method } [http://${ req.headers.host }${ req.url }] STOP connect! ${req.body, false, 3, true}`))
 			res.status(406).end ()
 			return res.socket?.end().destroy()
@@ -181,13 +181,6 @@ class server {
 			}
 
 			return getFragment (hash, res)
-		})
-
-		router.all ('*', (req: any, res: any) => {
-			const ipaddress = getIpAddressFromForwardHeader(req)
-			logger (Colors.grey(`[${ipaddress}] => Router /api get unknow router [http://${ req.headers.host }${ req.url }] STOP connect! ${req.body, false, 3, true}`))
-			res.status(410).end()
-			return res.socket?.end().destroy()
 		})
 	}
 }
