@@ -10,6 +10,7 @@ import Cluster from 'node:cluster'
 import {writeFile} from 'node:fs'
 import {_search, beamio_ContractPool, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {postLocalhost} from './beamioServer'
+import { keccak256, toUtf8Bytes } from "ethers"
 
 const storagePATH = masterSetup.storagePATH
 
@@ -122,10 +123,9 @@ class server {
 	private router ( router: Router ) {
 		
 		router.post ('/storageFragment',  async (req: any, res: any) => {
-			const { hash, wallet, signMessage, image } = req.body as {
+			const { wallet, signMessage, image } = req.body as {
 				wallet?: string
 				image?: string
-				hash?: string
 				signMessage?: string
 			}
 			const ipaddress = getIpAddressFromForwardHeader(req)
@@ -135,17 +135,19 @@ class server {
 
 			const obj = checkSign (wallet, signMessage)
 
-			if (!obj||!hash||!image) {
+			if (!obj||!image) {
 				logger (Colors.grey(`Router /storageFragments !obj Format Error Error! ${ipaddress} checkSign Error!`))
 				return res.status(403).end()
 			}
+			
+			
 
 			const kk = await _search(obj)
 			if (!kk?.results) {
 				logger (Colors.grey(`Router /storageFragments !obj Format Error Error! ${ipaddress} has not Beamioer!`))
 				return res.status(403).end()
 			}
-
+			const hash = keccak256(toUtf8Bytes(image))
 			const SC = beamio_ContractPool[0]
 			try {
 				const isActive: boolean = await SC.constIPFS.isCidInUse(hash)
