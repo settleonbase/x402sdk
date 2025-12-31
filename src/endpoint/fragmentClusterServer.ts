@@ -147,6 +147,7 @@ class server {
 				logger (Colors.grey(`Router /storageFragments !obj Format Error Error! ${ipaddress} has not Beamioer!`))
 				return res.status(403).end()
 			}
+
 			const hash = keccak256(toUtf8Bytes(image))
 			const SC = beamio_ContractPool[0]
 			try {
@@ -174,7 +175,7 @@ class server {
 
 		})
 
-		router.get ('getFragment',  async (req, res) => {
+		router.get ('/getFragment',  async (req, res) => {
 			const { hash } = req.query as {
 				hash?: string
 			}
