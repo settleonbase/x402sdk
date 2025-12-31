@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess} from '../db'
+import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {coinbaseHooks} from '../coinbase'
 const masterServerPort = 1111
 
@@ -53,6 +53,19 @@ const routing = ( router: Router ) => {
 		})
 
 		ipfsDataProcess()
+		res.status(200).end()
+
+	})
+
+	router.post('/getFragment', (req, res) => {
+		const { hash } = req.body as {
+			hash: string
+		}
+		ipfsAccessPool.push({
+			hash
+		})
+
+		ipfsAccessProcess()
 		res.status(200).end()
 
 	})

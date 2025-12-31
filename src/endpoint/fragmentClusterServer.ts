@@ -8,7 +8,7 @@ import { inspect } from 'node:util'
 import { checkSign, masterSetup} from '../util'
 import Cluster from 'node:cluster'
 import {writeFile} from 'node:fs'
-import {_search, beamio_ContractPool, ipfsAccessPool, ipfsAccessProcess} from '../db'
+import {_search, beamio_ContractPool,ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {postLocalhost} from './beamioServer'
 import { keccak256, toUtf8Bytes } from "ethers"
 
@@ -63,8 +63,13 @@ const getFragment = async (hash: string, res: Response) => {
 		req.pipe(res).on(`error`, err => {
 			logger(Colors.red(`getFragment on error ${err.message}`))
 		})
-		ipfsAccessPool.push({hash})
-		ipfsAccessProcess()
+
+		const obj = {
+			hash
+		}
+
+		postLocalhost('/api/getFragment', obj, res)
+
 	})
 	
 
@@ -165,10 +170,10 @@ class server {
 				const obj = {
 					wallet,
 					imageLength: image.length,
-					hash,
-
+					hash
 				}
-				return postLocalhost('/', obj, res)
+
+				return postLocalhost('/api/storageFragment', obj, res)
 			}
 
 			return res.status(403).json({status:true}).end()
