@@ -3,7 +3,7 @@ import type {Response, Request } from 'express'
 import { logger } from '../logger'
 import Colors from 'colors/safe'
 import {createServer} from 'node:http'
-import { readFile, createReadStream, stat} from 'node:fs'
+import Fs, { readFile, createReadStream, stat} from 'node:fs'
 import { inspect } from 'node:util'
 import { checkSign, masterSetup} from '../util'
 import Cluster from 'node:cluster'
@@ -48,13 +48,47 @@ const saveFragment = (hash: string, data: string): Promise<boolean> => new Promi
 	})
 })
 
+function parseBase64(data: string) {
+  const match = data.match(/^data:(.+);base64,(.+)$/)
+  if (!match) return null
+
+  return {
+    mime: match[1],
+    buffer: Buffer.from(match[2], "base64")
+  }
+}
+
 const getFragment = async (hash: string, res: Response) => {
 	
 	const filename = `${storagePATH}/${hash}`
-	return stat(filename, err => {
+
+	return stat(filename, async err => {
 		if (err) {
 			logger(Colors.red(`getFragment file [${filename}] does not exist!`))
 			return res.status(404).end()
+		}
+
+		const raw = await Fs.readFileSync(filename, 'utf8')
+		if (raw) {
+			// ==== base64 data URI ====
+			const base64 = raw.match(/^data:(.+);base64,(.+)$/)
+			if (base64) {
+				const mimeType = base64[1]
+				const buffer = Buffer.from(base64[2], "base64")
+
+				res.status(200)
+				res.setHeader("Content-Type", mimeType)
+				res.setHeader("Content-Length", buffer.length)
+
+				return res.end(buffer)
+			}
+
+			// ==== JSON ====
+			if (raw.trim().startsWith("{") || raw.trim().startsWith("[")) {
+				res.status(200)
+				res.setHeader("Content-Type", "application/json; charset=utf-8")
+				return res.end(raw)
+			}
 		}
 
 		const req = createReadStream(filename, 'utf8')
