@@ -1931,7 +1931,8 @@ export const BeamioPayMe = async (req: Request, res: Response) => {
 		address?: string
 	}
 	const isAddress = ethers.isAddress(address)
-	if (!isAddress || address === ethers.ZeroAddress ) {
+	const _amount = Number(amount)
+	if (!isAddress || address === ethers.ZeroAddress || isNaN(_amount) || !_amount ) {
 		return res.status(404).end()
 	}
 
