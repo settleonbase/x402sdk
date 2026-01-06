@@ -835,7 +835,6 @@ const router = ( router: express.Router ) => {
 
 	router.get('/cashCodeCheck', async (req,res) => {
 		return cashcode_check(req, res)
-		
 	})
 
 	router.get('/BeamioPaymentLinkFinish', async (req,res) => {

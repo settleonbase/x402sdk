@@ -1625,7 +1625,9 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 		return 
 	}
 	const SC = Settle_ContractPool.shift()
+
 	if (!SC) {
+		depositWith3009AuthorizationPayLinkPool.unshift(obj)
 		return setTimeout(() => depositWith3009AuthorizationPayLinkProcess(), 3000)
 	}
 
@@ -1856,6 +1858,110 @@ const finishedPayLinkProcess = async () => {
 	Settle_ContractPool.push(SC)
 	setTimeout(() => finishedPayLinkProcess(), 4000)
 
+
+}
+
+const PayMePool: facilitatorsPayLinkPoolType[] = []
+
+const PayMeProcess = async () => {
+	const obj = PayMePool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		PayMePool.unshift(obj)
+		return setTimeout(() => depositWith3009AuthorizationPayLinkProcess(), 3000)
+	}
+
+	try {
+		const getPayLink = await SC.conetSC.linkMemo(obj.linkHash)
+
+		//		if already linkHash exits
+		if (getPayLink.to !== ethers.ZeroAddress) {
+
+			Settle_ContractPool.unshift(SC)
+			return obj.res.status(403).end()
+		}
+
+
+		const tx = await SC.baseSC["depositWith3009Authorization(address,address,address,uint256,uint256,uint256,bytes32,bytes)"]
+		(
+			obj.from,
+			obj.to,
+			USDCContract_BASE,
+			obj.value,
+			obj.validAfter,
+			obj.validBefore,
+			obj.nonce,
+			obj.signature
+		)
+
+		logger(`PayMeProcess baseSC success!`, tx.hash)
+		
+
+		obj.res.status(200).json({success: true, USDC_tx: tx.hash})
+		await tx.wait()
+
+		const tr = await SC.conetSC.linkMemoGenerate(
+			obj.linkHash, obj.to, obj.value, baseChainID, USDCContract_BASE, USDC_Base_DECIMALS, obj.note
+		)
+
+		await tr.wait()
+		await new Promise(executor => setTimeout(() => executor(true), 4000))
+
+		const ts = await SC.conetSC.finishedLink(
+			obj.linkHash, tx.hash, obj.from, obj.value
+		)
+		
+		await ts.wait()
+
+		logger(`PayMeProcess conetSC success!`, ts.hash)
+
+	} catch (ex: any) {
+		logger(inspect({from:obj.from, to: obj.to, linkHash: obj.linkHash, usdcAmount: obj.value, validAfter: obj.validAfter, validBefore:obj.validBefore, nonce: obj.nonce, signature: obj.signature  }))
+		logger(`PayMeProcess Error!`, ex.message)
+	}
+
+	Settle_ContractPool.unshift(SC)
+	setTimeout(() => PayMeProcess(), 3000)
+
+}
+
+
+export const BeamioPayMe = async (req: Request, res: Response) => {
+	const { code, amount, note, address } = req.query as {
+		amount?: string
+		code?: string
+		note?: string
+		address?: string
+	}
+	const isAddress = ethers.isAddress(address)
+	if (!isAddress || address === ethers.ZeroAddress ) {
+		return res.status(404).end()
+	}
+
+	const totalAmount = Number(amount)
+	const requestX402 = await BeamioPayment(req, res, totalAmount.toString(), beamiobase)
+
+	logger(inspect(requestX402, false, 3, true))
+
+	if (!requestX402|| !requestX402?.authorization) {
+		return 
+	}
+
+	const authorization = requestX402.authorization
+	PayMePool.push({
+		from: authorization.from,
+		to: address,
+		value: authorization.value,
+		validAfter: authorization.validAfter,
+		validBefore: authorization.validBefore,
+		nonce: authorization.nonce,
+		signature: requestX402.signature,
+		res: res,
+		linkHash: code,
+		note: note,
+	})
+	PayMeProcess()
 
 }
 
