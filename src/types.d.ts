@@ -146,7 +146,7 @@ type facilitatorsPayLinkPoolType = {
 	res: any
 	linkHash?: string
 	note?: string
-	
+	newHash: boolean
 }
 
 

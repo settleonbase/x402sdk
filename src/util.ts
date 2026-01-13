@@ -948,7 +948,7 @@ export const generateCheck = async (req: Request, res: Response) => {
 			note: note,
 			nonce: payload.nonce,
 			linkHash: secureCode,
-
+			newHash: true
 		})
 		depositWith3009AuthorizationPayLinkProcess()
 
@@ -1823,7 +1823,8 @@ export const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
 			nonce: authorization.nonce,
 			signature: requestX402.signature,
 			res: res,
-			linkHash: code
+			linkHash: code,
+			newHash: true
 		})
 		depositWith3009AuthorizationPayLinkProcess()
 
@@ -1901,6 +1902,7 @@ export const BeamioPaymentLinkFinishRouteToSC = async (req: Request, res: Respon
 				res: res,
 				linkHash: code,
 				note: note,
+				newHash: true
 			})
 			PayMeProcess()
 
@@ -1978,28 +1980,34 @@ const PayMeProcess = async () => {
 		
 		const [,tr] = await Promise.all([
 			tx.wait(),
-			SC.conetSC.linkMemoGenerate(
+			obj.newHash ? SC.conetSC.linkMemoGenerate(
 				obj.linkHash, obj.to, obj.value, baseChainID, USDCContract_BASE, USDC_Base_DECIMALS, obj.note
+			) : SC.conetSC.finishedLink(
+				obj.linkHash, obj.signature, obj.from, obj.value
 			)
 		])
 		
 		
 
 		await tr.wait()
-		await new Promise(executor => setTimeout(() => executor(true), 4000))
 
-		const ts = await SC.conetSC.finishedLink(
-			obj.linkHash, obj.signature, obj.from, obj.value
-		)
+		logger(`PayMeProcess conetSC tr success!`, tr.hash)
+
+		if (obj.newHash) {
+			await new Promise(executor => setTimeout(() => executor(true), 4000))
+
+			const ts = await SC.conetSC.finishedLink(
+				obj.linkHash, obj.signature, obj.from, obj.value
+			)
+			
+			await ts.wait()
+
+			logger(`PayMeProcess newHash conetSC success!`, ts.hash)
+
+		}
 		
-		await ts.wait()
-
-		logger(`PayMeProcess conetSC success!`, ts.hash)
 
 	} catch (ex: any) {
-		if (obj.res.writable ) {
-			obj.res.status(403).json({success: false}).end()
-		}
 		
 
 		logger(`PayMeProcess Error!`,inspect({from:obj.from, to: obj.to, linkHash: obj.linkHash, usdcAmount: obj.value, validAfter: obj.validAfter, validBefore:obj.validBefore, nonce: obj.nonce, signature: obj.signature  }))
@@ -2148,6 +2156,7 @@ export const BeamioPayMe = async (req: Request, res: Response) => {
 				res: res,
 				linkHash: code,
 				note: note,
+				newHash: true
 			})
 			PayMeProcess()
 			
@@ -2241,6 +2250,7 @@ export const BeamioPayMeRouteToSC = async (req: Request, res: Response) => {
 				res: res,
 				linkHash: code,
 				note: note,
+				newHash: true
 			})
 			PayMeProcess()
 			
