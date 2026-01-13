@@ -1902,7 +1902,7 @@ export const BeamioPaymentLinkFinishRouteToSC = async (req: Request, res: Respon
 				res: res,
 				linkHash: code,
 				note: note,
-				newHash: true
+				newHash: false
 			})
 			PayMeProcess()
 
@@ -1960,11 +1960,11 @@ const PayMeProcess = async () => {
 	}
 
 	try {
-
+		//		转账到 beamio smart contract 地址
 		const tx = await SC.baseSC["depositWith3009Authorization(address,address,address,uint256,uint256,uint256,bytes32,bytes)"]
 		(
 			obj.from,
-			obj.to,
+			beamiobase,
 			USDCContract_BASE,
 			obj.value,
 			obj.validAfter,
@@ -1980,6 +1980,7 @@ const PayMeProcess = async () => {
 		
 		const [,tr] = await Promise.all([
 			tx.wait(),
+							//		记录到 conetSC 上	 obj.to
 			obj.newHash ? SC.conetSC.linkMemoGenerate(
 				obj.linkHash, obj.to, obj.value, baseChainID, USDCContract_BASE, USDC_Base_DECIMALS, obj.note
 			) : SC.conetSC.finishedLink(
@@ -2241,7 +2242,7 @@ export const BeamioPayMeRouteToSC = async (req: Request, res: Response) => {
 
 			PayMePool.push({
 				from,
-				to,
+				to: address,
 				value,
 				validAfter: requestX402.authorization.validAfter,
 				validBefore: requestX402.authorization.validBefore,
