@@ -1983,7 +1983,7 @@ const PayMeProcess = async () => {
 			obj.newHash ? SC.conetSC.linkMemoGenerate(
 				obj.linkHash, obj.to, obj.value, baseChainID, USDCContract_BASE, USDC_Base_DECIMALS, obj.note
 			) : SC.conetSC.finishedLink(
-				obj.linkHash, obj.signature, obj.from, obj.value
+				obj.linkHash, tx.hash, obj.from, obj.value
 			)
 		])
 		
@@ -1997,7 +1997,7 @@ const PayMeProcess = async () => {
 			await new Promise(executor => setTimeout(() => executor(true), 4000))
 
 			const ts = await SC.conetSC.finishedLink(
-				obj.linkHash, obj.signature, obj.from, obj.value
+				obj.linkHash, tx.hash, obj.from, obj.value
 			)
 			
 			await ts.wait()
