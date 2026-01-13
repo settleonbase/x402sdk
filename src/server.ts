@@ -12,7 +12,7 @@ import os from 'node:os'
 import fs from 'node:fs'
 import { useFacilitator } from "x402/verify"
 import {masterSetup, cashcode_request, cashcode_check, facilitators, facilitatorsPool, x402ProcessPool, MINT_RATE, BeamioFaucet, generateCheck, redeemCheck,
-	BeamioTransfer, getOracleRequest, verifyPaymentNew, BeamioPaymentLink, BeamioPaymentLinkFinish, BeamioETHFaucet, getClientIp, oracleBackoud, BeamioPayMe
+	BeamioTransfer, getOracleRequest, verifyPaymentNew, BeamioPaymentLink, BeamioPaymentLinkFinishRouteToSC, BeamioETHFaucet, getClientIp, oracleBackoud, BeamioPayMeRouteToSC
 } from './util'
 import { facilitator, createFacilitatorConfig } from "@coinbase/x402"
 import { exact } from "x402/schemes";
@@ -838,7 +838,7 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/BeamioPaymentLinkFinish', async (req,res) => {
-		return BeamioPaymentLinkFinish(req, res)
+		return BeamioPaymentLinkFinishRouteToSC(req, res)
 	})
 
 	router.get('/BeamioTransfer', async (req,res) => {
@@ -944,7 +944,7 @@ const router = ( router: express.Router ) => {
 	})
 
 	router.get('/BeamioPayME', async (req,res) => {
-		return BeamioPayMe(req, res)
+		return BeamioPayMeRouteToSC(req, res)
 	})
 
 	// router.get('/estimateNativeBaseTransferGas', async (req,res) => {

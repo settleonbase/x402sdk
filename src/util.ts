@@ -1606,8 +1606,15 @@ const BeamioPayment = async (req: Request, res: Response, amt: string|bigint, wa
 		
 
 		const payload: payload = paymentHeader?.payload as payload
+		
 		if (!payload.signature || payload.signature.length > 132) {
 			logger(`${_routerName} checkx402paymentHeader sign Error!`,inspect(payload, false, 3, true))
+			res.status(403).end()
+			return false
+		}
+
+		if (payload.authorization.to.toLowerCase() !== wallet.toLowerCase() || Number(payload.authorization.value.toString()) !==  Number(amt.toString())) {
+			logger(`${_routerName} checkx402paymentHeader authorization Error!`,inspect(payload, false, 3, true))
 			res.status(403).end()
 			return false
 		}
@@ -1826,6 +1833,83 @@ export const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
 
 }
 
+export const BeamioPaymentLinkFinishRouteToSC = async (req: Request, res: Response) => {
+	let { code, amount, note } = req.query as {
+		amount?: string
+		code?: string
+		note?: string
+	}
+
+	const totalAmount = Number(amount)
+
+	//		check step 1
+	if (!code || !ethers.isHexString(code) || isNaN(totalAmount) || totalAmount <= 0) {
+		logger(`BeamioPaymentLinkFinishRouteToSC check step 1 Error! !code == ${!code} || !ethers.isHexString(code) == ${!ethers.isHexString(code)} || isNaN(totalAmount) ${isNaN(totalAmount)}`)
+		return res.status(404).end()
+	}
+
+	const SC = Settle_ContractPool[0]
+
+
+
+	try {
+		const getPayLink = await SC.conetSC.linkMemo(code)
+		const requestAmount = Number(getPayLink.amount.toString())
+
+		//			no request 
+		if (getPayLink.to === ethers.ZeroAddress) {
+			logger(`BeamioPaymentLinkFinishRouteToSC no request getPayLink.to === ethers.ZeroAddress Error! getPayLink.to ${getPayLink.to} `)
+			return res.status(404).end()
+		}
+
+		//			Insufficient request
+		if ( totalAmount < requestAmount) {
+			logger(`BeamioPaymentLinkFinishRouteToSC totalAmount ${totalAmount} > 0 && totalAmount < requestAmount ${requestAmount} Error! `)
+			return res.status(403).end()
+		}
+
+		//				Already Used
+		if (getPayLink.from !== ethers.ZeroAddress) {
+			logger(`BeamioPaymentLinkFinishRouteToSC getPayLink.from !== ethers.ZeroAddress ${getPayLink.from !== ethers.ZeroAddress} Can't be reuse Error! `)
+			return res.status(403).end()
+			
+		}
+
+
+		logger(`BeamioPaymentLinkFinishRouteToSC doing BeamioPayment code ${code} totalAmount ${totalAmount} !`)
+
+		
+
+		const requestX402 = await BeamioPayment(req, res, totalAmount.toString(), beamiobase)
+		logger(inspect(requestX402, false, 3, true))
+		if (!requestX402|| !requestX402?.authorization) {
+			return 
+		}
+		
+			const from = requestX402.authorization.from
+			const to = requestX402.authorization.to
+			const value = requestX402.authorization.value
+			
+			PayMePool.push({
+				from,
+				to,
+				value,
+				validAfter: requestX402.authorization.validAfter,
+				validBefore: requestX402.authorization.validBefore,
+				nonce: requestX402.authorization.nonce,
+				signature: requestX402.signature,
+				res: res,
+				linkHash: code,
+				note: note,
+			})
+			PayMeProcess()
+
+	} catch (ex: any) {
+		return res.status(403).end()
+	}
+
+}
+
 const finishedPayLinkPool: {
 	linkHash: string
 	depositHash: string
@@ -1866,6 +1950,7 @@ const PayMePool: facilitatorsPayLinkPoolType[] = []
 const PayMeProcess = async () => {
 	const obj = PayMePool.shift()
 	if (!obj) return
+
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
 		PayMePool.unshift(obj)
@@ -1873,10 +1958,32 @@ const PayMeProcess = async () => {
 	}
 
 	try {
-		
-		const tr = await SC.conetSC.linkMemoGenerate(
-			obj.linkHash, obj.to, obj.value, baseChainID, USDCContract_BASE, USDC_Base_DECIMALS, obj.note
+
+		const tx = await SC.baseSC["depositWith3009Authorization(address,address,address,uint256,uint256,uint256,bytes32,bytes)"]
+		(
+			obj.from,
+			obj.to,
+			USDCContract_BASE,
+			obj.value,
+			obj.validAfter,
+			obj.validBefore,
+			obj.nonce,
+			obj.signature
 		)
+
+		logger(`PayMeProcess baseSC success!`, tx.hash)
+		if (obj.res.writable) {
+			obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
+		}
+		
+		const [,tr] = await Promise.all([
+			tx.wait(),
+			SC.conetSC.linkMemoGenerate(
+				obj.linkHash, obj.to, obj.value, baseChainID, USDCContract_BASE, USDC_Base_DECIMALS, obj.note
+			)
+		])
+		
+		
 
 		await tr.wait()
 		await new Promise(executor => setTimeout(() => executor(true), 4000))
@@ -1890,6 +1997,11 @@ const PayMeProcess = async () => {
 		logger(`PayMeProcess conetSC success!`, ts.hash)
 
 	} catch (ex: any) {
+		if (obj.res.writable ) {
+			obj.res.status(403).json({success: false}).end()
+		}
+		
+
 		logger(`PayMeProcess Error!`,inspect({from:obj.from, to: obj.to, linkHash: obj.linkHash, usdcAmount: obj.value, validAfter: obj.validAfter, validBefore:obj.validBefore, nonce: obj.nonce, signature: obj.signature  }))
 		logger(`PayMeProcess Error!`, ex.message)
 	}
@@ -2050,6 +2162,90 @@ export const BeamioPayMe = async (req: Request, res: Response) => {
 
 	
 	
+
+}
+
+export const BeamioPayMeRouteToSC = async (req: Request, res: Response) => {
+	const { code, amount, note, address } = req.query as {
+		amount?: string
+		code?: string
+		note?: string
+		address?: string
+	}
+	
+	const isAddress = ethers.isAddress(address)
+	const _amount = Number(amount)
+	if (!isAddress || address === ethers.ZeroAddress || isNaN(_amount) || !_amount ) {
+		return res.status(404).end()
+	}
+
+	//		if already linkHash exits
+	const getPayLink = await Settle_ContractPool[0].conetSC.linkMemo(code)
+	
+	if (getPayLink.to !== ethers.ZeroAddress) {
+
+		logger(`BeamioPayMe Error! code ${code} getPayLink.to !== ethers.ZeroAddress.`)
+		return res.status(403).end()
+	}
+
+
+
+	const user: any = await searchUsername(address)
+	if (!user?.results?.length||user.results.length > 1) {
+		logger(`BeamioPayMe Error! address ${address} has not exits!!!`)
+		return res.status(404).end()
+	}
+
+	const _price = amount|| '0'
+	const price = ethers.parseUnits(_price, USDC_Base_DECIMALS)			// to BIG INT
+
+	if ( !amount || price <= 0 ) {
+		logger(`BeamioPayMe Error! The minimum amount was not reached.`,inspect( req.query, false, 3, true))
+		return res.status(400).json({success: false, error: 'The minimum amount was not reached.'})
+	}
+
+	const requestX402 = await BeamioPayment(req, res, price.toString(), beamiobase)
+	logger(inspect(requestX402, false, 3, true))
+	if (!requestX402|| !requestX402?.authorization) {
+		return 
+	}
+
+
+		
+// depositWith3009AuthorizationPayLinkPool.push({
+// 			from: payload.from,
+// 			to: '',
+// 			value: payload.value,
+// 			validAfter: payload.validAfter,
+// 			validBefore: payload.validBefore,
+// 			signature: requestX402.signature,
+// 			res: res,
+// 			note: note,
+// 			nonce: payload.nonce,
+// 			linkHash: secureCode,
+
+// 		})
+			const from = requestX402.authorization.from
+			const to = requestX402.authorization.to
+			const value = requestX402.authorization.value
+			
+
+			PayMePool.push({
+				from,
+				to,
+				value,
+				validAfter: requestX402.authorization.validAfter,
+				validBefore: requestX402.authorization.validBefore,
+				nonce: requestX402.authorization.nonce,
+				signature: requestX402.signature,
+				res: res,
+				linkHash: code,
+				note: note,
+			})
+			PayMeProcess()
+			
+		return 
+			
 
 }
 
