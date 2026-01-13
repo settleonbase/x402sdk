@@ -1739,7 +1739,7 @@ export const BeamioETHFaucet = async (req: Request, res: Response) => {
 	res.status(200).end()
 }
 
-export const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
+const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
 	let { code, amount } = req.query as {
 		amount?: string
 		code?: string
@@ -1863,11 +1863,11 @@ export const BeamioPaymentLinkFinishRouteToSC = async (req: Request, res: Respon
 			return res.status(404).end()
 		}
 
-		//			Insufficient request
-		if ( totalAmount < requestAmount) {
-			logger(`BeamioPaymentLinkFinishRouteToSC totalAmount ${totalAmount} > 0 && totalAmount < requestAmount ${requestAmount} Error! `)
-			return res.status(403).end()
-		}
+		//			Insufficient request	need check chrrency
+		// if ( totalAmount < requestAmount) {
+		// 	logger(`BeamioPaymentLinkFinishRouteToSC totalAmount ${totalAmount} > 0 && totalAmount < requestAmount ${requestAmount} Error! `)
+		// 	return res.status(403).end()
+		// }
 
 		//				Already Used
 		if (getPayLink.from !== ethers.ZeroAddress) {
