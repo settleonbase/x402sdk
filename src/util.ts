@@ -506,7 +506,7 @@ export const verifyPaymentNew = (
 
 	} catch (error) {
 
-		logger(`verifyPayment catch error!`)
+		logger(`verifyPayment catch error!`, error)
 
 		res.status(402).json({
 			x402Version,
