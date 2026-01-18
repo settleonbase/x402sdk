@@ -1,0 +1,154 @@
+server {
+    server_name settleonbase.xyz www.settleonbase.xyz;
+        root /var/www/settleonbase.xyz;
+        index index.html index.htm;
+
+	location /api/ {
+
+            # ---------- CORS 预检：OPTIONS 直接返回 204 ----------
+            if ($request_method = 'OPTIONS') {
+                add_header Access-Control-Allow-Origin "*" always;
+                add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+                # 允许自定义头（X-PAYMENT），也兜住某些客户端会放的 Access-Control-Expose-Headers
+                add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, X-PAYMENT, Access-Control-Expose-Headers" always;
+                add_header Access-Control-Max-Age 86400 always;
+                add_header Content-Type "text/plain; charset=utf-8" always;
+                add_header Content-Length 0 always;
+                return 204;
+            }
+
+            # ---------- 对所有非预检请求统一加上 CORS 响应头 ----------
+            add_header Access-Control-Allow-Origin "*" always;
+            add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, X-PAYMENT, Access-Control-Expose-Headers" always;
+            add_header Access-Control-Expose-Headers "Content-Length, Content-Range, X-PAYMENT-RESPONSE" always;
+            add_header Vary "Origin" always;
+
+            # ---------- 反向代理到 Node（保留原始 /api/...） ----------
+            proxy_http_version 1.1;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+	     proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+            proxy_set_header X-Forwarded-Host   $host;   # 或 $http_host，通常 $host 更稳
+
+            # 如果后端可能升级 WebSocket，保留这两行（安全无害）
+            proxy_set_header Upgrade           $http_upgrade;
+            proxy_set_header Connection        $connection_upgrade;
+
+            # 直传大 body 或流式（按需）
+            proxy_request_buffering off;
+            proxy_buffering        off;
+
+            proxy_connect_timeout  60s;
+            proxy_send_timeout     60s;
+            proxy_read_timeout     60s;
+
+            proxy_redirect off;
+
+            # 重点：无尾斜杠 -> 保留原始 URI（含 /api/...）
+            proxy_pass http://127.0.0.1:4088;
+        }
+
+        location / {
+                # Simple requests
+                        if ($request_method ~* "(GET|POST)") {
+                        add_header "Access-Control-Allow-Origin"  '*' always;
+                }
+
+                # Preflighted requests
+                if ($request_method = OPTIONS ) {
+                        add_header "Access-Control-Allow-Origin"  '*' always;
+                        add_header "Access-Control-Allow-Methods" "GET, POST, OPTIONS, HEAD";
+                        add_header "Access-Control-Allow-Headers" "Authorization, Origin, X-Requested-With, Content-Type, Accept";
+                        return 200;
+                }
+                # proxy_set_header Host website-example-seven.vercel.app;
+                # proxy_pass            https://website-example-seven.vercel.app;
+                try_files $uri $uri/ =404;
+        }
+
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/api.settleonbase.xyz/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/api.settleonbase.xyz/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+
+
+
+
+}
+
+
+server {
+    server_name api.settleonbase.xyz;
+
+    access_log /var/log/nginx/api.settleonbase.xyz.access.log;
+    error_log  /var/log/nginx/api.settleonbase.xyz.error.log debug;
+
+    # 如果需要按来源精确控制，可用 map $http_origin $cors_origin; 这里先允许所有
+    # map $http_origin $cors_origin {
+    #     default "";
+    #     "~^https?://(localhost(:\d+)?|settleonbase\.xyz)$" $http_origin;
+    # }
+
+    location / {
+		# ---------- CORS 预检：OPTIONS 直接由 Nginx 返回 204 ----------
+		if ($request_method = 'OPTIONS') {
+			add_header Access-Control-Allow-Origin "*" always;
+			add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+			add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, X-PAYMENT, Access-Control-Expose-Headers" always;
+			add_header Access-Control-Max-Age 86400 always;
+			add_header Content-Type "text/plain; charset=utf-8" always;
+			add_header Content-Length 0 always;
+			return 204;
+		}
+
+		# ---------- 对所有非预检请求统一加上 CORS 响应头 ----------
+		add_header Access-Control-Allow-Origin "*" always;
+		add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+		add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, X-PAYMENT, Access-Control-Expose-Headers" always;
+		add_header Access-Control-Expose-Headers "Content-Length, Content-Range, X-PAYMENT-RESPONSE" always;
+		add_header Vary "Origin" always;
+
+		# ---------- 反向代理到 Node ----------
+		# ⭐ 用 Cloudflare 自带的 CF-Connecting-IP 作为真实用户 IP 传给 Node
+
+		# 如果 Cloudflare header 存在就用，否则用 remote_addr
+		set $client_ip $http_cf_connecting_ip;
+		if ($client_ip = '') {
+			set $client_ip $remote_addr;
+		}
+
+		proxy_set_header X-Real-IP $client_ip;
+    	proxy_set_header X-Forwarded-For $client_ip;
+
+		proxy_set_header Host              $host;
+		proxy_set_header X-Forwarded-Host  $host;
+		proxy_set_header X-Forwarded-Proto $scheme;
+
+		proxy_request_buffering off;
+		proxy_buffering        off;
+
+		proxy_connect_timeout  60s;
+		proxy_send_timeout     60s;
+		proxy_read_timeout     60s;
+
+		proxy_headers_hash_max_size   1024;
+		proxy_headers_hash_bucket_size 128;
+
+		proxy_http_version 1.1;
+		proxy_redirect off;
+
+		proxy_pass http://127.0.0.1:4088;
+	}
+
+    listen 443 ssl;
+    ssl_certificate /etc/letsencrypt/live/api.settleonbase.xyz/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/api.settleonbase.xyz/privkey.pem; # managed by Certbot
+    include             /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
+
+}

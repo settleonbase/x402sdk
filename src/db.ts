@@ -16,7 +16,7 @@ import IPFSAbi from './ABI/Ipfs.abi.json'
  * 
  */
 
-const DB_URL = "postgres://account:accountpass@localhost:7434/accountdb"
+
 const RPC_URL = "https://mainnet-rpc.conet.network"
 
 const providerConet = new ethers.JsonRpcProvider(RPC_URL)
@@ -512,127 +512,129 @@ export const addUser = async (req: Request, res: Response) => {
 		
 }
 
+const DB_URL = "postgres://account:accountpass@localhost:5432/accountdb"
 export const _search = async (keyward: string) => {
-	const _keywork = String(keyward || "").trim().replace("@", "")
-	const _page = 1
-	const _pageSize = 10
-	const raw = _keywork
-	const containsPat = `%${raw}%`
-	const prefixPat = `${raw}%`
+  const _keywork = String(keyward || "")
+    .trim()
+    .replace(/^@+/, "")          // ✅ 去掉开头的 @@@
+    .replace(/\s+/g, " ")        // ✅ 压缩空格
 
-	if (!_keywork) {
-		return({ error: "internal_error" })
-	}
+  const _page = 1
+  const _pageSize = 10
 
-	const isAddress = ethers.isAddress(_keywork)
-	const db = new Client({ connectionString: DB_URL })
+  if (!_keywork) {
+    return { results: [] }
+  }
 
-		try {
-		await db.connect()
+  // ✅ 极短关键词直接返回，避免 %p% 这种扫库
+  if (_keywork.length < 2 && !ethers.isAddress(_keywork)) {
+    return { results: [] }
+  }
 
-		const offset = (_page - 1) * _pageSize
+  const raw = _keywork
+  const containsPat = `%${raw}%`
+  const prefixPat = `${raw}%`
 
-		let rows
+  const isAddress = ethers.isAddress(_keywork)
+  const db = new Client({ connectionString: DB_URL })
 
-		if (isAddress) {
-			const address = _keywork.toLowerCase()
-			logger(`_search with address`)
-			// 🔹 按地址精确查
-			const { rows: r } = await db.query(
-				`
-				SELECT
-				a.address,
-				a.username,
-				a.created_at,
-				a.image,
-				a.first_name,
-				a.last_name,
-				-- follow_count: 这个人关注了多少人
-				COALESCE(
-					(SELECT COUNT(*) FROM follows f WHERE f.follower = a.address),
-					0
-				) AS follow_count,
-				-- follower_count: 有多少人关注了这个人
-				COALESCE(
-					(SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address),
-					0
-				) AS follower_count
-				FROM accounts a
-				WHERE LOWER(a.address) = LOWER($1)
-				ORDER BY a.created_at DESC
-				LIMIT $2 OFFSET $3
-				`,
-				[address, _pageSize, offset]
-			)
-			rows = r
-		} else {
-			logger(`_search with keyword`)
-			// 🔹 按用户名模糊查
-			const { rows: r } = await db.query(
-				`
-				WITH q AS (
-					SELECT
-					$1::text AS raw,
-					$2::text AS contains_pat,
-					$3::text AS prefix_pat
-				)
-				SELECT
-					a.address,
-					a.username,
-					a.created_at,
-					a.image,
-					a.first_name,
-					a.last_name,
-					COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
-					COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count,
-					CASE
-					WHEN a.username ILIKE q.contains_pat THEN 'username'
-					WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat THEN 'name'
-					WHEN COALESCE(a.first_name, '') ILIKE q.contains_pat THEN 'first_name'
-					WHEN COALESCE(a.last_name, '') ILIKE q.contains_pat THEN 'last_name'
-					ELSE 'unknown'
-					END AS hit_field
-				FROM accounts a
-				CROSS JOIN q
-				WHERE
-					a.username ILIKE q.contains_pat
-					OR COALESCE(a.first_name, '') ILIKE q.contains_pat
-					OR COALESCE(a.last_name, '') ILIKE q.contains_pat
-					OR (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat
-				ORDER BY
-					CASE
-					WHEN a.username ILIKE q.prefix_pat THEN 0
-					WHEN COALESCE(a.first_name, '') ILIKE q.prefix_pat THEN 1
-					WHEN COALESCE(a.last_name, '') ILIKE q.prefix_pat THEN 2
-					WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.prefix_pat THEN 3
-					ELSE 9
-					END,
-					GREATEST(
-					similarity(a.username, q.raw) * 2.0,
-					similarity(COALESCE(a.first_name, ''), q.raw) * 1.0,
-					similarity(COALESCE(a.last_name, ''), q.raw) * 1.0,
-					similarity((COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')), q.raw) * 1.2
-					) DESC,
-					a.created_at DESC
-				LIMIT $4 OFFSET $5;
-				`,
-				[raw, containsPat, prefixPat, _pageSize, offset]
-				)
+  try {
+    await db.connect()
 
-			rows = r
-		}
+    const offset = (_page - 1) * _pageSize
+    let rows: any[] = []
 
-		return {
-			results: rows
-		}
-		
-	} catch (err) {
-		console.error("searchUsers error:", err)
-		return({ error: "internal_error" })
-	} finally {
-		await db.end()
-	}
+    if (isAddress) {
+      const address = _keywork.toLowerCase()
+      logger(`_search with address`)
 
+      const { rows: r } = await db.query(
+        `
+        SELECT
+          a.address,
+          a.username,
+          a.created_at,
+          a.image,
+          a.first_name,
+          a.last_name,
+          COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
+          COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count
+        FROM accounts a
+        WHERE LOWER(a.address) = LOWER($1)
+        ORDER BY a.created_at DESC
+        LIMIT $2 OFFSET $3
+        `,
+        [address, _pageSize, offset]
+      )
+
+      rows = r
+    } else {
+      logger(`_search with keyword`)
+
+      // ✅ 可选：降低相似度阈值，让短词排序更稳定（你每次都 connect/end，所以放这里也行）
+      // await db.query(`SELECT set_limit(0.12)`)
+
+      const { rows: r } = await db.query(
+        `
+        WITH q AS (
+          SELECT
+            $1::text AS raw,
+            $2::text AS contains_pat,
+            $3::text AS prefix_pat
+        )
+        SELECT
+          a.address,
+          a.username,
+          a.created_at,
+          a.image,
+          a.first_name,
+          a.last_name,
+          COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
+          COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count,
+          CASE
+            WHEN a.username ILIKE q.contains_pat THEN 'username'
+            WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat THEN 'name'
+            WHEN COALESCE(a.first_name, '') ILIKE q.contains_pat THEN 'first_name'
+            WHEN COALESCE(a.last_name, '') ILIKE q.contains_pat THEN 'last_name'
+            ELSE 'unknown'
+          END AS hit_field
+        FROM accounts a
+        CROSS JOIN q
+        WHERE
+          a.username ILIKE q.contains_pat
+          OR COALESCE(a.first_name, '') ILIKE q.contains_pat
+          OR COALESCE(a.last_name, '') ILIKE q.contains_pat
+          OR (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat
+        ORDER BY
+          CASE
+            WHEN a.username ILIKE q.prefix_pat THEN 0
+            WHEN COALESCE(a.first_name, '') ILIKE q.prefix_pat THEN 1
+            WHEN COALESCE(a.last_name, '') ILIKE q.prefix_pat THEN 2
+            WHEN (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.prefix_pat THEN 3
+            ELSE 9
+          END,
+          GREATEST(
+            similarity(a.username, q.raw) * 2.0,
+            similarity(COALESCE(a.first_name, ''), q.raw) * 1.0,
+            similarity(COALESCE(a.last_name, ''), q.raw) * 1.0,
+            similarity((COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')), q.raw) * 1.2
+          ) DESC,
+          a.created_at DESC
+        LIMIT $4 OFFSET $5;
+        `,
+        [raw, containsPat, prefixPat, _pageSize, offset]
+      )
+
+      rows = r
+    }
+
+    return { results: rows }
+  } catch (err) {
+    console.error("searchUsers error:", err)
+    return { error: "internal_error" }
+  } finally {
+    await db.end()
+  }
 }
 
 export const searchUsers = async (req: Request, res: Response) => {
