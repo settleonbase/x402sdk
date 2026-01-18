@@ -512,7 +512,7 @@ export const addUser = async (req: Request, res: Response) => {
 		
 }
 
-const DB_URL = "postgres://account:accountpass@localhost:5432/accountdb"
+const DB_URL = "postgres://postgres:your_password@127.0.0.1:5432/beamio"
 export const _search = async (keyward: string) => {
   const _keywork = String(keyward || "")
     .trim()
