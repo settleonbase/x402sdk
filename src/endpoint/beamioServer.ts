@@ -101,7 +101,7 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ error: "Invalid data format" })
 		}
 
-		const isValid = checkSign(wallet, signMessage)
+		const isValid = checkSign(wallet, signMessage, wallet)
 		
 		if (!isValid) {
 			return  res.status(400).json({ error: "Signature verification failed!" })
@@ -138,7 +138,7 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ error: "Invalid data format" })
 		}
 
-		const isValid = checkSign(wallet, signMessage)
+		const isValid = checkSign(wallet, signMessage, wallet)
 		
 		if (!isValid||isValid === followAddress.toLowerCase()) {
 			return  res.status(400).json({ error: "Signature verification failed!" })
@@ -199,7 +199,7 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ error: "Invalid data format" })
 		}
 
-		const isValid = checkSign(wallet, signMessage)
+		const isValid = checkSign(wallet, signMessage, wallet)
 		
 		if (!isValid||isValid === followAddress.toLowerCase()) {
 			return  res.status(400).json({ error: "Signature verification failed!" })

@@ -145,10 +145,5 @@ server {
 		proxy_pass http://127.0.0.1:4088;
 	}
 
-    listen 443 ssl;
-    ssl_certificate /etc/letsencrypt/live/api.settleonbase.xyz/fullchain.pem; # managed by Certbot
-    ssl_certificate_key /etc/letsencrypt/live/api.settleonbase.xyz/privkey.pem; # managed by Certbot
-    include             /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
 
 }

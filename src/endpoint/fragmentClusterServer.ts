@@ -171,7 +171,7 @@ class server {
 				return res.status(403).end()
 			}
 
-			const obj = checkSign (wallet, signMessage)
+			const obj = checkSign (wallet, signMessage, wallet)
 
 			if (!obj||!image) {
 				logger (Colors.grey(`Router /storageFragments !obj Format Error Error! ${ipaddress} checkSign Error!`))
