@@ -180,11 +180,11 @@ class server {
 			
 			
 
-			const kk = await _search(obj)
-			if (!kk?.results) {
-				logger (Colors.grey(`Router /storageFragments !obj Format Error Error! ${ipaddress} has not Beamioer!`))
-				return res.status(403).end()
-			}
+			// const kk = await searchUser(obj)
+			// if (!kk?.results) {
+			// 	logger (Colors.grey(`Router /storageFragments !obj Format Error Error! ${ipaddress} has not Beamioer!`))
+			// 	return res.status(403).end()
+			// }
 
 			const hash = keccak256(toUtf8Bytes(image))
 			const SC = beamio_ContractPool[0]
