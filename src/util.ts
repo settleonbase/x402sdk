@@ -2388,12 +2388,12 @@ export const checkSign = (message: string, signMess: string, signWallet: string)
 	try {
 		recoverPublicKey = ethers.verifyMessage(message, signMess)
 
-	} catch (ex) {
-		return null
+	} catch (ex: any) {
+		return logger(`${ex.messang}`)
 	}
 
 	if (!recoverPublicKey || recoverPublicKey.toLowerCase() !== signWallet.toLowerCase()) {
-		
+		logger(`!recoverPublicKey || recoverPublicKey.toLowerCase() !== signWallet.toLowerCase()`)
 		return null
 	}
 	
