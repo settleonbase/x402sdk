@@ -61,7 +61,7 @@ function parseBase64(data: string) {
 const getFragment = async (hash: string, res: Response) => {
 	
 	const filename = `${storagePATH}/${hash}`
-
+	logger(`getFragment = ${hash} filename = ${filename}`)
 	return stat(filename, async err => {
 		if (err) {
 			logger(Colors.red(`getFragment file [${filename}] does not exist!`))
@@ -98,11 +98,11 @@ const getFragment = async (hash: string, res: Response) => {
 			logger(Colors.red(`getFragment on error ${err.message}`))
 		})
 
-		const obj = {
-			hash
-		}
+		// const obj = {
+		// 	hash
+		// }
 
-		postLocalhost('/api/getFragment', obj, res)
+		// postLocalhost('/api/getFragment', obj, res)
 
 	})
 	
@@ -168,6 +168,7 @@ class server {
 			}
 			const ipaddress = getIpAddressFromForwardHeader(req)
 			if (!wallet || !signMessage) {
+				logger (Colors.grey(`Router /storageFragments !wallet || !signMessage Error! ${ipaddress}`))
 				return res.status(403).end()
 			}
 
@@ -191,9 +192,11 @@ class server {
 			try {
 				const isActive: boolean = await SC.constIPFS.isCidInUse(hash)
 				if (isActive) {
+					logger (Colors.grey(`Router /storageFragments ${hash} isActive Error! ${ipaddress}`))
 					return res.status(403).end()
 				}
 			} catch (ex) {
+				logger (Colors.grey(`Router /storageFragments ${hash} isActive Error! ${ipaddress} ${ex as any}.message}`))
 				return res.status(403).end()
 			}
 
@@ -206,9 +209,11 @@ class server {
 					hash
 				}
 
+				logger (Colors.grey(`Router /storageFragments ${hash} saveFragment Success! ${ipaddress}`))
 				return postLocalhost('/api/storageFragment', obj, res)
 			}
 
+			logger (Colors.grey(`Router /storageFragments ${hash} saveFragment Error! ${ipaddress}`))
 			return res.status(403).json({status:true}).end()
 
 		})
