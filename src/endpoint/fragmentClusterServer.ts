@@ -189,6 +189,7 @@ class server {
 
 			const hash = keccak256(toUtf8Bytes(image))
 			const SC = beamio_ContractPool[0]
+			const result = await saveFragment(hash, image)
 			try {
 				const isActive: boolean = await SC.constIPFS.isCidInUse(hash)
 				if (isActive) {
@@ -200,7 +201,7 @@ class server {
 				return res.status(403).end()
 			}
 
-			const result = await saveFragment(hash, image)
+			
 
 			if (result) {
 				const obj = {
