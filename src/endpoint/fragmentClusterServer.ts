@@ -193,7 +193,7 @@ class server {
 				const isActive: boolean = await SC.constIPFS.isCidInUse(hash)
 				if (isActive) {
 					logger (Colors.grey(`Router /storageFragments ${hash} isActive Error! ${ipaddress}`))
-					return res.status(403).end()
+					return res.status(200).end()
 				}
 			} catch (ex) {
 				logger (Colors.grey(`Router /storageFragments ${hash} isActive Error! ${ipaddress} ${ex as any}.message}`))
