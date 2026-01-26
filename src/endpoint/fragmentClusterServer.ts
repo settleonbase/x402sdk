@@ -190,32 +190,7 @@ class server {
 			const hash = keccak256(toUtf8Bytes(image))
 			const SC = beamio_ContractPool[0]
 			const result = await saveFragment(hash, image)
-			try {
-				const isActive: boolean = await SC.constIPFS.isCidInUse(hash)
-				if (isActive) {
-					logger (Colors.grey(`Router /storageFragments ${hash} isActive Error! ${ipaddress}`))
-					return res.status(200).end()
-				}
-			} catch (ex) {
-				logger (Colors.grey(`Router /storageFragments ${hash} isActive Error! ${ipaddress} ${ex as any}.message}`))
-				return res.status(403).end()
-			}
-
-			
-
-			if (result) {
-				const obj = {
-					wallet,
-					imageLength: image.length,
-					hash
-				}
-
-				logger (Colors.grey(`Router /storageFragments ${hash} saveFragment Success! ${ipaddress}`))
-				return postLocalhost('/api/storageFragment', obj, res)
-			}
-
-			logger (Colors.grey(`Router /storageFragments ${hash} saveFragment Error! ${ipaddress}`))
-			return res.status(403).json({status:true}).end()
+			return res.status(200).end()
 
 		})
 
