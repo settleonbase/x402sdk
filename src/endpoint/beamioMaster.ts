@@ -52,6 +52,8 @@ const routing = ( router: Router ) => {
 			wallet, imageLength, hash
 		})
 
+		logger(`storageFragment ${hash} ${wallet} ${imageLength}`)
+
 		ipfsDataProcess()
 		res.status(200).end()
 
