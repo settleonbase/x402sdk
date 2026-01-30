@@ -246,12 +246,12 @@ const routing = ( router: Router ) => {
 			validBefore?: string
 		}
 
-		if (!cardAddress || !userSignature || !nonce  || !usdcAmount || !from || !validAfter || !validBefore) {
+		if (!cardAddress || !userSignature || !nonce  || !usdcAmount || !from || !validBefore) {
 			logger(`POST to Master /api/purchasingCard Invalid data format!`, inspect(req.body, false, 3, true))
 			return res.status(400).json({ error: "Invalid data format" })
 		}
 
-		const ret = await purchasingCard(cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore)
+		const ret = await purchasingCard(cardAddress, userSignature, nonce, usdcAmount, from, validAfter||'0', validBefore)
 		if (!ret||!(ret as { success: boolean }).success) {
 			logger(`POST to Master /api/purchasingCard failed!`, inspect(ret, false, 3, true))
 			return res.status(400).json(ret).end()
