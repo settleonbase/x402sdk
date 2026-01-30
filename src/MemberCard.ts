@@ -725,7 +725,7 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 		logger(`[purchasingCard] cardOwner = ${cardOwner}`);
 		logger(`[purchasingCard] ethers.parseUnits(usdcAmount, USDC_DECIMALS) = ${ethers.parseUnits(usdcAmount, USDC_DECIMALS)}`);
 		
-		if (USDC_Balance < ethers.parseUnits(usdcAmount, USDC_DECIMALS)) {
+		if (USDC_Balance < usdcAmount) {
 			return { success: false, message: 'USDC balance is not enough' }
 		}
 		

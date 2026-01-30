@@ -247,13 +247,13 @@ const routing = ( router: Router ) => {
 		}
 
 		if (!cardAddress || !userSignature || !nonce  || !usdcAmount || !from || !validBefore) {
-			logger(`POST to Master /api/purchasingCard Invalid data format!`, inspect(req.body, false, 3, true))
+			logger(`server /api/purchasingCard Invalid data format!`, inspect(req.body, false, 3, true))
 			return res.status(400).json({ error: "Invalid data format" })
 		}
 
 		const ret = await purchasingCard(cardAddress, userSignature, nonce, usdcAmount, from, validAfter||'0', validBefore)
 		if (!ret||!(ret as { success: boolean }).success) {
-			logger(`POST to Master /api/purchasingCard failed!`, inspect(ret, false, 3, true))
+			logger(`server /api/purchasingCard failed!`, inspect(ret, false, 3, true))
 			return res.status(400).json(ret).end()
 		}
 
@@ -267,7 +267,7 @@ const routing = ( router: Router ) => {
 			validBefore
 		}, res)
 
-		logger(`POST to Master /api/purchasingCard success!`, 
+		logger(`server /api/purchasingCard success!`, 
 		inspect({cardAddress, userSignature, nonce,usdcAmount, from, validAfter, validBefore}, false, 3, true))
 	})
 
