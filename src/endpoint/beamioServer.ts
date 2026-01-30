@@ -1,5 +1,6 @@
 import express, { Request, Response, Router} from 'express'
 import {getClientIp, getOracleRequest, oracleBackoud, checkSign} from '../util'
+import { checkSmartAccount } from '../MemberCard'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
@@ -10,6 +11,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
+import { purchasingCard } from '../MemberCard'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -233,6 +235,61 @@ const routing = ( router: Router ) => {
 		res.status(200).json(getOracleRequest()).end()
 	})
 
+	router.post('/purchasingCard', async (req,res) => {
+		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore } = req.body as {
+			cardAddress?: string
+			userSignature?: string
+			nonce?: string
+			usdcAmount?: string
+			from?: string
+			validAfter?: string
+			validBefore?: string
+		}
+
+		if (!cardAddress || !userSignature || !nonce  || !usdcAmount || !from || !validAfter || !validBefore) {
+			return res.status(400).json({ error: "Invalid data format" })
+		}
+
+		const ret = await purchasingCard(cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore)
+		if (!ret||!(ret as { success: boolean }).success) {
+			return res.status(400).json(ret).end()
+		}
+
+		postLocalhost ('/api/purchasingCard', {
+			cardAddress,
+			userSignature,
+			nonce,
+			usdcAmount,
+			from,
+			validAfter,
+			validBefore
+		}, res)
+
+		logger(`POST to Master /api/purchasingCard success!`, 
+			inspect({cardAddress, userSignature, nonce,usdcAmount, from, validAfter, validBefore}, false, 3, true))
+	})
+
+	router.get('/deploySmartAccount', async (req,res) => {
+		const { wallet, signMessage } = req.body as {
+			wallet?: string
+			signMessage?: string
+		}
+
+		if (!ethers.isAddress(wallet) || wallet === ethers.ZeroAddress || !signMessage || signMessage?.trim() === '') {
+			return res.status(400).json({ error: "Invalid data format" })
+		}
+
+		const isValid = checkSign(wallet, signMessage, wallet)
+		
+		if (!isValid) {
+			return  res.status(400).json({ error: "Signature verification failed!" })
+		}
+
+		return res.status(200).json({ message: "Smart account deployed!" }).end()
+		// const aaAccount = await checkSmartAccount(wallet)
+
+	})
+
 
 	router.get('/getMyFollowStatus', async (req,res) => {
 		const { wallet } = req.query as {
@@ -260,6 +317,9 @@ const routing = ( router: Router ) => {
 		
 
 	})
+
+
+
 
 }
 

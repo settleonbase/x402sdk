@@ -9,6 +9,7 @@ import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {coinbaseHooks} from '../coinbase'
+import { purchasingCardPool, purchasingCardProcess } from '../MemberCard'
 const masterServerPort = 1111
 
 
@@ -40,6 +41,32 @@ const routing = ( router: Router ) => {
 			'Remote Address:': req.socket.remoteAddress
 			},
 		})
+	})
+
+	router.post('/purchasingCard', (req, res) => {
+		const { cardAddress, userSignature, nonce, to, usdcAmount, from, validAfter, validBefore } = req.body as {
+			cardAddress: string
+			userSignature: string
+			nonce: string
+			to: string
+			usdcAmount: string
+			from: string
+			validAfter: string
+			validBefore: string
+		}
+
+		purchasingCardPool.push({
+			cardAddress,
+			userSignature,
+			nonce,
+			to,
+			usdcAmount,
+			from,
+			validAfter,
+			validBefore,
+			res: res
+		})
+		purchasingCardProcess()
 	})
 
 	router.post('/storageFragment', (req, res) => {
