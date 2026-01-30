@@ -106,19 +106,15 @@ const registerPayMasterForAAFactory = async (payMasterAddress: string) => {
     }
 }
 
-const DeployingSmartAccount = async (wallet: string) => {
-	const SC = Settle_ContractPool[0]
-	if (!SC) {
-		logger(`DeployingSmartAccount Error! SC is not found`);
-		return false
-	}
+const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract) => {
+	
 	try {
 		// 3. 预测账户地址 (可选，用于在创建前告诉用户地址)
 		const creatorAddress = wallet
 		
-		const index = await SC.aaAccountFactoryPaymaster.nextIndexOfCreator(creatorAddress);
+		const index = await SC.nextIndexOfCreator(creatorAddress);
 		// 使用 getFunction 并传入完整的函数签名或名称
-		const predictedAddress = await SC.aaAccountFactoryPaymaster.getFunction("getAddress(address,uint256)")(
+		const predictedAddress = await SC.getFunction("getAddress(address,uint256)")(
 			creatorAddress, 
 			index
 		);
@@ -131,18 +127,16 @@ const DeployingSmartAccount = async (wallet: string) => {
 			return;
 		}
 		// 如果你是普通用户调用：
-		const tx = await SC.aaAccountFactoryPaymaster.createAccountFor(wallet);
+		const tx = await SC.createAccountFor(wallet);
 		
 		// // 如果你是 Paymaster 身份调用 createAccountFor：
 		// // const tx = await factory.createAccountFor(creatorAddress);
 		console.log(`交易成功！哈希: ${tx.hash}`);
 		const receipt = await tx.wait();
-		
-	
-		// 5. 确认结果
-		console.log(`BeamioAccount 已在地址 ${predictedAddress} 部署完成。`);
+		logger(`DeployingSmartAccount Creat AA Account for ${wallet} success!`, tx.hash)
+		return { accountAddress: predictedAddress, alreadyExisted: false };
 	} catch (error: any) {
-		console.error("[Beamio] Failed to deploy smart account. Ensure your signer is the Factory Admin:", error.message)
+		logger(`DeployingSmartAccount error!`, error.message)
 		throw error;
 	}
 }
@@ -582,9 +576,11 @@ export const purchasingCardProcess = async () => {
 		purchasingCardPool.unshift(obj)
 		return setTimeout(() => purchasingCardProcess(), 3000)
 	}
-
-	 
+	
+	
 	try {
+
+		await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
 		const { cardAddress, userSignature, nonce, to, usdcAmount, from, validAfter, validBefore } = obj
 
 		// 1. 获取受益人 (Owner) - 仅作为签名参数，不需要 Owner 签名
@@ -684,7 +680,7 @@ export const getMyAssets = async (userEOA: string, cardAddress: string) => {
         logger(`❌ getMyAssets failed: ${error.message}`);
         throw error;
     }
-};
+}
 
 const cardOwnerPrivateKey = "735e12c015a59afbfc3a9d59d0753d0b738539fa38081ea6ac647b418e8b5e51"
 const test = async () => {
