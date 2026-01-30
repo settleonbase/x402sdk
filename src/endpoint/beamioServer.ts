@@ -247,11 +247,13 @@ const routing = ( router: Router ) => {
 		}
 
 		if (!cardAddress || !userSignature || !nonce  || !usdcAmount || !from || !validAfter || !validBefore) {
+			logger(`POST to Master /api/purchasingCard Invalid data format!`, inspect(req.body, false, 3, true))
 			return res.status(400).json({ error: "Invalid data format" })
 		}
 
 		const ret = await purchasingCard(cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore)
 		if (!ret||!(ret as { success: boolean }).success) {
+			logger(`POST to Master /api/purchasingCard failed!`, inspect(ret, false, 3, true))
 			return res.status(400).json(ret).end()
 		}
 
@@ -266,7 +268,7 @@ const routing = ( router: Router ) => {
 		}, res)
 
 		logger(`POST to Master /api/purchasingCard success!`, 
-			inspect({cardAddress, userSignature, nonce,usdcAmount, from, validAfter, validBefore}, false, 3, true))
+		inspect({cardAddress, userSignature, nonce,usdcAmount, from, validAfter, validBefore}, false, 3, true))
 	})
 
 	router.get('/deploySmartAccount', async (req,res) => {

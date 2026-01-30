@@ -10,6 +10,11 @@
 				"internalType": "address",
 				"name": "_oracle",
 				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "_aaFactory",
+				"type": "address"
 			}
 		],
 		"stateMutability": "nonpayable",
@@ -76,6 +81,25 @@
 		"inputs": [],
 		"name": "ZeroAddress",
 		"type": "error"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "oldFactory",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "newFactory",
+				"type": "address"
+			}
+		],
+		"name": "AAFactoryChanged",
+		"type": "event"
 	},
 	{
 		"anonymous": false,
@@ -225,6 +249,19 @@
 	{
 		"inputs": [],
 		"name": "USDC_TOKEN",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "aaFactory",
 		"outputs": [
 			{
 				"internalType": "address",
@@ -464,6 +501,19 @@
 			}
 		],
 		"name": "redeemForUser",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "newFactory",
+				"type": "address"
+			}
+		],
+		"name": "setAAFactory",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"

@@ -66,7 +66,9 @@ const routing = ( router: Router ) => {
 			validBefore,
 			res: res
 		})
-		purchasingCardProcess()
+
+		logger(` Master GOT /api/purchasingCard doing purchasingCardProcess...`, inspect(req.body, false, 3, true))
+		//purchasingCardProcess()
 	})
 
 	router.post('/storageFragment', (req, res) => {

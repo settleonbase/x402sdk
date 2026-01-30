@@ -7,8 +7,10 @@ import { inspect } from 'util'
 import Colors from 'colors/safe'
 import BeamioUserCardABI from './ABI/BeamioUserCard.json'
 import USDC_ABI from './ABI/usdc_abi.json'
+import BeamioAAAccountFactoryPaymasterABI from './ABI/BeamioAAAccountFactoryPaymaster.json'
 
-const memberCardBeamioFactoryPaymaster = '0xE243df84986e06bfa293a9089dfb19AD9394462E'
+const memberCardBeamioFactoryPaymaster = '0x05e6a8f53b096f44928670C431F78e1F75E232bA'
+const BeamioAAAccountFactoryPaymaster = '0xF036E570D5811a16A29C072528b7ceBF9933f7BD'
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 
 const BeamioTaskIndexer = '0xc499D0597940A2607f1415327e9050602D9057e3'
@@ -20,6 +22,7 @@ let Settle_ContractPool: {
 	baseFactoryPaymaster: ethers.Contract
 	walletBase: ethers.Wallet
 	walletConet: ethers.Wallet
+	aaAccountFactoryPaymaster: ethers.Contract
 }[] = []
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -30,10 +33,12 @@ masterSetup.settle_contractAdmin.forEach(n => {
 	const walletBase = new ethers.Wallet(n, providerBaseBackup)
 	const walletConet = new ethers.Wallet(n, providerConet)
 	const baseFactoryPaymaster = new ethers.Contract(memberCardBeamioFactoryPaymaster, BeamioFactoryPaymasterABI, walletBase)
+	const aaAccountFactoryPaymaster = new ethers.Contract(BeamioAAAccountFactoryPaymaster, BeamioAAAccountFactoryPaymasterABI, walletBase)
 	Settle_ContractPool.push ({
 		baseFactoryPaymaster,
 		walletBase,
 		walletConet,
+		aaAccountFactoryPaymaster,
 	})
 
 })
@@ -41,7 +46,7 @@ masterSetup.settle_contractAdmin.forEach(n => {
 
 //logger(`[Beamio] Registering ${adminn.address} `)
 
-const registerPayMaster = async (payMasterAddress: string) => {
+const registerPayMasterForCardFactory = async (payMasterAddress: string) => {
 	const targetAddress = payMasterAddress;
     const SC = Settle_ContractPool[0].baseFactoryPaymaster
     try {
@@ -71,14 +76,71 @@ const registerPayMaster = async (payMasterAddress: string) => {
     }
 }
 
+const registerPayMasterForAAFactory = async (payMasterAddress: string) => {
+	const targetAddress = payMasterAddress;
+    const SC = Settle_ContractPool[0].aaAccountFactoryPaymaster
+    try {
+        // 1. 修正调用：合约生成的 getter 是小写 m
+        // ethers 会自动为 public mapping 生成同名 getter 函数
+        const alreadyRegistered = await SC.isPayMaster(targetAddress); 
+        
+        if (alreadyRegistered) {
+            console.log(`[Beamio] Address ${targetAddress} is already a registered PayMaster.`);
+            return;
+        }
+
+        console.log(`[Beamio] Registering ${targetAddress} as PayMaster...`);
+
+        // 2. 修正函数名：合约中对应的函数是 changePaymasterStatus
+        // 第二个参数传 true 表示启用
+        const tx = await SC.addPayMaster(targetAddress);
+        
+        await tx.wait();
+        console.log(`[Beamio] Successfully added ${targetAddress} as PayMaster. Hash: ${tx.hash}`);
+    } catch (error: any) {
+        // 这里报错通常是因为：
+        // 1. 函数名拼错（已修正）
+        // 2. 调用者（adminn）不是合约的 owner（触发 NotAuthorized 错误）
+        console.error("[Beamio] Failed to add PayMaster. Ensure your signer is the Factory Admin:", error.message);
+        throw error;
+    }
+}
+
 const DeployingSmartAccount = async (wallet: string) => {
 	const SC = Settle_ContractPool[0]
 	if (!SC) {
+		logger(`DeployingSmartAccount Error! SC is not found`);
 		return false
 	}
 	try {
-		const tx = await SC.baseFactoryPaymaster.createAccountFor(wallet)
-		await tx.wait()
+		// 3. 预测账户地址 (可选，用于在创建前告诉用户地址)
+		const creatorAddress = wallet
+		
+		const index = await SC.aaAccountFactoryPaymaster.nextIndexOfCreator(creatorAddress);
+		// 使用 getFunction 并传入完整的函数签名或名称
+		const predictedAddress = await SC.aaAccountFactoryPaymaster.getFunction("getAddress(address,uint256)")(
+			creatorAddress, 
+			index
+		);
+
+		logger(`预测 ${wallet} 将生成的账户地址: ${predictedAddress} ${index}`);
+	
+		
+		if (index > 0n) {
+			logger(`账户已存在`);
+			return;
+		}
+		// 如果你是普通用户调用：
+		const tx = await SC.aaAccountFactoryPaymaster.createAccountFor(wallet);
+		
+		// // 如果你是 Paymaster 身份调用 createAccountFor：
+		// // const tx = await factory.createAccountFor(creatorAddress);
+		console.log(`交易成功！哈希: ${tx.hash}`);
+		const receipt = await tx.wait();
+		
+	
+		// 5. 确认结果
+		console.log(`BeamioAccount 已在地址 ${predictedAddress} 部署完成。`);
 	} catch (error: any) {
 		console.error("[Beamio] Failed to deploy smart account. Ensure your signer is the Factory Admin:", error.message)
 		throw error;
@@ -379,68 +441,134 @@ async function signUSDC3009(
  * 真正实现了 Owner 无需干预
  */
 export const USDC2Token = async (userPrivateKey: string, amount: number, cardAddress: string) => {
-	const SC = Settle_ContractPool[0]
-    try {
-        const userWallet = new ethers.Wallet(userPrivateKey, providerBaseBackup);
-        const usdcAmount6 = ethers.parseUnits(amount.toString(), 6);
-        const chainId = (await providerBaseBackup.getNetwork()).chainId;
-        const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+	const SC = Settle_ContractPool[0];
+  
+	try {
+	  const userWallet = new ethers.Wallet(userPrivateKey, providerBaseBackup);
+	  const usdcAmount6 = ethers.parseUnits(amount.toString(), 6);
+	  const chainId = (await providerBaseBackup.getNetwork()).chainId;
+  
+	  const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  
+	  // 0) 构造 Card（由 relayer/admin 付 gas）
+	  const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase);
+  
+	  // ====== 前置条件(1)：global gateway -> aaFactory 必须正确 ======
+	  // 你的全局 gateway：SC.baseFactoryPaymaster
+	  // 你的 aaFactory：SC.aaAccountFactoryPaymaster
+	  // 要求 gateway.aaFactory() == aaAccountFactoryPaymaster 地址
+  
+	  // 如果 baseFactoryPaymaster 没有 aaFactory() 这个函数，你就必须在合约里补上
+	  const globalAaFactory = await SC.baseFactoryPaymaster.aaFactory();
+	  const localAaFactory = await SC.aaAccountFactoryPaymaster.getAddress(); // ethers v6
+	  if (globalAaFactory.toLowerCase() !== localAaFactory.toLowerCase()) {
+		throw new Error(
+		  `❌ GlobalMisconfigured: baseFactoryPaymaster.aaFactory()=${globalAaFactory}, but SC.aaAccountFactoryPaymaster=${localAaFactory}`
+		);
+	  }
+  
+	  // 额外：aaFactory 必须是合约
+	  const aaFactoryCode = await providerBaseBackup.getCode(globalAaFactory);
+	  if (aaFactoryCode === "0x") {
+		throw new Error(`❌ GlobalMisconfigured: aaFactory ${globalAaFactory} has no code`);
+	  }
+  
+	  // ====== 前置条件(2)：用户 EOA 必须先有 AA account（以 beamioAccountOf 为准）======
+	  const userEOA = userWallet.address;
+  
+	  const primaryAccount =
+		await SC.aaAccountFactoryPaymaster.primaryAccountOf(userWallet.address);
 
-        // 1. 获取受益人 (Owner) - 仅作为签名参数，不需要 Owner 签名
-        const card = new ethers.Contract(cardAddress, [
-            "function owner() view returns (address)",
-            "function buyPointsWith3009Authorization(address from, uint256 usdcAmount6, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature, uint256 minPointsOut6) external"
-        ], SC.walletBase); // 使用 adminn 账户进行提交
-        
-        const cardOwner = await card.owner();
+		if (primaryAccount === ethers.ZeroAddress) {
+			throw new Error("❌ 用户尚未创建 BeamioAccount，请先 createAccount()");
+		}
 
-        // 2. 构造用户 3009 签名
-        const validBefore = Math.floor(Date.now() / 1000) + 3600;
-        const userNonce = ethers.hexlify(ethers.randomBytes(32));
+		logger(`[AA] primaryAccountOf(${userWallet.address}) = ${primaryAccount}`);
+  
+	 
+  
+  
+	  // （可选 debug）预测地址仅用于打印，不用于逻辑
+	  const index = await SC.aaAccountFactoryPaymaster.nextIndexOfCreator(userEOA);
+	  const predicted0 = await SC.aaAccountFactoryPaymaster.getFunction("getAddress(address,uint256)")(userEOA, 0);
+	  logger(`[AA] user=${userEOA} index=${index} predicted(index0)=${predicted0} primaryAccount=${primaryAccount}`);
+  
+	  // ====== merchant ======
+	  const merchantAddress = await card.owner();
+	  logger(`[Debug] Merchant Address: ${merchantAddress}`);
+  
+	  // ====== 价格 / oracle sanity check（很重要）======
+	  const unitPriceUsdc6 = await SC.baseFactoryPaymaster.quoteUnitPointInUSDC6(cardAddress);
+	  if (unitPriceUsdc6 === 0n) {
+		throw new Error("❌ PriceZero: quoteUnitPointInUSDC6(card)=0 (oracle 未配置/返回0)");
+	  }
 
-        const userSignature = await userWallet.signTypedData(
-            { name: 'USD Coin', version: '2', chainId, verifyingContract: USDC_ADDRESS },
-            {
-                TransferWithAuthorization: [
-                    { name: 'from', type: 'address' }, { name: 'to', type: 'address' },
-                    { name: 'value', type: 'uint256' }, { name: 'validAfter', type: 'uint256' },
-                    { name: 'validBefore', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }
-                ]
-            },
-            {
-                from: userWallet.address,
-                to: cardOwner, // USDC 最终打向这里
-                value: usdcAmount6,
-                validAfter: 0,
-                validBefore,
-                nonce: userNonce
-            }
-        );
-
-        logger(`[Relayer] Directly calling buyPointsWith3009...`);
-
-        // 3. 直接调用 Card 合约，跳过 Factory 的 executeAdminAction
-        // 这里由 adminn 支付 Gas，完全符合“无需 Owner 干预”的逻辑
-        const tx = await card.buyPointsWith3009Authorization(
-            userWallet.address,
-            usdcAmount6,
-            0,
-            validBefore,
-            userNonce,
-            userSignature,
-            0,
-            { gasLimit: 500000 }
-        );
-
-        const receipt = await tx.wait();
-        logger(`✅ Purchase Success! Hash: ${tx.hash}`);
-        return receipt;
-
-    } catch (error: any) {
-        logger(`❌ Direct Purchase Failed: ${error.message}`);
-        throw error;
-    }
-}
+	  console.log("chainId =", (await providerBaseBackup.getNetwork()).chainId);
+		console.log("block =", await providerBaseBackup.getBlockNumber());
+  
+	  // ====== 3009 签名（你这段逻辑没问题）======
+	  const validBefore = Math.floor(Date.now() / 1000) + 3600;
+	  const userNonce = ethers.hexlify(ethers.randomBytes(32));
+  
+	  const userSignature = await userWallet.signTypedData(
+		{ name: "USD Coin", version: "2", chainId, verifyingContract: USDC_ADDRESS },
+		{
+		  TransferWithAuthorization: [
+			{ name: "from", type: "address" },
+			{ name: "to", type: "address" },
+			{ name: "value", type: "uint256" },
+			{ name: "validAfter", type: "uint256" },
+			{ name: "validBefore", type: "uint256" },
+			{ name: "nonce", type: "bytes32" },
+		  ],
+		},
+		{
+		  from: userEOA,
+		  to: merchantAddress,
+		  value: usdcAmount6,
+		  validAfter: 0,
+		  validBefore,
+		  nonce: userNonce,
+		}
+	  );
+  
+	  logger(`[Relayer] staticCall buyPointsWith3009Authorization...`);
+  
+	  // ====== 强烈建议：先 staticCall 定位 revert ======
+	  await card.buyPointsWith3009Authorization.staticCall(
+		userEOA,
+		usdcAmount6,
+		0,
+		validBefore,
+		userNonce,
+		userSignature,
+		0
+	  );
+  
+	  logger(`[Relayer] sending buyPointsWith3009Authorization...`);
+  
+	  const tx = await card.buyPointsWith3009Authorization(
+		userEOA,
+		usdcAmount6,
+		0,
+		validBefore,
+		userNonce,
+		userSignature,
+		0,
+		{ gasLimit: 900_000 }
+	  );
+  
+	  const receipt = await tx.wait();
+	  logger(`✅ Purchase Success! Hash: ${tx.hash} status=${receipt.status}`);
+  
+	  return { txHash: tx.hash, account: primaryAccount };
+  
+	} catch (error: any) {
+	  logger(`❌ Direct Purchase Failed: ${error.message}`);
+	  throw error;
+	}
+  };
+  
 
 export const purchasingCardPool: { cardAddress: string, userSignature: string, nonce: string, to: string, usdcAmount: string, from: string, validAfter: string, validBefore: string, res: Response } [] = []
 
@@ -490,72 +618,96 @@ export const purchasingCardProcess = async () => {
 
 
 
-export const getMyAssets = async (toAddress: string, cardAddress: string) => {
+export const getMyAssets = async (userEOA: string, cardAddress: string) => {
+    const SC = Settle_ContractPool[0];
+
     try {
-        // 1. 实例化合约（只需要 getOwnership 函数的定义）
+        logger(`[Assets] Resolving AA account for EOA ${userEOA}...`);
+
+        // 1️⃣ 通过 AA Factory 拿 primaryAccount
+        const account = await SC.aaAccountFactoryPaymaster.primaryAccountOf(userEOA);
+
+        if (account === ethers.ZeroAddress) {
+            throw new Error("❌ No BeamioAccount found for this EOA");
+        }
+
+        const code = await providerBaseBackup.getCode(account);
+        if (code === "0x") {
+            throw new Error("❌ Resolved BeamioAccount has no code (not deployed)");
+        }
+
+        logger(`[Assets] Using BeamioAccount: ${account}`);
+
+        // 2️⃣ 实例化 Card（只需要 getOwnership）
         const cardContract = new ethers.Contract(
             cardAddress,
             [
                 "function getOwnership(address user) external view returns (uint256 pt, tuple(uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)"
             ],
-            providerBaseBackup // 使用你之前的 provider
+            providerBaseBackup
         );
 
-        logger(`[Assets] Fetching assets for ${toAddress} on card ${cardAddress}...`);
+        logger(`[Assets] Fetching assets for AA ${account} on card ${cardAddress}...`);
 
-        // 2. 调用合约方法
-        const [pointsBalance, nfts] = await cardContract.getOwnership(toAddress);
+        // 3️⃣ 用 AA 地址查资产
+        const [pointsBalance, nfts] = await cardContract.getOwnership(account);
 
-        // 3. 格式化数据并返回
+        // 4️⃣ 格式化返回
         const result = {
-            address: toAddress,
-            cardAddress: cardAddress,
-            // 积分余额（从 1e6 格式化回人类可读数值）
+            eoa: userEOA,
+            account,
+            cardAddress,
             points: ethers.formatUnits(pointsBalance, 6),
-            // NFT 列表处理
             nfts: nfts.map((nft: any) => ({
                 tokenId: nft.tokenId.toString(),
                 attribute: nft.attribute.toString(),
-                tier: nft.tierIndexOrMax === ethers.MaxUint256 ? "Default/Max" : nft.tierIndexOrMax.toString(),
-                expiry: nft.expiry === 0n ? "Never" : new Date(Number(nft.expiry) * 1000).toLocaleString(),
-                isExpired: nft.isExpired
-            }))
+                tier:
+                    nft.tierIndexOrMax === ethers.MaxUint256
+                        ? "Default/Max"
+                        : nft.tierIndexOrMax.toString(),
+                expiry:
+                    nft.expiry === 0n
+                        ? "Never"
+                        : new Date(Number(nft.expiry) * 1000).toLocaleString(),
+                isExpired: nft.isExpired,
+            })),
         };
 
-        // 打印结果
-        console.table(result.nfts);
-        logger(Colors.green(`✅ Points Balance: ${result.points}`));
+        // 5️⃣ 输出
+        if (result.nfts.length > 0) {
+            console.table(result.nfts);
+        }
+        logger(`✅ AA Points Balance: ${result.points}`);
 
         return result;
-
     } catch (error: any) {
-        logger(Colors.red(`❌ getMyAssets failed:`), error.message);
+        logger(`❌ getMyAssets failed: ${error.message}`);
         throw error;
     }
 };
 
-
+const cardOwnerPrivateKey = "735e12c015a59afbfc3a9d59d0753d0b738539fa38081ea6ac647b418e8b5e51"
 const test = async () => {
 	await new Promise(executor => setTimeout(executor, 3000))
-	//checkSmartAccount('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E')
+	await DeployingSmartAccount('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E')			//			0x88c99612ca7cd045177ce9273c62bd7f752cfff17780b501763365f87a31a607
 	// for (let i = 0; i < Settle_ContractPool.length; i++) {
-	// 	await registerPayMaster(Settle_ContractPool[i].walletBase.address)
+	// 	await registerPayMasterForCardFactory(Settle_ContractPool[i].walletBase.address)
 	// 	await new Promise(executor => setTimeout(executor, 3000))
 	// }
 
 	//		创建 新卡
-	//await initCardTest('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E', 'CAD', 100)
+	//await initCardTest('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E', 'CAD', 100)				//			0xfB804b423d27968336263c0CEF581Fbcd51D93B9		//		0x6068bc22e6b246f836369217e030bb2e83ebb071143dc80b0528f7b9366de07f
 
-	//await USDC2Token('', 0.01, '0x4984875AaeF76a4fF416936D1e8e42f3Fc7D6B09')
+	//await USDC2Token(cardOwnerPrivateKey, 0.01, '0xfB804b423d27968336263c0CEF581Fbcd51D93B9')
 		
-	await getMyAssets('0x66BAb8A64764e659Fa7FF41D19aDFbb7b956CED2', '0x4984875AaeF76a4fF416936D1e8e42f3Fc7D6B09')
+	await getMyAssets('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E', '0xfB804b423d27968336263c0CEF581Fbcd51D93B9')
 
 	// const rates = await getAllRate()
 	// logger(inspect(rates, false, 3, true))
 }
 
 
-export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string,usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
+export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
 	const SC = Settle_ContractPool[0]
 	try {
 		 // 1. 获取受益人 (Owner) - 仅作为签名参数，不需要 Owner 签名
@@ -568,7 +720,10 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 			USDC_SmartContract.balanceOf(from)
 		])
 
-		
+		logger(`[purchasingCard] USDC_Balance = ${USDC_Balance}`);
+		logger(`[purchasingCard] usdcAmount = ${usdcAmount}`);
+		logger(`[purchasingCard] cardOwner = ${cardOwner}`);
+		logger(`[purchasingCard] ethers.parseUnits(usdcAmount, USDC_DECIMALS) = ${ethers.parseUnits(usdcAmount, USDC_DECIMALS)}`);
 		
 		if (USDC_Balance < ethers.parseUnits(usdcAmount, USDC_DECIMALS)) {
 			return { success: false, message: 'USDC balance is not enough' }
@@ -583,3 +738,5 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 
 	return { success: true, message: 'Card purchased successfully!' }
 }
+
+test()

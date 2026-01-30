@@ -154,7 +154,17 @@
 	},
 	{
 		"inputs": [],
+		"name": "GlobalMisconfigured",
+		"type": "error"
+	},
+	{
+		"inputs": [],
 		"name": "MustGrow",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "NoBeamioAccount",
 		"type": "error"
 	},
 	{
@@ -266,7 +276,7 @@
 			{
 				"indexed": true,
 				"internalType": "address",
-				"name": "to",
+				"name": "beneficiaryAccount",
 				"type": "address"
 			},
 			{
@@ -297,7 +307,7 @@
 			{
 				"indexed": true,
 				"internalType": "address",
-				"name": "to",
+				"name": "beneficiaryAccount",
 				"type": "address"
 			},
 			{
@@ -472,13 +482,13 @@
 			{
 				"indexed": true,
 				"internalType": "address",
-				"name": "payer",
+				"name": "payerEOA",
 				"type": "address"
 			},
 			{
 				"indexed": true,
 				"internalType": "address",
-				"name": "merchant",
+				"name": "beneficiaryAccount",
 				"type": "address"
 			},
 			{
@@ -951,7 +961,7 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "from",
+				"name": "fromEOA",
 				"type": "address"
 			},
 			{
@@ -1264,7 +1274,7 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "to",
+				"name": "toEOA",
 				"type": "address"
 			},
 			{
@@ -1293,7 +1303,7 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "to",
+				"name": "toEOA",
 				"type": "address"
 			},
 			{
@@ -1404,7 +1414,7 @@
 			},
 			{
 				"internalType": "address",
-				"name": "user",
+				"name": "userEOA",
 				"type": "address"
 			}
 		],
