@@ -689,7 +689,7 @@ export const getMyAssets = async (userEOA: string, cardAddress: string) => {
 const cardOwnerPrivateKey = "735e12c015a59afbfc3a9d59d0753d0b738539fa38081ea6ac647b418e8b5e51"
 const test = async () => {
 	await new Promise(executor => setTimeout(executor, 3000))
-	await DeployingSmartAccount('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E')			//			0x88c99612ca7cd045177ce9273c62bd7f752cfff17780b501763365f87a31a607
+	// await DeployingSmartAccount('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E')			//			0x88c99612ca7cd045177ce9273c62bd7f752cfff17780b501763365f87a31a607
 	// for (let i = 0; i < Settle_ContractPool.length; i++) {
 	// 	await registerPayMasterForCardFactory(Settle_ContractPool[i].walletBase.address)
 	// 	await new Promise(executor => setTimeout(executor, 3000))
@@ -700,7 +700,7 @@ const test = async () => {
 
 	//await USDC2Token(cardOwnerPrivateKey, 0.01, '0xfB804b423d27968336263c0CEF581Fbcd51D93B9')
 		
-	await getMyAssets('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E', '0xfB804b423d27968336263c0CEF581Fbcd51D93B9')
+	// await getMyAssets('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E', '0xfB804b423d27968336263c0CEF581Fbcd51D93B9')
 
 	// const rates = await getAllRate()
 	// logger(inspect(rates, false, 3, true))
@@ -739,4 +739,4 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 	return { success: true, message: 'Card purchased successfully!' }
 }
 
-test()
+// test()
