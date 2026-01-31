@@ -761,7 +761,7 @@ export const purchasingCardProcess = async () => {
 		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`));
 
 		
-		const note = cardNote(cardAddress, usdcAmount, currency, tx.hash, currencyAmount.points)
+		const note = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points)
 
 		logger(Colors.green(`✅ purchasingCardProcess note: ${note}`));
 /**
