@@ -778,11 +778,12 @@ export const purchasingCardProcess = async () => {
 		logger(Colors.green(`✅ typeof SC.conetSC ${typeof SC.conetSC} ${SC.conetSC.address} `));
 		
 			
-			const tr = await SC.conetSC.transferRecord(
+			// tx 为 ethers TransactionResponse，只有 tx.hash，无 tx.finishedHash；合约 bytes32 用交易哈希 tx.hash 即可
+		const tr = await SC.conetSC.transferRecord(
 				obj.from,
 				to,
 				usdcAmount,
-				tx.finishedHash,
+				tx.hash,
 				note
 			)
 		
