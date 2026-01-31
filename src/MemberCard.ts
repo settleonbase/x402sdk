@@ -699,7 +699,6 @@ const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency
 		currencyAmount,
 		currencyTip: '',
 		tip: 0,
-		parentHash,
 		title: 'CCSA Card Purchase',
 		currencyTax: '0',
 		usdcAmount: Number(usdcAmount),
@@ -762,9 +761,17 @@ export const purchasingCardProcess = async () => {
 		const note = cardNote(cardAddress, usdcAmount, currency, tx.hash, usdcAmount)
 
 		logger(Colors.green(`✅ purchasingCardProcess note: ${note}`));
+/**
+ * const tx = await SC.conetSC.transferRecord(
+			obj.from,
+			obj.to,
+			obj.amount,
+			obj.finishedHash,
+			obj.note
+		)
+ */
 
-		
-		const [,tr] = await Promise.all([
+		const [ii,tr] = await Promise.all([
 			tx.wait(),
 			SC.beamioConet.transferRecord(
 				obj.from,
@@ -775,7 +782,9 @@ export const purchasingCardProcess = async () => {
 			)
 		])
 
-		await tr.wait()
+		if (tr) {
+			await tr.wait()
+		}
 
 		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`), `✅ purchasingCardProcess success! Hash: ${tr.hash}`);
 		
