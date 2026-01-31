@@ -776,8 +776,8 @@ export const purchasingCardProcess = async () => {
 		
 		
 	} catch (error: any) {
-		logger(Colors.red(`❌ purchasingCardProcess failed:`), inspect(obj, false, 3, true), error.message);
-		obj.res.status(400).json({success: false, error: 'purchasingCardProcess failed'}).end()
+		logger(Colors.red(`❌ purchasingCardProcess failed:`), error.message);
+		//obj.res.status(400).json({success: false, error: 'purchasingCardProcess failed'}).end()
 		
 	}
 
