@@ -44,6 +44,7 @@ let Settle_ContractPool: {
 	BeamioTaskDiamondAction: ethers.Contract
 	BeamioTaskDiamondAdmin: ethers.Contract
 	beamioConet: ethers.Contract
+	conetSC: ethers.Contract
 }[] = []
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -67,6 +68,7 @@ masterSetup.settle_contractAdmin.forEach(n => {
 	const BeamioTaskDiamondAction = new ethers.Contract(BeamioTaskIndexerAddress, ActionABI, walletConet)
 	const BeamioTaskDiamondAdmin = new ethers.Contract(BeamioTaskIndexerAddress, AdminFacetABI, walletConet)
 	const beamioConet = new ethers.Contract(beamioConetAddress, beamioConetABI, walletConet)
+	const conetSC = new ethers.Contract(beamioConet, beamioConetABI, walletConet)
 
 	Settle_ContractPool.push ({
 		baseFactoryPaymaster,
@@ -82,6 +84,7 @@ masterSetup.settle_contractAdmin.forEach(n => {
 		BeamioTaskDiamondAction,
 		BeamioTaskDiamondAdmin,
 		beamioConet,
+		conetSC,
 	})
 
 })
@@ -772,10 +775,10 @@ export const purchasingCardProcess = async () => {
  */	
 
 		await tx.wait()
-
+		logger(Colors.green(`✅ typeof SC.conetSC ${typeof SC.conetSC} ${SC.conetSC.address} `));
 		
 			
-			const tr = await SC.beamioConet.transferRecord(
+			const tr = await SC.conetSC.transferRecord(
 				obj.from,
 				to,
 				usdcAmount,
