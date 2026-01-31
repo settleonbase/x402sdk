@@ -769,18 +769,20 @@ export const purchasingCardProcess = async () => {
 			obj.finishedHash,
 			obj.note
 		)
- */
+ */	
 
-		const [ii,tr] = await Promise.all([
-			tx.wait(),
-			SC.beamioConet.transferRecord(
+		await tx.wait()
+
+		
+			
+			const tr = await SC.beamioConet.transferRecord(
 				obj.from,
 				to,
 				usdcAmount,
 				tx.finishedHash,
 				note
 			)
-		])
+		
 
 		if (tr) {
 			await tr.wait()
