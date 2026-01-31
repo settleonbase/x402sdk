@@ -16,7 +16,7 @@ import TaskABI from "./ABI/TaskABI.json";
 import StatsABI from "./ABI/StatsABI.json";
 import CatalogABI from "./ABI/CatalogABI.json";
 import ActionABI from "./ABI/ActionABI.json";
-import AdminFacetABI from "./ABI/AdminFacet.json";
+import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 
 const memberCardBeamioFactoryPaymaster = '0x05e6a8f53b096f44928670C431F78e1F75E232bA'

@@ -129,7 +129,7 @@ import TaskABI from "./ABI/TaskABI.json";
 import StatsABI from "./ABI/StatsABI.json";
 import CatalogABI from "./ABI/CatalogABI.json";
 import ActionABI from "./ABI/ActionABI.json";
-import AdminFacetABI from "./ABI/AdminFacet.json";
+import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import OwnershipFacetABI from "./ABI/OwnershipABI.json";
 
 import {showSelectorsPlusCuts} from './developshowSelectorsPlusCuts'
