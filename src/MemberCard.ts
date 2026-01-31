@@ -739,7 +739,7 @@ export const purchasingCardProcess = async () => {
 		// 1. 获取受益人 (Owner) - 仅作为签名参数，不需要 Owner 签名
 		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase); // 使用 adminn 账户进行提交
 
-		const [owner, _currency] = await Promise.all([
+		const [owner, _currency, currencyAmount] = await Promise.all([
 			card.owner(),
 			card.currency(),
 			quotePointsForUSDC_raw(cardAddress, BigInt(usdcAmount))
@@ -761,7 +761,7 @@ export const purchasingCardProcess = async () => {
 		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`));
 
 		
-		const note = cardNote(cardAddress, usdcAmount, currency, tx.hash, usdcAmount)
+		const note = cardNote(cardAddress, usdcAmount, currency, tx.hash, currencyAmount.points)
 
 		logger(Colors.green(`✅ purchasingCardProcess note: ${note}`));
 /**
