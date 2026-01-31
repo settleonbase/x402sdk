@@ -8,12 +8,24 @@ import Colors from 'colors/safe'
 import BeamioUserCardABI from './ABI/BeamioUserCard.json'
 import USDC_ABI from './ABI/usdc_abi.json'
 import BeamioAAAccountFactoryPaymasterABI from './ABI/BeamioAAAccountFactoryPaymaster.json'
+import IDiamondCutABI from "./ABI/DiamondCutFacetABI.json";
+import DiamondLoupeFacetABI from "./ABI/DiamondLoupeFacet.json";
+import DiamondCutFacetABI from "./ABI/DiamondCutFacetABI.json";
+import OwnershipABI from "./ABI/OwnershipABI.json";
+import TaskABI from "./ABI/TaskABI.json";
+import StatsABI from "./ABI/StatsABI.json";
+import CatalogABI from "./ABI/CatalogABI.json";
+import ActionABI from "./ABI/ActionABI.json";
+import AdminFacetABI from "./ABI/AdminFacet.json";
+import beamioConetABI from './ABI/beamio-conet.abi.json'
 
 const memberCardBeamioFactoryPaymaster = '0x05e6a8f53b096f44928670C431F78e1F75E232bA'
 const BeamioAAAccountFactoryPaymaster = '0xF036E570D5811a16A29C072528b7ceBF9933f7BD'
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
+const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 
-const BeamioTaskIndexer = '0xc499D0597940A2607f1415327e9050602D9057e3'
+const BeamioTaskIndexerAddress = '0x083AE5AC063a55dBA769Ba71Cd301d5FC5896D5b'
+const DIAMOND = BeamioTaskIndexerAddress
 const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
 const providerBaseBackup = new ethers.JsonRpcProvider('https://1rpc.io/base')
 const conetEndpoint = 'https://mainnet-rpc.conet.network'
@@ -23,25 +35,97 @@ let Settle_ContractPool: {
 	walletBase: ethers.Wallet
 	walletConet: ethers.Wallet
 	aaAccountFactoryPaymaster: ethers.Contract
+	BeamioTaskDiamondCut: ethers.Contract
+	BeamioTaskDiamondLoupe: ethers.Contract
+	BeamioTaskDiamondOwnership: ethers.Contract
+	BeamioTaskDiamondTask: ethers.Contract
+	BeamioTaskDiamondStats: ethers.Contract
+	BeamioTaskDiamondCatalog: ethers.Contract
+	BeamioTaskDiamondAction: ethers.Contract
+	BeamioTaskDiamondAdmin: ethers.Contract
+	beamioConet: ethers.Contract
 }[] = []
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const USDC_DECIMALS = 6;
 const USDC_SmartContract = new ethers.Contract(USDC_ADDRESS, USDC_ABI, providerBaseBackup)
 
+
+
+
 masterSetup.settle_contractAdmin.forEach(n => {
 	const walletBase = new ethers.Wallet(n, providerBaseBackup)
 	const walletConet = new ethers.Wallet(n, providerConet)
 	const baseFactoryPaymaster = new ethers.Contract(memberCardBeamioFactoryPaymaster, BeamioFactoryPaymasterABI, walletBase)
 	const aaAccountFactoryPaymaster = new ethers.Contract(BeamioAAAccountFactoryPaymaster, BeamioAAAccountFactoryPaymasterABI, walletBase)
+	const BeamioTaskDiamondCut = new ethers.Contract(BeamioTaskIndexerAddress, IDiamondCutABI, walletConet)
+	const BeamioTaskDiamondLoupe = new ethers.Contract(BeamioTaskIndexerAddress, DiamondLoupeFacetABI, walletConet)
+	const BeamioTaskDiamondOwnership = new ethers.Contract(BeamioTaskIndexerAddress, OwnershipABI, walletConet)
+	const BeamioTaskDiamondTask = new ethers.Contract(BeamioTaskIndexerAddress, TaskABI, walletConet)
+	const BeamioTaskDiamondStats = new ethers.Contract(BeamioTaskIndexerAddress, StatsABI, walletConet)
+	const BeamioTaskDiamondCatalog = new ethers.Contract(BeamioTaskIndexerAddress, CatalogABI, walletConet)
+	const BeamioTaskDiamondAction = new ethers.Contract(BeamioTaskIndexerAddress, ActionABI, walletConet)
+	const BeamioTaskDiamondAdmin = new ethers.Contract(BeamioTaskIndexerAddress, AdminFacetABI, walletConet)
+	const beamioConet = new ethers.Contract(beamioConetAddress, beamioConetABI, walletConet)
+
 	Settle_ContractPool.push ({
 		baseFactoryPaymaster,
 		walletBase,
 		walletConet,
 		aaAccountFactoryPaymaster,
+		BeamioTaskDiamondCut,
+		BeamioTaskDiamondLoupe,
+		BeamioTaskDiamondOwnership,
+		BeamioTaskDiamondTask,
+		BeamioTaskDiamondStats,
+		BeamioTaskDiamondCatalog,
+		BeamioTaskDiamondAction,
+		BeamioTaskDiamondAdmin,
+		beamioConet,
 	})
 
 })
+
+
+   
+
+
+  const addAdminList = async (adminList: string[]) => {
+	const  walletConet = Settle_ContractPool[0].walletConet
+	const SC = new ethers.Contract(DIAMOND, AdminFacetABI, walletConet);
+		
+	// 可选：确认一下 sender 是谁
+	const sender = await walletConet.getAddress();
+	logger(`[Beamio] sender(owner?)=${sender}`);
+		// 可选：确认一下 sender 是谁
+		
+	
+	for (const admin of adminList) {
+		try {
+			if (!ethers.isAddress(admin)) {
+			logger(`[Beamio] skip invalid address: ${admin}`);
+			continue;
+			}
+	
+			const already = await SC.isAdmin(admin);
+			if (already) {
+			logger(`[Beamio] ${admin} is already an Admin`);
+			continue;
+			}
+	
+			logger(`[Beamio] ${admin} is not an Admin, enabling...`);
+			const tx = await SC.setAdmin(admin, true);   // ✅ 正确：setAdmin(admin, true)
+			const receipt = await tx.wait();
+	
+			logger(`[Beamio] Successfully enabled ${admin}. tx=${tx.hash} block=${receipt.blockNumber}`);
+		} catch (e: any) {
+			logger(
+			`[Beamio] Failed for ${admin}: ${e?.shortMessage ?? e?.reason ?? e?.message ?? String(e)}`
+			);
+		}
+	}
+  }
+
 
 
 //logger(`[Beamio] Registering ${adminn.address} `)
@@ -564,7 +648,74 @@ export const USDC2Token = async (userPrivateKey: string, amount: number, cardAdd
   };
   
 
-export const purchasingCardPool: { cardAddress: string, userSignature: string, nonce: string, to: string, usdcAmount: string, from: string, validAfter: string, validBefore: string, res: Response } [] = []
+export const purchasingCardPool: { cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string, res: Response } [] = []
+
+type ICurrency = 'CAD'|'USD'|'JPY'|'CNY'|'USDC'|'HKD'|'EUR'|'SGD'|'TWD'
+
+const getICurrency = (currency: BigInt): ICurrency => {
+	switch (currency) {
+		case 0n:
+			return 'CAD'
+		case 1n:
+			return 'USD'
+		case 2n:
+			return 'JPY'
+		case 3n:
+			return 'CNY'
+		case 4n:
+			return 'USDC'
+		case 5n:
+			return 'HKD'
+		case 6n:
+			return 'EUR'
+		case 7n:
+			return 'SGD'
+		case 8n:
+			return 'TWD'
+		default:
+			return 'USDC'
+	}
+}
+
+const CCSACardAddress = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
+type payMe = {
+	currency: ICurrency
+	currencyAmount: string
+	currencyTip?: string
+	tip?: number
+	parentHash?: string
+	oneTimeMode?: boolean
+	code?: string
+	title?: string
+	currencyTax?: string
+	usdcAmount?: number
+	depositHash?: string
+}
+
+const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency, parentHash: string, currencyAmount: string): string => {
+
+	const payMe: payMe = {
+		currency,
+		currencyAmount,
+		currencyTip: '',
+		tip: 0,
+		parentHash,
+		title: 'CCSA Card Purchase',
+		currencyTax: '0',
+		usdcAmount: Number(usdcAmount),
+		depositHash: parentHash
+	}
+
+
+	switch (cardAddress.toLowerCase()) {
+		case CCSACardAddress:{
+			return `Thank you for purchasing CCSA Card\r\n${JSON.stringify(payMe)}`
+		}
+		
+		default:
+			return ''
+	}
+}
 
 export const purchasingCardProcess = async () => {
 	const obj = purchasingCardPool.shift()
@@ -581,12 +732,20 @@ export const purchasingCardProcess = async () => {
 	try {
 
 		await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
-		const { cardAddress, userSignature, nonce, to, usdcAmount, from, validAfter, validBefore } = obj
+		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore } = obj
 
 		// 1. 获取受益人 (Owner) - 仅作为签名参数，不需要 Owner 签名
-		const card = new ethers.Contract(cardAddress, [
-			"function buyPointsWith3009Authorization(address from, uint256 usdcAmount6, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature, uint256 minPointsOut6) external"
-		], SC.walletBase); // 使用 adminn 账户进行提交
+		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase); // 使用 adminn 账户进行提交
+
+		const [owner, _currency] = await Promise.all([
+			card.owner(),
+			card.currency(),
+			quotePointsForUSDC_raw(cardAddress, BigInt(usdcAmount))
+		])
+
+		const to = owner
+		const currency = getICurrency(_currency)
+
 		const tx = await card.buyPointsWith3009Authorization(
 			from,
 			usdcAmount,
@@ -597,8 +756,23 @@ export const purchasingCardProcess = async () => {
 			0
 		)
 		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
-		const receipt = await tx.wait()
-		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`));
+
+		const note = cardNote(cardAddress, usdcAmount, currency, tx.hash, usdcAmount)
+
+		const [,tr] = await Promise.all([
+			tx.wait(),
+			SC.beamioConet.transferRecord(
+				obj.from,
+				to,
+				usdcAmount,
+				tx.finishedHash,
+				note
+			)
+		])
+
+		await tr.wait()
+
+		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`), `✅ purchasingCardProcess success! Hash: ${tr.hash}`);
 		
 		
 	} catch (error: any) {
@@ -635,19 +809,24 @@ export const getMyAssets = async (userEOA: string, cardAddress: string) => {
         logger(`[Assets] Using BeamioAccount: ${account}`);
 
         // 2️⃣ 实例化 Card（只需要 getOwnership）
-        const cardContract = new ethers.Contract(
-            cardAddress,
-            [
-                "function getOwnership(address user) external view returns (uint256 pt, tuple(uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)"
-            ],
-            providerBaseBackup
+        const cardContractReadonly = new ethers.Contract(
+            cardAddress,BeamioUserCardABI, providerBaseBackup
         );
 
         logger(`[Assets] Fetching assets for AA ${account} on card ${cardAddress}...`);
 
         // 3️⃣ 用 AA 地址查资产
-        const [pointsBalance, nfts] = await cardContract.getOwnership(account);
+        
+		const [[pointsBalance, nfts], currency] = await Promise.all([
+			cardContractReadonly.getOwnership(account),
+			cardContractReadonly.currency()
+		])
 
+
+		
+
+
+		logger(inspect({pointsBalance, nfts}, false, 3, true), inspect(getICurrency(currency), false, 3, true))
         // 4️⃣ 格式化返回
         const result = {
             eoa: userEOA,
@@ -696,7 +875,7 @@ const test = async () => {
 
 	//await USDC2Token(cardOwnerPrivateKey, 0.01, '0xfB804b423d27968336263c0CEF581Fbcd51D93B9')
 		
-	// await getMyAssets('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E', '0xfB804b423d27968336263c0CEF581Fbcd51D93B9')
+	await getMyAssets('0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E', '0xfB804b423d27968336263c0CEF581Fbcd51D93B9')
 
 	// const rates = await getAllRate()
 	// logger(inspect(rates, false, 3, true))
@@ -735,4 +914,129 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 	return { success: true, message: 'Card purchased successfully!' }
 }
 
-// test()
+
+
+
+export const quoteUSDCForPoints = async (
+	cardAddress: string,
+	pointsHuman: string   // ✅ 人类可读，例如 "10" / "1.5"
+  ) => {
+	const factory = Settle_ContractPool[0].baseFactoryPaymaster;
+  
+	if (!pointsHuman || Number(pointsHuman) <= 0) {
+	  throw new Error("points must be > 0 (human readable)");
+	}
+  
+	// 1️⃣ 人类可读 → 6 位 points（链上单位）
+	let points6: bigint;
+	try {
+	  points6 = ethers.parseUnits(pointsHuman, 6);
+	} catch {
+	  throw new Error(`invalid points format: ${pointsHuman}`);
+	}
+  
+	if (points6 <= 0n) {
+	  throw new Error("points6 must be > 0");
+	}
+  
+	// 2️⃣ quote 总价（USDC 6 decimals）
+	const usdc6: bigint = await factory.quotePointsInUSDC6(cardAddress, points6);
+	if (usdc6 === 0n) {
+	  throw new Error("quote=0 (oracle not configured or card invalid)");
+	}
+  
+	// 3️⃣ 单价（1 token = 1e6 points）
+	const unitPriceUSDC6: bigint =
+	  await factory.quoteUnitPointInUSDC6(cardAddress);
+  
+	const ret = {
+	  // 原始输入
+	  points: pointsHuman,
+  
+	  // 链上单位
+	  points6,                     // bigint (1e6)
+  
+	  // 总价
+	  usdc6,                       // bigint (1e6)
+	  usdc: ethers.formatUnits(usdc6, 6),
+  
+	  // 单价
+	  unitPriceUSDC6,              // bigint
+	  unitPriceUSDC: ethers.formatUnits(unitPriceUSDC6, 6),
+	};
+  
+	logger(inspect(ret, false, 4, true));
+	return ret;
+}
+
+export const quotePointsForUSDC = async (
+	cardAddress: string,
+	usdcHuman: string // 人类可读 USDC，例如 "10.5"
+  ) => {
+	const factory = Settle_ContractPool[0].baseFactoryPaymaster;
+  
+	// 1) USDC 人类可读 -> USDC6
+	const usdc6 = ethers.parseUnits(usdcHuman, 6);
+	if (usdc6 <= 0n) throw new Error("usdc must be > 0");
+  
+	// 2) unitPrice：买 1e6 points 需要多少 USDC6
+	const unitPriceUSDC6: bigint = await factory.quoteUnitPointInUSDC6(cardAddress);
+	if (unitPriceUSDC6 === 0n) throw new Error("unitPriceUSDC6=0 (oracle not configured?)");
+  
+	// 3) 反推 pointsOut6（向下取整，和合约一致）
+	const points6 = (usdc6 * POINTS_ONE) / unitPriceUSDC6;
+  
+	const ret = {
+	  usdc: usdcHuman,
+	  usdc6,
+	  unitPriceUSDC6,
+	  unitPriceUSDC: ethers.formatUnits(unitPriceUSDC6, 6),
+  
+	  points6,
+	  points: ethers.formatUnits(points6, 6), // points 人类可读（6位）
+	};
+  
+	logger(inspect(ret, false, 4, true));
+	return ret;
+};
+
+export const quotePointsForUSDC_raw = async (
+	cardAddress: string,
+	usdc6: bigint // 已经是 raw USDC（6 decimals）
+  ) => {
+	const factory = Settle_ContractPool[0].baseFactoryPaymaster;
+  
+	if (usdc6 <= 0n) {
+	  throw new Error("usdc6 must be > 0");
+	}
+  
+	// 1️⃣ 拿单价：1e6 points 需要多少 USDC6
+	const unitPriceUSDC6: bigint =
+	  await factory.quoteUnitPointInUSDC6(cardAddress);
+  
+	if (unitPriceUSDC6 === 0n) {
+	  throw new Error("unitPriceUSDC6=0 (oracle not configured?)");
+	}
+  
+	// 2️⃣ 完全对齐合约里的计算公式
+	// pointsOut6 = usdcAmount6 * 1e6 / unitPriceUSDC6
+	const points6 = (usdc6 * POINTS_ONE) / unitPriceUSDC6;
+  
+	const ret = {
+	  usdc6,
+	  unitPriceUSDC6,
+  
+	  points6,
+  
+	  // 👇 仅用于 debug / 前端展示（可删）
+	  usdc: ethers.formatUnits(usdc6, 6),
+	  unitPriceUSDC: ethers.formatUnits(unitPriceUSDC6, 6),
+	  points: ethers.formatUnits(points6, 6),
+	};
+  
+	return ret;
+  };
+
+
+
+

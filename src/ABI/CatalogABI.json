@@ -1,0 +1,758 @@
+[
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "bool",
+				"name": "active",
+				"type": "bool"
+			}
+		],
+		"name": "CardActiveChanged",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "operator",
+				"type": "address"
+			}
+		],
+		"name": "CardMetaUpdated",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "creator",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "uint8",
+				"name": "cardType",
+				"type": "uint8"
+			}
+		],
+		"name": "CardRegistered",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "uint256",
+				"name": "hourIndex",
+				"type": "uint256"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "creator",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "uint8",
+				"name": "cardType",
+				"type": "uint8"
+			}
+		],
+		"name": "CatalogStatsUpdated",
+		"type": "event"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			}
+		],
+		"name": "cardExists",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "getAllCardsCount",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "offset",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "limit",
+				"type": "uint256"
+			}
+		],
+		"name": "getAllCardsPaged",
+		"outputs": [
+			{
+				"internalType": "address[]",
+				"name": "page",
+				"type": "address[]"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			}
+		],
+		"name": "getCardMeta",
+		"outputs": [
+			{
+				"components": [
+					{
+						"internalType": "address",
+						"name": "card",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "creator",
+						"type": "address"
+					},
+					{
+						"internalType": "string",
+						"name": "name",
+						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "description",
+						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "uri",
+						"type": "string"
+					},
+					{
+						"internalType": "uint8",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint256",
+						"name": "priceE18",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint8",
+						"name": "cardType",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint64",
+						"name": "saleStart",
+						"type": "uint64"
+					},
+					{
+						"internalType": "uint64",
+						"name": "saleEnd",
+						"type": "uint64"
+					},
+					{
+						"internalType": "bool",
+						"name": "active",
+						"type": "bool"
+					},
+					{
+						"internalType": "uint256",
+						"name": "createdAt",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "updatedAt",
+						"type": "uint256"
+					}
+				],
+				"internalType": "struct LibCatalogStorage.CardMeta",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint8",
+				"name": "mode",
+				"type": "uint8"
+			},
+			{
+				"internalType": "address",
+				"name": "account",
+				"type": "address"
+			},
+			{
+				"internalType": "uint8",
+				"name": "cardType",
+				"type": "uint8"
+			},
+			{
+				"internalType": "uint256",
+				"name": "startTimestamp",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "endTimestamp",
+				"type": "uint256"
+			}
+		],
+		"name": "getCatalogAggregatedStats",
+		"outputs": [
+			{
+				"components": [
+					{
+						"internalType": "uint256",
+						"name": "totalCreated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "totalMetaUpdated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "totalActivated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "totalDeactivated",
+						"type": "uint256"
+					}
+				],
+				"internalType": "struct CatalogFacet.AggregatedCatalogStats",
+				"name": "stats",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "creator",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "hourIndex",
+				"type": "uint256"
+			}
+		],
+		"name": "getCatalogCreatorHourly",
+		"outputs": [
+			{
+				"components": [
+					{
+						"internalType": "uint256",
+						"name": "collectionsCreated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "metaUpdated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "activated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "deactivated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "bool",
+						"name": "hasData",
+						"type": "bool"
+					}
+				],
+				"internalType": "struct LibCatalogStatsStorage.HourlyCatalogStats",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "hourIndex",
+				"type": "uint256"
+			}
+		],
+		"name": "getCatalogHourly",
+		"outputs": [
+			{
+				"components": [
+					{
+						"internalType": "uint256",
+						"name": "collectionsCreated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "metaUpdated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "activated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "deactivated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "bool",
+						"name": "hasData",
+						"type": "bool"
+					}
+				],
+				"internalType": "struct LibCatalogStatsStorage.HourlyCatalogStats",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint8",
+				"name": "mode",
+				"type": "uint8"
+			},
+			{
+				"internalType": "address",
+				"name": "account",
+				"type": "address"
+			},
+			{
+				"internalType": "uint8",
+				"name": "cardType",
+				"type": "uint8"
+			},
+			{
+				"internalType": "uint256",
+				"name": "startTimestamp",
+				"type": "uint256"
+			}
+		],
+		"name": "getCatalogStatsSince",
+		"outputs": [
+			{
+				"components": [
+					{
+						"internalType": "uint256",
+						"name": "totalCreated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "totalMetaUpdated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "totalActivated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "totalDeactivated",
+						"type": "uint256"
+					}
+				],
+				"internalType": "struct CatalogFacet.AggregatedCatalogStats",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint8",
+				"name": "cardType",
+				"type": "uint8"
+			},
+			{
+				"internalType": "uint256",
+				"name": "hourIndex",
+				"type": "uint256"
+			}
+		],
+		"name": "getCatalogTypeHourly",
+		"outputs": [
+			{
+				"components": [
+					{
+						"internalType": "uint256",
+						"name": "collectionsCreated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "metaUpdated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "activated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "deactivated",
+						"type": "uint256"
+					},
+					{
+						"internalType": "bool",
+						"name": "hasData",
+						"type": "bool"
+					}
+				],
+				"internalType": "struct LibCatalogStatsStorage.HourlyCatalogStats",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "creator",
+				"type": "address"
+			}
+		],
+		"name": "getCreatorCardsCount",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "creator",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "offset",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "limit",
+				"type": "uint256"
+			}
+		],
+		"name": "getCreatorCardsPaged",
+		"outputs": [
+			{
+				"internalType": "address[]",
+				"name": "page",
+				"type": "address[]"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint8",
+				"name": "cardType",
+				"type": "uint8"
+			}
+		],
+		"name": "getTypeCardsCount",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint8",
+				"name": "cardType",
+				"type": "uint8"
+			},
+			{
+				"internalType": "uint256",
+				"name": "offset",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "limit",
+				"type": "uint256"
+			}
+		],
+		"name": "getTypeCardsPaged",
+		"outputs": [
+			{
+				"internalType": "address[]",
+				"name": "page",
+				"type": "address[]"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"components": [
+					{
+						"internalType": "address",
+						"name": "card",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "creator",
+						"type": "address"
+					},
+					{
+						"internalType": "string",
+						"name": "name",
+						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "description",
+						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "uri",
+						"type": "string"
+					},
+					{
+						"internalType": "uint8",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint256",
+						"name": "priceE18",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint8",
+						"name": "cardType",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint64",
+						"name": "saleStart",
+						"type": "uint64"
+					},
+					{
+						"internalType": "uint64",
+						"name": "saleEnd",
+						"type": "uint64"
+					},
+					{
+						"internalType": "uint256",
+						"name": "ts",
+						"type": "uint256"
+					}
+				],
+				"internalType": "struct CatalogFacet.RegisterCardInput",
+				"name": "in_",
+				"type": "tuple"
+			}
+		],
+		"name": "registerCard",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"components": [
+					{
+						"internalType": "address",
+						"name": "card",
+						"type": "address"
+					},
+					{
+						"internalType": "bool",
+						"name": "active",
+						"type": "bool"
+					},
+					{
+						"internalType": "uint256",
+						"name": "ts",
+						"type": "uint256"
+					}
+				],
+				"internalType": "struct CatalogFacet.SetActiveInput",
+				"name": "in_",
+				"type": "tuple"
+			}
+		],
+		"name": "setCardActive",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"components": [
+					{
+						"internalType": "address",
+						"name": "card",
+						"type": "address"
+					},
+					{
+						"internalType": "string",
+						"name": "name",
+						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "description",
+						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "uri",
+						"type": "string"
+					},
+					{
+						"internalType": "uint8",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint256",
+						"name": "priceE18",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint8",
+						"name": "newCardType",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint64",
+						"name": "saleStart",
+						"type": "uint64"
+					},
+					{
+						"internalType": "uint64",
+						"name": "saleEnd",
+						"type": "uint64"
+					},
+					{
+						"internalType": "uint256",
+						"name": "ts",
+						"type": "uint256"
+					}
+				],
+				"internalType": "struct CatalogFacet.UpdateCardMetaInput",
+				"name": "in_",
+				"type": "tuple"
+			}
+		],
+		"name": "updateCardMeta",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	}
+]

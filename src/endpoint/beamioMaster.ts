@@ -44,11 +44,10 @@ const routing = ( router: Router ) => {
 	})
 
 	router.post('/purchasingCard', (req, res) => {
-		const { cardAddress, userSignature, nonce, to, usdcAmount, from, validAfter, validBefore } = req.body as {
+		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore } = req.body as {
 			cardAddress: string
 			userSignature: string
 			nonce: string
-			to: string
 			usdcAmount: string
 			from: string
 			validAfter: string
@@ -59,7 +58,6 @@ const routing = ( router: Router ) => {
 			cardAddress,
 			userSignature,
 			nonce,
-			to,
 			usdcAmount,
 			from,
 			validAfter,
