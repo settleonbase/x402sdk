@@ -756,9 +756,14 @@ export const purchasingCardProcess = async () => {
 			0
 		)
 		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
+		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`));
 
+		
 		const note = cardNote(cardAddress, usdcAmount, currency, tx.hash, usdcAmount)
 
+		logger(Colors.green(`✅ purchasingCardProcess note: ${note}`));
+
+		
 		const [,tr] = await Promise.all([
 			tx.wait(),
 			SC.beamioConet.transferRecord(
