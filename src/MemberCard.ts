@@ -710,7 +710,7 @@ const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency
 
 	switch (cardAddress.toLowerCase()) {
 		case CCSACardAddress:{
-			payMe.title = isMember ? `CCSA Top Up` : `CCSA Membership`
+			payMe.title = isMember ? `Top Up` : `CCSA Membership`
 			return payMe
 		}
 		
@@ -810,7 +810,7 @@ export const purchasingCardProcess = async () => {
 			afterTatchNoteByFrom: "",
 			afterTatchNoteByTo: "",
 			afterTatchNoteByCardOwner: "",
-		  };
+		};
 		
 		
 
