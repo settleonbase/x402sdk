@@ -833,7 +833,6 @@ export const purchasingCardProcess = async () => {
 		*/	
 
 		await tx.wait()
-		logger(Colors.green(`✅ typeof SC.conetSC ${typeof SC.conetSC} ${SC.conetSC.address} `));
 		
 			
 			// tx 为 ethers TransactionResponse，只有 tx.hash，无 tx.finishedHash；合约 bytes32 用交易哈希 tx.hash 即可
@@ -1114,5 +1113,43 @@ export const quotePointsForUSDC_raw = async (
   };
 
 
+  export const getLatest20Actions = async (
+	
+  ) => {
+	const facet = Settle_ContractPool[0].BeamioTaskDiamondAction
+  
+	// 1️⃣ 总 action 数
+	const total: bigint = await facet.getActionCount();
+	logger(`[getLatest20Actions] total = ${total}`);
+	if (total === 0n) return [];
+  
+	const limit = 20n;
+	const start =
+	  total > limit
+		? total - limit   // 从尾部往前
+		: 0n;
+  
+	// 2️⃣ 并发读取 action + meta
+	const actions = await Promise.all(
+	  Array.from(
+		{ length: Number(total - start) },
+		(_, i) => start + BigInt(i)
+	  ).map(async (actionId) => {
+		const [action, meta] = await facet.getActionWithMeta(actionId);
+		return {
+		  actionId: Number(actionId),
+		  ...action,
+		  ...meta,
+		};
+	  })
+	);
+  
+	// 3️⃣ UI 通常要最新在前
+	
+	const ret = actions.reverse();
+	logger(inspect(ret, false, 4, true))
+	return ret;
+  };
 
 
+//   getLatest20Actions()
