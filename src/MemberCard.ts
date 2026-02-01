@@ -193,7 +193,7 @@ const registerPayMasterForAAFactory = async (payMasterAddress: string) => {
     }
 }
 
-const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract) => {
+const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promise<{ accountAddress: string, alreadyExisted: boolean }> => {
 	
 	try {
 		// 3. 预测账户地址 (可选，用于在创建前告诉用户地址)
@@ -211,7 +211,7 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract) => {
 		
 		if (index > 0n) {
 			logger(`账户已存在`);
-			return;
+			return { accountAddress: predictedAddress, alreadyExisted: true };
 		}
 		// 如果你是普通用户调用：
 		const tx = await SC.createAccountFor(wallet);
@@ -219,13 +219,15 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract) => {
 		// // 如果你是 Paymaster 身份调用 createAccountFor：
 		// // const tx = await factory.createAccountFor(creatorAddress);
 		console.log(`交易成功！哈希: ${tx.hash}`);
-		const receipt = await tx.wait();
+		await tx.wait();
+
 		logger(`DeployingSmartAccount Creat AA Account for ${wallet} success!`, tx.hash)
 		return { accountAddress: predictedAddress, alreadyExisted: false };
 	} catch (error: any) {
 		logger(`DeployingSmartAccount error!`, error.message)
-		throw error;
+		
 	}
+	return { accountAddress: '', alreadyExisted: false };
 }
 
 
@@ -695,7 +697,7 @@ type payMe = {
 	depositHash?: string
 }
 
-const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency, parentHash: string, currencyAmount: string): payMe|null => {
+const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency, parentHash: string, currencyAmount: string, isMember: boolean): payMe|null => {
 
 	const payMe: payMe = {
 		currency,
@@ -708,7 +710,7 @@ const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency
 
 	switch (cardAddress.toLowerCase()) {
 		case CCSACardAddress:{
-			payMe.title = `CCSA Card Purchase`
+			payMe.title = isMember ? `CCSA Top Up` : `CCSA Membership`
 			return payMe
 		}
 		
@@ -730,20 +732,35 @@ export const purchasingCardProcess = async () => {
 	
 	
 	try {
+		
+		const { accountAddress, alreadyExisted } = await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
 
-		await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
+		if (!accountAddress) {
+			logger(Colors.red(`❌ ${obj.from} purchasingCardProcess DeployingSmartAccount failed`));
+			obj.res.status(400).json({success: false, error: 'DeployingSmartAccount failed'}).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => purchasingCardProcess(), 3000)
+			return
+		}
+
 		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore } = obj
 
 		// 1. 获取受益人 (Owner) - 仅作为签名参数，不需要 Owner 签名
 		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase); // 使用 adminn 账户进行提交
 
-		const [owner, _currency, currencyAmount] = await Promise.all([
+		const [[pointsBalance, nfts] ,owner, _currency, currencyAmount] = await Promise.all([
+			card.getOwnership(accountAddress),
 			card.owner(),
 			card.currency(),
 			quotePointsForUSDC_raw(cardAddress, BigInt(usdcAmount))
 		])
 
+		const isMember = (nfts?.length > 0) && (pointsBalance > 0n)
 		
+		logger(Colors.green(`✅ purchasingCardProcess ${obj.from} AA Account: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
+
+
+
 
 		const tx = await card.buyPointsWith3009Authorization(
 			from,
@@ -754,7 +771,7 @@ export const purchasingCardProcess = async () => {
 			userSignature,
 			0
 		)
-		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
+		
 		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`));
 
 
@@ -762,39 +779,17 @@ export const purchasingCardProcess = async () => {
 		const to = owner
 		const currency = getICurrency(_currency)
 		const ACTION_TOKEN_MINT = 1; // ActionFacet: 1 mint
-		const payMe = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points)
+		const payMe = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points, isMember)
 
 
 		if (!payMe) {
 			logger(Colors.red(`❌ purchasingCardProcess payMe is null`));
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => purchasingCardProcess(), 3000)
 			return
 		}
 
-		/**
-		 *     struct TokenActionInput {
-			uint8 actionType;     // 1 mint, 2 burn, 3 transfer
-			address card;
-			address from;
-			address to;
-			uint256 amount;
-			uint256 ts;           // 0 => block.timestamp
-
-			// meta fields
-			string title;
-			string note;
-			uint256 tax;
-			uint256 tip;
-			uint256 beamioFee1;
-			uint256 beamioFee2;
-			uint256 cardServiceFee;
-
-			// afterTatch (can update later, but can also set on create)
-			string afterTatchNoteByFrom;
-			string afterTatchNoteByTo;
-			string afterTatchNoteByCardOwner;
-		}
-		 */
-
+		
 
 		const input = {
 			actionType: ACTION_TOKEN_MINT,
@@ -822,16 +817,6 @@ export const purchasingCardProcess = async () => {
 		logger(Colors.green(`✅ purchasingCardProcess note: ${payMe}`));
 
 
-		/**
-		 * const tx = await SC.conetSC.transferRecord(
-					obj.from,
-					obj.to,
-					obj.amount,
-					obj.finishedHash,
-					obj.note
-				)
-		*/	
-
 		await tx.wait()
 		
 			
@@ -847,6 +832,7 @@ export const purchasingCardProcess = async () => {
 		const actionFacet = await SC.BeamioTaskDiamondAction
 		const tx2 = await actionFacet.syncTokenAction(input)
 		await tx2.wait()
+		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
 		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`), `✅ conetSC Hash: ${tr.hash}`, `✅ syncTokenAction Hash: ${tx2.hash}`);
 		
 		
@@ -1076,80 +1062,80 @@ export const quotePointsForUSDC = async (
 };
 
 export const quotePointsForUSDC_raw = async (
-	cardAddress: string,
-	usdc6: bigint // 已经是 raw USDC（6 decimals）
-  ) => {
-	const factory = Settle_ContractPool[0].baseFactoryPaymaster;
-  
-	if (usdc6 <= 0n) {
-	  throw new Error("usdc6 must be > 0");
-	}
-  
-	// 1️⃣ 拿单价：1e6 points 需要多少 USDC6
-	const unitPriceUSDC6: bigint =
-	  await factory.quoteUnitPointInUSDC6(cardAddress);
-  
-	if (unitPriceUSDC6 === 0n) {
-	  throw new Error("unitPriceUSDC6=0 (oracle not configured?)");
-	}
-  
-	// 2️⃣ 完全对齐合约里的计算公式
-	// pointsOut6 = usdcAmount6 * 1e6 / unitPriceUSDC6
-	const points6 = (usdc6 * POINTS_ONE) / unitPriceUSDC6;
-  
-	const ret = {
-	  usdc6,
-	  unitPriceUSDC6,
-  
-	  points6,
-  
-	  // 👇 仅用于 debug / 前端展示（可删）
-	  usdc: ethers.formatUnits(usdc6, 6),
-	  unitPriceUSDC: ethers.formatUnits(unitPriceUSDC6, 6),
-	  points: ethers.formatUnits(points6, 6),
-	};
-  
-	return ret;
-  };
-
-
-  export const getLatest20Actions = async (
+		cardAddress: string,
+		usdc6: bigint // 已经是 raw USDC（6 decimals）
+	) => {
+		const factory = Settle_ContractPool[0].baseFactoryPaymaster;
 	
-  ) => {
+		if (usdc6 <= 0n) {
+		throw new Error("usdc6 must be > 0");
+		}
+	
+		// 1️⃣ 拿单价：1e6 points 需要多少 USDC6
+		const unitPriceUSDC6: bigint =
+		await factory.quoteUnitPointInUSDC6(cardAddress);
+	
+		if (unitPriceUSDC6 === 0n) {
+		throw new Error("unitPriceUSDC6=0 (oracle not configured?)");
+		}
+	
+		// 2️⃣ 完全对齐合约里的计算公式
+		// pointsOut6 = usdcAmount6 * 1e6 / unitPriceUSDC6
+		const points6 = (usdc6 * POINTS_ONE) / unitPriceUSDC6;
+	
+		const ret = {
+		usdc6,
+		unitPriceUSDC6,
+	
+		points6,
+	
+		// 👇 仅用于 debug / 前端展示（可删）
+		usdc: ethers.formatUnits(usdc6, 6),
+		unitPriceUSDC: ethers.formatUnits(unitPriceUSDC6, 6),
+		points: ethers.formatUnits(points6, 6),
+		};
+	
+		return ret;
+};
+
+
+export const getLatest20Actions = async (
+
+) => {
 	const facet = Settle_ContractPool[0].BeamioTaskDiamondAction
-  
+
 	// 1️⃣ 总 action 数
 	const total: bigint = await facet.getActionCount();
 	logger(`[getLatest20Actions] total = ${total}`);
 	if (total === 0n) return [];
-  
+
 	const limit = 20n;
 	const start =
-	  total > limit
+		total > limit
 		? total - limit   // 从尾部往前
 		: 0n;
-  
+
 	// 2️⃣ 并发读取 action + meta
 	const actions = await Promise.all(
-	  Array.from(
+		Array.from(
 		{ length: Number(total - start) },
 		(_, i) => start + BigInt(i)
-	  ).map(async (actionId) => {
+		).map(async (actionId) => {
 		const [action, meta] = await facet.getActionWithMeta(actionId);
 		return {
-		  actionId: Number(actionId),
-		  ...action,
-		  ...meta,
+			actionId: Number(actionId),
+			...action,
+			...meta,
 		};
-	  })
+		})
 	);
-  
+
 	// 3️⃣ UI 通常要最新在前
-	
+
 	const ret = actions.reverse();
 	logger(inspect(ret, false, 4, true))
 	return ret;
-  };
+};
 
 
 //   getLatest20Actions()
