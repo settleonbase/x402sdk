@@ -203,7 +203,7 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 		// 使用 getFunction 并传入完整的函数签名或名称
 		const predictedAddress = await SC.getFunction("getAddress(address,uint256)")(
 			creatorAddress, 
-			index
+			0
 		);
 
 		logger(`预测 ${wallet} 将生成的账户地址: ${predictedAddress} ${index}`);
