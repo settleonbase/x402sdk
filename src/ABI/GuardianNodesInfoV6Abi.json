@@ -1,0 +1,571 @@
+[
+    {
+        "inputs": [],
+        "stateMutability": "nonpayable",
+        "type": "constructor"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "bytes32",
+                "name": "ipAddr",
+                "type": "bytes32"
+            },
+            {
+                "indexed": true,
+                "internalType": "bytes32",
+                "name": "regin",
+                "type": "bytes32"
+            }
+        ],
+        "name": "deleteIPAddr",
+        "type": "event"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "ipaddress",
+                "type": "string"
+            }
+        ],
+        "name": "IP2PGP",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "pgp",
+                "type": "string"
+            },
+            {
+                "internalType": "string",
+                "name": "pgpKey",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "id",
+                "type": "uint256"
+            },
+            {
+                "internalType": "string",
+                "name": "ipaddress",
+                "type": "string"
+            },
+            {
+                "internalType": "string",
+                "name": "regionName",
+                "type": "string"
+            },
+            {
+                "internalType": "string",
+                "name": "pgp",
+                "type": "string"
+            },
+            {
+                "internalType": "string",
+                "name": "pgpKey",
+                "type": "string"
+            },
+            {
+                "internalType": "address",
+                "name": "owner",
+                "type": "address"
+            }
+        ],
+        "name": "addNode",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "adminList",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "addr",
+                "type": "address"
+            },
+            {
+                "internalType": "bool",
+                "name": "status",
+                "type": "bool"
+            }
+        ],
+        "name": "changeAddressInAdminlist",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "start",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "length",
+                "type": "uint256"
+            }
+        ],
+        "name": "getAllNodes",
+        "outputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "uint256",
+                        "name": "id",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "string",
+                        "name": "PGP",
+                        "type": "string"
+                    },
+                    {
+                        "internalType": "string",
+                        "name": "PGPKey",
+                        "type": "string"
+                    },
+                    {
+                        "internalType": "string",
+                        "name": "ip_addr",
+                        "type": "string"
+                    },
+                    {
+                        "internalType": "string",
+                        "name": "regionName",
+                        "type": "string"
+                    }
+                ],
+                "internalType": "struct nodeInfo[]",
+                "name": "allNodes",
+                "type": "tuple[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "getAllRegions",
+        "outputs": [
+            {
+                "internalType": "string[]",
+                "name": "Regions",
+                "type": "string[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "owner",
+                "type": "address"
+            }
+        ],
+        "name": "getOwnerIPs",
+        "outputs": [
+            {
+                "internalType": "string[]",
+                "name": "ips",
+                "type": "string[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "pgpKey",
+                "type": "string"
+            }
+        ],
+        "name": "getPGPKeyIPaddress",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "ipaddress",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "regionName",
+                "type": "string"
+            }
+        ],
+        "name": "getReginNodes",
+        "outputs": [
+            {
+                "internalType": "string[]",
+                "name": "nodes",
+                "type": "string[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "regionName",
+                "type": "string"
+            }
+        ],
+        "name": "getRegionNodes",
+        "outputs": [
+            {
+                "internalType": "string[]",
+                "name": "nodes",
+                "type": "string[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "text",
+                "type": "string"
+            }
+        ],
+        "name": "hashString",
+        "outputs": [
+            {
+                "internalType": "bytes32",
+                "name": "",
+                "type": "bytes32"
+            }
+        ],
+        "stateMutability": "pure",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "id2ip",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "owner",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "id",
+                "type": "uint256"
+            },
+            {
+                "internalType": "string",
+                "name": "ipaddress",
+                "type": "string"
+            }
+        ],
+        "name": "id2node",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "idOwner",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "name": "ip2id",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "name": "ipaddress2PGP",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "name": "ipaddress2owner",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "name": "ipaddress2pgpKey",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "name": "ipaddressExisting",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "name": "ipaddressToRegion",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "name": "pgpKey2ipaddress",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "name": "pgpKeyToPGP",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "pgp",
+                "type": "string"
+            },
+            {
+                "internalType": "string",
+                "name": "pgpKey",
+                "type": "string"
+            },
+            {
+                "internalType": "string",
+                "name": "ipaddress",
+                "type": "string"
+            }
+        ],
+        "name": "pgpUpdate",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "name": "regionExisting",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "regionList",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "ipaddress",
+                "type": "string"
+            }
+        ],
+        "name": "removeNode",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    }
+]

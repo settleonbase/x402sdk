@@ -10,6 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {coinbaseHooks} from '../coinbase'
 import { purchasingCardPool, purchasingCardProcess } from '../MemberCard'
+
 const masterServerPort = 1111
 
 

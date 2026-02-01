@@ -653,7 +653,7 @@ export const USDC2Token = async (userPrivateKey: string, amount: number, cardAdd
 
 export const purchasingCardPool: { cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string, res: Response } [] = []
 
-type ICurrency = 'CAD'|'USD'|'JPY'|'CNY'|'USDC'|'HKD'|'EUR'|'SGD'|'TWD'
+
 
 const getICurrency = (currency: BigInt): ICurrency => {
 	switch (currency) {
@@ -695,27 +695,25 @@ type payMe = {
 	depositHash?: string
 }
 
-const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency, parentHash: string, currencyAmount: string): string => {
+const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency, parentHash: string, currencyAmount: string): payMe|null => {
 
 	const payMe: payMe = {
 		currency,
 		currencyAmount,
-		currencyTip: '',
-		tip: 0,
-		title: 'CCSA Card Purchase',
-		currencyTax: '0',
+		title: ``,
 		usdcAmount: Number(usdcAmount),
-		depositHash: parentHash
+		parentHash
 	}
 
 
 	switch (cardAddress.toLowerCase()) {
 		case CCSACardAddress:{
-			return `Thank you for purchasing CCSA Card\r\n${JSON.stringify(payMe)}`
+			payMe.title = `CCSA Card Purchase`
+			return payMe
 		}
 		
 		default:
-			return ''
+			return null
 	}
 }
 
@@ -745,8 +743,7 @@ export const purchasingCardProcess = async () => {
 			quotePointsForUSDC_raw(cardAddress, BigInt(usdcAmount))
 		])
 
-		const to = owner
-		const currency = getICurrency(_currency)
+		
 
 		const tx = await card.buyPointsWith3009Authorization(
 			from,
@@ -760,19 +757,80 @@ export const purchasingCardProcess = async () => {
 		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
 		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`));
 
-		
-		const note = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points)
 
-		logger(Colors.green(`✅ purchasingCardProcess note: ${note}`));
-/**
- * const tx = await SC.conetSC.transferRecord(
-			obj.from,
-			obj.to,
-			obj.amount,
-			obj.finishedHash,
-			obj.note
-		)
- */	
+
+		const to = owner
+		const currency = getICurrency(_currency)
+		const ACTION_TOKEN_MINT = 1; // ActionFacet: 1 mint
+		const payMe = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points)
+
+
+		if (!payMe) {
+			logger(Colors.red(`❌ purchasingCardProcess payMe is null`));
+			return
+		}
+
+		/**
+		 *     struct TokenActionInput {
+			uint8 actionType;     // 1 mint, 2 burn, 3 transfer
+			address card;
+			address from;
+			address to;
+			uint256 amount;
+			uint256 ts;           // 0 => block.timestamp
+
+			// meta fields
+			string title;
+			string note;
+			uint256 tax;
+			uint256 tip;
+			uint256 beamioFee1;
+			uint256 beamioFee2;
+			uint256 cardServiceFee;
+
+			// afterTatch (can update later, but can also set on create)
+			string afterTatchNoteByFrom;
+			string afterTatchNoteByTo;
+			string afterTatchNoteByCardOwner;
+		}
+		 */
+
+
+		const input = {
+			actionType: ACTION_TOKEN_MINT,
+			card: cardAddress,
+			from: ethers.ZeroAddress,
+			to: from, // ✅ points 归属 from
+			amount: currencyAmount.points6,
+			ts: 0n,
+
+			title: `${payMe.title}`,
+			note: JSON.stringify(payMe),
+			tax: 0n,
+			tip: 0n,
+			beamioFee1: 0n,
+			beamioFee2: 0n,
+			cardServiceFee: 0n,
+	
+			afterTatchNoteByFrom: "",
+			afterTatchNoteByTo: "",
+			afterTatchNoteByCardOwner: "",
+		  };
+		
+		
+
+		logger(Colors.green(`✅ purchasingCardProcess note: ${payMe}`));
+
+
+		/**
+		 * const tx = await SC.conetSC.transferRecord(
+					obj.from,
+					obj.to,
+					obj.amount,
+					obj.finishedHash,
+					obj.note
+				)
+		*/	
 
 		await tx.wait()
 		logger(Colors.green(`✅ typeof SC.conetSC ${typeof SC.conetSC} ${SC.conetSC.address} `));
@@ -784,15 +842,13 @@ export const purchasingCardProcess = async () => {
 				to,
 				usdcAmount,
 				tx.hash,
-				note
-			)
-		
-
-		if (tr) {
-			await tr.wait()
-		}
-
-		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`), `✅ purchasingCardProcess success! Hash: ${tr.hash}`);
+				`\r\n${JSON.stringify(payMe)}`
+			)	
+		await tr.wait()
+		const actionFacet = await SC.BeamioTaskDiamondAction
+		const tx2 = await actionFacet.syncTokenAction(input)
+		await tx2.wait()
+		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`), `✅ conetSC Hash: ${tr.hash}`, `✅ syncTokenAction Hash: ${tx2.hash}`);
 		
 		
 	} catch (error: any) {

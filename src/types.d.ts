@@ -1,4 +1,5 @@
 type IMasterSetup = {
+	BeamioOfficial: string
 	settle_admin: string
 	settle_u1: string
 	base_endpoint: string
@@ -198,8 +199,69 @@ type IAddUserPool = {
 	recover?: IAccountRecover[]
 }
 
+type ICurrency = 'CAD'|'USD'|'JPY'|'CNY'|'USDC'|'HKD'|'EUR'|'SGD'|'TWD'
+
 type IAddUserPool = {
 	wallet: string
 	account: beamioAccount
 	recover?: IAccountRecover[]
+}
+
+
+type paymentCard = {
+	amount: number
+	currency: ICurrency
+	title: string
+	timeStamp: number
+	usdcAmount: number
+	cashcodeUrl: string
+}
+
+type searchResult = {
+	address: string
+	created_at: number
+	first_name: string
+	image: string
+	last_name: string
+	username: string
+	follow_count: string
+	follower_count: string
+}
+
+
+
+type ChatMessage = {
+	id: string
+	from: "me" | "them"
+	text: string
+	createdAt: number
+	status?: "sending" | "sent" | "failed"
+	paymentCard?: paymentCard
+}
+
+
+type chatData = {
+	address: string
+	messages: ChatMessage[]
+	beamio: searchResult
+	chatData: {
+		privateArmored: string;
+		publicArmored: string;
+		routersArmoreds: string;
+		online: boolean;
+		routePgpKeyID: string;
+	}
+	pin: boolean
+	hide: boolean
+	unreadCount: number
+	tag: 'red'|'green'|'blue'|'grey'
+	muted: boolean
+	lastReadTs?: number
+}
+type searchKeyPGP = {
+	userPgpKeyID: string
+	userPublicKeyArmored: string
+	routePgpKeyID: string
+	routePublicKeyArmored: string
+	routeOnline: boolean
 }
