@@ -974,7 +974,7 @@ async function setTier(ownerPk: string, cardAddr: string) {
 
 const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
-const CCSACardAddressNew = '0x46c66544ccde8cfe6435b53a41883f5392d99c0b'.toLowerCase()
+const CCSACardAddressNew = '0x40f1384b2f0C7C2d864C35d4d4b192eFc8D74a78'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
@@ -1367,7 +1367,7 @@ const test = async () => {
 	// logger(inspect(rates, false, 3, true))	
 }
 
-// test()
+test()
 
 
 export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
@@ -1569,37 +1569,98 @@ export const getLatest20Actions = async (
 /**
  * 
  * {
+{
     "fromEOA": "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
     "id": "0",
-    "maxAmount": "209999",
-    "validAfter": "1770108124",
-    "validBefore": "1770111724",
-    "nonce": "0xdfd00c98e15fec9a8ce8b5e5e3fd5b8372bef2d4d5435f7afcc64440982aff53",
-    "signature": "0x184382c3475135d005d92dcc19960171ad7ae75561d6c6b80612095d29c0a96748b66414af3592b2ea02814c8ecfcf048eb153b7c41b50d14ee9c3e70948736d1b",
-    "digest": "0x719645bec9cdc2181cc45364004ea2070f9e53dc12e83cc83c4ec9a271f6a724"
+    "maxAmount": "9999",
+    "validAfter": "1770128158",
+    "validBefore": "1770131758",
+    "nonce": "0xa798efbb30f83918c8c1fca7e02fd97c7d3d4ea0547c6097a75b7bfecd12481f",
+    "signature": "0x996b9e1477eeb8c7b98df8cbce0b88c733019b72709097997d55096959f8baef2b53a972dc348e1cfe7bf9f2ccd569c61b5cc4b4ff3186839e232ce2aee3461b1c",
+    "digest": "0x58e4f8c1e0b94de595c269d286bbd608e759e19b1505aa6c06ef28605629d17c"
+}
 }
  */
 
-// export const forward1155ERC3009SignatureData = async (
-// 	cardAddress: string,
-// 	fromEOA: string,
-// 	validAfter: string,
-// 	validBefore: string,
-// 	nonce: string,
-// 	maxAmount: string,
-// 	signature: string,
-// 	digest: string,
-// 	to
-// ) => {
-// 	const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase);
-// 	const signature1 = await card.buyPointsWith3009Authorization(
-// 		from,
-// 		usdcAmount,
-// 		validAfter,
-// 		validBefore,
-// 		nonce,
-// 		userSignature,
-// 		0
-// 	)
-// 	return signature;
-// }
+
+const testBeamioCard = async (cardAddress: string) => {
+	const card = new ethers.Contract(cardAddress, BeamioUserCardArtifact.abi, Settle_ContractPool[0].walletBase);
+	
+	
+}
+
+export const forward1155ERC3009SignatureData = async (
+) => {
+	const sign = {
+		fromEOA: "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
+		id: "0",
+		to: "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
+		amount: "9999",
+		maxAmount: "9999",
+		validAfter: "1770128158",
+		validBefore: "1770131758",
+		nonce: "0xa798efbb30f83918c8c1fca7e02fd97c7d3d4ea0547c6097a75b7bfecd12481f",
+		signature: "0x996b9e1477eeb8c7b98df8cbce0b88c733019b72709097997d55096959f8baef2b53a972dc348e1cfe7bf9f2ccd569c61b5cc4b4ff3186839e232ce2aee3461b1c",
+		digest: "0x58e4f8c1e0b94de595c269d286bbd608e759e19b1505aa6c06ef28605629d17c",
+		cardAddress: CCSACardAddressNew,
+	  };
+	
+	  const env = Settle_ContractPool[0];
+	  const factory = env.baseFactoryPaymaster; // BeamioUserCardFactoryPaymasterV07 contract instance (connected signer)
+	  const provider = factory.runner!.provider! as ethers.Provider;
+	  const signer = factory.runner! as ethers.Signer;
+	
+	  const caller = await signer.getAddress();
+	  const net = await provider.getNetwork();
+	  const blk = await provider.getBlock("latest");
+	  console.log("chainId:", net.chainId.toString());
+	  console.log("block.timestamp:", blk!.timestamp);
+	  console.log("caller:", caller);
+	  console.log("factory.owner:", await factory.owner());
+	  console.log("factory.isPaymaster(caller):", await factory.isPaymaster(caller));
+	
+	  // ✅ 先 staticCall 看到真实 revert
+	  try {
+		await factory.redeemOpenTransfer.staticCall(
+		  sign.cardAddress,
+		  sign.fromEOA,
+		  sign.to,
+		  BigInt(sign.id),
+		  BigInt(sign.amount),
+		  BigInt(sign.maxAmount),
+		  BigInt(sign.validAfter),
+		  BigInt(sign.validBefore),
+		  sign.nonce,
+		  sign.signature
+		);
+		console.log("✅ redeemOpenTransfer staticCall ok");
+	  } catch (e: any) {
+		const data = e?.data || e?.error?.data || e?.info?.error?.data;
+		const msg = e?.shortMessage || e?.message || String(e);
+		console.error("❌ redeemOpenTransfer staticCall FAILED");
+		console.error("message:", msg);
+		console.error("revert data:", data);
+		throw e;
+	  }
+	
+	  // ✅ 再发交易
+	  const tx = await factory.redeemOpenTransfer(
+		sign.cardAddress,
+		sign.fromEOA,
+		sign.to,
+		BigInt(sign.id),
+		BigInt(sign.amount),
+		BigInt(sign.maxAmount),
+		BigInt(sign.validAfter),
+		BigInt(sign.validBefore),
+		sign.nonce,
+		sign.signature
+	  );
+	
+	  await tx.wait();
+	  console.log("✅ success tx:", tx.hash);
+	  return { txHash: tx.hash, };
+	
+	
+}
+
