@@ -974,7 +974,7 @@ async function setTier(ownerPk: string, cardAddr: string) {
 
 const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
-const CCSACardAddressNew = '0x55eeeb3f4b49f1949681b97d814df71425c919bc'.toLowerCase()
+const CCSACardAddressNew = '0xdde5f4581996cff79934b416791cd910833b6e72'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
@@ -1594,14 +1594,16 @@ const testBeamioCard = async (cardAddress: string) => {
  * 
  * @returns {
 {
+{
   "fromEOA": "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
   "id": "0",
-  "maxAmount": "210000",
-  "validAfter": "1770153039",
-  "validBefore": "1770153459",
-  "nonce": "0xdc6661cd504714ad169b77feab2fc11b29ea87edf358cff15fa7b471f7650cff",
-  "signature": "0x0066a92ae716006743d89d004a43a310acf42a55e9457e9041487f67f7da36904be18238844138c30f74108714786fca04f81e7fba1acadcaf6c38423fd6ed0f1b",
-  "digest": "0x4b6ce22b37d610531ca721d73b07662ccfc17a241a744e836497436514ae1113"
+  "maxAmount": "109999",
+  "validAfter": "1770157228",
+  "validBefore": "1770157648",
+  "nonce": "0x38a6494e92c47e2708d8310118b101a0a06e4bca765a73756aec0945fd59757b",
+  "signature": "0x319ee3484ed88fe3405eb6c1aa6ea4ba913b6620cca2676abc71a51a8b6b888d30a9b972a0f399ef87c84f0a0a07d4e12342c18431344095b3c5d14c8d01e59b1c",
+  "digest": "0xb6366bb87d04e72c4ec6de936ee7f9ad4c5a5da447a64725d37b70c29e713bef"
+}
 }
 }
 }
@@ -1614,12 +1616,12 @@ export const forward1155ERC3009SignatureData = async (
 		id: "0",
 		to: "0x863D5B7DaD9C595138e209d932511Be4E168A660",
 		amount: "10000",
-		maxAmount: "210000",
-		validAfter: "1770153039",
-		validBefore: "1770153459",
-		nonce: "0xdc6661cd504714ad169b77feab2fc11b29ea87edf358cff15fa7b471f7650cff",
-		signature: "0x0066a92ae716006743d89d004a43a310acf42a55e9457e9041487f67f7da36904be18238844138c30f74108714786fca04f81e7fba1acadcaf6c38423fd6ed0f1b",
-		digest: "0x4b6ce22b37d610531ca721d73b07662ccfc17a241a744e836497436514ae1113",
+		maxAmount: "109999",
+		validAfter: "1770157228",
+		validBefore: "1770157648",
+		nonce: "0x38a6494e92c47e2708d8310118b101a0a06e4bca765a73756aec0945fd59757b",
+		signature: "0x319ee3484ed88fe3405eb6c1aa6ea4ba913b6620cca2676abc71a51a8b6b888d30a9b972a0f399ef87c84f0a0a07d4e12342c18431344095b3c5d14c8d01e59b1c",
+		digest: "0xb6366bb87d04e72c4ec6de936ee7f9ad4c5a5da447a64725d37b70c29e713bef",
 		cardAddress: CCSACardAddressNew,
 	  };
 	
