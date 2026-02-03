@@ -1001,17 +1001,18 @@ const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency
 	}
 
 	logger(Colors.green(`✅ cardNote cardAddress = ${cardAddress} == '${CCSACardAddressNew}' isMember = ${isMember} usdcAmount = ${usdcAmount} currencyAmount = ${currencyAmount} parentHash = ${parentHash}`));
-
-	switch (cardAddress.toLowerCase()) {
-		case CCSACardAddressNew:{
-			payMe.title = isMember ? `Top Up` : `CCSA Membership`
-			return payMe
-		}
+payMe.title = isMember ? `Top Up` : `CCSA Membership`
+	// switch (cardAddress.toLowerCase()) {
+	// 	case CCSACardAddressNew:{
+	// 		payMe.title = isMember ? `Top Up` : `CCSA Membership`
+	// 		return payMe
+	// 	}
 		
-		default:
+	// 	default:
 
-			return null
-	}
+	// 		return null
+	// }
+	return payMe
 }
 
 export const purchasingCardProcess = async () => {
