@@ -51,6 +51,33 @@
 		"type": "error"
 	},
 	{
+		"inputs": [],
+		"name": "ECDSAInvalidSignature",
+		"type": "error"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "length",
+				"type": "uint256"
+			}
+		],
+		"name": "ECDSAInvalidSignatureLength",
+		"type": "error"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bytes32",
+				"name": "s",
+				"type": "bytes32"
+			}
+		],
+		"name": "ECDSAInvalidSignatureS",
+		"type": "error"
+	},
+	{
 		"inputs": [
 			{
 				"internalType": "address",
@@ -154,6 +181,51 @@
 	},
 	{
 		"inputs": [],
+		"name": "FaucetAmountTooLarge",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "FaucetConfigFrozen",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "FaucetConfigInvalid",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "FaucetDisabledBecausePriced",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "FaucetExpired",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "FaucetGlobalMaxExceeded",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "FaucetIdNotIssued",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "FaucetMaxExceeded",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "FaucetNotEnabled",
+		"type": "error"
+	},
+	{
+		"inputs": [],
 		"name": "GlobalMisconfigured",
 		"type": "error"
 	},
@@ -211,7 +283,17 @@
 	},
 	{
 		"inputs": [],
+		"name": "PriceNotConfigured",
+		"type": "error"
+	},
+	{
+		"inputs": [],
 		"name": "PriceZero",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "PurchaseDisabledBecauseFree",
 		"type": "error"
 	},
 	{
@@ -382,6 +464,104 @@
 		"inputs": [
 			{
 				"indexed": true,
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "userEOA",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "acct",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "amount",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "claimedAfter",
+				"type": "uint256"
+			}
+		],
+		"name": "FaucetClaimed",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"components": [
+					{
+						"internalType": "uint64",
+						"name": "validUntil",
+						"type": "uint64"
+					},
+					{
+						"internalType": "uint64",
+						"name": "perClaimMax",
+						"type": "uint64"
+					},
+					{
+						"internalType": "uint128",
+						"name": "maxPerUser",
+						"type": "uint128"
+					},
+					{
+						"internalType": "uint128",
+						"name": "maxGlobal",
+						"type": "uint128"
+					},
+					{
+						"internalType": "bool",
+						"name": "enabled",
+						"type": "bool"
+					},
+					{
+						"internalType": "uint8",
+						"name": "currency",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint8",
+						"name": "decimals",
+						"type": "uint8"
+					},
+					{
+						"internalType": "uint128",
+						"name": "priceInCurrency6",
+						"type": "uint128"
+					}
+				],
+				"indexed": false,
+				"internalType": "struct BeamioUserCard.FaucetConfig",
+				"name": "cfg",
+				"type": "tuple"
+			}
+		],
+		"name": "FaucetConfigUpdated",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
 				"internalType": "address",
 				"name": "user",
 				"type": "address"
@@ -455,6 +635,55 @@
 			}
 		],
 		"name": "MemberNFTUpgraded",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "fromEOA",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "fromAccount",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "amount",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "maxAmount",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "bytes32",
+				"name": "nonce",
+				"type": "bytes32"
+			},
+			{
+				"indexed": false,
+				"internalType": "address",
+				"name": "toAccount",
+				"type": "address"
+			}
+		],
+		"name": "OpenTransferAuthorized",
 		"type": "event"
 	},
 	{
@@ -747,6 +976,19 @@
 	},
 	{
 		"inputs": [],
+		"name": "ISSUED_NFT_START_ID",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
 		"name": "NFT_START_ID",
 		"outputs": [
 			{
@@ -1009,9 +1251,9 @@
 	{
 		"inputs": [
 			{
-				"internalType": "bytes32",
-				"name": "hash",
-				"type": "bytes32"
+				"internalType": "string",
+				"name": "pwd",
+				"type": "string"
 			}
 		],
 		"name": "cancelRedeem",
@@ -1073,6 +1315,16 @@
 			{
 				"internalType": "uint256",
 				"name": "attr",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "tokenAmt",
 				"type": "uint256"
 			}
 		],
@@ -1150,6 +1402,200 @@
 			}
 		],
 		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "userEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amount",
+				"type": "uint256"
+			}
+		],
+		"name": "faucetByGateway",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "claimedAfter",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			},
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"name": "faucetClaimed",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "faucetConfig",
+		"outputs": [
+			{
+				"internalType": "uint64",
+				"name": "validUntil",
+				"type": "uint64"
+			},
+			{
+				"internalType": "uint64",
+				"name": "perClaimMax",
+				"type": "uint64"
+			},
+			{
+				"internalType": "uint128",
+				"name": "maxPerUser",
+				"type": "uint128"
+			},
+			{
+				"internalType": "uint128",
+				"name": "maxGlobal",
+				"type": "uint128"
+			},
+			{
+				"internalType": "bool",
+				"name": "enabled",
+				"type": "bool"
+			},
+			{
+				"internalType": "uint8",
+				"name": "currency",
+				"type": "uint8"
+			},
+			{
+				"internalType": "uint8",
+				"name": "decimals",
+				"type": "uint8"
+			},
+			{
+				"internalType": "uint128",
+				"name": "priceInCurrency6",
+				"type": "uint128"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "faucetConfigFrozen",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "faucetGlobalMinted",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "userEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amount6",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validAfter",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validBefore",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "nonce",
+				"type": "bytes32"
+			},
+			{
+				"internalType": "bytes",
+				"name": "signature",
+				"type": "bytes"
+			}
+		],
+		"name": "faucetPurchaseWith3009AuthorizationByGateway",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "usdcPaid6",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "nonpayable",
 		"type": "function"
 	},
 	{
@@ -1318,6 +1764,69 @@
 		"type": "function"
 	},
 	{
+		"inputs": [
+			{
+				"internalType": "bytes32",
+				"name": "",
+				"type": "bytes32"
+			}
+		],
+		"name": "openAuthSpent",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "fromEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "maxAmount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validAfter",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validBefore",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "nonce",
+				"type": "bytes32"
+			}
+		],
+		"name": "openTransferAuthDigest",
+		"outputs": [
+			{
+				"internalType": "bytes32",
+				"name": "",
+				"type": "bytes32"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
 		"inputs": [],
 		"name": "owner",
 		"outputs": [
@@ -1408,9 +1917,33 @@
 	{
 		"inputs": [
 			{
-				"internalType": "bytes32",
-				"name": "hash",
-				"type": "bytes32"
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amount6",
+				"type": "uint256"
+			}
+		],
+		"name": "quoteFaucetPurchaseUSDC6",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "usdcNeed6",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "pwd",
+				"type": "string"
 			},
 			{
 				"internalType": "address",
@@ -1549,6 +2082,54 @@
 			}
 		],
 		"name": "setExpirySeconds",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint64",
+				"name": "validUntil",
+				"type": "uint64"
+			},
+			{
+				"internalType": "uint64",
+				"name": "perClaimMax",
+				"type": "uint64"
+			},
+			{
+				"internalType": "uint128",
+				"name": "maxPerUser",
+				"type": "uint128"
+			},
+			{
+				"internalType": "uint128",
+				"name": "maxGlobal",
+				"type": "uint128"
+			},
+			{
+				"internalType": "bool",
+				"name": "enabled",
+				"type": "bool"
+			},
+			{
+				"internalType": "enum BeamioCurrency.CurrencyType",
+				"name": "cur",
+				"type": "uint8"
+			},
+			{
+				"internalType": "uint128",
+				"name": "priceInCurrency6",
+				"type": "uint128"
+			}
+		],
+		"name": "setFaucetConfig",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
@@ -1720,6 +2301,59 @@
 			}
 		],
 		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "fromEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "toEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "maxAmount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validAfter",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validBefore",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "nonce",
+				"type": "bytes32"
+			},
+			{
+				"internalType": "bytes",
+				"name": "signature",
+				"type": "bytes"
+			}
+		],
+		"name": "transferWithOpenAuthorizationByGateway",
+		"outputs": [],
+		"stateMutability": "nonpayable",
 		"type": "function"
 	},
 	{

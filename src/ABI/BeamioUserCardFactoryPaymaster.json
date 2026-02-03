@@ -3,17 +3,22 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "_redeemModule",
+				"name": "redeemModule_",
 				"type": "address"
 			},
 			{
 				"internalType": "address",
-				"name": "_oracle",
+				"name": "quoteHelper_",
 				"type": "address"
 			},
 			{
 				"internalType": "address",
-				"name": "_aaFactory",
+				"name": "deployer_",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "aaFactory_",
 				"type": "address"
 			}
 		],
@@ -22,34 +27,12 @@
 	},
 	{
 		"inputs": [],
-		"name": "CallFailed",
+		"name": "AlreadyRegistered",
 		"type": "error"
 	},
 	{
 		"inputs": [],
-		"name": "ECDSAInvalidSignature",
-		"type": "error"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "uint256",
-				"name": "length",
-				"type": "uint256"
-			}
-		],
-		"name": "ECDSAInvalidSignatureLength",
-		"type": "error"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "bytes32",
-				"name": "s",
-				"type": "bytes32"
-			}
-		],
-		"name": "ECDSAInvalidSignatureS",
+		"name": "BadDeployedCard",
 		"type": "error"
 	},
 	{
@@ -59,22 +42,7 @@
 	},
 	{
 		"inputs": [],
-		"name": "InvalidSecret",
-		"type": "error"
-	},
-	{
-		"inputs": [],
 		"name": "NotAuthorized",
-		"type": "error"
-	},
-	{
-		"inputs": [],
-		"name": "OracleError",
-		"type": "error"
-	},
-	{
-		"inputs": [],
-		"name": "SecretUsed",
 		"type": "error"
 	},
 	{
@@ -107,7 +75,7 @@
 			{
 				"indexed": true,
 				"internalType": "address",
-				"name": "owner",
+				"name": "cardOwner",
 				"type": "address"
 			},
 			{
@@ -138,6 +106,25 @@
 			{
 				"indexed": true,
 				"internalType": "address",
+				"name": "cardOwner",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			}
+		],
+		"name": "CardRegistered",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
 				"name": "oldM",
 				"type": "address"
 			},
@@ -157,17 +144,17 @@
 			{
 				"indexed": true,
 				"internalType": "address",
-				"name": "oldOracle",
+				"name": "oldD",
 				"type": "address"
 			},
 			{
 				"indexed": true,
 				"internalType": "address",
-				"name": "newOracle",
+				"name": "newD",
 				"type": "address"
 			}
 		],
-		"name": "OracleChanged",
+		"name": "DeployerChanged",
 		"type": "event"
 	},
 	{
@@ -214,6 +201,25 @@
 			{
 				"indexed": true,
 				"internalType": "address",
+				"name": "oldH",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "newH",
+				"type": "address"
+			}
+		],
+		"name": "QuoteHelperChanged",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
 				"name": "card",
 				"type": "address"
 			},
@@ -231,6 +237,31 @@
 			}
 		],
 		"name": "RedeemExecuted",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "bool",
+				"name": "isNft",
+				"type": "bool"
+			}
+		],
+		"name": "TokenIdIssued",
 		"type": "event"
 	},
 	{
@@ -261,12 +292,44 @@
 	},
 	{
 		"inputs": [],
+		"name": "_aaFactory",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
 		"name": "aaFactory",
 		"outputs": [
 			{
 				"internalType": "address",
 				"name": "",
 				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "cardOwner",
+				"type": "address"
+			}
+		],
+		"name": "cardsOfOwner",
+		"outputs": [
+			{
+				"internalType": "address[]",
+				"name": "",
+				"type": "address[]"
 			}
 		],
 		"stateMutability": "view",
@@ -293,60 +356,31 @@
 	{
 		"inputs": [
 			{
-				"internalType": "string",
-				"name": "uri",
-				"type": "string"
+				"internalType": "address",
+				"name": "cardOwner",
+				"type": "address"
 			},
 			{
-				"internalType": "enum BeamioCurrency.CurrencyType",
-				"name": "cur",
+				"internalType": "uint8",
+				"name": "currency",
 				"type": "uint8"
 			},
 			{
 				"internalType": "uint256",
-				"name": "price",
+				"name": "priceInCurrencyE18",
 				"type": "uint256"
+			},
+			{
+				"internalType": "bytes",
+				"name": "initCode",
+				"type": "bytes"
 			}
 		],
-		"name": "createCardCollection",
+		"name": "createCardCollectionWithInitCode",
 		"outputs": [
 			{
 				"internalType": "address",
-				"name": "",
-				"type": "address"
-			}
-		],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "to",
-				"type": "address"
-			},
-			{
-				"internalType": "string",
-				"name": "uri",
-				"type": "string"
-			},
-			{
-				"internalType": "enum BeamioCurrency.CurrencyType",
-				"name": "cur",
-				"type": "uint8"
-			},
-			{
-				"internalType": "uint256",
-				"name": "price",
-				"type": "uint256"
-			}
-		],
-		"name": "createCardCollectionFor",
-		"outputs": [
-			{
-				"internalType": "address",
-				"name": "",
+				"name": "card",
 				"type": "address"
 			}
 		],
@@ -367,31 +401,40 @@
 		"type": "function"
 	},
 	{
+		"inputs": [],
+		"name": "deployer",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "coll",
+				"name": "",
 				"type": "address"
 			},
 			{
-				"internalType": "bytes",
-				"name": "data",
-				"type": "bytes"
-			},
-			{
-				"internalType": "bytes32",
-				"name": "secret",
-				"type": "bytes32"
-			},
-			{
-				"internalType": "bytes",
-				"name": "sig",
-				"type": "bytes"
+				"internalType": "address",
+				"name": "",
+				"type": "address"
 			}
 		],
-		"name": "executeAdminAction",
-		"outputs": [],
-		"stateMutability": "nonpayable",
+		"name": "isCardOfOwner",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
 		"type": "function"
 	},
 	{
@@ -414,13 +457,93 @@
 		"type": "function"
 	},
 	{
-		"inputs": [],
-		"name": "oracle",
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			}
+		],
+		"name": "isTokenIdIssued",
 		"outputs": [
 			{
-				"internalType": "contract IBeamioOracle",
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			},
+			{
+				"internalType": "bool",
+				"name": "isNft",
+				"type": "bool"
+			}
+		],
+		"name": "issueTokenId",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "cardOwner",
+				"type": "address"
+			}
+		],
+		"name": "latestCardOfOwner",
+		"outputs": [
+			{
+				"internalType": "address",
 				"name": "",
 				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "nextFungibleId",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "nextNftId",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
 			}
 		],
 		"stateMutability": "view",
@@ -442,22 +565,35 @@
 	{
 		"inputs": [
 			{
-				"internalType": "address",
-				"name": "card",
-				"type": "address"
+				"internalType": "uint8",
+				"name": "cur",
+				"type": "uint8"
 			},
 			{
 				"internalType": "uint256",
-				"name": "pts",
+				"name": "amount6",
 				"type": "uint256"
 			}
 		],
-		"name": "quotePointsInUSDC6",
+		"name": "quoteCurrencyAmountInUSDC6",
 		"outputs": [
 			{
 				"internalType": "uint256",
 				"name": "",
 				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "quoteHelper",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
 			}
 		],
 		"stateMutability": "view",
@@ -509,7 +645,25 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "newFactory",
+				"name": "cardOwner",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			}
+		],
+		"name": "registerExistingCard",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "f",
 				"type": "address"
 			}
 		],
@@ -522,11 +676,24 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "_oracle",
+				"name": "d",
 				"type": "address"
 			}
 		],
-		"name": "setOracle",
+		"name": "setDeployer",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "h",
+				"type": "address"
+			}
+		],
+		"name": "setQuoteHelper",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
@@ -548,24 +715,16 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "newOwner",
-				"type": "address"
-			}
-		],
-		"name": "transferOwner",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "bytes32",
 				"name": "",
-				"type": "bytes32"
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
 			}
 		],
-		"name": "usedMetaSecrets",
+		"name": "tokenIdIssued",
 		"outputs": [
 			{
 				"internalType": "bool",
@@ -574,6 +733,19 @@
 			}
 		],
 		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "newOwner",
+				"type": "address"
+			}
+		],
+		"name": "transferOwner",
+		"outputs": [],
+		"stateMutability": "nonpayable",
 		"type": "function"
 	}
 ]

@@ -279,3 +279,68 @@ checkAndVerify().catch((e) => {
 //upgradeActionFacet("0xFE482f7175999937f16E1B515aD8e1dD672211eA").catch(console.error);
 
 
+
+
+
+
+/**
+ * 1) 合约部署顺序（推荐顺序）
+A. 部署 Oracle（如果你已经有，就跳过）
+
+BeamioQuoteHelperV07 依赖一个 IBeamioOracle，也就是一个 getRate(uint8) 的 Oracle 合约。
+
+如果你已有 Oracle 地址：直接用它
+
+如果没有：你需要先部署一个简单 Oracle（测试用），或者把 QuoteHelper 的 oracle 参数先填你已有的实现
+
+⚠️ 注意：你给的 BeamioQuoteHelperV07 里 setOracle() 没有权限控制，正式环境建议加 onlyOwner（但这是你自己的选择）
+
+B. 部署 BeamioQuoteHelperV07
+
+在 Remix 里选中合约 BeamioQuoteHelperV07
+
+构造参数：
+
+_oracle：你 Oracle 合约地址
+
+部署成功记下地址：quoteHelper
+
+C. 部署 BeamioUserCardDeployerV07
+
+直接部署，无构造参数。
+
+部署成功记下地址：deployer
+
+部署后你需要调用一次：
+setFactoryOnce(factoryAddress)（等 Factory 部署完再回头设置）
+
+D. 部署 BeamioUserCardFactoryPaymasterV07
+
+构造参数有 4 个：
+
+redeemModule_：你的 Redeem 模块地址（delegatecall 用）
+
+quoteHelper_：上面部署的 quoteHelper
+
+deployer_：上面部署的 deployer
+
+aaFactory_：你的 AA AccountFactory 地址（实现 beamioAccountOf(eoa) + isBeamioAccount(account)）
+
+部署成功记下地址：factory
+
+E. 回去设置 Deployer 的 factory
+
+打开 BeamioUserCardDeployerV07 的已部署实例，调用：
+
+setFactoryOnce(factory)
+
+✅ 只允许一次，之后不能改（符合你设计）
+
+F. 部署 BeamioUserCardGatewayExecutorV07
+
+构造参数：
+
+factory_：上面的 factory
+
+部署成功记下地址：gatewayExecutor
+ */
