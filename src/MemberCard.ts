@@ -1046,7 +1046,7 @@ export const purchasingCardProcess = async () => {
 
 		const isMember = (nfts?.length > 0) && (pointsBalance > 0n)
 		
-		logger(Colors.green(`✅ purchasingCardProcess ${obj.from} AA Account: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
+		logger(Colors.green(`✅ purchasingCardProcess cardAddress = ${cardAddress} ${obj.from} AA Account: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
 
 
 
