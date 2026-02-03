@@ -974,7 +974,7 @@ async function setTier(ownerPk: string, cardAddr: string) {
 
 const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
-const CCSACardAddressNew = '0xe7e0743dcd0834c1b325286a7bc1d435419c88b9'.toLowerCase()
+const CCSACardAddressNew = '0x55eeeb3f4b49f1949681b97d814df71425c919bc'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
@@ -1590,19 +1590,36 @@ const testBeamioCard = async (cardAddress: string) => {
 	
 }
 
+/**
+ * 
+ * @returns {
+{
+  "fromEOA": "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
+  "id": "0",
+  "maxAmount": "210000",
+  "validAfter": "1770153039",
+  "validBefore": "1770153459",
+  "nonce": "0xdc6661cd504714ad169b77feab2fc11b29ea87edf358cff15fa7b471f7650cff",
+  "signature": "0x0066a92ae716006743d89d004a43a310acf42a55e9457e9041487f67f7da36904be18238844138c30f74108714786fca04f81e7fba1acadcaf6c38423fd6ed0f1b",
+  "digest": "0x4b6ce22b37d610531ca721d73b07662ccfc17a241a744e836497436514ae1113"
+}
+}
+}
+ */
+
 export const forward1155ERC3009SignatureData = async (
 ) => {
 	const sign = {
 		fromEOA: "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
 		id: "0",
-		to: "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
-		amount: "9999",
-		maxAmount: "9999",
-		validAfter: "1770128158",
-		validBefore: "1770131758",
-		nonce: "0xa798efbb30f83918c8c1fca7e02fd97c7d3d4ea0547c6097a75b7bfecd12481f",
-		signature: "0x996b9e1477eeb8c7b98df8cbce0b88c733019b72709097997d55096959f8baef2b53a972dc348e1cfe7bf9f2ccd569c61b5cc4b4ff3186839e232ce2aee3461b1c",
-		digest: "0x58e4f8c1e0b94de595c269d286bbd608e759e19b1505aa6c06ef28605629d17c",
+		to: "0x863D5B7DaD9C595138e209d932511Be4E168A660",
+		amount: "10000",
+		maxAmount: "210000",
+		validAfter: "1770153039",
+		validBefore: "1770153459",
+		nonce: "0xdc6661cd504714ad169b77feab2fc11b29ea87edf358cff15fa7b471f7650cff",
+		signature: "0x0066a92ae716006743d89d004a43a310acf42a55e9457e9041487f67f7da36904be18238844138c30f74108714786fca04f81e7fba1acadcaf6c38423fd6ed0f1b",
+		digest: "0x4b6ce22b37d610531ca721d73b07662ccfc17a241a744e836497436514ae1113",
 		cardAddress: CCSACardAddressNew,
 	  };
 	
@@ -1619,6 +1636,89 @@ export const forward1155ERC3009SignatureData = async (
 	  console.log("caller:", caller);
 	  console.log("factory.owner:", await factory.owner());
 	  console.log("factory.isPaymaster(caller):", await factory.isPaymaster(caller));
+
+
+	  const factoryAddr = await factory.getAddress()
+const chainId = (await provider.getNetwork()).chainId
+
+const abi = ethers.AbiCoder.defaultAbiCoder()
+const encoded = abi.encode(
+  ["string","address","address","uint256","address","uint256","uint256","uint256","uint256","bytes32"],
+  [
+    "OpenTransfer",
+    factoryAddr,                 // factoryGateway()
+    sign.cardAddress,            // address(this) = card
+    chainId,                     // block.chainid
+    sign.fromEOA,                // fromEOA
+    BigInt(sign.id),             // id
+    BigInt(sign.maxAmount),      // maxAmount
+    BigInt(sign.validAfter),
+    BigInt(sign.validBefore),
+    sign.nonce
+  ]
+)
+
+const hash = ethers.keccak256(encoded)
+
+// 合约用 toEthSignedMessageHash + ECDSA.recover
+const recovered = ethers.verifyMessage(ethers.getBytes(hash), sign.signature)
+
+console.log("local.hash:", hash)
+console.log("local.recovered:", recovered)
+console.log("expect fromEOA:", sign.fromEOA)
+
+
+const card = new ethers.Contract(sign.cardAddress, [
+	"function accountOf(address) view returns (address)",
+	"function accounts(address) view returns (address)",
+	"function resolveAccount(address) view returns (address)",
+	"function balanceOf(address,uint256) view returns (uint256)",
+	"function isTransferWhitelisted(address) view returns (bool)",
+	"function transferWhitelist(address) view returns (bool)",
+	"function POINTS_ID() view returns (uint256)",
+  ], provider)
+  
+  async function tryCall(label: string, fn: () => Promise<any>) {
+	try {
+	  const v = await fn()
+	  console.log(label, v)
+	  return v
+	} catch {}
+  }
+  
+  const fromAccount =
+	(await tryCall("accountOf", () => card.accountOf(sign.fromEOA))) ??
+	(await tryCall("accounts", () => card.accounts(sign.fromEOA))) ??
+	(await tryCall("resolveAccount", () => card.resolveAccount(sign.fromEOA))) ??
+	sign.fromEOA
+  
+  const toAccount =
+	(await tryCall("accountOf(to)", () => card.accountOf(sign.to))) ??
+	(await tryCall("accounts(to)", () => card.accounts(sign.to))) ??
+	(await tryCall("resolveAccount(to)", () => card.resolveAccount(sign.to))) ??
+	sign.to
+  
+  console.log("fromAccount", fromAccount)
+  console.log("toAccount", toAccount)
+  
+  await tryCall("wl(from)", () => card.isTransferWhitelisted(fromAccount))
+  await tryCall("wl(from) alt", () => card.transferWhitelist(fromAccount))
+  await tryCall("wl(to)", () => card.isTransferWhitelisted(toAccount))
+  await tryCall("wl(to) alt", () => card.transferWhitelist(toAccount))
+  
+  console.log("bal(from,id)", (await card.balanceOf(fromAccount, 0)).toString())
+
+
+
+  const aaF: string = (await DeployingSmartAccount(sign.fromEOA, env.aaAccountFactoryPaymaster))?.accountAddress
+  const aaT: string = (await DeployingSmartAccount(sign.to,  env.aaAccountFactoryPaymaster))?.accountAddress
+
+  const pid = await card.POINTS_ID()
+
+console.log("aaF:", aaF)
+console.log("aaT:", aaT)
+console.log("erc1155 bal(aa,pid):", (await card.balanceOf(aaF, pid)).toString())
+console.log("erc1155 bal(eoa,pid):", (await card.balanceOf(aaT, pid)).toString())
 	
 	  // ✅ 先 staticCall 看到真实 revert
 	  try {
@@ -1665,3 +1765,4 @@ export const forward1155ERC3009SignatureData = async (
 	
 }
 
+// forward1155ERC3009SignatureData()
