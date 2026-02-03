@@ -27,27 +27,27 @@
 	},
 	{
 		"inputs": [],
-		"name": "AlreadyRegistered",
+		"name": "BM_NotAuthorized",
 		"type": "error"
 	},
 	{
 		"inputs": [],
-		"name": "BadDeployedCard",
+		"name": "BM_ZeroAddress",
 		"type": "error"
 	},
 	{
 		"inputs": [],
-		"name": "InvalidRedeemHash",
+		"name": "F_AlreadyRegistered",
 		"type": "error"
 	},
 	{
 		"inputs": [],
-		"name": "NotAuthorized",
+		"name": "F_BadDeployedCard",
 		"type": "error"
 	},
 	{
 		"inputs": [],
-		"name": "ZeroAddress",
+		"name": "F_InvalidRedeemHash",
 		"type": "error"
 	},
 	{
@@ -163,6 +163,55 @@
 			{
 				"indexed": true,
 				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "fromEOA",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "toEOA",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "amount",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "maxAmount",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "bytes32",
+				"name": "nonce",
+				"type": "bytes32"
+			}
+		],
+		"name": "OpenTransferRelayed",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
 				"name": "oldOwner",
 				"type": "address"
 			},
@@ -226,7 +275,7 @@
 			{
 				"indexed": true,
 				"internalType": "address",
-				"name": "user",
+				"name": "userEOA",
 				"type": "address"
 			},
 			{
@@ -362,7 +411,7 @@
 			},
 			{
 				"internalType": "uint8",
-				"name": "currency",
+				"name": "currency_",
 				"type": "uint8"
 			},
 			{
@@ -632,11 +681,69 @@
 			},
 			{
 				"internalType": "address",
-				"name": "user",
+				"name": "userEOA",
 				"type": "address"
 			}
 		],
 		"name": "redeemForUser",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "cardAddr",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "fromEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "toEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "maxAmount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validAfter",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validBefore",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "nonce",
+				"type": "bytes32"
+			},
+			{
+				"internalType": "bytes",
+				"name": "sig",
+				"type": "bytes"
+			}
+		],
+		"name": "redeemOpenTransfer",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"

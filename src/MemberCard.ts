@@ -23,7 +23,7 @@ import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 
 const memberCardBeamioFactoryPaymasterV1 = '0x05e6a8f53b096f44928670C431F78e1F75E232bA'
 
-const BeamioUserCardFactoryPaymasterV2 = '0xf253739a626acBAc06FCD715921C921d5Bbe728F'
+const BeamioUserCardFactoryPaymasterV2 = '0x4637C267f5096C11A658cf0b0Dcdb8a89ce2F7EB'
 const BeamioAAAccountFactoryPaymaster = '0xF036E570D5811a16A29C072528b7ceBF9933f7BD'
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
@@ -492,94 +492,94 @@ const OLD_ERROR_SELECTORS: Record<string, string> = {
 	currencyType: CurrencyType,
 	currencyToPointValue: string
   ) => {
-	const uri = 'https://api.beamio.io/metadata/default_card.json'
-  const factoryAddress = BeamioUserCardFactoryPaymasterV2
-  const redeemModule = '0x1EC7540EbC03bcEBEc0C5f981C3D91100d206F5F'
-
-  const SC = Settle_ContractPool[0]
-  const signer = SC.walletBase
-
-  const priceE18 = ethers.parseUnits(currencyToPointValue, 18)
-  const currencyId = CurrencyMap[currencyType] // number
-
-  const abi = BeamioUserCardArtifact.abi ?? BeamioUserCardABI
-  if (!abi) throw new Error('Missing ABI')
-
-  const bytecodeRaw = BeamioUserCardArtifact.bytecode
-  if (!bytecodeRaw) throw new Error('Missing bytecode in artifact')
-
-  const bytecode = bytecodeRaw.startsWith('0x') ? bytecodeRaw : `0x${bytecodeRaw}`
-  if (/__\$\w+\$__|__\w+__/.test(bytecode)) {
-    throw new Error('Bytecode contains unlinked libraries placeholders')
-  }
-
-  const factoryDeploy = new ethers.ContractFactory(abi, bytecode, signer)
-
-  const deployTx = await factoryDeploy.getDeployTransaction(
-    uri,
-    user,
-    factoryAddress,
-    redeemModule,
-    currencyId,
-    priceE18
-  )
-
-  const initCodeHex = deployTx.data as string
-  if (!initCodeHex || initCodeHex.length <= 2) throw new Error('initCode empty')
-
-  console.log('✅ initCodeHex length:', initCodeHex.length)
-  console.log('✅ initCodeHex prefix:', initCodeHex.slice(0, 10))
-
-  const factory = new ethers.Contract(factoryAddress, SC.baseFactoryPaymaster.interface, signer)
-
-  const signerAddr = await signer.getAddress()
-const baseProvider = signer.provider!
-
-console.log('chainId:', (await baseProvider.getNetwork()).chainId)
-
-// 关键：部署模拟（不经过 Deployer）
-try {
-  const g = await baseProvider.estimateGas({
-    from: signerAddr,
-    data: initCodeHex
-  })
-  console.log('✅ direct create estimateGas ok:', g.toString())
-} catch (e: any) {
-  const data = e?.data || e?.error?.data || e?.info?.error?.data
-  const msg = e?.shortMessage || e?.message || String(e)
-  console.error('❌ direct create estimateGas FAILED')
-  console.error('message:', msg)
-  console.error('revert data:', data)
-  throw e
-}
-
-  try {
-    await factory.createCardCollectionWithInitCode.staticCall(
-      user,
-      currencyId,
-      priceE18,
-      initCodeHex,
-      { gasLimit: 6_500_000n }
-    )
-  } catch (e: any) {
-    const data = e?.data || e?.error?.data || e?.info?.error?.data
-    console.error('❌ staticCall revert data:', data)
-    throw e
-  }
-
-  const tx = await factory.createCardCollectionWithInitCode(
-    user,
-    currencyId,
-    priceE18,
-    initCodeHex,
-    { gasLimit: 6_500_000n }
-  )
-
-  const rc = await tx.wait()
-  return { txHash: tx.hash, receipt: rc }
+	const uri = "https://api.beamio.io/metadata/default_card.json";
   
-	
-  }
+	// ===== your existing config =====
+	const SC = Settle_ContractPool[0];
+	const signer = SC.walletBase;
+	const baseProvider = signer.provider!;
+	const signerAddr = await signer.getAddress();
+  
+	// ✅ MUST be BeamioUserCardFactoryPaymasterV07 address (the trusted gateway)
+	const factoryAddress = BeamioUserCardFactoryPaymasterV2;
+  
+	// ===== BeamioUserCard ctor:
+	// constructor(string uri, uint8 currency, uint256 priceE18, address initialOwner, address gateway)
+	// gateway == factoryAddress (BeamioUserCardFactoryPaymasterV07)
+	const priceE18 = ethers.parseUnits(currencyToPointValue, 18);
+	const currencyId = CurrencyMap[currencyType]; // uint8/number
+  
+	const abi = BeamioUserCardArtifact.abi ?? BeamioUserCardABI;
+	if (!abi) throw new Error("Missing ABI");
+  
+	const bytecodeRaw = BeamioUserCardArtifact.bytecode;
+	if (!bytecodeRaw) throw new Error("Missing bytecode in artifact");
+  
+	const bytecode = bytecodeRaw.startsWith("0x") ? bytecodeRaw : `0x${bytecodeRaw}`;
+	if (/__\$\w+\$__|__\w+__/.test(bytecode)) {
+	  throw new Error("Bytecode contains unlinked libraries placeholders");
+	}
+  
+	// ===== build initCode for DeployerV07.deploy(initCode) =====
+	const cardFactory = new ethers.ContractFactory(abi, bytecode, signer);
+  
+	// ✅ 5 params: uri, currencyId, priceE18, initialOwner(user), gateway(factoryAddress)
+	const deployTx = await cardFactory.getDeployTransaction(
+	  uri,
+	  currencyId,
+	  priceE18,
+	  user,
+	  factoryAddress
+	);
+  
+	const initCodeHex = deployTx.data as string;
+	if (!initCodeHex || initCodeHex.length <= 2) throw new Error("initCode empty");
+  
+	const net = await baseProvider.getNetwork();
+	console.log("chainId:", net.chainId.toString());
+	console.log("deployer signer:", signerAddr);
+	console.log("factoryAddress:", factoryAddress);
+	console.log("✅ initCodeHex length:", initCodeHex.length);
+	console.log("✅ initCodeHex prefix:", initCodeHex.slice(0, 10));
+  
+	// ===== call FactoryPaymasterV07.createCardCollectionWithInitCode =====
+	const factory = new ethers.Contract(
+	  factoryAddress,
+	  SC.baseFactoryPaymaster.interface, // must include createCardCollectionWithInitCode(...)
+	  signer
+	);
+  
+	// ✅ correct simulation: staticCall through factory (so it goes through DeployerV07 + checks)
+	try {
+	  await factory.createCardCollectionWithInitCode.staticCall(
+		user,
+		currencyId,
+		priceE18,
+		initCodeHex,
+		{ gasLimit: 6_500_000n }
+	  );
+	  console.log("✅ factory staticCall ok");
+	} catch (e: any) {
+	  const data = e?.data || e?.error?.data || e?.info?.error?.data;
+	  const msg = e?.shortMessage || e?.message || String(e);
+	  console.error("❌ factory staticCall FAILED");
+	  console.error("message:", msg);
+	  console.error("revert data:", data);
+	  throw e;
+	}
+  
+	// ✅ send tx
+	const tx = await factory.createCardCollectionWithInitCode(
+	  user,
+	  currencyId,
+	  priceE18,
+	  initCodeHex,
+	  { gasLimit: 6_500_000n }
+	);
+  
+	const rc = await tx.wait();
+	return { txHash: tx.hash, receipt: rc };
+  };
   
 
  
@@ -974,7 +974,7 @@ async function setTier(ownerPk: string, cardAddr: string) {
 
 const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
-const CCSACardAddressNew = '0x241B97Ee83bF8664D42c030447A63d209c546867'.toLowerCase()
+const CCSACardAddressNew = '0x46c66544ccde8cfe6435b53a41883f5392d99c0b'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
@@ -1343,7 +1343,7 @@ const BeamioAAAccount = '0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61'
 
 const test = async () => {
 	await new Promise(executor => setTimeout(executor, 3000))
-	//await DeployingSmartAccount(BeamioAAAccount, Settle_ContractPool[0].aaAccountFactoryPaymaster)			//			0x241B97Ee83bF8664D42c030447A63d209c546867
+	// await DeployingSmartAccount(BeamioAAAccount, Settle_ContractPool[0].aaAccountFactoryPaymaster)			//			0x241B97Ee83bF8664D42c030447A63d209c546867
 	// for (let i = 0; i < Settle_ContractPool.length; i++) {
 	// 	await registerPayMasterForCardFactory(Settle_ContractPool[i].walletBase.address)
 	// 	await new Promise(executor => setTimeout(executor, 3000))
@@ -1351,22 +1351,13 @@ const test = async () => {
 
 	//		创建 新卡
 
-	// try {
-	// 	await setupDeployerFactory()
-	// } catch (e: any) {
-	// 	if (e.message.includes('already set')) {
-	// 		logger(Colors.yellow(`Deployer already configured: ${e.message}`))
-	// 	} else {
-	// 		throw e
-	// 	}
-	// }
 	
 	// 然后创建新卡
 	
-	const kkk = await develop1(BeamioAAAccount, 'CAD', '1')			//CCSA 新卡地址： 0x241B97Ee83bF8664D42c030447A63d209c546867   --> 0x73b61F3Fa7347a848D9DAFd31C4930212D2B341F
-	logger(inspect(kkk, false, 3, true));
+	// const kkk = await develop1(BeamioAAAccount, 'CAD', '1')			//CCSA 新卡地址： 0x241B97Ee83bF8664D42c030447A63d209c546867   --> 0x73b61F3Fa7347a848D9DAFd31C4930212D2B341F
+	// logger(inspect(kkk, false, 3, true));
 	//logger(inspect(kkk, false, 3, true))
-	//await initCardTest('0x863D5B7DaD9C595138e209d932511Be4E168A660', 'CAD', 1, { minX: 1 })				//			0x7Dd5423FCB4924dD27E82EbAd54F4C81c0C7e4F6		//		0x6068bc22e6b246f836369217e030bb2e83ebb071143dc80b0528f7b9366de07f
+	//await initCardTest('0x863D5B7DaD9C595138e209d932511Be4E168A660', 'CAD', 1, { minX: 1 })				//  0x46C66544cCDe8cFE6435b53a41883F5392d99C0b			0x7Dd5423FCB4924dD27E82EbAd54F4C81c0C7e4F6		//	
 	//getLatestCard(Settle_ContractPool[0], '0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E')
 	//await USDC2Token(cardOwnerPrivateKey, 0.01, '0x7Dd5423FCB4924dD27E82EbAd54F4C81c0C7e4F6')
 	//debugMembership('0x863D5B7DaD9C595138e209d932511Be4E168A660','0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E', )
@@ -1575,3 +1566,40 @@ export const getLatest20Actions = async (
 
 
 //   getLatest20Actions()
+/**
+ * 
+ * {
+    "fromEOA": "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
+    "id": "0",
+    "maxAmount": "209999",
+    "validAfter": "1770108124",
+    "validBefore": "1770111724",
+    "nonce": "0xdfd00c98e15fec9a8ce8b5e5e3fd5b8372bef2d4d5435f7afcc64440982aff53",
+    "signature": "0x184382c3475135d005d92dcc19960171ad7ae75561d6c6b80612095d29c0a96748b66414af3592b2ea02814c8ecfcf048eb153b7c41b50d14ee9c3e70948736d1b",
+    "digest": "0x719645bec9cdc2181cc45364004ea2070f9e53dc12e83cc83c4ec9a271f6a724"
+}
+ */
+
+// export const forward1155ERC3009SignatureData = async (
+// 	cardAddress: string,
+// 	fromEOA: string,
+// 	validAfter: string,
+// 	validBefore: string,
+// 	nonce: string,
+// 	maxAmount: string,
+// 	signature: string,
+// 	digest: string,
+// 	to
+// ) => {
+// 	const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase);
+// 	const signature1 = await card.buyPointsWith3009Authorization(
+// 		from,
+// 		usdcAmount,
+// 		validAfter,
+// 		validBefore,
+// 		nonce,
+// 		userSignature,
+// 		0
+// 	)
+// 	return signature;
+// }
