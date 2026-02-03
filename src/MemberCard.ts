@@ -996,6 +996,7 @@ const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency
 		parentHash
 	}
 
+	logger(Colors.green(`✅ cardNote cardAddress = ${cardAddress} == '${CCSACardAddressNew}' isMember = ${isMember} usdcAmount = ${usdcAmount} currencyAmount = ${currencyAmount} parentHash = ${parentHash}`));
 
 	switch (cardAddress.toLowerCase()) {
 		case CCSACardAddressNew:{
