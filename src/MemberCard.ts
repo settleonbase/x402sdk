@@ -970,7 +970,7 @@ async function setTier(ownerPk: string, cardAddr: string) {
 
 const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
-const CCSACardAddressNew = '0x7Dd5423FCB4924dD27E82EbAd54F4C81c0C7e4F6'.toLowerCase()
+const CCSACardAddressNew = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
@@ -1358,6 +1358,7 @@ const test = async () => {
 	// 然后创建新卡
 	
 	const kkk = await develop1(BeamioAAAccount, 'CAD', '1')
+	logger(Colors.green(`✅ develop1 BeamioAAAccount = ${BeamioAAAccount} kkk = ${kkk}`));
 	//logger(inspect(kkk, false, 3, true))
 	//await initCardTest('0x863D5B7DaD9C595138e209d932511Be4E168A660', 'CAD', 1, { minX: 1 })				//			0x7Dd5423FCB4924dD27E82EbAd54F4C81c0C7e4F6		//		0x6068bc22e6b246f836369217e030bb2e83ebb071143dc80b0528f7b9366de07f
 	//getLatestCard(Settle_ContractPool[0], '0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E')
@@ -1369,7 +1370,7 @@ const test = async () => {
 	// logger(inspect(rates, false, 3, true))	
 }
 
-// test()
+test()
 
 
 export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
