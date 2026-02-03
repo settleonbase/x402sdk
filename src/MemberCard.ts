@@ -974,7 +974,7 @@ async function setTier(ownerPk: string, cardAddr: string) {
 
 const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
-const CCSACardAddressNew = '0xc536e833209d1b303727714990860261bb56e0b4'.toLowerCase()
+const CCSACardAddressNew = '0xa10d5faec0d0c67afe9c1ac6c01bfa76869f79ea'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
