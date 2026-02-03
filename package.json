@@ -27,8 +27,7 @@
 		"@nomicfoundation/hardhat-toolbox": "^6.1.0",
 		"@types/express": "^5.0.5",
 		"@types/node": "^24.9.2",
-		"@types/pg": "^8.15.6",
-		"hardhat": "^3.1.6"
+		"@types/pg": "^8.15.6"
 	},
 	"dependencies": {
 		"@coinbase/cdp-sdk": "^1.39.0",
