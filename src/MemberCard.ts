@@ -974,7 +974,7 @@ async function setTier(ownerPk: string, cardAddr: string) {
 
 const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
-const CCSACardAddressNew = '0x40f1384b2f0C7C2d864C35d4d4b192eFc8D74a78'.toLowerCase()
+const CCSACardAddressNew = '0xc536e833209d1b303727714990860261bb56e0b4'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
@@ -1367,7 +1367,7 @@ const test = async () => {
 	// logger(inspect(rates, false, 3, true))	
 }
 
-test()
+// test()
 
 
 export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
