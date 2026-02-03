@@ -1,0 +1,318 @@
+[
+	{
+		"inputs": [],
+		"name": "BM_CallFailed",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "BM_InvalidSecret",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "BM_NotAuthorized",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "BM_ZeroAddress",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "ECDSAInvalidSignature",
+		"type": "error"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "length",
+				"type": "uint256"
+			}
+		],
+		"name": "ECDSAInvalidSignatureLength",
+		"type": "error"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bytes32",
+				"name": "s",
+				"type": "bytes32"
+			}
+		],
+		"name": "ECDSAInvalidSignatureS",
+		"type": "error"
+	},
+	{
+		"inputs": [],
+		"name": "GX_SecretUsed",
+		"type": "error"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "coll",
+				"type": "address"
+			},
+			{
+				"internalType": "bytes",
+				"name": "data",
+				"type": "bytes"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "secret",
+				"type": "bytes32"
+			},
+			{
+				"internalType": "bytes",
+				"name": "sig",
+				"type": "bytes"
+			}
+		],
+		"name": "executeAdminAction",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "cardAddr",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "userEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amount",
+				"type": "uint256"
+			}
+		],
+		"name": "faucetFor",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "cardAddr",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "userEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amount6",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validAfter",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validBefore",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "nonce",
+				"type": "bytes32"
+			},
+			{
+				"internalType": "bytes",
+				"name": "sig",
+				"type": "bytes"
+			}
+		],
+		"name": "faucetPurchaseFor",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "cardAddr",
+				"type": "address"
+			},
+			{
+				"internalType": "bool",
+				"name": "isNft",
+				"type": "bool"
+			},
+			{
+				"internalType": "uint64",
+				"name": "validUntil",
+				"type": "uint64"
+			},
+			{
+				"internalType": "uint64",
+				"name": "perClaimMax",
+				"type": "uint64"
+			},
+			{
+				"internalType": "uint128",
+				"name": "maxPerUser",
+				"type": "uint128"
+			},
+			{
+				"internalType": "uint128",
+				"name": "maxGlobal",
+				"type": "uint128"
+			},
+			{
+				"internalType": "bool",
+				"name": "enabled",
+				"type": "bool"
+			},
+			{
+				"internalType": "enum BeamioCurrency.CurrencyType",
+				"name": "cur",
+				"type": "uint8"
+			},
+			{
+				"internalType": "uint128",
+				"name": "priceInCurrency6",
+				"type": "uint128"
+			}
+		],
+		"name": "issueIdAndFreezeFaucetConfig",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "card",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "fromEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "toEOA",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "amount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "maxAmount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validAfter",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "validBefore",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "nonce",
+				"type": "bytes32"
+			},
+			{
+				"internalType": "bytes",
+				"name": "sig",
+				"type": "bytes"
+			}
+		],
+		"name": "redeemOpenTransfer",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "factory_",
+				"type": "address"
+			}
+		],
+		"stateMutability": "nonpayable",
+		"type": "constructor"
+	},
+	{
+		"inputs": [],
+		"name": "factory",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bytes32",
+				"name": "",
+				"type": "bytes32"
+			}
+		],
+		"name": "usedMetaSecrets",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	}
+]

@@ -19,6 +19,7 @@ import ActionABI from "./ABI/ActionABI.json";
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
+import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 
 const memberCardBeamioFactoryPaymasterV1 = '0x05e6a8f53b096f44928670C431F78e1F75E232bA'
 
@@ -26,6 +27,7 @@ const BeamioUserCardFactoryPaymasterV2 = '0xf253739a626acBAc06FCD715921C921d5Bbe
 const BeamioAAAccountFactoryPaymaster = '0xF036E570D5811a16A29C072528b7ceBF9933f7BD'
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
+const BeamioUserCardGatewayAddress = '0x5b24729E66f13BaB19F763f7aE7A35C881D3d858'
 
 const BeamioTaskIndexerAddress = '0x083AE5AC063a55dBA769Ba71Cd301d5FC5896D5b'
 const DIAMOND = BeamioTaskIndexerAddress
@@ -49,6 +51,7 @@ let Settle_ContractPool: {
 	BeamioTaskDiamondAdmin: ethers.Contract
 	beamioConet: ethers.Contract
 	conetSC: ethers.Contract
+	BeamioUserCardGateway: ethers.Contract
 }[] = []
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -76,7 +79,7 @@ masterSetup.settle_contractAdmin.forEach(n => {
 	const BeamioTaskDiamondAdmin = new ethers.Contract(BeamioTaskIndexerAddress, AdminFacetABI, walletConet)
 	const beamioConet = new ethers.Contract(beamioConetAddress, beamioConetABI, walletConet)
 	const conetSC = new ethers.Contract(beamioConet, beamioConetABI, walletConet)
-
+	const BeamioUserCardGateway = new ethers.Contract(BeamioUserCardGatewayAddress, BeamioUserCardGatewayABI, walletBase)
 	Settle_ContractPool.push ({
 		baseFactoryPaymaster,
 		walletBase,
@@ -92,6 +95,7 @@ masterSetup.settle_contractAdmin.forEach(n => {
 		BeamioTaskDiamondAdmin,
 		beamioConet,
 		conetSC,
+		BeamioUserCardGateway
 	})
 
 })
@@ -964,13 +968,13 @@ async function setTier(ownerPk: string, cardAddr: string) {
   
 	console.log('tiersCount(after)=', (await card.getTiersCount()).toString())
 	console.log('tx=', tx.hash)
-  }
+}
   
   
 
 const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
-const CCSACardAddressNew = '0x73b61f3fa7347a848d9dafd31c4930212d2b341f'.toLowerCase()
+const CCSACardAddressNew = '0x241B97Ee83bF8664D42c030447A63d209c546867'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
@@ -1339,7 +1343,7 @@ const BeamioAAAccount = '0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61'
 
 const test = async () => {
 	await new Promise(executor => setTimeout(executor, 3000))
-	//await DeployingSmartAccount(BeamioAAAccount, Settle_ContractPool[0].aaAccountFactoryPaymaster)			//			0x88c99612ca7cd045177ce9273c62bd7f752cfff17780b501763365f87a31a607
+	//await DeployingSmartAccount(BeamioAAAccount, Settle_ContractPool[0].aaAccountFactoryPaymaster)			//			0x241B97Ee83bF8664D42c030447A63d209c546867
 	// for (let i = 0; i < Settle_ContractPool.length; i++) {
 	// 	await registerPayMasterForCardFactory(Settle_ContractPool[i].walletBase.address)
 	// 	await new Promise(executor => setTimeout(executor, 3000))
@@ -1359,8 +1363,8 @@ const test = async () => {
 	
 	// 然后创建新卡
 	
-	// const kkk = await develop1(BeamioAAAccount, 'CAD', '1')			CCSA 新卡地址：0x73b61F3Fa7347a848D9DAFd31C4930212D2B341F
-	// logger(inspect(kkk, false, 3, true));
+	const kkk = await develop1(BeamioAAAccount, 'CAD', '1')			//CCSA 新卡地址： 0x241B97Ee83bF8664D42c030447A63d209c546867   --> 0x73b61F3Fa7347a848D9DAFd31C4930212D2B341F
+	logger(inspect(kkk, false, 3, true));
 	//logger(inspect(kkk, false, 3, true))
 	//await initCardTest('0x863D5B7DaD9C595138e209d932511Be4E168A660', 'CAD', 1, { minX: 1 })				//			0x7Dd5423FCB4924dD27E82EbAd54F4C81c0C7e4F6		//		0x6068bc22e6b246f836369217e030bb2e83ebb071143dc80b0528f7b9366de07f
 	//getLatestCard(Settle_ContractPool[0], '0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E')
@@ -1372,7 +1376,7 @@ const test = async () => {
 	// logger(inspect(rates, false, 3, true))	
 }
 
-test()
+// test()
 
 
 export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
