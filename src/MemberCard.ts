@@ -974,7 +974,7 @@ async function setTier(ownerPk: string, cardAddr: string) {
 
 const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
-const CCSACardAddressNew = '0xdde5f4581996cff79934b416791cd910833b6e72'.toLowerCase()
+const CCSACardAddressNew = '0x71e36b58fc9a3fecdff5a40d6d44a47d6c3b973e'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
@@ -1403,7 +1403,46 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 	return { success: true, message: 'Card purchased successfully!' }
 }
 
-
+export async function addWhitelistViaGov({
+		
+		cardAddr,
+		targetAddr,
+		allowed
+}: {
+		
+		cardAddr: string
+		targetAddr: string
+		allowed: boolean
+	}) {
+		const card = new ethers.Contract(cardAddr, BeamioUserCardArtifact.abi, Settle_ContractPool[0].walletBase)
+	
+		// 0xe2316652 => _setTransferWhitelist(address,bool)
+		const selector = "0xe2316652"
+		const v1 = allowed ? 1n : 0n
+	
+		// 1) 先静态拿 proposalId（避免读 event）
+		const proposalId: bigint = await card.createProposal.staticCall(
+			selector,
+			targetAddr,
+			v1,
+			0n,
+			0n
+		)
+	
+		// 2) 创建 proposal（paymaster 出 gas）
+		const tx1 = await card.createProposal(selector, targetAddr, v1, 0n, 0n)
+		await tx1.wait()
+	
+		// 3) approve（如果 threshold==1，会在 _approve 里直接 _execute）
+		const tx2 = await card.approveProposal(proposalId)
+		await tx2.wait()
+	
+		return {
+			proposalId: proposalId.toString(),
+			txCreate: tx1.hash,
+			txApprove: tx2.hash
+		}
+	}
 
 
 export const quoteUSDCForPoints = async (
@@ -1766,5 +1805,12 @@ console.log("erc1155 bal(eoa,pid):", (await card.balanceOf(aaT, pid)).toString()
 	
 	
 }
+
+// addWhitelistViaGov({
+// 	cardAddr: CCSACardAddressNew,
+// 	targetAddr: "0xD2d37BBa75Be722F3a725111d4e2ebAf16e034E1",
+// 	allowed: true
+// })
+
 
 // forward1155ERC3009SignatureData()
