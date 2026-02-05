@@ -21,8 +21,10 @@ import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 
+/** @deprecated 旧版，已不再使用；当前使用 BeamioUserCardFactoryPaymasterV2 */
 const memberCardBeamioFactoryPaymasterV1 = '0x05e6a8f53b096f44928670C431F78e1F75E232bA'
 
+/** Base 主网新部署：与 config/base-addresses.ts、deployments/BASE_MAINNET_FACTORIES.md 一致 */
 const BeamioUserCardFactoryPaymasterV2 = '0x7Ec828BAbA1c58C5021a6E7D29ccDDdB2d8D84bd'
 const BeamioAAAccountFactoryPaymaster = '0xFD48F7a6bBEb0c0C1ff756C38cA7fE7544239767'
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
@@ -201,74 +203,72 @@ const registerPayMasterForAAFactory = async (payMasterAddress: string) => {
     }
 }
 
+/**
+ * 为 EOA 确保存在 AA 账户（purchasingCardProcess 等流程的依赖）。
+ * 约定：每个 EOA 仅拥有 index 为 0 的一个 AA 账户；若已存在则直接返回其地址，否则由 Paymaster 创建。
+ */
 const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promise<{ accountAddress: string, alreadyExisted: boolean }> => {
-	
+	const INDEX_AA_PER_EOA = 0n
+
 	try {
-		// 3. 预测账户地址 (可选，用于在创建前告诉用户地址)
 		const creatorAddress = wallet
-		
-		const index = await SC.nextIndexOfCreator(creatorAddress);
-		// 使用 getFunction 并传入完整的函数签名或名称
-		const predictedAddress = await SC.getFunction("getAddress(address,uint256)")(
-			creatorAddress, 
-			0
-		);
+		// nextIndexOfCreator = 当前「下一个」要分配的 index：0 表示尚无账户，1 表示已有 index 0 的账户
+		const nextIndex = await SC.nextIndexOfCreator(creatorAddress)
+		const getAddressFn = SC.getFunction('getAddress(address,uint256)')
+		const predictedAddress = await getAddressFn(creatorAddress, INDEX_AA_PER_EOA)
 
-		logger(`预测 ${wallet} 将生成的账户地址: ${predictedAddress} ${index}`);
-	
-		
-		if (index > 0n) {
-			logger(`账户已存在`);
-			return { accountAddress: predictedAddress, alreadyExisted: true };
+		logger(`DeployingSmartAccount ${wallet} -> 预测地址: ${predictedAddress}, nextIndex: ${nextIndex}`)
+
+		if (nextIndex > 0n) {
+			// 已有至少一个账户，只认 index 0 的那一个
+			const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
+			const code = await provider.getCode(predictedAddress)
+			if (code === '0x' || code === '') {
+				logger(Colors.red(`DeployingSmartAccount: ${wallet} nextIndex=${nextIndex} 但 index=0 地址未部署，状态异常`))
+				return { accountAddress: '', alreadyExisted: false }
+			}
+			logger(`DeployingSmartAccount: 账户已存在 (index=0)`)
+			return { accountAddress: predictedAddress, alreadyExisted: true }
 		}
-		// 如果你是普通用户调用：
-		const tx = await SC.createAccountFor(wallet);
-		
-		// // 如果你是 Paymaster 身份调用 createAccountFor：
-		// // const tx = await factory.createAccountFor(creatorAddress);
-		console.log(`交易成功！哈希: ${tx.hash}`);
-		await tx.wait();
 
-		logger(`DeployingSmartAccount Creat AA Account for ${wallet} success!`, tx.hash)
-		return { accountAddress: predictedAddress, alreadyExisted: false };
-	} catch (error: any) {
-		logger(`DeployingSmartAccount error!`, error.message)
-		
+		// 尚无账户，由 Paymaster 创建（工厂会分配 index 0）
+		const tx = await SC.createAccountFor(wallet)
+		console.log(`交易成功！哈希: ${tx.hash}`)
+		await tx.wait()
+
+		logger(`DeployingSmartAccount 已为 ${wallet} 创建 AA (index=0)`, tx.hash)
+		return { accountAddress: predictedAddress, alreadyExisted: false }
+	} catch (error: unknown) {
+		const msg = error instanceof Error ? error.message : String(error)
+		logger(`DeployingSmartAccount error!`, msg)
 	}
-	return { accountAddress: '', alreadyExisted: false };
+	return { accountAddress: '', alreadyExisted: false }
 }
 
 
-export const checkSmartAccount = async (wallet: string) => {
+/**
+ * 检查 EOA 是否已拥有 index=0 的 AA 账户（与 DeployingSmartAccount 约定一致）。
+ */
+export const checkSmartAccount = async (wallet: string): Promise<false | { accountAddress: string; alreadyExisted: true }> => {
 	const SC = Settle_ContractPool[0]
-	if (!SC) {
-		return false
-	}
+	if (!SC) return false
 	try {
-		const currentIndex = await SC.baseFactoryPaymaster.nextIndexOfCreator(wallet)
-		
-            /**
-             * 注意：由于 ethers.Contract 实例自带 getAddress() 方法（用于获取合约地址），
-             * 与 ABI 中的 getAddress 函数重名。
-             * 因此必须通过 getFunction 明确指定调用合约逻辑。
-             */
-            const getAddressFn = SC.baseFactoryPaymaster.getFunction("getAddress(address,uint256)")
-            const predictedAddress = await getAddressFn(wallet, currentIndex)
+		const nextIndex = await SC.baseFactoryPaymaster.nextIndexOfCreator(wallet)
+		// 仅关心 index 0 的账户
+		const getAddressFn = SC.baseFactoryPaymaster.getFunction('getAddress(address,uint256)')
+		const predictedAddress = await getAddressFn(wallet, 0n)
 
-			// 2. 检查该地址是否已经在链上部署了代码
-            const code = await providerBaseBackup.getCode(predictedAddress)
-            const isDeployed = code !== "0x"
+		const code = await providerBaseBackup.getCode(predictedAddress)
+		const isDeployed = code !== '0x' && code !== ''
 
-            if (isDeployed) {
-                console.log(`[Beamio] Account ${wallet} already deployed at ${predictedAddress}`);
-                return { accountAddress: predictedAddress, alreadyExisted: true };
-            }
-
-			return false
-	} catch (error) {
+		if (nextIndex > 0n && isDeployed) {
+			console.log(`[Beamio] Account ${wallet} already deployed at ${predictedAddress} (index=0)`)
+			return { accountAddress: predictedAddress, alreadyExisted: true }
+		}
+		return false
+	} catch {
 		return false
 	}
-
 }
 
 const ensureSmartAccount = async (req: Request, res: Response) => {
@@ -967,9 +967,6 @@ async function setTier(ownerPk: string, cardAddr: string) {
 	console.log('tx=', tx.hash)
 }
   
-  
-
-const CCSACardAddressOld = '0xfB804b423d27968336263c0CEF581Fbcd51D93B9'.toLowerCase()
 
 const CCSACardAddressNew = '0x71e36b58fc9a3fecdff5a40d6d44a47d6c3b973e'.toLowerCase()
 
