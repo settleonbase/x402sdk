@@ -1628,45 +1628,45 @@ const makePayMeForForward1155ERC3009SignatureData = async (obj: forward1155ERC30
 	}
 	return payMe;
 }
-export const forward1155ERC3009SignatureDataProcess = async () => {
-	const obj = forward1155ERC3009SignatureDataPool.shift();
-	if (!obj) {
-		return;
-	}
-	try {
-		const result = await forward1155ERC3009SignatureData(obj);
-		logger(Colors.green(`✅ forward1155ERC3009SignatureDataProcess success! result: ${inspect(result, false, 3, true)}`));
-		obj.res.status(200).json({success: true, txHash: result.txHash}).end()
-		const input = {
-			actionType: ,
-			card: cardAddress,
-			from: ethers.ZeroAddress,
-			to: from, // ✅ points 归属 from
-			amount: currencyAmount.points6,
-			ts: 0n,
+// export const forward1155ERC3009SignatureDataProcess = async () => {
+// 	const obj = forward1155ERC3009SignatureDataPool.shift();
+// 	if (!obj) {
+// 		return;
+// 	}
+// 	try {
+// 		const result = await forward1155ERC3009SignatureData(obj);
+// 		logger(Colors.green(`✅ forward1155ERC3009SignatureDataProcess success! result: ${inspect(result, false, 3, true)}`));
+// 		obj.res.status(200).json({success: true, txHash: result.txHash}).end()
+// 		const input = {
+// 			actionType: ,
+// 			card: cardAddress,
+// 			from: ethers.ZeroAddress,
+// 			to: from, // ✅ points 归属 from
+// 			amount: currencyAmount.points6,
+// 			ts: 0n,
 
-			title: `${payMe.title}`,
-			note: JSON.stringify(payMe),
-			tax: 0n,
-			tip: 0n,
-			beamioFee1: 0n,
-			beamioFee2: 0n,
-			cardServiceFee: 0n,
+// 			title: `${payMe.title}`,
+// 			note: JSON.stringify(payMe),
+// 			tax: 0n,
+// 			tip: 0n,
+// 			beamioFee1: 0n,
+// 			beamioFee2: 0n,
+// 			cardServiceFee: 0n,
 	
-			afterTatchNoteByFrom: "",
-			afterTatchNoteByTo: "",
-			afterTatchNoteByCardOwner: "",
-		};
+// 			afterTatchNoteByFrom: "",
+// 			afterTatchNoteByTo: "",
+// 			afterTatchNoteByCardOwner: "",
+// 		};
 
 
 
-	} catch (error: any) {
-		logger(Colors.red(`❌ forward1155ERC3009SignatureDataProcess failed:`), error.message);
-		obj.res.status(400).json({success: false, error: error.message}).end()
-	}
-	forward1155ERC3009SignatureDataPool.unshift(obj)
-	return setTimeout(() => forward1155ERC3009SignatureDataProcess(), 3000)
-}
+// 	} catch (error: any) {
+// 		logger(Colors.red(`❌ forward1155ERC3009SignatureDataProcess failed:`), error.message);
+// 		obj.res.status(400).json({success: false, error: error.message}).end()
+// 	}
+// 	forward1155ERC3009SignatureDataPool.unshift(obj)
+// 	return setTimeout(() => forward1155ERC3009SignatureDataProcess(), 3000)
+// }
 
 
 
