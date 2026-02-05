@@ -21,8 +21,6 @@ import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 
-/** @deprecated 旧版，已不再使用；当前使用 BeamioUserCardFactoryPaymasterV2 */
-const memberCardBeamioFactoryPaymasterV1 = '0x05e6a8f53b096f44928670C431F78e1F75E232bA'
 
 /** Base 主网新部署：与 config/base-addresses.ts、deployments/BASE_MAINNET_FACTORIES.md 一致 */
 const BeamioUserCardFactoryPaymasterV2 = '0x7Ec828BAbA1c58C5021a6E7D29ccDDdB2d8D84bd'
@@ -968,7 +966,8 @@ async function setTier(ownerPk: string, cardAddr: string) {
 }
   
 
-const CCSACardAddressNew = '0x71e36b58fc9a3fecdff5a40d6d44a47d6c3b973e'.toLowerCase()
+/** 新部署的 CCSA 卡（1 CAD = 1 token），与 deployments/base-UserCard-0xEaBF0A98.json 一致 */
+const CCSACardAddressNew = '0x1Dc8c473fc67358357E90636AE8607229d5e9f92'.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
