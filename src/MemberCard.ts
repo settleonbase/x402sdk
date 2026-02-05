@@ -23,8 +23,8 @@ import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 
 const memberCardBeamioFactoryPaymasterV1 = '0x05e6a8f53b096f44928670C431F78e1F75E232bA'
 
-const BeamioUserCardFactoryPaymasterV2 = '0x4637C267f5096C11A658cf0b0Dcdb8a89ce2F7EB'
-const BeamioAAAccountFactoryPaymaster = '0xF036E570D5811a16A29C072528b7ceBF9933f7BD'
+const BeamioUserCardFactoryPaymasterV2 = '0x7Ec828BAbA1c58C5021a6E7D29ccDDdB2d8D84bd'
+const BeamioAAAccountFactoryPaymaster = '0xFD48F7a6bBEb0c0C1ff756C38cA7fE7544239767'
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const BeamioUserCardGatewayAddress = '0x5b24729E66f13BaB19F763f7aE7A35C881D3d858'
@@ -99,9 +99,6 @@ masterSetup.settle_contractAdmin.forEach(n => {
 	})
 
 })
-
-
-   
 
 
   const addAdminList = async (adminList: string[]) => {
@@ -1345,10 +1342,10 @@ const BeamioAAAccount = '0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61'
 const test = async () => {
 	await new Promise(executor => setTimeout(executor, 3000))
 	// await DeployingSmartAccount(BeamioAAAccount, Settle_ContractPool[0].aaAccountFactoryPaymaster)			//			0x241B97Ee83bF8664D42c030447A63d209c546867
-	// for (let i = 0; i < Settle_ContractPool.length; i++) {
-	// 	await registerPayMasterForCardFactory(Settle_ContractPool[i].walletBase.address)
-	// 	await new Promise(executor => setTimeout(executor, 3000))
-	// }
+	for (let i = 0; i < Settle_ContractPool.length; i++) {
+		await registerPayMasterForCardFactory(Settle_ContractPool[i].walletBase.address)
+		await new Promise(executor => setTimeout(executor, 3000))
+	}
 
 	//		创建 新卡
 
@@ -1368,7 +1365,7 @@ const test = async () => {
 	// logger(inspect(rates, false, 3, true))	
 }
 
-// test()
+test()
 
 
 export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
@@ -1605,63 +1602,91 @@ export const getLatest20Actions = async (
 };
 
 
-//   getLatest20Actions()
+
+type forward1155ERC3009SignatureDataParams = {
+	fromEOA: string,
+	id: string,
+	to: string,
+	amount: string,
+	maxAmount: string,
+	validAfter: string,
+	validBefore: string,
+	nonce: string,
+	signature: string,
+	digest: string,
+	cardAddress: string,
+	res: Response,
+}
+
+export const forward1155ERC3009SignatureDataPool: forward1155ERC3009SignatureDataParams[] = [];
+
+
+
+const makePayMeForForward1155ERC3009SignatureData = async (obj: forward1155ERC3009SignatureDataParams) => {
+	const payMe = {
+		title: "Forward 1155 ERC3009 Signature Data",
+	}
+	return payMe;
+}
+export const forward1155ERC3009SignatureDataProcess = async () => {
+	const obj = forward1155ERC3009SignatureDataPool.shift();
+	if (!obj) {
+		return;
+	}
+	try {
+		const result = await forward1155ERC3009SignatureData(obj);
+		logger(Colors.green(`✅ forward1155ERC3009SignatureDataProcess success! result: ${inspect(result, false, 3, true)}`));
+		obj.res.status(200).json({success: true, txHash: result.txHash}).end()
+		const input = {
+			actionType: ,
+			card: cardAddress,
+			from: ethers.ZeroAddress,
+			to: from, // ✅ points 归属 from
+			amount: currencyAmount.points6,
+			ts: 0n,
+
+			title: `${payMe.title}`,
+			note: JSON.stringify(payMe),
+			tax: 0n,
+			tip: 0n,
+			beamioFee1: 0n,
+			beamioFee2: 0n,
+			cardServiceFee: 0n,
+	
+			afterTatchNoteByFrom: "",
+			afterTatchNoteByTo: "",
+			afterTatchNoteByCardOwner: "",
+		};
+
+
+
+	} catch (error: any) {
+		logger(Colors.red(`❌ forward1155ERC3009SignatureDataProcess failed:`), error.message);
+		obj.res.status(400).json({success: false, error: error.message}).end()
+	}
+	forward1155ERC3009SignatureDataPool.unshift(obj)
+	return setTimeout(() => forward1155ERC3009SignatureDataProcess(), 3000)
+}
+
+
+
 /**
  * 
- * {
-{
-    "fromEOA": "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
-    "id": "0",
-    "maxAmount": "9999",
-    "validAfter": "1770128158",
-    "validBefore": "1770131758",
-    "nonce": "0xa798efbb30f83918c8c1fca7e02fd97c7d3d4ea0547c6097a75b7bfecd12481f",
-    "signature": "0x996b9e1477eeb8c7b98df8cbce0b88c733019b72709097997d55096959f8baef2b53a972dc348e1cfe7bf9f2ccd569c61b5cc4b4ff3186839e232ce2aee3461b1c",
-    "digest": "0x58e4f8c1e0b94de595c269d286bbd608e759e19b1505aa6c06ef28605629d17c"
-}
-}
- */
-
-
-const testBeamioCard = async (cardAddress: string) => {
-	const card = new ethers.Contract(cardAddress, BeamioUserCardArtifact.abi, Settle_ContractPool[0].walletBase);
-	
-	
-}
-
-/**
+ * @param fromEOA 
+ * @param id 
+ * @param to 
+ * @param amount 
+ * @param maxAmount 
+ * @param validAfter 
+ * @param validBefore 
  * 
- * @returns {
-{
-{
-  "fromEOA": "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
-  "id": "0",
-  "maxAmount": "109999",
-  "validAfter": "1770157228",
-  "validBefore": "1770157648",
-  "nonce": "0x38a6494e92c47e2708d8310118b101a0a06e4bca765a73756aec0945fd59757b",
-  "signature": "0x319ee3484ed88fe3405eb6c1aa6ea4ba913b6620cca2676abc71a51a8b6b888d30a9b972a0f399ef87c84f0a0a07d4e12342c18431344095b3c5d14c8d01e59b1c",
-  "digest": "0xb6366bb87d04e72c4ec6de936ee7f9ad4c5a5da447a64725d37b70c29e713bef"
-}
-}
-}
-}
- */
+ * */
 
-export const forward1155ERC3009SignatureData = async (
-) => {
+const forward1155ERC3009SignatureData = async (
+	params: forward1155ERC3009SignatureDataParams
+):Promise<{ txHash: string }> => {
 	const sign = {
-		fromEOA: "0xDfB6c751653ae61C80512167a2154A68BCC97f1F",
-		id: "0",
-		to: "0x863D5B7DaD9C595138e209d932511Be4E168A660",
-		amount: "10000",
-		maxAmount: "109999",
-		validAfter: "1770157228",
-		validBefore: "1770157648",
-		nonce: "0x38a6494e92c47e2708d8310118b101a0a06e4bca765a73756aec0945fd59757b",
-		signature: "0x319ee3484ed88fe3405eb6c1aa6ea4ba913b6620cca2676abc71a51a8b6b888d30a9b972a0f399ef87c84f0a0a07d4e12342c18431344095b3c5d14c8d01e59b1c",
-		digest: "0xb6366bb87d04e72c4ec6de936ee7f9ad4c5a5da447a64725d37b70c29e713bef",
-		cardAddress: CCSACardAddressNew,
+		...params,
 	  };
 	
 	  const env = Settle_ContractPool[0];
@@ -1756,10 +1781,10 @@ const card = new ethers.Contract(sign.cardAddress, [
 
   const pid = await card.POINTS_ID()
 
-console.log("aaF:", aaF)
-console.log("aaT:", aaT)
-console.log("erc1155 bal(aa,pid):", (await card.balanceOf(aaF, pid)).toString())
-console.log("erc1155 bal(eoa,pid):", (await card.balanceOf(aaT, pid)).toString())
+	console.log("aaF:", aaF)
+	console.log("aaT:", aaT)
+	console.log("erc1155 bal(aa,pid):", (await card.balanceOf(aaF, pid)).toString())
+	console.log("erc1155 bal(eoa,pid):", (await card.balanceOf(aaT, pid)).toString())
 	
 	  // ✅ 先 staticCall 看到真实 revert
 	  try {
