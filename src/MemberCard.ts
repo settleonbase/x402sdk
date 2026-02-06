@@ -692,7 +692,12 @@ export type ContainerRelayPayload = {
 	signature: string
 }
 
-export const ContainerRelayPool: { containerPayload: ContainerRelayPayload; res: Response }[] = []
+export const ContainerRelayPool: {
+	containerPayload: ContainerRelayPayload
+	currency?: string
+	currencyAmount?: string
+	res: Response
+}[] = []
 
 /** Factory.relayContainerMainRelayed 的 ABI 片段 */
 const RELAY_MAIN_ABI = {
@@ -826,7 +831,11 @@ export const AAtoEOAPreCheckSenderHasCode = async (packedUserOp: AAtoEOAUserOp):
 	return { success: true }
 }
 
-
+const ACTION_TOKEN_TYPE = {
+	TOKEN_MINT: 1,
+	TOKEN_BURN: 2,
+	TOKEN_TRANSFER: 3
+}
 
 const getICurrency = (currency: BigInt): ICurrency => {
 	switch (currency) {
@@ -969,7 +978,7 @@ export const purchasingCardProcess = async () => {
 		
 
 		const input = {
-			actionType: ACTION_TOKEN_MINT,
+			actionType: ACTION_TOKEN_TYPE.TOKEN_MINT,
 			card: cardAddress,
 			from: ethers.ZeroAddress,
 			to: from, // ✅ points 归属 from
@@ -1585,7 +1594,49 @@ export const ContainerRelayProcess = async () => {
     const tx = await FactoryWithRelay.relayContainerMainRelayed(account, to, items, nonce_, deadline_, sigBytes)
     logger(`[AAtoEOA/Container] relay tx submitted hash=${tx.hash}`)
     await tx.wait()
-    logger(Colors.green(`✅ ContainerRelayProcess success! tx=${tx.hash}`))
+
+    const usdcAmountRaw = BigInt(payload.items[0].amount)
+    const currency = (obj.currency ?? 'USDC') as ICurrency
+    const currencyAmount = obj.currencyAmount ?? String(Number(usdcAmountRaw) / 1e6)
+    const payMeData: payMe = {
+      currency,
+      currencyAmount,
+      title: 'AA to EOA',
+      usdcAmount: Number(usdcAmountRaw) / 1e6,
+      parentHash: tx.hash,
+    }
+    logger(Colors.green(`✅ ContainerRelayProcess payMe = ${inspect(payMeData, false, 2, true)}`))
+    const tr = await SC.conetSC.transferRecord(
+      account,
+      to,
+      usdcAmountRaw,
+      tx.hash,
+      `\r\n${JSON.stringify(payMeData)}`
+    )
+    await tr.wait()
+
+    const actionInput = {
+      actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
+      card: USDC_ADDRESS,
+      from: account,
+      to,
+      amount: usdcAmountRaw,
+      ts: 0n,
+      title: 'AA to EOA',
+      note: JSON.stringify(payMeData),
+      tax: 0n,
+      tip: 0n,
+      beamioFee1: 0n,
+      beamioFee2: 0n,
+      cardServiceFee: 0n,
+      afterTatchNoteByFrom: '',
+      afterTatchNoteByTo: '',
+      afterTatchNoteByCardOwner: '',
+    }
+    const actionFacet = SC.BeamioTaskDiamondAction
+    const tx2 = await actionFacet.syncTokenAction(actionInput)
+    await tx2.wait()
+    logger(Colors.green(`✅ ContainerRelayProcess success! tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {
     const msg = error?.shortMessage || error?.message || String(error)

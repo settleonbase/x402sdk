@@ -279,6 +279,8 @@ const routing = ( router: Router ) => {
 			packedUserOp?: import('../MemberCard').AAtoEOAUserOp
 			openContainerPayload?: import('../MemberCard').OpenContainerRelayPayload
 			containerPayload?: import('../MemberCard').ContainerRelayPayload
+			currency?: string
+			currencyAmount?: string
 		}
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
 
@@ -289,7 +291,11 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
 			logger(Colors.green(`[AAtoEOA] server Container pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
-			postLocalhost('/api/AAtoEOA', { containerPayload: body.containerPayload }, res)
+			postLocalhost('/api/AAtoEOA', {
+				containerPayload: body.containerPayload,
+				currency: body.currency,
+				currencyAmount: body.currencyAmount,
+			}, res)
 			return
 		}
 

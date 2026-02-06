@@ -79,6 +79,8 @@ const routing = ( router: Router ) => {
 			packedUserOp?: AAtoEOAUserOp
 			openContainerPayload?: OpenContainerRelayPayload
 			containerPayload?: ContainerRelayPayload
+			currency?: string
+			currencyAmount?: string
 		}
 		logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
 
@@ -89,7 +91,12 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: preCheck.error ?? 'Invalid containerPayload' }).end()
 			}
 			const poolLenBefore = ContainerRelayPool.length
-			ContainerRelayPool.push({ containerPayload: body.containerPayload, res })
+			ContainerRelayPool.push({
+				containerPayload: body.containerPayload,
+				currency: body.currency,
+				currencyAmount: body.currencyAmount,
+				res,
+			})
 			logger(`[AAtoEOA] master pushed to ContainerRelayPool (length ${poolLenBefore} -> ${ContainerRelayPool.length}), calling ContainerRelayProcess()`)
 			ContainerRelayProcess()
 			return
