@@ -23,9 +23,9 @@ import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
-import { BASE_AA_FACTORY } from './chainAddresses'
+
 const BeamioUserCardFactoryPaymasterV2 = '0x7Ec828BAbA1c58C5021a6E7D29ccDDdB2d8D84bd'
-const BeamioAAAccountFactoryPaymaster = BASE_AA_FACTORY
+const BeamioAAAccountFactoryPaymaster = '0xFD48F7a6bBEb0c0C1ff756C38cA7fE7544239767'
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const BeamioUserCardGatewayAddress = '0x5b24729E66f13BaB19F763f7aE7A35C881D3d858'
