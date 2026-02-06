@@ -1290,7 +1290,7 @@ export const AAtoEOAProcess = async () => {
 			const pm = ethers.getAddress('0x' + pnd.slice(2, 42))
 			logger(`[AAtoEOA] parsed paymaster=${pm}`)
 		  }
-		  
+
 		// 与链上/客户端一致：userOpHash 必须用「空 signature」计算（ERC-4337 约定，客户端也是 signature: '0x' 算 hash 再签名）
 		try {
 			const opForHash = { ...packedOp, signature: '0x' as unknown as Uint8Array }
@@ -1302,6 +1302,12 @@ export const AAtoEOAProcess = async () => {
 			// 立即检查：签名人必须等于 AA 的 owner（createAccount 时 creator 写入 managers[0]）
 			const aaContract = new ethers.Contract(packedOp.sender, ['function owner() view returns (address)'], SC.walletBase.provider!)
 			const aaOwner = await aaContract.owner() as string
+
+
+
+			console.log(`[AAtoEOA] owner（createAccount factory address）=`, await aaContract.factory())
+
+
 			if (aaOwner && recoveredSigner && aaOwner.toLowerCase() !== recoveredSigner.toLowerCase()) {
 				const errMsg = `Signature signer (${recoveredSigner}) is not the AA owner (${aaOwner}). Use the key for the AA owner to sign.`
 				logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
