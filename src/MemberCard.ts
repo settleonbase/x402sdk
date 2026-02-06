@@ -667,6 +667,143 @@ export const AAtoEOAPool: {
 	res: Response
 }[] = []
 
+/** OpenContainerRelayPayload：UI 提交的 containerMainRelayedOpen 签名结果，与 SilentPassUI OpenContainerRelayPayload 一致 */
+export type OpenContainerRelayPayload = {
+	account: string
+	to: string
+	items: { kind: number; asset: string; amount: string | bigint; tokenId: string | bigint; data: string }[]
+	token: string
+	currencyType: number
+	maxAmount: string
+	nonce: string
+	deadline: string
+	signature: string
+}
+
+export const OpenContainerRelayPool: { openContainerPayload: OpenContainerRelayPayload; res: Response }[] = []
+
+/** ContainerRelayPayload：UI 提交的 containerMainRelayed（绑定 to）签名结果，与 SilentPassUI ContainerRelayPayload 一致 */
+export type ContainerRelayPayload = {
+	account: string
+	to: string
+	items: { kind: number; asset: string; amount: string | bigint; tokenId: string | bigint; data: string }[]
+	nonce: string
+	deadline: string
+	signature: string
+}
+
+export const ContainerRelayPool: { containerPayload: ContainerRelayPayload; res: Response }[] = []
+
+/** Factory.relayContainerMainRelayed 的 ABI 片段 */
+const RELAY_MAIN_ABI = {
+	inputs: [
+		{ internalType: 'address', name: 'account', type: 'address' },
+		{ internalType: 'address', name: 'to', type: 'address' },
+		{
+			internalType: 'struct IBeamioContainerModuleV07.ContainerItem[]',
+			name: 'items',
+			type: 'tuple[]',
+			components: [
+				{ internalType: 'uint8', name: 'kind', type: 'uint8' },
+				{ internalType: 'address', name: 'asset', type: 'address' },
+				{ internalType: 'uint256', name: 'amount', type: 'uint256' },
+				{ internalType: 'uint256', name: 'tokenId', type: 'uint256' },
+				{ internalType: 'bytes', name: 'data', type: 'bytes' },
+			],
+		},
+		{ internalType: 'uint256', name: 'nonce_', type: 'uint256' },
+		{ internalType: 'uint256', name: 'deadline_', type: 'uint256' },
+		{ internalType: 'bytes', name: 'sig', type: 'bytes' },
+	],
+	name: 'relayContainerMainRelayed',
+	outputs: [],
+	stateMutability: 'nonpayable' as const,
+	type: 'function' as const,
+}
+
+/** Factory.relayContainerMainRelayedOpen 的 ABI 片段（BeamioAAAccountFactoryPaymaster 已有实现，若 JSON 未包含可在此扩展） */
+const RELAY_OPEN_ABI = {
+	inputs: [
+		{ internalType: 'address', name: 'account', type: 'address' },
+		{ internalType: 'address', name: 'to', type: 'address' },
+		{
+			internalType: 'struct IBeamioContainerModuleV07.ContainerItem[]',
+			name: 'items',
+			type: 'tuple[]',
+			components: [
+				{ internalType: 'uint8', name: 'kind', type: 'uint8' },
+				{ internalType: 'address', name: 'asset', type: 'address' },
+				{ internalType: 'uint256', name: 'amount', type: 'uint256' },
+				{ internalType: 'uint256', name: 'tokenId', type: 'uint256' },
+				{ internalType: 'bytes', name: 'data', type: 'bytes' },
+			],
+		},
+		{ internalType: 'address', name: 'token', type: 'address' },
+		{ internalType: 'uint8', name: 'currencyType', type: 'uint8' },
+		{ internalType: 'uint256', name: 'maxAmount', type: 'uint256' },
+		{ internalType: 'uint256', name: 'nonce_', type: 'uint256' },
+		{ internalType: 'uint256', name: 'deadline_', type: 'uint256' },
+		{ internalType: 'bytes', name: 'sig', type: 'bytes' },
+	],
+	name: 'relayContainerMainRelayedOpen',
+	outputs: [],
+	stateMutability: 'nonpayable' as const,
+	type: 'function' as const,
+}
+
+/** 预检：OpenContainerRelayPayload 格式与签名长度校验 */
+export const OpenContainerRelayPreCheck = (payload: OpenContainerRelayPayload | undefined): { success: boolean; error?: string } => {
+	if (!payload || typeof payload !== 'object') return { success: false, error: 'openContainerPayload required' }
+	if (!ethers.isAddress(payload.account)) return { success: false, error: 'openContainerPayload.account must be a valid address' }
+	if (!ethers.isAddress(payload.to)) return { success: false, error: 'openContainerPayload.to must be a valid address' }
+	if (!Array.isArray(payload.items) || payload.items.length === 0) return { success: false, error: 'openContainerPayload.items must be a non-empty array' }
+	for (let i = 0; i < payload.items.length; i++) {
+		const it = payload.items[i]
+		if (it == null || typeof it !== 'object') return { success: false, error: `openContainerPayload.items[${i}] invalid` }
+		if (typeof it.kind !== 'number') return { success: false, error: `openContainerPayload.items[${i}].kind must be number` }
+		if (!ethers.isAddress(it.asset)) return { success: false, error: `openContainerPayload.items[${i}].asset must be address` }
+		if (it.amount === undefined || it.amount === null) return { success: false, error: `openContainerPayload.items[${i}].amount required` }
+		if (it.tokenId === undefined || it.tokenId === null) return { success: false, error: `openContainerPayload.items[${i}].tokenId required` }
+		if (it.data === undefined || it.data === null) return { success: false, error: `openContainerPayload.items[${i}].data required` }
+	}
+	if (!ethers.isAddress(payload.token)) return { success: false, error: 'openContainerPayload.token must be a valid address' }
+	if (typeof payload.currencyType !== 'number') return { success: false, error: 'openContainerPayload.currencyType must be number' }
+	if (payload.maxAmount === undefined || payload.maxAmount === null) return { success: false, error: 'openContainerPayload.maxAmount required' }
+	if (payload.nonce === undefined || payload.nonce === null) return { success: false, error: 'openContainerPayload.nonce required' }
+	if (payload.deadline === undefined || payload.deadline === null) return { success: false, error: 'openContainerPayload.deadline required' }
+	if (payload.signature === undefined || payload.signature === null) return { success: false, error: 'openContainerPayload.signature required' }
+	const sigHex = typeof payload.signature === 'string' && payload.signature.startsWith('0x') ? payload.signature : '0x' + (payload.signature || '')
+	const sigLen = sigHex.length <= 2 ? 0 : (sigHex.length - 2) / 2
+	if (sigLen !== 65) return { success: false, error: `openContainerPayload.signature must be 65 bytes (130 hex chars), got ${sigLen}` }
+	logger(`[AAtoEOA/OpenContainer] pre-check OK account=${payload.account} to=${payload.to} items=${payload.items.length}`)
+	return { success: true }
+}
+
+/** 预检：ContainerRelayPayload（containerMainRelayed 绑定 to）格式与签名长度校验 */
+export const ContainerRelayPreCheck = (payload: ContainerRelayPayload | undefined): { success: boolean; error?: string } => {
+	if (!payload || typeof payload !== 'object') return { success: false, error: 'containerPayload required' }
+	if (!ethers.isAddress(payload.account)) return { success: false, error: 'containerPayload.account must be a valid address' }
+	if (!ethers.isAddress(payload.to)) return { success: false, error: 'containerPayload.to must be a valid address' }
+	if (!Array.isArray(payload.items) || payload.items.length === 0) return { success: false, error: 'containerPayload.items must be a non-empty array' }
+	for (let i = 0; i < payload.items.length; i++) {
+		const it = payload.items[i]
+		if (it == null || typeof it !== 'object') return { success: false, error: `containerPayload.items[${i}] invalid` }
+		if (typeof it.kind !== 'number') return { success: false, error: `containerPayload.items[${i}].kind must be number` }
+		if (!ethers.isAddress(it.asset)) return { success: false, error: `containerPayload.items[${i}].asset must be address` }
+		if (it.amount === undefined || it.amount === null) return { success: false, error: `containerPayload.items[${i}].amount required` }
+		if (it.tokenId === undefined || it.tokenId === null) return { success: false, error: `containerPayload.items[${i}].tokenId required` }
+		if (it.data === undefined || it.data === null) return { success: false, error: `containerPayload.items[${i}].data required` }
+	}
+	if (payload.nonce === undefined || payload.nonce === null) return { success: false, error: 'containerPayload.nonce required' }
+	if (payload.deadline === undefined || payload.deadline === null) return { success: false, error: 'containerPayload.deadline required' }
+	if (payload.signature === undefined || payload.signature === null) return { success: false, error: 'containerPayload.signature required' }
+	const sigHex = typeof payload.signature === 'string' && payload.signature.startsWith('0x') ? payload.signature : '0x' + (payload.signature || '')
+	const sigLen = sigHex.length <= 2 ? 0 : (sigHex.length - 2) / 2
+	if (sigLen !== 65) return { success: false, error: `containerPayload.signature must be 65 bytes (130 hex chars), got ${sigLen}` }
+	logger(`[AAtoEOA/Container] pre-check OK account=${payload.account} to=${payload.to} items=${payload.items.length}`)
+	return { success: true }
+}
+
 /** 预检：集群节点对 AAtoEOA 请求做格式与基本校验，合格再转 master。 */
 export const AAtoEOAPreCheck = (toEOA: string, amountUSDC6: string, packedUserOp: AAtoEOAUserOp | undefined): { success: boolean; error?: string } => {
 	if (!toEOA || !ethers.isAddress(toEOA)) return { success: false, error: 'Invalid toEOA address' }
@@ -1131,6 +1268,8 @@ export const AAtoEOAProcess = async () => {
       return
     }
 
+	
+
     // --- entryPoint ---
     const entryPointAddress = await SC.aaAccountFactoryPaymaster.ENTRY_POINT()
     logger(`[AAtoEOA] ENTRY_POINT address: ${entryPointAddress}`)
@@ -1274,6 +1413,13 @@ export const AAtoEOAProcess = async () => {
       }
     }
 
+	 // --- submit ---
+	 const beneficiary = await SC.walletBase.getAddress()
+	 logger(
+	   `[AAtoEOA] calling handleOps sender=${sender} beneficiary=${beneficiary} callDataBytes=${hexBytesLen(callData)} sigLen=${sigBytes.length}`
+	 )
+ 
+
     // --- simulateValidation via eth_call (debug only, but super useful) ---
     try {
       const simIface = new ethers.Interface([
@@ -1297,12 +1443,7 @@ export const AAtoEOAProcess = async () => {
     const aaETH = await SC.walletBase.provider!.getBalance(sender)
     logger(`[AAtoEOA] entryPointDeposit=${deposit.toString()} aaETH=${aaETH.toString()}`)
 
-    // --- submit ---
-    const beneficiary = await SC.walletBase.getAddress()
-    logger(
-      `[AAtoEOA] calling handleOps sender=${sender} beneficiary=${beneficiary} callDataBytes=${hexBytesLen(callData)} sigLen=${sigBytes.length}`
-    )
-
+   
     const tx = await entryPoint.handleOps([packedOp], beneficiary)
     logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
     await tx.wait()
@@ -1326,6 +1467,134 @@ export const AAtoEOAProcess = async () => {
   } finally {
     Settle_ContractPool.unshift(SC)
     setTimeout(() => AAtoEOAProcess(), 3000)
+  }
+}
+
+/** 使用 Factory.relayContainerMainRelayedOpen 代付 Gas 执行 OpenContainer 转账；与 AAtoEOAProcess 共用 Settle_ContractPool。 */
+export const OpenContainerRelayProcess = async () => {
+  const obj = OpenContainerRelayPool.shift()
+  if (!obj) return
+
+  const payload = obj.openContainerPayload
+  logger(`[AAtoEOA/OpenContainer] process started account=${payload.account} to=${payload.to}`)
+
+  const SC = Settle_ContractPool.shift()
+  if (!SC) {
+    logger(Colors.yellow(`[AAtoEOA/OpenContainer] no SC available, re-queue (pool ${OpenContainerRelayPool.length})`))
+    OpenContainerRelayPool.unshift(obj)
+    return setTimeout(() => OpenContainerRelayProcess(), 3000)
+  }
+
+  try {
+    const account = ethers.getAddress(payload.account)
+    const to = ethers.getAddress(payload.to)
+    const token = ethers.getAddress(payload.token)
+    const items = payload.items.map((it) => ({
+      kind: Number(it.kind),
+      asset: ethers.getAddress(it.asset),
+      amount: BigInt(it.amount),
+      tokenId: BigInt(it.tokenId),
+      data: typeof it.data === 'string' ? (it.data as string) : ethers.hexlify(it.data as Uint8Array),
+    }))
+    const maxAmount = BigInt(payload.maxAmount)
+    const nonce_ = BigInt(payload.nonce)
+    const deadline_ = BigInt(payload.deadline)
+    const sigHex = typeof payload.signature === 'string' && payload.signature.startsWith('0x') ? payload.signature : '0x' + payload.signature
+    const sigBytes = ethers.getBytes(sigHex)
+
+    const accountCode = await SC.walletBase.provider!.getCode(account)
+    if (!accountCode || accountCode === '0x' || accountCode.length <= 2) {
+      obj.res.status(400).json({ success: false, error: 'account has no contract code' }).end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+    }
+
+    const FactoryWithRelay = new ethers.Contract(
+      BeamioAAAccountFactoryPaymaster,
+      [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_OPEN_ABI],
+      SC.walletBase
+    )
+    const tx = await FactoryWithRelay.relayContainerMainRelayedOpen(
+      account,
+      to,
+      items,
+      token,
+      payload.currencyType,
+      maxAmount,
+      nonce_,
+      deadline_,
+      sigBytes
+    )
+    logger(`[AAtoEOA/OpenContainer] relay tx submitted hash=${tx.hash}`)
+    await tx.wait()
+    logger(Colors.green(`✅ OpenContainerRelayProcess success! tx=${tx.hash}`))
+    obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
+  } catch (error: any) {
+    const msg = error?.shortMessage || error?.message || String(error)
+    logger(Colors.red(`❌ OpenContainerRelayProcess failed: ${msg}`))
+    if (error?.data) logger(Colors.red(`[AAtoEOA/OpenContainer] revert data=${error.data}`))
+    obj.res.status(500).json({ success: false, error: msg }).end()
+  } finally {
+    Settle_ContractPool.unshift(SC)
+    setTimeout(() => OpenContainerRelayProcess(), 3000)
+  }
+}
+
+/** 使用 Factory.relayContainerMainRelayed（绑定 to）代付 Gas 执行转账；与 AAtoEOAProcess 共用 Settle_ContractPool。 */
+export const ContainerRelayProcess = async () => {
+  const obj = ContainerRelayPool.shift()
+  if (!obj) return
+
+  const payload = obj.containerPayload
+  logger(`[AAtoEOA/Container] process started account=${payload.account} to=${payload.to}`)
+
+  const SC = Settle_ContractPool.shift()
+  if (!SC) {
+    logger(Colors.yellow(`[AAtoEOA/Container] no SC available, re-queue (pool ${ContainerRelayPool.length})`))
+    ContainerRelayPool.unshift(obj)
+    return setTimeout(() => ContainerRelayProcess(), 3000)
+  }
+
+  try {
+    const account = ethers.getAddress(payload.account)
+    const to = ethers.getAddress(payload.to)
+    const items = payload.items.map((it) => ({
+      kind: Number(it.kind),
+      asset: ethers.getAddress(it.asset),
+      amount: BigInt(it.amount),
+      tokenId: BigInt(it.tokenId),
+      data: typeof it.data === 'string' ? (it.data as string) : ethers.hexlify(it.data as Uint8Array),
+    }))
+    const nonce_ = BigInt(payload.nonce)
+    const deadline_ = BigInt(payload.deadline)
+    const sigHex = typeof payload.signature === 'string' && payload.signature.startsWith('0x') ? payload.signature : '0x' + payload.signature
+    const sigBytes = ethers.getBytes(sigHex)
+
+    const accountCode = await SC.walletBase.provider!.getCode(account)
+    if (!accountCode || accountCode === '0x' || accountCode.length <= 2) {
+      obj.res.status(400).json({ success: false, error: 'account has no contract code' }).end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => ContainerRelayProcess(), 3000)
+    }
+
+    const FactoryWithRelay = new ethers.Contract(
+      BeamioAAAccountFactoryPaymaster,
+      [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_MAIN_ABI],
+      SC.walletBase
+    )
+    const tx = await FactoryWithRelay.relayContainerMainRelayed(account, to, items, nonce_, deadline_, sigBytes)
+    logger(`[AAtoEOA/Container] relay tx submitted hash=${tx.hash}`)
+    await tx.wait()
+    logger(Colors.green(`✅ ContainerRelayProcess success! tx=${tx.hash}`))
+    obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
+  } catch (error: any) {
+    const msg = error?.shortMessage || error?.message || String(error)
+    logger(Colors.red(`❌ ContainerRelayProcess failed: ${msg}`))
+    if (error?.data) logger(Colors.red(`[AAtoEOA/Container] revert data=${error.data}`))
+    obj.res.status(500).json({ success: false, error: msg }).end()
+  } finally {
+    Settle_ContractPool.unshift(SC)
+    setTimeout(() => ContainerRelayProcess(), 3000)
   }
 }
 

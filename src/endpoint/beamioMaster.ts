@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {coinbaseHooks} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, AAtoEOAPool, AAtoEOAProcess, type AAtoEOAUserOp } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
 
 const masterServerPort = 1111
 
@@ -71,17 +71,47 @@ const routing = ( router: Router ) => {
 		purchasingCardProcess()
 	})
 
-	/** AA→EOA：接受 ERC-4337 UserOp 签字，入队后由 AAtoEOAProcess 用 Settle_ContractPool 私钥代付 Gas 提交 */
+	/** AA→EOA：支持三种提交。(1) ERC-4337 UserOp → AAtoEOAProcess；(2) openContainerPayload → OpenContainerRelayProcess；(3) containerPayload（绑定 to）→ ContainerRelayProcess */
 	router.post('/AAtoEOA', (req, res) => {
-		logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: req.body?.toEOA, amountUSDC6: req.body?.amountUSDC6, sender: req.body?.packedUserOp?.sender }, false, 3, true))
-		const { toEOA, amountUSDC6, packedUserOp } = req.body as {
+		const body = req.body as {
 			toEOA?: string
 			amountUSDC6?: string
 			packedUserOp?: AAtoEOAUserOp
+			openContainerPayload?: OpenContainerRelayPayload
+			containerPayload?: ContainerRelayPayload
 		}
+		logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
+
+		if (body.containerPayload) {
+			const preCheck = ContainerRelayPreCheck(body.containerPayload)
+			if (!preCheck.success) {
+				logger(Colors.red(`[AAtoEOA] master Container validation FAIL: ${preCheck.error}`))
+				return res.status(400).json({ success: false, error: preCheck.error ?? 'Invalid containerPayload' }).end()
+			}
+			const poolLenBefore = ContainerRelayPool.length
+			ContainerRelayPool.push({ containerPayload: body.containerPayload, res })
+			logger(`[AAtoEOA] master pushed to ContainerRelayPool (length ${poolLenBefore} -> ${ContainerRelayPool.length}), calling ContainerRelayProcess()`)
+			ContainerRelayProcess()
+			return
+		}
+
+		if (body.openContainerPayload) {
+			const preCheck = OpenContainerRelayPreCheck(body.openContainerPayload)
+			if (!preCheck.success) {
+				logger(Colors.red(`[AAtoEOA] master OpenContainer validation FAIL: ${preCheck.error}`))
+				return res.status(400).json({ success: false, error: preCheck.error ?? 'Invalid openContainerPayload' }).end()
+			}
+			const poolLenBefore = OpenContainerRelayPool.length
+			OpenContainerRelayPool.push({ openContainerPayload: body.openContainerPayload, res })
+			logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)
+			OpenContainerRelayProcess()
+			return
+		}
+
+		const { toEOA, amountUSDC6, packedUserOp } = body
 		if (!ethers.isAddress(toEOA) || !amountUSDC6 || !packedUserOp?.sender || !packedUserOp?.callData || packedUserOp?.signature === undefined) {
-			logger(Colors.red(`[AAtoEOA] master validation FAIL: need toEOA, amountUSDC6, packedUserOp (sender, callData, signature)`))
-			return res.status(400).json({ success: false, error: 'Invalid data: need toEOA, amountUSDC6, packedUserOp (sender, callData, signature)' }).end()
+			logger(Colors.red(`[AAtoEOA] master validation FAIL: need toEOA, amountUSDC6, packedUserOp OR containerPayload OR openContainerPayload`))
+			return res.status(400).json({ success: false, error: 'Invalid data: need toEOA, amountUSDC6, packedUserOp OR containerPayload OR openContainerPayload' }).end()
 		}
 		const poolLenBefore = AAtoEOAPool.length
 		AAtoEOAPool.push({

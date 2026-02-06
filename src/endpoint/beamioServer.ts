@@ -11,7 +11,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode } from '../MemberCard'
+import { purchasingCard, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck } from '../MemberCard'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -271,14 +271,40 @@ const routing = ( router: Router ) => {
 		inspect({cardAddress, userSignature, nonce,usdcAmount, from, validAfter, validBefore}, false, 3, true))
 	})
 
-	/** AA→EOA：预检通过后转发到 masterServerPort，由 master 入队 AAtoEOAPool 并 AAtoEOAProcess 代付 Gas */
+	/** AA→EOA：支持三种提交。(1) packedUserOp；(2) openContainerPayload；(3) containerPayload（绑定 to）*/
 	router.post('/AAtoEOA', async (req, res) => {
-		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: req.body?.toEOA, amountUSDC6: req.body?.amountUSDC6, sender: req.body?.packedUserOp?.sender }, false, 3, true))
-		const { toEOA, amountUSDC6, packedUserOp } = req.body as {
+		const body = req.body as {
 			toEOA?: string
 			amountUSDC6?: string
 			packedUserOp?: import('../MemberCard').AAtoEOAUserOp
+			openContainerPayload?: import('../MemberCard').OpenContainerRelayPayload
+			containerPayload?: import('../MemberCard').ContainerRelayPayload
 		}
+		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
+
+		if (body.containerPayload) {
+			const preCheck = ContainerRelayPreCheck(body.containerPayload)
+			if (!preCheck.success) {
+				logger(Colors.red(`[AAtoEOA] server Container pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+				return res.status(400).json({ success: false, error: preCheck.error }).end()
+			}
+			logger(Colors.green(`[AAtoEOA] server Container pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
+			postLocalhost('/api/AAtoEOA', { containerPayload: body.containerPayload }, res)
+			return
+		}
+
+		if (body.openContainerPayload) {
+			const preCheck = OpenContainerRelayPreCheck(body.openContainerPayload)
+			if (!preCheck.success) {
+				logger(Colors.red(`[AAtoEOA] server OpenContainer pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+				return res.status(400).json({ success: false, error: preCheck.error }).end()
+			}
+			logger(Colors.green(`[AAtoEOA] server OpenContainer pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
+			postLocalhost('/api/AAtoEOA', { openContainerPayload: body.openContainerPayload }, res)
+			return
+		}
+
+		const { toEOA, amountUSDC6, packedUserOp } = body
 		const preCheck = AAtoEOAPreCheck(toEOA ?? '', amountUSDC6 ?? '', packedUserOp)
 		if (!preCheck.success) {
 			logger(Colors.red(`[AAtoEOA] server pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
