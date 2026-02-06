@@ -809,6 +809,23 @@ export const ContainerRelayPreCheck = (payload: ContainerRelayPayload | undefine
 	return { success: true }
 }
 
+/** 与 BeamioContainerStorageV07 布局一致：从 AA 账户 storage 读 container module 的 relayedNonce / openRelayedNonce */
+function containerNonceSlotBase(): bigint {
+	const slotHex = ethers.keccak256(ethers.toUtf8Bytes('beamio.container.module.storage.v07'))
+	return BigInt(slotHex)
+}
+
+export async function readContainerNonceFromAAStorage(
+	provider: ethers.Provider,
+	aaAccount: string,
+	kind: 'relayed' | 'openRelayed'
+): Promise<bigint> {
+	const base = containerNonceSlotBase()
+	const slot = kind === 'relayed' ? base : base + 1n
+	const raw = await provider.getStorage(aaAccount, slot)
+	return BigInt(raw)
+}
+
 /** 预检：集群节点对 AAtoEOA 请求做格式与基本校验，合格再转 master。 */
 export const AAtoEOAPreCheck = (toEOA: string, amountUSDC6: string, packedUserOp: AAtoEOAUserOp | undefined): { success: boolean; error?: string } => {
 	if (!toEOA || !ethers.isAddress(toEOA)) return { success: false, error: 'Invalid toEOA address' }
@@ -1586,9 +1603,8 @@ export const ContainerRelayProcess = async () => {
       return setTimeout(() => ContainerRelayProcess(), 3000)
     }
 
-    const aaRead = new ethers.Contract(account, ['function relayedNonce() view returns (uint256)'], SC.walletBase.provider!)
-    const chainNonce = await aaRead.relayedNonce().catch(() => null)
-    if (chainNonce !== null && chainNonce !== nonce_) {
+    const chainNonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, account, 'relayed')
+    if (chainNonce !== nonce_) {
       const errMsg = `Nonce mismatch: payload nonce=${nonce_} but chain relayedNonce=${chainNonce}. Please refresh and try again (do not resubmit the same request).`
       logger(Colors.red(`[AAtoEOA/Container] ${errMsg}`))
       obj.res.status(400).json({ success: false, error: errMsg }).end()
