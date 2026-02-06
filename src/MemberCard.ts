@@ -1429,6 +1429,25 @@ export const AAtoEOAProcess = async () => {
 		  )
 		}
 	  }
+
+	 // 2) 校验：sender 是否在 paymaster 的 allowlist 内
+		const pmc = new ethers.Contract(
+		pm,
+		['function isBeamioAccount(address) view returns (bool)'],
+		SC.walletBase.provider!
+		)
+
+		const okSender = await pmc.isBeamioAccount(packedOp.sender)
+		logger(`[AAtoEOA] pm.isBeamioAccount(sender)=${okSender}`)
+
+		if (!okSender) {
+		const errMsg = `Sender AA not registered in paymaster: sender=${packedOp.sender} pm=${pm}`
+		logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
+		obj.res.status(400).json({ success: false, error: errMsg }).end()
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => AAtoEOAProcess(), 3000)
+		return
+		}
   
 	  // --- deposit + ETH (determines whether we can drop paymaster) ---
 	  const deposit = await entryPointRead.balanceOf(packedOp.sender)
