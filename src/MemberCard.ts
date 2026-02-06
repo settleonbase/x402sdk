@@ -1586,6 +1586,16 @@ export const ContainerRelayProcess = async () => {
       return setTimeout(() => ContainerRelayProcess(), 3000)
     }
 
+    const aaRead = new ethers.Contract(account, ['function relayedNonce() view returns (uint256)'], SC.walletBase.provider!)
+    const chainNonce = await aaRead.relayedNonce().catch(() => null)
+    if (chainNonce !== null && chainNonce !== nonce_) {
+      const errMsg = `Nonce mismatch: payload nonce=${nonce_} but chain relayedNonce=${chainNonce}. Please refresh and try again (do not resubmit the same request).`
+      logger(Colors.red(`[AAtoEOA/Container] ${errMsg}`))
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => ContainerRelayProcess(), 3000)
+    }
+
     const FactoryWithRelay = new ethers.Contract(
       BeamioAAAccountFactoryPaymaster,
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_MAIN_ABI],
@@ -1642,7 +1652,12 @@ export const ContainerRelayProcess = async () => {
     const msg = error?.shortMessage || error?.message || String(error)
     logger(Colors.red(`❌ ContainerRelayProcess failed: ${msg}`))
     if (error?.data) logger(Colors.red(`[AAtoEOA/Container] revert data=${error.data}`))
-    obj.res.status(500).json({ success: false, error: msg }).end()
+    const dataHex = typeof error?.data === 'string' ? error.data : ''
+    const isBadNonce = dataHex.length >= 10 && dataHex.slice(0, 10).toLowerCase() === '0x74794617'
+    const clientError = isBadNonce
+      ? 'Nonce already used (链上 nonce 已递增). 请重新发起转账，不要重复提交同一笔。'
+      : msg
+    obj.res.status(isBadNonce ? 400 : 500).json({ success: false, error: clientError }).end()
   } finally {
     Settle_ContractPool.unshift(SC)
     setTimeout(() => ContainerRelayProcess(), 3000)
