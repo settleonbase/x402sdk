@@ -1178,9 +1178,10 @@ export const purchasingCardProcess = async () => {
 	setTimeout(() => purchasingCardProcess(), 3000)
 }
 
-/** EntryPoint v0.7：用于提交 UserOp，Beamio 代付 Gas，beneficiary 收 gas 补偿 */
+/** EntryPoint v0.7：用于提交 UserOp、查询 userOpHash（与链上校验一致） */
 const EntryPointHandleOpsABI = [
-	'function handleOps(tuple(address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature)[] ops, address beneficiary) external'
+	'function handleOps(tuple(address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature)[] ops, address beneficiary) external',
+	'function getUserOpHash(tuple(address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature) userOp) view returns (bytes32)',
 ]
 
 /**
@@ -1197,6 +1198,7 @@ export const AAtoEOAProcess = async () => {
 		AAtoEOAPool.unshift(obj)
 		return setTimeout(() => AAtoEOAProcess(), 3000)
 	}
+	let recoveredSigner: string | null = null
 	try {
 		const op = obj.packedUserOp
 		const callDataHex = (op.callData || '0x').replace(/^0x/, '') ? (op.callData || '0x') : '0x'
@@ -1272,6 +1274,27 @@ export const AAtoEOAProcess = async () => {
 			paymasterAndData: op.paymasterAndData || '0x',
 			signature: sigBytes,
 		}
+		// 与链上 BeamioAccount 一致：userOpHash -> toEthSignedMessageHash -> recover；并立即检查 signer === AA.owner
+		try {
+			const userOpHash = await entryPoint.getUserOpHash(packedOp) as string
+			const hashBytes = ethers.getBytes(userOpHash)
+			const digest = ethers.hashMessage(hashBytes)
+			recoveredSigner = ethers.recoverAddress(digest, sigHex)
+			logger(`[AAtoEOA] recoveredSigner=${recoveredSigner} (must be threshold manager of AA ${packedOp.sender} for validateUserOp to pass)`)
+			// 立即检查：签名人必须等于 AA 的 owner（createAccount 时 creator 写入 managers[0]）
+			const aaContract = new ethers.Contract(packedOp.sender, ['function owner() view returns (address)'], SC.walletBase.provider!)
+			const aaOwner = await aaContract.owner() as string
+			if (aaOwner && recoveredSigner && aaOwner.toLowerCase() !== recoveredSigner.toLowerCase()) {
+				const errMsg = `Signature signer (${recoveredSigner}) is not the AA owner (${aaOwner}). Use the key for the AA owner to sign.`
+				logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+				obj.res.status(400).json({ success: false, error: errMsg }).end()
+				Settle_ContractPool.unshift(SC)
+				setTimeout(() => AAtoEOAProcess(), 3000)
+				return
+			}
+		} catch (e) {
+			logger(Colors.yellow(`[AAtoEOA] getUserOpHash/recover failed (non-fatal): ${(e as Error)?.message}`))
+		}
 		const beneficiary = await SC.walletBase.getAddress()
 		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureBytesLen=${sigBytes.length}`)
 		const tx = await entryPoint.handleOps([packedOp], beneficiary)
@@ -1279,10 +1302,10 @@ export const AAtoEOAProcess = async () => {
 		await tx.wait()
 		logger(Colors.green(`✅ AAtoEOAProcess success! Hash: ${tx.hash} toEOA: ${obj.toEOA} amount: ${obj.amountUSDC6}`))
 		obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
-	} catch (error: any) {
+		} catch (error: any) {
 		const msg = error?.shortMessage || error?.message || String(error)
 		const data = error?.data
-		// EntryPoint 常见 revert：FailedOp(uint256 opIndex, string reason) selector 0x65c8fd4d，解码出 "AA233 reverted" 等
+		// EntryPoint 常见 revert：FailedOp(uint256 opIndex, string reason) selector 0x65c8fd4d，解码出 "AA23 reverted" 等
 		let clientError = msg
 		if (typeof data === 'string' && data.length > 10) {
 			try {
@@ -1298,7 +1321,13 @@ export const AAtoEOAProcess = async () => {
 						if (len > 0 && hexPayload.length >= strStart + 64 + len * 2) {
 							const strHex = hexPayload.slice(strStart + 64, strStart + 64 + len * 2)
 							const decoded = ethers.toUtf8String('0x' + strHex)
-							if (decoded.length > 0) clientError = `EntryPoint reverted: ${decoded}`
+							if (decoded.length > 0) {
+								clientError = `EntryPoint reverted: ${decoded}`
+								// AA23 = 账户 validateUserOp 失败，多为签名恢复出的地址不是该 AA 的 owner
+								if (decoded.includes('AA23') && recoveredSigner != null) {
+									clientError += ` Signature recovered to ${recoveredSigner}; this address must be a threshold manager (owner) of the AA ${obj.packedUserOp?.sender ?? 'unknown'}.`
+								}
+							}
 						}
 					}
 				}
