@@ -1214,14 +1214,14 @@ export const AAtoEOAProcess = async () => {
 		const sigHex = typeof rawSig === 'string' && rawSig.startsWith('0x') ? rawSig : '0x' + (rawSig || '')
 		const sigLen = sigHex.length <= 2 ? 0 : (sigHex.length - 2) / 2
 		// 占位/测试 UserOp（空 callData 或空 signature）会在链上被 EntryPoint 拒绝并 revert（如 AA233 reverted）
-		if (callDataHex.length <= 2 || sigHex.length <= 2 || sigLen === 0) {
-			const errMsg = 'Invalid UserOp: callData and signature must be non-empty (client must sign the UserOp with the AA owner key; see ERC-4337)'
-			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg} (signatureLen=${sigHex.length})`))
-			obj.res.status(400).json({ success: false, error: errMsg }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => AAtoEOAProcess(), 3000)
-			return
-		}
+		// if (callDataHex.length <= 2 || sigHex.length <= 2 || sigLen === 0) {
+		// 	const errMsg = 'Invalid UserOp: callData and signature must be non-empty (client must sign the UserOp with the AA owner key; see ERC-4337)'
+		// 	logger(Colors.red(`❌ AAtoEOAProcess ${errMsg} (signatureLen=${sigHex.length})`))
+		// 	obj.res.status(400).json({ success: false, error: errMsg }).end()
+		// 	Settle_ContractPool.unshift(SC)
+		// 	setTimeout(() => AAtoEOAProcess(), 3000)
+		// 	return
+		// }
 		// BeamioAccount._checkThresholdManagersEthSign 要求 sigs.length % 65 === 0；单签必须恰好 65 字节，否则链上验证失败（AA23）
 		if (sigLen !== 65) {
 			const errMsg = `Invalid signature length: expected 65 bytes (130 hex chars), got ${sigLen} bytes (${sigHex.length} chars). Ensure client sends EIP-191 signature as hex, not double-encoded.`
