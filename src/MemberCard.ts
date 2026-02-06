@@ -20,12 +20,13 @@ import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
+import { BASE_AA_FACTORY } from './chainAddresses'
 
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
 const BeamioUserCardFactoryPaymasterV2 = '0x7Ec828BAbA1c58C5021a6E7D29ccDDdB2d8D84bd'
-const BeamioAAAccountFactoryPaymaster = '0xFD48F7a6bBEb0c0C1ff756C38cA7fE7544239767'
+const BeamioAAAccountFactoryPaymaster = BASE_AA_FACTORY
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const BeamioUserCardGatewayAddress = '0x5b24729E66f13BaB19F763f7aE7A35C881D3d858'
@@ -231,17 +232,46 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 		}
 
 		// 尚无账户，由 Paymaster 创建（工厂会分配 index 0）
+		// 注意：CREATE2 地址是确定性的，predictedAddress 应该等于实际部署的地址
 		const tx = await SC.createAccountFor(wallet)
-		console.log(`交易成功！哈希: ${tx.hash}`)
-		await tx.wait()
+		logger(`DeployingSmartAccount: 创建账户交易已发送，hash=${tx.hash}`)
+		const receipt = await tx.wait()
+		
+		// 验证交易是否成功
+		if (!receipt || receipt.status !== 1) {
+			logger(Colors.red(`DeployingSmartAccount: 交易失败，receipt.status=${receipt?.status}`))
+			return { accountAddress: '', alreadyExisted: false }
+		}
 
-		logger(`DeployingSmartAccount 已为 ${wallet} 创建 AA (index=0)`, tx.hash)
+		// CREATE2 地址是确定性的，predictedAddress 应该等于实际部署的地址
+		// 但为了安全，我们验证账户是否已部署
+		const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
+		const code = await provider.getCode(predictedAddress)
+		if (code === '0x' || code === '') {
+			logger(Colors.red(`DeployingSmartAccount: 交易成功但账户未部署，地址=${predictedAddress}`))
+			return { accountAddress: '', alreadyExisted: false }
+		}
+
+		// 验证账户是否已注册到 Factory（可选，因为 createAccountFor 内部会设置）
+		const isBeamioAccount = await SC.isBeamioAccount(predictedAddress)
+		if (!isBeamioAccount) {
+			logger(Colors.yellow(`DeployingSmartAccount: 警告：账户已部署但未注册到 Factory，地址=${predictedAddress}`))
+		}
+
+		// 验证 nextIndexOfCreator 已更新
+		const newNextIndex = await SC.nextIndexOfCreator(creatorAddress)
+		if (newNextIndex !== 1n) {
+			logger(Colors.yellow(`DeployingSmartAccount: 警告：nextIndexOfCreator 未正确更新，期望=1，实际=${newNextIndex}`))
+		}
+
+		logger(`DeployingSmartAccount 已为 ${wallet} 创建 AA (index=0)，地址=${predictedAddress}，tx=${tx.hash}`)
 		return { accountAddress: predictedAddress, alreadyExisted: false }
 	} catch (error: unknown) {
 		const msg = error instanceof Error ? error.message : String(error)
-		logger(`DeployingSmartAccount error!`, msg)
+		logger(Colors.red(`DeployingSmartAccount error! ${msg}`))
+		// 重新抛出错误以便调用方处理
+		throw new Error(`DeployingSmartAccount failed for ${wallet}: ${msg}`)
 	}
-	return { accountAddress: '', alreadyExisted: false }
 }
 
 
