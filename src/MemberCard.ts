@@ -1212,6 +1212,36 @@ export const AAtoEOAProcess = async () => {
 			setTimeout(() => AAtoEOAProcess(), 3000)
 			return
 		}
+		// BeamioAccount._checkThresholdManagersEthSign 要求 sigs.length % 65 === 0；单签必须恰好 65 字节，否则链上验证失败（AA23）
+		if (sigLen !== 65) {
+			const errMsg = `Invalid signature length: expected 65 bytes (130 hex chars), got ${sigLen} bytes (${sigHex.length} chars). Ensure client sends EIP-191 signature as hex, not double-encoded.`
+			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+			obj.res.status(400).json({ success: false, error: errMsg }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => AAtoEOAProcess(), 3000)
+			return
+		}
+		// 显式转为 65 字节再传给 handleOps，避免 JSON/ABI 层把十六进制字符串误编码为 132 字节（导致 sigs.length % 65 !== 0）
+		let sigBytes: Uint8Array
+		try {
+			sigBytes = ethers.getBytes(sigHex)
+		} catch (e) {
+			const errMsg = 'Invalid signature hex: cannot decode to bytes'
+			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+			obj.res.status(400).json({ success: false, error: errMsg }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => AAtoEOAProcess(), 3000)
+			return
+		}
+		if (sigBytes.length !== 65) {
+			const errMsg = `Signature decoded length is ${sigBytes.length}, expected 65`
+			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+			obj.res.status(400).json({ success: false, error: errMsg }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => AAtoEOAProcess(), 3000)
+			return
+		}
+		logger(`[AAtoEOA] signature bytes length=${sigBytes.length} hexLen=${sigHex.length}`)
 		const senderCode = await SC.walletBase.provider!.getCode(op.sender)
 		if (!senderCode || senderCode === '0x' || senderCode.length <= 2) {
 			const errMsg = 'Invalid sender: must be the AA contract address (with code), not the EOA. Use the smart account from primaryAccountOf(owner).'
@@ -1240,10 +1270,10 @@ export const AAtoEOAProcess = async () => {
 			preVerificationGas: typeof op.preVerificationGas === 'string' ? BigInt(op.preVerificationGas) : op.preVerificationGas,
 			gasFees: op.gasFees || ethers.ZeroHash,
 			paymasterAndData: op.paymasterAndData || '0x',
-			signature: sigHex,
+			signature: sigBytes,
 		}
 		const beneficiary = await SC.walletBase.getAddress()
-		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureLen=${(packedOp.signature?.length || 0)}`)
+		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureBytesLen=${sigBytes.length}`)
 		const tx = await entryPoint.handleOps([packedOp], beneficiary)
 		logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
 		await tx.wait()
