@@ -1204,6 +1204,27 @@ export const AAtoEOAProcess = async () => {
       logger(`[AAtoEOA] pm.isBeamioAccount(sender)=${okSender}`)
     }
 
+	  
+	  // ... 已经 parse 出 pm
+	  
+	  if (pm !== ethers.ZeroAddress) {
+		const pmDeposit = await entryPointRead.balanceOf(pm)
+		logger(`[AAtoEOA] paymasterDeposit=${pmDeposit.toString()} pm=${pm}`)
+	  
+		// 你可以设一个最低阈值，比如 0.001 ETH（按 Base 费用再调）
+		const min = ethers.parseEther('0.001')
+		if (pmDeposit < min) {
+		  const errMsg =
+			`AA31 paymaster deposit too low: deposit=${pmDeposit.toString()} (< ${min.toString()}). ` +
+			`Need to top up EntryPoint deposit for paymaster ${pm}.`
+		  logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
+		  obj.res.status(400).json({ success: false, error: errMsg }).end()
+		  Settle_ContractPool.unshift(SC)
+		  setTimeout(() => AAtoEOAProcess(), 3000)
+		  return
+		}
+	  }
+
     // --- recover signer from userOpHash (best-effort, for debug & pre-reject) ---
     try {
       const opForHash: any = { ...packedOp, signature: '0x' } // IMPORTANT
