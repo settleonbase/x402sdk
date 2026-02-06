@@ -1202,6 +1202,15 @@ export const AAtoEOAProcess = async () => {
 			setTimeout(() => AAtoEOAProcess(), 3000)
 			return
 		}
+		const senderCode = await SC.walletBase.provider!.getCode(op.sender)
+		if (!senderCode || senderCode === '0x' || senderCode.length <= 2) {
+			const errMsg = 'Invalid sender: must be the AA contract address (with code), not the EOA. Client should use the smart account address from primaryAccountOf(owner).'
+			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg} sender=${op.sender}`))
+			obj.res.status(400).json({ success: false, error: errMsg }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => AAtoEOAProcess(), 3000)
+			return
+		}
 		const entryPointAddress = await SC.aaAccountFactoryPaymaster.ENTRY_POINT()
 		logger(`[AAtoEOA] ENTRY_POINT address: ${entryPointAddress}`)
 		if (!entryPointAddress || entryPointAddress === ethers.ZeroAddress) {
