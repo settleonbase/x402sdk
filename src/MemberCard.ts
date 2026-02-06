@@ -1191,215 +1191,301 @@ const EntryPointHandleOpsABI = [
 export const AAtoEOAProcess = async () => {
 	const obj = AAtoEOAPool.shift()
 	if (!obj) return
-	logger(`[AAtoEOA] process started, pool had item toEOA=${obj.toEOA} amountUSDC6=${obj.amountUSDC6} sender=${obj.packedUserOp?.sender}`)
+  
+	logger(
+	  `[AAtoEOA] process started, pool had item toEOA=${obj.toEOA} amountUSDC6=${obj.amountUSDC6} sender=${obj.packedUserOp?.sender}`
+	)
+  
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
-		logger(Colors.yellow(`[AAtoEOA] process no SC available, re-queue and retry in 3s (pool length ${AAtoEOAPool.length})`))
-		AAtoEOAPool.unshift(obj)
-		return setTimeout(() => AAtoEOAProcess(), 3000)
+	  logger(
+		Colors.yellow(
+		  `[AAtoEOA] process no SC available, re-queue and retry in 3s (pool length ${AAtoEOAPool.length})`
+		)
+	  )
+	  AAtoEOAPool.unshift(obj)
+	  return setTimeout(() => AAtoEOAProcess(), 3000)
 	}
+  
 	let recoveredSigner: string | null = null
+  
 	try {
-		const op = obj.packedUserOp
-		const callData = op.callData || '0x'
-		if (!callData.startsWith('0x')) {
-			const errMsg = 'Invalid callData: must start with 0x'
-			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-			obj.res.status(400).json({ success: false, error: errMsg }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => AAtoEOAProcess(), 3000)
-			return
-		}
-		const rawSig = op.signature ?? '0x'
-		const sigHex = typeof rawSig === 'string' && rawSig.startsWith('0x') ? rawSig : '0x' + (rawSig || '')
-		const sigLen = sigHex.length <= 2 ? 0 : (sigHex.length - 2) / 2
-		// 占位/测试 UserOp（空 callData 或空 signature）会在链上被 EntryPoint 拒绝并 revert（如 AA233 reverted）
-		// if (callDataHex.length <= 2 || sigHex.length <= 2 || sigLen === 0) {
-		// 	const errMsg = 'Invalid UserOp: callData and signature must be non-empty (client must sign the UserOp with the AA owner key; see ERC-4337)'
-		// 	logger(Colors.red(`❌ AAtoEOAProcess ${errMsg} (signatureLen=${sigHex.length})`))
-		// 	obj.res.status(400).json({ success: false, error: errMsg }).end()
-		// 	Settle_ContractPool.unshift(SC)
-		// 	setTimeout(() => AAtoEOAProcess(), 3000)
-		// 	return
-		// }
-		// BeamioAccount._checkThresholdManagersEthSign 要求 sigs.length % 65 === 0；单签必须恰好 65 字节，否则链上验证失败（AA23）
-		if (sigLen !== 65) {
-			const errMsg = `Invalid signature length: expected 65 bytes (130 hex chars), got ${sigLen} bytes (${sigHex.length} chars). Ensure client sends EIP-191 signature as hex, not double-encoded.`
-			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-			obj.res.status(400).json({ success: false, error: errMsg }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => AAtoEOAProcess(), 3000)
-			return
-		}
-		// 显式转为 65 字节再传给 handleOps，避免 JSON/ABI 层把十六进制字符串误编码为 132 字节（导致 sigs.length % 65 !== 0）
-		let sigBytes: Uint8Array
+	  const op = obj.packedUserOp
+	  const callData = op.callData || '0x'
+	  if (!callData.startsWith('0x')) {
+		const errMsg = 'Invalid callData: must start with 0x'
+		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+		obj.res.status(400).json({ success: false, error: errMsg }).end()
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => AAtoEOAProcess(), 3000)
+		return
+	  }
+  
+	  // --- signature normalize ---
+	  const rawSig = op.signature ?? '0x'
+	  const sigHex =
+		typeof rawSig === 'string' && rawSig.startsWith('0x')
+		  ? rawSig
+		  : '0x' + (rawSig || '')
+	  const sigLen = sigHex.length <= 2 ? 0 : (sigHex.length - 2) / 2
+  
+	  if (sigLen !== 65) {
+		const errMsg = `Invalid signature length: expected 65 bytes (130 hex chars), got ${sigLen} bytes (${sigHex.length} chars). Ensure client sends EIP-191 signature as hex, not double-encoded.`
+		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+		obj.res.status(400).json({ success: false, error: errMsg }).end()
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => AAtoEOAProcess(), 3000)
+		return
+	  }
+  
+	  let sigBytes: Uint8Array
+	  try {
+		sigBytes = ethers.getBytes(sigHex)
+	  } catch {
+		const errMsg = 'Invalid signature hex: cannot decode to bytes'
+		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+		obj.res.status(400).json({ success: false, error: errMsg }).end()
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => AAtoEOAProcess(), 3000)
+		return
+	  }
+  
+	  if (sigBytes.length !== 65) {
+		const errMsg = `Signature decoded length is ${sigBytes.length}, expected 65`
+		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+		obj.res.status(400).json({ success: false, error: errMsg }).end()
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => AAtoEOAProcess(), 3000)
+		return
+	  }
+  
+	  logger(`[AAtoEOA] signature bytes length=${sigBytes.length} hexLen=${sigHex.length}`)
+  
+	  // --- sender must be contract ---
+	  const senderCode = await SC.walletBase.provider!.getCode(op.sender)
+	  if (!senderCode || senderCode === '0x' || senderCode.length <= 2) {
+		const errMsg =
+		  'Invalid sender: must be the AA contract address (with code), not the EOA. Use the smart account from primaryAccountOf(owner).'
+		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg} sender=${op.sender}`))
+		obj.res.status(400).json({ success: false, error: errMsg }).end()
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => AAtoEOAProcess(), 3000)
+		return
+	  }
+  
+	  // --- entryPoint ---
+	  const entryPointAddress = await SC.aaAccountFactoryPaymaster.ENTRY_POINT()
+	  logger(`[AAtoEOA] ENTRY_POINT address: ${entryPointAddress}`)
+	  if (!entryPointAddress || entryPointAddress === ethers.ZeroAddress) {
+		logger(Colors.red(`❌ AAtoEOAProcess ENTRY_POINT not found`))
+		obj.res
+		  .status(500)
+		  .json({ success: false, error: 'ENTRY_POINT not configured' })
+		  .end()
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => AAtoEOAProcess(), 3000)
+		return
+	  }
+  
+	  // tx-capable entryPoint (handleOps)
+	  const entryPoint = new ethers.Contract(
+		entryPointAddress,
+		EntryPointHandleOpsABI,
+		SC.walletBase
+	  )
+  
+	  // view-only entryPoint (balanceOf)
+	  const entryPointRead = new ethers.Contract(
+		entryPointAddress,
+		['function balanceOf(address account) view returns (uint256)'],
+		SC.walletBase.provider!
+	  )
+  
+	  // --- build packed op ---
+	  const packedOp: any = {
+		sender: op.sender,
+		nonce: typeof op.nonce === 'string' ? BigInt(op.nonce) : op.nonce,
+		initCode: op.initCode || '0x',
+		callData,
+		accountGasLimits: op.accountGasLimits || ethers.ZeroHash,
+		preVerificationGas:
+		  typeof op.preVerificationGas === 'string'
+			? BigInt(op.preVerificationGas)
+			: op.preVerificationGas,
+		gasFees: op.gasFees || ethers.ZeroHash,
+		paymasterAndData: op.paymasterAndData || '0x',
+		signature: sigBytes
+	  }
+  
+	  // --- paymaster parse ---
+	  const pnd = packedOp.paymasterAndData as string
+	  const pndLen = typeof pnd === 'string' ? (pnd.length - 2) / 2 : 0
+	  logger(
+		`[AAtoEOA] paymasterAndDataLen=${pndLen} pnd=${
+		  typeof pnd === 'string' ? pnd.slice(0, 42) + '...' : 'bytes'
+		}`
+	  )
+  
+	  let pm = ethers.ZeroAddress
+	  if (typeof pnd === 'string' && pnd.length >= 42) {
+		pm = ethers.getAddress('0x' + pnd.slice(2, 42))
+		logger(`[AAtoEOA] parsed paymaster=${pm}`)
+	  }
+  
+	  // --- recover signer from userOpHash ---
+	  try {
+		// ERC-4337 convention: hash is computed with empty signature
+		const opForHash: any = { ...packedOp, signature: '0x' }
+		const userOpHash = (await entryPoint.getUserOpHash(opForHash)) as string
+  
+		const digest = ethers.hashMessage(ethers.getBytes(userOpHash))
+		recoveredSigner = ethers.recoverAddress(digest, sigHex)
+		logger(
+		  `[AAtoEOA] recoveredSigner=${recoveredSigner} (must be threshold manager of AA ${packedOp.sender} for validateUserOp to pass)`
+		)
+	  } catch (e: any) {
+		logger(
+		  Colors.yellow(
+			`[AAtoEOA] getUserOpHash/recover failed (non-fatal): ${e?.shortMessage || e?.message}`
+		  )
+		)
+	  }
+  
+	  // --- read AA owner + factory ---
+	  let aaOwner = ethers.ZeroAddress
+	  let aaFactory = ethers.ZeroAddress
+	  try {
+		const aa = new ethers.Contract(
+		  packedOp.sender,
+		  [
+			'function owner() view returns (address)',
+			'function factory() view returns (address)'
+		  ],
+		  SC.walletBase.provider!
+		)
+		aaOwner = (await aa.owner()) as string
+		aaFactory = (await aa.factory()) as string
+		logger(
+		  `[AAtoEOA] AA owner=${aaOwner} AA factory=${aaFactory} paymaster=${pm}`
+		)
+	  } catch (e: any) {
+		logger(
+		  Colors.yellow(
+			`[AAtoEOA] AA owner/factory read failed (non-fatal): ${e?.shortMessage || e?.message}`
+		  )
+		)
+	  }
+  
+	  // --- enforce signer==owner when both known ---
+	  if (
+		aaOwner !== ethers.ZeroAddress &&
+		recoveredSigner &&
+		aaOwner.toLowerCase() !== recoveredSigner.toLowerCase()
+	  ) {
+		const errMsg = `Signature signer (${recoveredSigner}) is not the AA owner (${aaOwner}). Use the key for the AA owner to sign.`
+		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+		obj.res.status(400).json({ success: false, error: errMsg }).end()
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => AAtoEOAProcess(), 3000)
+		return
+	  }
+  
+	  // --- paymaster allowlist sanity (only if pm looks valid) ---
+	  if (pm !== ethers.ZeroAddress) {
 		try {
-			sigBytes = ethers.getBytes(sigHex)
-		} catch (e) {
-			const errMsg = 'Invalid signature hex: cannot decode to bytes'
-			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-			obj.res.status(400).json({ success: false, error: errMsg }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => AAtoEOAProcess(), 3000)
-			return
-		}
-		if (sigBytes.length !== 65) {
-			const errMsg = `Signature decoded length is ${sigBytes.length}, expected 65`
-			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-			obj.res.status(400).json({ success: false, error: errMsg }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => AAtoEOAProcess(), 3000)
-			return
-		}
-		logger(`[AAtoEOA] signature bytes length=${sigBytes.length} hexLen=${sigHex.length}`)
-		const senderCode = await SC.walletBase.provider!.getCode(op.sender)
-		if (!senderCode || senderCode === '0x' || senderCode.length <= 2) {
-			const errMsg = 'Invalid sender: must be the AA contract address (with code), not the EOA. Use the smart account from primaryAccountOf(owner).'
-			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg} sender=${op.sender}`))
-			obj.res.status(400).json({ success: false, error: errMsg }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => AAtoEOAProcess(), 3000)
-			return
-		}
-		const entryPointAddress = await SC.aaAccountFactoryPaymaster.ENTRY_POINT()
-		logger(`[AAtoEOA] ENTRY_POINT address: ${entryPointAddress}`)
-		if (!entryPointAddress || entryPointAddress === ethers.ZeroAddress) {
-			logger(Colors.red(`❌ AAtoEOAProcess ENTRY_POINT not found`))
-			obj.res.status(500).json({ success: false, error: 'ENTRY_POINT not configured' }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => AAtoEOAProcess(), 3000)
-			return
-		}
-		const entryPoint = new ethers.Contract(entryPointAddress, EntryPointHandleOpsABI, SC.walletBase)
-		const packedOp = {
-			sender: op.sender,
-			nonce: typeof op.nonce === 'string' ? BigInt(op.nonce) : op.nonce,
-			initCode: op.initCode || '0x',
-			callData,
-			accountGasLimits: op.accountGasLimits || ethers.ZeroHash,
-			preVerificationGas: typeof op.preVerificationGas === 'string' ? BigInt(op.preVerificationGas) : op.preVerificationGas,
-			gasFees: op.gasFees || ethers.ZeroHash,
-			paymasterAndData: op.paymasterAndData || '0x',
-			signature: sigBytes,
-		}
-
-		const pnd = packedOp.paymasterAndData
-		logger(`[AAtoEOA] paymasterAndDataLen=${(typeof pnd === 'string' ? (pnd.length-2)/2 : (pnd as Uint8Array).length)} pnd=${typeof pnd === 'string' ? pnd.slice(0, 42) + '...' : 'bytes'}`)
-
-		if (typeof pnd === 'string' && pnd.length >= 42) {
-			const pm = ethers.getAddress('0x' + pnd.slice(2, 42))
-			logger(`[AAtoEOA] parsed paymaster=${pm}`)
-		  }
-
-		// 与链上/客户端一致：userOpHash 必须用「空 signature」计算（ERC-4337 约定，客户端也是 signature: '0x' 算 hash 再签名）
-		try {
-			const opForHash = { ...packedOp, signature: '0x' as unknown as Uint8Array }
-			const userOpHash = await entryPoint.getUserOpHash(opForHash) as string
-			const hashBytes = ethers.getBytes(userOpHash)
-			const digest = ethers.hashMessage(hashBytes)
-			recoveredSigner = ethers.recoverAddress(digest, sigHex)
-			logger(`[AAtoEOA] recoveredSigner=${recoveredSigner} (must be threshold manager of AA ${packedOp.sender} for validateUserOp to pass)`)
-			// 立即检查：签名人必须等于 AA 的 owner（createAccount 时 creator 写入 managers[0]）
-			const aaContract = new ethers.Contract(packedOp.sender, ['function owner() view returns (address)'], SC.walletBase.provider!)
-			const aaOwner = await aaContract.owner() as string
-
-
-
-			console.log(`[AAtoEOA] entryPointAddress =${entryPointAddress} owner（createAccount factory address）=`, await aaContract.factory())
-
-
-			if (aaOwner && recoveredSigner && aaOwner.toLowerCase() !== recoveredSigner.toLowerCase()) {
-				const errMsg = `Signature signer (${recoveredSigner}) is not the AA owner (${aaOwner}). Use the key for the AA owner to sign.`
-				logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-				obj.res.status(400).json({ success: false, error: errMsg }).end()
-				Settle_ContractPool.unshift(SC)
-				setTimeout(() => AAtoEOAProcess(), 3000)
-				return
-			}
-		} catch (e) {
-			logger(Colors.yellow(`[AAtoEOA] getUserOpHash/recover failed (non-fatal): ${(e as Error)?.message}`))
-		}
-		const beneficiary = await SC.walletBase.getAddress()
-
-		const aaContract = new ethers.Contract(
-			packedOp.sender,
-			[
-			  'function owner() view returns (address)',
-			  'function factory() view returns (address)'
-			],
+		  const pmc = new ethers.Contract(
+			pm,
+			['function isBeamioAccount(address) view returns (bool)'],
 			SC.walletBase.provider!
 		  )
-		  
-		  const aaOwner = await aaContract.owner() as string
-		  const aaFactory = await aaContract.factory() as string
-		  logger(`[AAtoEOA] AA owner=${aaOwner} AA factory=${aaFactory} paymaster=${typeof pnd === 'string' && pnd.length >= 42 ? ethers.getAddress('0x' + pnd.slice(2, 42)) : '0x'}`)
-		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureBytesLen=${sigBytes.length}`)
-		
-		
-		const pmc = new ethers.Contract(BeamioAAAccountFactoryPaymaster, ['function isBeamioAccount(address) view returns (bool)'], SC.walletBase)
-		logger(`[AAtoEOA] pm.isBeamioAccount(sender)=${await pmc.isBeamioAccount(packedOp.sender)}`)
-
-		// 2) entryPoint deposit / AA ETH (决定能否不用 paymaster)
-		logger(`[AAtoEOA] deposit=${(await entryPoint.balanceOf(packedOp.sender)).toString()} aaETH=${(await providerBaseBackup.getBalance(packedOp.sender)).toString()}`)
-
-		// 3) 强制试一次不用 paymaster（只做一次实验）
-		packedOp.paymasterAndData = '0x'
-		// ✅ 用单独的只读 ABI，别用 EntryPointHandleOpsABI 的 entryPoint 实例
-const entryPointRead = new ethers.Contract(
-	entryPointAddress,
-	['function balanceOf(address account) view returns (uint256)'],
-	SC.walletBase.provider!
-  )
-  
-  const deposit = await entryPointRead.balanceOf(packedOp.sender)
-  const aaETH = await SC.walletBase.provider!.getBalance(packedOp.sender)
-  
-  logger(`[AAtoEOA] entryPointDeposit=${deposit.toString()} aaETH=${aaETH.toString()}`)
-  
-		
-		
-		const tx = await entryPoint.handleOps([packedOp], beneficiary)
-		logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
-		await tx.wait()
-		logger(Colors.green(`✅ AAtoEOAProcess success! Hash: ${tx.hash} toEOA: ${obj.toEOA} amount: ${obj.amountUSDC6}`))
-		obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
-		} catch (error: any) {
-		const msg = error?.shortMessage || error?.message || String(error)
-		const data = error?.data
-		// EntryPoint 常见 revert：FailedOp(uint256 opIndex, string reason) selector 0x65c8fd4d，解码出 "AA23 reverted" 等
-		let clientError = msg
-		if (typeof data === 'string' && data.length > 10) {
-			try {
-				const hexPayload = data.startsWith('0x') ? data.slice(2) : data
-				if (hexPayload.length >= 8) {
-					const selector = hexPayload.slice(0, 8)
-					// FailedOp(uint256 opIndex, string reason): 第二项为 string 的 offset（字节，从 params 起算）
-					if (selector === '65c8fd4d' && hexPayload.length >= 136) {
-						const offsetBytes = parseInt(hexPayload.slice(72, 136), 16) // 第二 32 字节为 offset
-						const strStart = 8 + offsetBytes * 2 // params 从 8 开始，offset 为字节
-						const lenHex = hexPayload.slice(strStart, strStart + 64)
-						const len = parseInt(lenHex, 16) || 0
-						if (len > 0 && hexPayload.length >= strStart + 64 + len * 2) {
-							const strHex = hexPayload.slice(strStart + 64, strStart + 64 + len * 2)
-							const decoded = ethers.toUtf8String('0x' + strHex)
-							if (decoded.length > 0) {
-								clientError = `EntryPoint reverted: ${decoded}`
-								// AA23 = 账户 validateUserOp 失败，多为签名恢复出的地址不是该 AA 的 owner
-								if (decoded.includes('AA23') && recoveredSigner != null) {
-									clientError += ` Signature recovered to ${recoveredSigner}; this address must be a threshold manager (owner) of the AA ${obj.packedUserOp?.sender ?? 'unknown'}.`
-								}
-							}
-						}
-					}
-				}
-			} catch (_) { /* keep clientError = msg */ }
+		  const ok = (await pmc.isBeamioAccount(packedOp.sender)) as boolean
+		  logger(`[AAtoEOA] pm.isBeamioAccount(sender)=${ok}`)
+		} catch (e: any) {
+		  logger(
+			Colors.yellow(
+			  `[AAtoEOA] pm.isBeamioAccount read failed (non-fatal): ${e?.shortMessage || e?.message}`
+			)
+		  )
 		}
-		logger(Colors.red(`❌ AAtoEOAProcess failed: ${msg}`), error?.data ? `data=${error.data}` : '')
-		obj.res.status(500).json({ success: false, error: clientError }).end()
+	  }
+  
+	  // --- deposit + ETH (determines whether we can drop paymaster) ---
+	  const deposit = await entryPointRead.balanceOf(packedOp.sender)
+	  const aaETH = await SC.walletBase.provider!.getBalance(packedOp.sender)
+	  logger(
+		`[AAtoEOA] entryPointDeposit=${deposit.toString()} aaETH=${aaETH.toString()}`
+	  )
+  
+	  // --- experiment: try without paymaster if there is deposit/ETH ---
+	  // (you can remove this branch after debug)
+	  if (deposit > 0n || aaETH > 0n) {
+		packedOp.paymasterAndData = '0x'
+		logger('[AAtoEOA] forcing paymasterAndData=0x for test')
+	  }
+  
+	  // --- submit ---
+	  const beneficiary = await SC.walletBase.getAddress()
+	  logger(
+		`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureBytesLen=${sigBytes.length}`
+	  )
+  
+	  const tx = await entryPoint.handleOps([packedOp], beneficiary)
+	  logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
+	  await tx.wait()
+  
+	  logger(
+		Colors.green(
+		  `✅ AAtoEOAProcess success! Hash: ${tx.hash} toEOA: ${obj.toEOA} amount: ${obj.amountUSDC6}`
+		)
+	  )
+	  obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
+	} catch (error: any) {
+	  const msg = error?.shortMessage || error?.message || String(error)
+	  const data = error?.data
+  
+	  let clientError = msg
+  
+	  // decode FailedOp selector 0x65c8fd4d -> reason string
+	  if (typeof data === 'string' && data.length > 10) {
+		try {
+		  const hexPayload = data.startsWith('0x') ? data.slice(2) : data
+		  if (hexPayload.length >= 8) {
+			const selector = hexPayload.slice(0, 8)
+			if (selector === '65c8fd4d' && hexPayload.length >= 136) {
+			  const offsetBytes = parseInt(hexPayload.slice(72, 136), 16)
+			  const strStart = 8 + offsetBytes * 2
+			  const lenHex = hexPayload.slice(strStart, strStart + 64)
+			  const len = parseInt(lenHex, 16) || 0
+			  if (len > 0 && hexPayload.length >= strStart + 64 + len * 2) {
+				const strHex = hexPayload.slice(
+				  strStart + 64,
+				  strStart + 64 + len * 2
+				)
+				const decoded = ethers.toUtf8String('0x' + strHex)
+				if (decoded.length > 0) {
+				  clientError = `EntryPoint reverted: ${decoded}`
+				  if (decoded.includes('AA23') && recoveredSigner != null) {
+					clientError += ` Signature recovered to ${recoveredSigner}; this address must be a threshold manager (owner) of the AA ${obj.packedUserOp?.sender ?? 'unknown'}.`
+				  }
+				}
+			  }
+			}
+		  }
+		} catch {
+		  // keep clientError = msg
+		}
+	  }
+  
+	  logger(
+		Colors.red(`❌ AAtoEOAProcess failed: ${msg}`),
+		error?.data ? `data=${error.data}` : ''
+	  )
+	  obj.res.status(500).json({ success: false, error: clientError }).end()
 	}
+  
 	Settle_ContractPool.unshift(SC)
 	setTimeout(() => AAtoEOAProcess(), 3000)
-}
+  }
 
 const getLatestCard = async (SC: any, ownerEOA: string) => {
 	const factoryAddr = await SC.baseFactoryPaymaster.getAddress()
