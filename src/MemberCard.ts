@@ -1320,6 +1320,19 @@ export const AAtoEOAProcess = async () => {
 			logger(Colors.yellow(`[AAtoEOA] getUserOpHash/recover failed (non-fatal): ${(e as Error)?.message}`))
 		}
 		const beneficiary = await SC.walletBase.getAddress()
+
+		const aaContract = new ethers.Contract(
+			packedOp.sender,
+			[
+			  'function owner() view returns (address)',
+			  'function factory() view returns (address)'
+			],
+			SC.walletBase.provider!
+		  )
+		  
+		  const aaOwner = await aaContract.owner() as string
+		  const aaFactory = await aaContract.factory() as string
+		  logger(`[AAtoEOA] AA owner=${aaOwner} AA factory=${aaFactory} paymaster=${typeof pnd === 'string' && pnd.length >= 42 ? ethers.getAddress('0x' + pnd.slice(2, 42)) : '0x'}`)
 		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureBytesLen=${sigBytes.length}`)
 		const tx = await entryPoint.handleOps([packedOp], beneficiary)
 		logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
