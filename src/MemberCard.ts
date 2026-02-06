@@ -1334,6 +1334,19 @@ export const AAtoEOAProcess = async () => {
 		  const aaFactory = await aaContract.factory() as string
 		  logger(`[AAtoEOA] AA owner=${aaOwner} AA factory=${aaFactory} paymaster=${typeof pnd === 'string' && pnd.length >= 42 ? ethers.getAddress('0x' + pnd.slice(2, 42)) : '0x'}`)
 		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureBytesLen=${sigBytes.length}`)
+		
+		
+		const pmc = new ethers.Contract(pm, ['function isBeamioAccount(address) view returns (bool)'], SC.walletBase)
+		logger(`[AAtoEOA] pm.isBeamioAccount(sender)=${await pmc.isBeamioAccount(packedOp.sender)}`)
+
+		// 2) entryPoint deposit / AA ETH (决定能否不用 paymaster)
+		logger(`[AAtoEOA] deposit=${(await entryPoint.balanceOf(packedOp.sender)).toString()} aaETH=${(await providerBaseBackup.getBalance(packedOp.sender)).toString()}`)
+
+		// 3) 强制试一次不用 paymaster（只做一次实验）
+		packedOp.paymasterAndData = '0x'
+		
+		
+		
 		const tx = await entryPoint.handleOps([packedOp], beneficiary)
 		logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
 		await tx.wait()
