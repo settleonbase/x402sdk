@@ -1488,10 +1488,10 @@ export const AAtoEOAProcess = async () => {
   
 	  // --- experiment: try without paymaster if there is deposit/ETH ---
 	  // (you can remove this branch after debug)
-	  if (deposit > 0n || aaETH > 0n) {
-		packedOp.paymasterAndData = '0x'
-		logger('[AAtoEOA] forcing paymasterAndData=0x for test')
-	  }
+	//   if (deposit > 0n || aaETH > 0n) {
+	// 	packedOp.paymasterAndData = '0x'
+	// 	logger('[AAtoEOA] forcing paymasterAndData=0x for test')
+	//   }
   
 	  // --- submit ---
 	  const beneficiary = await SC.walletBase.getAddress()
