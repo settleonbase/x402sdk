@@ -1344,7 +1344,15 @@ export const AAtoEOAProcess = async () => {
 
 		// 3) 强制试一次不用 paymaster（只做一次实验）
 		packedOp.paymasterAndData = '0x'
-		
+		const entryPointRead = new ethers.Contract(
+			entryPointAddress,
+			['function balanceOf(address) view returns (uint256)'],
+			SC.walletBase.provider!
+		  )
+		  
+		  const deposit = await entryPointRead.balanceOf(packedOp.sender)
+		  const aaETH = await SC.walletBase.provider!.getBalance(packedOp.sender)
+		  logger(`[AAtoEOA] entryPointDeposit=${deposit.toString()} aaETH=${aaETH.toString()}`)
 		
 		
 		const tx = await entryPoint.handleOps([packedOp], beneficiary)
