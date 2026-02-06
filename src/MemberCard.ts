@@ -1305,7 +1305,7 @@ export const AAtoEOAProcess = async () => {
 
 
 
-			console.log(`[AAtoEOA] owner（createAccount factory address）=`, await aaContract.factory())
+			console.log(`[AAtoEOA] entryPointAddress =${entryPointAddress} owner（createAccount factory address）=`, await aaContract.factory())
 
 
 			if (aaOwner && recoveredSigner && aaOwner.toLowerCase() !== recoveredSigner.toLowerCase()) {
