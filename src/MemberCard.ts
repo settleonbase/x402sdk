@@ -1282,6 +1282,15 @@ export const AAtoEOAProcess = async () => {
 			paymasterAndData: op.paymasterAndData || '0x',
 			signature: sigBytes,
 		}
+
+		const pnd = packedOp.paymasterAndData
+		logger(`[AAtoEOA] paymasterAndDataLen=${(typeof pnd === 'string' ? (pnd.length-2)/2 : (pnd as Uint8Array).length)} pnd=${typeof pnd === 'string' ? pnd.slice(0, 42) + '...' : 'bytes'}`)
+
+		if (typeof pnd === 'string' && pnd.length >= 42) {
+			const pm = ethers.getAddress('0x' + pnd.slice(2, 42))
+			logger(`[AAtoEOA] parsed paymaster=${pm}`)
+		  }
+		  
 		// 与链上/客户端一致：userOpHash 必须用「空 signature」计算（ERC-4337 约定，客户端也是 signature: '0x' 算 hash 再签名）
 		try {
 			const opForHash = { ...packedOp, signature: '0x' as unknown as Uint8Array }
