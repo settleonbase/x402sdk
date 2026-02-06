@@ -1336,7 +1336,7 @@ export const AAtoEOAProcess = async () => {
 		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureBytesLen=${sigBytes.length}`)
 		
 		
-		const pmc = new ethers.Contract(pm, ['function isBeamioAccount(address) view returns (bool)'], SC.walletBase)
+		const pmc = new ethers.Contract(BeamioAAAccountFactoryPaymaster, ['function isBeamioAccount(address) view returns (bool)'], SC.walletBase)
 		logger(`[AAtoEOA] pm.isBeamioAccount(sender)=${await pmc.isBeamioAccount(packedOp.sender)}`)
 
 		// 2) entryPoint deposit / AA ETH (决定能否不用 paymaster)
