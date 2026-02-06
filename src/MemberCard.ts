@@ -1188,6 +1188,20 @@ export const AAtoEOAProcess = async () => {
 		return setTimeout(() => AAtoEOAProcess(), 3000)
 	}
 	try {
+		const op = obj.packedUserOp
+		const callDataHex = (op.callData || '0x').replace(/^0x/, '') ? (op.callData || '0x') : '0x'
+		const rawSig = op.signature ?? '0x'
+		const sigHex = typeof rawSig === 'string' && rawSig.startsWith('0x') ? rawSig : '0x' + (rawSig || '')
+		const sigLen = sigHex.length <= 2 ? 0 : (sigHex.length - 2) / 2
+		// 占位/测试 UserOp（空 callData 或空 signature）会在链上被 EntryPoint 拒绝并 revert（如 AA233 reverted）
+		if (callDataHex.length <= 2 || sigHex.length <= 2 || sigLen === 0) {
+			const errMsg = 'Invalid UserOp: callData and signature must be non-empty (client must sign the UserOp with the AA owner key; see ERC-4337)'
+			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg} (signatureLen=${sigHex.length})`))
+			obj.res.status(400).json({ success: false, error: errMsg }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => AAtoEOAProcess(), 3000)
+			return
+		}
 		const entryPointAddress = await SC.aaAccountFactoryPaymaster.ENTRY_POINT()
 		logger(`[AAtoEOA] ENTRY_POINT address: ${entryPointAddress}`)
 		if (!entryPointAddress || entryPointAddress === ethers.ZeroAddress) {
@@ -1198,17 +1212,16 @@ export const AAtoEOAProcess = async () => {
 			return
 		}
 		const entryPoint = new ethers.Contract(entryPointAddress, EntryPointHandleOpsABI, SC.walletBase)
-		const op = obj.packedUserOp
 		const packedOp = {
 			sender: op.sender,
 			nonce: typeof op.nonce === 'string' ? BigInt(op.nonce) : op.nonce,
 			initCode: op.initCode || '0x',
-			callData: op.callData || '0x',
+			callData: callDataHex,
 			accountGasLimits: op.accountGasLimits || ethers.ZeroHash,
 			preVerificationGas: typeof op.preVerificationGas === 'string' ? BigInt(op.preVerificationGas) : op.preVerificationGas,
 			gasFees: op.gasFees || ethers.ZeroHash,
 			paymasterAndData: op.paymasterAndData || '0x',
-			signature: op.signature || '0x',
+			signature: sigHex,
 		}
 		const beneficiary = await SC.walletBase.getAddress()
 		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureLen=${(packedOp.signature?.length || 0)}`)
@@ -1219,9 +1232,31 @@ export const AAtoEOAProcess = async () => {
 		obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 	} catch (error: any) {
 		const msg = error?.shortMessage || error?.message || String(error)
-		const stack = error?.stack ? `\n${error.stack}` : ''
-		logger(Colors.red(`❌ AAtoEOAProcess failed: ${msg}${stack}`))
-		obj.res.status(500).json({ success: false, error: msg }).end()
+		const data = error?.data
+		// EntryPoint 常见 revert：FailedOp(uint256 opIndex, string reason) selector 0x65c8fd4d，解码出 "AA233 reverted" 等
+		let clientError = msg
+		if (typeof data === 'string' && data.length > 10) {
+			try {
+				const hexPayload = data.startsWith('0x') ? data.slice(2) : data
+				if (hexPayload.length >= 8) {
+					const selector = hexPayload.slice(0, 8)
+					// FailedOp(uint256 opIndex, string reason): 第二项为 string 的 offset（字节，从 params 起算）
+					if (selector === '65c8fd4d' && hexPayload.length >= 136) {
+						const offsetBytes = parseInt(hexPayload.slice(72, 136), 16) // 第二 32 字节为 offset
+						const strStart = 8 + offsetBytes * 2 // params 从 8 开始，offset 为字节
+						const lenHex = hexPayload.slice(strStart, strStart + 64)
+						const len = parseInt(lenHex, 16) || 0
+						if (len > 0 && hexPayload.length >= strStart + 64 + len * 2) {
+							const strHex = hexPayload.slice(strStart + 64, strStart + 64 + len * 2)
+							const decoded = ethers.toUtf8String('0x' + strHex)
+							if (decoded.length > 0) clientError = `EntryPoint reverted: ${decoded}`
+						}
+					}
+				}
+			} catch (_) { /* keep clientError = msg */ }
+		}
+		logger(Colors.red(`❌ AAtoEOAProcess failed: ${msg}`), error?.data ? `data=${error.data}` : '')
+		obj.res.status(500).json({ success: false, error: clientError }).end()
 	}
 	Settle_ContractPool.unshift(SC)
 	setTimeout(() => AAtoEOAProcess(), 3000)
