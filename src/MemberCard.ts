@@ -1204,7 +1204,7 @@ export const AAtoEOAProcess = async () => {
 		}
 		const senderCode = await SC.walletBase.provider!.getCode(op.sender)
 		if (!senderCode || senderCode === '0x' || senderCode.length <= 2) {
-			const errMsg = 'Invalid sender: must be the AA contract address (with code), not the EOA. Client should use the smart account address from primaryAccountOf(owner).'
+			const errMsg = 'Invalid sender: must be the AA contract address (with code), not the EOA. Use the smart account from primaryAccountOf(owner).'
 			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg} sender=${op.sender}`))
 			obj.res.status(400).json({ success: false, error: errMsg }).end()
 			Settle_ContractPool.unshift(SC)
@@ -1221,14 +1221,6 @@ export const AAtoEOAProcess = async () => {
 			return
 		}
 		const entryPoint = new ethers.Contract(entryPointAddress, EntryPointHandleOpsABI, SC.walletBase)
-		// EntryPoint 要求 paymasterAndData 为空或至少 20 字节；规范化 hex 并保证长度，避免 AA93
-		let paymasterAndDataHex = (op.paymasterAndData ?? '0x').replace(/^0x/i, '')
-		if (paymasterAndDataHex.length % 2) paymasterAndDataHex = '0' + paymasterAndDataHex
-		const paymasterBytes = Math.floor(paymasterAndDataHex.length / 2)
-		if (paymasterBytes > 0 && paymasterBytes < 20) {
-			paymasterAndDataHex = paymasterAndDataHex.padEnd(40, '0')
-		}
-		const paymasterAndData = paymasterAndDataHex ? '0x' + paymasterAndDataHex : '0x'
 		const packedOp = {
 			sender: op.sender,
 			nonce: typeof op.nonce === 'string' ? BigInt(op.nonce) : op.nonce,
@@ -1237,12 +1229,11 @@ export const AAtoEOAProcess = async () => {
 			accountGasLimits: op.accountGasLimits || ethers.ZeroHash,
 			preVerificationGas: typeof op.preVerificationGas === 'string' ? BigInt(op.preVerificationGas) : op.preVerificationGas,
 			gasFees: op.gasFees || ethers.ZeroHash,
-			paymasterAndData,
+			paymasterAndData: op.paymasterAndData || '0x',
 			signature: sigHex,
 		}
 		const beneficiary = await SC.walletBase.getAddress()
-		const pndBytes = paymasterAndData === '0x' ? 0 : Math.floor((paymasterAndData.length - 2) / 2)
-		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} paymasterAndDataLen=${pndBytes} signatureLen=${(packedOp.signature?.length || 0)}`)
+		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureLen=${(packedOp.signature?.length || 0)}`)
 		const tx = await entryPoint.handleOps([packedOp], beneficiary)
 		logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
 		await tx.wait()
@@ -1482,10 +1473,10 @@ const BeamioAAAccount = '0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61'
 const test = async () => {
 	await new Promise(executor => setTimeout(executor, 3000))
 	// await DeployingSmartAccount(BeamioAAAccount, Settle_ContractPool[0].aaAccountFactoryPaymaster)			//			0x241B97Ee83bF8664D42c030447A63d209c546867
-	for (let i = 0; i < Settle_ContractPool.length; i++) {
-		await registerPayMasterForCardFactory(Settle_ContractPool[i].walletBase.address)
-		await new Promise(executor => setTimeout(executor, 3000))
-	}
+	// for (let i = 0; i < Settle_ContractPool.length; i++) {
+	// 	await registerPayMasterForCardFactory(Settle_ContractPool[i].walletBase.address)
+	// 	await new Promise(executor => setTimeout(executor, 3000))
+	// }
 
 	//		创建 新卡
 
@@ -1505,7 +1496,7 @@ const test = async () => {
 	// logger(inspect(rates, false, 3, true))	
 }
 
-test()
+// test()
 
 
 export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
