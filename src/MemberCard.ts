@@ -1492,6 +1492,40 @@ export const AAtoEOAProcess = async () => {
 	// 	packedOp.paymasterAndData = '0x'
 	// 	logger('[AAtoEOA] forcing paymasterAndData=0x for test')
 	//   }
+
+	const AA_DEBUG_ABI = [
+		'function owner() view returns (address)',
+		'function factory() view returns (address)',
+		'function initialized() view returns (bool)',
+		'function threshold() view returns (uint256)',
+		'function isThresholdManager(address) view returns (bool)',
+		'function thresholdManagers(uint256) view returns (address)'
+	  ]
+	  
+	  const aaDbg = new ethers.Contract(packedOp.sender, AA_DEBUG_ABI, SC.walletBase.provider!)
+	  
+	  const [aaOwnerCheck, aaFactoryCheck, initializedCheck, thresholdCheck] = await Promise.all([
+		aaDbg.owner(),
+		aaDbg.factory(),
+		aaDbg.initialized(),
+		aaDbg.threshold()
+	  ])
+	  
+	  const isOwnerManager = await aaDbg.isThresholdManager(aaOwnerCheck)
+	  const isRecoveredManager = recoveredSigner
+		? await aaDbg.isThresholdManager(recoveredSigner)
+		: false
+	  
+	  let tm0 = ethers.ZeroAddress
+	  let tm1 = ethers.ZeroAddress
+	  try { tm0 = await aaDbg.thresholdManagers(0) } catch {}
+	  try { tm1 = await aaDbg.thresholdManagers(1) } catch {}
+	  
+	  logger(
+		`[AAtoEOA] AA check: initialized=${initializedCheck} threshold=${thresholdCheck.toString()} ` +
+		`owner=${aaOwnerCheck} ownerIsTM=${isOwnerManager} recoveredIsTM=${isRecoveredManager} ` +
+		`tm0=${tm0} tm1=${tm1}`
+	  )
   
 	  // --- submit ---
 	  const beneficiary = await SC.walletBase.getAddress()
