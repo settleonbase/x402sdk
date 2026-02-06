@@ -1201,7 +1201,15 @@ export const AAtoEOAProcess = async () => {
 	let recoveredSigner: string | null = null
 	try {
 		const op = obj.packedUserOp
-		const callDataHex = (op.callData || '0x').replace(/^0x/, '') ? (op.callData || '0x') : '0x'
+		const callData = op.callData || '0x'
+		if (!callData.startsWith('0x')) {
+			const errMsg = 'Invalid callData: must start with 0x'
+			logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
+			obj.res.status(400).json({ success: false, error: errMsg }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => AAtoEOAProcess(), 3000)
+			return
+		}
 		const rawSig = op.signature ?? '0x'
 		const sigHex = typeof rawSig === 'string' && rawSig.startsWith('0x') ? rawSig : '0x' + (rawSig || '')
 		const sigLen = sigHex.length <= 2 ? 0 : (sigHex.length - 2) / 2
@@ -1267,16 +1275,17 @@ export const AAtoEOAProcess = async () => {
 			sender: op.sender,
 			nonce: typeof op.nonce === 'string' ? BigInt(op.nonce) : op.nonce,
 			initCode: op.initCode || '0x',
-			callData: callDataHex,
+			callData,
 			accountGasLimits: op.accountGasLimits || ethers.ZeroHash,
 			preVerificationGas: typeof op.preVerificationGas === 'string' ? BigInt(op.preVerificationGas) : op.preVerificationGas,
 			gasFees: op.gasFees || ethers.ZeroHash,
 			paymasterAndData: op.paymasterAndData || '0x',
 			signature: sigBytes,
 		}
-		// 与链上 BeamioAccount 一致：userOpHash -> toEthSignedMessageHash -> recover；并立即检查 signer === AA.owner
+		// 与链上/客户端一致：userOpHash 必须用「空 signature」计算（ERC-4337 约定，客户端也是 signature: '0x' 算 hash 再签名）
 		try {
-			const userOpHash = await entryPoint.getUserOpHash(packedOp) as string
+			const opForHash = { ...packedOp, signature: '0x' as unknown as Uint8Array }
+			const userOpHash = await entryPoint.getUserOpHash(opForHash) as string
 			const hashBytes = ethers.getBytes(userOpHash)
 			const digest = ethers.hashMessage(hashBytes)
 			recoveredSigner = ethers.recoverAddress(digest, sigHex)
