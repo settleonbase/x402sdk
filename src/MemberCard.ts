@@ -18,7 +18,6 @@ import CatalogABI from "./ABI/CatalogABI.json";
 import ActionABI from "./ABI/ActionABI.json";
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
-import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 import { BASE_AA_FACTORY } from './chainAddresses'
 
@@ -103,105 +102,7 @@ masterSetup.settle_contractAdmin.forEach(n => {
 })
 
 
-  const addAdminList = async (adminList: string[]) => {
-	const  walletConet = Settle_ContractPool[0].walletConet
-	const SC = new ethers.Contract(DIAMOND, AdminFacetABI, walletConet);
-		
-	// 可选：确认一下 sender 是谁
-	const sender = await walletConet.getAddress();
-	logger(`[Beamio] sender(owner?)=${sender}`);
-		// 可选：确认一下 sender 是谁
-		
-	
-	for (const admin of adminList) {
-		try {
-			if (!ethers.isAddress(admin)) {
-			logger(`[Beamio] skip invalid address: ${admin}`);
-			continue;
-			}
-	
-			const already = await SC.isAdmin(admin);
-			if (already) {
-			logger(`[Beamio] ${admin} is already an Admin`);
-			continue;
-			}
-	
-			logger(`[Beamio] ${admin} is not an Admin, enabling...`);
-			const tx = await SC.setAdmin(admin, true);   // ✅ 正确：setAdmin(admin, true)
-			const receipt = await tx.wait();
-	
-			logger(`[Beamio] Successfully enabled ${admin}. tx=${tx.hash} block=${receipt.blockNumber}`);
-		} catch (e: any) {
-			logger(
-			`[Beamio] Failed for ${admin}: ${e?.shortMessage ?? e?.reason ?? e?.message ?? String(e)}`
-			);
-		}
-	}
-  }
 
-
-
-//logger(`[Beamio] Registering ${adminn.address} `)
-
-const registerPayMasterForCardFactory = async (payMasterAddress: string) => {
-	const targetAddress = payMasterAddress;
-    const SC = Settle_ContractPool[0].baseFactoryPaymaster
-    try {
-        // 1. 修正调用：合约生成的 getter 是小写 m
-        // ethers 会自动为 public mapping 生成同名 getter 函数
-        const alreadyRegistered = await SC.isPaymaster(targetAddress); 
-        
-        if (alreadyRegistered) {
-            console.log(`[Beamio] Address ${targetAddress} is already a registered PayMaster.`);
-            return;
-        }
-
-        console.log(`[Beamio] Registering ${targetAddress} as PayMaster...`);
-
-        // 2. 修正函数名：合约中对应的函数是 changePaymasterStatus
-        // 第二个参数传 true 表示启用
-        const tx = await SC.changePaymasterStatus(targetAddress, true);
-        
-        await tx.wait();
-        console.log(`[Beamio] Successfully added ${targetAddress} as PayMaster. Hash: ${tx.hash}`);
-    } catch (error: any) {
-        // 这里报错通常是因为：
-        // 1. 函数名拼错（已修正）
-        // 2. 调用者（adminn）不是合约的 owner（触发 NotAuthorized 错误）
-        console.error("[Beamio] Failed to add PayMaster. Ensure your signer is the Factory Admin:", error.message);
-        throw error;
-    }
-}
-
-const registerPayMasterForAAFactory = async (payMasterAddress: string) => {
-	const targetAddress = payMasterAddress;
-    const SC = Settle_ContractPool[0].aaAccountFactoryPaymaster
-    try {
-        // 1. 修正调用：合约生成的 getter 是小写 m
-        // ethers 会自动为 public mapping 生成同名 getter 函数
-        const alreadyRegistered = await SC.isPayMaster(targetAddress); 
-        
-        if (alreadyRegistered) {
-            console.log(`[Beamio] Address ${targetAddress} is already a registered PayMaster.`);
-            return;
-        }
-
-        console.log(`[Beamio] Registering ${targetAddress} as PayMaster...`);
-
-        // 2. 修正函数名：合约中对应的函数是 changePaymasterStatus
-        // 第二个参数传 true 表示启用
-        const tx = await SC.addPayMaster(targetAddress);
-        
-        await tx.wait();
-        console.log(`[Beamio] Successfully added ${targetAddress} as PayMaster. Hash: ${tx.hash}`);
-    } catch (error: any) {
-        // 这里报错通常是因为：
-        // 1. 函数名拼错（已修正）
-        // 2. 调用者（adminn）不是合约的 owner（触发 NotAuthorized 错误）
-        console.error("[Beamio] Failed to add PayMaster. Ensure your signer is the Factory Admin:", error.message);
-        throw error;
-    }
-}
 
 /**
  * 为 EOA 确保存在 AA 账户（purchasingCardProcess 等流程的依赖）。
@@ -343,117 +244,6 @@ const E18 = 10n ** 18n
 const POINTS_ONE = 1_000_000n // 1 point = 1e6 units (points6)
 const USDC_ONE_CENTS_6 = 10_000n // 0.01 USDC in 6 decimals
 
-/**
- * Deploy a new card with pricing:
- *   1 currency unit = X points
- *
- * Contract param pointsUnitPriceInCurrencyE18 means:
- *   price of 1.000000 point (1e6 units) in currency, with 1e18 precision.
- *
- * Therefore:
- *   priceE18 = 1e18 / X
- */
-const initCardTest_old = async (
-	user: string,
-	currencyType: CurrencyType,
-	currencyToPointValue: number,
-	opts?: {
-	  uri?: string
-	  previewPayUsdc?: number // default 0.01
-	  minX?: number // default 10 (防止误传 1)
-	}
-  ) => {
-	const uri = opts?.uri ?? 'https://api.beamio.io/metadata/default_card.json'
-	const previewPayUsdc = opts?.previewPayUsdc ?? 0.01
-	const minX = opts?.minX ?? 10
-  
-	if (!ethers.isAddress(user)) throw new Error(`bad user address: ${user}`)
-  
-	const X = Number(currencyToPointValue)
-	if (!Number.isFinite(X) || X <= 0) throw new Error(`currencyToPointValue must be > 0, got ${currencyToPointValue}`)
-	if (X < minX) {
-	  throw new Error(
-		`Refusing to deploy: currencyToPointValue (X=${X}) is too small. Did you mean 10000?\n` +
-		  `Rule: require X >= ${minX} to prevent accidental '1 currency = 1 point' deployments.`
-	  )
-	}
-  
-	const currencyId = CurrencyMap[currencyType]
-	const usdcId = CurrencyMap.USDC
-  
-	// priceE18 = 1e18 / X
-	const priceE18 = E18 / BigInt(X)
-  
-	// ===== Preview using your oracle table =====
-	try {
-	  const rates = await getAllRate()
-  
-	  const c = rates.find(r => r.id === currencyId && r.status === 'Active')
-	  const u = rates.find(r => r.id === usdcId && r.status === 'Active')
-  
-	  if (c && u) {
-		const cUSD = BigInt(c.rateRaw) // currency -> USD (E18)
-		const uUSD = BigInt(u.rateRaw) // USDC -> USD (E18)
-  
-		// usdE18 = priceE18 * cUSD / 1e18
-		const usdE18 = (priceE18 * cUSD) / E18
-  
-		// usdcE18 = usdE18 * 1e18 / uUSD
-		const usdcE18 = (usdE18 * E18) / uUSD
-  
-		// usdc6 per 1 point (rounded)
-		const usdc6PerPoint = (usdcE18 + (E12 / 2n)) / E12
-  
-		const payUsdc6 = BigInt(Math.round(previewPayUsdc * 1_000_000))
-		const points6Out = usdc6PerPoint === 0n ? 0n : (payUsdc6 * POINTS_ONE) / usdc6PerPoint
-  
-		logger(`[InitCardTest] Preview by oracle:`)
-		logger(`  currency=${currencyType} (id=${currencyId})  X=${X} points/1 ${currencyType}`)
-		logger(`  priceE18 (currency per 1 point) = ${ethers.formatUnits(priceE18, 18)} ${currencyType}`)
-		logger(`  rate ${currencyType}->USD = ${ethers.formatUnits(cUSD, 18)} , USDC->USD = ${ethers.formatUnits(uUSD, 18)}`)
-		logger(`  unitPriceUsdc6 (USDC per 1 point) = ${ethers.formatUnits(usdc6PerPoint, 6)} USDC`)
-		logger(`  pay ${previewPayUsdc} USDC => ~ ${ethers.formatUnits(points6Out, 6)} points`)
-	  } else {
-		logger(`[InitCardTest] Preview skipped: missing active rate for ${currencyType} or USDC`)
-	  }
-	} catch (e: any) {
-	  logger(Colors.gray(`[InitCardTest] Preview skipped (getAllRate failed): ${e?.message ?? String(e)}`))
-	}
-	const SC = Settle_ContractPool[0].baseFactoryPaymaster
-	// ===== Deploy =====
-	logger(Colors.yellow(`[Test] Deploying Card: 1 ${currencyType} = ${X} Points`))
-	logger(Colors.gray(`[Test] priceE18 = ${priceE18.toString()} (= ${ethers.formatUnits(priceE18, 18)} ${currencyType} per 1 point)`))
-
-
-
-
-
-	
-  
-	const tx = await SC.createCardCollectionFor(user, uri, currencyId, priceE18)
-	logger(Colors.cyan(`[Test] Transaction sent: ${tx.hash}`))
-  
-	const receipt = await tx.wait()
-	if (receipt.status !== 1) throw new Error('Transaction reverted on-chain.')
-		
-	const cardDeployedLog = receipt.logs.find((log: any) => {
-	  try {
-		const parsed = SC.interface.parseLog(log)
-		return parsed?.name === 'CardDeployed'
-	  } catch {
-		return false
-	  }
-	})
-  
-	if (!cardDeployedLog) throw new Error('CardDeployed event not found in receipt logs.')
-  
-	const parsed = SC.interface.parseLog(cardDeployedLog)
-	const newCardAddress = parsed?.args.card as string
-  
-	logger(Colors.green(`✅ [Test] Success! Card: ${newCardAddress}`))
-	return newCardAddress
-}
-
 const OLD_ERROR_SELECTORS: Record<string, string> = {
 	'0xea8e4eb5': 'NotAuthorized()',
 	'0xd92e233d': 'ZeroAddress()',
@@ -512,102 +302,6 @@ const OLD_ERROR_SELECTORS: Record<string, string> = {
   
 	return `Unknown custom error (selector=${sel})`
   }
-
-  export const develop1 = async (
-	user: string,
-	currencyType: CurrencyType,
-	currencyToPointValue: string
-  ) => {
-	const uri = "https://api.beamio.io/metadata/default_card.json";
-  
-	// ===== your existing config =====
-	const SC = Settle_ContractPool[0];
-	const signer = SC.walletBase;
-	const baseProvider = signer.provider!;
-	const signerAddr = await signer.getAddress();
-  
-	// ✅ MUST be BeamioUserCardFactoryPaymasterV07 address (the trusted gateway)
-	const factoryAddress = BeamioUserCardFactoryPaymasterV2;
-  
-	// ===== BeamioUserCard ctor:
-	// constructor(string uri, uint8 currency, uint256 priceE18, address initialOwner, address gateway)
-	// gateway == factoryAddress (BeamioUserCardFactoryPaymasterV07)
-	const priceE18 = ethers.parseUnits(currencyToPointValue, 18);
-	const currencyId = CurrencyMap[currencyType]; // uint8/number
-  
-	const abi = BeamioUserCardArtifact.abi ?? BeamioUserCardABI;
-	if (!abi) throw new Error("Missing ABI");
-  
-	const bytecodeRaw = BeamioUserCardArtifact.bytecode;
-	if (!bytecodeRaw) throw new Error("Missing bytecode in artifact");
-  
-	const bytecode = bytecodeRaw.startsWith("0x") ? bytecodeRaw : `0x${bytecodeRaw}`;
-	if (/__\$\w+\$__|__\w+__/.test(bytecode)) {
-	  throw new Error("Bytecode contains unlinked libraries placeholders");
-	}
-  
-	// ===== build initCode for DeployerV07.deploy(initCode) =====
-	const cardFactory = new ethers.ContractFactory(abi, bytecode, signer);
-  
-	// ✅ 5 params: uri, currencyId, priceE18, initialOwner(user), gateway(factoryAddress)
-	const deployTx = await cardFactory.getDeployTransaction(
-	  uri,
-	  currencyId,
-	  priceE18,
-	  user,
-	  factoryAddress
-	);
-  
-	const initCodeHex = deployTx.data as string;
-	if (!initCodeHex || initCodeHex.length <= 2) throw new Error("initCode empty");
-  
-	const net = await baseProvider.getNetwork();
-	console.log("chainId:", net.chainId.toString());
-	console.log("deployer signer:", signerAddr);
-	console.log("factoryAddress:", factoryAddress);
-	console.log("✅ initCodeHex length:", initCodeHex.length);
-	console.log("✅ initCodeHex prefix:", initCodeHex.slice(0, 10));
-  
-	// ===== call FactoryPaymasterV07.createCardCollectionWithInitCode =====
-	const factory = new ethers.Contract(
-	  factoryAddress,
-	  SC.baseFactoryPaymaster.interface, // must include createCardCollectionWithInitCode(...)
-	  signer
-	);
-  
-	// ✅ correct simulation: staticCall through factory (so it goes through DeployerV07 + checks)
-	try {
-	  await factory.createCardCollectionWithInitCode.staticCall(
-		user,
-		currencyId,
-		priceE18,
-		initCodeHex,
-		{ gasLimit: 6_500_000n }
-	  );
-	  console.log("✅ factory staticCall ok");
-	} catch (e: any) {
-	  const data = e?.data || e?.error?.data || e?.info?.error?.data;
-	  const msg = e?.shortMessage || e?.message || String(e);
-	  console.error("❌ factory staticCall FAILED");
-	  console.error("message:", msg);
-	  console.error("revert data:", data);
-	  throw e;
-	}
-  
-	// ✅ send tx
-	const tx = await factory.createCardCollectionWithInitCode(
-	  user,
-	  currencyId,
-	  priceE18,
-	  initCodeHex,
-	  { gasLimit: 6_500_000n }
-	);
-  
-	const rc = await tx.wait();
-	return { txHash: tx.hash, receipt: rc };
-  };
-  
-
  
 
 // 辅助函数：计算错误选择器
@@ -1022,21 +716,6 @@ const getICurrency = (currency: BigInt): ICurrency => {
 	}
 }
 
-async function setTier(ownerPk: string, cardAddr: string) {
-	const signer = new ethers.Wallet(ownerPk, providerBaseBackup)
-	const card = new ethers.Contract(cardAddr, BeamioUserCardABI, signer)
-  
-	console.log('owner=', await card.owner())
-	console.log('tiersCount(before)=', (await card.getTiersCount()).toString())
-  
-	// 超低门槛，保证你买 0.01 USDC 后会触发发卡
-	const tx = await card.appendTier(1n, 1n, { gasLimit: 500_000 })
-	await tx.wait()
-  
-	console.log('tiersCount(after)=', (await card.getTiersCount()).toString())
-	console.log('tx=', tx.hash)
-}
-  
 
 /** 新部署的 CCSA 卡（1 CAD = 1 token），与 deployments/base-UserCard-0xEaBF0A98.json 一致 */
 const CCSACardAddressNew = '0x1Dc8c473fc67358357E90636AE8607229d5e9f92'.toLowerCase()
@@ -1214,503 +893,6 @@ const EntryPointHandleOpsABI = [
 	'function getUserOpHash(tuple(address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature) userOp) view returns (bytes32)',
 ]
 
-/**
- * AA→EOA 队列处理：从 Pool 取任务，用 Settle_ContractPool 的私钥提交 UserOp 到 EntryPoint，代付 Gas。
- * 与 purchasingCardProcess 相同：从 Pool 取一项、从 Settle_ContractPool 取一个 SC，执行后归还并递归。
- */
-export const AAtoEOAProcess = async () => {
-	const obj = AAtoEOAPool.shift()
-	if (!obj) return
-  
-	logger(
-	  `[AAtoEOA] process started, pool had item toEOA=${obj.toEOA} amountUSDC6=${obj.amountUSDC6} sender=${obj.packedUserOp?.sender}`
-	)
-  
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-	  logger(
-		Colors.yellow(
-		  `[AAtoEOA] process no SC available, re-queue and retry in 3s (pool length ${AAtoEOAPool.length})`
-		)
-	  )
-	  AAtoEOAPool.unshift(obj)
-	  return setTimeout(() => AAtoEOAProcess(), 3000)
-	}
-  
-	let recoveredSigner: string | null = null
-  
-	try {
-	  const op = obj.packedUserOp
-	  const callData = op.callData || '0x'
-	  if (!callData.startsWith('0x')) {
-		const errMsg = 'Invalid callData: must start with 0x'
-		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-		obj.res.status(400).json({ success: false, error: errMsg }).end()
-		Settle_ContractPool.unshift(SC)
-		setTimeout(() => AAtoEOAProcess(), 3000)
-		return
-	  }
-  
-	  // --- signature normalize ---
-	  const rawSig = op.signature ?? '0x'
-	  const sigHex =
-		typeof rawSig === 'string' && rawSig.startsWith('0x')
-		  ? rawSig
-		  : '0x' + (rawSig || '')
-	  const sigLen = sigHex.length <= 2 ? 0 : (sigHex.length - 2) / 2
-  
-	  if (sigLen !== 65) {
-		const errMsg = `Invalid signature length: expected 65 bytes (130 hex chars), got ${sigLen} bytes (${sigHex.length} chars). Ensure client sends EIP-191 signature as hex, not double-encoded.`
-		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-		obj.res.status(400).json({ success: false, error: errMsg }).end()
-		Settle_ContractPool.unshift(SC)
-		setTimeout(() => AAtoEOAProcess(), 3000)
-		return
-	  }
-  
-	  let sigBytes: Uint8Array
-	  try {
-		sigBytes = ethers.getBytes(sigHex)
-	  } catch {
-		const errMsg = 'Invalid signature hex: cannot decode to bytes'
-		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-		obj.res.status(400).json({ success: false, error: errMsg }).end()
-		Settle_ContractPool.unshift(SC)
-		setTimeout(() => AAtoEOAProcess(), 3000)
-		return
-	  }
-  
-	  if (sigBytes.length !== 65) {
-		const errMsg = `Signature decoded length is ${sigBytes.length}, expected 65`
-		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-		obj.res.status(400).json({ success: false, error: errMsg }).end()
-		Settle_ContractPool.unshift(SC)
-		setTimeout(() => AAtoEOAProcess(), 3000)
-		return
-	  }
-  
-	  logger(`[AAtoEOA] signature bytes length=${sigBytes.length} hexLen=${sigHex.length}`)
-  
-	  // --- sender must be contract ---
-	  const senderCode = await SC.walletBase.provider!.getCode(op.sender)
-	  if (!senderCode || senderCode === '0x' || senderCode.length <= 2) {
-		const errMsg =
-		  'Invalid sender: must be the AA contract address (with code), not the EOA. Use the smart account from primaryAccountOf(owner).'
-		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg} sender=${op.sender}`))
-		obj.res.status(400).json({ success: false, error: errMsg }).end()
-		Settle_ContractPool.unshift(SC)
-		setTimeout(() => AAtoEOAProcess(), 3000)
-		return
-	  }
-  
-	  // --- entryPoint ---
-	  const entryPointAddress = await SC.aaAccountFactoryPaymaster.ENTRY_POINT()
-	  logger(`[AAtoEOA] ENTRY_POINT address: ${entryPointAddress}`)
-	  if (!entryPointAddress || entryPointAddress === ethers.ZeroAddress) {
-		logger(Colors.red(`❌ AAtoEOAProcess ENTRY_POINT not found`))
-		obj.res
-		  .status(500)
-		  .json({ success: false, error: 'ENTRY_POINT not configured' })
-		  .end()
-		Settle_ContractPool.unshift(SC)
-		setTimeout(() => AAtoEOAProcess(), 3000)
-		return
-	  }
-  
-	  // tx-capable entryPoint (handleOps)
-	  const entryPoint = new ethers.Contract(
-		entryPointAddress,
-		EntryPointHandleOpsABI,
-		SC.walletBase
-	  )
-  
-	  // view-only entryPoint (balanceOf)
-	  const entryPointRead = new ethers.Contract(
-		entryPointAddress,
-		['function balanceOf(address account) view returns (uint256)'],
-		SC.walletBase.provider!
-	  )
-  
-	  // --- build packed op ---
-	  const packedOp: any = {
-		sender: op.sender,
-		nonce: typeof op.nonce === 'string' ? BigInt(op.nonce) : op.nonce,
-		initCode: op.initCode || '0x',
-		callData,
-		accountGasLimits: op.accountGasLimits || ethers.ZeroHash,
-		preVerificationGas:
-		  typeof op.preVerificationGas === 'string'
-			? BigInt(op.preVerificationGas)
-			: op.preVerificationGas,
-		gasFees: op.gasFees || ethers.ZeroHash,
-		paymasterAndData: op.paymasterAndData || '0x',
-		signature: sigBytes
-	  }
-  
-	  // --- paymaster parse ---
-	  const pnd = packedOp.paymasterAndData as string
-	  const pndLen = typeof pnd === 'string' ? (pnd.length - 2) / 2 : 0
-	  logger(
-		`[AAtoEOA] paymasterAndDataLen=${pndLen} pnd=${
-		  typeof pnd === 'string' ? pnd.slice(0, 42) + '...' : 'bytes'
-		}`
-	  )
-  
-	  let pm = ethers.ZeroAddress
-	  if (typeof pnd === 'string' && pnd.length >= 42) {
-		pm = ethers.getAddress('0x' + pnd.slice(2, 42))
-		logger(`[AAtoEOA] parsed paymaster=${pm}`)
-	  }
-  
-	  // --- recover signer from userOpHash ---
-	  try {
-		// ERC-4337 convention: hash is computed with empty signature
-		const opForHash: any = { ...packedOp, signature: '0x' }
-		const userOpHash = (await entryPoint.getUserOpHash(opForHash)) as string
-  
-		const digest = ethers.hashMessage(ethers.getBytes(userOpHash))
-		recoveredSigner = ethers.recoverAddress(digest, sigHex)
-		logger(
-		  `[AAtoEOA] recoveredSigner=${recoveredSigner} (must be threshold manager of AA ${packedOp.sender} for validateUserOp to pass)`
-		)
-	  } catch (e: any) {
-		logger(
-		  Colors.yellow(
-			`[AAtoEOA] getUserOpHash/recover failed (non-fatal): ${e?.shortMessage || e?.message}`
-		  )
-		)
-	  }
-  
-	  // --- read AA owner + factory ---
-	  let aaOwner = ethers.ZeroAddress
-	  let aaFactory = ethers.ZeroAddress
-	  try {
-		const aa = new ethers.Contract(
-		  packedOp.sender,
-		  [
-			'function owner() view returns (address)',
-			'function factory() view returns (address)'
-		  ],
-		  SC.walletBase.provider!
-		)
-		aaOwner = (await aa.owner()) as string
-		aaFactory = (await aa.factory()) as string
-		logger(
-		  `[AAtoEOA] AA owner=${aaOwner} AA factory=${aaFactory} paymaster=${pm}`
-		)
-	  } catch (e: any) {
-		logger(
-		  Colors.yellow(
-			`[AAtoEOA] AA owner/factory read failed (non-fatal): ${e?.shortMessage || e?.message}`
-		  )
-		)
-	  }
-  
-	  // --- enforce signer==owner when both known ---
-	  if (
-		aaOwner !== ethers.ZeroAddress &&
-		recoveredSigner &&
-		aaOwner.toLowerCase() !== recoveredSigner.toLowerCase()
-	  ) {
-		const errMsg = `Signature signer (${recoveredSigner}) is not the AA owner (${aaOwner}). Use the key for the AA owner to sign.`
-		logger(Colors.red(`❌ AAtoEOAProcess ${errMsg}`))
-		obj.res.status(400).json({ success: false, error: errMsg }).end()
-		Settle_ContractPool.unshift(SC)
-		setTimeout(() => AAtoEOAProcess(), 3000)
-		return
-	  }
-
-	  // --- simulateValidation via eth_call (no tx) ---
-	try {
-		const simIface = new ethers.Interface([
-		'function simulateValidation((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature) userOp) external'
-		])
-	
-		const data = simIface.encodeFunctionData('simulateValidation', [packedOp])
-	
-		// ✅ 必须用 provider.call，绝不会发交易
-		await SC.walletBase.provider!.call({
-		to: entryPointAddress,
-		data
-		})
-	
-		logger('[AAtoEOA] simulateValidation eth_call ok')
-	} catch (e: any) {
-		const m = e?.shortMessage || e?.message || String(e)
-		logger(Colors.red(`[AAtoEOA] simulateValidation eth_call failed: ${m}`))
-		if (e?.data) logger(Colors.red(`[AAtoEOA] simulateValidation data=${e.data}`))
-	}
-  
-	  // --- paymaster allowlist sanity (only if pm looks valid) ---
-	  if (pm !== ethers.ZeroAddress) {
-		try {
-		  const pmc = new ethers.Contract(
-			pm,
-			['function isBeamioAccount(address) view returns (bool)'],
-			SC.walletBase.provider!
-		  )
-		  const ok = (await pmc.isBeamioAccount(packedOp.sender)) as boolean
-		  logger(`[AAtoEOA] pm.isBeamioAccount(sender)=${ok}`)
-		} catch (e: any) {
-		  logger(
-			Colors.yellow(
-			  `[AAtoEOA] pm.isBeamioAccount read failed (non-fatal): ${e?.shortMessage || e?.message}`
-			)
-		  )
-		}
-	  }
-
-	 // 2) 校验：sender 是否在 paymaster 的 allowlist 内
-		const pmc = new ethers.Contract(
-		pm,
-		['function isBeamioAccount(address) view returns (bool)'],
-		SC.walletBase.provider!
-		)
-
-		const okSender = await pmc.isBeamioAccount(packedOp.sender)
-		logger(`[AAtoEOA] pm.isBeamioAccount(sender)=${okSender}`)
-
-		if (!okSender) {
-		const errMsg = `Sender AA not registered in paymaster: sender=${packedOp.sender} pm=${pm}`
-		logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
-		obj.res.status(400).json({ success: false, error: errMsg }).end()
-		Settle_ContractPool.unshift(SC)
-		setTimeout(() => AAtoEOAProcess(), 3000)
-		return
-		}
-  
-	  // --- deposit + ETH (determines whether we can drop paymaster) ---
-	  const deposit = await entryPointRead.balanceOf(packedOp.sender)
-	  const aaETH = await SC.walletBase.provider!.getBalance(packedOp.sender)
-	  logger(
-		`[AAtoEOA] entryPointDeposit=${deposit.toString()} aaETH=${aaETH.toString()}`
-	  )
-  
-	  // --- experiment: try without paymaster if there is deposit/ETH ---
-	  // (you can remove this branch after debug)
-	//   if (deposit > 0n || aaETH > 0n) {
-	// 	packedOp.paymasterAndData = '0x'
-	// 	logger('[AAtoEOA] forcing paymasterAndData=0x for test')
-	//   }
-
-	const AA_DEBUG_ABI = [
-		'function owner() view returns (address)',
-		'function factory() view returns (address)',
-		'function initialized() view returns (bool)',
-		'function threshold() view returns (uint256)',
-		'function isThresholdManager(address) view returns (bool)',
-		'function thresholdManagers(uint256) view returns (address)'
-	  ]
-	  
-	  const aaDbg = new ethers.Contract(packedOp.sender, AA_DEBUG_ABI, SC.walletBase.provider!)
-	  
-	  const [aaOwnerCheck, aaFactoryCheck, initializedCheck, thresholdCheck] = await Promise.all([
-		aaDbg.owner(),
-		aaDbg.factory(),
-		aaDbg.initialized(),
-		aaDbg.threshold()
-	  ])
-	  
-	  const isOwnerManager = await aaDbg.isThresholdManager(aaOwnerCheck)
-	  const isRecoveredManager = recoveredSigner
-		? await aaDbg.isThresholdManager(recoveredSigner)
-		: false
-	  
-	  let tm0 = ethers.ZeroAddress
-	  let tm1 = ethers.ZeroAddress
-	  try { tm0 = await aaDbg.thresholdManagers(0) } catch {}
-	  try { tm1 = await aaDbg.thresholdManagers(1) } catch {}
-	  
-	  logger(
-		`[AAtoEOA] AA check: initialized=${initializedCheck} threshold=${thresholdCheck.toString()} ` +
-		`owner=${aaOwnerCheck} ownerIsTM=${isOwnerManager} recoveredIsTM=${isRecoveredManager} ` +
-		`tm0=${tm0} tm1=${tm1}`
-	  )
-  
-	  // --- submit ---
-	  const beneficiary = await SC.walletBase.getAddress()
-	  logger(
-		`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureBytesLen=${sigBytes.length}`
-	  )
-  
-	  const tx = await entryPoint.handleOps([packedOp], beneficiary)
-	  logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
-	  await tx.wait()
-  
-	  logger(
-		Colors.green(
-		  `✅ AAtoEOAProcess success! Hash: ${tx.hash} toEOA: ${obj.toEOA} amount: ${obj.amountUSDC6}`
-		)
-	  )
-	  obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
-	} catch (error: any) {
-	  const msg = error?.shortMessage || error?.message || String(error)
-	  const data = error?.data
-  
-	  let clientError = msg
-  
-	  // decode FailedOp selector 0x65c8fd4d -> reason string
-	  if (typeof data === 'string' && data.length > 10) {
-		try {
-		  const hexPayload = data.startsWith('0x') ? data.slice(2) : data
-		  if (hexPayload.length >= 8) {
-			const selector = hexPayload.slice(0, 8)
-			if (selector === '65c8fd4d' && hexPayload.length >= 136) {
-			  const offsetBytes = parseInt(hexPayload.slice(72, 136), 16)
-			  const strStart = 8 + offsetBytes * 2
-			  const lenHex = hexPayload.slice(strStart, strStart + 64)
-			  const len = parseInt(lenHex, 16) || 0
-			  if (len > 0 && hexPayload.length >= strStart + 64 + len * 2) {
-				const strHex = hexPayload.slice(
-				  strStart + 64,
-				  strStart + 64 + len * 2
-				)
-				const decoded = ethers.toUtf8String('0x' + strHex)
-				if (decoded.length > 0) {
-				  clientError = `EntryPoint reverted: ${decoded}`
-				  if (decoded.includes('AA23') && recoveredSigner != null) {
-					clientError += ` Signature recovered to ${recoveredSigner}; this address must be a threshold manager (owner) of the AA ${obj.packedUserOp?.sender ?? 'unknown'}.`
-				  }
-				}
-			  }
-			}
-		  }
-		} catch {
-		  // keep clientError = msg
-		}
-	  }
-  
-	  logger(
-		Colors.red(`❌ AAtoEOAProcess failed: ${msg}`),
-		error?.data ? `data=${error.data}` : ''
-	  )
-	  obj.res.status(500).json({ success: false, error: clientError }).end()
-	}
-  
-	Settle_ContractPool.unshift(SC)
-	setTimeout(() => AAtoEOAProcess(), 3000)
-  }
-
-const getLatestCard = async (SC: any, ownerEOA: string) => {
-	const factoryAddr = await SC.baseFactoryPaymaster.getAddress()
-	const abi = [
-		'function latestCardOfOwner(address) view returns (address)',
-		'function cardsOfOwner(address) view returns (address[])'
-	]
-	const f = new ethers.Contract(factoryAddr, abi, providerBaseBackup)
-	const latest = await f.latestCardOfOwner(ownerEOA)
-	const list = await f.cardsOfOwner(ownerEOA)
-
-	console.log('[Factory] cardsOfOwner=', list)
-	console.log('[Factory] latestCard=', latest)
-
-	if (latest === ethers.ZeroAddress) throw new Error('No card found for owner')
-	return latest
-}
-
-const debugMembership = async (cardAddress: string, userEOA: string) => {
-	const net = await providerBaseBackup.getNetwork()
-	console.log('[net]', { chainId: net.chainId.toString(), name: net.name })
-
-	const code = await providerBaseBackup.getCode(cardAddress)
-	console.log('[card]', cardAddress, 'codeLen=', code.length, 'isDeployed=', code !== '0x')
-	if (code === '0x') throw new Error(`❌ cardAddress has no code: ${cardAddress}`)
-
-	// 先用最小 ABI 探测“必然存在的字段”
-	const baseAbi = [
-		'function owner() view returns (address)',
-		'function factoryGateway() view returns (address)',
-		'function POINTS_ID() view returns (uint256)',
-		'function NFT_START_ID() view returns (uint256)',
-		'function ISSUED_NFT_START_ID() view returns (uint256)',
-		'function activeMembershipId(address) view returns (uint256)',
-		'function activeTierIndexOrMax(address) view returns (uint256)',
-		'function balanceOf(address,uint256) view returns (uint256)',
-		'function getOwnership(address) view returns (uint256 pt, tuple(uint256 tokenId,uint256 attribute,uint256 tierIndexOrMax,uint256 expiry,bool isExpired)[] nfts)'
-	]
-	const card0 = new ethers.Contract(cardAddress, baseAbi, providerBaseBackup)
-
-	const owner = await card0.owner()
-	const gateway = await card0.factoryGateway()
-	const pointsId = await card0.POINTS_ID()
-
-	console.log('owner=', owner)
-	console.log('factoryGateway=', gateway)
-	console.log('POINTS_ID=', pointsId.toString())
-
-	// resolve AA
-	const aaFactory = Settle_ContractPool[0].aaAccountFactoryPaymaster
-	let aa = await aaFactory.beamioAccountOf(userEOA)
-	if (aa === ethers.ZeroAddress) aa = await aaFactory.primaryAccountOf(userEOA)
-	console.log('aa=', aa)
-
-	const pointsBal = await card0.balanceOf(aa, pointsId)
-	const activeId = await card0.activeMembershipId(aa)
-	const activeTier = await card0.activeTierIndexOrMax(aa)
-
-	console.log('pointsBal=', pointsBal.toString())
-	console.log('activeMembershipId=', activeId.toString(), 'activeTier=', activeTier.toString())
-
-	// ✅ 直接读 getOwnership（你现在这份合约里是存在的）
-	try {
-		const own = await card0.getOwnership(aa)
-		console.log('getOwnership.pt=', own.pt.toString())
-		console.log('getOwnership.nfts=', own.nfts)
-	} catch (e: any) {
-		console.log('getOwnership() not found on this deployed version')
-	}
-
-	// ---- tiers: 兼容探测 ----
-	const tiersAbiA = [
-		'function tiersCount() view returns (uint256)',
-		'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr)'
-	]
-	const tiersAbiB = [
-		'function getTiersCount() view returns (uint256)',
-		'function getTierAt(uint256) view returns (uint256 minUsdc6, uint256 attr)'
-	]
-
-	let tiersCount = 0n
-	let mode: 'A' | 'B' | 'NONE' = 'NONE'
-
-	// A: tiersCount + tiers(i)
-	try {
-		const cA = new ethers.Contract(cardAddress, tiersAbiA, providerBaseBackup)
-		tiersCount = await cA.tiersCount()
-		mode = 'A'
-	} catch {}
-
-	// B: getTiersCount + getTierAt(i)
-	if (mode === 'NONE') {
-		try {
-		const cB = new ethers.Contract(cardAddress, tiersAbiB, providerBaseBackup)
-		tiersCount = await cB.getTiersCount()
-		mode = 'B'
-		} catch {}
-	}
-
-	console.log('tiersMode=', mode, 'tiersCount=', tiersCount.toString())
-
-	if (tiersCount > 0n) {
-		for (let i = 0; i < Number(tiersCount); i++) {
-		if (mode === 'A') {
-			const cA = new ethers.Contract(cardAddress, tiersAbiA, providerBaseBackup)
-			const t = await cA.tiers(i)
-			console.log(`tier[${i}] minUsdc6=${t.minUsdc6.toString()} attr=${t.attr.toString()}`)
-		} else if (mode === 'B') {
-			const cB = new ethers.Contract(cardAddress, tiersAbiB, providerBaseBackup)
-			const t = await cB.getTierAt(i)
-			console.log(`tier[${i}] minUsdc6=${t.minUsdc6.toString()} attr=${t.attr.toString()}`)
-		}
-		}
-  }
-
-  // ✅ 最快确认“#100 是否发了”
-  try {
-    const bal100 = await card0.balanceOf(aa, 100n)
-    console.log('balanceOf(aa, #100)=', bal100.toString())
-  } catch {}
-  }
 
 export const getMyAssets = async (userEOA: string, cardAddress: string) => {
     const SC = Settle_ContractPool[0];
@@ -1785,9 +967,352 @@ export const getMyAssets = async (userEOA: string, cardAddress: string) => {
     }
 }
 
+
+
+// ---- helpers ----
+function asBigInt(v: any, fallback = 0n) {
+  try {
+    if (typeof v === 'bigint') return v
+    if (typeof v === 'number') return BigInt(v)
+    if (typeof v === 'string') {
+      if (v.startsWith('0x')) return BigInt(v)
+      if (v.trim() === '') return fallback
+      return BigInt(v)
+    }
+    return fallback
+  } catch {
+    return fallback
+  }
+}
+
+function hexBytesLen(hex: string) {
+  if (!hex || typeof hex !== 'string') return 0
+  if (!hex.startsWith('0x')) return 0
+  return (hex.length - 2) / 2
+}
+
+async function safeCall<T>(fn: () => Promise<T>): Promise<T | null> {
+  try {
+    return await fn()
+  } catch {
+    return null
+  }
+}
+
+// decode EntryPoint FailedOp (0x65c8fd4d) -> string reason
+function tryDecodeFailedOp(data: any): string | null {
+  try {
+    if (typeof data !== 'string') return null
+    const hex = data.startsWith('0x') ? data.slice(2) : data
+    if (hex.length < 8) return null
+    const selector = hex.slice(0, 8)
+    if (selector !== '65c8fd4d') return null // FailedOp selector
+    // layout: selector + (opIndex) + (paymaster?) + (offsetReason) + ...
+    // easiest: search ASCII tail "AAxx ..." often is last arg string
+    // robust decode with AbiCoder:
+    const coder = ethers.AbiCoder.defaultAbiCoder()
+    // FailedOp(uint256 opIndex, string reason)
+    // BUT some EntryPoint versions: FailedOp(uint256 opIndex, address paymaster, string reason)
+    // We'll try both.
+    try {
+      const decoded = coder.decode(['uint256', 'string'], '0x' + hex.slice(8))
+      return `FailedOp(opIndex=${decoded[0].toString()}): ${decoded[1]}`
+    } catch {}
+    try {
+      const decoded2 = coder.decode(['uint256', 'address', 'string'], '0x' + hex.slice(8))
+      return `FailedOp(opIndex=${decoded2[0].toString()}, paymaster=${decoded2[1]}): ${decoded2[2]}`
+    } catch {}
+    return null
+  } catch {
+    return null
+  }
+}
+
+// pack check: bytes32 should not be 0x00..00
+function isZeroBytes32(x: any) {
+  const v = typeof x === 'string' ? x : ''
+  return v === ethers.ZeroHash || v === '0x' + '00'.repeat(32)
+}
+
+// parse first 20 bytes of paymasterAndData
+function parsePaymasterFromPnd(pnd: string): string | null {
+  try {
+    if (typeof pnd !== 'string' || !pnd.startsWith('0x')) return null
+    if (pnd.length < 2 + 40) return null
+    return ethers.getAddress('0x' + pnd.slice(2, 42))
+  } catch {
+    return null
+  }
+}
+
+export const AAtoEOAProcess = async () => {
+  const obj = AAtoEOAPool.shift()
+  if (!obj) return
+
+  logger(
+    `[AAtoEOA] process started, pool had item toEOA=${obj.toEOA} amountUSDC6=${obj.amountUSDC6} sender=${obj.packedUserOp?.sender}`
+  )
+
+  const SC = Settle_ContractPool.shift()
+  if (!SC) {
+    logger(
+      Colors.yellow(
+        `[AAtoEOA] process no SC available, re-queue and retry in 3s (pool length ${AAtoEOAPool.length})`
+      )
+    )
+    AAtoEOAPool.unshift(obj)
+    return setTimeout(() => AAtoEOAProcess(), 3000)
+  }
+
+  let recoveredSigner: string | null = null
+
+  try {
+    const op = obj.packedUserOp
+    if (!op) {
+      const errMsg = 'packedUserOp missing'
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+
+    // --- normalize fields ---
+    const sender = op.sender
+    const callData = op.callData || '0x'
+    if (!sender || !ethers.isAddress(sender)) {
+      const errMsg = `Invalid sender address: ${sender}`
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+    if (typeof callData !== 'string' || !callData.startsWith('0x')) {
+      const errMsg = 'Invalid callData: must start with 0x'
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+    if (callData.length <= 2) {
+      const errMsg = 'Invalid callData: empty'
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+
+    // --- signature normalize ---
+    const rawSig = op.signature ?? '0x'
+    const sigHex =
+      typeof rawSig === 'string' && rawSig.startsWith('0x')
+        ? rawSig
+        : '0x' + (rawSig || '')
+    const sigLen = hexBytesLen(sigHex)
+
+    if (sigLen !== 65) {
+      const errMsg = `Invalid signature length: expected 65 bytes, got ${sigLen} bytes`
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+
+    let sigBytes: Uint8Array
+    try {
+      sigBytes = ethers.getBytes(sigHex)
+    } catch {
+      const errMsg = 'Invalid signature hex: cannot decode to bytes'
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+    if (sigBytes.length !== 65) {
+      const errMsg = `Signature decoded length is ${sigBytes.length}, expected 65`
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+
+    logger(`[AAtoEOA] signature bytes length=${sigBytes.length} hexLen=${sigHex.length}`)
+
+    // --- sender must be contract ---
+    const senderCode = await SC.walletBase.provider!.getCode(sender)
+    if (!senderCode || senderCode === '0x' || senderCode.length <= 2) {
+      const errMsg = `Invalid sender: ${sender} has no contract code`
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+
+    // --- entryPoint ---
+    const entryPointAddress = await SC.aaAccountFactoryPaymaster.ENTRY_POINT()
+    logger(`[AAtoEOA] ENTRY_POINT address: ${entryPointAddress}`)
+    if (!entryPointAddress || entryPointAddress === ethers.ZeroAddress) {
+      const errMsg = 'ENTRY_POINT not configured'
+      obj.res.status(500).json({ success: false, error: errMsg }).end()
+      return
+    }
+
+    const entryPoint = new ethers.Contract(
+      entryPointAddress,
+      EntryPointHandleOpsABI,
+      SC.walletBase
+    )
+
+    const entryPointRead = new ethers.Contract(
+      entryPointAddress,
+      ['function balanceOf(address account) view returns (uint256)'],
+      SC.walletBase.provider!
+    )
+
+    // --- gas sanity checks (VERY IMPORTANT) ---
+    // 如果 client 还在发全 0，这里直接拦住并提示改 UI buildAndSignPackedUserOp
+    const accountGasLimits = op.accountGasLimits || ethers.ZeroHash
+    const gasFees = op.gasFees || ethers.ZeroHash
+    const preVerificationGas = asBigInt(op.preVerificationGas, 0n)
+
+    if (isZeroBytes32(accountGasLimits) || isZeroBytes32(gasFees) || preVerificationGas === 0n) {
+      const errMsg =
+        'Invalid gas fields: accountGasLimits/gasFees/preVerificationGas must be set for ERC-4337 v0.7. ' +
+        `got accountGasLimits=${accountGasLimits} gasFees=${gasFees} preVerificationGas=${preVerificationGas.toString()}`
+      logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+
+    // --- build packed op (tx format) ---
+    const packedOp: any = {
+      sender,
+      nonce: asBigInt(op.nonce, 0n),
+      initCode: op.initCode || '0x',
+      callData,
+      accountGasLimits,
+      preVerificationGas,
+      gasFees,
+      paymasterAndData: op.paymasterAndData || '0x',
+      signature: sigBytes
+    }
+
+    // --- paymaster parse + allowlist check ---
+    const pnd = packedOp.paymasterAndData as string
+    const pm = parsePaymasterFromPnd(pnd) ?? ethers.ZeroAddress
+    logger(
+      `[AAtoEOA] paymasterAndDataLen=${hexBytesLen(pnd)} paymaster=${pm}`
+    )
+
+    if (pm !== ethers.ZeroAddress) {
+      // 1) optional: verify sender allowed by paymaster
+      const pmc = new ethers.Contract(
+        pm,
+        ['function isBeamioAccount(address) view returns (bool)'],
+        SC.walletBase.provider!
+      )
+      const okSender = await safeCall(() => pmc.isBeamioAccount(sender) as Promise<boolean>)
+      if (okSender === false) {
+        const errMsg = `Sender AA not registered in paymaster allowlist: sender=${sender} pm=${pm}`
+        logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
+        obj.res.status(400).json({ success: false, error: errMsg }).end()
+        return
+      }
+      logger(`[AAtoEOA] pm.isBeamioAccount(sender)=${okSender}`)
+    }
+
+    // --- recover signer from userOpHash (best-effort, for debug & pre-reject) ---
+    try {
+      const opForHash: any = { ...packedOp, signature: '0x' } // IMPORTANT
+      const userOpHash = await entryPoint.getUserOpHash(opForHash) as string
+
+      // ✅ 正确：链上是 toEthSignedMessageHash(userOpHash)，等价于 verifyMessage(bytes32, sig)
+      recoveredSigner = ethers.verifyMessage(ethers.getBytes(userOpHash), sigHex)
+
+      logger(
+        `[AAtoEOA] recoveredSigner=${recoveredSigner} (should be AA owner / threshold manager)`
+      )
+    } catch (e: any) {
+      logger(
+        Colors.yellow(
+          `[AAtoEOA] getUserOpHash/recover failed (non-fatal): ${e?.shortMessage || e?.message}`
+        )
+      )
+    }
+
+    // --- read AA owner + factory (best-effort) ---
+    let aaOwner = ethers.ZeroAddress
+    let aaFactory = ethers.ZeroAddress
+    try {
+      const aaRead = new ethers.Contract(
+        sender,
+        ['function owner() view returns (address)', 'function factory() view returns (address)'],
+        SC.walletBase.provider!
+      )
+      aaOwner = await aaRead.owner()
+      aaFactory = await aaRead.factory()
+      logger(`[AAtoEOA] AA owner=${aaOwner} AA factory=${aaFactory}`)
+    } catch (e: any) {
+      logger(
+        Colors.yellow(
+          `[AAtoEOA] AA owner/factory read failed (non-fatal): ${e?.shortMessage || e?.message}`
+        )
+      )
+    }
+
+    // --- enforce signer == owner when both known ---
+    if (aaOwner !== ethers.ZeroAddress && recoveredSigner) {
+      if (aaOwner.toLowerCase() !== recoveredSigner.toLowerCase()) {
+        const errMsg = `Signature signer (${recoveredSigner}) is not AA owner (${aaOwner})`
+        logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
+        obj.res.status(400).json({ success: false, error: errMsg }).end()
+        return
+      }
+    }
+
+    // --- simulateValidation via eth_call (debug only, but super useful) ---
+    try {
+      const simIface = new ethers.Interface([
+        'function simulateValidation((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature) userOp) external'
+      ])
+      const data = simIface.encodeFunctionData('simulateValidation', [packedOp])
+
+      await SC.walletBase.provider!.call({ to: entryPointAddress, data })
+      logger('[AAtoEOA] simulateValidation eth_call ok')
+    } catch (e: any) {
+      const m = e?.shortMessage || e?.message || String(e)
+      const decoded = tryDecodeFailedOp(e?.data)
+      logger(Colors.red(`[AAtoEOA] simulateValidation failed: ${m}`))
+      if (decoded) logger(Colors.red(`[AAtoEOA] simulateValidation decoded: ${decoded}`))
+      if (e?.data) logger(Colors.red(`[AAtoEOA] simulateValidation data=${e.data}`))
+      // 不在这里 return，让后续 handleOps 去给最终错误（但日志会更完整）
+    }
+
+    // --- deposit/eth snapshot ---
+    const deposit = await entryPointRead.balanceOf(sender)
+    const aaETH = await SC.walletBase.provider!.getBalance(sender)
+    logger(`[AAtoEOA] entryPointDeposit=${deposit.toString()} aaETH=${aaETH.toString()}`)
+
+    // --- submit ---
+    const beneficiary = await SC.walletBase.getAddress()
+    logger(
+      `[AAtoEOA] calling handleOps sender=${sender} beneficiary=${beneficiary} callDataBytes=${hexBytesLen(callData)} sigLen=${sigBytes.length}`
+    )
+
+    const tx = await entryPoint.handleOps([packedOp], beneficiary)
+    logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
+    await tx.wait()
+
+    logger(Colors.green(`✅ AAtoEOAProcess success! tx=${tx.hash}`))
+    obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
+  } catch (error: any) {
+    const msg = error?.shortMessage || error?.message || String(error)
+    const decoded = tryDecodeFailedOp(error?.data)
+
+    let clientError = decoded ? decoded : msg
+    if (clientError.includes('AA23') && recoveredSigner) {
+      clientError += ` | recoveredSigner=${recoveredSigner} (must be AA owner / threshold manager)`
+    }
+
+    logger(Colors.red(`❌ AAtoEOAProcess failed: ${msg}`))
+    if (error?.data) logger(Colors.red(`[AAtoEOA] revert data=${error.data}`))
+    if (decoded) logger(Colors.red(`[AAtoEOA] decoded=${decoded}`))
+
+    obj.res.status(500).json({ success: false, error: clientError }).end()
+  } finally {
+    Settle_ContractPool.unshift(SC)
+    setTimeout(() => AAtoEOAProcess(), 3000)
+  }
+}
+
+
 const cardOwnerPrivateKey = ""
 
 const BeamioAAAccount = '0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61'
+
 
 
 const test = async () => {
@@ -1850,47 +1375,6 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 
 	return { success: true, message: 'Card purchased successfully!' }
 }
-
-export async function addWhitelistViaGov({
-		
-		cardAddr,
-		targetAddr,
-		allowed
-}: {
-		
-		cardAddr: string
-		targetAddr: string
-		allowed: boolean
-	}) {
-		const card = new ethers.Contract(cardAddr, BeamioUserCardArtifact.abi, Settle_ContractPool[0].walletBase)
-	
-		// 0xe2316652 => _setTransferWhitelist(address,bool)
-		const selector = "0xe2316652"
-		const v1 = allowed ? 1n : 0n
-	
-		// 1) 先静态拿 proposalId（避免读 event）
-		const proposalId: bigint = await card.createProposal.staticCall(
-			selector,
-			targetAddr,
-			v1,
-			0n,
-			0n
-		)
-	
-		// 2) 创建 proposal（paymaster 出 gas）
-		const tx1 = await card.createProposal(selector, targetAddr, v1, 0n, 0n)
-		await tx1.wait()
-	
-		// 3) approve（如果 threshold==1，会在 _approve 里直接 _execute）
-		const tx2 = await card.approveProposal(proposalId)
-		await tx2.wait()
-	
-		return {
-			proposalId: proposalId.toString(),
-			txCreate: tx1.hash,
-			txApprove: tx2.hash
-		}
-	}
 
 
 export const quoteUSDCForPoints = async (
