@@ -1390,21 +1390,26 @@ export const AAtoEOAProcess = async () => {
 		return
 	  }
 
-	  const entryPointSim = new ethers.Contract(
-		entryPointAddress,
-		[
-		  'function simulateValidation((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature) userOp) external'
-		],
-		SC.walletBase.provider!
-	  )
-	  
-	  try {
-		await entryPointSim.simulateValidation(packedOp)
-		logger('[AAtoEOA] simulateValidation ok')
-	  } catch (e: any) {
-		logger(Colors.red(`[AAtoEOA] simulateValidation failed: ${e?.shortMessage || e?.message}`))
+	  // --- simulateValidation via eth_call (no tx) ---
+	try {
+		const simIface = new ethers.Interface([
+		'function simulateValidation((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature) userOp) external'
+		])
+	
+		const data = simIface.encodeFunctionData('simulateValidation', [packedOp])
+	
+		// ✅ 必须用 provider.call，绝不会发交易
+		await SC.walletBase.provider!.call({
+		to: entryPointAddress,
+		data
+		})
+	
+		logger('[AAtoEOA] simulateValidation eth_call ok')
+	} catch (e: any) {
+		const m = e?.shortMessage || e?.message || String(e)
+		logger(Colors.red(`[AAtoEOA] simulateValidation eth_call failed: ${m}`))
 		if (e?.data) logger(Colors.red(`[AAtoEOA] simulateValidation data=${e.data}`))
-	  }
+	}
   
 	  // --- paymaster allowlist sanity (only if pm looks valid) ---
 	  if (pm !== ethers.ZeroAddress) {
