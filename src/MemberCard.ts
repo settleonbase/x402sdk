@@ -1389,6 +1389,22 @@ export const AAtoEOAProcess = async () => {
 		setTimeout(() => AAtoEOAProcess(), 3000)
 		return
 	  }
+
+	  const entryPointSim = new ethers.Contract(
+		entryPointAddress,
+		[
+		  'function simulateValidation((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature) userOp) external'
+		],
+		SC.walletBase.provider!
+	  )
+	  
+	  try {
+		await entryPointSim.simulateValidation(packedOp)
+		logger('[AAtoEOA] simulateValidation ok')
+	  } catch (e: any) {
+		logger(Colors.red(`[AAtoEOA] simulateValidation failed: ${e?.shortMessage || e?.message}`))
+		if (e?.data) logger(Colors.red(`[AAtoEOA] simulateValidation data=${e.data}`))
+	  }
   
 	  // --- paymaster allowlist sanity (only if pm looks valid) ---
 	  if (pm !== ethers.ZeroAddress) {
