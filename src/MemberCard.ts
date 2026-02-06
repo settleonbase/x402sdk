@@ -1212,6 +1212,14 @@ export const AAtoEOAProcess = async () => {
 			return
 		}
 		const entryPoint = new ethers.Contract(entryPointAddress, EntryPointHandleOpsABI, SC.walletBase)
+		// EntryPoint 要求 paymasterAndData 为空或至少 20 字节；规范化 hex 并保证长度，避免 AA93
+		let paymasterAndDataHex = (op.paymasterAndData ?? '0x').replace(/^0x/i, '')
+		if (paymasterAndDataHex.length % 2) paymasterAndDataHex = '0' + paymasterAndDataHex
+		const paymasterBytes = Math.floor(paymasterAndDataHex.length / 2)
+		if (paymasterBytes > 0 && paymasterBytes < 20) {
+			paymasterAndDataHex = paymasterAndDataHex.padEnd(40, '0')
+		}
+		const paymasterAndData = paymasterAndDataHex ? '0x' + paymasterAndDataHex : '0x'
 		const packedOp = {
 			sender: op.sender,
 			nonce: typeof op.nonce === 'string' ? BigInt(op.nonce) : op.nonce,
@@ -1220,11 +1228,12 @@ export const AAtoEOAProcess = async () => {
 			accountGasLimits: op.accountGasLimits || ethers.ZeroHash,
 			preVerificationGas: typeof op.preVerificationGas === 'string' ? BigInt(op.preVerificationGas) : op.preVerificationGas,
 			gasFees: op.gasFees || ethers.ZeroHash,
-			paymasterAndData: op.paymasterAndData || '0x',
+			paymasterAndData,
 			signature: sigHex,
 		}
 		const beneficiary = await SC.walletBase.getAddress()
-		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureLen=${(packedOp.signature?.length || 0)}`)
+		const pndBytes = paymasterAndData === '0x' ? 0 : Math.floor((paymasterAndData.length - 2) / 2)
+		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} paymasterAndDataLen=${pndBytes} signatureLen=${(packedOp.signature?.length || 0)}`)
 		const tx = await entryPoint.handleOps([packedOp], beneficiary)
 		logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
 		await tx.wait()
