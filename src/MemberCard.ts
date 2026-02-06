@@ -22,9 +22,10 @@ import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 
 
-/** Base 主网新部署：与 config/base-addresses.ts、deployments/BASE_MAINNET_FACTORIES.md 一致 */
+/** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
+import { BASE_AA_FACTORY } from './chainAddresses'
 const BeamioUserCardFactoryPaymasterV2 = '0x7Ec828BAbA1c58C5021a6E7D29ccDDdB2d8D84bd'
-const BeamioAAAccountFactoryPaymaster = '0xFD48F7a6bBEb0c0C1ff756C38cA7fE7544239767'
+const BeamioAAAccountFactoryPaymaster = BASE_AA_FACTORY
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const BeamioUserCardGatewayAddress = '0x5b24729E66f13BaB19F763f7aE7A35C881D3d858'
@@ -952,6 +953,15 @@ export const AAtoEOAPreCheck = (toEOA: string, amountUSDC6: string, packedUserOp
 	if (packedUserOp.callData === undefined || packedUserOp.callData === null) return { success: false, error: 'packedUserOp.callData required' }
 	if (packedUserOp.signature === undefined || packedUserOp.signature === null) return { success: false, error: 'packedUserOp.signature required' }
 	logger(`[AAtoEOA] pre-check OK toEOA=${toEOA} amountUSDC6=${amountUSDC6} sender=${packedUserOp.sender}`)
+	return { success: true }
+}
+
+/** Worker 预检：sender 必须有合约 code（拒绝 EOA），在转发到 master 前调用，避免 AA93。 */
+export const AAtoEOAPreCheckSenderHasCode = async (packedUserOp: AAtoEOAUserOp): Promise<{ success: boolean; error?: string }> => {
+	const code = await providerBaseBackup.getCode(packedUserOp.sender)
+	if (!code || code === '0x' || code.length <= 2) {
+		return { success: false, error: 'Invalid sender: must be the Smart Account contract (with code), not the EOA. Use primaryAccountOf(owner) as sender.' }
+	}
 	return { success: true }
 }
 

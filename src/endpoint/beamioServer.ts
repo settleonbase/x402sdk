@@ -11,7 +11,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, AAtoEOAPreCheck } from '../MemberCard'
+import { purchasingCard, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode } from '../MemberCard'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -283,6 +283,11 @@ const routing = ( router: Router ) => {
 		if (!preCheck.success) {
 			logger(Colors.red(`[AAtoEOA] server pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		const senderCheck = await AAtoEOAPreCheckSenderHasCode(packedUserOp!)
+		if (!senderCheck.success) {
+			logger(Colors.red(`[AAtoEOA] server sender pre-check FAIL: ${senderCheck.error}`))
+			return res.status(400).json({ success: false, error: senderCheck.error }).end()
 		}
 		logger(Colors.green(`[AAtoEOA] server pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
 		postLocalhost('/api/AAtoEOA', { toEOA, amountUSDC6, packedUserOp }, res)
