@@ -634,6 +634,12 @@ export const cashcode_request = async (req: Request, res: Response) => {
 }
 
 
+/**
+ * BeamioTransfer：x402 支付，使用 EIP-3009 TransferWithAuthorization。
+ * 客户端用 EOA 私钥签名，authorization.from = EOA，authorization.to = toAddress。
+ * 因此仅适用于「EOA 作为付款方」的场景（EOA→EOA、EOA→AA）。
+ * AA 作为付款方（AA→EOA）不适用：AA 无私钥无法签 EIP-3009，需单独实现 AA 执行流（如 ERC-4337 UserOp）。
+ */
 export const BeamioTransfer = async (req: Request, res: Response) => {
 	const _routerName = req.path
 	const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)

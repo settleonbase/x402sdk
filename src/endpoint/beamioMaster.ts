@@ -9,7 +9,8 @@ import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {coinbaseHooks} from '../coinbase'
-import { purchasingCardPool, purchasingCardProcess } from '../MemberCard'
+import { ethers } from 'ethers'
+import { purchasingCardPool, purchasingCardProcess, AAtoEOAPool, AAtoEOAProcess, type AAtoEOAUserOp } from '../MemberCard'
 
 const masterServerPort = 1111
 
@@ -68,6 +69,29 @@ const routing = ( router: Router ) => {
 
 		logger(` Master GOT /api/purchasingCard doing purchasingCardProcess...`, inspect(req.body, false, 3, true))
 		purchasingCardProcess()
+	})
+
+	/** AA→EOA：接受 ERC-4337 UserOp 签字，入队后由 AAtoEOAProcess 用 Settle_ContractPool 私钥代付 Gas 提交 */
+	router.post('/AAtoEOA', (req, res) => {
+		logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: req.body?.toEOA, amountUSDC6: req.body?.amountUSDC6, sender: req.body?.packedUserOp?.sender }, false, 3, true))
+		const { toEOA, amountUSDC6, packedUserOp } = req.body as {
+			toEOA?: string
+			amountUSDC6?: string
+			packedUserOp?: AAtoEOAUserOp
+		}
+		if (!ethers.isAddress(toEOA) || !amountUSDC6 || !packedUserOp?.sender || !packedUserOp?.callData || packedUserOp?.signature === undefined) {
+			logger(Colors.red(`[AAtoEOA] master validation FAIL: need toEOA, amountUSDC6, packedUserOp (sender, callData, signature)`))
+			return res.status(400).json({ success: false, error: 'Invalid data: need toEOA, amountUSDC6, packedUserOp (sender, callData, signature)' }).end()
+		}
+		const poolLenBefore = AAtoEOAPool.length
+		AAtoEOAPool.push({
+			toEOA: toEOA as string,
+			amountUSDC6,
+			packedUserOp: packedUserOp as AAtoEOAUserOp,
+			res,
+		})
+		logger(`[AAtoEOA] master pushed to pool (length ${poolLenBefore} -> ${AAtoEOAPool.length}), calling AAtoEOAProcess()`)
+		AAtoEOAProcess()
 	})
 
 	router.post('/storageFragment', (req, res) => {

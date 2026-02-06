@@ -923,6 +923,38 @@ export const USDC2Token = async (
 
 export const purchasingCardPool: { cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string, res: Response } [] = []
 
+/** AA→EOA 转账请求：客户端提交 ERC-4337 已签字的 UserOp，由 Beamio 代付 Gas 并提交到链上 */
+export type AAtoEOAUserOp = {
+	sender: string
+	nonce: string | bigint
+	initCode: string
+	callData: string
+	accountGasLimits: string
+	preVerificationGas: string | bigint
+	gasFees: string
+	paymasterAndData: string
+	signature: string
+}
+export const AAtoEOAPool: {
+	toEOA: string
+	amountUSDC6: string
+	packedUserOp: AAtoEOAUserOp
+	res: Response
+}[] = []
+
+/** 预检：集群节点对 AAtoEOA 请求做格式与基本校验，合格再转 master。 */
+export const AAtoEOAPreCheck = (toEOA: string, amountUSDC6: string, packedUserOp: AAtoEOAUserOp | undefined): { success: boolean; error?: string } => {
+	if (!toEOA || !ethers.isAddress(toEOA)) return { success: false, error: 'Invalid toEOA address' }
+	const amount = BigInt(amountUSDC6)
+	if (amount <= 0n) return { success: false, error: 'amountUSDC6 must be positive' }
+	if (!packedUserOp || typeof packedUserOp !== 'object') return { success: false, error: 'packedUserOp required' }
+	if (!packedUserOp.sender || !ethers.isAddress(packedUserOp.sender)) return { success: false, error: 'packedUserOp.sender must be a valid AA address' }
+	if (packedUserOp.callData === undefined || packedUserOp.callData === null) return { success: false, error: 'packedUserOp.callData required' }
+	if (packedUserOp.signature === undefined || packedUserOp.signature === null) return { success: false, error: 'packedUserOp.signature required' }
+	logger(`[AAtoEOA] pre-check OK toEOA=${toEOA} amountUSDC6=${amountUSDC6} sender=${packedUserOp.sender}`)
+	return { success: true }
+}
+
 
 
 const getICurrency = (currency: BigInt): ICurrency => {
@@ -1134,6 +1166,65 @@ export const purchasingCardProcess = async () => {
 	Settle_ContractPool.unshift(SC)
 
 	setTimeout(() => purchasingCardProcess(), 3000)
+}
+
+/** EntryPoint v0.7：用于提交 UserOp，Beamio 代付 Gas，beneficiary 收 gas 补偿 */
+const EntryPointHandleOpsABI = [
+	'function handleOps(tuple(address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature)[] ops, address beneficiary) external'
+]
+
+/**
+ * AA→EOA 队列处理：从 Pool 取任务，用 Settle_ContractPool 的私钥提交 UserOp 到 EntryPoint，代付 Gas。
+ * 与 purchasingCardProcess 相同：从 Pool 取一项、从 Settle_ContractPool 取一个 SC，执行后归还并递归。
+ */
+export const AAtoEOAProcess = async () => {
+	const obj = AAtoEOAPool.shift()
+	if (!obj) return
+	logger(`[AAtoEOA] process started, pool had item toEOA=${obj.toEOA} amountUSDC6=${obj.amountUSDC6} sender=${obj.packedUserOp?.sender}`)
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		logger(Colors.yellow(`[AAtoEOA] process no SC available, re-queue and retry in 3s (pool length ${AAtoEOAPool.length})`))
+		AAtoEOAPool.unshift(obj)
+		return setTimeout(() => AAtoEOAProcess(), 3000)
+	}
+	try {
+		const entryPointAddress = await SC.aaAccountFactoryPaymaster.ENTRY_POINT()
+		logger(`[AAtoEOA] ENTRY_POINT address: ${entryPointAddress}`)
+		if (!entryPointAddress || entryPointAddress === ethers.ZeroAddress) {
+			logger(Colors.red(`❌ AAtoEOAProcess ENTRY_POINT not found`))
+			obj.res.status(500).json({ success: false, error: 'ENTRY_POINT not configured' }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => AAtoEOAProcess(), 3000)
+			return
+		}
+		const entryPoint = new ethers.Contract(entryPointAddress, EntryPointHandleOpsABI, SC.walletBase)
+		const op = obj.packedUserOp
+		const packedOp = {
+			sender: op.sender,
+			nonce: typeof op.nonce === 'string' ? BigInt(op.nonce) : op.nonce,
+			initCode: op.initCode || '0x',
+			callData: op.callData || '0x',
+			accountGasLimits: op.accountGasLimits || ethers.ZeroHash,
+			preVerificationGas: typeof op.preVerificationGas === 'string' ? BigInt(op.preVerificationGas) : op.preVerificationGas,
+			gasFees: op.gasFees || ethers.ZeroHash,
+			paymasterAndData: op.paymasterAndData || '0x',
+			signature: op.signature || '0x',
+		}
+		const beneficiary = await SC.walletBase.getAddress()
+		logger(`[AAtoEOA] calling entryPoint.handleOps sender=${packedOp.sender} beneficiary=${beneficiary} callDataLen=${(packedOp.callData?.length || 0)} signatureLen=${(packedOp.signature?.length || 0)}`)
+		const tx = await entryPoint.handleOps([packedOp], beneficiary)
+		logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
+		await tx.wait()
+		logger(Colors.green(`✅ AAtoEOAProcess success! Hash: ${tx.hash} toEOA: ${obj.toEOA} amount: ${obj.amountUSDC6}`))
+		obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
+	} catch (error: any) {
+		const msg = error?.shortMessage || error?.message || String(error)
+		const stack = error?.stack ? `\n${error.stack}` : ''
+		logger(Colors.red(`❌ AAtoEOAProcess failed: ${msg}${stack}`))
+		obj.res.status(500).json({ success: false, error: msg }).end()
+	}
+	Settle_ContractPool.unshift(SC)
+	setTimeout(() => AAtoEOAProcess(), 3000)
 }
 
 const getLatestCard = async (SC: any, ownerEOA: string) => {

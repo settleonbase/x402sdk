@@ -11,7 +11,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard } from '../MemberCard'
+import { purchasingCard, AAtoEOAPreCheck } from '../MemberCard'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -269,6 +269,23 @@ const routing = ( router: Router ) => {
 
 		logger(`server /api/purchasingCard success!`, 
 		inspect({cardAddress, userSignature, nonce,usdcAmount, from, validAfter, validBefore}, false, 3, true))
+	})
+
+	/** AA→EOA：预检通过后转发到 masterServerPort，由 master 入队 AAtoEOAPool 并 AAtoEOAProcess 代付 Gas */
+	router.post('/AAtoEOA', async (req, res) => {
+		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: req.body?.toEOA, amountUSDC6: req.body?.amountUSDC6, sender: req.body?.packedUserOp?.sender }, false, 3, true))
+		const { toEOA, amountUSDC6, packedUserOp } = req.body as {
+			toEOA?: string
+			amountUSDC6?: string
+			packedUserOp?: import('../MemberCard').AAtoEOAUserOp
+		}
+		const preCheck = AAtoEOAPreCheck(toEOA ?? '', amountUSDC6 ?? '', packedUserOp)
+		if (!preCheck.success) {
+			logger(Colors.red(`[AAtoEOA] server pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`[AAtoEOA] server pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
+		postLocalhost('/api/AAtoEOA', { toEOA, amountUSDC6, packedUserOp }, res)
 	})
 
 	router.get('/deploySmartAccount', async (req,res) => {
