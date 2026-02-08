@@ -29,7 +29,8 @@ const BeamioUserCardFactoryPaymasterV2 = BASE_CARD_FACTORY
 const BeamioAAAccountFactoryPaymaster = BASE_AA_FACTORY
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
-const BeamioUserCardGatewayAddress = '0x5b24729E66f13BaB19F763f7aE7A35C881D3d858'
+/** UserCard gateway = AA Factory（与 BASE_AA_FACTORY 一致） */
+const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 
 const BeamioTaskIndexerAddress = '0x083AE5AC063a55dBA769Ba71Cd301d5FC5896D5b'
 const DIAMOND = BeamioTaskIndexerAddress
@@ -107,7 +108,16 @@ masterSetup.settle_contractAdmin.forEach((n: string) => {
 
 /**
  * 为 EOA 确保存在 AA 账户（purchasingCardProcess 等流程的依赖）。
- * 约定：每个 EOA 仅拥有 index 为 0 的一个 AA 账户；若已存在则直接返回其地址，否则由 Paymaster 创建。
+ *
+ * 业务约定（强制）：
+ * - 每个 EOA 仅支持一个 AA 账户（index=0）。
+ * - 不支持为同一 EOA 创建第二个及以上的 AA（index>=1）；若 EOA 已有 AA 则只返回其 index=0 的地址，绝不再次创建。
+ *
+ * 要求：SC 必须为 AA Factory（BeamioFactoryPaymasterV07），SC.runner 必须为 Factory 的 Paymaster，
+ * 否则 createAccountFor 会 revert (onlyPayMaster)。
+ *
+ * 合约语义：nextIndexOfCreator(creator)=0 表示尚无账户，=1 表示已分配 index 0；
+ * getAddress(creator, 0) 为 CREATE2 预测地址，createAccountFor(creator) 仅在此处用于创建唯一的 index=0 账户。
  */
 const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promise<{ accountAddress: string, alreadyExisted: boolean }> => {
 	const INDEX_AA_PER_EOA = 0n
@@ -122,7 +132,10 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 		logger(`DeployingSmartAccount ${wallet} -> 预测地址: ${predictedAddress}, nextIndex: ${nextIndex}`)
 
 		if (nextIndex > 0n) {
-			// 已有至少一个账户，只认 index 0 的那一个
+			// 已有 AA：只认 index 0，不创建第二个及以上
+			if (nextIndex > 1n) {
+				logger(Colors.yellow(`DeployingSmartAccount: ${wallet} 已有多个 AA (nextIndex=${nextIndex})，本逻辑仅支持一个 AA，只返回 index=0 的地址`))
+			}
 			const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
 			const code = await provider.getCode(predictedAddress)
 			if (code === '0x' || code === '') {
@@ -133,20 +146,18 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 			return { accountAddress: predictedAddress, alreadyExisted: true }
 		}
 
-		// 尚无账户，由 Paymaster 创建（工厂会分配 index 0）
-		// 注意：CREATE2 地址是确定性的，predictedAddress 应该等于实际部署的地址
+		// 尚无账户，由 Paymaster 调用 createAccountFor(creator)；仅此路径会创建 AA，且仅创建 index=0 的一个
 		const tx = await SC.createAccountFor(wallet)
 		logger(`DeployingSmartAccount: 创建账户交易已发送，hash=${tx.hash}`)
 		const receipt = await tx.wait()
-		
-		// 验证交易是否成功
+
+		// 验证交易是否成功（ethers v6: status 1 = 成功）
 		if (!receipt || receipt.status !== 1) {
 			logger(Colors.red(`DeployingSmartAccount: 交易失败，receipt.status=${receipt?.status}`))
 			return { accountAddress: '', alreadyExisted: false }
 		}
 
-		// CREATE2 地址是确定性的，predictedAddress 应该等于实际部署的地址
-		// 但为了安全，我们验证账户是否已部署
+		// CREATE2 确定性：实际部署地址 = getAddress(creator, 0) = predictedAddress
 		const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
 		const code = await provider.getCode(predictedAddress)
 		if (code === '0x' || code === '') {
@@ -154,13 +165,21 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 			return { accountAddress: '', alreadyExisted: false }
 		}
 
-		// 验证账户是否已注册到 Factory（可选，因为 createAccountFor 内部会设置）
+		// 可选：用 beamioAccountOf 与 predictedAddress 交叉验证
+		try {
+			const primary = await SC.beamioAccountOf(creatorAddress)
+			if (primary && primary.toLowerCase() !== predictedAddress.toLowerCase()) {
+				logger(Colors.yellow(`DeployingSmartAccount: primaryAccountOf 与 predicted 不一致，primary=${primary} predicted=${predictedAddress}`))
+			}
+		} catch {
+			// 忽略
+		}
+
 		const isBeamioAccount = await SC.isBeamioAccount(predictedAddress)
 		if (!isBeamioAccount) {
 			logger(Colors.yellow(`DeployingSmartAccount: 警告：账户已部署但未注册到 Factory，地址=${predictedAddress}`))
 		}
 
-		// 验证 nextIndexOfCreator 已更新
 		const newNextIndex = await SC.nextIndexOfCreator(creatorAddress)
 		if (newNextIndex !== 1n) {
 			logger(Colors.yellow(`DeployingSmartAccount: 警告：nextIndexOfCreator 未正确更新，期望=1，实际=${newNextIndex}`))
@@ -171,14 +190,13 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 	} catch (error: unknown) {
 		const msg = error instanceof Error ? error.message : String(error)
 		logger(Colors.red(`DeployingSmartAccount error! ${msg}`))
-		// 重新抛出错误以便调用方处理
 		throw new Error(`DeployingSmartAccount failed for ${wallet}: ${msg}`)
 	}
 }
 
 
 /**
- * 检查 EOA 是否已拥有 index=0 的 AA 账户（与 DeployingSmartAccount 约定一致）。
+ * 检查 EOA 是否已拥有 index=0 的 AA 账户（与 DeployingSmartAccount 约定一致：每个 EOA 仅支持一个 AA，不支持多个）。
  */
 export const checkSmartAccount = async (wallet: string): Promise<false | { accountAddress: string; alreadyExisted: true }> => {
 	const SC = Settle_ContractPool[0]
@@ -1558,10 +1576,35 @@ export const OpenContainerRelayProcess = async () => {
     logger(Colors.green(`✅ OpenContainerRelayProcess success! tx=${tx.hash}`))
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {
-    const msg = error?.shortMessage || error?.message || String(error)
+    let msg = error?.shortMessage || error?.message || String(error)
+    if (error?.data) {
+      logger(Colors.red(`[AAtoEOA/OpenContainer] revert data=${error.data}`))
+      // CM_ReservedERC20Violation(address,uint256,uint256,uint256) → 多为余额不足
+      const data = typeof error.data === 'string' ? error.data : ethers.hexlify(error.data)
+      if (data.length >= 4 + 32 * 4 && data.startsWith('0x')) {
+        try {
+          const selector = data.slice(0, 10)
+          if (selector === '0xc6d837a8') {
+            const abiCoder = ethers.AbiCoder.defaultAbiCoder()
+            const decoded = abiCoder.decode(
+              ['address', 'uint256', 'uint256', 'uint256'],
+              '0x' + data.slice(10)
+            ) as unknown as [string, bigint, bigint, bigint]
+            const [, spend, bal] = decoded
+            const spendHuman = Number(spend) / 1e6
+            const balHuman = Number(bal) / 1e6
+            msg = `Insufficient USDC balance: account has ${balHuman.toFixed(2)} USDC, need ${spendHuman.toFixed(2)} USDC`
+          }
+        } catch (_) {}
+      }
+    }
     logger(Colors.red(`❌ OpenContainerRelayProcess failed: ${msg}`))
-    if (error?.data) logger(Colors.red(`[AAtoEOA/OpenContainer] revert data=${error.data}`))
-    obj.res.status(500).json({ success: false, error: msg }).end()
+    // 失败时必须返回 500，且仅发送一次（避免 headers 已发送时再写导致异常）
+    if (!obj.res.headersSent) {
+      obj.res.status(500).json({ success: false, error: msg }).end()
+    } else {
+      logger(Colors.red(`[AAtoEOA/OpenContainer] WARN: response already sent, client may have received wrong status`))
+    }
   } finally {
     Settle_ContractPool.unshift(SC)
     setTimeout(() => OpenContainerRelayProcess(), 3000)

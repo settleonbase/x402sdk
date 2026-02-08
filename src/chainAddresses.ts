@@ -2,16 +2,16 @@
  * Base 主网 AA Factory 地址。
  * 与 config/base-addresses.ts 保持一致；运行 npm run redeploy:aa-factory:base 后会同步更新此处。
  */
-export const BASE_AA_FACTORY = '0x4811fe90Bb3b3C5dE6491c5Efb90E19756F2C318'
+export const BASE_AA_FACTORY = '0xD4759c85684e47A02223152b85C25D2E5cD2E738'
 
 /**
  * Base 主网 BeamioUserCard 工厂地址 (BeamioUserCardFactoryPaymasterV07)。
- * 与 deployments/BASE_MAINNET_FACTORIES.md 一致。
+ * 与 config/base-addresses.ts 一致。
  */
-export const BASE_CARD_FACTORY = '0x7Ec828BAbA1c58C5021a6E7D29ccDDdB2d8D84bd'
+export const BASE_CARD_FACTORY = '0x73e3b722Eb55C92Fe73DEC01c064a5C677079E03'
 
 /**
  * Base 主网 CCSA 卡地址（BeamioUserCard 实例，1 CAD = 1 token）。
  * 重新发卡后运行：NEW_CCSA_ADDRESS=0x... node scripts/replace-ccsa-address.js
  */
-export const BASE_CCSA_CARD_ADDRESS = '0x1dc8c473fc67358357e90636ae8607229d5e9f92'
+export const BASE_CCSA_CARD_ADDRESS = '0xd81B78B3E3253b37B44b75E88b6965FE887721a3'
