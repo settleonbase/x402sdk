@@ -19,12 +19,13 @@ import ActionABI from "./ABI/ActionABI.json";
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY } from './chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from './chainAddresses'
 
+import { createBeamioCardWithFactory } from './CCSA'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
-const BeamioUserCardFactoryPaymasterV2 = '0x7Ec828BAbA1c58C5021a6E7D29ccDDdB2d8D84bd'
+const BeamioUserCardFactoryPaymasterV2 = BASE_CARD_FACTORY
 const BeamioAAAccountFactoryPaymaster = BASE_AA_FACTORY
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
@@ -37,7 +38,7 @@ const providerBaseBackup = new ethers.JsonRpcProvider('https://1rpc.io/base')
 const providerBaseBackup1 = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
 const conetEndpoint = 'https://mainnet-rpc.conet.network'
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
-let Settle_ContractPool: {
+export let Settle_ContractPool: {
 	baseFactoryPaymaster: ethers.Contract
 	walletBase: ethers.Wallet
 	walletConet: ethers.Wallet
@@ -65,7 +66,7 @@ const USDC_SmartContract = new ethers.Contract(USDC_ADDRESS, USDC_ABI, providerB
 //			BeamioUserCardDeployerV07 					0x820bB3F54A403B298e2F785FFdA225009e9CA7Bf
 //			BeamioUserCardFactoryPaymasterV07			0xb6D5A5319a5555E087eea9e8FC9d5E6787E4dD66
 
-masterSetup.settle_contractAdmin.forEach(n => {
+masterSetup.settle_contractAdmin.forEach((n: string) => {
 	const walletBase = new ethers.Wallet(n, providerBaseBackup1)
 	const walletConet = new ethers.Wallet(n, providerConet)
 	const baseFactoryPaymaster = new ethers.Contract(BeamioUserCardFactoryPaymasterV2, BeamioFactoryPaymasterABI, walletBase)
@@ -211,6 +212,7 @@ const ensureSmartAccount = async (req: Request, res: Response) => {
 }
 
 export type CurrencyType = 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD'
+type ICurrency = CurrencyType
 
 const CurrencyMap: Record<CurrencyType, number> = {
   CAD: 0, USD: 1, JPY: 2, CNY: 3, USDC: 4,
@@ -880,8 +882,8 @@ const getICurrency = (currency: BigInt): ICurrency => {
 }
 
 
-/** 新部署的 CCSA 卡（1 CAD = 1 token），与 deployments/base-UserCard-0xEaBF0A98.json 一致 */
-const CCSACardAddressNew = '0x1Dc8c473fc67358357E90636AE8607229d5e9f92'.toLowerCase()
+/** 新部署的 CCSA 卡（1 CAD = 1 token），与 chainAddresses.BASE_CCSA_CARD_ADDRESS 一致 */
+const CCSACardAddressNew = BASE_CCSA_CARD_ADDRESS.toLowerCase()
 
 type payMe = {
 	currency: ICurrency
@@ -1689,6 +1691,10 @@ const BeamioAAAccount = '0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61'
 
 const test = async () => {
 	await new Promise(executor => setTimeout(executor, 3000))
+	const cardAddress = await createBeamioCardWithFactory(Settle_ContractPool[0].baseFactoryPaymaster, BeamioAAAccount, 'CAD', 1, {
+		uri: 'https://api.beamio.io/metadata/default_card.json',
+	})
+	logger(Colors.green(`✅ createBeamioCardWithFactory success! cardAddress = ${cardAddress}`))
 	// await DeployingSmartAccount(BeamioAAAccount, Settle_ContractPool[0].aaAccountFactoryPaymaster)			//			0x241B97Ee83bF8664D42c030447A63d209c546867
 	// for (let i = 0; i < Settle_ContractPool.length; i++) {
 	// 	await registerPayMasterForCardFactory(Settle_ContractPool[i].walletBase.address)
@@ -1703,7 +1709,6 @@ const test = async () => {
 	// const kkk = await develop1(BeamioAAAccount, 'CAD', '1')			//CCSA 新卡地址： 0x241B97Ee83bF8664D42c030447A63d209c546867   --> 0x73b61F3Fa7347a848D9DAFd31C4930212D2B341F
 	// logger(inspect(kkk, false, 3, true));
 	//logger(inspect(kkk, false, 3, true))
-	//await initCardTest('0x863D5B7DaD9C595138e209d932511Be4E168A660', 'CAD', 1, { minX: 1 })				//  0x46C66544cCDe8cFE6435b53a41883F5392d99C0b			0x7Dd5423FCB4924dD27E82EbAd54F4C81c0C7e4F6		//	
 	//getLatestCard(Settle_ContractPool[0], '0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E')
 	//await USDC2Token(cardOwnerPrivateKey, 0.01, '0x7Dd5423FCB4924dD27E82EbAd54F4C81c0C7e4F6')
 	//debugMembership('0x863D5B7DaD9C595138e209d932511Be4E168A660','0x733f860d1C97A0edD4d87BD63BA85Abb7f275F5E', )
