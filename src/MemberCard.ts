@@ -1109,9 +1109,16 @@ export const purchasingCardProcess = async () => {
 		
 		
 	} catch (error: any) {
-		logger(Colors.red(`❌ purchasingCardProcess failed:`), error);
-		//obj.res.status(400).json({success: false, error: 'purchasingCardProcess failed'}).end()
-		
+		const msg = error?.message ?? error?.shortMessage ?? String(error)
+		logger(Colors.red(`❌ purchasingCardProcess failed:`), error)
+		// 向客户端返回明确错误；Oracle/报价未配置时提示执行 set:oracle-cad
+		const isOracleError = /unitPriceUSDC6=0|oracle not configured|QuoteHelper|set:oracle-cad/i.test(msg)
+		const clientError = isOracleError
+			? (msg.includes('set:oracle-cad') ? msg : `unitPriceUSDC6=0 (oracle not configured?). For CAD cards run: npm run set:oracle-cad:base`)
+			: msg
+		if (obj.res && !obj.res.writableEnded) {
+			obj.res.status(400).json({ success: false, error: clientError }).end()
+		}
 	}
 
 	Settle_ContractPool.unshift(SC)
