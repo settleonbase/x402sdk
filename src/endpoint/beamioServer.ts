@@ -257,11 +257,18 @@ const routing = ( router: Router ) => {
 			return res.status(400).json(ret).end()
 		}
 
-		// 集群侧数据预检：链上只读校验，通过后把 preChecked 带给 master，master 不再重复校验
+		// 集群侧数据预检：链上只读校验，通过后把 preChecked 带给 master。若预检失败（如 Oracle 未配置）则回退：不带 preChecked 转发，由 master 自行校验
 		const preCheck = await purchasingCardPreCheck(cardAddress, usdcAmount, from)
+		const isOracleOrQuoteError = preCheck.success ? false : /unitPriceUSDC6|oracle not configured|quotePointsForUSDC|QuoteHelper/i.test(preCheck.error)
+
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/purchasingCard preCheck FAIL: ${preCheck.error}`))
-			return res.status(400).json({ success: false, error: preCheck.error }).end()
+			if (isOracleOrQuoteError) {
+				logger(Colors.yellow(`server /api/purchasingCard preCheck skipped (oracle/quote): ${preCheck.error} -> forward to master without preChecked`))
+				// 集群链上 Oracle/报价未配置时，仍转发给 master，master 用自身配置完成校验与发交易
+			} else {
+				logger(Colors.red(`server /api/purchasingCard preCheck FAIL: ${preCheck.error}`))
+				return res.status(400).json({ success: false, error: preCheck.error }).end()
+			}
 		}
 
 		postLocalhost ('/api/purchasingCard', {
@@ -272,10 +279,10 @@ const routing = ( router: Router ) => {
 			from,
 			validAfter,
 			validBefore,
-			preChecked: preCheck.preChecked
+			...(preCheck.success && preCheck.preChecked && { preChecked: preCheck.preChecked })
 		}, res)
 
-		logger(`server /api/purchasingCard preCheck OK, forwarded to master`, inspect({ cardAddress, from, usdcAmount }, false, 3, true))
+		logger(preCheck.success ? `server /api/purchasingCard preCheck OK, forwarded to master` : `server /api/purchasingCard forwarded to master (no preChecked)`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preCheck.success }, false, 3, true))
 	})
 
 	/** AA→EOA：支持三种提交。(1) packedUserOp；(2) openContainerPayload；(3) containerPayload（绑定 to）*/
