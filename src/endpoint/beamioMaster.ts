@@ -46,7 +46,7 @@ const routing = ( router: Router ) => {
 	})
 
 	router.post('/purchasingCard', (req, res) => {
-		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore } = req.body as {
+		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked } = req.body as {
 			cardAddress: string
 			userSignature: string
 			nonce: string
@@ -54,6 +54,7 @@ const routing = ( router: Router ) => {
 			from: string
 			validAfter: string
 			validBefore: string
+			preChecked?: import('../MemberCard').PurchasingCardPreChecked
 		}
 
 		purchasingCardPool.push({
@@ -64,10 +65,11 @@ const routing = ( router: Router ) => {
 			from,
 			validAfter,
 			validBefore,
-			res: res
+			res: res,
+			...(preChecked != null && { preChecked })
 		})
 
-		logger(` Master GOT /api/purchasingCard doing purchasingCardProcess...`, inspect(req.body, false, 3, true))
+		logger(` Master GOT /api/purchasingCard ${preChecked ? '[preChecked]' : ''} doing purchasingCardProcess...`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preChecked }, false, 3, true))
 		purchasingCardProcess()
 	})
 

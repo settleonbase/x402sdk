@@ -11,7 +11,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck } from '../MemberCard'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -257,6 +257,13 @@ const routing = ( router: Router ) => {
 			return res.status(400).json(ret).end()
 		}
 
+		// 集群侧数据预检：链上只读校验，通过后把 preChecked 带给 master，master 不再重复校验
+		const preCheck = await purchasingCardPreCheck(cardAddress, usdcAmount, from)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/purchasingCard preCheck FAIL: ${preCheck.error}`))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+
 		postLocalhost ('/api/purchasingCard', {
 			cardAddress,
 			userSignature,
@@ -264,11 +271,11 @@ const routing = ( router: Router ) => {
 			usdcAmount,
 			from,
 			validAfter,
-			validBefore
+			validBefore,
+			preChecked: preCheck.preChecked
 		}, res)
 
-		logger(`server /api/purchasingCard success!`, 
-		inspect({cardAddress, userSignature, nonce,usdcAmount, from, validAfter, validBefore}, false, 3, true))
+		logger(`server /api/purchasingCard preCheck OK, forwarded to master`, inspect({ cardAddress, from, usdcAmount }, false, 3, true))
 	})
 
 	/** AA→EOA：支持三种提交。(1) packedUserOp；(2) openContainerPayload；(3) containerPayload（绑定 to）*/

@@ -666,7 +666,28 @@ export const USDC2Token = async (
   }
   
 
-export const purchasingCardPool: { cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string, res: Response } [] = []
+/** 集群预检后传给 master 的数据（bigint 已序列化为 string 便于 JSON） */
+export type PurchasingCardPreChecked = {
+	accountAddress: string
+	owner: string
+	_currency: number
+	currencyAmount: { usdc6: string, points6: string, usdc: string, points: string, unitPriceUSDC6?: string, unitPriceUSDC?: string }
+	pointsBalance: string
+	nfts: unknown[]
+	isMember: boolean
+}
+
+export const purchasingCardPool: {
+	cardAddress: string
+	userSignature: string
+	nonce: string
+	usdcAmount: string
+	from: string
+	validAfter: string
+	validBefore: string
+	res: Response
+	preChecked?: PurchasingCardPreChecked
+}[] = []
 
 /** AA→EOA 转账请求：客户端提交 ERC-4337 已签字的 UserOp，由 Beamio 代付 Gas 并提交到链上 */
 export type AAtoEOAUserOp = {
@@ -955,32 +976,60 @@ export const purchasingCardProcess = async () => {
 	
 	
 	try {
-		
-		const { accountAddress, alreadyExisted } = await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
+		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked } = obj
 
-		if (!accountAddress) {
-			logger(Colors.red(`❌ ${obj.from} purchasingCardProcess DeployingSmartAccount failed`));
-			obj.res.status(400).json({success: false, error: 'DeployingSmartAccount failed'}).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => purchasingCardProcess(), 3000)
-			return
+		// 1. 受益人、汇率等：有预检数据则直接使用（不再做链上校验），减轻 master 负荷；否则在 master 做链上读取与 DeployingSmartAccount
+		let accountAddress: string
+		let owner: string
+		let _currency: number
+		let currencyAmount: { usdc6: bigint, points6: bigint, usdc: string, points: string, unitPriceUSDC6?: bigint, unitPriceUSDC?: string }
+		let pointsBalance: bigint
+		let nfts: unknown[]
+		let isMember: boolean
+
+		if (preChecked) {
+			accountAddress = preChecked.accountAddress
+			owner = preChecked.owner
+			_currency = preChecked._currency
+			currencyAmount = {
+				usdc6: BigInt(preChecked.currencyAmount.usdc6),
+				points6: BigInt(preChecked.currencyAmount.points6),
+				usdc: preChecked.currencyAmount.usdc,
+				points: preChecked.currencyAmount.points,
+				unitPriceUSDC6: preChecked.currencyAmount.unitPriceUSDC6 != null ? BigInt(preChecked.currencyAmount.unitPriceUSDC6) : undefined,
+				unitPriceUSDC: preChecked.currencyAmount.unitPriceUSDC
+			}
+			pointsBalance = BigInt(preChecked.pointsBalance)
+			nfts = preChecked.nfts ?? []
+			isMember = preChecked.isMember
+			logger(Colors.green(`✅ purchasingCardProcess [preChecked] cardAddress = ${cardAddress} ${obj.from} AA: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
+		} else {
+			const { accountAddress: addr } = await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
+			if (!addr) {
+				logger(Colors.red(`❌ ${obj.from} purchasingCardProcess DeployingSmartAccount failed`));
+				obj.res.status(400).json({success: false, error: 'DeployingSmartAccount failed'}).end()
+				Settle_ContractPool.unshift(SC)
+				setTimeout(() => purchasingCardProcess(), 3000)
+				return
+			}
+			accountAddress = addr
+			const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
+			const [[pb, n], o, c, ca] = await Promise.all([
+				card.getOwnership(accountAddress),
+				card.owner(),
+				card.currency(),
+				quotePointsForUSDC_raw(cardAddress, BigInt(usdcAmount), SC.baseFactoryPaymaster)
+			])
+			pointsBalance = pb
+			nfts = Array.isArray(n) ? n : []
+			owner = String(o)
+			_currency = Number(c)
+			currencyAmount = ca
+			isMember = (nfts.length > 0) && (pointsBalance > 0n)
+			logger(Colors.green(`✅ purchasingCardProcess cardAddress = ${cardAddress} ${obj.from} AA Account: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
 		}
 
-		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore } = obj
-
-		// 1. 获取受益人 (Owner) - 仅作为签名参数，不需要 Owner 签名
-		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase); // 使用 adminn 账户进行提交
-
-		const [[pointsBalance, nfts] ,owner, _currency, currencyAmount] = await Promise.all([
-			card.getOwnership(accountAddress),
-			card.owner(),
-			card.currency(),
-			quotePointsForUSDC_raw(cardAddress, BigInt(usdcAmount))
-		])
-
-		const isMember = (nfts?.length > 0) && (pointsBalance > 0n)
-		
-		logger(Colors.green(`✅ purchasingCardProcess cardAddress = ${cardAddress} ${obj.from} AA Account: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
+		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
 
 
 
@@ -1000,7 +1049,7 @@ export const purchasingCardProcess = async () => {
 
 
 		const to = owner
-		const currency = getICurrency(_currency)
+		const currency = getICurrency(BigInt(_currency))
 		const ACTION_TOKEN_MINT = 1; // ActionFacet: 1 mint
 		const payMe = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points, isMember)
 
@@ -1796,6 +1845,55 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 	return { success: true, message: 'Card purchased successfully!' }
 }
 
+/**
+ * 集群侧数据预检：只读链上数据，不写。返回 preChecked 供转发给 master，master 可不再做这些校验。
+ * 使用 Settle_ContractPool[0]（不 shift），仅 view 调用。
+ */
+export const purchasingCardPreCheck = async (
+	cardAddress: string,
+	usdcAmount: string,
+	from: string
+): Promise<{ success: true; preChecked: PurchasingCardPreChecked } | { success: false; error: string }> => {
+	const pool = Settle_ContractPool
+	if (!pool?.length) return { success: false, error: 'Settle_ContractPool empty' }
+	const SC = pool[0]
+	const factory = SC.baseFactoryPaymaster
+	const usdc6 = BigInt(usdcAmount)
+	if (usdc6 <= 0n) return { success: false, error: 'usdcAmount must be > 0' }
+	try {
+		const getAddressFn = SC.aaAccountFactoryPaymaster.getFunction('getAddress(address,uint256)')
+		const accountAddress = await getAddressFn(from, 0n) as string
+		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
+		const [[pointsBalance, nfts], owner, _currency, currencyAmount] = await Promise.all([
+			card.getOwnership(accountAddress),
+			card.owner(),
+			card.currency(),
+			quotePointsForUSDC_raw(cardAddress, usdc6, factory)
+		])
+		const isMember = (nfts?.length > 0) && (pointsBalance > 0n)
+		const preChecked: PurchasingCardPreChecked = {
+			accountAddress,
+			owner: String(owner),
+			_currency: Number(_currency),
+			currencyAmount: {
+				usdc6: String(currencyAmount.usdc6),
+				points6: String(currencyAmount.points6),
+				usdc: currencyAmount.usdc,
+				points: currencyAmount.points,
+				unitPriceUSDC6: String(currencyAmount.unitPriceUSDC6),
+				unitPriceUSDC: currencyAmount.unitPriceUSDC
+			},
+			pointsBalance: String(pointsBalance),
+			nfts: Array.isArray(nfts) ? nfts : [],
+			isMember
+		}
+		return { success: true, preChecked }
+	} catch (e: any) {
+		const msg = e?.message ?? e?.shortMessage ?? String(e)
+		logger(Colors.red(`[purchasingCardPreCheck] ${msg}`))
+		return { success: false, error: msg }
+	}
+}
 
 export const quoteUSDCForPoints = async (
 	cardAddress: string,
@@ -1819,15 +1917,14 @@ export const quoteUSDCForPoints = async (
 	  throw new Error("points6 must be > 0");
 	}
   
-	// 2️⃣ quote 总价（USDC 6 decimals）
-	const usdc6: bigint = await factory.quotePointsInUSDC6(cardAddress, points6);
-	if (usdc6 === 0n) {
-	  throw new Error("quote=0 (oracle not configured or card invalid)");
-	}
-  
-	// 3️⃣ 单价（1 token = 1e6 points）
+	// 2️⃣ 单价（1e6 points 对应 USDC6）；合约仅有 quoteUnitPointInUSDC6(card)，无 quotePointsInUSDC6
 	const unitPriceUSDC6: bigint =
 	  await factory.quoteUnitPointInUSDC6(cardAddress);
+	if (unitPriceUSDC6 === 0n) {
+	  throw new Error("quote=0 (oracle not configured or card invalid). Ensure BeamioOracle has CAD rate (e.g. updateRate(0, 1e18)) and card is from this factory.");
+	}
+	// 3️⃣ 总价 USDC6 = points6 * unitPriceUSDC6 / 1e6
+	const usdc6: bigint = (points6 * unitPriceUSDC6) / POINTS_ONE;
   
 	const ret = {
 	  // 原始输入
@@ -1882,21 +1979,35 @@ export const quotePointsForUSDC = async (
 
 export const quotePointsForUSDC_raw = async (
 		cardAddress: string,
-		usdc6: bigint // 已经是 raw USDC（6 decimals）
+		usdc6: bigint, // 已经是 raw USDC（6 decimals）
+		factoryOverride?: ethers.Contract // 调用方传入时使用（如 purchasingCardProcess 中已 shift 的 SC.baseFactoryPaymaster），否则用 Settle_ContractPool[0]
 	) => {
-		const factory = Settle_ContractPool[0].baseFactoryPaymaster;
+		const factory = factoryOverride ?? Settle_ContractPool[0]?.baseFactoryPaymaster;
+		if (!factory) throw new Error("quotePointsForUSDC_raw: no factory (pool empty or not inited)");
 	
 		if (usdc6 <= 0n) {
 		throw new Error("usdc6 must be > 0");
-		}
+	}
 	
 		// 1️⃣ 拿单价：1e6 points 需要多少 USDC6
 		const unitPriceUSDC6: bigint =
 		await factory.quoteUnitPointInUSDC6(cardAddress);
 	
 		if (unitPriceUSDC6 === 0n) {
-		throw new Error("unitPriceUSDC6=0 (oracle not configured?)");
+		// 链上返回 0 仅当 card.pointsUnitPriceInCurrencyE6()==0；若 Oracle 未配置则 revert。给出明确提示便于排查。
+		const provider = (factory as any).runner?.provider ?? (factory as any).provider;
+		let hint = "unitPriceUSDC6=0 (oracle not configured?)";
+		if (provider) {
+			try {
+				const card = new ethers.Contract(cardAddress, BeamioUserCardABI, provider);
+				const [currency, priceE6] = await Promise.all([card.currency(), card.pointsUnitPriceInCurrencyE6()]);
+				if (priceE6 === 0n) hint = "unitPriceUSDC6=0: card has pointsUnitPriceInCurrencyE6=0 (card not configured?)";
+				else if (Number(currency) === 0) hint = "unitPriceUSDC6=0. For CAD cards ensure Oracle has CAD rate: npm run set:oracle-cad:base. Card currency id=0, priceE6=" + String(priceE6);
+				else hint = "unitPriceUSDC6=0. Card currency id=" + String(currency) + ", priceE6=" + String(priceE6) + ". Ensure Oracle has rate for this currency.";
+			} catch (_) { /* keep default hint */ }
 		}
+		throw new Error(hint);
+	}
 	
 		// 2️⃣ 完全对齐合约里的计算公式
 		// pointsOut6 = usdcAmount6 * 1e6 / unitPriceUSDC6
