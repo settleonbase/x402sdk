@@ -710,12 +710,11 @@ export const AAtoEOAPool: {
 	res: Response
 }[] = []
 
-/** OpenContainerRelayPayload：UI 提交的 containerMainRelayedOpen 签名结果，与 SilentPassUI OpenContainerRelayPayload 一致 */
+/** OpenContainerRelayPayload：与 BeamioContainerModuleV07.containerMainRelayedOpen(to, items, currencyType, maxAmount, nonce_, deadline_, sig) 一致；无 token */
 export type OpenContainerRelayPayload = {
 	account: string
 	to: string
 	items: { kind: number; asset: string; amount: string | bigint; tokenId: string | bigint; data: string }[]
-	token: string
 	currencyType: number
 	maxAmount: string
 	nonce: string
@@ -769,7 +768,7 @@ const RELAY_MAIN_ABI = {
 	type: 'function' as const,
 }
 
-/** Factory.relayContainerMainRelayedOpen 的 ABI 片段（BeamioAAAccountFactoryPaymaster 已有实现，若 JSON 未包含可在此扩展） */
+/** Factory.relayContainerMainRelayedOpen 的 ABI 片段，与 BeamioContainerModuleV07.containerMainRelayedOpen(to, items, currencyType, maxAmount, nonce_, deadline_, sig) 一致，无 token */
 const RELAY_OPEN_ABI = {
 	inputs: [
 		{ internalType: 'address', name: 'account', type: 'address' },
@@ -786,7 +785,6 @@ const RELAY_OPEN_ABI = {
 				{ internalType: 'bytes', name: 'data', type: 'bytes' },
 			],
 		},
-		{ internalType: 'address', name: 'token', type: 'address' },
 		{ internalType: 'uint8', name: 'currencyType', type: 'uint8' },
 		{ internalType: 'uint256', name: 'maxAmount', type: 'uint256' },
 		{ internalType: 'uint256', name: 'nonce_', type: 'uint256' },
@@ -814,7 +812,6 @@ export const OpenContainerRelayPreCheck = (payload: OpenContainerRelayPayload | 
 		if (it.tokenId === undefined || it.tokenId === null) return { success: false, error: `openContainerPayload.items[${i}].tokenId required` }
 		if (it.data === undefined || it.data === null) return { success: false, error: `openContainerPayload.items[${i}].data required` }
 	}
-	if (!ethers.isAddress(payload.token)) return { success: false, error: 'openContainerPayload.token must be a valid address' }
 	if (typeof payload.currencyType !== 'number') return { success: false, error: 'openContainerPayload.currencyType must be number' }
 	if (payload.maxAmount === undefined || payload.maxAmount === null) return { success: false, error: 'openContainerPayload.maxAmount required' }
 	if (payload.nonce === undefined || payload.nonce === null) return { success: false, error: 'openContainerPayload.nonce required' }
@@ -1605,7 +1602,6 @@ export const OpenContainerRelayProcess = async () => {
   try {
     const account = ethers.getAddress(payload.account)
     const to = ethers.getAddress(payload.to)
-    const token = ethers.getAddress(payload.token)
     const items = payload.items.map((it) => ({
       kind: Number(it.kind),
       asset: ethers.getAddress(it.asset),
@@ -1635,7 +1631,6 @@ export const OpenContainerRelayProcess = async () => {
       account,
       to,
       items,
-      token,
       payload.currencyType,
       maxAmount,
       nonce_,
