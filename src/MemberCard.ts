@@ -668,9 +668,9 @@ export const USDC2Token = async (
   }
   
 
-/** 集群预检后传给 master 的数据（bigint 已序列化为 string 便于 JSON） */
+/** 集群预检后传给 master 的数据（bigint 已序列化为 string 便于 JSON）。AA 账户由 master 用 DeployingSmartAccount 检查/创建，集群不检查 AA。 */
 export type PurchasingCardPreChecked = {
-	accountAddress: string
+	accountAddress?: string
 	owner: string
 	_currency: number
 	currencyAmount: { usdc6: string, points6: string, usdc: string, points: string, unitPriceUSDC6?: string, unitPriceUSDC?: string }
@@ -982,7 +982,7 @@ export const purchasingCardProcess = async () => {
 		const isCCSA = cardAddress?.toLowerCase() === BASE_CCSA_CARD_ADDRESS.toLowerCase()
 		logger(Colors.cyan(`[purchasingCardProcess] cardAddress=${cardAddress} isCCSA=${isCCSA} (expected CCSA: ${BASE_CCSA_CARD_ADDRESS})`))
 
-		// 1. 受益人、汇率等：有预检数据则直接使用（不再做链上校验），减轻 master 负荷；否则在 master 做链上读取与 DeployingSmartAccount
+		// 1. AA 账户：仅在 master 用原有的 DeployingSmartAccount 检查/创建；集群不检查 AA、不传 accountAddress。若购卡 EOA 不存在 AA 则在此创建或返回错误。
 		let accountAddress: string
 		let owner: string
 		let _currency: number
@@ -991,8 +991,17 @@ export const purchasingCardProcess = async () => {
 		let nfts: unknown[]
 		let isMember: boolean
 
+		const { accountAddress: addr } = await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
+		if (!addr) {
+			logger(Colors.red(`❌ ${obj.from} purchasingCardProcess DeployingSmartAccount failed (no AA account)`));
+			if (obj.res && !obj.res.writableEnded) obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => purchasingCardProcess(), 3000)
+			return
+		}
+		accountAddress = addr
+
 		if (preChecked) {
-			accountAddress = preChecked.accountAddress
 			owner = preChecked.owner
 			_currency = preChecked._currency
 			currencyAmount = {
@@ -1008,15 +1017,6 @@ export const purchasingCardProcess = async () => {
 			isMember = preChecked.isMember
 			logger(Colors.green(`✅ purchasingCardProcess [preChecked] cardAddress = ${cardAddress} ${obj.from} AA: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
 		} else {
-			const { accountAddress: addr } = await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
-			if (!addr) {
-				logger(Colors.red(`❌ ${obj.from} purchasingCardProcess DeployingSmartAccount failed`));
-				obj.res.status(400).json({success: false, error: 'DeployingSmartAccount failed'}).end()
-				Settle_ContractPool.unshift(SC)
-				setTimeout(() => purchasingCardProcess(), 3000)
-				return
-			}
-			accountAddress = addr
 			const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
 			const [[pb, n], o, c, ca] = await Promise.all([
 				card.getOwnership(accountAddress),
@@ -1117,11 +1117,16 @@ export const purchasingCardProcess = async () => {
 		const data = error?.data ?? error?.info?.error?.data ?? ''
 		// 0x76024b71 = UC_PriceZero()：卡合约内 quoteUnitPointInUSDC6(address(this)) 返回 0，链上 Oracle 未配置该卡币种（如 CAD）
 		const isUCPriceZero = typeof data === 'string' && (data === '0x76024b71' || data.toLowerCase().startsWith('0x76024b71'))
+		// 0xad12d341 = UC_ResolveAccountFailed(eoa, aaFactory, acct)：卡合约解析 EOA 的 AA 账户时得到 address(0)，即该 EOA 在此链上尚未创建/部署 AA 账户
+		const isUCResolveAccountFailed = typeof data === 'string' && (data === '0xad12d341' || data.toLowerCase().startsWith('0xad12d341'))
 		logger(Colors.red(`❌ purchasingCardProcess failed:`), error)
 		let clientError = msg
 		if (isUCPriceZero) {
 			clientError = 'UC_PriceZero: Card contract rejected (quoteUnitPointInUSDC6=0 on chain). Set Oracle CAD rate on this chain: npm run set:oracle-cad:base'
 			logger(Colors.yellow(`[purchasingCardProcess] UC_PriceZero: chain Oracle missing rate for card currency (e.g. CAD). Run: npm run set:oracle-cad:base`))
+		} else if (isUCResolveAccountFailed) {
+			clientError = 'Account not found on chain. Please create or activate your Beamio account first, then try purchasing again.'
+			logger(Colors.yellow(`[purchasingCardProcess] UC_ResolveAccountFailed: EOA has no deployed AA account for this card's factory. Ensure DeployingSmartAccount runs before buyPointsWith3009Authorization.`))
 		} else {
 			const isOracleError = /unitPriceUSDC6=0|oracle not configured|QuoteHelper|set:oracle-cad/i.test(msg)
 			if (isOracleError) clientError = msg.includes('set:oracle-cad') ? msg : `unitPriceUSDC6=0 (oracle not configured?). For CAD cards run: npm run set:oracle-cad:base`
@@ -1863,8 +1868,9 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 }
 
 /**
- * 集群侧数据预检：只读链上数据，不写。返回 preChecked 供转发给 master，master 可不再做这些校验。
- * 使用 Settle_ContractPool[0]（不 shift），仅 view 调用。
+ * 集群侧数据预检：只读链上数据，不写。返回 preChecked 供转发给 master。
+ * 不在集群检查 AA：AA 由 master 的 purchasingCardProcess 内用 DeployingSmartAccount 检查/创建。
+ * 使用 Settle_ContractPool[0]（不 shift），仅 view 调用；用 getAddress(from,0) 仅作 getOwnership 入参取点数/会员数据，不向 master 返回 accountAddress。
  */
 export const purchasingCardPreCheck = async (
 	cardAddress: string,
@@ -1879,17 +1885,16 @@ export const purchasingCardPreCheck = async (
 	if (usdc6 <= 0n) return { success: false, error: 'usdcAmount must be > 0' }
 	try {
 		const getAddressFn = SC.aaAccountFactoryPaymaster.getFunction('getAddress(address,uint256)')
-		const accountAddress = await getAddressFn(from, 0n) as string
+		const counterfactualAccount = await getAddressFn(from, 0n) as string
 		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
 		const [[pointsBalance, nfts], owner, _currency, currencyAmount] = await Promise.all([
-			card.getOwnership(accountAddress),
+			card.getOwnership(counterfactualAccount),
 			card.owner(),
 			card.currency(),
 			quotePointsForUSDC_raw(cardAddress, usdc6, factory)
 		])
 		const isMember = (nfts?.length > 0) && (pointsBalance > 0n)
 		const preChecked: PurchasingCardPreChecked = {
-			accountAddress,
 			owner: String(owner),
 			_currency: Number(_currency),
 			currencyAmount: {
