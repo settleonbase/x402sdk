@@ -34,9 +34,11 @@ const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 
 const BeamioTaskIndexerAddress = '0x083AE5AC063a55dBA769Ba71Cd301d5FC5896D5b'
 const DIAMOND = BeamioTaskIndexerAddress
-const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
-const providerBaseBackup = new ethers.JsonRpcProvider('https://1rpc.io/base')
-const providerBaseBackup1 = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
+/** Base 主网 RPC，与 UI 一致，保证报价与链上状态一致 */
+const BASE_RPC_URL = 'https://1rpc.io/base'
+const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
+const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
+const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const conetEndpoint = 'https://mainnet-rpc.conet.network'
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 export let Settle_ContractPool: {
@@ -1984,8 +1986,8 @@ export const quotePointsForUSDC = async (
 	return ret;
 };
 
-/** 与 UI 一致的只读 RPC（1rpc.io/base），用于 unitPrice 主 RPC 返回 0 时重试，避免 base_endpoint 与 UI 不一致导致报价为 0 */
-const QUOTE_FALLBACK_RPC = 'https://1rpc.io/base'
+/** 与主 RPC 一致，unitPrice 主 RPC 返回 0 时重试用（当前主 RPC 已固定为 1rpc.io/base） */
+const QUOTE_FALLBACK_RPC = BASE_RPC_URL
 
 export const quotePointsForUSDC_raw = async (
 		cardAddress: string,

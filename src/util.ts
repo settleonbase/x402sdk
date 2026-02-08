@@ -393,8 +393,10 @@ const FaucetUserProcess = async () => {
 	processUSDC_Faucet()
 }
 
-const providerBase = new ethers.JsonRpcProvider(masterSetup.base_endpoint)
-const providerBaseBackup = new ethers.JsonRpcProvider('https://1rpc.io/base')
+/** Base 主网 RPC，与 UI 及 MemberCard 一致 */
+const BASE_RPC_URL = 'https://1rpc.io/base'
+const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
+const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
