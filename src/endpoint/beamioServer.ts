@@ -16,6 +16,13 @@ import { purchasingCard, purchasingCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreChec
 const masterServerPort = 1111
 const serverPort = 2222
 
+/** JSON 序列化时把 BigInt 转为 string，避免 "Do not know how to serialize a BigInt" */
+function jsonStringifyWithBigInt(obj: any): string {
+	return JSON.stringify(obj, (_key, value) =>
+		typeof value === 'bigint' ? value.toString() : value
+	)
+}
+
 export const postLocalhost = async (path: string, obj: any, _res: Response)=> {
 	
 	const option: RequestOptions = {
@@ -41,7 +48,7 @@ export const postLocalhost = async (path: string, obj: any, _res: Response)=> {
 		_res.status(502).end()
 	})
 
-	req.write(JSON.stringify(obj))
+	req.write(jsonStringifyWithBigInt(obj))
 	req.end()
 }
 
