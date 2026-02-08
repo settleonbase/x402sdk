@@ -979,6 +979,8 @@ export const purchasingCardProcess = async () => {
 	
 	try {
 		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked } = obj
+		const isCCSA = cardAddress?.toLowerCase() === BASE_CCSA_CARD_ADDRESS.toLowerCase()
+		logger(Colors.cyan(`[purchasingCardProcess] cardAddress=${cardAddress} isCCSA=${isCCSA} (expected CCSA: ${BASE_CCSA_CARD_ADDRESS})`))
 
 		// 1. 受益人、汇率等：有预检数据则直接使用（不再做链上校验），减轻 master 负荷；否则在 master 做链上读取与 DeployingSmartAccount
 		let accountAddress: string
@@ -1994,6 +1996,8 @@ export const quotePointsForUSDC_raw = async (
 		usdc6: bigint, // 已经是 raw USDC（6 decimals）
 		factoryOverride?: ethers.Contract // 调用方传入时使用（如 purchasingCardProcess 中已 shift 的 SC.baseFactoryPaymaster），否则用 Settle_ContractPool[0]
 	) => {
+		const isCCSA = cardAddress?.toLowerCase() === BASE_CCSA_CARD_ADDRESS.toLowerCase()
+		logger(Colors.cyan(`[quotePointsForUSDC_raw] cardAddress=${cardAddress} isCCSA=${isCCSA} usdc6=${usdc6}`))
 		const factory = factoryOverride ?? Settle_ContractPool[0]?.baseFactoryPaymaster;
 		if (!factory) throw new Error("quotePointsForUSDC_raw: no factory (pool empty or not inited)");
 	
