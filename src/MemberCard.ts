@@ -1114,12 +1114,18 @@ export const purchasingCardProcess = async () => {
 		
 	} catch (error: any) {
 		const msg = error?.message ?? error?.shortMessage ?? String(error)
+		const data = error?.data ?? error?.info?.error?.data ?? ''
+		// 0x76024b71 = UC_PriceZero()：卡合约内 quoteUnitPointInUSDC6(address(this)) 返回 0，链上 Oracle 未配置该卡币种（如 CAD）
+		const isUCPriceZero = typeof data === 'string' && (data === '0x76024b71' || data.toLowerCase().startsWith('0x76024b71'))
 		logger(Colors.red(`❌ purchasingCardProcess failed:`), error)
-		// 向客户端返回明确错误；Oracle/报价未配置时提示执行 set:oracle-cad
-		const isOracleError = /unitPriceUSDC6=0|oracle not configured|QuoteHelper|set:oracle-cad/i.test(msg)
-		const clientError = isOracleError
-			? (msg.includes('set:oracle-cad') ? msg : `unitPriceUSDC6=0 (oracle not configured?). For CAD cards run: npm run set:oracle-cad:base`)
-			: msg
+		let clientError = msg
+		if (isUCPriceZero) {
+			clientError = 'UC_PriceZero: Card contract rejected (quoteUnitPointInUSDC6=0 on chain). Set Oracle CAD rate on this chain: npm run set:oracle-cad:base'
+			logger(Colors.yellow(`[purchasingCardProcess] UC_PriceZero: chain Oracle missing rate for card currency (e.g. CAD). Run: npm run set:oracle-cad:base`))
+		} else {
+			const isOracleError = /unitPriceUSDC6=0|oracle not configured|QuoteHelper|set:oracle-cad/i.test(msg)
+			if (isOracleError) clientError = msg.includes('set:oracle-cad') ? msg : `unitPriceUSDC6=0 (oracle not configured?). For CAD cards run: npm run set:oracle-cad:base`
+		}
 		if (obj.res && !obj.res.writableEnded) {
 			obj.res.status(400).json({ success: false, error: clientError }).end()
 		}
@@ -1991,6 +1997,14 @@ export const quotePointsForUSDC = async (
 /** 与主 RPC 一致，unitPrice 主 RPC 返回 0 时重试用（当前主 RPC 已固定为 1rpc.io/base） */
 const QUOTE_FALLBACK_RPC = BASE_RPC_URL
 
+/**
+ * 为何 quoteUnitPointInUSDC6(cardAddress) 可能返回 0？
+ * 1) 合约逻辑：QuoteHelper.quoteUnitPointInUSDC6(currency, price) 仅在 price==0 时返回 0；否则会调 Oracle.getRate(currency)。
+ *    Oracle 未配置该币种时 getRate 会 revert，不会返回 0。所以链上「正常」返回 0 的唯一情况是：卡合约的 pointsUnitPriceInCurrencyE6() == 0。
+ * 2) 实际常见原因：部分 RPC 节点在 view 调用内部 revert 时（例如 Oracle 未配置 CAD），会把整次 eth_call 当作失败并返回 0 而不是抛出错误，
+ *    导致 quoteUnitPointInUSDC6 在客户端看到 0。此时用与 UI 相同的 quoteCurrencyAmountInUSDC6(CAD, 1e6) 可绕过（CCSA 已做）。
+ * 3) 若卡确为新部署且 constructor 已传 1e6，链上 pointsUnitPriceInCurrencyE6 不应为 0；若仍得 0，多为上述 RPC 对 revert 的处理差异。
+ */
 export const quotePointsForUSDC_raw = async (
 		cardAddress: string,
 		usdc6: bigint, // 已经是 raw USDC（6 decimals）
