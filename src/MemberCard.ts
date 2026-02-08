@@ -2004,12 +2004,27 @@ export const quotePointsForUSDC_raw = async (
 		if (usdc6 <= 0n) {
 		throw new Error("usdc6 must be > 0");
 	}
-	
-		// 1️⃣ 拿单价：1e6 points 需要多少 USDC6（先走主 factory，与 UI 同链时再走 fallback RPC 重试）
-		let unitPriceUSDC6: bigint = await factory.quoteUnitPointInUSDC6(cardAddress);
+
+		// CCSA 卡：与 UI 完全一致，直接用 quoteCurrencyAmountInUSDC6(CAD, 1e6) 作为单价，不依赖 quoteUnitPointInUSDC6(cardAddress)
+		const CAD_ENUM = 0
+		const POINTS_ONE_E6 = 1_000_000n
+		let unitPriceUSDC6: bigint = 0n
+		if (isCCSA) {
+			try {
+				unitPriceUSDC6 = await factory.quoteCurrencyAmountInUSDC6(CAD_ENUM, POINTS_ONE_E6)
+				if (unitPriceUSDC6 !== 0n) logger(Colors.green(`[quotePointsForUSDC_raw] CCSA: used quoteCurrencyAmountInUSDC6(CAD, 1e6) => ${unitPriceUSDC6} (same as UI)`))
+			} catch (e) {
+				logger(Colors.yellow(`[quotePointsForUSDC_raw] CCSA quoteCurrencyAmountInUSDC6 failed: ${(e as Error)?.message}`))
+			}
+		}
+
+		if (unitPriceUSDC6 === 0n) {
+		// 非 CCSA 或 CCSA 路径失败：走 quoteUnitPointInUSDC6(cardAddress)
+		unitPriceUSDC6 = await factory.quoteUnitPointInUSDC6(cardAddress);
+		}
 	
 		if (unitPriceUSDC6 === 0n) {
-		// 1) 同 RPC 重试一次
+		// 同 RPC 重试一次
 		try {
 			const fallbackProvider = new ethers.JsonRpcProvider(QUOTE_FALLBACK_RPC);
 			const readOnlyFactory = new ethers.Contract(BeamioUserCardFactoryPaymasterV2, BeamioFactoryPaymasterABI as ethers.InterfaceAbi, fallbackProvider);
@@ -2021,8 +2036,8 @@ export const quotePointsForUSDC_raw = async (
 		} catch (_) { /* ignore */ }
 	}
 
-		// 2) 若仍为 0：用与 UI 完全相同的报价路径 quoteCurrencyAmountInUSDC6(currency, priceE6) 计算单价（UI 的 quoteCurrencyAmountInUSDC 即用此 API）
-		if (unitPriceUSDC6 === 0n) {
+		if (unitPriceUSDC6 === 0n && !isCCSA) {
+		// 用与 UI 相同的报价路径：quoteCurrencyAmountInUSDC6(currency, priceE6)
 		const provider = (factory as any).runner?.provider ?? (factory as any).provider;
 		if (provider) {
 			try {
@@ -2032,7 +2047,7 @@ export const quotePointsForUSDC_raw = async (
 					const unitFromCurrencyQuote = await factory.quoteCurrencyAmountInUSDC6(Number(currency), priceE6);
 					if (unitFromCurrencyQuote !== 0n) {
 						unitPriceUSDC6 = unitFromCurrencyQuote;
-						logger(Colors.yellow(`[quotePointsForUSDC_raw] unitPrice from quoteUnitPointInUSDC6 was 0, used quoteCurrencyAmountInUSDC6(currency=${currency}, priceE6=${priceE6}) => ${unitFromCurrencyQuote} (same as UI)`));
+						logger(Colors.yellow(`[quotePointsForUSDC_raw] used quoteCurrencyAmountInUSDC6(currency=${currency}, priceE6=${priceE6}) => ${unitFromCurrencyQuote}`));
 					}
 				}
 			} catch (_) { /* keep unitPriceUSDC6 0 */ }
