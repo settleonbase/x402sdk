@@ -1984,6 +1984,9 @@ export const quotePointsForUSDC = async (
 	return ret;
 };
 
+/** 与 UI 一致的只读 RPC（1rpc.io/base），用于 unitPrice 主 RPC 返回 0 时重试，避免 base_endpoint 与 UI 不一致导致报价为 0 */
+const QUOTE_FALLBACK_RPC = 'https://1rpc.io/base'
+
 export const quotePointsForUSDC_raw = async (
 		cardAddress: string,
 		usdc6: bigint, // 已经是 raw USDC（6 decimals）
@@ -1996,9 +1999,21 @@ export const quotePointsForUSDC_raw = async (
 		throw new Error("usdc6 must be > 0");
 	}
 	
-		// 1️⃣ 拿单价：1e6 points 需要多少 USDC6
-		const unitPriceUSDC6: bigint =
-		await factory.quoteUnitPointInUSDC6(cardAddress);
+		// 1️⃣ 拿单价：1e6 points 需要多少 USDC6（先走主 factory，与 UI 同链时再走 fallback RPC 重试）
+		let unitPriceUSDC6: bigint = await factory.quoteUnitPointInUSDC6(cardAddress);
+	
+		if (unitPriceUSDC6 === 0n) {
+		// 主 RPC（master base_endpoint）返回 0 时，用与 UI 相同的 RPC 重试一次，避免服务端与 UI 使用不同 RPC 导致状态不一致
+		try {
+			const fallbackProvider = new ethers.JsonRpcProvider(QUOTE_FALLBACK_RPC);
+			const readOnlyFactory = new ethers.Contract(BeamioUserCardFactoryPaymasterV2, BeamioFactoryPaymasterABI as ethers.InterfaceAbi, fallbackProvider);
+			const fallbackPrice = await readOnlyFactory.quoteUnitPointInUSDC6(cardAddress);
+			if (fallbackPrice !== 0n) {
+				unitPriceUSDC6 = fallbackPrice;
+				logger(Colors.yellow(`[quotePointsForUSDC_raw] unitPrice was 0 on primary RPC, used fallback RPC (${QUOTE_FALLBACK_RPC}) => ${fallbackPrice}`));
+			}
+		} catch (_) { /* ignore, keep unitPriceUSDC6 0 and throw below */ }
+	}
 	
 		if (unitPriceUSDC6 === 0n) {
 		// 链上返回 0 仅当 card.pointsUnitPriceInCurrencyE6()==0；若 Oracle 未配置则 revert。给出明确提示便于排查。
