@@ -2005,20 +2005,37 @@ export const quotePointsForUSDC_raw = async (
 		let unitPriceUSDC6: bigint = await factory.quoteUnitPointInUSDC6(cardAddress);
 	
 		if (unitPriceUSDC6 === 0n) {
-		// 主 RPC（master base_endpoint）返回 0 时，用与 UI 相同的 RPC 重试一次，避免服务端与 UI 使用不同 RPC 导致状态不一致
+		// 1) 同 RPC 重试一次
 		try {
 			const fallbackProvider = new ethers.JsonRpcProvider(QUOTE_FALLBACK_RPC);
 			const readOnlyFactory = new ethers.Contract(BeamioUserCardFactoryPaymasterV2, BeamioFactoryPaymasterABI as ethers.InterfaceAbi, fallbackProvider);
 			const fallbackPrice = await readOnlyFactory.quoteUnitPointInUSDC6(cardAddress);
 			if (fallbackPrice !== 0n) {
 				unitPriceUSDC6 = fallbackPrice;
-				logger(Colors.yellow(`[quotePointsForUSDC_raw] unitPrice was 0 on primary RPC, used fallback RPC (${QUOTE_FALLBACK_RPC}) => ${fallbackPrice}`));
+				logger(Colors.yellow(`[quotePointsForUSDC_raw] unitPrice was 0, used fallback RPC => ${fallbackPrice}`));
 			}
-		} catch (_) { /* ignore, keep unitPriceUSDC6 0 and throw below */ }
+		} catch (_) { /* ignore */ }
 	}
-	
+
+		// 2) 若仍为 0：用与 UI 完全相同的报价路径 quoteCurrencyAmountInUSDC6(currency, priceE6) 计算单价（UI 的 quoteCurrencyAmountInUSDC 即用此 API）
 		if (unitPriceUSDC6 === 0n) {
-		// 链上返回 0 仅当 card.pointsUnitPriceInCurrencyE6()==0；若 Oracle 未配置则 revert。给出明确提示便于排查。
+		const provider = (factory as any).runner?.provider ?? (factory as any).provider;
+		if (provider) {
+			try {
+				const card = new ethers.Contract(cardAddress, BeamioUserCardABI, provider);
+				const [currency, priceE6] = await Promise.all([card.currency(), card.pointsUnitPriceInCurrencyE6()]);
+				if (priceE6 > 0n) {
+					const unitFromCurrencyQuote = await factory.quoteCurrencyAmountInUSDC6(Number(currency), priceE6);
+					if (unitFromCurrencyQuote !== 0n) {
+						unitPriceUSDC6 = unitFromCurrencyQuote;
+						logger(Colors.yellow(`[quotePointsForUSDC_raw] unitPrice from quoteUnitPointInUSDC6 was 0, used quoteCurrencyAmountInUSDC6(currency=${currency}, priceE6=${priceE6}) => ${unitFromCurrencyQuote} (same as UI)`));
+					}
+				}
+			} catch (_) { /* keep unitPriceUSDC6 0 */ }
+		}
+	}
+
+		if (unitPriceUSDC6 === 0n) {
 		const provider = (factory as any).runner?.provider ?? (factory as any).provider;
 		let hint = "unitPriceUSDC6=0 (oracle not configured?)";
 		if (provider) {
