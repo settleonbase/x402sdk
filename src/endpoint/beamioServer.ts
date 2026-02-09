@@ -300,8 +300,10 @@ const routing = ( router: Router ) => {
 			packedUserOp?: import('../MemberCard').AAtoEOAUserOp
 			openContainerPayload?: import('../MemberCard').OpenContainerRelayPayload
 			containerPayload?: import('../MemberCard').ContainerRelayPayload
-			currency?: string
-			currencyAmount?: string
+			currency?: string | string[]
+			currencyAmount?: string | string[]
+			currencyDiscount?: string | string[]
+			currencyDiscountAmount?: string | string[]
 		}
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
 
@@ -316,6 +318,8 @@ const routing = ( router: Router ) => {
 				containerPayload: body.containerPayload,
 				currency: body.currency,
 				currencyAmount: body.currencyAmount,
+				currencyDiscount: body.currencyDiscount,
+				currencyDiscountAmount: body.currencyDiscountAmount,
 			}, res)
 			return
 		}
@@ -354,6 +358,8 @@ const routing = ( router: Router ) => {
 				openContainerPayload: body.openContainerPayload,
 				currency: body.currency,
 				currencyAmount: body.currencyAmount,
+				currencyDiscount: body.currencyDiscount,
+				currencyDiscountAmount: body.currencyDiscountAmount,
 			}, res)
 			return
 		}

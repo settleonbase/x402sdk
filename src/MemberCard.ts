@@ -726,6 +726,8 @@ export const OpenContainerRelayPool: {
 	openContainerPayload: OpenContainerRelayPayload
 	currency?: string | string[]
 	currencyAmount?: string | string[]
+	currencyDiscount?: string | string[]
+	currencyDiscountAmount?: string | string[]
 	res: Response
 }[] = []
 
@@ -743,6 +745,8 @@ export const ContainerRelayPool: {
 	containerPayload: ContainerRelayPayload
 	currency?: string | string[]
 	currencyAmount?: string | string[]
+	currencyDiscount?: string | string[]
+	currencyDiscountAmount?: string | string[]
 	res: Response
 }[] = []
 
@@ -932,6 +936,8 @@ type payMe = {
 	currency: ICurrency
 	currencyAmount: string
 	currencyTip?: string
+	currencyDiscount?: string
+	currencyDiscountAmount?: string
 	tip?: number
 	parentHash?: string
 	oneTimeMode?: boolean
@@ -1567,6 +1573,67 @@ export const AAtoEOAProcess = async () => {
     logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
     await tx.wait()
 
+    // 记账：transferRecord + syncTokenAction（USDC 转账，card 为 USDC 地址，title 为 "Express Pay to EOA"）
+    const toEOA = ethers.getAddress(obj.toEOA)
+    const amountUSDC6BigInt = BigInt(obj.amountUSDC6)
+    const usdcAmountHuman = Number(amountUSDC6BigInt) / 1e6
+    const payMeData: payMe = {
+      currency: 'USDC',
+      currencyAmount: String(usdcAmountHuman),
+      title: 'Express Pay to EOA',
+      usdcAmount: usdcAmountHuman,
+      parentHash: tx.hash,
+    }
+    try {
+      const tr = await SC.conetSC.transferRecord(
+        sender,
+        toEOA,
+        amountUSDC6BigInt,
+        tx.hash,
+        `\r\n${JSON.stringify(payMeData)}`
+      )
+      logger(`[AAtoEOA] transferRecord submitted hash=${tr.hash}`)
+      try {
+        await tr.wait()
+        logger(`[AAtoEOA] transferRecord.wait() completed successfully`)
+      } catch (waitErr: any) {
+        logger(Colors.yellow(`[AAtoEOA] transferRecord.wait() failed (non-critical): ${waitErr?.shortMessage || waitErr?.message || waitErr}`))
+      }
+    } catch (trErr: any) {
+      logger(Colors.yellow(`[AAtoEOA] transferRecord failed (non-critical): ${trErr?.shortMessage || trErr?.message || trErr}`))
+    }
+    try {
+      const actionInput = {
+        actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
+        card: ethers.getAddress(USDC_ADDRESS),
+        from: sender,
+        to: toEOA,
+        amount: amountUSDC6BigInt,
+        ts: 0n,
+        title: 'Express Pay to EOA',
+        note: JSON.stringify(payMeData),
+        tax: 0n,
+        tip: 0n,
+        beamioFee1: 0n,
+        beamioFee2: 0n,
+        cardServiceFee: 0n,
+        afterTatchNoteByFrom: '',
+        afterTatchNoteByTo: '',
+        afterTatchNoteByCardOwner: '',
+      }
+      const actionFacet = SC.BeamioTaskDiamondAction
+      const tx2 = await actionFacet.syncTokenAction(actionInput)
+      logger(`[AAtoEOA] syncTokenAction submitted hash=${tx2.hash}`)
+      try {
+        await tx2.wait()
+        logger(`[AAtoEOA] syncTokenAction.wait() completed successfully`)
+      } catch (waitErr: any) {
+        logger(Colors.yellow(`[AAtoEOA] syncTokenAction.wait() failed (non-critical): ${waitErr?.shortMessage || waitErr?.message || waitErr}`))
+      }
+    } catch (syncErr: any) {
+      logger(Colors.yellow(`[AAtoEOA] syncTokenAction failed (non-critical): ${syncErr?.shortMessage || syncErr?.message || syncErr}`))
+    }
+
     logger(Colors.green(`✅ AAtoEOAProcess success! tx=${tx.hash}`))
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {
@@ -1687,9 +1754,11 @@ export const OpenContainerRelayProcess = async () => {
       // 交易已提交（有 tx.hash），继续处理转账记录
     }
 
-    // 优先使用 UI 客户端传递的 currency 和 currencyAmount（可能是数组或单个值）
+    // 优先使用 UI 客户端传递的 currency、currencyAmount、currencyDiscount、currencyDiscountAmount（可能是数组或单个值）
     const currencyFromClient = obj.currency
     const currencyAmountFromClient = obj.currencyAmount
+    const currencyDiscountFromClient = obj.currencyDiscount
+    const currencyDiscountAmountFromClient = obj.currencyDiscountAmount
     const currencyTypeValue = BigInt(payload.currencyType)
     const currencyFromType = getICurrency(currencyTypeValue)
     const isCurrencyArray = Array.isArray(currencyFromClient)
@@ -1720,8 +1789,9 @@ export const OpenContainerRelayProcess = async () => {
       const assetType = isUSDC ? 'USDC' : 'CCSA'
       const assetAmount = item.amount
       const assetAmountHuman = String(Number(assetAmount) / 1e6) // USDC 和 CCSA 都是 6 位小数
-      const cardAddress = isUSDC ? USDC_ADDRESS : BASE_CCSA_CARD_ADDRESS
-      const title = isUSDC ? 'Transfer USDC' : 'Transfer CCSA'
+      // 登记 USDC 转账时 actionInput.card 必须为 USDC 地址；CCSA 时为 CCSA 卡地址
+      const cardAddressForAction = isUSDC ? usdcAddress : ccsacardAddress
+      const title = 'Merchant Payment' // isUSDC ? 'Transfer USDC' : 'Transfer CCSA'
       
       // 为每个 item 获取对应的 currency 和 currencyAmount
       // 如果是数组，使用对应索引的值；如果是单个值，所有 item 共用
@@ -1732,11 +1802,22 @@ export const OpenContainerRelayProcess = async () => {
         ? (currencyAmountFromClient[processedItemIndex] ?? assetAmountHuman)
         : ((currencyAmountFromClient as string) ?? assetAmountHuman)
       
-      logger(`[AAtoEOA/OpenContainer] Item ${i} (processedIndex ${processedItemIndex}): currency=${itemCurrency}, currencyAmount=${itemCurrencyAmount}`)
+      const isCurrencyDiscountArray = Array.isArray(currencyDiscountFromClient)
+      const isCurrencyDiscountAmountArray = Array.isArray(currencyDiscountAmountFromClient)
+      const itemCurrencyDiscount = currencyDiscountFromClient != null
+        ? (isCurrencyDiscountArray ? (currencyDiscountFromClient[processedItemIndex] ?? undefined) : (currencyDiscountFromClient as string))
+        : undefined
+      const itemCurrencyDiscountAmount = currencyDiscountAmountFromClient != null
+        ? (isCurrencyDiscountAmountArray ? (currencyDiscountAmountFromClient[processedItemIndex] ?? undefined) : (currencyDiscountAmountFromClient as string))
+        : undefined
+      
+      logger(`[AAtoEOA/OpenContainer] Item ${i} (processedIndex ${processedItemIndex}): currency=${itemCurrency}, currencyAmount=${itemCurrencyAmount}, currencyDiscount=${itemCurrencyDiscount ?? 'null'}, currencyDiscountAmount=${itemCurrencyDiscountAmount ?? 'null'}`)
       
       const payMeData: payMe = {
         currency: itemCurrency,
         currencyAmount: itemCurrencyAmount,
+        ...(itemCurrencyDiscount != null && itemCurrencyDiscount !== '' && { currencyDiscount: itemCurrencyDiscount }),
+        ...(itemCurrencyDiscountAmount != null && itemCurrencyDiscountAmount !== '' && { currencyDiscountAmount: itemCurrencyDiscountAmount }),
         title,
         usdcAmount: isUSDC ? Number(assetAmount) / 1e6 : undefined,
         parentHash: tx.hash,
@@ -1770,11 +1851,11 @@ export const OpenContainerRelayProcess = async () => {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}] failed (non-critical): ${trError?.shortMessage || trError?.message || trError}`))
       }
 
-      // syncTokenAction
+      // syncTokenAction（USDC 时 card 为 USDC 地址，CCSA 时为 CCSA 卡地址）
       try {
         const actionInput = {
           actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
-          card: cardAddress,
+          card: cardAddressForAction,
           from: account,
           to,
           amount: assetAmount,
@@ -1907,9 +1988,13 @@ export const ContainerRelayProcess = async () => {
     const currencyAmountValue = Array.isArray(obj.currencyAmount) ? obj.currencyAmount[0] : obj.currencyAmount
     const currency = (currencyValue ?? 'USDC') as ICurrency
     const currencyAmount = currencyAmountValue ?? String(Number(usdcAmountRaw) / 1e6)
+    const currencyDiscountValue = obj.currencyDiscount != null ? (Array.isArray(obj.currencyDiscount) ? obj.currencyDiscount[0] : obj.currencyDiscount) : undefined
+    const currencyDiscountAmountValue = obj.currencyDiscountAmount != null ? (Array.isArray(obj.currencyDiscountAmount) ? obj.currencyDiscountAmount[0] : obj.currencyDiscountAmount) : undefined
     const payMeData: payMe = {
       currency,
       currencyAmount,
+      ...(currencyDiscountValue != null && currencyDiscountValue !== '' && { currencyDiscount: currencyDiscountValue }),
+      ...(currencyDiscountAmountValue != null && currencyDiscountAmountValue !== '' && { currencyDiscountAmount: currencyDiscountAmountValue }),
       title: 'AA to EOA',
       usdcAmount: Number(usdcAmountRaw) / 1e6,
       parentHash: tx.hash,

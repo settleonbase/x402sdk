@@ -83,6 +83,8 @@ const routing = ( router: Router ) => {
 			containerPayload?: ContainerRelayPayload
 			currency?: string | string[]
 			currencyAmount?: string | string[]
+			currencyDiscount?: string | string[]
+			currencyDiscountAmount?: string | string[]
 		}
 		logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
 
@@ -97,6 +99,8 @@ const routing = ( router: Router ) => {
 				containerPayload: body.containerPayload,
 				currency: body.currency,
 				currencyAmount: body.currencyAmount,
+				currencyDiscount: body.currencyDiscount,
+				currencyDiscountAmount: body.currencyDiscountAmount,
 				res,
 			})
 			logger(`[AAtoEOA] master pushed to ContainerRelayPool (length ${poolLenBefore} -> ${ContainerRelayPool.length}), calling ContainerRelayProcess()`)
@@ -115,6 +119,8 @@ const routing = ( router: Router ) => {
 				openContainerPayload: body.openContainerPayload,
 				currency: body.currency,
 				currencyAmount: body.currencyAmount,
+				currencyDiscount: body.currencyDiscount,
+				currencyDiscountAmount: body.currencyDiscountAmount,
 				res,
 			})
 			logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)
