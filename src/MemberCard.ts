@@ -1601,7 +1601,7 @@ export const OpenContainerRelayProcess = async () => {
 
   try {
     const account = ethers.getAddress(payload.account)
-    const to = ethers.getAddress(payload.to)
+    let to = ethers.getAddress(payload.to)
     const items = payload.items.map((it) => ({
       kind: Number(it.kind),
       asset: ethers.getAddress(it.asset),
@@ -1627,6 +1627,21 @@ export const OpenContainerRelayProcess = async () => {
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_OPEN_ABI],
       SC.walletBase
     )
+    // BeamioUserCard 要求 points(ERC1155) 只能转给 BeamioAccount；若 payload 含 ERC1155，将 to(EOA) 解析为 primary AA
+    const has1155 = items.some((it: { kind: number }) => it.kind === 1)
+    if (has1155) {
+      try {
+        const primary = await FactoryWithRelay.primaryAccountOf(payload.to)
+        if (primary && primary !== ethers.ZeroAddress) {
+          to = ethers.getAddress(primary)
+          logger(`[AAtoEOA/OpenContainer] ERC1155 item: resolved beneficiary EOA -> AA ${to}`)
+        } else {
+          logger(Colors.yellow(`[AAtoEOA/OpenContainer] ERC1155 item but beneficiary ${payload.to} has no AA; card will revert UC_NoBeamioAccount`))
+        }
+      } catch (e: any) {
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] primaryAccountOf(${payload.to}) failed: ${e?.message ?? e}`))
+      }
+    }
     const tx = await FactoryWithRelay.relayContainerMainRelayedOpen(
       account,
       to,
