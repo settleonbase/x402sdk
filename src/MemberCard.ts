@@ -741,8 +741,8 @@ export type ContainerRelayPayload = {
 
 export const ContainerRelayPool: {
 	containerPayload: ContainerRelayPayload
-	currency?: string
-	currencyAmount?: string
+	currency?: string | string[]
+	currencyAmount?: string | string[]
 	res: Response
 }[] = []
 
@@ -1902,8 +1902,11 @@ export const ContainerRelayProcess = async () => {
     await tx.wait()
 
     const usdcAmountRaw = BigInt(payload.items[0].amount)
-    const currency = (obj.currency ?? 'USDC') as ICurrency
-    const currencyAmount = obj.currencyAmount ?? String(Number(usdcAmountRaw) / 1e6)
+    // ContainerRelayProcess 只处理单个 item，所以 currency 和 currencyAmount 应该是字符串
+    const currencyValue = Array.isArray(obj.currency) ? obj.currency[0] : obj.currency
+    const currencyAmountValue = Array.isArray(obj.currencyAmount) ? obj.currencyAmount[0] : obj.currencyAmount
+    const currency = (currencyValue ?? 'USDC') as ICurrency
+    const currencyAmount = currencyAmountValue ?? String(Number(usdcAmountRaw) / 1e6)
     const payMeData: payMe = {
       currency,
       currencyAmount,

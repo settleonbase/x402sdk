@@ -341,8 +341,8 @@ const routing = ( router: Router ) => {
 					logger(Colors.red(`[AAtoEOA] server OpenContainer currency validation FAIL: ${error}`))
 					return res.status(400).json({ success: false, error }).end()
 				}
-				const currencyArray = body.currency as string[]
-				const currencyAmountArray = body.currencyAmount as string[]
+				const currencyArray = body.currency as unknown as string[]
+				const currencyAmountArray = body.currencyAmount as unknown as string[]
 				if (currencyArray.length !== itemsLength || currencyAmountArray.length !== itemsLength) {
 					const error = `currency and currencyAmount arrays must have the same length as items. Got items.length=${itemsLength}, currency.length=${currencyArray.length}, currencyAmount.length=${currencyAmountArray.length}`
 					logger(Colors.red(`[AAtoEOA] server OpenContainer currency length validation FAIL: ${error}`))
