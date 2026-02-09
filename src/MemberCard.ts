@@ -1627,20 +1627,37 @@ export const OpenContainerRelayProcess = async () => {
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_OPEN_ABI],
       SC.walletBase
     )
-    // BeamioUserCard 要求 points(ERC1155) 只能转给 BeamioAccount；若 payload 含 ERC1155，将 to(EOA) 解析为 primary AA
+    // BeamioUserCard 要求 points(ERC1155) 只能转给 BeamioAccount；若 payload 含 ERC1155 或 to 为 EOA，将 to 解析为受益人 primary AA（严禁用付款方 account 的 AA 作为 to）
     const has1155 = items.some((it: { kind: number }) => it.kind === 1)
-    if (has1155) {
+    const toIsEOA = !(await SC.walletBase.provider!.getCode(to).then((c: string) => c && c !== '0x' && c.length > 2))
+    const needResolveTo = has1155 || toIsEOA
+    if (needResolveTo) {
       try {
-        const primary = await FactoryWithRelay.primaryAccountOf(payload.to)
+        // 仅用 payload.to（受益人地址）解析，禁止用 payload.account（付款方）
+        const beneficiaryEOA = ethers.getAddress(payload.to)
+        const primary = await FactoryWithRelay.primaryAccountOf(beneficiaryEOA)
         if (primary && primary !== ethers.ZeroAddress) {
-          to = ethers.getAddress(primary)
-          logger(`[AAtoEOA/OpenContainer] ERC1155 item: resolved beneficiary EOA -> AA ${to}`)
+          const resolvedTo = ethers.getAddress(primary)
+          if (resolvedTo === account) {
+            obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same (to resolved to sender AA). payload.to must be the recipient EOA/AA, not the payer.' }).end()
+            Settle_ContractPool.unshift(SC)
+            return setTimeout(() => OpenContainerRelayProcess(), 3000)
+          }
+          to = resolvedTo
+          logger(`[AAtoEOA/OpenContainer] resolved beneficiary EOA -> AA ${to}`)
         } else {
-          logger(Colors.yellow(`[AAtoEOA/OpenContainer] ERC1155 item but beneficiary ${payload.to} has no AA; card will revert UC_NoBeamioAccount`))
+          if (has1155) {
+            logger(Colors.yellow(`[AAtoEOA/OpenContainer] ERC1155 item but beneficiary ${payload.to} has no AA; card will revert UC_NoBeamioAccount`))
+          }
         }
       } catch (e: any) {
-        logger(Colors.yellow(`[AAtoEOA/OpenContainer] primaryAccountOf(${payload.to}) failed: ${e?.message ?? e}`))
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] primaryAccountOf(beneficiary ${payload.to}) failed: ${e?.message ?? e}`))
       }
+    }
+    if (to === account) {
+      obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same. Check payload.to is the recipient address.' }).end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => OpenContainerRelayProcess(), 3000)
     }
     const tx = await FactoryWithRelay.relayContainerMainRelayedOpen(
       account,

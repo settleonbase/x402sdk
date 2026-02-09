@@ -18,8 +18,10 @@ import IPFSAbi from './ABI/Ipfs.abi.json'
 
 
 const RPC_URL = "https://mainnet-rpc.conet.network"
+const BASE_RPC_URL = "https://1rpc.io/base"
 
 const providerConet = new ethers.JsonRpcProvider(RPC_URL)
+const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
@@ -637,20 +639,39 @@ export const _search = async (keyward: string) => {
   }
 }
 
+/** If the given address is an AA (has contract code on Base), return its owner (EOA); otherwise return the input. */
+const resolveAAToEOA = async (address: string): Promise<string> => {
+	if (!ethers.isAddress(address)) return address
+	try {
+		const code = await providerBase.getCode(address)
+		if (!code || code === "0x" || code.length <= 2) return address
+		const aa = new ethers.Contract(address, ["function owner() view returns (address)"], providerBase)
+		const owner = await aa.owner()
+		if (owner && owner !== ethers.ZeroAddress) return ethers.getAddress(owner)
+	} catch (e) {
+		logger(`resolveAAToEOA(${address}) failed: ${(e as Error)?.message ?? e}`)
+	}
+	return address
+}
+
 export const searchUsers = async (req: Request, res: Response) => {
 	const { keyward } = req.query as {
 		keyward?: string
 	}
 
-	const _keywork = String(keyward || "").trim().replace("@", "")
+	let _keywork = String(keyward || "").trim().replace(/^@+/, "")
 
 	if (!_keywork) {
 		return res.status(404).end()
 	}
 
-	const ret = await _search (_keywork)
+	// If the search key is a wallet address and it is an AA on Base, resolve to EOA before searching (accounts table stores EOA).
+	if (ethers.isAddress(_keywork)) {
+		_keywork = await resolveAAToEOA(_keywork)
+	}
+
+	const ret = await _search(_keywork)
 	return res.status(200).json(ret).end()
-	
 }
 
 const updateUserFollowDB = async (
