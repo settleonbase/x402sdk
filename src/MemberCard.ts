@@ -1671,7 +1671,52 @@ export const OpenContainerRelayProcess = async () => {
     )
     logger(`[AAtoEOA/OpenContainer] relay tx submitted hash=${tx.hash}`)
     await tx.wait()
-    logger(Colors.green(`✅ OpenContainerRelayProcess success! tx=${tx.hash}`))
+
+    // 查找 USDC item（kind === 0 且 asset === USDC_ADDRESS），如果没有找到则使用 maxAmount
+    const usdcAddress = ethers.getAddress(USDC_ADDRESS)
+    const usdcItem = items.find((it: { kind: number; asset: string }) => it.kind === 0 && ethers.getAddress(it.asset) === usdcAddress)
+    const usdcAmountRaw = usdcItem ? BigInt(usdcItem.amount) : maxAmount
+    const currency = getICurrency(BigInt(payload.currencyType))
+    const currencyAmount = String(Number(usdcAmountRaw) / 1e6)
+    const payMeData: payMe = {
+      currency,
+      currencyAmount,
+      title: 'AA to EOA',
+      usdcAmount: Number(usdcAmountRaw) / 1e6,
+      parentHash: tx.hash,
+    }
+    logger(Colors.green(`✅ OpenContainerRelayProcess payMe = ${inspect(payMeData, false, 2, true)}`))
+    const tr = await SC.conetSC.transferRecord(
+      account,
+      to,
+      usdcAmountRaw,
+      tx.hash,
+      `\r\n${JSON.stringify(payMeData)}`
+    )
+    await tr.wait()
+
+    const actionInput = {
+      actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
+      card: USDC_ADDRESS,
+      from: account,
+      to,
+      amount: usdcAmountRaw,
+      ts: 0n,
+      title: 'AA to EOA',
+      note: JSON.stringify(payMeData),
+      tax: 0n,
+      tip: 0n,
+      beamioFee1: 0n,
+      beamioFee2: 0n,
+      cardServiceFee: 0n,
+      afterTatchNoteByFrom: '',
+      afterTatchNoteByTo: '',
+      afterTatchNoteByCardOwner: '',
+    }
+    const actionFacet = SC.BeamioTaskDiamondAction
+    const tx2 = await actionFacet.syncTokenAction(actionInput)
+    await tx2.wait()
+    logger(Colors.green(`✅ OpenContainerRelayProcess success! tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {
     let msg = error?.shortMessage || error?.message || String(error)
@@ -1804,6 +1849,7 @@ export const ContainerRelayProcess = async () => {
     }
     const actionFacet = SC.BeamioTaskDiamondAction
     const tx2 = await actionFacet.syncTokenAction(actionInput)
+
     await tx2.wait()
     logger(Colors.green(`✅ ContainerRelayProcess success! tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
