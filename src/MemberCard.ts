@@ -724,8 +724,8 @@ export type OpenContainerRelayPayload = {
 
 export const OpenContainerRelayPool: {
 	openContainerPayload: OpenContainerRelayPayload
-	currency?: string
-	currencyAmount?: string
+	currency?: string | string[]
+	currencyAmount?: string | string[]
 	res: Response
 }[] = []
 
@@ -1687,97 +1687,127 @@ export const OpenContainerRelayProcess = async () => {
       // 交易已提交（有 tx.hash），继续处理转账记录
     }
 
-    // 查找 USDC item（kind === 0 且 asset === USDC_ADDRESS），如果没有找到则使用 maxAmount
-    const usdcAddress = ethers.getAddress(USDC_ADDRESS)
-    const usdcItem = items.find((it: { kind: number; asset: string }) => it.kind === 0 && ethers.getAddress(it.asset) === usdcAddress)
-    const usdcAmountRaw = usdcItem ? BigInt(usdcItem.amount) : maxAmount
-    logger(`[AAtoEOA/OpenContainer] usdcAmount calculation: usdcItem=${usdcItem ? 'found' : 'not found'}, usdcAmountRaw=${usdcAmountRaw.toString()}, maxAmount=${maxAmount.toString()}`)
-    
-    // 优先使用 UI 客户端传递的 currency 和 currencyAmount，如果没有则从 currencyType 和 usdcAmountRaw 计算
+    // 优先使用 UI 客户端传递的 currency 和 currencyAmount（可能是数组或单个值）
     const currencyFromClient = obj.currency
     const currencyAmountFromClient = obj.currencyAmount
     const currencyTypeValue = BigInt(payload.currencyType)
     const currencyFromType = getICurrency(currencyTypeValue)
-    const currency = (currencyFromClient ?? currencyFromType) as ICurrency
-    const currencyAmount = currencyAmountFromClient ?? String(Number(usdcAmountRaw) / 1e6)
+    const isCurrencyArray = Array.isArray(currencyFromClient)
+    const isCurrencyAmountArray = Array.isArray(currencyAmountFromClient)
     
-    logger(`[AAtoEOA/OpenContainer] currency/currencyAmount: client currency=${currencyFromClient ?? 'null'}, client currencyAmount=${currencyAmountFromClient ?? 'null'}, currencyType=${payload.currencyType}, currencyFromType=${currencyFromType}, final currency=${currency}, final currencyAmount=${currencyAmount}`)
+    logger(`[AAtoEOA/OpenContainer] currency/currencyAmount: client currency=${isCurrencyArray ? `[${currencyFromClient.length} items]` : (currencyFromClient ?? 'null')}, client currencyAmount=${isCurrencyAmountArray ? `[${currencyAmountFromClient.length} items]` : (currencyAmountFromClient ?? 'null')}, currencyType=${payload.currencyType}, currencyFromType=${currencyFromType}, items.length=${items.length}`)
     
-    const payMeData: payMe = {
-      currency,
-      currencyAmount,
-      title: 'AA to EOA',
-      usdcAmount: Number(usdcAmountRaw) / 1e6,
-      parentHash: tx.hash,
-    }
-    logger(Colors.green(`✅ OpenContainerRelayProcess payMe = ${inspect(payMeData, false, 2, true)}`))
-    logger(`[AAtoEOA/OpenContainer] Starting transferRecord: account=${account}, to=${to}, usdcAmountRaw=${usdcAmountRaw.toString()}, tx.hash=${tx.hash}`)
+    // 按 item 拆分，每条转账记录只记录一种资产
+    const usdcAddress = ethers.getAddress(USDC_ADDRESS)
+    const ccsacardAddress = ethers.getAddress(BASE_CCSA_CARD_ADDRESS)
+    const trHashes: string[] = []
+    const syncTokenActionHashes: string[] = []
     
-    // transferRecord 和 syncTokenAction 是辅助操作，失败不应影响主流程
-    let trHash: string | undefined
-    let syncTokenActionHash: string | undefined
-    try {
-      logger(`[AAtoEOA/OpenContainer] Calling transferRecord...`)
-      const tr = await SC.conetSC.transferRecord(
-        account,
-        to,
-        usdcAmountRaw,
-        tx.hash,
-        `\r\n${JSON.stringify(payMeData)}`
-      )
-      logger(`[AAtoEOA/OpenContainer] transferRecord submitted hash=${tr.hash}`)
-      try {
-        await tr.wait()
-        trHash = tr.hash
-        logger(`[AAtoEOA/OpenContainer] transferRecord.wait() completed successfully`)
-      } catch (waitError: any) {
-        logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord.wait() failed (non-critical): ${waitError?.shortMessage || waitError?.message || waitError}`))
-        logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord.wait() error details: ${inspect(waitError, false, 3, true)}`))
-        trHash = tr.hash // 即使 wait 失败，交易已提交
+    // 用于跟踪实际处理的 item 索引（跳过非 USDC/CCSA 的 item）
+    let processedItemIndex = 0
+    
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      const itemAsset = ethers.getAddress(item.asset)
+      const isUSDC = item.kind === 0 && itemAsset === usdcAddress
+      const isCCSA = item.kind === 1 && itemAsset === ccsacardAddress
+      
+      if (!isUSDC && !isCCSA) {
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] Skipping item ${i}: kind=${item.kind}, asset=${itemAsset} (not USDC or CCSA)`))
+        continue
       }
-    } catch (trError: any) {
-      logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord failed (non-critical): ${trError?.shortMessage || trError?.message || trError}`))
-      logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord error details: ${inspect(trError, false, 3, true)}`))
-    }
+      
+      const assetType = isUSDC ? 'USDC' : 'CCSA'
+      const assetAmount = item.amount
+      const assetAmountHuman = String(Number(assetAmount) / 1e6) // USDC 和 CCSA 都是 6 位小数
+      const cardAddress = isUSDC ? USDC_ADDRESS : BASE_CCSA_CARD_ADDRESS
+      const title = isUSDC ? 'Transfer USDC' : 'Transfer CCSA'
+      
+      // 为每个 item 获取对应的 currency 和 currencyAmount
+      // 如果是数组，使用对应索引的值；如果是单个值，所有 item 共用
+      const itemCurrency = isCurrencyArray 
+        ? (currencyFromClient[processedItemIndex] ?? currencyFromType) as ICurrency
+        : ((currencyFromClient as string) ?? currencyFromType) as ICurrency
+      const itemCurrencyAmount = isCurrencyAmountArray
+        ? (currencyAmountFromClient[processedItemIndex] ?? assetAmountHuman)
+        : ((currencyAmountFromClient as string) ?? assetAmountHuman)
+      
+      logger(`[AAtoEOA/OpenContainer] Item ${i} (processedIndex ${processedItemIndex}): currency=${itemCurrency}, currencyAmount=${itemCurrencyAmount}`)
+      
+      const payMeData: payMe = {
+        currency: itemCurrency,
+        currencyAmount: itemCurrencyAmount,
+        title,
+        usdcAmount: isUSDC ? Number(assetAmount) / 1e6 : undefined,
+        parentHash: tx.hash,
+      }
+      
+      processedItemIndex++
+      
+      logger(`[AAtoEOA/OpenContainer] Processing item ${i}: ${assetType}, amount=${assetAmount.toString()}, title=${title}`)
+      logger(Colors.green(`✅ OpenContainerRelayProcess item ${i} payMe = ${inspect(payMeData, false, 2, true)}`))
+      
+      // transferRecord
+      try {
+        logger(`[AAtoEOA/OpenContainer] Calling transferRecord for item ${i} (${assetType})...`)
+        const tr = await SC.conetSC.transferRecord(
+          account,
+          to,
+          assetAmount,
+          tx.hash,
+          `\r\n${JSON.stringify(payMeData)}`
+        )
+        logger(`[AAtoEOA/OpenContainer] transferRecord[${i}] submitted hash=${tr.hash}`)
+        try {
+          await tr.wait()
+          trHashes.push(tr.hash)
+          logger(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() completed successfully`)
+        } catch (waitError: any) {
+          logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() failed (non-critical): ${waitError?.shortMessage || waitError?.message || waitError}`))
+          trHashes.push(tr.hash) // 即使 wait 失败，交易已提交
+        }
+      } catch (trError: any) {
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}] failed (non-critical): ${trError?.shortMessage || trError?.message || trError}`))
+      }
 
-    try {
-      const actionInput = {
-        actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
-        card: USDC_ADDRESS,
-        from: account,
-        to,
-        amount: usdcAmountRaw,
-        ts: 0n,
-        title: 'AA to EOA',
-        note: JSON.stringify(payMeData),
-        tax: 0n,
-        tip: 0n,
-        beamioFee1: 0n,
-        beamioFee2: 0n,
-        cardServiceFee: 0n,
-        afterTatchNoteByFrom: '',
-        afterTatchNoteByTo: '',
-        afterTatchNoteByCardOwner: '',
-      }
-      logger(`[AAtoEOA/OpenContainer] Calling syncTokenAction with actionInput: ${inspect(actionInput, false, 2, true)}`)
-      const actionFacet = SC.BeamioTaskDiamondAction
-      const tx2 = await actionFacet.syncTokenAction(actionInput)
-      logger(`[AAtoEOA/OpenContainer] syncTokenAction submitted hash=${tx2.hash}`)
+      // syncTokenAction
       try {
-        await tx2.wait()
-        syncTokenActionHash = tx2.hash
-        logger(`[AAtoEOA/OpenContainer] syncTokenAction.wait() completed successfully`)
-      } catch (waitError: any) {
-        logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction.wait() failed (non-critical): ${waitError?.shortMessage || waitError?.message || waitError}`))
-        logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction.wait() error details: ${inspect(waitError, false, 3, true)}`))
-        syncTokenActionHash = tx2.hash // 即使 wait 失败，交易已提交
+        const actionInput = {
+          actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
+          card: cardAddress,
+          from: account,
+          to,
+          amount: assetAmount,
+          ts: 0n,
+          title,
+          note: JSON.stringify(payMeData),
+          tax: 0n,
+          tip: 0n,
+          beamioFee1: 0n,
+          beamioFee2: 0n,
+          cardServiceFee: 0n,
+          afterTatchNoteByFrom: '',
+          afterTatchNoteByTo: '',
+          afterTatchNoteByCardOwner: '',
+        }
+        logger(`[AAtoEOA/OpenContainer] Calling syncTokenAction for item ${i} (${assetType}) with actionInput: ${inspect(actionInput, false, 2, true)}`)
+        const actionFacet = SC.BeamioTaskDiamondAction
+        const tx2 = await actionFacet.syncTokenAction(actionInput)
+        logger(`[AAtoEOA/OpenContainer] syncTokenAction[${i}] submitted hash=${tx2.hash}`)
+        try {
+          await tx2.wait()
+          syncTokenActionHashes.push(tx2.hash)
+          logger(`[AAtoEOA/OpenContainer] syncTokenAction[${i}].wait() completed successfully`)
+        } catch (waitError: any) {
+          logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction[${i}].wait() failed (non-critical): ${waitError?.shortMessage || waitError?.message || waitError}`))
+          syncTokenActionHashes.push(tx2.hash) // 即使 wait 失败，交易已提交
+        }
+      } catch (syncError: any) {
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction[${i}] failed (non-critical): ${syncError?.shortMessage || syncError?.message || syncError}`))
       }
-    } catch (syncError: any) {
-      logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction failed (non-critical): ${syncError?.shortMessage || syncError?.message || syncError}`))
-      logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction error details: ${inspect(syncError, false, 3, true)}`))
     }
     
-    const successMsg = `✅ OpenContainerRelayProcess success! tx=${tx.hash}${trHash ? ` conetSC=${trHash}` : ''}${syncTokenActionHash ? ` syncTokenAction=${syncTokenActionHash}` : ''}`
+    const successMsg = `✅ OpenContainerRelayProcess success! tx=${tx.hash}${trHashes.length > 0 ? ` conetSC=[${trHashes.join(', ')}]` : ''}${syncTokenActionHashes.length > 0 ? ` syncTokenAction=[${syncTokenActionHashes.join(', ')}]` : ''}`
     logger(Colors.green(successMsg))
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {

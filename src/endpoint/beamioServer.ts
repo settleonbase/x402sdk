@@ -326,6 +326,29 @@ const routing = ( router: Router ) => {
 				logger(Colors.red(`[AAtoEOA] server OpenContainer pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
+			// 检查 items.length 和 currency/currencyAmount 的长度匹配
+			const itemsLength = body.openContainerPayload.items?.length ?? 0
+			if (itemsLength > 1) {
+				if (!body.currency || !body.currencyAmount) {
+					const error = `When items.length > 1, currency and currencyAmount are required`
+					logger(Colors.red(`[AAtoEOA] server OpenContainer currency validation FAIL: ${error}`))
+					return res.status(400).json({ success: false, error }).end()
+				}
+				const currencyIsArray = Array.isArray(body.currency)
+				const currencyAmountIsArray = Array.isArray(body.currencyAmount)
+				if (!currencyIsArray || !currencyAmountIsArray) {
+					const error = `When items.length > 1, currency and currencyAmount must be arrays with the same length. Got items.length=${itemsLength}, currency is array=${currencyIsArray}, currencyAmount is array=${currencyAmountIsArray}`
+					logger(Colors.red(`[AAtoEOA] server OpenContainer currency validation FAIL: ${error}`))
+					return res.status(400).json({ success: false, error }).end()
+				}
+				const currencyArray = body.currency as string[]
+				const currencyAmountArray = body.currencyAmount as string[]
+				if (currencyArray.length !== itemsLength || currencyAmountArray.length !== itemsLength) {
+					const error = `currency and currencyAmount arrays must have the same length as items. Got items.length=${itemsLength}, currency.length=${currencyArray.length}, currencyAmount.length=${currencyAmountArray.length}`
+					logger(Colors.red(`[AAtoEOA] server OpenContainer currency length validation FAIL: ${error}`))
+					return res.status(400).json({ success: false, error }).end()
+				}
+			}
 			logger(Colors.green(`[AAtoEOA] server OpenContainer pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
 			postLocalhost('/api/AAtoEOA', {
 				openContainerPayload: body.openContainerPayload,

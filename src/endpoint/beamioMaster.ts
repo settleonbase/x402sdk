@@ -81,8 +81,8 @@ const routing = ( router: Router ) => {
 			packedUserOp?: AAtoEOAUserOp
 			openContainerPayload?: OpenContainerRelayPayload
 			containerPayload?: ContainerRelayPayload
-			currency?: string
-			currencyAmount?: string
+			currency?: string | string[]
+			currencyAmount?: string | string[]
 		}
 		logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
 
