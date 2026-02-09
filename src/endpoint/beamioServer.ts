@@ -327,7 +327,11 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
 			logger(Colors.green(`[AAtoEOA] server OpenContainer pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
-			postLocalhost('/api/AAtoEOA', { openContainerPayload: body.openContainerPayload }, res)
+			postLocalhost('/api/AAtoEOA', {
+				openContainerPayload: body.openContainerPayload,
+				currency: body.currency,
+				currencyAmount: body.currencyAmount,
+			}, res)
 			return
 		}
 

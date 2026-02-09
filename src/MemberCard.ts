@@ -722,7 +722,12 @@ export type OpenContainerRelayPayload = {
 	signature: string
 }
 
-export const OpenContainerRelayPool: { openContainerPayload: OpenContainerRelayPayload; res: Response }[] = []
+export const OpenContainerRelayPool: {
+	openContainerPayload: OpenContainerRelayPayload
+	currency?: string
+	currencyAmount?: string
+	res: Response
+}[] = []
 
 /** ContainerRelayPayload：UI 提交的 containerMainRelayed（绑定 to）签名结果，与 SilentPassUI ContainerRelayPayload 一致 */
 export type ContainerRelayPayload = {
@@ -1676,8 +1681,9 @@ export const OpenContainerRelayProcess = async () => {
     const usdcAddress = ethers.getAddress(USDC_ADDRESS)
     const usdcItem = items.find((it: { kind: number; asset: string }) => it.kind === 0 && ethers.getAddress(it.asset) === usdcAddress)
     const usdcAmountRaw = usdcItem ? BigInt(usdcItem.amount) : maxAmount
-    const currency = getICurrency(BigInt(payload.currencyType))
-    const currencyAmount = String(Number(usdcAmountRaw) / 1e6)
+    // 优先使用 UI 客户端传递的 currency 和 currencyAmount，如果没有则从 currencyType 和 usdcAmountRaw 计算
+    const currency = (obj.currency ?? getICurrency(BigInt(payload.currencyType))) as ICurrency
+    const currencyAmount = obj.currencyAmount ?? String(Number(usdcAmountRaw) / 1e6)
     const payMeData: payMe = {
       currency,
       currencyAmount,
@@ -1686,37 +1692,63 @@ export const OpenContainerRelayProcess = async () => {
       parentHash: tx.hash,
     }
     logger(Colors.green(`✅ OpenContainerRelayProcess payMe = ${inspect(payMeData, false, 2, true)}`))
-    const tr = await SC.conetSC.transferRecord(
-      account,
-      to,
-      usdcAmountRaw,
-      tx.hash,
-      `\r\n${JSON.stringify(payMeData)}`
-    )
-    await tr.wait()
-
-    const actionInput = {
-      actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
-      card: USDC_ADDRESS,
-      from: account,
-      to,
-      amount: usdcAmountRaw,
-      ts: 0n,
-      title: 'AA to EOA',
-      note: JSON.stringify(payMeData),
-      tax: 0n,
-      tip: 0n,
-      beamioFee1: 0n,
-      beamioFee2: 0n,
-      cardServiceFee: 0n,
-      afterTatchNoteByFrom: '',
-      afterTatchNoteByTo: '',
-      afterTatchNoteByCardOwner: '',
+    
+    // transferRecord 和 syncTokenAction 是辅助操作，失败不应影响主流程
+    let trHash: string | undefined
+    let syncTokenActionHash: string | undefined
+    try {
+      const tr = await SC.conetSC.transferRecord(
+        account,
+        to,
+        usdcAmountRaw,
+        tx.hash,
+        `\r\n${JSON.stringify(payMeData)}`
+      )
+      try {
+        await tr.wait()
+        trHash = tr.hash
+      } catch (waitError: any) {
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord.wait() failed (non-critical): ${waitError?.shortMessage || waitError?.message || waitError}`))
+        trHash = tr.hash // 即使 wait 失败，交易已提交
+      }
+    } catch (trError: any) {
+      logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord failed (non-critical): ${trError?.shortMessage || trError?.message || trError}`))
     }
-    const actionFacet = SC.BeamioTaskDiamondAction
-    const tx2 = await actionFacet.syncTokenAction(actionInput)
-    await tx2.wait()
-    logger(Colors.green(`✅ OpenContainerRelayProcess success! tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
+
+    try {
+      const actionInput = {
+        actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
+        card: USDC_ADDRESS,
+        from: account,
+        to,
+        amount: usdcAmountRaw,
+        ts: 0n,
+        title: 'AA to EOA',
+        note: JSON.stringify(payMeData),
+        tax: 0n,
+        tip: 0n,
+        beamioFee1: 0n,
+        beamioFee2: 0n,
+        cardServiceFee: 0n,
+        afterTatchNoteByFrom: '',
+        afterTatchNoteByTo: '',
+        afterTatchNoteByCardOwner: '',
+      }
+      const actionFacet = SC.BeamioTaskDiamondAction
+      const tx2 = await actionFacet.syncTokenAction(actionInput)
+      try {
+        await tx2.wait()
+        syncTokenActionHash = tx2.hash
+      } catch (waitError: any) {
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction.wait() failed (non-critical): ${waitError?.shortMessage || waitError?.message || waitError}`))
+        syncTokenActionHash = tx2.hash // 即使 wait 失败，交易已提交
+      }
+    } catch (syncError: any) {
+      logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction failed (non-critical): ${syncError?.shortMessage || syncError?.message || syncError}`))
+    }
+    
+    const successMsg = `✅ OpenContainerRelayProcess success! tx=${tx.hash}${trHash ? ` conetSC=${trHash}` : ''}${syncTokenActionHash ? ` syncTokenAction=${syncTokenActionHash}` : ''}`
+    logger(Colors.green(successMsg))
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {
     let msg = error?.shortMessage || error?.message || String(error)

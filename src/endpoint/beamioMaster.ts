@@ -111,7 +111,12 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: preCheck.error ?? 'Invalid openContainerPayload' }).end()
 			}
 			const poolLenBefore = OpenContainerRelayPool.length
-			OpenContainerRelayPool.push({ openContainerPayload: body.openContainerPayload, res })
+			OpenContainerRelayPool.push({
+				openContainerPayload: body.openContainerPayload,
+				currency: body.currency,
+				currencyAmount: body.currencyAmount,
+				res,
+			})
 			logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)
 			OpenContainerRelayProcess()
 			return
