@@ -1058,7 +1058,11 @@ export const purchasingCardProcess = async () => {
 		logger(Colors.green(`✅ purchasingCardProcess tx submitted Hash: ${tx.hash}`))
 
 		await tx.wait().catch((waitErr: any) => {
-			logger(Colors.yellow(`[purchasingCardProcess] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+			try {
+				logger(Colors.yellow(`[purchasingCardProcess] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+			} catch (_) {
+				console.error('[purchasingCardProcess] tx.wait() failed (RPC):', waitErr)
+			}
 		})
 		// Base 转账完成后立即返回 hash 给客户端，不等待记账
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
@@ -1112,12 +1116,20 @@ export const purchasingCardProcess = async () => {
 			`\r\n${JSON.stringify(payMe)}`
 		)
 		await tr.wait().catch((waitErr: any) => {
-			logger(Colors.yellow(`[purchasingCardProcess] tr.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+			try {
+				logger(Colors.yellow(`[purchasingCardProcess] tr.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+			} catch (_) {
+				console.error('[purchasingCardProcess] tr.wait() failed (RPC):', waitErr)
+			}
 		})
 		const actionFacet = await SC.BeamioTaskDiamondAction
 		const tx2 = await actionFacet.syncTokenAction(input)
 		await tx2.wait().catch((waitErr: any) => {
-			logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+			try {
+				logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+			} catch (_) {
+				console.error('[purchasingCardProcess] syncTokenAction.wait() failed (RPC):', waitErr)
+			}
 		})
 		logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
 		
@@ -1573,7 +1585,13 @@ export const AAtoEOAProcess = async () => {
    
     const tx = await entryPoint.handleOps([packedOp], beneficiary)
     logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
-    await tx.wait()
+    await tx.wait().catch((waitErr: any) => {
+      try {
+        logger(Colors.yellow(`[AAtoEOA] handleOps tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+      } catch (_) {
+        console.error('[AAtoEOA] handleOps tx.wait() failed (RPC):', waitErr)
+      }
+    })
 
     // 记账：transferRecord + syncTokenAction（USDC 转账，card 为 USDC 地址，title 为 "Express Pay to EOA"）
     const toEOA = ethers.getAddress(obj.toEOA)
@@ -1747,7 +1765,11 @@ export const OpenContainerRelayProcess = async () => {
     )
     logger(`[AAtoEOA/OpenContainer] relay tx submitted hash=${tx.hash}`)
     await tx.wait().catch((waitErr: any) => {
-      logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, tx submitted): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+      try {
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, tx submitted): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+      } catch (_) {
+        console.error('[AAtoEOA/OpenContainer] tx.wait() failed (RPC):', waitErr)
+      }
     })
     // Base 转账完成后立即返回 hash 给客户端，不等待记账
     if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
@@ -1839,7 +1861,11 @@ export const OpenContainerRelayProcess = async () => {
         )
         logger(`[AAtoEOA/OpenContainer] transferRecord[${i}] submitted hash=${tr.hash}`)
         await tr.wait().catch((waitErr: any) => {
-          logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+          try {
+            logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+          } catch (_) {
+            console.error(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() failed (RPC):`, waitErr)
+          }
         })
         trHashes.push(tr.hash)
       } catch (trError: any) {
@@ -1871,7 +1897,11 @@ export const OpenContainerRelayProcess = async () => {
         const tx2 = await actionFacet.syncTokenAction(actionInput)
         logger(`[AAtoEOA/OpenContainer] syncTokenAction[${i}] submitted hash=${tx2.hash}`)
         await tx2.wait().catch((waitErr: any) => {
-          logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction[${i}].wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+          try {
+            logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction[${i}].wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+          } catch (_) {
+            console.error(`[AAtoEOA/OpenContainer] syncTokenAction[${i}].wait() failed (RPC):`, waitErr)
+          }
         })
         syncTokenActionHashes.push(tx2.hash)
       } catch (syncError: any) {
@@ -1969,7 +1999,11 @@ export const ContainerRelayProcess = async () => {
     const tx = await FactoryWithRelay.relayContainerMainRelayed(account, to, items, nonce_, deadline_, sigBytes)
     logger(`[AAtoEOA/Container] relay tx submitted hash=${tx.hash}`)
     await tx.wait().catch((waitErr: any) => {
-      logger(Colors.yellow(`[AAtoEOA/Container] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+      try {
+        logger(Colors.yellow(`[AAtoEOA/Container] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+      } catch (_) {
+        console.error('[AAtoEOA/Container] tx.wait() failed (RPC):', waitErr)
+      }
     })
     // Base 转账完成后立即返回 hash 给客户端，不等待记账
     if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
@@ -2000,7 +2034,11 @@ export const ContainerRelayProcess = async () => {
       `\r\n${JSON.stringify(payMeData)}`
     )
     await tr.wait().catch((waitErr: any) => {
-      logger(Colors.yellow(`[AAtoEOA/Container] tr.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+      try {
+        logger(Colors.yellow(`[AAtoEOA/Container] tr.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+      } catch (_) {
+        console.error('[AAtoEOA/Container] tr.wait() failed (RPC):', waitErr)
+      }
     })
 
     const actionInput = {
@@ -2025,7 +2063,11 @@ export const ContainerRelayProcess = async () => {
     const tx2 = await actionFacet.syncTokenAction(actionInput)
 
     await tx2.wait().catch((waitErr: any) => {
-      logger(Colors.yellow(`[AAtoEOA/Container] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+      try {
+        logger(Colors.yellow(`[AAtoEOA/Container] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+      } catch (_) {
+        console.error('[AAtoEOA/Container] syncTokenAction.wait() failed (RPC):', waitErr)
+      }
     })
     logger(Colors.green(`✅ ContainerRelayProcess accounting done: tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
   } catch (error: any) {

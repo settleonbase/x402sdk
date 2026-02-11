@@ -70,7 +70,9 @@ const routing = ( router: Router ) => {
 		})
 
 		logger(` Master GOT /api/purchasingCard ${preChecked ? '[preChecked]' : ''} doing purchasingCardProcess...`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preChecked }, false, 3, true))
-		purchasingCardProcess()
+		purchasingCardProcess().catch((err: any) => {
+			logger(Colors.red('[purchasingCardProcess] unhandled error (fire-and-forget):'), err?.message ?? err)
+		})
 	})
 
 	/** AA→EOA：支持三种提交。(1) ERC-4337 UserOp → AAtoEOAProcess；(2) openContainerPayload → OpenContainerRelayProcess；(3) containerPayload（绑定 to）→ ContainerRelayProcess */
@@ -104,7 +106,9 @@ const routing = ( router: Router ) => {
 				res,
 			})
 			logger(`[AAtoEOA] master pushed to ContainerRelayPool (length ${poolLenBefore} -> ${ContainerRelayPool.length}), calling ContainerRelayProcess()`)
-			ContainerRelayProcess()
+			ContainerRelayProcess().catch((err: any) => {
+				logger(Colors.red('[ContainerRelayProcess] unhandled error:'), err?.message ?? err)
+			})
 			return
 		}
 
@@ -124,7 +128,9 @@ const routing = ( router: Router ) => {
 				res,
 			})
 			logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)
-			OpenContainerRelayProcess()
+			OpenContainerRelayProcess().catch((err: any) => {
+				logger(Colors.red('[OpenContainerRelayProcess] unhandled error:'), err?.message ?? err)
+			})
 			return
 		}
 
@@ -141,7 +147,9 @@ const routing = ( router: Router ) => {
 			res,
 		})
 		logger(`[AAtoEOA] master pushed to pool (length ${poolLenBefore} -> ${AAtoEOAPool.length}), calling AAtoEOAProcess()`)
-		AAtoEOAProcess()
+		AAtoEOAProcess().catch((err: any) => {
+			logger(Colors.red('[AAtoEOAProcess] unhandled error:'), err?.message ?? err)
+		})
 	})
 
 	router.post('/storageFragment', (req, res) => {
