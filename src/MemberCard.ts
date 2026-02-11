@@ -1744,15 +1744,11 @@ export const OpenContainerRelayProcess = async () => {
       sigBytes
     )
     logger(`[AAtoEOA/OpenContainer] relay tx submitted hash=${tx.hash}`)
-    // 等待交易确认，如果失败（如 RPC 响应不完整），交易已提交，继续处理
-    try {
-      await tx.wait()
-      logger(`[AAtoEOA/OpenContainer] tx.wait() completed successfully`)
-    } catch (waitError: any) {
-      logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, but tx submitted): ${waitError?.shortMessage || waitError?.message || waitError}`))
-      logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() error details: ${inspect(waitError, false, 3, true)}`))
-      // 交易已提交（有 tx.hash），继续处理转账记录
-    }
+    // 等待交易确认；RPC 错误（如 missing response for request）用 .catch 吸收，避免崩溃
+    await tx.wait().catch((waitErr: any) => {
+      logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, tx submitted): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+    })
+    logger(`[AAtoEOA/OpenContainer] tx.wait() done (ok or non-fatal RPC error), continuing`)
 
     // 优先使用 UI 客户端传递的 currency、currencyAmount、currencyDiscount、currencyDiscountAmount（可能是数组或单个值）
     const currencyFromClient = obj.currency
@@ -1839,14 +1835,10 @@ export const OpenContainerRelayProcess = async () => {
           `\r\n${JSON.stringify(payMeData)}`
         )
         logger(`[AAtoEOA/OpenContainer] transferRecord[${i}] submitted hash=${tr.hash}`)
-        try {
-          await tr.wait()
-          trHashes.push(tr.hash)
-          logger(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() completed successfully`)
-        } catch (waitError: any) {
-          logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() failed (non-critical): ${waitError?.shortMessage || waitError?.message || waitError}`))
-          trHashes.push(tr.hash) // 即使 wait 失败，交易已提交
-        }
+        await tr.wait().catch((waitErr: any) => {
+          logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+        })
+        trHashes.push(tr.hash)
       } catch (trError: any) {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}] failed (non-critical): ${trError?.shortMessage || trError?.message || trError}`))
       }
@@ -1875,14 +1867,10 @@ export const OpenContainerRelayProcess = async () => {
         const actionFacet = SC.BeamioTaskDiamondAction
         const tx2 = await actionFacet.syncTokenAction(actionInput)
         logger(`[AAtoEOA/OpenContainer] syncTokenAction[${i}] submitted hash=${tx2.hash}`)
-        try {
-          await tx2.wait()
-          syncTokenActionHashes.push(tx2.hash)
-          logger(`[AAtoEOA/OpenContainer] syncTokenAction[${i}].wait() completed successfully`)
-        } catch (waitError: any) {
-          logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction[${i}].wait() failed (non-critical): ${waitError?.shortMessage || waitError?.message || waitError}`))
-          syncTokenActionHashes.push(tx2.hash) // 即使 wait 失败，交易已提交
-        }
+        await tx2.wait().catch((waitErr: any) => {
+          logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction[${i}].wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+        })
+        syncTokenActionHashes.push(tx2.hash)
       } catch (syncError: any) {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] syncTokenAction[${i}] failed (non-critical): ${syncError?.shortMessage || syncError?.message || syncError}`))
       }
@@ -1893,33 +1881,31 @@ export const OpenContainerRelayProcess = async () => {
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {
     let msg = error?.shortMessage || error?.message || String(error)
-    if (error?.data) {
-      logger(Colors.red(`[AAtoEOA/OpenContainer] revert data=${error.data}`))
-      // CM_ReservedERC20Violation(address,uint256,uint256,uint256) → 多为余额不足
-      const data = typeof error.data === 'string' ? error.data : ethers.hexlify(error.data)
-      if (data.length >= 4 + 32 * 4 && data.startsWith('0x')) {
-        try {
-          const selector = data.slice(0, 10)
-          if (selector === '0xc6d837a8') {
-            const abiCoder = ethers.AbiCoder.defaultAbiCoder()
-            const decoded = abiCoder.decode(
-              ['address', 'uint256', 'uint256', 'uint256'],
-              '0x' + data.slice(10)
-            ) as unknown as [string, bigint, bigint, bigint]
-            const [, spend, bal] = decoded
-            const spendHuman = Number(spend) / 1e6
-            const balHuman = Number(bal) / 1e6
-            msg = `Insufficient USDC balance: account has ${balHuman.toFixed(2)} USDC, need ${spendHuman.toFixed(2)} USDC`
-          }
-        } catch (_) {}
+    try {
+      if (error?.data) {
+        logger(Colors.red(`[AAtoEOA/OpenContainer] revert data=${error.data}`))
+        const data = typeof error.data === 'string' ? error.data : ethers.hexlify(error.data)
+        if (data.length >= 4 + 32 * 4 && data.startsWith('0x')) {
+          try {
+            const selector = data.slice(0, 10)
+            if (selector === '0xc6d837a8') {
+              const abiCoder = ethers.AbiCoder.defaultAbiCoder()
+              const decoded = abiCoder.decode(
+                ['address', 'uint256', 'uint256', 'uint256'],
+                '0x' + data.slice(10)
+              ) as unknown as [string, bigint, bigint, bigint]
+              const [, spend, bal] = decoded
+              msg = `Insufficient USDC balance: account has ${(Number(bal) / 1e6).toFixed(2)} USDC, need ${(Number(spend) / 1e6).toFixed(2)} USDC`
+            }
+          } catch (_) {}
+        }
       }
-    }
+    } catch (_) {}
     logger(Colors.red(`❌ OpenContainerRelayProcess failed: ${msg}`))
-    // 失败时必须返回 500，且仅发送一次（避免 headers 已发送时再写导致异常）
-    if (!obj.res.headersSent) {
-      obj.res.status(500).json({ success: false, error: msg }).end()
-    } else {
-      logger(Colors.red(`[AAtoEOA/OpenContainer] WARN: response already sent, client may have received wrong status`))
+    try {
+      if (!obj.res?.headersSent) obj.res.status(500).json({ success: false, error: msg }).end()
+    } catch (resErr: any) {
+      logger(Colors.red(`[AAtoEOA/OpenContainer] failed to send error response: ${resErr?.message ?? resErr}`))
     }
   } finally {
     Settle_ContractPool.unshift(SC)
@@ -1980,7 +1966,9 @@ export const ContainerRelayProcess = async () => {
     )
     const tx = await FactoryWithRelay.relayContainerMainRelayed(account, to, items, nonce_, deadline_, sigBytes)
     logger(`[AAtoEOA/Container] relay tx submitted hash=${tx.hash}`)
-    await tx.wait()
+    await tx.wait().catch((waitErr: any) => {
+      logger(Colors.yellow(`[AAtoEOA/Container] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+    })
 
     const usdcAmountRaw = BigInt(payload.items[0].amount)
     // ContainerRelayProcess 只处理单个 item，所以 currency 和 currencyAmount 应该是字符串
@@ -2007,7 +1995,9 @@ export const ContainerRelayProcess = async () => {
       tx.hash,
       `\r\n${JSON.stringify(payMeData)}`
     )
-    await tr.wait()
+    await tr.wait().catch((waitErr: any) => {
+      logger(Colors.yellow(`[AAtoEOA/Container] tr.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+    })
 
     const actionInput = {
       actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
@@ -2030,7 +2020,9 @@ export const ContainerRelayProcess = async () => {
     const actionFacet = SC.BeamioTaskDiamondAction
     const tx2 = await actionFacet.syncTokenAction(actionInput)
 
-    await tx2.wait()
+    await tx2.wait().catch((waitErr: any) => {
+      logger(Colors.yellow(`[AAtoEOA/Container] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+    })
     logger(Colors.green(`✅ ContainerRelayProcess success! tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {
@@ -2042,7 +2034,11 @@ export const ContainerRelayProcess = async () => {
     const clientError = isBadNonce
       ? 'Nonce already used (链上 nonce 已递增). 请重新发起转账，不要重复提交同一笔。'
       : msg
-    obj.res.status(isBadNonce ? 400 : 500).json({ success: false, error: clientError }).end()
+    try {
+      if (!obj.res?.headersSent) obj.res.status(isBadNonce ? 400 : 500).json({ success: false, error: clientError }).end()
+    } catch (resErr: any) {
+      logger(Colors.red(`[AAtoEOA/Container] failed to send error response: ${resErr?.message ?? resErr}`))
+    }
   } finally {
     Settle_ContractPool.unshift(SC)
     setTimeout(() => ContainerRelayProcess(), 3000)

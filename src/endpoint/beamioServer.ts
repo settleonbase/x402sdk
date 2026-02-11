@@ -23,6 +23,21 @@ function jsonStringifyWithBigInt(obj: any): string {
 	)
 }
 
+/** 递归将对象中所有 BigInt 转为 string，避免下游 RPC / JSON 序列化出错 */
+function convertBigIntToString(obj: any): any {
+	if (obj === null || obj === undefined) return obj
+	if (typeof obj === 'bigint') return obj.toString()
+	if (Array.isArray(obj)) return obj.map(convertBigIntToString)
+	if (typeof obj === 'object') {
+		const out: Record<string, any> = {}
+		for (const k of Object.keys(obj)) {
+			out[k] = convertBigIntToString(obj[k])
+		}
+		return out
+	}
+	return obj
+}
+
 export const postLocalhost = async (path: string, obj: any, _res: Response)=> {
 	
 	const option: RequestOptions = {
@@ -294,7 +309,8 @@ const routing = ( router: Router ) => {
 
 	/** AA→EOA：支持三种提交。(1) packedUserOp；(2) openContainerPayload；(3) containerPayload（绑定 to）*/
 	router.post('/AAtoEOA', async (req, res) => {
-		const body = req.body as {
+		// 入口数据检测：将 BigInt 转为 string，避免 downstream RPC / JSON 序列化错误
+		const body = convertBigIntToString(req.body) as {
 			toEOA?: string
 			amountUSDC6?: string
 			packedUserOp?: import('../MemberCard').AAtoEOAUserOp
