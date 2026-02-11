@@ -238,7 +238,7 @@ export const oracolPrice = async () => {
 }
 
 export const oracleBackoud = async (FaucetProcess = true) => {
-	await getAllNodes()
+	// await getAllNodes()
 	Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 
 		const account = privateKeyToAccount('0x' + n as `0x${string}`)

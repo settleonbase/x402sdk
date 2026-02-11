@@ -1055,10 +1055,13 @@ export const purchasingCardProcess = async () => {
 			userSignature,
 			0
 		)
-		
-		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`));
+		logger(Colors.green(`✅ purchasingCardProcess tx submitted Hash: ${tx.hash}`))
 
-
+		await tx.wait().catch((waitErr: any) => {
+			logger(Colors.yellow(`[purchasingCardProcess] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+		})
+		// Base 转账完成后立即返回 hash 给客户端，不等待记账
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
 		const to = owner
 		const currency = getICurrency(BigInt(_currency))
@@ -1098,26 +1101,25 @@ export const purchasingCardProcess = async () => {
 		
 		
 
-		logger(Colors.green(`✅ purchasingCardProcess note: ${payMe}`));
+		logger(Colors.green(`✅ purchasingCardProcess note: ${payMe}`))
 
-
-		await tx.wait()
-		
-			
-			// tx 为 ethers TransactionResponse，只有 tx.hash，无 tx.finishedHash；合约 bytes32 用交易哈希 tx.hash 即可
+		// 以下记账（transferRecord、syncTokenAction）在后台执行，客户端已收到 hash
 		const tr = await SC.conetSC.transferRecord(
-				obj.from,
-				to,
-				usdcAmount,
-				tx.hash,
-				`\r\n${JSON.stringify(payMe)}`
-			)	
-		await tr.wait()
+			obj.from,
+			to,
+			usdcAmount,
+			tx.hash,
+			`\r\n${JSON.stringify(payMe)}`
+		)
+		await tr.wait().catch((waitErr: any) => {
+			logger(Colors.yellow(`[purchasingCardProcess] tr.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+		})
 		const actionFacet = await SC.BeamioTaskDiamondAction
 		const tx2 = await actionFacet.syncTokenAction(input)
-		await tx2.wait()
-		obj.res.status(200).json({success: true, USDC_tx: tx.hash}).end()
-		logger(Colors.green(`✅ purchasingCardProcess success! Hash: ${tx.hash}`), `✅ conetSC Hash: ${tr.hash}`, `✅ syncTokenAction Hash: ${tx2.hash}`);
+		await tx2.wait().catch((waitErr: any) => {
+			logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
+		})
+		logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
 		
 		
 	} catch (error: any) {
@@ -1744,12 +1746,13 @@ export const OpenContainerRelayProcess = async () => {
       sigBytes
     )
     logger(`[AAtoEOA/OpenContainer] relay tx submitted hash=${tx.hash}`)
-    // 等待交易确认；RPC 错误（如 missing response for request）用 .catch 吸收，避免崩溃
     await tx.wait().catch((waitErr: any) => {
       logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, tx submitted): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
     })
-    logger(`[AAtoEOA/OpenContainer] tx.wait() done (ok or non-fatal RPC error), continuing`)
+    // Base 转账完成后立即返回 hash 给客户端，不等待记账
+    if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
+    // 以下记账（transferRecord、syncTokenAction）在后台执行，客户端已收到 hash
     // 优先使用 UI 客户端传递的 currency、currencyAmount、currencyDiscount、currencyDiscountAmount（可能是数组或单个值）
     const currencyFromClient = obj.currency
     const currencyAmountFromClient = obj.currencyAmount
@@ -1876,9 +1879,8 @@ export const OpenContainerRelayProcess = async () => {
       }
     }
     
-    const successMsg = `✅ OpenContainerRelayProcess success! tx=${tx.hash}${trHashes.length > 0 ? ` conetSC=[${trHashes.join(', ')}]` : ''}${syncTokenActionHashes.length > 0 ? ` syncTokenAction=[${syncTokenActionHashes.join(', ')}]` : ''}`
+    const successMsg = `✅ OpenContainerRelayProcess accounting done: tx=${tx.hash}${trHashes.length > 0 ? ` conetSC=[${trHashes.join(', ')}]` : ''}${syncTokenActionHashes.length > 0 ? ` syncTokenAction=[${syncTokenActionHashes.join(', ')}]` : ''}`
     logger(Colors.green(successMsg))
-    obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {
     let msg = error?.shortMessage || error?.message || String(error)
     try {
@@ -1969,6 +1971,8 @@ export const ContainerRelayProcess = async () => {
     await tx.wait().catch((waitErr: any) => {
       logger(Colors.yellow(`[AAtoEOA/Container] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
     })
+    // Base 转账完成后立即返回 hash 给客户端，不等待记账
+    if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
     const usdcAmountRaw = BigInt(payload.items[0].amount)
     // ContainerRelayProcess 只处理单个 item，所以 currency 和 currencyAmount 应该是字符串
@@ -2023,8 +2027,7 @@ export const ContainerRelayProcess = async () => {
     await tx2.wait().catch((waitErr: any) => {
       logger(Colors.yellow(`[AAtoEOA/Container] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? waitErr}`))
     })
-    logger(Colors.green(`✅ ContainerRelayProcess success! tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
-    obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
+    logger(Colors.green(`✅ ContainerRelayProcess accounting done: tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
   } catch (error: any) {
     const msg = error?.shortMessage || error?.message || String(error)
     logger(Colors.red(`❌ ContainerRelayProcess failed: ${msg}`))
