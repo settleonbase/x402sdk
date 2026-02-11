@@ -221,7 +221,7 @@ export const oracolPrice = async () => {
 	const usdtwd = ethers.formatEther(price[9])
 	const timestamp = Number(price[6].toString())
 
-	logger(`oracolPrice BNB ${bnb} ETH ${eth} USDC ${usdc} `)
+	// logger(`oracolPrice BNB ${bnb} ETH ${eth} USDC ${usdc} `)
 	oracle.bnb = bnb.toString()
 	oracle.eth = eth.toString()
 	oracle.usdc = usdc.toString()
