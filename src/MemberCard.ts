@@ -43,6 +43,13 @@ const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const conetEndpoint = 'https://mainnet-rpc.conet.network'
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
+/**
+ * Settle_ContractPool：factory 登记的 owner 列表，每项为一名 admin（含 baseFactoryPaymaster、walletBase 等）。
+ *
+ * 使用约定（防 nonce 冲突）：
+ * - 任何 process 使用前必须 shift() 调出一名 owner，其他 process 则无法使用该 owner，避免同一 owner 同时调用 RPC 造成 nonce 冲突。
+ * - process 结束后（无论成功/失败/early return）必须 unshift(SC) 将 owner 放回，以便其他 process 可复用。
+ */
 export let Settle_ContractPool: {
 	baseFactoryPaymaster: ethers.Contract
 	walletBase: ethers.Wallet
@@ -2268,6 +2275,11 @@ export const createCardPoolPress = async () => {
 	}
 	const { res, ...payload } = obj
 	const { cardOwner, currency, priceInCurrencyE6, uri, shareTokenMetadata, tiers } = payload
+
+	// Settle_ContractPool = factory 登记的 owner 列表，shift 取一 admin 用于 RPC，支持多 request 并行（多 admin 同时送上链）
+	const factory = SC.baseFactoryPaymaster
+	logger(Colors.cyan(`[createCardPoolPress] admin=${SC.walletBase.address} cardOwner=${cardOwner} currency=${currency} priceE6=${priceInCurrencyE6}`))
+
 	try {
 		const { cardAddress, hash } = await createBeamioCardAdminWithHash(
 			cardOwner,

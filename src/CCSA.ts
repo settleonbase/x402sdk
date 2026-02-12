@@ -249,7 +249,7 @@ export async function createBeamioCardWithFactory(
     if (err?.code === 'CALL_EXCEPTION' && (err?.shortMessage === 'missing revert data' || !err?.reason)) {
       throw new Error(
         'createCardCollectionWithInitCode 链上执行 revert（RPC 未返回具体原因）。常见原因：\n' +
-          '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)；\n' +
+          '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
           '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
           '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（F_BadDeployedCard）。\n' +
           `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
@@ -365,7 +365,7 @@ export async function createBeamioCardWithFactoryReturningHash(
     if (err?.code === 'CALL_EXCEPTION' && (err?.shortMessage === 'missing revert data' || !err?.reason)) {
       throw new Error(
         'createCardCollectionWithInitCode 链上执行 revert（RPC 未返回具体原因）。常见原因：\n' +
-          '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)；\n' +
+          '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
           '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
           '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（F_BadDeployedCard）。\n' +
           `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
