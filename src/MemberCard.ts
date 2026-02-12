@@ -2149,17 +2149,19 @@ export const createBeamioCardAdmin = async (
 	)
 }
 
-/** 同 createBeamioCardAdmin，但返回 { cardAddress, hash } 供 createCardPoolPress 回传 tx hash */
+/** 同 createBeamioCardAdmin，但返回 { cardAddress, hash } 供 createCardPoolPress 回传 tx hash。
+ * @param factoryOverride 当 createCardPoolPress 传入 shift 出的 SC.baseFactoryPaymaster 时使用，确保使用正确的 signer（owner/paymaster） */
 export const createBeamioCardAdminWithHash = async (
 	cardOwner: string,
 	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD',
 	pointsUnitPriceInCurrencyE6: number | bigint,
-	opts?: { uri?: string }
+	opts?: { uri?: string },
+	factoryOverride?: ethers.Contract
 ): Promise<{ cardAddress: string; hash: string }> => {
-	const SC = Settle_ContractPool[0]
-	if (!SC?.baseFactoryPaymaster) throw new Error('Settle_ContractPool not initialized')
+	const factory = factoryOverride ?? Settle_ContractPool[0]?.baseFactoryPaymaster
+	if (!factory) throw new Error('Settle_ContractPool not initialized')
 	return createBeamioCardWithFactoryReturningHash(
-		SC.baseFactoryPaymaster,
+		factory,
 		cardOwner,
 		currency,
 		pointsUnitPriceInCurrencyE6,
@@ -2271,7 +2273,8 @@ export const createCardPoolPress = async () => {
 			cardOwner,
 			currency,
 			BigInt(priceInCurrencyE6),
-			uri ? { uri } : undefined
+			uri ? { uri } : undefined,
+			SC.baseFactoryPaymaster
 		)
 		// master 侧写入 metadata（shareTokenMetadata、tiers）到 0x{owner}.json
 		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
