@@ -11,7 +11,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck } from '../MemberCard'
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -307,6 +307,26 @@ const routing = ( router: Router ) => {
 		logger(preCheck.success ? `server /api/purchasingCard preCheck OK, forwarded to master` : `server /api/purchasingCard forwarded to master (no preChecked)`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preCheck.success }, false, 3, true))
 	})
 
+	/** createCard：集群预检 JSON，不合格 400，合格转发 master。master 不预检，直接推 createCardPool。*/
+	router.post('/createCard', async (req, res) => {
+		const body = req.body as {
+			cardOwner?: string
+			currency?: string
+			unitPriceHuman?: string | number
+			priceInCurrencyE6?: string | number
+			uri?: string
+			shareTokenMetadata?: { name?: string; description?: string; image?: string }
+			tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string }>
+		}
+		const preCheck = createCardPreCheck(body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/createCard preCheck FAIL: ${preCheck.error}`), inspect(body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/createCard preCheck OK, forwarding to master`), inspect({ cardOwner: preCheck.preChecked.cardOwner, currency: preCheck.preChecked.currency }, false, 2, true))
+		postLocalhost('/api/createCard', preCheck.preChecked, res)
+	})
+
 	/** AA→EOA：支持三种提交。(1) packedUserOp；(2) openContainerPayload；(3) containerPayload（绑定 to）*/
 	router.post('/AAtoEOA', async (req, res) => {
 		// 入口数据检测：将 BigInt 转为 string，避免 downstream RPC / JSON 序列化错误
@@ -526,6 +546,54 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 
 	logger(`🧭 public router after serverRoute(router)`)
+
+	const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
+	const ISSUED_NFT_START_ID = 100_000_000_000n
+	/** GET /metadata/:filename - 由 cluster 处理。0x{owner}.json：若 id < 100000000000 返回 shareTokenMetadata，否则返回完整 JSON。降低 master 负荷 */
+	app.get('/metadata/:filename', (req, res) => {
+		const filename = req.params.filename
+		// 仅允许 0x{40hex}.json 或 {64hex}.json，防止路径穿越
+		if (!/^(0x[0-9a-fA-F]{40}|[0-9a-f]{64})\.json$/.test(filename)) {
+			return res.status(400).json({ error: 'Invalid metadata filename format' })
+		}
+		const filePath = resolve(METADATA_BASE, filename)
+		const baseResolved = resolve(METADATA_BASE)
+		if (!filePath.startsWith(baseResolved + '/') && filePath !== baseResolved) {
+			return res.status(400).json({ error: 'Invalid path' })
+		}
+		try {
+			const content = fs.readFileSync(filePath, 'utf-8')
+			let data: Record<string, unknown>
+			try {
+				data = JSON.parse(content) as Record<string, unknown>
+			} catch {
+				res.setHeader('Content-Type', 'application/json')
+				return res.send(content)
+			}
+			const tokenIdHex = filename.startsWith('0x') ? null : filename.replace(/\.json$/, '')
+			const tokenId = tokenIdHex ? BigInt('0x' + tokenIdHex) : null
+			const useShared = tokenId === null || tokenId < ISSUED_NFT_START_ID
+			const shared = useShared && data && typeof data.shareTokenMetadata === 'object' && data.shareTokenMetadata !== null
+			let out: Record<string, unknown>
+			if (shared) {
+				const base = data.shareTokenMetadata as Record<string, unknown>
+				out = base ? { ...base } : {}
+				if (data.tiers && Array.isArray(data.tiers) && data.tiers.length > 0) {
+					out.tiers = data.tiers
+				}
+			} else {
+				out = data
+			}
+			res.setHeader('Content-Type', 'application/json')
+			res.send(JSON.stringify(out))
+		} catch (err: any) {
+			if (err?.code === 'ENOENT') {
+				return res.status(404).json({ error: 'Metadata not found' })
+			}
+			logger(Colors.red('[metadata] read error:'), err?.message ?? err)
+			return res.status(500).json({ error: 'Failed to read metadata' })
+		}
+	})
 
 		app.get('/_debug', (req, res) => {
 			res.json({

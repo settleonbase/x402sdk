@@ -17,15 +17,17 @@ const CURRENCY_TO_ENUM: Record<ICurrency, number> = {
   TWD: 8,
 }
 
-const DEFAULT_URI = 'https://api.beamio.io/metadata/{id}.json'
+/** 构建以 owner 为 key 的 metadata URI，NFT # < ISSUED_NFT_START_ID 共用同一 metadata */
+export const buildOwnerMetadataUri = (owner: string) =>
+  `https://api.beamio.io/metadata/0x${ethers.getAddress(owner).slice(2).toLowerCase()}.json`
 
 /**
  * 人类可读的 initCode 构造项：不传原始 initCode 时，由 createBeamioCardWithFactory 内部根据这些项组合生成。
- * - uri: BeamioUserCard 的 metadata URI，默认 DEFAULT_URI
+ * - uri: BeamioUserCard 的 metadata URI，默认 https://api.beamio.io/metadata/0x{owner}.json
  * - gateway: 工厂/gateway 地址，默认使用当前 factory 合约地址
  */
 export type CreateBeamioCardInitCodeOptions = {
-  /** BeamioUserCard 的 metadata URI，默认 https://api.beamio.io/metadata/{id}.json */
+  /** BeamioUserCard 的 metadata URI，默认 0x{owner}.json，id<100000000000 共用 shareTokenMetadata */
   uri?: string
   /** 工厂（gateway）地址，默认使用传入的 factory 合约地址 */
   gateway?: string
@@ -34,7 +36,7 @@ export type CreateBeamioCardInitCodeOptions = {
 export type CreateBeamioCardOptions = {
   /** 工厂合约地址，默认 Base 主网 CARD_FACTORY */
   factoryAddress?: string
-  /** BeamioUserCard 的 metadata URI，默认 https://api.beamio.io/metadata/{id}.json */
+  /** BeamioUserCard 的 metadata URI，默认 0x{owner}.json */
   uri?: string
   /** BeamioUserCard 的部署 initCode（constructor 编码 + bytecode）。可由 buildBeamioUserCardInitCode() 生成。 */
   initCode: string
@@ -191,7 +193,7 @@ export async function createBeamioCardWithFactory(
     initCode = initCodeOrOptions
   } else {
     const gateway = initCodeOrOptions.gateway ?? (typeof factory.getAddress === 'function' ? await factory.getAddress() : (factory as unknown as { address: string }).address)
-    const uri = initCodeOrOptions.uri ?? DEFAULT_URI
+    const uri = initCodeOrOptions.uri ?? buildOwnerMetadataUri(cardOwner)
     initCode = await buildBeamioUserCardInitCodeFromParams(uri, currencyEnum, priceE6, cardOwner, gateway)
   }
 
@@ -286,5 +288,122 @@ export async function createBeamioCardWithFactory(
     throw new Error('Could not resolve new BeamioUserCard address from receipt')
   }
   return ethers.getAddress(cardAddress)
+}
+
+/** 同 createBeamioCardWithFactory，但返回 { cardAddress, hash } 供 daemon 回传 tx hash 给 UI */
+export async function createBeamioCardWithFactoryReturningHash(
+  factory: ethers.Contract,
+  cardOwner: string,
+  currency: ICurrency,
+  pointsUnitPriceInCurrencyE6: number | bigint,
+  initCodeOrOptions: string | CreateBeamioCardInitCodeOptions
+): Promise<{ cardAddress: string; hash: string }> {
+  if (!ethers.isAddress(cardOwner)) throw new Error('Invalid cardOwner address')
+  const currencyEnum = CURRENCY_TO_ENUM[currency]
+  if (currencyEnum === undefined) throw new Error(`Unsupported currency: ${currency}`)
+  const priceE6 = BigInt(pointsUnitPriceInCurrencyE6)
+  if (priceE6 <= 0n) throw new Error('pointsUnitPriceInCurrencyE6 must be > 0')
+
+  let initCode: string
+  if (typeof initCodeOrOptions === 'string') {
+    if (!initCodeOrOptions || !initCodeOrOptions.startsWith('0x')) {
+      throw new Error('initCode must be a hex string (e.g. 0x...) when passed as string')
+    }
+    initCode = initCodeOrOptions
+  } else {
+    const gateway = initCodeOrOptions.gateway ?? (typeof factory.getAddress === 'function' ? await factory.getAddress() : (factory as unknown as { address: string }).address)
+    const uri = initCodeOrOptions.uri ?? buildOwnerMetadataUri(cardOwner)
+    initCode = await buildBeamioUserCardInitCodeFromParams(uri, currencyEnum, priceE6, cardOwner, gateway)
+  }
+
+  const runner = factory.runner
+  if (!runner || typeof (runner as ethers.Signer).getAddress !== 'function') {
+    throw new Error('Factory contract has no signer (runner). Cannot determine caller.')
+  }
+  const signerAddress = await (runner as ethers.Signer).getAddress()
+  const factoryOwner = (await factory.owner()) as string
+  const isPaymaster = typeof factory.isPaymaster === 'function' ? await factory.isPaymaster(signerAddress) : false
+  const isOwner = signerAddress.toLowerCase() === factoryOwner.toLowerCase()
+  if (!isOwner && !isPaymaster) {
+    throw new Error(
+      `Factory signer (${signerAddress}) is not the factory owner (${factoryOwner}) nor a registered paymaster. ` +
+        'Only owner or paymaster can call createCardCollectionWithInitCode.'
+    )
+  }
+
+  const deployerAddr = (await factory.deployer()) as string
+  if (deployerAddr && ethers.getAddress(deployerAddr) !== ethers.ZeroAddress) {
+    const deployerContract = new ethers.Contract(
+      deployerAddr,
+      ['function factory() view returns (address)'],
+      factory.runner
+    )
+    try {
+      const deployerFactory = (await deployerContract.factory()) as string
+      const thisFactoryAddr = await factory.getAddress()
+      if (deployerFactory.toLowerCase() !== thisFactoryAddr.toLowerCase()) {
+        throw new Error(
+          `Factory 使用的 Deployer (${deployerAddr}) 未指向当前工厂 (${thisFactoryAddr})。` +
+            '请由 Deployer 的 owner 调用 setFactory(工厂地址) 后再发卡。'
+        )
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes('未指向当前工厂')) throw e
+    }
+  }
+
+  let tx: ethers.ContractTransactionResponse
+  try {
+    tx = await factory.createCardCollectionWithInitCode(
+      cardOwner,
+      currencyEnum,
+      priceE6,
+      initCode
+    )
+  } catch (e: unknown) {
+    const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
+    if (err?.code === 'CALL_EXCEPTION' && (err?.shortMessage === 'missing revert data' || !err?.reason)) {
+      throw new Error(
+        'createCardCollectionWithInitCode 链上执行 revert（RPC 未返回具体原因）。常见原因：\n' +
+          '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)；\n' +
+          '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
+          '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（F_BadDeployedCard）。\n' +
+          `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
+      )
+    }
+    throw e
+  }
+  const hash = tx.hash
+  const receipt = await tx.wait()
+  if (!receipt) throw new Error('Transaction failed')
+
+  let cardAddress: string | undefined
+  try {
+    const iface = factory.interface
+    const log = receipt.logs?.find((l: ethers.Log) => {
+      try {
+        const parsed = iface.parseLog({ topics: l.topics, data: l.data })
+        return parsed?.name === 'CardDeployed'
+      } catch {
+        return false
+      }
+    }) as ethers.Log | undefined
+    if (log) {
+      const parsed = factory.interface.parseLog({ topics: log.topics, data: log.data })
+      cardAddress = parsed?.args?.card ?? parsed?.args?.userCard
+    }
+  } catch {}
+
+  if (!cardAddress) {
+    const cardsOfOwner = await factory.cardsOfOwner(cardOwner)
+    if (cardsOfOwner && Array.isArray(cardsOfOwner) && cardsOfOwner.length > 0) {
+      cardAddress = cardsOfOwner[cardsOfOwner.length - 1]
+    }
+  }
+
+  if (!cardAddress || !ethers.isAddress(cardAddress)) {
+    throw new Error('Could not resolve new BeamioUserCard address from receipt')
+  }
+  return { cardAddress: ethers.getAddress(cardAddress), hash }
 }
 

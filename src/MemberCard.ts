@@ -2,6 +2,8 @@ import { ethers } from 'ethers'
 import BeamioFactoryPaymasterABI from './ABI/BeamioUserCardFactoryPaymaster.json'
 import { masterSetup, checkSign } from './util'
 import { Request, Response} from 'express'
+import { resolve } from 'node:path'
+import fs from 'node:fs'
 import { logger } from './logger'
 import { inspect } from 'util'
 import Colors from 'colors/safe'
@@ -21,7 +23,7 @@ import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from './chainAddresses'
 
-import { createBeamioCardWithFactory } from './CCSA'
+import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
@@ -2128,6 +2130,187 @@ const test = async () => {
 
 // test()
 
+
+/** 管理员创建 BeamioUserCard，供 /api/createCard 调用。调用者需为工厂 paymaster（Settle_ContractPool[0]）。 */
+export const createBeamioCardAdmin = async (
+	cardOwner: string,
+	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD',
+	pointsUnitPriceInCurrencyE6: number | bigint,
+	opts?: { uri?: string }
+): Promise<string> => {
+	const SC = Settle_ContractPool[0]
+	if (!SC?.baseFactoryPaymaster) throw new Error('Settle_ContractPool not initialized')
+	return createBeamioCardWithFactory(
+		SC.baseFactoryPaymaster,
+		cardOwner,
+		currency,
+		pointsUnitPriceInCurrencyE6,
+		opts?.uri ? { uri: opts.uri } : {}
+	)
+}
+
+/** 同 createBeamioCardAdmin，但返回 { cardAddress, hash } 供 createCardPoolPress 回传 tx hash */
+export const createBeamioCardAdminWithHash = async (
+	cardOwner: string,
+	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD',
+	pointsUnitPriceInCurrencyE6: number | bigint,
+	opts?: { uri?: string }
+): Promise<{ cardAddress: string; hash: string }> => {
+	const SC = Settle_ContractPool[0]
+	if (!SC?.baseFactoryPaymaster) throw new Error('Settle_ContractPool not initialized')
+	return createBeamioCardWithFactoryReturningHash(
+		SC.baseFactoryPaymaster,
+		cardOwner,
+		currency,
+		pointsUnitPriceInCurrencyE6,
+		opts?.uri ? { uri: opts.uri } : {}
+	)
+}
+
+/** createCard 集群预检：校验 JSON 结构，不合格返回 error，合格才可转发 master。不写链。 */
+export type CreateCardPreChecked = {
+	cardOwner: string
+	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD'
+	priceInCurrencyE6: string
+	uri?: string
+	shareTokenMetadata?: { name?: string; description?: string; image?: string }
+	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string }>
+}
+
+export const createCardPreCheck = (body: {
+	cardOwner?: string
+	currency?: string
+	unitPriceHuman?: string | number
+	priceInCurrencyE6?: string | number
+	uri?: string
+	shareTokenMetadata?: { name?: string; description?: string; image?: string }
+	tiers?: unknown[]
+}): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
+	const validCurrency = ['CAD', 'USD', 'JPY', 'CNY', 'USDC', 'HKD', 'EUR', 'SGD', 'TWD']
+	if (!body.cardOwner || !ethers.isAddress(body.cardOwner)) {
+		return { success: false, error: 'cardOwner is required and must be a valid address' }
+	}
+	if (!body.currency || !validCurrency.includes(body.currency)) {
+		return { success: false, error: `currency must be one of: ${validCurrency.join(', ')}` }
+	}
+	let priceE6: bigint
+	if (body.unitPriceHuman != null && body.unitPriceHuman !== '') {
+		const n = parseFloat(String(body.unitPriceHuman))
+		if (!Number.isFinite(n) || n <= 0) {
+			return { success: false, error: 'unitPriceHuman must be > 0' }
+		}
+		priceE6 = BigInt(Math.round(n * 1_000_000))
+	} else if (body.priceInCurrencyE6 != null && body.priceInCurrencyE6 !== '') {
+		priceE6 = BigInt(body.priceInCurrencyE6)
+	} else {
+		return { success: false, error: 'Missing required: unitPriceHuman or priceInCurrencyE6' }
+	}
+	if (priceE6 <= 0n) {
+		return { success: false, error: 'price must be > 0' }
+	}
+	if (body.shareTokenMetadata != null && typeof body.shareTokenMetadata !== 'object') {
+		return { success: false, error: 'shareTokenMetadata must be an object if provided' }
+	}
+	if (body.tiers != null) {
+		if (!Array.isArray(body.tiers)) {
+			return { success: false, error: 'tiers must be an array if provided' }
+		}
+		for (let i = 0; i < body.tiers.length; i++) {
+			const t = body.tiers[i]
+			if (!t || typeof t !== 'object') {
+				return { success: false, error: `tiers[${i}] must be an object` }
+			}
+			const o = t as Record<string, unknown>
+			if (o.index != null && typeof o.index !== 'number') {
+				return { success: false, error: `tiers[${i}].index must be number` }
+			}
+			if (!o.minUsdc6 || typeof o.minUsdc6 !== 'string') {
+				return { success: false, error: `tiers[${i}].minUsdc6 is required (string)` }
+			}
+			if (o.attr != null && typeof o.attr !== 'number') {
+				return { success: false, error: `tiers[${i}].attr must be number` }
+			}
+		}
+	}
+	const preChecked: CreateCardPreChecked = {
+		cardOwner: ethers.getAddress(body.cardOwner),
+		currency: body.currency as CreateCardPreChecked['currency'],
+		priceInCurrencyE6: String(priceE6),
+		...(body.uri && { uri: body.uri }),
+		...(body.shareTokenMetadata && { shareTokenMetadata: body.shareTokenMetadata }),
+		...(body.tiers && body.tiers.length > 0 && {
+			tiers: body.tiers.map((t, i) => {
+				const o = t as Record<string, unknown>
+				return {
+					index: typeof o.index === 'number' ? o.index : i,
+					minUsdc6: String(o.minUsdc6),
+					attr: typeof o.attr === 'number' ? o.attr : i,
+					...(o.name != null && { name: String(o.name) }),
+					...(o.description != null && { description: String(o.description) }),
+				}
+			}),
+		}),
+	}
+	return { success: true, preChecked }
+}
+
+export const createCardPool: (CreateCardPreChecked & { res: Response })[] = []
+
+export const createCardPoolPress = async () => {
+	const obj = createCardPool.shift() as (CreateCardPreChecked & { res: Response }) | undefined
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		createCardPool.unshift(obj)
+		return setTimeout(() => createCardPoolPress(), 3000)
+	}
+	const { res, ...payload } = obj
+	const { cardOwner, currency, priceInCurrencyE6, uri, shareTokenMetadata, tiers } = payload
+	try {
+		const { cardAddress, hash } = await createBeamioCardAdminWithHash(
+			cardOwner,
+			currency,
+			BigInt(priceInCurrencyE6),
+			uri ? { uri } : undefined
+		)
+		// master 侧写入 metadata（shareTokenMetadata、tiers）到 0x{owner}.json
+		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
+		const ownerAddr = ethers.getAddress(cardOwner)
+		const metaFilename = `0x${ownerAddr.slice(2).toLowerCase()}.json`
+		if (shareTokenMetadata || (tiers && tiers.length > 0)) {
+			const metaPath = resolve(METADATA_BASE, metaFilename)
+			const metaDir = resolve(METADATA_BASE)
+			if (metaPath.startsWith(metaDir + '/') || metaPath === metaDir) {
+				try {
+					if (!fs.existsSync(metaDir)) fs.mkdirSync(metaDir, { recursive: true })
+					const metaContent = JSON.stringify({
+						...(shareTokenMetadata && {
+							shareTokenMetadata: {
+								name: shareTokenMetadata.name ?? 'Beamio CCSA Card',
+								...(shareTokenMetadata.description != null && { description: shareTokenMetadata.description }),
+								...(shareTokenMetadata.image != null && shareTokenMetadata.image !== '' && { image: shareTokenMetadata.image }),
+							},
+						}),
+						...(tiers && tiers.length > 0 && { tiers }),
+					}, null, 2)
+					fs.writeFileSync(metaPath, metaContent, 'utf-8')
+					logger(Colors.green(`[createCardPoolPress] wrote metadata: ${metaFilename}`))
+				} catch (metaErr: any) {
+					logger(Colors.yellow(`[createCardPoolPress] metadata write failed: ${metaErr?.message ?? metaErr}`))
+				}
+			}
+		}
+		logger(Colors.green(`[createCardPoolPress] card created: ${cardAddress} hash=${hash}`))
+		if (res && !res.headersSent) res.status(200).json({ success: true, cardAddress, hash }).end()
+	} catch (err: any) {
+		const msg = err?.message ?? String(err)
+		logger(Colors.red(`[createCardPoolPress] failed:`), msg)
+		if (res && !res.headersSent) res.status(500).json({ success: false, error: msg }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => createCardPoolPress(), 3000)
+	}
+}
 
 export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
 	const SC = Settle_ContractPool[0]

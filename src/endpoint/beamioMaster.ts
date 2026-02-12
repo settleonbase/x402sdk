@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {coinbaseHooks} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
 
 const masterServerPort = 1111
 
@@ -45,7 +45,36 @@ const routing = ( router: Router ) => {
 		})
 	})
 
-	router.post('/purchasingCard', (req, res) => {
+		/** 创建 BeamioUserCard。由 cluster 预检，master 不再预检，信任 cluster 数据。push createCardPool，daemon createCardPoolPress 上链后回传 hash。*/
+		router.post('/createCard', (req, res) => {
+			const raw = req.body as {
+				cardOwner: string
+				currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD'
+				priceInCurrencyE6?: string
+				unitPriceHuman?: string | number
+				uri?: string
+				shareTokenMetadata?: { name?: string; description?: string; image?: string }
+				tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string }>
+			}
+			let priceInCurrencyE6: string
+			if (raw.priceInCurrencyE6 != null && raw.priceInCurrencyE6 !== '') {
+				priceInCurrencyE6 = String(raw.priceInCurrencyE6)
+			} else if (raw.unitPriceHuman != null && raw.unitPriceHuman !== '') {
+				const n = parseFloat(String(raw.unitPriceHuman))
+				if (!Number.isFinite(n) || n <= 0) {
+					return res.status(400).json({ success: false, error: 'unitPriceHuman must be > 0' })
+				}
+				priceInCurrencyE6 = String(BigInt(Math.round(n * 1_000_000)))
+			} else {
+				return res.status(400).json({ success: false, error: 'Missing priceInCurrencyE6 or unitPriceHuman' })
+			}
+			const body = { ...raw, priceInCurrencyE6 }
+			createCardPool.push({ ...body, res })
+			logger(Colors.cyan(`[createCard] pushed to pool, cardOwner=${body.cardOwner}`))
+			createCardPoolPress()
+		})
+
+		router.post('/purchasingCard', (req, res) => {
 		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked } = req.body as {
 			cardAddress: string
 			userSignature: string
