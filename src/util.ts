@@ -85,6 +85,8 @@ const USDC_decimals = BigInt(10 ** 6)
 //	const conet_CashCodeNote = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
 const conet_CashCodeNote = '0xB8c526aC40f5BA9cC18706efE81AC7014A4aBB6d'
 const oracleSC_addr = '0xE9922F900Eef37635aF06e87708545ffD9C3aa99'
+/** Base 主网部署的 GuardianOracle，用于 oracolPrice 价格获取 */
+const oracleSC_addr_base = '0xE9922F900Eef37635aF06e87708545ffD9C3aa99'
 const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)
@@ -205,10 +207,10 @@ export const oracolPrice = async () => {
 	const assets = ['bnb', 'eth', 'usdc','usd-cad', 'usd-jpy', 'usd-cny', 'usd-hkd', 'usd-eur', 'usd-sgd', 'usd-twd']
 	const process: any[] = []
 	assets.forEach(n => {
-		process.push (oracleSC.GuardianPrice(n))
+		process.push(oracleSCBase.GuardianPrice(n))
 	})
 
-	const price = await Promise.all([...process, oracleSC.lastUpdateEpoch()])
+	const price = await Promise.all([...process, oracleSCBase.lastUpdateEpoch()])
 	const bnb = ethers.formatEther(price[0])
 	const eth = ethers.formatEther(price[1])
 	const usdc = ethers.formatEther(price[2])
@@ -219,7 +221,7 @@ export const oracolPrice = async () => {
 	const usdeur = ethers.formatEther(price[7])
 	const usdsgd = ethers.formatEther(price[8])
 	const usdtwd = ethers.formatEther(price[9])
-	const timestamp = Number(price[6].toString())
+	const timestamp = Number(price[10].toString())
 
 	// logger(`oracolPrice BNB ${bnb} ETH ${eth} USDC ${usdc} `)
 	oracle.bnb = bnb.toString()
@@ -400,6 +402,8 @@ const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
+/** Base 主网的 Oracle 合约实例，供 oracolPrice 使用 */
+const oracleSCBase = new ethers.Contract(oracleSC_addr_base, GuardianOracle_ABI, providerBase)
 
 export let Settle_ContractPool: {
 	baseSC: ethers.Contract
