@@ -197,12 +197,18 @@ const oracle = {
 
 let oracolPriceProcess = false
 
-/** BeamioCurrency: CAD=0, USD=1, JPY=2, CNY=3, USDC=4, HKD=5, EUR=6, SGD=7, TWD=8 */
+/** BeamioCurrency: CAD=0, USD=1, JPY=2, CNY=3, USDC=4, HKD=5, EUR=6, SGD=7, TWD=8
+ * 链上 getRate(c) 返回「1 该货币 = X USD」；UI 期望「1 USD = X 该货币」，故对非 USD/USDC 需取倒数
+ */
+const inv = (s: string) => {
+	const n = Number(s)
+	return (n > 0 ? 1 / n : 0).toString()
+}
 export const oracolPrice = async () => {
 	if (oracolPriceProcess) return
 	oracolPriceProcess = true
 	try {
-		const [usdcad, usdjpy, usdcny, usdc, usdhkd, usdeur, usdsgd, usdtwd] = await Promise.all([
+		const [cadRaw, jpyRaw, cnyRaw, usdcRaw, hkdRaw, eurRaw, sgdRaw, twdRaw] = await Promise.all([
 			oracleSCBase.getRate(0).then((r: bigint) => ethers.formatEther(r)), // CAD
 			oracleSCBase.getRate(2).then((r: bigint) => ethers.formatEther(r)), // JPY
 			oracleSCBase.getRate(3).then((r: bigint) => ethers.formatEther(r)), // CNY
@@ -215,14 +221,14 @@ export const oracolPrice = async () => {
 		const timestamp = Math.floor(Date.now() / 1000)
 		oracle.bnb = ''
 		oracle.eth = ''
-		oracle.usdc = usdc.toString()
-		oracle.usdcad = usdcad.toString()
-		oracle.usdjpy = usdjpy.toString()
-		oracle.usdcny = usdcny.toString()
-		oracle.usdhkd = usdhkd.toString()
-		oracle.usdeur = usdeur.toString()
-		oracle.usdsgd = usdsgd.toString()
-		oracle.usdtwd = usdtwd.toString()
+		oracle.usdc = usdcRaw.toString()
+		oracle.usdcad = inv(cadRaw)
+		oracle.usdjpy = inv(jpyRaw)
+		oracle.usdcny = inv(cnyRaw)
+		oracle.usdhkd = inv(hkdRaw)
+		oracle.usdeur = inv(eurRaw)
+		oracle.usdsgd = inv(sgdRaw)
+		oracle.usdtwd = inv(twdRaw)
 		oracle.timestamp = timestamp
 	} catch (e: any) {
 		// Exceeded quota / RPC 限流时保留旧数据，避免崩溃
