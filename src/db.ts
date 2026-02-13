@@ -29,7 +29,7 @@ const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
 const beamioConetAccountRegistry = '0x3E15607BCf98B01e6C7dF834a2CEc7B8B6aFb1BC'
 const IpfsStorageRegistryGlobalDedup = '0x121c4dDCa92f07dc53Fd6Db9bc5A07c2918F9591'
-const addressPGP = '0xB8065dBea9E50c24574280F8E8245fba90Eba782'
+const addressPGP = '0x13A96Bcd6aB010619d1004A1Cb4f5FE149e0F4c4'
 
 export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 	const walletConet = new ethers.Wallet(n, providerConet)
@@ -416,15 +416,21 @@ const addUserPoolProcess = async () => {
 
 		await updateUserDB(obj.account)
 
-		// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial，避免 AccountNotFound（账户未上链时 follow 会 revert）
+		// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial。需确认 BeamioOfficial 有账户，否则 followByAdmin 会 AccountNotFound
 		if (obj.followBeamioOfficial) {
 			try {
+				await (SC.constAccountRegistry as any).getAccount(BeamioOfficial)
 				const followTx = await SC.constAccountRegistry.followByAdmin(obj.wallet, BeamioOfficial)
 				await followTx.wait()
 				logger('addUserPoolProcess followByAdmin BeamioOfficial SUCCESS!', followTx.hash)
 				await updateUserFollowDB(obj.wallet, BeamioOfficial)
 			} catch (followEx: any) {
-				logger(`addUserPoolProcess followByAdmin Error: ${followEx?.shortMessage || followEx?.message} | wallet=${obj.wallet}`)
+				const msg = followEx?.shortMessage || followEx?.message || ''
+				if (/AccountNotFound|routePgpKeyID not in|route key not recorded/i.test(msg)) {
+					logger(`addUserPoolProcess skip followBeamioOfficial: ${msg}`)
+				} else {
+					logger(`addUserPoolProcess followByAdmin Error: ${msg} | wallet=${obj.wallet}`)
+				}
 			}
 		}
 
