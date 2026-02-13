@@ -4,11 +4,13 @@ import AccountRegistryAbi from "./ABI/beamio-AccountRegistry.json"
 import { logger } from "./logger"
 import { inspect } from "util"
 import { Request, Response} from 'express'
+import Colors from 'colors/safe'
 import {masterSetup} from './util'
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
 import IPFSAbi from './ABI/Ipfs.abi.json'
+import conetPGPABI from './ABI/conetPGP.json'
 
 /**
  * 
@@ -27,6 +29,7 @@ const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
 const beamioConetAccountRegistry = '0x3E15607BCf98B01e6C7dF834a2CEc7B8B6aFb1BC'
 const IpfsStorageRegistryGlobalDedup = '0x121c4dDCa92f07dc53Fd6Db9bc5A07c2918F9591'
+const addressPGP = '0xB8065dBea9E50c24574280F8E8245fba90Eba782'
 
 export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 	const walletConet = new ethers.Wallet(n, providerConet)
@@ -42,6 +45,7 @@ export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 		conetAirdrop: new ethers.Contract(airdropRecord, conetAirdropABI, walletConet),
 		constAccountRegistry: new ethers.Contract(beamioConetAccountRegistry, AccountRegistryABI, walletConet),
 		constIPFS: new ethers.Contract(IpfsStorageRegistryGlobalDedup, IPFSAbi, walletConet),
+		constPgpManager: new ethers.Contract(addressPGP, conetPGPABI as any, walletConet),
 	}
 })
 
@@ -342,6 +346,15 @@ const addFollowPool: {
 	remove: boolean
 }[] = []
 
+const regiestChatRoutePool: {
+	wallet: string
+	keyID: string
+	publicKeyArmored: string
+	encrypKeyArmored: string
+	routeKeyID: string
+	res: Response
+}[] = []
+
 
 /** 清洗 firstName/lastName，防止前端误把 JSON 等拼接到字段中 */
 const sanitizeName = (s: string | undefined): string => {
@@ -536,6 +549,65 @@ export const addUser = async (req: Request, res: Response) => {
 		})
 	}
 		
+}
+
+const regiestChatRouteProcess = async () => {
+	const obj = regiestChatRoutePool.shift()
+	if (!obj) return
+
+	const SC = beamio_ContractPool.shift()
+	if (!SC) {
+		regiestChatRoutePool.unshift(obj)
+		setTimeout(regiestChatRouteProcess, 2000)
+		return
+	}
+	try {
+		const tx = await SC.constPgpManager.addPublicPGPByAdmin(
+			obj.wallet,
+			obj.keyID,
+			obj.publicKeyArmored,
+			obj.encrypKeyArmored,
+			obj.routeKeyID
+		)
+		await tx.wait()
+		logger('regiestChatRouteProcess addPublicPGPByAdmin SUCCESS!', tx.hash)
+		obj.res.json({ ok: true, txHash: tx.hash })
+	} catch (err: any) {
+		const msg = err?.shortMessage || err?.message || 'Unknown error'
+		logger('regiestChatRouteProcess Error:', msg)
+		obj.res.status(500).json({ ok: false, error: msg })
+	}
+	beamio_ContractPool.unshift(SC)
+	setTimeout(regiestChatRouteProcess, 2000)
+}
+
+/** 登记 chat route：由 cluster 预检后转发。push regiestChatRoutePool，daemon 排队调用 addPublicPGPByAdmin。*/
+export const regiestChatRoute = async (req: Request, res: Response) => {
+	const { wallet, keyID, publicKeyArmored, encrypKeyArmored, routeKeyID } = req.body as {
+		wallet?: string
+		keyID?: string
+		publicKeyArmored?: string
+		encrypKeyArmored?: string
+		routeKeyID?: string
+	}
+	if (!ethers.isAddress(wallet) || !keyID || !publicKeyArmored || !encrypKeyArmored || !routeKeyID) {
+		return res.status(400).json({ ok: false, error: 'Missing or invalid: wallet, keyID, publicKeyArmored, encrypKeyArmored, routeKeyID' })
+	}
+	if (!beamio_ContractPool[0]?.constPgpManager) {
+		return res.status(500).json({ ok: false, error: 'Service unavailable' })
+	}
+	regiestChatRoutePool.push({
+		wallet: wallet.toLowerCase(),
+		keyID: String(keyID).trim(),
+		publicKeyArmored: String(publicKeyArmored),
+		encrypKeyArmored: String(encrypKeyArmored),
+		routeKeyID: String(routeKeyID).trim(),
+		res
+	})
+	logger(Colors.cyan(`[regiestChatRoute] pushed to pool, wallet=${wallet} routeKeyID=${routeKeyID}`))
+	regiestChatRouteProcess().catch((err: any) => {
+		logger(Colors.red('[regiestChatRouteProcess] unhandled error:'), err?.message ?? err)
+	})
 }
 
 const DB_URL = "postgres://postgres:your_password@127.0.0.1:5432/postgres"

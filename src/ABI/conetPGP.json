@@ -361,6 +361,39 @@
 				"internalType": "string",
 				"name": "routePgpKeyID",
 				"type": "string"
+			}
+		],
+		"name": "addPublicPGPByAdmin",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "to",
+				"type": "address"
+			},
+			{
+				"internalType": "string",
+				"name": "pgpKeyID",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "publicKeyArmored",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "encrypKeyArmored",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "routePgpKeyID",
+				"type": "string"
 			},
 			{
 				"internalType": "uint256",

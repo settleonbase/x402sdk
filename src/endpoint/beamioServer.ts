@@ -465,6 +465,41 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/AAtoEOA', { toEOA, amountUSDC6, packedUserOp }, res)
 	})
 
+	/** regiestChatRoute：集群预检格式，合格转发 master。master 使用 beamio_ContractPool 排队并发处理。*/
+	router.post('/regiestChatRoute', async (req, res) => {
+		const { wallet, keyID, publicKeyArmored, encrypKeyArmored, routeKeyID } = req.body as {
+			wallet?: string
+			keyID?: string
+			publicKeyArmored?: string
+			encrypKeyArmored?: string
+			routeKeyID?: string
+		}
+		if (!ethers.isAddress(wallet) || wallet === ethers.ZeroAddress) {
+			logger(Colors.red(`server /api/regiestChatRoute Invalid wallet`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ ok: false, error: 'Invalid wallet' }).end()
+		}
+		if (!keyID || typeof keyID !== 'string' || keyID.trim() === '') {
+			return res.status(400).json({ ok: false, error: 'Missing or invalid keyID' }).end()
+		}
+		if (!publicKeyArmored || typeof publicKeyArmored !== 'string' || publicKeyArmored.trim() === '') {
+			return res.status(400).json({ ok: false, error: 'Missing or invalid publicKeyArmored' }).end()
+		}
+		if (!encrypKeyArmored || typeof encrypKeyArmored !== 'string' || encrypKeyArmored.trim() === '') {
+			return res.status(400).json({ ok: false, error: 'Missing or invalid encrypKeyArmored' }).end()
+		}
+		if (!routeKeyID || typeof routeKeyID !== 'string' || routeKeyID.trim() === '') {
+			return res.status(400).json({ ok: false, error: 'Missing or invalid routeKeyID' }).end()
+		}
+		logger(Colors.green(`server /api/regiestChatRoute preCheck OK, forwarding to master`), inspect({ wallet, keyID: keyID.slice(0, 16), routeKeyID }, false, 2, true))
+		postLocalhost('/api/regiestChatRoute', {
+			wallet: wallet.toLowerCase(),
+			keyID: keyID.trim(),
+			publicKeyArmored: publicKeyArmored.trim(),
+			encrypKeyArmored: encrypKeyArmored.trim(),
+			routeKeyID: routeKeyID.trim()
+		}, res)
+	})
+
 	router.get('/deploySmartAccount', async (req,res) => {
 		const { wallet, signMessage } = req.body as {
 			wallet?: string

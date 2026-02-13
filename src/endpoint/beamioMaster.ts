@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {coinbaseHooks} from '../coinbase'
 import { ethers } from 'ethers'
 import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
@@ -27,6 +27,10 @@ const routing = ( router: Router ) => {
 
 	router.post('/addUser', (req,res) => {
 		return addUser(req, res)
+	})
+
+	router.post('/regiestChatRoute', (req, res) => {
+		return regiestChatRoute(req, res)
 	})
 
 	/** Cluster 每 1 分钟从此接口拉取 oracle，供 UI getOracle 直接响应 */
