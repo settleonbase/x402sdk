@@ -1420,9 +1420,6 @@ const balanceCache: Record<string, {
 }> = {}
 
 export const getOracleRequest = () => {
-	try {
-		logger(inspect(oracle, false, 3, true))
-	} catch (_) { /* 避免 logger/inspect 抛错导致 502 */ }
 	return oracle
 }
 

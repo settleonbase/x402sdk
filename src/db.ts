@@ -396,7 +396,14 @@ const addUserPoolProcess = async () => {
 		await updateUserDB(obj.account)
 
 	} catch (ex: any) {
-		logger(`addUserPoolProcess Error: ${ex.message}`)
+		const msg = ex?.data ? (() => {
+			try {
+				const iface = (SC.constAccountRegistry as any).interface
+				const err = iface?.parseError?.(ex.data)
+				return err ? `revert: ${err.name}()` : ex.message
+			} catch (_) { return ex.message }
+		})() : ex.message
+		logger(`addUserPoolProcess Error: ${msg} | wallet=${obj.wallet} accountName=${obj.account?.accountName}`)
 	}
 
 	beamio_ContractPool.unshift(SC)
@@ -433,7 +440,14 @@ const addFollowPoolProcess = async () => {
 		obj.remove ? await updateUserFollowRemoveDB(obj.wallet, obj.followAddress) : await updateUserFollowDB(obj.wallet, obj.followAddress)
 
 	} catch (ex: any) {
-		logger(`addFollowPoolProcess Error: ${ex.message}`)
+		const msg = ex?.data ? (() => {
+			try {
+				const iface = (SC.constAccountRegistry as any).interface
+				const err = iface?.parseError?.(ex.data)
+				return err ? `revert: ${err.name}()` : ex.message
+			} catch (_) { return ex.message }
+		})() : ex.message
+		logger(`addFollowPoolProcess Error: ${msg} | wallet=${obj.wallet} followAddress=${obj.followAddress} remove=${obj.remove}`)
 	}
 
 	beamio_ContractPool.unshift(SC)
