@@ -85,8 +85,8 @@ const USDC_decimals = BigInt(10 ** 6)
 //	const conet_CashCodeNote = '0xCe1F36a78904F9506E5cD3149Ce4992cC91385AF'
 const conet_CashCodeNote = '0xB8c526aC40f5BA9cC18706efE81AC7014A4aBB6d'
 const oracleSC_addr = '0xE9922F900Eef37635aF06e87708545ffD9C3aa99'
-/** Base 主网部署的 GuardianOracle，用于 oracolPrice 价格获取 */
-const oracleSC_addr_base = '0xE9922F900Eef37635aF06e87708545ffD9C3aa99'
+/** Base 主网部署的 BeamioOracle，用于 oracolPrice 汇率获取 */
+const oracleSC_addr_base = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)
@@ -198,34 +198,28 @@ const oracle = {
 
 let oracolPriceProcess = false
 
+/** BeamioCurrency: CAD=0, USD=1, JPY=2, CNY=3, USDC=4, HKD=5, EUR=6, SGD=7, TWD=8 */
 export const oracolPrice = async () => {
 	if (oracolPriceProcess) {
 		return
 	}
 	oracolPriceProcess = true
 
-	const assets = ['bnb', 'eth', 'usdc','usd-cad', 'usd-jpy', 'usd-cny', 'usd-hkd', 'usd-eur', 'usd-sgd', 'usd-twd']
-	const process: any[] = []
-	assets.forEach(n => {
-		process.push(oracleSCBase.GuardianPrice(n))
-	})
+	const [usdcad, usdjpy, usdcny, usdc, usdhkd, usdeur, usdsgd, usdtwd] = await Promise.all([
+		oracleSCBase.getRate(0).then((r: bigint) => ethers.formatEther(r)), // CAD
+		oracleSCBase.getRate(2).then((r: bigint) => ethers.formatEther(r)), // JPY
+		oracleSCBase.getRate(3).then((r: bigint) => ethers.formatEther(r)), // CNY
+		oracleSCBase.getRate(4).then((r: bigint) => ethers.formatEther(r)), // USDC
+		oracleSCBase.getRate(5).then((r: bigint) => ethers.formatEther(r)), // HKD
+		oracleSCBase.getRate(6).then((r: bigint) => ethers.formatEther(r)), // EUR
+		oracleSCBase.getRate(7).then((r: bigint) => ethers.formatEther(r)), // SGD
+		oracleSCBase.getRate(8).then((r: bigint) => ethers.formatEther(r)), // TWD
+	])
+	const timestamp = Math.floor(Date.now() / 1000)
 
-	const price = await Promise.all([...process, oracleSCBase.lastUpdateEpoch()])
-	const bnb = ethers.formatEther(price[0])
-	const eth = ethers.formatEther(price[1])
-	const usdc = ethers.formatEther(price[2])
-	const usdcad = ethers.formatEther(price[3])
-	const usdjpy = ethers.formatEther(price[4])
-	const usdcny = ethers.formatEther(price[5])
-	const usdhkd = ethers.formatEther(price[6])
-	const usdeur = ethers.formatEther(price[7])
-	const usdsgd = ethers.formatEther(price[8])
-	const usdtwd = ethers.formatEther(price[9])
-	const timestamp = Number(price[10].toString())
-
-	// logger(`oracolPrice BNB ${bnb} ETH ${eth} USDC ${usdc} `)
-	oracle.bnb = bnb.toString()
-	oracle.eth = eth.toString()
+	// logger(`oracolPrice USDC ${usdc} CAD ${usdcad} ...`)
+	oracle.bnb = ''
+	oracle.eth = ''
 	oracle.usdc = usdc.toString()
 	oracle.usdcad = usdcad.toString()
 	oracle.usdjpy = usdjpy.toString()
@@ -402,8 +396,10 @@ const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
-/** Base 主网的 Oracle 合约实例，供 oracolPrice 使用 */
-const oracleSCBase = new ethers.Contract(oracleSC_addr_base, GuardianOracle_ABI, providerBase)
+/** BeamioOracle ABI：getRate(uint8) 返回货币对 USD 的 E18 汇率 */
+const BeamioOracleAbi = ['function getRate(uint8 c) view returns (uint256)']
+/** Base 主网的 BeamioOracle 合约实例，供 oracolPrice 使用 */
+const oracleSCBase = new ethers.Contract(oracleSC_addr_base, BeamioOracleAbi, providerBase)
 
 export let Settle_ContractPool: {
 	baseSC: ethers.Contract
