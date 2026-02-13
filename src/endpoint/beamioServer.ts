@@ -9,9 +9,27 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck } from '../MemberCard'
+import { masterSetup } from '../util'
+
+const ISSUED_NFT_START_ID = 100_000_000_000n
+
+/** 仅 issued NFT 读函数，避免依赖完整 ABI 同步 */
+const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
+	'function issuedNftIndex() view returns (uint256)',
+	'function issuedNftTitle(uint256) view returns (bytes32)',
+	'function issuedNftSharedMetadataHash(uint256) view returns (bytes32)',
+	'function issuedNftValidAfter(uint256) view returns (uint64)',
+	'function issuedNftValidBefore(uint256) view returns (uint64)',
+	'function issuedNftMaxSupply(uint256) view returns (uint256)',
+	'function issuedNftMintedCount(uint256) view returns (uint256)',
+	'function issuedNftPriceInCurrency6(uint256) view returns (uint256)',
+	'function owner() view returns (address)',
+] as const
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://mainnet.base.org'
+const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -126,6 +144,231 @@ const routing = ( router: Router ) => {
 	
 	router.get('/search-users', (req,res) => {
 		searchUsers(req,res)
+	})
+
+	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）*/
+	router.get('/latestCards', async (req, res) => {
+		const limit = Math.min(parseInt(String(req.query.limit || 20), 10) || 20, 100)
+		const items = await getLatestCards(limit)
+		res.status(200).json({ items })
+	})
+
+	/** GET /api/searchHelp?card=0x... - 返回该卡已定义的全部 issued NFT 列表（maxSupply、mintedCount、priceInCurrency6 等） */
+	router.get('/searchHelp', async (req, res) => {
+		const { card } = req.query as { card?: string }
+		if (!card || !ethers.isAddress(card)) {
+			return res.status(400).json({ error: 'Invalid card address' })
+		}
+		try {
+			const cardContract = new ethers.Contract(card, BEAMIO_USER_CARD_ISSUED_NFT_ABI, providerBase)
+			const nextIdx = await cardContract.issuedNftIndex()
+			const nextIdxN = Number(nextIdx)
+			const startN = Number(ISSUED_NFT_START_ID)
+			if (nextIdxN <= startN) {
+				return res.status(200).json({ items: [] })
+			}
+			const items: Array<{
+				tokenId: string
+				title: string
+				sharedMetadataHash: string | null
+				validAfter: string
+				validBefore: string
+				maxSupply: string
+				mintedCount: string
+				priceInCurrency6: string
+			}> = []
+			for (let tid = startN; tid < nextIdxN; tid++) {
+				const [title, sharedMetadataHash, validAfter, validBefore, maxSupply, mintedCount, priceInCurrency6] = await Promise.all([
+					cardContract.issuedNftTitle(tid),
+					cardContract.issuedNftSharedMetadataHash(tid),
+					cardContract.issuedNftValidAfter(tid),
+					cardContract.issuedNftValidBefore(tid),
+					cardContract.issuedNftMaxSupply(tid),
+					cardContract.issuedNftMintedCount(tid),
+					cardContract.issuedNftPriceInCurrency6(tid),
+				])
+				let titleStr = ''
+				try { titleStr = ethers.toUtf8String(title).replace(/\0/g, '').trim() } catch { titleStr = '0x' + ethers.hexlify(title).slice(2) }
+				if (!titleStr) titleStr = '0x' + ethers.hexlify(title).slice(2)
+				items.push({
+					tokenId: String(tid),
+					title: titleStr,
+					sharedMetadataHash: sharedMetadataHash !== ethers.ZeroHash ? ethers.hexlify(sharedMetadataHash) : null,
+					validAfter: String(validAfter),
+					validBefore: String(validBefore),
+					maxSupply: String(maxSupply),
+					mintedCount: String(mintedCount),
+					priceInCurrency6: String(priceInCurrency6),
+				})
+			}
+			res.status(200).json({ items })
+		} catch (err: any) {
+			logger(Colors.red('[searchHelp] error:'), err?.message ?? err)
+			return res.status(500).json({ error: err?.message ?? 'Failed to fetch issued NFTs' })
+		}
+	})
+
+	/** GET /api/getNFTMetadata?card=0x&tokenId=...&nftSpecialMetadata=... - 返回指定 #NFT 的 metadata；若 DB 有 ipfsCid 则拉取 sharedSeriesMetadata 并与 nftSpecialMetadata（可选 JSON）组装 */
+	router.get('/getNFTMetadata', async (req, res) => {
+		const { card, tokenId, nftSpecialMetadata } = req.query as { card?: string; tokenId?: string; nftSpecialMetadata?: string }
+		if (!card || !ethers.isAddress(card) || !tokenId) {
+			return res.status(400).json({ error: 'Invalid card or tokenId' })
+		}
+		const tid = BigInt(tokenId)
+		if (tid < ISSUED_NFT_START_ID) {
+			return res.status(400).json({ error: 'tokenId must be >= ISSUED_NFT_START_ID (100000000000)' })
+		}
+		try {
+			const cardContract = new ethers.Contract(card, BEAMIO_USER_CARD_ISSUED_NFT_ABI, providerBase)
+			const [title, sharedMetadataHash, validAfter, validBefore, maxSupply, mintedCount, priceInCurrency6] = await Promise.all([
+				cardContract.issuedNftTitle(tid),
+				cardContract.issuedNftSharedMetadataHash(tid),
+				cardContract.issuedNftValidAfter(tid),
+				cardContract.issuedNftValidBefore(tid),
+				cardContract.issuedNftMaxSupply(tid),
+				cardContract.issuedNftMintedCount(tid),
+				cardContract.issuedNftPriceInCurrency6(tid),
+			])
+			if (maxSupply === 0n || maxSupply === 0) {
+				return res.status(404).json({ error: 'Issued NFT not defined' })
+			}
+			let titleStr = ''
+			try { titleStr = ethers.toUtf8String(title).replace(/\0/g, '').trim() } catch { titleStr = '0x' + ethers.hexlify(title).slice(2) }
+			if (!titleStr) titleStr = '0x' + ethers.hexlify(title).slice(2)
+			const out: Record<string, unknown> = {
+				tokenId: String(tid),
+				title: titleStr,
+				sharedMetadataHash: sharedMetadataHash !== ethers.ZeroHash ? ethers.hexlify(sharedMetadataHash) : null,
+				validAfter: String(validAfter),
+				validBefore: String(validBefore),
+				maxSupply: String(maxSupply),
+				mintedCount: String(mintedCount),
+				priceInCurrency6: String(priceInCurrency6),
+			}
+			// 若 DB 有系列且 ipfsCid 有效，拉取 sharedSeriesMetadata 并与 nftSpecialMetadata 组装
+			const series = await getSeriesByCardAndTokenId(card, tokenId)
+			if (series?.ipfsCid) {
+				try {
+					const ipfsUrl = `https://ipfs.io/ipfs/${series.ipfsCid}`
+					const ipfsRes = await fetch(ipfsUrl)
+					if (ipfsRes.ok) {
+						const sharedJson = await ipfsRes.json()
+						out.sharedSeriesMetadata = sharedJson
+						if (nftSpecialMetadata && typeof nftSpecialMetadata === 'string') {
+							try {
+								const special = JSON.parse(nftSpecialMetadata) as Record<string, unknown>
+								const base = (typeof sharedJson === 'object' && sharedJson !== null) ? sharedJson as Record<string, unknown> : {}
+								out.assembled = { ...base, ...special }
+							} catch {
+								out.nftSpecialMetadata = nftSpecialMetadata
+							}
+						}
+					}
+				} catch (ipfsErr: any) {
+					logger(Colors.yellow('[getNFTMetadata] IPFS fetch failed:'), ipfsErr?.message ?? ipfsErr)
+				}
+			}
+			res.status(200).json(out)
+		} catch (err: any) {
+			logger(Colors.red('[getNFTMetadata] error:'), err?.message ?? err)
+			return res.status(500).json({ error: err?.message ?? 'Failed to fetch NFT metadata' })
+		}
+	})
+
+	/** GET /api/ownerNftSeries?owner=0x... - 返回 owner 钱包所有的 NFT 系列（含 sharedMetadataHash、ipfsCid） */
+	router.get('/ownerNftSeries', async (req, res) => {
+		const { owner } = req.query as { owner?: string }
+		if (!owner || !ethers.isAddress(owner)) {
+			return res.status(400).json({ error: 'Invalid owner address' })
+		}
+		try {
+			const items = await getOwnerNftSeries(owner, 100)
+			res.status(200).json({ items })
+		} catch (err: any) {
+			logger(Colors.red('[ownerNftSeries] error:'), err?.message ?? err)
+			return res.status(500).json({ error: err?.message ?? 'Failed to fetch owner NFT series' })
+		}
+	})
+
+	/** GET /api/seriesSharedMetadata?card=0x&tokenId=... - 从 IPFS 拉取并返回该系列的 sharedSeriesMetadata JSON */
+	router.get('/seriesSharedMetadata', async (req, res) => {
+		const { card, tokenId } = req.query as { card?: string; tokenId?: string }
+		if (!card || !ethers.isAddress(card) || !tokenId) {
+			return res.status(400).json({ error: 'Invalid card or tokenId' })
+		}
+		const tid = BigInt(tokenId)
+		if (tid < ISSUED_NFT_START_ID) {
+			return res.status(400).json({ error: 'tokenId must be >= ISSUED_NFT_START_ID' })
+		}
+		try {
+			const series = await getSeriesByCardAndTokenId(card, tokenId)
+			if (!series?.ipfsCid) {
+				return res.status(404).json({ error: 'Series not registered or no IPFS CID' })
+			}
+			const ipfsUrl = `https://ipfs.io/ipfs/${series.ipfsCid}`
+			const ipfsRes = await fetch(ipfsUrl)
+			if (!ipfsRes.ok) {
+				return res.status(502).json({ error: 'Failed to fetch from IPFS' })
+			}
+			const sharedJson = await ipfsRes.json()
+			res.status(200).json({
+				cardAddress: series.cardAddress,
+				tokenId: series.tokenId,
+				sharedMetadataHash: series.sharedMetadataHash,
+				ipfsCid: series.ipfsCid,
+				metadata: series.metadata ?? null,
+				sharedSeriesMetadata: sharedJson,
+			})
+		} catch (err: any) {
+			logger(Colors.red('[seriesSharedMetadata] error:'), err?.message ?? err)
+			return res.status(500).json({ error: err?.message ?? 'Failed to fetch shared metadata' })
+		}
+	})
+
+	/** registerSeries：cluster 预检格式，合格转发 master */
+	router.post('/registerSeries', async (req, res) => {
+		const { cardAddress, tokenId, sharedMetadataHash, ipfsCid, metadata } = req.body as {
+			cardAddress?: string
+			tokenId?: string
+			sharedMetadataHash?: string
+			ipfsCid?: string
+			metadata?: Record<string, unknown>
+		}
+		if (!cardAddress || !ethers.isAddress(cardAddress) || !tokenId || !sharedMetadataHash || !ipfsCid) {
+			return res.status(400).json({ error: 'Missing cardAddress, tokenId, sharedMetadataHash, or ipfsCid' })
+		}
+		logger(Colors.green('server /api/registerSeries preCheck OK, forwarding to master'))
+		postLocalhost('/api/registerSeries', req.body, res)
+	})
+
+	/** registerMintMetadata：cluster 预检格式，合格转发 master */
+	router.post('/registerMintMetadata', async (req, res) => {
+		const { cardAddress, tokenId, ownerAddress, metadata } = req.body as {
+			cardAddress?: string
+			tokenId?: string
+			ownerAddress?: string
+			metadata?: Record<string, unknown>
+		}
+		if (!cardAddress || !ethers.isAddress(cardAddress) || !tokenId || !ownerAddress || !ethers.isAddress(ownerAddress) || !metadata || typeof metadata !== 'object') {
+			return res.status(400).json({ error: 'Missing cardAddress, tokenId, ownerAddress, or metadata (object)' })
+		}
+		logger(Colors.green('server /api/registerMintMetadata preCheck OK, forwarding to master'))
+		postLocalhost('/api/registerMintMetadata', req.body, res)
+	})
+
+	/** GET /api/mintMetadata?card=0x&tokenId=...&owner=0x... - cluster 直接处理读请求 */
+	router.get('/mintMetadata', async (req, res) => {
+		const { card, tokenId, owner } = req.query as { card?: string; tokenId?: string; owner?: string }
+		if (!card || !ethers.isAddress(card) || !tokenId || !owner || !ethers.isAddress(owner)) {
+			return res.status(400).json({ error: 'Invalid card, tokenId, or owner' })
+		}
+		try {
+			const items = await getMintMetadataForOwner(card, tokenId, owner)
+			res.status(200).json({ items })
+		} catch (err: any) {
+			logger(Colors.red('[mintMetadata] error:'), err?.message ?? err)
+			return res.status(500).json({ error: err?.message ?? 'Failed to fetch mint metadata' })
+		}
 	})
 	router.post('/addUser', async (req,res) => {
 		const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, pgpKeyID, pgpKey, signMessage } = req.body as {
@@ -360,6 +603,17 @@ const routing = ( router: Router ) => {
 		}
 		logger(Colors.green(`server /api/createCard preCheck OK, forwarding to master`), inspect({ cardOwner: preCheck.preChecked.cardOwner, currency: preCheck.preChecked.currency }, false, 2, true))
 		postLocalhost('/api/createCard', preCheck.preChecked, res)
+	})
+
+	/** cardCreateRedeem：集群预检，合格转发 master。master 使用 executeForOwnerPool + Settle_ContractPool 排队处理。默认 createRedeemBatch（多 hash array）*/
+	router.post('/cardCreateRedeem', async (req, res) => {
+		const preCheck = await cardCreateRedeemPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardCreateRedeem preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/cardCreateRedeem preCheck OK, forwarding to master`), inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true))
+		postLocalhost('/api/cardCreateRedeem', preCheck.preChecked, res)
 	})
 
 	router.post('/executeForOwner', async (req, res) => {

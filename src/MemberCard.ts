@@ -24,6 +24,7 @@ import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
+import { registerCardToDb } from './db'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
@@ -2328,6 +2329,16 @@ export const createCardPoolPress = async () => {
 			}
 		}
 		logger(Colors.green(`[createCardPoolPress] card created: ${cardAddress} hash=${hash}`))
+		registerCardToDb({
+			cardAddress,
+			cardOwner,
+			currency,
+			priceInCurrencyE6,
+			uri: uri ?? undefined,
+			shareTokenMetadata,
+			tiers,
+			txHash: hash,
+		}).catch(() => {})
 		if (res && !res.headersSent) res.status(200).json({ success: true, cardAddress, hash }).end()
 	} catch (err: any) {
 		const msg = err?.message ?? String(err)
@@ -2369,6 +2380,123 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 	}
 
 	return { success: true, message: 'Card purchased successfully!' }
+}
+
+/**
+ * 构建 createRedeemBatch 的 calldata，供 cardCreateRedeemPreCheck 使用。
+ * 默认使用 codes（string[]），每项 keccak256 得到 hash；若传 hashes 则直接使用。
+ */
+export const buildCardCreateRedeemBatchData = (params: {
+	codes?: string[]
+	hashes?: string[]
+	points6: string | number | bigint
+	attr: number
+	validAfter: number
+	validBefore: number
+	tokenIds: (string | number | bigint)[]
+	amounts: (string | number | bigint)[]
+}): string => {
+	const { codes, hashes, points6, attr, validAfter, validBefore, tokenIds, amounts } = params
+	let hashArr: string[]
+	if (hashes != null && hashes.length > 0) {
+		hashArr = hashes
+	} else if (codes != null && codes.length > 0) {
+		hashArr = codes.map((c) => ethers.keccak256(ethers.toUtf8Bytes(c)))
+	} else {
+		throw new Error('codes or hashes required (non-empty array)')
+	}
+	const iface = new ethers.Interface([
+		'function createRedeemBatch(bytes32[] hashes, uint256 points6, uint256 attr, uint64 validAfter, uint64 validBefore, uint256[] tokenIds, uint256[] amounts)',
+	])
+	return iface.encodeFunctionData('createRedeemBatch', [
+		hashArr,
+		BigInt(points6),
+		attr,
+		validAfter,
+		validBefore,
+		tokenIds.map((t) => BigInt(t)),
+		amounts.map((a) => BigInt(a)),
+	])
+}
+
+/** cardCreateRedeem 集群预检：校验 JSON、可选链上校验（card 存在、factoryGateway），合格返回 preChecked 供转发 master。不写链。 */
+export type CardCreateRedeemPreChecked = {
+	cardAddress: string
+	data: string
+	deadline: number
+	nonce: string
+	ownerSignature: string
+}
+
+export const cardCreateRedeemPreCheck = async (body: {
+	cardAddress?: string
+	codes?: string[]
+	hashes?: string[]
+	points6?: string | number
+	attr?: number
+	validAfter?: number
+	validBefore?: number
+	tokenIds?: (string | number)[]
+	amounts?: (string | number)[]
+	deadline?: number
+	nonce?: string
+	ownerSignature?: string
+}): Promise<{ success: true; preChecked: CardCreateRedeemPreChecked } | { success: false; error: string }> => {
+	const { cardAddress, codes, hashes, points6, attr, validAfter, validBefore, tokenIds, amounts, deadline, nonce, ownerSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) {
+		return { success: false, error: 'Invalid cardAddress' }
+	}
+	if ((!codes || codes.length === 0) && (!hashes || hashes.length === 0)) {
+		return { success: false, error: 'codes or hashes required (non-empty array)' }
+	}
+	if (!tokenIds || !amounts || tokenIds.length !== amounts.length) {
+		return { success: false, error: 'tokenIds and amounts required, same length' }
+	}
+	for (let i = 0; i < amounts.length; i++) {
+		if (BigInt(amounts[i]) <= 0n) {
+			return { success: false, error: `amounts[${i}] must be > 0` }
+		}
+	}
+	if (deadline == null || deadline === undefined || !nonce || !ownerSignature) {
+		return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+	}
+	try {
+		const data = buildCardCreateRedeemBatchData({
+			codes,
+			hashes,
+			points6: points6 ?? 0,
+			attr: attr ?? 0,
+			validAfter: validAfter ?? 0,
+			validBefore: validBefore ?? 0,
+			tokenIds,
+			amounts,
+		})
+		const pool = Settle_ContractPool
+		if (pool?.length) {
+			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+			const code = await provider.getCode(cardAddress)
+			if (!code || code === '0x') {
+				return { success: false, error: 'Card contract not found or not deployed' }
+			}
+			const card = new ethers.Contract(cardAddress, ['function factoryGateway() view returns (address)'], provider)
+			const gw = await card.factoryGateway()
+			if (!gw || gw === ethers.ZeroAddress) {
+				return { success: false, error: 'Card factoryGateway not configured' }
+			}
+		}
+		return {
+			success: true,
+			preChecked: {
+				cardAddress: ethers.getAddress(cardAddress),
+				data,
+				deadline: Number(deadline),
+				nonce: String(nonce),
+				ownerSignature: String(ownerSignature),
+			},
+		}
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
 }
 
 /**

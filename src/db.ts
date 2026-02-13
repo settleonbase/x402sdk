@@ -624,6 +624,331 @@ export const regiestChatRoute = async (req: Request, res: Response) => {
 }
 
 const DB_URL = "postgres://postgres:your_password@127.0.0.1:5432/postgres"
+
+/** beamio_cards 表：存储 createCard 创建的卡，供最新发行卡列表等查询。total_points_minted_6、holder_count 初始为 0，可由 indexer 后续更新。 */
+const BEAMIO_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_cards (
+	id SERIAL PRIMARY KEY,
+	card_address TEXT UNIQUE NOT NULL,
+	card_owner TEXT NOT NULL,
+	currency TEXT NOT NULL,
+	price_in_currency_e6 TEXT NOT NULL,
+	uri TEXT,
+	metadata_json JSONB,
+	tx_hash TEXT,
+	total_points_minted_6 BIGINT DEFAULT 0,
+	holder_count INT DEFAULT 0,
+	created_at TIMESTAMPTZ DEFAULT NOW()
+)`
+
+/** beamio_nft_series 表：存储 issued NFT 系列，含 sharedSeriesMetadata 的 IPFS 引用；metadata_json 为通用型 JSONB（应用场景扩展用，如电影/演唱会/商品等） */
+const BEAMIO_NFT_SERIES_TABLE = `CREATE TABLE IF NOT EXISTS beamio_nft_series (
+	id SERIAL PRIMARY KEY,
+	card_address TEXT NOT NULL,
+	token_id TEXT NOT NULL,
+	shared_metadata_hash TEXT NOT NULL,
+	ipfs_cid TEXT NOT NULL,
+	card_owner TEXT NOT NULL,
+	metadata_json JSONB,
+	created_at TIMESTAMPTZ DEFAULT NOW(),
+	UNIQUE(card_address, token_id)
+)`
+
+/** beamio_nft_mint_metadata 表：每笔 mint 的通用型 metadata_json（电影票座位、商品序列号、演唱会区域等），由 purchase/mint 流程登记 */
+const BEAMIO_NFT_MINT_METADATA_TABLE = `CREATE TABLE IF NOT EXISTS beamio_nft_mint_metadata (
+	id SERIAL PRIMARY KEY,
+	card_address TEXT NOT NULL,
+	token_id TEXT NOT NULL,
+	owner_address TEXT NOT NULL,
+	tx_hash TEXT,
+	metadata_json JSONB NOT NULL,
+	created_at TIMESTAMPTZ DEFAULT NOW()
+)`
+
+/** createCard 成功后登记到本地 DB */
+export const registerCardToDb = async (params: {
+	cardAddress: string
+	cardOwner: string
+	currency: string
+	priceInCurrencyE6: string
+	uri?: string
+	shareTokenMetadata?: { name?: string; description?: string; image?: string }
+	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string }>
+	txHash?: string
+}): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_CARDS_TABLE)
+		const metadataJson = JSON.stringify({
+			...(params.shareTokenMetadata && { shareTokenMetadata: params.shareTokenMetadata }),
+			...(params.tiers && params.tiers.length > 0 && { tiers: params.tiers }),
+		}) || null
+		await db.query(
+			`
+			INSERT INTO beamio_cards (card_address, card_owner, currency, price_in_currency_e6, uri, metadata_json, tx_hash)
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+			ON CONFLICT (card_address) DO UPDATE SET
+				card_owner = EXCLUDED.card_owner,
+				currency = EXCLUDED.currency,
+				price_in_currency_e6 = EXCLUDED.price_in_currency_e6,
+				uri = EXCLUDED.uri,
+				metadata_json = EXCLUDED.metadata_json,
+				tx_hash = EXCLUDED.tx_hash
+			`,
+			[
+				params.cardAddress.toLowerCase(),
+				params.cardOwner.toLowerCase(),
+				params.currency,
+				params.priceInCurrencyE6,
+				params.uri ?? null,
+				metadataJson && metadataJson !== '{}' ? metadataJson : null,
+				params.txHash ?? null,
+			]
+		)
+		logger(Colors.green(`[registerCardToDb] registered card=${params.cardAddress}`))
+	} catch (e: any) {
+		logger(Colors.yellow(`[registerCardToDb] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 最新发行的前 N 张卡明细 */
+export const getLatestCards = async (limit = 20): Promise<Array<{
+	cardAddress: string
+	cardOwner: string
+	currency: string
+	priceInCurrencyE6: string
+	uri: string | null
+	metadata: Record<string, unknown> | null
+	txHash: string | null
+	totalPointsMinted6: string
+	holderCount: number
+	createdAt: string
+}>> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const { rows } = await db.query(
+			`
+			SELECT card_address, card_owner, currency, price_in_currency_e6, uri, metadata_json, tx_hash, total_points_minted_6, holder_count, created_at
+			FROM beamio_cards
+			ORDER BY created_at DESC
+			LIMIT $1
+			`,
+			[limit]
+		)
+		return rows.map((r: any) => ({
+			cardAddress: r.card_address,
+			cardOwner: r.card_owner,
+			currency: r.currency,
+			priceInCurrencyE6: r.price_in_currency_e6,
+			uri: r.uri,
+			metadata: r.metadata_json,
+			txHash: r.tx_hash,
+			totalPointsMinted6: String(r.total_points_minted_6 ?? 0),
+			holderCount: Number(r.holder_count ?? 0),
+			createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+		}))
+	} catch (e: any) {
+		logger(Colors.yellow(`[getLatestCards] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 登记 issued NFT 系列到 DB（createIssuedNft 成功后由 API/daemon 调用）；metadataJson 为通用型 JSON，支持电影/演唱会/商品等场景 */
+export const registerSeriesToDb = async (params: {
+	cardAddress: string
+	tokenId: string
+	sharedMetadataHash: string
+	ipfsCid: string
+	cardOwner: string
+	metadataJson?: Record<string, unknown>
+}): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_NFT_SERIES_TABLE)
+		const meta = params.metadataJson != null ? JSON.stringify(params.metadataJson) : null
+		await db.query(
+			`
+			INSERT INTO beamio_nft_series (card_address, token_id, shared_metadata_hash, ipfs_cid, card_owner, metadata_json)
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+			ON CONFLICT (card_address, token_id) DO UPDATE SET
+				shared_metadata_hash = EXCLUDED.shared_metadata_hash,
+				ipfs_cid = EXCLUDED.ipfs_cid,
+				card_owner = EXCLUDED.card_owner,
+				metadata_json = COALESCE(EXCLUDED.metadata_json, beamio_nft_series.metadata_json)
+			`,
+			[
+				params.cardAddress.toLowerCase(),
+				params.tokenId,
+				params.sharedMetadataHash,
+				params.ipfsCid,
+				params.cardOwner.toLowerCase(),
+				meta,
+			]
+		)
+		logger(Colors.green(`[registerSeriesToDb] registered series card=${params.cardAddress} tokenId=${params.tokenId}`))
+	} catch (e: any) {
+		logger(Colors.yellow(`[registerSeriesToDb] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 登记单笔 mint 的通用型 metadata（购买/铸造时调用；metadataJson 任意结构，如 { seat: "A12" }、{ serialNo: "SN-001" }） */
+export const registerMintMetadataToDb = async (params: {
+	cardAddress: string
+	tokenId: string
+	ownerAddress: string
+	txHash?: string
+	metadataJson: Record<string, unknown>
+}): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_NFT_MINT_METADATA_TABLE)
+		const meta = JSON.stringify(params.metadataJson)
+		await db.query(
+			`
+			INSERT INTO beamio_nft_mint_metadata (card_address, token_id, owner_address, tx_hash, metadata_json)
+			VALUES ($1, $2, $3, $4, $5::jsonb)
+			`,
+			[
+				params.cardAddress.toLowerCase(),
+				params.tokenId,
+				params.ownerAddress.toLowerCase(),
+				params.txHash ?? null,
+				meta,
+			]
+		)
+		logger(Colors.green(`[registerMintMetadataToDb] card=${params.cardAddress} tokenId=${params.tokenId} owner=${params.ownerAddress}`))
+	} catch (e: any) {
+		logger(Colors.yellow(`[registerMintMetadataToDb] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** owner 钱包所有的 NFT 系列列表 */
+export const getOwnerNftSeries = async (owner: string, limit = 100): Promise<Array<{
+	cardAddress: string
+	tokenId: string
+	sharedMetadataHash: string
+	ipfsCid: string
+	cardOwner: string
+	metadata: Record<string, unknown> | null
+	createdAt: string
+}>> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_NFT_SERIES_TABLE)
+		const { rows } = await db.query(
+			`
+			SELECT card_address, token_id, shared_metadata_hash, ipfs_cid, card_owner, metadata_json, created_at
+			FROM beamio_nft_series
+			WHERE card_owner = $1
+			ORDER BY created_at DESC
+			LIMIT $2
+			`,
+			[owner.toLowerCase(), limit]
+		)
+		return rows.map((r: any) => ({
+			cardAddress: r.card_address,
+			tokenId: r.token_id,
+			sharedMetadataHash: r.shared_metadata_hash,
+			ipfsCid: r.ipfs_cid,
+			cardOwner: r.card_owner,
+			metadata: r.metadata_json,
+			createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+		}))
+	} catch (e: any) {
+		logger(Colors.yellow(`[getOwnerNftSeries] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 某 NFT 系列的 sharedSeriesMetadata 记录（含 ipfsCid、metadata_json 通用型 JSON） */
+export const getSeriesByCardAndTokenId = async (cardAddress: string, tokenId: string): Promise<{
+	cardAddress: string
+	tokenId: string
+	sharedMetadataHash: string
+	ipfsCid: string
+	cardOwner: string
+	metadata: Record<string, unknown> | null
+	createdAt: string
+} | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_NFT_SERIES_TABLE)
+		const { rows } = await db.query(
+			`
+			SELECT card_address, token_id, shared_metadata_hash, ipfs_cid, card_owner, metadata_json, created_at
+			FROM beamio_nft_series
+			WHERE card_address = $1 AND token_id = $2
+			`,
+			[cardAddress.toLowerCase(), tokenId]
+		)
+		if (rows.length === 0) return null
+		const r = rows[0]
+		return {
+			cardAddress: r.card_address,
+			tokenId: r.token_id,
+			sharedMetadataHash: r.shared_metadata_hash,
+			ipfsCid: r.ipfs_cid,
+			cardOwner: r.card_owner,
+			metadata: r.metadata_json,
+			createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[getSeriesByCardAndTokenId] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** owner 在某系列下拥有的各笔 mint 的 metadata_json 列表（按创建顺序，用于电影票座位、商品序列号等） */
+export const getMintMetadataForOwner = async (
+	cardAddress: string,
+	tokenId: string,
+	ownerAddress: string,
+	limit = 100
+): Promise<Array<{ txHash: string | null; metadata: Record<string, unknown>; createdAt: string }>> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_NFT_MINT_METADATA_TABLE)
+		const { rows } = await db.query(
+			`
+			SELECT tx_hash, metadata_json, created_at
+			FROM beamio_nft_mint_metadata
+			WHERE card_address = $1 AND token_id = $2 AND owner_address = $3
+			ORDER BY created_at ASC
+			LIMIT $4
+			`,
+			[cardAddress.toLowerCase(), tokenId, ownerAddress.toLowerCase(), limit]
+		)
+		return rows.map((r: any) => ({
+			txHash: r.tx_hash,
+			metadata: r.metadata_json ?? {},
+			createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+		}))
+	} catch (e: any) {
+		logger(Colors.yellow(`[getMintMetadataForOwner] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 export const _search = async (keyward: string) => {
   const _keywork = String(keyward || "")
     .trim()
