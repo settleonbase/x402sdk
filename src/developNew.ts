@@ -109,7 +109,7 @@ diamondCut(
 
 /**				Ver 2.0 added admin facet
  * 				DiamondCutFacet			0x8c7FBDCB20B00162d99f3CfeC928fcd3bfDEdBD3
- * 				diamondAddress			0x083AE5AC063a55dBA769Ba71Cd301d5FC5896D5b
+ * 				diamondAddress			0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad
  * 				OwnershipFacet			0x04cc1D7E893958DC5d2fc134EF7487C9A30f1Dd6
  * 				DiamondLoupeFacet		0x4bb6BDD37B388c3E2e6BC16C8AE7fa1854BF9912
  * 				StatsFacet				0xcB22040bD585927a7b5d00aD7713ef0f118842B3		ll	
@@ -139,7 +139,7 @@ import { logger } from "./logger";
 const LoupeABI = DiamondLoupeFacetABI
 
 const RPC_URL = "https://mainnet-rpc1.conet.network";
-const DIAMOND = "0x083AE5AC063a55dBA769Ba71Cd301d5FC5896D5b";
+const DIAMOND = "0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad";
 
 //										DiamondCutFacet
 // ====== 你当前链上已知 facet（旧/当前）======

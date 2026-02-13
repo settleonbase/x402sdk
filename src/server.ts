@@ -975,8 +975,19 @@ const router = ( router: express.Router ) => {
 		
 	// })
 
-	router.get('/getOracle', async (req,res) => {
-		res.status(200).json({eth: getOracleRequest()}).end()
+	router.get('/getOracle', async (req, res) => {
+		try {
+			const data = getOracleRequest()
+			res.status(200).json({ eth: data }).end()
+		} catch (e: any) {
+			console.error('getOracle error:', e?.message ?? e)
+			res.status(200).json({
+				eth: {
+					bnb: '', eth: '', usdc: '1', timestamp: Math.floor(Date.now() / 1000),
+					usdcad: '1', usdjpy: '150', usdcny: '7.2', usdhkd: '7.8', usdeur: '0.92', usdsgd: '1.35', usdtwd: '31'
+				}
+			}).end()
+		}
 	})
 
 	router.get('/generateCheck', (req,res) => {

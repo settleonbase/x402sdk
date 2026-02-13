@@ -34,7 +34,7 @@ const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 /** UserCard gateway = AA Factory（与 BASE_AA_FACTORY 一致） */
 const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 
-const BeamioTaskIndexerAddress = '0x083AE5AC063a55dBA769Ba71Cd301d5FC5896D5b'
+const BeamioTaskIndexerAddress = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
 const DIAMOND = BeamioTaskIndexerAddress
 /** Base 主网 RPC，与 UI 一致，保证报价与链上状态一致 */
 const BASE_RPC_URL = 'https://1rpc.io/base'

@@ -78,7 +78,6 @@ const CashCodeBaseAddr = '0x3977f35c531895CeD50fAf5e02bd9e7EB890D2D1'
 const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
 
-const USDC_conet = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
 const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
 export const MINT_RATE = ethers.parseUnits('7000', 18)
 const USDC_decimals = BigInt(10 ** 6)
@@ -255,7 +254,6 @@ export const oracleBackoud = async (FaucetProcess = true) => {
 			baseUSDC: new ethers.Contract(USDCContract_BASE, USDC_ABI, walletBase),
 			privateKey: n,
 			wallet: walletBase,
-			// conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
 			conetSC: new ethers.Contract(beamioConet, beamioConetABI, walletConet),
 			// event: new ethers.Contract(eventContract, Event_ABI, walletConet),
 			conetAirdrop: new ethers.Contract(airdropRecord, conetAirdropABI, walletConet),
@@ -968,24 +966,6 @@ export const generateCheck = async (req: Request, res: Response) => {
 
 
 
-const conet_chainID = '224400'
-const conet_USDC = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
-const conet_USDC_DECIMALS = 18
-const testInConet = async () => {
-	// const kk = await AuthorizationSign ("20", CashCodeCoNETAddr, masterSetup.settle_contractAdmin[0], conet_USDC_DECIMALS, conet_chainID, conet_USDC)
-	// const hash = generateCODE('')
-	// logger({kk, hash})
-	// await AuthorizationCallUSDC(kk)
-	// await AuthorizationCallCashCode(kk, hash.hash, conet_USDC)
-
-	//getHashDetail('0xb42de32faf01df3b795a5914fdc43b56aa7d2253810e977246a960bd4ae8897e')
-	await withdrawWithCode('2msGwbQsERCVqwQ14TzRTb', '', '0xD36Fc9d529B9Cc0b230942855BA46BC9CA772A88')
-}
-
-const testInBase = async () => {
-	const kk = await AuthorizationSign ("0.11", beamioConet, masterSetup.settle_contractAdmin[0], USDC_Base_DECIMALS, conet_chainID, conet_USDC)
-}
-
 const processCheck = async() => {
 	const obj = processToBase.shift()
 	if (!obj) {
@@ -1435,7 +1415,9 @@ const balanceCache: Record<string, {
 }> = {}
 
 export const getOracleRequest = () => {
-	logger(inspect(oracle, false, 3, true))
+	try {
+		logger(inspect(oracle, false, 3, true))
+	} catch (_) { /* 避免 logger/inspect 抛错导致 502 */ }
 	return oracle
 }
 

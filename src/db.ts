@@ -37,7 +37,6 @@ export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 		
 		privateKey: n,
 		wallet: walletConet,
-		// conetUSDC: new ethers.Contract(USDC_conet, USDC_ABI, walletConet),
 		conetSC: new ethers.Contract(beamioConet, beamioConetABI, walletConet),
 		// event: new ethers.Contract(eventContract, Event_ABI, walletConet),
 		conetAirdrop: new ethers.Contract(airdropRecord, conetAirdropABI, walletConet),
