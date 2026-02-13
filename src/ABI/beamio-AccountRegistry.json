@@ -689,6 +689,16 @@
 						"internalType": "string",
 						"name": "lastName",
 						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "pgpKeyID",
+						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "pgpKey",
+						"type": "string"
 					}
 				],
 				"internalType": "struct AccountInput",
@@ -748,6 +758,16 @@
 					{
 						"internalType": "string",
 						"name": "lastName",
+						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "pgpKeyID",
+						"type": "string"
+					},
+					{
+						"internalType": "string",
+						"name": "pgpKey",
 						"type": "string"
 					}
 				],

@@ -184,6 +184,8 @@ interface beamioAccount {
 	initialLoading: boolean
 	firstName: string
 	lastName: string
+	pgpKeyID?: string
+	pgpKey?: string
 	address: string
 	createdAt?: BigInt
 }

@@ -233,10 +233,9 @@ export const oracolPrice = async () => {
 }
 
 /**
- * @param FaucetProcess 是否在 block 时执行 FaucetUserProcess
  * @param enableOracle 是否启用链上 oracle 读取（仅 master 设为 true，cluster 从 master 拉取）
  */
-export const oracleBackoud = async (FaucetProcess = true, enableOracle = true) => {
+export const oracleBackoud = async (enableOracle = true) => {
 	// await getAllNodes()
 	Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 
@@ -274,122 +273,9 @@ export const oracleBackoud = async (FaucetProcess = true, enableOracle = true) =
 			return
 		}
 
-		if (FaucetProcess) FaucetUserProcess()
-		
 		oracolPrice()
 
 	})
-}
-
-const resource = `https://beamio.app/api/payment` as Resource
-
-const USDC_FaucetAmount = '0.2'
-const usdcFaucetAmount = ethers.parseUnits(USDC_FaucetAmount, 6)
-
-
-const processUSDC_Faucet = async () => {
-	const obj = FaucetUserPool.shift()
-	if (!obj) {
-		return
-	}
-
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-		FaucetUserPool.unshift(obj)
-		return setTimeout(() => processUSDC_Faucet(), 2000)
-	}
-
-	logger(`processUSDC_Faucet start! `, inspect(obj, false, 3, true))
-	const paymentRequirements = createBeamioExactPaymentRequirements(
-		USDC_FaucetAmount.toString(),
-		resource,
-		`Beamio Transfer`,
-		obj.wallet
-	)
-
-	const paymentHeader = {
-		network: 'base',
-		payload: await AuthorizationSign(USDC_FaucetAmount, obj.wallet, SC.privateKey, 6, baseChainID.toString(), USDCContract_BASE),
-		scheme:'exact',
-		x402Version: 1
-	}
-
-
-	try {
-
-		//	first 
-		const tr = await SC.conetAirdrop.airdrop(obj.wallet, obj.ipaddress)
-
-		const settleResponse = await settle(
-			//@ts-ignore
-			paymentHeader,
-			paymentRequirements)
-		const responseHeader = settleResponseHeader(settleResponse)
-
-		// In a real application, you would store this response header
-		// and associate it with the payment for later verification
-		
-		const responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString())
-		
-		if (!responseData.success) {
-			logger(`processUSDC_Faucet responseData ERROR!`, inspect(responseData, false, 3, true))
-			return
-		}
-
-		logger(`processUSDC_Faucet processUSDC_Faucet success! ${responseData?.transaction}`)
-
-		const tx = await SC.conetSC.transferRecord(
-			SC.wallet.address,
-			obj.wallet,
-			usdcFaucetAmount,
-			responseData?.transaction,
-			'Thank you for joining Beamio Alpha Test!'
-		)
-
-		
-		await Promise.all([
-			tx.wait(), tr.wait()
-		])
-		logger(`processUSDC_Faucet record to CoNET success ${tx.hash} ${tr.hash}`)
-		
-	} catch (ex: any) {
-		if (/500 Internal Server/i.test( ex.message)) {
-			FaucetUserPool.unshift(obj)
-		}
-		logger(`processUSDC_Faucet Error!`, ex.message)
-		
-	}
-	Settle_ContractPool.push(SC)
-	setTimeout(() => processUSDC_Faucet(), 2000)
-}
-
-
-const totalFaucetETHRecord: string [] = []
-
-let waitingFaucetUserProcessPool: string[] = []
-
-const FaucetUserProcess = async () => {
-	
-	if (!waitingFaucetUserProcessPool.length) {
-		return
-	}
-	
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-		return
-	}
-	
-	try {
-		const tx = await SC.conetSC.newUserBetch(waitingFaucetUserProcessPool)
-		waitingFaucetUserProcessPool = []
-		await tx.wait()
-		console.log(`FaucetUserProcess success ${tx.hash} address number = ${waitingFaucetUserProcessPool.length}`)
-	}catch (ex: any) {
-		logger(`FaucetUserProcess Error! ${ex.message}`)
-	}
-	
-	Settle_ContractPool.push(SC)
-	processUSDC_Faucet()
 }
 
 /** Base 主网 RPC：优先使用 ~/.master.json base_endpoint（可配置付费 RPC 避免 Exceeded quota），否则用公共 RPC */
@@ -1482,65 +1368,9 @@ export const getOracleRequest = () => {
 // 	}
 // }
 
-//			FaucetUser for USDC 
-
-const FaucetUser:string[] = []
-const FaucetIPAddress: string[] = []
-const FaucetUserPool: {
-	wallet: string
-	ipaddress: string
-}[] = []
-
-export const BeamioFaucet = async (req: Request, res: Response) => {
-	let ipaddress = getClientIp(req)
-
-	const { address } = req.query as {
-		address?: string
-	}
-	if (!address || address === ethers.ZeroAddress || !ethers.isAddress(address)) {
-		logger(`BeamioFaucet Error@! !address || address === ethers.ZeroAddress || !ethers.isAddress(${address})`)
-		return res.status(403).end()
-	}
-	
-	const walletAddress = address.toLowerCase()
-	const SC = Settle_ContractPool[0]
-	const realIpAddress = /73.189.157.190/.test(ipaddress) ? uuid62.v4() : ipaddress
-
-	if (FaucetUser.indexOf(walletAddress)  > -1 || !realIpAddress || FaucetIPAddress.indexOf(realIpAddress) > -1 ) {
-		logger(`BeamioFaucet ${walletAddress}:${realIpAddress} already!`)
-		return res.status(403).end()
-	}
-
-	
-
-	
-	
-	FaucetIPAddress.push(realIpAddress)
-	FaucetUser.push(walletAddress)
-		
-		try {
-			const isNew = await SC.conetAirdrop.mayAirdrop(walletAddress, realIpAddress)
-			
-			if (isNew) {
-				logger(`BeamioFaucet ${walletAddress}:${realIpAddress} added to Pool!`)
-				res.status(200).json({success: true}).end()
-				FaucetUserPool.push({
-					wallet: walletAddress,
-					ipaddress: realIpAddress
-				})
-				processUSDC_Faucet()
-				return
-			}
-			res.status(403).end()
-			return logger(`BeamioFaucet ${walletAddress}:${realIpAddress} already in mayAirdrop !!`)
-		} catch (ex: any) {
-			logger(`BeamioFaucet call faucetClaimed error! ${ex.message}`)
-			
-		}
-	
-
-	res.status(500).end()
-	logger(`BeamioFaucet ${walletAddress}:${realIpAddress} error`)
+/** Faucet 已停用，统一返回 200 兼容旧客户端 */
+export const BeamioFaucet = async (_req: Request, res: Response) => {
+	return res.status(200).json({ success: true }).end()
 }
 
 const BeamioPayment = async (req: Request, res: Response, amt: string|bigint, wallet: string): Promise<false|payload> => {
@@ -1684,51 +1514,14 @@ const depositWith3009AuthorizationPayLinkProcess = async () => {
 
 const declaneAddress = '0x1000000000000000000000000000000000000000'
 
-export const BeamioETHFaucetTry = async (address: string) => {
-	const _address = address.toLowerCase()
-	const index = totalFaucetETHRecord.indexOf(_address)
-	if (index > -1) {
-		return
-	}
-	const SC = Settle_ContractPool[0]
-	try {
-		const isClaimed = await SC.conetSC.faucetClaimed(_address)
-		if (isClaimed) {
-			return
-		}
-	} catch (ex: any) {
-		logger(` await SC.conetSC.faucetClaimed(${_address}) Error, ${ex.message}`)
-		return
-	}
-	waitingFaucetUserProcessPool.push(_address)
+/** Faucet 已停用，no-op */
+export const BeamioETHFaucetTry = async (_address: string) => {
+	return
 }
 
-export const BeamioETHFaucet = async (req: Request, res: Response) => {
-	let { address } = req.query as {
-		address?: string
-	}
-	if (!address || !ethers.isAddress(address) || ethers.ZeroAddress === address) {
-		return res.status(404).end()
-	}
-
-	const _address = address.toLowerCase()
-	const index = totalFaucetETHRecord.indexOf(_address)
-	if (index > -1) {
-		return res.status(403).end()
-	}
-
-	const SC = Settle_ContractPool[0]
-	try {
-		const isClaimed = await SC.conetSC.faucetClaimed(_address)
-		if (isClaimed) {
-			return res.status(403).end()
-		}
-	} catch (ex: any) {
-		logger(` await SC.conetSC.faucetClaimed(${_address}) Error, ${ex.message}`)
-		return res.status(500).json({success: false}).end()
-	}
-	waitingFaucetUserProcessPool.push(_address)
-	res.status(200).end()
+/** Faucet 已停用，统一返回 200 兼容旧客户端 */
+export const BeamioETHFaucet = async (_req: Request, res: Response) => {
+	return res.status(200).json({ success: true }).end()
 }
 
 const BeamioPaymentLinkFinish = async (req: Request, res: Response) => {
@@ -2074,6 +1867,8 @@ export const BeamioPayMe = async (req: Request, res: Response) => {
 		return res.status(400).json({success: false, error: 'The minimum amount was not reached.'})
 	}
 
+	const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
+	const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
 	const paymentRequirements = [createBeamioExactPaymentRequirements(
 		amount,
 		resource,

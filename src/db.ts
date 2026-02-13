@@ -4,7 +4,7 @@ import AccountRegistryAbi from "./ABI/beamio-AccountRegistry.json"
 import { logger } from "./logger"
 import { inspect } from "util"
 import { Request, Response} from 'express'
-import {masterSetup, BeamioETHFaucetTry} from './util'
+import {masterSetup} from './util'
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
@@ -343,6 +343,12 @@ const addFollowPool: {
 }[] = []
 
 
+/** 清洗 firstName/lastName，防止前端误把 JSON 等拼接到字段中 */
+const sanitizeName = (s: string | undefined): string => {
+	if (s == null || typeof s !== 'string') return ''
+	return String(s).split(/[\r\n]/)[0].trim().slice(0, 128)
+}
+
 const addUserPoolProcess = async () => {
 	const obj = addUserPool.shift()
 	if (!obj) {
@@ -359,13 +365,15 @@ const addUserPoolProcess = async () => {
 	}
 	const account = {
 		accountName: obj.account.accountName,
-		image: obj.account.image,
+		image: obj.account.image ?? '',
 		darkTheme: obj.account.darkTheme,
 		isUSDCFaucet:  obj.account.isUSDCFaucet,
 		isETHFaucet: obj.account.isETHFaucet,
 		initialLoading: obj.account.initialLoading,
-		firstName: obj.account.firstName,
-		lastName: obj.account.lastName
+		firstName: sanitizeName(obj.account.firstName),
+		lastName: sanitizeName(obj.account.lastName),
+		pgpKeyID: obj.account.pgpKeyID ?? '',
+		pgpKey: obj.account.pgpKey ?? ''
 	}
 	
 	try {
@@ -403,7 +411,8 @@ const addUserPoolProcess = async () => {
 				return err ? `revert: ${err.name}()` : ex.message
 			} catch (_) { return ex.message }
 		})() : ex.message
-		logger(`addUserPoolProcess Error: ${msg} | wallet=${obj.wallet} accountName=${obj.account?.accountName}`)
+		const hint = msg?.includes?.('missing revert data') ? ' [检查: signer 是否在 AccountRegistry admin 列表]' : ''
+		logger(`addUserPoolProcess Error: ${msg}${hint} | wallet=${obj.wallet} accountName=${obj.account?.accountName}`)
 	}
 
 	beamio_ContractPool.unshift(SC)
@@ -461,7 +470,7 @@ const addFollowPoolProcess = async () => {
 const BeamioOfficial = '0xeabf0a98ac208647247eaa25fdd4eb0e67793d61'
 
 export const addUser = async (req: Request, res: Response) => {
-	const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName } = req.body as {
+	const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, pgpKeyID, pgpKey } = req.body as {
 		accountName: string
 		wallet: string
 		recover: IAccountRecover[]
@@ -471,23 +480,26 @@ export const addUser = async (req: Request, res: Response) => {
 		isETHFaucet: boolean
 		firstName: string
 		lastName: string
+		pgpKeyID?: string
+		pgpKey?: string
 	}
 
 	try {
 
 		const getExistsUserData = await getUserData(accountName)
 		
-		// 2. 填默认值，保证所有 field 都存在
-
+		// 2. 填默认值，保证所有 field 都存在；firstName/lastName 用 sanitizeName 防止 JSON 污染
 		const fullInput: beamioAccount = {
 			accountName: accountName,
-			image,
+			image: image ?? '',
 			darkTheme,
 			isUSDCFaucet,
 			isETHFaucet,
 			initialLoading: true,
-			firstName,
-			lastName,
+			firstName: sanitizeName(firstName),
+			lastName: sanitizeName(lastName),
+			pgpKeyID: pgpKeyID ?? '',
+			pgpKey: pgpKey ?? '',
 			address: wallet,
 			createdAt: getExistsUserData?.createdAt
 		}
@@ -500,7 +512,6 @@ export const addUser = async (req: Request, res: Response) => {
 		})
 
 		addUserPoolProcess()
-		BeamioETHFaucetTry(wallet)
 
 		addFollowPool.push({
 			wallet,

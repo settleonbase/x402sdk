@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp, oracleBackoud, getOracleRequest, BeamioETHFaucetTry} from '../util'
+import {getClientIp, oracleBackoud, getOracleRequest} from '../util'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
