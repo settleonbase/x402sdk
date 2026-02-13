@@ -128,7 +128,7 @@ const routing = ( router: Router ) => {
 		searchUsers(req,res)
 	})
 	router.post('/addUser', async (req,res) => {
-		const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, signMessage } = req.body as {
+		const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, pgpKeyID, pgpKey, signMessage } = req.body as {
 			accountName?: string
 			wallet?: string
 			recover?: IAccountRecover[]
@@ -138,6 +138,8 @@ const routing = ( router: Router ) => {
 			isETHFaucet?: boolean
 			firstName?: string
 			lastName?: string
+			pgpKeyID?: string
+			pgpKey?: string
 			signMessage?: string
 		}
 
@@ -166,7 +168,9 @@ const routing = ( router: Router ) => {
 			darkTheme: typeof darkTheme === 'boolean' ? darkTheme : false,
 			isETHFaucet: typeof isETHFaucet === 'boolean' ? isETHFaucet : false,
 			firstName: firstName?.trim() || '',
-			lastName: lastName?.trim() || ''
+			lastName: lastName?.trim() || '',
+			pgpKeyID: typeof pgpKeyID === 'string' ? pgpKeyID.trim() : '',
+			pgpKey: typeof pgpKey === 'string' ? pgpKey.trim() : ''
 		}
 		
 		postLocalhost ('/api/addUser', obj, res)

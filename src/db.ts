@@ -416,6 +416,18 @@ const addUserPoolProcess = async () => {
 
 		await updateUserDB(obj.account)
 
+		// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial，避免 AccountNotFound（账户未上链时 follow 会 revert）
+		if (obj.followBeamioOfficial) {
+			try {
+				const followTx = await SC.constAccountRegistry.followByAdmin(obj.wallet, BeamioOfficial)
+				await followTx.wait()
+				logger('addUserPoolProcess followByAdmin BeamioOfficial SUCCESS!', followTx.hash)
+				await updateUserFollowDB(obj.wallet, BeamioOfficial)
+			} catch (followEx: any) {
+				logger(`addUserPoolProcess followByAdmin Error: ${followEx?.shortMessage || followEx?.message} | wallet=${obj.wallet}`)
+			}
+		}
+
 	} catch (ex: any) {
 		const msg = ex?.data ? (() => {
 			try {
@@ -521,18 +533,13 @@ export const addUser = async (req: Request, res: Response) => {
 		addUserPool.push({
 			wallet,
 			account: fullInput,
-			recover: recover
+			recover: recover,
+			followBeamioOfficial: true
 		})
 
 		addUserPoolProcess()
 
-		addFollowPool.push({
-			wallet,
-			followAddress: BeamioOfficial,
-			remove: false
-		})
-		addFollowPoolProcess()
-
+		// addFollow 改为在 addUserPoolProcess 内 setAccountByAdmin 成功后执行，避免 AccountNotFound（账户尚未上链时 follow 会 revert）
 		// 3. 组装 calldata：ethers v6 struct 传参可以直接用对象
 		console.log("[setAccountByAdmin] sending tx for", accountName, fullInput)
 

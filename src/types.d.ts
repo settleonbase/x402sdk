@@ -199,6 +199,7 @@ type IAddUserPool = {
 	wallet: string
 	account: beamioAccount
 	recover?: IAccountRecover[]
+	followBeamioOfficial?: boolean
 }
 
 type ICurrency = 'CAD'|'USD'|'JPY'|'CNY'|'USDC'|'HKD'|'EUR'|'SGD'|'TWD'
@@ -207,6 +208,7 @@ type IAddUserPool = {
 	wallet: string
 	account: beamioAccount
 	recover?: IAccountRecover[]
+	followBeamioOfficial?: boolean
 }
 
 
