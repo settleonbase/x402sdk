@@ -415,9 +415,9 @@ const addUserPoolProcess = async () => {
 		}
 
 		await updateUserDB(obj.account)
-
+		
 		// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial。需确认 BeamioOfficial 有账户，否则 followByAdmin 会 AccountNotFound
-		if (obj.followBeamioOfficial) {
+		if (obj.wallet.toLowerCase() !== BeamioOfficial.toLowerCase() && obj.followBeamioOfficial) {
 			try {
 				await (SC.constAccountRegistry as any).getAccount(BeamioOfficial)
 				const followTx = await SC.constAccountRegistry.followByAdmin(obj.wallet, BeamioOfficial)
