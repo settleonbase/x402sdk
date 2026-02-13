@@ -10,7 +10,7 @@ import StatsABI from "./ABI/StatsABI.json";
 import ActionABI from "./ABI/ActionABI.json";
 import TaskABI from "./ABI/TaskABI.json";
 
-const RPC_URL = "https://mainnet-rpc.conet.network";
+const RPC_URL = "https://mainnet-rpc1.conet.network";
 const DIAMOND = "0xCfCfD5E8428051B84D53aE1B39DeFD50705d967f";
 
 const FACETS = {

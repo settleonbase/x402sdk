@@ -116,7 +116,7 @@ import StatsABI from "./ABI/StatsABI.json";
 import CatalogABI from "./ABI/CatalogABI.json";
 import ActionABI from "./ABI/ActionABI.json";
 
-const RPC_URL = "https://mainnet-rpc.conet.network";
+const RPC_URL = "https://mainnet-rpc1.conet.network";
 const DIAMOND = "0xCfCfD5E8428051B84D53aE1B39DeFD50705d967f";
 
 //										DiamondCutFacet

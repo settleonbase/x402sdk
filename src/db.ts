@@ -17,7 +17,7 @@ import IPFSAbi from './ABI/Ipfs.abi.json'
  */
 
 
-const RPC_URL = "https://mainnet-rpc.conet.network"
+const RPC_URL = "https://mainnet-rpc1.conet.network"
 const BASE_RPC_URL = "https://1rpc.io/base"
 
 const providerConet = new ethers.JsonRpcProvider(RPC_URL)
@@ -25,7 +25,7 @@ const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
-const beamioConetAccountRegistry = '0x09dfed722FBD199E9EC6ece19630DE02692eF572'
+const beamioConetAccountRegistry = '0x3E15607BCf98B01e6C7dF834a2CEc7B8B6aFb1BC'
 const IpfsStorageRegistryGlobalDedup = '0x121c4dDCa92f07dc53Fd6Db9bc5A07c2918F9591'
 
 export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {

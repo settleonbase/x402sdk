@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess} from '../db'
 import {coinbaseHooks} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
 
 const masterServerPort = 1111
 
@@ -101,6 +101,26 @@ const routing = ( router: Router ) => {
 		logger(` Master GOT /api/purchasingCard ${preChecked ? '[preChecked]' : ''} doing purchasingCardProcess...`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preChecked }, false, 3, true))
 		purchasingCardProcess().catch((err: any) => {
 			logger(Colors.red('[purchasingCardProcess] unhandled error (fire-and-forget):'), err?.message ?? err)
+		})
+	})
+
+	router.post('/executeForOwner', (req, res) => {
+		const { cardAddress, data, deadline, nonce, ownerSignature, redeemCode, toUserEOA } = req.body as {
+			cardAddress?: string
+			data?: string
+			deadline?: number
+			nonce?: string
+			ownerSignature?: string
+			redeemCode?: string
+			toUserEOA?: string
+		}
+		if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
+			return res.status(400).json({ success: false, error: 'Missing required fields: cardAddress, data, deadline, nonce, ownerSignature' })
+		}
+		executeForOwnerPool.push({ cardAddress, data, deadline, nonce, ownerSignature, redeemCode, toUserEOA, res })
+		logger(Colors.cyan(`[executeForOwner] pushed to pool, card=${cardAddress}`))
+		executeForOwnerProcess().catch((err: any) => {
+			logger(Colors.red('[executeForOwnerProcess] unhandled error:'), err?.message ?? err)
 		})
 	})
 

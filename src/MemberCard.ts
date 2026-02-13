@@ -41,7 +41,7 @@ const BASE_RPC_URL = 'https://1rpc.io/base'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
-const conetEndpoint = 'https://mainnet-rpc.conet.network'
+const conetEndpoint = 'https://mainnet-rpc1.conet.network'
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 /**
  * Settle_ContractPool：factory 登记的 owner 列表，每项为一名 admin（含 baseFactoryPaymaster、walletBase 等）。
@@ -698,6 +698,18 @@ export const purchasingCardPool: {
 	validBefore: string
 	res: Response
 	preChecked?: PurchasingCardPreChecked
+}[] = []
+
+/** 通用 executeForOwner：客户端提交 owner 签名的 calldata，服务端免 gas 执行。可选 redeemCode+toUserEOA 时额外执行 redeemForUser（空投）。 */
+export const executeForOwnerPool: {
+	cardAddress: string
+	data: string
+	deadline: number
+	nonce: string
+	ownerSignature: string
+	redeemCode?: string
+	toUserEOA?: string
+	res: Response
 }[] = []
 
 /** AA→EOA 转账请求：客户端提交 ERC-4337 已签字的 UserOp，由 Beamio 代付 Gas 并提交到链上 */
@@ -2357,6 +2369,44 @@ export const purchasingCard = async (cardAddress: string, userSignature: string,
 	}
 
 	return { success: true, message: 'Card purchased successfully!' }
+}
+
+/**
+ * executeForOwnerProcess：通用，owner 签名的 calldata 由 paymaster 执行。若带 redeemCode+toUserEOA 则额外执行 redeemForUser（空投）。
+ */
+export const executeForOwnerProcess = async () => {
+	const obj = executeForOwnerPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		executeForOwnerPool.unshift(obj)
+		return setTimeout(() => executeForOwnerProcess(), 3000)
+	}
+	try {
+		const factory = SC.baseFactoryPaymaster
+		await factory.executeForOwner(
+			obj.cardAddress,
+			obj.data,
+			obj.deadline,
+			obj.nonce,
+			obj.ownerSignature
+		)
+		let code: string | undefined
+		if (obj.redeemCode != null && obj.toUserEOA != null) {
+			await factory.redeemForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
+			code = obj.redeemCode
+			logger(Colors.green(`✅ executeForOwnerProcess + redeemForUser card=${obj.cardAddress} to=${obj.toUserEOA}`))
+		} else {
+			logger(Colors.green(`✅ executeForOwnerProcess card=${obj.cardAddress}`))
+		}
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, ...(code != null && { code }) }).end()
+	} catch (e: any) {
+		logger(Colors.red(`❌ executeForOwnerProcess failed:`), e?.message ?? e)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => executeForOwnerProcess(), 3000)
+	}
 }
 
 /**

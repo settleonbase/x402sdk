@@ -327,6 +327,25 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/createCard', preCheck.preChecked, res)
 	})
 
+	router.post('/executeForOwner', async (req, res) => {
+		const { cardAddress, data, deadline, nonce, ownerSignature } = req.body as {
+			cardAddress?: string
+			data?: string
+			deadline?: number
+			nonce?: string
+			ownerSignature?: string
+		}
+		if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
+			logger(Colors.red(`server /api/executeForOwner Invalid data`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: 'Missing required fields' })
+		}
+		if (!ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid cardAddress' })
+		}
+		logger(Colors.green(`server /api/executeForOwner forwarding to master`), inspect({ cardAddress }, false, 2, true))
+		postLocalhost('/api/executeForOwner', req.body, res)
+	})
+
 	/** AA→EOA：支持三种提交。(1) packedUserOp；(2) openContainerPayload；(3) containerPayload（绑定 to）*/
 	router.post('/AAtoEOA', async (req, res) => {
 		// 入口数据检测：将 BigInt 转为 string，避免 downstream RPC / JSON 序列化错误

@@ -2,7 +2,7 @@
 import { ethers } from "ethers";
 import { masterSetup } from "./util";
 // ====== ENV ======
-const RPC_URL = "https://mainnet-rpc.conet.network"
+const RPC_URL = "https://mainnet-rpc1.conet.network"
 const DIAMOND = "0x083AE5AC063a55dBA769Ba71Cd301d5FC5896D5b"
 const PRIVATE_KEY = masterSetup.settle_contractAdmin[0]
 
