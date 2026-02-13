@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp, oracleBackoud, BeamioETHFaucetTry} from '../util'
+import {getClientIp, oracleBackoud, getOracleRequest, BeamioETHFaucetTry} from '../util'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
@@ -27,6 +27,11 @@ const routing = ( router: Router ) => {
 
 	router.post('/addUser', (req,res) => {
 		return addUser(req, res)
+	})
+
+	/** Cluster 每 1 分钟从此接口拉取 oracle，供 UI getOracle 直接响应 */
+	router.get('/oracleForCluster', (_req, res) => {
+		res.status(200).json(getOracleRequest()).end()
 	})
 
 	router.get('/debug/ip', (req, res) => {

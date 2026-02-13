@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp, getOracleRequest, oracleBackoud, checkSign} from '../util'
+import {getClientIp, oracleBackoud, checkSign} from '../util'
 import { checkSmartAccount } from '../MemberCard'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
@@ -15,6 +15,36 @@ import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreC
 
 const masterServerPort = 1111
 const serverPort = 2222
+
+/** Cluster 本地缓存 oracle，监听 CoNET 出块（约 6s/块），每 10 块（约 1 分钟）从 master 拉取 */
+const defaultOracle = { bnb: '', eth: '', usdc: '1', timestamp: 0, usdcad: '1', usdjpy: '150', usdcny: '7.2', usdhkd: '7.8', usdeur: '0.92', usdsgd: '1.35', usdtwd: '31' }
+let clusterOracleCache: Record<string, string | number> = { ...defaultOracle }
+
+const fetchOracleFromMaster = () => {
+	const opts: RequestOptions = { hostname: 'localhost', path: '/api/oracleForCluster', port: masterServerPort, method: 'GET' }
+	const req = request(opts, (res) => {
+		let buf = ''
+		res.on('data', (c) => { buf += c })
+		res.on('end', () => {
+			try {
+				const data = JSON.parse(buf)
+				if (data && typeof data === 'object') clusterOracleCache = { ...defaultOracle, ...data }
+			} catch (_) {}
+		})
+	})
+	req.on('error', () => {})
+	req.end()
+}
+
+const startClusterOracleSync = () => {
+	const conetRpc = new ethers.JsonRpcProvider('https://mainnet-rpc1.conet.network')
+	conetRpc.on('block', (blockNumber: bigint | number) => {
+		const n = typeof blockNumber === 'bigint' ? Number(blockNumber) : blockNumber
+		if (n % 10 !== 0) return
+		fetchOracleFromMaster()
+	})
+	fetchOracleFromMaster()
+}
 
 /** JSON 序列化时把 BigInt 转为 string，避免 "Do not know how to serialize a BigInt" */
 function jsonStringifyWithBigInt(obj: any): string {
@@ -253,17 +283,9 @@ const routing = ( router: Router ) => {
 		})
 	})
 
-	router.get('/getOracle', async (req, res) => {
-		try {
-			const data = getOracleRequest()
-			res.status(200).json(data).end()
-		} catch (e: any) {
-			logger(Colors.red('getOracle error:'), e?.message ?? e)
-			res.status(200).json({
-				bnb: '', eth: '', usdc: '1', timestamp: Math.floor(Date.now() / 1000),
-				usdcad: '1', usdjpy: '150', usdcny: '7.2', usdhkd: '7.8', usdeur: '0.92', usdsgd: '1.35', usdtwd: '31'
-			}).end()
-		}
+	/** Cluster 直接返回本地缓存的 oracle（每 1 分钟从 master 更新），不再读链 */
+	router.get('/getOracle', (_req, res) => {
+		res.status(200).json(clusterOracleCache).end()
 	})
 
 	router.post('/purchasingCard', async (req,res) => {
@@ -500,7 +522,8 @@ const routing = ( router: Router ) => {
 const initialize = async (reactBuildFolder: string, PORT: number) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
 	
-	oracleBackoud()
+	oracleBackoud(false, false)
+	setTimeout(startClusterOracleSync, 3000)
 	const defaultPath = join(__dirname, 'workers')
 	
 
@@ -661,5 +684,4 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 export const startServer = async () => {
 	initialize('', serverPort)
-	oracleBackoud(false)
 }

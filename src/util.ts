@@ -232,7 +232,11 @@ export const oracolPrice = async () => {
 	}
 }
 
-export const oracleBackoud = async (FaucetProcess = true) => {
+/**
+ * @param FaucetProcess 是否在 block 时执行 FaucetUserProcess
+ * @param enableOracle 是否启用链上 oracle 读取（仅 master 设为 true，cluster 从 master 拉取）
+ */
+export const oracleBackoud = async (FaucetProcess = true, enableOracle = true) => {
 	// await getAllNodes()
 	Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 
@@ -261,6 +265,8 @@ export const oracleBackoud = async (FaucetProcess = true) => {
 		}
 	})
 
+	if (!enableOracle) return
+
 	oracolPrice()
 	providerConet.on('block', async (blockNumber) => {
 
@@ -273,7 +279,6 @@ export const oracleBackoud = async (FaucetProcess = true) => {
 		oracolPrice()
 
 	})
-
 }
 
 const resource = `https://beamio.app/api/payment` as Resource
