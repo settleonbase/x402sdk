@@ -199,37 +199,37 @@ let oracolPriceProcess = false
 
 /** BeamioCurrency: CAD=0, USD=1, JPY=2, CNY=3, USDC=4, HKD=5, EUR=6, SGD=7, TWD=8 */
 export const oracolPrice = async () => {
-	if (oracolPriceProcess) {
-		return
-	}
+	if (oracolPriceProcess) return
 	oracolPriceProcess = true
-
-	const [usdcad, usdjpy, usdcny, usdc, usdhkd, usdeur, usdsgd, usdtwd] = await Promise.all([
-		oracleSCBase.getRate(0).then((r: bigint) => ethers.formatEther(r)), // CAD
-		oracleSCBase.getRate(2).then((r: bigint) => ethers.formatEther(r)), // JPY
-		oracleSCBase.getRate(3).then((r: bigint) => ethers.formatEther(r)), // CNY
-		oracleSCBase.getRate(4).then((r: bigint) => ethers.formatEther(r)), // USDC
-		oracleSCBase.getRate(5).then((r: bigint) => ethers.formatEther(r)), // HKD
-		oracleSCBase.getRate(6).then((r: bigint) => ethers.formatEther(r)), // EUR
-		oracleSCBase.getRate(7).then((r: bigint) => ethers.formatEther(r)), // SGD
-		oracleSCBase.getRate(8).then((r: bigint) => ethers.formatEther(r)), // TWD
-	])
-	const timestamp = Math.floor(Date.now() / 1000)
-
-	// logger(`oracolPrice USDC ${usdc} CAD ${usdcad} ...`)
-	oracle.bnb = ''
-	oracle.eth = ''
-	oracle.usdc = usdc.toString()
-	oracle.usdcad = usdcad.toString()
-	oracle.usdjpy = usdjpy.toString()
-	oracle.usdcny = usdcny.toString()
-	oracle.usdhkd = usdhkd.toString()
-	oracle.usdeur = usdeur.toString()
-	oracle.usdsgd = usdsgd.toString()
-	oracle.usdtwd = usdtwd.toString()
-	oracle.timestamp = timestamp
-
-	oracolPriceProcess = false
+	try {
+		const [usdcad, usdjpy, usdcny, usdc, usdhkd, usdeur, usdsgd, usdtwd] = await Promise.all([
+			oracleSCBase.getRate(0).then((r: bigint) => ethers.formatEther(r)), // CAD
+			oracleSCBase.getRate(2).then((r: bigint) => ethers.formatEther(r)), // JPY
+			oracleSCBase.getRate(3).then((r: bigint) => ethers.formatEther(r)), // CNY
+			oracleSCBase.getRate(4).then((r: bigint) => ethers.formatEther(r)), // USDC
+			oracleSCBase.getRate(5).then((r: bigint) => ethers.formatEther(r)), // HKD
+			oracleSCBase.getRate(6).then((r: bigint) => ethers.formatEther(r)), // EUR
+			oracleSCBase.getRate(7).then((r: bigint) => ethers.formatEther(r)), // SGD
+			oracleSCBase.getRate(8).then((r: bigint) => ethers.formatEther(r)), // TWD
+		])
+		const timestamp = Math.floor(Date.now() / 1000)
+		oracle.bnb = ''
+		oracle.eth = ''
+		oracle.usdc = usdc.toString()
+		oracle.usdcad = usdcad.toString()
+		oracle.usdjpy = usdjpy.toString()
+		oracle.usdcny = usdcny.toString()
+		oracle.usdhkd = usdhkd.toString()
+		oracle.usdeur = usdeur.toString()
+		oracle.usdsgd = usdsgd.toString()
+		oracle.usdtwd = usdtwd.toString()
+		oracle.timestamp = timestamp
+	} catch (e: any) {
+		// Exceeded quota / RPC 限流时保留旧数据，避免崩溃
+		logger('oracolPrice failed (quota/RPC):', e?.message?.slice?.(0, 80) ?? e)
+	} finally {
+		oracolPriceProcess = false
+	}
 }
 
 export const oracleBackoud = async (FaucetProcess = true) => {
@@ -264,7 +264,7 @@ export const oracleBackoud = async (FaucetProcess = true) => {
 	oracolPrice()
 	providerConet.on('block', async (blockNumber) => {
 
-		if (blockNumber % 10 !== 0) {
+		if (blockNumber % 30 !== 0) {
 			return
 		}
 
@@ -387,8 +387,8 @@ const FaucetUserProcess = async () => {
 	processUSDC_Faucet()
 }
 
-/** Base 主网 RPC，与 UI 及 MemberCard 一致 */
-const BASE_RPC_URL = 'https://1rpc.io/base'
+/** Base 主网 RPC：优先使用 ~/.master.json base_endpoint（可配置付费 RPC 避免 Exceeded quota），否则用公共 RPC */
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://mainnet.base.org'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
