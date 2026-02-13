@@ -36,8 +36,8 @@ const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 
 const BeamioTaskIndexerAddress = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
 const DIAMOND = BeamioTaskIndexerAddress
-/** Base 主网 RPC，与 UI 一致，保证报价与链上状态一致 */
-const BASE_RPC_URL = 'https://1rpc.io/base'
+/** Base 主网 RPC：使用 ~/.master.json base_endpoint */
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://mainnet.base.org'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
@@ -2541,7 +2541,7 @@ export const quotePointsForUSDC = async (
 	return ret;
 };
 
-/** 与主 RPC 一致，unitPrice 主 RPC 返回 0 时重试用（当前主 RPC 已固定为 1rpc.io/base） */
+/** 与主 RPC 一致，unitPrice 主 RPC 返回 0 时重试用 */
 const QUOTE_FALLBACK_RPC = BASE_RPC_URL
 
 /**

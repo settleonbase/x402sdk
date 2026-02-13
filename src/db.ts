@@ -18,7 +18,7 @@ import IPFSAbi from './ABI/Ipfs.abi.json'
 
 
 const RPC_URL = "https://mainnet-rpc1.conet.network"
-const BASE_RPC_URL = "https://1rpc.io/base"
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://mainnet.base.org'
 
 const providerConet = new ethers.JsonRpcProvider(RPC_URL)
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
