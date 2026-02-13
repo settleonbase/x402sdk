@@ -522,7 +522,7 @@ const routing = ( router: Router ) => {
 const initialize = async (reactBuildFolder: string, PORT: number) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
 	
-	oracleBackoud(false, false)
+	oracleBackoud(false)
 	setTimeout(startClusterOracleSync, 3000)
 	const defaultPath = join(__dirname, 'workers')
 	
