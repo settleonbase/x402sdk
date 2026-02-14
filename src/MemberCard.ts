@@ -1,5 +1,6 @@
 import { ethers } from 'ethers'
-import BeamioFactoryPaymasterABI from './ABI/BeamioUserCardFactoryPaymaster.json'
+import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
+const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
 import { masterSetup, checkSign } from './util'
 import { Request, Response} from 'express'
 import { resolve } from 'node:path'
@@ -1063,17 +1064,18 @@ export const purchasingCardProcess = async () => {
 			logger(Colors.green(`✅ purchasingCardProcess cardAddress = ${cardAddress} ${obj.from} AA Account: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
 		}
 
-		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
-
-
-
-
-		const tx = await card.buyPointsWith3009Authorization(
+		// 新合约设计：购点通过 Card Factory.buyPointsForUser，不再直接调用 card.buyPointsWith3009Authorization
+		// 显式使用 BASE_CARD_FACTORY，避免错误配置导致调用到卡地址（卡无 buyPointsForUser 会 revert）
+		const cardFactory = new ethers.Contract(BASE_CARD_FACTORY, BeamioFactoryPaymasterABI, SC.walletBase)
+		const nonceBytes32 = (typeof nonce === 'string' && nonce.startsWith('0x') ? ethers.zeroPadValue(nonce, 32) : ethers.zeroPadValue(ethers.toBeHex(BigInt(nonce)), 32)) as `0x${string}`
+		logger(Colors.gray(`[purchasingCardProcess] buyPointsForUser factory=${BASE_CARD_FACTORY} card=${cardAddress}`))
+		const tx = await cardFactory.buyPointsForUser(
+			cardAddress,
 			from,
 			usdcAmount,
 			validAfter,
 			validBefore,
-			nonce,
+			nonceBytes32,
 			userSignature,
 			0
 		)
