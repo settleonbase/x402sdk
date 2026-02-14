@@ -616,6 +616,16 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/cardCreateRedeem', preCheck.preChecked, res)
 	})
 
+	/** cardRedeem：用户兑换 redeem 码，转发 master */
+	router.post('/cardRedeem', async (req, res) => {
+		const { cardAddress, redeemCode, toUserEOA } = req.body || {}
+		if (!cardAddress || !redeemCode || !toUserEOA || !ethers.isAddress(cardAddress) || !ethers.isAddress(toUserEOA)) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, toUserEOA' })
+		}
+		logger(Colors.green(`server /api/cardRedeem forwarding to master`), { cardAddress, toUserEOA })
+		postLocalhost('/api/cardRedeem', req.body, res)
+	})
+
 	router.post('/executeForOwner', async (req, res) => {
 		const { cardAddress, data, deadline, nonce, ownerSignature } = req.body as {
 			cardAddress?: string

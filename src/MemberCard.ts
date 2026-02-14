@@ -702,6 +702,14 @@ export const purchasingCardPool: {
 	preChecked?: PurchasingCardPreChecked
 }[] = []
 
+/** 用户兑换 redeem 码：仅 redeemForUser，无需 owner 签名。paymaster 代付 gas。 */
+export const cardRedeemPool: {
+	cardAddress: string
+	redeemCode: string
+	toUserEOA: string
+	res: Response
+}[] = []
+
 /** 通用 executeForOwner：客户端提交 owner 签名的 calldata，服务端免 gas 执行。可选 redeemCode+toUserEOA 时额外执行 redeemForUser（空投）。 */
 export const executeForOwnerPool: {
 	cardAddress: string
@@ -2533,6 +2541,44 @@ export const executeForOwnerProcess = async () => {
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => executeForOwnerProcess(), 3000)
+	}
+}
+
+/**
+ * cardRedeemProcess：用户输入 redeem 码，服务端调用 factory.redeemForUser，将点数 mint 到用户 AA。
+ */
+export const cardRedeemProcess = async () => {
+	const obj = cardRedeemPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		cardRedeemPool.unshift(obj)
+		return setTimeout(() => cardRedeemProcess(), 3000)
+	}
+	logger(Colors.cyan(`[cardRedeemProcess] processing card=${obj.cardAddress} toUserEOA=${obj.toUserEOA} codeLen=${obj.redeemCode?.length ?? 0}`))
+	try {
+		// 1. 确保 redeem 用户有 AA 账号（与 purchasingCardProcess 一致）
+		const { accountAddress: addr } = await DeployingSmartAccount(obj.toUserEOA, SC.aaAccountFactoryPaymaster)
+		if (!addr) {
+			logger(Colors.red(`❌ cardRedeemProcess: ${obj.toUserEOA} DeployingSmartAccount failed (no AA account)`))
+			if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => cardRedeemProcess(), 3000)
+			return
+		}
+
+		const factory = SC.baseFactoryPaymaster
+		const tx = await factory.redeemForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
+		await tx.wait()
+		logger(Colors.green(`✅ cardRedeemProcess card=${obj.cardAddress} to=${obj.toUserEOA} tx=${tx.hash}`))
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, tx: tx.hash }).end()
+	} catch (e: any) {
+		const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
+		logger(Colors.red(`❌ cardRedeemProcess failed:`), errMsg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: errMsg }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => cardRedeemProcess(), 3000)
 	}
 }
 
