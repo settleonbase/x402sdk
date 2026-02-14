@@ -14,4 +14,4 @@ export const BASE_CARD_FACTORY = '0xbDC8a165820bB8FA23f5d953632409F73E804eE5'
  * Base 主网 CCSA 卡地址（BeamioUserCard 实例，1 CAD = 1 token）。
  * 与 SilentPassUI config/chainAddresses.ts BeamioCardCCSA_ADDRESS 必须一致；重发卡后运行 replace-ccsa-address.js 同步两处。
  */
-export const BASE_CCSA_CARD_ADDRESS = '0x09599dB6637475D5f9b3E88B39C9b5773A63eE99'
+export const BASE_CCSA_CARD_ADDRESS = '0x29f359eA39FEa40A94C6081924fe30f882B6520E'

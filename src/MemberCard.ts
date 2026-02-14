@@ -2412,12 +2412,14 @@ export const buildCardCreateRedeemBatchData = (params: {
 	} else {
 		throw new Error('codes or hashes required (non-empty array)')
 	}
+	// 若 tokenIds 含 POINTS_ID(0)，top-level points6 传 0 避免兑换时双倍 mint（点数由 bundle 提供）
+	const pts6ForRedeem = tokenIds?.some((t) => Number(t) === 0) ? 0n : BigInt(points6 ?? 0)
 	const iface = new ethers.Interface([
 		'function createRedeemBatch(bytes32[] hashes, uint256 points6, uint256 attr, uint64 validAfter, uint64 validBefore, uint256[] tokenIds, uint256[] amounts)',
 	])
 	return iface.encodeFunctionData('createRedeemBatch', [
 		hashArr,
-		BigInt(points6),
+		pts6ForRedeem,
 		attr,
 		validAfter,
 		validBefore,
