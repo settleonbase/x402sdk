@@ -144,6 +144,10 @@ const myCardsCache = new Map<string, { body: string; statusCode: number; expiry:
 const GET_AA_CACHE_TTL_MS = 30 * 1000
 const getAAAccountCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
 
+/** getBalance 缓存：30 秒 */
+const GET_BALANCE_CACHE_TTL_MS = 30 * 1000
+const getBalanceCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
+
 const SC = beamio_ContractPool[0].constAccountRegistry
 
 const userOwnershipCheck = async (accountName: string, wallet: string) => {
@@ -849,6 +853,28 @@ const routing = ( router: Router ) => {
 		} catch (e: any) {
 			logger(Colors.red('[getAAAccount] forward error:'), e?.message ?? e)
 			res.status(502).json({ error: e?.message ?? 'Failed to fetch AA account' })
+		}
+	})
+
+	/** GET /api/getBalance?address=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */
+	router.get('/getBalance', async (req, res) => {
+		const { address } = req.query as { address?: string }
+		if (!address || !ethers.isAddress(address)) {
+			return res.status(400).json({ error: 'Invalid address: require valid 0x address' })
+		}
+		const cacheKey = ethers.getAddress(address).toLowerCase()
+		const cached = getBalanceCache.get(cacheKey)
+		if (cached && Date.now() < cached.expiry) {
+			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
+		}
+		try {
+			const path = '/api/getBalance?address=' + encodeURIComponent(address)
+			const { statusCode, body } = await getLocalhostBuffer(path)
+			getBalanceCache.set(cacheKey, { body, statusCode, expiry: Date.now() + GET_BALANCE_CACHE_TTL_MS })
+			res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[getBalance] forward error:'), e?.message ?? e)
+			res.status(502).json({ error: e?.message ?? 'Failed to fetch balance' })
 		}
 	})
 

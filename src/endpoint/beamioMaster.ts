@@ -325,6 +325,38 @@ const routing = ( router: Router ) => {
 			}
 		})
 
+		/** GET /api/getBalance?address=0x... - 客户端 RPC 失败时由此获取 USDC/ETH 余额。30 秒缓存。 */
+		const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+		const GET_BALANCE_CACHE_TTL_MS = 30 * 1000
+		const getBalanceCache = new Map<string, { eth: string; usdc: string; oracle: Record<string, unknown>; expiry: number }>()
+		router.get('/getBalance', async (req, res) => {
+			const { address } = req.query as { address?: string }
+			if (!address || !ethers.isAddress(address)) {
+				return res.status(400).json({ error: 'Invalid address: require valid 0x address' })
+			}
+			const cacheKey = ethers.getAddress(address).toLowerCase()
+			const cached = getBalanceCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json({ eth: cached.eth, usdc: cached.usdc, oracle: cached.oracle })
+			}
+			try {
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const usdc = new ethers.Contract(USDC_BASE, ['function balanceOf(address) view returns (uint256)'], provider)
+				const [usdcRaw, ethRaw] = await Promise.all([usdc.balanceOf(address), provider.getBalance(address)])
+				const oracle = getOracleRequest()
+				const data = {
+					eth: ethers.formatUnits(ethRaw, 18),
+					usdc: ethers.formatUnits(usdcRaw, 6),
+					oracle: oracle ?? {},
+				}
+				getBalanceCache.set(cacheKey, { eth: data.eth, usdc: data.usdc, oracle: data.oracle, expiry: Date.now() + GET_BALANCE_CACHE_TTL_MS })
+				res.status(200).json(data)
+			} catch (err: any) {
+				logger(Colors.red('[getBalance] error:'), err?.message ?? err)
+				res.status(500).json({ error: err?.message ?? 'Failed to fetch balance' })
+			}
+		})
+
 		/** GET /api/ownerNftSeries - owner 钱包所有的 NFT 系列 */
 		router.get('/ownerNftSeries', async (req, res) => {
 			const { owner } = req.query as { owner?: string }
