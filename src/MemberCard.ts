@@ -2429,7 +2429,7 @@ export const buildCardCreateRedeemBatchData = (params: {
 }
 
 const GET_REDEEM_STATUS_BATCH_ABI = [
-	'function getRedeemStatusBatch(bytes32[] hashes) view returns (bool[] active, uint128[] points6)',
+	'function getRedeemStatusBatch(bytes32[] hashes) view returns (bool[] active, uint256[] totalPoints6)',
 ]
 
 function _decodeRedeemStatusApi(active: boolean): 'redeemed' | 'cancelled' | 'pending' {
