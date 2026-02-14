@@ -2568,10 +2568,32 @@ export const cardRedeemProcess = async () => {
 		}
 
 		const factory = SC.baseFactoryPaymaster
-		const tx = await factory.redeemForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
-		await tx.wait()
-		logger(Colors.green(`✅ cardRedeemProcess card=${obj.cardAddress} to=${obj.toUserEOA} tx=${tx.hash}`))
-		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, tx: tx.hash }).end()
+		let txHash: string | null = null
+		let lastErr: any = null
+		// 先尝试 one-time redeem；若 UC_InvalidProposal（code 可能为 pool 类型）则回退到 redeemPoolForUser
+		try {
+			const tx1 = await factory.redeemForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
+			await tx1.wait()
+			txHash = tx1.hash
+		} catch (oneTimeErr: any) {
+			lastErr = oneTimeErr
+			const msg = String(oneTimeErr?.data ?? oneTimeErr?.message ?? oneTimeErr?.shortMessage ?? '')
+			if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669|reverted/i.test(msg)) {
+				try {
+					const tx2 = await factory.redeemPoolForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
+					await tx2.wait()
+					txHash = tx2.hash
+					lastErr = null
+				} catch (poolErr: any) {
+					lastErr = poolErr
+				}
+			}
+			if (lastErr) throw lastErr
+		}
+		if (txHash) {
+			logger(Colors.green(`✅ cardRedeemProcess card=${obj.cardAddress} to=${obj.toUserEOA} tx=${txHash}`))
+			if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, tx: txHash }).end()
+		}
 	} catch (e: any) {
 		const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
 		logger(Colors.red(`❌ cardRedeemProcess failed:`), errMsg)
