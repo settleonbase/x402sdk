@@ -396,21 +396,22 @@ const addUserPoolProcess = async () => {
 		await tx.wait()
 		logger('addUserPoolProcess constAccountRegistry SUCCESS!', tx.hash)
 		if (obj.recover?.length) {
-				
 			for (const n of obj.recover) {
 				if (!n?.encrypto || !n?.hash || n.hash === ethers.ZeroHash) continue
-
-				// 1. 发送交易（等待发出去）
-				const tr = await SC.constAccountRegistry.setBase64NameByAdmin(
-					n.hash,
-					n.encrypto,
-					account.accountName,
-					obj.wallet
-				)
-
-				// 2. 等待这笔交易上链
-				const receipt = await tr.wait()
-				logger('addUserPoolProcess setBase64NameByAdmin', tr.hash)
+				try {
+					const tr = await SC.constAccountRegistry.setBase64NameByAdmin(
+						n.hash,
+						n.encrypto,
+						account.accountName,
+						obj.wallet
+					)
+					await tr.wait()
+					logger('addUserPoolProcess setBase64NameByAdmin', tr.hash)
+				} catch (ex: any) {
+					const msg = ex?.shortMessage || ex?.message || ''
+					logger(`addUserPoolProcess setBase64NameByAdmin failed (non-fatal): ${msg} | wallet=${obj.wallet} hash=${n.hash?.slice(0, 18)}...`)
+					// 不抛出：setAccountByAdmin 已成功，recover 写入失败时仍完成 updateUserDB 与 follow
+				}
 			}
 		}
 
