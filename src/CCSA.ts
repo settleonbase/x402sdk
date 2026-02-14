@@ -1,5 +1,6 @@
 import { ethers } from 'ethers'
-import BeamioFactoryPaymasterABI from './ABI/BeamioUserCardFactoryPaymaster.json'
+import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
+const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
 import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
 import { BASE_CARD_FACTORY } from './chainAddresses'
 
@@ -67,7 +68,7 @@ export async function createBeamioCard(
 
   const factory = new ethers.Contract(
     factoryAddress,
-    BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
+    BeamioFactoryPaymasterABI,
     signer
   )
 
