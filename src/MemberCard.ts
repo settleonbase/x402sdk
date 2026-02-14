@@ -1131,31 +1131,28 @@ export const purchasingCardProcess = async () => {
 
 		logger(Colors.green(`✅ purchasingCardProcess note: ${payMe}`))
 
-		// 以下记账（transferRecord、syncTokenAction）在后台执行，客户端已收到 hash
-		const tr = await SC.conetSC.transferRecord(
-			obj.from,
-			to,
-			usdcAmount,
-			tx.hash,
-			`\r\n${JSON.stringify(payMe)}`
-		)
-		await tr.wait().catch((waitErr: any) => {
-			try {
+		// 以下记账（transferRecord、syncTokenAction）在后台执行，客户端已收到 hash；任一项失败不影响购点成功
+		try {
+			const tr = await SC.conetSC.transferRecord(
+				obj.from,
+				to,
+				usdcAmount,
+				tx.hash,
+				`\r\n${JSON.stringify(payMe)}`
+			)
+			await tr.wait().catch((waitErr: any) => {
 				logger(Colors.yellow(`[purchasingCardProcess] tr.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
-			} catch (_) {
-				console.error('[purchasingCardProcess] tr.wait() failed (RPC):', waitErr)
-			}
-		})
-		const actionFacet = await SC.BeamioTaskDiamondAction
-		const tx2 = await actionFacet.syncTokenAction(input)
-		await tx2.wait().catch((waitErr: any) => {
-			try {
+			})
+			const actionFacet = await SC.BeamioTaskDiamondAction
+			const tx2 = await actionFacet.syncTokenAction(input)
+			await tx2.wait().catch((waitErr: any) => {
 				logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
-			} catch (_) {
-				console.error('[purchasingCardProcess] syncTokenAction.wait() failed (RPC):', waitErr)
-			}
-		})
-		logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
+			})
+			logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
+		} catch (accountingErr: any) {
+			// Diamond: fn not found 等：syncTokenAction 未在 Diamond 上配置时发生，购点已成功，仅记账失败
+			logger(Colors.yellow(`[purchasingCardProcess] accounting non-critical (purchase succeeded): ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
+		}
 		
 		
 	} catch (error: any) {
