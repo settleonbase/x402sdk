@@ -225,7 +225,8 @@ const routing = ( router: Router ) => {
 			res.status(200).json({ items })
 		})
 
-		/** GET /api/myCards?owner=0x... 或 ?owners=0x1,0x2 - 客户端 RPC 失败时可由此 API 获取。30 秒缓存，统一各 cluster 结果。 */
+		/** GET /api/myCards?owner=0x... 或 ?owners=0x1,0x2 - 客户端 RPC 失败时可由此 API 获取。30 秒缓存。
+		 * RPC 错误时返回 500，绝不返回 200+空 items，以便 UI 区分「成功无卡」与「请求失败」。 */
 		const MY_CARDS_CACHE_TTL_MS = 30 * 1000
 		const myCardsCache = new Map<string, { items: Array<{ cardAddress: string; name: string; currency: string; priceE6: string; ptsPer1Currency: string }>; expiry: number }>()
 		router.get('/myCards', async (req, res) => {
