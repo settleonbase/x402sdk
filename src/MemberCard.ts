@@ -2426,6 +2426,49 @@ export const buildCardCreateRedeemBatchData = (params: {
 	])
 }
 
+const GET_REDEEM_STATUS_BATCH_ABI = [
+	'function getRedeemStatusBatch(bytes32[] hashes) view returns (bool[] active, uint128[] points6)',
+]
+
+function _decodeRedeemStatusApi(active: boolean): 'redeemed' | 'cancelled' | 'pending' {
+	if (active) return 'pending'
+	return 'cancelled'
+}
+
+/**
+ * 批量查询 redeem 状态（供 API 使用）：按 card 分组调用 getRedeemStatusBatch。
+ * 仅支持批量，items 至少 1 项。
+ */
+export const getRedeemStatusBatchApi = async (
+	items: { cardAddress: string; hash: string }[]
+): Promise<Record<string, 'redeemed' | 'cancelled' | 'pending'>> => {
+	const result: Record<string, 'redeemed' | 'cancelled' | 'pending'> = {}
+	if (items.length === 0) return result
+	const byCard = new Map<string, { hash: string }[]>()
+	for (const it of items) {
+		if (!ethers.isAddress(it.cardAddress)) continue
+		const arr = byCard.get(it.cardAddress) ?? []
+		arr.push({ hash: it.hash })
+		byCard.set(it.cardAddress, arr)
+	}
+	try {
+		for (const [cardAddress, cardItems] of byCard) {
+			const card = new ethers.Contract(cardAddress, GET_REDEEM_STATUS_BATCH_ABI, providerBaseBackup)
+			const hashes = cardItems.map((i) =>
+				i.hash.length === 66 && i.hash.startsWith('0x') ? (i.hash as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(i.hash))
+			)
+			const [activeList] = await card.getRedeemStatusBatch(hashes)
+			cardItems.forEach((it, idx) => {
+				result[it.hash] = _decodeRedeemStatusApi(activeList[idx])
+			})
+		}
+	} catch (e: any) {
+		logger(Colors.red('[getRedeemStatusBatchApi] RPC error:'), e?.message ?? e)
+		items.forEach(({ hash }) => { result[hash] = 'pending' })
+	}
+	return result
+}
+
 /** cardCreateRedeem 集群预检：校验 JSON、可选链上校验（card 存在、factoryGateway），合格返回 preChecked 供转发 master。不写链。 */
 export type CardCreateRedeemPreChecked = {
 	cardAddress: string
@@ -2537,7 +2580,14 @@ export const executeForOwnerProcess = async () => {
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, ...(code != null && { code }) }).end()
 	} catch (e: any) {
 		logger(Colors.red(`❌ executeForOwnerProcess failed:`), e?.message ?? e)
-		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
+		let errMsg = e?.message ?? String(e)
+		const errData = (e?.data ?? e?.info?.error?.data ?? e?.error?.data) as string | undefined
+		// UC_RedeemDelegateFailed(bytes) 空 data 通常表示 RedeemModule 不支持 createRedeemBatch（旧版）
+		if (typeof errData === 'string' && /dccff669/.test(errData) && /0000000000000000000000000000000000000000000000000000000000000000$/.test(errData.slice(-64))) {
+			errMsg = 'Redeem module does not support createRedeemBatch. Run: npx hardhat run scripts/verifyAndFixRedeemModule.ts --network base'
+			logger(Colors.yellow('💡'), errMsg)
+		}
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: errMsg }).end()
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => executeForOwnerProcess(), 3000)
@@ -2597,7 +2647,12 @@ export const cardRedeemProcess = async () => {
 	} catch (e: any) {
 		const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
 		logger(Colors.red(`❌ cardRedeemProcess failed:`), errMsg)
-		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: errMsg }).end()
+		// UC_InvalidProposal：code 在此卡上不存在或已使用，提示用户检查卡地址
+		let clientError = errMsg
+		if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669/.test(String(e?.data ?? errMsg))) {
+			clientError = 'Code not found or already used. Please ensure you\'re redeeming against the correct card (the card where the code was created).'
+		}
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: clientError }).end()
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => cardRedeemProcess(), 3000)

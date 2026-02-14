@@ -29,6 +29,17 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 ] as const
 const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://mainnet.base.org'
 
+/** 通用查询缓存：30 秒协议 */
+const QUERY_CACHE_TTL_MS = 30 * 1000
+const searchHelpCache = new Map<string, { items: unknown[]; expiry: number }>()
+const getNFTMetadataCache = new Map<string, { out: Record<string, unknown>; expiry: number }>()
+const latestCardsCache = new Map<string, { items: unknown[]; expiry: number }>()
+const getFollowStatusCache = new Map<string, { data: unknown; expiry: number }>()
+const getMyFollowStatusCache = new Map<string, { data: unknown; expiry: number }>()
+const ownerNftSeriesCache = new Map<string, { items: unknown[]; expiry: number }>()
+const seriesSharedMetadataCache = new Map<string, { data: unknown; expiry: number }>()
+const mintMetadataCache = new Map<string, { items: unknown[]; expiry: number }>()
+
 const routing = ( router: Router ) => {
 
 	router.post('/addFollow', (req,res) => {
@@ -72,27 +83,41 @@ const routing = ( router: Router ) => {
 			return searchUsers(req, res)
 		})
 
+		/** GET /api/getFollowStatus 30 秒缓存 */
 		router.get('/getFollowStatus', async (req, res) => {
 			const { wallet, followAddress } = req.query as { wallet?: string; followAddress?: string }
 			if (!ethers.isAddress(wallet!) || wallet === ethers.ZeroAddress || !ethers.isAddress(followAddress!) || followAddress === ethers.ZeroAddress) {
 				return res.status(400).json({ error: 'Invalid data format' })
 			}
+			const cacheKey = `${ethers.getAddress(wallet!).toLowerCase()}:${ethers.getAddress(followAddress!).toLowerCase()}`
+			const cached = getFollowStatusCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json(cached.data).end()
+			}
 			const followStatus = await FollowerStatus(wallet!, followAddress!)
 			if (followStatus === null) {
 				return res.status(400).json({ error: 'Follow status check Error!' })
 			}
+			getFollowStatusCache.set(cacheKey, { data: followStatus, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 			return res.status(200).json(followStatus).end()
 		})
 
+		/** GET /api/getMyFollowStatus 30 秒缓存 */
 		router.get('/getMyFollowStatus', async (req, res) => {
 			const { wallet } = req.query as { wallet?: string }
 			if (!ethers.isAddress(wallet!) || wallet === ethers.ZeroAddress) {
 				return res.status(400).json({ error: 'Invalid data format' })
 			}
+			const cacheKey = ethers.getAddress(wallet!).toLowerCase()
+			const cached = getMyFollowStatusCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json(cached.data).end()
+			}
 			const followStatus = await getMyFollowStatus(wallet!)
 			if (followStatus === null) {
 				return res.status(400).json({ error: 'Follow status check Error!' })
 			}
+			getMyFollowStatusCache.set(cacheKey, { data: followStatus, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 			return res.status(200).json(followStatus).end()
 		})
 
@@ -104,11 +129,16 @@ const routing = ( router: Router ) => {
 			return coinbaseOfframp(req, res)
 		})
 
-		/** GET /api/searchHelp - 返回卡已定义的全部 issued NFT 列表 */
+		/** GET /api/searchHelp - 返回卡已定义的全部 issued NFT 列表。30 秒缓存 */
 		router.get('/searchHelp', async (req, res) => {
 			const { card } = req.query as { card?: string }
 			if (!card || !ethers.isAddress(card)) {
 				return res.status(400).json({ error: 'Invalid card address' })
+			}
+			const cacheKey = ethers.getAddress(card).toLowerCase()
+			const cached = searchHelpCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json({ items: cached.items })
 			}
 			try {
 				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
@@ -144,6 +174,7 @@ const routing = ( router: Router ) => {
 						priceInCurrency6: String(priceInCurrency6),
 					})
 				}
+				searchHelpCache.set(cacheKey, { items, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 				res.status(200).json({ items })
 			} catch (err: any) {
 				logger(Colors.red('[searchHelp] error:'), err?.message ?? err)
@@ -151,11 +182,16 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** GET /api/getNFTMetadata - 返回指定 NFT 的 metadata（含 sharedSeriesMetadata 组装） */
+		/** GET /api/getNFTMetadata - 返回指定 NFT 的 metadata。30 秒缓存 */
 		router.get('/getNFTMetadata', async (req, res) => {
 			const { card, tokenId, nftSpecialMetadata } = req.query as { card?: string; tokenId?: string; nftSpecialMetadata?: string }
 			if (!card || !ethers.isAddress(card) || !tokenId) {
 				return res.status(400).json({ error: 'Invalid card or tokenId' })
+			}
+			const cacheKey = `${ethers.getAddress(card).toLowerCase()}:${tokenId}:${nftSpecialMetadata ?? ''}`
+			const cached = getNFTMetadataCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json(cached.out)
 			}
 			const tid = BigInt(tokenId)
 			if (tid < ISSUED_NFT_START_ID) {
@@ -207,21 +243,28 @@ const routing = ( router: Router ) => {
 								}
 							}
 						}
-					} catch (ipfsErr: any) {
-						logger(Colors.yellow('[getNFTMetadata] IPFS fetch failed:'), ipfsErr?.message ?? ipfsErr)
-					}
+				} catch (ipfsErr: any) {
+					logger(Colors.yellow('[getNFTMetadata] IPFS fetch failed:'), ipfsErr?.message ?? ipfsErr)
 				}
-				res.status(200).json(out)
-			} catch (err: any) {
-				logger(Colors.red('[getNFTMetadata] error:'), err?.message ?? err)
-				res.status(500).json({ error: err?.message ?? 'Failed to fetch NFT metadata' })
 			}
-		})
+			getNFTMetadataCache.set(cacheKey, { out, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+			res.status(200).json(out)
+		} catch (err: any) {
+			logger(Colors.red('[getNFTMetadata] error:'), err?.message ?? err)
+			res.status(500).json({ error: err?.message ?? 'Failed to fetch NFT metadata' })
+		}
+	})
 
-		/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）*/
+		/** 最新发行的前 N 张卡明细。30 秒缓存 */
 		router.get('/latestCards', async (_req, res) => {
 			const limit = Math.min(parseInt(String(_req.query.limit || 20), 10) || 20, 100)
+			const cacheKey = `limit:${limit}`
+			const cached = latestCardsCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json({ items: cached.items })
+			}
 			const items = await getLatestCards(limit)
+			latestCardsCache.set(cacheKey, { items, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 			res.status(200).json({ items })
 		})
 
@@ -358,14 +401,20 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** GET /api/ownerNftSeries - owner 钱包所有的 NFT 系列 */
+		/** GET /api/ownerNftSeries - owner 钱包所有的 NFT 系列。30 秒缓存 */
 		router.get('/ownerNftSeries', async (req, res) => {
 			const { owner } = req.query as { owner?: string }
 			if (!owner || !ethers.isAddress(owner)) {
 				return res.status(400).json({ error: 'Invalid owner address' })
 			}
+			const cacheKey = ethers.getAddress(owner).toLowerCase()
+			const cached = ownerNftSeriesCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json({ items: cached.items })
+			}
 			try {
 				const items = await getOwnerNftSeries(owner, 100)
+				ownerNftSeriesCache.set(cacheKey, { items, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 				res.status(200).json({ items })
 			} catch (err: any) {
 				logger(Colors.red('[ownerNftSeries] error:'), err?.message ?? err)
@@ -373,11 +422,16 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** GET /api/seriesSharedMetadata - 从 IPFS 拉取 sharedSeriesMetadata */
+		/** GET /api/seriesSharedMetadata - 从 IPFS 拉取 sharedSeriesMetadata。30 秒缓存 */
 		router.get('/seriesSharedMetadata', async (req, res) => {
 			const { card, tokenId } = req.query as { card?: string; tokenId?: string }
 			if (!card || !ethers.isAddress(card) || !tokenId) {
 				return res.status(400).json({ error: 'Invalid card or tokenId' })
+			}
+			const cacheKey = `${ethers.getAddress(card).toLowerCase()}:${tokenId}`
+			const cached = seriesSharedMetadataCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json(cached.data)
 			}
 			const tid = BigInt(tokenId)
 			if (tid < ISSUED_NFT_START_ID) {
@@ -394,28 +448,36 @@ const routing = ( router: Router ) => {
 					return res.status(502).json({ error: 'Failed to fetch from IPFS' })
 				}
 				const sharedJson = await ipfsRes.json()
-				res.status(200).json({
+				const data = {
 					cardAddress: series.cardAddress,
 					tokenId: series.tokenId,
 					sharedMetadataHash: series.sharedMetadataHash,
 					ipfsCid: series.ipfsCid,
 					metadata: series.metadata ?? null,
 					sharedSeriesMetadata: sharedJson,
-				})
+				}
+				seriesSharedMetadataCache.set(cacheKey, { data, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+				res.status(200).json(data)
 			} catch (err: any) {
 				logger(Colors.red('[seriesSharedMetadata] error:'), err?.message ?? err)
 				res.status(500).json({ error: err?.message ?? 'Failed to fetch shared metadata' })
 			}
 		})
 
-		/** GET /api/mintMetadata - owner 在某系列下的各笔 mint metadata */
+		/** GET /api/mintMetadata - owner 在某系列下的各笔 mint metadata。30 秒缓存 */
 		router.get('/mintMetadata', async (req, res) => {
 			const { card, tokenId, owner } = req.query as { card?: string; tokenId?: string; owner?: string }
 			if (!card || !ethers.isAddress(card) || !tokenId || !owner || !ethers.isAddress(owner)) {
 				return res.status(400).json({ error: 'Invalid card, tokenId, or owner' })
 			}
+			const cacheKey = `${ethers.getAddress(card).toLowerCase()}:${tokenId}:${ethers.getAddress(owner).toLowerCase()}`
+			const cached = mintMetadataCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json({ items: cached.items })
+			}
 			try {
 				const items = await getMintMetadataForOwner(card, tokenId, owner)
+				mintMetadataCache.set(cacheKey, { items, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 				res.status(200).json({ items })
 			} catch (err: any) {
 				logger(Colors.red('[mintMetadata] error:'), err?.message ?? err)
