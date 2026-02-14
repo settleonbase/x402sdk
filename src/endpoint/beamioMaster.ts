@@ -11,7 +11,7 @@ import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDa
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
 
@@ -288,6 +288,40 @@ const routing = ( router: Router ) => {
 			} catch (err: any) {
 				logger(Colors.red('[myCards] error:'), err?.message ?? err)
 				res.status(500).json({ error: err?.message ?? 'Failed to fetch my cards' })
+			}
+		})
+
+		/** GET /api/getAAAccount?eoa=0x... - 客户端 RPC 失败时由此获取 primaryAccountOf(EOA)。30 秒缓存。 */
+		const GET_AA_CACHE_TTL_MS = 30 * 1000
+		const getAAAccountCache = new Map<string, { account: string | null; expiry: number }>()
+		router.get('/getAAAccount', async (req, res) => {
+			const { eoa } = req.query as { eoa?: string }
+			if (!eoa || !ethers.isAddress(eoa)) {
+				return res.status(400).json({ error: 'Invalid eoa: require valid 0x address' })
+			}
+			const cacheKey = ethers.getAddress(eoa).toLowerCase()
+			const cached = getAAAccountCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json({ account: cached.account })
+			}
+			try {
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const aaFactory = new ethers.Contract(BASE_AA_FACTORY, ['function primaryAccountOf(address) view returns (address)'], provider)
+				let account = await aaFactory.primaryAccountOf(eoa)
+				if (account === ethers.ZeroAddress) {
+					getAAAccountCache.set(cacheKey, { account: null, expiry: Date.now() + GET_AA_CACHE_TTL_MS })
+					return res.status(200).json({ account: null })
+				}
+				const code = await provider.getCode(account)
+				if (!code || code === '0x') {
+					getAAAccountCache.set(cacheKey, { account: null, expiry: Date.now() + GET_AA_CACHE_TTL_MS })
+					return res.status(200).json({ account: null })
+				}
+				getAAAccountCache.set(cacheKey, { account, expiry: Date.now() + GET_AA_CACHE_TTL_MS })
+				res.status(200).json({ account })
+			} catch (err: any) {
+				logger(Colors.red('[getAAAccount] error:'), err?.message ?? err)
+				res.status(500).json({ error: err?.message ?? 'Failed to fetch AA account' })
 			}
 		})
 

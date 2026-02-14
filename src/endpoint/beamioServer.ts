@@ -140,6 +140,10 @@ const getLocalhostBuffer = (path: string): Promise<{ statusCode: number; body: s
 const MY_CARDS_CACHE_TTL_MS = 30 * 1000
 const myCardsCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
 
+/** getAAAccount 缓存：30 秒 */
+const GET_AA_CACHE_TTL_MS = 30 * 1000
+const getAAAccountCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
+
 const SC = beamio_ContractPool[0].constAccountRegistry
 
 const userOwnershipCheck = async (accountName: string, wallet: string) => {
@@ -823,6 +827,28 @@ const routing = ( router: Router ) => {
 		} catch (e: any) {
 			logger(Colors.red('[myCards] forward error:'), e?.message ?? e)
 			res.status(502).json({ error: e?.message ?? 'Failed to fetch my cards' })
+		}
+	})
+
+	/** GET /api/getAAAccount?eoa=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */
+	router.get('/getAAAccount', async (req, res) => {
+		const { eoa } = req.query as { eoa?: string }
+		if (!eoa || !ethers.isAddress(eoa)) {
+			return res.status(400).json({ error: 'Invalid eoa: require valid 0x address' })
+		}
+		const cacheKey = ethers.getAddress(eoa).toLowerCase()
+		const cached = getAAAccountCache.get(cacheKey)
+		if (cached && Date.now() < cached.expiry) {
+			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
+		}
+		try {
+			const path = '/api/getAAAccount?eoa=' + encodeURIComponent(eoa)
+			const { statusCode, body } = await getLocalhostBuffer(path)
+			getAAAccountCache.set(cacheKey, { body, statusCode, expiry: Date.now() + GET_AA_CACHE_TTL_MS })
+			res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[getAAAccount] forward error:'), e?.message ?? e)
+			res.status(502).json({ error: e?.message ?? 'Failed to fetch AA account' })
 		}
 	})
 
