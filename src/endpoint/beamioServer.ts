@@ -115,6 +115,31 @@ export const postLocalhost = async (path: string, obj: any, _res: Response)=> {
 	req.end()
 }
 
+/** GET 请求转发到 master */
+const getLocalhost = (path: string, res: Response) => {
+	const opts: RequestOptions = { hostname: 'localhost', path, port: masterServerPort, method: 'GET' }
+	const req = request(opts, (masterRes) => { masterRes.pipe(res) })
+	req.on('error', (e) => { logger(Colors.red(`getLocalhost ${path} error:`), e.message); res.status(502).end() })
+	req.end()
+}
+
+/** GET 请求转发到 master 并返回 body（用于缓存） */
+const getLocalhostBuffer = (path: string): Promise<{ statusCode: number; body: string }> =>
+	new Promise((resolve, reject) => {
+		const opts: RequestOptions = { hostname: 'localhost', path, port: masterServerPort, method: 'GET' }
+		const req = request(opts, (masterRes) => {
+			let buf = ''
+			masterRes.on('data', (c) => { buf += c })
+			masterRes.on('end', () => resolve({ statusCode: masterRes.statusCode ?? 500, body: buf }))
+		})
+		req.on('error', (e) => reject(e))
+		req.end()
+	})
+
+/** myCards 缓存：30 秒内相同查询直接返回，减轻 master 负荷 */
+const MY_CARDS_CACHE_TTL_MS = 30 * 1000
+const myCardsCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
+
 const SC = beamio_ContractPool[0].constAccountRegistry
 
 const userOwnershipCheck = async (accountName: string, wallet: string) => {
@@ -766,6 +791,39 @@ const routing = ( router: Router ) => {
 			encrypKeyArmored: encrypKeyArmored.trim(),
 			routeKeyID: routeKeyID.trim()
 		}, res)
+	})
+
+	/** GET /api/myCards?owner=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */
+	router.get('/myCards', async (req, res) => {
+		const { owner, owners } = req.query as { owner?: string; owners?: string }
+		const addrs: string[] = []
+		if (owner && ethers.isAddress(owner)) addrs.push(ethers.getAddress(owner).toLowerCase())
+		if (owners && typeof owners === 'string') {
+			for (const a of owners.split(',').map((s) => s.trim())) {
+				if (a && ethers.isAddress(a)) addrs.push(ethers.getAddress(a).toLowerCase())
+			}
+		}
+		addrs.sort()
+		const cacheKey = addrs.length === 0 ? '' : addrs.join(',')
+		if (cacheKey) {
+			const cached = myCardsCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
+				return
+			}
+		}
+		const qs = Object.keys(req.query || {}).length ? '?' + new URLSearchParams(req.query as Record<string, string>).toString() : ''
+		const path = '/api/myCards' + qs
+		try {
+			const { statusCode, body } = await getLocalhostBuffer(path)
+			if (cacheKey && statusCode === 200) {
+				myCardsCache.set(cacheKey, { body, statusCode, expiry: Date.now() + MY_CARDS_CACHE_TTL_MS })
+			}
+			res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[myCards] forward error:'), e?.message ?? e)
+			res.status(502).json({ error: e?.message ?? 'Failed to fetch my cards' })
+		}
 	})
 
 	router.get('/deploySmartAccount', async (req,res) => {

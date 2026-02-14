@@ -11,6 +11,7 @@ import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDa
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
 
@@ -222,6 +223,72 @@ const routing = ( router: Router ) => {
 			const limit = Math.min(parseInt(String(_req.query.limit || 20), 10) || 20, 100)
 			const items = await getLatestCards(limit)
 			res.status(200).json({ items })
+		})
+
+		/** GET /api/myCards?owner=0x... 或 ?owners=0x1,0x2 - 客户端 RPC 失败时可由此 API 获取。30 秒缓存，统一各 cluster 结果。 */
+		const MY_CARDS_CACHE_TTL_MS = 30 * 1000
+		const myCardsCache = new Map<string, { items: Array<{ cardAddress: string; name: string; currency: string; priceE6: string; ptsPer1Currency: string }>; expiry: number }>()
+		router.get('/myCards', async (req, res) => {
+			const { owner, owners } = req.query as { owner?: string; owners?: string }
+			const ownerList: string[] = []
+			if (owner && ethers.isAddress(owner)) ownerList.push(ethers.getAddress(owner))
+			if (owners && typeof owners === 'string') {
+				for (const addr of owners.split(',').map((s) => s.trim())) {
+					if (addr && ethers.isAddress(addr)) ownerList.push(ethers.getAddress(addr))
+				}
+			}
+			if (ownerList.length === 0) {
+				return res.status(400).json({ error: 'Invalid owner or owners: require valid 0x address(es)' })
+			}
+			const cacheKey = [...ownerList].map((o) => o.toLowerCase()).sort().join(',')
+			const cached = myCardsCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json({ items: cached.items })
+			}
+			const CARD_ABI = ['function currency() view returns (uint8)', 'function pointsUnitPriceInCurrencyE6() view returns (uint256)']
+			const CURRENCY_MAP: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+			try {
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const factory = new ethers.Contract(BASE_CARD_FACTORY, ['function cardsOfOwner(address) view returns (address[])', 'function beamioUserCardOwner(address) view returns (address)'], provider)
+				const seen = new Set<string>()
+				const items: Array<{ cardAddress: string; name: string; currency: string; priceE6: string; ptsPer1Currency: string }> = []
+				for (const o of ownerList) {
+					const cards: string[] = await factory.cardsOfOwner(o)
+					for (const addr of cards) {
+						const key = addr.toLowerCase()
+						if (seen.has(key)) continue
+						seen.add(key)
+						try {
+							const card = new ethers.Contract(addr, CARD_ABI, provider)
+							const [currencyNum, priceE6Raw] = await Promise.all([card.currency(), card.pointsUnitPriceInCurrencyE6()])
+							const currency = CURRENCY_MAP[Number(currencyNum)] ?? 'USDC'
+							const priceE6 = Number(priceE6Raw)
+							const ptsPer1Currency = priceE6 > 0 ? String(1_000_000 / priceE6) : '0'
+							items.push({ cardAddress: addr, name: addr.toLowerCase() === BASE_CCSA_CARD_ADDRESS.toLowerCase() ? 'CCSA' : 'User Card', currency, priceE6: String(priceE6), ptsPer1Currency })
+						} catch (_) {}
+					}
+				}
+				// CCSA fallback: 若任一 owner 为 CCSA owner 且 CCSA 未在列表中，则加入
+				const ccsaLower = BASE_CCSA_CARD_ADDRESS.toLowerCase()
+				if (!seen.has(ccsaLower)) {
+					try {
+						const ccsaOwner = await factory.beamioUserCardOwner(BASE_CCSA_CARD_ADDRESS)
+						if (ccsaOwner && ownerList.some((o) => ccsaOwner.toLowerCase() === o.toLowerCase())) {
+							const card = new ethers.Contract(BASE_CCSA_CARD_ADDRESS, CARD_ABI, provider)
+							const [currencyNum, priceE6Raw] = await Promise.all([card.currency(), card.pointsUnitPriceInCurrencyE6()])
+							const currency = CURRENCY_MAP[Number(currencyNum)] ?? 'USDC'
+							const priceE6 = Number(priceE6Raw)
+							const ptsPer1Currency = priceE6 > 0 ? String(1_000_000 / priceE6) : '0'
+							items.unshift({ cardAddress: BASE_CCSA_CARD_ADDRESS, name: 'CCSA', currency, priceE6: String(priceE6), ptsPer1Currency })
+						}
+					} catch (_) {}
+				}
+				myCardsCache.set(cacheKey, { items, expiry: Date.now() + MY_CARDS_CACHE_TTL_MS })
+				res.status(200).json({ items })
+			} catch (err: any) {
+				logger(Colors.red('[myCards] error:'), err?.message ?? err)
+				res.status(500).json({ error: err?.message ?? 'Failed to fetch my cards' })
+			}
 		})
 
 		/** GET /api/ownerNftSeries - owner 钱包所有的 NFT 系列 */
