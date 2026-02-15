@@ -186,6 +186,34 @@ const getFollowCheck = async (wallet: string, followAddress: string) => {
 }
 
 const routing = ( router: Router ) => {
+
+	/** GET /api/manifest.json - 动态 manifest，cluster 独自处理，无需 master。支持 ?start_url= 或从 Referer 获取 */
+	router.get('/manifest.json', (req, res) => {
+		const startUrl = (req.query.start_url as string) || req.get('Referer') || ''
+		const protocol = req.get('X-Forwarded-Proto') || req.protocol || 'https'
+		const host = req.get('Host') || 'beamio.app'
+		const origin = `${protocol}://${host}`
+		const fallbackStartUrl = `${origin}/app/`
+		const url = startUrl && startUrl.startsWith('http') ? startUrl : fallbackStartUrl
+		const manifest = {
+			id: '/app/',
+			short_name: 'Beamio',
+			name: 'Beamio APP',
+			start_url: url,
+			scope: '/app/',
+			display: 'standalone' as const,
+			theme_color: '#0d0d0d',
+			background_color: '#0d0d0d',
+			icons: [
+				{ src: `${origin}/app/logo192.png`, sizes: '192x192', type: 'image/png', purpose: 'any' },
+				{ src: `${origin}/app/logo512.png`, sizes: '512x512', type: 'image/png', purpose: 'any' },
+				{ src: `${origin}/app/logo512-maskable.png`, sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+			],
+			shortcuts: [{ name: 'Open Beamio', short_name: 'Beamio', url: '/app/', icons: [{ src: `${origin}/app/logo192.png`, sizes: '192x192' }] }],
+		}
+		res.setHeader('Content-Type', 'application/manifest+json')
+		res.json(manifest)
+	})
 	
 	router.get('/search-users', (req,res) => {
 		searchUsers(req,res)
