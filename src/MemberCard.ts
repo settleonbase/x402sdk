@@ -1,7 +1,7 @@
 import { ethers } from 'ethers'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
-import { masterSetup, checkSign } from './util'
+import { masterSetup, checkSign, getBaseRpcUrlViaConetNode } from './util'
 import { Request, Response} from 'express'
 import { resolve } from 'node:path'
 import fs from 'node:fs'
@@ -2454,8 +2454,12 @@ export const getRedeemStatusBatchApi = async (
 		byCard.set(it.cardAddress, arr)
 	}
 	try {
+		// 优先使用 CoNET 节点访问 Base RPC（HTTP 协议），参照 SilentPassUI baseRpc
+		const baseRpcUrl = getBaseRpcUrlViaConetNode()
+		const baseNetwork = { name: 'base', chainId: 8453 } as const
+		const provider = baseRpcUrl ? new ethers.JsonRpcProvider(baseRpcUrl, baseNetwork, { staticNetwork: true }) : providerBaseBackup
 		for (const [cardAddress, cardItems] of byCard) {
-			const card = new ethers.Contract(cardAddress, GET_REDEEM_STATUS_BATCH_ABI, providerBaseBackup)
+			const card = new ethers.Contract(cardAddress, GET_REDEEM_STATUS_BATCH_ABI, provider)
 			const hashes = cardItems.map((i) =>
 				i.hash.length === 66 && i.hash.startsWith('0x') ? (i.hash as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(i.hash))
 			)
@@ -2629,7 +2633,10 @@ export const cardRedeemProcess = async () => {
 			txHash = tx1.hash
 		} catch (oneTimeErr: any) {
 			lastErr = oneTimeErr
-			const msg = String(oneTimeErr?.data ?? oneTimeErr?.message ?? oneTimeErr?.shortMessage ?? '')
+			const dataHex = typeof oneTimeErr?.data === 'string' ? oneTimeErr.data
+				: (oneTimeErr?.data && typeof oneTimeErr.data === 'object' && typeof (oneTimeErr.data as any).data === 'string') ? (oneTimeErr.data as any).data
+				: ''
+			const msg = String(dataHex || oneTimeErr?.message ?? oneTimeErr?.shortMessage ?? '')
 			if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669|reverted/i.test(msg)) {
 				try {
 					const tx2 = await factory.redeemPoolForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
@@ -2649,10 +2656,21 @@ export const cardRedeemProcess = async () => {
 	} catch (e: any) {
 		const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
 		logger(Colors.red(`❌ cardRedeemProcess failed:`), errMsg)
-		// UC_InvalidProposal：code 在此卡上不存在或已使用，提示用户检查卡地址
+		// 从多种位置提取 revert data（ethers v6 等结构可能不同）
+		const dataHex = typeof e?.data === 'string' ? e.data
+			: (e?.data && typeof e.data === 'object' && typeof (e.data as any).data === 'string') ? (e.data as any).data
+			: e?.info?.error?.data ?? e?.error?.data ?? ''
+		const dataStr = String(dataHex || errMsg)
+		// UC_InvalidProposal (0xfb713d2b) / UC_RedeemDelegateFailed (0xdccff669)：code 不存在或已使用
 		let clientError = errMsg
-		if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669/.test(String(e?.data ?? errMsg))) {
-			clientError = 'Code not found or already used. Please ensure you\'re redeeming against the correct card (the card where the code was created).'
+		if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669|UC_PoolAlreadyClaimed|0x038039a7/.test(dataStr)) {
+			if (/UC_PoolAlreadyClaimed|0x038039a7/.test(dataStr)) {
+				clientError = 'This redeem code has already been used by this account.'
+			} else if (/UC_InvalidTimeWindow|0xf88c1f68/.test(dataStr)) {
+				clientError = 'Redeem code has expired. Check validAfter/validBefore.'
+			} else {
+				clientError = 'Code not found or already used. Please ensure you\'re redeeming against the correct card (the card where the code was created).'
+			}
 		}
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: clientError }).end()
 	} finally {

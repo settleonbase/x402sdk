@@ -104,13 +104,22 @@ const beamioConetAccountRegistry = '0x3E15607BCf98B01e6C7dF834a2CEc7B8B6aFb1BC'
 
 let Guardian_Nodes: nodeInfo[] = []
 
-const getRandomNode = () => {
-    const _node1 = Guardian_Nodes[Math.floor(Math.random() * (Guardian_Nodes.length - 1))]
-    // return `https://${_node1.domain}.conet.network/solana-rpc`
-    return _node1.ip_addr
+/** 随机选取一个 Guardian 节点，返回其 ip_addr；无节点时返回 null */
+export const getRandomNode = (): string | null => {
+	if (!Guardian_Nodes.length) return null
+	const idx = Math.floor(Math.random() * Guardian_Nodes.length)
+	const _node1 = Guardian_Nodes[idx]
+	return _node1?.ip_addr ?? null
 }
 
-const getAllNodes = () => new Promise(async resolve=> {
+/** 通过 CoNET 节点获取 Base RPC URL（HTTP 协议），参照 SilentPassUI baseRpc；无节点时返回 null */
+export const getBaseRpcUrlViaConetNode = (): string | null => {
+	const ip = getRandomNode()
+	if (!ip) return null
+	return `http://${ip}/base-rpc`
+}
+
+export const getAllNodes = () => new Promise(async resolve=> {
 
 	const _nodes = await GuardianNodesMainnet.getAllNodes(0, 1000)
 	for (let i = 0; i < _nodes.length; i ++) {
@@ -242,7 +251,7 @@ export const oracolPrice = async () => {
  * @param enableOracle 是否启用链上 oracle 读取（仅 master 设为 true，cluster 从 master 拉取）
  */
 export const oracleBackoud = async (enableOracle = true) => {
-	// await getAllNodes()
+	await getAllNodes()
 	Settle_ContractPool = masterSetup.settle_contractAdmin.map(n => {
 
 		const account = privateKeyToAccount('0x' + n as `0x${string}`)
@@ -874,7 +883,8 @@ const processCheck = async() => {
 		return
 	}
 
-	const baseClient = createPublicClient({chain: base, transport: http(getRandomNode())})
+	const baseRpcUrl = getBaseRpcUrlViaConetNode() ?? BASE_RPC_URL
+	const baseClient = createPublicClient({chain: base, transport: http(baseRpcUrl)})
 	let baseHash: any
 	try {
 
@@ -968,7 +978,8 @@ const processCheckWithdraw = async () => {
 		}, 1000)
 	}
 
-	const baseClient = createPublicClient({chain: base, transport: http(`http://${getRandomNode()}/base-rpc`)})
+	const baseRpcUrl = getBaseRpcUrlViaConetNode() ?? BASE_RPC_URL
+	const baseClient = createPublicClient({chain: base, transport: http(baseRpcUrl)})
 	try {
 		const hash = ethers.solidityPackedKeccak256(['string'], [obj.code])
 
