@@ -2636,7 +2636,14 @@ export const cardRedeemProcess = async () => {
 			const dataHex = typeof oneTimeErr?.data === 'string' ? oneTimeErr.data
 				: (oneTimeErr?.data && typeof oneTimeErr.data === 'object' && typeof (oneTimeErr.data as any).data === 'string') ? (oneTimeErr.data as any).data
 				: ''
-			const msg = String(dataHex || oneTimeErr?.message ?? oneTimeErr?.shortMessage ?? '')
+			const msg = (() => {
+				try {
+					const m = oneTimeErr?.message ?? oneTimeErr?.shortMessage ?? ''
+					return String(dataHex || m)
+				} catch (_) {
+					return String(dataHex || '')
+				}
+			})()
 			if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669|reverted/i.test(msg)) {
 				try {
 					const tx2 = await factory.redeemPoolForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
