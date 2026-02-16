@@ -67,6 +67,7 @@ const routing = ( router: Router ) => {
 			shortcuts: [{ name: 'Open Beamio', short_name: 'Beamio', url: '/app/', icons: [{ src: `${origin}/app/logo192.png`, sizes: '192x192' }] }],
 		}
 		res.setHeader('Content-Type', 'application/manifest+json')
+		res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
 		res.json(manifest)
 	})
 
