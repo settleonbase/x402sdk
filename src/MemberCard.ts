@@ -1,7 +1,7 @@
 import { ethers } from 'ethers'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
-import { masterSetup, checkSign, getBaseRpcUrlViaConetNode } from './util'
+import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount } from './util'
 import { Request, Response} from 'express'
 import { resolve } from 'node:path'
 import fs from 'node:fs'
@@ -39,7 +39,7 @@ const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 const BeamioTaskIndexerAddress = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
 const DIAMOND = BeamioTaskIndexerAddress
 /** Base 主网 RPC：使用 ~/.master.json base_endpoint */
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://mainnet.base.org'
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
@@ -2454,10 +2454,20 @@ export const getRedeemStatusBatchApi = async (
 		byCard.set(it.cardAddress, arr)
 	}
 	try {
-		// 优先使用 CoNET 节点访问 Base RPC（HTTP 协议），参照 SilentPassUI baseRpc
+		// 仅使用 CoNET 节点访问 Base RPC（HTTP），不使用 base 官方或其他节点
 		const baseRpcUrl = getBaseRpcUrlViaConetNode()
+		if (!baseRpcUrl) {
+			const nodeCount = getGuardianNodesCount()
+			logger(Colors.yellow('[getRedeemStatusBatchApi] no CoNET nodes, skip RPC'), {
+				Guardian_Nodes_count: nodeCount,
+				items_count: items.length,
+				byCard_size: byCard.size,
+			})
+			items.forEach(({ hash }) => { result[hash] = 'pending' })
+			return result
+		}
 		const baseNetwork = { name: 'base', chainId: 8453 } as const
-		const provider = baseRpcUrl ? new ethers.JsonRpcProvider(baseRpcUrl, baseNetwork, { staticNetwork: true }) : providerBaseBackup
+		const provider = new ethers.JsonRpcProvider(baseRpcUrl, baseNetwork, { staticNetwork: true })
 		for (const [cardAddress, cardItems] of byCard) {
 			const card = new ethers.Contract(cardAddress, GET_REDEEM_STATUS_BATCH_ABI, provider)
 			const hashes = cardItems.map((i) =>

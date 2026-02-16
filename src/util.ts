@@ -119,6 +119,9 @@ export const getBaseRpcUrlViaConetNode = (): string | null => {
 	return `http://${ip}/base-rpc`
 }
 
+/** 供 debug：Guardian_Nodes 数量 */
+export const getGuardianNodesCount = (): number => Guardian_Nodes.length
+
 export const getAllNodes = () => new Promise(async resolve=> {
 
 	const _nodes = await GuardianNodesMainnet.getAllNodes(0, 1000)
