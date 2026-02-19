@@ -795,18 +795,6 @@ export const beamioTransferIndexerAccountingPool: {
 	res: Response
 }[] = []
 
-const ACTION_SYNC_V2_ABI: ethers.InterfaceAbi = [
-	"function syncTokenAction((bytes32,bytes32,uint256,bytes32,string,uint64,address,address,uint256,uint256,bool,(address,uint256,uint8,uint8,uint256,uint8,uint256)[],(uint16,uint256,uint256,uint256,uint256,uint256,address),(uint256,uint256,uint8,uint256,uint16,uint256,uint16,string,string))) external returns (uint256)"
-]
-
-const TX_TRANSFER_OUT_CONFIRMED = ethers.keccak256(ethers.toUtf8Bytes("transfer_out:confirmed"))
-const GAS_CHAIN_TYPE_ETH = 0
-const BASE_CHAIN_ID = 8453n
-const ROUTE_ASSET_TYPE_ERC20 = 0
-const ROUTE_SOURCE_MAIN = 0
-const CURRENCY_USDC = 4
-const CURRENCY_FIAT_USD = 1
-
 export const beamioTransferIndexerAccountingProcess = async () => {
 	const queueBefore = beamioTransferIndexerAccountingPool.length
 	const obj = beamioTransferIndexerAccountingPool.shift()
@@ -814,6 +802,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		return
 	}
 	logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] dequeue one job (queue ${queueBefore} -> ${beamioTransferIndexerAccountingPool.length}) txHash=${obj.finishedHash}`))
+	logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] 关联钱包: from(payer)=${obj.from} to(payee)=${obj.to}`))
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
 		logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] no admin wallet available, requeue txHash=${obj.finishedHash}`))
@@ -837,66 +826,44 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 		const gasWei = BigInt(obj.gasWei ?? '0')
 		const gasUSDC6 = BigInt(obj.gasUSDC6 ?? '0')
-		const gasChainType = Number(obj.gasChainType ?? GAS_CHAIN_TYPE_ETH)
+		const gasChainType = Number(obj.gasChainType ?? 0)
 		if (!Number.isInteger(gasChainType) || gasChainType < 0 || gasChainType > 1) {
 			throw new Error('gasChainType must be 0 or 1')
 		}
 		const feePayer = ethers.isAddress(obj.feePayer || '') ? String(obj.feePayer) : obj.from
 		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] normalized payload txHash=${txHash} from=${obj.from} to=${obj.to} amountUSDC6=${amountUSDC6} gasWei=${gasWei} gasUSDC6=${gasUSDC6} gasChainType=${gasChainType} feePayer=${feePayer}`))
 
-		const actionFacetV2 = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_V2_ABI, SC.walletConet)
-		const input = {
-			txId: txHash,
-			originalPaymentHash: ethers.ZeroHash,
-			chainId: BASE_CHAIN_ID,
-			txCategory: TX_TRANSFER_OUT_CONFIRMED,
-			displayJson: JSON.stringify({
+		// 使用与 AAtoEOA 相同的 syncTokenAction 格式（ActionABI / TransactionInput）
+		const actionInput = {
+			actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
+			card: ethers.getAddress(USDC_ADDRESS),
+			from: obj.from,
+			to: obj.to,
+			amount: amountUSDC6,
+			ts: 0n,
+			title: 'Beamio Transfer',
+			note: JSON.stringify({
 				title: 'Beamio Transfer',
-				note: obj.note || '',
 				finishedHash: txHash,
+				note: obj.note || '',
 				source: 'x402',
-			}),
-			timestamp: 0,
-			payer: obj.from,
-			payee: obj.to,
-			finalRequestAmountFiat6: amountUSDC6,
-			finalRequestAmountUSDC6: amountUSDC6,
-			isAAAccount: false,
-			route: [
-				{
-					asset: USDC_ADDRESS,
-					amountE6: amountUSDC6,
-					assetType: ROUTE_ASSET_TYPE_ERC20,
-					source: ROUTE_SOURCE_MAIN,
-					tokenId: 0,
-					itemCurrencyType: CURRENCY_USDC,
-					offsetInRequestCurrencyE6: amountUSDC6,
-				},
-			],
-			fees: {
+				gasWei: gasWei.toString(),
+				gasUSDC6: gasUSDC6.toString(),
 				gasChainType,
-				gasWei,
-				gasUSDC6,
-				serviceUSDC6: 0,
-				bServiceUSDC6: 0,
-				bServiceUnits6: 0,
 				feePayer,
-			},
-			meta: {
-				requestAmountFiat6: amountUSDC6,
-				requestAmountUSDC6: amountUSDC6,
-				currencyFiat: CURRENCY_FIAT_USD,
-				discountAmountFiat6: 0,
-				discountRateBps: 0,
-				taxAmountFiat6: 0,
-				taxRateBps: 0,
-				afterNotePayer: '',
-				afterNotePayee: obj.note || '',
-			},
+			}),
+			tax: 0n,
+			tip: 0n,
+			beamioFee1: 0n,
+			beamioFee2: 0n,
+			cardServiceFee: 0n,
+			afterTatchNoteByFrom: '',
+			afterTatchNoteByTo: '',
+			afterTatchNoteByCardOwner: obj.note || '',
 		}
 
 		logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] send syncTokenAction diamond=${BeamioTaskIndexerAddress} txHash=${txHash}`))
-		const tx = await actionFacetV2.syncTokenAction(input)
+		const tx = await SC.BeamioTaskDiamondAction.syncTokenAction(actionInput)
 		logger(Colors.green(`[beamioTransferIndexerAccountingProcess] syncTokenAction submitted hash=${tx.hash}`))
 		await tx.wait().catch((waitErr: any) => {
 			logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
