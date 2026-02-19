@@ -33,6 +33,7 @@
 		"@coinbase/cdp-sdk": "^1.39.0",
 		"@coinbase/onchainkit": "^1.1.2",
 		"@coinbase/x402": "^0.7.1",
+		"coinmarketcap-api": "^3.1.1",
 		"colors": "^1.4.0",
 		"cors": "^2.8.5",
 		"ethers": "^6.15.0",

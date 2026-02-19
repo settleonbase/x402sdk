@@ -36,7 +36,7 @@ const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 /** UserCard gateway = AA Factory（与 BASE_AA_FACTORY 一致） */
 const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 
-const BeamioTaskIndexerAddress = '0x43b25Da1d5516E98D569C1848b84d74B4b8cA6ad'
+const BeamioTaskIndexerAddress = '0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612'
 const DIAMOND = BeamioTaskIndexerAddress
 /** Base 主网 RPC：使用 ~/.master.json base_endpoint */
 const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
@@ -780,6 +780,134 @@ export const ContainerRelayPool: {
 	currencyDiscountAmount?: string | string[]
 	res: Response
 }[] = []
+
+/** BeamioTransfer 成功后的 Diamond 记账请求（由 master 排队处理） */
+export const beamioTransferIndexerAccountingPool: {
+	from: string
+	to: string
+	amountUSDC6: string
+	finishedHash: string
+	note?: string
+	gasWei?: string
+	gasUSDC6?: string
+	gasChainType?: number
+	feePayer?: string
+	res: Response
+}[] = []
+
+const ACTION_SYNC_V2_ABI: ethers.InterfaceAbi = [
+	"function syncTokenAction((bytes32,bytes32,uint256,bytes32,string,uint64,address,address,uint256,uint256,bool,(address,uint256,uint8,uint8,uint256,uint8,uint256)[],(uint16,uint256,uint256,uint256,uint256,uint256,address),(uint256,uint256,uint8,uint256,uint16,uint256,uint16,string,string))) external returns (uint256)"
+]
+
+const TX_TRANSFER_OUT_CONFIRMED = ethers.keccak256(ethers.toUtf8Bytes("transfer_out:confirmed"))
+const GAS_CHAIN_TYPE_ETH = 0
+const BASE_CHAIN_ID = 8453n
+const ROUTE_ASSET_TYPE_ERC20 = 0
+const ROUTE_SOURCE_MAIN = 0
+const CURRENCY_USDC = 4
+const CURRENCY_FIAT_USD = 1
+
+export const beamioTransferIndexerAccountingProcess = async () => {
+	const obj = beamioTransferIndexerAccountingPool.shift()
+	if (!obj) {
+		return
+	}
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		beamioTransferIndexerAccountingPool.unshift(obj)
+		return setTimeout(() => beamioTransferIndexerAccountingProcess(), 3000)
+	}
+
+	try {
+		if (!ethers.isAddress(obj.from) || !ethers.isAddress(obj.to)) {
+			throw new Error('invalid from/to address')
+		}
+		const amountUSDC6 = BigInt(obj.amountUSDC6 || '0')
+		if (amountUSDC6 <= 0n) {
+			throw new Error('amountUSDC6 must be > 0')
+		}
+		const txHash = String(obj.finishedHash || '')
+		if (!ethers.isHexString(txHash) || ethers.dataLength(txHash) !== 32) {
+			throw new Error('finishedHash must be bytes32 tx hash')
+		}
+		const gasWei = BigInt(obj.gasWei ?? '0')
+		const gasUSDC6 = BigInt(obj.gasUSDC6 ?? '0')
+		const gasChainType = Number(obj.gasChainType ?? GAS_CHAIN_TYPE_ETH)
+		if (!Number.isInteger(gasChainType) || gasChainType < 0 || gasChainType > 1) {
+			throw new Error('gasChainType must be 0 or 1')
+		}
+		const feePayer = ethers.isAddress(obj.feePayer || '') ? String(obj.feePayer) : obj.from
+
+		const actionFacetV2 = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_V2_ABI, SC.walletConet)
+		const input = {
+			txId: txHash,
+			originalPaymentHash: ethers.ZeroHash,
+			chainId: BASE_CHAIN_ID,
+			txCategory: TX_TRANSFER_OUT_CONFIRMED,
+			displayJson: JSON.stringify({
+				title: 'Beamio Transfer',
+				note: obj.note || '',
+				finishedHash: txHash,
+				source: 'x402',
+			}),
+			timestamp: 0,
+			payer: obj.from,
+			payee: obj.to,
+			finalRequestAmountFiat6: amountUSDC6,
+			finalRequestAmountUSDC6: amountUSDC6,
+			isAAAccount: false,
+			route: [
+				{
+					asset: USDC_ADDRESS,
+					amountE6: amountUSDC6,
+					assetType: ROUTE_ASSET_TYPE_ERC20,
+					source: ROUTE_SOURCE_MAIN,
+					tokenId: 0,
+					itemCurrencyType: CURRENCY_USDC,
+					offsetInRequestCurrencyE6: amountUSDC6,
+				},
+			],
+			fees: {
+				gasChainType,
+				gasWei,
+				gasUSDC6,
+				serviceUSDC6: 0,
+				bServiceUSDC6: 0,
+				bServiceUnits6: 0,
+				feePayer,
+			},
+			meta: {
+				requestAmountFiat6: amountUSDC6,
+				requestAmountUSDC6: amountUSDC6,
+				currencyFiat: CURRENCY_FIAT_USD,
+				discountAmountFiat6: 0,
+				discountRateBps: 0,
+				taxAmountFiat6: 0,
+				taxRateBps: 0,
+				afterNotePayer: '',
+				afterNotePayee: obj.note || '',
+			},
+		}
+
+		const tx = await actionFacetV2.syncTokenAction(input)
+		await tx.wait().catch((waitErr: any) => {
+			logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+		})
+		logger(Colors.green(`[beamioTransferIndexerAccountingProcess] indexed txHash=${txHash} syncTx=${tx.hash} from=${obj.from} to=${obj.to} amountUSDC6=${amountUSDC6}`))
+		if (!obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, indexed: true, txHash, syncTx: tx.hash }).end()
+		}
+	} catch (error: any) {
+		const msg = error?.shortMessage ?? error?.message ?? String(error)
+		logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] failed: ${msg}`), inspect(obj, false, 3, true))
+		if (!obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
+		}
+	}
+
+	Settle_ContractPool.unshift(SC)
+	setTimeout(() => beamioTransferIndexerAccountingProcess(), 1000)
+}
 
 /** Factory.relayContainerMainRelayed 的 ABI 片段 */
 const RELAY_MAIN_ABI = {

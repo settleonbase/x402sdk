@@ -1,4 +1,5 @@
 type IMasterSetup = {
+	CoinMarketCapAPIKey: string
 	BeamioOfficial: string
 	settle_admin: string
 	settle_u1: string

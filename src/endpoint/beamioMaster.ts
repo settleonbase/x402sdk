@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -633,6 +633,63 @@ const routing = ( router: Router ) => {
 			logger(` Master GOT /api/purchasingCard ${preChecked ? '[preChecked]' : ''} doing purchasingCardProcess...`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preChecked }, false, 3, true))
 			purchasingCardProcess().catch((err: any) => {
 				logger(Colors.red('[purchasingCardProcess] unhandled error (fire-and-forget):'), err?.message ?? err)
+			})
+		})
+
+		/** x402 BeamioTransfer 成功后：写入 BeamioIndexerDiamond（master 队列处理） */
+		router.post('/beamioTransferIndexerAccounting', (req, res) => {
+			const { from, to, amountUSDC6, finishedHash, note, gasWei, gasUSDC6, gasChainType, feePayer } = req.body as {
+				from?: string
+				to?: string
+				amountUSDC6?: string
+				finishedHash?: string
+				note?: string
+				gasWei?: string
+				gasUSDC6?: string
+				gasChainType?: number
+				feePayer?: string
+			}
+			if (!ethers.isAddress(from) || !ethers.isAddress(to) || !amountUSDC6 || !finishedHash || !ethers.isAddress(feePayer)) {
+				return res.status(400).json({ success: false, error: 'Invalid payload: from,to,amountUSDC6,finishedHash,feePayer required' }).end()
+			}
+			try {
+				const amount = BigInt(amountUSDC6)
+				if (amount <= 0n) {
+					return res.status(400).json({ success: false, error: 'amountUSDC6 must be > 0' }).end()
+				}
+				if (!ethers.isHexString(finishedHash) || ethers.dataLength(finishedHash) !== 32) {
+					return res.status(400).json({ success: false, error: 'finishedHash must be bytes32 tx hash' }).end()
+				}
+				const _gasWei = BigInt(gasWei ?? '0')
+				if (_gasWei < 0n) {
+					return res.status(400).json({ success: false, error: 'gasWei must be >= 0' }).end()
+				}
+				const _gasUSDC6 = BigInt(gasUSDC6 ?? '0')
+				if (_gasUSDC6 < 0n) {
+					return res.status(400).json({ success: false, error: 'gasUSDC6 must be >= 0' }).end()
+				}
+				if (gasChainType == null || !Number.isInteger(gasChainType) || gasChainType < 0 || gasChainType > 1) {
+					return res.status(400).json({ success: false, error: 'gasChainType must be 0(ETH) or 1(SOLANA)' }).end()
+				}
+			} catch {
+				return res.status(400).json({ success: false, error: 'Invalid bigint string: amountUSDC6/gasWei/gasUSDC6' }).end()
+			}
+
+			beamioTransferIndexerAccountingPool.push({
+				from: String(from),
+				to: String(to),
+				amountUSDC6: String(amountUSDC6),
+				finishedHash: String(finishedHash),
+				note: note ? String(note) : '',
+				gasWei: String(gasWei ?? '0'),
+				gasUSDC6: String(gasUSDC6 ?? '0'),
+				gasChainType: Number(gasChainType ?? 0),
+				feePayer: String(feePayer),
+				res,
+			})
+			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6}`))
+			beamioTransferIndexerAccountingProcess().catch((err: any) => {
+				logger(Colors.red('[beamioTransferIndexerAccountingProcess] unhandled error:'), err?.message ?? err)
 			})
 		})
 

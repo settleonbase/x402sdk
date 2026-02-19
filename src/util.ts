@@ -20,6 +20,7 @@ import {
 	} from "x402/types"
 import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x402/shared"
 import { inspect } from 'node:util'
+import { request as httpRequest, type RequestOptions } from 'node:http'
 const uuid62 = require('uuid62')
 import { createPublicClient, createWalletClient, http, getContract, parseEther, parseAbi, NumberToHexErrorType } from 'viem'
 import { base } from 'viem/chains'
@@ -77,6 +78,7 @@ const conetEndpoint = 'https://mainnet-rpc1.conet.network'
 const CashCodeBaseAddr = '0x3977f35c531895CeD50fAf5e02bd9e7EB890D2D1'
 const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
+const masterServerPort = 1111
 
 const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
 export const MINT_RATE = ethers.parseUnits('7000', 18)
@@ -209,7 +211,7 @@ const oracle = {
 
 let oracolPriceProcess = false
 
-/** BeamioCurrency: CAD=0, USD=1, JPY=2, CNY=3, USDC=4, HKD=5, EUR=6, SGD=7, TWD=8
+/** BeamioCurrency: CAD=0, USD=1, JPY=2, CNY=3, USDC=4, HKD=5, EUR=6, SGD=7, TWD=8, ETH=9, BNB=10, SOLANA=11, BTC=12
  * 链上 getRate(c) 返回「1 该货币 = X USD」；UI 期望「1 USD = X 该货币」，故对非 USD/USDC 需取倒数
  */
 const inv = (s: string) => {
@@ -639,6 +641,13 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 			transferRecord.push(record)
 			logger(inspect(record, false, 3, true))
 			transferRecordProcess()
+			void submitBeamioTransferIndexerAccountingToMaster({
+				from,
+				to,
+				amountUSDC6: amount.toString(),
+				finishedHash: String(responseData?.transaction || ''),
+				note: note || '',
+			})
 		}
 		
 		return 
@@ -648,6 +657,116 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 		res.status(500).end()
 	}
 	
+}
+
+const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
+	from: string
+	to: string
+	amountUSDC6: string
+	finishedHash: string
+	note: string
+}) => {
+	if (!ethers.isAddress(payload.from) || !ethers.isAddress(payload.to)) {
+		return
+	}
+	try {
+		if (!payload.amountUSDC6 || BigInt(payload.amountUSDC6) <= 0n) {
+			return
+		}
+	} catch {
+		return
+	}
+	if (!ethers.isHexString(payload.finishedHash) || ethers.dataLength(payload.finishedHash) !== 32) {
+		return
+	}
+	const gasFields = await estimateTransferGasFields(payload.finishedHash)
+
+	const option: RequestOptions = {
+		hostname: 'localhost',
+		path: '/api/beamioTransferIndexerAccounting',
+		port: masterServerPort,
+		method: 'POST',
+		protocol: 'http:',
+		headers: {
+			'Content-Type': 'application/json',
+		},
+	}
+
+	await new Promise<void>((resolve) => {
+		const req = httpRequest(option, (res) => {
+			let body = ''
+			res.on('data', (c) => { body += c.toString() })
+			res.on('end', () => {
+				if ((res.statusCode || 500) >= 400) {
+					logger(`[BeamioTransfer] submitBeamioTransferIndexerAccountingToMaster failed status=${res.statusCode} body=${body}`)
+				}
+				resolve()
+			})
+		})
+		req.once('error', (e) => {
+			logger(`[BeamioTransfer] submitBeamioTransferIndexerAccountingToMaster error: ${e.message}`)
+			resolve()
+		})
+		req.write(JSON.stringify({
+			...payload,
+			gasWei: gasFields.gasWei,
+			gasUSDC6: gasFields.gasUSDC6,
+			gasChainType: gasFields.gasChainType,
+			feePayer: payload.from,
+		}))
+		req.end()
+	})
+}
+
+const estimateTransferGasFields = async (txHash: string): Promise<{
+	gasWei: string
+	gasUSDC6: string
+	gasChainType: number
+}> => {
+	const GAS_CHAIN_TYPE_ETH = 0
+	const CURRENCY_USDC = 4
+	const CURRENCY_ETH = 9
+	const E18 = 10n ** 18n
+	const E6 = 10n ** 6n
+	try {
+		const receipt = await providerBase.getTransactionReceipt(txHash)
+		if (!receipt) {
+			return { gasWei: '0', gasUSDC6: '0', gasChainType: GAS_CHAIN_TYPE_ETH }
+		}
+		const gasUsed = receipt.gasUsed ?? 0n
+		let gasPrice = receipt.gasPrice ?? 0n
+		if (gasPrice <= 0n) {
+			const tx = await providerBase.getTransaction(txHash)
+			gasPrice = tx?.gasPrice ?? 0n
+		}
+		const gasWei = gasUsed * gasPrice
+
+		let gasUSDC6 = 0n
+		try {
+			// BeamioOracle: rate = "1 currency = X USD" (E18)
+			const [ethUsdE18, usdcUsdE18] = await Promise.all([
+				oracleSCBase.getRate(CURRENCY_ETH) as Promise<bigint>,
+				oracleSCBase.getRate(CURRENCY_USDC) as Promise<bigint>,
+			])
+			if (ethUsdE18 > 0n && usdcUsdE18 > 0n && gasWei > 0n) {
+				// wei -> USD(E18): gasWei * ethUsd / 1e18
+				const usdE18 = (gasWei * ethUsdE18) / E18
+				// USD(E18) -> USDC(6): usdE18 * 1e6 / usdcUsdE18, round half up
+				gasUSDC6 = (usdE18 * E6 + (usdcUsdE18 / 2n)) / usdcUsdE18
+			}
+		} catch (oracleErr: any) {
+			logger(`[BeamioTransfer] estimateTransferGasFields oracle fallback gasUSDC6=0: ${oracleErr?.message ?? String(oracleErr)}`)
+		}
+
+		return {
+			gasWei: gasWei.toString(),
+			gasUSDC6: gasUSDC6.toString(),
+			gasChainType: GAS_CHAIN_TYPE_ETH,
+		}
+	} catch (ex: any) {
+		logger(`[BeamioTransfer] estimateTransferGasFields failed: ${ex?.message ?? String(ex)}`)
+		return { gasWei: '0', gasUSDC6: '0', gasChainType: GAS_CHAIN_TYPE_ETH }
+	}
 }
 
 const transferRecord: {
