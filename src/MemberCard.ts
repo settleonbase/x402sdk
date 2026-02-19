@@ -808,15 +808,20 @@ const CURRENCY_USDC = 4
 const CURRENCY_FIAT_USD = 1
 
 export const beamioTransferIndexerAccountingProcess = async () => {
+	const queueBefore = beamioTransferIndexerAccountingPool.length
 	const obj = beamioTransferIndexerAccountingPool.shift()
 	if (!obj) {
 		return
 	}
+	logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] dequeue one job (queue ${queueBefore} -> ${beamioTransferIndexerAccountingPool.length}) txHash=${obj.finishedHash}`))
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
+		logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] no admin wallet available, requeue txHash=${obj.finishedHash}`))
 		beamioTransferIndexerAccountingPool.unshift(obj)
+		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] queue restore -> ${beamioTransferIndexerAccountingPool.length}`))
 		return setTimeout(() => beamioTransferIndexerAccountingProcess(), 3000)
 	}
+	logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] picked admin=${SC.walletConet.address}, remaining admins=${Settle_ContractPool.length}`))
 
 	try {
 		if (!ethers.isAddress(obj.from) || !ethers.isAddress(obj.to)) {
@@ -837,6 +842,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			throw new Error('gasChainType must be 0 or 1')
 		}
 		const feePayer = ethers.isAddress(obj.feePayer || '') ? String(obj.feePayer) : obj.from
+		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] normalized payload txHash=${txHash} from=${obj.from} to=${obj.to} amountUSDC6=${amountUSDC6} gasWei=${gasWei} gasUSDC6=${gasUSDC6} gasChainType=${gasChainType} feePayer=${feePayer}`))
 
 		const actionFacetV2 = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_V2_ABI, SC.walletConet)
 		const input = {
@@ -889,7 +895,9 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			},
 		}
 
+		logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] send syncTokenAction diamond=${BeamioTaskIndexerAddress} txHash=${txHash}`))
 		const tx = await actionFacetV2.syncTokenAction(input)
+		logger(Colors.green(`[beamioTransferIndexerAccountingProcess] syncTokenAction submitted hash=${tx.hash}`))
 		await tx.wait().catch((waitErr: any) => {
 			logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
 		})
@@ -906,6 +914,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 	}
 
 	Settle_ContractPool.unshift(SC)
+	logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] admin wallet returned=${SC.walletConet.address}, admins=${Settle_ContractPool.length}, queue=${beamioTransferIndexerAccountingPool.length}`))
 	setTimeout(() => beamioTransferIndexerAccountingProcess(), 1000)
 }
 
