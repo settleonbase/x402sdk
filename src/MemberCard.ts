@@ -1,7 +1,7 @@
 import { ethers } from 'ethers'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
-import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount } from './util'
+import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6 } from './util'
 import { Request, Response} from 'express'
 import { resolve } from 'node:path'
 import fs from 'node:fs'
@@ -828,21 +828,56 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		if (!ethers.isHexString(txHash) || ethers.dataLength(txHash) !== 32) {
 			throw new Error('finishedHash must be bytes32 tx hash')
 		}
-		const gasWei = BigInt(obj.gasWei ?? '0')
-		const gasUSDC6 = BigInt(obj.gasUSDC6 ?? '0')
+		let gasWei = BigInt(obj.gasWei ?? '0')
+		let gasUSDC6 = BigInt(obj.gasUSDC6 ?? '0')
 		const gasChainType = Number(obj.gasChainType ?? 0)
 		if (!Number.isInteger(gasChainType) || gasChainType < 0 || gasChainType > 1) {
 			throw new Error('gasChainType must be 0 or 1')
 		}
 		const feePayer = ethers.isAddress(obj.feePayer || '') ? String(obj.feePayer) : obj.from
+
+		// gasUSDC6 为 0 且有 gasWei 时，通过 BeamioOracle 换算
+		if (gasUSDC6 <= 0n && gasWei > 0n) {
+			gasUSDC6 = await convertGasWeiToUSDC6(gasWei)
+			logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] gasUSDC6 from oracle: gasWei=${gasWei} -> gasUSDC6=${gasUSDC6}`))
+		}
 		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] normalized payload txHash=${txHash} from=${obj.from} to=${obj.to} amountUSDC6=${amountUSDC6} gasWei=${gasWei} gasUSDC6=${gasUSDC6} gasChainType=${gasChainType} feePayer=${feePayer}`))
+
+		// 解析 note 中的 JSON（客户端如 {"currency":"CAD","currencyAmount":"0.01"}）
+		const BeamioCurrencyMap: Record<string, number> = { CAD: 0, USD: 1, JPY: 2, CNY: 3, USDC: 4, HKD: 5, EUR: 6, SGD: 7, TWD: 8, ETH: 9, BNB: 10, SOLANA: 11, BTC: 12 }
+		let requestAmountFiat6 = 0n
+		let currencyFiat = 4 // 默认 USDC
+		const noteStr = (obj.note || '').trim()
+		if (noteStr) {
+			const jsonMatch = noteStr.match(/\{[\s\S]*\}/)
+			if (jsonMatch) {
+				try {
+					const parsed = JSON.parse(jsonMatch[0]) as { currency?: string; currencyAmount?: string | number }
+					const cur = String(parsed.currency || 'USDC').toUpperCase()
+					currencyFiat = BeamioCurrencyMap[cur] ?? 4
+					const amt = parsed.currencyAmount
+					if (amt != null && amt !== '') {
+						const val = typeof amt === 'number' ? amt : parseFloat(String(amt))
+						if (!Number.isNaN(val) && val >= 0) requestAmountFiat6 = BigInt(Math.round(val * 1e6))
+					}
+				} catch (_) { /* 解析失败则保持默认 */ }
+			}
+		}
+		// 无 note 时，requestAmountFiat6 用 amountUSDC6 作为等价（1 USDC ≈ 1 USD）
+		if (requestAmountFiat6 <= 0n) {
+			requestAmountFiat6 = amountUSDC6
+			currencyFiat = 4 // USDC
+		}
+		const discountAmountFiat6 = 0n
+		const taxAmountFiat6 = 0n
+		const finalRequestAmountFiat6 = requestAmountFiat6 - discountAmountFiat6 + taxAmountFiat6
 
 		// 使用 ActionFacet.TransactionInput 格式（与 Indexer Diamond 当前 ActionFacet 一致）
 		const TX_TRANSFER_OUT = ethers.keccak256(ethers.toUtf8Bytes('transfer_out:confirmed'))
 		const CHAIN_ID_BASE = 8453n
 		const displayJson = JSON.stringify({
 			title: 'Beamio Transfer',
-			handle: (obj.note || '').replace(/\r?\n/g, ' ').trim().slice(0, 80),
+			handle: noteStr.replace(/\r?\n/g, ' ').trim().slice(0, 80),
 			finishedHash: txHash,
 			source: 'x402',
 		})
@@ -855,7 +890,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			timestamp: 0n,
 			payer: ethers.getAddress(obj.from),
 			payee: ethers.getAddress(obj.to),
-			finalRequestAmountFiat6: 0n,
+			finalRequestAmountFiat6,
 			finalRequestAmountUSDC6: amountUSDC6,
 			isAAAccount: false,
 			route: [] as { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[],
@@ -869,12 +904,12 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				feePayer,
 			},
 			meta: {
-				requestAmountFiat6: 0n,
+				requestAmountFiat6,
 				requestAmountUSDC6: amountUSDC6,
-				currencyFiat: 0,
-				discountAmountFiat6: 0n,
+				currencyFiat,
+				discountAmountFiat6,
 				discountRateBps: 0,
-				taxAmountFiat6: 0n,
+				taxAmountFiat6,
 				taxRateBps: 0,
 				afterNotePayer: '',
 				afterNotePayee: obj.note || '',

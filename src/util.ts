@@ -769,6 +769,27 @@ const estimateTransferGasFields = async (txHash: string): Promise<{
 	}
 }
 
+/** 将 gasWei 通过 BeamioOracle 换算为 gasUSDC6，供 beamioTransferIndexerAccounting 使用 */
+export const convertGasWeiToUSDC6 = async (gasWei: bigint): Promise<bigint> => {
+	const CURRENCY_USDC = 4
+	const CURRENCY_ETH = 9
+	const E18 = 10n ** 18n
+	const E6 = 10n ** 6n
+	if (gasWei <= 0n) return 0n
+	try {
+		const [ethUsdE18, usdcUsdE18] = await Promise.all([
+			oracleSCBase.getRate(CURRENCY_ETH) as Promise<bigint>,
+			oracleSCBase.getRate(CURRENCY_USDC) as Promise<bigint>,
+		])
+		if (ethUsdE18 <= 0n || usdcUsdE18 <= 0n) return 0n
+		const usdE18 = (gasWei * ethUsdE18) / E18
+		return (usdE18 * E6 + (usdcUsdE18 / 2n)) / usdcUsdE18
+	} catch (e: any) {
+		logger(`[convertGasWeiToUSDC6] oracle failed: ${e?.message ?? String(e)}`)
+		return 0n
+	}
+}
+
 const transferRecord: {
 	from: string
 	to: string
