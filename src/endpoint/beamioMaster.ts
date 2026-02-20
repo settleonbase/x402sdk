@@ -638,7 +638,7 @@ const routing = ( router: Router ) => {
 
 		/** x402 BeamioTransfer 成功后：写入 BeamioIndexerDiamond（master 队列处理） */
 		router.post('/beamioTransferIndexerAccounting', (req, res) => {
-			const { from, to, amountUSDC6, finishedHash, note, gasWei, gasUSDC6, gasChainType, feePayer } = req.body as {
+			const { from, to, amountUSDC6, finishedHash, note, gasWei, gasUSDC6, gasChainType, feePayer, isInternalTransfer } = req.body as {
 				from?: string
 				to?: string
 				amountUSDC6?: string
@@ -648,6 +648,7 @@ const routing = ( router: Router ) => {
 				gasUSDC6?: string
 				gasChainType?: number
 				feePayer?: string
+				isInternalTransfer?: boolean
 			}
 			if (!ethers.isAddress(from) || !ethers.isAddress(to) || !amountUSDC6 || !finishedHash || !ethers.isAddress(feePayer)) {
 				return res.status(400).json({ success: false, error: 'Invalid payload: from,to,amountUSDC6,finishedHash,feePayer required' }).end()
