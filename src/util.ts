@@ -638,9 +638,7 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 			const record = {
 				from, to, amount, finishedHash: responseData?.transaction, note: note||''
 			}
-			transferRecord.push(record)
 			logger(inspect(record, false, 3, true))
-			transferRecordProcess()
 			void submitBeamioTransferIndexerAccountingToMaster({
 				from,
 				to,
@@ -788,44 +786,6 @@ export const convertGasWeiToUSDC6 = async (gasWei: bigint): Promise<bigint> => {
 		logger(`[convertGasWeiToUSDC6] oracle failed: ${e?.message ?? String(e)}`)
 		return 0n
 	}
-}
-
-const transferRecord: {
-	from: string
-	to: string
-	amount: string
-	finishedHash: string
-	note: string
-}[] = []
-
-const transferRecordProcess = async () => {
-	const obj = transferRecord.shift()
-	if (!obj) {
-		return
-	}
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-		transferRecord.unshift()
-		return setTimeout(() => {
-			transferRecordProcess()
-		}, 2000)
-	}
-
-	try {
-		const tx = await SC.conetSC.transferRecord(
-			obj.from,
-			obj.to,
-			obj.amount,
-			obj.finishedHash,
-			obj.note
-		)
-		await tx.wait()
-	} catch (ex: any) {
-		logger(`transferRecordProcess Error!`, ex.message, inspect(obj, false, 3, true))
-	}
-
-	Settle_ContractPool.push(SC)
-	setTimeout(() => {transferRecordProcess()}, 1000)
 }
 
 const generateCODE = (passcode: string) => {

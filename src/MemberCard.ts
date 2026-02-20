@@ -1312,24 +1312,14 @@ export const purchasingCardProcess = async () => {
 
 		logger(Colors.green(`✅ purchasingCardProcess note: ${payMe}`))
 
-		// 以下记账（transferRecord、syncTokenAction）在后台执行，客户端已收到 hash；任一项失败不影响购点成功
+		// 以下记账（syncTokenAction -> BeamioIndexerDiamond）在后台执行，客户端已收到 hash；失败不影响购点成功
 		try {
-			const tr = await SC.conetSC.transferRecord(
-				obj.from,
-				to,
-				usdcAmount,
-				tx.hash,
-				`\r\n${JSON.stringify(payMe)}`
-			)
-			await tr.wait().catch((waitErr: any) => {
-				logger(Colors.yellow(`[purchasingCardProcess] tr.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
-			})
 			const actionFacet = await SC.BeamioTaskDiamondAction
 			const tx2 = await actionFacet.syncTokenAction(input)
 			await tx2.wait().catch((waitErr: any) => {
 				logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
 			})
-			logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
+			logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} syncTokenAction=${tx2.hash}`))
 		} catch (accountingErr: any) {
 			// Diamond: fn not found 等：syncTokenAction 未在 Diamond 上配置时发生，购点已成功，仅记账失败
 			logger(Colors.yellow(`[purchasingCardProcess] accounting non-critical (purchase succeeded): ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
@@ -1795,7 +1785,7 @@ export const AAtoEOAProcess = async () => {
       }
     })
 
-    // 记账：transferRecord + syncTokenAction（USDC 转账，card 为 USDC 地址，title 为 "Express Pay to EOA"）
+    // 记账：syncTokenAction via beamioTransferIndexerAccountingPool（USDC 转账，card 为 USDC 地址，title 为 "Express Pay to EOA"）
     const toEOA = ethers.getAddress(obj.toEOA)
     const amountUSDC6BigInt = BigInt(obj.amountUSDC6)
     const usdcAmountHuman = Number(amountUSDC6BigInt) / 1e6
@@ -1805,24 +1795,6 @@ export const AAtoEOAProcess = async () => {
       title: 'Express Pay to EOA',
       usdcAmount: usdcAmountHuman,
       parentHash: tx.hash,
-    }
-    try {
-      const tr = await SC.conetSC.transferRecord(
-        sender,
-        toEOA,
-        amountUSDC6BigInt,
-        tx.hash,
-        `\r\n${JSON.stringify(payMeData)}`
-      )
-      logger(`[AAtoEOA] transferRecord submitted hash=${tr.hash}`)
-      try {
-        await tr.wait()
-        logger(`[AAtoEOA] transferRecord.wait() completed successfully`)
-      } catch (waitErr: any) {
-        logger(Colors.yellow(`[AAtoEOA] transferRecord.wait() failed (non-critical): ${waitErr?.shortMessage || waitErr?.message || waitErr}`))
-      }
-    } catch (trErr: any) {
-      logger(Colors.yellow(`[AAtoEOA] transferRecord failed (non-critical): ${trErr?.shortMessage || trErr?.message || trErr}`))
     }
     // 记账入 BeamioIndexerDiamond（与 BeamioTransfer 一致，使用 internal_transfer:confirmed 区分内部转账）
     const noteForIndexer = `\r\n${JSON.stringify(payMeData)}`
@@ -1963,7 +1935,7 @@ export const OpenContainerRelayProcess = async () => {
     // Base 转账完成后立即返回 hash 给客户端，不等待记账
     if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
-    // 以下记账（transferRecord、syncTokenAction）在后台执行，客户端已收到 hash
+    // 以下记账（syncTokenAction）在后台执行，客户端已收到 hash
     // 优先使用 UI 客户端传递的 currency、currencyAmount、currencyDiscount、currencyDiscountAmount（可能是数组或单个值）
     const currencyFromClient = obj.currency
     const currencyAmountFromClient = obj.currencyAmount
@@ -1979,7 +1951,6 @@ export const OpenContainerRelayProcess = async () => {
     // 按 item 拆分，每条转账记录只记录一种资产
     const usdcAddress = ethers.getAddress(USDC_ADDRESS)
     const ccsacardAddress = ethers.getAddress(BASE_CCSA_CARD_ADDRESS)
-    const trHashes: string[] = []
     const syncTokenActionHashes: string[] = []
     
     // 用于跟踪实际处理的 item 索引（跳过非 USDC/CCSA 的 item）
@@ -2038,29 +2009,6 @@ export const OpenContainerRelayProcess = async () => {
       logger(`[AAtoEOA/OpenContainer] Processing item ${i}: ${assetType}, amount=${assetAmount.toString()}, title=${title}`)
       logger(Colors.green(`✅ OpenContainerRelayProcess item ${i} payMe = ${inspect(payMeData, false, 2, true)}`))
       
-      // transferRecord
-      try {
-        logger(`[AAtoEOA/OpenContainer] Calling transferRecord for item ${i} (${assetType})...`)
-        const tr = await SC.conetSC.transferRecord(
-          account,
-          to,
-          assetAmount,
-          tx.hash,
-          `\r\n${JSON.stringify(payMeData)}`
-        )
-        logger(`[AAtoEOA/OpenContainer] transferRecord[${i}] submitted hash=${tr.hash}`)
-        await tr.wait().catch((waitErr: any) => {
-          try {
-            logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
-          } catch (_) {
-            console.error(`[AAtoEOA/OpenContainer] transferRecord[${i}].wait() failed (RPC):`, waitErr)
-          }
-        })
-        trHashes.push(tr.hash)
-      } catch (trError: any) {
-        logger(Colors.yellow(`[AAtoEOA/OpenContainer] transferRecord[${i}] failed (non-critical): ${trError?.shortMessage || trError?.message || trError}`))
-      }
-
       // syncTokenAction（USDC 时 card 为 USDC 地址，CCSA 时为 CCSA 卡地址）
       try {
         const actionInput = {
@@ -2098,7 +2046,7 @@ export const OpenContainerRelayProcess = async () => {
       }
     }
     
-    const successMsg = `✅ OpenContainerRelayProcess accounting done: tx=${tx.hash}${trHashes.length > 0 ? ` conetSC=[${trHashes.join(', ')}]` : ''}${syncTokenActionHashes.length > 0 ? ` syncTokenAction=[${syncTokenActionHashes.join(', ')}]` : ''}`
+    const successMsg = `✅ OpenContainerRelayProcess accounting done: tx=${tx.hash}${syncTokenActionHashes.length > 0 ? ` syncTokenAction=[${syncTokenActionHashes.join(', ')}]` : ''}`
     logger(Colors.green(successMsg))
   } catch (error: any) {
     let msg = error?.shortMessage || error?.message || String(error)
@@ -2215,20 +2163,6 @@ export const ContainerRelayProcess = async () => {
       parentHash: tx.hash,
     }
     logger(Colors.green(`✅ ContainerRelayProcess payMe = ${inspect(payMeData, false, 2, true)}`))
-    const tr = await SC.conetSC.transferRecord(
-      account,
-      to,
-      usdcAmountRaw,
-      tx.hash,
-      `\r\n${JSON.stringify(payMeData)}`
-    )
-    await tr.wait().catch((waitErr: any) => {
-      try {
-        logger(Colors.yellow(`[AAtoEOA/Container] tr.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
-      } catch (_) {
-        console.error('[AAtoEOA/Container] tr.wait() failed (RPC):', waitErr)
-      }
-    })
 
     // 记账入 BeamioIndexerDiamond（与 BeamioTransfer 一致，使用 internal_transfer:confirmed 区分内部转账）
     const noteForIndexer = `\r\n${JSON.stringify(payMeData)}`
@@ -2248,7 +2182,7 @@ export const ContainerRelayProcess = async () => {
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
       logger(Colors.red('[AAtoEOA/Container] beamioTransferIndexerAccountingProcess unhandled:'), err?.message ?? err)
     })
-    logger(Colors.green(`✅ ContainerRelayProcess done: tx=${tx.hash} conetSC=${tr.hash}, indexer queue pushed`))
+    logger(Colors.green(`✅ ContainerRelayProcess done: tx=${tx.hash}, indexer queue pushed`))
   } catch (error: any) {
     let msg = error?.shortMessage || error?.message || String(error)
     try {
