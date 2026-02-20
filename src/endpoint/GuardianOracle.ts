@@ -58,14 +58,14 @@ const beamioOracleConetAddr = process.env.CONET_BEAMIO_ORACLE_ADDRESS || '0x06a1
 const beamioOracleBase = new ethers.Contract(beamioOracleBaseAddr, SeamioOracle_ABI, beamioWallet)
 const beamioOracleConet = new ethers.Contract(beamioOracleConetAddr, SeamioOracle_ABI, beamioWalletConet)
 
-/** BeamioCurrency.CurrencyType 对应索引: CAD=0, USD=1, JPY=2, CNY=3, USDC=4, HKD=5, EUR=6, SGD=7, TWD=8 */
+/** BeamioCurrency.CurrencyType: CAD=0, USD=1, JPY=2, CNY=3, USDC=4, HKD=5, EUR=6, SGD=7, TWD=8, ETH=9, BNB=10... */
 
-const CURRENCY_IDS = { CAD: 0, USD: 1, JPY: 2, CNY: 3, USDC: 4, HKD: 5, EUR: 6, SGD: 7, TWD: 8 } as const;
+const CURRENCY_IDS = { CAD: 0, USD: 1, JPY: 2, CNY: 3, USDC: 4, HKD: 5, EUR: 6, SGD: 7, TWD: 8, ETH: 9 } as const;
 
 /**
- * 将数据喂给 BeamioOracle，覆盖 CurrencyType 全部 9 种货币。
+ * 将数据喂给 BeamioOracle（Base + CoNET 双链）。
  * fx: Coinbase 返回的 1 USD = X 外币；Oracle 存储 1 外币 = ? USD，故法币用 1/rate。
- * USDC 来自 CMC；USD 恒为 1。
+ * USDC、ETH 来自 CMC；USD 恒为 1。ETH 用于 convertGasWeiToUSDC6（gas 换算）。
  */
 const updateBeamioOracleOnChain = async (
 	label: 'base' | 'conet',
@@ -96,6 +96,11 @@ const updateBeamioOracle = async (fx: any, cmcQuotes: any) => {
             logger(Colors.yellow(`⚠️ WARNING: USDC de-peg detected! Current Price: ${usdcPrice}`));
         }
 
+        const ethPrice = Number(cmcQuotes.data['1027']?.quote?.USD?.price ?? 0);
+        if (ethPrice <= 0) {
+            logger(Colors.yellow('⚠️ WARNING: ETH price missing from CMC, skipping ETH feed'));
+        }
+
         const ratesData = [
             { id: CURRENCY_IDS.CAD, symbol: 'CAD', rateUsd: 1 / fx.USDCAD },
             { id: CURRENCY_IDS.USD, symbol: 'USD', rateUsd: 1 },
@@ -106,6 +111,7 @@ const updateBeamioOracle = async (fx: any, cmcQuotes: any) => {
             { id: CURRENCY_IDS.EUR, symbol: 'EUR', rateUsd: 1 / fx.USDEUR },
             { id: CURRENCY_IDS.SGD, symbol: 'SGD', rateUsd: 1 / fx.USDSGD },
             { id: CURRENCY_IDS.TWD, symbol: 'TWD', rateUsd: 1 / fx.USDTWD },
+            ...(ethPrice > 0 ? [{ id: CURRENCY_IDS.ETH, symbol: 'ETH', rateUsd: ethPrice }] : []),
         ];
 
         // 2. 准备批量更新所需的数组
