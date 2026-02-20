@@ -639,12 +639,15 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 				from, to, amount, finishedHash: responseData?.transaction, note: note||''
 			}
 			logger(inspect(record, false, 3, true))
+			const { displayJson, currency, currencyAmount } = buildDisplayJsonFromNote(note || '', String(responseData?.transaction || ''), 'x402')
 			void submitBeamioTransferIndexerAccountingToMaster({
 				from,
 				to,
 				amountUSDC6: amount.toString(),
 				finishedHash: String(responseData?.transaction || ''),
-				note: note || '',
+				displayJson,
+				currency,
+				currencyAmount,
 			})
 		}
 		
@@ -657,12 +660,76 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 	
 }
 
+import type { DisplayJsonData } from './displayJsonTypes'
+
+/** 从 note（forText + '\\r\\n' + JSON + 可选 card JSON）构建 displayJson（仅附加字符），currency/currencyAmount 单独传 meta */
+function buildDisplayJsonFromNote(note: string, finishedHash: string, source: string): { displayJson: string; currency?: string; currencyAmount?: string } {
+	const trimmed = note.trim()
+	const parts = trimmed.split(/\r?\n/)
+	const forTextPart = parts[0]?.trim() || ''
+	const rest = parts.slice(1).join('\n').trim()
+	let parsed: { currency?: string; currencyAmount?: string | number } = {}
+	let card: DisplayJsonData['card']
+	const jsonMatches: string[] = []
+	let i = 0
+	while (rest && i < rest.length) {
+		const start = rest.indexOf('{', i)
+		if (start < 0) break
+		let depth = 0
+		let end = start
+		for (let j = start; j < rest.length; j++) {
+			if (rest[j] === '{') depth++
+			else if (rest[j] === '}') { depth--; if (depth === 0) { end = j + 1; break } }
+		}
+		if (depth === 0) jsonMatches.push(rest.slice(start, end))
+		i = end
+	}
+	for (const m of jsonMatches) {
+		try {
+			const obj = JSON.parse(m) as Record<string, unknown>
+			if (obj.currency != null || obj.currencyAmount != null) {
+				parsed.currency = obj.currency as string
+				parsed.currencyAmount = obj.currencyAmount as string | number
+			}
+			if (obj.title != null || obj.detail != null || obj.image != null) {
+				card = {
+					title: obj.title as string,
+					detail: obj.detail as string,
+					image: obj.image as string,
+				}
+			} else if (obj.card && typeof obj.card === 'object') {
+				const c = obj.card as Record<string, unknown>
+				card = {
+					title: c.title as string,
+					detail: c.detail as string,
+					image: c.image as string,
+				}
+			}
+		} catch (_) { /* ignore */ }
+	}
+	const d: DisplayJsonData = {
+		title: source === 'x402' ? 'Beamio Transfer' : 'AA to EOA (Internal)',
+		source,
+		finishedHash,
+		handle: (forTextPart && !/^\{/.test(forTextPart) ? forTextPart : '').slice(0, 80),
+		forText: forTextPart && !/^\{/.test(forTextPart) ? forTextPart : undefined,
+		card,
+	}
+	return {
+		displayJson: JSON.stringify(d),
+		currency: parsed.currency,
+		currencyAmount: parsed.currencyAmount != null ? String(parsed.currencyAmount) : undefined,
+	}
+}
+
 const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 	from: string
 	to: string
 	amountUSDC6: string
 	finishedHash: string
-	note: string
+	displayJson: string
+	currency?: string
+	currencyAmount?: string
 }) => {
 	if (!ethers.isAddress(payload.from) || !ethers.isAddress(payload.to)) {
 		return
@@ -706,7 +773,13 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 			resolve()
 		})
 		req.write(JSON.stringify({
-			...payload,
+			from: payload.from,
+			to: payload.to,
+			amountUSDC6: payload.amountUSDC6,
+			finishedHash: payload.finishedHash,
+			displayJson: payload.displayJson,
+			currency: payload.currency,
+			currencyAmount: payload.currencyAmount,
 			gasWei: gasFields.gasWei,
 			gasUSDC6: gasFields.gasUSDC6,
 			gasChainType: gasFields.gasChainType,

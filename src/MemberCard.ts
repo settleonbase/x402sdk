@@ -771,6 +771,7 @@ export const OpenContainerRelayPool: {
 	currencyAmount?: string | string[]
 	currencyDiscount?: string | string[]
 	currencyDiscountAmount?: string | string[]
+	forText?: string
 	res: Response
 }[] = []
 
@@ -790,8 +791,12 @@ export const ContainerRelayPool: {
 	currencyAmount?: string | string[]
 	currencyDiscount?: string | string[]
 	currencyDiscountAmount?: string | string[]
+	forText?: string
 	res: Response
 }[] = []
+
+import type { DisplayJsonData } from './displayJsonTypes'
+export type { DisplayJsonData } from './displayJsonTypes'
 
 /** BeamioTransfer / AA→EOA 成功后的 Diamond 记账请求（由 master 排队处理） */
 export const beamioTransferIndexerAccountingPool: {
@@ -799,12 +804,17 @@ export const beamioTransferIndexerAccountingPool: {
 	to: string
 	amountUSDC6: string
 	finishedHash: string
+	/** 账单附加字符 JSON（DisplayJsonData） */
+	displayJson?: string
+	/** @deprecated 兼容旧 note */
 	note?: string
+	/** 金额由 Transaction 表达，此处仅供 meta 的 requestAmountFiat6/currencyFiat 换算 */
+	currency?: string
+	currencyAmount?: string
 	gasWei?: string
 	gasUSDC6?: string
 	gasChainType?: number
 	feePayer?: string
-	/** true = AA→EOA 同一用户内部转账，使用 internal_transfer:confirmed */
 	isInternalTransfer?: boolean
 	res?: Response
 }[] = []
@@ -854,51 +864,65 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] normalized payload txHash=${txHash} from=${obj.from} to=${obj.to} amountUSDC6=${amountUSDC6} gasWei=${gasWei} gasUSDC6=${gasUSDC6} gasChainType=${gasChainType} feePayer=${feePayer}`))
 
-		// 解析 note 中的 JSON（客户端如 {"currency":"CAD","currencyAmount":"0.01"}）
 		const BeamioCurrencyMap: Record<string, number> = { CAD: 0, USD: 1, JPY: 2, CNY: 3, USDC: 4, HKD: 5, EUR: 6, SGD: 7, TWD: 8, ETH: 9, BNB: 10, SOLANA: 11, BTC: 12 }
 		let requestAmountFiat6 = 0n
-		let currencyFiat = 4 // 默认 USDC
-		const noteStr = (obj.note || '').trim()
-		if (noteStr) {
-			const jsonMatch = noteStr.match(/\{[\s\S]*\}/)
+		let currencyFiat = 4
+		let displayJsonStr: string
+
+		if (obj.displayJson) {
+			displayJsonStr = obj.displayJson
+			if (obj.currency || obj.currencyAmount != null) {
+				const cur = String(obj.currency || 'USDC').toUpperCase()
+				currencyFiat = BeamioCurrencyMap[cur] ?? 4
+				const amt = obj.currencyAmount
+				if (amt != null && amt !== '') {
+					const val = parseFloat(String(amt))
+					if (!Number.isNaN(val) && val >= 0) requestAmountFiat6 = BigInt(Math.round(val * 1e6))
+				}
+			}
+		} else {
+			const noteStr = (obj.note || '').trim()
+			let parsed: { currency?: string; currencyAmount?: string | number; forText?: string } = {}
+			const jsonMatch = noteStr?.match(/\{[\s\S]*\}/)
 			if (jsonMatch) {
 				try {
-					const parsed = JSON.parse(jsonMatch[0]) as { currency?: string; currencyAmount?: string | number }
-					const cur = String(parsed.currency || 'USDC').toUpperCase()
+					parsed = JSON.parse(jsonMatch[0]) as typeof parsed
+					const cur = String(parsed.currency || obj.currency || 'USDC').toUpperCase()
 					currencyFiat = BeamioCurrencyMap[cur] ?? 4
-					const amt = parsed.currencyAmount
+					const amt = parsed.currencyAmount ?? obj.currencyAmount
 					if (amt != null && amt !== '') {
 						const val = typeof amt === 'number' ? amt : parseFloat(String(amt))
 						if (!Number.isNaN(val) && val >= 0) requestAmountFiat6 = BigInt(Math.round(val * 1e6))
 					}
-				} catch (_) { /* 解析失败则保持默认 */ }
+				} catch (_) { /* 忽略 */ }
 			}
+			const forTextPart = noteStr?.split(/\r?\n/)[0]?.trim() || ''
+			const handle = (forTextPart && !/^\{/.test(forTextPart) ? forTextPart : (parsed?.forText ?? '')).slice(0, 80)
+			displayJsonStr = JSON.stringify({
+				title: isInternalTransfer ? 'AA to EOA (Internal)' : 'Beamio Transfer',
+				source: isInternalTransfer ? 'aa-eoa' : 'x402',
+				finishedHash: txHash,
+				handle,
+				forText: forTextPart || parsed?.forText || undefined,
+			} satisfies DisplayJsonData)
 		}
-		// 无 note 时，requestAmountFiat6 用 amountUSDC6 作为等价（1 USDC ≈ 1 USD）
 		if (requestAmountFiat6 <= 0n) {
 			requestAmountFiat6 = amountUSDC6
-			currencyFiat = 4 // USDC
+			currencyFiat = 4
 		}
 		const discountAmountFiat6 = 0n
 		const taxAmountFiat6 = 0n
 		const finalRequestAmountFiat6 = requestAmountFiat6 - discountAmountFiat6 + taxAmountFiat6
 
-		// 使用 ActionFacet.TransactionInput 格式（与 Indexer Diamond 当前 ActionFacet 一致）
 		const TX_TRANSFER_OUT = ethers.keccak256(ethers.toUtf8Bytes('transfer_out:confirmed'))
 		const TX_INTERNAL = ethers.keccak256(ethers.toUtf8Bytes('internal_transfer:confirmed'))
 		const CHAIN_ID_BASE = 8453n
-		const displayJson = JSON.stringify({
-			title: isInternalTransfer ? 'AA to EOA (Internal)' : 'Beamio Transfer',
-			handle: noteStr.replace(/\r?\n/g, ' ').trim().slice(0, 80),
-			finishedHash: txHash,
-			source: isInternalTransfer ? 'aa-eoa' : 'x402',
-		})
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
 			originalPaymentHash: ethers.ZeroHash,
 			chainId: CHAIN_ID_BASE,
 			txCategory: isInternalTransfer ? TX_INTERNAL : TX_TRANSFER_OUT,
-			displayJson,
+			displayJson: displayJsonStr,
 			timestamp: 0n,
 			payer: ethers.getAddress(obj.from),
 			payee: ethers.getAddress(obj.to),
@@ -934,7 +958,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				taxAmountFiat6,
 				taxRateBps: 0,
 				afterNotePayer: '',
-				afterNotePayee: obj.note || '',
+				afterNotePayee: obj.displayJson || obj.note || '',
 			},
 		}
 
@@ -1302,6 +1326,8 @@ type payMe = {
 	currencyTax?: string
 	usdcAmount?: number
 	depositHash?: string
+	/** 请求 URL 的 forText 备注（Bill 支付） */
+	forText?: string
 }
 
 const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency, parentHash: string, currencyAmount: string, isMember: boolean): payMe|null => {
@@ -1941,21 +1967,19 @@ export const AAtoEOAProcess = async () => {
     const toEOA = ethers.getAddress(obj.toEOA)
     const amountUSDC6BigInt = BigInt(obj.amountUSDC6)
     const usdcAmountHuman = Number(amountUSDC6BigInt) / 1e6
-    const payMeData: payMe = {
-      currency: 'USDC',
-      currencyAmount: String(usdcAmountHuman),
+    const displayJsonData: DisplayJsonData = {
       title: 'Express Pay to EOA',
-      usdcAmount: usdcAmountHuman,
-      parentHash: tx.hash,
+      source: 'aa-eoa',
+      finishedHash: tx.hash,
     }
-    // 记账入 BeamioIndexerDiamond（与 BeamioTransfer 一致，使用 internal_transfer:confirmed 区分内部转账）
-    const noteForIndexer = `\r\n${JSON.stringify(payMeData)}`
     beamioTransferIndexerAccountingPool.push({
       from: sender,
       to: toEOA,
       amountUSDC6: amountUSDC6BigInt.toString(),
       finishedHash: tx.hash,
-      note: noteForIndexer,
+      displayJson: JSON.stringify(displayJsonData),
+      currency: 'USDC',
+      currencyAmount: String(usdcAmountHuman),
       gasWei: '0',
       gasUSDC6: '0',
       gasChainType: 0,
@@ -2144,24 +2168,21 @@ export const OpenContainerRelayProcess = async () => {
         ? (isCurrencyDiscountAmountArray ? (currencyDiscountAmountFromClient[processedItemIndex] ?? undefined) : (currencyDiscountAmountFromClient as string))
         : undefined
       
-      logger(`[AAtoEOA/OpenContainer] Item ${i} (processedIndex ${processedItemIndex}): currency=${itemCurrency}, currencyAmount=${itemCurrencyAmount}, currencyDiscount=${itemCurrencyDiscount ?? 'null'}, currencyDiscountAmount=${itemCurrencyDiscountAmount ?? 'null'}`)
+      logger(`[AAtoEOA/OpenContainer] Item ${i} (processedIndex ${processedItemIndex}): currency=${itemCurrency}, currencyAmount=${itemCurrencyAmount}, currencyDiscount=${itemCurrencyDiscount ?? 'null'}, currencyDiscountAmount=${itemCurrencyDiscountAmount ?? 'null'}, forText=${obj.forText ?? 'null'}`)
       
-      const payMeData: payMe = {
-        currency: itemCurrency,
-        currencyAmount: itemCurrencyAmount,
-        ...(itemCurrencyDiscount != null && itemCurrencyDiscount !== '' && { currencyDiscount: itemCurrencyDiscount }),
-        ...(itemCurrencyDiscountAmount != null && itemCurrencyDiscountAmount !== '' && { currencyDiscountAmount: itemCurrencyDiscountAmount }),
+      const displayJsonData: DisplayJsonData = {
         title,
-        usdcAmount: isUSDC ? Number(assetAmount) / 1e6 : undefined,
-        parentHash: tx.hash,
+        source: 'open-container',
+        finishedHash: tx.hash,
+        handle: obj.forText?.trim()?.slice(0, 80),
+        forText: obj.forText?.trim(),
       }
       
       processedItemIndex++
       
       logger(`[AAtoEOA/OpenContainer] Processing item ${i}: ${assetType}, amount=${assetAmount.toString()}, title=${title}`)
-      logger(Colors.green(`✅ OpenContainerRelayProcess item ${i} payMe = ${inspect(payMeData, false, 2, true)}`))
+      logger(Colors.green(`✅ OpenContainerRelayProcess item ${i} displayJson = ${inspect(displayJsonData, false, 2, true)}`))
       
-      // syncTokenAction（USDC 时 card 为 USDC 地址，CCSA 时为 CCSA 卡地址）
       try {
         const actionInput = {
           actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
@@ -2171,7 +2192,7 @@ export const OpenContainerRelayProcess = async () => {
           amount: assetAmount,
           ts: 0n,
           title,
-          note: JSON.stringify(payMeData),
+          note: JSON.stringify(displayJsonData),
           tax: 0n,
           tip: 0n,
           beamioFee1: 0n,
@@ -2305,25 +2326,23 @@ export const ContainerRelayProcess = async () => {
     const currencyAmount = currencyAmountValue ?? String(Number(usdcAmountRaw) / 1e6)
     const currencyDiscountValue = obj.currencyDiscount != null ? (Array.isArray(obj.currencyDiscount) ? obj.currencyDiscount[0] : obj.currencyDiscount) : undefined
     const currencyDiscountAmountValue = obj.currencyDiscountAmount != null ? (Array.isArray(obj.currencyDiscountAmount) ? obj.currencyDiscountAmount[0] : obj.currencyDiscountAmount) : undefined
-    const payMeData: payMe = {
-      currency,
-      currencyAmount,
-      ...(currencyDiscountValue != null && currencyDiscountValue !== '' && { currencyDiscount: currencyDiscountValue }),
-      ...(currencyDiscountAmountValue != null && currencyDiscountAmountValue !== '' && { currencyDiscountAmount: currencyDiscountAmountValue }),
+    const displayJsonData: DisplayJsonData = {
       title: 'AA to EOA',
-      usdcAmount: Number(usdcAmountRaw) / 1e6,
-      parentHash: tx.hash,
+      source: 'container',
+      finishedHash: tx.hash,
+      handle: obj.forText?.trim()?.slice(0, 80),
+      forText: obj.forText?.trim(),
     }
-    logger(Colors.green(`✅ ContainerRelayProcess payMe = ${inspect(payMeData, false, 2, true)}`))
+    logger(Colors.green(`✅ ContainerRelayProcess displayJson = ${inspect(displayJsonData, false, 2, true)}`))
 
-    // 记账入 BeamioIndexerDiamond（与 BeamioTransfer 一致，使用 internal_transfer:confirmed 区分内部转账）
-    const noteForIndexer = `\r\n${JSON.stringify(payMeData)}`
     beamioTransferIndexerAccountingPool.push({
       from: account,
       to,
       amountUSDC6: usdcAmountRaw.toString(),
       finishedHash: tx.hash,
-      note: noteForIndexer,
+      displayJson: JSON.stringify(displayJsonData),
+      currency,
+      currencyAmount,
       gasWei: '0',
       gasUSDC6: '0',
       gasChainType: 0,

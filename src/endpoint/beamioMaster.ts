@@ -638,12 +638,15 @@ const routing = ( router: Router ) => {
 
 		/** x402 BeamioTransfer 成功后：写入 BeamioIndexerDiamond（master 队列处理） */
 		router.post('/beamioTransferIndexerAccounting', (req, res) => {
-			const { from, to, amountUSDC6, finishedHash, note, gasWei, gasUSDC6, gasChainType, feePayer, isInternalTransfer } = req.body as {
+			const { from, to, amountUSDC6, finishedHash, displayJson, note, currency, currencyAmount, gasWei, gasUSDC6, gasChainType, feePayer, isInternalTransfer } = req.body as {
 				from?: string
 				to?: string
 				amountUSDC6?: string
 				finishedHash?: string
+				displayJson?: string
 				note?: string
+				currency?: string
+				currencyAmount?: string
 				gasWei?: string
 				gasUSDC6?: string
 				gasChainType?: number
@@ -681,7 +684,10 @@ const routing = ( router: Router ) => {
 				to: String(to),
 				amountUSDC6: String(amountUSDC6),
 				finishedHash: String(finishedHash),
+				displayJson: displayJson ? String(displayJson) : undefined,
 				note: note ? String(note) : '',
+				currency: currency ? String(currency) : undefined,
+				currencyAmount: currencyAmount != null ? String(currencyAmount) : undefined,
 				gasWei: String(gasWei ?? '0'),
 				gasUSDC6: String(gasUSDC6 ?? '0'),
 				gasChainType: Number(gasChainType ?? 0),
@@ -760,6 +766,7 @@ const routing = ( router: Router ) => {
 				currencyAmount?: string | string[]
 				currencyDiscount?: string | string[]
 				currencyDiscountAmount?: string | string[]
+				forText?: string
 			}
 			logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
 
@@ -776,6 +783,7 @@ const routing = ( router: Router ) => {
 					currencyAmount: body.currencyAmount,
 					currencyDiscount: body.currencyDiscount,
 					currencyDiscountAmount: body.currencyDiscountAmount,
+					forText: body.forText?.trim() || undefined,
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to ContainerRelayPool (length ${poolLenBefore} -> ${ContainerRelayPool.length}), calling ContainerRelayProcess()`)
@@ -798,6 +806,7 @@ const routing = ( router: Router ) => {
 					currencyAmount: body.currencyAmount,
 					currencyDiscount: body.currencyDiscount,
 					currencyDiscountAmount: body.currencyDiscountAmount,
+					forText: body.forText?.trim() || undefined,
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)
