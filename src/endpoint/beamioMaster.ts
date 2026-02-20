@@ -685,6 +685,7 @@ const routing = ( router: Router ) => {
 				gasUSDC6: String(gasUSDC6 ?? '0'),
 				gasChainType: Number(gasChainType ?? 0),
 				feePayer: String(feePayer),
+				isInternalTransfer: !!isInternalTransfer,
 				res,
 			})
 			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6}`))

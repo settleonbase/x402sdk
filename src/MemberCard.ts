@@ -785,7 +785,7 @@ export const ContainerRelayPool: {
 	res: Response
 }[] = []
 
-/** BeamioTransfer 成功后的 Diamond 记账请求（由 master 排队处理） */
+/** BeamioTransfer / AA→EOA 成功后的 Diamond 记账请求（由 master 排队处理） */
 export const beamioTransferIndexerAccountingPool: {
 	from: string
 	to: string
@@ -796,7 +796,9 @@ export const beamioTransferIndexerAccountingPool: {
 	gasUSDC6?: string
 	gasChainType?: number
 	feePayer?: string
-	res: Response
+	/** true = AA→EOA 同一用户内部转账，使用 internal_transfer:confirmed */
+	isInternalTransfer?: boolean
+	res?: Response
 }[] = []
 
 export const beamioTransferIndexerAccountingProcess = async () => {
@@ -835,6 +837,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			throw new Error('gasChainType must be 0 or 1')
 		}
 		const feePayer = ethers.isAddress(obj.feePayer || '') ? String(obj.feePayer) : obj.from
+		const isInternalTransfer = !!obj.isInternalTransfer
 
 		// gasUSDC6 为 0 且有 gasWei 时，通过 BeamioOracle 换算
 		if (gasUSDC6 <= 0n && gasWei > 0n) {
@@ -874,26 +877,37 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 
 		// 使用 ActionFacet.TransactionInput 格式（与 Indexer Diamond 当前 ActionFacet 一致）
 		const TX_TRANSFER_OUT = ethers.keccak256(ethers.toUtf8Bytes('transfer_out:confirmed'))
+		const TX_INTERNAL = ethers.keccak256(ethers.toUtf8Bytes('internal_transfer:confirmed'))
 		const CHAIN_ID_BASE = 8453n
 		const displayJson = JSON.stringify({
-			title: 'Beamio Transfer',
+			title: isInternalTransfer ? 'AA to EOA (Internal)' : 'Beamio Transfer',
 			handle: noteStr.replace(/\r?\n/g, ' ').trim().slice(0, 80),
 			finishedHash: txHash,
-			source: 'x402',
+			source: isInternalTransfer ? 'aa-eoa' : 'x402',
 		})
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
 			originalPaymentHash: ethers.ZeroHash,
 			chainId: CHAIN_ID_BASE,
-			txCategory: TX_TRANSFER_OUT,
+			txCategory: isInternalTransfer ? TX_INTERNAL : TX_TRANSFER_OUT,
 			displayJson,
 			timestamp: 0n,
 			payer: ethers.getAddress(obj.from),
 			payee: ethers.getAddress(obj.to),
 			finalRequestAmountFiat6,
 			finalRequestAmountUSDC6: amountUSDC6,
-			isAAAccount: false,
-			route: [] as { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[],
+			isAAAccount: isInternalTransfer,
+			route: isInternalTransfer
+				? [{
+						asset: ethers.getAddress(USDC_ADDRESS),
+						amountE6: amountUSDC6,
+						assetType: 0, // ERC20
+						source: 0, // MainUSDC
+						tokenId: 0n,
+						itemCurrencyType: 4, // USDC
+						offsetInRequestCurrencyE6: amountUSDC6,
+				  }]
+				: ([] as { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[]),
 			fees: {
 				gasChainType,
 				gasWei,
@@ -923,14 +937,14 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		await tx.wait().catch((waitErr: any) => {
 			logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
 		})
-		logger(Colors.green(`[beamioTransferIndexerAccountingProcess] indexed txHash=${txHash} syncTx=${tx.hash} from=${obj.from} to=${obj.to} amountUSDC6=${amountUSDC6}`))
-		if (!obj.res.headersSent) {
+		logger(Colors.green(`[beamioTransferIndexerAccountingProcess] indexed txHash=${txHash} syncTx=${tx.hash} from=${obj.from} to=${obj.to} amountUSDC6=${amountUSDC6} isInternal=${isInternalTransfer}`))
+		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, indexed: true, txHash, syncTx: tx.hash }).end()
 		}
 	} catch (error: any) {
 		const msg = error?.shortMessage ?? error?.message ?? String(error)
 		logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] failed: ${msg}`), inspect(obj, false, 3, true))
-		if (!obj.res.headersSent) {
+		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
 		}
 	}
@@ -1810,37 +1824,24 @@ export const AAtoEOAProcess = async () => {
     } catch (trErr: any) {
       logger(Colors.yellow(`[AAtoEOA] transferRecord failed (non-critical): ${trErr?.shortMessage || trErr?.message || trErr}`))
     }
-    try {
-      const actionInput = {
-        actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
-        card: ethers.getAddress(USDC_ADDRESS),
-        from: sender,
-        to: toEOA,
-        amount: amountUSDC6BigInt,
-        ts: 0n,
-        title: 'Express Pay to EOA',
-        note: JSON.stringify(payMeData),
-        tax: 0n,
-        tip: 0n,
-        beamioFee1: 0n,
-        beamioFee2: 0n,
-        cardServiceFee: 0n,
-        afterTatchNoteByFrom: '',
-        afterTatchNoteByTo: '',
-        afterTatchNoteByCardOwner: '',
-      }
-      const actionFacet = SC.BeamioTaskDiamondAction
-      const tx2 = await actionFacet.syncTokenAction(actionInput)
-      logger(`[AAtoEOA] syncTokenAction submitted hash=${tx2.hash}`)
-      try {
-        await tx2.wait()
-        logger(`[AAtoEOA] syncTokenAction.wait() completed successfully`)
-      } catch (waitErr: any) {
-        logger(Colors.yellow(`[AAtoEOA] syncTokenAction.wait() failed (non-critical): ${waitErr?.shortMessage || waitErr?.message || waitErr}`))
-      }
-    } catch (syncErr: any) {
-      logger(Colors.yellow(`[AAtoEOA] syncTokenAction failed (non-critical): ${syncErr?.shortMessage || syncErr?.message || syncErr}`))
-    }
+    // 记账入 BeamioIndexerDiamond（与 BeamioTransfer 一致，使用 internal_transfer:confirmed 区分内部转账）
+    const noteForIndexer = `\r\n${JSON.stringify(payMeData)}`
+    beamioTransferIndexerAccountingPool.push({
+      from: sender,
+      to: toEOA,
+      amountUSDC6: amountUSDC6BigInt.toString(),
+      finishedHash: tx.hash,
+      note: noteForIndexer,
+      gasWei: '0',
+      gasUSDC6: '0',
+      gasChainType: 0,
+      feePayer: sender,
+      isInternalTransfer: true,
+    })
+    logger(Colors.cyan(`[AAtoEOA] pushed to beamioTransferIndexerAccountingPool (internal) from=${sender} to=${toEOA} amountUSDC6=${amountUSDC6BigInt}`))
+    beamioTransferIndexerAccountingProcess().catch((err: any) => {
+      logger(Colors.red('[AAtoEOA] beamioTransferIndexerAccountingProcess unhandled:'), err?.message ?? err)
+    })
 
     logger(Colors.green(`✅ AAtoEOAProcess success! tx=${tx.hash}`))
     obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
@@ -2229,35 +2230,25 @@ export const ContainerRelayProcess = async () => {
       }
     })
 
-    const actionInput = {
-      actionType: ACTION_TOKEN_TYPE.TOKEN_TRANSFER,
-      card: USDC_ADDRESS,
+    // 记账入 BeamioIndexerDiamond（与 BeamioTransfer 一致，使用 internal_transfer:confirmed 区分内部转账）
+    const noteForIndexer = `\r\n${JSON.stringify(payMeData)}`
+    beamioTransferIndexerAccountingPool.push({
       from: account,
       to,
-      amount: usdcAmountRaw,
-      ts: 0n,
-      title: 'AA to EOA',
-      note: JSON.stringify(payMeData),
-      tax: 0n,
-      tip: 0n,
-      beamioFee1: 0n,
-      beamioFee2: 0n,
-      cardServiceFee: 0n,
-      afterTatchNoteByFrom: '',
-      afterTatchNoteByTo: '',
-      afterTatchNoteByCardOwner: '',
-    }
-    const actionFacet = SC.BeamioTaskDiamondAction
-    const tx2 = await actionFacet.syncTokenAction(actionInput)
-
-    await tx2.wait().catch((waitErr: any) => {
-      try {
-        logger(Colors.yellow(`[AAtoEOA/Container] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
-      } catch (_) {
-        console.error('[AAtoEOA/Container] syncTokenAction.wait() failed (RPC):', waitErr)
-      }
+      amountUSDC6: usdcAmountRaw.toString(),
+      finishedHash: tx.hash,
+      note: noteForIndexer,
+      gasWei: '0',
+      gasUSDC6: '0',
+      gasChainType: 0,
+      feePayer: account,
+      isInternalTransfer: true,
     })
-    logger(Colors.green(`✅ ContainerRelayProcess accounting done: tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
+    logger(Colors.cyan(`[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool (internal) from=${account} to=${to} amountUSDC6=${usdcAmountRaw}`))
+    beamioTransferIndexerAccountingProcess().catch((err: any) => {
+      logger(Colors.red('[AAtoEOA/Container] beamioTransferIndexerAccountingProcess unhandled:'), err?.message ?? err)
+    })
+    logger(Colors.green(`✅ ContainerRelayProcess done: tx=${tx.hash} conetSC=${tr.hash}, indexer queue pushed`))
   } catch (error: any) {
     let msg = error?.shortMessage || error?.message || String(error)
     try {
