@@ -714,6 +714,14 @@ export const cardRedeemPool: {
 	res: Response
 }[] = []
 
+/** cardRedeem 成功后写入 BeamioIndexerDiamond（txCategory=cardmint:confirmed，新卡发行与 Top Up 共用） */
+export const cardRedeemIndexerAccountingPool: {
+	cardAddress: string
+	toUserEOA: string
+	aaAddress: string
+	txHash: string
+}[] = []
+
 /** 通用 executeForOwner：客户端提交 owner 签名的 calldata，服务端免 gas 执行。可选 redeemCode+toUserEOA 时额外执行 redeemForUser（空投）。 */
 export const executeForOwnerPool: {
 	cardAddress: string
@@ -931,6 +939,10 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
+		const conetBalance = await SC.walletConet.provider!.getBalance(SC.walletConet.address).catch(() => 0n)
+		if (conetBalance === 0n || conetBalance < 10n ** 14n) {
+			logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] warn: Conet admin ${SC.walletConet.address} balance=${ethers.formatEther(conetBalance)} CNET, may fail syncTokenAction`))
+		}
 		logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] send syncTokenAction diamond=${BeamioTaskIndexerAddress} txHash=${txHash}`))
 		const tx = await actionFacetSync.syncTokenAction(transactionInput)
 		logger(Colors.green(`[beamioTransferIndexerAccountingProcess] syncTokenAction submitted hash=${tx.hash}`))
@@ -942,7 +954,14 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			obj.res.status(200).json({ success: true, indexed: true, txHash, syncTx: tx.hash }).end()
 		}
 	} catch (error: any) {
-		const msg = error?.shortMessage ?? error?.message ?? String(error)
+		let msg = error?.shortMessage ?? error?.message ?? String(error)
+		const isInsufficientFunds = /insufficient funds for intrinsic transaction cost/i.test(msg)
+		if (isInsufficientFunds) {
+			msg = `${msg} (Conet 链上 admin ${SC?.walletConet?.address ?? '?'} 需充值 CNET 原生代币以支付 syncTokenAction gas)`
+			// 重新入队，待充值后重试
+			beamioTransferIndexerAccountingPool.unshift(obj)
+			logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] requeued due to insufficient gas, queue=${beamioTransferIndexerAccountingPool.length}`))
+		}
 		logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] failed: ${msg}`), inspect(obj, false, 3, true))
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
@@ -952,6 +971,139 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 	Settle_ContractPool.unshift(SC)
 	logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] admin wallet returned=${SC.walletConet.address}, admins=${Settle_ContractPool.length}, queue=${beamioTransferIndexerAccountingPool.length}`))
 	setTimeout(() => beamioTransferIndexerAccountingProcess(), 1000)
+}
+
+const TRANSFER_SINGLE_TOPIC = ethers.id('TransferSingle(address,address,address,uint256,uint256)')
+
+/** cardRedeem 成功后写入 BeamioIndexerDiamond，txCategory=cardmint:confirmed（新卡发行与 Top Up 共用） */
+export const cardRedeemIndexerAccountingProcess = async () => {
+	const obj = cardRedeemIndexerAccountingPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		cardRedeemIndexerAccountingPool.unshift(obj)
+		return setTimeout(() => cardRedeemIndexerAccountingProcess(), 3000)
+	}
+	logger(Colors.cyan(`[cardRedeemIndexerAccountingProcess] card=${obj.cardAddress} to=${obj.aaAddress} txHash=${obj.txHash}`))
+	try {
+		if (!ethers.isAddress(obj.cardAddress) || !ethers.isAddress(obj.aaAddress)) {
+			throw new Error('invalid cardAddress or aaAddress')
+		}
+		const txHash = ethers.hexlify(ethers.getBytes(obj.txHash)).length === 66 ? obj.txHash : ethers.keccak256(obj.txHash as `0x${string}`)
+		if (!ethers.isHexString(txHash) || ethers.dataLength(txHash) !== 32) {
+			throw new Error('txHash must be bytes32')
+		}
+		const transferToAa: { tokenId: bigint; value: bigint }[] = []
+		try {
+			const receipt = await SC.walletBase.provider!.getTransactionReceipt(txHash)
+			if (receipt?.logs) {
+				const cardAddr = obj.cardAddress.toLowerCase()
+				for (const log of receipt.logs) {
+					if (log.address.toLowerCase() !== cardAddr || log.topics[0] !== TRANSFER_SINGLE_TOPIC) continue
+					const decoded = ethers.AbiCoder.defaultAbiCoder().decode(['uint256', 'uint256'], log.data)
+					const toAddr = log.topics[3] ? ethers.getAddress('0x' + String(log.topics[3]).slice(-40)) : ''
+					if (toAddr.toLowerCase() === obj.aaAddress.toLowerCase()) {
+						transferToAa.push({ tokenId: decoded[0], value: decoded[1] })
+					}
+				}
+			}
+		} catch (_) { /* 解析失败时 transferToAa 为空 */ }
+		const pointsItem = transferToAa.find((t) => t.tokenId === 0n)
+		const amountE6 = pointsItem && pointsItem.value > 0n ? pointsItem.value : 1n
+		const cardContract = new ethers.Contract(obj.cardAddress, BeamioUserCardABI, SC.walletBase)
+		const [cardOwner, currencyFiat, priceE6] = await Promise.all([
+			cardContract.owner() as Promise<string>,
+			cardContract.currency() as Promise<bigint>,
+			cardContract.pointsUnitPriceInCurrencyE6() as Promise<bigint>,
+		])
+		const payerAddr = ethers.isAddress(cardOwner) ? ethers.getAddress(cardOwner) : ethers.ZeroAddress
+		if (payerAddr === ethers.ZeroAddress) throw new Error('card owner not found')
+		const currencyFiatNum = Number(currencyFiat)
+		const finalRequestAmountFiat6 = priceE6 > 0n ? (amountE6 * priceE6) / 1_000_000n : amountE6
+		let finalRequestAmountUSDC6: bigint
+		try {
+			const rateE18 = await getRateE18Safe(currencyFiatNum)
+			finalRequestAmountUSDC6 = rateE18 > 0n ? (finalRequestAmountFiat6 * rateE18) / E18 : finalRequestAmountFiat6
+		} catch (_) {
+			finalRequestAmountUSDC6 = currencyFiatNum === 4 ? finalRequestAmountFiat6 : 0n
+		}
+		if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
+		const TX_CARDMINT = ethers.keccak256(ethers.toUtf8Bytes('cardmint:confirmed'))
+		const CHAIN_ID_BASE = 8453n
+		const displayJson = JSON.stringify({
+			title: 'Card Mint',
+			handle: `Redeem to ${obj.aaAddress.slice(0, 10)}…`,
+			finishedHash: txHash,
+			source: 'cardRedeem',
+		})
+		const routeItems: { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[] = []
+		// Token #0：points 转账
+		routeItems.push({
+			asset: ethers.getAddress(obj.cardAddress),
+			amountE6,
+			assetType: 1,
+			source: 1,
+			tokenId: 0n,
+			itemCurrencyType: currencyFiatNum,
+			offsetInRequestCurrencyE6: finalRequestAmountFiat6,
+		})
+		// Token #n (n>0)：新发卡 mint 的 NFT
+		for (const t of transferToAa) {
+			if (t.tokenId > 0n && t.value > 0n) {
+				routeItems.push({
+					asset: ethers.getAddress(obj.cardAddress),
+					amountE6: t.value,
+					assetType: 1,
+					source: 2,
+					tokenId: t.tokenId,
+					itemCurrencyType: currencyFiatNum,
+					offsetInRequestCurrencyE6: 0n,
+				})
+			}
+		}
+		const transactionInput = {
+			txId: txHash as `0x${string}`,
+			originalPaymentHash: ethers.ZeroHash,
+			chainId: CHAIN_ID_BASE,
+			txCategory: TX_CARDMINT,
+			displayJson,
+			timestamp: 0n,
+			payer: payerAddr,
+			payee: ethers.getAddress(obj.aaAddress),
+			finalRequestAmountFiat6,
+			finalRequestAmountUSDC6,
+			isAAAccount: true,
+			route: routeItems,
+			fees: {
+				gasChainType: 0,
+				gasWei: 0n,
+				gasUSDC6: 0n,
+				serviceUSDC6: 0n,
+				bServiceUSDC6: 0n,
+				bServiceUnits6: 0n,
+				feePayer: ethers.ZeroAddress,
+			},
+			meta: {
+				requestAmountFiat6: finalRequestAmountFiat6,
+				requestAmountUSDC6: finalRequestAmountUSDC6,
+				currencyFiat: currencyFiatNum,
+				discountAmountFiat6: 0n,
+				discountRateBps: 0,
+				taxAmountFiat6: 0n,
+				taxRateBps: 0,
+				afterNotePayer: '',
+				afterNotePayee: '',
+			},
+		}
+		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
+		const tx = await actionFacetSync.syncTokenAction(transactionInput)
+		logger(Colors.green(`[cardRedeemIndexerAccountingProcess] indexed txHash=${txHash} syncTx=${tx.hash} card=${obj.cardAddress}`))
+	} catch (error: any) {
+		const msg = error?.shortMessage ?? error?.message ?? String(error)
+		logger(Colors.yellow(`[cardRedeemIndexerAccountingProcess] failed: ${msg}`), inspect(obj, false, 3, true))
+	}
+	Settle_ContractPool.unshift(SC)
+	setTimeout(() => cardRedeemIndexerAccountingProcess(), 1000)
 }
 
 /** Factory.relayContainerMainRelayed 的 ABI 片段 */
@@ -2772,6 +2924,15 @@ export const cardRedeemProcess = async () => {
 		}
 		if (txHash) {
 			logger(Colors.green(`✅ cardRedeemProcess card=${obj.cardAddress} to=${obj.toUserEOA} tx=${txHash}`))
+			cardRedeemIndexerAccountingPool.push({
+				cardAddress: obj.cardAddress,
+				toUserEOA: obj.toUserEOA,
+				aaAddress: addr,
+				txHash,
+			})
+			cardRedeemIndexerAccountingProcess().catch((err: any) => {
+				logger(Colors.red('[cardRedeemIndexerAccountingProcess] unhandled:'), err?.message ?? err)
+			})
 			if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, tx: txHash }).end()
 		}
 	} catch (e: any) {
