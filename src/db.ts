@@ -388,7 +388,35 @@ const addUserPoolProcess = async () => {
 		pgpKeyID: obj.account.pgpKeyID ?? '',
 		pgpKey: obj.account.pgpKey ?? ''
 	}
-	
+
+	// 写入数据库和 CoNET L1 之前，查询链上记录是否有变化；无变化则跳过
+	const isUnchanged = async (): Promise<boolean> => {
+		try {
+			const onchain = await SC.constAccountRegistry.getAccount(obj.wallet)
+			if (!onchain?.exists) return false
+			const s = (v: unknown) => (v == null ? '' : String(v).trim())
+			const eq = (a: unknown, b: unknown) => s(a) === s(b)
+			return (
+				eq(onchain.accountName, obj.account.accountName) &&
+				eq(onchain.image, obj.account.image ?? '') &&
+				!!onchain.darkTheme === !!obj.account.darkTheme &&
+				!!onchain.isUSDCFaucet === !!obj.account.isUSDCFaucet &&
+				!!onchain.isETHFaucet === !!obj.account.isETHFaucet &&
+				!!onchain.initialLoading === !!obj.account.initialLoading &&
+				eq(onchain.firstName, account.firstName) &&
+				eq(onchain.lastName, account.lastName)
+			)
+		} catch {
+			return false
+		}
+	}
+	if (await isUnchanged()) {
+		logger(Colors.cyan(`[addUserPoolProcess] skip: no change from on-chain wallet=${obj.wallet} accountName=${obj.account?.accountName}`))
+		beamio_ContractPool.unshift(SC)
+		setTimeout(addUserPoolProcess, 2000)
+		return
+	}
+
 	try {
 		const tx = await SC.constAccountRegistry.setAccountByAdmin(
 			obj.wallet, account

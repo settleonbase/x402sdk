@@ -2224,16 +2224,36 @@ export const ContainerRelayProcess = async () => {
     })
     logger(Colors.green(`✅ ContainerRelayProcess accounting done: tx=${tx.hash} conetSC=${tr.hash} syncTokenAction=${tx2.hash}`))
   } catch (error: any) {
-    const msg = error?.shortMessage || error?.message || String(error)
+    let msg = error?.shortMessage || error?.message || String(error)
+    try {
+      if (error?.data) {
+        logger(Colors.red(`[AAtoEOA/Container] revert data=${error.data}`))
+        const data = typeof error.data === 'string' ? error.data : ethers.hexlify(error.data)
+        if (data.length >= 4 + 32 * 4 && data.startsWith('0x')) {
+          const selector = data.slice(0, 10)
+          if (selector === '0xc6d837a8') {
+            // CM_ReservedERC20Violation(address token, uint256 spend, uint256 bal, uint256 reserved)
+            const abiCoder = ethers.AbiCoder.defaultAbiCoder()
+            const decoded = abiCoder.decode(
+              ['address', 'uint256', 'uint256', 'uint256'],
+              '0x' + data.slice(10)
+            ) as unknown as [string, bigint, bigint, bigint]
+            const [, spend, bal] = decoded
+            const fmt = (n: number) => (n >= 0.01 ? n.toFixed(2) : n.toFixed(6))
+            msg = `Insufficient USDC balance: account has ${fmt(Number(bal) / 1e6)} USDC, need ${fmt(Number(spend) / 1e6)} USDC`
+          }
+        }
+      }
+    } catch (_) {}
     logger(Colors.red(`❌ ContainerRelayProcess failed: ${msg}`))
-    if (error?.data) logger(Colors.red(`[AAtoEOA/Container] revert data=${error.data}`))
     const dataHex = typeof error?.data === 'string' ? error.data : ''
     const isBadNonce = dataHex.length >= 10 && dataHex.slice(0, 10).toLowerCase() === '0x74794617'
+    const isInsufficientBalance = dataHex.length >= 10 && dataHex.slice(0, 10).toLowerCase() === '0xc6d837a8'
     const clientError = isBadNonce
       ? 'Nonce already used (链上 nonce 已递增). 请重新发起转账，不要重复提交同一笔。'
       : msg
     try {
-      if (!obj.res?.headersSent) obj.res.status(isBadNonce ? 400 : 500).json({ success: false, error: clientError }).end()
+      if (!obj.res?.headersSent) obj.res.status(isBadNonce || isInsufficientBalance ? 400 : 500).json({ success: false, error: clientError }).end()
     } catch (resErr: any) {
       logger(Colors.red(`[AAtoEOA/Container] failed to send error response: ${resErr?.message ?? resErr}`))
     }
