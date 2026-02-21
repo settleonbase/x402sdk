@@ -915,6 +915,45 @@ const routing = ( router: Router ) => {
 		}, res)
 	})
 
+	/** Beamio Pay Me 生成 request 记账：预检后转发 master（txCategory=request_create:confirmed） */
+	router.post('/requestAccounting', async (req, res) => {
+		const { requestHash, payee, amount, currency, forText, validDays } = req.body as {
+			requestHash?: string
+			payee?: string
+			amount?: string
+			currency?: string
+			forText?: string
+			validDays?: number
+		}
+		if (!requestHash || !payee || !amount || validDays == null) {
+			logger(Colors.red(`[requestAccounting] server pre-check: missing required fields`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: 'Missing required: requestHash, payee, amount, validDays' }).end()
+		}
+		if (!ethers.isHexString(requestHash) || ethers.dataLength(requestHash) !== 32) {
+			return res.status(400).json({ success: false, error: 'requestHash must be bytes32' }).end()
+		}
+		if (!ethers.isAddress(payee)) {
+			return res.status(400).json({ success: false, error: 'Invalid payee address' }).end()
+		}
+		const amt = parseFloat(String(amount))
+		if (!Number.isFinite(amt) || amt <= 0) {
+			return res.status(400).json({ success: false, error: 'amount must be > 0' }).end()
+		}
+		const vd = Math.floor(Number(validDays))
+		if (vd < 1) {
+			return res.status(400).json({ success: false, error: 'validDays must be >= 1' }).end()
+		}
+		logger(Colors.green(`[requestAccounting] server pre-check OK, forwarding to master`), inspect({ requestHash, payee, amount, validDays }, false, 2, true))
+		postLocalhost('/api/requestAccounting', {
+			requestHash: String(requestHash),
+			payee: String(payee),
+			amount: String(amount),
+			currency: currency ? String(currency) : 'USD',
+			forText: forText ? String(forText) : undefined,
+			validDays: vd,
+		}, res)
+	})
+
 	/** GET /api/myCards?owner=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */
 	router.get('/myCards', async (req, res) => {
 		const { owner, owners } = req.query as { owner?: string; owners?: string }

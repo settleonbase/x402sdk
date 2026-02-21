@@ -11,4 +11,9 @@ export type DisplayJsonData = {
 		detail?: string
 		image?: string
 	}
+	/** 账单有效期（request 类）：有效天数、过期时间戳（秒） */
+	validity?: {
+		validDays?: number
+		expiresAt?: number
+	}
 }

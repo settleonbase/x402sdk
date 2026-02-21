@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -698,6 +698,49 @@ const routing = ( router: Router ) => {
 			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6}`))
 			beamioTransferIndexerAccountingProcess().catch((err: any) => {
 				logger(Colors.red('[beamioTransferIndexerAccountingProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		/** Beamio Pay Me 生成 request 记账（txCategory=request_create:confirmed，originalPaymentHash=requestHash） */
+		router.post('/requestAccounting', (req, res) => {
+			const { requestHash, payee, amount, currency, forText, validDays } = req.body as {
+				requestHash?: string
+				payee?: string
+				amount?: string
+				currency?: string
+				forText?: string
+				validDays?: number
+			}
+			if (!requestHash || !payee || !amount || validDays == null) {
+				return res.status(400).json({ success: false, error: 'Missing required: requestHash, payee, amount, validDays' }).end()
+			}
+			if (!ethers.isHexString(requestHash) || ethers.dataLength(requestHash) !== 32) {
+				return res.status(400).json({ success: false, error: 'requestHash must be bytes32' }).end()
+			}
+			if (!ethers.isAddress(payee)) {
+				return res.status(400).json({ success: false, error: 'Invalid payee address' }).end()
+			}
+			const amt = parseFloat(String(amount))
+			if (!Number.isFinite(amt) || amt <= 0) {
+				return res.status(400).json({ success: false, error: 'amount must be > 0' }).end()
+			}
+			const vd = Math.floor(Number(validDays))
+			if (vd < 1) {
+				return res.status(400).json({ success: false, error: 'validDays must be >= 1' }).end()
+			}
+
+			requestAccountingPool.push({
+				requestHash: String(requestHash),
+				payee: String(payee),
+				amount: String(amount),
+				currency: currency ? String(currency) : 'USD',
+				forText: forText ? String(forText) : undefined,
+				validDays: vd,
+				res,
+			})
+			logger(Colors.cyan(`[requestAccounting] pushed to pool requestHash=${requestHash} payee=${payee}`))
+			requestAccountingProcess().catch((err: any) => {
+				logger(Colors.red('[requestAccountingProcess] unhandled error:'), err?.message ?? err)
 			})
 		})
 

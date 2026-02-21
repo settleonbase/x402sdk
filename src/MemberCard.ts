@@ -997,6 +997,136 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 	setTimeout(() => beamioTransferIndexerAccountingProcess(), 1000)
 }
 
+/** Beamio Pay Me 生成 request 时的记账请求（txCategory=request_create:confirmed，originalPaymentHash=requestHash） */
+export const requestAccountingPool: {
+	requestHash: string
+	payee: string
+	amount: string
+	currency: string
+	forText?: string
+	validDays: number
+	displayJson?: string
+	res?: Response
+}[] = []
+
+export const requestAccountingProcess = async () => {
+	const obj = requestAccountingPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		requestAccountingPool.unshift(obj)
+		return setTimeout(() => requestAccountingProcess(), 3000)
+	}
+	logger(Colors.cyan(`[requestAccountingProcess] requestHash=${obj.requestHash} payee=${obj.payee}`))
+	try {
+		if (!ethers.isHexString(obj.requestHash) || ethers.dataLength(obj.requestHash) !== 32) {
+			throw new Error('requestHash must be bytes32')
+		}
+		if (!ethers.isAddress(obj.payee)) {
+			throw new Error('invalid payee address')
+		}
+		const amountVal = parseFloat(obj.amount)
+		if (!Number.isFinite(amountVal) || amountVal <= 0) {
+			throw new Error('amount must be > 0')
+		}
+		const validDays = Math.max(1, Math.floor(obj.validDays))
+		const nowMs = Date.now()
+		const expiresAt = Math.floor(nowMs / 1000) + validDays * 86400
+
+		const BeamioCurrencyMap: Record<string, number> = { CAD: 0, USD: 1, JPY: 2, CNY: 3, USDC: 4, HKD: 5, EUR: 6, SGD: 7, TWD: 8, ETH: 9, BNB: 10, SOLANA: 11, BTC: 12 }
+		const cur = String(obj.currency || 'USD').toUpperCase()
+		const currencyFiat = BeamioCurrencyMap[cur] ?? 1
+		const requestAmountFiat6 = BigInt(Math.round(amountVal * 1e6))
+		let finalRequestAmountUSDC6: bigint
+		try {
+			const rateE18 = await getRateE18Safe(currencyFiat)
+			const E18 = 10n ** 18n
+			finalRequestAmountUSDC6 = rateE18 > 0n ? (requestAmountFiat6 * rateE18) / E18 : requestAmountFiat6
+		} catch (_) {
+			finalRequestAmountUSDC6 = currencyFiat === 4 ? requestAmountFiat6 : requestAmountFiat6
+		}
+		if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
+
+		const displayJsonData: DisplayJsonData = obj.displayJson
+			? (JSON.parse(obj.displayJson) as DisplayJsonData)
+			: {
+					title: 'Beamio Request',
+					source: 'payme',
+					finishedHash: ethers.ZeroHash,
+					handle: (obj.forText || '').slice(0, 80),
+					forText: obj.forText || undefined,
+					validity: { validDays, expiresAt },
+			  }
+		if (!displayJsonData.validity) {
+			displayJsonData.validity = { validDays, expiresAt }
+		} else {
+			displayJsonData.validity.validDays = validDays
+			displayJsonData.validity.expiresAt = expiresAt
+		}
+		const displayJsonStr = JSON.stringify(displayJsonData)
+
+		const TX_REQUEST_CREATE = ethers.keccak256(ethers.toUtf8Bytes('request_create:confirmed'))
+		const CHAIN_ID_BASE = 8453n
+		const transactionInput = {
+			txId: obj.requestHash as `0x${string}`,
+			originalPaymentHash: obj.requestHash as `0x${string}`,
+			chainId: CHAIN_ID_BASE,
+			txCategory: TX_REQUEST_CREATE,
+			displayJson: displayJsonStr,
+			timestamp: BigInt(Math.floor(nowMs / 1000)),
+			payer: ethers.ZeroAddress,
+			payee: ethers.getAddress(obj.payee),
+			finalRequestAmountFiat6: requestAmountFiat6,
+			finalRequestAmountUSDC6,
+			isAAAccount: true,
+			route: [] as { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[],
+			fees: {
+				gasChainType: 0,
+				gasWei: 0n,
+				gasUSDC6: 0n,
+				serviceUSDC6: 0n,
+				bServiceUSDC6: 0n,
+				bServiceUnits6: 0n,
+				feePayer: ethers.ZeroAddress,
+			},
+			meta: {
+				requestAmountFiat6,
+				requestAmountUSDC6: finalRequestAmountUSDC6,
+				currencyFiat,
+				discountAmountFiat6: 0n,
+				discountRateBps: 0,
+				taxAmountFiat6: 0n,
+				taxRateBps: 0,
+				afterNotePayer: '',
+				afterNotePayee: obj.forText || '',
+			},
+		}
+
+		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
+		const conetBalance = await SC.walletConet.provider!.getBalance(SC.walletConet.address).catch(() => 0n)
+		if (conetBalance === 0n || conetBalance < 10n ** 14n) {
+			logger(Colors.yellow(`[requestAccountingProcess] warn: Conet admin ${SC.walletConet.address} balance low`))
+		}
+		logger(Colors.cyan(`[requestAccountingProcess] syncTokenAction requestHash=${obj.requestHash}`))
+		const tx = await actionFacetSync.syncTokenAction(transactionInput)
+		logger(Colors.green(`[requestAccountingProcess] syncTokenAction submitted hash=${tx.hash}`))
+		await tx.wait().catch((waitErr: any) => {
+			logger(Colors.yellow(`[requestAccountingProcess] syncTokenAction.wait() failed: ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+		})
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, indexed: true, requestHash: obj.requestHash, syncTx: tx.hash }).end()
+		}
+	} catch (error: any) {
+		const msg = error?.shortMessage ?? error?.message ?? String(error)
+		logger(Colors.yellow(`[requestAccountingProcess] failed: ${msg}`), inspect(obj, false, 3, true))
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
+		}
+	}
+	Settle_ContractPool.unshift(SC)
+	setTimeout(() => requestAccountingProcess(), 1000)
+}
+
 const TRANSFER_SINGLE_TOPIC = ethers.id('TransferSingle(address,address,address,uint256,uint256)')
 
 /** cardRedeem 成功后写入 BeamioIndexerDiamond，txCategory=cardmint:confirmed（新卡发行与 Top Up 共用） */
