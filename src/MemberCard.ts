@@ -750,6 +750,8 @@ export const AAtoEOAPool: {
 	toEOA: string
 	amountUSDC6: string
 	packedUserOp: AAtoEOAUserOp
+	/** Bill 支付时 URL 的 requestHash（bytes32），供记账写入 originalPaymentHash 以关联 request_create */
+	requestHash?: string
 	res: Response
 }[] = []
 
@@ -802,7 +804,16 @@ export const ContainerRelayPool: {
 import type { DisplayJsonData } from './displayJsonTypes'
 export type { DisplayJsonData } from './displayJsonTypes'
 
-/** BeamioTransfer / AA→EOA 成功后的 Diamond 记账请求（由 master 排队处理） */
+/** 单条 RouteItem 描述（供批量 push） */
+export type BeamioTransferRouteItem = {
+	asset: string
+	amountE6: string
+	assetType: number
+	source: number
+	tokenId: string
+}
+
+/** BeamioTransfer / AA→EOA 成功后的 Diamond 记账请求（由 master 排队处理）。支持 USDC 与 CCSA(BeamioUserCard ERC1155) */
 export const beamioTransferIndexerAccountingPool: {
 	from: string
 	to: string
@@ -823,6 +834,18 @@ export const beamioTransferIndexerAccountingPool: {
 	feePayer?: string
 	isInternalTransfer?: boolean
 	res?: Response
+	/** 多条 route 项（同一 tx 多资产时）。有则优先于 routeAsset */
+	routeItems?: BeamioTransferRouteItem[]
+	/** CCSA/BeamioUserCard 时：route 资产地址（单条兼容） */
+	routeAsset?: string
+	/** CCSA 时：1=ERC1155 */
+	routeAssetType?: number
+	/** CCSA 时：1=UserCardPoint, 2=UserCardCoupon, 3=UserCardCashVoucher */
+	routeSource?: number
+	/** CCSA 时：ERC1155 tokenId，0=points */
+	routeTokenId?: string
+	/** CCSA 时：route 的 amountE6（与 amountUSDC6 相同时可省略） */
+	routeAmountE6?: string
 }[] = []
 
 export const beamioTransferIndexerAccountingProcess = async () => {
@@ -928,6 +951,43 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		const originalPaymentHash = requestHashValid ? (obj.requestHash as `0x${string}`) : ethers.ZeroHash
 		const txCategory = isInternalTransfer ? TX_INTERNAL : (requestHashValid ? TX_REQUEST_FULFILLED : TX_TRANSFER_OUT)
 		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] requestHash=${obj.requestHash ?? 'n/a'} valid=${requestHashValid} txCategory=${requestHashValid ? 'request_fulfilled' : 'transfer_out'}`))
+		const routeItems: { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[] = []
+		if (obj.routeItems && obj.routeItems.length > 0) {
+			for (const r of obj.routeItems) {
+				if (!ethers.isAddress(r.asset)) continue
+				const amtE6 = BigInt(r.amountE6)
+				routeItems.push({
+					asset: ethers.getAddress(r.asset),
+					amountE6: amtE6,
+					assetType: r.assetType ?? 0,
+					source: r.source ?? 0,
+					tokenId: BigInt(r.tokenId ?? '0'),
+					itemCurrencyType: currencyFiat,
+					offsetInRequestCurrencyE6: amtE6,
+				})
+			}
+		} else if (obj.routeAsset && ethers.isAddress(obj.routeAsset)) {
+			const routeAmt = BigInt(obj.routeAmountE6 ?? obj.amountUSDC6)
+			routeItems.push({
+				asset: ethers.getAddress(obj.routeAsset),
+				amountE6: routeAmt,
+				assetType: obj.routeAssetType ?? 1,
+				source: obj.routeSource ?? 1,
+				tokenId: BigInt(obj.routeTokenId ?? '0'),
+				itemCurrencyType: currencyFiat,
+				offsetInRequestCurrencyE6: amountUSDC6,
+			})
+		} else if (isInternalTransfer) {
+			routeItems.push({
+				asset: ethers.getAddress(USDC_ADDRESS),
+				amountE6: amountUSDC6,
+				assetType: 0,
+				source: 0,
+				tokenId: 0n,
+				itemCurrencyType: 4,
+				offsetInRequestCurrencyE6: amountUSDC6,
+			})
+		}
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
 			originalPaymentHash,
@@ -940,17 +1000,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			finalRequestAmountFiat6,
 			finalRequestAmountUSDC6: amountUSDC6,
 			isAAAccount: isInternalTransfer,
-			route: isInternalTransfer
-				? [{
-						asset: ethers.getAddress(USDC_ADDRESS),
-						amountE6: amountUSDC6,
-						assetType: 0, // ERC20
-						source: 0, // MainUSDC
-						tokenId: 0n,
-						itemCurrencyType: 4, // USDC
-						offsetInRequestCurrencyE6: amountUSDC6,
-				  }]
-				: ([] as { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[]),
+			route: routeItems,
 			fees: {
 				gasChainType,
 				gasWei,
@@ -2149,8 +2199,9 @@ export const AAtoEOAProcess = async () => {
       gasChainType: 0,
       feePayer: sender,
       isInternalTransfer: true,
+      requestHash: obj.requestHash,
     })
-    logger(Colors.cyan(`[AAtoEOA] pushed to beamioTransferIndexerAccountingPool (internal) from=${sender} to=${toEOA} amountUSDC6=${amountUSDC6BigInt}`))
+    logger(Colors.cyan(`[AAtoEOA] pushed to beamioTransferIndexerAccountingPool (internal) from=${sender} to=${toEOA} amountUSDC6=${amountUSDC6BigInt} requestHash=${obj.requestHash ?? 'n/a'}`))
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
       logger(Colors.red('[AAtoEOA] beamioTransferIndexerAccountingProcess unhandled:'), err?.message ?? err)
     })
@@ -2289,30 +2340,35 @@ export const OpenContainerRelayProcess = async () => {
     const usdcAddress = ethers.getAddress(USDC_ADDRESS)
     const ccsacardAddress = ethers.getAddress(BASE_CCSA_CARD_ADDRESS)
     let processedItemIndex = 0
-    
+    const collectedRouteItems: BeamioTransferRouteItem[] = []
+    let totalAmountE6 = 0n
+    let primaryCurrency: ICurrency = currencyFromType
+    let primaryCurrencyAmount = ''
+
     for (let i = 0; i < items.length; i++) {
       const item = items[i]
       const itemAsset = ethers.getAddress(item.asset)
       const isUSDC = item.kind === 0 && itemAsset === usdcAddress
       const isCCSA = item.kind === 1 && itemAsset === ccsacardAddress
-      
+
       if (!isUSDC && !isCCSA) {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] Skipping item ${i}: kind=${item.kind}, asset=${itemAsset} (not USDC or CCSA)`))
         continue
       }
-      
+
       const assetType = isUSDC ? 'USDC' : 'CCSA'
       const assetAmount = item.amount
       const assetAmountHuman = String(Number(assetAmount) / 1e6)
-      const itemCurrency = isCurrencyArray 
+      const itemCurrency = isCurrencyArray
         ? (currencyFromClient[processedItemIndex] ?? currencyFromType) as ICurrency
         : ((currencyFromClient as string) ?? currencyFromType) as ICurrency
       const itemCurrencyAmount = isCurrencyAmountArray
         ? (currencyAmountFromClient[processedItemIndex] ?? assetAmountHuman)
         : ((currencyAmountFromClient as string) ?? assetAmountHuman)
-      
+
       logger(`[AAtoEOA/OpenContainer] Item ${i} (processedIndex ${processedItemIndex}): currency=${itemCurrency}, currencyAmount=${itemCurrencyAmount}, forText=${obj.forText ?? 'null'}`)
-      
+      processedItemIndex++
+
       const displayJsonData: DisplayJsonData = {
         title: 'Merchant Payment',
         source: 'open-container',
@@ -2320,31 +2376,60 @@ export const OpenContainerRelayProcess = async () => {
         handle: obj.forText?.trim()?.slice(0, 80),
         forText: obj.forText?.trim(),
       }
-      
-      processedItemIndex++
-      
       logger(`[AAtoEOA/OpenContainer] Processing item ${i}: ${assetType}, amount=${assetAmount.toString()}`)
       logger(Colors.green(`✅ OpenContainerRelayProcess item ${i} displayJson = ${inspect(displayJsonData, false, 2, true)}`))
-      
-      // 仅 USDC 写入 BeamioIndexerDiamond（CCSA 当前无对应 indexer 结构）
+
       if (isUSDC) {
-        beamioTransferIndexerAccountingPool.push({
-          from: account,
-          to,
-          amountUSDC6: assetAmount.toString(),
-          finishedHash: tx.hash,
-          displayJson: JSON.stringify(displayJsonData),
-          currency: itemCurrency,
-          currencyAmount: itemCurrencyAmount,
-          gasWei: '0',
-          gasUSDC6: '0',
-          gasChainType: 0,
-          feePayer: account,
-          isInternalTransfer: false,
-          requestHash: obj.requestHash,
+        collectedRouteItems.push({
+          asset: usdcAddress,
+          amountE6: assetAmount.toString(),
+          assetType: 0,
+          source: 0,
+          tokenId: '0',
         })
-        logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool item ${i} from=${account} to=${to} amountUSDC6=${assetAmount} requestHash=${obj.requestHash ?? 'n/a'}`))
+        totalAmountE6 += assetAmount
+        primaryCurrency = itemCurrency
+        primaryCurrencyAmount = itemCurrencyAmount
+      } else if (isCCSA) {
+        const tokenIdVal = item.tokenId
+        const routeSource = tokenIdVal === 0n ? 1 : 2
+        collectedRouteItems.push({
+          asset: ccsacardAddress,
+          amountE6: assetAmount.toString(),
+          assetType: 1,
+          source: routeSource,
+          tokenId: tokenIdVal.toString(),
+        })
+        totalAmountE6 += assetAmount
+        primaryCurrency = itemCurrency
+        primaryCurrencyAmount = itemCurrencyAmount
       }
+    }
+
+    if (collectedRouteItems.length > 0) {
+      beamioTransferIndexerAccountingPool.push({
+        from: account,
+        to,
+        amountUSDC6: totalAmountE6.toString(),
+        finishedHash: tx.hash,
+        displayJson: JSON.stringify({
+          title: 'Merchant Payment',
+          source: 'open-container',
+          finishedHash: tx.hash,
+          handle: obj.forText?.trim()?.slice(0, 80),
+          forText: obj.forText?.trim(),
+        }),
+        currency: primaryCurrency,
+        currencyAmount: primaryCurrencyAmount,
+        gasWei: '0',
+        gasUSDC6: '0',
+        gasChainType: 0,
+        feePayer: account,
+        isInternalTransfer: false,
+        requestHash: obj.requestHash,
+        routeItems: collectedRouteItems,
+      })
+      logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool routeItems=${collectedRouteItems.length} totalAmountE6=${totalAmountE6} from=${account} to=${to} requestHash=${obj.requestHash ?? 'n/a'}`))
     }
     
     beamioTransferIndexerAccountingProcess().catch((err: any) => {

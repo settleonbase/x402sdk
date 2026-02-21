@@ -872,11 +872,13 @@ const routing = ( router: Router ) => {
 				logger(Colors.red(`[AAtoEOA] master validation FAIL: need toEOA, amountUSDC6, packedUserOp OR containerPayload OR openContainerPayload`))
 				return res.status(400).json({ success: false, error: 'Invalid data: need toEOA, amountUSDC6, packedUserOp OR containerPayload OR openContainerPayload' }).end()
 			}
+			const reqHashValid = body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined
 			const poolLenBefore = AAtoEOAPool.length
 			AAtoEOAPool.push({
 				toEOA: toEOA as string,
 				amountUSDC6,
 				packedUserOp: packedUserOp as AAtoEOAUserOp,
+				requestHash: reqHashValid,
 				res,
 			})
 			logger(`[AAtoEOA] master pushed to pool (length ${poolLenBefore} -> ${AAtoEOAPool.length}), calling AAtoEOAProcess()`)
