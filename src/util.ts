@@ -562,6 +562,7 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 		note?: string
 		requestHash?: string
 	}
+	logger(`[BeamioTransfer] req.query: amount=${amount} toAddress=${toAddress?.slice(0, 10)}… requestHash=${requestHash ?? 'undefined'}`)
 
 	const _price = amount|| '0'
 	const price = ethers.parseUnits(_price, USDC_Base_DECIMALS)
@@ -640,9 +641,10 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 				from, to, amount, finishedHash: responseData?.transaction, note: note||''
 			}
 			logger(inspect(record, false, 3, true))
-			const { displayJson, currency, currencyAmount } = buildDisplayJsonFromNote(note || '', String(responseData?.transaction || ''), 'x402')
-			const reqHash = requestHash && ethers.isHexString(requestHash) && ethers.dataLength(requestHash) === 32 ? requestHash : undefined
-			logger(`[BeamioTransfer] submitBeamioTransferIndexerAccounting from=${from} to=${to} requestHash=${reqHash ?? 'n/a'}`)
+			const { displayJson, currency, currencyAmount, requestHash: requestHashFromNote } = buildDisplayJsonFromNote(note || '', String(responseData?.transaction || ''), 'x402')
+			const reqHashSrc = requestHash || requestHashFromNote
+			const reqHash = reqHashSrc && ethers.isHexString(reqHashSrc) && ethers.dataLength(reqHashSrc) === 32 ? reqHashSrc : undefined
+			logger(`[BeamioTransfer] submitBeamioTransferIndexerAccounting from=${from} to=${to} requestHash=${reqHash ?? 'n/a'} (from query=${requestHash ?? 'n/a'} fromNote=${requestHashFromNote ?? 'n/a'})`)
 			void submitBeamioTransferIndexerAccountingToMaster({
 				from,
 				to,
@@ -666,13 +668,13 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 
 import type { DisplayJsonData } from './displayJsonTypes'
 
-/** 从 note（forText + '\\r\\n' + JSON + 可选 card JSON）构建 displayJson（仅附加字符），currency/currencyAmount 单独传 meta */
-function buildDisplayJsonFromNote(note: string, finishedHash: string, source: string): { displayJson: string; currency?: string; currencyAmount?: string } {
+/** 从 note（forText + '\\r\\n' + JSON + 可选 card JSON）构建 displayJson（仅附加字符），currency/currencyAmount/requestHash 单独传 meta */
+function buildDisplayJsonFromNote(note: string, finishedHash: string, source: string): { displayJson: string; currency?: string; currencyAmount?: string; requestHash?: string } {
 	const trimmed = note.trim()
 	const parts = trimmed.split(/\r?\n/)
 	const forTextPart = parts[0]?.trim() || ''
 	const rest = parts.slice(1).join('\n').trim()
-	let parsed: { currency?: string; currencyAmount?: string | number } = {}
+	let parsed: { currency?: string; currencyAmount?: string | number; requestHash?: string } = {}
 	let card: DisplayJsonData['card']
 	const jsonMatches: string[] = []
 	let i = 0
@@ -694,6 +696,9 @@ function buildDisplayJsonFromNote(note: string, finishedHash: string, source: st
 			if (obj.currency != null || obj.currencyAmount != null) {
 				parsed.currency = obj.currency as string
 				parsed.currencyAmount = obj.currencyAmount as string | number
+			}
+			if (obj.requestHash != null && typeof obj.requestHash === 'string') {
+				parsed.requestHash = obj.requestHash
 			}
 			if (obj.title != null || obj.detail != null || obj.image != null) {
 				card = {
@@ -723,6 +728,7 @@ function buildDisplayJsonFromNote(note: string, finishedHash: string, source: st
 		displayJson: JSON.stringify(d),
 		currency: parsed.currency,
 		currencyAmount: parsed.currencyAmount != null ? String(parsed.currencyAmount) : undefined,
+		requestHash: parsed.requestHash,
 	}
 }
 
