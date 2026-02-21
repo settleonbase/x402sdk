@@ -1068,6 +1068,15 @@ export const requestAccountingProcess = async () => {
 		const TX_REQUEST_CREATE = ethers.keccak256(ethers.toUtf8Bytes('request_create:confirmed'))
 		const CHAIN_ID_BASE = 8453n
 		const payeeAddr = ethers.getAddress(obj.payee)
+		const routeItem = {
+			asset: ethers.getAddress(USDC_ADDRESS),
+			amountE6: finalRequestAmountUSDC6,
+			assetType: 0,
+			source: 0,
+			tokenId: 0n,
+			itemCurrencyType: currencyFiat,
+			offsetInRequestCurrencyE6: finalRequestAmountUSDC6,
+		}
 		const transactionInput = {
 			txId: obj.requestHash as `0x${string}`,
 			originalPaymentHash: obj.requestHash as `0x${string}`,
@@ -1080,7 +1089,7 @@ export const requestAccountingProcess = async () => {
 			finalRequestAmountFiat6: requestAmountFiat6,
 			finalRequestAmountUSDC6,
 			isAAAccount: true,
-			route: [] as { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[],
+			route: [routeItem],
 			fees: {
 				gasChainType: 0,
 				gasWei: 0n,
@@ -1119,7 +1128,8 @@ export const requestAccountingProcess = async () => {
 		}
 	} catch (error: any) {
 		const msg = error?.shortMessage ?? error?.message ?? String(error)
-		logger(Colors.yellow(`[requestAccountingProcess] failed: ${msg}`), inspect(obj, false, 3, true))
+		const logPayload = { requestHash: obj.requestHash, payee: obj.payee, amount: obj.amount, currency: obj.currency, forText: obj.forText, validDays: obj.validDays }
+		logger(Colors.yellow(`[requestAccountingProcess] failed: ${msg}`), inspect(logPayload, false, 2, true))
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
 		}
