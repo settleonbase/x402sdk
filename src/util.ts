@@ -392,6 +392,32 @@ export const verifyPaymentNew = (
 		})
 		return resolve(false)
 	}
+
+	// 余额检查：付款方 USDC 不足时提前返回，便于 UI 显示友好错误
+	try {
+		const auth = (decodedPayment?.payload as { authorization?: { from?: string; value?: string } })?.authorization
+		const payer = auth?.from
+		const needAmount = BigInt(auth?.value ?? '0')
+		if (payer && needAmount > 0n) {
+			const usdcBase = new ethers.Contract(USDCContract_BASE, ['function balanceOf(address) view returns (uint256)'], providerBase)
+			const bal = await usdcBase.balanceOf(payer)
+			if (bal < needAmount) {
+				const balStr = (Number(bal) / 1e6).toFixed(2)
+				const needStr = (Number(needAmount) / 1e6).toFixed(2)
+				const errMsg = `Insufficient USDC balance: account has ${balStr} USDC, need ${needStr} USDC`
+				logger(`verifyPayment ${errMsg}`)
+				res.status(402).json({
+					x402Version,
+					error: errMsg,
+					accepts: paymentRequirements,
+				})
+				return resolve(false)
+			}
+		}
+	} catch (balanceEx: any) {
+		logger(`verifyPayment balance check failed (continuing): ${balanceEx?.message ?? balanceEx}`)
+		// RPC 失败时不影响主流程，交给 facilitator 校验
+	}
 	
 	try {
 
@@ -433,6 +459,25 @@ export const verifyPaymentNew = (
 			const auth = payload?.authorization
 			const req0 = paymentRequirements[0]
 			logger(`[DEBUG] verifyPayment Bad Request - reqResource=${req0?.resource} payTo=${req0?.payTo} authFrom=${auth?.from?.slice(0, 10)}… authTo=${auth?.to?.slice(0, 10)}… authValue=${auth?.value} authResource=${auth?.resource ?? 'n/a'}`)
+			// 复现请求以捕获 facilitator 原始错误详情
+			try {
+				const createAuth = facilitator1?.createAuthHeaders
+				if (createAuth && facilitator1?.url && req0) {
+					const authHeaders = await createAuth()
+					const url = `${facilitator1.url}/verify`
+					const replacer = (_: unknown, v: unknown) => typeof v === 'bigint' ? String(v) : v
+					const body = JSON.stringify({
+						x402Version: decodedPayment?.x402Version ?? 1,
+						paymentPayload: JSON.parse(JSON.stringify(decodedPayment, replacer)),
+						paymentRequirements: [JSON.parse(JSON.stringify(req0, replacer))],
+					})
+					const debugRes = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders.verify }, body })
+					const debugText = await debugRes.text()
+					logger(`[DEBUG] facilitator raw response: status=${debugRes.status} body=${debugText}`)
+				}
+			} catch (debugEx: any) {
+				logger(`[DEBUG] facilitator debug fetch failed: ${debugEx?.message ?? debugEx}`)
+			}
 		}
 		res.status(402).json({
 			x402Version,
