@@ -418,6 +418,26 @@ export const verifyPaymentNew = (
 		logger(`verifyPayment balance check failed (continuing): ${balanceEx?.message ?? balanceEx}`)
 		// RPC 失败时不影响主流程，交给 facilitator 校验
 	}
+
+	// 签名时效检查：validAfter/validBefore 超出则提前返回，便于 UI 提示用户重新签名
+	const authTime = (decodedPayment?.payload as { authorization?: { validAfter?: string; validBefore?: string } })?.authorization
+	if (authTime?.validAfter !== undefined && authTime?.validBefore !== undefined) {
+		const now = Math.floor(Date.now() / 1000)
+		const validAfter = Number(authTime.validAfter)
+		const validBefore = Number(authTime.validBefore)
+		if (now < validAfter) {
+			const errMsg = 'Payment authorization not yet valid. Please try again shortly.'
+			logger(`verifyPayment ${errMsg} (now=${now} validAfter=${validAfter})`)
+			res.status(402).json({ x402Version, error: errMsg, accepts: paymentRequirements })
+			return resolve(false)
+		}
+		if (now > validBefore) {
+			const errMsg = 'Payment authorization expired. Please sign again.'
+			logger(`verifyPayment ${errMsg} (now=${now} validBefore=${validBefore})`)
+			res.status(402).json({ x402Version, error: errMsg, accepts: paymentRequirements })
+			return resolve(false)
+		}
+	}
 	
 	try {
 
