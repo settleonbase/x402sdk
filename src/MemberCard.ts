@@ -1067,6 +1067,7 @@ export const requestAccountingProcess = async () => {
 
 		const TX_REQUEST_CREATE = ethers.keccak256(ethers.toUtf8Bytes('request_create:confirmed'))
 		const CHAIN_ID_BASE = 8453n
+		const payeeAddr = ethers.getAddress(obj.payee)
 		const transactionInput = {
 			txId: obj.requestHash as `0x${string}`,
 			originalPaymentHash: obj.requestHash as `0x${string}`,
@@ -1074,8 +1075,8 @@ export const requestAccountingProcess = async () => {
 			txCategory: TX_REQUEST_CREATE,
 			displayJson: displayJsonStr,
 			timestamp: BigInt(Math.floor(nowMs / 1000)),
-			payer: ethers.ZeroAddress,
-			payee: ethers.getAddress(obj.payee),
+			payer: payeeAddr,
+			payee: payeeAddr,
 			finalRequestAmountFiat6: requestAmountFiat6,
 			finalRequestAmountUSDC6,
 			isAAAccount: true,
