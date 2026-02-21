@@ -1,0 +1,78 @@
+services:
+  op-geth:
+    image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-geth:v1.101609.0
+    container_name: base-op-geth
+    restart: unless-stopped
+    command:
+      - "--datadir=/data"
+      - "--op-network=base-mainnet"
+      - "--port=30313"
+      - "--discovery.port=30313"
+      - "--http"
+      - "--http.addr=0.0.0.0"
+      - "--http.port=8545"
+      - "--http.api=eth,net,web3,debug,txpool"
+      - "--http.vhosts=*"
+      - "--ws"
+      - "--ws.addr=0.0.0.0"
+      - "--ws.port=8546"
+      - "--ws.origins=*"
+      - "--authrpc.addr=0.0.0.0"
+      - "--authrpc.port=8551"
+      - "--authrpc.vhosts=*"
+      - "--authrpc.jwtsecret=/jwt/jwt.hex"
+      - "--syncmode=snap"
+      - "--cache=65536"
+      - "--rollup.disabletxpoolgossip=true"
+    ports:
+      - "8547:8545"     # Base L2 HTTP RPC
+      - "8548:8546"     # Base L2 WS
+      - "8552:8551"     # Engine API
+      - "30313:30313/tcp"
+      - "30313:30313/udp"
+    volumes:
+      - /media/sda/base/op-geth:/data
+      - /media/sda/base/jwt:/jwt
+      - /media/sda/base/config:/config
+
+  op-node:
+    image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.16.6
+    container_name: base-op-node
+    restart: unless-stopped
+    depends_on:
+      - op-geth
+
+    entrypoint: ["op-node"]
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    command:
+      - "--network=base-mainnet"
+      - "--l2=http://op-geth:8551"
+      - "--l2.jwt-secret=/jwt/jwt.hex"
+      - "--l1=http://host.docker.internal:8545"
+      - "--l1.beacon=http://host.docker.internal:5052"
+      - "--l1.max-concurrency=30"
+      - "--l1.cache-size=1200"
+      - "--l1.http-poll-interval=8s"
+      - "--rpc.addr=0.0.0.0"
+      - "--rpc.port=8549"
+      - "--p2p.priv.path=/data/opnode_p2p_priv.txt"
+      - "--p2p.discovery.path=/data/opnode_discovery_db"
+      - "--p2p.peerstore.path=/data/opnode_peerstore_db"
+      - "--p2p.listen.tcp=9222"
+      - "--p2p.listen.udp=9222"
+      - "--p2p.bootnodes=enr:-J24QNz9lbrKbN4iSmmjtnr7SjUMk4zB7f1krHZcTZx-JRKZd0kA2gjufUROD6T3sOWDVDnFJRvqBBo62zuF-hYCohOGAYiOoEyEgmlkgnY0gmlwhAPniryHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQKNVFlCxh_B-716tTs-h1vMzZkSs1FTu_OYTNjgufplG4N0Y3CCJAaDdWRwgiQG,enr:-J24QH-f1wt99sfpHy4c0QJM-NfmsIfmlLAMMcgZCUEgKG_BBYFc6FwYgaMJMQN5dsRBJApIok0jFn-9CS842lGpLmqGAYiOoDRAgmlkgnY0gmlwhLhIgb2Hb3BzdGFja4OFQgCJc2VjcDI1NmsxoQJ9FTIv8B9myn1MWaC_2lJ-sMoeCDkusCsk4BYHjjCq04N0Y3CCJAaDdWRwgiQG,enr:-J24QDXyyxvQYsd0yfsN0cRr1lZ1N11zGTplMNlW4xNEc7LkPXh0NAJ9iSOVdRO95GPYAIc6xmyoCCG6_0JxdL3a0zaGAYiOoAjFgmlkgnY0gmlwhAPckbGHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQJwoS7tzwxqXSyFL7g0JM-KWVbgvjfB8JA__T7yY_cYboN0Y3CCJAaDdWRwgiQG,enr:-J24QHmGyBwUZXIcsGYMaUqGGSl4CFdx9Tozu-vQCn5bHIQbR7On7dZbU61vYvfrJr30t0iahSqhc64J46MnUO2JvQaGAYiOoCKKgmlkgnY0gmlwhAPnCzSHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQINc4fSijfbNIiGhcgvwjsjxVFJHUstK9L1T8OTKUjgloN0Y3CCJAaDdWRwgiQG,enr:-J24QG3ypT4xSu0gjb5PABCmVxZqBjVw9ca7pvsI8jl4KATYAnxBmfkaIuEqy9sKvDHKuNCsy57WwK9wTt2aQgcaDDyGAYiOoGAXgmlkgnY0gmlwhDbGmZaHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQIeAK_--tcLEiu7HvoUlbV52MspE0uCocsx1f_rYvRenIN0Y3CCJAaDdWRwgiQG"
+      - "--verifier.l1-confs=4"
+      - "--rollup.load-protocol-versions=true"
+      - "--l1.beacon.fetch-all-sidecars=true"
+      - "--syncmode=execution-layer"
+    ports:
+      - "8549:8549"
+      - "9222:9222/tcp"
+      - "9222:9222/udp"
+    volumes:
+      - /media/sda/base/op-node:/data
+      - /media/sda/base/jwt:/jwt
+      - /media/sda/base/config:/config
