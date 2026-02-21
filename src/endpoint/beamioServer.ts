@@ -106,9 +106,9 @@ export const postLocalhost = async (path: string, obj: any, _res: Response)=> {
 		
 	})
 
-	req.once('error', (e) => {
-		console.error(`getReferrer req on Error! ${e.message}`)
-		_res.status(502).end()
+		req.once('error', (e) => {
+		logger(Colors.red(`[DEBUG] postLocalhost ${path} FAIL: ${e.message}`))
+		_res.status(502).json({ success: false, error: `Forward to master failed: ${e.message}` }).end()
 	})
 
 	req.write(jsonStringifyWithBigInt(obj))
@@ -808,6 +808,7 @@ const routing = ( router: Router ) => {
 			forText?: string
 			requestHash?: string
 		}
+		logger(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`)
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true))
 
 		if (body.containerPayload) {
@@ -958,6 +959,39 @@ const routing = ( router: Router ) => {
 			forText: forText ? String(forText) : undefined,
 			validDays: vd,
 		}, res)
+	})
+
+	/** beamioTransferIndexerAccounting：x402/AAtoEOA 成功后记账到 BeamioIndexerDiamond，预检后转发 master */
+	router.post('/beamioTransferIndexerAccounting', (req, res) => {
+		const body = convertBigIntToString(req.body) as {
+			from?: string
+			to?: string
+			amountUSDC6?: string
+			finishedHash?: string
+			displayJson?: string
+			note?: string
+			currency?: string
+			currencyAmount?: string
+			gasWei?: string
+			gasUSDC6?: string
+			gasChainType?: number
+			feePayer?: string
+			isInternalTransfer?: boolean
+			requestHash?: string
+		}
+		if (!ethers.isAddress(body?.from) || !ethers.isAddress(body?.to)) {
+			logger(Colors.red(`[beamioTransferIndexerAccounting] server pre-check FAIL: invalid from/to`))
+			return res.status(400).json({ success: false, error: 'Invalid from or to address' }).end()
+		}
+		if (!body?.amountUSDC6 || BigInt(body.amountUSDC6) <= 0n) {
+			return res.status(400).json({ success: false, error: 'amountUSDC6 must be > 0' }).end()
+		}
+		if (!body?.finishedHash || !ethers.isHexString(body.finishedHash) || ethers.dataLength(body.finishedHash) !== 32) {
+			return res.status(400).json({ success: false, error: 'finishedHash must be bytes32 tx hash' }).end()
+		}
+		logger(Colors.green(`[beamioTransferIndexerAccounting] server pre-check OK, forwarding to master from=${body.from?.slice(0, 10)}… to=${body.to?.slice(0, 10)}… requestHash=${body.requestHash ?? 'n/a'}`))
+		logger(Colors.gray(`[DEBUG] postLocalhost /api/beamioTransferIndexerAccounting`))
+		postLocalhost('/api/beamioTransferIndexerAccounting', body, res)
 	})
 
 	/** GET /api/myCards?owner=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */

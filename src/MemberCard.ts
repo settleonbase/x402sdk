@@ -990,6 +990,18 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 	} catch (error: any) {
 		let msg = error?.shortMessage ?? error?.message ?? String(error)
+		if (error?.data) logger(Colors.gray(`[DEBUG] beamioTransferIndexerAccountingProcess revert data=${typeof error.data === 'string' ? error.data : ethers.hexlify(error.data)}`))
+		const isTxExists = /tx exists/i.test(msg)
+		if (isTxExists) {
+			const existingTxHash = String(obj?.finishedHash ?? '')
+			logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] txHash=${existingTxHash} already indexed (idempotent OK), skip`))
+			if (obj.res && !obj.res.headersSent) {
+				obj.res.status(200).json({ success: true, indexed: true, txHash: existingTxHash, alreadyExists: true }).end()
+			}
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => beamioTransferIndexerAccountingProcess(), 1000)
+			return
+		}
 		const isInsufficientFunds = /insufficient funds for intrinsic transaction cost/i.test(msg)
 		if (isInsufficientFunds) {
 			msg = `${msg} (Conet 链上 admin ${SC?.walletConet?.address ?? '?'} 需充值 CNET 原生代币以支付 syncTokenAction gas)`
@@ -2170,6 +2182,7 @@ export const OpenContainerRelayProcess = async () => {
   const obj = OpenContainerRelayPool.shift()
   if (!obj) return
 
+  logger(Colors.gray(`[DEBUG] OpenContainerRelayProcess entry: objKeys=${Object.keys(obj).join(',')} requestHash=${obj.requestHash ?? 'n/a'} forText=${obj.forText ? `"${String(obj.forText).slice(0, 30)}…"` : 'n/a'} Settle_ContractPool.len=${Settle_ContractPool.length}`))
   const payload = obj.openContainerPayload
   logger(`[AAtoEOA/OpenContainer] process started account=${payload.account} to=${payload.to}`)
   logger(`[AAtoEOA/OpenContainer] received obj data: currency=${obj.currency ?? 'null'}, currencyAmount=${obj.currencyAmount ?? 'null'}, payload.currencyType=${payload.currencyType}, payload.maxAmount=${payload.maxAmount}, items.length=${payload.items.length}`)
