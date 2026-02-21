@@ -772,6 +772,8 @@ export const OpenContainerRelayPool: {
 	currencyDiscount?: string | string[]
 	currencyDiscountAmount?: string | string[]
 	forText?: string
+	/** Bill 支付时 URL 的 requestHash（bytes32），供记账写入 originalPaymentHash 以关联 request_create */
+	requestHash?: string
 	res: Response
 }[] = []
 
@@ -792,6 +794,8 @@ export const ContainerRelayPool: {
 	currencyDiscount?: string | string[]
 	currencyDiscountAmount?: string | string[]
 	forText?: string
+	/** Bill 支付时 URL 的 requestHash（bytes32），供记账写入 originalPaymentHash 以关联 request_create */
+	requestHash?: string
 	res: Response
 }[] = []
 
@@ -806,6 +810,8 @@ export const beamioTransferIndexerAccountingPool: {
 	finishedHash: string
 	/** 账单附加字符 JSON（DisplayJsonData） */
 	displayJson?: string
+	/** Bill 支付时 URL 的 requestHash（bytes32），写入 originalPaymentHash 以关联 request_create，便于 UI 分组聚合 */
+	requestHash?: string
 	/** @deprecated 兼容旧 note */
 	note?: string
 	/** 金额由 Transaction 表达，此处仅供 meta 的 requestAmountFiat6/currencyFiat 换算 */
@@ -916,12 +922,16 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 
 		const TX_TRANSFER_OUT = ethers.keccak256(ethers.toUtf8Bytes('transfer_out:confirmed'))
 		const TX_INTERNAL = ethers.keccak256(ethers.toUtf8Bytes('internal_transfer:confirmed'))
+		const TX_REQUEST_FULFILLED = ethers.keccak256(ethers.toUtf8Bytes('request_fulfilled:confirmed'))
 		const CHAIN_ID_BASE = 8453n
+		const requestHashValid = obj.requestHash && ethers.isHexString(obj.requestHash) && ethers.dataLength(obj.requestHash) === 32
+		const originalPaymentHash = requestHashValid ? (obj.requestHash as `0x${string}`) : ethers.ZeroHash
+		const txCategory = isInternalTransfer ? TX_INTERNAL : (requestHashValid ? TX_REQUEST_FULFILLED : TX_TRANSFER_OUT)
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
-			originalPaymentHash: ethers.ZeroHash,
+			originalPaymentHash,
 			chainId: CHAIN_ID_BASE,
-			txCategory: isInternalTransfer ? TX_INTERNAL : TX_TRANSFER_OUT,
+			txCategory,
 			displayJson: displayJsonStr,
 			timestamp: 0n,
 			payer: ethers.getAddress(obj.from),
@@ -2317,8 +2327,9 @@ export const OpenContainerRelayProcess = async () => {
           gasChainType: 0,
           feePayer: account,
           isInternalTransfer: false,
+          requestHash: obj.requestHash,
         })
-        logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool item ${i} from=${account} to=${to} amountUSDC6=${assetAmount}`))
+        logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool item ${i} from=${account} to=${to} amountUSDC6=${assetAmount} requestHash=${obj.requestHash ?? 'n/a'}`))
       }
     }
     
@@ -2455,8 +2466,9 @@ export const ContainerRelayProcess = async () => {
       gasChainType: 0,
       feePayer: account,
       isInternalTransfer: true,
+      requestHash: obj.requestHash,
     })
-    logger(Colors.cyan(`[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool (internal) from=${account} to=${to} amountUSDC6=${usdcAmountRaw}`))
+    logger(Colors.cyan(`[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool (internal) from=${account} to=${to} amountUSDC6=${usdcAmountRaw} requestHash=${obj.requestHash ?? 'n/a'}`))
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
       logger(Colors.red('[AAtoEOA/Container] beamioTransferIndexerAccountingProcess unhandled:'), err?.message ?? err)
     })

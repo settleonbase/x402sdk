@@ -805,6 +805,8 @@ const routing = ( router: Router ) => {
 			currencyAmount?: string | string[]
 			currencyDiscount?: string | string[]
 			currencyDiscountAmount?: string | string[]
+			forText?: string
+			requestHash?: string
 		}
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
 
@@ -821,6 +823,8 @@ const routing = ( router: Router ) => {
 				currencyAmount: body.currencyAmount,
 				currencyDiscount: body.currencyDiscount,
 				currencyDiscountAmount: body.currencyDiscountAmount,
+				forText: body.forText,
+				requestHash: body.requestHash,
 			}, res)
 			return
 		}
@@ -861,6 +865,8 @@ const routing = ( router: Router ) => {
 				currencyAmount: body.currencyAmount,
 				currencyDiscount: body.currencyDiscount,
 				currencyDiscountAmount: body.currencyDiscountAmount,
+				forText: body.forText,
+				requestHash: body.requestHash,
 			}, res)
 			return
 		}

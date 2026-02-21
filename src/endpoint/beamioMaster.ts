@@ -638,11 +638,12 @@ const routing = ( router: Router ) => {
 
 		/** x402 BeamioTransfer 成功后：写入 BeamioIndexerDiamond（master 队列处理） */
 		router.post('/beamioTransferIndexerAccounting', (req, res) => {
-			const { from, to, amountUSDC6, finishedHash, displayJson, note, currency, currencyAmount, gasWei, gasUSDC6, gasChainType, feePayer, isInternalTransfer } = req.body as {
+			const { from, to, amountUSDC6, finishedHash, displayJson, note, currency, currencyAmount, gasWei, gasUSDC6, gasChainType, feePayer, isInternalTransfer, requestHash } = req.body as {
 				from?: string
 				to?: string
 				amountUSDC6?: string
 				finishedHash?: string
+				requestHash?: string
 				displayJson?: string
 				note?: string
 				currency?: string
@@ -693,9 +694,10 @@ const routing = ( router: Router ) => {
 				gasChainType: Number(gasChainType ?? 0),
 				feePayer: String(feePayer),
 				isInternalTransfer: !!isInternalTransfer,
+				requestHash: requestHash && ethers.isHexString(requestHash) && ethers.dataLength(requestHash) === 32 ? requestHash : undefined,
 				res,
 			})
-			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6}`))
+			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6} requestHash=${requestHash ?? 'n/a'}`))
 			beamioTransferIndexerAccountingProcess().catch((err: any) => {
 				logger(Colors.red('[beamioTransferIndexerAccountingProcess] unhandled error:'), err?.message ?? err)
 			})
@@ -810,6 +812,7 @@ const routing = ( router: Router ) => {
 				currencyDiscount?: string | string[]
 				currencyDiscountAmount?: string | string[]
 				forText?: string
+				requestHash?: string
 			}
 			logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload }, false, 3, true))
 
@@ -827,6 +830,7 @@ const routing = ( router: Router ) => {
 					currencyDiscount: body.currencyDiscount,
 					currencyDiscountAmount: body.currencyDiscountAmount,
 					forText: body.forText?.trim() || undefined,
+					requestHash: body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined,
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to ContainerRelayPool (length ${poolLenBefore} -> ${ContainerRelayPool.length}), calling ContainerRelayProcess()`)
@@ -850,6 +854,7 @@ const routing = ( router: Router ) => {
 					currencyDiscount: body.currencyDiscount,
 					currencyDiscountAmount: body.currencyDiscountAmount,
 					forText: body.forText?.trim() || undefined,
+					requestHash: body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined,
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)
