@@ -350,6 +350,14 @@ function createBeamioExactPaymentRequirements(
 		}
 }
 
+/** 构建 x402 resource URL，优先使用 X-Forwarded-Proto 以在代理后得到正确的 https */
+function buildResourceUrl(req: Request): string {
+	const protocol = (req.get('X-Forwarded-Proto') as string) || req.protocol || 'https'
+	const host = req.get('X-Forwarded-Host') || req.headers.host || ''
+	const pathname = new URL(req.originalUrl || req.url, 'http://x').pathname
+	return `${protocol}://${host}${pathname}`
+}
+
 export const verifyPaymentNew = (
 		req: Request,
 		res: Response,
@@ -388,8 +396,7 @@ export const verifyPaymentNew = (
 		if (!paymentRequirements.length) {
 			//@ts-ignore
 			const amount = decodedPayment.payload.authorization.value
-			const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
-			const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
+			const resource = buildResourceUrl(req) as Resource
 			paymentRequirements = [createBeamioExactPaymentRequirements(
 				amount,
 				resource,
@@ -415,13 +422,19 @@ export const verifyPaymentNew = (
 			return resolve(false)
 		}
 
-	} catch (error) {
-
-		logger(`verifyPayment catch error!`, error)
-
+	} catch (error: any) {
+		const errMsg = error?.message ?? String(error)
+		const errCause = error?.cause?.message ?? error?.cause
+		logger(`verifyPayment catch error! ${errMsg}`, errCause ? `cause=${errCause}` : '')
+		if (errMsg.includes('Bad Request') || errMsg.includes('400')) {
+			const payload = decodedPayment?.payload as { authorization?: { from?: string; to?: string; value?: string; resource?: string } } | undefined
+			const auth = payload?.authorization
+			const req0 = paymentRequirements[0]
+			logger(`[DEBUG] verifyPayment Bad Request - reqResource=${req0?.resource} payTo=${req0?.payTo} authFrom=${auth?.from?.slice(0, 10)}… authTo=${auth?.to?.slice(0, 10)}… authValue=${auth?.value} authResource=${auth?.resource ?? 'n/a'}`)
+		}
 		res.status(402).json({
 			x402Version,
-			error,
+			error: errMsg,
 			accepts: paymentRequirements,
 		});
 		return resolve (false)
@@ -553,8 +566,7 @@ export const cashcode_request = async (req: Request, res: Response) => {
  */
 export const BeamioTransfer = async (req: Request, res: Response) => {
 	const _routerName = req.path
-	const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
-	const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
+	const resource = buildResourceUrl(req) as Resource
 
 	const { amount, toAddress, note, requestHash } = req.query as {
 		amount?: string
@@ -562,7 +574,7 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 		note?: string
 		requestHash?: string
 	}
-	logger(`[BeamioTransfer] req.query: amount=${amount} toAddress=${toAddress?.slice(0, 10)}… requestHash=${requestHash ?? 'undefined'}`)
+	logger(`[BeamioTransfer] req.query: amount=${amount} toAddress=${toAddress?.slice(0, 10)}… requestHash=${requestHash ?? 'undefined'} resource=${resource}`)
 
 	const _price = amount|| '0'
 	const price = ethers.parseUnits(_price, USDC_Base_DECIMALS)
