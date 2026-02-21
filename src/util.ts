@@ -350,10 +350,12 @@ function createBeamioExactPaymentRequirements(
 		}
 }
 
-/** 构建 x402 resource URL，优先使用 X-Forwarded-Proto 以在代理后得到正确的 https */
+/** 构建 x402 resource URL，优先使用 X-Forwarded-Proto 以在代理后得到正确的 https。取逗号分隔的首值（多级代理时可能为 "https, https"） */
 function buildResourceUrl(req: Request): string {
-	const protocol = (req.get('X-Forwarded-Proto') as string) || req.protocol || 'https'
-	const host = req.get('X-Forwarded-Host') || req.headers.host || ''
+	const rawProto = (req.get('X-Forwarded-Proto') as string) || req.protocol || 'https'
+	const protocol = rawProto.split(',')[0]?.trim() || 'https'
+	const rawHost = req.get('X-Forwarded-Host') || req.headers.host || ''
+	const host = rawHost.split(',')[0]?.trim() || ''
 	const pathname = new URL(req.originalUrl || req.url, 'http://x').pathname
 	return `${protocol}://${host}${pathname}`
 }
