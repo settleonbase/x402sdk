@@ -556,10 +556,11 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 	const url = new URL(`${req.protocol}://${req.headers.host}${req.originalUrl}`)
 	const resource = `${req.protocol}://${req.headers.host}${url.pathname}` as Resource
 
-	const { amount, toAddress, note } = req.query as {
+	const { amount, toAddress, note, requestHash } = req.query as {
 		amount?: string
 		toAddress?: string
 		note?: string
+		requestHash?: string
 	}
 
 	const _price = amount|| '0'
@@ -640,6 +641,8 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 			}
 			logger(inspect(record, false, 3, true))
 			const { displayJson, currency, currencyAmount } = buildDisplayJsonFromNote(note || '', String(responseData?.transaction || ''), 'x402')
+			const reqHash = requestHash && ethers.isHexString(requestHash) && ethers.dataLength(requestHash) === 32 ? requestHash : undefined
+			logger(`[BeamioTransfer] submitBeamioTransferIndexerAccounting from=${from} to=${to} requestHash=${reqHash ?? 'n/a'}`)
 			void submitBeamioTransferIndexerAccountingToMaster({
 				from,
 				to,
@@ -648,6 +651,7 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 				displayJson,
 				currency,
 				currencyAmount,
+				requestHash: reqHash,
 			})
 		}
 		
@@ -730,6 +734,7 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 	displayJson: string
 	currency?: string
 	currencyAmount?: string
+	requestHash?: string
 }) => {
 	if (!ethers.isAddress(payload.from) || !ethers.isAddress(payload.to)) {
 		return
@@ -772,7 +777,7 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 			logger(`[BeamioTransfer] submitBeamioTransferIndexerAccountingToMaster error: ${e.message}`)
 			resolve()
 		})
-		req.write(JSON.stringify({
+		const body: Record<string, unknown> = {
 			from: payload.from,
 			to: payload.to,
 			amountUSDC6: payload.amountUSDC6,
@@ -784,7 +789,9 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 			gasUSDC6: gasFields.gasUSDC6,
 			gasChainType: gasFields.gasChainType,
 			feePayer: payload.from,
-		}))
+		}
+		if (payload.requestHash) body.requestHash = payload.requestHash
+		req.write(JSON.stringify(body))
 		req.end()
 	})
 }

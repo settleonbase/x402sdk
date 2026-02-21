@@ -927,6 +927,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		const requestHashValid = obj.requestHash && ethers.isHexString(obj.requestHash) && ethers.dataLength(obj.requestHash) === 32
 		const originalPaymentHash = requestHashValid ? (obj.requestHash as `0x${string}`) : ethers.ZeroHash
 		const txCategory = isInternalTransfer ? TX_INTERNAL : (requestHashValid ? TX_REQUEST_FULFILLED : TX_TRANSFER_OUT)
+		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] requestHash=${obj.requestHash ?? 'n/a'} valid=${requestHashValid} txCategory=${requestHashValid ? 'request_fulfilled' : 'transfer_out'}`))
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
 			originalPaymentHash,

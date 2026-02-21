@@ -680,6 +680,7 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: 'Invalid bigint string: amountUSDC6/gasWei/gasUSDC6' }).end()
 			}
 
+			const reqHashValid = requestHash && ethers.isHexString(requestHash) && ethers.dataLength(requestHash) === 32 ? requestHash : undefined
 			beamioTransferIndexerAccountingPool.push({
 				from: String(from),
 				to: String(to),
@@ -694,10 +695,10 @@ const routing = ( router: Router ) => {
 				gasChainType: Number(gasChainType ?? 0),
 				feePayer: String(feePayer),
 				isInternalTransfer: !!isInternalTransfer,
-				requestHash: requestHash && ethers.isHexString(requestHash) && ethers.dataLength(requestHash) === 32 ? requestHash : undefined,
+				requestHash: reqHashValid,
 				res,
 			})
-			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6} requestHash=${requestHash ?? 'n/a'}`))
+			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6} requestHash=${reqHashValid ?? 'n/a'} (raw=${requestHash ?? 'undefined'})`))
 			beamioTransferIndexerAccountingProcess().catch((err: any) => {
 				logger(Colors.red('[beamioTransferIndexerAccountingProcess] unhandled error:'), err?.message ?? err)
 			})
