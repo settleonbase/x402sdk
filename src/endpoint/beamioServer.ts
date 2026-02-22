@@ -11,7 +11,8 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, getRedeemStatusBatchApi } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
+import { CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
 import { masterSetup } from '../util'
 
 const ISSUED_NFT_START_ID = 100_000_000_000n
@@ -30,6 +31,8 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 ] as const
 const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://mainnet.base.org'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
+const CONET_RPC = 'https://mainnet-rpc1.conet.network'
+const providerConet = new ethers.JsonRpcProvider(CONET_RPC)
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -135,6 +138,23 @@ const getLocalhostBuffer = (path: string): Promise<{ statusCode: number; body: s
 		req.on('error', (e) => reject(e))
 		req.end()
 	})
+
+/** Cluster 预检：若有 requestHash，调用 checkRequestStatus，过期或已支付则返回 { ok: false }，否则 { ok: true } */
+const runRequestHashPreCheck = async (requestHash: string, validDays: number, payee: string): Promise<{ ok: boolean; error?: string }> => {
+	if (!requestHash || !ethers.isHexString(requestHash) || ethers.dataLength(requestHash) !== 32) return { ok: true }
+	if (!payee || !ethers.isAddress(payee)) return { ok: true }
+	try {
+		const qs = new URLSearchParams({ requestHash, validDays: String(Math.max(1, Math.floor(validDays))), payee }).toString()
+		const { statusCode, body } = await getLocalhostBuffer('/api/checkRequestStatus?' + qs)
+		if (statusCode !== 200) return { ok: true }
+		const data = JSON.parse(body) as { expired?: boolean; fulfilled?: boolean }
+		if (data.expired) return { ok: false, error: 'Request expired' }
+		if (data.fulfilled) return { ok: false, error: 'Request already paid' }
+		return { ok: true }
+	} catch {
+		return { ok: true }
+	}
+}
 
 /** myCards 缓存：30 秒内相同查询直接返回，减轻 master 负荷 */
 const MY_CARDS_CACHE_TTL_MS = 30 * 1000
@@ -807,6 +827,7 @@ const routing = ( router: Router ) => {
 			currencyDiscountAmount?: string | string[]
 			forText?: string
 			requestHash?: string
+			validDays?: number | string
 		}
 		logger(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`)
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true))
@@ -817,6 +838,15 @@ const routing = ( router: Router ) => {
 				logger(Colors.red(`[AAtoEOA] server Container pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
+			const reqHashValid = body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined
+			if (reqHashValid && body.containerPayload?.to && ethers.isAddress(body.containerPayload.to)) {
+				const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1
+				const reqCheck = await runRequestHashPreCheck(reqHashValid, vd, body.containerPayload.to)
+				if (!reqCheck.ok) {
+					logger(Colors.yellow(`[AAtoEOA] Cluster requestHash pre-check FAIL: ${reqCheck.error}`))
+					return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end()
+				}
+			}
 			logger(Colors.green(`[AAtoEOA] server Container pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
 			postLocalhost('/api/AAtoEOA', {
 				containerPayload: body.containerPayload,
@@ -826,6 +856,7 @@ const routing = ( router: Router ) => {
 				currencyDiscountAmount: body.currencyDiscountAmount,
 				forText: body.forText,
 				requestHash: body.requestHash,
+				validDays: body.validDays,
 			}, res)
 			return
 		}
@@ -859,6 +890,15 @@ const routing = ( router: Router ) => {
 					return res.status(400).json({ success: false, error }).end()
 				}
 			}
+			const reqHashValid = body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined
+			if (reqHashValid && body.openContainerPayload?.to && ethers.isAddress(body.openContainerPayload.to)) {
+				const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1
+				const reqCheck = await runRequestHashPreCheck(reqHashValid, vd, body.openContainerPayload.to)
+				if (!reqCheck.ok) {
+					logger(Colors.yellow(`[AAtoEOA] Cluster requestHash pre-check FAIL: ${reqCheck.error}`))
+					return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end()
+				}
+			}
 			logger(Colors.green(`[AAtoEOA] server OpenContainer pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
 			postLocalhost('/api/AAtoEOA', {
 				openContainerPayload: body.openContainerPayload,
@@ -868,6 +908,7 @@ const routing = ( router: Router ) => {
 				currencyDiscountAmount: body.currencyDiscountAmount,
 				forText: body.forText,
 				requestHash: body.requestHash,
+				validDays: body.validDays,
 			}, res)
 			return
 		}
@@ -883,8 +924,16 @@ const routing = ( router: Router ) => {
 			logger(Colors.red(`[AAtoEOA] server sender pre-check FAIL: ${senderCheck.error}`))
 			return res.status(400).json({ success: false, error: senderCheck.error }).end()
 		}
+		if (body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 && toEOA && ethers.isAddress(toEOA)) {
+			const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1
+			const reqCheck = await runRequestHashPreCheck(body.requestHash, vd, toEOA)
+			if (!reqCheck.ok) {
+				logger(Colors.yellow(`[AAtoEOA] Cluster requestHash pre-check FAIL: ${reqCheck.error}`))
+				return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end()
+			}
+		}
 		logger(Colors.green(`[AAtoEOA] server pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
-		postLocalhost('/api/AAtoEOA', { toEOA, amountUSDC6, packedUserOp }, res)
+		postLocalhost('/api/AAtoEOA', { toEOA, amountUSDC6, packedUserOp, requestHash: body.requestHash, validDays: body.validDays }, res)
 	})
 
 	/** regiestChatRoute：集群预检格式，合格转发 master。master 使用 beamio_ContractPool 排队并发处理。*/
@@ -961,37 +1010,110 @@ const routing = ( router: Router ) => {
 		}, res)
 	})
 
-	/** beamioTransferIndexerAccounting：x402/AAtoEOA 成功后记账到 BeamioIndexerDiamond，预检后转发 master */
-	router.post('/beamioTransferIndexerAccounting', (req, res) => {
-		const body = convertBigIntToString(req.body) as {
-			from?: string
-			to?: string
-			amountUSDC6?: string
-			finishedHash?: string
-			displayJson?: string
-			note?: string
-			currency?: string
-			currencyAmount?: string
-			gasWei?: string
-			gasUSDC6?: string
-			gasChainType?: number
-			feePayer?: string
-			isInternalTransfer?: boolean
-			requestHash?: string
+	/** POST /api/cancelRequest - Payee 取消 Request。预检：格式 + 验签必须为原 request (Transaction) 的 payee，非 payee 不得 cancel */
+	router.post('/cancelRequest', async (req, res) => {
+		const { originalPaymentHash, payeeSignature } = req.body as { originalPaymentHash?: string; payeeSignature?: string }
+		if (!originalPaymentHash || !payeeSignature) {
+			logger(Colors.red(`[cancelRequest] server pre-check: missing originalPaymentHash or payeeSignature`))
+			return res.status(400).json({ success: false, error: 'Missing originalPaymentHash or payeeSignature' }).end()
 		}
-		if (!ethers.isAddress(body?.from) || !ethers.isAddress(body?.to)) {
-			logger(Colors.red(`[beamioTransferIndexerAccounting] server pre-check FAIL: invalid from/to`))
-			return res.status(400).json({ success: false, error: 'Invalid from or to address' }).end()
+		const preCheck = await cancelRequestPreCheck(String(originalPaymentHash), String(payeeSignature))
+		if (!preCheck.success) {
+			logger(Colors.red(`[cancelRequest] server pre-check FAIL: ${preCheck.error}`))
+			return res.status(403).json({ success: false, error: preCheck.error }).end()
 		}
-		if (!body?.amountUSDC6 || BigInt(body.amountUSDC6) <= 0n) {
-			return res.status(400).json({ success: false, error: 'amountUSDC6 must be > 0' }).end()
+		logger(Colors.green(`[cancelRequest] server pre-check OK (signature from payee), forwarding to master`), inspect({ originalPaymentHash: originalPaymentHash.slice(0, 10) + '…' }, false, 2, true))
+		postLocalhost('/api/cancelRequest', { originalPaymentHash: String(originalPaymentHash), payeeSignature: String(payeeSignature) }, res)
+	})
+
+		/** beamioTransferIndexerAccounting：x402/AAtoEOA 成功后记账到 BeamioIndexerDiamond，预检后转发 master */
+		router.post('/beamioTransferIndexerAccounting', async (req, res) => {
+			const body = convertBigIntToString(req.body) as {
+				from?: string
+				to?: string
+				amountUSDC6?: string
+				finishedHash?: string
+				displayJson?: string
+				note?: string
+				currency?: string
+				currencyAmount?: string
+				gasWei?: string
+				gasUSDC6?: string
+				gasChainType?: number
+				feePayer?: string
+				isInternalTransfer?: boolean
+				requestHash?: string
+				validDays?: number | string
+			}
+			if (!ethers.isAddress(body?.from) || !ethers.isAddress(body?.to)) {
+				logger(Colors.red(`[beamioTransferIndexerAccounting] server pre-check FAIL: invalid from/to`))
+				return res.status(400).json({ success: false, error: 'Invalid from or to address' }).end()
+			}
+			if (!body?.amountUSDC6 || BigInt(body.amountUSDC6) <= 0n) {
+				return res.status(400).json({ success: false, error: 'amountUSDC6 must be > 0' }).end()
+			}
+			if (!body?.finishedHash || !ethers.isHexString(body.finishedHash) || ethers.dataLength(body.finishedHash) !== 32) {
+				return res.status(400).json({ success: false, error: 'finishedHash must be bytes32 tx hash' }).end()
+			}
+			const reqHashValid = body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined
+			if (reqHashValid && body.to && ethers.isAddress(body.to)) {
+				const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1
+				const reqCheck = await runRequestHashPreCheck(reqHashValid, vd, body.to)
+				if (!reqCheck.ok) {
+					logger(Colors.yellow(`[beamioTransferIndexerAccounting] Cluster requestHash pre-check FAIL: ${reqCheck.error}`))
+					return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end()
+				}
+			}
+			logger(Colors.green(`[beamioTransferIndexerAccounting] server pre-check OK, forwarding to master from=${body.from?.slice(0, 10)}… to=${body.to?.slice(0, 10)}… requestHash=${body.requestHash ?? 'n/a'}`))
+			logger(Colors.gray(`[DEBUG] postLocalhost /api/beamioTransferIndexerAccounting`))
+			postLocalhost('/api/beamioTransferIndexerAccounting', body, res)
+		})
+
+	/** GET /api/checkBUnitClaimEligibility?address=0x... - 检查是否可领取 BeamioBUnits，cluster 直接读 CoNET BUnitAirdrop */
+	router.get('/checkBUnitClaimEligibility', async (req, res) => {
+		const { address } = req.query as { address?: string }
+		if (!address || !ethers.isAddress(address)) {
+			return res.status(400).json({ canClaim: false, error: 'Invalid address' })
 		}
-		if (!body?.finishedHash || !ethers.isHexString(body.finishedHash) || ethers.dataLength(body.finishedHash) !== 32) {
-			return res.status(400).json({ success: false, error: 'finishedHash must be bytes32 tx hash' }).end()
+		try {
+			const airdrop = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, ['function hasClaimed(address) view returns (bool)', 'function claimNonces(address) view returns (uint256)'], providerConet)
+			const [hasClaimed, nonce] = await Promise.all([airdrop.hasClaimed(address), airdrop.claimNonces(address)])
+			const canClaim = !hasClaimed
+			const deadline = Math.floor(Date.now() / 1000) + 3600 // 1h from now
+			res.status(200).json({ canClaim, nonce: String(nonce), deadline })
+		} catch (e: any) {
+			logger(Colors.red('[checkBUnitClaimEligibility] error:'), e?.message ?? e)
+			res.status(500).json({ canClaim: false, error: e?.message ?? 'Failed to check eligibility' })
 		}
-		logger(Colors.green(`[beamioTransferIndexerAccounting] server pre-check OK, forwarding to master from=${body.from?.slice(0, 10)}… to=${body.to?.slice(0, 10)}… requestHash=${body.requestHash ?? 'n/a'}`))
-		logger(Colors.gray(`[DEBUG] postLocalhost /api/beamioTransferIndexerAccounting`))
-		postLocalhost('/api/beamioTransferIndexerAccounting', body, res)
+	})
+
+	/** POST /api/claimBUnits - 领取 BeamioBUnits，cluster 预检后转发 master，master 使用 Settle_ContractPool 执行 claimFor */
+	router.post('/claimBUnits', async (req, res) => {
+		const body = req.body as { claimant?: string; nonce?: unknown; deadline?: unknown; signature?: unknown }
+		const preCheck = claimBUnitsPreCheck(body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/claimBUnits preCheck FAIL: ${preCheck.error}`))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green('server /api/claimBUnits preCheck OK, forwarding to master'))
+		postLocalhost('/api/claimBUnits', preCheck.preChecked, res)
+	})
+
+	/** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付，转发 master */
+	router.get('/checkRequestStatus', async (req, res) => {
+		const { requestHash, validDays, payee } = req.query as { requestHash?: string; validDays?: string; payee?: string }
+		if (!requestHash || validDays == null || validDays === '' || !payee) {
+			return res.status(400).json({ error: 'Missing required: requestHash, validDays, payee' })
+		}
+		try {
+			const qs = new URLSearchParams({ requestHash, validDays, payee }).toString()
+			const path = '/api/checkRequestStatus?' + qs
+			const { statusCode, body } = await getLocalhostBuffer(path)
+			res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[checkRequestStatus] forward error:'), e?.message ?? e)
+			res.status(502).json({ error: e?.message ?? 'Failed to check request status' })
+		}
 	})
 
 	/** GET /api/myCards?owner=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */

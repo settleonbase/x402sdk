@@ -26,7 +26,7 @@ const ACTION_SYNC_TOKEN_ABI = [
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from './chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
 import { registerCardToDb } from './db'
@@ -1209,6 +1209,195 @@ export const requestAccountingProcess = async () => {
 	}
 	Settle_ContractPool.unshift(SC)
 	setTimeout(() => requestAccountingProcess(), 1000)
+}
+
+/** Cluster 预检：验证 payeeSignature 的 recover 地址必须是原 request (Transaction) 的 payee，非 payee 不得 cancel */
+export const cancelRequestPreCheck = async (originalPaymentHash: string, payeeSignature: string): Promise<{ success: true } | { success: false; error: string }> => {
+	if (!ethers.isHexString(originalPaymentHash) || ethers.dataLength(originalPaymentHash) !== 32) {
+		return { success: false, error: 'originalPaymentHash must be bytes32' }
+	}
+	if (typeof payeeSignature !== 'string' || !/^0x[a-fA-F0-9]+$/.test(payeeSignature) || (payeeSignature.length - 2) / 2 !== 65) {
+		return { success: false, error: 'payeeSignature must be 65-byte hex' }
+	}
+	let recoveredAddr: string
+	try {
+		recoveredAddr = ethers.verifyMessage(ethers.getBytes(originalPaymentHash), payeeSignature)
+	} catch (_) {
+		return { success: false, error: 'Invalid payeeSignature' }
+	}
+	const INDEXER_READ_ABI = ['function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))']
+	const indexer = new ethers.Contract(BeamioTaskIndexerAddress, INDEXER_READ_ABI, providerConet)
+	let full: unknown = null
+	try {
+		full = await indexer.getTransactionFullByTxId(originalPaymentHash)
+	} catch (_) {
+		return { success: false, error: 'Request not found' }
+	}
+	const payeeRaw = full && typeof full === 'object' && 'payee' in full ? (full as { payee?: unknown }).payee : Array.isArray(full) && full.length > 7 ? full[7] : null
+	const payeeAddr = payeeRaw && ethers.isAddress(String(payeeRaw)) ? ethers.getAddress(String(payeeRaw)) : null
+	if (!payeeAddr) {
+		return { success: false, error: 'Request not found' }
+	}
+	const isAA = full && typeof full === 'object' && 'isAAAccount' in full ? !!(full as { isAAAccount?: boolean }).isAAAccount : Array.isArray(full) && full.length > 10 ? !!full[10] : false
+	const recoveredLower = recoveredAddr.toLowerCase()
+	const payeeLower = payeeAddr.toLowerCase()
+	let isAuthorized = recoveredLower === payeeLower
+	if (!isAuthorized && isAA) {
+		const AA_FACTORY_ABI = ['function primaryAccountOf(address eoa) view returns (address)']
+		const aaFactory = new ethers.Contract(BeamioAAAccountFactoryPaymaster, AA_FACTORY_ABI, providerBaseBackup)
+		const primaryAA = await aaFactory.primaryAccountOf(recoveredAddr).catch(() => ethers.ZeroAddress)
+		isAuthorized = primaryAA && ethers.getAddress(String(primaryAA)).toLowerCase() === payeeLower
+	}
+	if (!isAuthorized) {
+		return { success: false, error: 'Signature not from payee' }
+	}
+	return { success: true }
+}
+
+/** Payee 取消 Request：验证 payee 对 originalPaymentHash 的签字，创建 request_cancel 记账 */
+export const cancelRequestAccountingPool: {
+	originalPaymentHash: string
+	payeeSignature: string
+	res?: Response
+}[] = []
+
+export const cancelRequestAccountingProcess = async () => {
+	const obj = cancelRequestAccountingPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		cancelRequestAccountingPool.unshift(obj)
+		return setTimeout(() => cancelRequestAccountingProcess(), 3000)
+	}
+	logger(Colors.cyan(`[cancelRequestAccountingProcess] originalPaymentHash=${obj.originalPaymentHash.slice(0, 10)}…`))
+	try {
+		if (!ethers.isHexString(obj.originalPaymentHash) || ethers.dataLength(obj.originalPaymentHash) !== 32) {
+			throw new Error('originalPaymentHash must be bytes32')
+		}
+		// Cluster 已验签（payeeSignature 必须为原 request 的 payee），Master 信任预检结果，仅取 payee/isAA 用于记账
+		// 从 Indexer 获取 request_create（txId = originalPaymentHash）
+		const INDEXER_READ_ABI = ['function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))']
+		const indexer = new ethers.Contract(BeamioTaskIndexerAddress, INDEXER_READ_ABI, SC.walletConet.provider)
+		let full: unknown = null
+		try {
+			full = await indexer.getTransactionFullByTxId(obj.originalPaymentHash)
+		} catch (_) {
+			/* request 可能不存在 */
+		}
+		const payeeRaw = full && typeof full === 'object' && 'payee' in full ? (full as { payee?: unknown }).payee : Array.isArray(full) && full.length > 7 ? full[7] : null
+		const payeeAddr = payeeRaw && ethers.isAddress(String(payeeRaw)) ? ethers.getAddress(String(payeeRaw)) : null
+		const isAA = full && typeof full === 'object' && 'isAAAccount' in full ? !!(full as { isAAAccount?: boolean }).isAAAccount : Array.isArray(full) && full.length > 10 ? !!full[10] : false
+		if (!payeeAddr) {
+			throw new Error('Request not found')
+		}
+		const TX_REQUEST_CANCEL = ethers.keccak256(ethers.toUtf8Bytes('request_cancel:confirmed'))
+		const CHAIN_ID_BASE = 8453n
+		const nowMs = Date.now()
+		const cancelTxId = ethers.keccak256(ethers.solidityPacked(['bytes32', 'string', 'uint256'], [obj.originalPaymentHash, 'cancel', BigInt(Math.floor(nowMs / 1000))]))
+		const displayJsonStr = JSON.stringify({ title: 'Request Canceled', source: 'payee', handle: '' })
+		const transactionInput = {
+			txId: cancelTxId as `0x${string}`,
+			originalPaymentHash: obj.originalPaymentHash as `0x${string}`,
+			chainId: CHAIN_ID_BASE,
+			txCategory: TX_REQUEST_CANCEL,
+			displayJson: displayJsonStr,
+			timestamp: BigInt(Math.floor(nowMs / 1000)),
+			payer: payeeAddr,
+			payee: payeeAddr,
+			finalRequestAmountFiat6: 0n,
+			finalRequestAmountUSDC6: 0n,
+			isAAAccount: isAA,
+			route: [],
+			fees: { gasChainType: 0, gasWei: 0n, gasUSDC6: 0n, serviceUSDC6: 0n, bServiceUSDC6: 0n, bServiceUnits6: 0n, feePayer: ethers.ZeroAddress },
+			meta: { requestAmountFiat6: 0n, requestAmountUSDC6: 0n, currencyFiat: 1, discountAmountFiat6: 0n, discountRateBps: 0, taxAmountFiat6: 0n, taxRateBps: 0, afterNotePayer: '', afterNotePayee: '' },
+		}
+		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
+		const tx = await actionFacetSync.syncTokenAction(transactionInput)
+		logger(Colors.green(`[cancelRequestAccountingProcess] syncTokenAction submitted hash=${tx.hash}`))
+		await tx.wait().catch((waitErr: any) => {
+			logger(Colors.yellow(`[cancelRequestAccountingProcess] syncTokenAction.wait() failed: ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+		})
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, indexed: true, originalPaymentHash: obj.originalPaymentHash, syncTx: tx.hash }).end()
+		}
+	} catch (error: any) {
+		const msg = error?.shortMessage ?? error?.message ?? String(error)
+		logger(Colors.yellow(`[cancelRequestAccountingProcess] failed: ${msg}`), inspect({ originalPaymentHash: obj.originalPaymentHash?.slice(0, 10) }, false, 2, true))
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
+		}
+	}
+	Settle_ContractPool.unshift(SC)
+	setTimeout(() => cancelRequestAccountingProcess(), 1000)
+}
+
+/** BUnit Airdrop claimFor：CoNET 上 BUnitAirdrop.claimFor(claimant, nonce, deadline, signature)，使用 walletConet 代付 gas */
+const BUNIT_AIRDROP_ABI = [
+	'function hasClaimed(address) view returns (bool)',
+	'function claimNonces(address) view returns (uint256)',
+	'function claimFor(address claimant, uint256 nonce, uint256 deadline, bytes calldata signature)',
+] as const
+
+export type ClaimBUnitsPayload = {
+	claimant: string
+	nonce: string | number
+	deadline: string | number
+	signature: string
+	res?: Response
+}
+
+export const claimBUnitsPool: ClaimBUnitsPayload[] = []
+
+export const claimBUnitsPreCheck = (body: { claimant?: string; nonce?: unknown; deadline?: unknown; signature?: unknown }): { success: true; preChecked: ClaimBUnitsPayload } | { success: false; error: string } => {
+	if (!body.claimant || !ethers.isAddress(body.claimant)) {
+		return { success: false, error: 'Invalid claimant address' }
+	}
+	const nonce = typeof body.nonce === 'string' ? BigInt(body.nonce) : typeof body.nonce === 'number' ? BigInt(Math.floor(body.nonce)) : null
+	if (nonce === null || nonce < 0n) {
+		return { success: false, error: 'Invalid nonce' }
+	}
+	const deadline = typeof body.deadline === 'string' ? Number(body.deadline) : typeof body.deadline === 'number' ? body.deadline : null
+	if (deadline === null || !Number.isFinite(deadline) || deadline <= Math.floor(Date.now() / 1000)) {
+		return { success: false, error: 'Invalid or expired deadline' }
+	}
+	const sig = body.signature
+	if (typeof sig !== 'string' || !/^0x[a-fA-F0-9]+$/.test(sig) || (sig.length - 2) / 2 !== 65) {
+		return { success: false, error: 'Invalid signature (must be 65 bytes hex)' }
+	}
+	return {
+		success: true,
+		preChecked: {
+			claimant: ethers.getAddress(body.claimant),
+			nonce: String(nonce),
+			deadline: String(deadline),
+			signature: sig,
+		},
+	}
+}
+
+export const claimBUnitsProcess = async () => {
+	const obj = claimBUnitsPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		claimBUnitsPool.unshift(obj)
+		return setTimeout(() => claimBUnitsProcess(), 3000)
+	}
+	logger(Colors.cyan(`[claimBUnitsProcess] claimant=${obj.claimant} nonce=${obj.nonce}`))
+	try {
+		const airdrop = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, BUNIT_AIRDROP_ABI, SC.walletConet)
+		const tx = await airdrop.claimFor(obj.claimant, obj.nonce, obj.deadline, obj.signature)
+		logger(Colors.green(`[claimBUnitsProcess] tx=${tx.hash}`))
+		await tx.wait()
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red(`[claimBUnitsProcess] failed:`), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => claimBUnitsProcess(), 3000)
+	}
 }
 
 const TRANSFER_SINGLE_TOPIC = ethers.id('TransferSingle(address,address,address,uint256,uint256)')

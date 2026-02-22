@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, Settle_ContractPool, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, Settle_ContractPool, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -398,6 +398,97 @@ const routing = ( router: Router ) => {
 			}
 		})
 
+		/** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付。用于 Smart Routing 及 beamioTransferIndexerAccounting 前置校验。 */
+		const BEAMIO_INDEXER_ADDRESS = '0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612'
+		const CONET_RPC = 'https://mainnet-rpc1.conet.network'
+		const INDEXER_READ_ABI = [
+			'function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))',
+			'function getAccountTransactionsByMonthOffsetPaged(address account, uint256 periodOffset, uint256 pageOffset, uint256 pageLimit, bytes32 txCategoryFilter) view returns (uint256 total, uint256 periodStart, uint256 periodEnd, (bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)',
+		]
+		const TX_REQUEST_CREATE = ethers.keccak256(ethers.toUtf8Bytes('request_create:confirmed'))
+		const TX_REQUEST_FULFILLED = ethers.keccak256(ethers.toUtf8Bytes('request_fulfilled:confirmed'))
+
+		const checkRequestStatus = async (requestHash: string, validDays: number, payee: string): Promise<{ expired: boolean; fulfilled: boolean; error?: string }> => {
+			if (!requestHash || !ethers.isHexString(requestHash) || ethers.dataLength(requestHash) !== 32) {
+				return { expired: false, fulfilled: false, error: 'Invalid requestHash' }
+			}
+			if (!payee || !ethers.isAddress(payee)) {
+				return { expired: false, fulfilled: false, error: 'Invalid payee address' }
+			}
+			const vd = Math.floor(Number(validDays))
+			if (vd < 1) {
+				return { expired: false, fulfilled: false, error: 'validDays must be >= 1' }
+			}
+			try {
+				const provider = new ethers.JsonRpcProvider(CONET_RPC)
+				const indexer = new ethers.Contract(BEAMIO_INDEXER_ADDRESS, INDEXER_READ_ABI, provider)
+				const txHashBytes32 = ethers.getBytes(requestHash).length === 32 ? (requestHash as `0x${string}`) : ethers.hexlify(ethers.zeroPadValue(requestHash, 32)) as `0x${string}`
+
+				// 1. 查 request_create：txId = requestHash，取 timestamp
+				let createTs = 0n
+				try {
+					const full = await indexer.getTransactionFullByTxId(txHashBytes32)
+					if (full && full.txCategory === TX_REQUEST_CREATE && full.timestamp) {
+						createTs = BigInt(full.timestamp)
+					}
+				} catch {
+					// 可能不存在（未登记 request_create），按无时间戳处理，视为未过期（由 fulfilled 决定）
+				}
+
+				// 2. 过期：createTs + validDays*86400 < now
+				const nowSec = BigInt(Math.floor(Date.now() / 1000))
+				const validSeconds = BigInt(vd) * 86400n
+				const expiresAt = createTs + validSeconds
+				const expired = createTs > 0n ? nowSec > expiresAt : false
+
+				// 3. 已支付：payee 的 request_fulfilled 中 originalPaymentHash === requestHash
+				let fulfilled = false
+				try {
+					const [total, , , page] = await indexer.getAccountTransactionsByMonthOffsetPaged(
+						ethers.getAddress(payee),
+						0,
+						0,
+						50,
+						TX_REQUEST_FULFILLED
+					)
+					if (page && page.length > 0) {
+						const reqHashLower = requestHash.toLowerCase()
+						for (const tx of page) {
+							if (tx?.exists && tx.originalPaymentHash && String(tx.originalPaymentHash).toLowerCase() === reqHashLower) {
+								fulfilled = true
+								break
+							}
+						}
+					}
+				} catch {
+					// RPC 失败时不断言 fulfilled，避免误拒
+				}
+
+				return { expired, fulfilled }
+			} catch (err: any) {
+				return { expired: false, fulfilled: false, error: err?.message ?? 'Indexer query failed' }
+			}
+		}
+
+		router.get('/checkRequestStatus', async (req, res) => {
+			const { requestHash, validDays, payee } = req.query as { requestHash?: string; validDays?: string; payee?: string }
+			if (!requestHash || validDays == null || validDays === '' || !payee) {
+				return res.status(400).json({ error: 'Missing required: requestHash, validDays, payee' })
+			}
+			const vd = Math.floor(Number(validDays))
+			if (vd < 1) {
+				return res.status(400).json({ error: 'validDays must be >= 1' })
+			}
+			if (!ethers.isAddress(payee)) {
+				return res.status(400).json({ error: 'Invalid payee address' })
+			}
+			const result = await checkRequestStatus(requestHash, vd, payee)
+			if (result.error && !result.expired && !result.fulfilled) {
+				return res.status(500).json({ error: result.error })
+			}
+			res.status(200).json({ expired: result.expired, fulfilled: result.fulfilled })
+		})
+
 		/** GET /api/getBalance?address=0x... - 客户端 RPC 失败时由此获取 USDC/ETH 余额。30 秒缓存。 */
 		const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 		const GET_BALANCE_CACHE_TTL_MS = 30 * 1000
@@ -682,6 +773,8 @@ const routing = ( router: Router ) => {
 			}
 
 			const reqHashValid = requestHash && ethers.isHexString(requestHash) && ethers.dataLength(requestHash) === 32 ? requestHash : undefined
+			// requestHash 预检已由 Cluster 完成，Master 假定数据合格
+
 			beamioTransferIndexerAccountingPool.push({
 				from: String(from),
 				to: String(to),
@@ -748,6 +841,25 @@ const routing = ( router: Router ) => {
 			})
 		})
 
+		/** Payee 取消 Request：验证 payee 对 originalPaymentHash 的签字，创建 request_cancel 记账 */
+		router.post('/cancelRequest', (req, res) => {
+			const { originalPaymentHash, payeeSignature } = req.body as { originalPaymentHash?: string; payeeSignature?: string }
+			if (!originalPaymentHash || !payeeSignature) {
+				return res.status(400).json({ success: false, error: 'Missing originalPaymentHash or payeeSignature' }).end()
+			}
+			if (!ethers.isHexString(originalPaymentHash) || ethers.dataLength(originalPaymentHash) !== 32) {
+				return res.status(400).json({ success: false, error: 'originalPaymentHash must be bytes32' }).end()
+			}
+			if (typeof payeeSignature !== 'string' || !/^0x[a-fA-F0-9]+$/.test(payeeSignature) || (payeeSignature.length - 2) / 2 !== 65) {
+				return res.status(400).json({ success: false, error: 'payeeSignature must be 65-byte hex' }).end()
+			}
+			cancelRequestAccountingPool.push({ originalPaymentHash: String(originalPaymentHash), payeeSignature: String(payeeSignature), res })
+			logger(Colors.cyan(`[cancelRequest] pushed to pool originalPaymentHash=${originalPaymentHash.slice(0, 10)}…`))
+			cancelRequestAccountingProcess().catch((err: any) => {
+				logger(Colors.red('[cancelRequestAccountingProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
 		/** cardCreateRedeem：由 cluster 预检后转发，master 推入 executeForOwnerPool，统一经 Settle_ContractPool 排队处理 */
 		router.post('/cardCreateRedeem', (req, res) => {
 			const preChecked = req.body as {
@@ -801,7 +913,7 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** AA→EOA：支持三种提交。(1) ERC-4337 UserOp → AAtoEOAProcess；(2) openContainerPayload → OpenContainerRelayProcess；(3) containerPayload（绑定 to）→ ContainerRelayProcess */
+		/** AA→EOA：支持三种提交。(1) ERC-4337 UserOp → AAtoEOAProcess；(2) openContainerPayload → OpenContainerRelayProcess；(3) containerPayload（绑定 to）→ ContainerRelayProcess。requestHash 预检已由 Cluster 完成 */
 		router.post('/AAtoEOA', (req, res) => {
 			const body = req.body as {
 				toEOA?: string
@@ -815,6 +927,7 @@ const routing = ( router: Router ) => {
 				currencyDiscountAmount?: string | string[]
 				forText?: string
 				requestHash?: string
+				validDays?: number | string
 			}
 			logger(`[AAtoEOA] [DEBUG] Master received openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 40)}…"` : 'n/a'} OpenContainerRelayPool.len=${OpenContainerRelayPool.length} Settle_ContractPool.len=${Settle_ContractPool.length}`)
 			logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a', forText: body?.forText ? `${body.forText.slice(0, 40)}…` : 'n/a' }, false, 3, true))
@@ -884,6 +997,24 @@ const routing = ( router: Router ) => {
 			logger(`[AAtoEOA] master pushed to pool (length ${poolLenBefore} -> ${AAtoEOAPool.length}), calling AAtoEOAProcess()`)
 			AAtoEOAProcess().catch((err: any) => {
 				logger(Colors.red('[AAtoEOAProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		/** POST /api/claimBUnits - 由 cluster 预检后转发，master 推入 claimBUnitsPool，经 Settle_ContractPool 执行 BUnitAirdrop.claimFor */
+		router.post('/claimBUnits', (req, res) => {
+			const body = req.body as { claimant?: string; nonce?: string; deadline?: string; signature?: string }
+			if (!body.claimant || !body.nonce || !body.deadline || !body.signature) {
+				return res.status(400).json({ success: false, error: 'Missing claimant, nonce, deadline, or signature' }).end()
+			}
+			claimBUnitsPool.push({
+				claimant: body.claimant,
+				nonce: body.nonce,
+				deadline: body.deadline,
+				signature: body.signature,
+				res,
+			})
+			claimBUnitsProcess().catch((err: any) => {
+				logger(Colors.red('[claimBUnitsProcess] unhandled error:'), err?.message ?? err)
 			})
 		})
 
