@@ -1298,19 +1298,28 @@ export const cancelRequestAccountingProcess = async () => {
 		const displayJsonStr = JSON.stringify({ title: 'Request Canceled', source: 'payee', handle: '' })
 		// cancel 写入时沿用原 request 的 RouteItem 设定（txId=originalPaymentHash）
 		const origRoute = full && typeof full === 'object' && 'route' in full ? (full as { route?: unknown[] }).route : Array.isArray(full) && full.length > 11 ? full[11] : []
-		const finalRequestUSDC6 = full && typeof full === 'object' && 'finalRequestAmountUSDC6' in full ? BigInt((full as { finalRequestAmountUSDC6?: unknown }).finalRequestAmountUSDC6 ?? 0) : Array.isArray(full) && full.length > 9 ? BigInt(full[9] ?? 0) : 0n
+		const safeBigInt = (x: unknown): bigint => {
+			if (x === undefined || x === null) return 0n
+			if (typeof x === 'bigint') return x
+			if (typeof x === 'number' && !isNaN(x)) return BigInt(Math.floor(x))
+			if (typeof x === 'string') return BigInt(x || '0')
+			if (typeof x === 'boolean') return BigInt(x)
+			return 0n
+		}
+		const rawFinal = full && typeof full === 'object' && 'finalRequestAmountUSDC6' in full ? (full as { finalRequestAmountUSDC6?: unknown }).finalRequestAmountUSDC6 : Array.isArray(full) && full.length > 9 ? full[9] : 0
+		const finalRequestUSDC6 = safeBigInt(rawFinal)
 		const metaObj = full && typeof full === 'object' && 'meta' in full ? (full as { meta?: unknown }).meta : Array.isArray(full) && full.length > 13 ? full[13] : null
 		const metaCurrency = metaObj && typeof metaObj === 'object' && 'currencyFiat' in metaObj ? Number((metaObj as { currencyFiat?: unknown }).currencyFiat ?? 1) : Array.isArray(metaObj) && metaObj.length > 2 ? Number(metaObj[2] ?? 1) : 1
 		const toRouteItem = (r: unknown) => {
 			const v = (k: string | number) => (typeof r === 'object' && r !== null && (k in (r as object)) ? (r as Record<string, unknown>)[k] : Array.isArray(r) ? (r as unknown[])[k as number] : undefined)
 			return {
 				asset: ethers.getAddress(String(v('asset') ?? v(0) ?? ethers.ZeroAddress)),
-				amountE6: BigInt(v('amountE6') ?? v(1) ?? 0),
+				amountE6: safeBigInt(v('amountE6') ?? v(1)),
 				assetType: Number(v('assetType') ?? v(2) ?? 0),
 				source: Number(v('source') ?? v(3) ?? 0),
-				tokenId: BigInt(v('tokenId') ?? v(4) ?? 0),
+				tokenId: safeBigInt(v('tokenId') ?? v(4)),
 				itemCurrencyType: Number(v('itemCurrencyType') ?? v(5) ?? 1),
-				offsetInRequestCurrencyE6: BigInt(v('offsetInRequestCurrencyE6') ?? v(6) ?? v('amountE6') ?? v(1) ?? 0),
+				offsetInRequestCurrencyE6: safeBigInt(v('offsetInRequestCurrencyE6') ?? v(6) ?? v('amountE6') ?? v(1)),
 			}
 		}
 		const cancelRoute = isAA
