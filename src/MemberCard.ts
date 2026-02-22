@@ -1141,6 +1141,7 @@ export const requestAccountingProcess = async () => {
 		const TX_REQUEST_CREATE = ethers.keccak256(ethers.toUtf8Bytes('request_create:confirmed'))
 		const CHAIN_ID_BASE = 8453n
 		const payeeAddr = ethers.getAddress(obj.payee)
+		// request_create：asset=USDC，amountE6=finalRequestAmountUSDC6，itemCurrencyType 沿用 request 的 currency
 		const routeItem = {
 			asset: ethers.getAddress(USDC_ADDRESS),
 			amountE6: finalRequestAmountUSDC6,
@@ -1295,6 +1296,38 @@ export const cancelRequestAccountingProcess = async () => {
 		const nowMs = Date.now()
 		const cancelTxId = ethers.keccak256(ethers.solidityPacked(['bytes32', 'string', 'uint256'], [obj.originalPaymentHash, 'cancel', BigInt(Math.floor(nowMs / 1000))]))
 		const displayJsonStr = JSON.stringify({ title: 'Request Canceled', source: 'payee', handle: '' })
+		// cancel 写入时沿用原 request 的 RouteItem 设定（txId=originalPaymentHash）
+		const origRoute = full && typeof full === 'object' && 'route' in full ? (full as { route?: unknown[] }).route : Array.isArray(full) && full.length > 11 ? full[11] : []
+		const finalRequestUSDC6 = full && typeof full === 'object' && 'finalRequestAmountUSDC6' in full ? BigInt((full as { finalRequestAmountUSDC6?: unknown }).finalRequestAmountUSDC6 ?? 0) : Array.isArray(full) && full.length > 9 ? BigInt(full[9] ?? 0) : 0n
+		const metaObj = full && typeof full === 'object' && 'meta' in full ? (full as { meta?: unknown }).meta : Array.isArray(full) && full.length > 13 ? full[13] : null
+		const metaCurrency = metaObj && typeof metaObj === 'object' && 'currencyFiat' in metaObj ? Number((metaObj as { currencyFiat?: unknown }).currencyFiat ?? 1) : Array.isArray(metaObj) && metaObj.length > 2 ? Number(metaObj[2] ?? 1) : 1
+		const toRouteItem = (r: unknown) => {
+			const v = (k: string | number) => (typeof r === 'object' && r !== null && (k in (r as object)) ? (r as Record<string, unknown>)[k] : Array.isArray(r) ? (r as unknown[])[k as number] : undefined)
+			return {
+				asset: ethers.getAddress(String(v('asset') ?? v(0) ?? ethers.ZeroAddress)),
+				amountE6: BigInt(v('amountE6') ?? v(1) ?? 0),
+				assetType: Number(v('assetType') ?? v(2) ?? 0),
+				source: Number(v('source') ?? v(3) ?? 0),
+				tokenId: BigInt(v('tokenId') ?? v(4) ?? 0),
+				itemCurrencyType: Number(v('itemCurrencyType') ?? v(5) ?? 1),
+				offsetInRequestCurrencyE6: BigInt(v('offsetInRequestCurrencyE6') ?? v(6) ?? v('amountE6') ?? v(1) ?? 0),
+			}
+		}
+		const cancelRoute = isAA
+			? (Array.isArray(origRoute) && origRoute.length > 0
+				? origRoute.map(toRouteItem).filter((r) => r.amountE6 > 0n && r.asset !== ethers.ZeroAddress)
+				: [] as { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[])
+			: []
+		// 若原 request 无有效 route，fallback：单条 USDC
+		const routeForCancel = cancelRoute.length > 0 ? cancelRoute : (isAA && finalRequestUSDC6 > 0n ? [{
+			asset: ethers.getAddress(USDC_ADDRESS),
+			amountE6: finalRequestUSDC6,
+			assetType: 0,
+			source: 0,
+			tokenId: 0n,
+			itemCurrencyType: metaCurrency,
+			offsetInRequestCurrencyE6: finalRequestUSDC6,
+		}] : [])
 		const transactionInput = {
 			txId: cancelTxId as `0x${string}`,
 			originalPaymentHash: obj.originalPaymentHash as `0x${string}`,
@@ -1307,7 +1340,7 @@ export const cancelRequestAccountingProcess = async () => {
 			finalRequestAmountFiat6: 0n,
 			finalRequestAmountUSDC6: 0n,
 			isAAAccount: isAA,
-			route: [],
+			route: routeForCancel,
 			fees: { gasChainType: 0, gasWei: 0n, gasUSDC6: 0n, serviceUSDC6: 0n, bServiceUSDC6: 0n, bServiceUnits6: 0n, feePayer: ethers.ZeroAddress },
 			meta: { requestAmountFiat6: 0n, requestAmountUSDC6: 0n, currencyFiat: 1, discountAmountFiat6: 0n, discountRateBps: 0, taxAmountFiat6: 0n, taxRateBps: 0, afterNotePayer: '', afterNotePayee: '' },
 		}
