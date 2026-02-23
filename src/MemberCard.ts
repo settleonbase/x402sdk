@@ -2557,6 +2557,8 @@ export const OpenContainerRelayProcess = async () => {
       sigBytes
     )
     logger(`[AAtoEOA/OpenContainer] relay tx submitted hash=${tx.hash}`)
+    // 立即返回 hash 给客户端，避免 tx.wait() 等待链上确认导致 502 超时
+    if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
     await tx.wait().catch((waitErr: any) => {
       try {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, tx submitted): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
@@ -2564,8 +2566,6 @@ export const OpenContainerRelayProcess = async () => {
         console.error('[AAtoEOA/OpenContainer] tx.wait() failed (RPC):', waitErr)
       }
     })
-    // Base 转账完成后立即返回 hash 给客户端，不等待记账
-    if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
     // 以下记账通过 beamioTransferIndexerAccountingPool -> BeamioIndexerDiamond，客户端已收到 hash
     const currencyFromClient = obj.currency
