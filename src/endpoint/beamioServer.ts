@@ -1064,6 +1064,9 @@ const routing = ( router: Router ) => {
 					return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end()
 				}
 			}
+			if (!body.currency || !String(body.currency).trim()) {
+				logger(Colors.yellow(`[DEBUG] beamioTransferIndexerAccounting: currency missing or empty from=${body.from} to=${body.to} finishedHash=${body.finishedHash}`))
+			}
 			logger(Colors.green(`[beamioTransferIndexerAccounting] server pre-check OK, forwarding to master from=${body.from?.slice(0, 10)}… to=${body.to?.slice(0, 10)}… requestHash=${body.requestHash ?? 'n/a'}`))
 			logger(Colors.gray(`[DEBUG] postLocalhost /api/beamioTransferIndexerAccounting`))
 			postLocalhost('/api/beamioTransferIndexerAccounting', body, res)

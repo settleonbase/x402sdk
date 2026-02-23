@@ -7,6 +7,11 @@ services:
     image: ghcr.io/paradigmxyz/op-reth:v1.10.2
     container_name: base-op-reth
     restart: unless-stopped
+    # Debug 模式：观察 Merkle 重建为何不推进
+    # reth_stages=debug 覆盖 Merkle/AccountHashing/StorageHashing 等阶段
+    # op_reth=debug 覆盖 op-reth 执行层逻辑
+    environment:
+      - RUST_LOG=info,reth_stages=debug,op_reth=debug,reth=debug
     command:
       - "node"
       - "--datadir=/data"
@@ -29,16 +34,27 @@ services:
       - "--port=30313"
       - "--discovery.port=30313"
       - "--max-outbound-peers=100"
+      # 修正 enode 广播地址（Docker 内 NAT 检测失败会广播 127.0.0.1，导致无 peer）
+      - "--nat=extip:38.102.126.30"
+      # 加速：并行稀疏 trie、更高 RPC 连接数
+      - "--engine.parallel-sparse-trie"
+      - "--rpc.max-connections=600"
+      - "--rpc.gascap=18446744073709551615"
     ports:
       - "8547:8545"     # Base L2 HTTP RPC
       - "8548:8546"     # Base L2 WS
       - "8552:8551"     # Engine API
       - "30313:30313/tcp"
       - "30313:30313/udp"
+      - "9200:9200/udp"   # discv5 discovery
     volumes:
       - /media/sda/base/op-reth:/data
       - /media/sda/base/jwt:/jwt
       - /media/sda/base/config:/config
+    # 64c+128G 主机：op-reth 分配 56c/112G（主负载），op-node 8c/16G
+    cpus: "56"
+    mem_limit: 112g
+    mem_reservation: 16g
 
   op-node:
     image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.16.6
@@ -56,11 +72,13 @@ services:
       - "--network=base-mainnet"
       - "--l2=http://op-reth:8551"
       - "--l2.jwt-secret=/jwt/jwt.hex"
+      - "--l2.enginekind=reth"
       - "--l1=http://host.docker.internal:8545"
       - "--l1.beacon=http://host.docker.internal:5052"
-      - "--l1.max-concurrency=30"
-      - "--l1.cache-size=1200"
-      - "--l1.http-poll-interval=8s"
+      # 加速：更高 L1 并发、更大缓存、更短轮询
+      - "--l1.max-concurrency=50"
+      - "--l1.cache-size=1500"
+      - "--l1.http-poll-interval=4s"
       - "--rpc.addr=0.0.0.0"
       - "--rpc.port=8549"
       - "--p2p.priv.path=/data/opnode_p2p_priv.txt"
@@ -70,9 +88,11 @@ services:
       - "--p2p.listen.udp=9222"
       - "--p2p.bootnodes=enr:-J24QNz9lbrKbN4iSmmjtnr7SjUMk4zB7f1krHZcTZx-JRKZd0kA2gjufUROD6T3sOWDVDnFJRvqBBo62zuF-hYCohOGAYiOoEyEgmlkgnY0gmlwhAPniryHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQKNVFlCxh_B-716tTs-h1vMzZkSs1FTu_OYTNjgufplG4N0Y3CCJAaDdWRwgiQG,enr:-J24QH-f1wt99sfpHy4c0QJM-NfmsIfmlLAMMcgZCUEgKG_BBYFc6FwYgaMJMQN5dsRBJApIok0jFn-9CS842lGpLmqGAYiOoDRAgmlkgnY0gmlwhLhIgb2Hb3BzdGFja4OFQgCJc2VjcDI1NmsxoQJ9FTIv8B9myn1MWaC_2lJ-sMoeCDkusCsk4BYHjjCq04N0Y3CCJAaDdWRwgiQG,enr:-J24QDXyyxvQYsd0yfsN0cRr1lZ1N11zGTplMNlW4xNEc7LkPXh0NAJ9iSOVdRO95GPYAIc6xmyoCCG6_0JxdL3a0zaGAYiOoAjFgmlkgnY0gmlwhAPckbGHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQJwoS7tzwxqXSyFL7g0JM-KWVbgvjfB8JA__T7yY_cYboN0Y3CCJAaDdWRwgiQG,enr:-J24QHmGyBwUZXIcsGYMaUqGGSl4CFdx9Tozu-vQCn5bHIQbR7On7dZbU61vYvfrJr30t0iahSqhc64J46MnUO2JvQaGAYiOoCKKgmlkgnY0gmlwhAPnCzSHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQINc4fSijfbNIiGhcgvwjsjxVFJHUstK9L1T8OTKUjgloN0Y3CCJAaDdWRwgiQG,enr:-J24QG3ypT4xSu0gjb5PABCmVxZqBjVw9ca7pvsI8jl4KATYAnxBmfkaIuEqy9sKvDHKuNCsy57WwK9wTt2aQgcaDDyGAYiOoGAXgmlkgnY0gmlwhDbGmZaHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQIeAK_--tcLEiu7HvoUlbV52MspE0uCocsx1f_rYvRenIN0Y3CCJAaDdWRwgiQG"
       - "--verifier.l1-confs=4"
-      - "--rollup.load-protocol-versions=true"
+      # 禁用 ProtocolVersions 合约加载，避免 op-node 调用 engine_signalSuperchainV1 等 op-reth 未实现的方法，消除 "failed to notify engine of protocol version" Method not found
+      - "--rollup.load-protocol-versions=false"
       - "--l1.beacon.fetch-all-sidecars=true"
-      - "--syncmode=execution-layer"
+      # 共识派生：从 L1 顺序派生历史区块喂给 op-reth，不依赖 P2P
+      - "--syncmode=consensus-layer"
     ports:
       - "8549:8549"
       - "9222:9222/tcp"
@@ -81,3 +101,6 @@ services:
       - /media/sda/base/op-node:/data
       - /media/sda/base/jwt:/jwt
       - /media/sda/base/config:/config
+    cpus: "8"
+    mem_limit: 16g
+    mem_reservation: 4g

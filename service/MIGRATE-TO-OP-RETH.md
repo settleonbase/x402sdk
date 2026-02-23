@@ -36,8 +36,17 @@ wget -c "https://mainnet-reth-pruned-snapshots.base.org/$(curl -s https://mainne
 # 或 Archive（完整归档，更大）
 # wget -c "https://mainnet-reth-archive-snapshots.base.org/$(curl -s https://mainnet-reth-archive-snapshots.base.org/latest)"
 
-# 解压到数据目录（文件名以实际下载为准）
-tar -I zstd -xvf mainnet-reth-*.tar.zst -C /media/sda/base/op-reth
+# 解压到数据目录（使用绝对路径，文件名以实际下载为准）
+tar -I zstd -xvf base-reth-snapshot.tar.zst -C /media/sda/base/op-reth
+
+# 检查解压后的目录结构：reth 要求 chaindata、nodes、segments 等直接在 datadir 下
+ls -la /media/sda/base/op-reth/
+
+# 若存在嵌套目录（如 reth/、mainnet/ 等），需将内容上移一层
+# 示例：若解压后为 op-reth/reth/chaindata，则执行：
+# mv /media/sda/base/op-reth/reth/* /media/sda/base/op-reth/
+# rm -rf /media/sda/base/op-reth/reth
+# 以实际解压出的子目录名为准
 ```
 
 #### 方式 B：从头同步
@@ -47,8 +56,11 @@ tar -I zstd -xvf mainnet-reth-*.tar.zst -C /media/sda/base/op-reth
 ### 4. 启动 op-reth 版本
 
 ```bash
+cd /path/to/x402sdk/service
 docker compose -f docker-compose-op-reth.yml up -d
 ```
+
+**若快照已解压但节点无法识别**：检查 datadir 内是否直接包含 `chaindata`、`nodes`、`segments` 等目录。若这些在子目录（如 `reth/`）内，需先执行 `mv` 上移后再启动。
 
 ### 5. 验证
 
@@ -69,6 +81,15 @@ docker compose -f docker-compose-op-reth.yml down
 docker compose up -d    # 使用原 docker-compose.yml
 ```
 
+## 资源分配（64c + 128G 主机）
+
+| 服务 | CPU | 内存限制 | 内存预留 |
+|------|-----|----------|----------|
+| op-reth | 56 | 112G | 16G |
+| op-node | 8 | 16G | 4G |
+
+若使用 Docker Swarm，可改用 `deploy.resources`；`docker compose up` 使用 `cpus` / `mem_limit` 即可生效。
+
 ## 配置对照
 
 | 项目 | op-geth | op-reth |
@@ -78,6 +99,19 @@ docker compose up -d    # 使用原 docker-compose.yml
 | 数据目录 | /media/sda/base/op-geth | /media/sda/base/op-reth |
 | JWT | 共用 /media/sda/base/jwt | 共用 |
 | op-node L2 | http://op-geth:8551 | http://op-reth:8551 |
+
+## 加速配置（已内置）
+
+- **op-reth**：`--engine.parallel-sparse-trie`（并行状态根）、`--rpc.max-connections=600`、`--rpc.gascap` 无上限
+- **op-node**：`--l1.max-concurrency=50`、`--l1.cache-size=1500`、`--l1.http-poll-interval=4s`
+
+**完整加速策略**：见 [ACCELERATION-STRATEGY.md](./ACCELERATION-STRATEGY.md)。reth 阶段调优需**直接修改 datadir 内 reth.toml**，勿用 `--config` 挂载（会导致启动卡住）。
+
+## 故障排查
+
+### "failed to notify engine of protocol version" Method not found
+
+op-node 在 `--rollup.load-protocol-versions=true` 时会从 L1 合约加载协议版本并调用 `engine_signalSuperchainV1` 等 Engine API 通知执行层，op-reth 可能未实现该方法。解决：在 op-node 中设置 `--rollup.load-protocol-versions=false`（已在 docker-compose-op-reth.yml 中默认关闭）。
 
 ## 参考
 

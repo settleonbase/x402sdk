@@ -721,6 +721,9 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 			}
 			logger(inspect(record, false, 3, true))
 			const { displayJson, currency, currencyAmount, requestHash: requestHashFromNote } = buildDisplayJsonFromNote(note || '', String(responseData?.transaction || ''), 'x402')
+			if (!currency || !String(currency).trim()) {
+				logger(`[BeamioTransfer] [DEBUG] currency missing when submitting to beamioTransferIndexerAccounting from=${from} to=${to} finishedHash=${responseData?.transaction ?? 'n/a'}`)
+			}
 			const reqHashSrc = requestHash || requestHashFromNote
 			const reqHash = reqHashSrc && ethers.isHexString(reqHashSrc) && ethers.dataLength(reqHashSrc) === 32 ? reqHashSrc : undefined
 			logger(`[BeamioTransfer] submitBeamioTransferIndexerAccounting from=${from} to=${to} requestHash=${reqHash ?? 'n/a'} (from query=${requestHash ?? 'n/a'} fromNote=${requestHashFromNote ?? 'n/a'})`)

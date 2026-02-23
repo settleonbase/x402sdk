@@ -1,0 +1,7 @@
+# op-reth 加速参数：直接修改 datadir/reth.toml 生效（勿用 --config 挂载，会导致启动卡住）
+#
+# [stages.headers] 与 [stages.bodies]：见 ACCELERATION-STRATEGY.md
+#
+# [stages.merkle] 加速 MerkleChangeSets（64c/128G 可提高）：
+#   incremental_threshold = 20000   # 默认 7000，每批增量根计算块数
+#   rebuild_threshold = 200000     # 默认 100000，超过则全量重建 trie

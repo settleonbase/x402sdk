@@ -774,6 +774,9 @@ const routing = ( router: Router ) => {
 
 			const reqHashValid = requestHash && ethers.isHexString(requestHash) && ethers.dataLength(requestHash) === 32 ? requestHash : undefined
 			// requestHash 预检已由 Cluster 完成，Master 假定数据合格
+			if (!currency || !String(currency).trim()) {
+				logger(Colors.yellow(`[DEBUG] beamioTransferIndexerAccounting: currency missing or empty from=${from} to=${to} finishedHash=${finishedHash}`))
+			}
 
 			beamioTransferIndexerAccountingPool.push({
 				from: String(from),
