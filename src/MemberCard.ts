@@ -988,6 +988,9 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				offsetInRequestCurrencyE6: amountUSDC6,
 			})
 		}
+		// readme 强约束：isAAAccount=true 时必须提供 route[]；有 routeItems 的 OpenContainer/AA 交易必须 isAAAccount=true
+		const hasRouteFromAA = routeItems.length > 0
+		const isAAAccount = isInternalTransfer || hasRouteFromAA
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
 			originalPaymentHash,
@@ -999,7 +1002,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			payee: ethers.getAddress(obj.to),
 			finalRequestAmountFiat6,
 			finalRequestAmountUSDC6: amountUSDC6,
-			isAAAccount: isInternalTransfer,
+			isAAAccount,
 			route: routeItems,
 			fees: {
 				gasChainType,
