@@ -2511,25 +2511,34 @@ export const OpenContainerRelayProcess = async () => {
     const needResolveTo = has1155 || toIsEOA
     if (needResolveTo) {
       try {
-        // 仅用 payload.to（受益人地址）解析，禁止用 payload.account（付款方）
-        const beneficiaryEOA = ethers.getAddress(payload.to)
-        const primary = await FactoryWithRelay.primaryAccountOf(beneficiaryEOA)
-        if (primary && primary !== ethers.ZeroAddress) {
-          const resolvedTo = ethers.getAddress(primary)
-          if (resolvedTo === account) {
-            obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same (to resolved to sender AA). payload.to must be the recipient EOA/AA, not the payer.' }).end()
-            Settle_ContractPool.unshift(SC)
-            return setTimeout(() => OpenContainerRelayProcess(), 3000)
+        // 仅当 to 为 EOA 时需通过 primaryAccountOf(EOA) 解析为 AA；primaryAccountOf 的 key 是 EOA 而非 AA
+        // 若 to 已是 AA（有 code），则直接使用，无需解析
+        if (toIsEOA) {
+          const beneficiaryEOA = ethers.getAddress(payload.to)
+          const primary = await FactoryWithRelay.primaryAccountOf(beneficiaryEOA)
+          if (primary && primary !== ethers.ZeroAddress) {
+            const resolvedTo = ethers.getAddress(primary)
+            if (resolvedTo === account) {
+              obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same (to resolved to sender AA). payload.to must be the recipient EOA/AA, not the payer.' }).end()
+              Settle_ContractPool.unshift(SC)
+              return setTimeout(() => OpenContainerRelayProcess(), 3000)
+            }
+            to = resolvedTo
+            logger(`[AAtoEOA/OpenContainer] resolved beneficiary EOA -> AA ${to}`)
+          } else {
+            if (has1155) {
+              logger(Colors.yellow(`[AAtoEOA/OpenContainer] ERC1155 item but beneficiary EOA ${payload.to} has no AA; card will revert UC_NoBeamioAccount`))
+            }
           }
-          to = resolvedTo
-          logger(`[AAtoEOA/OpenContainer] resolved beneficiary EOA -> AA ${to}`)
         } else {
-          if (has1155) {
-            logger(Colors.yellow(`[AAtoEOA/OpenContainer] ERC1155 item but beneficiary ${payload.to} has no AA; card will revert UC_NoBeamioAccount`))
+          // to 已是 AA，可选验证 isBeamioAccount；若未注册则仅打 log（链上会 revert）
+          const isBeamio = await FactoryWithRelay.isBeamioAccount(to).catch(() => false)
+          if (has1155 && !isBeamio) {
+            logger(Colors.yellow(`[AAtoEOA/OpenContainer] ERC1155 item: beneficiary ${payload.to} may not be registered BeamioAccount (isBeamioAccount=${isBeamio})`))
           }
         }
       } catch (e: any) {
-        logger(Colors.yellow(`[AAtoEOA/OpenContainer] primaryAccountOf(beneficiary ${payload.to}) failed: ${e?.message ?? e}`))
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] resolve beneficiary ${payload.to} failed: ${e?.message ?? e}`))
       }
     }
     if (to === account) {
