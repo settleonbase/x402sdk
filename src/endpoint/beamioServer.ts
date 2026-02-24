@@ -309,8 +309,8 @@ const routing = ( router: Router ) => {
 				const hash = ethers.keccak256(uidBytes)
 				const offset = Number(BigInt(hash) % (2n ** 31n))
 				const path = `m/44'/60'/0'/0/${offset}`
-				const hdNode = ethers.HDNodeWallet.fromPhrase(mnemonic.trim())
-				const derived = hdNode.derivePath(path)
+				// fromPhrase 第二个参数为 path 时直接从根派生，避免 derivePath 在非根节点上报错
+				const derived = ethers.HDNodeWallet.fromPhrase(mnemonic.trim(), path)
 				privateKey = derived.privateKey
 				await registerNfcCardToDb({ uid: uid.trim(), privateKey })
 				logger(Colors.green(`[nfcTopup] derived key for uid=${uidHex} path=${path}`))
