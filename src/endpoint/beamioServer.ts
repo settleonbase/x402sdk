@@ -15,7 +15,10 @@ import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreC
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
-const OLD_CCSA_REDIRECT = '0x3A578f47d68a5f2C1f2930E9548E240AB8d40048'.toLowerCase()
+const OLD_CCSA_REDIRECTS = [
+	'0x3A578f47d68a5f2C1f2930E9548E240AB8d40048',
+	'0xb6ba88045F854B713562fb7f1332D186df3B25A8', // 曾为 infrastructure CCSA
+].map(a => a.toLowerCase())
 import { masterSetup } from '../util'
 
 const BASE_CHAIN_ID = 8453
@@ -895,7 +898,7 @@ const routing = ( router: Router ) => {
 		const valid = items
 			.filter((it: any) => it && it.cardAddress && it.hash)
 			.map((it: any) => ({
-				cardAddress: it.cardAddress?.toLowerCase() === OLD_CCSA_REDIRECT ? BASE_CCSA_CARD_ADDRESS : it.cardAddress,
+				cardAddress: OLD_CCSA_REDIRECTS.includes(it.cardAddress?.toLowerCase()) ? BASE_CCSA_CARD_ADDRESS : it.cardAddress,
 				hash: it.hash
 			}))
 		if (valid.length === 0) {

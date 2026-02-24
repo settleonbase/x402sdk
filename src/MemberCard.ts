@@ -3281,10 +3281,13 @@ const GET_REDEEM_STATUS_BATCH_ABI = [
 ]
 
 /** 旧 CCSA 地址 → 新 CCSA 地址映射，兼容仍发送旧地址的客户端 */
-const OLD_CCSA_TO_NEW = '0x3A578f47d68a5f2C1f2930E9548E240AB8d40048'.toLowerCase()
+const OLD_CCSA_TO_NEW = new Set([
+	'0x3A578f47d68a5f2C1f2930E9548E240AB8d40048',
+	'0xb6ba88045F854B713562fb7f1332D186df3B25A8', // 曾为 infrastructure CCSA
+].map(a => a.toLowerCase()))
 
 function _normalizeCardAddress(addr: string): string {
-	if (addr?.toLowerCase() === OLD_CCSA_TO_NEW) return BASE_CCSA_CARD_ADDRESS
+	if (addr && OLD_CCSA_TO_NEW.has(addr.toLowerCase())) return BASE_CCSA_CARD_ADDRESS
 	return addr
 }
 
