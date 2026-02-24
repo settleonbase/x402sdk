@@ -573,6 +573,16 @@ export const executeForAdminPool: Array<{
 	res?: Response
 }> = []
 
+/** 从 executeForAdmin 的 data 中解析 mintPointsByAdmin(toEOA, points6) 的 toEOA，供 NFC Topup 前置 DeployingSmartAccount */
+const tryParseMintPointsByAdminRecipient = (data: string): string | null => {
+	try {
+		const iface = new ethers.Interface(['function mintPointsByAdmin(address user, uint256 points6)'])
+		const decoded = iface.parseTransaction({ data })
+		if (decoded?.name === 'mintPointsByAdmin' && decoded.args[0]) return decoded.args[0] as string
+	} catch { /* ignore */ }
+	return null
+}
+
 export const executeForAdminProcess = async () => {
 	const obj = executeForAdminPool.shift()
 	if (!obj) return
@@ -582,6 +592,18 @@ export const executeForAdminProcess = async () => {
 		return setTimeout(() => executeForAdminProcess(), 3000)
 	}
 	try {
+		// NFC Topup：mintPointsByAdmin 要求 recipient 已有 AA 账户，否则 _toAccount 会 revert UC_ResolveAccountFailed
+		const recipientEOA = tryParseMintPointsByAdminRecipient(obj.data)
+		if (recipientEOA) {
+			const { accountAddress: addr } = await DeployingSmartAccount(recipientEOA, SC.aaAccountFactoryPaymaster)
+			if (!addr) {
+				logger(Colors.red(`[executeForAdminProcess] DeployingSmartAccount failed for recipient=${recipientEOA}`))
+				if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: 'Recipient has no Beamio account. Please activate the Beamio app first.' }).end()
+				Settle_ContractPool.unshift(SC)
+				setTimeout(() => executeForAdminProcess(), 1000)
+				return
+			}
+		}
 		const factory = SC.baseFactoryPaymaster
 		const tx = await factory.executeForAdmin(
 			obj.cardAddr,
