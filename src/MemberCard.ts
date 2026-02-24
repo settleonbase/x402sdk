@@ -570,6 +570,7 @@ export const executeForAdminPool: Array<{
 	deadline: number
 	nonce: string
 	adminSignature: string
+	uid?: string
 	res?: Response
 }> = []
 
@@ -646,8 +647,11 @@ export const executeForAdminProcess = async () => {
 		}
 		// NFC Topup：mintPointsByAdmin 要求 recipient 已有 AA 账户，否则 _toAccount 会 revert UC_ResolveAccountFailed
 		const recipientEOA = tryParseMintPointsByAdminRecipient(obj.data)
+		let aaAddr: string | null = null
 		if (recipientEOA) {
+			logger(Colors.cyan(`[nfcTopup] uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA} | cardAddr=${obj.cardAddr}`))
 			const { accountAddress: addr } = await DeployingSmartAccount(recipientEOA, SC.aaAccountFactoryPaymaster)
+			aaAddr = addr
 			if (!addr) {
 				logger(Colors.red(`[executeForAdminProcess] DeployingSmartAccount failed for recipient=${recipientEOA}`))
 				if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: 'Recipient has no Beamio account. Please activate the Beamio app first.' }).end()
@@ -682,7 +686,7 @@ export const executeForAdminProcess = async () => {
 				throw gasErr
 			}
 		}
-		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash}`))
+		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash} | uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'}`))
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
 		}

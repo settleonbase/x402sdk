@@ -12,7 +12,7 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
 const OLD_CCSA_REDIRECTS = [
@@ -39,6 +39,29 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 ] as const
 const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://mainnet.base.org'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
+
+/** 从 mintPointsByAdmin(data) 解析 recipient EOA */
+const tryParseMintPointsByAdminRecipient = (data: string): string | null => {
+	try {
+		const iface = new ethers.Interface(['function mintPointsByAdmin(address user, uint256 points6)'])
+		const decoded = iface.parseTransaction({ data })
+		if (decoded?.name === 'mintPointsByAdmin' && decoded.args[0]) return decoded.args[0] as string
+	} catch { /* ignore */ }
+	return null
+}
+
+/** 解析 EOA 对应的 AA 地址（用于日志） */
+const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> => {
+	try {
+		const iface = new ethers.Interface(['function beamioAccountOf(address) view returns (address)'])
+		const result = await providerBase.call({
+			to: BASE_AA_FACTORY as `0x${string}`,
+			data: iface.encodeFunctionData('beamioAccountOf', [eoa]) as `0x${string}`,
+		})
+		const [addr] = iface.decodeFunctionResult('beamioAccountOf', result)
+		return addr && addr !== ethers.ZeroAddress ? addr : null
+	} catch { return null }
+}
 const CONET_RPC = 'https://mainnet-rpc1.conet.network'
 const providerConet = new ethers.JsonRpcProvider(CONET_RPC)
 
@@ -300,12 +323,13 @@ const routing = ( router: Router ) => {
 
 	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master */
 	router.post('/nfcTopup', async (req, res) => {
-		const { cardAddr, data, deadline, nonce, adminSignature } = req.body as {
+		const { cardAddr, data, deadline, nonce, adminSignature, uid } = req.body as {
 			cardAddr?: string
 			data?: string
 			deadline?: number
 			nonce?: string
 			adminSignature?: string
+			uid?: string
 		}
 		if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
 			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' })
@@ -348,13 +372,16 @@ const routing = ( router: Router ) => {
 			if (!isAdmin) {
 				return res.status(403).json({ success: false, error: 'Signer is not card admin' })
 			}
-			logger(Colors.green('server /api/nfcTopup preCheck OK (admin signer verified), forwarding to master'))
+			const recipientEOA = tryParseMintPointsByAdminRecipient(data)
+			const aaAddr = recipientEOA ? await resolveBeamioAccountOf(recipientEOA) : null
+			logger(Colors.green(`server /api/nfcTopup preCheck OK | uid=${uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'} | forwarding to master`))
 			postLocalhost('/api/nfcTopup', {
 				cardAddr: cardAddress,
 				data,
 				deadline,
 				nonce,
-				adminSignature
+				adminSignature,
+				uid: typeof uid === 'string' ? uid : undefined
 			}, res)
 		} catch (e: any) {
 			logger(Colors.red(`[nfcTopup] preCheck failed: ${e?.message ?? e}`))
