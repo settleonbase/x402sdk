@@ -631,30 +631,48 @@ export const cashcode_request = async (req: Request, res: Response) => {
  * 客户端用 EOA 私钥签名，authorization.from = EOA，authorization.to = toAddress。
  * 因此仅适用于「EOA 作为付款方」的场景（EOA→EOA、EOA→AA）。
  * AA 作为付款方（AA→EOA）不适用：AA 无私钥无法签 EIP-3009，需单独实现 AA 执行流（如 ERC-4337 UserOp）。
+ *
+ * 协议：必须使用显式参数，不再依赖 payMe JSON。
+ * 必填：amount（usdcAmount）、currency、currencyAmount、toAddress。
  */
 export const BeamioTransfer = async (req: Request, res: Response) => {
 	const _routerName = req.path
 	const resource = buildResourceUrl(req) as Resource
 
-	const { amount, toAddress, note, requestHash } = req.query as {
+	const { amount, usdcAmount, currency, currencyAmount, toAddress, note, requestHash, isInternalTransfer } = req.query as {
 		amount?: string
+		usdcAmount?: string
+		currency?: string
+		currencyAmount?: string
 		toAddress?: string
 		note?: string
 		requestHash?: string
+		isInternalTransfer?: string
 	}
-	logger(`[BeamioTransfer] req.query: amount=${amount} toAddress=${toAddress?.slice(0, 10)}… requestHash=${requestHash ?? 'undefined'} resource=${resource}`)
+	const usdcAmt = amount || usdcAmount
+	logger(`[BeamioTransfer] req.query: amount=${usdcAmt} toAddress=${toAddress?.slice(0, 10)}… currency=${currency ?? 'undefined'} resource=${resource}`)
 
-	const _price = amount|| '0'
+	const _price = usdcAmt || '0'
 	const price = ethers.parseUnits(_price, USDC_Base_DECIMALS)
-	
-	if ( !amount || price <=0 || !ethers.isAddress(toAddress)) {
-		logger(`${_routerName} Error! The minimum amount was not reached.`,inspect(req.query, false, 3, true))
-		return res.status(400).json({success: false, error: 'The minimum amount was not reached.'})
+
+	if (!usdcAmt || price <= 0 || !ethers.isAddress(toAddress)) {
+		logger(`${_routerName} Error! The minimum amount was not reached.`, inspect(req.query, false, 3, true))
+		return res.status(400).json({ success: false, error: 'The minimum amount was not reached.' })
+	}
+
+	// Cluster 预检：拒绝缺少 currency/currencyAmount 的转账
+	if (!currency || !String(currency).trim()) {
+		logger(Colors.red(`[BeamioTransfer] REJECT: currency is required (explicit param, no payMe JSON)`))
+		return res.status(400).json({ success: false, error: 'currency is required for accounting' })
+	}
+	if (!currencyAmount || !String(currencyAmount).trim()) {
+		logger(Colors.red(`[BeamioTransfer] REJECT: currencyAmount is required (explicit param, no payMe JSON)`))
+		return res.status(400).json({ success: false, error: 'currencyAmount is required for accounting' })
 	}
 
 
 	const paymentRequirements = [createBeamioExactPaymentRequirements(
-		amount,
+		usdcAmt,
 		resource,
 		`Beamio Transfer`,
 		toAddress
@@ -716,33 +734,30 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 
 			const from = authorization.from
 			const to = authorization.to
-			const amount = authorization.value
+			const authAmount = authorization.value
 			const record = {
-				from, to, amount, finishedHash: responseData?.transaction, note: note||''
+				from, to, amount: authAmount, finishedHash: responseData?.transaction, note: note||''
 			}
 			logger(inspect(record, false, 3, true))
-			const { displayJson, currency, currencyAmount, requestHash: requestHashFromNote, isInternalTransfer } = buildDisplayJsonFromNote(note || '', String(responseData?.transaction || ''), 'x402')
-			if (!currency || !String(currency).trim()) {
-				logger(`[BeamioTransfer] [DEBUG] currency missing when submitting to beamioTransferIndexerAccounting from=${from} to=${to} finishedHash=${responseData?.transaction ?? 'n/a'}`)
-			}
+			// 使用显式参数 currency/currencyAmount，不再解析 payMe JSON
+			const displayJson = buildDisplayJsonFromNoteOnly(note || '', String(responseData?.transaction || ''), isInternalTransfer === 'true' || isInternalTransfer === '1')
+			const reqHashValid = requestHash && ethers.isHexString(requestHash) && ethers.dataLength(requestHash) === 32 ? requestHash : undefined
 			// 记账必须 payer≠payee；from=付款方 to=收款方，内部转账时 EOA→AA 为 from=EOA to=AA，AA→EOA 为 from=AA to=EOA
 			if (!from || !to || from.toLowerCase() === to.toLowerCase()) {
 				logger(Colors.red(`[BeamioTransfer] SKIP accounting: from=to (payer=payee) from=${from} to=${to} txHash=${responseData?.transaction ?? 'n/a'}`))
 			} else {
-			const reqHashSrc = requestHash || requestHashFromNote
-			const reqHash = reqHashSrc && ethers.isHexString(reqHashSrc) && ethers.dataLength(reqHashSrc) === 32 ? reqHashSrc : undefined
-			logger(`[BeamioTransfer] submitBeamioTransferIndexerAccounting from=${from} to=${to} requestHash=${reqHash ?? 'n/a'} (from query=${requestHash ?? 'n/a'} fromNote=${requestHashFromNote ?? 'n/a'})`)
-			void submitBeamioTransferIndexerAccountingToMaster({
-				from,
-				to,
-				amountUSDC6: amount.toString(),
-				finishedHash: String(responseData?.transaction || ''),
-				displayJson,
-				currency,
-				currencyAmount,
-				requestHash: reqHash,
-				isInternalTransfer: !!isInternalTransfer,
-			})
+				logger(`[BeamioTransfer] submitBeamioTransferIndexerAccounting from=${from} to=${to} requestHash=${reqHashValid ?? 'n/a'} currency=${currency}`)
+				void submitBeamioTransferIndexerAccountingToMaster({
+					from,
+					to,
+					amountUSDC6: authAmount.toString(),
+					finishedHash: String(responseData?.transaction || ''),
+					displayJson,
+					currency: currency as string,
+					currencyAmount: currencyAmount as string,
+					requestHash: reqHashValid,
+					isInternalTransfer: isInternalTransfer === 'true' || isInternalTransfer === '1',
+				})
 			}
 		}
 		
@@ -757,7 +772,50 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 
 import type { DisplayJsonData } from './displayJsonTypes'
 
-/** 从 note（forText + '\\r\\n' + JSON + 可选 card JSON）构建 displayJson（仅附加字符），currency/currencyAmount/requestHash/isInternalTransfer 单独传 meta */
+/** 仅从 note 构建 displayJson（forText、card），不解析 payMe。currency/currencyAmount 由显式参数传入 */
+function buildDisplayJsonFromNoteOnly(note: string, finishedHash: string, isInternalTransfer: boolean): string {
+	const trimmed = note.trim()
+	const parts = trimmed.split(/\r?\n/)
+	const forTextPart = parts[0]?.trim() || ''
+	const rest = parts.slice(1).join('\n').trim()
+	let card: DisplayJsonData['card']
+	const jsonMatches: string[] = []
+	let i = 0
+	while (rest && i < rest.length) {
+		const start = rest.indexOf('{', i)
+		if (start < 0) break
+		let depth = 0
+		let end = start
+		for (let j = start; j < rest.length; j++) {
+			if (rest[j] === '{') depth++
+			else if (rest[j] === '}') { depth--; if (depth === 0) { end = j + 1; break } }
+		}
+		if (depth === 0) jsonMatches.push(rest.slice(start, end))
+		i = end
+	}
+	for (const m of jsonMatches) {
+		try {
+			const obj = JSON.parse(m) as Record<string, unknown>
+			if (obj.title != null || obj.detail != null || obj.image != null) {
+				card = { title: obj.title as string, detail: obj.detail as string, image: obj.image as string }
+			} else if (obj.card && typeof obj.card === 'object') {
+				const c = obj.card as Record<string, unknown>
+				card = { title: c.title as string, detail: c.detail as string, image: c.image as string }
+			}
+		} catch (_) { /* ignore */ }
+	}
+	const d: DisplayJsonData = {
+		title: isInternalTransfer ? 'EOA to AA' : 'Beamio Transfer',
+		source: isInternalTransfer ? 'eoa-aa' : 'x402',
+		finishedHash,
+		handle: (forTextPart && !/^\{/.test(forTextPart) ? forTextPart : '').slice(0, 80),
+		forText: forTextPart && !/^\{/.test(forTextPart) ? forTextPart : undefined,
+		card,
+	}
+	return JSON.stringify(d)
+}
+
+/** @deprecated 不再用于 BeamioTransfer 记账，仅保留供 beamioTransferIndexerAccounting 的 note 回退路径 */
 function buildDisplayJsonFromNote(note: string, finishedHash: string, source: string): { displayJson: string; currency?: string; currencyAmount?: string; requestHash?: string; isInternalTransfer?: boolean } {
 	const trimmed = note.trim()
 	const parts = trimmed.split(/\r?\n/)
@@ -782,7 +840,8 @@ function buildDisplayJsonFromNote(note: string, finishedHash: string, source: st
 	for (const m of jsonMatches) {
 		try {
 			const obj = JSON.parse(m) as Record<string, unknown>
-			if (obj.currency != null || obj.currencyAmount != null) {
+			// 优先使用 payMe 格式（data1）的 currency/currencyAmount；card JSON 的 currencyAmount 可能带 "CA$" 前缀导致服务器 parseFloat 失败
+			if ((obj.currency != null || obj.currencyAmount != null) && (parsed.currency == null && parsed.currencyAmount == null)) {
 				parsed.currency = obj.currency as string
 				parsed.currencyAmount = obj.currencyAmount as string | number
 			}

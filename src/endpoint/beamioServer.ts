@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp, oracleBackoud, checkSign} from '../util'
+import { getClientIp, oracleBackoud, checkSign, BeamioTransfer } from '../util'
 import { checkSmartAccount } from '../MemberCard'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
@@ -321,7 +321,7 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/nfcTopupPrepare', { uid: uid.trim(), amount: String(amount ?? ''), currency: (currency || 'CAD').trim() }, res)
 	})
 
-	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForOwner，Cluster 预检签名与 card.owner() 后转发 Master */
+	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master */
 	router.post('/nfcTopup', async (req, res) => {
 		const { cardAddr, data, deadline, nonce, adminSignature, uid } = req.body as {
 			cardAddr?: string
@@ -351,7 +351,7 @@ const routing = ( router: Router ) => {
 				verifyingContract: BASE_CARD_FACTORY
 			}
 			const types = {
-				ExecuteForOwner: [
+				ExecuteForAdmin: [
 					{ name: 'cardAddress', type: 'address' },
 					{ name: 'dataHash', type: 'bytes32' },
 					{ name: 'deadline', type: 'uint256' },
@@ -366,11 +366,11 @@ const routing = ( router: Router ) => {
 			}
 			const digest = ethers.TypedDataEncoder.hash(domain, types, message)
 			const signer = ethers.recoverAddress(digest, adminSignature)
-			const cardAbi = ['function owner() view returns (address)']
+			const cardAbi = ['function isAdmin(address) view returns (bool)']
 			const card = new ethers.Contract(cardAddress, cardAbi, providerBase)
-			const cardOwner = await card.owner()
-			if (cardOwner.toLowerCase() !== signer.toLowerCase()) {
-				return res.status(403).json({ success: false, error: 'Signer is not card owner' })
+			const isAdmin = await card.isAdmin(signer)
+			if (!isAdmin) {
+				return res.status(403).json({ success: false, error: 'Signer is not card admin' })
 			}
 			const recipientEOA = tryParseMintPointsByAdminRecipient(data)
 			const aaAddr = recipientEOA ? await resolveBeamioAccountOf(recipientEOA) : null
@@ -825,6 +825,9 @@ const routing = ( router: Router ) => {
 		res.status(200).json(clusterOracleCache).end()
 	})
 
+	/** GET /api/BeamioTransfer - x402 EOA 转账。Cluster 直接处理（含预检 currency/currencyAmount 必填），不转发 master */
+	router.get('/BeamioTransfer', (req, res) => BeamioTransfer(req, res))
+
 	router.post('/purchasingCard', async (req,res) => {
 		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore } = req.body as {
 			cardAddress?: string
@@ -1003,6 +1006,15 @@ const routing = ( router: Router ) => {
 				logger(Colors.red(`[AAtoEOA] server Container pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
+			// Cluster 预检：currency/currencyAmount 必填（显式参数，不再依赖 payMe JSON）
+			if (!body.currency || !String(body.currency).trim()) {
+				logger(Colors.red(`[AAtoEOA] server Container REJECT: currency is required`))
+				return res.status(400).json({ success: false, error: 'currency is required for accounting' }).end()
+			}
+			if (!body.currencyAmount || (Array.isArray(body.currencyAmount) ? body.currencyAmount.length === 0 : !String(body.currencyAmount).trim())) {
+				logger(Colors.red(`[AAtoEOA] server Container REJECT: currencyAmount is required`))
+				return res.status(400).json({ success: false, error: 'currencyAmount is required for accounting' }).end()
+			}
 			const reqHashValid = body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined
 			if (reqHashValid && body.containerPayload?.to && ethers.isAddress(body.containerPayload.to)) {
 				const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1
@@ -1032,8 +1044,18 @@ const routing = ( router: Router ) => {
 				logger(Colors.red(`[AAtoEOA] server OpenContainer pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
-			// 检查 items.length 和 currency/currencyAmount 的长度匹配
 			const itemsLength = body.openContainerPayload.items?.length ?? 0
+			// Cluster 预检：currency/currencyAmount 必填（显式参数）
+			if (itemsLength <= 1) {
+				if (!body.currency || !String(Array.isArray(body.currency) ? body.currency[0] : body.currency).trim()) {
+					logger(Colors.red(`[AAtoEOA] server OpenContainer REJECT: currency is required`))
+					return res.status(400).json({ success: false, error: 'currency is required for accounting' }).end()
+				}
+				if (!body.currencyAmount || (Array.isArray(body.currencyAmount) ? !String(body.currencyAmount[0]).trim() : !String(body.currencyAmount).trim())) {
+					logger(Colors.red(`[AAtoEOA] server OpenContainer REJECT: currencyAmount is required`))
+					return res.status(400).json({ success: false, error: 'currencyAmount is required for accounting' }).end()
+				}
+			}
 			if (itemsLength > 1) {
 				if (!body.currency || !body.currencyAmount) {
 					const error = `When items.length > 1, currency and currencyAmount are required`
@@ -1233,8 +1255,14 @@ const routing = ( router: Router ) => {
 					return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end()
 				}
 			}
+			// Cluster 预检：currency/currencyAmount 必填（显式参数，不再依赖 payMe JSON）
 			if (!body.currency || !String(body.currency).trim()) {
-				logger(Colors.yellow(`[DEBUG] beamioTransferIndexerAccounting: currency missing or empty from=${body.from} to=${body.to} finishedHash=${body.finishedHash}`))
+				logger(Colors.red(`[beamioTransferIndexerAccounting] REJECT: currency is required`))
+				return res.status(400).json({ success: false, error: 'currency is required for accounting' }).end()
+			}
+			if (!body.currencyAmount || !String(body.currencyAmount).trim()) {
+				logger(Colors.red(`[beamioTransferIndexerAccounting] REJECT: currencyAmount is required`))
+				return res.status(400).json({ success: false, error: 'currencyAmount is required for accounting' }).end()
 			}
 			logger(Colors.green(`[beamioTransferIndexerAccounting] server pre-check OK, forwarding to master from=${body.from?.slice(0, 10)}… to=${body.to?.slice(0, 10)}… requestHash=${body.requestHash ?? 'n/a'}`))
 			logger(Colors.gray(`[DEBUG] postLocalhost /api/beamioTransferIndexerAccounting`))
