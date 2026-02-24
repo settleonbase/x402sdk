@@ -3280,6 +3280,14 @@ const GET_REDEEM_STATUS_BATCH_ABI = [
 	'function getRedeemStatusBatch(bytes32[] hashes) view returns (bool[] active, uint256[] totalPoints6)',
 ]
 
+/** 旧 CCSA 地址 → 新 CCSA 地址映射，兼容仍发送旧地址的客户端 */
+const OLD_CCSA_TO_NEW = '0x3A578f47d68a5f2C1f2930E9548E240AB8d40048'.toLowerCase()
+
+function _normalizeCardAddress(addr: string): string {
+	if (addr?.toLowerCase() === OLD_CCSA_TO_NEW) return BASE_CCSA_CARD_ADDRESS
+	return addr
+}
+
 function _decodeRedeemStatusApi(active: boolean): 'redeemed' | 'cancelled' | 'pending' {
 	if (active) return 'pending'
 	return 'cancelled'
@@ -3288,6 +3296,7 @@ function _decodeRedeemStatusApi(active: boolean): 'redeemed' | 'cancelled' | 'pe
 /**
  * 批量查询 redeem 状态（供 API 使用）：按 card 分组调用 getRedeemStatusBatch。
  * 仅支持批量，items 至少 1 项。
+ * 兼容：客户端发送旧 CCSA 地址时自动映射到新地址。
  */
 export const getRedeemStatusBatchApi = async (
 	items: { cardAddress: string; hash: string }[]
@@ -3297,9 +3306,10 @@ export const getRedeemStatusBatchApi = async (
 	const byCard = new Map<string, { hash: string }[]>()
 	for (const it of items) {
 		if (!ethers.isAddress(it.cardAddress)) continue
-		const arr = byCard.get(it.cardAddress) ?? []
+		const normalized = _normalizeCardAddress(it.cardAddress)
+		const arr = byCard.get(normalized) ?? []
 		arr.push({ hash: it.hash })
-		byCard.set(it.cardAddress, arr)
+		byCard.set(normalized, arr)
 	}
 	try {
 		// 仅使用 CoNET 节点访问 Base RPC（HTTP），不使用 base 官方或其他节点

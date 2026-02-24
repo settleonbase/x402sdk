@@ -12,7 +12,10 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
-import { BASE_CARD_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
+
+/** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
+const OLD_CCSA_REDIRECT = '0x3A578f47d68a5f2C1f2930E9548E240AB8d40048'.toLowerCase()
 import { masterSetup } from '../util'
 
 const BASE_CHAIN_ID = 8453
@@ -883,13 +886,18 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/cardRedeem', req.body, res)
 	})
 
-	/** redeemStatusBatch：批量查询 redeem 状态（只支持批量）。30 秒缓存 */
+	/** redeemStatusBatch：批量查询 redeem 状态（只支持批量）。30 秒缓存。兼容旧 CCSA 地址自动映射到新地址。 */
 	router.post('/redeemStatusBatch', async (req, res) => {
 		const { items } = req.body || {}
 		if (!Array.isArray(items) || items.length === 0) {
 			return res.status(400).json({ success: false, error: 'items required (non-empty array of { cardAddress, hash })' })
 		}
-		const valid = items.filter((it: any) => it && it.cardAddress && it.hash)
+		const valid = items
+			.filter((it: any) => it && it.cardAddress && it.hash)
+			.map((it: any) => ({
+				cardAddress: it.cardAddress?.toLowerCase() === OLD_CCSA_REDIRECT ? BASE_CCSA_CARD_ADDRESS : it.cardAddress,
+				hash: it.hash
+			}))
 		if (valid.length === 0) {
 			return res.status(400).json({ success: false, error: 'Each item must have cardAddress and hash' })
 		}
