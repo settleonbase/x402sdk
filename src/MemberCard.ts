@@ -605,13 +605,31 @@ export const executeForAdminProcess = async () => {
 			}
 		}
 		const factory = SC.baseFactoryPaymaster
-		const tx = await factory.executeForAdmin(
-			obj.cardAddr,
-			obj.data,
-			obj.deadline,
-			obj.nonce,
-			obj.adminSignature
-		)
+		let tx: ethers.ContractTransactionResponse
+		try {
+			tx = await factory.executeForAdmin(
+				obj.cardAddr,
+				obj.data,
+				obj.deadline,
+				obj.nonce,
+				obj.adminSignature
+			)
+		} catch (gasErr: any) {
+			// 部分 RPC 在 estimateGas 时返回 "missing revert data"，直接发送可成功。用固定 gasLimit 重试
+			if (/estimateGas|missing revert data|CALL_EXCEPTION/i.test(gasErr?.message ?? '')) {
+				logger(Colors.yellow(`[executeForAdminProcess] estimateGas failed, retrying with gasLimit=600000`))
+				tx = await factory.executeForAdmin(
+					obj.cardAddr,
+					obj.data,
+					obj.deadline,
+					obj.nonce,
+					obj.adminSignature,
+					{ gasLimit: 600_000 }
+				)
+			} else {
+				throw gasErr
+			}
+		}
 		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash}`))
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
