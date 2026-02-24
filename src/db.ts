@@ -751,6 +751,35 @@ export const getNfcCardPrivateKeyByUid = async (uid: string): Promise<string | n
 	}
 }
 
+/** 根据 UID 获取 NFC 卡对应的 recipient EOA 地址（用于 mintPointsByAdmin 的 to 参数）。若 DB 无则从 mnemonic 派生，不写入 DB。 */
+export const getNfcRecipientAddressByUid = async (uid: string): Promise<string | null> => {
+	let privateKey = await getNfcCardPrivateKeyByUid(uid)
+	if (privateKey) {
+		try {
+			const wallet = new ethers.Wallet(privateKey)
+			return await wallet.getAddress()
+		} catch {
+			return null
+		}
+	}
+	const mnemonic = (masterSetup as any)?.cryptoPayWallet
+	if (!mnemonic || typeof mnemonic !== 'string') return null
+	const normalizedUid = String(uid || '').trim().toLowerCase()
+	if (!/^[0-9a-f]+$/i.test(normalizedUid)) return null
+	const uidHex = normalizedUid.padStart(14, '0').slice(-14)
+	try {
+		const uidBytes = ethers.getBytes('0x' + uidHex)
+		const hash = ethers.keccak256(uidBytes)
+		const offset = Number(BigInt(hash) % (2n ** 31n))
+		const path = `m/44'/60'/0'/0/${offset}`
+		const derived = ethers.HDNodeWallet.fromPhrase(mnemonic.trim(), path)
+		const wallet = new ethers.Wallet(derived.privateKey)
+		return await wallet.getAddress()
+	} catch {
+		return null
+	}
+}
+
 /** 登记 NFC 卡到 DB（uid + private_key，供后续支付流程使用） */
 export const registerNfcCardToDb = async (params: { uid: string; privateKey: string }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })

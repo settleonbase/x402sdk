@@ -1,7 +1,7 @@
 import { ethers } from 'ethers'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
-import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6 } from './util'
+import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6, getOracleRequest } from './util'
 import { Request, Response} from 'express'
 import { resolve } from 'node:path'
 import fs from 'node:fs'
@@ -29,7 +29,7 @@ import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
-import { registerCardToDb } from './db'
+import { registerCardToDb, getNfcRecipientAddressByUid } from './db'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
@@ -528,6 +528,81 @@ export const signUSDC3009ForNfcTopup = async (
 		nonce
 	}
 	return await userWallet.signTypedData(domain, types, message)
+}
+
+/** NFC Topup Prepare：根据 uid/amount/currency 生成 executeForAdmin 所需的 data、deadline、nonce。供 Master nfcTopupPrepare 端点调用。 */
+export const nfcTopupPreparePayload = async (params: {
+	uid: string
+	amount: string
+	currency?: string
+}): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string } | { error: string }> => {
+	const { uid, amount, currency = 'CAD' } = params
+	const amt = typeof amount === 'string' ? amount : String(amount ?? '')
+	if (!amt || Number(amt) <= 0) return { error: 'Invalid amount' }
+	const recipientEOA = await getNfcRecipientAddressByUid(uid.trim())
+	if (!recipientEOA) return { error: 'Failed to resolve recipient from uid' }
+	const cardAddr = BASE_CCSA_CARD_ADDRESS
+	const cur = (currency || 'CAD').toUpperCase()
+	let usdcAmount6: bigint
+	if (cur === 'USD' || cur === 'USDC') {
+		usdcAmount6 = ethers.parseUnits(amt, 6)
+	} else {
+		const oracle = getOracleRequest()
+		const cadRate = Number((oracle as any)?.usdcad) || 1.35
+		const usdcRate = Number((oracle as any)?.usdc) || 1
+		const usdcHuman = Number(amt) / cadRate / usdcRate
+		usdcAmount6 = ethers.parseUnits(usdcHuman.toFixed(6), 6)
+	}
+	if (usdcAmount6 <= 0n) return { error: 'Invalid amount' }
+	const { points6 } = await quotePointsForUSDC_raw(cardAddr, usdcAmount6)
+	if (points6 <= 0n) return { error: 'quotePointsForUSDC failed' }
+	const iface = new ethers.Interface(['function mintPointsByAdmin(address toEOA, uint256 amount)'])
+	const data = iface.encodeFunctionData('mintPointsByAdmin', [recipientEOA, points6])
+	const deadline = Math.floor(Date.now() / 1000) + 300
+	const nonce = ethers.hexlify(ethers.randomBytes(32))
+	return { cardAddr, data, deadline, nonce }
+}
+
+/** executeForAdmin 队列：Master 用 paymaster 调用 factory.executeForAdmin */
+export const executeForAdminPool: Array<{
+	cardAddr: string
+	data: string
+	deadline: number
+	nonce: string
+	adminSignature: string
+	res?: Response
+}> = []
+
+export const executeForAdminProcess = async () => {
+	const obj = executeForAdminPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		executeForAdminPool.unshift(obj)
+		return setTimeout(() => executeForAdminProcess(), 3000)
+	}
+	try {
+		const factory = SC.baseFactoryPaymaster
+		const tx = await factory.executeForAdmin(
+			obj.cardAddr,
+			obj.data,
+			obj.deadline,
+			obj.nonce,
+			obj.adminSignature
+		)
+		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash}`))
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+		}
+	} catch (e: any) {
+		logger(Colors.red(`[executeForAdminProcess] failed: ${e?.message ?? e}`))
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'executeForAdmin failed' }).end()
+		}
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => executeForAdminProcess(), 1000)
+	}
 }
 
 /**

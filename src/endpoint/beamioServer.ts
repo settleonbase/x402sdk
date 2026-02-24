@@ -9,11 +9,13 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
-import { CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
+import { BASE_CARD_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
 import { masterSetup } from '../util'
+
+const BASE_CHAIN_ID = 8453
 
 const ISSUED_NFT_START_ID = 100_000_000_000n
 
@@ -281,46 +283,77 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/payByNfcUid', { uid: uid.trim(), amountUsdc6: amountUsdc6, payee: ethers.getAddress(payee) }, res)
 	})
 
-	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值（写操作，Cluster 预检 UID、解析/派生私钥后转发 Master） */
-	router.post('/nfcTopup', async (req, res) => {
+	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce */
+	router.post('/nfcTopupPrepare', async (req, res) => {
 		const { uid, amount, currency } = req.body as { uid?: string; amount?: string; currency?: string }
 		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 			return res.status(400).json({ success: false, error: 'Missing uid' })
 		}
-		const amt = typeof amount === 'string' ? amount : String(amount ?? '')
-		if (!amt || Number(amt) <= 0) {
-			return res.status(400).json({ success: false, error: 'Invalid amount' })
+		postLocalhost('/api/nfcTopupPrepare', { uid: uid.trim(), amount: String(amount ?? ''), currency: (currency || 'CAD').trim() }, res)
+	})
+
+	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master */
+	router.post('/nfcTopup', async (req, res) => {
+		const { cardAddr, data, deadline, nonce, adminSignature } = req.body as {
+			cardAddr?: string
+			data?: string
+			deadline?: number
+			nonce?: string
+			adminSignature?: string
 		}
-		const normalizedUid = String(uid || '').trim().toLowerCase()
-		if (!/^[0-9a-f]+$/i.test(normalizedUid)) {
-			return res.status(400).json({ success: false, error: 'Invalid uid format (hex only)' })
+		if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' })
 		}
-		// 7-byte UID = 14 hex chars，不足则左补 0
-		const uidHex = normalizedUid.padStart(14, '0').slice(-14)
-		let privateKey = await getNfcCardPrivateKeyByUid(uid)
-		if (!privateKey) {
-			const mnemonic = (masterSetup as any)?.cryptoPayWallet
-			if (!mnemonic || typeof mnemonic !== 'string') {
-				return res.status(500).json({ success: false, error: 'cryptoPayWallet not configured' })
+		if (typeof deadline !== 'number' || deadline <= 0 || !nonce || typeof nonce !== 'string' || !adminSignature || typeof adminSignature !== 'string') {
+			return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce/adminSignature' })
+		}
+		try {
+			const now = Math.floor(Date.now() / 1000)
+			if (now > deadline) {
+				return res.status(400).json({ success: false, error: 'Deadline expired' })
 			}
-			try {
-				// BIP32 路径索引必须 ≤ 2^31-1。用 keccak256(UID) 映射，避免 mod 碰撞、保证 UID↔私钥 1:1
-				const uidBytes = ethers.getBytes('0x' + uidHex)
-				const hash = ethers.keccak256(uidBytes)
-				const offset = Number(BigInt(hash) % (2n ** 31n))
-				const path = `m/44'/60'/0'/0/${offset}`
-				// fromPhrase 第二个参数为 path 时直接从根派生，避免 derivePath 在非根节点上报错
-				const derived = ethers.HDNodeWallet.fromPhrase(mnemonic.trim(), path)
-				privateKey = derived.privateKey
-				await registerNfcCardToDb({ uid: uid.trim(), privateKey })
-				logger(Colors.green(`[nfcTopup] derived key for uid=${uidHex} path=${path}`))
-			} catch (e: any) {
-				logger(Colors.red(`[nfcTopup] derive failed: ${e?.message ?? e}`))
-				return res.status(500).json({ success: false, error: e?.message ?? 'Failed to derive key' })
+			const cardAddress = ethers.getAddress(cardAddr)
+			const dataHash = ethers.keccak256(data)
+			const domain = {
+				name: 'BeamioUserCardFactory',
+				version: '1',
+				chainId: BASE_CHAIN_ID,
+				verifyingContract: BASE_CARD_FACTORY
 			}
+			const types = {
+				ExecuteForAdmin: [
+					{ name: 'cardAddress', type: 'address' },
+					{ name: 'dataHash', type: 'bytes32' },
+					{ name: 'deadline', type: 'uint256' },
+					{ name: 'nonce', type: 'bytes32' }
+				]
+			}
+			const message = {
+				cardAddress,
+				dataHash,
+				deadline: BigInt(deadline),
+				nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce
+			}
+			const digest = ethers.TypedDataEncoder.hash(domain, types, message)
+			const signer = ethers.recoverAddress(digest, adminSignature)
+			const cardAbi = ['function isAdmin(address) view returns (bool)']
+			const card = new ethers.Contract(cardAddress, cardAbi, providerBase)
+			const isAdmin = await card.isAdmin(signer)
+			if (!isAdmin) {
+				return res.status(403).json({ success: false, error: 'Signer is not card admin' })
+			}
+			logger(Colors.green('server /api/nfcTopup preCheck OK (admin signer verified), forwarding to master'))
+			postLocalhost('/api/nfcTopup', {
+				cardAddr: cardAddress,
+				data,
+				deadline,
+				nonce,
+				adminSignature
+			}, res)
+		} catch (e: any) {
+			logger(Colors.red(`[nfcTopup] preCheck failed: ${e?.message ?? e}`))
+			return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'PreCheck failed' })
 		}
-		logger(Colors.green('server /api/nfcTopup preCheck OK, forwarding to master'))
-		postLocalhost('/api/nfcTopup', { uid: uid.trim(), amount: amt, currency: (currency || 'CAD').trim() }, res)
 	})
 
 	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）。30 秒缓存 */

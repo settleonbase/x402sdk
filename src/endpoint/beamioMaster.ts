@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -1112,69 +1112,46 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：获取私钥、签 EIP-3009、推入 purchasingCardPool */
-		router.post('/nfcTopup', async (req, res) => {
+		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce，供前端签名 */
+		router.post('/nfcTopupPrepare', async (req, res) => {
 			const { uid, amount, currency } = req.body as { uid?: string; amount?: string; currency?: string }
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 				return res.status(400).json({ success: false, error: 'Missing uid' })
 			}
-			const amt = typeof amount === 'string' ? amount : String(amount ?? '')
-			if (!amt || Number(amt) <= 0) {
-				return res.status(400).json({ success: false, error: 'Invalid amount' })
+			const result = await nfcTopupPreparePayload({ uid: uid.trim(), amount: String(amount ?? ''), currency: (currency || 'CAD').trim() })
+			if ('error' in result) {
+				return res.status(400).json({ success: false, error: result.error })
 			}
-			const privateKey = await getNfcCardPrivateKeyByUid(uid)
-			if (!privateKey) {
-				return res.status(403).json({ success: false, error: '不存在该卡' })
+			res.status(200).json(result).end()
+		})
+
+		/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Master 调用 factory.executeForAdmin */
+		router.post('/nfcTopup', async (req, res) => {
+			const { cardAddr, data, deadline, nonce, adminSignature } = req.body as {
+				cardAddr?: string
+				data?: string
+				deadline?: number
+				nonce?: string
+				adminSignature?: string
 			}
-			try {
-				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
-				const wallet = new ethers.Wallet(privateKey, provider)
-				const from = wallet.address
-				const cardAddress = BASE_CCSA_CARD_ADDRESS
-				const cur = (currency || 'CAD').toUpperCase()
-				let usdcAmount6: bigint
-				if (cur === 'USD' || cur === 'USDC') {
-					usdcAmount6 = ethers.parseUnits(amt, 6)
-				} else {
-					const oracle = getOracleRequest()
-					const cadRate = Number((oracle as any)?.usdcad) || 1.35
-					const usdcRate = Number((oracle as any)?.usdc) || 1
-					const usdcHuman = Number(amt) / cadRate / usdcRate
-					usdcAmount6 = ethers.parseUnits(usdcHuman.toFixed(6), 6)
-				}
-				if (usdcAmount6 <= 0n) {
-					return res.status(400).json({ success: false, error: 'Invalid amount' })
-				}
-				const usdcAmount = usdcAmount6.toString()
-				const nonce = ethers.hexlify(ethers.randomBytes(32))
-				const now = Math.floor(Date.now() / 1000)
-				const validAfter = 0
-				const validBefore = now + 300
-				const userSignature = await signUSDC3009ForNfcTopup(wallet, cardAddress, usdcAmount6, validAfter, validBefore, nonce)
-				const preCheck = await purchasingCardPreCheck(cardAddress, usdcAmount, from)
-				const preChecked = preCheck.success ? preCheck.preChecked : undefined
-				if (!preCheck.success && !/unitPriceUSDC6|oracle not configured|quotePointsForUSDC|QuoteHelper/i.test(preCheck.error)) {
-					return res.status(400).json({ success: false, error: preCheck.error })
-				}
-				purchasingCardPool.push({
-					cardAddress,
-					userSignature,
-					nonce,
-					usdcAmount,
-					from,
-					validAfter: String(validAfter),
-					validBefore: String(validBefore),
-					res,
-					...(preChecked != null && { preChecked })
-				})
-				logger(Colors.green(`[nfcTopup] uid=${uid.slice(0, 16)}... from=${from} amount=${usdcAmount} pushed to purchasingCardPool`))
-				purchasingCardProcess().catch((err: any) => {
-					logger(Colors.red('[purchasingCardProcess] nfcTopup error:'), err?.message ?? err)
-				})
-			} catch (e: any) {
-				logger(Colors.red(`[nfcTopup] failed: ${e?.message ?? e}`))
-				return res.status(500).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'NFC Topup failed' })
+			if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' })
 			}
+			if (typeof deadline !== 'number' || deadline <= 0 || !nonce || typeof nonce !== 'string' || !adminSignature || typeof adminSignature !== 'string') {
+				return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce/adminSignature' })
+			}
+			executeForAdminPool.push({
+				cardAddr: ethers.getAddress(cardAddr),
+				data,
+				deadline,
+				nonce,
+				adminSignature,
+				res
+			})
+			logger(Colors.green(`[nfcTopup] cardAddr=${cardAddr} pushed to executeForAdminPool`))
+			executeForAdminProcess().catch((err: any) => {
+				logger(Colors.red('[executeForAdminProcess] nfcTopup error:'), err?.message ?? err)
+			})
 		})
 
 }
