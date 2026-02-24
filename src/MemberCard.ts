@@ -3346,6 +3346,45 @@ export const getRedeemStatusBatchApi = async (
 	return result
 }
 
+/** cardAddAdmin 集群预检：校验 data 为 addAdmin，newAdmin 为 EOA（非 AA），card 存在。合格转发 master executeForOwner。 */
+export const cardAddAdminPreCheck = async (body: {
+	cardAddress?: string
+	data?: string
+	deadline?: number
+	nonce?: string
+	ownerSignature?: string
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, data, deadline, nonce, ownerSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
+	const addAdminIface = new ethers.Interface(['function addAdmin(address newAdmin, uint256 newThreshold)'])
+	const expectedSelector = addAdminIface.getFunction('addAdmin')?.selector ?? ''
+	if (data.slice(0, 10).toLowerCase() !== expectedSelector.toLowerCase()) {
+		return { success: false, error: 'Data must be addAdmin(address,uint256) calldata' }
+	}
+	try {
+		const iface = new ethers.Interface(['function addAdmin(address newAdmin, uint256 newThreshold)'])
+		const decoded = iface.parseTransaction({ data })
+		if (!decoded || decoded.name !== 'addAdmin') return { success: false, error: 'Invalid addAdmin calldata' }
+		const newAdmin = decoded.args[0] as string
+		if (!newAdmin || !ethers.isAddress(newAdmin)) return { success: false, error: 'Invalid newAdmin address' }
+		const pool = Settle_ContractPool
+		if (pool?.length) {
+			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+			const [codeAtCard, codeAtAdmin] = await Promise.all([
+				provider.getCode(cardAddress),
+				provider.getCode(newAdmin),
+			])
+			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+			if (codeAtAdmin && codeAtAdmin !== '0x') return { success: false, error: 'newAdmin must be EOA (AA/smart contract not allowed)' }
+		}
+		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
 /** cardCreateRedeem 集群预检：校验 JSON、可选链上校验（card 存在、factoryGateway），合格返回 preChecked 供转发 master。不写链。 */
 export type CardCreateRedeemPreChecked = {
 	cardAddress: string
@@ -3439,13 +3478,14 @@ export const executeForOwnerProcess = async () => {
 	}
 	try {
 		const factory = SC.baseFactoryPaymaster
-		await factory.executeForOwner(
+		const tx = await factory.executeForOwner(
 			obj.cardAddress,
 			obj.data,
 			obj.deadline,
 			obj.nonce,
 			obj.ownerSignature
 		)
+		const hash = tx?.hash as string | undefined
 		let code: string | undefined
 		if (obj.redeemCode != null && obj.toUserEOA != null) {
 			await factory.redeemForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
@@ -3454,7 +3494,7 @@ export const executeForOwnerProcess = async () => {
 		} else {
 			logger(Colors.green(`✅ executeForOwnerProcess card=${obj.cardAddress}`))
 		}
-		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, ...(code != null && { code }) }).end()
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, ...(code != null && { code }), ...(hash && { hash }) }).end()
 	} catch (e: any) {
 		logger(Colors.red(`❌ executeForOwnerProcess failed:`), e?.message ?? e)
 		let errMsg = e?.message ?? String(e)
