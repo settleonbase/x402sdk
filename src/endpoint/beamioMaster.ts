@@ -1112,7 +1112,7 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce，供前端签名 */
+		/** POST /api/nfcTopupPrepare - 返回 executeForOwner 所需的 cardAddr、data、deadline、nonce，供前端签名 */
 		router.post('/nfcTopupPrepare', async (req, res) => {
 			const { uid, amount, currency } = req.body as { uid?: string; amount?: string; currency?: string }
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
@@ -1125,7 +1125,7 @@ const routing = ( router: Router ) => {
 			res.status(200).json(result).end()
 		})
 
-		/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Master 调用 factory.executeForAdmin */
+		/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForOwner，Master 调用 factory.executeForOwner */
 		router.post('/nfcTopup', async (req, res) => {
 			const { cardAddr, data, deadline, nonce, adminSignature, uid } = req.body as {
 				cardAddr?: string

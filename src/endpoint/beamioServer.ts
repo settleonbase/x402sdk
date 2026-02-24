@@ -321,7 +321,7 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/nfcTopupPrepare', { uid: uid.trim(), amount: String(amount ?? ''), currency: (currency || 'CAD').trim() }, res)
 	})
 
-	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master */
+	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForOwner，Cluster 预检签名与 card.owner() 后转发 Master */
 	router.post('/nfcTopup', async (req, res) => {
 		const { cardAddr, data, deadline, nonce, adminSignature, uid } = req.body as {
 			cardAddr?: string
@@ -351,7 +351,7 @@ const routing = ( router: Router ) => {
 				verifyingContract: BASE_CARD_FACTORY
 			}
 			const types = {
-				ExecuteForAdmin: [
+				ExecuteForOwner: [
 					{ name: 'cardAddress', type: 'address' },
 					{ name: 'dataHash', type: 'bytes32' },
 					{ name: 'deadline', type: 'uint256' },
@@ -366,11 +366,11 @@ const routing = ( router: Router ) => {
 			}
 			const digest = ethers.TypedDataEncoder.hash(domain, types, message)
 			const signer = ethers.recoverAddress(digest, adminSignature)
-			const cardAbi = ['function isAdmin(address) view returns (bool)']
+			const cardAbi = ['function owner() view returns (address)']
 			const card = new ethers.Contract(cardAddress, cardAbi, providerBase)
-			const isAdmin = await card.isAdmin(signer)
-			if (!isAdmin) {
-				return res.status(403).json({ success: false, error: 'Signer is not card admin' })
+			const cardOwner = await card.owner()
+			if (cardOwner.toLowerCase() !== signer.toLowerCase()) {
+				return res.status(403).json({ success: false, error: 'Signer is not card owner' })
 			}
 			const recipientEOA = tryParseMintPointsByAdminRecipient(data)
 			const aaAddr = recipientEOA ? await resolveBeamioAccountOf(recipientEOA) : null

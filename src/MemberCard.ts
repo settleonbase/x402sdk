@@ -530,7 +530,7 @@ export const signUSDC3009ForNfcTopup = async (
 	return await userWallet.signTypedData(domain, types, message)
 }
 
-/** NFC Topup Prepare：根据 uid/amount/currency 生成 executeForAdmin 所需的 data、deadline、nonce。供 Master nfcTopupPrepare 端点调用。 */
+/** NFC Topup Prepare：根据 uid/amount/currency 生成 executeForOwner 所需的 data、deadline、nonce。供 Master nfcTopupPrepare 端点调用。 */
 export const nfcTopupPreparePayload = async (params: {
 	uid: string
 	amount: string
@@ -564,7 +564,7 @@ export const nfcTopupPreparePayload = async (params: {
 	return { cardAddr, data, deadline, nonce }
 }
 
-/** executeForAdmin 队列：Master 用 paymaster 调用 factory.executeForAdmin */
+/** executeForOwner 队列（NFC Topup）：Master 用 paymaster 调用 factory.executeForOwner */
 export const executeForAdminPool: Array<{
 	cardAddr: string
 	data: string
@@ -575,7 +575,7 @@ export const executeForAdminPool: Array<{
 	res?: Response
 }> = []
 
-/** 校验 ExecuteForAdmin 签字的 signer 是否为 card 的 admin，与 Cluster 预检一致。Master 执行前二次校验。 */
+/** 校验 ExecuteForOwner 签字的 signer 是否为 card 的 owner，与 Cluster 预检一致。Master 执行前二次校验。 */
 const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 	cardAddr: string
 	data: string
@@ -592,7 +592,7 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 			verifyingContract: BASE_CARD_FACTORY,
 		}
 		const types = {
-			ExecuteForAdmin: [
+			ExecuteForOwner: [
 				{ name: 'cardAddress', type: 'address' },
 				{ name: 'dataHash', type: 'bytes32' },
 				{ name: 'deadline', type: 'uint256' },
@@ -607,11 +607,11 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 		}
 		const digest = ethers.TypedDataEncoder.hash(domain, types, message)
 		const signer = ethers.recoverAddress(digest, obj.adminSignature)
-		const cardAbi = ['function isAdmin(address) view returns (bool)']
+		const cardAbi = ['function owner() view returns (address)']
 		const provider = providerBaseBackup
 		const card = new ethers.Contract(obj.cardAddr, cardAbi, provider)
-		const isAdmin = await card.isAdmin(signer)
-		if (!isAdmin) return { ok: false, error: 'Signer is not card admin' }
+		const cardOwner = await card.owner()
+		if (cardOwner.toLowerCase() !== signer.toLowerCase()) return { ok: false, error: 'Signer is not card owner' }
 		return { ok: true, signer }
 	} catch (e: any) {
 		return { ok: false, error: e?.message ?? String(e) }
@@ -683,7 +683,7 @@ export const executeForAdminProcess = async () => {
 		const factory = SC.baseFactoryPaymaster
 		let tx: ethers.ContractTransactionResponse
 		try {
-			tx = await factory.executeForAdmin(
+			tx = await factory.executeForOwner(
 				obj.cardAddr,
 				obj.data,
 				obj.deadline,
@@ -694,7 +694,7 @@ export const executeForAdminProcess = async () => {
 			// 部分 RPC 在 estimateGas 时返回 "missing revert data"，直接发送可成功。用固定 gasLimit 重试
 			if (/estimateGas|missing revert data|CALL_EXCEPTION/i.test(gasErr?.message ?? '')) {
 				logger(Colors.yellow(`[executeForAdminProcess] estimateGas failed, retrying with gasLimit=600000`))
-				tx = await factory.executeForAdmin(
+				tx = await factory.executeForOwner(
 					obj.cardAddr,
 					obj.data,
 					obj.deadline,
@@ -713,7 +713,7 @@ export const executeForAdminProcess = async () => {
 	} catch (e: any) {
 		logger(Colors.red(`[executeForAdminProcess] failed: ${e?.message ?? e}`))
 		if (obj.res && !obj.res.headersSent) {
-			obj.res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'executeForAdmin failed' }).end()
+			obj.res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'executeForOwner failed' }).end()
 		}
 	} finally {
 		Settle_ContractPool.unshift(SC)
