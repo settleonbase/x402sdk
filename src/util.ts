@@ -1,6 +1,7 @@
 import {join} from 'node:path'
 import {homedir} from 'node:os'
 import {ethers} from 'ethers'
+import Colors from 'colors/safe'
 import {logger} from './logger'
 import CoinCodeABI from './ABI/cashcoin-abi.json'
 import USDC_ABI from './ABI/usdc_abi.json'
@@ -720,10 +721,14 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 				from, to, amount, finishedHash: responseData?.transaction, note: note||''
 			}
 			logger(inspect(record, false, 3, true))
-			const { displayJson, currency, currencyAmount, requestHash: requestHashFromNote } = buildDisplayJsonFromNote(note || '', String(responseData?.transaction || ''), 'x402')
+			const { displayJson, currency, currencyAmount, requestHash: requestHashFromNote, isInternalTransfer } = buildDisplayJsonFromNote(note || '', String(responseData?.transaction || ''), 'x402')
 			if (!currency || !String(currency).trim()) {
 				logger(`[BeamioTransfer] [DEBUG] currency missing when submitting to beamioTransferIndexerAccounting from=${from} to=${to} finishedHash=${responseData?.transaction ?? 'n/a'}`)
 			}
+			// 记账必须 payer≠payee；from=付款方 to=收款方，内部转账时 EOA→AA 为 from=EOA to=AA，AA→EOA 为 from=AA to=EOA
+			if (!from || !to || from.toLowerCase() === to.toLowerCase()) {
+				logger(Colors.red(`[BeamioTransfer] SKIP accounting: from=to (payer=payee) from=${from} to=${to} txHash=${responseData?.transaction ?? 'n/a'}`))
+			} else {
 			const reqHashSrc = requestHash || requestHashFromNote
 			const reqHash = reqHashSrc && ethers.isHexString(reqHashSrc) && ethers.dataLength(reqHashSrc) === 32 ? reqHashSrc : undefined
 			logger(`[BeamioTransfer] submitBeamioTransferIndexerAccounting from=${from} to=${to} requestHash=${reqHash ?? 'n/a'} (from query=${requestHash ?? 'n/a'} fromNote=${requestHashFromNote ?? 'n/a'})`)
@@ -736,7 +741,9 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 				currency,
 				currencyAmount,
 				requestHash: reqHash,
+				isInternalTransfer: !!isInternalTransfer,
 			})
+			}
 		}
 		
 		return 
@@ -750,13 +757,13 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 
 import type { DisplayJsonData } from './displayJsonTypes'
 
-/** 从 note（forText + '\\r\\n' + JSON + 可选 card JSON）构建 displayJson（仅附加字符），currency/currencyAmount/requestHash 单独传 meta */
-function buildDisplayJsonFromNote(note: string, finishedHash: string, source: string): { displayJson: string; currency?: string; currencyAmount?: string; requestHash?: string } {
+/** 从 note（forText + '\\r\\n' + JSON + 可选 card JSON）构建 displayJson（仅附加字符），currency/currencyAmount/requestHash/isInternalTransfer 单独传 meta */
+function buildDisplayJsonFromNote(note: string, finishedHash: string, source: string): { displayJson: string; currency?: string; currencyAmount?: string; requestHash?: string; isInternalTransfer?: boolean } {
 	const trimmed = note.trim()
 	const parts = trimmed.split(/\r?\n/)
 	const forTextPart = parts[0]?.trim() || ''
 	const rest = parts.slice(1).join('\n').trim()
-	let parsed: { currency?: string; currencyAmount?: string | number; requestHash?: string } = {}
+	let parsed: { currency?: string; currencyAmount?: string | number; requestHash?: string; isInternalTransfer?: boolean } = {}
 	let card: DisplayJsonData['card']
 	const jsonMatches: string[] = []
 	let i = 0
@@ -782,6 +789,9 @@ function buildDisplayJsonFromNote(note: string, finishedHash: string, source: st
 			if (obj.requestHash != null && typeof obj.requestHash === 'string') {
 				parsed.requestHash = obj.requestHash
 			}
+			if (obj.isInternalTransfer === true) {
+				parsed.isInternalTransfer = true
+			}
 			if (obj.title != null || obj.detail != null || obj.image != null) {
 				card = {
 					title: obj.title as string,
@@ -799,8 +809,8 @@ function buildDisplayJsonFromNote(note: string, finishedHash: string, source: st
 		} catch (_) { /* ignore */ }
 	}
 	const d: DisplayJsonData = {
-		title: source === 'x402' ? 'Beamio Transfer' : 'AA to EOA (Internal)',
-		source,
+		title: parsed.isInternalTransfer ? 'EOA to AA' : (source === 'x402' ? 'Beamio Transfer' : 'AA to EOA (Internal)'),
+		source: parsed.isInternalTransfer ? 'eoa-aa' : source,
 		finishedHash,
 		handle: (forTextPart && !/^\{/.test(forTextPart) ? forTextPart : '').slice(0, 80),
 		forText: forTextPart && !/^\{/.test(forTextPart) ? forTextPart : undefined,
@@ -811,6 +821,7 @@ function buildDisplayJsonFromNote(note: string, finishedHash: string, source: st
 		currency: parsed.currency,
 		currencyAmount: parsed.currencyAmount != null ? String(parsed.currencyAmount) : undefined,
 		requestHash: parsed.requestHash,
+		isInternalTransfer: parsed.isInternalTransfer,
 	}
 }
 
@@ -823,6 +834,7 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 	currency?: string
 	currencyAmount?: string
 	requestHash?: string
+	isInternalTransfer?: boolean
 }) => {
 	if (!ethers.isAddress(payload.from) || !ethers.isAddress(payload.to)) {
 		return
@@ -879,6 +891,7 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 			feePayer: payload.from,
 		}
 		if (payload.requestHash) body.requestHash = payload.requestHash
+		if (payload.isInternalTransfer) body.isInternalTransfer = true
 		req.write(JSON.stringify(body))
 		req.end()
 	})

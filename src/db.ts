@@ -693,6 +693,89 @@ const BEAMIO_NFT_MINT_METADATA_TABLE = `CREATE TABLE IF NOT EXISTS beamio_nft_mi
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
+/** nfc_cards 表：NTAG 424 DNA 登记卡，uid 为 NFC 卡 UID，private_key 为关联私钥（仅服务端使用，不返回客户端） */
+const NFC_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS nfc_cards (
+	id SERIAL PRIMARY KEY,
+	uid TEXT UNIQUE NOT NULL,
+	private_key TEXT NOT NULL,
+	created_at TIMESTAMPTZ DEFAULT NOW()
+)`
+
+/** 根据 UID 查询 NFC 卡状态（不返回 private_key）；若已登记则从 private_key 推导 address 返回 */
+export const getNfcCardByUid = async (uid: string): Promise<{ registered: boolean; address?: string }> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(NFC_CARDS_TABLE)
+		const normalizedUid = String(uid || '').trim().toLowerCase()
+		if (!normalizedUid) return { registered: false }
+		const { rows } = await db.query<{ private_key: string }>(
+			`SELECT private_key FROM nfc_cards WHERE LOWER(uid) = $1 LIMIT 1`,
+			[normalizedUid]
+		)
+		if (rows.length === 0) return { registered: false }
+		try {
+			const wallet = new ethers.Wallet(rows[0].private_key)
+			const address = await wallet.getAddress()
+			return { registered: true, address }
+		} catch (e: any) {
+			logger(Colors.yellow(`[getNfcCardByUid] derive address failed: ${e?.message ?? e}`))
+			return { registered: true }
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNfcCardByUid] failed: ${e?.message ?? e}`))
+		return { registered: false }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 服务端专用：根据 UID 获取 private_key（仅 Master 支付流程使用，不返回客户端） */
+export const getNfcCardPrivateKeyByUid = async (uid: string): Promise<string | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(NFC_CARDS_TABLE)
+		const normalizedUid = String(uid || '').trim().toLowerCase()
+		if (!normalizedUid) return null
+		const { rows } = await db.query<{ private_key: string }>(
+			`SELECT private_key FROM nfc_cards WHERE LOWER(uid) = $1 LIMIT 1`,
+			[normalizedUid]
+		)
+		return rows.length > 0 ? rows[0].private_key : null
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNfcCardPrivateKeyByUid] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 登记 NFC 卡到 DB（uid + private_key，供后续支付流程使用） */
+export const registerNfcCardToDb = async (params: { uid: string; privateKey: string }): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(NFC_CARDS_TABLE)
+		const uid = String(params.uid || '').trim()
+		const privateKey = String(params.privateKey || '').trim()
+		if (!uid || !privateKey) return
+		await db.query(
+			`
+			INSERT INTO nfc_cards (uid, private_key)
+			VALUES ($1, $2)
+			ON CONFLICT (uid) DO UPDATE SET private_key = EXCLUDED.private_key
+			`,
+			[uid, privateKey]
+		)
+		logger(Colors.green(`[registerNfcCardToDb] registered uid=${uid.slice(0, 16)}...`))
+	} catch (e: any) {
+		logger(Colors.yellow(`[registerNfcCardToDb] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** createCard 成功后登记到本地 DB */
 export const registerCardToDb = async (params: {
 	cardAddress: string

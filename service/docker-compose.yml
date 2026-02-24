@@ -25,9 +25,10 @@ services:
       - "--cache=65536"
       - "--rollup.disabletxpoolgossip=true"
     ports:
-      - "8547:8545"     # Base L2 HTTP RPC
-      - "8548:8546"     # Base L2 WS
-      - "8552:8551"     # Engine API
+      # 执行层 RPC 仅绑定本机，避免公网直连打满读事务（对外统一走反向代理）
+      - "127.0.0.1:8547:8545"     # Base L2 HTTP RPC
+      - "127.0.0.1:8548:8546"     # Base L2 WS
+      - "127.0.0.1:8552:8551"     # Engine API (仅本机调试)
       - "30313:30313/tcp"
       - "30313:30313/udp"
     volumes:

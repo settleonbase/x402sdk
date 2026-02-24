@@ -7,11 +7,8 @@ services:
     image: ghcr.io/paradigmxyz/op-reth:v1.10.2
     container_name: base-op-reth
     restart: unless-stopped
-    # Debug 模式：观察 Merkle 重建为何不推进
-    # reth_stages=debug 覆盖 Merkle/AccountHashing/StorageHashing 等阶段
-    # op_reth=debug 覆盖 op-reth 执行层逻辑
     environment:
-      - RUST_LOG=info,reth_stages=debug,op_reth=debug,reth=debug
+      - RUST_LOG=info
     command:
       - "node"
       - "--datadir=/data"
@@ -21,13 +18,13 @@ services:
       - "--http"
       - "--http.addr=0.0.0.0"
       - "--http.port=8545"
-      - "--http.api=eth,net,web3,debug,txpool,miner"
+      - "--http.api=eth,net,web3,txpool"
       - "--http.corsdomain=*"
       - "--ws"
       - "--ws.addr=0.0.0.0"
       - "--ws.port=8546"
       - "--ws.origins=*"
-      - "--ws.api=web3,debug,eth,net,txpool"
+      - "--ws.api=web3,eth,net,txpool"
       - "--authrpc.addr=0.0.0.0"
       - "--authrpc.port=8551"
       - "--authrpc.jwtsecret=/jwt/jwt.hex"
@@ -41,9 +38,10 @@ services:
       - "--rpc.max-connections=600"
       - "--rpc.gascap=18446744073709551615"
     ports:
-      - "8547:8545"     # Base L2 HTTP RPC
-      - "8548:8546"     # Base L2 WS
-      - "8552:8551"     # Engine API
+      # 执行层 RPC 仅绑定本机，避免公网直连压垮 op-reth（通过本机反向代理对外暴露）
+      - "127.0.0.1:8547:8545"     # Base L2 HTTP RPC
+      - "127.0.0.1:8548:8546"     # Base L2 WS
+      - "127.0.0.1:8552:8551"     # Engine API (仅本机调试)
       - "30313:30313/tcp"
       - "30313:30313/udp"
       - "9200:9200/udp"   # discv5 discovery
@@ -60,6 +58,7 @@ services:
     image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.16.6
     container_name: base-op-node
     restart: unless-stopped
+    # 仅等待 op-reth 容器启动，不等待 healthcheck（同步中 RPC 可能较晚就绪）
     depends_on:
       - op-reth
 
@@ -75,6 +74,7 @@ services:
       - "--l2.enginekind=reth"
       - "--l1=http://host.docker.internal:8545"
       - "--l1.beacon=http://host.docker.internal:5052"
+      - --l1.beacon-fallbacks=https://ethereum-beacon-api.publicnode.com
       # 加速：更高 L1 并发、更大缓存、更短轮询
       - "--l1.max-concurrency=50"
       - "--l1.cache-size=1500"

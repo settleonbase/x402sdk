@@ -9,7 +9,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
@@ -238,6 +238,86 @@ const routing = ( router: Router ) => {
 	
 	router.get('/search-users', (req,res) => {
 		searchUsers(req,res)
+	})
+
+	/** POST /api/nfcCardStatus - 查询 NTAG 424 DNA 卡状态（读操作，Cluster 直接处理） */
+	router.post('/nfcCardStatus', async (req, res) => {
+		const { uid } = req.body as { uid?: string }
+		if (!uid || typeof uid !== 'string') {
+			return res.status(400).json({ error: 'Missing uid' })
+		}
+		const result = await getNfcCardByUid(uid)
+		return res.status(200).json(result).end()
+	})
+
+	/** POST /api/registerNfcCard - 登记 NFC 卡，Cluster 预检后转发 Master */
+	router.post('/registerNfcCard', async (req, res) => {
+		const { uid, privateKey } = req.body as { uid?: string; privateKey?: string }
+		if (!uid || typeof uid !== 'string' || !privateKey || typeof privateKey !== 'string') {
+			return res.status(400).json({ ok: false, error: 'Missing uid or privateKey' })
+		}
+		logger(Colors.green('server /api/registerNfcCard preCheck OK, forwarding to master'))
+		postLocalhost('/api/registerNfcCard', { uid: uid.trim(), privateKey: privateKey.trim() }, res)
+	})
+
+	/** POST /api/payByNfcUid - 以 UID 支付（写操作，Cluster 预检后转发 Master） */
+	router.post('/payByNfcUid', async (req, res) => {
+		const { uid, amountUsdc6, payee } = req.body as { uid?: string; amountUsdc6?: string; payee?: string }
+		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+			return res.status(400).json({ success: false, error: 'Missing uid' })
+		}
+		const amountBig = amountUsdc6 ? BigInt(amountUsdc6) : 0n
+		if (amountBig <= 0n) {
+			return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
+		}
+		if (!payee || !ethers.isAddress(payee)) {
+			return res.status(400).json({ success: false, error: 'Invalid payee address' })
+		}
+		const cardStatus = await getNfcCardByUid(uid)
+		if (!cardStatus.registered) {
+			return res.status(403).json({ success: false, error: '不存在该卡' })
+		}
+		logger(Colors.green('server /api/payByNfcUid preCheck OK, forwarding to master'))
+		postLocalhost('/api/payByNfcUid', { uid: uid.trim(), amountUsdc6: amountUsdc6, payee: ethers.getAddress(payee) }, res)
+	})
+
+	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值（写操作，Cluster 预检 UID、解析/派生私钥后转发 Master） */
+	router.post('/nfcTopup', async (req, res) => {
+		const { uid, amount, currency } = req.body as { uid?: string; amount?: string; currency?: string }
+		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+			return res.status(400).json({ success: false, error: 'Missing uid' })
+		}
+		const amt = typeof amount === 'string' ? amount : String(amount ?? '')
+		if (!amt || Number(amt) <= 0) {
+			return res.status(400).json({ success: false, error: 'Invalid amount' })
+		}
+		const normalizedUid = String(uid || '').trim().toLowerCase()
+		if (!/^[0-9a-f]+$/i.test(normalizedUid)) {
+			return res.status(400).json({ success: false, error: 'Invalid uid format (hex only)' })
+		}
+		// 7-byte UID = 14 hex chars，不足则左补 0
+		const uidHex = normalizedUid.padStart(14, '0').slice(-14)
+		let privateKey = await getNfcCardPrivateKeyByUid(uid)
+		if (!privateKey) {
+			const mnemonic = (masterSetup as any)?.cryptoPayWallet
+			if (!mnemonic || typeof mnemonic !== 'string') {
+				return res.status(500).json({ success: false, error: 'cryptoPayWallet not configured' })
+			}
+			try {
+				const offset = BigInt('0x' + uidHex)
+				const path = `m/44'/60'/0'/0/${offset}`
+				const hdNode = ethers.HDNodeWallet.fromPhrase(mnemonic.trim())
+				const derived = hdNode.derivePath(path)
+				privateKey = derived.privateKey
+				await registerNfcCardToDb({ uid: uid.trim(), privateKey })
+				logger(Colors.green(`[nfcTopup] derived key for uid=${uidHex} path=${path}`))
+			} catch (e: any) {
+				logger(Colors.red(`[nfcTopup] derive failed: ${e?.message ?? e}`))
+				return res.status(500).json({ success: false, error: e?.message ?? 'Failed to derive key' })
+			}
+		}
+		logger(Colors.green('server /api/nfcTopup preCheck OK, forwarding to master'))
+		postLocalhost('/api/nfcTopup', { uid: uid.trim(), amount: amt, currency: (currency || 'CAD').trim() }, res)
 	})
 
 	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）。30 秒缓存 */
@@ -1048,6 +1128,10 @@ const routing = ( router: Router ) => {
 			if (!ethers.isAddress(body?.from) || !ethers.isAddress(body?.to)) {
 				logger(Colors.red(`[beamioTransferIndexerAccounting] server pre-check FAIL: invalid from/to`))
 				return res.status(400).json({ success: false, error: 'Invalid from or to address' }).end()
+			}
+			if (String(body.from).toLowerCase() === String(body.to).toLowerCase()) {
+				logger(Colors.red(`[beamioTransferIndexerAccounting] server pre-check FAIL: from=to (payer=payee)`))
+				return res.status(400).json({ success: false, error: 'from and to must be different (payer≠payee)' }).end()
 			}
 			if (!body?.amountUSDC6 || BigInt(body.amountUSDC6) <= 0n) {
 				return res.status(400).json({ success: false, error: 'amountUSDC6 must be > 0' }).end()

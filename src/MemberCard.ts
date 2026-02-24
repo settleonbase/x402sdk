@@ -496,7 +496,39 @@ async function signUSDC3009(
     return await userWallet.signTypedData(domain, types, message);
 }
 
-
+/** NFC Topup：服务端用私钥签 EIP-3009，供 Master nfcTopup 端点调用 */
+export const signUSDC3009ForNfcTopup = async (
+	userWallet: ethers.Wallet,
+	cardAddress: string,
+	usdcAmount6: bigint,
+	validAfter: number,
+	validBefore: number,
+	nonce: string
+): Promise<string> => {
+	const cardContract = new ethers.Contract(cardAddress, ["function owner() view returns (address)"], providerBaseBackup)
+	const merchantAddress = await cardContract.owner()
+	const usdcAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+	const domain = { name: 'USD Coin', version: '2', chainId: 8453, verifyingContract: usdcAddress }
+	const types = {
+		TransferWithAuthorization: [
+			{ name: 'from', type: 'address' },
+			{ name: 'to', type: 'address' },
+			{ name: 'value', type: 'uint256' },
+			{ name: 'validAfter', type: 'uint256' },
+			{ name: 'validBefore', type: 'uint256' },
+			{ name: 'nonce', type: 'bytes32' }
+		]
+	}
+	const message = {
+		from: userWallet.address,
+		to: merchantAddress,
+		value: usdcAmount6,
+		validAfter,
+		validBefore,
+		nonce
+	}
+	return await userWallet.signTypedData(domain, types, message)
+}
 
 /**
  * 无需许可的购买：用户签名，Paymaster 提交
@@ -868,6 +900,11 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 	try {
 		if (!ethers.isAddress(obj.from) || !ethers.isAddress(obj.to)) {
 			throw new Error('invalid from/to address')
+		}
+		// 内部转账及普通转账：payer(from) 与 payee(to) 必须不同，否则记账错误（AA<>EOA 时 from≠to）
+		if (obj.from.toLowerCase() === obj.to.toLowerCase()) {
+			logger(Colors.red(`[beamioTransferIndexerAccountingProcess] REJECT: from=to (payer=payee) txHash=${obj.finishedHash} addr=${obj.from}`))
+			throw new Error('from and to must be different (payer≠payee)')
 		}
 		const amountUSDC6 = BigInt(obj.amountUSDC6 || '0')
 		if (amountUSDC6 <= 0n) {

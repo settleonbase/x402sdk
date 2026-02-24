@@ -7,10 +7,10 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, Settle_ContractPool, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -749,6 +749,10 @@ const routing = ( router: Router ) => {
 			if (!ethers.isAddress(from) || !ethers.isAddress(to) || !amountUSDC6 || !finishedHash || !ethers.isAddress(feePayer)) {
 				return res.status(400).json({ success: false, error: 'Invalid payload: from,to,amountUSDC6,finishedHash,feePayer required' }).end()
 			}
+			if (String(from).toLowerCase() === String(to).toLowerCase()) {
+				logger(Colors.red(`[beamioTransferIndexerAccounting] REJECT: from=to (payer=payee) from=${from} finishedHash=${finishedHash}`))
+				return res.status(400).json({ success: false, error: 'from and to must be different (payer≠payee)' }).end()
+			}
 			try {
 				const amount = BigInt(amountUSDC6)
 				if (amount <= 0n) {
@@ -1053,6 +1057,124 @@ const routing = ( router: Router ) => {
 
 		router.post('/coinbase-hooks', express.raw({ type: '*/*' }), (req, res) => {
 			return coinbaseHooks(req, res)
+		})
+
+		/** POST /api/nfcCardStatus - 查询 NFC 卡状态（Master 可选实现，Cluster 已直接处理） */
+		router.post('/nfcCardStatus', async (req, res) => {
+			const { uid } = req.body as { uid?: string }
+			if (!uid || typeof uid !== 'string') {
+				return res.status(400).json({ error: 'Missing uid' })
+			}
+			const result = await getNfcCardByUid(uid)
+			return res.status(200).json(result).end()
+		})
+
+		/** POST /api/registerNfcCard - 登记 NFC 卡（uid + private_key），需鉴权（可后续添加） */
+		router.post('/registerNfcCard', async (req, res) => {
+			const { uid, privateKey } = req.body as { uid?: string; privateKey?: string }
+			if (!uid || typeof uid !== 'string' || !privateKey || typeof privateKey !== 'string') {
+				return res.status(400).json({ ok: false, error: 'Missing uid or privateKey' })
+			}
+			await registerNfcCardToDb({ uid: uid.trim(), privateKey: privateKey.trim() })
+			return res.status(200).json({ ok: true }).end()
+		})
+
+		/** POST /api/payByNfcUid - 以 UID 支付：使用 NFC 卡私钥从卡 EOA 向 payee 转 USDC */
+		router.post('/payByNfcUid', async (req, res) => {
+			const { uid, amountUsdc6, payee } = req.body as { uid?: string; amountUsdc6?: string; payee?: string }
+			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+				return res.status(400).json({ success: false, error: 'Missing uid' })
+			}
+			const amountBig = amountUsdc6 ? BigInt(amountUsdc6) : 0n
+			if (amountBig <= 0n) {
+				return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
+			}
+			if (!payee || !ethers.isAddress(payee)) {
+				return res.status(400).json({ success: false, error: 'Invalid payee address' })
+			}
+			const privateKey = await getNfcCardPrivateKeyByUid(uid)
+			if (!privateKey) {
+				return res.status(403).json({ success: false, error: '不存在该卡' })
+			}
+			try {
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const wallet = new ethers.Wallet(privateKey, provider)
+				const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+				const usdcAbi = ['function transfer(address to, uint256 amount) returns (bool)']
+				const usdc = new ethers.Contract(USDC_BASE, usdcAbi, wallet)
+				const tx = await usdc.transfer(ethers.getAddress(payee), amountBig)
+				await tx.wait()
+				logger(Colors.green(`[payByNfcUid] uid=${uid.slice(0, 16)}... -> ${payee} amount=${amountUsdc6} tx=${tx.hash}`))
+				return res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
+			} catch (e: any) {
+				logger(Colors.red(`[payByNfcUid] failed: ${e?.message ?? e}`))
+				return res.status(500).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Transfer failed' }).end()
+			}
+		})
+
+		/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：获取私钥、签 EIP-3009、推入 purchasingCardPool */
+		router.post('/nfcTopup', async (req, res) => {
+			const { uid, amount, currency } = req.body as { uid?: string; amount?: string; currency?: string }
+			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+				return res.status(400).json({ success: false, error: 'Missing uid' })
+			}
+			const amt = typeof amount === 'string' ? amount : String(amount ?? '')
+			if (!amt || Number(amt) <= 0) {
+				return res.status(400).json({ success: false, error: 'Invalid amount' })
+			}
+			const privateKey = await getNfcCardPrivateKeyByUid(uid)
+			if (!privateKey) {
+				return res.status(403).json({ success: false, error: '不存在该卡' })
+			}
+			try {
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const wallet = new ethers.Wallet(privateKey, provider)
+				const from = wallet.address
+				const cardAddress = BASE_CCSA_CARD_ADDRESS
+				const cur = (currency || 'CAD').toUpperCase()
+				let usdcAmount6: bigint
+				if (cur === 'USD' || cur === 'USDC') {
+					usdcAmount6 = ethers.parseUnits(amt, 6)
+				} else {
+					const oracle = getOracleRequest()
+					const cadRate = Number((oracle as any)?.usdcad) || 1.35
+					const usdcRate = Number((oracle as any)?.usdc) || 1
+					const usdcHuman = Number(amt) / cadRate / usdcRate
+					usdcAmount6 = ethers.parseUnits(usdcHuman.toFixed(6), 6)
+				}
+				if (usdcAmount6 <= 0n) {
+					return res.status(400).json({ success: false, error: 'Invalid amount' })
+				}
+				const usdcAmount = usdcAmount6.toString()
+				const nonce = ethers.hexlify(ethers.randomBytes(32))
+				const now = Math.floor(Date.now() / 1000)
+				const validAfter = 0
+				const validBefore = now + 300
+				const userSignature = await signUSDC3009ForNfcTopup(wallet, cardAddress, usdcAmount6, validAfter, validBefore, nonce)
+				const preCheck = await purchasingCardPreCheck(cardAddress, usdcAmount, from)
+				const preChecked = preCheck.success ? preCheck.preChecked : undefined
+				if (!preCheck.success && !/unitPriceUSDC6|oracle not configured|quotePointsForUSDC|QuoteHelper/i.test(preCheck.error)) {
+					return res.status(400).json({ success: false, error: preCheck.error })
+				}
+				purchasingCardPool.push({
+					cardAddress,
+					userSignature,
+					nonce,
+					usdcAmount,
+					from,
+					validAfter: String(validAfter),
+					validBefore: String(validBefore),
+					res,
+					...(preChecked != null && { preChecked })
+				})
+				logger(Colors.green(`[nfcTopup] uid=${uid.slice(0, 16)}... from=${from} amount=${usdcAmount} pushed to purchasingCardPool`))
+				purchasingCardProcess().catch((err: any) => {
+					logger(Colors.red('[purchasingCardProcess] nfcTopup error:'), err?.message ?? err)
+				})
+			} catch (e: any) {
+				logger(Colors.red(`[nfcTopup] failed: ${e?.message ?? e}`))
+				return res.status(500).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'NFC Topup failed' })
+			}
 		})
 
 }
