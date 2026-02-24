@@ -573,6 +573,49 @@ export const executeForAdminPool: Array<{
 	res?: Response
 }> = []
 
+/** 校验 ExecuteForAdmin 签字的 signer 是否为 card 的 admin，与 Cluster 预检一致。Master 执行前二次校验。 */
+const verifyExecuteForAdminSignerIsAdmin = async (obj: {
+	cardAddr: string
+	data: string
+	deadline: number
+	nonce: string
+	adminSignature: string
+}): Promise<{ ok: true; signer: string } | { ok: false; error: string }> => {
+	try {
+		const dataHash = ethers.keccak256(obj.data)
+		const domain = {
+			name: 'BeamioUserCardFactory',
+			version: '1',
+			chainId: 8453,
+			verifyingContract: BASE_CARD_FACTORY,
+		}
+		const types = {
+			ExecuteForAdmin: [
+				{ name: 'cardAddress', type: 'address' },
+				{ name: 'dataHash', type: 'bytes32' },
+				{ name: 'deadline', type: 'uint256' },
+				{ name: 'nonce', type: 'bytes32' },
+			],
+		}
+		const message = {
+			cardAddress: obj.cardAddr,
+			dataHash,
+			deadline: BigInt(obj.deadline),
+			nonce: obj.nonce.startsWith('0x') ? obj.nonce : ('0x' + obj.nonce) as `0x${string}`,
+		}
+		const digest = ethers.TypedDataEncoder.hash(domain, types, message)
+		const signer = ethers.recoverAddress(digest, obj.adminSignature)
+		const cardAbi = ['function isAdmin(address) view returns (bool)']
+		const provider = providerBaseBackup
+		const card = new ethers.Contract(obj.cardAddr, cardAbi, provider)
+		const isAdmin = await card.isAdmin(signer)
+		if (!isAdmin) return { ok: false, error: 'Signer is not card admin' }
+		return { ok: true, signer }
+	} catch (e: any) {
+		return { ok: false, error: e?.message ?? String(e) }
+	}
+}
+
 /** 从 executeForAdmin 的 data 中解析 mintPointsByAdmin(toEOA, points6) 的 toEOA，供 NFC Topup 前置 DeployingSmartAccount */
 const tryParseMintPointsByAdminRecipient = (data: string): string | null => {
 	try {
@@ -592,6 +635,15 @@ export const executeForAdminProcess = async () => {
 		return setTimeout(() => executeForAdminProcess(), 3000)
 	}
 	try {
+		// 二次校验：签字账户必须为 card admin（Cluster 已预检，Master 防御性再检）
+		const adminCheck = await verifyExecuteForAdminSignerIsAdmin(obj)
+		if (!adminCheck.ok) {
+			logger(Colors.red(`[executeForAdminProcess] admin check failed: ${adminCheck.error}`))
+			if (obj.res && !obj.res.headersSent) obj.res.status(403).json({ success: false, error: adminCheck.error }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => executeForAdminProcess(), 1000)
+			return
+		}
 		// NFC Topup：mintPointsByAdmin 要求 recipient 已有 AA 账户，否则 _toAccount 会 revert UC_ResolveAccountFailed
 		const recipientEOA = tryParseMintPointsByAdminRecipient(obj.data)
 		if (recipientEOA) {
