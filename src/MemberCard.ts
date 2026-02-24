@@ -558,7 +558,8 @@ export const nfcTopupPreparePayload = async (params: {
 	if (points6 <= 0n) return { error: 'quotePointsForUSDC failed' }
 	const iface = new ethers.Interface(['function mintPointsByAdmin(address toEOA, uint256 amount)'])
 	const data = iface.encodeFunctionData('mintPointsByAdmin', [recipientEOA, points6])
-	const deadline = Math.floor(Date.now() / 1000) + 300
+	/** 15 分钟有效期，避免队列/网络延迟导致 UC_InvalidTimeWindow */
+	const deadline = Math.floor(Date.now() / 1000) + 900
 	const nonce = ethers.hexlify(ethers.randomBytes(32))
 	return { cardAddr, data, deadline, nonce }
 }
@@ -627,6 +628,16 @@ const tryParseMintPointsByAdminRecipient = (data: string): string | null => {
 	return null
 }
 
+/** 获取 card 使用的 AA Factory 地址（card.factoryGateway()._aaFactory()），与 mintPointsByAdmin 的 _toAccount 解析逻辑一致 */
+const getCardAaFactoryAddress = async (cardAddr: string): Promise<string> => {
+	const cardAbi = ['function factoryGateway() view returns (address)']
+	const factoryAbi = ['function _aaFactory() view returns (address)']
+	const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+	const gateway = await card.factoryGateway()
+	const factory = new ethers.Contract(gateway, factoryAbi, providerBaseBackup)
+	return factory._aaFactory()
+}
+
 export const executeForAdminProcess = async () => {
 	const obj = executeForAdminPool.shift()
 	if (!obj) return
@@ -646,11 +657,20 @@ export const executeForAdminProcess = async () => {
 			return
 		}
 		// NFC Topup：mintPointsByAdmin 要求 recipient 已有 AA 账户，否则 _toAccount 会 revert UC_ResolveAccountFailed
+		// 必须使用 card 的 factoryGateway()._aaFactory()，与合约内 _resolveAccount 一致；若用配置的 AA Factory 可能不匹配导致 UC_ResolveAccountFailed
 		const recipientEOA = tryParseMintPointsByAdminRecipient(obj.data)
 		let aaAddr: string | null = null
 		if (recipientEOA) {
 			logger(Colors.cyan(`[nfcTopup] uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA} | cardAddr=${obj.cardAddr}`))
-			const { accountAddress: addr } = await DeployingSmartAccount(recipientEOA, SC.aaAccountFactoryPaymaster)
+			const cardAaFactoryAddr = await getCardAaFactoryAddress(obj.cardAddr)
+			const configAaAddr = await SC.aaAccountFactoryPaymaster.getAddress()
+			const aaFactoryContract = cardAaFactoryAddr.toLowerCase() === configAaAddr.toLowerCase()
+				? SC.aaAccountFactoryPaymaster
+				: new ethers.Contract(cardAaFactoryAddr, BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi, SC.walletBase)
+			if (cardAaFactoryAddr.toLowerCase() !== configAaAddr.toLowerCase()) {
+				logger(Colors.yellow(`[nfcTopup] Card _aaFactory(${cardAaFactoryAddr}) != config(${configAaAddr}), using card's aaFactory`))
+			}
+			const { accountAddress: addr } = await DeployingSmartAccount(recipientEOA, aaFactoryContract)
 			aaAddr = addr
 			if (!addr) {
 				logger(Colors.red(`[executeForAdminProcess] DeployingSmartAccount failed for recipient=${recipientEOA}`))
