@@ -304,7 +304,10 @@ const routing = ( router: Router ) => {
 				return res.status(500).json({ success: false, error: 'cryptoPayWallet not configured' })
 			}
 			try {
-				const offset = BigInt('0x' + uidHex)
+				// BIP32 路径索引必须 ≤ 2^31-1。用 keccak256(UID) 映射，避免 mod 碰撞、保证 UID↔私钥 1:1
+				const uidBytes = ethers.getBytes('0x' + uidHex)
+				const hash = ethers.keccak256(uidBytes)
+				const offset = Number(BigInt(hash) % (2n ** 31n))
 				const path = `m/44'/60'/0'/0/${offset}`
 				const hdNode = ethers.HDNodeWallet.fromPhrase(mnemonic.trim())
 				const derived = hdNode.derivePath(path)
