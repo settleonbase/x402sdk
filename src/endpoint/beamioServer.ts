@@ -282,6 +282,56 @@ const routing = ( router: Router ) => {
 		return res.status(200).json(result).end()
 	})
 
+	/** POST /api/getUIDAssets - 根据 UID 查询 NFC 卡资产（CCSA 点数 + USDC 余额），Cluster 直接处理，不转发 Master */
+	router.post('/getUIDAssets', async (req, res) => {
+		const { uid } = req.body as { uid?: string }
+		if (!uid || typeof uid !== 'string' || !uid.trim()) {
+			return res.status(400).json({ ok: false, error: 'Missing uid' }).end()
+		}
+		try {
+			const cardStatus = await getNfcCardByUid(uid.trim())
+			if (!cardStatus.registered || !cardStatus.address) {
+				return res.status(404).json({ ok: false, error: '卡未登记' }).end()
+			}
+			const eoa = ethers.getAddress(cardStatus.address)
+			const cardAbi = [
+				'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+				'function currency() view returns (uint8)',
+			]
+			const usdcAbi = ['function balanceOf(address) view returns (uint256)']
+			const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+			const card = new ethers.Contract(BASE_CCSA_CARD_ADDRESS, cardAbi, providerBase)
+			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
+			const [[pointsBalance, nfts], currencyNum, usdcBalanceRaw] = await Promise.all([
+				card.getOwnershipByEOA(eoa),
+				card.currency(),
+				usdc.balanceOf(eoa),
+			])
+			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+			const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
+			const result = {
+				ok: true,
+				address: eoa,
+				cardAddress: BASE_CCSA_CARD_ADDRESS,
+				points: ethers.formatUnits(pointsBalance, 6),
+				points6: String(pointsBalance),
+				usdcBalance: ethers.formatUnits(usdcBalanceRaw, 6),
+				cardCurrency: currency,
+				nfts: nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
+					tokenId: nft.tokenId.toString(),
+					attribute: nft.attribute.toString(),
+					tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
+					expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
+					isExpired: nft.isExpired,
+				})),
+			}
+			return res.status(200).json(result).end()
+		} catch (e: any) {
+			logger(Colors.red(`[getUIDAssets] failed: ${e?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: e?.shortMessage ?? e?.message ?? 'Query failed' }).end()
+		}
+	})
+
 	/** POST /api/registerNfcCard - 登记 NFC 卡，Cluster 预检后转发 Master */
 	router.post('/registerNfcCard', async (req, res) => {
 		const { uid, privateKey } = req.body as { uid?: string; privateKey?: string }
