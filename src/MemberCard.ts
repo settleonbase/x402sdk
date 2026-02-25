@@ -1021,6 +1021,8 @@ export const ContainerRelayPool: {
 	forText?: string
 	/** Bill 支付时 URL 的 requestHash（bytes32），供记账写入 originalPaymentHash 以关联 request_create */
 	requestHash?: string
+	/** NFC pay 等：总金额 USDC6，用于记账（CCSA 时 items[0] 为 points 非 USDC） */
+	amountUSDC6?: string
 	res: Response
 }[] = []
 
@@ -1912,6 +1914,23 @@ export const ContainerRelayPreCheck = (payload: ContainerRelayPayload | undefine
 	if (sigLen !== 65) return { success: false, error: `containerPayload.signature must be 65 bytes (130 hex chars), got ${sigLen}` }
 	logger(`[AAtoEOA/Container] pre-check OK account=${payload.account} to=${payload.to} items=${payload.items.length}`)
 	return { success: true }
+}
+
+/** 与 BeamioContainerModuleV07 一致：hashItem = keccak256(abi.encode(uint8(kind), asset, amount, tokenId, keccak256(data))) */
+function hashContainerItem(it: { kind: number; asset: string; amount: string | bigint; tokenId: string | bigint; data: string }): string {
+	const dataHex = typeof it.data === 'string' && it.data.startsWith('0x') ? it.data : '0x'
+	const dataHash = ethers.keccak256(ethers.getBytes(dataHex))
+	const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+		['uint8', 'address', 'uint256', 'uint256', 'bytes32'],
+		[it.kind as 0 | 1, it.asset, BigInt(it.amount), BigInt(it.tokenId), dataHash]
+	)
+	return ethers.keccak256(encoded)
+}
+
+/** 与 BeamioContainerModuleV07 一致：hashItems = keccak256(abi.encode(bytes32[])) */
+function hashContainerItems(items: { kind: number; asset: string; amount: string | bigint; tokenId: string | bigint; data: string }[]): string {
+	const hashes = items.map((it) => hashContainerItem(it))
+	return ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['bytes32[]'], [hashes]))
 }
 
 /** 与 BeamioContainerStorageV07 布局一致：从 AA 账户 storage 读 container module 的 relayedNonce / openRelayedNonce */
@@ -3006,7 +3025,7 @@ export const ContainerRelayProcess = async () => {
     // Base 转账完成后立即返回 hash 给客户端，不等待记账
     if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
-    const usdcAmountRaw = BigInt(payload.items[0].amount)
+    const usdcAmountRaw = obj.amountUSDC6 ? BigInt(obj.amountUSDC6) : BigInt(payload.items[0].amount)
     // ContainerRelayProcess 只处理单个 item，所以 currency 和 currencyAmount 应该是字符串
     const currencyValue = Array.isArray(obj.currency) ? obj.currency[0] : obj.currency
     const currencyAmountValue = Array.isArray(obj.currencyAmount) ? obj.currencyAmount[0] : obj.currencyAmount
@@ -3965,7 +3984,7 @@ export const quotePointsForUSDC_raw = async (
 const BASE_CHAIN_ID = 8453
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
-/** NFC 卡 Smart Routing 聚合扣款：CCSA 点数 + USDC，推入 OpenContainerRelayPool。失败返回 { pushed: false, error }，成功返回 { pushed: true } */
+/** NFC 卡 Smart Routing 聚合扣款：CCSA 点数 + USDC，使用 Container relay（绑定 to，与 AAaccount signAAtoEOA_USDC_with_BeamioContainerMainRelayed 一致）。失败返回 { pushed: false, error }，成功返回 { pushed: true } */
 export const payByNfcUidOpenContainer = async (params: {
 	uid: string
 	amountUsdc6: string
@@ -4055,8 +4074,9 @@ export const payByNfcUidOpenContainer = async (params: {
 				toResolved = payeeAA
 			}
 		}
-		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aa, 'openRelayed')
+		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aa, 'relayed')
 		const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
+		const itemsHash = hashContainerItems(items)
 		const domain = {
 			name: 'BeamioAccount',
 			version: '1',
@@ -4064,49 +4084,54 @@ export const payByNfcUidOpenContainer = async (params: {
 			verifyingContract: aa as `0x${string}`,
 		}
 		const types = {
-			OpenContainerMain: [
+			ContainerMain: [
 				{ name: 'account', type: 'address' },
-				{ name: 'currencyType', type: 'uint8' },
-				{ name: 'maxAmount', type: 'uint256' },
+				{ name: 'to', type: 'address' },
+				{ name: 'itemsHash', type: 'bytes32' },
 				{ name: 'nonce', type: 'uint256' },
 				{ name: 'deadline', type: 'uint256' },
 			],
 		}
 		const message = {
 			account: aa,
-			currencyType: 4,
-			maxAmount: amountBig,
+			to: toResolved,
+			itemsHash,
 			nonce,
 			deadline,
 		}
 		const sig = await wallet.signTypedData(domain, types, message)
-		const openContainerPayload: OpenContainerRelayPayload = {
+		const containerPayload: ContainerRelayPayload = {
 			account: aa,
 			to: toResolved,
-			items,
-			currencyType: 4,
-			maxAmount: amountUsdc6,
+			items: items.map((it) => ({
+				kind: it.kind,
+				asset: it.asset,
+				amount: it.amount,
+				tokenId: it.tokenId,
+				data: it.data,
+			})),
 			nonce: nonce.toString(),
 			deadline: deadline.toString(),
 			signature: sig,
 		}
-		const preCheck = OpenContainerRelayPreCheck(openContainerPayload)
+		const preCheck = ContainerRelayPreCheck(containerPayload)
 		if (!preCheck.success) {
 			return { pushed: false, error: preCheck.error }
 		}
-		OpenContainerRelayPool.push({
-			openContainerPayload,
+		ContainerRelayPool.push({
+			containerPayload,
 			currency: 'CAD',
 			currencyAmount: ethers.formatUnits(amountBig, 6),
 			forText: `NFC pay uid=${uid.slice(0, 12)}...`,
+			amountUSDC6: amountUsdc6,
 			res,
 		})
-		logger(Colors.green(`[payByNfcUidOpenContainer] pushed to pool uid=${uid.slice(0, 12)}... ccsa=${ccsaPointsWei} usdc=${usdcWei}`))
-		OpenContainerRelayProcess().catch((err: any) => logger(Colors.red('[OpenContainerRelayProcess] unhandled:'), err?.message ?? err))
+		logger(Colors.green(`[payByNfcUidContainer] pushed to pool uid=${uid.slice(0, 12)}... ccsa=${ccsaPointsWei} usdc=${usdcWei}`))
+		ContainerRelayProcess().catch((err: any) => logger(Colors.red('[ContainerRelayProcess] unhandled:'), err?.message ?? err))
 		return { pushed: true }
 	} catch (e: any) {
-		logger(Colors.red(`[payByNfcUidOpenContainer] failed: ${e?.message ?? e}`))
-		return { pushed: false, error: e?.shortMessage ?? e?.message ?? 'OpenContainer failed' }
+		logger(Colors.red(`[payByNfcUidContainer] failed: ${e?.message ?? e}`))
+		return { pushed: false, error: e?.shortMessage ?? e?.message ?? 'Container relay failed' }
 	}
 }
 
