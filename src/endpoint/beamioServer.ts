@@ -9,7 +9,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
@@ -293,13 +293,14 @@ const routing = ( router: Router ) => {
 		}
 		const uidTrim = uid.trim()
 		try {
-			const cardStatus = await getNfcCardByUid(uidTrim)
-			if (!cardStatus.registered || !cardStatus.address) {
+			/** 与 nfcTopup 一致：优先 nfc_cards 表，无则从 mnemonic 派生（否则 topup 成功但 getUIDAssets 仍报卡未登记） */
+			const eoaRaw = await getNfcRecipientAddressByUid(uidTrim)
+			if (!eoaRaw) {
 				const err = { ok: false, error: '卡未登记' }
-				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 卡未登记 cardStatus=${JSON.stringify(cardStatus)} 返回 404: ${JSON.stringify(err)}`))
+				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 卡未登记（nfc_cards 无记录且 mnemonic 派生失败）返回 404: ${JSON.stringify(err)}`))
 				return res.status(404).json(err).end()
 			}
-			const eoa = ethers.getAddress(cardStatus.address)
+			const eoa = ethers.getAddress(eoaRaw)
 			const cardAbi = [
 				'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 				'function currency() view returns (uint8)',
