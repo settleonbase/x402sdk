@@ -1096,7 +1096,7 @@ const routing = ( router: Router ) => {
 			if (!privateKey) {
 				return res.status(403).json({ success: false, error: '不存在该卡' })
 			}
-			const openResult = await payByNfcUidOpenContainer({ uid: uid.trim(), amountUsdc6, payee: ethers.getAddress(payee), res })
+			const openResult = await payByNfcUidOpenContainer({ uid: uid.trim(), amountUsdc6: amountUsdc6 ?? amountBig.toString(), payee: ethers.getAddress(payee), res })
 			if (openResult.pushed) {
 				return
 			}
