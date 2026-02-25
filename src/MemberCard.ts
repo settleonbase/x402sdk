@@ -3996,9 +3996,10 @@ export const payByNfcUidOpenContainer = async (params: {
 		const usdcAbi = ['function balanceOf(address) view returns (uint256)']
 		const card = new ethers.Contract(BASE_CCSA_CARD_ADDRESS, cardAbi, SC.walletBase.provider!)
 		const usdc = new ethers.Contract(USDC_BASE, usdcAbi, SC.walletBase.provider!)
+		// Container 从 AA 转出，需用 AA 的余额（非 EOA）
 		const [[points6], usdcBalance6] = await Promise.all([
 			card.getOwnership(aa).then((r: [bigint, unknown[]]) => [r[0]]),
-			usdc.balanceOf(eoa),
+			usdc.balanceOf(aa),
 		])
 		let unitPriceUSDC6 = 0n
 		try {
@@ -4021,6 +4022,14 @@ export const payByNfcUidOpenContainer = async (params: {
 			ccsaPointsWei = maxPointsFromAmount > points6 ? points6 : maxPointsFromAmount
 			const ccsaValue = (ccsaPointsWei * unitPriceUSDC6) / 1_000_000n
 			usdcWei = amountBig - ccsaValue
+			// AA 无 USDC 时，必须仅用 CCSA；用 ceil 覆盖 rounding 避免 usdcWei=1 导致链上 revert
+			if (usdcBalance6 === 0n && usdcWei > 0n) {
+				const ccsaPointsCeil = (amountBig * 1_000_000n + unitPriceUSDC6 - 1n) / unitPriceUSDC6
+				if (ccsaPointsCeil <= points6) {
+					ccsaPointsWei = ccsaPointsCeil
+					usdcWei = 0n
+				}
+			}
 		}
 		const items: { kind: number; asset: string; amount: string; tokenId: string; data: string }[] = []
 		if (ccsaPointsWei > 0n) {
