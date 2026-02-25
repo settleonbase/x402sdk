@@ -730,7 +730,7 @@ export const getNfcCardByUid = async (uid: string): Promise<{ registered: boolea
 	}
 }
 
-/** 服务端专用：根据 UID 获取 private_key（仅 Master 支付流程使用，不返回客户端） */
+/** 服务端专用：根据 UID 获取 private_key（仅 Master 支付流程使用，不返回客户端）。若 DB 无则从 mnemonic 派生，与 getNfcRecipientAddressByUid / nfcTopup 一致 */
 export const getNfcCardPrivateKeyByUid = async (uid: string): Promise<string | null> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
@@ -742,12 +742,28 @@ export const getNfcCardPrivateKeyByUid = async (uid: string): Promise<string | n
 			`SELECT private_key FROM nfc_cards WHERE LOWER(uid) = $1 LIMIT 1`,
 			[normalizedUid]
 		)
-		return rows.length > 0 ? rows[0].private_key : null
+		if (rows.length > 0) return rows[0].private_key
 	} catch (e: any) {
 		logger(Colors.yellow(`[getNfcCardPrivateKeyByUid] failed: ${e?.message ?? e}`))
 		return null
 	} finally {
 		await db.end().catch(() => {})
+	}
+	// DB 无则从 mnemonic 派生（与 getNfcRecipientAddressByUid 一致）
+	const mnemonic = (masterSetup as any)?.cryptoPayWallet
+	if (!mnemonic || typeof mnemonic !== 'string') return null
+	const uidNorm = String(uid || '').trim().toLowerCase()
+	if (!uidNorm || !/^[0-9a-f]+$/i.test(uidNorm)) return null
+	const uidHex = uidNorm.padStart(14, '0').slice(-14)
+	try {
+		const uidBytes = ethers.getBytes('0x' + uidHex)
+		const hash = ethers.keccak256(uidBytes)
+		const offset = Number(BigInt(hash) % (2n ** 31n))
+		const path = `m/44'/60'/0'/0/${offset}`
+		const derived = ethers.HDNodeWallet.fromPhrase(mnemonic.trim(), path)
+		return derived.privateKey
+	} catch {
+		return null
 	}
 }
 

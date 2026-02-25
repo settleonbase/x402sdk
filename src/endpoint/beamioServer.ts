@@ -371,11 +371,8 @@ const routing = ( router: Router ) => {
 		if (!payee || !ethers.isAddress(payee)) {
 			return res.status(400).json({ success: false, error: 'Invalid payee address' })
 		}
-		const cardStatus = await getNfcCardByUid(uid)
-		if (!cardStatus.registered) {
-			return res.status(403).json({ success: false, error: '不存在该卡' })
-		}
-		logger(Colors.green('server /api/payByNfcUid preCheck OK, forwarding to master'))
+		// 不在此做卡登记检测，直接转发 Master；Master 会从 DB 或 mnemonic 派生私钥
+		logger(Colors.green(`[payByNfcUid] Cluster preCheck OK uid=${uid.trim().slice(0, 16)}... amountUsdc6=${amountUsdc6} payee=${ethers.getAddress(payee)} forwarding to master`))
 		postLocalhost('/api/payByNfcUid', { uid: uid.trim(), amountUsdc6: amountUsdc6, payee: ethers.getAddress(payee) }, res)
 	})
 

@@ -3976,7 +3976,10 @@ export const payByNfcUidOpenContainer = async (params: {
 	const amountBig = BigInt(amountUsdc6)
 	if (amountBig <= 0n) return { pushed: false, error: 'Invalid amountUsdc6' }
 	const privateKey = await getNfcCardPrivateKeyByUid(uid.trim())
-	if (!privateKey) return { pushed: false, error: '不存在该卡' }
+	if (!privateKey) {
+		logger(Colors.red(`[payByNfcUidOpenContainer] failed: getNfcCardPrivateKeyByUid returned null for uid=${uid.slice(0, 16)}...`))
+		return { pushed: false, error: '不存在该卡' }
+	}
 	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
 	const SC = Settle_ContractPool[0]
 	try {

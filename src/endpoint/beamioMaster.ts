@@ -1082,24 +1082,31 @@ const routing = ( router: Router ) => {
 		/** POST /api/payByNfcUid - 以 UID 支付：Smart Routing 聚合 CCSA+USDC 扣款，无 AA 时回退纯 USDC 转账 */
 		router.post('/payByNfcUid', async (req, res) => {
 			const { uid, amountUsdc6, payee } = req.body as { uid?: string; amountUsdc6?: string; payee?: string }
+			logger(Colors.cyan(`[payByNfcUid] Master received uid=${uid?.slice(0, 16)}... amountUsdc6=${amountUsdc6} payee=${payee}`))
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+				logger(Colors.red('[payByNfcUid] reject: Missing uid'))
 				return res.status(400).json({ success: false, error: 'Missing uid' })
 			}
 			const amountBig = amountUsdc6 ? BigInt(amountUsdc6) : 0n
 			if (amountBig <= 0n) {
+				logger(Colors.red(`[payByNfcUid] reject: Invalid amountUsdc6=${amountUsdc6}`))
 				return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
 			}
 			if (!payee || !ethers.isAddress(payee)) {
+				logger(Colors.red(`[payByNfcUid] reject: Invalid payee=${payee}`))
 				return res.status(400).json({ success: false, error: 'Invalid payee address' })
 			}
 			const privateKey = await getNfcCardPrivateKeyByUid(uid)
+			logger(Colors.cyan(`[payByNfcUid] getNfcCardPrivateKeyByUid: ${privateKey ? 'OK (from DB or mnemonic)' : 'null (不存在该卡)'}`))
 			if (!privateKey) {
 				return res.status(403).json({ success: false, error: '不存在该卡' })
 			}
 			const openResult = await payByNfcUidOpenContainer({ uid: uid.trim(), amountUsdc6: amountUsdc6 ?? amountBig.toString(), payee: ethers.getAddress(payee), res })
+			logger(Colors.cyan(`[payByNfcUid] payByNfcUidOpenContainer: pushed=${openResult.pushed}${openResult.error ? ` error=${openResult.error}` : ''}`))
 			if (openResult.pushed) {
 				return
 			}
+			logger(Colors.yellow(`[payByNfcUid] fallback to simple USDC transfer`))
 			try {
 				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
 				const wallet = new ethers.Wallet(privateKey, provider)
