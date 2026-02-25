@@ -4032,7 +4032,20 @@ export const payByNfcUidOpenContainer = async (params: {
 		if (items.length === 0) {
 			items.push({ kind: 0, asset: USDC_BASE, amount: amountUsdc6, tokenId: '0', data: '0x' })
 		}
-		const toResolved = ethers.getAddress(payee)
+		let toResolved = ethers.getAddress(payee)
+		// 若含 CCSA，收款方必须为 AA；EOA 无 AA 时链上会 revert UC_NoBeamioAccount，在此预检
+		if (ccsaPointsWei > 0n) {
+			const payeeCode = await SC.walletBase.provider!.getCode(toResolved)
+			const isPayeeEOA = !payeeCode || payeeCode === '0x'
+			if (isPayeeEOA) {
+				const payeeAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(toResolved)
+				if (!payeeAA || payeeAA === ethers.ZeroAddress) {
+					logger(Colors.yellow(`[payByNfcUidOpenContainer] payee ${toResolved} is EOA with no AA, cannot receive CCSA`))
+					return { pushed: false, error: '收款方为 EOA，无法接收 CCSA 点数。请使用 Beamio AA 账户收款。' }
+				}
+				toResolved = payeeAA
+			}
+		}
 		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aa, 'openRelayed')
 		const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
 		const domain = {

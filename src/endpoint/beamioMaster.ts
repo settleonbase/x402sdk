@@ -1106,6 +1106,10 @@ const routing = ( router: Router ) => {
 			if (openResult.pushed) {
 				return
 			}
+			// 收款方无法接收 CCSA 时，不尝试 fallback（卡片 EOA 无 USDC 会失败）
+			if (openResult.error && (openResult.error.includes('EOA') || openResult.error.includes('无法接收 CCSA'))) {
+				return res.status(400).json({ success: false, error: openResult.error }).end()
+			}
 			logger(Colors.yellow(`[payByNfcUid] fallback to simple USDC transfer`))
 			try {
 				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
