@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -1079,7 +1079,7 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({ ok: true }).end()
 		})
 
-		/** POST /api/payByNfcUid - 以 UID 支付：使用 NFC 卡私钥从卡 EOA 向 payee 转 USDC */
+		/** POST /api/payByNfcUid - 以 UID 支付：Smart Routing 聚合 CCSA+USDC 扣款，无 AA 时回退纯 USDC 转账 */
 		router.post('/payByNfcUid', async (req, res) => {
 			const { uid, amountUsdc6, payee } = req.body as { uid?: string; amountUsdc6?: string; payee?: string }
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
@@ -1096,6 +1096,10 @@ const routing = ( router: Router ) => {
 			if (!privateKey) {
 				return res.status(403).json({ success: false, error: '不存在该卡' })
 			}
+			const openResult = await payByNfcUidOpenContainer({ uid: uid.trim(), amountUsdc6, payee: ethers.getAddress(payee), res })
+			if (openResult.pushed) {
+				return
+			}
 			try {
 				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
 				const wallet = new ethers.Wallet(privateKey, provider)
@@ -1104,7 +1108,7 @@ const routing = ( router: Router ) => {
 				const usdc = new ethers.Contract(USDC_BASE, usdcAbi, wallet)
 				const tx = await usdc.transfer(ethers.getAddress(payee), amountBig)
 				await tx.wait()
-				logger(Colors.green(`[payByNfcUid] uid=${uid.slice(0, 16)}... -> ${payee} amount=${amountUsdc6} tx=${tx.hash}`))
+				logger(Colors.green(`[payByNfcUid] fallback USDC uid=${uid.slice(0, 16)}... -> ${payee} amount=${amountUsdc6} tx=${tx.hash}`))
 				return res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 			} catch (e: any) {
 				logger(Colors.red(`[payByNfcUid] failed: ${e?.message ?? e}`))

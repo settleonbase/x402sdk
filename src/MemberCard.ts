@@ -29,7 +29,7 @@ import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
-import { registerCardToDb, getNfcRecipientAddressByUid } from './db'
+import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid } from './db'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
@@ -3962,6 +3962,128 @@ export const quotePointsForUSDC_raw = async (
 		return ret;
 };
 
+const BASE_CHAIN_ID = 8453
+const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+
+/** NFC 卡 Smart Routing 聚合扣款：CCSA 点数 + USDC，推入 OpenContainerRelayPool。失败返回 { pushed: false, error }，成功返回 { pushed: true } */
+export const payByNfcUidOpenContainer = async (params: {
+	uid: string
+	amountUsdc6: string
+	payee: string
+	res: Response
+}): Promise<{ pushed: boolean; error?: string }> => {
+	const { uid, amountUsdc6, payee, res } = params
+	const amountBig = BigInt(amountUsdc6)
+	if (amountBig <= 0n) return { pushed: false, error: 'Invalid amountUsdc6' }
+	const privateKey = await getNfcCardPrivateKeyByUid(uid.trim())
+	if (!privateKey) return { pushed: false, error: '不存在该卡' }
+	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
+	const SC = Settle_ContractPool[0]
+	try {
+		const wallet = new ethers.Wallet(privateKey)
+		const eoa = await wallet.getAddress()
+		const aa = await SC.aaAccountFactoryPaymaster.primaryAccountOf(eoa)
+		if (!aa || aa === ethers.ZeroAddress) {
+			logger(Colors.yellow(`[payByNfcUidOpenContainer] EOA ${eoa} has no AA, fallback to simple USDC`))
+			return { pushed: false, error: 'NO_AA' }
+		}
+		const aaCode = await SC.walletBase.provider!.getCode(aa)
+		if (!aaCode || aaCode === '0x') return { pushed: false, error: 'NO_AA' }
+		const cardAbi = ['function getOwnership(address) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[])', 'function currency() view returns (uint8)']
+		const usdcAbi = ['function balanceOf(address) view returns (uint256)']
+		const card = new ethers.Contract(BASE_CCSA_CARD_ADDRESS, cardAbi, SC.walletBase.provider!)
+		const usdc = new ethers.Contract(USDC_BASE, usdcAbi, SC.walletBase.provider!)
+		const [[points6], usdcBalance6] = await Promise.all([
+			card.getOwnership(aa).then((r: [bigint, unknown[]]) => [r[0]]),
+			usdc.balanceOf(eoa),
+		])
+		let unitPriceUSDC6 = 0n
+		try {
+			const { unitPriceUSDC6: up } = await quotePointsForUSDC_raw(BASE_CCSA_CARD_ADDRESS, 1_000_000n, SC.baseFactoryPaymaster)
+			unitPriceUSDC6 = up
+		} catch (e) {
+			logger(Colors.yellow(`[payByNfcUidOpenContainer] quote failed: ${(e as Error)?.message}`))
+			return { pushed: false, error: 'Quote failed' }
+		}
+		if (unitPriceUSDC6 === 0n) return { pushed: false, error: 'Unit price 0' }
+		const ccsaValueUsdc6 = (points6 * unitPriceUSDC6) / 1_000_000n
+		const totalBalance6 = ccsaValueUsdc6 + usdcBalance6
+		if (totalBalance6 < amountBig) {
+			return { pushed: false, error: `余额不足（需 ${amountUsdc6} USDC6）` }
+		}
+		let ccsaPointsWei = 0n
+		let usdcWei = amountBig
+		if (points6 > 0n && unitPriceUSDC6 > 0n) {
+			const maxPointsFromAmount = (amountBig * 1_000_000n) / unitPriceUSDC6
+			ccsaPointsWei = maxPointsFromAmount > points6 ? points6 : maxPointsFromAmount
+			const ccsaValue = (ccsaPointsWei * unitPriceUSDC6) / 1_000_000n
+			usdcWei = amountBig - ccsaValue
+		}
+		const items: { kind: number; asset: string; amount: string; tokenId: string; data: string }[] = []
+		if (ccsaPointsWei > 0n) {
+			items.push({ kind: 1, asset: BASE_CCSA_CARD_ADDRESS, amount: ccsaPointsWei.toString(), tokenId: '0', data: '0x' })
+		}
+		if (usdcWei > 0n) {
+			items.push({ kind: 0, asset: USDC_BASE, amount: usdcWei.toString(), tokenId: '0', data: '0x' })
+		}
+		if (items.length === 0) {
+			items.push({ kind: 0, asset: USDC_BASE, amount: amountUsdc6, tokenId: '0', data: '0x' })
+		}
+		const toResolved = ethers.getAddress(payee)
+		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aa, 'openRelayed')
+		const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
+		const domain = {
+			name: 'BeamioAccount',
+			version: '1',
+			chainId: BASE_CHAIN_ID,
+			verifyingContract: aa as `0x${string}`,
+		}
+		const types = {
+			OpenContainerMain: [
+				{ name: 'account', type: 'address' },
+				{ name: 'currencyType', type: 'uint8' },
+				{ name: 'maxAmount', type: 'uint256' },
+				{ name: 'nonce', type: 'uint256' },
+				{ name: 'deadline', type: 'uint256' },
+			],
+		}
+		const message = {
+			account: aa,
+			currencyType: 4,
+			maxAmount: amountBig,
+			nonce,
+			deadline,
+		}
+		const sig = await wallet.signTypedData(domain, types, message)
+		const openContainerPayload: OpenContainerRelayPayload = {
+			account: aa,
+			to: toResolved,
+			items,
+			currencyType: 4,
+			maxAmount: amountUsdc6,
+			nonce: nonce.toString(),
+			deadline: deadline.toString(),
+			signature: sig,
+		}
+		const preCheck = OpenContainerRelayPreCheck(openContainerPayload)
+		if (!preCheck.success) {
+			return { pushed: false, error: preCheck.error }
+		}
+		OpenContainerRelayPool.push({
+			openContainerPayload,
+			currency: 'CAD',
+			currencyAmount: ethers.formatUnits(amountBig, 6),
+			forText: `NFC pay uid=${uid.slice(0, 12)}...`,
+			res,
+		})
+		logger(Colors.green(`[payByNfcUidOpenContainer] pushed to pool uid=${uid.slice(0, 12)}... ccsa=${ccsaPointsWei} usdc=${usdcWei}`))
+		OpenContainerRelayProcess().catch((err: any) => logger(Colors.red('[OpenContainerRelayProcess] unhandled:'), err?.message ?? err))
+		return { pushed: true }
+	} catch (e: any) {
+		logger(Colors.red(`[payByNfcUidOpenContainer] failed: ${e?.message ?? e}`))
+		return { pushed: false, error: e?.shortMessage ?? e?.message ?? 'OpenContainer failed' }
+	}
+}
 
 export const getLatest20Actions = async (
 
