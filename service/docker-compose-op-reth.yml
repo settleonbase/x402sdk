@@ -33,7 +33,10 @@ services:
       - "--max-outbound-peers=100"
       # 修正 enode 广播地址（Docker 内 NAT 检测失败会广播 127.0.0.1，导致无 peer）
       - "--nat=extip:38.102.126.30"
-      # 加速：并行稀疏 trie、更高 RPC 连接数
+      # 加速：SafeNoSync 减少写 I/O、64GB trie 缓存、并行稀疏 trie、内存缓冲
+      - "--db.sync-mode=SafeNoSync"
+      - "--engine.cross-block-cache-size=65536"
+      - "--engine.memory-block-buffer-target=2"
       - "--engine.parallel-sparse-trie"
       - "--rpc.max-connections=600"
       - "--rpc.gascap=18446744073709551615"

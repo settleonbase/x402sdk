@@ -285,13 +285,19 @@ const routing = ( router: Router ) => {
 	/** POST /api/getUIDAssets - 根据 UID 查询 NFC 卡资产（CCSA 点数 + USDC 余额），Cluster 直接处理，不转发 Master */
 	router.post('/getUIDAssets', async (req, res) => {
 		const { uid } = req.body as { uid?: string }
+		logger(Colors.cyan(`[getUIDAssets] 收到请求 uid=${uid ?? '(undefined)'}`))
 		if (!uid || typeof uid !== 'string' || !uid.trim()) {
-			return res.status(400).json({ ok: false, error: 'Missing uid' }).end()
+			const err = { ok: false, error: 'Missing uid' }
+			logger(Colors.yellow(`[getUIDAssets] 返回 400: ${JSON.stringify(err)}`))
+			return res.status(400).json(err).end()
 		}
+		const uidTrim = uid.trim()
 		try {
-			const cardStatus = await getNfcCardByUid(uid.trim())
+			const cardStatus = await getNfcCardByUid(uidTrim)
 			if (!cardStatus.registered || !cardStatus.address) {
-				return res.status(404).json({ ok: false, error: '卡未登记' }).end()
+				const err = { ok: false, error: '卡未登记' }
+				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 卡未登记 cardStatus=${JSON.stringify(cardStatus)} 返回 404: ${JSON.stringify(err)}`))
+				return res.status(404).json(err).end()
 			}
 			const eoa = ethers.getAddress(cardStatus.address)
 			const cardAbi = [
@@ -325,10 +331,12 @@ const routing = ( router: Router ) => {
 					isExpired: nft.isExpired,
 				})),
 			}
+			logger(Colors.green(`[getUIDAssets] uid=${uidTrim} 成功: ${JSON.stringify(result)}`))
 			return res.status(200).json(result).end()
 		} catch (e: any) {
-			logger(Colors.red(`[getUIDAssets] failed: ${e?.message ?? e}`))
-			return res.status(500).json({ ok: false, error: e?.shortMessage ?? e?.message ?? 'Query failed' }).end()
+			const err = { ok: false, error: e?.shortMessage ?? e?.message ?? 'Query failed' }
+			logger(Colors.red(`[getUIDAssets] uid=${uidTrim} failed: ${e?.message ?? e} 返回 500: ${JSON.stringify(err)}`))
+			return res.status(500).json(err).end()
 		}
 	})
 
