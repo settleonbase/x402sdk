@@ -1,0 +1,98 @@
+# Base RPC 使用 op-reth
+# 工作目录: /home/peter/base (op-reth 数据在 op-reth 子目录)
+# 沿用 docker-compose-op-reth.yml 的 reth 优化设定
+
+services:
+  op-reth:
+    image: ghcr.io/paradigmxyz/op-reth:v1.10.2
+    container_name: base-op-reth
+    restart: unless-stopped
+    environment:
+      - RUST_LOG=info
+    command:
+      - "node"
+      - "--datadir=/data"
+      - "--chain=base"
+      - "--rollup.sequencer-http=https://mainnet-sequencer.base.org"
+      - "--rollup.disable-tx-pool-gossip"
+      - "--http"
+      - "--http.addr=0.0.0.0"
+      - "--http.port=8545"
+      - "--http.api=eth,net,web3,txpool"
+      - "--http.corsdomain=*"
+      - "--ws"
+      - "--ws.addr=0.0.0.0"
+      - "--ws.port=8546"
+      - "--ws.origins=*"
+      - "--ws.api=web3,eth,net,txpool"
+      - "--authrpc.addr=0.0.0.0"
+      - "--authrpc.port=8551"
+      - "--authrpc.jwtsecret=/jwt/jwt.hex"
+      - "--port=30313"
+      - "--discovery.port=30313"
+      - "--max-outbound-peers=100"
+      - "--nat=extip:38.102.126.30"
+      - "--db.sync-mode=SafeNoSync"
+      - "--engine.cross-block-cache-size=65536"
+      - "--engine.memory-block-buffer-target=2"
+      - "--engine.parallel-sparse-trie"
+      - "--rpc.max-connections=600"
+      - "--rpc.gascap=18446744073709551615"
+    ports:
+      - "127.0.0.1:8547:8545"
+      - "127.0.0.1:8548:8546"
+      - "127.0.0.1:8552:8551"
+      - "30313:30313/tcp"
+      - "30313:30313/udp"
+      - "9200:9200/udp"
+    volumes:
+      - /home/peter/base/op-reth:/data
+      - /home/peter/base/jwt:/jwt
+      - /home/peter/base/config:/config
+    cpus: "56"
+    mem_limit: 112g
+    mem_reservation: 16g
+
+  op-node:
+    image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.16.6
+    container_name: base-op-node
+    restart: unless-stopped
+    depends_on:
+      - op-reth
+    entrypoint: ["op-node"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - "--network=base-mainnet"
+      - "--l2=http://op-reth:8551"
+      - "--l2.jwt-secret=/jwt/jwt.hex"
+      - "--l2.enginekind=reth"
+      - "--l1=http://host.docker.internal:8545"
+      - "--l1.beacon=http://host.docker.internal:5052"
+      - --l1.beacon-fallbacks=https://ethereum-beacon-api.publicnode.com
+      - "--l1.max-concurrency=50"
+      - "--l1.cache-size=1500"
+      - "--l1.http-poll-interval=4s"
+      - "--rpc.addr=0.0.0.0"
+      - "--rpc.port=8549"
+      - "--p2p.priv.path=/data/opnode_p2p_priv.txt"
+      - "--p2p.discovery.path=/data/opnode_discovery_db"
+      - "--p2p.peerstore.path=/data/opnode_peerstore_db"
+      - "--p2p.listen.tcp=9222"
+      - "--p2p.listen.udp=9222"
+      - "--p2p.bootnodes=enr:-J24QNz9lbrKbN4iSmmjtnr7SjUMk4zB7f1krHZcTZx-JRKZd0kA2gjufUROD6T3sOWDVDnFJRvqBBo62zuF-hYCohOGAYiOoEyEgmlkgnY0gmlwhAPniryHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQKNVFlCxh_B-716tTs-h1vMzZkSs1FTu_OYTNjgufplG4N0Y3CCJAaDdWRwgiQG,enr:-J24QH-f1wt99sfpHy4c0QJM-NfmsIfmlLAMMcgZCUEgKG_BBYFc6FwYgaMJMQN5dsRBJApIok0jFn-9CS842lGpLmqGAYiOoDRAgmlkgnY0gmlwhLhIgb2Hb3BzdGFja4OFQgCJc2VjcDI1NmsxoQJ9FTIv8B9myn1MWaC_2lJ-sMoeCDkusCsk4BYHjjCq04N0Y3CCJAaDdWRwgiQG,enr:-J24QDXyyxvQYsd0yfsN0cRr1lZ1N11zGTplMNlW4xNEc7LkPXh0NAJ9iSOVdRO95GPYAIc6xmyoCCG6_0JxdL3a0zaGAYiOoAjFgmlkgnY0gmlwhAPckbGHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQJwoS7tzwxqXSyFL7g0JM-KWVbgvjfB8JA__T7yY_cYboN0Y3CCJAaDdWRwgiQG,enr:-J24QHmGyBwUZXIcsGYMaUqGGSl4CFdx9Tozu-vQCn5bHIQbR7On7dZbU61vYvfrJr30t0iahSqhc64J46MnUO2JvQaGAYiOoCKKgmlkgnY0gmlwhAPnCzSHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQINc4fSijfbNIiGhcgvwjsjxVFJHUstK9L1T8OTKUjgloN0Y3CCJAaDdWRwgiQG,enr:-J24QG3ypT4xSu0gjb5PABCmVxZqBjVw9ca7pvsI8jl4KATYAnxBmfkaIuEqy9sKvDHKuNCsy57WwK9wTt2aQgcaDDyGAYiOoGAXgmlkgnY0gmlwhDbGmZaHb3BzdGFja4OFQgCJc2VjcDI1NmsxoQIeAK_--tcLEiu7HvoUlbV52MspE0uCocsx1f_rYvRenIN0Y3CCJAaDdWRwgiQG"
+      - "--verifier.l1-confs=4"
+      - "--rollup.load-protocol-versions=false"
+      - "--l1.beacon.fetch-all-sidecars=true"
+      - "--syncmode=consensus-layer"
+    ports:
+      - "8549:8549"
+      - "9222:9222/tcp"
+      - "9222:9222/udp"
+    volumes:
+      - /home/peter/base/op-node:/data
+      - /home/peter/base/jwt:/jwt
+      - /home/peter/base/config:/config
+    cpus: "8"
+    mem_limit: 16g
+    mem_reservation: 4g
