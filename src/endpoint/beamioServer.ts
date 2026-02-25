@@ -18,6 +18,7 @@ import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT
 const OLD_CCSA_REDIRECTS = [
 	'0x3A578f47d68a5f2C1f2930E9548E240AB8d40048',
 	'0xb6ba88045F854B713562fb7f1332D186df3B25A8', // 曾为 infrastructure CCSA
+	'0x6870acA2f4f6aBed6B10B0C8D76C75343398fd64', // 旧工厂 0x86879fE3 部署的 CCSA
 ].map(a => a.toLowerCase())
 import { masterSetup } from '../util'
 
