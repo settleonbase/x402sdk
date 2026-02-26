@@ -3419,6 +3419,8 @@ const GET_REDEEM_STATUS_BATCH_ABI = [
 const OLD_CCSA_TO_NEW = new Set([
 	'0x3A578f47d68a5f2C1f2930E9548E240AB8d40048',
 	'0xb6ba88045F854B713562fb7f1332D186df3B25A8', // 曾为 infrastructure CCSA
+	'0x6870acA2f4f6aBed6B10B0C8D76C75343398fd64', // 旧工厂部署
+	'0xA1A9f6f942dc0ED9Aa7eF5df7337bd878c2e157b', // 旧工厂 0x86879fE3 部署（已迁移至新工厂）
 ].map(a => a.toLowerCase()))
 
 function _normalizeCardAddress(addr: string): string {
@@ -4061,15 +4063,27 @@ export const payByNfcUidOpenContainer = async (params: {
 			items.push({ kind: 0, asset: USDC_BASE, amount: amountUsdc6, tokenId: '0', data: '0x' })
 		}
 		let toResolved = ethers.getAddress(payee)
-		// 若含 CCSA，收款方必须为 AA；EOA 无 AA 时链上会 revert UC_NoBeamioAccount，在此预检
+		// 若含 CCSA，收款方必须为 AA；EOA 无 AA 时为其创建 AA 后继续
 		if (ccsaPointsWei > 0n) {
 			const payeeCode = await SC.walletBase.provider!.getCode(toResolved)
 			const isPayeeEOA = !payeeCode || payeeCode === '0x'
 			if (isPayeeEOA) {
-				const payeeAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(toResolved)
+				let payeeAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(toResolved)
 				if (!payeeAA || payeeAA === ethers.ZeroAddress) {
-					logger(Colors.yellow(`[payByNfcUidOpenContainer] payee ${toResolved} is EOA with no AA, cannot receive CCSA`))
-					return { pushed: false, error: '收款方为 EOA，无法接收 CCSA 点数。请使用 Beamio AA 账户收款。' }
+					logger(Colors.cyan(`[payByNfcUidOpenContainer] payee ${toResolved} is EOA with no AA, creating AA for them...`))
+					try {
+						const { accountAddress } = await DeployingSmartAccount(toResolved, SC.aaAccountFactoryPaymaster)
+						if (!accountAddress) {
+							logger(Colors.red(`[payByNfcUidOpenContainer] DeployingSmartAccount failed for payee=${toResolved}`))
+							return { pushed: false, error: '无法为收款方创建 Beamio AA 账户，请稍后重试。' }
+						}
+						payeeAA = accountAddress
+						logger(Colors.green(`[payByNfcUidOpenContainer] created AA ${payeeAA} for payee EOA ${toResolved}`))
+					} catch (e: unknown) {
+						const msg = e instanceof Error ? e.message : String(e)
+						logger(Colors.red(`[payByNfcUidOpenContainer] DeployingSmartAccount error: ${msg}`))
+						return { pushed: false, error: `无法为收款方创建 AA：${msg}` }
+					}
 				}
 				toResolved = payeeAA
 			}
