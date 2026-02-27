@@ -3329,12 +3329,19 @@ export const createCardPoolPress = async () => {
 			if (metaPath.startsWith(metaDir + '/') || metaPath === metaDir) {
 				try {
 					if (!fs.existsSync(metaDir)) fs.mkdirSync(metaDir, { recursive: true })
+					const name = shareTokenMetadata?.name ?? 'Beamio CCSA Card'
+					const description = shareTokenMetadata?.description
+					const image = shareTokenMetadata?.image != null && shareTokenMetadata.image !== '' ? shareTokenMetadata.image : undefined
+					// 同时写顶层 name/description/image（ERC1155 与前端 getCardMetadataFromUri 期望）与 shareTokenMetadata/tiers（兼容现有逻辑）
 					const metaContent = JSON.stringify({
+						...(name && { name }),
+						...(description != null && { description }),
+						...(image && { image }),
 						...(shareTokenMetadata && {
 							shareTokenMetadata: {
-								name: shareTokenMetadata.name ?? 'Beamio CCSA Card',
-								...(shareTokenMetadata.description != null && { description: shareTokenMetadata.description }),
-								...(shareTokenMetadata.image != null && shareTokenMetadata.image !== '' && { image: shareTokenMetadata.image }),
+								name,
+								...(description != null && { description }),
+								...(image && { image }),
 							},
 						}),
 						...(tiers && tiers.length > 0 && { tiers }),
