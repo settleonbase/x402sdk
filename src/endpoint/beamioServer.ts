@@ -11,7 +11,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
@@ -1049,7 +1049,7 @@ const routing = ( router: Router ) => {
 		logger(preCheck.success ? `server /api/purchasingCard preCheck OK, forwarded to master` : `server /api/purchasingCard forwarded to master (no preChecked)`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preCheck.success }, false, 3, true))
 	})
 
-	/** createCard：集群预检 JSON，不合格 400，合格转发 master。master 不预检，直接推 createCardPool。*/
+	/** createCard：集群预检 JSON + AA→EOA 替换，不合格 400，合格转发 master。master 不预检，直接推 createCardPool。*/
 	router.post('/createCard', async (req, res) => {
 		const body = req.body as {
 			cardOwner?: string
@@ -1064,6 +1064,16 @@ const routing = ( router: Router ) => {
 		if (!preCheck.success) {
 			logger(Colors.red(`server /api/createCard preCheck FAIL: ${preCheck.error}`), inspect(body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		const originalCardOwner = preCheck.preChecked.cardOwner
+		const resolveResult = await resolveCardOwnerToEOA(providerBase, originalCardOwner)
+		if (!resolveResult.success) {
+			logger(Colors.red(`server /api/createCard AA→EOA resolve FAIL: ${resolveResult.error}`))
+			return res.status(400).json({ success: false, error: resolveResult.error }).end()
+		}
+		preCheck.preChecked.cardOwner = resolveResult.cardOwner
+		if (ethers.getAddress(resolveResult.cardOwner) !== ethers.getAddress(originalCardOwner)) {
+			logger(Colors.cyan(`server /api/createCard cardOwner was AA, replaced with EOA: ${resolveResult.cardOwner}`))
 		}
 		logger(Colors.green(`server /api/createCard preCheck OK, forwarding to master`), inspect({ cardOwner: preCheck.preChecked.cardOwner, currency: preCheck.preChecked.currency }, false, 2, true))
 		postLocalhost('/api/createCard', preCheck.preChecked, res)

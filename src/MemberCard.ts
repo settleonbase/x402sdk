@@ -3272,6 +3272,28 @@ export const createCardPreCheck = (body: {
 	return { success: true, preChecked }
 }
 
+/** Cluster 预检用：若 cardOwner 为 AA（有合约 code），替换为其 owner 的 EOA。Master 不再校验，降低负荷。 */
+export const resolveCardOwnerToEOA = async (
+	provider: ethers.Provider,
+	cardOwner: string
+): Promise<{ success: true; cardOwner: string } | { success: false; error: string }> => {
+	const addr = ethers.getAddress(cardOwner)
+	const code = await provider.getCode(addr)
+	if (!code || code === '0x' || code.length <= 2) {
+		return { success: true, cardOwner: addr }
+	}
+	try {
+		const aaContract = new ethers.Contract(addr, ['function owner() view returns (address)'], provider)
+		const eoaOwner = await aaContract.owner()
+		if (eoaOwner && ethers.isAddress(eoaOwner) && ethers.getAddress(eoaOwner) !== ethers.ZeroAddress) {
+			return { success: true, cardOwner: ethers.getAddress(eoaOwner) }
+		}
+		return { success: false, error: 'cardOwner is an AA account but owner() returned invalid address. Use EOA as cardOwner.' }
+	} catch (e: any) {
+		return { success: false, error: `cardOwner is an AA account but owner() failed: ${e?.message ?? e}` }
+	}
+}
+
 export const createCardPool: (CreateCardPreChecked & { res: Response })[] = []
 
 export const createCardPoolPress = async () => {
