@@ -32,9 +32,13 @@ services:
       - "--discovery.port=30313"
       - "--max-outbound-peers=100"
       - "--nat=extip:38.102.126.30"
+      # Base 官方执行层 bootnodes (enode 格式，来自 base/node .env.mainnet)
+      - "--bootnodes=enode://87a32fd13bd596b2ffca97020e31aef4ddcc1bbd4b95bb633d16c1329f654f34049ed240a36b449fda5e5225d70fe40bc667f53c304b71f8e68fc9d448690b51@3.231.138.188:30301,enode://ca21ea8f176adb2e229ce2d700830c844af0ea941a1d8152a9513b966fe525e809c3a6c73a2c18a12b74ed6ec4380edf91662778fe0b79f6a591236e49e176f9@184.72.129.189:30301,enode://acf4507a211ba7c1e52cdf4eef62cdc3c32e7c9c47998954f7ba024026f9a6b2150cd3f0b734d9c78e507ab70d59ba61dfe5c45e1078c7ad0775fb251d7735a2@3.220.145.177:30301,enode://8a5a5006159bf079d06a04e5eceab2a1ce6e0f721875b2a9c96905336219dbe14203d38f70f3754686a6324f786c2f9852d8c0dd3adac2d080f4db35efc678c5@3.231.11.52:30301,enode://cdadbe835308ad3557f9a1de8db411da1a260a98f8421d62da90e71da66e55e98aaa8e90aa7ce01b408a54e4bd2253d701218081ded3dbe5efbbc7b41d7cef79@54.198.153.150:30301"
+      # SafeNoSync: op-reth 支持的最激进模式，减少 fsync 让出磁盘给读
       - "--db.sync-mode=SafeNoSync"
-      - "--engine.cross-block-cache-size=65536"
-      - "--engine.memory-block-buffer-target=2"
+      - "--db.max-readers=32767"
+      - "--engine.cross-block-cache-size=131072"
+      - "--engine.memory-block-buffer-target=4"
       - "--engine.parallel-sparse-trie"
       - "--rpc.max-connections=600"
       - "--rpc.gascap=18446744073709551615"
@@ -52,13 +56,20 @@ services:
     cpus: "56"
     mem_limit: 112g
     mem_reservation: 16g
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/8551' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 60
+      start_period: 7200s
 
   op-node:
     image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.16.6
     container_name: base-op-node
     restart: unless-stopped
     depends_on:
-      - op-reth
+      op-reth:
+        condition: service_healthy
     entrypoint: ["op-node"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -69,10 +80,11 @@ services:
       - "--l2.enginekind=reth"
       - "--l1=http://host.docker.internal:8545"
       - "--l1.beacon=http://host.docker.internal:5052"
-      - --l1.beacon-fallbacks=https://ethereum-beacon-api.publicnode.com
-      - "--l1.max-concurrency=50"
-      - "--l1.cache-size=1500"
-      - "--l1.http-poll-interval=4s"
+      - "--l1.beacon-fallbacks=https://ethereum-beacon-api.publicnode.com"
+      - "--l1.max-concurrency=100"
+      - "--l1.cache-size=2500"
+      - "--l1.http-poll-interval=2s"
+      - "--l2.engine-rpc-timeout=20s"
       - "--rpc.addr=0.0.0.0"
       - "--rpc.port=8549"
       - "--p2p.priv.path=/data/opnode_p2p_priv.txt"
@@ -84,7 +96,9 @@ services:
       - "--verifier.l1-confs=4"
       - "--rollup.load-protocol-versions=false"
       - "--l1.beacon.fetch-all-sidecars=true"
+      - "--l1.trustrpc=true"
       - "--syncmode=consensus-layer"
+      - "--p2p.disable=true"
     ports:
       - "8549:8549"
       - "9222:9222/tcp"
@@ -93,6 +107,6 @@ services:
       - /home/peter/base/op-node:/data
       - /home/peter/base/jwt:/jwt
       - /home/peter/base/config:/config
-    cpus: "8"
-    mem_limit: 16g
-    mem_reservation: 4g
+    cpus: "12"
+    mem_limit: 20g
+    mem_reservation: 6g

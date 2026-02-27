@@ -530,17 +530,23 @@ export const signUSDC3009ForNfcTopup = async (
 	return await userWallet.signTypedData(domain, types, message)
 }
 
-/** NFC Topup Prepare：根据 uid/amount/currency 生成 executeForAdmin 所需的 data、deadline、nonce。供 Master nfcTopupPrepare 端点调用。 */
+/** NFC Topup Prepare：根据 uid 或 wallet/amount/currency 生成 executeForAdmin 所需的 data、deadline、nonce。wallet 用于 Scan QR 获得的 beamio URL。 */
 export const nfcTopupPreparePayload = async (params: {
-	uid: string
+	uid?: string
+	wallet?: string
 	amount: string
 	currency?: string
 }): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string } | { error: string }> => {
-	const { uid, amount, currency = 'CAD' } = params
+	const { uid, wallet, amount, currency = 'CAD' } = params
 	const amt = typeof amount === 'string' ? amount : String(amount ?? '')
 	if (!amt || Number(amt) <= 0) return { error: 'Invalid amount' }
-	const recipientEOA = await getNfcRecipientAddressByUid(uid.trim())
-	if (!recipientEOA) return { error: 'Failed to resolve recipient from uid' }
+	let recipientEOA: string | null = null
+	if (wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())) {
+		recipientEOA = ethers.getAddress(wallet.trim())
+	} else if (uid && typeof uid === 'string' && uid.trim()) {
+		recipientEOA = await getNfcRecipientAddressByUid(uid.trim())
+	}
+	if (!recipientEOA) return { error: wallet ? 'Invalid wallet address' : 'Failed to resolve recipient from uid' }
 	const cardAddr = BASE_CCSA_CARD_ADDRESS
 	const cur = (currency || 'CAD').toUpperCase()
 	let usdcAmount6: bigint

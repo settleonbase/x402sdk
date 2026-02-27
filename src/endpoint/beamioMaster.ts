@@ -1127,13 +1127,20 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce，供前端签名 */
+		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce，供前端签名。支持 uid（NFC）或 wallet（Scan QR） */
 		router.post('/nfcTopupPrepare', async (req, res) => {
-			const { uid, amount, currency } = req.body as { uid?: string; amount?: string; currency?: string }
-			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
-				return res.status(400).json({ success: false, error: 'Missing uid' })
+			const { uid, wallet, amount, currency } = req.body as { uid?: string; wallet?: string; amount?: string; currency?: string }
+			const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0
+			const hasWallet = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())
+			if (!hasUid && !hasWallet) {
+				return res.status(400).json({ success: false, error: 'Missing uid or wallet' })
 			}
-			const result = await nfcTopupPreparePayload({ uid: uid.trim(), amount: String(amount ?? ''), currency: (currency || 'CAD').trim() })
+			const result = await nfcTopupPreparePayload({
+				uid: hasUid ? uid!.trim() : undefined,
+				wallet: hasWallet ? ethers.getAddress(wallet!.trim()) : undefined,
+				amount: String(amount ?? ''),
+				currency: (currency || 'CAD').trim()
+			})
 			if ('error' in result) {
 				return res.status(400).json({ success: false, error: result.error })
 			}

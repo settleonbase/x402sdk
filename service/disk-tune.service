@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply disk I/O tuning (scheduler, read_ahead)
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/apply-disk-tune.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

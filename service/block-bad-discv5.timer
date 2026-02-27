@@ -1,0 +1,11 @@
+[Unit]
+Description=Run block-bad-discv5 every 10 seconds
+
+[Timer]
+OnBootSec=10
+OnUnitActiveSec=10
+AccuracySec=1
+Persistent=true
+
+[Install]
+WantedBy=timers.target

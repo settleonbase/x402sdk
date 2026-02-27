@@ -349,6 +349,105 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	/** POST /api/getWalletAssets - 根据 wallet 查询资产。先确定是 AA 或 EOA：若 EOA 则推算 AA，检查 AA 存在后显示该 AA 资产。用于 Scan QR 获得的 beamio URL */
+	router.post('/getWalletAssets', async (req, res) => {
+		const { wallet } = req.body as { wallet?: string }
+		logger(Colors.cyan(`[getWalletAssets] 收到请求 wallet=${wallet ?? '(undefined)'}`))
+		if (!wallet || typeof wallet !== 'string' || !wallet.trim()) {
+			const err = { ok: false, error: 'Missing wallet' }
+			logger(Colors.yellow(`[getWalletAssets] 返回 400: ${JSON.stringify(err)}`))
+			return res.status(400).json(err).end()
+		}
+		if (!ethers.isAddress(wallet)) {
+			const err = { ok: false, error: 'Invalid wallet address' }
+			return res.status(400).json(err).end()
+		}
+		try {
+			const addr = ethers.getAddress(wallet.trim())
+			const code = await providerBase.getCode(addr)
+			const isAA = code && code !== '0x' && code.length > 2
+
+			let eoa: string
+			let aaAddr: string
+
+			if (isAA) {
+				aaAddr = addr
+				const aaOwnerAbi = ['function owner() view returns (address)']
+				const aaContract = new ethers.Contract(addr, aaOwnerAbi, providerBase)
+				const owner = await aaContract.owner()
+				if (!owner || owner === ethers.ZeroAddress) {
+					const err = { ok: false, error: '该 AA 无法解析 owner' }
+					logger(Colors.yellow(`[getWalletAssets] AA 无 owner 返回 404: ${JSON.stringify(err)}`))
+					return res.status(404).json(err).end()
+				}
+				eoa = ethers.getAddress(owner)
+			} else {
+				eoa = addr
+				const aaFactoryAbi = ['function beamioAccountOf(address) view returns (address)']
+				const aaFactory = new ethers.Contract(BASE_AA_FACTORY, aaFactoryAbi, providerBase)
+				const primary = await aaFactory.beamioAccountOf(addr)
+				if (!primary || primary === ethers.ZeroAddress) {
+					const err = { ok: false, error: '该钱包未激活 Beamio 账户' }
+					logger(Colors.yellow(`[getWalletAssets] EOA 无 AA 返回 404: ${JSON.stringify(err)}`))
+					return res.status(404).json(err).end()
+				}
+				const aaCode = await providerBase.getCode(primary)
+				if (!aaCode || aaCode === '0x') {
+					const err = { ok: false, error: '该钱包未激活 Beamio 账户' }
+					logger(Colors.yellow(`[getWalletAssets] beamioAccountOf 返回的 AA 无 code 返回 404: ${JSON.stringify(err)}`))
+					return res.status(404).json(err).end()
+				}
+				aaAddr = ethers.getAddress(primary)
+			}
+
+			const cardAbi = [
+				'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+				'function currency() view returns (uint8)',
+			]
+			const usdcAbi = ['function balanceOf(address) view returns (uint256)']
+			const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+			const card = new ethers.Contract(BASE_CCSA_CARD_ADDRESS, cardAbi, providerBase)
+			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
+			const [[pointsBalance, nfts], currencyNum, usdcBalanceRaw] = await Promise.all([
+				card.getOwnershipByEOA(eoa),
+				card.currency(),
+				usdc.balanceOf(aaAddr),
+			])
+			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+			const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
+			const result = {
+				ok: true,
+				address: eoa,
+				aaAddress: aaAddr,
+				cardAddress: BASE_CCSA_CARD_ADDRESS,
+				points: ethers.formatUnits(pointsBalance, 6),
+				points6: String(pointsBalance),
+				usdcBalance: ethers.formatUnits(usdcBalanceRaw, 6),
+				cardCurrency: currency,
+				nfts: nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
+					tokenId: nft.tokenId.toString(),
+					attribute: nft.attribute.toString(),
+					tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
+					expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
+					isExpired: nft.isExpired,
+				})),
+			}
+			logger(Colors.green(`[getWalletAssets] wallet=${eoa} aa=${aaAddr} 成功`))
+			return res.status(200).json(result).end()
+		} catch (e: any) {
+			const msg = e?.shortMessage ?? e?.message ?? ''
+			const isRevert = /execution reverted|CALL_EXCEPTION|revert/i.test(String(msg))
+			if (isRevert) {
+				const err = { ok: false, error: '该钱包未激活 Beamio 账户' }
+				logger(Colors.yellow(`[getWalletAssets] 链上查询 revert 返回 404: ${JSON.stringify(err)}`))
+				return res.status(404).json(err).end()
+			}
+			const err = { ok: false, error: msg || 'Query failed' }
+			logger(Colors.red(`[getWalletAssets] failed: ${msg} 返回 500: ${JSON.stringify(err)}`))
+			return res.status(500).json(err).end()
+		}
+	})
+
 	/** POST /api/registerNfcCard - 登记 NFC 卡，Cluster 预检后转发 Master */
 	router.post('/registerNfcCard', async (req, res) => {
 		const { uid, privateKey } = req.body as { uid?: string; privateKey?: string }
@@ -377,13 +476,20 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/payByNfcUid', { uid: uid.trim(), amountUsdc6: amountUsdc6, payee: ethers.getAddress(payee) }, res)
 	})
 
-	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce */
+	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。支持 uid（NFC）或 wallet（Scan QR） */
 	router.post('/nfcTopupPrepare', async (req, res) => {
-		const { uid, amount, currency } = req.body as { uid?: string; amount?: string; currency?: string }
-		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
-			return res.status(400).json({ success: false, error: 'Missing uid' })
+		const { uid, wallet, amount, currency } = req.body as { uid?: string; wallet?: string; amount?: string; currency?: string }
+		const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0
+		const hasWallet = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())
+		if (!hasUid && !hasWallet) {
+			return res.status(400).json({ success: false, error: 'Missing uid or wallet' })
 		}
-		postLocalhost('/api/nfcTopupPrepare', { uid: uid.trim(), amount: String(amount ?? ''), currency: (currency || 'CAD').trim() }, res)
+		postLocalhost('/api/nfcTopupPrepare', {
+			uid: hasUid ? uid!.trim() : undefined,
+			wallet: hasWallet ? ethers.getAddress(wallet!.trim()) : undefined,
+			amount: String(amount ?? ''),
+			currency: (currency || 'CAD').trim()
+		}, res)
 	})
 
 	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master */

@@ -1,0 +1,11 @@
+[Unit]
+Description=Block Bad discv5 IPs from op-node logs
+After=docker.service network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/peter/base/block-bad-discv5.sh
+User=peter
+
+[Install]
+WantedBy=multi-user.target
