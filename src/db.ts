@@ -870,6 +870,53 @@ export const registerCardToDb = async (params: {
 	}
 }
 
+/** 按 card_address 查单张卡的 card_owner + metadata_json。供 Cluster GET /api/cardMetadata 用，前端 beamioApi 拉取。 */
+export const getCardByAddress = async (cardAddress: string): Promise<{ cardOwner: string; metadata: Record<string, unknown> | null } | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const addr = cardAddress.toLowerCase()
+		const { rows } = await db.query(
+			`SELECT card_owner, metadata_json FROM beamio_cards WHERE card_address = $1 LIMIT 1`,
+			[addr]
+		)
+		if (rows.length === 0) return null
+		return {
+			cardOwner: rows[0].card_owner as string,
+			metadata: rows[0].metadata_json as Record<string, unknown> | null ?? null,
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[getCardByAddress] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 按 owner 查 0x{owner}.json 的 metadata（最近一张该 owner 的卡的 metadata_json）。Cluster 服务 GET /metadata/0x{owner}.json 用，不依赖 Master 写文件。 */
+export const getCardMetadataByOwner = async (owner: string): Promise<{ shareTokenMetadata?: Record<string, unknown>; tiers?: unknown[] } | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const normalized = owner.toLowerCase().startsWith('0x') ? owner.toLowerCase() : '0x' + owner.toLowerCase()
+		const { rows } = await db.query(
+			`SELECT metadata_json FROM beamio_cards WHERE card_owner = $1 ORDER BY created_at DESC LIMIT 1`,
+			[normalized]
+		)
+		if (rows.length === 0 || rows[0].metadata_json == null) return null
+		const data = rows[0].metadata_json as Record<string, unknown>
+		return {
+			...(data.shareTokenMetadata != null && { shareTokenMetadata: data.shareTokenMetadata as Record<string, unknown> }),
+			...(Array.isArray(data.tiers) && data.tiers.length > 0 && { tiers: data.tiers }),
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[getCardMetadataByOwner] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 最新发行的前 N 张卡明细 */
 export const getLatestCards = async (limit = 20): Promise<Array<{
 	cardAddress: string

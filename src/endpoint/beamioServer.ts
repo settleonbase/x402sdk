@@ -9,7 +9,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
@@ -1574,6 +1574,25 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	/** GET /api/cardMetadata?cardAddress=0x... - 返回该卡的 card_owner + metadata_json（DB beamio_cards），供前端 beamioApi 拉取用于 Passes 展示 */
+	router.get('/cardMetadata', async (req, res) => {
+		const { cardAddress } = req.query as { cardAddress?: string }
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ error: 'Invalid cardAddress: require valid 0x address' })
+		}
+		try {
+			const row = await getCardByAddress(cardAddress)
+			if (!row) {
+				return res.status(404).json({ error: 'Card not found' })
+			}
+			res.setHeader('Content-Type', 'application/json')
+			res.json({ cardOwner: row.cardOwner, metadata: row.metadata })
+		} catch (err: any) {
+			logger(Colors.red('[cardMetadata] error:'), err?.message ?? err)
+			return res.status(500).json({ error: 'Failed to fetch card metadata' })
+		}
+	})
+
 	router.get('/deploySmartAccount', async (req,res) => {
 		const { wallet, signMessage } = req.body as {
 			wallet?: string
@@ -1712,49 +1731,26 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 	logger(`🧭 public router after serverRoute(router)`)
 
-	const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
-	const ISSUED_NFT_START_ID = 100_000_000_000n
-	/** GET /metadata/:filename - 由 cluster 处理。0x{owner}.json：若 id < 100000000000 返回 shareTokenMetadata，否则返回完整 JSON。降低 master 负荷 */
-	app.get('/metadata/:filename', (req, res) => {
+	/** GET /metadata/:filename - Cluster 独立实现，不依赖 Master 写文件。0x{owner}.json 从 DB beamio_cards 按 card_owner 查最近一条 metadata_json 返回。 */
+	app.get('/metadata/:filename', async (req, res) => {
 		const filename = req.params.filename
-		// 仅允许 0x{40hex}.json 或 {64hex}.json，防止路径穿越
-		if (!/^(0x[0-9a-fA-F]{40}|[0-9a-f]{64})\.json$/.test(filename)) {
-			return res.status(400).json({ error: 'Invalid metadata filename format' })
+		if (!/^0x[0-9a-fA-F]{40}\.json$/.test(filename)) {
+			return res.status(400).json({ error: 'Invalid metadata filename format (expected 0x{40hex}.json)' })
 		}
-		const filePath = resolve(METADATA_BASE, filename)
-		const baseResolved = resolve(METADATA_BASE)
-		if (!filePath.startsWith(baseResolved + '/') && filePath !== baseResolved) {
-			return res.status(400).json({ error: 'Invalid path' })
-		}
+		const owner = filename.slice(0, -5) // 去掉 .json
 		try {
-			const content = fs.readFileSync(filePath, 'utf-8')
-			let data: Record<string, unknown>
-			try {
-				data = JSON.parse(content) as Record<string, unknown>
-			} catch {
-				res.setHeader('Content-Type', 'application/json')
-				return res.send(content)
+			const data = await getCardMetadataByOwner(owner)
+			if (!data) {
+				return res.status(404).json({ error: 'Metadata not found' })
 			}
-			const tokenIdHex = filename.startsWith('0x') ? null : filename.replace(/\.json$/, '')
-			const tokenId = tokenIdHex ? BigInt('0x' + tokenIdHex) : null
-			const useShared = tokenId === null || tokenId < ISSUED_NFT_START_ID
-			const shared = useShared && data && typeof data.shareTokenMetadata === 'object' && data.shareTokenMetadata !== null
-			let out: Record<string, unknown>
-			if (shared) {
-				const base = data.shareTokenMetadata as Record<string, unknown>
-				out = base ? { ...base } : {}
-				if (data.tiers && Array.isArray(data.tiers) && data.tiers.length > 0) {
-					out.tiers = data.tiers
-				}
-			} else {
-				out = data
+			const base = data.shareTokenMetadata && typeof data.shareTokenMetadata === 'object' ? data.shareTokenMetadata as Record<string, unknown> : {}
+			const out: Record<string, unknown> = { ...base }
+			if (data.tiers && Array.isArray(data.tiers) && data.tiers.length > 0) {
+				out.tiers = data.tiers
 			}
 			res.setHeader('Content-Type', 'application/json')
 			res.send(JSON.stringify(out))
 		} catch (err: any) {
-			if (err?.code === 'ENOENT') {
-				return res.status(404).json({ error: 'Metadata not found' })
-			}
 			logger(Colors.red('[metadata] read error:'), err?.message ?? err)
 			return res.status(500).json({ error: 'Failed to read metadata' })
 		}
