@@ -9,7 +9,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
@@ -1765,27 +1765,43 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			} else {
 				return res.status(400).json({ error: 'Invalid NFT suffix (use 64 hex chars or decimal digits)' })
 			}
+			logger(Colors.cyan(`[metadata] GET filename=${filename} → cardAddress=${cardAddress} tokenId=${tokenId}`))
 			try {
 				if (tokenId === 0) {
 					// tokenId 0 = 卡级 metadata（Base Explorer 约定，与 uri(0) 一致）
 					const row = await getCardByAddress(cardAddress)
 					if (!row?.metadata) {
+						logger(Colors.yellow(`[metadata] tokenId=0: no card metadata for cardAddress=${cardAddress}`))
 						return res.status(404).json({ error: 'Card metadata not found' })
 					}
 					const data = row.metadata as Record<string, unknown>
 					const base = data?.shareTokenMetadata && typeof data.shareTokenMetadata === 'object' ? data.shareTokenMetadata as Record<string, unknown> : {}
 					const out: Record<string, unknown> = { ...base }
 					if (data?.tiers && Array.isArray(data.tiers) && data.tiers.length > 0) out.tiers = data.tiers
+					const body = JSON.stringify(out)
+					logger(Colors.green(`[metadata] tokenId=0 返回给 UI 的 JSON 长度=${body.length} 内容:`), body)
 					res.setHeader('Content-Type', 'application/json')
-					res.send(JSON.stringify(out))
+					res.send(body)
 					return
 				}
 				const data = await getNftTierMetadataByCardAndToken(cardAddress, tokenId)
-				if (!data) {
+				// 兼容旧数据：若按 card_address 无记录，尝试按 card_owner 查（sync 可能只写过 owner）
+				let payload = data
+				if (!payload) {
+					const row = await getCardByAddress(cardAddress)
+					if (row?.cardOwner) {
+						payload = await getNftTierMetadataByOwnerAndToken(row.cardOwner, tokenId)
+						if (payload) logger(Colors.gray(`[metadata] tokenId=${tokenId} 按 card_owner=${row.cardOwner} 回退查到`))
+					}
+				}
+				if (!payload) {
+					logger(Colors.yellow(`[metadata] tokenId=${tokenId}: DB 无记录 cardAddress=${cardAddress}`))
 					return res.status(404).json({ error: 'NFT tier metadata not found' })
 				}
+				const body = JSON.stringify(payload)
+				logger(Colors.green(`[metadata] tokenId=${tokenId} 返回给 UI 的 JSON 长度=${body.length} 内容:`), body)
 				res.setHeader('Content-Type', 'application/json')
-				res.send(JSON.stringify(data))
+				res.send(body)
 			} catch (err: any) {
 				logger(Colors.red('[metadata] NFT tier read error:'), err?.message ?? err)
 				return res.status(500).json({ error: 'Failed to read NFT tier metadata' })

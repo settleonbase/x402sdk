@@ -999,8 +999,13 @@ export const getNftTierMetadataByCardAndToken = async (cardAddress: string, toke
 			`SELECT metadata_json FROM beamio_nft_tier_metadata WHERE card_address = $1 AND token_id = $2 LIMIT 1`,
 			[normalized, tokenIdNum]
 		)
-		if (rows.length === 0 || rows[0].metadata_json == null) return null
-		return rows[0].metadata_json as Record<string, unknown>
+		if (rows.length === 0 || rows[0].metadata_json == null) {
+			logger(Colors.yellow(`[getNftTierMetadataByCardAndToken] card_address=${normalized} token_id=${tokenIdNum} rows=${rows.length} metadata_json=${rows[0]?.metadata_json == null ? 'null' : typeof rows[0]?.metadata_json}`))
+			return null
+		}
+		const out = rows[0].metadata_json as Record<string, unknown>
+		logger(Colors.cyan(`[getNftTierMetadataByCardAndToken] card_address=${normalized} token_id=${tokenIdNum} 查到 metadata 键: ${Object.keys(out || {}).join(',') || '(空对象)'}`))
+		return out
 	} catch (e: any) {
 		logger(Colors.yellow(`[getNftTierMetadataByCardAndToken] failed: ${e?.message ?? e}`))
 		return null
