@@ -3560,6 +3560,49 @@ export const cardAddAdminPreCheck = async (body: {
 	}
 }
 
+const createIssuedNftIface = new ethers.Interface([
+	'function createIssuedNft(bytes32 title, uint64 validAfter, uint64 validBefore, uint256 maxSupply, uint256 priceInCurrency6, bytes32 sharedMetadataHash)',
+])
+
+/** cardCreateIssuedNft 集群预检：校验 data 为 createIssuedNft，maxSupply>0，validBefore>=validAfter（validBefore!=0 时），card 存在。合格转发 master executeForOwner，Master 不再校验。 */
+export const cardCreateIssuedNftPreCheck = async (body: {
+	cardAddress?: string
+	data?: string
+	deadline?: number
+	nonce?: string
+	ownerSignature?: string
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, data, deadline, nonce, ownerSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
+	const expectedSelector = createIssuedNftIface.getFunction('createIssuedNft')?.selector ?? ''
+	if (data.slice(0, 10).toLowerCase() !== expectedSelector.toLowerCase()) {
+		return { success: false, error: 'Data must be createIssuedNft(bytes32,uint64,uint64,uint256,uint256,bytes32) calldata' }
+	}
+	try {
+		const decoded = createIssuedNftIface.parseTransaction({ data })
+		if (!decoded || decoded.name !== 'createIssuedNft') return { success: false, error: 'Invalid createIssuedNft calldata' }
+		const [, validAfter, validBefore, maxSupply] = decoded.args
+		const validAfterN = Number(validAfter)
+		const validBeforeN = Number(validBefore)
+		const maxSupplyN = BigInt(maxSupply)
+		if (maxSupplyN === 0n) return { success: false, error: 'maxSupply must be > 0' }
+		if (validBeforeN !== 0 && validBeforeN < validAfterN) {
+			return { success: false, error: 'validBefore must be >= validAfter when not 0' }
+		}
+		const pool = Settle_ContractPool
+		if (pool?.length) {
+			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+			const codeAtCard = await provider.getCode(cardAddress)
+			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+		}
+		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
 /** cardCreateRedeem 集群预检：校验 JSON、可选链上校验（card 存在、factoryGateway），合格返回 preChecked 供转发 master。不写链。 */
 export type CardCreateRedeemPreChecked = {
 	cardAddress: string

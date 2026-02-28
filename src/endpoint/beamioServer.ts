@@ -11,7 +11,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
@@ -1098,6 +1098,17 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardAddAdmin preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
+		postLocalhost('/api/executeForOwner', req.body, res)
+	})
+
+	/** cardCreateIssuedNft：owner 定义新发行 NFT 类型。Cluster 预检 data 为 createIssuedNft、maxSupply>0、日期合法、card 存在，合格转发 master executeForOwner，Master 代付 gas 上链 */
+	router.post('/cardCreateIssuedNft', async (req, res) => {
+		const preCheck = await cardCreateIssuedNftPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardCreateIssuedNft preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/cardCreateIssuedNft preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 

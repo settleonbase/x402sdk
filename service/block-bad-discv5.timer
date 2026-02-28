@@ -1,9 +1,9 @@
 [Unit]
-Description=Run block-bad-discv5 every 10 seconds
+Description=Run block-bad-discv5 every 30 seconds
 
 [Timer]
 OnBootSec=10
-OnUnitActiveSec=10
+OnUnitActiveSec=30
 AccuracySec=1
 Persistent=true
 
