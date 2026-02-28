@@ -29,7 +29,7 @@ import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
-import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid } from './db'
+import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getCardByAddress, upsertNftTierMetadata } from './db'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
@@ -2203,6 +2203,7 @@ export const purchasingCardProcess = async () => {
 			// Diamond: fn not found 等：syncTokenAction 未在 Diamond 上配置时发生，购点已成功，仅记账失败
 			logger(Colors.yellow(`[purchasingCardProcess] accounting non-critical (purchase succeeded): ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
 		}
+		syncNftTierMetadataForUser(cardAddress, from).catch(() => {})
 		
 		
 	} catch (error: any) {
@@ -3192,7 +3193,7 @@ export type CreateCardPreChecked = {
 	priceInCurrencyE6: string
 	uri?: string
 	shareTokenMetadata?: { name?: string; description?: string; image?: string }
-	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string }>
+	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
 }
 
 export const createCardPreCheck = (body: {
@@ -3265,6 +3266,8 @@ export const createCardPreCheck = (body: {
 					attr: typeof o.attr === 'number' ? o.attr : i,
 					...(o.name != null && { name: String(o.name) }),
 					...(o.description != null && { description: String(o.description) }),
+					...(o.image != null && typeof o.image === 'string' && { image: o.image }),
+					...(o.backgroundColor != null && typeof o.backgroundColor === 'string' && { backgroundColor: o.backgroundColor }),
 				}
 			}),
 		}),
@@ -3683,6 +3686,68 @@ export const executeForOwnerProcess = async () => {
 	}
 }
 
+/** 成员 NFT tokenId 范围（与 BeamioERC1155Logic 一致） */
+const NFT_START_ID = 100
+const ISSUED_NFT_START_ID = 100_000_000_000
+
+/**
+ * redeem/mint 成功后同步该用户在该卡上的成员 NFT 的 tier metadata 到 DB，
+ * 供 GET /metadata/0x{owner}{NFT#}.json 返回。不阻塞主流程，内部 catch 错误。
+ */
+export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: string): Promise<void> => {
+	try {
+		const SC = Settle_ContractPool[0]
+		if (!SC) return
+		const getAddressFn = SC.aaAccountFactoryPaymaster.getFunction('getAddress(address,uint256)')
+		const accountAddress = await getAddressFn(userEOA, 0n).catch(() => null) as string | null
+		if (!accountAddress || accountAddress === ethers.ZeroAddress) return
+		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, providerBase)
+		const [cardOwner, ownership] = await Promise.all([
+			card.owner(),
+			card.getOwnership(accountAddress),
+		])
+		const nfts = Array.isArray(ownership) ? (ownership[1] ?? []) : (ownership?.nfts ?? [])
+		if (nfts.length === 0) return
+		const cardMeta = await getCardByAddress(cardAddress)
+		if (!cardMeta?.metadata?.tiers || !Array.isArray(cardMeta.metadata.tiers)) return
+		const tiers = cardMeta.metadata.tiers as Array<{ index?: number; minUsdc6?: string; attr?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
+		const shareTokenMetadata = cardMeta.metadata.shareTokenMetadata as { name?: string; description?: string; image?: string } | undefined
+		const cardOwnerStr = typeof cardOwner === 'string' ? cardOwner : String(cardOwner)
+		for (let i = 0; i < nfts.length; i++) {
+			const nft = nfts[i] as { tokenId: bigint | number; tierIndexOrMax?: bigint | number }
+			const tokenId = Number(nft.tokenId)
+			if (tokenId < NFT_START_ID || tokenId >= ISSUED_NFT_START_ID) continue
+			const tierIndexRaw = nft.tierIndexOrMax != null ? Number(nft.tierIndexOrMax) : 0
+			// type(uint256).max 表示无 tier，用 0 或跳过
+			const tierIndex = (tierIndexRaw >= tiers.length || !Number.isFinite(tierIndexRaw)) ? 0 : tierIndexRaw
+			const tier = tiers[tierIndex]
+			const name = tier?.name ?? shareTokenMetadata?.name ?? 'Beamio Member NFT'
+			const description = tier?.description ?? shareTokenMetadata?.description ?? ''
+			const image = tier?.image ?? shareTokenMetadata?.image
+			// EIP-1155 Metadata URI JSON Schema：name/description/image 为顶层；tier 等放入 properties 供浏览器展示 traits
+			await upsertNftTierMetadata({
+				cardAddress,
+				cardOwner: cardOwnerStr,
+				tokenId,
+				metadataJson: {
+					name,
+					description: description ?? '',
+					...(image && { image }),
+					properties: {
+						tier_index: tierIndex,
+						...(tier?.minUsdc6 != null && { min_usdc6: tier.minUsdc6 }),
+						...(tier?.name && { tier_name: tier.name }),
+						...(tier?.description != null && { tier_description: tier.description }),
+						...(tier?.backgroundColor != null && tier.backgroundColor !== '' && { background_color: tier.backgroundColor }),
+					},
+				},
+			})
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[syncNftTierMetadataForUser] card=${cardAddress} user=${userEOA} failed: ${e?.message ?? e}`))
+	}
+}
+
 /**
  * cardRedeemProcess：用户输入 redeem 码，服务端调用 factory.redeemForUser，将点数 mint 到用户 AA。
  */
@@ -3750,6 +3815,7 @@ export const cardRedeemProcess = async () => {
 			cardRedeemIndexerAccountingProcess().catch((err: any) => {
 				logger(Colors.red('[cardRedeemIndexerAccountingProcess] unhandled:'), err?.message ?? err)
 			})
+			syncNftTierMetadataForUser(obj.cardAddress, obj.toUserEOA).catch(() => {})
 			if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, tx: txHash }).end()
 		}
 	} catch (e: any) {

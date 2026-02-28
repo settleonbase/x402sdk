@@ -9,7 +9,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByOwnerAndToken} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
@@ -1737,11 +1737,50 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 	logger(`🧭 public router after serverRoute(router)`)
 
-	/** GET /metadata/:filename - Cluster 独立实现，不依赖 Master 写文件。0x{owner}.json 从 DB beamio_cards 按 card_owner 查最近一条 metadata_json 返回。 */
+	/** GET /metadata/:filename - Cluster 独立实现。支持三种格式：
+	 *  1) 0x{40hex}.json → 卡级 metadata（getCardMetadataByOwner）
+	 *  2) 0x{40hex}{64hex}.json → EIP-1155 标准：tokenId 为 64 位十六进制（Base Explorer 等）
+	 *  3) 0x{40hex}{decimal}.json → 现有十进制 NFT#（如 0x...100.json）
+	 */
 	app.get('/metadata/:filename', async (req, res) => {
 		const filename = req.params.filename
+		// 格式 2/3：0x + 40 hex + (64 hex 或 十进制) + .json
+		const nftMetaMatch = filename.match(/^(0x[0-9a-fA-F]{40})([0-9a-fA-F]+)\.json$/)
+		if (nftMetaMatch) {
+			const owner = nftMetaMatch[1]
+			const suffix = nftMetaMatch[2]
+			let tokenId: number
+			if (suffix.length === 64 && /^[0-9a-fA-F]{64}$/.test(suffix)) {
+				// EIP-1155 标准：64 位十六进制 tokenId（小写/无 0x 前缀）
+				tokenId = Number(BigInt('0x' + suffix))
+				if (!Number.isSafeInteger(tokenId) || tokenId < 0) {
+					return res.status(400).json({ error: 'Token ID from 64-hex out of safe range' })
+				}
+			} else if (/^[0-9]+$/.test(suffix)) {
+				// 现有十进制 NFT#
+				tokenId = parseInt(suffix, 10)
+				if (!Number.isInteger(tokenId) || tokenId < 0) {
+					return res.status(400).json({ error: 'Invalid NFT number in filename' })
+				}
+			} else {
+				return res.status(400).json({ error: 'Invalid NFT suffix (use 64 hex chars or decimal digits)' })
+			}
+			try {
+				const data = await getNftTierMetadataByOwnerAndToken(owner, tokenId)
+				if (!data) {
+					return res.status(404).json({ error: 'NFT tier metadata not found' })
+				}
+				res.setHeader('Content-Type', 'application/json')
+				res.send(JSON.stringify(data))
+			} catch (err: any) {
+				logger(Colors.red('[metadata] NFT tier read error:'), err?.message ?? err)
+				return res.status(500).json({ error: 'Failed to read NFT tier metadata' })
+			}
+			return
+		}
+		// 格式 1：0x{40hex}.json
 		if (!/^0x[0-9a-fA-F]{40}\.json$/.test(filename)) {
-			return res.status(400).json({ error: 'Invalid metadata filename format (expected 0x{40hex}.json)' })
+			return res.status(400).json({ error: 'Invalid metadata filename format (expected 0x{40hex}.json, 0x{40hex}{64hex}.json, or 0x{40hex}{NFT#}.json)' })
 		}
 		const owner = filename.slice(0, -5) // 去掉 .json
 		try {

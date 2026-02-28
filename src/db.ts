@@ -693,6 +693,17 @@ const BEAMIO_NFT_MINT_METADATA_TABLE = `CREATE TABLE IF NOT EXISTS beamio_nft_mi
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
+/** beamio_nft_tier_metadata 表：按 (card_owner, token_id) 存储每张成员 NFT 的 tier metadata，供 GET /metadata/0x{owner}{NFT#}.json 返回 */
+const BEAMIO_NFT_TIER_METADATA_TABLE = `CREATE TABLE IF NOT EXISTS beamio_nft_tier_metadata (
+	id SERIAL PRIMARY KEY,
+	card_owner TEXT NOT NULL,
+	token_id BIGINT NOT NULL,
+	card_address TEXT NOT NULL,
+	metadata_json JSONB NOT NULL,
+	created_at TIMESTAMPTZ DEFAULT NOW(),
+	UNIQUE(card_owner, token_id)
+)`
+
 /** nfc_cards 表：NTAG 424 DNA 登记卡，uid 为 NFC 卡 UID，private_key 为关联私钥（仅服务端使用，不返回客户端） */
 const NFC_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS nfc_cards (
 	id SERIAL PRIMARY KEY,
@@ -829,7 +840,7 @@ export const registerCardToDb = async (params: {
 	priceInCurrencyE6: string
 	uri?: string
 	shareTokenMetadata?: { name?: string; description?: string; image?: string }
-	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string }>
+	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
 	txHash?: string
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
@@ -919,6 +930,57 @@ export const getCardMetadataByOwner = async (owner: string): Promise<{ shareToke
 		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[getCardMetadataByOwner] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 写入或更新单张成员 NFT 的 tier metadata（card_owner + token_id 唯一）。由 mint/redeem 成功后 sync 调用。 */
+export const upsertNftTierMetadata = async (params: {
+	cardAddress: string
+	cardOwner: string
+	tokenId: number | bigint
+	metadataJson: Record<string, unknown>
+}): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_NFT_TIER_METADATA_TABLE)
+		const tokenIdNum = Number(params.tokenId)
+		await db.query(
+			`
+			INSERT INTO beamio_nft_tier_metadata (card_owner, token_id, card_address, metadata_json)
+			VALUES ($1, $2, $3, $4::jsonb)
+			ON CONFLICT (card_owner, token_id) DO UPDATE SET
+				card_address = EXCLUDED.card_address,
+				metadata_json = EXCLUDED.metadata_json
+			`,
+			[params.cardOwner.toLowerCase(), tokenIdNum, params.cardAddress.toLowerCase(), JSON.stringify(params.metadataJson)]
+		)
+		logger(Colors.cyan(`[upsertNftTierMetadata] card_owner=${params.cardOwner} token_id=${tokenIdNum}`))
+	} catch (e: any) {
+		logger(Colors.yellow(`[upsertNftTierMetadata] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 按 0x{owner}{NFT#}.json 的 owner 与 tokenId 查询该 NFT 的 tier metadata。Cluster GET /metadata/0x{owner}{NFT#}.json 用。 */
+export const getNftTierMetadataByOwnerAndToken = async (cardOwner: string, tokenId: number | bigint): Promise<Record<string, unknown> | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const normalized = cardOwner.toLowerCase().startsWith('0x') ? cardOwner.toLowerCase() : '0x' + cardOwner.toLowerCase()
+		const tokenIdNum = Number(tokenId)
+		const { rows } = await db.query<{ metadata_json: unknown }>(
+			`SELECT metadata_json FROM beamio_nft_tier_metadata WHERE card_owner = $1 AND token_id = $2 LIMIT 1`,
+			[normalized, tokenIdNum]
+		)
+		if (rows.length === 0 || rows[0].metadata_json == null) return null
+		return rows[0].metadata_json as Record<string, unknown>
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNftTierMetadataByOwnerAndToken] failed: ${e?.message ?? e}`))
 		return null
 	} finally {
 		await db.end().catch(() => {})
