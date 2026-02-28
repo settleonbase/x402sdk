@@ -18,13 +18,16 @@ const CURRENCY_TO_ENUM: Record<ICurrency, number> = {
   TWD: 8,
 }
 
-/** 构建以 owner 为 key 的 metadata URI，NFT # < ISSUED_NFT_START_ID 共用同一 metadata */
+/** 统一 metadata base（ERC-1155 / Base Explorer 约定）。合约 uri() 重写为 0x{address(this)}{id}.json，此处仅作 constructor 占位。 */
+const BEAMIO_METADATA_BASE_URI = 'https://api.beamio.io/metadata/'
+
+/** 构建以 owner 为 key 的 metadata URI（旧格式，仅兼容 0x{owner}.json 的卡级拉取）。新卡应使用合约重写后的唯一 URL。 */
 export const buildOwnerMetadataUri = (owner: string) =>
   `https://api.beamio.io/metadata/0x${ethers.getAddress(owner).slice(2).toLowerCase()}.json`
 
 /**
  * 人类可读的 initCode 构造项：不传原始 initCode 时，由 createBeamioCardWithFactory 内部根据这些项组合生成。
- * - uri: BeamioUserCard 的 metadata URI，默认 https://api.beamio.io/metadata/0x{owner}.json
+ * - uri: BeamioUserCard 的 metadata base（合约内重写 uri() 为 0x{合约地址}{id}.json，此处仅作 constructor 占位），默认 BEAMIO_METADATA_BASE_URI
  * - gateway: 工厂/gateway 地址，默认使用当前 factory 合约地址
  */
 export type CreateBeamioCardInitCodeOptions = {
@@ -194,7 +197,7 @@ export async function createBeamioCardWithFactory(
     initCode = initCodeOrOptions
   } else {
     const gateway = initCodeOrOptions.gateway ?? (typeof factory.getAddress === 'function' ? await factory.getAddress() : (factory as unknown as { address: string }).address)
-    const uri = initCodeOrOptions.uri ?? buildOwnerMetadataUri(cardOwner)
+    const uri = initCodeOrOptions.uri ?? BEAMIO_METADATA_BASE_URI
     initCode = await buildBeamioUserCardInitCodeFromParams(uri, currencyEnum, priceE6, cardOwner, gateway)
   }
 
@@ -313,7 +316,7 @@ export async function createBeamioCardWithFactoryReturningHash(
     initCode = initCodeOrOptions
   } else {
     const gateway = initCodeOrOptions.gateway ?? (typeof factory.getAddress === 'function' ? await factory.getAddress() : (factory as unknown as { address: string }).address)
-    const uri = initCodeOrOptions.uri ?? buildOwnerMetadataUri(cardOwner)
+    const uri = initCodeOrOptions.uri ?? BEAMIO_METADATA_BASE_URI
     initCode = await buildBeamioUserCardInitCodeFromParams(uri, currencyEnum, priceE6, cardOwner, gateway)
   }
 

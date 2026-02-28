@@ -9,7 +9,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByOwnerAndToken} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
@@ -1737,17 +1737,17 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 	logger(`🧭 public router after serverRoute(router)`)
 
-	/** GET /metadata/:filename - Cluster 独立实现。支持三种格式：
-	 *  1) 0x{40hex}.json → 卡级 metadata（getCardMetadataByOwner）
-	 *  2) 0x{40hex}{64hex}.json → EIP-1155 标准：tokenId 为 64 位十六进制（Base Explorer 等）
-	 *  3) 0x{40hex}{decimal}.json → 现有十进制 NFT#（如 0x...100.json）
+	/** GET /metadata/:filename - 唯一统一约定（Base Explorer / EIP-1155）：
+	 *  仅支持 0x{40hex}{suffix}.json，40hex = ERC-1155 合约（卡）地址，suffix = tokenId（十进制或 64 位十六进制）。
+	 *  tokenId=0 返回卡级 metadata（getCardByAddress），否则返回该 NFT tier metadata（getNftTierMetadataByCardAndToken）。
+	 *  兼容旧格式 0x{40hex}.json（40hex 视为 owner，getCardMetadataByOwner）用于卡级拉取。
 	 */
 	app.get('/metadata/:filename', async (req, res) => {
 		const filename = req.params.filename
-		// 格式 2/3：0x + 40 hex + (64 hex 或 十进制) + .json
+		// 格式 2/3：0x + 40 hex + (64 hex 或 十进制) + .json → 按 ERC-1155 约定，40hex 为合约（卡）地址
 		const nftMetaMatch = filename.match(/^(0x[0-9a-fA-F]{40})([0-9a-fA-F]+)\.json$/)
 		if (nftMetaMatch) {
-			const owner = nftMetaMatch[1]
+			const cardAddress = nftMetaMatch[1]
 			const suffix = nftMetaMatch[2]
 			let tokenId: number
 			if (suffix.length === 64 && /^[0-9a-fA-F]{64}$/.test(suffix)) {
@@ -1757,7 +1757,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 					return res.status(400).json({ error: 'Token ID from 64-hex out of safe range' })
 				}
 			} else if (/^[0-9]+$/.test(suffix)) {
-				// 现有十进制 NFT#
+				// 十进制 NFT#（如 101）
 				tokenId = parseInt(suffix, 10)
 				if (!Number.isInteger(tokenId) || tokenId < 0) {
 					return res.status(400).json({ error: 'Invalid NFT number in filename' })
@@ -1766,7 +1766,21 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 				return res.status(400).json({ error: 'Invalid NFT suffix (use 64 hex chars or decimal digits)' })
 			}
 			try {
-				const data = await getNftTierMetadataByOwnerAndToken(owner, tokenId)
+				if (tokenId === 0) {
+					// tokenId 0 = 卡级 metadata（Base Explorer 约定，与 uri(0) 一致）
+					const row = await getCardByAddress(cardAddress)
+					if (!row?.metadata) {
+						return res.status(404).json({ error: 'Card metadata not found' })
+					}
+					const data = row.metadata as Record<string, unknown>
+					const base = data?.shareTokenMetadata && typeof data.shareTokenMetadata === 'object' ? data.shareTokenMetadata as Record<string, unknown> : {}
+					const out: Record<string, unknown> = { ...base }
+					if (data?.tiers && Array.isArray(data.tiers) && data.tiers.length > 0) out.tiers = data.tiers
+					res.setHeader('Content-Type', 'application/json')
+					res.send(JSON.stringify(out))
+					return
+				}
+				const data = await getNftTierMetadataByCardAndToken(cardAddress, tokenId)
 				if (!data) {
 					return res.status(404).json({ error: 'NFT tier metadata not found' })
 				}

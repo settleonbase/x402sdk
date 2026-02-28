@@ -988,6 +988,27 @@ export const getNftTierMetadataByOwnerAndToken = async (cardOwner: string, token
 	}
 }
 
+/** 按 ERC-1155 合约地址 + tokenId 查询该 NFT 的 tier metadata。GET /metadata/0x{cardAddress}{tokenId}.json 用，符合 Base Explorer / EIP-1155 约定（40hex 为合约地址）。 */
+export const getNftTierMetadataByCardAndToken = async (cardAddress: string, tokenId: number | bigint): Promise<Record<string, unknown> | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const normalized = cardAddress.toLowerCase().startsWith('0x') ? cardAddress.toLowerCase() : '0x' + cardAddress.toLowerCase()
+		const tokenIdNum = Number(tokenId)
+		const { rows } = await db.query<{ metadata_json: unknown }>(
+			`SELECT metadata_json FROM beamio_nft_tier_metadata WHERE card_address = $1 AND token_id = $2 LIMIT 1`,
+			[normalized, tokenIdNum]
+		)
+		if (rows.length === 0 || rows[0].metadata_json == null) return null
+		return rows[0].metadata_json as Record<string, unknown>
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNftTierMetadataByCardAndToken] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 最新发行的前 N 张卡明细 */
 export const getLatestCards = async (limit = 20): Promise<Array<{
 	cardAddress: string
