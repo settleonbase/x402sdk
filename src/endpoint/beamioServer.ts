@@ -1577,18 +1577,24 @@ const routing = ( router: Router ) => {
 	/** GET /api/cardMetadata?cardAddress=0x... - 返回该卡的 card_owner + metadata_json（DB beamio_cards），供前端 beamioApi 拉取用于 Passes 展示 */
 	router.get('/cardMetadata', async (req, res) => {
 		const { cardAddress } = req.query as { cardAddress?: string }
+		logger(Colors.cyan(`[cardMetadata] GET cardAddress=${cardAddress ?? '(missing)'}`))
 		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			logger(Colors.yellow('[cardMetadata] 400: invalid or missing cardAddress'))
 			return res.status(400).json({ error: 'Invalid cardAddress: require valid 0x address' })
 		}
+		const normalizedAddr = ethers.getAddress(cardAddress).toLowerCase()
+		logger(Colors.cyan(`[cardMetadata] normalized card_address=${normalizedAddr}, querying DB...`))
 		try {
 			const row = await getCardByAddress(cardAddress)
 			if (!row) {
+				logger(Colors.yellow(`[cardMetadata] 404: no row in beamio_cards for card_address=${normalizedAddr}`))
 				return res.status(404).json({ error: 'Card not found' })
 			}
+			logger(Colors.green(`[cardMetadata] 200: card_owner=${row.cardOwner}`))
 			res.setHeader('Content-Type', 'application/json')
 			res.json({ cardOwner: row.cardOwner, metadata: row.metadata })
 		} catch (err: any) {
-			logger(Colors.red('[cardMetadata] error:'), err?.message ?? err)
+			logger(Colors.red('[cardMetadata] 500 error:'), err?.message ?? err)
 			return res.status(500).json({ error: 'Failed to fetch card metadata' })
 		}
 	})

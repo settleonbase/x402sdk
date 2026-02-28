@@ -876,11 +876,19 @@ export const getCardByAddress = async (cardAddress: string): Promise<{ cardOwner
 	try {
 		await db.connect()
 		const addr = cardAddress.toLowerCase()
+		logger(Colors.cyan(`[getCardByAddress] SELECT WHERE card_address = '${addr}'`))
 		const { rows } = await db.query(
 			`SELECT card_owner, metadata_json FROM beamio_cards WHERE card_address = $1 LIMIT 1`,
 			[addr]
 		)
-		if (rows.length === 0) return null
+		logger(Colors.cyan(`[getCardByAddress] rows=${rows.length}`))
+		if (rows.length === 0) {
+			// debug: 查表里是否有任意记录，以及 card_address 的格式
+			const countResult = await db.query(`SELECT COUNT(*) as c FROM beamio_cards`)
+			const sampleResult = await db.query(`SELECT card_address FROM beamio_cards LIMIT 3`)
+			logger(Colors.yellow(`[getCardByAddress] beamio_cards total rows=${(countResult.rows[0] as any)?.c ?? '?'}, sample card_addresses: ${JSON.stringify((sampleResult.rows as any[])?.map((r: any) => r?.card_address) ?? [])}`))
+			return null
+		}
 		return {
 			cardOwner: rows[0].card_owner as string,
 			metadata: rows[0].metadata_json as Record<string, unknown> | null ?? null,
