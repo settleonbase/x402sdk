@@ -959,6 +959,7 @@ export const upsertNftTierMetadata = async (params: {
 			[params.cardOwner.toLowerCase(), tokenIdNum, params.cardAddress.toLowerCase(), JSON.stringify(params.metadataJson)]
 		)
 		logger(Colors.cyan(`[upsertNftTierMetadata] card_owner=${params.cardOwner} token_id=${tokenIdNum}`))
+		logger(Colors.gray(`[upsertNftTierMetadata] metadata_json: ${JSON.stringify(params.metadataJson, null, 2)}`))
 	} catch (e: any) {
 		logger(Colors.yellow(`[upsertNftTierMetadata] failed: ${e?.message ?? e}`))
 	} finally {
