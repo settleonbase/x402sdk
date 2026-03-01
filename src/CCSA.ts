@@ -25,6 +25,43 @@ const BEAMIO_METADATA_BASE_URI = 'https://api.beamio.io/metadata/'
 export const buildOwnerMetadataUri = (owner: string) =>
   `https://api.beamio.io/metadata/0x${ethers.getAddress(owner).slice(2).toLowerCase()}.json`
 
+/** createCardCollectionWithInitCode 可能 revert 的 custom errors（Factory / Deployer / BeamioUserCard），用于解析链上返回的 data */
+const CREATE_CARD_ERROR_IFACE = new ethers.Interface([
+  'error DEP_NotFactory()',
+  'error DEP_InvalidFactory()',
+  'error DEP_NotOwner()',
+  'error BM_DeployFailed()',
+  'error BM_ZeroAddress()',
+  'error F_BadDeployedCard()',
+  'error F_AlreadyRegistered()',
+  'error UC_GlobalMisconfigured()',
+  'error UC_ResolveAccountFailed(address eoa, address aaFactory, address acct)',
+  'error UC_UnauthorizedGateway()',
+  'error UC_RedeemModuleZero()',
+])
+
+/**
+ * 解析 createCard 链上 revert 的 data，返回可读的 error 名称（及参数），便于日志定位原因。
+ * 若无法解析则返回 null。
+ */
+function parseCreateCardRevertData(data: string | Uint8Array | undefined): string | null {
+  if (data == null) return null
+  const hex = typeof data === 'string' ? data : (data instanceof Uint8Array ? ethers.hexlify(data) : null)
+  if (!hex || !hex.startsWith('0x') || hex.length < 10) return null
+  try {
+    const parsed = CREATE_CARD_ERROR_IFACE.parseError(hex)
+    if (!parsed) return null
+    const name = parsed.name
+    const args = parsed.args
+    if (args && args.length > 0) {
+      return `${name}(${args.map((a: unknown) => String(a)).join(', ')})`
+    }
+    return name
+  } catch {
+    return null
+  }
+}
+
 /**
  * 人类可读的 initCode 构造项：不传原始 initCode 时，由 createBeamioCardWithFactory 内部根据这些项组合生成。
  * - uri: BeamioUserCard 的 metadata base（合约内重写 uri() 为 0x{合约地址}{id}.json，此处仅作 constructor 占位），默认 BEAMIO_METADATA_BASE_URI
@@ -250,12 +287,19 @@ export async function createBeamioCardWithFactory(
     )
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
-    if (err?.code === 'CALL_EXCEPTION' && (err?.shortMessage === 'missing revert data' || !err?.reason)) {
+    const revertData = err?.data ?? (e as { data?: string | Uint8Array }).data ?? (e as { info?: { error?: { data?: string } } }).info?.error?.data
+    const decoded = parseCreateCardRevertData(revertData)
+    const isCallException = err?.code === 'CALL_EXCEPTION'
+    const noUsefulReason = !decoded && (err?.shortMessage === 'missing revert data' || !err?.reason || (err?.message && err.message.includes('unknown custom error')))
+    if (isCallException && (noUsefulReason || decoded)) {
+      const reasonLine = decoded ? `链上 revert: ${decoded}` : 'RPC 未返回具体原因'
+      const dataStr = revertData != null ? (typeof revertData === 'string' ? revertData : ethers.hexlify(revertData)) : ''
       throw new Error(
-        'createCardCollectionWithInitCode 链上执行 revert（RPC 未返回具体原因）。常见原因：\n' +
+        `createCardCollectionWithInitCode 链上执行 revert（${reasonLine}）。常见原因：\n` +
           '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
           '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
           '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（F_BadDeployedCard）。\n' +
+          (dataStr ? `原始 data: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
           `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
       )
     }
@@ -366,12 +410,19 @@ export async function createBeamioCardWithFactoryReturningHash(
     )
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
-    if (err?.code === 'CALL_EXCEPTION' && (err?.shortMessage === 'missing revert data' || !err?.reason)) {
+    const revertData = err?.data ?? (e as { data?: string | Uint8Array }).data ?? (e as { info?: { error?: { data?: string } } }).info?.error?.data
+    const decoded = parseCreateCardRevertData(revertData)
+    const isCallException = err?.code === 'CALL_EXCEPTION'
+    const noUsefulReason = !decoded && (err?.shortMessage === 'missing revert data' || !err?.reason || (err?.message && err.message.includes('unknown custom error')))
+    if (isCallException && (noUsefulReason || decoded)) {
+      const reasonLine = decoded ? `链上 revert: ${decoded}` : 'RPC 未返回具体原因'
+      const dataStr = revertData != null ? (typeof revertData === 'string' ? revertData : ethers.hexlify(revertData)) : ''
       throw new Error(
-        'createCardCollectionWithInitCode 链上执行 revert（RPC 未返回具体原因）。常见原因：\n' +
+        `createCardCollectionWithInitCode 链上执行 revert（${reasonLine}）。常见原因：\n` +
           '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
           '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
           '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（F_BadDeployedCard）。\n' +
+          (dataStr ? `原始 data: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
           `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
       )
     }
