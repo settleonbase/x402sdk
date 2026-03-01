@@ -414,19 +414,26 @@ const routing = ( router: Router ) => {
 							}
 						} catch (_) { /* ignore */ }
 					}
-					cards.push({
-						cardAddress: cardAddr,
-						cardName,
-						cardType,
-						points: ethers.formatUnits(pointsBalance, 6),
-						points6: String(pointsBalance),
-						cardCurrency: currency,
-						...(cardBackground != null && { cardBackground }),
-						...(cardImage != null && { cardImage }),
-						...(tierName != null && { tierName }),
-						...(tierDescription != null && { tierDescription }),
-						nfts: nftList,
-					})
+					// 当卡中资产为零且无 NFT# > 0 时，不组装进 cards
+					const hasPoints = pointsBalance > 0n
+					const hasNftGt0 = nftList.some((n: { tokenId: string }) => Number(n.tokenId) > 0)
+					if (hasPoints || hasNftGt0) {
+						cards.push({
+							cardAddress: cardAddr,
+							cardName,
+							cardType,
+							points: ethers.formatUnits(pointsBalance, 6),
+							points6: String(pointsBalance),
+							cardCurrency: currency,
+							...(cardBackground != null && { cardBackground }),
+							...(cardImage != null && { cardImage }),
+							...(tierName != null && { tierName }),
+							...(tierDescription != null && { tierDescription }),
+							nfts: nftList,
+						})
+					} else {
+						logger(Colors.gray(`[getUIDAssets] card=${cardAddr} skip: zero points and no NFT# > 0`))
+					}
 				} catch (cardErr: any) {
 					logger(Colors.gray(`[getUIDAssets] card=${cardAddr} skip: ${cardErr?.message ?? cardErr}`))
 				}
