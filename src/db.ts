@@ -840,7 +840,7 @@ export const registerCardToDb = async (params: {
 	priceInCurrencyE6: string
 	uri?: string
 	shareTokenMetadata?: { name?: string; description?: string; image?: string }
-	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
+	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
 	txHash?: string
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })

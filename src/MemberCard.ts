@@ -3206,7 +3206,7 @@ export type CreateCardPreChecked = {
 	priceInCurrencyE6: string
 	uri?: string
 	shareTokenMetadata?: { name?: string; description?: string; image?: string }
-	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
+	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
 }
 
 export const createCardPreCheck = (body: {
@@ -3262,6 +3262,9 @@ export const createCardPreCheck = (body: {
 			if (o.attr != null && typeof o.attr !== 'number') {
 				return { success: false, error: `tiers[${i}].attr must be number` }
 			}
+			if (o.upgradeByBalance != null && typeof o.upgradeByBalance !== 'boolean') {
+				return { success: false, error: `tiers[${i}].upgradeByBalance must be boolean if provided` }
+			}
 		}
 	}
 	const preChecked: CreateCardPreChecked = {
@@ -3281,6 +3284,7 @@ export const createCardPreCheck = (body: {
 					...(o.description != null && { description: String(o.description) }),
 					...(o.image != null && typeof o.image === 'string' && { image: o.image }),
 					...(o.backgroundColor != null && typeof o.backgroundColor === 'string' && { backgroundColor: o.backgroundColor }),
+					...(typeof o.upgradeByBalance === 'boolean' && { upgradeByBalance: o.upgradeByBalance }),
 				}
 			}),
 		}),
