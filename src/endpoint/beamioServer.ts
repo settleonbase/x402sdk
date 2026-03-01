@@ -288,7 +288,7 @@ const routing = ( router: Router ) => {
 		return res.status(200).json(result).end()
 	})
 
-	/** POST /api/getUIDAssets - 根据 UID 查询 NFC 卡资产（多卡：CCSA + 基础设施卡 + USDC 余额），Cluster 直接处理。每张卡按用户拥有的最佳 NFT 的 tier metadata 返回 cardBackground（供 Android 等多端展示）。 */
+	/** POST /api/getUIDAssets - 根据 UID 查询 NFC 卡资产（多卡：CCSA + 基础设施卡 + USDC 余额），Cluster 直接处理。uid 支持 NFC 卡 UID 或 beamioTab（Scan QR 的 beamio 参数，按 AccountRegistry 账户名解析 EOA）。每张卡按用户拥有的最佳 NFT 的 tier metadata 返回 cardBackground（供 Android 等多端展示）。 */
 	router.post('/getUIDAssets', async (req, res) => {
 		const { uid } = req.body as { uid?: string }
 		logger(Colors.cyan(`[getUIDAssets] 收到请求 uid=${uid ?? '(undefined)'}`))
@@ -299,7 +299,17 @@ const routing = ( router: Router ) => {
 		}
 		const uidTrim = uid.trim()
 		try {
-			const eoaRaw = await getNfcRecipientAddressByUid(uidTrim)
+			let eoaRaw = await getNfcRecipientAddressByUid(uidTrim)
+			if (!eoaRaw) {
+				// beamioTab：Scan QR 的 beamio 参数，按 AccountRegistry 账户名解析 EOA
+				try {
+					const owner = await SC.getOwnerByAccountName(uidTrim)
+					if (owner && owner !== ethers.ZeroAddress) {
+						eoaRaw = owner
+						logger(Colors.gray(`[getUIDAssets] uid=${uidTrim} 按 beamioTab 解析到 EOA=${eoaRaw.slice(0, 10)}...`))
+					}
+				} catch (_) { /* 非账户名，忽略 */ }
+			}
 			if (!eoaRaw) {
 				const err = { ok: false, error: '该卡没有被登记' }
 				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 卡未登记 返回 404: ${JSON.stringify(err)}`))
