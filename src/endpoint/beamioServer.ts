@@ -12,7 +12,7 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
 const OLD_CCSA_REDIRECTS = [
@@ -283,7 +283,7 @@ const routing = ( router: Router ) => {
 		return res.status(200).json(result).end()
 	})
 
-	/** POST /api/getUIDAssets - 根据 UID 查询 NFC 卡资产（CCSA 点数 + USDC 余额），Cluster 直接处理，不转发 Master */
+	/** POST /api/getUIDAssets - 根据 UID 查询 NFC 卡资产（多卡：CCSA + 基础设施卡 + USDC 余额），Cluster 直接处理。每张卡按用户拥有的最佳 NFT 的 tier metadata 返回 cardBackground（供 Android 等多端展示）。 */
 	router.post('/getUIDAssets', async (req, res) => {
 		const { uid } = req.body as { uid?: string }
 		logger(Colors.cyan(`[getUIDAssets] 收到请求 uid=${uid ?? '(undefined)'}`))
@@ -294,11 +294,10 @@ const routing = ( router: Router ) => {
 		}
 		const uidTrim = uid.trim()
 		try {
-			/** 与 nfcTopup 一致：优先 nfc_cards 表，无则从 mnemonic 派生（否则 topup 成功但 getUIDAssets 仍报卡未登记） */
 			const eoaRaw = await getNfcRecipientAddressByUid(uidTrim)
 			if (!eoaRaw) {
 				const err = { ok: false, error: '该卡没有被登记' }
-				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 卡未登记（nfc_cards 无记录且 mnemonic 派生失败）返回 404: ${JSON.stringify(err)}`))
+				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 卡未登记 返回 404: ${JSON.stringify(err)}`))
 				return res.status(404).json(err).end()
 			}
 			const eoa = ethers.getAddress(eoaRaw)
@@ -308,39 +307,85 @@ const routing = ( router: Router ) => {
 			]
 			const usdcAbi = ['function balanceOf(address) view returns (uint256)']
 			const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
-			const card = new ethers.Contract(BASE_CCSA_CARD_ADDRESS, cardAbi, providerBase)
 			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
-			const [[pointsBalance, nfts], currencyNum, usdcBalanceRaw] = await Promise.all([
-				card.getOwnershipByEOA(eoa),
-				card.currency(),
-				usdc.balanceOf(eoa),
-			])
+			const usdcBalanceRaw = await usdc.balanceOf(eoa)
+			const usdcBalance = ethers.formatUnits(usdcBalanceRaw, 6)
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
-			const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
+			const cardAddresses: { address: string; name: string; type: string }[] = [
+				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
+				{ address: BEAMIO_USER_CARD_ASSET_ADDRESS, name: 'CashTrees Card', type: 'infrastructure' },
+			]
+			const cards: Array<{
+				cardAddress: string
+				cardName: string
+				cardType: string
+				points: string
+				points6: string
+				cardCurrency: string
+				cardBackground?: string
+				nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }>
+			}> = []
+			for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
+				try {
+					const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
+					const [ [pointsBalance, nfts], currencyNum ] = await Promise.all([
+						card.getOwnershipByEOA(eoa),
+						card.currency(),
+					])
+					const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
+					const nftList = nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
+						tokenId: nft.tokenId.toString(),
+						attribute: nft.attribute.toString(),
+						tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
+						expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
+						isExpired: nft.isExpired,
+					}))
+					// 用户拥有的最佳 NFT（tokenId 最大且 > 0）对应的 tier metadata 中的 background 用于卡片背景
+					let cardBackground: string | undefined
+					const withTokenId = nftList.filter((n: { tokenId: string }) => Number(n.tokenId) > 0)
+					const bestNft = withTokenId.length > 0
+						? withTokenId.reduce((a: { tokenId: string }, b: { tokenId: string }) => (Number(b.tokenId) > Number(a.tokenId) ? b : a))
+						: null
+					if (bestNft) {
+						try {
+							const tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestNft.tokenId)
+							if (tierMeta && typeof tierMeta === 'object') {
+								const props = tierMeta.properties as Record<string, unknown> | undefined
+								const bg = (props?.background_color ?? tierMeta.background_color) as string | undefined
+								if (bg && typeof bg === 'string' && bg.trim()) {
+									cardBackground = bg.trim().startsWith('#') ? bg.trim() : `#${bg.trim().replace(/^#/, '')}`
+								}
+							}
+						} catch (_) { /* ignore */ }
+					}
+					cards.push({
+						cardAddress: cardAddr,
+						cardName,
+						cardType,
+						points: ethers.formatUnits(pointsBalance, 6),
+						points6: String(pointsBalance),
+						cardCurrency: currency,
+						...(cardBackground != null && { cardBackground }),
+						nfts: nftList,
+					})
+				} catch (cardErr: any) {
+					logger(Colors.gray(`[getUIDAssets] card=${cardAddr} skip: ${cardErr?.message ?? cardErr}`))
+				}
+			}
 			const result = {
 				ok: true,
 				address: eoa,
-				cardAddress: BASE_CCSA_CARD_ADDRESS,
-				points: ethers.formatUnits(pointsBalance, 6),
-				points6: String(pointsBalance),
-				usdcBalance: ethers.formatUnits(usdcBalanceRaw, 6),
-				cardCurrency: currency,
-				nfts: nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
-					tokenId: nft.tokenId.toString(),
-					attribute: nft.attribute.toString(),
-					tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
-					expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
-					isExpired: nft.isExpired,
-				})),
+				usdcBalance,
+				cards,
 			}
-			logger(Colors.green(`[getUIDAssets] uid=${uidTrim} 成功: ${JSON.stringify(result)}`))
+			logger(Colors.green(`[getUIDAssets] uid=${uidTrim} 成功 cards=${cards.length}`))
 			return res.status(200).json(result).end()
 		} catch (e: any) {
 			const msg = e?.shortMessage ?? e?.message ?? ''
 			const isRevert = /execution reverted|CALL_EXCEPTION|revert/i.test(String(msg))
 			if (isRevert) {
 				const err = { ok: false, error: '该卡没有被登记' }
-				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 链上查询 revert（账户未激活或不存在）返回 404: ${JSON.stringify(err)}`))
+				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 链上查询 revert 返回 404: ${JSON.stringify(err)}`))
 				return res.status(404).json(err).end()
 			}
 			const err = { ok: false, error: msg || 'Query failed' }
