@@ -323,6 +323,7 @@ const routing = ( router: Router ) => {
 				points6: string
 				cardCurrency: string
 				cardBackground?: string
+				cardImage?: string
 				tierName?: string
 				tierDescription?: string
 				nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }>
@@ -342,8 +343,9 @@ const routing = ( router: Router ) => {
 						expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
 						isExpired: nft.isExpired,
 					}))
-					// 用户拥有的最佳 NFT（tokenId 最大且 > 0）用于 tier 显示与 background
+					// 用户拥有的最佳 NFT（tokenId 最大且 > 0）用于 tier 显示与 background/image
 					let cardBackground: string | undefined
+					let cardImage: string | undefined
 					let tierName: string | undefined
 					let tierDescription: string | undefined
 					const withTokenId = nftList.filter((n: { tokenId: string }) => Number(n.tokenId) > 0)
@@ -365,6 +367,8 @@ const routing = ( router: Router ) => {
 								if (bg && typeof bg === 'string' && bg.trim()) {
 									cardBackground = bg.trim().startsWith('#') ? bg.trim() : `#${bg.trim().replace(/^#/, '')}`
 								}
+								const img = (props?.image ?? tierMeta.image) as string | undefined
+								if (img && typeof img === 'string' && img.trim()) cardImage = img.trim()
 								tierName = (props?.tier_name ?? tierMeta.name) as string | undefined
 								if (tierName && typeof tierName === 'string' && tierName.trim()) tierName = tierName.trim()
 								else tierName = undefined
@@ -375,8 +379,8 @@ const routing = ( router: Router ) => {
 								logger(Colors.gray(`[getUIDAssets] card=${cardAddr} tokenId=${bestNft.tokenId} 无 NFT tier metadata，将尝试从卡级 tiers 取 background`))
 							}
 							// 无 NFT tier metadata 时，用卡级 metadata 的 tiers 数组。按 BeamioUserCard.Tier.minUsdc6 升序排序，低的一档（minUsdc6 最小）为 sorted[0]；Default/Max 对应该低档。
-							if ((!tierName || !tierDescription || !cardBackground) && cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
-								const tiersRaw = cardRow.metadata.tiers as Array<{ index?: number; minUsdc6?: string; name?: string; description?: string; backgroundColor?: string }>
+							if ((!tierName || !tierDescription || !cardBackground || !cardImage) && cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
+								const tiersRaw = cardRow.metadata.tiers as Array<{ index?: number; minUsdc6?: string; name?: string; description?: string; image?: string; backgroundColor?: string }>
 								const minUsdc6Num = (t: { minUsdc6?: string }) => {
 									const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
 									const n = parseInt(s, 10)
@@ -391,6 +395,7 @@ const routing = ( router: Router ) => {
 								if (t) {
 									if (!tierName && t.name && String(t.name).trim()) tierName = String(t.name).trim()
 									if (!tierDescription && t.description && String(t.description).trim()) tierDescription = String(t.description).trim()
+									if (!cardImage && t.image && String(t.image).trim()) cardImage = String(t.image).trim()
 									// 卡级 tiers 中若有 backgroundColor，作为 cardBackground 兜底（当无 NFT tier metadata 时）
 									if (!cardBackground && t.backgroundColor && String(t.backgroundColor).trim()) {
 										const bg = String(t.backgroundColor).trim()
@@ -411,6 +416,7 @@ const routing = ( router: Router ) => {
 						points6: String(pointsBalance),
 						cardCurrency: currency,
 						...(cardBackground != null && { cardBackground }),
+						...(cardImage != null && { cardImage }),
 						...(tierName != null && { tierName }),
 						...(tierDescription != null && { tierDescription }),
 						nfts: nftList,
