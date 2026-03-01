@@ -164,6 +164,27 @@ const getLocalhost = (path: string, res: Response) => {
 	req.end()
 }
 
+/** POST 请求转发到 master 并返回 body（用于需修改响应的场景） */
+const postLocalhostBuffer = (path: string, obj: any): Promise<{ statusCode: number; body: string }> =>
+	new Promise((resolve, reject) => {
+		const opts: RequestOptions = {
+			hostname: 'localhost',
+			path,
+			port: masterServerPort,
+			method: 'POST',
+			protocol: 'http:',
+			headers: { 'Content-Type': 'application/json' }
+		}
+		const req = request(opts, (masterRes) => {
+			let buf = ''
+			masterRes.on('data', (c) => { buf += c })
+			masterRes.on('end', () => resolve({ statusCode: masterRes.statusCode ?? 500, body: buf }))
+		})
+		req.on('error', (e) => reject(e))
+		req.write(jsonStringifyWithBigInt(obj))
+		req.end()
+	})
+
 /** GET 请求转发到 master 并返回 body（用于缓存） */
 const getLocalhostBuffer = (path: string): Promise<{ statusCode: number; body: string }> =>
 	new Promise((resolve, reject) => {
@@ -613,24 +634,46 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/payByNfcUid', { uid: uid.trim(), amountUsdc6: amountUsdc6, payee: ethers.getAddress(payee) }, res)
 	})
 
-	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）或 wallet（Scan QR）。 */
+	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）、wallet（Scan QR）或 beamioTag（Scan QR 的 beamio 参数，按 AccountRegistry 解析 EOA）。 */
 	router.post('/nfcTopupPrepare', async (req, res) => {
-		const { uid, wallet, amount, currency, cardAddress } = req.body as { uid?: string; wallet?: string; amount?: string; currency?: string; cardAddress?: string }
+		const { uid, wallet, beamioTag, amount, currency, cardAddress } = req.body as { uid?: string; wallet?: string; beamioTag?: string; amount?: string; currency?: string; cardAddress?: string }
 		const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0
-		const hasWallet = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())
+		let resolvedWallet: string | undefined = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim()) ? ethers.getAddress(wallet.trim()) : undefined
+		const hasBeamioTag = beamioTag && typeof beamioTag === 'string' && beamioTag.trim().length > 0
+		if (hasBeamioTag && !resolvedWallet) {
+			try {
+				const owner = await SC.getOwnerByAccountName(beamioTag!.trim())
+				if (owner && owner !== ethers.ZeroAddress) {
+					resolvedWallet = ethers.getAddress(owner)
+					logger(Colors.gray(`[nfcTopupPrepare] beamioTag=${beamioTag!.trim()} 解析到 wallet=${resolvedWallet.slice(0, 10)}...`))
+				}
+			} catch (_) { /* 非账户名，忽略 */ }
+		}
+		const hasWallet = !!resolvedWallet
 		if (!hasUid && !hasWallet) {
-			return res.status(400).json({ success: false, error: 'Missing uid or wallet' })
+			return res.status(400).json({ success: false, error: hasBeamioTag ? 'beamioTag 无法解析到有效钱包' : 'Missing uid or wallet' })
 		}
 		if (!cardAddress || typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress.trim())) {
 			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' })
 		}
-		postLocalhost('/api/nfcTopupPrepare', {
+		const forwardBody = {
 			uid: hasUid ? uid!.trim() : undefined,
-			wallet: hasWallet ? ethers.getAddress(wallet!.trim()) : undefined,
+			wallet: resolvedWallet,
 			amount: String(amount ?? ''),
 			currency: (currency || 'CAD').trim(),
 			cardAddress: ethers.getAddress(cardAddress.trim())
-		}, res)
+		}
+		try {
+			const { statusCode, body } = await postLocalhostBuffer('/api/nfcTopupPrepare', forwardBody)
+			const parsed = JSON.parse(body)
+			if (resolvedWallet && hasBeamioTag && parsed.cardAddr && !parsed.error) {
+				parsed.wallet = resolvedWallet
+			}
+			res.status(statusCode).json(parsed).end()
+		} catch (e: any) {
+			logger(Colors.red(`[nfcTopupPrepare] forward failed: ${e?.message ?? e}`))
+			res.status(502).json({ success: false, error: `Forward to master failed: ${e?.message ?? e}` }).end()
+		}
 	})
 
 	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master */
