@@ -14,6 +14,11 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
 
+/** 服务器返回时强制屏蔽的旧基础设施卡地址 */
+const DEPRECATED_INFRA_CARDS = new Set([
+	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
+])
+
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
 const OLD_CCSA_REDIRECTS = [
 	'0x3A578f47d68a5f2C1f2930E9548E240AB8d40048',
@@ -314,7 +319,7 @@ const routing = ( router: Router ) => {
 			const cardAddresses: { address: string; name: string; type: string }[] = [
 				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
 				{ address: BEAMIO_USER_CARD_ASSET_ADDRESS, name: 'CashTrees Card', type: 'infrastructure' },
-			]
+			].filter(({ address }) => !DEPRECATED_INFRA_CARDS.has(address.toLowerCase()))
 			const cards: Array<{
 				cardAddress: string
 				cardName: string
@@ -427,12 +432,15 @@ const routing = ( router: Router ) => {
 				}
 			}
 
+			// 双保险：即使上游误传，也不向客户端返回已废弃基础设施卡数据
+			const cardsFiltered = cards.filter((c) => !DEPRECATED_INFRA_CARDS.has(c.cardAddress.toLowerCase()))
+
 
 			const result = {
 				ok: true,
 				address: eoa,
 				usdcBalance,
-				cards,
+				cards: cardsFiltered,
 			}
 			// Debug: 返回客户端的完整 JSON，便于排查 Android 端为何未解析/使用 cardBackground
 			const resultJson = JSON.stringify(result, null, 2)
