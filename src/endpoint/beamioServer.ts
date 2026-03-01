@@ -349,6 +349,7 @@ const routing = ( router: Router ) => {
 					let tierName: string | undefined
 					let tierDescription: string | undefined
 					const withTokenId = nftList.filter((n: { tokenId: string }) => Number(n.tokenId) > 0)
+					logger(Colors.gray(`[getUIDAssets] card=${cardAddr} withTokenId=${withTokenId.length} withTokenIds=${withTokenId.map((n: { tokenId: string }) => n.tokenId).join(',')}`))
 					const bestNft = withTokenId.length > 0
 						? withTokenId.reduce((a: { tokenId: string; tier: string }, b: { tokenId: string; tier: string }) => (Number(b.tokenId) > Number(a.tokenId) ? b : a))
 						: null
@@ -425,6 +426,8 @@ const routing = ( router: Router ) => {
 					logger(Colors.gray(`[getUIDAssets] card=${cardAddr} skip: ${cardErr?.message ?? cardErr}`))
 				}
 			}
+
+
 			const result = {
 				ok: true,
 				address: eoa,
