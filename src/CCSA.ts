@@ -310,7 +310,8 @@ export async function createBeamioCardWithFactory(
           '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
           '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（F_BadDeployedCard）。\n' +
           (hint ? hint : '') +
-          (dataStr ? `原始 data: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
+          (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
+          (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
           `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
       )
     }
@@ -435,7 +436,8 @@ export async function createBeamioCardWithFactoryReturningHash(
           '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
           '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（F_BadDeployedCard）。\n' +
           (hint ? hint : '') +
-          (dataStr ? `原始 data: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
+          (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
+          (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
           `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
       )
     }
