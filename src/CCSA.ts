@@ -62,6 +62,15 @@ function parseCreateCardRevertData(data: string | Uint8Array | undefined): strin
   }
 }
 
+/** 当 decoded 为 BM_DeployFailed 时追加的排查说明（CREATE 失败 = 卡 constructor revert 或 gas 不足） */
+function createCardRevertHint(decoded: string | null): string {
+  if (decoded !== 'BM_DeployFailed') return ''
+  return (
+    '【BM_DeployFailed】CREATE 失败（create 返回 0），通常为：① 卡 constructor 内 revert（如 gateway 无 code → UC_GlobalMisconfigured）；② gas 不足。' +
+    '请确认 initCode 中 gateway 为当前 Factory 地址且该地址在 Base 上有 code，并确认 x402sdk 使用的 BeamioUserCardArtifact 与链上预期一致。\n'
+  )
+}
+
 /**
  * 人类可读的 initCode 构造项：不传原始 initCode 时，由 createBeamioCardWithFactory 内部根据这些项组合生成。
  * - uri: BeamioUserCard 的 metadata base（合约内重写 uri() 为 0x{合约地址}{id}.json，此处仅作 constructor 占位），默认 BEAMIO_METADATA_BASE_URI
@@ -294,11 +303,13 @@ export async function createBeamioCardWithFactory(
     if (isCallException && (noUsefulReason || decoded)) {
       const reasonLine = decoded ? `链上 revert: ${decoded}` : 'RPC 未返回具体原因'
       const dataStr = revertData != null ? (typeof revertData === 'string' ? revertData : ethers.hexlify(revertData)) : ''
+      const hint = createCardRevertHint(decoded)
       throw new Error(
         `createCardCollectionWithInitCode 链上执行 revert（${reasonLine}）。常见原因：\n` +
           '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
           '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
           '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（F_BadDeployedCard）。\n' +
+          (hint ? hint : '') +
           (dataStr ? `原始 data: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
           `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
       )
@@ -417,11 +428,13 @@ export async function createBeamioCardWithFactoryReturningHash(
     if (isCallException && (noUsefulReason || decoded)) {
       const reasonLine = decoded ? `链上 revert: ${decoded}` : 'RPC 未返回具体原因'
       const dataStr = revertData != null ? (typeof revertData === 'string' ? revertData : ethers.hexlify(revertData)) : ''
+      const hint = createCardRevertHint(decoded)
       throw new Error(
         `createCardCollectionWithInitCode 链上执行 revert（${reasonLine}）。常见原因：\n` +
           '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
           '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
           '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（F_BadDeployedCard）。\n' +
+          (hint ? hint : '') +
           (dataStr ? `原始 data: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
           `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
       )
