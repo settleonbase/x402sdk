@@ -6,7 +6,7 @@ export const BASE_AA_FACTORY = '0xD86403DD1755F7add19540489Ea10cdE876Cc1CE'
 
 /**
  * Base 主网 BeamioUserCard 工厂地址 (BeamioUserCardFactoryPaymasterV07)。
- * 与 config/base-addresses.ts 一致。
+ * 与 config/base-addresses.ts CARD_FACTORY 一致；x402sdk 内所有 Factory 引用均使用本常量。
  */
 export const BASE_CARD_FACTORY = '0x19C000c00e6A2b254b39d16797930431E310BEdd'
 
