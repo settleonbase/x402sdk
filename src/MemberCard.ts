@@ -720,6 +720,12 @@ export const executeForAdminProcess = async () => {
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
 		}
+		// Android NFC topup（mintPointsByAdmin）成功后同步该用户在该卡上的成员 NFT tier metadata，与普通 topup/redeem 一致：按 minUsdc6 排序、Default/Max 对应低档、写入 backgroundColor 等 1155 JSON
+		if (recipientEOA && obj.cardAddr) {
+			syncNftTierMetadataForUser(obj.cardAddr, recipientEOA).catch((err: any) => {
+				logger(Colors.yellow(`[executeForAdminProcess] syncNftTierMetadataForUser after nfcTopup: ${err?.message ?? err}`))
+			})
+		}
 	} catch (e: any) {
 		logger(Colors.red(`[executeForAdminProcess] failed: ${e?.message ?? e}`))
 		if (obj.res && !obj.res.headersSent) {
@@ -3785,7 +3791,7 @@ const ISSUED_NFT_START_ID = 100_000_000_000
 
 /**
  * redeem/mint 成功后同步该用户在该卡上的成员 NFT 的 tier metadata 到 DB，
- * 供 GET /metadata/0x{owner}{NFT#}.json 返回。不阻塞主流程，内部 catch 错误。
+ * 供 GET /metadata/0x{owner}{NFT#}.json 返回。tier 选取与 getUIDAssets 一致：按 minUsdc6 升序排序，Default/Max 对应低档（tiersSorted[0]）；写入 1155 JSON 含 name/description/image/backgroundColor。
  */
 export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: string): Promise<void> => {
 	try {
@@ -3803,7 +3809,13 @@ export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: s
 		if (nfts.length === 0) return
 		const cardMeta = await getCardByAddress(cardAddress)
 		if (!cardMeta?.metadata?.tiers || !Array.isArray(cardMeta.metadata.tiers)) return
-		const tiers = cardMeta.metadata.tiers as Array<{ index?: number; minUsdc6?: string; attr?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
+		const tiersRaw = cardMeta.metadata.tiers as Array<{ index?: number; minUsdc6?: string; attr?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
+		const minUsdc6Num = (t: { minUsdc6?: string }) => {
+			const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
+			const n = parseInt(s, 10)
+			return Number.isNaN(n) ? Infinity : n
+		}
+		const tiersSorted = [...tiersRaw].sort((a, b) => minUsdc6Num(a) - minUsdc6Num(b))
 		const shareTokenMetadata = cardMeta.metadata.shareTokenMetadata as { name?: string; description?: string; image?: string } | undefined
 		const cardOwnerStr = typeof cardOwner === 'string' ? cardOwner : String(cardOwner)
 		for (let i = 0; i < nfts.length; i++) {
@@ -3811,13 +3823,14 @@ export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: s
 			const tokenId = Number(nft.tokenId)
 			if (tokenId < NFT_START_ID || tokenId >= ISSUED_NFT_START_ID) continue
 			const tierIndexRaw = nft.tierIndexOrMax != null ? Number(nft.tierIndexOrMax) : 0
-			// type(uint256).max 表示无 tier，用 0 或跳过
-			const tierIndex = (tierIndexRaw >= tiers.length || !Number.isFinite(tierIndexRaw)) ? 0 : tierIndexRaw
-			const tier = tiers[tierIndex]
+			const isDefaultMax = !Number.isFinite(tierIndexRaw) || tierIndexRaw >= tiersRaw.length
+			const tier = isDefaultMax ? tiersSorted[0] : tiersRaw[tierIndexRaw]
+			const tierIndexForProps = isDefaultMax ? 0 : tierIndexRaw
 			const name = tier?.name ?? shareTokenMetadata?.name ?? 'Beamio Member NFT'
 			const description = tier?.description ?? shareTokenMetadata?.description ?? ''
 			const image = tier?.image ?? shareTokenMetadata?.image
-			// EIP-1155 Metadata URI JSON Schema：name/description/image 为顶层；tier 等放入 properties 供浏览器展示 traits
+			const backgroundColor = tier?.backgroundColor != null && String(tier.backgroundColor).trim() !== '' ? String(tier.backgroundColor).trim() : undefined
+			const bgFormatted = backgroundColor ? (backgroundColor.startsWith('#') ? backgroundColor : `#${backgroundColor.replace(/^#/, '')}`) : undefined
 			await upsertNftTierMetadata({
 				cardAddress,
 				cardOwner: cardOwnerStr,
@@ -3826,12 +3839,13 @@ export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: s
 					name,
 					description: description ?? '',
 					...(image && { image }),
+					...(bgFormatted != null && { background_color: bgFormatted }),
 					properties: {
-						tier_index: tierIndex,
+						tier_index: tierIndexForProps,
 						...(tier?.minUsdc6 != null && { min_usdc6: tier.minUsdc6 }),
 						...(tier?.name && { tier_name: tier.name }),
 						...(tier?.description != null && { tier_description: tier.description }),
-						...(tier?.backgroundColor != null && tier.backgroundColor !== '' && { background_color: tier.backgroundColor }),
+						...(bgFormatted != null && { background_color: bgFormatted }),
 					},
 				},
 			})

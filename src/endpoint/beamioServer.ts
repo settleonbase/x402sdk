@@ -371,10 +371,12 @@ const routing = ( router: Router ) => {
 								tierDescription = (props?.tier_description ?? tierMeta.description) as string | undefined
 								if (tierDescription && typeof tierDescription === 'string' && tierDescription.trim()) tierDescription = tierDescription.trim()
 								else tierDescription = undefined
+							} else if (bestNft && !tierMeta) {
+								logger(Colors.gray(`[getUIDAssets] card=${cardAddr} tokenId=${bestNft.tokenId} 无 NFT tier metadata，将尝试从卡级 tiers 取 background`))
 							}
 							// 无 NFT tier metadata 时，用卡级 metadata 的 tiers 数组。按 BeamioUserCard.Tier.minUsdc6 升序排序，低的一档（minUsdc6 最小）为 sorted[0]；Default/Max 对应该低档。
-							if ((!tierName || !tierDescription) && cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
-								const tiersRaw = cardRow.metadata.tiers as Array<{ index?: number; minUsdc6?: string; name?: string; description?: string }>
+							if ((!tierName || !tierDescription || !cardBackground) && cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
+								const tiersRaw = cardRow.metadata.tiers as Array<{ index?: number; minUsdc6?: string; name?: string; description?: string; backgroundColor?: string }>
 								const minUsdc6Num = (t: { minUsdc6?: string }) => {
 									const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
 									const n = parseInt(s, 10)
@@ -389,6 +391,12 @@ const routing = ( router: Router ) => {
 								if (t) {
 									if (!tierName && t.name && String(t.name).trim()) tierName = String(t.name).trim()
 									if (!tierDescription && t.description && String(t.description).trim()) tierDescription = String(t.description).trim()
+									// 卡级 tiers 中若有 backgroundColor，作为 cardBackground 兜底（当无 NFT tier metadata 时）
+									if (!cardBackground && t.backgroundColor && String(t.backgroundColor).trim()) {
+										const bg = String(t.backgroundColor).trim()
+										cardBackground = bg.startsWith('#') ? bg : `#${bg.replace(/^#/, '')}`
+										logger(Colors.gray(`[getUIDAssets] card=${cardAddr} 使用卡级 tier backgroundColor: ${cardBackground}`))
+									}
 								}
 								if (!tierName && (bestNft.tier === 'Default/Max' || tierIndexChain === 0)) tierName = 'Default'
 								else if (!tierName) tierName = `Tier ${tierIndexChain + 1}`
