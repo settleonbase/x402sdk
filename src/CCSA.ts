@@ -125,7 +125,8 @@ export async function createBeamioCard(
     cardOwner,
     currencyEnum,
     priceE6,
-    initCode
+    initCode,
+    { gasLimit: 4_000_000 }
   )
   const receipt = await tx.wait()
   if (!receipt) throw new Error('Transaction failed')
@@ -292,7 +293,8 @@ export async function createBeamioCardWithFactory(
       cardOwner,
       currencyEnum,
       priceE6,
-      initCode
+      initCode,
+      { gasLimit: 4_000_000 }
     )
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
@@ -418,7 +420,8 @@ export async function createBeamioCardWithFactoryReturningHash(
       cardOwner,
       currencyEnum,
       priceE6,
-      initCode
+      initCode,
+      { gasLimit: 4_000_000 }
     )
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }

@@ -3507,8 +3507,8 @@ export const getRedeemStatusBatchApi = async (
 		byCard.set(normalized, arr)
 	}
 	try {
-		// 仅使用 CoNET 节点访问 Base RPC（HTTP），不使用 base 官方或其他节点
-		const baseRpcUrl = getBaseRpcUrlViaConetNode()
+		// 优先使用 CoNET 节点访问 Base RPC；若该节点返回 404（如 /base-rpc 不存在）则回退到 base_endpoint / 公网 RPC
+		let baseRpcUrl = getBaseRpcUrlViaConetNode()
 		if (!baseRpcUrl) {
 			const nodeCount = getGuardianNodesCount()
 			logger(Colors.yellow('[getRedeemStatusBatchApi] no CoNET nodes, skip RPC'), {
@@ -3519,17 +3519,33 @@ export const getRedeemStatusBatchApi = async (
 			items.forEach(({ hash }) => { result[hash] = 'pending' })
 			return result
 		}
+		const fallbackRpcUrl = BASE_RPC_URL
 		const baseNetwork = { name: 'base', chainId: 8453 } as const
-		const provider = new ethers.JsonRpcProvider(baseRpcUrl, baseNetwork, { staticNetwork: true })
-		for (const [cardAddress, cardItems] of byCard) {
-			const card = new ethers.Contract(cardAddress, GET_REDEEM_STATUS_BATCH_ABI, provider)
-			const hashes = cardItems.map((i) =>
-				i.hash.length === 66 && i.hash.startsWith('0x') ? (i.hash as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(i.hash))
-			)
-			const [activeList] = await card.getRedeemStatusBatch(hashes)
-			cardItems.forEach((it, idx) => {
-				result[it.hash] = _decodeRedeemStatusApi(activeList[idx])
-			})
+
+		const runWithProvider = async (url: string) => {
+			const provider = new ethers.JsonRpcProvider(url, baseNetwork, { staticNetwork: true })
+			for (const [cardAddress, cardItems] of byCard) {
+				const card = new ethers.Contract(cardAddress, GET_REDEEM_STATUS_BATCH_ABI, provider)
+				const hashes = cardItems.map((i) =>
+					i.hash.length === 66 && i.hash.startsWith('0x') ? (i.hash as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(i.hash))
+				)
+				const [activeList] = await card.getRedeemStatusBatch(hashes)
+				cardItems.forEach((it, idx) => {
+					result[it.hash] = _decodeRedeemStatusApi(activeList[idx])
+				})
+			}
+		}
+
+		try {
+			await runWithProvider(baseRpcUrl)
+		} catch (firstErr: any) {
+			const is404OrServerError = firstErr?.code === 'SERVER_ERROR' || firstErr?.info?.responseStatus === 404 || (String(firstErr?.info?.responseStatus ?? '').includes('404')) || (firstErr?.message && String(firstErr.message).includes('404'))
+			if (is404OrServerError && fallbackRpcUrl && fallbackRpcUrl !== baseRpcUrl) {
+				logger(Colors.yellow('[getRedeemStatusBatchApi] CoNET node RPC failed, retry with fallback'), { url: baseRpcUrl, fallback: fallbackRpcUrl })
+				await runWithProvider(fallbackRpcUrl)
+			} else {
+				throw firstErr
+			}
 		}
 	} catch (e: any) {
 		logger(Colors.red('[getRedeemStatusBatchApi] RPC error:'), e?.message ?? e)
