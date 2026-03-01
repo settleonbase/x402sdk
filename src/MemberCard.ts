@@ -120,6 +120,70 @@ masterSetup.settle_contractAdmin.forEach((n: string) => {
 
 })
 
+/**
+ * 启动时确保 ~/.master.json 的 settle_contractAdmin 地址都被登记为 Card Factory paymaster(admin)。
+ * - 幂等：已存在则跳过
+ * - 仅 owner 可写：自动在本地签名池中寻找 factory owner 对应钱包执行 changePaymasterStatus
+ */
+const ensureSettleAdminsAsCardFactoryAdmins = async (): Promise<void> => {
+	try {
+		if (!Settle_ContractPool.length) {
+			logger(Colors.yellow('[factory-admin-init] skip: Settle_ContractPool is empty'))
+			return
+		}
+
+		const readOnlyFactory = new ethers.Contract(
+			BeamioUserCardFactoryPaymasterV2,
+			BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
+			providerBaseBackup
+		)
+
+		const ownerOnChain = String(await readOnlyFactory.owner()).toLowerCase()
+		const ownerSC = Settle_ContractPool.find(sc => sc.walletBase.address.toLowerCase() === ownerOnChain)
+		if (!ownerSC) {
+			logger(
+				Colors.yellow(
+					`[factory-admin-init] skip: factory owner ${ownerOnChain} not found in settle_contractAdmin list`
+				)
+			)
+			return
+		}
+
+		for (const sc of Settle_ContractPool) {
+			const adminAddr = sc.walletBase.address
+			const adminLower = adminAddr.toLowerCase()
+			// owner 默认具备 onlyPaymaster 权限，不需要写入 isPaymaster
+			if (adminLower === ownerOnChain) {
+				continue
+			}
+
+			let isPaymaster = false
+			try {
+				isPaymaster = !!(await readOnlyFactory.isPaymaster(adminAddr))
+			} catch (e: any) {
+				logger(Colors.red(`[factory-admin-init] isPaymaster(${adminAddr}) failed: ${e?.message ?? e}`))
+				continue
+			}
+
+			if (isPaymaster) {
+				continue
+			}
+
+			try {
+				const tx = await ownerSC.baseFactoryPaymaster.changePaymasterStatus(adminAddr, true)
+				await tx.wait()
+				logger(Colors.green(`[factory-admin-init] added paymaster(admin): ${adminAddr}`))
+			} catch (e: any) {
+				logger(Colors.red(`[factory-admin-init] add paymaster(admin) failed for ${adminAddr}: ${e?.message ?? e}`))
+			}
+		}
+	} catch (e: any) {
+		logger(Colors.red(`[factory-admin-init] unexpected error: ${e?.message ?? e}`))
+	}
+}
+
+void ensureSettleAdminsAsCardFactoryAdmins()
+
 
 
 
