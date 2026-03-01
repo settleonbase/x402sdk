@@ -348,7 +348,14 @@ const routing = ( router: Router ) => {
 						: null
 					if (bestNft) {
 						try {
-							const tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestNft.tokenId)
+							let tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestNft.tokenId)
+							if (!tierMeta) {
+								const cardRow = await getCardByAddress(cardAddr)
+								if (cardRow?.cardOwner) {
+									tierMeta = await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, bestNft.tokenId)
+									if (tierMeta) logger(Colors.gray(`[getUIDAssets] card=${cardAddr} tokenId=${bestNft.tokenId} 按 card_owner 回退查到 tier metadata`))
+								}
+							}
 							if (tierMeta && typeof tierMeta === 'object') {
 								const props = tierMeta.properties as Record<string, unknown> | undefined
 								const bg = (props?.background_color ?? tierMeta.background_color) as string | undefined
