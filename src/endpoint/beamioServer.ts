@@ -385,6 +385,9 @@ const routing = ( router: Router ) => {
 				usdcBalance,
 				cards,
 			}
+			// Debug: 返回客户端的完整 JSON，便于排查 Android 端为何未解析/使用 cardBackground
+			const resultJson = JSON.stringify(result, null, 2)
+			logger(Colors.cyan(`[getUIDAssets] 返回客户端 JSON (uid=${uidTrim}):\n${resultJson}`))
 			logger(Colors.green(`[getUIDAssets] uid=${uidTrim} 成功 cards=${cards.length}`))
 			return res.status(200).json(result).end()
 		} catch (e: any) {
