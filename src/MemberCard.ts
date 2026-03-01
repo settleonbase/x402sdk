@@ -3470,16 +3470,7 @@ const GET_REDEEM_STATUS_BATCH_ABI = [
 	'function getRedeemStatusBatch(bytes32[] hashes) view returns (bool[] active, uint256[] totalPoints6)',
 ]
 
-/** 旧 CCSA 地址 → 新 CCSA 地址映射，兼容仍发送旧地址的客户端 */
-const OLD_CCSA_TO_NEW = new Set([
-	'0x3A578f47d68a5f2C1f2930E9548E240AB8d40048',
-	'0xb6ba88045F854B713562fb7f1332D186df3B25A8', // 曾为 infrastructure CCSA
-	'0x6870acA2f4f6aBed6B10B0C8D76C75343398fd64', // 旧工厂部署
-	'0xA1A9f6f942dc0ED9Aa7eF5df7337bd878c2e157b', // 旧工厂 0x86879fE3 部署（已迁移至新工厂）
-].map(a => a.toLowerCase()))
-
 function _normalizeCardAddress(addr: string): string {
-	if (addr && OLD_CCSA_TO_NEW.has(addr.toLowerCase())) return BASE_CCSA_CARD_ADDRESS
 	return addr
 }
 
