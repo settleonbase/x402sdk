@@ -476,19 +476,23 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/payByNfcUid', { uid: uid.trim(), amountUsdc6: amountUsdc6, payee: ethers.getAddress(payee) }, res)
 	})
 
-	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。支持 uid（NFC）或 wallet（Scan QR） */
+	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）或 wallet（Scan QR）。 */
 	router.post('/nfcTopupPrepare', async (req, res) => {
-		const { uid, wallet, amount, currency } = req.body as { uid?: string; wallet?: string; amount?: string; currency?: string }
+		const { uid, wallet, amount, currency, cardAddress } = req.body as { uid?: string; wallet?: string; amount?: string; currency?: string; cardAddress?: string }
 		const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0
 		const hasWallet = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())
 		if (!hasUid && !hasWallet) {
 			return res.status(400).json({ success: false, error: 'Missing uid or wallet' })
 		}
+		if (!cardAddress || typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress.trim())) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' })
+		}
 		postLocalhost('/api/nfcTopupPrepare', {
 			uid: hasUid ? uid!.trim() : undefined,
 			wallet: hasWallet ? ethers.getAddress(wallet!.trim()) : undefined,
 			amount: String(amount ?? ''),
-			currency: (currency || 'CAD').trim()
+			currency: (currency || 'CAD').trim(),
+			cardAddress: ethers.getAddress(cardAddress.trim())
 		}, res)
 	})
 

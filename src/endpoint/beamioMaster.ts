@@ -901,7 +901,7 @@ const routing = ( router: Router ) => {
 		})
 
 		router.post('/executeForOwner', (req, res) => {
-			const { cardAddress, data, deadline, nonce, ownerSignature, redeemCode, toUserEOA } = req.body as {
+			const { cardAddress, data, deadline, nonce, ownerSignature, redeemCode, toUserEOA, description, image, background_color } = req.body as {
 				cardAddress?: string
 				data?: string
 				deadline?: number
@@ -909,11 +909,14 @@ const routing = ( router: Router ) => {
 				ownerSignature?: string
 				redeemCode?: string
 				toUserEOA?: string
+				description?: string
+				image?: string
+				background_color?: string
 			}
 			if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
 				return res.status(400).json({ success: false, error: 'Missing required fields: cardAddress, data, deadline, nonce, ownerSignature' })
 			}
-			executeForOwnerPool.push({ cardAddress, data, deadline, nonce, ownerSignature, redeemCode, toUserEOA, res })
+			executeForOwnerPool.push({ cardAddress, data, deadline, nonce, ownerSignature, redeemCode, toUserEOA, res, description, image, background_color })
 			logger(Colors.cyan(`[executeForOwner] pushed to pool, card=${cardAddress}`))
 			executeForOwnerProcess().catch((err: any) => {
 				logger(Colors.red('[executeForOwnerProcess] unhandled error:'), err?.message ?? err)
@@ -1127,19 +1130,23 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce，供前端签名。支持 uid（NFC）或 wallet（Scan QR） */
+		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）或 wallet（Scan QR）。 */
 		router.post('/nfcTopupPrepare', async (req, res) => {
-			const { uid, wallet, amount, currency } = req.body as { uid?: string; wallet?: string; amount?: string; currency?: string }
+			const { uid, wallet, amount, currency, cardAddress } = req.body as { uid?: string; wallet?: string; amount?: string; currency?: string; cardAddress?: string }
 			const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0
 			const hasWallet = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())
 			if (!hasUid && !hasWallet) {
 				return res.status(400).json({ success: false, error: 'Missing uid or wallet' })
 			}
+			if (!cardAddress || typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress.trim())) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' })
+			}
 			const result = await nfcTopupPreparePayload({
 				uid: hasUid ? uid!.trim() : undefined,
 				wallet: hasWallet ? ethers.getAddress(wallet!.trim()) : undefined,
 				amount: String(amount ?? ''),
-				currency: (currency || 'CAD').trim()
+				currency: (currency || 'CAD').trim(),
+				cardAddress: ethers.getAddress(cardAddress.trim())
 			})
 			if ('error' in result) {
 				return res.status(400).json({ success: false, error: result.error })

@@ -530,16 +530,21 @@ export const signUSDC3009ForNfcTopup = async (
 	return await userWallet.signTypedData(domain, types, message)
 }
 
-/** NFC Topup Prepare：根据 uid 或 wallet/amount/currency 生成 executeForAdmin 所需的 data、deadline、nonce。wallet 用于 Scan QR 获得的 beamio URL。 */
+/** NFC Topup Prepare：根据 uid 或 wallet/amount/currency 生成 executeForAdmin 所需的 data、deadline、nonce。cardAddress 为必填，指定充值的卡。 */
 export const nfcTopupPreparePayload = async (params: {
 	uid?: string
 	wallet?: string
 	amount: string
 	currency?: string
+	cardAddress: string
 }): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string } | { error: string }> => {
-	const { uid, wallet, amount, currency = 'CAD' } = params
+	const { uid, wallet, amount, currency = 'CAD', cardAddress: clientCardAddress } = params
 	const amt = typeof amount === 'string' ? amount : String(amount ?? '')
 	if (!amt || Number(amt) <= 0) return { error: 'Invalid amount' }
+	if (!clientCardAddress || typeof clientCardAddress !== 'string' || !ethers.isAddress(clientCardAddress.trim())) {
+		return { error: 'Missing or invalid cardAddress' }
+	}
+	const cardAddr = ethers.getAddress(clientCardAddress.trim())
 	let recipientEOA: string | null = null
 	if (wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())) {
 		recipientEOA = ethers.getAddress(wallet.trim())
@@ -547,7 +552,6 @@ export const nfcTopupPreparePayload = async (params: {
 		recipientEOA = await getNfcRecipientAddressByUid(uid.trim())
 	}
 	if (!recipientEOA) return { error: wallet ? 'Invalid wallet address' : 'Failed to resolve recipient from uid' }
-	const cardAddr = BASE_CCSA_CARD_ADDRESS
 	const cur = (currency || 'CAD').toUpperCase()
 	let usdcAmount6: bigint
 	if (cur === 'USD' || cur === 'USDC') {
@@ -951,7 +955,7 @@ export const cardRedeemIndexerAccountingPool: {
 	txHash: string
 }[] = []
 
-/** 通用 executeForOwner：客户端提交 owner 签名的 calldata，服务端免 gas 执行。可选 redeemCode+toUserEOA 时额外执行 redeemForUser（空投）。 */
+/** 通用 executeForOwner：客户端提交 owner 签名的 calldata，服务端免 gas 执行。可选 redeemCode+toUserEOA 时额外执行 redeemForUser（空投）。可选 description/image/background_color 用于 createIssuedNft 后组装 EIP-1155 metadata。 */
 export const executeForOwnerPool: {
 	cardAddress: string
 	data: string
@@ -961,6 +965,9 @@ export const executeForOwnerPool: {
 	redeemCode?: string
 	toUserEOA?: string
 	res: Response
+	description?: string
+	image?: string
+	background_color?: string
 }[] = []
 
 /** AA→EOA 转账请求：客户端提交 ERC-4337 已签字的 UserOp，由 Beamio 代付 Gas 并提交到链上 */
@@ -3563,6 +3570,9 @@ export const cardAddAdminPreCheck = async (body: {
 const createIssuedNftIface = new ethers.Interface([
 	'function createIssuedNft(bytes32 title, uint64 validAfter, uint64 validBefore, uint256 maxSupply, uint256 priceInCurrency6, bytes32 sharedMetadataHash)',
 ])
+const CREATE_ISSUED_NFT_SELECTOR = createIssuedNftIface.getFunction('createIssuedNft')?.selector ?? ''
+const BeamioUserCardIface = new ethers.Interface(BeamioUserCardABI as ethers.InterfaceAbi)
+const ISSUED_NFT_CREATED_TOPIC = ethers.id('IssuedNftCreated(uint256,bytes32,uint64,uint64,uint256,uint256,bytes32)')
 
 /** cardCreateIssuedNft 集群预检：校验 data 为 createIssuedNft，maxSupply>0，validBefore>=validAfter（validBefore!=0 时），card 存在。合格转发 master executeForOwner，Master 不再校验。 */
 export const cardCreateIssuedNftPreCheck = async (body: {
@@ -3713,6 +3723,46 @@ export const executeForOwnerProcess = async () => {
 			logger(Colors.green(`✅ executeForOwnerProcess card=${obj.cardAddress}`))
 		}
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, ...(code != null && { code }), ...(hash && { hash }) }).end()
+		// createIssuedNft 成功后异步写入 EIP-1155 tier metadata，供 GET /metadata/0x{card}{tokenId}.json 返回
+		if (hash && obj.data && obj.data.slice(0, 10) === CREATE_ISSUED_NFT_SELECTOR) {
+			const cardAddress = obj.cardAddress
+			const descriptionFromBody = typeof obj.description === 'string' && obj.description.trim() ? obj.description.trim() : undefined
+			const imageFromBody = typeof obj.image === 'string' && obj.image.trim() ? obj.image.trim() : undefined
+			const backgroundColorFromBody = typeof obj.background_color === 'string' && obj.background_color.trim() ? obj.background_color.trim() : undefined
+			;(async () => {
+				try {
+					const receipt = await tx.wait()
+					if (!receipt || receipt.status !== 1) return
+					const cardAddrLower = cardAddress.toLowerCase()
+					for (const log of receipt.logs) {
+						if (log.address.toLowerCase() !== cardAddrLower || log.topics[0] !== ISSUED_NFT_CREATED_TOPIC) continue
+						const parsed = BeamioUserCardIface.parseLog({ topics: log.topics, data: log.data })
+						if (!parsed || parsed.name !== 'IssuedNftCreated') continue
+						const tokenId = Number(parsed.args.tokenId)
+						let cardOwner = (await getCardByAddress(cardAddress))?.cardOwner
+						if (!cardOwner) {
+							const card = new ethers.Contract(cardAddress, BeamioUserCardABI, providerBase)
+							const owner = await card.owner()
+							cardOwner = typeof owner === 'string' ? owner : String(owner)
+						}
+						const metadataJson: Record<string, unknown> = {
+							name: `Issued NFT #${tokenId}`,
+							description: descriptionFromBody ?? 'Issued NFT tier. ERC-1155 metadata for Base Explorer.',
+							image: imageFromBody ?? 'data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'1\' height=\'1\'/%3E',
+							...(backgroundColorFromBody && { background_color: backgroundColorFromBody }),
+							properties: {
+								...(backgroundColorFromBody && { background_color: backgroundColorFromBody }),
+							},
+						}
+						await upsertNftTierMetadata({ cardAddress, cardOwner, tokenId, metadataJson })
+						logger(Colors.green(`[createIssuedNft] upserted tier metadata card=${cardAddress} tokenId=${tokenId}`))
+						break
+					}
+				} catch (e: any) {
+					logger(Colors.yellow(`[createIssuedNft] background metadata upsert failed: ${e?.message ?? e}`))
+				}
+			})()
+		}
 	} catch (e: any) {
 		logger(Colors.red(`❌ executeForOwnerProcess failed:`), e?.message ?? e)
 		let errMsg = e?.message ?? String(e)
