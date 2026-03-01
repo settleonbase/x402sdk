@@ -306,7 +306,7 @@ const routing = ( router: Router ) => {
 					const owner = await SC.getOwnerByAccountName(uidTrim)
 					if (owner && owner !== ethers.ZeroAddress) {
 						eoaRaw = owner
-						logger(Colors.gray(`[getUIDAssets] uid=${uidTrim} 按 beamioTab 解析到 EOA=${eoaRaw.slice(0, 10)}...`))
+						logger(Colors.gray(`[getUIDAssets] uid=${uidTrim} 按 beamioTab 解析到 EOA=${owner.slice(0, 10)}...`))
 					}
 				} catch (_) { /* 非账户名，忽略 */ }
 			}
