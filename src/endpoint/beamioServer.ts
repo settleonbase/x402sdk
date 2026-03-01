@@ -323,6 +323,8 @@ const routing = ( router: Router ) => {
 				points6: string
 				cardCurrency: string
 				cardBackground?: string
+				tierName?: string
+				tierDescription?: string
 				nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }>
 			}> = []
 			for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
@@ -340,21 +342,22 @@ const routing = ( router: Router ) => {
 						expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
 						isExpired: nft.isExpired,
 					}))
-					// 用户拥有的最佳 NFT（tokenId 最大且 > 0）对应的 tier metadata 中的 background 用于卡片背景
+					// 用户拥有的最佳 NFT（tokenId 最大且 > 0）用于 tier 显示与 background
 					let cardBackground: string | undefined
+					let tierName: string | undefined
+					let tierDescription: string | undefined
 					const withTokenId = nftList.filter((n: { tokenId: string }) => Number(n.tokenId) > 0)
 					const bestNft = withTokenId.length > 0
-						? withTokenId.reduce((a: { tokenId: string }, b: { tokenId: string }) => (Number(b.tokenId) > Number(a.tokenId) ? b : a))
+						? withTokenId.reduce((a: { tokenId: string; tier: string }, b: { tokenId: string; tier: string }) => (Number(b.tokenId) > Number(a.tokenId) ? b : a))
 						: null
+					let cardRow: { cardOwner: string; metadata: Record<string, unknown> | null } | null = null
 					if (bestNft) {
 						try {
+							cardRow = await getCardByAddress(cardAddr)
 							let tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestNft.tokenId)
-							if (!tierMeta) {
-								const cardRow = await getCardByAddress(cardAddr)
-								if (cardRow?.cardOwner) {
-									tierMeta = await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, bestNft.tokenId)
-									if (tierMeta) logger(Colors.gray(`[getUIDAssets] card=${cardAddr} tokenId=${bestNft.tokenId} 按 card_owner 回退查到 tier metadata`))
-								}
+							if (!tierMeta && cardRow?.cardOwner) {
+								tierMeta = await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, bestNft.tokenId)
+								if (tierMeta) logger(Colors.gray(`[getUIDAssets] card=${cardAddr} tokenId=${bestNft.tokenId} 按 card_owner 回退查到 tier metadata`))
 							}
 							if (tierMeta && typeof tierMeta === 'object') {
 								const props = tierMeta.properties as Record<string, unknown> | undefined
@@ -362,6 +365,24 @@ const routing = ( router: Router ) => {
 								if (bg && typeof bg === 'string' && bg.trim()) {
 									cardBackground = bg.trim().startsWith('#') ? bg.trim() : `#${bg.trim().replace(/^#/, '')}`
 								}
+								tierName = (props?.tier_name ?? tierMeta.name) as string | undefined
+								if (tierName && typeof tierName === 'string' && tierName.trim()) tierName = tierName.trim()
+								else tierName = undefined
+								tierDescription = (props?.tier_description ?? tierMeta.description) as string | undefined
+								if (tierDescription && typeof tierDescription === 'string' && tierDescription.trim()) tierDescription = tierDescription.trim()
+								else tierDescription = undefined
+							}
+							// 无 NFT tier metadata 时，用卡级 metadata 的 tiers 数组按 tier 下标取 name/description（含 Default/Max 视为 0）
+							if ((!tierName || !tierDescription) && cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
+								const tiers = cardRow.metadata.tiers as Array<{ index?: number; name?: string; description?: string }>
+								const tierIndex = bestNft.tier === 'Default/Max' ? 0 : (parseInt(bestNft.tier, 10) || 0)
+								const t = tiers.find((x: { index?: number }, i: number) => (x.index != null ? x.index : i) === tierIndex) ?? tiers[tierIndex]
+								if (t) {
+									if (!tierName && t.name && String(t.name).trim()) tierName = String(t.name).trim()
+									if (!tierDescription && t.description && String(t.description).trim()) tierDescription = String(t.description).trim()
+								}
+								if (!tierName && (bestNft.tier === 'Default/Max' || tierIndex === 0)) tierName = 'Default'
+								else if (!tierName) tierName = `Tier ${tierIndex + 1}`
 							}
 						} catch (_) { /* ignore */ }
 					}
@@ -373,6 +394,8 @@ const routing = ( router: Router ) => {
 						points6: String(pointsBalance),
 						cardCurrency: currency,
 						...(cardBackground != null && { cardBackground }),
+						...(tierName != null && { tierName }),
+						...(tierDescription != null && { tierDescription }),
 						nfts: nftList,
 					})
 				} catch (cardErr: any) {
