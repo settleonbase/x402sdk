@@ -323,8 +323,16 @@ const routing = ( router: Router ) => {
 			const usdcAbi = ['function balanceOf(address) view returns (uint256)']
 			const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
-			const usdcBalanceRaw = await usdc.balanceOf(eoa)
-			const usdcBalance = ethers.formatUnits(usdcBalanceRaw, 6)
+			const [usdcEoaRaw, aaAddr] = await Promise.all([
+				usdc.balanceOf(eoa),
+				resolveBeamioAccountOf(eoa),
+			])
+			let usdcTotalRaw = usdcEoaRaw
+			if (aaAddr) {
+				const usdcAaRaw = await usdc.balanceOf(aaAddr)
+				usdcTotalRaw += usdcAaRaw
+			}
+			const usdcBalance = ethers.formatUnits(usdcTotalRaw, 6)
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
 			const cardAddresses: { address: string; name: string; type: string }[] = [
 				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
