@@ -31,6 +31,7 @@ const CREATE_CARD_ERROR_IFACE = new ethers.Interface([
   'error DEP_InvalidFactory()',
   'error DEP_NotOwner()',
   'error BM_DeployFailed()',
+  'error BM_DeployFailedAtStep(uint8 step)',
   'error BM_ZeroAddress()',
   'error F_BadDeployedCard()',
   'error F_AlreadyRegistered()',
@@ -62,13 +63,27 @@ function parseCreateCardRevertData(data: string | Uint8Array | undefined): strin
   }
 }
 
-/** 当 decoded 为 BM_DeployFailed 时追加的排查说明（CREATE 失败 = 卡 constructor revert 或 gas 不足） */
+/** 当 decoded 为 BM_DeployFailed 或 BM_DeployFailedAtStep(step) 时追加的排查说明 */
 function createCardRevertHint(decoded: string | null): string {
-  if (decoded !== 'BM_DeployFailed') return ''
-  return (
-    '【BM_DeployFailed】CREATE 失败（create 返回 0），通常为：① 卡 constructor 内 revert（如 gateway 无 code → UC_GlobalMisconfigured）；② gas 不足。' +
-    '请确认 initCode 中 gateway 为当前 Factory 地址且该地址在 Base 上有 code，并确认 x402sdk 使用的 BeamioUserCardArtifact 与链上预期一致。\n'
-  )
+  if (decoded === 'BM_DeployFailed') {
+    return (
+      '【BM_DeployFailed】CREATE 失败（create 返回 0），通常为：① 卡 constructor 内 revert（如 gateway 无 code → UC_GlobalMisconfigured）；② gas 不足。' +
+      '请确认 initCode 中 gateway 为当前 Factory 地址且该地址在 Base 上有 code，并确认 x402sdk 使用的 BeamioUserCardArtifact 与链上预期一致。\n'
+    )
+  }
+  const stepMatch = decoded?.match(/^BM_DeployFailedAtStep\((\d+)\)$/)
+  if (stepMatch) {
+    const step = parseInt(stepMatch[1], 10)
+    const stepDesc = [
+      '0=CREATE 失败（OOG / EIP-170 / EIP-3860 / constructor revert）',
+      '1=gateway 不匹配',
+      '2=owner 不匹配',
+      '3=currency 不匹配',
+      '4=price 不匹配',
+    ][step] ?? `step=${step}`
+    return `【BM_DeployFailedAtStep】${stepDesc}。若 step=0 请查 gas、runtime/initcode 大小、constructor 参数（gateway 有 code、initialOwner 非零）。\n`
+  }
+  return ''
 }
 
 /**
@@ -126,7 +141,7 @@ export async function createBeamioCard(
     currencyEnum,
     priceE6,
     initCode,
-    { gasLimit: 4_000_000 }
+    { gasLimit: 6_000_000 }
   )
   const receipt = await tx.wait()
   if (!receipt) throw new Error('Transaction failed')
@@ -294,7 +309,7 @@ export async function createBeamioCardWithFactory(
       currencyEnum,
       priceE6,
       initCode,
-      { gasLimit: 4_000_000 }
+      { gasLimit: 6_000_000 }
     )
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
@@ -421,7 +436,7 @@ export async function createBeamioCardWithFactoryReturningHash(
       currencyEnum,
       priceE6,
       initCode,
-      { gasLimit: 4_000_000 }
+      { gasLimit: 6_000_000 }
     )
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }

@@ -12,6 +12,7 @@
 import { ethers } from 'ethers'
 import { Settle_ContractPool } from './MemberCard'
 import { createBeamioCardWithFactory } from './CCSA'
+import { masterSetup } from './util'
 
 const CARD_ISSUER_ADDRESS = '0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61'
 const ONE_CAD_E6 = 1_000_000
@@ -30,7 +31,9 @@ async function main() {
 
   const factoryAddr = await factory.getAddress()
   const factoryOwner = (await factory.owner()) as string
+  const baseRpc = (masterSetup as { base_endpoint?: string })?.base_endpoint || 'https://1rpc.io/base'
   console.log('Creating CCSA card...')
+  console.log('  Base RPC (x402sdk):', baseRpc)
   console.log('  Factory:', factoryAddr)
   console.log('  Factory owner:', factoryOwner)
   console.log('  Caller/signer (must be owner or paymaster):', SC.walletBase.address)

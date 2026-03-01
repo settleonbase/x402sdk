@@ -186,115 +186,12 @@
   },
   {
     "inputs": [],
-    "name": "UC_FaucetAmountTooLarge",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_FaucetConfigFrozen",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_FaucetConfigInvalid",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_FaucetDisabledBecausePriced",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_FaucetExpired",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_FaucetGlobalMaxExceeded",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_FaucetIdNotIssued",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_FaucetMaxExceeded",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_FaucetNotEnabled",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "UC_GlobalMisconfigured",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "fromAccount",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "id",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "have",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "need",
-        "type": "uint256"
-      }
-    ],
-    "name": "UC_InsufficientBalance",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint64",
-        "name": "validAfter",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "validBefore",
-        "type": "uint64"
-      }
-    ],
-    "name": "UC_InvalidDateRange",
     "type": "error"
   },
   {
     "inputs": [],
     "name": "UC_InvalidProposal",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "got",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "expected",
-        "type": "uint256"
-      }
-    ],
-    "name": "UC_InvalidTokenId",
     "type": "error"
   },
   {
@@ -320,11 +217,6 @@
   {
     "inputs": [],
     "name": "UC_PriceZero",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_PurchaseDisabledBecauseFree",
     "type": "error"
   },
   {
@@ -581,7 +473,7 @@
           }
         ],
         "indexed": false,
-        "internalType": "struct BeamioUserCard.FaucetConfig",
+        "internalType": "struct FaucetStorage.FaucetConfig",
         "name": "cfg",
         "type": "tuple"
       }
@@ -1249,7 +1141,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "i",
         "type": "uint256"
       }
     ],
@@ -1734,113 +1626,58 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "name": "faucetClaimed",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
+        "name": "id",
         "type": "uint256"
       }
     ],
     "name": "faucetConfig",
     "outputs": [
       {
-        "internalType": "uint64",
-        "name": "validUntil",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "perClaimMax",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint128",
-        "name": "maxPerUser",
-        "type": "uint128"
-      },
-      {
-        "internalType": "uint128",
-        "name": "maxGlobal",
-        "type": "uint128"
-      },
-      {
-        "internalType": "bool",
-        "name": "enabled",
-        "type": "bool"
-      },
-      {
-        "internalType": "uint8",
-        "name": "currency",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint8",
-        "name": "decimals",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint128",
-        "name": "priceInCurrency6",
-        "type": "uint128"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
+        "components": [
+          {
+            "internalType": "uint64",
+            "name": "validUntil",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "perClaimMax",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint128",
+            "name": "maxPerUser",
+            "type": "uint128"
+          },
+          {
+            "internalType": "uint128",
+            "name": "maxGlobal",
+            "type": "uint128"
+          },
+          {
+            "internalType": "bool",
+            "name": "enabled",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint8",
+            "name": "currency",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint8",
+            "name": "decimals",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint128",
+            "name": "priceInCurrency6",
+            "type": "uint128"
+          }
+        ],
+        "internalType": "struct FaucetStorage.FaucetConfig",
         "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "faucetConfigFrozen",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "faucetGlobalMinted",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
+        "type": "tuple"
       }
     ],
     "stateMutability": "view",
@@ -2125,35 +1962,11 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "",
+        "name": "a",
         "type": "address"
       }
     ],
     "name": "isAdmin",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "name": "isApproved",
     "outputs": [
       {
         "internalType": "bool",
@@ -2224,7 +2037,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "tokenId",
         "type": "uint256"
       }
     ],
@@ -2243,7 +2056,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "tokenId",
         "type": "uint256"
       }
     ],
@@ -2262,7 +2075,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "tokenId",
         "type": "uint256"
       }
     ],
@@ -2281,7 +2094,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "tokenId",
         "type": "uint256"
       }
     ],
@@ -2300,7 +2113,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "tokenId",
         "type": "uint256"
       }
     ],
@@ -2319,7 +2132,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "tokenId",
         "type": "uint256"
       }
     ],
@@ -2338,7 +2151,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "tokenId",
         "type": "uint256"
       }
     ],
@@ -2519,46 +2332,53 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "id",
         "type": "uint256"
       }
     ],
     "name": "proposals",
     "outputs": [
       {
-        "internalType": "address",
-        "name": "target",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "v1",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "v2",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "v3",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes4",
-        "name": "selector",
-        "type": "bytes4"
-      },
-      {
-        "internalType": "uint256",
-        "name": "approvals",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "executed",
-        "type": "bool"
+        "components": [
+          {
+            "internalType": "address",
+            "name": "target",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "v1",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "v2",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "v3",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bytes4",
+            "name": "selector",
+            "type": "bytes4"
+          },
+          {
+            "internalType": "uint256",
+            "name": "approvals",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bool",
+            "name": "executed",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct GovernanceStorage.Proposal",
+        "name": "",
+        "type": "tuple"
       }
     ],
     "stateMutability": "view",
