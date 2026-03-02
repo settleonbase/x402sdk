@@ -3268,22 +3268,30 @@ export const createBeamioCardAdmin = async (
 }
 
 /** 同 createBeamioCardAdmin，但返回 { cardAddress, hash } 供 createCardPoolPress 回传 tx hash。
- * @param factoryOverride 当 createCardPoolPress 传入 shift 出的 SC.baseFactoryPaymaster 时使用，确保使用正确的 signer（owner/paymaster） */
+ * @param factoryOverride 当 createCardPoolPress 传入 shift 出的 SC.baseFactoryPaymaster 时使用，确保使用正确的 signer（owner/paymaster）
+ * @param tiers 可选，创建时一并传入链上（createCardCollectionWithInitCodeAndTiers） */
 export const createBeamioCardAdminWithHash = async (
 	cardOwner: string,
 	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD',
 	pointsUnitPriceInCurrencyE6: number | bigint,
-	opts?: { uri?: string },
+	opts?: { uri?: string; tiers?: Array<{ minUsdc6: string; attr: number; tierExpirySeconds?: number; upgradeByBalance?: boolean }> },
 	factoryOverride?: ethers.Contract
 ): Promise<{ cardAddress: string; hash: string }> => {
 	const factory = factoryOverride ?? Settle_ContractPool[0]?.baseFactoryPaymaster
 	if (!factory) throw new Error('Settle_ContractPool not initialized')
+	const tiersForCreate = opts?.tiers?.map((t) => ({
+		minUsdc6: t.minUsdc6,
+		attr: t.attr,
+		tierExpirySeconds: t.tierExpirySeconds ?? 0,
+		upgradeByBalance: t.upgradeByBalance !== false,
+	}))
 	return createBeamioCardWithFactoryReturningHash(
 		factory,
 		cardOwner,
 		currency,
 		pointsUnitPriceInCurrencyE6,
-		opts?.uri ? { uri: opts.uri } : {}
+		opts?.uri ? { uri: opts.uri } : {},
+		tiersForCreate
 	)
 }
 
@@ -3294,7 +3302,7 @@ export type CreateCardPreChecked = {
 	priceInCurrencyE6: string
 	uri?: string
 	shareTokenMetadata?: { name?: string; description?: string; image?: string }
-	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
+	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
 }
 
 export const createCardPreCheck = (body: {
@@ -3347,8 +3355,23 @@ export const createCardPreCheck = (body: {
 			if (!o.minUsdc6 || typeof o.minUsdc6 !== 'string') {
 				return { success: false, error: `tiers[${i}].minUsdc6 is required (string)` }
 			}
+			try {
+				const minUsdc6 = BigInt(o.minUsdc6)
+				if (minUsdc6 < 0n) return { success: false, error: `tiers[${i}].minUsdc6 must be >= 0` }
+			} catch {
+				return { success: false, error: `tiers[${i}].minUsdc6 must be an integer string` }
+			}
 			if (o.attr != null && typeof o.attr !== 'number') {
 				return { success: false, error: `tiers[${i}].attr must be number` }
+			}
+			if (o.attr != null && (!Number.isInteger(o.attr) || (o.attr as number) < 0)) {
+				return { success: false, error: `tiers[${i}].attr must be a non-negative integer` }
+			}
+			if (o.tierExpirySeconds != null) {
+				const expiryNum = Number(o.tierExpirySeconds)
+				if (!Number.isFinite(expiryNum) || expiryNum < 0 || !Number.isInteger(expiryNum)) {
+					return { success: false, error: `tiers[${i}].tierExpirySeconds must be a non-negative integer if provided` }
+				}
 			}
 			if (o.upgradeByBalance != null && typeof o.upgradeByBalance !== 'boolean') {
 				return { success: false, error: `tiers[${i}].upgradeByBalance must be boolean if provided` }
@@ -3368,6 +3391,7 @@ export const createCardPreCheck = (body: {
 					index: typeof o.index === 'number' ? o.index : i,
 					minUsdc6: String(o.minUsdc6),
 					attr: typeof o.attr === 'number' ? o.attr : i,
+					...(o.tierExpirySeconds != null && { tierExpirySeconds: Number(o.tierExpirySeconds) }),
 					...(o.name != null && { name: String(o.name) }),
 					...(o.description != null && { description: String(o.description) }),
 					...(o.image != null && typeof o.image === 'string' && { image: o.image }),
@@ -3420,11 +3444,19 @@ export const createCardPoolPress = async () => {
 	logger(Colors.cyan(`[createCardPoolPress] admin=${SC.walletBase.address} cardOwner=${cardOwner} currency=${currency} priceE6=${priceInCurrencyE6}`))
 
 	try {
+		const tiersForCreate = tiers && tiers.length > 0
+			? tiers.map((t, i) => ({
+					minUsdc6: t.minUsdc6,
+					attr: Number(t.attr ?? i),
+					tierExpirySeconds: Number(t.tierExpirySeconds ?? 0), // 0 => 使用卡全局 expirySeconds
+					upgradeByBalance: t.upgradeByBalance !== false,
+				}))
+			: undefined
 		const { cardAddress, hash } = await createBeamioCardAdminWithHash(
 			cardOwner,
 			currency,
 			BigInt(priceInCurrencyE6),
-			uri ? { uri } : undefined,
+			{ ...(uri && { uri }), ...(tiersForCreate && { tiers: tiersForCreate }) },
 			SC.baseFactoryPaymaster
 		)
 		// master 侧写入 metadata（shareTokenMetadata、tiers）到 0x{owner}.json

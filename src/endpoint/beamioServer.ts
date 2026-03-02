@@ -264,7 +264,49 @@ const getFollowCheck = async (wallet: string, followAddress: string) => {
 	return null
 }
 
+const DEBUG_INBOUND =
+	process.env.DEBUG_INBOUND === '1' ||
+	process.env.DEBUG_INBOUND === 'true' ||
+	process.env.NODE_ENV !== 'production'
+
+const truncateValue = (value: unknown, maxLen = 600): unknown => {
+	if (value == null) return value
+	if (typeof value === 'string') {
+		return value.length > maxLen ? `${value.slice(0, maxLen)}...<truncated ${value.length - maxLen} chars>` : value
+	}
+	if (typeof value === 'bigint') return value.toString()
+	if (Array.isArray(value)) {
+		const maxItems = 20
+		const mapped = value.slice(0, maxItems).map((v) => truncateValue(v, maxLen))
+		if (value.length > maxItems) mapped.push(`...<truncated ${value.length - maxItems} items>`)
+		return mapped
+	}
+	if (typeof value === 'object') {
+		const obj = value as Record<string, unknown>
+		const out: Record<string, unknown> = {}
+		for (const [k, v] of Object.entries(obj)) out[k] = truncateValue(v, maxLen)
+		return out
+	}
+	return value
+}
+
+const logInboundDebug = (req: Request) => {
+	if (!DEBUG_INBOUND) return
+	const body = truncateValue(req.body)
+	const query = truncateValue(req.query)
+	logger(
+		Colors.gray(
+			`[INBOUND][Cluster] ${req.method} ${req.originalUrl} ip=${getClientIp(req)}`
+		),
+		inspect({ query, body }, false, 4, true)
+	)
+}
+
 const routing = ( router: Router ) => {
+	router.use((req, _res, next) => {
+		logInboundDebug(req)
+		next()
+	})
 
 	/** GET /api/manifest.json - 动态 manifest，cluster 独自处理，无需 master。支持 ?start_url= 或从 Referer 获取 */
 	router.get('/manifest.json', (req, res) => {
@@ -1358,7 +1400,7 @@ const routing = ( router: Router ) => {
 			priceInCurrencyE6?: string | number
 			uri?: string
 			shareTokenMetadata?: { name?: string; description?: string; image?: string }
-			tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string }>
+			tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
 		}
 		const preCheck = createCardPreCheck(body)
 		if (!preCheck.success) {

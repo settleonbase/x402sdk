@@ -40,7 +40,47 @@ const ownerNftSeriesCache = new Map<string, { items: unknown[]; expiry: number }
 const seriesSharedMetadataCache = new Map<string, { data: unknown; expiry: number }>()
 const mintMetadataCache = new Map<string, { items: unknown[]; expiry: number }>()
 
+const DEBUG_INBOUND =
+	process.env.DEBUG_INBOUND === '1' ||
+	process.env.DEBUG_INBOUND === 'true' ||
+	process.env.NODE_ENV !== 'production'
+
+const truncateValue = (value: unknown, maxLen = 600): unknown => {
+	if (value == null) return value
+	if (typeof value === 'string') {
+		return value.length > maxLen ? `${value.slice(0, maxLen)}...<truncated ${value.length - maxLen} chars>` : value
+	}
+	if (typeof value === 'bigint') return value.toString()
+	if (Array.isArray(value)) {
+		const maxItems = 20
+		const mapped = value.slice(0, maxItems).map((v) => truncateValue(v, maxLen))
+		if (value.length > maxItems) mapped.push(`...<truncated ${value.length - maxItems} items>`)
+		return mapped
+	}
+	if (typeof value === 'object') {
+		const obj = value as Record<string, unknown>
+		const out: Record<string, unknown> = {}
+		for (const [k, v] of Object.entries(obj)) out[k] = truncateValue(v, maxLen)
+		return out
+	}
+	return value
+}
+
+const logInboundDebug = (req: Request) => {
+	if (!DEBUG_INBOUND) return
+	const body = truncateValue(req.body)
+	const query = truncateValue(req.query)
+	logger(
+		Colors.gray(`[INBOUND][Master] ${req.method} ${req.originalUrl} ip=${getClientIp(req)}`),
+		inspect({ query, body }, false, 4, true)
+	)
+}
+
 const routing = ( router: Router ) => {
+	router.use((req, _res, next) => {
+		logInboundDebug(req)
+		next()
+	})
 
 	/** GET /api/manifest.json - 动态 manifest，与 cluster 相同（nginx 可能代理到 master） */
 	router.get('/manifest.json', (req, res) => {
@@ -668,30 +708,16 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** 创建 BeamioUserCard。由 cluster 预检，master 不再预检，信任 cluster 数据。push createCardPool，daemon createCardPoolPress 上链后回传 hash，同时登记到本地 db。*/
+		/** 创建 BeamioUserCard。由 cluster 完整预检，master 不做任何入站校验，直接入队 createCardPool。*/
 		router.post('/createCard', (req, res) => {
-			const raw = req.body as {
+			const body = req.body as {
 				cardOwner: string
 				currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD'
-				priceInCurrencyE6?: string
-				unitPriceHuman?: string | number
+				priceInCurrencyE6: string
 				uri?: string
 				shareTokenMetadata?: { name?: string; description?: string; image?: string }
-				tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string }>
+				tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
 			}
-			let priceInCurrencyE6: string
-			if (raw.priceInCurrencyE6 != null && raw.priceInCurrencyE6 !== '') {
-				priceInCurrencyE6 = String(raw.priceInCurrencyE6)
-			} else if (raw.unitPriceHuman != null && raw.unitPriceHuman !== '') {
-				const n = parseFloat(String(raw.unitPriceHuman))
-				if (!Number.isFinite(n) || n <= 0) {
-					return res.status(400).json({ success: false, error: 'unitPriceHuman must be > 0' })
-				}
-				priceInCurrencyE6 = String(BigInt(Math.round(n * 1_000_000)))
-			} else {
-				return res.status(400).json({ success: false, error: 'Missing priceInCurrencyE6 or unitPriceHuman' })
-			}
-			const body = { ...raw, priceInCurrencyE6 }
 			createCardPool.push({ ...body, res })
 			logger(Colors.cyan(`[createCard] pushed to pool, cardOwner=${body.cardOwner}`))
 			createCardPoolPress()

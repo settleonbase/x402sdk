@@ -367,13 +367,22 @@ export async function createBeamioCardWithFactory(
   return ethers.getAddress(cardAddress)
 }
 
-/** 同 createBeamioCardWithFactory，但返回 { cardAddress, hash } 供 daemon 回传 tx hash 给 UI */
+/** Tier 结构（与 BeamioUserCard.Tier 一致） */
+export type CreateCardTier = {
+  minUsdc6: bigint | string
+  attr: number
+  tierExpirySeconds?: number | bigint
+  upgradeByBalance?: boolean
+}
+
+/** 同 createBeamioCardWithFactory，但返回 { cardAddress, hash } 供 daemon 回传 tx hash 给 UI。可选 tiers 时使用 createCardCollectionWithInitCodeAndTiers 一次性部署+配置 */
 export async function createBeamioCardWithFactoryReturningHash(
   factory: ethers.Contract,
   cardOwner: string,
   currency: ICurrency,
   pointsUnitPriceInCurrencyE6: number | bigint,
-  initCodeOrOptions: string | CreateBeamioCardInitCodeOptions
+  initCodeOrOptions: string | CreateBeamioCardInitCodeOptions,
+  tiers?: CreateCardTier[]
 ): Promise<{ cardAddress: string; hash: string }> {
   if (!ethers.isAddress(cardOwner)) throw new Error('Invalid cardOwner address')
   const currencyEnum = CURRENCY_TO_ENUM[currency]
@@ -429,15 +438,35 @@ export async function createBeamioCardWithFactoryReturningHash(
     }
   }
 
+  const tiersArray = tiers && tiers.length > 0
+    ? tiers.map((t) => ({
+        minUsdc6: BigInt(t.minUsdc6),
+        attr: t.attr,
+        tierExpirySeconds: BigInt(t.tierExpirySeconds ?? 0),
+        upgradeByBalance: t.upgradeByBalance !== false,
+      }))
+    : []
+
   let tx: ethers.ContractTransactionResponse
   try {
-    tx = await factory.createCardCollectionWithInitCode(
-      cardOwner,
-      currencyEnum,
-      priceE6,
-      initCode,
-      { gasLimit: 6_000_000 }
-    )
+    if (tiersArray.length > 0) {
+      tx = await factory.createCardCollectionWithInitCodeAndTiers(
+        cardOwner,
+        currencyEnum,
+        priceE6,
+        initCode,
+        tiersArray,
+        { gasLimit: 8_000_000 }
+      )
+    } else {
+      tx = await factory.createCardCollectionWithInitCode(
+        cardOwner,
+        currencyEnum,
+        priceE6,
+        initCode,
+        { gasLimit: 6_000_000 }
+      )
+    }
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
     const revertData = err?.data ?? (e as { data?: string | Uint8Array }).data ?? (e as { info?: { error?: { data?: string } } }).info?.error?.data
