@@ -572,11 +572,18 @@ const routing = ( router: Router ) => {
 			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
 			const usdcBalanceRaw = await usdc.balanceOf(aaAddr)
 			let unitPriceUSDC6 = '0'
+			let beamioUserCard = ''
 			try {
 				const factoryAbi = ['function quoteUnitPointInUSDC6(address) view returns (uint256)']
 				const factory = new ethers.Contract(BASE_CARD_FACTORY, factoryAbi, providerBase)
 				const up = await factory.quoteUnitPointInUSDC6(BASE_CCSA_CARD_ADDRESS)
 				unitPriceUSDC6 = String(up)
+			} catch (_) { /* ignore */ }
+			try {
+				const aaFactoryAbi = ['function beamioUserCard() view returns (address)']
+				const aaFactory = new ethers.Contract(BASE_AA_FACTORY, aaFactoryAbi, providerBase)
+				const uc = await aaFactory.beamioUserCard()
+				if (uc && uc !== ethers.ZeroAddress) beamioUserCard = ethers.getAddress(uc)
 			} catch (_) { /* ignore */ }
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
 			const cards: Array<{ cardAddress: string; cardName: string; cardType: string; points: string; points6: string; cardCurrency: string; nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }> }> = []
@@ -618,6 +625,7 @@ const routing = ( router: Router ) => {
 				cards,
 				nfts: firstCard?.nfts ?? [],
 				unitPriceUSDC6,
+				beamioUserCard: beamioUserCard || undefined,
 			}
 			logger(Colors.green(`[getWalletAssets] wallet=${eoa} aa=${aaAddr} 成功`))
 			return res.status(200).json(result).end()
