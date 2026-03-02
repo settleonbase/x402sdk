@@ -2823,6 +2823,7 @@ export const OpenContainerRelayProcess = async () => {
 
   logger(Colors.gray(`[DEBUG] OpenContainerRelayProcess entry: objKeys=${Object.keys(obj).join(',')} requestHash=${obj.requestHash ?? 'n/a'} forText=${obj.forText ? `"${String(obj.forText).slice(0, 30)}…"` : 'n/a'} Settle_ContractPool.len=${Settle_ContractPool.length}`))
   const payload = obj.openContainerPayload
+  logger(Colors.cyan(`[AAtoEOA/OpenContainer] [DEBUG] received openContainerPayload JSON: ${JSON.stringify(payload)}`))
   logger(`[AAtoEOA/OpenContainer] process started account=${payload.account} to=${payload.to}`)
   logger(`[AAtoEOA/OpenContainer] received obj data: currency=${obj.currency ?? 'null'}, currencyAmount=${obj.currencyAmount ?? 'null'}, payload.currencyType=${payload.currencyType}, payload.maxAmount=${payload.maxAmount}, items.length=${payload.items.length}`)
   logger(`[AAtoEOA/OpenContainer] full obj: ${inspect({ currency: obj.currency, currencyAmount: obj.currencyAmount, hasPayload: !!obj.openContainerPayload }, false, 2, true)}`)
@@ -4452,6 +4453,55 @@ export const payByNfcUidOpenContainer = async (params: {
 	} catch (e: any) {
 		logger(Colors.red(`[payByNfcUidContainer] failed: ${e?.message ?? e}`))
 		return { pushed: false, error: e?.shortMessage ?? e?.message ?? 'Container relay failed' }
+	}
+}
+
+/** QR 支付（OpenContainer）：根据 account(AA) 和 payee 返回 payeeAA、unitPriceUSDC6，供 Android 与 SilentPassUI 一致地 Smart Routing 组装 items */
+export const payByAccountPrepare = async (params: {
+	account: string
+	payee: string
+}): Promise<{
+	ok: boolean
+	payeeAA?: string
+	unitPriceUSDC6?: string
+	error?: string
+}> => {
+	const { account, payee } = params
+	if (!account || !ethers.isAddress(account) || !payee || !ethers.isAddress(payee)) {
+		return { ok: false, error: 'Invalid account or payee' }
+	}
+	if (Settle_ContractPool.length === 0) return { ok: false, error: 'Settle_ContractPool empty' }
+	const SC = Settle_ContractPool[0]
+	try {
+		let toResolved = ethers.getAddress(payee)
+		const payeeCode = await SC.walletBase.provider!.getCode(toResolved)
+		const isPayeeEOA = !payeeCode || payeeCode === '0x'
+		if (isPayeeEOA) {
+			let payeeAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(toResolved)
+			if (!payeeAA || payeeAA === ethers.ZeroAddress) {
+				try {
+					const { accountAddress } = await DeployingSmartAccount(toResolved, SC.aaAccountFactoryPaymaster)
+					if (accountAddress) payeeAA = accountAddress
+				} catch (_) { /* ignore */ }
+			}
+			if (payeeAA && payeeAA !== ethers.ZeroAddress) toResolved = payeeAA
+		}
+		let unitPriceUSDC6 = 0n
+		try {
+			const { unitPriceUSDC6: up } = await quotePointsForUSDC_raw(BASE_CCSA_CARD_ADDRESS, 1_000_000n, SC.baseFactoryPaymaster)
+			unitPriceUSDC6 = up
+		} catch (e) {
+			logger(Colors.yellow(`[payByAccountPrepare] quote failed: ${(e as Error)?.message}`))
+			return { ok: false, error: 'Quote failed' }
+		}
+		return {
+			ok: true,
+			payeeAA: toResolved,
+			unitPriceUSDC6: unitPriceUSDC6.toString(),
+		}
+	} catch (e: any) {
+		logger(Colors.red(`[payByAccountPrepare] failed: ${e?.message ?? e}`))
+		return { ok: false, error: e?.shortMessage ?? e?.message ?? 'Prepare failed' }
 	}
 }
 

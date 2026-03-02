@@ -571,6 +571,13 @@ const routing = ( router: Router ) => {
 			]
 			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
 			const usdcBalanceRaw = await usdc.balanceOf(aaAddr)
+			let unitPriceUSDC6 = '0'
+			try {
+				const factoryAbi = ['function quoteUnitPointInUSDC6(address) view returns (uint256)']
+				const factory = new ethers.Contract(BASE_CARD_FACTORY, factoryAbi, providerBase)
+				const up = await factory.quoteUnitPointInUSDC6(BASE_CCSA_CARD_ADDRESS)
+				unitPriceUSDC6 = String(up)
+			} catch (_) { /* ignore */ }
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
 			const cards: Array<{ cardAddress: string; cardName: string; cardType: string; points: string; points6: string; cardCurrency: string; nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }> }> = []
 			for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
@@ -610,6 +617,7 @@ const routing = ( router: Router ) => {
 				cardCurrency: firstCard?.cardCurrency ?? 'CAD',
 				cards,
 				nfts: firstCard?.nfts ?? [],
+				unitPriceUSDC6,
 			}
 			logger(Colors.green(`[getWalletAssets] wallet=${eoa} aa=${aaAddr} 成功`))
 			return res.status(200).json(result).end()
@@ -1475,6 +1483,9 @@ const routing = ( router: Router ) => {
 		}
 		logger(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`)
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true))
+		if (body?.openContainerPayload) {
+			logger(Colors.cyan(`[AAtoEOA] [DEBUG] openContainerPayload JSON (for debug): ${JSON.stringify(body.openContainerPayload)}`))
+		}
 
 		if (body.containerPayload) {
 			const preCheck = ContainerRelayPreCheck(body.containerPayload)

@@ -967,6 +967,7 @@ const routing = ( router: Router ) => {
 			}
 
 			if (body.openContainerPayload) {
+				logger(Colors.cyan(`[AAtoEOA] [DEBUG] Master openContainerPayload JSON: ${JSON.stringify(body.openContainerPayload)}`))
 				const preCheck = OpenContainerRelayPreCheck(body.openContainerPayload)
 				if (!preCheck.success) {
 					logger(Colors.red(`[AAtoEOA] master OpenContainer validation FAIL: ${preCheck.error}`))
