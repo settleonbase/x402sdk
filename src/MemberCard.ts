@@ -1095,6 +1095,9 @@ export type ContainerRelayPayload = {
 	signature: string
 }
 
+/** 客户端提交的未签名 container（供 payByNfcUidSignContainer 使用，服务端用 UID 私钥签名后 relay） */
+export type ContainerRelayPayloadUnsigned = Omit<ContainerRelayPayload, 'signature'>
+
 export const ContainerRelayPool: {
 	containerPayload: ContainerRelayPayload
 	currency?: string | string[]
@@ -1996,6 +1999,26 @@ export const ContainerRelayPreCheck = (payload: ContainerRelayPayload | undefine
 	const sigLen = sigHex.length <= 2 ? 0 : (sigHex.length - 2) / 2
 	if (sigLen !== 65) return { success: false, error: `containerPayload.signature must be 65 bytes (130 hex chars), got ${sigLen}` }
 	logger(`[AAtoEOA/Container] pre-check OK account=${payload.account} to=${payload.to} items=${payload.items.length}`)
+	return { success: true }
+}
+
+/** 预检：未签名 container（供 payByNfcUidSignContainer 使用） */
+export const ContainerRelayPreCheckUnsigned = (payload: ContainerRelayPayloadUnsigned | undefined): { success: boolean; error?: string } => {
+	if (!payload || typeof payload !== 'object') return { success: false, error: 'containerPayload required' }
+	if (!ethers.isAddress(payload.account)) return { success: false, error: 'containerPayload.account must be a valid address' }
+	if (!ethers.isAddress(payload.to)) return { success: false, error: 'containerPayload.to must be a valid address' }
+	if (!Array.isArray(payload.items) || payload.items.length === 0) return { success: false, error: 'containerPayload.items must be a non-empty array' }
+	for (let i = 0; i < payload.items.length; i++) {
+		const it = payload.items[i]
+		if (it == null || typeof it !== 'object') return { success: false, error: `containerPayload.items[${i}] invalid` }
+		if (typeof it.kind !== 'number') return { success: false, error: `containerPayload.items[${i}].kind must be number` }
+		if (!ethers.isAddress(it.asset)) return { success: false, error: `containerPayload.items[${i}].asset must be address` }
+		if (it.amount === undefined || it.amount === null) return { success: false, error: `containerPayload.items[${i}].amount required` }
+		if (it.tokenId === undefined || it.tokenId === null) return { success: false, error: `containerPayload.items[${i}].tokenId required` }
+		if (it.data === undefined || it.data === null) return { success: false, error: `containerPayload.items[${i}].data required` }
+	}
+	if (payload.nonce === undefined || payload.nonce === null) return { success: false, error: 'containerPayload.nonce required' }
+	if (payload.deadline === undefined || payload.deadline === null) return { success: false, error: 'containerPayload.deadline required' }
 	return { success: true }
 }
 
@@ -4429,6 +4452,144 @@ export const payByNfcUidOpenContainer = async (params: {
 	} catch (e: any) {
 		logger(Colors.red(`[payByNfcUidContainer] failed: ${e?.message ?? e}`))
 		return { pushed: false, error: e?.shortMessage ?? e?.message ?? 'Container relay failed' }
+	}
+}
+
+/** Android 构建 container 前的准备：返回 account、nonce、deadline、payeeAA、unitPriceUSDC6，供客户端 Smart Routing 后组装 items 并调用 payByNfcUidSignContainer */
+export const payByNfcUidPrepare = async (params: {
+	uid: string
+	payee: string
+	amountUsdc6: string
+}): Promise<{
+	ok: boolean
+	account?: string
+	nonce?: string
+	deadline?: string
+	payeeAA?: string
+	unitPriceUSDC6?: string
+	error?: string
+}> => {
+	const { uid, payee, amountUsdc6 } = params
+	const amountBig = BigInt(amountUsdc6)
+	if (amountBig <= 0n) return { ok: false, error: 'Invalid amountUsdc6' }
+	const privateKey = await getNfcCardPrivateKeyByUid(uid.trim())
+	if (!privateKey) {
+		logger(Colors.red(`[payByNfcUidPrepare] getNfcCardPrivateKeyByUid null uid=${uid.slice(0, 16)}...`))
+		return { ok: false, error: '不存在该卡' }
+	}
+	if (Settle_ContractPool.length === 0) return { ok: false, error: 'Settle_ContractPool empty' }
+	const SC = Settle_ContractPool[0]
+	try {
+		const wallet = new ethers.Wallet(privateKey)
+		const eoa = await wallet.getAddress()
+		const aa = await SC.aaAccountFactoryPaymaster.primaryAccountOf(eoa)
+		if (!aa || aa === ethers.ZeroAddress) {
+			return { ok: false, error: 'NO_AA' }
+		}
+		const aaCode = await SC.walletBase.provider!.getCode(aa)
+		if (!aaCode || aaCode === '0x') return { ok: false, error: 'NO_AA' }
+		let toResolved = ethers.getAddress(payee)
+		const payeeCode = await SC.walletBase.provider!.getCode(toResolved)
+		const isPayeeEOA = !payeeCode || payeeCode === '0x'
+		if (isPayeeEOA) {
+			let payeeAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(toResolved)
+			if (!payeeAA || payeeAA === ethers.ZeroAddress) {
+				try {
+					const { accountAddress } = await DeployingSmartAccount(toResolved, SC.aaAccountFactoryPaymaster)
+					if (accountAddress) payeeAA = accountAddress
+				} catch (_) { /* ignore */ }
+			}
+			if (payeeAA && payeeAA !== ethers.ZeroAddress) toResolved = payeeAA
+		}
+		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aa, 'relayed')
+		const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
+		let unitPriceUSDC6 = 0n
+		try {
+			const { unitPriceUSDC6: up } = await quotePointsForUSDC_raw(BASE_CCSA_CARD_ADDRESS, 1_000_000n, SC.baseFactoryPaymaster)
+			unitPriceUSDC6 = up
+		} catch (e) {
+			logger(Colors.yellow(`[payByNfcUidPrepare] quote failed: ${(e as Error)?.message}`))
+			return { ok: false, error: 'Quote failed' }
+		}
+		return {
+			ok: true,
+			account: aa,
+			nonce: nonce.toString(),
+			deadline: deadline.toString(),
+			payeeAA: toResolved,
+			unitPriceUSDC6: unitPriceUSDC6.toString(),
+		}
+	} catch (e: any) {
+		logger(Colors.red(`[payByNfcUidPrepare] failed: ${e?.message ?? e}`))
+		return { ok: false, error: e?.shortMessage ?? e?.message ?? 'Prepare failed' }
+	}
+}
+
+/** 服务端用 UID 私钥对 Android 提交的未签名 container 签名并 relay */
+export const payByNfcUidSignContainer = async (params: {
+	uid: string
+	containerPayload: ContainerRelayPayloadUnsigned
+	amountUsdc6: string
+	res: Response
+}): Promise<{ pushed: boolean; error?: string }> => {
+	const { uid, containerPayload, amountUsdc6, res } = params
+	const privateKey = await getNfcCardPrivateKeyByUid(uid.trim())
+	if (!privateKey) {
+		logger(Colors.red(`[payByNfcUidSignContainer] getNfcCardPrivateKeyByUid null uid=${uid.slice(0, 16)}...`))
+		return { pushed: false, error: '不存在该卡' }
+	}
+	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
+	const wallet = new ethers.Wallet(privateKey)
+	const eoa = await wallet.getAddress()
+	const aa = (await Settle_ContractPool[0].aaAccountFactoryPaymaster.primaryAccountOf(eoa)) ?? ethers.ZeroAddress
+	if (aa === ethers.ZeroAddress || ethers.getAddress(containerPayload.account) !== aa) {
+		return { pushed: false, error: 'account 与 UID 对应的 AA 不一致' }
+	}
+	try {
+		const itemsHash = hashContainerItems(containerPayload.items)
+		const domain = {
+			name: 'BeamioAccount',
+			version: '1',
+			chainId: BASE_CHAIN_ID,
+			verifyingContract: containerPayload.account as `0x${string}`,
+		}
+		const types = {
+			ContainerMain: [
+				{ name: 'account', type: 'address' },
+				{ name: 'to', type: 'address' },
+				{ name: 'itemsHash', type: 'bytes32' },
+				{ name: 'nonce', type: 'uint256' },
+				{ name: 'deadline', type: 'uint256' },
+			],
+		}
+		const message = {
+			account: containerPayload.account,
+			to: containerPayload.to,
+			itemsHash,
+			nonce: BigInt(containerPayload.nonce),
+			deadline: BigInt(containerPayload.deadline),
+		}
+		const sig = await wallet.signTypedData(domain, types, message)
+		const signed: ContainerRelayPayload = {
+			...containerPayload,
+			signature: sig,
+		}
+		const preCheck = ContainerRelayPreCheck(signed)
+		if (!preCheck.success) return { pushed: false, error: preCheck.error }
+		ContainerRelayPool.push({
+			containerPayload: signed,
+			currency: 'CAD',
+			currencyAmount: ethers.formatUnits(BigInt(amountUsdc6), 6),
+			forText: `NFC pay uid=${uid.slice(0, 12)}...`,
+			amountUSDC6: amountUsdc6,
+			res,
+		})
+		logger(Colors.green(`[payByNfcUidSignContainer] pushed uid=${uid.slice(0, 12)}... items=${containerPayload.items.length}`))
+		ContainerRelayProcess().catch((err: any) => logger(Colors.red('[ContainerRelayProcess] unhandled:'), err?.message ?? err))
+		return { pushed: true }
+	} catch (e: any) {
+		logger(Colors.red(`[payByNfcUidSignContainer] failed: ${e?.message ?? e}`))
+		return { pushed: false, error: e?.shortMessage ?? e?.message ?? 'Sign failed' }
 	}
 }
 

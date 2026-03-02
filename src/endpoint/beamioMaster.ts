@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -1080,6 +1080,43 @@ const routing = ( router: Router ) => {
 			}
 			await registerNfcCardToDb({ uid: uid.trim(), privateKey: privateKey.trim() })
 			return res.status(200).json({ ok: true }).end()
+		})
+
+		/** POST /api/payByNfcUidPrepare - Android 构建 container 前的准备，返回 account、nonce、deadline、payeeAA、unitPriceUSDC6 */
+		router.post('/payByNfcUidPrepare', async (req, res) => {
+			const { uid, payee, amountUsdc6 } = req.body as { uid?: string; payee?: string; amountUsdc6?: string }
+			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+				return res.status(400).json({ ok: false, error: 'Missing uid' })
+			}
+			if (!payee || !ethers.isAddress(payee)) {
+				return res.status(400).json({ ok: false, error: 'Invalid payee' })
+			}
+			if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
+				return res.status(400).json({ ok: false, error: 'Invalid amountUsdc6' })
+			}
+			const result = await payByNfcUidPrepare({ uid: uid.trim(), payee: ethers.getAddress(payee), amountUsdc6 })
+			return res.status(result.ok ? 200 : 400).json(result).end()
+		})
+
+		/** POST /api/payByNfcUidSignContainer - 接受 Android 打包的未签名 container，用 UID 私钥签名后 relay */
+		router.post('/payByNfcUidSignContainer', async (req, res) => {
+			const { uid, containerPayload, amountUsdc6 } = req.body as { uid?: string; containerPayload?: ContainerRelayPayloadUnsigned; amountUsdc6?: string }
+			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+				return res.status(400).json({ success: false, error: 'Missing uid' })
+			}
+			if (!containerPayload || typeof containerPayload !== 'object') {
+				return res.status(400).json({ success: false, error: 'Missing containerPayload' })
+			}
+			const preCheck = ContainerRelayPreCheckUnsigned(containerPayload)
+			if (!preCheck.success) {
+				return res.status(400).json({ success: false, error: preCheck.error }).end()
+			}
+			if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
+				return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
+			}
+			const result = await payByNfcUidSignContainer({ uid: uid.trim(), containerPayload, amountUsdc6, res })
+			if (result.pushed) return
+			return res.status(400).json({ success: false, error: result.error }).end()
 		})
 
 		/** POST /api/payByNfcUid - 以 UID 支付：Smart Routing 聚合 CCSA+USDC 扣款，无 AA 时回退纯 USDC 转账 */

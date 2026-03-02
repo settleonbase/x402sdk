@@ -11,7 +11,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
@@ -485,6 +485,7 @@ const routing = ( router: Router ) => {
 			const result = {
 				ok: true,
 				address: eoa,
+				aaAddress: aaAddr || undefined,
 				usdcBalance,
 				cards: cardsFiltered,
 			}
@@ -614,6 +615,84 @@ const routing = ( router: Router ) => {
 		}
 		logger(Colors.green('server /api/registerNfcCard preCheck OK, forwarding to master'))
 		postLocalhost('/api/registerNfcCard', { uid: uid.trim(), privateKey: privateKey.trim() }, res)
+	})
+
+	/** POST /api/payByNfcUidPrepare - Android 构建 container 前的准备（读操作，Cluster 可直处理或转发 Master） */
+	router.post('/payByNfcUidPrepare', async (req, res) => {
+		const { uid, payee, amountUsdc6 } = req.body as { uid?: string; payee?: string; amountUsdc6?: string }
+		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+			return res.status(400).json({ ok: false, error: 'Missing uid' })
+		}
+		if (!payee || !ethers.isAddress(payee)) {
+			return res.status(400).json({ ok: false, error: 'Invalid payee' })
+		}
+		if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
+			return res.status(400).json({ ok: false, error: 'Invalid amountUsdc6' })
+		}
+		logger(Colors.green(`[payByNfcUidPrepare] Cluster preCheck OK forwarding to master`))
+		postLocalhost('/api/payByNfcUidPrepare', { uid: uid.trim(), payee: ethers.getAddress(payee), amountUsdc6 }, res)
+	})
+
+	/** POST /api/payByNfcUidSignContainer - 接受 Android 打包的未签名 container（写操作，Cluster 预检余额后转发 Master） */
+	router.post('/payByNfcUidSignContainer', async (req, res) => {
+		const { uid, containerPayload, amountUsdc6 } = req.body as { uid?: string; containerPayload?: import('../MemberCard').ContainerRelayPayloadUnsigned; amountUsdc6?: string }
+		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+			return res.status(400).json({ success: false, error: 'Missing uid' })
+		}
+		if (!containerPayload || typeof containerPayload !== 'object') {
+			return res.status(400).json({ success: false, error: 'Missing containerPayload' })
+		}
+		const preCheck = ContainerRelayPreCheckUnsigned(containerPayload)
+		if (!preCheck.success) {
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
+			return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
+		}
+		// Cluster 预检：扣款是否在余额内，不足则返回错误，不转发 Master
+		const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+		const usdcAbi = ['function balanceOf(address) view returns (uint256)']
+		const cardAbi = ['function getOwnership(address) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[])']
+		try {
+			const account = ethers.getAddress(containerPayload.account)
+			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
+			let usdcRequired = 0n
+			const cardRequired = new Map<string, bigint>()
+			for (const it of containerPayload.items) {
+				const amount = BigInt(it.amount)
+				if (it.kind === 0 && ethers.getAddress(it.asset).toLowerCase() === USDC_BASE.toLowerCase()) {
+					usdcRequired += amount
+				} else if (it.kind === 1) {
+					const cardAddr = ethers.getAddress(it.asset)
+					cardRequired.set(cardAddr, (cardRequired.get(cardAddr) ?? 0n) + amount)
+				}
+			}
+			const usdcPromise = usdcRequired > 0n ? usdc.balanceOf(account) : Promise.resolve(0n)
+			const cardPromises = Array.from(cardRequired.entries()).map(async ([cardAddr, required]) => {
+				const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
+				const res = await card.getOwnership(account) as [bigint, unknown[]]
+				const points = res[0]
+				return { required, points }
+			})
+			const results = await Promise.all([usdcPromise, ...cardPromises])
+			const usdcBalance = results[0] as bigint
+			const cardBalances = results.slice(1) as { required: bigint; points: bigint }[]
+			if (usdcRequired > 0n && usdcBalance < usdcRequired) {
+				logger(Colors.yellow(`[payByNfcUidSignContainer] Cluster 预检失败: USDC 余额不足 需=${usdcRequired} 有=${usdcBalance}`))
+				return res.status(400).json({ success: false, error: '余额不足' }).end()
+			}
+			for (const { required, points } of cardBalances) {
+				if (points < required) {
+					logger(Colors.yellow(`[payByNfcUidSignContainer] Cluster 预检失败: CCSA 点数不足 需=${required} 有=${points}`))
+					return res.status(400).json({ success: false, error: '余额不足' }).end()
+				}
+			}
+		} catch (e: any) {
+			logger(Colors.red(`[payByNfcUidSignContainer] Cluster 余额预检异常: ${e?.message ?? e}`))
+			return res.status(500).json({ success: false, error: '余额预检失败' }).end()
+		}
+		logger(Colors.green(`[payByNfcUidSignContainer] Cluster preCheck OK uid=${uid.slice(0, 16)}... forwarding to master`))
+		postLocalhost('/api/payByNfcUidSignContainer', { uid: uid.trim(), containerPayload, amountUsdc6 }, res)
 	})
 
 	/** POST /api/payByNfcUid - 以 UID 支付（写操作，Cluster 预检后转发 Master） */
