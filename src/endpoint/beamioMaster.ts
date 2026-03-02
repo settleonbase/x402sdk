@@ -1107,6 +1107,7 @@ const routing = ( router: Router ) => {
 			if (!containerPayload || typeof containerPayload !== 'object') {
 				return res.status(400).json({ success: false, error: 'Missing containerPayload' })
 			}
+			logger(Colors.cyan(`[payByNfcUidSignContainer] Master received Android container uid=${uid.slice(0, 16)}... amountUsdc6=${amountUsdc6}\n` + inspect(containerPayload, false, 4, true)))
 			const preCheck = ContainerRelayPreCheckUnsigned(containerPayload)
 			if (!preCheck.success) {
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
