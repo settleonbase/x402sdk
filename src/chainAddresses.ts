@@ -20,7 +20,7 @@ export const BASE_CCSA_CARD_ADDRESS = '0x2032A363BB2cf331142391fC0DAd21D6504922C
  * Base 主网基础设施卡地址（BeamioUserCard 实例）。
  * 与服务端 getWalletAssets/getUIDAssets 的基础设施卡查询保持一致。
  */
-export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xB7644DDb12656F4854dC746464af47D33C206F0E'
+export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xa86a8406B06bD6c332b4b380A0EAced822218Eff'
 
 /**
  * CoNET BUnit Airdrop 合约地址（用于 claimBUnits）。

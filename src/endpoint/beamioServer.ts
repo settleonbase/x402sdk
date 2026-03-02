@@ -17,6 +17,7 @@ import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
 	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
+	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
 ])
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
@@ -29,6 +30,7 @@ const OLD_CCSA_REDIRECTS = [
 import { masterSetup } from '../util'
 
 const BASE_CHAIN_ID = 8453
+const MINT_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('mintPointsByAdmin(address,uint256)').slice(2, 10)
 
 const ISSUED_NFT_START_ID = 100_000_000_000n
 
@@ -851,6 +853,9 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce/adminSignature' })
 		}
 		try {
+			if (!data.startsWith(MINT_POINTS_BY_ADMIN_SELECTOR)) {
+				return res.status(400).json({ success: false, error: 'executeForAdmin only supports mintPointsByAdmin (topup)' })
+			}
 			const now = Math.floor(Date.now() / 1000)
 			if (now > deadline) {
 				return res.status(400).json({ success: false, error: 'Deadline expired' })
@@ -886,6 +891,9 @@ const routing = ( router: Router ) => {
 				return res.status(403).json({ success: false, error: 'Signer is not card admin' })
 			}
 			const recipientEOA = tryParseMintPointsByAdminRecipient(data)
+			if (!recipientEOA || !ethers.isAddress(recipientEOA)) {
+				return res.status(400).json({ success: false, error: 'Invalid mintPointsByAdmin payload' })
+			}
 			const aaAddr = recipientEOA ? await resolveBeamioAccountOf(recipientEOA) : null
 			logger(Colors.green(`server /api/nfcTopup preCheck OK | uid=${uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'} | forwarding to master`))
 			postLocalhost('/api/nfcTopup', {
