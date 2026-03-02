@@ -700,18 +700,72 @@ export const nfcTopupPreparePayload = async (params: {
 	}
 	if (!recipientEOA) return { error: wallet ? 'Invalid wallet address' : 'Failed to resolve recipient from uid' }
 	const cur = (currency || 'CAD').toUpperCase()
-	let usdcAmount6: bigint
-	if (cur === 'USD' || cur === 'USDC') {
-		usdcAmount6 = ethers.parseUnits(amt, 6)
-	} else {
-		const oracle = getOracleRequest()
-		const cadRate = Number((oracle as any)?.usdcad) || 1.35
-		const usdcRate = Number((oracle as any)?.usdc) || 1
-		const usdcHuman = Number(amt) / cadRate / usdcRate
-		usdcAmount6 = ethers.parseUnits(usdcHuman.toFixed(6), 6)
+	const ONE_E6 = 1_000_000n
+	const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
+	const toRateE6 = (raw: unknown, fallback: string): bigint => {
+		const n = Number(raw)
+		if (!Number.isFinite(n) || n <= 0) return ethers.parseUnits(fallback, 6)
+		return ethers.parseUnits(n.toFixed(6), 6)
 	}
-	if (usdcAmount6 <= 0n) return { error: 'Invalid amount' }
-	const { points6 } = await quotePointsForUSDC_raw(cardAddr, usdcAmount6)
+	const amountCurrency6 = ethers.parseUnits(amt, 6)
+	if (amountCurrency6 <= 0n) return { error: 'Invalid amount' }
+
+	// 优先使用“卡币种直算 points6”，避免 currency->USDC->points 的双重向下截断造成 49.999993 这类漏档误差
+	let points6: bigint | null = null
+	try {
+		const readCard = new ethers.Contract(
+			cardAddr,
+			['function currency() view returns (uint8)', 'function pointsUnitPriceInCurrencyE6() view returns (uint256)'],
+			providerBaseBackup
+		)
+		const [cardCurrencyId, priceInCurrency6] = await Promise.all([
+			readCard.currency() as Promise<bigint>,
+			readCard.pointsUnitPriceInCurrencyE6() as Promise<bigint>
+		])
+		const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+		const cardCurrency = currencyMap[Number(cardCurrencyId)] ?? 'CAD'
+		if (cardCurrency === cur && priceInCurrency6 > 0n) {
+			points6 = ceilDiv(amountCurrency6 * ONE_E6, priceInCurrency6)
+			logger(Colors.gray(`[nfcTopupPreparePayload] direct points calc card=${cardAddr} cur=${cur} amount6=${amountCurrency6} priceE6=${priceInCurrency6} => points6=${points6}`))
+		}
+	} catch (_) {
+		// 直算失败时回退 USDC 报价路径
+	}
+
+	if (points6 == null) {
+		const oracle = getOracleRequest() as any
+		let usdcAmount6: bigint
+		if (cur === 'USD' || cur === 'USDC') {
+			usdcAmount6 = amountCurrency6
+		} else {
+			const oracleRateKey: Record<string, string> = {
+				CAD: 'usdcad',
+				EUR: 'usdeur',
+				JPY: 'usdjpy',
+				CNY: 'usdcny',
+				HKD: 'usdhkd',
+				SGD: 'usdsgd',
+				TWD: 'usdtwd',
+			}
+			const rateKey = oracleRateKey[cur] ?? 'usdcad'
+			const fallbackRate: Record<string, string> = {
+				usdcad: '1.35',
+				usdeur: '0.92',
+				usdjpy: '150',
+				usdcny: '7.2',
+				usdhkd: '7.8',
+				usdsgd: '1.35',
+				usdtwd: '31',
+			}
+			const rateE6 = toRateE6(oracle?.[rateKey], fallbackRate[rateKey] ?? '1.35')
+			usdcAmount6 = ceilDiv(amountCurrency6 * ONE_E6, rateE6)
+		}
+		if (usdcAmount6 <= 0n) return { error: 'Invalid amount' }
+		const quote = await quotePointsForUSDC_raw(cardAddr, usdcAmount6)
+		points6 = quote.points6
+		logger(Colors.gray(`[nfcTopupPreparePayload] quote path card=${cardAddr} cur=${cur} amount6=${amountCurrency6} usdc6=${usdcAmount6} => points6=${points6}`))
+	}
+
 	if (points6 <= 0n) return { error: 'quotePointsForUSDC failed' }
 	const iface = new ethers.Interface(['function mintPointsByAdmin(address toEOA, uint256 amount)'])
 	const data = iface.encodeFunctionData('mintPointsByAdmin', [recipientEOA, points6])
