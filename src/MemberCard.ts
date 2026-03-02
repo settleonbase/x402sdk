@@ -3,8 +3,10 @@ import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
 import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6, getOracleRequest } from './util'
 import { Request, Response} from 'express'
-import { resolve } from 'node:path'
+import { resolve, join } from 'node:path'
 import fs from 'node:fs'
+import { homedir } from 'node:os'
+import cluster from 'cluster'
 import { logger } from './logger'
 import { inspect } from 'util'
 import Colors from 'colors/safe'
@@ -123,9 +125,51 @@ masterSetup.settle_contractAdmin.forEach((n: string) => {
 /**
  * 启动时确保 ~/.master.json 的 settle_contractAdmin 地址都被登记为 Card Factory paymaster(admin)。
  * - 幂等：已存在则跳过
- * - 仅 owner 可写：自动在本地签名池中寻找 factory owner 对应钱包执行 changePaymasterStatus
+ * - 仅使用 settle_contractAdmin[0] 作为写入 signer，避免多 signer/multi-worker 并发 nonce 冲突
  */
 const ensureSettleAdminsAsCardFactoryAdmins = async (): Promise<void> => {
+	if (!cluster.isPrimary) {
+		logger(Colors.gray('[factory-admin-init] skip: only master process can initialize factory admins'))
+		return
+	}
+
+	const lockPath = join(homedir(), '.beamio-factory-admin-init.lock')
+	const lockTtlMs = 3 * 60 * 1000
+	let lockFd: number | null = null
+	const releaseLock = () => {
+		if (lockFd != null) {
+			try { fs.closeSync(lockFd) } catch { /* ignore */ }
+			lockFd = null
+		}
+		try { if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath) } catch { /* ignore */ }
+	}
+	const acquireLock = (): boolean => {
+		try {
+			lockFd = fs.openSync(lockPath, 'wx')
+			fs.writeFileSync(lockFd, `${process.pid} ${Date.now()}`)
+			return true
+		} catch (e: any) {
+			if (e?.code !== 'EEXIST') return false
+			try {
+				const stat = fs.statSync(lockPath)
+				if (Date.now() - stat.mtimeMs > lockTtlMs) {
+					fs.unlinkSync(lockPath)
+					lockFd = fs.openSync(lockPath, 'wx')
+					fs.writeFileSync(lockFd, `${process.pid} ${Date.now()}`)
+					return true
+				}
+			} catch {
+				// ignore
+			}
+			return false
+		}
+	}
+
+	if (!acquireLock()) {
+		logger(Colors.gray('[factory-admin-init] skip: another process is initializing factory admins'))
+		return
+	}
+
 	try {
 		if (!Settle_ContractPool.length) {
 			logger(Colors.yellow('[factory-admin-init] skip: Settle_ContractPool is empty'))
@@ -138,22 +182,40 @@ const ensureSettleAdminsAsCardFactoryAdmins = async (): Promise<void> => {
 			providerBaseBackup
 		)
 
-		const ownerOnChain = String(await readOnlyFactory.owner()).toLowerCase()
-		const ownerSC = Settle_ContractPool.find(sc => sc.walletBase.address.toLowerCase() === ownerOnChain)
-		if (!ownerSC) {
+		const ownerOnChain = String(await readOnlyFactory.owner())
+		const ownerOnChainLower = ownerOnChain.toLowerCase()
+		const ownerPk = masterSetup?.settle_contractAdmin?.[0]
+		if (!ownerPk) {
+			logger(Colors.yellow('[factory-admin-init] skip: settle_contractAdmin[0] is empty'))
+			return
+		}
+		const ownerWallet = new ethers.Wallet(ownerPk, providerBaseBackup1)
+		if (ownerWallet.address.toLowerCase() !== ownerOnChainLower) {
 			logger(
 				Colors.yellow(
-					`[factory-admin-init] skip: factory owner ${ownerOnChain} not found in settle_contractAdmin list`
+					`[factory-admin-init] skip: settle_contractAdmin[0]=${ownerWallet.address} is not factory owner (${ownerOnChain})`
 				)
 			)
 			return
 		}
+		const ownerFactory = new ethers.Contract(
+			BeamioUserCardFactoryPaymasterV2,
+			BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
+			ownerWallet
+		)
 
-		for (const sc of Settle_ContractPool) {
-			const adminAddr = sc.walletBase.address
+		// 从本地配置列表构造目标 admin 地址（去重）
+		const adminTargets = [...new Set(Settle_ContractPool.map(sc => sc.walletBase.address.toLowerCase()))]
+			.map((addrLower) => {
+				const found = Settle_ContractPool.find(sc => sc.walletBase.address.toLowerCase() === addrLower)
+				return found?.walletBase.address
+			})
+			.filter((a): a is string => !!a)
+
+		for (const adminAddr of adminTargets) {
 			const adminLower = adminAddr.toLowerCase()
 			// owner 默认具备 onlyPaymaster 权限，不需要写入 isPaymaster
-			if (adminLower === ownerOnChain) {
+			if (adminLower === ownerOnChainLower) {
 				continue
 			}
 
@@ -170,19 +232,40 @@ const ensureSettleAdminsAsCardFactoryAdmins = async (): Promise<void> => {
 			}
 
 			try {
-				const tx = await ownerSC.baseFactoryPaymaster.changePaymasterStatus(adminAddr, true)
+				const tx = await ownerFactory.changePaymasterStatus(adminAddr, true)
 				await tx.wait()
 				logger(Colors.green(`[factory-admin-init] added paymaster(admin): ${adminAddr}`))
 			} catch (e: any) {
-				logger(Colors.red(`[factory-admin-init] add paymaster(admin) failed for ${adminAddr}: ${e?.message ?? e}`))
+				// 多进程并发场景：可能出现 nonce too low；此时再读一次链上状态，若已是 paymaster 视为成功
+				const msg = String(e?.message ?? e)
+				const isNonceRace =
+					msg.includes('nonce too low') ||
+					msg.includes('nonce has already been used') ||
+					e?.code === 'NONCE_EXPIRED'
+				if (isNonceRace) {
+					try {
+						const nowPaymaster = !!(await readOnlyFactory.isPaymaster(adminAddr))
+						if (nowPaymaster) {
+							logger(Colors.yellow(`[factory-admin-init] nonce race but admin already set: ${adminAddr}`))
+							continue
+						}
+					} catch {
+						// ignore and fall through to error log
+					}
+				}
+				logger(Colors.red(`[factory-admin-init] add paymaster(admin) failed for ${adminAddr}: ${msg}`))
 			}
 		}
 	} catch (e: any) {
 		logger(Colors.red(`[factory-admin-init] unexpected error: ${e?.message ?? e}`))
+	} finally {
+		releaseLock()
 	}
 }
 
-void ensureSettleAdminsAsCardFactoryAdmins()
+if (cluster.isPrimary) {
+	void ensureSettleAdminsAsCardFactoryAdmins()
+}
 
 
 
