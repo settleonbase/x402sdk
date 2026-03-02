@@ -12,7 +12,7 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, BASE_AA_FACTORY, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
+import { BASE_AA_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -565,31 +565,51 @@ const routing = ( router: Router ) => {
 			]
 			const usdcAbi = ['function balanceOf(address) view returns (uint256)']
 			const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
-			const card = new ethers.Contract(BASE_CCSA_CARD_ADDRESS, cardAbi, providerBase)
+			const cardAddresses: { address: string; name: string; type: string }[] = [
+				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
+				...(DEPRECATED_INFRA_CARDS.has(BEAMIO_USER_CARD_ASSET_ADDRESS.toLowerCase()) ? [] : [{ address: BEAMIO_USER_CARD_ASSET_ADDRESS, name: 'CashTrees Card', type: 'infrastructure' }]),
+			]
 			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
-			const [[pointsBalance, nfts], currencyNum, usdcBalanceRaw] = await Promise.all([
-				card.getOwnershipByEOA(eoa),
-				card.currency(),
-				usdc.balanceOf(aaAddr),
-			])
+			const usdcBalanceRaw = await usdc.balanceOf(aaAddr)
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
-			const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
+			const cards: Array<{ cardAddress: string; cardName: string; cardType: string; points: string; points6: string; cardCurrency: string; nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }> }> = []
+			for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
+				try {
+					const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
+					const [[pointsBalance, nfts], currencyNum] = await Promise.all([
+						card.getOwnershipByEOA(eoa),
+						card.currency(),
+					])
+					const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
+					cards.push({
+						cardAddress: cardAddr,
+						cardName,
+						cardType,
+						points: ethers.formatUnits(pointsBalance, 6),
+						points6: String(pointsBalance),
+						cardCurrency: currency,
+						nfts: nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
+							tokenId: nft.tokenId.toString(),
+							attribute: nft.attribute.toString(),
+							tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
+							expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
+							isExpired: nft.isExpired,
+						})),
+					})
+				} catch (_) { /* skip failed card */ }
+			}
+			const firstCard = cards[0]
 			const result = {
 				ok: true,
 				address: eoa,
 				aaAddress: aaAddr,
-				cardAddress: BASE_CCSA_CARD_ADDRESS,
-				points: ethers.formatUnits(pointsBalance, 6),
-				points6: String(pointsBalance),
+				cardAddress: firstCard?.cardAddress ?? BASE_CCSA_CARD_ADDRESS,
+				points: firstCard?.points ?? '0',
+				points6: firstCard?.points6 ?? '0',
 				usdcBalance: ethers.formatUnits(usdcBalanceRaw, 6),
-				cardCurrency: currency,
-				nfts: nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
-					tokenId: nft.tokenId.toString(),
-					attribute: nft.attribute.toString(),
-					tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
-					expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
-					isExpired: nft.isExpired,
-				})),
+				cardCurrency: firstCard?.cardCurrency ?? 'CAD',
+				cards,
+				nfts: firstCard?.nfts ?? [],
 			}
 			logger(Colors.green(`[getWalletAssets] wallet=${eoa} aa=${aaAddr} 成功`))
 			return res.status(200).json(result).end()
