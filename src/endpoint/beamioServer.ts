@@ -554,8 +554,9 @@ const routing = ( router: Router ) => {
 
 	/** POST /api/getWalletAssets - 根据 wallet 查询资产。先确定是 AA 或 EOA：若 EOA 则推算 AA，检查 AA 存在后显示该 AA 资产。用于 Scan QR 获得的 beamio URL */
 	router.post('/getWalletAssets', async (req, res) => {
-		const { wallet } = req.body as { wallet?: string }
-		logger(Colors.cyan(`[getWalletAssets] 收到请求 wallet=${wallet ?? '(undefined)'}`))
+		const { wallet, for: forLabel } = req.body as { wallet?: string; for?: string }
+		const isPostPayment = forLabel === 'postPaymentBalance'
+		logger(Colors.cyan(`[getWalletAssets] 收到请求 wallet=${wallet ?? '(undefined)'}${isPostPayment ? ' [扣款后拉取余额]' : ''}`))
 		if (!wallet || typeof wallet !== 'string' || !wallet.trim()) {
 			const err = { ok: false, error: 'Missing wallet' }
 			logger(Colors.yellow(`[getWalletAssets] 返回 400: ${JSON.stringify(err)}`))
@@ -630,7 +631,7 @@ const routing = ( router: Router ) => {
 				if (uc && uc !== ethers.ZeroAddress) beamioUserCard = ethers.getAddress(uc)
 			} catch (_) { /* ignore */ }
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
-			const cards: Array<{ cardAddress: string; cardName: string; cardType: string; points: string; points6: string; cardCurrency: string; nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }> }> = []
+			const cards: Array<{ cardAddress: string; cardName: string; cardType: string; points: string; points6: string; cardCurrency: string; cardBackground?: string; cardImage?: string; tierName?: string; tierDescription?: string; nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }> }> = []
 			for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
 				try {
 					const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
@@ -639,6 +640,59 @@ const routing = ( router: Router ) => {
 						card.currency(),
 					])
 					const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
+					const nftList = nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
+						tokenId: nft.tokenId.toString(),
+						attribute: nft.attribute.toString(),
+						tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
+						expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
+						isExpired: nft.isExpired,
+					}))
+					let cardBackground: string | undefined
+					let cardImage: string | undefined
+					let tierName: string | undefined
+					let tierDescription: string | undefined
+					const withTokenId = nftList.filter((n: { tokenId: string }) => Number(n.tokenId) > 0)
+					const bestNft = withTokenId.length > 0 ? withTokenId.reduce((a: { tokenId: string; tier: string }, b: { tokenId: string; tier: string }) => (Number(b.tokenId) > Number(a.tokenId) ? b : a)) : null
+					if (bestNft) {
+						try {
+							const cardRow = await getCardByAddress(cardAddr)
+							let tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestNft.tokenId)
+							if (!tierMeta && cardRow?.cardOwner) {
+								tierMeta = await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, bestNft.tokenId)
+							}
+							if (tierMeta && typeof tierMeta === 'object') {
+								const props = tierMeta.properties as Record<string, unknown> | undefined
+								const bg = (props?.background_color ?? tierMeta.background_color) as string | undefined
+								if (bg && typeof bg === 'string' && bg.trim()) cardBackground = bg.trim().startsWith('#') ? bg.trim() : `#${bg.trim().replace(/^#/, '')}`
+								const img = (props?.image ?? tierMeta.image) as string | undefined
+								if (img && typeof img === 'string' && img.trim()) cardImage = img.trim()
+								tierName = (props?.tier_name ?? tierMeta.name) as string | undefined
+								if (tierName && typeof tierName === 'string' && tierName.trim()) tierName = tierName.trim()
+								else tierName = undefined
+								tierDescription = (props?.tier_description ?? tierMeta.description) as string | undefined
+								if (tierDescription && typeof tierDescription === 'string' && tierDescription.trim()) tierDescription = tierDescription.trim()
+								else tierDescription = undefined
+							}
+							if ((!tierName || !tierDescription || !cardBackground || !cardImage) && cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
+								const tiersRaw = cardRow.metadata.tiers as Array<{ index?: number; minUsdc6?: string; name?: string; description?: string; image?: string; backgroundColor?: string }>
+								const minUsdc6Num = (t: { minUsdc6?: string }) => { const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''; const n = parseInt(s, 10); return Number.isNaN(n) ? Infinity : n }
+								const tiersSorted = [...tiersRaw].sort((a, b) => minUsdc6Num(a) - minUsdc6Num(b))
+								const tierIndexChain = bestNft.tier === 'Default/Max' ? 0 : (parseInt(bestNft.tier, 10) || 0)
+								const t = bestNft.tier === 'Default/Max' ? tiersSorted[0] : (tiersRaw.find((x: { index?: number }, i: number) => (x.index != null ? x.index : i) === tierIndexChain) ?? tiersRaw[tierIndexChain])
+								if (t) {
+									if (!tierName && t.name && String(t.name).trim()) tierName = String(t.name).trim()
+									if (!tierDescription && t.description && String(t.description).trim()) tierDescription = String(t.description).trim()
+									if (!cardImage && t.image && String(t.image).trim()) cardImage = String(t.image).trim()
+									if (!cardBackground && t.backgroundColor && String(t.backgroundColor).trim()) {
+										const bg = String(t.backgroundColor).trim()
+										cardBackground = bg.startsWith('#') ? bg : `#${bg.replace(/^#/, '')}`
+									}
+								}
+								if (!tierName && (bestNft.tier === 'Default/Max' || tierIndexChain === 0)) tierName = 'Default'
+								else if (!tierName) tierName = `Tier ${tierIndexChain + 1}`
+							}
+						} catch (_) { /* ignore */ }
+					}
 					cards.push({
 						cardAddress: cardAddr,
 						cardName,
@@ -646,13 +700,11 @@ const routing = ( router: Router ) => {
 						points: ethers.formatUnits(pointsBalance, 6),
 						points6: String(pointsBalance),
 						cardCurrency: currency,
-						nfts: nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
-							tokenId: nft.tokenId.toString(),
-							attribute: nft.attribute.toString(),
-							tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
-							expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
-							isExpired: nft.isExpired,
-						})),
+						...(cardBackground != null && { cardBackground }),
+						...(cardImage != null && { cardImage }),
+						...(tierName != null && { tierName }),
+						...(tierDescription != null && { tierDescription }),
+						nfts: nftList,
 					})
 				} catch (_) { /* skip failed card */ }
 			}
@@ -671,7 +723,9 @@ const routing = ( router: Router ) => {
 				unitPriceUSDC6,
 				beamioUserCard: beamioUserCard || undefined,
 			}
-			logger(Colors.green(`[getWalletAssets] wallet=${eoa} aa=${aaAddr} 成功`))
+			const resultJson = JSON.stringify(result, null, 2)
+			logger(Colors.cyan(`[getWalletAssets] 返回客户端 JSON (wallet=${eoa}):\n${resultJson}`))
+			logger(Colors.green(`[getWalletAssets] wallet=${eoa} aa=${aaAddr} 成功 cards=${cards.length}`))
 			return res.status(200).json(result).end()
 		} catch (e: any) {
 			const msg = e?.shortMessage ?? e?.message ?? ''
