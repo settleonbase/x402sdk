@@ -699,6 +699,29 @@ export const nfcTopupPreparePayload = async (params: {
 		recipientEOA = await getNfcRecipientAddressByUid(uid.trim())
 	}
 	if (!recipientEOA) return { error: wallet ? 'Invalid wallet address' : 'Failed to resolve recipient from uid' }
+
+	// 会员卡校验：用户必须有 NFT # in [NFT_START_ID, ISSUED_NFT_START_ID) 才能充值
+	const NFT_START_ID = 100
+	const ISSUED_NFT_START_ID = 100_000_000_000
+	try {
+		const cardRead = new ethers.Contract(
+			cardAddr,
+			['function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)'],
+			providerBaseBackup
+		)
+		const [, nfts] = await cardRead.getOwnershipByEOA(recipientEOA) as [bigint, Array<{ tokenId: bigint }>]
+		const hasMembership = Array.isArray(nfts) && nfts.some((n: { tokenId: bigint }) => {
+			const tid = Number(n.tokenId)
+			return tid >= NFT_START_ID && tid < ISSUED_NFT_START_ID
+		})
+		if (!hasMembership) {
+			return { error: 'Top-up not allowed without membership card. Please purchase a card first.' }
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[nfcTopupPreparePayload] membership check failed: ${e?.message ?? e}`))
+		return { error: 'Top-up not allowed without membership card. Please purchase a card first.' }
+	}
+
 	const cur = (currency || 'CAD').toUpperCase()
 	const ONE_E6 = 1_000_000n
 	const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
