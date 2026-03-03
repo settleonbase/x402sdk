@@ -28,7 +28,7 @@ const ACTION_SYNC_TOKEN_ABI = [
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS } from './chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
 import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getCardByAddress, upsertNftTierMetadata } from './db'
@@ -1895,6 +1895,47 @@ export const claimBUnitsProcess = async () => {
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => claimBUnitsProcess(), 3000)
+	}
+}
+
+const MERCHANT_POS_MANAGEMENT_ABI = [
+	'function registerPOSBySignature(address merchant, address pos, uint256 deadline, bytes32 nonce, bytes calldata signature)',
+] as const
+
+export type RegisterPOSPayload = {
+	merchant: string
+	pos: string
+	deadline: number
+	nonce: string
+	signature: string
+	res?: Response
+}
+
+export const registerPOSPool: RegisterPOSPayload[] = []
+
+export const registerPOSProcess = async () => {
+	const obj = registerPOSPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		registerPOSPool.unshift(obj)
+		return setTimeout(() => registerPOSProcess(), 3000)
+	}
+	logger(Colors.cyan(`[registerPOSProcess] merchant=${obj.merchant.slice(0, 10)}... pos=${obj.pos.slice(0, 10)}...`))
+	try {
+		const posMgmt = new ethers.Contract(MERCHANT_POS_MANAGEMENT_CONET, MERCHANT_POS_MANAGEMENT_ABI, SC.walletConet)
+		const nonceHex = obj.nonce.startsWith('0x') ? obj.nonce : '0x' + obj.nonce
+		const tx = await posMgmt.registerPOSBySignature(obj.merchant, obj.pos, obj.deadline, nonceHex, obj.signature)
+		logger(Colors.green(`[registerPOSProcess] tx=${tx.hash}`))
+		await tx.wait()
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red(`[registerPOSProcess] failed:`), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => registerPOSProcess(), 3000)
 	}
 }
 

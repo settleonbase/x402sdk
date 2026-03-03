@@ -12,7 +12,7 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS } from '../chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -908,6 +908,77 @@ const routing = ( router: Router ) => {
 			logger(Colors.red(`[nfcTopup] preCheck failed: ${e?.message ?? e}`))
 			return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'PreCheck failed' })
 		}
+	})
+
+	/** POST /api/registerPOS - 商家 manager 离线签字登记 POS，Cluster 预检后转发 Master 代付 Gas */
+	router.post('/registerPOS', async (req, res) => {
+		const { merchant, pos, deadline, nonce, signature } = req.body as {
+			merchant?: string
+			pos?: string
+			deadline?: number
+			nonce?: string
+			signature?: string
+		}
+		if (!merchant || !ethers.isAddress(merchant.trim())) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid merchant address' })
+		}
+		if (!pos || !ethers.isAddress(pos.trim())) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid pos address' })
+		}
+		const now = Math.floor(Date.now() / 1000)
+		if (typeof deadline !== 'number' || deadline <= now) {
+			return res.status(400).json({ success: false, error: 'Deadline must be in the future' })
+		}
+		if (!nonce || typeof nonce !== 'string' || nonce.trim().length === 0) {
+			return res.status(400).json({ success: false, error: 'Missing nonce' })
+		}
+		const sigHex = (signature || '').trim()
+		if (!sigHex || !ethers.isHexString(sigHex)) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid signature (must be hex)' })
+		}
+		const sigLen = ethers.getBytes(sigHex).length
+		if (sigLen !== 65 && sigLen !== 64) {
+			return res.status(400).json({ success: false, error: `Invalid signature length: expected 64 or 65 bytes, got ${sigLen}` })
+		}
+		// Optional: verify signature recovers to merchant
+		try {
+			const domain = {
+				name: 'MerchantPOSManagement',
+				version: '1',
+				chainId: 224400,
+				verifyingContract: MERCHANT_POS_MANAGEMENT_CONET as `0x${string}`,
+			}
+			const types = {
+				RegisterPOS: [
+					{ name: 'merchant', type: 'address' },
+					{ name: 'pos', type: 'address' },
+					{ name: 'deadline', type: 'uint256' },
+					{ name: 'nonce', type: 'bytes32' },
+				],
+			}
+			const message = {
+				merchant: ethers.getAddress(merchant.trim()),
+				pos: ethers.getAddress(pos.trim()),
+				deadline: BigInt(deadline),
+				nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+			}
+			const digest = ethers.TypedDataEncoder.hash(domain, types, message)
+			const signer = ethers.recoverAddress(digest, sigHex)
+			if (signer.toLowerCase() !== ethers.getAddress(merchant.trim()).toLowerCase()) {
+				return res.status(403).json({ success: false, error: 'Signature does not recover to merchant' })
+			}
+		} catch (e: any) {
+			logger(Colors.red(`[registerPOS] signature verify failed: ${e?.message ?? e}`))
+			return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid signature' })
+		}
+		logger(Colors.green(`[registerPOS] Cluster preCheck OK merchant=${merchant.slice(0, 10)}... pos=${pos.slice(0, 10)}... forwarding to master`))
+		postLocalhost('/api/registerPOS', {
+			merchant: ethers.getAddress(merchant.trim()),
+			pos: ethers.getAddress(pos.trim()),
+			deadline,
+			nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+			signature: sigHex,
+		}, res)
 	})
 
 	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）。30 秒缓存 */
