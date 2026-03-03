@@ -910,77 +910,6 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** POST /api/registerPOS - 商家 manager 离线签字登记 POS，Cluster 预检后转发 Master 代付 Gas */
-	router.post('/registerPOS', async (req, res) => {
-		const { merchant, pos, deadline, nonce, signature } = req.body as {
-			merchant?: string
-			pos?: string
-			deadline?: number
-			nonce?: string
-			signature?: string
-		}
-		if (!merchant || !ethers.isAddress(merchant.trim())) {
-			return res.status(400).json({ success: false, error: 'Missing or invalid merchant address' })
-		}
-		if (!pos || !ethers.isAddress(pos.trim())) {
-			return res.status(400).json({ success: false, error: 'Missing or invalid pos address' })
-		}
-		const now = Math.floor(Date.now() / 1000)
-		if (typeof deadline !== 'number' || deadline <= now) {
-			return res.status(400).json({ success: false, error: 'Deadline must be in the future' })
-		}
-		if (!nonce || typeof nonce !== 'string' || nonce.trim().length === 0) {
-			return res.status(400).json({ success: false, error: 'Missing nonce' })
-		}
-		const sigHex = (signature || '').trim()
-		if (!sigHex || !ethers.isHexString(sigHex)) {
-			return res.status(400).json({ success: false, error: 'Missing or invalid signature (must be hex)' })
-		}
-		const sigLen = ethers.getBytes(sigHex).length
-		if (sigLen !== 65 && sigLen !== 64) {
-			return res.status(400).json({ success: false, error: `Invalid signature length: expected 64 or 65 bytes, got ${sigLen}` })
-		}
-		// Optional: verify signature recovers to merchant
-		try {
-			const domain = {
-				name: 'MerchantPOSManagement',
-				version: '1',
-				chainId: 224400,
-				verifyingContract: MERCHANT_POS_MANAGEMENT_CONET as `0x${string}`,
-			}
-			const types = {
-				RegisterPOS: [
-					{ name: 'merchant', type: 'address' },
-					{ name: 'pos', type: 'address' },
-					{ name: 'deadline', type: 'uint256' },
-					{ name: 'nonce', type: 'bytes32' },
-				],
-			}
-			const message = {
-				merchant: ethers.getAddress(merchant.trim()),
-				pos: ethers.getAddress(pos.trim()),
-				deadline: BigInt(deadline),
-				nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
-			}
-			const digest = ethers.TypedDataEncoder.hash(domain, types, message)
-			const signer = ethers.recoverAddress(digest, sigHex)
-			if (signer.toLowerCase() !== ethers.getAddress(merchant.trim()).toLowerCase()) {
-				return res.status(403).json({ success: false, error: 'Signature does not recover to merchant' })
-			}
-		} catch (e: any) {
-			logger(Colors.red(`[registerPOS] signature verify failed: ${e?.message ?? e}`))
-			return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid signature' })
-		}
-		logger(Colors.green(`[registerPOS] Cluster preCheck OK merchant=${merchant.slice(0, 10)}... pos=${pos.slice(0, 10)}... forwarding to master`))
-		postLocalhost('/api/registerPOS', {
-			merchant: ethers.getAddress(merchant.trim()),
-			pos: ethers.getAddress(pos.trim()),
-			deadline,
-			nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
-			signature: sigHex,
-		}, res)
-	})
-
 	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）。30 秒缓存 */
 	router.get('/latestCards', async (req, res) => {
 		const limit = Math.min(parseInt(String(req.query.limit || 20), 10) || 20, 100)
@@ -1913,6 +1842,76 @@ const routing = ( router: Router ) => {
 		}
 		logger(Colors.green('server /api/claimBUnits preCheck OK, forwarding to master'))
 		postLocalhost('/api/claimBUnits', preCheck.preChecked, res)
+	})
+
+	/** POST /api/removePOS - 商家 manager 离线签字删除 POS，Cluster 预检后转发 Master 代付 Gas */
+	router.post('/removePOS', async (req, res) => {
+		const { merchant, pos, deadline, nonce, signature } = req.body as {
+			merchant?: string
+			pos?: string
+			deadline?: number
+			nonce?: string
+			signature?: string
+		}
+		if (!merchant || !ethers.isAddress(merchant.trim())) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid merchant address' })
+		}
+		if (!pos || !ethers.isAddress(pos.trim())) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid pos address' })
+		}
+		const now = Math.floor(Date.now() / 1000)
+		if (typeof deadline !== 'number' || deadline <= now) {
+			return res.status(400).json({ success: false, error: 'Deadline must be in the future' })
+		}
+		if (!nonce || typeof nonce !== 'string' || nonce.trim().length === 0) {
+			return res.status(400).json({ success: false, error: 'Missing nonce' })
+		}
+		const sigHex = (signature || '').trim()
+		if (!sigHex || !ethers.isHexString(sigHex)) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid signature (must be hex)' })
+		}
+		const sigLen = ethers.getBytes(sigHex).length
+		if (sigLen !== 65 && sigLen !== 64) {
+			return res.status(400).json({ success: false, error: `Invalid signature length: expected 64 or 65 bytes, got ${sigLen}` })
+		}
+		try {
+			const domain = {
+				name: 'MerchantPOSManagement',
+				version: '1',
+				chainId: 224400,
+				verifyingContract: MERCHANT_POS_MANAGEMENT_CONET as `0x${string}`,
+			}
+			const types = {
+				RemovePOS: [
+					{ name: 'merchant', type: 'address' },
+					{ name: 'pos', type: 'address' },
+					{ name: 'deadline', type: 'uint256' },
+					{ name: 'nonce', type: 'bytes32' },
+				],
+			}
+			const message = {
+				merchant: ethers.getAddress(merchant.trim()),
+				pos: ethers.getAddress(pos.trim()),
+				deadline: BigInt(deadline),
+				nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+			}
+			const digest = ethers.TypedDataEncoder.hash(domain, types, message)
+			const signer = ethers.recoverAddress(digest, sigHex)
+			if (signer.toLowerCase() !== ethers.getAddress(merchant.trim()).toLowerCase()) {
+				return res.status(403).json({ success: false, error: 'Signature does not recover to merchant' })
+			}
+		} catch (e: any) {
+			logger(Colors.red(`[removePOS] signature verify failed: ${e?.message ?? e}`))
+			return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid signature' })
+		}
+		logger(Colors.green(`[removePOS] Cluster preCheck OK merchant=${merchant.slice(0, 10)}... pos=${pos.slice(0, 10)}... forwarding to master`))
+		postLocalhost('/api/removePOS', {
+			merchant: ethers.getAddress(merchant.trim()),
+			pos: ethers.getAddress(pos.trim()),
+			deadline,
+			nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+			signature: sigHex,
+		}, res)
 	})
 
 	/** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付，转发 master */

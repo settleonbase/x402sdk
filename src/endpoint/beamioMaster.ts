@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, registerPOSPool, registerPOSProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -1055,13 +1055,13 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** POST /api/registerPOS - 由 cluster 预检后转发，master 推入 registerPOSPool，经 Settle_ContractPool 执行 MerchantPOSManagement.registerPOSBySignature */
-		router.post('/registerPOS', (req, res) => {
+		/** POST /api/removePOS - 由 cluster 预检后转发，master 推入 removePOSPool，经 Settle_ContractPool 执行 MerchantPOSManagement.removePOSBySignature */
+		router.post('/removePOS', (req, res) => {
 			const body = req.body as { merchant?: string; pos?: string; deadline?: number; nonce?: string; signature?: string }
 			if (!body.merchant || !body.pos || body.deadline == null || !body.nonce || !body.signature) {
 				return res.status(400).json({ success: false, error: 'Missing merchant, pos, deadline, nonce, or signature' }).end()
 			}
-			registerPOSPool.push({
+			removePOSPool.push({
 				merchant: body.merchant,
 				pos: body.pos,
 				deadline: body.deadline,
@@ -1069,8 +1069,8 @@ const routing = ( router: Router ) => {
 				signature: body.signature,
 				res,
 			})
-			registerPOSProcess().catch((err: any) => {
-				logger(Colors.red('[registerPOSProcess] unhandled error:'), err?.message ?? err)
+			removePOSProcess().catch((err: any) => {
+				logger(Colors.red('[removePOSProcess] unhandled error:'), err?.message ?? err)
 			})
 		})
 

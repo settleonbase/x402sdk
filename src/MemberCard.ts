@@ -1893,16 +1893,17 @@ export const claimBUnitsProcess = async () => {
 		logger(Colors.red(`[claimBUnitsProcess] failed:`), msg)
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
-		setTimeout(() => claimBUnitsProcess(), 3000)
+	Settle_ContractPool.unshift(SC)
+	setTimeout(() => claimBUnitsProcess(), 3000)
 	}
 }
 
+/** MerchantPOSManagement removePOSBySignature：CoNET 上删除 POS */
 const MERCHANT_POS_MANAGEMENT_ABI = [
-	'function registerPOSBySignature(address merchant, address pos, uint256 deadline, bytes32 nonce, bytes calldata signature)',
+	'function removePOSBySignature(address merchant, address pos, uint256 deadline, bytes32 nonce, bytes calldata signature)',
 ] as const
 
-export type RegisterPOSPayload = {
+export type RemovePOSPayload = {
 	merchant: string
 	pos: string
 	deadline: number
@@ -1911,31 +1912,31 @@ export type RegisterPOSPayload = {
 	res?: Response
 }
 
-export const registerPOSPool: RegisterPOSPayload[] = []
+export const removePOSPool: RemovePOSPayload[] = []
 
-export const registerPOSProcess = async () => {
-	const obj = registerPOSPool.shift()
+export const removePOSProcess = async () => {
+	const obj = removePOSPool.shift()
 	if (!obj) return
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
-		registerPOSPool.unshift(obj)
-		return setTimeout(() => registerPOSProcess(), 3000)
+		removePOSPool.unshift(obj)
+		return setTimeout(() => removePOSProcess(), 3000)
 	}
-	logger(Colors.cyan(`[registerPOSProcess] merchant=${obj.merchant.slice(0, 10)}... pos=${obj.pos.slice(0, 10)}...`))
+	logger(Colors.cyan(`[removePOSProcess] merchant=${obj.merchant.slice(0, 10)}... pos=${obj.pos.slice(0, 10)}...`))
 	try {
 		const posMgmt = new ethers.Contract(MERCHANT_POS_MANAGEMENT_CONET, MERCHANT_POS_MANAGEMENT_ABI, SC.walletConet)
 		const nonceHex = obj.nonce.startsWith('0x') ? obj.nonce : '0x' + obj.nonce
-		const tx = await posMgmt.registerPOSBySignature(obj.merchant, obj.pos, obj.deadline, nonceHex, obj.signature)
-		logger(Colors.green(`[registerPOSProcess] tx=${tx.hash}`))
+		const tx = await posMgmt.removePOSBySignature(obj.merchant, obj.pos, obj.deadline, nonceHex, obj.signature)
+		logger(Colors.green(`[removePOSProcess] tx=${tx.hash}`))
 		await tx.wait()
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
 	} catch (e: any) {
 		const msg = e?.message ?? String(e)
-		logger(Colors.red(`[registerPOSProcess] failed:`), msg)
+		logger(Colors.red(`[removePOSProcess] failed:`), msg)
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
 		Settle_ContractPool.unshift(SC)
-		setTimeout(() => registerPOSProcess(), 3000)
+		setTimeout(() => removePOSProcess(), 3000)
 	}
 }
 
