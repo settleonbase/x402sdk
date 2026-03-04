@@ -1868,23 +1868,23 @@ const routing = ( router: Router ) => {
 			postLocalhost('/api/beamioTransferIndexerAccounting', body, res)
 		})
 
-	/** GET /api/checkBUnitClaimEligibility?address=0x... - 检查是否可领取 BeamioBUnits，cluster 直接读 CoNET BUnitAirdrop */
-	router.get('/checkBUnitClaimEligibility', async (req, res) => {
-		const { address } = req.query as { address?: string }
-		if (!address || !ethers.isAddress(address)) {
-			return res.status(400).json({ canClaim: false, error: 'Invalid address' })
-		}
-		try {
-			const airdrop = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, ['function hasClaimed(address) view returns (bool)', 'function claimNonces(address) view returns (uint256)'], providerConet)
-			const [hasClaimed, nonce] = await Promise.all([airdrop.hasClaimed(address), airdrop.claimNonces(address)])
-			const canClaim = !hasClaimed
-			const deadline = Math.floor(Date.now() / 1000) + 3600 // 1h from now
-			res.status(200).json({ canClaim, nonce: String(nonce), deadline })
-		} catch (e: any) {
-			logger(Colors.red('[checkBUnitClaimEligibility] error:'), e?.message ?? e)
-			res.status(500).json({ canClaim: false, error: e?.message ?? 'Failed to check eligibility' })
-		}
-	})
+		/** GET /api/checkBUnitClaimEligibility?address=0x... - 检查是否可领取 BeamioBUnits，cluster 直接读 CoNET BUnitAirdrop */
+		router.get('/checkBUnitClaimEligibility', async (req, res) => {
+			const { address } = req.query as { address?: string }
+			if (!address || !ethers.isAddress(address)) {
+				return res.status(400).json({ canClaim: false, error: 'Invalid address' })
+			}
+			try {
+				const airdrop = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, ['function hasClaimed(address) view returns (bool)', 'function claimNonces(address) view returns (uint256)'], providerConet)
+				const [hasClaimed, nonce] = await Promise.all([airdrop.hasClaimed(address), airdrop.claimNonces(address)])
+				const canClaim = !hasClaimed
+				const deadline = Math.floor(Date.now() / 1000) + 3600 // 1h from now
+				res.status(200).json({ canClaim, nonce: String(nonce), deadline })
+			} catch (e: any) {
+				logger(Colors.red('[checkBUnitClaimEligibility] error:'), e?.message ?? e)
+				res.status(500).json({ canClaim: false, error: e?.message ?? 'Failed to check eligibility' })
+			}
+		})
 
 	/** POST /api/claimBUnits - 领取 BeamioBUnits，cluster 预检后转发 master，master 使用 Settle_ContractPool 执行 claimFor */
 	router.post('/claimBUnits', async (req, res) => {
