@@ -33,11 +33,10 @@ const providerBaseBackup = new ethers.JsonRpcProvider('https://1rpc.io/base')
 
 
 const apiKey = masterSetup.CoinMarketCapAPIKey
-const oracleSC_addr = '0xe5dA73e4c714afA3D1cCdb3392A4867cBc117629'
 const managerWallet = new ethers.Wallet(masterSetup.settle_contractAdmin[0], providerConet)
 const beamioWallet = new ethers.Wallet(masterSetup.settle_contractAdmin[0], providerBaseBackup)
 const beamioWalletConet = new ethers.Wallet(masterSetup.settle_contractAdmin[0], providerConet)
-const oracleSC = new ethers.Contract(oracleSC_addr, SeamioOracle_ABI, managerWallet)
+
 const client = new CoinMarketCap(apiKey)
 ///							1 Credits
 ///		ids BNB: 1839, Dai: 4943, ETH: 1027, USDC: 3408, USDT: 825 TRX:1958
@@ -54,7 +53,7 @@ const testData1 = [
 logger(`admin wallet ${managerWallet.address} | GuardianOracle CoNET | BeamioOracle L1 ${providerBaseBackup}`)
 
 const beamioOracleBaseAddr = process.env.BASE_BEAMIO_ORACLE_ADDRESS || '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
-const beamioOracleConetAddr = process.env.CONET_BEAMIO_ORACLE_ADDRESS || '0x06a1e0D55B4db57Aa906Eff332902F5CA7a25dd4'
+const beamioOracleConetAddr = process.env.CONET_BEAMIO_ORACLE_ADDRESS || '0x373639E4004f43C508b227644139F7b0c29f3cfF'
 const beamioOracleBase = new ethers.Contract(beamioOracleBaseAddr, SeamioOracle_ABI, beamioWallet)
 const beamioOracleConet = new ethers.Contract(beamioOracleConetAddr, SeamioOracle_ABI, beamioWalletConet)
 
@@ -141,29 +140,7 @@ const updateBeamioOracle = async (fx: any, cmcQuotes: any) => {
 }
 
 const linten = 1000 * 60 * 10
-const updateOracle = async (tokenNames: string[], price: number[]) => {
-	const priceArray = price.map(n => ethers.parseEther(n.toString()))
 
-	logger(inspect(tokenNames, false, 3, true))
-	logger(inspect(price, false, 3, true))
-	logger(inspect(priceArray, false, 3, true))
-	try {
-		const tx = await oracleSC.updatePrice(tokenNames, priceArray)
-		logger(`Write to Smart Contract success! ${tx.hash}`)
-		const ts = await tx.wait()
-		
-		return ts
-	} catch (ex) {
-		logger(Colors.magenta(`updateOracle Error!`), ex)
-		return false
-	}
-}
-
-const getIDs = () => {
-	return client.getIdMap({symbol: ['BNB', 'DAI', 'ETH', 'USDT', 'USDC', 'TRX']}).then((data: any) => {
-		logger(inspect(data, false, 3, true))
-	})
-}
 
 const getUsdFxFromCoinbase = async () => {
 	const res = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=USD')
