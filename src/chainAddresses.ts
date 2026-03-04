@@ -25,7 +25,7 @@ export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xa86a8406B06bD6c332b4b380A0EAced
 /**
  * CoNET BUnit Airdrop 合约地址（用于 claimBUnits）。
  */
-export const CONET_BUNIT_AIRDROP_ADDRESS = '0x5Bf7b014190c05957cc1A84976f958674628578c'
+export const CONET_BUNIT_AIRDROP_ADDRESS = '0xb6501670EB159561b29949B474db07204c7f0A12'
 
 /**
  * CoNET 主网 MerchantPOSManagement 合约地址（商家 POS 终端登记/删除）。
