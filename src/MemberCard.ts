@@ -1907,7 +1907,8 @@ export const claimBUnitsProcess = async () => {
 	logger(Colors.cyan(`[claimBUnitsProcess] claimant=${obj.claimant} nonce=${obj.nonce}`))
 	try {
 		const airdrop = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, BUNIT_AIRDROP_ABI, SC.walletConet)
-		const tx = await airdrop.claimFor(obj.claimant, obj.nonce, obj.deadline, obj.signature)
+		// claimFor 内部会调用 syncTokenAction 向 Indexer 记账，需约 55 万 gas；gas limit 过低会导致 out of gas，claim 成功但 Indexer 无记账
+		const tx = await airdrop.claimFor(obj.claimant, obj.nonce, obj.deadline, obj.signature, { gasLimit: 1_200_000 })
 		logger(Colors.green(`[claimBUnitsProcess] tx=${tx.hash}`))
 		await tx.wait()
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
