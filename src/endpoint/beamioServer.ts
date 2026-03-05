@@ -1075,11 +1075,13 @@ const routing = ( router: Router ) => {
 		return res.status(200).json({ items: rows })
 	})
 
-	/** GET /api/ai/generateImage?prompt=... - Proxy Pollinations 图片生成，避免客户端 403/CORS。使用 gen.pollinations.ai（新端點） */
+	/** GET /api/ai/generateImage?prompt=... - Proxy Pollinations 图片生成，避免客户端 403/CORS。使用 gen.pollinations.ai，需配置 masterSetup.POLLINATIONS_API_KEY（免費 key 見 enter.pollinations.ai） */
 	router.get('/ai/generateImage', async (req, res) => {
 		const prompt = typeof req.query?.prompt === 'string' ? req.query.prompt.trim() : ''
 		const text = prompt || 'a cute avatar'
-		const url = `https://gen.pollinations.ai/image/${encodeURIComponent(text)}`
+		const apiKey = (masterSetup as { POLLINATIONS_API_KEY?: string })?.POLLINATIONS_API_KEY
+		const baseUrl = `https://gen.pollinations.ai/image/${encodeURIComponent(text)}`
+		const url = apiKey && typeof apiKey === 'string' && apiKey.trim() ? `${baseUrl}?key=${encodeURIComponent(apiKey.trim())}` : baseUrl
 		try {
 			const ctrl = new AbortController()
 			const t = setTimeout(() => ctrl.abort(), 90_000)
@@ -1090,7 +1092,10 @@ const routing = ( router: Router ) => {
 				})
 				clearTimeout(t)
 				if (!upstream.ok) {
-					logger(Colors.yellow('[ai/generateImage] upstream'), upstream.status, url)
+					logger(Colors.yellow('[ai/generateImage] upstream'), upstream.status, baseUrl)
+					if (upstream.status === 401 && !apiKey) {
+						return res.status(503).json({ error: 'Image service requires POLLINATIONS_API_KEY. Add it to ~/.master.json (free key at enter.pollinations.ai)' })
+					}
 					return res.status(upstream.status).json({ error: `Image service returned ${upstream.status}` })
 				}
 				const ct = upstream.headers.get('content-type') || 'image/png'
