@@ -1,4 +1,5 @@
 import express, { Request, Response, Router} from 'express'
+import { GoogleGenAI } from '@google/genai'
 import { getClientIp, oracleBackoud, checkSign, BeamioTransfer } from '../util'
 import { checkSmartAccount } from '../MemberCard'
 import { join, resolve } from 'node:path'
@@ -1037,6 +1038,87 @@ const routing = ( router: Router ) => {
 		} catch (err: any) {
 			logger(Colors.red('[searchHelp] error:'), err?.message ?? err)
 			return res.status(500).json({ error: err?.message ?? 'Failed to fetch issued NFTs' })
+		}
+	})
+
+	/** POST /api/ai/beamioAction - Cluster 直接调用 Gemini 2.5 Flash，根据用户意图返回 BeamioAction（读操作，无需 Master） */
+	router.post('/ai/beamioAction', async (req, res) => {
+		const apiKey = masterSetup?.GEMINI_API_KEY
+		if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) {
+			logger(Colors.yellow('[ai/beamioAction] masterSetup.GEMINI_API_KEY not configured'))
+			return res.status(503).json({ error: 'AI service unavailable: GEMINI_API_KEY not configured' })
+		}
+		const { messages, userText } = req.body as {
+			messages?: Array<{ role: 'user' | 'assistant'; content: string }>
+			userText?: string
+		}
+		if (!userText || typeof userText !== 'string' || !userText.trim()) {
+			return res.status(400).json({ error: 'Missing or invalid userText' })
+		}
+		const BEAMIO_ACTION_SCHEMA = {
+			type: 'object' as const,
+			properties: {
+				type: {
+					type: 'string' as const,
+					enum: ['pay', 'request', 'cashcode', 'fuel', 'balance', 'history', 'contact', 'add-usdc', 'card-topup', 'text'],
+				},
+				params: {
+					type: 'object' as const,
+					properties: {
+						to: { type: 'string' as const },
+						amount: { type: 'number' as const },
+						currency: { type: 'string' as const, enum: ['USD', 'USDC', 'CAD'] },
+						note: { type: 'string' as const },
+						content: { type: 'string' as const },
+						mode: { type: 'string' as const, enum: ['create', 'redeem'] },
+						query: { type: 'string' as const },
+						action: { type: 'string' as const, enum: ['view', 'pay', 'chat'] },
+						cardId: { type: 'string' as const },
+					},
+				},
+			},
+			required: ['type', 'params'],
+		}
+		const systemPrompt = `你是 Beamio 钱包助手。根据用户意图返回 JSON action。
+支持: pay(转账)、request(收款)、balance(余额)、fuel(B-Units)、add-usdc(入金)、history(历史)、contact(联系人)、cashcode(创建/兑换现金码)、card-topup(卡充值)、text(纯文本回复)。
+pay 需 to(@BeamioTag 或地址) 和 amount；request 需 amount；text 需 content。只返回合法 JSON，不要 markdown 或代码块。`
+		try {
+			const ai = new GoogleGenAI({ apiKey })
+			const history = Array.isArray(messages) ? messages : []
+			const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [
+				{ role: 'user', parts: [{ text: systemPrompt }] },
+				...history.slice(-10).map((m) => ({
+					role: (m.role === 'assistant' ? 'model' : 'user') as 'user' | 'model',
+					parts: [{ text: m.content }],
+				})),
+				{ role: 'user', parts: [{ text: userText.trim() }] },
+			]
+			const response = await ai.models.generateContent({
+				model: 'gemini-2.5-flash',
+				contents,
+				config: {
+					responseMimeType: 'application/json' as const,
+					responseSchema: BEAMIO_ACTION_SCHEMA,
+				},
+			})
+			const text = (response as { text?: string })?.text?.trim()
+			if (!text) {
+				return res.status(502).json({ error: 'Empty response from AI' })
+			}
+			let action: Record<string, unknown>
+			try {
+				action = JSON.parse(text) as Record<string, unknown>
+			} catch {
+				logger(Colors.yellow('[ai/beamioAction] Invalid JSON from AI:'), text?.slice(0, 200))
+				return res.status(502).json({ error: 'Invalid JSON from AI' })
+			}
+			if (!action || typeof action.type !== 'string' || typeof action.params !== 'object') {
+				return res.status(502).json({ error: 'Invalid action structure from AI' })
+			}
+			return res.status(200).json({ action })
+		} catch (err: any) {
+			logger(Colors.red('[ai/beamioAction] error:'), err?.message ?? err)
+			return res.status(502).json({ error: err?.message ?? 'AI request failed' })
 		}
 	})
 

@@ -30,6 +30,7 @@
 		"@types/pg": "^8.15.6"
 	},
 	"dependencies": {
+		"@google/genai": "^1.0.0",
 		"@coinbase/cdp-sdk": "^1.39.0",
 		"@coinbase/onchainkit": "^1.1.2",
 		"@coinbase/x402": "^0.7.1",

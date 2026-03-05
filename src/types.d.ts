@@ -1,4 +1,5 @@
 type IMasterSetup = {
+	GEMINI_API_KEY: string
 	CoinMarketCapAPIKey: string
 	BeamioOfficial: string
 	settle_admin: string
