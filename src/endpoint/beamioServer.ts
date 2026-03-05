@@ -1121,7 +1121,7 @@ const routing = ( router: Router ) => {
 			properties: {
 				type: {
 					type: 'string' as const,
-					enum: ['pay', 'request', 'cashcode', 'fuel', 'balance', 'history', 'contact', 'add-usdc', 'card-topup', 'text', 'custom-ui', 'edit-profile', 'send-chat'],
+					enum: ['pay', 'request', 'cashcode', 'fuel', 'balance', 'history', 'contact', 'add-usdc', 'card-topup', 'text', 'custom-ui', 'edit-profile', 'send-chat', 'generate-avatar-image'],
 				},
 				params: {
 					type: 'object' as const,
@@ -1140,6 +1140,7 @@ const routing = ( router: Router ) => {
 						action: { type: 'string' as const, enum: ['view', 'pay', 'chat'] },
 						cardId: { type: 'string' as const },
 						limit: { type: 'number' as const },
+						prompt: { type: 'string' as const },
 						ui: {
 							type: 'object' as const,
 							properties: {
@@ -1171,10 +1172,16 @@ CoNET chat infrastructure (for your understanding when answering):
 		const PROFILE_EDIT_PROMPT = `
 Profile edit (edit-profile): Update user's Beamio profile via addUser API.
 - firstName, lastName: display name. When user says "change name to X", "my name is John Smith" -> { type: "edit-profile", params: { firstName: "John", lastName: "Smith" } }.
-- avatarSeed: DiceBear AI-generated avatar. URL = https://api.dicebear.com/8.x/fun-emoji/svg?seed={seed}. When user says "generate new avatar", "change avatar", "換頭像" -> use a creative seed e.g. "beamio-{random}" or "avatar-{timestamp}". { type: "edit-profile", params: { avatarSeed: "beamio-fresh-123" } }.
+- avatarSeed: DiceBear emoji avatar (seed only). When user says "change avatar to emoji", "use DiceBear seed" -> { type: "edit-profile", params: { avatarSeed: "beamio-123" } }.
+- IMPORTANT: When user says "生成小貓頭像", "generate cat avatar", "為我生成貓咪圖片", "get a cat image" -> use generate-avatar-image (returns actual image), NOT edit-profile.
 - currency: USD|USDC|CAD|JPY|CNY|HKD|EUR|SGD|TWD. When user says "set currency to CAD", "use JPY" -> { type: "edit-profile", params: { currency: "CAD" } }.
 - Can combine: { type: "edit-profile", params: { firstName: "John", lastName: "Doe", avatarSeed: "beamio-john", currency: "CAD" } }.
-- Triggers: "change name", "update profile", "generate avatar", "set currency", "修改名字", "換頭像", "設置貨幣".`
+- Triggers: "change name", "update profile", "set currency", "修改名字", "設置貨幣".`
+		const GENERATE_AVATAR_PROMPT = `
+generate-avatar-image: AI generates any image from text prompt (via Pollinations). User can download or set as profile avatar.
+- When user says "生成小貓頭像", "generate cat avatar", "為我生成貓咪圖片" -> { type: "generate-avatar-image", params: { prompt: "a cute kitten avatar" } }.
+- When user says "生成星空圖", "畫一隻龍", "create a dragon", "sunset over ocean", "a robot" -> { type: "generate-avatar-image", params: { prompt: "user's description in English" } }.
+- Always put the prompt in English for best results. Use generate-avatar-image when user wants to CREATE/GET any image. Use edit-profile only for changing name/currency/DiceBear seed.`
 		const HISTORY_PROMPT = `
 history: Transaction history from BeamioIndexerDiamond. UI fetches via getAccountTransactionsByMonthOffsetPaged and displays inline.
 - When user says "顯示前N條 歷史", "show last N transactions", "前5筆記錄", "顯示歷史" (with or without N) -> { type: "history", params: { limit: N } }. Use N from user (e.g. 5); if no number, use limit: 5.
@@ -1199,12 +1206,13 @@ Allowed types: Card, Text, Button, Row, Column, Spacer, Divider, BalanceDisplay,
 Example: User says "balance" -> { type: "custom-ui", params: { ui: { schema: "beamio-ui-v1", root: { type: "Card", props: { title: "Balance" }, children: [{ type: "BalanceDisplay" }, { type: "ActionButton", props: { label: "Add USDC", actionType: "add-usdc" } }] } } } }
 PREFER custom-ui to display AI-generated composite UI. For "balance", "add usdc", "how much" -> return custom-ui with Card + BalanceDisplay + ActionButton. Single actions (balance, add-usdc) only when user explicitly wants minimal.`
 		const systemPrompt = `You are the Beamio wallet assistant. Return JSON action based on user intent.
-Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text, custom-ui, edit-profile, send-chat.
+Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text, custom-ui, edit-profile, send-chat, generate-avatar-image.
 pay needs to (@BeamioTag or address) and amount; request needs amount; text needs content. Return valid JSON only, no markdown.
 ${BEAMIO_INFRA_PROMPT}
 ${HISTORY_PROMPT}
 ${CONET_CHAT_PROMPT}
 ${PROFILE_EDIT_PROMPT}
+${GENERATE_AVATAR_PROMPT}
 ${BEAMIO_SERVICE_CATALOG}
 ${UI_CATALOG_PROMPT}
 IMPORTANT: Reply in the SAME language as the user. If user asks in English, use English for text content. If user asks in 中文, use 中文. Match the user's language for all text responses.${feedbackPrompt}`
