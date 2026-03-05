@@ -1103,7 +1103,7 @@ const routing = ( router: Router ) => {
 			properties: {
 				type: {
 					type: 'string' as const,
-					enum: ['pay', 'request', 'cashcode', 'fuel', 'balance', 'history', 'contact', 'add-usdc', 'card-topup', 'text'],
+					enum: ['pay', 'request', 'cashcode', 'fuel', 'balance', 'history', 'contact', 'add-usdc', 'card-topup', 'text', 'custom-ui'],
 				},
 				params: {
 					type: 'object' as const,
@@ -1117,14 +1117,37 @@ const routing = ( router: Router ) => {
 						query: { type: 'string' as const },
 						action: { type: 'string' as const, enum: ['view', 'pay', 'chat'] },
 						cardId: { type: 'string' as const },
+						ui: {
+							type: 'object' as const,
+							properties: {
+								schema: { type: 'string' as const },
+								root: { type: 'object' as const },
+							},
+							required: ['schema', 'root'],
+						},
 					},
+					additionalProperties: true,
 				},
 			},
 			required: ['type', 'params'],
 		}
+		const UI_CATALOG_PROMPT = `
+custom-ui: For composite or custom layouts, use type "custom-ui" with params.ui = { schema: "beamio-ui-v1", root: UINode }.
+UINode: { type, props?, children? }. Allowed types: Card, Text, Button, Row, Column, Spacer, Divider, BalanceDisplay, AddUsdcHint, ActionButton.
+- Card: props.title?, props.subtitle?, children
+- Text: props.content, props.size? (xs|sm|base|lg)
+- Button: props.label, props.action? (pay|fuel|balance|add-usdc|contact|history|cashcode|request|card-topup), props.href? (external link)
+- ActionButton: props.label, props.actionType, props.actionParams? - opens Beamio action
+- Row/Column: props.gap?, children
+- Spacer: props.height? (px)
+- BalanceDisplay: shows USDC + B-Units (no props)
+- AddUsdcHint: hint for adding USDC (no props)
+Example: User says "balance" -> { type: "custom-ui", params: { ui: { schema: "beamio-ui-v1", root: { type: "Card", props: { title: "Balance" }, children: [{ type: "BalanceDisplay" }, { type: "ActionButton", props: { label: "Add USDC", actionType: "add-usdc" } }] } } } }
+Prefer custom-ui when combining multiple elements (e.g. balance + add-usdc button). Use single actions (balance, add-usdc) for simple cases.`
 		const systemPrompt = `You are the Beamio wallet assistant. Return JSON action based on user intent.
-Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text.
+Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text, custom-ui.
 pay needs to (@BeamioTag or address) and amount; request needs amount; text needs content. Return valid JSON only, no markdown.
+${UI_CATALOG_PROMPT}
 IMPORTANT: Reply in the SAME language as the user. If user asks in English, use English for text content. If user asks in 中文, use 中文. Match the user's language for all text responses.${feedbackPrompt}`
 		try {
 			const ai = new GoogleGenAI({ apiKey })
