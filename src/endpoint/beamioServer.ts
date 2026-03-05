@@ -1080,21 +1080,29 @@ const routing = ( router: Router ) => {
 		const prompt = typeof req.query?.prompt === 'string' ? req.query.prompt.trim() : ''
 		const text = prompt || 'a cute avatar'
 		const apiKey = (masterSetup as { POLLINATIONS_API_KEY?: string })?.POLLINATIONS_API_KEY
+		const key = apiKey && typeof apiKey === 'string' ? apiKey.trim() : ''
 		const baseUrl = `https://gen.pollinations.ai/image/${encodeURIComponent(text)}`
-		const url = apiKey && typeof apiKey === 'string' && apiKey.trim() ? `${baseUrl}?key=${encodeURIComponent(apiKey.trim())}` : baseUrl
+		const params = new URLSearchParams({ model: 'flux' })
+		if (key) params.set('key', key)
+		const url = `${baseUrl}?${params.toString()}`
+		const headers: Record<string, string> = { 'User-Agent': 'Beamio/1.0 (https://beamio.app)' }
+		if (key) headers['Authorization'] = `Bearer ${key}`
 		try {
 			const ctrl = new AbortController()
 			const t = setTimeout(() => ctrl.abort(), 90_000)
 			try {
 				const upstream = await fetch(url, {
-					headers: { 'User-Agent': 'Beamio/1.0 (https://beamio.app)' },
+					headers,
 					signal: ctrl.signal,
 				})
 				clearTimeout(t)
 				if (!upstream.ok) {
 					logger(Colors.yellow('[ai/generateImage] upstream'), upstream.status, baseUrl)
-					if (upstream.status === 401 && !apiKey) {
+					if ((upstream.status === 401 || upstream.status === 403) && !key) {
 						return res.status(503).json({ error: 'Image service requires POLLINATIONS_API_KEY. Add it to ~/.master.json (free key at enter.pollinations.ai)' })
+					}
+					if (upstream.status === 403 && key) {
+						return res.status(503).json({ error: 'POLLINATIONS_API_KEY rejected (403). Check key validity and image scope at enter.pollinations.ai' })
 					}
 					return res.status(upstream.status).json({ error: `Image service returned ${upstream.status}` })
 				}
@@ -1107,7 +1115,7 @@ const routing = ( router: Router ) => {
 				clearTimeout(t)
 			}
 		} catch (e) {
-			logger(Colors.red('[ai/generateImage]'), (e as Error)?.message ?? e, url)
+			logger(Colors.red('[ai/generateImage]'), (e as Error)?.message ?? e, baseUrl)
 			return res.status(502).json({ error: 'Failed to generate image' })
 		}
 	})
