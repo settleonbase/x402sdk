@@ -1081,9 +1081,10 @@ const routing = ( router: Router ) => {
 			},
 			required: ['type', 'params'],
 		}
-		const systemPrompt = `你是 Beamio 钱包助手。根据用户意图返回 JSON action。
-支持: pay(转账)、request(收款)、balance(余额)、fuel(B-Units)、add-usdc(入金)、history(历史)、contact(联系人)、cashcode(创建/兑换现金码)、card-topup(卡充值)、text(纯文本回复)。
-pay 需 to(@BeamioTag 或地址) 和 amount；request 需 amount；text 需 content。只返回合法 JSON，不要 markdown 或代码块。`
+		const systemPrompt = `You are the Beamio wallet assistant. Return JSON action based on user intent.
+Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text.
+pay needs to (@BeamioTag or address) and amount; request needs amount; text needs content. Return valid JSON only, no markdown.
+IMPORTANT: Reply in the SAME language as the user. If user asks in English, use English for text content. If user asks in 中文, use 中文. Match the user's language for all text responses.`
 		try {
 			const ai = new GoogleGenAI({ apiKey })
 			const history = Array.isArray(messages) ? messages : []
