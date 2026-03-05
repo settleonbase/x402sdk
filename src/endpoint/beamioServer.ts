@@ -1139,6 +1139,7 @@ const routing = ( router: Router ) => {
 						query: { type: 'string' as const },
 						action: { type: 'string' as const, enum: ['view', 'pay', 'chat'] },
 						cardId: { type: 'string' as const },
+						limit: { type: 'number' as const },
 						ui: {
 							type: 'object' as const,
 							properties: {
@@ -1174,6 +1175,10 @@ Profile edit (edit-profile): Update user's Beamio profile via addUser API.
 - currency: USD|USDC|CAD|JPY|CNY|HKD|EUR|SGD|TWD. When user says "set currency to CAD", "use JPY" -> { type: "edit-profile", params: { currency: "CAD" } }.
 - Can combine: { type: "edit-profile", params: { firstName: "John", lastName: "Doe", avatarSeed: "beamio-john", currency: "CAD" } }.
 - Triggers: "change name", "update profile", "generate avatar", "set currency", "修改名字", "換頭像", "設置貨幣".`
+		const HISTORY_PROMPT = `
+history: Transaction history from BeamioIndexerDiamond. UI fetches via getAccountTransactionsByMonthOffsetPaged and displays inline.
+- When user says "顯示前N條 歷史", "show last N transactions", "前5筆記錄", "顯示歷史" (with or without N) -> { type: "history", params: { limit: N } }. Use N from user (e.g. 5); if no number, use limit: 5.
+- When user says "history", "交易記錄", "open history" (no count, wants full page) -> { type: "history", params: {} } opens History page.`
 		const BEAMIO_SERVICE_CATALOG = `
 Service catalog (actions that invoke backend/client services):
 - send-chat: Send a CoNET P2P message directly. params: { to: string (BeamioTag, e.g. "Simon"), text: string }.
@@ -1197,6 +1202,7 @@ PREFER custom-ui to display AI-generated composite UI. For "balance", "add usdc"
 Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text, custom-ui, edit-profile, send-chat.
 pay needs to (@BeamioTag or address) and amount; request needs amount; text needs content. Return valid JSON only, no markdown.
 ${BEAMIO_INFRA_PROMPT}
+${HISTORY_PROMPT}
 ${CONET_CHAT_PROMPT}
 ${PROFILE_EDIT_PROMPT}
 ${BEAMIO_SERVICE_CATALOG}
