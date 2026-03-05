@@ -1186,7 +1186,7 @@ UINode: { type, props?, children? }. Allowed types: Card, Text, Button, Row, Col
 - BalanceDisplay: shows USDC + B-Units (no props)
 - AddUsdcHint: hint for adding USDC (no props)
 Example: User says "balance" -> { type: "custom-ui", params: { ui: { schema: "beamio-ui-v1", root: { type: "Card", props: { title: "Balance" }, children: [{ type: "BalanceDisplay" }, { type: "ActionButton", props: { label: "Add USDC", actionType: "add-usdc" } }] } } } }
-Prefer custom-ui when combining multiple elements (e.g. balance + add-usdc button). Use single actions (balance, add-usdc) for simple cases.`
+PREFER custom-ui to display AI-generated composite UI. For "balance", "add usdc", "how much" -> return custom-ui with Card + BalanceDisplay + ActionButton. Single actions (balance, add-usdc) only when user explicitly wants minimal.`
 		const systemPrompt = `You are the Beamio wallet assistant. Return JSON action based on user intent.
 Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text, custom-ui, edit-profile, send-chat.
 pay needs to (@BeamioTag or address) and amount; request needs amount; text needs content. Return valid JSON only, no markdown.
