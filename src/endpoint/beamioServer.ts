@@ -1043,6 +1043,7 @@ const routing = ( router: Router ) => {
 
 	/** POST /api/ai/learningFeedback - 保存 AI 学习反馈（满意/纠正），共享给所有用户。correctedAction：Beamio 提供的期望 UI/action */
 	router.post('/ai/learningFeedback', async (req, res) => {
+		logger(Colors.cyan('[ai/learningFeedback] DEBUG body:'), JSON.stringify(req.body, null, 2))
 		const { kind, userInput, action, customRule, correctedAction } = req.body as {
 			kind?: string
 			userInput?: string
@@ -1060,7 +1061,11 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ error: 'Missing or invalid action' })
 		}
 		const ok = await insertAiLearningFeedback(kind, userInput, action, customRule, correctedAction)
-		if (!ok) return res.status(500).json({ error: 'Failed to save feedback' })
+		if (!ok) {
+			logger(Colors.red('[ai/learningFeedback] Failed to save'))
+			return res.status(500).json({ error: 'Failed to save feedback' })
+		}
+		logger(Colors.green('[ai/learningFeedback] Saved:'), kind, userInput?.slice(0, 50))
 		return res.status(200).json({ ok: true })
 	})
 
