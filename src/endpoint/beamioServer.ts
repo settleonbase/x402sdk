@@ -1176,7 +1176,8 @@ Service catalog (actions that invoke backend/client services):
   Use send-chat when user explicitly wants to SEND a message. Use contact with action: chat when user wants to open chat/contacts without sending.`
 		const UI_CATALOG_PROMPT = `
 custom-ui: For composite or custom layouts, use type "custom-ui" with params.ui = { schema: "beamio-ui-v1", root: UINode }.
-UINode: { type, props?, children? }. Allowed types: Card, Text, Button, Row, Column, Spacer, Divider, BalanceDisplay, AddUsdcHint, ActionButton.
+UINode: { type, props?, children? }. root MUST have type (e.g. "Card") and valid structure. NEVER return root: {}.
+Allowed types: Card, Text, Button, Row, Column, Spacer, Divider, BalanceDisplay, AddUsdcHint, ActionButton.
 - Card: props.title?, props.subtitle?, children
 - Text: props.content, props.size? (xs|sm|base|lg)
 - Button: props.label, props.action? (pay|fuel|balance|add-usdc|contact|history|cashcode|request|card-topup), props.href? (external link)
@@ -1228,6 +1229,16 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			}
 			if (!action || typeof action.type !== 'string' || typeof action.params !== 'object') {
 				return res.status(502).json({ error: 'Invalid action structure from AI' })
+			}
+			// Sanitize custom-ui with empty/invalid root (AI sometimes returns root: {})
+			if (action.type === 'custom-ui' && action.params && typeof action.params === 'object') {
+				const params = action.params as Record<string, unknown>
+				const ui = params.ui as Record<string, unknown> | undefined
+				const root = ui?.root
+				const isEmptyRoot = !root || (typeof root === 'object' && !('type' in root))
+				if (ui && isEmptyRoot) {
+					ui.root = { type: 'Card', props: { title: 'Balance' }, children: [{ type: 'BalanceDisplay' }, { type: 'ActionButton', props: { label: 'Add USDC', actionType: 'add-usdc' } }] }
+				}
 			}
 			// Debug: 显示返回给 UI 的 action
 			logger(Colors.cyan('[ai/beamioAction] DEBUG response action:'), JSON.stringify(action, null, 2))
