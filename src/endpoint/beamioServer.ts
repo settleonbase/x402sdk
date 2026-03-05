@@ -1075,6 +1075,38 @@ const routing = ( router: Router ) => {
 		return res.status(200).json({ items: rows })
 	})
 
+	/** GET /api/ai/generateImage?prompt=... - Proxy Pollinations 图片生成，避免客户端 403/CORS。使用 gen.pollinations.ai（新端點） */
+	router.get('/ai/generateImage', async (req, res) => {
+		const prompt = typeof req.query?.prompt === 'string' ? req.query.prompt.trim() : ''
+		const text = prompt || 'a cute avatar'
+		const url = `https://gen.pollinations.ai/image/${encodeURIComponent(text)}`
+		try {
+			const ctrl = new AbortController()
+			const t = setTimeout(() => ctrl.abort(), 90_000)
+			try {
+				const upstream = await fetch(url, {
+					headers: { 'User-Agent': 'Beamio/1.0 (https://beamio.app)' },
+					signal: ctrl.signal,
+				})
+				clearTimeout(t)
+				if (!upstream.ok) {
+					logger(Colors.yellow('[ai/generateImage] upstream'), upstream.status, url)
+					return res.status(upstream.status).json({ error: `Image service returned ${upstream.status}` })
+				}
+				const ct = upstream.headers.get('content-type') || 'image/png'
+				res.setHeader('Content-Type', ct)
+				res.setHeader('Cache-Control', 'public, max-age=86400')
+				const buf = await upstream.arrayBuffer()
+				res.send(Buffer.from(buf))
+			} finally {
+				clearTimeout(t)
+			}
+		} catch (e) {
+			logger(Colors.red('[ai/generateImage]'), (e as Error)?.message ?? e, url)
+			return res.status(502).json({ error: 'Failed to generate image' })
+		}
+	})
+
 	/** POST /api/ai/beamioAction - Cluster 直接调用 Gemini 2.5 Flash，根据用户意图返回 BeamioAction（读操作，无需 Master） */
 	router.post('/ai/beamioAction', async (req, res) => {
 		// Debug: 显示 UI 传入的原始数据
