@@ -24,16 +24,16 @@
 		"@coinbase/x402": "^0.7.3",
 		"@mobile-wallet-protocol/client": "^1.0.0",
 		"@mobile-wallet-protocol/wagmi-connectors": "^1.0.1",
-		"@nomicfoundation/hardhat-toolbox": "^6.1.0",
+		"@nomicfoundation/hardhat-toolbox": "^7.0.0",
 		"@types/express": "^5.0.5",
 		"@types/node": "^24.9.2",
 		"@types/pg": "^8.15.6"
 	},
 	"dependencies": {
-		"@google/genai": "^1.0.0",
 		"@coinbase/cdp-sdk": "^1.39.0",
 		"@coinbase/onchainkit": "^1.1.2",
 		"@coinbase/x402": "^0.7.1",
+		"@google/genai": "^1.0.0",
 		"coinmarketcap-api": "^3.1.1",
 		"colors": "^1.4.0",
 		"cors": "^2.8.5",
@@ -44,7 +44,7 @@
 		"openpgp": "^6.3.0",
 		"pg": "^8.16.3",
 		"uuid": "^13.0.0",
-		"uuid62": "^1.0.2",
+		"uuid62": "^0.2.1",
 		"viem": "^2.38.6",
 		"x402-express": "^0.7.1",
 		"yargs": "^18.0.0"

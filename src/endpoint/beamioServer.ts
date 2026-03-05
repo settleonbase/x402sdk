@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -1041,6 +1041,34 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	/** POST /api/ai/learningFeedback - 保存 AI 学习反馈（满意/纠正），共享给所有用户 */
+	router.post('/ai/learningFeedback', async (req, res) => {
+		const { kind, userInput, action, customRule } = req.body as {
+			kind?: string
+			userInput?: string
+			action?: object
+			customRule?: string
+		}
+		if (!kind || !['approved', 'corrected'].includes(kind)) {
+			return res.status(400).json({ error: 'Invalid kind, use approved or corrected' })
+		}
+		if (!userInput || typeof userInput !== 'string' || !userInput.trim()) {
+			return res.status(400).json({ error: 'Missing or invalid userInput' })
+		}
+		if (!action || typeof action !== 'object') {
+			return res.status(400).json({ error: 'Missing or invalid action' })
+		}
+		const ok = await insertAiLearningFeedback(kind, userInput, action, customRule)
+		if (!ok) return res.status(500).json({ error: 'Failed to save feedback' })
+		return res.status(200).json({ ok: true })
+	})
+
+	/** GET /api/ai/learningFeedback - 获取 AI 学习反馈（供 beamioAction 注入 prompt） */
+	router.get('/ai/learningFeedback', async (_req, res) => {
+		const rows = await getAiLearningFeedback()
+		return res.status(200).json({ items: rows })
+	})
+
 	/** POST /api/ai/beamioAction - Cluster 直接调用 Gemini 2.5 Flash，根据用户意图返回 BeamioAction（读操作，无需 Master） */
 	router.post('/ai/beamioAction', async (req, res) => {
 		// Debug: 显示 UI 传入的原始数据
@@ -1056,6 +1084,19 @@ const routing = ( router: Router ) => {
 		}
 		if (!userText || typeof userText !== 'string' || !userText.trim()) {
 			return res.status(400).json({ error: 'Missing or invalid userText' })
+		}
+		const feedbackItems = await getAiLearningFeedback()
+		let feedbackPrompt = ''
+		if (feedbackItems.length > 0) {
+			feedbackPrompt = '\n\nLearned from user feedback (apply when relevant):\n'
+			for (const f of feedbackItems.slice(0, 20)) {
+				if (f.kind === 'approved') {
+					feedbackPrompt += `- User said "${f.user_input}" -> action: ${JSON.stringify(f.action_json)}\n`
+				} else if (f.kind === 'corrected') {
+					if (f.custom_rule) feedbackPrompt += `- Rule: ${f.custom_rule}\n`
+					else feedbackPrompt += `- User corrected "${f.user_input}" -> action: ${JSON.stringify(f.action_json)}\n`
+				}
+			}
 		}
 		const BEAMIO_ACTION_SCHEMA = {
 			type: 'object' as const,
@@ -1084,7 +1125,7 @@ const routing = ( router: Router ) => {
 		const systemPrompt = `You are the Beamio wallet assistant. Return JSON action based on user intent.
 Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text.
 pay needs to (@BeamioTag or address) and amount; request needs amount; text needs content. Return valid JSON only, no markdown.
-IMPORTANT: Reply in the SAME language as the user. If user asks in English, use English for text content. If user asks in 中文, use 中文. Match the user's language for all text responses.`
+IMPORTANT: Reply in the SAME language as the user. If user asks in English, use English for text content. If user asks in 中文, use 中文. Match the user's language for all text responses.${feedbackPrompt}`
 		try {
 			const ai = new GoogleGenAI({ apiKey })
 			const history = Array.isArray(messages) ? messages : []

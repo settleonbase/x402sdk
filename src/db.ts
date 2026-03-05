@@ -712,6 +712,58 @@ const NFC_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS nfc_cards (
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
+/** ai_learning_feedback 表：AI 学习反馈，共享给所有 Beamio 用户。kind: approved=满意, corrected=纠正 */
+const AI_LEARNING_FEEDBACK_TABLE = `CREATE TABLE IF NOT EXISTS ai_learning_feedback (
+	id SERIAL PRIMARY KEY,
+	kind TEXT NOT NULL,
+	user_input TEXT NOT NULL,
+	action_json JSONB NOT NULL,
+	custom_rule TEXT,
+	created_at TIMESTAMPTZ DEFAULT NOW()
+)`
+
+/** 插入 AI 学习反馈 */
+export const insertAiLearningFeedback = async (kind: string, userInput: string, actionJson: object, customRule?: string): Promise<boolean> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(AI_LEARNING_FEEDBACK_TABLE)
+		await db.query(
+			`INSERT INTO ai_learning_feedback (kind, user_input, action_json, custom_rule) VALUES ($1, $2, $3, $4)`,
+			[kind, String(userInput || '').trim().slice(0, 500), JSON.stringify(actionJson), customRule ?? null]
+		)
+		return true
+	} catch (e: any) {
+		logger(Colors.yellow(`[insertAiLearningFeedback] failed: ${e?.message ?? e}`))
+		return false
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 获取所有 AI 学习反馈（共享给所有用户，取最近 50 条） */
+export const getAiLearningFeedback = async (): Promise<Array<{ kind: string; user_input: string; action_json: object; custom_rule: string | null }>> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(AI_LEARNING_FEEDBACK_TABLE)
+		const { rows } = await db.query(
+			`SELECT kind, user_input, action_json, custom_rule FROM ai_learning_feedback ORDER BY created_at DESC LIMIT 50`
+		)
+		return rows.map((r: any) => ({
+			kind: r.kind,
+			user_input: r.user_input,
+			action_json: r.action_json ?? {},
+			custom_rule: r.custom_rule,
+		}))
+	} catch (e: any) {
+		logger(Colors.yellow(`[getAiLearningFeedback] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 根据 UID 查询 NFC 卡状态（不返回 private_key）；若已登记则从 private_key 推导 address 返回 */
 export const getNfcCardByUid = async (uid: string): Promise<{ registered: boolean; address?: string }> => {
 	const db = new Client({ connectionString: DB_URL })
