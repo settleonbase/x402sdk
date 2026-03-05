@@ -1041,13 +1041,14 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** POST /api/ai/learningFeedback - 保存 AI 学习反馈（满意/纠正），共享给所有用户 */
+	/** POST /api/ai/learningFeedback - 保存 AI 学习反馈（满意/纠正），共享给所有用户。correctedAction：Beamio 提供的期望 UI/action */
 	router.post('/ai/learningFeedback', async (req, res) => {
-		const { kind, userInput, action, customRule } = req.body as {
+		const { kind, userInput, action, customRule, correctedAction } = req.body as {
 			kind?: string
 			userInput?: string
 			action?: object
 			customRule?: string
+			correctedAction?: object
 		}
 		if (!kind || !['approved', 'corrected'].includes(kind)) {
 			return res.status(400).json({ error: 'Invalid kind, use approved or corrected' })
@@ -1058,7 +1059,7 @@ const routing = ( router: Router ) => {
 		if (!action || typeof action !== 'object') {
 			return res.status(400).json({ error: 'Missing or invalid action' })
 		}
-		const ok = await insertAiLearningFeedback(kind, userInput, action, customRule)
+		const ok = await insertAiLearningFeedback(kind, userInput, action, customRule, correctedAction)
 		if (!ok) return res.status(500).json({ error: 'Failed to save feedback' })
 		return res.status(200).json({ ok: true })
 	})
@@ -1093,8 +1094,20 @@ const routing = ( router: Router ) => {
 				if (f.kind === 'approved') {
 					feedbackPrompt += `- User said "${f.user_input}" -> action: ${JSON.stringify(f.action_json)}\n`
 				} else if (f.kind === 'corrected') {
-					if (f.custom_rule) feedbackPrompt += `- Rule: ${f.custom_rule}\n`
-					else feedbackPrompt += `- User corrected "${f.user_input}" -> action: ${JSON.stringify(f.action_json)}\n`
+					if (f.custom_rule) {
+						try {
+							const parsed = JSON.parse(f.custom_rule) as { _correctedAction?: object }
+							if (parsed._correctedAction) {
+								feedbackPrompt += `- User corrected "${f.user_input}" -> use this action instead: ${JSON.stringify(parsed._correctedAction)}\n`
+							} else {
+								feedbackPrompt += `- Rule: ${f.custom_rule}\n`
+							}
+						} catch {
+							feedbackPrompt += `- Rule: ${f.custom_rule}\n`
+						}
+					} else {
+						feedbackPrompt += `- User corrected "${f.user_input}" -> action: ${JSON.stringify(f.action_json)}\n`
+					}
 				}
 			}
 		}
@@ -1103,16 +1116,20 @@ const routing = ( router: Router ) => {
 			properties: {
 				type: {
 					type: 'string' as const,
-					enum: ['pay', 'request', 'cashcode', 'fuel', 'balance', 'history', 'contact', 'add-usdc', 'card-topup', 'text', 'custom-ui'],
+					enum: ['pay', 'request', 'cashcode', 'fuel', 'balance', 'history', 'contact', 'add-usdc', 'card-topup', 'text', 'custom-ui', 'edit-profile', 'send-chat'],
 				},
 				params: {
 					type: 'object' as const,
 					properties: {
 						to: { type: 'string' as const },
 						amount: { type: 'number' as const },
-						currency: { type: 'string' as const, enum: ['USD', 'USDC', 'CAD'] },
+						currency: { type: 'string' as const, enum: ['USD', 'USDC', 'CAD', 'JPY', 'CNY', 'HKD', 'EUR', 'SGD', 'TWD'] },
 						note: { type: 'string' as const },
 						content: { type: 'string' as const },
+						text: { type: 'string' as const },
+						firstName: { type: 'string' as const },
+						lastName: { type: 'string' as const },
+						avatarSeed: { type: 'string' as const },
 						mode: { type: 'string' as const, enum: ['create', 'redeem'] },
 						query: { type: 'string' as const },
 						action: { type: 'string' as const, enum: ['view', 'pay', 'chat'] },
@@ -1131,6 +1148,32 @@ const routing = ( router: Router ) => {
 			},
 			required: ['type', 'params'],
 		}
+		const BEAMIO_INFRA_PROMPT = `
+Beamio balance infrastructure (for your understanding when answering):
+- EOA = user's wallet address (e.g. MetaMask). Holds USDC directly on Base.
+- AA = Beamio Account (smart contract), resolved via beamioAccountOf(EOA). Activated when user first uses Beamio. Also holds USDC on Base.
+- User total USDC = EOA balance + AA balance. B-Units = CoNET chain credits for gas/fees, separate from USDC.
+- APIs: GET /api/getBalance?address=0x... returns {eth, usdc} for that address. GET /api/getWalletAssets?wallet=0x...&isAA=false returns AA balance + cards. getUIDAssets (NFC) returns EOA+AA combined.
+- When user asks "balance", "how much", "my USDC", "check balance", "餘額", "有多少" -> return balance or custom-ui with BalanceDisplay.`
+		const CONET_CHAT_PROMPT = `
+CoNET chat infrastructure (for your understanding when answering):
+- Chat uses CoNET P2P: messages encrypted with PGP, posted to CoNET nodes (https://{node}.conet.network/post). Recipient fetches via gossip.
+- User PGP keys: stored on CoNET chain (AddressPGP). regiestChatRoute registers keys so others can find them. getAllNodes (GuardianNodesInfoV6) returns entry nodes.
+- When user asks "chat", "message", "open contacts", "和某人聊天", "發訊息給" -> return contact with action: "chat".
+- If user specifies a person (e.g. "chat with @Simon", "message John") -> include query: "Simon" or "John" in params. { type: "contact", params: { action: "chat", query: "Simon" } }.
+- contact with action: chat opens the Chat/contacts page where user can select or start a conversation.`
+		const PROFILE_EDIT_PROMPT = `
+Profile edit (edit-profile): Update user's Beamio profile via addUser API.
+- firstName, lastName: display name. When user says "change name to X", "my name is John Smith" -> { type: "edit-profile", params: { firstName: "John", lastName: "Smith" } }.
+- avatarSeed: DiceBear AI-generated avatar. URL = https://api.dicebear.com/8.x/fun-emoji/svg?seed={seed}. When user says "generate new avatar", "change avatar", "換頭像" -> use a creative seed e.g. "beamio-{random}" or "avatar-{timestamp}". { type: "edit-profile", params: { avatarSeed: "beamio-fresh-123" } }.
+- currency: USD|USDC|CAD|JPY|CNY|HKD|EUR|SGD|TWD. When user says "set currency to CAD", "use JPY" -> { type: "edit-profile", params: { currency: "CAD" } }.
+- Can combine: { type: "edit-profile", params: { firstName: "John", lastName: "Doe", avatarSeed: "beamio-john", currency: "CAD" } }.
+- Triggers: "change name", "update profile", "generate avatar", "set currency", "修改名字", "換頭像", "設置貨幣".`
+		const BEAMIO_SERVICE_CATALOG = `
+Service catalog (actions that invoke backend/client services):
+- send-chat: Send a CoNET P2P message directly. params: { to: string (BeamioTag, e.g. "Simon"), text: string }.
+  When user says "send hello to @Simon", "message John with hi", "發送訊息給 Simon 說 hello" -> { type: "send-chat", params: { to: "Simon", text: "hello" } }.
+  Use send-chat when user explicitly wants to SEND a message. Use contact with action: chat when user wants to open chat/contacts without sending.`
 		const UI_CATALOG_PROMPT = `
 custom-ui: For composite or custom layouts, use type "custom-ui" with params.ui = { schema: "beamio-ui-v1", root: UINode }.
 UINode: { type, props?, children? }. Allowed types: Card, Text, Button, Row, Column, Spacer, Divider, BalanceDisplay, AddUsdcHint, ActionButton.
@@ -1145,8 +1188,12 @@ UINode: { type, props?, children? }. Allowed types: Card, Text, Button, Row, Col
 Example: User says "balance" -> { type: "custom-ui", params: { ui: { schema: "beamio-ui-v1", root: { type: "Card", props: { title: "Balance" }, children: [{ type: "BalanceDisplay" }, { type: "ActionButton", props: { label: "Add USDC", actionType: "add-usdc" } }] } } } }
 Prefer custom-ui when combining multiple elements (e.g. balance + add-usdc button). Use single actions (balance, add-usdc) for simple cases.`
 		const systemPrompt = `You are the Beamio wallet assistant. Return JSON action based on user intent.
-Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text, custom-ui.
+Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text, custom-ui, edit-profile, send-chat.
 pay needs to (@BeamioTag or address) and amount; request needs amount; text needs content. Return valid JSON only, no markdown.
+${BEAMIO_INFRA_PROMPT}
+${CONET_CHAT_PROMPT}
+${PROFILE_EDIT_PROMPT}
+${BEAMIO_SERVICE_CATALOG}
 ${UI_CATALOG_PROMPT}
 IMPORTANT: Reply in the SAME language as the user. If user asks in English, use English for text content. If user asks in 中文, use 中文. Match the user's language for all text responses.${feedbackPrompt}`
 		try {

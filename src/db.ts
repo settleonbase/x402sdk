@@ -722,15 +722,25 @@ const AI_LEARNING_FEEDBACK_TABLE = `CREATE TABLE IF NOT EXISTS ai_learning_feedb
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
-/** 插入 AI 学习反馈 */
-export const insertAiLearningFeedback = async (kind: string, userInput: string, actionJson: object, customRule?: string): Promise<boolean> => {
+/** 插入 AI 学习反馈。correctedAction：Beamio 提供的期望 action（用于 UI 学习，存入 custom_rule 的 JSON） */
+export const insertAiLearningFeedback = async (
+	kind: string,
+	userInput: string,
+	actionJson: object,
+	customRule?: string,
+	correctedAction?: object
+): Promise<boolean> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		await db.query(AI_LEARNING_FEEDBACK_TABLE)
+		// correctedAction 时：custom_rule 存 JSON {_correctedAction: action}，供 prompt 解析
+		const ruleVal = correctedAction
+			? JSON.stringify({ _correctedAction: correctedAction })
+			: (customRule ?? null)
 		await db.query(
 			`INSERT INTO ai_learning_feedback (kind, user_input, action_json, custom_rule) VALUES ($1, $2, $3, $4)`,
-			[kind, String(userInput || '').trim().slice(0, 500), JSON.stringify(actionJson), customRule ?? null]
+			[kind, String(userInput || '').trim().slice(0, 500), JSON.stringify(actionJson), ruleVal]
 		)
 		return true
 	} catch (e: any) {
