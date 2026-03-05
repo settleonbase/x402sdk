@@ -1043,6 +1043,8 @@ const routing = ( router: Router ) => {
 
 	/** POST /api/ai/beamioAction - Cluster 直接调用 Gemini 2.5 Flash，根据用户意图返回 BeamioAction（读操作，无需 Master） */
 	router.post('/ai/beamioAction', async (req, res) => {
+		// Debug: 显示 UI 传入的原始数据
+		logger(Colors.cyan('[ai/beamioAction] DEBUG body:'), JSON.stringify(req.body, null, 2))
 		const apiKey = masterSetup?.GEMINI_API_KEY
 		if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) {
 			logger(Colors.yellow('[ai/beamioAction] masterSetup.GEMINI_API_KEY not configured'))
@@ -1115,6 +1117,8 @@ pay 需 to(@BeamioTag 或地址) 和 amount；request 需 amount；text 需 cont
 			if (!action || typeof action.type !== 'string' || typeof action.params !== 'object') {
 				return res.status(502).json({ error: 'Invalid action structure from AI' })
 			}
+			// Debug: 显示返回给 UI 的 action
+			logger(Colors.cyan('[ai/beamioAction] DEBUG response action:'), JSON.stringify(action, null, 2))
 			return res.status(200).json({ action })
 		} catch (err: any) {
 			logger(Colors.red('[ai/beamioAction] error:'), err?.message ?? err)
