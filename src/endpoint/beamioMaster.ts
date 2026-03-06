@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -1052,6 +1052,26 @@ const routing = ( router: Router ) => {
 			})
 			claimBUnitsProcess().catch((err: any) => {
 				logger(Colors.red('[claimBUnitsProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		/** POST /api/purchaseBUnitFromBase - 由 cluster 预检后转发，master 推入 purchaseBUnitFromBasePool，经 Settle_ContractPool 执行 BaseTreasury.purchaseBUnitWith3009Authorization */
+		router.post('/purchaseBUnitFromBase', (req, res) => {
+			const body = req.body as { from?: string; amount?: string; validAfter?: number; validBefore?: number; nonce?: string; signature?: string }
+			if (!body.from || !body.amount || body.validAfter == null || body.validBefore == null || !body.nonce || !body.signature) {
+				return res.status(400).json({ success: false, error: 'Missing from, amount, validAfter, validBefore, nonce, or signature' }).end()
+			}
+			purchaseBUnitFromBasePool.push({
+				from: body.from,
+				amount: body.amount,
+				validAfter: body.validAfter,
+				validBefore: body.validBefore,
+				nonce: body.nonce,
+				signature: body.signature,
+				res,
+			})
+			purchaseBUnitFromBaseProcess().catch((err: any) => {
+				logger(Colors.red('[purchaseBUnitFromBaseProcess] unhandled error:'), err?.message ?? err)
 			})
 		})
 

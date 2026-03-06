@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
@@ -2169,6 +2169,18 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		logger(Colors.green('server /api/claimBUnits preCheck OK, forwarding to master'))
 		postLocalhost('/api/claimBUnits', preCheck.preChecked, res)
+	})
+
+	/** POST /api/purchaseBUnitFromBase - Refuel B-Unit：UI 离线签 EIP-3009，Cluster 预检后转发 Master，Master 提交 BaseTreasury.purchaseBUnitWith3009Authorization */
+	router.post('/purchaseBUnitFromBase', async (req, res) => {
+		const body = req.body as { from?: string; amount?: string; validAfter?: unknown; validBefore?: unknown; nonce?: string; signature?: string }
+		const preCheck = purchaseBUnitFromBasePreCheck(body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/purchaseBUnitFromBase preCheck FAIL: ${preCheck.error}`))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/purchaseBUnitFromBase preCheck OK from=${preCheck.preChecked.from.slice(0, 10)}... forwarding to master`))
+		postLocalhost('/api/purchaseBUnitFromBase', preCheck.preChecked, res)
 	})
 
 	/** POST /api/removePOS - 商家 manager 离线签字删除 POS，Cluster 预检后转发 Master 代付 Gas */

@@ -28,7 +28,7 @@ const ACTION_SYNC_TOKEN_ABI = [
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from './chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
 import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getCardByAddress, upsertNftTierMetadata } from './db'
@@ -1961,6 +1961,103 @@ export const removePOSProcess = async () => {
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => removePOSProcess(), 3000)
+	}
+}
+
+/** Refuel B-Unit：用户 EIP-3009 签字，Master 提交 BaseTreasury.purchaseBUnitWith3009Authorization */
+export type PurchaseBUnitFromBasePayload = {
+	from: string
+	amount: string
+	validAfter: number
+	validBefore: number
+	nonce: string
+	signature: string
+	res?: Response
+}
+
+export const purchaseBUnitFromBasePreCheck = (body: {
+	from?: string
+	amount?: string
+	validAfter?: unknown
+	validBefore?: unknown
+	nonce?: string
+	signature?: string
+}): { success: true; preChecked: PurchaseBUnitFromBasePayload } | { success: false; error: string } => {
+	if (!body.from || !ethers.isAddress(body.from)) {
+		return { success: false, error: 'Invalid from address' }
+	}
+	const amount = typeof body.amount === 'string' ? BigInt(body.amount) : null
+	if (amount === null || amount <= 0n) {
+		return { success: false, error: 'Invalid amount (must be positive)' }
+	}
+	const validAfter = typeof body.validAfter === 'number' ? body.validAfter : typeof body.validAfter === 'string' ? parseInt(body.validAfter, 10) : null
+	if (validAfter === null || !Number.isFinite(validAfter) || validAfter < 0) {
+		return { success: false, error: 'Invalid validAfter' }
+	}
+	const validBefore = typeof body.validBefore === 'number' ? body.validBefore : typeof body.validBefore === 'string' ? parseInt(body.validBefore, 10) : null
+	const now = Math.floor(Date.now() / 1000)
+	if (validBefore === null || !Number.isFinite(validBefore) || validBefore <= now) {
+		return { success: false, error: 'Invalid or expired validBefore' }
+	}
+	const nonce = (body.nonce || '').trim()
+	if (!nonce || !ethers.isHexString(nonce) || ethers.dataLength(nonce) !== 32) {
+		return { success: false, error: 'Invalid nonce (must be bytes32 hex)' }
+	}
+	const sig = (body.signature || '').trim()
+	if (!sig || !ethers.isHexString(sig)) {
+		return { success: false, error: 'Invalid signature (must be hex)' }
+	}
+	return {
+		success: true,
+		preChecked: {
+			from: ethers.getAddress(body.from),
+			amount: String(amount),
+			validAfter,
+			validBefore,
+			nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+			signature: sig,
+		},
+	}
+}
+
+export const purchaseBUnitFromBasePool: PurchaseBUnitFromBasePayload[] = []
+
+const BASE_USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+const BASE_TREASURY_ABI = [
+	'function purchaseBUnitWith3009Authorization(address from, address usdc, uint256 amount, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes calldata signature)',
+] as const
+
+export const purchaseBUnitFromBaseProcess = async () => {
+	const obj = purchaseBUnitFromBasePool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		purchaseBUnitFromBasePool.unshift(obj)
+		return setTimeout(() => purchaseBUnitFromBaseProcess(), 3000)
+	}
+	logger(Colors.cyan(`[purchaseBUnitFromBaseProcess] from=${obj.from.slice(0, 10)}... amount=${obj.amount}`))
+	try {
+		const treasury = new ethers.Contract(BASE_TREASURY, BASE_TREASURY_ABI, SC.walletBase)
+		const nonceBytes32 = obj.nonce.length === 66 ? obj.nonce : ethers.zeroPadValue(obj.nonce, 32)
+		const tx = await treasury.purchaseBUnitWith3009Authorization(
+			obj.from,
+			BASE_USDC,
+			obj.amount,
+			obj.validAfter,
+			obj.validBefore,
+			nonceBytes32,
+			obj.signature
+		)
+		logger(Colors.green(`[purchaseBUnitFromBaseProcess] tx=${tx.hash}`))
+		await tx.wait()
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red(`[purchaseBUnitFromBaseProcess] failed:`), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => purchaseBUnitFromBaseProcess(), 3000)
 	}
 }
 

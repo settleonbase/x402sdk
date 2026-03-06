@@ -25,9 +25,14 @@ export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xa86a8406B06bD6c332b4b380A0EAced
 /**
  * CoNET BUnit Airdrop 合约地址（用于 claimBUnits）。
  */
-export const CONET_BUNIT_AIRDROP_ADDRESS = '0x861c0d5b3BEbC8744917590e1FC6b4e37bd1C183'
+export const CONET_BUNIT_AIRDROP_ADDRESS = '0xc3CF7F6596aE4B761eb36975443c8D15dfAbaDAe'
 
 /**
  * CoNET 主网 MerchantPOSManagement 合约地址（商家 POS 终端登记/删除）。
  */
 export const MERCHANT_POS_MANAGEMENT_CONET = '0x3Eb57035d3237Fce4b1cB273662E875EdfA0D54f'
+
+/**
+ * Base 主网 BaseTreasury：USDC 购买 B-Unit，用户 EIP-3009 签字后由服务端提交 purchaseBUnitWith3009Authorization。
+ */
+export const BASE_TREASURY = '0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58'
