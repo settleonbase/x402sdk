@@ -1706,9 +1706,9 @@ export const requestAccountingProcess = async () => {
 		await tx.wait().catch((waitErr: any) => {
 			logger(Colors.yellow(`[requestAccountingProcess] syncTokenAction.wait() failed: ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
 		})
-		// 登记成功后向发出方收取 B-Unit 费用（Cluster 已预检，baseHash=requestHash，kind=requestAccounting）
+		// 登记成功后向发出方收取 B-Unit 费用。baseHash=syncTokenAction 的 CoNET tx hash（request 记账交易），非 requestHash
 		if (obj.payerEOA && obj.feeBUnits && obj.feeBUnits > 0n) {
-			const requestHashBytes32 = obj.requestHash as `0x${string}` // requestHash 已是 bytes32 格式
+			const syncTxHashBytes32 = tx.hash as `0x${string}` // syncTokenAction 的 CoNET 交易 hash
 			const bunitAirdropWrite = new ethers.Contract(
 				CONET_BUNIT_AIRDROP_ADDRESS,
 				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
@@ -1718,7 +1718,7 @@ export const requestAccountingProcess = async () => {
 				const consumeTx = await bunitAirdropWrite.consumeFromUser(
 					obj.payerEOA,
 					obj.feeBUnits,
-					requestHashBytes32,
+					syncTxHashBytes32,
 					0n, // no Base tx
 					4n, // kind=4 requestAccounting
 					{ gasLimit: 2_500_000 }
