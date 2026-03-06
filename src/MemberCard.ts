@@ -1586,6 +1586,8 @@ export const requestAccountingPool: {
 	forText?: string
 	validDays: number
 	displayJson?: string
+	feeBUnits?: bigint
+	payerEOA?: string
 	res?: Response
 }[] = []
 
@@ -1704,6 +1706,29 @@ export const requestAccountingProcess = async () => {
 		await tx.wait().catch((waitErr: any) => {
 			logger(Colors.yellow(`[requestAccountingProcess] syncTokenAction.wait() failed: ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
 		})
+		// 登记成功后向发出方收取 B-Unit 费用（Cluster 已预检，baseHash=requestHash，kind=requestAccounting）
+		if (obj.payerEOA && obj.feeBUnits && obj.feeBUnits > 0n) {
+			const requestHashBytes32 = obj.requestHash as `0x${string}` // requestHash 已是 bytes32 格式
+			const bunitAirdropWrite = new ethers.Contract(
+				CONET_BUNIT_AIRDROP_ADDRESS,
+				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+				SC.walletConet
+			)
+			try {
+				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+					obj.payerEOA,
+					obj.feeBUnits,
+					requestHashBytes32,
+					0n, // no Base tx
+					4n, // kind=4 requestAccounting
+					{ gasLimit: 2_500_000 }
+				)
+				await consumeTx.wait()
+				logger(Colors.cyan(`[requestAccountingProcess] consumeFromUser ok: ${Number(obj.feeBUnits) / 1e6} B-Units from ${obj.payerEOA}`))
+			} catch (consumeErr: any) {
+				logger(Colors.red(`[requestAccountingProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+			}
+		}
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, indexed: true, requestHash: obj.requestHash, syncTx: tx.hash }).end()
 		}
@@ -2536,6 +2561,72 @@ export const nfcTopupPreCheckBUnitFee = async (
 			error: `Topup B-Unit fee check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
 		}
 	}
+}
+
+/** Cluster 预检：requestAccounting 向发出方（payee）收费。0.8% 金额（换算 USDC），最低 2、最高 200 B-Units；金额>=5000 USDC 时 500 B-Units。不足则拒绝。 */
+export const requestAccountingPreCheckBUnitFee = async (
+	payee: string,
+	amount: string,
+	currency: string
+): Promise<{ success: boolean; error?: string; feeAmount?: bigint; payerEOA?: string }> => {
+	const BeamioCurrencyMap: Record<string, number> = { CAD: 0, USD: 1, JPY: 2, CNY: 3, USDC: 4, HKD: 5, EUR: 6, SGD: 7, TWD: 8, ETH: 9, BNB: 10, SOLANA: 11, BTC: 12 }
+	const cur = String(currency || 'USD').toUpperCase()
+	const currencyFiat = BeamioCurrencyMap[cur] ?? 1
+	const amountVal = parseFloat(amount)
+	if (!Number.isFinite(amountVal) || amountVal <= 0) {
+		return { success: false, error: 'amount must be > 0' }
+	}
+	const requestAmountFiat6 = BigInt(Math.round(amountVal * 1e6))
+	let amountUSDC6: bigint
+	try {
+		const rateE18 = await getRateE18Safe(currencyFiat)
+		const E18 = 10n ** 18n
+		amountUSDC6 = rateE18 > 0n ? (requestAmountFiat6 * rateE18) / E18 : requestAmountFiat6
+	} catch (_) {
+		amountUSDC6 = currencyFiat === 4 ? requestAmountFiat6 : requestAmountFiat6
+	}
+	if (amountUSDC6 <= 0n) amountUSDC6 = 1n
+
+	// 0.8% of amount in USDC; 1 B-Unit = 0.01 USDC => feeBUnits6 = amountUSDC6 * 0.008 * 100 = amountUSDC6 * 0.8
+	let feeBUnits6 = (amountUSDC6 * 8n * 100n) / 1000n
+	const FEE_MIN = 2_000_000n
+	const FEE_MAX = 200_000_000n
+	const FEE_5000_USDC = 500_000_000n
+	const FIVE_THOUSAND_USDC6 = 5000n * 1_000_000n
+	if (amountUSDC6 >= FIVE_THOUSAND_USDC6) {
+		feeBUnits6 = FEE_5000_USDC
+	} else {
+		if (feeBUnits6 < FEE_MIN) feeBUnits6 = FEE_MIN
+		if (feeBUnits6 > FEE_MAX) feeBUnits6 = FEE_MAX
+	}
+
+	// Resolve payee to EOA (AA owner or EOA)
+	let payerEOA: string
+	const code = await providerBaseBackup.getCode(payee)
+	if (code && code !== '0x' && code.length > 2) {
+		const aaRead = new ethers.Contract(payee, ['function owner() view returns (address)'], providerBaseBackup)
+		const owner = await aaRead.owner()
+		if (!owner || owner === ethers.ZeroAddress) {
+			return { success: false, error: 'Cannot determine payee owner for B-Unit fee check' }
+		}
+		payerEOA = ethers.getAddress(owner)
+	} else {
+		payerEOA = ethers.getAddress(payee)
+	}
+
+	const bunitAirdropRead = new ethers.Contract(
+		CONET_BUNIT_AIRDROP_ADDRESS,
+		['function getBUnitBalance(address) view returns (uint256)'],
+		providerConet
+	)
+	const balance = await bunitAirdropRead.getBUnitBalance(payerEOA)
+	if (balance < feeBUnits6) {
+		return {
+			success: false,
+			error: `Insufficient B-Units: payee needs ${Number(feeBUnits6) / 1e6} B-Units for requestAccounting (balance: ${Number(balance) / 1e6} B-Units)`,
+		}
+	}
+	return { success: true, feeAmount: feeBUnits6, payerEOA }
 }
 
 /** Cluster 预检：AA owner 的 B-Unit 余额必须 >= 2（手续费）。Master 不再重复检查。 */

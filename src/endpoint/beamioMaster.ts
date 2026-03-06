@@ -831,15 +831,17 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** Beamio Pay Me 生成 request 记账（txCategory=request_create:confirmed，originalPaymentHash=requestHash） */
+		/** Beamio Pay Me 生成 request 记账（txCategory=request_create:confirmed，originalPaymentHash=requestHash）。Cluster 已预检 B-Unit 费用。 */
 		router.post('/requestAccounting', (req, res) => {
-			const { requestHash, payee, amount, currency, forText, validDays } = req.body as {
+			const { requestHash, payee, amount, currency, forText, validDays, feeBUnits, payerEOA } = req.body as {
 				requestHash?: string
 				payee?: string
 				amount?: string
 				currency?: string
 				forText?: string
 				validDays?: number
+				feeBUnits?: string
+				payerEOA?: string
 			}
 			if (!requestHash || !payee || !amount || validDays == null) {
 				return res.status(400).json({ success: false, error: 'Missing required: requestHash, payee, amount, validDays' }).end()
@@ -866,6 +868,8 @@ const routing = ( router: Router ) => {
 				currency: currency ? String(currency) : 'USD',
 				forText: forText ? String(forText) : undefined,
 				validDays: vd,
+				feeBUnits: feeBUnits ? BigInt(feeBUnits) : undefined,
+				payerEOA: payerEOA && ethers.isAddress(payerEOA) ? ethers.getAddress(payerEOA) : undefined,
 				res,
 			})
 			logger(Colors.cyan(`[requestAccounting] pushed to pool requestHash=${requestHash} payee=${payee}`))

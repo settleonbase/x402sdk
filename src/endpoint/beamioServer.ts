@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
@@ -2074,7 +2074,12 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (vd < 1) {
 			return res.status(400).json({ success: false, error: 'validDays must be >= 1' }).end()
 		}
-		logger(Colors.green(`[requestAccounting] server pre-check OK, forwarding to master`), inspect({ requestHash, payee, amount, validDays }, false, 2, true))
+		const bunitFeeCheck = await requestAccountingPreCheckBUnitFee(String(payee), String(amount), currency ? String(currency) : 'USD')
+		if (!bunitFeeCheck.success) {
+			logger(Colors.red(`[requestAccounting] B-Unit fee pre-check FAIL: ${bunitFeeCheck.error}`))
+			return res.status(400).json({ success: false, error: bunitFeeCheck.error }).end()
+		}
+		logger(Colors.green(`[requestAccounting] server pre-check OK, forwarding to master | fee=${Number(bunitFeeCheck.feeAmount ?? 0) / 1e6} B-Units`), inspect({ requestHash, payee, amount, validDays }, false, 2, true))
 		postLocalhost('/api/requestAccounting', {
 			requestHash: String(requestHash),
 			payee: String(payee),
@@ -2082,6 +2087,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			currency: currency ? String(currency) : 'USD',
 			forText: forText ? String(forText) : undefined,
 			validDays: vd,
+			feeBUnits: bunitFeeCheck.feeAmount?.toString(),
+			payerEOA: bunitFeeCheck.payerEOA,
 		}, res)
 	})
 
