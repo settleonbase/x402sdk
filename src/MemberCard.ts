@@ -43,6 +43,8 @@ const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 
 const BeamioTaskIndexerAddress = '0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612'
+/** BUnitAirdrop consumeFromUser kind：x402 BeamioTransfer 转账手续费，需预先 registerKind(5,"x402Send") */
+const BUNIT_KIND_X402_SEND = 5n
 const DIAMOND = BeamioTaskIndexerAddress
 /** Base 主网 RPC：使用 ~/.master.json base_endpoint */
 const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
@@ -1330,8 +1332,12 @@ export const beamioTransferIndexerAccountingPool: {
 	gasWei?: string
 	gasUSDC6?: string
 	gasChainType?: number
+	/** Base 链 gasUsed，供 consumeFromUser 使用 */
+	baseGas?: string
 	feePayer?: string
 	isInternalTransfer?: boolean
+	/** 'x402' = BeamioTransfer x402 转账，需扣 2 B-Units */
+	source?: 'x402'
 	res?: Response
 	/** 多条 route 项（同一 tx 多资产时）。有则优先于 routeAsset */
 	routeItems?: BeamioTransferRouteItem[]
@@ -1528,6 +1534,32 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				afterNotePayer: '',
 				afterNotePayee: obj.displayJson || obj.note || '',
 			},
+		}
+
+		// BeamioTransfer x402：转账成功后扣 2 B-Units
+		if (obj.source === 'x402' && feePayer && feePayer !== ethers.ZeroAddress) {
+			const BUNIT_FEE_AMOUNT = 2_000_000n
+			const baseHashBytes32 = txHash as `0x${string}`
+			const baseGas = BigInt(obj.baseGas ?? '0')
+			const bunitAirdropWrite = new ethers.Contract(
+				CONET_BUNIT_AIRDROP_ADDRESS,
+				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+				SC.walletConet
+			)
+			try {
+				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+					feePayer,
+					BUNIT_FEE_AMOUNT,
+					baseHashBytes32,
+					baseGas,
+					BUNIT_KIND_X402_SEND, // kind=5 -> txCategory=keccak256("x402Send")，需预先 registerKind(5,"x402Send")
+					{ gasLimit: 2_500_000 }
+				)
+				await consumeTx.wait()
+				logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] consumeFromUser ok: 2 B-Units from ${feePayer} baseHash=${txHash} (x402Send)`))
+			} catch (consumeErr: any) {
+				logger(Colors.red(`[beamioTransferIndexerAccountingProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+			}
 		}
 
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
@@ -2701,6 +2733,41 @@ export const AAtoEOAPreCheckBUnitBalance = async (packedUserOp: AAtoEOAUserOp): 
 	}
 }
 
+/** Cluster 预检：Container 路径下 AA owner 的 B-Unit 余额必须 >= 2（手续费）。 */
+export const ContainerRelayPreCheckBUnitBalance = async (containerPayload: ContainerRelayPayload): Promise<{ success: boolean; error?: string }> => {
+	const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
+	try {
+		const account = ethers.getAddress(containerPayload.account)
+		const aaRead = new ethers.Contract(
+			account,
+			['function owner() view returns (address)'],
+			providerBaseBackup
+		)
+		const aaOwner = await aaRead.owner()
+		if (!aaOwner || aaOwner === ethers.ZeroAddress) {
+			return { success: false, error: 'Cannot determine AA owner for B-Unit fee check' }
+		}
+		const bunitAirdropRead = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function getBUnitBalance(address) view returns (uint256)'],
+			providerConet
+		)
+		const balance = await bunitAirdropRead.getBUnitBalance(aaOwner)
+		if (balance < BUNIT_FEE_AMOUNT) {
+			return {
+				success: false,
+				error: `Insufficient B-Units to pay fee (2 required, balance: ${Number(balance) / 1e6} B-Units)`,
+			}
+		}
+		return { success: true }
+	} catch (e: any) {
+		return {
+			success: false,
+			error: `B-Unit balance check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
+		}
+	}
+}
+
 const ACTION_TOKEN_TYPE = {
 	TOKEN_MINT: 1,
 	TOKEN_BURN: 2,
@@ -3779,15 +3846,53 @@ export const ContainerRelayProcess = async () => {
     )
     const tx = await FactoryWithRelay.relayContainerMainRelayed(account, to, items, nonce_, deadline_, sigBytes)
     logger(`[AAtoEOA/Container] relay tx submitted hash=${tx.hash}`)
-    await tx.wait().catch((waitErr: any) => {
+    const receipt = await tx.wait().catch((waitErr: any) => {
       try {
         logger(Colors.yellow(`[AAtoEOA/Container] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
       } catch (_) {
         console.error('[AAtoEOA/Container] tx.wait() failed (RPC):', waitErr)
       }
+      return null
     })
     // Base 转账完成后立即返回 hash 给客户端，不等待记账
     if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
+
+    // --- deduct 2 B-Units fee from feePayer on CoNET (with Base tx hash) ---
+    const baseGas = receipt?.gasUsed ?? 0n
+    let feePayer: string | null = null
+    try {
+      const aaRead = new ethers.Contract(
+        account,
+        ['function owner() view returns (address)'],
+        SC.walletBase.provider!
+      )
+      feePayer = await aaRead.owner()
+    } catch (_) {}
+    if (feePayer && feePayer !== ethers.ZeroAddress) {
+      const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
+      const baseHashBytes32 = tx.hash as `0x${string}`
+      const bunitAirdropWrite = new ethers.Contract(
+        CONET_BUNIT_AIRDROP_ADDRESS,
+        ['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+        SC.walletConet
+      )
+      try {
+        const consumeTx = await bunitAirdropWrite.consumeFromUser(
+          feePayer,
+          BUNIT_FEE_AMOUNT,
+          baseHashBytes32,
+          baseGas,
+          1n, // kind=1 -> txCategory=keccak256("sendUSDC")
+          { gasLimit: 2_500_000 }
+        )
+        await consumeTx.wait()
+        logger(Colors.cyan(`[AAtoEOA/Container] consumeFromUser ok: 2 B-Units from ${feePayer} baseHash=${tx.hash}`))
+      } catch (consumeErr: any) {
+        logger(Colors.red(`[AAtoEOA/Container] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+      }
+    } else {
+      logger(Colors.yellow(`[AAtoEOA/Container] skip consumeFromUser: could not resolve AA owner for account=${account}`))
+    }
 
     const usdcAmountRaw = obj.amountUSDC6 ? BigInt(obj.amountUSDC6) : BigInt(payload.items[0].amount)
     // ContainerRelayProcess 只处理单个 item，所以 currency 和 currencyAmount 应该是字符串

@@ -36,6 +36,7 @@ import beamiobaseABI from './ABI/beamio-base-abi.json'
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
+import { CONET_BUNIT_AIRDROP_ADDRESS } from './chainAddresses'
 
 
 
@@ -306,6 +307,34 @@ const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
+
+/** BeamioTransfer x402 预检：payer（EOA）的 B-Unit 余额必须 >= 2（手续费） */
+const beamioTransferPreCheckBUnitBalance = async (payerEOA: string): Promise<{ success: boolean; error?: string }> => {
+	const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
+	try {
+		if (!ethers.isAddress(payerEOA)) {
+			return { success: false, error: 'Invalid payer address for B-Unit fee check' }
+		}
+		const bunitAirdropRead = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function getBUnitBalance(address) view returns (uint256)'],
+			providerConet
+		)
+		const balance = await bunitAirdropRead.getBUnitBalance(payerEOA)
+		if (balance < BUNIT_FEE_AMOUNT) {
+			return {
+				success: false,
+				error: `Insufficient B-Units to pay fee (2 required, balance: ${Number(balance) / 1e6} B-Units)`,
+			}
+		}
+		return { success: true }
+	} catch (e: any) {
+		return {
+			success: false,
+			error: `B-Unit balance check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
+		}
+	}
+}
 /** BeamioOracle ABI：getRate(uint8) 返回货币对 USD 的 E18 汇率 */
 const BeamioOracleAbi = ['function getRate(uint8 c) view returns (uint256)']
 /** Base 主网的 BeamioOracle 合约实例，供 oracolPrice 使用 */
@@ -685,16 +714,25 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 		return 
 	}
 
-	let responseData: x402SettleResponse
-
 	const paymentHeader = exact.evm.decodePayment(req.header("X-PAYMENT")!)
 	const saleRequirements = paymentRequirements[0]
-
 	const payload: payload = paymentHeader?.payload as payload
 
-	try {
-	
+	// Cluster 预检：payer 的 B-Unit 余额必须 >= 2（手续费）
+	const payerEOA = payload?.authorization?.from
+	if (!payerEOA || !ethers.isAddress(payerEOA)) {
+		logger(Colors.red(`[BeamioTransfer] REJECT: cannot determine payer from payment`))
+		return res.status(400).json({ success: false, error: 'Invalid payment: cannot determine payer' })
+	}
+	const bunitCheck = await beamioTransferPreCheckBUnitBalance(payerEOA)
+	if (!bunitCheck.success) {
+		logger(Colors.red(`[BeamioTransfer] B-Unit pre-check FAIL: ${bunitCheck.error}`))
+		return res.status(400).json({ success: false, error: bunitCheck.error })
+	}
 
+	let responseData: x402SettleResponse
+
+	try {
 		const settleResponse = await settle(
 			paymentHeader,
 			saleRequirements)
@@ -947,7 +985,9 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 			gasWei: gasFields.gasWei,
 			gasUSDC6: gasFields.gasUSDC6,
 			gasChainType: gasFields.gasChainType,
+			baseGas: gasFields.baseGas,
 			feePayer: payload.from,
+			source: 'x402',
 		}
 		if (payload.requestHash) body.requestHash = payload.requestHash
 		if (payload.isInternalTransfer) body.isInternalTransfer = true
@@ -960,6 +1000,7 @@ const estimateTransferGasFields = async (txHash: string): Promise<{
 	gasWei: string
 	gasUSDC6: string
 	gasChainType: number
+	baseGas: string
 }> => {
 	const GAS_CHAIN_TYPE_ETH = 0
 	const CURRENCY_USDC = 4
@@ -969,7 +1010,7 @@ const estimateTransferGasFields = async (txHash: string): Promise<{
 	try {
 		const receipt = await providerBase.getTransactionReceipt(txHash)
 		if (!receipt) {
-			return { gasWei: '0', gasUSDC6: '0', gasChainType: GAS_CHAIN_TYPE_ETH }
+			return { gasWei: '0', gasUSDC6: '0', gasChainType: GAS_CHAIN_TYPE_ETH, baseGas: '0' }
 		}
 		const gasUsed = receipt.gasUsed ?? 0n
 		let gasPrice = receipt.gasPrice ?? 0n
@@ -1000,10 +1041,11 @@ const estimateTransferGasFields = async (txHash: string): Promise<{
 			gasWei: gasWei.toString(),
 			gasUSDC6: gasUSDC6.toString(),
 			gasChainType: GAS_CHAIN_TYPE_ETH,
+			baseGas: gasUsed.toString(),
 		}
 	} catch (ex: any) {
 		logger(`[BeamioTransfer] estimateTransferGasFields failed: ${ex?.message ?? String(ex)}`)
-		return { gasWei: '0', gasUSDC6: '0', gasChainType: GAS_CHAIN_TYPE_ETH }
+		return { gasWei: '0', gasUSDC6: '0', gasChainType: GAS_CHAIN_TYPE_ETH, baseGas: '0' }
 	}
 }
 

@@ -756,7 +756,7 @@ const routing = ( router: Router ) => {
 		/** x402 BeamioTransfer 成功后：写入 BeamioIndexerDiamond（master 队列处理） */
 		router.post('/beamioTransferIndexerAccounting', (req, res) => {
 			logger(Colors.gray(`[DEBUG] beamioTransferIndexerAccounting received bodyKeys=${Object.keys(req.body || {}).join(',')} from=${(req.body as any)?.from?.slice?.(0, 10)}… to=${(req.body as any)?.to?.slice?.(0, 10)}… requestHash=${(req.body as any)?.requestHash ?? 'n/a'} poolBefore=${beamioTransferIndexerAccountingPool.length}`))
-			const { from, to, amountUSDC6, finishedHash, displayJson, note, currency, currencyAmount, gasWei, gasUSDC6, gasChainType, feePayer, isInternalTransfer, requestHash } = req.body as {
+			const { from, to, amountUSDC6, finishedHash, displayJson, note, currency, currencyAmount, gasWei, gasUSDC6, gasChainType, baseGas, feePayer, isInternalTransfer, requestHash, source } = req.body as {
 				from?: string
 				to?: string
 				amountUSDC6?: string
@@ -769,8 +769,10 @@ const routing = ( router: Router ) => {
 				gasWei?: string
 				gasUSDC6?: string
 				gasChainType?: number
+				baseGas?: string
 				feePayer?: string
 				isInternalTransfer?: boolean
+				source?: string
 			}
 			if (!ethers.isAddress(from) || !ethers.isAddress(to) || !amountUSDC6 || !finishedHash || !ethers.isAddress(feePayer)) {
 				return res.status(400).json({ success: false, error: 'Invalid payload: from,to,amountUSDC6,finishedHash,feePayer required' }).end()
@@ -820,9 +822,11 @@ const routing = ( router: Router ) => {
 				gasWei: String(gasWei ?? '0'),
 				gasUSDC6: String(gasUSDC6 ?? '0'),
 				gasChainType: Number(gasChainType ?? 0),
+				baseGas: baseGas != null ? String(baseGas) : undefined,
 				feePayer: String(feePayer),
 				isInternalTransfer: !!isInternalTransfer,
 				requestHash: reqHashValid,
+				source: source === 'x402' ? 'x402' : undefined,
 				res,
 			})
 			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6} requestHash=${reqHashValid ?? 'n/a'} (raw=${requestHash ?? 'undefined'})`))
