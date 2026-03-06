@@ -2414,14 +2414,15 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
-	/** GET /api/getBUnitLedger?address=0x... - CoNET B-Unit 记账明细，30 秒缓存。供前端绕过 CORS 获取。 */
+	/** GET /api/getBUnitLedger?address=0x... - CoNET B-Unit 记账明细，30 秒缓存。供前端绕过 CORS 获取。?_nocache=1 跳过缓存。 */
 	router.get('/getBUnitLedger', async (req, res) => {
-		const { address } = req.query as { address?: string }
+		const { address, _nocache } = req.query as { address?: string; _nocache?: string }
 		if (!address || !ethers.isAddress(address)) {
 			return res.status(400).json({ error: 'Invalid address: require valid 0x address' })
 		}
 		const cacheKey = ethers.getAddress(address).toLowerCase()
-		const cached = getBUnitLedgerCache.get(cacheKey)
+		const skipCache = _nocache === '1' || _nocache === 'true'
+		const cached = !skipCache ? getBUnitLedgerCache.get(cacheKey) : undefined
 		if (cached && Date.now() < cached.expiry) {
 			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
@@ -2437,7 +2438,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const accountLower = address.toLowerCase()
 			const buintLower = CONET_BUINT.toLowerCase()
 			const decimals = 6
-			const entries: Array<{ id: string; title: string; subtitle: string; amount: number; time: string; timestamp: number; type: string; status: string; linkedUsdc: string; txHash: string; network: string; baseTxHash?: string }> = []
+			const entries: Array<{ id: string; title: string; subtitle: string; amount: number; time: string; timestamp: number; type: string; status: string; linkedUsdc: string; txHash: string; network: string; baseTxHash?: string; originalPaymentHash?: string }> = []
 			const formatTime = (ts: number) => {
 				const d = new Date(ts * 1000)
 				const now = Date.now()
@@ -2470,15 +2471,19 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					const baseTxHash = rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? rawOph : undefined
 					entries.push({ ...baseEntry, id: txIdHex, title: 'Fuel Yield (1:100)', subtitle: 'System Top-up', amount: amountBUnits, type: 'refuel', linkedUsdc: usdcStr, baseTxHash })
 				} else if (payee === buintLower && payer === accountLower) {
-					const rawOph = (tx as { originalPaymentHash?: string }).originalPaymentHash
+					const rawOphVal = (tx as { originalPaymentHash?: string | bigint }).originalPaymentHash
+					const rawOph = rawOphVal != null
+						? (typeof rawOphVal === 'string' ? rawOphVal : '0x' + BigInt(rawOphVal).toString(16).padStart(64, '0'))
+						: undefined
 					const txCatNorm = (typeof txCategory === 'string' ? txCategory : txCategory != null ? '0x' + BigInt(txCategory).toString(16).padStart(64, '0') : '').toLowerCase()
 					const isRequestAccounting = txCatNorm === TX_REQUEST_ACCOUNTING.toLowerCase()
-					// requestAccounting 的 originalPaymentHash 是 requestHash，非 Base tx，不显示为 baseTxHash
-					const baseTxHash = !isRequestAccounting && rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? rawOph : undefined
+					// requestAccounting 的 originalPaymentHash 是 requestHash，用 CoNET 链接；其他用 Base 链接
+					const ophHex = rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? (rawOph.startsWith('0x') ? rawOph : '0x' + rawOph) : ''
+					const baseTxHash = !isRequestAccounting && ophHex && ethers.dataLength(ophHex) === 32 ? ophHex : undefined
+					const originalPaymentHash = isRequestAccounting && ophHex && ethers.dataLength(ophHex) === 32 ? ophHex : undefined
 					const title = isRequestAccounting ? 'Service Fee (0.8%)' : 'B-Unit Burn'
-					const ophHex = rawOph && ethers.isHexString(rawOph) ? (rawOph.length >= 2 ? rawOph : '0x') : '0x'
 					const subtitle = isRequestAccounting
-						? `Payment Request ${ophHex.slice(-3)}`
+						? `Payment Request ${ophHex ? ophHex.slice(-3) : '—'}`
 						: (amountUSDC6 > 0 ? `Paid ${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'Gas / Fee')
 					entries.push({
 						...baseEntry,
@@ -2489,6 +2494,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 						type: amountUSDC6 > 0 ? 'fee' : 'gas',
 						linkedUsdc: amountUSDC6 > 0 ? `${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'N/A',
 						baseTxHash,
+						originalPaymentHash,
 					})
 				}
 			}
