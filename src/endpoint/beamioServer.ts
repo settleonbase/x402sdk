@@ -2416,7 +2416,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const accountLower = address.toLowerCase()
 			const buintLower = CONET_BUINT.toLowerCase()
 			const decimals = 6
-			const entries: Array<{ id: string; title: string; subtitle: string; amount: number; time: string; timestamp: number; type: string; status: string; linkedUsdc: string; txHash: string; network: string }> = []
+			const entries: Array<{ id: string; title: string; subtitle: string; amount: number; time: string; timestamp: number; type: string; status: string; linkedUsdc: string; txHash: string; network: string; baseTxHash?: string }> = []
 			const formatTime = (ts: number) => {
 				const d = new Date(ts * 1000)
 				const now = Date.now()
@@ -2445,8 +2445,24 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				} else if (txCategory === TX_BUINT_USDC && payee === accountLower) {
 					const usdcAmount = amountUSDC6 > 0 ? amountUSDC6 / 10 ** decimals : amountBUnits / 100
 					const usdcStr = usdcAmount > 0 ? `-${usdcAmount.toFixed(2)} USDC` : 'N/A'
-					entries.push({ ...baseEntry, id: txIdHex, title: 'Manual Refuel Gain', subtitle: `Swap $${usdcAmount.toFixed(2)} USDC`, amount: amountBUnits, type: 'refuel', linkedUsdc: usdcStr })
+					let baseTxHash: string | undefined
+					try {
+						const displayJson = (tx as { displayJson?: string })?.displayJson ?? ''
+						if (displayJson) {
+							const parsed = JSON.parse(displayJson) as { baseTxHash?: string }
+							if (parsed?.baseTxHash && ethers.isHexString(parsed.baseTxHash)) baseTxHash = parsed.baseTxHash
+						}
+					} catch {}
+					entries.push({ ...baseEntry, id: txIdHex, title: 'Fuel Yield (1:100)', subtitle: 'System Top-up', amount: amountBUnits, type: 'refuel', linkedUsdc: usdcStr, baseTxHash })
 				} else if (payee === buintLower && payer === accountLower) {
+					let baseTxHash: string | undefined
+					try {
+						const displayJson = (tx as { displayJson?: string })?.displayJson ?? ''
+						if (displayJson) {
+							const parsed = JSON.parse(displayJson) as { baseTxHash?: string }
+							if (parsed?.baseTxHash && ethers.isHexString(parsed.baseTxHash)) baseTxHash = parsed.baseTxHash
+						}
+					} catch {}
 					entries.push({
 						...baseEntry,
 						id: txIdHex,
@@ -2455,6 +2471,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 						amount: -amountBUnits,
 						type: amountUSDC6 > 0 ? 'fee' : 'gas',
 						linkedUsdc: amountUSDC6 > 0 ? `${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'N/A',
+						baseTxHash,
 					})
 				}
 			}
