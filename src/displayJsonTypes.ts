@@ -1,4 +1,8 @@
-/** displayJson 仅存账单附加字符（title/handle/forText/card），金额由 Transaction 的 finalRequestAmountFiat6/finalRequestAmountUSDC6/meta 表达 */
+/**
+ * displayJson 仅存 BeamioIndexerDiamond 约定的 DisplayJsonData 字段，不能自行组装 Indexer 中不存在的字段。
+ * Base tx hash 等由 originalPaymentHash 表达，勿放入 displayJson。
+ * 金额由 Transaction 的 finalRequestAmountFiat6/finalRequestAmountUSDC6/meta 表达。
+ */
 export type DisplayJsonData = {
 	title: string
 	source: string

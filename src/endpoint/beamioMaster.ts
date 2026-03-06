@@ -1260,13 +1260,16 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Master 调用 factory.executeForAdmin */
 		router.post('/nfcTopup', async (req, res) => {
-			const { cardAddr, data, deadline, nonce, adminSignature, uid } = req.body as {
+			const { cardAddr, data, deadline, nonce, adminSignature, uid, cardOwnerEOA, topupFeeBUnits, topupKind } = req.body as {
 				cardAddr?: string
 				data?: string
 				deadline?: number
 				nonce?: string
 				adminSignature?: string
 				uid?: string
+				cardOwnerEOA?: string
+				topupFeeBUnits?: string
+				topupKind?: number
 			}
 			if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
 				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' })
@@ -1281,6 +1284,9 @@ const routing = ( router: Router ) => {
 				nonce,
 				adminSignature,
 				uid: typeof uid === 'string' ? uid : undefined,
+				cardOwnerEOA: cardOwnerEOA && ethers.isAddress(cardOwnerEOA) ? ethers.getAddress(cardOwnerEOA) : undefined,
+				topupFeeBUnits: topupFeeBUnits ? BigInt(topupFeeBUnits) : undefined,
+				topupKind: topupKind === 2 || topupKind === 3 ? topupKind : 2,
 				res
 			})
 			logger(Colors.green(`[nfcTopup] cardAddr=${cardAddr} uid=${uid ?? '(not provided)'} pushed to executeForAdminPool`))

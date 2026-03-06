@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
@@ -953,14 +953,22 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: 'Invalid mintPointsByAdmin payload' })
 			}
 			const aaAddr = recipientEOA ? await resolveBeamioAccountOf(recipientEOA) : null
-			logger(Colors.green(`server /api/nfcTopup preCheck OK | uid=${uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'} | forwarding to master`))
+			const bunitFeeCheck = await nfcTopupPreCheckBUnitFee(cardAddress, data)
+			if (!bunitFeeCheck.success) {
+				logger(Colors.red(`[nfcTopup] B-Unit fee pre-check FAIL: ${bunitFeeCheck.error}`))
+				return res.status(400).json({ success: false, error: bunitFeeCheck.error }).end()
+			}
+			logger(Colors.green(`server /api/nfcTopup preCheck OK | uid=${uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'} | fee=${Number(bunitFeeCheck.feeAmount ?? 0) / 1e6} B-Units | forwarding to master`))
 			postLocalhost('/api/nfcTopup', {
 				cardAddr: cardAddress,
 				data,
 				deadline,
 				nonce,
 				adminSignature,
-				uid: typeof uid === 'string' ? uid : undefined
+				uid: typeof uid === 'string' ? uid : undefined,
+				cardOwnerEOA: bunitFeeCheck.cardOwnerEOA,
+				topupFeeBUnits: bunitFeeCheck.feeAmount?.toString(),
+				topupKind: bunitFeeCheck.topupKind,
 			}, res)
 		} catch (e: any) {
 			logger(Colors.red(`[nfcTopup] preCheck failed: ${e?.message ?? e}`))
@@ -2450,24 +2458,12 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				} else if (txCategory === TX_BUINT_USDC && payee === accountLower) {
 					const usdcAmount = amountUSDC6 > 0 ? amountUSDC6 / 10 ** decimals : amountBUnits / 100
 					const usdcStr = usdcAmount > 0 ? `-${usdcAmount.toFixed(2)} USDC` : 'N/A'
-					let baseTxHash: string | undefined
-					try {
-						const displayJson = (tx as { displayJson?: string })?.displayJson ?? ''
-						if (displayJson) {
-							const parsed = JSON.parse(displayJson) as { baseTxHash?: string }
-							if (parsed?.baseTxHash && ethers.isHexString(parsed.baseTxHash)) baseTxHash = parsed.baseTxHash
-						}
-					} catch {}
+					const rawOph = (tx as { originalPaymentHash?: string }).originalPaymentHash
+					const baseTxHash = rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? rawOph : undefined
 					entries.push({ ...baseEntry, id: txIdHex, title: 'Fuel Yield (1:100)', subtitle: 'System Top-up', amount: amountBUnits, type: 'refuel', linkedUsdc: usdcStr, baseTxHash })
 				} else if (payee === buintLower && payer === accountLower) {
-					let baseTxHash: string | undefined
-					try {
-						const displayJson = (tx as { displayJson?: string })?.displayJson ?? ''
-						if (displayJson) {
-							const parsed = JSON.parse(displayJson) as { baseTxHash?: string }
-							if (parsed?.baseTxHash && ethers.isHexString(parsed.baseTxHash)) baseTxHash = parsed.baseTxHash
-						}
-					} catch {}
+					const rawOph = (tx as { originalPaymentHash?: string }).originalPaymentHash
+					const baseTxHash = rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? rawOph : undefined
 					entries.push({
 						...baseEntry,
 						id: txIdHex,

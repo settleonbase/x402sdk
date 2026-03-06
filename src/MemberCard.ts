@@ -806,6 +806,9 @@ export const executeForAdminPool: Array<{
 	nonce: string
 	adminSignature: string
 	uid?: string
+	cardOwnerEOA?: string
+	topupFeeBUnits?: bigint
+	topupKind?: 2 | 3
 	res?: Response
 }> = []
 
@@ -943,6 +946,31 @@ export const executeForAdminProcess = async () => {
 		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash} | uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'}`))
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+		}
+		// Topup 成功后向卡的发行方收取 B-Unit 费用（Cluster 已预检，Master 直接执行）
+		if (obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) {
+			const receipt = await tx.wait()
+			const baseHash = tx.hash as `0x${string}`
+			const baseGas = receipt?.gasUsed ?? 0n
+			const bunitAirdropWrite = new ethers.Contract(
+				CONET_BUNIT_AIRDROP_ADDRESS,
+				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+				SC.walletConet
+			)
+			try {
+				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+					obj.cardOwnerEOA,
+					obj.topupFeeBUnits,
+					baseHash,
+					baseGas,
+					BigInt(obj.topupKind ?? 2), // kind=2 cardTopup, kind=3 issueCard
+					{ gasLimit: 2_500_000 }
+				)
+				await consumeTx.wait()
+				logger(Colors.cyan(`[executeForAdminProcess] consumeFromUser ok: ${Number(obj.topupFeeBUnits) / 1e6} B-Units from ${obj.cardOwnerEOA}`))
+			} catch (consumeErr: any) {
+				logger(Colors.red(`[executeForAdminProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+			}
 		}
 		// Android NFC topup（mintPointsByAdmin）成功后同步该用户在该卡上的成员 NFT tier metadata，与普通 topup/redeem 一致：按 minUsdc6 排序、Default/Max 对应低档、写入 backgroundColor 等 1155 JSON
 		if (recipientEOA && obj.cardAddr) {
@@ -1859,6 +1887,21 @@ const BUNIT_AIRDROP_ABI = [
 	'function claimFor(address claimant, uint256 nonce, uint256 deadline, bytes calldata signature)',
 ] as const
 
+/** EIP-712 domain 与 BUnitAirdrop contract 一致，用于 Cluster 签名预检 */
+const CLAIM_AIRDROP_DOMAIN = {
+	name: 'BUnitAirdrop',
+	version: '1',
+	chainId: 224400,
+	verifyingContract: CONET_BUNIT_AIRDROP_ADDRESS as `0x${string}`,
+}
+const CLAIM_AIRDROP_TYPES = {
+	ClaimAirdrop: [
+		{ name: 'claimant', type: 'address' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
 export type ClaimBUnitsPayload = {
 	claimant: string
 	nonce: string | number
@@ -1885,10 +1928,22 @@ export const claimBUnitsPreCheck = (body: { claimant?: string; nonce?: unknown; 
 	if (typeof sig !== 'string' || !/^0x[a-fA-F0-9]+$/.test(sig) || (sig.length - 2) / 2 !== 65) {
 		return { success: false, error: 'Invalid signature (must be 65 bytes hex)' }
 	}
+	// Cluster 预检：EIP-712 签名必须由 claimant 本人签署，否则不转发 Master
+	const claimant = ethers.getAddress(body.claimant)
+	const value = { claimant, nonce, deadline: BigInt(deadline) }
+	let recovered: string
+	try {
+		recovered = ethers.verifyTypedData(CLAIM_AIRDROP_DOMAIN, CLAIM_AIRDROP_TYPES, value, sig)
+	} catch {
+		return { success: false, error: 'Invalid signature (verification failed)' }
+	}
+	if (recovered.toLowerCase() !== claimant.toLowerCase()) {
+		return { success: false, error: 'Invalid signature: signer does not match claimant' }
+	}
 	return {
 		success: true,
 		preChecked: {
-			claimant: ethers.getAddress(body.claimant),
+			claimant,
 			nonce: String(nonce),
 			deadline: String(deadline),
 			signature: sig,
@@ -2377,6 +2432,110 @@ export const AAtoEOAPreCheckSenderHasCode = async (packedUserOp: AAtoEOAUserOp):
 		return { success: false, error: 'Invalid sender: must be the Smart Account contract (with code), not the EOA. Use primaryAccountOf(owner) as sender.' }
 	}
 	return { success: true }
+}
+
+/** 从 mintPointsByAdmin data 解析 recipient 与 points6 */
+const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; points6: bigint } | null => {
+	try {
+		const iface = new ethers.Interface(['function mintPointsByAdmin(address user, uint256 points6)'])
+		const decoded = iface.parseTransaction({ data })
+		if (decoded?.name === 'mintPointsByAdmin' && decoded.args[0] != null && decoded.args[1] != null) {
+			return { recipient: decoded.args[0] as string, points6: BigInt(decoded.args[1]) }
+		}
+	} catch { /* ignore */ }
+	return null
+}
+
+/** Cluster 预检：卡 topup 时向卡的发行方收取 B-Unit 费用。普通 topup 2 B-Units (kind=cardTopup)，新卡发行或 upgrade 获得新卡 99 B-Units (kind=issueCard)。 */
+export const nfcTopupPreCheckBUnitFee = async (
+	cardAddr: string,
+	data: string
+): Promise<{ success: boolean; error?: string; cardOwnerEOA?: string; feeAmount?: bigint; topupKind?: 2 | 3 }> => {
+	const FEE_REGULAR = 2_000_000n
+	const FEE_ISSUE_CARD = 99_000_000n
+	const KIND_CARD_TOPUP = 2
+	const KIND_ISSUE_CARD = 3
+	try {
+		const parsed = tryParseMintPointsByAdminArgs(data)
+		if (!parsed || !ethers.isAddress(parsed.recipient)) {
+			return { success: false, error: 'Invalid mintPointsByAdmin payload' }
+		}
+		const cardAbi = [
+			'function owner() view returns (address)',
+			'function factoryGateway() view returns (address)',
+			'function activeMembershipId(address) view returns (uint256)',
+			'function activeTierIndexOrMax(address) view returns (uint256)',
+			'function balanceOf(address,uint256) view returns (uint256)',
+			'function getTiersCount() view returns (uint256)',
+			'function getTierAt(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
+			'function getOwnershipByEOA(address) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+		]
+		const factoryAbi = ['function _aaFactory() view returns (address)']
+		const aaFactoryAbi = ['function beamioAccountOf(address) view returns (address)']
+		const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+		const rawOwner = await card.owner()
+		const resolveResult = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner)
+		if (!resolveResult.success) {
+			return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA' }
+		}
+		const cardOwnerEOA = resolveResult.cardOwner
+		const gateway = await card.factoryGateway()
+		const factory = new ethers.Contract(gateway, factoryAbi, providerBaseBackup)
+		const aaFactoryAddr = await factory._aaFactory()
+		const aaFactory = new ethers.Contract(aaFactoryAddr, aaFactoryAbi, providerBaseBackup)
+		const recipientAA = await aaFactory.beamioAccountOf(parsed.recipient)
+		let isIssueCard = false
+		if (!recipientAA || recipientAA === ethers.ZeroAddress) {
+			isIssueCard = true
+		} else {
+			const [activeId, activeTierIdx, tiersCount, ownership] = await Promise.all([
+				card.activeMembershipId(recipientAA),
+				card.activeTierIndexOrMax(recipientAA),
+				card.getTiersCount(),
+				card.getOwnershipByEOA(parsed.recipient) as Promise<[bigint, Array<{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }>]>,
+			])
+			const MAX_UINT = 2n ** 256n - 1n
+			if (activeId === 0n || activeTierIdx >= MAX_UINT) {
+				isIssueCard = true
+			} else if (tiersCount > 0n && activeTierIdx < tiersCount - 1n) {
+				const nextTierIdx = activeTierIdx + 1n
+				const nfts = ownership[1] ?? []
+				const alreadyHasNextTier = nfts.some(
+					(n: { tierIndexOrMax: bigint; isExpired: boolean }) =>
+						n.tierIndexOrMax === nextTierIdx && !n.isExpired
+				)
+				if (!alreadyHasNextTier) {
+					const nextTier = await card.getTierAt(nextTierIdx)
+					const pointsBalance = await card.balanceOf(recipientAA, 0)
+					if (nextTier.upgradeByBalance) {
+						if (pointsBalance + parsed.points6 >= nextTier.minUsdc6) isIssueCard = true
+					} else {
+						if (parsed.points6 >= nextTier.minUsdc6) isIssueCard = true
+					}
+				}
+			}
+		}
+		const feeAmount = isIssueCard ? FEE_ISSUE_CARD : FEE_REGULAR
+		const topupKind = (isIssueCard ? KIND_ISSUE_CARD : KIND_CARD_TOPUP) as 2 | 3
+		const bunitAirdropRead = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function getBUnitBalance(address) view returns (uint256)'],
+			providerConet
+		)
+		const balance = await bunitAirdropRead.getBUnitBalance(cardOwnerEOA)
+		if (balance < feeAmount) {
+			return {
+				success: false,
+				error: `Insufficient B-Units: card issuer needs ${Number(feeAmount) / 1e6} B-Units for this topup (balance: ${Number(balance) / 1e6} B-Units)`,
+			}
+		}
+		return { success: true, cardOwnerEOA, feeAmount, topupKind }
+	} catch (e: any) {
+		return {
+			success: false,
+			error: `Topup B-Unit fee check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
+		}
+	}
 }
 
 /** Cluster 预检：AA owner 的 B-Unit 余额必须 >= 2（手续费）。Master 不再重复检查。 */
@@ -3123,7 +3282,7 @@ export const AAtoEOAProcess = async () => {
         BUNIT_FEE_AMOUNT,
         baseHashBytes32,
         baseGas,
-        0n, // kind=0 -> txCategory=buintBurn
+        1n, // kind=1 -> txCategory=keccak256("sendUSDC")，需预先 registerKind(1,"sendUSDC")
         { gasLimit: 2_500_000 }
       )
       await consumeTx.wait()
