@@ -2379,6 +2379,40 @@ export const AAtoEOAPreCheckSenderHasCode = async (packedUserOp: AAtoEOAUserOp):
 	return { success: true }
 }
 
+/** Cluster 预检：AA owner 的 B-Unit 余额必须 >= 2（手续费）。Master 不再重复检查。 */
+export const AAtoEOAPreCheckBUnitBalance = async (packedUserOp: AAtoEOAUserOp): Promise<{ success: boolean; error?: string }> => {
+	const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
+	try {
+		const aaRead = new ethers.Contract(
+			packedUserOp.sender,
+			['function owner() view returns (address)'],
+			providerBaseBackup
+		)
+		const aaOwner = await aaRead.owner()
+		if (!aaOwner || aaOwner === ethers.ZeroAddress) {
+			return { success: false, error: 'Cannot determine AA owner for B-Unit fee check' }
+		}
+		const bunitAirdropRead = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function getBUnitBalance(address) view returns (uint256)'],
+			providerConet
+		)
+		const balance = await bunitAirdropRead.getBUnitBalance(aaOwner)
+		if (balance < BUNIT_FEE_AMOUNT) {
+			return {
+				success: false,
+				error: `Insufficient B-Units to pay fee (2 required, balance: ${Number(balance) / 1e6} B-Units)`,
+			}
+		}
+		return { success: true }
+	} catch (e: any) {
+		return {
+			success: false,
+			error: `B-Unit balance check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
+		}
+	}
+}
+
 const ACTION_TOKEN_TYPE = {
 	TOKEN_MINT: 1,
 	TOKEN_BURN: 2,
@@ -3025,6 +3059,18 @@ export const AAtoEOAProcess = async () => {
       }
     }
 
+    // --- fee payer for consumeFromUser (Cluster 已预检 B-Unit 余额，Master 不再检查) ---
+    const feePayer = aaOwner !== ethers.ZeroAddress ? aaOwner : recoveredSigner
+    if (!feePayer) {
+      const errMsg = 'Cannot determine fee payer (AA owner)'
+      logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      Settle_ContractPool.unshift(SC)
+      setTimeout(() => AAtoEOAProcess(), 3000)
+      return
+    }
+    const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
+
 	 // --- submit ---
 	 const beneficiary = await SC.walletBase.getAddress()
 	 logger(
@@ -3058,13 +3104,34 @@ export const AAtoEOAProcess = async () => {
    
     const tx = await entryPoint.handleOps([packedOp], beneficiary)
     logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
-    await tx.wait().catch((waitErr: any) => {
-      try {
-        logger(Colors.yellow(`[AAtoEOA] handleOps tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
-      } catch (_) {
-        console.error('[AAtoEOA] handleOps tx.wait() failed (RPC):', waitErr)
-      }
-    })
+    const receipt = await tx.wait()
+    if (!receipt) {
+      throw new Error('handleOps tx.wait() returned null')
+    }
+
+    // --- deduct 2 B-Units fee from feePayer on CoNET (with Base tx hash) ---
+    const baseHashBytes32 = tx.hash as `0x${string}` // 32-byte tx hash as bytes32
+    const baseGas = receipt.gasUsed
+    const bunitAirdropWrite = new ethers.Contract(
+      CONET_BUNIT_AIRDROP_ADDRESS,
+      ['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+      SC.walletConet
+    )
+    try {
+      const consumeTx = await bunitAirdropWrite.consumeFromUser(
+        feePayer,
+        BUNIT_FEE_AMOUNT,
+        baseHashBytes32,
+        baseGas,
+        0n, // kind=0 -> txCategory=buintBurn
+        { gasLimit: 2_500_000 }
+      )
+      await consumeTx.wait()
+      logger(Colors.cyan(`[AAtoEOA] consumeFromUser ok: 2 B-Units from ${feePayer} baseHash=${tx.hash}`))
+    } catch (consumeErr: any) {
+      logger(Colors.red(`[AAtoEOA] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+      // USDC transfer already succeeded; log but do not fail the response
+    }
 
     // 记账：syncTokenAction via beamioTransferIndexerAccountingPool（USDC 转账，card 为 USDC 地址，title 为 "Express Pay to EOA"）
     const toEOA = ethers.getAddress(obj.toEOA)
