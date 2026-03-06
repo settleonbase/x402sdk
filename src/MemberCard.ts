@@ -45,7 +45,7 @@ const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 const BeamioTaskIndexerAddress = '0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612'
 const DIAMOND = BeamioTaskIndexerAddress
 /** Base 主网 RPC：使用 ~/.master.json base_endpoint */
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
