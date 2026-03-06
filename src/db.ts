@@ -19,7 +19,7 @@ import conetPGPABI from './ABI/conetPGP.json'
  */
 
 
-const RPC_URL = "https://mainnet-rpc1.conet.network"
+const RPC_URL = "https://mainnet-rpc.conet.network"
 const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
 
 const providerConet = new ethers.JsonRpcProvider(RPC_URL)

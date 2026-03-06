@@ -75,7 +75,7 @@ import {reflashData} from './server'
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 
 const x402Version = 1
-const conetEndpoint = 'https://mainnet-rpc1.conet.network'
+const conetEndpoint = 'https://mainnet-rpc.conet.network'
 const CashCodeBaseAddr = '0x3977f35c531895CeD50fAf5e02bd9e7EB890D2D1'
 const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
@@ -94,7 +94,7 @@ const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 const {verify, settle} = useFacilitator(facilitator1)
 
 const GuardianNodeInfo_mainnet = '0xCd68C3FFFE403f9F26081807c77aB29a4DF6940D'
-const CONET_MAINNET = new ethers.JsonRpcProvider('https://mainnet-rpc1.conet.network') 
+const CONET_MAINNET = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network') 
 const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNodeInfoABI, CONET_MAINNET)
 
 

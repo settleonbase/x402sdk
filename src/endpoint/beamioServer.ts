@@ -72,7 +72,7 @@ const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> => {
 		return addr && addr !== ethers.ZeroAddress ? addr : null
 	} catch { return null }
 }
-const CONET_RPC = 'https://mainnet-rpc1.conet.network'
+const CONET_RPC = 'https://mainnet-rpc.conet.network'
 const providerConet = new ethers.JsonRpcProvider(CONET_RPC)
 
 const masterServerPort = 1111
@@ -99,7 +99,7 @@ const fetchOracleFromMaster = () => {
 }
 
 const startClusterOracleSync = () => {
-	const conetRpc = new ethers.JsonRpcProvider('https://mainnet-rpc1.conet.network')
+	const conetRpc = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network')
 	conetRpc.on('block', (blockNumber: bigint | number) => {
 		const n = typeof blockNumber === 'bigint' ? Number(blockNumber) : blockNumber
 		if (n % 10 !== 0) return
@@ -229,6 +229,9 @@ const getAAAccountCache = new Map<string, { body: string; statusCode: number; ex
 /** getBalance 缓存：30 秒 */
 const GET_BALANCE_CACHE_TTL_MS = 30 * 1000
 const getBalanceCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
+const GET_BUNIT_CACHE_TTL_MS = 30 * 1000
+const getBUnitBalanceCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
+const getBUnitLedgerCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
 
 /** 通用查询缓存：30 秒协议 */
 const QUERY_CACHE_TTL_MS = 30 * 1000
@@ -2179,6 +2182,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			logger(Colors.red(`server /api/purchaseBUnitFromBase preCheck FAIL: ${preCheck.error}`))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
+		// Cluster 预检：Base 链上 USDC 余额
+		try {
+			const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+			const usdc = new ethers.Contract(USDC_BASE, ['function balanceOf(address) view returns (uint256)'], providerBase)
+			const balance = await usdc.balanceOf(preCheck.preChecked.from)
+			const amount = BigInt(preCheck.preChecked.amount)
+			if (balance < amount) {
+				logger(Colors.red(`server /api/purchaseBUnitFromBase balance FAIL: from=${preCheck.preChecked.from.slice(0, 10)}... balance=${balance} < amount=${amount}`))
+				return res.status(400).json({ success: false, error: 'Insufficient USDC balance on Base' }).end()
+			}
+		} catch (e: any) {
+			logger(Colors.red(`server /api/purchaseBUnitFromBase balance check error: ${e?.message ?? e}`))
+			return res.status(502).json({ success: false, error: 'Failed to verify USDC balance' }).end()
+		}
 		logger(Colors.green(`server /api/purchaseBUnitFromBase preCheck OK from=${preCheck.preChecked.from.slice(0, 10)}... forwarding to master`))
 		postLocalhost('/api/purchaseBUnitFromBase', preCheck.preChecked, res)
 	})
@@ -2344,6 +2361,110 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		} catch (e: any) {
 			logger(Colors.red('[getBalance] forward error:'), e?.message ?? e)
 			res.status(502).json({ error: e?.message ?? 'Failed to fetch balance' })
+		}
+	})
+
+	/** GET /api/getBUnitBalance?address=0x... - CoNET B-Unit 余额（total/free/paid），30 秒缓存。供前端绕过 CORS 获取。 */
+	router.get('/getBUnitBalance', async (req, res) => {
+		const { address } = req.query as { address?: string }
+		if (!address || !ethers.isAddress(address)) {
+			return res.status(400).json({ error: 'Invalid address: require valid 0x address' })
+		}
+		const cacheKey = ethers.getAddress(address).toLowerCase()
+		const cached = getBUnitBalanceCache.get(cacheKey)
+		if (cached && Date.now() < cached.expiry) {
+			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
+		}
+		try {
+			const CONET_BUINT = '0x4A3E59519eE72B9Dcf376f0617fF0a0a5a1ef879'
+			const buint = new ethers.Contract(CONET_BUINT, ['function balanceOfAll(address) view returns (uint256 total, uint256 free, uint256 paid)'], providerConet)
+			const [total, free, paid] = await buint.balanceOfAll(address)
+			const decimals = 6
+			const data = {
+				total: Number(total) / 10 ** decimals,
+				free: Number(free) / 10 ** decimals,
+				paid: Number(paid) / 10 ** decimals,
+			}
+			const body = JSON.stringify(data)
+			getBUnitBalanceCache.set(cacheKey, { body, statusCode: 200, expiry: Date.now() + GET_BUNIT_CACHE_TTL_MS })
+			res.status(200).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[getBUnitBalance] error:'), e?.message ?? e)
+			res.status(502).json({ error: e?.message ?? 'Failed to fetch B-Unit balance' })
+		}
+	})
+
+	/** GET /api/getBUnitLedger?address=0x... - CoNET B-Unit 记账明细，30 秒缓存。供前端绕过 CORS 获取。 */
+	router.get('/getBUnitLedger', async (req, res) => {
+		const { address } = req.query as { address?: string }
+		if (!address || !ethers.isAddress(address)) {
+			return res.status(400).json({ error: 'Invalid address: require valid 0x address' })
+		}
+		const cacheKey = ethers.getAddress(address).toLowerCase()
+		const cached = getBUnitLedgerCache.get(cacheKey)
+		if (cached && Date.now() < cached.expiry) {
+			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
+		}
+		try {
+			const BEAMIO_INDEXER = '0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612'
+			const CONET_BUINT = '0x4A3E59519eE72B9Dcf376f0617fF0a0a5a1ef879'
+			const INDEXER_ABI = ['function getAccountTransactionsPaged(address account, uint256 offset, uint256 limit) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)']
+			const TX_BUINT_CLAIM = ethers.keccak256(ethers.toUtf8Bytes('buintClaim'))
+			const TX_BUINT_USDC = ethers.keccak256(ethers.toUtf8Bytes('buintUSDC'))
+			const indexer = new ethers.Contract(BEAMIO_INDEXER, INDEXER_ABI, providerConet)
+			const page = await indexer.getAccountTransactionsPaged(address, 0, 100)
+			const accountLower = address.toLowerCase()
+			const buintLower = CONET_BUINT.toLowerCase()
+			const decimals = 6
+			const entries: Array<{ id: string; title: string; subtitle: string; amount: number; time: string; timestamp: number; type: string; status: string; linkedUsdc: string; txHash: string; network: string }> = []
+			const formatTime = (ts: number) => {
+				const d = new Date(ts * 1000)
+				const now = Date.now()
+				const diff = now - ts * 1000
+				if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)}m ago`
+				if (diff < 24 * 60 * 60 * 1000) return `${Math.floor(diff / 3600000)}h ago`
+				if (diff < 48 * 60 * 60 * 1000) return 'Yesterday'
+				return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+			}
+			for (const tx of page) {
+				if (!tx?.exists) continue
+				const txCategory = String(tx.txCategory)
+				const payer = String(tx.payer).toLowerCase()
+				const payee = String(tx.payee).toLowerCase()
+				const amountFiat6 = Number(tx.finalRequestAmountFiat6 ?? 0)
+				const amountUSDC6 = Number(tx.finalRequestAmountUSDC6 ?? 0)
+				const amountBUnits = Math.round(amountFiat6 / 10 ** decimals)
+				const ts = Number(tx.timestamp ?? 0)
+				const timeStr = ts ? formatTime(ts) : '—'
+				const rawId = tx.id
+				const txIdHex = typeof rawId === 'string' ? rawId : rawId != null ? '0x' + BigInt(rawId).toString(16).padStart(64, '0') : '0x'
+				const txHashShort = txIdHex.length > 10 ? `${txIdHex.slice(0, 6)}...${txIdHex.slice(-4)}` : txIdHex
+				const baseEntry = { time: timeStr, timestamp: ts, txHash: txHashShort, network: 'CoNET L1' as const, status: 'Completed' as const }
+				if (txCategory === TX_BUINT_CLAIM && payee === accountLower) {
+					entries.push({ ...baseEntry, id: txIdHex, title: 'BUnit Claim', subtitle: 'Free claim', amount: amountBUnits, type: 'reward', linkedUsdc: 'N/A' })
+				} else if (txCategory === TX_BUINT_USDC && payee === accountLower) {
+					const usdcAmount = amountUSDC6 > 0 ? amountUSDC6 / 10 ** decimals : amountBUnits / 100
+					const usdcStr = usdcAmount > 0 ? `-${usdcAmount.toFixed(2)} USDC` : 'N/A'
+					entries.push({ ...baseEntry, id: txIdHex, title: 'Manual Refuel Gain', subtitle: `Swap $${usdcAmount.toFixed(2)} USDC`, amount: amountBUnits, type: 'refuel', linkedUsdc: usdcStr })
+				} else if (payee === buintLower && payer === accountLower) {
+					entries.push({
+						...baseEntry,
+						id: txIdHex,
+						title: 'B-Unit Burn',
+						subtitle: amountUSDC6 > 0 ? `Paid ${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'Gas / Fee',
+						amount: -amountBUnits,
+						type: amountUSDC6 > 0 ? 'fee' : 'gas',
+						linkedUsdc: amountUSDC6 > 0 ? `${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'N/A',
+					})
+				}
+			}
+			entries.sort((a, b) => b.timestamp - a.timestamp)
+			const body = JSON.stringify(entries)
+			getBUnitLedgerCache.set(cacheKey, { body, statusCode: 200, expiry: Date.now() + GET_BUNIT_CACHE_TTL_MS })
+			res.status(200).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[getBUnitLedger] error:'), e?.message ?? e)
+			res.status(502).json({ error: e?.message ?? 'Failed to fetch B-Unit ledger' })
 		}
 	})
 

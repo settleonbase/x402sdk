@@ -49,7 +49,7 @@ const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
-const conetEndpoint = 'https://mainnet-rpc1.conet.network'
+const conetEndpoint = 'https://mainnet-rpc.conet.network'
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 /**
  * Settle_ContractPool：factory 登记的 owner 列表，每项为一名 admin（含 baseFactoryPaymaster、walletBase 等）。
@@ -1987,8 +1987,9 @@ export const purchaseBUnitFromBasePreCheck = (body: {
 		return { success: false, error: 'Invalid from address' }
 	}
 	const amount = typeof body.amount === 'string' ? BigInt(body.amount) : null
-	if (amount === null || amount <= 0n) {
-		return { success: false, error: 'Invalid amount (must be positive)' }
+	const MIN_USDC6 = 1_000_000n  // 1 USDC (6 decimals)
+	if (amount === null || amount < MIN_USDC6) {
+		return { success: false, error: 'Minimum purchase is 1 USDC' }
 	}
 	const validAfter = typeof body.validAfter === 'number' ? body.validAfter : typeof body.validAfter === 'string' ? parseInt(body.validAfter, 10) : null
 	if (validAfter === null || !Number.isFinite(validAfter) || validAfter < 0) {
