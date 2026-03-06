@@ -2431,6 +2431,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const INDEXER_ABI = ['function getAccountTransactionsPaged(address account, uint256 offset, uint256 limit) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)']
 			const TX_BUINT_CLAIM = ethers.keccak256(ethers.toUtf8Bytes('buintClaim'))
 			const TX_BUINT_USDC = ethers.keccak256(ethers.toUtf8Bytes('buintUSDC'))
+			const TX_REQUEST_ACCOUNTING = ethers.keccak256(ethers.toUtf8Bytes('requestAccounting'))
 			const indexer = new ethers.Contract(BEAMIO_INDEXER, INDEXER_ABI, providerConet)
 			const page = await indexer.getAccountTransactionsPaged(address, 0, 100)
 			const accountLower = address.toLowerCase()
@@ -2470,12 +2471,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					entries.push({ ...baseEntry, id: txIdHex, title: 'Fuel Yield (1:100)', subtitle: 'System Top-up', amount: amountBUnits, type: 'refuel', linkedUsdc: usdcStr, baseTxHash })
 				} else if (payee === buintLower && payer === accountLower) {
 					const rawOph = (tx as { originalPaymentHash?: string }).originalPaymentHash
-					const baseTxHash = rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? rawOph : undefined
+					const txCatNorm = (typeof txCategory === 'string' ? txCategory : txCategory != null ? '0x' + BigInt(txCategory).toString(16).padStart(64, '0') : '').toLowerCase()
+					const isRequestAccounting = txCatNorm === TX_REQUEST_ACCOUNTING.toLowerCase()
+					// requestAccounting 的 originalPaymentHash 是 requestHash，非 Base tx，不显示为 baseTxHash
+					const baseTxHash = !isRequestAccounting && rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? rawOph : undefined
+					const title = isRequestAccounting ? 'Service Fee (0.8%)' : 'B-Unit Burn'
+					const ophHex = rawOph && ethers.isHexString(rawOph) ? (rawOph.length >= 2 ? rawOph : '0x') : '0x'
+					const subtitle = isRequestAccounting
+						? `Payment Request ${ophHex.slice(-3)}`
+						: (amountUSDC6 > 0 ? `Paid ${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'Gas / Fee')
 					entries.push({
 						...baseEntry,
 						id: txIdHex,
-						title: 'B-Unit Burn',
-						subtitle: amountUSDC6 > 0 ? `Paid ${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'Gas / Fee',
+						title,
+						subtitle,
 						amount: -amountBUnits,
 						type: amountUSDC6 > 0 ? 'fee' : 'gas',
 						linkedUsdc: amountUSDC6 > 0 ? `${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'N/A',
