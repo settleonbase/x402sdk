@@ -2480,6 +2480,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const TX_BUINT_CLAIM = ethers.keccak256(ethers.toUtf8Bytes('buintClaim'))
 			const TX_BUINT_USDC = ethers.keccak256(ethers.toUtf8Bytes('buintUSDC'))
 			const TX_REQUEST_ACCOUNTING = ethers.keccak256(ethers.toUtf8Bytes('requestAccounting'))
+			const TX_X402_SEND = ethers.keccak256(ethers.toUtf8Bytes('x402Send'))
 			const indexer = new ethers.Contract(BEAMIO_INDEXER, INDEXER_ABI, providerConet)
 			const page = await indexer.getAccountTransactionsPaged(address, 0, 100)
 			const accountLower = address.toLowerCase()
@@ -2524,21 +2525,25 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 						: undefined
 					const txCatNorm = (typeof txCategory === 'string' ? txCategory : txCategory != null ? '0x' + BigInt(txCategory).toString(16).padStart(64, '0') : '').toLowerCase()
 					const isRequestAccounting = txCatNorm === TX_REQUEST_ACCOUNTING.toLowerCase()
+					const isX402Send = txCatNorm === TX_X402_SEND.toLowerCase()
 					// requestAccounting 的 originalPaymentHash 是 requestHash，用 CoNET 链接；其他用 Base 链接
 					const ophHex = rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? (rawOph.startsWith('0x') ? rawOph : '0x' + rawOph) : ''
 					const baseTxHash = !isRequestAccounting && ophHex && ethers.dataLength(ophHex) === 32 ? ophHex : undefined
 					const originalPaymentHash = isRequestAccounting && ophHex && ethers.dataLength(ophHex) === 32 ? ophHex : undefined
-					const title = isRequestAccounting ? 'Service Fee (0.8%)' : 'B-Unit Burn'
+					const title = (isRequestAccounting || isX402Send) ? 'Service Fee (0.8%)' : 'B-Unit Burn'
 					const subtitle = isRequestAccounting
 						? `Payment Request ${ophHex ? ophHex.slice(-3) : '—'}`
-						: (amountUSDC6 > 0 ? `Paid ${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'Gas / Fee')
+						: isX402Send
+							? ''
+							: (amountUSDC6 > 0 ? `Paid ${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'Gas / Fee')
+					const isServiceFee = amountUSDC6 > 0 || isRequestAccounting || isX402Send
 					entries.push({
 						...baseEntry,
 						id: txIdHex,
 						title,
 						subtitle,
 						amount: -amountBUnits,
-						type: amountUSDC6 > 0 ? 'fee' : 'gas',
+						type: isServiceFee ? 'fee' : 'gas',
 						linkedUsdc: amountUSDC6 > 0 ? `${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'N/A',
 						baseTxHash,
 						originalPaymentHash,
