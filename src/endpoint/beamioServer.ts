@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
@@ -2044,6 +2044,48 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			encrypKeyArmored: encrypKeyArmored.trim(),
 			routeKeyID: routeKeyID.trim()
 		}, res)
+	})
+
+	/** GET /api/transferPreCheckBUnit - UI 自检转账前 B-Unit 是否 >= 2。account=EOA 或 aaAddress=AA（解析 owner 后检查） */
+	router.get('/transferPreCheckBUnit', async (req, res) => {
+		const account = req.query.account as string
+		const aaAddress = req.query.aaAddress as string
+		if (!account && !aaAddress) {
+			return res.status(400).json({ success: false, error: 'Missing account or aaAddress' }).end()
+		}
+		if (account && !ethers.isAddress(account)) {
+			return res.status(400).json({ success: false, error: 'Invalid account address' }).end()
+		}
+		if (aaAddress && !ethers.isAddress(aaAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid aaAddress' }).end()
+		}
+		const check = await transferPreCheckBUnit({ account: account || undefined, aaAddress: aaAddress || undefined })
+		if (!check.success) {
+			return res.status(200).json({ success: false, error: check.error }).end()
+		}
+		return res.status(200).json({ success: true }).end()
+	})
+
+	/** GET /api/requestAccountingPreCheck - UI 自检 B-Unit 是否足够，不写链。用于创建 payment request 前预检 */
+	router.get('/requestAccountingPreCheck', async (req, res) => {
+		const payee = req.query.payee as string
+		const amount = req.query.amount as string
+		const currency = (req.query.currency as string) || 'USD'
+		if (!payee || !amount) {
+			return res.status(400).json({ success: false, error: 'Missing payee or amount' }).end()
+		}
+		if (!ethers.isAddress(payee)) {
+			return res.status(400).json({ success: false, error: 'Invalid payee address' }).end()
+		}
+		const amt = parseFloat(String(amount))
+		if (!Number.isFinite(amt) || amt <= 0) {
+			return res.status(400).json({ success: false, error: 'amount must be > 0' }).end()
+		}
+		const bunitFeeCheck = await requestAccountingPreCheckBUnitFee(payee, amount, currency)
+		if (!bunitFeeCheck.success) {
+			return res.status(200).json({ success: false, error: bunitFeeCheck.error }).end()
+		}
+		return res.status(200).json({ success: true, feeAmount: bunitFeeCheck.feeAmount?.toString() }).end()
 	})
 
 	/** Beamio Pay Me 生成 request 记账：预检后转发 master（txCategory=request_create:confirmed） */

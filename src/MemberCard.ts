@@ -2629,6 +2629,44 @@ export const requestAccountingPreCheckBUnitFee = async (
 	return { success: true, feeAmount: feeBUnits6, payerEOA }
 }
 
+/** UI 预检：转账前检查 B-Unit 是否 >= 2。account 为 EOA；aaAddress 为 AA 时解析 owner 后检查。 */
+export const transferPreCheckBUnit = async (opts: { account?: string; aaAddress?: string }): Promise<{ success: boolean; error?: string }> => {
+	const BUNIT_FEE_AMOUNT = 2_000_000n
+	let payerEOA: string
+	if (opts.account && ethers.isAddress(opts.account)) {
+		payerEOA = ethers.getAddress(opts.account)
+	} else if (opts.aaAddress && ethers.isAddress(opts.aaAddress)) {
+		const aaRead = new ethers.Contract(opts.aaAddress, ['function owner() view returns (address)'], providerBaseBackup)
+		const owner = await aaRead.owner()
+		if (!owner || owner === ethers.ZeroAddress) {
+			return { success: false, error: 'Cannot determine AA owner for B-Unit fee check' }
+		}
+		payerEOA = ethers.getAddress(owner)
+	} else {
+		return { success: false, error: 'Missing account or aaAddress' }
+	}
+	try {
+		const bunitAirdropRead = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function getBUnitBalance(address) view returns (uint256)'],
+			providerConet
+		)
+		const balance = await bunitAirdropRead.getBUnitBalance(payerEOA)
+		if (balance < BUNIT_FEE_AMOUNT) {
+			return {
+				success: false,
+				error: `Insufficient B-Units: payer needs 2 B-Units for transfer fee (balance: ${Number(balance) / 1e6} B-Units)`,
+			}
+		}
+		return { success: true }
+	} catch (e: any) {
+		return {
+			success: false,
+			error: `B-Unit balance check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
+		}
+	}
+}
+
 /** Cluster 预检：AA owner 的 B-Unit 余额必须 >= 2（手续费）。Master 不再重复检查。 */
 export const AAtoEOAPreCheckBUnitBalance = async (packedUserOp: AAtoEOAUserOp): Promise<{ success: boolean; error?: string }> => {
 	const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
