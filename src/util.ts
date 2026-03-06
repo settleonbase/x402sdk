@@ -299,8 +299,8 @@ export const oracleBackoud = async (enableOracle = true) => {
 	})
 }
 
-/** Base 主网 RPC：优先使用 ~/.master.json base_endpoint，否则用 https://1rpc.io/base */
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
+/** Base 主网 RPC：优先使用 ~/.master.json base_endpoint，否则用 https://base-rpc.conet.network */
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
