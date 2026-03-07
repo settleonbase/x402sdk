@@ -46,8 +46,8 @@ const BeamioTaskIndexerAddress = '0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612'
 /** BUnitAirdrop consumeFromUser kind：x402 BeamioTransfer 转账手续费，需预先 registerKind(5,"x402Send") */
 const BUNIT_KIND_X402_SEND = 5n
 const DIAMOND = BeamioTaskIndexerAddress
-/** Base 主网 RPC：使用 ~/.master.json base_endpoint */
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
+/** Base 主网 RPC：Beamio 标准 base-rpc.conet.network，可被 ~/.master.json base_endpoint 覆盖 */
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
@@ -429,6 +429,26 @@ const E12 = 10n ** 12n
 const E18 = 10n ** 18n
 const POINTS_ONE = 1_000_000n // 1 point = 1e6 units (points6)
 const USDC_ONE_CENTS_6 = 10_000n // 0.01 USDC in 6 decimals
+
+/** Beamio 收费标准（OpenContainer 商户收款等）：1 USDC = 100 BUnit，费率 0.8%，最低 2 BUnit，最高 200 BUnit，>=5000 USDC 时 500 BUnit */
+function calcBeamioBUnitFee(amountUSDC6: bigint): { bServiceUnits6: bigint; bServiceUSDC6: bigint } {
+  const BUNIT_PER_USDC = 100n // 1 USDC = 100 BUnit
+  const MIN_BUNITS_6 = 2_000_000n
+  const MAX_BUNITS_6 = 200_000_000n
+  const THRESHOLD_USDC6 = 5_000_000_000n // 5000 USDC
+  const FIXED_HIGH_BUNITS_6 = 500_000_000n
+  if (amountUSDC6 >= THRESHOLD_USDC6) {
+    const bServiceUnits6 = FIXED_HIGH_BUNITS_6
+    const bServiceUSDC6 = bServiceUnits6 / BUNIT_PER_USDC
+    return { bServiceUnits6, bServiceUSDC6 }
+  }
+  // fee = amount * 0.8%; feeBUnits = feeUSDC * 100; feeBUnits6 = amountUSDC6 * 8/1000 * 100 = amountUSDC6 * 4/5
+  const feeBUnits6 = (amountUSDC6 * 8n * BUNIT_PER_USDC) / 1000n
+  const clamped = feeBUnits6 < MIN_BUNITS_6 ? MIN_BUNITS_6 : feeBUnits6 > MAX_BUNITS_6 ? MAX_BUNITS_6 : feeBUnits6
+  // 1 BUnit = 0.01 USDC => bServiceUSDC6 = bServiceUnits6 / 100
+  const bServiceUSDC6 = clamped / BUNIT_PER_USDC
+  return { bServiceUnits6: clamped, bServiceUSDC6 }
+}
 
 const OLD_ERROR_SELECTORS: Record<string, string> = {
 	'0xea8e4eb5': 'NotAuthorized()',
@@ -1336,8 +1356,12 @@ export const beamioTransferIndexerAccountingPool: {
 	baseGas?: string
 	feePayer?: string
 	isInternalTransfer?: boolean
-	/** 'x402' = BeamioTransfer x402 转账，需扣 2 B-Units */
-	source?: 'x402'
+	/** 'x402' = BeamioTransfer x402 转账，需扣 2 B-Units；'open-container' = OpenContainer 商户收款，BUnit 由收款方负担 */
+	source?: 'x402' | 'open-container'
+	/** B 服务费 USDC 6 位精度，写入 FeeInfo.bServiceUSDC6 */
+	bServiceUSDC6?: string
+	/** B 服务费单位数 6 位精度，写入 FeeInfo.bServiceUnits6 */
+	bServiceUnits6?: string
 	res?: Response
 	/** 多条 route 项（同一 tx 多资产时）。有则优先于 routeAsset */
 	routeItems?: BeamioTransferRouteItem[]
@@ -1519,8 +1543,8 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				gasWei,
 				gasUSDC6,
 				serviceUSDC6: 0n,
-				bServiceUSDC6: 0n,
-				bServiceUnits6: 0n,
+				bServiceUSDC6: BigInt(obj.bServiceUSDC6 ?? '0'),
+				bServiceUnits6: BigInt(obj.bServiceUnits6 ?? '0'),
 				feePayer,
 			},
 			meta: {
@@ -1536,7 +1560,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			},
 		}
 
-		// BeamioTransfer x402：转账成功后扣 2 B-Units
+		// BeamioTransfer x402：转账成功后扣 2 B-Units（由 payer 负担）
 		if (obj.source === 'x402' && feePayer && feePayer !== ethers.ZeroAddress) {
 			const BUNIT_FEE_AMOUNT = 2_000_000n
 			const baseHashBytes32 = txHash as `0x${string}`
@@ -1557,6 +1581,32 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				)
 				await consumeTx.wait()
 				logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] consumeFromUser ok: 2 B-Units from ${feePayer} baseHash=${txHash} (x402Send)`))
+			} catch (consumeErr: any) {
+				logger(Colors.red(`[beamioTransferIndexerAccountingProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+			}
+		}
+
+		// OpenContainer 商户收款：BUnit 由收款方（payee）负担，按 Beamio 收费标准
+		if (obj.source === 'open-container' && feePayer && feePayer !== ethers.ZeroAddress) {
+			const bunitFeeAmount = BigInt(obj.bServiceUnits6 ?? '2000000')
+			const baseHashBytes32 = txHash as `0x${string}`
+			const baseGas = BigInt(obj.baseGas ?? '0')
+			const bunitAirdropWrite = new ethers.Contract(
+				CONET_BUNIT_AIRDROP_ADDRESS,
+				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+				SC.walletConet
+			)
+			try {
+				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+					feePayer,
+					bunitFeeAmount,
+					baseHashBytes32,
+					baseGas,
+					1n, // kind=1 sendUSDC（与 Container 相同）
+					{ gasLimit: 2_500_000 }
+				)
+				await consumeTx.wait()
+				logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] consumeFromUser ok: ${Number(bunitFeeAmount) / 1e6} B-Units from payee ${feePayer} baseHash=${txHash} (open-container)`))
 			} catch (consumeErr: any) {
 				logger(Colors.red(`[beamioTransferIndexerAccountingProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
 			}
@@ -1738,7 +1788,15 @@ export const requestAccountingProcess = async () => {
 		await tx.wait().catch((waitErr: any) => {
 			logger(Colors.yellow(`[requestAccountingProcess] syncTokenAction.wait() failed: ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
 		})
-		// 登记成功后向发出方收取 B-Unit 费用。baseHash=syncTokenAction 的 CoNET tx hash（request 记账交易），非 requestHash
+		// 登记成功后立即回送 UI 200，不等待 B-Unit 扣费，加速 UI 显示
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, indexed: true, requestHash: obj.requestHash, syncTx: tx.hash }).end()
+		}
+		// 登记成功后向发出方收取 B-Unit 费用（后台执行，不阻塞 UI 响应；SC 在 consumeFromUser 完成后才归还 pool）
+		const releaseSC = () => {
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => requestAccountingProcess(), 1000)
+		}
 		if (obj.payerEOA && obj.feeBUnits && obj.feeBUnits > 0n) {
 			const syncTxHashBytes32 = tx.hash as `0x${string}` // syncTokenAction 的 CoNET 交易 hash
 			const bunitAirdropWrite = new ethers.Contract(
@@ -1746,8 +1804,8 @@ export const requestAccountingProcess = async () => {
 				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
 				SC.walletConet
 			)
-			try {
-				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+			bunitAirdropWrite
+				.consumeFromUser(
 					obj.payerEOA,
 					obj.feeBUnits,
 					syncTxHashBytes32,
@@ -1755,14 +1813,12 @@ export const requestAccountingProcess = async () => {
 					4n, // kind=4 requestAccounting
 					{ gasLimit: 2_500_000 }
 				)
-				await consumeTx.wait()
-				logger(Colors.cyan(`[requestAccountingProcess] consumeFromUser ok: ${Number(obj.feeBUnits) / 1e6} B-Units from ${obj.payerEOA}`))
-			} catch (consumeErr: any) {
-				logger(Colors.red(`[requestAccountingProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
-			}
-		}
-		if (obj.res && !obj.res.headersSent) {
-			obj.res.status(200).json({ success: true, indexed: true, requestHash: obj.requestHash, syncTx: tx.hash }).end()
+				.then((consumeTx: { wait: () => Promise<unknown> }) => consumeTx.wait())
+				.then(() => logger(Colors.cyan(`[requestAccountingProcess] consumeFromUser ok: ${Number(obj.feeBUnits) / 1e6} B-Units from ${obj.payerEOA}`)))
+				.catch((consumeErr: any) => logger(Colors.red(`[requestAccountingProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`)))
+				.finally(releaseSC)
+		} else {
+			releaseSC()
 		}
 	} catch (error: any) {
 		const msg = error?.shortMessage ?? error?.message ?? String(error)
@@ -1771,9 +1827,9 @@ export const requestAccountingProcess = async () => {
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
 		}
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => requestAccountingProcess(), 1000)
 	}
-	Settle_ContractPool.unshift(SC)
-	setTimeout(() => requestAccountingProcess(), 1000)
 }
 
 /** Cluster 预检：验证 payeeSignature 的 recover 地址必须是原 request (Transaction) 的 payee，非 payee 不得 cancel */
@@ -3663,8 +3719,13 @@ export const OpenContainerRelayProcess = async () => {
     let processedItemIndex = 0
     const collectedRouteItems: BeamioTransferRouteItem[] = []
     let totalAmountE6 = 0n
+    let totalAmountUSDC6ForFee = 0n
     let primaryCurrency: ICurrency = currencyFromType
     let primaryCurrencyAmount = ''
+    let ccsacardUnitPriceUSDC6 = 0n
+    try {
+      ccsacardUnitPriceUSDC6 = await SC.baseFactoryPaymaster.quoteUnitPointInUSDC6(ccsacardAddress)
+    } catch (_) {}
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i]
@@ -3709,6 +3770,7 @@ export const OpenContainerRelayProcess = async () => {
           tokenId: '0',
         })
         totalAmountE6 += assetAmount
+        totalAmountUSDC6ForFee += assetAmount
         primaryCurrency = itemCurrency
         primaryCurrencyAmount = itemCurrencyAmount
       } else if (isCCSA) {
@@ -3722,12 +3784,26 @@ export const OpenContainerRelayProcess = async () => {
           tokenId: tokenIdVal.toString(),
         })
         totalAmountE6 += assetAmount
+        if (ccsacardUnitPriceUSDC6 > 0n) totalAmountUSDC6ForFee += (assetAmount * ccsacardUnitPriceUSDC6) / POINTS_ONE
         primaryCurrency = itemCurrency
         primaryCurrencyAmount = itemCurrencyAmount
       }
     }
 
     if (collectedRouteItems.length > 0) {
+      // BUnit 由收款方（payee）负担，解析 to 为 EOA 供 consumeFromUser
+      let payeeEOA: string = to
+      try {
+        const toCode = await SC.walletBase.provider!.getCode(to)
+        if (toCode && toCode !== '0x' && toCode.length > 2) {
+          const aaRead = new ethers.Contract(to, ['function owner() view returns (address)'], SC.walletBase.provider!)
+          const owner = await aaRead.owner()
+          if (owner && owner !== ethers.ZeroAddress) payeeEOA = ethers.getAddress(owner)
+        }
+      } catch (_) {}
+      // Beamio 收费标准：1 USDC=100 BUnit，0.8% 费率，最低 2 BUnit，最高 200 BUnit，>=5000 USDC 时 500 BUnit
+      const amountUSDC6ForFee = totalAmountUSDC6ForFee > 0n ? totalAmountUSDC6ForFee : totalAmountE6
+      const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcBeamioBUnitFee(amountUSDC6ForFee)
       beamioTransferIndexerAccountingPool.push({
         from: account,
         to,
@@ -3745,12 +3821,15 @@ export const OpenContainerRelayProcess = async () => {
         gasWei: '0',
         gasUSDC6: '0',
         gasChainType: 0,
-        feePayer: account,
+        feePayer: payeeEOA,
         isInternalTransfer: false,
         requestHash: obj.requestHash,
         routeItems: collectedRouteItems,
+        source: 'open-container',
+        bServiceUSDC6: feeBUsdc6.toString(),
+        bServiceUnits6: feeBUnits6.toString(),
       })
-      logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool routeItems=${collectedRouteItems.length} totalAmountE6=${totalAmountE6} from=${account} to=${to} requestHash=${obj.requestHash ?? 'n/a'}`))
+      logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool routeItems=${collectedRouteItems.length} totalAmountE6=${totalAmountE6} amountUSDC6ForFee=${amountUSDC6ForFee} feePayer(payee)=${payeeEOA} bServiceUnits6=${feeBUnits6} bServiceUSDC6=${feeBUsdc6} requestHash=${obj.requestHash ?? 'n/a'}`))
     }
     
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
