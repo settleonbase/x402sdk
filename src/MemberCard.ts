@@ -2559,7 +2559,12 @@ const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; point
 	return null
 }
 
-/** Cluster 预检：卡 topup 时向卡的发行方收取 B-Unit 费用。普通 topup 2 B-Units (kind=cardTopup)，新卡发行或 upgrade 获得新卡 99 B-Units (kind=issueCard)。 */
+/** Cluster 预检（USDC topup）：卡发行方 owner 的 B-Units 是否足够。
+ * 规则：
+ * 1) 用户不拥有可用卡 NFT（需发行新卡）=> 99 B-Units（kind=issueCard）
+ * 2) 用户会因本次 topup 升级并获得新 tier NFT => 99 B-Units（kind=issueCard）
+ * 3) 其余普通 topup => 2 B-Units（kind=cardTopup）
+ */
 export const nfcTopupPreCheckBUnitFee = async (
 	cardAddr: string,
 	data: string
@@ -2597,9 +2602,9 @@ export const nfcTopupPreCheckBUnitFee = async (
 		const aaFactoryAddr = await factory._aaFactory()
 		const aaFactory = new ethers.Contract(aaFactoryAddr, aaFactoryAbi, providerBaseBackup)
 		const recipientAA = await aaFactory.beamioAccountOf(parsed.recipient)
-		let isIssueCard = false
+		let requiresIssueOrUpgrade = false
 		if (!recipientAA || recipientAA === ethers.ZeroAddress) {
-			isIssueCard = true
+			requiresIssueOrUpgrade = true
 		} else {
 			const [activeId, activeTierIdx, tiersCount, ownership] = await Promise.all([
 				card.activeMembershipId(recipientAA),
@@ -2608,11 +2613,13 @@ export const nfcTopupPreCheckBUnitFee = async (
 				card.getOwnershipByEOA(parsed.recipient) as Promise<[bigint, Array<{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }>]>,
 			])
 			const MAX_UINT = 2n ** 256n - 1n
-			if (activeId === 0n || activeTierIdx >= MAX_UINT) {
-				isIssueCard = true
+			const nfts = ownership[1] ?? []
+			const hasUsableMembershipNft = nfts.some((n: { isExpired: boolean }) => !n.isExpired)
+			// 用户不拥有可用卡 NFT：按发行新卡收费
+			if (!hasUsableMembershipNft || activeId === 0n || activeTierIdx >= MAX_UINT) {
+				requiresIssueOrUpgrade = true
 			} else if (tiersCount > 0n && activeTierIdx < tiersCount - 1n) {
 				const nextTierIdx = activeTierIdx + 1n
-				const nfts = ownership[1] ?? []
 				const alreadyHasNextTier = nfts.some(
 					(n: { tierIndexOrMax: bigint; isExpired: boolean }) =>
 						n.tierIndexOrMax === nextTierIdx && !n.isExpired
@@ -2621,15 +2628,15 @@ export const nfcTopupPreCheckBUnitFee = async (
 					const nextTier = await card.getTierAt(nextTierIdx)
 					const pointsBalance = await card.balanceOf(recipientAA, 0)
 					if (nextTier.upgradeByBalance) {
-						if (pointsBalance + parsed.points6 >= nextTier.minUsdc6) isIssueCard = true
+						if (pointsBalance + parsed.points6 >= nextTier.minUsdc6) requiresIssueOrUpgrade = true
 					} else {
-						if (parsed.points6 >= nextTier.minUsdc6) isIssueCard = true
+						if (parsed.points6 >= nextTier.minUsdc6) requiresIssueOrUpgrade = true
 					}
 				}
 			}
 		}
-		const feeAmount = isIssueCard ? FEE_ISSUE_CARD : FEE_REGULAR
-		const topupKind = (isIssueCard ? KIND_ISSUE_CARD : KIND_CARD_TOPUP) as 2 | 3
+		const feeAmount = requiresIssueOrUpgrade ? FEE_ISSUE_CARD : FEE_REGULAR
+		const topupKind = (requiresIssueOrUpgrade ? KIND_ISSUE_CARD : KIND_CARD_TOPUP) as 2 | 3
 		const bunitAirdropRead = new ethers.Contract(
 			CONET_BUNIT_AIRDROP_ADDRESS,
 			['function getBUnitBalance(address) view returns (uint256)'],

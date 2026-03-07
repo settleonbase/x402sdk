@@ -2487,7 +2487,39 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const accountLower = address.toLowerCase()
 			const buintLower = CONET_BUINT.toLowerCase()
 			const decimals = 6
-			const entries: Array<{ id: string; title: string; subtitle: string; amount: number; time: string; timestamp: number; type: string; status: string; linkedUsdc: string; txHash: string; network: string; baseTxHash?: string; originalPaymentHash?: string }> = []
+			const serializeJsonSafe = (value: unknown): unknown => {
+				if (typeof value === 'bigint') return value.toString()
+				if (Array.isArray(value)) return value.map((item) => serializeJsonSafe(item))
+				if (value && typeof value === 'object') {
+					const out: Record<string, unknown> = {}
+					for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+						out[k] = serializeJsonSafe(v)
+					}
+					return out
+				}
+				return value
+			}
+			const serializeRawTx = (tx: unknown): Record<string, unknown> => {
+				if (tx == null || typeof tx !== 'object') return {}
+				const t = tx as Record<string, unknown>
+				return {
+					id: serializeJsonSafe(t.id),
+					originalPaymentHash: serializeJsonSafe(t.originalPaymentHash),
+					chainId: serializeJsonSafe(t.chainId),
+					txCategory: serializeJsonSafe(t.txCategory),
+					displayJson: serializeJsonSafe(t.displayJson),
+					timestamp: serializeJsonSafe(t.timestamp),
+					payer: serializeJsonSafe(t.payer),
+					payee: serializeJsonSafe(t.payee),
+					finalRequestAmountFiat6: serializeJsonSafe(t.finalRequestAmountFiat6),
+					finalRequestAmountUSDC6: serializeJsonSafe(t.finalRequestAmountUSDC6),
+					isAAAccount: serializeJsonSafe(t.isAAAccount),
+					fees: serializeJsonSafe(t.fees),
+					meta: serializeJsonSafe(t.meta),
+					exists: serializeJsonSafe(t.exists),
+				}
+			}
+		const entries: Array<{ id: string; title: string; subtitle: string; amount: number; time: string; timestamp: number; type: string; status: string; linkedUsdc: string; txHash: string; network: string; baseTxHash?: string; originalPaymentHash?: string; rawTx: Record<string, unknown> }> = []
 			const formatTime = (ts: number) => {
 				const d = new Date(ts * 1000)
 				const now = Date.now()
@@ -2512,13 +2544,13 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				const txHashShort = txIdHex.length > 10 ? `${txIdHex.slice(0, 6)}...${txIdHex.slice(-4)}` : txIdHex
 				const baseEntry = { time: timeStr, timestamp: ts, txHash: txHashShort, network: 'CoNET L1' as const, status: 'Completed' as const }
 				if (txCategory === TX_BUINT_CLAIM && payee === accountLower) {
-					entries.push({ ...baseEntry, id: txIdHex, title: 'BUnit Claim', subtitle: 'Free claim', amount: amountBUnits, type: 'reward', linkedUsdc: 'N/A' })
+					entries.push({ ...baseEntry, id: txIdHex, title: 'BUnit Claim', subtitle: 'Free claim', amount: amountBUnits, type: 'reward', linkedUsdc: 'N/A', rawTx: serializeRawTx(tx) })
 				} else if (txCategory === TX_BUINT_USDC && payee === accountLower) {
 					const usdcAmount = amountUSDC6 > 0 ? amountUSDC6 / 10 ** decimals : amountBUnits / 100
 					const usdcStr = usdcAmount > 0 ? `-${usdcAmount.toFixed(2)} USDC` : 'N/A'
 					const rawOph = (tx as { originalPaymentHash?: string }).originalPaymentHash
 					const baseTxHash = rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? rawOph : undefined
-					entries.push({ ...baseEntry, id: txIdHex, title: 'Fuel Yield (1:100)', subtitle: 'System Top-up', amount: amountBUnits, type: 'refuel', linkedUsdc: usdcStr, baseTxHash })
+					entries.push({ ...baseEntry, id: txIdHex, title: 'Fuel Yield (1:100)', subtitle: 'System Top-up', amount: amountBUnits, type: 'refuel', linkedUsdc: usdcStr, baseTxHash, rawTx: serializeRawTx(tx) })
 				} else if (payee === buintLower && payer === accountLower) {
 					const rawOphVal = (tx as { originalPaymentHash?: string | bigint }).originalPaymentHash
 					const rawOph = rawOphVal != null
@@ -2549,6 +2581,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 						linkedUsdc: amountUSDC6 > 0 ? `${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'N/A',
 						baseTxHash,
 						originalPaymentHash,
+						rawTx: serializeRawTx(tx),
 					})
 				}
 			}
