@@ -1031,10 +1031,13 @@ export const executeForAdminProcess = async () => {
 				const beforeTokenSet = new Set(beforeTokenIds.map((id) => id.toString()))
 				const afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
 				const upgradedByMint = afterTokenIds.some((id) => !beforeTokenSet.has(id.toString()))
-				const isMemberBefore = (beforeNfts?.length ?? 0) > 0 && beforePoint6 > 0n
-				const topupCategoryRaw = (!isMemberBefore || beforeTokenIds.length === 0)
-					? 'iuuseNewCard'
-					: (upgradedByMint ? 'upgradeNewCard' : 'topupCard')
+				// Classification rule:
+				// - minted a new tier token this time + had previous balance => upgrade
+				// - minted a new tier token this time + no previous balance => first purchase
+				// - no new tier token minted => normal topup
+				const topupCategoryRaw = upgradedByMint
+					? (beforePoint6 > 0n ? 'upgradeNewCard' : 'iuuseNewCard')
+					: 'topupCard'
 				const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
 				let finalRequestAmountUSDC6 = 0n
 				try {
@@ -3371,9 +3374,13 @@ export const purchasingCardProcess = async () => {
 		} catch (ownershipErr: any) {
 			logger(Colors.yellow(`[purchasingCardProcess] post-topup ownership check failed: ${ownershipErr?.shortMessage ?? ownershipErr?.message ?? String(ownershipErr)}`))
 		}
-		const topupCategoryRaw = (!isMember || beforeTokenIds.length === 0)
-			? 'iuuseNewCard'
-			: (upgradedByMint ? 'upgradeNewCard' : 'topupCard')
+		// Classification rule:
+		// - minted a new tier token this time + had previous balance => upgrade
+		// - minted a new tier token this time + no previous balance => first purchase
+		// - no new tier token minted => normal topup
+		const topupCategoryRaw = upgradedByMint
+			? (beforePoint6 > 0n ? 'upgradeNewCard' : 'iuuseNewCard')
+			: 'topupCard'
 		const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
 		const displayJson = JSON.stringify({
 			title: payMe.title || (isMember ? 'Top Up' : 'Card Mint'),
