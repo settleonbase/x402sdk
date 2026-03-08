@@ -1756,7 +1756,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!shapeCheck || !(shapeCheck as { success: boolean }).success) {
 			return res.status(400).json(shapeCheck).end()
 		}
-		const preCheck = await usdcTopupPreCheck(cardAddress, usdcAmount, from, intent ?? 'auto')
+		const preCheck = await usdcTopupPreCheck(cardAddress, usdcAmount, from, 'auto')
 		if (!preCheck.success) {
 			logger(Colors.red(`server /api/usdcTopup preCheck FAIL: ${preCheck.error}`))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
@@ -1792,7 +1792,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!cardAddress || !from) {
 			return res.status(400).json({ success: false, error: 'cardAddress and from are required' }).end()
 		}
-		const preview = await usdcTopupPreview(cardAddress, from, intent ?? 'auto', usdcAmount)
+		const preview = await usdcTopupPreview(cardAddress, from, 'auto', usdcAmount)
 		if (!preview.success) {
 			return res.status(400).json({ success: false, error: preview.error }).end()
 		}

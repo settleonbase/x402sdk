@@ -4986,7 +4986,9 @@ export type UsdcTopupRuleCheck = {
 	hasMembership: boolean
 	currentPoints6: string
 	currentTierIndex: number
+	/** Backward-compatible field name; value is minimum tier threshold converted to required USDC6 */
 	minTierUsdc6: string
+	/** Backward-compatible field name; value is next tier threshold converted to required USDC6 */
 	nextTierMinUsdc6?: string
 	requiredMinUsdc6: string
 }
@@ -4996,7 +4998,9 @@ export type UsdcTopupPreview = {
 	hasMembership: boolean
 	currentPoints6: string
 	currentTierIndex: number
+	/** Backward-compatible field name; value is minimum tier threshold converted to required USDC6 */
 	minTierUsdc6: string
+	/** Backward-compatible field name; value is next tier threshold converted to required USDC6 */
 	nextTierMinUsdc6?: string
 	requiredMinUsdc6: string
 	recommendedUsdc6: string
@@ -5005,7 +5009,7 @@ export type UsdcTopupPreview = {
 const resolveUsdcTopupRules = async (
 	cardAddress: string,
 	from: string,
-	intent: UsdcTopupIntent = 'auto'
+	_intent: UsdcTopupIntent = 'auto'
 ): Promise<
 	| { success: true; preview: UsdcTopupPreview }
 	| { success: false; error: string }
@@ -5039,7 +5043,7 @@ const resolveUsdcTopupRules = async (
 			tiers.push({ index: i, minUsdc6 })
 		}
 		const tiersSorted = [...tiers].sort((a, b) => (a.minUsdc6 < b.minUsdc6 ? -1 : a.minUsdc6 > b.minUsdc6 ? 1 : 0))
-		const minTierUsdc6 = tiersSorted.length > 0 ? tiersSorted[0].minUsdc6 : 0n
+		const minTierPoints6 = tiersSorted.length > 0 ? tiersSorted[0].minUsdc6 : 0n
 
 		const nfts = Array.isArray(nftsRaw) ? nftsRaw : []
 		const hasMembership = nfts.some((n) => !n?.isExpired && Number(n?.tokenId ?? 0n) >= 100 && Number(n?.tokenId ?? 0n) < 100_000_000_000)
@@ -5052,29 +5056,26 @@ const resolveUsdcTopupRules = async (
 			if (Number.isFinite(num)) currentTierIndex = Math.max(currentTierIndex, num)
 		}
 		const nextTier = tiers.find((t) => t.index === currentTierIndex + 1)
-		const nextTierMinUsdc6 = nextTier?.minUsdc6
+		const nextTierPoints6 = nextTier?.minUsdc6
 		const currentPoints6 = pt ?? 0n
 
-		const resolvedIntent: Exclude<UsdcTopupIntent, 'auto'> = intent === 'auto'
-			? (hasMembership ? (nextTierMinUsdc6 != null ? 'upgrade' : 'topup') : 'first_purchase')
-			: intent
+		const unitPriceUSDC6 = await SC.baseFactoryPaymaster.quoteUnitPointInUSDC6(cardAddress) as bigint
+		if (unitPriceUSDC6 <= 0n) {
+			return { success: false, error: 'UC_PriceZero: quoteUnitPointInUSDC6(card)=0' }
+		}
+		const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
+		const points6ToRequiredUsdc6 = (points6: bigint) =>
+			points6 <= 0n ? 1n : ceilDiv(points6 * POINTS_ONE, unitPriceUSDC6)
 
-		if (resolvedIntent === 'first_purchase' && hasMembership) {
-			return { success: false, error: 'User already has membership card. Use topup or upgrade.' }
-		}
-		if ((resolvedIntent === 'topup' || resolvedIntent === 'upgrade') && !hasMembership) {
-			return { success: false, error: 'Top-up/upgrade requires existing membership card.' }
-		}
-
-		let requiredMinUsdc6 = 1n
-		if (resolvedIntent === 'first_purchase') {
-			requiredMinUsdc6 = minTierUsdc6 > 0n ? minTierUsdc6 : 1n
-		} else if (resolvedIntent === 'upgrade') {
-			if (!nextTierMinUsdc6 || nextTierMinUsdc6 <= currentPoints6) {
-				return { success: false, error: 'No higher tier available for upgrade.' }
-			}
-			requiredMinUsdc6 = nextTierMinUsdc6 - currentPoints6
-		}
+		// Backend auto-judges the flow by current ownership:
+		// - no membership NFT => first purchase (tier threshold applies only if tiers exist)
+		// - has membership NFT => topup (upgrade handled by contract automatically)
+		const resolvedIntent: Exclude<UsdcTopupIntent, 'auto'> = hasMembership ? 'topup' : 'first_purchase'
+		const requiredMinUsdc6 = resolvedIntent === 'first_purchase'
+			? points6ToRequiredUsdc6(minTierPoints6)
+			: 1n
+		const minTierRequiredUsdc6 = points6ToRequiredUsdc6(minTierPoints6)
+		const nextTierRequiredUsdc6 = nextTierPoints6 != null ? points6ToRequiredUsdc6(nextTierPoints6) : undefined
 
 		return {
 			success: true,
@@ -5083,8 +5084,8 @@ const resolveUsdcTopupRules = async (
 				hasMembership,
 				currentPoints6: currentPoints6.toString(),
 				currentTierIndex,
-				minTierUsdc6: minTierUsdc6.toString(),
-				...(nextTierMinUsdc6 != null && { nextTierMinUsdc6: nextTierMinUsdc6.toString() }),
+				minTierUsdc6: minTierRequiredUsdc6.toString(),
+				...(nextTierRequiredUsdc6 != null && { nextTierMinUsdc6: nextTierRequiredUsdc6.toString() }),
 				requiredMinUsdc6: requiredMinUsdc6.toString(),
 				recommendedUsdc6: requiredMinUsdc6.toString(),
 			},
@@ -5098,13 +5099,13 @@ const resolveUsdcTopupRules = async (
 export const usdcTopupPreview = async (
 	cardAddress: string,
 	from: string,
-	intent: UsdcTopupIntent = 'auto',
+	_intent: UsdcTopupIntent = 'auto',
 	usdcAmount?: string
 ): Promise<
 	| { success: true; preview: UsdcTopupPreview; amountCheck?: { ok: boolean; requiredMinUsdc6: string; providedUsdc6: string } }
 	| { success: false; error: string }
 > => {
-	const rules = await resolveUsdcTopupRules(cardAddress, from, intent)
+	const rules = await resolveUsdcTopupRules(cardAddress, from, 'auto')
 	if (!rules.success) return rules
 	const ret: { success: true; preview: UsdcTopupPreview; amountCheck?: { ok: boolean; requiredMinUsdc6: string; providedUsdc6: string } } = {
 		success: true,
@@ -5132,15 +5133,15 @@ export const usdcTopupPreview = async (
 
 /**
  * USDC Topup 预检（Cluster 用）：
- * - first_purchase: 必须达到最低 tier 门槛
- * - upgrade: 已持卡用户，必须达到下一档门槛差额
- * - topup: 已持卡用户，允许任意正数金额
+ * - 后端自动判断是否首购：若用户没有该卡 membership NFT，则按首购规则校验
+ * - 首购时：若有 tiers，必须达到最低 tier 门槛；若无 tiers，任意正数可过
+ * - 已持卡时：仅要求 > 0；升级由合约逻辑自动处理
  */
 export const usdcTopupPreCheck = async (
 	cardAddress: string,
 	usdcAmount: string,
 	from: string,
-	intent: UsdcTopupIntent = 'auto'
+	_intent: UsdcTopupIntent = 'auto'
 ): Promise<
 	| { success: true; preChecked: PurchasingCardPreChecked; ruleCheck: UsdcTopupRuleCheck }
 	| { success: false; error: string }
@@ -5150,7 +5151,7 @@ export const usdcTopupPreCheck = async (
 		if (!ethers.isAddress(from)) return { success: false, error: 'Invalid from address' }
 		const usdc6 = BigInt(usdcAmount)
 		if (usdc6 <= 0n) return { success: false, error: 'usdcAmount must be > 0' }
-		const rules = await resolveUsdcTopupRules(cardAddress, from, intent)
+		const rules = await resolveUsdcTopupRules(cardAddress, from, 'auto')
 		if (!rules.success) return rules
 		const requiredMinUsdc6 = BigInt(rules.preview.requiredMinUsdc6)
 
