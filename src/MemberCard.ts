@@ -722,27 +722,8 @@ export const nfcTopupPreparePayload = async (params: {
 	}
 	if (!recipientEOA) return { error: wallet ? 'Invalid wallet address' : 'Failed to resolve recipient from uid' }
 
-	// 会员卡校验：用户必须有 NFT # in [NFT_START_ID, ISSUED_NFT_START_ID) 才能充值
-	const NFT_START_ID = 100
-	const ISSUED_NFT_START_ID = 100_000_000_000
-	try {
-		const cardRead = new ethers.Contract(
-			cardAddr,
-			['function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)'],
-			providerBaseBackup
-		)
-		const [, nfts] = await cardRead.getOwnershipByEOA(recipientEOA) as [bigint, Array<{ tokenId: bigint }>]
-		const hasMembership = Array.isArray(nfts) && nfts.some((n: { tokenId: bigint }) => {
-			const tid = Number(n.tokenId)
-			return tid >= NFT_START_ID && tid < ISSUED_NFT_START_ID
-		})
-		if (!hasMembership) {
-			return { error: 'Top-up not allowed without membership card. Please purchase a card first.' }
-		}
-	} catch (e: any) {
-		logger(Colors.yellow(`[nfcTopupPreparePayload] membership check failed: ${e?.message ?? e}`))
-		return { error: 'Top-up not allowed without membership card. Please purchase a card first.' }
-	}
+	// Android admin topup 需要支持首发/升级/普通 topup 三类路径：
+	// 这里不再阻断“无会员卡”用户，具体分类与收费在 nfcTopupPreCheckBUnitFee + 记账阶段判定。
 
 	const cur = (currency || 'CAD').toUpperCase()
 	const ONE_E6 = 1_000_000n
@@ -918,7 +899,12 @@ export const executeForAdminProcess = async () => {
 		// NFC Topup：mintPointsByAdmin 要求 recipient 已有 AA 账户，否则 _toAccount 会 revert UC_ResolveAccountFailed
 		// 必须使用 card 的 factoryGateway()._aaFactory()，与合约内 _resolveAccount 一致；若用配置的 AA Factory 可能不匹配导致 UC_ResolveAccountFailed
 		const recipientEOA = tryParseMintPointsByAdminRecipient(obj.data)
+		const mintParsed = tryParseMintPointsByAdminArgs(obj.data)
 		let aaAddr: string | null = null
+		let beforePoint6 = 0n
+		let beforeNfts: Array<{ tokenId: bigint }> = []
+		let cardOwnerEOAForAccounting = ''
+		let cardCurrencyFiat = 0
 		if (recipientEOA) {
 			logger(Colors.cyan(`[nfcTopup] uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA} | cardAddr=${obj.cardAddr}`))
 			const cardAaFactoryAddr = await getCardAaFactoryAddress(obj.cardAddr)
@@ -937,6 +923,33 @@ export const executeForAdminProcess = async () => {
 				Settle_ContractPool.unshift(SC)
 				setTimeout(() => executeForAdminProcess(), 1000)
 				return
+			}
+			try {
+				const cardRead = new ethers.Contract(
+					obj.cardAddr,
+					[
+						'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+						'function owner() view returns (address)',
+						'function currency() view returns (uint8)',
+					],
+					providerBaseBackup
+				)
+				const [ownership, rawOwner, rawCurrency] = await Promise.all([
+					cardRead.getOwnershipByEOA(recipientEOA) as Promise<[bigint, Array<{ tokenId: bigint }>]>,
+					cardRead.owner() as Promise<string>,
+					cardRead.currency() as Promise<bigint>,
+				])
+				beforePoint6 = ownership?.[0] ?? 0n
+				beforeNfts = Array.isArray(ownership?.[1]) ? ownership[1] : []
+				cardCurrencyFiat = Number(rawCurrency ?? 0n)
+				try {
+					const resolvedOwner = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner)
+					cardOwnerEOAForAccounting = resolvedOwner?.success ? resolvedOwner.cardOwner : ''
+				} catch {
+					cardOwnerEOAForAccounting = ethers.isAddress(rawOwner) ? ethers.getAddress(rawOwner) : ''
+				}
+			} catch (preOwnershipErr: any) {
+				logger(Colors.yellow(`[executeForAdminProcess] pre-topup ownership snapshot failed: ${preOwnershipErr?.shortMessage ?? preOwnershipErr?.message ?? String(preOwnershipErr)}`))
 			}
 		}
 		const factory = SC.baseFactoryPaymaster
@@ -966,12 +979,21 @@ export const executeForAdminProcess = async () => {
 			}
 		}
 		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash} | uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'}`))
+		let baseReceipt: ethers.TransactionReceipt | null = null
+		const ensureBaseReceipt = async () => {
+			if (baseReceipt) return baseReceipt
+			baseReceipt = await tx.wait().catch((waitErr: any) => {
+				logger(Colors.yellow(`[executeForAdminProcess] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+				return null
+			}) as ethers.TransactionReceipt | null
+			return baseReceipt
+		}
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
 		}
 		// Topup 成功后向卡的发行方收取 B-Unit 费用（Cluster 已预检，Master 直接执行）
 		if (obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) {
-			const receipt = await tx.wait()
+			const receipt = await ensureBaseReceipt()
 			const baseHash = tx.hash as `0x${string}`
 			const baseGas = receipt?.gasUsed ?? 0n
 			const bunitAirdropWrite = new ethers.Contract(
@@ -992,6 +1014,106 @@ export const executeForAdminProcess = async () => {
 				logger(Colors.cyan(`[executeForAdminProcess] consumeFromUser ok: ${Number(obj.topupFeeBUnits) / 1e6} B-Units from ${obj.cardOwnerEOA}`))
 			} catch (consumeErr: any) {
 				logger(Colors.red(`[executeForAdminProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+			}
+		}
+		// Android admin topup 也按 purchasingCard 规则记账：
+		// iuuseNewCard / upgradeNewCard / topupCard
+		if (recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) {
+			try {
+				await ensureBaseReceipt()
+				const cardRead = new ethers.Contract(
+					obj.cardAddr,
+					['function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)'],
+					providerBaseBackup
+				)
+				const [, nAfter] = await cardRead.getOwnershipByEOA(recipientEOA) as [bigint, Array<{ tokenId: bigint }>]
+				const beforeTokenIds = extractTokenIdsFromOwnership(beforeNfts ?? [])
+				const beforeTokenSet = new Set(beforeTokenIds.map((id) => id.toString()))
+				const afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
+				const upgradedByMint = afterTokenIds.some((id) => !beforeTokenSet.has(id.toString()))
+				const isMemberBefore = (beforeNfts?.length ?? 0) > 0 && beforePoint6 > 0n
+				const topupCategoryRaw = (!isMemberBefore || beforeTokenIds.length === 0)
+					? 'iuuseNewCard'
+					: (upgradedByMint ? 'upgradeNewCard' : 'topupCard')
+				const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
+				let finalRequestAmountUSDC6 = 0n
+				try {
+					const q = await quoteUSDCForPoints(obj.cardAddr, ethers.formatUnits(mintParsed.points6, 6))
+					finalRequestAmountUSDC6 = BigInt(q.usdc6)
+				} catch (_) {
+					finalRequestAmountUSDC6 = cardCurrencyFiat === 4 ? mintParsed.points6 : 0n
+				}
+				if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
+				let cardDisplayName = ''
+				try {
+					const cardMeta = await getCardByAddress(obj.cardAddr)
+					const metadata = cardMeta?.metadata as { shareTokenMetadata?: { name?: string }; name?: string } | undefined
+					cardDisplayName = String(metadata?.shareTokenMetadata?.name ?? metadata?.name ?? '').trim()
+				} catch {}
+				const baseName = (cardDisplayName || 'Membership').replace(/\s*card\s*$/i, '').trim() || 'Membership'
+				const title = topupCategoryRaw === 'iuuseNewCard'
+					? `Buy ${baseName} Card`
+					: (topupCategoryRaw === 'upgradeNewCard' ? `Upgrade ${baseName} Card` : `Top Up ${baseName} Card`)
+				const payerAddr = ethers.getAddress(recipientEOA)
+				const payeeAddr = ethers.isAddress(cardOwnerEOAForAccounting)
+					? ethers.getAddress(cardOwnerEOAForAccounting)
+					: ethers.ZeroAddress
+				const displayJson = JSON.stringify({
+					title,
+					handle: '',
+					source: 'androidNfcTopup',
+					topupCategory: topupCategoryRaw,
+					cardName: cardDisplayName || undefined,
+					cardAddress: obj.cardAddr,
+					finishedHash: tx.hash,
+				})
+				const input = {
+					txId: tx.hash as `0x${string}`,
+					originalPaymentHash: ethers.ZeroHash as `0x${string}`,
+					chainId: 8453n,
+					txCategory: txCategoryTopup,
+					displayJson,
+					timestamp: 0n,
+					payer: payerAddr,
+					payee: payeeAddr,
+					finalRequestAmountFiat6: mintParsed.points6,
+					finalRequestAmountUSDC6,
+					isAAAccount: false,
+					route: [],
+					fees: {
+						gasChainType: 0,
+						gasWei: 0n,
+						gasUSDC6: 0n,
+						serviceUSDC6: 0n,
+						bServiceUSDC6: 0n,
+						bServiceUnits6: 0n,
+						feePayer: ethers.ZeroAddress,
+					},
+					meta: {
+						requestAmountFiat6: mintParsed.points6,
+						requestAmountUSDC6: finalRequestAmountUSDC6,
+						currencyFiat: cardCurrencyFiat,
+						discountAmountFiat6: beforePoint6,
+						discountRateBps: 0,
+						taxAmountFiat6: 0n,
+						taxRateBps: 0,
+						afterNotePayer: '',
+						afterNotePayee: '',
+					},
+				}
+				const syncTxHash = await runPurchasingCardAccountingJob(
+					{
+						input,
+						baseTxHash: tx.hash,
+						from: payerAddr,
+						cardAddress: obj.cardAddr,
+						attempt: 0,
+					},
+					{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
+				)
+				logger(Colors.green(`[executeForAdminProcess] android topup accounting done: baseTx=${tx.hash} syncTokenAction=${syncTxHash} cat=${topupCategoryRaw}`))
+			} catch (accountingErr: any) {
+				logger(Colors.yellow(`[executeForAdminProcess] android topup accounting non-critical: ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
 			}
 		}
 		// Android NFC topup（mintPointsByAdmin）成功后同步该用户在该卡上的成员 NFT tier metadata，与普通 topup/redeem 一致：按 minUsdc6 排序、Default/Max 对应低档、写入 backgroundColor 等 1155 JSON
@@ -2884,7 +3006,15 @@ type payMe = {
 	forText?: string
 }
 
-const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency, parentHash: string, currencyAmount: string, isMember: boolean): payMe|null => {
+const cardNote = (
+	cardAddress: string,
+	usdcAmount: string,
+	currency: ICurrency,
+	parentHash: string,
+	currencyAmount: string,
+	isMember: boolean,
+	cardDisplayName?: string
+): payMe | null => {
 
 	const payMe: payMe = {
 		currency,
@@ -2895,7 +3025,8 @@ const cardNote = (cardAddress : string, usdcAmount: string,  currency: ICurrency
 	}
 
 	logger(Colors.green(`✅ cardNote cardAddress = ${cardAddress} == '${CCSACardAddressNew}' isMember = ${isMember} usdcAmount = ${usdcAmount} currencyAmount = ${currencyAmount} parentHash = ${parentHash}`));
-payMe.title = isMember ? `Top Up` : `CCSA Membership`
+	const name = (cardDisplayName ?? '').trim()
+	payMe.title = isMember ? 'Top Up' : (name || (cardAddress.toLowerCase() === CCSACardAddressNew ? 'CCSA Membership' : 'Membership'))
 	// switch (cardAddress.toLowerCase()) {
 	// 	case CCSACardAddressNew:{
 	// 		payMe.title = isMember ? `Top Up` : `CCSA Membership`
@@ -3203,7 +3334,13 @@ export const purchasingCardProcess = async () => {
 
 		const to = owner
 		const currency = getICurrency(BigInt(_currency))
-		const payMe = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points, isMember)
+		let cardDisplayName = ''
+		try {
+			const cardMeta = await getCardByAddress(cardAddress)
+			const metadata = cardMeta?.metadata as { shareTokenMetadata?: { name?: string }; name?: string } | undefined
+			cardDisplayName = String(metadata?.shareTokenMetadata?.name ?? metadata?.name ?? '').trim()
+		} catch {}
+		const payMe = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points, isMember, cardDisplayName)
 
 		logger(Colors.green(`✅ purchasingCardProcess payMe cardAddress = ${cardAddress} payMe = ${inspect(payMe, false, 3, true)}`));
 		if (!payMe) {
@@ -3243,6 +3380,7 @@ export const purchasingCardProcess = async () => {
 			handle: '',
 			source: 'purchasingCard',
 			topupCategory: topupCategoryRaw,
+			cardName: cardDisplayName || undefined,
 			cardAddress,
 			finishedHash: tx.hash,
 			currency: payMe.currency,
