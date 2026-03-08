@@ -2909,6 +2909,157 @@ payMe.title = isMember ? `Top Up` : `CCSA Membership`
 	return payMe
 }
 
+type PurchasingCardAccountingInput = {
+	actionType: number
+	card: string
+	from: string
+	to: string
+	amount: bigint
+	ts: bigint
+	title: string
+	note: string
+	tax: bigint
+	tip: bigint
+	beamioFee1: bigint
+	beamioFee2: bigint
+	cardServiceFee: bigint
+	afterTatchNoteByFrom: string
+	afterTatchNoteByTo: string
+	afterTatchNoteByCardOwner: string
+}
+
+type PurchasingCardAccountingRetryJob = {
+	input: PurchasingCardAccountingInput
+	baseTxHash: string
+	from: string
+	cardAddress: string
+	attempt: number
+}
+
+const PURCHASING_CARD_ACCOUNTING_MAX_RETRY = 3
+export const purchasingCardAccountingRetryPool: PurchasingCardAccountingRetryJob[] = []
+let purchasingCardAccountingRetryRunning = false
+
+const accountingToDebugJson = (val: unknown) => JSON.stringify(
+	val,
+	(_k, v) => typeof v === 'bigint' ? v.toString() : v,
+	2
+)
+
+const pickAccountingErrorDebug = (err: any) => ({
+	name: err?.name,
+	code: err?.code,
+	shortMessage: err?.shortMessage,
+	message: err?.message,
+	reason: err?.reason,
+	data: err?.data ?? err?.info?.error?.data,
+	error: err?.error?.message ?? err?.info?.error?.message,
+	stack: err?.stack,
+})
+
+const buildPurchasingCardAccountingOverrides = (
+	feeData: { gasPrice?: bigint | null; maxFeePerGas?: bigint | null; maxPriorityFeePerGas?: bigint | null } | null | undefined,
+	multiplier: bigint,
+	fallbackGwei: string
+): Record<string, bigint | number> => {
+	const overrides: Record<string, bigint | number> = { gasLimit: 2_500_000 }
+	if (feeData?.maxFeePerGas != null && feeData?.maxPriorityFeePerGas != null) {
+		const boostedPriority = feeData.maxPriorityFeePerGas > 0n
+			? feeData.maxPriorityFeePerGas * multiplier
+			: ethers.parseUnits('2', 'gwei')
+		let boostedMax = feeData.maxFeePerGas > 0n
+			? feeData.maxFeePerGas * multiplier
+			: ethers.parseUnits(fallbackGwei, 'gwei')
+		if (boostedMax <= boostedPriority) {
+			boostedMax = boostedPriority + ethers.parseUnits('1', 'gwei')
+		}
+		overrides.maxPriorityFeePerGas = boostedPriority
+		overrides.maxFeePerGas = boostedMax
+		return overrides
+	}
+	const boostedGasPrice = feeData?.gasPrice && feeData.gasPrice > 0n
+		? feeData.gasPrice * multiplier
+		: ethers.parseUnits(fallbackGwei, 'gwei')
+	overrides.gasPrice = boostedGasPrice
+	return overrides
+}
+
+const runPurchasingCardAccountingJob = async (
+	job: PurchasingCardAccountingRetryJob,
+	SC: { walletConet: ethers.Wallet; BeamioTaskDiamondAction: ethers.Contract }
+) => {
+	const actionFacet = await SC.BeamioTaskDiamondAction
+	const feeData = await SC.walletConet.provider?.getFeeData().catch(() => null)
+	logger(Colors.cyan(`[purchasingCardProcess][DEBUG] BeamioIndexerDiamond payload(JSON):\n${accountingToDebugJson(job.input)}`))
+
+	const submitAndWait = async (label: '1st' | 'retry', overrides: Record<string, bigint | number>) => {
+		logger(Colors.gray(`[purchasingCardProcess] syncTokenAction ${label} gas overrides: ${inspect(overrides, false, 3, true)}`))
+		const tx = await actionFacet.syncTokenAction(job.input, overrides)
+		logger(Colors.green(`[purchasingCardProcess][DEBUG] syncTokenAction submitted (${label}) hash=${tx.hash}`))
+		const receipt = await tx.wait()
+		if (!receipt || Number(receipt.status ?? 0) !== 1) {
+			throw new Error(`syncTokenAction reverted (status=${receipt?.status ?? 'unknown'}) hash=${tx.hash}`)
+		}
+		return tx.hash
+	}
+
+	try {
+		return await submitAndWait('1st', buildPurchasingCardAccountingOverrides(feeData, 3n, '60'))
+	} catch (firstErr: any) {
+		logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction first try failed, retry once with higher gas: ${firstErr?.shortMessage ?? firstErr?.message ?? String(firstErr)}`))
+		logger(Colors.red(`[purchasingCardProcess][DEBUG] syncTokenAction first error: ${accountingToDebugJson(pickAccountingErrorDebug(firstErr))}`))
+		try {
+			return await submitAndWait('retry', buildPurchasingCardAccountingOverrides(feeData, 5n, '90'))
+		} catch (retryErr: any) {
+			logger(Colors.red(`[purchasingCardProcess][DEBUG] syncTokenAction retry error: ${accountingToDebugJson(pickAccountingErrorDebug(retryErr))}`))
+			throw retryErr
+		}
+	}
+}
+
+const ensurePurchasingCardAccountingRetryWorker = () => {
+	if (purchasingCardAccountingRetryRunning) return
+	purchasingCardAccountingRetryRunning = true
+	setTimeout(() => purchasingCardAccountingRetryProcess(), 1000)
+}
+
+const enqueuePurchasingCardAccountingRetryJob = (job: PurchasingCardAccountingRetryJob) => {
+	purchasingCardAccountingRetryPool.push(job)
+	logger(Colors.yellow(`[purchasingCardProcess] queued accounting retry job attempt=${job.attempt} tx=${job.baseTxHash} queue=${purchasingCardAccountingRetryPool.length}`))
+	ensurePurchasingCardAccountingRetryWorker()
+}
+
+export const purchasingCardAccountingRetryProcess = async () => {
+	const job = purchasingCardAccountingRetryPool.shift()
+	if (!job) {
+		purchasingCardAccountingRetryRunning = false
+		return
+	}
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		purchasingCardAccountingRetryPool.unshift(job)
+		setTimeout(() => purchasingCardAccountingRetryProcess(), 1500)
+		return
+	}
+	try {
+		const syncTxHash = await runPurchasingCardAccountingJob(job, { walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction })
+		logger(Colors.green(`✅ purchasingCardProcess queued accounting done: tx=${job.baseTxHash} syncTokenAction=${syncTxHash}`))
+	} catch (err: any) {
+		const nextAttempt = job.attempt + 1
+		logger(Colors.yellow(`[purchasingCardProcess] queued accounting failed: ${err?.shortMessage ?? err?.message ?? String(err)}`))
+		logger(Colors.red(`[purchasingCardProcess][DEBUG] queued accounting error detail: ${accountingToDebugJson(pickAccountingErrorDebug(err))}`))
+		if (nextAttempt < PURCHASING_CARD_ACCOUNTING_MAX_RETRY) {
+			purchasingCardAccountingRetryPool.push({ ...job, attempt: nextAttempt })
+			logger(Colors.yellow(`[purchasingCardProcess] requeued accounting job attempt=${nextAttempt} tx=${job.baseTxHash} queue=${purchasingCardAccountingRetryPool.length}`))
+		} else {
+			logger(Colors.red(`[purchasingCardProcess] dropped accounting job after max retries tx=${job.baseTxHash}`))
+		}
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => purchasingCardAccountingRetryProcess(), 1000)
+	}
+}
+
 export const purchasingCardProcess = async () => {
 	const obj = purchasingCardPool.shift()
 	if (!obj) {
@@ -3046,81 +3197,28 @@ export const purchasingCardProcess = async () => {
 
 		// 以下记账（syncTokenAction -> BeamioIndexerDiamond）在后台执行，客户端已收到 hash；失败不影响购点成功
 		try {
-			const actionFacet = await SC.BeamioTaskDiamondAction
-			const feeData = await SC.walletConet.provider?.getFeeData().catch(() => null)
-			const toDebugJson = (val: unknown) => JSON.stringify(
-				val,
-				(_k, v) => typeof v === 'bigint' ? v.toString() : v,
-				2
+			const syncTxHash = await runPurchasingCardAccountingJob(
+				{
+					input,
+					baseTxHash: tx.hash,
+					from,
+					cardAddress,
+					attempt: 0,
+				},
+				{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
 			)
-			const pickErrorDebug = (err: any) => ({
-				name: err?.name,
-				code: err?.code,
-				shortMessage: err?.shortMessage,
-				message: err?.message,
-				reason: err?.reason,
-				data: err?.data ?? err?.info?.error?.data,
-				error: err?.error?.message ?? err?.info?.error?.message,
-				stack: err?.stack,
-			})
-			const buildAccountingOverrides = (multiplier: bigint, fallbackGwei: string): Record<string, bigint | number> => {
-				const overrides: Record<string, bigint | number> = { gasLimit: 2_500_000 }
-				// 提高记账交易的 max fee，避免网络高峰时默认估算过低导致上链失败
-				if (feeData?.maxFeePerGas != null && feeData?.maxPriorityFeePerGas != null) {
-					const boostedPriority = feeData.maxPriorityFeePerGas > 0n
-						? feeData.maxPriorityFeePerGas * multiplier
-						: ethers.parseUnits('2', 'gwei')
-					let boostedMax = feeData.maxFeePerGas > 0n
-						? feeData.maxFeePerGas * multiplier
-						: ethers.parseUnits(fallbackGwei, 'gwei')
-					if (boostedMax <= boostedPriority) {
-						boostedMax = boostedPriority + ethers.parseUnits('1', 'gwei')
-					}
-					overrides.maxPriorityFeePerGas = boostedPriority
-					overrides.maxFeePerGas = boostedMax
-				} else {
-					const boostedGasPrice = feeData?.gasPrice && feeData.gasPrice > 0n
-						? feeData.gasPrice * multiplier
-						: ethers.parseUnits(fallbackGwei, 'gwei')
-					overrides.gasPrice = boostedGasPrice
-				}
-				return overrides
-			}
-
-			const accountingOverrides = buildAccountingOverrides(3n, '60')
-			logger(Colors.gray(`[purchasingCardProcess] syncTokenAction gas overrides: ${inspect(accountingOverrides, false, 3, true)}`))
-			logger(Colors.cyan(`[purchasingCardProcess][DEBUG] BeamioIndexerDiamond payload(JSON):\n${toDebugJson(input)}`))
-
-			let tx2: { hash: string; wait: () => Promise<unknown> }
-			try {
-				tx2 = await actionFacet.syncTokenAction(input, accountingOverrides)
-				logger(Colors.green(`[purchasingCardProcess][DEBUG] syncTokenAction submitted (1st) hash=${tx2.hash}`))
-			} catch (firstErr: any) {
-				const retryOverrides = buildAccountingOverrides(5n, '90')
-				logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction first try failed, retry once with higher gas: ${firstErr?.shortMessage ?? firstErr?.message ?? String(firstErr)}`))
-				logger(Colors.red(`[purchasingCardProcess][DEBUG] syncTokenAction first error: ${toDebugJson(pickErrorDebug(firstErr))}`))
-				logger(Colors.gray(`[purchasingCardProcess] syncTokenAction retry gas overrides: ${inspect(retryOverrides, false, 3, true)}`))
-				tx2 = await actionFacet.syncTokenAction(input, retryOverrides)
-				logger(Colors.green(`[purchasingCardProcess][DEBUG] syncTokenAction submitted (retry) hash=${tx2.hash}`))
-			}
-			await tx2.wait().catch((waitErr: any) => {
-				logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
-				logger(Colors.red(`[purchasingCardProcess][DEBUG] syncTokenAction.wait error: ${toDebugJson(pickErrorDebug(waitErr))}`))
-			})
-			logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} syncTokenAction=${tx2.hash}`))
+			logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} syncTokenAction=${syncTxHash}`))
 		} catch (accountingErr: any) {
-			// Diamond: fn not found 等：syncTokenAction 未在 Diamond 上配置时发生，购点已成功，仅记账失败
+			// 记账失败不影响购点主流程，入后台补记队列避免丢单
 			logger(Colors.yellow(`[purchasingCardProcess] accounting non-critical (purchase succeeded): ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
-			logger(Colors.red(`[purchasingCardProcess][DEBUG] accounting error detail: ${JSON.stringify({
-				name: accountingErr?.name,
-				code: accountingErr?.code,
-				shortMessage: accountingErr?.shortMessage,
-				message: accountingErr?.message,
-				reason: accountingErr?.reason,
-				data: accountingErr?.data ?? accountingErr?.info?.error?.data,
-				error: accountingErr?.error?.message ?? accountingErr?.info?.error?.message,
-				stack: accountingErr?.stack,
-			}, (_k, v) => typeof v === 'bigint' ? v.toString() : v, 2)}`))
+			logger(Colors.red(`[purchasingCardProcess][DEBUG] accounting error detail: ${accountingToDebugJson(pickAccountingErrorDebug(accountingErr))}`))
+			enqueuePurchasingCardAccountingRetryJob({
+				input,
+				baseTxHash: tx.hash,
+				from,
+				cardAddress,
+				attempt: 0,
+			})
 		}
 		syncNftTierMetadataForUser(cardAddress, from).catch(() => {})
 		
