@@ -2320,7 +2320,7 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 		}
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
-			originalPaymentHash: ethers.ZeroHash,
+			originalPaymentHash: ethers.ZeroHash as `0x${string}`,
 			chainId: CHAIN_ID_BASE,
 			txCategory: TX_CARDMINT,
 			displayJson,
@@ -2910,22 +2910,46 @@ payMe.title = isMember ? `Top Up` : `CCSA Membership`
 }
 
 type PurchasingCardAccountingInput = {
-	actionType: number
-	card: string
-	from: string
-	to: string
-	amount: bigint
-	ts: bigint
-	title: string
-	note: string
-	tax: bigint
-	tip: bigint
-	beamioFee1: bigint
-	beamioFee2: bigint
-	cardServiceFee: bigint
-	afterTatchNoteByFrom: string
-	afterTatchNoteByTo: string
-	afterTatchNoteByCardOwner: string
+	txId: `0x${string}`
+	originalPaymentHash: `0x${string}`
+	chainId: bigint
+	txCategory: `0x${string}`
+	displayJson: string
+	timestamp: bigint
+	payer: string
+	payee: string
+	finalRequestAmountFiat6: bigint
+	finalRequestAmountUSDC6: bigint
+	isAAAccount: boolean
+	route: {
+		asset: string
+		amountE6: bigint
+		assetType: number
+		source: number
+		tokenId: bigint
+		itemCurrencyType: number
+		offsetInRequestCurrencyE6: bigint
+	}[]
+	fees: {
+		gasChainType: number
+		gasWei: bigint
+		gasUSDC6: bigint
+		serviceUSDC6: bigint
+		bServiceUSDC6: bigint
+		bServiceUnits6: bigint
+		feePayer: string
+	}
+	meta: {
+		requestAmountFiat6: bigint
+		requestAmountUSDC6: bigint
+		currencyFiat: number
+		discountAmountFiat6: bigint
+		discountRateBps: number
+		taxAmountFiat6: bigint
+		taxRateBps: number
+		afterNotePayer: string
+		afterNotePayee: string
+	}
 }
 
 type PurchasingCardAccountingRetryJob = {
@@ -2988,7 +3012,7 @@ const runPurchasingCardAccountingJob = async (
 	job: PurchasingCardAccountingRetryJob,
 	SC: { walletConet: ethers.Wallet; BeamioTaskDiamondAction: ethers.Contract }
 ) => {
-	const actionFacet = await SC.BeamioTaskDiamondAction
+	const actionFacet = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 	const feeData = await SC.walletConet.provider?.getFeeData().catch(() => null)
 	logger(Colors.cyan(`[purchasingCardProcess][DEBUG] BeamioIndexerDiamond payload(JSON):\n${accountingToDebugJson(job.input)}`))
 
@@ -3157,7 +3181,6 @@ export const purchasingCardProcess = async () => {
 
 		const to = owner
 		const currency = getICurrency(BigInt(_currency))
-		const ACTION_TOKEN_MINT = 1; // ActionFacet: 1 mint
 		const payMe = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points, isMember)
 
 		logger(Colors.green(`✅ purchasingCardProcess payMe cardAddress = ${cardAddress} payMe = ${inspect(payMe, false, 3, true)}`));
@@ -3170,26 +3193,57 @@ export const purchasingCardProcess = async () => {
 
 		
 
-		const input = {
-			actionType: ACTION_TOKEN_TYPE.TOKEN_MINT,
-			card: cardAddress,
-			from: ethers.ZeroAddress,
-			to: from, // ✅ points 归属 from
-			amount: currencyAmount.points6,
-			ts: 0n,
-
-			title: `${payMe.title}`,
-			note: JSON.stringify(payMe),
-			tax: 0n,
-			tip: 0n,
-			beamioFee1: 0n,
-			beamioFee2: 0n,
-			cardServiceFee: 0n,
-	
-			afterTatchNoteByFrom: "",
-			afterTatchNoteByTo: "",
-			afterTatchNoteByCardOwner: "",
-		};
+		const TX_CARDMINT = ethers.keccak256(ethers.toUtf8Bytes('cardmint:confirmed'))
+		const CHAIN_ID_BASE = 8453n
+		const payerAddr = ethers.getAddress(from)
+		const payeeAddr = ethers.getAddress(to)
+		const finalRequestAmountUSDC6 = BigInt(usdcAmount)
+		const finalRequestAmountFiat6 = ethers.parseUnits(payMe.currencyAmount || '0', 6)
+		const currencyFiat = Number(_currency)
+		const displayJson = JSON.stringify({
+			title: payMe.title || (isMember ? 'Top Up' : 'Card Mint'),
+			handle: '',
+			source: 'purchasingCard',
+			cardAddress,
+			finishedHash: tx.hash,
+			currency: payMe.currency,
+			currencyAmount: payMe.currencyAmount,
+			usdcAmount: payMe.usdcAmount,
+		})
+		const input: PurchasingCardAccountingInput = {
+			txId: tx.hash as `0x${string}`,
+			originalPaymentHash: ethers.ZeroHash as `0x${string}`,
+			chainId: CHAIN_ID_BASE,
+			txCategory: TX_CARDMINT as `0x${string}`,
+			displayJson,
+			timestamp: 0n,
+			payer: payerAddr,
+			payee: payeeAddr,
+			finalRequestAmountFiat6,
+			finalRequestAmountUSDC6,
+			isAAAccount: false,
+			route: [],
+			fees: {
+				gasChainType: 0,
+				gasWei: 0n,
+				gasUSDC6: 0n,
+				serviceUSDC6: 0n,
+				bServiceUSDC6: 0n,
+				bServiceUnits6: 0n,
+				feePayer: ethers.ZeroAddress,
+			},
+			meta: {
+				requestAmountFiat6: finalRequestAmountFiat6,
+				requestAmountUSDC6: finalRequestAmountUSDC6,
+				currencyFiat,
+				discountAmountFiat6: 0n,
+				discountRateBps: 0,
+				taxAmountFiat6: 0n,
+				taxRateBps: 0,
+				afterNotePayer: '',
+				afterNotePayee: '',
+			},
+		}
 		
 		
 
