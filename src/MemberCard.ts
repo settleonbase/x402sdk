@@ -4979,6 +4979,207 @@ export const purchasingCardPreCheck = async (
 	}
 }
 
+export type UsdcTopupIntent = 'auto' | 'first_purchase' | 'upgrade' | 'topup'
+
+export type UsdcTopupRuleCheck = {
+	intent: Exclude<UsdcTopupIntent, 'auto'>
+	hasMembership: boolean
+	currentPoints6: string
+	currentTierIndex: number
+	minTierUsdc6: string
+	nextTierMinUsdc6?: string
+	requiredMinUsdc6: string
+}
+
+export type UsdcTopupPreview = {
+	intent: Exclude<UsdcTopupIntent, 'auto'>
+	hasMembership: boolean
+	currentPoints6: string
+	currentTierIndex: number
+	minTierUsdc6: string
+	nextTierMinUsdc6?: string
+	requiredMinUsdc6: string
+	recommendedUsdc6: string
+}
+
+const resolveUsdcTopupRules = async (
+	cardAddress: string,
+	from: string,
+	intent: UsdcTopupIntent = 'auto'
+): Promise<
+	| { success: true; preview: UsdcTopupPreview }
+	| { success: false; error: string }
+> => {
+	try {
+		if (!ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+		if (!ethers.isAddress(from)) return { success: false, error: 'Invalid from address' }
+		const pool = Settle_ContractPool
+		if (!pool?.length) return { success: false, error: 'Settle_ContractPool empty' }
+		const SC = pool[0]
+
+		const card = new ethers.Contract(
+			cardAddress,
+			[
+				'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+				'function getTiersCount() view returns (uint256)',
+				'function getTierAt(uint256 idx) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
+			],
+			SC.walletBase
+		)
+
+		const [[pt, nftsRaw], tiersCountRaw] = await Promise.all([
+			card.getOwnershipByEOA(from) as Promise<[bigint, Array<{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }>]>,
+			card.getTiersCount() as Promise<bigint>,
+		])
+
+		const tiersCount = Number(tiersCountRaw)
+		const tiers: Array<{ index: number; minUsdc6: bigint }> = []
+		for (let i = 0; i < tiersCount; i++) {
+			const [minUsdc6] = await card.getTierAt(i) as [bigint, bigint, bigint, boolean]
+			tiers.push({ index: i, minUsdc6 })
+		}
+		const tiersSorted = [...tiers].sort((a, b) => (a.minUsdc6 < b.minUsdc6 ? -1 : a.minUsdc6 > b.minUsdc6 ? 1 : 0))
+		const minTierUsdc6 = tiersSorted.length > 0 ? tiersSorted[0].minUsdc6 : 0n
+
+		const nfts = Array.isArray(nftsRaw) ? nftsRaw : []
+		const hasMembership = nfts.some((n) => !n?.isExpired && Number(n?.tokenId ?? 0n) >= 100 && Number(n?.tokenId ?? 0n) < 100_000_000_000)
+		let currentTierIndex = -1
+		for (const n of nfts) {
+			if (n?.isExpired) continue
+			const idx = n?.tierIndexOrMax
+			if (idx == null || idx === ethers.MaxUint256) continue
+			const num = Number(idx)
+			if (Number.isFinite(num)) currentTierIndex = Math.max(currentTierIndex, num)
+		}
+		const nextTier = tiers.find((t) => t.index === currentTierIndex + 1)
+		const nextTierMinUsdc6 = nextTier?.minUsdc6
+		const currentPoints6 = pt ?? 0n
+
+		const resolvedIntent: Exclude<UsdcTopupIntent, 'auto'> = intent === 'auto'
+			? (hasMembership ? (nextTierMinUsdc6 != null ? 'upgrade' : 'topup') : 'first_purchase')
+			: intent
+
+		if (resolvedIntent === 'first_purchase' && hasMembership) {
+			return { success: false, error: 'User already has membership card. Use topup or upgrade.' }
+		}
+		if ((resolvedIntent === 'topup' || resolvedIntent === 'upgrade') && !hasMembership) {
+			return { success: false, error: 'Top-up/upgrade requires existing membership card.' }
+		}
+
+		let requiredMinUsdc6 = 1n
+		if (resolvedIntent === 'first_purchase') {
+			requiredMinUsdc6 = minTierUsdc6 > 0n ? minTierUsdc6 : 1n
+		} else if (resolvedIntent === 'upgrade') {
+			if (!nextTierMinUsdc6 || nextTierMinUsdc6 <= currentPoints6) {
+				return { success: false, error: 'No higher tier available for upgrade.' }
+			}
+			requiredMinUsdc6 = nextTierMinUsdc6 - currentPoints6
+		}
+
+		return {
+			success: true,
+			preview: {
+				intent: resolvedIntent,
+				hasMembership,
+				currentPoints6: currentPoints6.toString(),
+				currentTierIndex,
+				minTierUsdc6: minTierUsdc6.toString(),
+				...(nextTierMinUsdc6 != null && { nextTierMinUsdc6: nextTierMinUsdc6.toString() }),
+				requiredMinUsdc6: requiredMinUsdc6.toString(),
+				recommendedUsdc6: requiredMinUsdc6.toString(),
+			},
+		}
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+/** USDC Topup 预览：签名前返回首购/升级最低要求和下一档信息（只读）。 */
+export const usdcTopupPreview = async (
+	cardAddress: string,
+	from: string,
+	intent: UsdcTopupIntent = 'auto',
+	usdcAmount?: string
+): Promise<
+	| { success: true; preview: UsdcTopupPreview; amountCheck?: { ok: boolean; requiredMinUsdc6: string; providedUsdc6: string } }
+	| { success: false; error: string }
+> => {
+	const rules = await resolveUsdcTopupRules(cardAddress, from, intent)
+	if (!rules.success) return rules
+	const ret: { success: true; preview: UsdcTopupPreview; amountCheck?: { ok: boolean; requiredMinUsdc6: string; providedUsdc6: string } } = {
+		success: true,
+		preview: rules.preview,
+	}
+	if (typeof usdcAmount === 'string' && usdcAmount.trim() !== '') {
+		try {
+			const provided = BigInt(usdcAmount)
+			const required = BigInt(rules.preview.requiredMinUsdc6)
+			ret.amountCheck = {
+				ok: provided >= required,
+				requiredMinUsdc6: rules.preview.requiredMinUsdc6,
+				providedUsdc6: provided.toString(),
+			}
+		} catch {
+			ret.amountCheck = {
+				ok: false,
+				requiredMinUsdc6: rules.preview.requiredMinUsdc6,
+				providedUsdc6: '0',
+			}
+		}
+	}
+	return ret
+}
+
+/**
+ * USDC Topup 预检（Cluster 用）：
+ * - first_purchase: 必须达到最低 tier 门槛
+ * - upgrade: 已持卡用户，必须达到下一档门槛差额
+ * - topup: 已持卡用户，允许任意正数金额
+ */
+export const usdcTopupPreCheck = async (
+	cardAddress: string,
+	usdcAmount: string,
+	from: string,
+	intent: UsdcTopupIntent = 'auto'
+): Promise<
+	| { success: true; preChecked: PurchasingCardPreChecked; ruleCheck: UsdcTopupRuleCheck }
+	| { success: false; error: string }
+> => {
+	try {
+		if (!ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+		if (!ethers.isAddress(from)) return { success: false, error: 'Invalid from address' }
+		const usdc6 = BigInt(usdcAmount)
+		if (usdc6 <= 0n) return { success: false, error: 'usdcAmount must be > 0' }
+		const rules = await resolveUsdcTopupRules(cardAddress, from, intent)
+		if (!rules.success) return rules
+		const requiredMinUsdc6 = BigInt(rules.preview.requiredMinUsdc6)
+
+		if (usdc6 < requiredMinUsdc6) {
+			const need = ethers.formatUnits(requiredMinUsdc6, 6)
+			return { success: false, error: `Amount too small for ${rules.preview.intent}. Minimum required is ${need} USDC.` }
+		}
+
+		const preCheck = await purchasingCardPreCheck(cardAddress, usdcAmount, from)
+		if (!preCheck.success) return preCheck
+
+		return {
+			success: true,
+			preChecked: preCheck.preChecked,
+			ruleCheck: {
+				intent: rules.preview.intent,
+				hasMembership: rules.preview.hasMembership,
+				currentPoints6: rules.preview.currentPoints6,
+				currentTierIndex: rules.preview.currentTierIndex,
+				minTierUsdc6: rules.preview.minTierUsdc6,
+				...(rules.preview.nextTierMinUsdc6 != null && { nextTierMinUsdc6: rules.preview.nextTierMinUsdc6 }),
+				requiredMinUsdc6: rules.preview.requiredMinUsdc6,
+			},
+		}
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
 export const quoteUSDCForPoints = async (
 	cardAddress: string,
 	pointsHuman: string   // ✅ 人类可读，例如 "10" / "1.5"

@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
@@ -1735,6 +1735,68 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}, res)
 
 		logger(preCheck.success ? `server /api/purchasingCard preCheck OK, forwarded to master` : `server /api/purchasingCard forwarded to master (no preChecked)`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preCheck.success }, false, 3, true))
+	})
+
+	/** USDC Topup（新接口）：Cluster 执行完整预检（tier/金额/签名字段），通过后转发 Master 执行 buyPointsForUser。 */
+	router.post('/usdcTopup', async (req, res) => {
+		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, intent } = req.body as {
+			cardAddress?: string
+			userSignature?: string
+			nonce?: string
+			usdcAmount?: string
+			from?: string
+			validAfter?: string
+			validBefore?: string
+			intent?: 'auto' | 'first_purchase' | 'upgrade' | 'topup'
+		}
+		if (!cardAddress || !userSignature || !nonce || !usdcAmount || !from || !validBefore) {
+			return res.status(400).json({ success: false, error: 'Invalid data format' }).end()
+		}
+		const shapeCheck = await purchasingCard(cardAddress, userSignature, nonce, usdcAmount, from, validAfter || '0', validBefore)
+		if (!shapeCheck || !(shapeCheck as { success: boolean }).success) {
+			return res.status(400).json(shapeCheck).end()
+		}
+		const preCheck = await usdcTopupPreCheck(cardAddress, usdcAmount, from, intent ?? 'auto')
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/usdcTopup preCheck FAIL: ${preCheck.error}`))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/usdcTopup preCheck OK intent=${preCheck.ruleCheck.intent}, forwarding to master`), inspect({
+			cardAddress,
+			from,
+			usdcAmount,
+			requiredMinUsdc6: preCheck.ruleCheck.requiredMinUsdc6,
+			hasMembership: preCheck.ruleCheck.hasMembership,
+		}, false, 2, true))
+		postLocalhost('/api/usdcTopup', {
+			cardAddress,
+			userSignature,
+			nonce,
+			usdcAmount,
+			from,
+			validAfter,
+			validBefore,
+			intent: preCheck.ruleCheck.intent,
+			preChecked: preCheck.preChecked,
+		}, res)
+	})
+
+	/** USDC Topup 预览（只读）：签名前返回首购/升级最低要求与下一档信息。 */
+	router.post('/usdcTopupPreview', async (req, res) => {
+		const { cardAddress, from, intent, usdcAmount } = req.body as {
+			cardAddress?: string
+			from?: string
+			intent?: 'auto' | 'first_purchase' | 'upgrade' | 'topup'
+			usdcAmount?: string
+		}
+		if (!cardAddress || !from) {
+			return res.status(400).json({ success: false, error: 'cardAddress and from are required' }).end()
+		}
+		const preview = await usdcTopupPreview(cardAddress, from, intent ?? 'auto', usdcAmount)
+		if (!preview.success) {
+			return res.status(400).json({ success: false, error: preview.error }).end()
+		}
+		return res.status(200).json(preview).end()
 	})
 
 	/** createCard：集群预检 JSON + AA→EOA 替换，不合格 400，合格转发 master。master 不预检，直接推 createCardPool。*/

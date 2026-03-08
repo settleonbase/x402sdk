@@ -753,6 +753,35 @@ const routing = ( router: Router ) => {
 			})
 		})
 
+		/** USDC Topup（cluster 已完成完整预检）：master 直接入 purchasingCard 队列执行。 */
+		router.post('/usdcTopup', (req, res) => {
+			const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked } = req.body as {
+				cardAddress: string
+				userSignature: string
+				nonce: string
+				usdcAmount: string
+				from: string
+				validAfter: string
+				validBefore: string
+				preChecked?: import('../MemberCard').PurchasingCardPreChecked
+			}
+			purchasingCardPool.push({
+				cardAddress,
+				userSignature,
+				nonce,
+				usdcAmount,
+				from,
+				validAfter,
+				validBefore,
+				res,
+				...(preChecked != null && { preChecked }),
+			})
+			logger(` Master GOT /api/usdcTopup ${preChecked ? '[preChecked]' : ''} -> purchasingCardProcess`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preChecked }, false, 3, true))
+			purchasingCardProcess().catch((err: any) => {
+				logger(Colors.red('[purchasingCardProcess] usdcTopup unhandled:'), err?.message ?? err)
+			})
+		})
+
 		/** x402 BeamioTransfer 成功后：写入 BeamioIndexerDiamond（master 队列处理） */
 		router.post('/beamioTransferIndexerAccounting', (req, res) => {
 			logger(Colors.gray(`[DEBUG] beamioTransferIndexerAccounting received bodyKeys=${Object.keys(req.body || {}).join(',')} from=${(req.body as any)?.from?.slice?.(0, 10)}… to=${(req.body as any)?.to?.slice?.(0, 10)}… requestHash=${(req.body as any)?.requestHash ?? 'n/a'} poolBefore=${beamioTransferIndexerAccountingPool.length}`))
