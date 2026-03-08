@@ -5065,7 +5065,7 @@ const resolveUsdcTopupRules = async (
 		}
 		const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
 		const points6ToRequiredUsdc6 = (points6: bigint) =>
-			points6 <= 0n ? 1n : ceilDiv(points6 * POINTS_ONE, unitPriceUSDC6)
+			points6 <= 0n ? 1n : ceilDiv(points6 * unitPriceUSDC6, POINTS_ONE)
 
 		// Backend auto-judges the flow by current ownership:
 		// - no membership NFT => first purchase (tier threshold applies only if tiers exist)
@@ -5076,6 +5076,13 @@ const resolveUsdcTopupRules = async (
 			: 1n
 		const minTierRequiredUsdc6 = points6ToRequiredUsdc6(minTierPoints6)
 		const nextTierRequiredUsdc6 = nextTierPoints6 != null ? points6ToRequiredUsdc6(nextTierPoints6) : undefined
+		if (process.env.NODE_ENV !== 'production') {
+			logger(
+				Colors.gray(
+					`[usdcTopupRules][debug] card=${cardAddress} from=${from} intent=${resolvedIntent} minTierPoints6=${minTierPoints6.toString()} unitPriceUSDC6=${unitPriceUSDC6.toString()} requiredMinUsdc6=${requiredMinUsdc6.toString()}`
+				)
+			)
+		}
 
 		return {
 			success: true,
