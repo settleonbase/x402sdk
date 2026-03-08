@@ -3047,7 +3047,43 @@ export const purchasingCardProcess = async () => {
 		// 以下记账（syncTokenAction -> BeamioIndexerDiamond）在后台执行，客户端已收到 hash；失败不影响购点成功
 		try {
 			const actionFacet = await SC.BeamioTaskDiamondAction
-			const tx2 = await actionFacet.syncTokenAction(input)
+			const feeData = await SC.walletConet.provider?.getFeeData().catch(() => null)
+			const buildAccountingOverrides = (multiplier: bigint, fallbackGwei: string): Record<string, bigint | number> => {
+				const overrides: Record<string, bigint | number> = { gasLimit: 2_500_000 }
+				// 提高记账交易的 max fee，避免网络高峰时默认估算过低导致上链失败
+				if (feeData?.maxFeePerGas != null && feeData?.maxPriorityFeePerGas != null) {
+					const boostedPriority = feeData.maxPriorityFeePerGas > 0n
+						? feeData.maxPriorityFeePerGas * multiplier
+						: ethers.parseUnits('2', 'gwei')
+					let boostedMax = feeData.maxFeePerGas > 0n
+						? feeData.maxFeePerGas * multiplier
+						: ethers.parseUnits(fallbackGwei, 'gwei')
+					if (boostedMax <= boostedPriority) {
+						boostedMax = boostedPriority + ethers.parseUnits('1', 'gwei')
+					}
+					overrides.maxPriorityFeePerGas = boostedPriority
+					overrides.maxFeePerGas = boostedMax
+				} else {
+					const boostedGasPrice = feeData?.gasPrice && feeData.gasPrice > 0n
+						? feeData.gasPrice * multiplier
+						: ethers.parseUnits(fallbackGwei, 'gwei')
+					overrides.gasPrice = boostedGasPrice
+				}
+				return overrides
+			}
+
+			const accountingOverrides = buildAccountingOverrides(3n, '60')
+			logger(Colors.gray(`[purchasingCardProcess] syncTokenAction gas overrides: ${inspect(accountingOverrides, false, 3, true)}`))
+
+			let tx2: { hash: string; wait: () => Promise<unknown> }
+			try {
+				tx2 = await actionFacet.syncTokenAction(input, accountingOverrides)
+			} catch (firstErr: any) {
+				const retryOverrides = buildAccountingOverrides(5n, '90')
+				logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction first try failed, retry once with higher gas: ${firstErr?.shortMessage ?? firstErr?.message ?? String(firstErr)}`))
+				logger(Colors.gray(`[purchasingCardProcess] syncTokenAction retry gas overrides: ${inspect(retryOverrides, false, 3, true)}`))
+				tx2 = await actionFacet.syncTokenAction(input, retryOverrides)
+			}
 			await tx2.wait().catch((waitErr: any) => {
 				logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
 			})
