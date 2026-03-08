@@ -1406,6 +1406,18 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 	app.use( '/api', router )
 	routing(router)
+	app.use((err: any, req: Request, res: Response, next: any) => {
+		// Guard noisy body-parser JSON syntax errors (e.g. multipart/form-data sent as application/json).
+		if (err?.type === 'entity.parse.failed' && err instanceof SyntaxError) {
+			const ct = String(req.headers['content-type'] ?? '')
+			logger(Colors.yellow(`[json-parse] ${req.method} ${req.originalUrl} invalid JSON body; content-type=${ct || '(none)'}`))
+			if (!res.headersSent) {
+				return res.status(400).json({ success: false, error: 'Invalid JSON body' }).end()
+			}
+			return
+		}
+		next(err)
+	})
 
 	logger('Router stack:', router.stack.map(r => r.route?.path))
 
