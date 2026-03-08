@@ -5409,6 +5409,9 @@ const resolveUsdcTopupRules = async (
 	| { success: true; preview: UsdcTopupPreview }
 	| { success: false; error: string }
 > => {
+	const CENT_USDC6 = 10_000n
+	const ROUND_HALF_USDC6 = 5_000n // 0.005 USDC
+	const roundUsdc6ToCents = (val: bigint) => ((val + ROUND_HALF_USDC6) / CENT_USDC6) * CENT_USDC6
 	try {
 		if (!ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 		if (!ethers.isAddress(from)) return { success: false, error: 'Invalid from address' }
@@ -5459,8 +5462,11 @@ const resolveUsdcTopupRules = async (
 			return { success: false, error: 'UC_PriceZero: quoteUnitPointInUSDC6(card)=0' }
 		}
 		const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
-		const points6ToRequiredUsdc6 = (points6: bigint) =>
-			points6 <= 0n ? 1n : ceilDiv(points6 * unitPriceUSDC6, POINTS_ONE)
+		// 与前端协议对齐：汇率到 USDC 后先加 0.005，再按 2 位小数四舍五入
+		const points6ToRequiredUsdc6 = (points6: bigint) => {
+			const raw = points6 <= 0n ? 1n : ceilDiv(points6 * unitPriceUSDC6, POINTS_ONE)
+			return roundUsdc6ToCents(raw)
+		}
 
 		// Backend auto-judges the flow by current ownership:
 		// - no membership NFT => first purchase (tier threshold applies only if tiers exist)
@@ -5507,6 +5513,9 @@ export const usdcTopupPreview = async (
 	| { success: true; preview: UsdcTopupPreview; amountCheck?: { ok: boolean; requiredMinUsdc6: string; providedUsdc6: string } }
 	| { success: false; error: string }
 > => {
+	const CENT_USDC6 = 10_000n
+	const ROUND_HALF_USDC6 = 5_000n // 0.005 USDC
+	const roundUsdc6ToCents = (val: bigint) => ((val + ROUND_HALF_USDC6) / CENT_USDC6) * CENT_USDC6
 	const rules = await resolveUsdcTopupRules(cardAddress, from, 'auto')
 	if (!rules.success) return rules
 	const ret: { success: true; preview: UsdcTopupPreview; amountCheck?: { ok: boolean; requiredMinUsdc6: string; providedUsdc6: string } } = {
@@ -5515,11 +5524,11 @@ export const usdcTopupPreview = async (
 	}
 	if (typeof usdcAmount === 'string' && usdcAmount.trim() !== '') {
 		try {
-			const provided = BigInt(usdcAmount)
-			const required = BigInt(rules.preview.requiredMinUsdc6)
+			const provided = roundUsdc6ToCents(BigInt(usdcAmount))
+			const required = roundUsdc6ToCents(BigInt(rules.preview.requiredMinUsdc6))
 			ret.amountCheck = {
 				ok: provided >= required,
-				requiredMinUsdc6: rules.preview.requiredMinUsdc6,
+				requiredMinUsdc6: required.toString(),
 				providedUsdc6: provided.toString(),
 			}
 		} catch {
@@ -5548,21 +5557,25 @@ export const usdcTopupPreCheck = async (
 	| { success: true; preChecked: PurchasingCardPreChecked; ruleCheck: UsdcTopupRuleCheck }
 	| { success: false; error: string }
 > => {
+	const CENT_USDC6 = 10_000n
+	const ROUND_HALF_USDC6 = 5_000n // 0.005 USDC
+	const roundUsdc6ToCents = (val: bigint) => ((val + ROUND_HALF_USDC6) / CENT_USDC6) * CENT_USDC6
 	try {
 		if (!ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 		if (!ethers.isAddress(from)) return { success: false, error: 'Invalid from address' }
-		const usdc6 = BigInt(usdcAmount)
+		const usdc6 = roundUsdc6ToCents(BigInt(usdcAmount))
 		if (usdc6 <= 0n) return { success: false, error: 'usdcAmount must be > 0' }
 		const rules = await resolveUsdcTopupRules(cardAddress, from, 'auto')
 		if (!rules.success) return rules
-		const requiredMinUsdc6 = BigInt(rules.preview.requiredMinUsdc6)
+		const requiredMinUsdc6 = roundUsdc6ToCents(BigInt(rules.preview.requiredMinUsdc6))
 
 		if (usdc6 < requiredMinUsdc6) {
 			const need = ethers.formatUnits(requiredMinUsdc6, 6)
 			return { success: false, error: `Amount too small for ${rules.preview.intent}. Minimum required is ${need} USDC.` }
 		}
 
-		const preCheck = await purchasingCardPreCheck(cardAddress, usdcAmount, from)
+		const normalizedUsdcAmount = usdc6.toString()
+		const preCheck = await purchasingCardPreCheck(cardAddress, normalizedUsdcAmount, from)
 		if (!preCheck.success) return preCheck
 
 		return {
@@ -5575,7 +5588,7 @@ export const usdcTopupPreCheck = async (
 				currentTierIndex: rules.preview.currentTierIndex,
 				minTierUsdc6: rules.preview.minTierUsdc6,
 				...(rules.preview.nextTierMinUsdc6 != null && { nextTierMinUsdc6: rules.preview.nextTierMinUsdc6 }),
-				requiredMinUsdc6: rules.preview.requiredMinUsdc6,
+				requiredMinUsdc6: requiredMinUsdc6.toString(),
 			},
 		}
 	} catch (e: any) {
