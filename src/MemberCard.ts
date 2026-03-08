@@ -3048,6 +3048,21 @@ export const purchasingCardProcess = async () => {
 		try {
 			const actionFacet = await SC.BeamioTaskDiamondAction
 			const feeData = await SC.walletConet.provider?.getFeeData().catch(() => null)
+			const toDebugJson = (val: unknown) => JSON.stringify(
+				val,
+				(_k, v) => typeof v === 'bigint' ? v.toString() : v,
+				2
+			)
+			const pickErrorDebug = (err: any) => ({
+				name: err?.name,
+				code: err?.code,
+				shortMessage: err?.shortMessage,
+				message: err?.message,
+				reason: err?.reason,
+				data: err?.data ?? err?.info?.error?.data,
+				error: err?.error?.message ?? err?.info?.error?.message,
+				stack: err?.stack,
+			})
 			const buildAccountingOverrides = (multiplier: bigint, fallbackGwei: string): Record<string, bigint | number> => {
 				const overrides: Record<string, bigint | number> = { gasLimit: 2_500_000 }
 				// 提高记账交易的 max fee，避免网络高峰时默认估算过低导致上链失败
@@ -3074,23 +3089,38 @@ export const purchasingCardProcess = async () => {
 
 			const accountingOverrides = buildAccountingOverrides(3n, '60')
 			logger(Colors.gray(`[purchasingCardProcess] syncTokenAction gas overrides: ${inspect(accountingOverrides, false, 3, true)}`))
+			logger(Colors.cyan(`[purchasingCardProcess][DEBUG] BeamioIndexerDiamond payload(JSON):\n${toDebugJson(input)}`))
 
 			let tx2: { hash: string; wait: () => Promise<unknown> }
 			try {
 				tx2 = await actionFacet.syncTokenAction(input, accountingOverrides)
+				logger(Colors.green(`[purchasingCardProcess][DEBUG] syncTokenAction submitted (1st) hash=${tx2.hash}`))
 			} catch (firstErr: any) {
 				const retryOverrides = buildAccountingOverrides(5n, '90')
 				logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction first try failed, retry once with higher gas: ${firstErr?.shortMessage ?? firstErr?.message ?? String(firstErr)}`))
+				logger(Colors.red(`[purchasingCardProcess][DEBUG] syncTokenAction first error: ${toDebugJson(pickErrorDebug(firstErr))}`))
 				logger(Colors.gray(`[purchasingCardProcess] syncTokenAction retry gas overrides: ${inspect(retryOverrides, false, 3, true)}`))
 				tx2 = await actionFacet.syncTokenAction(input, retryOverrides)
+				logger(Colors.green(`[purchasingCardProcess][DEBUG] syncTokenAction submitted (retry) hash=${tx2.hash}`))
 			}
 			await tx2.wait().catch((waitErr: any) => {
 				logger(Colors.yellow(`[purchasingCardProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+				logger(Colors.red(`[purchasingCardProcess][DEBUG] syncTokenAction.wait error: ${toDebugJson(pickErrorDebug(waitErr))}`))
 			})
 			logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} syncTokenAction=${tx2.hash}`))
 		} catch (accountingErr: any) {
 			// Diamond: fn not found 等：syncTokenAction 未在 Diamond 上配置时发生，购点已成功，仅记账失败
 			logger(Colors.yellow(`[purchasingCardProcess] accounting non-critical (purchase succeeded): ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
+			logger(Colors.red(`[purchasingCardProcess][DEBUG] accounting error detail: ${JSON.stringify({
+				name: accountingErr?.name,
+				code: accountingErr?.code,
+				shortMessage: accountingErr?.shortMessage,
+				message: accountingErr?.message,
+				reason: accountingErr?.reason,
+				data: accountingErr?.data ?? accountingErr?.info?.error?.data,
+				error: accountingErr?.error?.message ?? accountingErr?.info?.error?.message,
+				stack: accountingErr?.stack,
+			}, (_k, v) => typeof v === 'bigint' ? v.toString() : v, 2)}`))
 		}
 		syncNftTierMetadataForUser(cardAddress, from).catch(() => {})
 		
