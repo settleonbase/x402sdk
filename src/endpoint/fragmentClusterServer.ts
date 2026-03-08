@@ -123,7 +123,8 @@ class server {
 	private startServer = async () => {
 		const Cors = require('cors')
 		const app = Express()
-		app.use(Express.json({ limit: '50mb' }))
+		/** JSON body limit: image base64 ~4/3 of raw size; 50MB raw → ~67MB. Use 70mb to allow tier images. */
+		app.use(Express.json({ limit: '70mb' }))
 		app.use(Express.urlencoded({ extended: true }))
 		app.disable('x-powered-by')
 		app.use(Express.urlencoded({ extended: false }));
