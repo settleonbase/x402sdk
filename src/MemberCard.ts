@@ -2964,6 +2964,28 @@ const PURCHASING_CARD_ACCOUNTING_MAX_RETRY = 3
 export const purchasingCardAccountingRetryPool: PurchasingCardAccountingRetryJob[] = []
 let purchasingCardAccountingRetryRunning = false
 
+const extractTokenIdsFromOwnership = (items: unknown[]): bigint[] => {
+	const out: bigint[] = []
+	for (const item of items) {
+		try {
+			if (item && typeof item === 'object' && 'tokenId' in item) {
+				const v = (item as { tokenId?: unknown }).tokenId
+				if (typeof v === 'bigint') out.push(v)
+				else if (typeof v === 'number' && Number.isFinite(v)) out.push(BigInt(Math.floor(v)))
+				else if (typeof v === 'string' && v !== '') out.push(BigInt(v))
+				continue
+			}
+			if (Array.isArray(item) && item.length > 0) {
+				const v = item[0]
+				if (typeof v === 'bigint') out.push(v)
+				else if (typeof v === 'number' && Number.isFinite(v)) out.push(BigInt(Math.floor(v)))
+				else if (typeof v === 'string' && v !== '') out.push(BigInt(v))
+			}
+		} catch (_) {}
+	}
+	return out
+}
+
 const accountingToDebugJson = (val: unknown) => JSON.stringify(
 	val,
 	(_k, v) => typeof v === 'bigint' ? v.toString() : v,
@@ -3193,17 +3215,34 @@ export const purchasingCardProcess = async () => {
 
 		
 
-		const TX_CARDMINT = ethers.keccak256(ethers.toUtf8Bytes('cardmint:confirmed'))
 		const CHAIN_ID_BASE = 8453n
 		const payerAddr = ethers.getAddress(from)
 		const payeeAddr = ethers.getAddress(to)
 		const finalRequestAmountUSDC6 = BigInt(usdcAmount)
 		const finalRequestAmountFiat6 = ethers.parseUnits(payMe.currencyAmount || '0', 6)
 		const currencyFiat = Number(_currency)
+		const beforePoint6 = pointsBalance
+		const currentTopupPoint6 = currencyAmount.points6
+		const beforeTokenIds = extractTokenIdsFromOwnership(nfts ?? [])
+		const beforeTokenSet = new Set(beforeTokenIds.map((id) => id.toString()))
+		let upgradedByMint = false
+		try {
+			const cardRead = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
+			const [, nAfter] = await cardRead.getOwnership(accountAddress)
+			const afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
+			upgradedByMint = afterTokenIds.some((id) => !beforeTokenSet.has(id.toString()))
+		} catch (ownershipErr: any) {
+			logger(Colors.yellow(`[purchasingCardProcess] post-topup ownership check failed: ${ownershipErr?.shortMessage ?? ownershipErr?.message ?? String(ownershipErr)}`))
+		}
+		const topupCategoryRaw = (!isMember || beforeTokenIds.length === 0)
+			? 'iuuseNewCard'
+			: (upgradedByMint ? 'upgradeNewCard' : 'topupCard')
+		const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
 		const displayJson = JSON.stringify({
 			title: payMe.title || (isMember ? 'Top Up' : 'Card Mint'),
 			handle: '',
 			source: 'purchasingCard',
+			topupCategory: topupCategoryRaw,
 			cardAddress,
 			finishedHash: tx.hash,
 			currency: payMe.currency,
@@ -3214,7 +3253,7 @@ export const purchasingCardProcess = async () => {
 			txId: tx.hash as `0x${string}`,
 			originalPaymentHash: ethers.ZeroHash as `0x${string}`,
 			chainId: CHAIN_ID_BASE,
-			txCategory: TX_CARDMINT as `0x${string}`,
+			txCategory: txCategoryTopup,
 			displayJson,
 			timestamp: 0n,
 			payer: payerAddr,
@@ -3233,10 +3272,10 @@ export const purchasingCardProcess = async () => {
 				feePayer: ethers.ZeroAddress,
 			},
 			meta: {
-				requestAmountFiat6: finalRequestAmountFiat6,
+				requestAmountFiat6: currentTopupPoint6,
 				requestAmountUSDC6: finalRequestAmountUSDC6,
 				currencyFiat,
-				discountAmountFiat6: 0n,
+				discountAmountFiat6: beforePoint6,
 				discountRateBps: 0,
 				taxAmountFiat6: 0n,
 				taxRateBps: 0,
