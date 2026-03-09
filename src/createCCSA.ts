@@ -31,7 +31,7 @@ async function main() {
 
   const factoryAddr = await factory.getAddress()
   const factoryOwner = (await factory.owner()) as string
-  const baseRpc = (masterSetup as { base_endpoint?: string })?.base_endpoint || 'https://1rpc.io/base'
+  const baseRpc = (masterSetup as { base_endpoint?: string })?.base_endpoint || 'https://base-rpc.conet.network'
   console.log('Creating CCSA card...')
   console.log('  Base RPC (x402sdk):', baseRpc)
   console.log('  Factory:', factoryAddr)

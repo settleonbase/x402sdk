@@ -27,7 +27,7 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 	'function issuedNftPriceInCurrency6(uint256) view returns (uint256)',
 	'function owner() view returns (address)',
 ] as const
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
 
 /** 通用查询缓存：30 秒协议 */
 const QUERY_CACHE_TTL_MS = 30 * 1000
