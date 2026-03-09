@@ -23,6 +23,11 @@ export const BASE_CCSA_CARD_ADDRESS = '0x2032A363BB2cf331142391fC0DAd21D6504922C
 export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xa86a8406B06bD6c332b4b380A0EAced822218Eff'
 
 /**
+ * 购买卡时用于获取 metadata 的发行卡地址（卡名、tiers 等展示信息从此卡获取）。
+ */
+export const PURCHASING_CARD_METADATA_ADDRESS = '0xf99018dffdb0c5657c93ca14db2900cebe1168a7'
+
+/**
  * CoNET BUnit Airdrop 合约地址（用于 claimBUnits）。
  */
 export const CONET_BUNIT_AIRDROP_ADDRESS = '0xa7410a532544aB7d1bA70701D9D0E389e4f4Cc1F'

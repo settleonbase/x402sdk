@@ -28,7 +28,7 @@ const ACTION_SYNC_TOKEN_ABI = [
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY } from './chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, PURCHASING_CARD_METADATA_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
 import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getCardByAddress, upsertNftTierMetadata } from './db'
@@ -3339,7 +3339,7 @@ export const purchasingCardProcess = async () => {
 		const currency = getICurrency(BigInt(_currency))
 		let cardDisplayName = ''
 		try {
-			const cardMeta = await getCardByAddress(cardAddress)
+			const cardMeta = await getCardByAddress(PURCHASING_CARD_METADATA_ADDRESS)
 			const metadata = cardMeta?.metadata as { shareTokenMetadata?: { name?: string }; name?: string } | undefined
 			cardDisplayName = String(metadata?.shareTokenMetadata?.name ?? metadata?.name ?? '').trim()
 		} catch {}
