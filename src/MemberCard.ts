@@ -46,8 +46,8 @@ const BeamioTaskIndexerAddress = '0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612'
 /** BUnitAirdrop consumeFromUser kind：x402 BeamioTransfer 转账手续费，需预先 registerKind(5,"x402Send") */
 const BUNIT_KIND_X402_SEND = 5n
 const DIAMOND = BeamioTaskIndexerAddress
-/** Base 主网 RPC：Beamio 标准 base-rpc.conet.network，可被 ~/.master.json base_endpoint 覆盖 */
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
+/** Base 主网 RPC：https://1rpc.io/base，可被 ~/.master.json base_endpoint 覆盖 */
+const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
