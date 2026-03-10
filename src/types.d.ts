@@ -23,6 +23,7 @@ type IMasterSetup = {
 		key0Hex?: string
 		key2Hex: string
 		cardsDbPath?: string
+		debugSun?: boolean
 	}
 	storagePATH: string
 

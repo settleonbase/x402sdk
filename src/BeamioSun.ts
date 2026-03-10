@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv } from 'node:crypto'
 import type express from 'express'
 import { masterSetup } from './util'
 import { getBeamioSunLastCounterByUid, upsertBeamioSunLastCounterByUid } from './db'
+import { logger } from './logger'
 
 export interface BeamioSunCounterState {
 	uidHex: string
@@ -61,12 +62,55 @@ const getBeamioSunConfig = () => {
 		beamio_nfc?: {
 			key0Hex?: string
 			key2Hex?: string
+			debugSun?: boolean
 		}
 	}).beamio_nfc
 	if (!cfg?.key2Hex) {
 		throw new Error('masterSetup.beamio_nfc.key2Hex is required')
 	}
 	return cfg
+}
+
+const shouldDebugSun = (req?: express.Request): boolean => {
+	const cfg = getBeamioSunConfig()
+	const configEnabled = cfg.debugSun === true
+	const queryEnabled = req != null && (
+		req.query?.debug === '1' ||
+		req.query?.debug === 'true' ||
+		req.header('x-beamio-sun-debug') === '1'
+	)
+	return configEnabled || queryEnabled
+}
+
+const shortHex = (value: string | null | undefined, keep = 8): string | null => {
+	if (!value) return null
+	if (value.length <= keep * 2) return value
+	return `${value.slice(0, keep)}...${value.slice(-keep)}`
+}
+
+const logSunDebug = (
+	stage: 'verify_ok' | 'verify_fail',
+	req: express.Request,
+	data: Record<string, unknown>
+) => {
+	if (!shouldDebugSun(req)) return
+	const ip = String(req.headers['x-real-ip'] || req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '')
+	const parts = [
+		`stage=${stage}`,
+		`ip=${ip}`,
+		`method=${req.method}`,
+		`path=${req.path}`
+	]
+	for (const [key, value] of Object.entries(data)) {
+		if (value === undefined) continue
+		const normalized = value === null
+			? 'null'
+			: typeof value === 'string'
+				? value.replace(/\s+/g, ' ').trim()
+				: JSON.stringify(value)
+		parts.push(`${key}=${normalized}`)
+	}
+	logger('[beamio.sun]', parts.join(' | '))
 }
 
 const aesEcbEncrypt = (key: Buffer, block16: Buffer): Buffer => {
@@ -255,6 +299,24 @@ export const verifyBeamioSunRequest = async (req: express.Request, res: express.
 	try {
 		const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`
 		const result = await verifyBeamioSunUrl(url)
+		logSunDebug('verify_ok', req, {
+			uidHex: result.uidHex,
+			counterHex: result.counterHex,
+			lastCounterHex: result.counterState?.lastCounterHex ?? null,
+			tagIdHex: result.tagIdHex,
+			version: result.version,
+			macLayout: result.macLayout,
+			payloadLayout: result.payloadLayout,
+			macValid: result.macValid,
+			counterFresh: result.counterFresh,
+			embeddedUidMatchesInput: result.embeddedUidMatchesInput,
+			embeddedCounterMatchesInput: result.embeddedCounterMatchesInput,
+			valid: result.valid,
+			eHex: shortHex(result.eHex),
+			mHex: result.mHex,
+			expectedMacHex: result.expectedMacHex,
+			macInputAscii: result.macInputAscii
+		})
 		if (result.valid) {
 			await upsertBeamioSunLastCounterByUid({
 				uid: result.uidHex,
@@ -263,6 +325,13 @@ export const verifyBeamioSunRequest = async (req: express.Request, res: express.
 		}
 		return res.status(result.valid ? 200 : 403).json(result).end()
 	} catch (e: any) {
+		logSunDebug('verify_fail', req, {
+			error: e?.message ?? String(e),
+			uidHex: req.query?.uid ?? null,
+			cHex: req.query?.c ?? null,
+			eHex: shortHex(typeof req.query?.e === 'string' ? req.query.e : null),
+			mHex: typeof req.query?.m === 'string' ? req.query.m : null
+		})
 		return res.status(403).json({
 			success: false,
 			error: e?.message ?? String(e)
