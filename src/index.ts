@@ -1,5 +1,6 @@
 #!/usr/local/bin
 import { x402Server} from './server'
+export { verifyBeamioSunUrl, verifyBeamioSunRequest } from './BeamioSun'
 
 const yargs = require('yargs')
 

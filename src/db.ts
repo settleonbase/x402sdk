@@ -712,6 +712,14 @@ const NFC_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS nfc_cards (
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
+/** beamio_sun_counter_state 表：仅存 SUN 防重放状态，uid 对应最新成功通过验真的 counter。 */
+const BEAMIO_SUN_COUNTER_STATE_TABLE = `CREATE TABLE IF NOT EXISTS beamio_sun_counter_state (
+	id SERIAL PRIMARY KEY,
+	uid TEXT UNIQUE NOT NULL,
+	last_counter TEXT NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT NOW()
+)`
+
 /** ai_learning_feedback 表：AI 学习反馈，共享给所有 Beamio 用户。kind: approved=满意, corrected=纠正 */
 const AI_LEARNING_FEEDBACK_TABLE = `CREATE TABLE IF NOT EXISTS ai_learning_feedback (
 	id SERIAL PRIMARY KEY,
@@ -889,6 +897,54 @@ export const registerNfcCardToDb = async (params: { uid: string; privateKey: str
 		logger(Colors.green(`[registerNfcCardToDb] registered uid=${uid.slice(0, 16)}...`))
 	} catch (e: any) {
 		logger(Colors.yellow(`[registerNfcCardToDb] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export const getBeamioSunLastCounterByUid = async (uid: string): Promise<string | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_SUN_COUNTER_STATE_TABLE)
+		const normalizedUid = String(uid || '').trim().toLowerCase()
+		if (!normalizedUid) return null
+		const { rows } = await db.query<{ last_counter: string }>(
+			`SELECT last_counter FROM beamio_sun_counter_state WHERE LOWER(uid) = $1 LIMIT 1`,
+			[normalizedUid]
+		)
+		return rows[0]?.last_counter ? String(rows[0].last_counter).trim().toUpperCase() : null
+	} catch (e: any) {
+		logger(Colors.yellow(`[getBeamioSunLastCounterByUid] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export const upsertBeamioSunLastCounterByUid = async (params: {
+	uid: string
+	lastCounterHex: string
+}): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_SUN_COUNTER_STATE_TABLE)
+		const uid = String(params.uid || '').trim().toLowerCase()
+		const lastCounterHex = String(params.lastCounterHex || '').trim().toUpperCase()
+		if (!uid || !lastCounterHex) return
+		await db.query(
+			`
+			INSERT INTO beamio_sun_counter_state (uid, last_counter, updated_at)
+			VALUES ($1, $2, NOW())
+			ON CONFLICT (uid) DO UPDATE SET
+				last_counter = EXCLUDED.last_counter,
+				updated_at = NOW()
+			`,
+			[uid, lastCounterHex]
+		)
+	} catch (e: any) {
+		logger(Colors.yellow(`[upsertBeamioSunLastCounterByUid] failed: ${e?.message ?? e}`))
 	} finally {
 		await db.end().catch(() => {})
 	}

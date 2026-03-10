@@ -27,6 +27,7 @@ import {
 import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x402/shared";
 import {coinbaseToken, coinbaseOfframp} from './coinbase'
 import { searchUsers, addUser} from './db'
+import { verifyBeamioSunRequest } from './BeamioSun'
 
 
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
@@ -945,6 +946,10 @@ const router = ( router: express.Router ) => {
 
 	router.get('/BeamioPayME', async (req,res) => {
 		return BeamioPayMeRouteToSC(req, res)
+	})
+
+	router.get('/sun', (req, res) => {
+		return verifyBeamioSunRequest(req, res)
 	})
 
 	// router.get('/estimateNativeBaseTransferGas', async (req,res) => {

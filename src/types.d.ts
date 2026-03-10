@@ -19,6 +19,11 @@ type IMasterSetup = {
 		"CDP_API_KEY_SECRET":string
 		secret: string
 	}
+	beamio_nfc?: {
+		key0Hex?: string
+		key2Hex: string
+		cardsDbPath?: string
+	}
 	storagePATH: string
 
 }
