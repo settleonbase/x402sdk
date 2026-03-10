@@ -14,6 +14,7 @@ import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, get
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { verifyBeamioSunRequest } from '../BeamioSun'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -312,6 +313,11 @@ const routing = ( router: Router ) => {
 	router.use((req, _res, next) => {
 		logInboundDebug(req)
 		next()
+	})
+
+	/** GET /api/sun - 校验 Beamio SUN 动态 URL（读操作，Cluster 直接处理） */
+	router.get('/sun', (req, res) => {
+		return verifyBeamioSunRequest(req, res)
 	})
 
 	/** GET /api/manifest.json - 动态 manifest，cluster 独自处理，无需 master。支持 ?start_url= 或从 Referer 获取 */
