@@ -78,13 +78,23 @@ wget -qO- --header "Content-Type: application/json" \
 exit
 ```
 
-### 2. 检查 JWT 是否一致
+### 2. 检查 JWT 是否一致且格式正确
+
+**重要：jwt.hex 不得含尾随换行符（0x0a）**，否则 reth 报 `Invalid JWT: JWT decoding error: InvalidToken`。
 
 ```bash
-# 宿主机
-md5sum /home/peter/base/jwt/jwt.hex
-# op-node 和 op-reth 挂载的是同一目录，应相同
+# 宿主机：检查字节数（应为 64，若为 65 通常含换行）
+wc -c /home/peter/base/jwt/jwt.hex
+
+# 修复：去除换行后重写
+JWT_HEX=$(cat /home/peter/base/jwt/jwt.hex | tr -d '\n\r ')
+printf '%s' "$JWT_HEX" > /home/peter/base/jwt/jwt.hex
+
+# 或使用项目脚本
+./service/fix-jwt-auth.sh
 ```
+
+op-node 和 op-reth 挂载同一目录，JWT 应相同。
 
 ### 3. 尝试改用 WebSocket（与 Base 官方一致）
 

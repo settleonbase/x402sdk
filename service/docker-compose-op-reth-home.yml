@@ -61,15 +61,15 @@ services:
     mem_reservation: 16g
     healthcheck:
       test: ["CMD-SHELL", "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/8551' || exit 1"]
-      interval: 30s
+      interval: 15s
       timeout: 10s
-      retries: 60
-      start_period: 7200s
+      retries: 120
+      start_period: 600s
 
   op-node:
     image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.16.6
     container_name: base-op-node
-    restart: unless-stopped
+    restart: on-failure
     depends_on:
       op-reth:
         condition: service_healthy
@@ -87,7 +87,7 @@ services:
       - "--l1.max-concurrency=100"
       - "--l1.cache-size=2500"
       - "--l1.http-poll-interval=2s"
-      - "--l2.engine-rpc-timeout=20s"
+      - "--l2.engine-rpc-timeout=60s"
       - "--rpc.addr=0.0.0.0"
       - "--rpc.port=8549"
       - "--p2p.priv.path=/data/opnode_p2p_priv.txt"
