@@ -28,7 +28,7 @@ const ACTION_SYNC_TOKEN_ABI = [
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, PURCHASING_CARD_METADATA_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY } from './chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
 import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getCardByAddress, upsertNftTierMetadata } from './db'
@@ -3308,6 +3308,16 @@ export const purchasingCardProcess = async () => {
 			logger(Colors.green(`✅ purchasingCardProcess cardAddress = ${cardAddress} ${obj.from} AA Account: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
 		}
 
+		// Card must be in DB before topup; reject if not registered (createCard may not have completed)
+		const cardMeta = await getCardByAddress(cardAddress)
+		if (!cardMeta) {
+			logger(Colors.red(`❌ purchasingCardProcess card not in DB, rejecting topup: ${cardAddress}`))
+			if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: 'Card not found in registry. Please ensure the card was created successfully before purchasing.' }).end()
+			Settle_ContractPool.unshift(SC)
+			setTimeout(() => purchasingCardProcess(), 3000)
+			return
+		}
+
 		// 新合约设计：购点通过 Card Factory.buyPointsForUser，不再直接调用 card.buyPointsWith3009Authorization
 		// 显式使用 BASE_CARD_FACTORY，避免错误配置导致调用到卡地址（卡无 buyPointsForUser 会 revert）
 		const cardFactory = new ethers.Contract(BASE_CARD_FACTORY, BeamioFactoryPaymasterABI, SC.walletBase)
@@ -3337,12 +3347,9 @@ export const purchasingCardProcess = async () => {
 
 		const to = owner
 		const currency = getICurrency(BigInt(_currency))
-		let cardDisplayName = ''
-		try {
-			const cardMeta = await getCardByAddress(PURCHASING_CARD_METADATA_ADDRESS)
-			const metadata = cardMeta?.metadata as { shareTokenMetadata?: { name?: string }; name?: string } | undefined
-			cardDisplayName = String(metadata?.shareTokenMetadata?.name ?? metadata?.name ?? '').trim()
-		} catch {}
+		// cardMeta already validated before buyPointsForUser
+		const metadata = cardMeta.metadata as { shareTokenMetadata?: { name?: string }; name?: string } | undefined
+		const cardDisplayName = String(metadata?.shareTokenMetadata?.name ?? metadata?.name ?? '').trim()
 		const payMe = cardNote(cardAddress, currencyAmount.usdc, currency, tx.hash, currencyAmount.points, isMember, cardDisplayName)
 
 		logger(Colors.green(`✅ purchasingCardProcess payMe cardAddress = ${cardAddress} payMe = ${inspect(payMe, false, 3, true)}`));
