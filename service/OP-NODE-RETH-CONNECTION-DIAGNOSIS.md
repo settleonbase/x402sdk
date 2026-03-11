@@ -50,7 +50,15 @@ OP_NODE_RPC=http://服务器IP:8549 RETH_RPC=http://服务器IP:8547 ./check-op-
 - 若快照对应的 L2 高度较高（如 ~42M），对应 L1 区块可能距离当前头较远
 - 每步都要拉取 L1 数据并验证，回溯大量区块会非常耗时
 
-### 3. 其他可能原因
+### 3. 重建容器导致全链回溯
+
+**op-node 不持久化派生状态**。每次启动时，op-node 必须从 reth 的 Engine API 获取 L2 链头（unsafe/safe/finalized），再沿 L1 回溯建立派生流水线。
+
+若 op-node 启动时无法从 reth 获取 L2 链头（connection refused、reth 尚未就绪），会重试或回退，导致**重新回溯整条链**。
+
+**正确做法**：优先使用 `docker compose restart op-node`，**避免** `docker rm` + `docker compose up` 重建容器。
+
+### 4. 其他可能原因
 
 - **网络**：op-node 无法访问 `op-reth:8551`
 - **JWT**：JWT 不匹配导致 Engine API 请求被拒绝（但此时 reth 通常仍会“看到”请求，只是返回错误）

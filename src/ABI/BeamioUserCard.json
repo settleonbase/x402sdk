@@ -171,11 +171,6 @@
   },
   {
     "inputs": [],
-    "name": "UC_AlreadyHasValidCard",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "UC_AmountZero",
     "type": "error"
   },
@@ -192,11 +187,6 @@
   {
     "inputs": [],
     "name": "UC_InvalidProposal",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_MustGrow",
     "type": "error"
   },
   {
@@ -259,6 +249,11 @@
   {
     "inputs": [],
     "name": "UC_SBTNonTransferable",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "UC_StatsModuleZero",
     "type": "error"
   },
   {
@@ -1071,6 +1066,44 @@
       }
     ],
     "name": "_userOwnedNfts",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "activeMembershipCountByTierIndex",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "activeMembershipCountByTokenId",
     "outputs": [
       {
         "internalType": "uint256",
@@ -2169,6 +2202,127 @@
   {
     "inputs": [
       {
+        "internalType": "uint64",
+        "name": "hourIndex",
+        "type": "uint64"
+      }
+    ],
+    "name": "membershipFlowBucketAtHour",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "issuedCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "upgradedCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "expiredDiscoveredCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "activeSwitchCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "activatedCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "deactivatedCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bool",
+        "name": "hasData",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "scopeType",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "scopeKey",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "hourIndex",
+        "type": "uint64"
+      }
+    ],
+    "name": "membershipScopedFlowBucketAtHour",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "issuedCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "upgradedCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "expiredDiscoveredCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "activeSwitchCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "activatedCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "deactivatedCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bool",
+        "name": "hasData",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "metadataBaseURI",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "userEOA",
         "type": "address"
@@ -2434,6 +2588,24 @@
       }
     ],
     "name": "redeemPoolByGateway",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "adminToRemove",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "newThreshold",
+        "type": "uint256"
+      }
+    ],
+    "name": "removeAdmin",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -2770,6 +2942,64 @@
       }
     ],
     "name": "tokenTierIndexOrMax",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "totalActiveMemberships",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "totalMembershipIssued",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "totalMembershipIssuedByTierIndex",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "totalMembershipUpgraded",
     "outputs": [
       {
         "internalType": "uint256",

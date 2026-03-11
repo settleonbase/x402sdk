@@ -246,6 +246,83 @@ const mintMetadataCache = new Map<string, { body: string; expiry: number }>()
 const getFollowStatusCache = new Map<string, { body: string; expiry: number }>()
 const getMyFollowStatusCache = new Map<string, { body: string; expiry: number }>()
 
+type JsonObject = Record<string, unknown>
+
+const ERC1155_METADATA_PATH_RE = /^(?:0x)?([0-9a-fA-F]{40})([0-9a-fA-F]{64})\.json$/
+const DEFAULT_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x44e7a175e57a337bf5d0a98deb19a0a545e362d504092a7af1aecd58798eab'
+
+const isJsonObject = (value: unknown): value is JsonObject =>
+	typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const firstNonEmptyString = (...values: unknown[]): string | undefined => {
+	for (const value of values) {
+		if (typeof value !== 'string') continue
+		const trimmed = value.trim()
+		if (trimmed) return trimmed
+	}
+	return undefined
+}
+
+const mergeMetadataObjects = (...sources: Array<unknown>): JsonObject => {
+	const out: JsonObject = {}
+	for (const source of sources) {
+		if (!isJsonObject(source)) continue
+		Object.assign(out, source)
+	}
+	return out
+}
+
+const ensureMetadataImage = (meta: JsonObject): JsonObject => {
+	const props = isJsonObject(meta.properties) ? meta.properties : {}
+	const image = firstNonEmptyString(
+		meta.image,
+		meta.image_url,
+		meta.imageUrl,
+		props.image,
+		DEFAULT_METADATA_IMAGE_URL
+	)
+	if (image) meta.image = image
+	return meta
+}
+
+const normalizeExplorerMetadata = (
+	meta: JsonObject,
+	defaults: {
+		name: string
+		description: string
+		image?: string
+		externalUrl?: string
+		attributes?: unknown[]
+		extra?: JsonObject
+	}
+): JsonObject => {
+	const props = isJsonObject(meta.properties) ? meta.properties : {}
+	const out: JsonObject = {
+		name: firstNonEmptyString(meta.name, meta.title, defaults.name) ?? defaults.name,
+		description: firstNonEmptyString(meta.description, defaults.description) ?? defaults.description,
+	}
+	const image = firstNonEmptyString(
+		meta.image,
+		meta.image_url,
+		meta.imageUrl,
+		props.image,
+		defaults.image
+	)
+	if (image) out.image = image
+	const externalUrl = firstNonEmptyString(meta.external_url, meta.externalUrl, defaults.externalUrl)
+	if (externalUrl) out.external_url = externalUrl
+	const attrs = Array.isArray(meta.attributes) ? meta.attributes : defaults.attributes
+	if (attrs && attrs.length > 0) out.attributes = attrs
+	const backgroundColor = firstNonEmptyString(meta.background_color, props.background_color)
+	if (backgroundColor) out.background_color = backgroundColor
+	if (Object.keys(props).length > 0) out.properties = props
+	if (defaults.extra) Object.assign(out, defaults.extra)
+	for (const [key, value] of Object.entries(meta)) {
+		if (out[key] === undefined) out[key] = value
+	}
+	return out
+}
+
 const SC = beamio_ContractPool[0].constAccountRegistry
 
 const userOwnershipCheck = async (accountName: string, wallet: string) => {
@@ -1058,6 +1135,114 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	/** GET /api/metadata/0x{contract}{64hexTokenId}.json - BaseScan/ERC-1155 兼容元数据路由 */
+	router.get('/metadata/:resource', async (req, res) => {
+		const resource = typeof req.params.resource === 'string' ? req.params.resource : ''
+		const match = ERC1155_METADATA_PATH_RE.exec(resource)
+		if (!match) {
+			return res.status(404).json({ error: 'Invalid metadata path' })
+		}
+
+		const cardAddress = ethers.getAddress(`0x${match[1]}`)
+		const tokenIdHex = match[2].toLowerCase()
+		const tokenIdBigInt = BigInt(`0x${tokenIdHex}`)
+		const tokenId = tokenIdBigInt.toString()
+
+		try {
+			const cardRow = await getCardByAddress(cardAddress)
+			const cardMeta = isJsonObject(cardRow?.metadata) ? cardRow.metadata : {}
+			const cardProps = isJsonObject(cardMeta.properties) ? cardMeta.properties : {}
+			const cardName = firstNonEmptyString(cardMeta.name, cardMeta.title, 'Beamio User Card') ?? 'Beamio User Card'
+			const defaultImage = firstNonEmptyString(cardMeta.image, cardMeta.image_url, cardMeta.imageUrl, cardProps.image, DEFAULT_METADATA_IMAGE_URL)
+
+			let tokenMeta: JsonObject = {}
+			let sharedSeriesMetadata: JsonObject | null = null
+			let sharedMetadataHash: string | null = null
+			let ipfsCid: string | null = null
+
+			if (tokenIdBigInt >= ISSUED_NFT_START_ID) {
+				const series = await getSeriesByCardAndTokenId(cardAddress, tokenId)
+				sharedMetadataHash = series?.sharedMetadataHash ?? null
+				ipfsCid = series?.ipfsCid ?? null
+				if (series?.ipfsCid) {
+					try {
+						const ipfsRes = await fetch(`https://ipfs.io/ipfs/${series.ipfsCid}`)
+						if (ipfsRes.ok) {
+							const ipfsJson = await ipfsRes.json()
+							if (isJsonObject(ipfsJson)) sharedSeriesMetadata = ipfsJson
+						}
+					} catch (ipfsErr: any) {
+						logger(Colors.yellow('[metadata route] IPFS fetch failed:'), ipfsErr?.message ?? ipfsErr)
+					}
+				}
+				tokenMeta = mergeMetadataObjects(series?.metadata, sharedSeriesMetadata)
+			} else if (tokenIdBigInt > 0n) {
+				const tierMetaByOwner = cardRow?.cardOwner
+					? await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, tokenIdBigInt)
+					: null
+				const tierMetaByCard = await getNftTierMetadataByCardAndToken(cardAddress, tokenIdBigInt)
+				tokenMeta = mergeMetadataObjects(tierMetaByOwner, tierMetaByCard)
+			} else {
+				tokenMeta = mergeMetadataObjects(
+					cardMeta.pointsMetadata,
+					cardProps.pointsMetadata
+				)
+			}
+
+			const merged = ensureMetadataImage(mergeMetadataObjects(cardMeta, tokenMeta))
+			const baseExtra: JsonObject = {
+				card_address: cardAddress,
+				token_id: tokenId,
+			}
+
+			let out: JsonObject
+			if (tokenIdBigInt === 0n) {
+				out = normalizeExplorerMetadata(merged, {
+					name: `${cardName} Points`,
+					description: `${cardName} ERC-1155 points balance token on Beamio.`,
+					image: defaultImage,
+					attributes: [
+						{ trait_type: 'asset_type', value: 'POINTS' },
+						{ trait_type: 'token_id', value: tokenId },
+					],
+					extra: baseExtra,
+				})
+			} else if (tokenIdBigInt < ISSUED_NFT_START_ID) {
+				out = normalizeExplorerMetadata(merged, {
+					name: `${cardName} Membership #${tokenId}`,
+					description: `${cardName} membership NFT #${tokenId}.`,
+					image: defaultImage,
+					attributes: [
+						{ trait_type: 'asset_type', value: 'MEMBERSHIP' },
+						{ trait_type: 'token_id', value: tokenId },
+					],
+					extra: baseExtra,
+				})
+			} else {
+				out = normalizeExplorerMetadata(merged, {
+					name: `${cardName} Issued NFT #${tokenId}`,
+					description: `${cardName} issued NFT #${tokenId}.`,
+					image: defaultImage,
+					attributes: [
+						{ trait_type: 'asset_type', value: 'ISSUED_NFT' },
+						{ trait_type: 'token_id', value: tokenId },
+					],
+					extra: baseExtra,
+				})
+				if (sharedSeriesMetadata) out.sharedSeriesMetadata = sharedSeriesMetadata
+				if (sharedMetadataHash) out.sharedMetadataHash = sharedMetadataHash
+				if (ipfsCid) out.ipfsCid = ipfsCid
+			}
+
+			res.setHeader('Content-Type', 'application/json')
+			res.setHeader('Cache-Control', 'public, max-age=300')
+			return res.status(200).json(out)
+		} catch (err: any) {
+			logger(Colors.red('[metadata route] error:'), err?.message ?? err)
+			return res.status(500).json({ error: err?.message ?? 'Failed to fetch metadata' })
+		}
+	})
+
 	/** POST /api/ai/learningFeedback - 保存 AI 学习反馈（满意/纠正），共享给所有用户。correctedAction：Beamio 提供的期望 UI/action */
 	router.post('/ai/learningFeedback', async (req, res) => {
 		logger(Colors.cyan('[ai/learningFeedback] DEBUG body:'), JSON.stringify(req.body, null, 2))
@@ -1395,6 +1580,16 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					logger(Colors.yellow('[getNFTMetadata] IPFS fetch failed:'), ipfsErr?.message ?? ipfsErr)
 			}
 		}
+		const image = firstNonEmptyString(
+			(out.assembled as JsonObject | undefined)?.image,
+			(out.assembled as JsonObject | undefined)?.image_url,
+			(out.assembled as JsonObject | undefined)?.imageUrl,
+			(out.sharedSeriesMetadata as JsonObject | undefined)?.image,
+			(out.sharedSeriesMetadata as JsonObject | undefined)?.image_url,
+			(out.sharedSeriesMetadata as JsonObject | undefined)?.imageUrl,
+			DEFAULT_METADATA_IMAGE_URL
+		)
+		if (image) out.image = image
 		const body = JSON.stringify(out)
 		getNFTMetadataCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 		res.status(200).json(out)
