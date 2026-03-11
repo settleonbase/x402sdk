@@ -1,11 +1,8 @@
 import { ethers } from 'ethers'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
-import { BeamioUserCard__factory } from '../../../types/ethers-contracts/factories/BeamioUserCard/BeamioUserCard.sol/BeamioUserCard__factory'
+import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
 import { BASE_CARD_FACTORY } from './chainAddresses'
-
-const BeamioUserCardABI = BeamioUserCard__factory.abi
-const BeamioUserCardBytecode = BeamioUserCard__factory.bytecode
 
 type ICurrency = 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD'
 
@@ -218,8 +215,9 @@ async function buildBeamioUserCardInitCodeFromParams(
   initialOwner: string,
   gateway: string
 ): Promise<string> {
-  if (!BeamioUserCardBytecode) throw new Error('BeamioUserCard bytecode missing')
-  const factory = new ethers.ContractFactory(BeamioUserCardABI, BeamioUserCardBytecode)
+  const artifact = BeamioUserCardArtifact as { abi: ethers.InterfaceAbi; bytecode: string }
+  if (!artifact?.bytecode) throw new Error('BeamioUserCard artifact missing bytecode')
+  const factory = new ethers.ContractFactory(artifact.abi, artifact.bytecode)
   const deployTx = await factory.getDeployTransaction(
     uri,
     currencyEnum,
