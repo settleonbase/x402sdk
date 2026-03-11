@@ -1059,9 +1059,9 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）。30 秒缓存 */
+	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）。30 秒缓存。limit 上限 300 以覆盖持有者视角的更多卡 */
 	router.get('/latestCards', async (req, res) => {
-		const limit = Math.min(parseInt(String(req.query.limit || 20), 10) || 20, 100)
+		const limit = Math.min(parseInt(String(req.query.limit || 20), 10) || 20, 300)
 		const cacheKey = `limit:${limit}`
 		const cached = latestCardsCache.get(cacheKey)
 		if (cached && Date.now() < cached.expiry) {
