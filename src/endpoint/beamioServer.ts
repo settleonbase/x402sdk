@@ -22,6 +22,17 @@ const DEPRECATED_INFRA_CARDS = new Set([
 	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
 ])
 
+/** 与 SilentPassUI / Alliance 的 USER_CARD_DISPLAY_EXCLUDED 对齐：latestCards 不返回的卡地址 */
+const LATEST_CARDS_EXCLUDED = new Set([
+	'0xf99018dffdb0c5657c93ca14db2900cebe1168a7',
+	'0xa86a8406b06bd6c332b4b380a0eaced822218eff',
+	'0xc0f1c74fb95100a97b532be53b266a54f41db615',
+	'0xecc5bdff6716847e45363befd3506b1d539c02d5',
+	'0x90ae2212ee70aca8671ab7f5238c828d13c6dea7',
+	'0x4879171d6c4693eaedcd8f448a785a31b2146e64',
+	'0x82b333da5c723da6e98fefecd96cb1ca304c6125',
+])
+
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
 const OLD_CCSA_REDIRECTS = [
 	'0x3A578f47d68a5f2C1f2930E9548E240AB8d40048',
@@ -1059,7 +1070,7 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）。30 秒缓存。limit 上限 300 以覆盖持有者视角的更多卡 */
+	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）。30 秒缓存。limit 上限 300 以覆盖持有者视角的更多卡。与 SilentPassUI 的 USER_CARD_DISPLAY_EXCLUDED 对齐，不返回被 filter 的卡 */
 	router.get('/latestCards', async (req, res) => {
 		const limit = Math.min(parseInt(String(req.query.limit || 20), 10) || 20, 300)
 		const cacheKey = `limit:${limit}`
@@ -1067,7 +1078,8 @@ const routing = ( router: Router ) => {
 		if (cached && Date.now() < cached.expiry) {
 			return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
-		const items = await getLatestCards(limit)
+		const rawItems = await getLatestCards(limit)
+		const items = rawItems.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase()))
 		const body = JSON.stringify({ items })
 		latestCardsCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 		res.status(200).json({ items })
