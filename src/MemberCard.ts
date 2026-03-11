@@ -1017,7 +1017,7 @@ export const executeForAdminProcess = async () => {
 			}
 		}
 		// Android admin topup 也按 purchasingCard 规则记账：
-		// iuuseNewCard / upgradeNewCard / topupCard
+		// newCard / upgradeNewCard / topupCard
 		if (recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) {
 			try {
 				await ensureBaseReceipt()
@@ -1031,12 +1031,16 @@ export const executeForAdminProcess = async () => {
 				const beforeTokenSet = new Set(beforeTokenIds.map((id) => id.toString()))
 				const afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
 				const upgradedByMint = afterTokenIds.some((id) => !beforeTokenSet.has(id.toString()))
+				// TopUp RouteItem: tokenId = newly minted (upgrade/first) or existing held (normal topup); source=UserCardPoint
+				const tokenIdForRoute = upgradedByMint
+					? (afterTokenIds.find((id) => !beforeTokenSet.has(id.toString())) ?? afterTokenIds[0] ?? 0n)
+					: (afterTokenIds[0] ?? 0n)
 				// Classification rule:
 				// - minted a new tier token this time + had previous balance => upgrade
 				// - minted a new tier token this time + no previous balance => first purchase
 				// - no new tier token minted => normal topup
 				const topupCategoryRaw = upgradedByMint
-					? (beforePoint6 > 0n ? 'upgradeNewCard' : 'iuuseNewCard')
+					? (beforePoint6 > 0n ? 'upgradeNewCard' : 'newCard')
 					: 'topupCard'
 				const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
 				let finalRequestAmountUSDC6 = 0n
@@ -1054,7 +1058,7 @@ export const executeForAdminProcess = async () => {
 					cardDisplayName = String(metadata?.shareTokenMetadata?.name ?? metadata?.name ?? '').trim()
 				} catch {}
 				const baseName = (cardDisplayName || 'Membership').replace(/\s*card\s*$/i, '').trim() || 'Membership'
-				const title = topupCategoryRaw === 'iuuseNewCard'
+				const title = topupCategoryRaw === 'newCard'
 					? `Buy ${baseName} Card`
 					: (topupCategoryRaw === 'upgradeNewCard' ? `Upgrade ${baseName} Card` : `Top Up ${baseName} Card`)
 				const payerAddr = ethers.getAddress(recipientEOA)
@@ -1070,6 +1074,16 @@ export const executeForAdminProcess = async () => {
 					cardAddress: obj.cardAddr,
 					finishedHash: tx.hash,
 				})
+				// TopUp RouteItem per accounting spec: asset=card, assetType=ERC1155, source=UserCardPoint, tokenId=NFT card#, itemCurrencyType=currency, amountE6=topup amount
+				const topupRouteItem = {
+					asset: obj.cardAddr,
+					amountE6: mintParsed.points6,
+					assetType: 1, // ERC1155
+					source: 1, // RouteSource.UserCardPoint
+					tokenId: tokenIdForRoute,
+					itemCurrencyType: cardCurrencyFiat,
+					offsetInRequestCurrencyE6: 0n,
+				}
 				const input = {
 					txId: tx.hash as `0x${string}`,
 					originalPaymentHash: ethers.ZeroHash as `0x${string}`,
@@ -1082,7 +1096,7 @@ export const executeForAdminProcess = async () => {
 					finalRequestAmountFiat6: mintParsed.points6,
 					finalRequestAmountUSDC6,
 					isAAAccount: false,
-					route: [],
+					route: [topupRouteItem],
 					fees: {
 						gasChainType: 0,
 						gasWei: 0n,
@@ -1352,12 +1366,13 @@ export const cardRedeemPool: {
 	res: Response
 }[] = []
 
-/** cardRedeem 成功后写入 BeamioIndexerDiamond（txCategory=cardmint:confirmed，新卡发行与 Top Up 共用） */
+/** cardRedeem 成功后写入 BeamioIndexerDiamond（txCategory=redeemNewCard/redeemUpgradeNewCard/redeemTopupCard） */
 export const cardRedeemIndexerAccountingPool: {
 	cardAddress: string
 	toUserEOA: string
 	aaAddress: string
 	txHash: string
+	beforeNfts?: unknown[]
 }[] = []
 
 /** 通用 executeForOwner：客户端提交 owner 签名的 calldata，服务端免 gas 执行。可选 redeemCode+toUserEOA 时额外执行 redeemForUser（空投）。可选 description/image/background_color 用于 createIssuedNft 后组装 EIP-1155 metadata。 */
@@ -2357,7 +2372,7 @@ export const purchaseBUnitFromBaseProcess = async () => {
 
 const TRANSFER_SINGLE_TOPIC = ethers.id('TransferSingle(address,address,address,uint256,uint256)')
 
-/** cardRedeem 成功后写入 BeamioIndexerDiamond，txCategory=cardmint:confirmed（新卡发行与 Top Up 共用） */
+/** cardRedeem 成功后写入 BeamioIndexerDiamond，txCategory=redeemNewCard/redeemUpgradeNewCard/redeemTopupCard */
 export const cardRedeemIndexerAccountingProcess = async () => {
 	const obj = cardRedeemIndexerAccountingPool.shift()
 	if (!obj) return
@@ -2410,44 +2425,46 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 			finalRequestAmountUSDC6 = currencyFiatNum === 4 ? finalRequestAmountFiat6 : 0n
 		}
 		if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
-		const TX_CARDMINT = ethers.keccak256(ethers.toUtf8Bytes('cardmint:confirmed'))
+		// redeem txCategory: redeemNewCard / redeemUpgradeNewCard / redeemTopupCard
+		const hasNewTierInTransfer = transferToAa.some((t) => t.tokenId > 0n)
+		const beforeTokenIds = extractTokenIdsFromOwnership(obj.beforeNfts ?? [])
+		const redeemCategoryRaw = hasNewTierInTransfer
+			? (beforeTokenIds.length > 0 ? 'redeemUpgradeNewCard' : 'redeemNewCard')
+			: 'redeemTopupCard'
+		const TX_REDEEM = ethers.keccak256(ethers.toUtf8Bytes(redeemCategoryRaw))
 		const CHAIN_ID_BASE = 8453n
 		const displayJson = JSON.stringify({
-			title: 'Card Mint',
+			title: redeemCategoryRaw === 'redeemNewCard' ? 'Redeem New Card' : (redeemCategoryRaw === 'redeemUpgradeNewCard' ? 'Redeem Upgrade Card' : 'Redeem Top Up'),
 			handle: `Redeem to ${obj.aaAddress.slice(0, 10)}…`,
 			finishedHash: txHash,
 			source: 'cardRedeem',
+			topupCategory: redeemCategoryRaw,
 		})
-		const routeItems: { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[] = []
-		// Token #0：points 转账
-		routeItems.push({
+		// TopUp RouteItem per spec: asset=card, assetType=ERC1155, source=UserCardPoint, tokenId=NFT card#, itemCurrencyType=currency, amountE6=topup amount, offsetInRequestCurrencyE6=0
+		// tokenId: newly minted tier from transferToAa, or existing tier from getOwnership when points-only redeem
+		let tokenIdForRoute = transferToAa.find((t) => t.tokenId > 0n)?.tokenId ?? 0n
+		if (tokenIdForRoute === 0n) {
+			try {
+				const [, nfts] = await cardContract.getOwnership(obj.aaAddress) as [bigint, Array<{ tokenId: bigint }>]
+				const tierIds = extractTokenIdsFromOwnership(Array.isArray(nfts) ? nfts : [])
+				tokenIdForRoute = tierIds[0] ?? 0n
+			} catch (_) { /* keep 0n */ }
+		}
+		const topupRouteItem = {
 			asset: ethers.getAddress(obj.cardAddress),
 			amountE6,
-			assetType: 1,
-			source: 1,
-			tokenId: 0n,
+			assetType: 1, // ERC1155
+			source: 1, // RouteSource.UserCardPoint
+			tokenId: tokenIdForRoute,
 			itemCurrencyType: currencyFiatNum,
-			offsetInRequestCurrencyE6: finalRequestAmountFiat6,
-		})
-		// Token #n (n>0)：新发卡 mint 的 NFT
-		for (const t of transferToAa) {
-			if (t.tokenId > 0n && t.value > 0n) {
-				routeItems.push({
-					asset: ethers.getAddress(obj.cardAddress),
-					amountE6: t.value,
-					assetType: 1,
-					source: 2,
-					tokenId: t.tokenId,
-					itemCurrencyType: currencyFiatNum,
-					offsetInRequestCurrencyE6: 0n,
-				})
-			}
+			offsetInRequestCurrencyE6: 0n,
 		}
+		const routeItems = [topupRouteItem]
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
 			originalPaymentHash: ethers.ZeroHash as `0x${string}`,
 			chainId: CHAIN_ID_BASE,
-			txCategory: TX_CARDMINT,
+			txCategory: TX_REDEEM,
 			displayJson,
 			timestamp: 0n,
 			payer: payerAddr,
@@ -3373,21 +3390,27 @@ export const purchasingCardProcess = async () => {
 		const beforeTokenIds = extractTokenIdsFromOwnership(nfts ?? [])
 		const beforeTokenSet = new Set(beforeTokenIds.map((id) => id.toString()))
 		let upgradedByMint = false
+		let afterTokenIds: bigint[] = []
 		try {
 			const cardRead = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
 			const [, nAfter] = await cardRead.getOwnership(accountAddress)
-			const afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
+			afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
 			upgradedByMint = afterTokenIds.some((id) => !beforeTokenSet.has(id.toString()))
 		} catch (ownershipErr: any) {
 			logger(Colors.yellow(`[purchasingCardProcess] post-topup ownership check failed: ${ownershipErr?.shortMessage ?? ownershipErr?.message ?? String(ownershipErr)}`))
 		}
-		// Classification rule:
-		// - minted a new tier token this time + had previous balance => upgrade
-		// - minted a new tier token this time + no previous balance => first purchase
-		// - no new tier token minted => normal topup
+		// TopUp RouteItem: use UserCardPoint (txCategory: usdcNewCard/usdcUpgradeNewCard/usdcTopupCard)
+		const ROUTE_SOURCE_USER_CARD_POINT = 1
+		const tokenIdForRoute = upgradedByMint
+			? (afterTokenIds.find((id) => !beforeTokenSet.has(id.toString())) ?? afterTokenIds[0] ?? 0n)
+			: (afterTokenIds[0] ?? 0n)
+		// Classification rule (USDC 购点):
+		// - minted a new tier token this time + had previous balance => usdcUpgradeNewCard
+		// - minted a new tier token this time + no previous balance => usdcNewCard
+		// - no new tier token minted => usdcTopupCard
 		const topupCategoryRaw = upgradedByMint
-			? (beforePoint6 > 0n ? 'upgradeNewCard' : 'iuuseNewCard')
-			: 'topupCard'
+			? (beforePoint6 > 0n ? 'usdcUpgradeNewCard' : 'usdcNewCard')
+			: 'usdcTopupCard'
 		const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
 		const displayJson = JSON.stringify({
 			title: payMe.title || (isMember ? 'Top Up' : 'Card Mint'),
@@ -3401,6 +3424,16 @@ export const purchasingCardProcess = async () => {
 			currencyAmount: payMe.currencyAmount,
 			usdcAmount: payMe.usdcAmount,
 		})
+		// TopUp RouteItem per accounting spec: asset=card, assetType=ERC1155, source=UserCardPoint, tokenId=NFT card#, itemCurrencyType=currency, amountE6=topup amount
+		const topupRouteItem = {
+			asset: cardAddress,
+			amountE6: currentTopupPoint6,
+			assetType: 1, // ERC1155
+			source: ROUTE_SOURCE_USER_CARD_POINT,
+			tokenId: tokenIdForRoute,
+			itemCurrencyType: currencyFiat,
+			offsetInRequestCurrencyE6: 0n,
+		}
 		const input: PurchasingCardAccountingInput = {
 			txId: tx.hash as `0x${string}`,
 			originalPaymentHash: ethers.ZeroHash as `0x${string}`,
@@ -3413,7 +3446,7 @@ export const purchasingCardProcess = async () => {
 			finalRequestAmountFiat6,
 			finalRequestAmountUSDC6,
 			isAAAccount: false,
-			route: [],
+			route: [topupRouteItem],
 			fees: {
 				gasChainType: 0,
 				gasWei: 0n,
@@ -5266,6 +5299,14 @@ export const cardRedeemProcess = async () => {
 		}
 
 		const factory = SC.baseFactoryPaymaster
+		let beforeNfts: unknown[] | undefined
+		try {
+			const cardRead = new ethers.Contract(obj.cardAddress, BeamioUserCardABI, SC.walletBase)
+			const [, nfts] = await cardRead.getOwnership(addr) as [bigint, unknown[]]
+			beforeNfts = Array.isArray(nfts) ? nfts : []
+		} catch (_) {
+			beforeNfts = []
+		}
 		let txHash: string | null = null
 		let lastErr: any = null
 		// 先尝试 one-time redeem；若 UC_InvalidProposal（code 可能为 pool 类型）则回退到 redeemPoolForUser
@@ -5305,6 +5346,7 @@ export const cardRedeemProcess = async () => {
 				toUserEOA: obj.toUserEOA,
 				aaAddress: addr,
 				txHash,
+				beforeNfts,
 			})
 			cardRedeemIndexerAccountingProcess().catch((err: any) => {
 				logger(Colors.red('[cardRedeemIndexerAccountingProcess] unhandled:'), err?.message ?? err)
