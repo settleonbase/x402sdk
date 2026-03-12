@@ -21,10 +21,6 @@ const CURRENCY_TO_ENUM: Record<ICurrency, number> = {
 /** 统一 metadata base（ERC-1155 / Base Explorer 约定）。合约 uri() 重写为 0x{address(this)}{id}.json，此处仅作 constructor 占位。 */
 const BEAMIO_METADATA_BASE_URI = 'https://api.beamio.io/metadata/'
 
-/** 构建以 owner 为 key 的 metadata URI（旧格式，仅兼容 0x{owner}.json 的卡级拉取）。新卡应使用合约重写后的唯一 URL。 */
-export const buildOwnerMetadataUri = (owner: string) =>
-  `https://api.beamio.io/metadata/0x${ethers.getAddress(owner).slice(2).toLowerCase()}.json`
-
 /** createCardCollectionWithInitCode 可能 revert 的 custom errors（Factory / Deployer / BeamioUserCard），用于解析链上返回的 data */
 const CREATE_CARD_ERROR_IFACE = new ethers.Interface([
   'error DEP_NotFactory()',
@@ -92,7 +88,7 @@ function createCardRevertHint(decoded: string | null): string {
  * - gateway: 工厂/gateway 地址，默认使用当前 factory 合约地址
  */
 export type CreateBeamioCardInitCodeOptions = {
-  /** BeamioUserCard 的 metadata URI，默认 0x{owner}.json，id<100000000000 共用 shareTokenMetadata */
+  /** BeamioUserCard 的 metadata URI（constructor 占位，合约 uri() 重写为 0x{address(this)}{id}.json） */
   uri?: string
   /** 工厂（gateway）地址，默认使用传入的 factory 合约地址 */
   gateway?: string
@@ -101,7 +97,7 @@ export type CreateBeamioCardInitCodeOptions = {
 export type CreateBeamioCardOptions = {
   /** 工厂合约地址，默认 Base 主网 CARD_FACTORY */
   factoryAddress?: string
-  /** BeamioUserCard 的 metadata URI，默认 0x{owner}.json */
+  /** BeamioUserCard 的 metadata URI（constructor 占位） */
   uri?: string
   /** BeamioUserCard 的部署 initCode（constructor 编码 + bytecode）。可由 buildBeamioUserCardInitCode() 生成。 */
   initCode: string

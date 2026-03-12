@@ -4748,33 +4748,32 @@ export const createCardPoolPress = async () => {
 			{ ...(uri && { uri }), ...(tiersForCreate && { tiers: tiersForCreate }) },
 			SC.baseFactoryPaymaster
 		)
-		// master 侧写入 metadata（shareTokenMetadata、tiers）到 0x{owner}.json
+		// master 侧写入 metadata（shareTokenMetadata、tiers）到 0x{cardAddress}0.json（ERC-1155 约定）
 		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
-		const ownerAddr = ethers.getAddress(cardOwner)
-		const metaFilename = `0x${ownerAddr.slice(2).toLowerCase()}.json`
+		const cardAddr = ethers.getAddress(cardAddress)
+		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
 		if (shareTokenMetadata || (tiers && tiers.length > 0)) {
+			const name = shareTokenMetadata?.name ?? 'Beamio CCSA Card'
+			const description = shareTokenMetadata?.description
+			const image = shareTokenMetadata?.image != null && shareTokenMetadata.image !== '' ? shareTokenMetadata.image : undefined
+			const metaContent = JSON.stringify({
+				...(name && { name }),
+				...(description != null && { description }),
+				...(image && { image }),
+				...(shareTokenMetadata && {
+					shareTokenMetadata: {
+						name,
+						...(description != null && { description }),
+						...(image && { image }),
+					},
+				}),
+				...(tiers && tiers.length > 0 && { tiers }),
+			}, null, 2)
 			const metaPath = resolve(METADATA_BASE, metaFilename)
 			const metaDir = resolve(METADATA_BASE)
 			if (metaPath.startsWith(metaDir + '/') || metaPath === metaDir) {
 				try {
 					if (!fs.existsSync(metaDir)) fs.mkdirSync(metaDir, { recursive: true })
-					const name = shareTokenMetadata?.name ?? 'Beamio CCSA Card'
-					const description = shareTokenMetadata?.description
-					const image = shareTokenMetadata?.image != null && shareTokenMetadata.image !== '' ? shareTokenMetadata.image : undefined
-					// 同时写顶层 name/description/image（ERC1155 与前端 getCardMetadataFromUri 期望）与 shareTokenMetadata/tiers（兼容现有逻辑）
-					const metaContent = JSON.stringify({
-						...(name && { name }),
-						...(description != null && { description }),
-						...(image && { image }),
-						...(shareTokenMetadata && {
-							shareTokenMetadata: {
-								name,
-								...(description != null && { description }),
-								...(image && { image }),
-							},
-						}),
-						...(tiers && tiers.length > 0 && { tiers }),
-					}, null, 2)
 					fs.writeFileSync(metaPath, metaContent, 'utf-8')
 					logger(Colors.green(`[createCardPoolPress] wrote metadata: ${metaFilename}`))
 				} catch (metaErr: any) {

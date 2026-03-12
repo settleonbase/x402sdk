@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardMetadataByOwner, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
+import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -32,6 +32,7 @@ const LATEST_CARDS_EXCLUDED = new Set([
 	'0x4879171d6c4693eaedcd8f448a785a31b2146e64',
 	'0x82b333da5c723da6e98fefecd96cb1ca304c6125',
 	'0x9d098fa94d559b8cb223b9760e8bac3d07617c78',
+	'0x926deadb97d8badd1221060840b5a1cf46711a86',
 ])
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
@@ -3049,11 +3050,9 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	/** GET /metadata/:filename - 唯一统一约定（Base Explorer / EIP-1155）：
 	 *  仅支持 0x{40hex}{suffix}.json，40hex = ERC-1155 合约（卡）地址，suffix = tokenId（十进制或 64 位十六进制）。
 	 *  tokenId=0 返回卡级 metadata（getCardByAddress），否则返回该 NFT tier metadata（getNftTierMetadataByCardAndToken）。
-	 *  兼容旧格式 0x{40hex}.json（40hex 视为 owner，getCardMetadataByOwner）用于卡级拉取。
 	 */
 	app.get('/metadata/:filename', async (req, res) => {
 		const filename = req.params.filename
-		// 格式 2/3：0x + 40 hex + (64 hex 或 十进制) + .json → 按 ERC-1155 约定，40hex 为合约（卡）地址
 		const nftMetaMatch = filename.match(/^(0x[0-9a-fA-F]{40})([0-9a-fA-F]+)\.json$/)
 		if (nftMetaMatch) {
 			const cardAddress = nftMetaMatch[1]
@@ -3093,16 +3092,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 					res.send(body)
 					return
 				}
-				const data = await getNftTierMetadataByCardAndToken(cardAddress, tokenId)
-				// 兼容旧数据：若按 card_address 无记录，尝试按 card_owner 查（sync 可能只写过 owner）
-				let payload = data
-				if (!payload) {
-					const row = await getCardByAddress(cardAddress)
-					if (row?.cardOwner) {
-						payload = await getNftTierMetadataByOwnerAndToken(row.cardOwner, tokenId)
-						if (payload) logger(Colors.gray(`[metadata] tokenId=${tokenId} 按 card_owner=${row.cardOwner} 回退查到`))
-					}
-				}
+				const payload = await getNftTierMetadataByCardAndToken(cardAddress, tokenId)
 				if (!payload) {
 					logger(Colors.yellow(`[metadata] tokenId=${tokenId}: DB 无记录 cardAddress=${cardAddress}`))
 					return res.status(404).json({ error: 'NFT tier metadata not found' })
@@ -3117,27 +3107,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			}
 			return
 		}
-		// 格式 1：0x{40hex}.json
-		if (!/^0x[0-9a-fA-F]{40}\.json$/.test(filename)) {
-			return res.status(400).json({ error: 'Invalid metadata filename format (expected 0x{40hex}.json, 0x{40hex}{64hex}.json, or 0x{40hex}{NFT#}.json)' })
-		}
-		const owner = filename.slice(0, -5) // 去掉 .json
-		try {
-			const data = await getCardMetadataByOwner(owner)
-			if (!data) {
-				return res.status(404).json({ error: 'Metadata not found' })
-			}
-			const base = data.shareTokenMetadata && typeof data.shareTokenMetadata === 'object' ? data.shareTokenMetadata as Record<string, unknown> : {}
-			const out: Record<string, unknown> = { ...base }
-			if (data.tiers && Array.isArray(data.tiers) && data.tiers.length > 0) {
-				out.tiers = data.tiers
-			}
-			res.setHeader('Content-Type', 'application/json')
-			res.send(JSON.stringify(out))
-		} catch (err: any) {
-			logger(Colors.red('[metadata] read error:'), err?.message ?? err)
-			return res.status(500).json({ error: 'Failed to read metadata' })
-		}
+		return res.status(400).json({ error: 'Invalid metadata filename format (expected 0x{40hex}{suffix}.json, suffix = tokenId decimal or 64 hex)' })
 	})
 
 		app.get('/_debug', (req, res) => {
