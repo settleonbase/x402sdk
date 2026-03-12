@@ -18,8 +18,8 @@ const CURRENCY_TO_ENUM: Record<ICurrency, number> = {
   TWD: 8,
 }
 
-/** 统一 metadata base（ERC-1155 / Base Explorer 约定）。合约 uri() 重写为 0x{address(this)}{id}.json，此处仅作 constructor 占位。 */
-const BEAMIO_METADATA_BASE_URI = 'https://api.beamio.io/metadata/'
+/** 统一 metadata base（ERC-1155 / Base Explorer 约定）。与 Factory metadataBaseURI 一致，合约 uri() 重写为 0x{address(this)}{id}.json。 */
+const BEAMIO_METADATA_BASE_URI = 'https://beamio.app/api/metadata/0x'
 
 /** createCardCollectionWithInitCode 可能 revert 的 custom errors（Factory / Deployer / BeamioUserCard），用于解析链上返回的 data */
 const CREATE_CARD_ERROR_IFACE = new ethers.Interface([
