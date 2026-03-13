@@ -4995,7 +4995,72 @@ export const cardAddAdminPreCheck = async (body: {
 const createIssuedNftIface = new ethers.Interface([
 	'function createIssuedNft(bytes32 title, uint64 validAfter, uint64 validBefore, uint256 maxSupply, uint256 priceInCurrency6, bytes32 sharedMetadataHash)',
 ])
+const mintIssuedNftByGatewayIface = new ethers.Interface([
+	'function mintIssuedNftByGateway(address userEOA, uint256 tokenId, uint256 amount)',
+])
+const ISSUED_NFT_START_ID_MEMBER = 100_000_000_000n
 const CREATE_ISSUED_NFT_SELECTOR = createIssuedNftIface.getFunction('createIssuedNft')?.selector ?? ''
+
+/** cardMintIssuedNftToAddress 集群预检：校验 targetAddress 为 EOA，tokenId>=ISSUED_NFT_START_ID，amount>0，card 存在，owner 签名有效。合格编码 data 并转发 master executeForOwner。 */
+export const cardMintIssuedNftToAddressPreCheck = async (body: {
+	cardAddress?: string
+	targetAddress?: string
+	tokenId?: string | number
+	amount?: string | number
+	deadline?: number
+	nonce?: string
+	ownerSignature?: string
+}): Promise<{ success: true; preChecked: { cardAddress: string; data: string; deadline: number; nonce: string; ownerSignature: string } } | { success: false; error: string }> => {
+	const { cardAddress, targetAddress, tokenId, amount, deadline, nonce, ownerSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!targetAddress || !ethers.isAddress(targetAddress)) return { success: false, error: 'Invalid targetAddress' }
+	const tokenIdN = BigInt(tokenId ?? ISSUED_NFT_START_ID_MEMBER)
+	const amountN = BigInt(amount ?? 1)
+	if (tokenIdN < ISSUED_NFT_START_ID_MEMBER) return { success: false, error: 'tokenId must be >= ISSUED_NFT_START_ID (100000000000)' }
+	if (amountN <= 0n) return { success: false, error: 'amount must be > 0' }
+	if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+	try {
+		const data = mintIssuedNftByGatewayIface.encodeFunctionData('mintIssuedNftByGateway', [
+			ethers.getAddress(targetAddress),
+			tokenIdN,
+			amountN,
+		])
+		const pool = Settle_ContractPool
+		if (pool?.length) {
+			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+			const codeAtCard = await provider.getCode(cardAddress)
+			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+			const codeAtTarget = await provider.getCode(targetAddress)
+			if (codeAtTarget && codeAtTarget !== '0x') return { success: false, error: 'targetAddress must be EOA (AA/smart contract not allowed for mintIssuedNftByGateway)' }
+			const card = new ethers.Contract(cardAddress, ['function owner() view returns (address)'], provider)
+			const owner = await card.owner()
+			if (!owner || owner === ethers.ZeroAddress) return { success: false, error: 'Card has no owner' }
+			const factory = new ethers.Contract(BASE_CARD_FACTORY, ['function DOMAIN_SEPARATOR() view returns (bytes32)'], provider)
+			const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract: BASE_CARD_FACTORY }
+			const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
+			const dataHash = ethers.keccak256(data)
+			const nonceBytes = nonce.length === 66 && nonce.startsWith('0x') ? (nonce as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`
+			const value = { cardAddress: ethers.getAddress(cardAddress), dataHash, deadline: Number(deadline), nonce: nonceBytes }
+			const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+			const signer = ethers.recoverAddress(digest, ownerSignature)
+			if (signer.toLowerCase() !== ethers.getAddress(owner).toLowerCase()) {
+				return { success: false, error: 'Signature does not match card owner' }
+			}
+		}
+		return {
+			success: true,
+			preChecked: {
+				cardAddress: ethers.getAddress(cardAddress),
+				data,
+				deadline: Number(deadline),
+				nonce: String(nonce),
+				ownerSignature: String(ownerSignature),
+			},
+		}
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
 const BeamioUserCardIface = new ethers.Interface(BeamioUserCardABI as ethers.InterfaceAbi)
 const ISSUED_NFT_CREATED_TOPIC = ethers.id('IssuedNftCreated(uint256,bytes32,uint64,uint64,uint256,uint256,bytes32)')
 

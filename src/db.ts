@@ -1153,12 +1153,12 @@ export const getLatestCards = async (limit = 20): Promise<Array<{
 	}
 }
 
-/** 登记 issued NFT 系列到 DB（createIssuedNft 成功后由 API/daemon 调用）；metadataJson 为通用型 JSON，支持电影/演唱会/商品等场景 */
+/** 登记 issued NFT 系列到 DB（createIssuedNft 成功后由 API/daemon 调用）；metadataJson 为通用型 JSON，支持电影/演唱会/商品等场景；ipfsCid 可选，无 IPFS 时用 metadataJson 作为 shared metadata */
 export const registerSeriesToDb = async (params: {
 	cardAddress: string
 	tokenId: string
 	sharedMetadataHash: string
-	ipfsCid: string
+	ipfsCid?: string | null
 	cardOwner: string
 	metadataJson?: Record<string, unknown>
 }): Promise<void> => {
@@ -1167,6 +1167,7 @@ export const registerSeriesToDb = async (params: {
 		await db.connect()
 		await db.query(BEAMIO_NFT_SERIES_TABLE)
 		const meta = params.metadataJson != null ? JSON.stringify(params.metadataJson) : null
+		const ipfsCidVal = (params.ipfsCid != null && String(params.ipfsCid).trim() !== '') ? String(params.ipfsCid).trim() : ''
 		await db.query(
 			`
 			INSERT INTO beamio_nft_series (card_address, token_id, shared_metadata_hash, ipfs_cid, card_owner, metadata_json)
@@ -1181,7 +1182,7 @@ export const registerSeriesToDb = async (params: {
 				params.cardAddress.toLowerCase(),
 				params.tokenId,
 				params.sharedMetadataHash,
-				params.ipfsCid,
+				ipfsCidVal,
 				params.cardOwner.toLowerCase(),
 				meta,
 			]

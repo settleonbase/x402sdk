@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyBeamioSunRequest } from '../BeamioSun'
 
@@ -1188,7 +1188,7 @@ const routing = ( router: Router ) => {
 				const series = await getSeriesByCardAndTokenId(cardAddress, tokenId)
 				sharedMetadataHash = series?.sharedMetadataHash ?? null
 				ipfsCid = series?.ipfsCid ?? null
-				if (series?.ipfsCid) {
+				if (series?.ipfsCid && String(series.ipfsCid).trim() !== '') {
 					try {
 						const ipfsRes = await fetch(`https://ipfs.io/ipfs/${series.ipfsCid}`)
 						if (ipfsRes.ok) {
@@ -1198,6 +1198,9 @@ const routing = ( router: Router ) => {
 					} catch (ipfsErr: any) {
 						logger(Colors.yellow('[metadata route] IPFS fetch failed:'), ipfsErr?.message ?? ipfsErr)
 					}
+				}
+				if (!sharedSeriesMetadata && series?.metadata && typeof series.metadata === 'object') {
+					sharedSeriesMetadata = series.metadata
 				}
 				tokenMeta = mergeMetadataObjects(series?.metadata, sharedSeriesMetadata)
 			} else if (tokenIdBigInt > 0n) {
@@ -1645,7 +1648,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
-	/** GET /api/seriesSharedMetadata?card=0x&tokenId=... - 从 IPFS 拉取并返回该系列的 sharedSeriesMetadata。30 秒缓存 */
+	/** GET /api/seriesSharedMetadata?card=0x&tokenId=... - 返回该系列的 sharedSeriesMetadata（IPFS 或自定义 metadata）。30 秒缓存 */
 	router.get('/seriesSharedMetadata', async (req, res) => {
 		const { card, tokenId } = req.query as { card?: string; tokenId?: string }
 		if (!card || !ethers.isAddress(card) || !tokenId) {
@@ -1662,22 +1665,30 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		try {
 			const series = await getSeriesByCardAndTokenId(card, tokenId)
-			if (!series?.ipfsCid) {
-				return res.status(404).json({ error: 'Series not registered or no IPFS CID' })
+			if (!series) {
+				return res.status(404).json({ error: 'Series not registered' })
 			}
-			const ipfsUrl = `https://ipfs.io/ipfs/${series.ipfsCid}`
-			const ipfsRes = await fetch(ipfsUrl)
-			if (!ipfsRes.ok) {
-				return res.status(502).json({ error: 'Failed to fetch from IPFS' })
+			let sharedJson: Record<string, unknown> | null = null
+			if (series.ipfsCid && series.ipfsCid.trim() !== '') {
+				const ipfsUrl = `https://ipfs.io/ipfs/${series.ipfsCid}`
+				const ipfsRes = await fetch(ipfsUrl)
+				if (ipfsRes.ok) {
+					const parsed = await ipfsRes.json()
+					if (parsed && typeof parsed === 'object') sharedJson = parsed as Record<string, unknown>
+				}
 			}
-			const sharedJson = await ipfsRes.json()
+			if (!sharedJson && series.metadata && typeof series.metadata === 'object') {
+				sharedJson = series.metadata as Record<string, unknown>
+			}
+			const rawShared = (sharedJson ?? {}) as JsonObject
+			const sharedWithImage = ensureMetadataImage({ ...rawShared })
 			const out = {
 				cardAddress: series.cardAddress,
 				tokenId: series.tokenId,
 				sharedMetadataHash: series.sharedMetadataHash,
-				ipfsCid: series.ipfsCid,
+				ipfsCid: series.ipfsCid || null,
 				metadata: series.metadata ?? null,
-				sharedSeriesMetadata: sharedJson,
+				sharedSeriesMetadata: sharedWithImage,
 			}
 			const body = JSON.stringify(out)
 			seriesSharedMetadataCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
@@ -1688,7 +1699,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
-	/** registerSeries：cluster 预检格式，合格转发 master */
+	/** registerSeries：cluster 预检格式，合格转发 master。
+	 *  tokenId 必须来自合约 createIssuedNft 的返回值（合约自动递增，不可自定）。
+	 *  sharedMetadata：支持 ipfsCid（从 IPFS 拉取）或 metadata 自定义 JSON（扩展用），至少提供一个。 */
 	router.post('/registerSeries', async (req, res) => {
 		const { cardAddress, tokenId, sharedMetadataHash, ipfsCid, metadata } = req.body as {
 			cardAddress?: string
@@ -1697,14 +1710,19 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			ipfsCid?: string
 			metadata?: Record<string, unknown>
 		}
-		if (!cardAddress || !ethers.isAddress(cardAddress) || !tokenId || !sharedMetadataHash || !ipfsCid) {
-			return res.status(400).json({ error: 'Missing cardAddress, tokenId, sharedMetadataHash, or ipfsCid' })
+		if (!cardAddress || !ethers.isAddress(cardAddress) || !tokenId || !sharedMetadataHash) {
+			return res.status(400).json({ error: 'Missing cardAddress, tokenId, or sharedMetadataHash' })
+		}
+		const hasIpfs = ipfsCid != null && String(ipfsCid).trim() !== ''
+		const hasMetadata = metadata != null && typeof metadata === 'object'
+		if (!hasIpfs && !hasMetadata) {
+			return res.status(400).json({ error: 'Provide ipfsCid or metadata (custom JSON object) for shared metadata' })
 		}
 		logger(Colors.green('server /api/registerSeries preCheck OK, forwarding to master'))
 		postLocalhost('/api/registerSeries', req.body, res)
 	})
 
-	/** registerMintMetadata：cluster 预检格式，合格转发 master */
+	/** registerMintMetadata：cluster 预检格式，合格转发 master。tokenId 必须来自 createIssuedNft 返回值。metadata 为自定义 JSON（如座位、序列号等）。 */
 	router.post('/registerMintMetadata', async (req, res) => {
 		const { cardAddress, tokenId, ownerAddress, metadata } = req.body as {
 			cardAddress?: string
@@ -2087,6 +2105,17 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
+	/** cardMintIssuedNftToAddress：owner 离线签字发行 issued NFT 到指定地址。Cluster 预检 targetAddress 为 EOA、签名有效，编码 data 后转发 master executeForOwner */
+	router.post('/cardMintIssuedNftToAddress', async (req, res) => {
+		const preCheck = await cardMintIssuedNftToAddressPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardMintIssuedNftToAddress preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/cardMintIssuedNftToAddress preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: preCheck.preChecked.cardAddress, targetAddress: req.body?.targetAddress }, false, 2, true))
+		postLocalhost('/api/executeForOwner', preCheck.preChecked, res)
+	})
+
 	/** cardRedeem：用户兑换 redeem 码，转发 master */
 	router.post('/cardRedeem', async (req, res) => {
 		const { cardAddress, redeemCode, toUserEOA } = req.body || {}
@@ -2094,6 +2123,16 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, toUserEOA' })
 		}
 		logger(Colors.green(`server /api/cardRedeem forwarding to master`), { cardAddress, toUserEOA })
+		postLocalhost('/api/cardRedeem', req.body, res)
+	})
+
+	/** redeemSeries：用户使用 redeem code 兑换 NFT（与 cardRedeem 相同逻辑，用于特别设置 NFT 兑换） */
+	router.post('/redeemSeries', async (req, res) => {
+		const { cardAddress, redeemCode, toUserEOA } = req.body || {}
+		if (!cardAddress || !redeemCode || !toUserEOA || !ethers.isAddress(cardAddress) || !ethers.isAddress(toUserEOA)) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, toUserEOA' })
+		}
+		logger(Colors.green(`server /api/redeemSeries forwarding to master`), { cardAddress, toUserEOA })
 		postLocalhost('/api/cardRedeem', req.body, res)
 	})
 

@@ -29,6 +29,17 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 ] as const
 const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
 
+/** Beamio 默认 metadata image（与 BeamioUserCard 一致） */
+const DEFAULT_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x44e7a175e57a337bf5d0a98deb19a0a545e362d504092a7af1aecd58798eab'
+
+const ensureMetadataImage = (meta: Record<string, unknown>): Record<string, unknown> => {
+	const props = (meta.properties && typeof meta.properties === 'object') ? meta.properties as Record<string, unknown> : {}
+	const image = [meta.image, meta.image_url, meta.imageUrl, props.image, DEFAULT_METADATA_IMAGE_URL]
+		.find((v): v is string => typeof v === 'string' && v.trim() !== '')
+	if (image) meta.image = image
+	return meta
+}
+
 /** 通用查询缓存：30 秒协议 */
 const QUERY_CACHE_TTL_MS = 30 * 1000
 const searchHelpCache = new Map<string, { items: unknown[]; expiry: number }>()
@@ -582,7 +593,7 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** GET /api/seriesSharedMetadata - 从 IPFS 拉取 sharedSeriesMetadata。30 秒缓存 */
+		/** GET /api/seriesSharedMetadata - 返回 sharedSeriesMetadata（IPFS 或自定义 metadata）。30 秒缓存 */
 		router.get('/seriesSharedMetadata', async (req, res) => {
 			const { card, tokenId } = req.query as { card?: string; tokenId?: string }
 			if (!card || !ethers.isAddress(card) || !tokenId) {
@@ -599,22 +610,30 @@ const routing = ( router: Router ) => {
 			}
 			try {
 				const series = await getSeriesByCardAndTokenId(card, tokenId)
-				if (!series?.ipfsCid) {
-					return res.status(404).json({ error: 'Series not registered or no IPFS CID' })
+				if (!series) {
+					return res.status(404).json({ error: 'Series not registered' })
 				}
-				const ipfsUrl = `https://ipfs.io/ipfs/${series.ipfsCid}`
-				const ipfsRes = await fetch(ipfsUrl)
-				if (!ipfsRes.ok) {
-					return res.status(502).json({ error: 'Failed to fetch from IPFS' })
+				let sharedJson: Record<string, unknown> | null = null
+				if (series.ipfsCid && series.ipfsCid.trim() !== '') {
+					const ipfsUrl = `https://ipfs.io/ipfs/${series.ipfsCid}`
+					const ipfsRes = await fetch(ipfsUrl)
+					if (ipfsRes.ok) {
+						const parsed = await ipfsRes.json()
+						if (parsed && typeof parsed === 'object') sharedJson = parsed
+					}
 				}
-				const sharedJson = await ipfsRes.json()
+				if (!sharedJson && series.metadata && typeof series.metadata === 'object') {
+					sharedJson = series.metadata
+				}
+				const rawShared = (sharedJson ?? {}) as Record<string, unknown>
+				const sharedWithImage = ensureMetadataImage({ ...rawShared })
 				const data = {
 					cardAddress: series.cardAddress,
 					tokenId: series.tokenId,
 					sharedMetadataHash: series.sharedMetadataHash,
-					ipfsCid: series.ipfsCid,
+					ipfsCid: series.ipfsCid || null,
 					metadata: series.metadata ?? null,
-					sharedSeriesMetadata: sharedJson,
+					sharedSeriesMetadata: sharedWithImage,
 				}
 				seriesSharedMetadataCache.set(cacheKey, { data, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 				res.status(200).json(data)
@@ -645,7 +664,7 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** POST /api/registerSeries - 登记 NFT 系列到 DB（cluster 预检后转发） */
+		/** POST /api/registerSeries - 登记 NFT 系列到 DB（cluster 预检后转发）。tokenId 必须来自 createIssuedNft 返回值；ipfsCid 可选，无 IPFS 时用 metadata 作为 shared metadata */
 		router.post('/registerSeries', async (req, res) => {
 			const { cardAddress, tokenId, sharedMetadataHash, ipfsCid, metadata } = req.body as {
 				cardAddress?: string
@@ -654,8 +673,13 @@ const routing = ( router: Router ) => {
 				ipfsCid?: string
 				metadata?: Record<string, unknown>
 			}
-			if (!cardAddress || !ethers.isAddress(cardAddress) || !tokenId || !sharedMetadataHash || !ipfsCid) {
-				return res.status(400).json({ error: 'Missing cardAddress, tokenId, sharedMetadataHash, or ipfsCid' })
+			if (!cardAddress || !ethers.isAddress(cardAddress) || !tokenId || !sharedMetadataHash) {
+				return res.status(400).json({ error: 'Missing cardAddress, tokenId, or sharedMetadataHash' })
+			}
+			const hasIpfs = ipfsCid != null && String(ipfsCid).trim() !== ''
+			const hasMetadata = metadata != null && typeof metadata === 'object'
+			if (!hasIpfs && !hasMetadata) {
+				return res.status(400).json({ error: 'Provide ipfsCid or metadata (custom JSON object) for shared metadata' })
 			}
 			try {
 				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
@@ -670,7 +694,7 @@ const routing = ( router: Router ) => {
 					cardAddress,
 					tokenId: String(tokenId),
 					sharedMetadataHash: expectedHash,
-					ipfsCid,
+					ipfsCid: hasIpfs ? String(ipfsCid).trim() : undefined,
 					cardOwner,
 					metadataJson: metadata ?? undefined,
 				})
@@ -950,7 +974,7 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** cardRedeem：用户兑换 redeem 码，服务端 redeemForUser，点数 mint 到用户 AA */
+		/** cardRedeem：用户兑换 redeem 码，服务端 redeemForUser，点数/NFT mint 到用户 AA */
 		router.post('/cardRedeem', (req, res) => {
 			const { cardAddress, redeemCode, toUserEOA } = req.body as { cardAddress?: string; redeemCode?: string; toUserEOA?: string }
 			if (!cardAddress || !redeemCode || !toUserEOA || !ethers.isAddress(cardAddress) || !ethers.isAddress(toUserEOA)) {
@@ -958,6 +982,19 @@ const routing = ( router: Router ) => {
 			}
 			cardRedeemPool.push({ cardAddress, redeemCode, toUserEOA, res })
 			logger(Colors.cyan(`[cardRedeem] pushed to pool, card=${cardAddress} to=${toUserEOA}`))
+			cardRedeemProcess().catch((err: any) => {
+				logger(Colors.red('[cardRedeemProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		/** redeemSeries：用户使用 redeem code 兑换 NFT，与 cardRedeem 同一逻辑 */
+		router.post('/redeemSeries', (req, res) => {
+			const { cardAddress, redeemCode, toUserEOA } = req.body as { cardAddress?: string; redeemCode?: string; toUserEOA?: string }
+			if (!cardAddress || !redeemCode || !toUserEOA || !ethers.isAddress(cardAddress) || !ethers.isAddress(toUserEOA)) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, toUserEOA' })
+			}
+			cardRedeemPool.push({ cardAddress, redeemCode, toUserEOA, res })
+			logger(Colors.cyan(`[redeemSeries] pushed to pool, card=${cardAddress} to=${toUserEOA}`))
 			cardRedeemProcess().catch((err: any) => {
 				logger(Colors.red('[cardRedeemProcess] unhandled error:'), err?.message ?? err)
 			})
