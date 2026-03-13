@@ -619,7 +619,7 @@ const routing = ( router: Router ) => {
 					const ipfsRes = await fetch(ipfsUrl)
 					if (ipfsRes.ok) {
 						const parsed = await ipfsRes.json()
-						if (parsed && typeof parsed === 'object') sharedJson = parsed
+						if (parsed && typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) sharedJson = parsed as Record<string, unknown>
 					}
 				}
 				if (!sharedJson && series.metadata && typeof series.metadata === 'object') {
