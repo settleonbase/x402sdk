@@ -2113,7 +2113,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardMintIssuedNftToAddress preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: preCheck.preChecked.cardAddress, targetAddress: req.body?.targetAddress }, false, 2, true))
-		postLocalhost('/api/executeForOwner', preCheck.preChecked, res)
+		postLocalhost('/api/executeForOwner', { ...preCheck.preChecked, targetAddress: req.body?.targetAddress }, res)
 	})
 
 	/** cardRedeem：用户兑换 redeem 码，转发 master */

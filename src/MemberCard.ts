@@ -362,6 +362,25 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 
 
 /**
+ * 为 mint MerchantsManagement NFT 的 targetAddress（EOA）确保存在 AA。
+ * 若 EOA 无 AA 则先调用 createAccountFor 创建，再返回；Master 在 push executeForOwner 前调用。
+ */
+export const ensureAAForMintTarget = async (targetAddress: string): Promise<void> => {
+	const pool = Settle_ContractPool
+	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
+	const aaFactory = pool[0].aaAccountFactoryPaymaster
+	if (!aaFactory) throw new Error('aaAccountFactoryPaymaster not initialized')
+	const acct = await aaFactory.beamioAccountOf(targetAddress)
+	const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+	const hasAA = acct && acct !== ethers.ZeroAddress && (await provider.getCode(acct)) !== '0x'
+	if (hasAA) return
+	logger(Colors.cyan(`[ensureAAForMintTarget] targetAddress ${targetAddress} has no AA, creating...`))
+	const { accountAddress } = await DeployingSmartAccount(targetAddress, aaFactory)
+	if (!accountAddress) throw new Error(`Failed to create AA for ${targetAddress}`)
+	logger(Colors.green(`[ensureAAForMintTarget] created AA ${accountAddress} for ${targetAddress}`))
+}
+
+/**
  * 检查 EOA 是否已拥有 index=0 的 AA 账户（与 DeployingSmartAccount 约定一致：每个 EOA 仅支持一个 AA，不支持多个）。
  */
 export const checkSmartAccount = async (wallet: string): Promise<false | { accountAddress: string; alreadyExisted: true }> => {
@@ -3294,6 +3313,7 @@ export const purchasingCardProcess = async () => {
 		accountAddress = addr
 
 		if (preChecked) {
+			// preChecked.currencyAmount from server's quotePointsForUSDC_raw(usdcAmount); never from client
 			owner = preChecked.owner
 			_currency = preChecked._currency
 			currencyAmount = {
@@ -3309,6 +3329,7 @@ export const purchasingCardProcess = async () => {
 			isMember = preChecked.isMember
 			logger(Colors.green(`✅ purchasingCardProcess [preChecked] cardAddress = ${cardAddress} ${obj.from} AA: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
 		} else {
+			// currencyAmount: derived from usdcAmount (EIP-3009 signed value) via oracle; never from client input
 			const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
 			const [[pb, n], o, c, ca] = await Promise.all([
 				card.getOwnership(accountAddress),
@@ -3382,23 +3403,27 @@ export const purchasingCardProcess = async () => {
 		const CHAIN_ID_BASE = 8453n
 		const payerAddr = ethers.getAddress(from)
 		const payeeAddr = ethers.getAddress(to)
+		// Accounting: never trust client currency amount. Use USDC from EIP-3009 signature + chain-verified points.
 		const finalRequestAmountUSDC6 = BigInt(usdcAmount)
-		const finalRequestAmountFiat6 = ethers.parseUnits(payMe.currencyAmount || '0', 6)
 		const currencyFiat = Number(_currency)
 		const beforePoint6 = pointsBalance
-		const currentTopupPoint6 = currencyAmount.points6
 		const beforeTokenIds = extractTokenIdsFromOwnership(nfts ?? [])
 		const beforeTokenSet = new Set(beforeTokenIds.map((id) => id.toString()))
 		let upgradedByMint = false
 		let afterTokenIds: bigint[] = []
+		let actualPointsMinted = 0n
 		try {
 			const cardRead = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
-			const [, nAfter] = await cardRead.getOwnership(accountAddress)
+			const [ptAfter, nAfter] = await cardRead.getOwnership(accountAddress) as [bigint, unknown[]]
 			afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
 			upgradedByMint = afterTokenIds.some((id) => !beforeTokenSet.has(id.toString()))
+			actualPointsMinted = ptAfter > beforePoint6 ? ptAfter - beforePoint6 : 0n
 		} catch (ownershipErr: any) {
 			logger(Colors.yellow(`[purchasingCardProcess] post-topup ownership check failed: ${ownershipErr?.shortMessage ?? ownershipErr?.message ?? String(ownershipErr)}`))
 		}
+		// Currency amount for accounting: chain-verified points minted when available; else quote from USDC (never client input)
+		const currentTopupPoint6 = actualPointsMinted > 0n ? actualPointsMinted : currencyAmount.points6
+		const finalRequestAmountFiat6 = currentTopupPoint6
 		// TopUp RouteItem: use UserCardPoint (txCategory: usdcNewCard/usdcUpgradeNewCard/usdcTopupCard)
 		const ROUTE_SOURCE_USER_CARD_POINT = 1
 		const tokenIdForRoute = upgradedByMint
@@ -3412,6 +3437,8 @@ export const purchasingCardProcess = async () => {
 			? (beforePoint6 > 0n ? 'usdcUpgradeNewCard' : 'usdcNewCard')
 			: 'usdcTopupCard'
 		const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
+		// currencyAmount in displayJson: chain-verified when available, else from quote (USDC→oracle); never from client
+		const displayCurrencyAmount = actualPointsMinted > 0n ? ethers.formatUnits(actualPointsMinted, 6) : payMe.currencyAmount
 		const displayJson = JSON.stringify({
 			title: payMe.title || (isMember ? 'Top Up' : 'Card Mint'),
 			handle: '',
@@ -3421,7 +3448,7 @@ export const purchasingCardProcess = async () => {
 			cardAddress,
 			finishedHash: tx.hash,
 			currency: payMe.currency,
-			currencyAmount: payMe.currencyAmount,
+			currencyAmount: displayCurrencyAmount,
 			usdcAmount: payMe.usdcAmount,
 		})
 		// TopUp RouteItem per accounting spec: asset=card, assetType=ERC1155, source=UserCardPoint, tokenId=NFT card#, itemCurrencyType=currency, amountE6=topup amount
@@ -5032,9 +5059,11 @@ export const cardMintIssuedNftToAddressPreCheck = async (body: {
 			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
 			const codeAtTarget = await provider.getCode(targetAddress)
 			if (codeAtTarget && codeAtTarget !== '0x') return { success: false, error: 'targetAddress must be EOA (AA/smart contract not allowed for mintIssuedNftByGateway)' }
-			const card = new ethers.Contract(cardAddress, ['function owner() view returns (address)'], provider)
+			const card = new ethers.Contract(cardAddress, ['function owner() view returns (address)', 'function balanceOf(address account, uint256 id) view returns (uint256)'], provider)
 			const owner = await card.owner()
 			if (!owner || owner === ethers.ZeroAddress) return { success: false, error: 'Card has no owner' }
+			const existingBal = (await card.balanceOf(targetAddress, tokenIdN)) as bigint
+			if (existingBal > 0n) return { success: false, error: 'Already registered as merchant' }
 			const factory = new ethers.Contract(BASE_CARD_FACTORY, ['function DOMAIN_SEPARATOR() view returns (bytes32)'], provider)
 			const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract: BASE_CARD_FACTORY }
 			const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
