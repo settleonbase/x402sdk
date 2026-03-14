@@ -48,6 +48,7 @@ const LATEST_CARDS_EXCLUDED = new Set([
 	'0x3957724e39e3db4f9f5fb263dd18e73fe8a67581',
 	'0x4cb611a14b1441d36183f125503f2c72af5b8fc8',
 	'0xda36bd32418cac424dbffd07617094d1884e629c',
+	'0x63a6251a51939f6c47ba0ceff5984e5c9f031605',
 ])
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
