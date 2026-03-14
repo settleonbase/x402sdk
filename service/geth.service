@@ -10,6 +10,7 @@ RestartSec=3
 LimitNOFILE=1048576
 
 # NUMA: node3 (cpus 24-31, 32GB)
+AllowedCPUs=24-31
 ExecStart=/usr/bin/numactl --cpunodebind=3 --membind=3 -- /usr/bin/geth \
   --mainnet \
   --datadir=/media/sda/eth/geth \

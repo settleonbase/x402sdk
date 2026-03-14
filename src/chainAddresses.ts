@@ -8,7 +8,7 @@ export const BASE_AA_FACTORY = '0xD86403DD1755F7add19540489Ea10cdE876Cc1CE'
  * Base 主网 BeamioUserCard 工厂地址 (BeamioUserCardFactoryPaymasterV07)。
  * 与 config/base-addresses.ts 一致。
  */
-export const BASE_CARD_FACTORY = '0xE091a0A974a40bCee36288193376294a19a293aE'
+export const BASE_CARD_FACTORY = '0x01D1dA915ed265B587C71a529395e0f0ed5DA619'
 
 /**
  * Base 主网 CCSA 卡地址（BeamioUserCard 实例，1 CAD = 1 token）。
@@ -25,7 +25,7 @@ export const BASE_TREASURY = '0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58'
  * Base 主网基础设施卡地址（BeamioUserCard 实例）。
  * 与服务端 getWalletAssets/getUIDAssets 的基础设施卡查询保持一致。
  */
-export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xB7644DDb12656F4854dC746464af47D33C206F0E'
+export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0x5aF645042411bD68eC80C8b2C781d422343e95C9'
 
 /**
  * 购买卡时用于获取 metadata 的发行卡地址（卡名、tiers 等展示信息从此卡获取）。
