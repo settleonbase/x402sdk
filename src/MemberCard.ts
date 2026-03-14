@@ -5100,7 +5100,12 @@ export const getRedeemStatusBatchApi = async (
 	return result
 }
 
-/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold)。admin=true 时 to 必须为 EOA。合格转发 master executeForOwner。 */
+const adminManager4ArgIface = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
+const adminManager5ArgIface = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)'])
+const ADMIN_MANAGER_4_SELECTOR = adminManager4ArgIface.getFunction('adminManager')?.selector ?? ''
+const ADMIN_MANAGER_5_SELECTOR = adminManager5ArgIface.getFunction('adminManager')?.selector ?? ''
+
+/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold[, metadata[, mintLimit]])。admin=true 时 to 必须为 EOA。合格转发 master executeForOwner。 */
 export const cardAddAdminPreCheck = async (body: {
 	cardAddress?: string
 	data?: string
@@ -5111,13 +5116,13 @@ export const cardAddAdminPreCheck = async (body: {
 	const { cardAddress, data, deadline, nonce, ownerSignature } = body
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
-	const adminManagerIface = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
-	const expectedSelector = adminManagerIface.getFunction('adminManager')?.selector ?? ''
-	if (data.slice(0, 10).toLowerCase() !== expectedSelector.toLowerCase()) {
-		return { success: false, error: 'Data must be adminManager(address,bool,uint256,string) calldata' }
+	const dataSelector = data.slice(0, 10).toLowerCase()
+	if (dataSelector !== ADMIN_MANAGER_4_SELECTOR.toLowerCase() && dataSelector !== ADMIN_MANAGER_5_SELECTOR.toLowerCase()) {
+		return { success: false, error: 'Data must be adminManager(address,bool,uint256,string) or adminManager(...,uint256 mintLimit) calldata' }
 	}
 	try {
-		const decoded = adminManagerIface.parseTransaction({ data })
+		const iface = dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ? adminManager5ArgIface : adminManager4ArgIface
+		const decoded = iface.parseTransaction({ data })
 		if (!decoded || decoded.name !== 'adminManager') return { success: false, error: 'Invalid adminManager calldata' }
 		const to = decoded.args[0] as string
 		const admin = decoded.args[1] as boolean
@@ -5254,10 +5259,14 @@ export const cardCreateIssuedNftPreCheck = async (body: {
 	}
 }
 
-const createRedeemAdminIface = new ethers.Interface([
+const createRedeemAdmin4ArgIface = new ethers.Interface([
 	'function createRedeemAdmin(bytes32 hash, string metadata, uint64 validAfter, uint64 validBefore)',
 ])
-const CREATE_REDEEM_ADMIN_SELECTOR = createRedeemAdminIface.getFunction('createRedeemAdmin')?.selector ?? ''
+const createRedeemAdmin5ArgIface = new ethers.Interface([
+	'function createRedeemAdmin(bytes32 hash, string metadata, uint64 validAfter, uint64 validBefore, uint256 mintLimit)',
+])
+const CREATE_REDEEM_ADMIN_4_SELECTOR = createRedeemAdmin4ArgIface.getFunction('createRedeemAdmin')?.selector ?? ''
+const CREATE_REDEEM_ADMIN_5_SELECTOR = createRedeemAdmin5ArgIface.getFunction('createRedeemAdmin')?.selector ?? ''
 
 /** cardClearAdminMintCounter 集群预检：parent admin 签字清零 subordinate 的 mint 计数。校验 signer == card.adminParent(subordinate)。 */
 export const cardClearAdminMintCounterPreCheck = async (body: {
@@ -5324,7 +5333,7 @@ export const cardClearAdminMintCounterProcess = async (payload: {
 	return { success: true, tx: txCard.hash }
 }
 
-/** cardCreateRedeemAdmin 集群预检：校验 data 为 createRedeemAdmin(hash, metadata, validAfter, validBefore)，hash 非零，card 存在。合格转发 master executeForOwner。 */
+/** cardCreateRedeemAdmin 集群预检：校验 data 为 createRedeemAdmin(hash, metadata, validAfter, validBefore[, mintLimit])，hash 非零，card 存在。合格转发 master executeForOwner。 */
 export const cardCreateRedeemAdminPreCheck = async (body: {
 	cardAddress?: string
 	data?: string
@@ -5335,11 +5344,13 @@ export const cardCreateRedeemAdminPreCheck = async (body: {
 	const { cardAddress, data, deadline, nonce, ownerSignature } = body
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
-	if (data.slice(0, 10).toLowerCase() !== CREATE_REDEEM_ADMIN_SELECTOR.toLowerCase()) {
-		return { success: false, error: 'Data must be createRedeemAdmin(bytes32,string,uint64,uint64) calldata' }
+	const dataSelector = data.slice(0, 10).toLowerCase()
+	if (dataSelector !== CREATE_REDEEM_ADMIN_4_SELECTOR.toLowerCase() && dataSelector !== CREATE_REDEEM_ADMIN_5_SELECTOR.toLowerCase()) {
+		return { success: false, error: 'Data must be createRedeemAdmin(bytes32,string,uint64,uint64) or createRedeemAdmin(...,uint256 mintLimit) calldata' }
 	}
 	try {
-		const decoded = createRedeemAdminIface.parseTransaction({ data })
+		const iface = dataSelector === CREATE_REDEEM_ADMIN_5_SELECTOR.toLowerCase() ? createRedeemAdmin5ArgIface : createRedeemAdmin4ArgIface
+		const decoded = iface.parseTransaction({ data })
 		if (!decoded || decoded.name !== 'createRedeemAdmin') return { success: false, error: 'Invalid createRedeemAdmin calldata' }
 		const [hash] = decoded.args
 		if (!hash || hash === ethers.ZeroHash) return { success: false, error: 'hash must be non-zero (keccak256 of secret code)' }
