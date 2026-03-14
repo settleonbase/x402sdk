@@ -46,6 +46,7 @@ const LATEST_CARDS_EXCLUDED = new Set([
 	'0x4cc2e5a596791cb71e34d7b3177e60f6ab3f73ed',
 	'0xcdab59228695bbf2137d56382395f854267194e1',
 	'0x3957724e39e3db4f9f5fb263dd18e73fe8a67581',
+	'0x4cb611a14b1441d36183f125503f2c72af5b8fc8',
 ])
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
@@ -2879,7 +2880,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
 		try {
-			const BEAMIO_INDEXER = '0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612'
+			const BEAMIO_INDEXER = '0x9d481CC9Da04456e98aE2FD6eB6F18e37bf72eb5'
 			const CONET_BUINT = '0x4A3E59519eE72B9Dcf376f0617fF0a0a5a1ef879'
 			const INDEXER_ABI = ['function getAccountTransactionsPaged(address account, uint256 offset, uint256 limit) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)']
 			const TX_BUINT_CLAIM = ethers.keccak256(ethers.toUtf8Bytes('buintClaim'))
