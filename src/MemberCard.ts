@@ -2768,6 +2768,46 @@ const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; point
 	return null
 }
 
+type CardTier = {
+	index: number
+	minUsdc6: bigint
+	attr: bigint
+	tierExpirySeconds: bigint
+	upgradeByBalance: boolean
+}
+
+const MAX_CARD_TIER_SCAN = 256
+
+/**
+ * 新卡 tier 读取：
+ * - 直接使用 public tiers(uint256) getter
+ * - 越界时 RPC/合约会 revert，此时停止扫描
+ */
+const readCardTiers = async (
+	card: ethers.Contract,
+	cardAddress: string
+): Promise<CardTier[]> => {
+	const tiers: CardTier[] = []
+	for (let i = 0; i < MAX_CARD_TIER_SCAN; i++) {
+		try {
+			const tier = await card.tiers(i) as [bigint, bigint, bigint, boolean]
+			tiers.push({
+				index: i,
+				minUsdc6: BigInt(tier[0]),
+				attr: BigInt(tier[1]),
+				tierExpirySeconds: BigInt(tier[2]),
+				upgradeByBalance: Boolean(tier[3]),
+			})
+		} catch {
+			break
+		}
+	}
+	if (tiers.length === 0) {
+		logger(Colors.gray(`[readCardTiers] no tiers found for ${cardAddress}`))
+	}
+	return tiers
+}
+
 /** Cluster 预检（USDC topup）：卡发行方 owner 的 B-Units 是否足够。
  * 规则：
  * 1) 用户不拥有可用卡 NFT（需发行新卡）=> 99 B-Units（kind=issueCard）
@@ -2793,8 +2833,7 @@ export const nfcTopupPreCheckBUnitFee = async (
 			'function activeMembershipId(address) view returns (uint256)',
 			'function activeTierIndexOrMax(address) view returns (uint256)',
 			'function balanceOf(address,uint256) view returns (uint256)',
-			'function getTiersCount() view returns (uint256)',
-			'function getTierAt(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
+			'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
 			'function getOwnershipByEOA(address) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 		]
 		const factoryAbi = ['function _aaFactory() view returns (address)']
@@ -2815,11 +2854,11 @@ export const nfcTopupPreCheckBUnitFee = async (
 		if (!recipientAA || recipientAA === ethers.ZeroAddress) {
 			requiresIssueOrUpgrade = true
 		} else {
-			const [activeId, activeTierIdx, tiersCount, ownership] = await Promise.all([
+			const [activeId, activeTierIdx, ownership, tiers] = await Promise.all([
 				card.activeMembershipId(recipientAA),
 				card.activeTierIndexOrMax(recipientAA),
-				card.getTiersCount(),
 				card.getOwnershipByEOA(parsed.recipient) as Promise<[bigint, Array<{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }>]>,
+				readCardTiers(card, cardAddr),
 			])
 			const MAX_UINT = 2n ** 256n - 1n
 			const nfts = ownership[1] ?? []
@@ -2827,19 +2866,19 @@ export const nfcTopupPreCheckBUnitFee = async (
 			// 用户不拥有可用卡 NFT：按发行新卡收费
 			if (!hasUsableMembershipNft || activeId === 0n || activeTierIdx >= MAX_UINT) {
 				requiresIssueOrUpgrade = true
-			} else if (tiersCount > 0n && activeTierIdx < tiersCount - 1n) {
+			} else if (tiers.length > 0 && activeTierIdx < BigInt(tiers.length - 1)) {
 				const nextTierIdx = activeTierIdx + 1n
 				const alreadyHasNextTier = nfts.some(
 					(n: { tierIndexOrMax: bigint; isExpired: boolean }) =>
 						n.tierIndexOrMax === nextTierIdx && !n.isExpired
 				)
 				if (!alreadyHasNextTier) {
-					const nextTier = await card.getTierAt(nextTierIdx)
+					const nextTier = tiers[Number(nextTierIdx)]
 					const pointsBalance = await card.balanceOf(recipientAA, 0)
-					if (nextTier.upgradeByBalance) {
+					if (nextTier?.upgradeByBalance) {
 						if (pointsBalance + parsed.points6 >= nextTier.minUsdc6) requiresIssueOrUpgrade = true
 					} else {
-						if (parsed.points6 >= nextTier.minUsdc6) requiresIssueOrUpgrade = true
+						if (nextTier && parsed.points6 >= nextTier.minUsdc6) requiresIssueOrUpgrade = true
 					}
 				}
 			}
@@ -5869,23 +5908,15 @@ const resolveUsdcTopupRules = async (
 			cardAddress,
 			[
 				'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
-				'function getTiersCount() view returns (uint256)',
-				'function getTierAt(uint256 idx) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
+				'function tiers(uint256 idx) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
 			],
 			SC.walletBase
 		)
 
-		const [[pt, nftsRaw], tiersCountRaw] = await Promise.all([
+		const [[pt, nftsRaw], tiers] = await Promise.all([
 			card.getOwnershipByEOA(from) as Promise<[bigint, Array<{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }>]>,
-			card.getTiersCount() as Promise<bigint>,
+			readCardTiers(card, cardAddress),
 		])
-
-		const tiersCount = Number(tiersCountRaw)
-		const tiers: Array<{ index: number; minUsdc6: bigint }> = []
-		for (let i = 0; i < tiersCount; i++) {
-			const [minUsdc6] = await card.getTierAt(i) as [bigint, bigint, bigint, boolean]
-			tiers.push({ index: i, minUsdc6 })
-		}
 		const tiersSorted = [...tiers].sort((a, b) => (a.minUsdc6 < b.minUsdc6 ? -1 : a.minUsdc6 > b.minUsdc6 ? 1 : 0))
 		const minTierPoints6 = tiersSorted.length > 0 ? tiersSorted[0].minUsdc6 : 0n
 
