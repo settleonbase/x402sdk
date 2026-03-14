@@ -1,0 +1,5 @@
+# op-node NUMA binding (node3, same as op-reth)
+# Compose v5 不支持 cpuset 字段，改用 docker update：
+#   docker update --cpuset-cpus "24-31,56-63" --cpuset-mems "3" base-op-node
+# 或执行: ./apply-op-node-numa.sh
+# 持久化: 在 op-node 重启后运行 apply-op-node-numa.sh

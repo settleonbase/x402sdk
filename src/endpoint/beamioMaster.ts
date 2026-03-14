@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 
 const masterServerPort = 1111
@@ -748,7 +748,7 @@ const routing = ( router: Router ) => {
 		})
 
 		router.post('/purchasingCard', (req, res) => {
-			const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked } = req.body as {
+			const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked, recommender } = req.body as {
 				cardAddress: string
 				userSignature: string
 				nonce: string
@@ -757,6 +757,7 @@ const routing = ( router: Router ) => {
 				validAfter: string
 				validBefore: string
 				preChecked?: import('../MemberCard').PurchasingCardPreChecked
+				recommender?: string
 			}
 
 			purchasingCardPool.push({
@@ -768,7 +769,8 @@ const routing = ( router: Router ) => {
 				validAfter,
 				validBefore,
 				res: res,
-				...(preChecked != null && { preChecked })
+				...(preChecked != null && { preChecked }),
+				...(recommender != null && recommender !== '' && { recommender })
 			})
 
 			logger(` Master GOT /api/purchasingCard ${preChecked ? '[preChecked]' : ''} doing purchasingCardProcess...`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preChecked }, false, 3, true))
@@ -779,7 +781,7 @@ const routing = ( router: Router ) => {
 
 		/** USDC Topup（cluster 已完成完整预检）：master 直接入 purchasingCard 队列执行。 */
 		router.post('/usdcTopup', (req, res) => {
-			const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked } = req.body as {
+			const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked, recommender } = req.body as {
 				cardAddress: string
 				userSignature: string
 				nonce: string
@@ -788,6 +790,7 @@ const routing = ( router: Router ) => {
 				validAfter: string
 				validBefore: string
 				preChecked?: import('../MemberCard').PurchasingCardPreChecked
+				recommender?: string
 			}
 			purchasingCardPool.push({
 				cardAddress,
@@ -799,6 +802,7 @@ const routing = ( router: Router ) => {
 				validBefore,
 				res,
 				...(preChecked != null && { preChecked }),
+				...(recommender != null && recommender !== '' && { recommender })
 			})
 			logger(` Master GOT /api/usdcTopup ${preChecked ? '[preChecked]' : ''} -> purchasingCardProcess`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preChecked }, false, 3, true))
 			purchasingCardProcess().catch((err: any) => {
@@ -998,6 +1002,37 @@ const routing = ( router: Router ) => {
 			cardRedeemProcess().catch((err: any) => {
 				logger(Colors.red('[cardRedeemProcess] unhandled error:'), err?.message ?? err)
 			})
+		})
+
+		/** cardRedeemAdmin：用户兑换 redeem-admin 码，添加 to 为 admin，服务端 redeemAdminForUser */
+		router.post('/cardRedeemAdmin', (req, res) => {
+			const { cardAddress, redeemCode, to } = req.body as { cardAddress?: string; redeemCode?: string; to?: string }
+			if (!cardAddress || !redeemCode || !to || !ethers.isAddress(cardAddress) || !ethers.isAddress(to)) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, to' })
+			}
+			cardRedeemAdminPool.push({ cardAddress, redeemCode, to, res })
+			logger(Colors.cyan(`[cardRedeemAdmin] pushed to pool, card=${cardAddress} to=${to}`))
+			cardRedeemAdminProcess().catch((err: any) => {
+				logger(Colors.red('[cardRedeemAdminProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		/** cardClearAdminMintCounter：parent admin 签字清零 subordinate 的 mint 计数。Cluster 已预检，Master 调用 Factory（Card）+ Indexer */
+		router.post('/cardClearAdminMintCounter', async (req, res) => {
+			const { cardAddress, subordinate, deadline, nonce, adminSignature } = req.body as {
+				cardAddress?: string; subordinate?: string; deadline?: number; nonce?: string; adminSignature?: string
+			}
+			if (!cardAddress || !subordinate || !ethers.isAddress(cardAddress) || !ethers.isAddress(subordinate)) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, subordinate' }).end()
+			}
+			if (deadline == null || !nonce || !adminSignature) {
+				return res.status(400).json({ success: false, error: 'Missing: deadline, nonce, adminSignature' }).end()
+			}
+			const result = await cardClearAdminMintCounterProcess({ cardAddress, subordinate, deadline, nonce, adminSignature })
+			if (!result.success) {
+				return res.status(400).json(result).end()
+			}
+			return res.status(200).json({ success: true, tx: result.tx }).end()
 		})
 
 		router.post('/executeForOwner', async (req, res) => {

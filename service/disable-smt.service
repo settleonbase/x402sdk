@@ -1,0 +1,11 @@
+[Unit]
+Description=Disable SMT (AMD EPYC: execution client cache-heavy, SMT shares L1/L2)
+# Run before any execution clients
+Before=disable-thp.service geth.service lighthouse.service base-op-reth-native.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo off > /sys/devices/system/cpu/smt/control'
+
+[Install]
+WantedBy=multi-user.target

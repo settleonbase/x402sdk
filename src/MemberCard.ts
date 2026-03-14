@@ -21,9 +21,9 @@ import TaskABI from "./ABI/TaskABI.json";
 import StatsABI from "./ABI/StatsABI.json";
 import CatalogABI from "./ABI/CatalogABI.json";
 import ActionABI from "./ABI/ActionABI.json";
-/** syncTokenAction(TransactionInput) - 与 ActionFacet.sol 当前实现一致，用于 beamioTransferIndexerAccounting */
+/** syncTokenAction(TransactionInput) - 与 ActionFacet.sol 当前实现一致。operator 非零时用于 admin 维度 token #0 mint/burn 统计；operatorParentChain 为 parent 链，B 的 mint/burn 也累积到链上各 admin */
 const ACTION_SYNC_TOKEN_ABI = [
-	'function syncTokenAction((bytes32 txId, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta) in_) returns (uint256 actionId)',
+	'function syncTokenAction((bytes32 txId, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, address operator, address[] operatorParentChain) in_) returns (uint256 actionId)',
 ] as const
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
@@ -820,6 +820,25 @@ export const nfcTopupPreparePayload = async (params: {
 	return { cardAddr, data, deadline, nonce }
 }
 
+/** Burn Points Prepare：生成 executeForAdmin 所需的 data、deadline、nonce。Admin 离线签字后提交 /api/nfcTopup。target 为被 burn 的地址，amount 为 "max" 表示 burn 全部。 */
+export const burnPointsByAdminPreparePayload = async (params: {
+	cardAddress: string
+	target: string
+	amount: string
+}): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string } | { error: string }> => {
+	const { cardAddress, target, amount } = params
+	if (!cardAddress || !ethers.isAddress(cardAddress.trim())) return { error: 'Missing or invalid cardAddress' }
+	if (!target || !ethers.isAddress(target.trim())) return { error: 'Missing or invalid target' }
+	const amt = amount === 'max' || amount === 'all' ? ethers.MaxUint256 : BigInt(amount ?? '0')
+	if (amt <= 0n && amt !== ethers.MaxUint256) return { error: 'Invalid amount (use "max" for burn all)' }
+	const cardAddr = ethers.getAddress(cardAddress.trim())
+	const iface = new ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)'])
+	const data = iface.encodeFunctionData('burnPointsByAdmin', [ethers.getAddress(target.trim()), amt])
+	const deadline = Math.floor(Date.now() / 1000) + 900
+	const nonce = ethers.hexlify(ethers.randomBytes(32))
+	return { cardAddr, data, deadline, nonce }
+}
+
 /** executeForAdmin 队列：Master 用 paymaster 调用 factory.executeForAdmin */
 export const executeForAdminPool: Array<{
 	cardAddr: string
@@ -875,6 +894,21 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 	} catch (e: any) {
 		return { ok: false, error: e?.message ?? String(e) }
 	}
+}
+
+/** 从 card 拉取 operator 的 parent 链（从直接 parent 到根），用于 syncTokenAction 的 operatorParentChain，B 的 mint/burn 累积到链上各 admin */
+const fetchOperatorParentChain = async (cardAddr: string, operator: string): Promise<string[]> => {
+	const chain: string[] = []
+	const cardAbi = ['function adminParent(address) view returns (address)']
+	const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+	let current = operator
+	for (let i = 0; i < 32; i++) {
+		const parent = await card.adminParent(current) as string
+		if (!parent || parent === ethers.ZeroAddress) break
+		chain.push(ethers.getAddress(parent))
+		current = parent
+	}
+	return chain
 }
 
 /** 从 executeForAdmin 的 data 中解析 mintPointsByAdmin(toEOA, points6) 的 toEOA，供 NFC Topup 前置 DeployingSmartAccount */
@@ -1136,6 +1170,8 @@ export const executeForAdminProcess = async () => {
 						afterNotePayer: '',
 						afterNotePayee: '',
 					},
+					operator: ethers.getAddress(adminCheck.signer),
+					operatorParentChain: await fetchOperatorParentChain(obj.cardAddr, adminCheck.signer),
 				}
 				const syncTxHash = await runPurchasingCardAccountingJob(
 					{
@@ -1375,6 +1411,8 @@ export const purchasingCardPool: {
 	validBefore: string
 	res: Response
 	preChecked?: PurchasingCardPreChecked
+	/** Recommender 地址；非零时必须为 card admin，统计时 operator=recommender；为零则 operator=owner */
+	recommender?: string
 }[] = []
 
 /** 用户兑换 redeem 码：仅 redeemForUser，无需 owner 签名。paymaster 代付 gas。 */
@@ -1392,6 +1430,8 @@ export const cardRedeemIndexerAccountingPool: {
 	aaAddress: string
 	txHash: string
 	beforeNfts?: unknown[]
+	/** 创建 redeem 的 admin/owner，兑换时计入其统计及 parent 链；0 则用 card owner 兜底 */
+	creator?: string
 }[] = []
 
 /** 通用 executeForOwner：客户端提交 owner 签名的 calldata，服务端免 gas 执行。可选 redeemCode+toUserEOA 时额外执行 redeemForUser（空投）。可选 description/image/background_color 用于 createIssuedNft 后组装 EIP-1155 metadata。 */
@@ -1717,6 +1757,8 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				afterNotePayer: '',
 				afterNotePayee: obj.displayJson || obj.note || '',
 			},
+			operator: ethers.ZeroAddress,
+			operatorParentChain: [],
 		}
 
 		// BeamioTransfer x402：转账成功后扣 2 B-Units（由 payer 负担）
@@ -1934,6 +1976,8 @@ export const requestAccountingProcess = async () => {
 				afterNotePayer: '',
 				afterNotePayee: obj.forText || '',
 			},
+			operator: ethers.ZeroAddress,
+			operatorParentChain: [],
 		}
 
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
@@ -2131,6 +2175,8 @@ export const cancelRequestAccountingProcess = async () => {
 			route: routeForCancel,
 			fees: { gasChainType: 0, gasWei: 0n, gasUSDC6: 0n, serviceUSDC6: 0n, bServiceUSDC6: 0n, bServiceUnits6: 0n, feePayer: ethers.ZeroAddress },
 			meta: { requestAmountFiat6: 0n, requestAmountUSDC6: 0n, currencyFiat: 1, discountAmountFiat6: 0n, discountRateBps: 0, taxAmountFiat6: 0n, taxRateBps: 0, afterNotePayer: '', afterNotePayee: '' },
+			operator: ethers.ZeroAddress,
+			operatorParentChain: [],
 		}
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 		const tx = await actionFacetSync.syncTokenAction(transactionInput)
@@ -2512,6 +2558,8 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 				afterNotePayer: '',
 				afterNotePayee: '',
 			},
+			operator: (obj.creator && obj.creator !== ethers.ZeroAddress) ? ethers.getAddress(obj.creator) : payerAddr,
+			operatorParentChain: await fetchOperatorParentChain(obj.cardAddress, (obj.creator && obj.creator !== ethers.ZeroAddress) ? obj.creator : payerAddr),
 		}
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 		const tx = await actionFacetSync.syncTokenAction(transactionInput)
@@ -3120,6 +3168,8 @@ type PurchasingCardAccountingInput = {
 		afterNotePayer: string
 		afterNotePayee: string
 	}
+	operator?: string
+	operatorParentChain?: string[]
 }
 
 type PurchasingCardAccountingRetryJob = {
@@ -3358,19 +3408,35 @@ export const purchasingCardProcess = async () => {
 
 		// 新合约设计：购点通过 Card Factory.buyPointsForUser，不再直接调用 card.buyPointsWith3009Authorization
 		// 显式使用 BASE_CARD_FACTORY，避免错误配置导致调用到卡地址（卡无 buyPointsForUser 会 revert）
-		const cardFactory = new ethers.Contract(BASE_CARD_FACTORY, BeamioFactoryPaymasterABI, SC.walletBase)
+		const factoryAbiWithTopupRecommender = [
+			...BeamioFactoryPaymasterABI,
+			'function buyPointsForUser(address cardAddr,address fromEOA,uint256 usdcAmount6,uint256 validAfter,uint256 validBefore,bytes32 nonce,bytes signature,uint256 minPointsOut6,address recommender) returns (uint256)',
+		] as ethers.InterfaceAbi
+		const cardFactory = new ethers.Contract(BASE_CARD_FACTORY, factoryAbiWithTopupRecommender, SC.walletBase)
 		const nonceBytes32 = (typeof nonce === 'string' && nonce.startsWith('0x') ? ethers.zeroPadValue(nonce, 32) : ethers.zeroPadValue(ethers.toBeHex(BigInt(nonce)), 32)) as `0x${string}`
 		logger(Colors.gray(`[purchasingCardProcess] buyPointsForUser factory=${BASE_CARD_FACTORY} card=${cardAddress}`))
-		const tx = await cardFactory.buyPointsForUser(
-			cardAddress,
-			from,
-			usdcAmount,
-			validAfter,
-			validBefore,
-			nonceBytes32,
-			userSignature,
-			0
-		)
+		const tx = await (obj.recommender && obj.recommender !== ethers.ZeroAddress
+			? cardFactory["buyPointsForUser(address,address,uint256,uint256,uint256,bytes32,bytes,uint256,address)"](
+				cardAddress,
+				from,
+				usdcAmount,
+				validAfter,
+				validBefore,
+				nonceBytes32,
+				userSignature,
+				0,
+				obj.recommender
+			)
+			: cardFactory["buyPointsForUser(address,address,uint256,uint256,uint256,bytes32,bytes,uint256)"](
+				cardAddress,
+				from,
+				usdcAmount,
+				validAfter,
+				validBefore,
+				nonceBytes32,
+				userSignature,
+				0
+			))
 		logger(Colors.green(`✅ purchasingCardProcess tx submitted Hash: ${tx.hash}`))
 
 		await tx.wait().catch((waitErr: any) => {
@@ -3384,6 +3450,19 @@ export const purchasingCardProcess = async () => {
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
 		const to = owner
+		// operator: recommender 非零且为 admin 时计入 recommender 统计；否则计入 owner 链
+		let operatorAddr: string
+		if (obj.recommender && obj.recommender !== ethers.ZeroAddress) {
+			try {
+				const cardRead = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], SC.walletBase)
+				const isAdmin = await cardRead.isAdmin(ethers.getAddress(obj.recommender)) as boolean
+				operatorAddr = isAdmin ? ethers.getAddress(obj.recommender) : ethers.getAddress(to)
+			} catch (_) {
+				operatorAddr = ethers.getAddress(to)
+			}
+		} else {
+			operatorAddr = ethers.getAddress(to)
+		}
 		const currency = getICurrency(BigInt(_currency))
 		// cardMeta already validated before buyPointsForUser
 		const metadata = cardMeta.metadata as { shareTokenMetadata?: { name?: string }; name?: string } | undefined
@@ -3494,6 +3573,8 @@ export const purchasingCardProcess = async () => {
 				afterNotePayer: '',
 				afterNotePayee: '',
 			},
+			operator: operatorAddr,
+			operatorParentChain: await fetchOperatorParentChain(cardAddress, operatorAddr),
 		}
 		
 		
@@ -4980,7 +5061,7 @@ export const getRedeemStatusBatchApi = async (
 	return result
 }
 
-/** cardAddAdmin 集群预检：校验 data 为 addAdmin，newAdmin 为 EOA（非 AA），card 存在。合格转发 master executeForOwner。 */
+/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold)。admin=true 时 to 必须为 EOA。合格转发 master executeForOwner。 */
 export const cardAddAdminPreCheck = async (body: {
 	cardAddress?: string
 	data?: string
@@ -4991,26 +5072,28 @@ export const cardAddAdminPreCheck = async (body: {
 	const { cardAddress, data, deadline, nonce, ownerSignature } = body
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
-	const addAdminIface = new ethers.Interface(['function addAdmin(address newAdmin, uint256 newThreshold)'])
-	const expectedSelector = addAdminIface.getFunction('addAdmin')?.selector ?? ''
+	const adminManagerIface = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
+	const expectedSelector = adminManagerIface.getFunction('adminManager')?.selector ?? ''
 	if (data.slice(0, 10).toLowerCase() !== expectedSelector.toLowerCase()) {
-		return { success: false, error: 'Data must be addAdmin(address,uint256) calldata' }
+		return { success: false, error: 'Data must be adminManager(address,bool,uint256,string) calldata' }
 	}
 	try {
-		const iface = new ethers.Interface(['function addAdmin(address newAdmin, uint256 newThreshold)'])
-		const decoded = iface.parseTransaction({ data })
-		if (!decoded || decoded.name !== 'addAdmin') return { success: false, error: 'Invalid addAdmin calldata' }
-		const newAdmin = decoded.args[0] as string
-		if (!newAdmin || !ethers.isAddress(newAdmin)) return { success: false, error: 'Invalid newAdmin address' }
-		const pool = Settle_ContractPool
-		if (pool?.length) {
-			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-			const [codeAtCard, codeAtAdmin] = await Promise.all([
-				provider.getCode(cardAddress),
-				provider.getCode(newAdmin),
-			])
-			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
-			if (codeAtAdmin && codeAtAdmin !== '0x') return { success: false, error: 'newAdmin must be EOA (AA/smart contract not allowed)' }
+		const decoded = adminManagerIface.parseTransaction({ data })
+		if (!decoded || decoded.name !== 'adminManager') return { success: false, error: 'Invalid adminManager calldata' }
+		const to = decoded.args[0] as string
+		const admin = decoded.args[1] as boolean
+		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
+		if (admin) {
+			const pool = Settle_ContractPool
+			if (pool?.length) {
+				const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+				const [codeAtCard, codeAtTo] = await Promise.all([
+					provider.getCode(cardAddress),
+					provider.getCode(to),
+				])
+				if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+				if (codeAtTo && codeAtTo !== '0x') return { success: false, error: 'to must be EOA when adding admin (AA/smart contract not allowed)' }
+			}
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 		return { success: true }
@@ -5129,6 +5212,155 @@ export const cardCreateIssuedNftPreCheck = async (body: {
 		return { success: true }
 	} catch (e: any) {
 		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+const createRedeemAdminIface = new ethers.Interface([
+	'function createRedeemAdmin(bytes32 hash, string metadata, uint64 validAfter, uint64 validBefore)',
+])
+const CREATE_REDEEM_ADMIN_SELECTOR = createRedeemAdminIface.getFunction('createRedeemAdmin')?.selector ?? ''
+
+/** cardClearAdminMintCounter 集群预检：parent admin 签字清零 subordinate 的 mint 计数。校验 signer == card.adminParent(subordinate)。 */
+export const cardClearAdminMintCounterPreCheck = async (body: {
+	cardAddress?: string
+	subordinate?: string
+	deadline?: number
+	nonce?: string
+	adminSignature?: string
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, subordinate, deadline, nonce, adminSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!subordinate || !ethers.isAddress(subordinate)) return { success: false, error: 'Invalid subordinate' }
+	if (deadline == null || !nonce || !adminSignature) return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
+	if (deadline < Math.floor(Date.now() / 1000)) return { success: false, error: 'Signature expired' }
+	try {
+		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], providerBaseBackup)
+		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
+		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
+		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract: BASE_CARD_FACTORY }
+		const types = { ClearAdminMintCounter: [{ name: 'cardAddress', type: 'address' }, { name: 'subordinate', type: 'address' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
+		const nonceBytes = nonce.length === 66 && nonce.startsWith('0x') ? (nonce as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`
+		const value = { cardAddress: ethers.getAddress(cardAddress), subordinate: ethers.getAddress(subordinate), deadline: Number(deadline), nonce: nonceBytes }
+		const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+		const signer = ethers.recoverAddress(digest, adminSignature)
+		if (ethers.getAddress(signer) !== ethers.getAddress(parent)) {
+			return { success: false, error: 'Signer must be subordinate\'s parent admin' }
+		}
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+/** cardClearAdminMintCounter 执行：Master 调用 Factory.executeClearAdminMintCounter（Card 链上记账）与 Indexer.clearAdminMintCounterForSubordinate。 */
+export const cardClearAdminMintCounterProcess = async (payload: {
+	cardAddress: string
+	subordinate: string
+	deadline: number
+	nonce: string
+	adminSignature: string
+}): Promise<{ success: true; tx: string } | { success: false; error: string }> => {
+	const { cardAddress, subordinate, deadline, nonce, adminSignature } = payload
+	const pool = Settle_ContractPool
+	if (!pool?.length) return { success: false, error: 'Settle_ContractPool empty' }
+	const SC = pool[0]
+	const nonceBytes32 = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+
+	// 1) Card 链上记账：Factory.executeClearAdminMintCounter
+	const factoryAbi = ['function executeClearAdminMintCounter(address cardAddress,address subordinate,uint256 deadline,bytes32 nonce,bytes adminSignature)']
+	const factory = new ethers.Contract(BASE_CARD_FACTORY, factoryAbi, SC.walletBase)
+	const txCard = await factory.executeClearAdminMintCounter(
+		ethers.getAddress(cardAddress),
+		ethers.getAddress(subordinate),
+		Number(deadline),
+		nonceBytes32,
+		adminSignature as `0x${string}`
+	)
+	await txCard.wait()
+
+	// 2) Indexer 记账
+	const statsFacet = new ethers.Contract(BeamioTaskIndexerAddress, StatsABI as ethers.InterfaceAbi, SC.walletConet)
+	const txIndexer = await statsFacet.clearAdminMintCounterForSubordinate(ethers.getAddress(cardAddress), ethers.getAddress(subordinate))
+	await txIndexer.wait()
+	return { success: true, tx: txCard.hash }
+}
+
+/** cardCreateRedeemAdmin 集群预检：校验 data 为 createRedeemAdmin(hash, metadata, validAfter, validBefore)，hash 非零，card 存在。合格转发 master executeForOwner。 */
+export const cardCreateRedeemAdminPreCheck = async (body: {
+	cardAddress?: string
+	data?: string
+	deadline?: number
+	nonce?: string
+	ownerSignature?: string
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, data, deadline, nonce, ownerSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
+	if (data.slice(0, 10).toLowerCase() !== CREATE_REDEEM_ADMIN_SELECTOR.toLowerCase()) {
+		return { success: false, error: 'Data must be createRedeemAdmin(bytes32,string,uint64,uint64) calldata' }
+	}
+	try {
+		const decoded = createRedeemAdminIface.parseTransaction({ data })
+		if (!decoded || decoded.name !== 'createRedeemAdmin') return { success: false, error: 'Invalid createRedeemAdmin calldata' }
+		const [hash] = decoded.args
+		if (!hash || hash === ethers.ZeroHash) return { success: false, error: 'hash must be non-zero (keccak256 of secret code)' }
+		const pool = Settle_ContractPool
+		if (pool?.length) {
+			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+			const codeAtCard = await provider.getCode(cardAddress)
+			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+		}
+		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+/** cardRedeemAdmin：用户兑换 redeem-admin 码，添加 to 为 admin。服务端调用 factory.redeemAdminForUser。 */
+export const cardRedeemAdminPool: {
+	cardAddress: string
+	redeemCode: string
+	to: string
+	res?: Response
+}[] = []
+
+/** cardRedeemAdminProcess：用户兑换 redeem-admin 码，服务端调用 factory.redeemAdminForUser，将 to 添加为 admin。 */
+export const cardRedeemAdminProcess = async () => {
+	const obj = cardRedeemAdminPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		cardRedeemAdminPool.unshift(obj)
+		return setTimeout(() => cardRedeemAdminProcess(), 3000)
+	}
+	logger(Colors.cyan(`[cardRedeemAdminProcess] processing card=${obj.cardAddress} to=${obj.to} codeLen=${obj.redeemCode?.length ?? 0}`))
+	try {
+		const factory = SC.baseFactoryPaymaster
+		const tx = await factory.redeemAdminForUser(obj.cardAddress, obj.redeemCode, obj.to)
+		await tx.wait()
+		const txHash = tx.hash
+		logger(Colors.green(`✅ cardRedeemAdminProcess card=${obj.cardAddress} to=${obj.to} tx=${txHash}`))
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, tx: txHash }).end()
+	} catch (e: any) {
+		const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
+		logger(Colors.red(`❌ cardRedeemAdminProcess failed:`), errMsg)
+		const dataHex = typeof e?.data === 'string' ? e.data
+			: (e?.data && typeof e.data === 'object' && typeof (e.data as any).data === 'string') ? (e.data as any).data
+			: e?.info?.error?.data ?? e?.error?.data ?? ''
+		const dataStr = String(dataHex || errMsg)
+		let clientError = errMsg
+		if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669|UC_PoolAlreadyClaimed|0x038039a7/.test(dataStr)) {
+			if (/UC_InvalidTimeWindow|0xf88c1f68/.test(dataStr)) {
+				clientError = 'Redeem admin code has expired. Check validAfter/validBefore.'
+			} else {
+				clientError = 'Code not found or already used. Please ensure you\'re redeeming against the correct card.'
+			}
+		}
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: clientError }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => cardRedeemAdminProcess(), 3000)
 	}
 }
 
@@ -5402,6 +5634,13 @@ export const cardRedeemProcess = async () => {
 		}
 		let txHash: string | null = null
 		let lastErr: any = null
+		// 兑换前获取 creator（用于 syncTokenAction operator 统计）
+		let creator: string | undefined
+		try {
+			const cardRead = new ethers.Contract(obj.cardAddress, ['function getRedeemCreator(string) view returns (address)'], SC.walletBase)
+			creator = await cardRead.getRedeemCreator(obj.redeemCode) as string
+			if (creator === ethers.ZeroAddress) creator = undefined
+		} catch (_) { /* 旧卡无 getRedeemCreator 时忽略 */ }
 		// 先尝试 one-time redeem；若 UC_InvalidProposal（code 可能为 pool 类型）则回退到 redeemPoolForUser
 		try {
 			const tx1 = await factory.redeemForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
@@ -5440,6 +5679,7 @@ export const cardRedeemProcess = async () => {
 				aaAddress: addr,
 				txHash,
 				beforeNfts,
+				creator: creator ? ethers.getAddress(creator) : undefined,
 			})
 			cardRedeemIndexerAccountingProcess().catch((err: any) => {
 				logger(Colors.red('[cardRedeemIndexerAccountingProcess] unhandled:'), err?.message ?? err)
@@ -5470,6 +5710,63 @@ export const cardRedeemProcess = async () => {
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => cardRedeemProcess(), 3000)
+	}
+}
+
+/**
+ * 查询 card 的 admin 列表，连同 metadata、adminParent、mintCounter 一起回送。
+ * 使用 providerBaseBackup（card）和 providerConet（Indexer），不依赖 Settle_ContractPool。
+ */
+export const getCardAdminsWithMintCounter = async (cardAddress: string): Promise<{
+	success: true
+	admins: Array<{ address: string; metadata: string; parent: string; mintCounter: string }>
+} | { success: false; error: string }> => {
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	try {
+		const card = new ethers.Contract(cardAddress, [
+			'function getAdminList() view returns (address[])',
+			'function adminParent(address) view returns (address)',
+			'function getAdminMintCounter(address) view returns (uint256)',
+		], providerBaseBackup)
+		const adminList = await card.getAdminList() as string[]
+		const admins: Array<{ address: string; metadata: string; parent: string; mintCounter: string }> = []
+		for (const addr of adminList) {
+			if (!addr || addr === ethers.ZeroAddress) continue
+			const [parent, mintCounter] = await Promise.all([
+				card.adminParent(addr) as Promise<string>,
+				card.getAdminMintCounter(ethers.getAddress(addr)) as Promise<bigint>,
+			])
+			admins.push({
+				address: ethers.getAddress(addr),
+				metadata: '',
+				parent: parent ? ethers.getAddress(parent) : ethers.ZeroAddress,
+				mintCounter: String(mintCounter ?? 0n),
+			})
+		}
+		return { success: true, admins }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+/**
+ * 校验 USDC Topup 的 recommender：若提供则必须为 card admin，否则返回错误。
+ * 使用 providerBaseBackup，不依赖 Settle_ContractPool。
+ */
+export const validateRecommenderForTopup = async (
+	cardAddress: string,
+	recommender?: string
+): Promise<{ ok: true } | { ok: false; error: string }> => {
+	if (!recommender || recommender === ethers.ZeroAddress) return { ok: true }
+	if (!ethers.isAddress(recommender)) return { ok: false, error: 'Invalid recommender address' }
+	if (!ethers.isAddress(cardAddress)) return { ok: false, error: 'Invalid cardAddress' }
+	try {
+		const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], providerBaseBackup)
+		const isAdmin = await card.isAdmin(ethers.getAddress(recommender)) as boolean
+		if (!isAdmin) return { ok: false, error: 'Recommender must be card admin' }
+		return { ok: true }
+	} catch (e: any) {
+		return { ok: false, error: e?.message ?? String(e) }
 	}
 }
 

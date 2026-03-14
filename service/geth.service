@@ -1,0 +1,33 @@
+[Unit]
+Description=Ethereum Execution Layer (geth)
+After=network.target
+
+[Service]
+User=eth
+Type=simple
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+# NUMA: node3 (cpus 24-31, 32GB)
+ExecStart=/usr/bin/numactl --cpunodebind=3 --membind=3 -- /usr/bin/geth \
+  --mainnet \
+  --datadir=/media/sda/eth/geth \
+  \
+  --http --http.addr=0.0.0.0 --http.port=8545 \
+  --http.api=eth,net,web3,debug,txpool \
+  --http.vhosts="*" \
+  \
+  --ws --ws.addr=0.0.0.0 --ws.port=8546 \
+  --ws.api=eth,net,web3 \
+  --ws.origins="*" \
+  \
+  --authrpc.addr=0.0.0.0 --authrpc.port=8551 \
+  --authrpc.vhosts="*" \
+  --authrpc.jwtsecret=/media/sda/eth/jwt/jwt.hex \
+  \
+  --syncmode=snap \
+  --cache=32768
+
+[Install]
+WantedBy=multi-user.target

@@ -8,7 +8,7 @@ export const BASE_AA_FACTORY = '0xD86403DD1755F7add19540489Ea10cdE876Cc1CE'
  * Base 主网 BeamioUserCard 工厂地址 (BeamioUserCardFactoryPaymasterV07)。
  * 与 config/base-addresses.ts 一致。
  */
-export const BASE_CARD_FACTORY = '0x46E8a69f7296deF53e33844bb00D92309ab46233'
+export const BASE_CARD_FACTORY = '0xE091a0A974a40bCee36288193376294a19a293aE'
 
 /**
  * Base 主网 CCSA 卡地址（BeamioUserCard 实例，1 CAD = 1 token）。

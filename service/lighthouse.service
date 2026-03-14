@@ -1,0 +1,30 @@
+[Unit]
+Description=Ethereum Consensus Layer (Lighthouse)
+After=network.target geth.service
+Requires=geth.service
+
+[Service]
+User=eth
+Type=simple
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+# NUMA: node1 (cpus 8-15, 32GB)
+ExecStart=/usr/bin/numactl --cpunodebind=1 --membind=1 -- /usr/local/bin/lighthouse bn \
+  --network mainnet \
+  --datadir /media/sda/eth/lighthouse \
+  --execution-endpoint http://127.0.0.1:8551 \
+  --execution-jwt /media/sda/eth/jwt/jwt.hex \
+  \
+  --http \
+  --http-address 0.0.0.0 \
+  --http-port 5052 \
+  --http-allow-origin "*" \
+  \
+  --checkpoint-sync-url https://mainnet.checkpoint.sigp.io \
+  --target-peers 120 \
+  --supernode
+
+[Install]
+WantedBy=multi-user.target

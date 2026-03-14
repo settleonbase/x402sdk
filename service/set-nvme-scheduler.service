@@ -1,0 +1,12 @@
+[Unit]
+Description=Set NVMe IO scheduler to none
+# Run before block-heavy services
+Before=geth.service lighthouse.service base-op-reth-native.service
+
+[Service]
+Type=oneshot
+# NVMe has built-in scheduling; Linux scheduler adds latency for random IO
+ExecStart=/bin/sh -c 'for d in /sys/block/nvme*n1; do [ -f "$d/queue/scheduler" ] && echo none > "$d/queue/scheduler" && echo "Set $(basename $d) to none"; done'
+
+[Install]
+WantedBy=multi-user.target

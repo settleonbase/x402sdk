@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyBeamioSunRequest } from '../BeamioSun'
 
@@ -43,6 +43,7 @@ const LATEST_CARDS_EXCLUDED = new Set([
 	'0x407e9974a927af2860780645997778be7b0e8e23',
 	'0xea7b248cfcd457c4884371c55ae5afb0f428c483',
 	'0xe1666f0309529df18e7986064a337c981baea178',
+	'0x4cc2e5a596791cb71e34d7b3177e60f6ab3f73ed',
 ])
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
@@ -56,6 +57,7 @@ import { masterSetup } from '../util'
 
 const BASE_CHAIN_ID = 8453
 const MINT_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('mintPointsByAdmin(address,uint256)').slice(2, 10)
+const BURN_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('burnPointsByAdmin(address,uint256)').slice(2, 10)
 
 const ISSUED_NFT_START_ID = 100_000_000_000n
 
@@ -958,6 +960,14 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/payByNfcUid', { uid: uid.trim(), amountUsdc6: amountUsdc6, payee: ethers.getAddress(payee) }, res)
 	})
 
+	/** POST /api/burnPointsByAdminPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。Admin 离线签字后提交 /api/nfcTopup。target 为被 burn 的地址，amount 为 "max" 表示 burn 全部。 */
+	router.post('/burnPointsByAdminPrepare', async (req, res) => {
+		const { cardAddress, target, amount } = req.body as { cardAddress?: string; target?: string; amount?: string }
+		const result = await burnPointsByAdminPreparePayload({ cardAddress: cardAddress ?? '', target: target ?? '', amount: amount ?? '0' })
+		if ('error' in result) return res.status(400).json({ success: false, error: result.error })
+		res.status(200).json(result).end()
+	})
+
 	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）、wallet（Scan QR）或 beamioTag（Scan QR 的 beamio 参数，按 AccountRegistry 解析 EOA）。 */
 	router.post('/nfcTopupPrepare', async (req, res) => {
 		const { uid, wallet, beamioTag, amount, currency, cardAddress } = req.body as { uid?: string; wallet?: string; beamioTag?: string; amount?: string; currency?: string; cardAddress?: string }
@@ -1017,8 +1027,12 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce/adminSignature' })
 		}
 		try {
-			if (!data.startsWith(MINT_POINTS_BY_ADMIN_SELECTOR)) {
-				return res.status(400).json({ success: false, error: 'executeForAdmin only supports mintPointsByAdmin (topup)' })
+			const ADMIN_MANAGER_SELECTOR = '0x' + ethers.id('adminManager(address,bool,uint256,string)').slice(2, 10)
+			const isMint = data.startsWith(MINT_POINTS_BY_ADMIN_SELECTOR)
+			const isBurn = data.startsWith(BURN_POINTS_BY_ADMIN_SELECTOR)
+			const isAdminManager = data.startsWith(ADMIN_MANAGER_SELECTOR)
+			if (!isMint && !isBurn && !isAdminManager) {
+				return res.status(400).json({ success: false, error: 'executeForAdmin only supports mintPointsByAdmin, burnPointsByAdmin, or adminManager' })
 			}
 			const now = Math.floor(Date.now() / 1000)
 			if (now > deadline) {
@@ -1054,15 +1068,20 @@ const routing = ( router: Router ) => {
 			if (!isAdmin) {
 				return res.status(403).json({ success: false, error: 'Signer is not card admin' })
 			}
-			const recipientEOA = tryParseMintPointsByAdminRecipient(data)
-			if (!recipientEOA || !ethers.isAddress(recipientEOA)) {
-				return res.status(400).json({ success: false, error: 'Invalid mintPointsByAdmin payload' })
-			}
-			const aaAddr = recipientEOA ? await resolveBeamioAccountOf(recipientEOA) : null
-			const bunitFeeCheck = await nfcTopupPreCheckBUnitFee(cardAddress, data)
-			if (!bunitFeeCheck.success) {
-				logger(Colors.red(`[nfcTopup] B-Unit fee pre-check FAIL: ${bunitFeeCheck.error}`))
-				return res.status(400).json({ success: false, error: bunitFeeCheck.error }).end()
+			let recipientEOA: string | null = null
+			let aaAddr: string | null = null
+			let bunitFeeCheck: { success: boolean; error?: string; feeAmount?: bigint; cardOwnerEOA?: string; topupKind?: 2 | 3 } = { success: true }
+			if (isMint) {
+				recipientEOA = tryParseMintPointsByAdminRecipient(data)
+				if (!recipientEOA || !ethers.isAddress(recipientEOA)) {
+					return res.status(400).json({ success: false, error: 'Invalid mintPointsByAdmin payload' })
+				}
+				aaAddr = recipientEOA ? await resolveBeamioAccountOf(recipientEOA) : null
+				bunitFeeCheck = await nfcTopupPreCheckBUnitFee(cardAddress, data)
+				if (!bunitFeeCheck.success) {
+					logger(Colors.red(`[nfcTopup] B-Unit fee pre-check FAIL: ${bunitFeeCheck.error}`))
+					return res.status(400).json({ success: false, error: bunitFeeCheck.error }).end()
+				}
 			}
 			logger(Colors.green(`server /api/nfcTopup preCheck OK | uid=${uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'} | fee=${Number(bunitFeeCheck.feeAmount ?? 0) / 1e6} B-Units | forwarding to master`))
 			postLocalhost('/api/nfcTopup', {
@@ -1931,7 +1950,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.get('/BeamioTransfer', (req, res) => BeamioTransfer(req, res))
 
 	router.post('/purchasingCard', async (req,res) => {
-		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore } = req.body as {
+		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, recommender } = req.body as {
 			cardAddress?: string
 			userSignature?: string
 			nonce?: string
@@ -1939,11 +1958,17 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			from?: string
 			validAfter?: string
 			validBefore?: string
+			recommender?: string
 		}
 
 		if (!cardAddress || !userSignature || !nonce  || !usdcAmount || !from || !validBefore) {
 			logger(`server /api/purchasingCard Invalid data format!`, inspect(req.body, false, 3, true))
 			return res.status(400).json({ error: "Invalid data format" })
+		}
+
+		const recommenderCheck = await validateRecommenderForTopup(cardAddress, recommender)
+		if (!recommenderCheck.ok) {
+			return res.status(400).json({ success: false, error: recommenderCheck.error }).end()
 		}
 
 		const ret = await purchasingCard(cardAddress, userSignature, nonce, usdcAmount, from, validAfter||'0', validBefore)
@@ -1974,7 +1999,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			from,
 			validAfter,
 			validBefore,
-			...(preCheck.success && preCheck.preChecked && { preChecked: preCheck.preChecked })
+			...(preCheck.success && preCheck.preChecked && { preChecked: preCheck.preChecked }),
+			...(recommender != null && recommender !== '' && { recommender })
 		}, res)
 
 		logger(preCheck.success ? `server /api/purchasingCard preCheck OK, forwarded to master` : `server /api/purchasingCard forwarded to master (no preChecked)`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preCheck.success }, false, 3, true))
@@ -1982,7 +2008,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/** USDC Topup（新接口）：Cluster 执行完整预检（tier/金额/签名字段），通过后转发 Master 执行 buyPointsForUser。 */
 	router.post('/usdcTopup', async (req, res) => {
-		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, intent } = req.body as {
+		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, intent, recommender } = req.body as {
 			cardAddress?: string
 			userSignature?: string
 			nonce?: string
@@ -1991,9 +2017,14 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			validAfter?: string
 			validBefore?: string
 			intent?: 'auto' | 'first_purchase' | 'upgrade' | 'topup'
+			recommender?: string
 		}
 		if (!cardAddress || !userSignature || !nonce || !usdcAmount || !from || !validBefore) {
 			return res.status(400).json({ success: false, error: 'Invalid data format' }).end()
+		}
+		const recommenderCheck = await validateRecommenderForTopup(cardAddress, recommender)
+		if (!recommenderCheck.ok) {
+			return res.status(400).json({ success: false, error: recommenderCheck.error }).end()
 		}
 		const shapeCheck = await purchasingCard(cardAddress, userSignature, nonce, usdcAmount, from, validAfter || '0', validBefore)
 		if (!shapeCheck || !(shapeCheck as { success: boolean }).success) {
@@ -2021,6 +2052,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			validBefore,
 			intent: preCheck.ruleCheck.intent,
 			preChecked: preCheck.preChecked,
+			...(recommender != null && recommender !== '' && { recommender })
 		}, res)
 	})
 
@@ -2083,7 +2115,18 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/cardCreateRedeem', preCheck.preChecked, res)
 	})
 
-	/** cardAddAdmin：owner 添加 admin。Cluster 预检 data 为 addAdmin、newAdmin 为 EOA（非 AA），合格转发 master executeForOwner */
+	/** cardCreateRedeemAdmin：owner 离线签字创建 redeem-admin，Cluster 预检 data 为 createRedeemAdmin，合格转发 master executeForOwner */
+	router.post('/cardCreateRedeemAdmin', async (req, res) => {
+		const preCheck = await cardCreateRedeemAdminPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardCreateRedeemAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/cardCreateRedeemAdmin preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
+		postLocalhost('/api/executeForOwner', req.body, res)
+	})
+
+	/** cardAddAdmin：owner 管理 admin（添加/移除）。Cluster 预检 data 为 adminManager、add 时 to 为 EOA，合格转发 master executeForOwner */
 	router.post('/cardAddAdmin', async (req, res) => {
 		const preCheck = await cardAddAdminPreCheck(req.body)
 		if (!preCheck.success) {
@@ -2092,6 +2135,30 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		logger(Colors.green(`server /api/cardAddAdmin preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
 		postLocalhost('/api/executeForOwner', req.body, res)
+	})
+
+	/** GET /api/cardAdmins：查询 card 的 admin 列表，连同 metadata、parent、mintCounter 一起回送 */
+	router.get('/cardAdmins', async (req, res) => {
+		const cardAddress = (req.query?.cardAddress as string)?.trim()
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress query' }).end()
+		}
+		const result = await getCardAdminsWithMintCounter(cardAddress)
+		if (!result.success) {
+			return res.status(400).json(result).end()
+		}
+		return res.status(200).json({ success: true, admins: result.admins }).end()
+	})
+
+	/** cardClearAdminMintCounter：parent admin 签字清零 subordinate 的 mint 计数。Cluster 预检 signer==adminParent(subordinate)，合格转发 master */
+	router.post('/cardClearAdminMintCounter', async (req, res) => {
+		const preCheck = await cardClearAdminMintCounterPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardClearAdminMintCounter preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/cardClearAdminMintCounter preCheck OK, forwarding to master`), inspect({ cardAddress: req.body?.cardAddress, subordinate: req.body?.subordinate }, false, 2, true))
+		postLocalhost('/api/cardClearAdminMintCounter', req.body, res)
 	})
 
 	/** cardCreateIssuedNft：owner 定义新发行 NFT 类型。Cluster 预检 data 为 createIssuedNft、maxSupply>0、日期合法、card 存在，合格转发 master executeForOwner，Master 代付 gas 上链 */
@@ -2124,6 +2191,16 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		logger(Colors.green(`server /api/cardRedeem forwarding to master`), { cardAddress, toUserEOA })
 		postLocalhost('/api/cardRedeem', req.body, res)
+	})
+
+	/** cardRedeemAdmin：用户兑换 redeem-admin 码，添加 to 为 admin，转发 master */
+	router.post('/cardRedeemAdmin', async (req, res) => {
+		const { cardAddress, redeemCode, to } = req.body || {}
+		if (!cardAddress || !redeemCode || !to || !ethers.isAddress(cardAddress) || !ethers.isAddress(to)) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, to' })
+		}
+		logger(Colors.green(`server /api/cardRedeemAdmin forwarding to master`), { cardAddress, to })
+		postLocalhost('/api/cardRedeemAdmin', req.body, res)
 	})
 
 	/** redeemSeries：用户使用 redeem code 兑换 NFT（与 cardRedeem 相同逻辑，用于特别设置 NFT 兑换） */

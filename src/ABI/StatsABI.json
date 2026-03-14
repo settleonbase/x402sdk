@@ -372,5 +372,196 @@
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "admin",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "hourIndex",
+				"type": "uint256"
+			}
+		],
+		"name": "getAdminHourlyData",
+		"outputs": [
+			{
+				"components": [
+					{"internalType": "uint256", "name": "nftMinted", "type": "uint256"},
+					{"internalType": "uint256", "name": "tokenMinted", "type": "uint256"},
+					{"internalType": "uint256", "name": "tokenBurned", "type": "uint256"},
+					{"internalType": "uint256", "name": "transferCount", "type": "uint256"},
+					{"internalType": "bool", "name": "hasData", "type": "bool"}
+				],
+				"internalType": "struct LibStatsStorage.HourlyStats",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "address", "name": "admin", "type": "address"},
+			{"internalType": "address", "name": "card", "type": "address"},
+			{"internalType": "uint256", "name": "hourIndex", "type": "uint256"},
+			{"internalType": "uint256", "name": "cumulativeStartHour", "type": "uint256"}
+		],
+		"name": "getAdminHourlyDataFull",
+		"outputs": [
+			{
+				"components": [
+					{
+						"components": [
+							{"internalType": "uint256", "name": "nftMinted", "type": "uint256"},
+							{"internalType": "uint256", "name": "tokenMinted", "type": "uint256"},
+							{"internalType": "uint256", "name": "tokenBurned", "type": "uint256"},
+							{"internalType": "uint256", "name": "transferCount", "type": "uint256"},
+							{"internalType": "bool", "name": "hasData", "type": "bool"}
+						],
+						"internalType": "struct LibStatsStorage.HourlyStats",
+						"name": "hourly",
+						"type": "tuple"
+					},
+					{"internalType": "uint256", "name": "cumulativeTokenMintedFromBegin", "type": "uint256"},
+					{"internalType": "uint256", "name": "cumulativeTokenBurnedFromBegin", "type": "uint256"},
+					{"internalType": "uint256", "name": "adminMintCounterByCard", "type": "uint256"}
+				],
+				"internalType": "struct StatsFacet.AdminHourlyStatsResult",
+				"name": "result",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "address", "name": "admin", "type": "address"},
+			{"internalType": "address", "name": "card", "type": "address"},
+			{"internalType": "uint256", "name": "hourIndex", "type": "uint256"}
+		],
+		"name": "getAdminHourlyDataWithMintCounter",
+		"outputs": [
+			{
+				"components": [
+					{"internalType": "uint256", "name": "nftMinted", "type": "uint256"},
+					{"internalType": "uint256", "name": "tokenMinted", "type": "uint256"},
+					{"internalType": "uint256", "name": "tokenBurned", "type": "uint256"},
+					{"internalType": "uint256", "name": "transferCount", "type": "uint256"},
+					{"internalType": "bool", "name": "hasData", "type": "bool"}
+				],
+				"internalType": "struct LibStatsStorage.HourlyStats",
+				"name": "hourly",
+				"type": "tuple"
+			},
+			{"internalType": "uint256", "name": "mintCounter", "type": "uint256"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "address", "name": "admin", "type": "address"},
+			{"internalType": "address", "name": "card", "type": "address"},
+			{"internalType": "uint256", "name": "startTimestamp", "type": "uint256"},
+			{"internalType": "uint256", "name": "endTimestamp", "type": "uint256"},
+			{"internalType": "uint256", "name": "cumulativeStartTs", "type": "uint256"}
+		],
+		"name": "getAdminAggregatedStatsWithMintCounter",
+		"outputs": [
+			{
+				"components": [
+					{
+						"components": [
+							{"internalType": "uint256", "name": "totalNftMinted", "type": "uint256"},
+							{"internalType": "uint256", "name": "totalTokenMinted", "type": "uint256"},
+							{"internalType": "uint256", "name": "totalTokenBurned", "type": "uint256"},
+							{"internalType": "uint256", "name": "totalTransfers", "type": "uint256"}
+						],
+						"internalType": "struct StatsFacet.AggregatedStats",
+						"name": "stats",
+						"type": "tuple"
+					},
+					{"internalType": "uint256", "name": "cumulativeTokenMintedFromBegin", "type": "uint256"},
+					{"internalType": "uint256", "name": "cumulativeTokenBurnedFromBegin", "type": "uint256"},
+					{"internalType": "uint256", "name": "adminMintCounterByCard", "type": "uint256"}
+				],
+				"internalType": "struct StatsFacet.AdminAggregatedResult",
+				"name": "result",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "address", "name": "admin", "type": "address"},
+			{"internalType": "address", "name": "card", "type": "address"},
+			{"internalType": "uint8", "name": "periodType", "type": "uint8"},
+			{"internalType": "uint256", "name": "periods", "type": "uint256"},
+			{"internalType": "uint256", "name": "anchorTs", "type": "uint256"},
+			{"internalType": "uint256", "name": "cumulativeStartTs", "type": "uint256"}
+		],
+		"name": "getAdminBusinessPeriodReportsWithMintCounter",
+		"outputs": [
+			{
+				"components": [
+					{
+						"components": [
+							{"internalType": "uint256", "name": "periodStart", "type": "uint256"},
+							{"internalType": "uint256", "name": "periodEnd", "type": "uint256"},
+							{
+								"components": [
+									{"internalType": "uint256", "name": "totalNftMinted", "type": "uint256"},
+									{"internalType": "uint256", "name": "totalTokenMinted", "type": "uint256"},
+									{"internalType": "uint256", "name": "totalTokenBurned", "type": "uint256"},
+									{"internalType": "uint256", "name": "totalTransfers", "type": "uint256"}
+								],
+								"internalType": "struct StatsFacet.AggregatedStats",
+								"name": "stats",
+								"type": "tuple"
+							}
+						],
+						"internalType": "struct StatsFacet.PeriodReport[]",
+						"name": "reports",
+						"type": "tuple[]"
+					},
+					{"internalType": "uint256", "name": "cumulativeTokenMintedFromBegin", "type": "uint256"},
+					{"internalType": "uint256", "name": "cumulativeTokenBurnedFromBegin", "type": "uint256"},
+					{"internalType": "uint256", "name": "adminMintCounterByCard", "type": "uint256"}
+				],
+				"internalType": "struct StatsFacet.AdminPeriodReportsResult",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "address", "name": "card", "type": "address"},
+			{"internalType": "address", "name": "admin", "type": "address"}
+		],
+		"name": "getAdminMintCounter",
+		"outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "address", "name": "card", "type": "address"},
+			{"internalType": "address", "name": "subordinate", "type": "address"}
+		],
+		"name": "clearAdminMintCounterForSubordinate",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
 	}
 ]

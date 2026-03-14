@@ -32,6 +32,11 @@
   },
   {
     "inputs": [],
+    "name": "BM_CallFailed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "BM_NotAuthorized",
     "type": "error"
   },
@@ -171,6 +176,11 @@
   },
   {
     "inputs": [],
+    "name": "UC_AdminManagerRequiresOwnerSignature",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "UC_AmountZero",
     "type": "error"
   },
@@ -182,6 +192,32 @@
   {
     "inputs": [],
     "name": "UC_GlobalMisconfigured",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "fromAccount",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "have",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "need",
+        "type": "uint256"
+      }
+    ],
+    "name": "UC_InsufficientBalance",
     "type": "error"
   },
   {
@@ -300,6 +336,25 @@
       }
     ],
     "name": "AdminCardMinted",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "AdminPointsBurned",
     "type": "event"
   },
   {
@@ -988,6 +1043,10 @@
     "type": "event"
   },
   {
+    "stateMutability": "nonpayable",
+    "type": "fallback"
+  },
+  {
     "inputs": [],
     "name": "ISSUED_NFT_START_ID",
     "outputs": [
@@ -1156,29 +1215,11 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "newAdmin",
+        "name": "a",
         "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "newThreshold",
-        "type": "uint256"
       }
     ],
-    "name": "addAdmin",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "i",
-        "type": "uint256"
-      }
-    ],
-    "name": "adminList",
+    "name": "adminParent",
     "outputs": [
       {
         "internalType": "address",
@@ -1318,12 +1359,17 @@
   {
     "inputs": [
       {
-        "internalType": "string",
-        "name": "code",
-        "type": "string"
+        "internalType": "address",
+        "name": "target",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
       }
     ],
-    "name": "cancelRedeem",
+    "name": "burnPointsByAdmin",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1331,44 +1377,18 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "title",
-        "type": "bytes32"
+        "internalType": "address",
+        "name": "subordinate",
+        "type": "address"
       },
       {
-        "internalType": "uint64",
-        "name": "validAfter",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "validBefore",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint256",
-        "name": "maxSupply",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "priceInCurrency6",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "sharedMetadataHash",
-        "type": "bytes32"
+        "internalType": "address",
+        "name": "authorizer",
+        "type": "address"
       }
     ],
-    "name": "createIssuedNft",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
+    "name": "clearAdminMintCounterForSubordinate",
+    "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -1408,130 +1428,6 @@
         "type": "uint256"
       }
     ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "hash",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "points6",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "attr",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "validAfter",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "validBefore",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint256[]",
-        "name": "tokenIds",
-        "type": "uint256[]"
-      },
-      {
-        "internalType": "uint256[]",
-        "name": "amounts",
-        "type": "uint256[]"
-      }
-    ],
-    "name": "createRedeem",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32[]",
-        "name": "hashes",
-        "type": "bytes32[]"
-      },
-      {
-        "internalType": "uint256",
-        "name": "points6",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "attr",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "validAfter",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "validBefore",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint256[]",
-        "name": "tokenIds",
-        "type": "uint256[]"
-      },
-      {
-        "internalType": "uint256[]",
-        "name": "amounts",
-        "type": "uint256[]"
-      }
-    ],
-    "name": "createRedeemBatch",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "poolHash",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint64",
-        "name": "validAfter",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "validBefore",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint256[][]",
-        "name": "tokenIdsList",
-        "type": "uint256[][]"
-      },
-      {
-        "internalType": "uint256[][]",
-        "name": "amountsList",
-        "type": "uint256[][]"
-      },
-      {
-        "internalType": "uint32[]",
-        "name": "counts",
-        "type": "uint32[]"
-      }
-    ],
-    "name": "createRedeemPool",
-    "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -1582,25 +1478,6 @@
         "internalType": "address",
         "name": "",
         "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "id",
-        "type": "uint256"
-      }
-    ],
-    "name": "exists",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -1752,6 +1629,101 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "admin",
+        "type": "address"
+      }
+    ],
+    "name": "getAdminBurnCounter",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "admin",
+        "type": "address"
+      }
+    ],
+    "name": "getAdminMintCounter",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "admin",
+        "type": "address"
+      }
+    ],
+    "name": "getAdminRedeemMintCounter",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "admin",
+        "type": "address"
+      }
+    ],
+    "name": "getAdminTransferCounter",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "admin",
+        "type": "address"
+      }
+    ],
+    "name": "getAdminUSDCMintCounter",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "user",
         "type": "address"
       }
@@ -1853,166 +1825,6 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "hash",
-        "type": "bytes32"
-      }
-    ],
-    "name": "getRedeemStatus",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "active",
-        "type": "bool"
-      },
-      {
-        "internalType": "uint256",
-        "name": "totalPoints6",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "string[]",
-        "name": "codes",
-        "type": "string[]"
-      }
-    ],
-    "name": "getRedeemStatusBatch",
-    "outputs": [
-      {
-        "internalType": "bool[]",
-        "name": "active",
-        "type": "bool[]"
-      },
-      {
-        "internalType": "uint256[]",
-        "name": "totalPoints6",
-        "type": "uint256[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32[]",
-        "name": "hashes",
-        "type": "bytes32[]"
-      }
-    ],
-    "name": "getRedeemStatusBatch",
-    "outputs": [
-      {
-        "internalType": "bool[]",
-        "name": "active",
-        "type": "bool[]"
-      },
-      {
-        "internalType": "uint256[]",
-        "name": "totalPoints6",
-        "type": "uint256[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "hash",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "address",
-        "name": "claimer",
-        "type": "address"
-      }
-    ],
-    "name": "getRedeemStatusEx",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "active",
-        "type": "bool"
-      },
-      {
-        "internalType": "uint128",
-        "name": "points6",
-        "type": "uint128"
-      },
-      {
-        "internalType": "bool",
-        "name": "isPool",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "idx",
-        "type": "uint256"
-      }
-    ],
-    "name": "getTierAt",
-    "outputs": [
-      {
-        "components": [
-          {
-            "internalType": "uint256",
-            "name": "minUsdc6",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "attr",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "tierExpirySeconds",
-            "type": "uint256"
-          },
-          {
-            "internalType": "bool",
-            "name": "upgradeByBalance",
-            "type": "bool"
-          }
-        ],
-        "internalType": "struct BeamioUserCard.Tier",
-        "name": "",
-        "type": "tuple"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "getTiersCount",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "a",
         "type": "address"
@@ -2073,57 +1885,6 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "issuedNftIndex",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "issuedNftMaxSupply",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "issuedNftMintedCount",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -2137,82 +1898,6 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "issuedNftSharedMetadataHash",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "issuedNftTitle",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "issuedNftValidAfter",
-    "outputs": [
-      {
-        "internalType": "uint64",
-        "name": "",
-        "type": "uint64"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "issuedNftValidBefore",
-    "outputs": [
-      {
-        "internalType": "uint64",
-        "name": "",
-        "type": "uint64"
       }
     ],
     "stateMutability": "view",
@@ -2448,6 +2133,29 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "points6",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
+      }
+    ],
+    "name": "mintPointsByAdminWithOperator",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "userEOA",
         "type": "address"
       },
@@ -2458,6 +2166,29 @@
       }
     ],
     "name": "mintPointsByGateway",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "userEOA",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "points6",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
+      }
+    ],
+    "name": "mintPointsByGatewayWithOperator",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -2489,72 +2220,57 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "proposalCount",
-    "outputs": [
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
+      },
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "amount",
         "type": "uint256"
       }
     ],
-    "stateMutability": "view",
+    "name": "recordAdminBurnForStats",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "admin",
+        "type": "address"
+      },
+      {
         "internalType": "uint256",
-        "name": "id",
+        "name": "amount",
         "type": "uint256"
       }
     ],
-    "name": "proposals",
-    "outputs": [
+    "name": "recordAdminMintForStats",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
       {
-        "components": [
-          {
-            "internalType": "address",
-            "name": "target",
-            "type": "address"
-          },
-          {
-            "internalType": "uint256",
-            "name": "v1",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "v2",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "v3",
-            "type": "uint256"
-          },
-          {
-            "internalType": "bytes4",
-            "name": "selector",
-            "type": "bytes4"
-          },
-          {
-            "internalType": "uint256",
-            "name": "approvals",
-            "type": "uint256"
-          },
-          {
-            "internalType": "bool",
-            "name": "executed",
-            "type": "bool"
-          }
-        ],
-        "internalType": "struct GovernanceStorage.Proposal",
-        "name": "",
-        "type": "tuple"
+        "internalType": "string",
+        "name": "code",
+        "type": "string"
+      },
+      {
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
       }
     ],
-    "stateMutability": "view",
+    "name": "redeemAdminByGateway",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -2607,24 +2323,6 @@
       }
     ],
     "name": "redeemPoolByGateway",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "adminToRemove",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "newThreshold",
-        "type": "uint256"
-      }
-    ],
-    "name": "removeAdmin",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -2750,54 +2448,6 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "id",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "validUntil",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "perClaimMax",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint128",
-        "name": "maxPerUser",
-        "type": "uint128"
-      },
-      {
-        "internalType": "uint128",
-        "name": "maxGlobal",
-        "type": "uint128"
-      },
-      {
-        "internalType": "bool",
-        "name": "enabled",
-        "type": "bool"
-      },
-      {
-        "internalType": "enum BeamioCurrency.CurrencyType",
-        "name": "cur",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint128",
-        "name": "priceInCurrency6",
-        "type": "uint128"
-      }
-    ],
-    "name": "setFaucetConfig",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
         "name": "priceInCurrencyE6",
         "type": "uint256"
       }
@@ -2887,32 +2537,6 @@
         "internalType": "bool",
         "name": "",
         "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "poolHash",
-        "type": "bytes32"
-      }
-    ],
-    "name": "terminateRedeemPool",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "threshold",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
       }
     ],
     "stateMutability": "view",
