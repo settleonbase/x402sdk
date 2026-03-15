@@ -5105,7 +5105,7 @@ const adminManager5ArgIface = new ethers.Interface(['function adminManager(addre
 const ADMIN_MANAGER_4_SELECTOR = adminManager4ArgIface.getFunction('adminManager')?.selector ?? ''
 const ADMIN_MANAGER_5_SELECTOR = adminManager5ArgIface.getFunction('adminManager')?.selector ?? ''
 
-/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold[, metadata[, mintLimit]])。admin=true 时 to 必须为 AA 账号（EOA 无 AA 则拒绝）。合格转发 master executeForOwner。 */
+/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold[, metadata[, mintLimit]])。admin=true 时 to 可为 EOA（Master 会先为其创建 AA 再执行）。合格转发 master executeForOwner。 */
 export const cardAddAdminPreCheck = async (body: {
 	cardAddress?: string
 	data?: string
@@ -5125,19 +5125,13 @@ export const cardAddAdminPreCheck = async (body: {
 		const decoded = iface.parseTransaction({ data })
 		if (!decoded || decoded.name !== 'adminManager') return { success: false, error: 'Invalid adminManager calldata' }
 		const to = decoded.args[0] as string
-		const admin = decoded.args[1] as boolean
 		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
-		if (admin) {
-			const pool = Settle_ContractPool
-			if (pool?.length) {
-				const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-				const [codeAtCard, codeAtTo] = await Promise.all([
-					provider.getCode(cardAddress),
-					provider.getCode(to),
-				])
-				if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
-				if (!codeAtTo || codeAtTo === '0x') return { success: false, error: 'Admin must be AA account. EOA not allowed (use AA address).' }
-			}
+		// admin=true 时不再预检 to 是否为 AA；Master 会在 executeForOwner 前为 EOA 创建 AA 并替换 data 中的 to
+		const pool = Settle_ContractPool
+		if (pool?.length) {
+			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+			const codeAtCard = await provider.getCode(cardAddress)
+			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 		return { success: true }
@@ -5401,7 +5395,7 @@ export const cardRedeemAdminPool: {
 	res?: Response
 }[] = []
 
-/** cardRedeemAdminProcess：用户兑换 redeem-admin 码，服务端调用 factory.redeemAdminForUser，将 EOA 用户登记为指定卡的 admin。 */
+/** cardRedeemAdminProcess：用户兑换 redeem-admin 码，服务端调用 factory.redeemAdminForUser，将用户登记为指定卡的 admin。若 to 为 EOA 无 AA，先创建 AA 再使用 AA 地址（对齐 cardAddAdmin）。 */
 export const cardRedeemAdminProcess = async () => {
 	const obj = cardRedeemAdminPool.shift()
 	if (!obj) return
@@ -5413,7 +5407,27 @@ export const cardRedeemAdminProcess = async () => {
 	logger(Colors.cyan(`[cardRedeemAdminProcess] processing card=${obj.cardAddress} to(EOA)=${obj.to} codeLen=${obj.redeemCode?.length ?? 0}`))
 	try {
 		const factory = SC.baseFactoryPaymaster
-		const tx = await factory.redeemAdminForUser(obj.cardAddress, obj.redeemCode, obj.to)
+		let toForRedeem = obj.to
+		if (SC.aaAccountFactoryPaymaster && obj.to && ethers.isAddress(obj.to)) {
+			const provider = (SC.walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+			const codeAtTo = await provider.getCode(obj.to)
+			if (!codeAtTo || codeAtTo === '0x') {
+				let aaAddr = await SC.aaAccountFactoryPaymaster.beamioAccountOf(obj.to)
+				if (!aaAddr || aaAddr === ethers.ZeroAddress) aaAddr = await SC.aaAccountFactoryPaymaster.primaryAccountOf(obj.to)
+				const hasAA = aaAddr && aaAddr !== ethers.ZeroAddress && (await provider.getCode(aaAddr)) !== '0x'
+				if (!hasAA) {
+					logger(Colors.cyan(`[cardRedeemAdmin] EOA ${obj.to} has no AA, creating...`))
+					const { accountAddress } = await DeployingSmartAccount(obj.to, SC.aaAccountFactoryPaymaster)
+					if (accountAddress) {
+						logger(Colors.green(`[cardRedeemAdmin] created AA ${accountAddress} for EOA ${obj.to}, using AA for redeemAdmin`))
+						toForRedeem = ethers.getAddress(accountAddress)
+					}
+				} else {
+					toForRedeem = ethers.getAddress(aaAddr)
+				}
+			}
+		}
+		const tx = await factory.redeemAdminForUser(obj.cardAddress, obj.redeemCode, toForRedeem)
 		await tx.wait()
 		const txHash = tx.hash
 		logger(Colors.green(`✅ cardRedeemAdminProcess card=${obj.cardAddress} to(EOA)=${obj.to} tx=${txHash}`))
@@ -5533,6 +5547,31 @@ export const executeForOwnerProcess = async () => {
 	}
 	try {
 		const factory = SC.baseFactoryPaymaster
+		if (SC.aaAccountFactoryPaymaster && obj.data) {
+			const dataSelector = obj.data.slice(0, 10).toLowerCase()
+			const isAdminManager = dataSelector === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase()
+			if (isAdminManager) {
+				const iface = dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ? adminManager5ArgIface : adminManager4ArgIface
+				const decoded = iface.parseTransaction({ data: obj.data })
+				if (decoded?.name === 'adminManager' && decoded.args[1] === true) {
+					const to = decoded.args[0] as string
+					if (to && ethers.isAddress(to)) {
+						const provider = (SC.walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+						const codeAtTo = await provider.getCode(to)
+						if (!codeAtTo || codeAtTo === '0x') {
+							let aaAddr = await SC.aaAccountFactoryPaymaster.beamioAccountOf(to)
+							if (!aaAddr || aaAddr === ethers.ZeroAddress) aaAddr = await SC.aaAccountFactoryPaymaster.primaryAccountOf(to)
+							const hasAA = aaAddr && aaAddr !== ethers.ZeroAddress && (await provider.getCode(aaAddr)) !== '0x'
+							if (!hasAA) {
+								logger(Colors.cyan(`[cardAddAdmin] EOA ${to} has no AA, creating...`))
+								await DeployingSmartAccount(to, SC.aaAccountFactoryPaymaster)
+								logger(Colors.green(`[cardAddAdmin] AA created for EOA ${to}, proceeding with original data (EOA as admin)`))
+							}
+						}
+					}
+				}
+			}
+		}
 		const tx = await factory.executeForOwner(
 			obj.cardAddress,
 			obj.data,
