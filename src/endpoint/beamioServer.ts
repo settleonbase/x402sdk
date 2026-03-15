@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyBeamioSunRequest } from '../BeamioSun'
 
@@ -53,6 +53,7 @@ const LATEST_CARDS_EXCLUDED = new Set([
 	'0xb8a42181adc9bb81b6ccc1f2198be95105cfd969',
 	'0x70399f0854f32553d7fe14a43fd6ab925d39c0b4',
 	'0xfb4d0546b90a8f353f7c479392a1ba40a1185b9d',
+	'0x4c66b36ba059b2f05ef3d5f383c67533f19c6219',
 ])
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
@@ -2203,14 +2204,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/cardRedeem', req.body, res)
 	})
 
-	/** cardRedeemAdmin：用户兑换 redeem-admin 码，添加 to 为 admin，转发 master */
+	/** cardRedeemAdmin：用户兑换 redeem-admin 码，将 EOA 用户登记为指定卡的 admin。Cluster 预检链上 redeem code 有效后转发 master */
 	router.post('/cardRedeemAdmin', async (req, res) => {
 		const { cardAddress, redeemCode, to } = req.body || {}
 		if (!cardAddress || !redeemCode || !to || !ethers.isAddress(cardAddress) || !ethers.isAddress(to)) {
 			return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, to' })
 		}
-		logger(Colors.green(`server /api/cardRedeemAdmin forwarding to master`), { cardAddress, to })
-		postLocalhost('/api/cardRedeemAdmin', req.body, res)
+		const resolvedCard = OLD_CCSA_REDIRECTS.includes(cardAddress.toLowerCase()) ? BASE_CCSA_CARD_ADDRESS : cardAddress
+		const preCheck = await cardRedeemAdminPreCheck({ cardAddress: resolvedCard, redeemCode, to })
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardRedeemAdmin preCheck FAIL: ${preCheck.error}`), { cardAddress: resolvedCard, to })
+			return res.status(403).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/cardRedeemAdmin preCheck OK, forwarding to master`), { cardAddress: resolvedCard, to })
+		postLocalhost('/api/cardRedeemAdmin', { ...req.body, cardAddress: resolvedCard }, res)
 	})
 
 	/** redeemSeries：用户使用 redeem code 兑换 NFT（与 cardRedeem 相同逻辑，用于特别设置 NFT 兑换） */

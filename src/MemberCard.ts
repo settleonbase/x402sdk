@@ -5367,7 +5367,33 @@ export const cardCreateRedeemAdminPreCheck = async (body: {
 	}
 }
 
-/** cardRedeemAdmin：用户兑换 redeem-admin 码，添加 to 为 admin。服务端调用 factory.redeemAdminForUser。 */
+/** cardRedeemAdmin 集群预检：拉取链上 getRedeemAdminStatus(hash) 验证 redeem code 是否有效。非法则不予转发 master。 */
+export const cardRedeemAdminPreCheck = async (body: {
+	cardAddress?: string
+	redeemCode?: string
+	to?: string
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, redeemCode, to } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!redeemCode || typeof redeemCode !== 'string' || !redeemCode.trim()) return { success: false, error: 'Missing or invalid redeemCode' }
+	if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
+	try {
+		const hash = ethers.keccak256(ethers.toUtf8Bytes(redeemCode.trim()))
+		const cardAbi = ['function getRedeemAdminStatus(bytes32 hash) view returns (bool active)']
+		const card = new ethers.Contract(cardAddress, cardAbi, providerBaseBackup)
+		const active = await card.getRedeemAdminStatus(hash)
+		if (!active) {
+			return { success: false, error: 'Redeem admin code is invalid or expired' }
+		}
+		return { success: true }
+	} catch (e: any) {
+		const msg = e?.message ?? e?.shortMessage ?? String(e)
+		logger(Colors.red(`[cardRedeemAdminPreCheck] ${msg}`))
+		return { success: false, error: msg }
+	}
+}
+
+/** cardRedeemAdmin：用户兑换 redeem-admin 码，将 EOA 用户登记为指定卡的 admin。服务端调用 factory.redeemAdminForUser。 */
 export const cardRedeemAdminPool: {
 	cardAddress: string
 	redeemCode: string
@@ -5375,7 +5401,7 @@ export const cardRedeemAdminPool: {
 	res?: Response
 }[] = []
 
-/** cardRedeemAdminProcess：用户兑换 redeem-admin 码，服务端调用 factory.redeemAdminForUser，将 to 添加为 admin。 */
+/** cardRedeemAdminProcess：用户兑换 redeem-admin 码，服务端调用 factory.redeemAdminForUser，将 EOA 用户登记为指定卡的 admin。 */
 export const cardRedeemAdminProcess = async () => {
 	const obj = cardRedeemAdminPool.shift()
 	if (!obj) return
@@ -5384,13 +5410,13 @@ export const cardRedeemAdminProcess = async () => {
 		cardRedeemAdminPool.unshift(obj)
 		return setTimeout(() => cardRedeemAdminProcess(), 3000)
 	}
-	logger(Colors.cyan(`[cardRedeemAdminProcess] processing card=${obj.cardAddress} to=${obj.to} codeLen=${obj.redeemCode?.length ?? 0}`))
+	logger(Colors.cyan(`[cardRedeemAdminProcess] processing card=${obj.cardAddress} to(EOA)=${obj.to} codeLen=${obj.redeemCode?.length ?? 0}`))
 	try {
 		const factory = SC.baseFactoryPaymaster
 		const tx = await factory.redeemAdminForUser(obj.cardAddress, obj.redeemCode, obj.to)
 		await tx.wait()
 		const txHash = tx.hash
-		logger(Colors.green(`✅ cardRedeemAdminProcess card=${obj.cardAddress} to=${obj.to} tx=${txHash}`))
+		logger(Colors.green(`✅ cardRedeemAdminProcess card=${obj.cardAddress} to(EOA)=${obj.to} tx=${txHash}`))
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, tx: txHash }).end()
 	} catch (e: any) {
 		const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
