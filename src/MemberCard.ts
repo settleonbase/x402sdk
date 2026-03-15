@@ -46,8 +46,8 @@ const BeamioTaskIndexerAddress = BEAMIO_INDEXER_DIAMOND
 /** BUnitAirdrop consumeFromUser kind：x402 BeamioTransfer 转账手续费，需预先 registerKind(5,"x402Send") */
 const BUNIT_KIND_X402_SEND = 5n
 const DIAMOND = BeamioTaskIndexerAddress
-/** Base 主网 RPC：https://1rpc.io/base，可被 ~/.master.json base_endpoint 覆盖 */
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://1rpc.io/base'
+/** Base 主网 RPC：固定使用 Beamio 标准端点，不再从 ~/.master.json 读取 */
+const BASE_RPC_URL = 'https://1rpc.io/base'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
@@ -5053,7 +5053,7 @@ export const getRedeemStatusBatchApi = async (
 		byCard.set(normalized, arr)
 	}
 	try {
-		// 优先使用 CoNET 节点访问 Base RPC；若该节点返回 404（如 /base-rpc 不存在）则回退到 base_endpoint / 公网 RPC
+		// 优先使用 CoNET 节点访问 Base RPC；若该节点返回 404（如 /base-rpc 不存在）则回退到 1rpc.io/base
 		let baseRpcUrl = getBaseRpcUrlViaConetNode()
 		if (!baseRpcUrl) {
 			const nodeCount = getGuardianNodesCount()
