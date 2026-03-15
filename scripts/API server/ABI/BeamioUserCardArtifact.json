@@ -2790,7 +2790,7 @@
   "linkReferences": {},
   "deployedLinkReferences": {},
   "immutableReferences": {
-    "7803": [
+    "18130": [
       {
         "length": 32,
         "start": 10492
@@ -2798,5 +2798,5 @@
     ]
   },
   "inputSourceName": "project/src/BeamioUserCard/BeamioUserCard.sol",
-  "buildInfoId": "solc-0_8_33-84cb44ebc592ee524f0d5965fe8538a30b95119a"
+  "buildInfoId": "solc-0_8_33-06866910c06371723b8244479fc3ca7ba698614c"
 }
