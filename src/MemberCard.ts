@@ -5105,7 +5105,7 @@ const adminManager5ArgIface = new ethers.Interface(['function adminManager(addre
 const ADMIN_MANAGER_4_SELECTOR = adminManager4ArgIface.getFunction('adminManager')?.selector ?? ''
 const ADMIN_MANAGER_5_SELECTOR = adminManager5ArgIface.getFunction('adminManager')?.selector ?? ''
 
-/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold[, metadata[, mintLimit]])。admin=true 时 to 必须为 EOA。合格转发 master executeForOwner。 */
+/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold[, metadata[, mintLimit]])。admin=true 时 to 必须为 AA 账号（EOA 无 AA 则拒绝）。合格转发 master executeForOwner。 */
 export const cardAddAdminPreCheck = async (body: {
 	cardAddress?: string
 	data?: string
@@ -5136,7 +5136,7 @@ export const cardAddAdminPreCheck = async (body: {
 					provider.getCode(to),
 				])
 				if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
-				if (codeAtTo && codeAtTo !== '0x') return { success: false, error: 'to must be EOA when adding admin (AA/smart contract not allowed)' }
+				if (!codeAtTo || codeAtTo === '0x') return { success: false, error: 'Admin must be AA account. EOA not allowed (use AA address).' }
 			}
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
