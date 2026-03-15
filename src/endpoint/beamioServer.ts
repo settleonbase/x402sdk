@@ -49,6 +49,9 @@ const LATEST_CARDS_EXCLUDED = new Set([
 	'0x4cb611a14b1441d36183f125503f2c72af5b8fc8',
 	'0xda36bd32418cac424dbffd07617094d1884e629c',
 	'0x63a6251a51939f6c47ba0ceff5984e5c9f031605',
+	'0x48952f9ea1231b59e5c5fa1a99bc657b122cfdfd',
+	'0xb8a42181adc9bb81b6ccc1f2198be95105cfd969',
+	'0x70399f0854f32553d7fe14a43fd6ab925d39c0b4',
 ])
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
@@ -78,8 +81,8 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 	'function issuedNftPriceInCurrency6(uint256) view returns (uint256)',
 	'function owner() view returns (address)',
 ] as const
-/** Base RPC：固定使用 Beamio 标准端点，不再从 ~/.master.json 读取 */
-const BASE_RPC_URL = 'https://1rpc.io/base'
+/** Base RPC：优先 BASE_RPC_URL 环境变量，否则固定 1rpc.io/base */
+const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://1rpc.io/base'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 /** 从 mintPointsByAdmin(data) 解析 recipient EOA */

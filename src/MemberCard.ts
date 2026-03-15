@@ -46,8 +46,8 @@ const BeamioTaskIndexerAddress = BEAMIO_INDEXER_DIAMOND
 /** BUnitAirdrop consumeFromUser kind：x402 BeamioTransfer 转账手续费，需预先 registerKind(5,"x402Send") */
 const BUNIT_KIND_X402_SEND = 5n
 const DIAMOND = BeamioTaskIndexerAddress
-/** Base 主网 RPC：固定使用 Beamio 标准端点，不再从 ~/.master.json 读取 */
-const BASE_RPC_URL = 'https://1rpc.io/base'
+/** Base 主网 RPC：优先 BASE_RPC_URL 环境变量，否则固定 1rpc.io/base */
+const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://1rpc.io/base'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
