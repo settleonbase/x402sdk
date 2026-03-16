@@ -1376,6 +1376,37 @@ const routing = ( router: Router ) => {
 			res.status(200).json(result).end()
 		})
 
+		/** POST /api/executeForAdmin - cardAddAdminByAdmin 等：Cluster 预检后转发，Master 推入 executeForAdminPool */
+		router.post('/executeForAdmin', async (req, res) => {
+			const { cardAddress, cardAddr, data, deadline, nonce, adminSignature } = req.body as {
+				cardAddress?: string
+				cardAddr?: string
+				data?: string
+				deadline?: number
+				nonce?: string
+				adminSignature?: string
+			}
+			const addr = cardAddr ?? cardAddress
+			if (!addr || !ethers.isAddress(addr) || !data || typeof data !== 'string' || data.length === 0) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress/cardAddr/data' })
+			}
+			if (typeof deadline !== 'number' || deadline <= 0 || !nonce || typeof nonce !== 'string' || !adminSignature || typeof adminSignature !== 'string') {
+				return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce/adminSignature' })
+			}
+			executeForAdminPool.push({
+				cardAddr: ethers.getAddress(addr),
+				data,
+				deadline,
+				nonce,
+				adminSignature,
+				res
+			})
+			logger(Colors.cyan(`[executeForAdmin] pushed to pool, card=${addr}`))
+			executeForAdminProcess().catch((err: any) => {
+				logger(Colors.red('[executeForAdminProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
 		/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Master 调用 factory.executeForAdmin */
 		router.post('/nfcTopup', async (req, res) => {
 			const { cardAddr, data, deadline, nonce, adminSignature, uid, cardOwnerEOA, topupFeeBUnits, topupKind } = req.body as {

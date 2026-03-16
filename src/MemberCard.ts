@@ -949,6 +949,30 @@ export const executeForAdminProcess = async () => {
 			setTimeout(() => executeForAdminProcess(), 1000)
 			return
 		}
+		// adminManager(add admin)：若 to 为 EOA 且无 AA，先创建 AA（与 executeForOwnerProcess 一致）
+		const dataSel = obj.data.slice(0, 10).toLowerCase()
+		const isAdminManager = dataSel === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || dataSel === ADMIN_MANAGER_5_SELECTOR.toLowerCase()
+		if (isAdminManager && SC.aaAccountFactoryPaymaster) {
+			const iface = dataSel === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ? adminManager5ArgIface : adminManager4ArgIface
+			const decoded = iface.parseTransaction({ data: obj.data })
+			if (decoded?.name === 'adminManager' && decoded.args[1] === true) {
+				const to = decoded.args[0] as string
+				if (to && ethers.isAddress(to)) {
+					const provider = (SC.walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+					const codeAtTo = await provider.getCode(to)
+					if (!codeAtTo || codeAtTo === '0x') {
+						let aaAddr = await SC.aaAccountFactoryPaymaster.beamioAccountOf(to)
+						if (!aaAddr || aaAddr === ethers.ZeroAddress) aaAddr = await SC.aaAccountFactoryPaymaster.primaryAccountOf(to)
+						const hasAA = aaAddr && aaAddr !== ethers.ZeroAddress && (await provider.getCode(aaAddr)) !== '0x'
+						if (!hasAA) {
+							logger(Colors.cyan(`[cardAddAdminByAdmin] EOA ${to} has no AA, creating...`))
+							await DeployingSmartAccount(to, SC.aaAccountFactoryPaymaster)
+							logger(Colors.green(`[cardAddAdminByAdmin] AA created for EOA ${to}, proceeding`))
+						}
+					}
+				}
+			}
+		}
 		// NFC Topup：mintPointsByAdmin 要求 recipient 已有 AA 账户，否则 _toAccount 会 revert UC_ResolveAccountFailed
 		// 必须使用 card 的 factoryGateway()._aaFactory()，与合约内 _resolveAccount 一致；若用配置的 AA Factory 可能不匹配导致 UC_ResolveAccountFailed
 		const recipientEOA = tryParseMintPointsByAdminRecipient(obj.data)
@@ -5104,6 +5128,48 @@ const adminManager4ArgIface = new ethers.Interface(['function adminManager(addre
 const adminManager5ArgIface = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)'])
 const ADMIN_MANAGER_4_SELECTOR = adminManager4ArgIface.getFunction('adminManager')?.selector ?? ''
 const ADMIN_MANAGER_5_SELECTOR = adminManager5ArgIface.getFunction('adminManager')?.selector ?? ''
+
+/** cardAddAdminByAdmin 集群预检：校验 data 为 adminManager，adminSignature 的 signer 为 card admin。合格转发 master executeForAdmin。 */
+export const cardAddAdminByAdminPreCheck = async (body: {
+	cardAddress?: string
+	data?: string
+	deadline?: number
+	nonce?: string
+	adminSignature?: string
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, data, deadline, nonce, adminSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
+	const dataSelector = data.slice(0, 10).toLowerCase()
+	if (dataSelector !== ADMIN_MANAGER_4_SELECTOR.toLowerCase() && dataSelector !== ADMIN_MANAGER_5_SELECTOR.toLowerCase()) {
+		return { success: false, error: 'Data must be adminManager(address,bool,uint256,string) or adminManager(...,uint256 mintLimit) calldata' }
+	}
+	try {
+		const iface = dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ? adminManager5ArgIface : adminManager4ArgIface
+		const decoded = iface.parseTransaction({ data })
+		if (!decoded || decoded.name !== 'adminManager') return { success: false, error: 'Invalid adminManager calldata' }
+		const to = decoded.args[0] as string
+		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
+		const pool = Settle_ContractPool
+		if (pool?.length) {
+			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+			const codeAtCard = await provider.getCode(cardAddress)
+			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+		}
+		if (deadline == null || !nonce || !adminSignature) return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
+		const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
+			cardAddr: ethers.getAddress(cardAddress),
+			data,
+			deadline,
+			nonce,
+			adminSignature,
+		})
+		if (!adminCheck.ok) return { success: false, error: adminCheck.error }
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
 
 /** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold[, metadata[, mintLimit]])。admin=true 时 to 可为 EOA（Master 会先为其创建 AA 再执行）。合格转发 master executeForOwner。 */
 export const cardAddAdminPreCheck = async (body: {
