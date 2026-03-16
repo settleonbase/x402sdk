@@ -1,0 +1,16 @@
+[Unit]
+Description=Watch native reth payload progress and restart on stall
+After=network-online.target base-op-reth-native.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+ExecStart=/home/peter/base/reth-payload-watchdog.sh
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

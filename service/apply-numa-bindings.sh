@@ -6,8 +6,8 @@
 # NUMA layout (current target, node2 has 0 MB):
 #   node0: cpus 0-7         64GB  → op-reth
 #   node1: cpus 8-15        32GB  → op-reth
-#   node2: cpus 16-23        0GB  → op-node CPUs (memory from node0)
-#   node3: cpus 24-31       32GB  → op-reth + lighthouse + geth
+#   node2: cpus 16-23        0GB  → op-reth CPUs + op-node CPUs (memory from node0)
+#   node3: cpus 24-31       32GB  → lighthouse + geth
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -28,7 +28,7 @@ sudo systemctl daemon-reload
 echo "Installing geth.service..."
 sudo cp "$SCRIPT_DIR/geth.service" "$TARGET_SYSTEMD/geth.service"
 
-# 3. base-op-reth-native (node0+node1+node3 CPUs and memory)
+# 3. base-op-reth-native (node0+node1+node2 CPUs, node0+node1 memory)
 echo "Installing base-op-reth-native.service..."
 sudo cp "$SCRIPT_DIR/base-op-reth-native.service" "$TARGET_SYSTEMD/base-op-reth-native.service"
 
