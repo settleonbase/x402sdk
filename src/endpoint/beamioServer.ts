@@ -2144,44 +2144,38 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			logger(Colors.red(`server /api/cardAddAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
-		// Debug: log signer, card, adminTo (AA), and EOA for troubleshooting
+		// Debug: 一行打印：签字钱包、卡地址、想登记的admin的EOA/AA、离线签字指定的登记地址
 		try {
 			const { cardAddress, data, deadline, nonce, ownerSignature } = req.body
-			// 1) Recover signer (owner) from ownerSignature
 			let signerAddr: string | null = null
+			let adminEOA: string | null = null
+			let adminAA: string | null = null
 			if (cardAddress && data && deadline != null && nonce && ownerSignature) {
 				const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: BASE_CHAIN_ID, verifyingContract: BASE_CARD_FACTORY }
 				const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
 				const dataHash = ethers.keccak256(data)
 				const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
 				const value = { cardAddress: ethers.getAddress(cardAddress), dataHash, deadline: Number(deadline), nonce: nonceBytes }
-				const digest = ethers.TypedDataEncoder.hash(domain, types, value)
-				signerAddr = ethers.recoverAddress(digest, ownerSignature)
+				signerAddr = ethers.recoverAddress(ethers.TypedDataEncoder.hash(domain, types, value), ownerSignature)
 			}
-			// 2) Parse adminManager to get adminTo (AA)
-			let adminToAA: string | null = null
-			let adminToEOA: string | null = null
 			if (data && typeof data === 'string' && data.length >= 10) {
 				const iface4 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
 				const iface5 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)'])
-				const sel4 = (iface4.getFunction('adminManager')?.selector ?? '').toLowerCase()
-				const sel5 = (iface5.getFunction('adminManager')?.selector ?? '').toLowerCase()
-				const dataSel = data.slice(0, 10).toLowerCase()
-				const iface = dataSel === sel5 ? iface5 : iface4
+				const iface = data.slice(0, 10).toLowerCase() === (iface5.getFunction('adminManager')?.selector ?? '').toLowerCase() ? iface5 : iface4
 				const decoded = iface.parseTransaction({ data })
 				if (decoded?.name === 'adminManager' && decoded.args[0]) {
-					adminToAA = decoded.args[0] as string
-					// Resolve EOA from AA (BeamioAccount.owner())
+					adminAA = decoded.args[0] as string
 					try {
-						const ownerResult = await providerBase.call({ to: adminToAA as `0x${string}`, data: '0x8da5cb5b' })
+						const ownerResult = await providerBase.call({ to: adminAA as `0x${string}`, data: '0x8da5cb5b' })
 						if (ownerResult && ownerResult !== '0x') {
 							const [owner] = new ethers.Interface(['function owner() view returns (address)']).decodeFunctionResult('owner', ownerResult)
-							if (owner && owner !== ethers.ZeroAddress) adminToEOA = owner
+							if (owner && owner !== ethers.ZeroAddress) adminEOA = owner
 						}
-					} catch (_) { /* AA may not have owner() */ }
+					} catch (_) { /* ignore */ }
 				}
 			}
-			logger(Colors.cyan(`[cardAddAdmin] signer(owner)=${signerAddr ?? 'N/A'} cardAddress=${cardAddress ?? 'N/A'} adminTo(AA)=${adminToAA ?? 'N/A'} adminTo(EOA)=${adminToEOA ?? 'N/A'}`))
+			// adminAA = 离线签字 data 中 adminManager(to,...) 的 to，即登记为 admin 的地址
+			logger(Colors.cyan(`[cardAddAdmin] signer=${signerAddr ?? 'N/A'} cardAddress=${cardAddress ?? 'N/A'} adminEOA=${adminEOA ?? 'N/A'} adminAA=${adminAA ?? 'N/A'} adminSpecifiedInSig=${adminAA ?? 'N/A'}`))
 		} catch (e: any) {
 			logger(Colors.yellow(`[cardAddAdmin] debug log failed: ${e?.message ?? e}`))
 		}
