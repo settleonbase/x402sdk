@@ -5729,15 +5729,22 @@ export const executeForOwnerProcess = async () => {
 			})()
 		}
 	} catch (e: any) {
-		logger(Colors.red(`❌ executeForOwnerProcess failed:`), e?.message ?? e)
-		let errMsg = e?.message ?? String(e)
-		const errData = (e?.data ?? e?.info?.error?.data ?? e?.error?.data) as string | undefined
-		// UC_RedeemDelegateFailed(bytes) 空 data 通常表示 RedeemModule 不支持 createRedeemBatch（旧版）
-		if (typeof errData === 'string' && /dccff669/.test(errData) && /0000000000000000000000000000000000000000000000000000000000000000$/.test(errData.slice(-64))) {
-			errMsg = 'Redeem module does not support createRedeemBatch. Run: npx hardhat run scripts/verifyAndFixRedeemModule.ts --network base'
-			logger(Colors.yellow('💡'), errMsg)
+		const msg = String(e?.message ?? e)
+		const isNonceRace = msg.includes('nonce too low') || msg.includes('nonce has already been used') || e?.code === 'NONCE_EXPIRED'
+		if (isNonceRace) {
+			logger(Colors.yellow(`[executeForOwnerProcess] nonce race (ensureAAForEOA + cardAddAdmin 并发), re-queueing: ${msg}`))
+			executeForOwnerPool.unshift(obj)
+		} else {
+			logger(Colors.red(`❌ executeForOwnerProcess failed:`), e?.message ?? e)
+			let errMsg = e?.message ?? String(e)
+			const errData = (e?.data ?? e?.info?.error?.data ?? e?.error?.data) as string | undefined
+			// UC_RedeemDelegateFailed(bytes) 空 data 通常表示 RedeemModule 不支持 createRedeemBatch（旧版）
+			if (typeof errData === 'string' && /dccff669/.test(errData) && /0000000000000000000000000000000000000000000000000000000000000000$/.test(errData.slice(-64))) {
+				errMsg = 'Redeem module does not support createRedeemBatch. Run: npx hardhat run scripts/verifyAndFixRedeemModule.ts --network base'
+				logger(Colors.yellow('💡'), errMsg)
+			}
+			if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: errMsg }).end()
 		}
-		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: errMsg }).end()
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => executeForOwnerProcess(), 3000)
