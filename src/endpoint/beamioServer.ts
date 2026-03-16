@@ -2144,9 +2144,23 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			logger(Colors.red(`server /api/cardAddAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
-		// Debug: log admin to (must be deployed AA per ensureAAForEOA workflow)
+		// Debug: log signer, card, adminTo (AA), and EOA for troubleshooting
 		try {
-			const data = req.body?.data
+			const { cardAddress, data, deadline, nonce, ownerSignature } = req.body
+			// 1) Recover signer (owner) from ownerSignature
+			let signerAddr: string | null = null
+			if (cardAddress && data && deadline != null && nonce && ownerSignature) {
+				const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: BASE_CHAIN_ID, verifyingContract: BASE_CARD_FACTORY }
+				const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
+				const dataHash = ethers.keccak256(data)
+				const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+				const value = { cardAddress: ethers.getAddress(cardAddress), dataHash, deadline: Number(deadline), nonce: nonceBytes }
+				const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+				signerAddr = ethers.recoverAddress(digest, ownerSignature)
+			}
+			// 2) Parse adminManager to get adminTo (AA)
+			let adminToAA: string | null = null
+			let adminToEOA: string | null = null
 			if (data && typeof data === 'string' && data.length >= 10) {
 				const iface4 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
 				const iface5 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)'])
@@ -2156,10 +2170,21 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				const iface = dataSel === sel5 ? iface5 : iface4
 				const decoded = iface.parseTransaction({ data })
 				if (decoded?.name === 'adminManager' && decoded.args[0]) {
-					logger(Colors.cyan(`[cardAddAdmin] admin to (AA): ${decoded.args[0]}`))
+					adminToAA = decoded.args[0] as string
+					// Resolve EOA from AA (BeamioAccount.owner())
+					try {
+						const ownerResult = await providerBase.call({ to: adminToAA as `0x${string}`, data: '0x8da5cb5b' })
+						if (ownerResult && ownerResult !== '0x') {
+							const [owner] = new ethers.Interface(['function owner() view returns (address)']).decodeFunctionResult('owner', ownerResult)
+							if (owner && owner !== ethers.ZeroAddress) adminToEOA = owner
+						}
+					} catch (_) { /* AA may not have owner() */ }
 				}
 			}
-		} catch (_) { /* ignore decode errors */ }
+			logger(Colors.cyan(`[cardAddAdmin] signer(owner)=${signerAddr ?? 'N/A'} cardAddress=${cardAddress ?? 'N/A'} adminTo(AA)=${adminToAA ?? 'N/A'} adminTo(EOA)=${adminToEOA ?? 'N/A'}`))
+		} catch (e: any) {
+			logger(Colors.yellow(`[cardAddAdmin] debug log failed: ${e?.message ?? e}`))
+		}
 		logger(Colors.green(`server /api/cardAddAdmin preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
