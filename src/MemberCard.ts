@@ -381,6 +381,26 @@ export const ensureAAForMintTarget = async (targetAddress: string): Promise<void
 }
 
 /**
+ * 为 EOA 确保存在 AA，返回 AA 地址。供 UI 登记 admin 前调用：UI 仅传 EOA，由此获取 AA 再构建 adminManager(AA,...) 并签字。
+ * 登记 admin 必须使用 AA 账号；UI 送入 endpoint 的账号默认必须为 EOA，不能传送预测 AA。
+ */
+export const ensureAAForEOA = async (eoa: string): Promise<string> => {
+	const pool = Settle_ContractPool
+	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
+	const aaFactory = pool[0].aaAccountFactoryPaymaster
+	if (!aaFactory) throw new Error('aaAccountFactoryPaymaster not initialized')
+	const acct = await aaFactory.beamioAccountOf(eoa)
+	const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+	const hasAA = acct && acct !== ethers.ZeroAddress && (await provider.getCode(acct)) !== '0x'
+	if (hasAA) return ethers.getAddress(acct)
+	logger(Colors.cyan(`[ensureAAForEOA] EOA ${eoa} has no AA, creating...`))
+	const { accountAddress } = await DeployingSmartAccount(eoa, aaFactory)
+	if (!accountAddress) throw new Error(`Failed to create AA for ${eoa}`)
+	logger(Colors.green(`[ensureAAForEOA] created AA ${accountAddress} for EOA ${eoa}`))
+	return accountAddress
+}
+
+/**
  * 检查 EOA 是否已拥有 index=0 的 AA 账户（与 DeployingSmartAccount 约定一致：每个 EOA 仅支持一个 AA，不支持多个）。
  */
 export const checkSmartAccount = async (wallet: string): Promise<false | { accountAddress: string; alreadyExisted: true }> => {
@@ -949,7 +969,7 @@ export const executeForAdminProcess = async () => {
 			setTimeout(() => executeForAdminProcess(), 1000)
 			return
 		}
-		// adminManager(add admin)：若 to 为 EOA 且无 AA，先创建 AA（与 executeForOwnerProcess 一致）
+		// adminManager(add admin)：必须链上校验 to；若 to 无 code 视为 EOA，先创建 AA（与 executeForOwnerProcess 一致）。客户端应传 EOA 而非预测 AA。
 		const dataSel = obj.data.slice(0, 10).toLowerCase()
 		const isAdminManager = dataSel === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || dataSel === ADMIN_MANAGER_5_SELECTOR.toLowerCase()
 		if (isAdminManager && SC.aaAccountFactoryPaymaster) {
@@ -5155,6 +5175,12 @@ export const cardAddAdminByAdminPreCheck = async (body: {
 			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
 			const codeAtCard = await provider.getCode(cardAddress)
 			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+			if (decoded.args[1] === true) {
+				const codeAtTo = await provider.getCode(to)
+				if (!codeAtTo || codeAtTo === '0x') {
+					return { success: false, error: 'Admin must be deployed AA. Call GET /api/ensureAAForEOA?eoa=0x... with the EOA first, then use the returned AA address.' }
+				}
+			}
 		}
 		if (deadline == null || !nonce || !adminSignature) return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
 		const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
@@ -5171,7 +5197,7 @@ export const cardAddAdminByAdminPreCheck = async (body: {
 	}
 }
 
-/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold[, metadata[, mintLimit]])。admin=true 时 to 可为 EOA（Master 会先为其创建 AA 再执行）。合格转发 master executeForOwner。 */
+/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold[, metadata[, mintLimit]])。admin=true 时 to 必须为已部署的 AA，不能为 EOA 或预测地址。UI 应传 EOA 调用 GET /api/ensureAAForEOA 获取 AA，再构建 adminManager(AA,...) 并签字。 */
 export const cardAddAdminPreCheck = async (body: {
 	cardAddress?: string
 	data?: string
@@ -5192,12 +5218,17 @@ export const cardAddAdminPreCheck = async (body: {
 		if (!decoded || decoded.name !== 'adminManager') return { success: false, error: 'Invalid adminManager calldata' }
 		const to = decoded.args[0] as string
 		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
-		// admin=true 时不再预检 to 是否为 AA；Master 会在 executeForOwner 前为 EOA 创建 AA 并替换 data 中的 to
-		const pool = Settle_ContractPool
-		if (pool?.length) {
-			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-			const codeAtCard = await provider.getCode(cardAddress)
-			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+		if (decoded.args[1] === true) {
+			const pool = Settle_ContractPool
+			if (pool?.length) {
+				const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+				const codeAtCard = await provider.getCode(cardAddress)
+				if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+				const codeAtTo = await provider.getCode(to)
+				if (!codeAtTo || codeAtTo === '0x') {
+					return { success: false, error: 'Admin must be deployed AA. Call GET /api/ensureAAForEOA?eoa=0x... with the EOA first, then use the returned AA address.' }
+				}
+			}
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 		return { success: true }
@@ -5624,7 +5655,9 @@ export const executeForOwnerProcess = async () => {
 					if (to && ethers.isAddress(to)) {
 						const provider = (SC.walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
 						const codeAtTo = await provider.getCode(to)
+						// 必须链上校验：不能因收到 AA 地址就跳过检测。若 to 有 code 则视为已部署 AA，直接执行；若无 code 则视为 EOA，需为其创建 AA。
 						if (!codeAtTo || codeAtTo === '0x') {
+							// to 无 code：可能是 EOA 或预测的 AA。仅 EOA 可作 createAccountFor(creator)；预测 AA 不可。客户端应传 EOA 而非预测地址。
 							let aaAddr = await SC.aaAccountFactoryPaymaster.beamioAccountOf(to)
 							if (!aaAddr || aaAddr === ethers.ZeroAddress) aaAddr = await SC.aaAccountFactoryPaymaster.primaryAccountOf(to)
 							const hasAA = aaAddr && aaAddr !== ethers.ZeroAddress && (await provider.getCode(aaAddr)) !== '0x'

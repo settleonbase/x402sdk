@@ -2137,14 +2137,14 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
-	/** cardAddAdmin：owner 管理 admin（添加/移除）。Cluster 预检 data 为 adminManager、add 时 to 为 EOA，合格转发 master executeForOwner */
+	/** cardAddAdmin：owner 管理 admin（添加/移除）。Cluster 预检 data 为 adminManager、add 时 to 必须为已部署 AA（UI 先调 ensureAAForEOA 获取），合格转发 master executeForOwner */
 	router.post('/cardAddAdmin', async (req, res) => {
 		const preCheck = await cardAddAdminPreCheck(req.body)
 		if (!preCheck.success) {
 			logger(Colors.red(`server /api/cardAddAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
-		// Debug: log UI-passed admin address (handleResolved.addressAA)
+		// Debug: log admin to (must be deployed AA per ensureAAForEOA workflow)
 		try {
 			const data = req.body?.data
 			if (data && typeof data === 'string' && data.length >= 10) {
@@ -2156,7 +2156,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				const iface = dataSel === sel5 ? iface5 : iface4
 				const decoded = iface.parseTransaction({ data })
 				if (decoded?.name === 'adminManager' && decoded.args[0]) {
-					logger(Colors.cyan(`[cardAddAdmin] handleResolved.addressAA (admin to): ${decoded.args[0]}`))
+					logger(Colors.cyan(`[cardAddAdmin] admin to (AA): ${decoded.args[0]}`))
 				}
 			}
 		} catch (_) { /* ignore decode errors */ }
@@ -2831,6 +2831,22 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		} catch (e: any) {
 			logger(Colors.red('[myCards] forward error:'), e?.message ?? e)
 			res.status(502).json({ error: e?.message ?? 'Failed to fetch my cards' })
+		}
+	})
+
+	/** GET /api/ensureAAForEOA?eoa=0x... - 为 EOA 确保存在 AA（无则创建），返回 AA 地址。登记 admin 前 UI 必须传 EOA 调用此接口获取 AA。 */
+	router.get('/ensureAAForEOA', async (req, res) => {
+		const { eoa } = req.query as { eoa?: string }
+		if (!eoa || !ethers.isAddress(eoa)) {
+			return res.status(400).json({ error: 'Invalid eoa: require valid 0x address' })
+		}
+		try {
+			const path = '/api/ensureAAForEOA?eoa=' + encodeURIComponent(eoa)
+			const { statusCode, body } = await getLocalhostBuffer(path)
+			res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[ensureAAForEOA] forward error:'), e?.message ?? e)
+			res.status(502).json({ error: e?.message ?? 'Failed to ensure AA for EOA' })
 		}
 	})
 
