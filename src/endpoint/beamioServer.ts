@@ -2144,6 +2144,22 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			logger(Colors.red(`server /api/cardAddAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
+		// Debug: log UI-passed admin address (handleResolved.addressAA)
+		try {
+			const data = req.body?.data
+			if (data && typeof data === 'string' && data.length >= 10) {
+				const iface4 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
+				const iface5 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)'])
+				const sel4 = (iface4.getFunction('adminManager')?.selector ?? '').toLowerCase()
+				const sel5 = (iface5.getFunction('adminManager')?.selector ?? '').toLowerCase()
+				const dataSel = data.slice(0, 10).toLowerCase()
+				const iface = dataSel === sel5 ? iface5 : iface4
+				const decoded = iface.parseTransaction({ data })
+				if (decoded?.name === 'adminManager' && decoded.args[0]) {
+					logger(Colors.cyan(`[cardAddAdmin] handleResolved.addressAA (admin to): ${decoded.args[0]}`))
+				}
+			}
+		} catch (_) { /* ignore decode errors */ }
 		logger(Colors.green(`server /api/cardAddAdmin preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})

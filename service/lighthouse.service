@@ -17,6 +17,7 @@ ExecStart=/usr/bin/numactl --cpunodebind=3 --membind=3 -- /usr/local/bin/lightho
   --datadir /media/sda/eth/lighthouse \
   --execution-endpoint http://127.0.0.1:8551 \
   --execution-jwt /media/sda/eth/jwt/jwt.hex \
+  --execution-timeout-multiplier 4 \
   \
   --http \
   --http-address 0.0.0.0 \
