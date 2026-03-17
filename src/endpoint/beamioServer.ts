@@ -98,6 +98,18 @@ const tryParseMintPointsByAdminRecipient = (data: string): string | null => {
 	return null
 }
 
+/** 从 mintPointsByAdmin(data) 解析 recipient 与 points6 */
+const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; points6: bigint } | null => {
+	try {
+		const iface = new ethers.Interface(['function mintPointsByAdmin(address user, uint256 points6)'])
+		const decoded = iface.parseTransaction({ data })
+		if (decoded?.name === 'mintPointsByAdmin' && decoded.args[0] != null && decoded.args[1] != null) {
+			return { recipient: decoded.args[0] as string, points6: BigInt(decoded.args[1]) }
+		}
+	} catch { /* ignore */ }
+	return null
+}
+
 /** 解析 EOA 对应的 AA 地址（用于日志） */
 const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> => {
 	try {
@@ -1153,6 +1165,8 @@ const routing = ( router: Router ) => {
 			c?: string
 			m?: string
 		}
+		let nfcTagIdHex: string | null = null
+		let nfcLinkedEOA: string | null = null
 		const uidTrim = uid && typeof uid === 'string' ? uid.trim() : ''
 		const isNfcUid = uidTrim.length > 0 && /^[0-9A-Fa-f]{14}$/.test(uidTrim)
 		if (isNfcUid) {
@@ -1172,6 +1186,8 @@ const routing = ( router: Router ) => {
 					logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid}`))
 					return res.status(403).json(err).end()
 				}
+				nfcTagIdHex = sunResult.tagIdHex
+				nfcLinkedEOA = await getNfcRecipientAddressByTagId(nfcTagIdHex)
 				logger(Colors.gray(`[nfcTopup] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
 			} catch (sunErr: any) {
 				const msg = sunErr?.message ?? String(sunErr)
@@ -1222,10 +1238,21 @@ const routing = ( router: Router ) => {
 			}
 			const digest = ethers.TypedDataEncoder.hash(domain, types, message)
 			const signer = ethers.recoverAddress(digest, adminSignature)
-			const cardAbi = ['function isAdmin(address) view returns (bool)']
+			const cardAbi = ['function isAdmin(address) view returns (bool)', 'function owner() view returns (address)', 'function adminParent(address) view returns (address)']
 			const card = new ethers.Contract(cardAddress, cardAbi, providerBase)
 			const isAdmin = await card.isAdmin(signer)
 			if (!isAdmin) {
+				const mintParsed = tryParseMintPointsByAdminArgs(data)
+				const recipientTo = mintParsed?.recipient ?? tryParseMintPointsByAdminRecipient(data)
+				const points6 = mintParsed?.points6 ?? 0n
+				let cardOwner = ''
+				let signerAdminParent = ''
+				try {
+					cardOwner = await card.owner() as string
+					signerAdminParent = await card.adminParent(signer) as string
+				} catch (_) { /* ignore */ }
+				const nfcLinkedAA = nfcLinkedEOA ? await resolveBeamioAccountOf(nfcLinkedEOA) : null
+				logger(Colors.red(`[nfcTopup] Signer is not card admin - DEBUG: cardAddr=${cardAddress} | tagIdHex=${nfcTagIdHex ?? '(not NFC)'} | tagIdLinkedEOA=${nfcLinkedEOA ?? 'N/A'} | tagIdLinkedAA=${nfcLinkedAA ?? 'N/A'} | toRecipient=${recipientTo ?? 'N/A'} | amountPoints6=${points6.toString()} | cardOwner=${cardOwner || 'N/A'} | signer=${signer} | signerAdminParent=${signerAdminParent || 'N/A'}`))
 				return res.status(403).json({ success: false, error: 'Signer is not card admin' })
 			}
 			let recipientEOA: string | null = null
