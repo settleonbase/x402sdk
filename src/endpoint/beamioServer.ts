@@ -665,7 +665,7 @@ const routing = ( router: Router ) => {
 			}
 		}
 		try {
-			const eoaRaw = nfcSunTagIdHex
+			let eoaRaw = nfcSunTagIdHex
 				? await getNfcRecipientAddressByTagId(nfcSunTagIdHex)
 				: await getNfcRecipientAddressByUid(uidTrim)
 			if (!eoaRaw) {
