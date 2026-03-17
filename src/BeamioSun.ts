@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv } from 'node:crypto'
 import type express from 'express'
 import { masterSetup } from './util'
-import { getBeamioSunLastCounterByUid, upsertBeamioSunLastCounterByUid } from './db'
+import { getBeamioSunLastCounterStateByUid, upsertBeamioSunLastCounterByUid } from './db'
 import { logger } from './logger'
 
 export interface BeamioSunCounterState {
@@ -245,7 +245,8 @@ export const verifyBeamioSunUrl = async (url: string): Promise<VerifyBeamioSunRe
 	const mHexRaw = getQueryParam(url, 'm')
 	const mHex = mHexRaw ? normalizeHex(mHexRaw, 16) : null
 
-	const lastCounterHex = await getBeamioSunLastCounterByUid(uidHex)
+	const state = await getBeamioSunLastCounterStateByUid(uidHex)
+	const lastCounterHex = state?.lastCounterHex ?? null
 	const counterState: BeamioSunCounterState = {
 		uidHex,
 		lastCounterHex
@@ -268,7 +269,12 @@ export const verifyBeamioSunUrl = async (url: string): Promise<VerifyBeamioSunRe
 	const counterValue = parseInt(cHex, 16)
 	const macValid = mHex != null && expectedMacHex === mHex
 	const tagIdMatchesExpected = true
-	const counterFresh = !lastCounterHex || counterValue > parseInt(lastCounterHex, 16)
+	const lastCounterVal = lastCounterHex ? parseInt(lastCounterHex, 16) : -1
+	const counterStrictlyNew = counterValue > lastCounterVal
+	// 同 tap 短时 grace：getUIDAssets 成功后 persist 了 counter，nfcTopupPrepare/nfcTopup 复用同一 tap 的 e/c/m，counter 相同。允许 counter === lastCounter 且 lastPersisted 在 120 秒内。
+	const SAME_TAP_GRACE_MS = 120_000
+	const sameCounterRecentlyPersisted = counterValue === lastCounterVal && state?.updatedAt && (Date.now() - state.updatedAt.getTime() < SAME_TAP_GRACE_MS)
+	const counterFresh = !lastCounterHex || counterStrictlyNew || sameCounterRecentlyPersisted
 
 	return {
 		url,

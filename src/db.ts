@@ -961,19 +961,30 @@ export const registerNfcCardToDb = async (params: { uid: string; privateKey: str
 }
 
 export const getBeamioSunLastCounterByUid = async (uid: string): Promise<string | null> => {
+	const state = await getBeamioSunLastCounterStateByUid(uid)
+	return state?.lastCounterHex ?? null
+}
+
+/** 返回 lastCounter 与 updated_at，供 counter 防重放 + 同 tap 短时 grace 使用 */
+export const getBeamioSunLastCounterStateByUid = async (uid: string): Promise<{ lastCounterHex: string; updatedAt: Date } | null> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		await db.query(BEAMIO_SUN_COUNTER_STATE_TABLE)
 		const normalizedUid = String(uid || '').trim().toLowerCase()
 		if (!normalizedUid) return null
-		const { rows } = await db.query<{ last_counter: string }>(
-			`SELECT last_counter FROM beamio_sun_counter_state WHERE LOWER(uid) = $1 LIMIT 1`,
+		const { rows } = await db.query<{ last_counter: string; updated_at: Date }>(
+			`SELECT last_counter, updated_at FROM beamio_sun_counter_state WHERE LOWER(uid) = $1 LIMIT 1`,
 			[normalizedUid]
 		)
-		return rows[0]?.last_counter ? String(rows[0].last_counter).trim().toUpperCase() : null
+		const r = rows[0]
+		if (!r?.last_counter) return null
+		return {
+			lastCounterHex: String(r.last_counter).trim().toUpperCase(),
+			updatedAt: r.updated_at
+		}
 	} catch (e: any) {
-		logger(Colors.yellow(`[getBeamioSunLastCounterByUid] failed: ${e?.message ?? e}`))
+		logger(Colors.yellow(`[getBeamioSunLastCounterStateByUid] failed: ${e?.message ?? e}`))
 		return null
 	} finally {
 		await db.end().catch(() => {})
