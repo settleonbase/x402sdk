@@ -879,6 +879,23 @@ export const isTagIdRegistered = async (tagIdHex: string): Promise<boolean> => {
 	return addr != null
 }
 
+/** 根据 TagID 查找或创建钱包。若已登记则返回 EOA；若未登记则创建新 EOA、登记到 nfc_cards（uid+private_key+tag_id），返回 EOA。uidHex 为请求中的 uid（14 hex），用于登记。并发时以先插入为准，后插入不覆盖。 */
+export const provisionOrGetNfcWalletByTagId = async (tagIdHex: string, uidHex: string): Promise<{ eoa: string; wasNewlyProvisioned: boolean }> => {
+	const existing = await getNfcRecipientAddressByTagId(tagIdHex)
+	if (existing) return { eoa: existing, wasNewlyProvisioned: false }
+	const wallet = ethers.Wallet.createRandom()
+	await registerNfcCardToDb({
+		uid: uidHex,
+		privateKey: wallet.privateKey,
+		tagId: tagIdHex
+	})
+	const after = await getNfcRecipientAddressByTagId(tagIdHex)
+	const eoa = after ?? (await wallet.getAddress())
+	const wasNewlyProvisioned = true
+	logger(Colors.green(`[provisionOrGetNfcWalletByTagId] provisioned EOA ${eoa} for tagId=${tagIdHex.slice(0, 8)}...`))
+	return { eoa, wasNewlyProvisioned }
+}
+
 /** 根据 UID 获取 NFC 卡对应的 recipient EOA 地址（用于 mintPointsByAdmin 的 to 参数）。若 DB 无则从 mnemonic 派生，不写入 DB。 */
 export const getNfcRecipientAddressByUid = async (uid: string): Promise<string | null> => {
 	let privateKey = await getNfcCardPrivateKeyByUid(uid)
@@ -922,7 +939,9 @@ export const registerNfcCardToDb = async (params: { uid: string; privateKey: str
 		if (tagId && tagId.length === 16 && /^[0-9A-F]+$/.test(tagId)) {
 			await db.query(
 				`INSERT INTO nfc_cards (uid, private_key, tag_id) VALUES ($1, $2, $3)
-				ON CONFLICT (uid) DO UPDATE SET private_key = EXCLUDED.private_key, tag_id = COALESCE(EXCLUDED.tag_id, nfc_cards.tag_id)`,
+				ON CONFLICT (uid) DO UPDATE SET
+					private_key = CASE WHEN nfc_cards.tag_id IS NULL THEN EXCLUDED.private_key ELSE nfc_cards.private_key END,
+					tag_id = COALESCE(nfc_cards.tag_id, EXCLUDED.tag_id)`,
 				[uid, privateKey, tagId]
 			)
 			logger(Colors.green(`[registerNfcCardToDb] registered uid=${uid.slice(0, 16)}... tagId=${tagId.slice(0, 8)}...`))

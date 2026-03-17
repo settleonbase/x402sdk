@@ -10,11 +10,12 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _search, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, isTagIdRegistered, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
+import {beamio_ContractPool, searchUsers, _search, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyBeamioSunRequest, verifyAndPersistBeamioSunUrl } from '../BeamioSun'
+import { fetchUIDAssetsForEOA } from './getUIDAssetsLogic'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -647,12 +648,10 @@ const routing = ( router: Router ) => {
 			}
 			try {
 				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl, {
-					isTagIdValid: isTagIdRegistered
-				})
+				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
 				if (!sunResult.valid) {
-					const err = { ok: false, error: 'SUN verification failed or TagID not registered', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }
-					logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN/TagID 校验失败: valid=${sunResult.valid} macValid=${sunResult.macValid} counterFresh=${sunResult.counterFresh}`))
+					const err = { ok: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }
+					logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid} macValid=${sunResult.macValid} counterFresh=${sunResult.counterFresh}`))
 					return res.status(403).json(err).end()
 				}
 				nfcSunTagIdHex = sunResult.tagIdHex
@@ -665,9 +664,17 @@ const routing = ( router: Router ) => {
 			}
 		}
 		try {
-			let eoaRaw = nfcSunTagIdHex
-				? await getNfcRecipientAddressByTagId(nfcSunTagIdHex)
-				: await getNfcRecipientAddressByUid(uidTrim)
+			let eoaRaw: string | null
+			if (nfcSunTagIdHex) {
+				eoaRaw = await getNfcRecipientAddressByTagId(nfcSunTagIdHex)
+				if (!eoaRaw) {
+					logger(Colors.cyan(`[getUIDAssets] tagId=${nfcSunTagIdHex} 未绑定钱包，转发 Master 排队创建`))
+					postLocalhost('/api/getUIDAssetsProvision', { uid: uidTrim, tagIdHex: nfcSunTagIdHex, e: req.body?.e, c: req.body?.c, m: req.body?.m }, res)
+					return
+				}
+			} else {
+				eoaRaw = await getNfcRecipientAddressByUid(uidTrim)
+			}
 			if (!eoaRaw) {
 				// beamioTab：Scan QR 的 beamio 参数，按 AccountRegistry 账户名解析 EOA
 				try {
@@ -684,162 +691,10 @@ const routing = ( router: Router ) => {
 				return res.status(404).json(err).end()
 			}
 			const eoa = ethers.getAddress(eoaRaw)
-			const cardAbi = [
-				'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
-				'function currency() view returns (uint8)',
-			]
-			const usdcAbi = ['function balanceOf(address) view returns (uint256)']
-			const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
-			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
-			const [usdcEoaRaw, aaAddr] = await Promise.all([
-				usdc.balanceOf(eoa),
-				resolveBeamioAccountOf(eoa),
-			])
-			let usdcTotalRaw = usdcEoaRaw
-			if (aaAddr) {
-				const usdcAaRaw = await usdc.balanceOf(aaAddr)
-				usdcTotalRaw += usdcAaRaw
-			}
-			const usdcBalance = ethers.formatUnits(usdcTotalRaw, 6)
-			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
-			const cardAddresses: { address: string; name: string; type: string }[] = [
-				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
-				{ address: BEAMIO_USER_CARD_ASSET_ADDRESS, name: 'CashTrees Card', type: 'infrastructure' },
-			].filter(({ address }) => !DEPRECATED_INFRA_CARDS.has(address.toLowerCase()))
-			const cards: Array<{
-				cardAddress: string
-				cardName: string
-				cardType: string
-				points: string
-				points6: string
-				cardCurrency: string
-				cardBackground?: string
-				cardImage?: string
-				tierName?: string
-				tierDescription?: string
-				nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }>
-			}> = []
-			for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
-				try {
-					const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
-					const [ [pointsBalance, nfts], currencyNum ] = await Promise.all([
-						card.getOwnershipByEOA(eoa),
-						card.currency(),
-					])
-					const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
-					const nftList = nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
-						tokenId: nft.tokenId.toString(),
-						attribute: nft.attribute.toString(),
-						tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
-						expiry: nft.expiry === 0n ? 'Never' : new Date(Number(nft.expiry) * 1000).toLocaleString(),
-						isExpired: nft.isExpired,
-					}))
-					// 用户拥有的最佳 NFT（tokenId 最大且 > 0）用于 tier 显示与 background/image
-					let cardBackground: string | undefined
-					let cardImage: string | undefined
-					let tierName: string | undefined
-					let tierDescription: string | undefined
-					const withTokenId = nftList.filter((n: { tokenId: string }) => Number(n.tokenId) > 0)
-					logger(Colors.gray(`[getUIDAssets] card=${cardAddr} withTokenId=${withTokenId.length} withTokenIds=${withTokenId.map((n: { tokenId: string }) => n.tokenId).join(',')}`))
-					const bestNft = withTokenId.length > 0
-						? withTokenId.reduce((a: { tokenId: string; tier: string }, b: { tokenId: string; tier: string }) => (Number(b.tokenId) > Number(a.tokenId) ? b : a))
-						: null
-					let cardRow: { cardOwner: string; metadata: Record<string, unknown> | null } | null = null
-					if (bestNft) {
-						try {
-							cardRow = await getCardByAddress(cardAddr)
-							let tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestNft.tokenId)
-							if (!tierMeta && cardRow?.cardOwner) {
-								tierMeta = await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, bestNft.tokenId)
-								if (tierMeta) logger(Colors.gray(`[getUIDAssets] card=${cardAddr} tokenId=${bestNft.tokenId} 按 card_owner 回退查到 tier metadata`))
-							}
-							if (tierMeta && typeof tierMeta === 'object') {
-								const props = tierMeta.properties as Record<string, unknown> | undefined
-								const bg = (props?.background_color ?? tierMeta.background_color) as string | undefined
-								if (bg && typeof bg === 'string' && bg.trim()) {
-									cardBackground = bg.trim().startsWith('#') ? bg.trim() : `#${bg.trim().replace(/^#/, '')}`
-								}
-								const img = (props?.image ?? tierMeta.image) as string | undefined
-								if (img && typeof img === 'string' && img.trim()) cardImage = img.trim()
-								tierName = (props?.tier_name ?? tierMeta.name) as string | undefined
-								if (tierName && typeof tierName === 'string' && tierName.trim()) tierName = tierName.trim()
-								else tierName = undefined
-								tierDescription = (props?.tier_description ?? tierMeta.description) as string | undefined
-								if (tierDescription && typeof tierDescription === 'string' && tierDescription.trim()) tierDescription = tierDescription.trim()
-								else tierDescription = undefined
-							} else if (bestNft && !tierMeta) {
-								logger(Colors.gray(`[getUIDAssets] card=${cardAddr} tokenId=${bestNft.tokenId} 无 NFT tier metadata，将尝试从卡级 tiers 取 background`))
-							}
-							// 无 NFT tier metadata 时，用卡级 metadata 的 tiers 数组。按 BeamioUserCard.Tier.minUsdc6 升序排序，低的一档（minUsdc6 最小）为 sorted[0]；Default/Max 对应该低档。
-							if ((!tierName || !tierDescription || !cardBackground || !cardImage) && cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
-								const tiersRaw = cardRow.metadata.tiers as Array<{ index?: number; minUsdc6?: string; name?: string; description?: string; image?: string; backgroundColor?: string }>
-								const minUsdc6Num = (t: { minUsdc6?: string }) => {
-									const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
-									const n = parseInt(s, 10)
-									return Number.isNaN(n) ? Infinity : n
-								}
-								const tiersSorted = [...tiersRaw].sort((a, b) => minUsdc6Num(a) - minUsdc6Num(b))
-								const tierIndexChain = bestNft.tier === 'Default/Max' ? 0 : (parseInt(bestNft.tier, 10) || 0)
-								// Default/Max -> 排序后第一档（minUsdc6 最低）；数字 -> 按链上下标取原序中对应项
-								const t = bestNft.tier === 'Default/Max'
-									? tiersSorted[0]
-									: (tiersRaw.find((x: { index?: number }, i: number) => (x.index != null ? x.index : i) === tierIndexChain) ?? tiersRaw[tierIndexChain])
-								if (t) {
-									if (!tierName && t.name && String(t.name).trim()) tierName = String(t.name).trim()
-									if (!tierDescription && t.description && String(t.description).trim()) tierDescription = String(t.description).trim()
-									if (!cardImage && t.image && String(t.image).trim()) cardImage = String(t.image).trim()
-									// 卡级 tiers 中若有 backgroundColor，作为 cardBackground 兜底（当无 NFT tier metadata 时）
-									if (!cardBackground && t.backgroundColor && String(t.backgroundColor).trim()) {
-										const bg = String(t.backgroundColor).trim()
-										cardBackground = bg.startsWith('#') ? bg : `#${bg.replace(/^#/, '')}`
-										logger(Colors.gray(`[getUIDAssets] card=${cardAddr} 使用卡级 tier backgroundColor: ${cardBackground}`))
-									}
-								}
-								if (!tierName && (bestNft.tier === 'Default/Max' || tierIndexChain === 0)) tierName = 'Default'
-								else if (!tierName) tierName = `Tier ${tierIndexChain + 1}`
-							}
-						} catch (_) { /* ignore */ }
-					}
-					// 当卡中资产为零且无 NFT# > 0 时，不组装进 cards
-					const hasPoints = pointsBalance > 0n
-					const hasNftGt0 = nftList.some((n: { tokenId: string }) => Number(n.tokenId) > 0)
-					if (hasPoints || hasNftGt0) {
-						cards.push({
-							cardAddress: cardAddr,
-							cardName,
-							cardType,
-							points: ethers.formatUnits(pointsBalance, 6),
-							points6: String(pointsBalance),
-							cardCurrency: currency,
-							...(cardBackground != null && { cardBackground }),
-							...(cardImage != null && { cardImage }),
-							...(tierName != null && { tierName }),
-							...(tierDescription != null && { tierDescription }),
-							nfts: nftList,
-						})
-					} else {
-						logger(Colors.gray(`[getUIDAssets] card=${cardAddr} skip: zero points and no NFT# > 0`))
-					}
-				} catch (cardErr: any) {
-					logger(Colors.gray(`[getUIDAssets] card=${cardAddr} skip: ${cardErr?.message ?? cardErr}`))
-				}
-			}
-
-			// 双保险：即使上游误传，也不向客户端返回已废弃基础设施卡数据
-			const cardsFiltered = cards.filter((c) => !DEPRECATED_INFRA_CARDS.has(c.cardAddress.toLowerCase()))
-
-
-			const result = {
-				ok: true,
-				address: eoa,
-				aaAddress: aaAddr || undefined,
-				usdcBalance,
-				cards: cardsFiltered,
-			}
-			// Debug: 返回客户端的完整 JSON，便于排查 Android 端为何未解析/使用 cardBackground
+			const result = await fetchUIDAssetsForEOA(eoa)
 			const resultJson = JSON.stringify(result, null, 2)
 			logger(Colors.cyan(`[getUIDAssets] 返回客户端 JSON (uid=${uidTrim}):\n${resultJson}`))
-			logger(Colors.green(`[getUIDAssets] uid=${uidTrim} 成功 cards=${cards.length}`))
+			logger(Colors.green(`[getUIDAssets] uid=${uidTrim} 成功 cards=${result.cards.length}`))
 			return res.status(200).json(result).end()
 		} catch (e: any) {
 			const msg = e?.shortMessage ?? e?.message ?? ''

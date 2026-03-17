@@ -7,11 +7,12 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
+import { fetchUIDAssetsForEOA } from './getUIDAssetsLogic'
 
 const masterServerPort = 1111
 
@@ -462,6 +463,40 @@ const routing = ( router: Router ) => {
 				logger(Colors.red('[ensureAAForEOA] error:'), err?.message ?? err)
 				res.status(500).json({ error: err?.message ?? 'Failed to ensure AA for EOA' })
 			}
+		})
+
+		/** getUIDAssetsProvision pool：Cluster 预检通过后，TagID 未绑定时转发到此。Master 排队执行 provision → ensureAA → fetchAssets，不预检。 */
+		const getUIDAssetsProvisionPool: Array<{ uid: string; tagIdHex: string; res: Response }> = []
+		const getUIDAssetsProvisionPress = async () => {
+			const obj = getUIDAssetsProvisionPool.shift()
+			if (!obj) return
+			const { uid, tagIdHex, res } = obj
+			try {
+				logger(Colors.cyan(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provision + ensureAA + fetch`))
+				const { eoa, wasNewlyProvisioned } = await provisionOrGetNfcWalletByTagId(tagIdHex, uid)
+				if (wasNewlyProvisioned) {
+					await ensureAAForEOA(ethers.getAddress(eoa))
+					logger(Colors.green(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
+				}
+				const result = await fetchUIDAssetsForEOA(eoa)
+				logger(Colors.green(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... success`))
+				res.status(200).json(result).end()
+			} catch (err: any) {
+				const msg = err?.message ?? String(err)
+				logger(Colors.red(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... failed: ${msg}`))
+				res.status(500).json({ ok: false, error: msg }).end()
+			}
+			setTimeout(() => getUIDAssetsProvisionPress(), 0)
+		}
+
+		/** POST /api/getUIDAssetsProvision - Cluster 预检后转发。TagID 未绑定时需创建钱包，Master 排队处理。 */
+		router.post('/getUIDAssetsProvision', (req, res) => {
+			const { uid, tagIdHex } = req.body as { uid?: string; tagIdHex?: string }
+			if (!uid || !tagIdHex || typeof uid !== 'string' || typeof tagIdHex !== 'string') {
+				return res.status(400).json({ ok: false, error: 'Missing uid or tagIdHex' })
+			}
+			getUIDAssetsProvisionPool.push({ uid: uid.trim(), tagIdHex: tagIdHex.trim(), res })
+			getUIDAssetsProvisionPress()
 		})
 
 		/** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付。用于 Smart Routing 及 beamioTransferIndexerAccounting 前置校验。 */
