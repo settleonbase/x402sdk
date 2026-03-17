@@ -2137,10 +2137,25 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
-	/** cardAddAdmin：owner 管理 admin（添加/移除）。若 body 含 adminEOA，Cluster 先 ensureAAForEOA 再预检。预检 data 为 adminManager、add 时 to 必须为已部署 AA，合格转发 master executeForOwner */
+	/** cardAddAdmin：owner 管理 admin（添加/移除）。添加时：仅允许 EOA，body 必须含 adminEOA，Cluster 先 ensureAAForEOA（若 EOA 无 AA 则创建），再预检并转发。移除时无需 adminEOA。 */
 	router.post('/cardAddAdmin', async (req, res) => {
-		const adminEOA = (req.body?.adminEOA as string)?.trim()
-		if (adminEOA && ethers.isAddress(adminEOA)) {
+		const data = req.body?.data as string
+		let isAddingAdmin = false
+		if (data && typeof data === 'string' && data.length >= 10) {
+			const sel = data.slice(0, 10).toLowerCase()
+			const iface4 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
+			const iface5 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)'])
+			const is5 = sel === (iface5.getFunction('adminManager')?.selector ?? '').toLowerCase()
+			try {
+				const decoded = (is5 ? iface5 : iface4).parseTransaction({ data })
+				if (decoded?.name === 'adminManager') isAddingAdmin = decoded.args[1] === true
+			} catch (_) { /* ignore */ }
+		}
+		if (isAddingAdmin) {
+			const adminEOA = (req.body?.adminEOA as string)?.trim()
+			if (!adminEOA || !ethers.isAddress(adminEOA)) {
+				return res.status(400).json({ success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }).end()
+			}
 			try {
 				const { statusCode, body: ensureBody } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(ethers.getAddress(adminEOA)))
 				if (statusCode !== 200) {
@@ -2196,10 +2211,25 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
-	/** cardAddAdminByAdmin：admin 为自己下层登记 admin。若 body 含 adminEOA，Cluster 先 ensureAAForEOA 再预检。 */
+	/** cardAddAdminByAdmin：admin 为自己下层登记 admin。添加时：仅允许 EOA，body 必须含 adminEOA，Cluster 先 ensureAAForEOA（若 EOA 无 AA 则创建），再预检并转发。移除时无需 adminEOA。 */
 	router.post('/cardAddAdminByAdmin', async (req, res) => {
-		const adminEOA = (req.body?.adminEOA as string)?.trim()
-		if (adminEOA && ethers.isAddress(adminEOA)) {
+		const data = req.body?.data as string
+		let isAddingAdmin = false
+		if (data && typeof data === 'string' && data.length >= 10) {
+			const sel = data.slice(0, 10).toLowerCase()
+			const iface4 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
+			const iface5 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)'])
+			const is5 = sel === (iface5.getFunction('adminManager')?.selector ?? '').toLowerCase()
+			try {
+				const decoded = (is5 ? iface5 : iface4).parseTransaction({ data })
+				if (decoded?.name === 'adminManager') isAddingAdmin = decoded.args[1] === true
+			} catch (_) { /* ignore */ }
+		}
+		if (isAddingAdmin) {
+			const adminEOA = (req.body?.adminEOA as string)?.trim()
+			if (!adminEOA || !ethers.isAddress(adminEOA)) {
+				return res.status(400).json({ success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }).end()
+			}
 			try {
 				const { statusCode, body: ensureBody } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(ethers.getAddress(adminEOA)))
 				if (statusCode !== 200) {

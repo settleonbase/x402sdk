@@ -5149,15 +5149,16 @@ const adminManager5ArgIface = new ethers.Interface(['function adminManager(addre
 const ADMIN_MANAGER_4_SELECTOR = adminManager4ArgIface.getFunction('adminManager')?.selector ?? ''
 const ADMIN_MANAGER_5_SELECTOR = adminManager5ArgIface.getFunction('adminManager')?.selector ?? ''
 
-/** cardAddAdminByAdmin 集群预检：校验 data 为 adminManager，adminSignature 的 signer 为 card admin。合格转发 master executeForAdmin。 */
+/** cardAddAdminByAdmin 集群预检：仅允许添加 EOA。body 必须含 adminEOA，data 的 to 必须等于 adminEOA。禁止添加 AA。 */
 export const cardAddAdminByAdminPreCheck = async (body: {
 	cardAddress?: string
 	data?: string
 	deadline?: number
 	nonce?: string
 	adminSignature?: string
+	adminEOA?: string
 }): Promise<{ success: true } | { success: false; error: string }> => {
-	const { cardAddress, data, deadline, nonce, adminSignature } = body
+	const { cardAddress, data, deadline, nonce, adminSignature, adminEOA } = body
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
 	const dataSelector = data.slice(0, 10).toLowerCase()
@@ -5170,15 +5171,19 @@ export const cardAddAdminByAdminPreCheck = async (body: {
 		if (!decoded || decoded.name !== 'adminManager') return { success: false, error: 'Invalid adminManager calldata' }
 		const to = decoded.args[0] as string
 		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
-		const pool = Settle_ContractPool
-		if (pool?.length) {
-			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-			const codeAtCard = await provider.getCode(cardAddress)
-			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
-			if (decoded.args[1] === true) {
+		if (decoded.args[1] === true) {
+			if (!adminEOA || !ethers.isAddress(adminEOA)) return { success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }
+			if (to.toLowerCase() !== ethers.getAddress(adminEOA).toLowerCase()) {
+				return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
+			}
+			const pool = Settle_ContractPool
+			if (pool?.length) {
+				const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+				const codeAtCard = await provider.getCode(cardAddress)
+				if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
 				const codeAtTo = await provider.getCode(to)
-				if (!codeAtTo || codeAtTo === '0x') {
-					return { success: false, error: 'Admin must be deployed AA. Call GET /api/ensureAAForEOA?eoa=0x... with the EOA first, then use the returned AA address.' }
+				if (codeAtTo && codeAtTo !== '0x') {
+					return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
 				}
 			}
 		}
@@ -5197,15 +5202,16 @@ export const cardAddAdminByAdminPreCheck = async (body: {
 	}
 }
 
-/** cardAddAdmin/cardAdminManager 集群预检：校验 data 为 adminManager(to, admin, newThreshold[, metadata[, mintLimit]])。admin=true 时 to 必须为已部署的 AA，不能为 EOA 或预测地址。UI 应传 EOA 调用 GET /api/ensureAAForEOA 获取 AA，再构建 adminManager(AA,...) 并签字。 */
+/** cardAddAdmin/cardAdminManager 集群预检：仅允许添加 EOA。body 必须含 adminEOA，data 的 to 必须等于 adminEOA。禁止添加 AA。 */
 export const cardAddAdminPreCheck = async (body: {
 	cardAddress?: string
 	data?: string
 	deadline?: number
 	nonce?: string
 	ownerSignature?: string
+	adminEOA?: string
 }): Promise<{ success: true } | { success: false; error: string }> => {
-	const { cardAddress, data, deadline, nonce, ownerSignature } = body
+	const { cardAddress, data, deadline, nonce, ownerSignature, adminEOA } = body
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
 	const dataSelector = data.slice(0, 10).toLowerCase()
@@ -5219,14 +5225,18 @@ export const cardAddAdminPreCheck = async (body: {
 		const to = decoded.args[0] as string
 		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
 		if (decoded.args[1] === true) {
+			if (!adminEOA || !ethers.isAddress(adminEOA)) return { success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }
+			if (to.toLowerCase() !== ethers.getAddress(adminEOA).toLowerCase()) {
+				return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
+			}
 			const pool = Settle_ContractPool
 			if (pool?.length) {
 				const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
 				const codeAtCard = await provider.getCode(cardAddress)
 				if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
 				const codeAtTo = await provider.getCode(to)
-				if (!codeAtTo || codeAtTo === '0x') {
-					return { success: false, error: 'Admin must be deployed AA. Call GET /api/ensureAAForEOA?eoa=0x... with the EOA first, then use the returned AA address.' }
+				if (codeAtTo && codeAtTo !== '0x') {
+					return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
 				}
 			}
 		}
