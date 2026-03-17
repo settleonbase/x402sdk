@@ -466,11 +466,11 @@ const routing = ( router: Router ) => {
 		})
 
 		/** getUIDAssetsProvision pool：Cluster 预检通过后，TagID 未绑定时转发到此。Master 排队执行 provision → ensureAA → fetchAssets，不预检。 */
-		const getUIDAssetsProvisionPool: Array<{ uid: string; tagIdHex: string; res: Response }> = []
+		const getUIDAssetsProvisionPool: Array<{ uid: string; tagIdHex: string; c?: string; res: Response }> = []
 		const getUIDAssetsProvisionPress = async () => {
 			const obj = getUIDAssetsProvisionPool.shift()
 			if (!obj) return
-			const { uid, tagIdHex, res } = obj
+			const { uid, tagIdHex, c: counterHex, res } = obj
 			try {
 				logger(Colors.cyan(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provision + ensureAA + fetch`))
 				const { eoa, wasNewlyProvisioned } = await provisionOrGetNfcWalletByTagId(tagIdHex, uid)
@@ -479,8 +479,16 @@ const routing = ( router: Router ) => {
 					logger(Colors.green(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
 				}
 				const result = await fetchUIDAssetsForEOA(eoa)
+				const counterVal = counterHex && /^[0-9a-fA-F]{6}$/.test(counterHex) ? parseInt(counterHex, 16) : undefined
+				const merged = {
+					...result,
+					uid,
+					tagIdHex,
+					...(counterHex && { counterHex: counterHex }),
+					...(counterVal !== undefined && { counter: counterVal }),
+				}
 				logger(Colors.green(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... success`))
-				res.status(200).json(result).end()
+				res.status(200).json(merged).end()
 			} catch (err: any) {
 				const msg = err?.message ?? String(err)
 				logger(Colors.red(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... failed: ${msg}`))
@@ -491,11 +499,11 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/getUIDAssetsProvision - Cluster 预检后转发。TagID 未绑定时需创建钱包，Master 排队处理。 */
 		router.post('/getUIDAssetsProvision', (req, res) => {
-			const { uid, tagIdHex } = req.body as { uid?: string; tagIdHex?: string }
+			const { uid, tagIdHex, c } = req.body as { uid?: string; tagIdHex?: string; c?: string }
 			if (!uid || !tagIdHex || typeof uid !== 'string' || typeof tagIdHex !== 'string') {
 				return res.status(400).json({ ok: false, error: 'Missing uid or tagIdHex' })
 			}
-			getUIDAssetsProvisionPool.push({ uid: uid.trim(), tagIdHex: tagIdHex.trim(), res })
+			getUIDAssetsProvisionPool.push({ uid: uid.trim(), tagIdHex: tagIdHex.trim(), c: typeof c === 'string' ? c.trim() : undefined, res })
 			getUIDAssetsProvisionPress()
 		})
 

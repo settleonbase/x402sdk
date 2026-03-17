@@ -672,6 +672,7 @@ const routing = ( router: Router ) => {
 		const uidTrim = uid.trim()
 		const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
 		let nfcSunTagIdHex: string | null = null
+		let sunResult: import('../BeamioSun').VerifyBeamioSunResult | null = null
 		if (isNfcUid) {
 			const eTrim = typeof e === 'string' ? e.trim() : ''
 			const cTrim = typeof c === 'string' ? c.trim() : ''
@@ -683,7 +684,7 @@ const routing = ( router: Router ) => {
 			}
 			try {
 				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+				sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
 				if (!sunResult.valid) {
 					const err = { ok: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }
 					logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid} macValid=${sunResult.macValid} counterFresh=${sunResult.counterFresh}`))
@@ -727,10 +728,23 @@ const routing = ( router: Router ) => {
 			}
 			const eoa = ethers.getAddress(eoaRaw)
 			const result = await fetchUIDAssetsForEOA(eoa)
-			const resultJson = JSON.stringify(result, null, 2)
+			const nfcExtras = nfcSunTagIdHex && sunResult ? {
+				uid: uidTrim,
+				tagIdHex: nfcSunTagIdHex,
+				counterHex: sunResult.counterHex,
+				counter: sunResult.counterValue,
+			} : null
+			if (nfcExtras) {
+				logger(Colors.gray(`[getUIDAssets] debug 推算 tagIdHex=${nfcExtras.tagIdHex} counter=${nfcExtras.counter} counterHex=${nfcExtras.counterHex}`))
+			}
+			const merged = {
+				...result,
+				...(nfcExtras ?? {}),
+			}
+			const resultJson = JSON.stringify(merged, null, 2)
 			logger(Colors.cyan(`[getUIDAssets] 返回客户端 JSON (uid=${uidTrim}):\n${resultJson}`))
 			logger(Colors.green(`[getUIDAssets] uid=${uidTrim} 成功 cards=${result.cards.length}`))
-			return res.status(200).json(result).end()
+			return res.status(200).json(merged).end()
 		} catch (e: any) {
 			const msg = e?.shortMessage ?? e?.message ?? ''
 			const isRevert = /execution reverted|CALL_EXCEPTION|revert/i.test(String(msg))
