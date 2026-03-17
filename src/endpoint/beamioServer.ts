@@ -1253,7 +1253,13 @@ const routing = ( router: Router ) => {
 				} catch (_) { /* ignore */ }
 				const nfcLinkedAA = nfcLinkedEOA ? await resolveBeamioAccountOf(nfcLinkedEOA) : null
 				logger(Colors.red(`[nfcTopup] Signer is not card admin - DEBUG: cardAddr=${cardAddress} | tagIdHex=${nfcTagIdHex ?? '(not NFC)'} | tagIdLinkedEOA=${nfcLinkedEOA ?? 'N/A'} | tagIdLinkedAA=${nfcLinkedAA ?? 'N/A'} | toRecipient=${recipientTo ?? 'N/A'} | amountPoints6=${points6.toString()} | cardOwner=${cardOwner || 'N/A'} | signer=${signer} | signerAdminParent=${signerAdminParent || 'N/A'}`))
-				return res.status(403).json({ success: false, error: 'Signer is not card admin' })
+				return res.status(403).json({
+					success: false,
+					error: 'Signer is not card admin',
+					signer,
+					cardOwner: cardOwner || undefined,
+					cardAddr: cardAddress
+				})
 			}
 			let recipientEOA: string | null = null
 			let aaAddr: string | null = null
