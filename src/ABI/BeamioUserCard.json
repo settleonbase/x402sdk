@@ -191,6 +191,11 @@
   },
   {
     "inputs": [],
+    "name": "UC_BeneficiaryMustBeAA",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "UC_GlobalMisconfigured",
     "type": "error"
   },
