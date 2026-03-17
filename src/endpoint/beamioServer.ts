@@ -1063,10 +1063,12 @@ const routing = ( router: Router ) => {
 		res.status(200).json(result).end()
 	})
 
-	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）、wallet（Scan QR）或 beamioTag（Scan QR 的 beamio 参数，按 AccountRegistry 解析 EOA）。 */
+	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）、wallet（Scan QR）或 beamioTag（Scan QR 的 beamio 参数，按 AccountRegistry 解析 EOA）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查 EOA，无法推导 tagID 的不予受理。 */
 	router.post('/nfcTopupPrepare', async (req, res) => {
-		const { uid, wallet, beamioTag, amount, currency, cardAddress } = req.body as { uid?: string; wallet?: string; beamioTag?: string; amount?: string; currency?: string; cardAddress?: string }
+		const { uid, wallet, beamioTag, amount, currency, cardAddress, e, c, m } = req.body as { uid?: string; wallet?: string; beamioTag?: string; amount?: string; currency?: string; cardAddress?: string; e?: string; c?: string; m?: string }
 		const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0
+		const uidTrim = hasUid ? uid!.trim() : ''
+		const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
 		let resolvedWallet: string | undefined = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim()) ? ethers.getAddress(wallet.trim()) : undefined
 		const hasBeamioTag = beamioTag && typeof beamioTag === 'string' && beamioTag.trim().length > 0
 		if (hasBeamioTag && !resolvedWallet) {
@@ -1085,8 +1087,41 @@ const routing = ( router: Router ) => {
 		if (!cardAddress || typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress.trim())) {
 			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' })
 		}
+		// NFC 格式 uid：必须提供 e/c/m，SUN 校验，用 tagIdHex 查 EOA；不符合 SUN 或无法推导 tagID 的不予受理
+		if (hasUid && isNfcUid) {
+			const eTrim = typeof e === 'string' ? e.trim() : ''
+			const cTrim = typeof c === 'string' ? c.trim() : ''
+			const mTrim = typeof m === 'string' ? m.trim() : ''
+			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+				const err = { success: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' }
+				logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} 缺少 SUN 参数 返回 403: ${JSON.stringify(err)}`))
+				return res.status(403).json(err).end()
+			}
+			try {
+				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+				if (!sunResult.valid) {
+					const err = { success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }
+					logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid}`))
+					return res.status(403).json(err).end()
+				}
+				const eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
+				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
+					const err = { success: false, error: 'Card not provisioned. SUN valid but tagId not bound to wallet.' }
+					logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} 未绑定钱包 返回 403`))
+					return res.status(403).json(err).end()
+				}
+				resolvedWallet = ethers.getAddress(eoaFromTag)
+				logger(Colors.gray(`[nfcTopupPrepare] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}... wallet=${resolvedWallet.slice(0, 10)}...`))
+			} catch (sunErr: any) {
+				const msg = sunErr?.message ?? String(sunErr)
+				const err = { success: false, error: `SUN verification error: ${msg}` }
+				logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} SUN 校验异常: ${msg}`))
+				return res.status(403).json(err).end()
+			}
+		}
 		const forwardBody = {
-			uid: hasUid ? uid!.trim() : undefined,
+			uid: hasUid && !resolvedWallet ? uid!.trim() : undefined,
 			wallet: resolvedWallet,
 			amount: String(amount ?? ''),
 			currency: (currency || 'CAD').trim(),
@@ -1095,7 +1130,7 @@ const routing = ( router: Router ) => {
 		try {
 			const { statusCode, body } = await postLocalhostBuffer('/api/nfcTopupPrepare', forwardBody)
 			const parsed = JSON.parse(body)
-			if (resolvedWallet && hasBeamioTag && parsed.cardAddr && !parsed.error) {
+			if (resolvedWallet && (hasBeamioTag || (hasUid && isNfcUid)) && parsed.cardAddr && !parsed.error) {
 				parsed.wallet = resolvedWallet
 			}
 			res.status(statusCode).json(parsed).end()
@@ -1105,15 +1140,45 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master */
+	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master。当 uid 为 NFC 格式（14 位 hex）时：必须提供 e/c/m，SUN 校验通过才转发，不符合 SUN 或无法推导 tagID 的不予受理。 */
 	router.post('/nfcTopup', async (req, res) => {
-		const { cardAddr, data, deadline, nonce, adminSignature, uid } = req.body as {
+		const { cardAddr, data, deadline, nonce, adminSignature, uid, e, c, m } = req.body as {
 			cardAddr?: string
 			data?: string
 			deadline?: number
 			nonce?: string
 			adminSignature?: string
 			uid?: string
+			e?: string
+			c?: string
+			m?: string
+		}
+		const uidTrim = uid && typeof uid === 'string' ? uid.trim() : ''
+		const isNfcUid = uidTrim.length > 0 && /^[0-9A-Fa-f]{14}$/.test(uidTrim)
+		if (isNfcUid) {
+			const eTrim = typeof e === 'string' ? e.trim() : ''
+			const cTrim = typeof c === 'string' ? c.trim() : ''
+			const mTrim = typeof m === 'string' ? m.trim() : ''
+			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+				const err = { success: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' }
+				logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} 缺少 SUN 参数 返回 403: ${JSON.stringify(err)}`))
+				return res.status(403).json(err).end()
+			}
+			try {
+				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+				if (!sunResult.valid) {
+					const err = { success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }
+					logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid}`))
+					return res.status(403).json(err).end()
+				}
+				logger(Colors.gray(`[nfcTopup] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
+			} catch (sunErr: any) {
+				const msg = sunErr?.message ?? String(sunErr)
+				const err = { success: false, error: `SUN verification error: ${msg}` }
+				logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} SUN 校验异常: ${msg}`))
+				return res.status(403).json(err).end()
+			}
 		}
 		if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
 			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' })
