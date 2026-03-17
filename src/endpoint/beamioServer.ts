@@ -2137,8 +2137,21 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
-	/** cardAddAdmin：owner 管理 admin（添加/移除）。Cluster 预检 data 为 adminManager、add 时 to 必须为已部署 AA（UI 先调 ensureAAForEOA 获取），合格转发 master executeForOwner */
+	/** cardAddAdmin：owner 管理 admin（添加/移除）。若 body 含 adminEOA，Cluster 先 ensureAAForEOA 再预检。预检 data 为 adminManager、add 时 to 必须为已部署 AA，合格转发 master executeForOwner */
 	router.post('/cardAddAdmin', async (req, res) => {
+		const adminEOA = (req.body?.adminEOA as string)?.trim()
+		if (adminEOA && ethers.isAddress(adminEOA)) {
+			try {
+				const { statusCode, body: ensureBody } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(ethers.getAddress(adminEOA)))
+				if (statusCode !== 200) {
+					const err = (() => { try { const j = JSON.parse(ensureBody); return j?.error ?? 'Failed to ensure AA for EOA' } catch { return 'Failed to ensure AA for EOA' } })()
+					return res.status(400).json({ success: false, error: err }).end()
+				}
+			} catch (e: any) {
+				logger(Colors.red(`[cardAddAdmin] ensureAAForEOA failed: ${e?.message ?? e}`))
+				return res.status(502).json({ success: false, error: 'Failed to ensure AA for EOA' }).end()
+			}
+		}
 		const preCheck = await cardAddAdminPreCheck(req.body)
 		if (!preCheck.success) {
 			logger(Colors.red(`server /api/cardAddAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
@@ -2183,8 +2196,21 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
-	/** cardAddAdminByAdmin：admin 为自己下层登记 admin。Cluster 预检 data 为 adminManager、adminSignature 的 signer 为 card admin，合格转发 master executeForAdmin */
+	/** cardAddAdminByAdmin：admin 为自己下层登记 admin。若 body 含 adminEOA，Cluster 先 ensureAAForEOA 再预检。 */
 	router.post('/cardAddAdminByAdmin', async (req, res) => {
+		const adminEOA = (req.body?.adminEOA as string)?.trim()
+		if (adminEOA && ethers.isAddress(adminEOA)) {
+			try {
+				const { statusCode, body: ensureBody } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(ethers.getAddress(adminEOA)))
+				if (statusCode !== 200) {
+					const err = (() => { try { const j = JSON.parse(ensureBody); return j?.error ?? 'Failed to ensure AA for EOA' } catch { return 'Failed to ensure AA for EOA' } })()
+					return res.status(400).json({ success: false, error: err }).end()
+				}
+			} catch (e: any) {
+				logger(Colors.red(`[cardAddAdminByAdmin] ensureAAForEOA failed: ${e?.message ?? e}`))
+				return res.status(502).json({ success: false, error: 'Failed to ensure AA for EOA' }).end()
+			}
+		}
 		const preCheck = await cardAddAdminByAdminPreCheck(req.body)
 		if (!preCheck.success) {
 			logger(Colors.red(`server /api/cardAddAdminByAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
