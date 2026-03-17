@@ -338,3 +338,23 @@ export const verifyBeamioSunRequest = async (req: express.Request, res: express.
 		}).end()
 	}
 }
+
+/** 校验 SUN URL 并在 valid 时持久化 counter。若提供 isTagIdValid 且返回 false，则拒绝非法卡（valid=false）。供 getUIDAssets 等复用 beamio.sun 逻辑。 */
+export const verifyAndPersistBeamioSunUrl = async (
+	url: string,
+	options?: { isTagIdValid?: (tagIdHex: string) => Promise<boolean> }
+): Promise<VerifyBeamioSunResult> => {
+	const result = await verifyBeamioSunUrl(url)
+	if (!result.valid) return result
+	if (options?.isTagIdValid) {
+		const tagIdOk = await options.isTagIdValid(result.tagIdHex)
+		if (!tagIdOk) {
+			return { ...result, valid: false }
+		}
+	}
+	await upsertBeamioSunLastCounterByUid({
+		uid: result.uidHex,
+		lastCounterHex: result.counterHex
+	})
+	return result
+}

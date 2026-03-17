@@ -1271,13 +1271,13 @@ const routing = ( router: Router ) => {
 			return res.status(200).json(result).end()
 		})
 
-		/** POST /api/registerNfcCard - 登记 NFC 卡（uid + private_key），需鉴权（可后续添加） */
+		/** POST /api/registerNfcCard - 登记 NFC 卡（uid + private_key；tagId 可选，SUN 解密得到的 TagID） */
 		router.post('/registerNfcCard', async (req, res) => {
-			const { uid, privateKey } = req.body as { uid?: string; privateKey?: string }
+			const { uid, privateKey, tagId } = req.body as { uid?: string; privateKey?: string; tagId?: string }
 			if (!uid || typeof uid !== 'string' || !privateKey || typeof privateKey !== 'string') {
 				return res.status(400).json({ ok: false, error: 'Missing uid or privateKey' })
 			}
-			await registerNfcCardToDb({ uid: uid.trim(), privateKey: privateKey.trim() })
+			await registerNfcCardToDb({ uid: uid.trim(), privateKey: privateKey.trim(), ...(tagId && typeof tagId === 'string' && { tagId: tagId.trim() }) })
 			return res.status(200).json({ ok: true }).end()
 		})
 

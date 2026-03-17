@@ -704,13 +704,14 @@ const BEAMIO_NFT_TIER_METADATA_TABLE = `CREATE TABLE IF NOT EXISTS beamio_nft_ti
 	UNIQUE(card_owner, token_id)
 )`
 
-/** nfc_cards 表：NTAG 424 DNA 登记卡，uid 为 NFC 卡 UID，private_key 为关联私钥（仅服务端使用，不返回客户端） */
+/** nfc_cards 表：NTAG 424 DNA 登记卡。uid 为 NFC 卡 UID（兼容旧数据）；tag_id 为 SUN 解密得到的 TagID（16 hex），用于合法性校验与查卡。private_key 为关联私钥（仅服务端使用，不返回客户端） */
 const NFC_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS nfc_cards (
 	id SERIAL PRIMARY KEY,
 	uid TEXT UNIQUE NOT NULL,
 	private_key TEXT NOT NULL,
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
+const NFC_CARDS_ADD_TAG_ID = `ALTER TABLE nfc_cards ADD COLUMN IF NOT EXISTS tag_id TEXT UNIQUE`
 
 /** beamio_sun_counter_state 表：仅存 SUN 防重放状态，uid 对应最新成功通过验真的 counter。 */
 const BEAMIO_SUN_COUNTER_STATE_TABLE = `CREATE TABLE IF NOT EXISTS beamio_sun_counter_state (
@@ -848,6 +849,36 @@ export const getNfcCardPrivateKeyByUid = async (uid: string): Promise<string | n
 	}
 }
 
+/** 根据 TagID（SUN 解密得到的 16 hex）获取 NFC 卡对应的 recipient EOA。仅查 DB，TagID 未登记则返回 null（非法卡）。 */
+export const getNfcRecipientAddressByTagId = async (tagIdHex: string): Promise<string | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(NFC_CARDS_TABLE)
+		await db.query(NFC_CARDS_ADD_TAG_ID)
+		const normalized = String(tagIdHex || '').trim().toUpperCase()
+		if (!normalized || normalized.length !== 16 || !/^[0-9A-F]+$/.test(normalized)) return null
+		const { rows } = await db.query<{ private_key: string }>(
+			`SELECT private_key FROM nfc_cards WHERE UPPER(TRIM(tag_id)) = $1 LIMIT 1`,
+			[normalized]
+		)
+		if (rows.length === 0) return null
+		const wallet = new ethers.Wallet(rows[0].private_key)
+		return await wallet.getAddress()
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNfcRecipientAddressByTagId] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** TagID 是否已登记（合法卡） */
+export const isTagIdRegistered = async (tagIdHex: string): Promise<boolean> => {
+	const addr = await getNfcRecipientAddressByTagId(tagIdHex)
+	return addr != null
+}
+
 /** 根据 UID 获取 NFC 卡对应的 recipient EOA 地址（用于 mintPointsByAdmin 的 to 参数）。若 DB 无则从 mnemonic 派生，不写入 DB。 */
 export const getNfcRecipientAddressByUid = async (uid: string): Promise<string | null> => {
 	let privateKey = await getNfcCardPrivateKeyByUid(uid)
@@ -877,24 +908,32 @@ export const getNfcRecipientAddressByUid = async (uid: string): Promise<string |
 	}
 }
 
-/** 登记 NFC 卡到 DB（uid + private_key，供后续支付流程使用） */
-export const registerNfcCardToDb = async (params: { uid: string; privateKey: string }): Promise<void> => {
+/** 登记 NFC 卡到 DB（uid + private_key；tag_id 可选，SUN 解密得到的 TagID，用于合法性校验）。 */
+export const registerNfcCardToDb = async (params: { uid: string; privateKey: string; tagId?: string }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		await db.query(NFC_CARDS_TABLE)
+		await db.query(NFC_CARDS_ADD_TAG_ID)
 		const uid = String(params.uid || '').trim()
 		const privateKey = String(params.privateKey || '').trim()
+		const tagId = params.tagId ? String(params.tagId).trim().toUpperCase() : null
 		if (!uid || !privateKey) return
-		await db.query(
-			`
-			INSERT INTO nfc_cards (uid, private_key)
-			VALUES ($1, $2)
-			ON CONFLICT (uid) DO UPDATE SET private_key = EXCLUDED.private_key
-			`,
-			[uid, privateKey]
-		)
-		logger(Colors.green(`[registerNfcCardToDb] registered uid=${uid.slice(0, 16)}...`))
+		if (tagId && tagId.length === 16 && /^[0-9A-F]+$/.test(tagId)) {
+			await db.query(
+				`INSERT INTO nfc_cards (uid, private_key, tag_id) VALUES ($1, $2, $3)
+				ON CONFLICT (uid) DO UPDATE SET private_key = EXCLUDED.private_key, tag_id = COALESCE(EXCLUDED.tag_id, nfc_cards.tag_id)`,
+				[uid, privateKey, tagId]
+			)
+			logger(Colors.green(`[registerNfcCardToDb] registered uid=${uid.slice(0, 16)}... tagId=${tagId.slice(0, 8)}...`))
+		} else {
+			await db.query(
+				`INSERT INTO nfc_cards (uid, private_key) VALUES ($1, $2)
+				ON CONFLICT (uid) DO UPDATE SET private_key = EXCLUDED.private_key`,
+				[uid, privateKey]
+			)
+			logger(Colors.green(`[registerNfcCardToDb] registered uid=${uid.slice(0, 16)}...`))
+		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[registerNfcCardToDb] failed: ${e?.message ?? e}`))
 	} finally {

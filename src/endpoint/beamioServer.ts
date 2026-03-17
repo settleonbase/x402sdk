@@ -10,11 +10,11 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _search, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
+import {beamio_ContractPool, searchUsers, _search, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, isTagIdRegistered, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
-import { verifyBeamioSunRequest } from '../BeamioSun'
+import { verifyBeamioSunRequest, verifyAndPersistBeamioSunUrl } from '../BeamioSun'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -580,6 +580,40 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	/** GET /api/getCardStats?cardAddress=0x...&admin=0x... - 从 BeamioUserCard 获取 periodTransferAmount（Charge，当天数据）与 redeemMintCounterFromClear（Top-Up）。periodType=PERIOD_DAY、anchorTs=0 即当天。admin 为终端 EOA，默认用 owner。 */
+	const CARD_STATS_ABI = [
+		'function getAdminStatsFull(address admin, uint8 periodType, uint256 anchorTs, uint256 cumulativeStartTs) view returns (uint256 cumulativeMint, uint256 cumulativeBurn, uint256 cumulativeTransfer, uint256 cumulativeTransferAmount, uint256 cumulativeRedeemMint, uint256 cumulativeUSDCMint, uint256 cumulativeIssued, uint256 cumulativeUpgraded, uint256 periodMint, uint256 periodBurn, uint256 periodTransfer, uint256 periodTransferAmount, uint256 periodRedeemMint, uint256 periodUSDCMint, uint256 periodIssued, uint256 periodUpgraded, uint256 mintCounterFromClear, uint256 burnCounterFromClear, uint256 transferCounterFromClear, uint256 redeemMintCounterFromClear, uint256 usdcMintCounterFromClear, address[] subordinates)',
+		'function getGlobalStatsFull(uint8 periodType, uint256 anchorTs, uint256 cumulativeStartTs) view returns (uint256 cumulativeMint, uint256 cumulativeBurn, uint256 cumulativeTransfer, uint256 cumulativeTransferAmount, uint256 cumulativeRedeemMint, uint256 cumulativeUSDCMint, uint256 cumulativeIssued, uint256 cumulativeUpgraded, uint256 periodMint, uint256 periodBurn, uint256 periodTransfer, uint256 periodTransferAmount, uint256 periodRedeemMint, uint256 periodUSDCMint, uint256 periodIssued, uint256 periodUpgraded, uint256 adminCount)',
+	] as const
+	const PERIOD_DAY = 1
+	router.get('/getCardStats', async (req, res) => {
+		const { cardAddress: cardAddrQ, admin: adminQ } = req.query as { cardAddress?: string; admin?: string }
+		const cardAddr = (cardAddrQ?.trim() || BEAMIO_USER_CARD_ASSET_ADDRESS)
+		if (!ethers.isAddress(cardAddr)) {
+			return res.status(400).json({ ok: false, error: 'Invalid cardAddress' }).end()
+		}
+		try {
+			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_STATS_ABI, providerBase)
+			let adminAddr = adminQ?.trim() && ethers.isAddress(adminQ.trim()) ? ethers.getAddress(adminQ.trim()) : null
+			if (!adminAddr) {
+				const ownerAbi = ['function owner() view returns (address)']
+				const ownerCard = new ethers.Contract(ethers.getAddress(cardAddr), ownerAbi, providerBase)
+				const owner = await ownerCard.owner() as string
+				adminAddr = owner && owner !== ethers.ZeroAddress ? ethers.getAddress(owner) : null
+			}
+			if (!adminAddr) {
+				return res.status(200).json({ ok: true, charge: 0, topUp: 0 }).end()
+			}
+			const resAdmin = await card.getAdminStatsFull(adminAddr, PERIOD_DAY, 0, 0) as { periodTransferAmount: bigint; redeemMintCounterFromClear: bigint }
+			const charge = Number(resAdmin.periodTransferAmount) / 1_000_000
+			const topUp = Number(resAdmin.redeemMintCounterFromClear) / 1_000_000
+			return res.status(200).json({ ok: true, charge, topUp }).end()
+		} catch (e) {
+			logger(Colors.red(`[getCardStats] error: ${(e as Error)?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
+		}
+	})
+
 	/** POST /api/nfcCardStatus - 查询 NTAG 424 DNA 卡状态（读操作，Cluster 直接处理） */
 	router.post('/nfcCardStatus', async (req, res) => {
 		const { uid } = req.body as { uid?: string }
@@ -590,9 +624,9 @@ const routing = ( router: Router ) => {
 		return res.status(200).json(result).end()
 	})
 
-	/** POST /api/getUIDAssets - 根据 UID 查询 NFC 卡资产（多卡：CCSA + 基础设施卡 + USDC 余额），Cluster 直接处理。uid 支持 NFC 卡 UID 或 beamioTab（Scan QR 的 beamio 参数，按 AccountRegistry 账户名解析 EOA）。每张卡按用户拥有的最佳 NFT 的 tier metadata 返回 cardBackground（供 Android 等多端展示）。 */
+	/** POST /api/getUIDAssets - 根据 UID/beamioTab 或 TagID 查询 NFC 卡资产。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 解密得到 TagID，verifyAndPersistBeamioSunUrl 校验 TagID 已登记（非法卡拒绝），用 TagID 查 EOA。beamioTab 仍按 AccountRegistry 解析。 */
 	router.post('/getUIDAssets', async (req, res) => {
-		const { uid } = req.body as { uid?: string }
+		const { uid, e, c, m } = req.body as { uid?: string; e?: string; c?: string; m?: string }
 		logger(Colors.cyan(`[getUIDAssets] 收到请求 uid=${uid ?? '(undefined)'}`))
 		if (!uid || typeof uid !== 'string' || !uid.trim()) {
 			const err = { ok: false, error: 'Missing uid' }
@@ -600,8 +634,40 @@ const routing = ( router: Router ) => {
 			return res.status(400).json(err).end()
 		}
 		const uidTrim = uid.trim()
+		const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
+		let nfcSunTagIdHex: string | null = null
+		if (isNfcUid) {
+			const eTrim = typeof e === 'string' ? e.trim() : ''
+			const cTrim = typeof c === 'string' ? c.trim() : ''
+			const mTrim = typeof m === 'string' ? m.trim() : ''
+			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+				const err = { ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' }
+				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 缺少 SUN 参数 返回 403: ${JSON.stringify(err)}`))
+				return res.status(403).json(err).end()
+			}
+			try {
+				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl, {
+					isTagIdValid: isTagIdRegistered
+				})
+				if (!sunResult.valid) {
+					const err = { ok: false, error: 'SUN verification failed or TagID not registered', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }
+					logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN/TagID 校验失败: valid=${sunResult.valid} macValid=${sunResult.macValid} counterFresh=${sunResult.counterFresh}`))
+					return res.status(403).json(err).end()
+				}
+				nfcSunTagIdHex = sunResult.tagIdHex
+				logger(Colors.gray(`[getUIDAssets] uid=${uidTrim} tagId=${nfcSunTagIdHex} SUN 校验通过 counter=${sunResult.counterHex}`))
+			} catch (sunErr: any) {
+				const msg = sunErr?.message ?? String(sunErr)
+				const err = { ok: false, error: `SUN verification error: ${msg}` }
+				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} SUN 校验异常: ${msg}`))
+				return res.status(403).json(err).end()
+			}
+		}
 		try {
-			let eoaRaw = await getNfcRecipientAddressByUid(uidTrim)
+			const eoaRaw = nfcSunTagIdHex
+				? await getNfcRecipientAddressByTagId(nfcSunTagIdHex)
+				: await getNfcRecipientAddressByUid(uidTrim)
 			if (!eoaRaw) {
 				// beamioTab：Scan QR 的 beamio 参数，按 AccountRegistry 账户名解析 EOA
 				try {
@@ -978,14 +1044,14 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** POST /api/registerNfcCard - 登记 NFC 卡，Cluster 预检后转发 Master */
+	/** POST /api/registerNfcCard - 登记 NFC 卡，Cluster 预检后转发 Master。tagId 可选，SUN 解密得到的 TagID（16 hex），用于合法性校验。 */
 	router.post('/registerNfcCard', async (req, res) => {
-		const { uid, privateKey } = req.body as { uid?: string; privateKey?: string }
+		const { uid, privateKey, tagId } = req.body as { uid?: string; privateKey?: string; tagId?: string }
 		if (!uid || typeof uid !== 'string' || !privateKey || typeof privateKey !== 'string') {
 			return res.status(400).json({ ok: false, error: 'Missing uid or privateKey' })
 		}
 		logger(Colors.green('server /api/registerNfcCard preCheck OK, forwarding to master'))
-		postLocalhost('/api/registerNfcCard', { uid: uid.trim(), privateKey: privateKey.trim() }, res)
+		postLocalhost('/api/registerNfcCard', { uid: uid.trim(), privateKey: privateKey.trim(), ...(tagId && typeof tagId === 'string' && { tagId: tagId.trim() }) }, res)
 	})
 
 	/** POST /api/payByNfcUidPrepare - Android 构建 container 前的准备（读操作，Cluster 可直处理或转发 Master） */
