@@ -31,7 +31,8 @@ import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, BEAMIO_INDEXER_DIAMOND, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
-import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getCardByAddress, upsertNftTierMetadata } from './db'
+import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getNfcCardPrivateKeyByTagId, getCardByAddress, upsertNftTierMetadata } from './db'
+import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
@@ -1114,8 +1115,20 @@ export const executeForAdminProcess = async () => {
 		let baseReceipt: ethers.TransactionReceipt | null = null
 		const ensureBaseReceipt = async () => {
 			if (baseReceipt) return baseReceipt
-			baseReceipt = await tx.wait().catch((waitErr: any) => {
-				logger(Colors.yellow(`[executeForAdminProcess] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+			baseReceipt = await tx.wait().catch(async (waitErr: any) => {
+				const msg = waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)
+				logger(Colors.yellow(`[executeForAdminProcess] tx.wait() failed (RPC): ${msg}`))
+				// RPC may return malformed batch (missing eth_getTransactionReceipt response). Tx was broadcast; poll for receipt.
+				if (waitErr?.code === 'BAD_DATA' || /missing response for request/i.test(msg)) {
+					for (let i = 0; i < 12; i++) {
+						await new Promise((r) => setTimeout(r, 2000))
+						const r = await providerBaseBackup.getTransactionReceipt(tx.hash)
+						if (r) {
+							logger(Colors.green(`[executeForAdminProcess] receipt poll ok after ${(i + 1) * 2}s`))
+							return r
+						}
+					}
+				}
 				return null
 			}) as ethers.TransactionReceipt | null
 			return baseReceipt
@@ -6745,11 +6758,14 @@ export const payByAccountPrepare = async (params: {
 	}
 }
 
-/** Android 构建 container 前的准备：返回 account、nonce、deadline、payeeAA、unitPriceUSDC6，供客户端 Smart Routing 后组装 items 并调用 payByNfcUidSignContainer */
+/** Android 构建 container 前的准备：返回 account、nonce、deadline、payeeAA、unitPriceUSDC6，供客户端 Smart Routing 后组装 items 并调用 payByNfcUidSignContainer。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。 */
 export const payByNfcUidPrepare = async (params: {
 	uid: string
 	payee: string
 	amountUsdc6: string
+	e?: string
+	c?: string
+	m?: string
 }): Promise<{
 	ok: boolean
 	account?: string
@@ -6759,12 +6775,39 @@ export const payByNfcUidPrepare = async (params: {
 	unitPriceUSDC6?: string
 	error?: string
 }> => {
-	const { uid, payee, amountUsdc6 } = params
+	const { uid, payee, amountUsdc6, e, c, m } = params
 	const amountBig = BigInt(amountUsdc6)
 	if (amountBig <= 0n) return { ok: false, error: 'Invalid amountUsdc6' }
-	const privateKey = await getNfcCardPrivateKeyByUid(uid.trim())
+	const uidTrim = uid.trim()
+	const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
+	let privateKey: string | null
+	if (isNfcUid) {
+		const eTrim = typeof e === 'string' ? e.trim() : ''
+		const cTrim = typeof c === 'string' ? c.trim() : ''
+		const mTrim = typeof m === 'string' ? m.trim() : ''
+		if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+			logger(Colors.yellow(`[payByNfcUidPrepare] NFC uid requires SUN params (e,c,m) 64/6/16 hex`))
+			return { ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' }
+		}
+		try {
+			const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+			const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+			if (!sunResult.valid) {
+				logger(Colors.yellow(`[payByNfcUidPrepare] SUN verification failed uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex}`))
+				return { ok: false, error: 'SUN verification failed. Cannot derive valid tagID.' }
+			}
+			privateKey = await getNfcCardPrivateKeyByTagId(sunResult.tagIdHex)
+			logger(Colors.gray(`[payByNfcUidPrepare] SUN OK uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
+		} catch (sunErr: any) {
+			const msg = sunErr?.message ?? String(sunErr)
+			logger(Colors.yellow(`[payByNfcUidPrepare] SUN error uid=${uidTrim.slice(0, 12)}... ${msg}`))
+			return { ok: false, error: `SUN verification error: ${msg}` }
+		}
+	} else {
+		privateKey = await getNfcCardPrivateKeyByUid(uidTrim)
+	}
 	if (!privateKey) {
-		logger(Colors.red(`[payByNfcUidPrepare] getNfcCardPrivateKeyByUid null uid=${uid.slice(0, 16)}...`))
+		logger(Colors.red(`[payByNfcUidPrepare] getNfcCardPrivateKey null uid=${uidTrim.slice(0, 16)}...`))
 		return { ok: false, error: '不存在该卡' }
 	}
 	if (Settle_ContractPool.length === 0) return { ok: false, error: 'Settle_ContractPool empty' }
@@ -6815,17 +6858,47 @@ export const payByNfcUidPrepare = async (params: {
 	}
 }
 
-/** 服务端用 UID 私钥对 Android 提交的未签名 container 签名并 relay */
+/** 服务端用 UID 私钥对 Android 提交的未签名 container 签名并 relay。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。 */
 export const payByNfcUidSignContainer = async (params: {
 	uid: string
 	containerPayload: ContainerRelayPayloadUnsigned
 	amountUsdc6: string
 	res: Response
+	e?: string
+	c?: string
+	m?: string
 }): Promise<{ pushed: boolean; error?: string }> => {
-	const { uid, containerPayload, amountUsdc6, res } = params
-	const privateKey = await getNfcCardPrivateKeyByUid(uid.trim())
+	const { uid, containerPayload, amountUsdc6, res, e, c, m } = params
+	const uidTrim = uid.trim()
+	const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
+	let privateKey: string | null
+	if (isNfcUid) {
+		const eTrim = typeof e === 'string' ? e.trim() : ''
+		const cTrim = typeof c === 'string' ? c.trim() : ''
+		const mTrim = typeof m === 'string' ? m.trim() : ''
+		if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+			logger(Colors.yellow(`[payByNfcUidSignContainer] NFC uid requires SUN params (e,c,m) 64/6/16 hex`))
+			return { pushed: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' }
+		}
+		try {
+			const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+			const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+			if (!sunResult.valid) {
+				logger(Colors.yellow(`[payByNfcUidSignContainer] SUN verification failed uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex}`))
+				return { pushed: false, error: 'SUN verification failed' }
+			}
+			privateKey = await getNfcCardPrivateKeyByTagId(sunResult.tagIdHex)
+			logger(Colors.gray(`[payByNfcUidSignContainer] SUN OK uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
+		} catch (sunErr: any) {
+			const msg = sunErr?.message ?? String(sunErr)
+			logger(Colors.yellow(`[payByNfcUidSignContainer] SUN error uid=${uidTrim.slice(0, 12)}... ${msg}`))
+			return { pushed: false, error: `SUN verification error: ${msg}` }
+		}
+	} else {
+		privateKey = await getNfcCardPrivateKeyByUid(uidTrim)
+	}
 	if (!privateKey) {
-		logger(Colors.red(`[payByNfcUidSignContainer] getNfcCardPrivateKeyByUid null uid=${uid.slice(0, 16)}...`))
+		logger(Colors.red(`[payByNfcUidSignContainer] getNfcCardPrivateKey null uid=${uidTrim.slice(0, 16)}...`))
 		return { pushed: false, error: '不存在该卡' }
 	}
 	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }

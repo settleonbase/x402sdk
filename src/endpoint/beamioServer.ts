@@ -970,9 +970,9 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/registerNfcCard', { uid: uid.trim(), privateKey: privateKey.trim(), ...(tagId && typeof tagId === 'string' && { tagId: tagId.trim() }) }, res)
 	})
 
-	/** POST /api/payByNfcUidPrepare - Android 构建 container 前的准备（读操作，Cluster 可直处理或转发 Master） */
+	/** POST /api/payByNfcUidPrepare - Android 构建 container 前的准备（读操作，Cluster 可直处理或转发 Master）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。 */
 	router.post('/payByNfcUidPrepare', async (req, res) => {
-		const { uid, payee, amountUsdc6 } = req.body as { uid?: string; payee?: string; amountUsdc6?: string }
+		const { uid, payee, amountUsdc6, e, c, m } = req.body as { uid?: string; payee?: string; amountUsdc6?: string; e?: string; c?: string; m?: string }
 		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 			return res.status(400).json({ ok: false, error: 'Missing uid' })
 		}
@@ -982,20 +982,40 @@ const routing = ( router: Router ) => {
 		if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
 			return res.status(400).json({ ok: false, error: 'Invalid amountUsdc6' })
 		}
+		const uidTrim = uid.trim()
+		const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
+		if (isNfcUid) {
+			const eTrim = typeof e === 'string' ? e.trim() : ''
+			const cTrim = typeof c === 'string' ? c.trim() : ''
+			const mTrim = typeof m === 'string' ? m.trim() : ''
+			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+				return res.status(403).json({ ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' })
+			}
+		}
 		logger(Colors.green(`[payByNfcUidPrepare] Cluster preCheck OK forwarding to master`))
-		postLocalhost('/api/payByNfcUidPrepare', { uid: uid.trim(), payee: ethers.getAddress(payee), amountUsdc6 }, res)
+		postLocalhost('/api/payByNfcUidPrepare', { uid: uidTrim, payee: ethers.getAddress(payee), amountUsdc6, ...(isNfcUid && { e, c, m }) }, res)
 	})
 
-	/** POST /api/payByNfcUidSignContainer - 接受 Android 打包的未签名 container（写操作，Cluster 预检余额后转发 Master） */
+	/** POST /api/payByNfcUidSignContainer - 接受 Android 打包的未签名 container（写操作，Cluster 预检余额后转发 Master）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。 */
 	router.post('/payByNfcUidSignContainer', async (req, res) => {
-		const { uid, containerPayload, amountUsdc6 } = req.body as { uid?: string; containerPayload?: import('../MemberCard').ContainerRelayPayloadUnsigned; amountUsdc6?: string }
+		const { uid, containerPayload, amountUsdc6, e, c, m } = req.body as { uid?: string; containerPayload?: import('../MemberCard').ContainerRelayPayloadUnsigned; amountUsdc6?: string; e?: string; c?: string; m?: string }
 		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 			return res.status(400).json({ success: false, error: 'Missing uid' })
 		}
 		if (!containerPayload || typeof containerPayload !== 'object') {
 			return res.status(400).json({ success: false, error: 'Missing containerPayload' })
 		}
-		logger(Colors.cyan(`[payByNfcUidSignContainer] Android container uid=${uid.slice(0, 16)}... amountUsdc6=${amountUsdc6}\n` + inspect(containerPayload, false, 4, true)))
+		const uidTrim = uid.trim()
+		const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
+		if (isNfcUid) {
+			const eTrim = typeof e === 'string' ? e.trim() : ''
+			const cTrim = typeof c === 'string' ? c.trim() : ''
+			const mTrim = typeof m === 'string' ? m.trim() : ''
+			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+				return res.status(403).json({ success: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' })
+			}
+		}
+		logger(Colors.cyan(`[payByNfcUidSignContainer] Android container uid=${uidTrim.slice(0, 16)}... amountUsdc6=${amountUsdc6}\n` + inspect(containerPayload, false, 4, true)))
 		const preCheck = ContainerRelayPreCheckUnsigned(containerPayload)
 		if (!preCheck.success) {
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
@@ -1045,8 +1065,8 @@ const routing = ( router: Router ) => {
 			logger(Colors.red(`[payByNfcUidSignContainer] Cluster 余额预检异常: ${e?.message ?? e}`))
 			return res.status(500).json({ success: false, error: '余额预检失败' }).end()
 		}
-		logger(Colors.green(`[payByNfcUidSignContainer] Cluster preCheck OK uid=${uid.slice(0, 16)}... forwarding to master`))
-		postLocalhost('/api/payByNfcUidSignContainer', { uid: uid.trim(), containerPayload, amountUsdc6 }, res)
+		logger(Colors.green(`[payByNfcUidSignContainer] Cluster preCheck OK uid=${uidTrim.slice(0, 16)}... forwarding to master`))
+		postLocalhost('/api/payByNfcUidSignContainer', { uid: uidTrim, containerPayload, amountUsdc6, ...(isNfcUid && { e, c, m }) }, res)
 	})
 
 	/** POST /api/payByNfcUid - 以 UID 支付（写操作，Cluster 预检后转发 Master） */

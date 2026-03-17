@@ -849,6 +849,29 @@ export const getNfcCardPrivateKeyByUid = async (uid: string): Promise<string | n
 	}
 }
 
+/** 根据 TagID（SUN 解密得到的 16 hex）获取 NFC 卡对应的 private_key。仅查 DB，TagID 未登记则返回 null（非法卡）。供 Charge 流程用卡私钥签名。 */
+export const getNfcCardPrivateKeyByTagId = async (tagIdHex: string): Promise<string | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(NFC_CARDS_TABLE)
+		await db.query(NFC_CARDS_ADD_TAG_ID)
+		const normalized = String(tagIdHex || '').trim().toUpperCase()
+		if (!normalized || normalized.length !== 16 || !/^[0-9A-F]+$/.test(normalized)) return null
+		const { rows } = await db.query<{ private_key: string }>(
+			`SELECT private_key FROM nfc_cards WHERE UPPER(TRIM(tag_id)) = $1 LIMIT 1`,
+			[normalized]
+		)
+		if (rows.length === 0) return null
+		return rows[0].private_key
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNfcCardPrivateKeyByTagId] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 根据 TagID（SUN 解密得到的 16 hex）获取 NFC 卡对应的 recipient EOA。仅查 DB，TagID 未登记则返回 null（非法卡）。 */
 export const getNfcRecipientAddressByTagId = async (tagIdHex: string): Promise<string | null> => {
 	const db = new Client({ connectionString: DB_URL })

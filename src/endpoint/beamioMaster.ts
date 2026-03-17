@@ -1359,9 +1359,9 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({ ok: true }).end()
 		})
 
-		/** POST /api/payByNfcUidPrepare - Android 构建 container 前的准备，返回 account、nonce、deadline、payeeAA、unitPriceUSDC6 */
+		/** POST /api/payByNfcUidPrepare - Android 构建 container 前的准备，返回 account、nonce、deadline、payeeAA、unitPriceUSDC6。NFC 格式时需 e/c/m 做 SUN 校验。 */
 		router.post('/payByNfcUidPrepare', async (req, res) => {
-			const { uid, payee, amountUsdc6 } = req.body as { uid?: string; payee?: string; amountUsdc6?: string }
+			const { uid, payee, amountUsdc6, e, c, m } = req.body as { uid?: string; payee?: string; amountUsdc6?: string; e?: string; c?: string; m?: string }
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 				return res.status(400).json({ ok: false, error: 'Missing uid' })
 			}
@@ -1371,13 +1371,13 @@ const routing = ( router: Router ) => {
 			if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
 				return res.status(400).json({ ok: false, error: 'Invalid amountUsdc6' })
 			}
-			const result = await payByNfcUidPrepare({ uid: uid.trim(), payee: ethers.getAddress(payee), amountUsdc6 })
+			const result = await payByNfcUidPrepare({ uid: uid.trim(), payee: ethers.getAddress(payee), amountUsdc6, e, c, m })
 			return res.status(result.ok ? 200 : 400).json(result).end()
 		})
 
-		/** POST /api/payByNfcUidSignContainer - 接受 Android 打包的未签名 container，用 UID 私钥签名后 relay */
+		/** POST /api/payByNfcUidSignContainer - 接受 Android 打包的未签名 container，用 UID 私钥签名后 relay。NFC 格式时需 e/c/m 做 SUN 校验。 */
 		router.post('/payByNfcUidSignContainer', async (req, res) => {
-			const { uid, containerPayload, amountUsdc6 } = req.body as { uid?: string; containerPayload?: ContainerRelayPayloadUnsigned; amountUsdc6?: string }
+			const { uid, containerPayload, amountUsdc6, e, c, m } = req.body as { uid?: string; containerPayload?: ContainerRelayPayloadUnsigned; amountUsdc6?: string; e?: string; c?: string; m?: string }
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 				return res.status(400).json({ success: false, error: 'Missing uid' })
 			}
@@ -1392,7 +1392,7 @@ const routing = ( router: Router ) => {
 			if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
 				return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
 			}
-			const result = await payByNfcUidSignContainer({ uid: uid.trim(), containerPayload, amountUsdc6, res })
+			const result = await payByNfcUidSignContainer({ uid: uid.trim(), containerPayload, amountUsdc6, res, e, c, m })
 			if (result.pushed) return
 			return res.status(400).json({ success: false, error: result.error }).end()
 		})
