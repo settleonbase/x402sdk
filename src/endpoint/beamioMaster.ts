@@ -499,6 +499,41 @@ const routing = ( router: Router ) => {
 			getUIDAssetsProvisionPress()
 		})
 
+		/** sunProvision pool：Cluster /sun valid 时 tagID 未绑定，转发到此。Master 排队 provision → ensureAA，返回 { ...sunResult, eoa, aa }。 */
+		const sunProvisionPool: Array<{ uid: string; tagIdHex: string; sunResult: Record<string, unknown>; res: Response }> = []
+		const sunProvisionPress = async () => {
+			const obj = sunProvisionPool.shift()
+			if (!obj) return
+			const { uid, tagIdHex, sunResult, res } = obj
+			try {
+				logger(Colors.cyan(`[sunProvision] tagId=${tagIdHex.slice(0, 8)}... provision + ensureAA`))
+				const { eoa, wasNewlyProvisioned } = await provisionOrGetNfcWalletByTagId(tagIdHex, uid)
+				let aa: string | undefined
+				if (wasNewlyProvisioned) {
+					aa = await ensureAAForEOA(ethers.getAddress(eoa))
+					logger(Colors.green(`[sunProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
+				} else {
+					aa = await ensureAAForEOA(ethers.getAddress(eoa))
+				}
+				res.status(200).json({ ...sunResult, eoa, aa }).end()
+			} catch (err: any) {
+				const msg = err?.message ?? String(err)
+				logger(Colors.red(`[sunProvision] tagId=${tagIdHex.slice(0, 8)}... failed: ${msg}`))
+				res.status(500).json({ ok: false, error: msg }).end()
+			}
+			setTimeout(() => sunProvisionPress(), 0)
+		}
+
+		/** POST /api/sunProvision - Cluster /sun valid 且 tagID 未绑定时转发。Master 排队创建钱包，返回 { ...sunResult, eoa, aa }。 */
+		router.post('/sunProvision', (req, res) => {
+			const { uid, tagIdHex, sunResult } = req.body as { uid?: string; tagIdHex?: string; sunResult?: Record<string, unknown> }
+			if (!uid || !tagIdHex || typeof uid !== 'string' || typeof tagIdHex !== 'string' || !sunResult || typeof sunResult !== 'object') {
+				return res.status(400).json({ ok: false, error: 'Missing uid, tagIdHex or sunResult' })
+			}
+			sunProvisionPool.push({ uid: uid.trim(), tagIdHex: tagIdHex.trim(), sunResult, res })
+			sunProvisionPress()
+		})
+
 		/** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付。用于 Smart Routing 及 beamioTransferIndexerAccounting 前置校验。 */
 		const BEAMIO_INDEXER_ADDRESS = '0x9d481CC9Da04456e98aE2FD6eB6F18e37bf72eb5'
 		const CONET_RPC = 'https://mainnet-rpc.conet.network'

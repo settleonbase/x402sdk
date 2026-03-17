@@ -88,7 +88,8 @@ const shortHex = (value: string | null | undefined, keep = 8): string | null => 
 	return `${value.slice(0, keep)}...${value.slice(-keep)}`
 }
 
-const logSunDebug = (
+/** 供 beamioServer /sun 路由复用，记录 SUN 校验结果 */
+export const logSunDebug = (
 	stage: 'verify_ok' | 'verify_fail',
 	req: express.Request,
 	data: Record<string, unknown>

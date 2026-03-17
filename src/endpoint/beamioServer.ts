@@ -14,7 +14,7 @@ import {beamio_ContractPool, searchUsers, _search, FollowerStatus, getMyFollowSt
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
-import { verifyBeamioSunRequest, verifyAndPersistBeamioSunUrl } from '../BeamioSun'
+import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA } from './getUIDAssetsLogic'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
@@ -429,9 +429,44 @@ const routing = ( router: Router ) => {
 		next()
 	})
 
-	/** GET /api/sun - 校验 Beamio SUN 动态 URL（读操作，Cluster 直接处理） */
-	router.get('/sun', (req, res) => {
-		return verifyBeamioSunRequest(req, res)
+	/** GET /api/sun - 校验 Beamio SUN 动态 URL。valid 时：若 tagID 已绑定则返回 eoa/aa；未绑定则转发 Master 创建钱包并返回 eoa/aa。 */
+	router.get('/sun', async (req, res) => {
+		try {
+			const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`
+			const result = await verifyAndPersistBeamioSunUrl(url)
+			const shortHex = (v: string | null | undefined, k = 8) => !v ? null : v.length <= k * 2 ? v : `${v.slice(0, k)}...${v.slice(-k)}`
+			logSunDebug(result.valid ? 'verify_ok' : 'verify_fail', req, {
+				uidHex: result.uidHex,
+				counterHex: result.counterHex,
+				lastCounterHex: result.counterState?.lastCounterHex ?? null,
+				tagIdHex: result.tagIdHex,
+				version: result.version,
+				macLayout: result.macLayout,
+				payloadLayout: result.payloadLayout,
+				macValid: result.macValid,
+				counterFresh: result.counterFresh,
+				embeddedUidMatchesInput: result.embeddedUidMatchesInput,
+				embeddedCounterMatchesInput: result.embeddedCounterMatchesInput,
+				valid: result.valid,
+				eHex: shortHex(result.eHex),
+				mHex: result.mHex,
+				expectedMacHex: result.expectedMacHex,
+				macInputAscii: result.macInputAscii,
+			})
+			if (!result.valid) {
+				return res.status(403).json(result).end()
+			}
+			const eoa = await getNfcRecipientAddressByTagId(result.tagIdHex)
+			if (eoa) {
+				const aaAddr = await resolveBeamioAccountOf(eoa)
+				return res.status(200).json({ ...result, eoa, aa: aaAddr ?? undefined }).end()
+			}
+			logger(Colors.cyan(`[sun] tagId=${result.tagIdHex.slice(0, 8)}... 未绑定钱包，转发 Master 创建`))
+			postLocalhost('/api/sunProvision', { uid: result.uidHex, tagIdHex: result.tagIdHex, sunResult: result }, res)
+		} catch (e: any) {
+			logSunDebug('verify_fail', req, { error: e?.message ?? String(e), uidHex: req.query?.uid ?? null })
+			return res.status(403).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
 	})
 
 	/** GET /api/manifest.json - 动态 manifest，cluster 独自处理，无需 master。支持 ?start_url= 或从 Referer 获取 */
