@@ -5231,6 +5231,20 @@ export const cardAddAdminByAdminPreCheck = async (body: {
 			adminSignature,
 		})
 		if (!adminCheck.ok) return { success: false, error: adminCheck.error }
+		if (decoded.args[1] === true) {
+			const signer = (adminCheck as { ok: true; signer?: string }).signer
+			if (signer && Settle_ContractPool?.length) {
+				const provider = (Settle_ContractPool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+				const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)', 'function adminParent(address) view returns (address)'], provider)
+				const alreadyAdmin = await card.isAdmin(ethers.getAddress(to)) as boolean
+				if (alreadyAdmin) {
+					const parent = await card.adminParent(ethers.getAddress(to)) as string
+					if (parent && parent !== ethers.ZeroAddress && parent.toLowerCase() !== ethers.getAddress(signer).toLowerCase()) {
+						return { success: false, error: 'EOA is already admin under another parent. Only the parent admin who added it can update.' }
+					}
+				}
+			}
+		}
 		return { success: true }
 	} catch (e: any) {
 		return { success: false, error: e?.message ?? String(e) }
@@ -5272,6 +5286,25 @@ export const cardAddAdminPreCheck = async (body: {
 				const codeAtTo = await provider.getCode(to)
 				if (codeAtTo && codeAtTo !== '0x') {
 					return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
+				}
+			}
+			if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+			const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract: BASE_CARD_FACTORY }
+			const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
+			const dataHash = ethers.keccak256(data)
+			const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+			const value = { cardAddress: ethers.getAddress(cardAddress), dataHash, deadline: Number(deadline), nonce: nonceBytes }
+			const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+			const signer = ethers.recoverAddress(digest, ownerSignature)
+			if (Settle_ContractPool?.length) {
+				const provider = (Settle_ContractPool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+				const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)', 'function adminParent(address) view returns (address)'], provider)
+				const alreadyAdmin = await card.isAdmin(ethers.getAddress(to)) as boolean
+				if (alreadyAdmin) {
+					const parent = await card.adminParent(ethers.getAddress(to)) as string
+					if (parent && parent !== ethers.ZeroAddress) {
+						return { success: false, error: 'EOA is already admin under another admin. Only the parent admin who added it can update.' }
+					}
 				}
 			}
 		}

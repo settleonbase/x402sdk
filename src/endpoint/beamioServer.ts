@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
+import {beamio_ContractPool, searchUsers, _search, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -464,6 +464,120 @@ const routing = ( router: Router ) => {
 	
 	router.get('/search-users', (req,res) => {
 		searchUsers(req,res)
+	})
+
+	/** GET /api/getTerminalProfile - 终端首页用：返回当前钱包的 beamio profile 及上层 admin（merchant）的 profile。供 Android NdefScreen 头部展示。 */
+	router.get('/getTerminalProfile', async (req, res) => {
+		const { wallet } = req.query as { wallet?: string }
+		if (!wallet || typeof wallet !== 'string' || !wallet.trim() || !ethers.isAddress(wallet.trim())) {
+			return res.status(400).json({ ok: false, error: 'Missing or invalid wallet' }).end()
+		}
+		try {
+			const addr = ethers.getAddress(wallet.trim())
+			// Resolve AA to EOA (accounts table stores EOA)
+			let eoa = addr
+			try {
+				const code = await providerBase.getCode(addr)
+				if (code && code !== '0x' && code.length > 2) {
+					const aa = new ethers.Contract(addr, ['function owner() view returns (address)'], providerBase)
+					const owner = await aa.owner()
+					if (owner && owner !== ethers.ZeroAddress) eoa = ethers.getAddress(owner)
+				}
+			} catch (_) { /* not AA, use as-is */ }
+			const profileRet = await _search(eoa)
+			const profileRow = profileRet?.results?.[0]
+			const profile = profileRow ? {
+				accountName: profileRow.username ?? profileRow.accountName,
+				first_name: profileRow.first_name,
+				last_name: profileRow.last_name,
+				image: profileRow.image,
+				address: profileRow.address,
+			} : null
+			let adminProfile: { accountName?: string; first_name?: string; last_name?: string; image?: string; address?: string } | null = null
+			try {
+				const posMgmt = new ethers.Contract(MERCHANT_POS_MANAGEMENT_CONET, ['function getPOSMerchant(address) view returns (address)'], providerConet)
+				const merchant = await posMgmt.getPOSMerchant(eoa)
+				if (merchant && merchant !== ethers.ZeroAddress) {
+					const adminRet = await _search(ethers.getAddress(merchant))
+					const adminRow = adminRet?.results?.[0]
+					if (adminRow) {
+						adminProfile = {
+							accountName: adminRow.username ?? adminRow.accountName,
+							first_name: adminRow.first_name,
+							last_name: adminRow.last_name,
+							image: adminRow.image,
+							address: adminRow.address,
+						}
+					}
+				}
+			} catch (e) {
+				logger(Colors.gray(`[getTerminalProfile] getPOSMerchant failed: ${(e as Error)?.message ?? e}`))
+			}
+			return res.status(200).json({ ok: true, profile, adminProfile }).end()
+		} catch (e) {
+			logger(Colors.red(`[getTerminalProfile] error: ${(e as Error)?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
+		}
+	})
+
+	/** GET /api/getCardAdminInfo?cardAddress=0x...&wallet=0x... - 从 BeamioUserCard 卡合约（Base）获取 owner 与 admin 列表。cardAddress 默认 BEAMIO_USER_CARD_ASSET_ADDRESS。wallet 可选：若提供则返回该终端的上层 admin（upperAdmin）。供 Android 用 upperAdmin/owner 调用 search-users 拉取 BeamioCapsule。 */
+	const CARD_ADMIN_ABI = [
+		'function owner() view returns (address)',
+		'function getAdminListWithMetadata() view returns (address[] admins, string[] metadatas, address[] parents)',
+		'function getAdminSubordinatesWithMetadata(address admin) view returns (address[] subordinates, string[] metadatas, address[] parents)',
+	] as const
+	router.get('/getCardAdminInfo', async (req, res) => {
+		const { cardAddress: cardAddrQ, wallet: walletQ } = req.query as { cardAddress?: string; wallet?: string }
+		const cardAddr = (cardAddrQ?.trim() || BEAMIO_USER_CARD_ASSET_ADDRESS)
+		if (!ethers.isAddress(cardAddr)) {
+			return res.status(400).json({ ok: false, error: 'Invalid cardAddress' }).end()
+		}
+		try {
+			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_ADMIN_ABI, providerBase)
+			const [owner, adminResult] = await Promise.all([
+				card.owner() as Promise<string>,
+				card.getAdminListWithMetadata() as Promise<[string[], string[], string[]]>,
+			])
+			const [admins, metadatas, parents] = adminResult
+			const ownerAddr = owner && owner !== ethers.ZeroAddress ? ethers.getAddress(owner) : null
+			const result: { ok: boolean; owner: string | null; admins: string[]; metadatas: string[]; parents: string[]; upperAdmin?: string | null } = {
+				ok: true,
+				owner: ownerAddr,
+				admins: (admins ?? []).map((a: string) => ethers.getAddress(a)),
+				metadatas: metadatas ?? [],
+				parents: (parents ?? []).map((p: string) => ethers.getAddress(p)),
+			}
+			if (walletQ?.trim() && ethers.isAddress(walletQ.trim()) && ownerAddr) {
+				const terminal = ethers.getAddress(walletQ.trim())
+				const adminsNorm = (admins ?? []).map((a: string) => ethers.getAddress(a).toLowerCase())
+				const idx = adminsNorm.indexOf(terminal.toLowerCase())
+				if (idx >= 0) {
+					const p = (parents ?? [])[idx]
+					result.upperAdmin = p && p !== ethers.ZeroAddress ? ethers.getAddress(p) : ownerAddr
+				} else {
+					const [subsOwner] = await card.getAdminSubordinatesWithMetadata(ownerAddr) as [string[]]
+					const subsOwnerNorm = (subsOwner ?? []).map((s: string) => ethers.getAddress(s).toLowerCase())
+					if (subsOwnerNorm.includes(terminal.toLowerCase())) {
+						result.upperAdmin = ownerAddr
+					} else {
+						for (let i = 0; i < (admins ?? []).length; i++) {
+							const adminAddr = ethers.getAddress((admins ?? [])[i])
+							const [subs] = await card.getAdminSubordinatesWithMetadata(adminAddr) as [string[]]
+							const subsNorm = (subs ?? []).map((s: string) => ethers.getAddress(s).toLowerCase())
+							if (subsNorm.includes(terminal.toLowerCase())) {
+								result.upperAdmin = adminAddr
+								break
+							}
+						}
+						if (result.upperAdmin === undefined) result.upperAdmin = null
+					}
+				}
+			}
+			return res.status(200).json(result).end()
+		} catch (e) {
+			logger(Colors.red(`[getCardAdminInfo] error: ${(e as Error)?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
+		}
 	})
 
 	/** POST /api/nfcCardStatus - 查询 NTAG 424 DNA 卡状态（读操作，Cluster 直接处理） */
