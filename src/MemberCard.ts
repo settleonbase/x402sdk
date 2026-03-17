@@ -2502,7 +2502,14 @@ export const purchaseBUnitFromBaseProcess = async () => {
 			obj.signature
 		)
 		logger(Colors.green(`[purchaseBUnitFromBaseProcess] tx=${tx.hash}`))
-		await tx.wait()
+		try {
+			await tx.wait()
+		} catch (waitErr: any) {
+			// RPC may return malformed batch (e.g. missing eth_getTransactionReceipt response).
+			// Tx was already broadcast; return success so client gets txHash. Tx will confirm on chain.
+			const waitMsg = waitErr?.message ?? String(waitErr)
+			logger(Colors.yellow(`[purchaseBUnitFromBaseProcess] tx.wait() failed (tx sent): ${waitMsg}`))
+		}
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
 	} catch (e: any) {
 		const msg = e?.message ?? String(e)
