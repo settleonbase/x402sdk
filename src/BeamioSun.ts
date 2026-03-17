@@ -273,7 +273,7 @@ export const verifyBeamioSunUrl = async (url: string): Promise<VerifyBeamioSunRe
 	const counterStrictlyNew = counterValue > lastCounterVal
 	// 同 tap 短时 grace：getUIDAssets 成功后 persist 了 counter，nfcTopupPrepare/nfcTopup 复用同一 tap 的 e/c/m，counter 相同。允许 counter === lastCounter 且 lastPersisted 在 120 秒内。
 	const SAME_TAP_GRACE_MS = 120_000
-	const sameCounterRecentlyPersisted = counterValue === lastCounterVal && state?.updatedAt && (Date.now() - state.updatedAt.getTime() < SAME_TAP_GRACE_MS)
+	const sameCounterRecentlyPersisted = !!(counterValue === lastCounterVal && state?.updatedAt && (Date.now() - state.updatedAt.getTime() < SAME_TAP_GRACE_MS))
 	const counterFresh = !lastCounterHex || counterStrictlyNew || sameCounterRecentlyPersisted
 
 	return {
