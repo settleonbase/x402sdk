@@ -325,9 +325,33 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 
 		// CREATE2 确定性：实际部署地址 = getAddress(creator, 0) = predictedAddress
 		const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
-		const code = await provider.getCode(predictedAddress)
+		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+		let code = await provider.getCode(predictedAddress)
 		if (code === '0x' || code === '') {
+			// RPC 传播延迟：tx 已确认但 getCode 可能尚未索引，重试 2–3 次
+			for (let attempt = 1; attempt <= 3; attempt++) {
+				await sleep(2 * attempt * 1000)
+				code = await provider.getCode(predictedAddress)
+				if (code && code !== '0x' && code !== '') break
+			}
+		}
+		if (code === '0x' || code === '') {
+			// 重试后仍空：尝试 beamioAccountOf（Factory 可能已索引）
+			const primaryAfter = await SC.beamioAccountOf(creatorAddress).catch(() => null)
+			if (primaryAfter && primaryAfter !== ethers.ZeroAddress) {
+				const codeAtPrimary = await provider.getCode(primaryAfter).catch(() => '')
+				if (codeAtPrimary && codeAtPrimary !== '0x') {
+					logger(Colors.yellow(`DeployingSmartAccount: getCode(predicted) 空但 beamioAccountOf 已返回，使用 primary=${primaryAfter}`))
+					return { accountAddress: ethers.getAddress(primaryAfter), alreadyExisted: false }
+				}
+			}
+			const nextIdxAfter = await SC.nextIndexOfCreator(creatorAddress).catch(() => null)
+			const blockNum = receipt?.blockNumber ?? '?'
+			const gasUsed = receipt?.gasUsed?.toString() ?? '?'
+			const logsLen = receipt?.logs?.length ?? 0
 			logger(Colors.red(`DeployingSmartAccount: 交易成功但账户未部署，地址=${predictedAddress}`))
+			logger(Colors.red(`  [debug] txHash=${tx.hash} block=${blockNum} gasUsed=${gasUsed} logs=${logsLen}`))
+			logger(Colors.red(`  [debug] nextIndexOfCreator(after)=${nextIdxAfter} beamioAccountOf(after)=${primaryAfter ?? 'null'}`))
 			return { accountAddress: '', alreadyExisted: false }
 		}
 
@@ -394,8 +418,19 @@ export const ensureAAForEOA = async (eoa: string): Promise<string> => {
 	const hasAA = acct && acct !== ethers.ZeroAddress && (await provider.getCode(acct)) !== '0x'
 	if (hasAA) return ethers.getAddress(acct)
 	logger(Colors.cyan(`[ensureAAForEOA] EOA ${eoa} has no AA, creating...`))
-	const { accountAddress } = await DeployingSmartAccount(eoa, aaFactory)
-	if (!accountAddress) throw new Error(`Failed to create AA for ${eoa}`)
+	const { accountAddress, alreadyExisted } = await DeployingSmartAccount(eoa, aaFactory)
+	if (!accountAddress) {
+		let predicted: string | null = null
+		try {
+			const fn = aaFactory.getFunction('getAddress(address,uint256)')
+			predicted = await fn(eoa, 0n)
+		} catch {
+			/* ignore */
+		}
+		logger(Colors.red(`[ensureAAForEOA] error: Failed to create AA for ${eoa}`))
+		logger(Colors.red(`  [debug] predictedAddress=${predicted ?? '?'} alreadyExisted=${alreadyExisted}`))
+		throw new Error(`Failed to create AA for ${eoa}`)
+	}
 	logger(Colors.green(`[ensureAAForEOA] created AA ${accountAddress} for EOA ${eoa}`))
 	return accountAddress
 }
