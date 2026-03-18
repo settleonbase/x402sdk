@@ -4815,6 +4815,20 @@ export const ContainerRelayProcess = async () => {
       payeeEOA = ethers.getAddress(to)
     }
 
+    // Charge 记账：route 必须用卡资产（非 USDC），否则 getAssetTransactionsByTopAdmin(asset=card) 查不到
+    const firstItem = payload.items[0]
+    const firstAsset = firstItem?.asset && ethers.isAddress(firstItem.asset) ? ethers.getAddress(firstItem.asset) : ''
+    const isCardAsset = firstAsset && firstAsset.toLowerCase() !== USDC_ADDRESS.toLowerCase()
+    const routeItems: BeamioTransferRouteItem[] = isCardAsset
+      ? [{
+          asset: firstAsset,
+          amountE6: usdcAmountRaw.toString(),
+          assetType: 1,
+          source: 1,
+          tokenId: String(firstItem?.tokenId ?? '0'),
+        }]
+      : []
+
     beamioTransferIndexerAccountingPool.push({
       from: account,
       to,
@@ -4832,8 +4846,9 @@ export const ContainerRelayProcess = async () => {
       source: 'container',
       payeeEOA,
       merchantCardAddress: obj.merchantCardAddress,
+      ...(routeItems.length > 0 ? { routeItems } : {}),
     })
-    logger(Colors.cyan(`[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool (internal) from=${account} to=${to} amountUSDC6=${usdcAmountRaw} requestHash=${obj.requestHash ?? 'n/a'}`))
+    logger(Colors.cyan(`[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool (internal) from=${account} to=${to} amountUSDC6=${usdcAmountRaw} routeItems=${routeItems.length} requestHash=${obj.requestHash ?? 'n/a'}`))
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
       logger(Colors.red('[AAtoEOA/Container] beamioTransferIndexerAccountingProcess unhandled:'), err?.message ?? err)
     })
