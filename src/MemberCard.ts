@@ -316,7 +316,8 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 		// 尚无账户，由 Paymaster 调用 createAccountFor(creator)；仅此路径会创建 AA，且仅创建 index=0 的一个
 		const tx = await SC.createAccountFor(wallet)
 		logger(`DeployingSmartAccount: 创建账户交易已发送，hash=${tx.hash}`)
-		const receipt = await tx.wait()
+		// confirmations: 0 = 仅等待 tx 被打包，不轮询区块确认，避免 1rpc/Lava 的 "block too new" 一致性检查
+		const receipt = await tx.wait(0)
 
 		// 验证交易是否成功（ethers v6: status 1 = 成功）
 		if (!receipt || receipt.status !== 1) {
