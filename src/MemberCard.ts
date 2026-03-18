@@ -5923,7 +5923,7 @@ export const executeForOwnerProcess = async () => {
 				const iface = obj.data.slice(0, 10).toLowerCase() === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ? adminManager5ArgIface : adminManager4ArgIface
 				const decoded = iface.parseTransaction({ data: obj.data })
 				if (decoded?.name === 'adminManager') {
-					const [to, admin, newThreshold, metadata, mintLimit] = decoded.args as [string, boolean, bigint, string, bigint | undefined]
+					const [to, admin, newThreshold, metadata, mintLimit] = decoded.args as unknown as [string, boolean, bigint, string, bigint | undefined]
 					logger(Colors.cyan(`[cardAddAdmin] chainWrite: cardAddress=${obj.cardAddress} data=${obj.data} deadline=${obj.deadline} nonce=${obj.nonce} ownerSig=${typeof obj.ownerSignature === 'string' ? obj.ownerSignature.slice(0, 18) + '...' + obj.ownerSignature.slice(-8) : 'N/A'}`))
 					logger(Colors.cyan(`[cardAddAdmin] chainWrite decoded: adminManager(to=${to}, admin=${admin}, newThreshold=${String(newThreshold)}, metadata="${metadata}", mintLimit=${mintLimit != null ? String(mintLimit) : 'N/A'})`))
 				}
