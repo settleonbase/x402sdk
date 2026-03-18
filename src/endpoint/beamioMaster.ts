@@ -901,7 +901,7 @@ const routing = ( router: Router ) => {
 		/** x402 BeamioTransfer 成功后：写入 BeamioIndexerDiamond（master 队列处理） */
 		router.post('/beamioTransferIndexerAccounting', (req, res) => {
 			logger(Colors.gray(`[DEBUG] beamioTransferIndexerAccounting received bodyKeys=${Object.keys(req.body || {}).join(',')} from=${(req.body as any)?.from?.slice?.(0, 10)}… to=${(req.body as any)?.to?.slice?.(0, 10)}… requestHash=${(req.body as any)?.requestHash ?? 'n/a'} poolBefore=${beamioTransferIndexerAccountingPool.length}`))
-			const { from, to, amountUSDC6, finishedHash, displayJson, note, currency, currencyAmount, gasWei, gasUSDC6, gasChainType, baseGas, feePayer, isInternalTransfer, requestHash, source } = req.body as {
+			const { from, to, amountUSDC6, finishedHash, displayJson, note, currency, currencyAmount, gasWei, gasUSDC6, gasChainType, baseGas, feePayer, isInternalTransfer, requestHash, source, payeeEOA, merchantCardAddress } = req.body as {
 				from?: string
 				to?: string
 				amountUSDC6?: string
@@ -918,6 +918,8 @@ const routing = ( router: Router ) => {
 				feePayer?: string
 				isInternalTransfer?: boolean
 				source?: string
+				payeeEOA?: string
+				merchantCardAddress?: string
 			}
 			if (!ethers.isAddress(from) || !ethers.isAddress(to) || !amountUSDC6 || !finishedHash || !ethers.isAddress(feePayer)) {
 				return res.status(400).json({ success: false, error: 'Invalid payload: from,to,amountUSDC6,finishedHash,feePayer required' }).end()
@@ -971,7 +973,9 @@ const routing = ( router: Router ) => {
 				feePayer: String(feePayer),
 				isInternalTransfer: !!isInternalTransfer,
 				requestHash: reqHashValid,
-				source: source === 'x402' ? 'x402' : undefined,
+				source: source === 'x402' ? 'x402' : (source === 'open-container' || source === 'container' ? source : undefined),
+				payeeEOA: payeeEOA && ethers.isAddress(payeeEOA) ? payeeEOA : undefined,
+				merchantCardAddress: merchantCardAddress && ethers.isAddress(merchantCardAddress) ? merchantCardAddress : undefined,
 				res,
 			})
 			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6} requestHash=${reqHashValid ?? 'n/a'} (raw=${requestHash ?? 'undefined'})`))
@@ -1170,6 +1174,7 @@ const routing = ( router: Router ) => {
 				forText?: string
 				requestHash?: string
 				validDays?: number | string
+				merchantCardAddress?: string
 			}
 			logger(`[AAtoEOA] [DEBUG] Master received openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 40)}…"` : 'n/a'} OpenContainerRelayPool.len=${OpenContainerRelayPool.length} Settle_ContractPool.len=${Settle_ContractPool.length}`)
 			logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a', forText: body?.forText ? `${body.forText.slice(0, 40)}…` : 'n/a' }, false, 3, true))
@@ -1189,6 +1194,7 @@ const routing = ( router: Router ) => {
 					currencyDiscountAmount: body.currencyDiscountAmount,
 					forText: body.forText?.trim() || undefined,
 					requestHash: body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined,
+					merchantCardAddress: body.merchantCardAddress && ethers.isAddress(body.merchantCardAddress) ? body.merchantCardAddress : undefined,
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to ContainerRelayPool (length ${poolLenBefore} -> ${ContainerRelayPool.length}), calling ContainerRelayProcess()`)
@@ -1214,6 +1220,7 @@ const routing = ( router: Router ) => {
 					currencyDiscountAmount: body.currencyDiscountAmount,
 					forText: body.forText?.trim() || undefined,
 					requestHash: body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined,
+					merchantCardAddress: body.merchantCardAddress && ethers.isAddress(body.merchantCardAddress) ? body.merchantCardAddress : undefined,
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)

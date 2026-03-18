@@ -28,7 +28,7 @@ const ACTION_SYNC_TOKEN_ABI = [
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, BEAMIO_INDEXER_DIAMOND, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY } from './chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, BEAMIO_INDEXER_DIAMOND, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY, BEAMIO_USER_CARD_ASSET_ADDRESS } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
 import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getNfcCardPrivateKeyByTagId, getCardByAddress, upsertNftTierMetadata } from './db'
@@ -1597,6 +1597,8 @@ export const OpenContainerRelayPool: {
 	forText?: string
 	/** Bill 支付时 URL 的 requestHash（bytes32），供记账写入 originalPaymentHash 以关联 request_create */
 	requestHash?: string
+	/** Charge 记账：商户卡地址，用于推导 topAdmin。可选 */
+	merchantCardAddress?: string
 	res: Response
 }[] = []
 
@@ -1624,6 +1626,8 @@ export const ContainerRelayPool: {
 	requestHash?: string
 	/** NFC pay 等：总金额 USDC6，用于记账（CCSA 时 items[0] 为 points 非 USDC） */
 	amountUSDC6?: string
+	/** Charge 记账：商户卡地址，用于推导 topAdmin。可选 */
+	merchantCardAddress?: string
 	res: Response
 }[] = []
 
@@ -1661,8 +1665,8 @@ export const beamioTransferIndexerAccountingPool: {
 	baseGas?: string
 	feePayer?: string
 	isInternalTransfer?: boolean
-	/** 'x402' = BeamioTransfer x402 转账，需扣 2 B-Units；'open-container' = OpenContainer 商户收款，BUnit 由收款方负担 */
-	source?: 'x402' | 'open-container'
+	/** 'x402' = BeamioTransfer x402 转账，需扣 2 B-Units；'open-container' = OpenContainer 商户收款；'container' = Container 商户收款（Charge） */
+	source?: 'x402' | 'open-container' | 'container'
 	/** B 服务费 USDC 6 位精度，写入 FeeInfo.bServiceUSDC6 */
 	bServiceUSDC6?: string
 	/** B 服务费单位数 6 位精度，写入 FeeInfo.bServiceUnits6 */
@@ -1680,6 +1684,10 @@ export const beamioTransferIndexerAccountingPool: {
 	routeTokenId?: string
 	/** CCSA 时：route 的 amountE6（与 amountUSDC6 相同时可省略） */
 	routeAmountE6?: string
+	/** Charge 记账：受益人 to 的 EOA，记入 subordinate。OpenContainer 已有；Container 需在 push 前解析 */
+	payeeEOA?: string
+	/** Charge 记账：商户卡地址，用于推导 to 的上层 admin 的 AA 记入 topAdmin。可选，缺省时 open-container 用 BEAMIO_USER_CARD_ASSET_ADDRESS */
+	merchantCardAddress?: string
 }[] = []
 
 export const beamioTransferIndexerAccountingProcess = async () => {
@@ -1867,6 +1875,48 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			operatorParentChain: [],
 			topAdmin: ethers.ZeroAddress,
 			subordinate: ethers.ZeroAddress,
+		}
+
+		// Charge 记账：subordinate=受益人 to 的 EOA，topAdmin=to 的上层 admin 的 AA 地址
+		const isCharge = obj.source === 'open-container' || obj.source === 'container' || (obj.routeItems && obj.routeItems.length > 0)
+		if (isCharge) {
+			let payeeEOA: string
+			if (obj.payeeEOA && ethers.isAddress(obj.payeeEOA)) {
+				payeeEOA = ethers.getAddress(obj.payeeEOA)
+			} else {
+				try {
+					const toCode = await SC.walletBase.provider!.getCode(obj.to)
+					if (toCode && toCode !== '0x' && toCode.length > 2) {
+						const aaRead = new ethers.Contract(obj.to, ['function owner() view returns (address)'], SC.walletBase.provider!)
+						const owner = await aaRead.owner()
+						payeeEOA = owner && owner !== ethers.ZeroAddress ? ethers.getAddress(owner) : ethers.getAddress(obj.to)
+					} else {
+						payeeEOA = ethers.getAddress(obj.to)
+					}
+				} catch (_) {
+					payeeEOA = ethers.getAddress(obj.to)
+				}
+			}
+			transactionInput.subordinate = payeeEOA
+			const cardAddr = obj.merchantCardAddress && ethers.isAddress(obj.merchantCardAddress)
+				? obj.merchantCardAddress
+				: ((obj.source === 'open-container' || obj.source === 'container') ? BEAMIO_USER_CARD_ASSET_ADDRESS : undefined)
+			if (cardAddr) {
+				try {
+					const opChain = await fetchOperatorParentChain(cardAddr, payeeEOA)
+					const { topAdmin: topAdminEOA } = deriveTopAdminAndSubordinate(payeeEOA, opChain)
+					const topAdminAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(topAdminEOA)
+					if (topAdminAA && topAdminAA !== ethers.ZeroAddress) {
+						const aaCode = await SC.walletBase.provider!.getCode(topAdminAA)
+						if (aaCode && aaCode !== '0x' && aaCode.length > 2) {
+							transactionInput.topAdmin = ethers.getAddress(topAdminAA)
+							logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] Charge topAdmin=${transactionInput.topAdmin} subordinate=${payeeEOA}`))
+						}
+					}
+				} catch (e: any) {
+					logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] Charge topAdmin resolve failed (non-fatal): ${e?.message ?? e}`))
+				}
+			}
 		}
 
 		// BeamioTransfer x402：转账成功后扣 2 B-Units（由 payer 负担）
@@ -4554,6 +4604,8 @@ export const OpenContainerRelayProcess = async () => {
         source: 'open-container',
         bServiceUSDC6: feeBUsdc6.toString(),
         bServiceUnits6: feeBUnits6.toString(),
+        payeeEOA,
+        merchantCardAddress: obj.merchantCardAddress,
       })
       logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool routeItems=${collectedRouteItems.length} totalAmountE6=${totalAmountE6} amountUSDC6ForFee=${amountUSDC6ForFee} feePayer(payee)=${payeeEOA} bServiceUnits6=${feeBUnits6} bServiceUSDC6=${feeBUsdc6} requestHash=${obj.requestHash ?? 'n/a'}`))
     }
@@ -4716,6 +4768,21 @@ export const ContainerRelayProcess = async () => {
     }
     logger(Colors.green(`✅ ContainerRelayProcess displayJson = ${inspect(displayJsonData, false, 2, true)}`))
 
+    // Charge 记账：resolve to(payee) to EOA for subordinate
+    let payeeEOA: string = to
+    try {
+      const toCode = await SC.walletBase.provider!.getCode(to)
+      if (toCode && toCode !== '0x' && toCode.length > 2) {
+        const aaRead = new ethers.Contract(to, ['function owner() view returns (address)'], SC.walletBase.provider!)
+        const owner = await aaRead.owner()
+        if (owner && owner !== ethers.ZeroAddress) payeeEOA = ethers.getAddress(owner)
+      } else {
+        payeeEOA = ethers.getAddress(to)
+      }
+    } catch (_) {
+      payeeEOA = ethers.getAddress(to)
+    }
+
     beamioTransferIndexerAccountingPool.push({
       from: account,
       to,
@@ -4730,6 +4797,9 @@ export const ContainerRelayProcess = async () => {
       feePayer: account,
       isInternalTransfer: true,
       requestHash: obj.requestHash,
+      source: 'container',
+      payeeEOA,
+      merchantCardAddress: obj.merchantCardAddress,
     })
     logger(Colors.cyan(`[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool (internal) from=${account} to=${to} amountUSDC6=${usdcAmountRaw} requestHash=${obj.requestHash ?? 'n/a'}`))
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
