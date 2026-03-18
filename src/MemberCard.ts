@@ -21,9 +21,9 @@ import TaskABI from "./ABI/TaskABI.json";
 import StatsABI from "./ABI/StatsABI.json";
 import CatalogABI from "./ABI/CatalogABI.json";
 import ActionABI from "./ABI/ActionABI.json";
-/** syncTokenAction(TransactionInput) - 与 ActionFacet.sol 当前实现一致。operator 非零时用于 admin 维度 token #0 mint/burn 统计；operatorParentChain 为 parent 链，B 的 mint/burn 也累积到链上各 admin */
+/** syncTokenAction(TransactionInput) - 与 ActionFacet.sol 当前实现一致。operator 非零时用于 admin 维度 token #0 mint/burn 统计；operatorParentChain 为 parent 链；topAdmin=上层 admin，subordinate=签字方 EOA */
 const ACTION_SYNC_TOKEN_ABI = [
-	'function syncTokenAction((bytes32 txId, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, address operator, address[] operatorParentChain) in_) returns (uint256 actionId)',
+	'function syncTokenAction((bytes32 txId, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, address operator, address[] operatorParentChain, address topAdmin, address subordinate) in_) returns (uint256 actionId)',
 ] as const
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
@@ -967,6 +967,15 @@ const fetchOperatorParentChain = async (cardAddr: string, operator: string): Pro
 	return chain
 }
 
+/** 从 operatorParentChain 推导 topAdmin（根 admin）与 subordinate（签字方 EOA）。topAdmin 用于报表按上层 admin 查询，subordinate 为实际执行方 */
+const deriveTopAdminAndSubordinate = (operator: string, operatorParentChain: string[]): { topAdmin: string; subordinate: string } => {
+	const subordinate = ethers.getAddress(operator)
+	const topAdmin = operatorParentChain.length > 0
+		? ethers.getAddress(operatorParentChain[operatorParentChain.length - 1])
+		: subordinate
+	return { topAdmin, subordinate }
+}
+
 /** 从 executeForAdmin 的 data 中解析 mintPointsByAdmin(toEOA, points6) 的 toEOA，供 NFC Topup 前置 DeployingSmartAccount */
 const tryParseMintPointsByAdminRecipient = (data: string): string | null => {
 	try {
@@ -1229,6 +1238,8 @@ export const executeForAdminProcess = async () => {
 					itemCurrencyType: cardCurrencyFiat,
 					offsetInRequestCurrencyE6: 0n,
 				}
+				const operatorParentChain = await fetchOperatorParentChain(obj.cardAddr, adminCheck.signer)
+				const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(adminCheck.signer, operatorParentChain)
 				const input = {
 					txId: tx.hash as `0x${string}`,
 					originalPaymentHash: ethers.ZeroHash as `0x${string}`,
@@ -1263,7 +1274,9 @@ export const executeForAdminProcess = async () => {
 						afterNotePayee: '',
 					},
 					operator: ethers.getAddress(adminCheck.signer),
-					operatorParentChain: await fetchOperatorParentChain(obj.cardAddr, adminCheck.signer),
+					operatorParentChain,
+					topAdmin,
+					subordinate,
 				}
 				const syncTxHash = await runPurchasingCardAccountingJob(
 					{
@@ -1851,6 +1864,8 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			},
 			operator: ethers.ZeroAddress,
 			operatorParentChain: [],
+			topAdmin: ethers.ZeroAddress,
+			subordinate: ethers.ZeroAddress,
 		}
 
 		// BeamioTransfer x402：转账成功后扣 2 B-Units（由 payer 负担）
@@ -2070,6 +2085,8 @@ export const requestAccountingProcess = async () => {
 			},
 			operator: ethers.ZeroAddress,
 			operatorParentChain: [],
+			topAdmin: ethers.ZeroAddress,
+			subordinate: ethers.ZeroAddress,
 		}
 
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
@@ -2269,6 +2286,8 @@ export const cancelRequestAccountingProcess = async () => {
 			meta: { requestAmountFiat6: 0n, requestAmountUSDC6: 0n, currencyFiat: 1, discountAmountFiat6: 0n, discountRateBps: 0, taxAmountFiat6: 0n, taxRateBps: 0, afterNotePayer: '', afterNotePayee: '' },
 			operator: ethers.ZeroAddress,
 			operatorParentChain: [],
+			topAdmin: ethers.ZeroAddress,
+			subordinate: ethers.ZeroAddress,
 		}
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 		const tx = await actionFacetSync.syncTokenAction(transactionInput)
@@ -2624,6 +2643,9 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 			offsetInRequestCurrencyE6: 0n,
 		}
 		const routeItems = [topupRouteItem]
+		const redeemOperator = (obj.creator && obj.creator !== ethers.ZeroAddress) ? obj.creator : payerAddr
+		const redeemOpChain = await fetchOperatorParentChain(obj.cardAddress, redeemOperator)
+		const { topAdmin: redeemTopAdmin, subordinate: redeemSubordinate } = deriveTopAdminAndSubordinate(redeemOperator, redeemOpChain)
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
 			originalPaymentHash: ethers.ZeroHash as `0x${string}`,
@@ -2657,8 +2679,10 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 				afterNotePayer: '',
 				afterNotePayee: '',
 			},
-			operator: (obj.creator && obj.creator !== ethers.ZeroAddress) ? ethers.getAddress(obj.creator) : payerAddr,
-			operatorParentChain: await fetchOperatorParentChain(obj.cardAddress, (obj.creator && obj.creator !== ethers.ZeroAddress) ? obj.creator : payerAddr),
+			operator: ethers.getAddress(redeemOperator),
+			operatorParentChain: redeemOpChain,
+			topAdmin: redeemTopAdmin,
+			subordinate: redeemSubordinate,
 		}
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 		const tx = await actionFacetSync.syncTokenAction(transactionInput)
@@ -3308,6 +3332,8 @@ type PurchasingCardAccountingInput = {
 	}
 	operator?: string
 	operatorParentChain?: string[]
+	topAdmin?: string
+	subordinate?: string
 }
 
 type PurchasingCardAccountingRetryJob = {
@@ -3714,6 +3740,10 @@ export const purchasingCardProcess = async () => {
 			operator: operatorAddr,
 			operatorParentChain: await fetchOperatorParentChain(cardAddress, operatorAddr),
 		}
+		const opChain = input.operatorParentChain ?? []
+		const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(operatorAddr, opChain)
+		input.topAdmin = topAdmin
+		input.subordinate = subordinate
 		
 		
 

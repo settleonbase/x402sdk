@@ -13,7 +13,7 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, _search, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA } from './getUIDAssetsLogic'
 
@@ -660,6 +660,71 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({ ok: true, charge, topUp }).end()
 		} catch (e) {
 			logger(Colors.red(`[getCardStats] error: ${(e as Error)?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
+		}
+	})
+
+	/** GET /api/cardTransactions - 代理 BeamioIndexerDiamond 记账数据（asset + account 合并），供 bizSite 前端绕过 CORS 拉取。 */
+	router.get('/cardTransactions', async (req, res) => {
+		const { cardAddress, adminAddress, aaAddress } = req.query as { cardAddress?: string; adminAddress?: string; aaAddress?: string }
+		const cardAddr = (cardAddress?.trim() || BEAMIO_USER_CARD_ASSET_ADDRESS)
+		if (!ethers.isAddress(cardAddr)) {
+			return res.status(400).json({ error: 'Invalid cardAddress' }).end()
+		}
+		const adminAddr = adminAddress?.trim() && ethers.isAddress(adminAddress.trim()) ? ethers.getAddress(adminAddress.trim()) : null
+		const aaAddr = aaAddress?.trim() && ethers.isAddress(aaAddress.trim()) ? ethers.getAddress(aaAddress.trim()) : null
+		const INDEXER_ASSET_ABI = ['function getAssetTransactionsByCurrentPeriodOffsetAndAccountModePaged(address asset, address account, uint8 periodType, uint256 periodOffset, uint256 pageOffset, uint256 pageLimit, bytes32 txCategoryFilter, uint8 accountMode, uint256 chainIdFilter) view returns (uint256 total, uint256 periodStart, uint256 periodEnd, tuple(bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, tuple(uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, tuple(uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)']
+		const INDEXER_ACCOUNT_ABI = ['function getAccountTransactionsByCurrentPeriodOffsetAndAccountModePaged(address account, uint8 periodType, uint256 periodOffset, uint256 pageOffset, uint256 pageLimit, bytes32 txCategoryFilter, uint8 accountMode) view returns (uint256 total, uint256 periodStart, uint256 periodEnd, tuple(bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, tuple(uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, tuple(uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)']
+		const PERIOD_DAY = 1
+		const CHAIN_ID_FILTER_ALL = ethers.MaxUint256
+		const TX_CATEGORY_ZERO = ethers.ZeroHash
+		const ACCOUNT_MODE_ALL = 0
+		type TxRow = { id: string; txCategory: string; displayJson: string; timestamp: bigint; payer: string; payee: string; finalRequestAmountFiat6: bigint; finalRequestAmountUSDC6: bigint; meta: { afterNotePayer?: string; afterNotePayee?: string }; exists?: boolean }
+		const serializeTx = (tx: TxRow): Record<string, unknown> => ({
+			id: String(tx.id),
+			txCategory: String(tx.txCategory),
+			displayJson: tx.displayJson ?? '',
+			timestamp: String(tx.timestamp),
+			payer: tx.payer,
+			payee: tx.payee,
+			finalRequestAmountFiat6: String(tx.finalRequestAmountFiat6 ?? 0n),
+			finalRequestAmountUSDC6: String(tx.finalRequestAmountUSDC6 ?? 0n),
+			meta: tx.meta ?? {},
+		})
+		try {
+			const indexerAsset = new ethers.Contract(BEAMIO_INDEXER_DIAMOND, INDEXER_ASSET_ABI, providerConet)
+			const indexerAccount = new ethers.Contract(BEAMIO_INDEXER_DIAMOND, INDEXER_ACCOUNT_ABI, providerConet)
+			const seen = new Set<string>()
+			const all: TxRow[] = []
+			const addPage = (page: TxRow[] | undefined) => {
+				for (const tx of page ?? []) {
+					if (!tx?.exists || !tx?.id) continue
+					const id = String(tx.id)
+					if (seen.has(id)) continue
+					seen.add(id)
+					all.push(tx)
+				}
+			}
+			const queryAccount = async (account: string) => {
+				for (let periodOffset = 0; periodOffset < 3; periodOffset++) {
+					try {
+						const [total, , , page] = await indexerAccount.getAccountTransactionsByCurrentPeriodOffsetAndAccountModePaged(account, PERIOD_DAY, periodOffset, 0, 100, TX_CATEGORY_ZERO, ACCOUNT_MODE_ALL) as [bigint, bigint, bigint, TxRow[]]
+						addPage(page)
+						if (Number(total) <= 100) return
+					} catch { return }
+				}
+			}
+			if (adminAddr) await queryAccount(adminAddr)
+			if (aaAddr && aaAddr.toLowerCase() !== adminAddr?.toLowerCase()) await queryAccount(aaAddr)
+			for (let periodOffset = 0; periodOffset < 3; periodOffset++) {
+				const [total, , , page] = await indexerAsset.getAssetTransactionsByCurrentPeriodOffsetAndAccountModePaged(ethers.getAddress(cardAddr), ethers.ZeroAddress, PERIOD_DAY, periodOffset, 0, 100, TX_CATEGORY_ZERO, ACCOUNT_MODE_ALL, CHAIN_ID_FILTER_ALL) as [bigint, bigint, bigint, TxRow[]]
+				addPage(page)
+				if (Number(total) <= 100) break
+			}
+			const sorted = all.sort((a, b) => Number(b.timestamp - a.timestamp)).slice(0, 50)
+			return res.status(200).json({ ok: true, transactions: sorted.map(serializeTx) }).end()
+		} catch (e) {
+			logger(Colors.red(`[cardTransactions] error: ${(e as Error)?.message ?? e}`))
 			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
 		}
 	})
@@ -3216,7 +3281,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
 		try {
-			const BEAMIO_INDEXER = '0x9d481CC9Da04456e98aE2FD6eB6F18e37bf72eb5'
+			const BEAMIO_INDEXER = '0xd990719B2f05ccab4Acdd5D7A3f7aDfd2Fc584Fe'
 			const CONET_BUINT = '0x4A3E59519eE72B9Dcf376f0617fF0a0a5a1ef879'
 			const INDEXER_ABI = ['function getAccountTransactionsPaged(address account, uint256 offset, uint256 limit) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)']
 			const TX_BUINT_CLAIM = ethers.keccak256(ethers.toUtf8Bytes('buintClaim'))
