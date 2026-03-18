@@ -1904,8 +1904,22 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			if (cardAddr) {
 				try {
 					const opChain = await fetchOperatorParentChain(cardAddr, payeeEOA)
-					const { topAdmin: topAdminEOA } = deriveTopAdminAndSubordinate(payeeEOA, opChain)
-					const topAdminAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(topAdminEOA)
+					const { topAdmin: topAdminInChain } = deriveTopAdminAndSubordinate(payeeEOA, opChain)
+					// topAdminInChain 可能是 EOA 或 AA（链上 adminParent 接受 AA 作为 admin）
+					const topAdminCode = await SC.walletBase.provider!.getCode(topAdminInChain)
+					const topAdminIsAA = topAdminCode && topAdminCode !== '0x' && topAdminCode.length > 2
+					let topAdminAA: string
+					if (topAdminIsAA) {
+						topAdminAA = ethers.getAddress(topAdminInChain)
+					} else {
+						topAdminAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(topAdminInChain)
+						if (!topAdminAA || topAdminAA === ethers.ZeroAddress) {
+							try {
+								const beamio = await (SC.aaAccountFactoryPaymaster as any).beamioAccountOf?.(topAdminInChain)
+								if (beamio && beamio !== ethers.ZeroAddress) topAdminAA = beamio
+							} catch { /* ignore */ }
+						}
+					}
 					if (topAdminAA && topAdminAA !== ethers.ZeroAddress) {
 						const aaCode = await SC.walletBase.provider!.getCode(topAdminAA)
 						if (aaCode && aaCode !== '0x' && aaCode.length > 2) {
