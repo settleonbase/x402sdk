@@ -47,3 +47,6 @@ src/localDB.db
 
 # Optional: keep dist if you commit build for deployment
 # !dist/
+
+# Local tooling / temp
+.tmp-op-reth-rc3/

@@ -7,8 +7,11 @@ import Colors from 'colors/safe'
 import { getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken } from '../db'
 import { BASE_AA_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 
+/** 已废弃的旧基础设施卡地址，getUIDAssets 不查询、不返回。当前 BEAMIO_USER_CARD_ASSET_ADDRESS (0x74f35741...) 必须不在本列表。 */
 const DEPRECATED_INFRA_CARDS = new Set([
-	'0x74f35741ad8bc75d873a8d7d140ae5ffb529ac0f'.toLowerCase(),
+	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
+	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
+	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
 ])
 
 const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://1rpc.io/base'
