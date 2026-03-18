@@ -1985,6 +1985,24 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			}
 		}
 
+		// Charge 记账调试：打印完整 Transaction 结构，便于排查 topAdmin/subordinate 查询
+		if (isCharge) {
+			const txForLog = {
+				txId: transactionInput.txId,
+				txCategory: transactionInput.txCategory,
+				payer: transactionInput.payer,
+				payee: transactionInput.payee,
+				topAdmin: transactionInput.topAdmin,
+				subordinate: transactionInput.subordinate,
+				route: transactionInput.route?.map((r: { asset: string; amountE6: bigint; tokenId: bigint }) => ({
+					asset: r.asset,
+					amountE6: String(r.amountE6),
+					tokenId: String(r.tokenId),
+				})),
+			}
+			logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] Charge accounting TransactionInput: ${inspect(txForLog, false, 4, true)}`))
+		}
+
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 		const conetBalance = await SC.walletConet.provider!.getBalance(SC.walletConet.address).catch(() => 0n)
 		if (conetBalance === 0n || conetBalance < 10n ** 14n) {
