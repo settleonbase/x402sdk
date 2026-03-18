@@ -787,6 +787,18 @@ const routing = ( router: Router ) => {
 					postLocalhost('/api/getUIDAssetsProvision', { uid: uidTrim, tagIdHex: nfcSunTagIdHex, e: req.body?.e, c: req.body?.c, m: req.body?.m }, res)
 					return
 				}
+				// EOA 已绑定但可能无 AA（如 DeployingSmartAccount 曾失败），getOwnershipByEOA 会 revert UC_ResolveAccountFailed，需转发 Master 确保 AA
+				const aaAddr = await resolveBeamioAccountOf(eoaRaw)
+				let hasDeployedAA = false
+				if (aaAddr && aaAddr !== ethers.ZeroAddress) {
+					const code = await providerBase.getCode(aaAddr)
+					hasDeployedAA = !!(code && code !== '0x' && code.length > 2)
+				}
+				if (!hasDeployedAA) {
+					logger(Colors.cyan(`[getUIDAssets] tagId=${nfcSunTagIdHex} EOA 无已部署 AA，转发 Master 确保 AA 后拉取`))
+					postLocalhost('/api/getUIDAssetsProvision', { uid: uidTrim, tagIdHex: nfcSunTagIdHex, e: req.body?.e, c: req.body?.c, m: req.body?.m }, res)
+					return
+				}
 			} else {
 				eoaRaw = await getNfcRecipientAddressByUid(uidTrim)
 			}
