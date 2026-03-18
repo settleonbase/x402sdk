@@ -319,8 +319,8 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 		// confirmations: 0 = 仅等待 tx 被打包，不轮询区块确认，避免 1rpc/Lava 的 "block too new" 一致性检查
 		const receipt = await tx.wait(0)
 
-		// 验证交易是否成功（ethers v6: status 1 = 成功）
-		if (!receipt || receipt.status !== 1) {
+		// 验证交易是否成功（ethers v6: status 为 bigint，1n = 成功，0n = revert）
+		if (!receipt || receipt.status === 0n || receipt.status === 0) {
 			logger(Colors.red(`DeployingSmartAccount: 交易失败，receipt.status=${receipt?.status}`))
 			return { accountAddress: '', alreadyExisted: false }
 		}
