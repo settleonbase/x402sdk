@@ -21,10 +21,12 @@ import { fetchUIDAssetsForEOA } from './getUIDAssetsLogic'
 const DEPRECATED_INFRA_CARDS = new Set([
 	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
 	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
+	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
 ])
 
 /** 与 SilentPassUI / Alliance 的 USER_CARD_DISPLAY_EXCLUDED 对齐：latestCards 不返回的卡地址 */
 const LATEST_CARDS_EXCLUDED = new Set([
+	'0x02bae511632354584b198951b42ec73bacbc4e98',
 	'0xf99018dffdb0c5657c93ca14db2900cebe1168a7',
 	'0xa86a8406b06bd6c332b4b380a0eaced822218eff',
 	'0xc0f1c74fb95100a97b532be53b266a54f41db615',

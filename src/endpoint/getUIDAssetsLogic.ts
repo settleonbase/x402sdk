@@ -8,8 +8,7 @@ import { getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataB
 import { BASE_AA_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 
 const DEPRECATED_INFRA_CARDS = new Set([
-	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
-	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
+	'0x74f35741ad8bc75d873a8d7d140ae5ffb529ac0f'.toLowerCase(),
 ])
 
 const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://1rpc.io/base'
