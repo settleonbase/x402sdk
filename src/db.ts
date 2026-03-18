@@ -902,13 +902,13 @@ export const isTagIdRegistered = async (tagIdHex: string): Promise<boolean> => {
 	return addr != null
 }
 
-/** 根据 TagID 查找或创建钱包。若已登记则返回 EOA；若未登记则创建新 EOA、登记到 nfc_cards（uid+private_key+tag_id），返回 EOA。uidHex 为请求中的 uid（14 hex），用于登记。并发时以先插入为准，后插入不覆盖。 */
-export const provisionOrGetNfcWalletByTagId = async (tagIdHex: string, uidHex: string): Promise<{ eoa: string; wasNewlyProvisioned: boolean }> => {
+/** 根据 TagID 查找或创建钱包。若已登记则返回 EOA；若未登记则创建新 EOA、登记到 nfc_cards（tag_id 为主键语义）。uidHex 可选，仅兼容旧客户端；缺省时用 tagIdHex 作为 DB uid 列值。 */
+export const provisionOrGetNfcWalletByTagId = async (tagIdHex: string, uidHex?: string): Promise<{ eoa: string; wasNewlyProvisioned: boolean }> => {
 	const existing = await getNfcRecipientAddressByTagId(tagIdHex)
 	if (existing) return { eoa: existing, wasNewlyProvisioned: false }
 	const wallet = ethers.Wallet.createRandom()
 	await registerNfcCardToDb({
-		uid: uidHex,
+		uid: uidHex?.trim() || tagIdHex.trim(),
 		privateKey: wallet.privateKey,
 		tagId: tagIdHex
 	})

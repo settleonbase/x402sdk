@@ -473,7 +473,7 @@ const routing = ( router: Router ) => {
 			const { uid, tagIdHex, c: counterHex, res } = obj
 			try {
 				logger(Colors.cyan(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provision + ensureAA + fetch`))
-				const { eoa, wasNewlyProvisioned } = await provisionOrGetNfcWalletByTagId(tagIdHex, uid)
+				const { eoa, wasNewlyProvisioned } = await provisionOrGetNfcWalletByTagId(tagIdHex, uid || undefined)
 				// 始终确保 AA 存在：wasNewlyProvisioned 仅表示 EOA 新建，但 EOA 已存在时可能因 DeployingSmartAccount 曾失败而无 AA
 				await ensureAAForEOA(ethers.getAddress(eoa))
 				if (wasNewlyProvisioned) logger(Colors.green(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
@@ -481,7 +481,7 @@ const routing = ( router: Router ) => {
 				const counterVal = counterHex && /^[0-9a-fA-F]{6}$/.test(counterHex) ? parseInt(counterHex, 16) : undefined
 				const merged = {
 					...result,
-					uid,
+					...(uid && { uid }),
 					tagIdHex,
 					...(counterHex && { counterHex: counterHex }),
 					...(counterVal !== undefined && { counter: counterVal }),
@@ -496,13 +496,13 @@ const routing = ( router: Router ) => {
 			setTimeout(() => getUIDAssetsProvisionPress(), 0)
 		}
 
-		/** POST /api/getUIDAssetsProvision - Cluster 预检后转发。TagID 未绑定时需创建钱包，Master 排队处理。 */
+		/** POST /api/getUIDAssetsProvision - Cluster 预检后转发。TagID 未绑定时需创建钱包，Master 排队处理。tagIdHex 必填（卡的唯一 ID）；uid 可选（兼容旧客户端）。 */
 		router.post('/getUIDAssetsProvision', (req, res) => {
 			const { uid, tagIdHex, c } = req.body as { uid?: string; tagIdHex?: string; c?: string }
-			if (!uid || !tagIdHex || typeof uid !== 'string' || typeof tagIdHex !== 'string') {
-				return res.status(400).json({ ok: false, error: 'Missing uid or tagIdHex' })
+			if (!tagIdHex || typeof tagIdHex !== 'string' || !tagIdHex.trim()) {
+				return res.status(400).json({ ok: false, error: 'Missing tagIdHex (card unique ID)' })
 			}
-			getUIDAssetsProvisionPool.push({ uid: uid.trim(), tagIdHex: tagIdHex.trim(), c: typeof c === 'string' ? c.trim() : undefined, res })
+			getUIDAssetsProvisionPool.push({ uid: typeof uid === 'string' ? uid.trim() : '', tagIdHex: tagIdHex.trim(), c: typeof c === 'string' ? c.trim() : undefined, res })
 			getUIDAssetsProvisionPress()
 		})
 
@@ -514,14 +514,10 @@ const routing = ( router: Router ) => {
 			const { uid, tagIdHex, sunResult, res } = obj
 			try {
 				logger(Colors.cyan(`[sunProvision] tagId=${tagIdHex.slice(0, 8)}... provision + ensureAA`))
-				const { eoa, wasNewlyProvisioned } = await provisionOrGetNfcWalletByTagId(tagIdHex, uid)
-				let aa: string | undefined
-				if (wasNewlyProvisioned) {
-					aa = await ensureAAForEOA(ethers.getAddress(eoa))
-					logger(Colors.green(`[sunProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
-				} else {
-					aa = await ensureAAForEOA(ethers.getAddress(eoa))
-				}
+				const { eoa, wasNewlyProvisioned } = await provisionOrGetNfcWalletByTagId(tagIdHex, uid || undefined)
+				// 始终确保 AA 存在（与 getUIDAssetsProvision 一致）
+				const aa = await ensureAAForEOA(ethers.getAddress(eoa))
+				if (wasNewlyProvisioned) logger(Colors.green(`[sunProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
 				res.status(200).json({ ...sunResult, eoa, aa }).end()
 			} catch (err: any) {
 				const msg = err?.message ?? String(err)
@@ -531,13 +527,13 @@ const routing = ( router: Router ) => {
 			setTimeout(() => sunProvisionPress(), 0)
 		}
 
-		/** POST /api/sunProvision - Cluster /sun valid 且 tagID 未绑定时转发。Master 排队创建钱包，返回 { ...sunResult, eoa, aa }。 */
+		/** POST /api/sunProvision - Cluster /sun valid 且 tagID 未绑定时转发。Master 排队创建钱包，返回 { ...sunResult, eoa, aa }。tagIdHex 必填；uid 可选。 */
 		router.post('/sunProvision', (req, res) => {
 			const { uid, tagIdHex, sunResult } = req.body as { uid?: string; tagIdHex?: string; sunResult?: Record<string, unknown> }
-			if (!uid || !tagIdHex || typeof uid !== 'string' || typeof tagIdHex !== 'string' || !sunResult || typeof sunResult !== 'object') {
-				return res.status(400).json({ ok: false, error: 'Missing uid, tagIdHex or sunResult' })
+			if (!tagIdHex || typeof tagIdHex !== 'string' || !tagIdHex.trim() || !sunResult || typeof sunResult !== 'object') {
+				return res.status(400).json({ ok: false, error: 'Missing tagIdHex or sunResult' })
 			}
-			sunProvisionPool.push({ uid: uid.trim(), tagIdHex: tagIdHex.trim(), sunResult, res })
+			sunProvisionPool.push({ uid: typeof uid === 'string' ? uid.trim() : '', tagIdHex: tagIdHex.trim(), sunResult, res })
 			sunProvisionPress()
 		})
 

@@ -739,7 +739,7 @@ const routing = ( router: Router ) => {
 		return res.status(200).json(result).end()
 	})
 
-	/** POST /api/getUIDAssets - 根据 UID/beamioTab 或 TagID 查询 NFC 卡资产。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 解密得到 TagID，verifyAndPersistBeamioSunUrl 校验 TagID 已登记（非法卡拒绝），用 TagID 查 EOA。beamioTab 仍按 AccountRegistry 解析。 */
+	/** POST /api/getUIDAssets - 查询卡资产。卡的唯一 ID 为 TagID。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 解密得到 TagID，用 TagID 查 EOA/AA。beamioTab 仍按 AccountRegistry 解析。 */
 	router.post('/getUIDAssets', async (req, res) => {
 		const { uid, e, c, m } = req.body as { uid?: string; e?: string; c?: string; m?: string }
 		logger(Colors.cyan(`[getUIDAssets] 收到请求 uid=${uid ?? '(undefined)'}`))
