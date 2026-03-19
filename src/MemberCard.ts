@@ -49,11 +49,13 @@ const BUNIT_KIND_X402_SEND = 5n
 const DIAMOND = BeamioTaskIndexerAddress
 /** Base 主网 RPC：优先 BASE_RPC_URL 环境变量，否则固定 1rpc.io/base */
 const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://1rpc.io/base'
-const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
-const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
-const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL)
+/** 禁用 JSON-RPC batch：部分网关返回的 batch 与请求 id 不对齐时 ethers 会抛 BAD_DATA（missing response for request） */
+const JSONRPC_NO_BATCH = { batchMaxCount: 1 }
+const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
+const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
+const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
 const conetEndpoint = 'https://mainnet-rpc.conet.network'
-const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
+const providerConet = new ethers.JsonRpcProvider(conetEndpoint, undefined, JSONRPC_NO_BATCH)
 /**
  * Settle_ContractPool：factory 登记的 owner 列表，每项为一名 admin（含 baseFactoryPaymaster、walletBase 等）。
  *
@@ -4883,8 +4885,17 @@ export const ContainerRelayProcess = async () => {
           1n, // kind=1 -> txCategory=keccak256("sendUSDC")
           { gasLimit: 2_500_000 }
         )
-        await consumeTx.wait()
-        logger(Colors.cyan(`[AAtoEOA/Container] consumeFromUser ok: ${Number(feeBUnits6) / 1e6} B-Units from ${feePayerEOA} baseHash=${tx.hash}`))
+        const consumeRcpt = await consumeTx.wait().catch((waitErr: any) => {
+          try {
+            logger(Colors.yellow(`[AAtoEOA/Container] consumeFromUser tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+          } catch (_) {
+            console.error('[AAtoEOA/Container] consumeFromUser tx.wait() failed (RPC):', waitErr)
+          }
+          return null
+        })
+        if (consumeRcpt) {
+          logger(Colors.cyan(`[AAtoEOA/Container] consumeFromUser ok: ${Number(feeBUnits6) / 1e6} B-Units from ${feePayerEOA} baseHash=${tx.hash}`))
+        }
       } catch (consumeErr: any) {
         logger(Colors.red(`[AAtoEOA/Container] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
       }
@@ -5426,7 +5437,7 @@ export const getRedeemStatusBatchApi = async (
 		const baseNetwork = { name: 'base', chainId: 8453 } as const
 
 		const runWithProvider = async (url: string) => {
-			const provider = new ethers.JsonRpcProvider(url, baseNetwork, { staticNetwork: true })
+			const provider = new ethers.JsonRpcProvider(url, baseNetwork, { staticNetwork: true, batchMaxCount: 1 })
 			for (const [cardAddress, cardItems] of byCard) {
 				const card = new ethers.Contract(cardAddress, GET_REDEEM_STATUS_BATCH_ABI, provider)
 				const hashes = cardItems.map((i) =>
@@ -6753,7 +6764,7 @@ export const quotePointsForUSDC_raw = async (
 		if (unitPriceUSDC6 === 0n) {
 		// 同 RPC 重试一次
 		try {
-			const fallbackProvider = new ethers.JsonRpcProvider(QUOTE_FALLBACK_RPC);
+			const fallbackProvider = new ethers.JsonRpcProvider(QUOTE_FALLBACK_RPC, undefined, JSONRPC_NO_BATCH)
 			const readOnlyFactory = new ethers.Contract(BeamioUserCardFactoryPaymasterV2, BeamioFactoryPaymasterABI as ethers.InterfaceAbi, fallbackProvider);
 			const fallbackPrice = await readOnlyFactory.quoteUnitPointInUSDC6(cardAddress);
 			if (fallbackPrice !== 0n) {
