@@ -3696,6 +3696,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 							topupKind: obj.topupKind ?? 2,
 							beneficiary: payerAddr,
 						})
+						// payee = BUnitAirdrop：语义为卡 owner 向合约侧焚烧/消耗 B-Unit（满足 ActionFacet payee!=0）
 						const bunitOnlyInput: PurchasingCardAccountingInput = {
 							txId: nfcTopupBunitConsumeTxHash as `0x${string}`,
 							originalPaymentHash: tx.hash as `0x${string}`,
@@ -3704,7 +3705,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 							displayJson: bunitDisplayJson,
 							timestamp: 0n,
 							payer: feePayerCardOwner,
-							payee: ethers.ZeroAddress,
+							payee: ethers.getAddress(CONET_BUNIT_AIRDROP_ADDRESS),
 							finalRequestAmountFiat6: 0n,
 							finalRequestAmountUSDC6: bServiceUSDC6Topup,
 							isAAAccount: false,
