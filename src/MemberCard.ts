@@ -48,8 +48,8 @@ const BeamioTaskIndexerAddress = BEAMIO_INDEXER_DIAMOND
 /** BUnitAirdrop consumeFromUser kind：x402 BeamioTransfer 转账手续费，需预先 registerKind(5,"x402Send") */
 const BUNIT_KIND_X402_SEND = 5n
 const DIAMOND = BeamioTaskIndexerAddress
-/** Base 主网 RPC：优先 BASE_RPC_URL 环境变量，否则固定 1rpc.io/base */
-const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://1rpc.io/base'
+/** Base 主网 RPC：优先 BASE_RPC_URL 环境变量，否则固定 https://base-rpc.conet.network */
+const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://base-rpc.conet.network'
 /** 禁用 JSON-RPC batch：部分网关返回的 batch 与请求 id 不对齐时 ethers 会抛 BAD_DATA（missing response for request） */
 const JSONRPC_NO_BATCH = { batchMaxCount: 1 }
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
@@ -319,7 +319,7 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 		// 尚无账户，由 Paymaster 调用 createAccountFor(creator)；仅此路径会创建 AA，且仅创建 index=0 的一个
 		const tx = await SC.createAccountFor(wallet)
 		logger(`DeployingSmartAccount: 创建账户交易已发送，hash=${tx.hash}`)
-		// confirmations: 0 = 仅等待 tx 被打包，不轮询区块确认，避免 1rpc/Lava 的 "block too new" 一致性检查
+		// confirmations: 0 = 仅等待 tx 被打包，不轮询区块确认，避免部分公共 RPC 的 "block too new" 一致性检查
 		const receipt = await tx.wait(0)
 
 		// 验证交易是否成功（ethers v6: status 为 bigint，1n = 成功，0n = revert）
@@ -5572,7 +5572,7 @@ export const getRedeemStatusBatchApi = async (
 		byCard.set(normalized, arr)
 	}
 	try {
-		// 优先使用 CoNET 节点访问 Base RPC；若该节点返回 404（如 /base-rpc 不存在）则回退到 1rpc.io/base
+		// 优先使用 CoNET 分布式节点访问 Base RPC；若返回 404（如 /base-rpc 不存在）则回退到 BASE_RPC_URL（默认 base-rpc.conet.network）
 		let baseRpcUrl = getBaseRpcUrlViaConetNode()
 		if (!baseRpcUrl) {
 			const nodeCount = getGuardianNodesCount()

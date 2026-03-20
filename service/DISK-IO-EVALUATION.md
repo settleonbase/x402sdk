@@ -2,65 +2,75 @@
 
 ## 磁盘布局
 
-| 设备 | 类型 | 容量 | 挂载 | 用途 |
-|------|------|------|------|------|
-| **nvme0n1** | NVMe | 2.9T | / (vg0-root) | op-reth db (2.4T)、系统 |
-| **sda** | HDD | 18.2T | /media/sda | op-reth static/etl-tmp（geth/lighthouse 已停） |
+| 设备 | 类型 | 容量 | 挂载 | 主要用途 |
+|------|------|------|------|----------|
+| **nvme0n1** | NVMe | 2.9T | / (vg0-root) | op-reth db (2.4T)、系统、/home |
+| **sda** | HDD | 18.2T | /media/sda | geth、lighthouse、op-reth-static、快照、临时文件 |
 
-## I/O 采样结果 (5s 平均，2026-03-13 更新，geth/lighthouse 已停)
+## I/O 采样结果 (2026-03-20 更新，geth/lighthouse 运行中)
 
-### NVMe (nvme0n1)
-
-| 指标 | 值 | 评估 |
-|------|-----|------|
-| 读 IOPS | ~2900-7700/s | 高 |
-| 读吞吐 | ~11-31 MB/s | 中 |
-| 写 IOPS | ~3700-57000/s | 波动大（含 checkpoint 突发） |
-| 写吞吐 | ~23-354 MB/s | 波动大 |
-| **%util** | **42-83%** | 健康（突发时升高） |
-| r_await | ~0.09-0.30 ms | 极低 |
-| w_await | ~0.12 ms | 极低 |
-
-### HDD (sda)
+### NVMe (nvme0n1) — op-reth db
 
 | 指标 | 值 | 评估 |
 |------|-----|------|
-| 读 IOPS | 0/s | 空闲 |
-| 写 IOPS | 0/s | 空闲 |
-| **%util** | **0%** | ✅ 空闲 |
-| r_await | - | - |
-| w_await | - | - |
+| 读 IOPS | ~4k–11k/s | 高 |
+| 读吞吐 | ~18–44 MB/s | 中高 |
+| 写 IOPS | ~3k–13k/s | 高，波动 |
+| 写吞吐 | ~26–58 MB/s | 高 |
+| **%util** | **38–65%** | 中等负荷 |
+| r_await | ~0.09 ms | 极低 |
+| w_await | ~0.15 ms | 极低 |
 
-**geth/lighthouse 停止后，HDD 已无负载。**
+### HDD (sda) — geth、lighthouse、op-reth-static
+
+| 指标 | 值 | 评估 |
+|------|-----|------|
+| 读 IOPS | 0–185/s | 波动大（同步时升高） |
+| 读吞吐 | 0–13 MB/s | 视同步阶段而定 |
+| 写 IOPS | 18–69/s | 持续写入 |
+| 写吞吐 | ~7–27 MB/s | 持续 |
+| **%util** | **24–61%** | 中高，峰值可达 60%+ |
+| r_await | ~16 ms | HDD 典型 |
+| w_await | ~11–38 ms | 有排队 |
+
+## 关联文件夹使用总量
+
+| 路径 | 大小 | 磁盘 | 用途 |
+|------|------|------|------|
+| /media/sda/eth/geth/geth | **1.5T** | HDD | geth chaindata (L1 主网) |
+| /media/sda/eth/lighthouse | **225G** | HDD | Lighthouse beacon 链数据 |
+| /home/peter/base/op-reth/db | **2.4T** | NVMe | op-reth Base L2 数据库 |
+| /media/sda/base/op-reth-static | **128G** | HDD | op-reth 静态文件 |
+| /media/sda/baseTemp | **584G** | HDD | 临时/解压工作区 |
+| /media/sda/base-mainnet-pruned-reth-*.tar.zst | **1.2T** | HDD | Base 快照压缩包（可删除） |
+| /media/sda/ethereum-pos-mainnet | **266G** | HDD | 历史/备份数据 |
+| /media/sda/baseBackup | **29G** | HDD | 备份 |
+
+### 汇总
+
+| 磁盘 | 已用 | 可用 | 使用率 | 主要消费者 |
+|------|------|------|--------|------------|
+| / (NVMe) | 2.4T | 327G | 89% | op-reth db |
+| /media/sda (HDD) | 3.8T | 14T | 23% | geth、lighthouse、快照、baseTemp |
 
 ## 进程 I/O 贡献
 
-| 进程 | 读 (kB/s) | 写 (kB/s) | 主要磁盘 |
-|------|-----------|-----------|----------|
-| op-reth | ~31900 | ~41000 | NVMe (db) |
-
-op-reth 是唯一 I/O 消费者，全部落在 NVMe。
-
-## 数据分布
-
-| 路径 | 大小 | 磁盘 |
-|------|------|------|
-| /home/peter/base/op-reth (db) | 2.4T | NVMe |
-| /media/sda/base/op-reth-static | 178G | HDD |
-| /media/sda/base/op-reth-etl-tmp | 配置指向 | HDD |
-| /media/sda/eth/geth | - | HDD（已停） |
-| /media/sda/eth/lighthouse | 245G | HDD（已停） |
+| 进程 | 主要磁盘 | 说明 |
+|------|----------|------|
+| geth | HDD (sda) | 1.5T chaindata，同步时读多写多 |
+| lighthouse | HDD (sda) | 225G beacon 数据，读写 |
+| op-reth | NVMe + HDD | db 在 NVMe，static 在 HDD |
 
 ## 结论与建议
 
-### 当前状态（geth/lighthouse 已停）
+### 当前状态
 
-1. **NVMe**：op-reth db 在 NVMe，利用率 42-83%，延迟极低，表现良好。采样期间有 checkpoint 写突发（~354 MB/s）。
-2. **HDD**：**0% 利用率，完全空闲**。geth/lighthouse 停止后无负载。
-3. **op-reth**：读 ~32 MB/s，写 ~41 MB/s，为主要 I/O 消费者，全部落在 NVMe。
+1. **NVMe**：op-reth db 在 NVMe，利用率 38–65%，延迟极低，表现正常。
+2. **HDD**：geth + lighthouse 在 HDD，利用率 24–61%，同步时更高。r_await/w_await 升高时会拖慢 Engine API，导致 lighthouse 超时。
+3. **空间**：NVMe 剩余 327G，需关注；HDD 剩余 14T，充足。
 
 ### 建议
 
-1. **当前**：HDD 已空闲，无瓶颈。op-reth 独占 NVMe，I/O 表现正常。
-2. **若重启 geth/lighthouse**：HDD 将恢复负载，可能再次饱和（71-94% util）。
-3. **ionice**：可为 op-reth 设置 `ionice -c 1 -n 0`，保证其 NVMe 优先。
+1. **短期**：维持 lighthouse `--execution-timeout-multiplier 12`，应对 geth 在 HDD 上的间歇性延迟。
+2. **中期**：若 snapshot 已正确解压并导入，可删除 `/media/sda/base-mainnet-pruned-reth-*.tar.zst`（约 1.2T），释放 HDD 空间。
+3. **长期**：将 geth/lighthouse 迁至 SSD，可显著降低 Engine API 超时和同步延迟；或增加 NVMe 容量后迁移 op-reth db 外的数据。

@@ -86,8 +86,8 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 	'function issuedNftPriceInCurrency6(uint256) view returns (uint256)',
 	'function owner() view returns (address)',
 ] as const
-/** Base RPC：优先 BASE_RPC_URL 环境变量，否则固定 1rpc.io/base */
-const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://1rpc.io/base'
+/** Base RPC：优先 BASE_RPC_URL 环境变量，否则固定 https://base-rpc.conet.network */
+const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://base-rpc.conet.network'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 /** 从 mintPointsByAdmin(data) 解析 recipient EOA */

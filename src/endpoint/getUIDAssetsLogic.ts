@@ -15,7 +15,7 @@ const DEPRECATED_INFRA_CARDS = new Set([
 	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
 ])
 
-const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://1rpc.io/base'
+const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://base-rpc.conet.network'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'

@@ -30,15 +30,15 @@ record_restart() {
 }
 
 extract_latest_num() {
-  local out
-  out=$(sudo journalctl -u "$SERVICE" --since "${LOOKBACK_SECONDS} seconds ago" --no-pager 2>/dev/null || true)
-
-  python3 - <<'PY2' "$out"
+  # Pipe journal into Python (avoid ARG_MAX / "Argument list too long")
+  sudo journalctl -u "$SERVICE" --since "${LOOKBACK_SECONDS} seconds ago" --no-pager 2>/dev/null \
+    | python3 -c '
 import re, sys
-text = sys.argv[1]
-nums = [int(m.group(1)) for m in re.finditer(r"Received new payload from consensus engine\s+number=(\d+)", text)]
+text = sys.stdin.read()
+nums = [int(m.group(1)) for m in re.finditer(
+    r"Received new payload from consensus engine\s+number=(\d+)", text)]
 print(max(nums) if nums else "")
-PY2
+'
 }
 
 seed_recent() {
