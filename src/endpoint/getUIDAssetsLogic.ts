@@ -6,6 +6,7 @@ import { logger } from '../logger'
 import Colors from 'colors/safe'
 import { getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken } from '../db'
 import { BASE_AA_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
+import { maybeEnqueueNfcCashTreeBeamioTag } from '../db'
 
 /** 已废弃的旧基础设施卡地址，getUIDAssets 不查询、不返回。当前 BEAMIO_USER_CARD_ASSET_ADDRESS (0x74f35741...) 必须不在本列表。 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -186,4 +187,35 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 		usdcBalance,
 		cards: cardsFiltered,
 	}
+}
+
+/** 基础设施卡（CashTrees）当前主 tier 的 ERC1155 tokenId；与列表内展示用的「最高 tokenId」一致 */
+export const pickInfrastructureCashTreeTierTokenId = (
+	cards: FetchUIDAssetsResult['cards'],
+	infraAddress: string = BEAMIO_USER_CARD_ASSET_ADDRESS
+): string | null => {
+	const row = cards.find((c) => c.cardAddress.toLowerCase() === infraAddress.toLowerCase())
+	if (!row?.nfts?.length) return null
+	const withT = row.nfts.filter((n) => Number(n.tokenId) > 0)
+	if (!withT.length) return null
+	return withT.reduce((a, b) => (Number(b.tokenId) > Number(a.tokenId) ? b : a)).tokenId
+}
+
+/**
+ * NFC 余额查询成功后：若已持有基础设施卡 NFT，则确保 AccountRegistry beamioTag（CashTreeDamo_* / 与 db 约定一致）。
+ */
+export const ensureNfcCashTreeBeamioTagAfterFetch = (
+	eoa: string,
+	uid: string,
+	tagIdHex: string | null | undefined,
+	cards: FetchUIDAssetsResult['cards']
+): void => {
+	const tid = pickInfrastructureCashTreeTierTokenId(cards)
+	if (!tid) return
+	maybeEnqueueNfcCashTreeBeamioTag({
+		wallet: eoa,
+		uid,
+		tagIdHex: tagIdHex ?? null,
+		tierTokenId: tid,
+	})
 }

@@ -15,7 +15,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
-import { fetchUIDAssetsForEOA } from './getUIDAssetsLogic'
+import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -831,6 +831,9 @@ const routing = ( router: Router ) => {
 			const merged = {
 				...result,
 				...(nfcExtras ?? {}),
+			}
+			if (nfcSunTagIdHex) {
+				ensureNfcCashTreeBeamioTagAfterFetch(eoa, uidTrim, nfcSunTagIdHex, result.cards)
 			}
 			const resultJson = JSON.stringify(merged, null, 2)
 			logger(Colors.cyan(`[getUIDAssets] 返回客户端 JSON (uid=${uidTrim}):\n${resultJson}`))

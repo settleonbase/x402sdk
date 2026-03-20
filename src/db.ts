@@ -362,6 +362,136 @@ const sanitizeName = (s: string | undefined): string => {
 	return String(s).split(/[\r\n]/)[0].trim().slice(0, 128)
 }
 
+/** 与 Cluster `/addUser` 一致：beamioTag 仅允许 3–20 位字母数字与 _ . */
+const BEAMIO_ACCOUNT_NAME_RE = /^[a-zA-Z0-9_.]{3,20}$/
+
+/**
+ * NFC CashTree 基础设施卡发卡后的 beamioTag：语义为 CashTreeDamo-{NFT#}，链上/接口不允许 `-`，用 `_`。
+ * 过长时缩短为 `CT_` + tokenId 尾部，仍超长则用 `c` + keccak 前 19 位 hex（总长 20）。
+ */
+export const buildCashTreeNfcBeamioAccountName = (tierTokenId: string): string => {
+	const raw = String(tierTokenId || '').replace(/\s/g, '')
+	if (!raw || !/^\d+$/.test(raw)) return ''
+	let candidate = `CashTreeDamo_${raw}`
+	if (candidate.length <= 20 && BEAMIO_ACCOUNT_NAME_RE.test(candidate)) return candidate
+	const tail = raw.length > 14 ? raw.slice(-14) : raw
+	candidate = `CT_${tail}`
+	if (candidate.length <= 20 && BEAMIO_ACCOUNT_NAME_RE.test(candidate)) return candidate
+	const h = ethers.keccak256(ethers.toUtf8Bytes(`nfcCashTree:${raw}`)).slice(2, 21)
+	return (`c${h}`).slice(0, 20)
+}
+
+/** 根据 UID 查 NFC 卡 tag_id（SUN TagID），无则 null */
+export const getNfcTagIdByUid = async (uid: string): Promise<string | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(NFC_CARDS_TABLE)
+		await db.query(NFC_CARDS_ADD_TAG_ID)
+		const u = String(uid || '').trim().toLowerCase()
+		if (!u) return null
+		const { rows } = await db.query<{ tag_id: string | null }>(
+			`SELECT tag_id FROM nfc_cards WHERE LOWER(TRIM(uid)) = $1 LIMIT 1`,
+			[u]
+		)
+		const t = rows[0]?.tag_id
+		if (t == null || String(t).trim() === '') return null
+		return String(t).trim().toUpperCase()
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNfcTagIdByUid] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/**
+ * NFC 持卡 EOA 在 AccountRegistry 上登记/补全 beamioTag（服务端 setAccountByAdmin 队列）。
+ * 若用户已有**其他** beamioTag（与本次期望名不同），不覆盖。
+ */
+export const maybeEnqueueNfcCashTreeBeamioTag = (params: {
+	wallet: string
+	uid: string
+	tagIdHex?: string | null
+	tierTokenId: string
+}): void => {
+	void (async () => {
+		try {
+			const wallet = ethers.getAddress(String(params.wallet || '').trim())
+			const uid = String(params.uid || '').trim()
+			const tierTokenId = String(params.tierTokenId || '').trim()
+			if (!uid || !tierTokenId || tierTokenId === '0') return
+
+			const expectedName = buildCashTreeNfcBeamioAccountName(tierTokenId)
+			if (!expectedName || !BEAMIO_ACCOUNT_NAME_RE.test(expectedName)) {
+				logger(Colors.yellow(`[maybeEnqueueNfcCashTreeBeamioTag] invalid accountName derived from tokenId=${tierTokenId}`))
+				return
+			}
+
+			let tagId = params.tagIdHex != null && String(params.tagIdHex).trim() !== '' ? String(params.tagIdHex).trim().toUpperCase() : null
+			if (!tagId) tagId = await getNfcTagIdByUid(uid)
+
+			const reg = beamio_ContractPool[0]?.constAccountRegistry
+			if (!reg) {
+				logger(Colors.yellow('[maybeEnqueueNfcCashTreeBeamioTag] no constAccountRegistry'))
+				return
+			}
+
+			let exists = false
+			let accName = ''
+			let fnOn = ''
+			let lnOn = ''
+			try {
+				const o = await reg.getAccount(wallet)
+				exists = !!o?.exists
+				accName = String(o?.accountName ?? '').trim()
+				fnOn = sanitizeName(o?.firstName as string | undefined)
+				lnOn = sanitizeName(o?.lastName as string | undefined)
+			} catch {
+				exists = false
+			}
+
+			const uidF = sanitizeName(uid)
+			const tagF = sanitizeName(tagId || '')
+
+			if (exists && accName !== '' && accName !== expectedName) {
+				logger(Colors.gray(`[maybeEnqueueNfcCashTreeBeamioTag] skip: wallet already has tag ${accName} (expected ${expectedName})`))
+				return
+			}
+			if (exists && accName === expectedName && fnOn === uidF && lnOn === tagF) {
+				return
+			}
+
+			const getExistsUserData = await getUserData(expectedName)
+			const fullInput: beamioAccount = {
+				accountName: expectedName,
+				image: '',
+				darkTheme: false,
+				isUSDCFaucet: false,
+				isETHFaucet: false,
+				initialLoading: true,
+				firstName: uidF,
+				lastName: tagF,
+				pgpKeyID: '',
+				pgpKey: '',
+				address: wallet,
+				createdAt: getExistsUserData?.createdAt,
+			}
+
+			addUserPool.push({
+				wallet,
+				account: fullInput,
+				recover: [],
+				followBeamioOfficial: false,
+			})
+			addUserPoolProcess()
+			logger(Colors.cyan(`[maybeEnqueueNfcCashTreeBeamioTag] queued setAccountByAdmin wallet=${wallet.slice(0, 10)}… tag=${expectedName} uidLen=${uidF.length} tagIdLen=${tagF.length}`))
+		} catch (e: any) {
+			logger(Colors.yellow(`[maybeEnqueueNfcCashTreeBeamioTag] error: ${e?.message ?? e}`))
+		}
+	})()
+}
+
 const addUserPoolProcess = async () => {
 	const obj = addUserPool.shift()
 	if (!obj) {

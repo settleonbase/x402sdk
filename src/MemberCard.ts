@@ -31,7 +31,8 @@ import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, BEAMIO_INDEXER_DIAMOND, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_MAINNET_CHAIN_ID } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
-import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getNfcCardPrivateKeyByTagId, getCardByAddress, upsertNftTierMetadata } from './db'
+import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getNfcCardPrivateKeyByTagId, getCardByAddress, upsertNftTierMetadata, maybeEnqueueNfcCashTreeBeamioTag } from './db'
+import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './endpoint/getUIDAssetsLogic'
 import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
@@ -1490,6 +1491,9 @@ export const ContainerRelayPool: {
 	amountUSDC6?: string
 	/** Charge 记账：商户卡地址，用于推导 topAdmin。可选 */
 	merchantCardAddress?: string
+	/** NFC 扣款：扣款成功后补登记 beamioTag */
+	nfcUid?: string
+	nfcPayerEoa?: string
 	res: Response
 }[] = []
 
@@ -3683,6 +3687,21 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
 				)
 				logger(Colors.green(`[executeForAdminPostBaseProcess] android topup accounting done: baseTx=${tx.hash} syncTokenAction=${syncTxHash} cat=${topupCategoryRaw}`))
+				const isInfraCashTreeTopup =
+					obj.cardAddr.toLowerCase() === BEAMIO_USER_CARD_ASSET_ADDRESS.toLowerCase()
+				if (
+					isInfraCashTreeTopup &&
+					topupCategoryRaw === 'newCard' &&
+					obj.uid &&
+					recipientEOA &&
+					tokenIdForRoute > 0n
+				) {
+					maybeEnqueueNfcCashTreeBeamioTag({
+						wallet: recipientEOA,
+						uid: obj.uid.trim(),
+						tierTokenId: tokenIdForRoute.toString(),
+					})
+				}
 				if (nfcTopupBunitConsumeTxHash && bunitChargedOk && bServiceUnits6Topup > 0n) {
 					try {
 						const bunitDisplayJson = JSON.stringify({
@@ -5097,6 +5116,15 @@ export const ContainerRelayProcess = async () => {
       logger(Colors.red('[AAtoEOA/Container] beamioTransferIndexerAccountingProcess unhandled:'), err?.message ?? err)
     })
     logger(Colors.green(`✅ ContainerRelayProcess done: tx=${tx.hash}, indexer queue pushed`))
+    if (obj.nfcUid && obj.nfcPayerEoa && ethers.isAddress(obj.nfcPayerEoa)) {
+      void fetchUIDAssetsForEOA(obj.nfcPayerEoa)
+        .then((r) => {
+          ensureNfcCashTreeBeamioTagAfterFetch(ethers.getAddress(obj.nfcPayerEoa!), obj.nfcUid!, null, r.cards)
+        })
+        .catch((err: any) => {
+          logger(Colors.yellow(`[ContainerRelayProcess] NFC beamioTag ensure fetch skipped: ${err?.message ?? err}`))
+        })
+    }
   } catch (error: any) {
     let msg = error?.shortMessage || error?.message || String(error)
     try {
@@ -7104,6 +7132,8 @@ export const payByNfcUidOpenContainer = async (params: {
 			currencyAmount: ethers.formatUnits(amountBig, 6),
 			forText: `NFC pay uid=${uid.slice(0, 12)}...`,
 			amountUSDC6: amountUsdc6,
+			nfcUid: uid.trim(),
+			nfcPayerEoa: eoa,
 			res,
 		})
 		logger(Colors.green(`[payByNfcUidContainer] pushed to pool uid=${uid.slice(0, 12)}... ccsa=${ccsaPointsWei} usdc=${usdcWei}`))
@@ -7351,6 +7381,8 @@ export const payByNfcUidSignContainer = async (params: {
 			currencyAmount: ethers.formatUnits(BigInt(amountUsdc6), 6),
 			forText: `NFC pay uid=${uid.slice(0, 12)}...`,
 			amountUSDC6: amountUsdc6,
+			nfcUid: uidTrim,
+			nfcPayerEoa: eoa,
 			res,
 		})
 		logger(Colors.green(`[payByNfcUidSignContainer] pushed uid=${uid.slice(0, 12)}... items=${containerPayload.items.length}`))

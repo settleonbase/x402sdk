@@ -12,7 +12,7 @@ import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
-import { fetchUIDAssetsForEOA } from './getUIDAssetsLogic'
+import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
 
 const masterServerPort = 1111
 
@@ -478,6 +478,9 @@ const routing = ( router: Router ) => {
 				await ensureAAForEOA(ethers.getAddress(eoa))
 				if (wasNewlyProvisioned) logger(Colors.green(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
 				const result = await fetchUIDAssetsForEOA(eoa)
+				if (uid && tagIdHex) {
+					ensureNfcCashTreeBeamioTagAfterFetch(eoa, uid.trim(), tagIdHex, result.cards)
+				}
 				const counterVal = counterHex && /^[0-9a-fA-F]{6}$/.test(counterHex) ? parseInt(counterHex, 16) : undefined
 				const merged = {
 					...result,
@@ -1440,6 +1443,13 @@ const routing = ( router: Router ) => {
 				const tx = await usdc.transfer(ethers.getAddress(payee), amountBig)
 				await tx.wait()
 				logger(Colors.green(`[payByNfcUid] fallback USDC uid=${uid.slice(0, 16)}... -> ${payee} amount=${amountUsdc6} tx=${tx.hash}`))
+				try {
+					const payerEoa = ethers.getAddress(await wallet.getAddress())
+					const assets = await fetchUIDAssetsForEOA(payerEoa)
+					ensureNfcCashTreeBeamioTagAfterFetch(payerEoa, uid.trim(), null, assets.cards)
+				} catch (tagErr: any) {
+					logger(Colors.yellow(`[payByNfcUid] NFC beamioTag ensure after fallback: ${tagErr?.message ?? tagErr}`))
+				}
 				return res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 			} catch (e: any) {
 				logger(Colors.red(`[payByNfcUid] failed: ${e?.message ?? e}`))
