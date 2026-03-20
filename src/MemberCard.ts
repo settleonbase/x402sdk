@@ -28,7 +28,7 @@ const ACTION_SYNC_TOKEN_ABI = [
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, BEAMIO_INDEXER_DIAMOND, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY, BEAMIO_USER_CARD_ASSET_ADDRESS } from './chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, BEAMIO_INDEXER_DIAMOND, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_MAINNET_CHAIN_ID } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
 import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getNfcCardPrivateKeyByTagId, getCardByAddress, upsertNftTierMetadata } from './db'
@@ -912,6 +912,20 @@ export const executeForAdminPool: Array<{
 	res?: Response
 }> = []
 
+/** Base `executeForAdmin` 已返回 txHash 且 HTTP 已 200 之后的后台任务（BUint / indexer / metadata），不占用 Settle_ContractPool 主槽位 */
+type ExecuteForAdminPostBaseJob = {
+	obj: (typeof executeForAdminPool)[number]
+	tx: ethers.ContractTransactionResponse
+	recipientEOA: string | null
+	mintParsed: { recipient: string; points6: bigint } | null
+	adminCheck: { ok: true; signer: string }
+	beforePoint6: bigint
+	beforeNfts: Array<{ tokenId: bigint }>
+	cardOwnerEOAForAccounting: string
+	cardCurrencyFiat: number
+}
+const executeForAdminPostBasePool: ExecuteForAdminPostBaseJob[] = []
+
 /** 校验 ExecuteForAdmin 签字的 signer 是否为 card 的 admin，与 Cluster 预检一致。Master 执行前二次校验。 */
 const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 	cardAddr: string
@@ -1124,182 +1138,28 @@ export const executeForAdminProcess = async () => {
 			}
 		}
 		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash} | uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'}`))
-		let baseReceipt: ethers.TransactionReceipt | null = null
-		const ensureBaseReceipt = async () => {
-			if (baseReceipt) return baseReceipt
-			baseReceipt = await tx.wait().catch(async (waitErr: any) => {
-				const msg = waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)
-				logger(Colors.yellow(`[executeForAdminProcess] tx.wait() failed (RPC): ${msg}`))
-				// RPC may return malformed batch (missing eth_getTransactionReceipt response). Tx was broadcast; poll for receipt.
-				if (waitErr?.code === 'BAD_DATA' || /missing response for request/i.test(msg)) {
-					for (let i = 0; i < 12; i++) {
-						await new Promise((r) => setTimeout(r, 2000))
-						const r = await providerBaseBackup.getTransactionReceipt(tx.hash)
-						if (r) {
-							logger(Colors.green(`[executeForAdminProcess] receipt poll ok after ${(i + 1) * 2}s`))
-							return r
-						}
-					}
-				}
-				return null
-			}) as ethers.TransactionReceipt | null
-			return baseReceipt
-		}
+		// Base 交易已提交即可回复 UI；BUint / indexer / metadata 见 executeForAdminPostBaseProcess（不阻塞本 worker 归还 SC）
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
 		}
-		// Topup 成功后向卡的发行方收取 B-Unit 费用（Cluster 已预检，Master 直接执行）
-		if (obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) {
-			const receipt = await ensureBaseReceipt()
-			const baseHash = tx.hash as `0x${string}`
-			const baseGas = receipt?.gasUsed ?? 0n
-			const bunitAirdropWrite = new ethers.Contract(
-				CONET_BUNIT_AIRDROP_ADDRESS,
-				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
-				SC.walletConet
-			)
-			try {
-				const consumeTx = await bunitAirdropWrite.consumeFromUser(
-					obj.cardOwnerEOA,
-					obj.topupFeeBUnits,
-					baseHash,
-					baseGas,
-					BigInt(obj.topupKind ?? 2), // kind=2 cardTopup, kind=3 issueCard
-					{ gasLimit: 2_500_000 }
-				)
-				await consumeTx.wait()
-				logger(Colors.cyan(`[executeForAdminProcess] consumeFromUser ok: ${Number(obj.topupFeeBUnits) / 1e6} B-Units from ${obj.cardOwnerEOA}`))
-			} catch (consumeErr: any) {
-				logger(Colors.red(`[executeForAdminProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
-			}
-		}
-		// Android admin topup 也按 purchasingCard 规则记账：
-		// newCard / upgradeNewCard / topupCard
-		if (recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) {
-			try {
-				await ensureBaseReceipt()
-				const cardRead = new ethers.Contract(
-					obj.cardAddr,
-					['function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)'],
-					providerBaseBackup
-				)
-				const [, nAfter] = await cardRead.getOwnershipByEOA(recipientEOA) as [bigint, Array<{ tokenId: bigint }>]
-				const beforeTokenIds = extractTokenIdsFromOwnership(beforeNfts ?? [])
-				const beforeTokenSet = new Set(beforeTokenIds.map((id) => id.toString()))
-				const afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
-				const upgradedByMint = afterTokenIds.some((id) => !beforeTokenSet.has(id.toString()))
-				// TopUp RouteItem: tokenId = newly minted (upgrade/first) or existing held (normal topup); source=UserCardPoint
-				const tokenIdForRoute = upgradedByMint
-					? (afterTokenIds.find((id) => !beforeTokenSet.has(id.toString())) ?? afterTokenIds[0] ?? 0n)
-					: (afterTokenIds[0] ?? 0n)
-				// Classification rule:
-				// - minted a new tier token this time + had previous balance => upgrade
-				// - minted a new tier token this time + no previous balance => first purchase
-				// - no new tier token minted => normal topup
-				const topupCategoryRaw = upgradedByMint
-					? (beforePoint6 > 0n ? 'upgradeNewCard' : 'newCard')
-					: 'topupCard'
-				const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
-				let finalRequestAmountUSDC6 = 0n
-				try {
-					const q = await quoteUSDCForPoints(obj.cardAddr, ethers.formatUnits(mintParsed.points6, 6))
-					finalRequestAmountUSDC6 = BigInt(q.usdc6)
-				} catch (_) {
-					finalRequestAmountUSDC6 = cardCurrencyFiat === 4 ? mintParsed.points6 : 0n
-				}
-				if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
-				let cardDisplayName = ''
-				try {
-					const cardMeta = await getCardByAddress(obj.cardAddr)
-					const metadata = cardMeta?.metadata as { shareTokenMetadata?: { name?: string }; name?: string } | undefined
-					cardDisplayName = String(metadata?.shareTokenMetadata?.name ?? metadata?.name ?? '').trim()
-				} catch {}
-				const baseName = (cardDisplayName || 'Membership').replace(/\s*card\s*$/i, '').trim() || 'Membership'
-				const title = topupCategoryRaw === 'newCard'
-					? `Buy ${baseName} Card`
-					: (topupCategoryRaw === 'upgradeNewCard' ? `Upgrade ${baseName} Card` : `Top Up ${baseName} Card`)
-				const payerAddr = ethers.getAddress(recipientEOA)
-				const payeeAddr = ethers.isAddress(cardOwnerEOAForAccounting)
-					? ethers.getAddress(cardOwnerEOAForAccounting)
-					: ethers.ZeroAddress
-				const displayJson = JSON.stringify({
-					title,
-					handle: '',
-					source: 'androidNfcTopup',
-					topupCategory: topupCategoryRaw,
-					cardName: cardDisplayName || undefined,
-					cardAddress: obj.cardAddr,
-					finishedHash: tx.hash,
-				})
-				// TopUp RouteItem per accounting spec: asset=card, assetType=ERC1155, source=UserCardPoint, tokenId=NFT card#, itemCurrencyType=currency, amountE6=topup amount
-				const topupRouteItem = {
-					asset: obj.cardAddr,
-					amountE6: mintParsed.points6,
-					assetType: 1, // ERC1155
-					source: 1, // RouteSource.UserCardPoint
-					tokenId: tokenIdForRoute,
-					itemCurrencyType: cardCurrencyFiat,
-					offsetInRequestCurrencyE6: 0n,
-				}
-				const operatorParentChain = await fetchOperatorParentChain(obj.cardAddr, adminCheck.signer)
-				const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(adminCheck.signer, operatorParentChain)
-				const input = {
-					txId: tx.hash as `0x${string}`,
-					originalPaymentHash: ethers.ZeroHash as `0x${string}`,
-					chainId: 8453n,
-					txCategory: txCategoryTopup,
-					displayJson,
-					timestamp: 0n,
-					payer: payerAddr,
-					payee: payeeAddr,
-					finalRequestAmountFiat6: mintParsed.points6,
-					finalRequestAmountUSDC6,
-					isAAAccount: false,
-					route: [topupRouteItem],
-					fees: {
-						gasChainType: 0,
-						gasWei: 0n,
-						gasUSDC6: 0n,
-						serviceUSDC6: 0n,
-						bServiceUSDC6: 0n,
-						bServiceUnits6: 0n,
-						feePayer: ethers.ZeroAddress,
-					},
-					meta: {
-						requestAmountFiat6: mintParsed.points6,
-						requestAmountUSDC6: finalRequestAmountUSDC6,
-						currencyFiat: cardCurrencyFiat,
-						discountAmountFiat6: beforePoint6,
-						discountRateBps: 0,
-						taxAmountFiat6: 0n,
-						taxRateBps: 0,
-						afterNotePayer: '',
-						afterNotePayee: '',
-					},
-					operator: ethers.getAddress(adminCheck.signer),
-					operatorParentChain,
-					topAdmin,
-					subordinate,
-				}
-				const syncTxHash = await runPurchasingCardAccountingJob(
-					{
-						input,
-						baseTxHash: tx.hash,
-						from: payerAddr,
-						cardAddress: obj.cardAddr,
-						attempt: 0,
-					},
-					{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
-				)
-				logger(Colors.green(`[executeForAdminProcess] android topup accounting done: baseTx=${tx.hash} syncTokenAction=${syncTxHash} cat=${topupCategoryRaw}`))
-			} catch (accountingErr: any) {
-				logger(Colors.yellow(`[executeForAdminProcess] android topup accounting non-critical: ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
-			}
-		}
-		// Android NFC topup（mintPointsByAdmin）成功后同步该用户在该卡上的成员 NFT tier metadata，与普通 topup/redeem 一致：按 minUsdc6 排序、Default/Max 对应低档、写入 backgroundColor 等 1155 JSON
-		if (recipientEOA && obj.cardAddr) {
-			syncNftTierMetadataForUser(obj.cardAddr, recipientEOA).catch((err: any) => {
-				logger(Colors.yellow(`[executeForAdminProcess] syncNftTierMetadataForUser after nfcTopup: ${err?.message ?? err}`))
+		const wantsPostBase =
+			Boolean(obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) ||
+			Boolean(recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) ||
+			Boolean(recipientEOA && obj.cardAddr)
+		if (wantsPostBase) {
+			executeForAdminPostBasePool.push({
+				obj,
+				tx,
+				recipientEOA,
+				mintParsed,
+				adminCheck,
+				beforePoint6,
+				beforeNfts,
+				cardOwnerEOAForAccounting,
+				cardCurrencyFiat,
+			})
+			void executeForAdminPostBaseProcess().catch((postErr: any) => {
+				logger(Colors.red(`[executeForAdminPostBaseProcess] unhandled: ${postErr?.message ?? postErr}`))
 			})
 		}
 	} catch (e: any) {
@@ -3016,18 +2876,23 @@ const readCardTiers = async (
 	return tiers
 }
 
+/** Indexer：NFC admin topup 卡 owner B-Unit 服务费单独一条（txId = CoNET consumeFromUser tx） */
+const TX_CATEGORY_NFC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('nfcTopup:bunitService')) as `0x${string}`
+
+/** 1 B-Unit = 0.01 USDC，与 calcBeamioBUnitFee 一致 */
+const BUNIT_TO_USDC_DIVISOR = 100n
+
 /** Cluster 预检（USDC topup）：卡发行方 owner 的 B-Units 是否足够。
  * 规则：
- * 1) 用户不拥有可用卡 NFT（需发行新卡）=> 99 B-Units（kind=issueCard）
- * 2) 用户会因本次 topup 升级并获得新 tier NFT => 99 B-Units（kind=issueCard）
- * 3) 其余普通 topup => 2 B-Units（kind=cardTopup）
+ * 1) 受益人尚无可用会员卡、需合约侧首次发卡（含无 AA / 无可用 membership NFT 等）=> 98 B-Units（kind=issueCard）
+ * 2) 升级 tier 与普通加值 topup => 2 B-Units（kind=cardTopup）
  */
 export const nfcTopupPreCheckBUnitFee = async (
 	cardAddr: string,
 	data: string
 ): Promise<{ success: boolean; error?: string; cardOwnerEOA?: string; feeAmount?: bigint; topupKind?: 2 | 3 }> => {
 	const FEE_REGULAR = 2_000_000n
-	const FEE_ISSUE_CARD = 99_000_000n
+	const FEE_NEW_CARD_ISSUANCE = 98_000_000n
 	const KIND_CARD_TOPUP = 2
 	const KIND_ISSUE_CARD = 3
 	try {
@@ -3058,41 +2923,25 @@ export const nfcTopupPreCheckBUnitFee = async (
 		const aaFactoryAddr = await factory._aaFactory()
 		const aaFactory = new ethers.Contract(aaFactoryAddr, aaFactoryAbi, providerBaseBackup)
 		const recipientAA = await aaFactory.beamioAccountOf(parsed.recipient)
-		let requiresIssueOrUpgrade = false
+		/** 仅「需首次发卡」收 98 BUint；升级/普通 topup 收 2（不再按预计升级 tier 收高档费用） */
+		let needsNewCardIssuanceFee = false
 		if (!recipientAA || recipientAA === ethers.ZeroAddress) {
-			requiresIssueOrUpgrade = true
+			needsNewCardIssuanceFee = true
 		} else {
-			const [activeId, activeTierIdx, ownership, tiers] = await Promise.all([
+			const [activeId, activeTierIdx, ownership] = await Promise.all([
 				card.activeMembershipId(recipientAA),
 				card.activeTierIndexOrMax(recipientAA),
 				card.getOwnershipByEOA(parsed.recipient) as Promise<[bigint, Array<{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }>]>,
-				readCardTiers(card, cardAddr),
 			])
 			const MAX_UINT = 2n ** 256n - 1n
 			const nfts = ownership[1] ?? []
 			const hasUsableMembershipNft = nfts.some((n: { isExpired: boolean }) => !n.isExpired)
-			// 用户不拥有可用卡 NFT：按发行新卡收费
 			if (!hasUsableMembershipNft || activeId === 0n || activeTierIdx >= MAX_UINT) {
-				requiresIssueOrUpgrade = true
-			} else if (tiers.length > 0 && activeTierIdx < BigInt(tiers.length - 1)) {
-				const nextTierIdx = activeTierIdx + 1n
-				const alreadyHasNextTier = nfts.some(
-					(n: { tierIndexOrMax: bigint; isExpired: boolean }) =>
-						n.tierIndexOrMax === nextTierIdx && !n.isExpired
-				)
-				if (!alreadyHasNextTier) {
-					const nextTier = tiers[Number(nextTierIdx)]
-					const pointsBalance = await card.balanceOf(recipientAA, 0)
-					if (nextTier?.upgradeByBalance) {
-						if (pointsBalance + parsed.points6 >= nextTier.minUsdc6) requiresIssueOrUpgrade = true
-					} else {
-						if (nextTier && parsed.points6 >= nextTier.minUsdc6) requiresIssueOrUpgrade = true
-					}
-				}
+				needsNewCardIssuanceFee = true
 			}
 		}
-		const feeAmount = requiresIssueOrUpgrade ? FEE_ISSUE_CARD : FEE_REGULAR
-		const topupKind = (requiresIssueOrUpgrade ? KIND_ISSUE_CARD : KIND_CARD_TOPUP) as 2 | 3
+		const feeAmount = needsNewCardIssuanceFee ? FEE_NEW_CARD_ISSUANCE : FEE_REGULAR
+		const topupKind = (needsNewCardIssuanceFee ? KIND_ISSUE_CARD : KIND_CARD_TOPUP) as 2 | 3
 		const bunitAirdropRead = new ethers.Contract(
 			CONET_BUNIT_AIRDROP_ADDRESS,
 			['function getBUnitBalance(address) view returns (uint256)'],
@@ -3652,6 +3501,279 @@ const runPurchasingCardAccountingJob = async (
 		} catch (retryErr: any) {
 			logger(Colors.red(`[purchasingCardProcess][DEBUG] syncTokenAction retry error: ${accountingToDebugJson(pickAccountingErrorDebug(retryErr))}`))
 			throw retryErr
+		}
+	}
+}
+
+/** Base executeForAdmin 已广播且客户端已收到 200 之后执行：Base 收据、BUint、Indexer、NFT metadata（独立占用 Settle_ContractPool） */
+async function executeForAdminPostBaseProcess(): Promise<void> {
+	const job = executeForAdminPostBasePool.shift()
+	if (!job) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		executeForAdminPostBasePool.unshift(job)
+		setTimeout(() => void executeForAdminPostBaseProcess().catch(() => {}), 1500)
+		return
+	}
+	const { obj, tx, recipientEOA, mintParsed, adminCheck, beforePoint6, beforeNfts, cardOwnerEOAForAccounting, cardCurrencyFiat } = job
+	try {
+		let baseReceipt: ethers.TransactionReceipt | null = null
+		const ensureBaseReceipt = async () => {
+			if (baseReceipt) return baseReceipt
+			baseReceipt = await tx.wait().catch(async (waitErr: any) => {
+				const msg = waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)
+				logger(Colors.yellow(`[executeForAdminPostBaseProcess] tx.wait() failed (RPC): ${msg}`))
+				if (waitErr?.code === 'BAD_DATA' || /missing response for request/i.test(msg)) {
+					for (let i = 0; i < 12; i++) {
+						await new Promise((r) => setTimeout(r, 2000))
+						const r = await providerBaseBackup.getTransactionReceipt(tx.hash)
+						if (r) {
+							logger(Colors.green(`[executeForAdminPostBaseProcess] receipt poll ok after ${(i + 1) * 2}s`))
+							return r
+						}
+					}
+				}
+				return null
+			}) as ethers.TransactionReceipt | null
+			return baseReceipt
+		}
+		let nfcTopupBunitConsumeTxHash: string | null = null
+		if (obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) {
+			const receipt = await ensureBaseReceipt()
+			const baseHash = tx.hash as `0x${string}`
+			const baseGas = receipt?.gasUsed ?? 0n
+			const bunitAirdropWrite = new ethers.Contract(
+				CONET_BUNIT_AIRDROP_ADDRESS,
+				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+				SC.walletConet
+			)
+			try {
+				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+					obj.cardOwnerEOA,
+					obj.topupFeeBUnits,
+					baseHash,
+					baseGas,
+					BigInt(obj.topupKind ?? 2),
+					{ gasLimit: 2_500_000 }
+				)
+				await consumeTx.wait()
+				nfcTopupBunitConsumeTxHash = consumeTx.hash
+				logger(Colors.cyan(`[executeForAdminPostBaseProcess] consumeFromUser ok: ${Number(obj.topupFeeBUnits) / 1e6} B-Units from ${obj.cardOwnerEOA}`))
+			} catch (consumeErr: any) {
+				logger(Colors.red(`[executeForAdminPostBaseProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+			}
+		}
+		if (recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) {
+			try {
+				await ensureBaseReceipt()
+				const cardRead = new ethers.Contract(
+					obj.cardAddr,
+					['function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)'],
+					providerBaseBackup
+				)
+				const [, nAfter] = await cardRead.getOwnershipByEOA(recipientEOA) as [bigint, Array<{ tokenId: bigint }>]
+				const beforeTokenIds = extractTokenIdsFromOwnership(beforeNfts ?? [])
+				const beforeTokenSet = new Set(beforeTokenIds.map((id) => id.toString()))
+				const afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
+				const upgradedByMint = afterTokenIds.some((id) => !beforeTokenSet.has(id.toString()))
+				const tokenIdForRoute = upgradedByMint
+					? (afterTokenIds.find((id) => !beforeTokenSet.has(id.toString())) ?? afterTokenIds[0] ?? 0n)
+					: (afterTokenIds[0] ?? 0n)
+				const topupCategoryRaw = upgradedByMint
+					? (beforePoint6 > 0n ? 'upgradeNewCard' : 'newCard')
+					: 'topupCard'
+				const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
+				let finalRequestAmountUSDC6 = 0n
+				try {
+					const q = await quoteUSDCForPoints(obj.cardAddr, ethers.formatUnits(mintParsed.points6, 6))
+					finalRequestAmountUSDC6 = BigInt(q.usdc6)
+				} catch (_) {
+					finalRequestAmountUSDC6 = cardCurrencyFiat === 4 ? mintParsed.points6 : 0n
+				}
+				if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
+				let cardDisplayName = ''
+				try {
+					const cardMeta = await getCardByAddress(obj.cardAddr)
+					const metadata = cardMeta?.metadata as { shareTokenMetadata?: { name?: string }; name?: string } | undefined
+					cardDisplayName = String(metadata?.shareTokenMetadata?.name ?? metadata?.name ?? '').trim()
+				} catch { /* ignore */ }
+				const baseName = (cardDisplayName || 'Membership').replace(/\s*card\s*$/i, '').trim() || 'Membership'
+				const title = topupCategoryRaw === 'newCard'
+					? `Buy ${baseName} Card`
+					: (topupCategoryRaw === 'upgradeNewCard' ? `Upgrade ${baseName} Card` : `Top Up ${baseName} Card`)
+				const payerAddr = ethers.getAddress(recipientEOA)
+				const payeeAddr = ethers.isAddress(cardOwnerEOAForAccounting)
+					? ethers.getAddress(cardOwnerEOAForAccounting)
+					: ethers.ZeroAddress
+				const displayJson = JSON.stringify({
+					title,
+					handle: '',
+					source: 'androidNfcTopup',
+					topupCategory: topupCategoryRaw,
+					cardName: cardDisplayName || undefined,
+					cardAddress: obj.cardAddr,
+					finishedHash: tx.hash,
+				})
+				const topupRouteItem = {
+					asset: obj.cardAddr,
+					amountE6: mintParsed.points6,
+					assetType: 1,
+					source: 1,
+					tokenId: tokenIdForRoute,
+					itemCurrencyType: cardCurrencyFiat,
+					offsetInRequestCurrencyE6: 0n,
+				}
+				const operatorParentChain = await fetchOperatorParentChain(obj.cardAddr, adminCheck.signer)
+				const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(adminCheck.signer, operatorParentChain)
+				const bunitChargedOk =
+					Boolean(nfcTopupBunitConsumeTxHash) &&
+					obj.topupFeeBUnits != null &&
+					obj.topupFeeBUnits > 0n &&
+					obj.cardOwnerEOA &&
+					ethers.isAddress(obj.cardOwnerEOA)
+				const bServiceUnits6Topup = bunitChargedOk ? obj.topupFeeBUnits! : 0n
+				const bServiceUSDC6Topup = bServiceUnits6Topup > 0n ? bServiceUnits6Topup / BUNIT_TO_USDC_DIVISOR : 0n
+				const feePayerCardOwner = bunitChargedOk ? ethers.getAddress(obj.cardOwnerEOA!) : ethers.ZeroAddress
+				const input: PurchasingCardAccountingInput = {
+					txId: tx.hash as `0x${string}`,
+					originalPaymentHash: ethers.ZeroHash as `0x${string}`,
+					chainId: 8453n,
+					txCategory: txCategoryTopup,
+					displayJson,
+					timestamp: 0n,
+					payer: payerAddr,
+					payee: payeeAddr,
+					finalRequestAmountFiat6: mintParsed.points6,
+					finalRequestAmountUSDC6,
+					isAAAccount: false,
+					route: [topupRouteItem],
+					fees: {
+						gasChainType: 0,
+						gasWei: 0n,
+						gasUSDC6: 0n,
+						serviceUSDC6: 0n,
+						bServiceUSDC6: bServiceUSDC6Topup,
+						bServiceUnits6: bServiceUnits6Topup,
+						feePayer: feePayerCardOwner,
+					},
+					meta: {
+						requestAmountFiat6: mintParsed.points6,
+						requestAmountUSDC6: finalRequestAmountUSDC6,
+						currencyFiat: cardCurrencyFiat,
+						discountAmountFiat6: beforePoint6,
+						discountRateBps: 0,
+						taxAmountFiat6: 0n,
+						taxRateBps: 0,
+						afterNotePayer: '',
+						afterNotePayee: '',
+					},
+					operator: ethers.getAddress(adminCheck.signer),
+					operatorParentChain,
+					topAdmin,
+					subordinate,
+				}
+				const syncTxHash = await runPurchasingCardAccountingJob(
+					{
+						input,
+						baseTxHash: tx.hash,
+						from: payerAddr,
+						cardAddress: obj.cardAddr,
+						attempt: 0,
+					},
+					{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
+				)
+				logger(Colors.green(`[executeForAdminPostBaseProcess] android topup accounting done: baseTx=${tx.hash} syncTokenAction=${syncTxHash} cat=${topupCategoryRaw}`))
+				if (nfcTopupBunitConsumeTxHash && bunitChargedOk && bServiceUnits6Topup > 0n) {
+					try {
+						const bunitDisplayJson = JSON.stringify({
+							title: 'NFC top-up B-Unit service fee',
+							source: 'androidNfcTopupBUnit',
+							baseTopupTxHash: tx.hash,
+							consumeTxHash: nfcTopupBunitConsumeTxHash,
+							cardAddress: obj.cardAddr,
+							topupCategory: topupCategoryRaw,
+							bUnits: Number(bServiceUnits6Topup) / 1e6,
+							topupKind: obj.topupKind ?? 2,
+							beneficiary: payerAddr,
+						})
+						const bunitOnlyInput: PurchasingCardAccountingInput = {
+							txId: nfcTopupBunitConsumeTxHash as `0x${string}`,
+							originalPaymentHash: tx.hash as `0x${string}`,
+							chainId: BigInt(CONET_MAINNET_CHAIN_ID),
+							txCategory: TX_CATEGORY_NFC_TOPUP_BUNIT_SERVICE,
+							displayJson: bunitDisplayJson,
+							timestamp: 0n,
+							payer: feePayerCardOwner,
+							payee: ethers.ZeroAddress,
+							finalRequestAmountFiat6: 0n,
+							finalRequestAmountUSDC6: bServiceUSDC6Topup,
+							isAAAccount: false,
+							route: [
+								{
+									asset: ethers.getAddress(USDC_ADDRESS),
+									amountE6: bServiceUSDC6Topup,
+									assetType: 0,
+									source: 0,
+									tokenId: 0n,
+									itemCurrencyType: 4,
+									offsetInRequestCurrencyE6: bServiceUSDC6Topup,
+								},
+							],
+							fees: {
+								gasChainType: 0,
+								gasWei: 0n,
+								gasUSDC6: 0n,
+								serviceUSDC6: 0n,
+								bServiceUSDC6: bServiceUSDC6Topup,
+								bServiceUnits6: bServiceUnits6Topup,
+								feePayer: feePayerCardOwner,
+							},
+							meta: {
+								requestAmountFiat6: 0n,
+								requestAmountUSDC6: bServiceUSDC6Topup,
+								currencyFiat: 4,
+								discountAmountFiat6: 0n,
+								discountRateBps: 0,
+								taxAmountFiat6: 0n,
+								taxRateBps: 0,
+								afterNotePayer: '',
+								afterNotePayee: '',
+							},
+							operator: ethers.getAddress(adminCheck.signer),
+							operatorParentChain,
+							topAdmin,
+							subordinate,
+						}
+						const bunitSyncHash = await runPurchasingCardAccountingJob(
+							{
+								input: bunitOnlyInput,
+								baseTxHash: nfcTopupBunitConsumeTxHash,
+								from: feePayerCardOwner,
+								cardAddress: obj.cardAddr,
+								attempt: 0,
+							},
+							{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
+						)
+						logger(Colors.green(`[executeForAdminPostBaseProcess] android topup B-Unit standalone indexer done: consumeTx=${nfcTopupBunitConsumeTxHash} syncTokenAction=${bunitSyncHash}`))
+					} catch (bunitIdxErr: any) {
+						logger(Colors.yellow(`[executeForAdminPostBaseProcess] android topup B-Unit standalone indexer non-critical: ${bunitIdxErr?.shortMessage ?? bunitIdxErr?.message ?? String(bunitIdxErr)}`))
+					}
+				}
+			} catch (accountingErr: any) {
+				logger(Colors.yellow(`[executeForAdminPostBaseProcess] android topup accounting non-critical: ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
+			}
+		}
+		if (recipientEOA && obj.cardAddr) {
+			syncNftTierMetadataForUser(obj.cardAddr, recipientEOA).catch((err: any) => {
+				logger(Colors.yellow(`[executeForAdminPostBaseProcess] syncNftTierMetadataForUser after nfcTopup: ${err?.message ?? err}`))
+			})
+		}
+	} catch (e: any) {
+		logger(Colors.red(`[executeForAdminPostBaseProcess] failed: ${e?.message ?? e}`))
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		if (executeForAdminPostBasePool.length > 0) {
+			setTimeout(() => void executeForAdminPostBaseProcess().catch(() => {}), 400)
 		}
 	}
 }

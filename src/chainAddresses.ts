@@ -22,6 +22,9 @@ export const BASE_MAINNET_FACTORIES = {
   BeamioCardCCSA_ADDRESS: BASE_CCSA_CARD_ADDRESS,
 } as const
 
+/** CoNET 主网 chainId（BUnitAirdrop / consumeFromUser / 独立 BUint  indexer 记账） */
+export const CONET_MAINNET_CHAIN_ID = 224400
+
 export const CONTRACT_ADDRESSES = {
   base: {
     chainId: BASE_MAINNET_CHAIN_ID,
@@ -32,7 +35,7 @@ export const CONTRACT_ADDRESSES = {
     usdc: USDC_BASE,
   },
   conet: {
-    chainId: 224400,
+    chainId: CONET_MAINNET_CHAIN_ID,
     bUnitAirdrop: CONET_BUNIT_AIRDROP_ADDRESS,
     beamioIndexerDiamond: BEAMIO_INDEXER_DIAMOND,
   },
