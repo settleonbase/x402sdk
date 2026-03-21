@@ -1941,6 +1941,14 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				payee: transactionInput.payee,
 				topAdmin: transactionInput.topAdmin,
 				subordinate: transactionInput.subordinate,
+				finalRequestAmountFiat6: String(transactionInput.finalRequestAmountFiat6),
+				finalRequestAmountUSDC6: String(transactionInput.finalRequestAmountUSDC6),
+				meta: {
+					requestAmountFiat6: String(transactionInput.meta.requestAmountFiat6),
+					requestAmountUSDC6: String(transactionInput.meta.requestAmountUSDC6),
+					currencyFiat: transactionInput.meta.currencyFiat,
+				},
+				routeLen: transactionInput.route?.length ?? 0,
 				route: transactionInput.route?.map((r: { asset: string; amountE6: bigint; tokenId: bigint }) => ({
 					asset: r.asset,
 					amountE6: String(r.amountE6),
@@ -5283,10 +5291,26 @@ export const ContainerRelayProcess = async () => {
       }
     }
 
-    const subtotalFiatE6 = await containerRelayFiatStringToE6(obj.nfcSubtotalCurrencyAmount)
-    const tipFiatE6 = await containerRelayFiatStringToE6(obj.nfcTipCurrencyAmount)
-    const hasNfcBreakdown =
-      !!obj.nfcUid && obj.nfcSubtotalCurrencyAmount != null && String(obj.nfcSubtotalCurrencyAmount).trim() !== ''
+    const normNfcAmountStr = (v: unknown): string => {
+      if (v == null) return ''
+      if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+      return String(v).trim()
+    }
+    /** 与 payByNfcUidSignContainer 一致：优先 nfcSubtotalCurrencyAmount，否则在非 USDC 账单下回退 pool.currencyAmount（防 Cluster/Master 丢字段或旧客户端只传其一） */
+    const effectiveNfcSubtotalStr =
+      normNfcAmountStr(obj.nfcSubtotalCurrencyAmount) ||
+      (reqCurUpper !== 'USDC' ? normNfcAmountStr(obj.currencyAmount) : '')
+    const effectiveNfcTipStr = normNfcAmountStr(obj.nfcTipCurrencyAmount)
+
+    logger(
+      Colors.gray(
+        `[ContainerRelayProcess] NFC ledger inputs nfcUid=${obj.nfcUid ? `${String(obj.nfcUid).slice(0, 12)}...` : 'none'} nfcSubtotalCurrencyAmount=${obj.nfcSubtotalCurrencyAmount ?? 'n/a'} pool.currencyAmount=${obj.currencyAmount ?? 'n/a'} effectiveSubtotal="${effectiveNfcSubtotalStr}" effectiveTip="${effectiveNfcTipStr}" reqCur=${reqCurUpper}`
+      )
+    )
+
+    const subtotalFiatE6 = await containerRelayFiatStringToE6(effectiveNfcSubtotalStr || undefined)
+    const tipFiatE6 = await containerRelayFiatStringToE6(effectiveNfcTipStr || undefined)
+    const hasNfcBreakdown = !!obj.nfcUid && effectiveNfcSubtotalStr !== ''
 
     let ledgerFinalFiat6: string | undefined
     let ledgerFinalUsdc6: string | undefined
@@ -5307,7 +5331,7 @@ export const ContainerRelayProcess = async () => {
       ledgerFinalFiat6 = finalMainFiat6.toString()
       ledgerFinalUsdc6 = usdcAmountRaw.toString()
       indexerCurrency = reqCurUpper as ICurrency
-      indexerCurrencyAmount = String(obj.nfcSubtotalCurrencyAmount).trim()
+      indexerCurrencyAmount = effectiveNfcSubtotalStr
     }
 
     const TX_TIP_CAT = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP'))
@@ -5365,7 +5389,7 @@ export const ContainerRelayProcess = async () => {
           finishedHash: tx.hash,
           displayJson: JSON.stringify(tipDisplay),
           currency: indexerCurrency,
-          currencyAmount: obj.nfcTipCurrencyAmount != null && String(obj.nfcTipCurrencyAmount).trim() !== '' ? String(obj.nfcTipCurrencyAmount).trim() : String(Number(tipFiatE6) / 1e6),
+          currencyAmount: effectiveNfcTipStr !== '' ? effectiveNfcTipStr : String(Number(tipFiatE6) / 1e6),
           gasWei: '0',
           gasUSDC6: '0',
           gasChainType: 0,
@@ -5401,7 +5425,7 @@ export const ContainerRelayProcess = async () => {
 
     logger(
       Colors.cyan(
-        `[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool from=${account} to=${to} amountUSDC6=${usdcAmountRaw} routeItems=${collectedRouteItems.length} nfcBreakdown=${hasNfcBreakdown} requestHash=${obj.requestHash ?? 'n/a'}`
+        `[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool from=${account} to=${to} amountUSDC6=${usdcAmountRaw} routeItems=${collectedRouteItems.length} nfcBreakdown=${hasNfcBreakdown} finalFiat6=${ledgerFinalFiat6 ?? 'n/a'} metaFiat6=${ledgerMetaFiat6 ?? 'n/a'} tipFiatE6=${tipFiatE6.toString()} requestHash=${obj.requestHash ?? 'n/a'}`
       )
     )
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
@@ -7620,6 +7644,21 @@ export const payByNfcUidSignContainer = async (params: {
 		nfcTaxAmountFiat6,
 		nfcTaxRateBps,
 	} = params
+	const normNfcBodyAmount = (v: unknown): string | undefined => {
+		if (v == null) return undefined
+		if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+		const s = String(v).trim()
+		return s === '' ? undefined : s
+	}
+	const nfcSubStr = normNfcBodyAmount(nfcSubtotalCurrencyAmount)
+	const nfcTipStr = normNfcBodyAmount(nfcTipCurrencyAmount)
+	const nfcReqCurStr =
+		nfcRequestCurrency != null && String(nfcRequestCurrency).trim() !== '' ? String(nfcRequestCurrency).trim().toUpperCase() : undefined
+	logger(
+		Colors.gray(
+			`[payByNfcUidSignContainer] NFC bill fields normalized subtotal=${nfcSubStr ?? 'none'} tip=${nfcTipStr ?? 'none'} currency=${nfcReqCurStr ?? 'default'}`
+		)
+	)
 	const uidTrim = uid.trim()
 	const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
 	let privateKey: string | null
@@ -7692,18 +7731,18 @@ export const payByNfcUidSignContainer = async (params: {
 		if (!preCheck.success) return { pushed: false, error: preCheck.error }
 		ContainerRelayPool.push({
 			containerPayload: signed,
-			currency: (nfcRequestCurrency ?? 'CAD').toUpperCase(),
-			currencyAmount: nfcSubtotalCurrencyAmount?.trim() || undefined,
+			currency: nfcReqCurStr ?? 'CAD',
+			currencyAmount: nfcSubStr,
 			forText: `NFC pay uid=${uid.slice(0, 12)}...`,
 			amountUSDC6: amountUsdc6,
 			nfcUid: uidTrim,
 			nfcPayerEoa: eoa,
-			nfcSubtotalCurrencyAmount: nfcSubtotalCurrencyAmount?.trim() || undefined,
-			nfcTipCurrencyAmount: nfcTipCurrencyAmount?.trim() || undefined,
-			nfcRequestCurrency: nfcRequestCurrency?.trim() || undefined,
-			nfcDiscountAmountFiat6: nfcDiscountAmountFiat6?.trim() || undefined,
+			nfcSubtotalCurrencyAmount: nfcSubStr,
+			nfcTipCurrencyAmount: nfcTipStr,
+			nfcRequestCurrency: nfcReqCurStr,
+			nfcDiscountAmountFiat6: nfcDiscountAmountFiat6 != null ? String(nfcDiscountAmountFiat6).trim() || undefined : undefined,
 			nfcDiscountRateBps,
-			nfcTaxAmountFiat6: nfcTaxAmountFiat6?.trim() || undefined,
+			nfcTaxAmountFiat6: nfcTaxAmountFiat6 != null ? String(nfcTaxAmountFiat6).trim() || undefined : undefined,
 			nfcTaxRateBps,
 			res,
 		})

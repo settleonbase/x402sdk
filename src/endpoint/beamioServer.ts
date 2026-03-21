@@ -1175,6 +1175,24 @@ const routing = ( router: Router ) => {
 			logger(Colors.red(`[payByNfcUidSignContainer] Cluster 余额预检异常: ${e?.message ?? e}`))
 			return res.status(500).json({ success: false, error: '余额预检失败' }).end()
 		}
+		const nfcFwd = {
+			nfcSubtotalCurrencyAmount: nfcSubtotalCurrencyAmount ?? null,
+			nfcTipCurrencyAmount: nfcTipCurrencyAmount ?? null,
+			nfcRequestCurrency: nfcRequestCurrency ?? null,
+			types: {
+				sub: typeof nfcSubtotalCurrencyAmount,
+				tip: typeof nfcTipCurrencyAmount,
+				cur: typeof nfcRequestCurrency,
+			},
+		}
+		logger(Colors.gray(`[payByNfcUidSignContainer] Cluster NFC forward snapshot: ${JSON.stringify(nfcFwd)}`))
+		const strOrUndef = (v: unknown) =>
+			v != null && String(v).trim() !== '' ? String(v).trim() : undefined
+		const fwdSub = strOrUndef(nfcSubtotalCurrencyAmount)
+		const fwdTip = strOrUndef(nfcTipCurrencyAmount)
+		const fwdCur = strOrUndef(nfcRequestCurrency)
+		const fwdDisc = strOrUndef(nfcDiscountAmountFiat6)
+		const fwdTax = strOrUndef(nfcTaxAmountFiat6)
 		logger(Colors.green(`[payByNfcUidSignContainer] Cluster preCheck OK uid=${uidTrim.slice(0, 16)}... forwarding to master`))
 		postLocalhost(
 			'/api/payByNfcUidSignContainer',
@@ -1183,12 +1201,12 @@ const routing = ( router: Router ) => {
 				containerPayload,
 				amountUsdc6,
 				...(isNfcUid && { e, c, m }),
-				...(nfcSubtotalCurrencyAmount != null ? { nfcSubtotalCurrencyAmount } : {}),
-				...(nfcTipCurrencyAmount != null ? { nfcTipCurrencyAmount } : {}),
-				...(nfcRequestCurrency != null ? { nfcRequestCurrency } : {}),
-				...(nfcDiscountAmountFiat6 != null ? { nfcDiscountAmountFiat6 } : {}),
+				...(fwdSub != null ? { nfcSubtotalCurrencyAmount: fwdSub } : {}),
+				...(fwdTip != null ? { nfcTipCurrencyAmount: fwdTip } : {}),
+				...(fwdCur != null ? { nfcRequestCurrency: fwdCur } : {}),
+				...(fwdDisc != null ? { nfcDiscountAmountFiat6: fwdDisc } : {}),
 				...(nfcDiscountRateBps != null ? { nfcDiscountRateBps } : {}),
-				...(nfcTaxAmountFiat6 != null ? { nfcTaxAmountFiat6 } : {}),
+				...(fwdTax != null ? { nfcTaxAmountFiat6: fwdTax } : {}),
 				...(nfcTaxRateBps != null ? { nfcTaxRateBps } : {}),
 			},
 			res

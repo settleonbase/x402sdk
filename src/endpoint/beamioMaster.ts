@@ -1425,6 +1425,17 @@ const routing = ( router: Router ) => {
 			if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
 				return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
 			}
+			const nfcLog = {
+				nfcSubtotalCurrencyAmount: nfcSubtotalCurrencyAmount ?? null,
+				nfcTipCurrencyAmount: nfcTipCurrencyAmount ?? null,
+				nfcRequestCurrency: nfcRequestCurrency ?? null,
+				types: {
+					sub: typeof nfcSubtotalCurrencyAmount,
+					tip: typeof nfcTipCurrencyAmount,
+					cur: typeof nfcRequestCurrency,
+				},
+			}
+			logger(Colors.gray(`[payByNfcUidSignContainer] Master NFC body (raw): ${JSON.stringify(nfcLog)}`))
 			const result = await payByNfcUidSignContainer({
 				uid: uid.trim(),
 				containerPayload,
@@ -1433,12 +1444,27 @@ const routing = ( router: Router ) => {
 				e,
 				c,
 				m,
-				nfcSubtotalCurrencyAmount,
-				nfcTipCurrencyAmount,
-				nfcRequestCurrency,
-				nfcDiscountAmountFiat6,
+				nfcSubtotalCurrencyAmount:
+					nfcSubtotalCurrencyAmount != null && String(nfcSubtotalCurrencyAmount).trim() !== ''
+						? String(nfcSubtotalCurrencyAmount).trim()
+						: undefined,
+				nfcTipCurrencyAmount:
+					nfcTipCurrencyAmount != null && String(nfcTipCurrencyAmount).trim() !== ''
+						? String(nfcTipCurrencyAmount).trim()
+						: undefined,
+				nfcRequestCurrency:
+					nfcRequestCurrency != null && String(nfcRequestCurrency).trim() !== ''
+						? String(nfcRequestCurrency).trim()
+						: undefined,
+				nfcDiscountAmountFiat6:
+					nfcDiscountAmountFiat6 != null && String(nfcDiscountAmountFiat6).trim() !== ''
+						? String(nfcDiscountAmountFiat6).trim()
+						: undefined,
 				nfcDiscountRateBps,
-				nfcTaxAmountFiat6,
+				nfcTaxAmountFiat6:
+					nfcTaxAmountFiat6 != null && String(nfcTaxAmountFiat6).trim() !== ''
+						? String(nfcTaxAmountFiat6).trim()
+						: undefined,
 				nfcTaxRateBps,
 			})
 			if (result.pushed) return
