@@ -5318,6 +5318,8 @@ export const ContainerRelayProcess = async () => {
     let ledgerMetaUsdc6: string | undefined
     let indexerCurrency: ICurrency = currency
     let indexerCurrencyAmount = currencyAmount
+    /** 与第二条 TX_TIP 共用排价；主单 final USDC6 = 链上总 USDC6 − 小费 USDC6 */
+    let tipUsdc6Snapshot = 0n
 
     if (hasNfcBreakdown) {
       const subtotalUsdc6 = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNum, subtotalFiatE6)
@@ -5325,11 +5327,18 @@ export const ContainerRelayProcess = async () => {
         obj.nfcDiscountAmountFiat6 != null && obj.nfcDiscountAmountFiat6 !== '' ? BigInt(obj.nfcDiscountAmountFiat6) : 0n
       const taxB = obj.nfcTaxAmountFiat6 != null && obj.nfcTaxAmountFiat6 !== '' ? BigInt(obj.nfcTaxAmountFiat6) : 0n
       const baseFiat6 = subtotalFiatE6 - discountB + taxB
-      const finalMainFiat6 = baseFiat6 + tipFiatE6
+      if (tipFiatE6 > 0n) {
+        tipUsdc6Snapshot = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNum, tipFiatE6)
+      }
+      let mainUsdc6 = usdcAmountRaw
+      if (tipUsdc6Snapshot > 0n) {
+        mainUsdc6 = usdcAmountRaw >= tipUsdc6Snapshot ? usdcAmountRaw - tipUsdc6Snapshot : 0n
+      }
       ledgerMetaFiat6 = subtotalFiatE6.toString()
       ledgerMetaUsdc6 = subtotalUsdc6.toString()
-      ledgerFinalFiat6 = finalMainFiat6.toString()
-      ledgerFinalUsdc6 = usdcAmountRaw.toString()
+      // 主单：仅小计（±折扣/税），不含小费；小费为队列中第二条（TX_TIP，id 随机，originalPaymentHash=本 relay tx）
+      ledgerFinalFiat6 = baseFiat6.toString()
+      ledgerFinalUsdc6 = mainUsdc6.toString()
       indexerCurrency = reqCurUpper as ICurrency
       indexerCurrencyAmount = effectiveNfcSubtotalStr
     }
@@ -5372,7 +5381,8 @@ export const ContainerRelayProcess = async () => {
     })
 
     if (hasNfcBreakdown && tipFiatE6 > 0n) {
-      const tipUsdc6 = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNum, tipFiatE6)
+      const tipUsdc6 =
+        tipUsdc6Snapshot > 0n ? tipUsdc6Snapshot : await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNum, tipFiatE6)
       if (tipUsdc6 > 0n) {
         const tipTxId = ethers.hexlify(ethers.randomBytes(32))
         const tipDisplay: DisplayJsonData = {
@@ -5425,7 +5435,7 @@ export const ContainerRelayProcess = async () => {
 
     logger(
       Colors.cyan(
-        `[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool from=${account} to=${to} amountUSDC6=${usdcAmountRaw} routeItems=${collectedRouteItems.length} nfcBreakdown=${hasNfcBreakdown} finalFiat6=${ledgerFinalFiat6 ?? 'n/a'} metaFiat6=${ledgerMetaFiat6 ?? 'n/a'} tipFiatE6=${tipFiatE6.toString()} requestHash=${obj.requestHash ?? 'n/a'}`
+        `[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool from=${account} to=${to} amountUSDC6=${usdcAmountRaw} routeItems=${collectedRouteItems.length} nfcBreakdown=${hasNfcBreakdown} mainFinalFiat6=${ledgerFinalFiat6 ?? 'n/a'} metaFiat6=${ledgerMetaFiat6 ?? 'n/a'} tipFiatE6=${tipFiatE6.toString()} tipUsdc6=${tipUsdc6Snapshot.toString()} requestHash=${obj.requestHash ?? 'n/a'}`
       )
     )
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
