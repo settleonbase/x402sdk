@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
@@ -3094,8 +3094,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			if (!body?.finishedHash || !ethers.isHexString(body.finishedHash) || ethers.dataLength(body.finishedHash) !== 32) {
 				return res.status(400).json({ success: false, error: 'finishedHash must be bytes32 tx hash' }).end()
 			}
+			const tipLedgerRow = isChargeLedgerTxTipRow(body.ledgerTxCategory)
 			const reqHashValid = body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined
-			if (reqHashValid && body.to && ethers.isAddress(body.to)) {
+			// TX_TIP 为同一笔 Base relay 的附属行：不得再按 Bill requestHash 做「已履约」拦截，否则第二条记账会被 Cluster 403
+			if (!tipLedgerRow && reqHashValid && body.to && ethers.isAddress(body.to)) {
 				const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1
 				const reqCheck = await runRequestHashPreCheck(reqHashValid, vd, body.to)
 				if (!reqCheck.ok) {
@@ -3112,9 +3114,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				logger(Colors.red(`[beamioTransferIndexerAccounting] REJECT: currencyAmount is required`))
 				return res.status(400).json({ success: false, error: 'currencyAmount is required for accounting' }).end()
 			}
-			const TX_TIP_CAT_HEX = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP'))
-			const catHex = body.ledgerTxCategory != null ? String(body.ledgerTxCategory).trim() : ''
-			if (catHex !== '' && catHex.toLowerCase() === TX_TIP_CAT_HEX.toLowerCase()) {
+			if (tipLedgerRow) {
 				const lid = body.ledgerTxId != null ? String(body.ledgerTxId).trim() : ''
 				const lorig = body.ledgerOriginalPaymentHash != null ? String(body.ledgerOriginalPaymentHash).trim() : ''
 				const fh = String(body.finishedHash).trim()
@@ -3130,8 +3130,13 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				if (lid.toLowerCase() === fh.toLowerCase()) {
 					return res.status(400).json({ success: false, error: 'TX_TIP ledgerTxId must not equal finishedHash; use a new random bytes32 for tip row id' }).end()
 				}
+				logger(
+					Colors.cyan(
+						`[beamioTransferIndexerAccounting] TX_TIP charge ledger Transaction preview (readme) = ${inspect(buildChargeLedgerTransactionPreviewFromIndexerBody(body), false, 4, true)}`
+					)
+				)
 			}
-			logger(Colors.green(`[beamioTransferIndexerAccounting] server pre-check OK, forwarding to master from=${body.from?.slice(0, 10)}… to=${body.to?.slice(0, 10)}… requestHash=${body.requestHash ?? 'n/a'}`))
+			logger(Colors.green(`[beamioTransferIndexerAccounting] server pre-check OK, forwarding to master from=${body.from?.slice(0, 10)}… to=${body.to?.slice(0, 10)}… requestHash=${body.requestHash ?? 'n/a'}${tipLedgerRow ? ' (TX_TIP row)' : ''}`))
 			logger(Colors.gray(`[DEBUG] postLocalhost /api/beamioTransferIndexerAccounting`))
 			postLocalhost('/api/beamioTransferIndexerAccounting', body, res)
 		})

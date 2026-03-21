@@ -1525,6 +1525,99 @@ export type BeamioTransferRouteItem = {
 	offsetInRequestCurrencyE6?: string
 }
 
+/** keccak256("TX_TIP")：Charge 小费独立 Diamond 行 ledgerTxCategory */
+export const TX_TIP_LEDGER_CATEGORY_HEX = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP')) as `0x${string}`
+
+/** HTTP body / pool 条目共用的 readme Transaction 预览输入 */
+export type ChargeIndexerAccountingPreviewBody = {
+	from?: string
+	to?: string
+	amountUSDC6?: string
+	finishedHash?: string
+	displayJson?: string
+	currency?: string
+	currencyAmount?: string
+	ledgerTxId?: string
+	ledgerOriginalPaymentHash?: string
+	ledgerTxCategory?: string
+	ledgerFinalRequestAmountFiat6?: string
+	ledgerFinalRequestAmountUSDC6?: string
+	ledgerMetaRequestAmountFiat6?: string
+	ledgerMetaRequestAmountUSDC6?: string
+	routeItems?: unknown
+	feePayer?: string
+	bServiceUSDC6?: string
+	bServiceUnits6?: string
+	isInternalTransfer?: boolean
+	requestHash?: string
+}
+
+export function isChargeLedgerTxTipRow(ledgerTxCategory: unknown): boolean {
+	const catHex = ledgerTxCategory != null ? String(ledgerTxCategory).trim() : ''
+	return catHex !== '' && catHex.toLowerCase() === TX_TIP_LEDGER_CATEGORY_HEX.toLowerCase()
+}
+
+/** CoNET Index readme.md Transaction 字段预览（Cluster/Master 日志对齐） */
+export function buildChargeLedgerTransactionPreviewFromIndexerBody(body: ChargeIndexerAccountingPreviewBody): Record<string, unknown> {
+	const tip = isChargeLedgerTxTipRow(body.ledgerTxCategory)
+	const mainTxHash = body.finishedHash != null ? String(body.finishedHash).trim() : ''
+	const tipId = body.ledgerTxId != null ? String(body.ledgerTxId).trim() : ''
+	const id = tip && tipId ? tipId : mainTxHash
+	const reqOk =
+		body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32
+			? String(body.requestHash).trim()
+			: ''
+	let originalPaymentHash: string = ethers.ZeroHash
+	if (tip) {
+		const lo = body.ledgerOriginalPaymentHash != null ? String(body.ledgerOriginalPaymentHash).trim() : ''
+		originalPaymentHash = lo && ethers.isHexString(lo) && ethers.dataLength(lo) === 32 ? lo : mainTxHash
+	} else {
+		const lo = body.ledgerOriginalPaymentHash != null ? String(body.ledgerOriginalPaymentHash).trim() : ''
+		if (lo && ethers.isHexString(lo) && ethers.dataLength(lo) === 32) {
+			originalPaymentHash = lo
+		} else if (reqOk) {
+			originalPaymentHash = reqOk
+		} else {
+			originalPaymentHash = ethers.ZeroHash
+		}
+	}
+	let displayParsed: unknown = body.displayJson
+	if (typeof body.displayJson === 'string') {
+		try {
+			displayParsed = JSON.parse(body.displayJson) as unknown
+		} catch {
+			/* keep raw string */
+		}
+	}
+	const hasRoute = !!(body.routeItems && Array.isArray(body.routeItems) && (body.routeItems as unknown[]).length > 0)
+	return {
+		kind: tip ? 'TX_TIP' : 'charge_main_or_internal',
+		id,
+		originalPaymentHash,
+		chainId: 8453,
+		txCategory: body.ledgerTxCategory ?? '(master_derived)',
+		displayJson: displayParsed,
+		payer: body.from,
+		payee: body.to,
+		finalRequestAmountFiat6: body.ledgerFinalRequestAmountFiat6 ?? '(master_from_currencyAmount)',
+		finalRequestAmountUSDC6: body.ledgerFinalRequestAmountUSDC6 ?? body.amountUSDC6,
+		isAAAccount: hasRoute || !!body.isInternalTransfer,
+		route: body.routeItems,
+		fees: {
+			feePayer: body.feePayer,
+			bServiceUSDC6: body.bServiceUSDC6 ?? '0',
+			bServiceUnits6: body.bServiceUnits6 ?? '0',
+		},
+		meta: {
+			requestAmountFiat6: body.ledgerMetaRequestAmountFiat6,
+			requestAmountUSDC6: body.ledgerMetaRequestAmountUSDC6,
+			currency: body.currency,
+			currencyAmount: body.currencyAmount,
+		},
+		baseRelayTxHash: mainTxHash,
+	}
+}
+
 /** BeamioTransfer / AA→EOA 成功后的 Diamond 记账请求（由 master 排队处理）。支持 USDC 与 CCSA(BeamioUserCard ERC1155) */
 export const beamioTransferIndexerAccountingPool: {
 	from: string
@@ -1937,8 +2030,12 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		// Charge 记账调试：打印完整 Transaction 结构，便于排查 topAdmin/subordinate 查询
 		if (isCharge) {
 			const txForLog = {
+				kind: txCategory === TX_TIP ? 'TX_TIP' : 'charge_main_or_internal',
 				txId: transactionInput.txId,
+				originalPaymentHash: transactionInput.originalPaymentHash,
+				chainId: String(transactionInput.chainId),
 				txCategory: transactionInput.txCategory,
+				displayJson: displayJsonStr,
 				payer: transactionInput.payer,
 				payee: transactionInput.payee,
 				topAdmin: transactionInput.topAdmin,
@@ -1956,6 +2053,11 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 					amountE6: String(r.amountE6),
 					tokenId: String(r.tokenId),
 				})),
+				fees: {
+					feePayer: transactionInput.fees.feePayer,
+					bServiceUSDC6: String(transactionInput.fees.bServiceUSDC6),
+					bServiceUnits6: String(transactionInput.fees.bServiceUnits6),
+				},
 			}
 			logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] Charge accounting TransactionInput: ${inspect(txForLog, false, 4, true)}`))
 		}
@@ -5479,8 +5581,6 @@ export const ContainerRelayProcess = async () => {
     }
     logger(Colors.green(`✅ ContainerRelayProcess displayJson = ${inspect(displayJsonData, false, 2, true)}`))
 
-    const TX_TIP_CAT = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP'))
-
     const { bServiceUSDC6: containerBUsdc6 } = calcBeamioBUnitFee(usdcAmountRaw)
     beamioTransferIndexerAccountingPool.push({
       from: account,
@@ -5549,7 +5649,7 @@ export const ContainerRelayProcess = async () => {
           bServiceUnits6: '0',
           ledgerTxId: tipTxId,
           ledgerOriginalPaymentHash: tx.hash,
-          ledgerTxCategory: TX_TIP_CAT,
+          ledgerTxCategory: TX_TIP_LEDGER_CATEGORY_HEX,
           ledgerFinalRequestAmountFiat6: tipFiatE6.toString(),
           ledgerFinalRequestAmountUSDC6: tipUsdc6.toString(),
           ledgerMetaRequestAmountFiat6: tipFiatE6.toString(),
@@ -5566,6 +5666,47 @@ export const ContainerRelayProcess = async () => {
             },
           ],
         })
+        logger(
+          Colors.cyan(
+            `[ContainerRelayProcess] TX_TIP charge ledger Transaction preview (readme) = ${inspect(
+              buildChargeLedgerTransactionPreviewFromIndexerBody({
+                from: account,
+                to,
+                amountUSDC6: tipUsdc6.toString(),
+                finishedHash: tx.hash,
+                displayJson: JSON.stringify(tipDisplay),
+                currency: indexerCurrency,
+                currencyAmount: effectiveNfcTipStr !== '' ? effectiveNfcTipStr : String(Number(tipFiatE6) / 1e6),
+                ledgerTxId: tipTxId,
+                ledgerOriginalPaymentHash: tx.hash,
+                ledgerTxCategory: TX_TIP_LEDGER_CATEGORY_HEX,
+                ledgerFinalRequestAmountFiat6: tipFiatE6.toString(),
+                ledgerFinalRequestAmountUSDC6: tipUsdc6.toString(),
+                ledgerMetaRequestAmountFiat6: tipFiatE6.toString(),
+                ledgerMetaRequestAmountUSDC6: tipUsdc6.toString(),
+                routeItems: [
+                  {
+                    asset: usdcAddrNorm,
+                    amountE6: tipUsdc6.toString(),
+                    assetType: 0,
+                    source: 0,
+                    tokenId: '0',
+                    itemCurrencyType: 4,
+                    offsetInRequestCurrencyE6: tipUsdc6.toString(),
+                  },
+                ],
+                feePayer: feePayerEOA,
+                bServiceUSDC6: '0',
+                bServiceUnits6: '0',
+                isInternalTransfer: true,
+                requestHash: obj.requestHash,
+              }),
+              false,
+              4,
+              true
+            )}`
+          )
+        )
       }
     }
 
