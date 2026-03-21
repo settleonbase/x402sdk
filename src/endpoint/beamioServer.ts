@@ -2760,6 +2760,15 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			forText?: string
 			requestHash?: string
 			validDays?: number | string
+			merchantCardAddress?: string
+			nfcSubtotalCurrencyAmount?: string
+			nfcTipCurrencyAmount?: string
+			nfcTipRateBps?: number
+			nfcRequestCurrency?: string
+			nfcDiscountAmountFiat6?: string
+			nfcDiscountRateBps?: number
+			nfcTaxAmountFiat6?: string
+			nfcTaxRateBps?: number
 		}
 		logger(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`)
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true))
@@ -2873,6 +2882,15 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				forText: body.forText,
 				requestHash: body.requestHash,
 				validDays: body.validDays,
+				merchantCardAddress: body.merchantCardAddress,
+				nfcSubtotalCurrencyAmount: body.nfcSubtotalCurrencyAmount,
+				nfcTipCurrencyAmount: body.nfcTipCurrencyAmount,
+				nfcTipRateBps: body.nfcTipRateBps,
+				nfcRequestCurrency: body.nfcRequestCurrency,
+				nfcDiscountAmountFiat6: body.nfcDiscountAmountFiat6,
+				nfcDiscountRateBps: body.nfcDiscountRateBps,
+				nfcTaxAmountFiat6: body.nfcTaxAmountFiat6,
+				nfcTaxRateBps: body.nfcTaxRateBps,
 			}, res)
 			return
 		}

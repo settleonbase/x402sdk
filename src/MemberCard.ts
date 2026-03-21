@@ -1462,6 +1462,15 @@ export const OpenContainerRelayPool: {
 	requestHash?: string
 	/** Charge 记账：商户卡地址，用于推导 topAdmin。可选 */
 	merchantCardAddress?: string
+	/** QR / OpenContainer Charge：与 ContainerRelayPool 一致，供 TX_TIP 子行与 TransactionMeta（税/折扣不含小费） */
+	nfcSubtotalCurrencyAmount?: string
+	nfcTipCurrencyAmount?: string
+	nfcTipRateBps?: number
+	nfcRequestCurrency?: string
+	nfcDiscountAmountFiat6?: string
+	nfcDiscountRateBps?: number
+	nfcTaxAmountFiat6?: string
+	nfcTaxRateBps?: number
 	res: Response
 }[] = []
 
@@ -5190,25 +5199,139 @@ export const OpenContainerRelayProcess = async () => {
       // Beamio 收费标准：1 USDC=100 BUnit，0.8% 费率，最低 2 BUnit，最高 200 BUnit，>=5000 USDC 时 500 BUnit
       const amountUSDC6ForFee = totalAmountUSDC6ForFee > 0n ? totalAmountUSDC6ForFee : totalAmountE6
       const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcBeamioBUnitFee(amountUSDC6ForFee)
+      /** 与 ContainerRelay 一致：用 USDC6 等价总额做账本分栏与 TX_TIP 拆分（优于混加 raw item amount） */
+      const usdcAmountRaw = amountUSDC6ForFee
+
+      const normOpenBillAmountStr = (v: unknown): string => {
+        if (v == null) return ''
+        if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+        return String(v).trim()
+      }
+      const BeamioCurrencyMapOpenBill: Record<string, number> = {
+        CAD: 0,
+        USD: 1,
+        JPY: 2,
+        CNY: 3,
+        USDC: 4,
+        HKD: 5,
+        EUR: 6,
+        SGD: 7,
+        TWD: 8,
+        ETH: 9,
+        BNB: 10,
+        SOLANA: 11,
+        BTC: 12,
+      }
+      const reqCurUpperOpen = String(obj.nfcRequestCurrency ?? primaryCurrency ?? 'CAD').toUpperCase()
+      const payerCurrencyFiatNumOpen = BeamioCurrencyMapOpenBill[reqCurUpperOpen] ?? 0
+      const effectiveOpenSubtotalStr = normOpenBillAmountStr(obj.nfcSubtotalCurrencyAmount)
+      const effectiveOpenTipStr = normOpenBillAmountStr(obj.nfcTipCurrencyAmount)
+      /** Android QR 等显式传 nfcSubtotalCurrencyAmount 时启用 TX_TIP 子行（与 NFC Container 一致） */
+      const hasOpenBillBreakdown = effectiveOpenSubtotalStr !== ''
+
+      const usdcAddrNormOpen = ethers.getAddress(USDC_ADDRESS)
+      let ledgerFinalFiat6: string | undefined
+      let ledgerFinalUsdc6: string | undefined
+      let ledgerMetaFiat6: string | undefined
+      let ledgerMetaUsdc6: string | undefined
+      let indexerCurrency: ICurrency = primaryCurrency
+      let indexerCurrencyAmount = primaryCurrencyAmount
+      let tipUsdc6SnapshotOpen = 0n
+      let subtotalFiatE6Open = 0n
+      let tipFiatE6Open = 0n
+      let nfcLedgerDiscountAmountFiat6Open: string | undefined
+      let nfcLedgerDiscountRateBpsOpen: number | undefined
+
+      if (hasOpenBillBreakdown) {
+        subtotalFiatE6Open = await containerRelayFiatStringToE6(effectiveOpenSubtotalStr)
+        tipFiatE6Open = await containerRelayFiatStringToE6(effectiveOpenTipStr || undefined)
+        const subtotalUsdc6Open = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNumOpen, subtotalFiatE6Open)
+        const discountBOpen =
+          obj.nfcDiscountAmountFiat6 != null && obj.nfcDiscountAmountFiat6 !== '' ? BigInt(obj.nfcDiscountAmountFiat6) : 0n
+        const taxBOpen =
+          obj.nfcTaxAmountFiat6 != null && obj.nfcTaxAmountFiat6 !== '' ? BigInt(obj.nfcTaxAmountFiat6) : 0n
+        const baseFiat6Open = subtotalFiatE6Open - discountBOpen + taxBOpen
+        if (tipFiatE6Open > 0n) {
+          tipUsdc6SnapshotOpen = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNumOpen, tipFiatE6Open)
+          if (tipUsdc6SnapshotOpen === 0n && usdcAmountRaw > 0n) {
+            const denomFiatOpen = subtotalFiatE6Open + tipFiatE6Open
+            if (denomFiatOpen > 0n) {
+              tipUsdc6SnapshotOpen = (usdcAmountRaw * tipFiatE6Open) / denomFiatOpen
+            }
+          }
+        }
+        let mainUsdc6Open = usdcAmountRaw
+        if (tipFiatE6Open > 0n && tipUsdc6SnapshotOpen > 0n) {
+          mainUsdc6Open = usdcAmountRaw >= tipUsdc6SnapshotOpen ? usdcAmountRaw - tipUsdc6SnapshotOpen : 0n
+        }
+        ledgerMetaFiat6 = subtotalFiatE6Open.toString()
+        ledgerMetaUsdc6 = subtotalUsdc6Open.toString()
+        ledgerFinalFiat6 = baseFiat6Open.toString()
+        ledgerFinalUsdc6 = mainUsdc6Open.toString()
+        indexerCurrency = reqCurUpperOpen as ICurrency
+        indexerCurrencyAmount = effectiveOpenSubtotalStr
+        nfcLedgerDiscountAmountFiat6Open =
+          obj.nfcDiscountAmountFiat6 != null && String(obj.nfcDiscountAmountFiat6).trim() !== ''
+            ? String(obj.nfcDiscountAmountFiat6).trim()
+            : undefined
+        nfcLedgerDiscountRateBpsOpen =
+          obj.nfcDiscountRateBps != null && Number.isFinite(Number(obj.nfcDiscountRateBps))
+            ? Math.max(0, Math.min(10000, Math.trunc(Number(obj.nfcDiscountRateBps))))
+            : undefined
+      }
+
+      const displayJsonOpen: DisplayJsonData = {
+        /** 与 ContainerRelay NFC 的「NFC Merchant Payment」对位，便于索引/报表区分 QR Charge */
+        title: hasOpenBillBreakdown ? 'QR Merchant Payment' : 'Merchant Payment',
+        source: 'open-container',
+        finishedHash: tx.hash,
+        handle: obj.forText?.trim()?.slice(0, 80),
+        forText: obj.forText?.trim(),
+      }
+      if (hasOpenBillBreakdown) {
+        const discountBOpen =
+          obj.nfcDiscountAmountFiat6 != null && obj.nfcDiscountAmountFiat6 !== '' ? BigInt(obj.nfcDiscountAmountFiat6) : 0n
+        const taxBOpen =
+          obj.nfcTaxAmountFiat6 != null && obj.nfcTaxAmountFiat6 !== '' ? BigInt(obj.nfcTaxAmountFiat6) : 0n
+        let tipBpsForDisplayOpen = 0
+        if (obj.nfcTipRateBps != null && Number.isFinite(Number(obj.nfcTipRateBps))) {
+          tipBpsForDisplayOpen = Math.max(0, Math.min(10000, Math.trunc(Number(obj.nfcTipRateBps))))
+        } else if (tipFiatE6Open > 0n && subtotalFiatE6Open > 0n) {
+          tipBpsForDisplayOpen = Number((tipFiatE6Open * 10000n) / subtotalFiatE6Open)
+        }
+        const fmt2Open = (e6: bigint) => (Number(e6) / 1e6).toFixed(2)
+        displayJsonOpen.chargeBreakdown = {
+          requestCurrency: reqCurUpperOpen,
+          subtotalCurrencyAmount: effectiveOpenSubtotalStr,
+          taxRatePercent:
+            obj.nfcTaxRateBps != null && Number.isFinite(Number(obj.nfcTaxRateBps))
+              ? Math.round((Number(obj.nfcTaxRateBps) / 100) * 100) / 100
+              : 0,
+          taxAmountCurrencyAmount: fmt2Open(taxBOpen),
+          tierDiscountPercent:
+            obj.nfcDiscountRateBps != null && Number.isFinite(Number(obj.nfcDiscountRateBps))
+              ? Math.round((Number(obj.nfcDiscountRateBps) / 100) * 100) / 100
+              : 0,
+          tierDiscountAmountCurrencyAmount: fmt2Open(discountBOpen),
+          tipRatePercent: tipBpsForDisplayOpen > 0 ? Math.round((tipBpsForDisplayOpen / 100) * 100) / 100 : 0,
+          tipCurrencyAmount: effectiveOpenTipStr !== '' ? effectiveOpenTipStr : undefined,
+        }
+      }
+
       beamioTransferIndexerAccountingPool.push({
         from: account,
         to: signedPayee,
-        amountUSDC6: totalAmountE6.toString(),
+        amountUSDC6: usdcAmountRaw.toString(),
         finishedHash: tx.hash,
-        displayJson: JSON.stringify({
-          title: 'Merchant Payment',
-          source: 'open-container',
-          finishedHash: tx.hash,
-          handle: obj.forText?.trim()?.slice(0, 80),
-          forText: obj.forText?.trim(),
-        }),
-        currency: primaryCurrency,
-        currencyAmount: primaryCurrencyAmount,
+        displayJson: JSON.stringify(displayJsonOpen),
+        currency: indexerCurrency,
+        currencyAmount: indexerCurrencyAmount,
         gasWei: '0',
         gasUSDC6: '0',
         gasChainType: 0,
         feePayer: feePayerEOA,
-        isInternalTransfer: false,
+        /** 与 ContainerRelayProcess 主单一致：AA→商户 container 记账走 internal 语义 */
+        isInternalTransfer: true,
         requestHash: obj.requestHash,
         routeItems: collectedRouteItems,
         source: 'open-container',
@@ -5216,11 +5339,79 @@ export const OpenContainerRelayProcess = async () => {
         bServiceUnits6: feeBUnits6.toString(),
         payeeEOA,
         merchantCardAddress: obj.merchantCardAddress,
+        ...(hasOpenBillBreakdown
+          ? {
+              ledgerFinalRequestAmountFiat6: ledgerFinalFiat6,
+              ledgerFinalRequestAmountUSDC6: ledgerFinalUsdc6,
+              ledgerMetaRequestAmountFiat6: ledgerMetaFiat6,
+              ledgerMetaRequestAmountUSDC6: ledgerMetaUsdc6,
+              ledgerMetaDiscountAmountFiat6: nfcLedgerDiscountAmountFiat6Open,
+              ledgerMetaDiscountRateBps: nfcLedgerDiscountRateBpsOpen,
+              ledgerMetaTaxAmountFiat6: obj.nfcTaxAmountFiat6,
+              ledgerMetaTaxRateBps: obj.nfcTaxRateBps,
+            }
+          : {}),
       })
+
+      if (hasOpenBillBreakdown && tipFiatE6Open > 0n) {
+        const tipUsdc6Open =
+          tipUsdc6SnapshotOpen > 0n
+            ? tipUsdc6SnapshotOpen
+            : await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNumOpen, tipFiatE6Open)
+        if (tipUsdc6Open > 0n) {
+          const tipTxIdOpen = ethers.hexlify(ethers.randomBytes(32))
+          const tipDisplayOpen: DisplayJsonData = {
+            title: 'Tip',
+            source: 'open-container',
+            finishedHash: tx.hash,
+            handle: 'QR tip',
+            forText: obj.forText?.trim(),
+          }
+          beamioTransferIndexerAccountingPool.push({
+            from: account,
+            to: signedPayee,
+            amountUSDC6: tipUsdc6Open.toString(),
+            finishedHash: tx.hash,
+            displayJson: JSON.stringify(tipDisplayOpen),
+            currency: indexerCurrency,
+            currencyAmount: effectiveOpenTipStr !== '' ? effectiveOpenTipStr : String(Number(tipFiatE6Open) / 1e6),
+            gasWei: '0',
+            gasUSDC6: '0',
+            gasChainType: 0,
+            feePayer: feePayerEOA,
+            isInternalTransfer: true,
+            requestHash: obj.requestHash,
+            source: 'open-container',
+            payeeEOA,
+            merchantCardAddress: obj.merchantCardAddress,
+            bServiceUSDC6: '0',
+            bServiceUnits6: '0',
+            ledgerTxId: tipTxIdOpen,
+            ledgerOriginalPaymentHash: tx.hash,
+            ledgerTxCategory: TX_TIP_LEDGER_CATEGORY_HEX,
+            ledgerFinalRequestAmountFiat6: tipFiatE6Open.toString(),
+            ledgerFinalRequestAmountUSDC6: tipUsdc6Open.toString(),
+            ledgerMetaRequestAmountFiat6: tipFiatE6Open.toString(),
+            ledgerMetaRequestAmountUSDC6: tipUsdc6Open.toString(),
+            routeItems: [
+              {
+                asset: usdcAddrNormOpen,
+                amountE6: tipUsdc6Open.toString(),
+                assetType: 0,
+                source: 0,
+                tokenId: '0',
+                itemCurrencyType: 4,
+                offsetInRequestCurrencyE6: tipUsdc6Open.toString(),
+              },
+            ],
+          })
+        }
+      }
+
       if (signedPayee.toLowerCase() !== to.toLowerCase()) {
         logger(Colors.gray(`[AAtoEOA/OpenContainer] indexer payee=${signedPayee} (relay recipient AA=${to})`))
       }
-      logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool routeItems=${collectedRouteItems.length} totalAmountE6=${totalAmountE6} amountUSDC6ForFee=${amountUSDC6ForFee} feePayer=${feePayerEOA} payeeEOA=${payeeEOA} bServiceUnits6=${feeBUnits6} bServiceUSDC6=${feeBUsdc6} requestHash=${obj.requestHash ?? 'n/a'}`))
+      logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool routeItems=${collectedRouteItems.length} totalAmountE6=${totalAmountE6} amountUSDC6ForFee=${amountUSDC6ForFee} feePayer=${feePayerEOA} payeeEOA=${payeeEOA} bServiceUnits6=${feeBUnits6} bServiceUSDC6=${feeBUsdc6} requestHash=${obj.requestHash ?? 'n/a'} openBillBreakdown=${hasOpenBillBreakdown}`))
     }
     
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
