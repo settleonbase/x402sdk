@@ -16,6 +16,7 @@ import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPre
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
+import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -908,6 +909,7 @@ const routing = ( router: Router ) => {
 			const cardAbi = [
 				'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 				'function currency() view returns (uint8)',
+				'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
 			]
 			const usdcAbi = ['function balanceOf(address) view returns (uint256)']
 			const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
@@ -932,7 +934,23 @@ const routing = ( router: Router ) => {
 				if (uc && uc !== ethers.ZeroAddress) beamioUserCard = ethers.getAddress(uc)
 			} catch (_) { /* ignore */ }
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
-			const cards: Array<{ cardAddress: string; cardName: string; cardType: string; points: string; points6: string; cardCurrency: string; cardBackground?: string; cardImage?: string; tierName?: string; tierDescription?: string; nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }> }> = []
+			const cardsStaged: {
+				row: {
+					cardAddress: string
+					cardName: string
+					cardType: string
+					points: string
+					points6: string
+					cardCurrency: string
+					cardBackground?: string
+					cardImage?: string
+					tierName?: string
+					tierDescription?: string
+					primaryMemberTokenId?: string
+					nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }>
+				}
+				sortMin: bigint
+			}[] = []
 			for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
 				try {
 					const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
@@ -953,7 +971,15 @@ const routing = ( router: Router ) => {
 					let tierName: string | undefined
 					let tierDescription: string | undefined
 					const withTokenId = nftList.filter((n: { tokenId: string }) => Number(n.tokenId) > 0)
-					const bestNft = withTokenId.length > 0 ? withTokenId.reduce((a: { tokenId: string; tier: string }, b: { tokenId: string; tier: string }) => (Number(b.tokenId) > Number(a.tokenId) ? b : a)) : null
+					const pick = await pickBestMembershipNftByMinUsdc6(
+						card,
+						nfts.map((nft: { tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }) => ({
+							tokenId: nft.tokenId,
+							tierIndexOrMax: nft.tierIndexOrMax,
+							isExpired: nft.isExpired,
+						}))
+					)
+					const bestNft = pick ? nftList.find((n: { tokenId: string }) => n.tokenId === pick.tokenId) ?? null : null
 					if (bestNft) {
 						try {
 							const cardRow = await getCardByAddress(cardAddr)
@@ -994,21 +1020,31 @@ const routing = ( router: Router ) => {
 							}
 						} catch (_) { /* ignore */ }
 					}
-					cards.push({
-						cardAddress: cardAddr,
-						cardName,
-						cardType,
-						points: ethers.formatUnits(pointsBalance, 6),
-						points6: String(pointsBalance),
-						cardCurrency: currency,
-						...(cardBackground != null && { cardBackground }),
-						...(cardImage != null && { cardImage }),
-						...(tierName != null && { tierName }),
-						...(tierDescription != null && { tierDescription }),
-						nfts: nftList,
+					cardsStaged.push({
+						row: {
+							cardAddress: cardAddr,
+							cardName,
+							cardType,
+							points: ethers.formatUnits(pointsBalance, 6),
+							points6: String(pointsBalance),
+							cardCurrency: currency,
+							...(cardBackground != null && { cardBackground }),
+							...(cardImage != null && { cardImage }),
+							...(tierName != null && { tierName }),
+							...(tierDescription != null && { tierDescription }),
+							...(pick ? { primaryMemberTokenId: pick.tokenId } : {}),
+							nfts: nftList,
+						},
+						sortMin: pick?.minUsdc6 ?? 0n,
 					})
 				} catch (_) { /* skip failed card */ }
 			}
+			cardsStaged.sort((a, b) => {
+				if (a.sortMin > b.sortMin) return -1
+				if (a.sortMin < b.sortMin) return 1
+				return 0
+			})
+			const cards = cardsStaged.map((s) => s.row)
 			const firstCard = cards[0]
 			const result = {
 				ok: true,

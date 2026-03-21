@@ -7,6 +7,7 @@ import Colors from 'colors/safe'
 import { getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken } from '../db'
 import { BASE_AA_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 import { maybeEnqueueNfcCashTreeBeamioTag } from '../db'
+import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 
 /** 已废弃的旧基础设施卡地址，getUIDAssets 不查询、不返回。当前 BEAMIO_USER_CARD_ASSET_ADDRESS (0x74f35741...) 必须不在本列表。 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -55,6 +56,8 @@ export type FetchUIDAssetsResult = {
 		cardImage?: string
 		tierName?: string
 		tierDescription?: string
+		/** Best membership NFT on this card by max `tiers[i].minUsdc6` (matches `_findBestValidMembership`). */
+		primaryMemberTokenId?: string
 		nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }>
 	}>
 }
@@ -64,6 +67,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 	const cardAbi = [
 		'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 		'function currency() view returns (uint8)',
+		'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
 	]
 	const usdcAbi = ['function balanceOf(address) view returns (uint256)']
 	const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
@@ -82,7 +86,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 		{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
 		{ address: BEAMIO_USER_CARD_ASSET_ADDRESS, name: 'CashTrees Card', type: 'infrastructure' },
 	].filter(({ address }) => !DEPRECATED_INFRA_CARDS.has(address.toLowerCase()))
-	const cards: FetchUIDAssetsResult['cards'] = []
+	const cardsStaged: { row: FetchUIDAssetsResult['cards'][number]; sortMin: bigint }[] = []
 	for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
 		try {
 			const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
@@ -104,9 +108,15 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 			let tierDescription: string | undefined
 			const withTokenId = nftList.filter((n: { tokenId: string }) => Number(n.tokenId) > 0)
 			logger(Colors.gray(`[fetchUIDAssetsForEOA] card=${cardAddr} withTokenId=${withTokenId.length}`))
-			const bestNft = withTokenId.length > 0
-				? withTokenId.reduce((a: { tokenId: string; tier: string }, b: { tokenId: string; tier: string }) => (Number(b.tokenId) > Number(a.tokenId) ? b : a))
-				: null
+			const pick = await pickBestMembershipNftByMinUsdc6(
+				card,
+				nfts.map((nft: { tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }) => ({
+					tokenId: nft.tokenId,
+					tierIndexOrMax: nft.tierIndexOrMax,
+					isExpired: nft.isExpired,
+				}))
+			)
+			const bestNft = pick ? nftList.find((n: { tokenId: string }) => n.tokenId === pick.tokenId) ?? null : null
 			let cardRow: { cardOwner: string; metadata: Record<string, unknown> | null } | null = null
 			if (bestNft) {
 				try {
@@ -161,7 +171,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 			const hasPoints = pointsBalance > 0n
 			const hasNftGt0 = nftList.some((n: { tokenId: string }) => Number(n.tokenId) > 0)
 			if (hasPoints || hasNftGt0) {
-				cards.push({
+				const row: FetchUIDAssetsResult['cards'][number] = {
 					cardAddress: cardAddr,
 					cardName,
 					cardType,
@@ -172,13 +182,21 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 					...(cardImage != null && { cardImage }),
 					...(tierName != null && { tierName }),
 					...(tierDescription != null && { tierDescription }),
+					...(pick ? { primaryMemberTokenId: pick.tokenId } : {}),
 					nfts: nftList,
-				})
+				}
+				cardsStaged.push({ row, sortMin: pick?.minUsdc6 ?? 0n })
 			}
 		} catch (cardErr: unknown) {
 			logger(Colors.gray(`[fetchUIDAssetsForEOA] card=${cardAddr} skip: ${(cardErr as Error)?.message ?? cardErr}`))
 		}
 	}
+	cardsStaged.sort((a, b) => {
+		if (a.sortMin > b.sortMin) return -1
+		if (a.sortMin < b.sortMin) return 1
+		return 0
+	})
+	const cards = cardsStaged.map((s) => s.row)
 	const cardsFiltered = cards.filter((c) => !DEPRECATED_INFRA_CARDS.has(c.cardAddress.toLowerCase()))
 	return {
 		ok: true,
@@ -189,13 +207,15 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 	}
 }
 
-/** 基础设施卡（CashTrees）当前主 tier 的 ERC1155 tokenId；与列表内展示用的「最高 tokenId」一致 */
+/** 基础设施卡（CashTrees）主会员 NFT：与链上 `tiers[i].minUsdc6` 最高档一致（`primaryMemberTokenId`）。 */
 export const pickInfrastructureCashTreeTierTokenId = (
 	cards: FetchUIDAssetsResult['cards'],
 	infraAddress: string = BEAMIO_USER_CARD_ASSET_ADDRESS
 ): string | null => {
 	const row = cards.find((c) => c.cardAddress.toLowerCase() === infraAddress.toLowerCase())
 	if (!row?.nfts?.length) return null
+	const primary = row.primaryMemberTokenId?.trim()
+	if (primary && Number(primary) > 0) return primary
 	const withT = row.nfts.filter((n) => Number(n.tokenId) > 0)
 	if (!withT.length) return null
 	return withT.reduce((a, b) => (Number(b.tokenId) > Number(a.tokenId) ? b : a)).tokenId
