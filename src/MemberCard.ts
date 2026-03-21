@@ -3062,6 +3062,9 @@ export const nfcTopupPreCheckBUnitFee = async (
  * Cluster 预检：mintPointsByAdmin 是否会因 `UC_AdminAirdropLimitExceeded` 在链上回滚。
  * 与 GovernanceModule._enforceAndRecordAdminAirdropLimit 一致：自 signer（operator）沿 adminParent 上至 owner，凡非 owner 节点须满足 used + points6 <= limit。
  */
+/** points6 / 1e6 for user-facing strings (matches on-chain mint amount scale) */
+const formatPoints6ForDisplay = (x: bigint): string => ethers.formatUnits(x, 6)
+
 export const nfcTopupPreCheckAdminAirdropLimit = async (
 	cardAddr: string,
 	signer: string,
@@ -3091,9 +3094,13 @@ export const nfcTopupPreCheckAdminAirdropLimit = async (
 				const limit = BigInt(row.limit)
 				if (!unlimited && used + points6 > limit) {
 					const rem = limit > used ? limit - used : 0n
+					const u = formatPoints6ForDisplay(used)
+					const q = formatPoints6ForDisplay(points6)
+					const l = formatPoints6ForDisplay(limit)
+					const r = formatPoints6ForDisplay(rem)
 					return {
 						success: false,
-						error: `Admin airdrop limit exceeded for ${current}: used ${used.toString()} + requested ${points6.toString()} exceeds limit ${limit.toString()} (remaining ${rem.toString()} points6). Raise mint limit or clear usage on-chain.`,
+						error: `Admin airdrop limit exceeded for ${current}: used ${u} + requested ${q} exceeds limit ${l} (remaining ${r}). Amounts are card points (6 decimals). Raise mint limit or clear usage on-chain.`,
 					}
 				}
 			}
