@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _search, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
+import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -534,7 +534,7 @@ const routing = ( router: Router ) => {
 					if (owner && owner !== ethers.ZeroAddress) eoa = ethers.getAddress(owner)
 				}
 			} catch (_) { /* not AA, use as-is */ }
-			const profileRet = await _search(eoa)
+			const profileRet = await _searchExactByAddress(eoa.toLowerCase())
 			const profileRow = profileRet?.results?.[0]
 			const profile = profileRow ? {
 				accountName: profileRow.username ?? profileRow.accountName,
@@ -548,7 +548,7 @@ const routing = ( router: Router ) => {
 				const posMgmt = new ethers.Contract(MERCHANT_POS_MANAGEMENT_CONET, ['function getPOSMerchant(address) view returns (address)'], providerConet)
 				const merchant = await posMgmt.getPOSMerchant(eoa)
 				if (merchant && merchant !== ethers.ZeroAddress) {
-					const adminRet = await _search(ethers.getAddress(merchant))
+					const adminRet = await _searchExactByAddress(ethers.getAddress(merchant).toLowerCase())
 					const adminRow = adminRet?.results?.[0]
 					if (adminRow) {
 						adminProfile = {

@@ -1567,43 +1567,42 @@ export const getMintMetadataForOwner = async (
 	}
 }
 
-export const _search = async (keyward: string) => {
-  const _keywork = String(keyward || "")
-    .trim()
-    .replace(/^@+/, "")          // ✅ 去掉开头的 @@@
-    .replace(/\s+/g, " ")        // ✅ 压缩空格
+/** Base 上：EOA 返回自身小写；合约则必须能解析出非零 owner()，否则 null（search 返回空）。getCode 失败时按 EOA 处理以免 RPC 抖动误杀。 */
+export const resolveSearchAddressToEOALower = async (address: string): Promise<string | null> => {
+	if (!ethers.isAddress(address)) return null
+	const addr = ethers.getAddress(address)
+	let code: string
+	try {
+		code = await providerBase.getCode(addr)
+	} catch (e) {
+		logger(`resolveSearchAddressToEOALower getCode(${addr}) failed: ${(e as Error)?.message ?? e}`)
+		return addr.toLowerCase()
+	}
+	const isContract = Boolean(code && code !== "0x" && code.length > 2)
+	if (!isContract) {
+		return addr.toLowerCase()
+	}
+	try {
+		const aa = new ethers.Contract(addr, ["function owner() view returns (address)"], providerBase)
+		const owner = await aa.owner()
+		if (!owner || owner === ethers.ZeroAddress) return null
+		return ethers.getAddress(owner).toLowerCase()
+	} catch (e) {
+		logger(`resolveSearchAddressToEOALower owner() failed for ${addr}: ${(e as Error)?.message ?? e}`)
+		return null
+	}
+}
 
-  const _page = 1
-  const _pageSize = 10
+const SEARCH_EXACT_PAGE_SIZE = 10
 
-  if (!_keywork) {
-    return { results: [] }
-  }
-
-  // ✅ 极短关键词直接返回，避免 %p% 这种扫库
-  if (_keywork.length < 2 && !ethers.isAddress(_keywork)) {
-    return { results: [] }
-  }
-
-  const raw = _keywork
-  const containsPat = `%${raw}%`
-  const prefixPat = `${raw}%`
-
-  const isAddress = ethers.isAddress(_keywork)
-  const db = new Client({ connectionString: DB_URL })
-
-  try {
-    await db.connect()
-
-    const offset = (_page - 1) * _pageSize
-    let rows: any[] = []
-
-    if (isAddress) {
-      const address = _keywork.toLowerCase()
-      logger(`_search with address`)
-
-      const { rows: r } = await db.query(
-        `
+/** 仅按 accounts.address 等值匹配（无模糊）。addressLower 为小写 0x 地址。 */
+export const _searchExactByAddress = async (addressLower: string) => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const offset = 0
+		const { rows: r } = await db.query(
+			`
         SELECT
           a.address,
           a.username,
@@ -1618,15 +1617,52 @@ export const _search = async (keyward: string) => {
         ORDER BY a.created_at DESC
         LIMIT $2 OFFSET $3
         `,
-        [address, _pageSize, offset]
-      )
+			[addressLower, SEARCH_EXACT_PAGE_SIZE, offset]
+		)
+		return { results: r }
+	} catch (err) {
+		console.error("searchUsers error:", err)
+		return { error: "internal_error" }
+	} finally {
+		await db.end()
+	}
+}
 
-      rows = r
-    } else {
-      logger(`_search with keyword`)
+/** 关键词模糊搜索（非地址检索须走 searchUsers 里对地址的分支，勿把地址传入本函数）。 */
+export const _search = async (keyward: string) => {
+  const _keywork = String(keyward || "")
+    .trim()
+    .replace(/^@+/, "")          // ✅ 去掉开头的 @@@
+    .replace(/\s+/g, " ")        // ✅ 压缩空格
 
-      // ✅ 可选：降低相似度阈值，让短词排序更稳定（你每次都 connect/end，所以放这里也行）
-      // await db.query(`SELECT set_limit(0.12)`)
+  const _page = 1
+  const _pageSize = 10
+
+  if (!_keywork) {
+    return { results: [] }
+  }
+
+  // ethers.isAddress 声明为 `value is string`，对 string 入参在 false 分支会被 TS 误收窄为 never
+  if ((ethers.isAddress as (v: string) => boolean)(_keywork)) {
+    return { results: [] }
+  }
+
+  // ✅ 极短关键词直接返回，避免 %p% 这种扫库
+  if (_keywork.length < 2) {
+    return { results: [] }
+  }
+
+  const raw = _keywork
+  const containsPat = `%${raw}%`
+  const prefixPat = `${raw}%`
+
+  const db = new Client({ connectionString: DB_URL })
+
+  try {
+    await db.connect()
+
+    const offset = (_page - 1) * _pageSize
+    logger(`_search with keyword`)
 
       const { rows: r } = await db.query(
         `
@@ -1679,31 +1715,13 @@ export const _search = async (keyward: string) => {
         [raw, containsPat, prefixPat, _pageSize, offset]
       )
 
-      rows = r
-    }
-
-    return { results: rows }
+    return { results: r }
   } catch (err) {
     console.error("searchUsers error:", err)
     return { error: "internal_error" }
   } finally {
     await db.end()
   }
-}
-
-/** If the given address is an AA (has contract code on Base), return its owner (EOA); otherwise return the input. */
-const resolveAAToEOA = async (address: string): Promise<string> => {
-	if (!ethers.isAddress(address)) return address
-	try {
-		const code = await providerBase.getCode(address)
-		if (!code || code === "0x" || code.length <= 2) return address
-		const aa = new ethers.Contract(address, ["function owner() view returns (address)"], providerBase)
-		const owner = await aa.owner()
-		if (owner && owner !== ethers.ZeroAddress) return ethers.getAddress(owner)
-	} catch (e) {
-		logger(`resolveAAToEOA(${address}) failed: ${(e as Error)?.message ?? e}`)
-	}
-	return address
 }
 
 export const searchUsers = async (req: Request, res: Response) => {
@@ -1717,9 +1735,14 @@ export const searchUsers = async (req: Request, res: Response) => {
 		return res.status(404).end()
 	}
 
-	// If the search key is a wallet address and it is an AA on Base, resolve to EOA before searching (accounts table stores EOA).
 	if (ethers.isAddress(_keywork)) {
-		_keywork = await resolveAAToEOA(_keywork)
+		const normalized = ethers.getAddress(_keywork)
+		const eoaLower = await resolveSearchAddressToEOALower(normalized)
+		if (eoaLower === null) {
+			return res.status(200).json({ results: [] }).end()
+		}
+		const ret = await _searchExactByAddress(eoaLower)
+		return res.status(200).json(ret).end()
 	}
 
 	const ret = await _search(_keywork)
