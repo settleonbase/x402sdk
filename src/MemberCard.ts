@@ -1494,6 +1494,16 @@ export const ContainerRelayPool: {
 	/** NFC 扣款：扣款成功后补登记 beamioTag */
 	nfcUid?: string
 	nfcPayerEoa?: string
+	/** NFC Charge：小计（request currency，如 CAD 的 "10.50"），用于 TransactionMeta.requestAmountFiat6 / 排价 USDC */
+	nfcSubtotalCurrencyAmount?: string
+	/** NFC Charge：小费（同币种字符串）；>0 时额外写入 TX_TIP 记账行 */
+	nfcTipCurrencyAmount?: string
+	/** NFC Charge：小计/小费币种 ISO，默认 CAD */
+	nfcRequestCurrency?: string
+	nfcDiscountAmountFiat6?: string
+	nfcDiscountRateBps?: number
+	nfcTaxAmountFiat6?: string
+	nfcTaxRateBps?: number
 	res: Response
 }[] = []
 
@@ -1507,6 +1517,10 @@ export type BeamioTransferRouteItem = {
 	assetType: number
 	source: number
 	tokenId: string
+	/** 与链上 BeamioUserCard.currency() 一致；缺省时由记账进程用账单 currency 填充 */
+	itemCurrencyType?: number
+	/** RouteItem.offsetInRequestCurrencyE6；缺省与 amountE6 相同 */
+	offsetInRequestCurrencyE6?: string
 }
 
 /** BeamioTransfer / AA→EOA 成功后的 Diamond 记账请求（由 master 排队处理）。支持 USDC 与 CCSA(BeamioUserCard ERC1155) */
@@ -1554,6 +1568,20 @@ export const beamioTransferIndexerAccountingPool: {
 	payeeEOA?: string
 	/** Charge 记账：商户卡地址，用于推导 to 的上层 admin 的 AA 记入 topAdmin。可选，缺省时 open-container 用 BEAMIO_USER_CARD_ASSET_ADDRESS */
 	merchantCardAddress?: string
+	/** 覆盖 Diamond Transaction.txId（如 TX_TIP 子行使用 random bytes32） */
+	ledgerTxId?: string
+	/** 覆盖 originalPaymentHash（如 TX_TIP 指向 Base 支付 tx hash） */
+	ledgerOriginalPaymentHash?: string
+	/** 覆盖 txCategory（bytes32 hex） */
+	ledgerTxCategory?: string
+	ledgerFinalRequestAmountFiat6?: string
+	ledgerFinalRequestAmountUSDC6?: string
+	ledgerMetaRequestAmountFiat6?: string
+	ledgerMetaRequestAmountUSDC6?: string
+	ledgerMetaDiscountAmountFiat6?: string
+	ledgerMetaDiscountRateBps?: number
+	ledgerMetaTaxAmountFiat6?: string
+	ledgerMetaTaxRateBps?: number
 }[] = []
 
 export const beamioTransferIndexerAccountingProcess = async () => {
@@ -1648,35 +1676,88 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				forText: forTextPart || parsed?.forText || undefined,
 			} satisfies DisplayJsonData)
 		}
+		if (obj.ledgerMetaRequestAmountFiat6 != null && obj.ledgerMetaRequestAmountFiat6 !== '') {
+			requestAmountFiat6 = BigInt(obj.ledgerMetaRequestAmountFiat6)
+		}
 		if (requestAmountFiat6 <= 0n) {
 			requestAmountFiat6 = amountUSDC6
 			// 不覆盖 currencyFiat：currencyAmount 解析失败（如带 "CA$" 前缀）时，currency 已由 obj.currency 或 parsed 正确传入，应保留
 		}
-		const discountAmountFiat6 = 0n
-		const taxAmountFiat6 = 0n
-		const finalRequestAmountFiat6 = requestAmountFiat6 - discountAmountFiat6 + taxAmountFiat6
+		let metaRequestAmountUSDC6 = amountUSDC6
+		if (obj.ledgerMetaRequestAmountUSDC6 != null && obj.ledgerMetaRequestAmountUSDC6 !== '') {
+			metaRequestAmountUSDC6 = BigInt(obj.ledgerMetaRequestAmountUSDC6)
+		}
+		const discountAmountFiat6 =
+			obj.ledgerMetaDiscountAmountFiat6 != null && obj.ledgerMetaDiscountAmountFiat6 !== ''
+				? BigInt(obj.ledgerMetaDiscountAmountFiat6)
+				: 0n
+		const discountRateBps = Number(obj.ledgerMetaDiscountRateBps ?? 0)
+		const taxAmountFiat6 =
+			obj.ledgerMetaTaxAmountFiat6 != null && obj.ledgerMetaTaxAmountFiat6 !== ''
+				? BigInt(obj.ledgerMetaTaxAmountFiat6)
+				: 0n
+		const taxRateBps = Number(obj.ledgerMetaTaxRateBps ?? 0)
+		let finalRequestAmountFiat6: bigint
+		if (obj.ledgerFinalRequestAmountFiat6 != null && obj.ledgerFinalRequestAmountFiat6 !== '') {
+			finalRequestAmountFiat6 = BigInt(obj.ledgerFinalRequestAmountFiat6)
+		} else {
+			finalRequestAmountFiat6 = requestAmountFiat6 - discountAmountFiat6 + taxAmountFiat6
+		}
+		let finalRequestAmountUSDC6: bigint
+		if (obj.ledgerFinalRequestAmountUSDC6 != null && obj.ledgerFinalRequestAmountUSDC6 !== '') {
+			finalRequestAmountUSDC6 = BigInt(obj.ledgerFinalRequestAmountUSDC6)
+		} else {
+			finalRequestAmountUSDC6 = amountUSDC6
+		}
 
-		const TX_TRANSFER_OUT = ethers.keccak256(ethers.toUtf8Bytes('transfer_out:confirmed'))
-		const TX_INTERNAL = ethers.keccak256(ethers.toUtf8Bytes('internal_transfer:confirmed'))
-		const TX_REQUEST_FULFILLED = ethers.keccak256(ethers.toUtf8Bytes('request_fulfilled:confirmed'))
+		const TX_TRANSFER_OUT = ethers.keccak256(ethers.toUtf8Bytes('transfer_out:confirmed')) as `0x${string}`
+		const TX_INTERNAL = ethers.keccak256(ethers.toUtf8Bytes('internal_transfer:confirmed')) as `0x${string}`
+		const TX_REQUEST_FULFILLED = ethers.keccak256(ethers.toUtf8Bytes('request_fulfilled:confirmed')) as `0x${string}`
+		const TX_TIP = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP')) as `0x${string}`
 		const CHAIN_ID_BASE = 8453n
 		const requestHashValid = obj.requestHash && ethers.isHexString(obj.requestHash) && ethers.dataLength(obj.requestHash) === 32
-		const originalPaymentHash = requestHashValid ? (obj.requestHash as `0x${string}`) : ethers.ZeroHash
-		const txCategory = isInternalTransfer ? TX_INTERNAL : (requestHashValid ? TX_REQUEST_FULFILLED : TX_TRANSFER_OUT)
-		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] requestHash=${obj.requestHash ?? 'n/a'} valid=${requestHashValid} txCategory=${requestHashValid ? 'request_fulfilled' : 'transfer_out'}`))
+		const ledgerOrigValid =
+			obj.ledgerOriginalPaymentHash &&
+			ethers.isHexString(obj.ledgerOriginalPaymentHash) &&
+			ethers.dataLength(obj.ledgerOriginalPaymentHash) === 32
+		const originalPaymentHash = ledgerOrigValid
+			? (obj.ledgerOriginalPaymentHash as `0x${string}`)
+			: requestHashValid
+				? (obj.requestHash as `0x${string}`)
+				: ethers.ZeroHash
+		let txCategory: `0x${string}` = isInternalTransfer ? TX_INTERNAL : requestHashValid ? TX_REQUEST_FULFILLED : TX_TRANSFER_OUT
+		const ledgerCatValid =
+			obj.ledgerTxCategory && ethers.isHexString(obj.ledgerTxCategory) && ethers.dataLength(obj.ledgerTxCategory) === 32
+		if (ledgerCatValid) {
+			txCategory = obj.ledgerTxCategory as `0x${string}`
+		}
+		const ledgerTxIdValid =
+			obj.ledgerTxId && ethers.isHexString(obj.ledgerTxId) && ethers.dataLength(obj.ledgerTxId) === 32
+		const txIdForLedger = (ledgerTxIdValid ? obj.ledgerTxId! : txHash) as `0x${string}`
+		logger(
+			Colors.gray(
+				`[beamioTransferIndexerAccountingProcess] requestHash=${obj.requestHash ?? 'n/a'} valid=${requestHashValid} txCategory=${txCategory === TX_TIP ? 'TX_TIP' : requestHashValid ? 'request_fulfilled' : isInternalTransfer ? 'internal' : 'transfer_out'} ledgerTxId=${ledgerTxIdValid ? 'yes' : 'no'}`
+			)
+		)
 		const routeItems: { asset: string; amountE6: bigint; assetType: number; source: number; tokenId: bigint; itemCurrencyType: number; offsetInRequestCurrencyE6: bigint }[] = []
 		if (obj.routeItems && obj.routeItems.length > 0) {
 			for (const r of obj.routeItems) {
 				if (!ethers.isAddress(r.asset)) continue
 				const amtE6 = BigInt(r.amountE6)
+				const itemCur =
+					r.itemCurrencyType !== undefined && r.itemCurrencyType !== null ? Number(r.itemCurrencyType) : currencyFiat
+				const offsetE6 =
+					r.offsetInRequestCurrencyE6 !== undefined && r.offsetInRequestCurrencyE6 !== ''
+						? BigInt(r.offsetInRequestCurrencyE6)
+						: amtE6
 				routeItems.push({
 					asset: ethers.getAddress(r.asset),
 					amountE6: amtE6,
 					assetType: r.assetType ?? 0,
 					source: r.source ?? 0,
 					tokenId: BigInt(r.tokenId ?? '0'),
-					itemCurrencyType: currencyFiat,
-					offsetInRequestCurrencyE6: amtE6,
+					itemCurrencyType: itemCur,
+					offsetInRequestCurrencyE6: offsetE6,
 				})
 			}
 		} else if (obj.routeAsset && ethers.isAddress(obj.routeAsset)) {
@@ -1705,7 +1786,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		const hasRouteFromAA = routeItems.length > 0
 		const isAAAccount = isInternalTransfer || hasRouteFromAA
 		const transactionInput = {
-			txId: txHash as `0x${string}`,
+			txId: txIdForLedger,
 			originalPaymentHash,
 			chainId: CHAIN_ID_BASE,
 			txCategory,
@@ -1714,7 +1795,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			payer: ethers.getAddress(obj.from),
 			payee: ethers.getAddress(obj.to),
 			finalRequestAmountFiat6,
-			finalRequestAmountUSDC6: amountUSDC6,
+			finalRequestAmountUSDC6,
 			isAAAccount,
 			route: routeItems,
 			fees: {
@@ -1728,12 +1809,12 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			},
 			meta: {
 				requestAmountFiat6,
-				requestAmountUSDC6: amountUSDC6,
+				requestAmountUSDC6: metaRequestAmountUSDC6,
 				currencyFiat,
 				discountAmountFiat6,
-				discountRateBps: 0,
+				discountRateBps,
 				taxAmountFiat6,
-				taxRateBps: 0,
+				taxRateBps,
 				afterNotePayer: '',
 				afterNotePayee: obj.displayJson || obj.note || '',
 			},
@@ -4985,6 +5066,24 @@ export const OpenContainerRelayProcess = async () => {
   }
 }
 
+/** NFC Container 记账：字符串金额 → fiat E6 */
+async function containerRelayFiatStringToE6(amountStr: string | undefined): Promise<bigint> {
+	if (amountStr == null || String(amountStr).trim() === '') return 0n
+	const val = parseFloat(String(amountStr).trim())
+	if (!Number.isFinite(val) || val < 0) return 0n
+	return BigInt(Math.round(val * 1e6))
+}
+
+async function containerRelayFiatE6ToUsdc6(currencyFiatNum: number, fiatE6: bigint): Promise<bigint> {
+	if (fiatE6 <= 0n) return 0n
+	try {
+		const rateE18 = await getRateE18Safe(currencyFiatNum)
+		return rateE18 > 0n ? (fiatE6 * rateE18) / E18 : currencyFiatNum === 4 ? fiatE6 : 0n
+	} catch {
+		return currencyFiatNum === 4 ? fiatE6 : 0n
+	}
+}
+
 /** 使用 Factory.relayContainerMainRelayed（绑定 to）代付 Gas 执行转账；与 AAtoEOAProcess 共用 Settle_ContractPool。 */
 export const ContainerRelayProcess = async () => {
   const obj = ContainerRelayPool.shift()
@@ -5087,15 +5186,31 @@ export const ContainerRelayProcess = async () => {
     } else {
       logger(Colors.yellow(`[AAtoEOA/Container] skip consumeFromUser: feePayer=${feePayerEOA ?? 'null'} feeBUnits6=${feeBUnits6}`))
     }
-    // ContainerRelayProcess 只处理单个 item，所以 currency 和 currencyAmount 应该是字符串
+    // ContainerRelay：按 container items 组装 RouteItem；NFC 时写入 fiat/USDC 双语金额、TransactionMeta 与可选 TX_TIP 子行
     const currencyValue = Array.isArray(obj.currency) ? obj.currency[0] : obj.currency
     const currencyAmountValue = Array.isArray(obj.currencyAmount) ? obj.currencyAmount[0] : obj.currencyAmount
     const currency = (currencyValue ?? 'USDC') as ICurrency
     const currencyAmount = currencyAmountValue ?? String(Number(usdcAmountRaw) / 1e6)
-    const currencyDiscountValue = obj.currencyDiscount != null ? (Array.isArray(obj.currencyDiscount) ? obj.currencyDiscount[0] : obj.currencyDiscount) : undefined
-    const currencyDiscountAmountValue = obj.currencyDiscountAmount != null ? (Array.isArray(obj.currencyDiscountAmount) ? obj.currencyDiscountAmount[0] : obj.currencyDiscountAmount) : undefined
+    const BeamioCurrencyMapLocal: Record<string, number> = {
+      CAD: 0,
+      USD: 1,
+      JPY: 2,
+      CNY: 3,
+      USDC: 4,
+      HKD: 5,
+      EUR: 6,
+      SGD: 7,
+      TWD: 8,
+      ETH: 9,
+      BNB: 10,
+      SOLANA: 11,
+      BTC: 12,
+    }
+    const reqCurUpper = String(obj.nfcRequestCurrency ?? currency ?? 'CAD').toUpperCase()
+    const payerCurrencyFiatNum = BeamioCurrencyMapLocal[reqCurUpper] ?? 0
+
     const displayJsonData: DisplayJsonData = {
-      title: 'AA to EOA',
+      title: obj.nfcUid ? 'NFC Merchant Payment' : 'AA to EOA',
       source: 'container',
       finishedHash: tx.hash,
       handle: obj.forText?.trim()?.slice(0, 80),
@@ -5103,7 +5218,6 @@ export const ContainerRelayProcess = async () => {
     }
     logger(Colors.green(`✅ ContainerRelayProcess displayJson = ${inspect(displayJsonData, false, 2, true)}`))
 
-    // Charge 记账：resolve to(payee) to EOA for subordinate
     let payeeEOA: string = to
     try {
       const toCode = await SC.walletBase.provider!.getCode(to)
@@ -5118,19 +5232,85 @@ export const ContainerRelayProcess = async () => {
       payeeEOA = ethers.getAddress(to)
     }
 
-    // Charge 记账：route 必须用卡资产（非 USDC），否则 getAssetTransactionsByTopAdmin(asset=card) 查不到
-    const firstItem = payload.items[0]
-    const firstAsset = firstItem?.asset && ethers.isAddress(firstItem.asset) ? ethers.getAddress(firstItem.asset) : ''
-    const isCardAsset = firstAsset && firstAsset.toLowerCase() !== USDC_ADDRESS.toLowerCase()
-    const routeItems: BeamioTransferRouteItem[] = isCardAsset
-      ? [{
-          asset: firstAsset,
-          amountE6: usdcAmountRaw.toString(),
+    const usdcAddrNorm = ethers.getAddress(USDC_ADDRESS)
+    const cardCurrencyCache = new Map<string, number>()
+    const itemCurrencyTypeFor1155 = async (cardAddr: string): Promise<number> => {
+      const k = cardAddr.toLowerCase()
+      if (cardCurrencyCache.has(k)) return cardCurrencyCache.get(k)!
+      try {
+        const c = new ethers.Contract(cardAddr, ['function currency() view returns (uint8)'], SC.walletBase.provider!)
+        const cur = Number(await c.currency())
+        cardCurrencyCache.set(k, cur)
+        return cur
+      } catch {
+        cardCurrencyCache.set(k, payerCurrencyFiatNum)
+        return payerCurrencyFiatNum
+      }
+    }
+
+    const collectedRouteItems: BeamioTransferRouteItem[] = []
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      const itemAsset = ethers.getAddress(item.asset)
+      const isUSDCKind = item.kind === 0 && itemAsset.toLowerCase() === usdcAddrNorm.toLowerCase()
+      if (!isUSDCKind && item.kind !== 1) continue
+      if (item.kind === 1 && itemAsset.toLowerCase() === usdcAddrNorm.toLowerCase()) continue
+
+      const assetAmount = item.amount
+      if (isUSDCKind) {
+        collectedRouteItems.push({
+          asset: usdcAddrNorm,
+          amountE6: assetAmount.toString(),
+          assetType: 0,
+          source: 0,
+          tokenId: '0',
+          itemCurrencyType: 4,
+          offsetInRequestCurrencyE6: assetAmount.toString(),
+        })
+      } else {
+        const tokenIdVal = item.tokenId
+        const routeSource = tokenIdVal === 0n ? 1 : 2
+        const itemCur = await itemCurrencyTypeFor1155(itemAsset)
+        collectedRouteItems.push({
+          asset: itemAsset,
+          amountE6: assetAmount.toString(),
           assetType: 1,
-          source: 1,
-          tokenId: String(firstItem?.tokenId ?? '0'),
-        }]
-      : []
+          source: routeSource,
+          tokenId: tokenIdVal.toString(),
+          itemCurrencyType: itemCur,
+          offsetInRequestCurrencyE6: assetAmount.toString(),
+        })
+      }
+    }
+
+    const subtotalFiatE6 = await containerRelayFiatStringToE6(obj.nfcSubtotalCurrencyAmount)
+    const tipFiatE6 = await containerRelayFiatStringToE6(obj.nfcTipCurrencyAmount)
+    const hasNfcBreakdown =
+      !!obj.nfcUid && obj.nfcSubtotalCurrencyAmount != null && String(obj.nfcSubtotalCurrencyAmount).trim() !== ''
+
+    let ledgerFinalFiat6: string | undefined
+    let ledgerFinalUsdc6: string | undefined
+    let ledgerMetaFiat6: string | undefined
+    let ledgerMetaUsdc6: string | undefined
+    let indexerCurrency: ICurrency = currency
+    let indexerCurrencyAmount = currencyAmount
+
+    if (hasNfcBreakdown) {
+      const subtotalUsdc6 = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNum, subtotalFiatE6)
+      const discountB =
+        obj.nfcDiscountAmountFiat6 != null && obj.nfcDiscountAmountFiat6 !== '' ? BigInt(obj.nfcDiscountAmountFiat6) : 0n
+      const taxB = obj.nfcTaxAmountFiat6 != null && obj.nfcTaxAmountFiat6 !== '' ? BigInt(obj.nfcTaxAmountFiat6) : 0n
+      const baseFiat6 = subtotalFiatE6 - discountB + taxB
+      const finalMainFiat6 = baseFiat6 + tipFiatE6
+      ledgerMetaFiat6 = subtotalFiatE6.toString()
+      ledgerMetaUsdc6 = subtotalUsdc6.toString()
+      ledgerFinalFiat6 = finalMainFiat6.toString()
+      ledgerFinalUsdc6 = usdcAmountRaw.toString()
+      indexerCurrency = reqCurUpper as ICurrency
+      indexerCurrencyAmount = String(obj.nfcSubtotalCurrencyAmount).trim()
+    }
+
+    const TX_TIP_CAT = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP'))
 
     const { bServiceUSDC6: containerBUsdc6 } = calcBeamioBUnitFee(usdcAmountRaw)
     beamioTransferIndexerAccountingPool.push({
@@ -5139,8 +5319,8 @@ export const ContainerRelayProcess = async () => {
       amountUSDC6: usdcAmountRaw.toString(),
       finishedHash: tx.hash,
       displayJson: JSON.stringify(displayJsonData),
-      currency,
-      currencyAmount,
+      currency: indexerCurrency,
+      currencyAmount: indexerCurrencyAmount,
       gasWei: '0',
       gasUSDC6: '0',
       gasChainType: 0,
@@ -5152,9 +5332,78 @@ export const ContainerRelayProcess = async () => {
       merchantCardAddress: obj.merchantCardAddress,
       bServiceUSDC6: containerBUsdc6.toString(),
       bServiceUnits6: feeBUnits6.toString(),
-      ...(routeItems.length > 0 ? { routeItems } : {}),
+      ...(collectedRouteItems.length > 0 ? { routeItems: collectedRouteItems } : {}),
+      ...(hasNfcBreakdown
+        ? {
+            ledgerFinalRequestAmountFiat6: ledgerFinalFiat6,
+            ledgerFinalRequestAmountUSDC6: ledgerFinalUsdc6,
+            ledgerMetaRequestAmountFiat6: ledgerMetaFiat6,
+            ledgerMetaRequestAmountUSDC6: ledgerMetaUsdc6,
+            ledgerMetaDiscountAmountFiat6: obj.nfcDiscountAmountFiat6,
+            ledgerMetaDiscountRateBps: obj.nfcDiscountRateBps,
+            ledgerMetaTaxAmountFiat6: obj.nfcTaxAmountFiat6,
+            ledgerMetaTaxRateBps: obj.nfcTaxRateBps,
+          }
+        : {}),
     })
-    logger(Colors.cyan(`[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool (internal) from=${account} to=${to} amountUSDC6=${usdcAmountRaw} routeItems=${routeItems.length} requestHash=${obj.requestHash ?? 'n/a'}`))
+
+    if (hasNfcBreakdown && tipFiatE6 > 0n) {
+      const tipUsdc6 = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNum, tipFiatE6)
+      if (tipUsdc6 > 0n) {
+        const tipTxId = ethers.hexlify(ethers.randomBytes(32))
+        const tipDisplay: DisplayJsonData = {
+          title: 'Tip',
+          source: 'container',
+          finishedHash: tx.hash,
+          handle: 'NFC tip',
+          forText: obj.forText?.trim(),
+        }
+        beamioTransferIndexerAccountingPool.push({
+          from: account,
+          to,
+          amountUSDC6: tipUsdc6.toString(),
+          finishedHash: tx.hash,
+          displayJson: JSON.stringify(tipDisplay),
+          currency: indexerCurrency,
+          currencyAmount: obj.nfcTipCurrencyAmount != null && String(obj.nfcTipCurrencyAmount).trim() !== '' ? String(obj.nfcTipCurrencyAmount).trim() : String(Number(tipFiatE6) / 1e6),
+          gasWei: '0',
+          gasUSDC6: '0',
+          gasChainType: 0,
+          feePayer: feePayerEOA,
+          isInternalTransfer: true,
+          requestHash: obj.requestHash,
+          source: 'container',
+          payeeEOA,
+          merchantCardAddress: obj.merchantCardAddress,
+          bServiceUSDC6: '0',
+          bServiceUnits6: '0',
+          ledgerTxId: tipTxId,
+          ledgerOriginalPaymentHash: tx.hash,
+          ledgerTxCategory: TX_TIP_CAT,
+          ledgerFinalRequestAmountFiat6: tipFiatE6.toString(),
+          ledgerFinalRequestAmountUSDC6: tipUsdc6.toString(),
+          ledgerMetaRequestAmountFiat6: tipFiatE6.toString(),
+          ledgerMetaRequestAmountUSDC6: tipUsdc6.toString(),
+          routeItems: [
+            {
+              asset: usdcAddrNorm,
+              amountE6: tipUsdc6.toString(),
+              assetType: 0,
+              source: 0,
+              tokenId: '0',
+              itemCurrencyType: 4,
+              offsetInRequestCurrencyE6: tipUsdc6.toString(),
+            },
+          ],
+        })
+      }
+    }
+
+    logger(
+      Colors.cyan(
+        `[AAtoEOA/Container] pushed to beamioTransferIndexerAccountingPool from=${account} to=${to} amountUSDC6=${usdcAmountRaw} routeItems=${collectedRouteItems.length} nfcBreakdown=${hasNfcBreakdown} requestHash=${obj.requestHash ?? 'n/a'}`
+      )
+    )
     beamioTransferIndexerAccountingProcess().catch((err: any) => {
       logger(Colors.red('[AAtoEOA/Container] beamioTransferIndexerAccountingProcess unhandled:'), err?.message ?? err)
     })
@@ -7346,8 +7595,31 @@ export const payByNfcUidSignContainer = async (params: {
 	e?: string
 	c?: string
 	m?: string
+	/** 小计（与 Charge 输入币种一致，如 CAD "10.50"）→ TransactionMeta.requestAmountFiat6 / 排价 USDC */
+	nfcSubtotalCurrencyAmount?: string
+	nfcTipCurrencyAmount?: string
+	nfcRequestCurrency?: string
+	nfcDiscountAmountFiat6?: string
+	nfcDiscountRateBps?: number
+	nfcTaxAmountFiat6?: string
+	nfcTaxRateBps?: number
 }): Promise<{ pushed: boolean; error?: string }> => {
-	const { uid, containerPayload, amountUsdc6, res, e, c, m } = params
+	const {
+		uid,
+		containerPayload,
+		amountUsdc6,
+		res,
+		e,
+		c,
+		m,
+		nfcSubtotalCurrencyAmount,
+		nfcTipCurrencyAmount,
+		nfcRequestCurrency,
+		nfcDiscountAmountFiat6,
+		nfcDiscountRateBps,
+		nfcTaxAmountFiat6,
+		nfcTaxRateBps,
+	} = params
 	const uidTrim = uid.trim()
 	const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
 	let privateKey: string | null
@@ -7420,12 +7692,19 @@ export const payByNfcUidSignContainer = async (params: {
 		if (!preCheck.success) return { pushed: false, error: preCheck.error }
 		ContainerRelayPool.push({
 			containerPayload: signed,
-			currency: 'CAD',
-			currencyAmount: ethers.formatUnits(BigInt(amountUsdc6), 6),
+			currency: (nfcRequestCurrency ?? 'CAD').toUpperCase(),
+			currencyAmount: nfcSubtotalCurrencyAmount?.trim() || undefined,
 			forText: `NFC pay uid=${uid.slice(0, 12)}...`,
 			amountUSDC6: amountUsdc6,
 			nfcUid: uidTrim,
 			nfcPayerEoa: eoa,
+			nfcSubtotalCurrencyAmount: nfcSubtotalCurrencyAmount?.trim() || undefined,
+			nfcTipCurrencyAmount: nfcTipCurrencyAmount?.trim() || undefined,
+			nfcRequestCurrency: nfcRequestCurrency?.trim() || undefined,
+			nfcDiscountAmountFiat6: nfcDiscountAmountFiat6?.trim() || undefined,
+			nfcDiscountRateBps,
+			nfcTaxAmountFiat6: nfcTaxAmountFiat6?.trim() || undefined,
+			nfcTaxRateBps,
 			res,
 		})
 		logger(Colors.green(`[payByNfcUidSignContainer] pushed uid=${uid.slice(0, 12)}... items=${containerPayload.items.length}`))

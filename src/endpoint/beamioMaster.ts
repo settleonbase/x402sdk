@@ -1382,7 +1382,35 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/payByNfcUidSignContainer - 接受 Android 打包的未签名 container，用 UID 私钥签名后 relay。NFC 格式时需 e/c/m 做 SUN 校验。 */
 		router.post('/payByNfcUidSignContainer', async (req, res) => {
-			const { uid, containerPayload, amountUsdc6, e, c, m } = req.body as { uid?: string; containerPayload?: ContainerRelayPayloadUnsigned; amountUsdc6?: string; e?: string; c?: string; m?: string }
+			const {
+				uid,
+				containerPayload,
+				amountUsdc6,
+				e,
+				c,
+				m,
+				nfcSubtotalCurrencyAmount,
+				nfcTipCurrencyAmount,
+				nfcRequestCurrency,
+				nfcDiscountAmountFiat6,
+				nfcDiscountRateBps,
+				nfcTaxAmountFiat6,
+				nfcTaxRateBps,
+			} = req.body as {
+				uid?: string
+				containerPayload?: ContainerRelayPayloadUnsigned
+				amountUsdc6?: string
+				e?: string
+				c?: string
+				m?: string
+				nfcSubtotalCurrencyAmount?: string
+				nfcTipCurrencyAmount?: string
+				nfcRequestCurrency?: string
+				nfcDiscountAmountFiat6?: string
+				nfcDiscountRateBps?: number
+				nfcTaxAmountFiat6?: string
+				nfcTaxRateBps?: number
+			}
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 				return res.status(400).json({ success: false, error: 'Missing uid' })
 			}
@@ -1397,7 +1425,22 @@ const routing = ( router: Router ) => {
 			if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
 				return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
 			}
-			const result = await payByNfcUidSignContainer({ uid: uid.trim(), containerPayload, amountUsdc6, res, e, c, m })
+			const result = await payByNfcUidSignContainer({
+				uid: uid.trim(),
+				containerPayload,
+				amountUsdc6,
+				res,
+				e,
+				c,
+				m,
+				nfcSubtotalCurrencyAmount,
+				nfcTipCurrencyAmount,
+				nfcRequestCurrency,
+				nfcDiscountAmountFiat6,
+				nfcDiscountRateBps,
+				nfcTaxAmountFiat6,
+				nfcTaxRateBps,
+			})
 			if (result.pushed) return
 			return res.status(400).json({ success: false, error: result.error }).end()
 		})

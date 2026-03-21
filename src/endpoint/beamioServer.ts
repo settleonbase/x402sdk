@@ -1080,7 +1080,35 @@ const routing = ( router: Router ) => {
 
 	/** POST /api/payByNfcUidSignContainer - 接受 Android 打包的未签名 container（写操作，Cluster 预检余额后转发 Master）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。 */
 	router.post('/payByNfcUidSignContainer', async (req, res) => {
-		const { uid, containerPayload, amountUsdc6, e, c, m } = req.body as { uid?: string; containerPayload?: import('../MemberCard').ContainerRelayPayloadUnsigned; amountUsdc6?: string; e?: string; c?: string; m?: string }
+		const {
+			uid,
+			containerPayload,
+			amountUsdc6,
+			e,
+			c,
+			m,
+			nfcSubtotalCurrencyAmount,
+			nfcTipCurrencyAmount,
+			nfcRequestCurrency,
+			nfcDiscountAmountFiat6,
+			nfcDiscountRateBps,
+			nfcTaxAmountFiat6,
+			nfcTaxRateBps,
+		} = req.body as {
+			uid?: string
+			containerPayload?: import('../MemberCard').ContainerRelayPayloadUnsigned
+			amountUsdc6?: string
+			e?: string
+			c?: string
+			m?: string
+			nfcSubtotalCurrencyAmount?: string
+			nfcTipCurrencyAmount?: string
+			nfcRequestCurrency?: string
+			nfcDiscountAmountFiat6?: string
+			nfcDiscountRateBps?: number
+			nfcTaxAmountFiat6?: string
+			nfcTaxRateBps?: number
+		}
 		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 			return res.status(400).json({ success: false, error: 'Missing uid' })
 		}
@@ -1148,7 +1176,23 @@ const routing = ( router: Router ) => {
 			return res.status(500).json({ success: false, error: '余额预检失败' }).end()
 		}
 		logger(Colors.green(`[payByNfcUidSignContainer] Cluster preCheck OK uid=${uidTrim.slice(0, 16)}... forwarding to master`))
-		postLocalhost('/api/payByNfcUidSignContainer', { uid: uidTrim, containerPayload, amountUsdc6, ...(isNfcUid && { e, c, m }) }, res)
+		postLocalhost(
+			'/api/payByNfcUidSignContainer',
+			{
+				uid: uidTrim,
+				containerPayload,
+				amountUsdc6,
+				...(isNfcUid && { e, c, m }),
+				...(nfcSubtotalCurrencyAmount != null ? { nfcSubtotalCurrencyAmount } : {}),
+				...(nfcTipCurrencyAmount != null ? { nfcTipCurrencyAmount } : {}),
+				...(nfcRequestCurrency != null ? { nfcRequestCurrency } : {}),
+				...(nfcDiscountAmountFiat6 != null ? { nfcDiscountAmountFiat6 } : {}),
+				...(nfcDiscountRateBps != null ? { nfcDiscountRateBps } : {}),
+				...(nfcTaxAmountFiat6 != null ? { nfcTaxAmountFiat6 } : {}),
+				...(nfcTaxRateBps != null ? { nfcTaxRateBps } : {}),
+			},
+			res
+		)
 	})
 
 	/** POST /api/payByNfcUid - 以 UID 支付（写操作，Cluster 预检后转发 Master） */
