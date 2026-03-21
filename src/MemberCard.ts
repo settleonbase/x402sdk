@@ -3058,6 +3058,60 @@ export const nfcTopupPreCheckBUnitFee = async (
 	}
 }
 
+/**
+ * Cluster 预检：mintPointsByAdmin 是否会因 `UC_AdminAirdropLimitExceeded` 在链上回滚。
+ * 与 GovernanceModule._enforceAndRecordAdminAirdropLimit 一致：自 signer（operator）沿 adminParent 上至 owner，凡非 owner 节点须满足 used + points6 <= limit。
+ */
+export const nfcTopupPreCheckAdminAirdropLimit = async (
+	cardAddr: string,
+	signer: string,
+	points6: bigint
+): Promise<{ success: boolean; error?: string }> => {
+	try {
+		if (points6 <= 0n) {
+			return { success: true }
+		}
+		const cardAbi = [
+			'function owner() view returns (address)',
+			'function adminParent(address) view returns (address)',
+			'function getAdminAirdropLimit(address) view returns (tuple(address admin, address parent, uint256 limit, uint256 usedFromClear, uint256 remainingAvailable, bool unlimited))',
+		] as const
+		const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+		const owner = (await card.owner()) as string
+		const ownerLc = owner.toLowerCase()
+		let current: string = ethers.getAddress(signer)
+		for (let depth = 0; depth < 64; depth++) {
+			if (current === ethers.ZeroAddress) {
+				break
+			}
+			if (current.toLowerCase() !== ownerLc) {
+				const row = await card.getAdminAirdropLimit(current)
+				const unlimited = Boolean(row.unlimited)
+				const used = BigInt(row.usedFromClear)
+				const limit = BigInt(row.limit)
+				if (!unlimited && used + points6 > limit) {
+					const rem = limit > used ? limit - used : 0n
+					return {
+						success: false,
+						error: `Admin airdrop limit exceeded for ${current}: used ${used.toString()} + requested ${points6.toString()} exceeds limit ${limit.toString()} (remaining ${rem.toString()} points6). Raise mint limit or clear usage on-chain.`,
+					}
+				}
+			}
+			const parentRaw = (await card.adminParent(current)) as string
+			if (!parentRaw || parentRaw === ethers.ZeroAddress) {
+				break
+			}
+			current = ethers.getAddress(parentRaw)
+		}
+		return { success: true }
+	} catch (e: any) {
+		return {
+			success: false,
+			error: `Admin airdrop limit pre-check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
+		}
+	}
+}
+
 /** Cluster 预检：requestAccounting 向发出方（payee）收费。0.8% 金额（换算 USDC），最低 2、最高 200 B-Units；金额>=5000 USDC 时 500 B-Units。不足则拒绝。 */
 export const requestAccountingPreCheckBUnitFee = async (
 	payee: string,
@@ -3629,28 +3683,53 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 	const { obj, tx, recipientEOA, mintParsed, adminCheck, beforePoint6, beforeNfts, cardOwnerEOAForAccounting, cardCurrencyFiat } = job
 	try {
 		let baseReceipt: ethers.TransactionReceipt | null = null
-		const ensureBaseReceipt = async () => {
-			if (baseReceipt) return baseReceipt
-			baseReceipt = await tx.wait().catch(async (waitErr: any) => {
+		/** 含链上回滚：tx.wait() 常直接抛错，须轮询 receipt 才能读到 status=0 */
+		const ensureBaseReceipt = async (): Promise<ethers.TransactionReceipt | null> => {
+			if (baseReceipt) {
+				return baseReceipt
+			}
+			try {
+				baseReceipt = await tx.wait()
+			} catch (waitErr: any) {
 				const msg = waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)
 				logger(Colors.yellow(`[executeForAdminPostBaseProcess] tx.wait() failed (RPC): ${msg}`))
-				if (waitErr?.code === 'BAD_DATA' || /missing response for request/i.test(msg)) {
-					for (let i = 0; i < 12; i++) {
-						await new Promise((r) => setTimeout(r, 2000))
-						const r = await providerBaseBackup.getTransactionReceipt(tx.hash)
-						if (r) {
-							logger(Colors.green(`[executeForAdminPostBaseProcess] receipt poll ok after ${(i + 1) * 2}s`))
-							return r
-						}
+			}
+			if (!baseReceipt) {
+				for (let i = 0; i < 15; i++) {
+					await new Promise((r) => setTimeout(r, 2000))
+					const r = await providerBaseBackup.getTransactionReceipt(tx.hash)
+					if (r) {
+						logger(
+							Colors.green(
+								`[executeForAdminPostBaseProcess] receipt poll ok after ${(i + 1) * 2}s status=${r.status}`
+							)
+						)
+						baseReceipt = r
+						break
 					}
 				}
-				return null
-			}) as ethers.TransactionReceipt | null
+			}
+			if (baseReceipt && Number(baseReceipt.status ?? 0) !== 1) {
+				logger(
+					Colors.red(
+						`[executeForAdminPostBaseProcess] Base executeForAdmin tx reverted or failed: hash=${tx.hash} status=${baseReceipt.status}`
+					)
+				)
+			}
 			return baseReceipt
 		}
+		const resolvedReceipt = await ensureBaseReceipt()
+		const baseTxOk = resolvedReceipt != null && Number(resolvedReceipt.status ?? 0) === 1
+		if (!baseTxOk && (obj.cardOwnerEOA || recipientEOA)) {
+			logger(
+				Colors.red(
+					`[executeForAdminPostBaseProcess] Skip B-Unit charge and NFC topup indexer (Base tx not successful). hash=${tx.hash} — UI may have already received 200; check BaseScan for revert reason.`
+				)
+			)
+		}
 		let nfcTopupBunitConsumeTxHash: string | null = null
-		if (obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) {
-			const receipt = await ensureBaseReceipt()
+		if (baseTxOk && obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) {
+			const receipt = resolvedReceipt
 			const baseHash = tx.hash as `0x${string}`
 			const baseGas = receipt?.gasUsed ?? 0n
 			const bunitAirdropWrite = new ethers.Contract(
@@ -3674,9 +3753,8 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				logger(Colors.red(`[executeForAdminPostBaseProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
 			}
 		}
-		if (recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) {
+		if (baseTxOk && recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) {
 			try {
-				await ensureBaseReceipt()
 				const cardRead = new ethers.Contract(
 					obj.cardAddr,
 					['function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)'],
