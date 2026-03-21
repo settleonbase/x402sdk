@@ -1089,6 +1089,7 @@ const routing = ( router: Router ) => {
 			m,
 			nfcSubtotalCurrencyAmount,
 			nfcTipCurrencyAmount,
+			nfcTipRateBps,
 			nfcRequestCurrency,
 			nfcDiscountAmountFiat6,
 			nfcDiscountRateBps,
@@ -1103,6 +1104,7 @@ const routing = ( router: Router ) => {
 			m?: string
 			nfcSubtotalCurrencyAmount?: string
 			nfcTipCurrencyAmount?: string
+			nfcTipRateBps?: number
 			nfcRequestCurrency?: string
 			nfcDiscountAmountFiat6?: string
 			nfcDiscountRateBps?: number
@@ -1178,10 +1180,12 @@ const routing = ( router: Router ) => {
 		const nfcFwd = {
 			nfcSubtotalCurrencyAmount: nfcSubtotalCurrencyAmount ?? null,
 			nfcTipCurrencyAmount: nfcTipCurrencyAmount ?? null,
+			nfcTipRateBps: nfcTipRateBps ?? null,
 			nfcRequestCurrency: nfcRequestCurrency ?? null,
 			types: {
 				sub: typeof nfcSubtotalCurrencyAmount,
 				tip: typeof nfcTipCurrencyAmount,
+				tipBps: typeof nfcTipRateBps,
 				cur: typeof nfcRequestCurrency,
 			},
 		}
@@ -1203,6 +1207,9 @@ const routing = ( router: Router ) => {
 				...(isNfcUid && { e, c, m }),
 				...(fwdSub != null ? { nfcSubtotalCurrencyAmount: fwdSub } : {}),
 				...(fwdTip != null ? { nfcTipCurrencyAmount: fwdTip } : {}),
+				...(nfcTipRateBps != null && Number.isFinite(Number(nfcTipRateBps))
+					? { nfcTipRateBps: Math.max(0, Math.min(10000, Math.trunc(Number(nfcTipRateBps)))) }
+					: {}),
 				...(fwdCur != null ? { nfcRequestCurrency: fwdCur } : {}),
 				...(fwdDisc != null ? { nfcDiscountAmountFiat6: fwdDisc } : {}),
 				...(nfcDiscountRateBps != null ? { nfcDiscountRateBps } : {}),

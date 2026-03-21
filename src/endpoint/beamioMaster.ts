@@ -1391,6 +1391,7 @@ const routing = ( router: Router ) => {
 				m,
 				nfcSubtotalCurrencyAmount,
 				nfcTipCurrencyAmount,
+				nfcTipRateBps,
 				nfcRequestCurrency,
 				nfcDiscountAmountFiat6,
 				nfcDiscountRateBps,
@@ -1405,6 +1406,7 @@ const routing = ( router: Router ) => {
 				m?: string
 				nfcSubtotalCurrencyAmount?: string
 				nfcTipCurrencyAmount?: string
+				nfcTipRateBps?: number
 				nfcRequestCurrency?: string
 				nfcDiscountAmountFiat6?: string
 				nfcDiscountRateBps?: number
@@ -1451,6 +1453,10 @@ const routing = ( router: Router ) => {
 				nfcTipCurrencyAmount:
 					nfcTipCurrencyAmount != null && String(nfcTipCurrencyAmount).trim() !== ''
 						? String(nfcTipCurrencyAmount).trim()
+						: undefined,
+				nfcTipRateBps:
+					nfcTipRateBps != null && Number.isFinite(Number(nfcTipRateBps))
+						? Math.max(0, Math.min(10000, Math.trunc(Number(nfcTipRateBps))))
 						: undefined,
 				nfcRequestCurrency:
 					nfcRequestCurrency != null && String(nfcRequestCurrency).trim() !== ''
