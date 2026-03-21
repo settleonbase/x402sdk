@@ -3105,6 +3105,19 @@ export const AAtoEOAPreCheckBUnitBalance = async (packedUserOp: AAtoEOAUserOp): 
 	}
 }
 
+/** OpenContainer items：优先用第一条 kind=1 且非 CCSA 的 ERC1155（Factory beamioUserCard）做 adminParent 查询；否则回退旧常量（仅 USDC+CCSA 等场景）。 */
+export const resolveChargeFeePayerCardFromOpenContainerItems = (items: { kind: number; asset: string }[]): string => {
+	const ccsaLower = BASE_CCSA_CARD_ADDRESS.toLowerCase()
+	for (const it of items) {
+		if (Number(it.kind) !== 1) continue
+		try {
+			const a = ethers.getAddress(String(it.asset))
+			if (a.toLowerCase() !== ccsaLower) return a
+		} catch (_) {}
+	}
+	return BEAMIO_USER_CARD_ASSET_ADDRESS
+}
+
 /** Charge 费用承担方：检测 to（收款方）的上层 admin。若上层是卡的 owner 或 adminParent==0，则 BUint 费用由 to 负担；否则由 upperAdmin 负担。返回 feePayer 的 EOA。 */
 export const resolveChargeFeePayer = async (
 	to: string,
@@ -3186,7 +3199,10 @@ export const OpenContainerRelayPreCheckBUnitFee = async (
 		}
 		if (totalAmountUSDC6 <= 0n) totalAmountUSDC6 = 1n
 		const { bServiceUnits6: feeBUnits6 } = calcBeamioBUnitFee(totalAmountUSDC6)
-		const { feePayerEOA } = await resolveChargeFeePayer(to, BEAMIO_USER_CARD_ASSET_ADDRESS, providerBaseBackup)
+		const feePayerCard = resolveChargeFeePayerCardFromOpenContainerItems(
+			items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
+		)
+		const { feePayerEOA } = await resolveChargeFeePayer(to, feePayerCard, providerBaseBackup)
 		const bunitAirdropRead = new ethers.Contract(
 			CONET_BUNIT_AIRDROP_ADDRESS,
 			['function getBUnitBalance(address) view returns (uint256)'],
@@ -4692,7 +4708,9 @@ export const OpenContainerRelayProcess = async () => {
 
   try {
     const account = ethers.getAddress(payload.account)
-    let to = ethers.getAddress(payload.to)
+    /** Indexer/UI payee：与 openContainer 签名 payload.to 一致（可能是商户 EOA）；链上 relay 的 to 可能解析为 primary AA */
+    const signedPayee = ethers.getAddress(payload.to)
+    let to = signedPayee
     const items = payload.items.map((it) => ({
       kind: Number(it.kind),
       asset: ethers.getAddress(it.asset),
@@ -4808,13 +4826,14 @@ export const OpenContainerRelayProcess = async () => {
       const itemAsset = ethers.getAddress(item.asset)
       const isUSDC = item.kind === 0 && itemAsset === usdcAddress
       const isCCSA = item.kind === 1 && itemAsset === ccsacardAddress
+      const isOtherErc1155 = item.kind === 1 && itemAsset !== usdcAddress && itemAsset !== ccsacardAddress
 
-      if (!isUSDC && !isCCSA) {
-        logger(Colors.yellow(`[AAtoEOA/OpenContainer] Skipping item ${i}: kind=${item.kind}, asset=${itemAsset} (not USDC or CCSA)`))
+      if (!isUSDC && !isCCSA && !isOtherErc1155) {
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] Skipping item ${i}: kind=${item.kind}, asset=${itemAsset} (not USDC or ERC1155 route)`))
         continue
       }
 
-      const assetType = isUSDC ? 'USDC' : 'CCSA'
+      const assetType = isUSDC ? 'USDC' : isCCSA ? 'CCSA' : 'ERC1155'
       const assetAmount = item.amount
       const assetAmountHuman = String(Number(assetAmount) / 1e6)
       const itemCurrency = isCurrencyArray
@@ -4863,18 +4882,39 @@ export const OpenContainerRelayProcess = async () => {
         if (ccsacardUnitPriceUSDC6 > 0n) totalAmountUSDC6ForFee += (assetAmount * ccsacardUnitPriceUSDC6) / POINTS_ONE
         primaryCurrency = itemCurrency
         primaryCurrencyAmount = itemCurrencyAmount
+      } else if (isOtherErc1155) {
+        let other1155UnitPriceUSDC6 = 0n
+        try {
+          other1155UnitPriceUSDC6 = await SC.baseFactoryPaymaster.quoteUnitPointInUSDC6(itemAsset)
+        } catch (_) {}
+        const tokenIdVal = item.tokenId
+        const routeSource = tokenIdVal === 0n ? 1 : 2
+        collectedRouteItems.push({
+          asset: itemAsset,
+          amountE6: assetAmount.toString(),
+          assetType: 1,
+          source: routeSource,
+          tokenId: tokenIdVal.toString(),
+        })
+        totalAmountE6 += assetAmount
+        if (other1155UnitPriceUSDC6 > 0n) totalAmountUSDC6ForFee += (assetAmount * other1155UnitPriceUSDC6) / POINTS_ONE
+        primaryCurrency = itemCurrency
+        primaryCurrencyAmount = itemCurrencyAmount
       }
     }
 
     if (collectedRouteItems.length > 0) {
       // Charge 费用承担方：to 的上层 admin 逻辑（若上层是卡 owner 则 to 负担，否则 upperAdmin 负担）
-      const { feePayerEOA, payeeEOA } = await resolveChargeFeePayer(to, BEAMIO_USER_CARD_ASSET_ADDRESS, SC.walletBase.provider!)
+      const feePayerCard = resolveChargeFeePayerCardFromOpenContainerItems(
+        items.map((it) => ({ kind: it.kind, asset: it.asset }))
+      )
+      const { feePayerEOA, payeeEOA } = await resolveChargeFeePayer(to, feePayerCard, SC.walletBase.provider!)
       // Beamio 收费标准：1 USDC=100 BUnit，0.8% 费率，最低 2 BUnit，最高 200 BUnit，>=5000 USDC 时 500 BUnit
       const amountUSDC6ForFee = totalAmountUSDC6ForFee > 0n ? totalAmountUSDC6ForFee : totalAmountE6
       const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcBeamioBUnitFee(amountUSDC6ForFee)
       beamioTransferIndexerAccountingPool.push({
         from: account,
-        to,
+        to: signedPayee,
         amountUSDC6: totalAmountE6.toString(),
         finishedHash: tx.hash,
         displayJson: JSON.stringify({
@@ -4899,6 +4939,9 @@ export const OpenContainerRelayProcess = async () => {
         payeeEOA,
         merchantCardAddress: obj.merchantCardAddress,
       })
+      if (signedPayee.toLowerCase() !== to.toLowerCase()) {
+        logger(Colors.gray(`[AAtoEOA/OpenContainer] indexer payee=${signedPayee} (relay recipient AA=${to})`))
+      }
       logger(Colors.cyan(`[AAtoEOA/OpenContainer] pushed to beamioTransferIndexerAccountingPool routeItems=${collectedRouteItems.length} totalAmountE6=${totalAmountE6} amountUSDC6ForFee=${amountUSDC6ForFee} feePayer=${feePayerEOA} payeeEOA=${payeeEOA} bServiceUnits6=${feeBUnits6} bServiceUSDC6=${feeBUsdc6} requestHash=${obj.requestHash ?? 'n/a'}`))
     }
     
