@@ -10,11 +10,43 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
 
 const masterServerPort = 1111
+
+/** HTTP 记账 body 中的 routeItems 归一化（与 MemberCard 内存路径一致） */
+function normalizeBeamioRouteItemsFromBody(raw: unknown): BeamioTransferRouteItem[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) {
+		return undefined
+	}
+	const out: BeamioTransferRouteItem[] = []
+	for (const entry of raw) {
+		if (!entry || typeof entry !== 'object') {
+			continue
+		}
+		const r = entry as Record<string, unknown>
+		const asset = r.asset
+		if (typeof asset !== 'string' || !ethers.isAddress(asset)) {
+			continue
+		}
+		if (r.amountE6 == null) {
+			continue
+		}
+		out.push({
+			asset: ethers.getAddress(asset),
+			amountE6: String(r.amountE6),
+			assetType: typeof r.assetType === 'number' && Number.isFinite(r.assetType) ? r.assetType : Number(r.assetType ?? 0),
+			source: typeof r.source === 'number' && Number.isFinite(r.source) ? r.source : Number(r.source ?? 0),
+			tokenId: r.tokenId != null ? String(r.tokenId) : '0',
+			itemCurrencyType:
+				r.itemCurrencyType !== undefined && r.itemCurrencyType !== null ? Number(r.itemCurrencyType) : undefined,
+			offsetInRequestCurrencyE6: r.offsetInRequestCurrencyE6 != null ? String(r.offsetInRequestCurrencyE6) : undefined,
+		})
+	}
+	return out.length ? out : undefined
+}
 
 const ISSUED_NFT_START_ID = 100_000_000_000n
 const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
@@ -904,7 +936,40 @@ const routing = ( router: Router ) => {
 		/** x402 BeamioTransfer 成功后：写入 BeamioIndexerDiamond（master 队列处理） */
 		router.post('/beamioTransferIndexerAccounting', (req, res) => {
 			logger(Colors.gray(`[DEBUG] beamioTransferIndexerAccounting received bodyKeys=${Object.keys(req.body || {}).join(',')} from=${(req.body as any)?.from?.slice?.(0, 10)}… to=${(req.body as any)?.to?.slice?.(0, 10)}… requestHash=${(req.body as any)?.requestHash ?? 'n/a'} poolBefore=${beamioTransferIndexerAccountingPool.length}`))
-			const { from, to, amountUSDC6, finishedHash, displayJson, note, currency, currencyAmount, gasWei, gasUSDC6, gasChainType, baseGas, feePayer, isInternalTransfer, requestHash, source, payeeEOA, merchantCardAddress } = req.body as {
+			const {
+				from,
+				to,
+				amountUSDC6,
+				finishedHash,
+				displayJson,
+				note,
+				currency,
+				currencyAmount,
+				gasWei,
+				gasUSDC6,
+				gasChainType,
+				baseGas,
+				feePayer,
+				isInternalTransfer,
+				requestHash,
+				source,
+				payeeEOA,
+				merchantCardAddress,
+				ledgerTxId,
+				ledgerOriginalPaymentHash,
+				ledgerTxCategory,
+				routeItems,
+				ledgerFinalRequestAmountFiat6,
+				ledgerFinalRequestAmountUSDC6,
+				ledgerMetaRequestAmountFiat6,
+				ledgerMetaRequestAmountUSDC6,
+				ledgerMetaDiscountAmountFiat6,
+				ledgerMetaDiscountRateBps,
+				ledgerMetaTaxAmountFiat6,
+				ledgerMetaTaxRateBps,
+				bServiceUSDC6,
+				bServiceUnits6,
+			} = req.body as {
 				from?: string
 				to?: string
 				amountUSDC6?: string
@@ -923,6 +988,20 @@ const routing = ( router: Router ) => {
 				source?: string
 				payeeEOA?: string
 				merchantCardAddress?: string
+				ledgerTxId?: string
+				ledgerOriginalPaymentHash?: string
+				ledgerTxCategory?: string
+				routeItems?: unknown
+				ledgerFinalRequestAmountFiat6?: string
+				ledgerFinalRequestAmountUSDC6?: string
+				ledgerMetaRequestAmountFiat6?: string
+				ledgerMetaRequestAmountUSDC6?: string
+				ledgerMetaDiscountAmountFiat6?: string
+				ledgerMetaDiscountRateBps?: number
+				ledgerMetaTaxAmountFiat6?: string
+				ledgerMetaTaxRateBps?: number
+				bServiceUSDC6?: string
+				bServiceUnits6?: string
 			}
 			if (!ethers.isAddress(from) || !ethers.isAddress(to) || !amountUSDC6 || !finishedHash || !ethers.isAddress(feePayer)) {
 				return res.status(400).json({ success: false, error: 'Invalid payload: from,to,amountUSDC6,finishedHash,feePayer required' }).end()
@@ -960,6 +1039,17 @@ const routing = ( router: Router ) => {
 				logger(Colors.yellow(`[DEBUG] beamioTransferIndexerAccounting: currency missing or empty from=${from} to=${to} finishedHash=${finishedHash}`))
 			}
 
+			const ledgerTxIdTrim = ledgerTxId != null ? String(ledgerTxId).trim() : ''
+			const ledgerTxIdOk =
+				ledgerTxIdTrim !== '' && ethers.isHexString(ledgerTxIdTrim) && ethers.dataLength(ledgerTxIdTrim) === 32
+			const ledgerOrigTrim = ledgerOriginalPaymentHash != null ? String(ledgerOriginalPaymentHash).trim() : ''
+			const ledgerOrigOk =
+				ledgerOrigTrim !== '' && ethers.isHexString(ledgerOrigTrim) && ethers.dataLength(ledgerOrigTrim) === 32
+			const ledgerCatTrim = ledgerTxCategory != null ? String(ledgerTxCategory).trim() : ''
+			const ledgerCatOk =
+				ledgerCatTrim !== '' && ethers.isHexString(ledgerCatTrim) && ethers.dataLength(ledgerCatTrim) === 32
+			const parsedRouteItems = normalizeBeamioRouteItemsFromBody(routeItems)
+
 			beamioTransferIndexerAccountingPool.push({
 				from: String(from),
 				to: String(to),
@@ -979,6 +1069,36 @@ const routing = ( router: Router ) => {
 				source: source === 'x402' ? 'x402' : (source === 'open-container' || source === 'container' ? source : undefined),
 				payeeEOA: payeeEOA && ethers.isAddress(payeeEOA) ? payeeEOA : undefined,
 				merchantCardAddress: merchantCardAddress && ethers.isAddress(merchantCardAddress) ? merchantCardAddress : undefined,
+				...(ledgerTxIdOk ? { ledgerTxId: ledgerTxIdTrim } : {}),
+				...(ledgerOrigOk ? { ledgerOriginalPaymentHash: ledgerOrigTrim } : {}),
+				...(ledgerCatOk ? { ledgerTxCategory: ledgerCatTrim } : {}),
+				...(parsedRouteItems ? { routeItems: parsedRouteItems } : {}),
+				...(ledgerFinalRequestAmountFiat6 != null && String(ledgerFinalRequestAmountFiat6).trim() !== ''
+					? { ledgerFinalRequestAmountFiat6: String(ledgerFinalRequestAmountFiat6) }
+					: {}),
+				...(ledgerFinalRequestAmountUSDC6 != null && String(ledgerFinalRequestAmountUSDC6).trim() !== ''
+					? { ledgerFinalRequestAmountUSDC6: String(ledgerFinalRequestAmountUSDC6) }
+					: {}),
+				...(ledgerMetaRequestAmountFiat6 != null && String(ledgerMetaRequestAmountFiat6).trim() !== ''
+					? { ledgerMetaRequestAmountFiat6: String(ledgerMetaRequestAmountFiat6) }
+					: {}),
+				...(ledgerMetaRequestAmountUSDC6 != null && String(ledgerMetaRequestAmountUSDC6).trim() !== ''
+					? { ledgerMetaRequestAmountUSDC6: String(ledgerMetaRequestAmountUSDC6) }
+					: {}),
+				...(ledgerMetaDiscountAmountFiat6 != null && String(ledgerMetaDiscountAmountFiat6).trim() !== ''
+					? { ledgerMetaDiscountAmountFiat6: String(ledgerMetaDiscountAmountFiat6) }
+					: {}),
+				...(ledgerMetaDiscountRateBps != null && Number.isFinite(Number(ledgerMetaDiscountRateBps))
+					? { ledgerMetaDiscountRateBps: Number(ledgerMetaDiscountRateBps) }
+					: {}),
+				...(ledgerMetaTaxAmountFiat6 != null && String(ledgerMetaTaxAmountFiat6).trim() !== ''
+					? { ledgerMetaTaxAmountFiat6: String(ledgerMetaTaxAmountFiat6) }
+					: {}),
+				...(ledgerMetaTaxRateBps != null && Number.isFinite(Number(ledgerMetaTaxRateBps))
+					? { ledgerMetaTaxRateBps: Number(ledgerMetaTaxRateBps) }
+					: {}),
+				...(bServiceUSDC6 != null && String(bServiceUSDC6).trim() !== '' ? { bServiceUSDC6: String(bServiceUSDC6) } : {}),
+				...(bServiceUnits6 != null && String(bServiceUnits6).trim() !== '' ? { bServiceUnits6: String(bServiceUnits6) } : {}),
 				res,
 			})
 			logger(Colors.cyan(`[beamioTransferIndexerAccounting] pushed to pool from=${from} to=${to} amountUSDC6=${amountUSDC6} requestHash=${reqHashValid ?? 'n/a'} (raw=${requestHash ?? 'undefined'})`))

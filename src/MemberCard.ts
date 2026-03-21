@@ -1498,7 +1498,7 @@ export const ContainerRelayPool: {
 	nfcSubtotalCurrencyAmount?: string
 	/** NFC Charge：小费（同币种字符串）；>0 时额外写入 TX_TIP 记账行 */
 	nfcTipCurrencyAmount?: string
-	/** NFC Charge：小费率（bps，如 18% = 1800）；写入主单 TransactionMeta.discountRateBps（与 tip 金额共用 discount 槽位） */
+	/** NFC Charge：小费率 bps（如 1800 = 18%）；小费仅走 TX_TIP 子行，主单 meta.discount* 仅表示会员 tier 折扣 */
 	nfcTipRateBps?: number
 	/** NFC Charge：小计/小费币种 ISO，默认 CAD */
 	nfcRequestCurrency?: string
@@ -5219,15 +5219,6 @@ export const ContainerRelayProcess = async () => {
     const reqCurUpper = String(obj.nfcRequestCurrency ?? currency ?? 'CAD').toUpperCase()
     const payerCurrencyFiatNum = BeamioCurrencyMapLocal[reqCurUpper] ?? 0
 
-    const displayJsonData: DisplayJsonData = {
-      title: obj.nfcUid ? 'NFC Merchant Payment' : 'AA to EOA',
-      source: 'container',
-      finishedHash: tx.hash,
-      handle: obj.forText?.trim()?.slice(0, 80),
-      forText: obj.forText?.trim(),
-    }
-    logger(Colors.green(`✅ ContainerRelayProcess displayJson = ${inspect(displayJsonData, false, 2, true)}`))
-
     let payeeEOA: string = to
     try {
       const toCode = await SC.walletBase.provider!.getCode(to)
@@ -5328,44 +5319,80 @@ export const ContainerRelayProcess = async () => {
       const discountB =
         obj.nfcDiscountAmountFiat6 != null && obj.nfcDiscountAmountFiat6 !== '' ? BigInt(obj.nfcDiscountAmountFiat6) : 0n
       const taxB = obj.nfcTaxAmountFiat6 != null && obj.nfcTaxAmountFiat6 !== '' ? BigInt(obj.nfcTaxAmountFiat6) : 0n
+      /** 主单根层 finalRequestAmountFiat6 口径：请求小计 ± 税/会员折扣，不含小费（readme Transaction） */
       const baseFiat6 = subtotalFiatE6 - discountB + taxB
       if (tipFiatE6 > 0n) {
         tipUsdc6Snapshot = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNum, tipFiatE6)
+        if (tipUsdc6Snapshot === 0n && usdcAmountRaw > 0n) {
+          const denomFiat = subtotalFiatE6 + tipFiatE6
+          if (denomFiat > 0n) {
+            tipUsdc6Snapshot = (usdcAmountRaw * tipFiatE6) / denomFiat
+          }
+        }
       }
+      /** 主单根层 finalRequestAmountUSDC6：链上本笔总 USDC6 − 小费 USDC6（小费单独 TX_TIP 行登记） */
       let mainUsdc6 = usdcAmountRaw
-      if (tipUsdc6Snapshot > 0n) {
+      if (tipFiatE6 > 0n && tipUsdc6Snapshot > 0n) {
         mainUsdc6 = usdcAmountRaw >= tipUsdc6Snapshot ? usdcAmountRaw - tipUsdc6Snapshot : 0n
       }
       ledgerMetaFiat6 = subtotalFiatE6.toString()
       ledgerMetaUsdc6 = subtotalUsdc6.toString()
-      // 主单：仅小计（±折扣/税），不含小费；小费为队列中第二条（TX_TIP，id 随机，originalPaymentHash=本 relay tx）
       ledgerFinalFiat6 = baseFiat6.toString()
       ledgerFinalUsdc6 = mainUsdc6.toString()
       indexerCurrency = reqCurUpper as ICurrency
       indexerCurrencyAmount = effectiveNfcSubtotalStr
     }
 
-    /** 主单 meta：有小费时 discount* 槽位记小费（readme NFC 约定）；无小费时仍可用 nfcDiscount* 记商户折扣 */
+    /** 主单 meta.discount*：仅会员 tier 折扣（nfcDiscount*）；小费不再占用该槽位 */
     let nfcLedgerDiscountAmountFiat6: string | undefined
     let nfcLedgerDiscountRateBps: number | undefined
     if (hasNfcBreakdown) {
-      if (tipFiatE6 > 0n) {
-        let tipBps = 0
-        if (obj.nfcTipRateBps != null && Number.isFinite(Number(obj.nfcTipRateBps))) {
-          tipBps = Math.max(0, Math.min(10000, Math.trunc(Number(obj.nfcTipRateBps))))
-        } else if (subtotalFiatE6 > 0n) {
-          tipBps = Number((tipFiatE6 * 10000n) / subtotalFiatE6)
-        }
-        nfcLedgerDiscountAmountFiat6 = tipFiatE6.toString()
-        nfcLedgerDiscountRateBps = tipBps
-      } else {
-        nfcLedgerDiscountAmountFiat6 =
-          obj.nfcDiscountAmountFiat6 != null && String(obj.nfcDiscountAmountFiat6).trim() !== ''
-            ? String(obj.nfcDiscountAmountFiat6).trim()
-            : undefined
-        nfcLedgerDiscountRateBps = obj.nfcDiscountRateBps
+      nfcLedgerDiscountAmountFiat6 =
+        obj.nfcDiscountAmountFiat6 != null && String(obj.nfcDiscountAmountFiat6).trim() !== ''
+          ? String(obj.nfcDiscountAmountFiat6).trim()
+          : undefined
+      nfcLedgerDiscountRateBps =
+        obj.nfcDiscountRateBps != null && Number.isFinite(Number(obj.nfcDiscountRateBps))
+          ? Math.max(0, Math.min(10000, Math.trunc(Number(obj.nfcDiscountRateBps))))
+          : undefined
+    }
+
+    const displayJsonData: DisplayJsonData = {
+      title: obj.nfcUid ? 'NFC Merchant Payment' : 'AA to EOA',
+      source: 'container',
+      finishedHash: tx.hash,
+      handle: obj.forText?.trim()?.slice(0, 80),
+      forText: obj.forText?.trim(),
+    }
+    if (hasNfcBreakdown) {
+      const discountB =
+        obj.nfcDiscountAmountFiat6 != null && obj.nfcDiscountAmountFiat6 !== '' ? BigInt(obj.nfcDiscountAmountFiat6) : 0n
+      const taxB = obj.nfcTaxAmountFiat6 != null && obj.nfcTaxAmountFiat6 !== '' ? BigInt(obj.nfcTaxAmountFiat6) : 0n
+      let tipBpsForDisplay = 0
+      if (obj.nfcTipRateBps != null && Number.isFinite(Number(obj.nfcTipRateBps))) {
+        tipBpsForDisplay = Math.max(0, Math.min(10000, Math.trunc(Number(obj.nfcTipRateBps))))
+      } else if (tipFiatE6 > 0n && subtotalFiatE6 > 0n) {
+        tipBpsForDisplay = Number((tipFiatE6 * 10000n) / subtotalFiatE6)
+      }
+      const fmt2 = (e6: bigint) => (Number(e6) / 1e6).toFixed(2)
+      displayJsonData.chargeBreakdown = {
+        requestCurrency: reqCurUpper,
+        subtotalCurrencyAmount: effectiveNfcSubtotalStr,
+        taxRatePercent:
+          obj.nfcTaxRateBps != null && Number.isFinite(Number(obj.nfcTaxRateBps))
+            ? Math.round((Number(obj.nfcTaxRateBps) / 100) * 100) / 100
+            : 0,
+        taxAmountCurrencyAmount: fmt2(taxB),
+        tierDiscountPercent:
+          obj.nfcDiscountRateBps != null && Number.isFinite(Number(obj.nfcDiscountRateBps))
+            ? Math.round((Number(obj.nfcDiscountRateBps) / 100) * 100) / 100
+            : 0,
+        tierDiscountAmountCurrencyAmount: fmt2(discountB),
+        tipRatePercent: tipBpsForDisplay > 0 ? Math.round((tipBpsForDisplay / 100) * 100) / 100 : 0,
+        tipCurrencyAmount: effectiveNfcTipStr !== '' ? effectiveNfcTipStr : undefined,
       }
     }
+    logger(Colors.green(`✅ ContainerRelayProcess displayJson = ${inspect(displayJsonData, false, 2, true)}`))
 
     const TX_TIP_CAT = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP'))
 

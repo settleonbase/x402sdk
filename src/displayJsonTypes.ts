@@ -20,4 +20,15 @@ export type DisplayJsonData = {
 		validDays?: number
 		expiresAt?: number
 	}
+	/** NFC Charge 明细（与 Transaction.meta 税/折扣一致；小费另有 TX_TIP 行） */
+	chargeBreakdown?: {
+		requestCurrency?: string
+		subtotalCurrencyAmount?: string
+		taxRatePercent?: number
+		taxAmountCurrencyAmount?: string
+		tierDiscountPercent?: number
+		tierDiscountAmountCurrencyAmount?: string
+		tipRatePercent?: number
+		tipCurrencyAmount?: string
+	}
 }

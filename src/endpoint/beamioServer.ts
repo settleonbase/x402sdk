@@ -3053,6 +3053,23 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				isInternalTransfer?: boolean
 				requestHash?: string
 				validDays?: number | string
+				ledgerTxId?: string
+				ledgerOriginalPaymentHash?: string
+				ledgerTxCategory?: string
+				source?: string
+				payeeEOA?: string
+				merchantCardAddress?: string
+				routeItems?: unknown
+				ledgerFinalRequestAmountFiat6?: string
+				ledgerFinalRequestAmountUSDC6?: string
+				ledgerMetaRequestAmountFiat6?: string
+				ledgerMetaRequestAmountUSDC6?: string
+				ledgerMetaDiscountAmountFiat6?: string
+				ledgerMetaDiscountRateBps?: number
+				ledgerMetaTaxAmountFiat6?: string
+				ledgerMetaTaxRateBps?: number
+				bServiceUSDC6?: string
+				bServiceUnits6?: string
 			}
 			if (!ethers.isAddress(body?.from) || !ethers.isAddress(body?.to)) {
 				logger(Colors.red(`[beamioTransferIndexerAccounting] server pre-check FAIL: invalid from/to`))
@@ -3085,6 +3102,25 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			if (!body.currencyAmount || !String(body.currencyAmount).trim()) {
 				logger(Colors.red(`[beamioTransferIndexerAccounting] REJECT: currencyAmount is required`))
 				return res.status(400).json({ success: false, error: 'currencyAmount is required for accounting' }).end()
+			}
+			const TX_TIP_CAT_HEX = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP'))
+			const catHex = body.ledgerTxCategory != null ? String(body.ledgerTxCategory).trim() : ''
+			if (catHex !== '' && catHex.toLowerCase() === TX_TIP_CAT_HEX.toLowerCase()) {
+				const lid = body.ledgerTxId != null ? String(body.ledgerTxId).trim() : ''
+				const lorig = body.ledgerOriginalPaymentHash != null ? String(body.ledgerOriginalPaymentHash).trim() : ''
+				const fh = String(body.finishedHash).trim()
+				if (!lid || !ethers.isHexString(lid) || ethers.dataLength(lid) !== 32) {
+					return res.status(400).json({ success: false, error: 'TX_TIP accounting requires ledgerTxId (random bytes32, distinct from main tx id)' }).end()
+				}
+				if (!lorig || !ethers.isHexString(lorig) || ethers.dataLength(lorig) !== 32) {
+					return res.status(400).json({ success: false, error: 'TX_TIP accounting requires ledgerOriginalPaymentHash (parent main Transaction.id / Base relay tx hash)' }).end()
+				}
+				if (lorig.toLowerCase() !== fh.toLowerCase()) {
+					return res.status(400).json({ success: false, error: 'TX_TIP ledgerOriginalPaymentHash must equal finishedHash (main relay tx hash)' }).end()
+				}
+				if (lid.toLowerCase() === fh.toLowerCase()) {
+					return res.status(400).json({ success: false, error: 'TX_TIP ledgerTxId must not equal finishedHash; use a new random bytes32 for tip row id' }).end()
+				}
 			}
 			logger(Colors.green(`[beamioTransferIndexerAccounting] server pre-check OK, forwarding to master from=${body.from?.slice(0, 10)}… to=${body.to?.slice(0, 10)}… requestHash=${body.requestHash ?? 'n/a'}`))
 			logger(Colors.gray(`[DEBUG] postLocalhost /api/beamioTransferIndexerAccounting`))
