@@ -320,16 +320,42 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 		const tx = await SC.createAccountFor(wallet)
 		logger(`DeployingSmartAccount: 创建账户交易已发送，hash=${tx.hash}`)
 		// confirmations: 0 = 仅等待 tx 被打包，不轮询区块确认，避免部分公共 RPC 的 "block too new" 一致性检查
-		const receipt = await tx.wait(0)
-
-		// 验证交易是否成功（ethers v6: status 为 bigint，1n = 成功，0n = revert）
-		if (!receipt || receipt.status === 0n || receipt.status === 0) {
-			logger(Colors.red(`DeployingSmartAccount: 交易失败，receipt.status=${receipt?.status}`))
-			return { accountAddress: '', alreadyExisted: false }
+		const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
+		let receipt = await tx.wait(0).catch((e: unknown) => {
+			logger(Colors.yellow(`DeployingSmartAccount: tx.wait(0) error (tx may still confirm): ${e instanceof Error ? e.message : String(e)}`))
+			return null
+		})
+		// 部分 RPC 返回 receipt=null 或缺少 status；仅当明确 status=失败 时判 revert，否则用链上 getCode / getTransactionReceipt 佐证
+		if (receipt) {
+			const st = receipt.status
+			const failed = st === 0n || st === 0 || st === false
+			if (failed) {
+				logger(Colors.red(`DeployingSmartAccount: 交易 revert，receipt.status=${String(st)}`))
+				return { accountAddress: '', alreadyExisted: false }
+			}
+		} else {
+			try {
+				receipt = await provider.getTransactionReceipt(tx.hash)
+			} catch {
+				/* ignore */
+			}
+			if (receipt) {
+				const st = receipt.status
+				const failed = st === 0n || st === 0 || st === false
+				if (failed) {
+					logger(Colors.red(`DeployingSmartAccount: 交易 revert（来自 getTransactionReceipt），status=${String(st)}`))
+					return { accountAddress: '', alreadyExisted: false }
+				}
+			} else {
+				logger(
+					Colors.yellow(
+						'DeployingSmartAccount: wait(0) 与 getTransactionReceipt 均无可用 receipt，将用预测地址 getCode 判断是否已部署'
+					)
+				)
+			}
 		}
 
 		// CREATE2 确定性：实际部署地址 = getAddress(creator, 0) = predictedAddress
-		const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
 		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 		let code = await provider.getCode(predictedAddress)
 		if (code === '0x' || code === '') {
@@ -2621,8 +2647,19 @@ export const purchaseBUnitFromBasePreCheck = (body: {
 	if (!body.from || !ethers.isAddress(body.from)) {
 		return { success: false, error: 'Invalid from address' }
 	}
-	const amount = typeof body.amount === 'string' ? BigInt(body.amount) : null
-	const MIN_USDC6 = 1_000_000n  // 1 USDC (6 decimals)
+	let amount: bigint | null = null
+	try {
+		if (typeof body.amount === 'bigint') {
+			amount = body.amount
+		} else if (typeof body.amount === 'number' && Number.isFinite(body.amount)) {
+			amount = BigInt(Math.trunc(body.amount))
+		} else if (typeof body.amount === 'string' && body.amount.trim()) {
+			amount = BigInt(body.amount.trim())
+		}
+	} catch {
+		amount = null
+	}
+	const MIN_USDC6 = 1_000_000n // 1 USDC (6 decimals); each refuel must be >= 1 USDC
 	if (amount === null || amount < MIN_USDC6) {
 		return { success: false, error: 'Minimum purchase is 1 USDC' }
 	}
@@ -2673,6 +2710,40 @@ export const purchaseBUnitFromBaseProcess = async () => {
 	}
 	logger(Colors.cyan(`[purchaseBUnitFromBaseProcess] from=${obj.from.slice(0, 10)}... amount=${obj.amount}`))
 	try {
+		const fromAddr = ethers.getAddress(obj.from)
+		let amountBn: bigint
+		try {
+			amountBn = BigInt(obj.amount)
+		} catch {
+			throw new Error('Invalid amount')
+		}
+		const MIN_PURCHASE_USDC6 = 1_000_000n
+		if (amountBn < MIN_PURCHASE_USDC6) {
+			throw new Error('Minimum purchase is 1 USDC')
+		}
+		const aaFactory = SC.aaAccountFactoryPaymaster
+		if (!aaFactory) {
+			throw new Error('aaAccountFactoryPaymaster not initialized')
+		}
+		const provider = (SC.walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+		let aaAddr: string = await aaFactory.beamioAccountOf(fromAddr)
+		if (!aaAddr || aaAddr === ethers.ZeroAddress) {
+			try {
+				aaAddr = await aaFactory.primaryAccountOf(fromAddr)
+			} catch {
+				aaAddr = ethers.ZeroAddress
+			}
+		}
+		const codeAtAa = aaAddr && aaAddr !== ethers.ZeroAddress ? await provider.getCode(aaAddr) : '0x'
+		const hasAA = aaAddr && aaAddr !== ethers.ZeroAddress && codeAtAa !== '0x' && codeAtAa !== ''
+		if (!hasAA) {
+			logger(Colors.cyan(`[purchaseBUnitFromBaseProcess] EOA ${fromAddr} has no AA, creating before B-Unit refuel...`))
+			const { accountAddress } = await DeployingSmartAccount(fromAddr, aaFactory)
+			if (!accountAddress) {
+				throw new Error(`Failed to create AA for ${fromAddr}`)
+			}
+			logger(Colors.green(`[purchaseBUnitFromBaseProcess] AA ready ${accountAddress} for ${fromAddr}`))
+		}
 		const treasury = new ethers.Contract(BASE_TREASURY, BASE_TREASURY_ABI, SC.walletBase)
 		const nonceBytes32 = obj.nonce.length === 66 ? obj.nonce : ethers.zeroPadValue(obj.nonce, 32)
 		const tx = await treasury.purchaseBUnitWith3009Authorization(
