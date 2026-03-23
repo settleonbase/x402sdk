@@ -119,6 +119,8 @@ export type NfcLinkAppLockRecord = {
 	aaAddress: string
 	/** null = 未创建链上 redeem（客户尚无 AA 等） */
 	redeemHashBytes32: `0x${string}` | null
+	/** 有 infra #0 时认领走 Container 迁移（服务端写 DB） */
+	migrateViaContainer?: boolean
 }
 
 function normalizeNfcLinkTagId(raw: string): string {
@@ -168,6 +170,7 @@ export async function registerNfcLinkAppLock(
 		chainTxHash: chainTxHash ?? null,
 		linkRedeemPlaintext: linkRedeemPlaintext ?? null,
 		linkRedeemPublic: linkRedeemPublic ?? null,
+		migrateViaContainer: fixed.migrateViaContainer,
 	})
 }
 
@@ -233,13 +236,34 @@ export async function nfcLinkAppPaymentBlockedIfAny(opts: {
 	return 'This card is linking to the Beamio app. Complete or cancel in the app before top-up or charge.'
 }
 
+export type NfcLinkAppValidateOk = {
+	ok: true
+	redeemOnChain: boolean
+	/** 认领时用 NFC 私钥签 Container 迁 #0（无 createRedeemBatch） */
+	migrateViaContainer: boolean
+	payerEoa: string
+	aaAddress: string
+}
+
+function nfcLinkAppValidateOkResult(row: NfcLinkAppSessionDb, rec: NfcLinkAppLockRecord): NfcLinkAppValidateOk {
+	const redeemOnChain = rec.redeemHashBytes32 != null
+	const migrateViaContainer = !redeemOnChain && Boolean(row.migrateViaContainer)
+	return {
+		ok: true,
+		redeemOnChain,
+		migrateViaContainer,
+		payerEoa: ethers.getAddress(row.payerEoa),
+		aaAddress: ethers.getAddress(row.aaAddress),
+	}
+}
+
 /** 供 beamio.app 校验 URL 参数是否与当前 Link App 会话一致（无链上 redeem 时 nftRedeemcode 可为空或字面 null） */
 export async function nfcLinkAppValidateParams(body: {
 	nftRedeemcode?: string | null
 	tagid?: string
 	uid?: string
 	counter?: string | number
-}): Promise<{ ok: true; redeemOnChain: boolean } | { ok: false; error: string }> {
+}): Promise<NfcLinkAppValidateOk | { ok: false; error: string }> {
 	const tag = body.tagid?.trim().replace(/^0x/i, '').toLowerCase()
 	const uid = (body.uid?.trim() ?? '').toLowerCase()
 	if (!tag || !uid) return { ok: false, error: 'Missing tagid or uid.' }
@@ -258,7 +282,7 @@ export async function nfcLinkAppValidateParams(body: {
 			if (codeNorm !== row.linkRedeemPublic) {
 				return { ok: false, error: 'nftRedeemcode mismatch.' }
 			}
-			return { ok: true, redeemOnChain: false }
+			return nfcLinkAppValidateOkResult(row, rec)
 		}
 		if (codeNorm !== '' && codeNorm.toLowerCase() !== 'null') {
 			return {
@@ -266,7 +290,7 @@ export async function nfcLinkAppValidateParams(body: {
 				error: 'This session has no on-chain redeem; nftRedeemcode should be empty or null.',
 			}
 		}
-		return { ok: true, redeemOnChain: false }
+		return nfcLinkAppValidateOkResult(row, rec)
 	}
 	const code = body.nftRedeemcode == null ? '' : String(body.nftRedeemcode).trim()
 	if (!code || code.toLowerCase() === 'null') return { ok: false, error: 'Missing nftRedeemcode for this link session.' }
@@ -276,7 +300,7 @@ export async function nfcLinkAppValidateParams(body: {
 		const h = ethers.keccak256(ethers.toUtf8Bytes(code)) as `0x${string}`
 		if (h.toLowerCase() !== rec.redeemHashBytes32.toLowerCase()) return { ok: false, error: 'nftRedeemcode mismatch.' }
 	}
-	return { ok: true, redeemOnChain: true }
+	return nfcLinkAppValidateOkResult(row, rec)
 }
 
 //			RedeemModule 						0x1EC7540EbC03bcEBEc0C5f981C3D91100d206F5F
@@ -6654,13 +6678,14 @@ export const buildCardCreateRedeemBatchData = (params: {
 
 // --- NFC Link App：链上 createRedeemBatch（execute 本体）---
 
-const NFC_LINK_APP_VALID_BEFORE = 4102444800
-
 const NFC_LINK_BALANCE_OF_ABI = ['function balanceOf(address account, uint256 id) view returns (uint256)'] as const
 
 /**
- * Link App 基础设施卡 createRedeemBatch：仅打包 **token #0**（点数/基础设施份额），不把会员卡 NFT 放入 redeem container。
- * token #0 余额为 0 时返回 null → 不建链上 redeem（仅持有会员 NFT 无点数时走无链上 redeem 的 Link 会话）。
+ * Link App 基础设施卡 createRedeemBatch 的 **数量来源**：在 `cardAddress` 上用 `balanceOf(holderAa, 0)` 读取持仓。
+ *
+ * - `holderAa` 必须是 NFC 绑定 EOA 对应的 **用户 AA**（`primaryAccountOf(eoa)`），即「NFC 卡侧智能账户」在卡合约上的 ERC-1155 余额；**不是**用 EOA 的 `getOwnershipByEOA(eoa)` 来拼 container，也不是商户/终端的 **executeForAdmin** 发卡 redeem。
+ * - 仅打包 **token #0**；会员卡 NFT 不进入 container。
+ * - #0 为 0 → 返回 null（无链上 redeem 的 Link 会话）。
  */
 export async function buildNfcLinkAppRedeemBundleFromChain(
 	cardAddress: string,
@@ -6694,16 +6719,9 @@ function resolveNfcLinkAppCardAddress(body: { cardAddress?: string }): { ok: tru
 }
 
 /**
- * NFC Link App (POS): SUN → read NFC holder AA **token #0** on the infrastructure card → optional `createRedeemBatch` bundle (**#0 only**; membership NFTs excluded), or DB-only lock if no #0 / no AA.
- *
- * **Product boundary (vs “card admin / merchant redeem”)**
- * - Does **not** use `executeForAdmin` or any **card-admin-signed** redeem/mint path.
- * - This is **not** the merchant workflow “admin creates redeem codes for customers”.
- * - It **does** use **infrastructure card `owner()`** EIP-712 `executeForOwner` + `createRedeemBatch` calldata so the Factory can register a **one-time migration offer** on the infra BeamioUserCard.
- *
- * **On-chain caveat:** `BeamioUserCardFactoryPaymasterV07._executeForOwner` rewrites plain `createRedeemBatch` into `createRedeemBatchWithCreator(..., signer)` where `signer` is **that card’s `owner()`**. Redeem consume (`redeemForUser`) may still attribute **some admin mint / membership-flow stats** to `owner()` via `_getRedeemCreator`. If you need **zero** owner-linked redeem accounting, that requires a **contract upgrade** (e.g. dedicated selector + skip-stats flag or sentinel creator), not server-only changes.
- *
- * Env: `BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY` must match infrastructure card `owner()`.
+ * NFC Link App (POS): SUN，读 NFC AA 在基础设施卡上 token #0；**仅**登记 DB + `nftRedeemcode`，不在此步 `createRedeemBatch`。
+ * 有 #0 时 `migrate_via_container=true`，认领阶段用 NFC 卡私钥签 Container，把全部 #0 转到 App 用户 AA。
+ * 无 #0 则仅换绑。仍含链上 pending redeem 的旧会话认领走 `redeemForUser`；cancel 链上 batch 仍需 `BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY`。
  */
 export const nfcLinkAppExecute = async (
 	body: { uid?: string; e?: string; c?: string; m?: string; cardAddress?: string },
@@ -6807,105 +6825,10 @@ export const nfcLinkAppExecute = async (
 			return
 		}
 		const linkCardAddr = cardResolved.address
+		// `aa` = NFC 绑定 EOA 的 primary AA；bundle 数量为该 AA 在基础设施卡上的 balanceOf(aa,0)，非 EOA getOwnershipByEOA、非商户 admin redeem
 		const bundle = await buildNfcLinkAppRedeemBundleFromChain(linkCardAddr, aa, SC.walletBase.provider!)
-		if (bundle == null) {
-			const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
-			try {
-				await registerNfcLinkAppLock(
-					{
-						tagIdHex: normalizeNfcLinkTagId(tagIdHex),
-						uid: uidTrim,
-						counterHex: cTrim.toLowerCase(),
-						payerEoa: eoa,
-						aaAddress: aa,
-						redeemHashBytes32: null,
-					},
-					null,
-					redeemSecret,
-					redeemSecret
-				)
-			} catch (eUp: any) {
-				res.status(500).json({ success: false, error: eUp?.message ?? 'Failed to persist link session.' }).end()
-				return
-			}
-			const encTag = encodeURIComponent(normalizeNfcLinkTagId(tagIdHex))
-			const encUid = encodeURIComponent(uidTrim)
-			const counterDec = parseInt(cTrim, 16)
-			const encCounter = encodeURIComponent(String(counterDec))
-			const encCode = encodeURIComponent(redeemSecret)
-			const deepLinkUrl = `https://beamio.app/app/?nftRedeemcode=${encCode}&tagid=${encTag}&uid=${encUid}&counter=${encCounter}`
-			res.status(200)
-				.json({
-					success: true,
-					redeem: null,
-					nftRedeemcode: redeemSecret,
-					tagid: normalizeNfcLinkTagId(tagIdHex),
-					uid: uidTrim,
-					counter: counterDec,
-					deepLinkUrl,
-					txHash: null,
-					redeemOnChain: false,
-					note: 'No token #0 balance on infrastructure card for this AA; link proceeds without on-chain redeem (membership NFTs are not migrated via Link redeem).',
-				})
-				.end()
-			return
-		}
-		const pk = typeof process !== 'undefined' ? process.env?.BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY?.trim() : ''
-		if (!pk) {
-			res.status(503).json({ success: false, error: 'Link App is not configured (missing BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY).' }).end()
-			return
-		}
-		const ownerWallet = new ethers.Wallet(pk, SC.walletBase.provider!)
-		const ownerRead = new ethers.Contract(linkCardAddr, ['function owner() view returns (address)'], SC.walletBase.provider!)
-		const onchainOwner = (await ownerRead.owner()) as string
-		if (ethers.getAddress(ownerWallet.address) !== ethers.getAddress(onchainOwner)) {
-			res.status(503).json({ success: false, error: 'BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY does not match infrastructure card owner().' }).end()
-			return
-		}
+		const hasToken0Points = bundle != null
 		const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
-		const hashBytes32 = ethers.keccak256(ethers.toUtf8Bytes(redeemSecret)) as `0x${string}`
-		const data = buildCardCreateRedeemBatchData({
-			hashes: [hashBytes32],
-			points6: 0,
-			attr: 0,
-			validAfter: 0,
-			validBefore: NFC_LINK_APP_VALID_BEFORE,
-			tokenIds: bundle.tokenIds,
-			amounts: bundle.amounts,
-		})
-		const deadline = Math.floor(Date.now() / 1000) + 900
-		const nonce = ethers.hexlify(ethers.randomBytes(32))
-		const domain = {
-			name: 'BeamioUserCardFactory',
-			version: '1',
-			chainId: BASE_MAINNET_CHAIN_ID,
-			verifyingContract: BASE_CARD_FACTORY,
-		}
-		const types = {
-			ExecuteForOwner: [
-				{ name: 'cardAddress', type: 'address' },
-				{ name: 'dataHash', type: 'bytes32' },
-				{ name: 'deadline', type: 'uint256' },
-				{ name: 'nonce', type: 'bytes32' },
-			],
-		}
-		const dataHash = ethers.keccak256(data)
-		const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x')
-			? nonce
-			: ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
-		const value = {
-			cardAddress: linkCardAddr,
-			dataHash,
-			deadline,
-			nonce: nonceBytes,
-		}
-		const ownerSignature = await ownerWallet.signTypedData(domain, types, value)
-		const tx = await SC.baseFactoryPaymaster.executeForOwner(linkCardAddr, data, deadline, nonce, ownerSignature)
-		const receipt = await tx.wait()
-		if (!receipt || receipt.status !== 1) {
-			res.status(500).json({ success: false, error: 'On-chain transaction failed.' }).end()
-			return
-		}
 		try {
 			await registerNfcLinkAppLock(
 				{
@@ -6914,9 +6837,10 @@ export const nfcLinkAppExecute = async (
 					counterHex: cTrim.toLowerCase(),
 					payerEoa: eoa,
 					aaAddress: aa,
-					redeemHashBytes32: hashBytes32,
+					redeemHashBytes32: null,
+					migrateViaContainer: hasToken0Points,
 				},
-				tx.hash,
+				null,
 				redeemSecret,
 				redeemSecret
 			)
@@ -6924,24 +6848,27 @@ export const nfcLinkAppExecute = async (
 			res.status(500).json({ success: false, error: eUp?.message ?? 'Failed to persist link session.' }).end()
 			return
 		}
-		const encCode = encodeURIComponent(redeemSecret)
 		const encTag = encodeURIComponent(normalizeNfcLinkTagId(tagIdHex))
 		const encUid = encodeURIComponent(uidTrim)
 		const counterDec = parseInt(cTrim, 16)
 		const encCounter = encodeURIComponent(String(counterDec))
+		const encCode = encodeURIComponent(redeemSecret)
 		const deepLinkUrl = `https://beamio.app/app/?nftRedeemcode=${encCode}&tagid=${encTag}&uid=${encUid}&counter=${encCounter}`
 		res.status(200)
 			.json({
 				success: true,
-				/** 公开段（与深链 nftRedeemcode 一致）；链上兑换使用该字符串作为完整 redeem code */
-				redeem: redeemSecret,
+				redeem: null,
 				nftRedeemcode: redeemSecret,
 				tagid: normalizeNfcLinkTagId(tagIdHex),
 				uid: uidTrim,
 				counter: counterDec,
 				deepLinkUrl,
-				txHash: tx.hash,
-				redeemOnChain: true,
+				txHash: null,
+				redeemOnChain: false,
+				migrateViaContainer: hasToken0Points,
+				note: hasToken0Points
+					? 'Token #0 on the infrastructure card migrates to your app AA when you claim the link (container transfer signed with the NFC card key). No createRedeemBatch at link time.'
+					: 'No token #0 balance on infrastructure card for this AA; link proceeds without asset migration.',
 			})
 			.end()
 	} catch (e: any) {
@@ -7279,6 +7206,192 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 	}
 }
 
+/**
+ * Link App 认领：用 DB 中 NFC 卡私钥签 `ContainerMain`，将基础设施卡 ERC-1155 `#0` 全额从 NFC 用户 AA 转到 App 用户 AA。
+ * 不经过 createRedeemBatch / redeemForUser。
+ */
+async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
+	nfcTagIdHex: string
+	nfcPayerEoa: string
+	nfcAa: string
+	beneficiaryUserEoa: string
+}): Promise<{ txHash: string } | { skipped: true }> {
+	const { nfcTagIdHex, nfcPayerEoa, nfcAa, beneficiaryUserEoa } = params
+	const infra = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+	const aaNorm = ethers.getAddress(nfcAa)
+	if (aaNorm === ethers.ZeroAddress) {
+		throw new Error('NFC smart account is not deployed.')
+	}
+	const nfcPk = await getNfcCardPrivateKeyByTagId(normalizeNfcLinkTagId(nfcTagIdHex))
+	if (!nfcPk) {
+		throw new Error('NFC card private key not found.')
+	}
+	const nfcWallet = new ethers.Wallet(nfcPk)
+	if (ethers.getAddress(nfcWallet.address).toLowerCase() !== ethers.getAddress(nfcPayerEoa).toLowerCase()) {
+		throw new Error('NFC private key does not match the linked card EOA.')
+	}
+
+	const SC = Settle_ContractPool.shift()
+	if (!SC) throw new Error('Service temporarily unavailable')
+	try {
+		const primary = await SC.aaAccountFactoryPaymaster.primaryAccountOf(ethers.getAddress(nfcPayerEoa))
+		if (!primary || ethers.getAddress(primary).toLowerCase() !== aaNorm.toLowerCase()) {
+			throw new Error('NFC AA address mismatch.')
+		}
+		const { accountAddress: beneficiaryAa } = await DeployingSmartAccount(
+			ethers.getAddress(beneficiaryUserEoa),
+			SC.aaAccountFactoryPaymaster
+		)
+		if (!beneficiaryAa) {
+			throw new Error('Failed to create or resolve beneficiary AA.')
+		}
+		const toAddr = ethers.getAddress(beneficiaryAa)
+
+		const cardRead = new ethers.Contract(infra, NFC_LINK_BALANCE_OF_ABI, SC.walletBase.provider!)
+		const bal0 = (await cardRead.balanceOf(aaNorm, 0n)) as bigint
+		if (bal0 <= 0n) {
+			logger(Colors.gray(`[nfcLinkAppMigrateContainer] skip: zero token #0 for AA ${aaNorm.slice(0, 10)}…`))
+			return { skipped: true }
+		}
+
+		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aaNorm, 'relayed')
+		const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
+		const items = [{ kind: 1, asset: infra, amount: bal0.toString(), tokenId: '0', data: '0x' }]
+		const itemsHash = hashContainerItems(items)
+		const domain = {
+			name: 'BeamioAccount',
+			version: '1',
+			chainId: BASE_MAINNET_CHAIN_ID,
+			verifyingContract: aaNorm as `0x${string}`,
+		}
+		const types = {
+			ContainerMain: [
+				{ name: 'account', type: 'address' },
+				{ name: 'to', type: 'address' },
+				{ name: 'itemsHash', type: 'bytes32' },
+				{ name: 'nonce', type: 'uint256' },
+				{ name: 'deadline', type: 'uint256' },
+			],
+		}
+		const message = {
+			account: aaNorm,
+			to: toAddr,
+			itemsHash,
+			nonce,
+			deadline,
+		}
+		const nfcSigner = nfcWallet.connect(SC.walletBase.provider!)
+		const signature = await nfcSigner.signTypedData(domain, types, message)
+		const containerPayload: ContainerRelayPayload = {
+			account: aaNorm,
+			to: toAddr,
+			items: items.map((it) => ({
+				kind: it.kind,
+				asset: it.asset,
+				amount: it.amount,
+				tokenId: it.tokenId,
+				data: it.data,
+			})),
+			nonce: nonce.toString(),
+			deadline: deadline.toString(),
+			signature,
+		}
+		const pre = ContainerRelayPreCheck(containerPayload)
+		if (!pre.success) {
+			throw new Error(pre.error ?? 'Container pre-check failed')
+		}
+
+		let usdcAmountRaw = bal0
+		try {
+			const fq = new ethers.Contract(
+				BASE_CARD_FACTORY,
+				['function quoteUnitPointInUSDC6(address) view returns (uint256)'],
+				SC.walletBase.provider!
+			)
+			const unit = (await fq.quoteUnitPointInUSDC6(infra)) as bigint
+			if (unit > 0n) {
+				usdcAmountRaw = (bal0 * unit) / 1_000_000n
+			}
+		} catch {
+			/* fee estimate fallback */
+		}
+		if (usdcAmountRaw <= 0n) {
+			usdcAmountRaw = 1n
+		}
+		const bu = await ContainerRelayPreCheckBUnitBalance(
+			containerPayload,
+			'USDC',
+			ethers.formatUnits(usdcAmountRaw, 6)
+		)
+		if (!bu.success) {
+			throw new Error(bu.error ?? 'B-Unit balance check failed')
+		}
+
+		const relayItems = containerPayload.items.map((it) => {
+			const d = it.data
+			const dataHex = typeof d === 'string' && d.startsWith('0x') ? d : '0x'
+			return {
+				kind: Number(it.kind),
+				asset: ethers.getAddress(it.asset),
+				amount: BigInt(it.amount),
+				tokenId: BigInt(it.tokenId),
+				data: dataHex,
+			}
+		})
+		const nonce_ = BigInt(containerPayload.nonce)
+		const deadline_ = BigInt(containerPayload.deadline)
+		const sigHex =
+			typeof containerPayload.signature === 'string' && containerPayload.signature.startsWith('0x')
+				? containerPayload.signature
+				: `0x${containerPayload.signature}`
+		const sigBytes = ethers.getBytes(sigHex)
+
+		const FactoryWithRelay = new ethers.Contract(
+			BeamioAAAccountFactoryPaymaster,
+			[...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_MAIN_ABI],
+			SC.walletBase
+		)
+		const tx = await FactoryWithRelay.relayContainerMainRelayed(aaNorm, toAddr, relayItems, nonce_, deadline_, sigBytes)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) {
+			throw new Error('Container relay transaction failed')
+		}
+
+		const { feePayerEOA } = await resolveChargeFeePayer(toAddr, BEAMIO_USER_CARD_ASSET_ADDRESS, SC.walletBase.provider!)
+		const { bServiceUnits6: feeBUnits6 } = calcBeamioBUnitFee(usdcAmountRaw)
+		if (feePayerEOA && feePayerEOA !== ethers.ZeroAddress && feeBUnits6 > 0n) {
+			try {
+				const bunitAirdropWrite = new ethers.Contract(
+					CONET_BUNIT_AIRDROP_ADDRESS,
+					['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+					SC.walletConet
+				)
+				await bunitAirdropWrite.consumeFromUser(
+					feePayerEOA,
+					feeBUnits6,
+					tx.hash as `0x${string}`,
+					receipt.gasUsed ?? 0n,
+					1n,
+					{ gasLimit: 2_500_000 }
+				)
+			} catch (e: unknown) {
+				const msg = e instanceof Error ? e.message : String(e)
+				logger(Colors.yellow(`[nfcLinkAppMigrateContainer] consumeFromUser non-fatal: ${msg}`))
+			}
+		}
+
+		logger(
+			Colors.green(
+				`✅ [nfcLinkAppMigrateContainer] infra #0 amount=${bal0} ${aaNorm.slice(0, 10)}… → ${toAddr.slice(0, 10)}… tx=${tx.hash}`
+			)
+		)
+		syncNftTierMetadataForUser(infra, beneficiaryUserEoa).catch(() => {})
+		return { txHash: tx.hash }
+	} finally {
+		Settle_ContractPool.unshift(SC)
+	}
+}
+
 function normalizeNfcLinkClaimPrivateKey(raw: unknown): string | null {
 	if (raw == null || typeof raw !== 'string') return null
 	const t = raw.trim()
@@ -7289,9 +7402,10 @@ function normalizeNfcLinkClaimPrivateKey(raw: unknown): string | null {
 }
 
 /**
- * SilentPassUI deep link claim: validate private key → EOA, validate session, replace NFC row key, release session.
- * - If session has on-chain batch (`redeemOnChain`): ensure/create **App user AA**, then `redeemForUser` / `redeemPoolForUser` on infra card (Link migration consume — **not** `executeForAdmin`; see `nfcLinkAppExecute` JSDoc for owner/creator stats caveat).
- * - If no on-chain redeem: skip chain consume; DB rebind only.
+ * SilentPassUI deep link claim: validate private key → EOA, validate session, optional chain migrate, replace NFC row key, release session.
+ * - `migrateViaContainer`: ensure App user AA, NFC 私钥签 Container，`relayContainerMainRelayed` 迁基础设施卡 #0 至用户 AA。
+ * - `redeemOnChain`（旧会话）: `redeemForUser` / `redeemPoolForUser`。
+ * - 否则仅 DB 换绑。
  * Body: nftRedeemcode, tagid, uid, counter, privateKey (HTTPS; do not log secret).
  */
 export const nfcLinkAppClaimWithKeyExecute = async (
@@ -7355,7 +7469,24 @@ export const nfcLinkAppClaimWithKeyExecute = async (
 	}
 
 	let redeemTxHash: string | null = null
-	if (v.redeemOnChain) {
+	if (v.migrateViaContainer) {
+		try {
+			const r = await performNfcLinkAppMigrateInfraToken0ViaContainer({
+				nfcTagIdHex: tagRaw,
+				nfcPayerEoa: v.payerEoa,
+				nfcAa: v.aaAddress,
+				beneficiaryUserEoa: userEoa,
+			})
+			if ('txHash' in r) {
+				redeemTxHash = r.txHash
+			}
+		} catch (e: any) {
+			const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
+			logger(Colors.red(`[nfcLinkAppClaimWithKey] container migrate failed: ${errMsg}`))
+			res.status(400).json({ success: false, error: errMsg || 'Token migration failed.' }).end()
+			return
+		}
+	} else if (v.redeemOnChain) {
 		try {
 			redeemTxHash = await performInfraCardRedeemForUserEoaOnce(userEoa, code)
 		} catch (e: any) {

@@ -1374,7 +1374,14 @@ const routing = ( router: Router ) => {
 	router.post('/nfcLinkAppValidate', async (req, res) => {
 		const v = await nfcLinkAppValidateParams(req.body ?? {})
 		if (!v.ok) return res.status(400).json({ success: false, error: v.error }).end()
-		return res.status(200).json({ success: true, redeemOnChain: v.redeemOnChain }).end()
+		return res
+			.status(200)
+			.json({
+				success: true,
+				redeemOnChain: v.redeemOnChain,
+				migrateViaContainer: v.migrateViaContainer,
+			})
+			.end()
 	})
 
 	/** POST /api/nfcLinkAppRelease - App 完成 Link（尤其 redeem=null 会话）后释放 DB 会话，恢复 topup/charge */

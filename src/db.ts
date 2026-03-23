@@ -869,6 +869,7 @@ const NFC_LINK_APP_SESSIONS_ADD_PLAINTEXT = `ALTER TABLE nfc_link_app_sessions A
 const NFC_LINK_APP_SESSIONS_ADD_PUBLIC = `ALTER TABLE nfc_link_app_sessions ADD COLUMN IF NOT EXISTS link_redeem_public TEXT`
 const NFC_LINK_APP_SESSIONS_ADD_AUTO_CANCEL_AT = `ALTER TABLE nfc_link_app_sessions ADD COLUMN IF NOT EXISTS auto_cancel_at TIMESTAMPTZ`
 const NFC_LINK_APP_SESSIONS_IDX_AUTO_CANCEL = `CREATE INDEX IF NOT EXISTS idx_nfc_link_app_sessions_auto_cancel ON nfc_link_app_sessions (auto_cancel_at) WHERE released_at IS NULL AND auto_cancel_at IS NOT NULL`
+const NFC_LINK_APP_SESSIONS_ADD_MIGRATE_VIA_CONTAINER = `ALTER TABLE nfc_link_app_sessions ADD COLUMN IF NOT EXISTS migrate_via_container BOOLEAN NOT NULL DEFAULT FALSE`
 
 /** ai_learning_feedback 表：AI 学习反馈，共享给所有 Beamio 用户。kind: approved=满意, corrected=纠正 */
 const AI_LEARNING_FEEDBACK_TABLE = `CREATE TABLE IF NOT EXISTS ai_learning_feedback (
@@ -1054,6 +1055,7 @@ async function ensureNfcLinkAppSessionsSchema(db: Client): Promise<void> {
 	await db.query(NFC_LINK_APP_SESSIONS_ADD_PLAINTEXT)
 	await db.query(NFC_LINK_APP_SESSIONS_ADD_PUBLIC)
 	await db.query(NFC_LINK_APP_SESSIONS_ADD_AUTO_CANCEL_AT)
+	await db.query(NFC_LINK_APP_SESSIONS_ADD_MIGRATE_VIA_CONTAINER)
 	await db.query(NFC_LINK_APP_SESSIONS_IDX_AUTO_CANCEL)
 	await db.query(NFC_LINK_APP_SESSIONS_IDX_PAYER)
 	await db.query(NFC_LINK_APP_SESSIONS_IDX_AA)
@@ -1073,6 +1075,8 @@ export type NfcLinkAppSessionDb = {
 	linkRedeemPublic: string | null
 	/** POST /api/nfcLinkApp 锁定后计划自动解锁时间（Master 定时任务） */
 	autoCancelAt: Date | null
+	/** 有 infra #0 时：认领阶段用 NFC 私钥签 Container 迁移，而非 createRedeemBatch/redeemForUser */
+	migrateViaContainer: boolean
 }
 
 function rowToNfcLinkSession(r: {
@@ -1086,6 +1090,7 @@ function rowToNfcLinkSession(r: {
 	link_redeem_plaintext?: string | null
 	link_redeem_public?: string | null
 	auto_cancel_at?: Date | string | null
+	migrate_via_container?: boolean | null
 }): NfcLinkAppSessionDb {
 	const h = r.redeem_hash_bytes32
 	const plain = r.link_redeem_plaintext
@@ -1107,6 +1112,7 @@ function rowToNfcLinkSession(r: {
 		linkRedeemPlaintext: plain != null && String(plain).length > 0 ? String(plain) : null,
 		linkRedeemPublic: pub != null && String(pub).length > 0 ? String(pub) : null,
 		autoCancelAt,
+		migrateViaContainer: Boolean(r.migrate_via_container),
 	}
 }
 
@@ -1121,6 +1127,7 @@ export const upsertActiveNfcLinkAppSession = async (rec: {
 	chainTxHash: string | null
 	linkRedeemPlaintext?: string | null
 	linkRedeemPublic?: string | null
+	migrateViaContainer?: boolean
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
@@ -1137,9 +1144,10 @@ export const upsertActiveNfcLinkAppSession = async (rec: {
 		const ctx = rec.chainTxHash ? String(rec.chainTxHash).trim() : null
 		const plain = rec.linkRedeemPlaintext != null && String(rec.linkRedeemPlaintext).length > 0 ? String(rec.linkRedeemPlaintext) : null
 		const pub = rec.linkRedeemPublic != null && String(rec.linkRedeemPublic).length > 0 ? String(rec.linkRedeemPublic) : null
+		const mvc = Boolean(rec.migrateViaContainer)
 		await db.query(
-			`INSERT INTO nfc_link_app_sessions (tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, released_at, auto_cancel_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NOW() + INTERVAL '5 minutes')
+			`INSERT INTO nfc_link_app_sessions (tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, migrate_via_container, released_at, auto_cancel_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NOW() + INTERVAL '5 minutes')
 			ON CONFLICT (tag_id_hex) DO UPDATE SET
 				uid_hex = EXCLUDED.uid_hex,
 				counter_hex = EXCLUDED.counter_hex,
@@ -1149,10 +1157,11 @@ export const upsertActiveNfcLinkAppSession = async (rec: {
 				chain_tx_hash = EXCLUDED.chain_tx_hash,
 				link_redeem_plaintext = EXCLUDED.link_redeem_plaintext,
 				link_redeem_public = EXCLUDED.link_redeem_public,
+				migrate_via_container = EXCLUDED.migrate_via_container,
 				released_at = NULL,
 				auto_cancel_at = NOW() + INTERVAL '5 minutes',
 				created_at = NOW()`,
-			[tag, rec.uid.trim(), ctr, payer, aa, rh, ctx, plain, pub]
+			[tag, rec.uid.trim(), ctr, payer, aa, rh, ctx, plain, pub, mvc]
 		)
 	} catch (e: any) {
 		logger(Colors.yellow(`[upsertActiveNfcLinkAppSession] failed: ${e?.message ?? e}`))
@@ -1176,7 +1185,7 @@ export const fetchActiveNfcLinkAppSessionForPaymentBlock = async (opts: {
 			const tag = normalizeTagIdHexForLinkSession(opts.tagIdHex)
 			if (tag) {
 				const { rows } = await db.query(
-					`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+					`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at, migrate_via_container
 					FROM nfc_link_app_sessions WHERE tag_id_hex = $1 AND released_at IS NULL LIMIT 1`,
 					[tag]
 				)
@@ -1187,7 +1196,7 @@ export const fetchActiveNfcLinkAppSessionForPaymentBlock = async (opts: {
 			const aa = ethers.getAddress(opts.aaAddress).toLowerCase()
 			if (aa !== ethers.ZeroAddress.toLowerCase()) {
 				const { rows } = await db.query(
-					`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+					`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at, migrate_via_container
 					FROM nfc_link_app_sessions WHERE LOWER(TRIM(aa_address)) = $1 AND released_at IS NULL LIMIT 1`,
 					[aa]
 				)
@@ -1197,7 +1206,7 @@ export const fetchActiveNfcLinkAppSessionForPaymentBlock = async (opts: {
 		if (opts.payerEoa && ethers.isAddress(opts.payerEoa)) {
 			const pay = ethers.getAddress(opts.payerEoa).toLowerCase()
 			const { rows } = await db.query(
-				`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+				`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at, migrate_via_container
 				FROM nfc_link_app_sessions WHERE LOWER(TRIM(payer_eoa)) = $1 AND released_at IS NULL LIMIT 1`,
 				[pay]
 			)
@@ -1239,7 +1248,7 @@ export const listNfcLinkAppSessionsDueForAutoCancel = async (limit: number = 12)
 		await ensureNfcLinkAppSessionsSchema(db)
 		const lim = Math.min(Math.max(1, Math.floor(limit)), 50)
 		const { rows } = await db.query(
-			`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+			`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at, migrate_via_container
 			FROM nfc_link_app_sessions
 			WHERE released_at IS NULL
 			  AND auto_cancel_at IS NOT NULL
@@ -1272,7 +1281,7 @@ export const releaseNfcLinkAppSessionIfMatches = async (body: {
 		await db.connect()
 		await ensureNfcLinkAppSessionsSchema(db)
 		const { rows } = await db.query(
-			`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+			`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at, migrate_via_container
 			FROM nfc_link_app_sessions WHERE tag_id_hex = $1 AND released_at IS NULL LIMIT 1`,
 			[tag]
 		)
