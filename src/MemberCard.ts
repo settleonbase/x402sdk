@@ -1,4 +1,5 @@
 import { ethers } from 'ethers'
+import { randomUUID } from 'node:crypto'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
 import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6, getOracleRequest } from './util'
@@ -28,11 +29,28 @@ const ACTION_SYNC_TOKEN_ABI = [
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, BEAMIO_INDEXER_DIAMOND, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_MAINNET_CHAIN_ID } from './chainAddresses'
+import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, BEAMIO_INDEXER_DIAMOND, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_MAINNET_CHAIN_ID, BASE_MAINNET_CHAIN_ID } from './chainAddresses'
 
 import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
-import { registerCardToDb, getNfcRecipientAddressByUid, getNfcCardPrivateKeyByUid, getNfcCardPrivateKeyByTagId, getCardByAddress, upsertNftTierMetadata, maybeEnqueueNfcCashTreeBeamioTag } from './db'
+import {
+	registerCardToDb,
+	getNfcRecipientAddressByUid,
+	getNfcRecipientAddressByTagId,
+	getNfcCardPrivateKeyByUid,
+	getNfcCardPrivateKeyByTagId,
+	getCardByAddress,
+	upsertNftTierMetadata,
+	maybeEnqueueNfcCashTreeBeamioTag,
+	fetchActiveNfcLinkAppSessionForPaymentBlock,
+	listNfcLinkAppSessionsDueForAutoCancel,
+	upsertActiveNfcLinkAppSession,
+	markNfcLinkAppSessionReleasedByTag,
+	releaseNfcLinkAppSessionIfMatches,
+	replaceNfcCardKeyByTagId,
+	type NfcLinkAppSessionDb,
+} from './db'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './endpoint/getUIDAssetsLogic'
+import { pickBestMembershipNftByMinUsdc6, type RawNftOwnershipRow } from './endpoint/membershipTierPick'
 import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
@@ -86,6 +104,180 @@ const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const USDC_DECIMALS = 6;
 const USDC_SmartContract = new ethers.Contract(USDC_ADDRESS, USDC_ABI, providerBaseBackup)
 
+const GET_REDEEM_STATUS_BATCH_ABI = [
+	'function getRedeemStatusBatch(bytes32[] hashes) view returns (bool[] active, uint256[] totalPoints6)',
+]
+
+/** NFC Link App：PG 会话 + 链上 redeem active 探测（无 AA 时无链上 redeem，仅 DB 会话） */
+export type NfcLinkAppLockRecord = {
+	tagIdHex: string
+	uid: string
+	counterHex: string
+	/** 卡 EOA；topup mint 受益人与无 AA 锁匹配 */
+	payerEoa: string
+	/** 已部署 AA；无链上 redeem 时用零地址 */
+	aaAddress: string
+	/** null = 未创建链上 redeem（客户尚无 AA 等） */
+	redeemHashBytes32: `0x${string}` | null
+}
+
+function normalizeNfcLinkTagId(raw: string): string {
+	return raw.trim().replace(/^0x/i, '').toLowerCase()
+}
+
+function sessionDbToLockRecord(row: NfcLinkAppSessionDb): NfcLinkAppLockRecord {
+	return {
+		tagIdHex: row.tagIdHex,
+		uid: row.uid,
+		counterHex: row.counterHex,
+		payerEoa: row.payerEoa,
+		aaAddress: row.aaAddress,
+		redeemHashBytes32: row.redeemHashBytes32,
+	}
+}
+
+/** App 完成无 redeem 的 Link 流程后调用：按 tag/uid/counter 释放 DB 会话 */
+export async function releaseNfcLinkAppLockIfSessionMatches(body: {
+	tagid?: string
+	uid?: string
+	counter?: string | number
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+	return releaseNfcLinkAppSessionIfMatches(body)
+}
+
+export async function registerNfcLinkAppLock(
+	rec: NfcLinkAppLockRecord,
+	chainTxHash?: string | null,
+	linkRedeemPlaintext?: string | null,
+	linkRedeemPublic?: string | null
+): Promise<void> {
+	const t = normalizeNfcLinkTagId(rec.tagIdHex)
+	const fixed: NfcLinkAppLockRecord = {
+		...rec,
+		tagIdHex: t,
+		payerEoa: ethers.getAddress(rec.payerEoa),
+		aaAddress: rec.aaAddress === ethers.ZeroAddress ? ethers.ZeroAddress : ethers.getAddress(rec.aaAddress),
+	}
+	await upsertActiveNfcLinkAppSession({
+		tagIdHex: fixed.tagIdHex,
+		uid: fixed.uid,
+		counterHex: fixed.counterHex,
+		payerEoa: fixed.payerEoa,
+		aaAddress: fixed.aaAddress,
+		redeemHashBytes32: fixed.redeemHashBytes32,
+		chainTxHash: chainTxHash ?? null,
+		linkRedeemPlaintext: linkRedeemPlaintext ?? null,
+		linkRedeemPublic: linkRedeemPublic ?? null,
+	})
+}
+
+/** 与 409 响应一致，供 Cluster/Master 与客户端识别「卡已锁定」 */
+export const NFC_LINK_APP_CARD_LOCKED_ERROR_CODE = 'NFC_LINK_APP_CARD_LOCKED'
+export const NFC_LINK_APP_CARD_LOCKED_MESSAGE = 'This card is already locked for Link App.'
+
+/**
+ * 新建 Link App 前：若该 tag 已有进行中会话则阻塞。redeemOnChain=false 表示仅内存/DB 锁（无链上 redeem）。
+ */
+export async function nfcLinkAppNewLinkBlockedDetail(tagIdHex: string): Promise<{ redeemOnChain: boolean } | null> {
+	const tagNorm = normalizeNfcLinkTagId(tagIdHex)
+	const row = await fetchActiveNfcLinkAppSessionForPaymentBlock({ tagIdHex: tagNorm })
+	if (!row) return null
+	const rec = sessionDbToLockRecord(row)
+	if (rec.redeemHashBytes32 == null) {
+		return { redeemOnChain: false }
+	}
+	const card = new ethers.Contract(BEAMIO_USER_CARD_ASSET_ADDRESS, GET_REDEEM_STATUS_BATCH_ABI, providerBaseBackup)
+	try {
+		const [activeList] = await card.getRedeemStatusBatch([rec.redeemHashBytes32])
+		const stillPending = activeList[0] === true
+		if (!stillPending) {
+			await markNfcLinkAppSessionReleasedByTag(rec.tagIdHex)
+			return null
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[nfcLinkAppNewLinkBlockedDetail] RPC skip: ${e?.message ?? e}`))
+		return null
+	}
+	return { redeemOnChain: true }
+}
+
+/** 若该 tag / AA / 卡 EOA 处于 Link App 且（无链上 redeem 或 redeem 仍 active），返回英文错误文案；否则返回 null */
+export async function nfcLinkAppPaymentBlockedIfAny(opts: {
+	tagIdHex?: string
+	aaAddress?: string
+	payerEoa?: string
+}): Promise<string | null> {
+	const tagNorm = opts.tagIdHex ? normalizeNfcLinkTagId(opts.tagIdHex) : undefined
+	const row = await fetchActiveNfcLinkAppSessionForPaymentBlock({
+		tagIdHex: tagNorm,
+		aaAddress: opts.aaAddress,
+		payerEoa: opts.payerEoa,
+	})
+	if (!row) return null
+	const rec = sessionDbToLockRecord(row)
+	if (rec.redeemHashBytes32 == null) {
+		return 'This card is linking to the Beamio app. Complete or cancel in the app before top-up or charge.'
+	}
+	const card = new ethers.Contract(BEAMIO_USER_CARD_ASSET_ADDRESS, GET_REDEEM_STATUS_BATCH_ABI, providerBaseBackup)
+	try {
+		const [activeList] = await card.getRedeemStatusBatch([rec.redeemHashBytes32])
+		const stillPending = activeList[0] === true
+		if (!stillPending) {
+			await markNfcLinkAppSessionReleasedByTag(rec.tagIdHex)
+			return null
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[nfcLinkAppPaymentBlockedIfAny] RPC skip: ${e?.message ?? e}`))
+		return null
+	}
+	return 'This card is linking to the Beamio app. Complete or cancel in the app before top-up or charge.'
+}
+
+/** 供 beamio.app 校验 URL 参数是否与当前 Link App 会话一致（无链上 redeem 时 nftRedeemcode 可为空或字面 null） */
+export async function nfcLinkAppValidateParams(body: {
+	nftRedeemcode?: string | null
+	tagid?: string
+	uid?: string
+	counter?: string | number
+}): Promise<{ ok: true; redeemOnChain: boolean } | { ok: false; error: string }> {
+	const tag = body.tagid?.trim().replace(/^0x/i, '').toLowerCase()
+	const uid = body.uid?.trim() ?? ''
+	if (!tag || !uid) return { ok: false, error: 'Missing tagid or uid.' }
+	const row = await fetchActiveNfcLinkAppSessionForPaymentBlock({ tagIdHex: tag })
+	if (!row) return { ok: false, error: 'No active link session for this tag.' }
+	const rec = sessionDbToLockRecord(row)
+	if (rec.uid !== uid) return { ok: false, error: 'uid mismatch.' }
+	const ctr = body.counter
+	const ctrNum = typeof ctr === 'number' && Number.isFinite(ctr) ? ctr : parseInt(String(ctr ?? ''), 10)
+	const expected = parseInt(rec.counterHex, 16)
+	if (!Number.isFinite(ctrNum) || ctrNum !== expected) return { ok: false, error: 'counter mismatch.' }
+	if (rec.redeemHashBytes32 == null) {
+		const raw = body.nftRedeemcode
+		const codeNorm = raw === null || raw === undefined ? '' : String(raw).trim()
+		if (row.linkRedeemPublic != null && row.linkRedeemPublic.length > 0) {
+			if (codeNorm !== row.linkRedeemPublic) {
+				return { ok: false, error: 'nftRedeemcode mismatch.' }
+			}
+			return { ok: true, redeemOnChain: false }
+		}
+		if (codeNorm !== '' && codeNorm.toLowerCase() !== 'null') {
+			return {
+				ok: false,
+				error: 'This session has no on-chain redeem; nftRedeemcode should be empty or null.',
+			}
+		}
+		return { ok: true, redeemOnChain: false }
+	}
+	const code = body.nftRedeemcode == null ? '' : String(body.nftRedeemcode).trim()
+	if (!code || code.toLowerCase() === 'null') return { ok: false, error: 'Missing nftRedeemcode for this link session.' }
+	if (row.linkRedeemPublic != null && row.linkRedeemPublic.length > 0) {
+		if (code !== row.linkRedeemPublic) return { ok: false, error: 'nftRedeemcode mismatch.' }
+	} else {
+		const h = ethers.keccak256(ethers.toUtf8Bytes(code)) as `0x${string}`
+		if (h.toLowerCase() !== rec.redeemHashBytes32.toLowerCase()) return { ok: false, error: 'nftRedeemcode mismatch.' }
+	}
+	return { ok: true, redeemOnChain: true }
+}
 
 //			RedeemModule 						0x1EC7540EbC03bcEBEc0C5f981C3D91100d206F5F
 //			BeamioQuoteHelperV07 						0x4DD4b418949911B8A8038295F6a8Af7a1eA8de50
@@ -826,6 +1018,28 @@ export const nfcTopupPreparePayload = async (params: {
 		recipientEOA = await getNfcRecipientAddressByUid(uid.trim())
 	}
 	if (!recipientEOA) return { error: wallet ? 'Invalid wallet address' : 'Failed to resolve recipient from uid' }
+
+	if (Settle_ContractPool.length > 0) {
+		try {
+			const SC0 = Settle_ContractPool[0]
+			const aa0 = await SC0.aaAccountFactoryPaymaster.primaryAccountOf(recipientEOA)
+			if (aa0 && aa0 !== ethers.ZeroAddress) {
+				const aaCode0 = await SC0.walletBase.provider!.getCode(aa0)
+				if (aaCode0 && aaCode0 !== '0x') {
+					const linkBlock = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa0, payerEoa: recipientEOA })
+					if (linkBlock) return { error: linkBlock }
+				} else {
+					const linkBlockEoa = await nfcLinkAppPaymentBlockedIfAny({ payerEoa: recipientEOA })
+					if (linkBlockEoa) return { error: linkBlockEoa }
+				}
+			} else {
+				const linkBlockEoa = await nfcLinkAppPaymentBlockedIfAny({ payerEoa: recipientEOA })
+				if (linkBlockEoa) return { error: linkBlockEoa }
+			}
+		} catch (_) {
+			/* ignore link check RPC errors; proceed */
+		}
+	}
 
 	// Android admin topup 需要支持首发/升级/普通 topup 三类路径：
 	// 这里不再阻断“无会员卡”用户，具体分类与收费在 nfcTopupPreCheckBUnitFee + 记账阶段判定。
@@ -3113,6 +3327,25 @@ const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; point
 	return null
 }
 
+/** Master nfcTopup：mint 受益人 AA 处于 Link App 锁时拒绝（锁在 Master 进程内存，Cluster 预检不可靠） */
+export const nfcLinkAppPaymentBlockedForMintCalldata = async (data: string): Promise<string | null> => {
+	const parsed = tryParseMintPointsByAdminArgs(data)
+	if (!parsed?.recipient || !ethers.isAddress(parsed.recipient)) return null
+	const byEoa = await nfcLinkAppPaymentBlockedIfAny({ payerEoa: parsed.recipient })
+	if (byEoa) return byEoa
+	if (Settle_ContractPool.length === 0) return null
+	const SC = Settle_ContractPool[0]
+	try {
+		const aa = await SC.aaAccountFactoryPaymaster.primaryAccountOf(parsed.recipient)
+		if (!aa || aa === ethers.ZeroAddress) return null
+		const code = await SC.walletBase.provider!.getCode(aa)
+		if (!code || code === '0x') return null
+		return await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa })
+	} catch {
+		return null
+	}
+}
+
 type CardTier = {
 	index: number
 	minUsdc6: bigint
@@ -5089,6 +5322,13 @@ export const OpenContainerRelayProcess = async () => {
       return setTimeout(() => OpenContainerRelayProcess(), 3000)
     }
 
+    const linkBlOc = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: account })
+    if (linkBlOc) {
+      obj.res.status(403).json({ success: false, error: linkBlOc }).end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+    }
+
     const FactoryWithRelay = new ethers.Contract(
       BeamioAAAccountFactoryPaymaster,
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_OPEN_ABI],
@@ -5576,6 +5816,13 @@ export const ContainerRelayProcess = async () => {
     const accountCode = await SC.walletBase.provider!.getCode(account)
     if (!accountCode || accountCode === '0x' || accountCode.length <= 2) {
       obj.res.status(400).json({ success: false, error: 'account has no contract code' }).end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => ContainerRelayProcess(), 3000)
+    }
+
+    const linkBlCr = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: account })
+    if (linkBlCr) {
+      obj.res.status(403).json({ success: false, error: linkBlCr }).end()
       Settle_ContractPool.unshift(SC)
       return setTimeout(() => ContainerRelayProcess(), 3000)
     }
@@ -6405,9 +6652,771 @@ export const buildCardCreateRedeemBatchData = (params: {
 	])
 }
 
-const GET_REDEEM_STATUS_BATCH_ABI = [
-	'function getRedeemStatusBatch(bytes32[] hashes) view returns (bool[] active, uint256[] totalPoints6)',
-]
+// --- NFC Link App：链上 createRedeemBatch（execute 本体）---
+
+const NFC_LINK_APP_VALID_BEFORE = 4102444800
+
+const NFC_LINK_GET_OWNERSHIP_ABI = [
+	'function balanceOf(address account, uint256 id) view returns (uint256)',
+	'function getOwnership(address account) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+] as const
+
+/**
+ * 在指定卡合约上读取 NFC 对应 AA 的 token#0（点数/基础设施份额）与按 minUsdc6 最优的会员 NFT 余额，组装 createRedeemBatch 的 tokenIds/amounts。
+ * 若两者皆无（余额为 0），返回 null → 不建链上 redeem。
+ */
+export async function buildNfcLinkAppRedeemBundleFromChain(
+	cardAddress: string,
+	holderAa: string,
+	provider: ethers.Provider
+): Promise<{ tokenIds: bigint[]; amounts: bigint[] } | null> {
+	const card = ethers.getAddress(cardAddress)
+	const holder = ethers.getAddress(holderAa)
+	const c = new ethers.Contract(card, NFC_LINK_GET_OWNERSHIP_ABI, provider)
+	const bal0 = (await c.balanceOf(holder, 0n)) as bigint
+	const [, nfts] = (await c.getOwnership(holder)) as [bigint, unknown[]]
+	const rawRows: RawNftOwnershipRow[] = []
+	for (const row of Array.isArray(nfts) ? nfts : []) {
+		const rec = row as Record<string, unknown> & { tokenId?: bigint; tierIndexOrMax?: bigint; isExpired?: boolean }
+		const tokenId = BigInt(String(rec.tokenId ?? (row as unknown[])[0] ?? 0))
+		const tierIndexOrMax = BigInt(String(rec.tierIndexOrMax ?? (row as unknown[])[2] ?? 0))
+		const isExpired = Boolean(rec.isExpired ?? (row as unknown[])[4])
+		rawRows.push({ tokenId, tierIndexOrMax, isExpired })
+	}
+	const best = await pickBestMembershipNftByMinUsdc6(c as unknown as ethers.Contract, rawRows)
+	let memId: bigint | null = null
+	let memBal = 0n
+	if (best) {
+		memId = BigInt(best.tokenId)
+		memBal = (await c.balanceOf(holder, memId)) as bigint
+	}
+	const hasToken0 = bal0 > 0n
+	const hasMem = memId != null && memBal > 0n
+	if (!hasToken0 && !hasMem) {
+		return null
+	}
+	const tokenIds: bigint[] = []
+	const amounts: bigint[] = []
+	if (hasToken0) {
+		tokenIds.push(0n)
+		amounts.push(bal0)
+	}
+	if (hasMem && memId != null) {
+		tokenIds.push(memId)
+		amounts.push(memBal)
+	}
+	return { tokenIds, amounts }
+}
+
+function resolveNfcLinkAppCardAddress(body: { cardAddress?: string }): { ok: true; address: string } | { ok: false; error: string } {
+	const infra = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+	const raw = body.cardAddress != null ? String(body.cardAddress).trim() : ''
+	if (!raw) {
+		return { ok: true, address: infra }
+	}
+	if (!ethers.isAddress(raw)) {
+		return { ok: false, error: 'Invalid cardAddress.' }
+	}
+	const ca = ethers.getAddress(raw)
+	if (ca !== infra) {
+		return { ok: false, error: 'cardAddress must be the Beamio infrastructure user card.' }
+	}
+	return { ok: true, address: ca }
+}
+
+/**
+ * NFC Link App (POS): SUN → read NFC holder AA balances on the infrastructure card → optional `createRedeemBatch` bundle (token #0 + best membership NFT), or DB-only lock if no assets / no AA.
+ *
+ * **Product boundary (vs “card admin / merchant redeem”)**
+ * - Does **not** use `executeForAdmin` or any **card-admin-signed** redeem/mint path.
+ * - This is **not** the merchant workflow “admin creates redeem codes for customers”.
+ * - It **does** use **infrastructure card `owner()`** EIP-712 `executeForOwner` + `createRedeemBatch` calldata so the Factory can register a **one-time migration offer** on the infra BeamioUserCard.
+ *
+ * **On-chain caveat:** `BeamioUserCardFactoryPaymasterV07._executeForOwner` rewrites plain `createRedeemBatch` into `createRedeemBatchWithCreator(..., signer)` where `signer` is **that card’s `owner()`**. Redeem consume (`redeemForUser`) may still attribute **some admin mint / membership-flow stats** to `owner()` via `_getRedeemCreator`. If you need **zero** owner-linked redeem accounting, that requires a **contract upgrade** (e.g. dedicated selector + skip-stats flag or sentinel creator), not server-only changes.
+ *
+ * Env: `BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY` must match infrastructure card `owner()`.
+ */
+export const nfcLinkAppExecute = async (
+	body: { uid?: string; e?: string; c?: string; m?: string; cardAddress?: string },
+	res: Response
+): Promise<void> => {
+	const uidTrim = body.uid?.trim() ?? ''
+	const eTrim = body.e?.trim() ?? ''
+	const cTrim = body.c?.trim() ?? ''
+	const mTrim = body.m?.trim() ?? ''
+	if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+		res.status(400).json({ success: false, error: 'Invalid uid' }).end()
+		return
+	}
+	if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+		res.status(403).json({ success: false, error: 'SUN params (e, c, m) required for NFC Link App.' }).end()
+		return
+	}
+	let sunResult: Awaited<ReturnType<typeof verifyAndPersistBeamioSunUrl>>
+	try {
+		const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+		sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+	} catch (e: any) {
+		res.status(403).json({ success: false, error: `SUN error: ${e?.message ?? e}` }).end()
+		return
+	}
+	if (!sunResult.valid) {
+		res.status(403).json({ success: false, error: 'SUN verification failed.' }).end()
+		return
+	}
+	const tagIdHex = sunResult.tagIdHex
+	const blockedDetail = await nfcLinkAppNewLinkBlockedDetail(tagIdHex)
+	if (blockedDetail) {
+		res.status(409)
+			.json({
+				success: false,
+				error: NFC_LINK_APP_CARD_LOCKED_MESSAGE,
+				errorCode: NFC_LINK_APP_CARD_LOCKED_ERROR_CODE,
+				redeemOnChain: blockedDetail.redeemOnChain,
+			})
+			.end()
+		return
+	}
+	const eoa = await getNfcRecipientAddressByTagId(tagIdHex)
+	if (!eoa || !ethers.isAddress(eoa)) {
+		res.status(403).json({ success: false, error: 'Card not provisioned.' }).end()
+		return
+	}
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		res.status(503).json({ success: false, error: 'Service temporarily unavailable.' }).end()
+		return
+	}
+	try {
+		const aa = await SC.aaAccountFactoryPaymaster.primaryAccountOf(eoa)
+		const aaCode = aa && aa !== ethers.ZeroAddress ? await SC.walletBase.provider!.getCode(aa) : '0x'
+		const hasDeployedAa = !!(aa && aa !== ethers.ZeroAddress && aaCode && aaCode !== '0x')
+		if (!hasDeployedAa) {
+			const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+			try {
+				await registerNfcLinkAppLock(
+					{
+						tagIdHex: normalizeNfcLinkTagId(tagIdHex),
+						uid: uidTrim,
+						counterHex: cTrim.toLowerCase(),
+						payerEoa: eoa,
+						aaAddress: ethers.ZeroAddress,
+						redeemHashBytes32: null,
+					},
+					null,
+					redeemSecret,
+					redeemSecret
+				)
+			} catch (eUp: any) {
+				res.status(500).json({ success: false, error: eUp?.message ?? 'Failed to persist link session.' }).end()
+				return
+			}
+			const encTag = encodeURIComponent(normalizeNfcLinkTagId(tagIdHex))
+			const encUid = encodeURIComponent(uidTrim)
+			const counterDec = parseInt(cTrim, 16)
+			const encCounter = encodeURIComponent(String(counterDec))
+			const encCode = encodeURIComponent(redeemSecret)
+			const deepLinkUrl = `https://beamio.app/app/?nftRedeemcode=${encCode}&tagid=${encTag}&uid=${encUid}&counter=${encCounter}`
+			res.status(200)
+				.json({
+					success: true,
+					redeem: null,
+					nftRedeemcode: redeemSecret,
+					tagid: normalizeNfcLinkTagId(tagIdHex),
+					uid: uidTrim,
+					counter: counterDec,
+					deepLinkUrl,
+					txHash: null,
+					redeemOnChain: false,
+				})
+				.end()
+			return
+		}
+		const cardResolved = resolveNfcLinkAppCardAddress(body)
+		if (!cardResolved.ok) {
+			res.status(400).json({ success: false, error: cardResolved.error }).end()
+			return
+		}
+		const linkCardAddr = cardResolved.address
+		const bundle = await buildNfcLinkAppRedeemBundleFromChain(linkCardAddr, aa, SC.walletBase.provider!)
+		if (bundle == null) {
+			const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+			try {
+				await registerNfcLinkAppLock(
+					{
+						tagIdHex: normalizeNfcLinkTagId(tagIdHex),
+						uid: uidTrim,
+						counterHex: cTrim.toLowerCase(),
+						payerEoa: eoa,
+						aaAddress: aa,
+						redeemHashBytes32: null,
+					},
+					null,
+					redeemSecret,
+					redeemSecret
+				)
+			} catch (eUp: any) {
+				res.status(500).json({ success: false, error: eUp?.message ?? 'Failed to persist link session.' }).end()
+				return
+			}
+			const encTag = encodeURIComponent(normalizeNfcLinkTagId(tagIdHex))
+			const encUid = encodeURIComponent(uidTrim)
+			const counterDec = parseInt(cTrim, 16)
+			const encCounter = encodeURIComponent(String(counterDec))
+			const encCode = encodeURIComponent(redeemSecret)
+			const deepLinkUrl = `https://beamio.app/app/?nftRedeemcode=${encCode}&tagid=${encTag}&uid=${encUid}&counter=${encCounter}`
+			res.status(200)
+				.json({
+					success: true,
+					redeem: null,
+					nftRedeemcode: redeemSecret,
+					tagid: normalizeNfcLinkTagId(tagIdHex),
+					uid: uidTrim,
+					counter: counterDec,
+					deepLinkUrl,
+					txHash: null,
+					redeemOnChain: false,
+					note: 'No token #0 or membership NFT on card for this AA; link proceeds without on-chain redeem.',
+				})
+				.end()
+			return
+		}
+		const pk = typeof process !== 'undefined' ? process.env?.BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY?.trim() : ''
+		if (!pk) {
+			res.status(503).json({ success: false, error: 'Link App is not configured (missing BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY).' }).end()
+			return
+		}
+		const ownerWallet = new ethers.Wallet(pk, SC.walletBase.provider!)
+		const ownerRead = new ethers.Contract(linkCardAddr, ['function owner() view returns (address)'], SC.walletBase.provider!)
+		const onchainOwner = (await ownerRead.owner()) as string
+		if (ethers.getAddress(ownerWallet.address) !== ethers.getAddress(onchainOwner)) {
+			res.status(503).json({ success: false, error: 'BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY does not match infrastructure card owner().' }).end()
+			return
+		}
+		const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+		const hashBytes32 = ethers.keccak256(ethers.toUtf8Bytes(redeemSecret)) as `0x${string}`
+		const data = buildCardCreateRedeemBatchData({
+			hashes: [hashBytes32],
+			points6: 0,
+			attr: 0,
+			validAfter: 0,
+			validBefore: NFC_LINK_APP_VALID_BEFORE,
+			tokenIds: bundle.tokenIds,
+			amounts: bundle.amounts,
+		})
+		const deadline = Math.floor(Date.now() / 1000) + 900
+		const nonce = ethers.hexlify(ethers.randomBytes(32))
+		const domain = {
+			name: 'BeamioUserCardFactory',
+			version: '1',
+			chainId: BASE_MAINNET_CHAIN_ID,
+			verifyingContract: BASE_CARD_FACTORY,
+		}
+		const types = {
+			ExecuteForOwner: [
+				{ name: 'cardAddress', type: 'address' },
+				{ name: 'dataHash', type: 'bytes32' },
+				{ name: 'deadline', type: 'uint256' },
+				{ name: 'nonce', type: 'bytes32' },
+			],
+		}
+		const dataHash = ethers.keccak256(data)
+		const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x')
+			? nonce
+			: ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+		const value = {
+			cardAddress: linkCardAddr,
+			dataHash,
+			deadline,
+			nonce: nonceBytes,
+		}
+		const ownerSignature = await ownerWallet.signTypedData(domain, types, value)
+		const tx = await SC.baseFactoryPaymaster.executeForOwner(linkCardAddr, data, deadline, nonce, ownerSignature)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) {
+			res.status(500).json({ success: false, error: 'On-chain transaction failed.' }).end()
+			return
+		}
+		try {
+			await registerNfcLinkAppLock(
+				{
+					tagIdHex: normalizeNfcLinkTagId(tagIdHex),
+					uid: uidTrim,
+					counterHex: cTrim.toLowerCase(),
+					payerEoa: eoa,
+					aaAddress: aa,
+					redeemHashBytes32: hashBytes32,
+				},
+				tx.hash,
+				redeemSecret,
+				redeemSecret
+			)
+		} catch (eUp: any) {
+			res.status(500).json({ success: false, error: eUp?.message ?? 'Failed to persist link session.' }).end()
+			return
+		}
+		const encCode = encodeURIComponent(redeemSecret)
+		const encTag = encodeURIComponent(normalizeNfcLinkTagId(tagIdHex))
+		const encUid = encodeURIComponent(uidTrim)
+		const counterDec = parseInt(cTrim, 16)
+		const encCounter = encodeURIComponent(String(counterDec))
+		const deepLinkUrl = `https://beamio.app/app/?nftRedeemcode=${encCode}&tagid=${encTag}&uid=${encUid}&counter=${encCounter}`
+		res.status(200)
+			.json({
+				success: true,
+				/** 公开段（与深链 nftRedeemcode 一致）；链上兑换使用该字符串作为完整 redeem code */
+				redeem: redeemSecret,
+				nftRedeemcode: redeemSecret,
+				tagid: normalizeNfcLinkTagId(tagIdHex),
+				uid: uidTrim,
+				counter: counterDec,
+				deepLinkUrl,
+				txHash: tx.hash,
+				redeemOnChain: true,
+			})
+			.end()
+	} catch (e: any) {
+		logger(Colors.red(`[nfcLinkAppExecute] ${e?.message ?? e}`))
+		if (!res.headersSent) {
+			res.status(500).json({ success: false, error: e?.shortMessage ?? e?.message ?? String(e) }).end()
+		}
+	} finally {
+		Settle_ContractPool.unshift(SC)
+	}
+}
+
+function buildInfraCancelRedeemCalldata(plainCode: string): string {
+	const iface = new ethers.Interface(['function cancelRedeem(string code)'])
+	return iface.encodeFunctionData('cancelRedeem', [plainCode])
+}
+
+/** POST /nfcLinkAppCancel 与 Master 5 分钟自动解锁共用：查链上 redeem 是否仍有效，必要时 cancelRedeem，最后释放 DB 锁。 */
+export async function nfcLinkAppUnlockActiveSessionRowCore(row: NfcLinkAppSessionDb): Promise<{
+	ok: boolean
+	released: boolean
+	cancelledOnChain?: boolean
+	redeemOnChain?: boolean
+	txHash?: string
+	note?: string
+	error?: string
+	httpStatus?: number
+}> {
+	if (row.redeemHashBytes32 == null) {
+		await markNfcLinkAppSessionReleasedByTag(row.tagIdHex)
+		return { ok: true, released: true, redeemOnChain: false, cancelledOnChain: false }
+	}
+	const card = new ethers.Contract(BEAMIO_USER_CARD_ASSET_ADDRESS, GET_REDEEM_STATUS_BATCH_ABI, providerBaseBackup)
+	let stillPending = true
+	try {
+		const [activeList] = await card.getRedeemStatusBatch([row.redeemHashBytes32])
+		stillPending = activeList[0] === true
+	} catch (e: any) {
+		logger(Colors.yellow(`[nfcLinkAppUnlockActiveSessionRowCore] getRedeemStatusBatch: ${e?.message ?? e}`))
+		return {
+			ok: false,
+			released: false,
+			httpStatus: 503,
+			error: 'Could not verify redeem status. Try again later.',
+		}
+	}
+	if (!stillPending) {
+		await markNfcLinkAppSessionReleasedByTag(row.tagIdHex)
+		return {
+			ok: true,
+			released: true,
+			cancelledOnChain: false,
+			redeemOnChain: true,
+			note: 'Redeem already cleared on-chain.',
+		}
+	}
+	const plain = row.linkRedeemPlaintext
+	if (!plain || plain.length === 0) {
+		return {
+			ok: false,
+			released: false,
+			httpStatus: 503,
+			error:
+				'This session has an on-chain redeem but the server cannot cancel it (missing stored secret). Contact support or wait until the redeem expires.',
+		}
+	}
+	const pk = typeof process !== 'undefined' ? process.env?.BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY?.trim() : ''
+	if (!pk) {
+		return {
+			ok: false,
+			released: false,
+			httpStatus: 503,
+			error: 'Link App cancel is not configured (missing BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY).',
+		}
+	}
+	const infra = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+	const ownerRead = new ethers.Contract(infra, ['function owner() view returns (address)'], providerBaseBackup)
+	let onchainOwner: string
+	try {
+		onchainOwner = (await ownerRead.owner()) as string
+	} catch (e: any) {
+		return {
+			ok: false,
+			released: false,
+			httpStatus: 503,
+			error: `Could not read infrastructure card owner: ${e?.message ?? e}`,
+		}
+	}
+	const ownerWallet = new ethers.Wallet(pk, providerBaseBackup)
+	if (ethers.getAddress(ownerWallet.address) !== ethers.getAddress(onchainOwner)) {
+		return {
+			ok: false,
+			released: false,
+			httpStatus: 503,
+			error: 'BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY does not match infrastructure card owner().',
+		}
+	}
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		return { ok: false, released: false, httpStatus: 503, error: 'Service temporarily unavailable.' }
+	}
+	try {
+		const data = buildInfraCancelRedeemCalldata(plain)
+		const deadline = Math.floor(Date.now() / 1000) + 900
+		const nonce = ethers.hexlify(ethers.randomBytes(32))
+		const domain = {
+			name: 'BeamioUserCardFactory',
+			version: '1',
+			chainId: BASE_MAINNET_CHAIN_ID,
+			verifyingContract: BASE_CARD_FACTORY,
+		}
+		const types = {
+			ExecuteForOwner: [
+				{ name: 'cardAddress', type: 'address' },
+				{ name: 'dataHash', type: 'bytes32' },
+				{ name: 'deadline', type: 'uint256' },
+				{ name: 'nonce', type: 'bytes32' },
+			],
+		}
+		const dataHash = ethers.keccak256(data)
+		const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x')
+			? nonce
+			: ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+		const value = {
+			cardAddress: infra,
+			dataHash,
+			deadline,
+			nonce: nonceBytes,
+		}
+		const ownerWalletWithProvider = new ethers.Wallet(pk, SC.walletBase.provider!)
+		const ownerSignature = await ownerWalletWithProvider.signTypedData(domain, types, value)
+		const tx = await SC.baseFactoryPaymaster.executeForOwner(infra, data, deadline, nonce, ownerSignature)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) {
+			return { ok: false, released: false, httpStatus: 500, error: 'On-chain cancel transaction failed.' }
+		}
+		await markNfcLinkAppSessionReleasedByTag(row.tagIdHex)
+		return {
+			ok: true,
+			released: true,
+			cancelledOnChain: true,
+			redeemOnChain: true,
+			txHash: tx.hash,
+		}
+	} catch (e: any) {
+		logger(Colors.red(`[nfcLinkAppUnlockActiveSessionRowCore] ${e?.message ?? e}`))
+		return {
+			ok: false,
+			released: false,
+			httpStatus: 500,
+			error: e?.shortMessage ?? e?.message ?? String(e),
+		}
+	} finally {
+		Settle_ContractPool.unshift(SC)
+	}
+}
+
+/** Master：POST /api/nfcLinkApp 锁定后 5 分钟到期仍活跃会话 → 与 cancel 相同逻辑解锁（链上仍 pending 则 cancelRedeem）。 */
+export async function nfcLinkAppAutoCancelDueSessionsSweepOnce(): Promise<void> {
+	const due = await listNfcLinkAppSessionsDueForAutoCancel(16)
+	if (due.length === 0) return
+	const nowMs = Date.now()
+	for (const snapshot of due) {
+		const live = await fetchActiveNfcLinkAppSessionForPaymentBlock({ tagIdHex: snapshot.tagIdHex })
+		if (!live) {
+			continue
+		}
+		// 列出后若同一 tag 再次 Link，upsert 会重置 auto_cancel_at；不得对「新倒计时」误解锁
+		if (!live.autoCancelAt || live.autoCancelAt.getTime() > nowMs) {
+			continue
+		}
+		const r = await nfcLinkAppUnlockActiveSessionRowCore(live)
+		if (r.ok) {
+			logger(
+				Colors.green(
+					`[nfcLinkAppAutoCancel] tag=${live.tagIdHex.slice(0, 8)}… released=${r.released} cancelledOnChain=${r.cancelledOnChain ?? false} tx=${r.txHash ?? 'n/a'}`
+				)
+			)
+		} else {
+			logger(Colors.yellow(`[nfcLinkAppAutoCancel] tag=${live.tagIdHex.slice(0, 8)}… failed: ${r.error ?? 'unknown'}`))
+		}
+	}
+}
+
+const NFC_LINK_APP_AUTO_CANCEL_SWEEP_MS = 20_000
+
+export function startNfcLinkAppAutoCancelSweeper(): void {
+	nfcLinkAppAutoCancelDueSessionsSweepOnce().catch((e: any) => {
+		logger(Colors.yellow(`[nfcLinkAppAutoCancel] initial sweep: ${e?.message ?? e}`))
+	})
+	setInterval(() => {
+		nfcLinkAppAutoCancelDueSessionsSweepOnce().catch((e: any) => {
+			logger(Colors.yellow(`[nfcLinkAppAutoCancel] sweep: ${e?.message ?? e}`))
+		})
+	}, NFC_LINK_APP_AUTO_CANCEL_SWEEP_MS)
+}
+
+/**
+ * POS 取消 Link：SUN 校验 → 按 tag 查活跃会话；无链上 redeem 则仅释放 DB；有 redeem 则基础设施卡 owner 签 executeForOwner(cancelRedeem(plaintext))（依赖 DB link_redeem_plaintext）。
+ */
+export const nfcLinkAppCancelExecute = async (
+	body: { uid?: string; e?: string; c?: string; m?: string },
+	res: Response
+): Promise<void> => {
+	const uidTrim = body.uid?.trim() ?? ''
+	const eTrim = body.e?.trim() ?? ''
+	const cTrim = body.c?.trim() ?? ''
+	const mTrim = body.m?.trim() ?? ''
+	if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+		res.status(400).json({ success: false, error: 'Invalid uid' }).end()
+		return
+	}
+	if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+		res.status(403).json({ success: false, error: 'SUN params (e, c, m) required for NFC Link App cancel.' }).end()
+		return
+	}
+	let sunResult: Awaited<ReturnType<typeof verifyAndPersistBeamioSunUrl>>
+	try {
+		const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+		sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+	} catch (e: any) {
+		res.status(403).json({ success: false, error: `SUN error: ${e?.message ?? e}` }).end()
+		return
+	}
+	if (!sunResult.valid) {
+		res.status(403).json({ success: false, error: 'SUN verification failed.' }).end()
+		return
+	}
+	const tagNorm = normalizeNfcLinkTagId(sunResult.tagIdHex)
+	const row = await fetchActiveNfcLinkAppSessionForPaymentBlock({ tagIdHex: tagNorm })
+	if (!row) {
+		res.status(404).json({ success: false, error: 'No active Link App session for this tag.' }).end()
+		return
+	}
+	const result = await nfcLinkAppUnlockActiveSessionRowCore(row)
+	if (!result.ok) {
+		res.status(result.httpStatus ?? 500).json({ success: false, error: result.error ?? 'Unknown error' }).end()
+		return
+	}
+	const payload: Record<string, unknown> = {
+		success: true,
+		cancelledOnChain: result.cancelledOnChain ?? false,
+		redeemOnChain: result.redeemOnChain ?? false,
+	}
+	if (result.txHash) payload.txHash = result.txHash
+	if (result.note) payload.note = result.note
+	res.status(200).json(payload).end()
+}
+
+/**
+ * Consumes the **NFC Link App** one-time code via Factory `redeemForUser` / `redeemPoolForUser` (same transport as `cardRedeemProcess`), after ensuring the **App user’s** AA exists.
+ * Mints the bundle to the user’s AA per `redeemByGateway` semantics — this is the **Link migration** path, not `executeForAdmin` merchant redeem; see `nfcLinkAppExecute` JSDoc for Factory `creator` / stats caveat.
+ */
+async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCode: string): Promise<string> {
+	const cardAddress = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+	const SC = Settle_ContractPool.shift()
+	if (!SC) throw new Error('Service temporarily unavailable')
+	try {
+		// 1. 与 cardRedeemProcess 相同：无 AA 则 createAccountFor，再 redeem
+		const { accountAddress: addr } = await DeployingSmartAccount(toUserEOA, SC.aaAccountFactoryPaymaster)
+		if (!addr) {
+			throw new Error('Account not found or failed to create. Please create/activate your Beamio account first.')
+		}
+
+		const factory = SC.baseFactoryPaymaster
+		let beforeNfts: unknown[] | undefined
+		try {
+			const cardRead = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
+			const [, nfts] = await cardRead.getOwnership(addr) as [bigint, unknown[]]
+			beforeNfts = Array.isArray(nfts) ? nfts : []
+		} catch (_) {
+			beforeNfts = []
+		}
+
+		let txHash: string | null = null
+		let lastErr: any = null
+		let creator: string | undefined
+		try {
+			const cardRead = new ethers.Contract(cardAddress, ['function getRedeemCreator(string) view returns (address)'], SC.walletBase)
+			creator = await cardRead.getRedeemCreator(redeemCode) as string
+			if (creator === ethers.ZeroAddress) creator = undefined
+		} catch (_) {
+			/* 旧卡无 getRedeemCreator 时忽略 */
+		}
+
+		try {
+			const tx1 = await factory.redeemForUser(cardAddress, redeemCode, toUserEOA)
+			await tx1.wait()
+			txHash = tx1.hash
+		} catch (oneTimeErr: any) {
+			lastErr = oneTimeErr
+			const dataHex = typeof oneTimeErr?.data === 'string' ? oneTimeErr.data
+				: (oneTimeErr?.data && typeof oneTimeErr.data === 'object' && typeof (oneTimeErr.data as any).data === 'string') ? (oneTimeErr.data as any).data
+				: ''
+			const msg = (() => {
+				try {
+					const m = oneTimeErr?.message ?? oneTimeErr?.shortMessage ?? ''
+					return String(dataHex || m)
+				} catch (_) {
+					return String(dataHex || '')
+				}
+			})()
+			if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669|reverted/i.test(msg)) {
+				try {
+					const tx2 = await factory.redeemPoolForUser(cardAddress, redeemCode, toUserEOA)
+					await tx2.wait()
+					txHash = tx2.hash
+					lastErr = null
+				} catch (poolErr: any) {
+					lastErr = poolErr
+				}
+			}
+			if (lastErr) throw lastErr
+		}
+
+		if (!txHash) throw new Error('Redeem failed')
+
+		logger(Colors.green(`✅ [nfcLinkAppClaimWithKey] infra redeem card=${cardAddress} toEOA=${toUserEOA} tx=${txHash}`))
+		cardRedeemIndexerAccountingPool.push({
+			cardAddress,
+			toUserEOA,
+			aaAddress: addr,
+			txHash,
+			beforeNfts,
+			creator: creator ? ethers.getAddress(creator) : undefined,
+		})
+		cardRedeemIndexerAccountingProcess().catch((err: any) => {
+			logger(Colors.red('[cardRedeemIndexerAccountingProcess] unhandled:'), err?.message ?? err)
+		})
+		syncNftTierMetadataForUser(cardAddress, toUserEOA).catch(() => {})
+
+		return txHash
+	} finally {
+		Settle_ContractPool.unshift(SC)
+	}
+}
+
+function normalizeNfcLinkClaimPrivateKey(raw: unknown): string | null {
+	if (raw == null || typeof raw !== 'string') return null
+	const t = raw.trim()
+	if (!t) return null
+	const hex = t.startsWith('0x') ? t : `0x${t}`
+	if (!/^0x[0-9a-fA-F]{64}$/.test(hex)) return null
+	return hex
+}
+
+/**
+ * SilentPassUI deep link claim: validate private key → EOA, validate session, replace NFC row key, release session.
+ * - If session has on-chain batch (`redeemOnChain`): ensure/create **App user AA**, then `redeemForUser` / `redeemPoolForUser` on infra card (Link migration consume — **not** `executeForAdmin`; see `nfcLinkAppExecute` JSDoc for owner/creator stats caveat).
+ * - If no on-chain redeem: skip chain consume; DB rebind only.
+ * Body: nftRedeemcode, tagid, uid, counter, privateKey (HTTPS; do not log secret).
+ */
+export const nfcLinkAppClaimWithKeyExecute = async (
+	body: {
+		nftRedeemcode?: string
+		tagid?: string
+		uid?: string
+		counter?: string | number
+		privateKey?: string
+	},
+	res: Response
+): Promise<void> => {
+	const pkNorm = normalizeNfcLinkClaimPrivateKey(body.privateKey)
+	if (!pkNorm) {
+		res.status(400).json({ success: false, error: 'Invalid private key.' }).end()
+		return
+	}
+	let userEoa: string
+	try {
+		userEoa = ethers.getAddress((new ethers.Wallet(pkNorm)).address)
+	} catch {
+		res.status(400).json({ success: false, error: 'Invalid private key.' }).end()
+		return
+	}
+	const code = String(body.nftRedeemcode ?? '').trim()
+	const tagRaw = String(body.tagid ?? '').trim().replace(/^0x/i, '')
+	const uid = String(body.uid ?? '').trim().replace(/^0x/i, '').toLowerCase()
+	const ctr = body.counter
+	if (!code || code.toLowerCase() === 'null') {
+		res.status(400).json({ success: false, error: 'Missing nftRedeemcode.' }).end()
+		return
+	}
+	if (!/^[0-9a-f]{16}$/i.test(tagRaw)) {
+		res.status(400).json({ success: false, error: 'Invalid tagid.' }).end()
+		return
+	}
+	if (!/^[0-9a-f]{14}$/i.test(uid)) {
+		res.status(400).json({ success: false, error: 'Invalid uid.' }).end()
+		return
+	}
+	const ctrNum = typeof ctr === 'number' && Number.isFinite(ctr) ? ctr : parseInt(String(ctr ?? ''), 10)
+	if (!Number.isFinite(ctrNum)) {
+		res.status(400).json({ success: false, error: 'Invalid counter.' }).end()
+		return
+	}
+	let v: Awaited<ReturnType<typeof nfcLinkAppValidateParams>>
+	try {
+		v = await nfcLinkAppValidateParams({
+			nftRedeemcode: code,
+			tagid: tagRaw,
+			uid,
+			counter: ctrNum,
+		})
+	} catch (e: any) {
+		res.status(400).json({ success: false, error: e?.message ?? 'Validation failed.' }).end()
+		return
+	}
+	if (!v.ok) {
+		res.status(400).json({ success: false, error: v.error }).end()
+		return
+	}
+
+	let redeemTxHash: string | null = null
+	if (v.redeemOnChain) {
+		try {
+			redeemTxHash = await performInfraCardRedeemForUserEoaOnce(userEoa, code)
+		} catch (e: any) {
+			const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
+			logger(Colors.red(`[nfcLinkAppClaimWithKey] redeem failed: ${errMsg}`))
+			res.status(400).json({ success: false, error: 'Redeem failed. The code may be invalid or already used.' }).end()
+			return
+		}
+	}
+
+	try {
+		await replaceNfcCardKeyByTagId({
+			tagIdHex: tagRaw,
+			privateKey: pkNorm,
+			uidHex: uid,
+		})
+	} catch (e: any) {
+		logger(Colors.red(`[nfcLinkAppClaimWithKey] DB update failed: ${e?.message ?? e}`))
+		res.status(500).json({ success: false, error: 'Failed to update NFC card record.' }).end()
+		return
+	}
+
+	try {
+		await markNfcLinkAppSessionReleasedByTag(normalizeNfcLinkTagId(tagRaw))
+	} catch (e: any) {
+		logger(Colors.yellow(`[nfcLinkAppClaimWithKey] release session: ${e?.message ?? e}`))
+	}
+
+	res.status(200).json({ success: true, address: userEoa, redeemTxHash }).end()
+}
 
 function _normalizeCardAddress(addr: string): string {
 	return addr
@@ -7872,6 +8881,8 @@ export const payByNfcUidOpenContainer = async (params: {
 		}
 		const aaCode = await SC.walletBase.provider!.getCode(aa)
 		if (!aaCode || aaCode === '0x') return { pushed: false, error: 'NO_AA' }
+		const lbOpen = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa, payerEoa: eoa })
+		if (lbOpen) return { pushed: false, error: lbOpen }
 		const cardAbi = ['function getOwnership(address) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[])', 'function currency() view returns (uint8)']
 		const usdcAbi = ['function balanceOf(address) view returns (uint256)']
 		const card = new ethers.Contract(BASE_CCSA_CARD_ADDRESS, cardAbi, SC.walletBase.provider!)
@@ -8122,6 +9133,8 @@ export const payByNfcUidPrepare = async (params: {
 		}
 		const aaCode = await SC.walletBase.provider!.getCode(aa)
 		if (!aaCode || aaCode === '0x') return { ok: false, error: 'NO_AA' }
+		const linkBlockPrepare = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa, payerEoa: eoa })
+		if (linkBlockPrepare) return { ok: false, error: linkBlockPrepare }
 		let toResolved = ethers.getAddress(payee)
 		const payeeCode = await SC.walletBase.provider!.getCode(toResolved)
 		const isPayeeEOA = !payeeCode || payeeCode === '0x'
@@ -8178,7 +9191,7 @@ export const payByNfcUidSignContainer = async (params: {
 	nfcDiscountRateBps?: number
 	nfcTaxAmountFiat6?: string
 	nfcTaxRateBps?: number
-}): Promise<{ pushed: boolean; error?: string }> => {
+}): Promise<{ pushed: boolean; error?: string; httpStatus?: number }> => {
 	const {
 		uid,
 		containerPayload,
@@ -8253,6 +9266,10 @@ export const payByNfcUidSignContainer = async (params: {
 	const aa = (await Settle_ContractPool[0].aaAccountFactoryPaymaster.primaryAccountOf(eoa)) ?? ethers.ZeroAddress
 	if (aa === ethers.ZeroAddress || ethers.getAddress(containerPayload.account) !== aa) {
 		return { pushed: false, error: 'account 与 UID 对应的 AA 不一致' }
+	}
+	const linkBlockCharge = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa, payerEoa: eoa })
+	if (linkBlockCharge) {
+		return { pushed: false, error: linkBlockCharge, httpStatus: 403 }
 	}
 	try {
 		const itemsHash = hashContainerItems(containerPayload.items)

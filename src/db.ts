@@ -851,6 +851,25 @@ const BEAMIO_SUN_COUNTER_STATE_TABLE = `CREATE TABLE IF NOT EXISTS beamio_sun_co
 	updated_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
+/** nfc_link_app_sessions：Link App 进行中会话（Cluster/Master 共用 PG，替代进程内 Map） */
+const NFC_LINK_APP_SESSIONS_TABLE = `CREATE TABLE IF NOT EXISTS nfc_link_app_sessions (
+	tag_id_hex TEXT PRIMARY KEY,
+	uid_hex TEXT NOT NULL,
+	counter_hex TEXT NOT NULL,
+	payer_eoa TEXT NOT NULL,
+	aa_address TEXT NOT NULL,
+	redeem_hash_bytes32 TEXT,
+	chain_tx_hash TEXT,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	released_at TIMESTAMPTZ
+)`
+const NFC_LINK_APP_SESSIONS_IDX_PAYER = `CREATE INDEX IF NOT EXISTS idx_nfc_link_app_sessions_active_payer ON nfc_link_app_sessions (LOWER(payer_eoa)) WHERE released_at IS NULL`
+const NFC_LINK_APP_SESSIONS_IDX_AA = `CREATE INDEX IF NOT EXISTS idx_nfc_link_app_sessions_active_aa ON nfc_link_app_sessions (LOWER(aa_address)) WHERE released_at IS NULL AND LOWER(TRIM(aa_address)) <> '0x0000000000000000000000000000000000000000'`
+const NFC_LINK_APP_SESSIONS_ADD_PLAINTEXT = `ALTER TABLE nfc_link_app_sessions ADD COLUMN IF NOT EXISTS link_redeem_plaintext TEXT`
+const NFC_LINK_APP_SESSIONS_ADD_PUBLIC = `ALTER TABLE nfc_link_app_sessions ADD COLUMN IF NOT EXISTS link_redeem_public TEXT`
+const NFC_LINK_APP_SESSIONS_ADD_AUTO_CANCEL_AT = `ALTER TABLE nfc_link_app_sessions ADD COLUMN IF NOT EXISTS auto_cancel_at TIMESTAMPTZ`
+const NFC_LINK_APP_SESSIONS_IDX_AUTO_CANCEL = `CREATE INDEX IF NOT EXISTS idx_nfc_link_app_sessions_auto_cancel ON nfc_link_app_sessions (auto_cancel_at) WHERE released_at IS NULL AND auto_cancel_at IS NOT NULL`
+
 /** ai_learning_feedback 表：AI 学习反馈，共享给所有 Beamio 用户。kind: approved=满意, corrected=纠正 */
 const AI_LEARNING_FEEDBACK_TABLE = `CREATE TABLE IF NOT EXISTS ai_learning_feedback (
 	id SERIAL PRIMARY KEY,
@@ -1026,6 +1045,257 @@ export const getNfcRecipientAddressByTagId = async (tagIdHex: string): Promise<s
 	}
 }
 
+function normalizeTagIdHexForLinkSession(raw: string): string {
+	return String(raw || '').trim().replace(/^0x/i, '').toLowerCase()
+}
+
+async function ensureNfcLinkAppSessionsSchema(db: Client): Promise<void> {
+	await db.query(NFC_LINK_APP_SESSIONS_TABLE)
+	await db.query(NFC_LINK_APP_SESSIONS_ADD_PLAINTEXT)
+	await db.query(NFC_LINK_APP_SESSIONS_ADD_PUBLIC)
+	await db.query(NFC_LINK_APP_SESSIONS_ADD_AUTO_CANCEL_AT)
+	await db.query(NFC_LINK_APP_SESSIONS_IDX_AUTO_CANCEL)
+	await db.query(NFC_LINK_APP_SESSIONS_IDX_PAYER)
+	await db.query(NFC_LINK_APP_SESSIONS_IDX_AA)
+}
+
+export type NfcLinkAppSessionDb = {
+	tagIdHex: string
+	uid: string
+	counterHex: string
+	payerEoa: string
+	aaAddress: string
+	redeemHashBytes32: `0x${string}` | null
+	chainTxHash: string | null
+	/** 仅服务端用于 POS cancelRedeem；勿对外 API 返回 */
+	linkRedeemPlaintext: string | null
+	/** 深链 nftRedeemcode 公开段（不含 6 位 security），供校验 */
+	linkRedeemPublic: string | null
+	/** POST /api/nfcLinkApp 锁定后计划自动解锁时间（Master 定时任务） */
+	autoCancelAt: Date | null
+}
+
+function rowToNfcLinkSession(r: {
+	tag_id_hex: string
+	uid_hex: string
+	counter_hex: string
+	payer_eoa: string
+	aa_address: string
+	redeem_hash_bytes32: string | null
+	chain_tx_hash: string | null
+	link_redeem_plaintext?: string | null
+	link_redeem_public?: string | null
+	auto_cancel_at?: Date | string | null
+}): NfcLinkAppSessionDb {
+	const h = r.redeem_hash_bytes32
+	const plain = r.link_redeem_plaintext
+	const pub = r.link_redeem_public
+	const ac = r.auto_cancel_at
+	let autoCancelAt: Date | null = null
+	if (ac != null) {
+		autoCancelAt = ac instanceof Date ? ac : new Date(ac)
+		if (Number.isNaN(autoCancelAt.getTime())) autoCancelAt = null
+	}
+	return {
+		tagIdHex: r.tag_id_hex,
+		uid: r.uid_hex,
+		counterHex: r.counter_hex,
+		payerEoa: ethers.getAddress(r.payer_eoa),
+		aaAddress: ethers.getAddress(r.aa_address),
+		redeemHashBytes32: h && String(h).length > 0 ? (String(h) as `0x${string}`) : null,
+		chainTxHash: r.chain_tx_hash,
+		linkRedeemPlaintext: plain != null && String(plain).length > 0 ? String(plain) : null,
+		linkRedeemPublic: pub != null && String(pub).length > 0 ? String(pub) : null,
+		autoCancelAt,
+	}
+}
+
+/** 写入或刷新当前 tag 的 Link App 活跃会话（released_at 置空） */
+export const upsertActiveNfcLinkAppSession = async (rec: {
+	tagIdHex: string
+	uid: string
+	counterHex: string
+	payerEoa: string
+	aaAddress: string
+	redeemHashBytes32: string | null
+	chainTxHash: string | null
+	linkRedeemPlaintext?: string | null
+	linkRedeemPublic?: string | null
+}): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcLinkAppSessionsSchema(db)
+		const tag = normalizeTagIdHexForLinkSession(rec.tagIdHex)
+		if (!tag || tag.length !== 16 || !/^[0-9a-f]+$/.test(tag)) {
+			throw new Error('Invalid tagIdHex for nfc link session')
+		}
+		const payer = ethers.getAddress(rec.payerEoa).toLowerCase()
+		const aa = ethers.getAddress(rec.aaAddress).toLowerCase()
+		const ctr = String(rec.counterHex || '').trim().toLowerCase()
+		const rh = rec.redeemHashBytes32 ? String(rec.redeemHashBytes32).toLowerCase() : null
+		const ctx = rec.chainTxHash ? String(rec.chainTxHash).trim() : null
+		const plain = rec.linkRedeemPlaintext != null && String(rec.linkRedeemPlaintext).length > 0 ? String(rec.linkRedeemPlaintext) : null
+		const pub = rec.linkRedeemPublic != null && String(rec.linkRedeemPublic).length > 0 ? String(rec.linkRedeemPublic) : null
+		await db.query(
+			`INSERT INTO nfc_link_app_sessions (tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, released_at, auto_cancel_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NOW() + INTERVAL '5 minutes')
+			ON CONFLICT (tag_id_hex) DO UPDATE SET
+				uid_hex = EXCLUDED.uid_hex,
+				counter_hex = EXCLUDED.counter_hex,
+				payer_eoa = EXCLUDED.payer_eoa,
+				aa_address = EXCLUDED.aa_address,
+				redeem_hash_bytes32 = EXCLUDED.redeem_hash_bytes32,
+				chain_tx_hash = EXCLUDED.chain_tx_hash,
+				link_redeem_plaintext = EXCLUDED.link_redeem_plaintext,
+				link_redeem_public = EXCLUDED.link_redeem_public,
+				released_at = NULL,
+				auto_cancel_at = NOW() + INTERVAL '5 minutes',
+				created_at = NOW()`,
+			[tag, rec.uid.trim(), ctr, payer, aa, rh, ctx, plain, pub]
+		)
+	} catch (e: any) {
+		logger(Colors.yellow(`[upsertActiveNfcLinkAppSession] failed: ${e?.message ?? e}`))
+		throw e
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 按 tag → AA → payer 顺序查找未释放会话，供付款拦截与校验 */
+export const fetchActiveNfcLinkAppSessionForPaymentBlock = async (opts: {
+	tagIdHex?: string
+	aaAddress?: string
+	payerEoa?: string
+}): Promise<NfcLinkAppSessionDb | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcLinkAppSessionsSchema(db)
+		if (opts.tagIdHex) {
+			const tag = normalizeTagIdHexForLinkSession(opts.tagIdHex)
+			if (tag) {
+				const { rows } = await db.query(
+					`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+					FROM nfc_link_app_sessions WHERE tag_id_hex = $1 AND released_at IS NULL LIMIT 1`,
+					[tag]
+				)
+				if (rows[0]) return rowToNfcLinkSession(rows[0] as any)
+			}
+		}
+		if (opts.aaAddress && ethers.isAddress(opts.aaAddress)) {
+			const aa = ethers.getAddress(opts.aaAddress).toLowerCase()
+			if (aa !== ethers.ZeroAddress.toLowerCase()) {
+				const { rows } = await db.query(
+					`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+					FROM nfc_link_app_sessions WHERE LOWER(TRIM(aa_address)) = $1 AND released_at IS NULL LIMIT 1`,
+					[aa]
+				)
+				if (rows[0]) return rowToNfcLinkSession(rows[0] as any)
+			}
+		}
+		if (opts.payerEoa && ethers.isAddress(opts.payerEoa)) {
+			const pay = ethers.getAddress(opts.payerEoa).toLowerCase()
+			const { rows } = await db.query(
+				`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+				FROM nfc_link_app_sessions WHERE LOWER(TRIM(payer_eoa)) = $1 AND released_at IS NULL LIMIT 1`,
+				[pay]
+			)
+			if (rows[0]) return rowToNfcLinkSession(rows[0] as any)
+		}
+		return null
+	} catch (e: any) {
+		logger(Colors.yellow(`[fetchActiveNfcLinkAppSessionForPaymentBlock] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 链上 redeem 已结束或业务清会话：按 tag 标记释放 */
+export const markNfcLinkAppSessionReleasedByTag = async (tagIdHex: string): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcLinkAppSessionsSchema(db)
+		const tag = normalizeTagIdHexForLinkSession(tagIdHex)
+		if (!tag) return
+		await db.query(
+			`UPDATE nfc_link_app_sessions SET released_at = NOW(), auto_cancel_at = NULL WHERE tag_id_hex = $1 AND released_at IS NULL`,
+			[tag]
+		)
+	} catch (e: any) {
+		logger(Colors.yellow(`[markNfcLinkAppSessionReleasedByTag] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** Master 定时任务：已到 auto_cancel_at 且仍锁定的会话（POST /api/nfcLinkApp 后 5 分钟自动解锁） */
+export const listNfcLinkAppSessionsDueForAutoCancel = async (limit: number = 12): Promise<NfcLinkAppSessionDb[]> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcLinkAppSessionsSchema(db)
+		const lim = Math.min(Math.max(1, Math.floor(limit)), 50)
+		const { rows } = await db.query(
+			`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+			FROM nfc_link_app_sessions
+			WHERE released_at IS NULL
+			  AND auto_cancel_at IS NOT NULL
+			  AND auto_cancel_at <= NOW()
+			ORDER BY auto_cancel_at ASC
+			LIMIT $1`,
+			[lim]
+		)
+		return (rows as any[]).map((r) => rowToNfcLinkSession(r))
+	} catch (e: any) {
+		logger(Colors.yellow(`[listNfcLinkAppSessionsDueForAutoCancel] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** App 完成 Link 后释放会话（校验 tag/uid/counter） */
+export const releaseNfcLinkAppSessionIfMatches = async (body: {
+	tagid?: string
+	uid?: string
+	counter?: string | number
+}): Promise<{ ok: true } | { ok: false; error: string }> => {
+	const tag = String(body.tagid || '').trim().replace(/^0x/i, '').toLowerCase()
+	const uid = String(body.uid || '').trim()
+	if (!tag || !uid) return { ok: false, error: 'Missing tagid or uid.' }
+
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcLinkAppSessionsSchema(db)
+		const { rows } = await db.query(
+			`SELECT tag_id_hex, uid_hex, counter_hex, payer_eoa, aa_address, redeem_hash_bytes32, chain_tx_hash, link_redeem_plaintext, link_redeem_public, auto_cancel_at
+			FROM nfc_link_app_sessions WHERE tag_id_hex = $1 AND released_at IS NULL LIMIT 1`,
+			[tag]
+		)
+		if (!rows[0]) return { ok: false, error: 'No active link session for this tag.' }
+		const rec = rowToNfcLinkSession(rows[0] as any)
+		if (rec.uid !== uid) return { ok: false, error: 'uid mismatch.' }
+		const ctr = body.counter
+		const ctrNum = typeof ctr === 'number' && Number.isFinite(ctr) ? ctr : parseInt(String(ctr ?? ''), 10)
+		const expected = parseInt(rec.counterHex, 16)
+		if (!Number.isFinite(ctrNum) || ctrNum !== expected) return { ok: false, error: 'counter mismatch.' }
+		await db.query(
+			`UPDATE nfc_link_app_sessions SET released_at = NOW(), auto_cancel_at = NULL WHERE tag_id_hex = $1 AND released_at IS NULL`,
+			[tag]
+		)
+		return { ok: true }
+	} catch (e: any) {
+		logger(Colors.yellow(`[releaseNfcLinkAppSessionIfMatches] failed: ${e?.message ?? e}`))
+		return { ok: false, error: 'Database error.' }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** TagID 是否已登记（合法卡） */
 export const isTagIdRegistered = async (tagIdHex: string): Promise<boolean> => {
 	const addr = await getNfcRecipientAddressByTagId(tagIdHex)
@@ -1108,6 +1378,42 @@ export const registerNfcCardToDb = async (params: { uid: string; privateKey: str
 		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[registerNfcCardToDb] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/**
+ * Link App 完成后：按 TagID 将 nfc_cards 的私钥替换为用户钱包私钥，并同步 uid（SUN 14 hex）。
+ * 先 UPDATE tag_id 命中行；若无行则 INSERT（新卡首次绑定用户密钥）。
+ */
+export const replaceNfcCardKeyByTagId = async (params: {
+	tagIdHex: string
+	privateKey: string
+	uidHex: string
+}): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	const tagUpper = String(params.tagIdHex || '').trim().replace(/^0x/i, '').toUpperCase()
+	const pk = String(params.privateKey || '').trim()
+	const uid = String(params.uidHex || '').trim().toLowerCase()
+	if (!tagUpper || tagUpper.length !== 16 || !/^[0-9A-F]+$/.test(tagUpper) || !pk || !uid) {
+		throw new Error('replaceNfcCardKeyByTagId: invalid tagIdHex, privateKey, or uidHex')
+	}
+	try {
+		await db.connect()
+		await db.query(NFC_CARDS_TABLE)
+		await db.query(NFC_CARDS_ADD_TAG_ID)
+		const up = await db.query(`UPDATE nfc_cards SET private_key = $1, uid = $2 WHERE UPPER(TRIM(tag_id)) = $3`, [
+			pk,
+			uid,
+			tagUpper,
+		])
+		if ((up.rowCount ?? 0) > 0) return
+		await db.query(
+			`INSERT INTO nfc_cards (uid, private_key, tag_id) VALUES ($1, $2, $3)
+			ON CONFLICT (tag_id) DO UPDATE SET private_key = EXCLUDED.private_key, uid = EXCLUDED.uid`,
+			[uid, pk, tagUpper]
+		)
 	} finally {
 		await db.end().catch(() => {})
 	}

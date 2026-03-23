@@ -10,7 +10,7 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
 
@@ -1634,7 +1634,8 @@ const routing = ( router: Router ) => {
 				nfcTaxRateBps,
 			})
 			if (result.pushed) return
-			return res.status(400).json({ success: false, error: result.error }).end()
+			if (res.headersSent) return
+			return res.status(result.httpStatus ?? 400).json({ success: false, error: result.error }).end()
 		})
 
 		/** POST /api/payByNfcUid - 以 UID 支付：Smart Routing 聚合 CCSA+USDC 扣款，无 AA 时回退纯 USDC 转账 */
@@ -1664,6 +1665,9 @@ const routing = ( router: Router ) => {
 			if (openResult.pushed) {
 				return
 			}
+			if (openResult.error?.includes('linking to the Beamio app')) {
+				return res.status(403).json({ success: false, error: openResult.error }).end()
+			}
 			// 收款方无法接收 CCSA 时，不尝试 fallback（卡片 EOA 无 USDC 会失败）
 			if (openResult.error && (openResult.error.includes('EOA') || openResult.error.includes('无法接收 CCSA'))) {
 				return res.status(400).json({ success: false, error: openResult.error }).end()
@@ -1690,6 +1694,21 @@ const routing = ( router: Router ) => {
 				logger(Colors.red(`[payByNfcUid] failed: ${e?.message ?? e}`))
 				return res.status(500).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Transfer failed' }).end()
 			}
+		})
+
+		/** POST /api/nfcLinkApp - 基础设施卡 owner 签 executeForOwner(createRedeemBatch)，返回明文 redeem 与深链 */
+		router.post('/nfcLinkApp', async (req, res) => {
+			await nfcLinkAppExecute(req.body ?? {}, res)
+		})
+
+		/** POST /api/nfcLinkAppCancel - 取消进行中 Link：executeForOwner(cancelRedeem)（若有）+ 释放 DB 会话 */
+		router.post('/nfcLinkAppCancel', async (req, res) => {
+			await nfcLinkAppCancelExecute(req.body ?? {}, res)
+		})
+
+		/** POST /api/nfcLinkAppClaimWithKey - App 完成 Link：redeem（若有）+ 将 nfc_cards 私钥换为用户密钥 + 释放会话 */
+		router.post('/nfcLinkAppClaimWithKey', async (req, res) => {
+			await nfcLinkAppClaimWithKeyExecute(req.body ?? {}, res)
 		})
 
 		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）或 wallet（Scan QR）。 */
@@ -1765,6 +1784,10 @@ const routing = ( router: Router ) => {
 			}
 			if (typeof deadline !== 'number' || deadline <= 0 || !nonce || typeof nonce !== 'string' || !adminSignature || typeof adminSignature !== 'string') {
 				return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce/adminSignature' })
+			}
+			const mintLinkBlock = await nfcLinkAppPaymentBlockedForMintCalldata(data)
+			if (mintLinkBlock) {
+				return res.status(403).json({ success: false, error: mintLinkBlock }).end()
 			}
 			executeForAdminPool.push({
 				cardAddr: ethers.getAddress(cardAddr),
@@ -1901,6 +1924,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		console.table([
 			{ 'x402 Server': `http://localhost:${PORT}`, 'Serving files from': staticFolder }
 		])
+		startNfcLinkAppAutoCancelSweeper()
 	})
 
 	server.on('error', (err: any) => {

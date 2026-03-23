@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
@@ -1272,6 +1272,141 @@ const routing = ( router: Router ) => {
 		// 不在此做卡登记检测，直接转发 Master；Master 会从 DB 或 mnemonic 派生私钥
 		logger(Colors.green(`[payByNfcUid] Cluster preCheck OK uid=${uid.trim().slice(0, 16)}... amountUsdc6=${amountUsdc6} payee=${ethers.getAddress(payee)} forwarding to master`))
 		postLocalhost('/api/payByNfcUid', { uid: uid.trim(), amountUsdc6: amountUsdc6, payee: ethers.getAddress(payee) }, res)
+	})
+
+	/** POST /api/nfcLinkApp - POS Link App：SUN 预检 + DB 会话冲突检查，再转发 Master 登记 redeem / 写会话 */
+	router.post('/nfcLinkApp', async (req, res) => {
+		const body = req.body as { uid?: string; e?: string; c?: string; m?: string; cardAddress?: string }
+		const uidTrim = body.uid?.trim() ?? ''
+		const eTrim = body.e?.trim() ?? ''
+		const cTrim = body.c?.trim() ?? ''
+		const mTrim = body.m?.trim() ?? ''
+		const cardRaw = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : ''
+		if (cardRaw) {
+			if (!ethers.isAddress(cardRaw)) {
+				return res.status(400).json({ success: false, error: 'Invalid cardAddress.' }).end()
+			}
+			const ca = ethers.getAddress(cardRaw)
+			if (ca !== ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)) {
+				return res.status(400).json({ success: false, error: 'cardAddress must be the Beamio infrastructure user card.' }).end()
+			}
+		}
+		if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+			return res.status(400).json({ success: false, error: 'Invalid uid' }).end()
+		}
+		if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+			return res.status(403).json({ success: false, error: 'SUN params (e, c, m) required.' }).end()
+		}
+		try {
+			const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+			const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+			if (!sunResult.valid) {
+				return res.status(403).json({ success: false, error: 'SUN verification failed.' }).end()
+			}
+			const blockedDetail = await nfcLinkAppNewLinkBlockedDetail(sunResult.tagIdHex)
+			if (blockedDetail) {
+				return res
+					.status(409)
+					.json({
+						success: false,
+						error: NFC_LINK_APP_CARD_LOCKED_MESSAGE,
+						errorCode: NFC_LINK_APP_CARD_LOCKED_ERROR_CODE,
+						redeemOnChain: blockedDetail.redeemOnChain,
+					})
+					.end()
+			}
+		} catch (e: any) {
+			return res.status(403).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+		postLocalhost(
+			'/api/nfcLinkApp',
+			{
+				uid: uidTrim,
+				e: eTrim,
+				c: cTrim,
+				m: mTrim,
+				...(cardRaw ? { cardAddress: ethers.getAddress(cardRaw) } : {}),
+			},
+			res
+		)
+	})
+
+	/** POST /api/nfcLinkAppClaimWithKey - SilentPassUI 扫 Link 深链：校验参数与私钥格式后转 Master（redeem + 换绑 nfc_cards 私钥） */
+	router.post('/nfcLinkAppClaimWithKey', async (req, res) => {
+		const body = req.body as {
+			nftRedeemcode?: string
+			tagid?: string
+			uid?: string
+			counter?: string | number
+			privateKey?: string
+		}
+		const code = typeof body.nftRedeemcode === 'string' ? body.nftRedeemcode.trim() : ''
+		const tagid = typeof body.tagid === 'string' ? body.tagid.trim().replace(/^0x/i, '') : ''
+		const uid = typeof body.uid === 'string' ? body.uid.trim().replace(/^0x/i, '').toLowerCase() : ''
+		const pk = typeof body.privateKey === 'string' ? body.privateKey.trim() : ''
+		const ctr = body.counter
+		if (!code || code.toLowerCase() === 'null') {
+			return res.status(400).json({ success: false, error: 'Missing nftRedeemcode.' }).end()
+		}
+		if (!/^[0-9a-f]{16}$/i.test(tagid)) {
+			return res.status(400).json({ success: false, error: 'Invalid tagid.' }).end()
+		}
+		if (!/^[0-9a-f]{14}$/i.test(uid)) {
+			return res.status(400).json({ success: false, error: 'Invalid uid.' }).end()
+		}
+		const ctrNum = typeof ctr === 'number' && Number.isFinite(ctr) ? ctr : parseInt(String(ctr ?? ''), 10)
+		if (!Number.isFinite(ctrNum)) {
+			return res.status(400).json({ success: false, error: 'Invalid counter.' }).end()
+		}
+		const pkHex = pk.startsWith('0x') ? pk : `0x${pk}`
+		if (!/^0x[0-9a-fA-F]{64}$/.test(pkHex)) {
+			return res.status(400).json({ success: false, error: 'Invalid private key.' }).end()
+		}
+		try {
+			new ethers.Wallet(pkHex)
+		} catch {
+			return res.status(400).json({ success: false, error: 'Invalid private key.' }).end()
+		}
+		postLocalhost('/api/nfcLinkAppClaimWithKey', req.body ?? {}, res)
+	})
+
+	/** POST /api/nfcLinkAppValidate - 校验深链参数与当前 Link App 会话一致（Cluster 直出，读共享 PG） */
+	router.post('/nfcLinkAppValidate', async (req, res) => {
+		const v = await nfcLinkAppValidateParams(req.body ?? {})
+		if (!v.ok) return res.status(400).json({ success: false, error: v.error }).end()
+		return res.status(200).json({ success: true, redeemOnChain: v.redeemOnChain }).end()
+	})
+
+	/** POST /api/nfcLinkAppRelease - App 完成 Link（尤其 redeem=null 会话）后释放 DB 会话，恢复 topup/charge */
+	router.post('/nfcLinkAppRelease', async (req, res) => {
+		const r = await releaseNfcLinkAppLockIfSessionMatches(req.body ?? {})
+		if (!r.ok) return res.status(400).json({ success: false, error: r.error }).end()
+		return res.status(200).json({ success: true }).end()
+	})
+
+	/** POST /api/nfcLinkAppCancel - SUN 预检后转发 Master：链上 cancelRedeem（若有）+ 释放 DB 会话 */
+	router.post('/nfcLinkAppCancel', async (req, res) => {
+		const body = req.body as { uid?: string; e?: string; c?: string; m?: string }
+		const uidTrim = body.uid?.trim() ?? ''
+		const eTrim = body.e?.trim() ?? ''
+		const cTrim = body.c?.trim() ?? ''
+		const mTrim = body.m?.trim() ?? ''
+		if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+			return res.status(400).json({ success: false, error: 'Invalid uid' }).end()
+		}
+		if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+			return res.status(403).json({ success: false, error: 'SUN params (e, c, m) required.' }).end()
+		}
+		try {
+			const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+			const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+			if (!sunResult.valid) {
+				return res.status(403).json({ success: false, error: 'SUN verification failed.' }).end()
+			}
+		} catch (e: any) {
+			return res.status(403).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+		postLocalhost('/api/nfcLinkAppCancel', { uid: uidTrim, e: eTrim, c: cTrim, m: mTrim }, res)
 	})
 
 	/** POST /api/burnPointsByAdminPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。Admin 离线签字后提交 /api/nfcTopup。target 为被 burn 的地址，amount 为 "max" 表示 burn 全部。 */
@@ -2823,6 +2958,13 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				logger(Colors.red(`[AAtoEOA] server Container B-Unit pre-check FAIL: ${bunitCheck.error}`))
 				return res.status(400).json({ success: false, error: bunitCheck.error }).end()
 			}
+			const closedPayerAa = body.containerPayload?.account
+			if (closedPayerAa && ethers.isAddress(closedPayerAa)) {
+				const lbCc = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: closedPayerAa })
+				if (lbCc) {
+					return res.status(403).json({ success: false, error: lbCc }).end()
+				}
+			}
 			// Cluster 预检：currency/currencyAmount 必填（显式参数，不再依赖 payMe JSON）
 			if (!body.currency || !String(body.currency).trim()) {
 				logger(Colors.red(`[AAtoEOA] server Container REJECT: currency is required`))
@@ -2898,6 +3040,13 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			if (!bunitCheck.success) {
 				logger(Colors.red(`[AAtoEOA] server OpenContainer B-Unit pre-check FAIL: ${bunitCheck.error}`))
 				return res.status(400).json({ success: false, error: bunitCheck.error }).end()
+			}
+			const payerAa = body.openContainerPayload?.account
+			if (payerAa && ethers.isAddress(payerAa)) {
+				const lbOc = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: payerAa })
+				if (lbOc) {
+					return res.status(403).json({ success: false, error: lbOc }).end()
+				}
 			}
 			const reqHashValid = body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined
 			if (reqHashValid && body.openContainerPayload?.to && ethers.isAddress(body.openContainerPayload.to)) {
