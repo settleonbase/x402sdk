@@ -7206,6 +7206,9 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 	}
 }
 
+/** `/api/nfcLinkAppClaimWithKey` Container 迁移专用：固定 2 B-Units，由基础设施卡 `owner()`（解析为 EOA）承担，不按转账金额计费。 */
+const NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6 = 2_000_000n
+
 /**
  * Link App 认领：用 DB 中 NFC 卡私钥签 `ContainerMain`，将基础设施卡 ERC-1155 `#0` 全额从 NFC 用户 AA 转到 App 用户 AA。
  * 不经过 createRedeemBatch / redeemForUser。
@@ -7301,30 +7304,23 @@ async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
 			throw new Error(pre.error ?? 'Container pre-check failed')
 		}
 
-		let usdcAmountRaw = bal0
-		try {
-			const fq = new ethers.Contract(
-				BASE_CARD_FACTORY,
-				['function quoteUnitPointInUSDC6(address) view returns (uint256)'],
-				SC.walletBase.provider!
-			)
-			const unit = (await fq.quoteUnitPointInUSDC6(infra)) as bigint
-			if (unit > 0n) {
-				usdcAmountRaw = (bal0 * unit) / 1_000_000n
-			}
-		} catch {
-			/* fee estimate fallback */
+		const infraOwnerRead = new ethers.Contract(infra, ['function owner() view returns (address)'], SC.walletBase.provider!)
+		const rawCardOwner = (await infraOwnerRead.owner()) as string
+		const issuerResolve = await resolveCardOwnerToEOA(SC.walletBase.provider!, rawCardOwner)
+		if (!issuerResolve.success) {
+			throw new Error(issuerResolve.error ?? 'Could not resolve infrastructure card owner to EOA for B-Unit fee.')
 		}
-		if (usdcAmountRaw <= 0n) {
-			usdcAmountRaw = 1n
-		}
-		const bu = await ContainerRelayPreCheckBUnitBalance(
-			containerPayload,
-			'USDC',
-			ethers.formatUnits(usdcAmountRaw, 6)
+		const cardIssuerEoa = ethers.getAddress(issuerResolve.cardOwner)
+		const bunitRead = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function getBUnitBalance(address) view returns (uint256)'],
+			providerConet
 		)
-		if (!bu.success) {
-			throw new Error(bu.error ?? 'B-Unit balance check failed')
+		const issuerBUnitBal = (await bunitRead.getBUnitBalance(cardIssuerEoa)) as bigint
+		if (issuerBUnitBal < NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) {
+			throw new Error(
+				`Insufficient B-Units: infrastructure card issuer needs ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units for link migration (balance: ${Number(issuerBUnitBal) / 1e6} B-Units).`
+			)
 		}
 
 		const relayItems = containerPayload.items.map((it) => {
@@ -7357,27 +7353,28 @@ async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
 			throw new Error('Container relay transaction failed')
 		}
 
-		const { feePayerEOA } = await resolveChargeFeePayer(toAddr, BEAMIO_USER_CARD_ASSET_ADDRESS, SC.walletBase.provider!)
-		const { bServiceUnits6: feeBUnits6 } = calcBeamioBUnitFee(usdcAmountRaw)
-		if (feePayerEOA && feePayerEOA !== ethers.ZeroAddress && feeBUnits6 > 0n) {
-			try {
-				const bunitAirdropWrite = new ethers.Contract(
-					CONET_BUNIT_AIRDROP_ADDRESS,
-					['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
-					SC.walletConet
+		try {
+			const bunitAirdropWrite = new ethers.Contract(
+				CONET_BUNIT_AIRDROP_ADDRESS,
+				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+				SC.walletConet
+			)
+			await bunitAirdropWrite.consumeFromUser(
+				cardIssuerEoa,
+				NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
+				tx.hash as `0x${string}`,
+				receipt.gasUsed ?? 0n,
+				1n,
+				{ gasLimit: 2_500_000 }
+			)
+			logger(
+				Colors.cyan(
+					`[nfcLinkAppMigrateContainer] consumeFromUser: ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units from infra card issuer ${cardIssuerEoa.slice(0, 10)}…`
 				)
-				await bunitAirdropWrite.consumeFromUser(
-					feePayerEOA,
-					feeBUnits6,
-					tx.hash as `0x${string}`,
-					receipt.gasUsed ?? 0n,
-					1n,
-					{ gasLimit: 2_500_000 }
-				)
-			} catch (e: unknown) {
-				const msg = e instanceof Error ? e.message : String(e)
-				logger(Colors.yellow(`[nfcLinkAppMigrateContainer] consumeFromUser non-fatal: ${msg}`))
-			}
+			)
+		} catch (e: unknown) {
+			const msg = e instanceof Error ? e.message : String(e)
+			logger(Colors.yellow(`[nfcLinkAppMigrateContainer] consumeFromUser non-fatal: ${msg}`))
 		}
 
 		logger(
