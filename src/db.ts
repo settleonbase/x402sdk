@@ -1278,7 +1278,7 @@ export const releaseNfcLinkAppSessionIfMatches = async (body: {
 		)
 		if (!rows[0]) return { ok: false, error: 'No active link session for this tag.' }
 		const rec = rowToNfcLinkSession(rows[0] as any)
-		if (rec.uid !== uid) return { ok: false, error: 'uid mismatch.' }
+		if (rec.uid.trim().toLowerCase() !== uid.trim().toLowerCase()) return { ok: false, error: 'uid mismatch.' }
 		const ctr = body.counter
 		const ctrNum = typeof ctr === 'number' && Number.isFinite(ctr) ? ctr : parseInt(String(ctr ?? ''), 10)
 		const expected = parseInt(rec.counterHex, 16)

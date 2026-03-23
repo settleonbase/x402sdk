@@ -241,12 +241,12 @@ export async function nfcLinkAppValidateParams(body: {
 	counter?: string | number
 }): Promise<{ ok: true; redeemOnChain: boolean } | { ok: false; error: string }> {
 	const tag = body.tagid?.trim().replace(/^0x/i, '').toLowerCase()
-	const uid = body.uid?.trim() ?? ''
+	const uid = (body.uid?.trim() ?? '').toLowerCase()
 	if (!tag || !uid) return { ok: false, error: 'Missing tagid or uid.' }
 	const row = await fetchActiveNfcLinkAppSessionForPaymentBlock({ tagIdHex: tag })
 	if (!row) return { ok: false, error: 'No active link session for this tag.' }
 	const rec = sessionDbToLockRecord(row)
-	if (rec.uid !== uid) return { ok: false, error: 'uid mismatch.' }
+	if (rec.uid.trim().toLowerCase() !== uid) return { ok: false, error: 'uid mismatch.' }
 	const ctr = body.counter
 	const ctrNum = typeof ctr === 'number' && Number.isFinite(ctr) ? ctr : parseInt(String(ctr ?? ''), 10)
 	const expected = parseInt(rec.counterHex, 16)
