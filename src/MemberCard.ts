@@ -6656,14 +6656,11 @@ export const buildCardCreateRedeemBatchData = (params: {
 
 const NFC_LINK_APP_VALID_BEFORE = 4102444800
 
-const NFC_LINK_GET_OWNERSHIP_ABI = [
-	'function balanceOf(address account, uint256 id) view returns (uint256)',
-	'function getOwnership(address account) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
-] as const
+const NFC_LINK_BALANCE_OF_ABI = ['function balanceOf(address account, uint256 id) view returns (uint256)'] as const
 
 /**
- * 在指定卡合约上读取 NFC 对应 AA 的 token#0（点数/基础设施份额）与按 minUsdc6 最优的会员 NFT 余额，组装 createRedeemBatch 的 tokenIds/amounts。
- * 若两者皆无（余额为 0），返回 null → 不建链上 redeem。
+ * Link App 基础设施卡 createRedeemBatch：仅打包 **token #0**（点数/基础设施份额），不把会员卡 NFT 放入 redeem container。
+ * token #0 余额为 0 时返回 null → 不建链上 redeem（仅持有会员 NFT 无点数时走无链上 redeem 的 Link 会话）。
  */
 export async function buildNfcLinkAppRedeemBundleFromChain(
 	cardAddress: string,
@@ -6672,40 +6669,12 @@ export async function buildNfcLinkAppRedeemBundleFromChain(
 ): Promise<{ tokenIds: bigint[]; amounts: bigint[] } | null> {
 	const card = ethers.getAddress(cardAddress)
 	const holder = ethers.getAddress(holderAa)
-	const c = new ethers.Contract(card, NFC_LINK_GET_OWNERSHIP_ABI, provider)
+	const c = new ethers.Contract(card, NFC_LINK_BALANCE_OF_ABI, provider)
 	const bal0 = (await c.balanceOf(holder, 0n)) as bigint
-	const [, nfts] = (await c.getOwnership(holder)) as [bigint, unknown[]]
-	const rawRows: RawNftOwnershipRow[] = []
-	for (const row of Array.isArray(nfts) ? nfts : []) {
-		const rec = row as Record<string, unknown> & { tokenId?: bigint; tierIndexOrMax?: bigint; isExpired?: boolean }
-		const tokenId = BigInt(String(rec.tokenId ?? (row as unknown[])[0] ?? 0))
-		const tierIndexOrMax = BigInt(String(rec.tierIndexOrMax ?? (row as unknown[])[2] ?? 0))
-		const isExpired = Boolean(rec.isExpired ?? (row as unknown[])[4])
-		rawRows.push({ tokenId, tierIndexOrMax, isExpired })
-	}
-	const best = await pickBestMembershipNftByMinUsdc6(c as unknown as ethers.Contract, rawRows)
-	let memId: bigint | null = null
-	let memBal = 0n
-	if (best) {
-		memId = BigInt(best.tokenId)
-		memBal = (await c.balanceOf(holder, memId)) as bigint
-	}
-	const hasToken0 = bal0 > 0n
-	const hasMem = memId != null && memBal > 0n
-	if (!hasToken0 && !hasMem) {
+	if (bal0 <= 0n) {
 		return null
 	}
-	const tokenIds: bigint[] = []
-	const amounts: bigint[] = []
-	if (hasToken0) {
-		tokenIds.push(0n)
-		amounts.push(bal0)
-	}
-	if (hasMem && memId != null) {
-		tokenIds.push(memId)
-		amounts.push(memBal)
-	}
-	return { tokenIds, amounts }
+	return { tokenIds: [0n], amounts: [bal0] }
 }
 
 function resolveNfcLinkAppCardAddress(body: { cardAddress?: string }): { ok: true; address: string } | { ok: false; error: string } {
@@ -6725,7 +6694,7 @@ function resolveNfcLinkAppCardAddress(body: { cardAddress?: string }): { ok: tru
 }
 
 /**
- * NFC Link App (POS): SUN → read NFC holder AA balances on the infrastructure card → optional `createRedeemBatch` bundle (token #0 + best membership NFT), or DB-only lock if no assets / no AA.
+ * NFC Link App (POS): SUN → read NFC holder AA **token #0** on the infrastructure card → optional `createRedeemBatch` bundle (**#0 only**; membership NFTs excluded), or DB-only lock if no #0 / no AA.
  *
  * **Product boundary (vs “card admin / merchant redeem”)**
  * - Does **not** use `executeForAdmin` or any **card-admin-signed** redeem/mint path.
@@ -6876,7 +6845,7 @@ export const nfcLinkAppExecute = async (
 					deepLinkUrl,
 					txHash: null,
 					redeemOnChain: false,
-					note: 'No token #0 or membership NFT on card for this AA; link proceeds without on-chain redeem.',
+					note: 'No token #0 balance on infrastructure card for this AA; link proceeds without on-chain redeem (membership NFTs are not migrated via Link redeem).',
 				})
 				.end()
 			return
