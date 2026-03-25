@@ -745,6 +745,62 @@
       "type": "function"
     },
     {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "cardOwner",
+          "type": "address"
+        },
+        {
+          "internalType": "uint8",
+          "name": "currency",
+          "type": "uint8"
+        },
+        {
+          "internalType": "uint256",
+          "name": "priceInCurrencyE6",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes",
+          "name": "initCode",
+          "type": "bytes"
+        },
+        {
+          "components": [
+            {
+              "internalType": "uint256",
+              "name": "minUsdc6",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "attr",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "tierExpirySeconds",
+              "type": "uint256"
+            }
+          ],
+          "internalType": "struct Tier[]",
+          "name": "tiers",
+          "type": "tuple[]"
+        }
+      ],
+      "name": "createCardCollectionWithInitCodeAndTiers",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "card",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
       "inputs": [],
       "name": "defaultRedeemModule",
       "outputs": [
