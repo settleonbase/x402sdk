@@ -8,6 +8,12 @@ export const BASE_AA_FACTORY = '0x4b31D6a05Cdc817CAc1B06369555b37a5b182122'
 /** BeamioAccountDeployer（与 config/base-addresses.json BEAMIO_ACCOUNT_DEPLOYER 同步） */
 export const BASE_BEAMIO_ACCOUNT_DEPLOYER = '0x139D55591A03550259AF32097A9848ECE9869C90'
 export const BASE_CARD_FACTORY = '0xfB5E3F2AbFe24DC17970d78245BeF56aAE8cb71a'
+/**
+ * createCardCollectionWithInitCode(address,uint8,uint256,bytes)
+ * 必须与 Base 上 CARD_FACTORY 部署一致；编码时请用完整 Factory ABI（Interface），勿手写旧 selector。
+ * 历史错误 calldata 前缀 0x9a7eb0f0 在链上工厂中已不存在，会导致整笔 revert。
+ */
+export const FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_SELECTOR = '0xef759095' as const
 /** BeamioUserCardFormattingLib 部署地址（发卡 initCode 链接用）。空串时可用环境变量 BEAMIO_USER_CARD_FORMATTING_LIB */
 export const BASE_BEAMIO_USER_CARD_FORMATTING_LIB = '0x4F2D7Afaa0b1cfd1833C0fA637C80F9B54fF8fca'
 /** BeamioUserCardTransferLib 部署地址。空串时可用环境变量 BEAMIO_USER_CARD_TRANSFER_LIB */
