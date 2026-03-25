@@ -118,6 +118,21 @@ function isConfiguredLibAddress(s: string | undefined): s is string {
   return typeof s === 'string' && s.startsWith('0x') && s.length === 42
 }
 
+/** EIP-55 or all-lowercase hex; if checksum fails, retry with lowercase (constants/env typos). */
+function tryNormalizeLibAddress(s: string | undefined): string | undefined {
+  if (!s?.trim()) return undefined
+  const t = s.trim()
+  try {
+    return ethers.getAddress(t)
+  } catch {
+    try {
+      return ethers.getAddress(t.toLowerCase())
+    } catch {
+      return undefined
+    }
+  }
+}
+
 /**
  * 解析 BeamioUserCard 链接库地址：显式 override → 环境变量 → chainAddresses 常量。
  * SI / Master 可不传 libraryAddresses，只要已发布版本的 chainAddresses 或进程 env 已配置。
@@ -133,23 +148,15 @@ export function resolveBeamioUserCardLibraryAddresses(
 
   let fmt: string | undefined
   let tr: string | undefined
-  try {
-    if (fmtO) fmt = ethers.getAddress(fmtO)
-    else if (fmtE) fmt = ethers.getAddress(fmtE)
-    else if (isConfiguredLibAddress(BASE_BEAMIO_USER_CARD_FORMATTING_LIB)) {
-      fmt = ethers.getAddress(BASE_BEAMIO_USER_CARD_FORMATTING_LIB)
-    }
-  } catch {
-    fmt = undefined
+  if (fmtO) fmt = tryNormalizeLibAddress(fmtO)
+  else if (fmtE) fmt = tryNormalizeLibAddress(fmtE)
+  else if (isConfiguredLibAddress(BASE_BEAMIO_USER_CARD_FORMATTING_LIB)) {
+    fmt = tryNormalizeLibAddress(BASE_BEAMIO_USER_CARD_FORMATTING_LIB)
   }
-  try {
-    if (trO) tr = ethers.getAddress(trO)
-    else if (trE) tr = ethers.getAddress(trE)
-    else if (isConfiguredLibAddress(BASE_BEAMIO_USER_CARD_TRANSFER_LIB)) {
-      tr = ethers.getAddress(BASE_BEAMIO_USER_CARD_TRANSFER_LIB)
-    }
-  } catch {
-    tr = undefined
+  if (trO) tr = tryNormalizeLibAddress(trO)
+  else if (trE) tr = tryNormalizeLibAddress(trE)
+  else if (isConfiguredLibAddress(BASE_BEAMIO_USER_CARD_TRANSFER_LIB)) {
+    tr = tryNormalizeLibAddress(BASE_BEAMIO_USER_CARD_TRANSFER_LIB)
   }
 
   if (fmt && tr) {
