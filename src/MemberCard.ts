@@ -34,9 +34,48 @@ const ACTION_SYNC_TOKEN_ABI = [
 import AdminFacetABI from "./ABI/adminFacet_ABI.json";
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import BeamioUserCardGatewayABI from './ABI/BeamioUserCardGatewayABI.json'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, BEAMIO_INDEXER_DIAMOND, MERCHANT_POS_MANAGEMENT_CONET, BASE_TREASURY, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_MAINNET_CHAIN_ID, BASE_MAINNET_CHAIN_ID } from './chainAddresses'
+import {
+	BASE_AA_FACTORY,
+	BASE_CARD_FACTORY,
+	BASE_CCSA_CARD_ADDRESS,
+	CONET_BUNIT_AIRDROP_ADDRESS,
+	BEAMIO_INDEXER_DIAMOND,
+	MERCHANT_POS_MANAGEMENT_CONET,
+	BASE_TREASURY,
+	BEAMIO_USER_CARD_ASSET_ADDRESS,
+	CONET_MAINNET_CHAIN_ID,
+	BASE_MAINNET_CHAIN_ID,
+	BASE_BEAMIO_USER_CARD_FORMATTING_LIB,
+	BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
+} from './chainAddresses'
 
-import { createBeamioCardWithFactory, createBeamioCardWithFactoryReturningHash } from './CCSA'
+import {
+	createBeamioCardWithFactory,
+	createBeamioCardWithFactoryReturningHash,
+	type BeamioUserCardLibraryAddresses,
+} from './CCSA'
+
+function beamioUserCardLibrariesFromConfig(override?: BeamioUserCardLibraryAddresses): BeamioUserCardLibraryAddresses {
+	if (override) return override
+	const formatting =
+		(typeof process !== 'undefined' && process.env.BEAMIO_USER_CARD_FORMATTING_LIB?.trim()) ||
+		BASE_BEAMIO_USER_CARD_FORMATTING_LIB
+	const transfer =
+		(typeof process !== 'undefined' && process.env.BEAMIO_USER_CARD_TRANSFER_LIB?.trim()) ||
+		BASE_BEAMIO_USER_CARD_TRANSFER_LIB
+	if (!formatting || !transfer || !ethers.isAddress(formatting) || !ethers.isAddress(transfer)) {
+		throw new Error(
+			'BeamioUserCard requires linked libraries. Set BASE_BEAMIO_USER_CARD_FORMATTING_LIB / BASE_BEAMIO_USER_CARD_TRANSFER_LIB in chainAddresses.ts or BEAMIO_* env after deploying (see BeamioContract scripts/beamioUserCardLibraries.ts).'
+		)
+	}
+	if (formatting === ethers.ZeroAddress || transfer === ethers.ZeroAddress) {
+		throw new Error('BeamioUserCard library addresses must be non-zero')
+	}
+	return {
+		BeamioUserCardFormattingLib: ethers.getAddress(formatting),
+		BeamioUserCardTransferLib: ethers.getAddress(transfer),
+	}
+}
 import {
 	registerCardToDb,
 	getNfcRecipientAddressByUid,
@@ -3380,7 +3419,6 @@ type CardTier = {
 	minUsdc6: bigint
 	attr: bigint
 	tierExpirySeconds: bigint
-	upgradeByBalance: boolean
 }
 
 const MAX_CARD_TIER_SCAN = 256
@@ -3397,13 +3435,12 @@ const readCardTiers = async (
 	const tiers: CardTier[] = []
 	for (let i = 0; i < MAX_CARD_TIER_SCAN; i++) {
 		try {
-			const tier = await card.tiers(i) as [bigint, bigint, bigint, boolean]
+			const tier = await card.tiers(i) as [bigint, bigint, bigint]
 			tiers.push({
 				index: i,
 				minUsdc6: BigInt(tier[0]),
 				attr: BigInt(tier[1]),
 				tierExpirySeconds: BigInt(tier[2]),
-				upgradeByBalance: Boolean(tier[3]),
 			})
 		} catch {
 			break
@@ -3445,7 +3482,6 @@ export const nfcTopupPreCheckBUnitFee = async (
 			'function activeMembershipId(address) view returns (uint256)',
 			'function activeTierIndexOrMax(address) view returns (uint256)',
 			'function balanceOf(address,uint256) view returns (uint256)',
-			'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
 			'function getOwnershipByEOA(address) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 		]
 		const factoryAbi = ['function _aaFactory() view returns (address)']
@@ -6350,16 +6386,27 @@ export const createBeamioCardAdmin = async (
 	cardOwner: string,
 	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD',
 	pointsUnitPriceInCurrencyE6: number | bigint,
-	opts?: { uri?: string }
+	opts?: {
+		uri?: string
+		transferWhitelistEnabled?: boolean
+		upgradeType?: 0 | 1 | 2
+		libraryAddresses?: BeamioUserCardLibraryAddresses
+	}
 ): Promise<string> => {
 	const SC = Settle_ContractPool[0]
 	if (!SC?.baseFactoryPaymaster) throw new Error('Settle_ContractPool not initialized')
+	const initOpts: Parameters<typeof createBeamioCardWithFactory>[4] = {
+		libraryAddresses: beamioUserCardLibrariesFromConfig(opts?.libraryAddresses),
+	}
+	if (opts?.uri) initOpts.uri = opts.uri
+	if (opts?.transferWhitelistEnabled === true) initOpts.transferWhitelistEnabled = true
+	if (opts?.upgradeType === 1 || opts?.upgradeType === 2) initOpts.upgradeType = opts.upgradeType
 	return createBeamioCardWithFactory(
 		SC.baseFactoryPaymaster,
 		cardOwner,
 		currency,
 		pointsUnitPriceInCurrencyE6,
-		opts?.uri ? { uri: opts.uri } : {}
+		initOpts
 	)
 }
 
@@ -6370,7 +6417,13 @@ export const createBeamioCardAdminWithHash = async (
 	cardOwner: string,
 	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD',
 	pointsUnitPriceInCurrencyE6: number | bigint,
-	opts?: { uri?: string; tiers?: Array<{ minUsdc6: string; attr: number; tierExpirySeconds?: number; upgradeByBalance?: boolean }> },
+	opts?: {
+		uri?: string
+		tiers?: Array<{ minUsdc6: string; attr: number; tierExpirySeconds?: number }>
+		transferWhitelistEnabled?: boolean
+		upgradeType?: 0 | 1 | 2
+		libraryAddresses?: BeamioUserCardLibraryAddresses
+	},
 	factoryOverride?: ethers.Contract
 ): Promise<{ cardAddress: string; hash: string }> => {
 	const factory = factoryOverride ?? Settle_ContractPool[0]?.baseFactoryPaymaster
@@ -6379,14 +6432,19 @@ export const createBeamioCardAdminWithHash = async (
 		minUsdc6: t.minUsdc6,
 		attr: t.attr,
 		tierExpirySeconds: t.tierExpirySeconds ?? 0,
-		upgradeByBalance: t.upgradeByBalance !== false,
 	}))
+	const initOpts: Parameters<typeof createBeamioCardWithFactoryReturningHash>[4] = {
+		libraryAddresses: beamioUserCardLibrariesFromConfig(opts?.libraryAddresses),
+	}
+	if (opts?.uri) initOpts.uri = opts.uri
+	if (opts?.transferWhitelistEnabled === true) initOpts.transferWhitelistEnabled = true
+	if (opts?.upgradeType === 1 || opts?.upgradeType === 2) initOpts.upgradeType = opts.upgradeType
 	return createBeamioCardWithFactoryReturningHash(
 		factory,
 		cardOwner,
 		currency,
 		pointsUnitPriceInCurrencyE6,
-		opts?.uri ? { uri: opts.uri } : {},
+		initOpts,
 		tiersForCreate
 	)
 }
@@ -6397,8 +6455,12 @@ export type CreateCardPreChecked = {
 	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD'
 	priceInCurrencyE6: string
 	uri?: string
+	/** When true, card is deployed with points transfer whitelist enforcement enabled */
+	transferWhitelistEnabled?: boolean
+	/** 0=topup delta; 1=points balance; 2=cumulative points to admin */
+	upgradeType?: 0 | 1 | 2
 	shareTokenMetadata?: { name?: string; description?: string; image?: string }
-	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
+	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
 }
 
 export const createCardPreCheck = (body: {
@@ -6407,6 +6469,8 @@ export const createCardPreCheck = (body: {
 	unitPriceHuman?: string | number
 	priceInCurrencyE6?: string | number
 	uri?: string
+	transferWhitelistEnabled?: unknown
+	upgradeType?: unknown
 	shareTokenMetadata?: { name?: string; description?: string; image?: string }
 	tiers?: unknown[]
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
@@ -6434,6 +6498,15 @@ export const createCardPreCheck = (body: {
 	}
 	if (body.shareTokenMetadata != null && typeof body.shareTokenMetadata !== 'object') {
 		return { success: false, error: 'shareTokenMetadata must be an object if provided' }
+	}
+	if (body.transferWhitelistEnabled != null && typeof body.transferWhitelistEnabled !== 'boolean') {
+		return { success: false, error: 'transferWhitelistEnabled must be a boolean if provided' }
+	}
+	if (body.upgradeType != null) {
+		const ut = Number(body.upgradeType)
+		if (!Number.isInteger(ut) || ut < 0 || ut > 2) {
+			return { success: false, error: 'upgradeType must be 0, 1, or 2 if provided' }
+		}
 	}
 	if (body.tiers != null) {
 		if (!Array.isArray(body.tiers)) {
@@ -6469,9 +6542,6 @@ export const createCardPreCheck = (body: {
 					return { success: false, error: `tiers[${i}].tierExpirySeconds must be a non-negative integer if provided` }
 				}
 			}
-			if (o.upgradeByBalance != null && typeof o.upgradeByBalance !== 'boolean') {
-				return { success: false, error: `tiers[${i}].upgradeByBalance must be boolean if provided` }
-			}
 		}
 	}
 	const preChecked: CreateCardPreChecked = {
@@ -6479,6 +6549,8 @@ export const createCardPreCheck = (body: {
 		currency: body.currency as CreateCardPreChecked['currency'],
 		priceInCurrencyE6: String(priceE6),
 		...(body.uri && { uri: body.uri }),
+		...(typeof body.transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled: body.transferWhitelistEnabled }),
+		...(body.upgradeType != null && { upgradeType: Number(body.upgradeType) as 0 | 1 | 2 }),
 		...(body.shareTokenMetadata && { shareTokenMetadata: body.shareTokenMetadata }),
 		...(body.tiers && body.tiers.length > 0 && {
 			tiers: body.tiers.map((t, i) => {
@@ -6492,7 +6564,6 @@ export const createCardPreCheck = (body: {
 					...(o.description != null && { description: String(o.description) }),
 					...(o.image != null && typeof o.image === 'string' && { image: o.image }),
 					...(o.backgroundColor != null && typeof o.backgroundColor === 'string' && { backgroundColor: o.backgroundColor }),
-					...(typeof o.upgradeByBalance === 'boolean' && { upgradeByBalance: o.upgradeByBalance }),
 				}
 			}),
 		}),
@@ -6533,11 +6604,16 @@ export const createCardPoolPress = async () => {
 		return setTimeout(() => createCardPoolPress(), 3000)
 	}
 	const { res, ...payload } = obj
-	const { cardOwner, currency, priceInCurrencyE6, uri, shareTokenMetadata, tiers } = payload
+	const { cardOwner, currency, priceInCurrencyE6, uri, transferWhitelistEnabled, upgradeType, shareTokenMetadata, tiers } = payload
 
 	// Settle_ContractPool = factory 登记的 owner 列表，shift 取一 admin 用于 RPC，支持多 request 并行（多 admin 同时送上链）
 	const factory = SC.baseFactoryPaymaster
-	logger(Colors.cyan(`[createCardPoolPress] admin=${SC.walletBase.address} cardOwner=${cardOwner} currency=${currency} priceE6=${priceInCurrencyE6}`))
+	logger(
+		Colors.cyan(
+			`[createCardPoolPress] admin=${SC.walletBase.address} cardOwner=${cardOwner} currency=${currency} priceE6=${priceInCurrencyE6}` +
+				(transferWhitelistEnabled ? ' transferWhitelist=ON' : '')
+		)
+	)
 
 	try {
 		const tiersForCreate = tiers && tiers.length > 0
@@ -6545,14 +6621,19 @@ export const createCardPoolPress = async () => {
 					minUsdc6: t.minUsdc6,
 					attr: Number(t.attr ?? i),
 					tierExpirySeconds: Number(t.tierExpirySeconds ?? 0), // 0 => 使用卡全局 expirySeconds
-					upgradeByBalance: t.upgradeByBalance !== false,
 				}))
 			: undefined
+		const ut = upgradeType === 1 || upgradeType === 2 ? upgradeType : undefined
 		const { cardAddress, hash } = await createBeamioCardAdminWithHash(
 			cardOwner,
 			currency,
 			BigInt(priceInCurrencyE6),
-			{ ...(uri && { uri }), ...(tiersForCreate && { tiers: tiersForCreate }) },
+			{
+				...(uri && { uri }),
+				...(tiersForCreate && { tiers: tiersForCreate }),
+				...(transferWhitelistEnabled === true && { transferWhitelistEnabled: true }),
+				...(ut != null && { upgradeType: ut }),
+			},
 			SC.baseFactoryPaymaster
 		)
 		// master 侧写入 metadata（shareTokenMetadata、tiers）到 0x{cardAddress}0.json（ERC-1155 约定）
@@ -8598,7 +8679,7 @@ const resolveUsdcTopupRules = async (
 			cardAddress,
 			[
 				'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
-				'function tiers(uint256 idx) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
+				'function tiers(uint256 idx) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds)',
 			],
 			SC.walletBase
 		)

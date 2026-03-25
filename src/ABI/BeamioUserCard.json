@@ -25,6 +25,16 @@
         "internalType": "address",
         "name": "gateway_",
         "type": "address"
+      },
+      {
+        "internalType": "uint8",
+        "name": "upgradeType_",
+        "type": "uint8"
+      },
+      {
+        "internalType": "bool",
+        "name": "initialTransferWhitelistEnabled",
+        "type": "bool"
       }
     ],
     "stateMutability": "nonpayable",
@@ -191,11 +201,6 @@
   },
   {
     "inputs": [],
-    "name": "UC_BeneficiaryMustBeAA",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "UC_GlobalMisconfigured",
     "type": "error"
   },
@@ -232,6 +237,11 @@
   },
   {
     "inputs": [],
+    "name": "UC_InvalidUpgradeType",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "UC_NoBeamioAccount",
     "type": "error"
   },
@@ -243,11 +253,6 @@
   {
     "inputs": [],
     "name": "UC_OpenMintExecutorUnauthorized",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_PointsToNotWhitelisted",
     "type": "error"
   },
   {
@@ -269,27 +274,6 @@
   {
     "inputs": [],
     "name": "UC_RedeemModuleZero",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "eoa",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "aaFactory",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "acct",
-        "type": "address"
-      }
-    ],
-    "name": "UC_ResolveAccountFailed",
     "type": "error"
   },
   {
@@ -917,12 +901,6 @@
         "internalType": "uint256",
         "name": "tierExpirySeconds",
         "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "upgradeByBalance",
-        "type": "bool"
       }
     ],
     "name": "TierAppended",
@@ -1251,11 +1229,6 @@
         "internalType": "uint256",
         "name": "tierExpirySeconds",
         "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "upgradeByBalance",
-        "type": "bool"
       }
     ],
     "name": "appendTier",
@@ -1911,6 +1884,25 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "effectiveTo",
+        "type": "address"
+      }
+    ],
+    "name": "isPointsTransferRecipientAllowed",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
@@ -2553,14 +2545,9 @@
             "internalType": "uint256",
             "name": "tierExpirySeconds",
             "type": "uint256"
-          },
-          {
-            "internalType": "bool",
-            "name": "upgradeByBalance",
-            "type": "bool"
           }
         ],
-        "internalType": "struct BeamioUserCard.Tier[]",
+        "internalType": "struct Tier[]",
         "name": "newTiers",
         "type": "tuple[]"
       }
@@ -2644,11 +2631,6 @@
         "internalType": "uint256",
         "name": "tierExpirySeconds",
         "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "upgradeByBalance",
-        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -2803,6 +2785,19 @@
         "internalType": "bool",
         "name": "",
         "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "upgradeType",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
       }
     ],
     "stateMutability": "view",

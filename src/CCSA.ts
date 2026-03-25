@@ -3,6 +3,12 @@ import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
 import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
 import { BASE_CARD_FACTORY } from './chainAddresses'
+import {
+  linkBeamioUserCardBytecode,
+  type BeamioUserCardLibraryAddresses,
+} from './linkBeamioUserCardBytecode.js'
+
+export type { BeamioUserCardLibraryAddresses } from './linkBeamioUserCardBytecode.js'
 
 type ICurrency = 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD'
 
@@ -92,6 +98,15 @@ export type CreateBeamioCardInitCodeOptions = {
   uri?: string
   /** 工厂（gateway）地址，默认使用传入的 factory 合约地址 */
   gateway?: string
+  /** 0=按单次 topup/redeem 金额升级；1=按 points 余额；2=按累计向 admin 转账 points。constructor 固定，默认 0 */
+  upgradeType?: 0 | 1 | 2
+  /** true：创建时即开启 points 转账白名单（须配置 whitelist 地址）；默认 false（不限制） */
+  transferWhitelistEnabled?: boolean
+  /**
+   * 链上已部署且与当前 BeamioUserCardArtifact 版本一致的库地址（Formatting + Transfer）。
+   * 由 initCode 选项生成部署数据时必传；或直接传入完整 initCode 十六进制字符串可省略。
+   */
+  libraryAddresses?: BeamioUserCardLibraryAddresses
 }
 
 export type CreateBeamioCardOptions = {
@@ -183,20 +198,40 @@ export async function buildBeamioUserCardInitCode(
   currencyEnum: number,
   pointsUnitPriceInCurrencyE6: bigint,
   initialOwner: string,
-  gateway: string
+  gateway: string,
+  upgradeType: 0 | 1 | 2 = 0,
+  initialTransferWhitelistEnabled = false,
+  libraryAddresses?: BeamioUserCardLibraryAddresses
 ): Promise<string> {
   const fs = require('fs') as typeof import('fs')
   const raw = fs.readFileSync(artifactPath, 'utf-8')
-  const artifact = JSON.parse(raw) as { abi: ethers.InterfaceAbi; bytecode: string }
+  const artifact = JSON.parse(raw) as {
+    abi: ethers.InterfaceAbi
+    bytecode: string
+    linkReferences?: Record<string, Record<string, unknown[]>>
+  }
   if (!artifact?.bytecode) throw new Error('Artifact missing bytecode')
 
-  const factory = new ethers.ContractFactory(artifact.abi, artifact.bytecode)
+  let bytecode = artifact.bytecode
+  const lr = artifact.linkReferences
+  if (lr && Object.keys(lr).length > 0) {
+    if (!libraryAddresses) {
+      throw new Error(
+        'BeamioUserCard artifact has linkReferences; pass libraryAddresses (BeamioUserCardFormattingLib + BeamioUserCardTransferLib) as the last argument to buildBeamioUserCardInitCode'
+      )
+    }
+    bytecode = linkBeamioUserCardBytecode(bytecode, lr, libraryAddresses)
+  }
+
+  const factory = new ethers.ContractFactory(artifact.abi, bytecode)
   const deployTx = await factory.getDeployTransaction(
     uri,
     currencyEnum,
     pointsUnitPriceInCurrencyE6,
     initialOwner,
-    gateway
+    gateway,
+    upgradeType,
+    initialTransferWhitelistEnabled
   )
   const initCode = deployTx?.data
   if (!initCode) throw new Error('Failed to build BeamioUserCard initCode')
@@ -209,17 +244,38 @@ async function buildBeamioUserCardInitCodeFromParams(
   currencyEnum: number,
   pointsUnitPriceInCurrencyE6: bigint,
   initialOwner: string,
-  gateway: string
+  gateway: string,
+  upgradeType: 0 | 1 | 2,
+  initialTransferWhitelistEnabled = false,
+  libraryAddresses?: BeamioUserCardLibraryAddresses
 ): Promise<string> {
-  const artifact = BeamioUserCardArtifact as { abi: ethers.InterfaceAbi; bytecode: string }
+  const artifact = BeamioUserCardArtifact as {
+    abi: ethers.InterfaceAbi
+    bytecode: string
+    linkReferences?: Record<string, Record<string, unknown[]>>
+  }
   if (!artifact?.bytecode) throw new Error('BeamioUserCard artifact missing bytecode')
-  const factory = new ethers.ContractFactory(artifact.abi, artifact.bytecode)
+
+  let bytecode = artifact.bytecode
+  const lr = artifact.linkReferences
+  if (lr && Object.keys(lr).length > 0) {
+    if (!libraryAddresses) {
+      throw new Error(
+        'BeamioUserCard requires linked libraries. Pass libraryAddresses: { BeamioUserCardFormattingLib, BeamioUserCardTransferLib } in CreateBeamioCardInitCodeOptions, or supply a pre-linked initCode hex string.'
+      )
+    }
+    bytecode = linkBeamioUserCardBytecode(bytecode, lr, libraryAddresses)
+  }
+
+  const factory = new ethers.ContractFactory(artifact.abi, bytecode)
   const deployTx = await factory.getDeployTransaction(
     uri,
     currencyEnum,
     pointsUnitPriceInCurrencyE6,
     initialOwner,
-    gateway
+    gateway,
+    upgradeType,
+    initialTransferWhitelistEnabled
   )
   const initCode = deployTx?.data
   if (!initCode) throw new Error('Failed to build BeamioUserCard initCode')
@@ -256,7 +312,19 @@ export async function createBeamioCardWithFactory(
   } else {
     const gateway = initCodeOrOptions.gateway ?? (typeof factory.getAddress === 'function' ? await factory.getAddress() : (factory as unknown as { address: string }).address)
     const uri = initCodeOrOptions.uri ?? BEAMIO_METADATA_BASE_URI
-    initCode = await buildBeamioUserCardInitCodeFromParams(uri, currencyEnum, priceE6, cardOwner, gateway)
+    const wlOn = initCodeOrOptions.transferWhitelistEnabled === true
+    const ut = initCodeOrOptions.upgradeType
+    const upgradeType: 0 | 1 | 2 = ut === 1 || ut === 2 ? ut : 0
+    initCode = await buildBeamioUserCardInitCodeFromParams(
+      uri,
+      currencyEnum,
+      priceE6,
+      cardOwner,
+      gateway,
+      upgradeType,
+      wlOn,
+      initCodeOrOptions.libraryAddresses
+    )
   }
 
   // 调用 createCardCollectionWithInitCode 前确认 factory 的 signer 是工厂 owner（或已注册 paymaster）
@@ -368,7 +436,6 @@ export type CreateCardTier = {
   minUsdc6: bigint | string
   attr: number
   tierExpirySeconds?: number | bigint
-  upgradeByBalance?: boolean
 }
 
 /** 同 createBeamioCardWithFactory，但返回 { cardAddress, hash } 供 daemon 回传 tx hash 给 UI。可选 tiers 时使用 createCardCollectionWithInitCodeAndTiers 一次性部署+配置 */
@@ -395,7 +462,19 @@ export async function createBeamioCardWithFactoryReturningHash(
   } else {
     const gateway = initCodeOrOptions.gateway ?? (typeof factory.getAddress === 'function' ? await factory.getAddress() : (factory as unknown as { address: string }).address)
     const uri = initCodeOrOptions.uri ?? BEAMIO_METADATA_BASE_URI
-    initCode = await buildBeamioUserCardInitCodeFromParams(uri, currencyEnum, priceE6, cardOwner, gateway)
+    const wlOn = initCodeOrOptions.transferWhitelistEnabled === true
+    const ut2 = initCodeOrOptions.upgradeType
+    const upgradeType2: 0 | 1 | 2 = ut2 === 1 || ut2 === 2 ? ut2 : 0
+    initCode = await buildBeamioUserCardInitCodeFromParams(
+      uri,
+      currencyEnum,
+      priceE6,
+      cardOwner,
+      gateway,
+      upgradeType2,
+      wlOn,
+      initCodeOrOptions.libraryAddresses
+    )
   }
 
   const runner = factory.runner
@@ -439,7 +518,6 @@ export async function createBeamioCardWithFactoryReturningHash(
         minUsdc6: BigInt(t.minUsdc6),
         attr: t.attr,
         tierExpirySeconds: BigInt(t.tierExpirySeconds ?? 0),
-        upgradeByBalance: t.upgradeByBalance !== false,
       }))
     : []
 
