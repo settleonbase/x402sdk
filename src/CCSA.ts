@@ -2,7 +2,11 @@ import { ethers } from 'ethers'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
 import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
-import { BASE_CARD_FACTORY } from './chainAddresses'
+import {
+  BASE_BEAMIO_USER_CARD_FORMATTING_LIB,
+  BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
+  BASE_CARD_FACTORY,
+} from './chainAddresses'
 import {
   linkBeamioUserCardBytecode,
   type BeamioUserCardLibraryAddresses,
@@ -108,6 +112,50 @@ export type CreateBeamioCardInitCodeOptions = {
    * 由 initCode 选项生成部署数据时必传；或直接传入完整 initCode 十六进制字符串可省略。
    */
   libraryAddresses?: BeamioUserCardLibraryAddresses
+}
+
+function isConfiguredLibAddress(s: string | undefined): s is string {
+  return typeof s === 'string' && s.startsWith('0x') && s.length === 42
+}
+
+/**
+ * 解析 BeamioUserCard 链接库地址：显式 override → 环境变量 → chainAddresses 常量。
+ * SI / Master 可不传 libraryAddresses，只要已发布版本的 chainAddresses 或进程 env 已配置。
+ */
+export function resolveBeamioUserCardLibraryAddresses(
+  override?: BeamioUserCardLibraryAddresses
+): BeamioUserCardLibraryAddresses | undefined {
+  const fmtO = override?.BeamioUserCardFormattingLib?.trim()
+  const trO = override?.BeamioUserCardTransferLib?.trim()
+  const fmtE =
+    typeof process !== 'undefined' ? process.env?.BEAMIO_USER_CARD_FORMATTING_LIB?.trim() : undefined
+  const trE = typeof process !== 'undefined' ? process.env?.BEAMIO_USER_CARD_TRANSFER_LIB?.trim() : undefined
+
+  let fmt: string | undefined
+  let tr: string | undefined
+  try {
+    if (fmtO) fmt = ethers.getAddress(fmtO)
+    else if (fmtE) fmt = ethers.getAddress(fmtE)
+    else if (isConfiguredLibAddress(BASE_BEAMIO_USER_CARD_FORMATTING_LIB)) {
+      fmt = ethers.getAddress(BASE_BEAMIO_USER_CARD_FORMATTING_LIB)
+    }
+  } catch {
+    fmt = undefined
+  }
+  try {
+    if (trO) tr = ethers.getAddress(trO)
+    else if (trE) tr = ethers.getAddress(trE)
+    else if (isConfiguredLibAddress(BASE_BEAMIO_USER_CARD_TRANSFER_LIB)) {
+      tr = ethers.getAddress(BASE_BEAMIO_USER_CARD_TRANSFER_LIB)
+    }
+  } catch {
+    tr = undefined
+  }
+
+  if (fmt && tr) {
+    return { BeamioUserCardFormattingLib: fmt, BeamioUserCardTransferLib: tr }
+  }
+  return undefined
 }
 
 export type CreateBeamioCardOptions = {
@@ -216,12 +264,15 @@ export async function buildBeamioUserCardInitCode(
   let bytecode = artifact.bytecode
   const lr = artifact.linkReferences
   if (lr && Object.keys(lr).length > 0) {
-    if (!libraryAddresses) {
+    const libs = resolveBeamioUserCardLibraryAddresses(libraryAddresses)
+    if (!libs) {
       throw new Error(
-        'BeamioUserCard artifact has linkReferences; pass libraryAddresses (BeamioUserCardFormattingLib + BeamioUserCardTransferLib) as the last argument to buildBeamioUserCardInitCode'
+        'BeamioUserCard artifact has linkReferences; pass libraryAddresses to buildBeamioUserCardInitCode, ' +
+          'or set BEAMIO_USER_CARD_FORMATTING_LIB / BEAMIO_USER_CARD_TRANSFER_LIB, ' +
+          'or configure BASE_BEAMIO_USER_CARD_*_LIB in chainAddresses.ts'
       )
     }
-    bytecode = linkBeamioUserCardBytecode(bytecode, lr, libraryAddresses)
+    bytecode = linkBeamioUserCardBytecode(bytecode, lr, libs)
   }
 
   const factory = new ethers.ContractFactory(artifact.abi, bytecode)
@@ -260,12 +311,16 @@ async function buildBeamioUserCardInitCodeFromParams(
   let bytecode = artifact.bytecode
   const lr = artifact.linkReferences
   if (lr && Object.keys(lr).length > 0) {
-    if (!libraryAddresses) {
+    const libs = resolveBeamioUserCardLibraryAddresses(libraryAddresses)
+    if (!libs) {
       throw new Error(
-        'BeamioUserCard requires linked libraries. Pass libraryAddresses: { BeamioUserCardFormattingLib, BeamioUserCardTransferLib } in CreateBeamioCardInitCodeOptions, or supply a pre-linked initCode hex string.'
+        'BeamioUserCard requires linked libraries. Pass libraryAddresses in CreateBeamioCardInitCodeOptions, ' +
+          'or set BEAMIO_USER_CARD_FORMATTING_LIB / BEAMIO_USER_CARD_TRANSFER_LIB, ' +
+          'or configure BASE_BEAMIO_USER_CARD_*_LIB in chainAddresses.ts (see BeamioContract scripts/beamioUserCardLibraries.ts). ' +
+          'Alternatively supply a pre-linked initCode hex string.'
       )
     }
-    bytecode = linkBeamioUserCardBytecode(bytecode, lr, libraryAddresses)
+    bytecode = linkBeamioUserCardBytecode(bytecode, lr, libs)
   }
 
   const factory = new ethers.ContractFactory(artifact.abi, bytecode)
