@@ -13,7 +13,12 @@ import { inspect } from 'util'
 import Colors from 'colors/safe'
 import BeamioUserCardABI from './ABI/BeamioUserCard.json'
 import USDC_ABI from './ABI/usdc_abi.json'
-import BeamioAAAccountFactoryPaymasterABI from './ABI/BeamioAAAccountFactoryPaymaster.json'
+import BeamioAAAccountFactoryPaymasterArtifact from './ABI/BeamioAAAccountFactoryPaymaster.json'
+const BeamioAAAccountFactoryPaymasterABI = (
+	Array.isArray(BeamioAAAccountFactoryPaymasterArtifact)
+		? BeamioAAAccountFactoryPaymasterArtifact
+		: (BeamioAAAccountFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []
+) as ethers.InterfaceAbi
 import IDiamondCutABI from "./ABI/DiamondCutFacetABI.json";
 import DiamondLoupeFacetABI from "./ABI/DiamondLoupeFacet.json";
 import DiamondCutFacetABI from "./ABI/DiamondCutFacetABI.json";

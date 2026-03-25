@@ -242,6 +242,11 @@
   },
   {
     "inputs": [],
+    "name": "UC_OpenMintExecutorUnauthorized",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "UC_PointsToNotWhitelisted",
     "type": "error"
   },
@@ -285,11 +290,6 @@
       }
     ],
     "name": "UC_ResolveAccountFailed",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_SBTNonTransferable",
     "type": "error"
   },
   {
@@ -2213,6 +2213,29 @@
       }
     ],
     "name": "mintPointsByGatewayWithOperator",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "payerAA",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "points6",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "operatorForStats",
+        "type": "address"
+      }
+    ],
+    "name": "mintPointsOpenContainerRelay",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
