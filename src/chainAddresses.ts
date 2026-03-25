@@ -17,10 +17,14 @@ export const BASE_CARD_FACTORY = '0xfB5E3F2AbFe24DC17970d78245BeF56aAE8cb71a'
 export const FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_SELECTOR = '0xef759095' as const
 /** 5 参工厂方法（含 Tier[]）；与 4 参方法并存，勿与 0xef759095 混淆 */
 export const FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_SELECTOR = '0x9a7eb0f0' as const
-/** BeamioUserCardFormattingLib 部署地址（发卡 initCode 链接用）。空串时可用环境变量 BEAMIO_USER_CARD_FORMATTING_LIB */
-export const BASE_BEAMIO_USER_CARD_FORMATTING_LIB = '0x4F2D7Afaa0b1cfd1833C0fA637C80F9B54fF8fca'
-/** BeamioUserCardTransferLib 部署地址。空串时可用环境变量 BEAMIO_USER_CARD_TRANSFER_LIB */
-export const BASE_BEAMIO_USER_CARD_TRANSFER_LIB = '0x75b35013063651Dd3859d97b1C17de1dD2268b6f'
+/**
+ * BeamioUserCardFormattingLib（发卡 initCode 链接用）。必须与当前 npm 编译产物 linkReferences 一致；
+ * 旧地址会导致 initCode 与链上库 bytecode 不匹配，CREATE / AndTiers 整笔 revert（见成功 tx 0xda9bd5d5… 与失败 0xe67c4054… 对比）。
+ * 空串时可用环境变量 BEAMIO_USER_CARD_FORMATTING_LIB。
+ */
+export const BASE_BEAMIO_USER_CARD_FORMATTING_LIB = '0xe56dca3aF78a12164dC6546e6CD0E9Fe9D9Cc4b3'
+/** BeamioUserCardTransferLib；同上须与 artifact 同步。 */
+export const BASE_BEAMIO_USER_CARD_TRANSFER_LIB = '0xc7fAF8e33e9fE9D4409961Ec72d46B2200766f8F'
 export const BASE_CCSA_CARD_ADDRESS = '0x2032A363BB2cf331142391fC0DAd21D6504922C7'
 export const BASE_TREASURY = '0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58'
 export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0x9Cda8477C9F03b8759ac64e21941e578908fd750'
