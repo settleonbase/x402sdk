@@ -376,11 +376,15 @@ export async function createBeamioCardWithFactory(
   if (priceE6 <= 0n) throw new Error('pointsUnitPriceInCurrencyE6 must be > 0')
 
   let initCode: string
+  let initCodeSource: 'prebuiltHex' | 'builtFromOptions'
+  let gatewayUsedWhenBuilding: string | undefined
+  let libraryOverrideForDebug: BeamioUserCardLibraryAddresses | undefined
   if (typeof initCodeOrOptions === 'string') {
     if (!initCodeOrOptions || !initCodeOrOptions.startsWith('0x')) {
       throw new Error('initCode must be a hex string (e.g. 0x...) when passed as string')
     }
     initCode = initCodeOrOptions
+    initCodeSource = 'prebuiltHex'
   } else {
     const resolvedFactory = await resolveFactoryAddressForInitCode(factory)
     const requestedGw = initCodeOrOptions.gateway
@@ -391,6 +395,8 @@ export async function createBeamioCardWithFactory(
       )
     }
     const gateway = resolvedFactory
+    gatewayUsedWhenBuilding = gateway
+    libraryOverrideForDebug = initCodeOrOptions.libraryAddresses
     const uri = initCodeOrOptions.uri ?? BEAMIO_METADATA_BASE_URI
     const wlOn = initCodeOrOptions.transferWhitelistEnabled === true
     const ut = initCodeOrOptions.upgradeType
@@ -405,6 +411,7 @@ export async function createBeamioCardWithFactory(
       wlOn,
       initCodeOrOptions.libraryAddresses
     )
+    initCodeSource = 'builtFromOptions'
   }
 
   // 调用 createCardCollectionWithInitCode 前确认 factory 的 signer 是工厂 owner（或已注册 paymaster）
@@ -448,6 +455,21 @@ export async function createBeamioCardWithFactory(
     }
   }
 
+  const createCardDebugSnap = await collectCreateCardChainDebugSnapshot(factory, initCode, {
+    cardOwner,
+    currencyEnum,
+    priceE6,
+    signerAddress,
+    gasLimit,
+    callKind: 'createCardCollectionWithInitCode',
+    initCodeSource,
+    gatewayUsedWhenBuilding,
+    libraryOverride: libraryOverrideForDebug,
+    rawTierCount: 0,
+    normalizedTierCount: 0,
+  })
+  if (isVerboseCreateCardDebug()) emitCreateCardDebug('preflight', createCardDebugSnap)
+
   let tx: ethers.ContractTransactionResponse
   try {
     tx = await factory.createCardCollectionWithInitCode(
@@ -461,6 +483,13 @@ export async function createBeamioCardWithFactory(
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
     const revertData = err?.data ?? (e as { data?: string | Uint8Array }).data ?? (e as { info?: { error?: { data?: string } } }).info?.error?.data
     const decoded = parseCreateCardRevertData(revertData)
+    const failSnap: CreateCardChainDebugSnapshot = {
+      ...createCardDebugSnap,
+      failureRpcCode: err?.code ?? null,
+      failureShortMessage: err?.shortMessage ?? err?.message ?? String(e),
+      parsedRevert: decoded ?? null,
+    }
+    emitCreateCardDebug('failure', failSnap)
     const isCallException = err?.code === 'CALL_EXCEPTION'
     const noUsefulReason = !decoded && (err?.shortMessage === 'missing revert data' || !err?.reason || (err?.message && err.message.includes('unknown custom error')))
     if (isCallException && (noUsefulReason || decoded)) {
@@ -468,18 +497,21 @@ export async function createBeamioCardWithFactory(
       const dataStr = revertData != null ? (typeof revertData === 'string' ? revertData : ethers.hexlify(revertData)) : ''
       const hint = createCardRevertHint(decoded)
       throw new Error(
-        `createCardCollectionWithInitCode(或 WithInitCodeAndTiers) 链上执行 revert（${reasonLine}）。常见原因：\n` +
-          '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
-          '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
-          '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（BM_DeployFailedAtStep 2–4）；\n' +
-          '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero），或 Factory ABI 缺少 createCardCollectionWithInitCodeAndTiers。\n' +
-          (hint ? hint : '') +
-          (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
-          (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
-          `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
+        appendSnapshotToErrorMessage(
+          `createCardCollectionWithInitCode(或 WithInitCodeAndTiers) 链上执行 revert（${reasonLine}）。常见原因：\n` +
+            '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
+            '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
+            '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（BM_DeployFailedAtStep 2–4）；\n' +
+            '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero），或 Factory ABI 缺少 createCardCollectionWithInitCodeAndTiers。\n' +
+            (hint ? hint : '') +
+            (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
+            (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
+            `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`,
+          failSnap,
+        ),
       )
     }
-    throw e
+    throw new Error(appendSnapshotToErrorMessage(err?.shortMessage ?? err?.message ?? String(e), failSnap))
   }
   const receipt = await tx.wait()
   if (!receipt) throw new Error('Transaction failed')
@@ -551,6 +583,122 @@ async function resolveFactoryAddressForInitCode(factory: ethers.Contract): Promi
   return ethers.getAddress(a)
 }
 
+function isVerboseCreateCardDebug(): boolean {
+  return typeof process !== 'undefined' && process.env?.BEAMIO_CREATE_CARD_DEBUG === '1'
+}
+
+/** JSON-safe fields for Master / Cluster logs (no secrets). */
+export type CreateCardChainDebugSnapshot = Record<string, string | number | boolean | null | string[]>
+
+/**
+ * Collect on-chain + initCode fingerprints to compare local Hardhat vs server Master.
+ * Set BEAMIO_CREATE_CARD_DEBUG=1 to also log a verbose block before send (see emitCreateCardDebug).
+ */
+export async function collectCreateCardChainDebugSnapshot(
+  factory: ethers.Contract,
+  initCode: string,
+  params: {
+    cardOwner: string
+    currencyEnum: number
+    priceE6: bigint
+    signerAddress: string
+    gasLimit: bigint
+    callKind: 'createCardCollectionWithInitCode' | 'createCardCollectionWithInitCodeAndTiers'
+    initCodeSource: 'prebuiltHex' | 'builtFromOptions'
+    gatewayUsedWhenBuilding?: string
+    libraryOverride?: BeamioUserCardLibraryAddresses
+    rawTierCount?: number
+    normalizedTierCount?: number
+  },
+): Promise<CreateCardChainDebugSnapshot> {
+  const factoryAddr = await resolveFactoryAddressForInitCode(factory)
+  const ic = initCode.startsWith('0x') ? initCode : `0x${initCode}`
+  const initCodeByteLength = (ic.length - 2) / 2
+  const initCodeKeccak256 = ethers.keccak256(ic)
+  const libs = resolveBeamioUserCardLibraryAddresses(params.libraryOverride)
+
+  let chainId: string | null = null
+  try {
+    const p = factory.runner && 'provider' in factory.runner ? (factory.runner as ethers.Signer).provider : null
+    if (p) chainId = (await p.getNetwork()).chainId.toString()
+  } catch {
+    chainId = null
+  }
+
+  let deployerAddress: string | null = null
+  let deployerFactory: string | null = null
+  let deployerFactoryMatches: boolean | null = null
+  try {
+    deployerAddress = (await factory.deployer()) as string
+    if (deployerAddress && ethers.getAddress(deployerAddress) !== ethers.ZeroAddress) {
+      const dc = new ethers.Contract(
+        deployerAddress,
+        ['function factory() view returns (address)'],
+        factory.runner,
+      )
+      deployerFactory = (await dc.factory()) as string
+      deployerFactoryMatches =
+        deployerFactory.toLowerCase() === factoryAddr.toLowerCase()
+    }
+  } catch {
+    deployerAddress = deployerAddress ?? null
+  }
+
+  const gw = params.gatewayUsedWhenBuilding
+  const gatewayMatchesFactory =
+    gw !== undefined ? gw.toLowerCase() === factoryAddr.toLowerCase() : null
+
+  return {
+    chainId: chainId ?? 'unknown',
+    factoryAddress: factoryAddr,
+    signerAddress: params.signerAddress,
+    cardOwner: params.cardOwner,
+    currencyEnum: params.currencyEnum,
+    priceE6: params.priceE6.toString(),
+    callKind: params.callKind,
+    gasLimit: params.gasLimit.toString(),
+    initCodeSource: params.initCodeSource,
+    initCodeByteLength,
+    initCodeKeccak256,
+    initCodePrefixHex: ic.slice(0, 26),
+    gatewayUsedWhenBuilding: gw ?? null,
+    gatewayMatchesFactory: gatewayMatchesFactory ?? null,
+    beamioUserCardFormattingLib: libs?.BeamioUserCardFormattingLib ?? 'missing',
+    beamioUserCardTransferLib: libs?.BeamioUserCardTransferLib ?? 'missing',
+    deployerAddress,
+    deployerFactory,
+    deployerFactoryMatches,
+    rawTierCount: params.rawTierCount ?? 0,
+    normalizedTierCount: params.normalizedTierCount ?? 0,
+    noteGatewayRule:
+      'BeamioUserCard.factoryGateway() must equal the factory that calls createCard; initCode gateway must match factory address.',
+    noteReceiptLogs:
+      'On revert, tx receipt logs are usually empty; use debug_traceTransaction / Tenderly for inner revert.',
+    noteCompareLocal:
+      'Compare initCodeKeccak256 with a local Hardhat create (same owner/currency/price/gateway). If hashes differ, artifact or library link addresses differ (run compile + syncBeamioUserCardToX402sdk).',
+    noteStep0vs1:
+      'BM_DeployFailedAtStep(0)=CREATE/constructor; step(1)=gateway mismatch; steps 2–4=owner/currency/price.',
+  }
+}
+
+function emitCreateCardDebug(phase: 'preflight' | 'failure', snapshot: CreateCardChainDebugSnapshot): void {
+  const line = `[BeamioCreateCard:${phase}] ${JSON.stringify(snapshot)}`
+  console.warn(line)
+  if (phase === 'preflight' && isVerboseCreateCardDebug()) {
+    console.warn(
+      '[BeamioCreateCard:preflight:verbose] BEAMIO_CREATE_CARD_DEBUG=1 is set; unset after diagnosis to reduce log volume.',
+    )
+  }
+}
+
+function appendSnapshotToErrorMessage(base: string, snapshot: CreateCardChainDebugSnapshot): string {
+  try {
+    return `${base}\n[createCardDebugJson] ${JSON.stringify(snapshot)}`
+  } catch {
+    return base
+  }
+}
+
 /** 同 createBeamioCardWithFactory，但返回 { cardAddress, hash } 供 daemon 回传 tx hash 给 UI。可选 tiers 时使用 createCardCollectionWithInitCodeAndTiers 一次性部署+配置 */
 export async function createBeamioCardWithFactoryReturningHash(
   factory: ethers.Contract,
@@ -567,11 +715,15 @@ export async function createBeamioCardWithFactoryReturningHash(
   if (priceE6 <= 0n) throw new Error('pointsUnitPriceInCurrencyE6 must be > 0')
 
   let initCode: string
+  let initCodeSource: 'prebuiltHex' | 'builtFromOptions'
+  let gatewayUsedWhenBuilding: string | undefined
+  let libraryOverrideForDebug: BeamioUserCardLibraryAddresses | undefined
   if (typeof initCodeOrOptions === 'string') {
     if (!initCodeOrOptions || !initCodeOrOptions.startsWith('0x')) {
       throw new Error('initCode must be a hex string (e.g. 0x...) when passed as string')
     }
     initCode = initCodeOrOptions
+    initCodeSource = 'prebuiltHex'
   } else {
     const resolvedFactory = await resolveFactoryAddressForInitCode(factory)
     const requestedGw = initCodeOrOptions.gateway
@@ -582,6 +734,8 @@ export async function createBeamioCardWithFactoryReturningHash(
       )
     }
     const gateway = resolvedFactory
+    gatewayUsedWhenBuilding = gateway
+    libraryOverrideForDebug = initCodeOrOptions.libraryAddresses
     const uri = initCodeOrOptions.uri ?? BEAMIO_METADATA_BASE_URI
     const wlOn = initCodeOrOptions.transferWhitelistEnabled === true
     const ut2 = initCodeOrOptions.upgradeType
@@ -596,6 +750,7 @@ export async function createBeamioCardWithFactoryReturningHash(
       wlOn,
       initCodeOrOptions.libraryAddresses
     )
+    initCodeSource = 'builtFromOptions'
   }
 
   const runner = factory.runner
@@ -643,6 +798,25 @@ export async function createBeamioCardWithFactoryReturningHash(
 
   const gasLimit = getCreateCardGasLimit()
 
+  const callKind =
+    normalizedTiers.length > 0
+      ? 'createCardCollectionWithInitCodeAndTiers'
+      : 'createCardCollectionWithInitCode'
+  const createCardDebugSnap = await collectCreateCardChainDebugSnapshot(factory, initCode, {
+    cardOwner,
+    currencyEnum,
+    priceE6,
+    signerAddress,
+    gasLimit,
+    callKind,
+    initCodeSource,
+    gatewayUsedWhenBuilding,
+    libraryOverride: libraryOverrideForDebug,
+    rawTierCount: tiers?.length ?? 0,
+    normalizedTierCount: normalizedTiers.length,
+  })
+  if (isVerboseCreateCardDebug()) emitCreateCardDebug('preflight', createCardDebugSnap)
+
   let tx: ethers.ContractTransactionResponse
   try {
     if (normalizedTiers.length > 0) {
@@ -667,6 +841,13 @@ export async function createBeamioCardWithFactoryReturningHash(
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
     const revertData = err?.data ?? (e as { data?: string | Uint8Array }).data ?? (e as { info?: { error?: { data?: string } } }).info?.error?.data
     const decoded = parseCreateCardRevertData(revertData)
+    const failSnap: CreateCardChainDebugSnapshot = {
+      ...createCardDebugSnap,
+      failureRpcCode: err?.code ?? null,
+      failureShortMessage: err?.shortMessage ?? err?.message ?? String(e),
+      parsedRevert: decoded ?? null,
+    }
+    emitCreateCardDebug('failure', failSnap)
     const isCallException = err?.code === 'CALL_EXCEPTION'
     const noUsefulReason = !decoded && (err?.shortMessage === 'missing revert data' || !err?.reason || (err?.message && err.message.includes('unknown custom error')))
     if (isCallException && (noUsefulReason || decoded)) {
@@ -674,18 +855,21 @@ export async function createBeamioCardWithFactoryReturningHash(
       const dataStr = revertData != null ? (typeof revertData === 'string' ? revertData : ethers.hexlify(revertData)) : ''
       const hint = createCardRevertHint(decoded)
       throw new Error(
-        `createCardCollectionWithInitCode(或 WithInitCodeAndTiers) 链上执行 revert（${reasonLine}）。常见原因：\n` +
-          '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
-          '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
-          '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（BM_DeployFailedAtStep 2–4）；\n' +
-          '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero），或 Factory ABI 缺少 createCardCollectionWithInitCodeAndTiers。\n' +
-          (hint ? hint : '') +
-          (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
-          (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
-          `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`
+        appendSnapshotToErrorMessage(
+          `createCardCollectionWithInitCode(或 WithInitCodeAndTiers) 链上执行 revert（${reasonLine}）。常见原因：\n` +
+            '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
+            '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
+            '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（BM_DeployFailedAtStep 2–4）；\n' +
+            '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero），或 Factory ABI 缺少 createCardCollectionWithInitCodeAndTiers。\n' +
+            (hint ? hint : '') +
+            (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
+            (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
+            `原始错误: ${err?.shortMessage ?? err?.message ?? String(e)}`,
+          failSnap,
+        ),
       )
     }
-    throw e
+    throw new Error(appendSnapshotToErrorMessage(err?.shortMessage ?? err?.message ?? String(e), failSnap))
   }
   const hash = tx.hash
   const receipt = await tx.wait()
