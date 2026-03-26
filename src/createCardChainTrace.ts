@@ -1,9 +1,18 @@
 /**
  * Ordered createCard HTTP → Master → CCSA trace lines for journald / grep.
+ *
  * Enable with: BEAMIO_CREATE_CARD_CHAIN_TRACE=1
  *
+ * **systemd:** Exporting the variable in your SSH shell does NOT affect
+ * `conet-beamio-api` (or any `systemctl` service). Set it on the unit, e.g.:
+ *
+ *   sudo systemctl edit conet-beamio-api.service
+ *   # [Service]
+ *   # Environment=BEAMIO_CREATE_CARD_CHAIN_TRACE=1
+ *   sudo systemctl daemon-reload && sudo systemctl restart conet-beamio-api.service
+ *
  * Each line: [BeamioCreateCardChain] {"step":"...","order":N,...}
- * Search: BeamioCreateCardChain
+ * Search: journalctl ... | grep BeamioCreateCardChain
  */
 
 const ENV_KEY = 'BEAMIO_CREATE_CARD_CHAIN_TRACE'

@@ -486,6 +486,7 @@ export async function createBeamioCardWithFactory(
   })
 
   let tx: ethers.ContractTransactionResponse
+  let receipt: ethers.TransactionReceipt | null = null
   try {
     tx = await factory.createCardCollectionWithInitCode(
       cardOwner,
@@ -494,9 +495,22 @@ export async function createBeamioCardWithFactory(
       initCode,
       { gasLimit: gasLimit },
     )
+    receipt = await tx.wait()
+    if (!receipt) throw new Error('Transaction failed')
+    // Revert is often surfaced here (after mining), not on the initial send — keep in same try/catch as send.
+    if (Number(receipt.status) === 0) {
+      throw Object.assign(new Error('transaction execution reverted'), {
+        code: 'CALL_EXCEPTION',
+        shortMessage: 'transaction execution reverted',
+        receipt,
+      } as const)
+    }
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
-    const revertData = err?.data ?? (e as { data?: string | Uint8Array }).data ?? (e as { info?: { error?: { data?: string } } }).info?.error?.data
+    const revertData =
+      err?.data ??
+      (e as { data?: string | Uint8Array }).data ??
+      (e as { info?: { error?: { data?: string } } }).info?.error?.data
     const decoded = parseCreateCardRevertData(revertData)
     const failSnap: CreateCardChainDebugSnapshot = {
       ...createCardDebugSnap,
@@ -533,13 +547,11 @@ export async function createBeamioCardWithFactory(
     }
     throw new Error(appendSnapshotToErrorMessage(err?.shortMessage ?? err?.message ?? String(e), failSnap))
   }
-  const receipt = await tx.wait()
-  if (!receipt) throw new Error('Transaction failed')
 
   let cardAddress: string | undefined
   try {
     const iface = factory.interface
-    const log = receipt.logs?.find((l: ethers.Log) => {
+    const log = receipt!.logs?.find((l: ethers.Log) => {
       try {
         const parsed = iface.parseLog({ topics: l.topics, data: l.data })
         return parsed?.name === 'CardDeployed'
@@ -859,6 +871,7 @@ export async function createBeamioCardWithFactoryReturningHash(
   })
 
   let tx: ethers.ContractTransactionResponse
+  let receipt: ethers.TransactionReceipt | null = null
   try {
     if (normalizedTiers.length > 0) {
       tx = await factory.createCardCollectionWithInitCodeAndTiers(
@@ -878,9 +891,21 @@ export async function createBeamioCardWithFactoryReturningHash(
         { gasLimit },
       )
     }
+    receipt = await tx.wait()
+    if (!receipt) throw new Error('Transaction failed')
+    if (Number(receipt.status) === 0) {
+      throw Object.assign(new Error('transaction execution reverted'), {
+        code: 'CALL_EXCEPTION',
+        shortMessage: 'transaction execution reverted',
+        receipt,
+      } as const)
+    }
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
-    const revertData = err?.data ?? (e as { data?: string | Uint8Array }).data ?? (e as { info?: { error?: { data?: string } } }).info?.error?.data
+    const revertData =
+      err?.data ??
+      (e as { data?: string | Uint8Array }).data ??
+      (e as { info?: { error?: { data?: string } } }).info?.error?.data
     const decoded = parseCreateCardRevertData(revertData)
     const failSnap: CreateCardChainDebugSnapshot = {
       ...createCardDebugSnap,
@@ -918,13 +943,11 @@ export async function createBeamioCardWithFactoryReturningHash(
     throw new Error(appendSnapshotToErrorMessage(err?.shortMessage ?? err?.message ?? String(e), failSnap))
   }
   const hash = tx.hash
-  const receipt = await tx.wait()
-  if (!receipt) throw new Error('Transaction failed')
 
   let cardAddress: string | undefined
   try {
     const iface = factory.interface
-    const log = receipt.logs?.find((l: ethers.Log) => {
+    const log = receipt!.logs?.find((l: ethers.Log) => {
       try {
         const parsed = iface.parseLog({ topics: l.topics, data: l.data })
         return parsed?.name === 'CardDeployed'
