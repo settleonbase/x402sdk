@@ -11,6 +11,7 @@ import {
   linkBeamioUserCardBytecode,
   type BeamioUserCardLibraryAddresses,
 } from './linkBeamioUserCardBytecode.js'
+import { emitCreateCardChainTrace } from './createCardChainTrace'
 
 export type { BeamioUserCardLibraryAddresses } from './linkBeamioUserCardBytecode.js'
 
@@ -375,6 +376,12 @@ export async function createBeamioCardWithFactory(
   const priceE6 = BigInt(pointsUnitPriceInCurrencyE6)
   if (priceE6 <= 0n) throw new Error('pointsUnitPriceInCurrencyE6 must be > 0')
 
+  emitCreateCardChainTrace('CCSA.createBeamioCardWithFactory.enter', {
+    cardOwner,
+    currency,
+    priceE6: priceE6.toString(),
+  })
+
   let initCode: string
   let initCodeSource: 'prebuiltHex' | 'builtFromOptions'
   let gatewayUsedWhenBuilding: string | undefined
@@ -470,6 +477,14 @@ export async function createBeamioCardWithFactory(
   })
   if (isVerboseCreateCardDebug()) emitCreateCardDebug('preflight', createCardDebugSnap)
 
+  emitCreateCardChainTrace('CCSA.createBeamioCardWithFactory.beforeSendTx', {
+    callKind: createCardDebugSnap.callKind,
+    factoryAddress: createCardDebugSnap.factoryAddress,
+    signerAddress: createCardDebugSnap.signerAddress,
+    initCodeKeccak256: createCardDebugSnap.initCodeKeccak256,
+    initCodeByteLength: createCardDebugSnap.initCodeByteLength,
+  })
+
   let tx: ethers.ContractTransactionResponse
   try {
     tx = await factory.createCardCollectionWithInitCode(
@@ -489,6 +504,11 @@ export async function createBeamioCardWithFactory(
       failureShortMessage: err?.shortMessage ?? err?.message ?? String(e),
       parsedRevert: decoded ?? null,
     }
+    emitCreateCardChainTrace('CCSA.createBeamioCardWithFactory.sendFailed', {
+      failureRpcCode: failSnap.failureRpcCode,
+      parsedRevert: failSnap.parsedRevert,
+      initCodeKeccak256: failSnap.initCodeKeccak256,
+    })
     emitCreateCardDebug('failure', failSnap)
     const isCallException = err?.code === 'CALL_EXCEPTION'
     const noUsefulReason = !decoded && (err?.shortMessage === 'missing revert data' || !err?.reason || (err?.message && err.message.includes('unknown custom error')))
@@ -543,7 +563,12 @@ export async function createBeamioCardWithFactory(
   if (!cardAddress || !ethers.isAddress(cardAddress)) {
     throw new Error('Could not resolve new BeamioUserCard address from receipt')
   }
-  return ethers.getAddress(cardAddress)
+  const out = ethers.getAddress(cardAddress)
+  emitCreateCardChainTrace('CCSA.createBeamioCardWithFactory.success', {
+    cardAddress: out,
+    txHash: tx.hash,
+  })
+  return out
 }
 
 /** Tier 结构（与 BeamioUserCard.Tier 一致） */
@@ -714,6 +739,13 @@ export async function createBeamioCardWithFactoryReturningHash(
   const priceE6 = BigInt(pointsUnitPriceInCurrencyE6)
   if (priceE6 <= 0n) throw new Error('pointsUnitPriceInCurrencyE6 must be > 0')
 
+  emitCreateCardChainTrace('CCSA.createBeamioCardWithFactoryReturningHash.enter', {
+    cardOwner,
+    currency,
+    priceE6: priceE6.toString(),
+    tierArgLength: tiers?.length ?? 0,
+  })
+
   let initCode: string
   let initCodeSource: 'prebuiltHex' | 'builtFromOptions'
   let gatewayUsedWhenBuilding: string | undefined
@@ -817,6 +849,15 @@ export async function createBeamioCardWithFactoryReturningHash(
   })
   if (isVerboseCreateCardDebug()) emitCreateCardDebug('preflight', createCardDebugSnap)
 
+  emitCreateCardChainTrace('CCSA.createBeamioCardWithFactoryReturningHash.beforeSendTx', {
+    callKind: createCardDebugSnap.callKind,
+    factoryAddress: createCardDebugSnap.factoryAddress,
+    signerAddress: createCardDebugSnap.signerAddress,
+    initCodeKeccak256: createCardDebugSnap.initCodeKeccak256,
+    initCodeByteLength: createCardDebugSnap.initCodeByteLength,
+    normalizedTierCount: normalizedTiers.length,
+  })
+
   let tx: ethers.ContractTransactionResponse
   try {
     if (normalizedTiers.length > 0) {
@@ -847,6 +888,11 @@ export async function createBeamioCardWithFactoryReturningHash(
       failureShortMessage: err?.shortMessage ?? err?.message ?? String(e),
       parsedRevert: decoded ?? null,
     }
+    emitCreateCardChainTrace('CCSA.createBeamioCardWithFactoryReturningHash.sendFailed', {
+      failureRpcCode: failSnap.failureRpcCode,
+      parsedRevert: failSnap.parsedRevert,
+      initCodeKeccak256: failSnap.initCodeKeccak256,
+    })
     emitCreateCardDebug('failure', failSnap)
     const isCallException = err?.code === 'CALL_EXCEPTION'
     const noUsefulReason = !decoded && (err?.shortMessage === 'missing revert data' || !err?.reason || (err?.message && err.message.includes('unknown custom error')))
@@ -902,6 +948,11 @@ export async function createBeamioCardWithFactoryReturningHash(
   if (!cardAddress || !ethers.isAddress(cardAddress)) {
     throw new Error('Could not resolve new BeamioUserCard address from receipt')
   }
-  return { cardAddress: ethers.getAddress(cardAddress), hash }
+  const resolved = ethers.getAddress(cardAddress)
+  emitCreateCardChainTrace('CCSA.createBeamioCardWithFactoryReturningHash.success', {
+    cardAddress: resolved,
+    txHash: hash,
+  })
+  return { cardAddress: resolved, hash }
 }
 
