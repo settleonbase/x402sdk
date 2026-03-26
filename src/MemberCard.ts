@@ -389,11 +389,14 @@ masterSetup.settle_contractAdmin.forEach((n: string) => {
 })
 
 /**
- * 启动时确保 ~/.master.json 的 settle_contractAdmin 地址都被登记为 Card Factory paymaster(admin)。
+ * 启动时确保 ~/.master.json 的 settle_contractAdmin 地址在以下工厂具备 paymaster 权限：
+ * - BeamioUserCardFactoryPaymasterV07（BASE_CARD_FACTORY）：owner + changePaymasterStatus / isPaymaster
+ * - BeamioFactoryPaymasterV07（BASE_AA_FACTORY）：admin + addPayMaster / isPayMaster
  * - 幂等：已存在则跳过
  * - 仅使用 settle_contractAdmin[0] 作为写入 signer，避免多 signer/multi-worker 并发 nonce 冲突
+ * - 卡工厂与 AA 工厂分别校验 on-chain owner/admin；一侧不匹配仅跳过该侧，不影响另一侧
  */
-const ensureSettleAdminsAsCardFactoryAdmins = async (): Promise<void> => {
+const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 	if (!cluster.isPrimary) {
 		logger(Colors.gray('[factory-admin-init] skip: only master process can initialize factory admins'))
 		return
@@ -442,33 +445,12 @@ const ensureSettleAdminsAsCardFactoryAdmins = async (): Promise<void> => {
 			return
 		}
 
-		const readOnlyFactory = new ethers.Contract(
-			BeamioUserCardFactoryPaymasterV2,
-			BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
-			providerBaseBackup
-		)
-
-		const ownerOnChain = String(await readOnlyFactory.owner())
-		const ownerOnChainLower = ownerOnChain.toLowerCase()
 		const ownerPk = masterSetup?.settle_contractAdmin?.[0]
 		if (!ownerPk) {
 			logger(Colors.yellow('[factory-admin-init] skip: settle_contractAdmin[0] is empty'))
 			return
 		}
 		const ownerWallet = new ethers.Wallet(ownerPk, providerBaseBackup1)
-		if (ownerWallet.address.toLowerCase() !== ownerOnChainLower) {
-			logger(
-				Colors.yellow(
-					`[factory-admin-init] skip: settle_contractAdmin[0]=${ownerWallet.address} is not factory owner (${ownerOnChain})`
-				)
-			)
-			return
-		}
-		const ownerFactory = new ethers.Contract(
-			BeamioUserCardFactoryPaymasterV2,
-			BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
-			ownerWallet
-		)
 
 		// 从本地配置列表构造目标 admin 地址（去重）
 		const adminTargets = [...new Set(Settle_ContractPool.map(sc => sc.walletBase.address.toLowerCase()))]
@@ -478,49 +460,143 @@ const ensureSettleAdminsAsCardFactoryAdmins = async (): Promise<void> => {
 			})
 			.filter((a): a is string => !!a)
 
-		for (const adminAddr of adminTargets) {
-			const adminLower = adminAddr.toLowerCase()
-			// owner 默认具备 onlyPaymaster 权限，不需要写入 isPaymaster
-			if (adminLower === ownerOnChainLower) {
-				continue
-			}
-
-			let isPaymaster = false
-			try {
-				isPaymaster = !!(await readOnlyFactory.isPaymaster(adminAddr))
-			} catch (e: any) {
-				logger(Colors.red(`[factory-admin-init] isPaymaster(${adminAddr}) failed: ${e?.message ?? e}`))
-				continue
-			}
-
-			if (isPaymaster) {
-				continue
-			}
-
-			try {
-				const tx = await ownerFactory.changePaymasterStatus(adminAddr, true)
-				await tx.wait()
-				logger(Colors.green(`[factory-admin-init] added paymaster(admin): ${adminAddr}`))
-			} catch (e: any) {
-				// 多进程并发场景：可能出现 nonce too low；此时再读一次链上状态，若已是 paymaster 视为成功
-				const msg = String(e?.message ?? e)
-				const isNonceRace =
-					msg.includes('nonce too low') ||
-					msg.includes('nonce has already been used') ||
-					e?.code === 'NONCE_EXPIRED'
-				if (isNonceRace) {
-					try {
-						const nowPaymaster = !!(await readOnlyFactory.isPaymaster(adminAddr))
-						if (nowPaymaster) {
-							logger(Colors.yellow(`[factory-admin-init] nonce race but admin already set: ${adminAddr}`))
-							continue
-						}
-					} catch {
-						// ignore and fall through to error log
-					}
+		// ----- UserCard factory paymasters -----
+		const readOnlyCardFactory = new ethers.Contract(
+			BeamioUserCardFactoryPaymasterV2,
+			BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
+			providerBaseBackup
+		)
+		let cardOwnerOnChain: string | null = null
+		try {
+			cardOwnerOnChain = String(await readOnlyCardFactory.owner())
+		} catch (e: any) {
+			logger(Colors.red(`[factory-admin-init] card: owner() failed: ${e?.message ?? e}`))
+		}
+		const cardOwnerOnChainLower = cardOwnerOnChain?.toLowerCase() ?? ''
+		if (cardOwnerOnChain && ownerWallet.address.toLowerCase() === cardOwnerOnChainLower) {
+			const ownerCardFactory = new ethers.Contract(
+				BeamioUserCardFactoryPaymasterV2,
+				BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
+				ownerWallet
+			)
+			for (const adminAddr of adminTargets) {
+				const adminLower = adminAddr.toLowerCase()
+				if (adminLower === cardOwnerOnChainLower) {
+					continue
 				}
-				logger(Colors.red(`[factory-admin-init] add paymaster(admin) failed for ${adminAddr}: ${msg}`))
+
+				let isPaymaster = false
+				try {
+					isPaymaster = !!(await readOnlyCardFactory.isPaymaster(adminAddr))
+				} catch (e: any) {
+					logger(Colors.red(`[factory-admin-init] card: isPaymaster(${adminAddr}) failed: ${e?.message ?? e}`))
+					continue
+				}
+
+				if (isPaymaster) {
+					continue
+				}
+
+				try {
+					const tx = await ownerCardFactory.changePaymasterStatus(adminAddr, true)
+					await tx.wait()
+					logger(Colors.green(`[factory-admin-init] card: added paymaster(admin): ${adminAddr}`))
+				} catch (e: any) {
+					const msg = String(e?.message ?? e)
+					const isNonceRace =
+						msg.includes('nonce too low') ||
+						msg.includes('nonce has already been used') ||
+						e?.code === 'NONCE_EXPIRED'
+					if (isNonceRace) {
+						try {
+							const nowPaymaster = !!(await readOnlyCardFactory.isPaymaster(adminAddr))
+							if (nowPaymaster) {
+								logger(Colors.yellow(`[factory-admin-init] card: nonce race but admin already set: ${adminAddr}`))
+								continue
+							}
+						} catch {
+							// ignore and fall through to error log
+						}
+					}
+					logger(Colors.red(`[factory-admin-init] card: add paymaster(admin) failed for ${adminAddr}: ${msg}`))
+				}
 			}
+		} else if (cardOwnerOnChain) {
+			logger(
+				Colors.yellow(
+					`[factory-admin-init] card: skip: settle_contractAdmin[0]=${ownerWallet.address} is not factory owner (${cardOwnerOnChain})`
+				)
+			)
+		}
+
+		// ----- AA account factory (BeamioFactoryPaymasterV07) paymasters -----
+		const readOnlyAaFactory = new ethers.Contract(
+			BeamioAAAccountFactoryPaymaster,
+			BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
+			providerBaseBackup
+		)
+		let aaAdminOnChain: string | null = null
+		try {
+			aaAdminOnChain = String(await readOnlyAaFactory.admin())
+		} catch (e: any) {
+			logger(Colors.red(`[factory-admin-init] aa: admin() failed: ${e?.message ?? e}`))
+		}
+		const aaAdminOnChainLower = aaAdminOnChain?.toLowerCase() ?? ''
+		if (aaAdminOnChain && ownerWallet.address.toLowerCase() === aaAdminOnChainLower) {
+			const ownerAaFactory = new ethers.Contract(
+				BeamioAAAccountFactoryPaymaster,
+				BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
+				ownerWallet
+			)
+			for (const adminAddr of adminTargets) {
+				const adminLower = adminAddr.toLowerCase()
+				// 部署时 admin 已在 isPayMaster 集合中
+				if (adminLower === aaAdminOnChainLower) {
+					continue
+				}
+
+				let isPayMasterAddr = false
+				try {
+					isPayMasterAddr = !!(await readOnlyAaFactory.isPayMaster(adminAddr))
+				} catch (e: any) {
+					logger(Colors.red(`[factory-admin-init] aa: isPayMaster(${adminAddr}) failed: ${e?.message ?? e}`))
+					continue
+				}
+
+				if (isPayMasterAddr) {
+					continue
+				}
+
+				try {
+					const tx = await ownerAaFactory.addPayMaster(adminAddr)
+					await tx.wait()
+					logger(Colors.green(`[factory-admin-init] aa: added paymaster: ${adminAddr}`))
+				} catch (e: any) {
+					const msg = String(e?.message ?? e)
+					const isNonceRace =
+						msg.includes('nonce too low') ||
+						msg.includes('nonce has already been used') ||
+						e?.code === 'NONCE_EXPIRED'
+					if (isNonceRace) {
+						try {
+							const nowPm = !!(await readOnlyAaFactory.isPayMaster(adminAddr))
+							if (nowPm) {
+								logger(Colors.yellow(`[factory-admin-init] aa: nonce race but paymaster already set: ${adminAddr}`))
+								continue
+							}
+						} catch {
+							// ignore and fall through to error log
+						}
+					}
+					logger(Colors.red(`[factory-admin-init] aa: addPayMaster failed for ${adminAddr}: ${msg}`))
+				}
+			}
+		} else if (aaAdminOnChain) {
+			logger(
+				Colors.yellow(
+					`[factory-admin-init] aa: skip: settle_contractAdmin[0]=${ownerWallet.address} is not AA factory admin (${aaAdminOnChain})`
+				)
+			)
 		}
 	} catch (e: any) {
 		logger(Colors.red(`[factory-admin-init] unexpected error: ${e?.message ?? e}`))
@@ -530,7 +606,7 @@ const ensureSettleAdminsAsCardFactoryAdmins = async (): Promise<void> => {
 }
 
 if (cluster.isPrimary) {
-	void ensureSettleAdminsAsCardFactoryAdmins()
+	void ensureSettleAdminsAsFactoryPaymasters()
 }
 
 
