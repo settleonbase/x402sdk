@@ -1,8 +1,11 @@
 /**
  * Wire-up in full repo `src/MemberCard.ts`:
  * - At start of `createCardPoolPress`, after dequeuing SC + job, call `traceMemberCardCreateCardPoolPressDequeue`.
+ * - Optional tiers log: `traceMasterCreateCardPoolEntryTiers(job.tiers)` from `./endpoint/createCardEndpointTrace`.
  * - At start of `createBeamioCardAdminWithHash`, call `traceMemberCardCreateBeamioCardAdminWithHashEnter`.
  * - Immediately before `return createBeamioCardWithFactoryReturningHash(...)` / `return createBeamioCardWithFactory(...)`, call `traceMemberCardDelegateToCCSA`.
+ *
+ * Worker (`beamioServer`): after parsing createCard body, `traceClusterCreateCardRequestBodyTiers(body)`.
  */
 import { emitCreateCardChainTrace } from './createCardChainTrace'
 

@@ -12,6 +12,7 @@ import {
   type BeamioUserCardLibraryAddresses,
 } from './linkBeamioUserCardBytecode.js'
 import { emitCreateCardChainTrace } from './createCardChainTrace'
+import { emitCreateCardTiersJson } from './createCardTiersDebug'
 
 export type { BeamioUserCardLibraryAddresses } from './linkBeamioUserCardBytecode.js'
 
@@ -834,6 +835,14 @@ export async function createBeamioCardWithFactoryReturningHash(
   }
 
   const normalizedTiers = normalizeTiersForCreateCard(tiers)
+  emitCreateCardTiersJson(
+    'CCSA.createBeamioCardWithFactoryReturningHash.normalizedTiersForChain',
+    normalizedTiers.map((t) => ({
+      minUsdc6: t.minUsdc6.toString(),
+      attr: t.attr.toString(),
+      tierExpirySeconds: t.tierExpirySeconds.toString(),
+    })),
+  )
   if (tiers?.length && normalizedTiers.length === 0) {
     console.warn(
       '[CCSA] createCard tiers input had only minUsdc6<=0 entries; using createCardCollectionWithInitCode (no AndTiers) to avoid UC_TierMinZero.',
