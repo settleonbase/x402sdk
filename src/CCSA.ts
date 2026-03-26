@@ -96,12 +96,12 @@ function createCardRevertHint(decoded: string | null): string {
 /**
  * 人类可读的 initCode 构造项：不传原始 initCode 时，由 createBeamioCardWithFactory 内部根据这些项组合生成。
  * - uri: BeamioUserCard 的 metadata base（合约内重写 uri() 为 0x{合约地址}{id}.json，此处仅作 constructor 占位），默认 BEAMIO_METADATA_BASE_URI
- * - gateway: 工厂/gateway 地址，默认使用当前 factory 合约地址
+ * - gateway: 若传入且与 factory 地址不一致会被忽略并告警；initCode 内 gateway 始终为当前 factory（链上 factoryGateway 必须与 msg.sender 工厂一致）。
  */
 export type CreateBeamioCardInitCodeOptions = {
   /** BeamioUserCard 的 metadata URI（constructor 占位，合约 uri() 重写为 0x{address(this)}{id}.json） */
   uri?: string
-  /** 工厂（gateway）地址，默认使用传入的 factory 合约地址 */
+  /** 已废弃/忽略：gateway 强制为 factory.getAddress()，勿传其它地址以免 BM_DeployFailedAtStep(1) */
   gateway?: string
   /** 0=按单次 topup/redeem 金额升级；1=按 points 余额；2=按累计向 admin 转账 points。constructor 固定，默认 0 */
   upgradeType?: 0 | 1 | 2
@@ -137,6 +137,15 @@ function tryNormalizeLibAddress(s: string | undefined): string | undefined {
  * 解析 BeamioUserCard 链接库地址：显式 override → 环境变量 → chainAddresses 常量。
  * SI / Master 可不传 libraryAddresses，只要已发布版本的 chainAddresses 或进程 env 已配置。
  */
+/** 与 Master 失败笔对齐：gas 上限需覆盖 ~25KB initCode 的 CREATE；可用 BEAMIO_CREATE_CARD_GAS_LIMIT 覆盖 */
+const DEFAULT_CREATE_CARD_GAS_LIMIT = 8_500_000n
+
+function getCreateCardGasLimit(): bigint {
+  const raw = typeof process !== 'undefined' ? process.env?.BEAMIO_CREATE_CARD_GAS_LIMIT?.trim() : undefined
+  if (raw && /^\d+$/.test(raw)) return BigInt(raw)
+  return DEFAULT_CREATE_CARD_GAS_LIMIT
+}
+
 export function resolveBeamioUserCardLibraryAddresses(
   override?: BeamioUserCardLibraryAddresses
 ): BeamioUserCardLibraryAddresses | undefined {
@@ -373,7 +382,15 @@ export async function createBeamioCardWithFactory(
     }
     initCode = initCodeOrOptions
   } else {
-    const gateway = initCodeOrOptions.gateway ?? (typeof factory.getAddress === 'function' ? await factory.getAddress() : (factory as unknown as { address: string }).address)
+    const resolvedFactory = await resolveFactoryAddressForInitCode(factory)
+    const requestedGw = initCodeOrOptions.gateway
+    if (requestedGw !== undefined && ethers.getAddress(requestedGw) !== resolvedFactory) {
+      console.warn(
+        `[CCSA] initCodeOptions.gateway (${ethers.getAddress(requestedGw)}) ignored; using factory ${resolvedFactory} ` +
+          '(BeamioUserCard.factoryGateway() must equal the factory that calls createCardCollectionWithInitCode).',
+      )
+    }
+    const gateway = resolvedFactory
     const uri = initCodeOrOptions.uri ?? BEAMIO_METADATA_BASE_URI
     const wlOn = initCodeOrOptions.transferWhitelistEnabled === true
     const ut = initCodeOrOptions.upgradeType
@@ -406,6 +423,8 @@ export async function createBeamioCardWithFactory(
     )
   }
 
+  const gasLimit = getCreateCardGasLimit()
+
   // 预检查：工厂使用的 deployer 必须已通过 setFactory(factory) 指向当前工厂，否则 deploy() 会 revert（DEP_NotFactory）
   const deployerAddr = (await factory.deployer()) as string
   if (deployerAddr && ethers.getAddress(deployerAddr) !== ethers.ZeroAddress) {
@@ -436,7 +455,7 @@ export async function createBeamioCardWithFactory(
       currencyEnum,
       priceE6,
       initCode,
-      { gasLimit: 6_000_000 }
+      { gasLimit: gasLimit },
     )
   } catch (e: unknown) {
     const err = e as { code?: string; data?: string; reason?: string; shortMessage?: string; message?: string }
@@ -502,6 +521,36 @@ export type CreateCardTier = {
   tierExpirySeconds?: number | bigint
 }
 
+/**
+ * 过滤 minUsdc6<=0 的档；链上 appendTier 要求 minUsdc6>0（UC_TierMinZero）。
+ * 若调用方传了占位 tier（0 门槛），应退回无 tiers 的 createCardCollectionWithInitCode，避免整笔 revert。
+ */
+export function normalizeTiersForCreateCard(
+  tiers: CreateCardTier[] | undefined,
+): { minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint }[] {
+  if (!tiers?.length) return []
+  const out: { minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint }[] = []
+  for (const t of tiers) {
+    const min = BigInt(t.minUsdc6)
+    if (min <= 0n) continue
+    out.push({
+      minUsdc6: min,
+      attr: BigInt(t.attr),
+      tierExpirySeconds: BigInt(t.tierExpirySeconds ?? 0),
+    })
+  }
+  return out
+}
+
+async function resolveFactoryAddressForInitCode(factory: ethers.Contract): Promise<string> {
+  if (typeof factory.getAddress === 'function') {
+    return ethers.getAddress(await factory.getAddress())
+  }
+  const a = (factory as unknown as { address?: string }).address
+  if (!a) throw new Error('Factory contract has no getAddress() nor address')
+  return ethers.getAddress(a)
+}
+
 /** 同 createBeamioCardWithFactory，但返回 { cardAddress, hash } 供 daemon 回传 tx hash 给 UI。可选 tiers 时使用 createCardCollectionWithInitCodeAndTiers 一次性部署+配置 */
 export async function createBeamioCardWithFactoryReturningHash(
   factory: ethers.Contract,
@@ -524,7 +573,15 @@ export async function createBeamioCardWithFactoryReturningHash(
     }
     initCode = initCodeOrOptions
   } else {
-    const gateway = initCodeOrOptions.gateway ?? (typeof factory.getAddress === 'function' ? await factory.getAddress() : (factory as unknown as { address: string }).address)
+    const resolvedFactory = await resolveFactoryAddressForInitCode(factory)
+    const requestedGw = initCodeOrOptions.gateway
+    if (requestedGw !== undefined && ethers.getAddress(requestedGw) !== resolvedFactory) {
+      console.warn(
+        `[CCSA] initCodeOptions.gateway (${ethers.getAddress(requestedGw)}) ignored; using factory ${resolvedFactory} ` +
+          '(BeamioUserCard.factoryGateway() must equal the factory that calls createCardCollectionWithInitCode).',
+      )
+    }
+    const gateway = resolvedFactory
     const uri = initCodeOrOptions.uri ?? BEAMIO_METADATA_BASE_URI
     const wlOn = initCodeOrOptions.transferWhitelistEnabled === true
     const ut2 = initCodeOrOptions.upgradeType
@@ -577,24 +634,25 @@ export async function createBeamioCardWithFactoryReturningHash(
     }
   }
 
-  const tiersArray = tiers && tiers.length > 0
-    ? tiers.map((t) => ({
-        minUsdc6: BigInt(t.minUsdc6),
-        attr: t.attr,
-        tierExpirySeconds: BigInt(t.tierExpirySeconds ?? 0),
-      }))
-    : []
+  const normalizedTiers = normalizeTiersForCreateCard(tiers)
+  if (tiers?.length && normalizedTiers.length === 0) {
+    console.warn(
+      '[CCSA] createCard tiers input had only minUsdc6<=0 entries; using createCardCollectionWithInitCode (no AndTiers) to avoid UC_TierMinZero.',
+    )
+  }
+
+  const gasLimit = getCreateCardGasLimit()
 
   let tx: ethers.ContractTransactionResponse
   try {
-    if (tiersArray.length > 0) {
+    if (normalizedTiers.length > 0) {
       tx = await factory.createCardCollectionWithInitCodeAndTiers(
         cardOwner,
         currencyEnum,
         priceE6,
         initCode,
-        tiersArray,
-        { gasLimit: 8_000_000 }
+        normalizedTiers,
+        { gasLimit },
       )
     } else {
       tx = await factory.createCardCollectionWithInitCode(
@@ -602,7 +660,7 @@ export async function createBeamioCardWithFactoryReturningHash(
         currencyEnum,
         priceE6,
         initCode,
-        { gasLimit: 6_000_000 }
+        { gasLimit },
       )
     }
   } catch (e: unknown) {
