@@ -7,7 +7,12 @@ export const BASE_MAINNET_CHAIN_ID = 8453
 export const BASE_AA_FACTORY = '0x4b31D6a05Cdc817CAc1B06369555b37a5b182122'
 /** BeamioAccountDeployer（与 config/base-addresses.json BEAMIO_ACCOUNT_DEPLOYER 同步） */
 export const BASE_BEAMIO_ACCOUNT_DEPLOYER = '0x139D55591A03550259AF32097A9848ECE9869C90'
-export const BASE_CARD_FACTORY = '0xfB5E3F2AbFe24DC17970d78245BeF56aAE8cb71a'
+/**
+ * Base card factory (createCard / factoryGateway / EIP-712 domain verifyingContract).
+ * Aligned with deployments/base-UserCardFactory-DEBUG.json (createCard succeeds; prod factory still reverts on same initCode).
+ * Previous prod: 0xfB5E3F2AbFe24DC17970d78245BeF56aAE8cb71a — see DEBUG json `productionFactoryReference`.
+ */
+export const BASE_CARD_FACTORY = '0x2EB245646de404b2Dce87E01C6282C131778bb05'
 /**
  * createCardCollectionWithInitCode(address,uint8,uint256,bytes) — selector 0xef759095
  * createCardCollectionWithInitCodeAndTiers(..., (uint256,uint256,uint256)[]) — selector 0x9a7eb0f0
