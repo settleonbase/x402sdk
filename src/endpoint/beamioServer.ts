@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback} from '../db'
+import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -1079,6 +1079,69 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	/**
+	 * POST /api/nfcCardLinkState — 用户-linked 卡：active / deactive / remove（仅 remove 会删除 DB 私钥与绑定）。
+	 * Body: { message, signature } — message 为 canonical JSON UTF-8 字符串（与 wallet.signMessage(message) 一致），见 db.buildNfcCardLinkStateSignMessage。
+	 */
+	router.post('/nfcCardLinkState', async (req, res) => {
+		const { message, signature } = req.body as { message?: string; signature?: string }
+		logger(Colors.cyan(`[nfcCardLinkState] messageLen=${message != null ? String(message).length : 0}`))
+		if (!message || typeof message !== 'string' || !signature || typeof signature !== 'string') {
+			return res.status(400).json({ ok: false, error: 'Missing message or signature.' }).end()
+		}
+		try {
+			const out = await applyNfcCardLinkStateChange({ message: message.trim(), signature: signature.trim() })
+			if (!out.ok) {
+				return res.status(400).json({ ok: false, error: out.error, errorCode: out.errorCode }).end()
+			}
+			return res.status(200).json({ ok: true, action: out.action, tagId: out.tagId }).end()
+		} catch (e: any) {
+			const msg = e?.shortMessage ?? e?.message ?? 'Request failed.'
+			logger(Colors.red(`[nfcCardLinkState] ${msg}`))
+			return res.status(500).json({ ok: false, error: msg }).end()
+		}
+	})
+
+	/** POST /api/listLinkedNfcCards — 传入 AA 或 EOA，返回该钱包（认领时记录的 EOA）下已通过 Link App 绑定的 NFC：uid、tagId。纯 DB 读，Cluster 直出。 */
+	router.post('/listLinkedNfcCards', async (req, res) => {
+		const { wallet } = req.body as { wallet?: string }
+		logger(Colors.cyan(`[listLinkedNfcCards] wallet=${wallet ?? '(undefined)'}`))
+		if (!wallet || typeof wallet !== 'string' || !wallet.trim()) {
+			return res.status(400).json({ ok: false, error: 'Missing wallet' }).end()
+		}
+		if (!ethers.isAddress(wallet)) {
+			return res.status(400).json({ ok: false, error: 'Invalid wallet address' }).end()
+		}
+		try {
+			const addr = ethers.getAddress(wallet.trim())
+			const code = await providerBase.getCode(addr)
+			const isAA = Boolean(code && code !== '0x' && code.length > 2)
+			let ownerEoa: string
+			if (isAA) {
+				const aaContract = new ethers.Contract(addr, ['function owner() view returns (address)'], providerBase)
+				const owner = await aaContract.owner()
+				if (!owner || owner === ethers.ZeroAddress) {
+					return res.status(400).json({ ok: false, error: 'Cannot resolve AA owner' }).end()
+				}
+				ownerEoa = ethers.getAddress(owner)
+			} else {
+				ownerEoa = addr
+			}
+			const cards = await listLinkedNfcCardsByOwnerEoa(ownerEoa)
+			return res.status(200).json({
+				ok: true,
+				ownerEoa,
+				inputWasSmartAccount: isAA,
+				count: cards.length,
+				cards,
+			}).end()
+		} catch (e: any) {
+			const msg = e?.shortMessage ?? e?.message ?? 'Query failed'
+			logger(Colors.red(`[listLinkedNfcCards] failed: ${msg}`))
+			return res.status(500).json({ ok: false, error: msg }).end()
+		}
+	})
+
 	/** POST /api/registerNfcCard - 登记 NFC 卡，Cluster 预检后转发 Master。tagId 可选，SUN 解密得到的 TagID（16 hex），用于合法性校验。 */
 	router.post('/registerNfcCard', async (req, res) => {
 		const { uid, privateKey, tagId } = req.body as { uid?: string; privateKey?: string; tagId?: string }
@@ -1304,6 +1367,10 @@ const routing = ( router: Router ) => {
 			if (!sunResult.valid) {
 				return res.status(403).json({ success: false, error: 'SUN verification failed.' }).end()
 			}
+			const nfcTxGateLink = await getNfcCardSignedTxGateByTagId(sunResult.tagIdHex)
+			if (!nfcTxGateLink.ok) {
+				return res.status(403).json({ success: false, error: nfcTxGateLink.message, errorCode: nfcTxGateLink.code }).end()
+			}
 			const blockedDetail = await nfcLinkAppNewLinkBlockedDetail(sunResult.tagIdHex)
 			if (blockedDetail) {
 				return res
@@ -1367,6 +1434,10 @@ const routing = ( router: Router ) => {
 			new ethers.Wallet(pkHex)
 		} catch {
 			return res.status(400).json({ success: false, error: 'Invalid private key.' }).end()
+		}
+		const claimClusterGate = await getNfcCardSignedTxGateByTagId(tagid.toUpperCase())
+		if (!claimClusterGate.ok) {
+			return res.status(403).json({ success: false, error: claimClusterGate.message, errorCode: claimClusterGate.code }).end()
 		}
 		postLocalhost('/api/nfcLinkAppClaimWithKey', req.body ?? {}, res)
 	})
@@ -1467,6 +1538,10 @@ const routing = ( router: Router ) => {
 					logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid}`))
 					return res.status(403).json(err).end()
 				}
+				const topPrepGate = await getNfcCardSignedTxGateByTagId(sunResult.tagIdHex)
+				if (!topPrepGate.ok) {
+					return res.status(403).json({ success: false, error: topPrepGate.message, errorCode: topPrepGate.code }).end()
+				}
 				const eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
 				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
 					const err = { success: false, error: 'Card not provisioned. SUN valid but tagId not bound to wallet.' }
@@ -1537,6 +1612,12 @@ const routing = ( router: Router ) => {
 					return res.status(403).json(err).end()
 				}
 				nfcTagIdHex = sunResult.tagIdHex
+				const topGate = await getNfcCardSignedTxGateByTagId(nfcTagIdHex)
+				if (!topGate.ok) {
+					const err = { success: false, error: topGate.message, errorCode: topGate.code }
+					logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} NFC gate: ${topGate.code}`))
+					return res.status(403).json(err).end()
+				}
 				nfcLinkedEOA = await getNfcRecipientAddressByTagId(nfcTagIdHex)
 				logger(Colors.gray(`[nfcTopup] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
 			} catch (sunErr: any) {

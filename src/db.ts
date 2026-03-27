@@ -842,6 +842,228 @@ const NFC_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS nfc_cards (
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
 const NFC_CARDS_ADD_TAG_ID = `ALTER TABLE nfc_cards ADD COLUMN IF NOT EXISTS tag_id TEXT UNIQUE`
+/** Link App 认领完成后写入用户 EOA，供按钱包枚举已绑定 NFC（不暴露私钥） */
+const NFC_CARDS_ADD_LINKED_OWNER = `ALTER TABLE nfc_cards ADD COLUMN IF NOT EXISTS linked_owner_eoa TEXT`
+const NFC_CARDS_IDX_LINKED_OWNER = `CREATE INDEX IF NOT EXISTS idx_nfc_cards_linked_owner_eoa ON nfc_cards (LOWER(TRIM(linked_owner_eoa))) WHERE linked_owner_eoa IS NOT NULL`
+/** user-linked 卡：active 允许 NFC 交易；deactive 仅允许查余额；remove 后清空私钥与 linked_owner */
+const NFC_CARDS_ADD_LINK_STATE = `ALTER TABLE nfc_cards ADD COLUMN IF NOT EXISTS nfc_link_state TEXT`
+const NFC_CARDS_PRIVATE_KEY_DROP_NOT_NULL = `ALTER TABLE nfc_cards ALTER COLUMN private_key DROP NOT NULL`
+
+export const NFC_CARD_LINK_STATE_SCOPE = 'beamio:NfcCardLinkState:v1'
+const NFC_GATE_DEACTIVATED_MSG =
+	'This NFC card is deactivated. Only balance checks are allowed. Reactivate it in your wallet app first.'
+const NFC_GATE_UNLINKED_MSG = 'This NFC card is not linked or the link was removed.'
+
+export type NfcCardSignedTxGate = { ok: true } | { ok: false; code: string; message: string }
+
+async function ensureNfcCardsExtendedSchema(db: Client): Promise<void> {
+	await db.query(NFC_CARDS_TABLE)
+	await db.query(NFC_CARDS_ADD_TAG_ID)
+	await db.query(NFC_CARDS_ADD_LINKED_OWNER)
+	await db.query(NFC_CARDS_ADD_LINK_STATE)
+	await db.query(NFC_CARDS_PRIVATE_KEY_DROP_NOT_NULL)
+	await db.query(NFC_CARDS_IDX_LINKED_OWNER)
+}
+
+function normalizeNfcLinkStateRow(state: string | null | undefined, hasPk: boolean): 'active' | 'deactive' | 'removed' {
+	if (!hasPk) return 'removed'
+	const s = String(state ?? '').trim().toLowerCase()
+	if (s === 'deactive') return 'deactive'
+	return 'active'
+}
+
+/**
+ * NFC 发起支付/充值/Link 等写操作前检查：DB 行存在且 deactive/removed 时拒绝；无行则不限制（兼容 mnemonic 路径，由私钥解析后续处理）。
+ */
+export const getNfcCardSignedTxGateByTagId = async (tagIdHex: string): Promise<NfcCardSignedTxGate> => {
+	const db = new Client({ connectionString: DB_URL })
+	const normalized = String(tagIdHex || '').trim().toUpperCase()
+	if (!normalized || normalized.length !== 16 || !/^[0-9A-F]+$/.test(normalized)) return { ok: true }
+	try {
+		await db.connect()
+		await ensureNfcCardsExtendedSchema(db)
+		const { rows } = await db.query<{ private_key: string | null; nfc_link_state: string | null }>(
+			`SELECT private_key, nfc_link_state FROM nfc_cards WHERE UPPER(TRIM(tag_id)) = $1 LIMIT 1`,
+			[normalized]
+		)
+		if (rows.length === 0) return { ok: true }
+		const hasPk = rows[0].private_key != null && String(rows[0].private_key).trim() !== ''
+		const st = normalizeNfcLinkStateRow(rows[0].nfc_link_state, hasPk)
+		if (st === 'removed' || !hasPk) return { ok: false, code: 'NFC_CARD_UNLINKED', message: NFC_GATE_UNLINKED_MSG }
+		if (st === 'deactive') return { ok: false, code: 'NFC_CARD_DEACTIVATED', message: NFC_GATE_DEACTIVATED_MSG }
+		return { ok: true }
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNfcCardSignedTxGateByTagId] failed: ${e?.message ?? e}`))
+		return { ok: true }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export const getNfcCardSignedTxGateByUid = async (uid: string): Promise<NfcCardSignedTxGate> => {
+	const db = new Client({ connectionString: DB_URL })
+	const normalizedUid = String(uid || '').trim().toLowerCase()
+	if (!normalizedUid) return { ok: true }
+	try {
+		await db.connect()
+		await ensureNfcCardsExtendedSchema(db)
+		const { rows } = await db.query<{ private_key: string | null; nfc_link_state: string | null }>(
+			`SELECT private_key, nfc_link_state FROM nfc_cards WHERE LOWER(TRIM(uid)) = $1 LIMIT 1`,
+			[normalizedUid]
+		)
+		if (rows.length === 0) return { ok: true }
+		const hasPk = rows[0].private_key != null && String(rows[0].private_key).trim() !== ''
+		const st = normalizeNfcLinkStateRow(rows[0].nfc_link_state, hasPk)
+		if (st === 'removed' || !hasPk) return { ok: false, code: 'NFC_CARD_UNLINKED', message: NFC_GATE_UNLINKED_MSG }
+		if (st === 'deactive') return { ok: false, code: 'NFC_CARD_DEACTIVATED', message: NFC_GATE_DEACTIVATED_MSG }
+		return { ok: true }
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNfcCardSignedTxGateByUid] failed: ${e?.message ?? e}`))
+		return { ok: true }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 与 UI `wallet.signMessage(message)` 一致：键名排序后的 JSON 字符串。 */
+export function buildNfcCardLinkStateSignMessage(
+	action: 'active' | 'deactive' | 'remove',
+	tagId16: string,
+	issuedAtSec: number
+): string {
+	const tag = String(tagId16 || '')
+		.trim()
+		.replace(/^0x/i, '')
+		.toUpperCase()
+	if (!/^[0-9A-F]{16}$/.test(tag)) {
+		throw new Error('tagId must be 16 hex characters')
+	}
+	if (!Number.isFinite(issuedAtSec) || issuedAtSec <= 0) {
+		throw new Error('issuedAt must be a positive Unix timestamp in seconds')
+	}
+	if (action !== 'active' && action !== 'deactive' && action !== 'remove') {
+		throw new Error('action must be active, deactive, or remove')
+	}
+	const o = {
+		action,
+		issuedAt: Math.floor(issuedAtSec),
+		scope: NFC_CARD_LINK_STATE_SCOPE,
+		tagId: tag,
+	}
+	return JSON.stringify(o, Object.keys(o).sort())
+}
+
+export const applyNfcCardLinkStateChange = async (params: {
+	message: string
+	signature: string
+}): Promise<
+	| { ok: true; action: 'active' | 'deactive' | 'remove'; tagId: string }
+	| { ok: false; error: string; errorCode?: string }
+> => {
+	const msgRaw = String(params.message || '').trim()
+	const sigRaw = String(params.signature || '').trim()
+	if (!msgRaw || !sigRaw) {
+		return { ok: false, error: 'Missing message or signature.', errorCode: 'MISSING_PARAMS' }
+	}
+	let parsed: { action?: string; issuedAt?: number; scope?: string; tagId?: string }
+	try {
+		parsed = JSON.parse(msgRaw) as typeof parsed
+	} catch {
+		return { ok: false, error: 'Invalid message JSON.', errorCode: 'INVALID_JSON' }
+	}
+	const action = parsed.action
+	const issuedAt = parsed.issuedAt
+	const scope = parsed.scope
+	const tagIdRaw = parsed.tagId
+	if (action !== 'active' && action !== 'deactive' && action !== 'remove') {
+		return { ok: false, error: 'Invalid action.', errorCode: 'INVALID_ACTION' }
+	}
+	if (scope !== NFC_CARD_LINK_STATE_SCOPE) {
+		return { ok: false, error: 'Invalid scope.', errorCode: 'INVALID_SCOPE' }
+	}
+	const tagUpper = String(tagIdRaw || '')
+		.trim()
+		.replace(/^0x/i, '')
+		.toUpperCase()
+	if (!/^[0-9A-F]{16}$/.test(tagUpper)) {
+		return { ok: false, error: 'Invalid tagId.', errorCode: 'INVALID_TAG_ID' }
+	}
+	if (typeof issuedAt !== 'number' || !Number.isFinite(issuedAt)) {
+		return { ok: false, error: 'Invalid issuedAt.', errorCode: 'INVALID_ISSUED_AT' }
+	}
+	const now = Math.floor(Date.now() / 1000)
+	if (Math.abs(now - Math.floor(issuedAt)) > 600) {
+		return { ok: false, error: 'issuedAt expired or out of range.', errorCode: 'STALE_MESSAGE' }
+	}
+	let canonical: string
+	try {
+		canonical = buildNfcCardLinkStateSignMessage(action, tagUpper, issuedAt)
+	} catch (e: any) {
+		return { ok: false, error: e?.message ?? 'Invalid payload', errorCode: 'INVALID_PAYLOAD' }
+	}
+	if (canonical !== msgRaw) {
+		return {
+			ok: false,
+			error: 'Message must be canonical JSON (sorted keys: action, issuedAt, scope, tagId).',
+			errorCode: 'NON_CANONICAL_MESSAGE',
+		}
+	}
+	let recovered: string
+	try {
+		recovered = ethers.verifyMessage(msgRaw, sigRaw)
+	} catch {
+		return { ok: false, error: 'Invalid signature.', errorCode: 'INVALID_SIGNATURE' }
+	}
+	const recoveredNorm = ethers.getAddress(recovered).toLowerCase()
+
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcCardsExtendedSchema(db)
+		const { rows } = await db.query<{ private_key: string | null; linked_owner_eoa: string | null }>(
+			`SELECT private_key, linked_owner_eoa FROM nfc_cards WHERE UPPER(TRIM(tag_id)) = $1 LIMIT 1`,
+			[tagUpper]
+		)
+		if (rows.length === 0) {
+			return { ok: false, error: 'Card not found for tagId.', errorCode: 'NOT_FOUND' }
+		}
+		const pk = rows[0].private_key
+		const ownerCol = rows[0].linked_owner_eoa
+		if (!pk || !String(pk).trim()) {
+			return { ok: false, error: 'Card has no bound private key.', errorCode: 'NOT_LINKED' }
+		}
+		if (!ownerCol || !String(ownerCol).trim()) {
+			return { ok: false, error: 'Only user-linked cards can change link state this way.', errorCode: 'NOT_USER_LINKED' }
+		}
+		let pkAddr: string
+		try {
+			pkAddr = ethers.getAddress(new ethers.Wallet(String(pk).trim()).address).toLowerCase()
+		} catch {
+			return { ok: false, error: 'Stored key is invalid.', errorCode: 'INVALID_STORED_KEY' }
+		}
+		const ownerNorm = ethers.getAddress(String(ownerCol).trim()).toLowerCase()
+		if (pkAddr !== recoveredNorm || ownerNorm !== recoveredNorm) {
+			return { ok: false, error: 'Signer does not match the card bound wallet.', errorCode: 'SIGNER_MISMATCH' }
+		}
+
+		if (action === 'remove') {
+			await db.query(
+				`UPDATE nfc_cards SET private_key = NULL, linked_owner_eoa = NULL, nfc_link_state = 'removed' WHERE UPPER(TRIM(tag_id)) = $1`,
+				[tagUpper]
+			)
+		} else if (action === 'deactive') {
+			await db.query(`UPDATE nfc_cards SET nfc_link_state = 'deactive' WHERE UPPER(TRIM(tag_id)) = $1`, [tagUpper])
+		} else {
+			await db.query(`UPDATE nfc_cards SET nfc_link_state = 'active' WHERE UPPER(TRIM(tag_id)) = $1`, [tagUpper])
+		}
+		return { ok: true, action, tagId: tagUpper }
+	} catch (e: any) {
+		logger(Colors.red(`[applyNfcCardLinkStateChange] ${e?.message ?? e}`))
+		return { ok: false, error: e?.message ?? 'Database error.', errorCode: 'DB_ERROR' }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
 
 /** beamio_sun_counter_state 表：仅存 SUN 防重放状态，uid 对应最新成功通过验真的 counter。 */
 const BEAMIO_SUN_COUNTER_STATE_TABLE = `CREATE TABLE IF NOT EXISTS beamio_sun_counter_state (
@@ -938,16 +1160,18 @@ export const getNfcCardByUid = async (uid: string): Promise<{ registered: boolea
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
-		await db.query(NFC_CARDS_TABLE)
+		await ensureNfcCardsExtendedSchema(db)
 		const normalizedUid = String(uid || '').trim().toLowerCase()
 		if (!normalizedUid) return { registered: false }
-		const { rows } = await db.query<{ private_key: string }>(
+		const { rows } = await db.query<{ private_key: string | null }>(
 			`SELECT private_key FROM nfc_cards WHERE LOWER(uid) = $1 LIMIT 1`,
 			[normalizedUid]
 		)
 		if (rows.length === 0) return { registered: false }
+		const pk = rows[0].private_key
+		if (pk == null || String(pk).trim() === '') return { registered: false }
 		try {
-			const wallet = new ethers.Wallet(rows[0].private_key)
+			const wallet = new ethers.Wallet(pk)
 			const address = await wallet.getAddress()
 			return { registered: true, address }
 		} catch (e: any) {
@@ -967,14 +1191,18 @@ export const getNfcCardPrivateKeyByUid = async (uid: string): Promise<string | n
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
-		await db.query(NFC_CARDS_TABLE)
+		await ensureNfcCardsExtendedSchema(db)
 		const normalizedUid = String(uid || '').trim().toLowerCase()
 		if (!normalizedUid) return null
-		const { rows } = await db.query<{ private_key: string }>(
+		const { rows } = await db.query<{ private_key: string | null }>(
 			`SELECT private_key FROM nfc_cards WHERE LOWER(uid) = $1 LIMIT 1`,
 			[normalizedUid]
 		)
-		if (rows.length > 0) return rows[0].private_key
+		if (rows.length > 0) {
+			const pk = rows[0].private_key
+			if (pk != null && String(pk).trim() !== '') return String(pk).trim()
+			return null
+		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[getNfcCardPrivateKeyByUid] failed: ${e?.message ?? e}`))
 		return null
@@ -1004,16 +1232,17 @@ export const getNfcCardPrivateKeyByTagId = async (tagIdHex: string): Promise<str
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
-		await db.query(NFC_CARDS_TABLE)
-		await db.query(NFC_CARDS_ADD_TAG_ID)
+		await ensureNfcCardsExtendedSchema(db)
 		const normalized = String(tagIdHex || '').trim().toUpperCase()
 		if (!normalized || normalized.length !== 16 || !/^[0-9A-F]+$/.test(normalized)) return null
-		const { rows } = await db.query<{ private_key: string }>(
+		const { rows } = await db.query<{ private_key: string | null }>(
 			`SELECT private_key FROM nfc_cards WHERE UPPER(TRIM(tag_id)) = $1 LIMIT 1`,
 			[normalized]
 		)
 		if (rows.length === 0) return null
-		return rows[0].private_key
+		const pk = rows[0].private_key
+		if (pk == null || String(pk).trim() === '') return null
+		return String(pk).trim()
 	} catch (e: any) {
 		logger(Colors.yellow(`[getNfcCardPrivateKeyByTagId] failed: ${e?.message ?? e}`))
 		return null
@@ -1027,16 +1256,17 @@ export const getNfcRecipientAddressByTagId = async (tagIdHex: string): Promise<s
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
-		await db.query(NFC_CARDS_TABLE)
-		await db.query(NFC_CARDS_ADD_TAG_ID)
+		await ensureNfcCardsExtendedSchema(db)
 		const normalized = String(tagIdHex || '').trim().toUpperCase()
 		if (!normalized || normalized.length !== 16 || !/^[0-9A-F]+$/.test(normalized)) return null
-		const { rows } = await db.query<{ private_key: string }>(
+		const { rows } = await db.query<{ private_key: string | null }>(
 			`SELECT private_key FROM nfc_cards WHERE UPPER(TRIM(tag_id)) = $1 LIMIT 1`,
 			[normalized]
 		)
 		if (rows.length === 0) return null
-		const wallet = new ethers.Wallet(rows[0].private_key)
+		const pk = rows[0].private_key
+		if (pk == null || String(pk).trim() === '') return null
+		const wallet = new ethers.Wallet(String(pk).trim())
 		return await wallet.getAddress()
 	} catch (e: any) {
 		logger(Colors.yellow(`[getNfcRecipientAddressByTagId] failed: ${e?.message ?? e}`))
@@ -1330,6 +1560,32 @@ export const provisionOrGetNfcWalletByTagId = async (tagIdHex: string, uidHex?: 
 
 /** 根据 UID 获取 NFC 卡对应的 recipient EOA 地址（用于 mintPointsByAdmin 的 to 参数）。若 DB 无则从 mnemonic 派生，不写入 DB。 */
 export const getNfcRecipientAddressByUid = async (uid: string): Promise<string | null> => {
+	const normalizedUidRow = String(uid || '').trim().toLowerCase()
+	if (normalizedUidRow && /^[0-9a-f]+$/i.test(normalizedUidRow)) {
+		const db = new Client({ connectionString: DB_URL })
+		try {
+			await db.connect()
+			await ensureNfcCardsExtendedSchema(db)
+			const { rows } = await db.query<{ private_key: string | null }>(
+				`SELECT private_key FROM nfc_cards WHERE LOWER(TRIM(uid)) = $1 LIMIT 1`,
+				[normalizedUidRow]
+			)
+			if (rows.length > 0) {
+				const pk = rows[0].private_key
+				if (pk == null || String(pk).trim() === '') return null
+				try {
+					const w = new ethers.Wallet(String(pk).trim())
+					return await w.getAddress()
+				} catch {
+					return null
+				}
+			}
+		} catch (e: any) {
+			logger(Colors.yellow(`[getNfcRecipientAddressByUid] db read: ${e?.message ?? e}`))
+		} finally {
+			await db.end().catch(() => {})
+		}
+	}
 	let privateKey = await getNfcCardPrivateKeyByUid(uid)
 	if (privateKey) {
 		try {
@@ -1395,16 +1651,24 @@ export const registerNfcCardToDb = async (params: { uid: string; privateKey: str
 /**
  * Link App 完成后：按 TagID 将 nfc_cards 的私钥替换为用户钱包私钥，并同步 uid（SUN 14 hex）。
  * 先 UPDATE tag_id 命中行；若无行则 INSERT（新卡首次绑定用户密钥）。
+ * [linkedOwnerEoa] 写入 linked_owner_eoa，供 listLinkedNfcCards 按 EOA 查询。
  */
 export const replaceNfcCardKeyByTagId = async (params: {
 	tagIdHex: string
 	privateKey: string
 	uidHex: string
+	linkedOwnerEoa: string
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
 	const tagUpper = String(params.tagIdHex || '').trim().replace(/^0x/i, '').toUpperCase()
 	const pk = String(params.privateKey || '').trim()
 	const uid = String(params.uidHex || '').trim().toLowerCase()
+	let ownerEoaLower: string
+	try {
+		ownerEoaLower = ethers.getAddress(String(params.linkedOwnerEoa || '').trim()).toLowerCase()
+	} catch {
+		throw new Error('replaceNfcCardKeyByTagId: invalid linkedOwnerEoa')
+	}
 	if (!tagUpper || tagUpper.length !== 16 || !/^[0-9A-F]+$/.test(tagUpper) || !pk || !uid) {
 		throw new Error('replaceNfcCardKeyByTagId: invalid tagIdHex, privateKey, or uidHex')
 	}
@@ -1412,17 +1676,59 @@ export const replaceNfcCardKeyByTagId = async (params: {
 		await db.connect()
 		await db.query(NFC_CARDS_TABLE)
 		await db.query(NFC_CARDS_ADD_TAG_ID)
-		const up = await db.query(`UPDATE nfc_cards SET private_key = $1, uid = $2 WHERE UPPER(TRIM(tag_id)) = $3`, [
-			pk,
-			uid,
-			tagUpper,
-		])
+		await db.query(NFC_CARDS_ADD_LINKED_OWNER)
+		await db.query(NFC_CARDS_IDX_LINKED_OWNER)
+		await db.query(NFC_CARDS_ADD_LINK_STATE)
+		const up = await db.query(
+			`UPDATE nfc_cards SET private_key = $1, uid = $2, linked_owner_eoa = $4, nfc_link_state = 'active' WHERE UPPER(TRIM(tag_id)) = $3`,
+			[pk, uid, tagUpper, ownerEoaLower]
+		)
 		if ((up.rowCount ?? 0) > 0) return
 		await db.query(
-			`INSERT INTO nfc_cards (uid, private_key, tag_id) VALUES ($1, $2, $3)
-			ON CONFLICT (tag_id) DO UPDATE SET private_key = EXCLUDED.private_key, uid = EXCLUDED.uid`,
-			[uid, pk, tagUpper]
+			`INSERT INTO nfc_cards (uid, private_key, tag_id, linked_owner_eoa, nfc_link_state) VALUES ($1, $2, $3, $4, 'active')
+			ON CONFLICT (tag_id) DO UPDATE SET
+				private_key = EXCLUDED.private_key,
+				uid = EXCLUDED.uid,
+				linked_owner_eoa = EXCLUDED.linked_owner_eoa,
+				nfc_link_state = 'active'`,
+			[uid, pk, tagUpper, ownerEoaLower]
 		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 按用户 EOA 列出已通过 Link App 绑定到该钱包的 NFC（返回 uid 14 hex、tagId 16 hex、linkState；不含私钥） */
+export const listLinkedNfcCardsByOwnerEoa = async (
+	ownerEoa: string
+): Promise<{ uid: string; tagId: string; linkState: 'active' | 'deactive' }[]> => {
+	let eoaNorm: string
+	try {
+		eoaNorm = ethers.getAddress(String(ownerEoa || '').trim()).toLowerCase()
+	} catch {
+		return []
+	}
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcCardsExtendedSchema(db)
+		const { rows } = await db.query<{ uid: string; tag_id: string; nfc_link_state: string | null }>(
+			`SELECT uid, tag_id, nfc_link_state FROM nfc_cards
+			 WHERE linked_owner_eoa IS NOT NULL AND LOWER(TRIM(linked_owner_eoa)) = $1
+			 AND tag_id IS NOT NULL AND TRIM(tag_id) <> ''
+			 AND private_key IS NOT NULL AND TRIM(COALESCE(private_key, '')) <> ''
+			 AND COALESCE(NULLIF(LOWER(TRIM(nfc_link_state)), ''), 'active') <> 'removed'
+			 ORDER BY id ASC`,
+			[eoaNorm]
+		)
+		return rows.map((r) => ({
+			uid: String(r.uid || '').replace(/^0x/i, '').toLowerCase(),
+			tagId: String(r.tag_id || '').replace(/^0x/i, '').toUpperCase(),
+			linkState: String(r.nfc_link_state || '').trim().toLowerCase() === 'deactive' ? 'deactive' : 'active',
+		}))
+	} catch (e: any) {
+		logger(Colors.yellow(`[listLinkedNfcCardsByOwnerEoa] failed: ${e?.message ?? e}`))
+		return []
 	} finally {
 		await db.end().catch(() => {})
 	}

@@ -91,6 +91,8 @@ import {
 	markNfcLinkAppSessionReleasedByTag,
 	releaseNfcLinkAppSessionIfMatches,
 	replaceNfcCardKeyByTagId,
+	getNfcCardSignedTxGateByTagId,
+	getNfcCardSignedTxGateByUid,
 	type NfcLinkAppSessionDb,
 } from './db'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './endpoint/getUIDAssetsLogic'
@@ -1159,6 +1161,10 @@ export const nfcTopupPreparePayload = async (params: {
 	if (wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())) {
 		recipientEOA = ethers.getAddress(wallet.trim())
 	} else if (uid && typeof uid === 'string' && uid.trim()) {
+		const gateTop = await getNfcCardSignedTxGateByUid(uid.trim())
+		if (!gateTop.ok) {
+			return { error: gateTop.message }
+		}
 		recipientEOA = await getNfcRecipientAddressByUid(uid.trim())
 	}
 	if (!recipientEOA) return { error: wallet ? 'Invalid wallet address' : 'Failed to resolve recipient from uid' }
@@ -6914,6 +6920,11 @@ export const nfcLinkAppExecute = async (
 		return
 	}
 	const tagIdHex = sunResult.tagIdHex
+	const linkGate = await getNfcCardSignedTxGateByTagId(tagIdHex)
+	if (!linkGate.ok) {
+		res.status(403).json({ success: false, error: linkGate.message, errorCode: linkGate.code }).end()
+		return
+	}
 	const blockedDetail = await nfcLinkAppNewLinkBlockedDetail(tagIdHex)
 	if (blockedDetail) {
 		res.status(409)
@@ -7387,6 +7398,10 @@ async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
 	if (aaNorm === ethers.ZeroAddress) {
 		throw new Error('NFC smart account is not deployed.')
 	}
+	const migrateGate = await getNfcCardSignedTxGateByTagId(normalizeNfcLinkTagId(nfcTagIdHex))
+	if (!migrateGate.ok) {
+		throw new Error(migrateGate.message)
+	}
 	const nfcPk = await getNfcCardPrivateKeyByTagId(normalizeNfcLinkTagId(nfcTagIdHex))
 	if (!nfcPk) {
 		throw new Error('NFC card private key not found.')
@@ -7610,6 +7625,11 @@ export const nfcLinkAppClaimWithKeyExecute = async (
 		res.status(400).json({ success: false, error: 'Invalid counter.' }).end()
 		return
 	}
+	const claimGate = await getNfcCardSignedTxGateByTagId(normalizeNfcLinkTagId(tagRaw))
+	if (!claimGate.ok) {
+		res.status(403).json({ success: false, error: claimGate.message, errorCode: claimGate.code }).end()
+		return
+	}
 	let v: Awaited<ReturnType<typeof nfcLinkAppValidateParams>>
 	try {
 		v = await nfcLinkAppValidateParams({
@@ -7661,6 +7681,7 @@ export const nfcLinkAppClaimWithKeyExecute = async (
 			tagIdHex: tagRaw,
 			privateKey: pkNorm,
 			uidHex: uid,
+			linkedOwnerEoa: userEoa,
 		})
 	} catch (e: any) {
 		logger(Colors.red(`[nfcLinkAppClaimWithKey] DB update failed: ${e?.message ?? e}`))
@@ -9123,6 +9144,10 @@ export const payByNfcUidOpenContainer = async (params: {
 	const { uid, amountUsdc6, payee, res } = params
 	const amountBig = BigInt(amountUsdc6)
 	if (amountBig <= 0n) return { pushed: false, error: 'Invalid amountUsdc6' }
+	const gateOpen = await getNfcCardSignedTxGateByUid(uid.trim())
+	if (!gateOpen.ok) {
+		return { pushed: false, error: gateOpen.message }
+	}
 	const privateKey = await getNfcCardPrivateKeyByUid(uid.trim())
 	if (!privateKey) {
 		logger(Colors.red(`[payByNfcUidOpenContainer] failed: getNfcCardPrivateKeyByUid returned null for uid=${uid.slice(0, 16)}...`))
@@ -9367,6 +9392,10 @@ export const payByNfcUidPrepare = async (params: {
 				logger(Colors.yellow(`[payByNfcUidPrepare] SUN verification failed uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex}`))
 				return { ok: false, error: 'SUN verification failed. Cannot derive valid tagID.' }
 			}
+			const gateTag = await getNfcCardSignedTxGateByTagId(sunResult.tagIdHex)
+			if (!gateTag.ok) {
+				return { ok: false, error: gateTag.message }
+			}
 			privateKey = await getNfcCardPrivateKeyByTagId(sunResult.tagIdHex)
 			logger(Colors.gray(`[payByNfcUidPrepare] SUN OK uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
 		} catch (sunErr: any) {
@@ -9375,6 +9404,10 @@ export const payByNfcUidPrepare = async (params: {
 			return { ok: false, error: `SUN verification error: ${msg}` }
 		}
 	} else {
+		const gateUid = await getNfcCardSignedTxGateByUid(uidTrim)
+		if (!gateUid.ok) {
+			return { ok: false, error: gateUid.message }
+		}
 		privateKey = await getNfcCardPrivateKeyByUid(uidTrim)
 	}
 	if (!privateKey) {
@@ -9505,6 +9538,10 @@ export const payByNfcUidSignContainer = async (params: {
 				logger(Colors.yellow(`[payByNfcUidSignContainer] SUN verification failed uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex}`))
 				return { pushed: false, error: 'SUN verification failed' }
 			}
+			const gateTagSc = await getNfcCardSignedTxGateByTagId(sunResult.tagIdHex)
+			if (!gateTagSc.ok) {
+				return { pushed: false, error: gateTagSc.message, httpStatus: 403 }
+			}
 			privateKey = await getNfcCardPrivateKeyByTagId(sunResult.tagIdHex)
 			logger(Colors.gray(`[payByNfcUidSignContainer] SUN OK uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
 		} catch (sunErr: any) {
@@ -9513,6 +9550,10 @@ export const payByNfcUidSignContainer = async (params: {
 			return { pushed: false, error: `SUN verification error: ${msg}` }
 		}
 	} else {
+		const gateUidSc = await getNfcCardSignedTxGateByUid(uidTrim)
+		if (!gateUidSc.ok) {
+			return { pushed: false, error: gateUidSc.message, httpStatus: 403 }
+		}
 		privateKey = await getNfcCardPrivateKeyByUid(uidTrim)
 	}
 	if (!privateKey) {
@@ -9864,3 +9905,5 @@ const card = new ethers.Contract(sign.cardAddress, [
 
 
 // forward1155ERC3009SignatureData()
+
+export { buildNfcCardLinkStateSignMessage, NFC_CARD_LINK_STATE_SCOPE } from './db'
