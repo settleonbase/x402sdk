@@ -2818,13 +2818,37 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 						const ownerResult = await providerBase.call({ to: adminAA as `0x${string}`, data: '0x8da5cb5b' })
 						if (ownerResult && ownerResult !== '0x') {
 							const [owner] = new ethers.Interface(['function owner() view returns (address)']).decodeFunctionResult('owner', ownerResult)
-							if (owner && owner !== ethers.ZeroAddress) adminEOA = owner
+							if (owner && owner !== ethers.ZeroAddress) adminEOA = ethers.getAddress(String(owner))
 						}
 					} catch (_) { /* ignore */ }
 				}
 			}
+			// 规范 AA（UserCardFactory._aaFactory → beamioAccountOf，与资产/OpenContainer 一致）
+			let canonicalAAForSignerEOA: string | null = null
+			let canonicalAAForAdminTargetEOA: string | null = null
+			let adminTargetEOA: string | null = adminEOA
+			if (!adminTargetEOA && isAddingAdmin) {
+				const rawBody = (req.body?.adminEOA as string)?.trim()
+				if (rawBody && ethers.isAddress(rawBody)) adminTargetEOA = ethers.getAddress(rawBody)
+			}
+			if (signerAddr && ethers.isAddress(signerAddr)) {
+				try {
+					canonicalAAForSignerEOA = await resolveBeamioAaForEoaWithFallback(providerBase, signerAddr)
+				} catch (_) { /* ignore */ }
+			}
+			if (adminTargetEOA && ethers.isAddress(adminTargetEOA)) {
+				try {
+					canonicalAAForAdminTargetEOA = await resolveBeamioAaForEoaWithFallback(providerBase, adminTargetEOA)
+				} catch (_) { /* ignore */ }
+			}
+			const fmtAa = (a: string | null) => (a && ethers.isAddress(a) ? a : 'N/A')
 			// adminAA = 离线签字 data 中 adminManager(to,...) 的 to，即登记为 admin 的地址
-			logger(Colors.cyan(`[cardAddAdmin] signer=${signerAddr ?? 'N/A'} cardAddress=${cardAddress ?? 'N/A'} adminEOA=${adminEOA ?? 'N/A'} adminAA=${adminAA ?? 'N/A'} adminSpecifiedInSig=${adminAA ?? 'N/A'}`))
+			logger(
+				Colors.cyan(
+					`[cardAddAdmin] signer=${signerAddr ?? 'N/A'} cardAddress=${cardAddress ?? 'N/A'} adminEOA=${adminEOA ?? 'N/A'} adminAA=${adminAA ?? 'N/A'} adminSpecifiedInSig=${adminAA ?? 'N/A'} ` +
+						`canonicalAAForSignerEOA=${fmtAa(canonicalAAForSignerEOA)} adminTargetEOA=${adminTargetEOA ?? 'N/A'} canonicalAAForAdminTargetEOA=${fmtAa(canonicalAAForAdminTargetEOA)}`
+				)
+			)
 		} catch (e: any) {
 			logger(Colors.yellow(`[cardAddAdmin] debug log failed: ${e?.message ?? e}`))
 		}

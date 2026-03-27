@@ -96,6 +96,7 @@ import {
 	type NfcLinkAppSessionDb,
 } from './db'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './endpoint/getUIDAssetsLogic'
+import { resolveBeamioAaForEoaWithFallback } from './endpoint/resolveBeamioAaViaUserCardFactory'
 import { pickBestMembershipNftByMinUsdc6, type RawNftOwnershipRow } from './endpoint/membershipTierPick'
 import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
 
@@ -5507,14 +5508,68 @@ export const OpenContainerRelayProcess = async () => {
             }
           }
         } else {
-          // to 已是 AA，可选验证 isBeamioAccount；若未注册则仅打 log（链上会 revert）
-          const isBeamio = await FactoryWithRelay.isBeamioAccount(to).catch(() => false)
+          // to 已有合约代码：须为 AA Factory 登记的 BeamioAccount（ERC1155 受益人链上硬约束）
+          let isBeamio = await FactoryWithRelay.isBeamioAccount(to).catch(() => false)
           if (has1155 && !isBeamio) {
-            logger(Colors.yellow(`[AAtoEOA/OpenContainer] ERC1155 item: beneficiary ${payload.to} may not be registered BeamioAccount (isBeamioAccount=${isBeamio})`))
+            logger(
+              Colors.yellow(
+                `[AAtoEOA/OpenContainer] ERC1155: beneficiary ${payload.to} isBeamioAccount=false; try owner→canonical AA (same as getWalletAssets)`
+              )
+            )
+            try {
+              const ownerAbi = ['function owner() view returns (address)']
+              const benef = new ethers.Contract(ethers.getAddress(to), ownerAbi, SC.walletBase.provider!)
+              const own = await benef.owner()
+              if (own && own !== ethers.ZeroAddress) {
+                const beneficiaryEoa = ethers.getAddress(own)
+                const canonical = await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, beneficiaryEoa)
+                if (canonical) {
+                  const c = ethers.getAddress(canonical)
+                  const ok = await FactoryWithRelay.isBeamioAccount(c).catch(() => false)
+                  if (ok) {
+                    if (c.toLowerCase() !== ethers.getAddress(to).toLowerCase()) {
+                      logger(
+                        Colors.cyan(
+                          `[AAtoEOA/OpenContainer] replaced payee ${to} with factory-registered AA ${c} (owner ${beneficiaryEoa})`
+                        )
+                      )
+                    } else {
+                      logger(
+                        Colors.gray(
+                          `[AAtoEOA/OpenContainer] payee ${to} matches canonical AA but first isBeamio check failed; using on-chain retry ok=true`
+                        )
+                      )
+                    }
+                    to = c
+                    isBeamio = true
+                  }
+                }
+              }
+            } catch (re: any) {
+              logger(Colors.yellow(`[AAtoEOA/OpenContainer] payee owner/canonical resolve failed: ${re?.message ?? re}`))
+            }
+            if (!isBeamio) {
+              logger(
+                Colors.yellow(
+                  `[AAtoEOA/OpenContainer] ERC1155 item: beneficiary ${payload.to} is not a registered BeamioAccount on AA factory`
+                )
+              )
+            }
           }
         }
       } catch (e: any) {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] resolve beneficiary ${payload.to} failed: ${e?.message ?? e}`))
+      }
+    }
+    if (has1155) {
+      const payeeReg = await FactoryWithRelay.isBeamioAccount(ethers.getAddress(to)).catch(() => false)
+      if (!payeeReg) {
+        const err =
+          'OpenContainer ERC1155 requires payee to be a BeamioAccount registered on the AA factory. Use merchant EOA as payload.to so the server can resolve primary AA, or ensure payee AA was created via Beamio factory.'
+        logger(Colors.red(`[AAtoEOA/OpenContainer] REJECT: payee not registered BeamioAccount, to=${to}`))
+        obj.res.status(400).json({ success: false, error: err }).end()
+        Settle_ContractPool.unshift(SC)
+        return setTimeout(() => OpenContainerRelayProcess(), 3000)
       }
     }
     if (to === account) {
