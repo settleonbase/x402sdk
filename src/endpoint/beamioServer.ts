@@ -115,7 +115,7 @@ const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; point
 	return null
 }
 
-/** 解析 EOA 对应的 AA（与 UserCard getOwnershipByEOA / OpenContainer account 一致；失败时回退 BASE_AA_FACTORY） */
+/** 解析 EOA 对应的 AA：仅 UserCardFactoryPaymaster._aaFactory() 路径（与发卡工厂绑定；无回退旧 AA 工厂） */
 const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> =>
 	resolveBeamioAaForEoaWithFallback(providerBase, eoa)
 

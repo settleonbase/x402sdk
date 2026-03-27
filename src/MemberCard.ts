@@ -5497,13 +5497,56 @@ export const OpenContainerRelayProcess = async () => {
       return setTimeout(() => OpenContainerRelayProcess(), 3000)
     }
 
+    // 与 getWalletAssets / resolveBeamioAaForEoaWithFallback 一致：须用 **该笔 OpenContainer 涉及卡** 在 factoryGateway 上绑定的 _aaFactory()。
+    // 勿硬编码 BASE_AA_FACTORY：卡工厂已指向新 AA 工厂时，旧工厂的 isBeamioAccount 会对真实商户 AA 恒 false，导致 Charge REJECT。
+    const has1155 = items.some((it: { kind: number }) => it.kind === 1)
+    const erc1155CardAddr = items.find((it) => it.kind === 1)?.asset
+    const merchantCardRaw = (obj as { merchantCardAddress?: string }).merchantCardAddress
+    const merchantCardNorm =
+      merchantCardRaw && ethers.isAddress(merchantCardRaw) ? ethers.getAddress(merchantCardRaw) : null
+    let relayAaFactoryAddr: string | null = null
+    try {
+      if (erc1155CardAddr) {
+        relayAaFactoryAddr = await getCardAaFactoryAddress(erc1155CardAddr)
+      } else if (merchantCardNorm) {
+        relayAaFactoryAddr = await getCardAaFactoryAddress(merchantCardNorm)
+      } else {
+        relayAaFactoryAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(
+          SC.walletBase.provider!,
+          BASE_CARD_FACTORY
+        )
+      }
+    } catch (facErr: any) {
+      logger(Colors.yellow(`[AAtoEOA/OpenContainer] resolve relay AA factory failed: ${facErr?.message ?? facErr}`))
+      relayAaFactoryAddr = null
+    }
+    if (!relayAaFactoryAddr) {
+      logger(Colors.red(`[AAtoEOA/OpenContainer] no AA factory (card/UserCard path)`))
+      obj.res
+        .status(500)
+        .json({
+          success: false,
+          error:
+            'OpenContainer: could not resolve AA factory from the card. Ensure payload includes ERC1155 from a BeamioUserCard or merchantCardAddress.',
+        })
+        .end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+    }
+    relayAaFactoryAddr = ethers.getAddress(relayAaFactoryAddr)
+    if (relayAaFactoryAddr.toLowerCase() !== BeamioAAAccountFactoryPaymaster.toLowerCase()) {
+      logger(
+        Colors.cyan(
+          `[AAtoEOA/OpenContainer] relay factory=${relayAaFactoryAddr} (UserCard-bound; BASE_AA_FACTORY=${BeamioAAAccountFactoryPaymaster} is not used for this relay)`
+        )
+      )
+    }
     const FactoryWithRelay = new ethers.Contract(
-      BeamioAAAccountFactoryPaymaster,
+      relayAaFactoryAddr,
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_OPEN_ABI],
       SC.walletBase
     )
     // BeamioUserCard 要求 points(ERC1155) 只能转给 BeamioAccount；若 payload 含 ERC1155 或 to 为 EOA，将 to 解析为受益人 primary AA（严禁用付款方 account 的 AA 作为 to）
-    const has1155 = items.some((it: { kind: number }) => it.kind === 1)
     const toIsEOA = !(await SC.walletBase.provider!.getCode(to).then((c: string) => c && c !== '0x' && c.length > 2))
     const needResolveTo = has1155 || toIsEOA
     if (needResolveTo) {
@@ -6058,8 +6101,48 @@ export const ContainerRelayProcess = async () => {
       return setTimeout(() => ContainerRelayProcess(), 3000)
     }
 
+    const erc1155CardAddrC = items.find((it) => it.kind === 1)?.asset
+    const merchantCardRawC = (obj as { merchantCardAddress?: string }).merchantCardAddress
+    const merchantCardNormC =
+      merchantCardRawC && ethers.isAddress(merchantCardRawC) ? ethers.getAddress(merchantCardRawC) : null
+    let relayAaFactoryContainer: string | null = null
+    try {
+      if (erc1155CardAddrC) {
+        relayAaFactoryContainer = await getCardAaFactoryAddress(erc1155CardAddrC)
+      } else if (merchantCardNormC) {
+        relayAaFactoryContainer = await getCardAaFactoryAddress(merchantCardNormC)
+      } else {
+        relayAaFactoryContainer = await getAaFactoryAddressFromUserCardFactoryPaymaster(
+          SC.walletBase.provider!,
+          BASE_CARD_FACTORY
+        )
+      }
+    } catch (facErr: any) {
+      logger(Colors.yellow(`[AAtoEOA/Container] resolve relay AA factory failed: ${facErr?.message ?? facErr}`))
+      relayAaFactoryContainer = null
+    }
+    if (!relayAaFactoryContainer) {
+      obj.res
+        .status(500)
+        .json({
+          success: false,
+          error:
+            'Container: could not resolve AA factory from the card. Include ERC1155 from a BeamioUserCard or merchantCardAddress.',
+        })
+        .end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => ContainerRelayProcess(), 3000)
+    }
+    relayAaFactoryContainer = ethers.getAddress(relayAaFactoryContainer)
+    if (relayAaFactoryContainer.toLowerCase() !== BeamioAAAccountFactoryPaymaster.toLowerCase()) {
+      logger(
+        Colors.cyan(
+          `[AAtoEOA/Container] relay factory=${relayAaFactoryContainer} (UserCard-bound; BASE_AA_FACTORY=${BeamioAAAccountFactoryPaymaster} not used)`
+        )
+      )
+    }
     const FactoryWithRelay = new ethers.Contract(
-      BeamioAAAccountFactoryPaymaster,
+      relayAaFactoryContainer,
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_MAIN_ABI],
       SC.walletBase
     )
