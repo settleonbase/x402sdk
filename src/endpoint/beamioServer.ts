@@ -3091,6 +3091,34 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				logger(Colors.red(`[AAtoEOA] server OpenContainer pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
+			/** 付款 AA 必须与 UserCard 工厂链路 canonical 一致，否则链上 balanceOf(account,0) 为 0 导致 CM_Reserved1155Violation */
+			try {
+				const acc = ethers.getAddress(body.openContainerPayload.account)
+				const aaOwnerAbi = ['function owner() view returns (address)']
+				const aaContract = new ethers.Contract(acc, aaOwnerAbi, providerBase)
+				const ownerRaw = await aaContract.owner()
+				if (!ownerRaw || ownerRaw === ethers.ZeroAddress) {
+					logger(Colors.red(`[AAtoEOA] server OpenContainer REJECT: invalid AA owner for ${acc}`))
+					return res
+						.status(400)
+						.json({ success: false, error: 'openContainerPayload.account is not a valid Beamio AA' })
+						.end()
+				}
+				const eoa = ethers.getAddress(ownerRaw)
+				const canonical = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
+				if (canonical && canonical.toLowerCase() !== acc.toLowerCase()) {
+					const msg = `openContainer account ${acc} does not match canonical AA ${canonical} for owner ${eoa}. Refresh aaAddress from getWalletAssets or getAAAccount and re-sign.`
+					logger(Colors.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`))
+					return res.status(400).json({ success: false, error: msg }).end()
+				}
+			} catch (e: any) {
+				const m = e?.shortMessage ?? e?.message ?? String(e)
+				logger(Colors.red(`[AAtoEOA] server OpenContainer canonical AA check FAIL: ${m}`))
+				return res
+					.status(400)
+					.json({ success: false, error: 'Failed to validate openContainerPayload.account against canonical AA' })
+					.end()
+			}
 			const itemsLength = body.openContainerPayload.items?.length ?? 0
 			// Cluster 预检：currency/currencyAmount 必填（显式参数）
 			if (itemsLength <= 1) {
