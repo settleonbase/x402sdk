@@ -2553,7 +2553,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 		const isInsufficientFunds = /insufficient funds for intrinsic transaction cost/i.test(msg)
 		if (isInsufficientFunds) {
-			msg = `${msg} (Conet 链上 admin ${SC?.walletConet?.address ?? '?'} 需充值 CNET 原生代币以支付 syncTokenAction gas)`
+			msg = `${msg} (Fund native CNET on Conet for admin ${SC?.walletConet?.address ?? '?'} to pay syncTokenAction gas.)`
 			// 重新入队，待充值后重试
 			beamioTransferIndexerAccountingPool.unshift(obj)
 			logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] requeued due to insufficient gas, queue=${beamioTransferIndexerAccountingPool.length}`))
@@ -6609,7 +6609,7 @@ export const ContainerRelayProcess = async () => {
     const isBadNonce = dataHex.length >= 10 && dataHex.slice(0, 10).toLowerCase() === '0x74794617'
     const isInsufficientBalance = dataHex.length >= 10 && dataHex.slice(0, 10).toLowerCase() === '0xc6d837a8'
     const clientError = isBadNonce
-      ? 'Nonce already used (链上 nonce 已递增). 请重新发起转账，不要重复提交同一笔。'
+      ? 'Nonce already used (on-chain nonce was incremented). Start a new transfer; do not resubmit the same payment.'
       : msg
     try {
       if (!obj.res?.headersSent) obj.res.status(isBadNonce || isInsufficientBalance ? 400 : 500).json({ success: false, error: clientError }).end()
@@ -9349,7 +9349,7 @@ export const payByNfcUidOpenContainer = async (params: {
 	const privateKey = await getNfcCardPrivateKeyByUid(uid.trim())
 	if (!privateKey) {
 		logger(Colors.red(`[payByNfcUidOpenContainer] failed: getNfcCardPrivateKeyByUid returned null for uid=${uid.slice(0, 16)}...`))
-		return { pushed: false, error: '不存在该卡' }
+		return { pushed: false, error: 'Card not found' }
 	}
 	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
 	const SC = Settle_ContractPool[0]
@@ -9387,7 +9387,7 @@ export const payByNfcUidOpenContainer = async (params: {
 		const ccsaValueUsdc6 = (points6 * unitPriceUSDC6) / 1_000_000n
 		const totalBalance6 = ccsaValueUsdc6 + usdcBalance6
 		if (totalBalance6 < amountBig) {
-			return { pushed: false, error: `余额不足（需 ${amountUsdc6} USDC6）` }
+			return { pushed: false, error: `Insufficient balance (need ${amountUsdc6} USDC6)` }
 		}
 		let ccsaPointsWei = 0n
 		let usdcWei = amountBig
@@ -9427,7 +9427,7 @@ export const payByNfcUidOpenContainer = async (params: {
 					try {
 						const facAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(SC.walletBase.provider!, BASE_CARD_FACTORY)
 						if (!facAddr) {
-							return { pushed: false, error: '无法解析 AA 工厂，请稍后重试。' }
+							return { pushed: false, error: 'Could not resolve AA factory. Please try again.' }
 						}
 						const payeeFac = new ethers.Contract(
 							facAddr,
@@ -9437,14 +9437,14 @@ export const payByNfcUidOpenContainer = async (params: {
 						const { accountAddress } = await DeployingSmartAccount(toResolved, payeeFac)
 						if (!accountAddress) {
 							logger(Colors.red(`[payByNfcUidOpenContainer] DeployingSmartAccount failed for payee=${toResolved}`))
-							return { pushed: false, error: '无法为收款方创建 Beamio AA 账户，请稍后重试。' }
+							return { pushed: false, error: 'Could not create Beamio AA for payee. Please try again.' }
 						}
 						payeeAA = accountAddress
 						logger(Colors.green(`[payByNfcUidOpenContainer] created AA ${payeeAA} for payee EOA ${toResolved}`))
 					} catch (e: unknown) {
 						const msg = e instanceof Error ? e.message : String(e)
 						logger(Colors.red(`[payByNfcUidOpenContainer] DeployingSmartAccount error: ${msg}`))
-						return { pushed: false, error: `无法为收款方创建 AA：${msg}` }
+						return { pushed: false, error: `Could not create AA for payee: ${msg}` }
 					}
 				}
 				toResolved = ethers.getAddress(payeeAA)
@@ -9628,7 +9628,7 @@ export const payByNfcUidPrepare = async (params: {
 	}
 	if (!privateKey) {
 		logger(Colors.red(`[payByNfcUidPrepare] getNfcCardPrivateKey null uid=${uidTrim.slice(0, 16)}...`))
-		return { ok: false, error: '不存在该卡' }
+		return { ok: false, error: 'Card not found' }
 	}
 	if (Settle_ContractPool.length === 0) return { ok: false, error: 'Settle_ContractPool empty' }
 	const SC = Settle_ContractPool[0]
@@ -9784,14 +9784,14 @@ export const payByNfcUidSignContainer = async (params: {
 	}
 	if (!privateKey) {
 		logger(Colors.red(`[payByNfcUidSignContainer] getNfcCardPrivateKey null uid=${uidTrim.slice(0, 16)}...`))
-		return { pushed: false, error: '不存在该卡' }
+		return { pushed: false, error: 'Card not found' }
 	}
 	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
 	const wallet = new ethers.Wallet(privateKey)
 	const eoa = await wallet.getAddress()
 	const aaResolved = await resolveBeamioAaForEoaWithFallback(Settle_ContractPool[0].walletBase.provider!, eoa)
 	if (!aaResolved || ethers.getAddress(containerPayload.account) !== ethers.getAddress(aaResolved)) {
-		return { pushed: false, error: 'account 与 UID 对应的 AA 不一致' }
+		return { pushed: false, error: 'Container account does not match the AA resolved for this NFC UID.' }
 	}
 	const aa = ethers.getAddress(aaResolved)
 	const linkBlockCharge = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa, payerEoa: eoa })

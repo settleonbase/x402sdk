@@ -1651,9 +1651,9 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: 'Invalid payee address' })
 			}
 			const privateKey = await getNfcCardPrivateKeyByUid(uid)
-			logger(Colors.cyan(`[payByNfcUid] getNfcCardPrivateKeyByUid: ${privateKey ? 'OK (from DB or mnemonic)' : 'null (不存在该卡)'}`))
+			logger(Colors.cyan(`[payByNfcUid] getNfcCardPrivateKeyByUid: ${privateKey ? 'OK (from DB or mnemonic)' : 'null (card not found)'}`))
 			if (!privateKey) {
-				return res.status(403).json({ success: false, error: '不存在该卡' })
+				return res.status(403).json({ success: false, error: 'Card not found' })
 			}
 			const openResult = await payByNfcUidOpenContainer({ uid: uid.trim(), amountUsdc6: amountUsdc6 ?? amountBig.toString(), payee: ethers.getAddress(payee), res })
 			logger(Colors.cyan(`[payByNfcUid] payByNfcUidOpenContainer: pushed=${openResult.pushed}${openResult.error ? ` error=${openResult.error}` : ''}`))
@@ -1663,8 +1663,13 @@ const routing = ( router: Router ) => {
 			if (openResult.error?.includes('linking to the Beamio app')) {
 				return res.status(403).json({ success: false, error: openResult.error }).end()
 			}
-			// 收款方无法接收 CCSA 时，不尝试 fallback（卡片 EOA 无 USDC 会失败）
-			if (openResult.error && (openResult.error.includes('EOA') || openResult.error.includes('无法接收 CCSA'))) {
+			// Payee cannot receive CCSA (e.g. EOA-only): skip fallback when pure USDC would also fail
+			if (
+				openResult.error &&
+				(openResult.error.includes('EOA') ||
+					openResult.error.includes('cannot receive CCSA') ||
+					openResult.error.includes('无法接收 CCSA'))
+			) {
 				return res.status(400).json({ success: false, error: openResult.error }).end()
 			}
 			logger(Colors.yellow(`[payByNfcUid] fallback to simple USDC transfer`))

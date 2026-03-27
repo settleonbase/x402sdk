@@ -855,7 +855,7 @@ const routing = ( router: Router ) => {
 				} catch (_) { /* 非账户名，忽略 */ }
 			}
 			if (!eoaRaw) {
-				const err = { ok: false, error: '该卡没有被登记' }
+				const err = { ok: false, error: 'This card is not registered' }
 				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 卡未登记 返回 404: ${JSON.stringify(err)}`))
 				return res.status(404).json(err).end()
 			}
@@ -885,7 +885,7 @@ const routing = ( router: Router ) => {
 			const msg = e?.shortMessage ?? e?.message ?? ''
 			const isRevert = /execution reverted|CALL_EXCEPTION|revert/i.test(String(msg))
 			if (isRevert) {
-				const err = { ok: false, error: '该卡没有被登记' }
+				const err = { ok: false, error: 'This card is not registered' }
 				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 链上查询 revert 返回 404: ${JSON.stringify(err)}`))
 				return res.status(404).json(err).end()
 			}
@@ -922,7 +922,7 @@ const routing = ( router: Router ) => {
 				const aaContract = new ethers.Contract(addr, aaOwnerAbi, providerBase)
 				const owner = await aaContract.owner()
 				if (!owner || owner === ethers.ZeroAddress) {
-					const err = { ok: false, error: '该 AA 无法解析 owner' }
+					const err = { ok: false, error: 'Could not resolve owner for this AA' }
 					logger(Colors.yellow(`[getWalletAssets] AA 无 owner 返回 404: ${JSON.stringify(err)}`))
 					return res.status(404).json(err).end()
 				}
@@ -930,7 +930,7 @@ const routing = ( router: Router ) => {
 				/** 与 getUIDAssets 一致：aaAddress 一律为 UserCard 工厂链路的 canonical AA，禁止沿用调用方传入的「另一工厂」AA */
 				const canonicalAa = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
 				if (!canonicalAa) {
-					const err = { ok: false, error: '该钱包未激活 Beamio 账户' }
+					const err = { ok: false, error: 'No active Beamio account for this wallet' }
 					logger(Colors.yellow(`[getWalletAssets] EOA 无 canonical AA 返回 404: ${JSON.stringify(err)}`))
 					return res.status(404).json(err).end()
 				}
@@ -946,7 +946,7 @@ const routing = ( router: Router ) => {
 				eoa = addr
 				const primary = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
 				if (!primary) {
-					const err = { ok: false, error: '该钱包未激活 Beamio 账户' }
+					const err = { ok: false, error: 'No active Beamio account for this wallet' }
 					logger(Colors.yellow(`[getWalletAssets] EOA 无 AA 返回 404: ${JSON.stringify(err)}`))
 					return res.status(404).json(err).end()
 				}
@@ -1119,7 +1119,7 @@ const routing = ( router: Router ) => {
 			const msg = e?.shortMessage ?? e?.message ?? ''
 			const isRevert = /execution reverted|CALL_EXCEPTION|revert/i.test(String(msg))
 			if (isRevert) {
-				const err = { ok: false, error: '该钱包未激活 Beamio 账户' }
+				const err = { ok: false, error: 'No active Beamio account for this wallet' }
 				logger(Colors.yellow(`[getWalletAssets] 链上查询 revert 返回 404: ${JSON.stringify(err)}`))
 				return res.status(404).json(err).end()
 			}
@@ -1315,7 +1315,7 @@ const routing = ( router: Router ) => {
 			const cardBalances = results.slice(1) as { required: bigint; points: bigint }[]
 			if (usdcRequired > 0n && usdcBalance < usdcRequired) {
 				logger(Colors.yellow(`[payByNfcUidSignContainer] Cluster 预检失败: USDC 余额不足 需=${usdcRequired} 有=${usdcBalance}`))
-				return res.status(400).json({ success: false, error: '余额不足' }).end()
+				return res.status(400).json({ success: false, error: 'Insufficient balance' }).end()
 			}
 			for (const { required, points } of cardBalances) {
 				if (points < required) {
@@ -1324,12 +1324,12 @@ const routing = ( router: Router ) => {
 							`[payByNfcUidSignContainer] Cluster 预检失败: 卡内点数不足（container account）需=${required} 有=${points}。若与 getUIDAssets 不一致，请确认 payByNfcUidPrepare 使用 UserCard 绑定 AA。`
 						)
 					)
-					return res.status(400).json({ success: false, error: '余额不足' }).end()
+					return res.status(400).json({ success: false, error: 'Insufficient balance' }).end()
 				}
 			}
 		} catch (e: any) {
 			logger(Colors.red(`[payByNfcUidSignContainer] Cluster 余额预检异常: ${e?.message ?? e}`))
-			return res.status(500).json({ success: false, error: '余额预检失败' }).end()
+			return res.status(500).json({ success: false, error: 'Balance pre-check failed' }).end()
 		}
 		const nfcFwd = {
 			nfcSubtotalCurrencyAmount: nfcSubtotalCurrencyAmount ?? null,
@@ -1569,7 +1569,7 @@ const routing = ( router: Router ) => {
 		}
 		const hasWallet = !!resolvedWallet
 		if (!hasUid && !hasWallet) {
-			return res.status(400).json({ success: false, error: hasBeamioTag ? 'beamioTag 无法解析到有效钱包' : 'Missing uid or wallet' })
+			return res.status(400).json({ success: false, error: hasBeamioTag ? 'Could not resolve beamioTag to a valid wallet' : 'Missing uid or wallet' })
 		}
 		if (!cardAddress || typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress.trim())) {
 			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' })
