@@ -17,6 +17,7 @@ import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDE
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
+import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -114,18 +115,9 @@ const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; point
 	return null
 }
 
-/** 解析 EOA 对应的 AA 地址（用于日志） */
-const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> => {
-	try {
-		const iface = new ethers.Interface(['function beamioAccountOf(address) view returns (address)'])
-		const result = await providerBase.call({
-			to: BASE_AA_FACTORY as `0x${string}`,
-			data: iface.encodeFunctionData('beamioAccountOf', [eoa]) as `0x${string}`,
-		})
-		const [addr] = iface.decodeFunctionResult('beamioAccountOf', result)
-		return addr && addr !== ethers.ZeroAddress ? addr : null
-	} catch { return null }
-}
+/** 解析 EOA 对应的 AA（与 UserCard getOwnershipByEOA / OpenContainer account 一致；失败时回退 BASE_AA_FACTORY） */
+const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> =>
+	resolveBeamioAaForEoaWithFallback(providerBase, eoa)
 const CONET_RPC = 'https://mainnet-rpc.conet.network'
 const providerConet = new ethers.JsonRpcProvider(CONET_RPC)
 
@@ -890,21 +882,13 @@ const routing = ( router: Router ) => {
 				eoa = ethers.getAddress(owner)
 			} else {
 				eoa = addr
-				const aaFactoryAbi = ['function beamioAccountOf(address) view returns (address)']
-				const aaFactory = new ethers.Contract(BASE_AA_FACTORY, aaFactoryAbi, providerBase)
-				const primary = await aaFactory.beamioAccountOf(addr)
-				if (!primary || primary === ethers.ZeroAddress) {
+				const primary = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
+				if (!primary) {
 					const err = { ok: false, error: '该钱包未激活 Beamio 账户' }
 					logger(Colors.yellow(`[getWalletAssets] EOA 无 AA 返回 404: ${JSON.stringify(err)}`))
 					return res.status(404).json(err).end()
 				}
-				const aaCode = await providerBase.getCode(primary)
-				if (!aaCode || aaCode === '0x') {
-					const err = { ok: false, error: '该钱包未激活 Beamio 账户' }
-					logger(Colors.yellow(`[getWalletAssets] beamioAccountOf 返回的 AA 无 code 返回 404: ${JSON.stringify(err)}`))
-					return res.status(404).json(err).end()
-				}
-				aaAddr = ethers.getAddress(primary)
+				aaAddr = primary
 			}
 
 			const cardAbi = [
@@ -919,7 +903,8 @@ const routing = ( router: Router ) => {
 				...(DEPRECATED_INFRA_CARDS.has(BEAMIO_USER_CARD_ASSET_ADDRESS.toLowerCase()) ? [] : [{ address: BEAMIO_USER_CARD_ASSET_ADDRESS, name: 'CashTrees Card', type: 'infrastructure' }]),
 			]
 			const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
-			const usdcBalanceRaw = await usdc.balanceOf(aaAddr)
+			const [usdcEoaRaw, usdcAaRaw] = await Promise.all([usdc.balanceOf(eoa), usdc.balanceOf(aaAddr)])
+			const usdcBalanceRaw = usdcEoaRaw + usdcAaRaw
 			let unitPriceUSDC6 = '0'
 			let beamioUserCard = ''
 			try {

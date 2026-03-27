@@ -5,9 +5,10 @@ import { ethers } from 'ethers'
 import { logger } from '../logger'
 import Colors from 'colors/safe'
 import { getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken } from '../db'
-import { BASE_AA_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 import { maybeEnqueueNfcCashTreeBeamioTag } from '../db'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
+import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
 /** 已废弃的旧基础设施卡地址，getUIDAssets 不查询、不返回。当前 BEAMIO_USER_CARD_ASSET_ADDRESS (0x74f35741...) 必须不在本列表。 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -21,24 +22,8 @@ const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
-const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> => {
-	try {
-		const aaFactoryAbi = ['function beamioAccountOf(address) view returns (address)']
-		const aaFactory = new ethers.Contract(BASE_AA_FACTORY, aaFactoryAbi, providerBase)
-		const result = await providerBase.call({
-			to: BASE_AA_FACTORY as `0x${string}`,
-			data: (aaFactory.interface.encodeFunctionData('beamioAccountOf', [eoa]) as `0x${string}`),
-		})
-		if (!result || result === '0x') return null
-		const decoded = ethers.AbiCoder.defaultAbiCoder().decode(['address'], result)
-		const addr = decoded[0] as string
-		if (!addr || addr === ethers.ZeroAddress) return null
-		const code = await providerBase.getCode(addr)
-		return code && code !== '0x' && code.length > 2 ? ethers.getAddress(addr) : null
-	} catch {
-		return null
-	}
-}
+const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> =>
+	resolveBeamioAaForEoaWithFallback(providerBase, eoa)
 
 export type FetchUIDAssetsResult = {
 	ok: true

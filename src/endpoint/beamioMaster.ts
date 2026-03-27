@@ -11,8 +11,9 @@ import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDa
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
+import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
 const masterServerPort = 1111
 
@@ -448,7 +449,7 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** GET /api/getAAAccount?eoa=0x... - 客户端 RPC 失败时由此获取 primaryAccountOf(EOA)。30 秒缓存。 */
+		/** GET /api/getAAAccount?eoa=0x... - 与 UserCard getOwnershipByEOA 一致：CARD_FACTORY._aaFactory → beamioAccountOf / primaryAccountOf，失败回退 BASE_AA_FACTORY。30 秒缓存。 */
 		const GET_AA_CACHE_TTL_MS = 30 * 1000
 		const getAAAccountCache = new Map<string, { account: string | null; expiry: number }>()
 		router.get('/getAAAccount', async (req, res) => {
@@ -463,14 +464,8 @@ const routing = ( router: Router ) => {
 			}
 			try {
 				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
-				const aaFactory = new ethers.Contract(BASE_AA_FACTORY, ['function primaryAccountOf(address) view returns (address)'], provider)
-				let account = await aaFactory.primaryAccountOf(eoa)
-				if (account === ethers.ZeroAddress) {
-					getAAAccountCache.set(cacheKey, { account: null, expiry: Date.now() + GET_AA_CACHE_TTL_MS })
-					return res.status(200).json({ account: null })
-				}
-				const code = await provider.getCode(account)
-				if (!code || code === '0x') {
+				const account = await resolveBeamioAaForEoaWithFallback(provider, eoa)
+				if (!account) {
 					getAAAccountCache.set(cacheKey, { account: null, expiry: Date.now() + GET_AA_CACHE_TTL_MS })
 					return res.status(200).json({ account: null })
 				}
