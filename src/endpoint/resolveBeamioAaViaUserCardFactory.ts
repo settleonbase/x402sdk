@@ -1,9 +1,10 @@
 /**
- * Resolve EOA → AA the same way BeamioUserCard does: UserCardFactoryPaymaster._aaFactory() then beamioAccountOf(eoa).
- * Falls back to BASE_AA_FACTORY when _aaFactory is unavailable (aligns with chainAddresses / provision tooling).
+ * Resolve EOA → AA：仅使用 **链上** `UserCardFactoryPaymaster._aaFactory()` 再 `beamioAccountOf(eoa)`（与发卡工厂绑定的新 AA 工厂一致）。
+ *
+ * **不再回退 `BASE_AA_FACTORY`（0x4b31…）**：该常量与当前卡工厂 `_aaFactory()` 常不一致，回退会解析到「旧部署」上的 AA，与 OpenContainer / getUIDAssets 卡路径分裂。
  */
 import { ethers } from 'ethers'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY } from '../chainAddresses'
+import { BASE_CARD_FACTORY } from '../chainAddresses'
 
 const userCardFactoryPaymasterAbi = ['function _aaFactory() view returns (address)'] as const
 const aaFactoryAbi = ['function beamioAccountOf(address) view returns (address)'] as const
@@ -48,13 +49,11 @@ export async function resolveBeamioAaForEoaViaUserCardFactory(
 	return beamioAaFromFactory(provider, eoa, aaFac)
 }
 
-/** Try User Card factory path first, then config BASE_AA_FACTORY. */
+/** 仅 UserCard 绑定的 `_aaFactory()`；无可用工厂或无已部署 AA 时返回 null。 */
 export async function resolveBeamioAaForEoaWithFallback(
 	provider: ethers.Provider,
 	eoa: string,
 	userCardFactoryPaymaster: string = BASE_CARD_FACTORY
 ): Promise<string | null> {
-	const primary = await resolveBeamioAaForEoaViaUserCardFactory(provider, eoa, userCardFactoryPaymaster)
-	if (primary) return primary
-	return beamioAaFromFactory(provider, eoa, BASE_AA_FACTORY)
+	return resolveBeamioAaForEoaViaUserCardFactory(provider, eoa, userCardFactoryPaymaster)
 }

@@ -96,7 +96,10 @@ import {
 	type NfcLinkAppSessionDb,
 } from './db'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './endpoint/getUIDAssetsLogic'
-import { resolveBeamioAaForEoaWithFallback } from './endpoint/resolveBeamioAaViaUserCardFactory'
+import {
+	getAaFactoryAddressFromUserCardFactoryPaymaster,
+	resolveBeamioAaForEoaWithFallback,
+} from './endpoint/resolveBeamioAaViaUserCardFactory'
 import { pickBestMembershipNftByMinUsdc6, type RawNftOwnershipRow } from './endpoint/membershipTierPick'
 import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
 
@@ -762,10 +765,16 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 export const ensureAAForMintTarget = async (targetAddress: string): Promise<void> => {
 	const pool = Settle_ContractPool
 	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
-	const aaFactory = pool[0].aaAccountFactoryPaymaster
-	if (!aaFactory) throw new Error('aaAccountFactoryPaymaster not initialized')
-	const acct = await aaFactory.beamioAccountOf(targetAddress)
 	const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, BASE_CARD_FACTORY)
+	if (!wired) {
+		throw new Error(
+			'ensureAAForMintTarget: cannot read UserCard _aaFactory(); cannot ensure AA for mint target'
+		)
+	}
+	const factoryAddr = wired
+	const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, pool[0].walletBase)
+	const acct = await aaFactory.beamioAccountOf(targetAddress)
 	const hasAA = acct && acct !== ethers.ZeroAddress && (await provider.getCode(acct)) !== '0x'
 	if (hasAA) return
 	logger(Colors.cyan(`[ensureAAForMintTarget] targetAddress ${targetAddress} has no AA, creating...`))
@@ -777,33 +786,42 @@ export const ensureAAForMintTarget = async (targetAddress: string): Promise<void
 /**
  * 为 EOA 确保存在 AA，返回 AA 地址。Cluster 在 cardAddAdmin 添加 admin 前会调用（经 /api/ensureAAForEOA）。
  *
- * 注意：cardAddAdminPreCheck 要求 adminManager 的 **to** 与 **body.adminEOA** 为同一地址，且 **to** 上无合约代码（链上登记的是 **EOA** 身份；AA 供 Beamio 扣款/OpenContainer 等路径）。
- * 必须传入真实商户 **EOA**；若误传占位/缓存错误地址，ensure 会为该错误地址创建 AA，但卡上登记的 admin 仍是该错误 EOA，后续业务会失败。
+ * 使用 **UserCardFactory._aaFactory()** 上的工厂（与 resolveBeamioAaForEoaWithFallback 一致）；读不到 `_aaFactory` 时抛错，不回退旧 BASE_AA_FACTORY。
+ *
+ * 注意：cardAddAdminPreCheck 要求 adminManager 的 **to** 与 **body.adminEOA** 为同一 EOA（to 无代码）。误传占位地址时仍会在该键下建 AA 并登记 admin。
  */
 export const ensureAAForEOA = async (eoa: string): Promise<string> => {
 	const pool = Settle_ContractPool
 	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
-	const aaFactory = pool[0].aaAccountFactoryPaymaster
-	if (!aaFactory) throw new Error('aaAccountFactoryPaymaster not initialized')
-	const acct = await aaFactory.beamioAccountOf(eoa)
 	const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+	const eoaNorm = ethers.getAddress(eoa)
+	/** 与 resolveBeamioAaForEoaWithFallback 一致：仅 UserCard._aaFactory()，不用链下 BASE_AA_FACTORY 回退 */
+	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, BASE_CARD_FACTORY)
+	if (!wired) {
+		throw new Error(
+			'ensureAAForEOA: cannot read UserCard _aaFactory(); set BASE_CARD_FACTORY RPC or deploy wiring before ensuring AA'
+		)
+	}
+	const factoryAddr = wired
+	const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, pool[0].walletBase)
+	const acct = await aaFactory.beamioAccountOf(eoaNorm)
 	const hasAA = acct && acct !== ethers.ZeroAddress && (await provider.getCode(acct)) !== '0x'
 	if (hasAA) return ethers.getAddress(acct)
-	logger(Colors.cyan(`[ensureAAForEOA] EOA ${eoa} has no AA, creating...`))
-	const { accountAddress, alreadyExisted } = await DeployingSmartAccount(eoa, aaFactory)
+	logger(Colors.cyan(`[ensureAAForEOA] EOA ${eoaNorm} has no AA on ${factoryAddr}, creating...`))
+	const { accountAddress, alreadyExisted } = await DeployingSmartAccount(eoaNorm, aaFactory)
 	if (!accountAddress) {
 		let predicted: string | null = null
 		try {
 			const fn = aaFactory.getFunction('getAddress(address,uint256)')
-			predicted = await fn(eoa, 0n)
+			predicted = await fn(eoaNorm, 0n)
 		} catch {
 			/* ignore */
 		}
-		logger(Colors.red(`[ensureAAForEOA] error: Failed to create AA for ${eoa}`))
-		logger(Colors.red(`  [debug] predictedAddress=${predicted ?? '?'} alreadyExisted=${alreadyExisted}`))
-		throw new Error(`Failed to create AA for ${eoa}`)
+		logger(Colors.red(`[ensureAAForEOA] error: Failed to create AA for ${eoaNorm}`))
+		logger(Colors.red(`  [debug] factory=${factoryAddr} predictedAddress=${predicted ?? '?'} alreadyExisted=${alreadyExisted}`))
+		throw new Error(`Failed to create AA for ${eoaNorm}`)
 	}
-	logger(Colors.green(`[ensureAAForEOA] created AA ${accountAddress} for EOA ${eoa}`))
+	logger(Colors.green(`[ensureAAForEOA] created AA ${accountAddress} for EOA ${eoaNorm} (factory=${factoryAddr})`))
 	return accountAddress
 }
 
