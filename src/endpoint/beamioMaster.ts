@@ -477,7 +477,7 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** GET /api/ensureAAForEOA?eoa=0x... - 为 EOA 确保存在 AA（无则创建），返回 AA 地址。登记 admin 前 UI 必须传 EOA 调用此接口获取 AA，再构建 adminManager(AA,...) 并签字。 */
+		/** GET /api/ensureAAForEOA?eoa=0x... - 为 EOA 确保存在 AA（无则创建），返回 { aa }。cardAddAdmin 预检要求 adminManager.to 与 body.adminEOA 同为真实商户 EOA（无 code），勿用占位地址。 */
 		router.get('/ensureAAForEOA', async (req, res) => {
 			const { eoa } = req.query as { eoa?: string }
 			if (!eoa || !ethers.isAddress(eoa)) {

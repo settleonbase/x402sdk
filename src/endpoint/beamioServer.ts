@@ -118,6 +118,54 @@ const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; point
 /** 解析 EOA 对应的 AA（与 UserCard getOwnershipByEOA / OpenContainer account 一致；失败时回退 BASE_AA_FACTORY） */
 const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> =>
 	resolveBeamioAaForEoaWithFallback(providerBase, eoa)
+
+/**
+ * cardAddAdmin：Master ensureAAForEOA 成功后，Cluster 必须能用同一解析路径在链上看到已部署 AA。
+ * 避免 Master 失败却仍转发、或 body.adminEOA 与真实商户不一致时难以排查。
+ */
+async function assertAdminEoaHasVisibleAaAfterEnsure(
+	adminEoaNorm: string,
+	ensureBody: string,
+	logTag: string
+): Promise<{ ok: true; canonicalAa: string } | { ok: false; error: string }> {
+	let masterAa: string | null = null
+	try {
+		const j = JSON.parse(ensureBody) as { aa?: string }
+		if (j?.aa && ethers.isAddress(j.aa)) masterAa = ethers.getAddress(j.aa)
+	} catch {
+		/* ignore */
+	}
+	let canonicalAa: string | null = null
+	for (let attempt = 0; attempt < 2 && !canonicalAa; attempt++) {
+		if (attempt > 0) await new Promise((r) => setTimeout(r, 1500))
+		try {
+			canonicalAa = await resolveBeamioAaForEoaWithFallback(providerBase, adminEoaNorm)
+		} catch {
+			canonicalAa = null
+		}
+	}
+	if (!canonicalAa) {
+		logger(
+			Colors.red(
+				`[${logTag}] No AA visible on Base for body adminEOA=${adminEoaNorm} after ensureAAForEOA (master aa=${masterAa ?? 'N/A'}). ` +
+					'Use the merchant real EOA in both body.adminEOA and adminManager.to (must match, EOA with no code).'
+			)
+		)
+		return {
+			ok: false,
+			error:
+				'Admin EOA has no AA visible onchain after ensureAAForEOA. Use the merchant’s real EOA in body.adminEOA and adminManager.to; do not use a placeholder address.',
+		}
+	}
+	if (masterAa && masterAa.toLowerCase() !== canonicalAa.toLowerCase()) {
+		logger(
+			Colors.yellow(
+				`[${logTag}] Master ensure aa ${masterAa} != cluster canonical ${canonicalAa} for adminEOA=${adminEoaNorm} (gate uses cluster read)`
+			)
+		)
+	}
+	return { ok: true, canonicalAa }
+}
 const CONET_RPC = 'https://mainnet-rpc.conet.network'
 const providerConet = new ethers.JsonRpcProvider(CONET_RPC)
 
@@ -2758,7 +2806,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
-	/** cardAddAdmin：owner 管理 admin（添加/移除）。添加时：仅允许 EOA，body 必须含 adminEOA，Cluster 先 ensureAAForEOA（若 EOA 无 AA 则创建），再预检并转发。移除时无需 adminEOA。 */
+	/** cardAddAdmin：owner 管理 admin（添加/移除）。添加时 body.adminEOA 须与 calldata adminManager.to 同为商户 EOA；Cluster ensureAAForEOA 后须能在 Base 上读到规范 AA，再预检转发。移除时无需 adminEOA。 */
 	router.post('/cardAddAdmin', async (req, res) => {
 		const data = req.body?.data as string
 		let isAddingAdmin = false
@@ -2777,8 +2825,11 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			if (!adminEOA || !ethers.isAddress(adminEOA)) {
 				return res.status(400).json({ success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }).end()
 			}
+			const adminNorm = ethers.getAddress(adminEOA)
+			let ensureBody = ''
 			try {
-				const { statusCode, body: ensureBody } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(ethers.getAddress(adminEOA)))
+				const { statusCode, body: eb } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(adminNorm))
+				ensureBody = eb
 				if (statusCode !== 200) {
 					const err = (() => { try { const j = JSON.parse(ensureBody); return j?.error ?? 'Failed to ensure AA for EOA' } catch { return 'Failed to ensure AA for EOA' } })()
 					return res.status(400).json({ success: false, error: err }).end()
@@ -2786,6 +2837,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			} catch (e: any) {
 				logger(Colors.red(`[cardAddAdmin] ensureAAForEOA failed: ${e?.message ?? e}`))
 				return res.status(502).json({ success: false, error: 'Failed to ensure AA for EOA' }).end()
+			}
+			const visible = await assertAdminEoaHasVisibleAaAfterEnsure(adminNorm, ensureBody, 'cardAddAdmin')
+			if (!visible.ok) {
+				return res.status(400).json({ success: false, error: visible.error }).end()
 			}
 		}
 		const preCheck = await cardAddAdminPreCheck(req.body)
@@ -2797,8 +2852,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		try {
 			const { cardAddress, data, deadline, nonce, ownerSignature } = req.body
 			let signerAddr: string | null = null
-			let adminEOA: string | null = null
-			let adminAA: string | null = null
+			/** adminManager(to=...) 的 to；预检要求为 EOA，与 body.adminEOA 同址 */
+			let calldataTo: string | null = null
+			/** 若 calldata to 曾为合约，则 owner(to)；正常 EOA 路径下多为 N/A */
+			let ownerOfCalldataToIfContract: string | null = null
 			if (cardAddress && data && deadline != null && nonce && ownerSignature) {
 				const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: BASE_CHAIN_ID, verifyingContract: BASE_CARD_FACTORY }
 				const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
@@ -2813,40 +2870,37 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				const iface = data.slice(0, 10).toLowerCase() === (iface5.getFunction('adminManager')?.selector ?? '').toLowerCase() ? iface5 : iface4
 				const decoded = iface.parseTransaction({ data })
 				if (decoded?.name === 'adminManager' && decoded.args[0]) {
-					adminAA = decoded.args[0] as string
+					calldataTo = ethers.getAddress(String(decoded.args[0]))
 					try {
-						const ownerResult = await providerBase.call({ to: adminAA as `0x${string}`, data: '0x8da5cb5b' })
+						const ownerResult = await providerBase.call({ to: calldataTo as `0x${string}`, data: '0x8da5cb5b' })
 						if (ownerResult && ownerResult !== '0x') {
 							const [owner] = new ethers.Interface(['function owner() view returns (address)']).decodeFunctionResult('owner', ownerResult)
-							if (owner && owner !== ethers.ZeroAddress) adminEOA = ethers.getAddress(String(owner))
+							if (owner && owner !== ethers.ZeroAddress) ownerOfCalldataToIfContract = ethers.getAddress(String(owner))
 						}
 					} catch (_) { /* ignore */ }
 				}
 			}
-			// 规范 AA（UserCardFactory._aaFactory → beamioAccountOf，与资产/OpenContainer 一致）
 			let canonicalAAForSignerEOA: string | null = null
-			let canonicalAAForAdminTargetEOA: string | null = null
-			let adminTargetEOA: string | null = adminEOA
-			if (!adminTargetEOA && isAddingAdmin) {
-				const rawBody = (req.body?.adminEOA as string)?.trim()
-				if (rawBody && ethers.isAddress(rawBody)) adminTargetEOA = ethers.getAddress(rawBody)
-			}
+			let canonicalAAForBodyAdminEOA: string | null = null
+			const bodyAdminRaw = (req.body?.adminEOA as string)?.trim()
+			const bodyAdminEOA = bodyAdminRaw && ethers.isAddress(bodyAdminRaw) ? ethers.getAddress(bodyAdminRaw) : null
 			if (signerAddr && ethers.isAddress(signerAddr)) {
 				try {
 					canonicalAAForSignerEOA = await resolveBeamioAaForEoaWithFallback(providerBase, signerAddr)
 				} catch (_) { /* ignore */ }
 			}
-			if (adminTargetEOA && ethers.isAddress(adminTargetEOA)) {
+			if (isAddingAdmin && bodyAdminEOA) {
 				try {
-					canonicalAAForAdminTargetEOA = await resolveBeamioAaForEoaWithFallback(providerBase, adminTargetEOA)
+					canonicalAAForBodyAdminEOA = await resolveBeamioAaForEoaWithFallback(providerBase, bodyAdminEOA)
 				} catch (_) { /* ignore */ }
 			}
 			const fmtAa = (a: string | null) => (a && ethers.isAddress(a) ? a : 'N/A')
-			// adminAA = 离线签字 data 中 adminManager(to,...) 的 to，即登记为 admin 的地址
 			logger(
 				Colors.cyan(
-					`[cardAddAdmin] signer=${signerAddr ?? 'N/A'} cardAddress=${cardAddress ?? 'N/A'} adminEOA=${adminEOA ?? 'N/A'} adminAA=${adminAA ?? 'N/A'} adminSpecifiedInSig=${adminAA ?? 'N/A'} ` +
-						`canonicalAAForSignerEOA=${fmtAa(canonicalAAForSignerEOA)} adminTargetEOA=${adminTargetEOA ?? 'N/A'} canonicalAAForAdminTargetEOA=${fmtAa(canonicalAAForAdminTargetEOA)}`
+					`[cardAddAdmin] signer=${signerAddr ?? 'N/A'} cardAddress=${cardAddress ?? 'N/A'} bodyAdminEOA=${bodyAdminEOA ?? 'N/A'} ` +
+						`calldataTo=${calldataTo ?? 'N/A'} ownerOfCalldataTo(ifContract)=${ownerOfCalldataToIfContract ?? 'N/A'} ` +
+						`canonicalAAForSignerEOA=${fmtAa(canonicalAAForSignerEOA)} canonicalAAForBodyAdminEOA=${fmtAa(canonicalAAForBodyAdminEOA)} ` +
+						`(on-card admin identity is EOA=calldataTo; AA is for Beamio spend paths)`
 				)
 			)
 		} catch (e: any) {
@@ -2875,8 +2929,11 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			if (!adminEOA || !ethers.isAddress(adminEOA)) {
 				return res.status(400).json({ success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }).end()
 			}
+			const adminNorm = ethers.getAddress(adminEOA)
+			let ensureBody = ''
 			try {
-				const { statusCode, body: ensureBody } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(ethers.getAddress(adminEOA)))
+				const { statusCode, body: eb } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(adminNorm))
+				ensureBody = eb
 				if (statusCode !== 200) {
 					const err = (() => { try { const j = JSON.parse(ensureBody); return j?.error ?? 'Failed to ensure AA for EOA' } catch { return 'Failed to ensure AA for EOA' } })()
 					return res.status(400).json({ success: false, error: err }).end()
@@ -2884,6 +2941,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			} catch (e: any) {
 				logger(Colors.red(`[cardAddAdminByAdmin] ensureAAForEOA failed: ${e?.message ?? e}`))
 				return res.status(502).json({ success: false, error: 'Failed to ensure AA for EOA' }).end()
+			}
+			const visible = await assertAdminEoaHasVisibleAaAfterEnsure(adminNorm, ensureBody, 'cardAddAdminByAdmin')
+			if (!visible.ok) {
+				return res.status(400).json({ success: false, error: visible.error }).end()
 			}
 		}
 		const preCheck = await cardAddAdminByAdminPreCheck(req.body)
@@ -3660,7 +3721,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
-	/** GET /api/ensureAAForEOA?eoa=0x... - 为 EOA 确保存在 AA（无则创建），返回 AA 地址。登记 admin 前 UI 必须传 EOA 调用此接口获取 AA。 */
+	/** GET /api/ensureAAForEOA?eoa=0x... - 转发 Master；返回 { aa }。cardAddAdmin 须用真实商户 EOA，adminManager.to 须与同 body.adminEOA 一致。 */
 	router.get('/ensureAAForEOA', async (req, res) => {
 		const { eoa } = req.query as { eoa?: string }
 		if (!eoa || !ethers.isAddress(eoa)) {

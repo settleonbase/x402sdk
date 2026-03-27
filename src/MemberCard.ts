@@ -775,8 +775,10 @@ export const ensureAAForMintTarget = async (targetAddress: string): Promise<void
 }
 
 /**
- * 为 EOA 确保存在 AA，返回 AA 地址。供 UI 登记 admin 前调用：UI 仅传 EOA，由此获取 AA 再构建 adminManager(AA,...) 并签字。
- * 登记 admin 必须使用 AA 账号；UI 送入 endpoint 的账号默认必须为 EOA，不能传送预测 AA。
+ * 为 EOA 确保存在 AA，返回 AA 地址。Cluster 在 cardAddAdmin 添加 admin 前会调用（经 /api/ensureAAForEOA）。
+ *
+ * 注意：cardAddAdminPreCheck 要求 adminManager 的 **to** 与 **body.adminEOA** 为同一地址，且 **to** 上无合约代码（链上登记的是 **EOA** 身份；AA 供 Beamio 扣款/OpenContainer 等路径）。
+ * 必须传入真实商户 **EOA**；若误传占位/缓存错误地址，ensure 会为该错误地址创建 AA，但卡上登记的 admin 仍是该错误 EOA，后续业务会失败。
  */
 export const ensureAAForEOA = async (eoa: string): Promise<string> => {
 	const pool = Settle_ContractPool
