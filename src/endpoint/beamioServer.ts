@@ -13,11 +13,11 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
-import { BASE_AA_FACTORY, BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
-import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -976,10 +976,13 @@ const routing = ( router: Router ) => {
 				unitPriceUSDC6 = String(up)
 			} catch (_) { /* ignore */ }
 			try {
-				const aaFactoryAbi = ['function beamioUserCard() view returns (address)']
-				const aaFactory = new ethers.Contract(BASE_AA_FACTORY, aaFactoryAbi, providerBase)
-				const uc = await aaFactory.beamioUserCard()
-				if (uc && uc !== ethers.ZeroAddress) beamioUserCard = ethers.getAddress(uc)
+				const aaFacAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerBase, BASE_CARD_FACTORY)
+				if (aaFacAddr) {
+					const aaFactoryAbi = ['function beamioUserCard() view returns (address)']
+					const aaFactory = new ethers.Contract(aaFacAddr, aaFactoryAbi, providerBase)
+					const uc = await aaFactory.beamioUserCard()
+					if (uc && uc !== ethers.ZeroAddress) beamioUserCard = ethers.getAddress(uc)
+				}
 			} catch (_) { /* ignore */ }
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
 			const cardsStaged: {
@@ -1316,7 +1319,11 @@ const routing = ( router: Router ) => {
 			}
 			for (const { required, points } of cardBalances) {
 				if (points < required) {
-					logger(Colors.yellow(`[payByNfcUidSignContainer] Cluster 预检失败: CCSA 点数不足 需=${required} 有=${points}`))
+					logger(
+						Colors.yellow(
+							`[payByNfcUidSignContainer] Cluster 预检失败: 卡内点数不足（container account）需=${required} 有=${points}。若与 getUIDAssets 不一致，请确认 payByNfcUidPrepare 使用 UserCard 绑定 AA。`
+						)
+					)
 					return res.status(400).json({ success: false, error: '余额不足' }).end()
 				}
 			}

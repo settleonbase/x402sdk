@@ -449,7 +449,7 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** GET /api/getAAAccount?eoa=0x... - 与 UserCard getOwnershipByEOA 一致：CARD_FACTORY._aaFactory → beamioAccountOf / primaryAccountOf，失败回退 BASE_AA_FACTORY。30 秒缓存。 */
+		/** GET /api/getAAAccount?eoa=0x... - 仅 UserCard 绑定 _aaFactory → beamioAccountOf（与 resolveBeamioAaForEoaWithFallback 一致）。30 秒缓存。 */
 		const GET_AA_CACHE_TTL_MS = 30 * 1000
 		const getAAAccountCache = new Map<string, { account: string | null; expiry: number }>()
 		router.get('/getAAAccount', async (req, res) => {

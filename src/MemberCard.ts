@@ -109,7 +109,7 @@ const BeamioUserCardFactoryPaymasterV2 = BASE_CARD_FACTORY
 const BeamioAAAccountFactoryPaymaster = BASE_AA_FACTORY
 const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
-/** UserCard gateway = AA Factory（与 BASE_AA_FACTORY 一致） */
+/** UserCard EIP-712 / gateway：与 `BASE_CARD_FACTORY._aaFactory()` 及 `BASE_AA_FACTORY`（config）一致 */
 const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 
 const BeamioTaskIndexerAddress = BEAMIO_INDEXER_DIAMOND
@@ -397,7 +397,7 @@ masterSetup.settle_contractAdmin.forEach((n: string) => {
 /**
  * 启动时确保 ~/.master.json 的 settle_contractAdmin 地址在以下工厂具备 paymaster 权限：
  * - BeamioUserCardFactoryPaymasterV07（BASE_CARD_FACTORY）：owner + changePaymasterStatus / isPaymaster
- * - BeamioFactoryPaymasterV07（BASE_AA_FACTORY）：admin + addPayMaster / isPayMaster
+ * - BeamioFactoryPaymasterV07（UserCard._aaFactory / BASE_AA_FACTORY）：admin + addPayMaster / isPayMaster
  * - 幂等：已存在则跳过
  * - 仅使用 settle_contractAdmin[0] 作为写入 signer，避免多 signer/multi-worker 并发 nonce 冲突
  * - 卡工厂与 AA 工厂分别校验 on-chain owner/admin；一侧不匹配仅跳过该侧，不影响另一侧
@@ -535,9 +535,16 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 			)
 		}
 
-		// ----- AA account factory (BeamioFactoryPaymasterV07) paymasters -----
+		// ----- AA account factory (UserCard._aaFactory，与 chainAddresses BASE_AA_FACTORY 对齐) paymasters -----
+		let aaFactoryAddrForPaymasters = BeamioAAAccountFactoryPaymaster
+		try {
+			const r = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerBaseBackup, BASE_CARD_FACTORY)
+			if (r) aaFactoryAddrForPaymasters = ethers.getAddress(r)
+		} catch {
+			/* use chainAddresses */
+		}
 		const readOnlyAaFactory = new ethers.Contract(
-			BeamioAAAccountFactoryPaymaster,
+			aaFactoryAddrForPaymasters,
 			BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
 			providerBaseBackup
 		)
@@ -550,7 +557,7 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 		const aaAdminOnChainLower = aaAdminOnChain?.toLowerCase() ?? ''
 		if (aaAdminOnChain && ownerWallet.address.toLowerCase() === aaAdminOnChainLower) {
 			const ownerAaFactory = new ethers.Contract(
-				BeamioAAAccountFactoryPaymaster,
+				aaFactoryAddrForPaymasters,
 				BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
 				ownerWallet
 			)
@@ -611,8 +618,41 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 	}
 }
 
+/** Master 启动时与链上 UserCard._aaFactory() 对齐；避免本地 AA_FACTORY 未及时提交时 Settle 池仍指向旧工厂 */
+async function refreshSettlePoolAaFactoryContractsFromUserCard(): Promise<void> {
+	if (!Settle_ContractPool.length) {
+		logger(Colors.yellow('[aa-factory-bind] skip: Settle_ContractPool empty'))
+		return
+	}
+	try {
+		const addr = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerBaseBackup1, BASE_CARD_FACTORY)
+		if (!addr) {
+			logger(Colors.yellow('[aa-factory-bind] UserCard _aaFactory() unreadable; pool keeps chainAddresses BASE_AA_FACTORY'))
+			return
+		}
+		const configured = BeamioAAAccountFactoryPaymaster
+		if (addr.toLowerCase() === configured.toLowerCase()) {
+			logger(Colors.gray(`[aa-factory-bind] On-chain _aaFactory matches chainAddresses (${addr})`))
+			return
+		}
+		logger(
+			Colors.cyan(
+				`[aa-factory-bind] Rebinding aaAccountFactoryPaymaster: config=${configured} -> on-chain=${addr}`
+			)
+		)
+		for (const sc of Settle_ContractPool) {
+			sc.aaAccountFactoryPaymaster = new ethers.Contract(addr, BeamioAAAccountFactoryPaymasterABI, sc.walletBase)
+		}
+	} catch (e: any) {
+		logger(Colors.red(`[aa-factory-bind] failed: ${e?.message ?? e}`))
+	}
+}
+
 if (cluster.isPrimary) {
-	void ensureSettleAdminsAsFactoryPaymasters()
+	void (async () => {
+		await refreshSettlePoolAaFactoryContractsFromUserCard()
+		await ensureSettleAdminsAsFactoryPaymasters()
+	})()
 }
 
 
@@ -7572,7 +7612,7 @@ async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
 	const SC = Settle_ContractPool.shift()
 	if (!SC) throw new Error('Service temporarily unavailable')
 	try {
-		const primary = await SC.aaAccountFactoryPaymaster.primaryAccountOf(ethers.getAddress(nfcPayerEoa))
+		const primary = await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, ethers.getAddress(nfcPayerEoa))
 		if (!primary || ethers.getAddress(primary).toLowerCase() !== aaNorm.toLowerCase()) {
 			throw new Error('NFC AA address mismatch.')
 		}
@@ -9316,11 +9356,12 @@ export const payByNfcUidOpenContainer = async (params: {
 	try {
 		const wallet = new ethers.Wallet(privateKey)
 		const eoa = await wallet.getAddress()
-		const aa = await SC.aaAccountFactoryPaymaster.primaryAccountOf(eoa)
-		if (!aa || aa === ethers.ZeroAddress) {
+		const aaRaw = await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, eoa)
+		if (!aaRaw) {
 			logger(Colors.yellow(`[payByNfcUidOpenContainer] EOA ${eoa} has no AA, fallback to simple USDC`))
 			return { pushed: false, error: 'NO_AA' }
 		}
+		const aa = ethers.getAddress(aaRaw)
 		const aaCode = await SC.walletBase.provider!.getCode(aa)
 		if (!aaCode || aaCode === '0x') return { pushed: false, error: 'NO_AA' }
 		const lbOpen = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa, payerEoa: eoa })
@@ -9380,11 +9421,20 @@ export const payByNfcUidOpenContainer = async (params: {
 			const payeeCode = await SC.walletBase.provider!.getCode(toResolved)
 			const isPayeeEOA = !payeeCode || payeeCode === '0x'
 			if (isPayeeEOA) {
-				let payeeAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(toResolved)
-				if (!payeeAA || payeeAA === ethers.ZeroAddress) {
+				let payeeAA = (await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, toResolved)) ?? null
+				if (!payeeAA) {
 					logger(Colors.cyan(`[payByNfcUidOpenContainer] payee ${toResolved} is EOA with no AA, creating AA for them...`))
 					try {
-						const { accountAddress } = await DeployingSmartAccount(toResolved, SC.aaAccountFactoryPaymaster)
+						const facAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(SC.walletBase.provider!, BASE_CARD_FACTORY)
+						if (!facAddr) {
+							return { pushed: false, error: '无法解析 AA 工厂，请稍后重试。' }
+						}
+						const payeeFac = new ethers.Contract(
+							facAddr,
+							BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
+							SC.walletBase
+						)
+						const { accountAddress } = await DeployingSmartAccount(toResolved, payeeFac)
 						if (!accountAddress) {
 							logger(Colors.red(`[payByNfcUidOpenContainer] DeployingSmartAccount failed for payee=${toResolved}`))
 							return { pushed: false, error: '无法为收款方创建 Beamio AA 账户，请稍后重试。' }
@@ -9397,7 +9447,7 @@ export const payByNfcUidOpenContainer = async (params: {
 						return { pushed: false, error: `无法为收款方创建 AA：${msg}` }
 					}
 				}
-				toResolved = payeeAA
+				toResolved = ethers.getAddress(payeeAA)
 			}
 		}
 		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aa, 'relayed')
@@ -9484,14 +9534,22 @@ export const payByAccountPrepare = async (params: {
 		const payeeCode = await SC.walletBase.provider!.getCode(toResolved)
 		const isPayeeEOA = !payeeCode || payeeCode === '0x'
 		if (isPayeeEOA) {
-			let payeeAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(toResolved)
-			if (!payeeAA || payeeAA === ethers.ZeroAddress) {
+			let payeeAA = (await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, toResolved)) ?? null
+			if (!payeeAA) {
 				try {
-					const { accountAddress } = await DeployingSmartAccount(toResolved, SC.aaAccountFactoryPaymaster)
-					if (accountAddress) payeeAA = accountAddress
+					const facAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(SC.walletBase.provider!, BASE_CARD_FACTORY)
+					if (facAddr) {
+						const payeeFac = new ethers.Contract(
+							facAddr,
+							BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
+							SC.walletBase
+						)
+						const { accountAddress } = await DeployingSmartAccount(toResolved, payeeFac)
+						if (accountAddress) payeeAA = accountAddress
+					}
 				} catch (_) { /* ignore */ }
 			}
-			if (payeeAA && payeeAA !== ethers.ZeroAddress) toResolved = payeeAA
+			if (payeeAA) toResolved = ethers.getAddress(payeeAA)
 		}
 		let unitPriceUSDC6 = 0n
 		try {
@@ -9577,10 +9635,12 @@ export const payByNfcUidPrepare = async (params: {
 	try {
 		const wallet = new ethers.Wallet(privateKey)
 		const eoa = await wallet.getAddress()
-		const aa = await SC.aaAccountFactoryPaymaster.primaryAccountOf(eoa)
-		if (!aa || aa === ethers.ZeroAddress) {
+		// 必须与 getUIDAssets / resolveBeamioAaForEoaWithFallback 一致：用 UserCard 绑定的 _aaFactory()，勿用 BASE_AA_FACTORY.primaryAccountOf
+		const aaRaw = await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, eoa)
+		if (!aaRaw) {
 			return { ok: false, error: 'NO_AA' }
 		}
+		const aa = ethers.getAddress(aaRaw)
 		const aaCode = await SC.walletBase.provider!.getCode(aa)
 		if (!aaCode || aaCode === '0x') return { ok: false, error: 'NO_AA' }
 		const linkBlockPrepare = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa, payerEoa: eoa })
@@ -9589,14 +9649,22 @@ export const payByNfcUidPrepare = async (params: {
 		const payeeCode = await SC.walletBase.provider!.getCode(toResolved)
 		const isPayeeEOA = !payeeCode || payeeCode === '0x'
 		if (isPayeeEOA) {
-			let payeeAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(toResolved)
-			if (!payeeAA || payeeAA === ethers.ZeroAddress) {
+			let payeeAA = (await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, toResolved)) ?? null
+			if (!payeeAA) {
 				try {
-					const { accountAddress } = await DeployingSmartAccount(toResolved, SC.aaAccountFactoryPaymaster)
-					if (accountAddress) payeeAA = accountAddress
+					const facAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(SC.walletBase.provider!, BASE_CARD_FACTORY)
+					if (facAddr) {
+						const payeeFac = new ethers.Contract(
+							facAddr,
+							BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
+							SC.walletBase
+						)
+						const { accountAddress } = await DeployingSmartAccount(toResolved, payeeFac)
+						if (accountAddress) payeeAA = accountAddress
+					}
 				} catch (_) { /* ignore */ }
 			}
-			if (payeeAA && payeeAA !== ethers.ZeroAddress) toResolved = payeeAA
+			if (payeeAA) toResolved = ethers.getAddress(payeeAA)
 		}
 		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aa, 'relayed')
 		const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
@@ -9721,10 +9789,11 @@ export const payByNfcUidSignContainer = async (params: {
 	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
 	const wallet = new ethers.Wallet(privateKey)
 	const eoa = await wallet.getAddress()
-	const aa = (await Settle_ContractPool[0].aaAccountFactoryPaymaster.primaryAccountOf(eoa)) ?? ethers.ZeroAddress
-	if (aa === ethers.ZeroAddress || ethers.getAddress(containerPayload.account) !== aa) {
+	const aaResolved = await resolveBeamioAaForEoaWithFallback(Settle_ContractPool[0].walletBase.provider!, eoa)
+	if (!aaResolved || ethers.getAddress(containerPayload.account) !== ethers.getAddress(aaResolved)) {
 		return { pushed: false, error: 'account 与 UID 对应的 AA 不一致' }
 	}
+	const aa = ethers.getAddress(aaResolved)
 	const linkBlockCharge = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa, payerEoa: eoa })
 	if (linkBlockCharge) {
 		return { pushed: false, error: linkBlockCharge, httpStatus: 403 }
