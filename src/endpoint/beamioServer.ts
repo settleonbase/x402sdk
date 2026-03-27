@@ -870,7 +870,6 @@ const routing = ( router: Router ) => {
 			let aaAddr: string
 
 			if (isAA) {
-				aaAddr = addr
 				const aaOwnerAbi = ['function owner() view returns (address)']
 				const aaContract = new ethers.Contract(addr, aaOwnerAbi, providerBase)
 				const owner = await aaContract.owner()
@@ -880,6 +879,21 @@ const routing = ( router: Router ) => {
 					return res.status(404).json(err).end()
 				}
 				eoa = ethers.getAddress(owner)
+				/** 与 getUIDAssets 一致：aaAddress 一律为 UserCard 工厂链路的 canonical AA，禁止沿用调用方传入的「另一工厂」AA */
+				const canonicalAa = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
+				if (!canonicalAa) {
+					const err = { ok: false, error: '该钱包未激活 Beamio 账户' }
+					logger(Colors.yellow(`[getWalletAssets] EOA 无 canonical AA 返回 404: ${JSON.stringify(err)}`))
+					return res.status(404).json(err).end()
+				}
+				if (canonicalAa.toLowerCase() !== addr.toLowerCase()) {
+					logger(
+						Colors.gray(
+							`[getWalletAssets] wallet 传入 AA ${addr} 与卡工厂解析 AA ${canonicalAa} 不一致，返回 canonical（与 getOwnershipByEOA / OpenContainer 一致）`
+						)
+					)
+				}
+				aaAddr = canonicalAa
 			} else {
 				eoa = addr
 				const primary = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
