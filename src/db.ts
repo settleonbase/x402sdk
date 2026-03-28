@@ -492,6 +492,122 @@ export const maybeEnqueueNfcCashTreeBeamioTag = (params: {
 	})()
 }
 
+/**
+ * 无基础设施会员 NFT 可用名时的 NFC 默认 beamioTag：verra_{N}。N 来自全局 beamio_verra_seq；
+ * 若提供 tagIdHex，同一卡复用已写入 nfc_cards.verra_number 的编号（幂等）。
+ */
+export const maybeEnqueueNfcVerraBeamioTag = (params: {
+	wallet: string
+	uid: string
+	tagIdHex?: string | null
+}): void => {
+	void (async () => {
+		try {
+			const wallet = ethers.getAddress(String(params.wallet || '').trim())
+			const uid = String(params.uid || '').trim()
+			if (!uid) return
+
+			const reg = beamio_ContractPool[0]?.constAccountRegistry
+			if (!reg) {
+				logger(Colors.yellow('[maybeEnqueueNfcVerraBeamioTag] no constAccountRegistry'))
+				return
+			}
+
+			let exists = false
+			let accName = ''
+			let fnOn = ''
+			let lnOn = ''
+			try {
+				const o = await reg.getAccount(wallet)
+				exists = !!o?.exists
+				accName = String(o?.accountName ?? '').trim()
+				fnOn = sanitizeName(o?.firstName as string | undefined)
+				lnOn = sanitizeName(o?.lastName as string | undefined)
+			} catch {
+				exists = false
+			}
+			if (exists && accName !== '') return
+
+			const tagRaw = params.tagIdHex != null ? String(params.tagIdHex).trim().replace(/^0x/i, '').toUpperCase() : ''
+			const tagOk = tagRaw.length === 16 && /^[0-9A-F]+$/.test(tagRaw)
+
+			let n: number | null = null
+			if (tagOk) {
+				n = await getNfcVerraNumberByTagId(tagRaw)
+			}
+			if (n == null) {
+				n = await allocateNextVerraNumber()
+				if (tagOk) await setNfcCardVerraNumberIfUnset(tagRaw, n)
+			}
+
+			let expectedName = ''
+			for (let attempt = 0; attempt < 12 && !expectedName; attempt++) {
+				if (attempt > 0) {
+					n = await allocateNextVerraNumber()
+					if (tagOk) await upsertNfcCardVerraNumberByTagId(tagRaw, n)
+				}
+				const cand = buildVerraBeamioAccountName(n)
+				if (!cand) continue
+				let ownerOk = true
+				try {
+					const ow = await reg.getOwnerByAccountName(cand)
+					if (ow && ow !== ethers.ZeroAddress && ow.toLowerCase() !== wallet.toLowerCase()) {
+						ownerOk = false
+					}
+				} catch {
+					ownerOk = true
+				}
+				if (ownerOk) {
+					expectedName = cand
+					break
+				}
+			}
+			if (!expectedName || !BEAMIO_ACCOUNT_NAME_RE.test(expectedName)) {
+				logger(Colors.yellow('[maybeEnqueueNfcVerraBeamioTag] could not allocate unique verra_* name'))
+				return
+			}
+			let tagId = tagOk ? tagRaw : null
+			if (!tagId) tagId = (await getNfcTagIdByUid(uid))?.toUpperCase() ?? null
+
+			const uidF = sanitizeName(uid)
+			const tagF = sanitizeName(tagId || '')
+			if (exists && accName === expectedName && fnOn === uidF && lnOn === tagF) {
+				return
+			}
+
+			const getExistsUserData = await getUserData(expectedName)
+			const fullInput: beamioAccount = {
+				accountName: expectedName,
+				image: '',
+				darkTheme: false,
+				isUSDCFaucet: false,
+				isETHFaucet: false,
+				initialLoading: true,
+				firstName: uidF,
+				lastName: tagF,
+				pgpKeyID: '',
+				pgpKey: '',
+				address: wallet,
+				createdAt: getExistsUserData?.createdAt,
+			}
+			addUserPool.push({
+				wallet,
+				account: fullInput,
+				recover: [],
+				followBeamioOfficial: false,
+			})
+			addUserPoolProcess()
+			logger(
+				Colors.cyan(
+					`[maybeEnqueueNfcVerraBeamioTag] queued setAccountByAdmin wallet=${wallet.slice(0, 10)}… tag=${expectedName} uidLen=${uidF.length} tagIdLen=${tagF.length}`
+				)
+			)
+		} catch (e: any) {
+			logger(Colors.yellow(`[maybeEnqueueNfcVerraBeamioTag] error: ${e?.message ?? e}`))
+		}
+	})()
+}
+
 const addUserPoolProcess = async () => {
 	const obj = addUserPool.shift()
 	if (!obj) {
@@ -848,6 +964,15 @@ const NFC_CARDS_IDX_LINKED_OWNER = `CREATE INDEX IF NOT EXISTS idx_nfc_cards_lin
 /** user-linked 卡：active 允许 NFC 交易；deactive 仅允许查余额；remove 后清空私钥与 linked_owner */
 const NFC_CARDS_ADD_LINK_STATE = `ALTER TABLE nfc_cards ADD COLUMN IF NOT EXISTS nfc_link_state TEXT`
 const NFC_CARDS_PRIVATE_KEY_DROP_NOT_NULL = `ALTER TABLE nfc_cards ALTER COLUMN private_key DROP NOT NULL`
+/** NFC 自动分配的 verra 序号，按 tag_id 绑定便于幂等 */
+const NFC_CARDS_ADD_VERRA_NUMBER = `ALTER TABLE nfc_cards ADD COLUMN IF NOT EXISTS verra_number BIGINT`
+
+/** 全局自增 verra 编号（PostgreSQL 单行原子 UPDATE） */
+const BEAMIO_VERRA_SEQ_TABLE = `CREATE TABLE IF NOT EXISTS beamio_verra_seq (
+	id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+	last_assigned BIGINT NOT NULL DEFAULT 0
+)`
+const BEAMIO_VERRA_SEQ_SEED = `INSERT INTO beamio_verra_seq (id, last_assigned) VALUES (1, 0) ON CONFLICT (id) DO NOTHING`
 
 export const NFC_CARD_LINK_STATE_SCOPE = 'beamio:NfcCardLinkState:v1'
 const NFC_GATE_DEACTIVATED_MSG =
@@ -862,7 +987,99 @@ async function ensureNfcCardsExtendedSchema(db: Client): Promise<void> {
 	await db.query(NFC_CARDS_ADD_LINKED_OWNER)
 	await db.query(NFC_CARDS_ADD_LINK_STATE)
 	await db.query(NFC_CARDS_PRIVATE_KEY_DROP_NOT_NULL)
+	await db.query(NFC_CARDS_ADD_VERRA_NUMBER)
 	await db.query(NFC_CARDS_IDX_LINKED_OWNER)
+}
+
+async function ensureBeamioVerraSeqSchema(db: Client): Promise<void> {
+	await db.query(BEAMIO_VERRA_SEQ_TABLE)
+	await db.query(BEAMIO_VERRA_SEQ_SEED)
+}
+
+/** 分配下一个 verra 序号（全局递增，持久化在 beamio_verra_seq） */
+export const allocateNextVerraNumber = async (): Promise<number> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioVerraSeqSchema(db)
+		const { rows } = await db.query<{ last_assigned: string }>(
+			`UPDATE beamio_verra_seq SET last_assigned = last_assigned + 1 WHERE id = 1 RETURNING last_assigned`
+		)
+		const n = rows[0]?.last_assigned
+		return n != null ? Number(n) : 1
+	} catch (e: any) {
+		logger(Colors.yellow(`[allocateNextVerraNumber] failed: ${e?.message ?? e}`))
+		return 1
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export const getNfcVerraNumberByTagId = async (tagIdHex: string): Promise<number | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	const normalized = String(tagIdHex || '').trim().replace(/^0x/i, '').toUpperCase()
+	if (!normalized || normalized.length !== 16 || !/^[0-9A-F]+$/.test(normalized)) return null
+	try {
+		await db.connect()
+		await ensureNfcCardsExtendedSchema(db)
+		const { rows } = await db.query<{ verra_number: string | null }>(
+			`SELECT verra_number FROM nfc_cards WHERE UPPER(TRIM(tag_id)) = $1 LIMIT 1`,
+			[normalized]
+		)
+		const v = rows[0]?.verra_number
+		if (v == null) return null
+		const n = Number(v)
+		return Number.isFinite(n) && n > 0 ? n : null
+	} catch (e: any) {
+		logger(Colors.yellow(`[getNfcVerraNumberByTagId] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export const setNfcCardVerraNumberIfUnset = async (tagIdHex: string, verraNum: number): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	const normalized = String(tagIdHex || '').trim().replace(/^0x/i, '').toUpperCase()
+	if (!normalized || normalized.length !== 16 || !/^[0-9A-F]+$/.test(normalized) || !Number.isFinite(verraNum) || verraNum <= 0) return
+	try {
+		await db.connect()
+		await ensureNfcCardsExtendedSchema(db)
+		await db.query(
+			`UPDATE nfc_cards SET verra_number = $2 WHERE UPPER(TRIM(tag_id)) = $1 AND (verra_number IS NULL OR verra_number <= 0)`,
+			[normalized, verraNum]
+		)
+	} catch (e: any) {
+		logger(Colors.yellow(`[setNfcCardVerraNumberIfUnset] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export const upsertNfcCardVerraNumberByTagId = async (tagIdHex: string, verraNum: number): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	const normalized = String(tagIdHex || '').trim().replace(/^0x/i, '').toUpperCase()
+	if (!normalized || normalized.length !== 16 || !/^[0-9A-F]+$/.test(normalized) || !Number.isFinite(verraNum) || verraNum <= 0) return
+	try {
+		await db.connect()
+		await ensureNfcCardsExtendedSchema(db)
+		await db.query(`UPDATE nfc_cards SET verra_number = $2 WHERE UPPER(TRIM(tag_id)) = $1`, [normalized, verraNum])
+	} catch (e: any) {
+		logger(Colors.yellow(`[upsertNfcCardVerraNumberByTagId] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/**
+ * NFC 自动 beamioTag：verra_{N}（链上 accountName 不允许 `-`，与 CashTreeDamo_* 一致用 `_`）。
+ * 展示语义可为 verra-N，链上/DB 存 verra_N。
+ */
+export const buildVerraBeamioAccountName = (verraNumber: number): string => {
+	const n = Math.floor(Number(verraNumber))
+	if (!Number.isFinite(n) || n <= 0) return ''
+	const s = `verra_${n}`
+	return BEAMIO_ACCOUNT_NAME_RE.test(s) ? s : ''
 }
 
 function normalizeNfcLinkStateRow(state: string | null | undefined, hasPk: boolean): 'active' | 'deactive' | 'removed' {

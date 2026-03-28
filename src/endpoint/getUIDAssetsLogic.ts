@@ -4,9 +4,15 @@
 import { ethers } from 'ethers'
 import { logger } from '../logger'
 import Colors from 'colors/safe'
-import { getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken } from '../db'
+import {
+	getCardByAddress,
+	getNftTierMetadataByCardAndToken,
+	getNftTierMetadataByOwnerAndToken,
+	beamio_ContractPool,
+	maybeEnqueueNfcCashTreeBeamioTag,
+	maybeEnqueueNfcVerraBeamioTag,
+} from '../db'
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
-import { maybeEnqueueNfcCashTreeBeamioTag } from '../db'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
@@ -25,10 +31,38 @@ const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> =>
 	resolveBeamioAaForEoaWithFallback(providerBase, eoa)
 
+/**
+ * 从链上 AccountRegistry 读 EOA 的 beamioTag（accountName）；去掉首尾空白与前缀 `@`。
+ * 无登记、`exists` 为 false 或 RPC 失败时返回 undefined。
+ */
+export async function fetchBeamioTagForEoa(eoa: string): Promise<string | undefined> {
+	let eoaAddr: string
+	try {
+		eoaAddr = ethers.getAddress(String(eoa || '').trim())
+	} catch {
+		return undefined
+	}
+	const reg = beamio_ContractPool[0]?.constAccountRegistry
+	if (!reg) return undefined
+	try {
+		const o = await reg.getAccount(eoaAddr)
+		if (!o?.exists) return undefined
+		const raw = String(o.accountName ?? '')
+			.trim()
+			.replace(/^@+/, '')
+			.trim()
+		return raw !== '' ? raw : undefined
+	} catch {
+		return undefined
+	}
+}
+
 export type FetchUIDAssetsResult = {
 	ok: true
 	address: string
 	aaAddress?: string
+	/** AccountRegistry `accountName`（无 `@`）；无链上账户或未设置时省略 */
+	beamioTag?: string
 	usdcBalance: string
 	cards: Array<{
 		cardAddress: string
@@ -183,10 +217,12 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 	})
 	const cards = cardsStaged.map((s) => s.row)
 	const cardsFiltered = cards.filter((c) => !DEPRECATED_INFRA_CARDS.has(c.cardAddress.toLowerCase()))
+	const beamioTag = await fetchBeamioTagForEoa(eoaAddr)
 	return {
 		ok: true,
 		address: eoaAddr,
 		aaAddress: aaAddr || undefined,
+		...(beamioTag != null && beamioTag !== '' ? { beamioTag } : {}),
 		usdcBalance,
 		cards: cardsFiltered,
 	}
@@ -206,8 +242,83 @@ export const pickInfrastructureCashTreeTierTokenId = (
 	return withT.reduce((a, b) => (Number(b.tokenId) > Number(a.tokenId) ? b : a)).tokenId
 }
 
+const INFRA_OWNERSHIP_ABI = [
+	'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+	'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
+] as const
+
+/** 仅查基础设施卡在链上的主会员 tokenId（与 fetchUIDAssetsForEOA 一致），供无 cards 数组时的 NFC 入口 */
+export async function pickInfrastructureCashTreeTierTokenIdFromChain(eoa: string): Promise<string | null> {
+	const eoaAddr = ethers.getAddress(eoa)
+	try {
+		if (DEPRECATED_INFRA_CARDS.has(BEAMIO_USER_CARD_ASSET_ADDRESS.toLowerCase())) return null
+		const card = new ethers.Contract(BEAMIO_USER_CARD_ASSET_ADDRESS, INFRA_OWNERSHIP_ABI, providerBase)
+		const [, nfts] = (await card.getOwnershipByEOA(eoaAddr)) as [
+			bigint,
+			{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }[],
+		]
+		const pick = await pickBestMembershipNftByMinUsdc6(
+			card,
+			nfts.map((nft) => ({
+				tokenId: nft.tokenId,
+				tierIndexOrMax: nft.tierIndexOrMax,
+				isExpired: nft.isExpired,
+			}))
+		)
+		return pick?.tokenId ?? null
+	} catch {
+		return null
+	}
+}
+
 /**
- * NFC 余额查询成功后：若已持有基础设施卡 NFT，则确保 AccountRegistry beamioTag（CashTreeDamo_* / 与 db 约定一致）。
+ * NFC 流程在校验 SUN、且 EOA 已有部署 AA 之后：若链上尚无 beamioTag，则排队登记。
+ * 优先基础设施卡 NFT 对应的 CashTreeDamo_*；否则分配 verra_{N}（全局序号 + nfc_cards.verra_number）。
+ */
+export function scheduleEnsureNfcBeamioTagForEoa(
+	eoa: string,
+	uid: string,
+	tagIdHex: string | null | undefined,
+	cards: FetchUIDAssetsResult['cards'] | null | undefined
+): void {
+	void (async () => {
+		try {
+			const wallet = ethers.getAddress(String(eoa || '').trim())
+			const uidS = String(uid || '').trim()
+			if (!uidS) return
+			const reg = beamio_ContractPool[0]?.constAccountRegistry
+			if (!reg) return
+			let accName = ''
+			let exists = false
+			try {
+				const o = await reg.getAccount(wallet)
+				exists = !!o?.exists
+				accName = String(o?.accountName ?? '').trim()
+			} catch {
+				exists = false
+			}
+			if (exists && accName !== '') return
+
+			let tierTokenId: string | null = null
+			if (cards && cards.length > 0) {
+				tierTokenId = pickInfrastructureCashTreeTierTokenId(cards)
+			}
+			if (!tierTokenId) {
+				tierTokenId = await pickInfrastructureCashTreeTierTokenIdFromChain(wallet)
+			}
+			if (tierTokenId) {
+				maybeEnqueueNfcCashTreeBeamioTag({ wallet, uid: uidS, tagIdHex, tierTokenId })
+			} else {
+				maybeEnqueueNfcVerraBeamioTag({ wallet, uid: uidS, tagIdHex })
+			}
+		} catch (e: unknown) {
+			logger(Colors.yellow(`[scheduleEnsureNfcBeamioTagForEoa] ${(e as Error)?.message ?? e}`))
+		}
+	})()
+}
+
+/**
+ * @deprecated Prefer scheduleEnsureNfcBeamioTagForEoa（含无 NFT 时的 verra_*）
  */
 export const ensureNfcCashTreeBeamioTagAfterFetch = (
 	eoa: string,
@@ -215,12 +326,5 @@ export const ensureNfcCashTreeBeamioTagAfterFetch = (
 	tagIdHex: string | null | undefined,
 	cards: FetchUIDAssetsResult['cards']
 ): void => {
-	const tid = pickInfrastructureCashTreeTierTokenId(cards)
-	if (!tid) return
-	maybeEnqueueNfcCashTreeBeamioTag({
-		wallet: eoa,
-		uid,
-		tagIdHex: tagIdHex ?? null,
-		tierTokenId: tid,
-	})
+	scheduleEnsureNfcBeamioTagForEoa(eoa, uid, tagIdHex, cards)
 }

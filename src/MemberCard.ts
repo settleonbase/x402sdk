@@ -95,7 +95,7 @@ import {
 	getNfcCardSignedTxGateByUid,
 	type NfcLinkAppSessionDb,
 } from './db'
-import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './endpoint/getUIDAssetsLogic'
+import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './endpoint/getUIDAssetsLogic'
 import {
 	getAaFactoryAddressFromUserCardFactoryPaymaster,
 	resolveBeamioAaForEoaWithFallback,
@@ -6576,7 +6576,7 @@ export const ContainerRelayProcess = async () => {
     if (obj.nfcUid && obj.nfcPayerEoa && ethers.isAddress(obj.nfcPayerEoa)) {
       void fetchUIDAssetsForEOA(obj.nfcPayerEoa)
         .then((r) => {
-          ensureNfcCashTreeBeamioTagAfterFetch(ethers.getAddress(obj.nfcPayerEoa!), obj.nfcUid!, null, r.cards)
+          scheduleEnsureNfcBeamioTagForEoa(ethers.getAddress(obj.nfcPayerEoa!), obj.nfcUid!, null, r.cards)
         })
         .catch((err: any) => {
           logger(Colors.yellow(`[ContainerRelayProcess] NFC beamioTag ensure fetch skipped: ${err?.message ?? err}`))
@@ -9592,6 +9592,7 @@ export const payByNfcUidPrepare = async (params: {
 	if (amountBig <= 0n) return { ok: false, error: 'Invalid amountUsdc6' }
 	const uidTrim = uid.trim()
 	const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
+	let nfcSunTagForScheduler: string | null = null
 	let privateKey: string | null
 	if (isNfcUid) {
 		const eTrim = typeof e === 'string' ? e.trim() : ''
@@ -9613,6 +9614,7 @@ export const payByNfcUidPrepare = async (params: {
 				return { ok: false, error: gateTag.message }
 			}
 			privateKey = await getNfcCardPrivateKeyByTagId(sunResult.tagIdHex)
+			nfcSunTagForScheduler = sunResult.tagIdHex
 			logger(Colors.gray(`[payByNfcUidPrepare] SUN OK uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
 		} catch (sunErr: any) {
 			const msg = sunErr?.message ?? String(sunErr)
@@ -9676,6 +9678,7 @@ export const payByNfcUidPrepare = async (params: {
 			logger(Colors.yellow(`[payByNfcUidPrepare] quote failed: ${(e as Error)?.message}`))
 			return { ok: false, error: 'Quote failed' }
 		}
+		scheduleEnsureNfcBeamioTagForEoa(eoa, uidTrim, nfcSunTagForScheduler, null)
 		return {
 			ok: true,
 			account: aa,
@@ -9748,6 +9751,7 @@ export const payByNfcUidSignContainer = async (params: {
 	)
 	const uidTrim = uid.trim()
 	const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
+	let nfcSunTagForScheduler: string | null = null
 	let privateKey: string | null
 	if (isNfcUid) {
 		const eTrim = typeof e === 'string' ? e.trim() : ''
@@ -9769,6 +9773,7 @@ export const payByNfcUidSignContainer = async (params: {
 				return { pushed: false, error: gateTagSc.message, httpStatus: 403 }
 			}
 			privateKey = await getNfcCardPrivateKeyByTagId(sunResult.tagIdHex)
+			nfcSunTagForScheduler = sunResult.tagIdHex
 			logger(Colors.gray(`[payByNfcUidSignContainer] SUN OK uid=${uidTrim.slice(0, 12)}... tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
 		} catch (sunErr: any) {
 			const msg = sunErr?.message ?? String(sunErr)
@@ -9848,6 +9853,7 @@ export const payByNfcUidSignContainer = async (params: {
 			res,
 		})
 		logger(Colors.green(`[payByNfcUidSignContainer] pushed uid=${uid.slice(0, 12)}... items=${containerPayload.items.length}`))
+		scheduleEnsureNfcBeamioTagForEoa(eoa, uidTrim, nfcSunTagForScheduler, null)
 		ContainerRelayProcess().catch((err: any) => logger(Colors.red('[ContainerRelayProcess] unhandled:'), err?.message ?? err))
 		return { pushed: true }
 	} catch (e: any) {

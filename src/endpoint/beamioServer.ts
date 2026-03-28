@@ -15,7 +15,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
-import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
+import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
@@ -514,8 +514,17 @@ const routing = ( router: Router ) => {
 			}
 			const eoa = await getNfcRecipientAddressByTagId(result.tagIdHex)
 			if (eoa) {
-				const aaAddr = await resolveBeamioAccountOf(eoa)
-				return res.status(200).json({ ...result, eoa, aa: aaAddr ?? undefined }).end()
+				const eoaAddr = ethers.getAddress(eoa)
+				const aaAddr = await resolveBeamioAccountOf(eoaAddr)
+				let hasDeployedAA = false
+				if (aaAddr && aaAddr !== ethers.ZeroAddress) {
+					const code = await providerBase.getCode(aaAddr)
+					hasDeployedAA = !!(code && code !== '0x' && code.length > 2)
+				}
+				if (hasDeployedAA) {
+					scheduleEnsureNfcBeamioTagForEoa(eoaAddr, result.uidHex, result.tagIdHex, null)
+				}
+				return res.status(200).json({ ...result, eoa: eoaAddr, aa: aaAddr ?? undefined }).end()
 			}
 			logger(Colors.cyan(`[sun] tagId=${result.tagIdHex.slice(0, 8)}... 未绑定钱包，转发 Master 创建`))
 			postLocalhost('/api/sunProvision', { uid: result.uidHex, tagIdHex: result.tagIdHex, sunResult: result }, res)
@@ -875,7 +884,7 @@ const routing = ( router: Router ) => {
 				...(nfcExtras ?? {}),
 			}
 			if (nfcSunTagIdHex) {
-				ensureNfcCashTreeBeamioTagAfterFetch(eoa, uidTrim, nfcSunTagIdHex, result.cards)
+				scheduleEnsureNfcBeamioTagForEoa(eoa, uidTrim, nfcSunTagIdHex, result.cards)
 			}
 			const resultJson = JSON.stringify(merged, null, 2)
 			logger(Colors.cyan(`[getUIDAssets] 返回客户端 JSON (uid=${uidTrim}):\n${resultJson}`))
@@ -1097,6 +1106,7 @@ const routing = ( router: Router ) => {
 			})
 			const cards = cardsStaged.map((s) => s.row)
 			const firstCard = cards[0]
+			const beamioTag = await fetchBeamioTagForEoa(eoa)
 			const result = {
 				ok: true,
 				address: eoa,
@@ -1110,6 +1120,7 @@ const routing = ( router: Router ) => {
 				nfts: firstCard?.nfts ?? [],
 				unitPriceUSDC6,
 				beamioUserCard: beamioUserCard || undefined,
+				...(beamioTag != null && beamioTag !== '' ? { beamioTag } : {}),
 			}
 			const resultJson = JSON.stringify(result, null, 2)
 			logger(Colors.cyan(`[getWalletAssets] 返回客户端 JSON (wallet=${eoa}):\n${resultJson}`))
@@ -1558,6 +1569,7 @@ const routing = ( router: Router ) => {
 		const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
 		let resolvedWallet: string | undefined = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim()) ? ethers.getAddress(wallet.trim()) : undefined
 		const hasBeamioTag = beamioTag && typeof beamioTag === 'string' && beamioTag.trim().length > 0
+		let nfcSunTagForEnsure: string | null = null
 		if (hasBeamioTag && !resolvedWallet) {
 			try {
 				const owner = await SC.getOwnerByAccountName(beamioTag!.trim())
@@ -1603,6 +1615,7 @@ const routing = ( router: Router ) => {
 					return res.status(403).json(err).end()
 				}
 				resolvedWallet = ethers.getAddress(eoaFromTag)
+				nfcSunTagForEnsure = sunResult.tagIdHex
 				logger(Colors.gray(`[nfcTopupPrepare] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}... wallet=${resolvedWallet.slice(0, 10)}...`))
 			} catch (sunErr: any) {
 				const msg = sunErr?.message ?? String(sunErr)
@@ -1623,6 +1636,19 @@ const routing = ( router: Router ) => {
 			const parsed = JSON.parse(body)
 			if (resolvedWallet && (hasBeamioTag || (hasUid && isNfcUid)) && parsed.cardAddr && !parsed.error) {
 				parsed.wallet = resolvedWallet
+			}
+			if (resolvedWallet && hasUid && isNfcUid && nfcSunTagForEnsure && parsed.cardAddr && !parsed.error) {
+				try {
+					const aa = await resolveBeamioAccountOf(ethers.getAddress(resolvedWallet))
+					if (aa && aa !== ethers.ZeroAddress) {
+						const code = await providerBase.getCode(aa)
+						if (code && code !== '0x' && code.length > 2) {
+							scheduleEnsureNfcBeamioTagForEoa(ethers.getAddress(resolvedWallet), uidTrim, nfcSunTagForEnsure, null)
+						}
+					}
+				} catch (_) {
+					/* non-fatal */
+				}
 			}
 			res.status(statusCode).json(parsed).end()
 		} catch (e: any) {
@@ -1771,6 +1797,19 @@ const routing = ( router: Router ) => {
 				}
 			}
 			logger(Colors.green(`server /api/nfcTopup preCheck OK | uid=${uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'} | fee=${Number(bunitFeeCheck.feeAmount ?? 0) / 1e6} B-Units | forwarding to master`))
+			if (isNfcUid && nfcLinkedEOA && nfcTagIdHex && ethers.isAddress(nfcLinkedEOA)) {
+				try {
+					const aaNfc = await resolveBeamioAccountOf(ethers.getAddress(nfcLinkedEOA))
+					if (aaNfc && aaNfc !== ethers.ZeroAddress) {
+						const codeNfc = await providerBase.getCode(aaNfc)
+						if (codeNfc && codeNfc !== '0x' && codeNfc.length > 2) {
+							scheduleEnsureNfcBeamioTagForEoa(ethers.getAddress(nfcLinkedEOA), uidTrim, nfcTagIdHex, null)
+						}
+					}
+				} catch (_) {
+					/* non-fatal */
+				}
+			}
 			postLocalhost('/api/nfcTopup', {
 				cardAddr: cardAddress,
 				data,

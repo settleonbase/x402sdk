@@ -12,7 +12,7 @@ import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
-import { fetchUIDAssetsForEOA, ensureNfcCashTreeBeamioTagAfterFetch } from './getUIDAssetsLogic'
+import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
 const masterServerPort = 1111
@@ -506,7 +506,7 @@ const routing = ( router: Router ) => {
 				if (wasNewlyProvisioned) logger(Colors.green(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
 				const result = await fetchUIDAssetsForEOA(eoa)
 				if (uid && tagIdHex) {
-					ensureNfcCashTreeBeamioTagAfterFetch(eoa, uid.trim(), tagIdHex, result.cards)
+					scheduleEnsureNfcBeamioTagForEoa(eoa, uid.trim(), tagIdHex, result.cards)
 				}
 				const counterVal = counterHex && /^[0-9a-fA-F]{6}$/.test(counterHex) ? parseInt(counterHex, 16) : undefined
 				const merged = {
@@ -548,7 +548,13 @@ const routing = ( router: Router ) => {
 				// 始终确保 AA 存在（与 getUIDAssetsProvision 一致）
 				const aa = await ensureAAForEOA(ethers.getAddress(eoa))
 				if (wasNewlyProvisioned) logger(Colors.green(`[sunProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
-				res.status(200).json({ ...sunResult, eoa, aa }).end()
+				const eoaAddr = ethers.getAddress(eoa)
+				const uidForTag =
+					(typeof uid === 'string' && uid.trim()
+						? uid.trim()
+						: String((sunResult as { uidHex?: string }).uidHex ?? '').trim()) || tagIdHex
+				scheduleEnsureNfcBeamioTagForEoa(eoaAddr, uidForTag, tagIdHex, null)
+				res.status(200).json({ ...sunResult, eoa: eoaAddr, aa }).end()
 			} catch (err: any) {
 				const msg = err?.message ?? String(err)
 				logger(Colors.red(`[sunProvision] tagId=${tagIdHex.slice(0, 8)}... failed: ${msg}`))
@@ -1685,7 +1691,7 @@ const routing = ( router: Router ) => {
 				try {
 					const payerEoa = ethers.getAddress(await wallet.getAddress())
 					const assets = await fetchUIDAssetsForEOA(payerEoa)
-					ensureNfcCashTreeBeamioTagAfterFetch(payerEoa, uid.trim(), null, assets.cards)
+					scheduleEnsureNfcBeamioTagForEoa(payerEoa, uid.trim(), null, assets.cards)
 				} catch (tagErr: any) {
 					logger(Colors.yellow(`[payByNfcUid] NFC beamioTag ensure after fallback: ${tagErr?.message ?? tagErr}`))
 				}
