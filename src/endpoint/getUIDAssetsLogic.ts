@@ -120,6 +120,7 @@ function displayNameFromCardMetadata(m: Record<string, unknown> | null | undefin
 export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOptions): Promise<FetchUIDAssetsResult> => {
 	const eoaAddr = ethers.getAddress(eoa)
 	const cardAbi = [
+		'function getOwnership(address user) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 		'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 		'function currency() view returns (uint8)',
 		'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
@@ -161,7 +162,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			cardName = displayNameFromCardMetadata(cardRow?.metadata ?? undefined) ?? fallbackDisplayName
 			const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
 			const [[pointsBalance, nfts], currencyNum] = await Promise.all([
-				card.getOwnershipByEOA(eoaAddr),
+				aaAddr ? card.getOwnership(aaAddr) : card.getOwnershipByEOA(eoaAddr),
 				card.currency(),
 			])
 			const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
@@ -190,6 +191,12 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			if (bestNft) {
 				try {
 					let tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestNft.tokenId)
+					if (!tierMeta && aaAddr) {
+						tierMeta = await getNftTierMetadataByOwnerAndToken(aaAddr, bestNft.tokenId)
+					}
+					if (!tierMeta) {
+						tierMeta = await getNftTierMetadataByOwnerAndToken(eoaAddr, bestNft.tokenId)
+					}
 					if (!tierMeta && cardRow?.cardOwner) {
 						tierMeta = await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, bestNft.tokenId)
 					}
@@ -316,6 +323,7 @@ export const pickInfrastructureCashTreeTierTokenId = (
 }
 
 const INFRA_OWNERSHIP_ABI = [
+	'function getOwnership(address user) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 	'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 	'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
 ] as const
@@ -325,8 +333,9 @@ export async function pickInfrastructureCashTreeTierTokenIdFromChain(eoa: string
 	const eoaAddr = ethers.getAddress(eoa)
 	try {
 		if (DEPRECATED_INFRA_CARDS.has(BEAMIO_USER_CARD_ASSET_ADDRESS.toLowerCase())) return null
+		const aaAddr = await resolveBeamioAccountOf(eoaAddr)
 		const card = new ethers.Contract(BEAMIO_USER_CARD_ASSET_ADDRESS, INFRA_OWNERSHIP_ABI, providerBase)
-		const [, nfts] = (await card.getOwnershipByEOA(eoaAddr)) as [
+		const [, nfts] = (await (aaAddr ? card.getOwnership(aaAddr) : card.getOwnershipByEOA(eoaAddr))) as [
 			bigint,
 			{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }[],
 		]
