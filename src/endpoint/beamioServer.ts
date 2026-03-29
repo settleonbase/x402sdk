@@ -849,16 +849,26 @@ const routing = ( router: Router ) => {
 
 	/** 解析 POS 可选字段：`merchantInfraCard` 指定终端登记的基础设施卡；`merchantInfraOnly` 为真时仅返回该卡一行（须有效 merchantInfraCard）。 */
 	const parseMerchantInfraFetchOptions = (body: unknown): FetchUIDAssetsOptions => {
-		const b = body as { merchantInfraCard?: string; merchantInfraOnly?: boolean }
+		const b = body as { merchantInfraCard?: string; merchantInfraOnly?: boolean; cardsScope?: string; includeZeroBalanceCards?: boolean }
 		const raw = typeof b?.merchantInfraCard === 'string' ? b.merchantInfraCard.trim() : ''
 		const resolved =
 			raw !== '' && ethers.isAddress(raw)
 				? ethers.getAddress(raw)
 				: undefined
 		const merchantInfraOnly = b?.merchantInfraOnly === true && !!resolved
+		const scopeRaw = typeof b?.cardsScope === 'string' ? b.cardsScope.trim().toLowerCase() : ''
+		let cardsScope: FetchUIDAssetsOptions['cardsScope'] = undefined
+		if (merchantInfraOnly) {
+			cardsScope = 'merchantInfraOnly'
+		} else if (scopeRaw === 'infrastructureonly' || scopeRaw === 'infraonly') {
+			cardsScope = 'infrastructureOnly'
+		} else if (scopeRaw === 'all') {
+			cardsScope = 'all'
+		}
 		return {
 			...(resolved ? { infrastructureCardAddress: resolved } : {}),
-			...(merchantInfraOnly ? { cardsScope: 'merchantInfraOnly' as const } : {}),
+			...(cardsScope ? { cardsScope } : {}),
+			...(b?.includeZeroBalanceCards === true ? { includeZeroBalanceCards: true } : {}),
 		}
 	}
 

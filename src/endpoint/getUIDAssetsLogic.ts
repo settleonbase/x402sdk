@@ -86,9 +86,10 @@ export type FetchUIDAssetsOptions = {
 	infrastructureCardAddress?: string
 	/**
 	 * `merchantInfraOnly`：仅返回该基础设施卡一行（含余额为 0），用于 POS「Check Balance」。
-	 * `all`：CCSA + 基础设施（与历史行为一致）。
+	 * `infrastructureOnly`：仅查询/返回解析后的基础设施卡（`merchantInfraCard` 或默认常量），不附带 CCSA。
+	 * `all`（默认）：CCSA + 基础设施（与历史行为一致）。
 	 */
-	cardsScope?: 'all' | 'merchantInfraOnly'
+	cardsScope?: 'all' | 'merchantInfraOnly' | 'infrastructureOnly'
 	/** getWalletAssets 历史行为：即使 points/NFT 全空也返回该卡一行。 */
 	includeZeroBalanceCards?: boolean
 }
@@ -103,6 +104,17 @@ const resolveInfrastructureCardAddress = (opt?: string): string => {
 		}
 	}
 	return BEAMIO_USER_CARD_ASSET_ADDRESS
+}
+
+/** 与 MemberCard / cardMetadata 一致：优先 shareTokenMetadata.name，其次顶层 name。 */
+function displayNameFromCardMetadata(m: Record<string, unknown> | null | undefined): string | null {
+	if (!m || typeof m !== 'object') return null
+	const stm = m.shareTokenMetadata as Record<string, unknown> | undefined
+	const n1 = stm?.name
+	if (typeof n1 === 'string' && n1.trim()) return n1.trim()
+	const n2 = m.name
+	if (typeof n2 === 'string' && n2.trim()) return n2.trim()
+	return null
 }
 
 export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOptions): Promise<FetchUIDAssetsResult> => {
@@ -127,15 +139,26 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
 	const infraAddr = resolveInfrastructureCardAddress(opts?.infrastructureCardAddress)
 	const merchantInfraOnly = opts?.cardsScope === 'merchantInfraOnly'
-	const cardAddresses: { address: string; name: string; type: string }[] = merchantInfraOnly
-		? [{ address: infraAddr, name: 'CashTrees Card', type: 'infrastructure' }]
+	const infrastructureOnly = opts?.cardsScope === 'infrastructureOnly'
+	const singleInfraScope = merchantInfraOnly || infrastructureOnly
+	const infraFallbackName = 'Infrastructure card'
+	const cardAddresses: { address: string; name: string; type: string }[] = singleInfraScope
+		? [{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' }]
 		: [
 				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
-				{ address: infraAddr, name: 'CashTrees Card', type: 'infrastructure' },
+				{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' },
 			].filter(({ address }) => !DEPRECATED_INFRA_CARDS.has(address.toLowerCase()))
 	const cardsStaged: { row: FetchUIDAssetsResult['cards'][number]; sortMin: bigint }[] = []
-	for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
+	for (const { address: cardAddr, name: fallbackDisplayName, type: cardType } of cardAddresses) {
+		let cardName = fallbackDisplayName
 		try {
+			let cardRow: { cardOwner: string; metadata: Record<string, unknown> | null } | null = null
+			try {
+				cardRow = await getCardByAddress(cardAddr)
+			} catch {
+				/* DB 失败仍用链上数据 */
+			}
+			cardName = displayNameFromCardMetadata(cardRow?.metadata ?? undefined) ?? fallbackDisplayName
 			const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
 			const [[pointsBalance, nfts], currencyNum] = await Promise.all([
 				card.getOwnershipByEOA(eoaAddr),
@@ -164,10 +187,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				}))
 			)
 			const bestNft = pick ? nftList.find((n: { tokenId: string }) => n.tokenId === pick.tokenId) ?? null : null
-			let cardRow: { cardOwner: string; metadata: Record<string, unknown> | null } | null = null
 			if (bestNft) {
 				try {
-					cardRow = await getCardByAddress(cardAddr)
 					let tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestNft.tokenId)
 					if (!tierMeta && cardRow?.cardOwner) {
 						tierMeta = await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, bestNft.tokenId)
@@ -237,7 +258,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			}
 		} catch (cardErr: unknown) {
 			logger(Colors.gray(`[fetchUIDAssetsForEOA] card=${cardAddr} skip: ${(cardErr as Error)?.message ?? cardErr}`))
-			if (merchantInfraOnly && cardAddr.toLowerCase() === infraAddr.toLowerCase()) {
+			if (singleInfraScope && cardAddr.toLowerCase() === infraAddr.toLowerCase()) {
 				try {
 					const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
 					const currencyNum = await card.currency()
