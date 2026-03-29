@@ -1,8 +1,10 @@
 /**
- * 将卡登记 `metadata.tiers[]` 中的行与链上 `tierIndexOrMax` 对齐。
+ * 将卡登记 `metadata.tiers[]` 中的行与链上 `tierIndexOrMax` / NFT `attribute` 对齐。
  *
- * **优先**用链上槽位 `tierIndex`：`metadata.tiers[].index === tierIndex`，否则数组下标 `tierIndex`（与 registerCard 默认一致）。
- * **仅当**上述无法得到一行时，再回退用 `tiers(tierIndex).minUsdc6` 在 JSON 中筛选并用 `index` / `attr` 消歧。
+ * 1. **按槽位** `tierIndex`（`index === tier` 或数组下标）命中一行后，若该行有 `attr` 且与 NFT `attribute` 不一致，**弃用**（常见：登记里 index 与链上 tiers(i) 错位）。
+ * 2. 若 NFT `attribute` 在 JSON 中**唯一**命中一行 `tiers[].attr`，用该行。
+ * 3. 再用 `tiers(tierIndex).minUsdc6` 筛选并消歧。
+ * 4. 最后任取 `attr` 匹配的第一行。
  */
 export type CardTierMetadataRow = {
 	index?: number
@@ -13,6 +15,16 @@ export type CardTierMetadataRow = {
 	description?: string
 	image?: string
 	backgroundColor?: string
+}
+
+/** 与链上 attributes[tokenId]、登记 tiers[].attr 一致时才接受「按槽位」选中的行。 */
+function rowAttrConsistentWithNft(row: CardTierMetadataRow, primaryNftAttribute?: string | null): boolean {
+	const attrStr = primaryNftAttribute?.trim() ?? ''
+	if (attrStr === '') return true
+	const n = Number.parseInt(attrStr, 10)
+	if (!Number.isFinite(n)) return true
+	if (row.attr == null) return true
+	return row.attr === n
 }
 
 /** 与 getUIDAssets 旧版 pickCardMetadataTierRow 一致：显式 index 优先，否则用数组下标。 */
@@ -59,8 +71,15 @@ function disambiguateTierRows(
 	return pool[0]!
 }
 
+function parseNftAttrNum(primaryNftAttribute?: string | null): number | null {
+	const attrStr = primaryNftAttribute?.trim() ?? ''
+	if (attrStr === '') return null
+	const n = Number.parseInt(attrStr, 10)
+	return Number.isFinite(n) ? n : null
+}
+
 /**
- * @param chainMinStr / chainAttrBn 仅在「按 tierIndex 找不到行」时使用（需与链上 tiers(tierIndex) 一致）。
+ * @param chainMinStr / chainAttrBn 来自链上 `tiers(tierIndex)`，用于 minUsdc6 回退路径。
  */
 export function pickTierMetadataRowForChainSlot(
 	tiersRaw: CardTierMetadataRow[],
@@ -72,19 +91,21 @@ export function pickTierMetadataRowForChainSlot(
 	if (!Array.isArray(tiersRaw) || tiersRaw.length === 0) return null
 
 	const byIndexFirst = pickTierRowByStrictIndex(tiersRaw, tierIndexChain)
-	if (byIndexFirst) return byIndexFirst
+	if (byIndexFirst && rowAttrConsistentWithNft(byIndexFirst, primaryNftAttribute)) return byIndexFirst
+
+	const attrNum = parseNftAttrNum(primaryNftAttribute)
+	if (attrNum != null) {
+		const byAttrUnique = tiersRaw.filter((r) => r.attr === attrNum)
+		if (byAttrUnique.length === 1) return byAttrUnique[0]!
+	}
 
 	const candidates = tiersRaw.filter((row) => rowMatchesChainMin(row, chainMinStr))
 	const fromMin = disambiguateTierRows(candidates, tierIndexChain, primaryNftAttribute, chainAttrBn)
 	if (fromMin) return fromMin
 
-	const attrStr = primaryNftAttribute?.trim() ?? ''
-	if (attrStr !== '') {
-		const n = Number.parseInt(attrStr, 10)
-		if (Number.isFinite(n)) {
-			const byAttr = tiersRaw.find((r) => r.attr === n)
-			if (byAttr) return byAttr
-		}
+	if (attrNum != null) {
+		const byAttr = tiersRaw.find((r) => r.attr === attrNum)
+		if (byAttr) return byAttr
 	}
 
 	return null
