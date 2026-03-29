@@ -2130,7 +2130,7 @@ export const registerCardToDb = async (params: {
 	currency: string
 	priceInCurrencyE6: string
 	uri?: string
-	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[] }
+	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[]; Symbol?: string }
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
 	txHash?: string
 }): Promise<void> => {
@@ -2164,7 +2164,16 @@ export const registerCardToDb = async (params: {
 				params.txHash ?? null,
 			]
 		)
-		logger(Colors.green(`[registerCardToDb] registered card=${params.cardAddress}`))
+		const cats = params.shareTokenMetadata?.categories
+		if (Array.isArray(cats) && cats.length > 0) {
+			logger(
+				Colors.green(
+					`[registerCardToDb] registered card=${params.cardAddress} categories=${cats.filter((c) => typeof c === 'string' && c.trim()).join(',')}`
+				)
+			)
+		} else {
+			logger(Colors.green(`[registerCardToDb] registered card=${params.cardAddress}`))
+		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[registerCardToDb] failed: ${e?.message ?? e}`))
 	} finally {
@@ -2281,8 +2290,8 @@ export const getNftTierMetadataByCardAndToken = async (cardAddress: string, toke
 	}
 }
 
-/** 最新发行的前 N 张卡明细 */
-export const getLatestCards = async (limit = 20): Promise<Array<{
+/** 与 getLatestCards 单行结构一致，供分类聚合等接口复用 */
+export type BeamioLatestCardItem = {
 	cardAddress: string
 	cardOwner: string
 	currency: string
@@ -2293,7 +2302,34 @@ export const getLatestCards = async (limit = 20): Promise<Array<{
 	totalPointsMinted6: string
 	holderCount: number
 	createdAt: string
-}>> => {
+}
+
+const mapBeamioCardSqlRow = (r: {
+	card_address: string
+	card_owner: string
+	currency: string
+	price_in_currency_e6: string
+	uri: string | null
+	metadata_json: unknown
+	tx_hash: string | null
+	total_points_minted_6: unknown
+	holder_count: unknown
+	created_at: Date | string
+}): BeamioLatestCardItem => ({
+	cardAddress: r.card_address,
+	cardOwner: r.card_owner,
+	currency: r.currency,
+	priceInCurrencyE6: r.price_in_currency_e6,
+	uri: r.uri,
+	metadata: (r.metadata_json && typeof r.metadata_json === 'object') ? (r.metadata_json as Record<string, unknown>) : null,
+	txHash: r.tx_hash,
+	totalPointsMinted6: String(r.total_points_minted_6 ?? 0),
+	holderCount: Number(r.holder_count ?? 0),
+	createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+})
+
+/** 最新发行的前 N 张卡明细 */
+export const getLatestCards = async (limit = 20): Promise<BeamioLatestCardItem[]> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
@@ -2306,24 +2342,87 @@ export const getLatestCards = async (limit = 20): Promise<Array<{
 			`,
 			[limit]
 		)
-		return rows.map((r: any) => ({
-			cardAddress: r.card_address,
-			cardOwner: r.card_owner,
-			currency: r.currency,
-			priceInCurrencyE6: r.price_in_currency_e6,
-			uri: r.uri,
-			metadata: r.metadata_json,
-			txHash: r.tx_hash,
-			totalPointsMinted6: String(r.total_points_minted_6 ?? 0),
-			holderCount: Number(r.holder_count ?? 0),
-			createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
-		}))
+		return (rows as any[]).map(mapBeamioCardSqlRow)
 	} catch (e: any) {
 		logger(Colors.yellow(`[getLatestCards] failed: ${e?.message ?? e}`))
 		return []
 	} finally {
 		await db.end().catch(() => {})
 	}
+}
+
+/**
+ * 从 beamio_cards 拉取「含 shareTokenMetadata.categories 非空」的最近若干张卡（按 created_at 降序）。
+ * createCard → registerCardToDb 已将 categories 写入 metadata_json，用于分类登记与聚合。
+ */
+export const getRecentCategorizedBeamioCards = async (limit = 800): Promise<BeamioLatestCardItem[]> => {
+	const cap = Math.min(Math.max(limit, 1), 3000)
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_CARDS_TABLE)
+		const { rows } = await db.query(
+			`
+			SELECT card_address, card_owner, currency, price_in_currency_e6, uri, metadata_json, tx_hash, total_points_minted_6, holder_count, created_at
+			FROM beamio_cards
+			WHERE jsonb_typeof(COALESCE(metadata_json->'shareTokenMetadata'->'categories', '[]'::jsonb)) = 'array'
+			  AND jsonb_array_length(COALESCE(metadata_json->'shareTokenMetadata'->'categories', '[]'::jsonb)) > 0
+			ORDER BY created_at DESC
+			LIMIT $1
+			`,
+			[cap]
+		)
+		return (rows as any[]).map(mapBeamioCardSqlRow)
+	} catch (e: any) {
+		logger(Colors.yellow(`[getRecentCategorizedBeamioCards] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/**
+ * 按 categoryId 聚合发卡：每张卡可出现在多个 category（metadata 中多个 id）。
+ * `scanLimit`：最多扫描多少张「已带 categories」的最近发卡；`limitPerCategory`：每个 category 最多返回几张卡（仍按 created_at 全局顺序填充）。
+ */
+export const getLatestCardsGroupedByCategory = async (options?: {
+	scanLimit?: number
+	limitPerCategory?: number
+}): Promise<Array<{ categoryId: string; items: BeamioLatestCardItem[] }>> => {
+	const scanLimit = Math.min(Math.max(options?.scanLimit ?? 800, 1), 3000)
+	const limitPerCategory = Math.min(Math.max(options?.limitPerCategory ?? 80, 1), 500)
+	const flat = await getRecentCategorizedBeamioCards(scanLimit)
+	const byCat = new Map<string, BeamioLatestCardItem[]>()
+	const seenInCat = new Map<string, Set<string>>()
+	for (const card of flat) {
+		const meta = card.metadata
+		const stm = meta && typeof meta.shareTokenMetadata === 'object' ? (meta.shareTokenMetadata as Record<string, unknown>) : null
+		const raw = stm?.categories
+		const cats =
+			Array.isArray(raw) ?
+				(raw as unknown[])
+					.filter((c): c is string => typeof c === 'string' && c.trim() !== '')
+					.map((c) => c.trim())
+					.slice(0, 32)
+			:	[]
+		for (const cat of cats) {
+			if (!byCat.has(cat)) {
+				byCat.set(cat, [])
+				seenInCat.set(cat, new Set())
+			}
+			const set = seenInCat.get(cat)!
+			const lo = card.cardAddress.toLowerCase()
+			if (set.has(lo)) continue
+			set.add(lo)
+			const arr = byCat.get(cat)!
+			if (arr.length < limitPerCategory) {
+				arr.push(card)
+			}
+		}
+	}
+	return Array.from(byCat.entries())
+		.map(([categoryId, items]) => ({ categoryId, items }))
+		.sort((a, b) => a.categoryId.localeCompare(b.categoryId))
 }
 
 /** 登记 issued NFT 系列到 DB（createIssuedNft 成功后由 API/daemon 调用）；metadataJson 为通用型 JSON，支持电影/演唱会/商品等场景；ipfsCid 可选，无 IPFS 时用 metadataJson 作为 shared metadata */

@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet} from '../db'
+import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -343,6 +343,7 @@ const QUERY_CACHE_TTL_MS = 30 * 1000
 const redeemStatusBatchCache = new Map<string, { body: string; expiry: number }>()
 const searchHelpCache = new Map<string, { body: string; expiry: number }>()
 const latestCardsCache = new Map<string, { body: string; expiry: number }>()
+const cardsByCategoryCache = new Map<string, { body: string; expiry: number }>()
 const getNFTMetadataCache = new Map<string, { body: string; expiry: number }>()
 const ownerNftSeriesCache = new Map<string, { body: string; expiry: number }>()
 const seriesSharedMetadataCache = new Map<string, { body: string; expiry: number }>()
@@ -1834,6 +1835,31 @@ const routing = ( router: Router ) => {
 		const body = JSON.stringify({ items })
 		latestCardsCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 		res.status(200).json({ items })
+	})
+
+	/**
+	 * 按 shareTokenMetadata.categories 聚合已登记发卡（beamio_cards.metadata_json）。
+	 * Query: scanLimit（默认 800，最大 3000）、limitPerCategory（默认 80，最大 500）。
+	 * 返回 { groups: [{ categoryId, items }] }，与 latestCards 相同排除列表。
+	 */
+	router.get('/cardsByCategory', async (req, res) => {
+		const scanLimit = Math.min(parseInt(String(req.query.scanLimit || 800), 10) || 800, 3000)
+		const limitPerCategory = Math.min(parseInt(String(req.query.limitPerCategory || 80), 10) || 80, 500)
+		const cacheKey = `scan:${scanLimit}:per:${limitPerCategory}`
+		const cached = cardsByCategoryCache.get(cacheKey)
+		if (cached && Date.now() < cached.expiry) {
+			return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body)
+		}
+		const rawGroups = await getLatestCardsGroupedByCategory({ scanLimit, limitPerCategory })
+		const groups = rawGroups
+			.map((g) => ({
+				categoryId: g.categoryId,
+				items: g.items.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase())),
+			}))
+			.filter((g) => g.items.length > 0)
+		const body = JSON.stringify({ groups })
+		cardsByCategoryCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+		res.status(200).setHeader('Content-Type', 'application/json').send(body)
 	})
 
 	/** GET /api/searchHelp?card=0x... - 返回该卡已定义的全部 issued NFT 列表。30 秒缓存 */

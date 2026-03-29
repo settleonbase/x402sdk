@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, removePOSPool, removePOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
@@ -79,6 +79,7 @@ const QUERY_CACHE_TTL_MS = 30 * 1000
 const searchHelpCache = new Map<string, { items: unknown[]; expiry: number }>()
 const getNFTMetadataCache = new Map<string, { out: Record<string, unknown>; expiry: number }>()
 const latestCardsCache = new Map<string, { items: unknown[]; expiry: number }>()
+const cardsByCategoryCache = new Map<string, { groups: unknown[]; expiry: number }>()
 const getFollowStatusCache = new Map<string, { data: unknown; expiry: number }>()
 const getMyFollowStatusCache = new Map<string, { data: unknown; expiry: number }>()
 const ownerNftSeriesCache = new Map<string, { items: unknown[]; expiry: number }>()
@@ -380,6 +381,20 @@ const routing = ( router: Router ) => {
 			const items = await getLatestCards(limit)
 			latestCardsCache.set(cacheKey, { items, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 			res.status(200).json({ items })
+		})
+
+		/** 按 shareTokenMetadata.categories 聚合已登记发卡（与 Cluster GET /api/cardsByCategory 一致） */
+		router.get('/cardsByCategory', async (_req, res) => {
+			const scanLimit = Math.min(parseInt(String(_req.query.scanLimit || 800), 10) || 800, 3000)
+			const limitPerCategory = Math.min(parseInt(String(_req.query.limitPerCategory || 80), 10) || 80, 500)
+			const cacheKey = `scan:${scanLimit}:per:${limitPerCategory}`
+			const cached = cardsByCategoryCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json({ groups: cached.groups })
+			}
+			const groups = await getLatestCardsGroupedByCategory({ scanLimit, limitPerCategory })
+			cardsByCategoryCache.set(cacheKey, { groups, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+			res.status(200).json({ groups })
 		})
 
 		/** GET /api/myCards?owner=0x... 或 ?owners=0x1,0x2 - 客户端 RPC 失败时可由此 API 获取。30 秒缓存。
