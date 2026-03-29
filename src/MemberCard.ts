@@ -6806,7 +6806,7 @@ export type CreateCardPreChecked = {
 	transferWhitelistEnabled?: boolean
 	/** 0=topup delta; 1=points balance; 2=cumulative points to admin */
 	upgradeType?: 0 | 1 | 2
-	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[]; Symbol?: string }
+	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[] }
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
 }
 
@@ -6818,7 +6818,7 @@ export const createCardPreCheck = (body: {
 	uri?: string
 	transferWhitelistEnabled?: unknown
 	upgradeType?: unknown
-	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: unknown; Symbol?: unknown }
+	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: unknown }
 	tiers?: unknown[]
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
 	const validCurrency = ['CAD', 'USD', 'JPY', 'CNY', 'USDC', 'HKD', 'EUR', 'SGD', 'TWD']
@@ -6863,18 +6863,6 @@ export const createCardPreCheck = (body: {
 				if (c.length > 64) {
 					return { success: false, error: `shareTokenMetadata.categories[${i}] is too long (max 64)` }
 				}
-			}
-		}
-		if (stm.Symbol != null) {
-			if (typeof stm.Symbol !== 'string') {
-				return { success: false, error: 'shareTokenMetadata.Symbol must be a string if provided' }
-			}
-			const s = stm.Symbol.trim()
-			if (!s) {
-				return { success: false, error: 'shareTokenMetadata.Symbol must be non-empty if provided' }
-			}
-			if (s.length > 48) {
-				return { success: false, error: 'shareTokenMetadata.Symbol is too long (max 48)' }
 			}
 		}
 	}
@@ -6931,9 +6919,6 @@ export const createCardPreCheck = (body: {
 		if (stm.description != null) meta.description = String(stm.description)
 		if (stm.image != null && typeof stm.image === 'string') meta.image = stm.image
 		if (stm.categories != null) meta.categories = stm.categories as string[]
-		if (stm.Symbol != null && typeof stm.Symbol === 'string' && stm.Symbol.trim() !== '') {
-			meta.Symbol = stm.Symbol.trim()
-		}
 		if (Object.keys(meta).length > 0) {
 			normalizedShareTokenMetadata = meta
 		}
@@ -7046,9 +7031,6 @@ export const createCardPoolPress = async () => {
 						.map((c) => c.trim())
 						.slice(0, 32)
 				:	[]
-			const symRaw = (shareTokenMetadata as { Symbol?: unknown } | undefined)?.Symbol
-			const symbolStr =
-				typeof symRaw === 'string' && symRaw.trim() !== '' ? symRaw.trim().slice(0, 48) : undefined
 			const metaContent = JSON.stringify({
 				...(name && { name }),
 				...(description != null && { description }),
@@ -7059,7 +7041,6 @@ export const createCardPoolPress = async () => {
 						...(description != null && { description }),
 						...(image && { image }),
 						...(categories.length > 0 && { categories }),
-						...(symbolStr && { Symbol: symbolStr }),
 					},
 				}),
 				...(tiers && tiers.length > 0 && { tiers }),
