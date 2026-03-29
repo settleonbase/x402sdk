@@ -3954,7 +3954,11 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					const ophHex = rawOph && rawOph !== ethers.ZeroHash && ethers.isHexString(rawOph) && ethers.dataLength(rawOph) === 32 ? (rawOph.startsWith('0x') ? rawOph : '0x' + rawOph) : ''
 					const baseTxHash = !isRequestAccounting && ophHex && ethers.dataLength(ophHex) === 32 ? ophHex : undefined
 					const originalPaymentHash = isRequestAccounting && ophHex && ethers.dataLength(ophHex) === 32 ? ophHex : undefined
-					const title = (isRequestAccounting || isSendUSDC || isX402Send) ? 'Service Fee (0.8%)' : 'B-Unit Burn'
+					const title = isRequestAccounting
+						? 'Service Fee (0.8%)'
+						: isSendUSDC || isX402Send
+							? 'Service Fee'
+							: 'B-Unit Burn'
 					const subtitle = isRequestAccounting
 						? `Payment Request ${ophHex ? ophHex.slice(-3) : '—'}`
 						: (isSendUSDC || isX402Send)

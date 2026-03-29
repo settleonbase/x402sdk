@@ -957,6 +957,56 @@ function calcBeamioBUnitFee(amountUSDC6: bigint): { bServiceUnits6: bigint; bSer
   return { bServiceUnits6: clamped, bServiceUSDC6 }
 }
 
+/** Charge（OpenContainer / Container）：每笔固定 2 B-Unit（6 位小数），不按转账金额比例 */
+const CHARGE_FIXED_BUNIT_FEE_UNITS6 = 2_000_000n
+
+function calcChargeFixedBUnitFee(): { bServiceUnits6: bigint; bServiceUSDC6: bigint } {
+  const bServiceUnits6 = CHARGE_FIXED_BUNIT_FEE_UNITS6
+  const bServiceUSDC6 = bServiceUnits6 / 100n // 1 B-Unit = 0.01 USDC
+  return { bServiceUnits6, bServiceUSDC6 }
+}
+
+/** CoNET B-Unit ERC20 风格余额合约（balanceOfAll），与 beamioServer /api/getBUnitBalance 一致 */
+const CONET_BUINT_TOKEN_ADDRESS = '0x4A3E59519eE72B9dCf376f0617fF0a0a5a1ef879'
+
+/** Charge consumeFromUser revert 时拉取与 Cluster 预检同源的 getBUnitBalance，并附带代币 balanceOfAll 供对照 */
+async function logChargeConsumeFromUserDiagnostics(
+	providerConetLike: ethers.Provider,
+	feePayerEOA: string,
+	feeBUnits6: bigint,
+	usdcAmountRaw: bigint,
+	consumeTxHash: string | undefined,
+	basePaymentHash: string,
+	label: string
+): Promise<void> {
+	try {
+		const airdropRead = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function getBUnitBalance(address) view returns (uint256)'],
+			providerConetLike
+		)
+		const buintRead = new ethers.Contract(
+			CONET_BUINT_TOKEN_ADDRESS,
+			['function balanceOfAll(address) view returns (uint256 total, uint256 free, uint256 paid)'],
+			providerConetLike
+		)
+		const [balAirdrop, balAll] = await Promise.all([
+			airdropRead.getBUnitBalance(feePayerEOA),
+			buintRead.balanceOfAll(feePayerEOA),
+		])
+		const [total, free, paid] = balAll
+		logger(
+			Colors.yellow(
+				`[${label}] consumeFromUser diagnostic feePayer=${feePayerEOA} baseHash=${basePaymentHash} consumeTx=${consumeTxHash ?? 'n/a'} ` +
+					`usdcAmount6=${usdcAmountRaw.toString()} feeBUnits6=${feeBUnits6.toString()} (${Number(feeBUnits6) / 1e6} B-Units) ` +
+					`getBUnitBalance(airdrop)=${balAirdrop.toString()} balanceOfAll total/free/paid=${total}/${free}/${paid}`
+			)
+		)
+	} catch (e: any) {
+		logger(Colors.yellow(`[${label}] consumeFromUser diagnostic read failed: ${e?.shortMessage ?? e?.message ?? e}`))
+	}
+}
+
 const OLD_ERROR_SELECTORS: Record<string, string> = {
 	'0xea8e4eb5': 'NotAuthorized()',
 	'0xd92e233d': 'ZeroAddress()',
@@ -2498,9 +2548,9 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			}
 		}
 
-		// OpenContainer 商户收款：BUnit 由收款方（payee）负担，按 Beamio 收费标准
+		// OpenContainer 商户收款：BUnit 由卡 owner 负担，每笔固定 2 B-Units（与 Cluster / pool 一致）
 		if (obj.source === 'open-container' && feePayer && feePayer !== ethers.ZeroAddress) {
-			const bunitFeeAmount = BigInt(obj.bServiceUnits6 ?? '2000000')
+			const bunitFeeAmount = CHARGE_FIXED_BUNIT_FEE_UNITS6
 			const baseHashBytes32 = txHash as `0x${string}`
 			const baseGas = BigInt(obj.baseGas ?? '0')
 			const bunitAirdropWrite = new ethers.Contract(
@@ -3930,6 +3980,23 @@ export const resolveChargeFeePayerCardFromOpenContainerItems = (items: { kind: n
 	return BEAMIO_USER_CARD_ASSET_ADDRESS
 }
 
+/**
+ * Charge 路径 B-Unit 扣费地址：收款侧 BeamioUserCard（与 resolveChargeFeePayerCardFromOpenContainerItems 同源）的 owner()，
+ * 不再按 admin 层级由 upperAdmin/subordinate 承担。
+ */
+export const resolveChargeBUnitFeePayerCardOwner = async (
+	provider: ethers.Provider,
+	items: { kind: number; asset: string }[]
+): Promise<string> => {
+	const cardAddr = resolveChargeFeePayerCardFromOpenContainerItems(items)
+	const card = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], provider)
+	const owner = (await card.owner()) as string
+	if (!owner || owner === ethers.ZeroAddress) {
+		throw new Error(`Charge B-Unit fee: card ${cardAddr} has no owner`)
+	}
+	return ethers.getAddress(owner)
+}
+
 /** Charge 费用承担方：检测 to（收款方）的上层 admin。若上层是卡的 owner 或 adminParent==0，则 BUint 费用由 to 负担；否则由 upperAdmin 负担。返回 feePayer 的 EOA。 */
 export const resolveChargeFeePayer = async (
 	to: string,
@@ -3973,48 +4040,18 @@ export const resolveChargeFeePayer = async (
 	return { feePayerEOA, payeeEOA }
 }
 
-/** Cluster 预检：Charge（OpenContainer/Container）收款方 feePayer 的 B-Unit 余额必须 >= 按金额计算的费用。0.8% 转账额（换算 USDC），最低 2、最高 200 B-Units；>=5000 USDC 时 500 B-Units。 */
+/** Cluster 预检：Charge（OpenContainer）由收款侧卡 owner 承担 B-Unit，每笔固定 2 B-Units。 */
 export const OpenContainerRelayPreCheckBUnitFee = async (
 	payload: OpenContainerRelayPayload,
-	currency: string | string[],
-	currencyAmount: string | string[]
+	_currency: string | string[],
+	_currencyAmount: string | string[]
 ): Promise<{ success: boolean; error?: string; feeBUnits6?: bigint; feePayerEOA?: string }> => {
 	try {
-		const to = ethers.getAddress(payload.to)
 		const items = payload.items ?? []
-		if (items.length === 0) return { success: false, error: 'items required for fee calculation' }
-		const currencyArr = Array.isArray(currency) ? currency : [currency]
-		const amountArr = Array.isArray(currencyAmount) ? currencyAmount : [currencyAmount]
-		const BeamioCurrencyMap: Record<string, number> = { CAD: 0, USD: 1, JPY: 2, CNY: 3, USDC: 4, HKD: 5, EUR: 6, SGD: 7, TWD: 8, ETH: 9, BNB: 10, SOLANA: 11, BTC: 12 }
-		let totalAmountUSDC6 = 0n
-		for (let i = 0; i < items.length; i++) {
-			const it = items[i]
-			const cur = String(currencyArr[i] ?? currencyArr[0] ?? 'USDC').toUpperCase()
-			const currencyFiat = BeamioCurrencyMap[cur] ?? 4
-			const amountVal = parseFloat(String(amountArr[i] ?? amountArr[0] ?? it.amount))
-			if (!Number.isFinite(amountVal) || amountVal <= 0) continue
-			const requestAmountFiat6 = BigInt(Math.round(amountVal * 1e6))
-			let amountUSDC6: bigint
-			try {
-				const rateE18 = await getRateE18Safe(currencyFiat)
-				const E18 = 10n ** 18n
-				amountUSDC6 = rateE18 > 0n ? (requestAmountFiat6 * rateE18) / E18 : requestAmountFiat6
-			} catch (_) {
-				amountUSDC6 = currencyFiat === 4 ? requestAmountFiat6 : requestAmountFiat6
-			}
-			if (it.asset?.toLowerCase() === USDC_ADDRESS.toLowerCase()) {
-				totalAmountUSDC6 += amountUSDC6
-			} else {
-				// CCSA/infra card: use unitPrice if available; fallback to amount
-				totalAmountUSDC6 += amountUSDC6
-			}
-		}
-		if (totalAmountUSDC6 <= 0n) totalAmountUSDC6 = 1n
-		const { bServiceUnits6: feeBUnits6 } = calcBeamioBUnitFee(totalAmountUSDC6)
-		const feePayerCard = resolveChargeFeePayerCardFromOpenContainerItems(
-			items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
-		)
-		const { feePayerEOA } = await resolveChargeFeePayer(to, feePayerCard, providerBaseBackup)
+		if (items.length === 0) return { success: false, error: 'items required for charge fee check' }
+		const itemSlice = items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
+		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
+		const feePayerEOA = await resolveChargeBUnitFeePayerCardOwner(providerBaseBackup, itemSlice)
 		const bunitAirdropRead = new ethers.Contract(
 			CONET_BUNIT_AIRDROP_ADDRESS,
 			['function getBUnitBalance(address) view returns (uint256)'],
@@ -4024,7 +4061,7 @@ export const OpenContainerRelayPreCheckBUnitFee = async (
 		if (balance < feeBUnits6) {
 			return {
 				success: false,
-				error: `Insufficient B-Units: payee needs ${Number(feeBUnits6) / 1e6} B-Units for charge fee (balance: ${Number(balance) / 1e6} B-Units)`,
+				error: `Insufficient B-Units: card owner needs ${Number(feeBUnits6) / 1e6} B-Units for charge fee (balance: ${Number(balance) / 1e6} B-Units)`,
 			}
 		}
 		return { success: true, feeBUnits6, feePayerEOA }
@@ -4036,41 +4073,26 @@ export const OpenContainerRelayPreCheckBUnitFee = async (
 	}
 }
 
-/** Cluster 预检：Container 路径下按转账金额计算 B-Unit 费用，feePayer（to 的上层 admin 逻辑）余额必须充足。currency/currencyAmount 可选，缺失时用 items[0].amount 作为 USDC6。 */
+/** Cluster 预检：Container 路径下由收款侧卡 owner 承担 B-Unit，每笔固定 2 B-Units。currency/currencyAmount 仅用于校验存在正金额（与转账语义一致）。 */
 export const ContainerRelayPreCheckBUnitBalance = async (
 	containerPayload: ContainerRelayPayload,
 	currency?: string | string[],
 	currencyAmount?: string | string[]
 ): Promise<{ success: boolean; error?: string; feeBUnits6?: bigint; feePayerEOA?: string }> => {
 	try {
-		const to = ethers.getAddress(containerPayload.to)
 		const items = containerPayload.items ?? []
-		if (items.length === 0) return { success: false, error: 'items required for fee calculation' }
-		let totalAmountUSDC6: bigint
+		if (items.length === 0) return { success: false, error: 'items required for charge fee check' }
+		const raw0 = BigInt(items[0]?.amount ?? 0)
+		let amountOk = raw0 > 0n
 		if (currency != null && currencyAmount != null) {
-			const currencyArr = Array.isArray(currency) ? currency : [currency]
 			const amountArr = Array.isArray(currencyAmount) ? currencyAmount : [currencyAmount]
-			const BeamioCurrencyMap: Record<string, number> = { CAD: 0, USD: 1, JPY: 2, CNY: 3, USDC: 4, HKD: 5, EUR: 6, SGD: 7, TWD: 8, ETH: 9, BNB: 10, SOLANA: 11, BTC: 12 }
-			const cur = String(currencyArr[0] ?? 'USDC').toUpperCase()
-			const currencyFiat = BeamioCurrencyMap[cur] ?? 4
-			const amountVal = parseFloat(String(amountArr[0] ?? items[0]?.amount ?? 0))
-			if (!Number.isFinite(amountVal) || amountVal <= 0) {
-				return { success: false, error: 'amount must be > 0 for fee calculation' }
-			}
-			const requestAmountFiat6 = BigInt(Math.round(amountVal * 1e6))
-			try {
-				const rateE18 = await getRateE18Safe(currencyFiat)
-				const E18 = 10n ** 18n
-				totalAmountUSDC6 = rateE18 > 0n ? (requestAmountFiat6 * rateE18) / E18 : requestAmountFiat6
-			} catch (_) {
-				totalAmountUSDC6 = currencyFiat === 4 ? requestAmountFiat6 : requestAmountFiat6
-			}
-		} else {
-			totalAmountUSDC6 = BigInt(items[0]?.amount ?? 0)
+			const amountVal = parseFloat(String(amountArr[0] ?? 0))
+			if (Number.isFinite(amountVal) && amountVal > 0) amountOk = true
 		}
-		if (totalAmountUSDC6 <= 0n) totalAmountUSDC6 = 1n
-		const { bServiceUnits6: feeBUnits6 } = calcBeamioBUnitFee(totalAmountUSDC6)
-		const { feePayerEOA } = await resolveChargeFeePayer(to, BEAMIO_USER_CARD_ASSET_ADDRESS, providerBaseBackup)
+		if (!amountOk) return { success: false, error: 'amount must be > 0 for container relay' }
+		const itemSlice = items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
+		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
+		const feePayerEOA = await resolveChargeBUnitFeePayerCardOwner(providerBaseBackup, itemSlice)
 		const bunitAirdropRead = new ethers.Contract(
 			CONET_BUNIT_AIRDROP_ADDRESS,
 			['function getBUnitBalance(address) view returns (uint256)'],
@@ -4080,7 +4102,7 @@ export const ContainerRelayPreCheckBUnitBalance = async (
 		if (balance < feeBUnits6) {
 			return {
 				success: false,
-				error: `Insufficient B-Units: payee needs ${Number(feeBUnits6) / 1e6} B-Units for charge fee (balance: ${Number(balance) / 1e6} B-Units)`,
+				error: `Insufficient B-Units: card owner needs ${Number(feeBUnits6) / 1e6} B-Units for charge fee (balance: ${Number(balance) / 1e6} B-Units)`,
 			}
 		}
 		return { success: true, feeBUnits6, feePayerEOA }
@@ -5844,14 +5866,14 @@ export const OpenContainerRelayProcess = async () => {
     }
 
     if (collectedRouteItems.length > 0) {
-      // Charge 费用承担方：to 的上层 admin 逻辑（若上层是卡 owner 则 to 负担，否则 upperAdmin 负担）
       const feePayerCard = resolveChargeFeePayerCardFromOpenContainerItems(
         items.map((it) => ({ kind: it.kind, asset: it.asset }))
       )
-      const { feePayerEOA, payeeEOA } = await resolveChargeFeePayer(to, feePayerCard, SC.walletBase.provider!)
-      // Beamio 收费标准：1 USDC=100 BUnit，0.8% 费率，最低 2 BUnit，最高 200 BUnit，>=5000 USDC 时 500 BUnit
+      const feePayerItems = items.map((it) => ({ kind: it.kind, asset: it.asset }))
+      const feePayerEOA = await resolveChargeBUnitFeePayerCardOwner(SC.walletBase.provider!, feePayerItems)
+      const { payeeEOA } = await resolveChargeFeePayer(to, feePayerCard, SC.walletBase.provider!)
       const amountUSDC6ForFee = totalAmountUSDC6ForFee > 0n ? totalAmountUSDC6ForFee : totalAmountE6
-      const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcBeamioBUnitFee(amountUSDC6ForFee)
+      const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcChargeFixedBUnitFee()
       /** 与 ContainerRelay 一致：用 USDC6 等价总额做账本分栏与 TX_TIP 拆分（优于混加 raw item amount） */
       const usdcAmountRaw = amountUSDC6ForFee
 
@@ -6237,9 +6259,9 @@ export const ContainerRelayProcess = async () => {
     if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
     const usdcAmountRaw = obj.amountUSDC6 ? BigInt(obj.amountUSDC6) : BigInt(payload.items[0].amount)
-    // Charge 费用承担方：to 的上层 admin 逻辑；Beamio 收费标准 0.8%，最低 2、最高 200 BUnit，>=5000 USDC 时 500 BUnit
-    const { feePayerEOA } = await resolveChargeFeePayer(to, BEAMIO_USER_CARD_ASSET_ADDRESS, SC.walletBase.provider!)
-    const { bServiceUnits6: feeBUnits6 } = calcBeamioBUnitFee(usdcAmountRaw)
+    const feePayerItems = payload.items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset) }))
+    const feePayerEOA = await resolveChargeBUnitFeePayerCardOwner(SC.walletBase.provider!, feePayerItems)
+    const { bServiceUnits6: feeBUnits6, bServiceUSDC6: containerBUsdc6 } = calcChargeFixedBUnitFee()
     const baseGas = receipt?.gasUsed ?? 0n
     if (feePayerEOA && feePayerEOA !== ethers.ZeroAddress && feeBUnits6 > 0n) {
       const baseHashBytes32 = tx.hash as `0x${string}`
@@ -6257,9 +6279,18 @@ export const ContainerRelayProcess = async () => {
           1n, // kind=1 -> txCategory=keccak256("sendUSDC")
           { gasLimit: 2_500_000 }
         )
-        const consumeRcpt = await consumeTx.wait().catch((waitErr: any) => {
+        const consumeRcpt = await consumeTx.wait().catch(async (waitErr: any) => {
           try {
             logger(Colors.yellow(`[AAtoEOA/Container] consumeFromUser tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+            await logChargeConsumeFromUserDiagnostics(
+              SC.walletConet.provider!,
+              feePayerEOA,
+              feeBUnits6,
+              usdcAmountRaw,
+              consumeTx.hash,
+              tx.hash,
+              'AAtoEOA/Container'
+            )
           } catch (_) {
             console.error('[AAtoEOA/Container] consumeFromUser tx.wait() failed (RPC):', waitErr)
           }
@@ -6472,7 +6503,6 @@ export const ContainerRelayProcess = async () => {
     }
     logger(Colors.green(`✅ ContainerRelayProcess displayJson = ${inspect(displayJsonData, false, 2, true)}`))
 
-    const { bServiceUSDC6: containerBUsdc6 } = calcBeamioBUnitFee(usdcAmountRaw)
     beamioTransferIndexerAccountingPool.push({
       from: account,
       to,
