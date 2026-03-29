@@ -104,6 +104,7 @@ import {
 	resolveBeamioAaForEoaWithFallback,
 } from './endpoint/resolveBeamioAaViaUserCardFactory'
 import { pickBestMembershipNftByMinUsdc6, type RawNftOwnershipRow } from './endpoint/membershipTierPick'
+import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './endpoint/tierMetadataRowResolve'
 import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
@@ -8888,8 +8889,8 @@ export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: s
 		if (nfts.length === 0) return
 		const cardMeta = await getCardByAddress(cardAddress)
 		if (!cardMeta?.metadata?.tiers || !Array.isArray(cardMeta.metadata.tiers)) return
-		const tiersRaw = cardMeta.metadata.tiers as Array<{ index?: number; minUsdc6?: string; attr?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
-		const minUsdc6Num = (t: { minUsdc6?: string }) => {
+		const tiersRaw = cardMeta.metadata.tiers as CardTierMetadataRow[]
+		const minUsdc6Num = (t: { minUsdc6?: string | number | null }) => {
 			const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
 			const n = parseInt(s, 10)
 			return Number.isNaN(n) ? Infinity : n
@@ -8898,28 +8899,21 @@ export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: s
 		const shareTokenMetadata = cardMeta.metadata.shareTokenMetadata as { name?: string; description?: string; image?: string } | undefined
 		const cardOwnerStr = typeof cardOwner === 'string' ? cardOwner : String(cardOwner)
 		for (let i = 0; i < nfts.length; i++) {
-			const nft = nfts[i] as { tokenId: bigint | number; tierIndexOrMax?: bigint | number }
+			const nft = nfts[i] as { tokenId: bigint | number; tierIndexOrMax?: bigint | number; attribute?: bigint | number }
 			const tokenId = Number(nft.tokenId)
 			if (tokenId < NFT_START_ID || tokenId >= ISSUED_NFT_START_ID) continue
 			const tierIndexRaw = nft.tierIndexOrMax != null ? Number(nft.tierIndexOrMax) : 0
 			const isDefaultMax = !Number.isFinite(tierIndexRaw) || tierIndexRaw >= tiersRaw.length
-			let tier: (typeof tiersRaw)[number] | undefined
+			let tier: CardTierMetadataRow | undefined
 			if (isDefaultMax) {
 				tier = tiersSorted[0]
 			} else {
 				try {
 					const trow = await card.tiers(BigInt(tierIndexRaw))
-					const chainMinStr = trow[0].toString()
-					const byMin = tiersRaw.find((row) => {
-						if (row.minUsdc6 == null) return false
-						const s = String(row.minUsdc6).trim()
-						try {
-							return BigInt(s === '' ? '0' : s) === BigInt(chainMinStr)
-						} catch {
-							return false
-						}
-					})
-					tier = byMin ?? tiersRaw[tierIndexRaw]
+					const nftAttrStr = nft.attribute != null ? String(nft.attribute) : undefined
+					tier =
+						pickTierMetadataRowForChainSlot(tiersRaw, tierIndexRaw, trow[0].toString(), trow[1], nftAttrStr) ??
+						tiersRaw[tierIndexRaw]
 				} catch {
 					tier = tiersRaw[tierIndexRaw]
 				}

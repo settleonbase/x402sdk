@@ -15,6 +15,7 @@ import {
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tierMetadataRowResolve'
 
 /** 已废弃的旧基础设施卡地址，getUIDAssets 不查询、不返回。当前 BEAMIO_USER_CARD_ASSET_ADDRESS (0x74f35741...) 必须不在本列表。 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -118,22 +119,12 @@ function displayNameFromCardMetadata(m: Record<string, unknown> | null | undefin
 	return null
 }
 
-type CardMetadataTierRow = {
-	index?: number
-	minUsdc6?: string
-	name?: string
-	description?: string
-	image?: string
-	backgroundColor?: string
-}
-
 /**
  * 仅用 metadata.tiers 的 index / 数组下标对齐链上档（回退用）。
- * 若商户把 `index` 做成 1-based、或与 `tiers(i)` 部署序不一致，会错档；主路径见 {@link pickCardMetadataTierRowForChain}。
  */
-function pickCardMetadataTierRow(tiersRaw: CardMetadataTierRow[], bestNftTier: string): CardMetadataTierRow | null {
+function pickCardMetadataTierRow(tiersRaw: CardTierMetadataRow[], bestNftTier: string): CardTierMetadataRow | null {
 	if (!Array.isArray(tiersRaw) || tiersRaw.length === 0) return null
-	const minUsdc6Num = (t: { minUsdc6?: string }) => {
+	const minUsdc6Num = (t: { minUsdc6?: string | number | null }) => {
 		const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
 		const n = parseInt(s, 10)
 		return Number.isNaN(n) ? Infinity : n
@@ -151,11 +142,12 @@ function pickCardMetadataTierRow(tiersRaw: CardMetadataTierRow[], bestNftTier: s
  */
 async function pickCardMetadataTierRowForChain(
 	card: ethers.Contract,
-	tiersRaw: CardMetadataTierRow[],
-	bestNftTier: string
-): Promise<CardMetadataTierRow | null> {
+	tiersRaw: CardTierMetadataRow[],
+	bestNftTier: string,
+	primaryNftAttribute?: string | null
+): Promise<CardTierMetadataRow | null> {
 	if (!Array.isArray(tiersRaw) || tiersRaw.length === 0) return null
-	const minUsdc6Num = (t: { minUsdc6?: string }) => {
+	const minUsdc6Num = (t: { minUsdc6?: string | number | null }) => {
 		const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
 		const n = parseInt(s, 10)
 		return Number.isNaN(n) ? Infinity : n
@@ -171,17 +163,14 @@ async function pickCardMetadataTierRowForChain(
 	const c = card as ethers.Contract & { tiers: (i: bigint) => Promise<[bigint, bigint, bigint, boolean]> }
 	try {
 		const trow = await c.tiers(BigInt(tierIndexChain))
-		const chainMinStr = trow[0].toString()
-		const byMin = tiersRaw.find((row) => {
-			if (row.minUsdc6 == null) return false
-			const s = String(row.minUsdc6).trim()
-			try {
-				return BigInt(s === '' ? '0' : s) === BigInt(chainMinStr)
-			} catch {
-				return false
-			}
-		})
-		if (byMin) return byMin
+		const picked = pickTierMetadataRowForChainSlot(
+			tiersRaw,
+			tierIndexChain,
+			trow[0].toString(),
+			trow[1],
+			primaryNftAttribute
+		)
+		if (picked) return picked
 	} catch {
 		/* tiers(i) revert */
 	}
@@ -289,8 +278,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 					}
 					// 卡级 metadata.tiers：与主档链上索引对齐的 name 作为 tierName（覆盖 NFT 库里的占位文案），供 Android/Web 直接使用。
 					if (cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
-						const tiersRaw = cardRow.metadata.tiers as CardMetadataTierRow[]
-						const t = await pickCardMetadataTierRowForChain(card, tiersRaw, bestNft.tier)
+						const tiersRaw = cardRow.metadata.tiers as CardTierMetadataRow[]
+						const t = await pickCardMetadataTierRowForChain(card, tiersRaw, bestNft.tier, bestNft.attribute)
 						if (t) {
 							const cardTierName = t.name != null ? String(t.name).trim() : ''
 							if (cardTierName) tierName = cardTierName
