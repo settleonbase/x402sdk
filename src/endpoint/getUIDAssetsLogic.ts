@@ -137,8 +137,8 @@ function pickCardMetadataTierRow(tiersRaw: CardTierMetadataRow[], bestNftTier: s
 }
 
 /**
- * 用链上 `tiers(tierIndex).minUsdc6` 在卡 metadata.tiers 中匹配行（与合约 Tier 定义一致），
- * 避免仅按 `tiers[].index` 或数组顺序错绑到 Silver 等相邻档。
+ * 解析卡 metadata.tiers 展示行：由 {@link pickTierMetadataRowForChainSlot} 优先按 `tierIndex`，
+ * 找不到再按链上 `tiers(tierIndex).minUsdc6` 回退；链上调用失败时仅用 index/下标。
  */
 async function pickCardMetadataTierRowForChain(
 	card: ethers.Contract,

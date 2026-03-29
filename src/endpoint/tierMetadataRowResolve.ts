@@ -1,7 +1,8 @@
 /**
- * 将卡登记 `metadata.tiers[]` 中的行与链上 `tiers(tierIndex)` 对齐。
- * 多个档可能在 JSON 里写了相同 minUsdc6，仅用 min 匹配会误选（如选到 Silver 而非真实档 2）；
- * 应用链上槽位 `index`、`tiers(i).attr` 与 NFT `attribute` 消歧。
+ * 将卡登记 `metadata.tiers[]` 中的行与链上 `tierIndexOrMax` 对齐。
+ *
+ * **优先**用链上槽位 `tierIndex`：`metadata.tiers[].index === tierIndex`，否则数组下标 `tierIndex`（与 registerCard 默认一致）。
+ * **仅当**上述无法得到一行时，再回退用 `tiers(tierIndex).minUsdc6` 在 JSON 中筛选并用 `index` / `attr` 消歧。
  */
 export type CardTierMetadataRow = {
 	index?: number
@@ -12,6 +13,13 @@ export type CardTierMetadataRow = {
 	description?: string
 	image?: string
 	backgroundColor?: string
+}
+
+/** 与 getUIDAssets 旧版 pickCardMetadataTierRow 一致：显式 index 优先，否则用数组下标。 */
+function pickTierRowByStrictIndex(tiersRaw: CardTierMetadataRow[], tierIndexChain: number): CardTierMetadataRow | null {
+	const byKey = tiersRaw.find((x, i) => (x.index != null ? x.index : i) === tierIndexChain)
+	if (byKey) return byKey
+	return tiersRaw[tierIndexChain] ?? null
 }
 
 function rowMatchesChainMin(row: CardTierMetadataRow, chainMinStr: string): boolean {
@@ -52,8 +60,7 @@ function disambiguateTierRows(
 }
 
 /**
- * 在已知链上 `tiers(tierIndex)` 的 minUsdc6、attr 时，选取 metadata 行。
- * 若 minUsdc6 无匹配，回退：`metadata.index === tierIndex` → NFT attribute vs `metadata.attr` → 数组下标。
+ * @param chainMinStr / chainAttrBn 仅在「按 tierIndex 找不到行」时使用（需与链上 tiers(tierIndex) 一致）。
  */
 export function pickTierMetadataRowForChainSlot(
 	tiersRaw: CardTierMetadataRow[],
@@ -64,12 +71,12 @@ export function pickTierMetadataRowForChainSlot(
 ): CardTierMetadataRow | null {
 	if (!Array.isArray(tiersRaw) || tiersRaw.length === 0) return null
 
+	const byIndexFirst = pickTierRowByStrictIndex(tiersRaw, tierIndexChain)
+	if (byIndexFirst) return byIndexFirst
+
 	const candidates = tiersRaw.filter((row) => rowMatchesChainMin(row, chainMinStr))
 	const fromMin = disambiguateTierRows(candidates, tierIndexChain, primaryNftAttribute, chainAttrBn)
 	if (fromMin) return fromMin
-
-	const byExplicitIndex = tiersRaw.find((r) => r.index === tierIndexChain)
-	if (byExplicitIndex) return byExplicitIndex
 
 	const attrStr = primaryNftAttribute?.trim() ?? ''
 	if (attrStr !== '') {
@@ -80,5 +87,5 @@ export function pickTierMetadataRowForChainSlot(
 		}
 	}
 
-	return tiersRaw[tierIndexChain] ?? null
+	return null
 }
