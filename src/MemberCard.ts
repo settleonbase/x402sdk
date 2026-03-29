@@ -3095,9 +3095,39 @@ export const claimBUnitsProcess = async () => {
 	}
 }
 
+/** MerchantPOSManagement.sol: error POSNotRegistered(); */
+const MERCHANT_POS_POSNOTREGISTERED_SELECTOR = '0x81bf2afc'
+
+function collectEthersRevertDataHex(e: unknown): string {
+	let cur: unknown = e
+	const seen = new Set<unknown>()
+	for (let i = 0; i < 12 && cur != null && !seen.has(cur); i++) {
+		seen.add(cur)
+		const o = cur as Record<string, unknown>
+		const d = o['data']
+		if (typeof d === 'string' && d.startsWith('0x') && d.length >= 10) return d.toLowerCase()
+		const err = o['error'] as Record<string, unknown> | undefined
+		const ed = err?.['data']
+		if (typeof ed === 'string' && ed.startsWith('0x') && ed.length >= 10) return ed.toLowerCase()
+		const info = o['info'] as Record<string, unknown> | undefined
+		const ie = info?.['error'] as Record<string, unknown> | undefined
+		const ied = ie?.['data']
+		if (typeof ied === 'string' && ied.startsWith('0x') && ied.length >= 10) return ied.toLowerCase()
+		cur = o['cause'] ?? o['error']
+	}
+	const msg = String((e as { message?: string })?.message ?? e ?? '')
+	const m = msg.match(/data="(0x[a-fA-F0-9]+)"/)
+	if (m) return m[1]!.toLowerCase()
+	return ''
+}
+
 /** MerchantPOSManagement removePOSBySignature：CoNET 上删除 POS */
 const MERCHANT_POS_MANAGEMENT_ABI = [
 	'function removePOSBySignature(address merchant, address pos, uint256 deadline, bytes32 nonce, bytes calldata signature)',
+] as const
+
+const MERCHANT_POS_REGISTER_ABI = [
+	'function registerPOSBySignature(address merchant, address pos, uint256 deadline, bytes32 nonce, bytes calldata signature)',
 ] as const
 
 export type RemovePOSPayload = {
@@ -3109,7 +3139,17 @@ export type RemovePOSPayload = {
 	res?: Response
 }
 
+export type RegisterPOSChainPayload = {
+	merchant: string
+	pos: string
+	deadline: number
+	nonce: string
+	signature: string
+	res?: Response
+}
+
 export const removePOSPool: RemovePOSPayload[] = []
+export const registerPOSPool: RegisterPOSChainPayload[] = []
 
 export const removePOSProcess = async () => {
 	const obj = removePOSPool.shift()
@@ -3128,12 +3168,53 @@ export const removePOSProcess = async () => {
 		await tx.wait()
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
 	} catch (e: any) {
-		const msg = e?.message ?? String(e)
-		logger(Colors.red(`[removePOSProcess] failed:`), msg)
-		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+		const rev = collectEthersRevertDataHex(e)
+		if (rev.startsWith(MERCHANT_POS_POSNOTREGISTERED_SELECTOR)) {
+			logger(
+				Colors.yellow(
+					`[removePOSProcess] POSNotRegistered on CoNET (idempotent); merchant=${obj.merchant.slice(0, 10)}... pos=${obj.pos.slice(0, 10)}...`,
+				),
+			)
+			if (obj.res && !obj.res.headersSent) {
+				obj.res
+					.status(200)
+					.json({ success: true, txHash: null, note: 'POS was not on MerchantPOSManagement registry' })
+					.end()
+			}
+		} else {
+			const msg = e?.message ?? String(e)
+			logger(Colors.red(`[removePOSProcess] failed:`), msg)
+			if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+		}
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => removePOSProcess(), 3000)
+	}
+}
+
+export const registerPOSProcess = async () => {
+	const obj = registerPOSPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		registerPOSPool.unshift(obj)
+		return setTimeout(() => registerPOSProcess(), 3000)
+	}
+	logger(Colors.cyan(`[registerPOSProcess] merchant=${obj.merchant.slice(0, 10)}... pos=${obj.pos.slice(0, 10)}...`))
+	try {
+		const posMgmt = new ethers.Contract(MERCHANT_POS_MANAGEMENT_CONET, MERCHANT_POS_REGISTER_ABI, SC.walletConet)
+		const nonceHex = obj.nonce.startsWith('0x') ? obj.nonce : '0x' + obj.nonce
+		const tx = await posMgmt.registerPOSBySignature(obj.merchant, obj.pos, obj.deadline, nonceHex, obj.signature)
+		logger(Colors.green(`[registerPOSProcess] tx=${tx.hash}`))
+		await tx.wait()
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red(`[registerPOSProcess] failed:`), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => registerPOSProcess(), 3000)
 	}
 }
 

@@ -3711,6 +3711,76 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}, res)
 	})
 
+	/** POST /api/registerPOS - merchant EIP-712 RegisterPOS，Cluster 验签后转发 Master 代付 CoNET Gas */
+	router.post('/registerPOS', async (req, res) => {
+		const { merchant, pos, deadline, nonce, signature } = req.body as {
+			merchant?: string
+			pos?: string
+			deadline?: number
+			nonce?: string
+			signature?: string
+		}
+		if (!merchant || !ethers.isAddress(merchant.trim())) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid merchant address' })
+		}
+		if (!pos || !ethers.isAddress(pos.trim())) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid pos address' })
+		}
+		const now = Math.floor(Date.now() / 1000)
+		if (typeof deadline !== 'number' || deadline <= now) {
+			return res.status(400).json({ success: false, error: 'Deadline must be in the future' })
+		}
+		if (!nonce || typeof nonce !== 'string' || nonce.trim().length === 0) {
+			return res.status(400).json({ success: false, error: 'Missing nonce' })
+		}
+		const sigHex = (signature || '').trim()
+		if (!sigHex || !ethers.isHexString(sigHex)) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid signature (must be hex)' })
+		}
+		const sigLen = ethers.getBytes(sigHex).length
+		if (sigLen !== 65 && sigLen !== 64) {
+			return res.status(400).json({ success: false, error: `Invalid signature length: expected 64 or 65 bytes, got ${sigLen}` })
+		}
+		try {
+			const domain = {
+				name: 'MerchantPOSManagement',
+				version: '1',
+				chainId: 224400,
+				verifyingContract: MERCHANT_POS_MANAGEMENT_CONET as `0x${string}`,
+			}
+			const types = {
+				RegisterPOS: [
+					{ name: 'merchant', type: 'address' },
+					{ name: 'pos', type: 'address' },
+					{ name: 'deadline', type: 'uint256' },
+					{ name: 'nonce', type: 'bytes32' },
+				],
+			}
+			const message = {
+				merchant: ethers.getAddress(merchant.trim()),
+				pos: ethers.getAddress(pos.trim()),
+				deadline: BigInt(deadline),
+				nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+			}
+			const digest = ethers.TypedDataEncoder.hash(domain, types, message)
+			const signer = ethers.recoverAddress(digest, sigHex)
+			if (signer.toLowerCase() !== ethers.getAddress(merchant.trim()).toLowerCase()) {
+				return res.status(403).json({ success: false, error: 'Signature does not recover to merchant' })
+			}
+		} catch (e: any) {
+			logger(Colors.red(`[registerPOS] signature verify failed: ${e?.message ?? e}`))
+			return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid signature' })
+		}
+		logger(Colors.green(`[registerPOS] Cluster preCheck OK merchant=${merchant.slice(0, 10)}... pos=${pos.slice(0, 10)}... forwarding to master`))
+		postLocalhost('/api/registerPOS', {
+			merchant: ethers.getAddress(merchant.trim()),
+			pos: ethers.getAddress(pos.trim()),
+			deadline,
+			nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+			signature: sigHex,
+		}, res)
+	})
+
 	/** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付，转发 master */
 	router.get('/checkRequestStatus', async (req, res) => {
 		const { requestHash, validDays, payee } = req.query as { requestHash?: string; validDays?: string; payee?: string }
