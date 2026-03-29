@@ -81,7 +81,31 @@ export type FetchUIDAssetsResult = {
 	}>
 }
 
-export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsResult> => {
+/** POS / 客户端可选：指定终端登记的基础设施 BeamioUserCard 地址；若与默认常量不一致则查询该合约。 */
+export type FetchUIDAssetsOptions = {
+	infrastructureCardAddress?: string
+	/**
+	 * `merchantInfraOnly`：仅返回该基础设施卡一行（含余额为 0），用于 POS「Check Balance」。
+	 * `all`：CCSA + 基础设施（与历史行为一致）。
+	 */
+	cardsScope?: 'all' | 'merchantInfraOnly'
+	/** getWalletAssets 历史行为：即使 points/NFT 全空也返回该卡一行。 */
+	includeZeroBalanceCards?: boolean
+}
+
+const resolveInfrastructureCardAddress = (opt?: string): string => {
+	if (opt && typeof opt === 'string') {
+		try {
+			const a = ethers.getAddress(opt.trim())
+			if (!DEPRECATED_INFRA_CARDS.has(a.toLowerCase())) return a
+		} catch {
+			/* fall through */
+		}
+	}
+	return BEAMIO_USER_CARD_ASSET_ADDRESS
+}
+
+export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOptions): Promise<FetchUIDAssetsResult> => {
 	const eoaAddr = ethers.getAddress(eoa)
 	const cardAbi = [
 		'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
@@ -101,10 +125,14 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 	}
 	const usdcBalance = ethers.formatUnits(usdcTotalRaw, 6)
 	const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
-	const cardAddresses: { address: string; name: string; type: string }[] = [
-		{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
-		{ address: BEAMIO_USER_CARD_ASSET_ADDRESS, name: 'CashTrees Card', type: 'infrastructure' },
-	].filter(({ address }) => !DEPRECATED_INFRA_CARDS.has(address.toLowerCase()))
+	const infraAddr = resolveInfrastructureCardAddress(opts?.infrastructureCardAddress)
+	const merchantInfraOnly = opts?.cardsScope === 'merchantInfraOnly'
+	const cardAddresses: { address: string; name: string; type: string }[] = merchantInfraOnly
+		? [{ address: infraAddr, name: 'CashTrees Card', type: 'infrastructure' }]
+		: [
+				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
+				{ address: infraAddr, name: 'CashTrees Card', type: 'infrastructure' },
+			].filter(({ address }) => !DEPRECATED_INFRA_CARDS.has(address.toLowerCase()))
 	const cardsStaged: { row: FetchUIDAssetsResult['cards'][number]; sortMin: bigint }[] = []
 	for (const { address: cardAddr, name: cardName, type: cardType } of cardAddresses) {
 		try {
@@ -189,7 +217,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 			}
 			const hasPoints = pointsBalance > 0n
 			const hasNftGt0 = nftList.some((n: { tokenId: string }) => Number(n.tokenId) > 0)
-			if (hasPoints || hasNftGt0) {
+			const includeRow = hasPoints || hasNftGt0 || merchantInfraOnly || opts?.includeZeroBalanceCards === true
+			if (includeRow) {
 				const row: FetchUIDAssetsResult['cards'][number] = {
 					cardAddress: cardAddr,
 					cardName,
@@ -208,6 +237,27 @@ export const fetchUIDAssetsForEOA = async (eoa: string): Promise<FetchUIDAssetsR
 			}
 		} catch (cardErr: unknown) {
 			logger(Colors.gray(`[fetchUIDAssetsForEOA] card=${cardAddr} skip: ${(cardErr as Error)?.message ?? cardErr}`))
+			if (merchantInfraOnly && cardAddr.toLowerCase() === infraAddr.toLowerCase()) {
+				try {
+					const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
+					const currencyNum = await card.currency()
+					const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
+					cardsStaged.push({
+						row: {
+							cardAddress: cardAddr,
+							cardName,
+							cardType,
+							points: '0',
+							points6: '0',
+							cardCurrency: currency,
+							nfts: [],
+						},
+						sortMin: 0n,
+					})
+				} catch {
+					/* ignore */
+				}
+			}
 		}
 	}
 	cardsStaged.sort((a, b) => {
@@ -233,7 +283,9 @@ export const pickInfrastructureCashTreeTierTokenId = (
 	cards: FetchUIDAssetsResult['cards'],
 	infraAddress: string = BEAMIO_USER_CARD_ASSET_ADDRESS
 ): string | null => {
-	const row = cards.find((c) => c.cardAddress.toLowerCase() === infraAddress.toLowerCase())
+	const row =
+		cards.find((c) => c.cardAddress.toLowerCase() === infraAddress.toLowerCase()) ??
+		cards.find((c) => c.cardType === 'infrastructure')
 	if (!row?.nfts?.length) return null
 	const primary = row.primaryMemberTokenId?.trim()
 	if (primary && Number(primary) > 0) return primary
