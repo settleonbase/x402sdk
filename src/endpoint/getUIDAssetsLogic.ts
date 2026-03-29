@@ -160,7 +160,7 @@ async function pickCardMetadataTierRowForChain(
 		return pickCardMetadataTierRow(tiersRaw, bestNftTier)
 	}
 
-	const c = card as ethers.Contract & { tiers: (i: bigint) => Promise<[bigint, bigint, bigint, boolean]> }
+	const c = card as ethers.Contract & { tiers: (i: bigint) => Promise<[bigint, bigint, bigint]> }
 	try {
 		const trow = await c.tiers(BigInt(tierIndexChain))
 		const picked = pickTierMetadataRowForChainSlot(
@@ -184,7 +184,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 		'function getOwnership(address user) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 		'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 		'function currency() view returns (uint8)',
-		'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
+		'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds)',
 	]
 	const usdcAbi = ['function balanceOf(address) view returns (uint256)']
 	const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
@@ -283,9 +283,9 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 						if (t) {
 							const cardTierName = t.name != null ? String(t.name).trim() : ''
 							if (cardTierName) tierName = cardTierName
-							if (!tierDescription && t.description && String(t.description).trim()) {
-								tierDescription = String(t.description).trim()
-							}
+							// 与 tierName 一致：链上对齐后的卡级 metadata.tiers 行优先生效，避免 NFT 库里占位 description（如 5%）盖住正确折扣文案（如 7.5%）。
+							const cardTierDesc = t.description != null ? String(t.description).trim() : ''
+							if (cardTierDesc) tierDescription = cardTierDesc
 							if (!cardImage && t.image && String(t.image).trim()) cardImage = String(t.image).trim()
 							if (!cardBackground && t.backgroundColor && String(t.backgroundColor).trim()) {
 								const bg = String(t.backgroundColor).trim()
@@ -385,7 +385,7 @@ export const pickInfrastructureCashTreeTierTokenId = (
 const INFRA_OWNERSHIP_ABI = [
 	'function getOwnership(address user) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 	'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
-	'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
+	'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds)',
 ] as const
 
 /** 仅查基础设施卡在链上的主会员 tokenId（与 fetchUIDAssetsForEOA 一致），供无 cards 数组时的 NFC 入口 */
