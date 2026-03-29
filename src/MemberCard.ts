@@ -8869,7 +8869,8 @@ const ISSUED_NFT_START_ID = 100_000_000_000
 
 /**
  * redeem/mint 成功后同步该用户在该卡上的成员 NFT 的 tier metadata 到 DB，
- * 供 GET /metadata/0x{owner}{NFT#}.json 返回。tier 选取与 getUIDAssets 一致：按 minUsdc6 升序排序，Default/Max 对应低档（tiersSorted[0]）；写入 1155 JSON 含 name/description/image/backgroundColor。
+ * 供 GET /metadata/0x{owner}{NFT#}.json 返回。
+ * 档行选取：优先链上 `tiers(tierIndex).minUsdc6` 与卡 metadata.tiers[].minUsdc6 匹配（与 getUIDAssets 一致），避免仅靠数组下标/index 错绑；Default/Max 对应 minUsdc6 最低档（tiersSorted[0]）。
  */
 export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: string): Promise<void> => {
 	try {
@@ -8902,7 +8903,27 @@ export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: s
 			if (tokenId < NFT_START_ID || tokenId >= ISSUED_NFT_START_ID) continue
 			const tierIndexRaw = nft.tierIndexOrMax != null ? Number(nft.tierIndexOrMax) : 0
 			const isDefaultMax = !Number.isFinite(tierIndexRaw) || tierIndexRaw >= tiersRaw.length
-			const tier = isDefaultMax ? tiersSorted[0] : tiersRaw[tierIndexRaw]
+			let tier: (typeof tiersRaw)[number] | undefined
+			if (isDefaultMax) {
+				tier = tiersSorted[0]
+			} else {
+				try {
+					const trow = await card.tiers(BigInt(tierIndexRaw))
+					const chainMinStr = trow[0].toString()
+					const byMin = tiersRaw.find((row) => {
+						if (row.minUsdc6 == null) return false
+						const s = String(row.minUsdc6).trim()
+						try {
+							return BigInt(s === '' ? '0' : s) === BigInt(chainMinStr)
+						} catch {
+							return false
+						}
+					})
+					tier = byMin ?? tiersRaw[tierIndexRaw]
+				} catch {
+					tier = tiersRaw[tierIndexRaw]
+				}
+			}
 			const tierIndexForProps = isDefaultMax ? 0 : tierIndexRaw
 			const name = tier?.name ?? shareTokenMetadata?.name ?? 'Beamio Member NFT'
 			const description = tier?.description ?? shareTokenMetadata?.description ?? ''

@@ -128,8 +128,8 @@ type CardMetadataTierRow = {
 }
 
 /**
- * 将卡登记 metadata.tiers 中行与链上 `tierIndexOrMax` 对齐（与 syncNftTierMetadataForUser / pickBest 一致）。
- * 用于回传 `tierName`：展示名以卡级 tiers[].name 为准，避免客户端只能显示链上数字档。
+ * 仅用 metadata.tiers 的 index / 数组下标对齐链上档（回退用）。
+ * 若商户把 `index` 做成 1-based、或与 `tiers(i)` 部署序不一致，会错档；主路径见 {@link pickCardMetadataTierRowForChain}。
  */
 function pickCardMetadataTierRow(tiersRaw: CardMetadataTierRow[], bestNftTier: string): CardMetadataTierRow | null {
 	if (!Array.isArray(tiersRaw) || tiersRaw.length === 0) return null
@@ -143,6 +143,50 @@ function pickCardMetadataTierRow(tiersRaw: CardMetadataTierRow[], bestNftTier: s
 	const tierIndexChain = parseInt(bestNftTier, 10) || 0
 	const byIndex = tiersRaw.find((x, i) => (x.index != null ? x.index : i) === tierIndexChain)
 	return byIndex ?? tiersRaw[tierIndexChain] ?? null
+}
+
+/**
+ * 用链上 `tiers(tierIndex).minUsdc6` 在卡 metadata.tiers 中匹配行（与合约 Tier 定义一致），
+ * 避免仅按 `tiers[].index` 或数组顺序错绑到 Silver 等相邻档。
+ */
+async function pickCardMetadataTierRowForChain(
+	card: ethers.Contract,
+	tiersRaw: CardMetadataTierRow[],
+	bestNftTier: string
+): Promise<CardMetadataTierRow | null> {
+	if (!Array.isArray(tiersRaw) || tiersRaw.length === 0) return null
+	const minUsdc6Num = (t: { minUsdc6?: string }) => {
+		const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
+		const n = parseInt(s, 10)
+		return Number.isNaN(n) ? Infinity : n
+	}
+	const tiersSorted = [...tiersRaw].sort((a, b) => minUsdc6Num(a) - minUsdc6Num(b))
+	if (bestNftTier === 'Default/Max') return tiersSorted[0] ?? null
+
+	const tierIndexChain = Number.parseInt(bestNftTier, 10)
+	if (!Number.isFinite(tierIndexChain) || tierIndexChain < 0) {
+		return pickCardMetadataTierRow(tiersRaw, bestNftTier)
+	}
+
+	const c = card as ethers.Contract & { tiers: (i: bigint) => Promise<[bigint, bigint, bigint, boolean]> }
+	try {
+		const trow = await c.tiers(BigInt(tierIndexChain))
+		const chainMinStr = trow[0].toString()
+		const byMin = tiersRaw.find((row) => {
+			if (row.minUsdc6 == null) return false
+			const s = String(row.minUsdc6).trim()
+			try {
+				return BigInt(s === '' ? '0' : s) === BigInt(chainMinStr)
+			} catch {
+				return false
+			}
+		})
+		if (byMin) return byMin
+	} catch {
+		/* tiers(i) revert */
+	}
+
+	return pickCardMetadataTierRow(tiersRaw, bestNftTier)
 }
 
 export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOptions): Promise<FetchUIDAssetsResult> => {
@@ -246,7 +290,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 					// 卡级 metadata.tiers：与主档链上索引对齐的 name 作为 tierName（覆盖 NFT 库里的占位文案），供 Android/Web 直接使用。
 					if (cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
 						const tiersRaw = cardRow.metadata.tiers as CardMetadataTierRow[]
-						const t = pickCardMetadataTierRow(tiersRaw, bestNft.tier)
+						const t = await pickCardMetadataTierRowForChain(card, tiersRaw, bestNft.tier)
 						if (t) {
 							const cardTierName = t.name != null ? String(t.name).trim() : ''
 							if (cardTierName) tierName = cardTierName
