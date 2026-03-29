@@ -6848,6 +6848,18 @@ export const createCardPreCheck = (body: {
 			}
 		}
 	}
+	let normalizedShareTokenMetadata: CreateCardPreChecked['shareTokenMetadata'] = undefined
+	if (body.shareTokenMetadata != null && typeof body.shareTokenMetadata === 'object') {
+		const stm = body.shareTokenMetadata as Record<string, unknown>
+		const meta: NonNullable<CreateCardPreChecked['shareTokenMetadata']> = {}
+		if (stm.name != null) meta.name = String(stm.name)
+		if (stm.description != null) meta.description = String(stm.description)
+		if (stm.image != null && typeof stm.image === 'string') meta.image = stm.image
+		if (stm.categories != null) meta.categories = stm.categories as string[]
+		if (Object.keys(meta).length > 0) {
+			normalizedShareTokenMetadata = meta
+		}
+	}
 	const preChecked: CreateCardPreChecked = {
 		cardOwner: ethers.getAddress(body.cardOwner),
 		currency: body.currency as CreateCardPreChecked['currency'],
@@ -6855,7 +6867,7 @@ export const createCardPreCheck = (body: {
 		...(body.uri && { uri: body.uri }),
 		...(typeof body.transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled: body.transferWhitelistEnabled }),
 		...(body.upgradeType != null && { upgradeType: Number(body.upgradeType) as 0 | 1 | 2 }),
-		...(body.shareTokenMetadata && { shareTokenMetadata: body.shareTokenMetadata }),
+		...(normalizedShareTokenMetadata != null && { shareTokenMetadata: normalizedShareTokenMetadata }),
 		...(body.tiers && body.tiers.length > 0 && {
 			tiers: body.tiers.map((t, i) => {
 				const o = t as Record<string, unknown>
