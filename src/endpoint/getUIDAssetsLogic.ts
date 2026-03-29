@@ -73,6 +73,7 @@ export type FetchUIDAssetsResult = {
 		cardCurrency: string
 		cardBackground?: string
 		cardImage?: string
+		/** 档展示名：优先卡级 metadata.tiers[].name（与链上主档索引对齐），无则回退 NFT 库元数据 / 占位。客户端应优先用本字段而非自行拼「Tier N」。 */
 		tierName?: string
 		tierDescription?: string
 		/** Best membership NFT on this card by max `tiers[i].minUsdc6` (matches `_findBestValidMembership`). */
@@ -115,6 +116,33 @@ function displayNameFromCardMetadata(m: Record<string, unknown> | null | undefin
 	const n2 = m.name
 	if (typeof n2 === 'string' && n2.trim()) return n2.trim()
 	return null
+}
+
+type CardMetadataTierRow = {
+	index?: number
+	minUsdc6?: string
+	name?: string
+	description?: string
+	image?: string
+	backgroundColor?: string
+}
+
+/**
+ * 将卡登记 metadata.tiers 中行与链上 `tierIndexOrMax` 对齐（与 syncNftTierMetadataForUser / pickBest 一致）。
+ * 用于回传 `tierName`：展示名以卡级 tiers[].name 为准，避免客户端只能显示链上数字档。
+ */
+function pickCardMetadataTierRow(tiersRaw: CardMetadataTierRow[], bestNftTier: string): CardMetadataTierRow | null {
+	if (!Array.isArray(tiersRaw) || tiersRaw.length === 0) return null
+	const minUsdc6Num = (t: { minUsdc6?: string }) => {
+		const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
+		const n = parseInt(s, 10)
+		return Number.isNaN(n) ? Infinity : n
+	}
+	const tiersSorted = [...tiersRaw].sort((a, b) => minUsdc6Num(a) - minUsdc6Num(b))
+	if (bestNftTier === 'Default/Max') return tiersSorted[0] ?? null
+	const tierIndexChain = parseInt(bestNftTier, 10) || 0
+	const byIndex = tiersRaw.find((x, i) => (x.index != null ? x.index : i) === tierIndexChain)
+	return byIndex ?? tiersRaw[tierIndexChain] ?? null
 }
 
 export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOptions): Promise<FetchUIDAssetsResult> => {
@@ -215,29 +243,28 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 						if (tierDescription && typeof tierDescription === 'string' && tierDescription.trim()) tierDescription = tierDescription.trim()
 						else tierDescription = undefined
 					}
-					if ((!tierName || !tierDescription || !cardBackground || !cardImage) && cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
-						const tiersRaw = cardRow.metadata.tiers as Array<{ index?: number; minUsdc6?: string; name?: string; description?: string; image?: string; backgroundColor?: string }>
-						const minUsdc6Num = (t: { minUsdc6?: string }) => {
-							const s = t.minUsdc6 != null ? String(t.minUsdc6).trim() : ''
-							const n = parseInt(s, 10)
-							return Number.isNaN(n) ? Infinity : n
-						}
-						const tiersSorted = [...tiersRaw].sort((a, b) => minUsdc6Num(a) - minUsdc6Num(b))
-						const tierIndexChain = bestNft.tier === 'Default/Max' ? 0 : (parseInt(bestNft.tier, 10) || 0)
-						const t = bestNft.tier === 'Default/Max'
-							? tiersSorted[0]
-							: (tiersRaw.find((x: { index?: number }, i: number) => (x.index != null ? x.index : i) === tierIndexChain) ?? tiersRaw[tierIndexChain])
+					// 卡级 metadata.tiers：与主档链上索引对齐的 name 作为 tierName（覆盖 NFT 库里的占位文案），供 Android/Web 直接使用。
+					if (cardRow?.metadata?.tiers && Array.isArray(cardRow.metadata.tiers)) {
+						const tiersRaw = cardRow.metadata.tiers as CardMetadataTierRow[]
+						const t = pickCardMetadataTierRow(tiersRaw, bestNft.tier)
 						if (t) {
-							if (!tierName && t.name && String(t.name).trim()) tierName = String(t.name).trim()
-							if (!tierDescription && t.description && String(t.description).trim()) tierDescription = String(t.description).trim()
+							const cardTierName = t.name != null ? String(t.name).trim() : ''
+							if (cardTierName) tierName = cardTierName
+							if (!tierDescription && t.description && String(t.description).trim()) {
+								tierDescription = String(t.description).trim()
+							}
 							if (!cardImage && t.image && String(t.image).trim()) cardImage = String(t.image).trim()
 							if (!cardBackground && t.backgroundColor && String(t.backgroundColor).trim()) {
 								const bg = String(t.backgroundColor).trim()
 								cardBackground = bg.startsWith('#') ? bg : `#${bg.replace(/^#/, '')}`
 							}
 						}
-						if (!tierName && (bestNft.tier === 'Default/Max' || tierIndexChain === 0)) tierName = 'Default'
-						else if (!tierName) tierName = `Tier ${tierIndexChain + 1}`
+						const tierIndexChain = bestNft.tier === 'Default/Max' ? 0 : (parseInt(bestNft.tier, 10) || 0)
+						if (!tierName) {
+							if (bestNft.tier === 'Default/Max' || tierIndexChain === 0) tierName = 'Default'
+							// 与 Android chainTierLabelFromPrimaryNft 一致：链上索引 N →「Tier N」
+							else tierName = `Tier ${tierIndexChain}`
+						}
 					}
 				} catch {
 					/* ignore */
