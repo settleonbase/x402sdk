@@ -1514,13 +1514,46 @@ export const executeForAdminProcess = async () => {
 		// 必须使用 card 的 factoryGateway()._aaFactory()，与合约内 _resolveAccount 一致；若用配置的 AA Factory 可能不匹配导致 UC_ResolveAccountFailed
 		const recipientEOA = tryParseMintPointsByAdminRecipient(obj.data)
 		const mintParsed = tryParseMintPointsByAdminArgs(obj.data)
+		let burnParsedForLog: { target: string; amount: bigint } | null = null
+		if (!mintParsed) {
+			try {
+				const iface = new ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)'])
+				const dec = iface.parseTransaction({ data: obj.data })
+				if (dec?.name === 'burnPointsByAdmin' && dec.args[0] != null && dec.args[1] != null) {
+					burnParsedForLog = { target: dec.args[0] as string, amount: BigInt(dec.args[1]) }
+				}
+			} catch { /* ignore */ }
+		}
+		try {
+			const posSigner = adminCheck.signer
+			let cardOwnerLog = ''
+			const ownCard = new ethers.Contract(obj.cardAddr, ['function owner() view returns (address)'], providerBaseBackup)
+			const rawOw = await ownCard.owner() as string
+			if (rawOw && ethers.isAddress(rawOw)) cardOwnerLog = ethers.getAddress(rawOw)
+			let op: string = 'other'
+			let pts6 = ''
+			let rcpt = 'N/A'
+			if (mintParsed) {
+				op = 'mintPointsByAdmin'
+				pts6 = mintParsed.points6.toString()
+				rcpt = mintParsed.recipient
+			} else if (burnParsedForLog) {
+				op = 'burnPointsByAdmin'
+				pts6 = burnParsedForLog.amount.toString()
+				rcpt = burnParsedForLog.target
+			}
+			if (op !== 'other' || obj.uid) {
+				logger(Colors.cyan(`[nfcTopup] POS topup summary | cardAddr=${obj.cardAddr} | cardOwner=${cardOwnerLog || 'N/A'} | posEOA=${posSigner} | op=${op} | points6=${pts6 || 'N/A'} | recipient=${rcpt} | uid=${obj.uid ?? '(none)'}`))
+			}
+		} catch (auditErr: any) {
+			logger(Colors.yellow(`[nfcTopup] POS topup summary (master) skipped: ${auditErr?.shortMessage ?? auditErr?.message ?? String(auditErr)}`))
+		}
 		let aaAddr: string | null = null
 		let beforePoint6 = 0n
 		let beforeNfts: Array<{ tokenId: bigint }> = []
 		let cardOwnerEOAForAccounting = ''
 		let cardCurrencyFiat = 0
 		if (recipientEOA) {
-			logger(Colors.cyan(`[nfcTopup] uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA} | cardAddr=${obj.cardAddr}`))
 			const cardAaFactoryAddr = await getCardAaFactoryAddress(obj.cardAddr)
 			const configAaAddr = await SC.aaAccountFactoryPaymaster.getAddress()
 			const aaFactoryContract = cardAaFactoryAddr.toLowerCase() === configAaAddr.toLowerCase()

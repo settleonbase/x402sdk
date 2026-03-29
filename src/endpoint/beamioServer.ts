@@ -115,6 +115,17 @@ const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; point
 	return null
 }
 
+const tryParseBurnPointsByAdminArgs = (data: string): { target: string; points6: bigint } | null => {
+	try {
+		const iface = new ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)'])
+		const decoded = iface.parseTransaction({ data })
+		if (decoded?.name === 'burnPointsByAdmin' && decoded.args[0] != null && decoded.args[1] != null) {
+			return { target: decoded.args[0] as string, points6: BigInt(decoded.args[1]) }
+		}
+	} catch { /* ignore */ }
+	return null
+}
+
 /** 解析 EOA 对应的 AA：仅 UserCardFactoryPaymaster._aaFactory() 路径（与发卡工厂绑定；无回退旧 AA 工厂） */
 const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> =>
 	resolveBeamioAaForEoaWithFallback(providerBase, eoa)
@@ -1575,6 +1586,14 @@ const routing = ( router: Router ) => {
 			cardAddress: ethers.getAddress(cardAddress.trim())
 		}
 		try {
+			let prepareCardOwner = ''
+			try {
+				const cprep = new ethers.Contract(forwardBody.cardAddress, ['function owner() view returns (address)'], providerBase)
+				const ow = await cprep.owner() as string
+				if (ow && ethers.isAddress(ow)) prepareCardOwner = ethers.getAddress(ow)
+			} catch { /* ignore */ }
+			const walletLabel = forwardBody.wallet ?? (forwardBody.uid ? `(uid=${forwardBody.uid})` : 'N/A')
+			logger(Colors.cyan(`[nfcTopupPrepare] POS prepare summary | cardAddr=${forwardBody.cardAddress} | cardOwner=${prepareCardOwner || 'N/A'} | amount=${forwardBody.amount} | currency=${forwardBody.currency} | payeeWallet=${walletLabel}`))
 			const { statusCode, body } = await postLocalhostBuffer('/api/nfcTopupPrepare', forwardBody)
 			const parsed = JSON.parse(body)
 			if (resolvedWallet && (hasBeamioTag || (hasUid && isNfcUid)) && parsed.cardAddr && !parsed.error) {
@@ -1715,6 +1734,28 @@ const routing = ( router: Router ) => {
 					cardAddr: cardAddress
 				})
 			}
+			let cardOwnerForLog = ''
+			try {
+				const ow = await card.owner() as string
+				if (ow && ethers.isAddress(ow)) cardOwnerForLog = ethers.getAddress(ow)
+			} catch { /* ignore */ }
+			let topupSummaryOp = 'adminManager'
+			let topupSummaryPoints6 = ''
+			let topupSummaryRecipient = 'N/A'
+			if (isMint) {
+				const mp = tryParseMintPointsByAdminArgs(data)
+				topupSummaryOp = 'mintPointsByAdmin'
+				topupSummaryPoints6 = mp?.points6 !== undefined ? mp.points6.toString() : ''
+				topupSummaryRecipient = mp?.recipient ?? tryParseMintPointsByAdminRecipient(data) ?? 'N/A'
+			} else if (isBurn) {
+				const bp = tryParseBurnPointsByAdminArgs(data)
+				topupSummaryOp = 'burnPointsByAdmin'
+				if (bp) {
+					topupSummaryPoints6 = bp.points6.toString()
+					topupSummaryRecipient = bp.target
+				}
+			}
+			logger(Colors.cyan(`[nfcTopup] POS topup summary | cardAddr=${cardAddress} | cardOwner=${cardOwnerForLog || 'N/A'} | posEOA=${signer} | op=${topupSummaryOp} | points6=${topupSummaryPoints6 || 'N/A'} | recipient=${topupSummaryRecipient} | uid=${uidTrim || '(none)'}`))
 			let recipientEOA: string | null = null
 			let aaAddr: string | null = null
 			let bunitFeeCheck: { success: boolean; error?: string; feeAmount?: bigint; cardOwnerEOA?: string; topupKind?: 2 | 3 } = { success: true }
