@@ -78,6 +78,9 @@ function beamioUserCardLibrariesFromConfig(override?: BeamioUserCardLibraryAddre
 }
 import {
 	registerCardToDb,
+	assertPosEoaAvailableForCardBinding,
+	upsertPosTerminalAdminCardBinding,
+	deletePosTerminalAdminCardBinding,
 	getNfcRecipientAddressByUid,
 	getNfcRecipientAddressByTagId,
 	getNfcCardPrivateKeyByUid,
@@ -1590,6 +1593,7 @@ export const executeForAdminProcess = async () => {
 			}
 		}
 		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash} | uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'}`))
+		void syncPosTerminalAdminBindingAfterTx(tx, obj.cardAddr, obj.data).catch(() => {})
 		// Base 交易已提交即可回复 UI；BUint / indexer / metadata 见 executeForAdminPostBaseProcess（不阻塞本 worker 归还 SC）
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
@@ -6739,7 +6743,7 @@ export type CreateCardPreChecked = {
 	transferWhitelistEnabled?: boolean
 	/** 0=topup delta; 1=points balance; 2=cumulative points to admin */
 	upgradeType?: 0 | 1 | 2
-	shareTokenMetadata?: { name?: string; description?: string; image?: string }
+	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[] }
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
 }
 
@@ -6751,7 +6755,7 @@ export const createCardPreCheck = (body: {
 	uri?: string
 	transferWhitelistEnabled?: unknown
 	upgradeType?: unknown
-	shareTokenMetadata?: { name?: string; description?: string; image?: string }
+	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: unknown }
 	tiers?: unknown[]
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
 	const validCurrency = ['CAD', 'USD', 'JPY', 'CNY', 'USDC', 'HKD', 'EUR', 'SGD', 'TWD']
@@ -6778,6 +6782,26 @@ export const createCardPreCheck = (body: {
 	}
 	if (body.shareTokenMetadata != null && typeof body.shareTokenMetadata !== 'object') {
 		return { success: false, error: 'shareTokenMetadata must be an object if provided' }
+	}
+	if (body.shareTokenMetadata != null && typeof body.shareTokenMetadata === 'object') {
+		const stm = body.shareTokenMetadata as Record<string, unknown>
+		if (stm.categories != null) {
+			if (!Array.isArray(stm.categories)) {
+				return { success: false, error: 'shareTokenMetadata.categories must be an array if provided' }
+			}
+			if (stm.categories.length > 32) {
+				return { success: false, error: 'shareTokenMetadata.categories must have at most 32 entries' }
+			}
+			for (let i = 0; i < stm.categories.length; i++) {
+				const c = stm.categories[i]
+				if (typeof c !== 'string' || !c.trim()) {
+					return { success: false, error: `shareTokenMetadata.categories[${i}] must be a non-empty string` }
+				}
+				if (c.length > 64) {
+					return { success: false, error: `shareTokenMetadata.categories[${i}] is too long (max 64)` }
+				}
+			}
+		}
 	}
 	if (body.transferWhitelistEnabled != null && typeof body.transferWhitelistEnabled !== 'boolean') {
 		return { success: false, error: 'transferWhitelistEnabled must be a boolean if provided' }
@@ -6924,6 +6948,14 @@ export const createCardPoolPress = async () => {
 			const name = shareTokenMetadata?.name ?? 'Beamio CCSA Card'
 			const description = shareTokenMetadata?.description
 			const image = shareTokenMetadata?.image != null && shareTokenMetadata.image !== '' ? shareTokenMetadata.image : undefined
+			const rawCats = (shareTokenMetadata as { categories?: unknown } | undefined)?.categories
+			const categories =
+				Array.isArray(rawCats) ?
+					(rawCats as unknown[])
+						.filter((c): c is string => typeof c === 'string' && c.trim() !== '')
+						.map((c) => c.trim())
+						.slice(0, 32)
+				:	[]
 			const metaContent = JSON.stringify({
 				...(name && { name }),
 				...(description != null && { description }),
@@ -6933,6 +6965,7 @@ export const createCardPoolPress = async () => {
 						name,
 						...(description != null && { description }),
 						...(image && { image }),
+						...(categories.length > 0 && { categories }),
 					},
 				}),
 				...(tiers && tiers.length > 0 && { tiers }),
@@ -7976,6 +8009,38 @@ const adminManager5ArgIface = new ethers.Interface(['function adminManager(addre
 const ADMIN_MANAGER_4_SELECTOR = adminManager4ArgIface.getFunction('adminManager')?.selector ?? ''
 const ADMIN_MANAGER_5_SELECTOR = adminManager5ArgIface.getFunction('adminManager')?.selector ?? ''
 
+/** adminManager 上链确认后：登记或删除 POS EOA → 卡地址（与 Cluster 预检 assertPosEoaAvailableForCardBinding 一致）。 */
+async function syncPosTerminalAdminBindingAfterTx(
+	tx: ethers.ContractTransactionResponse,
+	cardAddressRaw: string,
+	data: string
+): Promise<void> {
+	const dataSel = data.slice(0, 10).toLowerCase()
+	if (dataSel !== ADMIN_MANAGER_4_SELECTOR.toLowerCase() && dataSel !== ADMIN_MANAGER_5_SELECTOR.toLowerCase()) {
+		return
+	}
+	try {
+		const iface = dataSel === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ? adminManager5ArgIface : adminManager4ArgIface
+		const decoded = iface.parseTransaction({ data })
+		if (decoded?.name !== 'adminManager') return
+		const to = decoded.args[0] as string
+		const isAdd = decoded.args[1] === true
+		if (!to || !ethers.isAddress(to)) return
+		const cardAddr = ethers.getAddress(cardAddressRaw)
+		const posEoa = ethers.getAddress(to)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) return
+		const txHash = receipt.hash ?? tx.hash
+		if (isAdd) {
+			await upsertPosTerminalAdminCardBinding({ posEoa, cardAddress: cardAddr, txHash })
+		} else {
+			await deletePosTerminalAdminCardBinding(posEoa, cardAddr)
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[syncPosTerminalAdminBindingAfterTx] ${e?.message ?? e}`))
+	}
+}
+
 /** cardAddAdminByAdmin 集群预检：仅允许添加 EOA。body 必须含 adminEOA，data 的 to 必须等于 adminEOA。禁止添加 AA。 */
 export const cardAddAdminByAdminPreCheck = async (body: {
 	cardAddress?: string
@@ -8036,6 +8101,10 @@ export const cardAddAdminByAdminPreCheck = async (body: {
 					}
 				}
 			}
+		}
+		if (decoded.args[1] === true) {
+			const bindCheck = await assertPosEoaAvailableForCardBinding(ethers.getAddress(to), ethers.getAddress(cardAddress))
+			if (!bindCheck.ok) return { success: false, error: bindCheck.error }
 		}
 		return { success: true }
 	} catch (e: any) {
@@ -8099,6 +8168,8 @@ export const cardAddAdminPreCheck = async (body: {
 					}
 				}
 			}
+			const bindCheck = await assertPosEoaAvailableForCardBinding(ethers.getAddress(to), ethers.getAddress(cardAddress))
+			if (!bindCheck.ok) return { success: false, error: bindCheck.error }
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 		return { success: true }
@@ -8563,6 +8634,7 @@ export const executeForOwnerProcess = async () => {
 			obj.ownerSignature
 		)
 		const hash = tx?.hash as string | undefined
+		void syncPosTerminalAdminBindingAfterTx(tx, obj.cardAddress, obj.data).catch(() => {})
 		let code: string | undefined
 		if (obj.redeemCode != null && obj.toUserEOA != null) {
 			await factory.redeemForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)

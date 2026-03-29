@@ -915,6 +915,119 @@ const BEAMIO_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_cards (
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
+/** POS 终端 EOA（商户子 admin）→ 登记为 admin 的 BeamioUserCard；供跨卡冲突拒绝与 GET myPosAddress。 */
+const BEAMIO_POS_TERMINAL_ADMIN_CARD_TABLE = `CREATE TABLE IF NOT EXISTS beamio_pos_terminal_admin_card (
+	pos_eoa TEXT PRIMARY KEY,
+	card_address TEXT NOT NULL,
+	tx_hash TEXT,
+	updated_at TIMESTAMPTZ DEFAULT NOW()
+)`
+const BEAMIO_POS_TERMINAL_ADMIN_CARD_IDX_CARD = `CREATE INDEX IF NOT EXISTS idx_beamio_pos_terminal_admin_card_card ON beamio_pos_terminal_admin_card (LOWER(TRIM(card_address)))`
+
+async function ensureBeamioPosTerminalAdminCardSchema(db: Client): Promise<void> {
+	await db.query(BEAMIO_POS_TERMINAL_ADMIN_CARD_TABLE)
+	await db.query(BEAMIO_POS_TERMINAL_ADMIN_CARD_IDX_CARD)
+}
+
+/** cardAddAdmin 预检：POS EOA 已绑定其他卡则拒绝。同一卡重复登记允许（更新 mint limit 等）。 */
+export const assertPosEoaAvailableForCardBinding = async (
+	posLoose: string,
+	cardAddressLoose: string
+): Promise<{ ok: true } | { ok: false; error: string }> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioPosTerminalAdminCardSchema(db)
+		const pos = ethers.getAddress(posLoose).toLowerCase()
+		const card = ethers.getAddress(cardAddressLoose).toLowerCase()
+		const { rows } = await db.query<{ card_address: string }>(
+			`SELECT card_address FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 LIMIT 1`,
+			[pos]
+		)
+		if (rows.length > 0 && rows[0].card_address !== card) {
+			return {
+				ok: false,
+				error:
+					'This terminal address is already registered as an admin on another merchant card. Remove it there before linking to this card.',
+			}
+		}
+		return { ok: true }
+	} catch (e: any) {
+		logger(Colors.yellow(`[assertPosEoaAvailableForCardBinding] failed: ${e?.message ?? e}`))
+		return { ok: false, error: 'Could not verify terminal registration. Try again later.' }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** adminManager(add) 上链成功后写入；remove 成功后可 delete。 */
+export const upsertPosTerminalAdminCardBinding = async (params: {
+	posEoa: string
+	cardAddress: string
+	txHash?: string
+}): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioPosTerminalAdminCardSchema(db)
+		const pos = ethers.getAddress(params.posEoa).toLowerCase()
+		const card = ethers.getAddress(params.cardAddress).toLowerCase()
+		await db.query(
+			`
+			INSERT INTO beamio_pos_terminal_admin_card (pos_eoa, card_address, tx_hash, updated_at)
+			VALUES ($1, $2, $3, NOW())
+			ON CONFLICT (pos_eoa) DO UPDATE SET
+				card_address = EXCLUDED.card_address,
+				tx_hash = EXCLUDED.tx_hash,
+				updated_at = NOW()
+			`,
+			[pos, card, params.txHash ?? null]
+		)
+		logger(Colors.green(`[upsertPosTerminalAdminCardBinding] pos=${pos} card=${card}`))
+	} catch (e: any) {
+		logger(Colors.yellow(`[upsertPosTerminalAdminCardBinding] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export const deletePosTerminalAdminCardBinding = async (posLoose: string, cardAddressLoose: string): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioPosTerminalAdminCardSchema(db)
+		const pos = ethers.getAddress(posLoose).toLowerCase()
+		const card = ethers.getAddress(cardAddressLoose).toLowerCase()
+		await db.query(`DELETE FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 AND card_address = $2`, [pos, card])
+	} catch (e: any) {
+		logger(Colors.yellow(`[deletePosTerminalAdminCardBinding] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** POS 问询已登记商户卡地址（Registration Device 成功且链上 confirm 后即有记录）。 */
+export const getPosTerminalCardAddressForWallet = async (walletLoose: string): Promise<string | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioPosTerminalAdminCardSchema(db)
+		const w = ethers.getAddress(walletLoose).toLowerCase()
+		const { rows } = await db.query<{ card_address: string }>(
+			`SELECT card_address FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 LIMIT 1`,
+			[w]
+		)
+		if (rows.length === 0) return null
+		const raw = rows[0].card_address
+		return raw && ethers.isAddress(raw) ? ethers.getAddress(raw) : null
+	} catch (e: any) {
+		logger(Colors.yellow(`[getPosTerminalCardAddressForWallet] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** beamio_nft_series 表：存储 issued NFT 系列，含 sharedSeriesMetadata 的 IPFS 引用；metadata_json 为通用型 JSONB（应用场景扩展用，如电影/演唱会/商品等） */
 const BEAMIO_NFT_SERIES_TABLE = `CREATE TABLE IF NOT EXISTS beamio_nft_series (
 	id SERIAL PRIMARY KEY,
@@ -2017,7 +2130,7 @@ export const registerCardToDb = async (params: {
 	currency: string
 	priceInCurrencyE6: string
 	uri?: string
-	shareTokenMetadata?: { name?: string; description?: string; image?: string }
+	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[] }
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
 	txHash?: string
 }): Promise<void> => {

@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId} from '../db'
+import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -680,6 +680,52 @@ const routing = ( router: Router ) => {
 			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
 		}
 	})
+
+	/**
+	 * GET /api/myPosAddress?wallet=0x... 或 POST JSON { "wallet"|"posEOA"|"address": "0x..." }
+	 * — POS 终端 EOA 已通过 Registration Device（cardAddAdmin）登记后，返回该终端绑定的 BeamioUserCard 地址。
+	 * Cluster 直读 DB，不转发 Master。
+	 */
+	const parseMyPosWallet = (req: Request): string | null => {
+		const q = req.query as { wallet?: string; posEOA?: string; address?: string }
+		const fromQuery = q.wallet?.trim() || q.posEOA?.trim() || q.address?.trim()
+		if (fromQuery) return fromQuery
+		const b = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {}
+		const fromBody =
+			(typeof b.wallet === 'string' && b.wallet.trim()) ||
+			(typeof b.posEOA === 'string' && b.posEOA.trim()) ||
+			(typeof b.address === 'string' && b.address.trim()) ||
+			''
+		return fromBody || null
+	}
+	const myPosAddressHandler = async (req: Request, res: Response) => {
+		const raw = parseMyPosWallet(req)
+		if (!raw || !ethers.isAddress(raw)) {
+			return res.status(400).json({ ok: false, error: 'wallet or posEOA (address) required' }).end()
+		}
+		try {
+			const cardAddress = await getPosTerminalCardAddressForWallet(raw)
+			if (!cardAddress) {
+				return res
+					.status(404)
+					.json({ ok: false, error: 'No merchant card registered for this terminal in DB' })
+					.end()
+			}
+			return res
+				.status(200)
+				.json({
+					ok: true,
+					cardAddress,
+					myPosAddress: cardAddress,
+				})
+				.end()
+		} catch (e) {
+			logger(Colors.red(`[myPosAddress] error: ${(e as Error)?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
+		}
+	}
+	router.get('/myPosAddress', myPosAddressHandler)
+	router.post('/myPosAddress', myPosAddressHandler)
 
 	/** GET /api/getCardStats?cardAddress=0x...&admin=0x... - 从 BeamioUserCard 获取 periodTransferAmount（Charge，当天数据）与 redeemMintCounterFromClear（Top-Up）。periodType=PERIOD_DAY、anchorTs=0 即当天。admin 为终端 EOA，默认用 owner。 */
 	const CARD_STATS_ABI = [
