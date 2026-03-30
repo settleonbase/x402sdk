@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
@@ -1328,6 +1328,18 @@ const routing = ( router: Router ) => {
 		const fwdCur = strOrUndef(nfcRequestCurrency)
 		const fwdDisc = strOrUndef(nfcDiscountAmountFiat6)
 		const fwdTax = strOrUndef(nfcTaxAmountFiat6)
+		if (chargeOwnerChildBurn && typeof chargeOwnerChildBurn === 'object') {
+			const burnPre = await verifyChargeOwnerChildBurnClusterPreCheck({
+				burn: chargeOwnerChildBurn as import('../MemberCard').ChargeOwnerChildBurnPayload,
+				payeeTo: containerPayload.to,
+				merchantCardAddress: undefined,
+				items: containerPayload.items ?? [],
+			})
+			if (!burnPre.ok) {
+				logger(Colors.red(`[payByNfcUidSignContainer] chargeOwnerChildBurn Cluster REJECT: ${burnPre.error}`))
+				return res.status(400).json({ success: false, error: burnPre.error }).end()
+			}
+		}
 		logger(Colors.green(`[payByNfcUidSignContainer] Cluster preCheck OK uid=${uidTrim.slice(0, 16)}... forwarding to master`))
 		postLocalhost(
 			'/api/payByNfcUidSignContainer',
@@ -1523,6 +1535,14 @@ const routing = ( router: Router ) => {
 	/** POST /api/burnPointsByAdminPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。Admin 离线签字后提交 /api/nfcTopup。target 为被 burn 的地址，amount 为 "max" 表示 burn 全部。 */
 	router.post('/burnPointsByAdminPrepare', async (req, res) => {
 		const { cardAddress, target, amount } = req.body as { cardAddress?: string; target?: string; amount?: string }
+		const allow = await verifyBurnPointsByAdminPrepareAllowed({
+			cardAddress: cardAddress ?? '',
+			target: target ?? '',
+		})
+		if (!allow.ok) {
+			logger(Colors.yellow(`[burnPointsByAdminPrepare] Cluster REJECT: ${allow.error}`))
+			return res.status(400).json({ success: false, error: allow.error }).end()
+		}
 		const result = await burnPointsByAdminPreparePayload({ cardAddress: cardAddress ?? '', target: target ?? '', amount: amount ?? '0' })
 		if ('error' in result) return res.status(400).json({ success: false, error: result.error })
 		res.status(200).json(result).end()
@@ -3200,6 +3220,18 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end()
 				}
 			}
+			if (body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object') {
+				const burnPre = await verifyChargeOwnerChildBurnClusterPreCheck({
+					burn: body.chargeOwnerChildBurn as import('../MemberCard').ChargeOwnerChildBurnPayload,
+					payeeTo: body.containerPayload.to,
+					merchantCardAddress: typeof body.merchantCardAddress === 'string' ? body.merchantCardAddress : undefined,
+					items: body.containerPayload.items ?? [],
+				})
+				if (!burnPre.ok) {
+					logger(Colors.red(`[AAtoEOA] chargeOwnerChildBurn Cluster REJECT (container): ${burnPre.error}`))
+					return res.status(400).json({ success: false, error: burnPre.error }).end()
+				}
+			}
 			logger(Colors.green(`[AAtoEOA] server Container pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
 			postLocalhost('/api/AAtoEOA', {
 				containerPayload: body.containerPayload,
@@ -3303,6 +3335,18 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				if (!reqCheck.ok) {
 					logger(Colors.yellow(`[AAtoEOA] Cluster requestHash pre-check FAIL: ${reqCheck.error}`))
 					return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end()
+				}
+			}
+			if (body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object') {
+				const burnPre = await verifyChargeOwnerChildBurnClusterPreCheck({
+					burn: body.chargeOwnerChildBurn as import('../MemberCard').ChargeOwnerChildBurnPayload,
+					payeeTo: body.openContainerPayload.to,
+					merchantCardAddress: typeof body.merchantCardAddress === 'string' ? body.merchantCardAddress : undefined,
+					items: body.openContainerPayload.items ?? [],
+				})
+				if (!burnPre.ok) {
+					logger(Colors.red(`[AAtoEOA] chargeOwnerChildBurn Cluster REJECT (openContainer): ${burnPre.error}`))
+					return res.status(400).json({ success: false, error: burnPre.error }).end()
 				}
 			}
 			logger(Colors.green(`[AAtoEOA] server OpenContainer pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))

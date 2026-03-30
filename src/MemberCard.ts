@@ -1520,19 +1520,28 @@ function resolveChargeAccountingCardAddress(obj: (typeof beamioTransferIndexerAc
 }
 
 /** Charge：beneficiary EOA 的 adminParent 是否等于卡 owner（owner 通过 adminManagerByAdmin 等职级添加的直接下级）。用于记账 topAdmin=owner EOA 与可选链上 burn。 */
-const chargePayeeParentIsCardOwner = async (
+export const chargePayeeParentIsCardOwner = async (
 	cardAddr: string,
 	payeeEOA: string
 ): Promise<{ yes: boolean; cardOwnerEOAForIndexer: string }> => {
-	const cardAbi = ['function adminParent(address) view returns (address)', 'function owner() view returns (address)']
+	const cardAbi = [
+		'function adminParent(address) view returns (address)',
+		'function owner() view returns (address)',
+		'function isAdmin(address) view returns (bool)',
+	]
 	const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
 	const payee = ethers.getAddress(payeeEOA)
-	const [parent, rawOwner] = await Promise.all([
+	const [parent, rawOwner, isPayeeAdmin] = await Promise.all([
 		card.adminParent(payee) as Promise<string>,
 		card.owner() as Promise<string>,
+		card.isAdmin(payee) as Promise<boolean>,
 	])
 	const own = ethers.getAddress(rawOwner)
-	const yes = Boolean(parent && parent !== ethers.ZeroAddress && ethers.getAddress(parent) === own)
+	const parentNz = parent && parent !== ethers.ZeroAddress
+	const parentIsOwner = Boolean(parentNz && ethers.getAddress(parent) === own)
+	/** owner 经 adminManager 添加的一级 admin：adminParent==0 且仍在 admin 列表；与 getCardAdminInfo 在 parent==0 时将 upperAdmin 设为 owner 一致 */
+	const ownerLineAdmin = Boolean(!parentNz && isPayeeAdmin)
+	const yes = parentIsOwner || ownerLineAdmin
 	let cardOwnerEOAForIndexer = own
 	try {
 		const resolved = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner)
@@ -1543,6 +1552,47 @@ const chargePayeeParentIsCardOwner = async (
 	return { yes, cardOwnerEOAForIndexer }
 }
 
+/**
+ * Cluster：从 Charge relay（merchantCardAddress + items）推导记账卡地址，与 resolveChargeAccountingCardAddress 一致。
+ * chargeOwnerChildBurn.cardAddr 必须与该地址一致，不可仅信 POS。
+ */
+export function resolveChargeCardAddressFromRelayItems(params: {
+	merchantCardAddress?: string
+	items?: readonly { kind: number; asset: string }[]
+}): string {
+	if (params.merchantCardAddress && ethers.isAddress(params.merchantCardAddress)) {
+		return ethers.getAddress(params.merchantCardAddress)
+	}
+	const routes = params.items
+	if (Array.isArray(routes)) {
+		for (const r of routes) {
+			if (!r?.asset || !ethers.isAddress(r.asset)) continue
+			if (Number(r.kind) === 1) {
+				return ethers.getAddress(r.asset)
+			}
+		}
+	}
+	return ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+}
+
+/** 收款 `to`（AA 或 EOA）解析为受益人 EOA（与 maybeExecuteChargeOwnerChildBurn / 记账一致） */
+export async function resolvePayeeEoaFromChargeTo(toAddr: string): Promise<string | undefined> {
+	const trimmed = toAddr?.trim()
+	if (!trimmed || !ethers.isAddress(trimmed)) return undefined
+	const to = ethers.getAddress(trimmed)
+	try {
+		const code = await providerBaseBackup.getCode(to)
+		if (code && code !== '0x' && code.length > 2) {
+			const aa = new ethers.Contract(to, ['function owner() view returns (address)'], providerBaseBackup)
+			const ow = await aa.owner()
+			if (ow && ow !== ethers.ZeroAddress) return ethers.getAddress(ow)
+		}
+	} catch {
+		/* payee is EOA */
+	}
+	return to
+}
+
 /** Container relay 完成后：若客户端附带 chargeOwnerChildBurn 且链上为 owner 直属下级，则 executeForAdmin 焚烧刚入账的 points */
 export type ChargeOwnerChildBurnPayload = {
 	cardAddr: string
@@ -1550,6 +1600,79 @@ export type ChargeOwnerChildBurnPayload = {
 	deadline: number
 	nonce: string
 	adminSignature: string
+}
+
+/**
+ * Cluster 预检：不信任 POS 对受益人层级的断言。根据 to、items、merchantCardAddress 推导卡地址与受益人 EOA，
+ * 链上校验 adminParent/isAdmin 与 getCardAdminInfo（upper=owner）语义一致，且 burn.cardAddr 与推导卡一致。
+ */
+export async function verifyChargeOwnerChildBurnClusterPreCheck(params: {
+	burn: ChargeOwnerChildBurnPayload
+	payeeTo: string
+	merchantCardAddress?: string
+	items: readonly { kind: number; asset: string }[]
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+	const { burn } = params
+	if (!burn?.cardAddr || !ethers.isAddress(burn.cardAddr)) {
+		return { ok: false, error: 'chargeOwnerChildBurn.cardAddr invalid' }
+	}
+	if (!burn?.data || !String(burn.data).trim()) {
+		return { ok: false, error: 'chargeOwnerChildBurn.data required' }
+	}
+	if (!burn?.adminSignature || !String(burn.adminSignature).trim()) {
+		return { ok: false, error: 'chargeOwnerChildBurn.adminSignature required' }
+	}
+	if (burn.deadline == null || Number(burn.deadline) <= 0) {
+		return { ok: false, error: 'chargeOwnerChildBurn.deadline invalid' }
+	}
+	if (burn.nonce == null || !String(burn.nonce).trim()) {
+		return { ok: false, error: 'chargeOwnerChildBurn.nonce required' }
+	}
+	const cardFromRelay = resolveChargeCardAddressFromRelayItems({
+		merchantCardAddress: params.merchantCardAddress,
+		items: params.items,
+	})
+	const burnCard = ethers.getAddress(burn.cardAddr)
+	if (burnCard.toLowerCase() !== cardFromRelay.toLowerCase()) {
+		return {
+			ok: false,
+			error: 'chargeOwnerChildBurn.cardAddr must match server-derived charge card from route',
+		}
+	}
+	const payeeEOA = await resolvePayeeEoaFromChargeTo(params.payeeTo)
+	if (!payeeEOA) {
+		return { ok: false, error: 'invalid payee `to` for chargeOwnerChildBurn' }
+	}
+	const { yes } = await chargePayeeParentIsCardOwner(cardFromRelay, payeeEOA)
+	if (!yes) {
+		return {
+			ok: false,
+			error: 'chargeOwnerChildBurn not allowed: beneficiary is not owner-line admin on-chain',
+		}
+	}
+	return { ok: true }
+}
+
+/** POST /api/burnPointsByAdminPrepare：POS 不可信；仅当 target（AA）对应 EOA 在该卡上为 owner 线 admin 时才发放 prepare 载荷 */
+export async function verifyBurnPointsByAdminPrepareAllowed(params: {
+	cardAddress: string
+	target: string
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+	const c = params.cardAddress?.trim()
+	const t = params.target?.trim()
+	if (!c || !ethers.isAddress(c)) return { ok: false, error: 'Missing or invalid cardAddress' }
+	if (!t || !ethers.isAddress(t)) return { ok: false, error: 'Missing or invalid target' }
+	const cardAddr = ethers.getAddress(c)
+	const payeeEOA = await resolvePayeeEoaFromChargeTo(t)
+	if (!payeeEOA) return { ok: false, error: 'Could not resolve payee EOA from target' }
+	const { yes } = await chargePayeeParentIsCardOwner(cardAddr, payeeEOA)
+	if (!yes) {
+		return {
+			ok: false,
+			error: 'burn prepare not allowed: target owner is not owner-line admin on this card',
+		}
+	}
+	return { ok: true }
 }
 
 async function maybeExecuteChargeOwnerChildBurnAfterContainerRelay(params: {
