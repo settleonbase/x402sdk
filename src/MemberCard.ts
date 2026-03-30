@@ -39,6 +39,7 @@ import {
 	BASE_CARD_FACTORY,
 	BASE_CCSA_CARD_ADDRESS,
 	CONET_BUNIT_AIRDROP_ADDRESS,
+	CONET_BUINT_REDEEM_AIRDROP,
 	BEAMIO_INDEXER_DIAMOND,
 	MERCHANT_POS_MANAGEMENT_CONET,
 	BASE_TREASURY,
@@ -3397,6 +3398,156 @@ export const claimBUnitsProcess = async () => {
 	} finally {
 	Settle_ContractPool.unshift(SC)
 	setTimeout(() => claimBUnitsProcess(), 3000)
+	}
+}
+
+// --- BuintRedeemAirdrop：Cluster 读链预检 + Master admin 代付 gas（redeemWithCodeAsAdmin → 用户 AA）---
+
+const BUINT_REDEEM_AIRDROP_ABI = [
+	'function getRedeem(bytes32 codeHash) view returns (uint256 amount, uint64 validAfter, uint64 validBefore, bool active, bool consumed)',
+	'function redeemWithCodeAsAdmin(address recipient, string code) external',
+] as const
+
+const MAX_BUINT_REDEEM_CODE_BYTES = 512
+
+function buintRedeemAirdropTimeOk(validAfter: bigint, validBefore: bigint, nowSec: number): boolean {
+	if (validAfter !== 0n && BigInt(nowSec) < validAfter) return false
+	if (validBefore !== 0n && BigInt(nowSec) > validBefore) return false
+	return true
+}
+
+export type BuintRedeemAirdropPreCheckResult = {
+	valid: boolean
+	codeHash: string
+	amount: string
+	validAfter: number
+	validBefore: number
+	active: boolean
+	consumed: boolean
+	timeOk: boolean
+	redeemable: boolean
+	error?: string
+}
+
+/** CoNET 读操作：兑换码是否仍可被领取（不含签名；供 Cluster / 前端预检） */
+export async function buintRedeemAirdropQueryOnChain(code: string): Promise<BuintRedeemAirdropPreCheckResult> {
+	const b = ethers.toUtf8Bytes(code)
+	const now = Math.floor(Date.now() / 1000)
+	if (b.length === 0 || b.length > MAX_BUINT_REDEEM_CODE_BYTES) {
+		return {
+			valid: false,
+			codeHash: ethers.keccak256(b),
+			amount: '0',
+			validAfter: 0,
+			validBefore: 0,
+			active: false,
+			consumed: false,
+			timeOk: false,
+			redeemable: false,
+			error: 'Invalid redeem code length',
+		}
+	}
+	const codeHash = ethers.keccak256(b)
+	const c = new ethers.Contract(CONET_BUINT_REDEEM_AIRDROP, BUINT_REDEEM_AIRDROP_ABI, providerConet)
+	let amount = 0n
+	let validAfter = 0n
+	let validBefore = 0n
+	let active = false
+	let consumed = false
+	try {
+		const r = await c.getRedeem!(codeHash)
+		const tup = r as unknown as [bigint, bigint, bigint, boolean, boolean]
+		amount = tup[0] ?? 0n
+		validAfter = tup[1] ?? 0n
+		validBefore = tup[2] ?? 0n
+		active = Boolean(tup[3])
+		consumed = Boolean(tup[4])
+	} catch (e: any) {
+		return {
+			valid: false,
+			codeHash,
+			amount: '0',
+			validAfter: 0,
+			validBefore: 0,
+			active: false,
+			consumed: false,
+			timeOk: false,
+			redeemable: false,
+			error: e?.shortMessage ?? e?.message ?? 'getRedeem failed',
+		}
+	}
+	const timeOk = buintRedeemAirdropTimeOk(validAfter, validBefore, now)
+	let error: string | undefined
+	if (!active) error = 'Redeem is not active'
+	else if (consumed) error = 'Redeem already consumed'
+	else if (!timeOk) error = 'Outside valid time window'
+	else if (amount <= 0n) error = 'Zero amount'
+	const redeemable = active && !consumed && timeOk && amount > 0n
+	return {
+		valid: true,
+		codeHash,
+		amount: amount.toString(),
+		validAfter: Number(validAfter),
+		validBefore: Number(validBefore),
+		active,
+		consumed,
+		timeOk,
+		redeemable,
+		error,
+	}
+}
+
+export function buintRedeemAirdropRedeemClusterPreCheck(body: {
+	eoa?: string
+	code?: string
+}): { success: true; eoa: string; code: string } | { success: false; error: string } {
+	const rawEoa = typeof body.eoa === 'string' ? body.eoa.trim() : ''
+	const code = typeof body.code === 'string' ? body.code : ''
+	if (!rawEoa || !ethers.isAddress(rawEoa)) {
+		return { success: false, error: 'Invalid eoa' }
+	}
+	const b = ethers.toUtf8Bytes(code)
+	if (b.length === 0 || b.length > MAX_BUINT_REDEEM_CODE_BYTES) {
+		return { success: false, error: 'Invalid redeem code length' }
+	}
+	return { success: true, eoa: ethers.getAddress(rawEoa), code }
+}
+
+export type BuintRedeemAirdropPoolPayload = {
+	eoa: string
+	code: string
+	res?: Response
+}
+
+export const buintRedeemAirdropPool: BuintRedeemAirdropPoolPayload[] = []
+
+export const buintRedeemAirdropProcess = async () => {
+	const obj = buintRedeemAirdropPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		buintRedeemAirdropPool.unshift(obj)
+		return setTimeout(() => void buintRedeemAirdropProcess(), 3000)
+	}
+	logger(Colors.cyan(`[buintRedeemAirdropProcess] eoa=${obj.eoa}`))
+	try {
+		const aa = await ensureAAForEOA(obj.eoa)
+		const redeem = new ethers.Contract(CONET_BUINT_REDEEM_AIRDROP, BUINT_REDEEM_AIRDROP_ABI, SC.walletConet)
+		const tx = await redeem.redeemWithCodeAsAdmin!(aa, obj.code, { gasLimit: 900_000 })
+		logger(Colors.green(`[buintRedeemAirdropProcess] tx=${tx.hash}`))
+		await tx.wait()
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, txHash: tx.hash, aa }).end()
+		}
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red('[buintRedeemAirdropProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: msg }).end()
+		}
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => void buintRedeemAirdropProcess(), 3000)
 	}
 }
 
