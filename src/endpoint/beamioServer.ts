@@ -1220,6 +1220,7 @@ const routing = ( router: Router ) => {
 			nfcDiscountRateBps,
 			nfcTaxAmountFiat6,
 			nfcTaxRateBps,
+			chargeOwnerChildBurn,
 		} = req.body as {
 			uid?: string
 			containerPayload?: import('../MemberCard').ContainerRelayPayloadUnsigned
@@ -1235,6 +1236,7 @@ const routing = ( router: Router ) => {
 			nfcDiscountRateBps?: number
 			nfcTaxAmountFiat6?: string
 			nfcTaxRateBps?: number
+			chargeOwnerChildBurn?: import('../MemberCard').ChargeOwnerChildBurnPayload
 		}
 		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 			return res.status(400).json({ success: false, error: 'Missing uid' })
@@ -1344,6 +1346,7 @@ const routing = ( router: Router ) => {
 				...(nfcDiscountRateBps != null ? { nfcDiscountRateBps } : {}),
 				...(fwdTax != null ? { nfcTaxAmountFiat6: fwdTax } : {}),
 				...(nfcTaxRateBps != null ? { nfcTaxRateBps } : {}),
+				...(chargeOwnerChildBurn && typeof chargeOwnerChildBurn === 'object' ? { chargeOwnerChildBurn } : {}),
 			},
 			res
 		)
@@ -3153,6 +3156,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			nfcDiscountRateBps?: number
 			nfcTaxAmountFiat6?: string
 			nfcTaxRateBps?: number
+			chargeOwnerChildBurn?: import('../MemberCard').ChargeOwnerChildBurnPayload
 		}
 		logger(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`)
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true))
@@ -3206,6 +3210,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				forText: body.forText,
 				requestHash: body.requestHash,
 				validDays: body.validDays,
+				...(body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object'
+					? { chargeOwnerChildBurn: body.chargeOwnerChildBurn }
+					: {}),
 			}, res)
 			return
 		}
@@ -3317,6 +3324,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				nfcDiscountRateBps: body.nfcDiscountRateBps,
 				nfcTaxAmountFiat6: body.nfcTaxAmountFiat6,
 				nfcTaxRateBps: body.nfcTaxRateBps,
+				...(body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object'
+					? { chargeOwnerChildBurn: body.chargeOwnerChildBurn }
+					: {}),
 			}, res)
 			return
 		}

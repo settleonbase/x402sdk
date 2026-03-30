@@ -1499,6 +1499,175 @@ const deriveTopAdminAndSubordinate = (operator: string, operatorParentChain: str
 	return { topAdmin, subordinate }
 }
 
+/** Charge 记账：推导用于 adminParent/topAdmin 的 BeamioUserCard 地址（与实付 route 一致，对齐 NFC）。 */
+function resolveChargeAccountingCardAddress(obj: (typeof beamioTransferIndexerAccountingPool)[0]): string | undefined {
+	if (obj.merchantCardAddress && ethers.isAddress(obj.merchantCardAddress)) {
+		return ethers.getAddress(obj.merchantCardAddress)
+	}
+	const routes = obj.routeItems
+	if (Array.isArray(routes)) {
+		for (const r of routes) {
+			if (!r?.asset || !ethers.isAddress(r.asset)) continue
+			if (Number(r.assetType) === 1) {
+				return ethers.getAddress(r.asset)
+			}
+		}
+	}
+	if (obj.source === 'open-container' || obj.source === 'container') {
+		return ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+	}
+	return undefined
+}
+
+/** Charge：beneficiary EOA 的 adminParent 是否等于卡 owner（owner 通过 adminManagerByAdmin 等职级添加的直接下级）。用于记账 topAdmin=owner EOA 与可选链上 burn。 */
+const chargePayeeParentIsCardOwner = async (
+	cardAddr: string,
+	payeeEOA: string
+): Promise<{ yes: boolean; cardOwnerEOAForIndexer: string }> => {
+	const cardAbi = ['function adminParent(address) view returns (address)', 'function owner() view returns (address)']
+	const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+	const payee = ethers.getAddress(payeeEOA)
+	const [parent, rawOwner] = await Promise.all([
+		card.adminParent(payee) as Promise<string>,
+		card.owner() as Promise<string>,
+	])
+	const own = ethers.getAddress(rawOwner)
+	const yes = Boolean(parent && parent !== ethers.ZeroAddress && ethers.getAddress(parent) === own)
+	let cardOwnerEOAForIndexer = own
+	try {
+		const resolved = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner)
+		if (resolved?.success && resolved.cardOwner) cardOwnerEOAForIndexer = ethers.getAddress(resolved.cardOwner)
+	} catch {
+		/* keep contract owner address */
+	}
+	return { yes, cardOwnerEOAForIndexer }
+}
+
+/** Container relay 完成后：若客户端附带 chargeOwnerChildBurn 且链上为 owner 直属下级，则 executeForAdmin 焚烧刚入账的 points */
+export type ChargeOwnerChildBurnPayload = {
+	cardAddr: string
+	data: string
+	deadline: number
+	nonce: string
+	adminSignature: string
+}
+
+async function maybeExecuteChargeOwnerChildBurnAfterContainerRelay(params: {
+	SC: (typeof Settle_ContractPool)[0]
+	provider: ethers.Provider
+	obj: { chargeOwnerChildBurn?: ChargeOwnerChildBurnPayload }
+	payeeAATo: string
+	items: Array<{ kind: number; asset: string; amount: bigint; tokenId: bigint; data: string }>
+}): Promise<void> {
+	const burn = params.obj.chargeOwnerChildBurn
+	if (!burn?.data || !burn?.adminSignature || !burn?.cardAddr || burn.deadline == null || !burn.nonce) return
+
+	let payeeEOA = params.payeeAATo
+	try {
+		const toCode = await params.provider.getCode(params.payeeAATo)
+		if (toCode && toCode !== '0x' && toCode.length > 2) {
+			const aaRead = new ethers.Contract(params.payeeAATo, ['function owner() view returns (address)'], params.provider)
+			const ow = await aaRead.owner()
+			if (ow && ow !== ethers.ZeroAddress) payeeEOA = ethers.getAddress(ow)
+		}
+	} catch {
+		/* keep */
+	}
+
+	const erc1155Items = params.items.filter((it) => it.kind === 1)
+	if (erc1155Items.length === 0) return
+
+	const pointsByCard = new Map<string, bigint>()
+	for (const it of erc1155Items) {
+		const c = ethers.getAddress(it.asset)
+		pointsByCard.set(c, (pointsByCard.get(c) ?? 0n) + it.amount)
+	}
+	if (pointsByCard.size !== 1) {
+		logger(Colors.yellow(`[chargeOwnerChildBurn] skipped: multiple ERC1155 card assets in one container/open`))
+		return
+	}
+	const cardAddrPoints = [...pointsByCard.keys()][0]
+	const pointsSum = pointsByCard.get(cardAddrPoints) ?? 0n
+	if (pointsSum <= 0n) return
+
+	const { yes } = await chargePayeeParentIsCardOwner(cardAddrPoints, payeeEOA)
+	if (!yes) {
+		logger(Colors.yellow(`[chargeOwnerChildBurn] rejected: payee is not direct child of card owner on-chain`))
+		return
+	}
+
+	const cardNorm = ethers.getAddress(burn.cardAddr)
+	if (cardNorm !== cardAddrPoints) {
+		logger(Colors.yellow(`[chargeOwnerChildBurn] rejected: cardAddr mismatch burn=${cardNorm} items=${cardAddrPoints}`))
+		return
+	}
+
+	const deadlineNum = Number(burn.deadline)
+	const nonceStr = typeof burn.nonce === 'string' ? burn.nonce : String(burn.nonce)
+	const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
+		cardAddr: cardNorm,
+		data: burn.data,
+		deadline: deadlineNum,
+		nonce: nonceStr,
+		adminSignature: burn.adminSignature,
+	})
+	if (!adminCheck.ok) {
+		logger(Colors.yellow(`[chargeOwnerChildBurn] admin check failed: ${adminCheck.error}`))
+		return
+	}
+	if (adminCheck.signer.toLowerCase() !== payeeEOA.toLowerCase()) {
+		logger(Colors.yellow(`[chargeOwnerChildBurn] signer must be payee EOA`))
+		return
+	}
+
+	const ifaceBurn = new ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)'])
+	let decoded: ethers.TransactionDescription | null = null
+	try {
+		decoded = ifaceBurn.parseTransaction({ data: burn.data })
+	} catch {
+		decoded = null
+	}
+	if (!decoded || decoded.name !== 'burnPointsByAdmin') {
+		logger(Colors.yellow(`[chargeOwnerChildBurn] invalid data (expected burnPointsByAdmin)`))
+		return
+	}
+	const target = ethers.getAddress(decoded.args[0] as string)
+	const amountArg = decoded.args[1] as bigint
+	const payeeAANorm = ethers.getAddress(params.payeeAATo)
+	if (target.toLowerCase() !== payeeAANorm.toLowerCase()) {
+		logger(Colors.yellow(`[chargeOwnerChildBurn] target must be payee AA`))
+		return
+	}
+	if (amountArg !== pointsSum && amountArg !== ethers.MaxUint256) {
+		logger(
+			Colors.yellow(
+				`[chargeOwnerChildBurn] amount mismatch got=${amountArg} expected=${pointsSum} (or MaxUint256)`
+			)
+		)
+		return
+	}
+
+	const nonceHex = nonceStr.startsWith('0x') ? (nonceStr as `0x${string}`) : (`0x${nonceStr}` as `0x${string}`)
+	try {
+		let tx: ethers.ContractTransactionResponse
+		try {
+			tx = await params.SC.baseFactoryPaymaster.executeForAdmin(cardNorm, burn.data, BigInt(deadlineNum), nonceHex, burn.adminSignature)
+		} catch (gasErr: any) {
+			if (/estimateGas|missing revert data|CALL_EXCEPTION/i.test(gasErr?.message ?? '')) {
+				tx = await params.SC.baseFactoryPaymaster.executeForAdmin(cardNorm, burn.data, BigInt(deadlineNum), nonceHex, burn.adminSignature, {
+					gasLimit: 650_000,
+				})
+			} else {
+				throw gasErr
+			}
+		}
+		logger(Colors.green(`[chargeOwnerChildBurn] executeForAdmin ok tx=${tx.hash}`))
+		await tx.wait().catch(() => {})
+	} catch (e: any) {
+		logger(Colors.red(`[chargeOwnerChildBurn] executeForAdmin failed: ${e?.shortMessage ?? e?.message ?? e}`))
+	}
+}
+
 /** 从 executeForAdmin 的 data 中解析 mintPointsByAdmin(toEOA, points6) 的 toEOA，供 NFC Topup 前置 DeployingSmartAccount */
 const tryParseMintPointsByAdminRecipient = (data: string): string | null => {
 	try {
@@ -2010,6 +2179,8 @@ export const OpenContainerRelayPool: {
 	nfcDiscountRateBps?: number
 	nfcTaxAmountFiat6?: string
 	nfcTaxRateBps?: number
+	/** owner 直属下级 OpenContainer Charge：POS 提交的 burn，relay 成功后焚烧入账 points（与 NFC/封闭 container 对齐） */
+	chargeOwnerChildBurn?: ChargeOwnerChildBurnPayload
 	res: Response
 }[] = []
 
@@ -2054,6 +2225,8 @@ export const ContainerRelayPool: {
 	nfcDiscountRateBps?: number
 	nfcTaxAmountFiat6?: string
 	nfcTaxRateBps?: number
+	/** owner 直属下级 Charge：POS 提交的 executeForAdmin(burnPointsByAdmin)，relay 成功后焚烧入账 points */
+	chargeOwnerChildBurn?: ChargeOwnerChildBurnPayload
 	res: Response
 }[] = []
 
@@ -2488,33 +2661,41 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				}
 			}
 			transactionInput.subordinate = payeeEOA
-			const cardAddr = obj.merchantCardAddress && ethers.isAddress(obj.merchantCardAddress)
-				? obj.merchantCardAddress
-				: ((obj.source === 'open-container' || obj.source === 'container') ? BEAMIO_USER_CARD_ASSET_ADDRESS : undefined)
+			const cardAddr = resolveChargeAccountingCardAddress(obj)
 			if (cardAddr) {
 				try {
-					const opChain = await fetchOperatorParentChain(cardAddr, payeeEOA)
-					const { topAdmin: topAdminInChain } = deriveTopAdminAndSubordinate(payeeEOA, opChain)
-					// topAdminInChain 可能是 EOA 或 AA（链上 adminParent 接受 AA 作为 admin）
-					const topAdminCode = await SC.walletBase.provider!.getCode(topAdminInChain)
-					const topAdminIsAA = topAdminCode && topAdminCode !== '0x' && topAdminCode.length > 2
-					let topAdminAA: string
-					if (topAdminIsAA) {
-						topAdminAA = ethers.getAddress(topAdminInChain)
+					const parentIsOwner = await chargePayeeParentIsCardOwner(cardAddr, payeeEOA)
+					if (parentIsOwner.yes && parentIsOwner.cardOwnerEOAForIndexer) {
+						transactionInput.topAdmin = ethers.getAddress(parentIsOwner.cardOwnerEOAForIndexer)
+						logger(
+							Colors.cyan(
+								`[beamioTransferIndexerAccountingProcess] Charge owner-direct: topAdmin=${transactionInput.topAdmin} (owner EOA) subordinate=${payeeEOA}`
+							)
+						)
 					} else {
-						topAdminAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(topAdminInChain)
-						if (!topAdminAA || topAdminAA === ethers.ZeroAddress) {
-							try {
-								const beamio = await (SC.aaAccountFactoryPaymaster as any).beamioAccountOf?.(topAdminInChain)
-								if (beamio && beamio !== ethers.ZeroAddress) topAdminAA = beamio
-							} catch { /* ignore */ }
+						const opChain = await fetchOperatorParentChain(cardAddr, payeeEOA)
+						const { topAdmin: topAdminInChain } = deriveTopAdminAndSubordinate(payeeEOA, opChain)
+						// topAdminInChain 可能是 EOA 或 AA（链上 adminParent 接受 AA 作为 admin）
+						const topAdminCode = await SC.walletBase.provider!.getCode(topAdminInChain)
+						const topAdminIsAA = topAdminCode && topAdminCode !== '0x' && topAdminCode.length > 2
+						let topAdminAA: string
+						if (topAdminIsAA) {
+							topAdminAA = ethers.getAddress(topAdminInChain)
+						} else {
+							topAdminAA = await SC.aaAccountFactoryPaymaster.primaryAccountOf(topAdminInChain)
+							if (!topAdminAA || topAdminAA === ethers.ZeroAddress) {
+								try {
+									const beamio = await (SC.aaAccountFactoryPaymaster as any).beamioAccountOf?.(topAdminInChain)
+									if (beamio && beamio !== ethers.ZeroAddress) topAdminAA = beamio
+								} catch { /* ignore */ }
+							}
 						}
-					}
-					if (topAdminAA && topAdminAA !== ethers.ZeroAddress) {
-						const aaCode = await SC.walletBase.provider!.getCode(topAdminAA)
-						if (aaCode && aaCode !== '0x' && aaCode.length > 2) {
-							transactionInput.topAdmin = ethers.getAddress(topAdminAA)
-							logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] Charge topAdmin=${transactionInput.topAdmin} subordinate=${payeeEOA}`))
+						if (topAdminAA && topAdminAA !== ethers.ZeroAddress) {
+							const aaCode = await SC.walletBase.provider!.getCode(topAdminAA)
+							if (aaCode && aaCode !== '0x' && aaCode.length > 2) {
+								transactionInput.topAdmin = ethers.getAddress(topAdminAA)
+								logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] Charge topAdmin=${transactionInput.topAdmin} subordinate=${payeeEOA}`))
+							}
 						}
 					}
 				} catch (e: any) {
@@ -5834,13 +6015,23 @@ export const OpenContainerRelayProcess = async () => {
     logger(`[AAtoEOA/OpenContainer] relay tx submitted hash=${tx.hash}`)
     // 立即返回 hash 给客户端，避免 tx.wait() 等待链上确认导致 502 超时
     if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
-    await tx.wait().catch((waitErr: any) => {
+    const openRelayReceipt = await tx.wait().catch((waitErr: any) => {
       try {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, tx submitted): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
       } catch (_) {
         console.error('[AAtoEOA/OpenContainer] tx.wait() failed (RPC):', waitErr)
       }
+      return null
     })
+    if (openRelayReceipt && obj.chargeOwnerChildBurn) {
+      await maybeExecuteChargeOwnerChildBurnAfterContainerRelay({
+        SC,
+        provider: SC.walletBase.provider!,
+        obj,
+        payeeAATo: to,
+        items,
+      })
+    }
 
     // 以下记账通过 beamioTransferIndexerAccountingPool -> BeamioIndexerDiamond，客户端已收到 hash
     const currencyFromClient = obj.currency
@@ -6337,6 +6528,15 @@ export const ContainerRelayProcess = async () => {
       }
       return null
     })
+    if (receipt) {
+      await maybeExecuteChargeOwnerChildBurnAfterContainerRelay({
+        SC,
+        provider: SC.walletBase.provider!,
+        obj,
+        payeeAATo: to,
+        items,
+      })
+    }
     // Base 转账完成后立即返回 hash 给客户端，不等待记账
     if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
@@ -9955,6 +10155,7 @@ export const payByNfcUidSignContainer = async (params: {
 	nfcDiscountRateBps?: number
 	nfcTaxAmountFiat6?: string
 	nfcTaxRateBps?: number
+	chargeOwnerChildBurn?: ChargeOwnerChildBurnPayload
 }): Promise<{ pushed: boolean; error?: string; httpStatus?: number }> => {
 	const {
 		uid,
@@ -9972,6 +10173,7 @@ export const payByNfcUidSignContainer = async (params: {
 		nfcDiscountRateBps,
 		nfcTaxAmountFiat6,
 		nfcTaxRateBps,
+		chargeOwnerChildBurn,
 	} = params
 	const normNfcBodyAmount = (v: unknown): string | undefined => {
 		if (v == null) return undefined
@@ -10093,6 +10295,7 @@ export const payByNfcUidSignContainer = async (params: {
 			nfcDiscountRateBps,
 			nfcTaxAmountFiat6: nfcTaxAmountFiat6 != null ? String(nfcTaxAmountFiat6).trim() || undefined : undefined,
 			nfcTaxRateBps,
+			...(chargeOwnerChildBurn ? { chargeOwnerChildBurn } : {}),
 			res,
 		})
 		logger(Colors.green(`[payByNfcUidSignContainer] pushed uid=${uid.slice(0, 12)}... items=${containerPayload.items.length}`))

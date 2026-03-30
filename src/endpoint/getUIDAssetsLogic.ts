@@ -282,10 +282,14 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 						const t = await pickCardMetadataTierRowForChain(card, tiersRaw, bestNft.tier, bestNft.attribute)
 						if (t) {
 							const cardTierName = t.name != null ? String(t.name).trim() : ''
-							if (cardTierName) tierName = cardTierName
-							// 与 tierName 一致：链上对齐后的卡级 metadata.tiers 行优先生效，避免 NFT 库里占位 description（如 5%）盖住正确折扣文案（如 7.5%）。
 							const cardTierDesc = t.description != null ? String(t.description).trim() : ''
-							if (cardTierDesc) tierDescription = cardTierDesc
+							if (cardTierName) {
+								tierName = cardTierName
+								// 与 tierName 同源：卡级 tiers 命中 name 时，description 只认该行；无则清空，禁止沿用 NFT 库按 tokenId 缓存的旧档文案（升降级同 tokenId 会串档）。
+								tierDescription = cardTierDesc !== '' ? cardTierDesc : undefined
+							} else if (cardTierDesc !== '') {
+								tierDescription = cardTierDesc
+							}
 							if (!cardImage && t.image && String(t.image).trim()) cardImage = String(t.image).trim()
 							if (!cardBackground && t.backgroundColor && String(t.backgroundColor).trim()) {
 								const bg = String(t.backgroundColor).trim()

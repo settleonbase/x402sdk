@@ -1322,6 +1322,7 @@ const routing = ( router: Router ) => {
 				nfcDiscountRateBps?: number
 				nfcTaxAmountFiat6?: string
 				nfcTaxRateBps?: number
+				chargeOwnerChildBurn?: import('../MemberCard').ChargeOwnerChildBurnPayload
 			}
 			logger(`[AAtoEOA] [DEBUG] Master received openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 40)}…"` : 'n/a'} OpenContainerRelayPool.len=${OpenContainerRelayPool.length} Settle_ContractPool.len=${Settle_ContractPool.length}`)
 			logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a', forText: body?.forText ? `${body.forText.slice(0, 40)}…` : 'n/a' }, false, 3, true))
@@ -1342,6 +1343,7 @@ const routing = ( router: Router ) => {
 					forText: body.forText?.trim() || undefined,
 					requestHash: body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined,
 					merchantCardAddress: body.merchantCardAddress && ethers.isAddress(body.merchantCardAddress) ? body.merchantCardAddress : undefined,
+					chargeOwnerChildBurn: body.chargeOwnerChildBurn,
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to ContainerRelayPool (length ${poolLenBefore} -> ${ContainerRelayPool.length}), calling ContainerRelayProcess()`)
@@ -1400,6 +1402,7 @@ const routing = ( router: Router ) => {
 						body.nfcTaxRateBps != null && Number.isFinite(Number(body.nfcTaxRateBps))
 							? Math.max(0, Math.min(10000, Math.trunc(Number(body.nfcTaxRateBps))))
 							: undefined,
+					chargeOwnerChildBurn: body.chargeOwnerChildBurn,
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)
@@ -1592,6 +1595,7 @@ const routing = ( router: Router ) => {
 				nfcDiscountRateBps,
 				nfcTaxAmountFiat6,
 				nfcTaxRateBps,
+				chargeOwnerChildBurn,
 			} = req.body as {
 				uid?: string
 				containerPayload?: ContainerRelayPayloadUnsigned
@@ -1607,6 +1611,7 @@ const routing = ( router: Router ) => {
 				nfcDiscountRateBps?: number
 				nfcTaxAmountFiat6?: string
 				nfcTaxRateBps?: number
+				chargeOwnerChildBurn?: import('../MemberCard').ChargeOwnerChildBurnPayload
 			}
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 				return res.status(400).json({ success: false, error: 'Missing uid' })
@@ -1667,6 +1672,7 @@ const routing = ( router: Router ) => {
 						? String(nfcTaxAmountFiat6).trim()
 						: undefined,
 				nfcTaxRateBps,
+				chargeOwnerChildBurn,
 			})
 			if (result.pushed) return
 			if (res.headersSent) return
