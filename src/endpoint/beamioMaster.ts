@@ -10,6 +10,12 @@ import Colors from 'colors/safe'
 import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
+import {
+	createMerchantKitCheckoutSession,
+	getMerchantKitSessionStatus,
+	handleMerchantKitStripeWebhook,
+	refreshMerchantKitSessionFromStripe,
+} from './merchantKitStripe'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './getUIDAssetsLogic'
@@ -1869,6 +1875,69 @@ const routing = ( router: Router ) => {
 			})
 		})
 
+		/**
+		 * Merchant kit Stripe — Master 单进程持有会话 map（Cluster 预检后 postLocalhost 至此处）。
+		 * body: `{ walletAddress, packageType }`
+		 */
+		router.post('/merchantKitStripe/createSession', async (req, res) => {
+			const { walletAddress, packageType } = req.body ?? {}
+			if (!walletAddress || typeof packageType !== 'string') {
+				return res.status(400).json({ error: 'walletAddress and packageType required' }).end()
+			}
+			if (!ethers.isAddress(walletAddress)) {
+				return res.status(400).json({ error: 'Invalid walletAddress' }).end()
+			}
+			const out = await createMerchantKitCheckoutSession(walletAddress, packageType)
+			if ('error' in out) {
+				logger(Colors.red('[merchantKitStripe] createSession HTTP 400 (master)'), walletAddress, out.error)
+				return res.status(400).json({ error: out.error }).end()
+			}
+			return res.status(200).json({ url: out.url, sessionId: out.sessionId }).end()
+		})
+
+		router.post('/merchantKitStripe/poll', async (req, res) => {
+			const { sessionId, userClosedCheckout } = req.body ?? {}
+			if (!sessionId || typeof sessionId !== 'string') {
+				return res.status(400).json({ error: 'sessionId required' }).end()
+			}
+			const closed = Boolean(userClosedCheckout)
+			await refreshMerchantKitSessionFromStripe(sessionId, {
+				treatOpenUnpaidAsAbandoned: closed,
+			})
+			const st = getMerchantKitSessionStatus(sessionId)
+			if (!st) {
+				logger(Colors.yellow('[merchantKitStripe] poll 404 unknown session (master)'), sessionId)
+				return res.status(404).json({ error: 'Unknown session' }).end()
+			}
+			const pollVerbose =
+				closed ||
+				process.env.MERCHANT_KIT_STRIPE_DEBUG === '1' ||
+				process.env.MERCHANT_KIT_STRIPE_DEBUG === 'true'
+			if (pollVerbose) {
+				logger(
+					Colors.cyan('[merchantKitStripe] poll → (master)'),
+					inspect(
+						{
+							sessionId,
+							userClosedCheckout: closed,
+							status: st.status,
+							packageType: st.packageType,
+							lastEvent: st.lastEvent,
+						},
+						false,
+						2,
+						true
+					)
+				)
+			}
+			return res.status(200).json({
+				status: st.status,
+				packageType: st.packageType,
+				eoaAddress: st.eoaAddress,
+				lastEvent: st.lastEvent,
+			}).end()
+		})
+
 }
 
 const initialize = async (reactBuildFolder: string, PORT: number) => {
@@ -1888,7 +1957,30 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	const isProd = process.env.NODE_ENV === "production";
 
 	const app = express()
-	app.set("trust proxy", true); 
+	app.set("trust proxy", true)
+
+	/** Stripe merchant-kit webhook：仅在 Master 验签并更新会话 map（Cluster 将 raw body 转发至此） */
+	app.post(
+		'/api/merchant-kit-stripe-webhook',
+		express.raw({ type: 'application/json' }),
+		async (req: Request, res: Response) => {
+			const ip = getClientIp(req)
+			const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
+			logger(
+				Colors.cyan('[merchant-kit-stripe-webhook] POST (master)'),
+				`ip=${ip || '(none)'}`,
+				`ua=${ua || '(none)'}`
+			)
+			const result = await handleMerchantKitStripeWebhook(req.body as Buffer, req.headers['stripe-signature'])
+			if (result.ok) {
+				logger(Colors.green('[merchant-kit-stripe-webhook] response 200 received=true'))
+				return res.status(200).json({ received: true }).end()
+			}
+			logger(Colors.red('[merchant-kit-stripe-webhook] response 400'), result.error)
+			return res.status(400).send(`Webhook Error: ${result.error}`).end()
+		}
+	)
+
 	if (!isProd) {
 			app.use((req, res, next) => {
 				res.setHeader('Access-Control-Allow-Origin', '*'); // 或你的白名单 Origin

@@ -70,12 +70,6 @@ const OLD_CCSA_REDIRECTS = [
 	'0xA1A9f6f942dc0ED9Aa7eF5df7337bd878c2e157b', // 旧工厂 0x86879fE3 部署的 CCSA（已迁移至新工厂）
 ].map(a => a.toLowerCase())
 import { masterSetup } from '../util'
-import {
-	createMerchantKitCheckoutSession,
-	getMerchantKitSessionStatus,
-	handleMerchantKitStripeWebhook,
-	refreshMerchantKitSessionFromStripe,
-} from './merchantKitStripe'
 
 const BASE_CHAIN_ID = 8453
 const MINT_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('mintPointsByAdmin(address,uint256)').slice(2, 10)
@@ -268,6 +262,39 @@ export const postLocalhost = async (path: string, obj: any, _res: Response)=> {
 
 	req.write(jsonStringifyWithBigInt(obj))
 	req.end()
+}
+
+/** 将 Stripe webhook 等 raw body POST 原样转发到 Master（签名头必须透传） */
+const postLocalhostRaw = (
+	path: string,
+	body: Buffer,
+	stripeSignature: string | string[] | undefined,
+	_res: Response
+) => {
+	const headers: Record<string, string> = {
+		'Content-Type': 'application/json',
+		'Content-Length': String(body.length),
+	}
+	if (stripeSignature) {
+		headers['stripe-signature'] = Array.isArray(stripeSignature) ? stripeSignature[0] : stripeSignature
+	}
+	const option: RequestOptions = {
+		hostname: 'localhost',
+		path,
+		port: masterServerPort,
+		method: 'POST',
+		protocol: 'http:',
+		headers,
+	}
+	const reqOut = request(option, (mres) => {
+		mres.pipe(_res)
+	})
+	reqOut.once('error', (e) => {
+		logger(Colors.red(`[DEBUG] postLocalhostRaw ${path} FAIL: ${e.message}`))
+		_res.status(502).json({ success: false, error: `Forward to master failed: ${e.message}` }).end()
+	})
+	reqOut.write(body)
+	reqOut.end()
 }
 
 /** GET 请求转发到 master */
@@ -4228,7 +4255,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	})
 
-	/** Merchant Programs (biz) — Stripe Checkout: `{ walletAddress, packageType: 'standard_kit' | 'custom_kit' }` */
+	/**
+	 * Merchant Programs — Cluster 仅预检后转发 Master（会话状态仅在 Master 单进程，避免多 worker 内存分裂）。
+	 * body: `{ walletAddress, packageType: 'standard_kit' | 'custom_kit' }`
+	 */
 	router.post('/merchantKitStripe/createSession', async (req, res) => {
 		const { walletAddress, packageType } = req.body ?? {}
 		if (!walletAddress || typeof packageType !== 'string') {
@@ -4237,12 +4267,22 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!ethers.isAddress(walletAddress)) {
 			return res.status(400).json({ error: 'Invalid walletAddress' }).end()
 		}
-		const out = await createMerchantKitCheckoutSession(walletAddress, packageType)
-		if ('error' in out) {
-			logger(Colors.red('[merchantKitStripe] createSession HTTP 400'), walletAddress, out.error)
-			return res.status(400).json({ error: out.error }).end()
+		if (packageType !== 'standard_kit' && packageType !== 'custom_kit') {
+			return res.status(400).json({ error: 'Invalid packageType' }).end()
 		}
-		return res.status(200).json({ url: out.url, sessionId: out.sessionId }).end()
+		const sk =
+			(typeof process !== 'undefined' && process.env?.STRIPE_SECRET_KEY?.trim()) ||
+			(masterSetup as { stripe_SecretKey?: string }).stripe_SecretKey?.trim() ||
+			''
+		if (!sk) {
+			logger(Colors.red('[merchantKitStripe] createSession cluster precheck: Stripe key missing'))
+			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
+		}
+		return postLocalhost(
+			'/api/merchantKitStripe/createSession',
+			{ walletAddress: ethers.getAddress(walletAddress), packageType },
+			res
+		)
 	})
 
 	router.post('/merchantKitStripe/poll', async (req, res) => {
@@ -4250,42 +4290,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!sessionId || typeof sessionId !== 'string') {
 			return res.status(400).json({ error: 'sessionId required' }).end()
 		}
-		const closed = Boolean(userClosedCheckout)
-		await refreshMerchantKitSessionFromStripe(sessionId, {
-			treatOpenUnpaidAsAbandoned: closed,
-		})
-		const st = getMerchantKitSessionStatus(sessionId)
-		if (!st) {
-			logger(Colors.yellow('[merchantKitStripe] poll 404 unknown session'), sessionId)
-			return res.status(404).json({ error: 'Unknown session' }).end()
-		}
-		const pollVerbose =
-			closed ||
-			process.env.MERCHANT_KIT_STRIPE_DEBUG === '1' ||
-			process.env.MERCHANT_KIT_STRIPE_DEBUG === 'true'
-		if (pollVerbose) {
-			logger(
-				Colors.cyan('[merchantKitStripe] poll →'),
-				inspect(
-					{
-						sessionId,
-						userClosedCheckout: closed,
-						status: st.status,
-						packageType: st.packageType,
-						lastEvent: st.lastEvent,
-					},
-					false,
-					2,
-					true
-				)
-			)
-		}
-		return res.status(200).json({
-			status: st.status,
-			packageType: st.packageType,
-			eoaAddress: st.eoaAddress,
-			lastEvent: st.lastEvent,
-		}).end()
+		return postLocalhost('/api/merchantKitStripe/poll', { sessionId, userClosedCheckout: Boolean(userClosedCheckout) }, res)
 	})
 
 }
@@ -4318,17 +4323,16 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			const ip = getClientIp(req)
 			const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
 			logger(
-				Colors.cyan('[merchant-kit-stripe-webhook] POST'),
+				Colors.cyan('[merchant-kit-stripe-webhook] POST → master'),
 				`ip=${ip || '(none)'}`,
 				`ua=${ua || '(none)'}`
 			)
-			const result = await handleMerchantKitStripeWebhook(req.body as Buffer, req.headers['stripe-signature'])
-			if (result.ok) {
-				logger(Colors.green('[merchant-kit-stripe-webhook] response 200 received=true'))
-				return res.status(200).json({ received: true }).end()
-			}
-			logger(Colors.red('[merchant-kit-stripe-webhook] response 400'), result.error)
-			return res.status(400).send(`Webhook Error: ${result.error}`).end()
+			return postLocalhostRaw(
+				'/api/merchant-kit-stripe-webhook',
+				req.body as Buffer,
+				req.headers['stripe-signature'],
+				res
+			)
 		}
 	)
 
