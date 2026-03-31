@@ -27,6 +27,10 @@ type IMasterSetup = {
 	}
 	storagePATH: string
 
+	/** Stripe API secret (`~/.master.json`；与 CoNET paymentHook 一致). 也可用环境变量 `STRIPE_SECRET_KEY` 覆盖。 */
+	stripe_SecretKey?: string
+	/** Merchant kit Checkout webhook signing secret（`~/.master.json`）；也可用环境变量 `STRIPE_WEBHOOK_SECRET_MERCHANT_KIT` 覆盖。 */
+	STRIPE_WEBHOOK_SECRET_MERCHANT_KIT?: string
 }
 
 /**

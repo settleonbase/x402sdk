@@ -70,6 +70,12 @@ const OLD_CCSA_REDIRECTS = [
 	'0xA1A9f6f942dc0ED9Aa7eF5df7337bd878c2e157b', // 旧工厂 0x86879fE3 部署的 CCSA（已迁移至新工厂）
 ].map(a => a.toLowerCase())
 import { masterSetup } from '../util'
+import {
+	createMerchantKitCheckoutSession,
+	getMerchantKitSessionStatus,
+	handleMerchantKitStripeWebhook,
+	refreshMerchantKitSessionFromStripe,
+} from './merchantKitStripe'
 
 const BASE_CHAIN_ID = 8453
 const MINT_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('mintPointsByAdmin(address,uint256)').slice(2, 10)
@@ -4222,8 +4228,39 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	})
 
+	/** Merchant Programs (biz) — Stripe Checkout: `{ walletAddress, packageType: 'standard_kit' | 'custom_kit' }` */
+	router.post('/merchantKitStripe/createSession', async (req, res) => {
+		const { walletAddress, packageType } = req.body ?? {}
+		if (!walletAddress || typeof packageType !== 'string') {
+			return res.status(400).json({ error: 'walletAddress and packageType required' }).end()
+		}
+		if (!ethers.isAddress(walletAddress)) {
+			return res.status(400).json({ error: 'Invalid walletAddress' }).end()
+		}
+		const out = await createMerchantKitCheckoutSession(walletAddress, packageType)
+		if ('error' in out) {
+			return res.status(400).json({ error: out.error }).end()
+		}
+		return res.status(200).json({ url: out.url, sessionId: out.sessionId }).end()
+	})
 
-
+	router.post('/merchantKitStripe/poll', async (req, res) => {
+		const { sessionId } = req.body ?? {}
+		if (!sessionId || typeof sessionId !== 'string') {
+			return res.status(400).json({ error: 'sessionId required' }).end()
+		}
+		await refreshMerchantKitSessionFromStripe(sessionId)
+		const st = getMerchantKitSessionStatus(sessionId)
+		if (!st) {
+			return res.status(404).json({ error: 'Unknown session' }).end()
+		}
+		return res.status(200).json({
+			status: st.status,
+			packageType: st.packageType,
+			eoaAddress: st.eoaAddress,
+			lastEvent: st.lastEvent,
+		}).end()
+	})
 
 }
 
@@ -4245,7 +4282,22 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	const isProd = process.env.NODE_ENV === "production";
 
 	const app = express()
-	app.set("trust proxy", true); 
+	app.set("trust proxy", true);
+
+	/** Stripe merchant-kit webhook must see raw body (before express.json). Configure URL in Stripe Dashboard → same path on beamio.app. */
+	app.post(
+		'/api/merchant-kit-stripe-webhook',
+		express.raw({ type: 'application/json' }),
+		async (req: Request, res: Response) => {
+			const result = await handleMerchantKitStripeWebhook(req.body as Buffer, req.headers['stripe-signature'])
+			if (result.ok) {
+				return res.status(200).json({ received: true }).end()
+			}
+			logger(Colors.red('[merchant-kit-stripe-webhook]'), result.error)
+			return res.status(400).send(`Webhook Error: ${result.error}`).end()
+		}
+	)
+
 	if (!isProd) {
 			app.use((req, res, next) => {
 				res.setHeader('Access-Control-Allow-Origin', '*'); // 或你的白名单 Origin
