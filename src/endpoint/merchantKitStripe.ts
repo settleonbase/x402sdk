@@ -9,6 +9,18 @@ import Colors from 'colors/safe'
 import { masterSetup } from '../util'
 import { logger } from '../logger'
 
+/** Set `MERCHANT_KIT_STRIPE_DEBUG=1` (or `true`) for verbose poll/refresh logs. Webhook always logs a short summary line. */
+function merchantKitStripeDebugEnabled(): boolean {
+	const v = (typeof process !== 'undefined' && process.env?.MERCHANT_KIT_STRIPE_DEBUG?.trim()?.toLowerCase()) || ''
+	return v === '1' || v === 'true' || v === 'yes'
+}
+
+function merchantKitDbg(...args: unknown[]) {
+	if (merchantKitStripeDebugEnabled()) {
+		logger(Colors.cyan('[merchantKitStripe:debug]'), ...args)
+	}
+}
+
 export const MERCHANT_KIT_PACKAGES = {
 	standard_kit: {
 		name: 'Standard Program Kit',
@@ -150,6 +162,13 @@ export async function createMerchantKitCheckoutSession(
 		createdAt: Date.now(),
 	})
 
+	logger(
+		Colors.green('[merchantKitStripe] createSession ok'),
+		`session=${session.id}`,
+		`pkg=${packageType}`,
+		`eoa=${eoaLower.slice(0, 10)}…`
+	)
+
 	return { sessionId: session.id, url: session.url }
 }
 
@@ -157,20 +176,39 @@ export function getMerchantKitSessionStatus(sessionId: string): SessionRecord | 
 	return sessions.get(sessionId) ?? null
 }
 
+export type RefreshMerchantKitSessionOptions = {
+	/** After user closes the Stripe window: treat `open` + `unpaid` as abandoned. */
+	treatOpenUnpaidAsAbandoned?: boolean
+}
+
 /** Best-effort sync when webhook is delayed or missed. */
-export async function refreshMerchantKitSessionFromStripe(sessionId: string): Promise<void> {
+export async function refreshMerchantKitSessionFromStripe(
+	sessionId: string,
+	options?: RefreshMerchantKitSessionOptions
+): Promise<void> {
 	const stripe = getStripeClient()
 	if (!stripe) return
 	const rec_ = sessions.get(sessionId)
-	if (rec_?.status !== 'pending') return
+	if (rec_?.status !== 'pending') {
+		merchantKitDbg('refresh skip (not pending)', sessionId, 'local=', rec_?.status ?? '(no record)')
+		return
+	}
 	try {
 		const s = await stripe.checkout.sessions.retrieve(sessionId)
+		merchantKitDbg(
+			'retrieve',
+			sessionId,
+			`checkoutStatus=${s.status}`,
+			`payment_status=${s.payment_status}`,
+			`abandonedFlag=${Boolean(options?.treatOpenUnpaidAsAbandoned)}`
+		)
 		if (s.status === 'complete' && s.payment_status === 'paid') {
 			sessions.set(sessionId, {
 				...rec_,
 				status: 'succeeded',
 				lastEvent: 'retrieve.paid',
 			})
+			logger(Colors.green('[merchantKitStripe] refresh → succeeded'), sessionId)
 			return
 		}
 		if (s.status === 'expired') {
@@ -179,9 +217,26 @@ export async function refreshMerchantKitSessionFromStripe(sessionId: string): Pr
 				status: 'failed',
 				lastEvent: 'expired',
 			})
+			logger(Colors.yellow('[merchantKitStripe] refresh → failed (expired)'), sessionId)
+			return
+		}
+		if (
+			options?.treatOpenUnpaidAsAbandoned &&
+			s.status === 'open' &&
+			s.payment_status === 'unpaid'
+		) {
+			sessions.set(sessionId, {
+				...rec_,
+				status: 'failed',
+				lastEvent: 'abandoned',
+			})
+			logger(
+				Colors.yellow('[merchantKitStripe] refresh → failed (abandoned open+unpaid)'),
+				sessionId
+			)
 		}
 	} catch (err: unknown) {
-		logger(Colors.yellow(`[merchantKitStripe] retrieve session ${sessionId}:`), err)
+		logger(Colors.yellow(`[merchantKitStripe] retrieve error ${sessionId}:`), err)
 	}
 }
 
@@ -194,25 +249,35 @@ function applySessionOutcome(
 	const eoa = meta.eoaAddress ?? prev?.eoaAddress ?? ''
 	const packageType = meta.packageType ?? prev?.packageType ?? ''
 	const createdAt = prev?.createdAt ?? Date.now()
-	sessions.set(sessionId, {
+	const next: SessionRecord = {
 		status,
 		eoaAddress: eoa,
 		packageType,
 		createdAt,
 		lastEvent: meta.lastEvent,
-	})
+	}
+	sessions.set(sessionId, next)
+	merchantKitDbg('applySessionOutcome', sessionId, meta.lastEvent, '→', status, `pkg=${packageType}`)
 }
 
 export async function handleMerchantKitStripeWebhook(
 	rawBody: Buffer,
 	sigHeader: string | string[] | undefined
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+	logger(
+		Colors.cyan('[merchantKitStripe:hook] inbound'),
+		`bytes=${rawBody.length}`,
+		`stripe-signature=${Boolean(sigHeader && (typeof sigHeader === 'string' ? sigHeader : sigHeader[0]))}`
+	)
+
 	const whSecret = getWebhookSecret()
 	if (!whSecret) {
+		logger(Colors.red('[merchantKitStripe:hook] abort: STRIPE_WEBHOOK_SECRET_MERCHANT_KIT / ~/.master.json missing'))
 		return { ok: false, error: 'STRIPE_WEBHOOK_SECRET_MERCHANT_KIT not configured' }
 	}
 	const stripe = getStripeClient()
 	if (!stripe) {
+		logger(Colors.red('[merchantKitStripe:hook] abort: Stripe API key missing'))
 		return { ok: false, error: 'Stripe client not configured' }
 	}
 	const sig = typeof sigHeader === 'string' ? sigHeader : sigHeader?.[0] ?? ''
@@ -221,34 +286,69 @@ export async function handleMerchantKitStripeWebhook(
 		event = stripe.webhooks.constructEvent(rawBody, sig, whSecret)
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.red('[merchantKitStripe:hook] constructEvent FAILED'), msg)
 		return { ok: false, error: msg }
 	}
+
+	logger(
+		Colors.green('[merchantKitStripe:hook] verified'),
+		`id=${event.id}`,
+		`type=${event.type}`,
+		`livemode=${event.livemode}`,
+		`api_version=${event.api_version ?? '(n/a)'}`
+	)
 
 	switch (event.type) {
 		case 'checkout.session.completed': {
 			const session = event.data.object as Stripe.Checkout.Session
+			const meta = session.metadata ?? {}
+			logger(
+				'[merchantKitStripe:hook] checkout.session.completed',
+				`session=${session.id}`,
+				`payment_status=${session.payment_status}`,
+				`status=${session.status}`,
+				`metadata.pkg=${meta.packageType ?? '?'}`,
+				`metadata.eoa=${meta.eoaAddress ? `${String(meta.eoaAddress).slice(0, 10)}…` : '?'}`
+			)
 			if (session.payment_status === 'paid') {
+				const hadLocal = sessions.has(session.id)
 				applySessionOutcome(session.id, 'succeeded', {
 					eoaAddress: session.metadata?.eoaAddress,
 					packageType: session.metadata?.packageType,
 					lastEvent: event.type,
 				})
-				logger(Colors.green(`[merchantKitStripe] paid session=${session.id} pkg=${session.metadata?.packageType}`))
+				logger(
+					Colors.green('[merchantKitStripe:hook] → local map UPDATED succeeded'),
+					`session=${session.id}`,
+					`hadLocalRecord=${hadLocal}`
+				)
+			} else {
+				logger(
+					Colors.yellow('[merchantKitStripe:hook] checkout.session.completed SKIPPED (not paid yet)'),
+					`payment_status=${session.payment_status}`
+				)
 			}
 			break
 		}
 		case 'checkout.session.async_payment_failed': {
 			const session = event.data.object as Stripe.Checkout.Session
+			logger(
+				Colors.yellow('[merchantKitStripe:hook] checkout.session.async_payment_failed'),
+				`session=${session.id}`
+			)
 			applySessionOutcome(session.id, 'failed', {
 				eoaAddress: session.metadata?.eoaAddress,
 				packageType: session.metadata?.packageType,
 				lastEvent: event.type,
 			})
-			logger(Colors.yellow(`[merchantKitStripe] async_payment_failed session=${session.id}`))
 			break
 		}
 		case 'checkout.session.expired': {
 			const session = event.data.object as Stripe.Checkout.Session
+			logger(
+				Colors.yellow('[merchantKitStripe:hook] checkout.session.expired'),
+				`session=${session.id}`
+			)
 			applySessionOutcome(session.id, 'failed', {
 				eoaAddress: session.metadata?.eoaAddress,
 				packageType: session.metadata?.packageType,
@@ -257,6 +357,7 @@ export async function handleMerchantKitStripeWebhook(
 			break
 		}
 		default:
+			logger(Colors.grey(`[merchantKitStripe:hook] unhandled event type (ignored): ${event.type}`))
 			break
 	}
 

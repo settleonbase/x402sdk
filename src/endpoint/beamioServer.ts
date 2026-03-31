@@ -4239,20 +4239,46 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		const out = await createMerchantKitCheckoutSession(walletAddress, packageType)
 		if ('error' in out) {
+			logger(Colors.red('[merchantKitStripe] createSession HTTP 400'), walletAddress, out.error)
 			return res.status(400).json({ error: out.error }).end()
 		}
 		return res.status(200).json({ url: out.url, sessionId: out.sessionId }).end()
 	})
 
 	router.post('/merchantKitStripe/poll', async (req, res) => {
-		const { sessionId } = req.body ?? {}
+		const { sessionId, userClosedCheckout } = req.body ?? {}
 		if (!sessionId || typeof sessionId !== 'string') {
 			return res.status(400).json({ error: 'sessionId required' }).end()
 		}
-		await refreshMerchantKitSessionFromStripe(sessionId)
+		const closed = Boolean(userClosedCheckout)
+		await refreshMerchantKitSessionFromStripe(sessionId, {
+			treatOpenUnpaidAsAbandoned: closed,
+		})
 		const st = getMerchantKitSessionStatus(sessionId)
 		if (!st) {
+			logger(Colors.yellow('[merchantKitStripe] poll 404 unknown session'), sessionId)
 			return res.status(404).json({ error: 'Unknown session' }).end()
+		}
+		const pollVerbose =
+			closed ||
+			process.env.MERCHANT_KIT_STRIPE_DEBUG === '1' ||
+			process.env.MERCHANT_KIT_STRIPE_DEBUG === 'true'
+		if (pollVerbose) {
+			logger(
+				Colors.cyan('[merchantKitStripe] poll →'),
+				inspect(
+					{
+						sessionId,
+						userClosedCheckout: closed,
+						status: st.status,
+						packageType: st.packageType,
+						lastEvent: st.lastEvent,
+					},
+					false,
+					2,
+					true
+				)
+			)
 		}
 		return res.status(200).json({
 			status: st.status,
@@ -4289,11 +4315,19 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		'/api/merchant-kit-stripe-webhook',
 		express.raw({ type: 'application/json' }),
 		async (req: Request, res: Response) => {
+			const ip = getClientIp(req)
+			const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
+			logger(
+				Colors.cyan('[merchant-kit-stripe-webhook] POST'),
+				`ip=${ip || '(none)'}`,
+				`ua=${ua || '(none)'}`
+			)
 			const result = await handleMerchantKitStripeWebhook(req.body as Buffer, req.headers['stripe-signature'])
 			if (result.ok) {
+				logger(Colors.green('[merchant-kit-stripe-webhook] response 200 received=true'))
 				return res.status(200).json({ received: true }).end()
 			}
-			logger(Colors.red('[merchant-kit-stripe-webhook]'), result.error)
+			logger(Colors.red('[merchant-kit-stripe-webhook] response 400'), result.error)
 			return res.status(400).send(`Webhook Error: ${result.error}`).end()
 		}
 	)
