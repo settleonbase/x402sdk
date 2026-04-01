@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, type BeamioLatestCardItem} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import {
@@ -100,10 +100,25 @@ const LATEST_CARDS_PREWARM_MS = 6 * 1000
 const LATEST_CARDS_CACHE_STALE_MS = 15 * 1000
 const LATEST_CARDS_PREWARM_LIMITS = [20, 100, 300] as const
 
-async function computeLatestCardsForMaster(limit: number) {
-	const raw = await getLatestCards(limit)
-	const filtered = raw.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase()))
-	return enrichLatestCardsWithBaseErc1155PointsHolderCounts(filtered, providerBaseForLatestCards)
+/** 合并同 limit 的并发 enrich（6s prewarm 与 GET /latestCards 缓存未命中常同时触发，避免同一批卡重复 RPC + 重复日志） */
+const latestCardsComputeInflight = new Map<number, Promise<BeamioLatestCardItem[]>>()
+
+async function computeLatestCardsForMaster(limit: number): Promise<BeamioLatestCardItem[]> {
+	const inflight = latestCardsComputeInflight.get(limit)
+	if (inflight) return inflight
+
+	const task = (async () => {
+		try {
+			const raw = await getLatestCards(limit)
+			const filtered = raw.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase()))
+			return enrichLatestCardsWithBaseErc1155PointsHolderCounts(filtered, providerBaseForLatestCards)
+		} finally {
+			latestCardsComputeInflight.delete(limit)
+		}
+	})()
+
+	latestCardsComputeInflight.set(limit, task)
+	return task
 }
 
 async function prewarmLatestCardsCacheMaster(): Promise<void> {

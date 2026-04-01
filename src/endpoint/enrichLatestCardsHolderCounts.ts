@@ -68,13 +68,48 @@ async function ethCallWithOptionalRetry(
 	provider: ethers.Provider,
 	req: { to: string; data: string },
 ): Promise<string> {
-	try {
-		return await provider.call(req)
-	} catch (e) {
-		if (!shouldRetryRpcCall(e)) throw e
-		await new Promise((r) => setTimeout(r, 300))
-		return await provider.call(req)
+	const delays = [300, 700] as const
+	for (let attempt = 0; ; attempt++) {
+		try {
+			return await provider.call(req)
+		} catch (e) {
+			if (attempt < delays.length && shouldRetryRpcCall(e)) {
+				await new Promise((r) => setTimeout(r, delays[attempt]))
+				continue
+			}
+			throw e
+		}
 	}
+}
+
+/** prewarm 对 20/100/300 顺序各跑一遍，同卡会连错三次；限流同地址同类错误日志 */
+const holderEnrichErrLogAt = new Map<string, number>()
+const HOLDER_ENRICH_ERR_LOG_TTL_MS = 45_000
+
+function shouldLogHolderEnrichErr(kind: string, cardAddress: string): boolean {
+	const key = `${cardAddress.toLowerCase()}:${kind}`
+	const now = Date.now()
+	const last = holderEnrichErrLogAt.get(key) ?? 0
+	if (now - last < HOLDER_ENRICH_ERR_LOG_TTL_MS) return false
+	holderEnrichErrLogAt.set(key, now)
+	if (holderEnrichErrLogAt.size > 2000) {
+		for (const [k, t] of holderEnrichErrLogAt) {
+			if (now - t > HOLDER_ENRICH_ERR_LOG_TTL_MS) holderEnrichErrLogAt.delete(k)
+		}
+	}
+	return true
+}
+
+/**
+ * RPC 对某卡持续返回 CALL_EXCEPTION 时，prewarm 仍每 6s×3 个 limit 重试 → 刷屏且打满节点。
+ * 失败后进入冷却窗口，期间跳过 eth_call（holder 仍可用 totalActiveMemberships / totalSupply）。
+ */
+const globalStatsSkipUntil = new Map<string, number>()
+const GLOBAL_STATS_FAIL_COOLDOWN_MS = 8 * 60 * 1000
+
+function globalStatsCooldownRemainingMs(addrLower: string): number {
+	const until = globalStatsSkipUntil.get(addrLower) ?? 0
+	return Math.max(0, until - Date.now())
 }
 
 /**
@@ -97,23 +132,39 @@ export async function enrichLatestCardsWithBaseErc1155PointsHolderCounts(
 			try {
 				supply0 = (await card.totalSupply(POINTS_TOKEN_ID)) as bigint
 			} catch (e: unknown) {
-				logger(Colors.gray(`[latestCards holders] ${it.cardAddress} totalSupply(0): ${shortRpcCallErr(e)}`))
+				if (shouldLogHolderEnrichErr('totalSupply0', it.cardAddress)) {
+					logger(Colors.gray(`[latestCards holders] ${it.cardAddress} totalSupply(0): ${shortRpcCallErr(e)}`))
+				}
 			}
 			try {
 				active = (await card.totalActiveMemberships()) as bigint
 			} catch (e: unknown) {
-				logger(Colors.gray(`[latestCards holders] ${it.cardAddress} totalActiveMemberships: ${shortRpcCallErr(e)}`))
+				if (shouldLogHolderEnrichErr('totalActiveMemberships', it.cardAddress)) {
+					logger(Colors.gray(`[latestCards holders] ${it.cardAddress} totalActiveMemberships: ${shortRpcCallErr(e)}`))
+				}
 			}
 			let cumulativeMint = 0n
 			let issuedFallback = 0n
-			try {
-				const data = IFACE_HOLDERS.encodeFunctionData('getGlobalStatsFull', [PERIOD_HOUR, 0, 0])
-				const ret = await ethCallWithOptionalRetry(provider, { to: it.cardAddress, data })
-				const p = decodeGlobalStatsFullMintAndIssued(ret)
-				cumulativeMint = p.cumulativeMint
-				issuedFallback = p.cumulativeIssuedPlusUpgraded
-			} catch (e: unknown) {
-				logger(Colors.gray(`[latestCards holders] ${it.cardAddress} getGlobalStatsFull: ${shortRpcCallErr(e)}`))
+			const addrLo = (it.cardAddress || '').toLowerCase()
+			const gsCool = addrLo ? globalStatsCooldownRemainingMs(addrLo) : 0
+			if (gsCool <= 0) {
+				try {
+					const data = IFACE_HOLDERS.encodeFunctionData('getGlobalStatsFull', [PERIOD_HOUR, 0, 0])
+					const ret = await ethCallWithOptionalRetry(provider, { to: it.cardAddress, data })
+					const p = decodeGlobalStatsFullMintAndIssued(ret)
+					cumulativeMint = p.cumulativeMint
+					issuedFallback = p.cumulativeIssuedPlusUpgraded
+					if (addrLo) globalStatsSkipUntil.delete(addrLo)
+				} catch (e: unknown) {
+					if (addrLo) globalStatsSkipUntil.set(addrLo, Date.now() + GLOBAL_STATS_FAIL_COOLDOWN_MS)
+					if (shouldLogHolderEnrichErr('getGlobalStatsFull', it.cardAddress)) {
+						logger(
+							Colors.gray(
+								`[latestCards holders] ${it.cardAddress} getGlobalStatsFull: ${shortRpcCallErr(e)} (cooldown ${GLOBAL_STATS_FAIL_COOLDOWN_MS / 60000}m)`,
+							),
+						)
+					}
+				}
 			}
 			let n = toSafeNonNegInt(active)
 			if (n === 0) n = toSafeNonNegInt(issuedFallback)
@@ -124,7 +175,9 @@ export async function enrichLatestCardsWithBaseErc1155PointsHolderCounts(
 				token0CumulativeMint6: cumulativeMint.toString(),
 			})
 		} catch (e: unknown) {
-			logger(Colors.gray(`[latestCards holders] ${it.cardAddress}: ${shortRpcCallErr(e)}`))
+			if (shouldLogHolderEnrichErr('outer', it.cardAddress)) {
+				logger(Colors.gray(`[latestCards holders] ${it.cardAddress}: ${shortRpcCallErr(e)}`))
+			}
 			out.push(it)
 		}
 	}
