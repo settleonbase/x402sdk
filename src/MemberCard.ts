@@ -2289,6 +2289,11 @@ export type PurchasingCardPreChecked = {
 	pointsBalance: string
 	nfts: unknown[]
 	isMember: boolean
+	/** 与 NFC topup 一致：发卡方 EOA（B-Unit 扣款主体） */
+	cardOwnerEOA?: string
+	/** 2% USDC 名义对应的 B-Unit（6 位小数），字符串化 bigint */
+	topupFeeBUnits?: string
+	topupKind?: number
 }
 
 export const purchasingCardPool: {
@@ -4310,9 +4315,22 @@ const readCardTiers = async (
 
 /** Indexer：NFC admin topup 卡 owner B-Unit 服务费单独一条（txId = CoNET consumeFromUser tx） */
 const TX_CATEGORY_NFC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('nfcTopup:bunitService')) as `0x${string}`
+/** Indexer：USDC buyPointsForUser topup 的 B-Unit 服务费单独一条 */
+const TX_CATEGORY_USDC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('usdcTopup:bunitService')) as `0x${string}`
 
 /** 1 B-Unit = 0.01 USDC，与 calcBeamioBUnitFee 一致 */
 const BUNIT_TO_USDC_DIVISOR = 100n
+
+/** Topup（NFC/QR mint 与 USDC 购点）：按 **折算后 USDC（6 位）名义金额** 的 **2%** 收取 B-Unit；1 B-Unit = 0.01 USDC ⇒ feeBUnits6 = feeUSDC6 × 100 */
+const TOPUP_BUNIT_FEE_BPS = 200n
+const TOPUP_BUNIT_BPS_DENOM = 10_000n
+
+export function calcTopupBUnitFeeFromUsdcNotional(amountUSDC6: bigint): { feeUSDC6: bigint; feeBUnits6: bigint } {
+	if (amountUSDC6 <= 0n) return { feeUSDC6: 0n, feeBUnits6: 0n }
+	const feeUSDC6 = (amountUSDC6 * TOPUP_BUNIT_FEE_BPS + TOPUP_BUNIT_BPS_DENOM - 1n) / TOPUP_BUNIT_BPS_DENOM
+	const feeBUnits6 = feeUSDC6 * BUNIT_TO_USDC_DIVISOR
+	return { feeUSDC6, feeBUnits6 }
+}
 
 /** Cluster 预检（mintPointsByAdmin / NFC 与 QR 同路径）：卡发行方 owner 的 B-Units 是否足够。
  * 规则：按 topup 金额折算 USDC（与 quoteUSDCForPoints / executeForAdmin 记账一致：points6 * quoteUnitPointInUSDC6 / 1e6）后收取 **2%** 对应的 B-Unit；
@@ -4323,8 +4341,6 @@ export const nfcTopupPreCheckBUnitFee = async (
 	data: string
 ): Promise<{ success: boolean; error?: string; cardOwnerEOA?: string; feeAmount?: bigint; topupKind?: 2 | 3 }> => {
 	const KIND_CARD_TOPUP = 2
-	const TOPUP_FEE_BPS = 200n // 2%（万分比 200/10000）
-	const BPS_DENOM = 10_000n
 	try {
 		const parsed = tryParseMintPointsByAdminArgs(data)
 		if (!parsed || !ethers.isAddress(parsed.recipient)) {
@@ -4355,8 +4371,7 @@ export const nfcTopupPreCheckBUnitFee = async (
 		if (amountUSDC6 <= 0n) {
 			return { success: false, error: 'Topup USDC notional is zero' }
 		}
-		const feeUSDC6 = (amountUSDC6 * TOPUP_FEE_BPS + BPS_DENOM - 1n) / BPS_DENOM
-		const feeAmount = feeUSDC6 * 100n
+		const { feeBUnits6: feeAmount } = calcTopupBUnitFeeFromUsdcNotional(amountUSDC6)
 		const topupKind = KIND_CARD_TOPUP as 2 | 3
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
 		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeAmount, {
@@ -5452,13 +5467,34 @@ export const purchasingCardProcess = async () => {
 			))
 		logger(Colors.green(`✅ purchasingCardProcess tx submitted Hash: ${tx.hash}`))
 
-		await tx.wait().catch((waitErr: any) => {
+		let purchReceipt: ethers.TransactionReceipt | null = null
+		try {
+			purchReceipt = await tx.wait()
+		} catch (waitErr: any) {
 			try {
 				logger(Colors.yellow(`[purchasingCardProcess] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
 			} catch (_) {
 				console.error('[purchasingCardProcess] tx.wait() failed (RPC):', waitErr)
 			}
-		})
+		}
+		if (!purchReceipt) {
+			for (let i = 0; i < 15; i++) {
+				await new Promise((r) => setTimeout(r, 2000))
+				const r = await providerBaseBackup.getTransactionReceipt(tx.hash)
+				if (r) {
+					purchReceipt = r
+					break
+				}
+			}
+		}
+		const basePurchTxOk = purchReceipt != null && Number(purchReceipt.status ?? 0) === 1
+		if (!basePurchTxOk) {
+			logger(
+				Colors.red(
+					`[purchasingCardProcess] Base buyPointsForUser tx not successful; skip B-Unit charge. hash=${tx.hash} status=${purchReceipt?.status ?? 'unknown'}`
+				)
+			)
+		}
 		// Base 转账完成后立即返回 hash 给客户端，不等待记账
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
@@ -5593,8 +5629,74 @@ export const purchasingCardProcess = async () => {
 		const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(operatorAddr, opChain)
 		input.topAdmin = topAdmin
 		input.subordinate = subordinate
-		
-		
+
+		let usdcTopupBunitConsumeTxHash: string | null = null
+		let topupBunitFeePayerResolved: string | null = null
+		const usdc6Signed = BigInt(usdcAmount)
+		let topupFeeBUnitsForJob =
+			obj.preChecked?.topupFeeBUnits != null && String(obj.preChecked.topupFeeBUnits).length > 0
+				? BigInt(obj.preChecked.topupFeeBUnits)
+				: calcTopupBUnitFeeFromUsdcNotional(usdc6Signed).feeBUnits6
+		let cardOwnerEOAForBunit = ''
+		if (obj.preChecked?.cardOwnerEOA && ethers.isAddress(obj.preChecked.cardOwnerEOA)) {
+			cardOwnerEOAForBunit = ethers.getAddress(obj.preChecked.cardOwnerEOA)
+		} else {
+			const roB = await resolveCardOwnerToEOA(providerBaseBackup, to)
+			cardOwnerEOAForBunit = roB.success ? roB.cardOwner : ethers.getAddress(to)
+		}
+		if (basePurchTxOk && topupFeeBUnitsForJob > 0n && cardOwnerEOAForBunit) {
+			let topupFeeConsumer = cardOwnerEOAForBunit
+			try {
+				const aaFacTop = await getCardAaFactoryAddress(cardAddress)
+				const pickedTop = await pickBUnitFeeConsumerPreferEoaThenAa(topupFeeConsumer, topupFeeBUnitsForJob, {
+					aaFactoryAddress: aaFacTop,
+				})
+				if (pickedTop.ok) {
+					topupFeeConsumer = pickedTop.consumer
+				} else {
+					logger(Colors.yellow(`[purchasingCardProcess] B-Unit payer pick failed, trying issuer EOA only: ${pickedTop.error}`))
+				}
+			} catch (pickErr: any) {
+				logger(Colors.yellow(`[purchasingCardProcess] B-Unit payer pick error: ${pickErr?.message ?? pickErr}`))
+			}
+			topupBunitFeePayerResolved = topupFeeConsumer
+			const baseGasPurch = purchReceipt?.gasUsed ?? 0n
+			const baseHashPurch = tx.hash as `0x${string}`
+			const bunitAirdropWritePurch = new ethers.Contract(
+				CONET_BUNIT_AIRDROP_ADDRESS,
+				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+				SC.walletConet
+			)
+			try {
+				const consumeTxPurch = await bunitAirdropWritePurch.consumeFromUser(
+					topupFeeConsumer,
+					topupFeeBUnitsForJob,
+					baseHashPurch,
+					baseGasPurch,
+					2n,
+					{ gasLimit: 2_500_000 }
+				)
+				await consumeTxPurch.wait()
+				usdcTopupBunitConsumeTxHash = consumeTxPurch.hash
+				logger(Colors.cyan(`[purchasingCardProcess] consumeFromUser ok: ${Number(topupFeeBUnitsForJob) / 1e6} B-Units from ${topupFeeConsumer}`))
+			} catch (consumeErr: any) {
+				logger(Colors.red(`[purchasingCardProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+			}
+		}
+		const bunitChargedOkUsdc =
+			Boolean(usdcTopupBunitConsumeTxHash) && topupFeeBUnitsForJob > 0n && Boolean(cardOwnerEOAForBunit)
+		const bServiceUnits6UsdcTopup = bunitChargedOkUsdc ? topupFeeBUnitsForJob : 0n
+		const bServiceUSDC6UsdcTopup = bServiceUnits6UsdcTopup > 0n ? bServiceUnits6UsdcTopup / BUNIT_TO_USDC_DIVISOR : 0n
+		const feePayerCardOwnerUsdc = bunitChargedOkUsdc
+			? ethers.getAddress(
+					topupBunitFeePayerResolved && ethers.isAddress(topupBunitFeePayerResolved)
+						? topupBunitFeePayerResolved
+						: cardOwnerEOAForBunit
+			  )
+			: ethers.ZeroAddress
+		input.fees.bServiceUSDC6 = bServiceUSDC6UsdcTopup
+		input.fees.bServiceUnits6 = bServiceUnits6UsdcTopup
+		input.fees.feePayer = feePayerCardOwnerUsdc
 
 		logger(Colors.green(`✅ purchasingCardProcess note: ${payMe}`))
 
@@ -5611,6 +5713,90 @@ export const purchasingCardProcess = async () => {
 				{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
 			)
 			logger(Colors.green(`✅ purchasingCardProcess accounting done: tx=${tx.hash} syncTokenAction=${syncTxHash}`))
+			if (usdcTopupBunitConsumeTxHash && bunitChargedOkUsdc && bServiceUnits6UsdcTopup > 0n) {
+				try {
+					const bunitDisplayJsonUsdc = JSON.stringify({
+						title: 'USDC top-up B-Unit service fee',
+						source: 'usdcTopupBUnit',
+						baseTopupTxHash: tx.hash,
+						consumeTxHash: usdcTopupBunitConsumeTxHash,
+						cardAddress,
+						topupCategory: topupCategoryRaw,
+						bUnits: Number(bServiceUnits6UsdcTopup) / 1e6,
+						topupKind: 2,
+						beneficiary: payerAddr,
+					})
+					const bunitOnlyInputUsdc: PurchasingCardAccountingInput = {
+						txId: usdcTopupBunitConsumeTxHash as `0x${string}`,
+						originalPaymentHash: tx.hash as `0x${string}`,
+						chainId: BigInt(CONET_MAINNET_CHAIN_ID),
+						txCategory: TX_CATEGORY_USDC_TOPUP_BUNIT_SERVICE,
+						displayJson: bunitDisplayJsonUsdc,
+						timestamp: 0n,
+						payer: feePayerCardOwnerUsdc,
+						payee: ethers.getAddress(CONET_BUNIT_AIRDROP_ADDRESS),
+						finalRequestAmountFiat6: 0n,
+						finalRequestAmountUSDC6: bServiceUSDC6UsdcTopup,
+						isAAAccount: false,
+						route: [
+							{
+								asset: ethers.getAddress(USDC_ADDRESS),
+								amountE6: bServiceUSDC6UsdcTopup,
+								assetType: 0,
+								source: 0,
+								tokenId: 0n,
+								itemCurrencyType: 4,
+								offsetInRequestCurrencyE6: bServiceUSDC6UsdcTopup,
+							},
+						],
+						fees: {
+							gasChainType: 0,
+							gasWei: 0n,
+							gasUSDC6: 0n,
+							serviceUSDC6: 0n,
+							bServiceUSDC6: bServiceUSDC6UsdcTopup,
+							bServiceUnits6: bServiceUnits6UsdcTopup,
+							feePayer: feePayerCardOwnerUsdc,
+						},
+						meta: {
+							requestAmountFiat6: 0n,
+							requestAmountUSDC6: bServiceUSDC6UsdcTopup,
+							currencyFiat: 4,
+							discountAmountFiat6: 0n,
+							discountRateBps: 0,
+							taxAmountFiat6: 0n,
+							taxRateBps: 0,
+							afterNotePayer: '',
+							afterNotePayee: '',
+						},
+						operator: operatorAddr,
+						operatorParentChain: input.operatorParentChain,
+						topAdmin: input.topAdmin,
+						subordinate: input.subordinate,
+					}
+					const bunitSyncHashUsdc = await runPurchasingCardAccountingJob(
+						{
+							input: bunitOnlyInputUsdc,
+							baseTxHash: usdcTopupBunitConsumeTxHash,
+							from: feePayerCardOwnerUsdc,
+							cardAddress,
+							attempt: 0,
+						},
+						{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
+					)
+					logger(
+						Colors.green(
+							`[purchasingCardProcess] USDC topup B-Unit standalone indexer done: consumeTx=${usdcTopupBunitConsumeTxHash} syncTokenAction=${bunitSyncHashUsdc}`
+						)
+					)
+				} catch (bunitIdxErr: any) {
+					logger(
+						Colors.yellow(
+							`[purchasingCardProcess] USDC topup B-Unit standalone indexer non-critical: ${bunitIdxErr?.shortMessage ?? bunitIdxErr?.message ?? String(bunitIdxErr)}`
+						)
+					)
+				}
+			}
 		} catch (accountingErr: any) {
 			// 记账失败不影响购点主流程，入后台补记队列避免丢单
 			logger(Colors.yellow(`[purchasingCardProcess] accounting non-critical (purchase succeeded): ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
@@ -9772,7 +9958,28 @@ export const purchasingCardPreCheck = async (
 			nfts: Array.isArray(nfts) ? nfts : [],
 			isMember
 		}
-		return { success: true, preChecked }
+		const { feeBUnits6 } = calcTopupBUnitFeeFromUsdcNotional(usdc6)
+		const resolveOwnerForBunit = await resolveCardOwnerToEOA(providerBaseBackup, preChecked.owner)
+		if (!resolveOwnerForBunit.success) {
+			return { success: false, error: resolveOwnerForBunit.error ?? 'Cannot resolve card owner to EOA' }
+		}
+		const cardOwnerEOABunit = resolveOwnerForBunit.cardOwner
+		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddress)
+		const pickedBunit = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOABunit, feeBUnits6, {
+			aaFactoryAddress: aaFactoryAddr,
+		})
+		if (!pickedBunit.ok) {
+			return { success: false, error: `Insufficient B-Units for topup (${pickedBunit.error})` }
+		}
+		return {
+			success: true,
+			preChecked: {
+				...preChecked,
+				cardOwnerEOA: cardOwnerEOABunit,
+				topupFeeBUnits: feeBUnits6.toString(),
+				topupKind: 2,
+			},
+		}
 	} catch (e: any) {
 		const msg = e?.message ?? e?.shortMessage ?? String(e)
 		logger(Colors.red(`[purchasingCardPreCheck] ${msg}`))
