@@ -408,7 +408,7 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-		/** 最新发行的前 N 张卡明细；holderCount 在 Base 上按 ERC-1155 事件统计 token #0 持仓。由 6s 定时任务预拉缓存，请求优先命中缓存。limit 上限 300（与 Cluster 一致）。 */
+		/** 最新发行的前 N 张卡明细；holderCount 为链上 totalActiveMemberships / getGlobalStatsFull（BeamioUserCard readme）。6s 预拉缓存。limit 上限 300。 */
 		router.get('/latestCards', async (_req, res) => {
 			const limit = Math.min(parseInt(String(_req.query.limit || 20), 10) || 20, 300)
 			const cacheKey = `limit:${limit}`

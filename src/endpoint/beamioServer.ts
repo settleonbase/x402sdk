@@ -1839,7 +1839,7 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** 最新发行的前 N 张卡明细：透传 Master（Master 每 6s 预拉 DB metadata + Base 上 holderCount；与 Master 同排除集）。limit 上限 300。 */
+	/** 最新发行的前 N 张卡明细：透传 Master（metadata + 链上会员/全局统计 holderCount；与 Master 同排除集）。limit 上限 300。 */
 	router.get('/latestCards', (req, res) => {
 		const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''
 		getLocalhost(`/api/latestCards${qs}`, res)
