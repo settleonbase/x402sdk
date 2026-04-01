@@ -54,7 +54,16 @@ function pruneMerchantKitSessions() {
 	}
 }
 
-setInterval(pruneMerchantKitSessions, 60 * 60 * 1000).unref?.()
+/** 与 setInterval 等价的首拍延迟 1h，随后每轮结束后再排 1h（遵守 beamio-no-setinterval） */
+function scheduleMerchantKitSessionPrune(): void {
+	const t = setTimeout(() => {
+		pruneMerchantKitSessions()
+		scheduleMerchantKitSessionPrune()
+	}, 60 * 60 * 1000)
+	t.unref?.()
+}
+
+scheduleMerchantKitSessionPrune()
 
 function getStripeSecretKey(): string {
 	const setup = masterSetup as { stripe_SecretKey?: string }

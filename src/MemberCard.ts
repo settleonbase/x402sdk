@@ -8215,14 +8215,28 @@ export async function nfcLinkAppAutoCancelDueSessionsSweepOnce(): Promise<void> 
 const NFC_LINK_APP_AUTO_CANCEL_SWEEP_MS = 20_000
 
 export function startNfcLinkAppAutoCancelSweeper(): void {
-	nfcLinkAppAutoCancelDueSessionsSweepOnce().catch((e: any) => {
-		logger(Colors.yellow(`[nfcLinkAppAutoCancel] initial sweep: ${e?.message ?? e}`))
-	})
-	setInterval(() => {
-		nfcLinkAppAutoCancelDueSessionsSweepOnce().catch((e: any) => {
-			logger(Colors.yellow(`[nfcLinkAppAutoCancel] sweep: ${e?.message ?? e}`))
-		})
-	}, NFC_LINK_APP_AUTO_CANCEL_SWEEP_MS)
+	const scheduleNext = (): void => {
+		setTimeout(() => {
+			void (async () => {
+				try {
+					await nfcLinkAppAutoCancelDueSessionsSweepOnce()
+				} catch (e: any) {
+					logger(Colors.yellow(`[nfcLinkAppAutoCancel] sweep: ${e?.message ?? e}`))
+				} finally {
+					scheduleNext()
+				}
+			})()
+		}, NFC_LINK_APP_AUTO_CANCEL_SWEEP_MS)
+	}
+	void (async () => {
+		try {
+			await nfcLinkAppAutoCancelDueSessionsSweepOnce()
+		} catch (e: any) {
+			logger(Colors.yellow(`[nfcLinkAppAutoCancel] initial sweep: ${e?.message ?? e}`))
+		} finally {
+			scheduleNext()
+		}
+	})()
 }
 
 /**

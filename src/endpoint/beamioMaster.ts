@@ -132,11 +132,28 @@ async function prewarmLatestCardsCacheMaster(): Promise<void> {
 	}
 }
 
+let latestCardsPrewarmTimeout: ReturnType<typeof setTimeout> | undefined
+
 function startLatestCardsPrewarmTimer(): void {
-	void prewarmLatestCardsCacheMaster()
-	setInterval(() => {
-		void prewarmLatestCardsCacheMaster()
-	}, LATEST_CARDS_PREWARM_MS).unref?.()
+	const scheduleAfterDelay = (): void => {
+		latestCardsPrewarmTimeout = setTimeout(() => {
+			void (async () => {
+				try {
+					await prewarmLatestCardsCacheMaster()
+				} finally {
+					scheduleAfterDelay()
+				}
+			})()
+		}, LATEST_CARDS_PREWARM_MS)
+		latestCardsPrewarmTimeout.unref?.()
+	}
+	void (async () => {
+		try {
+			await prewarmLatestCardsCacheMaster()
+		} finally {
+			scheduleAfterDelay()
+		}
+	})()
 }
 
 const DEBUG_INBOUND =

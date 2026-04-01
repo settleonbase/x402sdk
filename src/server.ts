@@ -1215,13 +1215,21 @@ const loadSettleFile = async () => {
 async function initSettlePersistence() {
   await loadSettleFile();
 
-  // 每 5 分钟增量落盘
-  settleFlushTimer = setInterval(flushNewReflashData, 5 * 60 * 1000);
+  const scheduleSettleFlush = (): void => {
+    settleFlushTimer = setTimeout(async () => {
+      try {
+        await flushNewReflashData();
+      } finally {
+        scheduleSettleFlush();
+      }
+    }, 5 * 60 * 1000);
+  };
+  scheduleSettleFlush();
 
   // 进程退出时兜底 flush 一次
   const onExit = async () => {
     try {
-      if (settleFlushTimer) clearInterval(settleFlushTimer);
+      if (settleFlushTimer) clearTimeout(settleFlushTimer);
       await flushNewReflashData();
     } catch {}
     process.exit(0);
