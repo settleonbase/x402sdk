@@ -18,6 +18,7 @@ import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import { enrichLatestCardsWithIndexerNft0HolderCounts } from './enrichLatestCardsHolderCounts'
 
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
@@ -1877,7 +1878,7 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、卡持有者数、metadata）。30 秒缓存。limit 上限 300 以覆盖持有者视角的更多卡。与 SilentPassUI 的 USER_CARD_DISPLAY_EXCLUDED 对齐，不返回被 filter 的卡 */
+	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、metadata）。holderCount 由 CoNET BeamioIndexer `getBeamioUserCardNft0HolderCount` 实时覆盖。30 秒缓存。limit 上限 300。与 SilentPassUI 的 USER_CARD_DISPLAY_EXCLUDED 对齐 */
 	router.get('/latestCards', async (req, res) => {
 		const limit = Math.min(parseInt(String(req.query.limit || 20), 10) || 20, 300)
 		const cacheKey = `limit:${limit}`
@@ -1886,7 +1887,8 @@ const routing = ( router: Router ) => {
 			return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
 		const rawItems = await getLatestCards(limit)
-		const items = rawItems.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase()))
+		const filtered = rawItems.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase()))
+		const items = await enrichLatestCardsWithIndexerNft0HolderCounts(filtered, BEAMIO_INDEXER_DIAMOND, providerConet)
 		const body = JSON.stringify({ items })
 		latestCardsCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 		res.status(200).json({ items })

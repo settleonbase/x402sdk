@@ -7362,7 +7362,7 @@ export type CreateCardPreChecked = {
 	transferWhitelistEnabled?: boolean
 	/** 0=topup delta; 1=points balance; 2=cumulative points to admin */
 	upgradeType?: 0 | 1 | 2
-	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[] }
+	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[]; backgroundColor?: string }
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
 }
 
@@ -7374,7 +7374,7 @@ export const createCardPreCheck = (body: {
 	uri?: string
 	transferWhitelistEnabled?: unknown
 	upgradeType?: unknown
-	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: unknown }
+	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: unknown; backgroundColor?: unknown }
 	tiers?: unknown[]
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
 	const validCurrency = ['CAD', 'USD', 'JPY', 'CNY', 'USDC', 'HKD', 'EUR', 'SGD', 'TWD']
@@ -7475,6 +7475,10 @@ export const createCardPreCheck = (body: {
 		if (stm.description != null) meta.description = String(stm.description)
 		if (stm.image != null && typeof stm.image === 'string') meta.image = stm.image
 		if (stm.categories != null) meta.categories = stm.categories as string[]
+		if (stm.backgroundColor != null && typeof stm.backgroundColor === 'string') {
+			const bg = stm.backgroundColor.trim()
+			if (bg.length > 0 && bg.length <= 64) meta.backgroundColor = bg
+		}
 		if (Object.keys(meta).length > 0) {
 			normalizedShareTokenMetadata = meta
 		}
@@ -7597,6 +7601,10 @@ export const createCardPoolPress = async () => {
 						...(description != null && { description }),
 						...(image && { image }),
 						...(categories.length > 0 && { categories }),
+						...(shareTokenMetadata?.backgroundColor &&
+							String(shareTokenMetadata.backgroundColor).trim() && {
+								backgroundColor: String(shareTokenMetadata.backgroundColor).trim(),
+							}),
 					},
 				}),
 				...(tiers && tiers.length > 0 && { tiers }),

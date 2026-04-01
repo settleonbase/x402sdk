@@ -17,11 +17,15 @@ import {
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND } from '../chainAddresses'
+import { enrichLatestCardsWithIndexerNft0HolderCounts } from './enrichLatestCardsHolderCounts'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
 const masterServerPort = 1111
+
+const CONET_RPC_MASTER = (typeof process !== 'undefined' && process.env?.CONET_RPC?.trim()) || 'https://mainnet-rpc.conet.network'
+const providerConetForLatestCards = new ethers.JsonRpcProvider(CONET_RPC_MASTER)
 
 /** HTTP 记账 body 中的 routeItems 归一化（与 MemberCard 内存路径一致） */
 function normalizeBeamioRouteItemsFromBody(raw: unknown): BeamioTransferRouteItem[] | undefined {
@@ -376,7 +380,7 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-		/** 最新发行的前 N 张卡明细。30 秒缓存 */
+		/** 最新发行的前 N 张卡明细；holderCount 由 Indexer `getBeamioUserCardNft0HolderCount` 覆盖。30 秒缓存 */
 		router.get('/latestCards', async (_req, res) => {
 			const limit = Math.min(parseInt(String(_req.query.limit || 20), 10) || 20, 100)
 			const cacheKey = `limit:${limit}`
@@ -384,7 +388,8 @@ const routing = ( router: Router ) => {
 			if (cached && Date.now() < cached.expiry) {
 				return res.status(200).json({ items: cached.items })
 			}
-			const items = await getLatestCards(limit)
+			const raw = await getLatestCards(limit)
+			const items = await enrichLatestCardsWithIndexerNft0HolderCounts(raw, BEAMIO_INDEXER_DIAMOND, providerConetForLatestCards)
 			latestCardsCache.set(cacheKey, { items, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 			res.status(200).json({ items })
 		})
