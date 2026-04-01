@@ -3667,7 +3667,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
-	/** POST /api/buintRedeemAirdropRedeem - admin 代付：redeemWithCodeAsAdmin（划入请求体中的 EOA）；cluster 完整预检后转 master */
+	/** POST /api/buintRedeemAirdropRedeem - admin 代付：Master 先 ensureAAForEOA(Base)，再 redeemWithCodeAsAdmin（recipient=该 EOA 的 AA）；cluster 完整预检后转 master */
 	router.post('/buintRedeemAirdropRedeem', async (req, res) => {
 		const body = req.body as { eoa?: string; code?: string }
 		const pre = buintRedeemAirdropRedeemClusterPreCheck(body)

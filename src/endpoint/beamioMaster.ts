@@ -1525,7 +1525,7 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** POST /api/buintRedeemAirdropRedeem - cluster 完整预检后转发；redeemWithCodeAsAdmin(CoNET → 用户 EOA) */
+		/** POST /api/buintRedeemAirdropRedeem - cluster 完整预检后转发；ensureAAForEOA(Base) 后 redeemWithCodeAsAdmin(CoNET → 用户 AA) */
 		router.post('/buintRedeemAirdropRedeem', (req, res) => {
 			const body = req.body as { eoa?: string; code?: string }
 			if (!body.eoa || !ethers.isAddress(body.eoa) || typeof body.code !== 'string' || !body.code.trim()) {

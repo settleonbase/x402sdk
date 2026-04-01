@@ -3495,7 +3495,7 @@ export const claimBUnitsProcess = async () => {
 	}
 }
 
-// --- BuintRedeemAirdrop：Cluster 读链预检 + Master admin 代付 gas（redeemWithCodeAsAdmin → 用户 EOA）---
+// --- BuintRedeemAirdrop：Cluster 读链预检 + Master admin 代付 gas（redeemWithCodeAsAdmin → 用户 Base AA，与 B-Unit 余额侧一致）---
 
 const BUINT_REDEEM_AIRDROP_ABI = [
 	'function getRedeem(bytes32 codeHash) view returns (uint256 amount, uint64 validAfter, uint64 validBefore, bool active, bool consumed)',
@@ -3618,20 +3618,29 @@ export const buintRedeemAirdropPool: BuintRedeemAirdropPoolPayload[] = []
 export const buintRedeemAirdropProcess = async () => {
 	const obj = buintRedeemAirdropPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
+	if (!Settle_ContractPool.length) {
 		buintRedeemAirdropPool.unshift(obj)
 		return setTimeout(() => void buintRedeemAirdropProcess(), 3000)
 	}
-	logger(Colors.cyan(`[buintRedeemAirdropProcess] eoa=${obj.eoa}`))
+	const eoaNorm = ethers.getAddress(obj.eoa)
+	logger(Colors.cyan(`[buintRedeemAirdropProcess] eoa=${eoaNorm}`))
+	let SC: (typeof Settle_ContractPool)[number] | undefined
 	try {
-		const recipient = ethers.getAddress(obj.eoa)
+		const aaRecipient = await ensureAAForEOA(eoaNorm)
+		SC = Settle_ContractPool.shift()
+		if (!SC) {
+			buintRedeemAirdropPool.unshift(obj)
+			return setTimeout(() => void buintRedeemAirdropProcess(), 3000)
+		}
 		const redeem = new ethers.Contract(CONET_BUINT_REDEEM_AIRDROP, BUINT_REDEEM_AIRDROP_ABI, SC.walletConet)
-		const tx = await redeem.redeemWithCodeAsAdmin!(recipient, obj.code, { gasLimit: 900_000 })
-		logger(Colors.green(`[buintRedeemAirdropProcess] tx=${tx.hash} recipient=${recipient}`))
+		const tx = await redeem.redeemWithCodeAsAdmin!(aaRecipient, obj.code, { gasLimit: 900_000 })
+		logger(Colors.green(`[buintRedeemAirdropProcess] tx=${tx.hash} eoa=${eoaNorm} recipientAA=${aaRecipient}`))
 		await tx.wait()
 		if (obj.res && !obj.res.headersSent) {
-			obj.res.status(200).json({ success: true, txHash: tx.hash, recipient }).end()
+			obj.res
+				.status(200)
+				.json({ success: true, txHash: tx.hash, eoa: eoaNorm, aa: aaRecipient, recipient: aaRecipient })
+				.end()
 		}
 	} catch (e: any) {
 		const msg = e?.message ?? String(e)
@@ -3640,7 +3649,7 @@ export const buintRedeemAirdropProcess = async () => {
 			obj.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		if (SC) Settle_ContractPool.unshift(SC)
 		setTimeout(() => void buintRedeemAirdropProcess(), 3000)
 	}
 }
