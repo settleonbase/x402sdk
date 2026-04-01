@@ -1812,6 +1812,95 @@ const getCardAaFactoryAddress = async (cardAddr: string): Promise<string> => {
 	return factory._aaFactory()
 }
 
+const AA_FACTORY_READ_ABI = [
+	'function beamioAccountOf(address) view returns (address)',
+	'function primaryAccountOf(address) view returns (address)',
+] as const
+
+async function resolveBeamioAaAddressForEoaOnFactory(
+	provider: ethers.Provider,
+	aaFactoryAddress: string,
+	eoa: string
+): Promise<string | null> {
+	const fac = new ethers.Contract(aaFactoryAddress, AA_FACTORY_READ_ABI, provider)
+	const eoaN = ethers.getAddress(eoa)
+	let aa: string = ethers.ZeroAddress
+	try {
+		aa = (await fac.beamioAccountOf(eoaN)) as string
+	} catch {
+		aa = ethers.ZeroAddress
+	}
+	if (!aa || aa === ethers.ZeroAddress) {
+		try {
+			aa = (await fac.primaryAccountOf(eoaN)) as string
+		} catch {
+			aa = ethers.ZeroAddress
+		}
+	}
+	if (!aa || aa === ethers.ZeroAddress) return null
+	const code = await provider.getCode(aa)
+	if (!code || code === '0x' || code.length <= 2) return null
+	return ethers.getAddress(aa)
+}
+
+/** CoNET：优先从 payer EOA 扣 B-Unit；不足时再尝试同一控制下的 Beamio AA 地址（Factory 解析或显式传入，如 AAtoEOA 的 sender）。 */
+async function pickBUnitFeeConsumerPreferEoaThenAa(
+	payerEoa: string,
+	feeBUnits6: bigint,
+	opts?: { aaFactoryAddress?: string | null; explicitAaFallback?: string | null }
+): Promise<{ ok: true; consumer: string; usedAaFallback: boolean } | { ok: false; error: string }> {
+	if (feeBUnits6 <= 0n) {
+		return { ok: false, error: 'B-Unit fee amount must be > 0' }
+	}
+	const eoaN = ethers.getAddress(payerEoa)
+	const bunitAirdropRead = new ethers.Contract(
+		CONET_BUNIT_AIRDROP_ADDRESS,
+		['function getBUnitBalance(address) view returns (uint256)'],
+		providerConet
+	)
+	const balEoa = (await bunitAirdropRead.getBUnitBalance(eoaN)) as bigint
+	if (balEoa >= feeBUnits6) {
+		return { ok: true, consumer: eoaN, usedAaFallback: false }
+	}
+	const tryConsumeAa = async (aaRaw: string): Promise<{ ok: true; consumer: string; usedAaFallback: boolean } | null> => {
+		if (!aaRaw || !ethers.isAddress(aaRaw)) return null
+		const aaN = ethers.getAddress(aaRaw)
+		if (aaN.toLowerCase() === eoaN.toLowerCase()) return null
+		const balAa = (await bunitAirdropRead.getBUnitBalance(aaN)) as bigint
+		if (balAa >= feeBUnits6) {
+			return { ok: true, consumer: aaN, usedAaFallback: true }
+		}
+		return null
+	}
+	if (opts?.explicitAaFallback && ethers.isAddress(opts.explicitAaFallback)) {
+		const hit = await tryConsumeAa(opts.explicitAaFallback)
+		if (hit) return hit
+	}
+	if (opts?.aaFactoryAddress && ethers.isAddress(opts.aaFactoryAddress)) {
+		const linkedAa = await resolveBeamioAaAddressForEoaOnFactory(providerBaseBackup, opts.aaFactoryAddress, eoaN)
+		if (linkedAa) {
+			const hit = await tryConsumeAa(linkedAa)
+			if (hit) return hit
+		}
+	}
+	let aaBalHint = ''
+	if (opts?.explicitAaFallback && ethers.isAddress(opts.explicitAaFallback)) {
+		const aaN = ethers.getAddress(opts.explicitAaFallback)
+		if (aaN.toLowerCase() !== eoaN.toLowerCase()) {
+			try {
+				const b = (await bunitAirdropRead.getBUnitBalance(aaN)) as bigint
+				aaBalHint = `, AA ${aaN.slice(0, 8)}… balance ${Number(b) / 1e6}`
+			} catch {
+				aaBalHint = ', AA balance unreadable'
+			}
+		}
+	}
+	return {
+		ok: false,
+		error: `Insufficient B-Units: need ${Number(feeBUnits6) / 1e6} B-Units (EOA balance ${Number(balEoa) / 1e6}${aaBalHint})`,
+	}
+}
+
 export const executeForAdminProcess = async () => {
 	const obj = executeForAdminPool.shift()
 	if (!obj) return
@@ -4269,16 +4358,14 @@ export const nfcTopupPreCheckBUnitFee = async (
 		const feeUSDC6 = (amountUSDC6 * TOPUP_FEE_BPS + BPS_DENOM - 1n) / BPS_DENOM
 		const feeAmount = feeUSDC6 * 100n
 		const topupKind = KIND_CARD_TOPUP as 2 | 3
-		const bunitAirdropRead = new ethers.Contract(
-			CONET_BUNIT_AIRDROP_ADDRESS,
-			['function getBUnitBalance(address) view returns (uint256)'],
-			providerConet
-		)
-		const balance = await bunitAirdropRead.getBUnitBalance(cardOwnerEOA)
-		if (balance < feeAmount) {
+		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
+		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeAmount, {
+			aaFactoryAddress: aaFactoryAddr,
+		})
+		if (!picked.ok) {
 			return {
 				success: false,
-				error: `Insufficient B-Units: card issuer needs ${Number(feeAmount) / 1e6} B-Units for this topup (balance: ${Number(balance) / 1e6} B-Units)`,
+				error: `Insufficient B-Units for topup (${picked.error})`,
 			}
 		}
 		return { success: true, cardOwnerEOA, feeAmount, topupKind }
@@ -4388,8 +4475,9 @@ export const requestAccountingPreCheckBUnitFee = async (
 		if (feeBUnits6 > FEE_MAX) feeBUnits6 = FEE_MAX
 	}
 
-	// Resolve payee to EOA (AA owner or EOA)
-	let payerEOA: string
+	// Resolve payee to EOA (AA owner or EOA)；若 payee 本身是 AA，允许在 owner EOA 不足时改从该 AA 扣 B-Unit
+	let payerEoaResolved: string
+	let explicitAaFallback: string | undefined
 	const code = await providerBaseBackup.getCode(payee)
 	if (code && code !== '0x' && code.length > 2) {
 		const aaRead = new ethers.Contract(payee, ['function owner() view returns (address)'], providerBaseBackup)
@@ -4397,54 +4485,47 @@ export const requestAccountingPreCheckBUnitFee = async (
 		if (!owner || owner === ethers.ZeroAddress) {
 			return { success: false, error: 'Cannot determine payee owner for B-Unit fee check' }
 		}
-		payerEOA = ethers.getAddress(owner)
+		payerEoaResolved = ethers.getAddress(owner)
+		explicitAaFallback = ethers.getAddress(payee)
 	} else {
-		payerEOA = ethers.getAddress(payee)
+		payerEoaResolved = ethers.getAddress(payee)
 	}
 
-	const bunitAirdropRead = new ethers.Contract(
-		CONET_BUNIT_AIRDROP_ADDRESS,
-		['function getBUnitBalance(address) view returns (uint256)'],
-		providerConet
-	)
-	const balance = await bunitAirdropRead.getBUnitBalance(payerEOA)
-	if (balance < feeBUnits6) {
-		return {
-			success: false,
-			error: `Insufficient B-Units: payee needs ${Number(feeBUnits6) / 1e6} B-Units for requestAccounting (balance: ${Number(balance) / 1e6} B-Units)`,
-		}
+	const picked = await pickBUnitFeeConsumerPreferEoaThenAa(payerEoaResolved, feeBUnits6, {
+		aaFactoryAddress: BeamioAAAccountFactoryPaymaster,
+		explicitAaFallback,
+	})
+	if (!picked.ok) {
+		return { success: false, error: `Insufficient B-Units for requestAccounting (${picked.error})` }
 	}
-	return { success: true, feeAmount: feeBUnits6, payerEOA }
+	return { success: true, feeAmount: feeBUnits6, payerEOA: picked.consumer }
 }
 
-/** UI 预检：转账前检查 B-Unit 是否 >= 2。account 为 EOA；aaAddress 为 AA 时解析 owner 后检查。 */
+/** UI 预检：转账前检查 B-Unit 是否 >= 2。account 为 EOA；aaAddress 为 AA 时先查 owner EOA，不足再查 AA。 */
 export const transferPreCheckBUnit = async (opts: { account?: string; aaAddress?: string }): Promise<{ success: boolean; error?: string }> => {
 	const BUNIT_FEE_AMOUNT = 2_000_000n
-	let payerEOA: string
+	let payerEoaResolved: string
+	let explicitAaFallback: string | undefined
 	if (opts.account && ethers.isAddress(opts.account)) {
-		payerEOA = ethers.getAddress(opts.account)
+		payerEoaResolved = ethers.getAddress(opts.account)
 	} else if (opts.aaAddress && ethers.isAddress(opts.aaAddress)) {
 		const aaRead = new ethers.Contract(opts.aaAddress, ['function owner() view returns (address)'], providerBaseBackup)
 		const owner = await aaRead.owner()
 		if (!owner || owner === ethers.ZeroAddress) {
 			return { success: false, error: 'Cannot determine AA owner for B-Unit fee check' }
 		}
-		payerEOA = ethers.getAddress(owner)
+		payerEoaResolved = ethers.getAddress(owner)
+		explicitAaFallback = ethers.getAddress(opts.aaAddress)
 	} else {
 		return { success: false, error: 'Missing account or aaAddress' }
 	}
 	try {
-		const bunitAirdropRead = new ethers.Contract(
-			CONET_BUNIT_AIRDROP_ADDRESS,
-			['function getBUnitBalance(address) view returns (uint256)'],
-			providerConet
-		)
-		const balance = await bunitAirdropRead.getBUnitBalance(payerEOA)
-		if (balance < BUNIT_FEE_AMOUNT) {
-			return {
-				success: false,
-				error: `Insufficient B-Units: payer needs 2 B-Units for transfer fee (balance: ${Number(balance) / 1e6} B-Units)`,
-			}
+		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(payerEoaResolved, BUNIT_FEE_AMOUNT, {
+			aaFactoryAddress: BeamioAAAccountFactoryPaymaster,
+			explicitAaFallback,
+		})
+		if (!picked.ok) {
+			return { success: false, error: picked.error }
 		}
 		return { success: true }
 	} catch (e: any) {
@@ -4455,7 +4536,7 @@ export const transferPreCheckBUnit = async (opts: { account?: string; aaAddress?
 	}
 }
 
-/** Cluster 预检：AA owner 的 B-Unit 余额必须 >= 2（手续费）。Master 不再重复检查。 */
+/** Cluster 预检：AAtoEOA 手续费优先查 AA owner 的 EOA；不足再查 AA（sender）上的 B-Unit。Master 再次用同一规则选扣款地址。 */
 export const AAtoEOAPreCheckBUnitBalance = async (packedUserOp: AAtoEOAUserOp): Promise<{ success: boolean; error?: string }> => {
 	const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
 	try {
@@ -4468,17 +4549,11 @@ export const AAtoEOAPreCheckBUnitBalance = async (packedUserOp: AAtoEOAUserOp): 
 		if (!aaOwner || aaOwner === ethers.ZeroAddress) {
 			return { success: false, error: 'Cannot determine AA owner for B-Unit fee check' }
 		}
-		const bunitAirdropRead = new ethers.Contract(
-			CONET_BUNIT_AIRDROP_ADDRESS,
-			['function getBUnitBalance(address) view returns (uint256)'],
-			providerConet
-		)
-		const balance = await bunitAirdropRead.getBUnitBalance(aaOwner)
-		if (balance < BUNIT_FEE_AMOUNT) {
-			return {
-				success: false,
-				error: `Insufficient B-Units to pay fee (2 required, balance: ${Number(balance) / 1e6} B-Units)`,
-			}
+		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(ethers.getAddress(aaOwner), BUNIT_FEE_AMOUNT, {
+			explicitAaFallback: ethers.getAddress(packedUserOp.sender),
+		})
+		if (!picked.ok) {
+			return { success: false, error: picked.error }
 		}
 		return { success: true }
 	} catch (e: any) {
@@ -4573,20 +4648,19 @@ export const OpenContainerRelayPreCheckBUnitFee = async (
 		if (items.length === 0) return { success: false, error: 'items required for charge fee check' }
 		const itemSlice = items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
 		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
-		const feePayerEOA = await resolveChargeBUnitFeePayerCardOwner(providerBaseBackup, itemSlice)
-		const bunitAirdropRead = new ethers.Contract(
-			CONET_BUNIT_AIRDROP_ADDRESS,
-			['function getBUnitBalance(address) view returns (uint256)'],
-			providerConet
-		)
-		const balance = await bunitAirdropRead.getBUnitBalance(feePayerEOA)
-		if (balance < feeBUnits6) {
+		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(providerBaseBackup, itemSlice)
+		const cardAddr = resolveChargeFeePayerCardFromOpenContainerItems(itemSlice)
+		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
+		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
+			aaFactoryAddress: aaFactoryAddr,
+		})
+		if (!picked.ok) {
 			return {
 				success: false,
-				error: `Insufficient B-Units: card owner needs ${Number(feeBUnits6) / 1e6} B-Units for charge fee (balance: ${Number(balance) / 1e6} B-Units)`,
+				error: `Insufficient B-Units for charge (${picked.error})`,
 			}
 		}
-		return { success: true, feeBUnits6, feePayerEOA }
+		return { success: true, feeBUnits6, feePayerEOA: picked.consumer }
 	} catch (e: any) {
 		return {
 			success: false,
@@ -4614,20 +4688,19 @@ export const ContainerRelayPreCheckBUnitBalance = async (
 		if (!amountOk) return { success: false, error: 'amount must be > 0 for container relay' }
 		const itemSlice = items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
 		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
-		const feePayerEOA = await resolveChargeBUnitFeePayerCardOwner(providerBaseBackup, itemSlice)
-		const bunitAirdropRead = new ethers.Contract(
-			CONET_BUNIT_AIRDROP_ADDRESS,
-			['function getBUnitBalance(address) view returns (uint256)'],
-			providerConet
-		)
-		const balance = await bunitAirdropRead.getBUnitBalance(feePayerEOA)
-		if (balance < feeBUnits6) {
+		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(providerBaseBackup, itemSlice)
+		const cardAddr = resolveChargeFeePayerCardFromOpenContainerItems(itemSlice)
+		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
+		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
+			aaFactoryAddress: aaFactoryAddr,
+		})
+		if (!picked.ok) {
 			return {
 				success: false,
-				error: `Insufficient B-Units: card owner needs ${Number(feeBUnits6) / 1e6} B-Units for charge fee (balance: ${Number(balance) / 1e6} B-Units)`,
+				error: `Insufficient B-Units for charge (${picked.error})`,
 			}
 		}
-		return { success: true, feeBUnits6, feePayerEOA }
+		return { success: true, feeBUnits6, feePayerEOA: picked.consumer }
 	} catch (e: any) {
 		return {
 			success: false,
@@ -4939,7 +5012,30 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			)
 		}
 		let nfcTopupBunitConsumeTxHash: string | null = null
+		/** 与预检一致：优先卡 issuer EOA，不足则扣其 Beamio AA */
+		let topupBunitFeePayerResolved: string | null = null
 		if (baseTxOk && obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) {
+			let topupFeeConsumer = ethers.getAddress(obj.cardOwnerEOA)
+			try {
+				if (ethers.isAddress(obj.cardAddr)) {
+					const aaFacTop = await getCardAaFactoryAddress(obj.cardAddr)
+					const pickedTop = await pickBUnitFeeConsumerPreferEoaThenAa(topupFeeConsumer, obj.topupFeeBUnits, {
+						aaFactoryAddress: aaFacTop,
+					})
+					if (pickedTop.ok) {
+						topupFeeConsumer = pickedTop.consumer
+					} else {
+						logger(
+							Colors.yellow(
+								`[executeForAdminPostBaseProcess] B-Unit payer pick failed, trying issuer EOA only: ${pickedTop.error}`
+							)
+						)
+					}
+				}
+			} catch (pickErr: any) {
+				logger(Colors.yellow(`[executeForAdminPostBaseProcess] B-Unit payer pick error: ${pickErr?.message ?? pickErr}`))
+			}
+			topupBunitFeePayerResolved = topupFeeConsumer
 			const receipt = resolvedReceipt
 			const baseHash = tx.hash as `0x${string}`
 			const baseGas = receipt?.gasUsed ?? 0n
@@ -4950,7 +5046,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			)
 			try {
 				const consumeTx = await bunitAirdropWrite.consumeFromUser(
-					obj.cardOwnerEOA,
+					topupFeeConsumer,
 					obj.topupFeeBUnits,
 					baseHash,
 					baseGas,
@@ -4959,7 +5055,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				)
 				await consumeTx.wait()
 				nfcTopupBunitConsumeTxHash = consumeTx.hash
-				logger(Colors.cyan(`[executeForAdminPostBaseProcess] consumeFromUser ok: ${Number(obj.topupFeeBUnits) / 1e6} B-Units from ${obj.cardOwnerEOA}`))
+				logger(Colors.cyan(`[executeForAdminPostBaseProcess] consumeFromUser ok: ${Number(obj.topupFeeBUnits) / 1e6} B-Units from ${topupFeeConsumer}`))
 			} catch (consumeErr: any) {
 				logger(Colors.red(`[executeForAdminPostBaseProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
 			}
@@ -5033,7 +5129,13 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					ethers.isAddress(obj.cardOwnerEOA)
 				const bServiceUnits6Topup = bunitChargedOk ? obj.topupFeeBUnits! : 0n
 				const bServiceUSDC6Topup = bServiceUnits6Topup > 0n ? bServiceUnits6Topup / BUNIT_TO_USDC_DIVISOR : 0n
-				const feePayerCardOwner = bunitChargedOk ? ethers.getAddress(obj.cardOwnerEOA!) : ethers.ZeroAddress
+				const feePayerCardOwner = bunitChargedOk
+					? ethers.getAddress(
+							topupBunitFeePayerResolved && ethers.isAddress(topupBunitFeePayerResolved)
+								? topupBunitFeePayerResolved
+								: obj.cardOwnerEOA!
+					  )
+					: ethers.ZeroAddress
 				const input: PurchasingCardAccountingInput = {
 					txId: tx.hash as `0x${string}`,
 					originalPaymentHash: ethers.ZeroHash as `0x${string}`,
@@ -5942,9 +6044,10 @@ export const AAtoEOAProcess = async () => {
       }
     }
 
-    // --- fee payer for consumeFromUser (Cluster 已预检 B-Unit 余额，Master 不再检查) ---
-    const feePayer = aaOwner !== ethers.ZeroAddress ? aaOwner : recoveredSigner
-    if (!feePayer) {
+    // --- fee payer for consumeFromUser：优先 AA owner 的 EOA，不足则扣 AA（sender）---
+    const ownerForBunit =
+      aaOwner !== ethers.ZeroAddress ? ethers.getAddress(aaOwner) : recoveredSigner ? ethers.getAddress(recoveredSigner) : null
+    if (!ownerForBunit) {
       const errMsg = 'Cannot determine fee payer (AA owner)'
       logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
       obj.res.status(400).json({ success: false, error: errMsg }).end()
@@ -5953,6 +6056,17 @@ export const AAtoEOAProcess = async () => {
       return
     }
     const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
+    const bunitPick = await pickBUnitFeeConsumerPreferEoaThenAa(ownerForBunit, BUNIT_FEE_AMOUNT, {
+      explicitAaFallback: ethers.getAddress(sender),
+    })
+    if (!bunitPick.ok) {
+      logger(Colors.red(`❌ [AAtoEOA] ${bunitPick.error}`))
+      obj.res.status(400).json({ success: false, error: bunitPick.error }).end()
+      Settle_ContractPool.unshift(SC)
+      setTimeout(() => AAtoEOAProcess(), 3000)
+      return
+    }
+    const feePayer = bunitPick.consumer
 
 	 // --- submit ---
 	 const beneficiary = await SC.walletBase.getAddress()
@@ -6402,10 +6516,18 @@ export const OpenContainerRelayProcess = async () => {
         items.map((it) => ({ kind: it.kind, asset: it.asset }))
       )
       const feePayerItems = items.map((it) => ({ kind: it.kind, asset: it.asset }))
-      const feePayerEOA = await resolveChargeBUnitFeePayerCardOwner(SC.walletBase.provider!, feePayerItems)
+      const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcChargeFixedBUnitFee()
+      const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(SC.walletBase.provider!, feePayerItems)
+      const aaFactoryOpen = await getCardAaFactoryAddress(feePayerCard)
+      const feePayerPickOpen = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
+        aaFactoryAddress: aaFactoryOpen,
+      })
+      const feePayerEOA = feePayerPickOpen.ok ? feePayerPickOpen.consumer : feePayerOwnerEoa
+      if (!feePayerPickOpen.ok) {
+        logger(Colors.yellow(`[AAtoEOA/OpenContainer] B-Unit payer pick failed at master, fallback EOA for consume: ${feePayerPickOpen.error}`))
+      }
       const { payeeEOA } = await resolveChargeFeePayer(to, feePayerCard, SC.walletBase.provider!)
       const amountUSDC6ForFee = totalAmountUSDC6ForFee > 0n ? totalAmountUSDC6ForFee : totalAmountE6
-      const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcChargeFixedBUnitFee()
       /** 与 ContainerRelay 一致：用 USDC6 等价总额做账本分栏与 TX_TIP 拆分（优于混加 raw item amount） */
       const usdcAmountRaw = amountUSDC6ForFee
 
@@ -6801,8 +6923,17 @@ export const ContainerRelayProcess = async () => {
 
     const usdcAmountRaw = obj.amountUSDC6 ? BigInt(obj.amountUSDC6) : BigInt(payload.items[0].amount)
     const feePayerItems = payload.items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset) }))
-    const feePayerEOA = await resolveChargeBUnitFeePayerCardOwner(SC.walletBase.provider!, feePayerItems)
+    const feePayerOwnerEoaContainer = await resolveChargeBUnitFeePayerCardOwner(SC.walletBase.provider!, feePayerItems)
+    const feePayerCardContainer = resolveChargeFeePayerCardFromOpenContainerItems(feePayerItems)
     const { bServiceUnits6: feeBUnits6, bServiceUSDC6: containerBUsdc6 } = calcChargeFixedBUnitFee()
+    const aaFactoryContainer = await getCardAaFactoryAddress(feePayerCardContainer)
+    const feePayerPickContainer = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoaContainer, feeBUnits6, {
+      aaFactoryAddress: aaFactoryContainer,
+    })
+    const feePayerEOA = feePayerPickContainer.ok ? feePayerPickContainer.consumer : feePayerOwnerEoaContainer
+    if (!feePayerPickContainer.ok) {
+      logger(Colors.yellow(`[AAtoEOA/Container] B-Unit payer pick failed at master, fallback EOA: ${feePayerPickContainer.error}`))
+    }
     const baseGas = receipt?.gasUsed ?? 0n
     if (feePayerEOA && feePayerEOA !== ethers.ZeroAddress && feeBUnits6 > 0n) {
       const baseHashBytes32 = tx.hash as `0x${string}`
