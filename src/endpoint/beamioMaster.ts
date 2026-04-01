@@ -408,7 +408,7 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-		/** 最新发行的前 N 张卡明细；holderCount 为链上 totalActiveMemberships / getGlobalStatsFull（BeamioUserCard readme）。6s 预拉缓存。limit 上限 300。 */
+		/** 最新发行的前 N 张卡明细；holderCount + token0TotalSupply6（totalSupply(0)）+ token0CumulativeMint6（getGlobalStatsFull.cumulativeMint）。6s 预拉缓存。limit 上限 300。 */
 		router.get('/latestCards', async (_req, res) => {
 			const limit = Math.min(parseInt(String(_req.query.limit || 20), 10) || 20, 300)
 			const cacheKey = `limit:${limit}`
@@ -1493,7 +1493,7 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** POST /api/buintRedeemAirdropRedeem - cluster 完整预检后转发；ensureAAForEOA(Base) + redeemWithCodeAsAdmin(CoNET → AA) */
+		/** POST /api/buintRedeemAirdropRedeem - cluster 完整预检后转发；redeemWithCodeAsAdmin(CoNET → 用户 EOA) */
 		router.post('/buintRedeemAirdropRedeem', (req, res) => {
 			const body = req.body as { eoa?: string; code?: string }
 			if (!body.eoa || !ethers.isAddress(body.eoa) || typeof body.code !== 'string' || !body.code.trim()) {

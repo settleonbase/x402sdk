@@ -2299,9 +2299,20 @@ export type BeamioLatestCardItem = {
 	uri: string | null
 	metadata: Record<string, unknown> | null
 	txHash: string | null
+	/** DB / 索引维护的 points mint 累计（6 位精度），可能与链上不同步 */
 	totalPointsMinted6: string
 	holderCount: number
 	createdAt: string
+	/**
+	 * 链上 ERC-1155 `totalSupply(0)`：token #0（points）当前总流通量（已 mint − 已 burn），6 位精度整数字符串。
+	 * 由 Master latestCards enrichment 写入。
+	 */
+	token0TotalSupply6?: string
+	/**
+	 * 链上 `getGlobalStatsFull` 的 `cumulativeMint`：合约统计窗口内 token #0 累计 mint 量（6 位精度），见 BeamioUserCard readme。
+	 * 与 `totalSupply` 不同：后者为当前存量，此为统计口径累计 mint。
+	 */
+	token0CumulativeMint6?: string
 }
 
 const mapBeamioCardSqlRow = (r: {

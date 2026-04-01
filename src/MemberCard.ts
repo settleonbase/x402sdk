@@ -1308,7 +1308,7 @@ export const nfcTopupPreparePayload = async (params: {
 	}
 
 	// Android admin topup 需要支持首发/升级/普通 topup 三类路径：
-	// 这里不再阻断“无会员卡”用户，具体分类与收费在 nfcTopupPreCheckBUnitFee + 记账阶段判定。
+	// 这里不再阻断“无会员卡”用户；B-Unit 服务费仅按 topup 折算 USDC 的 2%（见 nfcTopupPreCheckBUnitFee），与是否首发无关。
 
 	const cur = (currency || 'CAD').toUpperCase()
 	const ONE_E6 = 1_000_000n
@@ -3401,7 +3401,7 @@ export const claimBUnitsProcess = async () => {
 	}
 }
 
-// --- BuintRedeemAirdrop：Cluster 读链预检 + Master admin 代付 gas（redeemWithCodeAsAdmin → 用户 AA）---
+// --- BuintRedeemAirdrop：Cluster 读链预检 + Master admin 代付 gas（redeemWithCodeAsAdmin → 用户 EOA）---
 
 const BUINT_REDEEM_AIRDROP_ABI = [
 	'function getRedeem(bytes32 codeHash) view returns (uint256 amount, uint64 validAfter, uint64 validBefore, bool active, bool consumed)',
@@ -3531,13 +3531,13 @@ export const buintRedeemAirdropProcess = async () => {
 	}
 	logger(Colors.cyan(`[buintRedeemAirdropProcess] eoa=${obj.eoa}`))
 	try {
-		const aa = await ensureAAForEOA(obj.eoa)
+		const recipient = ethers.getAddress(obj.eoa)
 		const redeem = new ethers.Contract(CONET_BUINT_REDEEM_AIRDROP, BUINT_REDEEM_AIRDROP_ABI, SC.walletConet)
-		const tx = await redeem.redeemWithCodeAsAdmin!(aa, obj.code, { gasLimit: 900_000 })
-		logger(Colors.green(`[buintRedeemAirdropProcess] tx=${tx.hash}`))
+		const tx = await redeem.redeemWithCodeAsAdmin!(recipient, obj.code, { gasLimit: 900_000 })
+		logger(Colors.green(`[buintRedeemAirdropProcess] tx=${tx.hash} recipient=${recipient}`))
 		await tx.wait()
 		if (obj.res && !obj.res.headersSent) {
-			obj.res.status(200).json({ success: true, txHash: tx.hash, aa }).end()
+			obj.res.status(200).json({ success: true, txHash: tx.hash, recipient }).end()
 		}
 	} catch (e: any) {
 		const msg = e?.message ?? String(e)
@@ -4225,34 +4225,27 @@ const TX_CATEGORY_NFC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes(
 /** 1 B-Unit = 0.01 USDC，与 calcBeamioBUnitFee 一致 */
 const BUNIT_TO_USDC_DIVISOR = 100n
 
-/** Cluster 预检（USDC topup）：卡发行方 owner 的 B-Units 是否足够。
- * 规则：
- * 1) 受益人尚无可用会员卡、需合约侧首次发卡（含无 AA / 无可用 membership NFT 等）=> 98 B-Units（kind=issueCard）
- * 2) 升级 tier 与普通加值 topup => 2 B-Units（kind=cardTopup）
+/** Cluster 预检（mintPointsByAdmin / NFC 与 QR 同路径）：卡发行方 owner 的 B-Units 是否足够。
+ * 规则：按 topup 金额折算 USDC（与 quoteUSDCForPoints / executeForAdmin 记账一致：points6 * quoteUnitPointInUSDC6 / 1e6）后收取 **2%** 对应的 B-Unit；
+ * 1 B-Unit = 0.01 USDC => feeBUnits6 = feeUSDC6 * 100。不再区分是否首次发卡。
  */
 export const nfcTopupPreCheckBUnitFee = async (
 	cardAddr: string,
 	data: string
 ): Promise<{ success: boolean; error?: string; cardOwnerEOA?: string; feeAmount?: bigint; topupKind?: 2 | 3 }> => {
-	const FEE_REGULAR = 2_000_000n
-	const FEE_NEW_CARD_ISSUANCE = 98_000_000n
 	const KIND_CARD_TOPUP = 2
-	const KIND_ISSUE_CARD = 3
+	const TOPUP_FEE_BPS = 200n // 2%（万分比 200/10000）
+	const BPS_DENOM = 10_000n
 	try {
 		const parsed = tryParseMintPointsByAdminArgs(data)
 		if (!parsed || !ethers.isAddress(parsed.recipient)) {
 			return { success: false, error: 'Invalid mintPointsByAdmin payload' }
 		}
-		const cardAbi = [
-			'function owner() view returns (address)',
-			'function factoryGateway() view returns (address)',
-			'function activeMembershipId(address) view returns (uint256)',
-			'function activeTierIndexOrMax(address) view returns (uint256)',
-			'function balanceOf(address,uint256) view returns (uint256)',
-			'function getOwnershipByEOA(address) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
-		]
-		const factoryAbi = ['function _aaFactory() view returns (address)']
-		const aaFactoryAbi = ['function beamioAccountOf(address) view returns (address)']
+		if (parsed.points6 <= 0n) {
+			return { success: false, error: 'Invalid mintPointsByAdmin amount' }
+		}
+		const cardAbi = ['function owner() view returns (address)', 'function factoryGateway() view returns (address)']
+		const gatewayAbi = ['function quoteUnitPointInUSDC6(address) view returns (uint256)']
 		const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
 		const rawOwner = await card.owner()
 		const resolveResult = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner)
@@ -4260,30 +4253,22 @@ export const nfcTopupPreCheckBUnitFee = async (
 			return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA' }
 		}
 		const cardOwnerEOA = resolveResult.cardOwner
-		const gateway = await card.factoryGateway()
-		const factory = new ethers.Contract(gateway, factoryAbi, providerBaseBackup)
-		const aaFactoryAddr = await factory._aaFactory()
-		const aaFactory = new ethers.Contract(aaFactoryAddr, aaFactoryAbi, providerBaseBackup)
-		const recipientAA = await aaFactory.beamioAccountOf(parsed.recipient)
-		/** 仅「需首次发卡」收 98 BUint；升级/普通 topup 收 2（不再按预计升级 tier 收高档费用） */
-		let needsNewCardIssuanceFee = false
-		if (!recipientAA || recipientAA === ethers.ZeroAddress) {
-			needsNewCardIssuanceFee = true
-		} else {
-			const [activeId, activeTierIdx, ownership] = await Promise.all([
-				card.activeMembershipId(recipientAA),
-				card.activeTierIndexOrMax(recipientAA),
-				card.getOwnershipByEOA(parsed.recipient) as Promise<[bigint, Array<{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }>]>,
-			])
-			const MAX_UINT = 2n ** 256n - 1n
-			const nfts = ownership[1] ?? []
-			const hasUsableMembershipNft = nfts.some((n: { isExpired: boolean }) => !n.isExpired)
-			if (!hasUsableMembershipNft || activeId === 0n || activeTierIdx >= MAX_UINT) {
-				needsNewCardIssuanceFee = true
+		const gatewayAddr = await card.factoryGateway()
+		const gateway = new ethers.Contract(gatewayAddr, gatewayAbi, providerBaseBackup)
+		const unitPriceUSDC6: bigint = await gateway.quoteUnitPointInUSDC6(cardAddr)
+		if (unitPriceUSDC6 === 0n) {
+			return {
+				success: false,
+				error: 'UC_PriceZero: quoteUnitPointInUSDC6(card)=0 (cannot compute USDC value for B-Unit fee)',
 			}
 		}
-		const feeAmount = needsNewCardIssuanceFee ? FEE_NEW_CARD_ISSUANCE : FEE_REGULAR
-		const topupKind = (needsNewCardIssuanceFee ? KIND_ISSUE_CARD : KIND_CARD_TOPUP) as 2 | 3
+		const amountUSDC6 = (parsed.points6 * unitPriceUSDC6) / POINTS_ONE
+		if (amountUSDC6 <= 0n) {
+			return { success: false, error: 'Topup USDC notional is zero' }
+		}
+		const feeUSDC6 = (amountUSDC6 * TOPUP_FEE_BPS + BPS_DENOM - 1n) / BPS_DENOM
+		const feeAmount = feeUSDC6 * 100n
+		const topupKind = KIND_CARD_TOPUP as 2 | 3
 		const bunitAirdropRead = new ethers.Contract(
 			CONET_BUNIT_AIRDROP_ADDRESS,
 			['function getBUnitBalance(address) view returns (uint256)'],

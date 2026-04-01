@@ -1839,7 +1839,7 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** 最新发行的前 N 张卡明细：透传 Master（metadata + 链上会员/全局统计 holderCount；与 Master 同排除集）。limit 上限 300。 */
+	/** 最新发行的前 N 张卡明细：透传 Master（含 token0TotalSupply6、token0CumulativeMint6、holderCount；与 Master 同排除集）。limit 上限 300。 */
 	router.get('/latestCards', (req, res) => {
 		const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''
 		getLocalhost(`/api/latestCards${qs}`, res)
@@ -3667,7 +3667,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
-	/** POST /api/buintRedeemAirdropRedeem - admin 代付：ensureAA + redeemWithCodeAsAdmin；cluster 完整预检后转 master */
+	/** POST /api/buintRedeemAirdropRedeem - admin 代付：redeemWithCodeAsAdmin（划入请求体中的 EOA）；cluster 完整预检后转 master */
 	router.post('/buintRedeemAirdropRedeem', async (req, res) => {
 		const body = req.body as { eoa?: string; code?: string }
 		const pre = buintRedeemAirdropRedeemClusterPreCheck(body)
