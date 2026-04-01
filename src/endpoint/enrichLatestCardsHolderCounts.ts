@@ -46,6 +46,37 @@ function toSafeNonNegInt(n: bigint): number {
 	return Math.trunc(x)
 }
 
+/** ethers CALL_EXCEPTION 的 message 常带整段 transaction JSON，journald 刷屏；只保留可读前缀 */
+function shortRpcCallErr(e: unknown): string {
+	const x = e as { code?: string; message?: string }
+	const code = x?.code != null ? String(x.code) : 'error'
+	let msg = typeof x?.message === 'string' ? x.message : String(e)
+	const cut = msg.indexOf('(action=')
+	if (cut >= 0) msg = msg.slice(0, cut).trim()
+	if (msg.length > 180) msg = `${msg.slice(0, 180)}…`
+	return `${code}: ${msg}`
+}
+
+function shouldRetryRpcCall(e: unknown): boolean {
+	const x = e as { code?: string; message?: string }
+	if (x?.code === 'CALL_EXCEPTION') return true
+	const m = String(x?.message ?? e)
+	return m.includes('missing revert data')
+}
+
+async function ethCallWithOptionalRetry(
+	provider: ethers.Provider,
+	req: { to: string; data: string },
+): Promise<string> {
+	try {
+		return await provider.call(req)
+	} catch (e) {
+		if (!shouldRetryRpcCall(e)) throw e
+		await new Promise((r) => setTimeout(r, 300))
+		return await provider.call(req)
+	}
+}
+
 /**
  * latestCards：链上 enrichment。
  * - `holderCount`：`totalActiveMemberships`，否则 `cumulativeIssued + cumulativeUpgraded`。
@@ -65,24 +96,24 @@ export async function enrichLatestCardsWithBaseErc1155PointsHolderCounts(
 			let active = 0n
 			try {
 				supply0 = (await card.totalSupply(POINTS_TOKEN_ID)) as bigint
-			} catch (e: any) {
-				logger(Colors.gray(`[latestCards holders] ${it.cardAddress} totalSupply(0): ${e?.message ?? e}`))
+			} catch (e: unknown) {
+				logger(Colors.gray(`[latestCards holders] ${it.cardAddress} totalSupply(0): ${shortRpcCallErr(e)}`))
 			}
 			try {
 				active = (await card.totalActiveMemberships()) as bigint
-			} catch (e: any) {
-				logger(Colors.gray(`[latestCards holders] ${it.cardAddress} totalActiveMemberships: ${e?.message ?? e}`))
+			} catch (e: unknown) {
+				logger(Colors.gray(`[latestCards holders] ${it.cardAddress} totalActiveMemberships: ${shortRpcCallErr(e)}`))
 			}
 			let cumulativeMint = 0n
 			let issuedFallback = 0n
 			try {
 				const data = IFACE_HOLDERS.encodeFunctionData('getGlobalStatsFull', [PERIOD_HOUR, 0, 0])
-				const ret = await provider.call({ to: it.cardAddress, data })
+				const ret = await ethCallWithOptionalRetry(provider, { to: it.cardAddress, data })
 				const p = decodeGlobalStatsFullMintAndIssued(ret)
 				cumulativeMint = p.cumulativeMint
 				issuedFallback = p.cumulativeIssuedPlusUpgraded
-			} catch (e: any) {
-				logger(Colors.gray(`[latestCards holders] ${it.cardAddress} getGlobalStatsFull: ${e?.message ?? e}`))
+			} catch (e: unknown) {
+				logger(Colors.gray(`[latestCards holders] ${it.cardAddress} getGlobalStatsFull: ${shortRpcCallErr(e)}`))
 			}
 			let n = toSafeNonNegInt(active)
 			if (n === 0) n = toSafeNonNegInt(issuedFallback)
@@ -92,8 +123,8 @@ export async function enrichLatestCardsWithBaseErc1155PointsHolderCounts(
 				token0TotalSupply6: supply0.toString(),
 				token0CumulativeMint6: cumulativeMint.toString(),
 			})
-		} catch (e: any) {
-			logger(Colors.gray(`[latestCards holders] ${it.cardAddress}: ${e?.message ?? e}`))
+		} catch (e: unknown) {
+			logger(Colors.gray(`[latestCards holders] ${it.cardAddress}: ${shortRpcCallErr(e)}`))
 			out.push(it)
 		}
 	}
