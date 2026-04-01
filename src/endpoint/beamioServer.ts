@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getLatestCards, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet} from '../db'
+import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -18,49 +18,11 @@ import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
-import { enrichLatestCardsWithIndexerNft0HolderCounts } from './enrichLatestCardsHolderCounts'
-
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
 	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
 	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
 	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
-])
-
-/** 与 SilentPassUI / Alliance 的 USER_CARD_DISPLAY_EXCLUDED 对齐：latestCards 不返回的卡地址 */
-const LATEST_CARDS_EXCLUDED = new Set([
-	'0x02bae511632354584b198951b42ec73bacbc4e98',
-	'0xf99018dffdb0c5657c93ca14db2900cebe1168a7',
-	'0xa86a8406b06bd6c332b4b380a0eaced822218eff',
-	'0xc0f1c74fb95100a97b532be53b266a54f41db615',
-	'0xecc5bdff6716847e45363befd3506b1d539c02d5',
-	'0x90ae2212ee70aca8671ab7f5238c828d13c6dea7',
-	'0x4879171d6c4693eaedcd8f448a785a31b2146e64',
-	'0x82b333da5c723da6e98fefecd96cb1ca304c6125',
-	'0x9d098fa94d559b8cb223b9760e8bac3d07617c78',
-	'0x926deadb97d8badd1221060840b5a1cf46711a86',
-	'0x709dae38d65a87289597ee79cb0d5d251a282e59',
-	'0x536cab27c6488202fd86bae0581f143c725f5b4d',
-	'0xb87058b44c881020fd529e7e34a158f05bc4c28a',
-	'0x82cee96db45933fe4b71d36fa8904508f929027c',
-	'0xf0ce0ae91f74f67893e00307cabea8c058939f03',
-	'0xb7644ddb12656f4854dc746464af47d33c206f0e',
-	'0x0fb5032915c5473b6ef40d878c3c701641f90ec8',
-	'0x407e9974a927af2860780645997778be7b0e8e23',
-	'0xea7b248cfcd457c4884371c55ae5afb0f428c483',
-	'0xe1666f0309529df18e7986064a337c981baea178',
-	'0x4cc2e5a596791cb71e34d7b3177e60f6ab3f73ed',
-	'0xcdab59228695bbf2137d56382395f854267194e1',
-	'0x3957724e39e3db4f9f5fb263dd18e73fe8a67581',
-	'0x4cb611a14b1441d36183f125503f2c72af5b8fc8',
-	'0xda36bd32418cac424dbffd07617094d1884e629c',
-	'0x63a6251a51939f6c47ba0ceff5984e5c9f031605',
-	'0x48952f9ea1231b59e5c5fa1a99bc657b122cfdfd',
-	'0xb8a42181adc9bb81b6ccc1f2198be95105cfd969',
-	'0x70399f0854f32553d7fe14a43fd6ab925d39c0b4',
-	'0xfb4d0546b90a8f353f7c479392a1ba40a1185b9d',
-	'0x4c66b36ba059b2f05ef3d5f383c67533f19c6219',
-	'0x9cda8477c9f03b8759ac64e21941e578908fd750',
 ])
 
 /** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
@@ -376,7 +338,6 @@ const getBUnitLedgerCache = new Map<string, { body: string; statusCode: number; 
 const QUERY_CACHE_TTL_MS = 30 * 1000
 const redeemStatusBatchCache = new Map<string, { body: string; expiry: number }>()
 const searchHelpCache = new Map<string, { body: string; expiry: number }>()
-const latestCardsCache = new Map<string, { body: string; expiry: number }>()
 const getNFTMetadataCache = new Map<string, { body: string; expiry: number }>()
 const ownerNftSeriesCache = new Map<string, { body: string; expiry: number }>()
 const seriesSharedMetadataCache = new Map<string, { body: string; expiry: number }>()
@@ -1878,20 +1839,10 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** 最新发行的前 N 张卡明细（含 mint token #0 总数、metadata）。holderCount 由 CoNET BeamioIndexer `getBeamioUserCardNft0HolderCount` 实时覆盖。30 秒缓存。limit 上限 300。与 SilentPassUI 的 USER_CARD_DISPLAY_EXCLUDED 对齐 */
-	router.get('/latestCards', async (req, res) => {
-		const limit = Math.min(parseInt(String(req.query.limit || 20), 10) || 20, 300)
-		const cacheKey = `limit:${limit}`
-		const cached = latestCardsCache.get(cacheKey)
-		if (cached && Date.now() < cached.expiry) {
-			return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body)
-		}
-		const rawItems = await getLatestCards(limit)
-		const filtered = rawItems.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase()))
-		const items = await enrichLatestCardsWithIndexerNft0HolderCounts(filtered, BEAMIO_INDEXER_DIAMOND, providerConet)
-		const body = JSON.stringify({ items })
-		latestCardsCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
-		res.status(200).json({ items })
+	/** 最新发行的前 N 张卡明细：透传 Master（Master 每 6s 预拉 DB metadata + Base 上 holderCount；与 Master 同排除集）。limit 上限 300。 */
+	router.get('/latestCards', (req, res) => {
+		const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''
+		getLocalhost(`/api/latestCards${qs}`, res)
 	})
 
 	/** GET /api/searchHelp?card=0x... - 返回该卡已定义的全部 issued NFT 列表。30 秒缓存 */

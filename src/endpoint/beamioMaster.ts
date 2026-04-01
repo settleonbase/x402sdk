@@ -17,15 +17,13 @@ import {
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND } from '../chainAddresses'
-import { enrichLatestCardsWithIndexerNft0HolderCounts } from './enrichLatestCardsHolderCounts'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
+import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
+import { LATEST_CARDS_EXCLUDED } from './latestCardsShared'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
 const masterServerPort = 1111
-
-const CONET_RPC_MASTER = (typeof process !== 'undefined' && process.env?.CONET_RPC?.trim()) || 'https://mainnet-rpc.conet.network'
-const providerConetForLatestCards = new ethers.JsonRpcProvider(CONET_RPC_MASTER)
 
 /** HTTP 记账 body 中的 routeItems 归一化（与 MemberCard 内存路径一致） */
 function normalizeBeamioRouteItemsFromBody(raw: unknown): BeamioTransferRouteItem[] | undefined {
@@ -72,6 +70,7 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 	'function owner() view returns (address)',
 ] as const
 const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
+const providerBaseForLatestCards = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 /** Beamio 默认 metadata image（与 BeamioUserCard 一致） */
 const DEFAULT_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x44e7a175e57a337bf5d0a98deb19a0a545e362d504092a7af1aecd58798eab'
@@ -95,6 +94,35 @@ const getMyFollowStatusCache = new Map<string, { data: unknown; expiry: number }
 const ownerNftSeriesCache = new Map<string, { items: unknown[]; expiry: number }>()
 const seriesSharedMetadataCache = new Map<string, { data: unknown; expiry: number }>()
 const mintMetadataCache = new Map<string, { items: unknown[]; expiry: number }>()
+
+/** Master 每 6s 预拉 latestCards（metadata + holderCount）；缓存条可续期至下一轮 */
+const LATEST_CARDS_PREWARM_MS = 6 * 1000
+const LATEST_CARDS_CACHE_STALE_MS = 15 * 1000
+const LATEST_CARDS_PREWARM_LIMITS = [20, 100, 300] as const
+
+async function computeLatestCardsForMaster(limit: number) {
+	const raw = await getLatestCards(limit)
+	const filtered = raw.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase()))
+	return enrichLatestCardsWithBaseErc1155PointsHolderCounts(filtered, providerBaseForLatestCards)
+}
+
+async function prewarmLatestCardsCacheMaster(): Promise<void> {
+	for (const lim of LATEST_CARDS_PREWARM_LIMITS) {
+		try {
+			const items = await computeLatestCardsForMaster(lim)
+			latestCardsCache.set(`limit:${lim}`, { items, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
+		} catch (e: any) {
+			logger(Colors.yellow(`[latestCards prewarm] limit=${lim}: ${e?.message ?? e}`))
+		}
+	}
+}
+
+function startLatestCardsPrewarmTimer(): void {
+	void prewarmLatestCardsCacheMaster()
+	setInterval(() => {
+		void prewarmLatestCardsCacheMaster()
+	}, LATEST_CARDS_PREWARM_MS).unref?.()
+}
 
 const DEBUG_INBOUND =
 	process.env.DEBUG_INBOUND === '1' ||
@@ -380,18 +408,22 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-		/** 最新发行的前 N 张卡明细；holderCount 由 Indexer `getBeamioUserCardNft0HolderCount` 覆盖。30 秒缓存 */
+		/** 最新发行的前 N 张卡明细；holderCount 在 Base 上按 ERC-1155 事件统计 token #0 持仓。由 6s 定时任务预拉缓存，请求优先命中缓存。limit 上限 300（与 Cluster 一致）。 */
 		router.get('/latestCards', async (_req, res) => {
-			const limit = Math.min(parseInt(String(_req.query.limit || 20), 10) || 20, 100)
+			const limit = Math.min(parseInt(String(_req.query.limit || 20), 10) || 20, 300)
 			const cacheKey = `limit:${limit}`
 			const cached = latestCardsCache.get(cacheKey)
 			if (cached && Date.now() < cached.expiry) {
 				return res.status(200).json({ items: cached.items })
 			}
-			const raw = await getLatestCards(limit)
-			const items = await enrichLatestCardsWithIndexerNft0HolderCounts(raw, BEAMIO_INDEXER_DIAMOND, providerConetForLatestCards)
-			latestCardsCache.set(cacheKey, { items, expiry: Date.now() + QUERY_CACHE_TTL_MS })
-			res.status(200).json({ items })
+			try {
+				const items = await computeLatestCardsForMaster(limit)
+				latestCardsCache.set(cacheKey, { items, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
+				res.status(200).json({ items })
+			} catch (e: any) {
+				logger(Colors.red('[latestCards] error:'), e?.message ?? e)
+				res.status(500).json({ error: e?.message ?? 'latestCards failed' })
+			}
 		})
 
 		/** 按 shareTokenMetadata.categories 聚合已登记发卡（与 Cluster GET /api/cardsByCategory 一致） */
@@ -2084,6 +2116,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			{ 'x402 Server': `http://localhost:${PORT}`, 'Serving files from': staticFolder }
 		])
 		startNfcLinkAppAutoCancelSweeper()
+		startLatestCardsPrewarmTimer()
 	})
 
 	server.on('error', (err: any) => {
