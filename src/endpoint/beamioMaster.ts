@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp, oracleBackoud, getOracleRequest, masterSetup} from '../util'
+import {getClientIp, oracleBackoud, getOracleRequest, masterSetup, resolveBeamioBaseHttpRpcUrl} from '../util'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
@@ -69,7 +69,7 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 	'function issuedNftPriceInCurrency6(uint256) view returns (uint256)',
 	'function owner() view returns (address)',
 ] as const
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
+const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
 const providerBaseForLatestCards = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 /** Beamio 默认 metadata image（与 BeamioUserCard 一致） */

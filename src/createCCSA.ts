@@ -12,14 +12,14 @@
 import { ethers } from 'ethers'
 import { Settle_ContractPool } from './MemberCard'
 import { createBeamioCardWithFactory } from './CCSA'
-import { masterSetup } from './util'
+import { masterSetup, resolveBeamioBaseHttpRpcUrl } from './util'
 
 const CARD_ISSUER_ADDRESS = '0xEaBF0A98aC208647247eAA25fDD4eB0e67793d61'
 const ONE_CAD_E6 = 1_000_000
 
 async function main() {
   if (!Settle_ContractPool?.length) {
-    throw new Error('Settle_ContractPool 为空，请确保 MemberCard 已加载（~/.master.json 中配置 base_endpoint 与 settle_contractAdmin）')
+    throw new Error('Settle_ContractPool 为空，请确保 MemberCard 已加载（~/.master.json 中配置 settle_contractAdmin；Base RPC 默认 https://base-rpc.conet.network，可用 BASE_RPC_URL 覆盖）')
   }
   // 调用者（signer）须为工厂 owner 或 paymaster；卡归属（cardOwner）独立，可为 CARD_ISSUER_ADDRESS
   const SC = Settle_ContractPool[0]
@@ -31,7 +31,7 @@ async function main() {
 
   const factoryAddr = await factory.getAddress()
   const factoryOwner = (await factory.owner()) as string
-  const baseRpc = (masterSetup as { base_endpoint?: string })?.base_endpoint || 'https://base-rpc.conet.network'
+  const baseRpc = resolveBeamioBaseHttpRpcUrl()
   console.log('Creating CCSA card...')
   console.log('  Base RPC (x402sdk):', baseRpc)
   console.log('  Factory:', factoryAddr)

@@ -32,7 +32,7 @@ const OLD_CCSA_REDIRECTS = [
 	'0x6870acA2f4f6aBed6B10B0C8D76C75343398fd64', // 旧工厂部署的 CCSA
 	'0xA1A9f6f942dc0ED9Aa7eF5df7337bd878c2e157b', // 旧工厂 0x86879fE3 部署的 CCSA（已迁移至新工厂）
 ].map(a => a.toLowerCase())
-import { masterSetup } from '../util'
+import { masterSetup, resolveBeamioBaseHttpRpcUrl } from '../util'
 
 const BASE_CHAIN_ID = 8453
 const MINT_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('mintPointsByAdmin(address,uint256)').slice(2, 10)
@@ -52,8 +52,8 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 	'function issuedNftPriceInCurrency6(uint256) view returns (uint256)',
 	'function owner() view returns (address)',
 ] as const
-/** Base RPC：优先 BASE_RPC_URL 环境变量，否则固定 https://base-rpc.conet.network */
-const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://base-rpc.conet.network'
+/** Base RPC：与 util.resolveBeamioBaseHttpRpcUrl 一致（默认 https://base-rpc.conet.network） */
+const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 /** 从 mintPointsByAdmin(data) 解析 recipient EOA */

@@ -70,6 +70,15 @@ export const getClientIp = (req: Request): string => {
 
 
 logger( homedir())
+
+/** CoNET 官方 Base HTTP RPC。API 默认使用此地址；仅环境变量 BASE_RPC_URL 可覆盖。不读取 ~/.master.json base_endpoint 作为主 RPC，避免误配 Alchemy 等第三方限额节点。 */
+export const BEAMIO_BASE_HTTP_RPC_DEFAULT = 'https://base-rpc.conet.network'
+
+export function resolveBeamioBaseHttpRpcUrl(): string {
+	const env = typeof process !== 'undefined' ? process.env?.BASE_RPC_URL?.trim() : ''
+	return env || BEAMIO_BASE_HTTP_RPC_DEFAULT
+}
+
 export const masterSetup: IMasterSetup = require ( setupFile )
 import {reflashData} from './server'
 
@@ -300,8 +309,8 @@ export const oracleBackoud = async (enableOracle = true) => {
 	})
 }
 
-/** Base 主网 RPC：优先使用 ~/.master.json base_endpoint，否则用 https://base-rpc.conet.network */
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
+/** Base 主网 RPC：与 resolveBeamioBaseHttpRpcUrl 一致（默认 CoNET 官方节点） */
+const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 

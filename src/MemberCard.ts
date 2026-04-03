@@ -2,7 +2,7 @@ import { ethers } from 'ethers'
 import { randomUUID } from 'node:crypto'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
-import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6, getOracleRequest } from './util'
+import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6, getOracleRequest, resolveBeamioBaseHttpRpcUrl } from './util'
 import { Request, Response} from 'express'
 import { resolve, join } from 'node:path'
 import fs from 'node:fs'
@@ -122,8 +122,8 @@ const BeamioTaskIndexerAddress = BEAMIO_INDEXER_DIAMOND
 /** BUnitAirdrop consumeFromUser kind：x402 BeamioTransfer 转账手续费，需预先 registerKind(5,"x402Send") */
 const BUNIT_KIND_X402_SEND = 5n
 const DIAMOND = BeamioTaskIndexerAddress
-/** Base 主网 RPC：优先 BASE_RPC_URL 环境变量，否则固定 https://base-rpc.conet.network */
-const BASE_RPC_URL = (typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://base-rpc.conet.network'
+/** Base 主网 RPC：默认 CoNET 官方节点；仅 BASE_RPC_URL 环境变量可覆盖 */
+const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
 /** 禁用 JSON-RPC batch：部分网关返回的 batch 与请求 id 不对齐时 ethers 会抛 BAD_DATA（missing response for request） */
 const JSONRPC_NO_BATCH = { batchMaxCount: 1 }
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)

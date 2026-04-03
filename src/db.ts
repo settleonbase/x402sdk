@@ -5,7 +5,7 @@ import { logger } from "./logger"
 import { inspect } from "util"
 import { Request, Response} from 'express'
 import Colors from 'colors/safe'
-import {masterSetup} from './util'
+import {masterSetup, resolveBeamioBaseHttpRpcUrl} from './util'
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
@@ -20,7 +20,7 @@ import conetPGPABI from './ABI/conetPGP.json'
 
 
 const RPC_URL = "https://mainnet-rpc.conet.network"
-const BASE_RPC_URL = masterSetup?.base_endpoint || 'https://base-rpc.conet.network'
+const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
 
 const providerConet = new ethers.JsonRpcProvider(RPC_URL)
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)

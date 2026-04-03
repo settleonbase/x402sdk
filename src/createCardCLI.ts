@@ -19,7 +19,7 @@ const CURRENCIES = ['CAD', 'USD', 'JPY', 'CNY', 'USDC', 'HKD', 'EUR', 'SGD', 'TW
 
 async function main() {
   if (!Settle_ContractPool?.length) {
-    throw new Error('Settle_ContractPool 为空，请确保 MemberCard 已加载（~/.master.json 中配置 base_endpoint 与 settle_contractAdmin）')
+    throw new Error('Settle_ContractPool 为空，请确保 MemberCard 已加载（~/.master.json 中配置 settle_contractAdmin；Base RPC 默认 https://base-rpc.conet.network，可用 BASE_RPC_URL 覆盖）')
   }
 
   const cardOwnerRaw = process.env.CARD_OWNER?.trim()
