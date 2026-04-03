@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet} from '../db'
+import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, getCardTopupRollup} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -4145,12 +4145,85 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				logger(Colors.yellow(`[cardMetadata] 404: no row in beamio_cards for card_address=${normalizedAddr}`))
 				return res.status(404).json({ error: 'Card not found' })
 			}
+			const topupStats = await getCardTopupRollup(cardAddress)
 			logger(Colors.green(`[cardMetadata] 200: card_owner=${row.cardOwner}`))
 			res.setHeader('Content-Type', 'application/json')
-			res.json({ cardOwner: row.cardOwner, metadata: row.metadata })
+			res.json({
+				cardOwner: row.cardOwner,
+				metadata: row.metadata,
+				topupStats: {
+					totalTopupCount: topupStats.totalTopupCount,
+					totalRepeatTopupCount: topupStats.totalRepeatTopupCount,
+				},
+			})
 		} catch (err: any) {
 			logger(Colors.red('[cardMetadata] 500 error:'), err?.message ?? err)
 			return res.status(500).json({ error: 'Failed to fetch card metadata' })
+		}
+	})
+
+	/**
+	 * GET /api/cardMemberTopups?cardAddress=0x…&mode=events|members|card&limit=&offset=&page=
+	 * card：仅返回该卡 totalTopupCount、totalRepeatTopupCount（全站成功 top-up 次数与 repeat 次数）。
+	 * events / members 含义同前。
+	 * page 为 1 基页码（与 limit 联用：offset=(page-1)*limit）；若同时传 offset，以 offset 为准。
+	 */
+	router.get('/cardMemberTopups', async (req, res) => {
+		const q = req.query as { cardAddress?: string; mode?: string; limit?: string; offset?: string; page?: string }
+		const { cardAddress, mode, limit: limitQ, offset: offsetQ, page: pageQ } = q
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ error: 'Invalid cardAddress: require valid 0x address' })
+		}
+		const m = String(mode || 'events').toLowerCase()
+		const parsedLimit = limitQ != null && String(limitQ).trim() !== '' ? Number(limitQ) : 20
+		const limit = Math.min(Math.max(Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : 20, 1), 2000)
+		let offset = 0
+		if (offsetQ != null && String(offsetQ).trim() !== '') {
+			const o = Number(offsetQ)
+			offset = Number.isFinite(o) && o > 0 ? Math.floor(o) : 0
+		} else if (pageQ != null && String(pageQ).trim() !== '') {
+			const p = Number(pageQ)
+			const page = Number.isFinite(p) && p >= 1 ? Math.floor(p) : 1
+			offset = (page - 1) * limit
+		}
+		const addrNorm = ethers.getAddress(cardAddress)
+		try {
+			if (m === 'card') {
+				const rollup = await getCardTopupRollup(cardAddress)
+				return res.status(200).json({
+					mode: 'card',
+					cardAddress: addrNorm,
+					totalTopupCount: rollup.totalTopupCount,
+					totalRepeatTopupCount: rollup.totalRepeatTopupCount,
+				})
+			}
+			if (m === 'members') {
+				const { items, total } = await listDistinctCardMemberTopupMembers(cardAddress, { limit, offset })
+				const pageNum = limit > 0 ? Math.floor(offset / limit) + 1 : 1
+				return res.status(200).json({
+					mode: 'members',
+					cardAddress: addrNorm,
+					total,
+					limit,
+					offset,
+					page: pageNum,
+					members: items,
+				})
+			}
+			const { items, total } = await listCardMemberTopupEvents(cardAddress, { limit, offset })
+			const pageNum = limit > 0 ? Math.floor(offset / limit) + 1 : 1
+			return res.status(200).json({
+				mode: 'events',
+				cardAddress: addrNorm,
+				total,
+				limit,
+				offset,
+				page: pageNum,
+				events: items,
+			})
+		} catch (err: any) {
+			logger(Colors.red('[cardMemberTopups] error:'), err?.message ?? err)
+			return res.status(500).json({ error: 'Failed to fetch card member top-ups' })
 		}
 	})
 

@@ -1063,6 +1063,364 @@ const BEAMIO_NFT_TIER_METADATA_TABLE = `CREATE TABLE IF NOT EXISTS beamio_nft_ti
 	UNIQUE(card_owner, token_id)
 )`
 
+/** 每次 Base 上成功 top-up（USDC 购点 / POS NFC mint）后写入：会员档 NFT#、EOA、AA，供 biz 按卡查询会员地址（与 indexer 互补）。base_tx_hash 幂等。 */
+const BEAMIO_MEMBER_TOPUP_EVENTS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_member_topup_events (
+	id SERIAL PRIMARY KEY,
+	card_address TEXT NOT NULL,
+	base_tx_hash TEXT NOT NULL,
+	member_eoa TEXT NOT NULL,
+	member_aa TEXT NOT NULL,
+	tier_token_id TEXT NOT NULL,
+	topup_source TEXT NOT NULL,
+	topup_category TEXT,
+	created_at TIMESTAMPTZ DEFAULT NOW(),
+	UNIQUE(base_tx_hash)
+)`
+const BEAMIO_MEMBER_TOPUP_EVENTS_IDX_CARD = `CREATE INDEX IF NOT EXISTS idx_beamio_member_topup_events_card ON beamio_member_topup_events (LOWER(TRIM(card_address)))`
+const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_POINTS = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS points_e6 TEXT`
+const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_USDC = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS usdc_e6 TEXT`
+
+/** 每卡每 EOA 聚合：top-up 次数、累计 points(6) / USDC(6)、仅保留最后一次 top-up 时间戳。 */
+const BEAMIO_CARD_MEMBER_TOPUP_STATS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_card_member_topup_stats (
+	card_address TEXT NOT NULL,
+	member_eoa TEXT NOT NULL,
+	member_aa TEXT NOT NULL,
+	tier_token_id TEXT NOT NULL,
+	topup_count INTEGER NOT NULL DEFAULT 0,
+	topup_points_total_e6 NUMERIC(48,0) NOT NULL DEFAULT 0,
+	topup_usdc_total_e6 NUMERIC(48,0) NOT NULL DEFAULT 0,
+	last_topup_at TIMESTAMPTZ NOT NULL,
+	last_base_tx_hash TEXT,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (card_address, member_eoa)
+)`
+const BEAMIO_CARD_MEMBER_TOPUP_STATS_IDX_CARD = `CREATE INDEX IF NOT EXISTS idx_beamio_card_member_topup_stats_card_last ON beamio_card_member_topup_stats (card_address, last_topup_at DESC)`
+
+/** 每张卡汇总：成功 top-up 总次数、repeat top-up 次数（非新用户：未新发/升级档 NFT，与 MemberCard topupCategory 一致）。 */
+const BEAMIO_CARD_TOPUP_ROLLUPS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_card_topup_rollups (
+	card_address TEXT PRIMARY KEY,
+	total_topup_count BIGINT NOT NULL DEFAULT 0,
+	total_repeat_topup_count BIGINT NOT NULL DEFAULT 0,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`
+
+async function ensureBeamioCardTopupRollupsSchema(db: Client): Promise<void> {
+	await db.query(BEAMIO_CARD_TOPUP_ROLLUPS_TABLE)
+}
+
+/** USDC：`usdcTopupCard`；NFC：`topupCard`。其余（newCard / upgrade / usdcNewCard 等）不计入 repeat。 */
+export function topupCategoryIsRepeatMemberTopup(category: string | null | undefined): boolean {
+	if (category == null) return false
+	const c = String(category).trim()
+	return c === 'usdcTopupCard' || c === 'topupCard'
+}
+
+export type CardTopupRollupRow = {
+	totalTopupCount: number
+	totalRepeatTopupCount: number
+}
+
+export const getCardTopupRollup = async (cardAddress: string): Promise<CardTopupRollupRow> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioCardTopupRollupsSchema(db)
+		const card = ethers.getAddress(cardAddress).toLowerCase()
+		const { rows } = await db.query<{ total_topup_count: string; total_repeat_topup_count: string }>(
+			`
+			SELECT total_topup_count::text, total_repeat_topup_count::text
+			FROM beamio_card_topup_rollups
+			WHERE card_address = $1
+			LIMIT 1
+			`,
+			[card]
+		)
+		if (!rows.length) {
+			return { totalTopupCount: 0, totalRepeatTopupCount: 0 }
+		}
+		return {
+			totalTopupCount: Number(rows[0].total_topup_count) || 0,
+			totalRepeatTopupCount: Number(rows[0].total_repeat_topup_count) || 0,
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[getCardTopupRollup] failed: ${e?.message ?? e}`))
+		return { totalTopupCount: 0, totalRepeatTopupCount: 0 }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+async function ensureBeamioMemberTopupEventsSchema(db: Client): Promise<void> {
+	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_TABLE)
+	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_POINTS)
+	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_USDC)
+	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_IDX_CARD)
+}
+
+async function ensureBeamioCardMemberTopupStatsSchema(db: Client): Promise<void> {
+	await db.query(BEAMIO_CARD_MEMBER_TOPUP_STATS_TABLE)
+	await db.query(BEAMIO_CARD_MEMBER_TOPUP_STATS_IDX_CARD)
+}
+
+function topupAmountToNumericString(v: bigint | string | number | null | undefined): string {
+	if (v == null) return '0'
+	if (typeof v === 'bigint') return v.toString()
+	if (typeof v === 'number')
+		return String(Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0)
+	const s = String(v).trim()
+	if (!s || !/^\d+$/.test(s)) return '0'
+	return s
+}
+
+export type MemberTopupEventRow = {
+	memberEoa: string
+	memberAa: string
+	tierTokenId: string
+	baseTxHash: string
+	topupSource: string
+	topupCategory: string | null
+	createdAt: string
+	/** 该笔 top-up 入账 points（6 位小数整数），事件表审计用 */
+	pointsE6?: string
+	/** 该笔对应 USDC 数量（6 位小数整数） */
+	usdcE6?: string
+}
+
+/** 每用户聚合（按卡 + EOA）：次数、累计额、最后一次 top-up 时间 */
+export type MemberTopupMemberAggRow = {
+	memberEoa: string
+	memberAa: string
+	tierTokenId: string
+	topupCount: number
+	topupPointsTotalE6: string
+	topupUsdcTotalE6: string
+	lastTopupAt: string
+	lastBaseTxHash: string | null
+}
+
+export type MemberTopupPage<T> = { items: T[]; total: number }
+
+/** Master：Base top-up 成功后写入事件（幂等 base_tx_hash）；仅在新插入时累加 beamio_card_member_topup_stats。 */
+export const insertMemberTopupEvent = async (params: {
+	cardAddress: string
+	baseTxHash: string
+	memberEoa: string
+	memberAa: string
+	tierTokenId: string
+	topupSource: 'usdcPurchasingCard' | 'androidNfcTopup'
+	topupCategory?: string | null
+	/** 本笔 top-up 入账 points（6 位精度整数） */
+	pointsE6?: bigint | string | number
+	/** 本笔对应 USDC（6 位精度整数） */
+	usdcE6?: bigint | string | number
+}): Promise<void> => {
+	const db = new Client({ connectionString: DB_URL })
+	const pointsStr = topupAmountToNumericString(params.pointsE6)
+	const usdcStr = topupAmountToNumericString(params.usdcE6)
+	try {
+		await db.connect()
+		await ensureBeamioMemberTopupEventsSchema(db)
+		await ensureBeamioCardMemberTopupStatsSchema(db)
+		await ensureBeamioCardTopupRollupsSchema(db)
+		const card = ethers.getAddress(params.cardAddress).toLowerCase()
+		const hash = String(params.baseTxHash).toLowerCase()
+		const eoa = ethers.getAddress(params.memberEoa).toLowerCase()
+		const aa = ethers.isAddress(params.memberAa) ? ethers.getAddress(params.memberAa).toLowerCase() : ethers.ZeroAddress.toLowerCase()
+		const repeatInc: 0 | 1 = topupCategoryIsRepeatMemberTopup(params.topupCategory) ? 1 : 0
+		await db.query('BEGIN')
+		try {
+			const ins = await db.query<{ id: number }>(
+				`
+				INSERT INTO beamio_member_topup_events (card_address, base_tx_hash, member_eoa, member_aa, tier_token_id, topup_source, topup_category, points_e6, usdc_e6)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				ON CONFLICT (base_tx_hash) DO NOTHING
+				RETURNING id
+				`,
+				[card, hash, eoa, aa, String(params.tierTokenId), params.topupSource, params.topupCategory ?? null, pointsStr, usdcStr]
+			)
+			if (!ins.rows?.length) {
+				await db.query('COMMIT')
+				return
+			}
+			await db.query(
+				`
+				INSERT INTO beamio_card_member_topup_stats (
+					card_address, member_eoa, member_aa, tier_token_id,
+					topup_count, topup_points_total_e6, topup_usdc_total_e6,
+					last_topup_at, last_base_tx_hash
+				) VALUES ($1, $2, $3, $4, 1, $5::numeric, $6::numeric, NOW(), $7)
+				ON CONFLICT (card_address, member_eoa) DO UPDATE SET
+					member_aa = EXCLUDED.member_aa,
+					tier_token_id = EXCLUDED.tier_token_id,
+					topup_count = beamio_card_member_topup_stats.topup_count + 1,
+					topup_points_total_e6 = beamio_card_member_topup_stats.topup_points_total_e6 + EXCLUDED.topup_points_total_e6,
+					topup_usdc_total_e6 = beamio_card_member_topup_stats.topup_usdc_total_e6 + EXCLUDED.topup_usdc_total_e6,
+					last_topup_at = EXCLUDED.last_topup_at,
+					last_base_tx_hash = EXCLUDED.last_base_tx_hash,
+					updated_at = NOW()
+				`,
+				[card, eoa, aa, String(params.tierTokenId), pointsStr, usdcStr, hash]
+			)
+			await db.query(
+				`
+				INSERT INTO beamio_card_topup_rollups (card_address, total_topup_count, total_repeat_topup_count)
+				VALUES ($1, 1, $2)
+				ON CONFLICT (card_address) DO UPDATE SET
+					total_topup_count = beamio_card_topup_rollups.total_topup_count + 1,
+					total_repeat_topup_count = beamio_card_topup_rollups.total_repeat_topup_count + EXCLUDED.total_repeat_topup_count,
+					updated_at = NOW()
+				`,
+				[card, repeatInc]
+			)
+			await db.query('COMMIT')
+			logger(Colors.green(`[insertMemberTopupEvent] card=${card} tx=${hash.slice(0, 12)}… eoa=${eoa.slice(0, 10)}… tier=${params.tierTokenId} pts+${pointsStr} usdc+${usdcStr} repeat+${repeatInc}`))
+		} catch (inner: any) {
+			await db.query('ROLLBACK').catch(() => {})
+			throw inner
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[insertMemberTopupEvent] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+const mapMemberTopupRow = (r: {
+	member_eoa: string
+	member_aa: string
+	tier_token_id: string
+	base_tx_hash: string
+	topup_source: string
+	topup_category: string | null
+	created_at: Date
+	points_e6?: string | null
+	usdc_e6?: string | null
+}): MemberTopupEventRow => ({
+	memberEoa: r.member_eoa,
+	memberAa: r.member_aa,
+	tierTokenId: r.tier_token_id,
+	baseTxHash: r.base_tx_hash,
+	topupSource: r.topup_source,
+	topupCategory: r.topup_category,
+	createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+	...(r.points_e6 != null && r.points_e6 !== '' ? { pointsE6: r.points_e6 } : {}),
+	...(r.usdc_e6 != null && r.usdc_e6 !== '' ? { usdcE6: r.usdc_e6 } : {}),
+})
+
+const mapMemberTopupStatsRow = (r: {
+	member_eoa: string
+	member_aa: string
+	tier_token_id: string
+	topup_count: string | number
+	topup_points_total_e6: string
+	topup_usdc_total_e6: string
+	last_topup_at: Date
+	last_base_tx_hash: string | null
+}): MemberTopupMemberAggRow => ({
+	memberEoa: r.member_eoa,
+	memberAa: r.member_aa,
+	tierTokenId: r.tier_token_id,
+	topupCount: typeof r.topup_count === 'number' ? r.topup_count : Number(r.topup_count) || 0,
+	topupPointsTotalE6: String(r.topup_points_total_e6 ?? '0'),
+	topupUsdcTotalE6: String(r.topup_usdc_total_e6 ?? '0'),
+	lastTopupAt: r.last_topup_at instanceof Date ? r.last_topup_at.toISOString() : String(r.last_topup_at),
+	lastBaseTxHash: r.last_base_tx_hash,
+})
+
+/** Cluster：按卡分页拉取 top-up 事件，按登记时间 created_at 倒序。total 为该卡事件总行数。limit 默认 20，最大 2000。 */
+export const listCardMemberTopupEvents = async (
+	cardAddress: string,
+	opts?: { limit?: number; offset?: number }
+): Promise<MemberTopupPage<MemberTopupEventRow>> => {
+	const db = new Client({ connectionString: DB_URL })
+	const limit = Math.min(Math.max(Number(opts?.limit) || 20, 1), 2000)
+	const offset = Math.max(Number(opts?.offset) || 0, 0)
+	try {
+		await db.connect()
+		await ensureBeamioMemberTopupEventsSchema(db)
+		const card = ethers.getAddress(cardAddress).toLowerCase()
+		const countRes = await db.query<{ c: string }>(
+			`SELECT COUNT(*)::text AS c FROM beamio_member_topup_events WHERE LOWER(TRIM(card_address)) = $1`,
+			[card]
+		)
+		const total = Number(countRes.rows[0]?.c ?? 0) || 0
+		const { rows } = await db.query<{
+			member_eoa: string
+			member_aa: string
+			tier_token_id: string
+			base_tx_hash: string
+			topup_source: string
+			topup_category: string | null
+			created_at: Date
+			points_e6: string | null
+			usdc_e6: string | null
+		}>(
+			`
+			SELECT member_eoa, member_aa, tier_token_id, base_tx_hash, topup_source, topup_category, created_at, points_e6, usdc_e6
+			FROM beamio_member_topup_events
+			WHERE LOWER(TRIM(card_address)) = $1
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2 OFFSET $3
+			`,
+			[card, limit, offset]
+		)
+		return { items: rows.map(mapMemberTopupRow), total }
+	} catch (e: any) {
+		logger(Colors.yellow(`[listCardMemberTopupEvents] failed: ${e?.message ?? e}`))
+		return { items: [], total: 0 }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/**
+ * Cluster：按卡读取 beamio_card_member_topup_stats（每用户 top-up 次数、累计 points/USDC、仅最后一次时间戳），按 last_topup_at 倒序分页。
+ * total 为该卡聚合行数（会员地址数）。
+ */
+export const listDistinctCardMemberTopupMembers = async (
+	cardAddress: string,
+	opts?: { limit?: number; offset?: number }
+): Promise<MemberTopupPage<MemberTopupMemberAggRow>> => {
+	const db = new Client({ connectionString: DB_URL })
+	const limit = Math.min(Math.max(Number(opts?.limit) || 20, 1), 2000)
+	const offset = Math.max(Number(opts?.offset) || 0, 0)
+	try {
+		await db.connect()
+		await ensureBeamioCardMemberTopupStatsSchema(db)
+		const card = ethers.getAddress(cardAddress).toLowerCase()
+		const countRes = await db.query<{ c: string }>(
+			`SELECT COUNT(*)::text AS c FROM beamio_card_member_topup_stats WHERE card_address = $1`,
+			[card]
+		)
+		const total = Number(countRes.rows[0]?.c ?? 0) || 0
+		const { rows } = await db.query<{
+			member_eoa: string
+			member_aa: string
+			tier_token_id: string
+			topup_count: string
+			topup_points_total_e6: string
+			topup_usdc_total_e6: string
+			last_topup_at: Date
+			last_base_tx_hash: string | null
+		}>(
+			`
+			SELECT member_eoa, member_aa, tier_token_id, topup_count, topup_points_total_e6, topup_usdc_total_e6, last_topup_at, last_base_tx_hash
+			FROM beamio_card_member_topup_stats
+			WHERE card_address = $1
+			ORDER BY last_topup_at DESC, member_eoa ASC
+			LIMIT $2 OFFSET $3
+			`,
+			[card, limit, offset]
+		)
+		return { items: rows.map(mapMemberTopupStatsRow), total }
+	} catch (e: any) {
+		logger(Colors.yellow(`[listDistinctCardMemberTopupMembers] failed: ${e?.message ?? e}`))
+		return { items: [], total: 0 }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** nfc_cards 表：NTAG 424 DNA 登记卡。uid 为 NFC 卡 UID（兼容旧数据）；tag_id 为 SUN 解密得到的 TagID（16 hex），用于合法性校验与查卡。private_key 为关联私钥（仅服务端使用，不返回客户端） */
 const NFC_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS nfc_cards (
 	id SERIAL PRIMARY KEY,

@@ -89,6 +89,7 @@ import {
 	getCardByAddress,
 	upsertNftTierMetadata,
 	maybeEnqueueNfcCashTreeBeamioTag,
+	insertMemberTopupEvent,
 	fetchActiveNfcLinkAppSessionForPaymentBlock,
 	listNfcLinkAppSessionsDueForAutoCancel,
 	upsertActiveNfcLinkAppSession,
@@ -5102,6 +5103,23 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				const topupCategoryRaw = upgradedByMint
 					? (beforePoint6 > 0n ? 'upgradeNewCard' : 'newCard')
 					: 'topupCard'
+				let memberAaForDb = ''
+				try {
+					const cardAaFactoryAddrNfc = await getCardAaFactoryAddress(obj.cardAddr)
+					const configAaAddrNfc = await SC.aaAccountFactoryPaymaster.getAddress()
+					const aaFactoryContractNfc =
+						cardAaFactoryAddrNfc.toLowerCase() === configAaAddrNfc.toLowerCase()
+							? SC.aaAccountFactoryPaymaster
+							: new ethers.Contract(
+									cardAaFactoryAddrNfc,
+									BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
+									SC.walletBase
+							  )
+					const { accountAddress: aaNfc } = await DeployingSmartAccount(recipientEOA, aaFactoryContractNfc)
+					memberAaForDb = aaNfc || ''
+				} catch (aaDbErr: any) {
+					logger(Colors.yellow(`[executeForAdminPostBaseProcess] AA for member topup DB: ${aaDbErr?.message ?? aaDbErr}`))
+				}
 				const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
 				let finalRequestAmountUSDC6 = 0n
 				try {
@@ -5111,6 +5129,19 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					finalRequestAmountUSDC6 = cardCurrencyFiat === 4 ? mintParsed.points6 : 0n
 				}
 				if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
+				void insertMemberTopupEvent({
+					cardAddress: obj.cardAddr,
+					baseTxHash: tx.hash,
+					memberEoa: recipientEOA,
+					memberAa: memberAaForDb || ethers.ZeroAddress,
+					tierTokenId: tokenIdForRoute.toString(),
+					topupSource: 'androidNfcTopup',
+					topupCategory: topupCategoryRaw,
+					pointsE6: mintParsed.points6,
+					usdcE6: finalRequestAmountUSDC6,
+				}).catch((dbErr: any) =>
+					logger(Colors.yellow(`[executeForAdminPostBaseProcess] insertMemberTopupEvent: ${dbErr?.message ?? dbErr}`))
+				)
 				let cardDisplayName = ''
 				try {
 					const cardMeta = await getCardByAddress(obj.cardAddr)
@@ -5706,6 +5737,22 @@ export const purchasingCardProcess = async () => {
 		input.fees.bServiceUSDC6 = bServiceUSDC6UsdcTopup
 		input.fees.bServiceUnits6 = bServiceUnits6UsdcTopup
 		input.fees.feePayer = feePayerCardOwnerUsdc
+
+		if (basePurchTxOk) {
+			void insertMemberTopupEvent({
+				cardAddress,
+				baseTxHash: tx.hash,
+				memberEoa: payerAddr,
+				memberAa: accountAddress,
+				tierTokenId: tokenIdForRoute.toString(),
+				topupSource: 'usdcPurchasingCard',
+				topupCategory: topupCategoryRaw,
+				pointsE6: currentTopupPoint6,
+				usdcE6: finalRequestAmountUSDC6,
+			}).catch((dbErr: any) =>
+				logger(Colors.yellow(`[purchasingCardProcess] insertMemberTopupEvent: ${dbErr?.message ?? dbErr}`))
+			)
+		}
 
 		logger(Colors.green(`✅ purchasingCardProcess note: ${payMe}`))
 
