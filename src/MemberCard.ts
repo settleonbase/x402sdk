@@ -8098,6 +8098,7 @@ export async function buildNfcLinkAppRedeemBundleFromChain(
 	return { tokenIds: [0n], amounts: [bal0] }
 }
 
+/** Link App：可选 `cardAddress` 指定读 token #0 / 迁移来源的 BeamioUserCard；缺省为 SDK 默认基础设施卡。允许任意已部署卡地址（如终端登记的商户基础设施卡）。 */
 function resolveNfcLinkAppCardAddress(body: { cardAddress?: string }): { ok: true; address: string } | { ok: false; error: string } {
 	const infra = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
 	const raw = body.cardAddress != null ? String(body.cardAddress).trim() : ''
@@ -8107,11 +8108,7 @@ function resolveNfcLinkAppCardAddress(body: { cardAddress?: string }): { ok: tru
 	if (!ethers.isAddress(raw)) {
 		return { ok: false, error: 'Invalid cardAddress.' }
 	}
-	const ca = ethers.getAddress(raw)
-	if (ca !== infra) {
-		return { ok: false, error: 'cardAddress must be the Beamio infrastructure user card.' }
-	}
-	return { ok: true, address: ca }
+	return { ok: true, address: ethers.getAddress(raw) }
 }
 
 /**

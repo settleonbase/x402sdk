@@ -1385,14 +1385,8 @@ const routing = ( router: Router ) => {
 		const cTrim = body.c?.trim() ?? ''
 		const mTrim = body.m?.trim() ?? ''
 		const cardRaw = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : ''
-		if (cardRaw) {
-			if (!ethers.isAddress(cardRaw)) {
-				return res.status(400).json({ success: false, error: 'Invalid cardAddress.' }).end()
-			}
-			const ca = ethers.getAddress(cardRaw)
-			if (ca !== ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)) {
-				return res.status(400).json({ success: false, error: 'cardAddress must be the Beamio infrastructure user card.' }).end()
-			}
+		if (cardRaw && !ethers.isAddress(cardRaw)) {
+			return res.status(400).json({ success: false, error: 'Invalid cardAddress.' }).end()
 		}
 		if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
 			return res.status(400).json({ success: false, error: 'Invalid uid' }).end()
