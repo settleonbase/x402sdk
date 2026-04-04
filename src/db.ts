@@ -1373,6 +1373,55 @@ export const listCardMemberTopupEvents = async (
 	}
 }
 
+/** POS Balance Detail：该会员 EOA 在此商户卡上 DB 最新一条 top-up（与 [insertMemberTopupEvent] 同源）。无记录返回 null。 */
+export type MemberLastTopupOnCardRow = {
+	lastTopupAt: string
+	usdcE6: string | null
+	pointsE6: string | null
+	baseTxHash: string | null
+}
+
+export const getMemberLastTopupOnCard = async (
+	cardAddress: string,
+	memberEoa: string
+): Promise<MemberLastTopupOnCardRow | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioMemberTopupEventsSchema(db)
+		const card = ethers.getAddress(cardAddress).toLowerCase()
+		const eoa = ethers.getAddress(memberEoa).toLowerCase()
+		const { rows } = await db.query<{
+			created_at: Date
+			usdc_e6: string | null
+			points_e6: string | null
+			base_tx_hash: string
+		}>(
+			`
+			SELECT created_at, usdc_e6, points_e6, base_tx_hash
+			FROM beamio_member_topup_events
+			WHERE LOWER(TRIM(card_address)) = $1 AND LOWER(TRIM(member_eoa)) = $2
+			ORDER BY created_at DESC, id DESC
+			LIMIT 1
+			`,
+			[card, eoa]
+		)
+		if (!rows.length) return null
+		const r = rows[0]
+		return {
+			lastTopupAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+			usdcE6: r.usdc_e6 != null && String(r.usdc_e6).trim() !== '' ? String(r.usdc_e6).trim() : null,
+			pointsE6: r.points_e6 != null && String(r.points_e6).trim() !== '' ? String(r.points_e6).trim() : null,
+			baseTxHash: r.base_tx_hash ?? null,
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[getMemberLastTopupOnCard] failed: ${e?.message ?? e}`))
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /**
  * Cluster：按卡读取 beamio_card_member_topup_stats（每用户 top-up 次数、累计 points/USDC、仅最后一次时间戳），按 last_topup_at 倒序分页。
  * total 为该卡聚合行数（会员地址数）。

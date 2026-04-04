@@ -9,6 +9,7 @@ import {
 	getNftTierMetadataByCardAndToken,
 	getNftTierMetadataByOwnerAndToken,
 	beamio_ContractPool,
+	getMemberLastTopupOnCard,
 	maybeEnqueueNfcCashTreeBeamioTag,
 	maybeEnqueueNfcVerraBeamioTag,
 } from '../db'
@@ -83,6 +84,13 @@ export type FetchUIDAssetsResult = {
 		primaryMemberTokenId?: string
 		nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }>
 	}>
+	/**
+	 * 本次查询所用基础设施卡（`merchantInfraCard` / `infrastructureCardAddress` 或默认常量）上，该会员 EOA 在 DB 中的最近一笔 top-up。
+	 * 与 `getMemberLastTopupOnCard` / `insertMemberTopupEvent` 一致；无记录时字段省略。
+	 */
+	posLastTopupAt?: string
+	posLastTopupUsdcE6?: string
+	posLastTopupPointsE6?: string
 }
 
 /** POS / 客户端可选：指定终端登记的基础设施 BeamioUserCard 地址；若与默认常量不一致则查询该合约。 */
@@ -362,6 +370,22 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	const cards = cardsStaged.map((s) => s.row)
 	const cardsFiltered = cards.filter((c) => !DEPRECATED_INFRA_CARDS.has(c.cardAddress.toLowerCase()))
 	const beamioTag = await fetchBeamioTagForEoa(eoaAddr)
+	const infraForPos = resolveInfrastructureCardAddress(opts?.infrastructureCardAddress)
+	let posTopFields: {
+		posLastTopupAt?: string
+		posLastTopupUsdcE6?: string
+		posLastTopupPointsE6?: string
+	} = {}
+	try {
+		const snap = await getMemberLastTopupOnCard(infraForPos, eoaAddr)
+		if (snap) {
+			posTopFields.posLastTopupAt = snap.lastTopupAt
+			if (snap.usdcE6 != null) posTopFields.posLastTopupUsdcE6 = snap.usdcE6
+			if (snap.pointsE6 != null) posTopFields.posLastTopupPointsE6 = snap.pointsE6
+		}
+	} catch {
+		/* DB 失败不阻塞资产查询 */
+	}
 	return {
 		ok: true,
 		address: eoaAddr,
@@ -369,6 +393,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 		...(beamioTag != null && beamioTag !== '' ? { beamioTag } : {}),
 		usdcBalance,
 		cards: cardsFiltered,
+		...posTopFields,
 	}
 }
 
