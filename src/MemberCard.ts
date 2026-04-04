@@ -9428,6 +9428,22 @@ export const cardRedeemAdminPreCheck = async (body: {
 		if (!active) {
 			return { success: false, error: 'Redeem admin code is invalid or expired' }
 		}
+		const cardNorm = ethers.getAddress(cardAddress)
+		const toAddr = ethers.getAddress(to)
+		const codeAtTo = await providerBaseBackup.getCode(toAddr)
+		let posBindEoa: string
+		if (!codeAtTo || codeAtTo === '0x' || codeAtTo.length <= 2) {
+			posBindEoa = toAddr
+		} else {
+			const aa = new ethers.Contract(toAddr, ['function owner() view returns (address)'], providerBaseBackup)
+			const ow = (await aa.owner()) as string
+			if (!ow || ow === ethers.ZeroAddress || !ethers.isAddress(ow)) {
+				return { success: false, error: 'Invalid to: cannot resolve owner EOA for terminal binding check' }
+			}
+			posBindEoa = ethers.getAddress(ow)
+		}
+		const bindCheck = await assertPosEoaAvailableForCardBinding(posBindEoa, cardNorm)
+		if (!bindCheck.ok) return { success: false, error: bindCheck.error }
 		return { success: true }
 	} catch (e: any) {
 		const msg = e?.message ?? e?.shortMessage ?? String(e)
@@ -9479,6 +9495,11 @@ export const cardRedeemAdminProcess = async () => {
 		const tx = await factory.redeemAdminForUser(obj.cardAddress, obj.redeemCode, toForRedeem)
 		await tx.wait()
 		const txHash = tx.hash
+		void upsertPosTerminalAdminCardBinding({
+			posEoa: ethers.getAddress(obj.to),
+			cardAddress: ethers.getAddress(obj.cardAddress),
+			txHash,
+		}).catch((e: any) => logger(Colors.yellow(`[cardRedeemAdminProcess] upsertPosTerminalAdminCardBinding: ${e?.message ?? e}`)))
 		logger(Colors.green(`✅ cardRedeemAdminProcess card=${obj.cardAddress} to(EOA)=${obj.to} tx=${txHash}`))
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, tx: txHash }).end()
 	} catch (e: any) {

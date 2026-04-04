@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, getCardTopupRollup} from '../db'
+import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, getCardTopupRollup} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -1704,10 +1704,16 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce/adminSignature' })
 		}
 		try {
-			const ADMIN_MANAGER_SELECTOR = '0x' + ethers.id('adminManager(address,bool,uint256,string)').slice(2, 10)
+			const adminManagerIface4 = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
+			const adminManagerIface5 = new ethers.Interface([
+				'function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)',
+			])
+			const adminManagerSel4 = (adminManagerIface4.getFunction('adminManager')?.selector ?? '').toLowerCase()
+			const adminManagerSel5 = (adminManagerIface5.getFunction('adminManager')?.selector ?? '').toLowerCase()
+			const dataSel = data.slice(0, 10).toLowerCase()
 			const isMint = data.startsWith(MINT_POINTS_BY_ADMIN_SELECTOR)
 			const isBurn = data.startsWith(BURN_POINTS_BY_ADMIN_SELECTOR)
-			const isAdminManager = data.startsWith(ADMIN_MANAGER_SELECTOR)
+			const isAdminManager = dataSel === adminManagerSel4 || dataSel === adminManagerSel5
 			if (!isMint && !isBurn && !isAdminManager) {
 				return res.status(400).json({ success: false, error: 'executeForAdmin only supports mintPointsByAdmin, burnPointsByAdmin, or adminManager' })
 			}
@@ -1761,6 +1767,36 @@ const routing = ( router: Router ) => {
 					cardOwner: cardOwner || undefined,
 					cardAddr: cardAddress
 				})
+			}
+			/** adminManager(add) 经 nfcTopup 时须与 cardAddAdminByAdmin 一致：禁止同一终端 EOA 已绑定其他商户卡后再加为 admin（此前仅此路径未做 DB 预检）。 */
+			if (isAdminManager) {
+				const iface = dataSel === adminManagerSel5 ? adminManagerIface5 : adminManagerIface4
+				try {
+					const decoded = iface.parseTransaction({ data })
+					if (decoded?.name === 'adminManager' && decoded.args[1] === true) {
+						const toRaw = decoded.args[0] as string
+						if (!toRaw || !ethers.isAddress(toRaw)) {
+							return res.status(400).json({ success: false, error: 'Invalid adminManager to address' }).end()
+						}
+						const toCandidate = ethers.getAddress(toRaw)
+						const codeAtTo = await providerBase.getCode(toCandidate)
+						if (codeAtTo && codeAtTo !== '0x' && codeAtTo.length > 2) {
+							return res
+								.status(400)
+								.json({ success: false, error: 'Adding AA as admin via nfcTopup is not allowed. Encode adminManager with the terminal EOA as to.' })
+								.end()
+						}
+						const bindCheck = await assertPosEoaAvailableForCardBinding(toCandidate, cardAddress)
+						if (!bindCheck.ok) {
+							return res.status(400).json({ success: false, error: bindCheck.error }).end()
+						}
+					}
+				} catch (e: any) {
+					return res
+						.status(400)
+						.json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid adminManager calldata' })
+						.end()
+				}
 			}
 			let cardOwnerForLog = ''
 			try {
