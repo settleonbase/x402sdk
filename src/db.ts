@@ -1103,9 +1103,15 @@ const BEAMIO_CARD_TOPUP_ROLLUPS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_card_
 	total_repeat_topup_count BIGINT NOT NULL DEFAULT 0,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )`
-
 async function ensureBeamioCardTopupRollupsSchema(db: Client): Promise<void> {
 	await db.query(BEAMIO_CARD_TOPUP_ROLLUPS_TABLE)
+	/** Top-up 前无有效会员 NFT 时按渠道累计（近场 NFC / App USDC）。 */
+	await db.query(
+		`ALTER TABLE beamio_card_topup_rollups ADD COLUMN IF NOT EXISTS nfc_activation_count BIGINT NOT NULL DEFAULT 0`
+	)
+	await db.query(
+		`ALTER TABLE beamio_card_topup_rollups ADD COLUMN IF NOT EXISTS app_activation_count BIGINT NOT NULL DEFAULT 0`
+	)
 }
 
 /** USDC：`usdcTopupCard`；NFC：`topupCard`。其余（newCard / upgrade / usdcNewCard 等）不计入 repeat。 */
@@ -1118,6 +1124,10 @@ export function topupCategoryIsRepeatMemberTopup(category: string | null | undef
 export type CardTopupRollupRow = {
 	totalTopupCount: number
 	totalRepeatTopupCount: number
+	/** Top-up 成功且当时用户在该卡无有效会员 NFT：近场 NFC 渠道累计 */
+	nfcActivationCount: number
+	/** 同上：App USDC 购点渠道累计 */
+	appActivationCount: number
 }
 
 export const getCardTopupRollup = async (cardAddress: string): Promise<CardTopupRollupRow> => {
@@ -1126,9 +1136,18 @@ export const getCardTopupRollup = async (cardAddress: string): Promise<CardTopup
 		await db.connect()
 		await ensureBeamioCardTopupRollupsSchema(db)
 		const card = ethers.getAddress(cardAddress).toLowerCase()
-		const { rows } = await db.query<{ total_topup_count: string; total_repeat_topup_count: string }>(
+		const { rows } = await db.query<{
+			total_topup_count: string
+			total_repeat_topup_count: string
+			nfc_activation_count: string
+			app_activation_count: string
+		}>(
 			`
-			SELECT total_topup_count::text, total_repeat_topup_count::text
+			SELECT
+				total_topup_count::text,
+				total_repeat_topup_count::text,
+				COALESCE(nfc_activation_count, 0)::text AS nfc_activation_count,
+				COALESCE(app_activation_count, 0)::text AS app_activation_count
 			FROM beamio_card_topup_rollups
 			WHERE card_address = $1
 			LIMIT 1
@@ -1136,15 +1155,27 @@ export const getCardTopupRollup = async (cardAddress: string): Promise<CardTopup
 			[card]
 		)
 		if (!rows.length) {
-			return { totalTopupCount: 0, totalRepeatTopupCount: 0 }
+			return {
+				totalTopupCount: 0,
+				totalRepeatTopupCount: 0,
+				nfcActivationCount: 0,
+				appActivationCount: 0,
+			}
 		}
 		return {
 			totalTopupCount: Number(rows[0].total_topup_count) || 0,
 			totalRepeatTopupCount: Number(rows[0].total_repeat_topup_count) || 0,
+			nfcActivationCount: Number(rows[0].nfc_activation_count) || 0,
+			appActivationCount: Number(rows[0].app_activation_count) || 0,
 		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[getCardTopupRollup] failed: ${e?.message ?? e}`))
-		return { totalTopupCount: 0, totalRepeatTopupCount: 0 }
+		return {
+			totalTopupCount: 0,
+			totalRepeatTopupCount: 0,
+			nfcActivationCount: 0,
+			appActivationCount: 0,
+		}
 	} finally {
 		await db.end().catch(() => {})
 	}
@@ -1213,6 +1244,12 @@ export const insertMemberTopupEvent = async (params: {
 	pointsE6?: bigint | string | number
 	/** 本笔对应 USDC（6 位精度整数） */
 	usdcE6?: bigint | string | number
+	/**
+	 * Top-up 前该用户在该卡上无有效会员 NFT（与 usdcTopup hasMembership 语义一致）时由 MemberCard 置 true，
+	 * 在幂等新插入事件时给对应渠道 activation +1。
+	 */
+	countAsNfcActivation?: boolean
+	countAsAppActivation?: boolean
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
 	const pointsStr = topupAmountToNumericString(params.pointsE6)
@@ -1227,6 +1264,10 @@ export const insertMemberTopupEvent = async (params: {
 		const eoa = ethers.getAddress(params.memberEoa).toLowerCase()
 		const aa = ethers.isAddress(params.memberAa) ? ethers.getAddress(params.memberAa).toLowerCase() : ethers.ZeroAddress.toLowerCase()
 		const repeatInc: 0 | 1 = topupCategoryIsRepeatMemberTopup(params.topupCategory) ? 1 : 0
+		const nfcActInc: 0 | 1 =
+			params.topupSource === 'androidNfcTopup' && params.countAsNfcActivation === true ? 1 : 0
+		const appActInc: 0 | 1 =
+			params.topupSource === 'usdcPurchasingCard' && params.countAsAppActivation === true ? 1 : 0
 		await db.query('BEGIN')
 		try {
 			const ins = await db.query<{ id: number }>(
@@ -1263,17 +1304,26 @@ export const insertMemberTopupEvent = async (params: {
 			)
 			await db.query(
 				`
-				INSERT INTO beamio_card_topup_rollups (card_address, total_topup_count, total_repeat_topup_count)
-				VALUES ($1, 1, $2)
+				INSERT INTO beamio_card_topup_rollups (
+					card_address, total_topup_count, total_repeat_topup_count,
+					nfc_activation_count, app_activation_count
+				)
+				VALUES ($1, 1, $2, $3, $4)
 				ON CONFLICT (card_address) DO UPDATE SET
 					total_topup_count = beamio_card_topup_rollups.total_topup_count + 1,
 					total_repeat_topup_count = beamio_card_topup_rollups.total_repeat_topup_count + EXCLUDED.total_repeat_topup_count,
+					nfc_activation_count = beamio_card_topup_rollups.nfc_activation_count + EXCLUDED.nfc_activation_count,
+					app_activation_count = beamio_card_topup_rollups.app_activation_count + EXCLUDED.app_activation_count,
 					updated_at = NOW()
 				`,
-				[card, repeatInc]
+				[card, repeatInc, nfcActInc, appActInc]
 			)
 			await db.query('COMMIT')
-			logger(Colors.green(`[insertMemberTopupEvent] card=${card} tx=${hash.slice(0, 12)}… eoa=${eoa.slice(0, 10)}… tier=${params.tierTokenId} pts+${pointsStr} usdc+${usdcStr} repeat+${repeatInc}`))
+			logger(
+				Colors.green(
+					`[insertMemberTopupEvent] card=${card} tx=${hash.slice(0, 12)}… eoa=${eoa.slice(0, 10)}… tier=${params.tierTokenId} pts+${pointsStr} usdc+${usdcStr} repeat+${repeatInc} nfcAct+${nfcActInc} appAct+${appActInc}`
+				)
+			)
 		} catch (inner: any) {
 			await db.query('ROLLBACK').catch(() => {})
 			throw inner
@@ -1464,6 +1514,124 @@ export const listDistinctCardMemberTopupMembers = async (
 		return { items: rows.map(mapMemberTopupStatsRow), total }
 	} catch (e: any) {
 		logger(Colors.yellow(`[listDistinctCardMemberTopupMembers] failed: ${e?.message ?? e}`))
+		return { items: [], total: 0 }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 每卡会员目录：`beamio_card_member_topup_stats` + `beamio_member_topup_events` 推断 NFC / App 渠道 */
+export type CardMemberDirectoryRow = MemberTopupMemberAggRow & {
+	usedNfc: boolean
+	usedApp: boolean
+	firstTopupSource: string | null
+	firstTopupAt: string
+}
+
+const mapCardMemberDirectoryRow = (
+	r: {
+		member_eoa: string
+		member_aa: string
+		tier_token_id: string
+		topup_count: string
+		topup_points_total_e6: string
+		topup_usdc_total_e6: string
+		last_topup_at: Date
+		last_base_tx_hash: string | null
+		used_nfc: boolean
+		used_app: boolean
+		first_topup_source: string | null
+		first_topup_at: Date | null
+	}
+): CardMemberDirectoryRow => ({
+	...mapMemberTopupStatsRow(r),
+	usedNfc: Boolean(r.used_nfc),
+	usedApp: Boolean(r.used_app),
+	firstTopupSource: r.first_topup_source != null && String(r.first_topup_source).trim() !== '' ? String(r.first_topup_source).trim() : null,
+	firstTopupAt:
+		r.first_topup_at instanceof Date
+			? r.first_topup_at.toISOString()
+			: r.first_topup_at != null
+				? String(r.first_topup_at)
+				: '',
+})
+
+/** Cluster：同 `listDistinctCardMemberTopupMembers` 排序与分页，附加每笔会员在该卡上的 NFC/App top-up 轨迹 */
+export const listCardMemberDirectory = async (
+	cardAddress: string,
+	opts?: { limit?: number; offset?: number }
+): Promise<MemberTopupPage<CardMemberDirectoryRow>> => {
+	const db = new Client({ connectionString: DB_URL })
+	const limit = Math.min(Math.max(Number(opts?.limit) || 20, 1), 2000)
+	const offset = Math.max(Number(opts?.offset) || 0, 0)
+	try {
+		await db.connect()
+		await ensureBeamioCardMemberTopupStatsSchema(db)
+		await ensureBeamioMemberTopupEventsSchema(db)
+		const card = ethers.getAddress(cardAddress).toLowerCase()
+		const countRes = await db.query<{ c: string }>(
+			`SELECT COUNT(*)::text AS c FROM beamio_card_member_topup_stats WHERE card_address = $1`,
+			[card]
+		)
+		const total = Number(countRes.rows[0]?.c ?? 0) || 0
+		const { rows } = await db.query<{
+			member_eoa: string
+			member_aa: string
+			tier_token_id: string
+			topup_count: string
+			topup_points_total_e6: string
+			topup_usdc_total_e6: string
+			last_topup_at: Date
+			last_base_tx_hash: string | null
+			used_nfc: boolean
+			used_app: boolean
+			first_topup_source: string | null
+			first_topup_at: Date | null
+		}>(
+			`
+			WITH ch AS (
+				SELECT
+					LOWER(TRIM(member_eoa)) AS eoa,
+					BOOL_OR(topup_source = 'androidNfcTopup') AS used_nfc,
+					BOOL_OR(topup_source = 'usdcPurchasingCard') AS used_app
+				FROM beamio_member_topup_events
+				WHERE LOWER(TRIM(card_address)) = $1
+				GROUP BY LOWER(TRIM(member_eoa))
+			),
+			fs AS (
+				SELECT DISTINCT ON (LOWER(TRIM(member_eoa)))
+					LOWER(TRIM(member_eoa)) AS eoa,
+					topup_source AS first_topup_source,
+					created_at AS first_topup_at
+				FROM beamio_member_topup_events
+				WHERE LOWER(TRIM(card_address)) = $1
+				ORDER BY LOWER(TRIM(member_eoa)), created_at ASC, id ASC
+			)
+			SELECT
+				s.member_eoa,
+				s.member_aa,
+				s.tier_token_id,
+				s.topup_count,
+				s.topup_points_total_e6::text,
+				s.topup_usdc_total_e6::text,
+				s.last_topup_at,
+				s.last_base_tx_hash,
+				COALESCE(ch.used_nfc, false) AS used_nfc,
+				COALESCE(ch.used_app, false) AS used_app,
+				fs.first_topup_source,
+				fs.first_topup_at
+			FROM beamio_card_member_topup_stats s
+			LEFT JOIN ch ON LOWER(TRIM(s.member_eoa)) = ch.eoa
+			LEFT JOIN fs ON LOWER(TRIM(s.member_eoa)) = fs.eoa
+			WHERE s.card_address = $1
+			ORDER BY s.last_topup_at DESC, s.member_eoa ASC
+			LIMIT $2 OFFSET $3
+			`,
+			[card, limit, offset]
+		)
+		return { items: rows.map(mapCardMemberDirectoryRow), total }
+	} catch (e: any) {
+		logger(Colors.yellow(`[listCardMemberDirectory] failed: ${e?.message ?? e}`))
 		return { items: [], total: 0 }
 	} finally {
 		await db.end().catch(() => {})

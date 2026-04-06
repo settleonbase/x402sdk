@@ -4880,6 +4880,31 @@ const PURCHASING_CARD_ACCOUNTING_MAX_RETRY = 3
 export const purchasingCardAccountingRetryPool: PurchasingCardAccountingRetryJob[] = []
 let purchasingCardAccountingRetryRunning = false
 
+const MEMBERSHIP_NFT_MIN_ID = 100n
+const MEMBERSHIP_NFT_MAX_EXCLUSIVE = 100_000_000_000n
+
+/** 与 `resolveUsdcTopupRules` 中 hasMembership 一致：未过期且 tokenId∈[100,1e11)。 */
+const ownershipSnapshotHasValidMembershipNft = (nfts: unknown[] | undefined | null): boolean => {
+	const arr = Array.isArray(nfts) ? nfts : []
+	for (const raw of arr) {
+		if (!raw || typeof raw !== 'object') continue
+		const n = raw as { tokenId?: unknown; isExpired?: boolean }
+		if (n.isExpired) continue
+		let tid = 0n
+		try {
+			const v = n.tokenId
+			if (typeof v === 'bigint') tid = v
+			else if (typeof v === 'number' && Number.isFinite(v)) tid = BigInt(Math.floor(v))
+			else if (typeof v === 'string' && v !== '') tid = BigInt(v)
+			else continue
+		} catch {
+			continue
+		}
+		if (tid >= MEMBERSHIP_NFT_MIN_ID && tid < MEMBERSHIP_NFT_MAX_EXCLUSIVE) return true
+	}
+	return false
+}
+
 const extractTokenIdsFromOwnership = (items: unknown[]): bigint[] => {
 	const out: bigint[] = []
 	for (const item of items) {
@@ -5129,6 +5154,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					finalRequestAmountUSDC6 = cardCurrencyFiat === 4 ? mintParsed.points6 : 0n
 				}
 				if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
+				const hadMembershipBeforeNfc = ownershipSnapshotHasValidMembershipNft(beforeNfts as unknown[])
 				void insertMemberTopupEvent({
 					cardAddress: obj.cardAddr,
 					baseTxHash: tx.hash,
@@ -5139,6 +5165,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					topupCategory: topupCategoryRaw,
 					pointsE6: mintParsed.points6,
 					usdcE6: finalRequestAmountUSDC6,
+					countAsNfcActivation: !hadMembershipBeforeNfc,
 				}).catch((dbErr: any) =>
 					logger(Colors.yellow(`[executeForAdminPostBaseProcess] insertMemberTopupEvent: ${dbErr?.message ?? dbErr}`))
 				)
@@ -5739,6 +5766,7 @@ export const purchasingCardProcess = async () => {
 		input.fees.feePayer = feePayerCardOwnerUsdc
 
 		if (basePurchTxOk) {
+			const hadMembershipBeforeApp = ownershipSnapshotHasValidMembershipNft(nfts as unknown[])
 			void insertMemberTopupEvent({
 				cardAddress,
 				baseTxHash: tx.hash,
@@ -5749,6 +5777,7 @@ export const purchasingCardProcess = async () => {
 				topupCategory: topupCategoryRaw,
 				pointsE6: currentTopupPoint6,
 				usdcE6: finalRequestAmountUSDC6,
+				countAsAppActivation: !hadMembershipBeforeApp,
 			}).catch((dbErr: any) =>
 				logger(Colors.yellow(`[purchasingCardProcess] insertMemberTopupEvent: ${dbErr?.message ?? dbErr}`))
 			)

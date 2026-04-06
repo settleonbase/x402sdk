@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, getCardTopupRollup} from '../db'
+import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -4184,6 +4184,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				topupStats: {
 					totalTopupCount: topupStats.totalTopupCount,
 					totalRepeatTopupCount: topupStats.totalRepeatTopupCount,
+					nfcActivationCount: topupStats.nfcActivationCount,
+					appActivationCount: topupStats.appActivationCount,
 				},
 			})
 		} catch (err: any) {
@@ -4193,9 +4195,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	/**
-	 * GET /api/cardMemberTopups?cardAddress=0x…&mode=events|members|card&limit=&offset=&page=
+	 * GET /api/cardMemberTopups?cardAddress=0x…&mode=events|members|directory|card&limit=&offset=&page=
 	 * card：仅返回该卡 totalTopupCount、totalRepeatTopupCount（全站成功 top-up 次数与 repeat 次数）。
 	 * events / members 含义同前。
+	 * directory：同 members 分页，但每行含 usedNfc、usedApp、firstTopupSource、firstTopupAt（由 beamio_member_topup_events 聚合）。
 	 * page 为 1 基页码（与 limit 联用：offset=(page-1)*limit）；若同时传 offset，以 offset 为准。
 	 */
 	router.get('/cardMemberTopups', async (req, res) => {
@@ -4225,6 +4228,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					cardAddress: addrNorm,
 					totalTopupCount: rollup.totalTopupCount,
 					totalRepeatTopupCount: rollup.totalRepeatTopupCount,
+					nfcActivationCount: rollup.nfcActivationCount,
+					appActivationCount: rollup.appActivationCount,
 				})
 			}
 			if (m === 'members') {
@@ -4232,6 +4237,19 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				const pageNum = limit > 0 ? Math.floor(offset / limit) + 1 : 1
 				return res.status(200).json({
 					mode: 'members',
+					cardAddress: addrNorm,
+					total,
+					limit,
+					offset,
+					page: pageNum,
+					members: items,
+				})
+			}
+			if (m === 'directory') {
+				const { items, total } = await listCardMemberDirectory(cardAddress, { limit, offset })
+				const pageNum = limit > 0 ? Math.floor(offset / limit) + 1 : 1
+				return res.status(200).json({
+					mode: 'directory',
 					cardAddress: addrNorm,
 					total,
 					limit,
