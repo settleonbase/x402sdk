@@ -2756,6 +2756,28 @@ export const registerCardToDb = async (params: {
 	}
 }
 
+/** 已登记发卡（beamio_cards）的去重 owner EOA 小写列表，供 Cluster 过滤「发卡方」身份。 */
+export const getDistinctBeamioCardOwnerAddressesLower = async (): Promise<string[]> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_CARDS_TABLE)
+		const { rows } = await db.query<{ card_owner: string }>(
+			`
+			SELECT DISTINCT LOWER(TRIM(card_owner)) AS card_owner
+			FROM beamio_cards
+			WHERE card_owner IS NOT NULL AND TRIM(card_owner) <> ''
+			`
+		)
+		return rows.map((r) => r.card_owner).filter((x) => typeof x === "string" && x.startsWith("0x"))
+	} catch (e: any) {
+		logger(Colors.yellow(`[getDistinctBeamioCardOwnerAddressesLower] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 按 card_address 查单张卡的 card_owner + metadata_json。供 Cluster GET /api/cardMetadata 用，前端 beamioApi 拉取。 */
 export const getCardByAddress = async (cardAddress: string): Promise<{ cardOwner: string; metadata: Record<string, unknown> | null } | null> => {
 	const db = new Client({ connectionString: DB_URL })
@@ -3358,6 +3380,33 @@ export const _search = async (keyward: string) => {
   } finally {
     await db.end()
   }
+}
+
+/** 与 searchUsers 相同检索逻辑，供 Cluster 在二次过滤前拿到原始 results（无 HTTP）。 */
+export const searchUsersResultsForKeyward = async (
+	keywardRaw: string
+): Promise<{ results: any[] } | { error: string }> => {
+	let _keywork = String(keywardRaw || "").trim().replace(/^@+/, "")
+	if (!_keywork) {
+		return { results: [] }
+	}
+	if (ethers.isAddress(_keywork)) {
+		const normalized = ethers.getAddress(_keywork)
+		const eoaLower = await resolveSearchAddressToEOALower(normalized)
+		if (eoaLower === null) {
+			return { results: [] }
+		}
+		const ret = await _searchExactByAddress(eoaLower)
+		if ("error" in ret && ret.error) {
+			return { error: String(ret.error) }
+		}
+		return { results: ret.results ?? [] }
+	}
+	const ret = await _search(_keywork)
+	if ("error" in ret && ret.error) {
+		return { error: String(ret.error) }
+	}
+	return { results: (ret as { results: any[] }).results ?? [] }
 }
 
 export const searchUsers = async (req: Request, res: Response) => {

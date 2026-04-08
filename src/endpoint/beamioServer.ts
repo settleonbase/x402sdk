@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup} from '../db'
+import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -571,6 +571,147 @@ const routing = ( router: Router ) => {
 	
 	router.get('/search-users', (req,res) => {
 		searchUsers(req,res)
+	})
+
+	const DISTINCT_CARD_OWNERS_CACHE_TTL_MS = 60_000
+	let distinctCardOwnersCache: { addrs: Set<string>; expiry: number } | null = null
+	const getCachedDistinctBeamioCardOwnerSet = async (): Promise<Set<string>> => {
+		const now = Date.now()
+		if (distinctCardOwnersCache && distinctCardOwnersCache.expiry > now) {
+			return distinctCardOwnersCache.addrs
+		}
+		const list = await getDistinctBeamioCardOwnerAddressesLower()
+		const addrs = new Set(list.map((x) => x.toLowerCase()))
+		distinctCardOwnersCache = { addrs, expiry: now + DISTINCT_CARD_OWNERS_CACHE_TTL_MS }
+		return addrs
+	}
+
+	const FACTORY_CARDS_OF_OWNER_ABI = ['function cardsOfOwner(address owner) view returns (address[])'] as const
+	const CARD_ADMIN_ABI_OWNER_AND_LIST = [
+		'function owner() view returns (address)',
+		'function getAdminListWithMetadata() view returns (address[] admins, string[] metadatas, address[] parents)',
+	] as const
+
+	const collectWalletRelatedCardAddresses = async (
+		walletRaw: string | null | undefined,
+		extraCardAddressesCsv: string | undefined
+	): Promise<string[]> => {
+		const out = new Set<string>()
+		if (extraCardAddressesCsv?.trim()) {
+			for (const part of extraCardAddressesCsv.split(',')) {
+				const t = part.trim()
+				if (t && ethers.isAddress(t)) out.add(ethers.getAddress(t))
+			}
+		}
+		const wTrim = walletRaw?.trim()
+		if (!wTrim || !ethers.isAddress(wTrim)) {
+			return Array.from(out)
+		}
+		const wallet = ethers.getAddress(wTrim)
+		let eoa = wallet
+		try {
+			const code = await providerBase.getCode(wallet)
+			if (code && code !== '0x' && code.length > 2) {
+				const aa = new ethers.Contract(wallet, ['function owner() view returns (address)'], providerBase)
+				const owner = await aa.owner()
+				if (owner && owner !== ethers.ZeroAddress) eoa = ethers.getAddress(owner)
+			}
+		} catch {
+			/* treat as EOA */
+		}
+		try {
+			const pos = await getPosTerminalCardAddressForWallet(eoa)
+			if (pos) out.add(ethers.getAddress(pos))
+		} catch {
+			/* ignore */
+		}
+		try {
+			const fac = new ethers.Contract(BASE_CARD_FACTORY, FACTORY_CARDS_OF_OWNER_ABI, providerBase)
+			const cards = (await fac.cardsOfOwner(eoa)) as string[]
+			const cap = 48
+			for (const c of (cards ?? []).slice(0, cap)) {
+				if (c && ethers.isAddress(c) && c !== ethers.ZeroAddress) out.add(ethers.getAddress(c))
+			}
+		} catch (e) {
+			logger(Colors.gray(`[search-users-by-card-owner-or-admin] cardsOfOwner failed: ${(e as Error)?.message ?? e}`))
+		}
+		return Array.from(out)
+	}
+
+	const buildOwnerOrAdminAllowSetForCards = async (cardAddrs: string[]): Promise<Set<string>> => {
+		const allow = new Set<string>()
+		const unique = [...new Set(cardAddrs.map((c) => ethers.getAddress(c)))]
+		await Promise.all(
+			unique.map(async (cardAddr) => {
+				try {
+					const card = new ethers.Contract(cardAddr, CARD_ADMIN_ABI_OWNER_AND_LIST, providerBase)
+					const [owner, adminResult] = await Promise.all([
+						card.owner() as Promise<string>,
+						card.getAdminListWithMetadata() as Promise<[string[], string[], string[]]>,
+					])
+					const [admins] = adminResult
+					if (owner && owner !== ethers.ZeroAddress) allow.add(ethers.getAddress(owner).toLowerCase())
+					for (const a of admins ?? []) {
+						if (a && ethers.isAddress(a) && a !== ethers.ZeroAddress) allow.add(ethers.getAddress(a).toLowerCase())
+					}
+				} catch (e) {
+					logger(
+						Colors.gray(
+							`[search-users-by-card-owner-or-admin] card ${cardAddr} admin fetch failed: ${(e as Error)?.message ?? e}`
+						)
+					)
+				}
+			})
+		)
+		return allow
+	}
+
+	/**
+	 * GET /api/search-users-by-card-owner-or-admin?keyward=...&wallet=0x...&extraCardAddresses=0x...,0x...
+	 * 先按 search-users 逻辑查 BeamioTag，再过滤：accounts.address 在 beamio_cards 登记过的发卡 owner，或与 wallet 关联卡（POS 绑定卡 + factory.cardsOfOwner + extra）链上 owner/admin 集合命中。
+	 * 无 wallet 时仅保留「DB 登记发卡 owner」命中项（链上 admin 需传 wallet 或 extraCardAddresses）。
+	 */
+	router.get('/search-users-by-card-owner-or-admin', async (req, res) => {
+		const { keyward, wallet, extraCardAddresses } = req.query as {
+			keyward?: string
+			wallet?: string
+			extraCardAddresses?: string
+		}
+		const _keywork = String(keyward || '').trim().replace(/^@+/, '')
+		if (!_keywork) {
+			return res.status(404).end()
+		}
+		try {
+			const raw = await searchUsersResultsForKeyward(_keywork)
+			if ('error' in raw) {
+				return res.status(500).json({ ok: false, error: raw.error }).end()
+			}
+			const results = raw.results ?? []
+			const ownerSet = await getCachedDistinctBeamioCardOwnerSet()
+			let chainAllow = new Set<string>()
+			const walletTrim = wallet?.trim()
+			const extraTrim = extraCardAddresses?.trim()
+			if ((walletTrim && ethers.isAddress(walletTrim)) || extraTrim) {
+				const cards = await collectWalletRelatedCardAddresses(
+					walletTrim && ethers.isAddress(walletTrim) ? walletTrim : undefined,
+					extraTrim
+				)
+				if (cards.length > 0) {
+					chainAllow = await buildOwnerOrAdminAllowSetForCards(cards)
+				}
+			}
+			const filtered = results.filter((row: { address?: string }) => {
+				const addr = typeof row?.address === 'string' ? row.address.toLowerCase() : ''
+				if (!addr) return false
+				if (ownerSet.has(addr)) return true
+				if (chainAllow.has(addr)) return true
+				return false
+			})
+			return res.status(200).json({ results: filtered }).end()
+		} catch (e) {
+			logger(Colors.red(`[search-users-by-card-owner-or-admin] ${(e as Error)?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
+		}
 	})
 
 	/** GET /api/getTerminalProfile - 终端首页用：返回当前钱包的 beamio profile 及上层 admin（merchant）的 profile。供 Android NdefScreen 头部展示。 */

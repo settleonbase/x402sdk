@@ -7749,8 +7749,32 @@ export type CreateCardPreChecked = {
 	transferWhitelistEnabled?: boolean
 	/** 0=topup delta; 1=points balance; 2=cumulative points to admin */
 	upgradeType?: 0 | 1 | 2
-	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[]; backgroundColor?: string }
+	shareTokenMetadata?: {
+		name?: string
+		description?: string
+		image?: string
+		categories?: string[]
+		backgroundColor?: string
+		/** Whole currency units; optional (Card Issuance recharge limits) */
+		minimumTopup?: number
+		maximumTopup?: number
+	}
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
+}
+
+const CREATE_CARD_TOPUP_LIMIT_MAX_UNITS = 1000
+
+function parseCreateCardTopupWholeUnit(v: unknown): number | undefined {
+	if (v == null) return undefined
+	if (typeof v === 'number' && Number.isInteger(v) && v > 0) return v
+	if (typeof v === 'string') {
+		const t = v.replace(/,/g, '').trim()
+		if (!t) return undefined
+		const n = Number.parseInt(t, 10)
+		const f = parseFloat(t)
+		if (Number.isFinite(n) && Number.isFinite(f) && f === n && n > 0) return n
+	}
+	return undefined
 }
 
 export const createCardPreCheck = (body: {
@@ -7761,7 +7785,15 @@ export const createCardPreCheck = (body: {
 	uri?: string
 	transferWhitelistEnabled?: unknown
 	upgradeType?: unknown
-	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: unknown; backgroundColor?: unknown }
+	shareTokenMetadata?: {
+		name?: string
+		description?: string
+		image?: string
+		categories?: unknown
+		backgroundColor?: unknown
+		minimumTopup?: unknown
+		maximumTopup?: unknown
+	}
 	tiers?: unknown[]
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
 	const validCurrency = ['CAD', 'USD', 'JPY', 'CNY', 'USDC', 'HKD', 'EUR', 'SGD', 'TWD']
@@ -7807,6 +7839,23 @@ export const createCardPreCheck = (body: {
 					return { success: false, error: `shareTokenMetadata.categories[${i}] is too long (max 64)` }
 				}
 			}
+		}
+		const minTu = parseCreateCardTopupWholeUnit(stm.minimumTopup ?? stm.minTopup)
+		const maxTu = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
+		if (minTu != null && minTu > CREATE_CARD_TOPUP_LIMIT_MAX_UNITS) {
+			return {
+				success: false,
+				error: `shareTokenMetadata.minimumTopup must not exceed ${CREATE_CARD_TOPUP_LIMIT_MAX_UNITS}`,
+			}
+		}
+		if (maxTu != null && maxTu > CREATE_CARD_TOPUP_LIMIT_MAX_UNITS) {
+			return {
+				success: false,
+				error: `shareTokenMetadata.maximumTopup must not exceed ${CREATE_CARD_TOPUP_LIMIT_MAX_UNITS}`,
+			}
+		}
+		if (minTu != null && maxTu != null && minTu > maxTu) {
+			return { success: false, error: 'shareTokenMetadata.minimumTopup cannot be greater than maximumTopup' }
 		}
 	}
 	if (body.transferWhitelistEnabled != null && typeof body.transferWhitelistEnabled !== 'boolean') {
@@ -7866,6 +7915,10 @@ export const createCardPreCheck = (body: {
 			const bg = stm.backgroundColor.trim()
 			if (bg.length > 0 && bg.length <= 64) meta.backgroundColor = bg
 		}
+		const minTup = parseCreateCardTopupWholeUnit(stm.minimumTopup ?? stm.minTopup)
+		const maxTup = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
+		if (minTup != null) meta.minimumTopup = minTup
+		if (maxTup != null) meta.maximumTopup = maxTup
 		if (Object.keys(meta).length > 0) {
 			normalizedShareTokenMetadata = meta
 		}
@@ -7991,6 +8044,14 @@ export const createCardPoolPress = async () => {
 						...(shareTokenMetadata?.backgroundColor &&
 							String(shareTokenMetadata.backgroundColor).trim() && {
 								backgroundColor: String(shareTokenMetadata.backgroundColor).trim(),
+							}),
+						...(shareTokenMetadata.minimumTopup != null &&
+							Number.isFinite(Number(shareTokenMetadata.minimumTopup)) && {
+								minimumTopup: Number(shareTokenMetadata.minimumTopup),
+							}),
+						...(shareTokenMetadata.maximumTopup != null &&
+							Number.isFinite(Number(shareTokenMetadata.maximumTopup)) && {
+								maximumTopup: Number(shareTokenMetadata.maximumTopup),
 							}),
 					},
 				}),
