@@ -3831,6 +3831,160 @@ export const buintRedeemAirdropProcess = async () => {
 	}
 }
 
+// --- BusinessStartKetRedeem：用户兑换 — Cluster 预检 + Master redeemWithCodeAsAdmin（Ket mint + B-Unit 至用户 Base AA）---
+
+const BUSINESS_START_KET_REDEEM_USER_REDEEM_ABI = [
+	'function getRedeem(bytes32 codeHash) view returns (uint256 tokenId, uint256 ketAmount, uint256 buintAmount, uint64 validAfter, uint64 validBefore, bool active, bool consumed)',
+	'function redeemWithCodeAsAdmin(address recipient, string code) external',
+] as const
+
+export type BusinessStartKetRedeemPreCheckResult = {
+	valid: boolean
+	codeHash: string
+	tokenId: string
+	ketAmount: string
+	buintAmount: string
+	validAfter: number
+	validBefore: number
+	active: boolean
+	consumed: boolean
+	timeOk: boolean
+	redeemable: boolean
+	error?: string
+}
+
+/** CoNET：BusinessStartKetRedeem 兑换码是否仍可领取（Ket / B-Unit 至少一项 > 0） */
+export async function businessStartKetRedeemQueryOnChain(code: string): Promise<BusinessStartKetRedeemPreCheckResult> {
+	const b = ethers.toUtf8Bytes(code)
+	const now = Math.floor(Date.now() / 1000)
+	const emptyHash = ethers.keccak256(b.length ? b : new Uint8Array([0]))
+	const failBase = {
+		valid: false,
+		codeHash: emptyHash,
+		tokenId: '0',
+		ketAmount: '0',
+		buintAmount: '0',
+		validAfter: 0,
+		validBefore: 0,
+		active: false,
+		consumed: false,
+		timeOk: false,
+		redeemable: false,
+	} satisfies Omit<BusinessStartKetRedeemPreCheckResult, 'error'>
+	if (b.length === 0 || b.length > MAX_BUINT_REDEEM_CODE_BYTES) {
+		return { ...failBase, codeHash: ethers.keccak256(b), error: 'Invalid redeem code length' }
+	}
+	const addr = resolveConetBusinessStartKetRedeemAddress()
+	const codeHash = ethers.keccak256(b)
+	if (!addr) {
+		return { ...failBase, codeHash, error: 'CONET_BUSINESS_START_KET_REDEEM not configured' }
+	}
+	const c = new ethers.Contract(addr, BUSINESS_START_KET_REDEEM_USER_REDEEM_ABI, providerConet)
+	let tokenId = 0n
+	let ketAmount = 0n
+	let buintAmount = 0n
+	let validAfter = 0n
+	let validBefore = 0n
+	let active = false
+	let consumed = false
+	try {
+		const r = await c.getRedeem!(codeHash)
+		const tup = r as unknown as [bigint, bigint, bigint, bigint, bigint, boolean, boolean]
+		tokenId = tup[0] ?? 0n
+		ketAmount = tup[1] ?? 0n
+		buintAmount = tup[2] ?? 0n
+		validAfter = tup[3] ?? 0n
+		validBefore = tup[4] ?? 0n
+		active = Boolean(tup[5])
+		consumed = Boolean(tup[6])
+	} catch (e: any) {
+		return {
+			...failBase,
+			codeHash,
+			error: e?.shortMessage ?? e?.message ?? 'getRedeem failed',
+		}
+	}
+	const timeOk = buintRedeemAirdropTimeOk(validAfter, validBefore, now)
+	let error: string | undefined
+	if (!active) error = 'Redeem is not active'
+	else if (consumed) error = 'Redeem already consumed'
+	else if (!timeOk) error = 'Outside valid time window'
+	else if (ketAmount <= 0n && buintAmount <= 0n) error = 'Nothing to redeem'
+	const redeemable = active && !consumed && timeOk && (ketAmount > 0n || buintAmount > 0n)
+	return {
+		valid: true,
+		codeHash,
+		tokenId: tokenId.toString(),
+		ketAmount: ketAmount.toString(),
+		buintAmount: buintAmount.toString(),
+		validAfter: Number(validAfter),
+		validBefore: Number(validBefore),
+		active,
+		consumed,
+		timeOk,
+		redeemable,
+		error,
+	}
+}
+
+/** 与 BuintRedeemAirdrop 相同：校验 eoa + code 长度 */
+export const businessStartKetRedeemRedeemClusterPreCheck = buintRedeemAirdropRedeemClusterPreCheck
+
+export type BusinessStartKetRedeemUserRedeemPoolPayload = {
+	eoa: string
+	code: string
+	res?: Response
+}
+
+export const businessStartKetRedeemUserRedeemPool: BusinessStartKetRedeemUserRedeemPoolPayload[] = []
+
+export const businessStartKetRedeemUserRedeemProcess = async () => {
+	const obj = businessStartKetRedeemUserRedeemPool.shift()
+	if (!obj) return
+	const redeemAddr = resolveConetBusinessStartKetRedeemAddress()
+	if (!redeemAddr) {
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: 'CONET_BUSINESS_START_KET_REDEEM not configured' }).end()
+		}
+		setTimeout(() => void businessStartKetRedeemUserRedeemProcess(), 3000)
+		return
+	}
+	if (!Settle_ContractPool.length) {
+		businessStartKetRedeemUserRedeemPool.unshift(obj)
+		return setTimeout(() => void businessStartKetRedeemUserRedeemProcess(), 3000)
+	}
+	const eoaNorm = ethers.getAddress(obj.eoa)
+	logger(Colors.cyan(`[businessStartKetRedeemUserRedeemProcess] eoa=${eoaNorm}`))
+	let SC: (typeof Settle_ContractPool)[number] | undefined
+	try {
+		const aaRecipient = await ensureAAForEOA(eoaNorm)
+		SC = Settle_ContractPool.shift()
+		if (!SC) {
+			businessStartKetRedeemUserRedeemPool.unshift(obj)
+			return setTimeout(() => void businessStartKetRedeemUserRedeemProcess(), 3000)
+		}
+		const redeem = new ethers.Contract(redeemAddr, BUSINESS_START_KET_REDEEM_USER_REDEEM_ABI, SC.walletConet)
+		const tx = await redeem.redeemWithCodeAsAdmin!(aaRecipient, obj.code, { gasLimit: 1_200_000 })
+		logger(Colors.green(`[businessStartKetRedeemUserRedeemProcess] tx=${tx.hash} eoa=${eoaNorm} recipientAA=${aaRecipient}`))
+		await tx.wait()
+		if (obj.res && !obj.res.headersSent) {
+			obj.res
+				.status(200)
+				.json({ success: true, txHash: tx.hash, eoa: eoaNorm, aa: aaRecipient, recipient: aaRecipient })
+				.end()
+		}
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red('[businessStartKetRedeemUserRedeemProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: msg }).end()
+		}
+	} finally {
+		if (SC) Settle_ContractPool.unshift(SC)
+		setTimeout(() => void businessStartKetRedeemUserRedeemProcess(), 3000)
+	}
+}
+
 // --- BusinessStartKetRedeem：redeem admin EIP-712 授权 + Master(Settle) 代付 gas 调用 createRedeemFor / cancelRedeemFor ---
 
 const BUSINESS_START_KET_REDEEM_RELAY_ABI = [
