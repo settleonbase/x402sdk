@@ -41,6 +41,7 @@ import {
 	CONET_BUNIT_AIRDROP_ADDRESS,
 	CONET_BUINT_REDEEM_AIRDROP,
 	BEAMIO_INDEXER_DIAMOND,
+	CONET_BUSINESS_START_KET,
 	MERCHANT_POS_MANAGEMENT_CONET,
 	BASE_TREASURY,
 	BEAMIO_USER_CARD_ASSET_ADDRESS,
@@ -624,6 +625,91 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 	}
 }
 
+const BUSINESS_START_KET_ADMIN_ABI = [
+	'function admins(address) view returns (bool)',
+	'function addAdmin(address account) external',
+] as const
+
+/**
+ * Master 主进程：确保 BusinessStartKet（CoNET）的 admins 覆盖 Settle_ContractPool 中全部钱包。
+ * 需配置 CONET_BUSINESS_START_KET（chainAddresses 或环境变量）；由 settle_contractAdmin[0] 在链上需已是 admin。
+ */
+const ensureBusinessStartKetConetAdmins = async (): Promise<void> => {
+	if (!cluster.isPrimary) {
+		return
+	}
+	const raw =
+		(typeof process !== 'undefined' && process.env.CONET_BUSINESS_START_KET?.trim()) || CONET_BUSINESS_START_KET
+	if (!raw?.trim()) {
+		logger(Colors.gray('[business-start-ket-admin] skip: CONET_BUSINESS_START_KET not configured'))
+		return
+	}
+	let contractAddr: string
+	try {
+		contractAddr = ethers.getAddress(raw.trim())
+	} catch {
+		logger(Colors.yellow('[business-start-ket-admin] skip: invalid CONET_BUSINESS_START_KET'))
+		return
+	}
+	if (contractAddr === ethers.ZeroAddress) {
+		return
+	}
+	if (!Settle_ContractPool.length) {
+		logger(Colors.yellow('[business-start-ket-admin] skip: Settle_ContractPool is empty'))
+		return
+	}
+	const ownerPk = masterSetup?.settle_contractAdmin?.[0]
+	if (!ownerPk) {
+		logger(Colors.yellow('[business-start-ket-admin] skip: settle_contractAdmin[0] is empty'))
+		return
+	}
+	const signer = new ethers.Wallet(ownerPk, providerConet)
+	const read = new ethers.Contract(contractAddr, BUSINESS_START_KET_ADMIN_ABI, providerConet)
+	let signerIsAdmin = false
+	try {
+		signerIsAdmin = !!(await read.admins(signer.address))
+	} catch (e: any) {
+		logger(Colors.red(`[business-start-ket-admin] admins(${signer.address}) failed: ${e?.message ?? e}`))
+		return
+	}
+	if (!signerIsAdmin) {
+		logger(
+			Colors.yellow(
+				`[business-start-ket-admin] skip: settle_contractAdmin[0]=${signer.address} is not BusinessStartKet admin (on-chain)`
+			)
+		)
+		return
+	}
+	const adminTargets = [...new Set(Settle_ContractPool.map((sc) => sc.walletConet.address.toLowerCase()))]
+		.map((addrLower) => {
+			const found = Settle_ContractPool.find((sc) => sc.walletConet.address.toLowerCase() === addrLower)
+			return found?.walletConet.address
+		})
+		.filter((a): a is string => !!a)
+		.map((a) => ethers.getAddress(a))
+
+	const write = new ethers.Contract(contractAddr, BUSINESS_START_KET_ADMIN_ABI, signer)
+	for (const adminAddr of adminTargets) {
+		let isAdmin = false
+		try {
+			isAdmin = !!(await read.admins(adminAddr))
+		} catch (e: any) {
+			logger(Colors.red(`[business-start-ket-admin] admins(${adminAddr}) failed: ${e?.message ?? e}`))
+			continue
+		}
+		if (isAdmin) {
+			continue
+		}
+		try {
+			const tx = await write.addAdmin(adminAddr)
+			await tx.wait()
+			logger(Colors.green(`[business-start-ket-admin] addAdmin ok: ${adminAddr}`))
+		} catch (e: any) {
+			logger(Colors.red(`[business-start-ket-admin] addAdmin failed for ${adminAddr}: ${e?.message ?? e}`))
+		}
+	}
+}
+
 /** Master 启动时与链上 UserCard._aaFactory() 对齐；避免本地 AA_FACTORY 未及时提交时 Settle 池仍指向旧工厂 */
 async function refreshSettlePoolAaFactoryContractsFromUserCard(): Promise<void> {
 	if (!Settle_ContractPool.length) {
@@ -658,6 +744,7 @@ if (cluster.isPrimary) {
 	void (async () => {
 		await refreshSettlePoolAaFactoryContractsFromUserCard()
 		await ensureSettleAdminsAsFactoryPaymasters()
+		await ensureBusinessStartKetConetAdmins()
 	})()
 }
 

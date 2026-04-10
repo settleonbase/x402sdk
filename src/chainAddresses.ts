@@ -41,6 +41,12 @@ export const CONET_BUINT_REDEEM_AIRDROP = '0x9A02EfE5DFC45E9236552BfE8FAB6643Efe
 export const BEAMIO_INDEXER_DIAMOND = '0xd990719B2f05ccab4Acdd5D7A3f7aDfd2Fc584Fe'
 export const MERCHANT_POS_MANAGEMENT_CONET = '0x3Eb57035d3237Fce4b1cB273662E875EdfA0D54f'
 
+/**
+ * BusinessStartKet ERC-1155（CoNET）。与 deployments/conet-addresses.json `BusinessStartKet` 同步。
+ * 未部署时留空串；可用环境变量 CONET_BUSINESS_START_KET 覆盖（便于未提交地址前的本地联调）。
+ */
+export const CONET_BUSINESS_START_KET = '0x2FF032d57eCF466624911692AF44D0B4A32a8E1f'
+
 export const BASE_MAINNET_FACTORIES = {
   AA_FACTORY: BASE_AA_FACTORY,
   BEAMIO_ACCOUNT_DEPLOYER: BASE_BEAMIO_ACCOUNT_DEPLOYER,
@@ -66,6 +72,7 @@ export const CONTRACT_ADDRESSES = {
     bUnitAirdrop: CONET_BUNIT_AIRDROP_ADDRESS,
     buintRedeemAirdrop: CONET_BUINT_REDEEM_AIRDROP,
     beamioIndexerDiamond: BEAMIO_INDEXER_DIAMOND,
+    businessStartKet: CONET_BUSINESS_START_KET || undefined,
   },
 } as const
 
