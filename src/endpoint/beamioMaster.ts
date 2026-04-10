@@ -1541,7 +1541,7 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** POST /api/businessStartKetRedeemRedeem — cluster 预检合格后转发；Settle 代付 gas 调 BusinessStartKetRedeem.redeemWithCodeAsAdmin */
+		/** POST /api/businessStartKetRedeemRedeem — cluster 预检合格后转发；Settle 代付 gas 调 redeemWithCodeAsAdmin(recipient=用户 EOA) */
 		router.post('/businessStartKetRedeemRedeem', (req, res) => {
 			const body = req.body as { eoa?: string; code?: string }
 			if (!body.eoa || !ethers.isAddress(body.eoa) || typeof body.code !== 'string' || !body.code.trim()) {

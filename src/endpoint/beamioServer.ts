@@ -3926,7 +3926,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/buintRedeemAirdropRedeem', { eoa: pre.eoa, code: pre.code }, res)
 	})
 
-	/** POST /api/businessStartKetRedeemRedeem — BusinessStartKetRedeem：Cluster 读链预检后代付 redeemWithCodeAsAdmin（Ket + B-Unit → 用户 Base AA） */
+	/** POST /api/businessStartKetRedeemRedeem — BusinessStartKetRedeem：Cluster 读链预检后代付 redeemWithCodeAsAdmin（Ket + B-Unit → 用户 EOA，CoNET） */
 	router.post('/businessStartKetRedeemRedeem', async (req, res) => {
 		const body = req.body as { eoa?: string; code?: string }
 		const pre = businessStartKetRedeemRedeemClusterPreCheck(body)

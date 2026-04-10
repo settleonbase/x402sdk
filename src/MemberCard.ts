@@ -3831,7 +3831,7 @@ export const buintRedeemAirdropProcess = async () => {
 	}
 }
 
-// --- BusinessStartKetRedeem：用户兑换 — Cluster 预检 + Master redeemWithCodeAsAdmin（Ket mint + B-Unit 至用户 Base AA）---
+// --- BusinessStartKetRedeem：用户兑换 — Cluster 预检 + Master redeemWithCodeAsAdmin（Ket mint + B-Unit 至用户 EOA，CoNET）---
 
 const BUSINESS_START_KET_REDEEM_USER_REDEEM_ABI = [
 	'function getRedeem(bytes32 codeHash) view returns (uint256 tokenId, uint256 ketAmount, uint256 buintAmount, uint64 validAfter, uint64 validBefore, bool active, bool consumed)',
@@ -3957,20 +3957,19 @@ export const businessStartKetRedeemUserRedeemProcess = async () => {
 	logger(Colors.cyan(`[businessStartKetRedeemUserRedeemProcess] eoa=${eoaNorm}`))
 	let SC: (typeof Settle_ContractPool)[number] | undefined
 	try {
-		const aaRecipient = await ensureAAForEOA(eoaNorm)
 		SC = Settle_ContractPool.shift()
 		if (!SC) {
 			businessStartKetRedeemUserRedeemPool.unshift(obj)
 			return setTimeout(() => void businessStartKetRedeemUserRedeemProcess(), 3000)
 		}
 		const redeem = new ethers.Contract(redeemAddr, BUSINESS_START_KET_REDEEM_USER_REDEEM_ABI, SC.walletConet)
-		const tx = await redeem.redeemWithCodeAsAdmin!(aaRecipient, obj.code, { gasLimit: 1_200_000 })
-		logger(Colors.green(`[businessStartKetRedeemUserRedeemProcess] tx=${tx.hash} eoa=${eoaNorm} recipientAA=${aaRecipient}`))
+		const tx = await redeem.redeemWithCodeAsAdmin!(eoaNorm, obj.code, { gasLimit: 1_200_000 })
+		logger(Colors.green(`[businessStartKetRedeemUserRedeemProcess] tx=${tx.hash} eoa=${eoaNorm} recipientEOA=${eoaNorm}`))
 		await tx.wait()
 		if (obj.res && !obj.res.headersSent) {
 			obj.res
 				.status(200)
-				.json({ success: true, txHash: tx.hash, eoa: eoaNorm, aa: aaRecipient, recipient: aaRecipient })
+				.json({ success: true, txHash: tx.hash, eoa: eoaNorm, recipient: eoaNorm })
 				.end()
 		}
 	} catch (e: any) {
