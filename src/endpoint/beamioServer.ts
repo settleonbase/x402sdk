@@ -1784,7 +1784,21 @@ const routing = ( router: Router ) => {
 
 	/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master。当 uid 为 NFC 格式（14 位 hex）时：必须提供 e/c/m，SUN 校验通过才转发，不符合 SUN 或无法推导 tagID 的不予受理。 */
 	router.post('/nfcTopup', async (req, res) => {
-		const { cardAddr, data, deadline, nonce, adminSignature, uid, e, c, m } = req.body as {
+		const {
+			cardAddr,
+			data,
+			deadline,
+			nonce,
+			adminSignature,
+			uid,
+			e,
+			c,
+			m,
+			cardCurrencyAmount,
+			cashCurrencyAmount,
+			bonusCurrencyAmount,
+			currencyAmount,
+		} = req.body as {
 			cardAddr?: string
 			data?: string
 			deadline?: number
@@ -1794,6 +1808,10 @@ const routing = ( router: Router ) => {
 			e?: string
 			c?: string
 			m?: string
+			cardCurrencyAmount?: string
+			cashCurrencyAmount?: string
+			bonusCurrencyAmount?: string
+			currencyAmount?: string
 		}
 		let nfcTagIdHex: string | null = null
 		let nfcLinkedEOA: string | null = null
@@ -1980,6 +1998,53 @@ const routing = ( router: Router ) => {
 				}
 			}
 			logger(Colors.green(`server /api/nfcTopup preCheck OK | uid=${uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'} | fee=${Number(bunitFeeCheck.feeAmount ?? 0) / 1e6} B-Units | forwarding to master`))
+			const parseTopupCurrencyE6Cluster = (raw: unknown): bigint => {
+				const t = String(raw ?? '')
+					.trim()
+					.replace(/,/g, '')
+				if (!t) return 0n
+				try {
+					return ethers.parseUnits(t, 6)
+				} catch {
+					return -1n
+				}
+			}
+			const splitCluster: {
+				cardCurrencyAmount?: string
+				cashCurrencyAmount?: string
+				bonusCurrencyAmount?: string
+				currencyAmount?: string
+			} = {}
+			if (isMint) {
+				const anySplitField =
+					(cardCurrencyAmount != null && String(cardCurrencyAmount).trim() !== '') ||
+					(cashCurrencyAmount != null && String(cashCurrencyAmount).trim() !== '') ||
+					(bonusCurrencyAmount != null && String(bonusCurrencyAmount).trim() !== '') ||
+					(currencyAmount != null && String(currencyAmount).trim() !== '')
+				if (anySplitField) {
+					const cE = parseTopupCurrencyE6Cluster(cardCurrencyAmount)
+					const cashE = parseTopupCurrencyE6Cluster(cashCurrencyAmount)
+					const bE = parseTopupCurrencyE6Cluster(bonusCurrencyAmount)
+					const totE = parseTopupCurrencyE6Cluster(currencyAmount)
+					if (cE < 0n || cashE < 0n || bE < 0n || totE < 0n) {
+						return res.status(400).json({ success: false, error: 'Invalid top-up currency split amounts' }).end()
+					}
+					if (totE <= 0n || cE + cashE + bE !== totE) {
+						return res
+							.status(400)
+							.json({
+								success: false,
+								error:
+									'cardCurrencyAmount + cashCurrencyAmount + bonusCurrencyAmount must equal currencyAmount (6 decimal places)',
+							})
+							.end()
+					}
+					splitCluster.cardCurrencyAmount = ethers.formatUnits(cE, 6)
+					splitCluster.cashCurrencyAmount = ethers.formatUnits(cashE, 6)
+					splitCluster.bonusCurrencyAmount = ethers.formatUnits(bE, 6)
+					splitCluster.currencyAmount = ethers.formatUnits(totE, 6)
+				}
+			}
 			if (isNfcUid && nfcLinkedEOA && nfcTagIdHex && ethers.isAddress(nfcLinkedEOA)) {
 				try {
 					const aaNfc = await resolveBeamioAccountOf(ethers.getAddress(nfcLinkedEOA))
@@ -1993,17 +2058,22 @@ const routing = ( router: Router ) => {
 					/* non-fatal */
 				}
 			}
-			postLocalhost('/api/nfcTopup', {
-				cardAddr: cardAddress,
-				data,
-				deadline,
-				nonce,
-				adminSignature,
-				uid: typeof uid === 'string' ? uid : undefined,
-				cardOwnerEOA: bunitFeeCheck.cardOwnerEOA,
-				topupFeeBUnits: bunitFeeCheck.feeAmount?.toString(),
-				topupKind: bunitFeeCheck.topupKind,
-			}, res)
+			postLocalhost(
+				'/api/nfcTopup',
+				{
+					cardAddr: cardAddress,
+					data,
+					deadline,
+					nonce,
+					adminSignature,
+					uid: typeof uid === 'string' ? uid : undefined,
+					cardOwnerEOA: bunitFeeCheck.cardOwnerEOA,
+					topupFeeBUnits: bunitFeeCheck.feeAmount?.toString(),
+					topupKind: bunitFeeCheck.topupKind,
+					...splitCluster,
+				},
+				res
+			)
 		} catch (e: any) {
 			logger(Colors.red(`[nfcTopup] preCheck failed: ${e?.message ?? e}`))
 			return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'PreCheck failed' })
@@ -4472,7 +4542,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/**
 	 * Merchant Programs — Cluster 仅预检后转发 Master（会话状态仅在 Master 单进程，避免多 worker 内存分裂）。
-	 * body: `{ walletAddress, packageType: 'standard_kit' | 'custom_kit' }`
+	 * body: `{ walletAddress, packageType: 'lite_kit' | 'standard_kit' | 'custom_kit' }`
 	 */
 	router.post('/merchantKitStripe/createSession', async (req, res) => {
 		const { walletAddress, packageType } = req.body ?? {}
@@ -4482,7 +4552,11 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!ethers.isAddress(walletAddress)) {
 			return res.status(400).json({ error: 'Invalid walletAddress' }).end()
 		}
-		if (packageType !== 'standard_kit' && packageType !== 'custom_kit') {
+		if (
+			packageType !== 'lite_kit' &&
+			packageType !== 'standard_kit' &&
+			packageType !== 'custom_kit'
+		) {
 			return res.status(400).json({ error: 'Invalid packageType' }).end()
 		}
 		const sk =

@@ -1905,7 +1905,21 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Master 调用 factory.executeForAdmin */
 		router.post('/nfcTopup', async (req, res) => {
-			const { cardAddr, data, deadline, nonce, adminSignature, uid, cardOwnerEOA, topupFeeBUnits, topupKind } = req.body as {
+			const {
+				cardAddr,
+				data,
+				deadline,
+				nonce,
+				adminSignature,
+				uid,
+				cardOwnerEOA,
+				topupFeeBUnits,
+				topupKind,
+				cardCurrencyAmount,
+				cashCurrencyAmount,
+				bonusCurrencyAmount,
+				currencyAmount,
+			} = req.body as {
 				cardAddr?: string
 				data?: string
 				deadline?: number
@@ -1915,6 +1929,10 @@ const routing = ( router: Router ) => {
 				cardOwnerEOA?: string
 				topupFeeBUnits?: string
 				topupKind?: number
+				cardCurrencyAmount?: string
+				cashCurrencyAmount?: string
+				bonusCurrencyAmount?: string
+				currencyAmount?: string
 			}
 			if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
 				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' })
@@ -1926,6 +1944,44 @@ const routing = ( router: Router ) => {
 			if (mintLinkBlock) {
 				return res.status(403).json({ success: false, error: mintLinkBlock }).end()
 			}
+			const parseTopupAmtE6 = (raw: unknown): bigint => {
+				const t = String(raw ?? '')
+					.trim()
+					.replace(/,/g, '')
+				if (!t) return 0n
+				try {
+					return ethers.parseUnits(t, 6)
+				} catch {
+					return -1n
+				}
+			}
+			const cE = parseTopupAmtE6(cardCurrencyAmount)
+			const cashE = parseTopupAmtE6(cashCurrencyAmount)
+			const bE = parseTopupAmtE6(bonusCurrencyAmount)
+			const totE = parseTopupAmtE6(currencyAmount)
+			const anySplit =
+				(cardCurrencyAmount != null && String(cardCurrencyAmount).trim() !== '') ||
+				(cashCurrencyAmount != null && String(cashCurrencyAmount).trim() !== '') ||
+				(bonusCurrencyAmount != null && String(bonusCurrencyAmount).trim() !== '') ||
+				(currencyAmount != null && String(currencyAmount).trim() !== '')
+			let topupCurrencySplit:
+				| { currencyAmountE6: bigint; cardE6: bigint; cashE6: bigint; bonusE6: bigint }
+				| undefined
+			if (anySplit) {
+				if (cE < 0n || cashE < 0n || bE < 0n || totE < 0n) {
+					return res.status(400).json({ success: false, error: 'Invalid top-up currency split amounts' }).end()
+				}
+				if (totE <= 0n || cE + cashE + bE !== totE) {
+					return res
+						.status(400)
+						.json({
+							success: false,
+							error: 'cardCurrencyAmount + cashCurrencyAmount + bonusCurrencyAmount must equal currencyAmount (6dp)',
+						})
+						.end()
+				}
+				topupCurrencySplit = { currencyAmountE6: totE, cardE6: cE, cashE6: cashE, bonusE6: bE }
+			}
 			executeForAdminPool.push({
 				cardAddr: ethers.getAddress(cardAddr),
 				data,
@@ -1936,7 +1992,8 @@ const routing = ( router: Router ) => {
 				cardOwnerEOA: cardOwnerEOA && ethers.isAddress(cardOwnerEOA) ? ethers.getAddress(cardOwnerEOA) : undefined,
 				topupFeeBUnits: topupFeeBUnits ? BigInt(topupFeeBUnits) : undefined,
 				topupKind: topupKind === 2 || topupKind === 3 ? topupKind : 2,
-				res
+				res,
+				topupCurrencySplit,
 			})
 			logger(Colors.green(`[nfcTopup] cardAddr=${cardAddr} uid=${uid ?? '(not provided)'} pushed to executeForAdminPool`))
 			executeForAdminProcess().catch((err: any) => {

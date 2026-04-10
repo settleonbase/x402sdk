@@ -22,6 +22,11 @@ function merchantKitDbg(...args: unknown[]) {
 }
 
 export const MERCHANT_KIT_PACKAGES = {
+	lite_kit: {
+		name: 'Lite Program Kit',
+		cadCents: 1900,
+		description: '500 B-Units included — digital program (no NFC cards)',
+	},
 	standard_kit: {
 		name: 'Standard Program Kit',
 		cadCents: 6900,

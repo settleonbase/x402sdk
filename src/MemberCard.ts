@@ -1418,6 +1418,8 @@ export const executeForAdminPool: Array<{
 	topupFeeBUnits?: bigint
 	topupKind?: 2 | 3
 	res?: Response
+	/** POS 可选：卡币种入账拆分（6 位小数整数）；缺省则 indexer 仍为单笔 legacy `topupCard`/`newCard`/`upgradeNewCard` */
+	topupCurrencySplit?: { currencyAmountE6: bigint; cardE6: bigint; cashE6: bigint; bonusE6: bigint }
 }> = []
 
 /** Base `executeForAdmin` 已返回 txHash 且 HTTP 已 200 之后的后台任务（BUint / indexer / metadata），不占用 Settle_ContractPool 主槽位 */
@@ -4328,6 +4330,77 @@ const TX_CATEGORY_NFC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes(
 /** Indexer：USDC buyPointsForUser topup 的 B-Unit 服务费单独一条 */
 const TX_CATEGORY_USDC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('usdcTopup:bunitService')) as `0x${string}`
 
+/** NFC top-up 拆分记账（与 readme 2.3 及 bizSite `INDEXER_TX_TOPUP_CATEGORIES` 对齐；`txId` 须与 Base mint tx 不同，见 `nfcTopupIndexerLegTxId`） */
+const NFC_TOPUP_TX_CREDIT_TOPUP_CARD = ethers.keccak256(ethers.toUtf8Bytes('creditTopupCard')) as `0x${string}`
+const NFC_TOPUP_TX_CASH_TOPUP_CARD = ethers.keccak256(ethers.toUtf8Bytes('cashTopupCard')) as `0x${string}`
+const NFC_TOPUP_TX_CREDIT_UPGRADE_NEW_CARD = ethers.keccak256(ethers.toUtf8Bytes('creditUpgradeNewCard')) as `0x${string}`
+const NFC_TOPUP_TX_CASH_UPGRADE_NEW_CARD = ethers.keccak256(ethers.toUtf8Bytes('cashUpgradeNewCard')) as `0x${string}`
+const NFC_TOPUP_TX_CREDIT_NEW_CARD = ethers.keccak256(ethers.toUtf8Bytes('creditNewCard')) as `0x${string}`
+const NFC_TOPUP_TX_CASH_NEW_CARD = ethers.keccak256(ethers.toUtf8Bytes('cashNewCard')) as `0x${string}`
+const NFC_TOPUP_TX_BONUS_CARD = ethers.keccak256(ethers.toUtf8Bytes('bonusCard')) as `0x${string}`
+
+function nfcTopupIndexerCategoryForLeg(
+	leg: 'credit' | 'cash' | 'bonus',
+	base: 'topupCard' | 'upgradeNewCard' | 'newCard'
+): `0x${string}` {
+	if (leg === 'bonus') return NFC_TOPUP_TX_BONUS_CARD
+	if (base === 'topupCard') return leg === 'credit' ? NFC_TOPUP_TX_CREDIT_TOPUP_CARD : NFC_TOPUP_TX_CASH_TOPUP_CARD
+	if (base === 'upgradeNewCard') return leg === 'credit' ? NFC_TOPUP_TX_CREDIT_UPGRADE_NEW_CARD : NFC_TOPUP_TX_CASH_UPGRADE_NEW_CARD
+	return leg === 'credit' ? NFC_TOPUP_TX_CREDIT_NEW_CARD : NFC_TOPUP_TX_CASH_NEW_CARD
+}
+
+/** 与 Base `mintPointsByAdmin` txHash 组合生成唯一 `txId`（ActionFacet `tx exists`） */
+function nfcTopupIndexerLegTxId(baseTxHash: string, legKey: string): `0x${string}` {
+	const h = (baseTxHash || '').trim().toLowerCase()
+	const txWord =
+		/^0x[0-9a-f]{64}$/.test(h) ? (h as `0x${string}`) : (ethers.keccak256(ethers.toUtf8Bytes(h)) as `0x${string}`)
+	return ethers.keccak256(ethers.solidityPacked(['bytes32', 'string'], [txWord, legKey])) as `0x${string}`
+}
+
+/**
+ * Split on-chain minted `points6` across NFC top-up legs by **fiat6** weights (same order as `legs`).
+ * Last leg gets remainder so Σ = `totalPts`. If a leg has `fiat6 > 0` but floored share is 0, borrow 1 point
+ * from a donor leg with `> 1` so **principal + bonus** can each get a non-zero `syncTokenAction` when `totalPts` allows.
+ */
+function nfcSplitMintPointsByCurrencyLegs(totalPts: bigint, fiat6ByLeg: bigint[]): bigint[] {
+	const n = fiat6ByLeg.length
+	if (n === 0 || totalPts <= 0n) return Array(n).fill(0n)
+	const sumF = fiat6ByLeg.reduce((a, b) => a + b, 0n)
+	if (sumF <= 0n) return Array(n).fill(0n)
+	const out: bigint[] = []
+	let allocated = 0n
+	for (let i = 0; i < n; i++) {
+		if (i === n - 1) {
+			out.push(totalPts - allocated)
+		} else {
+			const p = (totalPts * fiat6ByLeg[i]!) / sumF
+			out.push(p)
+			allocated += p
+		}
+	}
+	for (let guard = 0; guard < n + 5; guard++) {
+		let donor = -1
+		for (let j = n - 1; j >= 0; j--) {
+			if (out[j]! > 1n) {
+				donor = j
+				break
+			}
+		}
+		if (donor < 0) break
+		let fixed = false
+		for (let i = 0; i < n; i++) {
+			if (fiat6ByLeg[i]! <= 0n) continue
+			if (out[i]! > 0n) continue
+			out[donor] -= 1n
+			out[i] = 1n
+			fixed = true
+			break
+		}
+		if (!fixed) break
+	}
+	return out
+}
+
 /** 1 B-Unit = 0.01 USDC，与 calcBeamioBUnitFee 一致 */
 const BUNIT_TO_USDC_DIVISOR = 100n
 
@@ -5145,7 +5218,6 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				} catch (aaDbErr: any) {
 					logger(Colors.yellow(`[executeForAdminPostBaseProcess] AA for member topup DB: ${aaDbErr?.message ?? aaDbErr}`))
 				}
-				const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
 				let finalRequestAmountUSDC6 = 0n
 				try {
 					const q = await quoteUSDCForPoints(obj.cardAddr, ethers.formatUnits(mintParsed.points6, 6))
@@ -5218,55 +5290,190 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 								: obj.cardOwnerEOA!
 					  )
 					: ethers.ZeroAddress
-				const input: PurchasingCardAccountingInput = {
-					txId: tx.hash as `0x${string}`,
-					originalPaymentHash: ethers.ZeroHash as `0x${string}`,
-					chainId: 8453n,
-					txCategory: txCategoryTopup,
-					displayJson,
-					timestamp: 0n,
-					payer: payerAddr,
-					payee: payeeAddr,
-					finalRequestAmountFiat6: mintParsed.points6,
-					finalRequestAmountUSDC6,
-					isAAAccount: false,
-					route: [topupRouteItem],
-					fees: {
-						gasChainType: 0,
-						gasWei: 0n,
-						gasUSDC6: 0n,
-						serviceUSDC6: 0n,
-						bServiceUSDC6: bServiceUSDC6Topup,
-						bServiceUnits6: bServiceUnits6Topup,
-						feePayer: feePayerCardOwner,
-					},
-					meta: {
-						requestAmountFiat6: mintParsed.points6,
-						requestAmountUSDC6: finalRequestAmountUSDC6,
-						currencyFiat: cardCurrencyFiat,
-						discountAmountFiat6: beforePoint6,
-						discountRateBps: 0,
-						taxAmountFiat6: 0n,
-						taxRateBps: 0,
-						afterNotePayer: '',
-						afterNotePayee: '',
-					},
-					operator: ethers.getAddress(adminCheck.signer),
-					operatorParentChain,
-					topAdmin,
-					subordinate,
+				const spl = obj.topupCurrencySplit
+				const sumSplit =
+					spl != null ? spl.cardE6 + spl.cashE6 + spl.bonusE6 : 0n
+				const useSplit =
+					Boolean(spl) &&
+					spl!.currencyAmountE6 > 0n &&
+					sumSplit === spl!.currencyAmountE6 &&
+					(spl!.cardE6 > 0n || spl!.cashE6 > 0n || spl!.bonusE6 > 0n)
+				if (spl && !useSplit) {
+					logger(
+						Colors.yellow(
+							`[executeForAdminPostBaseProcess] topupCurrencySplit ignored (sum mismatch or zero): amtE6=${spl.currencyAmountE6} card=${spl.cardE6} cash=${spl.cashE6} bonus=${spl.bonusE6}`
+						)
+					)
 				}
-				const syncTxHash = await runPurchasingCardAccountingJob(
-					{
-						input,
-						baseTxHash: tx.hash,
-						from: payerAddr,
-						cardAddress: obj.cardAddr,
-						attempt: 0,
-					},
-					{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
-				)
-				logger(Colors.green(`[executeForAdminPostBaseProcess] android topup accounting done: baseTx=${tx.hash} syncTokenAction=${syncTxHash} cat=${topupCategoryRaw}`))
+				let syncTxHash = ''
+				if (useSplit) {
+					type NfcLeg = { leg: 'credit' | 'cash' | 'bonus'; fiat6: bigint; idxKey: string }
+					/** Order: card (credit) → cash → bonus — Card/Cash 本金一条 + Bonus 一条共两条原子记账（`txId` 按腿区分）。 */
+					const legs: NfcLeg[] = []
+					if (spl!.cardE6 > 0n) legs.push({ leg: 'credit', fiat6: spl!.cardE6, idxKey: 'credit' })
+					if (spl!.cashE6 > 0n) legs.push({ leg: 'cash', fiat6: spl!.cashE6, idxKey: 'cash' })
+					if (spl!.bonusE6 > 0n) legs.push({ leg: 'bonus', fiat6: spl!.bonusE6, idxKey: 'bonus' })
+					const pointsLegs = nfcSplitMintPointsByCurrencyLegs(mintParsed.points6, legs.map((l) => l.fiat6))
+					let usdcAllocated = 0n
+					for (let i = 0; i < legs.length; i++) {
+						const pts = pointsLegs[i] ?? 0n
+						if (pts <= 0n) {
+							if (legs[i]!.fiat6 > 0n) {
+								logger(
+									Colors.yellow(
+										`[executeForAdminPostBaseProcess] NFC topup split leg skipped (zero points after split): leg=${legs[i]!.idxKey} fiat6=${legs[i]!.fiat6} totalPts=${mintParsed.points6}`
+									)
+								)
+							}
+							continue
+						}
+						let usdcLeg =
+							i === legs.length - 1
+								? finalRequestAmountUSDC6 - usdcAllocated
+								: (finalRequestAmountUSDC6 * pts) / mintParsed.points6
+						if (usdcLeg < 0n) usdcLeg = 0n
+						if (i < legs.length - 1) usdcAllocated += usdcLeg
+						const cat = nfcTopupIndexerCategoryForLeg(
+							legs[i]!.leg,
+							topupCategoryRaw as 'topupCard' | 'upgradeNewCard' | 'newCard'
+						)
+						const legTitleSuffix =
+							legs[i]!.leg === 'credit' ? ' · Card' : legs[i]!.leg === 'cash' ? ' · Cash' : ' · Bonus'
+						const legDisplayJson = JSON.stringify({
+							title: `${title}${legTitleSuffix}`,
+							handle: '',
+							source: 'androidNfcTopup',
+							topupCategory: topupCategoryRaw,
+							topupPaymentLeg: legs[i]!.leg,
+							cardName: cardDisplayName || undefined,
+							cardAddress: obj.cardAddr,
+							finishedHash: tx.hash,
+							cardCurrencyAmountE6: spl!.cardE6.toString(),
+							cashCurrencyAmountE6: spl!.cashE6.toString(),
+							bonusCurrencyAmountE6: spl!.bonusE6.toString(),
+						})
+						const legTxId = nfcTopupIndexerLegTxId(tx.hash, `${topupCategoryRaw}:${legs[i]!.idxKey}`)
+						const attachFee = i === 0
+						const inputLeg: PurchasingCardAccountingInput = {
+							txId: legTxId,
+							originalPaymentHash: ethers.ZeroHash as `0x${string}`,
+							chainId: 8453n,
+							txCategory: cat,
+							displayJson: legDisplayJson,
+							timestamp: 0n,
+							payer: payerAddr,
+							payee: payeeAddr,
+							finalRequestAmountFiat6: pts,
+							finalRequestAmountUSDC6: usdcLeg,
+							isAAAccount: false,
+							route: [
+								{
+									asset: obj.cardAddr,
+									amountE6: pts,
+									assetType: 1,
+									source: 1,
+									tokenId: tokenIdForRoute,
+									itemCurrencyType: cardCurrencyFiat,
+									offsetInRequestCurrencyE6: 0n,
+								},
+							],
+							fees: {
+								gasChainType: 0,
+								gasWei: 0n,
+								gasUSDC6: 0n,
+								serviceUSDC6: 0n,
+								bServiceUSDC6: attachFee ? bServiceUSDC6Topup : 0n,
+								bServiceUnits6: attachFee ? bServiceUnits6Topup : 0n,
+								feePayer: attachFee ? feePayerCardOwner : ethers.ZeroAddress,
+							},
+							meta: {
+								requestAmountFiat6: pts,
+								requestAmountUSDC6: usdcLeg,
+								currencyFiat: cardCurrencyFiat,
+								discountAmountFiat6: beforePoint6,
+								discountRateBps: 0,
+								taxAmountFiat6: 0n,
+								taxRateBps: 0,
+								afterNotePayer: '',
+								afterNotePayee: '',
+							},
+							operator: ethers.getAddress(adminCheck.signer),
+							operatorParentChain,
+							topAdmin,
+							subordinate,
+						}
+						syncTxHash = await runPurchasingCardAccountingJob(
+							{
+								input: inputLeg,
+								baseTxHash: tx.hash,
+								from: payerAddr,
+								cardAddress: obj.cardAddr,
+								attempt: 0,
+							},
+							{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
+						)
+					}
+					logger(
+						Colors.green(
+							`[executeForAdminPostBaseProcess] android topup split accounting done: baseTx=${tx.hash} lastSync=${syncTxHash} legs=${legs.length} baseCat=${topupCategoryRaw}`
+						)
+					)
+				} else {
+					const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
+					const input: PurchasingCardAccountingInput = {
+						txId: tx.hash as `0x${string}`,
+						originalPaymentHash: ethers.ZeroHash as `0x${string}`,
+						chainId: 8453n,
+						txCategory: txCategoryTopup,
+						displayJson,
+						timestamp: 0n,
+						payer: payerAddr,
+						payee: payeeAddr,
+						finalRequestAmountFiat6: mintParsed.points6,
+						finalRequestAmountUSDC6,
+						isAAAccount: false,
+						route: [topupRouteItem],
+						fees: {
+							gasChainType: 0,
+							gasWei: 0n,
+							gasUSDC6: 0n,
+							serviceUSDC6: 0n,
+							bServiceUSDC6: bServiceUSDC6Topup,
+							bServiceUnits6: bServiceUnits6Topup,
+							feePayer: feePayerCardOwner,
+						},
+						meta: {
+							requestAmountFiat6: mintParsed.points6,
+							requestAmountUSDC6: finalRequestAmountUSDC6,
+							currencyFiat: cardCurrencyFiat,
+							discountAmountFiat6: beforePoint6,
+							discountRateBps: 0,
+							taxAmountFiat6: 0n,
+							taxRateBps: 0,
+							afterNotePayer: '',
+							afterNotePayee: '',
+						},
+						operator: ethers.getAddress(adminCheck.signer),
+						operatorParentChain,
+						topAdmin,
+						subordinate,
+					}
+					syncTxHash = await runPurchasingCardAccountingJob(
+						{
+							input,
+							baseTxHash: tx.hash,
+							from: payerAddr,
+							cardAddress: obj.cardAddr,
+							attempt: 0,
+						},
+						{ walletConet: SC.walletConet, BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction }
+					)
+					logger(
+						Colors.green(
+							`[executeForAdminPostBaseProcess] android topup accounting done: baseTx=${tx.hash} syncTokenAction=${syncTxHash} cat=${topupCategoryRaw}`
+						)
+					)
+				}
 				const isInfraCashTreeTopup =
 					obj.cardAddr.toLowerCase() === BEAMIO_USER_CARD_ASSET_ADDRESS.toLowerCase()
 				if (
