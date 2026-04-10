@@ -631,6 +631,178 @@ const BUSINESS_START_KET_ADMIN_ABI = [
 	'function addAdmin(address account) external',
 ] as const
 
+/** CoNET：读余额 + adminBurn（发卡前销毁 #0） */
+const BUSINESS_START_KET_BALANCE_BURN_ABI = [
+	'function balanceOf(address account, uint256 id) view returns (uint256)',
+	'function adminBurn(address from, uint256 id, uint256 value) external',
+] as const
+
+const BUSINESS_START_KET_ISSUANCE_TOKEN_ID = 0n
+
+const AA_FACTORY_RESOLVE_FOR_KET_ABI = [
+	'function beamioAccountOf(address) view returns (address)',
+	'function primaryAccountOf(address) view returns (address)',
+] as const
+
+function businessStartKetCreateCardGateSkipped(): boolean {
+	const v =
+		(typeof process !== 'undefined' && process.env?.BEAMIO_SKIP_BUSINESS_START_KET_GATE?.trim()?.toLowerCase()) || ''
+	return v === '1' || v === 'true' || v === 'yes'
+}
+
+function resolveConetBusinessStartKetAddressForCreateCardGate(): string | null {
+	const raw =
+		(typeof process !== 'undefined' && process.env.CONET_BUSINESS_START_KET?.trim()) || CONET_BUSINESS_START_KET
+	if (!raw?.trim()) return null
+	try {
+		const a = ethers.getAddress(raw.trim())
+		return a === ethers.ZeroAddress ? null : a
+	} catch {
+		return null
+	}
+}
+
+/**
+ * 与 merchantKitStripe 一致：若 `walletAddress` 为某 EOA 的 Beamio AA，则 Ket mint/recipient 以 EOA 为准。
+ */
+async function resolveBusinessStartKetMintRecipientEoaOnBase(walletAddress: string): Promise<string> {
+	const addr = ethers.getAddress(walletAddress)
+	let code: string
+	try {
+		code = await providerBaseBackup.getCode(addr)
+	} catch {
+		return addr
+	}
+	if (!code || code === '0x') {
+		return addr
+	}
+	const acct = new ethers.Contract(addr, ['function owner() view returns (address)'], providerBaseBackup)
+	let ownerRaw: string
+	try {
+		ownerRaw = await acct.owner()
+	} catch {
+		return addr
+	}
+	if (!ownerRaw || ownerRaw === ethers.ZeroAddress) {
+		return addr
+	}
+	let ownerAddr: string
+	try {
+		ownerAddr = ethers.getAddress(ownerRaw)
+	} catch {
+		return addr
+	}
+	const fac = new ethers.Contract(BeamioAAAccountFactoryPaymaster, AA_FACTORY_RESOLVE_FOR_KET_ABI, providerBaseBackup)
+	try {
+		let aa = await fac.beamioAccountOf(ownerAddr)
+		if (!aa || aa === ethers.ZeroAddress) {
+			aa = await fac.primaryAccountOf(ownerAddr).catch(() => ethers.ZeroAddress)
+		}
+		if (aa && aa !== ethers.ZeroAddress && ethers.getAddress(aa) === addr) {
+			return ownerAddr
+		}
+	} catch {
+		/* not Beamio AA */
+	}
+	return addr
+}
+
+export type CreateCardBusinessStartKetClusterPreCheckResult =
+	| { success: true; burnFrom?: string }
+	| { success: false; error: string }
+
+/**
+ * Cluster：发卡前只读预检 — 是否在 CoNET 上持有 BusinessStartKet #0（≥1）。
+ * 在 AA→EOA 解析之后调用，同时用原始 cardOwner 与解析后 EOA 及 mint 语义候选地址查余额。
+ * `BEAMIO_SKIP_BUSINESS_START_KET_GATE=1` 时跳过（本地/工具）。
+ */
+export async function createCardBusinessStartKetClusterPreCheck(
+	originalCardOwner: string,
+	resolvedCardOwnerEoa: string
+): Promise<CreateCardBusinessStartKetClusterPreCheckResult> {
+	if (businessStartKetCreateCardGateSkipped()) {
+		return { success: true }
+	}
+	const ketAddr = resolveConetBusinessStartKetAddressForCreateCardGate()
+	if (!ketAddr) {
+		return {
+			success: false,
+			error:
+				'Business starter certificate is not configured on this server (BusinessStartKet). Cannot issue card.',
+		}
+	}
+	const ketRead = new ethers.Contract(ketAddr, BUSINESS_START_KET_BALANCE_BURN_ABI, providerConet)
+	const orig = ethers.getAddress(originalCardOwner)
+	const resolved = ethers.getAddress(resolvedCardOwnerEoa)
+	const candidates: string[] = []
+	const seen = new Set<string>()
+	const push = (a: string) => {
+		const x = ethers.getAddress(a)
+		const k = x.toLowerCase()
+		if (!seen.has(k)) {
+			seen.add(k)
+			candidates.push(x)
+		}
+	}
+	push(orig)
+	push(resolved)
+	try {
+		push(await resolveBusinessStartKetMintRecipientEoaOnBase(orig))
+	} catch {
+		/* ignore */
+	}
+	if (orig.toLowerCase() !== resolved.toLowerCase()) {
+		try {
+			push(await resolveBusinessStartKetMintRecipientEoaOnBase(resolved))
+		} catch {
+			/* ignore */
+		}
+	}
+	for (const holder of candidates) {
+		let bal: bigint
+		try {
+			bal = await ketRead.balanceOf(holder, BUSINESS_START_KET_ISSUANCE_TOKEN_ID)
+		} catch (e: any) {
+			return {
+				success: false,
+				error: `Failed to verify BusinessStartKet balance: ${e?.message ?? e}`,
+			}
+		}
+		if (bal >= 1n) {
+			return { success: true, burnFrom: holder }
+		}
+	}
+	return {
+		success: false,
+		error:
+			'Issuing a merchant card requires one Business Starter Kit certificate on CoNET (BusinessStartKet #0). None found for this wallet.',
+	}
+}
+
+async function burnOneBusinessStartKet0ForCreateCardPool(
+	SC: (typeof Settle_ContractPool)[0],
+	burnFrom: string
+): Promise<{ txHash: string }> {
+	const ketAddr = resolveConetBusinessStartKetAddressForCreateCardGate()
+	if (!ketAddr) {
+		throw new Error('CONET_BUSINESS_START_KET not configured')
+	}
+	const ket = new ethers.Contract(ketAddr, BUSINESS_START_KET_BALANCE_BURN_ABI, SC.walletConet)
+	const from = ethers.getAddress(burnFrom)
+	const bal = await ket.balanceOf(from, BUSINESS_START_KET_ISSUANCE_TOKEN_ID)
+	if (bal < 1n) {
+		throw new Error(
+			'BusinessStartKet #0 balance is insufficient (possible race). Card issuance was aborted.'
+		)
+	}
+	const tx = await ket.adminBurn(from, BUSINESS_START_KET_ISSUANCE_TOKEN_ID, 1n)
+	const receipt = await tx.wait()
+	if (!receipt || Number(receipt.status) !== 1) {
+		throw new Error('BusinessStartKet adminBurn failed or reverted')
+	}
+	return { txHash: receipt.hash }
+}
+
 /**
  * Master 主进程：确保 BusinessStartKet（CoNET）的 admins 覆盖 Settle_ContractPool 中全部钱包。
  * 需配置 CONET_BUSINESS_START_KET（chainAddresses 或环境变量）；由 settle_contractAdmin[0] 在链上需已是 admin。
@@ -8739,6 +8911,10 @@ export type CreateCardPreChecked = {
 		maximumTopup?: number
 	}
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
+	/** CoNET BusinessStartKet #0 burn source; set by Cluster after balance precheck (omit when BEAMIO_SKIP_BUSINESS_START_KET_GATE) */
+	businessStartKetBurnFrom?: string
+	/** Client-supplied cardOwner before Cluster AA→EOA normalization; Master re-verifies burn target */
+	createCardOwnerAsRequested?: string
 }
 
 const CREATE_CARD_TOPUP_LIMIT_MAX_UNITS = 1000
@@ -8962,7 +9138,18 @@ export const createCardPoolPress = async () => {
 		return setTimeout(() => createCardPoolPress(), 3000)
 	}
 	const { res, ...payload } = obj
-	const { cardOwner, currency, priceInCurrencyE6, uri, transferWhitelistEnabled, upgradeType, shareTokenMetadata, tiers } = payload
+	const {
+		cardOwner,
+		currency,
+		priceInCurrencyE6,
+		uri,
+		transferWhitelistEnabled,
+		upgradeType,
+		shareTokenMetadata,
+		tiers,
+		businessStartKetBurnFrom,
+		createCardOwnerAsRequested,
+	} = payload
 
 	// Settle_ContractPool = factory 登记的 owner 列表，shift 取一 admin 用于 RPC，支持多 request 并行（多 admin 同时送上链）
 	const factory = SC.baseFactoryPaymaster
@@ -8974,6 +9161,25 @@ export const createCardPoolPress = async () => {
 	)
 
 	try {
+		if (!businessStartKetCreateCardGateSkipped() && businessStartKetBurnFrom) {
+			const burnAddr = ethers.getAddress(businessStartKetBurnFrom)
+			const reVerify = await createCardBusinessStartKetClusterPreCheck(
+				createCardOwnerAsRequested ?? cardOwner,
+				ethers.getAddress(cardOwner)
+			)
+			if (
+				!reVerify.success ||
+				!reVerify.burnFrom ||
+				ethers.getAddress(reVerify.burnFrom) !== burnAddr
+			) {
+				throw new Error(
+					'BusinessStartKet burn address failed master re-verification. Card issuance was aborted.'
+				)
+			}
+			logger(Colors.cyan(`[createCardPoolPress] BusinessStartKet adminBurn tokenId=0 amount=1 from=${burnAddr}`))
+			const { txHash: ketBurnTxHash } = await burnOneBusinessStartKet0ForCreateCardPool(SC, burnAddr)
+			logger(Colors.green(`[createCardPoolPress] BusinessStartKet burn ok tx=${ketBurnTxHash}`))
+		}
 		const tiersForCreate = tiers && tiers.length > 0
 			? tiers.map((t, i) => ({
 					minUsdc6: t.minUsdc6,

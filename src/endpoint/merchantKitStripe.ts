@@ -8,7 +8,11 @@ import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { masterSetup } from '../util'
 import { logger } from '../logger'
-import { CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET } from '../chainAddresses'
+import {
+	BASE_AA_FACTORY,
+	CONET_BUNIT_AIRDROP_ADDRESS,
+	CONET_BUSINESS_START_KET,
+} from '../chainAddresses'
 
 /** CoNET B-Unit / kit mint signer（与 MemberCard Settle 一致） */
 const CONET_MAINNET_RPC_HTTP = 'https://mainnet-rpc.conet.network'
@@ -20,6 +24,63 @@ const BUNIT_AIRDROP_MINT_FOR_USDC_PURCHASE_ABI = [
 const BUSINESS_START_KET_MINT_ABI = [
 	'function mint(address to, uint256 id, uint256 amount, bytes data) external',
 ] as const
+
+const BASE_RPC_HTTP_DEFAULT = 'https://base-rpc.conet.network'
+
+const AA_FACTORY_RESOLVE_ABI = [
+	'function beamioAccountOf(address) view returns (address)',
+	'function primaryAccountOf(address) view returns (address)',
+] as const
+
+/**
+ * CoNET kit mint 必须记入用户 EOA。客户端可能把 Beamio AA（与 profile keyID 相同）当作 wallet 传入。
+ * 在 Base 上校验：若地址为合约且 beamioAccountOf(owner)/primaryAccountOf(owner) 等于该地址，则返回 owner。
+ */
+async function resolveMerchantKitStripeMintRecipientEoa(walletAddress: string): Promise<string> {
+	const addr = ethers.getAddress(walletAddress)
+	const baseRpc =
+		(typeof process !== 'undefined' && process.env.BASE_RPC_URL?.trim()) || BASE_RPC_HTTP_DEFAULT
+	const provider = new ethers.JsonRpcProvider(baseRpc.replace(/\/$/, ''))
+	let code: string
+	try {
+		code = await provider.getCode(addr)
+	} catch {
+		return addr
+	}
+	if (!code || code === '0x') {
+		return addr
+	}
+	const acct = new ethers.Contract(addr, ['function owner() view returns (address)'], provider)
+	let ownerRaw: string
+	try {
+		ownerRaw = await acct.owner()
+	} catch {
+		return addr
+	}
+	if (!ownerRaw || ownerRaw === ethers.ZeroAddress) {
+		return addr
+	}
+	let ownerAddr: string
+	try {
+		ownerAddr = ethers.getAddress(ownerRaw)
+	} catch {
+		return addr
+	}
+	const fac = new ethers.Contract(BASE_AA_FACTORY, AA_FACTORY_RESOLVE_ABI, provider)
+	try {
+		let aa = await fac.beamioAccountOf(ownerAddr)
+		if (!aa || aa === ethers.ZeroAddress) {
+			aa = await fac.primaryAccountOf(ownerAddr).catch(() => ethers.ZeroAddress)
+		}
+		if (aa && aa !== ethers.ZeroAddress && ethers.getAddress(aa) === addr) {
+			merchantKitDbg('resolveMintRecipient: AA → EOA', addr, '→', ownerAddr)
+			return ownerAddr
+		}
+	} catch {
+		/* not a Beamio AA for this owner */
+	}
+	return addr
+}
 
 /** Set `MERCHANT_KIT_STRIPE_DEBUG=1` (or `true`) for verbose poll/refresh logs. Webhook always logs a short summary line. */
 function merchantKitStripeDebugEnabled(): boolean {
@@ -153,12 +214,21 @@ async function fulfillMerchantKitStripeOnChain(sessionId: string): Promise<void>
 				merchantKitDbg('fulfill skip (not succeeded)', sessionId, rec?.status ?? '(no record)')
 				return
 			}
-			let eoa: string
+			let mintRecipient: string
 			try {
-				eoa = ethers.getAddress(rec.eoaAddress)
+				mintRecipient = ethers.getAddress(rec.eoaAddress)
 			} catch {
 				logger(Colors.red('[merchantKitStripe] fulfill: invalid EOA'), rec.eoaAddress)
 				return
+			}
+			mintRecipient = await resolveMerchantKitStripeMintRecipientEoa(mintRecipient)
+			if (mintRecipient.toLowerCase() !== rec.eoaAddress.toLowerCase()) {
+				logger(
+					Colors.cyan('[merchantKitStripe] fulfill: wallet was AA on Base; minting kit to EOA'),
+					rec.eoaAddress,
+					'→',
+					mintRecipient
+				)
 			}
 			if (!(rec.packageType in MERCHANT_KIT_PACKAGES)) {
 				logger(Colors.red('[merchantKitStripe] fulfill: unknown packageType'), rec.packageType)
@@ -183,7 +253,7 @@ async function fulfillMerchantKitStripeOnChain(sessionId: string): Promise<void>
 					signer
 				)
 				const refHash = ethers.keccak256(ethers.toUtf8Bytes(sessionId))
-				const tx = await airdrop.mintForUsdcPurchase(eoa, usdc6Synth, refHash)
+				const tx = await airdrop.mintForUsdcPurchase(mintRecipient, usdc6Synth, refHash)
 				const receipt = await tx.wait()
 				const h = receipt?.hash ?? tx.hash
 				patchChainFulfillment({ buintTxHash: h, lastError: undefined })
@@ -193,14 +263,14 @@ async function fulfillMerchantKitStripeOnChain(sessionId: string): Promise<void>
 					`pkg=${pkg}`,
 					`bunits≈${(Number(MERCHANT_KIT_INCLUDED_BUNITS_6[pkg]) / 1e6).toFixed(2)}`,
 					`tx=${h}`,
-					`eoa=${eoa}`
+					`eoa=${mintRecipient}`
 				)
 			}
 
 			const ketAddr = resolveConetBusinessStartKetAddressForMint()
 			if (ketAddr && !getCf().nftTxHash) {
 				const ket = new ethers.Contract(ketAddr, BUSINESS_START_KET_MINT_ABI, signer)
-				const tx2 = await ket.mint(eoa, 0n, 1n, '0x')
+				const tx2 = await ket.mint(mintRecipient, 0n, 1n, '0x')
 				const receipt2 = await tx2.wait()
 				const h2 = receipt2?.hash ?? tx2.hash
 				patchChainFulfillment({ nftTxHash: h2, lastError: undefined })
@@ -208,7 +278,7 @@ async function fulfillMerchantKitStripeOnChain(sessionId: string): Promise<void>
 					Colors.green('[merchantKitStripe] BusinessStartKet mint token #0 ok'),
 					`session=${sessionId}`,
 					`tx=${h2}`,
-					`eoa=${eoa}`
+					`eoa=${mintRecipient}`
 				)
 			} else if (!ketAddr) {
 				merchantKitDbg('fulfill: skip ERC1155 (CONET_BUSINESS_START_KET unset)')

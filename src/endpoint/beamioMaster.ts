@@ -955,6 +955,9 @@ const routing = ( router: Router ) => {
 				uri?: string
 				shareTokenMetadata?: { name?: string; description?: string; image?: string }
 				tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
+				/** Set by Cluster when BusinessStartKet #0 must be burned before deploy */
+				businessStartKetBurnFrom?: string
+				createCardOwnerAsRequested?: string
 			}
 			createCardPool.push({ ...body, res })
 			logger(Colors.cyan(`[createCard] pushed to pool, cardOwner=${body.cardOwner}`))
