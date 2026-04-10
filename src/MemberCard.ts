@@ -42,6 +42,7 @@ import {
 	CONET_BUINT_REDEEM_AIRDROP,
 	BEAMIO_INDEXER_DIAMOND,
 	CONET_BUSINESS_START_KET,
+	CONET_BUSINESS_START_KET_REDEEM,
 	MERCHANT_POS_MANAGEMENT_CONET,
 	BASE_TREASURY,
 	BEAMIO_USER_CARD_ASSET_ADDRESS,
@@ -710,6 +711,91 @@ const ensureBusinessStartKetConetAdmins = async (): Promise<void> => {
 	}
 }
 
+const BUSINESS_START_KET_REDEEM_ADMIN_ABI = [
+	'function redeemAdmins(address) view returns (bool)',
+	'function addRedeemAdmin(address account) external',
+] as const
+
+/**
+ * Master 主进程：确保 BusinessStartKetRedeem（CoNET）的 redeemAdmins 覆盖 Settle_ContractPool 全部钱包。
+ */
+const ensureBusinessStartKetRedeemConetAdmins = async (): Promise<void> => {
+	if (!cluster.isPrimary) {
+		return
+	}
+	const raw =
+		(typeof process !== 'undefined' && process.env.CONET_BUSINESS_START_KET_REDEEM?.trim()) ||
+		CONET_BUSINESS_START_KET_REDEEM
+	if (!raw?.trim()) {
+		logger(Colors.gray('[business-start-ket-redeem-admin] skip: CONET_BUSINESS_START_KET_REDEEM not configured'))
+		return
+	}
+	let contractAddr: string
+	try {
+		contractAddr = ethers.getAddress(raw.trim())
+	} catch {
+		logger(Colors.yellow('[business-start-ket-redeem-admin] skip: invalid CONET_BUSINESS_START_KET_REDEEM'))
+		return
+	}
+	if (contractAddr === ethers.ZeroAddress) {
+		return
+	}
+	if (!Settle_ContractPool.length) {
+		logger(Colors.yellow('[business-start-ket-redeem-admin] skip: Settle_ContractPool is empty'))
+		return
+	}
+	const ownerPk = masterSetup?.settle_contractAdmin?.[0]
+	if (!ownerPk) {
+		logger(Colors.yellow('[business-start-ket-redeem-admin] skip: settle_contractAdmin[0] is empty'))
+		return
+	}
+	const signer = new ethers.Wallet(ownerPk, providerConet)
+	const read = new ethers.Contract(contractAddr, BUSINESS_START_KET_REDEEM_ADMIN_ABI, providerConet)
+	let signerIsRedeemAdmin = false
+	try {
+		signerIsRedeemAdmin = !!(await read.redeemAdmins(signer.address))
+	} catch (e: any) {
+		logger(Colors.red(`[business-start-ket-redeem-admin] redeemAdmins(${signer.address}) failed: ${e?.message ?? e}`))
+		return
+	}
+	if (!signerIsRedeemAdmin) {
+		logger(
+			Colors.yellow(
+				`[business-start-ket-redeem-admin] skip: settle_contractAdmin[0]=${signer.address} is not BusinessStartKetRedeem redeem admin (on-chain)`
+			)
+		)
+		return
+	}
+	const adminTargets = [...new Set(Settle_ContractPool.map((sc) => sc.walletConet.address.toLowerCase()))]
+		.map((addrLower) => {
+			const found = Settle_ContractPool.find((sc) => sc.walletConet.address.toLowerCase() === addrLower)
+			return found?.walletConet.address
+		})
+		.filter((a): a is string => !!a)
+		.map((a) => ethers.getAddress(a))
+
+	const write = new ethers.Contract(contractAddr, BUSINESS_START_KET_REDEEM_ADMIN_ABI, signer)
+	for (const adminAddr of adminTargets) {
+		let isRa = false
+		try {
+			isRa = !!(await read.redeemAdmins(adminAddr))
+		} catch (e: any) {
+			logger(Colors.red(`[business-start-ket-redeem-admin] redeemAdmins(${adminAddr}) failed: ${e?.message ?? e}`))
+			continue
+		}
+		if (isRa) {
+			continue
+		}
+		try {
+			const tx = await write.addRedeemAdmin(adminAddr)
+			await tx.wait()
+			logger(Colors.green(`[business-start-ket-redeem-admin] addRedeemAdmin ok: ${adminAddr}`))
+		} catch (e: any) {
+			logger(Colors.red(`[business-start-ket-redeem-admin] addRedeemAdmin failed for ${adminAddr}: ${e?.message ?? e}`))
+		}
+	}
+}
+
 /** Master 启动时与链上 UserCard._aaFactory() 对齐；避免本地 AA_FACTORY 未及时提交时 Settle 池仍指向旧工厂 */
 async function refreshSettlePoolAaFactoryContractsFromUserCard(): Promise<void> {
 	if (!Settle_ContractPool.length) {
@@ -745,6 +831,7 @@ if (cluster.isPrimary) {
 		await refreshSettlePoolAaFactoryContractsFromUserCard()
 		await ensureSettleAdminsAsFactoryPaymasters()
 		await ensureBusinessStartKetConetAdmins()
+		await ensureBusinessStartKetRedeemConetAdmins()
 	})()
 }
 
@@ -3741,6 +3828,451 @@ export const buintRedeemAirdropProcess = async () => {
 	} finally {
 		if (SC) Settle_ContractPool.unshift(SC)
 		setTimeout(() => void buintRedeemAirdropProcess(), 3000)
+	}
+}
+
+// --- BusinessStartKetRedeem：redeem admin EIP-712 授权 + Master(Settle) 代付 gas 调用 createRedeemFor / cancelRedeemFor ---
+
+const BUSINESS_START_KET_REDEEM_RELAY_ABI = [
+	'function createRedeemFor(address admin, bytes32 codeHash, uint256 tokenId, uint256 ketAmount, uint256 buintAmount, uint256 validAfter, uint256 validBefore, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function cancelRedeemFor(address admin, bytes32 codeHash, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function redeemAdminNonces(address account) view returns (uint256)',
+	'function redeemAdmins(address account) view returns (bool)',
+] as const
+
+const KET_REDEEM_CREATE_TOKEN_ID = 0n
+const KET_REDEEM_CREATE_KET_AMOUNT = 1n
+
+function resolveConetBusinessStartKetRedeemAddress(): string | null {
+	const raw =
+		(typeof process !== 'undefined' && process.env.CONET_BUSINESS_START_KET_REDEEM?.trim()) ||
+		CONET_BUSINESS_START_KET_REDEEM
+	if (!raw?.trim()) return null
+	try {
+		const a = ethers.getAddress(raw.trim())
+		return a === ethers.ZeroAddress ? null : a
+	} catch {
+		return null
+	}
+}
+
+export function businessStartKetRedeemEip712Domain(verifyingContract: string) {
+	return {
+		name: 'BusinessStartKetRedeem',
+		version: '1',
+		chainId: CONET_MAINNET_CHAIN_ID,
+		verifyingContract: ethers.getAddress(verifyingContract),
+	} as const
+}
+
+export const businessStartKetRedeemCreateTypedDataTypes: Record<string, { name: string; type: string }[]> = {
+	CreateRedeem: [
+		{ name: 'admin', type: 'address' },
+		{ name: 'codeHash', type: 'bytes32' },
+		{ name: 'tokenId', type: 'uint256' },
+		{ name: 'amount', type: 'uint256' },
+		{ name: 'buintAmount', type: 'uint256' },
+		{ name: 'validAfter', type: 'uint256' },
+		{ name: 'validBefore', type: 'uint256' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
+export const businessStartKetRedeemCancelTypedDataTypes: Record<string, { name: string; type: string }[]> = {
+	CancelRedeem: [
+		{ name: 'admin', type: 'address' },
+		{ name: 'codeHash', type: 'bytes32' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
+/** Cluster 直读：当前 admin 在 BusinessStartKetRedeem 上的 redeemAdminNonces（供前端签名前拉取） */
+export async function businessStartKetRedeemReadAdminNonce(adminAddress: string): Promise<{ ok: true; nonce: string } | { ok: false; error: string }> {
+	const addr = resolveConetBusinessStartKetRedeemAddress()
+	if (!addr) {
+		return { ok: false, error: 'CONET_BUSINESS_START_KET_REDEEM not configured' }
+	}
+	let admin: string
+	try {
+		admin = ethers.getAddress(adminAddress.trim())
+	} catch {
+		return { ok: false, error: 'Invalid admin' }
+	}
+	const c = new ethers.Contract(addr, BUSINESS_START_KET_REDEEM_RELAY_ABI, providerConet)
+	try {
+		const n = await c.redeemAdminNonces!(admin)
+		return { ok: true, nonce: (n as bigint).toString() }
+	} catch (e: any) {
+		return { ok: false, error: e?.shortMessage ?? e?.message ?? 'redeemAdminNonces failed' }
+	}
+}
+
+export async function businessStartKetRedeemCreateClusterPreCheck(body: {
+	admin?: string
+	codeHash?: string
+	buintAmount?: string
+	validAfter?: unknown
+	validBefore?: unknown
+	nonce?: unknown
+	deadline?: unknown
+	signature?: unknown
+}): Promise<
+	| {
+			success: true
+			preChecked: {
+				contract: string
+				admin: string
+				codeHash: string
+				tokenId: bigint
+				ketAmount: bigint
+				buintAmount: bigint
+				validAfter: bigint
+				validBefore: bigint
+				nonce: bigint
+				deadline: bigint
+				signature: string
+			}
+	  }
+	| { success: false; error: string }
+> {
+	const contractAddr = resolveConetBusinessStartKetRedeemAddress()
+	if (!contractAddr) {
+		return { success: false, error: 'CONET_BUSINESS_START_KET_REDEEM not configured' }
+	}
+	const rawAdmin = typeof body.admin === 'string' ? body.admin.trim() : ''
+	if (!rawAdmin || !ethers.isAddress(rawAdmin)) {
+		return { success: false, error: 'Invalid admin' }
+	}
+	const admin = ethers.getAddress(rawAdmin)
+	const rawHash = typeof body.codeHash === 'string' ? body.codeHash.trim() : ''
+	if (!rawHash.startsWith('0x') || rawHash.length !== 66) {
+		return { success: false, error: 'Invalid codeHash' }
+	}
+	const codeHash = rawHash as `0x${string}`
+	let buintAmount: bigint
+	try {
+		buintAmount = BigInt(typeof body.buintAmount === 'string' ? body.buintAmount.trim() : '')
+	} catch {
+		return { success: false, error: 'Invalid buintAmount' }
+	}
+	if (buintAmount <= 0n) {
+		return { success: false, error: 'buintAmount must be positive' }
+	}
+	if (buintAmount > BigInt('0xffffffffffffffffffffffffffffffff')) {
+		return { success: false, error: 'buintAmount too large' }
+	}
+	let validAfter = 0n
+	let validBefore = 0n
+	if (body.validAfter != null && body.validAfter !== '') {
+		try {
+			validAfter = BigInt(String(body.validAfter))
+		} catch {
+			return { success: false, error: 'Invalid validAfter' }
+		}
+	}
+	if (body.validBefore != null && body.validBefore !== '') {
+		try {
+			validBefore = BigInt(String(body.validBefore))
+		} catch {
+			return { success: false, error: 'Invalid validBefore' }
+		}
+	}
+	if (validAfter > BigInt('0xffffffffffffffff') || validBefore > BigInt('0xffffffffffffffff')) {
+		return { success: false, error: 'validAfter/validBefore overflow uint64' }
+	}
+	let nonce: bigint
+	try {
+		nonce = BigInt(String(body.nonce ?? ''))
+	} catch {
+		return { success: false, error: 'Invalid nonce' }
+	}
+	let deadline: bigint
+	try {
+		deadline = BigInt(String(body.deadline ?? ''))
+	} catch {
+		return { success: false, error: 'Invalid deadline' }
+	}
+	const sigRaw = typeof body.signature === 'string' ? body.signature.trim() : ''
+	if (!sigRaw.startsWith('0x') || sigRaw.length < 130) {
+		return { success: false, error: 'Invalid signature' }
+	}
+	const signature = sigRaw
+
+	const read = new ethers.Contract(contractAddr, BUSINESS_START_KET_REDEEM_RELAY_ABI, providerConet)
+	let isRa = false
+	let chainNonce = 0n
+	try {
+		isRa = !!(await read.redeemAdmins!(admin))
+		chainNonce = await read.redeemAdminNonces!(admin)
+	} catch (e: any) {
+		return { success: false, error: e?.shortMessage ?? e?.message ?? 'On-chain read failed' }
+	}
+	if (!isRa) {
+		return { success: false, error: 'Not a redeem admin' }
+	}
+	if (chainNonce !== nonce) {
+		return { success: false, error: 'Stale nonce; refresh and sign again' }
+	}
+	const nowSec = Math.floor(Date.now() / 1000)
+	if (deadline <= BigInt(nowSec)) {
+		return { success: false, error: 'Deadline expired' }
+	}
+
+	const domain = businessStartKetRedeemEip712Domain(contractAddr)
+	const message = {
+		admin,
+		codeHash,
+		tokenId: KET_REDEEM_CREATE_TOKEN_ID,
+		amount: KET_REDEEM_CREATE_KET_AMOUNT,
+		buintAmount,
+		validAfter,
+		validBefore,
+		nonce,
+		deadline,
+	}
+	let recovered: string
+	try {
+		recovered = ethers.verifyTypedData(domain, businessStartKetRedeemCreateTypedDataTypes, message, signature)
+	} catch (e: any) {
+		return { success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid typed data signature' }
+	}
+	if (recovered.toLowerCase() !== admin.toLowerCase()) {
+		return { success: false, error: 'Signer is not admin' }
+	}
+
+	return {
+		success: true,
+		preChecked: {
+			contract: contractAddr,
+			admin,
+			codeHash,
+			tokenId: KET_REDEEM_CREATE_TOKEN_ID,
+			ketAmount: KET_REDEEM_CREATE_KET_AMOUNT,
+			buintAmount,
+			validAfter,
+			validBefore,
+			nonce,
+			deadline,
+			signature,
+		},
+	}
+}
+
+export async function businessStartKetRedeemCancelClusterPreCheck(body: {
+	admin?: string
+	codeHash?: string
+	nonce?: unknown
+	deadline?: unknown
+	signature?: unknown
+}): Promise<
+	| {
+			success: true
+			preChecked: {
+				contract: string
+				admin: string
+				codeHash: string
+				nonce: bigint
+				deadline: bigint
+				signature: string
+			}
+	  }
+	| { success: false; error: string }
+> {
+	const contractAddr = resolveConetBusinessStartKetRedeemAddress()
+	if (!contractAddr) {
+		return { success: false, error: 'CONET_BUSINESS_START_KET_REDEEM not configured' }
+	}
+	const rawAdmin = typeof body.admin === 'string' ? body.admin.trim() : ''
+	if (!rawAdmin || !ethers.isAddress(rawAdmin)) {
+		return { success: false, error: 'Invalid admin' }
+	}
+	const admin = ethers.getAddress(rawAdmin)
+	const rawHash = typeof body.codeHash === 'string' ? body.codeHash.trim() : ''
+	if (!rawHash.startsWith('0x') || rawHash.length !== 66) {
+		return { success: false, error: 'Invalid codeHash' }
+	}
+	const codeHash = rawHash as `0x${string}`
+	let nonce: bigint
+	try {
+		nonce = BigInt(String(body.nonce ?? ''))
+	} catch {
+		return { success: false, error: 'Invalid nonce' }
+	}
+	let deadline: bigint
+	try {
+		deadline = BigInt(String(body.deadline ?? ''))
+	} catch {
+		return { success: false, error: 'Invalid deadline' }
+	}
+	const sigRaw = typeof body.signature === 'string' ? body.signature.trim() : ''
+	if (!sigRaw.startsWith('0x') || sigRaw.length < 130) {
+		return { success: false, error: 'Invalid signature' }
+	}
+	const signature = sigRaw
+
+	const read = new ethers.Contract(contractAddr, BUSINESS_START_KET_REDEEM_RELAY_ABI, providerConet)
+	let isRa = false
+	let chainNonce = 0n
+	try {
+		isRa = !!(await read.redeemAdmins!(admin))
+		chainNonce = await read.redeemAdminNonces!(admin)
+	} catch (e: any) {
+		return { success: false, error: e?.shortMessage ?? e?.message ?? 'On-chain read failed' }
+	}
+	if (!isRa) {
+		return { success: false, error: 'Not a redeem admin' }
+	}
+	if (chainNonce !== nonce) {
+		return { success: false, error: 'Stale nonce; refresh and sign again' }
+	}
+	const nowSec = Math.floor(Date.now() / 1000)
+	if (deadline <= BigInt(nowSec)) {
+		return { success: false, error: 'Deadline expired' }
+	}
+
+	const domain = businessStartKetRedeemEip712Domain(contractAddr)
+	const message = { admin, codeHash, nonce, deadline }
+	let recovered: string
+	try {
+		recovered = ethers.verifyTypedData(domain, businessStartKetRedeemCancelTypedDataTypes, message, signature)
+	} catch (e: any) {
+		return { success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid typed data signature' }
+	}
+	if (recovered.toLowerCase() !== admin.toLowerCase()) {
+		return { success: false, error: 'Signer is not admin' }
+	}
+
+	return {
+		success: true,
+		preChecked: {
+			contract: contractAddr,
+			admin,
+			codeHash,
+			nonce,
+			deadline,
+			signature,
+		},
+	}
+}
+
+export type BusinessStartKetRedeemCreatePoolPayload = {
+	contract: string
+	admin: string
+	codeHash: string
+	tokenId: bigint
+	ketAmount: bigint
+	buintAmount: bigint
+	validAfter: bigint
+	validBefore: bigint
+	nonce: bigint
+	deadline: bigint
+	signature: string
+	res?: Response
+}
+
+export const businessStartKetRedeemCreatePool: BusinessStartKetRedeemCreatePoolPayload[] = []
+
+export const businessStartKetRedeemCreateProcess = async () => {
+	const obj = businessStartKetRedeemCreatePool.shift()
+	if (!obj) return
+	if (!Settle_ContractPool.length) {
+		businessStartKetRedeemCreatePool.unshift(obj)
+		return setTimeout(() => void businessStartKetRedeemCreateProcess(), 3000)
+	}
+	logger(
+		Colors.cyan(
+			`[businessStartKetRedeemCreateProcess] admin=${obj.admin} codeHash=${obj.codeHash.slice(0, 10)}…`
+		)
+	)
+	let SC: (typeof Settle_ContractPool)[number] | undefined
+	try {
+		SC = Settle_ContractPool.shift()
+		if (!SC) {
+			businessStartKetRedeemCreatePool.unshift(obj)
+			return setTimeout(() => void businessStartKetRedeemCreateProcess(), 3000)
+		}
+		const c = new ethers.Contract(obj.contract, BUSINESS_START_KET_REDEEM_RELAY_ABI, SC.walletConet)
+		const tx = await c.createRedeemFor!(
+			obj.admin,
+			obj.codeHash,
+			obj.tokenId,
+			obj.ketAmount,
+			obj.buintAmount,
+			obj.validAfter,
+			obj.validBefore,
+			obj.nonce,
+			obj.deadline,
+			obj.signature,
+			{ gasLimit: 900_000 }
+		)
+		logger(Colors.green(`[businessStartKetRedeemCreateProcess] tx=${tx.hash}`))
+		await tx.wait()
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+		}
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red('[businessStartKetRedeemCreateProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: msg }).end()
+		}
+	} finally {
+		if (SC) Settle_ContractPool.unshift(SC)
+		setTimeout(() => void businessStartKetRedeemCreateProcess(), 3000)
+	}
+}
+
+export type BusinessStartKetRedeemCancelPoolPayload = {
+	contract: string
+	admin: string
+	codeHash: string
+	nonce: bigint
+	deadline: bigint
+	signature: string
+	res?: Response
+}
+
+export const businessStartKetRedeemCancelPool: BusinessStartKetRedeemCancelPoolPayload[] = []
+
+export const businessStartKetRedeemCancelProcess = async () => {
+	const obj = businessStartKetRedeemCancelPool.shift()
+	if (!obj) return
+	if (!Settle_ContractPool.length) {
+		businessStartKetRedeemCancelPool.unshift(obj)
+		return setTimeout(() => void businessStartKetRedeemCancelProcess(), 3000)
+	}
+	logger(
+		Colors.cyan(
+			`[businessStartKetRedeemCancelProcess] admin=${obj.admin} codeHash=${obj.codeHash.slice(0, 10)}…`
+		)
+	)
+	let SC: (typeof Settle_ContractPool)[number] | undefined
+	try {
+		SC = Settle_ContractPool.shift()
+		if (!SC) {
+			businessStartKetRedeemCancelPool.unshift(obj)
+			return setTimeout(() => void businessStartKetRedeemCancelProcess(), 3000)
+		}
+		const c = new ethers.Contract(obj.contract, BUSINESS_START_KET_REDEEM_RELAY_ABI, SC.walletConet)
+		const tx = await c.cancelRedeemFor!(obj.admin, obj.codeHash, obj.nonce, obj.deadline, obj.signature, {
+			gasLimit: 600_000,
+		})
+		logger(Colors.green(`[businessStartKetRedeemCancelProcess] tx=${tx.hash}`))
+		await tx.wait()
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+		}
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red('[businessStartKetRedeemCancelProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: msg }).end()
+		}
+	} finally {
+		if (SC) Settle_ContractPool.unshift(SC)
+		setTimeout(() => void businessStartKetRedeemCancelProcess(), 3000)
 	}
 }
 

@@ -16,7 +16,7 @@ import {
 	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED } from './latestCardsShared'
@@ -1541,6 +1541,82 @@ const routing = ( router: Router ) => {
 			})
 		})
 
+		/** POST /api/businessStartKetRedeemAdminCreate — cluster 预检合格后转发；Settle 代付 gas 调 createRedeemFor */
+		router.post('/businessStartKetRedeemAdminCreate', (req, res) => {
+			const b = req.body as {
+				contract?: string
+				admin?: string
+				codeHash?: string
+				tokenId?: string
+				ketAmount?: string
+				buintAmount?: string
+				validAfter?: string
+				validBefore?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			if (
+				!b.contract ||
+				!b.admin ||
+				!b.codeHash ||
+				b.tokenId == null ||
+				b.ketAmount == null ||
+				b.buintAmount == null ||
+				b.validAfter == null ||
+				b.validBefore == null ||
+				b.nonce == null ||
+				b.deadline == null ||
+				!b.signature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing create fields' }).end()
+			}
+			businessStartKetRedeemCreatePool.push({
+				contract: ethers.getAddress(b.contract),
+				admin: ethers.getAddress(b.admin),
+				codeHash: b.codeHash,
+				tokenId: BigInt(b.tokenId),
+				ketAmount: BigInt(b.ketAmount),
+				buintAmount: BigInt(b.buintAmount),
+				validAfter: BigInt(b.validAfter),
+				validBefore: BigInt(b.validBefore),
+				nonce: BigInt(b.nonce),
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				res,
+			})
+			businessStartKetRedeemCreateProcess().catch((err: any) => {
+				logger(Colors.red('[businessStartKetRedeemCreateProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		/** POST /api/businessStartKetRedeemAdminCancel — cluster 预检合格后转发；Settle 代付 gas 调 cancelRedeemFor */
+		router.post('/businessStartKetRedeemAdminCancel', (req, res) => {
+			const b = req.body as {
+				contract?: string
+				admin?: string
+				codeHash?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			if (!b.contract || !b.admin || !b.codeHash || b.nonce == null || b.deadline == null || !b.signature) {
+				return res.status(400).json({ success: false, error: 'Missing cancel fields' }).end()
+			}
+			businessStartKetRedeemCancelPool.push({
+				contract: ethers.getAddress(b.contract),
+				admin: ethers.getAddress(b.admin),
+				codeHash: b.codeHash,
+				nonce: BigInt(b.nonce),
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				res,
+			})
+			businessStartKetRedeemCancelProcess().catch((err: any) => {
+				logger(Colors.red('[businessStartKetRedeemCancelProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
 		/** POST /api/purchaseBUnitFromBase - 由 cluster 预检后转发，master 推入 purchaseBUnitFromBasePool，经 Settle_ContractPool 执行 BaseTreasury.purchaseBUnitWith3009Authorization */
 		router.post('/purchaseBUnitFromBase', (req, res) => {
 			const body = req.body as { from?: string; amount?: string; validAfter?: number; validBefore?: number; nonce?: string; signature?: string }
@@ -2061,6 +2137,7 @@ const routing = ( router: Router ) => {
 				packageType: st.packageType,
 				eoaAddress: st.eoaAddress,
 				lastEvent: st.lastEvent,
+				chainFulfillment: st.chainFulfillment ?? null,
 			}).end()
 		})
 

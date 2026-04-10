@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
@@ -3924,6 +3924,67 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		logger(Colors.green('server /api/buintRedeemAirdropRedeem preCheck OK, forwarding to master'))
 		postLocalhost('/api/buintRedeemAirdropRedeem', { eoa: pre.eoa, code: pre.code }, res)
+	})
+
+	/** GET /api/businessStartKetRedeemAdminNonce?admin=0x… — Cluster 直读 CoNET redeemAdminNonces（供签名前） */
+	router.get('/businessStartKetRedeemAdminNonce', async (req, res) => {
+		const admin = typeof req.query.admin === 'string' ? req.query.admin.trim() : ''
+		const out = await businessStartKetRedeemReadAdminNonce(admin)
+		if (!out.ok) {
+			return res.status(400).json({ success: false, error: out.error }).end()
+		}
+		return res.status(200).json({ success: true, nonce: out.nonce }).end()
+	})
+
+	/** POST /api/businessStartKetRedeemAdminCreate — redeem admin EIP-712 授权；Cluster 完整预检后转发 Master，Settle 代付 gas 调 createRedeemFor（Ket #0 ×1 + 指定 B-Unit） */
+	router.post('/businessStartKetRedeemAdminCreate', async (req, res) => {
+		const pre = await businessStartKetRedeemCreateClusterPreCheck(req.body)
+		if (!pre.success) {
+			logger(Colors.red(`server /api/businessStartKetRedeemAdminCreate preCheck FAIL: ${pre.error}`))
+			return res.status(400).json({ success: false, error: pre.error }).end()
+		}
+		logger(Colors.green('server /api/businessStartKetRedeemAdminCreate preCheck OK, forwarding to master'))
+		const p = pre.preChecked
+		postLocalhost(
+			'/api/businessStartKetRedeemAdminCreate',
+			{
+				contract: p.contract,
+				admin: p.admin,
+				codeHash: p.codeHash,
+				tokenId: p.tokenId.toString(),
+				ketAmount: p.ketAmount.toString(),
+				buintAmount: p.buintAmount.toString(),
+				validAfter: p.validAfter.toString(),
+				validBefore: p.validBefore.toString(),
+				nonce: p.nonce.toString(),
+				deadline: p.deadline.toString(),
+				signature: p.signature,
+			},
+			res
+		)
+	})
+
+	/** POST /api/businessStartKetRedeemAdminCancel — redeem admin EIP-712 授权取消兑换 */
+	router.post('/businessStartKetRedeemAdminCancel', async (req, res) => {
+		const pre = await businessStartKetRedeemCancelClusterPreCheck(req.body)
+		if (!pre.success) {
+			logger(Colors.red(`server /api/businessStartKetRedeemAdminCancel preCheck FAIL: ${pre.error}`))
+			return res.status(400).json({ success: false, error: pre.error }).end()
+		}
+		logger(Colors.green('server /api/businessStartKetRedeemAdminCancel preCheck OK, forwarding to master'))
+		const cp = pre.preChecked
+		postLocalhost(
+			'/api/businessStartKetRedeemAdminCancel',
+			{
+				contract: cp.contract,
+				admin: cp.admin,
+				codeHash: cp.codeHash,
+				nonce: cp.nonce.toString(),
+				deadline: cp.deadline.toString(),
+				signature: cp.signature,
+			},
+			res
+		)
 	})
 
 	/** POST /api/purchaseBUnitFromBase - Refuel B-Unit：UI 离线签 EIP-3009，Cluster 预检后转发 Master，Master 提交 BaseTreasury.purchaseBUnitWith3009Authorization */

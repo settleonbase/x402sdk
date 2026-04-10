@@ -8,6 +8,18 @@ import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { masterSetup } from '../util'
 import { logger } from '../logger'
+import { CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET } from '../chainAddresses'
+
+/** CoNET B-Unit / kit mint signer（与 MemberCard Settle 一致） */
+const CONET_MAINNET_RPC_HTTP = 'https://mainnet-rpc.conet.network'
+
+const BUNIT_AIRDROP_MINT_FOR_USDC_PURCHASE_ABI = [
+	'function mintForUsdcPurchase(address to, uint256 usdcAmount, bytes32 baseTxHash) external',
+] as const
+
+const BUSINESS_START_KET_MINT_ABI = [
+	'function mint(address to, uint256 id, uint256 amount, bytes data) external',
+] as const
 
 /** Set `MERCHANT_KIT_STRIPE_DEBUG=1` (or `true`) for verbose poll/refresh logs. Webhook always logs a short summary line. */
 function merchantKitStripeDebugEnabled(): boolean {
@@ -41,12 +53,36 @@ export const MERCHANT_KIT_PACKAGES = {
 
 export type MerchantKitPackageType = keyof typeof MERCHANT_KIT_PACKAGES
 
+/**
+ * 合成 USDC（6 位）传入 BUnitAirdrop.mintForUsdcPurchase：合约内 bunit = usdc * 100（USDC_TO_BUNIT_RATE），
+ * 与各 kit 标价中包含的 B-Unit 数量一致（付费池 mintPaid）。非真实链上 USDC，仅用于铸造配额与 Indexer 记账维度。
+ */
+export const MERCHANT_KIT_SYNTHETIC_USDC6_FOR_BUINT: Record<MerchantKitPackageType, bigint> = {
+	lite_kit: 5_000_000n,
+	standard_kit: 20_000_000n,
+	custom_kit: 50_000_000n,
+}
+
+/** 各 kit 对应铸造的 B-Unit 数量（6 位精度），与 MERCHANT_KIT_PACKAGES 文案一致 */
+export const MERCHANT_KIT_INCLUDED_BUNITS_6: Record<MerchantKitPackageType, bigint> = {
+	lite_kit: 500_000_000n,
+	standard_kit: 2_000_000_000n,
+	custom_kit: 5_000_000_000n,
+}
+
+export type MerchantKitChainFulfillment = {
+	buintTxHash?: string
+	nftTxHash?: string
+	lastError?: string
+}
+
 type SessionRecord = {
 	status: 'pending' | 'succeeded' | 'failed'
 	eoaAddress: string
 	packageType: string
 	createdAt: number
 	lastEvent?: string
+	chainFulfillment?: MerchantKitChainFulfillment
 }
 
 const sessions = new Map<string, SessionRecord>()
@@ -69,6 +105,130 @@ function scheduleMerchantKitSessionPrune(): void {
 }
 
 scheduleMerchantKitSessionPrune()
+
+/** 同 session 多次触发 webhook / refresh 时合并为单次履约链上流程 */
+const merchantKitFulfillmentInflight = new Map<string, Promise<void>>()
+
+function resolveConetBusinessStartKetAddressForMint(): string | null {
+	const raw =
+		(typeof process !== 'undefined' && process.env.CONET_BUSINESS_START_KET?.trim()) ||
+		CONET_BUSINESS_START_KET?.trim() ||
+		''
+	if (!raw) {
+		return null
+	}
+	try {
+		const a = ethers.getAddress(raw)
+		return a === ethers.ZeroAddress ? null : a
+	} catch {
+		return null
+	}
+}
+
+/**
+ * Stripe Checkout 支付确认后：向 metadata 中的 EOA 铸造 B-Units（付费池）并 mint BusinessStartKet #0 ×1。
+ * 幂等：按 session 记录分步跳过已完成的交易；并发合并为单次 in-flight Promise。
+ */
+async function fulfillMerchantKitStripeOnChain(sessionId: string): Promise<void> {
+	let inflight = merchantKitFulfillmentInflight.get(sessionId)
+	if (inflight) {
+		merchantKitDbg('fulfill join (in flight)', sessionId)
+		return inflight
+	}
+	inflight = (async () => {
+		const getCf = (): MerchantKitChainFulfillment => sessions.get(sessionId)?.chainFulfillment ?? {}
+		const patchChainFulfillment = (patch: MerchantKitChainFulfillment) => {
+			const cur = sessions.get(sessionId)
+			if (!cur) {
+				return
+			}
+			sessions.set(sessionId, {
+				...cur,
+				chainFulfillment: { ...cur.chainFulfillment, ...patch },
+			})
+		}
+		try {
+			const rec = sessions.get(sessionId)
+			if (!rec || rec.status !== 'succeeded') {
+				merchantKitDbg('fulfill skip (not succeeded)', sessionId, rec?.status ?? '(no record)')
+				return
+			}
+			let eoa: string
+			try {
+				eoa = ethers.getAddress(rec.eoaAddress)
+			} catch {
+				logger(Colors.red('[merchantKitStripe] fulfill: invalid EOA'), rec.eoaAddress)
+				return
+			}
+			if (!(rec.packageType in MERCHANT_KIT_PACKAGES)) {
+				logger(Colors.red('[merchantKitStripe] fulfill: unknown packageType'), rec.packageType)
+				return
+			}
+			const pkg = rec.packageType as MerchantKitPackageType
+			const usdc6Synth = MERCHANT_KIT_SYNTHETIC_USDC6_FOR_BUINT[pkg]
+
+			const pk = (masterSetup as { settle_contractAdmin?: string[] }).settle_contractAdmin?.[0]
+			if (!pk?.trim()) {
+				logger(Colors.red('[merchantKitStripe] fulfill: settle_contractAdmin[0] missing'))
+				return
+			}
+			const pkNorm = pk.trim().startsWith('0x') ? pk.trim() : `0x${pk.trim()}`
+			const provider = new ethers.JsonRpcProvider(CONET_MAINNET_RPC_HTTP)
+			const signer = new ethers.Wallet(pkNorm, provider)
+
+			if (!getCf().buintTxHash) {
+				const airdrop = new ethers.Contract(
+					CONET_BUNIT_AIRDROP_ADDRESS,
+					BUNIT_AIRDROP_MINT_FOR_USDC_PURCHASE_ABI,
+					signer
+				)
+				const refHash = ethers.keccak256(ethers.toUtf8Bytes(sessionId))
+				const tx = await airdrop.mintForUsdcPurchase(eoa, usdc6Synth, refHash)
+				const receipt = await tx.wait()
+				const h = receipt?.hash ?? tx.hash
+				patchChainFulfillment({ buintTxHash: h, lastError: undefined })
+				logger(
+					Colors.green('[merchantKitStripe] mintForUsdcPurchase ok (kit B-Units paid pool)'),
+					`session=${sessionId}`,
+					`pkg=${pkg}`,
+					`bunits≈${(Number(MERCHANT_KIT_INCLUDED_BUNITS_6[pkg]) / 1e6).toFixed(2)}`,
+					`tx=${h}`,
+					`eoa=${eoa}`
+				)
+			}
+
+			const ketAddr = resolveConetBusinessStartKetAddressForMint()
+			if (ketAddr && !getCf().nftTxHash) {
+				const ket = new ethers.Contract(ketAddr, BUSINESS_START_KET_MINT_ABI, signer)
+				const tx2 = await ket.mint(eoa, 0n, 1n, '0x')
+				const receipt2 = await tx2.wait()
+				const h2 = receipt2?.hash ?? tx2.hash
+				patchChainFulfillment({ nftTxHash: h2, lastError: undefined })
+				logger(
+					Colors.green('[merchantKitStripe] BusinessStartKet mint token #0 ok'),
+					`session=${sessionId}`,
+					`tx=${h2}`,
+					`eoa=${eoa}`
+				)
+			} else if (!ketAddr) {
+				merchantKitDbg('fulfill: skip ERC1155 (CONET_BUSINESS_START_KET unset)')
+			}
+		} catch (e: unknown) {
+			const msg = e instanceof Error ? e.message : String(e)
+			logger(Colors.red('[merchantKitStripe] fulfill FAILED'), sessionId, msg)
+			patchChainFulfillment({ lastError: msg })
+		} finally {
+			merchantKitFulfillmentInflight.delete(sessionId)
+		}
+	})()
+	merchantKitFulfillmentInflight.set(sessionId, inflight)
+	return inflight
+}
+
+/** Fire-and-forget；应从 webhook / paid refresh 各调用一次（内部幂等） */
+export function scheduleMerchantKitStripeChainFulfillment(sessionId: string): void {
+	void fulfillMerchantKitStripeOnChain(sessionId)
+}
 
 function getStripeSecretKey(): string {
 	const setup = masterSetup as { stripe_SecretKey?: string }
@@ -260,18 +420,19 @@ function applySessionOutcome(
 	meta: { eoaAddress?: string; packageType?: string; lastEvent: string }
 ) {
 	const prev = sessions.get(sessionId)
-	const eoa = meta.eoaAddress ?? prev?.eoaAddress ?? ''
-	const packageType = meta.packageType ?? prev?.packageType ?? ''
 	const createdAt = prev?.createdAt ?? Date.now()
+	const eoaNorm = (meta.eoaAddress ?? prev?.eoaAddress ?? '').toLowerCase()
+	const pkgNorm = meta.packageType ?? prev?.packageType ?? ''
 	const next: SessionRecord = {
 		status,
-		eoaAddress: eoa,
-		packageType,
+		eoaAddress: eoaNorm,
+		packageType: pkgNorm,
 		createdAt,
 		lastEvent: meta.lastEvent,
+		chainFulfillment: prev?.chainFulfillment,
 	}
 	sessions.set(sessionId, next)
-	merchantKitDbg('applySessionOutcome', sessionId, meta.lastEvent, '→', status, `pkg=${packageType}`)
+	merchantKitDbg('applySessionOutcome', sessionId, meta.lastEvent, '→', status, `pkg=${pkgNorm}`)
 }
 
 export async function handleMerchantKitStripeWebhook(
@@ -336,6 +497,7 @@ export async function handleMerchantKitStripeWebhook(
 					`session=${session.id}`,
 					`hadLocalRecord=${hadLocal}`
 				)
+				scheduleMerchantKitStripeChainFulfillment(session.id)
 			} else {
 				logger(
 					Colors.yellow('[merchantKitStripe:hook] checkout.session.completed SKIPPED (not paid yet)'),

@@ -47,6 +47,12 @@ export const MERCHANT_POS_MANAGEMENT_CONET = '0x3Eb57035d3237Fce4b1cB273662E875E
  */
 export const CONET_BUSINESS_START_KET = '0x2FF032d57eCF466624911692AF44D0B4A32a8E1f'
 
+/**
+ * BusinessStartKetRedeem（CoNET）。与 deployments/conet-addresses.json `BusinessStartKetRedeem` 同步。
+ * 环境变量 CONET_BUSINESS_START_KET_REDEEM 可覆盖。
+ */
+export const CONET_BUSINESS_START_KET_REDEEM = '0x44A68B182BaB5d5Ed45C9F027b42a8Bbb6564b2E'
+
 export const BASE_MAINNET_FACTORIES = {
   AA_FACTORY: BASE_AA_FACTORY,
   BEAMIO_ACCOUNT_DEPLOYER: BASE_BEAMIO_ACCOUNT_DEPLOYER,
@@ -73,6 +79,7 @@ export const CONTRACT_ADDRESSES = {
     buintRedeemAirdrop: CONET_BUINT_REDEEM_AIRDROP,
     beamioIndexerDiamond: BEAMIO_INDEXER_DIAMOND,
     businessStartKet: CONET_BUSINESS_START_KET || undefined,
+    businessStartKetRedeem: CONET_BUSINESS_START_KET_REDEEM || undefined,
   },
 } as const
 
