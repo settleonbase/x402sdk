@@ -8909,6 +8909,12 @@ export type CreateCardPreChecked = {
 		/** Whole currency units; optional (Card Issuance recharge limits) */
 		minimumTopup?: number
 		maximumTopup?: number
+		/** Consumer-facing short title (Card Configurator) */
+		displayName?: string
+		/** Points token label for dashboard */
+		Symbol?: string
+		bonusRule?: { paymentAmount: number; bonusValue: number }
+		bonusRules?: Array<{ paymentAmount: number; bonusValue: number }>
 	}
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
 	/** CoNET BusinessStartKet #0 burn source; set by Cluster after balance precheck (omit when BEAMIO_SKIP_BUSINESS_START_KET_GATE) */
@@ -8918,6 +8924,11 @@ export type CreateCardPreChecked = {
 }
 
 const CREATE_CARD_TOPUP_LIMIT_MAX_UNITS = 1000
+const CREATE_CARD_DISPLAY_NAME_MAX_LEN = 128
+const CREATE_CARD_SYMBOL_MAX_LEN = 32
+const CREATE_CARD_BONUS_RULES_MAX = 32
+/** Whole-currency-ish cap for bonus rule amounts (defensive) */
+const CREATE_CARD_BONUS_AMOUNT_MAX = 1_000_000_000
 
 function parseCreateCardTopupWholeUnit(v: unknown): number | undefined {
 	if (v == null) return undefined
@@ -8930,6 +8941,43 @@ function parseCreateCardTopupWholeUnit(v: unknown): number | undefined {
 		if (Number.isFinite(n) && Number.isFinite(f) && f === n && n > 0) return n
 	}
 	return undefined
+}
+
+function parseCreateCardBonusAmount(v: unknown): number | null {
+	if (v == null) return null
+	if (typeof v === 'number' && Number.isFinite(v)) return v
+	if (typeof v === 'string') {
+		const t = v.replace(/,/g, '').trim()
+		if (!t) return null
+		const n = Number(t)
+		return Number.isFinite(n) ? n : null
+	}
+	return null
+}
+
+function normalizeCreateCardBonusRuleEntry(
+	raw: unknown,
+	idxLabel: string,
+): { success: true; rule: { paymentAmount: number; bonusValue: number } } | { success: false; error: string } {
+	if (!raw || typeof raw !== 'object') {
+		return { success: false, error: `${idxLabel} must be an object` }
+	}
+	const o = raw as Record<string, unknown>
+	const pa = parseCreateCardBonusAmount(o.paymentAmount)
+	const bv = parseCreateCardBonusAmount(o.bonusValue)
+	if (pa == null || bv == null) {
+		return { success: false, error: `${idxLabel} requires finite numeric paymentAmount and bonusValue` }
+	}
+	if (pa < 0 || bv < 0) {
+		return { success: false, error: `${idxLabel} amounts must be >= 0` }
+	}
+	if (pa > CREATE_CARD_BONUS_AMOUNT_MAX || bv > CREATE_CARD_BONUS_AMOUNT_MAX) {
+		return {
+			success: false,
+			error: `${idxLabel} amounts must not exceed ${CREATE_CARD_BONUS_AMOUNT_MAX}`,
+		}
+	}
+	return { success: true, rule: { paymentAmount: pa, bonusValue: bv } }
 }
 
 export const createCardPreCheck = (body: {
@@ -8948,6 +8996,10 @@ export const createCardPreCheck = (body: {
 		backgroundColor?: unknown
 		minimumTopup?: unknown
 		maximumTopup?: unknown
+		displayName?: unknown
+		Symbol?: unknown
+		bonusRule?: unknown
+		bonusRules?: unknown
 	}
 	tiers?: unknown[]
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
@@ -9012,6 +9064,63 @@ export const createCardPreCheck = (body: {
 		if (minTu != null && maxTu != null && minTu > maxTu) {
 			return { success: false, error: 'shareTokenMetadata.minimumTopup cannot be greater than maximumTopup' }
 		}
+		if (stm.displayName != null) {
+			if (typeof stm.displayName !== 'string') {
+				return { success: false, error: 'shareTokenMetadata.displayName must be a string if provided' }
+			}
+			const dn = stm.displayName.trim()
+			if (dn.length > CREATE_CARD_DISPLAY_NAME_MAX_LEN) {
+				return {
+					success: false,
+					error: `shareTokenMetadata.displayName must be at most ${CREATE_CARD_DISPLAY_NAME_MAX_LEN} characters`,
+				}
+			}
+		}
+		if (stm.Symbol != null) {
+			if (typeof stm.Symbol !== 'string') {
+				return { success: false, error: 'shareTokenMetadata.Symbol must be a string if provided' }
+			}
+			const sym = stm.Symbol.trim()
+			if (sym.length > CREATE_CARD_SYMBOL_MAX_LEN) {
+				return {
+					success: false,
+					error: `shareTokenMetadata.Symbol must be at most ${CREATE_CARD_SYMBOL_MAX_LEN} characters`,
+				}
+			}
+		}
+		let normalizedBonusRules: Array<{ paymentAmount: number; bonusValue: number }> | undefined
+		if (stm.bonusRules != null) {
+			if (!Array.isArray(stm.bonusRules)) {
+				return { success: false, error: 'shareTokenMetadata.bonusRules must be an array if provided' }
+			}
+			if (stm.bonusRules.length > CREATE_CARD_BONUS_RULES_MAX) {
+				return {
+					success: false,
+					error: `shareTokenMetadata.bonusRules must have at most ${CREATE_CARD_BONUS_RULES_MAX} entries`,
+				}
+			}
+			normalizedBonusRules = []
+			for (let i = 0; i < stm.bonusRules.length; i++) {
+				const parsed = normalizeCreateCardBonusRuleEntry(stm.bonusRules[i], `shareTokenMetadata.bonusRules[${i}]`)
+				if (!parsed.success) return { success: false, error: parsed.error }
+				normalizedBonusRules.push(parsed.rule)
+			}
+		}
+		if (stm.bonusRule != null) {
+			const parsed = normalizeCreateCardBonusRuleEntry(stm.bonusRule, 'shareTokenMetadata.bonusRule')
+			if (!parsed.success) return { success: false, error: parsed.error }
+			if (normalizedBonusRules && normalizedBonusRules.length > 0) {
+				const first = normalizedBonusRules[0]
+				if (first.paymentAmount !== parsed.rule.paymentAmount || first.bonusValue !== parsed.rule.bonusValue) {
+					return {
+						success: false,
+						error: 'shareTokenMetadata.bonusRule must match bonusRules[0] when both are provided',
+					}
+				}
+			} else {
+				normalizedBonusRules = [parsed.rule]
+			}
+		}
 	}
 	if (body.transferWhitelistEnabled != null && typeof body.transferWhitelistEnabled !== 'boolean') {
 		return { success: false, error: 'transferWhitelistEnabled must be a boolean if provided' }
@@ -9074,6 +9183,38 @@ export const createCardPreCheck = (body: {
 		const maxTup = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
 		if (minTup != null) meta.minimumTopup = minTup
 		if (maxTup != null) meta.maximumTopup = maxTup
+		if (stm.displayName != null && typeof stm.displayName === 'string') {
+			const dn = stm.displayName.trim()
+			if (dn.length > 0) meta.displayName = dn.slice(0, CREATE_CARD_DISPLAY_NAME_MAX_LEN)
+		}
+		if (stm.Symbol != null && typeof stm.Symbol === 'string') {
+			const sym = stm.Symbol.trim()
+			if (sym.length > 0) meta.Symbol = sym.slice(0, CREATE_CARD_SYMBOL_MAX_LEN)
+		}
+		let bonusRulesOut: Array<{ paymentAmount: number; bonusValue: number }> | undefined
+		if (stm.bonusRules != null && Array.isArray(stm.bonusRules)) {
+			bonusRulesOut = []
+			for (const br of stm.bonusRules) {
+				const p = normalizeCreateCardBonusRuleEntry(br, 'bonusRules')
+				if (p.success) bonusRulesOut.push(p.rule)
+			}
+			if (bonusRulesOut.length === 0) bonusRulesOut = undefined
+		}
+		if (stm.bonusRule != null && typeof stm.bonusRule === 'object') {
+			const p = normalizeCreateCardBonusRuleEntry(stm.bonusRule, 'bonusRule')
+			if (p.success) {
+				if (bonusRulesOut && bonusRulesOut.length > 0) {
+					meta.bonusRules = bonusRulesOut
+					meta.bonusRule = bonusRulesOut[0]
+				} else {
+					meta.bonusRule = p.rule
+					meta.bonusRules = [p.rule]
+				}
+			}
+		} else if (bonusRulesOut && bonusRulesOut.length > 0) {
+			meta.bonusRules = bonusRulesOut
+			meta.bonusRule = bonusRulesOut[0]
+		}
 		if (Object.keys(meta).length > 0) {
 			normalizedShareTokenMetadata = meta
 		}
@@ -9205,43 +9346,23 @@ export const createCardPoolPress = async () => {
 		const cardAddr = ethers.getAddress(cardAddress)
 		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
 		if (shareTokenMetadata || (tiers && tiers.length > 0)) {
-			const name = shareTokenMetadata?.name ?? 'Beamio CCSA Card'
-			const description = shareTokenMetadata?.description
-			const image = shareTokenMetadata?.image != null && shareTokenMetadata.image !== '' ? shareTokenMetadata.image : undefined
-			const rawCats = (shareTokenMetadata as { categories?: unknown } | undefined)?.categories
-			const categories =
-				Array.isArray(rawCats) ?
-					(rawCats as unknown[])
-						.filter((c): c is string => typeof c === 'string' && c.trim() !== '')
-						.map((c) => c.trim())
-						.slice(0, 32)
-				:	[]
-			const metaContent = JSON.stringify({
-				...(name && { name }),
-				...(description != null && { description }),
-				...(image && { image }),
-				...(shareTokenMetadata && {
-					shareTokenMetadata: {
-						name,
-						...(description != null && { description }),
-						...(image && { image }),
-						...(categories.length > 0 && { categories }),
-						...(shareTokenMetadata?.backgroundColor &&
-							String(shareTokenMetadata.backgroundColor).trim() && {
-								backgroundColor: String(shareTokenMetadata.backgroundColor).trim(),
-							}),
-						...(shareTokenMetadata.minimumTopup != null &&
-							Number.isFinite(Number(shareTokenMetadata.minimumTopup)) && {
-								minimumTopup: Number(shareTokenMetadata.minimumTopup),
-							}),
-						...(shareTokenMetadata.maximumTopup != null &&
-							Number.isFinite(Number(shareTokenMetadata.maximumTopup)) && {
-								maximumTopup: Number(shareTokenMetadata.maximumTopup),
-							}),
-					},
-				}),
-				...(tiers && tiers.length > 0 && { tiers }),
-			}, null, 2)
+			const stm = shareTokenMetadata
+			const topName =
+				stm?.name != null && String(stm.name).trim() !== '' ? String(stm.name).trim() : 'Beamio CCSA Card'
+			const metaContent = JSON.stringify(
+				{
+					name: topName,
+					...(stm?.description != null && { description: String(stm.description) }),
+					...(stm?.image != null &&
+						String(stm.image).trim() !== '' && { image: String(stm.image).trim() }),
+					...(stm && Object.keys(stm).length > 0 && { shareTokenMetadata: { ...stm } }),
+					...(tiers && tiers.length > 0 && { tiers }),
+					...(upgradeType != null && { upgradeType }),
+					...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
+				},
+				null,
+				2
+			)
 			const metaPath = resolve(METADATA_BASE, metaFilename)
 			const metaDir = resolve(METADATA_BASE)
 			if (metaPath.startsWith(metaDir + '/') || metaPath === metaDir) {
@@ -9261,6 +9382,8 @@ export const createCardPoolPress = async () => {
 			currency,
 			priceInCurrencyE6,
 			uri: uri ?? undefined,
+			...(upgradeType != null && { upgradeType }),
+			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
 			shareTokenMetadata,
 			tiers,
 			txHash: hash,

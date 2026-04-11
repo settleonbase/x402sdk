@@ -2705,8 +2705,33 @@ export const registerCardToDb = async (params: {
 	currency: string
 	priceInCurrencyE6: string
 	uri?: string
-	shareTokenMetadata?: { name?: string; description?: string; image?: string; categories?: string[]; Symbol?: string }
-	tiers?: Array<{ index: number; minUsdc6: string; attr: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
+	/** Persisted into metadata_json for full createCard audit */
+	upgradeType?: 0 | 1 | 2
+	transferWhitelistEnabled?: boolean
+	shareTokenMetadata?: {
+		name?: string
+		description?: string
+		image?: string
+		categories?: string[]
+		Symbol?: string
+		displayName?: string
+		backgroundColor?: string
+		minimumTopup?: number
+		maximumTopup?: number
+		bonusRule?: { paymentAmount: number; bonusValue: number }
+		bonusRules?: Array<{ paymentAmount: number; bonusValue: number }>
+	}
+	tiers?: Array<{
+		index: number
+		minUsdc6: string
+		attr: number
+		tierExpirySeconds?: number
+		name?: string
+		description?: string
+		image?: string
+		backgroundColor?: string
+		upgradeByBalance?: boolean
+	}>
 	txHash?: string
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
@@ -2716,6 +2741,10 @@ export const registerCardToDb = async (params: {
 		const metadataJson = JSON.stringify({
 			...(params.shareTokenMetadata && { shareTokenMetadata: params.shareTokenMetadata }),
 			...(params.tiers && params.tiers.length > 0 && { tiers: params.tiers }),
+			...(params.upgradeType != null && { upgradeType: params.upgradeType }),
+			...(typeof params.transferWhitelistEnabled === 'boolean' && {
+				transferWhitelistEnabled: params.transferWhitelistEnabled,
+			}),
 		}) || null
 		await db.query(
 			`
