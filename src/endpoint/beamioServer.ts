@@ -34,6 +34,21 @@ const OLD_CCSA_REDIRECTS = [
 ].map(a => a.toLowerCase())
 import { masterSetup, resolveBeamioBaseHttpRpcUrl } from '../util'
 
+/** Public short link GET /go/verra-ndef → TestFlight (iOS) or Play Store (Android / default). */
+const VERRA_NDEF_PLAY_STORE_URL =
+	'https://play.google.com/store/apps/details?id=com.beamio.android_ntag'
+const VERRA_NDEF_TESTFLIGHT_URL = 'https://testflight.apple.com/join/ytm1F8Aq'
+
+function resolveVerraNdefInstallRedirectUrl(userAgent: string): string {
+	const ua = userAgent || ''
+	const isIOS =
+		/iPad|iPhone|iPod/i.test(ua) ||
+		(/Macintosh/i.test(ua) && /\bMobile\b/i.test(ua))
+	if (isIOS) return VERRA_NDEF_TESTFLIGHT_URL
+	if (/Android/i.test(ua)) return VERRA_NDEF_PLAY_STORE_URL
+	return VERRA_NDEF_PLAY_STORE_URL
+}
+
 const BASE_CHAIN_ID = 8453
 const MINT_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('mintPointsByAdmin(address,uint256)').slice(2, 10)
 const BURN_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('burnPointsByAdmin(address,uint256)').slice(2, 10)
@@ -4772,6 +4787,19 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 	app.use( '/api', router )
 	routing(router)
+
+	/** Short link for Verra NDEF / SoftPOS: UA-based redirect to TestFlight or Play Store. */
+	app.get('/go/verra-ndef', (req: Request, res: Response) => {
+		const ua = String(req.headers['user-agent'] ?? '')
+		const loc = resolveVerraNdefInstallRedirectUrl(ua)
+		logger(
+			Colors.cyan('[go/verra-ndef] redirect'),
+			`→ ${loc}`,
+			`ua=${ua.slice(0, 120)}`
+		)
+		res.redirect(302, loc)
+	})
+
 	app.use((err: any, req: Request, res: Response, next: any) => {
 		// Guard noisy body-parser JSON syntax errors (e.g. multipart/form-data sent as application/json).
 		if (err?.type === 'entity.parse.failed' && err instanceof SyntaxError) {
