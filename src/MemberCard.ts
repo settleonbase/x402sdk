@@ -10438,7 +10438,16 @@ async function syncPosTerminalAdminBindingAfterTx(
 		if (!receipt || receipt.status !== 1) return
 		const txHash = receipt.hash ?? tx.hash
 		if (isAdd) {
-			await upsertPosTerminalAdminCardBinding({ posEoa, cardAddress: cardAddr, txHash })
+			const metaStr = decoded.args[3] as string
+			let metadataJson: unknown | undefined = undefined
+			if (metaStr != null && typeof metaStr === 'string' && metaStr.length > 0) {
+				try {
+					metadataJson = JSON.parse(metaStr) as unknown
+				} catch {
+					metadataJson = { rawMetadata: metaStr }
+				}
+			}
+			await upsertPosTerminalAdminCardBinding({ posEoa, cardAddress: cardAddr, txHash, metadataJson })
 		} else {
 			await deletePosTerminalAdminCardBinding(posEoa, cardAddr)
 		}

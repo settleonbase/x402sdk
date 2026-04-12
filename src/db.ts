@@ -927,6 +927,9 @@ const BEAMIO_POS_TERMINAL_ADMIN_CARD_IDX_CARD = `CREATE INDEX IF NOT EXISTS idx_
 async function ensureBeamioPosTerminalAdminCardSchema(db: Client): Promise<void> {
 	await db.query(BEAMIO_POS_TERMINAL_ADMIN_CARD_TABLE)
 	await db.query(BEAMIO_POS_TERMINAL_ADMIN_CARD_IDX_CARD)
+	await db.query(
+		`ALTER TABLE beamio_pos_terminal_admin_card ADD COLUMN IF NOT EXISTS metadata_json JSONB`
+	).catch(() => {})
 }
 
 /** cardAddAdmin 预检：POS EOA 已绑定其他卡则拒绝。同一卡重复登记允许（更新 mint limit 等）。 */
@@ -948,7 +951,7 @@ export const assertPosEoaAvailableForCardBinding = async (
 			return {
 				ok: false,
 				error:
-					'This terminal address is already registered as an admin on another merchant card. Remove it there before linking to this card.',
+					'This terminal address is already registered as a POS terminal. Remove it there before linking to this POS terminal.',
 			}
 		}
 		return { ok: true }
@@ -960,11 +963,13 @@ export const assertPosEoaAvailableForCardBinding = async (
 	}
 }
 
-/** adminManager(add) 上链成功后写入；remove 成功后可 delete。 */
+/** adminManager(add) 上链成功后写入；remove 成功后可 delete。metadataJson：Link terminal UI 随 calldata 上链的 JSON（同步解析入库）。 */
 export const upsertPosTerminalAdminCardBinding = async (params: {
 	posEoa: string
 	cardAddress: string
 	txHash?: string
+	/** Parsed object or JSON-serializable value; omit on non-terminal upserts (e.g. redeem) to preserve existing row. */
+	metadataJson?: unknown
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
@@ -972,16 +977,18 @@ export const upsertPosTerminalAdminCardBinding = async (params: {
 		await ensureBeamioPosTerminalAdminCardSchema(db)
 		const pos = ethers.getAddress(params.posEoa).toLowerCase()
 		const card = ethers.getAddress(params.cardAddress).toLowerCase()
+		const meta = params.metadataJson === undefined ? null : params.metadataJson
 		await db.query(
 			`
-			INSERT INTO beamio_pos_terminal_admin_card (pos_eoa, card_address, tx_hash, updated_at)
-			VALUES ($1, $2, $3, NOW())
+			INSERT INTO beamio_pos_terminal_admin_card (pos_eoa, card_address, tx_hash, metadata_json, updated_at)
+			VALUES ($1, $2, $3, $4::jsonb, NOW())
 			ON CONFLICT (pos_eoa) DO UPDATE SET
 				card_address = EXCLUDED.card_address,
 				tx_hash = EXCLUDED.tx_hash,
+				metadata_json = COALESCE(EXCLUDED.metadata_json, beamio_pos_terminal_admin_card.metadata_json),
 				updated_at = NOW()
 			`,
-			[pos, card, params.txHash ?? null]
+			[pos, card, params.txHash ?? null, meta]
 		)
 		logger(Colors.green(`[upsertPosTerminalAdminCardBinding] pos=${pos} card=${card}`))
 	} catch (e: any) {
@@ -1008,20 +1015,33 @@ export const deletePosTerminalAdminCardBinding = async (posLoose: string, cardAd
 
 /** POS 问询已登记商户卡地址（Registration Device 成功且链上 confirm 后即有记录）。 */
 export const getPosTerminalCardAddressForWallet = async (walletLoose: string): Promise<string | null> => {
+	const row = await getPosTerminalCardBindingRow(walletLoose)
+	return row?.cardAddress ?? null
+}
+
+/** 含 DB 内保存的终端 metadata（Link & activate terminal 时从链上 adminManager metadata 解析）。 */
+export const getPosTerminalCardBindingRow = async (
+	walletLoose: string
+): Promise<{ cardAddress: string; txHash: string | null; terminalMetadata: unknown | null } | null> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		await ensureBeamioPosTerminalAdminCardSchema(db)
 		const w = ethers.getAddress(walletLoose).toLowerCase()
-		const { rows } = await db.query<{ card_address: string }>(
-			`SELECT card_address FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 LIMIT 1`,
+		const { rows } = await db.query<{ card_address: string; tx_hash: string | null; metadata_json: unknown | null }>(
+			`SELECT card_address, tx_hash, metadata_json FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 LIMIT 1`,
 			[w]
 		)
 		if (rows.length === 0) return null
 		const raw = rows[0].card_address
-		return raw && ethers.isAddress(raw) ? ethers.getAddress(raw) : null
+		if (!raw || !ethers.isAddress(raw)) return null
+		return {
+			cardAddress: ethers.getAddress(raw),
+			txHash: rows[0].tx_hash ?? null,
+			terminalMetadata: rows[0].metadata_json ?? null,
+		}
 	} catch (e: any) {
-		logger(Colors.yellow(`[getPosTerminalCardAddressForWallet] failed: ${e?.message ?? e}`))
+		logger(Colors.yellow(`[getPosTerminalCardBindingRow] failed: ${e?.message ?? e}`))
 		return null
 	} finally {
 		await db.end().catch(() => {})
