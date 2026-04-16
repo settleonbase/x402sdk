@@ -81,6 +81,7 @@ function beamioUserCardLibrariesFromConfig(override?: BeamioUserCardLibraryAddre
 }
 import {
 	registerCardToDb,
+	getBeamioCardRowForMetadataSync,
 	assertPosEoaAvailableForCardBinding,
 	upsertPosTerminalAdminCardBinding,
 	deletePosTerminalAdminCardBinding,
@@ -9304,6 +9305,110 @@ export const resolveCardOwnerToEOA = async (
 
 export const createCardPool: (CreateCardPreChecked & { res: Response })[] = []
 
+/** ERC-1155 卡级 `0x{cardAddress}0.json` 内容，与 createCardPoolPress 写入格式一致。 */
+export function buildBeamioErc1155Card0MetadataFileContent(opts: {
+	shareTokenMetadata?: Record<string, unknown> | null
+	tiers?: Array<Record<string, unknown>>
+	upgradeType?: number
+	transferWhitelistEnabled?: boolean
+}): string {
+	const stm = opts.shareTokenMetadata
+	const topName =
+		stm?.name != null && String(stm.name).trim() !== '' ? String(stm.name).trim() : 'Beamio CCSA Card'
+	return JSON.stringify(
+		{
+			name: topName,
+			...(stm?.description != null && { description: String(stm.description) }),
+			...(stm?.image != null && String(stm.image).trim() !== '' && { image: String(stm.image).trim() }),
+			...(stm && Object.keys(stm).length > 0 && { shareTokenMetadata: { ...stm } }),
+			...(opts.tiers && opts.tiers.length > 0 && { tiers: opts.tiers }),
+			...(opts.upgradeType != null && { upgradeType: opts.upgradeType }),
+			...(typeof opts.transferWhitelistEnabled === 'boolean' && {
+				transferWhitelistEnabled: opts.transferWhitelistEnabled,
+			}),
+		},
+		null,
+		2
+	)
+}
+
+/**
+ * 已发卡仅更新链下 metadata（`METADATA_BASE/0x{card}0.json` + beamio_cards.metadata_json）。
+ * 供商户在 Card Configurator / Programs 中修改 recharge bonus 等后点 Publish，无需重新部署合约。
+ */
+export async function applyBeamioCardShareMetadataUpdate(params: {
+	cardAddress: string
+	shareTokenMetadata: Record<string, unknown>
+	tiers?: Array<Record<string, unknown>>
+	upgradeType?: number
+	transferWhitelistEnabled?: boolean
+}): Promise<{ success: boolean; error?: string }> {
+	try {
+		const cardAddr = ethers.getAddress(params.cardAddress)
+		const row = await getBeamioCardRowForMetadataSync(cardAddr)
+		if (!row) {
+			return {
+				success: false,
+				error: 'Card is not registered in beamio_cards. Publish a new card first, or register this address.',
+			}
+		}
+		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
+		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
+		const metaPath = resolve(METADATA_BASE, metaFilename)
+		const metaDir = resolve(METADATA_BASE)
+		if (!metaPath.startsWith(metaDir + '/') && metaPath !== metaDir) {
+			return { success: false, error: 'Invalid metadata path' }
+		}
+
+		let upgradeType = params.upgradeType
+		let transferWhitelistEnabled = params.transferWhitelistEnabled
+		let tiersForFile = params.tiers
+		if (fs.existsSync(metaPath)) {
+			try {
+				const prev = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as Record<string, unknown>
+				if (upgradeType === undefined && prev.upgradeType != null) {
+					const u = Number(prev.upgradeType)
+					if (u === 0 || u === 1 || u === 2) upgradeType = u
+				}
+				if (transferWhitelistEnabled === undefined && typeof prev.transferWhitelistEnabled === 'boolean') {
+					transferWhitelistEnabled = prev.transferWhitelistEnabled
+				}
+				if (tiersForFile === undefined && Array.isArray(prev.tiers)) {
+					tiersForFile = prev.tiers as Array<Record<string, unknown>>
+				}
+			} catch {
+				/* keep params-only */
+			}
+		}
+
+		const metaContent = buildBeamioErc1155Card0MetadataFileContent({
+			shareTokenMetadata: params.shareTokenMetadata,
+			tiers: tiersForFile,
+			upgradeType,
+			transferWhitelistEnabled,
+		})
+		if (!fs.existsSync(metaDir)) fs.mkdirSync(metaDir, { recursive: true })
+		fs.writeFileSync(metaPath, metaContent, 'utf-8')
+		logger(Colors.green(`[applyBeamioCardShareMetadataUpdate] wrote ${metaFilename}`))
+
+		await registerCardToDb({
+			cardAddress: cardAddr,
+			cardOwner: row.cardOwner,
+			currency: row.currency,
+			priceInCurrencyE6: row.priceInCurrencyE6,
+			uri: row.uri ?? undefined,
+			shareTokenMetadata: params.shareTokenMetadata as Parameters<typeof registerCardToDb>[0]['shareTokenMetadata'],
+			...(tiersForFile && tiersForFile.length > 0 && { tiers: tiersForFile as never }),
+			...(upgradeType != null && { upgradeType: upgradeType as 0 | 1 | 2 }),
+			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
+			txHash: row.txHash ?? undefined,
+		})
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
 export const createCardPoolPress = async () => {
 	const obj = createCardPool.shift() as (CreateCardPreChecked & { res: Response }) | undefined
 	if (!obj) return
@@ -9380,23 +9485,13 @@ export const createCardPoolPress = async () => {
 		const cardAddr = ethers.getAddress(cardAddress)
 		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
 		if (shareTokenMetadata || (tiers && tiers.length > 0)) {
-			const stm = shareTokenMetadata
-			const topName =
-				stm?.name != null && String(stm.name).trim() !== '' ? String(stm.name).trim() : 'Beamio CCSA Card'
-			const metaContent = JSON.stringify(
-				{
-					name: topName,
-					...(stm?.description != null && { description: String(stm.description) }),
-					...(stm?.image != null &&
-						String(stm.image).trim() !== '' && { image: String(stm.image).trim() }),
-					...(stm && Object.keys(stm).length > 0 && { shareTokenMetadata: { ...stm } }),
-					...(tiers && tiers.length > 0 && { tiers }),
-					...(upgradeType != null && { upgradeType }),
-					...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
-				},
-				null,
-				2
-			)
+			const stm = shareTokenMetadata as Record<string, unknown> | undefined
+			const metaContent = buildBeamioErc1155Card0MetadataFileContent({
+				shareTokenMetadata: stm,
+				tiers: tiers as Array<Record<string, unknown>> | undefined,
+				upgradeType: upgradeType != null ? upgradeType : undefined,
+				transferWhitelistEnabled,
+			})
 			const metaPath = resolve(METADATA_BASE, metaFilename)
 			const metaDir = resolve(METADATA_BASE)
 			if (metaPath.startsWith(metaDir + '/') || metaPath === metaDir) {

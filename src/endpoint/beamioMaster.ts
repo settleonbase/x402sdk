@@ -16,7 +16,7 @@ import {
 	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED } from './latestCardsShared'
@@ -962,6 +962,48 @@ const routing = ( router: Router ) => {
 			createCardPool.push({ ...body, res })
 			logger(Colors.cyan(`[createCard] pushed to pool, cardOwner=${body.cardOwner}`))
 			createCardPoolPress()
+		})
+
+		/**
+		 * 已发卡仅更新 ERC-1155 卡级 JSON（recharge bonus / shareTokenMetadata / tiers 等），不写链。
+		 * Cluster 需在预检（持卡人身份等）后转发至 Master，与 /api/createCard 一致。
+		 */
+		router.post('/updateCardShareMetadata', async (req, res) => {
+			const body = req.body as {
+				cardAddress?: string
+				shareTokenMetadata?: Record<string, unknown>
+				tiers?: Array<Record<string, unknown>>
+				upgradeType?: number
+				transferWhitelistEnabled?: boolean
+			}
+			const cardAddress = body.cardAddress?.trim()
+			if (!cardAddress || !ethers.isAddress(cardAddress)) {
+				res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end()
+				return
+			}
+			if (!body.shareTokenMetadata || typeof body.shareTokenMetadata !== 'object') {
+				res.status(400).json({ success: false, error: 'shareTokenMetadata object is required' }).end()
+				return
+			}
+			try {
+				const r = await applyBeamioCardShareMetadataUpdate({
+					cardAddress,
+					shareTokenMetadata: body.shareTokenMetadata,
+					...(body.tiers != null && { tiers: body.tiers }),
+					...(body.upgradeType != null && { upgradeType: body.upgradeType }),
+					...(typeof body.transferWhitelistEnabled === 'boolean' && {
+						transferWhitelistEnabled: body.transferWhitelistEnabled,
+					}),
+				})
+				if (!r.success) {
+					res.status(400).json({ success: false, error: r.error ?? 'Metadata update failed' }).end()
+					return
+				}
+				res.status(200).json({ success: true, cardAddress: ethers.getAddress(cardAddress) }).end()
+			} catch (err: any) {
+				logger(Colors.red('[updateCardShareMetadata] error:'), err?.message ?? err)
+				res.status(500).json({ success: false, error: err?.message ?? 'Metadata update failed' }).end()
+			}
 		})
 
 		router.post('/purchasingCard', (req, res) => {

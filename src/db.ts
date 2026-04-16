@@ -2738,8 +2738,9 @@ export const registerCardToDb = async (params: {
 		backgroundColor?: string
 		minimumTopup?: number
 		maximumTopup?: number
-		bonusRule?: { paymentAmount: number; bonusValue: number }
-		bonusRules?: Array<{ paymentAmount: number; bonusValue: number }>
+		logoDisplayTier?: number
+		bonusRule?: { paymentAmount: number; bonusValue: number; bonusProportional?: boolean }
+		bonusRules?: Array<{ paymentAmount: number; bonusValue: number; bonusProportional?: boolean }>
 	}
 	tiers?: Array<{
 		index: number
@@ -2800,6 +2801,48 @@ export const registerCardToDb = async (params: {
 		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[registerCardToDb] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 供 metadata 热更新：读取 beamio_cards 登记行（不写链，只同步 JSON + metadata_json）。 */
+export const getBeamioCardRowForMetadataSync = async (
+	cardAddress: string
+): Promise<{
+	cardOwner: string
+	currency: string
+	priceInCurrencyE6: string
+	uri: string | null
+	txHash: string | null
+} | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_CARDS_TABLE)
+		const addr = cardAddress.toLowerCase()
+		const { rows } = await db.query<{
+			card_owner: string
+			currency: string
+			price_in_currency_e6: string
+			uri: string | null
+			tx_hash: string | null
+		}>(
+			`SELECT card_owner, currency, price_in_currency_e6, uri, tx_hash FROM beamio_cards WHERE card_address = $1 LIMIT 1`,
+			[addr]
+		)
+		if (rows.length === 0) return null
+		const r = rows[0]
+		return {
+			cardOwner: r.card_owner as string,
+			currency: r.currency as string,
+			priceInCurrencyE6: String(r.price_in_currency_e6 ?? ''),
+			uri: r.uri ?? null,
+			txHash: r.tx_hash ?? null,
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[getBeamioCardRowForMetadataSync] failed: ${e?.message ?? e}`))
+		return null
 	} finally {
 		await db.end().catch(() => {})
 	}
