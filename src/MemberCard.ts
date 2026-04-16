@@ -8913,8 +8913,8 @@ export type CreateCardPreChecked = {
 		displayName?: string
 		/** Points token label for dashboard */
 		Symbol?: string
-		bonusRule?: { paymentAmount: number; bonusValue: number }
-		bonusRules?: Array<{ paymentAmount: number; bonusValue: number }>
+		bonusRule?: CreateCardBonusRuleNormalized
+		bonusRules?: CreateCardBonusRuleNormalized[]
 	}
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
 	/** CoNET BusinessStartKet #0 burn source; set by Cluster after balance precheck (omit when BEAMIO_SKIP_BUSINESS_START_KET_GATE) */
@@ -8929,6 +8929,14 @@ const CREATE_CARD_SYMBOL_MAX_LEN = 32
 const CREATE_CARD_BONUS_RULES_MAX = 32
 /** Whole-currency-ish cap for bonus rule amounts (defensive) */
 const CREATE_CARD_BONUS_AMOUNT_MAX = 1_000_000_000
+
+/** Normalized bonus rule persisted in shareTokenMetadata (matches biz / POS clients). */
+type CreateCardBonusRuleNormalized = {
+	paymentAmount: number
+	bonusValue: number
+	/** When true, bonus scales with top-up: principal * (bonusValue / paymentAmount). */
+	bonusProportional?: boolean
+}
 
 function parseCreateCardTopupWholeUnit(v: unknown): number | undefined {
 	if (v == null) return undefined
@@ -8955,10 +8963,23 @@ function parseCreateCardBonusAmount(v: unknown): number | null {
 	return null
 }
 
+function parseCreateCardBonusProportionalFlag(o: Record<string, unknown>): boolean {
+	const keys = ['bonusProportional', 'bonusIsProportional', 'percentBased', 'proportionalBonus', 'percentage'] as const
+	for (const k of keys) {
+		const v = o[k]
+		if (v === true || v === 1) return true
+		if (typeof v === 'string') {
+			const s = v.trim().toLowerCase()
+			if (s === 'true' || s === '1' || s === 'yes') return true
+		}
+	}
+	return false
+}
+
 function normalizeCreateCardBonusRuleEntry(
 	raw: unknown,
 	idxLabel: string,
-): { success: true; rule: { paymentAmount: number; bonusValue: number } } | { success: false; error: string } {
+): { success: true; rule: CreateCardBonusRuleNormalized } | { success: false; error: string } {
 	if (!raw || typeof raw !== 'object') {
 		return { success: false, error: `${idxLabel} must be an object` }
 	}
@@ -8971,13 +8992,22 @@ function normalizeCreateCardBonusRuleEntry(
 	if (pa < 0 || bv < 0) {
 		return { success: false, error: `${idxLabel} amounts must be >= 0` }
 	}
+	const bonusProportional = parseCreateCardBonusProportionalFlag(o)
+	if (bonusProportional && (pa <= 0 || bv <= 0)) {
+		return {
+			success: false,
+			error: `${idxLabel}: when proportional/percentage bonus is set, paymentAmount and bonusValue must be > 0`,
+		}
+	}
 	if (pa > CREATE_CARD_BONUS_AMOUNT_MAX || bv > CREATE_CARD_BONUS_AMOUNT_MAX) {
 		return {
 			success: false,
 			error: `${idxLabel} amounts must not exceed ${CREATE_CARD_BONUS_AMOUNT_MAX}`,
 		}
 	}
-	return { success: true, rule: { paymentAmount: pa, bonusValue: bv } }
+	const rule: CreateCardBonusRuleNormalized = { paymentAmount: pa, bonusValue: bv }
+	if (bonusProportional) rule.bonusProportional = true
+	return { success: true, rule }
 }
 
 export const createCardPreCheck = (body: {
@@ -9088,7 +9118,7 @@ export const createCardPreCheck = (body: {
 				}
 			}
 		}
-		let normalizedBonusRules: Array<{ paymentAmount: number; bonusValue: number }> | undefined
+		let normalizedBonusRules: CreateCardBonusRuleNormalized[] | undefined
 		if (stm.bonusRules != null) {
 			if (!Array.isArray(stm.bonusRules)) {
 				return { success: false, error: 'shareTokenMetadata.bonusRules must be an array if provided' }
@@ -9111,7 +9141,11 @@ export const createCardPreCheck = (body: {
 			if (!parsed.success) return { success: false, error: parsed.error }
 			if (normalizedBonusRules && normalizedBonusRules.length > 0) {
 				const first = normalizedBonusRules[0]
-				if (first.paymentAmount !== parsed.rule.paymentAmount || first.bonusValue !== parsed.rule.bonusValue) {
+				if (
+					first.paymentAmount !== parsed.rule.paymentAmount ||
+					first.bonusValue !== parsed.rule.bonusValue ||
+					Boolean(first.bonusProportional) !== Boolean(parsed.rule.bonusProportional)
+				) {
 					return {
 						success: false,
 						error: 'shareTokenMetadata.bonusRule must match bonusRules[0] when both are provided',
@@ -9191,7 +9225,7 @@ export const createCardPreCheck = (body: {
 			const sym = stm.Symbol.trim()
 			if (sym.length > 0) meta.Symbol = sym.slice(0, CREATE_CARD_SYMBOL_MAX_LEN)
 		}
-		let bonusRulesOut: Array<{ paymentAmount: number; bonusValue: number }> | undefined
+		let bonusRulesOut: CreateCardBonusRuleNormalized[] | undefined
 		if (stm.bonusRules != null && Array.isArray(stm.bonusRules)) {
 			bonusRulesOut = []
 			for (const br of stm.bonusRules) {
