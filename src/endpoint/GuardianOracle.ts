@@ -53,7 +53,7 @@ const testData1 = [
 logger(`admin wallet ${managerWallet.address} | GuardianOracle CoNET | BeamioOracle L1 ${providerBaseBackup}`)
 
 const beamioOracleBaseAddr = process.env.BASE_BEAMIO_ORACLE_ADDRESS || '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
-const beamioOracleConetAddr = process.env.CONET_BEAMIO_ORACLE_ADDRESS || '0x06a1e0D55B4db57Aa906Eff332902F5CA7a25dd4'
+const beamioOracleConetAddr = process.env.CONET_BEAMIO_ORACLE_ADDRESS || '0x32aa4fC3D3506850b27F767Bf582f4ec449de224'
 const beamioOracleBase = new ethers.Contract(beamioOracleBaseAddr, SeamioOracle_ABI, beamioWallet)
 const beamioOracleConet = new ethers.Contract(beamioOracleConetAddr, SeamioOracle_ABI, beamioWalletConet)
 
