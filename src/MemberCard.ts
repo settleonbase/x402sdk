@@ -132,7 +132,7 @@ const JSONRPC_NO_BATCH = { batchMaxCount: 1 }
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
-const conetEndpoint = 'https://mainnet-rpc.conet.network'
+const conetEndpoint = 'https://rpc1.conet.network'
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint, undefined, JSONRPC_NO_BATCH)
 /**
  * Settle_ContractPool：factory 登记的 owner 列表，每项为一名 admin（含 baseFactoryPaymaster、walletBase 等）。
@@ -1317,7 +1317,7 @@ function calcChargeFixedBUnitFee(): { bServiceUnits6: bigint; bServiceUSDC6: big
 }
 
 /** CoNET B-Unit ERC20 风格余额合约（balanceOfAll），与 beamioServer /api/getBUnitBalance 一致 */
-const CONET_BUINT_TOKEN_ADDRESS = '0x4A3E59519eE72B9dCf376f0617fF0a0a5a1ef879'
+const CONET_BUINT_TOKEN_ADDRESS = '0xC97CEbb4DF827cB2D1453A9Df7FEf6dADa1C16Ad'
 
 /** Charge consumeFromUser revert 时拉取与 Cluster 预检同源的 getBUnitBalance，并附带代币 balanceOfAll 供对照 */
 async function logChargeConsumeFromUserDiagnostics(
@@ -3759,7 +3759,7 @@ const BUNIT_AIRDROP_ABI = [
 const CLAIM_AIRDROP_DOMAIN = {
 	name: 'BUnitAirdrop',
 	version: '1',
-	chainId: 224400,
+	chainId: 224422,
 	verifyingContract: CONET_BUNIT_AIRDROP_ADDRESS as `0x${string}`,
 }
 const CLAIM_AIRDROP_TYPES = {

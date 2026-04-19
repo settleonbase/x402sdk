@@ -26,7 +26,7 @@ interface quote {
 }
 
 /** GuardianOracle 所在 L1：CoNET */
-const providerConet = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network')
+const providerConet = new ethers.JsonRpcProvider('https://rpc1.conet.network')
 /** BeamioOracle 所在 L1；与 CoNET 不同链，故可并行喂价且无 nonce 冲突 */
 const providerBaseBackup = new ethers.JsonRpcProvider('https://base-rpc.conet.network')
 

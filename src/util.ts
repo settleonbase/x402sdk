@@ -85,7 +85,7 @@ import {reflashData} from './server'
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 
 const x402Version = 1
-const conetEndpoint = 'https://mainnet-rpc.conet.network'
+const conetEndpoint = 'https://rpc1.conet.network'
 const CashCodeBaseAddr = '0x3977f35c531895CeD50fAf5e02bd9e7EB890D2D1'
 const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
@@ -104,7 +104,7 @@ const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 const {verify, settle} = useFacilitator(facilitator1)
 
 const GuardianNodeInfo_mainnet = '0xCd68C3FFFE403f9F26081807c77aB29a4DF6940D'
-const CONET_MAINNET = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network') 
+const CONET_MAINNET = new ethers.JsonRpcProvider('https://rpc1.conet.network') 
 const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNodeInfoABI, CONET_MAINNET)
 
 
@@ -113,7 +113,7 @@ const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNo
 const beamiobase = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
-const beamioConetAccountRegistry = '0x3E15607BCf98B01e6C7dF834a2CEc7B8B6aFb1BC'
+const beamioConetAccountRegistry = '0x46cBFC3f77b320Db545D1DC21138fa1ED2Fa3df3'
 
 let Guardian_Nodes: nodeInfo[] = []
 
@@ -186,7 +186,7 @@ export const getAllNodes = () => new Promise(async resolve=> {
 
 
 const conetMainnet = defineChain({
-	id: 224400, // 随便指定唯一的 chainId，例如 2550；如果有官方ID请填实际
+	id: 224422, // 随便指定唯一的 chainId，例如 2550；如果有官方ID请填实际
 	name: 'CoNET Mainnet',
 	network: 'conet',
 	nativeCurrency: {

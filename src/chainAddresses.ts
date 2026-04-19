@@ -4,14 +4,14 @@
  */
 export const BASE_MAINNET_CHAIN_ID = 8453
 
-export const BASE_AA_FACTORY = '0x4b31D6a05Cdc817CAc1B06369555b37a5b182122'
+export const BASE_AA_FACTORY = '0x23883E2b7DEcf507DFDdeb44ceF3B48647E428eA'
 /** BeamioAccountDeployer（与 config/base-addresses.json BEAMIO_ACCOUNT_DEPLOYER 同步） */
 export const BASE_BEAMIO_ACCOUNT_DEPLOYER = '0x139D55591A03550259AF32097A9848ECE9869C90'
 /**
  * Base card factory (createCard / factoryGateway / EIP-712 domain verifyingContract).
  * Canonical: deployments/base-UserCardFactory.json / base-UserCardFactory-DEBUG.json（同址）.
  */
-export const BASE_CARD_FACTORY = '0x2EB245646de404b2Dce87E01C6282C131778bb05'
+export const BASE_CARD_FACTORY = '0x04394E2Fc324aF3801B50748c93E362056903EA4'
 /**
  * createCardCollectionWithInitCode(address,uint8,uint256,bytes) — selector 0xef759095
  * createCardCollectionWithInitCodeAndTiers(..., (uint256,uint256,uint256)[]) — selector 0x9a7eb0f0
@@ -31,27 +31,27 @@ export const BASE_BEAMIO_USER_CARD_FORMATTING_LIB = '0xe56dca3aF78a12164dC6546e6
 export const BASE_BEAMIO_USER_CARD_TRANSFER_LIB = '0xc7fAF8e33e9fE9D4409961Ec72d46B2200766f8F'
 export const BASE_CCSA_CARD_ADDRESS = '0x2032A363BB2cf331142391fC0DAd21D6504922C7'
 export const BASE_TREASURY = '0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58'
-export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xA756F2E27a332d6Be2d399dA543E3Ce4C8455F14'
+export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0x3047f0Dd2d919Ebe4D21CC3BCbcB1748c8F2cB9D'
 export const PURCHASING_CARD_METADATA_ADDRESS = '0xf99018DfFdb0c5657C93ca14DB2900CEbe1168A7'
-export const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+export const USDC_BASE = '0x456Ecd35370bA9d4a9f615399a154548f07c2437'
 
-export const CONET_BUNIT_AIRDROP_ADDRESS = '0xa7410a532544aB7d1bA70701D9D0E389e4f4Cc1F'
+export const CONET_BUNIT_AIRDROP_ADDRESS = '0xbE1CF54f76BcAb40DC49cDcD7FBA525b9ABDa264'
 /** BuintRedeemAirdrop（CoNET）；与 deployments/conet-addresses.json 同步 */
-export const CONET_BUINT_REDEEM_AIRDROP = '0x9A02EfE5DFC45E9236552BfE8FAB6643Efefc84A'
-export const BEAMIO_INDEXER_DIAMOND = '0xd990719B2f05ccab4Acdd5D7A3f7aDfd2Fc584Fe'
-export const MERCHANT_POS_MANAGEMENT_CONET = '0x3Eb57035d3237Fce4b1cB273662E875EdfA0D54f'
+export const CONET_BUINT_REDEEM_AIRDROP = '0x0DC615bAc14411CbDCd082fe59CBdDA8768615B0'
+export const BEAMIO_INDEXER_DIAMOND = '0x0c29b4DB72F31457570D38eB215b3F855d5989E1'
+export const MERCHANT_POS_MANAGEMENT_CONET = '0x5156E93f44283CA584D09EA46E30ee14ca0abB37'
 
 /**
  * BusinessStartKet ERC-1155（CoNET）。与 deployments/conet-addresses.json `BusinessStartKet` 同步。
  * 未部署时留空串；可用环境变量 CONET_BUSINESS_START_KET 覆盖（便于未提交地址前的本地联调）。
  */
-export const CONET_BUSINESS_START_KET = '0x2FF032d57eCF466624911692AF44D0B4A32a8E1f'
+export const CONET_BUSINESS_START_KET = '0x65B4780efA2e2dB2FB4761dF82b16902d445Ab46'
 
 /**
  * BusinessStartKetRedeem（CoNET）。与 deployments/conet-addresses.json `BusinessStartKetRedeem` 同步。
  * 环境变量 CONET_BUSINESS_START_KET_REDEEM 可覆盖。
  */
-export const CONET_BUSINESS_START_KET_REDEEM = '0x44A68B182BaB5d5Ed45C9F027b42a8Bbb6564b2E'
+export const CONET_BUSINESS_START_KET_REDEEM = '0x0c15545f833CF4DF6C7F51F8D148cf7684e663ab'
 
 export const BASE_MAINNET_FACTORIES = {
   AA_FACTORY: BASE_AA_FACTORY,
@@ -61,7 +61,7 @@ export const BASE_MAINNET_FACTORIES = {
 } as const
 
 /** CoNET 主网 chainId（BUnitAirdrop / consumeFromUser / 独立 BUint  indexer 记账） */
-export const CONET_MAINNET_CHAIN_ID = 224400
+export const CONET_MAINNET_CHAIN_ID = 224422
 
 export const CONTRACT_ADDRESSES = {
   base: {

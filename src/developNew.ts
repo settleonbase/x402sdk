@@ -138,7 +138,7 @@ import { logger } from "./logger";
 
 const LoupeABI = DiamondLoupeFacetABI
 
-const RPC_URL = "https://mainnet-rpc.conet.network";
+const RPC_URL = "https://rpc1.conet.network";
 const DIAMOND = "0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612";
 
 //										DiamondCutFacet

@@ -15,7 +15,7 @@ import {
 } from '../chainAddresses'
 
 /** CoNET B-Unit / kit mint signer（与 MemberCard Settle 一致） */
-const CONET_MAINNET_RPC_HTTP = 'https://mainnet-rpc.conet.network'
+const CONET_MAINNET_RPC_HTTP = 'https://rpc1.conet.network'
 
 const BUNIT_AIRDROP_MINT_FOR_USDC_PURCHASE_ABI = [
 	'function mintForUsdcPurchase(address to, uint256 usdcAmount, bytes32 baseTxHash) external',

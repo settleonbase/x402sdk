@@ -155,7 +155,7 @@ async function assertAdminEoaHasVisibleAaAfterEnsure(
 	}
 	return { ok: true, canonicalAa }
 }
-const CONET_RPC = 'https://mainnet-rpc.conet.network'
+const CONET_RPC = 'https://rpc1.conet.network'
 const providerConet = new ethers.JsonRpcProvider(CONET_RPC)
 
 const masterServerPort = 1111
@@ -182,7 +182,7 @@ const fetchOracleFromMaster = () => {
 }
 
 const startClusterOracleSync = () => {
-	const conetRpc = new ethers.JsonRpcProvider('https://mainnet-rpc.conet.network')
+	const conetRpc = new ethers.JsonRpcProvider('https://rpc1.conet.network')
 	conetRpc.on('block', (blockNumber: bigint | number) => {
 		const n = typeof blockNumber === 'bigint' ? Number(blockNumber) : blockNumber
 		if (n % 10 !== 0) return
@@ -4097,7 +4097,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const domain = {
 				name: 'MerchantPOSManagement',
 				version: '1',
-				chainId: 224400,
+				chainId: 224422,
 				verifyingContract: MERCHANT_POS_MANAGEMENT_CONET as `0x${string}`,
 			}
 			const types = {
@@ -4167,7 +4167,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const domain = {
 				name: 'MerchantPOSManagement',
 				version: '1',
-				chainId: 224400,
+				chainId: 224422,
 				verifyingContract: MERCHANT_POS_MANAGEMENT_CONET as `0x${string}`,
 			}
 			const types = {

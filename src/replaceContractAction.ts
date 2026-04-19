@@ -6,7 +6,7 @@ import { homedir } from "os";
 import IDiamondCutABI from "./ABI/DiamondCutFacetABI.json";
 import LoupeABI from "./ABI/LoupeABI.json";
 
-const RPC_URL = "https://mainnet-rpc.conet.network";
+const RPC_URL = "https://rpc1.conet.network";
 const ZERO = ethers.ZeroAddress;
 
 // 从 deployments/conet-IndexerDiamond.json 读取（与 MemberCard BeamioTaskIndexerAddress 一致）

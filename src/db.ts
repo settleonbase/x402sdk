@@ -19,7 +19,7 @@ import conetPGPABI from './ABI/conetPGP.json'
  */
 
 
-const RPC_URL = "https://mainnet-rpc.conet.network"
+const RPC_URL = "https://rpc1.conet.network"
 const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
 
 const providerConet = new ethers.JsonRpcProvider(RPC_URL)
@@ -27,7 +27,7 @@ const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
-const beamioConetAccountRegistry = '0x3E15607BCf98B01e6C7dF834a2CEc7B8B6aFb1BC'
+const beamioConetAccountRegistry = '0x46cBFC3f77b320Db545D1DC21138fa1ED2Fa3df3'
 const IpfsStorageRegistryGlobalDedup = '0x121c4dDCa92f07dc53Fd6Db9bc5A07c2918F9591'
 const addressPGP = '0x13A96Bcd6aB010619d1004A1Cb4f5FE149e0F4c4'
 
