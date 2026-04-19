@@ -103,14 +103,14 @@ const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)
 
-const GuardianNodeInfo_mainnet = '0xCd68C3FFFE403f9F26081807c77aB29a4DF6940D'
+const GuardianNodeInfo_mainnet = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
 const CONET_MAINNET = new ethers.JsonRpcProvider('https://rpc1.conet.network') 
 const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNodeInfoABI, CONET_MAINNET)
 
 
-//					beamio	Contract
+//					beamio	Contract（与 GuardianNodesInfoV6 同链上地址）
 
-const beamiobase = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
+const beamiobase = GuardianNodeInfo_mainnet
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
 const beamioConetAccountRegistry = '0x46cBFC3f77b320Db545D1DC21138fa1ED2Fa3df3'
