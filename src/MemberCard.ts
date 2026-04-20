@@ -2,7 +2,7 @@ import { ethers } from 'ethers'
 import { randomUUID } from 'node:crypto'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
-import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6, getOracleRequest, resolveBeamioBaseHttpRpcUrl } from './util'
+import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6, getOracleRequest, isOracleFresh, resolveBeamioBaseHttpRpcUrl } from './util'
 import { Request, Response} from 'express'
 import { resolve, join } from 'node:path'
 import fs from 'node:fs'
@@ -1607,18 +1607,15 @@ export const signUSDC3009ForNfcTopup = async (
 }
 
 /** 将 currency amount（人类可读）经 Oracle 折算为 USDC6（6 位精度），与 nfcTopupPreparePayload 内部 quote path 一致。
- * USD/USDC 直接 1:1；其它币种走 oracle 汇率（带 fallback）。供 NFC USDC Topup（x402）等场景共享。 */
+ * USD/USDC 直接 1:1；其它币种**严格走 Oracle 汇率**——若 oracle 字段缺失/0 或快照已 stale（超过 10 分钟）
+ * 则返回 0n，由调用方拒绝此次报价（503/Retry），**不再静默 fallback 到任何写死常量**。
+ * 这是为了避免在 oracle 暂停/未同步时仍以一个旧的、与市场背离的汇率给 USDC 客户报价。 */
 export const quoteCurrencyToUsdc6 = (amount: string, currency?: string): bigint => {
 	const amt = typeof amount === 'string' ? amount.trim() : ''
 	if (!amt || Number(amt) <= 0) return 0n
 	const cur = (currency || 'CAD').toUpperCase()
 	const ONE_E6 = 1_000_000n
 	const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
-	const toRateE6 = (raw: unknown, fallback: string): bigint => {
-		const n = Number(raw)
-		if (!Number.isFinite(n) || n <= 0) return ethers.parseUnits(fallback, 6)
-		return ethers.parseUnits(n.toFixed(6), 6)
-	}
 	let amountCurrency6: bigint
 	try {
 		amountCurrency6 = ethers.parseUnits(amt, 6)
@@ -1627,7 +1624,6 @@ export const quoteCurrencyToUsdc6 = (amount: string, currency?: string): bigint 
 	}
 	if (amountCurrency6 <= 0n) return 0n
 	if (cur === 'USD' || cur === 'USDC') return amountCurrency6
-	const oracle = getOracleRequest() as any
 	const oracleRateKey: Record<string, string> = {
 		CAD: 'usdcad',
 		EUR: 'usdeur',
@@ -1637,17 +1633,15 @@ export const quoteCurrencyToUsdc6 = (amount: string, currency?: string): bigint 
 		SGD: 'usdsgd',
 		TWD: 'usdtwd',
 	}
-	const rateKey = oracleRateKey[cur] ?? 'usdcad'
-	const fallbackRate: Record<string, string> = {
-		usdcad: '1.35',
-		usdeur: '0.92',
-		usdjpy: '150',
-		usdcny: '7.2',
-		usdhkd: '7.8',
-		usdsgd: '1.35',
-		usdtwd: '31',
-	}
-	const rateE6 = toRateE6(oracle?.[rateKey], fallbackRate[rateKey] ?? '1.35')
+	const rateKey = oracleRateKey[cur]
+	if (!rateKey) return 0n
+	if (!isOracleFresh()) return 0n
+	const oracle = getOracleRequest() as any
+	const rawRate = oracle?.[rateKey]
+	const rateNum = Number(rawRate)
+	if (!Number.isFinite(rateNum) || rateNum <= 0) return 0n
+	const rateE6 = ethers.parseUnits(rateNum.toFixed(6), 6)
+	if (rateE6 <= 0n) return 0n
 	return ceilDiv(amountCurrency6 * ONE_E6, rateE6)
 }
 
@@ -1706,11 +1700,6 @@ export const nfcTopupPreparePayload = async (params: {
 	const cur = (currency || 'CAD').toUpperCase()
 	const ONE_E6 = 1_000_000n
 	const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
-	const toRateE6 = (raw: unknown, fallback: string): bigint => {
-		const n = Number(raw)
-		if (!Number.isFinite(n) || n <= 0) return ethers.parseUnits(fallback, 6)
-		return ethers.parseUnits(n.toFixed(6), 6)
-	}
 	const amountCurrency6 = ethers.parseUnits(amt, 6)
 	if (amountCurrency6 <= 0n) return { error: 'Invalid amount' }
 
@@ -1737,34 +1726,12 @@ export const nfcTopupPreparePayload = async (params: {
 	}
 
 	if (points6 == null) {
-		const oracle = getOracleRequest() as any
-		let usdcAmount6: bigint
-		if (cur === 'USD' || cur === 'USDC') {
-			usdcAmount6 = amountCurrency6
-		} else {
-			const oracleRateKey: Record<string, string> = {
-				CAD: 'usdcad',
-				EUR: 'usdeur',
-				JPY: 'usdjpy',
-				CNY: 'usdcny',
-				HKD: 'usdhkd',
-				SGD: 'usdsgd',
-				TWD: 'usdtwd',
-			}
-			const rateKey = oracleRateKey[cur] ?? 'usdcad'
-			const fallbackRate: Record<string, string> = {
-				usdcad: '1.35',
-				usdeur: '0.92',
-				usdjpy: '150',
-				usdcny: '7.2',
-				usdhkd: '7.8',
-				usdsgd: '1.35',
-				usdtwd: '31',
-			}
-			const rateE6 = toRateE6(oracle?.[rateKey], fallbackRate[rateKey] ?? '1.35')
-			usdcAmount6 = ceilDiv(amountCurrency6 * ONE_E6, rateE6)
+		// 退到"USDC 报价"路径：必须经 Oracle 折算为 USDC6 后再 quotePointsForUSDC。
+		// 严禁在 oracle 缺失/stale 时悄悄使用写死的固定汇率给客户记账（参见 beamio-currency-protocol）。
+		const usdcAmount6 = quoteCurrencyToUsdc6(amt, cur)
+		if (usdcAmount6 <= 0n) {
+			return { error: 'Oracle rate unavailable, please retry shortly' }
 		}
-		if (usdcAmount6 <= 0n) return { error: 'Invalid amount' }
 		const quote = await quotePointsForUSDC_raw(cardAddr, usdcAmount6)
 		points6 = quote.points6
 		logger(Colors.gray(`[nfcTopupPreparePayload] quote path card=${cardAddr} cur=${cur} amount6=${amountCurrency6} usdc6=${usdcAmount6} => points6=${points6}`))

@@ -1,6 +1,6 @@
 import express, { Request, Response, Router} from 'express'
 import { GoogleGenAI } from '@google/genai'
-import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner } from '../util'
+import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh } from '../util'
 import { checkSmartAccount } from '../MemberCard'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
@@ -173,7 +173,12 @@ const fetchOracleFromMaster = () => {
 		res.on('end', () => {
 			try {
 				const data = JSON.parse(buf)
-				if (data && typeof data === 'object') clusterOracleCache = { ...defaultOracle, ...data }
+				if (data && typeof data === 'object') {
+					clusterOracleCache = { ...defaultOracle, ...data }
+					// 同步到 util.ts 全局 oracle，保证 quoteCurrencyToUsdc6 / nfcTopupPreparePayload 在
+					// cluster 进程内也能读到 master 的真实链上汇率，而不是悄悄退回到任何 fallback 常量。
+					setOracleSnapshot(data as Record<string, unknown>)
+				}
 			} catch (_) {}
 		})
 	})
@@ -2129,7 +2134,15 @@ const routing = ( router: Router ) => {
 			}
 			const usdc6 = quoteCurrencyToUsdc6(amt, cur)
 			if (usdc6 <= 0n) {
-				return res.status(400).json({ success: false, error: 'Quote failed (zero usdc6)' }).end()
+				const fresh = isOracleFresh()
+				const oracleTs = (clusterOracleCache?.timestamp ?? 0) as number
+				logger(Colors.yellow(`[nfcUsdcTopupQuote] oracle quote=0 cur=${cur} amt=${amt} fresh=${fresh} oracleTs=${oracleTs}`))
+				return res.status(503).json({
+					success: false,
+					error: fresh
+						? `Oracle rate not available for ${cur}, please retry shortly`
+						: `Oracle rate stale, please retry shortly`,
+				}).end()
 			}
 			return res.status(200).json({
 				success: true,
@@ -2139,6 +2152,7 @@ const routing = ( router: Router ) => {
 				amount: amt,
 				quotedUsdc6: usdc6.toString(),
 				quotedUsdc: ethers.formatUnits(usdc6, 6),
+				oracleTimestamp: Number(clusterOracleCache?.timestamp ?? 0),
 			}).end()
 		} catch (e: any) {
 			logger(Colors.red(`[nfcUsdcTopupQuote] error: ${e?.message ?? e}`))
@@ -2243,10 +2257,17 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: prepared.error }).end()
 			}
 
-			// 4. USDC 报价
+			// 4. USDC 报价 - **严格 Oracle**：oracle 缺失/stale 时拒绝，不允许用固定汇率报价
 			const quotedUsdc6 = quoteCurrencyToUsdc6(amt, cur)
 			if (quotedUsdc6 <= 0n) {
-				return res.status(400).json({ success: false, error: 'Quote failed' }).end()
+				const fresh = isOracleFresh()
+				logger(Colors.yellow(`[nfcUsdcTopup] oracle quote=0 cur=${cur} amt=${amt} fresh=${fresh}`))
+				return res.status(503).json({
+					success: false,
+					error: fresh
+						? `Oracle rate not available for ${cur}, please retry shortly`
+						: `Oracle rate stale, please retry shortly`,
+				}).end()
 			}
 
 			// 5. x402 verify + settle（verifyPaymentNew 内部已处理 402 / 余额 / 时效）

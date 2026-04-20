@@ -869,8 +869,13 @@ export const settleBeamioX402ToCardOwner = async (
 		return null
 	}
 	const resource = buildResourceUrl(req) as Resource
+	// processPriceToAtomicAmount 把 string price 视为「人类可读 USDC dollar」并再乘 10**6 得到原子单位。
+	// 因此必须传人类可读字符串（如 "81.000000"），**绝不能直接传 quotedUsdc6.toString()**（已经是 atomic），
+	// 否则会被多乘一次 10^6，前端 wrapFetchWithPayment 看到的 maxAmountRequired 会暴涨到万亿级，
+	// 立即触发 "Payment amount exceeds maximum allowed" 客户端拒签。
+	const priceUsdcHuman = ethers.formatUnits(quotedUsdc6, 6)
 	const paymentRequirements = [createBeamioExactPaymentRequirements(
-		quotedUsdc6.toString(),
+		priceUsdcHuman,
 		resource,
 		description,
 		ethers.getAddress(cardOwner)
@@ -1819,6 +1824,42 @@ const balanceCache: Record<string, {
 
 export const getOracleRequest = () => {
 	return oracle
+}
+
+/** Cluster 进程不会自己跑 oracolPrice()，由其从 master /api/oracleForCluster 拉到快照后调用本函数同步进
+ * util.ts 全局 oracle，确保 quoteCurrencyToUsdc6 / nfcTopupPreparePayload 在 cluster 端也能拿到真实链上汇率，
+ * 而不是悄悄回退到写死的 fallback 常量（参见 beamio-currency-protocol：禁止固定汇率给客户报价）。 */
+export const setOracleSnapshot = (snap: Record<string, unknown> | null | undefined): void => {
+	if (!snap || typeof snap !== 'object') return
+	const pickStr = (k: string): string | undefined => {
+		const v = (snap as any)[k]
+		if (v === undefined || v === null) return undefined
+		const s = String(v)
+		return s.length ? s : undefined
+	}
+	const pickNum = (k: string): number | undefined => {
+		const v = (snap as any)[k]
+		const n = Number(v)
+		return Number.isFinite(n) ? n : undefined
+	}
+	const fields: Array<keyof typeof oracle> = ['bnb', 'eth', 'usdc', 'usdcad', 'usdjpy', 'usdcny', 'usdhkd', 'usdeur', 'usdsgd', 'usdtwd']
+	for (const f of fields) {
+		const v = pickStr(f as string)
+		if (v !== undefined) (oracle as any)[f] = v
+	}
+	const ts = pickNum('timestamp')
+	if (ts !== undefined && ts > 0) oracle.timestamp = ts
+}
+
+/** Oracle 报价新鲜度阈值（秒）。超过则视为 stale，不允许用于客户报价。 */
+export const ORACLE_FRESH_WINDOW_SEC = 10 * 60
+
+/** 判断当前 oracle 快照是否新鲜：timestamp 必须存在，并落在阈值窗口内。 */
+export const isOracleFresh = (windowSec = ORACLE_FRESH_WINDOW_SEC): boolean => {
+	const ts = Number(oracle.timestamp)
+	if (!Number.isFinite(ts) || ts <= 0) return false
+	const nowSec = Math.floor(Date.now() / 1000)
+	return (nowSec - ts) <= windowSec
 }
 
 // const getBalance = async (address: string) => {
