@@ -70,7 +70,12 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 	'function owner() view returns (address)',
 ] as const
 const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
-const providerBaseForLatestCards = new ethers.JsonRpcProvider(BASE_RPC_URL)
+/**
+ * Disable JSON-RPC batch (与 MemberCard.ts 一致)。base-rpc.conet.network 上游网关在 batch
+ * 响应顺序与请求 id 不对齐时会让 ethers 等到 default request timeout（~30s/请求），
+ * 直接表现为 Trending Now 单卡 enrichment 用 25s+ 而 base-rpc 单 call 实测仅 ~200ms。
+ */
+const providerBaseForLatestCards = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, { batchMaxCount: 1 })
 
 /** Beamio 默认 metadata image（与 BeamioUserCard 一致） */
 const DEFAULT_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x44e7a175e57a337bf5d0a98deb19a0a545e362d504092a7af1aecd58798eab'
@@ -95,12 +100,18 @@ const ownerNftSeriesCache = new Map<string, { items: unknown[]; expiry: number }
 const seriesSharedMetadataCache = new Map<string, { data: unknown; expiry: number }>()
 const mintMetadataCache = new Map<string, { items: unknown[]; expiry: number }>()
 
-/** Master 每 6s 预拉 latestCards（metadata + holderCount）；缓存条可续期至下一轮 */
-const LATEST_CARDS_PREWARM_MS = 6 * 1000
-const LATEST_CARDS_CACHE_STALE_MS = 15 * 1000
+/**
+ * Master prewarm latestCards：
+ *  - 实际只拉一次 limit=300（链上 + enrichment），其它 limit 用 slice 派生，避免 3 次重复打满 RPC。
+ *  - 间隔从 6s 调到 30s：trending 数据无需毫秒级新鲜，且 enrichment 本身 RPC 成本高。
+ *  - cache stale 与 chain-fetch-protocol 30s TTL 对齐（之前 15s 在窗口尾部高频 miss）。
+ */
+const LATEST_CARDS_PREWARM_MS = 30 * 1000
+const LATEST_CARDS_CACHE_STALE_MS = 30 * 1000
 const LATEST_CARDS_PREWARM_LIMITS = [20, 100, 300] as const
+const LATEST_CARDS_SUPERSET_LIMIT = 300
 
-/** 合并同 limit 的并发 enrich（6s prewarm 与 GET /latestCards 缓存未命中常同时触发，避免同一批卡重复 RPC + 重复日志） */
+/** 合并同 limit 的并发 enrich（prewarm 与 GET /latestCards 缓存未命中常同时触发，避免同一批卡重复 RPC + 重复日志） */
 const latestCardsComputeInflight = new Map<number, Promise<BeamioLatestCardItem[]>>()
 
 async function computeLatestCardsForMaster(limit: number): Promise<BeamioLatestCardItem[]> {
@@ -122,13 +133,23 @@ async function computeLatestCardsForMaster(limit: number): Promise<BeamioLatestC
 }
 
 async function prewarmLatestCardsCacheMaster(): Promise<void> {
+	// 1) 拉超集 limit=300 一次，命中后 slice 派生其它 limit（避免 3 倍 RPC）
+	let superset: BeamioLatestCardItem[] | null = null
+	try {
+		superset = await computeLatestCardsForMaster(LATEST_CARDS_SUPERSET_LIMIT)
+		latestCardsCache.set(
+			`limit:${LATEST_CARDS_SUPERSET_LIMIT}`,
+			{ items: superset, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS },
+		)
+	} catch (e: any) {
+		logger(Colors.yellow(`[latestCards prewarm] limit=${LATEST_CARDS_SUPERSET_LIMIT}: ${e?.message ?? e}`))
+	}
+	// 2) 派生剩余 limit；untrusted 失败时绝不写空，让旧 trusted cache 自然 stale
+	if (!superset) return
 	for (const lim of LATEST_CARDS_PREWARM_LIMITS) {
-		try {
-			const items = await computeLatestCardsForMaster(lim)
-			latestCardsCache.set(`limit:${lim}`, { items, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
-		} catch (e: any) {
-			logger(Colors.yellow(`[latestCards prewarm] limit=${lim}: ${e?.message ?? e}`))
-		}
+		if (lim === LATEST_CARDS_SUPERSET_LIMIT) continue
+		const sliced = superset.slice(0, lim)
+		latestCardsCache.set(`limit:${lim}`, { items: sliced, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
 	}
 }
 
@@ -440,7 +461,13 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-		/** 最新发行的前 N 张卡明细；holderCount + token0TotalSupply6（totalSupply(0)）+ token0CumulativeMint6（getGlobalStatsFull.cumulativeMint）。6s 预拉缓存。limit 上限 300。 */
+		/**
+		 * 最新发行的前 N 张卡明细；holderCount + token0TotalSupply6 + token0CumulativeMint6。
+		 *  - cache 命中（含已过期）一律可用：未过期直接返回；过期则当 stale 兜底。
+		 *  - cache miss：优先用 limit=300 超集 slice 派生（一次链上拉取就能服务多个 limit）。
+		 *  - 计算失败：若有任何 stale trusted cache，返回 stale 而不是 5xx，避免触发 nginx 504。
+		 *  - 严格不返回 [] 表示「无卡」（按 beamio-untrusted-empty-result-discard.mdc，windowed 扫描的空结果不可信）。
+		 */
 		router.get('/latestCards', async (_req, res) => {
 			const limit = Math.min(parseInt(String(_req.query.limit || 20), 10) || 20, 300)
 			const cacheKey = `limit:${limit}`
@@ -448,13 +475,29 @@ const routing = ( router: Router ) => {
 			if (cached && Date.now() < cached.expiry) {
 				return res.status(200).json({ items: cached.items })
 			}
+
+			// 用超集 cache 派生：避免对每个 limit 都触发 enrichment
+			const supersetCacheKey = `limit:${LATEST_CARDS_SUPERSET_LIMIT}`
+			const superset = latestCardsCache.get(supersetCacheKey)
+			if (superset && limit < LATEST_CARDS_SUPERSET_LIMIT && superset.items.length >= limit) {
+				const sliced = superset.items.slice(0, limit)
+				latestCardsCache.set(cacheKey, { items: sliced, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
+				return res.status(200).json({ items: sliced })
+			}
+
 			try {
 				const items = await computeLatestCardsForMaster(limit)
 				latestCardsCache.set(cacheKey, { items, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
 				res.status(200).json({ items })
 			} catch (e: any) {
 				logger(Colors.red('[latestCards] error:'), e?.message ?? e)
-				res.status(500).json({ error: e?.message ?? 'latestCards failed' })
+				// untrusted 失败：尝试返回 stale trusted cache（同 limit 或超集 slice），避免 nginx 504
+				if (cached) return res.status(200).json({ items: cached.items, stale: true })
+				if (superset && limit <= LATEST_CARDS_SUPERSET_LIMIT) {
+					const sliced = superset.items.slice(0, limit)
+					if (sliced.length > 0) return res.status(200).json({ items: sliced, stale: true })
+				}
+				res.status(503).json({ error: e?.message ?? 'latestCards failed' })
 			}
 		})
 
