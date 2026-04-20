@@ -16,7 +16,7 @@ import {
 	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED } from './latestCardsShared'
@@ -2179,6 +2179,110 @@ const routing = ( router: Router ) => {
 			executeForAdminProcess().catch((err: any) => {
 				logger(Colors.red('[executeForAdminProcess] nfcTopup error:'), err?.message ?? err)
 			})
+		})
+
+		/** POST /api/nfcUsdcTopup —— x402 NFC USDC Topup Master 端
+		 * Cluster 已完成：
+		 *   - SUN 校验 + recipientEOA 解析
+		 *   - card.owner() == cardOwner 一致性
+		 *   - nfcTopupPreparePayload(data/deadline/nonce, mintPointsByAdmin → recipientEOA)
+		 *   - x402 verify + settle USDC（transferWithAuthorization → cardOwner）
+		 * Master 在此处：
+		 *   - 用 service-admin（masterSetup.settle_contractAdmin[0]）EIP-712 签 ExecuteForAdmin
+		 *   - push executeForAdminPool 复用既有 NFC topup 工作流（executeForAdminProcess + post-base-process 记账） */
+		router.post('/nfcUsdcTopup', async (req, res) => {
+			const {
+				cardAddr,
+				data,
+				deadline,
+				nonce,
+				recipientEOA,
+				cardOwner,
+				currency,
+				currencyAmount,
+				payer,
+				USDC_tx,
+				usdcAmount6,
+				nfcUid,
+			} = req.body as {
+				cardAddr?: string
+				data?: string
+				deadline?: number
+				nonce?: string
+				recipientEOA?: string
+				cardOwner?: string
+				currency?: string
+				currencyAmount?: string
+				payer?: string
+				USDC_tx?: string
+				usdcAmount6?: string
+				nfcUid?: string
+				nfcTagIdHex?: string
+			}
+			try {
+				if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' }).end()
+				}
+				if (typeof deadline !== 'number' || deadline <= 0 || !nonce || typeof nonce !== 'string') {
+					return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce' }).end()
+				}
+				if (!recipientEOA || !ethers.isAddress(recipientEOA)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid recipientEOA' }).end()
+				}
+				if (!cardOwner || !ethers.isAddress(cardOwner)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid cardOwner' }).end()
+				}
+
+				const cardAddrNorm = ethers.getAddress(cardAddr)
+				const cardOwnerNorm = ethers.getAddress(cardOwner)
+				const recipientNorm = ethers.getAddress(recipientEOA)
+
+				/** Master 用 service admin key 签 ExecuteForAdmin。要求 settle_contractAdmin[0] 已被 cardOwner 添加为该卡 admin。 */
+				const signed = await signExecuteForAdminWithServiceAdmin({ cardAddr: cardAddrNorm, data, deadline, nonce })
+				if ('error' in signed) {
+					logger(Colors.red(`[nfcUsdcTopup] service admin sign FAIL: ${signed.error}`))
+					return res.status(500).json({ success: false, error: `Service admin sign failed: ${signed.error}` }).end()
+				}
+
+				/** USDC 已 settle 至 cardOwner（USDC_tx），此处提供 currencyAmount 让 NFC topup post-base 链路按 currency 拆分。
+				 *  当前不做拆分，等同 legacy `topupCard`/`newCard`/`upgradeNewCard` 单笔行为。 */
+				const totE = (() => {
+					const t = String(currencyAmount ?? '').trim().replace(/,/g, '')
+					if (!t) return 0n
+					try { return ethers.parseUnits(t, 6) } catch { return 0n }
+				})()
+				const topupCurrencySplit = totE > 0n
+					? { currencyAmountE6: totE, cardE6: totE, cashE6: 0n, bonusE6: 0n }
+					: undefined
+
+				executeForAdminPool.push({
+					cardAddr: cardAddrNorm,
+					data,
+					deadline,
+					nonce,
+					adminSignature: signed.adminSignature,
+					uid: typeof nfcUid === 'string' ? nfcUid : undefined,
+					cardOwnerEOA: cardOwnerNorm,
+					topupKind: 2,
+					res,
+					topupCurrencySplit,
+					topupSourceOverride: 'webPosNfcTopup',
+				})
+
+				logger(Colors.green(
+					`[nfcUsdcTopup] queued ExecuteForAdmin card=${cardAddrNorm} recipient=${recipientNorm} cardOwner=${cardOwnerNorm} ` +
+					`USDC_tx=${USDC_tx ?? 'n/a'} payer=${payer ?? 'n/a'} usdc6=${usdcAmount6 ?? 'n/a'} ` +
+					`currency=${currency ?? 'n/a'} amount=${currencyAmount ?? 'n/a'} signer=${signed.signer}`
+				))
+				executeForAdminProcess().catch((err: any) => {
+					logger(Colors.red('[executeForAdminProcess] nfcUsdcTopup error:'), err?.message ?? err)
+				})
+			} catch (err: any) {
+				logger(Colors.red(`[nfcUsdcTopup] master error: ${err?.message ?? err}`))
+				if (!res.headersSent) {
+					res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+				}
+			}
 		})
 
 		/**

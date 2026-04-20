@@ -1258,7 +1258,7 @@ export const insertMemberTopupEvent = async (params: {
 	memberEoa: string
 	memberAa: string
 	tierTokenId: string
-	topupSource: 'usdcPurchasingCard' | 'androidNfcTopup'
+	topupSource: 'usdcPurchasingCard' | 'androidNfcTopup' | 'webPosNfcTopup'
 	topupCategory?: string | null
 	/** 本笔 top-up 入账 points（6 位精度整数） */
 	pointsE6?: bigint | string | number

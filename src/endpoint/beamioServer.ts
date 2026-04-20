@@ -1,6 +1,6 @@
 import express, { Request, Response, Router} from 'express'
 import { GoogleGenAI } from '@google/genai'
-import { getClientIp, oracleBackoud, checkSign, BeamioTransfer } from '../util'
+import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner } from '../util'
 import { checkSmartAccount } from '../MemberCard'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
@@ -2095,6 +2095,195 @@ const routing = ( router: Router ) => {
 		} catch (e: any) {
 			logger(Colors.red(`[nfcTopup] preCheck failed: ${e?.message ?? e}`))
 			return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'PreCheck failed' })
+		}
+	})
+
+	/** GET /api/nfcUsdcTopupQuote
+	 * 客户端浏览器钱包页面（verra-home /usdc-topup）展示价格用：根据 currency 与 amount 用 Oracle 折算 USDC6。
+	 * Query: card, owner, amount, currency。
+	 * 同步校验 card.owner() 是否与 owner 一致，避免任意 payTo 注入误用。 */
+	router.get('/nfcUsdcTopupQuote', async (req, res) => {
+		try {
+			const { card, owner, amount, currency } = req.query as { card?: string; owner?: string; amount?: string; currency?: string }
+			if (!card || !ethers.isAddress(String(card).trim())) {
+				return res.status(400).json({ success: false, error: 'Invalid card' }).end()
+			}
+			if (!owner || !ethers.isAddress(String(owner).trim())) {
+				return res.status(400).json({ success: false, error: 'Invalid owner' }).end()
+			}
+			const cur = (currency || 'CAD').toString().trim().toUpperCase()
+			const amt = String(amount ?? '').trim()
+			if (!amt || !(Number(amt) > 0)) {
+				return res.status(400).json({ success: false, error: 'Invalid amount' }).end()
+			}
+			const cardAddr = ethers.getAddress(String(card).trim())
+			const ownerAddr = ethers.getAddress(String(owner).trim())
+			let onChainOwner: string | null = null
+			try {
+				const c = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
+				const o = (await c.owner()) as string
+				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
+			} catch (_) { /* tolerate transient rpc */ }
+			if (onChainOwner && onChainOwner !== ownerAddr) {
+				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+			}
+			const usdc6 = quoteCurrencyToUsdc6(amt, cur)
+			if (usdc6 <= 0n) {
+				return res.status(400).json({ success: false, error: 'Quote failed (zero usdc6)' }).end()
+			}
+			return res.status(200).json({
+				success: true,
+				cardAddress: cardAddr,
+				cardOwner: onChainOwner ?? ownerAddr,
+				currency: cur,
+				amount: amt,
+				quotedUsdc6: usdc6.toString(),
+				quotedUsdc: ethers.formatUnits(usdc6, 6),
+			}).end()
+		} catch (e: any) {
+			logger(Colors.red(`[nfcUsdcTopupQuote] error: ${e?.message ?? e}`))
+			return res.status(500).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	/** POST /api/nfcUsdcTopup
+	 * x402（EIP-3009）：客户用任意外部钱包浏览器（MetaMask 等）为 NFC POS topup 付 USDC。
+	 * 流程：
+	 *   1. 校验 body 参数（cardAddress、cardOwner、uid+SUN e/c/m、amount、currency）
+	 *   2. SUN 校验通过后用 tagId 查 NFC 持卡人 EOA（recipientEOA）
+	 *   3. 校验 card.owner() == cardOwner（payTo 一致性）
+	 *   4. nfcTopupPreparePayload 拿到 ExecuteForAdmin 的 data/deadline/nonce（mintPointsByAdmin → recipientEOA, points6）
+	 *   5. quoteCurrencyToUsdc6 计算需付 USDC6
+	 *   6. 构造 paymentRequirements(payTo=cardOwner) 通过 verifyPaymentNew 走 x402 协议
+	 *   7. settle USDC（transferWithAuthorization → cardOwner）
+	 *   8. 转发 Master /api/nfcUsdcTopup，由 Master 用 service-admin key 签 ExecuteForAdmin 后 push executeForAdminPool
+	 */
+	router.post('/nfcUsdcTopup', async (req, res) => {
+		const { cardAddress, cardOwner, uid, e, c, m, amount, currency } = req.body as {
+			cardAddress?: string
+			cardOwner?: string
+			uid?: string
+			e?: string
+			c?: string
+			m?: string
+			amount?: string
+			currency?: string
+		}
+		try {
+			if (!cardAddress || !ethers.isAddress(String(cardAddress).trim())) {
+				return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end()
+			}
+			if (!cardOwner || !ethers.isAddress(String(cardOwner).trim())) {
+				return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end()
+			}
+			const uidTrim = (uid ?? '').trim()
+			const eTrim = (e ?? '').trim()
+			const cTrim = (c ?? '').trim()
+			const mTrim = (m ?? '').trim()
+			if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+				return res.status(400).json({ success: false, error: 'Invalid uid (expect 14-hex NFC UID)' }).end()
+			}
+			if (eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+				return res.status(400).json({ success: false, error: 'NFC UID requires SUN params (e=64 hex, c=6 hex, m=16 hex)' }).end()
+			}
+			const cur = (currency || 'CAD').trim().toUpperCase()
+			const amt = String(amount ?? '').trim()
+			if (!amt || !(Number(amt) > 0)) {
+				return res.status(400).json({ success: false, error: 'Invalid amount' }).end()
+			}
+			const cardAddr = ethers.getAddress(String(cardAddress).trim())
+			const ownerAddr = ethers.getAddress(String(cardOwner).trim())
+
+			// 1. SUN 校验 + recipient 解析（与 /api/nfcTopupPrepare 同一组合：SUN→tagId→DB EOA）
+			let recipientEOA: string | null = null
+			let tagIdHex: string | null = null
+			try {
+				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+				if (!sunResult.valid) {
+					logger(Colors.yellow(`[nfcUsdcTopup] uid=${uidTrim} SUN 校验失败 valid=${sunResult.valid}`))
+					return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
+				}
+				tagIdHex = sunResult.tagIdHex
+				const topGate = await getNfcCardSignedTxGateByTagId(tagIdHex)
+				if (!topGate.ok) {
+					return res.status(403).json({ success: false, error: topGate.message, errorCode: topGate.code }).end()
+				}
+				const eoaFromTag = await getNfcRecipientAddressByTagId(tagIdHex)
+				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
+					return res.status(403).json({ success: false, error: 'Card not provisioned. SUN valid but tagId not bound to wallet.' }).end()
+				}
+				recipientEOA = ethers.getAddress(eoaFromTag)
+			} catch (sunErr: any) {
+				logger(Colors.yellow(`[nfcUsdcTopup] uid=${uidTrim} SUN 校验异常: ${sunErr?.message ?? sunErr}`))
+				return res.status(403).json({ success: false, error: `SUN verification error: ${sunErr?.message ?? sunErr}` }).end()
+			}
+
+			// 2. 校验 card.owner() 一致性（防止 payTo 被注入）
+			let onChainOwner: string | null = null
+			try {
+				const cprep = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
+				const o = (await cprep.owner()) as string
+				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
+			} catch (_) { /* tolerate */ }
+			if (onChainOwner && onChainOwner !== ownerAddr) {
+				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+			}
+			const payToOwner = onChainOwner ?? ownerAddr
+
+			// 3. 准备 ExecuteForAdmin payload（mintPointsByAdmin → recipientEOA, points6）。
+			//    nfcTopupPreparePayload 内部以 wallet=recipientEOA 跳过 SUN 走 wallet 直发路径
+			const prepared = await nfcTopupPreparePayload({
+				wallet: recipientEOA,
+				amount: amt,
+				currency: cur,
+				cardAddress: cardAddr,
+			})
+			if ('error' in prepared) {
+				return res.status(400).json({ success: false, error: prepared.error }).end()
+			}
+
+			// 4. USDC 报价
+			const quotedUsdc6 = quoteCurrencyToUsdc6(amt, cur)
+			if (quotedUsdc6 <= 0n) {
+				return res.status(400).json({ success: false, error: 'Quote failed' }).end()
+			}
+
+			// 5. x402 verify + settle（verifyPaymentNew 内部已处理 402 / 余额 / 时效）
+			const settled = await settleBeamioX402ToCardOwner(req, res, {
+				cardOwner: payToOwner,
+				quotedUsdc6,
+				description: `Beamio NFC USDC Topup (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`,
+			})
+			if (!settled) return // 响应已在 helper 内写出
+
+			logger(Colors.green(`[nfcUsdcTopup] settle OK card=${cardAddr} payer=${settled.payer} usdc6=${settled.usdcAmount6} USDC_tx=${settled.USDC_tx} → forward Master to mint points to recipient=${recipientEOA}`))
+
+			// 6. 转发 Master 触发 ExecuteForAdmin（由 Master 用 service admin key 签 + push executeForAdminPool）
+			postLocalhost(
+				'/api/nfcUsdcTopup',
+				{
+					cardAddr: prepared.cardAddr,
+					data: prepared.data,
+					deadline: prepared.deadline,
+					nonce: prepared.nonce,
+					recipientEOA,
+					cardOwner: payToOwner,
+					currency: cur,
+					currencyAmount: amt,
+					payer: settled.payer,
+					USDC_tx: settled.USDC_tx,
+					usdcAmount6: settled.usdcAmount6.toString(),
+					nfcUid: uidTrim,
+					nfcTagIdHex: tagIdHex,
+				},
+				res
+			)
+		} catch (err: any) {
+			logger(Colors.red(`[nfcUsdcTopup] error: ${err?.message ?? err}`))
+			if (!res.headersSent) {
+				res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+			}
 		}
 	})
 

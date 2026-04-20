@@ -1606,6 +1606,51 @@ export const signUSDC3009ForNfcTopup = async (
 	return await userWallet.signTypedData(domain, types, message)
 }
 
+/** 将 currency amount（人类可读）经 Oracle 折算为 USDC6（6 位精度），与 nfcTopupPreparePayload 内部 quote path 一致。
+ * USD/USDC 直接 1:1；其它币种走 oracle 汇率（带 fallback）。供 NFC USDC Topup（x402）等场景共享。 */
+export const quoteCurrencyToUsdc6 = (amount: string, currency?: string): bigint => {
+	const amt = typeof amount === 'string' ? amount.trim() : ''
+	if (!amt || Number(amt) <= 0) return 0n
+	const cur = (currency || 'CAD').toUpperCase()
+	const ONE_E6 = 1_000_000n
+	const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
+	const toRateE6 = (raw: unknown, fallback: string): bigint => {
+		const n = Number(raw)
+		if (!Number.isFinite(n) || n <= 0) return ethers.parseUnits(fallback, 6)
+		return ethers.parseUnits(n.toFixed(6), 6)
+	}
+	let amountCurrency6: bigint
+	try {
+		amountCurrency6 = ethers.parseUnits(amt, 6)
+	} catch {
+		return 0n
+	}
+	if (amountCurrency6 <= 0n) return 0n
+	if (cur === 'USD' || cur === 'USDC') return amountCurrency6
+	const oracle = getOracleRequest() as any
+	const oracleRateKey: Record<string, string> = {
+		CAD: 'usdcad',
+		EUR: 'usdeur',
+		JPY: 'usdjpy',
+		CNY: 'usdcny',
+		HKD: 'usdhkd',
+		SGD: 'usdsgd',
+		TWD: 'usdtwd',
+	}
+	const rateKey = oracleRateKey[cur] ?? 'usdcad'
+	const fallbackRate: Record<string, string> = {
+		usdcad: '1.35',
+		usdeur: '0.92',
+		usdjpy: '150',
+		usdcny: '7.2',
+		usdhkd: '7.8',
+		usdsgd: '1.35',
+		usdtwd: '31',
+	}
+	const rateE6 = toRateE6(oracle?.[rateKey], fallbackRate[rateKey] ?? '1.35')
+	return ceilDiv(amountCurrency6 * ONE_E6, rateE6)
+}
+
 /** NFC Topup Prepare：根据 uid 或 wallet/amount/currency 生成 executeForAdmin 所需的 data、deadline、nonce。cardAddress 为必填，指定充值的卡。 */
 export const nfcTopupPreparePayload = async (params: {
 	uid?: string
@@ -1767,6 +1812,8 @@ export const executeForAdminPool: Array<{
 	res?: Response
 	/** POS 可选：卡币种入账拆分（6 位小数整数）；缺省则 indexer 仍为单笔 legacy `topupCard`/`newCard`/`upgradeNewCard` */
 	topupCurrencySplit?: { currencyAmountE6: bigint; cardE6: bigint; cashE6: bigint; bonusE6: bigint }
+	/** 可选 topup 渠道标签覆盖（缺省走默认 `'androidNfcTopup'`）。供 web POS x402 NFC USDC topup 等场景区分渠道。 */
+	topupSourceOverride?: 'usdcPurchasingCard' | 'androidNfcTopup' | 'webPosNfcTopup'
 }> = []
 
 /** Base `executeForAdmin` 已返回 txHash 且 HTTP 已 200 之后的后台任务（BUint / indexer / metadata），不占用 Settle_ContractPool 主槽位 */
@@ -1782,6 +1829,48 @@ type ExecuteForAdminPostBaseJob = {
 	cardCurrencyFiat: number
 }
 const executeForAdminPostBasePool: ExecuteForAdminPostBaseJob[] = []
+
+/** Master 端用 service admin key（masterSetup.settle_contractAdmin[0]）对 ExecuteForAdmin 进行 EIP-712 签字。
+ * 用于 x402 nfcUsdcTopup 等无法获得 cardOwner 私钥的服务端发起场景：
+ * 前提是 settle_contractAdmin[0] 已被 cardOwner 添加为 card 的 admin（否则 executeForAdminProcess 内的二次校验将拒绝）。
+ * 返回 { adminSignature, signer }。 */
+export const signExecuteForAdminWithServiceAdmin = async (obj: {
+	cardAddr: string
+	data: string
+	deadline: number
+	nonce: string
+}): Promise<{ adminSignature: string; signer: string } | { error: string }> => {
+	try {
+		const pk = (masterSetup as { settle_contractAdmin?: string[] }).settle_contractAdmin?.[0]
+		if (!pk) return { error: 'Service admin private key not configured (masterSetup.settle_contractAdmin[0])' }
+		const wallet = new ethers.Wallet(pk)
+		const dataHash = ethers.keccak256(obj.data)
+		const domain = {
+			name: 'BeamioUserCardFactory',
+			version: '1',
+			chainId: 8453,
+			verifyingContract: BASE_CARD_FACTORY,
+		}
+		const types = {
+			ExecuteForAdmin: [
+				{ name: 'cardAddress', type: 'address' },
+				{ name: 'dataHash', type: 'bytes32' },
+				{ name: 'deadline', type: 'uint256' },
+				{ name: 'nonce', type: 'bytes32' },
+			],
+		}
+		const message = {
+			cardAddress: ethers.getAddress(obj.cardAddr),
+			dataHash,
+			deadline: BigInt(obj.deadline),
+			nonce: obj.nonce.startsWith('0x') ? obj.nonce : (`0x${obj.nonce}` as `0x${string}`),
+		}
+		const adminSignature = await wallet.signTypedData(domain, types, message)
+		return { adminSignature, signer: ethers.getAddress(wallet.address) }
+	} catch (e: any) {
+		return { error: e?.message ?? String(e) }
+	}
+}
 
 /** 校验 ExecuteForAdmin 签字的 signer 是否为 card 的 admin，与 Cluster 预检一致。Master 执行前二次校验。 */
 const verifyExecuteForAdminSignerIsAdmin = async (obj: {
@@ -6172,13 +6261,14 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				}
 				if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
 				const hadMembershipBeforeNfc = ownershipSnapshotHasValidMembershipNft(beforeNfts as unknown[])
+				const effectiveTopupSource = obj.topupSourceOverride ?? 'androidNfcTopup'
 				void insertMemberTopupEvent({
 					cardAddress: obj.cardAddr,
 					baseTxHash: tx.hash,
 					memberEoa: recipientEOA,
 					memberAa: memberAaForDb || ethers.ZeroAddress,
 					tierTokenId: tokenIdForRoute.toString(),
-					topupSource: 'androidNfcTopup',
+					topupSource: effectiveTopupSource,
 					topupCategory: topupCategoryRaw,
 					pointsE6: mintParsed.points6,
 					usdcE6: finalRequestAmountUSDC6,
@@ -6203,7 +6293,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				const displayJson = JSON.stringify({
 					title,
 					handle: '',
-					source: 'androidNfcTopup',
+					source: effectiveTopupSource,
 					topupCategory: topupCategoryRaw,
 					cardName: cardDisplayName || undefined,
 					cardAddress: obj.cardAddr,
@@ -6287,7 +6377,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 						const legDisplayJson = JSON.stringify({
 							title: `${title}${legTitleSuffix}`,
 							handle: '',
-							source: 'androidNfcTopup',
+							source: effectiveTopupSource,
 							topupCategory: topupCategoryRaw,
 							topupPaymentLeg: legs[i]!.leg,
 							cardName: cardDisplayName || undefined,

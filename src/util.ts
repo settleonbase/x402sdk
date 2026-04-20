@@ -359,6 +359,26 @@ export let Settle_ContractPool: {
 	constAccountRegistry: ethers.Contract
 }[] = []
 
+/** x402 协议 version 常量（外部模块构造 paymentRequirements / 错误响应时使用） */
+export const X402_PROTOCOL_VERSION = x402Version
+
+/** Base USDC ERC-20 合约地址（外部模块需要时复用，避免重复硬编码） */
+export const BASE_USDC_CONTRACT = USDCContract_BASE
+
+/** 暴露给外部模块复用：构造 Beamio x402 'exact' scheme PaymentRequirements。
+ * 与 cashcode_request / BeamioTransfer 内部使用同一个工厂，保持 mimeType / extra / network 一致。 */
+export function buildBeamioExactPaymentRequirements(
+		price: Price,
+		resource: Resource,
+		description: string,
+		payto: string
+	): PaymentRequirements {
+	return createBeamioExactPaymentRequirements(price, resource, description, payto)
+}
+
+/** 暴露 x402 resource URL 构造（X-Forwarded-Proto/Host 优先），供外部 handler 与 verifyPaymentNew 输入对齐。 */
+export const buildX402ResourceUrl = (req: Request): Resource => buildResourceUrl(req) as Resource
+
 function createBeamioExactPaymentRequirements(
 		price: Price,
 		resource: Resource,
@@ -815,6 +835,87 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 		res.status(500).end()
 	}
 	
+}
+
+/** x402 'exact' settle 结果（settle 成功时返回，失败时已写出 402/500 响应）。 */
+export type BeamioX402SettleSuccess = {
+	payer: string
+	usdcAmount6: bigint
+	USDC_tx?: string
+	network?: string
+	authorization: { from: string; to: string; value: string; validAfter: string; validBefore: string; nonce: string }
+}
+
+/**
+ * 共享 x402 settle 工具：
+ * - 在 cluster 端 `verifyPaymentNew` 通过后，把 USDC 通过 facilitator 真正结算到 `cardOwner`。
+ * - 失败路径（缺/坏 X-PAYMENT、settle 错误）已经把 402/500 响应写出，调用方应直接返回。
+ *
+ * 注意：本函数 **不会** 写出成功响应；返回成功结构体后，调用方负责继续后续业务（如触发 nfcTopup workflow）
+ * 并最终通过 `res.status(200).json(...)` 回写。
+ */
+export const settleBeamioX402ToCardOwner = async (
+	req: Request,
+	res: Response,
+	params: { cardOwner: string; quotedUsdc6: bigint; description: string }
+): Promise<BeamioX402SettleSuccess | null> => {
+	const { cardOwner, quotedUsdc6, description } = params
+	if (!ethers.isAddress(cardOwner)) {
+		res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end()
+		return null
+	}
+	if (quotedUsdc6 <= 0n) {
+		res.status(400).json({ success: false, error: 'Invalid quotedUsdc6' }).end()
+		return null
+	}
+	const resource = buildResourceUrl(req) as Resource
+	const paymentRequirements = [createBeamioExactPaymentRequirements(
+		quotedUsdc6.toString(),
+		resource,
+		description,
+		ethers.getAddress(cardOwner)
+	)]
+	const isValid = await verifyPaymentNew(req, res, paymentRequirements)
+	if (!isValid) return null
+
+	const paymentHeader = exact.evm.decodePayment(req.header('X-PAYMENT')!)
+	const saleRequirements = paymentRequirements[0]
+	const payload = paymentHeader?.payload as { authorization: { from: string; to: string; value: string; validAfter: string; validBefore: string; nonce: string } }
+	const auth = payload?.authorization
+	if (!auth || !ethers.isAddress(auth.from) || !ethers.isAddress(auth.to)) {
+		res.status(400).json({ success: false, error: 'Invalid payment payload (missing authorization)' }).end()
+		return null
+	}
+	if (ethers.getAddress(auth.to) !== ethers.getAddress(cardOwner)) {
+		res.status(400).json({ success: false, error: 'Payment authorization "to" mismatch with cardOwner' }).end()
+		return null
+	}
+	if (BigInt(auth.value || '0') < quotedUsdc6) {
+		res.status(400).json({ success: false, error: `Payment authorization value < quotedUsdc6 (${auth.value} < ${quotedUsdc6})` }).end()
+		return null
+	}
+
+	try {
+		const settleResponse = await settle(paymentHeader, saleRequirements)
+		const responseHeader = settleResponseHeader(settleResponse)
+		const responseData = JSON.parse(Buffer.from(responseHeader, 'base64').toString()) as { success: boolean; payer?: string; transaction?: string; network?: string; errorReason?: string }
+		if (!responseData.success) {
+			logger(Colors.red(`[settleBeamioX402ToCardOwner] settle failed: ${inspect(responseData, false, 3, true)}`))
+			res.status(402).json({ success: false, error: responseData.errorReason ?? 'USDC settle failed' }).end()
+			return null
+		}
+		return {
+			payer: responseData.payer ?? auth.from,
+			usdcAmount6: BigInt(auth.value),
+			USDC_tx: responseData.transaction,
+			network: responseData.network,
+			authorization: auth,
+		}
+	} catch (ex: any) {
+		logger(Colors.red(`[settleBeamioX402ToCardOwner] settle exception: ${ex?.message ?? ex}`))
+		res.status(500).json({ success: false, error: `USDC settle exception: ${ex?.message ?? ex}` }).end()
+		return null
+	}
 }
 
 import type { DisplayJsonData } from './displayJsonTypes'
