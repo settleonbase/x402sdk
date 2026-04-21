@@ -2285,6 +2285,92 @@ const routing = ( router: Router ) => {
 			}
 		})
 
+		/** POST /api/nfcUsdcCharge —— x402 NFC USDC Charge Master 端
+		 * Cluster 已完成：
+		 *   - SUN 校验（确认 NFC 卡确实在 POS 现场）
+		 *   - card.owner() == cardOwner 一致性
+		 *   - x402 verify + settle USDC（transferWithAuthorization → cardOwner）
+		 * Master 在此处：
+		 *   - 仅做记账日志（charge 是顾客付款给商家，不需要 mintPointsByAdmin / ExecuteForAdmin）
+		 *   - 与 NFC charge 字段同步（subtotal/discount/tax/tip/currency），便于商家端报表对齐
+		 * 未来若需要为 NFC 卡持有人发 loyalty points（earn-on-charge），可在此基于 nfcTopupPreparePayload + signExecuteForAdminWithServiceAdmin 扩展。
+		 */
+		router.post('/nfcUsdcCharge', async (req, res) => {
+			const {
+				cardAddr,
+				cardOwner,
+				nfcUid,
+				nfcTagIdHex,
+				nfcRecipientEOA,
+				currency,
+				subtotalCurrencyAmount,
+				discountAmountFiat6,
+				discountRateBps,
+				taxAmountFiat6,
+				taxRateBps,
+				tipCurrencyAmount,
+				tipRateBps,
+				totalCurrencyAmount,
+				usdcAmount6,
+				USDC_tx,
+				payer,
+			} = req.body as {
+				cardAddr?: string
+				cardOwner?: string
+				nfcUid?: string
+				nfcTagIdHex?: string
+				nfcRecipientEOA?: string
+				currency?: string
+				subtotalCurrencyAmount?: string
+				discountAmountFiat6?: string
+				discountRateBps?: number
+				taxAmountFiat6?: string
+				taxRateBps?: number
+				tipCurrencyAmount?: string
+				tipRateBps?: number
+				totalCurrencyAmount?: string
+				usdcAmount6?: string
+				USDC_tx?: string
+				payer?: string
+			}
+			try {
+				if (!cardAddr || !ethers.isAddress(cardAddr)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr' }).end()
+				}
+				if (!cardOwner || !ethers.isAddress(cardOwner)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid cardOwner' }).end()
+				}
+				const cardAddrNorm = ethers.getAddress(cardAddr)
+				const cardOwnerNorm = ethers.getAddress(cardOwner)
+				const cur = String(currency ?? 'CAD').toUpperCase()
+				logger(Colors.green(
+					`[nfcUsdcCharge] OK card=${cardAddrNorm} cardOwner=${cardOwnerNorm} ` +
+					`USDC_tx=${USDC_tx ?? 'n/a'} payer=${payer ?? 'n/a'} usdc6=${usdcAmount6 ?? 'n/a'} ` +
+					`currency=${cur} subtotal=${subtotalCurrencyAmount ?? '0'} discountE6=${discountAmountFiat6 ?? '0'}` +
+					`(${discountRateBps ?? 0}bps) taxE6=${taxAmountFiat6 ?? '0'}(${taxRateBps ?? 0}bps) ` +
+					`tip=${tipCurrencyAmount ?? '0'}(${tipRateBps ?? 0}bps) total=${totalCurrencyAmount ?? '0'} ` +
+					`nfcUid=${nfcUid ?? 'n/a'} nfcTagId=${nfcTagIdHex ? nfcTagIdHex.slice(0, 8) + '…' : 'n/a'} ` +
+					`nfcRecipient=${nfcRecipientEOA ?? 'n/a'}`
+				))
+				return res.status(200).json({
+					success: true,
+					cardAddress: cardAddrNorm,
+					cardOwner: cardOwnerNorm,
+					currency: cur,
+					totalCurrencyAmount: totalCurrencyAmount ?? null,
+					usdcAmount6: usdcAmount6 ?? null,
+					USDC_tx: USDC_tx ?? null,
+					payer: payer ?? null,
+					nfcUid: nfcUid ?? null,
+				}).end()
+			} catch (err: any) {
+				logger(Colors.red(`[nfcUsdcCharge] master error: ${err?.message ?? err}`))
+				if (!res.headersSent) {
+					res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+				}
+			}
+		})
+
 		/**
 		 * Merchant kit Stripe — Master 单进程持有会话 map（Cluster 预检后 postLocalhost 至此处）。
 		 * body: `{ walletAddress, packageType }`

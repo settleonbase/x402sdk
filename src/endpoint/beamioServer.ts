@@ -996,6 +996,243 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	/**
+	 * GET /api/posLedger - POS 终端 EOA 维度的 Top-Up + Charge 流水（newest first），同时回送
+	 * 该 admin 在指定 BeamioUserCard 上的「上次 clear 起累计」(`mintCounterFromClear` /
+	 * `transferAmountFromClear`)。
+	 *
+	 * 列表使用「running cumulative bound」裁剪：从最新一条开始累加 USDC6（fiat6 兜底），
+	 * 一旦 topUpSum6 ≥ topUpFromClear6 且 chargeSum6 ≥ chargeFromClear6 即停止——确保
+	 * **items 的 topUp/charge 总和等于 admin/owner 清零后的金额**（与 `*FromClear` 对账）。
+	 *
+	 * Query: `eoa`（必填，POS 终端 EOA）；`infraCard`（必填，POS 注册的基础设施 BeamioUserCard）。
+	 * 返回 `{ ok, fromClear: { topUp6, charge6 }, items: [...] }` —— `items` 为简化后的行集，
+	 * iOS 直接渲染、按时间倒序（最新在最上方）。
+	 */
+	router.get('/posLedger', async (req, res) => {
+		const { eoa, infraCard } = req.query as { eoa?: string; infraCard?: string }
+		const eoaTrim = typeof eoa === 'string' ? eoa.trim() : ''
+		const cardTrim = typeof infraCard === 'string' ? infraCard.trim() : ''
+		if (!eoaTrim || !ethers.isAddress(eoaTrim)) {
+			return res.status(400).json({ ok: false, error: 'Invalid eoa' }).end()
+		}
+		if (!cardTrim || !ethers.isAddress(cardTrim)) {
+			return res.status(400).json({ ok: false, error: 'Invalid infraCard' }).end()
+		}
+		const adminAddr = ethers.getAddress(eoaTrim)
+		const cardAddr = ethers.getAddress(cardTrim)
+
+		const TX_PAGE_TUPLE = 'tuple(bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, tuple(uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, tuple(uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists, address topAdmin, address subordinate)'
+		const POS_LEDGER_INDEXER_ABI = [
+			'function getAccountActionCount(address account) view returns (uint256)',
+			`function getAccountTransactionsPaged(address account, uint256 offset, uint256 limit) view returns (${TX_PAGE_TUPLE}[] page)`,
+		]
+		const ADMIN_STATS_FULL_ABI = [
+			'function getAdminStatsFull(address admin, uint8 periodType, uint256 anchorTs, uint256 cumulativeStartTs) view returns (tuple(uint256 cumulativeMint, uint256 cumulativeBurn, uint256 cumulativeTransfer, uint256 cumulativeTransferAmount, uint256 cumulativeRedeemMint, uint256 cumulativeUSDCMint, uint256 cumulativeIssued, uint256 cumulativeUpgraded, uint256 periodMint, uint256 periodBurn, uint256 periodTransfer, uint256 periodTransferAmount, uint256 periodRedeemMint, uint256 periodUSDCMint, uint256 periodIssued, uint256 periodUpgraded, uint256 mintCounterFromClear, uint256 burnCounterFromClear, uint256 transferCounterFromClear, uint256 transferAmountFromClear, uint256 redeemMintCounterFromClear, uint256 usdcMintCounterFromClear, address[] subordinates))',
+		]
+
+		// keccak256 of the categorized topup hashes (mirror biz `INDEXER_TX_TOPUP_CATEGORIES`).
+		const hk = (s: string) => ethers.keccak256(ethers.toUtf8Bytes(s)).toLowerCase()
+		const TOPUP_CATEGORIES_LOWER = new Set<string>([
+			hk('usdcTopupCard'),
+			hk('newCard'),
+			hk('upgradeNewCard'),
+			hk('topupCard'),
+			hk('redeemNewCard'),
+			hk('redeemUpgradeNewCard'),
+			hk('redeemTopupCard'),
+			hk('creditTopupCard'),
+			hk('cashTopupCard'),
+			hk('creditUpgradeNewCard'),
+			hk('cashUpgradeNewCard'),
+			hk('creditNewCard'),
+			hk('cashNewCard'),
+			hk('bonusCard'),
+		])
+		const TIP_CATEGORIES_LOWER = new Set<string>([
+			hk('merchant_pay:tip_updated'),
+			hk('TX_TIP'),
+		])
+		const SKIP_CATEGORIES_LOWER = new Set<string>([
+			hk('buintClaim'),
+			hk('buintUSDC'),
+			hk('buintBurn'),
+			hk('requestAccounting'),
+			hk('sendUSDC'),
+			hk('x402Send'),
+		])
+		const normalizeCatHex = (cat: unknown): string => {
+			if (cat == null) return ''
+			if (typeof cat === 'string') {
+				const s = cat.trim()
+				if (!s) return ''
+				if (s.startsWith('0x')) return s.toLowerCase()
+				try {
+					return ethers.hexlify(s as ethers.BytesLike).toLowerCase()
+				} catch {
+					try {
+						return (`0x${BigInt(s).toString(16).padStart(64, '0')}`).toLowerCase()
+					} catch {
+						return ''
+					}
+				}
+			}
+			try { return ethers.hexlify(cat as ethers.BytesLike).toLowerCase() } catch { return '' }
+		}
+
+		try {
+			const stats = new ethers.Contract(cardAddr, ADMIN_STATS_FULL_ABI, providerConet)
+			let topUpFromClear6 = 0n
+			let chargeFromClear6 = 0n
+			try {
+				const v: any = await stats.getAdminStatsFull(adminAddr, 0, 0, 0)
+				const mintFromClear = v?.mintCounterFromClear ?? v?.[16]
+				const xferAmtFromClear = v?.transferAmountFromClear ?? v?.[19]
+				if (mintFromClear != null) topUpFromClear6 = BigInt(mintFromClear)
+				if (xferAmtFromClear != null) chargeFromClear6 = BigInt(xferAmtFromClear)
+			} catch (e) {
+				// `getAdminStatsFull` 可能 revert（如 admin 未登记到 card）；此时 fallback 0/0 → 不裁剪上限，仅按可获取的 items 返回。
+				logger(Colors.yellow(`[posLedger] getAdminStatsFull failed admin=${adminAddr} card=${cardAddr}: ${(e as Error)?.message ?? e}`))
+			}
+
+			const indexer = new ethers.Contract(BEAMIO_INDEXER_DIAMOND, POS_LEDGER_INDEXER_ABI, providerConet)
+			let total = 0n
+			try { total = await indexer.getAccountActionCount(adminAddr) } catch { total = 0n }
+			const totalNum = Number(total)
+			if (!Number.isFinite(totalNum) || totalNum <= 0) {
+				return res.status(200).json({
+					ok: true,
+					fromClear: { topUp6: topUpFromClear6.toString(), charge6: chargeFromClear6.toString() },
+					items: [],
+				}).end()
+			}
+
+			type IndexerTxRow = {
+				id: string | bigint
+				originalPaymentHash?: string | bigint
+				txCategory: string | bigint
+				displayJson?: string
+				timestamp: bigint
+				payer: string
+				payee: string
+				finalRequestAmountFiat6: bigint
+				finalRequestAmountUSDC6: bigint
+				meta?: { currencyFiat?: number | bigint; afterNotePayer?: string; afterNotePayee?: string }
+				exists?: boolean
+				topAdmin?: string
+				subordinate?: string
+				fees?: { bServiceUnits6?: bigint }
+			}
+			type SimplifiedItem = {
+				id: string
+				originalPaymentHash?: string
+				type: 'topUp' | 'charge'
+				txCategory: string
+				timestamp: number
+				payer: string
+				payee: string
+				amountUSDC6: string
+				amountFiat6: string
+				currencyFiat: number
+				displayJson: string
+				topAdmin?: string
+				subordinate?: string
+				note?: string
+			}
+
+			const PAGE_SIZE = 50
+			const HARD_PAGE_CAP = 20 // ≤ 1000 rows scanned (safety bound)
+			let topUpSum6 = 0n
+			let chargeSum6 = 0n
+			const items: SimplifiedItem[] = []
+			let nextOffset = 0
+			let pages = 0
+			let stop = false
+			while (!stop && pages < HARD_PAGE_CAP && nextOffset < totalNum) {
+				const lim = Math.min(PAGE_SIZE, totalNum - nextOffset)
+				let page: IndexerTxRow[]
+				try {
+					page = await indexer.getAccountTransactionsPaged(adminAddr, nextOffset, lim) as IndexerTxRow[]
+				} catch (e) {
+					logger(Colors.yellow(`[posLedger] getAccountTransactionsPaged failed off=${nextOffset} lim=${lim}: ${(e as Error)?.message ?? e}`))
+					break
+				}
+				nextOffset += lim
+				pages += 1
+				for (const tx of page ?? []) {
+					if (!tx?.exists || !tx?.id) continue
+					const catHex = normalizeCatHex(tx.txCategory)
+					if (catHex === '' || SKIP_CATEGORIES_LOWER.has(catHex) || TIP_CATEGORIES_LOWER.has(catHex)) continue
+					const isTopUp = TOPUP_CATEGORIES_LOWER.has(catHex)
+					const itemType: 'topUp' | 'charge' = isTopUp ? 'topUp' : 'charge'
+					const usdc6 = BigInt(tx.finalRequestAmountUSDC6 ?? 0n)
+					const fiat6 = BigInt(tx.finalRequestAmountFiat6 ?? 0n)
+					const measure6 = usdc6 > 0n ? usdc6 : fiat6
+					if (itemType === 'topUp') {
+						const targetReached = topUpFromClear6 > 0n && topUpSum6 >= topUpFromClear6
+						if (targetReached) continue
+						if (topUpFromClear6 > 0n && topUpSum6 + measure6 > topUpFromClear6 + (topUpFromClear6 / 1000n)) {
+							// 越界（超过目标 +0.1%）→ 该笔属于上一次 clear 之前；丢弃并视作 topUp 已完成。
+							topUpSum6 = topUpFromClear6
+							continue
+						}
+						topUpSum6 += measure6
+					} else {
+						const targetReached = chargeFromClear6 > 0n && chargeSum6 >= chargeFromClear6
+						if (targetReached) continue
+						if (chargeFromClear6 > 0n && chargeSum6 + measure6 > chargeFromClear6 + (chargeFromClear6 / 1000n)) {
+							chargeSum6 = chargeFromClear6
+							continue
+						}
+						chargeSum6 += measure6
+					}
+					const idStr = typeof tx.id === 'string' ? tx.id : ('0x' + BigInt(tx.id).toString(16).padStart(64, '0'))
+					const ophRaw = tx.originalPaymentHash
+					const ophStr = ophRaw == null
+						? undefined
+						: typeof ophRaw === 'string'
+							? (ophRaw === ethers.ZeroHash ? undefined : ophRaw.toLowerCase())
+							: ('0x' + BigInt(ophRaw).toString(16).padStart(64, '0'))
+					const note = (tx.meta?.afterNotePayee || tx.meta?.afterNotePayer || '').toString()
+					items.push({
+						id: idStr.toLowerCase(),
+						originalPaymentHash: ophStr,
+						type: itemType,
+						txCategory: catHex,
+						timestamp: Number(tx.timestamp ?? 0n),
+						payer: tx.payer ? ethers.getAddress(tx.payer).toLowerCase() : '',
+						payee: tx.payee ? ethers.getAddress(tx.payee).toLowerCase() : '',
+						amountUSDC6: usdc6.toString(),
+						amountFiat6: fiat6.toString(),
+						currencyFiat: Number(tx.meta?.currencyFiat ?? 0n),
+						displayJson: tx.displayJson ?? '',
+						topAdmin: tx.topAdmin && tx.topAdmin !== ethers.ZeroAddress ? ethers.getAddress(tx.topAdmin).toLowerCase() : undefined,
+						subordinate: tx.subordinate && tx.subordinate !== ethers.ZeroAddress ? ethers.getAddress(tx.subordinate).toLowerCase() : undefined,
+						note: note || undefined,
+					})
+					const topUpDone = topUpFromClear6 === 0n || topUpSum6 >= topUpFromClear6
+					const chargeDone = chargeFromClear6 === 0n || chargeSum6 >= chargeFromClear6
+					if (topUpDone && chargeDone) {
+						stop = true
+						break
+					}
+				}
+				// `getAccountTransactionsPaged` returns offset 0 = newest（与 biz `pullAccountPagedWithLocalStopRule` 对齐）
+				// 当 from-clear 全为 0 时（admin 未登记 / RPC 失败）我们还是限定单页 + HARD_PAGE_CAP 防止全表扫描。
+				if (topUpFromClear6 === 0n && chargeFromClear6 === 0n) break
+			}
+			items.sort((a, b) => b.timestamp - a.timestamp)
+			return res.status(200).json({
+				ok: true,
+				fromClear: { topUp6: topUpFromClear6.toString(), charge6: chargeFromClear6.toString() },
+				items,
+			}).end()
+		} catch (e) {
+			logger(Colors.red(`[posLedger] error: ${(e as Error)?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
+		}
+	})
+
 	/** POST /api/nfcCardStatus - 查询 NTAG 424 DNA 卡状态（读操作，Cluster 直接处理） */
 	router.post('/nfcCardStatus', async (req, res) => {
 		const { uid } = req.body as { uid?: string }
@@ -2302,6 +2539,280 @@ const routing = ( router: Router ) => {
 			)
 		} catch (err: any) {
 			logger(Colors.red(`[nfcUsdcTopup] error: ${err?.message ?? err}`))
+			if (!res.headersSent) {
+				res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+			}
+		}
+	})
+
+	/**
+	 * Charge breakdown 归一化（与 NFC charge `nfcBill` 字段对齐：subtotal/discount/tax/tip + 可选 bps）。
+	 * total = subtotal - discount + tax + tip（任一负数视为 0；total 为最小可报价基数）。
+	 * 返回 currency-amount 文本（保留两位小数；total 用 ceil 处理误差）+ atomic E6（用于审计/记账）。
+	 */
+	const normalizeChargeBreakdown = (raw: {
+		subtotal?: string | number
+		discount?: string | number
+		tax?: string | number
+		tip?: string | number
+		discountBps?: string | number
+		taxBps?: string | number
+		tipBps?: string | number
+	}): {
+		subtotal: number
+		discount: number
+		tax: number
+		tip: number
+		total: number
+		discountBps: number
+		taxBps: number
+		tipBps: number
+	} => {
+		const num = (v: unknown): number => {
+			if (v === undefined || v === null) return 0
+			const n = Number(String(v).replace(/,/g, '').trim())
+			return Number.isFinite(n) && n > 0 ? n : 0
+		}
+		const intBps = (v: unknown): number => {
+			if (v === undefined || v === null) return 0
+			const n = Math.round(Number(v))
+			return Number.isFinite(n) && n >= 0 ? n : 0
+		}
+		const subtotal = num(raw.subtotal)
+		const discount = num(raw.discount)
+		const tax = num(raw.tax)
+		const tip = num(raw.tip)
+		const total = Math.max(0, subtotal - discount + tax + tip)
+		return {
+			subtotal,
+			discount,
+			tax,
+			tip,
+			total,
+			discountBps: intBps(raw.discountBps),
+			taxBps: intBps(raw.taxBps),
+			tipBps: intBps(raw.tipBps),
+		}
+	}
+
+	/** GET /api/nfcUsdcChargeQuote
+	 * 客户端浏览器钱包页面（verra-home /usdc-charge）展示价格用：根据 charge breakdown + currency 用 Oracle 折算 USDC6。
+	 * Query: card, owner, subtotal, discount, tax, tip, discountBps, taxBps, tipBps, currency。
+	 * 同步校验 card.owner() 是否与 owner 一致（与 topup 一致），避免任意 payTo 注入误用。 */
+	router.get('/nfcUsdcChargeQuote', async (req, res) => {
+		try {
+			const { card, owner, currency } = req.query as { card?: string; owner?: string; currency?: string }
+			if (!card || !ethers.isAddress(String(card).trim())) {
+				return res.status(400).json({ success: false, error: 'Invalid card' }).end()
+			}
+			if (!owner || !ethers.isAddress(String(owner).trim())) {
+				return res.status(400).json({ success: false, error: 'Invalid owner' }).end()
+			}
+			const cur = (currency || 'CAD').toString().trim().toUpperCase()
+			const breakdown = normalizeChargeBreakdown(req.query as any)
+			if (breakdown.total <= 0) {
+				return res.status(400).json({ success: false, error: 'Invalid charge breakdown (total must be > 0)' }).end()
+			}
+			const cardAddr = ethers.getAddress(String(card).trim())
+			const ownerAddr = ethers.getAddress(String(owner).trim())
+			let onChainOwner: string | null = null
+			try {
+				const c = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
+				const o = (await c.owner()) as string
+				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
+			} catch (_) { /* tolerate transient rpc */ }
+			if (onChainOwner && onChainOwner !== ownerAddr) {
+				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+			}
+			const totalStr = breakdown.total.toFixed(6)
+			const usdc6 = quoteCurrencyToUsdc6(totalStr, cur)
+			if (usdc6 <= 0n) {
+				const fresh = isOracleFresh()
+				const oracleTs = (clusterOracleCache?.timestamp ?? 0) as number
+				logger(Colors.yellow(`[nfcUsdcChargeQuote] oracle quote=0 cur=${cur} total=${totalStr} fresh=${fresh} oracleTs=${oracleTs}`))
+				return res.status(503).json({
+					success: false,
+					error: fresh
+						? `Oracle rate not available for ${cur}, please retry shortly`
+						: `Oracle rate stale, please retry shortly`,
+				}).end()
+			}
+			return res.status(200).json({
+				success: true,
+				cardAddress: cardAddr,
+				cardOwner: onChainOwner ?? ownerAddr,
+				currency: cur,
+				subtotal: breakdown.subtotal.toFixed(2),
+				discount: breakdown.discount.toFixed(2),
+				tax: breakdown.tax.toFixed(2),
+				tip: breakdown.tip.toFixed(2),
+				total: breakdown.total.toFixed(2),
+				discountBps: breakdown.discountBps,
+				taxBps: breakdown.taxBps,
+				tipBps: breakdown.tipBps,
+				quotedUsdc6: usdc6.toString(),
+				quotedUsdc: ethers.formatUnits(usdc6, 6),
+				oracleTimestamp: Number(clusterOracleCache?.timestamp ?? 0),
+			}).end()
+		} catch (e: any) {
+			logger(Colors.red(`[nfcUsdcChargeQuote] error: ${e?.message ?? e}`))
+			return res.status(500).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	/** POST /api/nfcUsdcCharge
+	 * x402（EIP-3009）：客户用任意外部钱包浏览器（MetaMask 等）为 NFC POS charge 付 USDC。
+	 * 与 nfcUsdcTopup 区别：
+	 *   - charge 是顾客付钱给商家，**不需要** mintPointsByAdmin / ExecuteForAdmin
+	 *   - body 携带 charge breakdown（subtotal/discount/tax/tip + currency），与 NFC charge `nfcBill` 字段对齐
+	 *   - SUN 校验仍需要（确认 NFC 卡当前在 POS 现场），recipientEOA 仅用于审计/未来 loyalty 入账
+	 */
+	router.post('/nfcUsdcCharge', async (req, res) => {
+		const {
+			cardAddress,
+			cardOwner,
+			uid,
+			e,
+			c,
+			m,
+			currency,
+			subtotal,
+			discount,
+			tax,
+			tip,
+			discountBps,
+			taxBps,
+			tipBps,
+		} = req.body as {
+			cardAddress?: string
+			cardOwner?: string
+			uid?: string
+			e?: string
+			c?: string
+			m?: string
+			currency?: string
+			subtotal?: string | number
+			discount?: string | number
+			tax?: string | number
+			tip?: string | number
+			discountBps?: string | number
+			taxBps?: string | number
+			tipBps?: string | number
+		}
+		try {
+			if (!cardAddress || !ethers.isAddress(String(cardAddress).trim())) {
+				return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end()
+			}
+			if (!cardOwner || !ethers.isAddress(String(cardOwner).trim())) {
+				return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end()
+			}
+			const uidTrim = (uid ?? '').trim()
+			const eTrim = (e ?? '').trim()
+			const cTrim = (c ?? '').trim()
+			const mTrim = (m ?? '').trim()
+			if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+				return res.status(400).json({ success: false, error: 'Invalid uid (expect 14-hex NFC UID)' }).end()
+			}
+			if (eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+				return res.status(400).json({ success: false, error: 'NFC UID requires SUN params (e=64 hex, c=6 hex, m=16 hex)' }).end()
+			}
+			const cur = (currency || 'CAD').trim().toUpperCase()
+			const breakdown = normalizeChargeBreakdown({ subtotal, discount, tax, tip, discountBps, taxBps, tipBps })
+			if (breakdown.total <= 0) {
+				return res.status(400).json({ success: false, error: 'Invalid charge breakdown (total must be > 0)' }).end()
+			}
+			const cardAddr = ethers.getAddress(String(cardAddress).trim())
+			const ownerAddr = ethers.getAddress(String(cardOwner).trim())
+
+			// 1. SUN 校验（confirm NFC physically present at POS）。recipientEOA 是 best-effort：未绑定不阻塞 charge。
+			let recipientEOA: string | null = null
+			let tagIdHex: string | null = null
+			try {
+				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+				if (!sunResult.valid) {
+					logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验失败 valid=${sunResult.valid}`))
+					return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
+				}
+				tagIdHex = sunResult.tagIdHex
+				try {
+					const eoaFromTag = await getNfcRecipientAddressByTagId(tagIdHex)
+					if (eoaFromTag && ethers.isAddress(eoaFromTag)) {
+						recipientEOA = ethers.getAddress(eoaFromTag)
+					}
+				} catch (_) { /* charge: best-effort */ }
+			} catch (sunErr: any) {
+				logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验异常: ${sunErr?.message ?? sunErr}`))
+				return res.status(403).json({ success: false, error: `SUN verification error: ${sunErr?.message ?? sunErr}` }).end()
+			}
+
+			// 2. 校验 card.owner() 一致性（防止 payTo 被注入）
+			let onChainOwner: string | null = null
+			try {
+				const cprep = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
+				const o = (await cprep.owner()) as string
+				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
+			} catch (_) { /* tolerate */ }
+			if (onChainOwner && onChainOwner !== ownerAddr) {
+				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+			}
+			const payToOwner = onChainOwner ?? ownerAddr
+
+			// 3. USDC 报价 - 严格 Oracle（与 topup 同策略）
+			const totalStr = breakdown.total.toFixed(6)
+			const quotedUsdc6 = quoteCurrencyToUsdc6(totalStr, cur)
+			if (quotedUsdc6 <= 0n) {
+				const fresh = isOracleFresh()
+				logger(Colors.yellow(`[nfcUsdcCharge] oracle quote=0 cur=${cur} total=${totalStr} fresh=${fresh}`))
+				return res.status(503).json({
+					success: false,
+					error: fresh
+						? `Oracle rate not available for ${cur}, please retry shortly`
+						: `Oracle rate stale, please retry shortly`,
+				}).end()
+			}
+
+			// 4. x402 verify + settle（USDC → cardOwner）
+			const settled = await settleBeamioX402ToCardOwner(req, res, {
+				cardOwner: payToOwner,
+				quotedUsdc6,
+				description: `Beamio NFC USDC Charge (${cur} ${breakdown.total.toFixed(2)} → card ${cardAddr.slice(0, 8)}…)`,
+			})
+			if (!settled) return // 响应已在 helper 内写出
+
+			const fiat6 = (n: number): string => BigInt(Math.max(0, Math.round(n * 1_000_000))).toString()
+
+			logger(Colors.green(
+				`[nfcUsdcCharge] settle OK card=${cardAddr} payer=${settled.payer} ` +
+				`USDC_tx=${settled.USDC_tx} usdc6=${settled.usdcAmount6} → forward Master`
+			))
+
+			// 5. 转发 Master 记账（master 不会签 ExecuteForAdmin；返回 200 即可）
+			postLocalhost(
+				'/api/nfcUsdcCharge',
+				{
+					cardAddr,
+					cardOwner: payToOwner,
+					nfcUid: uidTrim,
+					nfcTagIdHex: tagIdHex,
+					nfcRecipientEOA: recipientEOA,
+					currency: cur,
+					subtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
+					discountAmountFiat6: fiat6(breakdown.discount),
+					discountRateBps: breakdown.discountBps,
+					taxAmountFiat6: fiat6(breakdown.tax),
+					taxRateBps: breakdown.taxBps,
+					tipCurrencyAmount: breakdown.tip.toFixed(2),
+					tipRateBps: breakdown.tipBps,
+					totalCurrencyAmount: breakdown.total.toFixed(2),
+					usdcAmount6: settled.usdcAmount6.toString(),
+					USDC_tx: settled.USDC_tx,
+					payer: settled.payer,
+				},
+				res
+			)
+		} catch (err: any) {
+			logger(Colors.red(`[nfcUsdcCharge] error: ${err?.message ?? err}`))
 			if (!res.headersSent) {
 				res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
 			}
