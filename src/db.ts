@@ -22,12 +22,25 @@ import conetPGPABI from './ABI/conetPGP.json'
 const RPC_URL = "https://rpc1.conet.network"
 const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
 
+/**
+ * 判断一次 ethers `view`/`pure` 调用的异常是否等价于「链上无数据」。
+ * 当合约返回 0x（如 `getOwnerByAccountName(未注册名字)` / `getAccount(未注册地址)`）时，
+ * ethers v6 抛出 `BAD_DATA: could not decode result data (value="0x", ...)`。
+ * 这等价于「该 key 不存在」而不是真正的 RPC/合约错误，调用方应当作 `ZeroAddress`/`undefined` 处理。
+ */
+export const isOnchainEmptyResult = (ex: any): boolean => {
+	if (!ex) return false
+	if (ex.code === 'BAD_DATA') return true
+	const msg: string = ex.shortMessage || ex.message || String(ex)
+	return /could not decode result data|value="0x"|BAD_DATA/i.test(msg)
+}
+
 const providerConet = new ethers.JsonRpcProvider(RPC_URL)
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
-const beamioConetAccountRegistry = '0x2dF9c4c51564FfF861965572CE11ebe27d3C1B35'
+const beamioConetAccountRegistry = '0x4afaca09cf8307070a83836223Ae129073eC92e5'
 const IpfsStorageRegistryGlobalDedup = '0x121c4dDCa92f07dc53Fd6Db9bc5A07c2918F9591'
 const addressPGP = '0xb2aABe52f476356AE638839A786EAE425A0c1b66'
 
@@ -329,7 +342,15 @@ const syncUserDataFromChainToDb = async (userName: string): Promise<void> => {
 	if (!nameNorm) return
 
 	try {
-		const owner: string = await SC.getOwnerByAccountName(nameNorm)
+		// getOwnerByAccountName 在新 registry 上对未注册的 username 会返回 0x（BAD_DATA），
+		// 这等价于「名字未被占用」，不是错误。其它异常（RPC 抖动等）仍走外层 catch 报错。
+		let owner: string
+		try {
+			owner = await SC.getOwnerByAccountName(nameNorm)
+		} catch (probeEx: any) {
+			if (!isOnchainEmptyResult(probeEx)) throw probeEx
+			owner = ethers.ZeroAddress
+		}
 
 		if (!owner || owner === ethers.ZeroAddress) {
 			logger(`[syncUserDataFromChainToDb] username not found on-chain: ${nameNorm}`)
@@ -932,7 +953,14 @@ const reconcileLocalDbBeforeAddUser = async (
 	if (!nameNorm) return
 
 	try {
-		const ownerByName: string = await reg.getOwnerByAccountName(nameNorm)
+		// 新 registry 对未注册名字会返回 0x（BAD_DATA），等价于「名字未被占用」。
+		let ownerByName: string
+		try {
+			ownerByName = await reg.getOwnerByAccountName(nameNorm)
+		} catch (probeEx: any) {
+			if (!isOnchainEmptyResult(probeEx)) throw probeEx
+			ownerByName = ethers.ZeroAddress
+		}
 		const nameFreeOnChain =
 			!ownerByName || ownerByName === ethers.ZeroAddress
 
@@ -940,15 +968,16 @@ const reconcileLocalDbBeforeAddUser = async (
 			await clearStaleUsernameFromDb(nameNorm)
 		}
 
+		// getAccount 在新 registry 对未注册地址同样返回 0x（BAD_DATA），等价于 exists=false。
 		let walletHasAccount: boolean | null = null
 		try {
 			const acc = await reg.getAccount(wallet)
 			walletHasAccount = !!acc?.exists
-		} catch {
-			walletHasAccount = null
+		} catch (probeEx: any) {
+			walletHasAccount = isOnchainEmptyResult(probeEx) ? false : null
 		}
 
-		// 仅当链上明确 exists=false 时删本地；RPC/解码失败时不采信为「无账户」，避免误删
+		// 仅当链上明确 exists=false 时删本地；RPC 抖动等不采信为「无账户」，避免误删
 		if (walletHasAccount === false) {
 			logger(
 				Colors.yellow(
