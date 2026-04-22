@@ -4,14 +4,14 @@
  */
 export const BASE_MAINNET_CHAIN_ID = 8453
 
-export const BASE_AA_FACTORY = '0xbc7CddFdba33348357aFE5F290f242ecBbc1C090'
+export const BASE_AA_FACTORY = '0x4b31D6a05Cdc817CAc1B06369555b37a5b182122'
 /** BeamioAccountDeployer（与 config/base-addresses.json BEAMIO_ACCOUNT_DEPLOYER 同步） */
 export const BASE_BEAMIO_ACCOUNT_DEPLOYER = '0x139D55591A03550259AF32097A9848ECE9869C90'
 /**
  * Base card factory (createCard / factoryGateway / EIP-712 domain verifyingContract).
  * Canonical: deployments/base-UserCardFactory.json / base-UserCardFactory-DEBUG.json（同址）.
  */
-export const BASE_CARD_FACTORY = '0xcb85296A6Dc978c32b1d58a1C804d995cd6F7B09'
+export const BASE_CARD_FACTORY = '0x2EB245646de404b2Dce87E01C6282C131778bb05'
 /**
  * createCardCollectionWithInitCode(address,uint8,uint256,bytes) — selector 0xef759095
  * createCardCollectionWithInitCodeAndTiers(..., (uint256,uint256,uint256)[]) — selector 0x9a7eb0f0
@@ -31,9 +31,9 @@ export const BASE_BEAMIO_USER_CARD_FORMATTING_LIB = '0xe56dca3aF78a12164dC6546e6
 export const BASE_BEAMIO_USER_CARD_TRANSFER_LIB = '0xc7fAF8e33e9fE9D4409961Ec72d46B2200766f8F'
 export const BASE_CCSA_CARD_ADDRESS = '0x2032A363BB2cf331142391fC0DAd21D6504922C7'
 export const BASE_TREASURY = '0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58'
-export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xaa1Aa34794b566408Cc7Ddba8E0519C4d13fAa55'
+export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xBCcfA50d2a5917C7A8662177F5F4B7A175787270'
 export const PURCHASING_CARD_METADATA_ADDRESS = '0xf99018DfFdb0c5657C93ca14DB2900CEbe1168A7'
-export const USDC_BASE = '0xdD0163FE76FC8fbc4a05b21bCe7CE2642968E176'
+export const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 export const CONET_BUNIT_AIRDROP_ADDRESS = '0xFd60936707cb4583c08D8AacBA19E4bfaEE446B8'
 /** BuintRedeemAirdrop（CoNET）；与 deployments/conet-addresses.json 同步 */
