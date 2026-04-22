@@ -2672,11 +2672,14 @@ const routing = ( router: Router ) => {
 	})
 
 	/** POST /api/nfcUsdcCharge
-	 * x402（EIP-3009）：客户用任意外部钱包浏览器（MetaMask 等）为 NFC POS charge 付 USDC。
+	 * x402（EIP-3009）：客户用任意外部钱包浏览器（MetaMask 等）为 POS charge 付 USDC。
 	 * 与 nfcUsdcTopup 区别：
 	 *   - charge 是顾客付钱给商家，**不需要** mintPointsByAdmin / ExecuteForAdmin
 	 *   - body 携带 charge breakdown（subtotal/discount/tax/tip + currency），与 NFC charge `nfcBill` 字段对齐
-	 *   - SUN 校验仍需要（确认 NFC 卡当前在 POS 现场），recipientEOA 仅用于审计/未来 loyalty 入账
+	 *
+	 * NFC 模式（兼容旧链路）：携带 `uid + e + c + m` ⇒ SUN 校验 + best-effort 解析 recipientEOA（未来 loyalty 入账）。
+	 * 第三方钱包模式（iOS POS USDC charge no-NFC）：`uid` 未提供 ⇒ 跳过 SUN 校验（`recipientEOA = null`），收款仍走
+	 *   `card.owner()` 一致性校验后的 cardOwner，确保不会误把 USDC 转到任意 payTo。
 	 */
 	router.post('/nfcUsdcCharge', async (req, res) => {
 		const {
@@ -2721,11 +2724,15 @@ const routing = ( router: Router ) => {
 			const eTrim = (e ?? '').trim()
 			const cTrim = (c ?? '').trim()
 			const mTrim = (m ?? '').trim()
-			if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
-				return res.status(400).json({ success: false, error: 'Invalid uid (expect 14-hex NFC UID)' }).end()
-			}
-			if (eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
-				return res.status(400).json({ success: false, error: 'NFC UID requires SUN params (e=64 hex, c=6 hex, m=16 hex)' }).end()
+			// uid 提供与否决定走 NFC SUN 校验路径还是第三方钱包 no-NFC 路径。
+			const hasNfcSun = uidTrim.length > 0 || eTrim.length > 0 || cTrim.length > 0 || mTrim.length > 0
+			if (hasNfcSun) {
+				if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+					return res.status(400).json({ success: false, error: 'Invalid uid (expect 14-hex NFC UID)' }).end()
+				}
+				if (eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+					return res.status(400).json({ success: false, error: 'NFC UID requires SUN params (e=64 hex, c=6 hex, m=16 hex)' }).end()
+				}
 			}
 			const cur = (currency || 'CAD').trim().toUpperCase()
 			const breakdown = normalizeChargeBreakdown({ subtotal, discount, tax, tip, discountBps, taxBps, tipBps })
@@ -2735,26 +2742,30 @@ const routing = ( router: Router ) => {
 			const cardAddr = ethers.getAddress(String(cardAddress).trim())
 			const ownerAddr = ethers.getAddress(String(cardOwner).trim())
 
-			// 1. SUN 校验（confirm NFC physically present at POS）。recipientEOA 是 best-effort：未绑定不阻塞 charge。
+			// 1. SUN 校验仅在 NFC 模式触发；no-NFC 第三方钱包路径直接跳过（`card.owner()` 一致性 + x402 verify 仍是强约束）。
 			let recipientEOA: string | null = null
 			let tagIdHex: string | null = null
-			try {
-				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-				if (!sunResult.valid) {
-					logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验失败 valid=${sunResult.valid}`))
-					return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
-				}
-				tagIdHex = sunResult.tagIdHex
+			if (hasNfcSun) {
 				try {
-					const eoaFromTag = await getNfcRecipientAddressByTagId(tagIdHex)
-					if (eoaFromTag && ethers.isAddress(eoaFromTag)) {
-						recipientEOA = ethers.getAddress(eoaFromTag)
+					const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
+					const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
+					if (!sunResult.valid) {
+						logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验失败 valid=${sunResult.valid}`))
+						return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
 					}
-				} catch (_) { /* charge: best-effort */ }
-			} catch (sunErr: any) {
-				logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验异常: ${sunErr?.message ?? sunErr}`))
-				return res.status(403).json({ success: false, error: `SUN verification error: ${sunErr?.message ?? sunErr}` }).end()
+					tagIdHex = sunResult.tagIdHex
+					try {
+						const eoaFromTag = await getNfcRecipientAddressByTagId(tagIdHex)
+						if (eoaFromTag && ethers.isAddress(eoaFromTag)) {
+							recipientEOA = ethers.getAddress(eoaFromTag)
+						}
+					} catch (_) { /* charge: best-effort */ }
+				} catch (sunErr: any) {
+					logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验异常: ${sunErr?.message ?? sunErr}`))
+					return res.status(403).json({ success: false, error: `SUN verification error: ${sunErr?.message ?? sunErr}` }).end()
+				}
+			} else {
+				logger(Colors.cyan(`[nfcUsdcCharge] no-NFC mode card=${cardAddr.slice(0, 8)}… cur=${cur} total=${breakdown.total.toFixed(2)} (third-party wallet, SUN bypass)`))
 			}
 
 			// 2. 校验 card.owner() 一致性（防止 payTo 被注入）
