@@ -2665,47 +2665,94 @@ const routing = ( router: Router ) => {
 	 * 同步校验 card.owner() 是否与 owner 一致（与 topup 一致），避免任意 payTo 注入误用。 */
 	router.get('/nfcUsdcChargeQuote', async (req, res) => {
 		try {
-			const { card, owner, currency } = req.query as { card?: string; owner?: string; currency?: string }
+			const { card, owner, currency, pos } = req.query as { card?: string; owner?: string; currency?: string; pos?: string }
 			if (!card || !ethers.isAddress(String(card).trim())) {
 				return res.status(400).json({ success: false, error: 'Invalid card' }).end()
 			}
-			if (!owner || !ethers.isAddress(String(owner).trim())) {
-				return res.status(400).json({ success: false, error: 'Invalid owner' }).end()
-			}
-			const cur = (currency || 'CAD').toString().trim().toUpperCase()
 			const breakdown = normalizeChargeBreakdown(req.query as any)
 			if (breakdown.total <= 0) {
 				return res.status(400).json({ success: false, error: 'Invalid charge breakdown (total must be > 0)' }).end()
 			}
 			const cardAddr = ethers.getAddress(String(card).trim())
-			const ownerAddr = ethers.getAddress(String(owner).trim())
+			const posAddr = pos && ethers.isAddress(String(pos).trim()) ? ethers.getAddress(String(pos).trim()) : null
+
+			// 链上一次性读取 owner / currency / isAdmin(pos)，让 owner/currency 在 URL 中变可选
 			let onChainOwner: string | null = null
+			let onChainCurrency: string | null = null
+			let isAdminPos: boolean = posAddr === null
 			try {
-				const c = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
-				const o = (await c.owner()) as string
+				const c = new ethers.Contract(
+					cardAddr,
+					[
+						'function owner() view returns (address)',
+						'function currency() view returns (uint8)',
+						'function isAdmin(address) view returns (bool)',
+					],
+					providerBase
+				)
+				const ownerP = c.owner() as Promise<string>
+				const curEnumP = c.currency() as Promise<bigint | number>
+				const adminP = posAddr ? (c.isAdmin(posAddr) as Promise<boolean>) : Promise.resolve(true)
+				const [o, ce, ad] = await Promise.all([ownerP, curEnumP, adminP])
 				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
+				const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+				onChainCurrency = currencyMap[Number(ce)] ?? null
+				isAdminPos = !!ad
 			} catch (_) { /* tolerate transient rpc */ }
-			if (onChainOwner && onChainOwner !== ownerAddr) {
-				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+
+			// owner 字段处理：URL 提供 ⇒ 与链上一致校验；URL 缺省 ⇒ 直接用链上 owner（新 schema）。
+			const ownerStr = (owner ?? '').toString().trim()
+			let resolvedOwner: string | null = onChainOwner
+			if (ownerStr !== '') {
+				if (!ethers.isAddress(ownerStr)) {
+					return res.status(400).json({ success: false, error: 'Invalid owner' }).end()
+				}
+				const ownerAddr = ethers.getAddress(ownerStr)
+				if (onChainOwner && onChainOwner !== ownerAddr) {
+					return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+				}
+				resolvedOwner = onChainOwner ?? ownerAddr
 			}
+			if (!resolvedOwner) {
+				return res.status(400).json({ success: false, error: 'Cannot resolve card.owner() on-chain' }).end()
+			}
+			if (posAddr && !isAdminPos && posAddr !== resolvedOwner) {
+				return res
+					.status(400)
+					.json({ success: false, error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…` })
+					.end()
+			}
+
+			// currency: URL 提供 ⇒ 必须与链上一致；URL 缺省 ⇒ 用链上 (新 schema)；链上读不到 ⇒ 回退 CAD
+			const cur = (currency ?? '').toString().trim().toUpperCase() || onChainCurrency || 'CAD'
+			if (currency && onChainCurrency && cur !== onChainCurrency.toUpperCase()) {
+				logger(
+					Colors.yellow(
+						`[nfcUsdcChargeQuote] currency mismatch client=${cur} card=${onChainCurrency} card=${cardAddr.slice(0, 10)}… (using card chain currency)`
+					)
+				)
+			}
+			const effectiveCurrency = onChainCurrency ?? cur
+
 			const totalStr = breakdown.total.toFixed(6)
-			const usdc6 = quoteCurrencyToUsdc6(totalStr, cur)
+			const usdc6 = quoteCurrencyToUsdc6(totalStr, effectiveCurrency)
 			if (usdc6 <= 0n) {
 				const fresh = isOracleFresh()
 				const oracleTs = (clusterOracleCache?.timestamp ?? 0) as number
-				logger(Colors.yellow(`[nfcUsdcChargeQuote] oracle quote=0 cur=${cur} total=${totalStr} fresh=${fresh} oracleTs=${oracleTs}`))
+				logger(Colors.yellow(`[nfcUsdcChargeQuote] oracle quote=0 cur=${effectiveCurrency} total=${totalStr} fresh=${fresh} oracleTs=${oracleTs}`))
 				return res.status(503).json({
 					success: false,
 					error: fresh
-						? `Oracle rate not available for ${cur}, please retry shortly`
+						? `Oracle rate not available for ${effectiveCurrency}, please retry shortly`
 						: `Oracle rate stale, please retry shortly`,
 				}).end()
 			}
 			return res.status(200).json({
 				success: true,
 				cardAddress: cardAddr,
-				cardOwner: onChainOwner ?? ownerAddr,
-				currency: cur,
+				cardOwner: resolvedOwner,
+				pos: posAddr,
+				currency: effectiveCurrency,
 				subtotal: breakdown.subtotal.toFixed(2),
 				discount: breakdown.discount.toFixed(2),
 				tax: breakdown.tax.toFixed(2),
@@ -2887,8 +2934,10 @@ const routing = ( router: Router ) => {
 	 */
 	router.post('/nfcUsdcCharge', async (req, res) => {
 		const {
+			card,
 			cardAddress,
 			cardOwner,
+			pos,
 			uid,
 			e,
 			c,
@@ -2902,8 +2951,10 @@ const routing = ( router: Router ) => {
 			taxBps,
 			tipBps,
 		} = req.body as {
+			card?: string
 			cardAddress?: string
 			cardOwner?: string
+			pos?: string
 			uid?: string
 			e?: string
 			c?: string
@@ -2918,12 +2969,15 @@ const routing = ( router: Router ) => {
 			tipBps?: string | number
 		}
 		try {
-			if (!cardAddress || !ethers.isAddress(String(cardAddress).trim())) {
-				return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end()
+			// 新 schema 用 `card`；老 schema 用 `cardAddress`。两者择一即可，都没有则 400。
+			const cardField = (card ?? cardAddress ?? '').toString().trim()
+			if (!cardField || !ethers.isAddress(cardField)) {
+				return res.status(400).json({ success: false, error: 'Invalid card' }).end()
 			}
-			if (!cardOwner || !ethers.isAddress(String(cardOwner).trim())) {
-				return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end()
-			}
+			const cardAddr = ethers.getAddress(cardField)
+			const posStr = (pos ?? '').toString().trim()
+			const posAddr = posStr && ethers.isAddress(posStr) ? ethers.getAddress(posStr) : null
+			const ownerStrRaw = (cardOwner ?? '').toString().trim()
 			const uidTrim = (uid ?? '').trim()
 			const eTrim = (e ?? '').trim()
 			const cTrim = (c ?? '').trim()
@@ -2938,13 +2992,10 @@ const routing = ( router: Router ) => {
 					return res.status(400).json({ success: false, error: 'NFC UID requires SUN params (e=64 hex, c=6 hex, m=16 hex)' }).end()
 				}
 			}
-			const cur = (currency || 'CAD').trim().toUpperCase()
 			const breakdown = normalizeChargeBreakdown({ subtotal, discount, tax, tip, discountBps, taxBps, tipBps })
 			if (breakdown.total <= 0) {
 				return res.status(400).json({ success: false, error: 'Invalid charge breakdown (total must be > 0)' }).end()
 			}
-			const cardAddr = ethers.getAddress(String(cardAddress).trim())
-			const ownerAddr = ethers.getAddress(String(cardOwner).trim())
 
 			// 1. SUN 校验仅在 NFC 模式触发；no-NFC 第三方钱包路径直接跳过（`card.owner()` 一致性 + x402 verify 仍是强约束）。
 			let recipientEOA: string | null = null
@@ -2972,28 +3023,71 @@ const routing = ( router: Router ) => {
 				logger(Colors.cyan(`[nfcUsdcCharge] no-NFC mode card=${cardAddr.slice(0, 8)}… cur=${cur} total=${breakdown.total.toFixed(2)} (third-party wallet, SUN bypass)`))
 			}
 
-			// 2. 校验 card.owner() 一致性（防止 payTo 被注入）
+			// 2. 链上一次性读 owner / currency / isAdmin(pos)：新 schema 下 owner/currency 不在 URL 里，必须链上权威。
 			let onChainOwner: string | null = null
+			let onChainCurrency: string | null = null
+			let isAdminPos: boolean = posAddr === null
 			try {
-				const cprep = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
-				const o = (await cprep.owner()) as string
+				const cprep = new ethers.Contract(
+					cardAddr,
+					[
+						'function owner() view returns (address)',
+						'function currency() view returns (uint8)',
+						'function isAdmin(address) view returns (bool)',
+					],
+					providerBase
+				)
+				const ownerP = cprep.owner() as Promise<string>
+				const curP = cprep.currency() as Promise<bigint | number>
+				const adminP = posAddr ? (cprep.isAdmin(posAddr) as Promise<boolean>) : Promise.resolve(true)
+				const [o, ce, ad] = await Promise.all([ownerP, curP, adminP])
 				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
-			} catch (_) { /* tolerate */ }
-			if (onChainOwner && onChainOwner !== ownerAddr) {
-				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+				const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+				onChainCurrency = currencyMap[Number(ce)] ?? null
+				isAdminPos = !!ad
+			} catch (_) { /* tolerate transient rpc */ }
+			if (!onChainOwner) {
+				return res.status(400).json({ success: false, error: 'Cannot resolve card.owner() on-chain' }).end()
 			}
-			const payToOwner = onChainOwner ?? ownerAddr
+			// 老 schema 显式传 cardOwner ⇒ 必须与链上一致；新 schema 不传 ⇒ 直接用链上值
+			if (ownerStrRaw !== '') {
+				if (!ethers.isAddress(ownerStrRaw)) {
+					return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end()
+				}
+				const ownerAddr = ethers.getAddress(ownerStrRaw)
+				if (ownerAddr !== onChainOwner) {
+					return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+				}
+			}
+			if (posAddr && !isAdminPos && posAddr !== onChainOwner) {
+				return res
+					.status(400)
+					.json({ success: false, error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…` })
+					.end()
+			}
+			const payToOwner = onChainOwner
+
+			// currency: 新 schema 缺省 ⇒ 用链上；老 schema 显式 ⇒ warn-only mismatch（不阻断，避免老 QR 被 reject）
+			const cur = ((currency ?? '').toString().trim().toUpperCase() || onChainCurrency || 'CAD')
+			if (currency && onChainCurrency && cur !== onChainCurrency.toUpperCase()) {
+				logger(
+					Colors.yellow(
+						`[nfcUsdcCharge] currency mismatch client=${cur} card=${onChainCurrency} card=${cardAddr.slice(0, 10)}… (using card chain currency)`
+					)
+				)
+			}
+			const effectiveCurrency = onChainCurrency ?? cur
 
 			// 3. USDC 报价 - 严格 Oracle（与 topup 同策略）
 			const totalStr = breakdown.total.toFixed(6)
-			const quotedUsdc6 = quoteCurrencyToUsdc6(totalStr, cur)
+			const quotedUsdc6 = quoteCurrencyToUsdc6(totalStr, effectiveCurrency)
 			if (quotedUsdc6 <= 0n) {
 				const fresh = isOracleFresh()
-				logger(Colors.yellow(`[nfcUsdcCharge] oracle quote=0 cur=${cur} total=${totalStr} fresh=${fresh}`))
+				logger(Colors.yellow(`[nfcUsdcCharge] oracle quote=0 cur=${effectiveCurrency} total=${totalStr} fresh=${fresh}`))
 				return res.status(503).json({
 					success: false,
 					error: fresh
-						? `Oracle rate not available for ${cur}, please retry shortly`
+						? `Oracle rate not available for ${effectiveCurrency}, please retry shortly`
 						: `Oracle rate stale, please retry shortly`,
 				}).end()
 			}
@@ -3002,14 +3096,14 @@ const routing = ( router: Router ) => {
 			const settled = await settleBeamioX402ToCardOwner(req, res, {
 				cardOwner: payToOwner,
 				quotedUsdc6,
-				description: `Beamio NFC USDC Charge (${cur} ${breakdown.total.toFixed(2)} → card ${cardAddr.slice(0, 8)}…)`,
+				description: `Beamio NFC USDC Charge (${effectiveCurrency} ${breakdown.total.toFixed(2)} → card ${cardAddr.slice(0, 8)}…)`,
 			})
 			if (!settled) return // 响应已在 helper 内写出
 
 			const fiat6 = (n: number): string => BigInt(Math.max(0, Math.round(n * 1_000_000))).toString()
 
 			logger(Colors.green(
-				`[nfcUsdcCharge] settle OK card=${cardAddr} payer=${settled.payer} ` +
+				`[nfcUsdcCharge] settle OK card=${cardAddr} pos=${posAddr ? posAddr.slice(0, 10) + '…' : '(none)'} payer=${settled.payer} ` +
 				`USDC_tx=${settled.USDC_tx} usdc6=${settled.usdcAmount6} → forward Master`
 			))
 
@@ -3019,10 +3113,11 @@ const routing = ( router: Router ) => {
 				{
 					cardAddr,
 					cardOwner: payToOwner,
+					pos: posAddr,
 					nfcUid: uidTrim,
 					nfcTagIdHex: tagIdHex,
 					nfcRecipientEOA: recipientEOA,
-					currency: cur,
+					currency: effectiveCurrency,
 					subtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
 					discountAmountFiat6: fiat6(breakdown.discount),
 					discountRateBps: breakdown.discountBps,
