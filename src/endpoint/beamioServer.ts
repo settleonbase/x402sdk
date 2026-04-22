@@ -5050,7 +5050,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
 		try {
-			const CONET_BUINT = '0xC97CEbb4DF827cB2D1453A9Df7FEf6dADa1C16Ad'
+			// 源自 deployments/conet-addresses.json:BUint（chain 224422 重启后地址）。
+			// 旧地址 0xC97CEbb4DF827cB2D1453A9Df7FEf6dADa1C16Ad 已废弃，链上无代码会触发 BAD_DATA。
+			const CONET_BUINT = '0x1330297821814B06A6DafE3557Fa730F690D7007'
 			const buint = new ethers.Contract(CONET_BUINT, ['function balanceOfAll(address) view returns (uint256 total, uint256 free, uint256 paid)'], providerConet)
 			const [total, free, paid] = await buint.balanceOfAll(address)
 			const decimals = 6
@@ -5081,8 +5083,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
 		try {
-			const BEAMIO_INDEXER = '0xd990719B2f05ccab4Acdd5D7A3f7aDfd2Fc584Fe'
-			const CONET_BUINT = '0xC97CEbb4DF827cB2D1453A9Df7FEf6dADa1C16Ad'
+			// 源自 deployments/conet-addresses.json（chain 224422 重启后）。
+			// 旧 BeamioIndexerDiamond 0xd990719B2f05ccab4Acdd5D7A3f7aDfd2Fc584Fe / 旧 BUint 0xC97CEbb4DF827cB2D1453A9Df7FEf6dADa1C16Ad 已废弃。
+			const BEAMIO_INDEXER = '0x45D45de73465b8913B50974Fc188529dFFb7AfFA'
+			const CONET_BUINT = '0x1330297821814B06A6DafE3557Fa730F690D7007'
 			const INDEXER_ABI = ['function getAccountTransactionsPaged(address account, uint256 offset, uint256 limit) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)']
 			const TX_BUINT_CLAIM = ethers.keccak256(ethers.toUtf8Bytes('buintClaim'))
 			const TX_BUINT_USDC = ethers.keccak256(ethers.toUtf8Bytes('buintUSDC'))

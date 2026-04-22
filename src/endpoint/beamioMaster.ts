@@ -707,7 +707,9 @@ const routing = ( router: Router ) => {
 		})
 
 		/** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付。用于 Smart Routing 及 beamioTransferIndexerAccounting 前置校验。 */
-		const BEAMIO_INDEXER_ADDRESS = '0xd990719B2f05ccab4Acdd5D7A3f7aDfd2Fc584Fe'
+		// 源自 deployments/conet-addresses.json:BeamioIndexerDiamond（chain 224422 重启后地址）。
+		// 旧地址 0xd990719B2f05ccab4Acdd5D7A3f7aDfd2Fc584Fe 已废弃。
+		const BEAMIO_INDEXER_ADDRESS = '0x45D45de73465b8913B50974Fc188529dFFb7AfFA'
 		const CONET_RPC = 'https://rpc1.conet.network'
 		const INDEXER_READ_ABI = [
 			'function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))',
