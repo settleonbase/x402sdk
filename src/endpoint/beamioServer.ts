@@ -2724,6 +2724,157 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	/** GET /api/nfcUsdcChargePreCheck
+	 * iOS POS 在生成 USDC charge QR **之前** 的 fast-fail 预检：cardOwner 是否有足够 B-Unit 覆盖 topup 腿手续费？
+	 * 失败 ⇒ POS 不出 QR，弹 toast；成功 ⇒ POS 渲染 QR 等顾客扫码。
+	 *
+	 * 这是 PR #2 的范围，仅做 BUnit 余额预检；后续 PR #4（双腿 orchestrator）会真正消费 BUnit。
+	 *
+	 * Query:
+	 *   - card        必填  BeamioUserCard 地址
+	 *   - pos         可选（推荐）POS 终端 admin EOA；提供 ⇒ 校验 pos∈card.adminList()/owner，杜绝 misconfig
+	 *   - subtotal    必填  小计（人类可读，按 card.currency() 隐含币种）
+	 *   - tipBps,taxBps,discountBps  可选，默认 0
+	 *   - currency    可选，仅作日志/兼容；后端以链上 card.currency() 为准
+	 */
+	router.get('/nfcUsdcChargePreCheck', async (req, res) => {
+		try {
+			const { card, pos, subtotal, currency } = req.query as { card?: string; pos?: string; subtotal?: string; currency?: string }
+			if (!card || !ethers.isAddress(String(card).trim())) {
+				return res.status(400).json({ ok: false, error: 'Invalid card' }).end()
+			}
+			const subtotalStr = String(subtotal ?? '').trim()
+			if (!subtotalStr || !(Number(subtotalStr) > 0)) {
+				return res.status(400).json({ ok: false, error: 'Invalid subtotal' }).end()
+			}
+			const cardAddr = ethers.getAddress(String(card).trim())
+			const posAddr = pos && ethers.isAddress(String(pos).trim()) ? ethers.getAddress(String(pos).trim()) : null
+
+			// 1. 链上读 card.owner / card.isAdmin(pos) / card.currency
+			const cardC = new ethers.Contract(
+				cardAddr,
+				[
+					'function owner() view returns (address)',
+					'function isAdmin(address) view returns (bool)',
+					'function currency() view returns (uint8)',
+				],
+				providerBase
+			)
+			const ownerPromise = cardC.owner() as Promise<string>
+			const isAdminPromise: Promise<boolean> = posAddr ? cardC.isAdmin(posAddr) : Promise.resolve(true)
+			const currencyEnumPromise = cardC.currency() as Promise<bigint | number>
+			const [ownerRaw, isAdminPos, currencyEnum] = await Promise.all([ownerPromise, isAdminPromise, currencyEnumPromise])
+			const onChainOwner = ethers.isAddress(ownerRaw) ? ethers.getAddress(ownerRaw) : null
+			if (!onChainOwner) {
+				return res.status(400).json({ ok: false, error: 'Cannot resolve card.owner() on-chain' }).end()
+			}
+			if (posAddr && !isAdminPos && posAddr !== onChainOwner) {
+				return res
+					.status(400)
+					.json({ ok: false, error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…` })
+					.end()
+			}
+			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+			const cardCurrency = currencyMap[Number(currencyEnum)] ?? 'CAD'
+			if (currency && String(currency).trim().toUpperCase() !== cardCurrency.toUpperCase()) {
+				logger(
+					Colors.yellow(
+						`[nfcUsdcChargePreCheck] currency mismatch client=${String(currency).trim().toUpperCase()} card=${cardCurrency} card=${cardAddr.slice(0, 10)}… (using card chain currency)`
+					)
+				)
+			}
+
+			// 2. 重算 total fiat (= subtotal × (10000 - disc + tax + tip) / 10000) — 与 normalizeChargeBreakdown 同源
+			const breakdown = normalizeChargeBreakdown({
+				subtotal: subtotalStr,
+				tipBps: String(req.query.tipBps ?? '0'),
+				taxBps: String(req.query.taxBps ?? '0'),
+				discountBps: String(req.query.discountBps ?? '0'),
+			})
+			if (breakdown.total <= 0) {
+				return res.status(400).json({ ok: false, error: 'Invalid charge breakdown (total must be > 0)' }).end()
+			}
+			const totalStr = breakdown.total.toFixed(6)
+
+			// 3. quote total fiat → USDC6
+			const usdc6 = quoteCurrencyToUsdc6(totalStr, cardCurrency)
+			if (usdc6 <= 0n) {
+				return res.status(503).json({ ok: false, error: `Oracle rate not available for ${cardCurrency}, please retry shortly` }).end()
+			}
+
+			// 4. USDC6 → points6 via card-specific gateway.quoteUnitPointInUSDC6
+			let points6: bigint
+			try {
+				const gw = new ethers.Contract(cardAddr, ['function factoryGateway() view returns (address)'], providerBase)
+				const gatewayAddr = (await gw.factoryGateway()) as string
+				const gateway = new ethers.Contract(gatewayAddr, ['function quoteUnitPointInUSDC6(address) view returns (uint256)'], providerBase)
+				const unitPriceUSDC6 = (await gateway.quoteUnitPointInUSDC6(cardAddr)) as bigint
+				if (unitPriceUSDC6 <= 0n) {
+					return res.status(503).json({ ok: false, error: 'Card unit price unavailable (UC_PriceZero)' }).end()
+				}
+				// ceil(usdc6 * 1e6 / unitPriceUSDC6) — 与 nfcTopupPreCheckBUnitFee 反算口径一致
+				points6 = (usdc6 * 1_000_000n + unitPriceUSDC6 - 1n) / unitPriceUSDC6
+			} catch (e: any) {
+				return res.status(503).json({ ok: false, error: `Cannot read card price: ${e?.shortMessage ?? e?.message ?? String(e)}` }).end()
+			}
+			if (points6 <= 0n) {
+				return res.status(400).json({ ok: false, error: 'Computed points6 is zero (subtotal too small)' }).end()
+			}
+
+			// 5. 用 mock mintPointsByAdmin(dummy, points6) calldata 复用现有 BUnit fee 预检
+			const dummyRecipient = '0x000000000000000000000000000000000000dEaD'
+			const mintIface = new ethers.Interface(['function mintPointsByAdmin(address,uint256)'])
+			const mockData = mintIface.encodeFunctionData('mintPointsByAdmin', [dummyRecipient, points6])
+			const bunit = await nfcTopupPreCheckBUnitFee(cardAddr, mockData)
+			if (!bunit.success) {
+				logger(
+					Colors.yellow(
+						`[nfcUsdcChargePreCheck] BUnit fee FAIL card=${cardAddr.slice(0, 10)}… owner=${(bunit.cardOwnerEOA ?? onChainOwner).slice(0, 10)}… err=${bunit.error}`
+					)
+				)
+				return res
+					.status(400)
+					.json({
+						ok: false,
+						error: bunit.error ?? 'B-Unit pre-check failed',
+						cardOwner: bunit.cardOwnerEOA ?? onChainOwner,
+						requiredBUnits6: bunit.feeAmount?.toString(),
+					})
+					.end()
+			}
+
+			logger(
+				Colors.green(
+					`[nfcUsdcChargePreCheck] OK card=${cardAddr.slice(0, 10)}… pos=${posAddr ? posAddr.slice(0, 10) + '…' : '(none)'} subtotal=${subtotalStr} ${cardCurrency} total=${breakdown.total.toFixed(2)} usdc6=${usdc6} points6=${points6} fee=${bunit.feeAmount} BUnits6`
+				)
+			)
+			return res
+				.status(200)
+				.json({
+					ok: true,
+					cardAddr,
+					cardOwner: bunit.cardOwnerEOA ?? onChainOwner,
+					pos: posAddr,
+					currency: cardCurrency,
+					subtotal: breakdown.subtotal.toFixed(2),
+					discount: breakdown.discount.toFixed(2),
+					tax: breakdown.tax.toFixed(2),
+					tip: breakdown.tip.toFixed(2),
+					total: breakdown.total.toFixed(2),
+					discountBps: breakdown.discountBps,
+					taxBps: breakdown.taxBps,
+					tipBps: breakdown.tipBps,
+					quotedUsdc6: usdc6.toString(),
+					estPoints6: points6.toString(),
+					requiredBUnits6: bunit.feeAmount?.toString() ?? '0',
+				})
+				.end()
+		} catch (e: any) {
+			logger(Colors.red(`[nfcUsdcChargePreCheck] error: ${e?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: e?.shortMessage ?? e?.message ?? String(e) }).end()
+		}
+	})
+
 	/** POST /api/nfcUsdcCharge
 	 * x402（EIP-3009）：客户用任意外部钱包浏览器（MetaMask 等）为 POS charge 付 USDC。
 	 * 与 nfcUsdcTopup 区别：
