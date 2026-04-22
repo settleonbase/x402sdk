@@ -815,20 +815,33 @@ const addUserPoolProcess = async () => {
 
 		await updateUserDB(obj.account)
 		
-		// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial。需确认 BeamioOfficial 有账户，否则 followByAdmin 会 AccountNotFound
+		// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial。
+		// 先用 getAccount 探测 BeamioOfficial 是否已经在 registry 上注册；
+		// 链上无账户时 ethers 会抛 BAD_DATA: could not decode result data（返回 0x），
+		// 与 AccountNotFound 同义，视作"BeamioOfficial 还没注册"安静跳过即可，避免误报为 followByAdmin 失败。
 		if (obj.wallet.toLowerCase() !== BeamioOfficial.toLowerCase() && obj.followBeamioOfficial) {
+			let officialExists = false
 			try {
-				await (SC.constAccountRegistry as any).getAccount(BeamioOfficial)
-				const followTx = await SC.constAccountRegistry.followByAdmin(obj.wallet, BeamioOfficial)
-				await followTx.wait()
-				logger('addUserPoolProcess followByAdmin BeamioOfficial SUCCESS!', followTx.hash)
-				await updateUserFollowDB(obj.wallet, BeamioOfficial)
-			} catch (followEx: any) {
-				const msg = followEx?.shortMessage || followEx?.message || ''
-				if (/AccountNotFound|routePgpKeyID not in|route key not recorded/i.test(msg)) {
-					logger(`addUserPoolProcess skip followBeamioOfficial: ${msg}`)
-				} else {
-					logger(`addUserPoolProcess followByAdmin Error: ${msg} | wallet=${obj.wallet}`)
+				const onchain = await (SC.constAccountRegistry as any).getAccount(BeamioOfficial)
+				officialExists = !!onchain?.exists
+			} catch (_probeEx: any) {
+				officialExists = false
+			}
+			if (!officialExists) {
+				logger(`addUserPoolProcess skip followBeamioOfficial: BeamioOfficial not yet onchain | wallet=${obj.wallet}`)
+			} else {
+				try {
+					const followTx = await SC.constAccountRegistry.followByAdmin(obj.wallet, BeamioOfficial)
+					await followTx.wait()
+					logger('addUserPoolProcess followByAdmin BeamioOfficial SUCCESS!', followTx.hash)
+					await updateUserFollowDB(obj.wallet, BeamioOfficial)
+				} catch (followEx: any) {
+					const msg = followEx?.shortMessage || followEx?.message || ''
+					if (/AccountNotFound|routePgpKeyID not in|route key not recorded|could not decode result data|BAD_DATA/i.test(msg)) {
+						logger(`addUserPoolProcess skip followBeamioOfficial: ${msg}`)
+					} else {
+						logger(`addUserPoolProcess followByAdmin Error: ${msg} | wallet=${obj.wallet}`)
+					}
 				}
 			}
 		}
