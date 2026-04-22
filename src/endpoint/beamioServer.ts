@@ -1214,16 +1214,23 @@ const routing = ( router: Router ) => {
 						subordinate: tx.subordinate && tx.subordinate !== ethers.ZeroAddress ? ethers.getAddress(tx.subordinate).toLowerCase() : undefined,
 						note: note || undefined,
 					})
-					const topUpDone = topUpFromClear6 === 0n || topUpSum6 >= topUpFromClear6
-					const chargeDone = chargeFromClear6 === 0n || chargeSum6 >= chargeFromClear6
-					if (topUpDone && chargeDone) {
-						stop = true
-						break
+					// 只有当 *FromClear 给出了非 0 目标且双方均已达到，才能提前 break；
+					// 否则（POS EOA 不在 infraCard admin 列表导致 getAdminStatsFull 返回 0/0，或
+					// 旧 Diamond 时期 subordinate 未被纳入 accountActionIds 导致目标不可达）继续翻页，
+					// 由 HARD_PAGE_CAP 与 totalNum 自然兜底，避免「fromClear=0 时只回 1 条」。
+					if (topUpFromClear6 > 0n && chargeFromClear6 > 0n) {
+						const topUpDone = topUpSum6 >= topUpFromClear6
+						const chargeDone = chargeSum6 >= chargeFromClear6
+						if (topUpDone && chargeDone) {
+							stop = true
+							break
+						}
 					}
 				}
-				// `getAccountTransactionsPaged` returns offset 0 = newest（与 biz `pullAccountPagedWithLocalStopRule` 对齐）
-				// 当 from-clear 全为 0 时（admin 未登记 / RPC 失败）我们还是限定单页 + HARD_PAGE_CAP 防止全表扫描。
-				if (topUpFromClear6 === 0n && chargeFromClear6 === 0n) break
+				// `getAccountTransactionsPaged` returns offset 0 = newest（与 biz `pullAccountPagedWithLocalStopRule` 对齐）。
+				// 当 fromClear=0/0（如 POS EOA 不在 infraCard admin 列表时 `getAdminStatsFull` revert）
+				// 不再立即 break——继续翻页让 HARD_PAGE_CAP / totalNum 兜底，覆盖 ActionFacet 升级后
+				// `subordinate` 也并入 accountActionIds 的全部经手记录。
 			}
 			items.sort((a, b) => b.timestamp - a.timestamp)
 			return res.status(200).json({
