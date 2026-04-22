@@ -225,24 +225,127 @@ const updateUserDB = async (account: beamioAccount) => {
 	await db.end()
 }
 
-const getUserData = async (userName: string) => {
-
-	const SC = beamio_ContractPool[0].constAccountRegistry
+/** 链上该 handle 未绑定时，清除本地 accounts 表中仍挂着该用户名的陈旧缓存（采信链上）。 */
+const clearStaleUsernameFromDb = async (accountName: string): Promise<void> => {
+	const nameNorm = String(accountName || '').trim()
+	if (!nameNorm) return
+	const db = new Client({ connectionString: DB_URL })
 	try {
-		// 1. 先通过 username 找到链上的 owner 地址
-		const owner: string = await SC.getOwnerByAccountName(userName)
+		await db.connect()
+		const r = await db.query(
+			`
+			UPDATE accounts
+			SET username = ''
+			WHERE LOWER(TRIM(COALESCE(username, ''))) = LOWER($1)
+			`,
+			[nameNorm]
+		)
+		const n = r.rowCount ?? 0
+		if (n > 0) {
+			logger(
+				Colors.yellow(
+					`[clearStaleUsernameFromDb] cleared stale handle "${nameNorm}" from ${n} row(s) (align with chain)`
+				)
+			)
+		}
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+type GetUserDataResult = {
+	address: string
+	username: string
+	image: string
+	darkTheme: boolean
+	isUSDCFaucet: boolean
+	isETHFaucet: boolean
+	initialLoading: boolean
+	firstName: string
+	lastName: string
+	createdAt: bigint
+}
+
+const rowToGetUserDataResult = (r: Record<string, unknown>): GetUserDataResult => {
+	const ca = r.created_at
+	let createdAt: bigint
+	if (ca == null || ca === "") {
+		createdAt = BigInt(Date.now())
+	} else if (typeof ca === "bigint") {
+		createdAt = ca
+	} else {
+		createdAt = BigInt(String(ca))
+	}
+	return {
+		address: String(r.address ?? "").toLowerCase(),
+		username: String(r.username ?? ""),
+		image: String(r.image ?? ""),
+		darkTheme: Boolean(r.dark_theme),
+		isUSDCFaucet: Boolean(r.is_usdc_faucet),
+		isETHFaucet: Boolean(r.is_eth_faucet),
+		initialLoading: r.initial_loading !== false,
+		firstName: String(r.first_name ?? ""),
+		lastName: String(r.last_name ?? ""),
+		createdAt,
+	}
+}
+
+/** 仅读本地 DB，不访问链。 */
+const getUserDataFromDbByUsername = async (
+	userName: string
+): Promise<GetUserDataResult | null> => {
+	const nameNorm = String(userName || "").trim()
+	if (!nameNorm) return null
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const { rows } = await db.query(
+			`
+			SELECT address, username, image, dark_theme, is_usdc_faucet, is_eth_faucet,
+				initial_loading, first_name, last_name, created_at
+			FROM accounts
+			WHERE LOWER(TRIM(COALESCE(username, ''))) = LOWER($1)
+			LIMIT 1
+			`,
+			[nameNorm]
+		)
+		const row = rows[0] as Record<string, unknown> | undefined
+		if (!row) return null
+		return rowToGetUserDataResult(row)
+	} catch (e: any) {
+		logger(
+			Colors.yellow(`[getUserDataFromDbByUsername] ${e?.message ?? e}`)
+		)
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** 可信链上数据拉取并写回本地（供 getUserData 后台调用）。 */
+const syncUserDataFromChainToDb = async (userName: string): Promise<void> => {
+	const SC = beamio_ContractPool[0].constAccountRegistry
+	const nameNorm = String(userName || "").trim()
+	if (!nameNorm) return
+
+	try {
+		const owner: string = await SC.getOwnerByAccountName(nameNorm)
 
 		if (!owner || owner === ethers.ZeroAddress) {
-			// 链上没有这个用户名，DB 也不用更新
-			logger(`[getUserData] username not found on-chain: ${userName}`)
-			return null
+			logger(`[syncUserDataFromChainToDb] username not found on-chain: ${nameNorm}`)
+			try {
+				await clearStaleUsernameFromDb(nameNorm)
+			} catch (cle: any) {
+				logger(
+					Colors.yellow(
+						`[syncUserDataFromChainToDb] clearStaleUsernameFromDb failed: ${cle?.message ?? cle}`
+					)
+				)
+			}
+			return
 		}
 
-		// 2. 调用 getAccount(owner) 拿到链上结构
 		const onchain = await SC.getAccount(owner)
-
-		// onchain 是一个 struct，ethers v6 会给你 array + named props：
-		// onchain.accountName, onchain.image, onchain.darkTheme, ...
 		const accountName: string = onchain.accountName
 		const image: string = onchain.image
 		const darkTheme: boolean = onchain.darkTheme
@@ -251,23 +354,20 @@ const getUserData = async (userName: string) => {
 		const initialLoading: boolean = onchain.initialLoading
 		const firstName: string = onchain.firstName
 		const lastName: string = onchain.lastName
-		const createdAt: bigint = onchain.createdAt * BigInt(1000)  // solidity uint256 → bigint
+		const createdAt: bigint = onchain.createdAt * BigInt(1000)
 		const exists: boolean = onchain.exists
 
 		if (!exists) {
-			// 理论上不会出现，因为 getAccount 不存在会 revert，保险起见
 			logger(
-				`[getUserData] account.exists = false on-chain for ${owner} (${userName})`
+				`[syncUserDataFromChainToDb] account.exists = false on-chain for ${owner} (${nameNorm})`
 			)
-			return null
+			return
 		}
-		logger(`getUserData Start save to DB!`)
+
 		const db = new Client({ connectionString: DB_URL })
 		await db.connect()
-		// 3. 写入本地 DB（accounts 表）
-		//    注意：created_at 是 BIGINT，用 string 传给 pg 最安全
 		const now = new Date()
-		
+
 		await db.query(
 			`
 			INSERT INTO accounts (
@@ -308,34 +408,58 @@ const getUserData = async (userName: string) => {
 				initialLoading,
 				firstName || null,
 				lastName || null,
-				createdAt.toString(), // BIGINT
-				now
+				createdAt.toString(),
+				now,
 			]
 		)
 
 		logger(
-			`[getUserData] synced user ${userName} (${owner}) from chain to DB`
+			`[syncUserDataFromChainToDb] synced user ${nameNorm} (${owner}) from chain to DB`
 		)
 		await db.end()
-		// 4. 返回一个整理好的对象给上层用（可选）
-		return {
-			address: owner.toLowerCase(),
-			username: accountName,
-			image,
-			darkTheme,
-			isUSDCFaucet,
-			isETHFaucet,
-			initialLoading,
-			firstName,
-			lastName,
-			createdAt: createdAt // 前端用的话可以转 number（注意安全范围）
-		}
 	} catch (ex: any) {
 		logger(
-			`[getUserData] failed for username=${userName}:`,
+			`[syncUserDataFromChainToDb] failed for username=${nameNorm}:`,
 			ex?.shortMessage || ex?.message || ex
 		)
 	}
+}
+
+const syncUserDataFromChainInFlight = new Map<string, Promise<void>>()
+
+const enqueueSyncUserDataFromChain = (userName: string): void => {
+	const k = String(userName || "").trim()
+	if (!k) return
+	let p = syncUserDataFromChainInFlight.get(k)
+	if (p) {
+		void p.catch(() => {})
+		return
+	}
+	p = syncUserDataFromChainToDb(userName)
+		.catch((e: any) =>
+			logger(
+				Colors.yellow(
+					`[getUserData] background sync failed: ${e?.message ?? e}`
+				)
+			)
+		)
+		.finally(() => {
+			syncUserDataFromChainInFlight.delete(k)
+		})
+	syncUserDataFromChainInFlight.set(k, p)
+	void p
+}
+
+/**
+ * 先返回本地 DB 缓存（若有），再异步拉取链上可信数据并 upsert 本地。
+ * 无本地行时返回 null，后台仍尝试同步（例如链上已有、本地未写入）。
+ */
+const getUserData = async (
+	userName: string
+): Promise<GetUserDataResult | null> => {
+	const local = await getUserDataFromDbByUsername(userName)
+	enqueueSyncUserDataFromChain(userName)
+	return local
 }
 
 
@@ -775,6 +899,60 @@ const addFollowPoolProcess = async () => {
 
 const BeamioOfficial = '0xeabf0a98ac208647247eaa25fdd4eb0e67793d61'
 
+/**
+ * addUser 前：以 AccountRegistry 链上为准。handle 未绑定时清理本地该用户名的缓存；
+ * 钱包在链上无账户时删除本地该地址的 accounts/follows（避免陈旧行阻碍重新登记）。
+ */
+const reconcileLocalDbBeforeAddUser = async (
+	accountName: string,
+	walletRaw: string
+): Promise<void> => {
+	const reg = beamio_ContractPool[0]?.constAccountRegistry
+	if (!reg) return
+	let wallet: string
+	try {
+		wallet = ethers.getAddress(String(walletRaw || '').trim()).toLowerCase()
+	} catch {
+		return
+	}
+	const nameNorm = String(accountName || '').trim()
+	if (!nameNorm) return
+
+	try {
+		const ownerByName: string = await reg.getOwnerByAccountName(nameNorm)
+		const nameFreeOnChain =
+			!ownerByName || ownerByName === ethers.ZeroAddress
+
+		if (nameFreeOnChain) {
+			await clearStaleUsernameFromDb(nameNorm)
+		}
+
+		let walletHasAccount: boolean | null = null
+		try {
+			const acc = await reg.getAccount(wallet)
+			walletHasAccount = !!acc?.exists
+		} catch {
+			walletHasAccount = null
+		}
+
+		// 仅当链上明确 exists=false 时删本地；RPC/解码失败时不采信为「无账户」，避免误删
+		if (walletHasAccount === false) {
+			logger(
+				Colors.yellow(
+					`[reconcileLocalDbBeforeAddUser] chain has no account for ${wallet.slice(0, 10)}… — drop stale DB rows if any`
+				)
+			)
+			await deleteAccountFromDB(wallet)
+		}
+	} catch (ex: any) {
+		logger(
+			Colors.yellow(
+				`[reconcileLocalDbBeforeAddUser] skipped: ${ex?.shortMessage || ex?.message || ex}`
+			)
+		)
+	}
+}
+
 export const addUser = async (req: Request, res: Response) => {
 	const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, pgpKeyID, pgpKey } = req.body as {
 		accountName: string
@@ -791,6 +969,8 @@ export const addUser = async (req: Request, res: Response) => {
 	}
 
 	try {
+
+		await reconcileLocalDbBeforeAddUser(accountName, wallet)
 
 		const getExistsUserData = await getUserData(accountName)
 		
