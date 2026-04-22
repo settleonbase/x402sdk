@@ -14,7 +14,7 @@ const conetDepinProvider = new ethers.JsonRpcProvider('https://rpc1.conet.networ
 const searchUrl = `${beamioApi}/api/search-users`
 
 const GuardianNodesMainnet = new ethers.Contract(
-	'0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94',
+	'0x6d7a526BFD03E90ea8D19eDB986577395a139872',
 	GuardianNodesInfoV6Abi,
 	conetDepinProvider
 )

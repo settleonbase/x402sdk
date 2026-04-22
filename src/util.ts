@@ -103,7 +103,7 @@ const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)
 
-const GuardianNodeInfo_mainnet = '0xdE51f1daaCa6eae9BDeEe33E324c3e6e96837e94'
+const GuardianNodeInfo_mainnet = '0x6d7a526BFD03E90ea8D19eDB986577395a139872'
 const CONET_MAINNET = new ethers.JsonRpcProvider('https://rpc1.conet.network') 
 const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNodeInfoABI, CONET_MAINNET)
 
@@ -135,30 +135,84 @@ export const getBaseRpcUrlViaConetNode = (): string | null => {
 /** 供 debug：Guardian_Nodes 数量 */
 export const getGuardianNodesCount = (): number => Guardian_Nodes.length
 
-export const getAllNodes = () => new Promise(async resolve=> {
+/**
+ * 与 conet-si `_getAllNodes` 一致的分页拉取：
+ * - 每页 100 条（合约的内部 limit，传 1000 会被 RPC 静默返回空数据 `0x`，
+ *   触发 ethers `BAD_DATA` 抛出，让旧实现把整个进程拖崩）。
+ * - 对 `BAD_DATA value="0x"` 吞掉视为「无更多节点」，与 conet-si 保持一致。
+ * - 连续 5 次其它错误退出，避免无限重试。
+ */
+const _getAllNodesPaged = async (): Promise<any[]> => {
+	const PAGE = 100
+	const MAX_LOOP = 1000
+	const MAX_CONSECUTIVE_FAIL = 5
+	const all: any[] = []
+	const seen = new Set<string>()
+	let i = 0
+	let loop = 0
+	let consecutiveFail = 0
 
-	const _nodes = await GuardianNodesMainnet.getAllNodes(0, 1000)
-	for (let i = 0; i < _nodes.length; i ++) {
-		const node = _nodes[i]
-		const id = parseInt(node[0].toString())
-		const pgpString: string = Buffer.from( node[1], 'base64').toString()
-		const domain: string = node[2]
-		const ipAddr: string = node[3]
-		const region: string = node[4]
-		const itemNode = {
-			ip_addr: ipAddr,
-			armoredPublicKey: pgpString,
-			domain: domain,
-			nftNumber: id,
-			region: region
+	while (loop++ < MAX_LOOP) {
+		let page: any[] = []
+		try {
+			page = await GuardianNodesMainnet.getAllNodes(i, PAGE)
+			consecutiveFail = 0
+		} catch (e: any) {
+			if (e?.code === 'BAD_DATA' && /value="0x"/.test(e?.message ?? '')) {
+				logger(`_getAllNodesPaged: contract returned empty (0x) at offset=${i}, treat as end`)
+				break
+			}
+			consecutiveFail++
+			logger(`_getAllNodesPaged Error (${consecutiveFail}/${MAX_CONSECUTIVE_FAIL}) at offset=${i}: ${e?.message ?? e}`)
+			if (consecutiveFail >= MAX_CONSECUTIVE_FAIL) break
+			await new Promise(r => setTimeout(r, 2000))
+			continue
 		}
-	
-		Guardian_Nodes.push(itemNode)
-  	}
-	
-	resolve(true)
-	logger(`getAllNodes success total nodes = ${Guardian_Nodes.length}`)
-})
+
+		if (!page || page.length === 0) break
+
+		let added = 0
+		for (const n of page) {
+			const ip = (n?.[3] ?? '').toString().trim().toLowerCase()
+			if (!ip) continue
+			if (seen.has(ip)) continue
+			seen.add(ip)
+			all.push(n)
+			added++
+		}
+		if (added === 0) break
+		i += page.length
+	}
+
+	return all
+}
+
+export const getAllNodes = async (): Promise<boolean> => {
+	try {
+		const _nodes = await _getAllNodesPaged()
+		Guardian_Nodes.length = 0
+		for (let i = 0; i < _nodes.length; i ++) {
+			const node = _nodes[i]
+			const id = parseInt(node[0].toString())
+			const pgpString: string = Buffer.from(node[1], 'base64').toString()
+			const domain: string = node[2]
+			const ipAddr: string = node[3]
+			const region: string = node[4]
+			Guardian_Nodes.push({
+				ip_addr: ipAddr,
+				armoredPublicKey: pgpString,
+				domain: domain,
+				nftNumber: id,
+				region: region,
+			})
+		}
+		logger(`getAllNodes success total nodes = ${Guardian_Nodes.length}`)
+		return true
+	} catch (e: any) {
+		logger(`getAllNodes Error: ${e?.message ?? e}`)
+		return false
+	}
+}
 
 // const headers: Record<string, string> = {
 // 	accept: 'application/json',

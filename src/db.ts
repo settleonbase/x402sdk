@@ -29,7 +29,7 @@ const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
 const beamioConetAccountRegistry = '0x2dF9c4c51564FfF861965572CE11ebe27d3C1B35'
 const IpfsStorageRegistryGlobalDedup = '0x121c4dDCa92f07dc53Fd6Db9bc5A07c2918F9591'
-const addressPGP = '0x9C94238945295146F3F572D77ae492C13DF90bDd'
+const addressPGP = '0xb2aABe52f476356AE638839A786EAE425A0c1b66'
 
 export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 	const walletConet = new ethers.Wallet(n, providerConet)
