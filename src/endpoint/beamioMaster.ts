@@ -1835,19 +1835,33 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({ ok: true }).end()
 		})
 
-		/** POST /api/payByNfcUidPrepare - Android 构建 container 前的准备，返回 account、nonce、deadline、payeeAA、unitPriceUSDC6。NFC 格式时需 e/c/m 做 SUN 校验。 */
+		/** POST /api/payByNfcUidPrepare - 客户端构建 container 前的准备，返回 account、nonce、deadline、payeeAA、cardCurrency、pointsUnitPriceInCurrencyE6（fiat6-only 协议）以及兼容的 unitPriceUSDC6。
+		 *  fiat6-only 协议：传 `amountFiat6` + `currency`；`amountUsdc6` 已 deprecated，仅作回退。NFC 格式时需 e/c/m 做 SUN 校验。 */
 		router.post('/payByNfcUidPrepare', async (req, res) => {
-			const { uid, payee, amountUsdc6, e, c, m } = req.body as { uid?: string; payee?: string; amountUsdc6?: string; e?: string; c?: string; m?: string }
+			const { uid, payee, amountUsdc6, amountFiat6, currency, e, c, m } = req.body as { uid?: string; payee?: string; amountUsdc6?: string; amountFiat6?: string; currency?: string; e?: string; c?: string; m?: string }
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 				return res.status(400).json({ ok: false, error: 'Missing uid' })
 			}
 			if (!payee || !ethers.isAddress(payee)) {
 				return res.status(400).json({ ok: false, error: 'Invalid payee' })
 			}
-			if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
-				return res.status(400).json({ ok: false, error: 'Invalid amountUsdc6' })
+			const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : ''
+			const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : ''
+			const fiat6Ok = fiat6Trim !== '' && /^[0-9]+$/.test(fiat6Trim) && BigInt(fiat6Trim) > 0n && currencyTrim !== ''
+			const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(String(amountUsdc6).trim()) && BigInt(String(amountUsdc6).trim()) > 0n
+			if (!fiat6Ok && !usdc6Ok) {
+				return res.status(400).json({ ok: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' })
 			}
-			const result = await payByNfcUidPrepare({ uid: uid.trim(), payee: ethers.getAddress(payee), amountUsdc6, e, c, m })
+			const result = await payByNfcUidPrepare({
+				uid: uid.trim(),
+				payee: ethers.getAddress(payee),
+				amountUsdc6: usdc6Ok ? amountUsdc6 : undefined,
+				amountFiat6: fiat6Ok ? fiat6Trim : undefined,
+				currency: fiat6Ok ? currencyTrim : undefined,
+				e,
+				c,
+				m,
+			})
 			return res.status(result.ok ? 200 : 400).json(result).end()
 		})
 
@@ -1857,6 +1871,8 @@ const routing = ( router: Router ) => {
 				uid,
 				containerPayload,
 				amountUsdc6,
+				amountFiat6,
+				currency,
 				e,
 				c,
 				m,
@@ -1873,6 +1889,8 @@ const routing = ( router: Router ) => {
 				uid?: string
 				containerPayload?: ContainerRelayPayloadUnsigned
 				amountUsdc6?: string
+				amountFiat6?: string
+				currency?: string
 				e?: string
 				c?: string
 				m?: string
@@ -1892,13 +1910,17 @@ const routing = ( router: Router ) => {
 			if (!containerPayload || typeof containerPayload !== 'object') {
 				return res.status(400).json({ success: false, error: 'Missing containerPayload' })
 			}
-			logger(Colors.cyan(`[payByNfcUidSignContainer] Master received Android container uid=${uid.slice(0, 16)}... amountUsdc6=${amountUsdc6}\n` + inspect(containerPayload, false, 4, true)))
+			const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : ''
+			const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : ''
+			const fiat6Ok = fiat6Trim !== '' && /^[0-9]+$/.test(fiat6Trim) && BigInt(fiat6Trim) > 0n && currencyTrim !== ''
+			const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(String(amountUsdc6).trim()) && BigInt(String(amountUsdc6).trim()) > 0n
+			logger(Colors.cyan(`[payByNfcUidSignContainer] Master received container uid=${uid.slice(0, 16)}... amountFiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} amountUsdc6=${usdc6Ok ? amountUsdc6 : 'none'}\n` + inspect(containerPayload, false, 4, true)))
 			const preCheck = ContainerRelayPreCheckUnsigned(containerPayload)
 			if (!preCheck.success) {
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
-			if (!amountUsdc6 || BigInt(amountUsdc6) <= 0n) {
-				return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
+			if (!fiat6Ok && !usdc6Ok) {
+				return res.status(400).json({ success: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' })
 			}
 			const nfcLog = {
 				nfcSubtotalCurrencyAmount: nfcSubtotalCurrencyAmount ?? null,
@@ -1914,7 +1936,9 @@ const routing = ( router: Router ) => {
 			const result = await payByNfcUidSignContainer({
 				uid: uid.trim(),
 				containerPayload,
-				amountUsdc6,
+				amountUsdc6: usdc6Ok ? amountUsdc6 : undefined,
+				amountFiat6: fiat6Ok ? fiat6Trim : undefined,
+				currency: fiat6Ok ? currencyTrim : undefined,
 				res,
 				e,
 				c,
@@ -1954,20 +1978,30 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/payByNfcUid - 以 UID 支付：Smart Routing 聚合 CCSA+USDC 扣款，无 AA 时回退纯 USDC 转账 */
 		router.post('/payByNfcUid', async (req, res) => {
-			const { uid, amountUsdc6, payee } = req.body as { uid?: string; amountUsdc6?: string; payee?: string }
-			logger(Colors.cyan(`[payByNfcUid] Master received uid=${uid?.slice(0, 16)}... amountUsdc6=${amountUsdc6} payee=${payee}`))
+			const { uid, amountUsdc6, amountFiat6, currency, payee } = req.body as { uid?: string; amountUsdc6?: string; amountFiat6?: string; currency?: string; payee?: string }
+			logger(Colors.cyan(`[payByNfcUid] Master received uid=${uid?.slice(0, 16)}... amountFiat6=${amountFiat6 ?? 'none'} currency=${currency ?? 'none'} amountUsdc6=${amountUsdc6 ?? 'none'} payee=${payee}`))
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 				logger(Colors.red('[payByNfcUid] reject: Missing uid'))
 				return res.status(400).json({ success: false, error: 'Missing uid' })
 			}
-			const amountBig = amountUsdc6 ? BigInt(amountUsdc6) : 0n
-			if (amountBig <= 0n) {
-				logger(Colors.red(`[payByNfcUid] reject: Invalid amountUsdc6=${amountUsdc6}`))
-				return res.status(400).json({ success: false, error: 'Invalid amountUsdc6' })
+			const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : ''
+			const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : ''
+			const fiat6Ok = fiat6Trim !== '' && /^[0-9]+$/.test(fiat6Trim) && BigInt(fiat6Trim) > 0n && currencyTrim !== ''
+			const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(String(amountUsdc6).trim()) && BigInt(String(amountUsdc6).trim()) > 0n
+			if (!fiat6Ok && !usdc6Ok) {
+				logger(Colors.red(`[payByNfcUid] reject: Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)`))
+				return res.status(400).json({ success: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' })
 			}
+			const amountBig = usdc6Ok ? BigInt(String(amountUsdc6).trim()) : 0n
 			if (!payee || !ethers.isAddress(payee)) {
 				logger(Colors.red(`[payByNfcUid] reject: Invalid payee=${payee}`))
 				return res.status(400).json({ success: false, error: 'Invalid payee address' })
+			}
+			if (!usdc6Ok && fiat6Ok) {
+				// fiat6-only Charge 协议：/payByNfcUid 走 OpenContainer 路径，OpenContainer 仍按 USDC 计费。
+				// TODO(下一批)：把 OpenContainer 路径接入 fiat6+chain quote 自洽换算。当前过渡期：要求 fiat6 客户端走 /payByNfcUidSignContainer。
+				logger(Colors.red(`[payByNfcUid] fiat6-only client should use /payByNfcUidSignContainer (OpenContainer path 暂未支持 fiat6 自洽换算)`))
+				return res.status(400).json({ success: false, error: 'fiat6-only client must use /payByNfcUidSignContainer (OpenContainer path 暂未支持 fiat6)' })
 			}
 			const privateKey = await getNfcCardPrivateKeyByUid(uid)
 			logger(Colors.cyan(`[payByNfcUid] getNfcCardPrivateKeyByUid: ${privateKey ? 'OK (from DB or mnemonic)' : 'null (card not found)'}`))

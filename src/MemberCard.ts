@@ -12299,11 +12299,15 @@ export const payByAccountPrepare = async (params: {
 	}
 }
 
-/** Android 构建 container 前的准备：返回 account、nonce、deadline、payeeAA、unitPriceUSDC6，供客户端 Smart Routing 后组装 items 并调用 payByNfcUidSignContainer。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。 */
+/** 客户端构建 container 前的准备：返回 account、nonce、deadline、payeeAA、cardCurrency、pointsUnitPriceInCurrencyE6（fiat6-only 协议）以及兼容的 unitPriceUSDC6，供 Smart Routing 后组装 items 并调用 payByNfcUidSignContainer。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。
+ *  fiat6-only 协议（推荐）：传 `amountFiat6` + `currency`；`amountUsdc6` 已 deprecated，仅作回退。
+ *  见 .cursor/rules/beamio-charge-fiat-only-protocol.mdc */
 export const payByNfcUidPrepare = async (params: {
 	uid: string
 	payee: string
-	amountUsdc6: string
+	amountUsdc6?: string
+	amountFiat6?: string
+	currency?: string
 	e?: string
 	c?: string
 	m?: string
@@ -12314,11 +12318,14 @@ export const payByNfcUidPrepare = async (params: {
 	deadline?: string
 	payeeAA?: string
 	unitPriceUSDC6?: string
+	cardCurrency?: string
+	pointsUnitPriceInCurrencyE6?: string
 	error?: string
 }> => {
-	const { uid, payee, amountUsdc6, e, c, m } = params
-	const amountBig = BigInt(amountUsdc6)
-	if (amountBig <= 0n) return { ok: false, error: 'Invalid amountUsdc6' }
+	const { uid, payee, amountUsdc6, amountFiat6, currency, e, c, m } = params
+	const fiat6Ok = !!amountFiat6 && /^[0-9]+$/.test(amountFiat6) && BigInt(amountFiat6) > 0n && !!currency
+	const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(amountUsdc6) && BigInt(amountUsdc6) > 0n
+	if (!fiat6Ok && !usdc6Ok) return { ok: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' }
 	const uidTrim = uid.trim()
 	const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
 	let nfcSunTagForScheduler: string | null = null
@@ -12407,6 +12414,28 @@ export const payByNfcUidPrepare = async (params: {
 			logger(Colors.yellow(`[payByNfcUidPrepare] quote failed: ${(e as Error)?.message}`))
 			return { ok: false, error: 'Quote failed' }
 		}
+		// fiat6-only 协议：附带返回 BeamioUserCard 链上 currency() 与 pointsUnitPriceInCurrencyE6()，
+		// 供客户端按 ceil(amountFiat6 * 1e6 / pointsUnitPriceInCurrencyE6) 组装 items[].amount，零 oracle 漂移。
+		let cardCurrencyStr: string | undefined
+		let pointsPriceE6Str: string | undefined
+		try {
+			const cardRead = new ethers.Contract(
+				BASE_CCSA_CARD_ADDRESS,
+				['function currency() view returns (uint8)', 'function pointsUnitPriceInCurrencyE6() view returns (uint256)'],
+				SC.walletBase.provider!
+			)
+			const [curEnum, priceE6] = await Promise.all([cardRead.currency() as Promise<bigint | number>, cardRead.pointsUnitPriceInCurrencyE6() as Promise<bigint>])
+			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+			cardCurrencyStr = currencyMap[Number(curEnum)] ?? 'CAD'
+			pointsPriceE6Str = priceE6.toString()
+			if (fiat6Ok && currency && currency.toUpperCase() !== cardCurrencyStr.toUpperCase()) {
+				logger(Colors.yellow(`[payByNfcUidPrepare] fiat6 currency mismatch: client=${currency} card=${cardCurrencyStr}. Client must input amount in card currency.`))
+				return { ok: false, error: `Currency mismatch: client sent ${currency}, card is ${cardCurrencyStr}. POS must input amount in card currency (fiat6-only protocol).` }
+			}
+		} catch (e) {
+			logger(Colors.yellow(`[payByNfcUidPrepare] read card currency/priceE6 failed: ${(e as Error)?.message}`))
+			// 容错：不阻塞老客户端，让它继续走 unitPriceUSDC6 老路；fiat6 客户端在缺这两个字段时会自行报错。
+		}
 		scheduleEnsureNfcBeamioTagForEoa(eoa, uidTrim, nfcSunTagForScheduler, null)
 		return {
 			ok: true,
@@ -12415,6 +12444,8 @@ export const payByNfcUidPrepare = async (params: {
 			deadline: deadline.toString(),
 			payeeAA: toResolved,
 			unitPriceUSDC6: unitPriceUSDC6.toString(),
+			...(cardCurrencyStr ? { cardCurrency: cardCurrencyStr } : {}),
+			...(pointsPriceE6Str ? { pointsUnitPriceInCurrencyE6: pointsPriceE6Str } : {}),
 		}
 	} catch (e: any) {
 		logger(Colors.red(`[payByNfcUidPrepare] failed: ${e?.message ?? e}`))
@@ -12422,11 +12453,20 @@ export const payByNfcUidPrepare = async (params: {
 	}
 }
 
-/** 服务端用 UID 私钥对 Android 提交的未签名 container 签名并 relay。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。 */
+/** 服务端用 UID 私钥对客户端提交的未签名 container 签名并 relay。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。
+ *  fiat6-only 协议（推荐）：传 `amountFiat6` + `currency`（卡币种）；`amountUsdc6` 已 deprecated，仅作回退。
+ *  当 `amountFiat6` 与 `nfcSubtotalCurrencyAmount`/`nfcRequestCurrency` 一致时，记账以 fiat6 为唯一真相来源；
+ *  服务端按链上 oracle 单源换算 USDC6 用于 BUnit 收费等附属用途。
+ *  见 .cursor/rules/beamio-charge-fiat-only-protocol.mdc */
 export const payByNfcUidSignContainer = async (params: {
 	uid: string
 	containerPayload: ContainerRelayPayloadUnsigned
-	amountUsdc6: string
+	/** @deprecated 由客户端送来的 USDC6 金额；存在 oracle 漂移风险。fiat6-only 客户端不要再传此字段。 */
+	amountUsdc6?: string
+	/** fiat6-only 协议必填：账单总额（卡币种 6 位定点）。当 `currency` 与 `nfcRequestCurrency` 一致时，与 `nfcSubtotalCurrencyAmount` 同口径。 */
+	amountFiat6?: string
+	/** fiat6-only 协议必填：账单币种（必须与目标 BeamioUserCard.currency() 一致）。 */
+	currency?: string
 	res: Response
 	e?: string
 	c?: string
@@ -12447,6 +12487,8 @@ export const payByNfcUidSignContainer = async (params: {
 		uid,
 		containerPayload,
 		amountUsdc6,
+		amountFiat6,
+		currency,
 		res,
 		e,
 		c,
@@ -12461,6 +12503,31 @@ export const payByNfcUidSignContainer = async (params: {
 		nfcTaxRateBps,
 		chargeOwnerChildBurn,
 	} = params
+	const fiat6Ok = !!amountFiat6 && /^[0-9]+$/.test(amountFiat6) && BigInt(amountFiat6) > 0n && !!currency
+	const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(amountUsdc6) && BigInt(amountUsdc6) > 0n
+	if (!fiat6Ok && !usdc6Ok) return { pushed: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' }
+	if (fiat6Ok && currency && nfcRequestCurrency && currency.toUpperCase() !== String(nfcRequestCurrency).trim().toUpperCase()) {
+		logger(Colors.yellow(`[payByNfcUidSignContainer] fiat6 currency=${currency} mismatches nfcRequestCurrency=${nfcRequestCurrency}; using fiat6 currency.`))
+	}
+	// fiat6-only 协议：当客户端只传 fiat6（推荐）时，服务端按链上单源 oracle 派生 USDC6 用于
+	// 下游 BUnit 收费 / 记账等附属用途。**实际 ContainerItem 转账金额仍以 items[].amount 为准**（客户端按 priceE6 直算，零漂移）。
+	let amountUsdc6Effective: string | undefined = amountUsdc6
+	if (fiat6Ok && !usdc6Ok) {
+		try {
+			if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
+			const { unitPriceUSDC6 } = await quotePointsForUSDC_raw(BASE_CCSA_CARD_ADDRESS, 1_000_000n, Settle_ContractPool[0].baseFactoryPaymaster)
+			if (unitPriceUSDC6 <= 0n) {
+				return { pushed: false, error: 'Chain oracle quote returned 0 (cannot derive USDC6 from fiat6)' }
+			}
+			// amountUsdc6 = ceil(amountFiat6 * unitPriceUSDC6 / 1e6)
+			const fiatBig = BigInt(amountFiat6!)
+			amountUsdc6Effective = ((fiatBig * unitPriceUSDC6 + 999_999n) / 1_000_000n).toString()
+			logger(Colors.gray(`[payByNfcUidSignContainer] fiat6→USDC6 derived (chain oracle): ${amountFiat6} ${currency} * ${unitPriceUSDC6} / 1e6 = ${amountUsdc6Effective}`))
+		} catch (qErr: any) {
+			logger(Colors.red(`[payByNfcUidSignContainer] fiat6→USDC6 derive failed: ${qErr?.message ?? qErr}`))
+			return { pushed: false, error: 'Server unable to derive USDC6 from fiat6 (chain quote failed)' }
+		}
+	}
 	const normNfcBodyAmount = (v: unknown): string | undefined => {
 		if (v == null) return undefined
 		if (typeof v === 'number' && Number.isFinite(v)) return String(v)
