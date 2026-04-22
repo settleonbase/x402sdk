@@ -12634,10 +12634,10 @@ export const payByNfcUidSignContainer = async (params: {
 		if (!preCheck.success) return { pushed: false, error: preCheck.error }
 		ContainerRelayPool.push({
 			containerPayload: signed,
-			currency: nfcReqCurStr ?? 'CAD',
+			currency: (currency ? currency.toUpperCase() : nfcReqCurStr) ?? 'CAD',
 			currencyAmount: nfcSubStr,
 			forText: `NFC pay uid=${uid.slice(0, 12)}...`,
-			amountUSDC6: amountUsdc6,
+			amountUSDC6: amountUsdc6Effective ?? amountUsdc6 ?? '0',
 			nfcUid: uidTrim,
 			nfcPayerEoa: eoa,
 			nfcSubtotalCurrencyAmount: nfcSubStr,
