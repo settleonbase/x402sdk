@@ -3020,7 +3020,7 @@ const routing = ( router: Router ) => {
 					return res.status(403).json({ success: false, error: `SUN verification error: ${sunErr?.message ?? sunErr}` }).end()
 				}
 			} else {
-				logger(Colors.cyan(`[nfcUsdcCharge] no-NFC mode card=${cardAddr.slice(0, 8)}… cur=${cur} total=${breakdown.total.toFixed(2)} (third-party wallet, SUN bypass)`))
+				logger(Colors.cyan(`[nfcUsdcCharge] no-NFC mode card=${cardAddr.slice(0, 8)}… total=${breakdown.total.toFixed(2)} (third-party wallet, SUN bypass; currency resolved on-chain)`))
 			}
 
 			// 2. 链上一次性读 owner / currency / isAdmin(pos)：新 schema 下 owner/currency 不在 URL 里，必须链上权威。
