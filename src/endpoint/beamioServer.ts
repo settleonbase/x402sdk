@@ -382,6 +382,11 @@ type ChargeSessionState =
 	| 'settling'          // verify 通过，USDC settle on-chain
 	/** PR #4 (USDC charge orchestrator) 引入的中间态：USDC 已结算，编排器开始 L1 topup */
 	| 'topup_pending'
+	/** PR #4 v2：编排器已生成 tmpEOA + nfcTopupPreparePayload，等待 POS 终端用 admin key 离线签 ExecuteForAdmin。
+	 *  POS 轮询命中此态 ⇒ 读 `pendingTopup*` 字段，本地 `BeamioEthWallet.signExecuteForAdmin`，POST 回
+	 *  `/api/nfcUsdcChargeTopupAuth`；服务端写入 `posTopupSignature` 后编排器恢复并提交到 Master。
+	 *  若 POS 在 `TOPUP_SIG_TIMEOUT_MS` 内未送达 ⇒ session=error（USDC 已落 cardOwner，无 ghost dust，loyalty 入账缺失需人工对账）。 */
+	| 'awaiting_topup_auth'
 	/** PR #4：L1 topup tx 已确认，开始解析 tmpAA + 构造 container 进入 L2 */
 	| 'topup_confirmed'
 	/** PR #4：L2 charge container 已提交 Master，等待 relay 上链 */
@@ -414,6 +419,17 @@ interface ChargeSession {
 	pointsMinted6: string | null
 	topupTxHash: string | null
 	chargeTxHash: string | null
+	/** PR #4 v2：`awaiting_topup_auth` 状态下供 POS 端签 ExecuteForAdmin 的全部输入。POS 必须用这些 *exact* 值
+	 *  签名（任何字段 mismatch 都会让 cluster 验签 recover 不到 session.pos 而拒收）。 */
+	pendingTopupCardAddr: string | null
+	pendingTopupRecipientEOA: string | null
+	pendingTopupData: string | null
+	pendingTopupDeadline: number | null
+	pendingTopupNonce: string | null
+	pendingTopupPoints6: string | null
+	pendingTopupBUnitFee: string | null
+	/** POS POST 回的签名；orchestrator 的 `awaitTopupSignature` 轮询命中后即转入下一阶段并清掉 pendingTopup* 字段。 */
+	posTopupSignature: string | null
 	createdAt: number
 	updatedAt: number
 }
@@ -3073,6 +3089,14 @@ const routing = ( router: Router ) => {
 					pointsMinted6: null,
 					topupTxHash: null,
 					chargeTxHash: null,
+					pendingTopupCardAddr: null,
+					pendingTopupRecipientEOA: null,
+					pendingTopupData: null,
+					pendingTopupDeadline: null,
+					pendingTopupNonce: null,
+					pendingTopupPoints6: null,
+					pendingTopupBUnitFee: null,
+					posTopupSignature: null,
 					createdAt: now,
 					updatedAt: now,
 					...patch,
@@ -3327,8 +3351,9 @@ const routing = ( router: Router ) => {
 				sessionUpdate({ state: 'error', error: 'USDC settle returned invalid tx hash; orchestrator aborted' })
 				return
 			}
+			const sidForAwait = sidNorm ?? ''
 			const orchestratorCtx: UsdcChargeOrchestratorContext = {
-				sid: sidNorm ?? '',
+				sid: sidForAwait,
 				cardAddr,
 				cardOwner: payToOwner,
 				currency: effectiveCurrency,
@@ -3341,6 +3366,35 @@ const routing = ( router: Router ) => {
 				updateSession: (patch: OrchestratorSessionPatch) => {
 					// orchestrator 不持有 sid（避免循环依赖），无 sid 时 sessionUpdate 内部 no-op，恰好兜住「sid 缺省」场景
 					sessionUpdate(patch as Partial<ChargeSession>)
+				},
+				/** PR #4 v2：阻塞轮询 in-memory `chargeSessions[sid].posTopupSignature`。
+				 *  POS POST `/api/nfcUsdcChargeTopupAuth` 命中 ⇒ cluster verify 后写入此字段；本闭包每 500ms 探一次。
+				 *  签名注入后立刻清掉 pendingTopup* + posTopupSignature（一次性消耗，避免重放/串扰下一笔）。 */
+				awaitTopupSignature: async (timeoutMs: number) => {
+					if (!sidForAwait) return { ok: false, error: 'sid missing; orchestrator cannot solicit POS signature' }
+					const deadline = Date.now() + Math.max(1_000, timeoutMs)
+					while (Date.now() < deadline) {
+						const cur = chargeSessions.get(sidForAwait)
+						if (!cur) return { ok: false, error: 'session evicted while awaiting POS signature' }
+						if (cur.state === 'error') return { ok: false, error: cur.error || 'session moved to error' }
+						const sig = cur.posTopupSignature
+						if (sig && /^0x[0-9a-fA-F]{130}$/.test(sig)) {
+							const signer = cur.pos ?? ''
+							sessionUpdate({
+								posTopupSignature: null,
+								pendingTopupCardAddr: null,
+								pendingTopupRecipientEOA: null,
+								pendingTopupData: null,
+								pendingTopupDeadline: null,
+								pendingTopupNonce: null,
+								pendingTopupPoints6: null,
+								pendingTopupBUnitFee: null,
+							})
+							return { ok: true, signature: sig, signer }
+						}
+						await new Promise((r) => setTimeout(r, 500))
+					}
+					return { ok: false, error: `timeout ${timeoutMs}ms waiting POS topup auth` }
 				},
 			}
 			void runUsdcChargeOrchestrator(orchestratorCtx).catch((err: unknown) => {
@@ -3374,6 +3428,109 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({ ok: true, state: 'awaiting_payment', sid: sidQ.toLowerCase() }).end()
 		}
 		return res.status(200).json({ ok: true, ...rec }).end()
+	})
+
+	/** POST /api/nfcUsdcChargeTopupAuth
+	 * PR #4 v2 (POS-signed admin path): 当 session 进入 `awaiting_topup_auth` 时，POS 终端读 pendingTopup* 字段，
+	 * 用 admin EOA 私钥（`BeamioEthWallet.signExecuteForAdmin`）离线签 ExecuteForAdmin 后调用此端点回写签名。
+	 *
+	 * 服务端校验：
+	 *   1. sid 合法 + session 存在 + state==awaiting_topup_auth + pendingTopup* 字段都在。
+	 *   2. signature 65-byte hex；EIP-712 (BeamioUserCardFactory v1, ExecuteForAdmin) 用 pendingTopup{cardAddr,data,deadline,nonce}
+	 *      hash 后 recover；recover 出的 EOA 必须 == session.pos（cluster 在 charge 阶段已 isAdmin(pos)=true，因此无需再链上查）。
+	 *   3. 通过则把 sig 写入 `posTopupSignature`，orchestrator 的 `awaitTopupSignature` 轮询会立即捕获。
+	 *
+	 * 失败模式：
+	 *   - state mismatch ⇒ 409，POS 应停止重试（orchestrator 已超时或失败）。
+	 *   - signer 不是 session.pos ⇒ 401，POS 端拼错私钥 / 串卡。
+	 *   - 重复 POST ⇒ 200 idempotent（已被 orchestrator 消耗后 pending* 字段已清）。
+	 */
+	router.post('/nfcUsdcChargeTopupAuth', (req, res) => {
+		try {
+			const { sid, signature } = (req.body ?? {}) as { sid?: string; signature?: string }
+			const sidNorm = typeof sid === 'string' ? sid.trim().toLowerCase() : ''
+			if (!isValidSid(sidNorm)) {
+				return res.status(400).json({ success: false, error: 'Invalid sid (expect UUID v4)' }).end()
+			}
+			const sigNorm = typeof signature === 'string' ? signature.trim() : ''
+			if (!/^0x[0-9a-fA-F]{130}$/.test(sigNorm)) {
+				return res.status(400).json({ success: false, error: 'Invalid signature (expect 65-byte 0x… hex)' }).end()
+			}
+			pruneExpiredChargeSessions()
+			const rec = chargeSessions.get(sidNorm)
+			if (!rec) {
+				return res.status(404).json({ success: false, error: 'Session not found or expired' }).end()
+			}
+			if (rec.state === 'error') {
+				return res.status(409).json({ success: false, error: rec.error || 'Session in error state' }).end()
+			}
+			if (rec.state !== 'awaiting_topup_auth') {
+				// idempotent re-submit 兜底：orchestrator 可能已消耗签名并推进到下一阶段。
+				if (rec.posTopupSignature == null && rec.pendingTopupData == null) {
+					return res.status(200).json({ success: true, idempotent: true, state: rec.state }).end()
+				}
+				return res.status(409).json({ success: false, error: `Session not awaiting topup auth (state=${rec.state})` }).end()
+			}
+			if (
+				!rec.pendingTopupCardAddr || !rec.pendingTopupData ||
+				rec.pendingTopupDeadline == null || !rec.pendingTopupNonce
+			) {
+				return res.status(409).json({ success: false, error: 'Session has no pending topup payload' }).end()
+			}
+			if (!rec.pos || !ethers.isAddress(rec.pos)) {
+				return res.status(409).json({ success: false, error: 'Session has no POS operator bound' }).end()
+			}
+
+			// EIP-712 重算 digest，recover 校验；domain 与 cluster `/api/nfcTopup` (BeamioUserCardFactory v1) 完全一致。
+			const dataBytes = ethers.getBytes(rec.pendingTopupData)
+			const dataHash = ethers.keccak256(dataBytes)
+			const domain = {
+				name: 'BeamioUserCardFactory',
+				version: '1',
+				chainId: BASE_CHAIN_ID,
+				verifyingContract: BASE_CARD_FACTORY,
+			}
+			const types = {
+				ExecuteForAdmin: [
+					{ name: 'cardAddress', type: 'address' },
+					{ name: 'dataHash', type: 'bytes32' },
+					{ name: 'deadline', type: 'uint256' },
+					{ name: 'nonce', type: 'bytes32' },
+				],
+			}
+			const nonceHex = rec.pendingTopupNonce.startsWith('0x') ? rec.pendingTopupNonce : '0x' + rec.pendingTopupNonce
+			const message = {
+				cardAddress: rec.pendingTopupCardAddr,
+				dataHash,
+				deadline: BigInt(rec.pendingTopupDeadline),
+				nonce: nonceHex,
+			}
+			let signer: string
+			try {
+				const digest = ethers.TypedDataEncoder.hash(domain, types, message)
+				signer = ethers.recoverAddress(digest, sigNorm)
+			} catch (err: any) {
+				return res.status(400).json({ success: false, error: `EIP-712 recover failed: ${err?.shortMessage ?? err?.message ?? String(err)}` }).end()
+			}
+			if (!signer || !ethers.isAddress(signer)) {
+				return res.status(400).json({ success: false, error: 'EIP-712 recover returned invalid address' }).end()
+			}
+			if (signer.toLowerCase() !== rec.pos.toLowerCase()) {
+				logger(Colors.red(`[nfcUsdcChargeTopupAuth] signer mismatch sid=${sidNorm.slice(0, 8)}… expected=${rec.pos} got=${signer}`))
+				return res.status(401).json({ success: false, error: 'Signature does not recover to bound POS operator', expectedPos: rec.pos, recoveredSigner: signer }).end()
+			}
+
+			// 注入签名；orchestrator 的 awaitTopupSignature 闭包 500ms 内会捕获并清空 pendingTopup* + posTopupSignature。
+			const now = Date.now()
+			chargeSessions.set(sidNorm, { ...rec, posTopupSignature: sigNorm, updatedAt: now })
+			logger(Colors.green(`[nfcUsdcChargeTopupAuth] sid=${sidNorm.slice(0, 8)}… POS sig accepted signer=${signer}`))
+			return res.status(200).json({ success: true, sid: sidNorm, signer }).end()
+		} catch (err: any) {
+			logger(Colors.red(`[nfcUsdcChargeTopupAuth] error: ${err?.message ?? err}`))
+			if (!res.headersSent) {
+				res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+			}
+		}
 	})
 
 	/** 最新发行的前 N 张卡明细：透传 Master（含 token0TotalSupply6、token0CumulativeMint6、holderCount；与 Master 同排除集）。limit 上限 300。 */

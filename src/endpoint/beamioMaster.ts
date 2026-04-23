@@ -2270,6 +2270,8 @@ const routing = ( router: Router ) => {
 				chargeSessionId,
 				posOperator,
 				topupSourceOverride,
+				preSignedAdminSignature,
+				preSignedAdminSigner,
 			} = req.body as {
 				cardAddr?: string
 				data?: string
@@ -2295,6 +2297,12 @@ const routing = ( router: Router ) => {
 				posOperator?: string
 				/** PR #4：渠道标签覆盖（缺省 'webPosNfcTopup'）。orchestrator 临时钱包 topup 用 'webPosNfcTopup' 走默认即可 */
 				topupSourceOverride?: 'usdcPurchasingCard' | 'androidNfcTopup' | 'webPosNfcTopup'
+				/** PR #4 v2 (POS-signed admin path)：编排器从 cluster 拿到 POS 终端用 admin EOA 私钥离线签的
+				 *  ExecuteForAdmin 65-byte sig。提供时跳过本地 service-admin 签（service admin 不一定是该商户卡的 admin）。
+				 *  cluster 已 verify recover==session.pos 且 isAdmin(pos)==true，Master 只做语义校验后直接 push pool。 */
+				preSignedAdminSignature?: string
+				/** PR #4 v2：与 `preSignedAdminSignature` 配对，用于日志/审计；Master 不依赖此字段做权限判定（链上 recover 才是权威）。 */
+				preSignedAdminSigner?: string
 			}
 			try {
 				if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
@@ -2314,11 +2322,26 @@ const routing = ( router: Router ) => {
 				const cardOwnerNorm = ethers.getAddress(cardOwner)
 				const recipientNorm = ethers.getAddress(recipientEOA)
 
-				/** Master 用 service admin key 签 ExecuteForAdmin。要求 settle_contractAdmin[0] 已被 cardOwner 添加为该卡 admin。 */
-				const signed = await signExecuteForAdminWithServiceAdmin({ cardAddr: cardAddrNorm, data, deadline, nonce })
-				if ('error' in signed) {
-					logger(Colors.red(`[nfcUsdcTopup] service admin sign FAIL: ${signed.error}`))
-					return res.status(500).json({ success: false, error: `Service admin sign failed: ${signed.error}` }).end()
+				/** PR #4 v2：preSignedAdminSignature 优先 —— 由 POS 终端用 admin EOA 离线签 ExecuteForAdmin。
+				 *  cluster 端在 `/api/nfcUsdcChargeTopupAuth` 已做 EIP-712 recover==session.pos + isAdmin 双重校验，
+				 *  Master 这里仅做格式校验后透传。无 preSigned 时回落到 service-admin 签（兼容 NFC USDC topup 历史路径）。 */
+				let adminSignatureForPool: string
+				let adminSignerForLog: string
+				if (typeof preSignedAdminSignature === 'string' && /^0x[0-9a-fA-F]{130}$/.test(preSignedAdminSignature.trim())) {
+					adminSignatureForPool = preSignedAdminSignature.trim()
+					if (!preSignedAdminSigner || !ethers.isAddress(preSignedAdminSigner)) {
+						return res.status(400).json({ success: false, error: 'preSignedAdminSignature provided without valid preSignedAdminSigner' }).end()
+					}
+					adminSignerForLog = ethers.getAddress(preSignedAdminSigner)
+				} else {
+					/** Master 用 service admin key 签 ExecuteForAdmin。要求 settle_contractAdmin[0] 已被 cardOwner 添加为该卡 admin。 */
+					const signed = await signExecuteForAdminWithServiceAdmin({ cardAddr: cardAddrNorm, data, deadline, nonce })
+					if ('error' in signed) {
+						logger(Colors.red(`[nfcUsdcTopup] service admin sign FAIL: ${signed.error}`))
+						return res.status(500).json({ success: false, error: `Service admin sign failed: ${signed.error}` }).end()
+					}
+					adminSignatureForPool = signed.adminSignature
+					adminSignerForLog = signed.signer
 				}
 
 				/** USDC 已 settle 至 cardOwner（USDC_tx），此处提供 currencyAmount 让 NFC topup post-base 链路按 currency 拆分。
@@ -2360,7 +2383,7 @@ const routing = ( router: Router ) => {
 					data,
 					deadline,
 					nonce,
-					adminSignature: signed.adminSignature,
+					adminSignature: adminSignatureForPool,
 					uid: typeof nfcUid === 'string' ? nfcUid : undefined,
 					cardOwnerEOA: cardOwnerNorm,
 					topupFeeBUnits: feeBUnitsParsed,
@@ -2378,7 +2401,8 @@ const routing = ( router: Router ) => {
 					`USDC_tx=${USDC_tx ?? 'n/a'} payer=${payer ?? 'n/a'} usdc6=${usdcAmount6 ?? 'n/a'} ` +
 					`currency=${currency ?? 'n/a'} amount=${currencyAmount ?? 'n/a'} ` +
 					`feeBUnits=${feeBUnitsParsed?.toString() ?? 'n/a'} sid=${sidNorm ?? 'n/a'} ` +
-					`pos=${posOperatorNorm ? posOperatorNorm.slice(0, 10) + '…' : 'n/a'} signer=${signed.signer}`
+					`pos=${posOperatorNorm ? posOperatorNorm.slice(0, 10) + '…' : 'n/a'} ` +
+					`signer=${adminSignerForLog} signSource=${preSignedAdminSignature ? 'pos-presigned' : 'service-admin'}`
 				))
 				executeForAdminProcess().catch((err: any) => {
 					logger(Colors.red('[executeForAdminProcess] nfcUsdcTopup error:'), err?.message ?? err)

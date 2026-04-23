@@ -9,10 +9,14 @@
  *     2. `nfcTopupPreparePayload({ wallet: tmpEOA, amount: total, currency, cardAddress })`
  *        编码 `mintPointsByAdmin(tmpEOA, points6)` 的 ExecuteForAdmin payload。
  *     3. `nfcTopupPreCheckBUnitFee(cardAddr, data)` 算 issuer 须扣的 B-Unit 服务费（与 NFC topup 路径一致 2%）。
- *     4. POST localhost Master `/api/nfcUsdcTopup`，带 `recipientEOA=tmpEOA / topupFeeBUnits / originatingUSDCTx / chargeSessionId / posOperator`。
- *        Master 用 service admin 签 ExecuteForAdmin → push `executeForAdminPool` → `executeForAdminProcess` 上链；
+ *     4. **PR #4 v2** 推 session 进 `awaiting_topup_auth` 暴露 pendingTopup* 字段，等 POS 终端用 admin EOA 私钥
+ *        `BeamioEthWallet.signExecuteForAdmin` 离线签 ExecuteForAdmin 后 POST 回 `/api/nfcUsdcChargeTopupAuth`。
+ *        cluster 验签 recover==session.pos 后注入 `posTopupSignature`，本编排器 `awaitTopupSignature` 解析返回。
+ *     5. POST localhost Master `/api/nfcUsdcTopup`，带 `recipientEOA=tmpEOA / topupFeeBUnits / originatingUSDCTx / chargeSessionId / posOperator
+ *        + preSignedAdminSignature(=POS 离线签) + preSignedAdminSigner(=POS EOA)`。
+ *        Master 跳过 service-admin 签直接 push `executeForAdminPool` → `executeForAdminProcess` 上链（contract recover==POS=admin）；
  *        post-base 阶段 `insertMemberTopupEvent` 写入新增列 `originating_usdc_tx / charge_session_id / pos_operator`。
- *     5. `providerBase.waitForTransaction(topupTx, 1, 60_000)` 等 1 个确认（Master 在 mint 前会 `DeployingSmartAccount` 部署 tmpAA）。
+ *     6. `providerBase.waitForTransaction(topupTx, 1, 60_000)` 等 1 个确认（Master 在 mint 前会 `DeployingSmartAccount` 部署 tmpAA）。
  *
  *   L2 (charge leg)：
  *     6. `resolveBeamioAaForEoaWithFallback(provider, tmpEOA)` 解析 tmpAA（topup 已部署）；带 3×2s 重试以防节点未同步。
@@ -26,7 +30,8 @@
  *   L3 (cleanup)：
  *    11. tmpEOA 引用置空（只在内存里）；session 标 `success`。
  *
- * 失败处理（用户 q2 = a）：
+ * 失败处理：
+ *   - awaiting_topup_auth 超时（POS 不在线/未签）⇒ session=error，loyalty 入账缺失等待人工对账（USDC 已结算到 cardOwner，无 ghost dust）。
  *   - L1 fail：session=error，无副作用（USDC 已结算到 cardOwner 是用户期望的目的地，仅 loyalty 入账缺失）。
  *   - L2 fail：5 次指数退避（1s / 2s / 4s / 8s / 16s）；全部失败后 session=error，**tmpEOA 引用立即销毁**。
  *     在 tmpAA 上残留 N currency-points 视为已知 ghost dust，由日志中 `[orchestrator-ghost-dust]` 关键字捕获供日后人工对账（用户接受）。
@@ -85,6 +90,7 @@ const stringifyWithBigInt = (obj: unknown): string =>
 export type OrchestratorSessionPatch = {
 	state?:
 		| 'topup_pending'
+		| 'awaiting_topup_auth'
 		| 'topup_confirmed'
 		| 'charge_pending'
 		| 'success'
@@ -95,6 +101,15 @@ export type OrchestratorSessionPatch = {
 	pointsMinted6?: string
 	topupTxHash?: string
 	chargeTxHash?: string
+	/** PR #4 v2：暴露给 POS 端签 ExecuteForAdmin 用的字段。仅在进入 `awaiting_topup_auth` 时一次性写入；
+	 *  `posTopupSignature` 落位后 cluster 会清掉这些字段，避免 session 落地数据无意义膨胀。 */
+	pendingTopupCardAddr?: string | null
+	pendingTopupRecipientEOA?: string | null
+	pendingTopupData?: string | null
+	pendingTopupDeadline?: number | null
+	pendingTopupNonce?: string | null
+	pendingTopupPoints6?: string | null
+	pendingTopupBUnitFee?: string | null
 }
 
 export interface UsdcChargeOrchestratorContext {
@@ -120,6 +135,14 @@ export interface UsdcChargeOrchestratorContext {
 	provider: ethers.JsonRpcProvider
 	/** 进度推送回调（推 sid 的 in-memory `chargeSessions`） */
 	updateSession: (patch: OrchestratorSessionPatch) => void
+	/** PR #4 v2：阻塞等待 POS 端 POST `/api/nfcUsdcChargeTopupAuth` 注入的 admin 签名。
+	 *  cluster 端实现：定期 read `chargeSessions[sid].posTopupSignature`（POS POST 时已 verify recover==session.pos），
+	 *  返回 65-byte hex。超时（默认 120 s）⇒ `{ ok: false }`，orchestrator 写 session=error 并退出（不会走到 L2，
+	 *  接受 USDC 已结算到 cardOwner / loyalty 入账缺失的 reconcile_pending 语义，符合用户 q3 = a 选择）。 */
+	awaitTopupSignature: (timeoutMs: number) => Promise<{ ok: true; signature: string; signer: string } | { ok: false; error: string }>
+	/** 默认 120s。POS 在 USDC settle 后若 1-2 拍轮询拿到 awaiting_topup_auth，本地 secp256k1 签 ~10ms，
+	 *  实际 RTT 约 200-400ms。120s 足够覆盖 POS 端临时网络抖动 + 商户手指未点确认的 worst-case。 */
+	topupSignatureTimeoutMs?: number
 }
 
 /** 内部：把对象 POST 到本机 Master，返回 { status, body }。与 beamioServer.postLocalhost 不同：
@@ -243,11 +266,39 @@ const resolveTmpAaWithRetry = async (
 	return null
 }
 
-/** L1：tmp wallet topup（mintPointsByAdmin(tmpEOA, points6) via Master executeForAdmin） */
+/** PR #4 v2 默认值：POS 终端临时离线/锁屏的容忍上限。120 s 足够一次完整 retry 提示用户解锁后再签。 */
+const DEFAULT_TOPUP_SIG_TIMEOUT_MS = 120_000
+
+/** 内部：从 mintPointsByAdmin(data) 解析 points6，POS UI 显示用（避免 POS 再去做 ABI 解码）。 */
+const tryParseMintPoints6 = (dataHex: string): bigint | null => {
+	try {
+		const iface = new ethers.Interface(['function mintPointsByAdmin(address toEOA, uint256 amount)'])
+		const parsed = iface.parseTransaction({ data: dataHex })
+		if (!parsed || parsed.name !== 'mintPointsByAdmin') return null
+		return parsed.args[1] as bigint
+	} catch {
+		return null
+	}
+}
+
+/** L1：tmp wallet topup（mintPointsByAdmin(tmpEOA, points6) via POS-signed ExecuteForAdmin → Master executeForAdmin）
+ *
+ *  PR #4 v2 流程：
+ *  1. server `nfcTopupPreparePayload` → 拿 cardAddr/data/deadline/nonce + 算 B-Unit fee。
+ *  2. updateSession 推 `awaiting_topup_auth` + 全部 pendingTopup* 字段；POS 轮询拿到后用 admin EOA 私钥
+ *     `BeamioEthWallet.signExecuteForAdmin(...)` 签名，POST 回 `/api/nfcUsdcChargeTopupAuth`。
+ *  3. cluster verify recover==session.pos 后写入 `posTopupSignature`，本函数 awaitTopupSignature 解析返回。
+ *  4. 转发 Master `/api/nfcUsdcTopup`，把 POS sig 作为 `preSignedAdminSignature` 透传，Master 跳过 service-admin 签直接 push pool。
+ *  5. 等 1 个确认。
+ */
 const runTopupLeg = async (
 	ctx: UsdcChargeOrchestratorContext,
 	tmpEOA: string
 ): Promise<{ ok: true; topupTxHash: string } | { ok: false; error: string }> => {
+	if (!ctx.posOperator) {
+		// no-NFC USDC charge 必须有 POS（cluster 已校验过；这里是防御性兜底）。无 POS ⇒ 没人能签 admin auth。
+		return { ok: false, error: 'POS operator missing; cannot solicit topup admin signature' }
+	}
 	const prepared = await nfcTopupPreparePayload({
 		wallet: tmpEOA,
 		amount: ctx.totalCurrencyAmount,
@@ -262,6 +313,33 @@ const runTopupLeg = async (
 	if (!bunit.success) {
 		return { ok: false, error: `topup B-Unit pre-check: ${bunit.error}` }
 	}
+
+	const points6 = tryParseMintPoints6(prepared.data)
+
+	// 让 POS 看到要签什么：每个字段都得跟链上 ExecuteForAdmin 验签一致，签完回填 posTopupSignature。
+	ctx.updateSession({
+		state: 'awaiting_topup_auth',
+		pendingTopupCardAddr: prepared.cardAddr,
+		pendingTopupRecipientEOA: tmpEOA,
+		pendingTopupData: prepared.data,
+		pendingTopupDeadline: prepared.deadline,
+		pendingTopupNonce: prepared.nonce,
+		pendingTopupPoints6: points6 != null ? points6.toString() : null,
+		pendingTopupBUnitFee: bunit.feeAmount?.toString() ?? '0',
+	})
+	logger(Colors.cyan(
+		`[orchestrator] sid=${ctx.sid.slice(0, 8)}… awaiting_topup_auth: tmpEOA=${tmpEOA.slice(0, 10)}… ` +
+		`points6=${points6?.toString() ?? 'n/a'} feeBUnits=${bunit.feeAmount?.toString() ?? 'n/a'} ` +
+		`deadline=${prepared.deadline} expecting POS=${ctx.posOperator.slice(0, 10)}…`
+	))
+
+	const sigWait = await ctx.awaitTopupSignature(ctx.topupSignatureTimeoutMs ?? DEFAULT_TOPUP_SIG_TIMEOUT_MS)
+	if (!sigWait.ok) {
+		return { ok: false, error: `awaiting POS topup auth: ${sigWait.error}` }
+	}
+	logger(Colors.green(
+		`[orchestrator] sid=${ctx.sid.slice(0, 8)}… POS topup auth received signer=${sigWait.signer.slice(0, 10)}…`
+	))
 
 	let resp: { status: number; body: string }
 	try {
@@ -280,8 +358,11 @@ const runTopupLeg = async (
 			topupFeeBUnits: bunit.feeAmount?.toString() ?? '0',
 			originatingUSDCTx: ctx.originatingUSDCTx,
 			chargeSessionId: ctx.sid,
-			posOperator: ctx.posOperator ?? undefined,
+			posOperator: ctx.posOperator,
 			topupSourceOverride: TOPUP_SOURCE_OVERRIDE,
+			/** PR #4 v2：携 POS 离线签的 admin sig；Master 跳过 service-admin 签，contract recover==POS=admin。 */
+			preSignedAdminSignature: sigWait.signature,
+			preSignedAdminSigner: sigWait.signer,
 		})
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err)
