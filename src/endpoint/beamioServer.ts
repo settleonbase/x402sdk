@@ -434,18 +434,47 @@ interface ChargeSession {
 	updatedAt: number
 }
 
-const CHARGE_SESSION_TTL_MS = 10 * 60 * 1000
-const chargeSessions = new Map<string, ChargeSession>()
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function isValidSid(sid: unknown): sid is string {
 	return typeof sid === 'string' && UUID_V4_RE.test(sid)
 }
 
-function pruneExpiredChargeSessions(): void {
-	const now = Date.now()
-	for (const [k, v] of chargeSessions) {
-		if (now - v.updatedAt > CHARGE_SESSION_TTL_MS) chargeSessions.delete(k)
+/** PR #4 v3：cluster 是 N-worker 多进程，session store 改在 Master（单进程，唯一信源），cluster 全部 HTTP 代理。
+ *  详见 `beamioMaster.ts` 顶部 `MasterChargeSession` block 注释。
+ *
+ *  这里只暴露三个 helper：
+ *   - `masterSessionUpsert(sid, patch)` ← cluster sessionUpdate(...) 的实际承载（fire-and-forget，不阻塞热路径）
+ *   - `masterSessionGet(sid)`           ← GET /api/nfcUsdcChargeSession 透传 + orchestrator 内部 polling 用（如 awaitTopupSignature 走专用 consume 端点）
+ *   - `masterSessionConsumePosSig(sid)` ← orchestrator awaitTopupSignature 闭环原子消耗 POS 签名 */
+const masterSessionUpsert = async (sid: string, patch: Record<string, unknown>): Promise<void> => {
+	try {
+		const r = await postLocalhostBuffer('/api/chargeSessionUpsert', { sid, patch })
+		if (r.statusCode !== 200) {
+			logger(Colors.red(`[masterSessionUpsert] sid=${sid.slice(0,8)}… HTTP ${r.statusCode} body=${r.body.slice(0, 200)}`))
+		}
+	} catch (err: any) {
+		logger(Colors.red(`[masterSessionUpsert] sid=${sid.slice(0,8)}… error: ${err?.message ?? err}`))
+	}
+}
+
+const masterSessionGet = async (sid: string): Promise<{ statusCode: number; body: string }> => {
+	const sidEnc = encodeURIComponent(sid)
+	return getLocalhostBuffer(`/api/chargeSessionGet?sid=${sidEnc}`)
+}
+
+const masterSessionConsumePosSig = async (sid: string): Promise<
+	{ ok: true; signature: string; signer: string } | { ok: false; error: string }
+> => {
+	try {
+		const r = await postLocalhostBuffer('/api/chargeSessionConsumePosSig', { sid })
+		const parsed = JSON.parse(r.body) as { ok?: boolean; signature?: string; signer?: string; error?: string }
+		if (parsed.ok && typeof parsed.signature === 'string' && typeof parsed.signer === 'string') {
+			return { ok: true, signature: parsed.signature, signer: parsed.signer }
+		}
+		return { ok: false, error: parsed.error ?? 'no signature yet' }
+	} catch (err: any) {
+		return { ok: false, error: err?.message ?? String(err) }
 	}
 }
 
@@ -3054,55 +3083,13 @@ const routing = ( router: Router ) => {
 			taxBps?: string | number
 			tipBps?: string | number
 		}
-		// PR #3: sid 仅用于 POS ↔ cluster 内部状态跟踪，不影响 verra-home POST/x402 流程；
+		// PR #3 sid 仅用于 POS ↔ cluster 内部状态跟踪，不影响 verra-home POST/x402 流程；
 		// sid 缺省/无效 ⇒ 跳过 session 写入但仍正常处理 charge（向下兼容老 verra-home build）。
+		// PR #4 v3：session 实际存储在 Master，cluster 这里只是 fire-and-forget 转发，多 worker 共享一份信源。
 		const sidNorm: string | null = isValidSid(sid) ? (sid as string).toLowerCase() : null
 		const sessionUpdate = (patch: Partial<ChargeSession>): void => {
 			if (!sidNorm) return
-			const prev = chargeSessions.get(sidNorm)
-			const now = Date.now()
-			if (prev) {
-				chargeSessions.set(sidNorm, { ...prev, ...patch, updatedAt: now })
-			} else {
-				// 首次写入 ⇒ 由当前 patch + 字段缺省组合：cardAddr/owner 等会在后面 sessionUpdate 阶段填入
-				chargeSessions.set(sidNorm, {
-					sid: sidNorm,
-					state: 'verifying',
-					cardAddr: '',
-					pos: null,
-					cardOwner: null,
-					currency: null,
-					subtotal: '0',
-					discount: '0',
-					tax: '0',
-					tip: '0',
-					total: '0',
-					discountBps: 0,
-					taxBps: 0,
-					tipBps: 0,
-					usdcAmount6: null,
-					USDC_tx: null,
-					payer: null,
-					error: null,
-					tmpEOA: null,
-					tmpAA: null,
-					pointsMinted6: null,
-					topupTxHash: null,
-					chargeTxHash: null,
-					pendingTopupCardAddr: null,
-					pendingTopupRecipientEOA: null,
-					pendingTopupData: null,
-					pendingTopupDeadline: null,
-					pendingTopupNonce: null,
-					pendingTopupPoints6: null,
-					pendingTopupBUnitFee: null,
-					posTopupSignature: null,
-					createdAt: now,
-					updatedAt: now,
-					...patch,
-				})
-			}
-			pruneExpiredChargeSessions()
+			void masterSessionUpsert(sidNorm, patch as Record<string, unknown>)
 		}
 		try {
 			// 新 schema 用 `card`；老 schema 用 `cardAddress`。两者择一即可，都没有则 400。
@@ -3367,30 +3354,20 @@ const routing = ( router: Router ) => {
 					// orchestrator 不持有 sid（避免循环依赖），无 sid 时 sessionUpdate 内部 no-op，恰好兜住「sid 缺省」场景
 					sessionUpdate(patch as Partial<ChargeSession>)
 				},
-				/** PR #4 v2：阻塞轮询 in-memory `chargeSessions[sid].posTopupSignature`。
-				 *  POS POST `/api/nfcUsdcChargeTopupAuth` 命中 ⇒ cluster verify 后写入此字段；本闭包每 500ms 探一次。
-				 *  签名注入后立刻清掉 pendingTopup* + posTopupSignature（一次性消耗，避免重放/串扰下一笔）。 */
+				/** PR #4 v3：跨 worker session 轮询 ⇒ 走 Master 的 `/api/chargeSessionConsumePosSig` 原子消耗端点。
+				 *  POS POST `/api/nfcUsdcChargeTopupAuth` 命中 cluster ⇒ proxy 到 Master ⇒ Master verify 后写 posTopupSignature；
+				 *  本闭包每 500ms 探一次 Master，签名一旦出现即原子消耗（Master 同时清掉 pendingTopup* 字段，避免重放）。 */
 				awaitTopupSignature: async (timeoutMs: number) => {
 					if (!sidForAwait) return { ok: false, error: 'sid missing; orchestrator cannot solicit POS signature' }
 					const deadline = Date.now() + Math.max(1_000, timeoutMs)
 					while (Date.now() < deadline) {
-						const cur = chargeSessions.get(sidForAwait)
-						if (!cur) return { ok: false, error: 'session evicted while awaiting POS signature' }
-						if (cur.state === 'error') return { ok: false, error: cur.error || 'session moved to error' }
-						const sig = cur.posTopupSignature
-						if (sig && /^0x[0-9a-fA-F]{130}$/.test(sig)) {
-							const signer = cur.pos ?? ''
-							sessionUpdate({
-								posTopupSignature: null,
-								pendingTopupCardAddr: null,
-								pendingTopupRecipientEOA: null,
-								pendingTopupData: null,
-								pendingTopupDeadline: null,
-								pendingTopupNonce: null,
-								pendingTopupPoints6: null,
-								pendingTopupBUnitFee: null,
-							})
-							return { ok: true, signature: sig, signer }
+						const got = await masterSessionConsumePosSig(sidForAwait)
+						if (got.ok) return { ok: true, signature: got.signature, signer: got.signer }
+						// got.error in {'no signature yet', 'session not found', 'session in error', ...}
+						if (got.error === 'session not found') {
+							// upsert 还没飘到 Master（fire-and-forget 没回执），继续等
+						} else if (got.error.startsWith('session in error') || got.error === 'session moved to error') {
+							return { ok: false, error: got.error }
 						}
 						await new Promise((r) => setTimeout(r, 500))
 					}
@@ -3412,123 +3389,37 @@ const routing = ( router: Router ) => {
 	})
 
 	/** GET /api/nfcUsdcChargeSession?sid=<uuid v4>
-	 * PR #3: iOS POS 出 USDC charge QR 后单飞轮询此端点，获取顾客在 verra-home 的支付进度。
-	 * - sid 不存在 ⇒ `state: 'awaiting_payment'`（顾客尚未到达 POST 阶段；POS 继续轮询，不要把它当 error）
-	 * - sid 存在 ⇒ 返回完整 record（含 USDC_tx / payer / breakdown）；terminal state（success/error）后 POS 停止轮询并切 UI
-	 * - TTL 10 分钟过期后自动清理（POS 在 terminal state 后通常 ≤1 秒就完成 UI 切换 + cancel 轮询，不会触碰过期）
-	 */
-	router.get('/nfcUsdcChargeSession', (req, res) => {
+	 * PR #3 iOS POS 轮询入口；PR #4 v3 改为 cluster→Master 透传：session 唯一信源在 Master，
+	 * cluster 任何 worker 都能拿到一致状态（修复 LB 派到非创建者 worker 时的 "Session not found"）。
+	 * - sid 非法 ⇒ 400 由 cluster 自己拦
+	 * - sid 不存在 ⇒ Master 返 awaiting_payment shell；POS 继续轮询不当 error
+	 * - sid 存在 ⇒ 返完整 record（含 USDC_tx/payer/breakdown/pendingTopup*） */
+	router.get('/nfcUsdcChargeSession', async (req, res) => {
 		const sidQ = (req.query?.sid ?? '').toString().trim()
 		if (!isValidSid(sidQ)) {
 			return res.status(400).json({ ok: false, error: 'Invalid sid (expect UUID v4)' }).end()
 		}
-		pruneExpiredChargeSessions()
-		const rec = chargeSessions.get(sidQ.toLowerCase())
-		if (!rec) {
-			return res.status(200).json({ ok: true, state: 'awaiting_payment', sid: sidQ.toLowerCase() }).end()
+		try {
+			const r = await masterSessionGet(sidQ.toLowerCase())
+			res.status(r.statusCode === 200 ? 200 : r.statusCode).setHeader('Content-Type', 'application/json').send(r.body).end()
+		} catch (err: any) {
+			logger(Colors.red(`[nfcUsdcChargeSession proxy] sid=${sidQ.slice(0, 8)}… ${err?.message ?? err}`))
+			res.status(502).json({ ok: false, error: 'Master unreachable' }).end()
 		}
-		return res.status(200).json({ ok: true, ...rec }).end()
 	})
 
 	/** POST /api/nfcUsdcChargeTopupAuth
-	 * PR #4 v2 (POS-signed admin path): 当 session 进入 `awaiting_topup_auth` 时，POS 终端读 pendingTopup* 字段，
-	 * 用 admin EOA 私钥（`BeamioEthWallet.signExecuteForAdmin`）离线签 ExecuteForAdmin 后调用此端点回写签名。
-	 *
-	 * 服务端校验：
-	 *   1. sid 合法 + session 存在 + state==awaiting_topup_auth + pendingTopup* 字段都在。
-	 *   2. signature 65-byte hex；EIP-712 (BeamioUserCardFactory v1, ExecuteForAdmin) 用 pendingTopup{cardAddr,data,deadline,nonce}
-	 *      hash 后 recover；recover 出的 EOA 必须 == session.pos（cluster 在 charge 阶段已 isAdmin(pos)=true，因此无需再链上查）。
-	 *   3. 通过则把 sig 写入 `posTopupSignature`，orchestrator 的 `awaitTopupSignature` 轮询会立即捕获。
-	 *
-	 * 失败模式：
-	 *   - state mismatch ⇒ 409，POS 应停止重试（orchestrator 已超时或失败）。
-	 *   - signer 不是 session.pos ⇒ 401，POS 端拼错私钥 / 串卡。
-	 *   - 重复 POST ⇒ 200 idempotent（已被 orchestrator 消耗后 pending* 字段已清）。
-	 */
-	router.post('/nfcUsdcChargeTopupAuth', (req, res) => {
+	 * PR #4 v2 POS-signed admin path；PR #4 v3：cluster→Master 透传，所有验签 + session 写入都在 Master 完成。
+	 * 这样不论 POS 的请求被 LB 派到哪个 cluster worker，都能命中正确 session。
+	 * cluster 端只透传请求体，不再持本地 state。 */
+	router.post('/nfcUsdcChargeTopupAuth', async (req, res) => {
 		try {
-			const { sid, signature } = (req.body ?? {}) as { sid?: string; signature?: string }
-			const sidNorm = typeof sid === 'string' ? sid.trim().toLowerCase() : ''
-			if (!isValidSid(sidNorm)) {
-				return res.status(400).json({ success: false, error: 'Invalid sid (expect UUID v4)' }).end()
-			}
-			const sigNorm = typeof signature === 'string' ? signature.trim() : ''
-			if (!/^0x[0-9a-fA-F]{130}$/.test(sigNorm)) {
-				return res.status(400).json({ success: false, error: 'Invalid signature (expect 65-byte 0x… hex)' }).end()
-			}
-			pruneExpiredChargeSessions()
-			const rec = chargeSessions.get(sidNorm)
-			if (!rec) {
-				return res.status(404).json({ success: false, error: 'Session not found or expired' }).end()
-			}
-			if (rec.state === 'error') {
-				return res.status(409).json({ success: false, error: rec.error || 'Session in error state' }).end()
-			}
-			if (rec.state !== 'awaiting_topup_auth') {
-				// idempotent re-submit 兜底：orchestrator 可能已消耗签名并推进到下一阶段。
-				if (rec.posTopupSignature == null && rec.pendingTopupData == null) {
-					return res.status(200).json({ success: true, idempotent: true, state: rec.state }).end()
-				}
-				return res.status(409).json({ success: false, error: `Session not awaiting topup auth (state=${rec.state})` }).end()
-			}
-			if (
-				!rec.pendingTopupCardAddr || !rec.pendingTopupData ||
-				rec.pendingTopupDeadline == null || !rec.pendingTopupNonce
-			) {
-				return res.status(409).json({ success: false, error: 'Session has no pending topup payload' }).end()
-			}
-			if (!rec.pos || !ethers.isAddress(rec.pos)) {
-				return res.status(409).json({ success: false, error: 'Session has no POS operator bound' }).end()
-			}
-
-			// EIP-712 重算 digest，recover 校验；domain 与 cluster `/api/nfcTopup` (BeamioUserCardFactory v1) 完全一致。
-			const dataBytes = ethers.getBytes(rec.pendingTopupData)
-			const dataHash = ethers.keccak256(dataBytes)
-			const domain = {
-				name: 'BeamioUserCardFactory',
-				version: '1',
-				chainId: BASE_CHAIN_ID,
-				verifyingContract: BASE_CARD_FACTORY,
-			}
-			const types = {
-				ExecuteForAdmin: [
-					{ name: 'cardAddress', type: 'address' },
-					{ name: 'dataHash', type: 'bytes32' },
-					{ name: 'deadline', type: 'uint256' },
-					{ name: 'nonce', type: 'bytes32' },
-				],
-			}
-			const nonceHex = rec.pendingTopupNonce.startsWith('0x') ? rec.pendingTopupNonce : '0x' + rec.pendingTopupNonce
-			const message = {
-				cardAddress: rec.pendingTopupCardAddr,
-				dataHash,
-				deadline: BigInt(rec.pendingTopupDeadline),
-				nonce: nonceHex,
-			}
-			let signer: string
-			try {
-				const digest = ethers.TypedDataEncoder.hash(domain, types, message)
-				signer = ethers.recoverAddress(digest, sigNorm)
-			} catch (err: any) {
-				return res.status(400).json({ success: false, error: `EIP-712 recover failed: ${err?.shortMessage ?? err?.message ?? String(err)}` }).end()
-			}
-			if (!signer || !ethers.isAddress(signer)) {
-				return res.status(400).json({ success: false, error: 'EIP-712 recover returned invalid address' }).end()
-			}
-			if (signer.toLowerCase() !== rec.pos.toLowerCase()) {
-				logger(Colors.red(`[nfcUsdcChargeTopupAuth] signer mismatch sid=${sidNorm.slice(0, 8)}… expected=${rec.pos} got=${signer}`))
-				return res.status(401).json({ success: false, error: 'Signature does not recover to bound POS operator', expectedPos: rec.pos, recoveredSigner: signer }).end()
-			}
-
-			// 注入签名；orchestrator 的 awaitTopupSignature 闭包 500ms 内会捕获并清空 pendingTopup* + posTopupSignature。
-			const now = Date.now()
-			chargeSessions.set(sidNorm, { ...rec, posTopupSignature: sigNorm, updatedAt: now })
-			logger(Colors.green(`[nfcUsdcChargeTopupAuth] sid=${sidNorm.slice(0, 8)}… POS sig accepted signer=${signer}`))
-			return res.status(200).json({ success: true, sid: sidNorm, signer }).end()
+			const r = await postLocalhostBuffer('/api/nfcUsdcChargeTopupAuth', req.body ?? {})
+			res.status(r.statusCode).setHeader('Content-Type', 'application/json').send(r.body).end()
 		} catch (err: any) {
-			logger(Colors.red(`[nfcUsdcChargeTopupAuth] error: ${err?.message ?? err}`))
+			logger(Colors.red(`[nfcUsdcChargeTopupAuth proxy] ${err?.message ?? err}`))
 			if (!res.headersSent) {
-				res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+				res.status(502).json({ success: false, error: 'Master unreachable' }).end()
 			}
 		}
 	})

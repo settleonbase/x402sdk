@@ -80,6 +80,121 @@ const providerBaseForLatestCards = new ethers.JsonRpcProvider(BASE_RPC_URL, unde
 /** Beamio 默认 metadata image（与 BeamioUserCard 一致） */
 const DEFAULT_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x44e7a175e57a337bf5d0a98deb19a0a545e362d504092a7af1aecd58798eab'
 
+/** Base mainnet chain id —— EIP-712 ExecuteForAdmin domain 用 */
+const MASTER_BASE_CHAIN_ID = 8453
+
+/** PR #4 v3：USDC charge session 中央存储
+ *
+ * 背景：cluster 是 N-worker 多进程；之前 `chargeSessions` Map 在 cluster 端就是进程内 Map，POS 的
+ * `GET /api/nfcUsdcChargeSession` / `POST /api/nfcUsdcChargeTopupAuth` 被 LB 派到任何一个 worker 都
+ * 极易 404 "Session not found or expired"。修法：把 session store 搬到 Master（单进程，唯一信源）。
+ *
+ * Master 提供三个内部端点供 cluster 代理：
+ *   POST /api/chargeSessionUpsert   — cluster sessionUpdate(...) → fire-and-forget upsert
+ *   GET  /api/chargeSessionGet      — cluster GET /api/nfcUsdcChargeSession 透传到这里
+ *   POST /api/chargeSessionConsumePosSig — orchestrator awaitTopupSignature 轮询消耗
+ *
+ * 以及一个对外端点（cluster proxy 后转发过来）：
+ *   POST /api/nfcUsdcChargeTopupAuth — POS 离线签字回灌（EIP-712 verify recover==session.pos）
+ *
+ * TTL 与 cluster 既有逻辑一致，10 分钟。clean up 在每次 GET / upsert 时顺手做一次。 */
+type MasterChargeSessionState =
+	| 'awaiting_payment'
+	| 'verifying'
+	| 'settling'
+	| 'topup_pending'
+	| 'awaiting_topup_auth'
+	| 'topup_confirmed'
+	| 'charge_pending'
+	| 'success'
+	| 'error'
+
+interface MasterChargeSession {
+	sid: string
+	state: MasterChargeSessionState
+	cardAddr: string
+	pos: string | null
+	cardOwner: string | null
+	currency: string | null
+	subtotal: string
+	discount: string
+	tax: string
+	tip: string
+	total: string
+	discountBps: number
+	taxBps: number
+	tipBps: number
+	usdcAmount6: string | null
+	USDC_tx: string | null
+	payer: string | null
+	error: string | null
+	tmpEOA: string | null
+	tmpAA: string | null
+	pointsMinted6: string | null
+	topupTxHash: string | null
+	chargeTxHash: string | null
+	pendingTopupCardAddr: string | null
+	pendingTopupRecipientEOA: string | null
+	pendingTopupData: string | null
+	pendingTopupDeadline: number | null
+	pendingTopupNonce: string | null
+	pendingTopupPoints6: string | null
+	pendingTopupBUnitFee: string | null
+	posTopupSignature: string | null
+	createdAt: number
+	updatedAt: number
+}
+
+const MASTER_CHARGE_SESSION_TTL_MS = 10 * 60 * 1000
+const masterChargeSessions = new Map<string, MasterChargeSession>()
+const MASTER_UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+const masterIsValidSid = (sid: unknown): sid is string =>
+	typeof sid === 'string' && MASTER_UUID_V4_RE.test(sid)
+
+const masterPruneExpiredChargeSessions = (): void => {
+	const now = Date.now()
+	for (const [k, v] of masterChargeSessions) {
+		if (now - v.updatedAt > MASTER_CHARGE_SESSION_TTL_MS) masterChargeSessions.delete(k)
+	}
+}
+
+const masterMakeFreshChargeSession = (sid: string, now: number): MasterChargeSession => ({
+	sid,
+	state: 'verifying',
+	cardAddr: '',
+	pos: null,
+	cardOwner: null,
+	currency: null,
+	subtotal: '0',
+	discount: '0',
+	tax: '0',
+	tip: '0',
+	total: '0',
+	discountBps: 0,
+	taxBps: 0,
+	tipBps: 0,
+	usdcAmount6: null,
+	USDC_tx: null,
+	payer: null,
+	error: null,
+	tmpEOA: null,
+	tmpAA: null,
+	pointsMinted6: null,
+	topupTxHash: null,
+	chargeTxHash: null,
+	pendingTopupCardAddr: null,
+	pendingTopupRecipientEOA: null,
+	pendingTopupData: null,
+	pendingTopupDeadline: null,
+	pendingTopupNonce: null,
+	pendingTopupPoints6: null,
+	pendingTopupBUnitFee: null,
+	posTopupSignature: null,
+	createdAt: now,
+	updatedAt: now,
+})
+
 const ensureMetadataImage = (meta: Record<string, unknown>): Record<string, unknown> => {
 	const props = (meta.properties && typeof meta.properties === 'object') ? meta.properties as Record<string, unknown> : {}
 	const image = [meta.image, meta.image_url, meta.imageUrl, props.image, DEFAULT_METADATA_IMAGE_URL]
@@ -2409,6 +2524,200 @@ const routing = ( router: Router ) => {
 				})
 			} catch (err: any) {
 				logger(Colors.red(`[nfcUsdcTopup] master error: ${err?.message ?? err}`))
+				if (!res.headersSent) {
+					res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+				}
+			}
+		})
+
+		/** PR #4 v3 (cross-worker session store) —— 见文件顶部 `MasterChargeSession` block 注释。
+		 *  POST /api/chargeSessionUpsert  body: { sid, patch }
+		 *  - sid：UUID v4（非法 ⇒ 400）
+		 *  - patch：可选字段子集；缺省字段不动；patch.state 必须是合法 state 字符串（非法 ⇒ 400）
+		 *  - 不存在 ⇒ 用 makeFresh 创建后再 merge
+		 *  - 200 即代表已落地；fire-and-forget 调用方不必读 body
+		 *
+		 *  这里用宽松的 record 透传 patch（不强 schema），因为 patch 字段经常一起增减；
+		 *  cluster `sessionUpdate` 自己保证只送合法字段，Master 这层只做基本 sanity。 */
+		router.post('/chargeSessionUpsert', (req, res) => {
+			try {
+				const { sid, patch } = (req.body ?? {}) as { sid?: string; patch?: Record<string, unknown> }
+				const sidNorm = typeof sid === 'string' ? sid.trim().toLowerCase() : ''
+				if (!masterIsValidSid(sidNorm)) {
+					return res.status(400).json({ ok: false, error: 'Invalid sid (expect UUID v4)' }).end()
+				}
+				if (!patch || typeof patch !== 'object') {
+					return res.status(400).json({ ok: false, error: 'Missing patch object' }).end()
+				}
+				masterPruneExpiredChargeSessions()
+				const now = Date.now()
+				const prev = masterChargeSessions.get(sidNorm) ?? masterMakeFreshChargeSession(sidNorm, now)
+				const merged = { ...prev, ...patch, sid: sidNorm, updatedAt: now } as MasterChargeSession
+				// state 校验：只接受合法字符串；其他字段一律透传
+				if (
+					patch.state !== undefined &&
+					typeof patch.state === 'string' &&
+					!['awaiting_payment','verifying','settling','topup_pending','awaiting_topup_auth','topup_confirmed','charge_pending','success','error'].includes(patch.state as string)
+				) {
+					return res.status(400).json({ ok: false, error: `Invalid state: ${patch.state}` }).end()
+				}
+				masterChargeSessions.set(sidNorm, merged)
+				return res.status(200).json({ ok: true, sid: sidNorm, state: merged.state }).end()
+			} catch (err: any) {
+				logger(Colors.red(`[chargeSessionUpsert] ${err?.message ?? err}`))
+				if (!res.headersSent) {
+					res.status(500).json({ ok: false, error: err?.message ?? String(err) }).end()
+				}
+			}
+		})
+
+		/** GET /api/chargeSessionGet?sid=...  —— cluster GET /api/nfcUsdcChargeSession 透传到这里。
+		 *  - sid 不存在 ⇒ `state: 'awaiting_payment'` shell（与之前 cluster 行为一致，POS 不要把它当 error）。
+		 *  - sid 存在 ⇒ 返回完整 record（含 USDC_tx / payer / breakdown / orchestrator 中间态）。 */
+		router.get('/chargeSessionGet', (req, res) => {
+			try {
+				const sidQ = (req.query?.sid ?? '').toString().trim().toLowerCase()
+				if (!masterIsValidSid(sidQ)) {
+					return res.status(400).json({ ok: false, error: 'Invalid sid (expect UUID v4)' }).end()
+				}
+				masterPruneExpiredChargeSessions()
+				const rec = masterChargeSessions.get(sidQ)
+				if (!rec) {
+					return res.status(200).json({ ok: true, state: 'awaiting_payment', sid: sidQ }).end()
+				}
+				return res.status(200).json({ ok: true, ...rec }).end()
+			} catch (err: any) {
+				logger(Colors.red(`[chargeSessionGet] ${err?.message ?? err}`))
+				if (!res.headersSent) {
+					res.status(500).json({ ok: false, error: err?.message ?? String(err) }).end()
+				}
+			}
+		})
+
+		/** POST /api/chargeSessionConsumePosSig  body: { sid }
+		 *  orchestrator 的 awaitTopupSignature 闭包通过此端点轮询 + 原子消耗 POS 签名。
+		 *  - 签名未到 ⇒ `{ ok: false, error: 'no signature yet' }`，调用方下一轮再来
+		 *  - 签名已到 ⇒ 返回 signature + signer，并清掉 posTopupSignature + 全部 pendingTopup* 字段（一次性消耗，避免重放） */
+		router.post('/chargeSessionConsumePosSig', (req, res) => {
+			try {
+				const { sid } = (req.body ?? {}) as { sid?: string }
+				const sidNorm = typeof sid === 'string' ? sid.trim().toLowerCase() : ''
+				if (!masterIsValidSid(sidNorm)) {
+					return res.status(400).json({ ok: false, error: 'Invalid sid (expect UUID v4)' }).end()
+				}
+				const rec = masterChargeSessions.get(sidNorm)
+				if (!rec) return res.status(200).json({ ok: false, error: 'session not found' }).end()
+				if (rec.state === 'error') return res.status(200).json({ ok: false, error: rec.error || 'session in error' }).end()
+				const sig = rec.posTopupSignature
+				if (!sig || !/^0x[0-9a-fA-F]{130}$/.test(sig)) {
+					return res.status(200).json({ ok: false, error: 'no signature yet' }).end()
+				}
+				const signer = rec.pos ?? ''
+				const now = Date.now()
+				masterChargeSessions.set(sidNorm, {
+					...rec,
+					posTopupSignature: null,
+					pendingTopupCardAddr: null,
+					pendingTopupRecipientEOA: null,
+					pendingTopupData: null,
+					pendingTopupDeadline: null,
+					pendingTopupNonce: null,
+					pendingTopupPoints6: null,
+					pendingTopupBUnitFee: null,
+					updatedAt: now,
+				})
+				return res.status(200).json({ ok: true, signature: sig, signer }).end()
+			} catch (err: any) {
+				logger(Colors.red(`[chargeSessionConsumePosSig] ${err?.message ?? err}`))
+				if (!res.headersSent) {
+					res.status(500).json({ ok: false, error: err?.message ?? String(err) }).end()
+				}
+			}
+		})
+
+		/** POST /api/nfcUsdcChargeTopupAuth  body: { sid, signature }
+		 *  POS 端把 admin EOA 离线签的 ExecuteForAdmin 65-byte sig 回灌（cluster 把 POS 的请求 proxy 到这里）。
+		 *  Master 用 session.pendingTopup* 字段重算 EIP-712 digest，recover 必须 == session.pos。
+		 *  通过则写 posTopupSignature，编排器的 consumePosSig 闭环立即获取。 */
+		router.post('/nfcUsdcChargeTopupAuth', (req, res) => {
+			try {
+				const { sid, signature } = (req.body ?? {}) as { sid?: string; signature?: string }
+				const sidNorm = typeof sid === 'string' ? sid.trim().toLowerCase() : ''
+				if (!masterIsValidSid(sidNorm)) {
+					return res.status(400).json({ success: false, error: 'Invalid sid (expect UUID v4)' }).end()
+				}
+				const sigNorm = typeof signature === 'string' ? signature.trim() : ''
+				if (!/^0x[0-9a-fA-F]{130}$/.test(sigNorm)) {
+					return res.status(400).json({ success: false, error: 'Invalid signature (expect 65-byte 0x… hex)' }).end()
+				}
+				masterPruneExpiredChargeSessions()
+				const rec = masterChargeSessions.get(sidNorm)
+				if (!rec) {
+					return res.status(404).json({ success: false, error: 'Session not found or expired' }).end()
+				}
+				if (rec.state === 'error') {
+					return res.status(409).json({ success: false, error: rec.error || 'Session in error state' }).end()
+				}
+				if (rec.state !== 'awaiting_topup_auth') {
+					if (rec.posTopupSignature == null && rec.pendingTopupData == null) {
+						return res.status(200).json({ success: true, idempotent: true, state: rec.state }).end()
+					}
+					return res.status(409).json({ success: false, error: `Session not awaiting topup auth (state=${rec.state})` }).end()
+				}
+				if (
+					!rec.pendingTopupCardAddr || !rec.pendingTopupData ||
+					rec.pendingTopupDeadline == null || !rec.pendingTopupNonce
+				) {
+					return res.status(409).json({ success: false, error: 'Session has no pending topup payload' }).end()
+				}
+				if (!rec.pos || !ethers.isAddress(rec.pos)) {
+					return res.status(409).json({ success: false, error: 'Session has no POS operator bound' }).end()
+				}
+
+				const dataBytes = ethers.getBytes(rec.pendingTopupData)
+				const dataHash = ethers.keccak256(dataBytes)
+				const domain = {
+					name: 'BeamioUserCardFactory',
+					version: '1',
+					chainId: MASTER_BASE_CHAIN_ID,
+					verifyingContract: BASE_CARD_FACTORY,
+				}
+				const types = {
+					ExecuteForAdmin: [
+						{ name: 'cardAddress', type: 'address' },
+						{ name: 'dataHash', type: 'bytes32' },
+						{ name: 'deadline', type: 'uint256' },
+						{ name: 'nonce', type: 'bytes32' },
+					],
+				}
+				const nonceHex = rec.pendingTopupNonce.startsWith('0x') ? rec.pendingTopupNonce : '0x' + rec.pendingTopupNonce
+				const message = {
+					cardAddress: rec.pendingTopupCardAddr,
+					dataHash,
+					deadline: BigInt(rec.pendingTopupDeadline),
+					nonce: nonceHex,
+				}
+				let signer: string
+				try {
+					const digest = ethers.TypedDataEncoder.hash(domain, types, message)
+					signer = ethers.recoverAddress(digest, sigNorm)
+				} catch (err: any) {
+					return res.status(400).json({ success: false, error: `EIP-712 recover failed: ${err?.shortMessage ?? err?.message ?? String(err)}` }).end()
+				}
+				if (!signer || !ethers.isAddress(signer)) {
+					return res.status(400).json({ success: false, error: 'EIP-712 recover returned invalid address' }).end()
+				}
+				if (signer.toLowerCase() !== rec.pos.toLowerCase()) {
+					logger(Colors.red(`[nfcUsdcChargeTopupAuth] signer mismatch sid=${sidNorm.slice(0, 8)}… expected=${rec.pos} got=${signer}`))
+					return res.status(401).json({ success: false, error: 'Signature does not recover to bound POS operator', expectedPos: rec.pos, recoveredSigner: signer }).end()
+				}
+
+				const now = Date.now()
+				masterChargeSessions.set(sidNorm, { ...rec, posTopupSignature: sigNorm, updatedAt: now })
+				logger(Colors.green(`[nfcUsdcChargeTopupAuth] sid=${sidNorm.slice(0, 8)}… POS sig accepted signer=${signer}`))
+				return res.status(200).json({ success: true, sid: sidNorm, signer }).end()
+			} catch (err: any) {
+				logger(Colors.red(`[nfcUsdcChargeTopupAuth] ${err?.message ?? err}`))
 				if (!res.headersSent) {
 					res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
 				}
