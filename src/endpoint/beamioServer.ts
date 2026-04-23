@@ -365,6 +365,61 @@ const mintMetadataCache = new Map<string, { body: string; expiry: number }>()
 const getFollowStatusCache = new Map<string, { body: string; expiry: number }>()
 const getMyFollowStatusCache = new Map<string, { body: string; expiry: number }>()
 
+/** PR #3: USDC charge no-NFC session 跟踪
+ * iOS POS 出 QR 前自生成 UUID v4 `sid`，写入 QR URL；customer 在 verra-home 完成 x402 + USDC settle 后，
+ * 后端把 `sid → state/USDC_tx/payer/...` 持久化进 in-memory map；POS 异步 `setTimeout` 链单飞轮询
+ * `GET /api/nfcUsdcChargeSession?sid=...` 读取最新状态：terminal state（success/error）后 POS 切换 UI
+ * 进 `chargeApprovedInline / paymentTerminalError`。
+ *
+ * - 仅 in-memory（cluster 单进程一致；多副本回滚时由 client 容忍 not-found 即可）
+ * - TTL = 10 分钟（远长于典型 1-2 分钟 QR 展示窗口；customer 慢点也不会被踢）
+ * - 没记录 ⇒ GET 返回 `{ ok: true, state: 'awaiting_payment' }` 而不是 404，让 POS 单一码路径处理「客人还没扫」
+ */
+type ChargeSessionState =
+	| 'awaiting_payment'  // POS 出 QR，customer 尚未到达 verra-home POST charge
+	| 'verifying'         // verra-home 提交 charge，x402 verify 进行中
+	| 'settling'          // verify 通过，USDC settle on-chain
+	| 'success'           // settle OK，已转发 Master 记账
+	| 'error'             // 任意阶段失败（payload 中含 error）
+
+interface ChargeSession {
+	sid: string
+	state: ChargeSessionState
+	cardAddr: string
+	pos: string | null
+	cardOwner: string | null
+	currency: string | null
+	subtotal: string
+	discount: string
+	tax: string
+	tip: string
+	total: string
+	discountBps: number
+	taxBps: number
+	tipBps: number
+	usdcAmount6: string | null
+	USDC_tx: string | null
+	payer: string | null
+	error: string | null
+	createdAt: number
+	updatedAt: number
+}
+
+const CHARGE_SESSION_TTL_MS = 10 * 60 * 1000
+const chargeSessions = new Map<string, ChargeSession>()
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function isValidSid(sid: unknown): sid is string {
+	return typeof sid === 'string' && UUID_V4_RE.test(sid)
+}
+
+function pruneExpiredChargeSessions(): void {
+	const now = Date.now()
+	for (const [k, v] of chargeSessions) {
+		if (now - v.updatedAt > CHARGE_SESSION_TTL_MS) chargeSessions.delete(k)
+	}
+}
+
 type JsonObject = Record<string, unknown>
 
 const ERC1155_METADATA_PATH_RE = /^(?:0x)?([0-9a-fA-F]{40})([0-9a-fA-F]{64})\.json$/
@@ -2938,6 +2993,7 @@ const routing = ( router: Router ) => {
 			cardAddress,
 			cardOwner,
 			pos,
+			sid,
 			uid,
 			e,
 			c,
@@ -2955,6 +3011,7 @@ const routing = ( router: Router ) => {
 			cardAddress?: string
 			cardOwner?: string
 			pos?: string
+			sid?: string
 			uid?: string
 			e?: string
 			c?: string
@@ -2968,10 +3025,48 @@ const routing = ( router: Router ) => {
 			taxBps?: string | number
 			tipBps?: string | number
 		}
+		// PR #3: sid 仅用于 POS ↔ cluster 内部状态跟踪，不影响 verra-home POST/x402 流程；
+		// sid 缺省/无效 ⇒ 跳过 session 写入但仍正常处理 charge（向下兼容老 verra-home build）。
+		const sidNorm: string | null = isValidSid(sid) ? (sid as string).toLowerCase() : null
+		const sessionUpdate = (patch: Partial<ChargeSession>): void => {
+			if (!sidNorm) return
+			const prev = chargeSessions.get(sidNorm)
+			const now = Date.now()
+			if (prev) {
+				chargeSessions.set(sidNorm, { ...prev, ...patch, updatedAt: now })
+			} else {
+				// 首次写入 ⇒ 由当前 patch + 字段缺省组合：cardAddr/owner 等会在后面 sessionUpdate 阶段填入
+				chargeSessions.set(sidNorm, {
+					sid: sidNorm,
+					state: 'verifying',
+					cardAddr: '',
+					pos: null,
+					cardOwner: null,
+					currency: null,
+					subtotal: '0',
+					discount: '0',
+					tax: '0',
+					tip: '0',
+					total: '0',
+					discountBps: 0,
+					taxBps: 0,
+					tipBps: 0,
+					usdcAmount6: null,
+					USDC_tx: null,
+					payer: null,
+					error: null,
+					createdAt: now,
+					updatedAt: now,
+					...patch,
+				})
+			}
+			pruneExpiredChargeSessions()
+		}
 		try {
 			// 新 schema 用 `card`；老 schema 用 `cardAddress`。两者择一即可，都没有则 400。
 			const cardField = (card ?? cardAddress ?? '').toString().trim()
 			if (!cardField || !ethers.isAddress(cardField)) {
+				sessionUpdate({ state: 'error', error: 'Invalid card' })
 				return res.status(400).json({ success: false, error: 'Invalid card' }).end()
 			}
 			const cardAddr = ethers.getAddress(cardField)
@@ -2986,16 +3081,33 @@ const routing = ( router: Router ) => {
 			const hasNfcSun = uidTrim.length > 0 || eTrim.length > 0 || cTrim.length > 0 || mTrim.length > 0
 			if (hasNfcSun) {
 				if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+					sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid uid' })
 					return res.status(400).json({ success: false, error: 'Invalid uid (expect 14-hex NFC UID)' }).end()
 				}
 				if (eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+					sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid NFC SUN params' })
 					return res.status(400).json({ success: false, error: 'NFC UID requires SUN params (e=64 hex, c=6 hex, m=16 hex)' }).end()
 				}
 			}
 			const breakdown = normalizeChargeBreakdown({ subtotal, discount, tax, tip, discountBps, taxBps, tipBps })
 			if (breakdown.total <= 0) {
+				sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid charge breakdown' })
 				return res.status(400).json({ success: false, error: 'Invalid charge breakdown (total must be > 0)' }).end()
 			}
+			// 进入 verifying 阶段：把 breakdown + cardAddr/pos 写入 session（POS 拉取后能立即知道客户已经到达 POST 阶段）
+			sessionUpdate({
+				state: 'verifying',
+				cardAddr,
+				pos: posAddr,
+				subtotal: breakdown.subtotal.toFixed(2),
+				discount: breakdown.discount.toFixed(2),
+				tax: breakdown.tax.toFixed(2),
+				tip: breakdown.tip.toFixed(2),
+				total: breakdown.total.toFixed(2),
+				discountBps: breakdown.discountBps,
+				taxBps: breakdown.taxBps,
+				tipBps: breakdown.tipBps,
+			})
 
 			// 1. SUN 校验仅在 NFC 模式触发；no-NFC 第三方钱包路径直接跳过（`card.owner()` 一致性 + x402 verify 仍是强约束）。
 			let recipientEOA: string | null = null
@@ -3006,6 +3118,7 @@ const routing = ( router: Router ) => {
 					const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
 					if (!sunResult.valid) {
 						logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验失败 valid=${sunResult.valid}`))
+						sessionUpdate({ state: 'error', error: 'SUN verification failed' })
 						return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
 					}
 					tagIdHex = sunResult.tagIdHex
@@ -3017,6 +3130,7 @@ const routing = ( router: Router ) => {
 					} catch (_) { /* charge: best-effort */ }
 				} catch (sunErr: any) {
 					logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验异常: ${sunErr?.message ?? sunErr}`))
+					sessionUpdate({ state: 'error', error: `SUN verification error: ${sunErr?.message ?? sunErr}` })
 					return res.status(403).json({ success: false, error: `SUN verification error: ${sunErr?.message ?? sunErr}` }).end()
 				}
 			} else {
@@ -3047,19 +3161,23 @@ const routing = ( router: Router ) => {
 				isAdminPos = !!ad
 			} catch (_) { /* tolerate transient rpc */ }
 			if (!onChainOwner) {
+				sessionUpdate({ state: 'error', error: 'Cannot resolve card.owner() on-chain' })
 				return res.status(400).json({ success: false, error: 'Cannot resolve card.owner() on-chain' }).end()
 			}
 			// 老 schema 显式传 cardOwner ⇒ 必须与链上一致；新 schema 不传 ⇒ 直接用链上值
 			if (ownerStrRaw !== '') {
 				if (!ethers.isAddress(ownerStrRaw)) {
+					sessionUpdate({ state: 'error', cardOwner: onChainOwner, error: 'Invalid cardOwner' })
 					return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end()
 				}
 				const ownerAddr = ethers.getAddress(ownerStrRaw)
 				if (ownerAddr !== onChainOwner) {
+					sessionUpdate({ state: 'error', cardOwner: onChainOwner, error: 'cardOwner mismatch' })
 					return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
 				}
 			}
 			if (posAddr && !isAdminPos && posAddr !== onChainOwner) {
+				sessionUpdate({ state: 'error', cardOwner: onChainOwner, error: 'pos not admin/owner of card' })
 				return res
 					.status(400)
 					.json({ success: false, error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…` })
@@ -3077,6 +3195,8 @@ const routing = ( router: Router ) => {
 				)
 			}
 			const effectiveCurrency = onChainCurrency ?? cur
+			// 资料齐了，把 owner/currency 也补进 session（POS 可以提前看到 verifying 阶段的明细）
+			sessionUpdate({ cardOwner: payToOwner, currency: effectiveCurrency })
 
 			// 3. USDC 报价 - 严格 Oracle（与 topup 同策略）
 			const totalStr = breakdown.total.toFixed(6)
@@ -3084,28 +3204,46 @@ const routing = ( router: Router ) => {
 			if (quotedUsdc6 <= 0n) {
 				const fresh = isOracleFresh()
 				logger(Colors.yellow(`[nfcUsdcCharge] oracle quote=0 cur=${effectiveCurrency} total=${totalStr} fresh=${fresh}`))
-				return res.status(503).json({
-					success: false,
-					error: fresh
-						? `Oracle rate not available for ${effectiveCurrency}, please retry shortly`
-						: `Oracle rate stale, please retry shortly`,
-				}).end()
+				const errMsg = fresh
+					? `Oracle rate not available for ${effectiveCurrency}, please retry shortly`
+					: `Oracle rate stale, please retry shortly`
+				sessionUpdate({ state: 'error', error: errMsg })
+				return res.status(503).json({ success: false, error: errMsg }).end()
 			}
 
 			// 4. x402 verify + settle（USDC → cardOwner）
+			sessionUpdate({ state: 'settling' })
 			const settled = await settleBeamioX402ToCardOwner(req, res, {
 				cardOwner: payToOwner,
 				quotedUsdc6,
 				description: `Beamio NFC USDC Charge (${effectiveCurrency} ${breakdown.total.toFixed(2)} → card ${cardAddr.slice(0, 8)}…)`,
 			})
-			if (!settled) return // 响应已在 helper 内写出
+			if (!settled) {
+				// helper 已经把错误响应写到 res；session 用 status code 推断粗粒度原因（具体错文已写到 res 给 verra-home）
+				const sc = res.statusCode
+				const reason = sc === 402
+					? 'USDC payment verification failed'
+					: sc === 503
+						? 'USDC settle unavailable, please retry'
+						: `USDC settle failed (HTTP ${sc})`
+				sessionUpdate({ state: 'error', error: reason })
+				return
+			}
 
 			const fiat6 = (n: number): string => BigInt(Math.max(0, Math.round(n * 1_000_000))).toString()
 
 			logger(Colors.green(
 				`[nfcUsdcCharge] settle OK card=${cardAddr} pos=${posAddr ? posAddr.slice(0, 10) + '…' : '(none)'} payer=${settled.payer} ` +
-				`USDC_tx=${settled.USDC_tx} usdc6=${settled.usdcAmount6} → forward Master`
+				`USDC_tx=${settled.USDC_tx} usdc6=${settled.usdcAmount6} sid=${sidNorm ?? '(none)'} → forward Master`
 			))
+			// terminal success：USDC 已到 cardOwner，记账由 Master 异步进行（Master 失败不会影响 POS 的成功 UI）
+			sessionUpdate({
+				state: 'success',
+				usdcAmount6: settled.usdcAmount6.toString(),
+				USDC_tx: settled.USDC_tx,
+				payer: settled.payer,
+				error: null,
+			})
 
 			// 5. 转发 Master 记账（master 不会签 ExecuteForAdmin；返回 200 即可）
 			postLocalhost(
@@ -3134,10 +3272,30 @@ const routing = ( router: Router ) => {
 			)
 		} catch (err: any) {
 			logger(Colors.red(`[nfcUsdcCharge] error: ${err?.message ?? err}`))
+			sessionUpdate({ state: 'error', error: err?.message ?? String(err) })
 			if (!res.headersSent) {
 				res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
 			}
 		}
+	})
+
+	/** GET /api/nfcUsdcChargeSession?sid=<uuid v4>
+	 * PR #3: iOS POS 出 USDC charge QR 后单飞轮询此端点，获取顾客在 verra-home 的支付进度。
+	 * - sid 不存在 ⇒ `state: 'awaiting_payment'`（顾客尚未到达 POST 阶段；POS 继续轮询，不要把它当 error）
+	 * - sid 存在 ⇒ 返回完整 record（含 USDC_tx / payer / breakdown）；terminal state（success/error）后 POS 停止轮询并切 UI
+	 * - TTL 10 分钟过期后自动清理（POS 在 terminal state 后通常 ≤1 秒就完成 UI 切换 + cancel 轮询，不会触碰过期）
+	 */
+	router.get('/nfcUsdcChargeSession', (req, res) => {
+		const sidQ = (req.query?.sid ?? '').toString().trim()
+		if (!isValidSid(sidQ)) {
+			return res.status(400).json({ ok: false, error: 'Invalid sid (expect UUID v4)' }).end()
+		}
+		pruneExpiredChargeSessions()
+		const rec = chargeSessions.get(sidQ.toLowerCase())
+		if (!rec) {
+			return res.status(200).json({ ok: true, state: 'awaiting_payment', sid: sidQ.toLowerCase() }).end()
+		}
+		return res.status(200).json({ ok: true, ...rec }).end()
 	})
 
 	/** 最新发行的前 N 张卡明细：透传 Master（含 token0TotalSupply6、token0CumulativeMint6、holderCount；与 Master 同排除集）。limit 上限 300。 */
