@@ -5961,6 +5961,19 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			}
 			next();
 		});
+		// 生产环境只把所有 CORS 预检透传给 nginx 处理，但这里加一行轻量日志，
+		// 用于排查 x402 客户端"Failed to fetch"问题：如果浏览器第二跳带着 X-PAYMENT 的预检
+		// 实际打到了 Node，会在这里看到 `acrh=...,x-payment`；如果完全看不到 OPTIONS log，
+		// 就说明 nginx 自己回的 OPTIONS（可能没把 X-PAYMENT 列入 Access-Control-Allow-Headers）。
+		app.use((req, _res, next) => {
+			if (req.method === 'OPTIONS') {
+				const acrm = req.header('access-control-request-method') ?? '(none)'
+				const acrh = req.header('access-control-request-headers') ?? '(none)'
+				const origin = req.header('origin') ?? '(no-origin)'
+				logger(`[CORS preflight] path=${req.originalUrl} origin=${origin} acrm=${acrm} acrh=${acrh}`)
+			}
+			next();
+		});
 	}
 
 

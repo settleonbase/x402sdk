@@ -481,7 +481,16 @@ export const verifyPaymentNew = (
 	const payment = req.header("X-PAYMENT")
 
 	if (!payment) {
-		logger(`verifyPayment send x402 payment information`)
+		// 第一跳：客户端没带 X-PAYMENT，按 x402 协议返回 402 + paymentRequirements。
+		// 把 Origin / Referer / UA 一起 dump，便于排查跨域第二跳是否被 CORS 预检拦下来：
+		// 如果第二跳从未到达服务器，但这条日志却出现两次（同一 sid/同一 cardAddr），
+		// 极有可能是浏览器在 OPTIONS 预检阶段把带 X-PAYMENT 的 POST block 掉了。
+		const origin = req.header('origin') ?? '(no-origin)'
+		const referer = req.header('referer') ?? '(no-referer)'
+		const ua = (req.header('user-agent') ?? '').slice(0, 80)
+		const xfwdProto = req.header('x-forwarded-proto') ?? '(none)'
+		const xfwdFor = req.header('x-forwarded-for') ?? '(none)'
+		logger(`verifyPayment send x402 payment information path=${req.originalUrl} origin=${origin} referer=${referer} xfwd-proto=${xfwdProto} xfwd-for=${xfwdFor} ua="${ua}"`)
 		res.status(402).json({
 			x402Version,
 			error: "X-PAYMENT header is required",
@@ -489,6 +498,9 @@ export const verifyPaymentNew = (
 		})
 		return 
 	}
+
+	// 进入第二跳：把 X-PAYMENT 长度+前缀打出来，证明 nginx + 浏览器 CORS 预检确实放行了 X-PAYMENT。
+	logger(`verifyPayment got X-PAYMENT header path=${req.originalUrl} origin=${req.header('origin') ?? '(no-origin)'} payment.len=${payment.length} payment.prefix=${payment.slice(0, 24)}…`)
 
 	let decodedPayment: PaymentPayload
 
