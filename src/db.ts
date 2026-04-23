@@ -1321,6 +1321,11 @@ const BEAMIO_MEMBER_TOPUP_EVENTS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_memb
 const BEAMIO_MEMBER_TOPUP_EVENTS_IDX_CARD = `CREATE INDEX IF NOT EXISTS idx_beamio_member_topup_events_card ON beamio_member_topup_events (LOWER(TRIM(card_address)))`
 const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_POINTS = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS points_e6 TEXT`
 const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_USDC = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS usdc_e6 TEXT`
+/** PR #4 (USDC charge orchestrator): 把外部 USDC 结算 tx 挂到 topup 行上，便于
+ *  「USDC settle → tmp wallet topup → tmp wallet charge」三段对账（同一 sid 共享 USDC_tx）。 */
+const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_ORIG_USDC_TX = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS originating_usdc_tx TEXT`
+const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_CHARGE_SID = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS charge_session_id TEXT`
+const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_POS_OPERATOR = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS pos_operator TEXT`
 
 /** 每卡每 EOA 聚合：top-up 次数、累计 points(6) / USDC(6)、仅保留最后一次 top-up 时间戳。 */
 const BEAMIO_CARD_MEMBER_TOPUP_STATS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_card_member_topup_stats (
@@ -1427,6 +1432,9 @@ async function ensureBeamioMemberTopupEventsSchema(db: Client): Promise<void> {
 	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_TABLE)
 	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_POINTS)
 	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_USDC)
+	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_ORIG_USDC_TX)
+	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_CHARGE_SID)
+	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_POS_OPERATOR)
 	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_IDX_CARD)
 }
 
@@ -1492,6 +1500,11 @@ export const insertMemberTopupEvent = async (params: {
 	 */
 	countAsNfcActivation?: boolean
 	countAsAppActivation?: boolean
+	/** PR #4 (USDC charge orchestrator)：本 topup 由 USDC charge 编排器触发时，
+	 *  挂上原始 x402 settle tx hash + POS sid + 操作员，三段对账（settle → topup → charge）共享一组标识。 */
+	originatingUsdcTx?: string | null
+	chargeSessionId?: string | null
+	posOperator?: string | null
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
 	const pointsStr = topupAmountToNumericString(params.pointsE6)
@@ -1510,16 +1523,28 @@ export const insertMemberTopupEvent = async (params: {
 			params.topupSource === 'androidNfcTopup' && params.countAsNfcActivation === true ? 1 : 0
 		const appActInc: 0 | 1 =
 			params.topupSource === 'usdcPurchasingCard' && params.countAsAppActivation === true ? 1 : 0
+		const origUsdcTxNorm =
+			typeof params.originatingUsdcTx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(params.originatingUsdcTx.trim())
+				? params.originatingUsdcTx.trim().toLowerCase()
+				: null
+		const chargeSidNorm =
+			typeof params.chargeSessionId === 'string' && params.chargeSessionId.trim().length > 0
+				? params.chargeSessionId.trim().toLowerCase()
+				: null
+		const posOpNorm =
+			typeof params.posOperator === 'string' && ethers.isAddress(params.posOperator.trim())
+				? ethers.getAddress(params.posOperator.trim()).toLowerCase()
+				: null
 		await db.query('BEGIN')
 		try {
 			const ins = await db.query<{ id: number }>(
 				`
-				INSERT INTO beamio_member_topup_events (card_address, base_tx_hash, member_eoa, member_aa, tier_token_id, topup_source, topup_category, points_e6, usdc_e6)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				INSERT INTO beamio_member_topup_events (card_address, base_tx_hash, member_eoa, member_aa, tier_token_id, topup_source, topup_category, points_e6, usdc_e6, originating_usdc_tx, charge_session_id, pos_operator)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 				ON CONFLICT (base_tx_hash) DO NOTHING
 				RETURNING id
 				`,
-				[card, hash, eoa, aa, String(params.tierTokenId), params.topupSource, params.topupCategory ?? null, pointsStr, usdcStr]
+				[card, hash, eoa, aa, String(params.tierTokenId), params.topupSource, params.topupCategory ?? null, pointsStr, usdcStr, origUsdcTxNorm, chargeSidNorm, posOpNorm]
 			)
 			if (!ins.rows?.length) {
 				await db.query('COMMIT')

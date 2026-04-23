@@ -18,6 +18,7 @@ import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import { runUsdcChargeOrchestrator, type OrchestratorSessionPatch, type UsdcChargeOrchestratorContext } from './usdcChargeOrchestrator'
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
 	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
@@ -379,7 +380,13 @@ type ChargeSessionState =
 	| 'awaiting_payment'  // POS 出 QR，customer 尚未到达 verra-home POST charge
 	| 'verifying'         // verra-home 提交 charge，x402 verify 进行中
 	| 'settling'          // verify 通过，USDC settle on-chain
-	| 'success'           // settle OK，已转发 Master 记账
+	/** PR #4 (USDC charge orchestrator) 引入的中间态：USDC 已结算，编排器开始 L1 topup */
+	| 'topup_pending'
+	/** PR #4：L1 topup tx 已确认，开始解析 tmpAA + 构造 container 进入 L2 */
+	| 'topup_confirmed'
+	/** PR #4：L2 charge container 已提交 Master，等待 relay 上链 */
+	| 'charge_pending'
+	| 'success'           // PR #4：已含 chargeTxHash（编排器 L2 完成）
 	| 'error'             // 任意阶段失败（payload 中含 error）
 
 interface ChargeSession {
@@ -401,6 +408,12 @@ interface ChargeSession {
 	USDC_tx: string | null
 	payer: string | null
 	error: string | null
+	/** PR #4：编排器临时钱包 EOA / AA / mint 出的 points / topup base tx / charge base tx */
+	tmpEOA: string | null
+	tmpAA: string | null
+	pointsMinted6: string | null
+	topupTxHash: string | null
+	chargeTxHash: string | null
 	createdAt: number
 	updatedAt: number
 }
@@ -3055,6 +3068,11 @@ const routing = ( router: Router ) => {
 					USDC_tx: null,
 					payer: null,
 					error: null,
+					tmpEOA: null,
+					tmpAA: null,
+					pointsMinted6: null,
+					topupTxHash: null,
+					chargeTxHash: null,
 					createdAt: now,
 					updatedAt: now,
 					...patch,
@@ -3234,42 +3252,102 @@ const routing = ( router: Router ) => {
 
 			logger(Colors.green(
 				`[nfcUsdcCharge] settle OK card=${cardAddr} pos=${posAddr ? posAddr.slice(0, 10) + '…' : '(none)'} payer=${settled.payer} ` +
-				`USDC_tx=${settled.USDC_tx} usdc6=${settled.usdcAmount6} sid=${sidNorm ?? '(none)'} → forward Master`
+				`USDC_tx=${settled.USDC_tx} usdc6=${settled.usdcAmount6} sid=${sidNorm ?? '(none)'} ` +
+				`mode=${hasNfcSun ? 'NFC' : 'no-NFC orchestrator'}`
 			))
-			// terminal success：USDC 已到 cardOwner，记账由 Master 异步进行（Master 失败不会影响 POS 的成功 UI）
+
+			// 5. 分流：
+			//    - NFC 模式 ⇒ 顾客是 BeamioTag 持卡人，沿用既有 Master `/api/nfcUsdcCharge` 仅做日志记账（PR #4 之前行为）；
+			//                 settle 成功即视为终态，session 直接进 success（顾客的 NFC tag 已绑定，无需 orchestrator）。
+			//    - no-NFC 模式 ⇒ PR #4 编排器：立刻 200 给 verra-home（USDC 已到 cardOwner，对客户已完成支付），
+			//                     后台启动 ephemeral 钱包 topup → charge 闭环；POS 通过 sid 轮询 session 状态机推进 UI。
+			if (hasNfcSun) {
+				sessionUpdate({
+					state: 'success',
+					usdcAmount6: settled.usdcAmount6.toString(),
+					USDC_tx: settled.USDC_tx,
+					payer: settled.payer,
+					error: null,
+				})
+				postLocalhost(
+					'/api/nfcUsdcCharge',
+					{
+						cardAddr,
+						cardOwner: payToOwner,
+						pos: posAddr,
+						nfcUid: uidTrim,
+						nfcTagIdHex: tagIdHex,
+						nfcRecipientEOA: recipientEOA,
+						currency: effectiveCurrency,
+						subtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
+						discountAmountFiat6: fiat6(breakdown.discount),
+						discountRateBps: breakdown.discountBps,
+						taxAmountFiat6: fiat6(breakdown.tax),
+						taxRateBps: breakdown.taxBps,
+						tipCurrencyAmount: breakdown.tip.toFixed(2),
+						tipRateBps: breakdown.tipBps,
+						totalCurrencyAmount: breakdown.total.toFixed(2),
+						usdcAmount6: settled.usdcAmount6.toString(),
+						USDC_tx: settled.USDC_tx,
+						payer: settled.payer,
+					},
+					res
+				)
+				return
+			}
+
+			// no-NFC orchestrator path (PR #4)
+			// 立即把 USDC settle 成功告诉 verra-home（用户在小狐狸里看到 ✓ 不需要等到 L1/L2 链上确认）
 			sessionUpdate({
-				state: 'success',
+				state: 'topup_pending',
 				usdcAmount6: settled.usdcAmount6.toString(),
 				USDC_tx: settled.USDC_tx,
 				payer: settled.payer,
 				error: null,
 			})
-
-			// 5. 转发 Master 记账（master 不会签 ExecuteForAdmin；返回 200 即可）
-			postLocalhost(
-				'/api/nfcUsdcCharge',
-				{
-					cardAddr,
+			if (!res.headersSent) {
+				res.status(200).json({
+					success: true,
+					cardAddress: cardAddr,
 					cardOwner: payToOwner,
-					pos: posAddr,
-					nfcUid: uidTrim,
-					nfcTagIdHex: tagIdHex,
-					nfcRecipientEOA: recipientEOA,
 					currency: effectiveCurrency,
-					subtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
-					discountAmountFiat6: fiat6(breakdown.discount),
-					discountRateBps: breakdown.discountBps,
-					taxAmountFiat6: fiat6(breakdown.tax),
-					taxRateBps: breakdown.taxBps,
-					tipCurrencyAmount: breakdown.tip.toFixed(2),
-					tipRateBps: breakdown.tipBps,
 					totalCurrencyAmount: breakdown.total.toFixed(2),
 					usdcAmount6: settled.usdcAmount6.toString(),
 					USDC_tx: settled.USDC_tx,
 					payer: settled.payer,
+					sid: sidNorm,
+				}).end()
+			}
+
+			// 后台编排（fire-and-forget）；orchestrator 内部做 try/catch + session 状态推进；
+			// 任何 unhandled 异常都会被外层 .catch 捕获写到 session.error，不会冒泡为 unhandledRejection 把 cluster worker 拖垮。
+			// settle 在极少数情况下没有 transaction 字段（responseData.transaction undefined）；这种 USDC 等于没 settle，跳过编排并把 session 标记 error。
+			if (!settled.USDC_tx || !/^0x[0-9a-fA-F]{64}$/.test(settled.USDC_tx)) {
+				logger(Colors.red(`[nfcUsdcCharge/orchestrator] sid=${sidNorm ?? 'n/a'} settle returned invalid USDC_tx; abort orchestrator`))
+				sessionUpdate({ state: 'error', error: 'USDC settle returned invalid tx hash; orchestrator aborted' })
+				return
+			}
+			const orchestratorCtx: UsdcChargeOrchestratorContext = {
+				sid: sidNorm ?? '',
+				cardAddr,
+				cardOwner: payToOwner,
+				currency: effectiveCurrency,
+				totalCurrencyAmount: breakdown.total.toFixed(2),
+				originatingUSDCTx: settled.USDC_tx,
+				usdcAmount6: settled.usdcAmount6.toString(),
+				payer: settled.payer,
+				posOperator: posAddr,
+				provider: providerBase,
+				updateSession: (patch: OrchestratorSessionPatch) => {
+					// orchestrator 不持有 sid（避免循环依赖），无 sid 时 sessionUpdate 内部 no-op，恰好兜住「sid 缺省」场景
+					sessionUpdate(patch as Partial<ChargeSession>)
 				},
-				res
-			)
+			}
+			void runUsdcChargeOrchestrator(orchestratorCtx).catch((err: unknown) => {
+				const msg = err instanceof Error ? err.message : String(err)
+				logger(Colors.red(`[nfcUsdcCharge/orchestrator] sid=${sidNorm ?? 'n/a'} unhandled: ${msg}`))
+				sessionUpdate({ state: 'error', error: `Orchestrator unhandled: ${msg}` })
+			})
 		} catch (err: any) {
 			logger(Colors.red(`[nfcUsdcCharge] error: ${err?.message ?? err}`))
 			sessionUpdate({ state: 'error', error: err?.message ?? String(err) })

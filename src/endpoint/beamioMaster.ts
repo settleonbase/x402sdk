@@ -1488,6 +1488,11 @@ const routing = ( router: Router ) => {
 				nfcTaxAmountFiat6?: string
 				nfcTaxRateBps?: number
 				chargeOwnerChildBurn?: import('../MemberCard').ChargeOwnerChildBurnPayload
+				/** PR #4 (USDC charge orchestrator)：把外部 USDC settle tx + POS sid + 操作员标记到本笔 container charge，
+				 *  ContainerRelayPool 持有，便于事后按 sid 关联三段（USDC settle → tmp wallet topup → tmp wallet charge）。 */
+				originatingUSDCTx?: string
+				chargeSessionId?: string
+				posOperator?: string
 			}
 			logger(`[AAtoEOA] [DEBUG] Master received openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 40)}…"` : 'n/a'} OpenContainerRelayPool.len=${OpenContainerRelayPool.length} Settle_ContractPool.len=${Settle_ContractPool.length}`)
 			logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a', forText: body?.forText ? `${body.forText.slice(0, 40)}…` : 'n/a' }, false, 3, true))
@@ -1498,6 +1503,18 @@ const routing = ( router: Router ) => {
 					logger(Colors.red(`[AAtoEOA] master Container validation FAIL: ${preCheck.error}`))
 					return res.status(400).json({ success: false, error: preCheck.error ?? 'Invalid containerPayload' }).end()
 				}
+				const origUsdcTxNorm =
+					typeof body.originatingUSDCTx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(body.originatingUSDCTx.trim())
+						? body.originatingUSDCTx.trim().toLowerCase()
+						: undefined
+				const sidNorm =
+					typeof body.chargeSessionId === 'string' && body.chargeSessionId.trim().length > 0
+						? body.chargeSessionId.trim().toLowerCase()
+						: undefined
+				const posOpNorm =
+					typeof body.posOperator === 'string' && ethers.isAddress(body.posOperator.trim())
+						? ethers.getAddress(body.posOperator.trim())
+						: undefined
 				const poolLenBefore = ContainerRelayPool.length
 				ContainerRelayPool.push({
 					containerPayload: body.containerPayload,
@@ -1509,8 +1526,16 @@ const routing = ( router: Router ) => {
 					requestHash: body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined,
 					merchantCardAddress: body.merchantCardAddress && ethers.isAddress(body.merchantCardAddress) ? body.merchantCardAddress : undefined,
 					chargeOwnerChildBurn: body.chargeOwnerChildBurn,
+					originatingUSDCTx: origUsdcTxNorm,
+					chargeSessionId: sidNorm,
+					posOperator: posOpNorm,
 					res,
 				})
+				if (sidNorm || origUsdcTxNorm) {
+					logger(Colors.cyan(
+						`[AAtoEOA/Container] orchestrator-tagged container: sid=${sidNorm ?? 'n/a'} originatingUSDCTx=${origUsdcTxNorm ?? 'n/a'} pos=${posOpNorm ? posOpNorm.slice(0, 10) + '…' : 'n/a'}`
+					))
+				}
 				logger(`[AAtoEOA] master pushed to ContainerRelayPool (length ${poolLenBefore} -> ${ContainerRelayPool.length}), calling ContainerRelayProcess()`)
 				ContainerRelayProcess().catch((err: any) => {
 					logger(Colors.red('[ContainerRelayProcess] unhandled error:'), err?.message ?? err)
@@ -2240,6 +2265,11 @@ const routing = ( router: Router ) => {
 				USDC_tx,
 				usdcAmount6,
 				nfcUid,
+				topupFeeBUnits,
+				originatingUSDCTx,
+				chargeSessionId,
+				posOperator,
+				topupSourceOverride,
 			} = req.body as {
 				cardAddr?: string
 				data?: string
@@ -2254,6 +2284,17 @@ const routing = ( router: Router ) => {
 				usdcAmount6?: string
 				nfcUid?: string
 				nfcTagIdHex?: string
+				/** PR #4 (USDC charge orchestrator)：传入 issuer 须扣的 topup B-Unit 服务费（与 NFC topup 一致 2%）。
+				 *  历史 x402 nfcUsdcTopup 不传此字段 ⇒ 不扣费（与旧行为兼容）。 */
+				topupFeeBUnits?: string
+				/** PR #4：原始 x402 USDC settle 的 base tx，便于 insertMemberTopupEvent 对账 */
+				originatingUSDCTx?: string
+				/** PR #4：POS 端轮询 sid（UUID v4），便于「USDC settle → topup → charge」三段对账 */
+				chargeSessionId?: string
+				/** PR #4：POS 终端钱包地址，作为 operator 进入 admin 记账 */
+				posOperator?: string
+				/** PR #4：渠道标签覆盖（缺省 'webPosNfcTopup'）。orchestrator 临时钱包 topup 用 'webPosNfcTopup' 走默认即可 */
+				topupSourceOverride?: 'usdcPurchasingCard' | 'androidNfcTopup' | 'webPosNfcTopup'
 			}
 			try {
 				if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
@@ -2291,6 +2332,29 @@ const routing = ( router: Router ) => {
 					? { currencyAmountE6: totE, cardE6: totE, cashE6: 0n, bonusE6: 0n }
 					: undefined
 
+				const feeBUnitsParsed: bigint | undefined = (() => {
+					if (topupFeeBUnits == null) return undefined
+					const s = String(topupFeeBUnits).trim()
+					if (!s || !/^\d+$/.test(s)) return undefined
+					try { return BigInt(s) } catch { return undefined }
+				})()
+				const originatingUsdcTxNorm =
+					typeof originatingUSDCTx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(originatingUSDCTx.trim())
+						? originatingUSDCTx.trim().toLowerCase()
+						: undefined
+				const sidNorm =
+					typeof chargeSessionId === 'string' && chargeSessionId.trim().length > 0
+						? chargeSessionId.trim().toLowerCase()
+						: undefined
+				const posOperatorNorm =
+					typeof posOperator === 'string' && ethers.isAddress(posOperator.trim())
+						? ethers.getAddress(posOperator.trim())
+						: undefined
+				const sourceOverrideNorm: 'usdcPurchasingCard' | 'androidNfcTopup' | 'webPosNfcTopup' =
+					topupSourceOverride === 'usdcPurchasingCard' || topupSourceOverride === 'androidNfcTopup'
+						? topupSourceOverride
+						: 'webPosNfcTopup'
+
 				executeForAdminPool.push({
 					cardAddr: cardAddrNorm,
 					data,
@@ -2299,16 +2363,22 @@ const routing = ( router: Router ) => {
 					adminSignature: signed.adminSignature,
 					uid: typeof nfcUid === 'string' ? nfcUid : undefined,
 					cardOwnerEOA: cardOwnerNorm,
+					topupFeeBUnits: feeBUnitsParsed,
 					topupKind: 2,
 					res,
 					topupCurrencySplit,
-					topupSourceOverride: 'webPosNfcTopup',
+					topupSourceOverride: sourceOverrideNorm,
+					originatingUSDCTx: originatingUsdcTxNorm,
+					chargeSessionId: sidNorm,
+					posOperator: posOperatorNorm,
 				})
 
 				logger(Colors.green(
 					`[nfcUsdcTopup] queued ExecuteForAdmin card=${cardAddrNorm} recipient=${recipientNorm} cardOwner=${cardOwnerNorm} ` +
 					`USDC_tx=${USDC_tx ?? 'n/a'} payer=${payer ?? 'n/a'} usdc6=${usdcAmount6 ?? 'n/a'} ` +
-					`currency=${currency ?? 'n/a'} amount=${currencyAmount ?? 'n/a'} signer=${signed.signer}`
+					`currency=${currency ?? 'n/a'} amount=${currencyAmount ?? 'n/a'} ` +
+					`feeBUnits=${feeBUnitsParsed?.toString() ?? 'n/a'} sid=${sidNorm ?? 'n/a'} ` +
+					`pos=${posOperatorNorm ? posOperatorNorm.slice(0, 10) + '…' : 'n/a'} signer=${signed.signer}`
 				))
 				executeForAdminProcess().catch((err: any) => {
 					logger(Colors.red('[executeForAdminProcess] nfcUsdcTopup error:'), err?.message ?? err)

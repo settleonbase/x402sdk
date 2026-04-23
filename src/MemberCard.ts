@@ -1781,6 +1781,11 @@ export const executeForAdminPool: Array<{
 	topupCurrencySplit?: { currencyAmountE6: bigint; cardE6: bigint; cashE6: bigint; bonusE6: bigint }
 	/** 可选 topup 渠道标签覆盖（缺省走默认 `'androidNfcTopup'`）。供 web POS x402 NFC USDC topup 等场景区分渠道。 */
 	topupSourceOverride?: 'usdcPurchasingCard' | 'androidNfcTopup' | 'webPosNfcTopup'
+	/** PR #4 (USDC charge orchestrator)：把外部 USDC settle tx 与 POS sid 挂到本笔 topup 上，
+	 *  供 insertMemberTopupEvent 写入 originating_usdc_tx / charge_session_id / pos_operator，便于「USDC settle → topup → charge」三段对账。 */
+	originatingUSDCTx?: string
+	chargeSessionId?: string
+	posOperator?: string
 }> = []
 
 /** Base `executeForAdmin` 已返回 txHash 且 HTTP 已 200 之后的后台任务（BUint / indexer / metadata），不占用 Settle_ContractPool 主槽位 */
@@ -2851,6 +2856,11 @@ export const ContainerRelayPool: {
 	nfcTaxRateBps?: number
 	/** owner 直属下级 Charge：POS 提交的 executeForAdmin(burnPointsByAdmin)，relay 成功后焚烧入账 points */
 	chargeOwnerChildBurn?: ChargeOwnerChildBurnPayload
+	/** PR #4 (USDC charge orchestrator)：标识本次 container charge 是「USDC settle → tmp wallet topup → tmp wallet charge」三段中的 charge 段。
+	 *  originatingUSDCTx 与 chargeSessionId 共享同一组 sid，便于事后按 sid 查所有相关 base tx；posOperator 为该笔 USDC charge 的 POS 终端。 */
+	originatingUSDCTx?: string
+	chargeSessionId?: string
+	posOperator?: string
 	res: Response
 }[] = []
 
@@ -5212,8 +5222,9 @@ function hashContainerItem(it: { kind: number; asset: string; amount: string | b
 	return ethers.keccak256(encoded)
 }
 
-/** 与 BeamioContainerModuleV07 一致：hashItems = keccak256(abi.encode(bytes32[])) */
-function hashContainerItems(items: { kind: number; asset: string; amount: string | bigint; tokenId: string | bigint; data: string }[]): string {
+/** 与 BeamioContainerModuleV07 一致：hashItems = keccak256(abi.encode(bytes32[]))。
+ *  PR #4：`usdcChargeOrchestrator` 用临时 EOA 离线签 ContainerMain 时需要计算同款 itemsHash，因此对外导出。 */
+export function hashContainerItems(items: { kind: number; asset: string; amount: string | bigint; tokenId: string | bigint; data: string }[]): string {
 	const hashes = items.map((it) => hashContainerItem(it))
 	return ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['bytes32[]'], [hashes]))
 }
@@ -6240,6 +6251,9 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					pointsE6: mintParsed.points6,
 					usdcE6: finalRequestAmountUSDC6,
 					countAsNfcActivation: !hadMembershipBeforeNfc,
+					originatingUsdcTx: obj.originatingUSDCTx ?? null,
+					chargeSessionId: obj.chargeSessionId ?? null,
+					posOperator: obj.posOperator ?? null,
 				}).catch((dbErr: any) =>
 					logger(Colors.yellow(`[executeForAdminPostBaseProcess] insertMemberTopupEvent: ${dbErr?.message ?? dbErr}`))
 				)
