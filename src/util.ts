@@ -1230,6 +1230,199 @@ const estimateTransferGasFields = async (txHash: string): Promise<{
 	}
 }
 
+/** PR (USDC charge settle ledger):
+ * `keccak256("usdcCharge:settle")` —— BeamioIndexerDiamond.syncTokenAction 的 `ledgerTxCategory`，
+ * 标记一行**独立**的 USDC settle ledger 行（payer → cardOwner，Base USDC `transferWithAuthorization`）。
+ *
+ * 在 charge 流程中，这是 orchestrator 三段「L0 settle / L1 topup / L2 charge」中的 **L0** 行，
+ * 与 L1 topup 主单 / L2 charge 主单完全分开。链下对账以 `finishedHash = USDC_tx` 作为 join key，
+ * 与 PG `beamio_member_topup_events.originating_usdc_tx` 一致。 */
+export const TX_CATEGORY_USDC_CHARGE_SETTLE = ethers.keccak256(ethers.toUtf8Bytes('usdcCharge:settle')) as `0x${string}`
+
+/** Fire-and-forget：USDC charge settle 成功后，独立向 BeamioIndexerDiamond 推一行 ledger。
+ *
+ * 复用既存 Master `/api/beamioTransferIndexerAccounting` 端点 + `beamioTransferIndexerAccountingPool`；
+ * 这条行：
+ *   - `from = payer`、`to = cardOwner`、`finishedHash = USDC_tx`、`source = 'x402'`；
+ *   - `ledgerTxCategory = TX_CATEGORY_USDC_CHARGE_SETTLE`，与 L1 topup（`creditTopupCard` 等）/ L2 charge 主单互斥；
+ *   - `routeItems` 单元素：USDC@Base 资产、`amountE6 = usdcAmount6`（charge 主单 / topup 主单也带 USDC route，
+ *     但 category 不同，Indexer 不会去重）；
+ *   - `bServiceUSDC6 / bServiceUnits6 = 0`（settle 段无 B-Unit 服务费——B-Unit 费在 L1 topup 段独立记账）；
+ *   - 无 `requestHash`（charge 不绑 payMe Voucher），跳过 `runRequestHashPreCheck`；
+ *   - `currency / currencyAmount` 为商户卡币种（CAD/USD/...），与 NFC charge 主单 currency 字段一致；
+ *   - `ledgerFinalRequestAmountFiat6 = total e6`、`ledgerFinalRequestAmountUSDC6 = usdcAmount6`；
+ *   - `ledgerMetaRequestAmountFiat6 = subtotal e6`、`ledgerMetaDiscount/Tax*` 反映原始 breakdown。
+ *
+ * 失败仅 logger，不抛；charge 主链路（USDC settle 完成 + orchestrator 启动）不会被阻塞。
+ * 设计目的：让独立查询「USDC 在哪些时刻到了商户 cardOwner EOA」时，**不必再 join topup 主单**。 */
+export const submitUsdcChargeSettleIndexer = async (params: {
+	payer: string
+	cardOwner: string
+	cardAddress: string
+	posOperator?: string | null
+	sid?: string | null
+	currency: string
+	/** decimal currency string e.g. "5.00" —— breakdown.subtotal */
+	subtotalCurrencyAmount: string
+	/** decimal currency string e.g. "5.00" —— breakdown.total = subtotal - discount + tax + tip */
+	totalCurrencyAmount: string
+	/** atomic e6 string —— breakdown.discount * 1e6 */
+	discountAmountFiat6?: string
+	discountRateBps?: number
+	/** atomic e6 string —— breakdown.tax * 1e6 */
+	taxAmountFiat6?: string
+	taxRateBps?: number
+	/** decimal currency string —— breakdown.tip（折叠在 total 内，仅用于 displayJson 审计） */
+	tipCurrencyAmount?: string
+	tipRateBps?: number
+	/** Base USDC settle tx hash（必须 0x + 32 bytes） */
+	usdcTxHash: string
+	/** atomic 6 —— x402 settle 实际转账金额 */
+	usdcAmount6: bigint | string
+}): Promise<void> => {
+	try {
+		if (!ethers.isAddress(params.payer) || !ethers.isAddress(params.cardOwner) || !ethers.isAddress(params.cardAddress)) {
+			logger(Colors.yellow(`[submitUsdcChargeSettleIndexer] skip: invalid address (payer/cardOwner/cardAddress)`))
+			return
+		}
+		if (params.payer.toLowerCase() === params.cardOwner.toLowerCase()) {
+			logger(Colors.yellow(`[submitUsdcChargeSettleIndexer] skip: payer==cardOwner ${params.payer}`))
+			return
+		}
+		const usdcAmount6Big = typeof params.usdcAmount6 === 'bigint' ? params.usdcAmount6 : BigInt(params.usdcAmount6)
+		if (usdcAmount6Big <= 0n) {
+			logger(Colors.yellow(`[submitUsdcChargeSettleIndexer] skip: usdcAmount6 <= 0`))
+			return
+		}
+		if (!params.usdcTxHash || !ethers.isHexString(params.usdcTxHash) || ethers.dataLength(params.usdcTxHash) !== 32) {
+			logger(Colors.yellow(`[submitUsdcChargeSettleIndexer] skip: invalid usdcTxHash ${params.usdcTxHash}`))
+			return
+		}
+		const cur = (params.currency || '').toString().trim().toUpperCase() || 'CAD'
+		const totalNum = Number(params.totalCurrencyAmount)
+		if (!Number.isFinite(totalNum) || totalNum <= 0) {
+			logger(Colors.yellow(`[submitUsdcChargeSettleIndexer] skip: invalid totalCurrencyAmount ${params.totalCurrencyAmount}`))
+			return
+		}
+		const subtotalNum = Number(params.subtotalCurrencyAmount)
+		const fiat6 = (n: number): string => BigInt(Math.max(0, Math.round(n * 1_000_000))).toString()
+		const totalFiat6 = fiat6(totalNum)
+		const subtotalFiat6 = Number.isFinite(subtotalNum) && subtotalNum > 0 ? fiat6(subtotalNum) : totalFiat6
+
+		const USDC_BASE_ADDRESS = ethers.getAddress('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913')
+		const usdcAmount6Str = usdcAmount6Big.toString()
+
+		const displayJson = JSON.stringify({
+			title: 'USDC Charge Settle',
+			source: 'usdcChargeSettle',
+			finishedHash: params.usdcTxHash,
+			cardAddress: ethers.getAddress(params.cardAddress),
+			cardOwner: ethers.getAddress(params.cardOwner),
+			payer: ethers.getAddress(params.payer),
+			pos: params.posOperator && ethers.isAddress(params.posOperator) ? ethers.getAddress(params.posOperator) : undefined,
+			sid: params.sid ?? undefined,
+			currency: cur,
+			currencyAmount: params.totalCurrencyAmount,
+			breakdown: {
+				subtotal: params.subtotalCurrencyAmount,
+				discountFiat6: params.discountAmountFiat6 ?? '0',
+				discountBps: Number.isFinite(Number(params.discountRateBps)) ? Number(params.discountRateBps) : 0,
+				taxFiat6: params.taxAmountFiat6 ?? '0',
+				taxBps: Number.isFinite(Number(params.taxRateBps)) ? Number(params.taxRateBps) : 0,
+				tip: params.tipCurrencyAmount ?? '0',
+				tipBps: Number.isFinite(Number(params.tipRateBps)) ? Number(params.tipRateBps) : 0,
+				total: params.totalCurrencyAmount,
+			},
+			usdcAmount6: usdcAmount6Str,
+		})
+
+		const gasFields = await estimateTransferGasFields(params.usdcTxHash)
+
+		const body: Record<string, unknown> = {
+			from: ethers.getAddress(params.payer),
+			to: ethers.getAddress(params.cardOwner),
+			amountUSDC6: usdcAmount6Str,
+			finishedHash: params.usdcTxHash,
+			displayJson,
+			currency: cur,
+			currencyAmount: params.totalCurrencyAmount,
+			gasWei: gasFields.gasWei,
+			gasUSDC6: gasFields.gasUSDC6,
+			gasChainType: gasFields.gasChainType,
+			baseGas: gasFields.baseGas,
+			// settle 由 x402 facilitator 代付 gas，链上 fee payer 是 facilitator EOA；ledger 这里用 payer
+			// （顾客 EOA，发起 EIP-3009 授权的人）作为账面 feePayer，与既存 `submitBeamioTransferIndexerAccountingToMaster`
+			// (`source='x402'`) 的口径一致。
+			feePayer: ethers.getAddress(params.payer),
+			source: 'x402',
+			payeeEOA: ethers.getAddress(params.cardOwner),
+			merchantCardAddress: ethers.getAddress(params.cardAddress),
+			ledgerTxId: params.usdcTxHash,
+			ledgerOriginalPaymentHash: ethers.ZeroHash,
+			ledgerTxCategory: TX_CATEGORY_USDC_CHARGE_SETTLE,
+			ledgerFinalRequestAmountFiat6: totalFiat6,
+			ledgerFinalRequestAmountUSDC6: usdcAmount6Str,
+			ledgerMetaRequestAmountFiat6: subtotalFiat6,
+			ledgerMetaRequestAmountUSDC6: usdcAmount6Str,
+			ledgerMetaDiscountAmountFiat6: params.discountAmountFiat6 ?? '0',
+			ledgerMetaDiscountRateBps: Number.isFinite(Number(params.discountRateBps)) ? Number(params.discountRateBps) : 0,
+			ledgerMetaTaxAmountFiat6: params.taxAmountFiat6 ?? '0',
+			ledgerMetaTaxRateBps: Number.isFinite(Number(params.taxRateBps)) ? Number(params.taxRateBps) : 0,
+			bServiceUSDC6: '0',
+			bServiceUnits6: '0',
+			routeItems: [
+				{
+					asset: USDC_BASE_ADDRESS,
+					amountE6: usdcAmount6Str,
+					assetType: 0,
+					source: 0,
+					tokenId: '0',
+					itemCurrencyType: 4, // USDC
+					offsetInRequestCurrencyE6: usdcAmount6Str,
+				},
+			],
+		}
+
+		const option: RequestOptions = {
+			hostname: 'localhost',
+			path: '/api/beamioTransferIndexerAccounting',
+			port: masterServerPort,
+			method: 'POST',
+			protocol: 'http:',
+			headers: { 'Content-Type': 'application/json' },
+		}
+
+		await new Promise<void>((resolve) => {
+			const req = httpRequest(option, (resp) => {
+				let buf = ''
+				resp.on('data', (c) => { buf += c.toString() })
+				resp.on('end', () => {
+					if ((resp.statusCode || 500) >= 400) {
+						logger(Colors.yellow(
+							`[submitUsdcChargeSettleIndexer] master returned ${resp.statusCode} body=${buf.slice(0, 240)} ` +
+							`USDC_tx=${params.usdcTxHash} payer=${params.payer.slice(0, 10)}… cardOwner=${params.cardOwner.slice(0, 10)}…`
+						))
+					} else {
+						logger(Colors.cyan(
+							`[submitUsdcChargeSettleIndexer] enqueued OK USDC_tx=${params.usdcTxHash} ` +
+							`payer=${params.payer.slice(0, 10)}… cardOwner=${params.cardOwner.slice(0, 10)}… usdc6=${usdcAmount6Str} sid=${params.sid ?? 'n/a'}`
+						))
+					}
+					resolve()
+				})
+			})
+			req.once('error', (e) => {
+				logger(Colors.yellow(`[submitUsdcChargeSettleIndexer] master unreachable: ${e.message}`))
+				resolve()
+			})
+			req.write(JSON.stringify(body))
+			req.end()
+		})
+	} catch (err: any) {
+		logger(Colors.yellow(`[submitUsdcChargeSettleIndexer] non-critical: ${err?.message ?? String(err)}`))
+	}
+}
+
 /** 将 gasWei 通过 BeamioOracle 换算为 gasUSDC6，供 beamioTransferIndexerAccounting 使用 */
 export const convertGasWeiToUSDC6 = async (gasWei: bigint): Promise<bigint> => {
 	const CURRENCY_USDC = 4

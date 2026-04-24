@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp, oracleBackoud, getOracleRequest, masterSetup, resolveBeamioBaseHttpRpcUrl} from '../util'
+import {getClientIp, oracleBackoud, getOracleRequest, masterSetup, resolveBeamioBaseHttpRpcUrl, submitUsdcChargeSettleIndexer} from '../util'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
@@ -2804,6 +2804,243 @@ const routing = ( router: Router ) => {
 				}).end()
 			} catch (err: any) {
 				logger(Colors.red(`[nfcUsdcCharge] master error: ${err?.message ?? err}`))
+				if (!res.headersSent) {
+					res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+				}
+			}
+		})
+
+		/** POST /api/usdcChargeRawSig —— WC v2 / 任意第三方钱包 raw EIP-3009 sig USDC@Base 直发
+		 *
+		 * 与 `/api/nfcUsdcCharge`（x402 路径）的关键区别：
+		 *   - 调用方（POS）已经从顾客钱包拿到完整 transferWithAuthorization (from,to,value,validAfter,validBefore,nonce,signature)；
+		 *     Master 这里**不走 x402 facilitator**、**不调 settle()**，直接用 service-admin EOA 在 Base 上提交 USDC 合约的
+		 *     `transferWithAuthorization(...)`。USDC 合约自己会做 EIP-712 校验 + nonce 防重放，所以即便我们自己也复算一次
+		 *     ECDSA 仅作为 fast-fail（避免烧白 gas）。
+		 *   - **不触发 orchestrator 双腿 topup→charge / mintPointsByAdmin** —— 第三方钱包顾客没有 BeamioTag 卡，没有 loyalty
+		 *     points 受益人；硬塞 `_requirePointsMintAllowsFirstMembership` 会撞 first-membership tier 阈值（< $10 Base tier 必 revert）。
+		 *     这里 settle 完成即视为终态：商户卡 owner EOA 直接收 USDC，记账落库，session → success。
+		 *
+		 * Cluster 端 `POST /api/nfcUsdcChargeRawSig` 已完成：sid 合法性、card.owner() / currency() / isAdmin(pos) 链上权威读、
+		 * breakdown 归一化、Oracle USDC 报价（usdcAmount6 = expected min）。Master 这里仅做：sig 复算 → 链上提交 → 记账 → 200。
+		 */
+		router.post('/usdcChargeRawSig', async (req, res) => {
+			const {
+				cardAddress,
+				cardOwner,
+				pos,
+				sid,
+				currency,
+				totalCurrencyAmount,
+				subtotalCurrencyAmount,
+				discountAmountFiat6,
+				discountRateBps,
+				taxAmountFiat6,
+				taxRateBps,
+				tipCurrencyAmount,
+				tipRateBps,
+				usdcAmount6,
+				payer,
+				validAfter,
+				validBefore,
+				nonce,
+				signature,
+			} = (req.body ?? {}) as {
+				cardAddress?: string
+				cardOwner?: string
+				pos?: string
+				sid?: string
+				currency?: string
+				totalCurrencyAmount?: string
+				subtotalCurrencyAmount?: string
+				discountAmountFiat6?: string
+				discountRateBps?: number
+				taxAmountFiat6?: string
+				taxRateBps?: number
+				tipCurrencyAmount?: string
+				tipRateBps?: number
+				usdcAmount6?: string
+				payer?: string
+				validAfter?: string | number
+				validBefore?: string | number
+				nonce?: string
+				signature?: string
+			}
+			try {
+				if (!cardAddress || !ethers.isAddress(cardAddress)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' }).end()
+				}
+				if (!cardOwner || !ethers.isAddress(cardOwner)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid cardOwner' }).end()
+				}
+				if (!payer || !ethers.isAddress(payer)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid payer (EIP-3009 from)' }).end()
+				}
+				if (!usdcAmount6 || !/^\d+$/.test(usdcAmount6) || BigInt(usdcAmount6) <= 0n) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid usdcAmount6 (expect positive uint256 decimal string)' }).end()
+				}
+				if (!nonce || !/^0x[0-9a-fA-F]{64}$/.test(nonce)) {
+					return res.status(400).json({ success: false, error: 'Invalid nonce (expect 0x-prefixed 32-byte hex)' }).end()
+				}
+				if (!signature || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+					return res.status(400).json({ success: false, error: 'Invalid signature (expect 0x-prefixed 65-byte hex)' }).end()
+				}
+				const validAfterBig = BigInt(validAfter ?? '0')
+				const validBeforeBig = BigInt(validBefore ?? '0')
+				const nowSec = BigInt(Math.floor(Date.now() / 1000))
+				const TIME_TOLERANCE = 300n
+				if (validBeforeBig <= nowSec) {
+					return res.status(400).json({ success: false, error: `Authorization expired (validBefore=${validBeforeBig} <= now=${nowSec})` }).end()
+				}
+				if (validAfterBig > nowSec + TIME_TOLERANCE) {
+					return res.status(400).json({ success: false, error: `Authorization not yet valid (validAfter=${validAfterBig} > now=${nowSec})` }).end()
+				}
+
+				const cardAddressNorm = ethers.getAddress(cardAddress)
+				const cardOwnerNorm = ethers.getAddress(cardOwner)
+				const payerNorm = ethers.getAddress(payer)
+				const valueBig = BigInt(usdcAmount6)
+				const cur = String(currency ?? 'CAD').toUpperCase()
+				const sidNorm = typeof sid === 'string' && sid.trim().length > 0 ? sid.trim() : null
+				const posNorm = typeof pos === 'string' && ethers.isAddress(pos) ? ethers.getAddress(pos) : null
+
+				// fast-fail：本地 ECDSA 复算 EIP-712 TransferWithAuthorization；与 USDC 合约同 domain/types。
+				// 复算失败 ⇒ 不烧 gas、直接 400；复算通过 ⇒ 链上 USDC 合约会再校验一次（nonce 防重放只能在链上做）。
+				const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+				const USDC_EIP712_DOMAIN = {
+					name: 'USD Coin',
+					version: '2',
+					chainId: MASTER_BASE_CHAIN_ID,
+					verifyingContract: USDC_BASE,
+				}
+				const TRANSFER_WITH_AUTH_TYPES: Record<string, ethers.TypedDataField[]> = {
+					TransferWithAuthorization: [
+						{ name: 'from', type: 'address' },
+						{ name: 'to', type: 'address' },
+						{ name: 'value', type: 'uint256' },
+						{ name: 'validAfter', type: 'uint256' },
+						{ name: 'validBefore', type: 'uint256' },
+						{ name: 'nonce', type: 'bytes32' },
+					],
+				}
+				const message = {
+					from: payerNorm,
+					to: cardOwnerNorm,
+					value: valueBig,
+					validAfter: validAfterBig,
+					validBefore: validBeforeBig,
+					nonce: nonce as `0x${string}`,
+				}
+				let recovered: string
+				try {
+					recovered = ethers.verifyTypedData(USDC_EIP712_DOMAIN, TRANSFER_WITH_AUTH_TYPES, message, signature)
+				} catch (sigErr: any) {
+					logger(Colors.yellow(`[usdcChargeRawSig] sig recover threw: ${sigErr?.message ?? sigErr}`))
+					return res.status(400).json({ success: false, error: 'Signature recovery failed (malformed sig)' }).end()
+				}
+				if (ethers.getAddress(recovered) !== payerNorm) {
+					logger(Colors.yellow(
+						`[usdcChargeRawSig] sig signer ${recovered} != payer ${payerNorm} (card=${cardAddressNorm.slice(0, 10)}…)`
+					))
+					return res.status(400).json({ success: false, error: `EIP-3009 signer mismatch (recovered=${recovered}, payer=${payerNorm})` }).end()
+				}
+
+				const pk = (masterSetup as { settle_contractAdmin?: string[] }).settle_contractAdmin?.[0]
+				if (!pk) {
+					return res.status(500).json({ success: false, error: 'Service admin Base signer not configured (masterSetup.settle_contractAdmin[0])' }).end()
+				}
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const wallet = new ethers.Wallet(pk, provider)
+				const usdcAbi = [
+					'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature)',
+				]
+				const usdc = new ethers.Contract(USDC_BASE, usdcAbi, wallet)
+
+				let txHash: string | null = null
+				let blockNumber: number | null = null
+				try {
+					const tx = await usdc.transferWithAuthorization(
+						payerNorm,
+						cardOwnerNorm,
+						valueBig,
+						validAfterBig,
+						validBeforeBig,
+						nonce,
+						signature
+					)
+					txHash = tx.hash
+					logger(Colors.cyan(
+						`[usdcChargeRawSig] submit tx=${txHash} card=${cardAddressNorm.slice(0, 10)}… payer=${payerNorm.slice(0, 10)}… ` +
+						`cardOwner=${cardOwnerNorm.slice(0, 10)}… value6=${valueBig.toString()} sid=${sidNorm ?? 'n/a'}`
+					))
+					const rcpt = await tx.wait(1)
+					blockNumber = rcpt?.blockNumber ?? null
+					if (!rcpt || rcpt.status !== 1) {
+						logger(Colors.red(`[usdcChargeRawSig] tx reverted on-chain status=${rcpt?.status} hash=${txHash}`))
+						return res.status(502).json({ success: false, error: `USDC transferWithAuthorization reverted on-chain (tx=${txHash})`, USDC_tx: txHash }).end()
+					}
+				} catch (txErr: any) {
+					const msg = txErr?.shortMessage ?? txErr?.message ?? String(txErr)
+					logger(Colors.red(`[usdcChargeRawSig] submit tx failed: ${msg}`))
+					return res.status(502).json({ success: false, error: `USDC transferWithAuthorization failed: ${msg}` }).end()
+				}
+
+				logger(Colors.green(
+					`[usdcChargeRawSig] OK card=${cardAddressNorm} cardOwner=${cardOwnerNorm} pos=${posNorm ? posNorm.slice(0, 10) + '…' : '(none)'} ` +
+					`USDC_tx=${txHash} payer=${payerNorm} usdc6=${valueBig.toString()} block=${blockNumber} ` +
+					`currency=${cur} subtotal=${subtotalCurrencyAmount ?? '0'} discountE6=${discountAmountFiat6 ?? '0'}` +
+					`(${discountRateBps ?? 0}bps) taxE6=${taxAmountFiat6 ?? '0'}(${taxRateBps ?? 0}bps) ` +
+					`tip=${tipCurrencyAmount ?? '0'}(${tipRateBps ?? 0}bps) total=${totalCurrencyAmount ?? '0'} ` +
+					`sid=${sidNorm ?? 'n/a'} mode=raw-sig (no orchestrator)`
+				))
+
+				// PR (USDC settle 独立记账)：raw-sig 路径不走 orchestrator（无 L1 topup / L2 charge 行），
+				// 唯一的 ledger 行就是这条 USDC settle 行。fire-and-forget enqueue（同 cluster /api/nfcUsdcCharge 路径）。
+				// helper 内部走 localhost POST `/api/beamioTransferIndexerAccounting` —— 即便我们已在 Master 进程内，
+				// 也保持同一条 enqueue 路径（含 currency/from-to 预检）以避免重复实现校验逻辑。
+				if (txHash) {
+					void submitUsdcChargeSettleIndexer({
+						payer: payerNorm,
+						cardOwner: cardOwnerNorm,
+						cardAddress: cardAddressNorm,
+						posOperator: posNorm,
+						sid: sidNorm,
+						currency: cur,
+						subtotalCurrencyAmount: typeof subtotalCurrencyAmount === 'string' && subtotalCurrencyAmount.trim()
+							? subtotalCurrencyAmount
+							: (totalCurrencyAmount ?? '0'),
+						totalCurrencyAmount: typeof totalCurrencyAmount === 'string' && totalCurrencyAmount.trim()
+							? totalCurrencyAmount
+							: ethers.formatUnits(valueBig, 6),
+						discountAmountFiat6: typeof discountAmountFiat6 === 'string' ? discountAmountFiat6 : '0',
+						discountRateBps: Number(discountRateBps ?? 0),
+						taxAmountFiat6: typeof taxAmountFiat6 === 'string' ? taxAmountFiat6 : '0',
+						taxRateBps: Number(taxRateBps ?? 0),
+						tipCurrencyAmount: typeof tipCurrencyAmount === 'string' ? tipCurrencyAmount : '0',
+						tipRateBps: Number(tipRateBps ?? 0),
+						usdcTxHash: txHash,
+						usdcAmount6: valueBig,
+					}).catch((err: unknown) => {
+						const msg = err instanceof Error ? err.message : String(err)
+						logger(Colors.yellow(`[usdcChargeRawSig] USDC settle indexer enqueue failed (non-critical): ${msg}`))
+					})
+				}
+
+				return res.status(200).json({
+					success: true,
+					cardAddress: cardAddressNorm,
+					cardOwner: cardOwnerNorm,
+					pos: posNorm,
+					currency: cur,
+					totalCurrencyAmount: totalCurrencyAmount ?? null,
+					usdcAmount6: valueBig.toString(),
+					USDC_tx: txHash,
+					blockNumber,
+					payer: payerNorm,
+					sid: sidNorm,
+				}).end()
+			} catch (err: any) {
+				logger(Colors.red(`[usdcChargeRawSig] master error: ${err?.message ?? err}`))
 				if (!res.headersSent) {
 					res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
 				}

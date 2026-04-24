@@ -1,6 +1,6 @@
 import express, { Request, Response, Router} from 'express'
 import { GoogleGenAI } from '@google/genai'
-import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh } from '../util'
+import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh, submitUsdcChargeSettleIndexer } from '../util'
 import { checkSmartAccount } from '../MemberCard'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
@@ -1177,6 +1177,14 @@ const routing = ( router: Router ) => {
 			hk('requestAccounting'),
 			hk('sendUSDC'),
 			hk('x402Send'),
+			// Top-up B-Unit service fee legs are internal settlement of the parent
+			// top-up (same `originalPaymentHash` → topup tx hash). biz hides them
+			// via `mergeTopupBunitFeeRowsIntoTopups`; the POS Transactions screen
+			// has no place for the fee chip, so emit them as if they didn't exist
+			// (otherwise they surface as a spurious "Charge -$0.15" row alongside
+			// the actual top-up).
+			hk('nfcTopup:bunitService'),
+			hk('usdcTopup:bunitService'),
 		])
 		const normalizeCatHex = (cat: unknown): string => {
 			if (cat == null) return ''
@@ -3003,6 +3011,32 @@ const routing = ( router: Router ) => {
 					.end()
 			}
 
+			// 6. POS 作为 subordinate admin 的 airdrop 额度链路预检
+			//    USDC charge orchestrator 用 POS 的 admin sig 走 executeForAdmin → mintPointsByAdminWithOperator(operator=POS)，
+			//    GovernanceModule._enforceAndRecordAdminAirdropLimit 会沿 POS→…→cardOwner 沿途检查每一级
+			//    `adminAirdropLimit - adminAirdropUsed >= points6`（cardOwner 不受限）。POS 限额不够就在出 QR 前 fast-fail，
+			//    避免顾客 USDC 已结算给 cardOwner 但 loyalty mint 链上 revert 留下 reconcile_pending。
+			//    posAddr 缺省（向后兼容老 client）⇒ 用 cardOwner 自身做兜底（cardOwner 永远通过）。
+			const limitSignerForCheck = posAddr ?? onChainOwner
+			const airdropCheck = await nfcTopupPreCheckAdminAirdropLimit(cardAddr, limitSignerForCheck, points6)
+			if (!airdropCheck.success) {
+				logger(
+					Colors.yellow(
+						`[nfcUsdcChargePreCheck] admin airdrop limit FAIL card=${cardAddr.slice(0, 10)}… signer=${limitSignerForCheck.slice(0, 10)}… points6=${points6} err=${airdropCheck.error}`
+					)
+				)
+				return res
+					.status(400)
+					.json({
+						ok: false,
+						error: airdropCheck.error ?? 'Admin airdrop limit pre-check failed',
+						cardOwner: bunit.cardOwnerEOA ?? onChainOwner,
+						pos: posAddr,
+						estPoints6: points6.toString(),
+					})
+					.end()
+			}
+
 			logger(
 				Colors.green(
 					`[nfcUsdcChargePreCheck] OK card=${cardAddr.slice(0, 10)}… pos=${posAddr ? posAddr.slice(0, 10) + '…' : '(none)'} subtotal=${subtotalStr} ${cardCurrency} total=${breakdown.total.toFixed(2)} usdc6=${usdc6} points6=${points6} fee=${bunit.feeAmount} BUnits6`
@@ -3267,6 +3301,34 @@ const routing = ( router: Router ) => {
 				`mode=${hasNfcSun ? 'NFC' : 'no-NFC orchestrator'}`
 			))
 
+			// PR (USDC settle 独立记账)：USDC `transferWithAuthorization` 一旦 settle 成功（payer→cardOwner@Base），
+			// 立刻向 BeamioIndexerDiamond 推一行**独立** ledger（`TX_CATEGORY_USDC_CHARGE_SETTLE`），不依赖 L1 topup
+			// 主单的 `originating_usdc_tx` 反查；NFC + no-NFC orchestrator 两条 charge 路径共用此入口。
+			// fire-and-forget：失败仅 logger，不阻塞 200 响应 / orchestrator 启动 / NFC 模式 postLocalhost。
+			if (settled.USDC_tx) {
+				void submitUsdcChargeSettleIndexer({
+					payer: settled.payer,
+					cardOwner: payToOwner,
+					cardAddress: cardAddr,
+					posOperator: posAddr ?? null,
+					sid: sidNorm ?? null,
+					currency: effectiveCurrency,
+					subtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
+					totalCurrencyAmount: breakdown.total.toFixed(2),
+					discountAmountFiat6: fiat6(breakdown.discount),
+					discountRateBps: breakdown.discountBps,
+					taxAmountFiat6: fiat6(breakdown.tax),
+					taxRateBps: breakdown.taxBps,
+					tipCurrencyAmount: breakdown.tip.toFixed(2),
+					tipRateBps: breakdown.tipBps,
+					usdcTxHash: settled.USDC_tx,
+					usdcAmount6: settled.usdcAmount6,
+				}).catch((err: unknown) => {
+					const msg = err instanceof Error ? err.message : String(err)
+					logger(Colors.yellow(`[nfcUsdcCharge] USDC settle indexer enqueue failed (non-critical): ${msg}`))
+				})
+			}
+
 			// 5. 分流：
 			//    - NFC 模式 ⇒ 顾客是 BeamioTag 持卡人，沿用既有 Master `/api/nfcUsdcCharge` 仅做日志记账（PR #4 之前行为）；
 			//                 settle 成功即视为终态，session 直接进 success（顾客的 NFC tag 已绑定，无需 orchestrator）。
@@ -3420,6 +3482,258 @@ const routing = ( router: Router ) => {
 			logger(Colors.red(`[nfcUsdcChargeTopupAuth proxy] ${err?.message ?? err}`))
 			if (!res.headersSent) {
 				res.status(502).json({ success: false, error: 'Master unreachable' }).end()
+			}
+		}
+	})
+
+	/** POST /api/nfcUsdcChargeRawSig
+	 *
+	 * WC v2 / 任意第三方钱包路径：POS 在本地通过 WC 会话拿到顾客钱包对 EIP-3009 USDC.transferWithAuthorization 的离线签名后，
+	 * 直接 POST 这里把 raw sig 提交给 backend。**不走 x402** 包装（x402 facilitator 走 settle 需要 X-PAYMENT header）。
+	 *
+	 * 与 `/api/nfcUsdcCharge`（x402 路径）的拓扑差别：
+	 *   - x402 路径：verra-home 浏览器内 wrapFetchWithPayment 注入 X-PAYMENT 头 → cluster `settleBeamioX402ToCardOwner` →
+	 *     x402 facilitator 提交 USDC tx；session 状态机走 verifying → settling → topup_pending → … → success。
+	 *   - raw-sig 路径：POS 拿签名直接 POST raw 字段；cluster 校验 sid/card/breakdown/quote → 转发 Master 直接提交 USDC tx；
+	 *     **跳过 orchestrator 双腿**（第三方钱包顾客没有 BeamioTag/loyalty card，硬塞 mint points 会撞 first-membership tier
+	 *     阈值）；session 直接 verifying → settling → success。
+	 *
+	 * Body:
+	 *   { sid, card, pos, currency?, subtotal, discountBps?, taxBps?, tipBps?,
+	 *     payer (EIP-3009 from), value (USDC6 expected), validAfter, validBefore, nonce, signature }
+	 */
+	router.post('/nfcUsdcChargeRawSig', async (req, res) => {
+		const {
+			card,
+			pos,
+			sid,
+			currency,
+			subtotal,
+			discount,
+			tax,
+			tip,
+			discountBps,
+			taxBps,
+			tipBps,
+			payer,
+			value,
+			validAfter,
+			validBefore,
+			nonce,
+			signature,
+		} = req.body as {
+			card?: string
+			pos?: string
+			sid?: string
+			currency?: string
+			subtotal?: string | number
+			discount?: string | number
+			tax?: string | number
+			tip?: string | number
+			discountBps?: string | number
+			taxBps?: string | number
+			tipBps?: string | number
+			payer?: string
+			value?: string
+			validAfter?: string | number
+			validBefore?: string | number
+			nonce?: string
+			signature?: string
+		}
+		const sidNorm: string | null = isValidSid(sid) ? (sid as string).toLowerCase() : null
+		const sessionUpdate = (patch: Partial<ChargeSession>): void => {
+			if (!sidNorm) return
+			void masterSessionUpsert(sidNorm, patch as Record<string, unknown>)
+		}
+		try {
+			const cardField = (card ?? '').toString().trim()
+			if (!cardField || !ethers.isAddress(cardField)) {
+				sessionUpdate({ state: 'error', error: 'Invalid card' })
+				return res.status(400).json({ success: false, error: 'Invalid card' }).end()
+			}
+			const cardAddr = ethers.getAddress(cardField)
+			const posStr = (pos ?? '').toString().trim()
+			const posAddr = posStr && ethers.isAddress(posStr) ? ethers.getAddress(posStr) : null
+			const payerStr = (payer ?? '').toString().trim()
+			if (!payerStr || !ethers.isAddress(payerStr)) {
+				sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid payer (EIP-3009 from)' })
+				return res.status(400).json({ success: false, error: 'Invalid payer (EIP-3009 from)' }).end()
+			}
+			const payerAddr = ethers.getAddress(payerStr)
+			const valueStr = (value ?? '').toString().trim()
+			if (!valueStr || !/^\d+$/.test(valueStr) || BigInt(valueStr) <= 0n) {
+				sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid value (expect positive uint256 decimal)' })
+				return res.status(400).json({ success: false, error: 'Invalid value (expect positive uint256 decimal)' }).end()
+			}
+			const nonceStr = (nonce ?? '').toString().trim()
+			if (!/^0x[0-9a-fA-F]{64}$/.test(nonceStr)) {
+				sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid nonce (expect 32-byte hex)' })
+				return res.status(400).json({ success: false, error: 'Invalid nonce (expect 0x-prefixed 32-byte hex)' }).end()
+			}
+			const sigStr = (signature ?? '').toString().trim()
+			if (!/^0x[0-9a-fA-F]{130}$/.test(sigStr)) {
+				sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid signature (expect 65-byte hex)' })
+				return res.status(400).json({ success: false, error: 'Invalid signature (expect 0x-prefixed 65-byte hex)' }).end()
+			}
+			const validAfterStr = (validAfter ?? '0').toString().trim()
+			const validBeforeStr = (validBefore ?? '0').toString().trim()
+			if (!/^\d+$/.test(validAfterStr) || !/^\d+$/.test(validBeforeStr)) {
+				sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid validAfter/validBefore (expect uint256 decimal)' })
+				return res.status(400).json({ success: false, error: 'Invalid validAfter/validBefore (expect uint256 decimal)' }).end()
+			}
+
+			const breakdown = normalizeChargeBreakdown({ subtotal, discount, tax, tip, discountBps, taxBps, tipBps })
+			if (breakdown.total <= 0) {
+				sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid charge breakdown' })
+				return res.status(400).json({ success: false, error: 'Invalid charge breakdown (total must be > 0)' }).end()
+			}
+			sessionUpdate({
+				state: 'verifying',
+				cardAddr,
+				pos: posAddr,
+				subtotal: breakdown.subtotal.toFixed(2),
+				discount: breakdown.discount.toFixed(2),
+				tax: breakdown.tax.toFixed(2),
+				tip: breakdown.tip.toFixed(2),
+				total: breakdown.total.toFixed(2),
+				discountBps: breakdown.discountBps,
+				taxBps: breakdown.taxBps,
+				tipBps: breakdown.tipBps,
+			})
+
+			// 链上权威读 owner / currency / isAdmin(pos) —— 与 /api/nfcUsdcCharge 同口径，cardOwner 永远以链上为准（防伪 URL）。
+			let onChainOwner: string | null = null
+			let onChainCurrency: string | null = null
+			let isAdminPos: boolean = posAddr === null
+			try {
+				const cprep = new ethers.Contract(
+					cardAddr,
+					[
+						'function owner() view returns (address)',
+						'function currency() view returns (uint8)',
+						'function isAdmin(address) view returns (bool)',
+					],
+					providerBase
+				)
+				const ownerP = cprep.owner() as Promise<string>
+				const curP = cprep.currency() as Promise<bigint | number>
+				const adminP = posAddr ? (cprep.isAdmin(posAddr) as Promise<boolean>) : Promise.resolve(true)
+				const [o, ce, ad] = await Promise.all([ownerP, curP, adminP])
+				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
+				const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+				onChainCurrency = currencyMap[Number(ce)] ?? null
+				isAdminPos = !!ad
+			} catch (_) { /* tolerate transient rpc */ }
+			if (!onChainOwner) {
+				sessionUpdate({ state: 'error', error: 'Cannot resolve card.owner() on-chain' })
+				return res.status(400).json({ success: false, error: 'Cannot resolve card.owner() on-chain' }).end()
+			}
+			if (posAddr && !isAdminPos && posAddr !== onChainOwner) {
+				sessionUpdate({ state: 'error', cardOwner: onChainOwner, error: 'pos not admin/owner of card' })
+				return res
+					.status(400)
+					.json({ success: false, error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…` })
+					.end()
+			}
+			const payToOwner = onChainOwner
+
+			const cur = ((currency ?? '').toString().trim().toUpperCase() || onChainCurrency || 'CAD')
+			const effectiveCurrency = onChainCurrency ?? cur
+			sessionUpdate({ cardOwner: payToOwner, currency: effectiveCurrency })
+
+			// USDC 报价：与 NFC charge 同 Oracle 路径；report payload value 必须 ≥ 报价（容许多支付）。
+			const totalStr = breakdown.total.toFixed(6)
+			const quotedUsdc6 = quoteCurrencyToUsdc6(totalStr, effectiveCurrency)
+			if (quotedUsdc6 <= 0n) {
+				const fresh = isOracleFresh()
+				logger(Colors.yellow(`[nfcUsdcChargeRawSig] oracle quote=0 cur=${effectiveCurrency} total=${totalStr} fresh=${fresh}`))
+				const errMsg = fresh
+					? `Oracle rate not available for ${effectiveCurrency}, please retry shortly`
+					: `Oracle rate stale, please retry shortly`
+				sessionUpdate({ state: 'error', error: errMsg })
+				return res.status(503).json({ success: false, error: errMsg }).end()
+			}
+			const valueBig = BigInt(valueStr)
+			if (valueBig < quotedUsdc6) {
+				const errMsg = `Authorization value < quote (auth=${valueBig} < quote=${quotedUsdc6})`
+				sessionUpdate({ state: 'error', error: errMsg })
+				return res.status(400).json({ success: false, error: errMsg }).end()
+			}
+
+			sessionUpdate({ state: 'settling' })
+			const fiat6 = (n: number): string => BigInt(Math.max(0, Math.round(n * 1_000_000))).toString()
+
+			const masterPayload = {
+				cardAddress: cardAddr,
+				cardOwner: payToOwner,
+				pos: posAddr,
+				sid: sidNorm,
+				currency: effectiveCurrency,
+				totalCurrencyAmount: breakdown.total.toFixed(2),
+				subtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
+				discountAmountFiat6: fiat6(breakdown.discount),
+				discountRateBps: breakdown.discountBps,
+				taxAmountFiat6: fiat6(breakdown.tax),
+				taxRateBps: breakdown.taxBps,
+				tipCurrencyAmount: breakdown.tip.toFixed(2),
+				tipRateBps: breakdown.tipBps,
+				usdcAmount6: valueBig.toString(),
+				payer: payerAddr,
+				validAfter: validAfterStr,
+				validBefore: validBeforeStr,
+				nonce: nonceStr,
+				signature: sigStr,
+			}
+
+			let masterResp: { statusCode: number; body: string }
+			try {
+				masterResp = await postLocalhostBuffer('/api/usdcChargeRawSig', masterPayload)
+			} catch (proxyErr: any) {
+				const msg = proxyErr?.message ?? String(proxyErr)
+				logger(Colors.red(`[nfcUsdcChargeRawSig] master proxy: ${msg}`))
+				sessionUpdate({ state: 'error', error: `Master unreachable: ${msg}` })
+				return res.status(502).json({ success: false, error: `Master unreachable: ${msg}` }).end()
+			}
+			let masterJson: { success?: boolean; error?: string; USDC_tx?: string; payer?: string; usdcAmount6?: string; blockNumber?: number | null } = {}
+			try { masterJson = JSON.parse(masterResp.body) } catch { /* keep empty */ }
+			if (masterResp.statusCode !== 200 || !masterJson.success) {
+				const errMsg = masterJson.error ?? `Master submit failed (HTTP ${masterResp.statusCode})`
+				sessionUpdate({ state: 'error', error: errMsg })
+				return res.status(masterResp.statusCode === 200 ? 502 : masterResp.statusCode).setHeader('Content-Type', 'application/json').send(masterResp.body).end()
+			}
+
+			logger(Colors.green(
+				`[nfcUsdcChargeRawSig] settle OK card=${cardAddr} pos=${posAddr ? posAddr.slice(0, 10) + '…' : '(none)'} ` +
+				`payer=${payerAddr} USDC_tx=${masterJson.USDC_tx} usdc6=${valueBig.toString()} sid=${sidNorm ?? '(none)'} ` +
+				`mode=raw-sig (no orchestrator)`
+			))
+
+			sessionUpdate({
+				state: 'success',
+				usdcAmount6: valueBig.toString(),
+				USDC_tx: masterJson.USDC_tx ?? null,
+				payer: payerAddr,
+				error: null,
+			})
+
+			return res.status(200).json({
+				success: true,
+				cardAddress: cardAddr,
+				cardOwner: payToOwner,
+				pos: posAddr,
+				currency: effectiveCurrency,
+				totalCurrencyAmount: breakdown.total.toFixed(2),
+				usdcAmount6: valueBig.toString(),
+				USDC_tx: masterJson.USDC_tx ?? null,
+				blockNumber: masterJson.blockNumber ?? null,
+				payer: payerAddr,
+				sid: sidNorm,
+			}).end()
+		} catch (err: any) {
+			logger(Colors.red(`[nfcUsdcChargeRawSig] error: ${err?.message ?? err}`))
+			sessionUpdate({ state: 'error', error: err?.message ?? String(err) })
+			if (!res.headersSent) {
+				res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
 			}
 		}
 	})
