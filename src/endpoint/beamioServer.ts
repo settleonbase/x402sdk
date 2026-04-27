@@ -1251,7 +1251,7 @@ const routing = ( router: Router ) => {
 			type SimplifiedItem = {
 				id: string
 				originalPaymentHash?: string
-				type: 'topUp' | 'charge'
+				type: 'topUp' | 'charge' | 'tip'
 				txCategory: string
 				timestamp: number
 				payer: string
@@ -1287,9 +1287,10 @@ const routing = ( router: Router ) => {
 				for (const tx of page ?? []) {
 					if (!tx?.exists || !tx?.id) continue
 					const catHex = normalizeCatHex(tx.txCategory)
-					if (catHex === '' || SKIP_CATEGORIES_LOWER.has(catHex) || TIP_CATEGORIES_LOWER.has(catHex)) continue
+					if (catHex === '' || SKIP_CATEGORIES_LOWER.has(catHex)) continue
 					const isTopUp = TOPUP_CATEGORIES_LOWER.has(catHex)
-					const itemType: 'topUp' | 'charge' = isTopUp ? 'topUp' : 'charge'
+					const isTip = TIP_CATEGORIES_LOWER.has(catHex)
+					const itemType: 'topUp' | 'charge' | 'tip' = isTip ? 'tip' : isTopUp ? 'topUp' : 'charge'
 					const usdc6 = BigInt(tx.finalRequestAmountUSDC6 ?? 0n)
 					const fiat6 = BigInt(tx.finalRequestAmountFiat6 ?? 0n)
 					const measure6 = usdc6 > 0n ? usdc6 : fiat6
@@ -1302,7 +1303,7 @@ const routing = ( router: Router ) => {
 							continue
 						}
 						topUpSum6 += measure6
-					} else {
+					} else if (itemType === 'charge') {
 						const targetReached = chargeFromClear6 > 0n && chargeSum6 >= chargeFromClear6
 						if (targetReached) continue
 						if (chargeFromClear6 > 0n && chargeSum6 + measure6 > chargeFromClear6 + (chargeFromClear6 / 1000n)) {
