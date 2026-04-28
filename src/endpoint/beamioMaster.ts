@@ -1578,6 +1578,41 @@ const routing = ( router: Router ) => {
 			})
 		})
 
+		/** cardUpdateTiers：Cluster 已校验 owner signature + setTiers calldata；Master 执行链上 setTiers，确认后同步 metadata。 */
+		router.post('/cardUpdateTiers', async (req, res) => {
+			const body = req.body as {
+				cardAddress: string
+				data: string
+				deadline: number
+				nonce: string
+				ownerSignature: string
+				shareTokenMetadata: Record<string, unknown>
+				tiers?: Array<Record<string, unknown>>
+				upgradeType?: number
+				transferWhitelistEnabled?: boolean
+			}
+			executeForOwnerPool.push({
+				cardAddress: body.cardAddress,
+				data: body.data,
+				deadline: body.deadline,
+				nonce: body.nonce,
+				ownerSignature: body.ownerSignature,
+				res,
+				metadataUpdate: {
+					shareTokenMetadata: body.shareTokenMetadata,
+					...(body.tiers != null && { tiers: body.tiers }),
+					...(body.upgradeType != null && { upgradeType: body.upgradeType }),
+					...(typeof body.transferWhitelistEnabled === 'boolean' && {
+						transferWhitelistEnabled: body.transferWhitelistEnabled,
+					}),
+				},
+			})
+			logger(Colors.cyan(`[cardUpdateTiers] pushed to executeForOwnerPool, card=${body.cardAddress}`))
+			executeForOwnerProcess().catch((err: any) => {
+				logger(Colors.red('[executeForOwnerProcess] cardUpdateTiers unhandled error:'), err?.message ?? err)
+			})
+		})
+
 		/** AA→EOA：支持三种提交。(1) ERC-4337 UserOp → AAtoEOAProcess；(2) openContainerPayload → OpenContainerRelayProcess；(3) containerPayload（绑定 to）→ ContainerRelayProcess。requestHash 预检已由 Cluster 完成 */
 		router.post('/AAtoEOA', (req, res) => {
 			const body = req.body as {

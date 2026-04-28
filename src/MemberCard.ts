@@ -2753,6 +2753,12 @@ export const executeForOwnerPool: {
 	description?: string
 	image?: string
 	background_color?: string
+	metadataUpdate?: {
+		shareTokenMetadata: Record<string, unknown>
+		tiers?: Array<Record<string, unknown>>
+		upgradeType?: number
+		transferWhitelistEnabled?: boolean
+	}
 }[] = []
 
 /** AA→EOA 转账请求：客户端提交 ERC-4337 已签字的 UserOp，由 Beamio 代付 Gas 并提交到链上 */
@@ -11278,6 +11284,23 @@ export const executeForOwnerProcess = async () => {
 			logger(Colors.green(`✅ executeForOwnerProcess + redeemForUser card=${obj.cardAddress} to=${obj.toUserEOA}`))
 		} else {
 			logger(Colors.green(`✅ executeForOwnerProcess card=${obj.cardAddress}`))
+		}
+		if (obj.metadataUpdate) {
+			const receipt = await tx.wait()
+			if (!receipt || Number(receipt.status ?? 0) !== 1) {
+				throw new Error('executeForOwner transaction failed before metadata update')
+			}
+			const meta = await applyBeamioCardShareMetadataUpdate({
+				cardAddress: obj.cardAddress,
+				shareTokenMetadata: obj.metadataUpdate.shareTokenMetadata,
+				...(obj.metadataUpdate.tiers != null && { tiers: obj.metadataUpdate.tiers }),
+				...(obj.metadataUpdate.upgradeType != null && { upgradeType: obj.metadataUpdate.upgradeType }),
+				...(typeof obj.metadataUpdate.transferWhitelistEnabled === 'boolean' && {
+					transferWhitelistEnabled: obj.metadataUpdate.transferWhitelistEnabled,
+				}),
+			})
+			if (!meta.success) throw new Error(meta.error ?? 'Metadata update failed after tier update')
+			logger(Colors.green(`[executeForOwnerProcess] card tiers metadata synced card=${obj.cardAddress}`))
 		}
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, ...(code != null && { code }), ...(hash && { hash }) }).end()
 		// createIssuedNft 成功后异步写入 EIP-1155 tier metadata，供 GET /metadata/0x{card}{tokenId}.json 返回

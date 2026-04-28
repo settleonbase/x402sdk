@@ -5046,6 +5046,129 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
+	/** cardUpdateTiers：owner 离线签字整体替换 BeamioUserCard.tiers，并同步 card metadata。 */
+	router.post('/cardUpdateTiers', async (req, res) => {
+		const body = req.body as {
+			cardAddress?: string
+			data?: string
+			deadline?: number
+			nonce?: string
+			ownerSignature?: string
+			shareTokenMetadata?: Record<string, unknown>
+			tiers?: Array<Record<string, unknown>>
+			upgradeType?: number
+			transferWhitelistEnabled?: boolean
+		}
+		const { cardAddress, data, deadline, nonce, ownerSignature } = body
+		if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
+			return res.status(400).json({ success: false, error: 'Missing required fields' }).end()
+		}
+		if (!ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end()
+		}
+		if (!ethers.isHexString(data)) {
+			return res.status(400).json({ success: false, error: 'Invalid calldata' }).end()
+		}
+		if (!ethers.isHexString(nonce, 32)) {
+			return res.status(400).json({ success: false, error: 'Invalid nonce' }).end()
+		}
+		if (!/^0x[0-9a-fA-F]{130}$/.test(String(ownerSignature))) {
+			return res.status(400).json({ success: false, error: 'Invalid ownerSignature' }).end()
+		}
+		const now = Math.floor(Date.now() / 1000)
+		if (!Number.isInteger(deadline) || deadline <= now) {
+			return res.status(400).json({ success: false, error: 'Deadline expired' }).end()
+		}
+		if (!body.shareTokenMetadata || typeof body.shareTokenMetadata !== 'object' || Array.isArray(body.shareTokenMetadata)) {
+			return res.status(400).json({ success: false, error: 'shareTokenMetadata object is required' }).end()
+		}
+		if (!Array.isArray(body.tiers) || body.tiers.length === 0) {
+			return res.status(400).json({ success: false, error: 'tiers array is required' }).end()
+		}
+		if (body.upgradeType != null) {
+			const ut = Number(body.upgradeType)
+			if (!Number.isInteger(ut) || ut < 0 || ut > 2) {
+				return res.status(400).json({ success: false, error: 'upgradeType must be 0, 1, or 2 if provided' }).end()
+			}
+		}
+		const setTiersIface = new ethers.Interface([
+			'function setTiers(tuple(uint256 minUsdc6,uint256 attr,uint256 tierExpirySeconds)[] newTiers)',
+			'function owner() view returns (address)',
+		])
+		let decoded: ethers.TransactionDescription | null
+		try {
+			decoded = setTiersIface.parseTransaction({ data })
+		} catch {
+			return res.status(400).json({ success: false, error: 'data must call setTiers' }).end()
+		}
+		if (!decoded || decoded.name !== 'setTiers') {
+			return res.status(400).json({ success: false, error: 'data must call setTiers' }).end()
+		}
+		const chainTiers = Array.from(decoded.args[0] as ArrayLike<any>).map((t) => ({
+			minUsdc6: BigInt(t.minUsdc6 ?? t[0]).toString(),
+			attr: Number(t.attr ?? t[1]),
+			tierExpirySeconds: BigInt(t.tierExpirySeconds ?? t[2]).toString(),
+		}))
+		if (chainTiers.length === 0) {
+			return res.status(400).json({ success: false, error: 'setTiers requires at least one tier' }).end()
+		}
+		if (body.tiers.length !== chainTiers.length) {
+			return res.status(400).json({ success: false, error: 'metadata tiers length must match setTiers calldata' }).end()
+		}
+		for (let i = 0; i < chainTiers.length; i++) {
+			if (BigInt(chainTiers[i].minUsdc6) <= 0n) {
+				return res.status(400).json({ success: false, error: `tiers[${i}].minUsdc6 must be > 0` }).end()
+			}
+			if (!Number.isInteger(chainTiers[i].attr) || chainTiers[i].attr < 0) {
+				return res.status(400).json({ success: false, error: `tiers[${i}].attr must be a non-negative integer` }).end()
+			}
+		}
+		for (let i = 0; i < body.tiers.length; i++) {
+			const meta = body.tiers[i]
+			if (!meta || typeof meta !== 'object') {
+				return res.status(400).json({ success: false, error: `tiers[${i}] must be an object` }).end()
+			}
+			const chain = chainTiers[i]
+			if (!chain || String(meta.minUsdc6) !== chain.minUsdc6 || Number(meta.attr) !== chain.attr) {
+				return res.status(400).json({ success: false, error: `tiers[${i}] metadata does not match setTiers calldata` }).end()
+			}
+		}
+		try {
+			const card = new ethers.Contract(ethers.getAddress(cardAddress), ['function owner() view returns (address)'], providerBase)
+			const owner = ethers.getAddress(await card.owner())
+			const digest = ethers.TypedDataEncoder.hash(
+				{
+					name: 'BeamioUserCardFactory',
+					version: '1',
+					chainId: BASE_CHAIN_ID,
+					verifyingContract: BASE_CARD_FACTORY,
+				},
+				{
+					ExecuteForOwner: [
+						{ name: 'cardAddress', type: 'address' },
+						{ name: 'dataHash', type: 'bytes32' },
+						{ name: 'deadline', type: 'uint256' },
+						{ name: 'nonce', type: 'bytes32' },
+					],
+				},
+				{
+					cardAddress: ethers.getAddress(cardAddress),
+					dataHash: ethers.keccak256(data),
+					deadline,
+					nonce,
+				}
+			)
+			const recovered = ethers.getAddress(ethers.recoverAddress(digest, ownerSignature))
+			if (recovered !== owner) {
+				return res.status(403).json({ success: false, error: 'Signer is not card owner' }).end()
+			}
+		} catch (e: any) {
+			return res.status(400).json({ success: false, error: e?.message ?? 'Failed to verify owner signature' }).end()
+		}
+		logger(Colors.green(`server /api/cardUpdateTiers preCheck OK, forwarding to master`), inspect({ cardAddress, tierCount: chainTiers.length }, false, 2, true))
+		postLocalhost('/api/cardUpdateTiers', req.body, res)
+	})
+
 	/** AA→EOA：支持三种提交。(1) packedUserOp；(2) openContainerPayload；(3) containerPayload（绑定 to）*/
 	router.post('/AAtoEOA', async (req, res) => {
 		// 入口数据检测：将 BigInt 转为 string，避免 downstream RPC / JSON 序列化错误
