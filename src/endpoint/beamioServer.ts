@@ -1,6 +1,6 @@
 import express, { Request, Response, Router} from 'express'
 import { GoogleGenAI } from '@google/genai'
-import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh, submitUsdcChargeSettleIndexer } from '../util'
+import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh, submitUsdcChargeSettleIndexer, TX_CATEGORY_TERMINAL_RESET } from '../util'
 import { checkSmartAccount } from '../MemberCard'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
@@ -1118,12 +1118,16 @@ const routing = ( router: Router ) => {
 	 * 该 admin 在指定 BeamioUserCard 上的「上次 clear 起累计」(`mintCounterFromClear` /
 	 * `transferAmountFromClear`)。
 	 *
-	 * 列表使用「running cumulative bound」裁剪：从最新一条开始累加 USDC6（fiat6 兜底），
+	 * **TX_Terminal_RESET**：若 indexer 中存在 `payee`=本 POS EOA 的最新一条 `TX_Terminal_RESET`，
+	 * `items` **仅保留**该行 `timestamp` **之后**的业务流水（该行本身不回传），并把该标点放在
+	 * `lastTerminalReset` 供客户端持久化到下一标点到来。
+	 *
+	 * 列表另使用「running cumulative bound」裁剪：从最新一条开始累加 USDC6（fiat6 兜底），
 	 * 一旦 topUpSum6 ≥ topUpFromClear6 且 chargeSum6 ≥ chargeFromClear6 即停止——确保
 	 * **items 的 topUp/charge 总和等于 admin/owner 清零后的金额**（与 `*FromClear` 对账）。
 	 *
 	 * Query: `eoa`（必填，POS 终端 EOA）；`infraCard`（必填，POS 注册的基础设施 BeamioUserCard）。
-	 * 返回 `{ ok, fromClear: { topUp6, charge6 }, items: [...] }` —— `items` 为简化后的行集，
+	 * 返回 `{ ok, fromClear: { topUp6, charge6 }, lastTerminalReset, items }` —— `items` 为简化后的行集，
 	 * iOS 直接渲染、按时间倒序（最新在最上方）。
 	 */
 	router.get('/posLedger', async (req, res) => {
@@ -1204,6 +1208,7 @@ const routing = ( router: Router ) => {
 			}
 			try { return ethers.hexlify(cat as ethers.BytesLike).toLowerCase() } catch { return '' }
 		}
+		const TERMINAL_RESET_LOWER = TX_CATEGORY_TERMINAL_RESET.toLowerCase()
 
 		try {
 			const stats = new ethers.Contract(cardAddr, ADMIN_STATS_FULL_ABI, providerConet)
@@ -1224,10 +1229,12 @@ const routing = ( router: Router ) => {
 			let total = 0n
 			try { total = await indexer.getAccountActionCount(adminAddr) } catch { total = 0n }
 			const totalNum = Number(total)
+			let lastTerminalResetMarker: { txId: string; timestamp: number; payer: string } | null = null
 			if (!Number.isFinite(totalNum) || totalNum <= 0) {
 				return res.status(200).json({
 					ok: true,
 					fromClear: { topUp6: topUpFromClear6.toString(), charge6: chargeFromClear6.toString() },
+					lastTerminalReset: null,
 					items: [],
 				}).end()
 			}
@@ -1273,6 +1280,7 @@ const routing = ( router: Router ) => {
 			let nextOffset = 0
 			let pages = 0
 			let stop = false
+			const adminLower = adminAddr.toLowerCase()
 			while (!stop && pages < HARD_PAGE_CAP && nextOffset < totalNum) {
 				const lim = Math.min(PAGE_SIZE, totalNum - nextOffset)
 				let page: IndexerTxRow[]
@@ -1287,6 +1295,24 @@ const routing = ( router: Router ) => {
 				for (const tx of page ?? []) {
 					if (!tx?.exists || !tx?.id) continue
 					const catHex = normalizeCatHex(tx.txCategory)
+
+					if (catHex === TERMINAL_RESET_LOWER && tx.payee) {
+						const payeeLc = ethers.getAddress(tx.payee).toLowerCase()
+						if (payeeLc === adminLower && !lastTerminalResetMarker) {
+							const tid =
+								typeof tx.id === 'string'
+									? (tx.id.startsWith('0x') ? tx.id : `0x${BigInt(tx.id).toString(16).padStart(64, '0')}`).toLowerCase()
+									: (`0x${BigInt(tx.id).toString(16).padStart(64, '0')}`).toLowerCase()
+							const markerTs = Number(tx.timestamp ?? 0n)
+							const payerLc = tx.payer ? ethers.getAddress(tx.payer).toLowerCase() : ''
+							lastTerminalResetMarker = { txId: tid, timestamp: markerTs, payer: payerLc }
+						}
+						continue
+					}
+
+					const fenceTs = lastTerminalResetMarker?.timestamp
+					if (fenceTs !== undefined && Number(tx.timestamp ?? 0n) <= fenceTs) continue
+
 					if (catHex === '' || SKIP_CATEGORIES_LOWER.has(catHex)) continue
 					const isTopUp = TOPUP_CATEGORIES_LOWER.has(catHex)
 					const isTip = TIP_CATEGORIES_LOWER.has(catHex)
@@ -1358,6 +1384,7 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({
 				ok: true,
 				fromClear: { topUp6: topUpFromClear6.toString(), charge6: chargeFromClear6.toString() },
+				lastTerminalReset: lastTerminalResetMarker,
 				items,
 			}).end()
 		} catch (e) {
@@ -4936,6 +4963,17 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		logger(Colors.green(`server /api/cardClearAdminMintCounter preCheck OK, forwarding to master`), inspect({ cardAddress: req.body?.cardAddress, subordinate: req.body?.subordinate }, false, 2, true))
 		postLocalhost('/api/cardClearAdminMintCounter', req.body, res)
+	})
+
+	/** cardTerminalSettlementClear：parent admin 签 TerminalSettlementClear；仅 indexer 标点，不与 Reset Terminal Limit（mint）混用。Cluster 预检后转发 Master */
+	router.post('/cardTerminalSettlementClear', async (req, res) => {
+		const preCheck = await cardTerminalSettlementClearPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardTerminalSettlementClear preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(Colors.green(`server /api/cardTerminalSettlementClear preCheck OK, forwarding to master`), inspect({ cardAddress: req.body?.cardAddress, subordinate: req.body?.subordinate }, false, 2, true))
+		postLocalhost('/api/cardTerminalSettlementClear', req.body, res)
 	})
 
 	/** cardCreateIssuedNft：owner 定义新发行 NFT 类型。Cluster 预检 data 为 createIssuedNft、maxSupply>0、日期合法、card 存在，合格转发 master executeForOwner，Master 代付 gas 上链 */

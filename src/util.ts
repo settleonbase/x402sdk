@@ -1239,6 +1239,9 @@ const estimateTransferGasFields = async (txHash: string): Promise<{
  * 与 PG `beamio_member_topup_events.originating_usdc_tx` 一致。 */
 export const TX_CATEGORY_USDC_CHARGE_SETTLE = ethers.keccak256(ethers.toUtf8Bytes('usdcCharge:settle')) as `0x${string}`
 
+/** Merchant OS parent admin reset POS terminal quotas on Base；CoNET indexer 单行标点：`payer`=上级 admin EOA，`payee`=Terminal EOA。 */
+export const TX_CATEGORY_TERMINAL_RESET = ethers.keccak256(ethers.toUtf8Bytes('TX_Terminal_RESET')) as `0x${string}`
+
 /** Fire-and-forget：USDC charge settle 成功后，独立向 BeamioIndexerDiamond 推一行 ledger。
  *
  * 复用既存 Master `/api/beamioTransferIndexerAccounting` 端点 + `beamioTransferIndexerAccountingPool`；

@@ -2,7 +2,7 @@ import { ethers } from 'ethers'
 import { randomUUID } from 'node:crypto'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
-import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6, getOracleRequest, isOracleFresh, resolveBeamioBaseHttpRpcUrl } from './util'
+import { masterSetup, checkSign, getBaseRpcUrlViaConetNode, getGuardianNodesCount, convertGasWeiToUSDC6, getOracleRequest, isOracleFresh, resolveBeamioBaseHttpRpcUrl, TX_CATEGORY_TERMINAL_RESET } from './util'
 import { Request, Response} from 'express'
 import { resolve, join } from 'node:path'
 import fs from 'node:fs'
@@ -10953,6 +10953,137 @@ export const cardClearAdminMintCounterPreCheck = async (body: {
 	}
 }
 
+/** Merchant OS 「Settlement clear」集群预检：仅 indexer 标点；签名为独立 EIP-712 类型 TerminalSettlementClear。校验 signer == card.adminParent(subordinate)。 */
+export const cardTerminalSettlementClearPreCheck = async (body: {
+	cardAddress?: string
+	subordinate?: string
+	deadline?: number
+	nonce?: string
+	adminSignature?: string
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, subordinate, deadline, nonce, adminSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!subordinate || !ethers.isAddress(subordinate)) return { success: false, error: 'Invalid subordinate' }
+	if (deadline == null || !nonce || !adminSignature) return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
+	if (deadline < Math.floor(Date.now() / 1000)) return { success: false, error: 'Signature expired' }
+	try {
+		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], providerBaseBackup)
+		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
+		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
+		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract: BASE_CARD_FACTORY }
+		const types = {
+			TerminalSettlementClear: [
+				{ name: 'cardAddress', type: 'address' },
+				{ name: 'subordinate', type: 'address' },
+				{ name: 'deadline', type: 'uint256' },
+				{ name: 'nonce', type: 'bytes32' },
+			],
+		}
+		const nonceBytes = nonce.length === 66 && nonce.startsWith('0x') ? (nonce as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`
+		const value = { cardAddress: ethers.getAddress(cardAddress), subordinate: ethers.getAddress(subordinate), deadline: Number(deadline), nonce: nonceBytes }
+		const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+		const signer = ethers.recoverAddress(digest, adminSignature)
+		if (ethers.getAddress(signer) !== ethers.getAddress(parent)) {
+			return { success: false, error: 'Signer must be subordinate\'s parent admin' }
+		}
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+/** Settlement clear 执行：仅 CoNET ActionFacet `syncTokenAction`，`txCategory=TX_Terminal_RESET`；不调用 Base Factory / 不清 mint 计数。 */
+export const cardTerminalSettlementClearProcess = async (payload: {
+	cardAddress: string
+	subordinate: string
+	deadline: number
+	nonce: string
+	adminSignature: string
+}): Promise<{ success: true; syncTx: string } | { success: false; error: string }> => {
+	const { cardAddress, subordinate, deadline, nonce, adminSignature } = payload
+	const pool = Settle_ContractPool
+	if (!pool?.length) return { success: false, error: 'Settle_ContractPool empty' }
+	const SC = pool[0]
+	const nonceBytes32 = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+	const cardNorm = ethers.getAddress(cardAddress)
+	const payeeTerminal = ethers.getAddress(subordinate)
+	const domain = {
+		name: 'BeamioUserCardFactory',
+		version: '1',
+		chainId: 8453,
+		verifyingContract: BASE_CARD_FACTORY,
+	}
+	const types = {
+		TerminalSettlementClear: [
+			{ name: 'cardAddress', type: 'address' },
+			{ name: 'subordinate', type: 'address' },
+			{ name: 'deadline', type: 'uint256' },
+			{ name: 'nonce', type: 'bytes32' },
+		],
+	}
+	const value = {
+		cardAddress: cardNorm,
+		subordinate: payeeTerminal,
+		deadline: Number(deadline),
+		nonce: nonceBytes32,
+	}
+	const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+	const payerParent = ethers.recoverAddress(digest, adminSignature as `0x${string}`)
+	const ledgerTxId = ethers.solidityPackedKeccak256(
+		['string', 'bytes32', 'address', 'address'],
+		['TX_Terminal_RESET:settlement:', nonceBytes32, cardNorm, payeeTerminal]
+	) as `0x${string}`
+	const displayJsonObj = {
+		title: 'Terminal settlement period',
+		source: 'terminalSettlementClear',
+		card: cardNorm,
+		terminal: payeeTerminal,
+	}
+	const nowSec = BigInt(Math.floor(Date.now() / 1000))
+	const resetInput = {
+		txId: ledgerTxId,
+		originalPaymentHash: ethers.ZeroHash,
+		chainId: BigInt(CONET_MAINNET_CHAIN_ID),
+		txCategory: TX_CATEGORY_TERMINAL_RESET,
+		displayJson: JSON.stringify(displayJsonObj),
+		timestamp: nowSec,
+		payer: ethers.getAddress(payerParent),
+		payee: payeeTerminal,
+		finalRequestAmountFiat6: 0n,
+		finalRequestAmountUSDC6: 0n,
+		isAAAccount: false,
+		route: [] as [],
+		fees: {
+			gasChainType: 0,
+			gasWei: 0n,
+			gasUSDC6: 0n,
+			serviceUSDC6: 0n,
+			bServiceUSDC6: 0n,
+			bServiceUnits6: 0n,
+			feePayer: ethers.ZeroAddress,
+		},
+		meta: {
+			requestAmountFiat6: 0n,
+			requestAmountUSDC6: 0n,
+			currencyFiat: 1,
+			discountAmountFiat6: 0n,
+			discountRateBps: 0,
+			taxAmountFiat6: 0n,
+			taxRateBps: 0,
+			afterNotePayer: '',
+			afterNotePayee: '',
+		},
+		operator: ethers.ZeroAddress,
+		operatorParentChain: [],
+		topAdmin: ethers.ZeroAddress,
+		subordinate: ethers.ZeroAddress,
+	}
+	const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
+	const txSync = await actionFacetSync.syncTokenAction(resetInput)
+	await txSync.wait()
+	return { success: true, syncTx: txSync.hash }
+}
+
 /** cardClearAdminMintCounter 执行：Master 调用 Factory.executeClearAdminMintCounter（Card 链上记账）与 Indexer.clearAdminMintCounterForSubordinate。 */
 export const cardClearAdminMintCounterProcess = async (payload: {
 	cardAddress: string
@@ -10979,10 +11110,11 @@ export const cardClearAdminMintCounterProcess = async (payload: {
 	)
 	await txCard.wait()
 
-	// 2) Indexer 记账
+	// 2) Indexer Stats：清零持卡侧计数（mint 等）
 	const statsFacet = new ethers.Contract(BeamioTaskIndexerAddress, StatsABI as ethers.InterfaceAbi, SC.walletConet)
 	const txIndexer = await statsFacet.clearAdminMintCounterForSubordinate(ethers.getAddress(cardAddress), ethers.getAddress(subordinate))
 	await txIndexer.wait()
+
 	return { success: true, tx: txCard.hash }
 }
 
