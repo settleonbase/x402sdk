@@ -5362,6 +5362,133 @@ const readCardTiers = async (
 	return tiers
 }
 
+/** 对齐 `BeamioUserCard._requirePointsMintAllowsFirstMembership`：无有效会员且配置了 tiers 时，`points6` 须 ≥ 全档最小的 `minUsdc6`。 */
+export async function nfcTopupPreCheckMintMinTierFirstMembership(
+	cardAddrRaw: string,
+	mintRecipientAddrRaw: string,
+	points6Mint: bigint
+): Promise<{ success: boolean; error?: string }> {
+	if (points6Mint <= 0n) return { success: true }
+	try {
+		const cardNorm = ethers.getAddress(cardAddrRaw.trim())
+		const mintUser = ethers.getAddress(mintRecipientAddrRaw.trim())
+
+		const membershipAbi = [
+			'function activeMembershipId(address) view returns (uint256)',
+			'function balanceOf(address,uint256) view returns (uint256)',
+			'function expiresAt(uint256) view returns (uint256)',
+			'function currency() view returns (uint8)',
+			'function pointsUnitPriceInCurrencyE6() view returns (uint256)',
+		]
+		const cardForTiers = new ethers.Contract(
+			cardNorm,
+			[...membershipAbi, 'function tiers(uint256) view returns (uint256 minUsdc6,uint256,uint256)'],
+			providerBaseBackup
+		)
+		const tiersResolved = await readCardTiers(cardForTiers, cardNorm)
+		if (tiersResolved.length === 0) return { success: true }
+
+		let minVal = tiersResolved[0].minUsdc6
+		for (const t of tiersResolved) {
+			if (t.minUsdc6 < minVal) minVal = t.minUsdc6
+		}
+		if (minVal <= 0n) return { success: true }
+
+		const aaFactoryAddr = ethers.getAddress(await getCardAaFactoryAddress(cardNorm))
+		const facAbi = ['function isBeamioAccount(address) view returns (bool)', 'function beamioAccountOf(address) view returns (address)']
+		const fac = new ethers.Contract(aaFactoryAddr, facAbi as ethers.InterfaceAbi, providerBaseBackup)
+
+		let acct: string
+		let isAcct = false
+		try {
+			isAcct = (await fac.isBeamioAccount(mintUser)) as boolean
+		} catch {
+			isAcct = false
+		}
+		if (isAcct) {
+			acct = mintUser
+		} else {
+			let aaPred: string = ethers.ZeroAddress
+			try {
+				aaPred = (await fac.beamioAccountOf(mintUser)) as string
+			} catch {
+				aaPred = ethers.ZeroAddress
+			}
+			if (!aaPred || ethers.getAddress(aaPred) === ethers.ZeroAddress) {
+				acct = ethers.ZeroAddress
+			} else {
+				acct = ethers.getAddress(aaPred)
+			}
+		}
+
+		let hasValid = false
+		if (acct !== ethers.ZeroAddress) {
+			try {
+				const cardM = new ethers.Contract(cardNorm, membershipAbi, providerBaseBackup)
+				const aid = BigInt(await cardM.activeMembershipId(acct))
+				if (aid > 0n) {
+					const bal = BigInt(await cardM.balanceOf(acct, aid))
+					const exp = BigInt(await cardM.expiresAt(aid))
+					const ts = BigInt(Math.floor(Date.now() / 1000))
+					const expired = exp !== 0n && ts > exp
+					if (bal > 0n && !expired) hasValid = true
+				}
+			} catch {
+				/* non-member — treat like contract would */
+			}
+		}
+
+		if (hasValid) return { success: true }
+		if (points6Mint >= minVal) return { success: true }
+
+		const currencyMap: Record<number, string> = {
+			0: 'CAD',
+			1: 'USD',
+			2: 'JPY',
+			3: 'CNY',
+			4: 'USDC',
+			5: 'HKD',
+			6: 'EUR',
+			7: 'SGD',
+			8: 'TWD',
+		}
+		const cardPricing = new ethers.Contract(cardNorm, membershipAbi, providerBaseBackup)
+		let ccy = 'CAD'
+		let priceE6 = 1_000_000n
+		try {
+			const curId = (await cardPricing.currency()) as bigint
+			ccy = currencyMap[Number(curId)] ?? 'CAD'
+			const p = (await cardPricing.pointsUnitPriceInCurrencyE6()) as bigint
+			if (p > 0n) priceE6 = p
+		} catch {
+			/* defaults above */
+		}
+
+		const ONE_E6 = 1_000_000n
+		const ceilDiv = (a: bigint, b: bigint) => {
+			if (b <= 0n) return 0n
+			return (a + b - 1n) / b
+		}
+		const minPayCur6 =
+			priceE6 > 0n ? ceilDiv(minVal * priceE6, ONE_E6) : minVal
+		let minFormatted: string
+		try {
+			const n = Number(ethers.formatUnits(minPayCur6, 6))
+			minFormatted = n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+		} catch {
+			minFormatted = ethers.formatUnits(minPayCur6, 6)
+		}
+
+		return {
+			success: false,
+			error: `No active membership for this customer. Top-up must be at least ${minFormatted} ${ccy} (first tier minimum for this card).`,
+		}
+	} catch (e: any) {
+		logger(Colors.yellow(`[nfcTopupPreCheckMintMinTierFirstMembership] skipped: ${e?.message ?? e}`))
+		return { success: true }
+	}
+}
+
 /** Indexer：NFC admin topup 卡 owner B-Unit 服务费单独一条（txId = CoNET consumeFromUser tx） */
 const TX_CATEGORY_NFC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('nfcTopup:bunitService')) as `0x${string}`
 /** Indexer：USDC buyPointsForUser topup 的 B-Unit 服务费单独一条 */
