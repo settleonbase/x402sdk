@@ -616,3 +616,136 @@ export const runUsdcChargeOrchestrator = async (
 	))
 	ctx.updateSession({ state: 'error', error: `Charge leg failed after retries: ${lastErr ?? 'unknown'}` })
 }
+
+/** POS + `sid` 的 USDC NFC Topup：USDC 已由顾客 x402 settle 至 cardOwner；挂点 mint 需 POS admin 签 ExecuteForAdmin（与 charge 编排器的 L1 同形，但 recipient 为 NFC 持卡人 EOA，无临时钱包 / 无 L2）。 */
+export interface UsdcNfcTopupPosOrchestratorContext {
+	sid: string
+	cardAddr: string
+	cardOwner: string
+	currency: string
+	currencyAmount: string
+	recipientEOA: string
+	prepared: { cardAddr: string; data: string; deadline: number; nonce: string }
+	originatingUSDCTx: string
+	usdcAmount6: string
+	payer: string
+	posOperator: string
+	nfcUid: string
+	nfcTagIdHex: string | null
+	provider: ethers.JsonRpcProvider
+	updateSession: (patch: OrchestratorSessionPatch) => void
+	awaitTopupSignature: (timeoutMs: number) => Promise<
+		{ ok: true; signature: string; signer: string } | { ok: false; error: string }
+	>
+	topupSignatureTimeoutMs?: number
+}
+
+export const runUsdcNfcTopupPosOrchestrator = async (ctx: UsdcNfcTopupPosOrchestratorContext): Promise<void> => {
+	if (!ctx.posOperator) {
+		ctx.updateSession({ state: 'error', error: 'POS operator missing; cannot solicit topup admin signature' })
+		return
+	}
+	const prepared = ctx.prepared
+	const bunit = await nfcTopupPreCheckBUnitFee(ctx.cardAddr, prepared.data)
+	if (!bunit.success) {
+		ctx.updateSession({ state: 'error', error: `topup B-Unit pre-check: ${bunit.error}` })
+		return
+	}
+	const points6 = tryParseMintPoints6(prepared.data)
+	ctx.updateSession({
+		state: 'awaiting_topup_auth',
+		pendingTopupCardAddr: prepared.cardAddr,
+		pendingTopupRecipientEOA: ctx.recipientEOA,
+		pendingTopupData: prepared.data,
+		pendingTopupDeadline: prepared.deadline,
+		pendingTopupNonce: prepared.nonce,
+		pendingTopupPoints6: points6 != null ? points6.toString() : null,
+		pendingTopupBUnitFee: bunit.feeAmount?.toString() ?? '0',
+	})
+	logger(
+		Colors.cyan(
+			`[orchestrator-USDC-topup] sid=${ctx.sid.slice(0, 8)}… awaiting_topup_auth: recipient=${ctx.recipientEOA.slice(0, 10)}… ` +
+				`points6=${points6?.toString() ?? 'n/a'} feeBUnits=${bunit.feeAmount?.toString() ?? 'n/a'} ` +
+				`deadline=${prepared.deadline} expecting POS=${ctx.posOperator.slice(0, 10)}…`
+		)
+	)
+
+	const sigWait = await ctx.awaitTopupSignature(ctx.topupSignatureTimeoutMs ?? DEFAULT_TOPUP_SIG_TIMEOUT_MS)
+	if (!sigWait.ok) {
+		ctx.updateSession({ state: 'error', error: `awaiting POS topup auth: ${sigWait.error}` })
+		return
+	}
+	logger(
+		Colors.green(
+			`[orchestrator-USDC-topup] sid=${ctx.sid.slice(0, 8)}… POS topup auth received signer=${sigWait.signer.slice(0, 10)}…`
+		)
+	)
+
+	ctx.updateSession({ state: 'topup_pending' })
+
+	let resp: { status: number; body: string }
+	try {
+		resp = await callMasterJson('/api/nfcUsdcTopup', {
+			cardAddr: prepared.cardAddr,
+			data: prepared.data,
+			deadline: prepared.deadline,
+			nonce: prepared.nonce,
+			recipientEOA: ctx.recipientEOA,
+			cardOwner: ctx.cardOwner,
+			currency: ctx.currency,
+			currencyAmount: ctx.currencyAmount,
+			payer: ctx.payer,
+			USDC_tx: ctx.originatingUSDCTx,
+			usdcAmount6: ctx.usdcAmount6,
+			nfcUid: ctx.nfcUid,
+			...(ctx.nfcTagIdHex ? { nfcTagIdHex: ctx.nfcTagIdHex } : {}),
+			topupFeeBUnits: bunit.feeAmount?.toString() ?? '0',
+			originatingUSDCTx: ctx.originatingUSDCTx,
+			chargeSessionId: ctx.sid,
+			posOperator: ctx.posOperator,
+			topupSourceOverride: TOPUP_SOURCE_OVERRIDE,
+			preSignedAdminSignature: sigWait.signature,
+			preSignedAdminSigner: sigWait.signer,
+		})
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err)
+		ctx.updateSession({ state: 'error', error: `topup forward to master failed: ${msg}` })
+		return
+	}
+
+	if (resp.status !== 200 || !isSuccess(resp.body)) {
+		const m = extractError(resp.body) ?? `HTTP ${resp.status}`
+		ctx.updateSession({ state: 'error', error: `topup master rejected: ${m}` })
+		return
+	}
+
+	const txHash = extractTxHash(resp.body, ['txHash', 'USDC_tx', 'executeForAdmin_tx'])
+	if (!txHash) {
+		ctx.updateSession({ state: 'error', error: 'topup master returned no txHash' })
+		return
+	}
+
+	try {
+		const receipt = await ctx.provider.waitForTransaction(txHash, 1, L1_TX_CONFIRM_TIMEOUT_MS)
+		if (!receipt || receipt.status !== 1) {
+			ctx.updateSession({
+				state: 'error',
+				error: `topup tx ${txHash.slice(0, 10)}… not confirmed (status=${receipt?.status ?? 'null'})`,
+			})
+			return
+		}
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err)
+		ctx.updateSession({ state: 'error', error: `topup waitForTransaction: ${msg}` })
+		return
+	}
+
+	ctx.updateSession({
+		state: 'success',
+		topupTxHash: txHash,
+		pointsMinted6: points6 != null ? points6.toString() : undefined,
+		chargeTxHash: undefined,
+		error: null,
+	})
+	logger(Colors.green(`[orchestrator-USDC-topup] sid=${ctx.sid.slice(0, 8)}… done topupTx=${txHash.slice(0, 12)}…`))
+}

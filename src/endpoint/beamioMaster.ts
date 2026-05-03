@@ -104,6 +104,8 @@ type MasterChargeSessionState =
 	| 'settling'
 	| 'topup_pending'
 	| 'awaiting_topup_auth'
+	/** USDC x402 已结算到 cardOwner；待顾客在终端贴卡/扫码后再走 `nfcTopup` 完成 mint（与先 SUN 再付的旧 sid 路径分离） */
+	| 'awaiting_beneficiary'
 	| 'topup_confirmed'
 	| 'charge_pending'
 	| 'success'
@@ -2365,6 +2367,7 @@ const routing = ( router: Router ) => {
 				cashCurrencyAmount,
 				bonusCurrencyAmount,
 				currencyAmount,
+				usdcTopupSessionId,
 			} = req.body as {
 				cardAddr?: string
 				data?: string
@@ -2379,6 +2382,92 @@ const routing = ( router: Router ) => {
 				cashCurrencyAmount?: string
 				bonusCurrencyAmount?: string
 				currencyAmount?: string
+				usdcTopupSessionId?: string
+			}
+			/** 仅当本请求成功消费 `awaiting_beneficiary` session 时由本 handler 填入（忽略 body 里伪造的对账元数据）。 */
+			let usdcPhase2OriginatingTx: string | undefined
+			let usdcPhase2ChargeSid: string | undefined
+			let usdcPhase2PosOp: string | undefined
+			const usdcSidRaw = typeof usdcTopupSessionId === 'string' ? usdcTopupSessionId.trim().toLowerCase() : ''
+			if (usdcSidRaw && masterIsValidSid(usdcSidRaw)) {
+				masterPruneExpiredChargeSessions()
+				const rec = masterChargeSessions.get(usdcSidRaw)
+				if (!rec || rec.state !== 'awaiting_beneficiary') {
+					return res
+						.status(400)
+						.json({ success: false, error: 'Invalid USDC top-up session (not awaiting beneficiary)' })
+						.end()
+				}
+				const cardNorm = ethers.getAddress(String(cardAddr).trim())
+				if (!rec.cardAddr || ethers.getAddress(rec.cardAddr) !== cardNorm) {
+					return res.status(400).json({ success: false, error: 'USDC session card mismatch' }).end()
+				}
+				const parseTot = (raw: unknown): bigint => {
+					const t = String(raw ?? '')
+						.trim()
+						.replace(/,/g, '')
+					if (!t) return -1n
+					try {
+						return ethers.parseUnits(t, 6)
+					} catch {
+						return -1n
+					}
+				}
+				const totBody = parseTot(currencyAmount)
+				if (totBody < 0n) {
+					return res.status(400).json({ success: false, error: 'Missing currencyAmount for USDC phase-2 topup' }).end()
+				}
+				const anySplit =
+					(cardCurrencyAmount != null && String(cardCurrencyAmount).trim() !== '') ||
+					(cashCurrencyAmount != null && String(cashCurrencyAmount).trim() !== '') ||
+					(bonusCurrencyAmount != null && String(bonusCurrencyAmount).trim() !== '')
+				if (anySplit) {
+					const cE = parseTot(cardCurrencyAmount)
+					const cashE = parseTot(cashCurrencyAmount)
+					const bE = parseTot(bonusCurrencyAmount)
+					const totE = parseTot(currencyAmount)
+					if (cE < 0n || cashE < 0n || bE < 0n || totE < 0n) {
+						return res.status(400).json({ success: false, error: 'Invalid top-up currency split amounts' }).end()
+					}
+					if (totE <= 0n || cE + cashE + bE !== totE) {
+						return res.status(400).json({ success: false, error: 'Split amounts must sum to currencyAmount' }).end()
+					}
+				}
+				const sessTot = parseTot(rec.total)
+				if (sessTot < 0n || totBody !== sessTot) {
+					return res.status(400).json({ success: false, error: 'USDC session amount mismatch' }).end()
+				}
+				const curRec = (rec.currency ?? '').trim().toUpperCase()
+				if (curRec) {
+					let chainCur = ''
+					try {
+						const c = new ethers.Contract(
+							cardNorm,
+							['function currency() view returns (string)'],
+							providerBaseForLatestCards
+						)
+						chainCur = String(await c.currency()).trim().toUpperCase()
+					} catch {
+						chainCur = ''
+					}
+					if (chainCur && chainCur !== curRec) {
+						return res.status(400).json({ success: false, error: 'USDC session currency mismatch' }).end()
+					}
+				}
+				const usdcTx = rec.USDC_tx && /^0x[0-9a-fA-F]{64}$/.test(rec.USDC_tx) ? rec.USDC_tx.toLowerCase() : ''
+				if (!usdcTx) {
+					return res.status(400).json({ success: false, error: 'USDC session missing settle tx' }).end()
+				}
+				usdcPhase2OriginatingTx = usdcTx
+				usdcPhase2ChargeSid = usdcSidRaw
+				if (rec.pos && ethers.isAddress(rec.pos)) usdcPhase2PosOp = ethers.getAddress(rec.pos)
+				const now = Date.now()
+				masterChargeSessions.set(usdcSidRaw, {
+					...rec,
+					state: 'topup_pending',
+					error: null,
+					updatedAt: now,
+				})
 			}
 			if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
 				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' })
@@ -2440,6 +2529,13 @@ const routing = ( router: Router ) => {
 				topupKind: topupKind === 2 || topupKind === 3 ? topupKind : 2,
 				res,
 				topupCurrencySplit,
+				...(usdcPhase2ChargeSid && usdcPhase2OriginatingTx
+					? {
+							originatingUSDCTx: usdcPhase2OriginatingTx,
+							chargeSessionId: usdcPhase2ChargeSid,
+							...(usdcPhase2PosOp ? { posOperator: usdcPhase2PosOp } : {}),
+						}
+					: {}),
 			})
 			logger(Colors.green(`[nfcTopup] cardAddr=${cardAddr} uid=${uid ?? '(not provided)'} pushed to executeForAdminPool`))
 			executeForAdminProcess().catch((err: any) => {
@@ -2647,7 +2743,7 @@ const routing = ( router: Router ) => {
 				if (
 					patch.state !== undefined &&
 					typeof patch.state === 'string' &&
-					!['awaiting_payment','verifying','settling','topup_pending','awaiting_topup_auth','topup_confirmed','charge_pending','success','error'].includes(patch.state as string)
+					!['awaiting_payment','verifying','settling','topup_pending','awaiting_topup_auth','awaiting_beneficiary','topup_confirmed','charge_pending','success','error'].includes(patch.state as string)
 				) {
 					return res.status(400).json({ ok: false, error: `Invalid state: ${patch.state}` }).end()
 				}
