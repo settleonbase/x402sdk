@@ -2816,6 +2816,8 @@ export const OpenContainerRelayPool: {
 	nfcTaxRateBps?: number
 	/** owner 直属下级 OpenContainer Charge：POS 提交的 burn，relay 成功后焚烧入账 points（与 NFC/封闭 container 对齐） */
 	chargeOwnerChildBurn?: ChargeOwnerChildBurnPayload
+	/** 与 ContainerRelayPool：POS 终端 EOA，用于 indexer subordinate → accountActionIds(POS) */
+	posOperator?: string
 	res: Response
 }[] = []
 
@@ -3022,6 +3024,8 @@ export const beamioTransferIndexerAccountingPool: {
 	routeAmountE6?: string
 	/** Charge 记账：受益人 to 的 EOA，记入 subordinate。OpenContainer 已有；Container 需在 push 前解析 */
 	payeeEOA?: string
+	/** POS 终端 EOA：存在且非 payer/payee 时，作为 Diamond `subordinate` 写入 `accountActionIds`，便于 `posLedger`/getAccountTransactionsPaged(POS) */
+	posOperator?: string
 	/** Charge 记账：商户卡地址，用于推导 to 的上层 admin 的 AA 记入 topAdmin。可选，缺省时 open-container 用 BEAMIO_USER_CARD_ASSET_ADDRESS */
 	merchantCardAddress?: string
 	/** 覆盖 Diamond Transaction.txId（如 TX_TIP 子行使用 random bytes32） */
@@ -3280,7 +3284,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			subordinate: ethers.ZeroAddress,
 		}
 
-		// Charge 记账：subordinate=受益人 to 的 EOA，topAdmin=to 的上层 admin 的 AA 地址
+		// Charge 记账：subordinate 优先 posOperator（POS EOA，与 ActionFacet accountActionIds 对齐）；否则受益人 EOA。topAdmin 仍由 payee 链解析
 		const isCharge = obj.source === 'open-container' || obj.source === 'container' || (obj.routeItems && obj.routeItems.length > 0)
 		if (isCharge) {
 			let payeeEOA: string
@@ -3300,7 +3304,18 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 					payeeEOA = ethers.getAddress(obj.to)
 				}
 			}
-			transactionInput.subordinate = payeeEOA
+			/** ActionFacet：subordinate 与 payer/payee 均不同时才进 accountActionIds[subordinate]。POS charge 须用 POS EOA，否则仅 top-up 等会出现在 POS 维度。 */
+			let subordinateForLedger = payeeEOA
+			const posOpRaw = typeof obj.posOperator === 'string' ? obj.posOperator.trim() : ''
+			if (posOpRaw && ethers.isAddress(posOpRaw)) {
+				const posAddr = ethers.getAddress(posOpRaw)
+				const payerLc = transactionInput.payer.toLowerCase()
+				const payeeLc = transactionInput.payee.toLowerCase()
+				if (posAddr.toLowerCase() !== payerLc && posAddr.toLowerCase() !== payeeLc) {
+					subordinateForLedger = posAddr
+				}
+			}
+			transactionInput.subordinate = subordinateForLedger
 			const cardAddr = resolveChargeAccountingCardAddress(obj)
 			if (cardAddr) {
 				try {
@@ -3309,7 +3324,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 						transactionInput.topAdmin = ethers.getAddress(parentIsOwner.cardOwnerEOAForIndexer)
 						logger(
 							Colors.cyan(
-								`[beamioTransferIndexerAccountingProcess] Charge owner-direct: topAdmin=${transactionInput.topAdmin} (owner EOA) subordinate=${payeeEOA}`
+								`[beamioTransferIndexerAccountingProcess] Charge owner-direct: topAdmin=${transactionInput.topAdmin} (owner EOA) subordinate=${subordinateForLedger} payeeEOA=${payeeEOA}`
 							)
 						)
 					} else {
@@ -3334,7 +3349,11 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 							const aaCode = await SC.walletBase.provider!.getCode(topAdminAA)
 							if (aaCode && aaCode !== '0x' && aaCode.length > 2) {
 								transactionInput.topAdmin = ethers.getAddress(topAdminAA)
-								logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] Charge topAdmin=${transactionInput.topAdmin} subordinate=${payeeEOA}`))
+								logger(
+									Colors.cyan(
+										`[beamioTransferIndexerAccountingProcess] Charge topAdmin=${transactionInput.topAdmin} subordinate=${subordinateForLedger} payeeEOA=${payeeEOA}`
+									)
+								)
 							}
 						}
 					}
@@ -8180,6 +8199,7 @@ export const OpenContainerRelayProcess = async () => {
               ledgerMetaTaxRateBps: obj.nfcTaxRateBps,
             }
           : {}),
+        ...(obj.posOperator && ethers.isAddress(obj.posOperator) ? { posOperator: ethers.getAddress(obj.posOperator) } : {}),
       })
 
       if (hasOpenBillBreakdown && tipFiatE6Open > 0n) {
@@ -8233,6 +8253,7 @@ export const OpenContainerRelayProcess = async () => {
                 offsetInRequestCurrencyE6: tipUsdc6Open.toString(),
               },
             ],
+            ...(obj.posOperator && ethers.isAddress(obj.posOperator) ? { posOperator: ethers.getAddress(obj.posOperator) } : {}),
           })
         }
       }
@@ -8707,6 +8728,7 @@ export const ContainerRelayProcess = async () => {
             ledgerMetaTaxRateBps: obj.nfcTaxRateBps,
           }
         : {}),
+      ...(obj.posOperator && ethers.isAddress(obj.posOperator) ? { posOperator: ethers.getAddress(obj.posOperator) } : {}),
     })
 
     if (hasNfcBreakdown && tipFiatE6 > 0n) {
@@ -8758,6 +8780,7 @@ export const ContainerRelayProcess = async () => {
               offsetInRequestCurrencyE6: tipUsdc6.toString(),
             },
           ],
+          ...(obj.posOperator && ethers.isAddress(obj.posOperator) ? { posOperator: ethers.getAddress(obj.posOperator) } : {}),
         })
         logger(
           Colors.cyan(

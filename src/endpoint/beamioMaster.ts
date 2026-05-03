@@ -1719,6 +1719,10 @@ const routing = ( router: Router ) => {
 					return res.status(400).json({ success: false, error: preCheck.error ?? 'Invalid openContainerPayload' }).end()
 				}
 				const poolLenBefore = OpenContainerRelayPool.length
+				const posOpOpenNorm =
+					typeof body.posOperator === 'string' && ethers.isAddress(body.posOperator.trim())
+						? ethers.getAddress(body.posOperator.trim())
+						: undefined
 				OpenContainerRelayPool.push({
 					openContainerPayload: body.openContainerPayload,
 					currency: body.currency,
@@ -1761,6 +1765,7 @@ const routing = ( router: Router ) => {
 							? Math.max(0, Math.min(10000, Math.trunc(Number(body.nfcTaxRateBps))))
 							: undefined,
 					chargeOwnerChildBurn: body.chargeOwnerChildBurn,
+					posOperator: posOpOpenNorm,
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)

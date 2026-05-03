@@ -1779,8 +1779,47 @@ const routing = ( router: Router ) => {
 		)
 	})
 
-	/** POST /api/payByNfcUidSignContainer - 接受 Android 打包的未签名 container（写操作，Cluster 预检余额后转发 Master）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。 */
-	router.post('/payByNfcUidSignContainer', async (req, res) => {
+	/** POS USDC checkout — Beamio NFC：请求体与 `/api/payByNfcUidPrepare` 相同；独立路径便于观测 AA USDC + points 扣款巷道。 */
+	router.post('/nfcUsdcChargeNfcPrepare', async (req, res) => {
+		logger(Colors.cyan(`[nfcUsdcChargeNfcPrepare] cluster alias (same precheck as payByNfcUidPrepare)`))
+		const { uid, payee, amountUsdc6, amountFiat6, currency, e, c, m } = req.body as { uid?: string; payee?: string; amountUsdc6?: string; amountFiat6?: string; currency?: string; e?: string; c?: string; m?: string }
+		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+			return res.status(400).json({ ok: false, error: 'Missing uid' })
+		}
+		if (!payee || !ethers.isAddress(payee)) {
+			return res.status(400).json({ ok: false, error: 'Invalid payee' })
+		}
+		const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : ''
+		const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : ''
+		const fiat6Ok = fiat6Trim !== '' && /^[0-9]+$/.test(fiat6Trim) && BigInt(fiat6Trim) > 0n && currencyTrim !== ''
+		const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(String(amountUsdc6).trim()) && BigInt(String(amountUsdc6).trim()) > 0n
+		if (!fiat6Ok && !usdc6Ok) {
+			return res.status(400).json({ ok: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' })
+		}
+		const uidTrim = uid.trim()
+		const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
+		if (isNfcUid) {
+			const eTrim = typeof e === 'string' ? e.trim() : ''
+			const cTrim = typeof c === 'string' ? c.trim() : ''
+			const mTrim = typeof m === 'string' ? m.trim() : ''
+			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+				return res.status(403).json({ ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' })
+			}
+		}
+		postLocalhost(
+			'/api/payByNfcUidPrepare',
+			{
+				uid: uidTrim,
+				payee: ethers.getAddress(payee),
+				...(fiat6Ok ? { amountFiat6: fiat6Trim, currency: currencyTrim } : {}),
+				...(usdc6Ok ? { amountUsdc6 } : {}),
+				...(isNfcUid && { e, c, m }),
+			},
+			res
+		)
+	})
+
+	const clusterPayByNfcUidSignContainer = async (req: Request, res: Response) => {
 		const {
 			uid,
 			containerPayload,
@@ -1952,6 +1991,13 @@ const routing = ( router: Router ) => {
 			},
 			res
 		)
+	}
+
+	router.post('/payByNfcUidSignContainer', clusterPayByNfcUidSignContainer)
+	/** POS USDC checkout — Beamio NFC lane；请求体与 `/api/payByNfcUidSignContainer` 相同。 */
+	router.post('/nfcUsdcChargeNfcSign', async (req, res) => {
+		logger(Colors.cyan(`[nfcUsdcChargeNfcSign] alias handler == payByNfcUidSignContainer`))
+		return clusterPayByNfcUidSignContainer(req, res)
 	})
 
 	/** POST /api/payByNfcUid - 以 UID 支付（写操作，Cluster 预检后转发 Master）。
@@ -5233,6 +5279,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			nfcTaxAmountFiat6?: string
 			nfcTaxRateBps?: number
 			chargeOwnerChildBurn?: import('../MemberCard').ChargeOwnerChildBurnPayload
+			posOperator?: string
+			originatingUSDCTx?: string
+			chargeSessionId?: string
 		}
 		logger(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`)
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true))
@@ -5298,6 +5347,18 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				forText: body.forText,
 				requestHash: body.requestHash,
 				validDays: body.validDays,
+				merchantCardAddress: body.merchantCardAddress,
+				nfcSubtotalCurrencyAmount: body.nfcSubtotalCurrencyAmount,
+				nfcTipCurrencyAmount: body.nfcTipCurrencyAmount,
+				nfcTipRateBps: body.nfcTipRateBps,
+				nfcRequestCurrency: body.nfcRequestCurrency,
+				nfcDiscountAmountFiat6: body.nfcDiscountAmountFiat6,
+				nfcDiscountRateBps: body.nfcDiscountRateBps,
+				nfcTaxAmountFiat6: body.nfcTaxAmountFiat6,
+				nfcTaxRateBps: body.nfcTaxRateBps,
+				posOperator: body.posOperator,
+				originatingUSDCTx: body.originatingUSDCTx,
+				chargeSessionId: body.chargeSessionId,
 				...(body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object'
 					? { chargeOwnerChildBurn: body.chargeOwnerChildBurn }
 					: {}),
@@ -5424,6 +5485,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				nfcDiscountRateBps: body.nfcDiscountRateBps,
 				nfcTaxAmountFiat6: body.nfcTaxAmountFiat6,
 				nfcTaxRateBps: body.nfcTaxRateBps,
+				posOperator: body.posOperator,
+				originatingUSDCTx: body.originatingUSDCTx,
+				chargeSessionId: body.chargeSessionId,
 				...(body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object'
 					? { chargeOwnerChildBurn: body.chargeOwnerChildBurn }
 					: {}),
