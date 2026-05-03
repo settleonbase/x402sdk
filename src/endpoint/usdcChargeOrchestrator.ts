@@ -131,6 +131,15 @@ export interface UsdcChargeOrchestratorContext {
 	payer: string
 	/** POS 终端钱包（admin / owner of card），作为 operator 进入 admin 记账 */
 	posOperator: string | null
+	/** POS / session id（USDC 编排 L2 与 NFC 一致的 nfc* 记账拆项） */
+	nfcSubtotalCurrencyAmount: string
+	nfcRequestCurrency: string
+	nfcTipCurrencyAmount?: string
+	nfcTipRateBps?: number
+	nfcDiscountAmountFiat6?: string
+	nfcDiscountRateBps?: number
+	nfcTaxAmountFiat6?: string
+	nfcTaxRateBps?: number
 	/** Base chain provider；orchestrator 用它等 tx 确认 + 解析 AA + 读余额 */
 	provider: ethers.JsonRpcProvider
 	/** 进度推送回调（推 sid 的 in-memory `chargeSessions`） */
@@ -487,6 +496,22 @@ const runChargeLegOnce = async (
 			originatingUSDCTx: ctx.originatingUSDCTx,
 			chargeSessionId: ctx.sid,
 			posOperator: ctx.posOperator ?? undefined,
+			nfcSubtotalCurrencyAmount: ctx.nfcSubtotalCurrencyAmount,
+			nfcRequestCurrency: ctx.nfcRequestCurrency,
+			...(ctx.nfcTipCurrencyAmount != null && String(ctx.nfcTipCurrencyAmount).trim() !== ''
+				? { nfcTipCurrencyAmount: String(ctx.nfcTipCurrencyAmount).trim() }
+				: {}),
+			...(ctx.nfcTipRateBps != null && ctx.nfcTipRateBps > 0 ? { nfcTipRateBps: ctx.nfcTipRateBps } : {}),
+			...(ctx.nfcDiscountAmountFiat6 != null && String(ctx.nfcDiscountAmountFiat6).trim() !== ''
+				? { nfcDiscountAmountFiat6: String(ctx.nfcDiscountAmountFiat6).trim() }
+				: {}),
+			...(ctx.nfcDiscountRateBps != null && ctx.nfcDiscountRateBps > 0
+				? { nfcDiscountRateBps: ctx.nfcDiscountRateBps }
+				: {}),
+			...(ctx.nfcTaxAmountFiat6 != null && String(ctx.nfcTaxAmountFiat6).trim() !== ''
+				? { nfcTaxAmountFiat6: String(ctx.nfcTaxAmountFiat6).trim() }
+				: {}),
+			...(ctx.nfcTaxRateBps != null && ctx.nfcTaxRateBps > 0 ? { nfcTaxRateBps: ctx.nfcTaxRateBps } : {}),
 		})
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err)

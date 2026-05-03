@@ -1693,6 +1693,38 @@ const routing = ( router: Router ) => {
 					forText: body.forText?.trim() || undefined,
 					requestHash: body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined,
 					merchantCardAddress: body.merchantCardAddress && ethers.isAddress(body.merchantCardAddress) ? body.merchantCardAddress : undefined,
+					nfcSubtotalCurrencyAmount:
+						body.nfcSubtotalCurrencyAmount != null && String(body.nfcSubtotalCurrencyAmount).trim() !== ''
+							? String(body.nfcSubtotalCurrencyAmount).trim()
+							: undefined,
+					nfcTipCurrencyAmount:
+						body.nfcTipCurrencyAmount != null && String(body.nfcTipCurrencyAmount).trim() !== ''
+							? String(body.nfcTipCurrencyAmount).trim()
+							: undefined,
+					nfcTipRateBps:
+						body.nfcTipRateBps != null && Number.isFinite(Number(body.nfcTipRateBps))
+							? Math.max(0, Math.min(10000, Math.trunc(Number(body.nfcTipRateBps))))
+							: undefined,
+					nfcRequestCurrency:
+						body.nfcRequestCurrency != null && String(body.nfcRequestCurrency).trim() !== ''
+							? String(body.nfcRequestCurrency).trim()
+							: undefined,
+					nfcDiscountAmountFiat6:
+						body.nfcDiscountAmountFiat6 != null && String(body.nfcDiscountAmountFiat6).trim() !== ''
+							? String(body.nfcDiscountAmountFiat6).trim()
+							: undefined,
+					nfcDiscountRateBps:
+						body.nfcDiscountRateBps != null && Number.isFinite(Number(body.nfcDiscountRateBps))
+							? Math.max(0, Math.min(10000, Math.trunc(Number(body.nfcDiscountRateBps))))
+							: undefined,
+					nfcTaxAmountFiat6:
+						body.nfcTaxAmountFiat6 != null && String(body.nfcTaxAmountFiat6).trim() !== ''
+							? String(body.nfcTaxAmountFiat6).trim()
+							: undefined,
+					nfcTaxRateBps:
+						body.nfcTaxRateBps != null && Number.isFinite(Number(body.nfcTaxRateBps))
+							? Math.max(0, Math.min(10000, Math.trunc(Number(body.nfcTaxRateBps))))
+							: undefined,
 					chargeOwnerChildBurn: body.chargeOwnerChildBurn,
 					originatingUSDCTx: origUsdcTxNorm,
 					chargeSessionId: sidNorm,

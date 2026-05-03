@@ -3500,6 +3500,16 @@ const routing = ( router: Router ) => {
 				cardOwner: payToOwner,
 				currency: effectiveCurrency,
 				totalCurrencyAmount: breakdown.total.toFixed(2),
+				nfcSubtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
+				nfcRequestCurrency: effectiveCurrency,
+				...(breakdown.tip > 0 ? { nfcTipCurrencyAmount: breakdown.tip.toFixed(2) } : {}),
+				...(breakdown.tipBps > 0 ? { nfcTipRateBps: breakdown.tipBps } : {}),
+				...(breakdown.discount > 0
+					? { nfcDiscountAmountFiat6: String(Math.round(breakdown.discount * 1_000_000)) }
+					: {}),
+				...(breakdown.discountBps > 0 ? { nfcDiscountRateBps: breakdown.discountBps } : {}),
+				...(breakdown.tax > 0 ? { nfcTaxAmountFiat6: String(Math.round(breakdown.tax * 1_000_000)) } : {}),
+				...(breakdown.taxBps > 0 ? { nfcTaxRateBps: breakdown.taxBps } : {}),
 				originatingUSDCTx: settled.USDC_tx,
 				usdcAmount6: settled.usdcAmount6.toString(),
 				payer: settled.payer,

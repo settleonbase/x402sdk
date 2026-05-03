@@ -8605,7 +8605,12 @@ export const ContainerRelayProcess = async () => {
 
     const subtotalFiatE6 = await containerRelayFiatStringToE6(effectiveNfcSubtotalStr || undefined)
     const tipFiatE6 = await containerRelayFiatStringToE6(effectiveNfcTipStr || undefined)
-    const hasNfcBreakdown = !!obj.nfcUid && effectiveNfcSubtotalStr !== ''
+    /** NFC UID 流程，或 USDC settle→topup→charge 编排（有 chargeSessionId，无 SUN uid） */
+    const hasNfcBreakdown =
+      effectiveNfcSubtotalStr !== '' &&
+      (!!obj.nfcUid ||
+        (!!obj.chargeSessionId && String(obj.chargeSessionId).trim() !== ''))
+    const isOrchestratorUsdCharge = !obj.nfcUid && !!obj.chargeSessionId && effectiveNfcSubtotalStr !== ''
 
     let ledgerFinalFiat6: string | undefined
     let ledgerFinalUsdc6: string | undefined
@@ -8660,7 +8665,7 @@ export const ContainerRelayProcess = async () => {
     }
 
     const displayJsonData: DisplayJsonData = {
-      title: obj.nfcUid ? 'NFC Merchant Payment' : 'AA to EOA',
+      title: obj.nfcUid ? 'NFC Merchant Payment' : isOrchestratorUsdCharge ? 'USDC merchant charge' : 'AA to EOA',
       source: 'container',
       finishedHash: tx.hash,
       handle: obj.forText?.trim()?.slice(0, 80),
