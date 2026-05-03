@@ -5375,6 +5375,10 @@ const NFC_TOPUP_TX_CASH_UPGRADE_NEW_CARD = ethers.keccak256(ethers.toUtf8Bytes('
 const NFC_TOPUP_TX_CREDIT_NEW_CARD = ethers.keccak256(ethers.toUtf8Bytes('creditNewCard')) as `0x${string}`
 const NFC_TOPUP_TX_CASH_NEW_CARD = ethers.keccak256(ethers.toUtf8Bytes('cashNewCard')) as `0x${string}`
 const NFC_TOPUP_TX_BONUS_CARD = ethers.keccak256(ethers.toUtf8Bytes('bonusCard')) as `0x${string}`
+/** CoNET readme `TX_USDC_*`：USDC charge orchestrator L1（`topupSourceOverride === 'webPosNfcTopup'`）须走 USDC 类目，避免 POS History 误显示为 Card Top-Up。 */
+const NFC_TOPUP_TX_USDC_NEW_CARD = ethers.keccak256(ethers.toUtf8Bytes('usdcNewCard')) as `0x${string}`
+const NFC_TOPUP_TX_USDC_TOPUP_CARD = ethers.keccak256(ethers.toUtf8Bytes('usdcTopupCard')) as `0x${string}`
+const NFC_TOPUP_TX_USDC_UPGRADE_NEW_CARD = ethers.keccak256(ethers.toUtf8Bytes('usdcUpgradeNewCard')) as `0x${string}`
 
 function nfcTopupIndexerCategoryForLeg(
 	leg: 'credit' | 'cash' | 'bonus',
@@ -5384,6 +5388,20 @@ function nfcTopupIndexerCategoryForLeg(
 	if (base === 'topupCard') return leg === 'credit' ? NFC_TOPUP_TX_CREDIT_TOPUP_CARD : NFC_TOPUP_TX_CASH_TOPUP_CARD
 	if (base === 'upgradeNewCard') return leg === 'credit' ? NFC_TOPUP_TX_CREDIT_UPGRADE_NEW_CARD : NFC_TOPUP_TX_CASH_UPGRADE_NEW_CARD
 	return leg === 'credit' ? NFC_TOPUP_TX_CREDIT_NEW_CARD : NFC_TOPUP_TX_CASH_NEW_CARD
+}
+
+/** USDC charge orchestrator L1：`topupSourceOverride === 'webPosNfcTopup'` 且 **credit** 腿 → readme `TX_USDC_*`；cash/bonus 仍走 NFC 拆分类目。 */
+function nfcTopupIndexerCategoryForWebPosUsdcChargeLeg(
+	leg: 'credit' | 'cash' | 'bonus',
+	base: 'topupCard' | 'upgradeNewCard' | 'newCard',
+	effectiveTopupSource: string
+): `0x${string}` {
+	if (effectiveTopupSource === 'webPosNfcTopup' && leg === 'credit') {
+		if (base === 'topupCard') return NFC_TOPUP_TX_USDC_TOPUP_CARD
+		if (base === 'upgradeNewCard') return NFC_TOPUP_TX_USDC_UPGRADE_NEW_CARD
+		return NFC_TOPUP_TX_USDC_NEW_CARD
+	}
+	return nfcTopupIndexerCategoryForLeg(leg, base)
 }
 
 /** 与 Base `mintPointsByAdmin` txHash 组合生成唯一 `txId`（ActionFacet `tx exists`） */
@@ -6374,9 +6392,10 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 								: (finalRequestAmountUSDC6 * pts) / mintParsed.points6
 						if (usdcLeg < 0n) usdcLeg = 0n
 						if (i < legs.length - 1) usdcAllocated += usdcLeg
-						const cat = nfcTopupIndexerCategoryForLeg(
+						const cat = nfcTopupIndexerCategoryForWebPosUsdcChargeLeg(
 							legs[i]!.leg,
-							topupCategoryRaw as 'topupCard' | 'upgradeNewCard' | 'newCard'
+							topupCategoryRaw as 'topupCard' | 'upgradeNewCard' | 'newCard',
+							effectiveTopupSource
 						)
 						const legTitleSuffix =
 							legs[i]!.leg === 'credit' ? ' · Card' : legs[i]!.leg === 'cash' ? ' · Cash' : ' · Bonus'
@@ -6460,7 +6479,14 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 						)
 					)
 				} else {
-					const txCategoryTopup = ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`
+					const txCategoryTopup =
+						effectiveTopupSource === 'webPosNfcTopup'
+							? topupCategoryRaw === 'topupCard'
+								? NFC_TOPUP_TX_USDC_TOPUP_CARD
+								: topupCategoryRaw === 'upgradeNewCard'
+									? NFC_TOPUP_TX_USDC_UPGRADE_NEW_CARD
+									: NFC_TOPUP_TX_USDC_NEW_CARD
+							: (ethers.keccak256(ethers.toUtf8Bytes(topupCategoryRaw)) as `0x${string}`)
 					const input: PurchasingCardAccountingInput = {
 						txId: tx.hash as `0x${string}`,
 						originalPaymentHash: ethers.ZeroHash as `0x${string}`,

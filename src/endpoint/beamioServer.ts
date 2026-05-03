@@ -77,6 +77,10 @@ function posLedgerPaymentMethodLabel(row: PosLedgerRowForMethod): string {
 	if (row.type === 'tip') return ''
 	if (row.type === 'topUp') {
 		try {
+			// USDC charge orchestrator L1 rows use `TX_USDC_*` indexer categories but still carry
+			// `topupPaymentLeg: "credit"` (same split shape as NFC); category must win over leg label.
+			const fromCat = posLedgerTopupPaymentMethodFromCategoryHex(row.txCategory)
+			if (fromCat === 'USDC') return 'USDC'
 			const dj = JSON.parse(row.displayJson || '{}') as { topupPaymentLeg?: string }
 			const leg = String(dj.topupPaymentLeg || '')
 				.trim()
@@ -1301,6 +1305,8 @@ const routing = ( router: Router ) => {
 		const hk = (s: string) => ethers.keccak256(ethers.toUtf8Bytes(s)).toLowerCase()
 		const TOPUP_CATEGORIES_LOWER = new Set<string>([
 			hk('usdcTopupCard'),
+			hk('usdcNewCard'),
+			hk('usdcUpgradeNewCard'),
 			hk('newCard'),
 			hk('upgradeNewCard'),
 			hk('topupCard'),
