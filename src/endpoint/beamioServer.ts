@@ -2835,22 +2835,41 @@ const routing = ( router: Router ) => {
 		const intBps = (v: unknown): number => {
 			if (v === undefined || v === null) return 0
 			const n = Math.round(Number(v))
-			return Number.isFinite(n) && n >= 0 ? n : 0
+			if (!Number.isFinite(n) || n < 0) return 0
+			return Math.min(10000, n)
 		}
 		const subtotal = num(raw.subtotal)
-		const discount = num(raw.discount)
-		const tax = num(raw.tax)
-		const tip = num(raw.tip)
-		const total = Math.max(0, subtotal - discount + tax + tip)
+		const discountBps = intBps(raw.discountBps)
+		const taxBps = intBps(raw.taxBps)
+		const tipBps = intBps(raw.tipBps)
+
+		let discount = num(raw.discount)
+		if (discount <= 0 && discountBps > 0) {
+			discount = (subtotal * discountBps) / 10000
+		}
+		const afterDiscount = Math.max(0, subtotal - discount)
+
+		let tax = num(raw.tax)
+		if (tax <= 0 && taxBps > 0) {
+			tax = (afterDiscount * taxBps) / 10000
+		}
+
+		let tip = num(raw.tip)
+		/** 与 POS `tipBps` / MemberCard NFC 展示一致：小费按小计比例，基数为 subtotal（非税后） */
+		if (tip <= 0 && tipBps > 0) {
+			tip = (subtotal * tipBps) / 10000
+		}
+
+		const total = Math.max(0, afterDiscount + tax + tip)
 		return {
 			subtotal,
 			discount,
 			tax,
 			tip,
 			total,
-			discountBps: intBps(raw.discountBps),
-			taxBps: intBps(raw.taxBps),
-			tipBps: intBps(raw.tipBps),
+			discountBps,
+			taxBps,
+			tipBps,
 		}
 	}
 
@@ -3026,7 +3045,7 @@ const routing = ( router: Router ) => {
 				)
 			}
 
-			// 2. 重算 total fiat (= subtotal × (10000 - disc + tax + tip) / 10000) — 与 normalizeChargeBreakdown 同源
+			// 2. 重算 total fiat — 与 normalizeChargeBreakdown 同源（显式金额优先，否则 Bps：折扣/税/小费）
 			const breakdown = normalizeChargeBreakdown({
 				subtotal: subtotalStr,
 				tipBps: String(req.query.tipBps ?? '0'),
