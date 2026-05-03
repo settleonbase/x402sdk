@@ -6409,7 +6409,13 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				}
 				if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
 				const hadMembershipBeforeNfc = ownershipSnapshotHasValidMembershipNft(beforeNfts as unknown[])
-				const effectiveTopupSource = obj.topupSourceOverride ?? 'androidNfcTopup'
+				const originatingUsdcTxNorm =
+					typeof obj.originatingUSDCTx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(obj.originatingUSDCTx.trim())
+						? obj.originatingUSDCTx.trim().toLowerCase()
+						: ''
+				/** `nfcUsdcTopup` / orchestrator 显式传 `topupSourceOverride`。USDC Phase-2 仅 `nfcTopup` + `originatingUSDCTx`（POS `usdcTopupSessionId`）时原先缺省为 `androidNfcTopup`，split 腿会退回 `creditTopupCard` 而非 readme `TX_USDC_*`。 */
+				const effectiveTopupSource =
+					obj.topupSourceOverride ?? (originatingUsdcTxNorm ? 'webPosNfcTopup' : 'androidNfcTopup')
 				void insertMemberTopupEvent({
 					cardAddress: obj.cardAddr,
 					baseTxHash: tx.hash,
