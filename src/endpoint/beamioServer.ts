@@ -3809,6 +3809,7 @@ const routing = ( router: Router ) => {
 				sessionUpdate({ state: 'error', error: errMsg })
 				return res.status(503).json({ success: false, error: errMsg }).end()
 			}
+			const quotedSubtotalUsdc6 = quoteCurrencyToUsdc6(breakdown.subtotal.toFixed(6), effectiveCurrency)
 
 			// 4. x402 verify + settle（USDC → cardOwner）
 			sessionUpdate({ state: 'settling' })
@@ -3955,6 +3956,7 @@ const routing = ( router: Router ) => {
 				...(breakdown.taxBps > 0 ? { nfcTaxRateBps: breakdown.taxBps } : {}),
 				originatingUSDCTx: settled.USDC_tx,
 				usdcAmount6: settled.usdcAmount6.toString(),
+				...(quotedSubtotalUsdc6 > 0n ? { ledgerMainChargeUsdc6: quotedSubtotalUsdc6.toString() } : {}),
 				payer: settled.payer,
 				posOperator: posAddr,
 				provider: providerBase,
@@ -5754,6 +5756,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			posOperator?: string
 			originatingUSDCTx?: string
 			chargeSessionId?: string
+			/** NFC USD-settled charge: oracle subtotal USDC6 for indexer main row (no CAD/USDC mix). */
+			chargeLedgerMainUsdc6?: string
 		}
 		logger(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`)
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true))
@@ -5831,6 +5835,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				posOperator: body.posOperator,
 				originatingUSDCTx: body.originatingUSDCTx,
 				chargeSessionId: body.chargeSessionId,
+				...(typeof body.chargeLedgerMainUsdc6 === 'string' && body.chargeLedgerMainUsdc6.trim() !== ''
+					? { chargeLedgerMainUsdc6: body.chargeLedgerMainUsdc6.trim() }
+					: {}),
 				...(body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object'
 					? { chargeOwnerChildBurn: body.chargeOwnerChildBurn }
 					: {}),
@@ -5960,6 +5967,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				posOperator: body.posOperator,
 				originatingUSDCTx: body.originatingUSDCTx,
 				chargeSessionId: body.chargeSessionId,
+				...(typeof body.chargeLedgerMainUsdc6 === 'string' && body.chargeLedgerMainUsdc6.trim() !== ''
+					? { chargeLedgerMainUsdc6: body.chargeLedgerMainUsdc6.trim() }
+					: {}),
 				...(body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object'
 					? { chargeOwnerChildBurn: body.chargeOwnerChildBurn }
 					: {}),

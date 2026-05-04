@@ -2818,6 +2818,8 @@ export const OpenContainerRelayPool: {
 	chargeOwnerChildBurn?: ChargeOwnerChildBurnPayload
 	/** 与 ContainerRelayPool：POS 终端 EOA，用于 indexer subordinate → accountActionIds(POS) */
 	posOperator?: string
+	/** 与 ContainerRelayPool：显式主单 finalRequestAmountUSDC6（小计 USDC6），避免 points relay 原子单位混减 tip */
+	chargeLedgerMainUsdc6?: string
 	res: Response
 }[] = []
 
@@ -2869,6 +2871,8 @@ export const ContainerRelayPool: {
 	originatingUSDCTx?: string
 	chargeSessionId?: string
 	posOperator?: string
+	/** PR #4：主单 indexer `finalRequestAmountUSDC6`（账单小计对应的 USDC6，与 settle 侧 oracle 一致）。禁止用 ERC1155 relay 金额 − tip USDC 推导。 */
+	chargeLedgerMainUsdc6?: string
 	res: Response
 }[] = []
 
@@ -8237,6 +8241,14 @@ export const OpenContainerRelayProcess = async () => {
       const hasOpenBillBreakdown = effectiveOpenSubtotalStr !== ''
 
       const usdcAddrNormOpen = ethers.getAddress(USDC_ADDRESS)
+      const hasUsdcKindOpenRelay = items.some((it) => {
+        try {
+          const a = ethers.getAddress(it.asset)
+          return it.kind === 0 && a.toLowerCase() === usdcAddrNormOpen.toLowerCase()
+        } catch {
+          return false
+        }
+      })
       let ledgerFinalFiat6: string | undefined
       let ledgerFinalUsdc6: string | undefined
       let ledgerMetaFiat6: string | undefined
@@ -8249,6 +8261,20 @@ export const OpenContainerRelayProcess = async () => {
       let nfcLedgerDiscountAmountFiat6Open: string | undefined
       let nfcLedgerDiscountRateBpsOpen: number | undefined
 
+      const explicitMainChargeUsdc6OpenStr =
+        obj.chargeLedgerMainUsdc6 != null && String(obj.chargeLedgerMainUsdc6).trim() !== ''
+          ? String(obj.chargeLedgerMainUsdc6).trim()
+          : ''
+      let explicitMainChargeUsdc6Open: bigint | null = null
+      try {
+        if (explicitMainChargeUsdc6OpenStr !== '') {
+          const v = BigInt(explicitMainChargeUsdc6OpenStr)
+          if (v > 0n) explicitMainChargeUsdc6Open = v
+        }
+      } catch {
+        explicitMainChargeUsdc6Open = null
+      }
+
       if (hasOpenBillBreakdown) {
         subtotalFiatE6Open = await containerRelayFiatStringToE6(effectiveOpenSubtotalStr)
         tipFiatE6Open = await containerRelayFiatStringToE6(effectiveOpenTipStr || undefined)
@@ -8260,16 +8286,28 @@ export const OpenContainerRelayProcess = async () => {
         const baseFiat6Open = subtotalFiatE6Open - discountBOpen + taxBOpen
         if (tipFiatE6Open > 0n) {
           tipUsdc6SnapshotOpen = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNumOpen, tipFiatE6Open)
-          if (tipUsdc6SnapshotOpen === 0n && usdcAmountRaw > 0n) {
+          const allowTipSplitFallbackOpen =
+            tipUsdc6SnapshotOpen === 0n &&
+            usdcAmountRaw > 0n &&
+            hasUsdcKindOpenRelay &&
+            explicitMainChargeUsdc6Open == null
+          if (allowTipSplitFallbackOpen) {
             const denomFiatOpen = subtotalFiatE6Open + tipFiatE6Open
             if (denomFiatOpen > 0n) {
               tipUsdc6SnapshotOpen = (usdcAmountRaw * tipFiatE6Open) / denomFiatOpen
             }
           }
         }
-        let mainUsdc6Open = usdcAmountRaw
-        if (tipFiatE6Open > 0n && tipUsdc6SnapshotOpen > 0n) {
-          mainUsdc6Open = usdcAmountRaw >= tipUsdc6SnapshotOpen ? usdcAmountRaw - tipUsdc6SnapshotOpen : 0n
+        let mainUsdc6Open: bigint
+        if (explicitMainChargeUsdc6Open != null) {
+          mainUsdc6Open = explicitMainChargeUsdc6Open
+        } else if (!hasUsdcKindOpenRelay) {
+          mainUsdc6Open = subtotalUsdc6Open
+        } else {
+          mainUsdc6Open = usdcAmountRaw
+          if (tipFiatE6Open > 0n && tipUsdc6SnapshotOpen > 0n) {
+            mainUsdc6Open = usdcAmountRaw >= tipUsdc6SnapshotOpen ? usdcAmountRaw - tipUsdc6SnapshotOpen : 0n
+          }
         }
         ledgerMetaFiat6 = subtotalFiatE6Open.toString()
         ledgerMetaUsdc6 = subtotalUsdc6Open.toString()
@@ -8745,6 +8783,15 @@ export const ContainerRelayProcess = async () => {
       }
     }
 
+    const hasUsdcKindInRelay = items.some((it) => {
+      try {
+        const a = ethers.getAddress(it.asset)
+        return it.kind === 0 && a.toLowerCase() === usdcAddrNorm.toLowerCase()
+      } catch {
+        return false
+      }
+    })
+
     const normNfcAmountStr = (v: unknown): string => {
       if (v == null) return ''
       if (typeof v === 'number' && Number.isFinite(v)) return String(v)
@@ -8777,8 +8824,22 @@ export const ContainerRelayProcess = async () => {
     let ledgerMetaUsdc6: string | undefined
     let indexerCurrency: ICurrency = currency
     let indexerCurrencyAmount = currencyAmount
-    /** 与第二条 TX_TIP 共用排价；主单 final USDC6 = 链上总 USDC6 − 小费 USDC6 */
+    /** 与 TX_TIP 行共用：小费 USDC6 仅由 bill 币种 fiat→oracle 推导；不在「仅 points relay」路径上用 relay 原子单位按比例拆分 */
     let tipUsdc6Snapshot = 0n
+
+    const explicitMainChargeUsdc6Str =
+      obj.chargeLedgerMainUsdc6 != null && String(obj.chargeLedgerMainUsdc6).trim() !== ''
+        ? String(obj.chargeLedgerMainUsdc6).trim()
+        : ''
+    let explicitMainChargeUsdc6: bigint | null = null
+    try {
+      if (explicitMainChargeUsdc6Str !== '') {
+        const v = BigInt(explicitMainChargeUsdc6Str)
+        if (v > 0n) explicitMainChargeUsdc6 = v
+      }
+    } catch {
+      explicitMainChargeUsdc6 = null
+    }
 
     if (hasNfcBreakdown) {
       const subtotalUsdc6 = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNum, subtotalFiatE6)
@@ -8789,17 +8850,26 @@ export const ContainerRelayProcess = async () => {
       const baseFiat6 = subtotalFiatE6 - discountB + taxB
       if (tipFiatE6 > 0n) {
         tipUsdc6Snapshot = await containerRelayFiatE6ToUsdc6(payerCurrencyFiatNum, tipFiatE6)
-        if (tipUsdc6Snapshot === 0n && usdcAmountRaw > 0n) {
+        const allowTipSplitFallback =
+          tipUsdc6Snapshot === 0n && usdcAmountRaw > 0n && hasUsdcKindInRelay && explicitMainChargeUsdc6 == null
+        if (allowTipSplitFallback) {
           const denomFiat = subtotalFiatE6 + tipFiatE6
           if (denomFiat > 0n) {
             tipUsdc6Snapshot = (usdcAmountRaw * tipFiatE6) / denomFiat
           }
         }
       }
-      /** 主单根层 finalRequestAmountUSDC6：链上本笔总 USDC6 − 小费 USDC6（小费单独 TX_TIP 行登记） */
-      let mainUsdc6 = usdcAmountRaw
-      if (tipFiatE6 > 0n && tipUsdc6Snapshot > 0n) {
-        mainUsdc6 = usdcAmountRaw >= tipUsdc6Snapshot ? usdcAmountRaw - tipUsdc6Snapshot : 0n
+      /** 主单 finalRequestAmountUSDC6：显式提交的「小计 USDC」优先（orchestrator settle 报价）；否则纯 ERC1155 relay 用 fiat 小计的 oracle USDC；含 USDC relay 腿时保留「总额−tip」推导 */
+      let mainUsdc6: bigint
+      if (explicitMainChargeUsdc6 != null) {
+        mainUsdc6 = explicitMainChargeUsdc6
+      } else if (!hasUsdcKindInRelay) {
+        mainUsdc6 = subtotalUsdc6
+      } else {
+        mainUsdc6 = usdcAmountRaw
+        if (tipFiatE6 > 0n && tipUsdc6Snapshot > 0n) {
+          mainUsdc6 = usdcAmountRaw >= tipUsdc6Snapshot ? usdcAmountRaw - tipUsdc6Snapshot : 0n
+        }
       }
       ledgerMetaFiat6 = subtotalFiatE6.toString()
       ledgerMetaUsdc6 = subtotalUsdc6.toString()

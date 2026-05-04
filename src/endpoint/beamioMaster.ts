@@ -1663,6 +1663,7 @@ const routing = ( router: Router ) => {
 				originatingUSDCTx?: string
 				chargeSessionId?: string
 				posOperator?: string
+				chargeLedgerMainUsdc6?: string
 			}
 			logger(`[AAtoEOA] [DEBUG] Master received openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 40)}…"` : 'n/a'} OpenContainerRelayPool.len=${OpenContainerRelayPool.length} Settle_ContractPool.len=${Settle_ContractPool.length}`)
 			logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a', forText: body?.forText ? `${body.forText.slice(0, 40)}…` : 'n/a' }, false, 3, true))
@@ -1731,6 +1732,9 @@ const routing = ( router: Router ) => {
 					originatingUSDCTx: origUsdcTxNorm,
 					chargeSessionId: sidNorm,
 					posOperator: posOpNorm,
+					...(typeof body.chargeLedgerMainUsdc6 === 'string' && body.chargeLedgerMainUsdc6.trim() !== ''
+						? { chargeLedgerMainUsdc6: body.chargeLedgerMainUsdc6.trim() }
+						: {}),
 					res,
 				})
 				if (sidNorm || origUsdcTxNorm) {
@@ -1800,6 +1804,9 @@ const routing = ( router: Router ) => {
 							: undefined,
 					chargeOwnerChildBurn: body.chargeOwnerChildBurn,
 					posOperator: posOpOpenNorm,
+					...(typeof body.chargeLedgerMainUsdc6 === 'string' && body.chargeLedgerMainUsdc6.trim() !== ''
+						? { chargeLedgerMainUsdc6: body.chargeLedgerMainUsdc6.trim() }
+						: {}),
 					res,
 				})
 				logger(`[AAtoEOA] master pushed to OpenContainerRelayPool (length ${poolLenBefore} -> ${OpenContainerRelayPool.length}), calling OpenContainerRelayProcess()`)

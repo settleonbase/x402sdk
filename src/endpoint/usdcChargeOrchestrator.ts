@@ -127,6 +127,8 @@ export interface UsdcChargeOrchestratorContext {
 	originatingUSDCTx: string
 	/** USDC 结算金额 6 位定点，仅用于日志 */
 	usdcAmount6: string
+	/** 账单「小计」（不含小费）对应的 USDC6，与 settle 前 oracle 报价一致；写入 indexer 主单 `finalRequestAmountUSDC6`，禁止用 relay points−tip 混算 */
+	ledgerMainChargeUsdc6?: string
 	/** 客户钱包地址（USDC 付款方），仅用于日志 */
 	payer: string
 	/** POS 终端钱包（admin / owner of card），作为 operator 进入 admin 记账 */
@@ -496,6 +498,9 @@ const runChargeLegOnce = async (
 			originatingUSDCTx: ctx.originatingUSDCTx,
 			chargeSessionId: ctx.sid,
 			posOperator: ctx.posOperator ?? undefined,
+			...(ctx.ledgerMainChargeUsdc6 != null && String(ctx.ledgerMainChargeUsdc6).trim() !== ''
+				? { chargeLedgerMainUsdc6: String(ctx.ledgerMainChargeUsdc6).trim() }
+				: {}),
 			nfcSubtotalCurrencyAmount: ctx.nfcSubtotalCurrencyAmount,
 			nfcRequestCurrency: ctx.nfcRequestCurrency,
 			...(ctx.nfcTipCurrencyAmount != null && String(ctx.nfcTipCurrencyAmount).trim() !== ''
