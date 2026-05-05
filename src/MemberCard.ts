@@ -1,4 +1,4 @@
-import { ethers } from 'ethers'
+import { ethers, type TransactionReceipt } from 'ethers'
 import { randomUUID } from 'node:crypto'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
@@ -11851,6 +11851,8 @@ export const executeForOwnerProcess = async () => {
 				)
 			)
 		}
+		let issuedNftTokenIdForApi: string | undefined
+		let createIssuedNftReceiptForBg: TransactionReceipt | null = null
 		const tx = await factory.executeForOwner(
 			obj.cardAddress,
 			obj.data,
@@ -11879,6 +11881,39 @@ export const executeForOwnerProcess = async () => {
 				)
 			)
 		}
+
+		/** Create Coupon / cardCreateIssuedNft：等同步 Base receipt 后把 `issuedNftTokenId` 返回客户端（不再由浏览器轮询 issuedNftIndex）。CoNET B-Uint 记账仍在下方 background IIFE，不阻塞 JSON。 */
+		const isCreateIssuedNftNoShareMetaUpdate =
+			Boolean(
+				hash &&
+					obj.data &&
+					obj.data.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase() &&
+					!obj.metadataUpdate,
+			)
+		if (isCreateIssuedNftNoShareMetaUpdate) {
+			const receipt = await tx.wait()
+			createIssuedNftReceiptForBg = receipt
+			if (!receipt || Number(receipt.status ?? 0) !== 1) {
+				throw new Error('createIssuedNft executeForOwner transaction failed')
+			}
+			const cardLower = ethers.getAddress(obj.cardAddress).toLowerCase()
+			for (const log of receipt.logs) {
+				if (log.address.toLowerCase() !== cardLower || log.topics[0] !== ISSUED_NFT_CREATED_TOPIC) continue
+				let parsed: ethers.LogDescription | null = null
+				try {
+					parsed = BeamioUserCardIface.parseLog({ topics: log.topics, data: log.data })
+				} catch {
+					continue
+				}
+				if (!parsed || parsed.name !== 'IssuedNftCreated') continue
+				issuedNftTokenIdForApi = String(parsed.args.tokenId)
+				break
+			}
+			if (!issuedNftTokenIdForApi) {
+				throw new Error('createIssuedNft confirmed but IssuedNftCreated event was not found in receipt logs')
+			}
+		}
+
 		if (obj.metadataUpdate) {
 			const receipt = await tx.wait()
 			if (!receipt || Number(receipt.status ?? 0) !== 1) {
@@ -11896,9 +11931,19 @@ export const executeForOwnerProcess = async () => {
 			if (!meta.success) throw new Error(meta.error ?? 'Metadata update failed after tier update')
 			logger(Colors.green(`[executeForOwnerProcess] card tiers metadata synced card=${obj.cardAddress}`))
 		}
-		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, ...(code != null && { code }), ...(hash && { hash }) }).end()
-		// createIssuedNft 成功后异步写入 EIP-1155 tier metadata，供 GET /metadata/0x{card}{tokenId}.json 返回
-		if (hash && obj.data && obj.data.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase()) {
+		if (obj.res && !obj.res.headersSent) {
+			obj.res
+				.status(200)
+				.json({
+					success: true,
+					...(code != null && { code }),
+					...(hash && { hash }),
+					...(issuedNftTokenIdForApi != null && { issuedNftTokenId: issuedNftTokenIdForApi }),
+				})
+				.end()
+		}
+		// createIssuedNft 成功后异步：CoNET B-Uint indexer 记账 + EIP-1155 tier metadata upsert（不阻塞 API 响应；receipt 已在主流程 await）
+		if (createIssuedNftReceiptForBg && hash && obj.data && obj.data.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase()) {
 			const cardAddress = obj.cardAddress
 			const feeCtx = createIssuedNftCouponBunitCtx
 			const baseCreateHash = hash
@@ -11919,8 +11964,8 @@ export const executeForOwnerProcess = async () => {
 			}
 			;(async () => {
 				try {
-					const receipt = await tx.wait()
-					if (!receipt || receipt.status !== 1) return
+					const receipt = createIssuedNftReceiptForBg
+					if (!receipt || Number(receipt.status ?? 0) !== 1) return
 
 					if (
 						feeCtx &&
