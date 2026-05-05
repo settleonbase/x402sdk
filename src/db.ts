@@ -3584,9 +3584,9 @@ export const resolveSearchAddressToEOALower = async (address: string): Promise<s
 		const owner = await aa.owner()
 		if (!owner || owner === ethers.ZeroAddress) return null
 		return ethers.getAddress(owner).toLowerCase()
-	} catch (e) {
-		logger(`resolveSearchAddressToEOALower owner() failed for ${addr}: ${(e as Error)?.message ?? e}`)
-		return null
+	} catch {
+		// 非 Ownable 合约（常见于 ERC-4337 AA、`owner()` 无或 eth_call 空返回）：无法用 owner 转成 EOA，仍可按该地址精确查 `accounts.address`
+		return addr.toLowerCase()
 	}
 }
 
