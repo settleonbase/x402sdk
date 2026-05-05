@@ -772,6 +772,76 @@ const logInboundDebug = (req: Request) => {
 	)
 }
 
+/** 与 Master `couponWorkflowDebugEnabled` 对齐：设为 1 时 Cluster 对本 workflow 多打一行脱敏摘要。勿记录 redeem 明文。 */
+const CLUSTER_COUPON_WORKFLOW_DEBUG =
+	process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === '1' ||
+	process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === 'true'
+
+function redactSignatureForCouponLog(sig: unknown): string {
+	if (typeof sig !== 'string' || !sig.startsWith('0x')) return `(nonHex:${String(sig ?? '').slice(0, 24)})`
+	if (sig.length <= 26) return '0x(short)'
+	return `${sig.slice(0, 12)}…${sig.slice(-8)}`
+}
+
+function metadataExtraKeysForCouponLog(extra: unknown): string[] | undefined {
+	if (extra == null) return undefined
+	if (typeof extra === 'string') {
+		const s = extra.trim()
+		if (!s) return undefined
+		try {
+			const p = JSON.parse(s) as unknown
+			return p != null && typeof p === 'object' && !Array.isArray(p) ? Object.keys(p as object) : ['<non-object json>']
+		} catch {
+			return ['<invalid json>']
+		}
+	}
+	if (typeof extra === 'object' && !Array.isArray(extra)) return Object.keys(extra as object)
+	return undefined
+}
+
+/** `/api/cardCreateIssuedNft` / `/api/executeForOwner` 等请求体摘要（无主密钥、不含 codes）。 */
+function sanitizeExecuteForOwnerCouponWorkflowBody(body: Record<string, unknown> | undefined | null): Record<string, unknown> {
+	if (!body || typeof body !== 'object') return {}
+	const data = typeof body.data === 'string' ? body.data : ''
+	const sel = data.length >= 10 ? data.slice(0, 10) : '(no-calldata)'
+	return {
+		cardAddress: body.cardAddress,
+		selector: sel,
+		dataByteLen: typeof data === 'string' && data.startsWith('0x') ? Math.floor((data.length - 2) / 2) : 0,
+		deadline: body.deadline,
+		nonceSnippet: typeof body.nonce === 'string' ? `${body.nonce.slice(0, 14)}…` : body.nonce,
+		ownerSignature: redactSignatureForCouponLog(body.ownerSignature),
+		descriptionLen: typeof body.description === 'string' ? body.description.length : undefined,
+		hasImageUrl: !!(typeof body.image === 'string' && body.image.trim()),
+		background_color: typeof body.background_color === 'string' ? String(body.background_color).slice(0, 42) : undefined,
+		metadata_extra_properties_keys: metadataExtraKeysForCouponLog(body.metadata_extra_properties),
+	}
+}
+
+/** `cardCreateRedeem`：**禁止**序列化 codes（服务端亦不得存明文；日志只计数）。 */
+function sanitizeCardCreateRedeemWorkflowBody(body: Record<string, unknown> | undefined | null): Record<string, unknown> {
+	if (!body || typeof body !== 'object') return {}
+	const data = typeof body.data === 'string' ? body.data : ''
+	const sel = data.length >= 10 ? data.slice(0, 10) : '(no-calldata)'
+	const codes = body.codes
+	const codeCount = Array.isArray(codes) ? codes.length : codes != null ? 1 : 0
+	return {
+		cardAddress: body.cardAddress,
+		selector: sel,
+		dataByteLen: typeof data === 'string' && data.startsWith('0x') ? Math.floor((data.length - 2) / 2) : 0,
+		clientCodesCount_reportOnlyNotLogged: codeCount,
+		points6: body.points6,
+		validAfter: body.validAfter,
+		validBefore: body.validBefore,
+		tokenIds: body.tokenIds,
+		amounts: body.amounts,
+		attr: body.attr,
+		deadline: body.deadline,
+		nonceSnippet: typeof body.nonce === 'string' ? `${body.nonce.slice(0, 14)}…` : body.nonce,
+		ownerSignature: redactSignatureForCouponLog(body.ownerSignature),
+	}
+}
+
 const routing = ( router: Router ) => {
 	router.use((req, _res, next) => {
 		logInboundDebug(req)
@@ -4932,7 +5002,15 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!hasIpfs && !hasMetadata) {
 			return res.status(400).json({ error: 'Provide ipfsCid or metadata (custom JSON object) for shared metadata' })
 		}
-		logger(Colors.green('server /api/registerSeries preCheck OK, forwarding to master'))
+		logger(Colors.green(`server /api/registerSeries preCheck OK, forwarding to master`))
+		if (CLUSTER_COUPON_WORKFLOW_DEBUG) {
+			const md = metadata as Record<string, unknown> | undefined
+			logger(
+				Colors.magenta(
+					`[couponWorkflow][Cluster] registerSeries card=${ethers.getAddress(cardAddress)} tokenId=${String(tokenId)} metadataKeys=${md != null ? Object.keys(md).join(',') : 'none'} ipfs=${hasIpfs}`
+				)
+			)
+		}
 		postLocalhost('/api/registerSeries', req.body, res)
 	})
 
@@ -5310,12 +5388,27 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/** cardCreateRedeem：集群预检，合格转发 master。master 使用 executeForOwnerPool + Settle_ContractPool 排队处理。默认 createRedeemBatch（多 hash array）*/
 	router.post('/cardCreateRedeem', async (req, res) => {
+		const rawBody = req.body as Record<string, unknown>
 		const preCheck = await cardCreateRedeemPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardCreateRedeem preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(
+				Colors.red(`server /api/cardCreateRedeem preCheck FAIL: ${preCheck.error}`),
+				inspect(sanitizeCardCreateRedeemWorkflowBody(rawBody), false, 3, true)
+			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardCreateRedeem preCheck OK, forwarding to master`), inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true))
+		if (CLUSTER_COUPON_WORKFLOW_DEBUG) {
+			logger(
+				Colors.magenta(`[couponWorkflow][Cluster] cardCreateRedeem → Master`),
+				inspect(
+					sanitizeCardCreateRedeemWorkflowBody({ ...rawBody, data: preCheck.preChecked.data } as Record<string, unknown>),
+					false,
+					3,
+					true
+				)
+			)
+		}
 		postLocalhost('/api/cardCreateRedeem', preCheck.preChecked, res)
 	})
 
@@ -5518,12 +5611,22 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/** cardCreateIssuedNft：owner 定义新发行 NFT 类型。Cluster 预检含 createIssuedNft 合法性 + 卡主（owner）至少 100 B-Unit；合格后转发 master；Master 先于 Base 于 CoNET 扣 100 B-Unit 再 executeForOwner */
 	router.post('/cardCreateIssuedNft', async (req, res) => {
+		const rawBody = req.body as Record<string, unknown>
 		const preCheck = await cardCreateIssuedNftPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardCreateIssuedNft preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(
+				Colors.red(`server /api/cardCreateIssuedNft preCheck FAIL: ${preCheck.error}`),
+				inspect(sanitizeExecuteForOwnerCouponWorkflowBody(rawBody), false, 3, true)
+			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardCreateIssuedNft preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
+		if (CLUSTER_COUPON_WORKFLOW_DEBUG) {
+			logger(
+				Colors.magenta(`[couponWorkflow][Cluster] cardCreateIssuedNft → executeForOwner`),
+				inspect(sanitizeExecuteForOwnerCouponWorkflowBody(rawBody), false, 3, true)
+			)
+		}
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
@@ -5614,7 +5717,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			ownerSignature?: string
 		}
 		if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
-			logger(Colors.red(`server /api/executeForOwner Invalid data`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/executeForOwner Invalid data`), inspect(sanitizeExecuteForOwnerCouponWorkflowBody(req.body as Record<string, unknown>), false, 3, true))
 			return res.status(400).json({ success: false, error: 'Missing required fields' })
 		}
 		if (!ethers.isAddress(cardAddress)) {

@@ -11137,6 +11137,16 @@ const mintIssuedNftByGatewayIface = new ethers.Interface([
 const ISSUED_NFT_START_ID_MEMBER = 100_000_000_000n
 const CREATE_ISSUED_NFT_SELECTOR = createIssuedNftIface.getFunction('createIssuedNft')?.selector ?? ''
 
+const createRedeemBatchIfaceCouponDbg = new ethers.Interface([
+	'function createRedeemBatch(bytes32[] hashes, uint256 points6, uint256 attr, uint64 validAfter, uint64 validBefore, uint256[] tokenIds, uint256[] amounts)',
+])
+const CREATE_REDEEM_BATCH_SELECTOR = createRedeemBatchIfaceCouponDbg.getFunction('createRedeemBatch')?.selector ?? ''
+
+/** Cluster/Master：设为 `BEAMIO_WORKFLOW_COUPON_DEBUG=1` 打印 Create Coupon 链路与 createRedeemBatch 脱敏步骤日志（不打印 redeem 明文）。 */
+export const couponWorkflowDebugEnabled = (): boolean =>
+	typeof process !== 'undefined' &&
+	(process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === '1' || process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === 'true')
+
 /** cardMintIssuedNftToAddress 集群预检：校验 targetAddress 为 EOA，tokenId>=ISSUED_NFT_START_ID，amount>0，card 存在，owner 签名有效。合格编码 data 并转发 master executeForOwner。 */
 export const cardMintIssuedNftToAddressPreCheck = async (body: {
 	cardAddress?: string
@@ -11716,6 +11726,36 @@ export const executeForOwnerProcess = async () => {
 	let createIssuedNftCouponBunitCtx:
 		| { consumeTxHash: string; feePayer: string; cardOwnerEOA: string }
 		| null = obj.createIssuedNftCouponBunitDeferred ?? null
+	if (couponWorkflowDebugEnabled() && obj.data && obj.data.length >= 10) {
+		const sel = obj.data.slice(0, 10).toLowerCase()
+		if (sel === CREATE_ISSUED_NFT_SELECTOR.toLowerCase()) {
+			try {
+				const decoded = createIssuedNftIface.parseTransaction({ data: obj.data })
+				const a = decoded?.args
+				logger(
+					Colors.magenta(
+						`[couponWorkflow][executeForOwner dequeue] createIssuedNft card=${obj.cardAddress} maxSupply=${String(a?.[3])} validAfter=${String(a?.[1])} validBefore=${String(a?.[2])} priceInCurrency6=${String(a?.[4])} hasDescription=${!!obj.description} hasImage=${!!obj.image} hasBackgroundColor=${!!obj.background_color} hasMetadataExtra=${obj.metadata_extra_properties != null}`
+					)
+				)
+			} catch (e: any) {
+				logger(Colors.yellow(`[couponWorkflow][executeForOwner dequeue] createIssuedNft calldata parse failed: ${e?.message ?? e}`))
+			}
+		} else if (sel === CREATE_REDEEM_BATCH_SELECTOR.toLowerCase()) {
+			try {
+				const decoded = createRedeemBatchIfaceCouponDbg.parseTransaction({ data: obj.data })
+				const hashes = decoded?.args[0] as string[]
+				const tokenIds = decoded?.args[5] as bigint[]
+				const amounts = decoded?.args[6] as bigint[]
+				logger(
+					Colors.magenta(
+						`[couponWorkflow][executeForOwner dequeue] createRedeemBatch card=${obj.cardAddress} hashCount=${hashes?.length ?? 0} tokenIds=[${(tokenIds ?? []).map(String).join(',')}] amounts=[${(amounts ?? []).map(String).join(',')}] points6=${String(decoded?.args[1] ?? '')} attr=${String(decoded?.args[2] ?? '')} validAfter=${String(decoded?.args[3] ?? '')} validBefore=${String(decoded?.args[4] ?? '')}`
+					)
+				)
+			} catch (e: any) {
+				logger(Colors.yellow(`[couponWorkflow][executeForOwner dequeue] createRedeemBatch calldata parse failed: ${e?.message ?? e}`))
+			}
+		}
+	}
 	try {
 		const factory = SC.baseFactoryPaymaster
 		if (SC.aaAccountFactoryPaymaster && obj.data) {
@@ -11827,6 +11867,17 @@ export const executeForOwnerProcess = async () => {
 			logger(Colors.green(`✅ executeForOwnerProcess + redeemForUser card=${obj.cardAddress} to=${obj.toUserEOA}`))
 		} else {
 			logger(Colors.green(`✅ executeForOwnerProcess card=${obj.cardAddress}`))
+		}
+		if (
+			couponWorkflowDebugEnabled() &&
+			obj.data?.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase() &&
+			hash
+		) {
+			logger(
+				Colors.magenta(
+					`[couponWorkflow][executeForOwner] Base executeForOwner tx submitted hash=${hash} card=${obj.cardAddress}`
+				)
+			)
 		}
 		if (obj.metadataUpdate) {
 			const receipt = await tx.wait()
@@ -12007,6 +12058,17 @@ export const executeForOwnerProcess = async () => {
 			executeForOwnerPool.unshift(obj)
 		} else {
 			logger(Colors.red(`❌ executeForOwnerProcess failed:`), e?.message ?? e)
+			if (
+				couponWorkflowDebugEnabled() &&
+				obj.data &&
+				(obj.data.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase() ||
+					obj.data.slice(0, 10).toLowerCase() === CREATE_REDEEM_BATCH_SELECTOR.toLowerCase())
+			) {
+				const stack = e?.stack
+				if (typeof stack === 'string') {
+					logger(Colors.gray(`[couponWorkflow][executeForOwner] stack:\n${stack.split('\n').slice(0, 14).join('\n')}`))
+				}
+			}
 			let errMsg = e?.message ?? String(e)
 			const errData = (e?.data ?? e?.info?.error?.data ?? e?.error?.data) as string | undefined
 			// UC_RedeemDelegateFailed(bytes) 空 data 通常表示 RedeemModule 不支持 createRedeemBatch（旧版）

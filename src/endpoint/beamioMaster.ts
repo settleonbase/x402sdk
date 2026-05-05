@@ -16,7 +16,7 @@ import {
 	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED } from './latestCardsShared'
@@ -1059,6 +1059,14 @@ const routing = ( router: Router ) => {
 			if (!hasIpfs && !hasMetadata) {
 				return res.status(400).json({ error: 'Provide ipfsCid or metadata (custom JSON object) for shared metadata' })
 			}
+			if (couponWorkflowDebugEnabled()) {
+				const mk = metadata ? Object.keys(metadata) : []
+				logger(
+					Colors.magenta(
+						`[couponWorkflow][Master] registerSeries card=${ethers.getAddress(cardAddress)} tokenId=${String(tokenId)} hasIpfs=${hasIpfs} metadataKeys=${mk.join(',') || 'none'}`
+					)
+				)
+			}
 			try {
 				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
 				const cardContract = new ethers.Contract(cardAddress, BEAMIO_USER_CARD_ISSUED_NFT_ABI, provider)
@@ -1079,6 +1087,13 @@ const routing = ( router: Router ) => {
 				res.status(200).json({ success: true })
 			} catch (err: any) {
 				logger(Colors.red('[registerSeries] error:'), err?.message ?? err)
+				if (couponWorkflowDebugEnabled()) {
+					logger(
+						Colors.gray(
+							`[couponWorkflow][Master] registerSeries failed card=${cardAddress != null ? String(cardAddress) : 'n/a'} tokenId=${tokenId != null ? String(tokenId) : 'n/a'}`
+						)
+					)
+				}
 				res.status(500).json({ error: err?.message ?? 'Failed to register series' })
 			}
 		})
@@ -1149,6 +1164,16 @@ const routing = ( router: Router ) => {
 				res.status(400).json({ success: false, error: 'shareTokenMetadata object is required' }).end()
 				return
 			}
+			if (couponWorkflowDebugEnabled()) {
+				const sm = body.shareTokenMetadata as Record<string, unknown>
+				const couponsRaw = sm.coupons
+				const couponsLen = Array.isArray(couponsRaw) ? couponsRaw.length : -1
+				logger(
+					Colors.magenta(
+						`[couponWorkflow][Master] updateCardShareMetadata card=${ethers.getAddress(cardAddress)} shareTokenMetadataKeys=${Object.keys(sm).join(',')} couponsLength=${couponsLen}`
+					)
+				)
+			}
 			try {
 				const r = await applyBeamioCardShareMetadataUpdate({
 					cardAddress,
@@ -1166,6 +1191,11 @@ const routing = ( router: Router ) => {
 				res.status(200).json({ success: true, cardAddress: ethers.getAddress(cardAddress) }).end()
 			} catch (err: any) {
 				logger(Colors.red('[updateCardShareMetadata] error:'), err?.message ?? err)
+				if (couponWorkflowDebugEnabled()) {
+					logger(
+						Colors.gray(`[couponWorkflow][Master] updateCardShareMetadata failed card=${cardAddress}`)
+					)
+				}
 				res.status(500).json({ success: false, error: err?.message ?? 'Metadata update failed' }).end()
 			}
 		})
@@ -1486,6 +1516,31 @@ const routing = ( router: Router ) => {
 			if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
 				return res.status(400).json({ success: false, error: 'Missing required fields: cardAddress, data, deadline, nonce, ownerSignature' })
 			}
+			if (couponWorkflowDebugEnabled()) {
+				const d = typeof data === 'string' ? data : ''
+				const sel = d.length >= 10 ? d.slice(0, 10) : ''
+				try {
+					const iface = new ethers.Interface([
+						'function createRedeemBatch(bytes32[] hashes, uint256 points6, uint256 attr, uint64 validAfter, uint64 validBefore, uint256[] tokenIds, uint256[] amounts)',
+					])
+					const dec = iface.parseTransaction({ data: d })
+					const hashes = dec?.args?.[0] as string[] | undefined
+					const hc = Array.isArray(hashes) ? hashes.length : 0
+					const tid = dec?.args?.[5] as bigint[] | undefined
+					const amt = dec?.args?.[6] as bigint[] | undefined
+					logger(
+						Colors.magenta(
+							`[couponWorkflow][Master] cardCreateRedeem enqueue card=${cardAddress} selector=${sel} hashesInCalldata=${hc} tokenIds=[${(tid ?? []).map(String).join(',')}] amounts=[${(amt ?? []).map(String).join(',')}]`
+						)
+					)
+				} catch {
+					logger(
+						Colors.magenta(
+							`[couponWorkflow][Master] cardCreateRedeem enqueue card=${cardAddress} selector=${sel} (calldata decode skipped)`
+						)
+					)
+				}
+			}
 			executeForOwnerPool.push({ cardAddress, data, deadline, nonce, ownerSignature, res })
 			logger(Colors.cyan(`[cardCreateRedeem] pushed to executeForOwnerPool, card=${cardAddress}`))
 			executeForOwnerProcess().catch((err: any) => {
@@ -1606,6 +1661,27 @@ const routing = ( router: Router ) => {
 					logger(Colors.red(`[executeForOwner] ensureAAForMintTarget failed: ${e?.message ?? e}`))
 					return res.status(500).json({ success: false, error: e?.message ?? 'Failed to create AA for recipient' })
 				}
+			}
+			if (couponWorkflowDebugEnabled()) {
+				const d = typeof data === 'string' ? data : ''
+				const sel = d.length >= 10 ? d.slice(0, 10) : ''
+				const byteLen = d.startsWith('0x') ? (d.length - 2) / 2 : 0
+				let mexKeys = 'none'
+				const mex = metadata_extra_properties
+				if (typeof mex === 'string' && mex.trim()) {
+					try {
+						mexKeys = Object.keys(JSON.parse(mex.trim()) as object).join(',')
+					} catch {
+						mexKeys = '<json parse fail>'
+					}
+				} else if (mex != null && typeof mex === 'object' && !Array.isArray(mex)) {
+					mexKeys = Object.keys(mex).join(',')
+				}
+				logger(
+					Colors.magenta(
+						`[couponWorkflow][Master] executeForOwner enqueue card=${cardAddress} selector=${sel} calldataByteLen=${byteLen} deadline=${deadline} metadataExtraKeys=${mexKeys} descLen=${typeof description === 'string' ? description.length : 0} hasImage=${!!(typeof image === 'string' && image.trim())} hasMintTarget=${!!targetAddress} hasAuxRedeemPair=${redeemCode != null && toUserEOA != null}`
+					)
+				)
 			}
 			executeForOwnerPool.push({
 				cardAddress,
