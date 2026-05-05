@@ -1922,6 +1922,30 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "userEOA",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "issuedNftUserSigClaimUsed",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint64",
         "name": "hourIndex",
         "type": "uint64"
@@ -2105,6 +2129,24 @@
       }
     ],
     "name": "mintIssuedNftByOwner",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "userEOA",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "mintIssuedNftByUserSigClaim",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
