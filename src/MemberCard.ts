@@ -1851,7 +1851,7 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 	deadline: number
 	nonce: string
 	adminSignature: string
-}): Promise<{ ok: true; signer: string } | { ok: false; error: string }> => {
+}): Promise<{ ok: true; signer: string } | { ok: false; error: string; signer?: string }> => {
 	try {
 		const dataHash = ethers.keccak256(obj.data)
 		const domain = {
@@ -1880,7 +1880,22 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 		const provider = providerBaseBackup
 		const card = new ethers.Contract(obj.cardAddr, cardAbi, provider)
 		const isAdmin = await card.isAdmin(signer)
-		if (!isAdmin) return { ok: false, error: 'Signer is not card admin' }
+		if (!isAdmin) {
+			const sigPreview =
+				obj.adminSignature && obj.adminSignature.length > 24
+					? `${obj.adminSignature.slice(0, 14)}...${obj.adminSignature.slice(-10)}`
+					: obj.adminSignature
+			logger(
+				Colors.red(
+					`[executeForAdmin][eip712] signer is not admin card=${obj.cardAddr} verifyingContract=${BASE_CARD_FACTORY} chainId=8453 recovered=${signer} digest=${digest} dataHash=${dataHash} deadline=${obj.deadline} nonce=${message.nonce} sig=${sigPreview}`
+				)
+			)
+			return {
+				ok: false,
+				error: `Signer is not card admin (recovered=${signer}, verifyingContract=${BASE_CARD_FACTORY})`,
+				signer,
+			}
+		}
 		return { ok: true, signer }
 	} catch (e: any) {
 		return { ok: false, error: e?.message ?? String(e) }
@@ -2324,7 +2339,11 @@ export const executeForAdminProcess = async () => {
 		// 二次校验：签字账户必须为 card admin（Cluster 已预检，Master 防御性再检）
 		const adminCheck = await verifyExecuteForAdminSignerIsAdmin(obj)
 		if (!adminCheck.ok) {
-			logger(Colors.red(`[executeForAdminProcess] admin check failed: ${adminCheck.error}`))
+			logger(
+				Colors.red(
+					`[executeForAdminProcess] admin check failed: ${adminCheck.error} | card=${obj.cardAddr} | recovered=${adminCheck.signer ?? 'N/A'} | configuredFactory=${BASE_CARD_FACTORY}`
+				)
+			)
 			if (obj.res && !obj.res.headersSent) obj.res.status(403).json({ success: false, error: adminCheck.error }).end()
 			Settle_ContractPool.unshift(SC)
 			setTimeout(() => executeForAdminProcess(), 1000)

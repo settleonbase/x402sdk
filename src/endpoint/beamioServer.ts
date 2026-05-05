@@ -2569,6 +2569,15 @@ const routing = ( router: Router ) => {
 			}
 			const digest = ethers.TypedDataEncoder.hash(domain, types, message)
 			const signer = ethers.recoverAddress(digest, adminSignature)
+			const sigPreview =
+				adminSignature && typeof adminSignature === 'string' && adminSignature.length > 24
+					? `${adminSignature.slice(0, 14)}...${adminSignature.slice(-10)}`
+					: String(adminSignature ?? '')
+			logger(
+				Colors.gray(
+					`[nfcTopup][eip712] card=${cardAddress} verifyingContract=${BASE_CARD_FACTORY} chainId=${BASE_CHAIN_ID} dataHash=${dataHash} deadline=${deadline} nonce=${message.nonce} digest=${digest} recovered=${signer} sig=${sigPreview}`
+				)
+			)
 			const cardAbi = ['function isAdmin(address) view returns (bool)', 'function owner() view returns (address)', 'function adminParent(address) view returns (address)']
 			const card = new ethers.Contract(cardAddress, cardAbi, providerBase)
 			const isAdmin = await card.isAdmin(signer)
@@ -2578,12 +2587,19 @@ const routing = ( router: Router ) => {
 				const points6 = mintParsed?.points6 ?? 0n
 				let cardOwner = ''
 				let signerAdminParent = ''
+				let signerDbBoundCard = 'N/A'
+				let signerDbBoundCardMatch = false
 				try {
 					cardOwner = await card.owner() as string
 					signerAdminParent = await card.adminParent(signer) as string
+					const binding = await getPosTerminalCardBindingRow(signer)
+					if (binding?.cardAddress) {
+						signerDbBoundCard = binding.cardAddress
+						signerDbBoundCardMatch = binding.cardAddress.toLowerCase() === cardAddress.toLowerCase()
+					}
 				} catch (_) { /* ignore */ }
 				const nfcLinkedAA = nfcLinkedEOA ? await resolveBeamioAccountOf(nfcLinkedEOA) : null
-				logger(Colors.red(`[nfcTopup] Signer is not card admin - DEBUG: cardAddr=${cardAddress} | tagIdHex=${nfcTagIdHex ?? '(not NFC)'} | tagIdLinkedEOA=${nfcLinkedEOA ?? 'N/A'} | tagIdLinkedAA=${nfcLinkedAA ?? 'N/A'} | toRecipient=${recipientTo ?? 'N/A'} | amountPoints6=${points6.toString()} | cardOwner=${cardOwner || 'N/A'} | signer=${signer} | signerAdminParent=${signerAdminParent || 'N/A'}`))
+				logger(Colors.red(`[nfcTopup] Signer is not card admin - DEBUG: cardAddr=${cardAddress} | verifyingContract=${BASE_CARD_FACTORY} | tagIdHex=${nfcTagIdHex ?? '(not NFC)'} | tagIdLinkedEOA=${nfcLinkedEOA ?? 'N/A'} | tagIdLinkedAA=${nfcLinkedAA ?? 'N/A'} | toRecipient=${recipientTo ?? 'N/A'} | amountPoints6=${points6.toString()} | cardOwner=${cardOwner || 'N/A'} | signer=${signer} | signerAdminParent=${signerAdminParent || 'N/A'} | signerDbBoundCard=${signerDbBoundCard} | signerDbBoundCardMatch=${signerDbBoundCardMatch} | digest=${digest} | nonce=${message.nonce} | dataHash=${dataHash}`))
 				return res.status(403).json({
 					success: false,
 					error: 'Signer is not card admin',
