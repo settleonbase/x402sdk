@@ -124,6 +124,10 @@ const BeamioUserCardGatewayAddress = BASE_AA_FACTORY
 const BeamioTaskIndexerAddress = BEAMIO_INDEXER_DIAMOND
 /** BUnitAirdrop consumeFromUser kind：x402 BeamioTransfer 转账手续费，需预先 registerKind(5,"x402Send") */
 const BUNIT_KIND_X402_SEND = 5n
+/** Merchant `cardCreateIssuedNft` / Create Coupon：卡 owner（EOA→AA 备选）一次性支付固定 B-Unit；于 Base executeForOwner 之前在 CoNET 扣除。数值为 6 位小数（与 getBUnitBalance 一致）。 */
+export const CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6 = 100_000_000n
+/** 与 NFC/USDC topup B-Unit 扣款一致：`consumeFromUser` kind，须与链上 BUnit registerKind 一致 */
+const BUNIT_KIND_CREATE_ISSUED_NFT_TOPUP_FAMILY = 2n
 const DIAMOND = BeamioTaskIndexerAddress
 /** Base 主网 RPC：默认 CoNET 官方节点；仅 BASE_RPC_URL 环境变量可覆盖 */
 const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
@@ -132,6 +136,35 @@ const JSONRPC_NO_BATCH = { batchMaxCount: 1 }
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
 const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, JSONRPC_NO_BATCH)
+
+/** EIP-712 `verifyingContract`：须与 BeamioUserCard（含历史卡）的 `factoryGateway()` 一致，不得写死为新部署的 BASE_CARD_FACTORY。 */
+export async function getBeamioUserCardFactoryGateway(cardAddress: string): Promise<string> {
+	const addr = ethers.getAddress(cardAddress.trim())
+	const read = new ethers.Contract(addr, ['function factoryGateway() view returns (address)'], providerBaseBackup)
+	const gw = (await read.factoryGateway()) as string
+	if (!gw || gw === ethers.ZeroAddress || !ethers.isAddress(gw)) {
+		throw new Error('factoryGateway invalid or missing on card')
+	}
+	return ethers.getAddress(gw)
+}
+
+/** 对 `executeForAdmin` 的链上入口：须为卡记录之 `factoryGateway()`；与 Settle 池内默认 `baseFactoryPaymaster` 不一致时仍须路由到正确合约。 */
+async function contractForExecuteForAdmin(
+	SC: { baseFactoryPaymaster: ethers.Contract; walletBase: ethers.Wallet },
+	cardAddr: string,
+): Promise<ethers.Contract> {
+	const gw = await getBeamioUserCardFactoryGateway(cardAddr)
+	let pinned: string
+	try {
+		pinned = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
+	} catch {
+		pinned = ethers.getAddress(BASE_CARD_FACTORY)
+	}
+	if (gw.toLowerCase() === pinned.toLowerCase()) return SC.baseFactoryPaymaster
+	logger(Colors.yellow(`[executeForAdmin] gateway ${gw} != pool factory ${pinned}; routing on-chain call to card gateway`))
+	return new ethers.Contract(gw, ['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'], SC.walletBase)
+}
+
 const conetEndpoint = 'https://rpc1.conet.network'
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint, undefined, JSONRPC_NO_BATCH)
 /**
@@ -1652,7 +1685,7 @@ export const nfcTopupPreparePayload = async (params: {
 	amount: string
 	currency?: string
 	cardAddress: string
-}): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string } | { error: string }> => {
+}): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string; factoryGateway: string } | { error: string }> => {
 	const { uid, wallet, amount, currency = 'CAD', cardAddress: clientCardAddress } = params
 	const amt = typeof amount === 'string' ? amount : String(amount ?? '')
 	if (!amt || Number(amt) <= 0) return { error: 'Invalid amount' }
@@ -1743,7 +1776,8 @@ export const nfcTopupPreparePayload = async (params: {
 	/** 15 分钟有效期，避免队列/网络延迟导致 UC_InvalidTimeWindow */
 	const deadline = Math.floor(Date.now() / 1000) + 900
 	const nonce = ethers.hexlify(ethers.randomBytes(32))
-	return { cardAddr, data, deadline, nonce }
+	const factoryGateway = await getBeamioUserCardFactoryGateway(cardAddr)
+	return { cardAddr, data, deadline, nonce, factoryGateway }
 }
 
 /** Burn Points Prepare：生成 executeForAdmin 所需的 data、deadline、nonce。Admin 离线签字后提交 /api/nfcTopup。target 为被 burn 的地址，amount 为 "max" 表示 burn 全部。 */
@@ -1751,7 +1785,7 @@ export const burnPointsByAdminPreparePayload = async (params: {
 	cardAddress: string
 	target: string
 	amount: string
-}): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string } | { error: string }> => {
+}): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string; factoryGateway: string } | { error: string }> => {
 	const { cardAddress, target, amount } = params
 	if (!cardAddress || !ethers.isAddress(cardAddress.trim())) return { error: 'Missing or invalid cardAddress' }
 	if (!target || !ethers.isAddress(target.trim())) return { error: 'Missing or invalid target' }
@@ -1762,7 +1796,8 @@ export const burnPointsByAdminPreparePayload = async (params: {
 	const data = iface.encodeFunctionData('burnPointsByAdmin', [ethers.getAddress(target.trim()), amt])
 	const deadline = Math.floor(Date.now() / 1000) + 900
 	const nonce = ethers.hexlify(ethers.randomBytes(32))
-	return { cardAddr, data, deadline, nonce }
+	const factoryGateway = await getBeamioUserCardFactoryGateway(cardAddr)
+	return { cardAddr, data, deadline, nonce, factoryGateway }
 }
 
 /** executeForAdmin 队列：Master 用 paymaster 调用 factory.executeForAdmin */
@@ -1817,11 +1852,12 @@ export const signExecuteForAdminWithServiceAdmin = async (obj: {
 		if (!pk) return { error: 'Service admin private key not configured (masterSetup.settle_contractAdmin[0])' }
 		const wallet = new ethers.Wallet(pk)
 		const dataHash = ethers.keccak256(obj.data)
+		const verifyingContract = await getBeamioUserCardFactoryGateway(obj.cardAddr)
 		const domain = {
 			name: 'BeamioUserCardFactory',
 			version: '1',
 			chainId: 8453,
-			verifyingContract: BASE_CARD_FACTORY,
+			verifyingContract,
 		}
 		const types = {
 			ExecuteForAdmin: [
@@ -1854,11 +1890,13 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 }): Promise<{ ok: true; signer: string } | { ok: false; error: string; signer?: string }> => {
 	try {
 		const dataHash = ethers.keccak256(obj.data)
+		const cardAddrNorm = ethers.getAddress(obj.cardAddr)
+		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddrNorm)
 		const domain = {
 			name: 'BeamioUserCardFactory',
 			version: '1',
 			chainId: 8453,
-			verifyingContract: BASE_CARD_FACTORY,
+			verifyingContract,
 		}
 		const types = {
 			ExecuteForAdmin: [
@@ -1869,7 +1907,7 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 			],
 		}
 		const message = {
-			cardAddress: obj.cardAddr,
+			cardAddress: cardAddrNorm,
 			dataHash,
 			deadline: BigInt(obj.deadline),
 			nonce: obj.nonce.startsWith('0x') ? obj.nonce : ('0x' + obj.nonce) as `0x${string}`,
@@ -1878,7 +1916,7 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 		const signer = ethers.recoverAddress(digest, obj.adminSignature)
 		const cardAbi = ['function isAdmin(address) view returns (bool)']
 		const provider = providerBaseBackup
-		const card = new ethers.Contract(obj.cardAddr, cardAbi, provider)
+		const card = new ethers.Contract(cardAddrNorm, cardAbi, provider)
 		const isAdmin = await card.isAdmin(signer)
 		if (!isAdmin) {
 			const sigPreview =
@@ -1887,12 +1925,12 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 					: obj.adminSignature
 			logger(
 				Colors.red(
-					`[executeForAdmin][eip712] signer is not admin card=${obj.cardAddr} verifyingContract=${BASE_CARD_FACTORY} chainId=8453 recovered=${signer} digest=${digest} dataHash=${dataHash} deadline=${obj.deadline} nonce=${message.nonce} sig=${sigPreview}`
+					`[executeForAdmin][eip712] signer is not admin card=${cardAddrNorm} verifyingContract=${verifyingContract} chainId=8453 recovered=${signer} digest=${digest} dataHash=${dataHash} deadline=${obj.deadline} nonce=${message.nonce} sig=${sigPreview}`
 				)
 			)
 			return {
 				ok: false,
-				error: `Signer is not card admin (recovered=${signer}, verifyingContract=${BASE_CARD_FACTORY})`,
+				error: `Signer is not card admin (recovered=${signer}, verifyingContract=${verifyingContract})`,
 				signer,
 			}
 		}
@@ -2200,11 +2238,12 @@ async function maybeExecuteChargeOwnerChildBurnAfterContainerRelay(params: {
 	const nonceHex = nonceStr.startsWith('0x') ? (nonceStr as `0x${string}`) : (`0x${nonceStr}` as `0x${string}`)
 	try {
 		let tx: ethers.ContractTransactionResponse
+		const factory = await contractForExecuteForAdmin(params.SC, cardNorm)
 		try {
-			tx = await params.SC.baseFactoryPaymaster.executeForAdmin(cardNorm, burn.data, BigInt(deadlineNum), nonceHex, burn.adminSignature)
+			tx = await factory.executeForAdmin(cardNorm, burn.data, BigInt(deadlineNum), nonceHex, burn.adminSignature)
 		} catch (gasErr: any) {
 			if (/estimateGas|missing revert data|CALL_EXCEPTION/i.test(gasErr?.message ?? '')) {
-				tx = await params.SC.baseFactoryPaymaster.executeForAdmin(cardNorm, burn.data, BigInt(deadlineNum), nonceHex, burn.adminSignature, {
+				tx = await factory.executeForAdmin(cardNorm, burn.data, BigInt(deadlineNum), nonceHex, burn.adminSignature, {
 					gasLimit: 650_000,
 				})
 			} else {
@@ -2339,9 +2378,13 @@ export const executeForAdminProcess = async () => {
 		// 二次校验：签字账户必须为 card admin（Cluster 已预检，Master 防御性再检）
 		const adminCheck = await verifyExecuteForAdminSignerIsAdmin(obj)
 		if (!adminCheck.ok) {
+			let gwHint = BASE_CARD_FACTORY
+			try {
+				gwHint = await getBeamioUserCardFactoryGateway(obj.cardAddr)
+			} catch (_) { /* ignore */ }
 			logger(
 				Colors.red(
-					`[executeForAdminProcess] admin check failed: ${adminCheck.error} | card=${obj.cardAddr} | recovered=${adminCheck.signer ?? 'N/A'} | configuredFactory=${BASE_CARD_FACTORY}`
+					`[executeForAdminProcess] admin check failed: ${adminCheck.error} | card=${obj.cardAddr} | recovered=${adminCheck.signer ?? 'N/A'} | cardFactoryGateway=${gwHint} | poolFactory=${BASE_CARD_FACTORY}`
 				)
 			)
 			if (obj.res && !obj.res.headersSent) obj.res.status(403).json({ success: false, error: adminCheck.error }).end()
@@ -2462,7 +2505,7 @@ export const executeForAdminProcess = async () => {
 				logger(Colors.yellow(`[executeForAdminProcess] pre-topup ownership snapshot failed: ${preOwnershipErr?.shortMessage ?? preOwnershipErr?.message ?? String(preOwnershipErr)}`))
 			}
 		}
-		const factory = SC.baseFactoryPaymaster
+		const factory = await contractForExecuteForAdmin(SC, obj.cardAddr)
 		let tx: ethers.ContractTransactionResponse
 		try {
 			tx = await factory.executeForAdmin(
@@ -2772,12 +2815,16 @@ export const executeForOwnerPool: {
 	description?: string
 	image?: string
 	background_color?: string
+	/** JSON string or plain object merged into EIP-1155 metadata `properties` after createIssuedNft tier upsert */
+	metadata_extra_properties?: string | Record<string, unknown>
 	metadataUpdate?: {
 		shareTokenMetadata: Record<string, unknown>
 		tiers?: Array<Record<string, unknown>>
 		upgradeType?: number
 		transferWhitelistEnabled?: boolean
 	}
+	/** 已成功预扣 Create Coupon createIssuedNft 的 B-Unit（nonce 重队列时复用，禁止二次扣费） */
+	createIssuedNftCouponBunitDeferred?: { consumeTxHash: string; feePayer: string; cardOwnerEOA: string }
 }[] = []
 
 /** AA→EOA 转账请求：客户端提交 ERC-4337 已签字的 UserOp，由 Beamio 代付 Gas 并提交到链上 */
@@ -5516,6 +5563,10 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 const TX_CATEGORY_NFC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('nfcTopup:bunitService')) as `0x${string}`
 /** Indexer：USDC buyPointsForUser topup 的 B-Unit 服务费单独一条 */
 const TX_CATEGORY_USDC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('usdcTopup:bunitService')) as `0x${string}`
+/** Indexer：Create Coupon / API `cardCreateIssuedNft` 商户 B-Unit 费一条（便于关联 Base createIssuedNft tx） */
+const TX_CATEGORY_CREATE_ISSUED_NFT_COUPON_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('createIssuedNftCoupon:bunitService')
+) as `0x${string}`
 
 /** NFC top-up 拆分记账（与 readme 2.3 及 bizSite `INDEXER_TX_TOPUP_CATEGORIES` 对齐；`txId` 须与 Base mint tx 不同，见 `nfcTopupIndexerLegTxId`） */
 const NFC_TOPUP_TX_CREDIT_TOPUP_CARD = ethers.keccak256(ethers.toUtf8Bytes('creditTopupCard')) as `0x${string}`
@@ -10252,11 +10303,12 @@ export async function nfcLinkAppUnlockActiveSessionRowCore(row: NfcLinkAppSessio
 		const data = buildInfraCancelRedeemCalldata(plain)
 		const deadline = Math.floor(Date.now() / 1000) + 900
 		const nonce = ethers.hexlify(ethers.randomBytes(32))
+		const verifyingContract = await getBeamioUserCardFactoryGateway(infra)
 		const domain = {
 			name: 'BeamioUserCardFactory',
 			version: '1',
 			chainId: BASE_MAINNET_CHAIN_ID,
-			verifyingContract: BASE_CARD_FACTORY,
+			verifyingContract,
 		}
 		const types = {
 			ExecuteForOwner: [
@@ -11047,7 +11099,8 @@ export const cardAddAdminPreCheck = async (body: {
 				}
 			}
 			if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
-			const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract: BASE_CARD_FACTORY }
+			const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
+			const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract }
 			const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
 			const dataHash = ethers.keccak256(data)
 			const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
@@ -11120,8 +11173,8 @@ export const cardMintIssuedNftToAddressPreCheck = async (body: {
 			if (!owner || owner === ethers.ZeroAddress) return { success: false, error: 'Card has no owner' }
 			const existingBal = (await card.balanceOf(targetAddress, tokenIdN)) as bigint
 			if (existingBal > 0n) return { success: false, error: 'Already registered as merchant' }
-			const factory = new ethers.Contract(BASE_CARD_FACTORY, ['function DOMAIN_SEPARATOR() view returns (bytes32)'], provider)
-			const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract: BASE_CARD_FACTORY }
+			const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
+			const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract }
 			const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
 			const dataHash = ethers.keccak256(data)
 			const nonceBytes = nonce.length === 66 && nonce.startsWith('0x') ? (nonce as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`
@@ -11182,6 +11235,28 @@ export const cardCreateIssuedNftPreCheck = async (body: {
 			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+		try {
+			const cardForOwnerProbe = new ethers.Contract(
+				ethers.getAddress(cardAddress),
+				['function owner() view returns (address)'],
+				providerBaseBackup
+			)
+			const rawOwn = await cardForOwnerProbe.owner()
+			const ro = await resolveCardOwnerToEOA(providerBaseBackup, rawOwn as string)
+			if (!ro.success) return { success: false, error: ro.error ?? 'Cannot resolve card owner for B-Unit fee' }
+			const aaFc = await getCardAaFactoryAddress(ethers.getAddress(cardAddress))
+			const pickBu = await pickBUnitFeeConsumerPreferEoaThenAa(ro.cardOwner, CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6, {
+				aaFactoryAddress: aaFc,
+			})
+			if (!pickBu.ok) {
+				return {
+					success: false,
+					error: `Insufficient B-Units for createIssuedNft: merchant (card owner) must have at least ${Number(CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6) / 1e6} B-Units. ${pickBu.error}`,
+				}
+			}
+		} catch (eBu: any) {
+			return { success: false, error: eBu?.message ?? String(eBu) }
+		}
 		return { success: true }
 	} catch (e: any) {
 		return { success: false, error: e?.message ?? String(e) }
@@ -11214,7 +11289,8 @@ export const cardClearAdminMintCounterPreCheck = async (body: {
 		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], providerBaseBackup)
 		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
 		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
-		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract: BASE_CARD_FACTORY }
+		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
+		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract }
 		const types = { ClearAdminMintCounter: [{ name: 'cardAddress', type: 'address' }, { name: 'subordinate', type: 'address' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
 		const nonceBytes = nonce.length === 66 && nonce.startsWith('0x') ? (nonce as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`
 		const value = { cardAddress: ethers.getAddress(cardAddress), subordinate: ethers.getAddress(subordinate), deadline: Number(deadline), nonce: nonceBytes }
@@ -11246,7 +11322,8 @@ export const cardTerminalSettlementClearPreCheck = async (body: {
 		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], providerBaseBackup)
 		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
 		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
-		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract: BASE_CARD_FACTORY }
+		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
+		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract }
 		const types = {
 			TerminalSettlementClear: [
 				{ name: 'cardAddress', type: 'address' },
@@ -11283,11 +11360,12 @@ export const cardTerminalSettlementClearProcess = async (payload: {
 	const nonceBytes32 = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
 	const cardNorm = ethers.getAddress(cardAddress)
 	const payeeTerminal = ethers.getAddress(subordinate)
+	const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
 	const domain = {
 		name: 'BeamioUserCardFactory',
 		version: '1',
 		chainId: 8453,
-		verifyingContract: BASE_CARD_FACTORY,
+		verifyingContract,
 	}
 	const types = {
 		TerminalSettlementClear: [
@@ -11374,9 +11452,10 @@ export const cardClearAdminMintCounterProcess = async (payload: {
 	const SC = pool[0]
 	const nonceBytes32 = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
 
-	// 1) Card 链上记账：Factory.executeClearAdminMintCounter
+	// 1) Card 链上记账：Factory.executeClearAdminMintCounter（须为卡绑定的 gateway）
 	const factoryAbi = ['function executeClearAdminMintCounter(address cardAddress,address subordinate,uint256 deadline,bytes32 nonce,bytes adminSignature)']
-	const factory = new ethers.Contract(BASE_CARD_FACTORY, factoryAbi, SC.walletBase)
+	const gw = await getBeamioUserCardFactoryGateway(ethers.getAddress(cardAddress))
+	const factory = new ethers.Contract(gw, factoryAbi, SC.walletBase)
 	const txCard = await factory.executeClearAdminMintCounter(
 		ethers.getAddress(cardAddress),
 		ethers.getAddress(subordinate),
@@ -11633,6 +11712,10 @@ export const executeForOwnerProcess = async () => {
 		executeForOwnerPool.unshift(obj)
 		return setTimeout(() => executeForOwnerProcess(), 3000)
 	}
+	/** Merchant Create Coupon B-Unit；Base executeForOwner（createIssuedNft）失败时款已扣（见产品说明）。重队列时复用 `createIssuedNftCouponBunitDeferred` 避免二次扣费 */
+	let createIssuedNftCouponBunitCtx:
+		| { consumeTxHash: string; feePayer: string; cardOwnerEOA: string }
+		| null = obj.createIssuedNftCouponBunitDeferred ?? null
 	try {
 		const factory = SC.baseFactoryPaymaster
 		if (SC.aaAccountFactoryPaymaster && obj.data) {
@@ -11676,6 +11759,58 @@ export const executeForOwnerProcess = async () => {
 				logger(Colors.yellow(`[cardAddAdmin] chainWrite debug failed: ${e?.message ?? e}`))
 			}
 		}
+		if (obj.data?.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase() && !createIssuedNftCouponBunitCtx) {
+			const cardAddrN = ethers.getAddress(obj.cardAddress)
+			const cardOwnerRead = new ethers.Contract(cardAddrN, ['function owner() view returns (address)'], providerBaseBackup)
+			const rawOwner = await cardOwnerRead.owner()
+			const resolveResult = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner as string)
+			if (!resolveResult.success) {
+				throw new Error(resolveResult.error ?? 'Cannot resolve card owner to EOA for B-Unit fee')
+			}
+			const cardOwnerEOA = resolveResult.cardOwner
+			const aaFac = await getCardAaFactoryAddress(cardAddrN)
+			const pickedFee = await pickBUnitFeeConsumerPreferEoaThenAa(
+				cardOwnerEOA,
+				CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6,
+				{ aaFactoryAddress: aaFac }
+			)
+			if (!pickedFee.ok) {
+				throw new Error(
+					`Insufficient B-Units for createIssuedNft — program card owner must have at least ${Number(CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6) / 1e6} B-Units: ${pickedFee.error}`
+				)
+			}
+			const feeConsumer = pickedFee.consumer
+			const bunitWrite = new ethers.Contract(
+				CONET_BUNIT_AIRDROP_ADDRESS,
+				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+				SC.walletConet
+			)
+			let consumeTxFee: ethers.ContractTransactionResponse
+			try {
+				consumeTxFee = await bunitWrite.consumeFromUser(
+					feeConsumer,
+					CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6,
+					ethers.ZeroHash,
+					0n,
+					BUNIT_KIND_CREATE_ISSUED_NFT_TOPUP_FAMILY,
+					{ gasLimit: 2_500_000 }
+				)
+				await consumeTxFee.wait()
+			} catch (buErr: any) {
+				throw new Error(`B-Unit debit before createIssuedNft failed: ${buErr?.shortMessage ?? buErr?.message ?? buErr}`)
+			}
+			createIssuedNftCouponBunitCtx = {
+				consumeTxHash: consumeTxFee.hash,
+				feePayer: feeConsumer,
+				cardOwnerEOA,
+			}
+			obj.createIssuedNftCouponBunitDeferred = createIssuedNftCouponBunitCtx
+			logger(
+				Colors.cyan(
+					`[executeForOwnerProcess] createIssuedNft 100 B-Unit pre-debited CoNET payer=${feeConsumer} tx=${consumeTxFee.hash}`
+				)
+			)
+		}
 		const tx = await factory.executeForOwner(
 			obj.cardAddress,
 			obj.data,
@@ -11712,15 +11847,126 @@ export const executeForOwnerProcess = async () => {
 		}
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, ...(code != null && { code }), ...(hash && { hash }) }).end()
 		// createIssuedNft 成功后异步写入 EIP-1155 tier metadata，供 GET /metadata/0x{card}{tokenId}.json 返回
-		if (hash && obj.data && obj.data.slice(0, 10) === CREATE_ISSUED_NFT_SELECTOR) {
+		if (hash && obj.data && obj.data.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase()) {
 			const cardAddress = obj.cardAddress
+			const feeCtx = createIssuedNftCouponBunitCtx
+			const baseCreateHash = hash
 			const descriptionFromBody = typeof obj.description === 'string' && obj.description.trim() ? obj.description.trim() : undefined
 			const imageFromBody = typeof obj.image === 'string' && obj.image.trim() ? obj.image.trim() : undefined
 			const backgroundColorFromBody = typeof obj.background_color === 'string' && obj.background_color.trim() ? obj.background_color.trim() : undefined
+			let extraPropsFromBody: Record<string, unknown> | undefined
+			const rawExtra = obj.metadata_extra_properties as string | Record<string, unknown> | undefined
+			if (typeof rawExtra === 'string' && rawExtra.trim()) {
+				try {
+					const p = JSON.parse(rawExtra.trim()) as unknown
+					if (p != null && typeof p === 'object' && !Array.isArray(p)) extraPropsFromBody = p as Record<string, unknown>
+				} catch {
+					/* ignore invalid JSON */
+				}
+			} else if (rawExtra != null && typeof rawExtra === 'object' && !Array.isArray(rawExtra)) {
+				extraPropsFromBody = rawExtra as Record<string, unknown>
+			}
 			;(async () => {
 				try {
 					const receipt = await tx.wait()
 					if (!receipt || receipt.status !== 1) return
+
+					if (
+						feeCtx &&
+						baseCreateHash &&
+						feeCtx.consumeTxHash &&
+						ethers.isAddress(feeCtx.feePayer) &&
+						ethers.isAddress(feeCtx.cardOwnerEOA)
+					) {
+						try {
+							const opChain = await fetchOperatorParentChain(cardAddress, feeCtx.cardOwnerEOA)
+							const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(feeCtx.cardOwnerEOA, opChain)
+							const bServiceUnits6Line = CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6
+							const bServiceUSDC6Line = bServiceUnits6Line / BUNIT_TO_USDC_DIVISOR
+							const bunitDisplayJson = JSON.stringify({
+								title: 'Create Coupon issued NFT B-Unit fee',
+								source: 'createIssuedNftCoupon',
+								baseCreateIssuedNftTxHash: baseCreateHash,
+								consumeTxHash: feeCtx.consumeTxHash,
+								cardAddress,
+								bUnits: Number(bServiceUnits6Line) / 1e6,
+								beneficiary: feeCtx.feePayer,
+							})
+							const bunitOnlyInput: PurchasingCardAccountingInput = {
+								txId: feeCtx.consumeTxHash as `0x${string}`,
+								originalPaymentHash: baseCreateHash as `0x${string}`,
+								chainId: BigInt(CONET_MAINNET_CHAIN_ID),
+								txCategory: TX_CATEGORY_CREATE_ISSUED_NFT_COUPON_BUNIT_SERVICE,
+								displayJson: bunitDisplayJson,
+								timestamp: 0n,
+								payer: ethers.getAddress(feeCtx.feePayer),
+								payee: ethers.getAddress(CONET_BUNIT_AIRDROP_ADDRESS),
+								finalRequestAmountFiat6: 0n,
+								finalRequestAmountUSDC6: bServiceUSDC6Line,
+								isAAAccount: false,
+								route: [
+									{
+										asset: ethers.getAddress(USDC_ADDRESS),
+										amountE6: bServiceUSDC6Line,
+										assetType: 0,
+										source: 0,
+										tokenId: 0n,
+										itemCurrencyType: 4,
+										offsetInRequestCurrencyE6: bServiceUSDC6Line,
+									},
+								],
+								fees: {
+									gasChainType: 0,
+									gasWei: 0n,
+									gasUSDC6: 0n,
+									serviceUSDC6: 0n,
+									bServiceUSDC6: bServiceUSDC6Line,
+									bServiceUnits6: bServiceUnits6Line,
+									feePayer: ethers.getAddress(feeCtx.feePayer),
+								},
+								meta: {
+									requestAmountFiat6: 0n,
+									requestAmountUSDC6: bServiceUSDC6Line,
+									currencyFiat: 4,
+									discountAmountFiat6: 0n,
+									discountRateBps: 0,
+									taxAmountFiat6: 0n,
+									taxRateBps: 0,
+									afterNotePayer: '',
+									afterNotePayee: '',
+								},
+								operator: ethers.getAddress(feeCtx.cardOwnerEOA),
+								operatorParentChain: opChain,
+								topAdmin,
+								subordinate,
+							}
+							const poolSc = Settle_ContractPool[0]
+							if (poolSc) {
+								const bunitSyncHash = await runPurchasingCardAccountingJob(
+									{
+										input: bunitOnlyInput,
+										baseTxHash: feeCtx.consumeTxHash,
+										from: ethers.getAddress(feeCtx.feePayer),
+										cardAddress,
+										attempt: 0,
+									},
+									{ walletConet: poolSc.walletConet, BeamioTaskDiamondAction: poolSc.BeamioTaskDiamondAction }
+								)
+								logger(
+									Colors.green(
+										`[createIssuedNft] B-Unit indexer leg ok baseTx=${baseCreateHash} consumeTx=${feeCtx.consumeTxHash} sync=${bunitSyncHash}`
+									)
+								)
+							}
+						} catch (idxErr: any) {
+							logger(
+								Colors.yellow(
+									`[createIssuedNft] B-Unit standalone indexer non-critical: ${idxErr?.shortMessage ?? idxErr?.message ?? String(idxErr)}`
+								)
+							)
+						}
+					}
+
 					const cardAddrLower = cardAddress.toLowerCase()
 					for (const log of receipt.logs) {
 						if (log.address.toLowerCase() !== cardAddrLower || log.topics[0] !== ISSUED_NFT_CREATED_TOPIC) continue
@@ -11733,14 +11979,16 @@ export const executeForOwnerProcess = async () => {
 							const owner = await card.owner()
 							cardOwner = typeof owner === 'string' ? owner : String(owner)
 						}
+						const baseProps: Record<string, unknown> = {
+							...(backgroundColorFromBody && { background_color: backgroundColorFromBody }),
+							...(extraPropsFromBody && Object.keys(extraPropsFromBody).length > 0 ? extraPropsFromBody : {}),
+						}
 						const metadataJson: Record<string, unknown> = {
 							name: `Issued NFT #${tokenId}`,
 							description: descriptionFromBody ?? 'Issued NFT tier. ERC-1155 metadata for Base Explorer.',
 							image: imageFromBody ?? 'data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'1\' height=\'1\'/%3E',
 							...(backgroundColorFromBody && { background_color: backgroundColorFromBody }),
-							properties: {
-								...(backgroundColorFromBody && { background_color: backgroundColorFromBody }),
-							},
+							properties: baseProps,
 						}
 						await upsertNftTierMetadata({ cardAddress, cardOwner, tokenId, metadataJson })
 						logger(Colors.green(`[createIssuedNft] upserted tier metadata card=${cardAddress} tokenId=${tokenId}`))

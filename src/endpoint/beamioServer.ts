@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
@@ -577,6 +577,7 @@ interface ChargeSession {
 	pendingTopupNonce: string | null
 	pendingTopupPoints6: string | null
 	pendingTopupBUnitFee: string | null
+	pendingTopupVerifyingContract: string | null
 	/** POS POST 回的签名；orchestrator 的 `awaitTopupSignature` 轮询命中后即转入下一阶段并清掉 pendingTopup* 字段。 */
 	posTopupSignature: string | null
 	createdAt: number
@@ -2546,12 +2547,13 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: 'Deadline expired' })
 			}
 			const cardAddress = ethers.getAddress(cardAddr)
+			const verifyingContractGw = await getBeamioUserCardFactoryGateway(cardAddress)
 			const dataHash = ethers.keccak256(data)
 			const domain = {
 				name: 'BeamioUserCardFactory',
 				version: '1',
 				chainId: BASE_CHAIN_ID,
-				verifyingContract: BASE_CARD_FACTORY
+				verifyingContract: verifyingContractGw
 			}
 			const types = {
 				ExecuteForAdmin: [
@@ -2575,7 +2577,7 @@ const routing = ( router: Router ) => {
 					: String(adminSignature ?? '')
 			logger(
 				Colors.gray(
-					`[nfcTopup][eip712] card=${cardAddress} verifyingContract=${BASE_CARD_FACTORY} chainId=${BASE_CHAIN_ID} dataHash=${dataHash} deadline=${deadline} nonce=${message.nonce} digest=${digest} recovered=${signer} sig=${sigPreview}`
+					`[nfcTopup][eip712] card=${cardAddress} verifyingContract=${verifyingContractGw} chainConfiguredFactory=${BASE_CARD_FACTORY} chainId=${BASE_CHAIN_ID} dataHash=${dataHash} deadline=${deadline} nonce=${message.nonce} digest=${digest} recovered=${signer} sig=${sigPreview}`
 				)
 			)
 			const cardAbi = ['function isAdmin(address) view returns (bool)', 'function owner() view returns (address)', 'function adminParent(address) view returns (address)']
@@ -2599,7 +2601,7 @@ const routing = ( router: Router ) => {
 					}
 				} catch (_) { /* ignore */ }
 				const nfcLinkedAA = nfcLinkedEOA ? await resolveBeamioAccountOf(nfcLinkedEOA) : null
-				logger(Colors.red(`[nfcTopup] Signer is not card admin - DEBUG: cardAddr=${cardAddress} | verifyingContract=${BASE_CARD_FACTORY} | tagIdHex=${nfcTagIdHex ?? '(not NFC)'} | tagIdLinkedEOA=${nfcLinkedEOA ?? 'N/A'} | tagIdLinkedAA=${nfcLinkedAA ?? 'N/A'} | toRecipient=${recipientTo ?? 'N/A'} | amountPoints6=${points6.toString()} | cardOwner=${cardOwner || 'N/A'} | signer=${signer} | signerAdminParent=${signerAdminParent || 'N/A'} | signerDbBoundCard=${signerDbBoundCard} | signerDbBoundCardMatch=${signerDbBoundCardMatch} | digest=${digest} | nonce=${message.nonce} | dataHash=${dataHash}`))
+				logger(Colors.red(`[nfcTopup] Signer is not card admin - DEBUG: cardAddr=${cardAddress} | verifyingContract=${verifyingContractGw} | tagIdHex=${nfcTagIdHex ?? '(not NFC)'} | tagIdLinkedEOA=${nfcLinkedEOA ?? 'N/A'} | tagIdLinkedAA=${nfcLinkedAA ?? 'N/A'} | toRecipient=${recipientTo ?? 'N/A'} | amountPoints6=${points6.toString()} | cardOwner=${cardOwner || 'N/A'} | signer=${signer} | signerAdminParent=${signerAdminParent || 'N/A'} | signerDbBoundCard=${signerDbBoundCard} | signerDbBoundCardMatch=${signerDbBoundCardMatch} | digest=${digest} | nonce=${message.nonce} | dataHash=${dataHash}`))
 				return res.status(403).json({
 					success: false,
 					error: 'Signer is not card admin',
@@ -3200,6 +3202,7 @@ const routing = ( router: Router ) => {
 						data: prepared.data,
 						deadline: prepared.deadline,
 						nonce: prepared.nonce,
+						factoryGateway: prepared.factoryGateway,
 					},
 					originatingUSDCTx: settled.USDC_tx,
 					usdcAmount6: settled.usdcAmount6.toString(),
@@ -5378,7 +5381,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			/** 若 calldata to 曾为合约，则 owner(to)；正常 EOA 路径下多为 N/A */
 			let ownerOfCalldataToIfContract: string | null = null
 			if (cardAddress && data && deadline != null && nonce && ownerSignature) {
-				const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: BASE_CHAIN_ID, verifyingContract: BASE_CARD_FACTORY }
+				const vc = await getBeamioUserCardFactoryGateway(ethers.getAddress(String(cardAddress)))
+				const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: BASE_CHAIN_ID, verifyingContract: vc }
 				const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
 				const dataHash = ethers.keccak256(data)
 				const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
@@ -5512,7 +5516,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/cardTerminalSettlementClear', req.body, res)
 	})
 
-	/** cardCreateIssuedNft：owner 定义新发行 NFT 类型。Cluster 预检 data 为 createIssuedNft、maxSupply>0、日期合法、card 存在，合格转发 master executeForOwner，Master 代付 gas 上链 */
+	/** cardCreateIssuedNft：owner 定义新发行 NFT 类型。Cluster 预检含 createIssuedNft 合法性 + 卡主（owner）至少 100 B-Unit；合格后转发 master；Master 先于 Base 于 CoNET 扣 100 B-Unit 再 executeForOwner */
 	router.post('/cardCreateIssuedNft', async (req, res) => {
 		const preCheck = await cardCreateIssuedNftPreCheck(req.body)
 		if (!preCheck.success) {
@@ -5710,12 +5714,13 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		try {
 			const card = new ethers.Contract(ethers.getAddress(cardAddress), ['function owner() view returns (address)'], providerBase)
 			const owner = ethers.getAddress(await card.owner())
+			const vc = await getBeamioUserCardFactoryGateway(ethers.getAddress(cardAddress))
 			const digest = ethers.TypedDataEncoder.hash(
 				{
 					name: 'BeamioUserCardFactory',
 					version: '1',
 					chainId: BASE_CHAIN_ID,
-					verifyingContract: BASE_CARD_FACTORY,
+					verifyingContract: vc,
 				},
 				{
 					ExecuteForOwner: [

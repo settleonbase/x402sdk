@@ -110,6 +110,7 @@ export type OrchestratorSessionPatch = {
 	pendingTopupNonce?: string | null
 	pendingTopupPoints6?: string | null
 	pendingTopupBUnitFee?: string | null
+	pendingTopupVerifyingContract?: string | null
 }
 
 export interface UsdcChargeOrchestratorContext {
@@ -337,6 +338,7 @@ const runTopupLeg = async (
 		pendingTopupNonce: prepared.nonce,
 		pendingTopupPoints6: points6 != null ? points6.toString() : null,
 		pendingTopupBUnitFee: bunit.feeAmount?.toString() ?? '0',
+		pendingTopupVerifyingContract: prepared.factoryGateway,
 	})
 	logger(Colors.cyan(
 		`[orchestrator] sid=${ctx.sid.slice(0, 8)}… awaiting_topup_auth: tmpEOA=${tmpEOA.slice(0, 10)}… ` +
@@ -630,7 +632,7 @@ export interface UsdcNfcTopupPosOrchestratorContext {
 	currency: string
 	currencyAmount: string
 	recipientEOA: string
-	prepared: { cardAddr: string; data: string; deadline: number; nonce: string }
+	prepared: { cardAddr: string; data: string; deadline: number; nonce: string; factoryGateway: string }
 	originatingUSDCTx: string
 	usdcAmount6: string
 	payer: string
@@ -666,6 +668,7 @@ export const runUsdcNfcTopupPosOrchestrator = async (ctx: UsdcNfcTopupPosOrchest
 		pendingTopupNonce: prepared.nonce,
 		pendingTopupPoints6: points6 != null ? points6.toString() : null,
 		pendingTopupBUnitFee: bunit.feeAmount?.toString() ?? '0',
+		pendingTopupVerifyingContract: prepared.factoryGateway,
 	})
 	logger(
 		Colors.cyan(

@@ -16,7 +16,7 @@ import {
 	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED } from './latestCardsShared'
@@ -142,6 +142,7 @@ interface MasterChargeSession {
 	pendingTopupNonce: string | null
 	pendingTopupPoints6: string | null
 	pendingTopupBUnitFee: string | null
+	pendingTopupVerifyingContract: string | null
 	posTopupSignature: string | null
 	createdAt: number
 	updatedAt: number
@@ -192,6 +193,7 @@ const masterMakeFreshChargeSession = (sid: string, now: number): MasterChargeSes
 	pendingTopupNonce: null,
 	pendingTopupPoints6: null,
 	pendingTopupBUnitFee: null,
+	pendingTopupVerifyingContract: null,
 	posTopupSignature: null,
 	createdAt: now,
 	updatedAt: now,
@@ -1567,7 +1569,20 @@ const routing = ( router: Router ) => {
 		})
 
 		router.post('/executeForOwner', async (req, res) => {
-			const { cardAddress, data, deadline, nonce, ownerSignature, redeemCode, toUserEOA, targetAddress, description, image, background_color } = req.body as {
+			const {
+				cardAddress,
+				data,
+				deadline,
+				nonce,
+				ownerSignature,
+				redeemCode,
+				toUserEOA,
+				targetAddress,
+				description,
+				image,
+				background_color,
+				metadata_extra_properties,
+			} = req.body as {
 				cardAddress?: string
 				data?: string
 				deadline?: number
@@ -1579,6 +1594,7 @@ const routing = ( router: Router ) => {
 				description?: string
 				image?: string
 				background_color?: string
+				metadata_extra_properties?: string | Record<string, unknown>
 			}
 			if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
 				return res.status(400).json({ success: false, error: 'Missing required fields: cardAddress, data, deadline, nonce, ownerSignature' })
@@ -1591,7 +1607,20 @@ const routing = ( router: Router ) => {
 					return res.status(500).json({ success: false, error: e?.message ?? 'Failed to create AA for recipient' })
 				}
 			}
-			executeForOwnerPool.push({ cardAddress, data, deadline, nonce, ownerSignature, redeemCode, toUserEOA, res, description, image, background_color })
+			executeForOwnerPool.push({
+				cardAddress,
+				data,
+				deadline,
+				nonce,
+				ownerSignature,
+				redeemCode,
+				toUserEOA,
+				res,
+				description,
+				image,
+				background_color,
+				metadata_extra_properties,
+			})
 			logger(Colors.cyan(`[executeForOwner] pushed to pool, card=${cardAddress}`))
 			executeForOwnerProcess().catch((err: any) => {
 				logger(Colors.red('[executeForOwnerProcess] unhandled error:'), err?.message ?? err)
@@ -2817,6 +2846,7 @@ const routing = ( router: Router ) => {
 					pendingTopupNonce: null,
 					pendingTopupPoints6: null,
 					pendingTopupBUnitFee: null,
+					pendingTopupVerifyingContract: null,
 					updatedAt: now,
 				})
 				return res.status(200).json({ ok: true, signature: sig, signer }).end()
@@ -2832,7 +2862,7 @@ const routing = ( router: Router ) => {
 		 *  POS 端把 admin EOA 离线签的 ExecuteForAdmin 65-byte sig 回灌（cluster 把 POS 的请求 proxy 到这里）。
 		 *  Master 用 session.pendingTopup* 字段重算 EIP-712 digest，recover 必须 == session.pos。
 		 *  通过则写 posTopupSignature，编排器的 consumePosSig 闭环立即获取。 */
-		router.post('/nfcUsdcChargeTopupAuth', (req, res) => {
+		router.post('/nfcUsdcChargeTopupAuth', async (req, res) => {
 			try {
 				const { sid, signature } = (req.body ?? {}) as { sid?: string; signature?: string }
 				const sidNorm = typeof sid === 'string' ? sid.trim().toLowerCase() : ''
@@ -2869,11 +2899,27 @@ const routing = ( router: Router ) => {
 
 				const dataBytes = ethers.getBytes(rec.pendingTopupData)
 				const dataHash = ethers.keccak256(dataBytes)
+				let verifyingContract: string
+				try {
+					const fromSession =
+						rec.pendingTopupVerifyingContract != null &&
+						String(rec.pendingTopupVerifyingContract).trim() !== '' &&
+						ethers.isAddress(String(rec.pendingTopupVerifyingContract).trim())
+							? ethers.getAddress(String(rec.pendingTopupVerifyingContract).trim())
+							: null
+					verifyingContract =
+						fromSession ?? (await getBeamioUserCardFactoryGateway(rec.pendingTopupCardAddr))
+				} catch (vcErr: any) {
+					return res
+						.status(409)
+						.json({ success: false, error: `EIP-712 factory gateway: ${vcErr?.message ?? String(vcErr)}` })
+						.end()
+				}
 				const domain = {
 					name: 'BeamioUserCardFactory',
 					version: '1',
 					chainId: MASTER_BASE_CHAIN_ID,
-					verifyingContract: BASE_CARD_FACTORY,
+					verifyingContract,
 				}
 				const types = {
 					ExecuteForAdmin: [
@@ -2885,7 +2931,7 @@ const routing = ( router: Router ) => {
 				}
 				const nonceHex = rec.pendingTopupNonce.startsWith('0x') ? rec.pendingTopupNonce : '0x' + rec.pendingTopupNonce
 				const message = {
-					cardAddress: rec.pendingTopupCardAddr,
+					cardAddress: ethers.getAddress(rec.pendingTopupCardAddr),
 					dataHash,
 					deadline: BigInt(rec.pendingTopupDeadline),
 					nonce: nonceHex,
