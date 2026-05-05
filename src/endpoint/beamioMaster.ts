@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, type BeamioLatestCardItem} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, type BeamioLatestCardItem} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import {
@@ -67,6 +67,7 @@ const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
 	'function issuedNftMaxSupply(uint256) view returns (uint256)',
 	'function issuedNftMintedCount(uint256) view returns (uint256)',
 	'function issuedNftPriceInCurrency6(uint256) view returns (uint256)',
+	'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
 	'function owner() view returns (address)',
 ] as const
 const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
@@ -216,6 +217,8 @@ const cardsByCategoryCache = new Map<string, { groups: unknown[]; expiry: number
 const getFollowStatusCache = new Map<string, { data: unknown; expiry: number }>()
 const getMyFollowStatusCache = new Map<string, { data: unknown; expiry: number }>()
 const ownerNftSeriesCache = new Map<string, { items: unknown[]; expiry: number }>()
+const recentIssuedCouponSeriesCache = new Map<string, { items: unknown[]; limit: number; expiry: number }>()
+const cardActiveIssuedCouponSeriesCache = new Map<string, { data: { cardAddress: string; limit: number; items: unknown[] }; expiry: number }>()
 const seriesSharedMetadataCache = new Map<string, { data: unknown; expiry: number }>()
 const mintMetadataCache = new Map<string, { items: unknown[]; expiry: number }>()
 
@@ -968,6 +971,108 @@ const routing = ( router: Router ) => {
 			} catch (err: any) {
 				logger(Colors.red('[ownerNftSeries] error:'), err?.message ?? err)
 				res.status(500).json({ error: err?.message ?? 'Failed to fetch owner NFT series' })
+			}
+		})
+
+		/** GET /api/recentIssuedCouponSeries — Program 优惠券 issued NFT，按登记时间倒序；默认 limit=20，最大 50 */
+		router.get('/recentIssuedCouponSeries', async (req, res) => {
+			let limit = Number((req.query as { limit?: string }).limit ?? 20)
+			if (!Number.isFinite(limit)) limit = 20
+			limit = Math.floor(limit)
+			limit = Math.min(Math.max(limit, 1), 50)
+			const cacheKey = String(limit)
+			const cached = recentIssuedCouponSeriesCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json({ items: cached.items, limit: cached.limit })
+			}
+			try {
+				const items = await listRecentBeamioIssuedCouponSeries(limit)
+				recentIssuedCouponSeriesCache.set(cacheKey, { items, limit, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+				res.status(200).json({ items, limit })
+			} catch (err: any) {
+				logger(Colors.red('[recentIssuedCouponSeries] error:'), err?.message ?? err)
+				res.status(500).json({ error: err?.message ?? 'Failed to fetch recent issued coupon series' })
+			}
+		})
+
+		/** GET /api/cardActiveIssuedCouponSeries — 单卡 Program 优惠券，DB 登记时间倒序且链上 isIssuedNftValid；默认 limit=20，最大 50 */
+		router.get('/cardActiveIssuedCouponSeries', async (req, res) => {
+			const { card } = req.query as { card?: string; limit?: string }
+			if (!card || !ethers.isAddress(card)) {
+				return res.status(400).json({ error: 'Invalid card address' })
+			}
+			let limit = Number((req.query as { limit?: string }).limit ?? 20)
+			if (!Number.isFinite(limit)) limit = 20
+			limit = Math.floor(limit)
+			limit = Math.min(Math.max(limit, 1), 50)
+			const checksum = ethers.getAddress(card)
+			const cacheKey = `${checksum.toLowerCase()}:${limit}`
+			const cached = cardActiveIssuedCouponSeriesCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json(cached.data)
+			}
+			try {
+				const scanLimit = Math.min(400, Math.max(60, limit * 25))
+				const candidates = await listCouponIssuedNftSeriesForCardDescending(checksum, scanLimit)
+				const seenToken = new Set<string>()
+				const ordered = [] as typeof candidates
+				for (const row of candidates) {
+					if (seenToken.has(row.tokenId)) continue
+					seenToken.add(row.tokenId)
+					ordered.push(row)
+				}
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const cardContract = new ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, provider)
+				const items: Array<{
+					cardAddress: string
+					tokenId: string
+					sharedMetadataHash: string
+					ipfsCid: string
+					cardOwner: string
+					metadata: Record<string, unknown> | null
+					createdAt: string
+					issuedNftValidAfter: string
+					issuedNftValidBefore: string
+				}> = []
+				for (const row of ordered) {
+					if (items.length >= limit) break
+					let tid: bigint
+					try {
+						tid = BigInt(row.tokenId)
+					} catch {
+						continue
+					}
+					if (tid < ISSUED_NFT_START_ID) continue
+					try {
+						const [valid, va, vb, ms] = await Promise.all([
+							cardContract.isIssuedNftValid(tid),
+							cardContract.issuedNftValidAfter(tid),
+							cardContract.issuedNftValidBefore(tid),
+							cardContract.issuedNftMaxSupply(tid),
+						])
+						if (ms === 0n) continue
+						if (!valid) continue
+						items.push({
+							cardAddress: row.cardAddress,
+							tokenId: row.tokenId,
+							sharedMetadataHash: row.sharedMetadataHash,
+							ipfsCid: row.ipfsCid,
+							cardOwner: row.cardOwner,
+							metadata: row.metadata,
+							createdAt: row.createdAt,
+							issuedNftValidAfter: String(va),
+							issuedNftValidBefore: String(vb),
+						})
+					} catch {
+						continue
+					}
+				}
+				const data = { cardAddress: checksum, limit, items }
+				cardActiveIssuedCouponSeriesCache.set(cacheKey, { data, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+				res.status(200).json(data)
+			} catch (err: any) {
+				logger(Colors.red('[cardActiveIssuedCouponSeries] error:'), err?.message ?? err)
+				res.status(500).json({ error: err?.message ?? 'Failed to fetch active issued coupons for card' })
 			}
 		})
 
