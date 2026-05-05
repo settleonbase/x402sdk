@@ -11932,10 +11932,12 @@ export const executeForOwnerProcess = async () => {
 			logger(Colors.green(`[executeForOwnerProcess] card tiers metadata synced card=${obj.cardAddress}`))
 		}
 		if (obj.res && !obj.res.headersSent) {
+			const cardAddrChecksummed = ethers.getAddress(obj.cardAddress)
 			obj.res
 				.status(200)
 				.json({
 					success: true,
+					cardAddress: cardAddrChecksummed,
 					...(code != null && { code }),
 					...(hash && { hash }),
 					...(issuedNftTokenIdForApi != null && { issuedNftTokenId: issuedNftTokenIdForApi }),
