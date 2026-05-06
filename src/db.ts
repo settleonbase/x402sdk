@@ -3414,6 +3414,34 @@ export const registerSeriesToDb = async (params: {
 	}
 }
 
+/** 更新已登记 issued NFT 系列 metadata_json（保留 shared_metadata_hash / ipfs_cid / card_owner）。 */
+export const updateSeriesMetadataByCardAndToken = async (params: {
+	cardAddress: string
+	tokenId: string
+	metadataJson: Record<string, unknown>
+}): Promise<boolean> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_NFT_SERIES_TABLE)
+		const meta = JSON.stringify(params.metadataJson)
+		const { rowCount } = await db.query(
+			`
+			UPDATE beamio_nft_series
+			SET metadata_json = $3::jsonb
+			WHERE card_address = $1 AND token_id = $2
+			`,
+			[params.cardAddress.toLowerCase(), params.tokenId, meta]
+		)
+		return (rowCount ?? 0) > 0
+	} catch (e: any) {
+		logger(Colors.yellow(`[updateSeriesMetadataByCardAndToken] failed: ${e?.message ?? e}`))
+		return false
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 登记单笔 mint 的通用型 metadata（购买/铸造时调用；metadataJson 任意结构，如 { seat: "A12" }、{ serialNo: "SN-001" }） */
 export const registerMintMetadataToDb = async (params: {
 	cardAddress: string

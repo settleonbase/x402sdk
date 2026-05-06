@@ -101,6 +101,7 @@ import {
 	replaceNfcCardKeyByTagId,
 	getNfcCardSignedTxGateByTagId,
 	getNfcCardSignedTxGateByUid,
+	listCouponIssuedNftSeriesForCardDescending,
 	type NfcLinkAppSessionDb,
 } from './db'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './endpoint/getUIDAssetsLogic'
@@ -2788,6 +2789,18 @@ export const cardRedeemPool: {
 	cardAddress: string
 	redeemCode: string
 	toUserEOA: string
+	res: Response
+}[] = []
+
+/** Coupon Open Claim（无 redeemcode）：用户 EIP-712 签名申请，Master 代发 `claimIssuedNftWithUserSig`。 */
+export const cardCouponOpenClaimPool: {
+	cardAddress: string
+	couponId: string
+	userEOA: string
+	tokenId: string
+	deadline: number
+	nonce: string
+	userSignature: string
 	res: Response
 }[] = []
 
@@ -11170,6 +11183,17 @@ const createIssuedNftIface = new ethers.Interface([
 const mintIssuedNftByGatewayIface = new ethers.Interface([
 	'function mintIssuedNftByGateway(address userEOA, uint256 tokenId, uint256 amount)',
 ])
+const claimIssuedNftWithUserSigIface = new ethers.Interface([
+	'function claimIssuedNftWithUserSig(address cardAddr, address userEOA, uint256 tokenId, uint256 deadline, bytes32 nonce, bytes userSignature)',
+])
+const CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE = {
+	ClaimIssuedNft: [
+		{ name: 'cardAddr', type: 'address' },
+		{ name: 'tokenId', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+		{ name: 'nonce', type: 'bytes32' },
+	],
+}
 const ISSUED_NFT_START_ID_MEMBER = 100_000_000_000n
 const CREATE_ISSUED_NFT_SELECTOR = createIssuedNftIface.getFunction('createIssuedNft')?.selector ?? ''
 
@@ -11182,6 +11206,132 @@ const CREATE_REDEEM_BATCH_SELECTOR = createRedeemBatchIfaceCouponDbg.getFunction
 export const couponWorkflowDebugEnabled = (): boolean =>
 	typeof process !== 'undefined' &&
 	(process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === '1' || process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === 'true')
+
+function readCouponIdFromSeriesMetadata(meta: Record<string, unknown> | null | undefined): string {
+	if (!meta || typeof meta !== 'object') return ''
+	const rootId = meta.couponId
+	if (typeof rootId === 'string' && rootId.trim()) return rootId.trim()
+	const properties = meta.properties
+	if (!properties || typeof properties !== 'object') return ''
+	const beamioCoupon = (properties as Record<string, unknown>).beamioCoupon
+	if (!beamioCoupon || typeof beamioCoupon !== 'object') return ''
+	const nestedId = (beamioCoupon as Record<string, unknown>).couponId
+	return typeof nestedId === 'string' && nestedId.trim() ? nestedId.trim() : ''
+}
+
+function readCouponRequiresRedeemCode(meta: Record<string, unknown> | null | undefined): boolean {
+	if (!meta || typeof meta !== 'object') return false
+	const root = meta as Record<string, unknown>
+	const toBool = (v: unknown): boolean =>
+		v === true || v === 1 || v === '1' || v === 'true'
+	if (toBool(root.requiresRedeemCode) || toBool(root.redeemCodeRequired)) return true
+	const properties = root.properties
+	if (!properties || typeof properties !== 'object') return false
+	const beamioCoupon = (properties as Record<string, unknown>).beamioCoupon
+	if (!beamioCoupon || typeof beamioCoupon !== 'object') return false
+	const nested = beamioCoupon as Record<string, unknown>
+	return toBool(nested.requiresRedeemCode) || toBool(nested.redeemCodeRequired)
+}
+
+/** cardCouponOpenClaim 集群预检：校验用户签名、couponId↔tokenId 映射、仅允许 open claim（requiresRedeemCode=false）。 */
+export const cardCouponOpenClaimPreCheck = async (body: {
+	cardAddress?: string
+	couponId?: string
+	userEOA?: string
+	tokenId?: string | number
+	deadline?: number
+	nonce?: string
+	userSignature?: string
+}): Promise<{ success: true; preChecked: { cardAddress: string; couponId: string; userEOA: string; tokenId: string; deadline: number; nonce: string; userSignature: string } } | { success: false; error: string }> => {
+	const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!userEOA || !ethers.isAddress(userEOA)) return { success: false, error: 'Invalid userEOA' }
+	const couponIdTrimmed = String(couponId ?? '').trim()
+	if (!couponIdTrimmed) return { success: false, error: 'Missing couponId' }
+	let tokenIdN: bigint
+	try {
+		tokenIdN = BigInt(tokenId ?? 0)
+	} catch {
+		return { success: false, error: 'Invalid tokenId' }
+	}
+	if (tokenIdN < ISSUED_NFT_START_ID_MEMBER) return { success: false, error: 'tokenId must be issued NFT tokenId' }
+	if (deadline == null || !Number.isInteger(Number(deadline)) || Number(deadline) <= Math.floor(Date.now() / 1000)) {
+		return { success: false, error: 'Missing or expired deadline' }
+	}
+	if (!nonce || typeof nonce !== 'string' || !nonce.trim()) return { success: false, error: 'Missing nonce' }
+	if (!userSignature || !ethers.isHexString(userSignature)) return { success: false, error: 'Invalid userSignature' }
+
+	const cardNorm = ethers.getAddress(cardAddress)
+	const userNorm = ethers.getAddress(userEOA)
+	const nonceBytes32 =
+		nonce.length === 66 && nonce.startsWith('0x')
+			? (nonce as `0x${string}`)
+			: (ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`)
+
+	try {
+		const candidates = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
+		const matchedSeries = candidates.find((row) => {
+			if (String(row.tokenId) !== String(tokenIdN)) return false
+			const seriesCouponId = readCouponIdFromSeriesMetadata(row.metadata ?? null)
+			return seriesCouponId === couponIdTrimmed
+		})
+		if (!matchedSeries) {
+			return { success: false, error: 'couponId does not match tokenId for this card' }
+		}
+		if (readCouponRequiresRedeemCode(matchedSeries.metadata ?? null)) {
+			return { success: false, error: 'This coupon requires redeemCode; open claim is disabled.' }
+		}
+
+		const cardRead = new ethers.Contract(
+			cardNorm,
+			[
+				'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
+				'function issuedNftPriceInCurrency6(uint256 tokenId) view returns (uint256)',
+				'function issuedNftUserSigClaimUsed(address userEOA, uint256 tokenId) view returns (bool)',
+			],
+			providerBaseBackup
+		)
+		const [isValid, priceInCurrency6, alreadyClaimed] = await Promise.all([
+			cardRead.isIssuedNftValid(tokenIdN) as Promise<boolean>,
+			cardRead.issuedNftPriceInCurrency6(tokenIdN) as Promise<bigint>,
+			cardRead.issuedNftUserSigClaimUsed(userNorm, tokenIdN) as Promise<boolean>,
+		])
+		if (!isValid) return { success: false, error: 'Issued coupon is inactive or expired' }
+		if (priceInCurrency6 !== 0n) return { success: false, error: 'Coupon open claim is only available for free issued NFT (price=0)' }
+		if (alreadyClaimed) return { success: false, error: 'This address already claimed this coupon and is no longer eligible.' }
+
+		const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
+		const domain = {
+			name: 'BeamioUserCardFactory',
+			version: '1',
+			chainId: BASE_MAINNET_CHAIN_ID,
+			verifyingContract,
+		}
+		const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
+			cardAddr: cardNorm,
+			tokenId: tokenIdN,
+			deadline: Number(deadline),
+			nonce: nonceBytes32,
+		})
+		const signer = ethers.recoverAddress(digest, userSignature)
+		if (ethers.getAddress(signer) !== userNorm) return { success: false, error: 'userSignature signer mismatch' }
+
+		return {
+			success: true,
+			preChecked: {
+				cardAddress: cardNorm,
+				couponId: couponIdTrimmed,
+				userEOA: userNorm,
+				tokenId: String(tokenIdN),
+				deadline: Number(deadline),
+				nonce: nonceBytes32,
+				userSignature: String(userSignature),
+			},
+		}
+	} catch (e: any) {
+		return { success: false, error: e?.shortMessage ?? e?.message ?? String(e) }
+	}
+}
 
 /** cardMintIssuedNftToAddress 集群预检：校验 targetAddress 为 EOA，tokenId>=ISSUED_NFT_START_ID，amount>0，card 存在，owner 签名有效。合格编码 data 并转发 master executeForOwner。 */
 export const cardMintIssuedNftToAddressPreCheck = async (body: {
@@ -12361,6 +12511,81 @@ export const cardRedeemProcess = async () => {
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => cardRedeemProcess(), 3000)
+	}
+}
+
+/**
+ * cardCouponOpenClaimProcess：无 redeemcode 的 issued coupon 直领流程（用户 EIP-712 签名）。
+ * Master 调用 Factory `claimIssuedNftWithUserSig`，由 paymaster 代付 gas。
+ */
+export const cardCouponOpenClaimProcess = async () => {
+	const obj = cardCouponOpenClaimPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		cardCouponOpenClaimPool.unshift(obj)
+		return setTimeout(() => cardCouponOpenClaimProcess(), 3000)
+	}
+	logger(
+		Colors.cyan(
+			`[cardCouponOpenClaimProcess] processing card=${obj.cardAddress} couponId=${obj.couponId} tokenId=${obj.tokenId} user=${obj.userEOA}`
+		)
+	)
+	try {
+		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
+		const poolFactoryAddr = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
+		const claimContract =
+			cardGateway.toLowerCase() === poolFactoryAddr.toLowerCase()
+				? SC.baseFactoryPaymaster
+				: new ethers.Contract(
+					cardGateway,
+					['function claimIssuedNftWithUserSig(address cardAddr,address userEOA,uint256 tokenId,uint256 deadline,bytes32 nonce,bytes userSignature)'],
+					SC.walletBase
+				)
+
+		const tx = await claimContract.claimIssuedNftWithUserSig(
+			obj.cardAddress,
+			obj.userEOA,
+			BigInt(obj.tokenId),
+			BigInt(obj.deadline),
+			obj.nonce as `0x${string}`,
+			obj.userSignature,
+		)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) {
+			throw new Error('Coupon open claim transaction failed')
+		}
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({
+				success: true,
+				tx: tx.hash,
+				cardAddress: obj.cardAddress,
+				couponId: obj.couponId,
+				tokenId: obj.tokenId,
+			}).end()
+		}
+		logger(Colors.green(`[cardCouponOpenClaimProcess] success tx=${tx.hash}`))
+	} catch (e: any) {
+		const errMsg = e?.reason ?? e?.shortMessage ?? e?.message ?? String(e)
+		let clientError = errMsg
+		if (/UC_NonceUsed/i.test(errMsg)) {
+			clientError = 'This coupon claim signature nonce has already been used.'
+		} else if (/UC_InvalidSignature/i.test(errMsg)) {
+			clientError = 'Invalid claim signature.'
+		} else if (/UC_IssuedNftSigClaimAlreadyUsed/i.test(errMsg)) {
+			clientError = 'This wallet already claimed this coupon.'
+		} else if (/UC_IssuedNftNotFree|UC_PurchaseDisabledBecauseFree/i.test(errMsg)) {
+			clientError = 'This coupon is not available for open claim.'
+		} else if (/UC_IssuedNftInactive|UC_InvalidTimeWindow/i.test(errMsg)) {
+			clientError = 'This coupon is inactive or claim window has expired.'
+		}
+		logger(Colors.red(`[cardCouponOpenClaimProcess] failed: ${clientError}`))
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: clientError }).end()
+		}
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => cardCouponOpenClaimProcess(), 3000)
 	}
 }
 

@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, type BeamioLatestCardItem} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, getCardByAddress, getNftTierMetadataByCardAndToken, upsertNftTierMetadata, updateSeriesMetadataByCardAndToken, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, type BeamioLatestCardItem} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import {
@@ -16,7 +16,7 @@ import {
 	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED } from './latestCardsShared'
@@ -77,6 +77,15 @@ const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
  * 直接表现为 Trending Now 单卡 enrichment 用 25s+ 而 base-rpc 单 call 实测仅 ~200ms。
  */
 const providerBaseForLatestCards = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, { batchMaxCount: 1 })
+
+function setOrDeleteStringField(target: Record<string, unknown>, key: string, value: string): void {
+	const v = String(value ?? '').trim()
+	if (v) {
+		target[key] = v
+		return
+	}
+	delete target[key]
+}
 
 /** Beamio 默认 metadata image（与 BeamioUserCard 一致） */
 const DEFAULT_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x44e7a175e57a337bf5d0a98deb19a0a545e362d504092a7af1aecd58798eab'
@@ -1310,6 +1319,130 @@ const routing = ( router: Router ) => {
 			}
 		})
 
+		/** 已发行 coupon：仅允许更新 metadata（icon / description / backgroundColor），不改已上链发行参数。 */
+		router.post('/updateIssuedCouponMetadata', async (req, res) => {
+			try {
+				const body = req.body as {
+					cardAddress?: string
+					couponId?: string
+					issuedTokenId?: string
+					icon?: string
+					backgroundColor?: string
+					description?: string
+				}
+				const cardAddress = body.cardAddress?.trim()
+				const couponId = body.couponId?.trim() ?? ''
+				const issuedTokenIdRaw = body.issuedTokenId?.trim() ?? ''
+				if (!cardAddress || !ethers.isAddress(cardAddress)) {
+					return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end()
+				}
+				if (!couponId) {
+					return res.status(400).json({ success: false, error: 'couponId is required' }).end()
+				}
+				let tokenIdNorm: string
+				try {
+					tokenIdNorm = String(BigInt(issuedTokenIdRaw))
+				} catch {
+					return res.status(400).json({ success: false, error: 'issuedTokenId must be an integer string' }).end()
+				}
+				const cardNorm = ethers.getAddress(cardAddress)
+				const cardRow = await getCardByAddress(cardNorm)
+				if (!cardRow) {
+					return res.status(404).json({ success: false, error: 'Card metadata not found' }).end()
+				}
+				const cardMeta = (cardRow.metadata ?? {}) as Record<string, unknown>
+				const shareTokenMetadata = (
+					cardMeta.shareTokenMetadata && typeof cardMeta.shareTokenMetadata === 'object' && !Array.isArray(cardMeta.shareTokenMetadata)
+						? { ...(cardMeta.shareTokenMetadata as Record<string, unknown>) }
+						: {}
+				) as Record<string, unknown>
+				const coupons = Array.isArray(shareTokenMetadata.coupons)
+					? ([...(shareTokenMetadata.coupons as Array<Record<string, unknown>>)] as Array<Record<string, unknown>>)
+					: []
+				const couponIdx = coupons.findIndex((item) => {
+					const id = String(item?.couponId ?? item?.id ?? '').trim()
+					const tok = String(item?.issuedTokenId ?? '').trim()
+					return id === couponId && tok === tokenIdNorm
+				})
+				if (couponIdx < 0) {
+					return res.status(404).json({ success: false, error: 'Issued coupon metadata row not found' }).end()
+				}
+				const coupon = { ...coupons[couponIdx] }
+				setOrDeleteStringField(coupon, 'icon', String(body.icon ?? ''))
+				setOrDeleteStringField(coupon, 'backgroundColor', String(body.backgroundColor ?? ''))
+				setOrDeleteStringField(coupon, 'description', String(body.description ?? ''))
+				coupons[couponIdx] = coupon
+				shareTokenMetadata.coupons = coupons
+				const applyRes = await applyBeamioCardShareMetadataUpdate({
+					cardAddress: cardNorm,
+					shareTokenMetadata,
+					...(Array.isArray(cardMeta.tiers) ? { tiers: cardMeta.tiers as Array<Record<string, unknown>> } : {}),
+					...(cardMeta.upgradeType != null ? { upgradeType: Number(cardMeta.upgradeType) } : {}),
+					...(typeof cardMeta.transferWhitelistEnabled === 'boolean'
+						? { transferWhitelistEnabled: cardMeta.transferWhitelistEnabled }
+						: {}),
+				})
+				if (!applyRes.success) {
+					return res.status(400).json({ success: false, error: applyRes.error ?? 'Metadata update failed' }).end()
+				}
+				const series = await getSeriesByCardAndTokenId(cardNorm, tokenIdNorm)
+				if (series?.metadata && typeof series.metadata === 'object') {
+					const nextSeriesMeta = { ...(series.metadata as Record<string, unknown>) }
+					setOrDeleteStringField(nextSeriesMeta, 'icon', String(body.icon ?? ''))
+					setOrDeleteStringField(nextSeriesMeta, 'backgroundColor', String(body.backgroundColor ?? ''))
+					setOrDeleteStringField(nextSeriesMeta, 'description', String(body.description ?? ''))
+					if (nextSeriesMeta.properties && typeof nextSeriesMeta.properties === 'object' && !Array.isArray(nextSeriesMeta.properties)) {
+						const props = { ...(nextSeriesMeta.properties as Record<string, unknown>) }
+						if (props.beamioCoupon && typeof props.beamioCoupon === 'object' && !Array.isArray(props.beamioCoupon)) {
+							const beamioCoupon = { ...(props.beamioCoupon as Record<string, unknown>) }
+							setOrDeleteStringField(beamioCoupon, 'icon', String(body.icon ?? ''))
+							setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
+							setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
+							props.beamioCoupon = beamioCoupon
+							nextSeriesMeta.properties = props
+						}
+					}
+					await updateSeriesMetadataByCardAndToken({
+						cardAddress: cardNorm,
+						tokenId: tokenIdNorm,
+						metadataJson: nextSeriesMeta,
+					})
+				}
+				const tierMeta = await getNftTierMetadataByCardAndToken(cardNorm, Number(tokenIdNorm))
+				if (tierMeta && typeof tierMeta === 'object') {
+					const nextTierMeta = { ...(tierMeta as Record<string, unknown>) }
+					setOrDeleteStringField(nextTierMeta, 'image', String(body.icon ?? ''))
+					setOrDeleteStringField(nextTierMeta, 'background_color', String(body.backgroundColor ?? ''))
+					setOrDeleteStringField(nextTierMeta, 'description', String(body.description ?? ''))
+					const tierProps =
+						nextTierMeta.properties && typeof nextTierMeta.properties === 'object' && !Array.isArray(nextTierMeta.properties)
+							? { ...(nextTierMeta.properties as Record<string, unknown>) }
+							: {}
+					const beamioCoupon =
+						tierProps.beamioCoupon && typeof tierProps.beamioCoupon === 'object' && !Array.isArray(tierProps.beamioCoupon)
+							? { ...(tierProps.beamioCoupon as Record<string, unknown>) }
+							: {}
+					setOrDeleteStringField(beamioCoupon, 'icon', String(body.icon ?? ''))
+					setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
+					setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
+					if (Object.keys(beamioCoupon).length > 0) {
+						tierProps.beamioCoupon = beamioCoupon
+					}
+					nextTierMeta.properties = tierProps
+					await upsertNftTierMetadata({
+						cardAddress: cardNorm,
+						cardOwner: cardRow.cardOwner,
+						tokenId: Number(tokenIdNorm),
+						metadataJson: nextTierMeta,
+					})
+				}
+				return res.status(200).json({ success: true, cardAddress: cardNorm }).end()
+			} catch (err: any) {
+				logger(Colors.red('[updateIssuedCouponMetadata] error:'), err?.message ?? err)
+				return res.status(500).json({ success: false, error: err?.message ?? 'Issued coupon metadata update failed' }).end()
+			}
+		})
+
 		router.post('/purchasingCard', (req, res) => {
 			const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked, recommender } = req.body as {
 				cardAddress: string
@@ -1668,6 +1801,36 @@ const routing = ( router: Router ) => {
 			logger(Colors.cyan(`[cardRedeem] pushed to pool, card=${cardAddress} to=${toUserEOA}`))
 			cardRedeemProcess().catch((err: any) => {
 				logger(Colors.red('[cardRedeemProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		/** cardCouponOpenClaim：无 redeemcode 的 coupon open-claim，服务端调用 claimIssuedNftWithUserSig。 */
+		router.post('/cardCouponOpenClaim', (req, res) => {
+			const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature } = req.body as {
+				cardAddress?: string
+				couponId?: string
+				userEOA?: string
+				tokenId?: string
+				deadline?: number
+				nonce?: string
+				userSignature?: string
+			}
+			if (!cardAddress || !couponId || !userEOA || !tokenId || deadline == null || !nonce || !userSignature) {
+				return res.status(400).json({ success: false, error: 'Missing required fields for cardCouponOpenClaim' }).end()
+			}
+			cardCouponOpenClaimPool.push({
+				cardAddress,
+				couponId,
+				userEOA,
+				tokenId,
+				deadline: Number(deadline),
+				nonce,
+				userSignature,
+				res,
+			})
+			logger(Colors.cyan(`[cardCouponOpenClaim] pushed to pool, card=${cardAddress} couponId=${couponId} tokenId=${tokenId}`))
+			cardCouponOpenClaimProcess().catch((err: any) => {
+				logger(Colors.red('[cardCouponOpenClaimProcess] unhandled error:'), err?.message ?? err)
 			})
 		})
 
