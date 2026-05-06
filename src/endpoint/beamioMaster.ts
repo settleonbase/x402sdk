@@ -1043,29 +1043,34 @@ const routing = ( router: Router ) => {
 						continue
 					}
 					if (tid < ISSUED_NFT_START_ID) continue
+					let valid = false
 					try {
-						const [valid, va, vb, ms] = await Promise.all([
-							cardContract.isIssuedNftValid(tid),
-							cardContract.issuedNftValidAfter(tid),
-							cardContract.issuedNftValidBefore(tid),
-							cardContract.issuedNftMaxSupply(tid),
-						])
-						if (ms === 0n) continue
-						if (!valid) continue
-						items.push({
-							cardAddress: row.cardAddress,
-							tokenId: row.tokenId,
-							sharedMetadataHash: row.sharedMetadataHash,
-							ipfsCid: row.ipfsCid,
-							cardOwner: row.cardOwner,
-							metadata: row.metadata,
-							createdAt: row.createdAt,
-							issuedNftValidAfter: String(va),
-							issuedNftValidBefore: String(vb),
-						})
+						valid = await cardContract.isIssuedNftValid(tid)
 					} catch {
 						continue
 					}
+					if (!valid) continue
+					try {
+						const ms = await cardContract.issuedNftMaxSupply(tid)
+						if (ms === 0n) continue
+					} catch {
+						// unknown maxSupply: keep valid rows
+					}
+					let va = 0n
+					let vb = 0n
+					try { va = await cardContract.issuedNftValidAfter(tid) } catch { va = 0n }
+					try { vb = await cardContract.issuedNftValidBefore(tid) } catch { vb = 0n }
+					items.push({
+						cardAddress: row.cardAddress,
+						tokenId: row.tokenId,
+						sharedMetadataHash: row.sharedMetadataHash,
+						ipfsCid: row.ipfsCid,
+						cardOwner: row.cardOwner,
+						metadata: row.metadata,
+						createdAt: row.createdAt,
+						issuedNftValidAfter: String(va),
+						issuedNftValidBefore: String(vb),
+					})
 				}
 				const data = { cardAddress: checksum, limit, items }
 				cardActiveIssuedCouponSeriesCache.set(cacheKey, { data, expiry: Date.now() + QUERY_CACHE_TTL_MS })

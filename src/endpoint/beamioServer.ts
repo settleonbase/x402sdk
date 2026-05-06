@@ -5005,29 +5005,36 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					continue
 				}
 				if (tid < ISSUED_NFT_START_ID) continue
+				let valid = false
 				try {
-					const [valid, va, vb, ms] = await Promise.all([
-						cardContract.isIssuedNftValid(tid),
-						cardContract.issuedNftValidAfter(tid),
-						cardContract.issuedNftValidBefore(tid),
-						cardContract.issuedNftMaxSupply(tid),
-					])
-					if (ms === 0n) continue
-					if (!valid) continue
-					items.push({
-						cardAddress: row.cardAddress,
-						tokenId: row.tokenId,
-						sharedMetadataHash: row.sharedMetadataHash,
-						ipfsCid: row.ipfsCid,
-						cardOwner: row.cardOwner,
-						metadata: row.metadata,
-						createdAt: row.createdAt,
-						issuedNftValidAfter: String(va),
-						issuedNftValidBefore: String(vb),
-					})
+					valid = await cardContract.isIssuedNftValid(tid)
 				} catch {
 					continue
 				}
+				if (!valid) continue
+				// Some cards may expose `isIssuedNftValid` but revert on optional
+				// series getters. Keep valid rows instead of dropping the icon.
+				try {
+					const ms = await cardContract.issuedNftMaxSupply(tid)
+					if (ms === 0n) continue
+				} catch {
+					// treat maxSupply as unknown; keep row when `valid` is true
+				}
+				let va = 0n
+				let vb = 0n
+				try { va = await cardContract.issuedNftValidAfter(tid) } catch { va = 0n }
+				try { vb = await cardContract.issuedNftValidBefore(tid) } catch { vb = 0n }
+				items.push({
+					cardAddress: row.cardAddress,
+					tokenId: row.tokenId,
+					sharedMetadataHash: row.sharedMetadataHash,
+					ipfsCid: row.ipfsCid,
+					cardOwner: row.cardOwner,
+					metadata: row.metadata,
+					createdAt: row.createdAt,
+					issuedNftValidAfter: String(va),
+					issuedNftValidBefore: String(vb),
+				})
 			}
 			const body = JSON.stringify({ cardAddress: checksum, limit, items })
 			cardActiveIssuedCouponSeriesCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
