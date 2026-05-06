@@ -11195,6 +11195,9 @@ const CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE = {
 	],
 }
 const ISSUED_NFT_START_ID_MEMBER = 100_000_000_000n
+const burnIssuedNftByGatewayIface = new ethers.Interface([
+	'function burnIssuedNftByGateway(address holder, uint256 tokenId, uint256 amount)',
+])
 const CREATE_ISSUED_NFT_SELECTOR = createIssuedNftIface.getFunction('createIssuedNft')?.selector ?? ''
 
 const createRedeemBatchIfaceCouponDbg = new ethers.Interface([
@@ -11336,6 +11339,137 @@ export const cardCouponPosClaimPreCheck = async (body: {
 		nonce,
 		userSignature,
 	})
+}
+
+export const cardCouponPosConsumePreparePreCheck = async (body: {
+	cardAddress?: string
+	couponId?: string
+	userEOA?: string
+	tokenId?: string | number
+	amount?: string | number
+}): Promise<
+	| {
+		success: true
+		preChecked: {
+			cardAddress: string
+			couponId: string
+			userEOA: string
+			userAccount: string
+			tokenId: string
+			amount: string
+			data: string
+			deadline: number
+			nonce: string
+			factoryGateway: string
+		}
+	}
+	| { success: false; error: string }
+> => {
+	const cardAddress = String(body.cardAddress ?? '').trim()
+	const couponId = String(body.couponId ?? '').trim()
+	const userEOA = String(body.userEOA ?? '').trim()
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!couponId) return { success: false, error: 'Missing couponId' }
+	if (!userEOA || !ethers.isAddress(userEOA)) return { success: false, error: 'Invalid userEOA' }
+
+	let tokenIdN: bigint | null = null
+	if (body.tokenId != null && String(body.tokenId).trim() !== '') {
+		try {
+			tokenIdN = BigInt(body.tokenId)
+		} catch {
+			return { success: false, error: 'Invalid tokenId' }
+		}
+	}
+	if (tokenIdN != null && tokenIdN < ISSUED_NFT_START_ID_MEMBER) {
+		return { success: false, error: 'tokenId must be issued NFT tokenId' }
+	}
+
+	const amountRaw = String(body.amount ?? '1').trim()
+	let amountN: bigint
+	try {
+		amountN = BigInt(amountRaw)
+	} catch {
+		return { success: false, error: 'Invalid amount' }
+	}
+	if (amountN <= 0n) return { success: false, error: 'amount must be > 0' }
+
+	const cardNorm = ethers.getAddress(cardAddress)
+	const userNorm = ethers.getAddress(userEOA)
+	const rows = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
+	if (tokenIdN == null) {
+		const matched = rows.find((row) => {
+			const cid = readCouponIdFromSeriesMetadata(row.metadata ?? null)
+			if (cid !== couponId) return false
+			try {
+				const tid = BigInt(String(row.tokenId))
+				return tid >= ISSUED_NFT_START_ID_MEMBER
+			} catch {
+				return false
+			}
+		})
+		if (!matched) return { success: false, error: 'couponId not found for card' }
+		tokenIdN = BigInt(String(matched.tokenId))
+	} else {
+		const matched = rows.find((row) => {
+			if (String(row.tokenId) !== String(tokenIdN)) return false
+			const cid = readCouponIdFromSeriesMetadata(row.metadata ?? null)
+			return cid === couponId
+		})
+		if (!matched) return { success: false, error: 'couponId does not match tokenId for this card' }
+	}
+
+	let holderAccount = userNorm
+	try {
+		const aaFactory = new ethers.Contract(
+			BASE_AA_FACTORY,
+			['function primaryAccountOf(address) view returns (address)'],
+			providerBaseBackup
+		)
+		const aaCandidate = await aaFactory.primaryAccountOf(userNorm) as string
+		if (aaCandidate && aaCandidate !== ethers.ZeroAddress && ethers.isAddress(aaCandidate)) {
+			holderAccount = ethers.getAddress(aaCandidate)
+		}
+	} catch {
+		/* keep EOA as fallback holder */
+	}
+
+	const cardRead = new ethers.Contract(
+		cardNorm,
+		[
+			'function balanceOf(address account, uint256 id) view returns (uint256)',
+			'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
+		],
+		providerBaseBackup
+	)
+	const [bal, isValid] = await Promise.all([
+		cardRead.balanceOf(holderAccount, tokenIdN) as Promise<bigint>,
+		cardRead.isIssuedNftValid(tokenIdN) as Promise<boolean>,
+	])
+	if (!isValid) return { success: false, error: 'Issued coupon is inactive or expired' }
+	if (bal < amountN) return { success: false, error: 'Insufficient coupon balance to consume' }
+
+	const data = burnIssuedNftByGatewayIface.encodeFunctionData('burnIssuedNftByGateway', [holderAccount, tokenIdN, amountN])
+	const deadline = Math.floor(Date.now() / 1000) + 15 * 60
+	const nonce = ethers.keccak256(
+		ethers.toUtf8Bytes(`pos-consume-coupon:${cardNorm}:${couponId}:${holderAccount}:${String(tokenIdN)}:${String(amountN)}:${randomUUID()}`)
+	)
+	const factoryGateway = await getBeamioUserCardFactoryGateway(cardNorm)
+
+	return {
+		success: true,
+		preChecked: {
+			cardAddress: cardNorm,
+			couponId,
+			userEOA: userNorm,
+			userAccount: holderAccount,
+			tokenId: String(tokenIdN),
+			amount: String(amountN),
+			data,
+			deadline,
+			nonce,
+			factoryGateway,
+		},
+	}
 }
 
 /** cardCouponOpenClaim 集群预检：校验用户签名、couponId↔tokenId 映射、仅允许 open claim（requiresRedeemCode=false）。 */
