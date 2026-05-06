@@ -10949,6 +10949,33 @@ const adminManager5ArgIface = new ethers.Interface(['function adminManager(addre
 const ADMIN_MANAGER_4_SELECTOR = adminManager4ArgIface.getFunction('adminManager')?.selector ?? ''
 const ADMIN_MANAGER_5_SELECTOR = adminManager5ArgIface.getFunction('adminManager')?.selector ?? ''
 
+/**
+ * POS terminal cross-card binding check should only run for terminal-link metadata.
+ * Owner/self admin metadata (e.g. "Program owner (top-level admin)") must not be blocked by terminal binding rows.
+ */
+const shouldEnforcePosTerminalBindingFromAdminMetadata = (metadataRaw: unknown): boolean => {
+	if (typeof metadataRaw !== 'string') return false
+	const s = metadataRaw.trim()
+	if (!s) return false
+	try {
+		const j = JSON.parse(s) as Record<string, unknown>
+		const hasTerminalShape =
+			Object.prototype.hasOwnProperty.call(j, 'deviceName') ||
+			Object.prototype.hasOwnProperty.call(j, 'handle') ||
+			Object.prototype.hasOwnProperty.call(j, 'linkVariant') ||
+			Object.prototype.hasOwnProperty.call(j, 'allowedTopupMethods') ||
+			Object.prototype.hasOwnProperty.call(j, 'terminalOnboardingReloadUnlimited')
+		if (hasTerminalShape) return true
+		const role = String(j.role ?? '').toLowerCase()
+		const label = String(j.label ?? '').toLowerCase()
+		if (role.includes('terminal') || label.includes('terminal') || label.includes('softpos')) return true
+		return false
+	} catch {
+		const low = s.toLowerCase()
+		return low.includes('terminal') || low.includes('softpos')
+	}
+}
+
 /** adminManager 上链确认后：登记或删除 POS EOA → 卡地址（与 Cluster 预检 assertPosEoaAvailableForCardBinding 一致）。 */
 async function syncPosTerminalAdminBindingAfterTx(
 	tx: ethers.ContractTransactionResponse,
@@ -10973,6 +11000,9 @@ async function syncPosTerminalAdminBindingAfterTx(
 		const txHash = receipt.hash ?? tx.hash
 		if (isAdd) {
 			const metaStr = decoded.args[3] as string
+			if (!shouldEnforcePosTerminalBindingFromAdminMetadata(metaStr)) {
+				return
+			}
 			let metadataJson: unknown | undefined = undefined
 			if (metaStr != null && typeof metaStr === 'string' && metaStr.length > 0) {
 				try {
@@ -11052,8 +11082,11 @@ export const cardAddAdminByAdminPreCheck = async (body: {
 			}
 		}
 		if (decoded.args[1] === true) {
-			const bindCheck = await assertPosEoaAvailableForCardBinding(ethers.getAddress(to), ethers.getAddress(cardAddress))
-			if (!bindCheck.ok) return { success: false, error: bindCheck.error }
+			const metadata = decoded.args[3] as string
+			if (shouldEnforcePosTerminalBindingFromAdminMetadata(metadata)) {
+				const bindCheck = await assertPosEoaAvailableForCardBinding(ethers.getAddress(to), ethers.getAddress(cardAddress))
+				if (!bindCheck.ok) return { success: false, error: bindCheck.error }
+			}
 		}
 		return { success: true }
 	} catch (e: any) {
@@ -11118,8 +11151,11 @@ export const cardAddAdminPreCheck = async (body: {
 					}
 				}
 			}
-			const bindCheck = await assertPosEoaAvailableForCardBinding(ethers.getAddress(to), ethers.getAddress(cardAddress))
-			if (!bindCheck.ok) return { success: false, error: bindCheck.error }
+			const metadata = decoded.args[3] as string
+			if (shouldEnforcePosTerminalBindingFromAdminMetadata(metadata)) {
+				const bindCheck = await assertPosEoaAvailableForCardBinding(ethers.getAddress(to), ethers.getAddress(cardAddress))
+				if (!bindCheck.ok) return { success: false, error: bindCheck.error }
+			}
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 		return { success: true }
