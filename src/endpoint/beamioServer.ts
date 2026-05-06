@@ -4998,6 +4998,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				createdAt: string
 				issuedNftValidAfter: string
 				issuedNftValidBefore: string
+				issuedNftMaxSupply?: string
+				issuedNftMintedCount?: string
+				issuedNftRemainingSupply?: string
 			}> = []
 			for (const row of ordered) {
 				if (items.length >= limit) break
@@ -5015,11 +5018,19 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					continue
 				}
 				if (!valid) continue
+				let maxSupply: bigint | null = null
+				let mintedCount: bigint | null = null
 				// Some cards may expose `isIssuedNftValid` but revert on optional
 				// series getters. Keep valid rows instead of dropping the icon.
 				try {
 					const ms = await cardContract.issuedNftMaxSupply(tid)
 					if (ms === 0n) continue
+					maxSupply = ms
+					try {
+						mintedCount = await cardContract.issuedNftMintedCount(tid)
+					} catch {
+						mintedCount = null
+					}
 				} catch {
 					// treat maxSupply as unknown; keep row when `valid` is true
 				}
@@ -5027,6 +5038,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				let vb = 0n
 				try { va = await cardContract.issuedNftValidAfter(tid) } catch { va = 0n }
 				try { vb = await cardContract.issuedNftValidBefore(tid) } catch { vb = 0n }
+				const remainingSupply = maxSupply != null && mintedCount != null
+					? (maxSupply > mintedCount ? maxSupply - mintedCount : 0n)
+					: null
 				items.push({
 					cardAddress: row.cardAddress,
 					tokenId: row.tokenId,
@@ -5037,6 +5051,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					createdAt: row.createdAt,
 					issuedNftValidAfter: String(va),
 					issuedNftValidBefore: String(vb),
+					...(maxSupply != null ? { issuedNftMaxSupply: String(maxSupply) } : {}),
+					...(mintedCount != null ? { issuedNftMintedCount: String(mintedCount) } : {}),
+					...(remainingSupply != null ? { issuedNftRemainingSupply: String(remainingSupply) } : {}),
 				})
 			}
 			const body = JSON.stringify({ cardAddress: checksum, limit, items })

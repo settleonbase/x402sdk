@@ -1042,6 +1042,9 @@ const routing = ( router: Router ) => {
 					createdAt: string
 					issuedNftValidAfter: string
 					issuedNftValidBefore: string
+					issuedNftMaxSupply?: string
+					issuedNftMintedCount?: string
+					issuedNftRemainingSupply?: string
 				}> = []
 				for (const row of ordered) {
 					if (items.length >= limit) break
@@ -1059,9 +1062,17 @@ const routing = ( router: Router ) => {
 						continue
 					}
 					if (!valid) continue
+					let maxSupply: bigint | null = null
+					let mintedCount: bigint | null = null
 					try {
 						const ms = await cardContract.issuedNftMaxSupply(tid)
 						if (ms === 0n) continue
+						maxSupply = ms
+						try {
+							mintedCount = await cardContract.issuedNftMintedCount(tid)
+						} catch {
+							mintedCount = null
+						}
 					} catch {
 						// unknown maxSupply: keep valid rows
 					}
@@ -1069,6 +1080,9 @@ const routing = ( router: Router ) => {
 					let vb = 0n
 					try { va = await cardContract.issuedNftValidAfter(tid) } catch { va = 0n }
 					try { vb = await cardContract.issuedNftValidBefore(tid) } catch { vb = 0n }
+					const remainingSupply = maxSupply != null && mintedCount != null
+						? (maxSupply > mintedCount ? maxSupply - mintedCount : 0n)
+						: null
 					items.push({
 						cardAddress: row.cardAddress,
 						tokenId: row.tokenId,
@@ -1079,6 +1093,9 @@ const routing = ( router: Router ) => {
 						createdAt: row.createdAt,
 						issuedNftValidAfter: String(va),
 						issuedNftValidBefore: String(vb),
+						...(maxSupply != null ? { issuedNftMaxSupply: String(maxSupply) } : {}),
+						...(mintedCount != null ? { issuedNftMintedCount: String(mintedCount) } : {}),
+						...(remainingSupply != null ? { issuedNftRemainingSupply: String(remainingSupply) } : {}),
 					})
 				}
 				const data = { cardAddress: checksum, limit, items }
