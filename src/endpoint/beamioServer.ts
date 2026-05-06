@@ -1436,7 +1436,8 @@ const routing = ( router: Router ) => {
 		const TERMINAL_RESET_LOWER = TX_CATEGORY_TERMINAL_RESET.toLowerCase()
 
 		try {
-			const stats = new ethers.Contract(cardAddr, ADMIN_STATS_FULL_ABI, providerConet)
+			// BeamioUserCard lives on Base — must use providerBase (CoNET RPC has no code at this address → decode errors / 0x)
+			const stats = new ethers.Contract(cardAddr, ADMIN_STATS_FULL_ABI, providerBase)
 			let topUpFromClear6 = 0n
 			let chargeFromClear6 = 0n
 			try {
