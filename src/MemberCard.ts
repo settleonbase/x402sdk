@@ -11233,6 +11233,111 @@ function readCouponRequiresRedeemCode(meta: Record<string, unknown> | null | und
 	return toBool(nested.requiresRedeemCode) || toBool(nested.redeemCodeRequired)
 }
 
+/**
+ * POS one-tap coupon claim (NFC card path): build user EIP-712 signature server-side
+ * using the NFC private key (uid/tagId) and reuse the standard open-claim precheck.
+ */
+export const cardCouponPosClaimPreCheck = async (body: {
+	cardAddress?: string
+	couponId?: string
+	userEOA?: string
+	uid?: string
+	tagIdHex?: string
+	tokenId?: string | number
+}): Promise<
+	| {
+		success: true
+		preChecked: {
+			cardAddress: string
+			couponId: string
+			userEOA: string
+			tokenId: string
+			deadline: number
+			nonce: string
+			userSignature: string
+		}
+	}
+	| { success: false; error: string }
+> => {
+	const cardAddress = String(body.cardAddress ?? '').trim()
+	const couponId = String(body.couponId ?? '').trim()
+	const userEOA = String(body.userEOA ?? '').trim()
+	const uid = String(body.uid ?? '').trim()
+	const tagIdHex = String(body.tagIdHex ?? '').trim().replace(/^0x/i, '').toUpperCase()
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!couponId) return { success: false, error: 'Missing couponId' }
+	if (!userEOA || !ethers.isAddress(userEOA)) return { success: false, error: 'Invalid userEOA' }
+	if (!uid && !tagIdHex) return { success: false, error: 'uid or tagIdHex is required for POS claim signing' }
+
+	let tokenIdN: bigint | null = null
+	if (body.tokenId != null && String(body.tokenId).trim() !== '') {
+		try {
+			tokenIdN = BigInt(body.tokenId)
+		} catch {
+			return { success: false, error: 'Invalid tokenId' }
+		}
+	}
+	const cardNorm = ethers.getAddress(cardAddress)
+	const userNorm = ethers.getAddress(userEOA)
+
+	if (tokenIdN == null) {
+		const rows = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
+		const matched = rows.find((row) => {
+			const cid = readCouponIdFromSeriesMetadata(row.metadata ?? null)
+			if (cid !== couponId) return false
+			try {
+				const tid = BigInt(String(row.tokenId))
+				return tid >= ISSUED_NFT_START_ID_MEMBER
+			} catch {
+				return false
+			}
+		})
+		if (!matched) return { success: false, error: 'couponId not found for card' }
+		tokenIdN = BigInt(String(matched.tokenId))
+	}
+
+	let privateKey: string | null = null
+	if (tagIdHex) privateKey = await getNfcCardPrivateKeyByTagId(tagIdHex)
+	if (!privateKey && uid) privateKey = await getNfcCardPrivateKeyByUid(uid)
+	if (!privateKey) return { success: false, error: 'No NFC private key found for this card session' }
+	const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`
+	if (!ethers.isHexString(pk, 32)) return { success: false, error: 'Invalid NFC private key format' }
+	const signerAddr = new ethers.Wallet(pk).address
+	if (ethers.getAddress(signerAddr) !== userNorm) {
+		return { success: false, error: 'NFC signer does not match userEOA' }
+	}
+
+	const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
+	const deadline = Math.floor(Date.now() / 1000) + 15 * 60
+	const nonce = ethers.keccak256(
+		ethers.toUtf8Bytes(`pos-open-claim:${cardNorm}:${couponId}:${userNorm}:${String(tokenIdN)}:${randomUUID()}`)
+	)
+	const domain = {
+		name: 'BeamioUserCardFactory',
+		version: '1',
+		chainId: BASE_MAINNET_CHAIN_ID,
+		verifyingContract,
+	}
+	const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
+		cardAddr: cardNorm,
+		tokenId: tokenIdN,
+		deadline,
+		nonce,
+	})
+	const signingKey = new ethers.SigningKey(pk as `0x${string}`)
+	const userSignature = ethers.Signature.from(signingKey.sign(digest)).serialized
+
+	return await cardCouponOpenClaimPreCheck({
+		cardAddress: cardNorm,
+		couponId,
+		userEOA: userNorm,
+		tokenId: tokenIdN.toString(),
+		deadline,
+		nonce,
+		userSignature,
+	})
+}
+
 /** cardCouponOpenClaim 集群预检：校验用户签名、couponId↔tokenId 映射、仅允许 open claim（requiresRedeemCode=false）。 */
 export const cardCouponOpenClaimPreCheck = async (body: {
 	cardAddress?: string

@@ -12,6 +12,7 @@ import {
 	getMemberLastTopupOnCard,
 	maybeEnqueueNfcCashTreeBeamioTag,
 	maybeEnqueueNfcVerraBeamioTag,
+	listCouponIssuedNftSeriesForCardDescending,
 } from '../db'
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
@@ -31,6 +32,7 @@ const BASE_RPC_URL =
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+const CADD_BASE = '0x16F93eBC5320C89EfC8701577efe49d14A276a06'
 
 const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> =>
 	resolveBeamioAaForEoaWithFallback(providerBase, eoa)
@@ -68,6 +70,7 @@ export type FetchUIDAssetsResult = {
 	/** AccountRegistry `accountName`（无 `@`）；无链上账户或未设置时省略 */
 	beamioTag?: string
 	usdcBalance: string
+	caddBalance?: string
 	cards: Array<{
 		cardAddress: string
 		cardName: string
@@ -91,6 +94,21 @@ export type FetchUIDAssetsResult = {
 	posLastTopupAt?: string
 	posLastTopupUsdcE6?: string
 	posLastTopupPointsE6?: string
+	merchantCouponBalances?: Array<{
+		cardAddress: string
+		couponId: string
+		tokenId: string
+		title: string
+		balance: string
+		requiresRedeemCode: boolean
+	}>
+	merchantClaimableCoupons?: Array<{
+		cardAddress: string
+		couponId: string
+		tokenId: string
+		title: string
+		requiresRedeemCode: boolean
+	}>
 }
 
 /** POS / 客户端可选：指定终端登记的基础设施 BeamioUserCard 地址；若与默认常量不一致则查询该合约。 */
@@ -127,6 +145,50 @@ function displayNameFromCardMetadata(m: Record<string, unknown> | null | undefin
 	const n2 = m.name
 	if (typeof n2 === 'string' && n2.trim()) return n2.trim()
 	return null
+}
+
+function readCouponIdFromSeriesMetadata(meta: Record<string, unknown> | null | undefined): string {
+	if (!meta || typeof meta !== 'object') return ''
+	const rootId = meta.couponId
+	if (typeof rootId === 'string' && rootId.trim()) return rootId.trim()
+	const properties = meta.properties
+	if (!properties || typeof properties !== 'object') return ''
+	const beamioCoupon = (properties as Record<string, unknown>).beamioCoupon
+	if (!beamioCoupon || typeof beamioCoupon !== 'object') return ''
+	const nestedId = (beamioCoupon as Record<string, unknown>).couponId
+	return typeof nestedId === 'string' && nestedId.trim() ? nestedId.trim() : ''
+}
+
+function readCouponRequiresRedeemCode(meta: Record<string, unknown> | null | undefined): boolean {
+	if (!meta || typeof meta !== 'object') return false
+	const root = meta as Record<string, unknown>
+	const toBool = (v: unknown): boolean => v === true || v === 1 || v === '1' || v === 'true'
+	if (toBool(root.requiresRedeemCode) || toBool(root.redeemCodeRequired)) return true
+	const properties = root.properties
+	if (!properties || typeof properties !== 'object') return false
+	const beamioCoupon = (properties as Record<string, unknown>).beamioCoupon
+	if (!beamioCoupon || typeof beamioCoupon !== 'object') return false
+	const nested = beamioCoupon as Record<string, unknown>
+	return toBool(nested.requiresRedeemCode) || toBool(nested.redeemCodeRequired)
+}
+
+function readCouponTitleFromSeriesMetadata(meta: Record<string, unknown> | null | undefined, tokenId: string): string {
+	if (!meta || typeof meta !== 'object') return `Coupon #${tokenId}`
+	const rootTitle = typeof meta.title === 'string' ? meta.title.trim() : ''
+	if (rootTitle) return rootTitle
+	const rootName = typeof meta.name === 'string' ? meta.name.trim() : ''
+	if (rootName) return rootName
+	const properties = meta.properties
+	if (properties && typeof properties === 'object') {
+		const beamioCoupon = (properties as Record<string, unknown>).beamioCoupon
+		if (beamioCoupon && typeof beamioCoupon === 'object') {
+			const nestedTitle = typeof (beamioCoupon as Record<string, unknown>).title === 'string' ? String((beamioCoupon as Record<string, unknown>).title).trim() : ''
+			if (nestedTitle) return nestedTitle
+			const nestedName = typeof (beamioCoupon as Record<string, unknown>).name === 'string' ? String((beamioCoupon as Record<string, unknown>).name).trim() : ''
+			if (nestedName) return nestedName
+		}
+	}
+	return `Coupon #${tokenId}`
 }
 
 /**
@@ -197,17 +259,32 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 		'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds)',
 	]
 	const usdcAbi = ['function balanceOf(address) view returns (uint256)']
+	const caddAbi = ['function balanceOf(address) view returns (uint256)', 'function decimals() view returns (uint8)']
 	const usdc = new ethers.Contract(USDC_BASE, usdcAbi, providerBase)
+	const cadd = new ethers.Contract(CADD_BASE, caddAbi, providerBase)
 	const [usdcEoaRaw, aaAddr] = await Promise.all([
 		usdc.balanceOf(eoaAddr),
 		resolveBeamioAccountOf(eoaAddr),
 	])
 	let usdcTotalRaw = usdcEoaRaw
+	let caddTotalRaw = 0n
+	let caddDecimals = 18
 	if (aaAddr) {
-		const usdcAaRaw = await usdc.balanceOf(aaAddr)
+		const [usdcAaRaw, caddAaRaw] = await Promise.all([
+			usdc.balanceOf(aaAddr),
+			cadd.balanceOf(aaAddr).catch(() => 0n),
+		])
 		usdcTotalRaw += usdcAaRaw
+		caddTotalRaw += caddAaRaw
 	}
+	const [caddEoaRaw, caddDecimalsRaw] = await Promise.all([
+		cadd.balanceOf(eoaAddr).catch(() => 0n),
+		cadd.decimals().catch(() => 18),
+	])
+	caddTotalRaw += caddEoaRaw
+	caddDecimals = Number(caddDecimalsRaw)
 	const usdcBalance = ethers.formatUnits(usdcTotalRaw, 6)
+	const caddBalance = ethers.formatUnits(caddTotalRaw, caddDecimals)
 	const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
 	const infraAddr = resolveInfrastructureCardAddress(opts?.infrastructureCardAddress)
 	const merchantInfraOnly = opts?.cardsScope === 'merchantInfraOnly'
@@ -386,14 +463,87 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	} catch {
 		/* DB 失败不阻塞资产查询 */
 	}
+	let merchantCouponBalances: FetchUIDAssetsResult['merchantCouponBalances'] | undefined
+	let merchantClaimableCoupons: FetchUIDAssetsResult['merchantClaimableCoupons'] | undefined
+	try {
+		const seriesRows = await listCouponIssuedNftSeriesForCardDescending(infraForPos, 80)
+		if (seriesRows.length > 0) {
+			const tokenHolder = aaAddr && ethers.isAddress(aaAddr) ? ethers.getAddress(aaAddr) : eoaAddr
+			const couponRead = new ethers.Contract(
+				infraForPos,
+				[
+					'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
+					'function issuedNftPriceInCurrency6(uint256 tokenId) view returns (uint256)',
+					'function issuedNftUserSigClaimUsed(address userEOA, uint256 tokenId) view returns (bool)',
+					'function balanceOf(address account, uint256 id) view returns (uint256)',
+				],
+				providerBase
+			)
+			const seen = new Set<string>()
+			const balances: NonNullable<FetchUIDAssetsResult['merchantCouponBalances']> = []
+			const claimables: NonNullable<FetchUIDAssetsResult['merchantClaimableCoupons']> = []
+			for (const row of seriesRows) {
+				const tokenId = String(row.tokenId ?? '').trim()
+				if (!tokenId || seen.has(tokenId)) continue
+				seen.add(tokenId)
+				let tokenIdN: bigint
+				try {
+					tokenIdN = BigInt(tokenId)
+				} catch {
+					continue
+				}
+				const couponId = readCouponIdFromSeriesMetadata(row.metadata ?? null)
+				if (!couponId) continue
+				const requiresRedeemCode = readCouponRequiresRedeemCode(row.metadata ?? null)
+				const title = readCouponTitleFromSeriesMetadata(row.metadata ?? null, tokenId)
+				const [isValid, priceInCurrency6, alreadyClaimed, balByHolder, balByEoa] = await Promise.all([
+					couponRead.isIssuedNftValid(tokenIdN).catch(() => false) as Promise<boolean>,
+					couponRead.issuedNftPriceInCurrency6(tokenIdN).catch(() => 0n) as Promise<bigint>,
+					couponRead.issuedNftUserSigClaimUsed(eoaAddr, tokenIdN).catch(() => false) as Promise<boolean>,
+					couponRead.balanceOf(tokenHolder, tokenIdN).catch(() => 0n) as Promise<bigint>,
+					tokenHolder.toLowerCase() === eoaAddr.toLowerCase()
+						? Promise.resolve(0n)
+						: (couponRead.balanceOf(eoaAddr, tokenIdN).catch(() => 0n) as Promise<bigint>),
+				])
+				if (!isValid) continue
+				const bal = balByHolder > balByEoa ? balByHolder : balByEoa
+				if (bal > 0n) {
+					balances.push({
+						cardAddress: infraForPos,
+						couponId,
+						tokenId,
+						title,
+						balance: String(bal),
+						requiresRedeemCode,
+					})
+				}
+				if (!requiresRedeemCode && priceInCurrency6 === 0n && !alreadyClaimed && bal === 0n) {
+					claimables.push({
+						cardAddress: infraForPos,
+						couponId,
+						tokenId,
+						title,
+						requiresRedeemCode,
+					})
+				}
+			}
+			merchantCouponBalances = balances.length > 0 ? balances : undefined
+			merchantClaimableCoupons = claimables.length > 0 ? claimables : undefined
+		}
+	} catch {
+		/* ignore coupon enrichment failure */
+	}
 	return {
 		ok: true,
 		address: eoaAddr,
 		aaAddress: aaAddr || undefined,
 		...(beamioTag != null && beamioTag !== '' ? { beamioTag } : {}),
 		usdcBalance,
+		caddBalance,
 		cards: cardsFiltered,
 		...posTopFields,
+		...(merchantCouponBalances ? { merchantCouponBalances } : {}),
+		...(merchantClaimableCoupons ? { merchantClaimableCoupons } : {}),
 	}
 }
 

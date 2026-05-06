@@ -1368,6 +1368,7 @@ const routing = ( router: Router ) => {
 					return res.status(404).json({ success: false, error: 'Issued coupon metadata row not found' }).end()
 				}
 				const coupon = { ...coupons[couponIdx] }
+				delete coupon.discountPercent
 				setOrDeleteStringField(coupon, 'icon', String(body.icon ?? ''))
 				setOrDeleteStringField(coupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 				setOrDeleteStringField(coupon, 'description', String(body.description ?? ''))
@@ -1388,6 +1389,7 @@ const routing = ( router: Router ) => {
 				const series = await getSeriesByCardAndTokenId(cardNorm, tokenIdNorm)
 				if (series?.metadata && typeof series.metadata === 'object') {
 					const nextSeriesMeta = { ...(series.metadata as Record<string, unknown>) }
+					delete nextSeriesMeta.discountPercent
 					setOrDeleteStringField(nextSeriesMeta, 'icon', String(body.icon ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'description', String(body.description ?? ''))
@@ -1395,6 +1397,7 @@ const routing = ( router: Router ) => {
 						const props = { ...(nextSeriesMeta.properties as Record<string, unknown>) }
 						if (props.beamioCoupon && typeof props.beamioCoupon === 'object' && !Array.isArray(props.beamioCoupon)) {
 							const beamioCoupon = { ...(props.beamioCoupon as Record<string, unknown>) }
+							delete beamioCoupon.discountPercent
 							setOrDeleteStringField(beamioCoupon, 'icon', String(body.icon ?? ''))
 							setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 							setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
@@ -1411,6 +1414,7 @@ const routing = ( router: Router ) => {
 				const tierMeta = await getNftTierMetadataByCardAndToken(cardNorm, Number(tokenIdNorm))
 				if (tierMeta && typeof tierMeta === 'object') {
 					const nextTierMeta = { ...(tierMeta as Record<string, unknown>) }
+					delete nextTierMeta.discountPercent
 					setOrDeleteStringField(nextTierMeta, 'image', String(body.icon ?? ''))
 					setOrDeleteStringField(nextTierMeta, 'background_color', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(nextTierMeta, 'description', String(body.description ?? ''))
@@ -1422,6 +1426,7 @@ const routing = ( router: Router ) => {
 						tierProps.beamioCoupon && typeof tierProps.beamioCoupon === 'object' && !Array.isArray(tierProps.beamioCoupon)
 							? { ...(tierProps.beamioCoupon as Record<string, unknown>) }
 							: {}
+					delete beamioCoupon.discountPercent
 					setOrDeleteStringField(beamioCoupon, 'icon', String(body.icon ?? ''))
 					setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
