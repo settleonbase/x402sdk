@@ -11184,11 +11184,11 @@ const mintIssuedNftByGatewayIface = new ethers.Interface([
 	'function mintIssuedNftByGateway(address userEOA, uint256 tokenId, uint256 amount)',
 ])
 const claimIssuedNftWithUserSigIface = new ethers.Interface([
-	'function claimIssuedNftWithUserSig(address cardAddr, address userEOA, uint256 tokenId, uint256 deadline, bytes32 nonce, bytes userSignature)',
+	'function claimIssuedNftWithUserSig(address cardAddress, address userEOA, uint256 tokenId, uint256 deadline, bytes32 nonce, bytes userSignature)',
 ])
 const CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE = {
 	ClaimIssuedNft: [
-		{ name: 'cardAddr', type: 'address' },
+		{ name: 'cardAddress', type: 'address' },
 		{ name: 'tokenId', type: 'uint256' },
 		{ name: 'deadline', type: 'uint256' },
 		{ name: 'nonce', type: 'bytes32' },
@@ -11319,7 +11319,7 @@ export const cardCouponPosClaimPreCheck = async (body: {
 		verifyingContract,
 	}
 	const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
-		cardAddr: cardNorm,
+		cardAddress: cardNorm,
 		tokenId: tokenIdN,
 		deadline,
 		nonce,
@@ -11413,7 +11413,7 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 			verifyingContract,
 		}
 		const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
-			cardAddr: cardNorm,
+			cardAddress: cardNorm,
 			tokenId: tokenIdN,
 			deadline: Number(deadline),
 			nonce: nonceBytes32,
