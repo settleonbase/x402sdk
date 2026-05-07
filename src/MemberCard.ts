@@ -11198,6 +11198,9 @@ const ISSUED_NFT_START_ID_MEMBER = 100_000_000_000n
 const burnIssuedNftByGatewayIface = new ethers.Interface([
 	'function burnIssuedNftByGateway(address holder, uint256 tokenId, uint256 amount)',
 ])
+const BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR = (
+	burnIssuedNftByGatewayIface.getFunction('burnIssuedNftByGateway')?.selector ?? ''
+).toLowerCase()
 const CREATE_ISSUED_NFT_SELECTOR = createIssuedNftIface.getFunction('createIssuedNft')?.selector ?? ''
 
 const createRedeemBatchIfaceCouponDbg = new ethers.Interface([
@@ -11441,20 +11444,23 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 		[
 			'function balanceOf(address account, uint256 id) view returns (uint256)',
 			'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
+			'function isAdmin(address) view returns (bool)',
 			'function owner() view returns (address)',
 		],
 		providerBaseBackup
 	)
-	const [bal, isValid, cardOwner] = await Promise.all([
+	const signerNorm = signerEOA ? ethers.getAddress(signerEOA) : null
+	const [bal, isValid, signerIsAdmin, cardOwner] = await Promise.all([
 		cardRead.balanceOf(holderAccount, tokenIdN) as Promise<bigint>,
 		cardRead.isIssuedNftValid(tokenIdN) as Promise<boolean>,
+		signerNorm ? (cardRead.isAdmin(signerNorm) as Promise<boolean>) : Promise.resolve(false),
 		cardRead.owner() as Promise<string>,
 	])
 	const ownerNorm = ethers.getAddress(cardOwner)
-	if (signerEOA && ethers.getAddress(signerEOA) !== ownerNorm) {
+	if (signerNorm && !signerIsAdmin) {
 		return {
 			success: false,
-			error: `Consume requires card owner signature. signer=${ethers.getAddress(signerEOA)} owner=${ownerNorm}`,
+			error: `Consume requires card admin signature. signer=${signerNorm} owner=${ownerNorm}`,
 		}
 	}
 	if (!isValid) return { success: false, error: 'Issued coupon is inactive or expired' }
@@ -11481,6 +11487,87 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 			nonce,
 			factoryGateway,
 		},
+	}
+}
+
+export const cardCouponPosConsumeSubmitPreCheck = async (body: {
+	cardAddress?: string
+	data?: string
+	deadline?: number
+	nonce?: string
+	adminSignature?: string
+	signerEOA?: string
+}): Promise<
+	| {
+		success: true
+		preChecked: {
+			cardAddress: string
+			data: string
+			deadline: number
+			nonce: string
+			adminSignature: string
+		}
+	}
+	| { success: false; error: string }
+> => {
+	const cardAddress = String(body.cardAddress ?? '').trim()
+	const data = String(body.data ?? '').trim()
+	const nonce = String(body.nonce ?? '').trim()
+	const adminSignature = String(body.adminSignature ?? '').trim()
+	const signerEOA = String(body.signerEOA ?? '').trim()
+	const deadline = Number(body.deadline)
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!data || !ethers.isHexString(data) || data.length < 10) return { success: false, error: 'Invalid data' }
+	if (!Number.isFinite(deadline) || deadline <= 0) return { success: false, error: 'Invalid deadline' }
+	if (!nonce) return { success: false, error: 'Missing nonce' }
+	if (!adminSignature || !ethers.isHexString(adminSignature)) return { success: false, error: 'Invalid adminSignature' }
+	if (signerEOA && !ethers.isAddress(signerEOA)) return { success: false, error: 'Invalid signerEOA' }
+
+	const selector = data.slice(0, 10).toLowerCase()
+	if (selector !== BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR) {
+		return { success: false, error: 'Data must be burnIssuedNftByGateway calldata' }
+	}
+
+	try {
+		const decoded = burnIssuedNftByGatewayIface.parseTransaction({ data })
+		if (!decoded || decoded.name !== 'burnIssuedNftByGateway') {
+			return { success: false, error: 'Invalid burnIssuedNftByGateway calldata' }
+		}
+		const holder = decoded.args[0] as string
+		const tokenId = BigInt(decoded.args[1] as bigint)
+		const amount = BigInt(decoded.args[2] as bigint)
+		if (!holder || !ethers.isAddress(holder)) return { success: false, error: 'Invalid holder address in calldata' }
+		if (tokenId < ISSUED_NFT_START_ID_MEMBER) return { success: false, error: 'tokenId must be issued NFT tokenId' }
+		if (amount <= 0n) return { success: false, error: 'amount must be > 0' }
+
+		const cardNorm = ethers.getAddress(cardAddress)
+		const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
+			cardAddr: cardNorm,
+			data,
+			deadline,
+			nonce,
+			adminSignature,
+		})
+		if (!adminCheck.ok) return { success: false, error: adminCheck.error }
+		if (signerEOA && ethers.getAddress(signerEOA) !== ethers.getAddress(adminCheck.signer)) {
+			return {
+				success: false,
+				error: `signerEOA mismatch. signerEOA=${ethers.getAddress(signerEOA)} recovered=${ethers.getAddress(adminCheck.signer)}`,
+			}
+		}
+
+		return {
+			success: true,
+			preChecked: {
+				cardAddress: cardNorm,
+				data,
+				deadline,
+				nonce,
+				adminSignature,
+			},
+		}
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
 	}
 }
 
