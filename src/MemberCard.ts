@@ -11345,6 +11345,7 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 	cardAddress?: string
 	couponId?: string
 	userEOA?: string
+	signerEOA?: string
 	tokenId?: string | number
 	amount?: string | number
 }): Promise<
@@ -11368,9 +11369,11 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 	const cardAddress = String(body.cardAddress ?? '').trim()
 	const couponId = String(body.couponId ?? '').trim()
 	const userEOA = String(body.userEOA ?? '').trim()
+	const signerEOA = String(body.signerEOA ?? '').trim()
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 	if (!couponId) return { success: false, error: 'Missing couponId' }
 	if (!userEOA || !ethers.isAddress(userEOA)) return { success: false, error: 'Invalid userEOA' }
+	if (signerEOA && !ethers.isAddress(signerEOA)) return { success: false, error: 'Invalid signerEOA' }
 
 	let tokenIdN: bigint | null = null
 	if (body.tokenId != null && String(body.tokenId).trim() !== '') {
@@ -11438,13 +11441,22 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 		[
 			'function balanceOf(address account, uint256 id) view returns (uint256)',
 			'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
+			'function owner() view returns (address)',
 		],
 		providerBaseBackup
 	)
-	const [bal, isValid] = await Promise.all([
+	const [bal, isValid, cardOwner] = await Promise.all([
 		cardRead.balanceOf(holderAccount, tokenIdN) as Promise<bigint>,
 		cardRead.isIssuedNftValid(tokenIdN) as Promise<boolean>,
+		cardRead.owner() as Promise<string>,
 	])
+	const ownerNorm = ethers.getAddress(cardOwner)
+	if (signerEOA && ethers.getAddress(signerEOA) !== ownerNorm) {
+		return {
+			success: false,
+			error: `Consume requires card owner signature. signer=${ethers.getAddress(signerEOA)} owner=${ownerNorm}`,
+		}
+	}
 	if (!isValid) return { success: false, error: 'Issued coupon is inactive or expired' }
 	if (bal < amountN) return { success: false, error: 'Insufficient coupon balance to consume' }
 
