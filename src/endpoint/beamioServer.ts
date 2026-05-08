@@ -3017,6 +3017,14 @@ const routing = ( router: Router ) => {
 						: `Oracle rate stale, please retry shortly`,
 				}).end()
 			}
+			const permitSpender = (() => {
+				try {
+					const pk = (masterSetup as { settle_contractAdmin?: string[] }).settle_contractAdmin?.[0]
+					return pk ? ethers.getAddress(new ethers.Wallet(pk).address) : null
+				} catch {
+					return null
+				}
+			})()
 			return res.status(200).json({
 				success: true,
 				cardAddress: cardAddr,
@@ -3026,6 +3034,7 @@ const routing = ( router: Router ) => {
 				quotedUsdc6: usdc6.toString(),
 				quotedUsdc: ethers.formatUnits(usdc6, 6),
 				oracleTimestamp: Number(clusterOracleCache?.timestamp ?? 0),
+				...(cur === 'CADD' && permitSpender ? { permitSpender } : {}),
 			}).end()
 		} catch (e: any) {
 			logger(Colors.red(`[nfcUsdcTopupQuote] error: ${e?.message ?? e}`))
@@ -3045,7 +3054,7 @@ const routing = ( router: Router ) => {
 	 *   5b. **无 sid+pos**（历史浏览器）：cluster 直接 `postLocalhost` Master，由 service-admin 签 ExecuteForAdmin
 	 */
 	router.post('/nfcUsdcTopup', async (req, res) => {
-		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos } = req.body as {
+		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature } = req.body as {
 			cardAddress?: string
 			cardOwner?: string
 			uid?: string
@@ -3056,6 +3065,15 @@ const routing = ( router: Router ) => {
 			currency?: string
 			sid?: string
 			pos?: string
+			paymentToken?: string
+			payer?: string
+			value?: string
+			validAfter?: string | number
+			validBefore?: string | number
+			nonce?: string
+			permitDeadline?: string | number
+			permitNonce?: string | number
+			signature?: string
 		}
 		const sidNorm: string | null = isValidSid(sid) ? (sid as string).trim().toLowerCase() : null
 		const posStr = (pos ?? '').toString().trim()
@@ -3087,6 +3105,11 @@ const routing = ( router: Router ) => {
 			const hasFullNfc =
 				/^[0-9A-Fa-f]{14}$/.test(uidTrim) && eTrim.length === 64 && cTrim.length === 6 && mTrim.length === 16
 			const cur = (currency || 'CAD').trim().toUpperCase()
+			const paymentTokenNorm = (() => {
+				const t = String(paymentToken ?? '').trim().toUpperCase()
+				if (t === 'USDC' || t === 'CADD') return t
+				return cur === 'CADD' ? 'CADD' : 'USDC'
+			})()
 			const amt = String(amount ?? '').trim()
 			if (!amt || !(Number(amt) > 0)) {
 				sessionUpdate({ state: 'error', error: 'Invalid amount' })
@@ -3094,6 +3117,56 @@ const routing = ( router: Router ) => {
 			}
 			const cardAddr = ethers.getAddress(String(cardAddress).trim())
 			const ownerAddr = ethers.getAddress(String(cardOwner).trim())
+
+			const settleWithRawSigIfNeeded = async (
+				expectedAmount6: bigint,
+				description: string
+			): Promise<{ payer: string; USDC_tx: string; usdcAmount6: bigint } | null | undefined> => {
+				if (paymentTokenNorm !== 'CADD') return undefined
+				const payerAddrRaw = String(payer ?? '').trim()
+				const valueRaw = String(value ?? '').trim()
+				const permitDeadlineRaw = String(permitDeadline ?? '').trim()
+				const permitNonceRaw = String(permitNonce ?? '').trim()
+				const sigRaw = String(signature ?? '').trim()
+				if (!payerAddrRaw || !ethers.isAddress(payerAddrRaw)) {
+					if (!res.headersSent) res.status(400).json({ success: false, error: 'CADD settle requires valid `payer` address' }).end()
+					return null
+				}
+				if (!valueRaw || !/^\d+$/.test(valueRaw) || BigInt(valueRaw) <= 0n) {
+					if (!res.headersSent) res.status(400).json({ success: false, error: 'CADD settle requires positive `value` (atomic 6-decimals)' }).end()
+					return null
+				}
+				if (BigInt(valueRaw) < expectedAmount6) {
+					if (!res.headersSent) {
+						res.status(400).json({ success: false, error: `CADD value too small: ${valueRaw} < quoted ${expectedAmount6.toString()}` }).end()
+					}
+					return null
+				}
+				if (!/^\d+$/.test(permitDeadlineRaw) || !/^\d+$/.test(permitNonceRaw) || !/^0x[0-9a-fA-F]{130}$/.test(sigRaw)) {
+					if (!res.headersSent) res.status(400).json({ success: false, error: 'CADD settle requires permitDeadline/permitNonce/signature' }).end()
+					return null
+				}
+				const r = await postLocalhostBuffer('/api/tokenTransferRawSig', {
+					paymentToken: 'CADD',
+					cardOwner: payToOwner,
+					payer: payerAddrRaw,
+					value: valueRaw,
+					permitDeadline: permitDeadlineRaw,
+					permitNonce: permitNonceRaw,
+					signature: sigRaw,
+				})
+				let j: any = {}
+				try { j = JSON.parse(r.body || '{}') } catch { j = {} }
+				if (r.statusCode !== 200 || j?.success === false || !j?.txHash) {
+					const errMsg = j?.error ?? `CADD settle failed (HTTP ${r.statusCode})`
+					logger(Colors.red(`[nfcUsdcTopup] ${description} cadd raw-sig settle failed: ${errMsg}`))
+					if (!res.headersSent) res.status(502).json({ success: false, error: errMsg }).end()
+					return null
+				}
+				const payerNorm = ethers.getAddress(String(j.payer ?? payerAddrRaw))
+				const txHash = String(j.txHash).trim()
+				return { payer: payerNorm, USDC_tx: txHash, usdcAmount6: BigInt(valueRaw) }
+			}
 
 			if (!hasFullNfc && !sessionPath) {
 				sessionUpdate({ state: 'error', error: 'Invalid uid' })
@@ -3171,11 +3244,21 @@ const routing = ( router: Router ) => {
 					return res.status(503).json({ success: false, error: omsg }).end()
 				}
 				sessionUpdate({ state: 'settling' })
-				const settled1 = await settleBeamioX402ToCardOwner(req, res, {
-					cardOwner: payToOwner,
-					quotedUsdc6: quotedPhase1,
-					description: `Beamio USDC Topup phase-1 (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`,
-				})
+				const settledByRawSig1 = await settleWithRawSigIfNeeded(
+					quotedPhase1,
+					`Beamio ${paymentTokenNorm} Topup phase-1 (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`
+				)
+				if (settledByRawSig1 === null) {
+					sessionUpdate({ state: 'error', error: `${paymentTokenNorm} settle failed` })
+					return
+				}
+				const settled1 =
+					settledByRawSig1 ??
+					(await settleBeamioX402ToCardOwner(req, res, {
+						cardOwner: payToOwner,
+						quotedUsdc6: quotedPhase1,
+						description: `Beamio USDC Topup phase-1 (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`,
+					}))
 				if (!settled1) {
 					const sc = res.statusCode
 					const reason =
@@ -3281,11 +3364,21 @@ const routing = ( router: Router ) => {
 
 			// 5. x402 verify + settle（verifyPaymentNew 内部已处理 402 / 余额 / 时效）
 			if (sessionPath) sessionUpdate({ state: 'settling' })
-			const settled = await settleBeamioX402ToCardOwner(req, res, {
-				cardOwner: payToOwner,
+			const settledByRawSig = await settleWithRawSigIfNeeded(
 				quotedUsdc6,
-				description: `Beamio NFC USDC Topup (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`,
-			})
+				`Beamio NFC ${paymentTokenNorm} Topup (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`
+			)
+			if (settledByRawSig === null) {
+				sessionUpdate({ state: 'error', error: `${paymentTokenNorm} settle failed` })
+				return
+			}
+			const settled =
+				settledByRawSig ??
+				(await settleBeamioX402ToCardOwner(req, res, {
+					cardOwner: payToOwner,
+					quotedUsdc6,
+					description: `Beamio NFC USDC Topup (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`,
+				}))
 			if (!settled) {
 				const sc = res.statusCode
 				const reason =
@@ -3565,6 +3658,14 @@ const routing = ( router: Router ) => {
 						: `Oracle rate stale, please retry shortly`,
 				}).end()
 			}
+			const permitSpender = (() => {
+				try {
+					const pk = (masterSetup as { settle_contractAdmin?: string[] }).settle_contractAdmin?.[0]
+					return pk ? ethers.getAddress(new ethers.Wallet(pk).address) : null
+				} catch {
+					return null
+				}
+			})()
 			return res.status(200).json({
 				success: true,
 				cardAddress: cardAddr,
@@ -3582,6 +3683,7 @@ const routing = ( router: Router ) => {
 				quotedUsdc6: usdc6.toString(),
 				quotedUsdc: ethers.formatUnits(usdc6, 6),
 				oracleTimestamp: Number(clusterOracleCache?.timestamp ?? 0),
+				...(effectiveCurrency === 'CADD' && permitSpender ? { permitSpender } : {}),
 			}).end()
 		} catch (e: any) {
 			logger(Colors.red(`[nfcUsdcChargeQuote] error: ${e?.message ?? e}`))
@@ -3795,6 +3897,15 @@ const routing = ( router: Router ) => {
 			discountBps,
 			taxBps,
 			tipBps,
+			paymentToken,
+			payer,
+			value,
+			validAfter,
+			validBefore,
+			nonce,
+			permitDeadline,
+			permitNonce,
+			signature,
 		} = req.body as {
 			card?: string
 			cardAddress?: string
@@ -3813,6 +3924,15 @@ const routing = ( router: Router ) => {
 			discountBps?: string | number
 			taxBps?: string | number
 			tipBps?: string | number
+			paymentToken?: string
+			payer?: string
+			value?: string
+			validAfter?: string | number
+			validBefore?: string | number
+			nonce?: string
+			permitDeadline?: string | number
+			permitNonce?: string | number
+			signature?: string
 		}
 		// PR #3 sid 仅用于 POS ↔ cluster 内部状态跟踪，不影响 verra-home POST/x402 流程；
 		// sid 缺省/无效 ⇒ 跳过 session 写入但仍正常处理 charge（向下兼容老 verra-home build）。
@@ -3947,6 +4067,11 @@ const routing = ( router: Router ) => {
 
 			// currency: 新 schema 缺省 ⇒ 用链上；老 schema 显式 ⇒ warn-only mismatch（不阻断，避免老 QR 被 reject）
 			const cur = ((currency ?? '').toString().trim().toUpperCase() || onChainCurrency || 'CAD')
+			const paymentTokenNorm = (() => {
+				const t = String(paymentToken ?? '').trim().toUpperCase()
+				if (t === 'USDC' || t === 'CADD') return t
+				return cur === 'CADD' ? 'CADD' : 'USDC'
+			})()
 			if (currency && onChainCurrency && cur !== onChainCurrency.toUpperCase()) {
 				logger(
 					Colors.yellow(
@@ -3972,13 +4097,70 @@ const routing = ( router: Router ) => {
 			}
 			const quotedSubtotalUsdc6 = quoteCurrencyToUsdc6(breakdown.subtotal.toFixed(6), effectiveCurrency)
 
+			const settleWithRawSigIfNeeded = async (): Promise<
+				{ payer: string; USDC_tx: string; usdcAmount6: bigint } | null | undefined
+			> => {
+				if (paymentTokenNorm !== 'CADD') return undefined
+				const payerAddrRaw = String(payer ?? '').trim()
+				const valueRaw = String(value ?? '').trim()
+				const permitDeadlineRaw = String(permitDeadline ?? '').trim()
+				const permitNonceRaw = String(permitNonce ?? '').trim()
+				const sigRaw = String(signature ?? '').trim()
+				if (!payerAddrRaw || !ethers.isAddress(payerAddrRaw)) {
+					if (!res.headersSent) res.status(400).json({ success: false, error: 'CADD settle requires valid `payer` address' }).end()
+					return null
+				}
+				if (!valueRaw || !/^\d+$/.test(valueRaw) || BigInt(valueRaw) <= 0n) {
+					if (!res.headersSent) res.status(400).json({ success: false, error: 'CADD settle requires positive `value` (atomic 6-decimals)' }).end()
+					return null
+				}
+				if (BigInt(valueRaw) < quotedUsdc6) {
+					if (!res.headersSent) {
+						res.status(400).json({ success: false, error: `CADD value too small: ${valueRaw} < quoted ${quotedUsdc6.toString()}` }).end()
+					}
+					return null
+				}
+				if (!/^\d+$/.test(permitDeadlineRaw) || !/^\d+$/.test(permitNonceRaw) || !/^0x[0-9a-fA-F]{130}$/.test(sigRaw)) {
+					if (!res.headersSent) res.status(400).json({ success: false, error: 'CADD settle requires permitDeadline/permitNonce/signature' }).end()
+					return null
+				}
+				const r = await postLocalhostBuffer('/api/tokenTransferRawSig', {
+					paymentToken: 'CADD',
+					cardOwner: payToOwner,
+					payer: payerAddrRaw,
+					value: valueRaw,
+					permitDeadline: permitDeadlineRaw,
+					permitNonce: permitNonceRaw,
+					signature: sigRaw,
+				})
+				let j: any = {}
+				try { j = JSON.parse(r.body || '{}') } catch { j = {} }
+				if (r.statusCode !== 200 || j?.success === false || !j?.txHash) {
+					const errMsg = j?.error ?? `CADD settle failed (HTTP ${r.statusCode})`
+					if (!res.headersSent) res.status(502).json({ success: false, error: errMsg }).end()
+					return null
+				}
+				return {
+					payer: ethers.getAddress(String(j.payer ?? payerAddrRaw)),
+					USDC_tx: String(j.txHash).trim(),
+					usdcAmount6: BigInt(valueRaw),
+				}
+			}
+
 			// 4. x402 verify + settle（USDC → cardOwner）
 			sessionUpdate({ state: 'settling' })
-			const settled = await settleBeamioX402ToCardOwner(req, res, {
-				cardOwner: payToOwner,
-				quotedUsdc6,
-				description: `Beamio NFC USDC Charge (${effectiveCurrency} ${breakdown.total.toFixed(2)} → card ${cardAddr.slice(0, 8)}…)`,
-			})
+			const settledByRawSig = await settleWithRawSigIfNeeded()
+			if (settledByRawSig === null) {
+				sessionUpdate({ state: 'error', error: `${paymentTokenNorm} settle failed` })
+				return
+			}
+			const settled =
+				settledByRawSig ??
+				(await settleBeamioX402ToCardOwner(req, res, {
+					cardOwner: payToOwner,
+					quotedUsdc6,
+					description: `Beamio NFC USDC Charge (${effectiveCurrency} ${breakdown.total.toFixed(2)} → card ${cardAddr.slice(0, 8)}…)`,
+				}))
 			if (!settled) {
 				// helper 已经把错误响应写到 res；session 用 status code 推断粗粒度原因（具体错文已写到 res 给 verra-home）
 				const sc = res.statusCode

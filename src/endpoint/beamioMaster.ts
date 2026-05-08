@@ -3420,6 +3420,244 @@ const routing = ( router: Router ) => {
 			}
 		})
 
+		/** POST /api/tokenTransferRawSig
+		 * Generic EIP-3009 relay for USDC/CADD transferWithAuthorization.
+		 * Used by cluster for non-x402 settle paths (e.g. CADD QR pay) before continuing topup/charge flows.
+		 */
+		router.post('/tokenTransferRawSig', async (req, res) => {
+			const {
+				paymentToken,
+				cardOwner,
+				payer,
+				value,
+				validAfter,
+				validBefore,
+				nonce,
+				permitDeadline,
+				permitNonce,
+				signature,
+			} = (req.body ?? {}) as {
+				paymentToken?: string
+				cardOwner?: string
+				payer?: string
+				value?: string | number
+				validAfter?: string | number
+				validBefore?: string | number
+				nonce?: string
+				permitDeadline?: string | number
+				permitNonce?: string | number
+				signature?: string
+			}
+			try {
+				const tokenSym = String(paymentToken ?? 'USDC').trim().toUpperCase()
+				const tokenMap: Record<string, string> = {
+					USDC: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+					CADD: '0x16F93eBC5320C89EfC8701577efe49d14A276a06',
+				}
+				const tokenAddress = tokenMap[tokenSym]
+				if (!tokenAddress) {
+					return res.status(400).json({ success: false, error: `Unsupported paymentToken: ${tokenSym}` }).end()
+				}
+				if (!cardOwner || !ethers.isAddress(cardOwner)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid cardOwner' }).end()
+				}
+				if (!payer || !ethers.isAddress(payer)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid payer' }).end()
+				}
+				if (!value || !/^\d+$/.test(String(value)) || BigInt(String(value)) <= 0n) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid value' }).end()
+				}
+				if (!signature || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+					return res.status(400).json({ success: false, error: 'Invalid signature (expect 0x-prefixed 65-byte hex)' }).end()
+				}
+
+				const payerNorm = ethers.getAddress(payer)
+				const cardOwnerNorm = ethers.getAddress(cardOwner)
+				const valueBig = BigInt(String(value))
+
+				const pk = (masterSetup as { settle_contractAdmin?: string[] }).settle_contractAdmin?.[0]
+				if (!pk) {
+					return res.status(500).json({ success: false, error: 'Service admin Base signer not configured (masterSetup.settle_contractAdmin[0])' }).end()
+				}
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const wallet = new ethers.Wallet(pk, provider)
+				const token = new ethers.Contract(
+					tokenAddress,
+					[
+						'function name() view returns (string)',
+						'function version() view returns (string)',
+						'function nonces(address) view returns (uint256)',
+						'function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)',
+						'function transferFrom(address from, address to, uint256 value) returns (bool)',
+						'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature)',
+					],
+					wallet
+				)
+
+				let domainName = tokenSym
+				let domainVersion = '1'
+				try {
+					const n = await token.name() as string
+					if (typeof n === 'string' && n.trim()) domainName = n.trim()
+				} catch {
+					/* fallback */
+				}
+				try {
+					const v = await token.version() as string
+					if (typeof v === 'string' && v.trim()) domainVersion = v.trim()
+				} catch {
+					/* fallback */
+				}
+				const DOMAIN = {
+					name: domainName,
+					version: domainVersion,
+					chainId: MASTER_BASE_CHAIN_ID,
+					verifyingContract: ethers.getAddress(tokenAddress),
+				}
+				let txHash: string | null = null
+				if (tokenSym === 'CADD') {
+					const permitDeadlineBig = BigInt(permitDeadline ?? '0')
+					const permitNonceBig = BigInt(permitNonce ?? '0')
+					const nowSec = BigInt(Math.floor(Date.now() / 1000))
+					if (permitDeadlineBig <= nowSec) {
+						return res.status(400).json({ success: false, error: `Permit expired (deadline=${permitDeadlineBig} <= now=${nowSec})` }).end()
+					}
+					const spender = ethers.getAddress(wallet.address)
+					const permitTypes: Record<string, ethers.TypedDataField[]> = {
+						Permit: [
+							{ name: 'owner', type: 'address' },
+							{ name: 'spender', type: 'address' },
+							{ name: 'value', type: 'uint256' },
+							{ name: 'nonce', type: 'uint256' },
+							{ name: 'deadline', type: 'uint256' },
+						],
+					}
+					const permitMsg = {
+						owner: payerNorm,
+						spender,
+						value: valueBig,
+						nonce: permitNonceBig,
+						deadline: permitDeadlineBig,
+					}
+					let recovered: string
+					try {
+						recovered = ethers.verifyTypedData(DOMAIN, permitTypes, permitMsg, signature)
+					} catch (sigErr: any) {
+						return res.status(400).json({ success: false, error: `Permit signature recovery failed: ${sigErr?.message ?? sigErr}` }).end()
+					}
+					if (ethers.getAddress(recovered) !== payerNorm) {
+						return res.status(400).json({ success: false, error: `Permit signer mismatch (recovered=${recovered}, payer=${payerNorm})` }).end()
+					}
+					try {
+						const nonceOnChain = await token.nonces(payerNorm) as bigint
+						if (BigInt(nonceOnChain) !== permitNonceBig) {
+							return res.status(400).json({ success: false, error: `Permit nonce mismatch (onchain=${nonceOnChain.toString()}, signed=${permitNonceBig.toString()})` }).end()
+						}
+					} catch {
+						/* ignore strict nonce check failure */
+					}
+					try {
+						const sig = ethers.Signature.from(signature)
+						const txPermit = await token.permit(
+							payerNorm,
+							spender,
+							valueBig,
+							permitDeadlineBig,
+							sig.v,
+							sig.r,
+							sig.s
+						)
+						const permitRcpt = await txPermit.wait(1)
+						if (!permitRcpt || permitRcpt.status !== 1) {
+							return res.status(502).json({ success: false, error: `CADD permit reverted on-chain (tx=${txPermit.hash})`, txHash: txPermit.hash }).end()
+						}
+						const txTransfer = await token.transferFrom(payerNorm, cardOwnerNorm, valueBig)
+						txHash = txTransfer.hash
+						const rcpt = await txTransfer.wait(1)
+						if (!rcpt || rcpt.status !== 1) {
+							return res.status(502).json({ success: false, error: `CADD transferFrom reverted on-chain (tx=${txHash})`, txHash }).end()
+						}
+					} catch (txErr: any) {
+						const msg = txErr?.shortMessage ?? txErr?.message ?? String(txErr)
+						return res.status(502).json({ success: false, error: `CADD permit/transferFrom failed: ${msg}` }).end()
+					}
+				} else {
+					if (!nonce || !/^0x[0-9a-fA-F]{64}$/.test(nonce)) {
+						return res.status(400).json({ success: false, error: 'Invalid nonce (expect 0x-prefixed 32-byte hex)' }).end()
+					}
+					const validAfterBig = BigInt(validAfter ?? '0')
+					const validBeforeBig = BigInt(validBefore ?? '0')
+					const nowSec = BigInt(Math.floor(Date.now() / 1000))
+					const TIME_TOLERANCE = 300n
+					if (validBeforeBig <= nowSec) {
+						return res.status(400).json({ success: false, error: `Authorization expired (validBefore=${validBeforeBig} <= now=${nowSec})` }).end()
+					}
+					if (validAfterBig > nowSec + TIME_TOLERANCE) {
+						return res.status(400).json({ success: false, error: `Authorization not yet valid (validAfter=${validAfterBig} > now=${nowSec})` }).end()
+					}
+					const authTypes: Record<string, ethers.TypedDataField[]> = {
+						TransferWithAuthorization: [
+							{ name: 'from', type: 'address' },
+							{ name: 'to', type: 'address' },
+							{ name: 'value', type: 'uint256' },
+							{ name: 'validAfter', type: 'uint256' },
+							{ name: 'validBefore', type: 'uint256' },
+							{ name: 'nonce', type: 'bytes32' },
+						],
+					}
+					const authMsg = {
+						from: payerNorm,
+						to: cardOwnerNorm,
+						value: valueBig,
+						validAfter: validAfterBig,
+						validBefore: validBeforeBig,
+						nonce: nonce as `0x${string}`,
+					}
+					let recovered: string
+					try {
+						recovered = ethers.verifyTypedData(DOMAIN, authTypes, authMsg, signature)
+					} catch (sigErr: any) {
+						return res.status(400).json({ success: false, error: `Signature recovery failed: ${sigErr?.message ?? sigErr}` }).end()
+					}
+					if (ethers.getAddress(recovered) !== payerNorm) {
+						return res.status(400).json({ success: false, error: `EIP-3009 signer mismatch (recovered=${recovered}, payer=${payerNorm})` }).end()
+					}
+					try {
+						const tx = await token.transferWithAuthorization(
+							payerNorm,
+							cardOwnerNorm,
+							valueBig,
+							validAfterBig,
+							validBeforeBig,
+							nonce,
+							signature
+						)
+						txHash = tx.hash
+						const rcpt = await tx.wait(1)
+						if (!rcpt || rcpt.status !== 1) {
+							return res.status(502).json({ success: false, error: `${tokenSym} transferWithAuthorization reverted on-chain (tx=${txHash})`, txHash }).end()
+						}
+					} catch (txErr: any) {
+						const msg = txErr?.shortMessage ?? txErr?.message ?? String(txErr)
+						return res.status(502).json({ success: false, error: `${tokenSym} transferWithAuthorization failed: ${msg}` }).end()
+					}
+				}
+
+				return res.status(200).json({
+					success: true,
+					paymentToken: tokenSym,
+					payer: payerNorm,
+					txHash,
+					transaction: txHash,
+					USDC_tx: txHash,
+					usdcAmount6: valueBig.toString(),
+				}).end()
+			} catch (err: any) {
+				logger(Colors.red(`[tokenTransferRawSig] ${err?.message ?? err}`))
+				return res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+			}
+		})
+
 		/** POST /api/usdcChargeRawSig —— WC v2 / 任意第三方钱包 raw EIP-3009 sig USDC@Base 直发
 		 *
 		 * 与 `/api/nfcUsdcCharge`（x402 路径）的关键区别：
@@ -3450,6 +3688,7 @@ const routing = ( router: Router ) => {
 				tipCurrencyAmount,
 				tipRateBps,
 				usdcAmount6,
+				paymentToken,
 				payer,
 				validAfter,
 				validBefore,
@@ -3470,6 +3709,7 @@ const routing = ( router: Router ) => {
 				tipCurrencyAmount?: string
 				tipRateBps?: number
 				usdcAmount6?: string
+				paymentToken?: string
 				payer?: string
 				validAfter?: string | number
 				validBefore?: string | number
@@ -3511,17 +3751,23 @@ const routing = ( router: Router ) => {
 				const payerNorm = ethers.getAddress(payer)
 				const valueBig = BigInt(usdcAmount6)
 				const cur = String(currency ?? 'CAD').toUpperCase()
+				const paymentTokenNorm = (() => {
+					const t = String(paymentToken ?? '').trim().toUpperCase()
+					if (t === 'USDC' || t === 'CADD') return t
+					return cur === 'CADD' ? 'CADD' : 'USDC'
+				})()
 				const sidNorm = typeof sid === 'string' && sid.trim().length > 0 ? sid.trim() : null
 				const posNorm = typeof pos === 'string' && ethers.isAddress(pos) ? ethers.getAddress(pos) : null
 
-				// fast-fail：本地 ECDSA 复算 EIP-712 TransferWithAuthorization；与 USDC 合约同 domain/types。
+				// fast-fail：本地 ECDSA 复算 EIP-712 TransferWithAuthorization；与支付 token 合约同 domain/types。
 				// 复算失败 ⇒ 不烧 gas、直接 400；复算通过 ⇒ 链上 USDC 合约会再校验一次（nonce 防重放只能在链上做）。
-				const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
-				const USDC_EIP712_DOMAIN = {
-					name: 'USD Coin',
-					version: '2',
-					chainId: MASTER_BASE_CHAIN_ID,
-					verifyingContract: USDC_BASE,
+				const tokenMap: Record<string, string> = {
+					USDC: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+					CADD: '0x16F93eBC5320C89EfC8701577efe49d14A276a06',
+				}
+				const tokenAddress = tokenMap[paymentTokenNorm]
+				if (!tokenAddress) {
+					return res.status(400).json({ success: false, error: `Unsupported paymentToken: ${paymentTokenNorm}` }).end()
 				}
 				const TRANSFER_WITH_AUTH_TYPES: Record<string, ethers.TypedDataField[]> = {
 					TransferWithAuthorization: [
@@ -3541,9 +3787,35 @@ const routing = ( router: Router ) => {
 					validBefore: validBeforeBig,
 					nonce: nonce as `0x${string}`,
 				}
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const eip712Read = new ethers.Contract(
+					tokenAddress,
+					['function name() view returns (string)', 'function version() view returns (string)'],
+					provider
+				)
+				let domainName = paymentTokenNorm
+				let domainVersion = '1'
+				try {
+					const n = await eip712Read.name() as string
+					if (typeof n === 'string' && n.trim()) domainName = n.trim()
+				} catch {
+					/* fallback */
+				}
+				try {
+					const v = await eip712Read.version() as string
+					if (typeof v === 'string' && v.trim()) domainVersion = v.trim()
+				} catch {
+					/* fallback */
+				}
+				const TOKEN_EIP712_DOMAIN = {
+					name: domainName,
+					version: domainVersion,
+					chainId: MASTER_BASE_CHAIN_ID,
+					verifyingContract: ethers.getAddress(tokenAddress),
+				}
 				let recovered: string
 				try {
-					recovered = ethers.verifyTypedData(USDC_EIP712_DOMAIN, TRANSFER_WITH_AUTH_TYPES, message, signature)
+					recovered = ethers.verifyTypedData(TOKEN_EIP712_DOMAIN, TRANSFER_WITH_AUTH_TYPES, message, signature)
 				} catch (sigErr: any) {
 					logger(Colors.yellow(`[usdcChargeRawSig] sig recover threw: ${sigErr?.message ?? sigErr}`))
 					return res.status(400).json({ success: false, error: 'Signature recovery failed (malformed sig)' }).end()
@@ -3559,12 +3831,11 @@ const routing = ( router: Router ) => {
 				if (!pk) {
 					return res.status(500).json({ success: false, error: 'Service admin Base signer not configured (masterSetup.settle_contractAdmin[0])' }).end()
 				}
-				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
 				const wallet = new ethers.Wallet(pk, provider)
 				const usdcAbi = [
 					'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature)',
 				]
-				const usdc = new ethers.Contract(USDC_BASE, usdcAbi, wallet)
+				const usdc = new ethers.Contract(tokenAddress, usdcAbi, wallet)
 
 				let txHash: string | null = null
 				let blockNumber: number | null = null
