@@ -2976,13 +2976,37 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	const decimalToAtomic6 = (raw: string): bigint => {
+		const s = String(raw ?? '').trim()
+		if (!/^\d+(?:\.\d+)?$/.test(s)) return 0n
+		const [intPart, fracPart = ''] = s.split('.')
+		const frac6 = `${fracPart}000000`.slice(0, 6)
+		try {
+			return BigInt(intPart) * 1_000_000n + BigInt(frac6)
+		} catch {
+			return 0n
+		}
+	}
+
+	const quoteSettleAmount6 = (
+		amountDec: string,
+		currency: string,
+		paymentToken: 'USDC' | 'CADD'
+	): { amount6: bigint; usesOracle: boolean } => {
+		const cur = String(currency ?? '').trim().toUpperCase()
+		if (paymentToken === 'CADD' && (cur === 'CAD' || cur === 'CADD')) {
+			return { amount6: decimalToAtomic6(amountDec), usesOracle: false }
+		}
+		return { amount6: quoteCurrencyToUsdc6(amountDec, cur), usesOracle: true }
+	}
+
 	/** GET /api/nfcUsdcTopupQuote
 	 * 客户端浏览器钱包页面（verra-home /usdc-topup）展示价格用：根据 currency 与 amount 用 Oracle 折算 USDC6。
 	 * Query: card, owner, amount, currency。
 	 * 同步校验 card.owner() 是否与 owner 一致，避免任意 payTo 注入误用。 */
 	router.get('/nfcUsdcTopupQuote', async (req, res) => {
 		try {
-			const { card, owner, amount, currency } = req.query as { card?: string; owner?: string; amount?: string; currency?: string }
+			const { card, owner, amount, currency, paymentToken } = req.query as { card?: string; owner?: string; amount?: string; currency?: string; paymentToken?: string }
 			if (!card || !ethers.isAddress(String(card).trim())) {
 				return res.status(400).json({ success: false, error: 'Invalid card' }).end()
 			}
@@ -3005,8 +3029,16 @@ const routing = ( router: Router ) => {
 			if (onChainOwner && onChainOwner !== ownerAddr) {
 				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
 			}
-			const usdc6 = quoteCurrencyToUsdc6(amt, cur)
+			const paymentTokenNorm = (() => {
+				const t = String(paymentToken ?? '').trim().toUpperCase()
+				if (t === 'USDC' || t === 'CADD') return t as 'USDC' | 'CADD'
+				return cur === 'CADD' ? 'CADD' : 'USDC'
+			})()
+			const { amount6: usdc6, usesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
 			if (usdc6 <= 0n) {
+				if (!usesOracle) {
+					return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end()
+				}
 				const fresh = isOracleFresh()
 				const oracleTs = (clusterOracleCache?.timestamp ?? 0) as number
 				logger(Colors.yellow(`[nfcUsdcTopupQuote] oracle quote=0 cur=${cur} amt=${amt} fresh=${fresh} oracleTs=${oracleTs}`))
@@ -3034,7 +3066,7 @@ const routing = ( router: Router ) => {
 				quotedUsdc6: usdc6.toString(),
 				quotedUsdc: ethers.formatUnits(usdc6, 6),
 				oracleTimestamp: Number(clusterOracleCache?.timestamp ?? 0),
-				...(cur === 'CADD' && permitSpender ? { permitSpender } : {}),
+				...(paymentTokenNorm === 'CADD' && permitSpender ? { permitSpender } : {}),
 			}).end()
 		} catch (e: any) {
 			logger(Colors.red(`[nfcUsdcTopupQuote] error: ${e?.message ?? e}`))
@@ -3233,8 +3265,12 @@ const routing = ( router: Router ) => {
 
 			/** POS 两阶段 topup 阶段 1：QR 无 NFC/SUN，仅 USDC settle + `awaiting_beneficiary`。 */
 			if (!hasFullNfc && sessionPath) {
-				const quotedPhase1 = quoteCurrencyToUsdc6(amt, cur)
+				const { amount6: quotedPhase1, usesOracle: phase1UsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
 				if (quotedPhase1 <= 0n) {
+					if (!phase1UsesOracle) {
+						sessionUpdate({ state: 'error', error: 'Invalid CADD amount' })
+						return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end()
+					}
 					const fresh = isOracleFresh()
 					logger(Colors.yellow(`[nfcUsdcTopup/phase1] oracle quote=0 cur=${cur} amt=${amt} fresh=${fresh}`))
 					const omsg = fresh
@@ -3348,8 +3384,15 @@ const routing = ( router: Router ) => {
 			}
 
 			// 4. USDC 报价 - **严格 Oracle**：oracle 缺失/stale 时拒绝，不允许用固定汇率报价
-			const quotedUsdc6 = quoteCurrencyToUsdc6(amt, cur)
+			const { amount6: quotedUsdc6, usesOracle: topupUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
 			if (quotedUsdc6 <= 0n) {
+				if (!topupUsesOracle) {
+					sessionUpdate({ state: 'error', error: 'Invalid CADD amount' })
+					return res.status(400).json({
+						success: false,
+						error: 'Invalid CADD amount',
+					}).end()
+				}
 				const fresh = isOracleFresh()
 				logger(Colors.yellow(`[nfcUsdcTopup] oracle quote=0 cur=${cur} amt=${amt} fresh=${fresh}`))
 				const omsg = fresh
@@ -3576,7 +3619,13 @@ const routing = ( router: Router ) => {
 	 * 同步校验 card.owner() 是否与 owner 一致（与 topup 一致），避免任意 payTo 注入误用。 */
 	router.get('/nfcUsdcChargeQuote', async (req, res) => {
 		try {
-			const { card, owner, currency, pos } = req.query as { card?: string; owner?: string; currency?: string; pos?: string }
+			const { card, owner, currency, pos, paymentToken } = req.query as {
+				card?: string
+				owner?: string
+				currency?: string
+				pos?: string
+				paymentToken?: string
+			}
 			if (!card || !ethers.isAddress(String(card).trim())) {
 				return res.status(400).json({ success: false, error: 'Invalid card' }).end()
 			}
@@ -3645,9 +3694,17 @@ const routing = ( router: Router ) => {
 			}
 			const effectiveCurrency = onChainCurrency ?? cur
 
+			const paymentTokenNorm = (() => {
+				const t = String(paymentToken ?? '').trim().toUpperCase()
+				if (t === 'USDC' || t === 'CADD') return t as 'USDC' | 'CADD'
+				return effectiveCurrency === 'CADD' ? 'CADD' : 'USDC'
+			})()
 			const totalStr = breakdown.total.toFixed(6)
-			const usdc6 = quoteCurrencyToUsdc6(totalStr, effectiveCurrency)
+			const { amount6: usdc6, usesOracle } = quoteSettleAmount6(totalStr, effectiveCurrency, paymentTokenNorm)
 			if (usdc6 <= 0n) {
+				if (!usesOracle) {
+					return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end()
+				}
 				const fresh = isOracleFresh()
 				const oracleTs = (clusterOracleCache?.timestamp ?? 0) as number
 				logger(Colors.yellow(`[nfcUsdcChargeQuote] oracle quote=0 cur=${effectiveCurrency} total=${totalStr} fresh=${fresh} oracleTs=${oracleTs}`))
@@ -3683,7 +3740,7 @@ const routing = ( router: Router ) => {
 				quotedUsdc6: usdc6.toString(),
 				quotedUsdc: ethers.formatUnits(usdc6, 6),
 				oracleTimestamp: Number(clusterOracleCache?.timestamp ?? 0),
-				...(effectiveCurrency === 'CADD' && permitSpender ? { permitSpender } : {}),
+				...(paymentTokenNorm === 'CADD' && permitSpender ? { permitSpender } : {}),
 			}).end()
 		} catch (e: any) {
 			logger(Colors.red(`[nfcUsdcChargeQuote] error: ${e?.message ?? e}`))
@@ -4085,8 +4142,16 @@ const routing = ( router: Router ) => {
 
 			// 3. USDC 报价 - 严格 Oracle（与 topup 同策略）
 			const totalStr = breakdown.total.toFixed(6)
-			const quotedUsdc6 = quoteCurrencyToUsdc6(totalStr, effectiveCurrency)
+			const { amount6: quotedUsdc6, usesOracle: chargeUsesOracle } = quoteSettleAmount6(
+				totalStr,
+				effectiveCurrency,
+				paymentTokenNorm
+			)
 			if (quotedUsdc6 <= 0n) {
+				if (!chargeUsesOracle) {
+					sessionUpdate({ state: 'error', error: 'Invalid CADD amount' })
+					return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end()
+				}
 				const fresh = isOracleFresh()
 				logger(Colors.yellow(`[nfcUsdcCharge] oracle quote=0 cur=${effectiveCurrency} total=${totalStr} fresh=${fresh}`))
 				const errMsg = fresh
@@ -4095,7 +4160,11 @@ const routing = ( router: Router ) => {
 				sessionUpdate({ state: 'error', error: errMsg })
 				return res.status(503).json({ success: false, error: errMsg }).end()
 			}
-			const quotedSubtotalUsdc6 = quoteCurrencyToUsdc6(breakdown.subtotal.toFixed(6), effectiveCurrency)
+			const quotedSubtotalUsdc6 = quoteSettleAmount6(
+				breakdown.subtotal.toFixed(6),
+				effectiveCurrency,
+				paymentTokenNorm
+			).amount6
 
 			const settleWithRawSigIfNeeded = async (): Promise<
 				{ payer: string; USDC_tx: string; usdcAmount6: bigint } | null | undefined
