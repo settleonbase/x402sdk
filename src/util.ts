@@ -763,7 +763,7 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 	const _routerName = req.path
 	const resource = buildResourceUrl(req) as Resource
 
-	const { amount, usdcAmount, currency, currencyAmount, toAddress, note, requestHash, isInternalTransfer } = req.query as {
+	const { amount, usdcAmount, currency, currencyAmount, toAddress, note, requestHash, isInternalTransfer, feePayerForBunit } = req.query as {
 		amount?: string
 		usdcAmount?: string
 		currency?: string
@@ -772,6 +772,8 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 		note?: string
 		requestHash?: string
 		isInternalTransfer?: string
+		/** `payee`：B-Unit 预检与 consumeFromUser 扣款方为收款人（需配合 note=Vouchers） */
+		feePayerForBunit?: string
 	}
 	const usdcAmt = amount || usdcAmount
 	logger(`[BeamioTransfer] req.query: amount=${usdcAmt} toAddress=${toAddress?.slice(0, 10)}… currency=${currency ?? 'undefined'} resource=${resource}`)
@@ -813,15 +815,30 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 	const saleRequirements = paymentRequirements[0]
 	const payload: payload = paymentHeader?.payload as payload
 
-	// Cluster 预检：payer 的 B-Unit 余额必须 >= 2（手续费）
+	// Cluster 预检：默认 payer 付 B-Unit；Vouchers 链路约定收款人付（与 vouchersReceivePreCheck 一致）
 	const payerEOA = payload?.authorization?.from
 	if (!payerEOA || !ethers.isAddress(payerEOA)) {
 		logger(Colors.red(`[BeamioTransfer] REJECT: cannot determine payer from payment`))
 		return res.status(400).json({ success: false, error: 'Invalid payment: cannot determine payer' })
 	}
-	const bunitCheck = await beamioTransferPreCheckBUnitBalance(payerEOA)
+	const bunitRole = String(feePayerForBunit ?? 'payer').trim().toLowerCase()
+	const payeePaysBunit = bunitRole === 'payee'
+	if (payeePaysBunit && String(note ?? '').trim() !== 'Vouchers') {
+		logger(Colors.red(`[BeamioTransfer] REJECT: feePayerForBunit=payee requires note=Vouchers`))
+		return res.status(400).json({
+			success: false,
+			error: 'feePayerForBunit=payee is only allowed with note=Vouchers',
+		})
+	}
+	const toNorm = ethers.getAddress(toAddress!)
+	const bunitFeeAddress = payeePaysBunit ? toNorm : ethers.getAddress(payerEOA)
+	const bunitCheck = await beamioTransferPreCheckBUnitBalance(bunitFeeAddress)
 	if (!bunitCheck.success) {
-		logger(Colors.red(`[BeamioTransfer] B-Unit pre-check FAIL: ${bunitCheck.error}`))
+		logger(
+			Colors.red(
+				`[BeamioTransfer] B-Unit pre-check FAIL (${payeePaysBunit ? 'payee' : 'payer'}=${bunitFeeAddress.slice(0, 10)}…): ${bunitCheck.error}`,
+			),
+		)
 		return res.status(400).json({ success: false, error: bunitCheck.error })
 	}
 
@@ -879,7 +896,9 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 			if (!from || !to || from.toLowerCase() === to.toLowerCase()) {
 				logger(Colors.red(`[BeamioTransfer] SKIP accounting: from=to (payer=payee) from=${from} to=${to} txHash=${responseData?.transaction ?? 'n/a'}`))
 			} else {
-				logger(`[BeamioTransfer] submitBeamioTransferIndexerAccounting from=${from} to=${to} requestHash=${reqHashValid ?? 'n/a'} currency=${currency}`)
+				logger(
+					`[BeamioTransfer] submitBeamioTransferIndexerAccounting from=${from} to=${to} requestHash=${reqHashValid ?? 'n/a'} currency=${currency} feePayer=${payeePaysBunit ? 'payee' : 'payer'}`,
+				)
 				void submitBeamioTransferIndexerAccountingToMaster({
 					from,
 					to,
@@ -890,6 +909,7 @@ export const BeamioTransfer = async (req: Request, res: Response) => {
 					currencyAmount: currencyAmount as string,
 					requestHash: reqHashValid,
 					isInternalTransfer: isInternalTransfer === 'true' || isInternalTransfer === '1',
+					feePayer: payeePaysBunit ? toNorm : undefined,
 				})
 			}
 		}
@@ -1113,6 +1133,8 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 	currencyAmount?: string
 	requestHash?: string
 	isInternalTransfer?: boolean
+	/** B-Unit x402Send fee payer; default `from` (payer). Vouchers uses `to` (payee). */
+	feePayer?: string
 }) => {
 	if (!ethers.isAddress(payload.from) || !ethers.isAddress(payload.to)) {
 		return
@@ -1155,6 +1177,8 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 			logger(`[BeamioTransfer] submitBeamioTransferIndexerAccountingToMaster error: ${e.message}`)
 			resolve()
 		})
+		const feePayerResolved =
+			payload.feePayer && ethers.isAddress(payload.feePayer) ? ethers.getAddress(payload.feePayer) : ethers.getAddress(payload.from)
 		const body: Record<string, unknown> = {
 			from: payload.from,
 			to: payload.to,
@@ -1167,7 +1191,7 @@ const submitBeamioTransferIndexerAccountingToMaster = async (payload: {
 			gasUSDC6: gasFields.gasUSDC6,
 			gasChainType: gasFields.gasChainType,
 			baseGas: gasFields.baseGas,
-			feePayer: payload.from,
+			feePayer: feePayerResolved,
 			source: 'x402',
 		}
 		if (payload.requestHash) body.requestHash = payload.requestHash
