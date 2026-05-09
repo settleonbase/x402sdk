@@ -6716,6 +6716,45 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		return res.status(200).json({ success: true }).end()
 	})
 
+	/** GET /api/vouchersReceivePreCheck - 第三方钱包 URL 收款预检（校验收款 EOA 地址、金额格式、B-Unit >= 2）。 */
+	router.get('/vouchersReceivePreCheck', async (req, res) => {
+		const toRaw = String(req.query.to ?? '').trim()
+		const amountRaw = String(req.query.amount ?? req.query.Amount ?? '').trim()
+		const currencyRaw = String(req.query.currency ?? 'USDC').trim().toUpperCase()
+		const acceptTokensRaw = String(req.query.acceptTokens ?? req.query.accepttokens ?? 'USDC').trim().toUpperCase()
+		if (!toRaw || !ethers.isAddress(toRaw)) {
+			return res.status(400).json({ success: false, error: 'Invalid `to` address' }).end()
+		}
+		if (!/^\d+(?:\.\d{1,6})?$/.test(amountRaw) || !(Number(amountRaw) > 0)) {
+			return res.status(400).json({ success: false, error: 'Invalid `amount` (supports up to 6 decimals)' }).end()
+		}
+		if (currencyRaw !== 'USDC') {
+			return res.status(400).json({ success: false, error: 'Only USDC is supported for vouchers receive URL' }).end()
+		}
+		if (!acceptTokensRaw.split(',').map((s) => s.trim()).filter(Boolean).includes('USDC')) {
+			return res.status(400).json({ success: false, error: '`acceptTokens` must include USDC' }).end()
+		}
+		const to = ethers.getAddress(toRaw)
+		const bunit = await transferPreCheckBUnit({ account: to })
+		if (!bunit.success) {
+			return res.status(200).json({
+				success: false,
+				error: bunit.error ?? 'B-Unit balance is not enough',
+				payee: to,
+				amount: amountRaw,
+				currency: currencyRaw,
+			}).end()
+		}
+		return res.status(200).json({
+			success: true,
+			payee: to,
+			amount: amountRaw,
+			currency: currencyRaw,
+			acceptTokens: 'USDC',
+			paymentUrl: `https://beamio.app/Vouchers?Amount=${encodeURIComponent(amountRaw)}&currency=USDC&acceptTokens=USDC&to=${encodeURIComponent(to)}`,
+		}).end()
+	})
+
 	/** GET /api/requestAccountingPreCheck - UI 自检 B-Unit 是否足够，不写链。用于创建 payment request 前预检 */
 	router.get('/requestAccountingPreCheck', async (req, res) => {
 		const payee = req.query.payee as string
