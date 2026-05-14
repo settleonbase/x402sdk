@@ -16,7 +16,7 @@ import {
 	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED, filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
@@ -1367,7 +1367,7 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** 已发行 coupon：仅允许更新 metadata（icon / description / backgroundColor），不改已上链发行参数。 */
+		/** 已发行 coupon：允许更新 metadata（icon / description / backgroundColor / couponImage 宽屏背景图 URL）。 */
 		router.post('/updateIssuedCouponMetadata', async (req, res) => {
 			try {
 				const body = req.body as {
@@ -1377,6 +1377,7 @@ const routing = ( router: Router ) => {
 					icon?: string
 					backgroundColor?: string
 					description?: string
+					couponImage?: string
 				}
 				const cardAddress = body.cardAddress?.trim()
 				const couponId = body.couponId?.trim() ?? ''
@@ -1392,6 +1393,13 @@ const routing = ( router: Router ) => {
 					tokenIdNorm = String(BigInt(issuedTokenIdRaw))
 				} catch {
 					return res.status(400).json({ success: false, error: 'issuedTokenId must be an integer string' }).end()
+				}
+				const couponImageTrim = typeof body.couponImage === 'string' ? body.couponImage.trim() : ''
+				if (couponImageTrim && !isAllowedMerchantImageHttpsUrl(couponImageTrim)) {
+					return res
+						.status(400)
+						.json({ success: false, error: 'couponImage must be a non-localhost https URL (max 2048 characters).' })
+						.end()
 				}
 				const cardNorm = ethers.getAddress(cardAddress)
 				const cardRow = await getCardByAddress(cardNorm)
@@ -1420,6 +1428,7 @@ const routing = ( router: Router ) => {
 				setOrDeleteStringField(coupon, 'icon', String(body.icon ?? ''))
 				setOrDeleteStringField(coupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 				setOrDeleteStringField(coupon, 'description', String(body.description ?? ''))
+				setOrDeleteStringField(coupon, 'couponImage', couponImageTrim)
 				coupons[couponIdx] = coupon
 				shareTokenMetadata.coupons = coupons
 				const applyRes = await applyBeamioCardShareMetadataUpdate({
@@ -1441,6 +1450,7 @@ const routing = ( router: Router ) => {
 					setOrDeleteStringField(nextSeriesMeta, 'icon', String(body.icon ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'description', String(body.description ?? ''))
+					setOrDeleteStringField(nextSeriesMeta, 'couponImage', couponImageTrim)
 					if (nextSeriesMeta.properties && typeof nextSeriesMeta.properties === 'object' && !Array.isArray(nextSeriesMeta.properties)) {
 						const props = { ...(nextSeriesMeta.properties as Record<string, unknown>) }
 						if (props.beamioCoupon && typeof props.beamioCoupon === 'object' && !Array.isArray(props.beamioCoupon)) {
@@ -1449,6 +1459,7 @@ const routing = ( router: Router ) => {
 							setOrDeleteStringField(beamioCoupon, 'icon', String(body.icon ?? ''))
 							setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 							setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
+							setOrDeleteStringField(beamioCoupon, 'couponImage', couponImageTrim)
 							props.beamioCoupon = beamioCoupon
 							nextSeriesMeta.properties = props
 						}
@@ -1478,6 +1489,7 @@ const routing = ( router: Router ) => {
 					setOrDeleteStringField(beamioCoupon, 'icon', String(body.icon ?? ''))
 					setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
+					setOrDeleteStringField(beamioCoupon, 'couponImage', couponImageTrim)
 					if (Object.keys(beamioCoupon).length > 0) {
 						tierProps.beamioCoupon = beamioCoupon
 					}

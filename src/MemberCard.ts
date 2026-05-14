@@ -9828,7 +9828,8 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 
 const MERCHANT_IMAGE_URL_MAX_LEN = 2048
 
-function isAllowedMerchantImageHttpsUrl(raw: string): boolean {
+/** Shared rule for `merchantImage`, coupon `couponImage`, etc. (https, non-localhost, max length). */
+export function isAllowedMerchantImageHttpsUrl(raw: string): boolean {
 	const u = raw.trim()
 	if (!u || u.length > MERCHANT_IMAGE_URL_MAX_LEN) return false
 	if (!/^https:\/\//i.test(u)) return false
