@@ -19,7 +19,7 @@ import {
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
-import { LATEST_CARDS_EXCLUDED } from './latestCardsShared'
+import { LATEST_CARDS_EXCLUDED, filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 
@@ -253,7 +253,11 @@ async function computeLatestCardsForMaster(limit: number): Promise<BeamioLatestC
 		try {
 			const raw = await getLatestCards(limit)
 			const filtered = raw.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase()))
-			return enrichLatestCardsWithBaseErc1155PointsHolderCounts(filtered, providerBaseForLatestCards)
+			const enriched = await enrichLatestCardsWithBaseErc1155PointsHolderCounts(
+				filtered,
+				providerBaseForLatestCards,
+			)
+			return filterLatestCardsByDiscoverMerchantPolicy(enriched)
 		} finally {
 			latestCardsComputeInflight.delete(limit)
 		}

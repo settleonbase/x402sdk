@@ -1,3 +1,6 @@
+import { ethers } from 'ethers'
+import type { BeamioLatestCardItem } from '../db'
+
 /**
  * latestCards / last-N 发卡列表：Cluster 与 Master 共用排除集（与 SilentPassUI、Alliance USER_CARD_DISPLAY_EXCLUDED 对齐）。
  */
@@ -35,3 +38,29 @@ export const LATEST_CARDS_EXCLUDED = new Set([
 	'0x4c66b36ba059b2f05ef3d5f383c67533f19c6219',
 	'0x9cda8477c9f03b8759ac64e21941e578908fd750',
 ])
+
+/**
+ * Discover / `GET /api/latestCards`：遗留商家（`created_at` 早于分界）仅保留该 EOA `card_owner`；分界起新注册不参加过滤。
+ * 须与 `src/SilentPassUI/src/pages/Vouchers/Market.tsx` 中 `DISCOVER_*` 常量保持一致。
+ */
+export const DISCOVER_NEW_MERCHANTS_UNFILTERED_SINCE_MS = Date.parse('2026-05-14T00:00:00.000Z')
+const DISCOVER_LEGACY_ALLOWED_CARD_OWNER_LOWER = ethers.getAddress(
+	'0xda2c9e028d7df4338763e1e14b081ae7316b803a',
+).toLowerCase()
+
+function discoverLatestCardCreatedAtMs(iso: string | null | undefined): number | null {
+	if (iso == null || typeof iso !== 'string') return null
+	const t = Date.parse(iso.trim())
+	return Number.isFinite(t) ? t : null
+}
+
+/** Apply after `LATEST_CARDS_EXCLUDED` + enrichment. */
+export function filterLatestCardsByDiscoverMerchantPolicy(cards: BeamioLatestCardItem[]): BeamioLatestCardItem[] {
+	return cards.filter((c) => {
+		const createdMs = discoverLatestCardCreatedAtMs(c.createdAt)
+		if (createdMs != null && createdMs >= DISCOVER_NEW_MERCHANTS_UNFILTERED_SINCE_MS) return true
+		const owner = (c.cardOwner || '').trim()
+		if (!owner || !ethers.isAddress(owner)) return false
+		return ethers.getAddress(owner).toLowerCase() === DISCOVER_LEGACY_ALLOWED_CARD_OWNER_LOWER
+	})
+}
