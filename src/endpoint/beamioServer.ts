@@ -6259,6 +6259,21 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/updateIssuedCouponMetadata', req.body, res)
 	})
 
+	/** 仅更新 program `merchantImage` URL（或清除）；Cluster 预检后转发 Master。 */
+	router.post('/updateCardMerchantImage', async (req, res) => {
+		const body = req.body as { cardAddress?: unknown; merchantImage?: unknown }
+		const cardAddress = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : ''
+		const merchantImage = typeof body.merchantImage === 'string' ? body.merchantImage : ''
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end()
+		}
+		logger(
+			Colors.green('server /api/updateCardMerchantImage preCheck OK, forwarding to master'),
+			inspect({ cardAddress }, false, 2, true)
+		)
+		postLocalhost('/api/updateCardMerchantImage', { cardAddress, merchantImage }, res)
+	})
+
 	/** cardUpdateTiers：owner 离线签字整体替换 BeamioUserCard.tiers，并同步 card metadata。 */
 	router.post('/cardUpdateTiers', async (req, res) => {
 		const body = req.body as {

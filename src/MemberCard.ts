@@ -9826,6 +9826,82 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 	}
 }
 
+const MERCHANT_IMAGE_URL_MAX_LEN = 2048
+
+function isAllowedMerchantImageHttpsUrl(raw: string): boolean {
+	const u = raw.trim()
+	if (!u || u.length > MERCHANT_IMAGE_URL_MAX_LEN) return false
+	if (!/^https:\/\//i.test(u)) return false
+	try {
+		const parsed = new URL(u)
+		if (parsed.protocol !== 'https:') return false
+		if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') return false
+		return true
+	} catch {
+		return false
+	}
+}
+
+/**
+ * 仅更新 `shareTokenMetadata.merchantImage`（或清除），合并 DB 现有 shareTokenMetadata 与顶层 tiers / upgradeType。
+ * 供 `POST /api/updateCardMerchantImage` 使用；写 `0x{card}0.json` + `registerCardToDb`。
+ */
+export async function applyBeamioCardMerchantImageUrlUpdate(params: {
+	cardAddress: string
+	/** https URL to set; empty string removes merchantImage / merchant_image keys */
+	merchantImage: string
+}): Promise<{ success: boolean; error?: string }> {
+	try {
+		const cardAddr = ethers.getAddress(params.cardAddress.trim())
+		const row = await getCardByAddress(cardAddr)
+		if (!row?.metadata || typeof row.metadata !== 'object') {
+			return { success: false, error: 'Card is not registered in beamio_cards or has no metadata.' }
+		}
+		const meta = row.metadata as Record<string, unknown>
+		const share =
+			meta.shareTokenMetadata != null &&
+			typeof meta.shareTokenMetadata === 'object' &&
+			!Array.isArray(meta.shareTokenMetadata)
+				? { ...(meta.shareTokenMetadata as Record<string, unknown>) }
+				: {}
+		const trimmed = String(params.merchantImage ?? '').trim()
+		if (trimmed) {
+			if (!isAllowedMerchantImageHttpsUrl(trimmed)) {
+				return {
+					success: false,
+					error: 'merchantImage must be a non-localhost https URL (max 2048 characters).',
+				}
+			}
+			share.merchantImage = trimmed
+			delete share.merchant_image
+		} else {
+			delete share.merchantImage
+			delete share.merchant_image
+		}
+		const tiers =
+			Array.isArray(meta.tiers) && meta.tiers.length > 0
+				? (meta.tiers as Array<Record<string, unknown>>)
+				: undefined
+		let upgradeType: number | undefined
+		if (meta.upgradeType != null) {
+			const u = Number(meta.upgradeType)
+			if (u === 0 || u === 1 || u === 2) upgradeType = u
+		}
+		const transferWhitelistEnabled =
+			typeof meta.transferWhitelistEnabled === 'boolean' ? meta.transferWhitelistEnabled : undefined
+
+		return applyBeamioCardShareMetadataUpdate({
+			cardAddress: cardAddr,
+			shareTokenMetadata: share,
+			...(tiers && tiers.length > 0 && { tiers }),
+			...(upgradeType !== undefined && { upgradeType: upgradeType as 0 | 1 | 2 }),
+			...(transferWhitelistEnabled !== undefined && { transferWhitelistEnabled }),
+		})
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
 export const createCardPoolPress = async () => {
 	const obj = createCardPool.shift() as (CreateCardPreChecked & { res: Response }) | undefined
 	if (!obj) return
