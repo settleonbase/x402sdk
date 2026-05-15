@@ -96,6 +96,34 @@ function summarizeCouponIconForDebugLog(icon: string | undefined): string {
 	return `len=${s.length} head=${s.slice(0, 80)}`
 }
 
+/** When `shareTokenMetadata.coupons` is empty/out-of-sync, authorize updates from `beamio_nft_series.metadata_json`. */
+function seriesMetadataMatchesIssuedCoupon(
+	metadata: unknown,
+	couponId: string,
+	issuedTokenIdNorm: string
+): boolean {
+	if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return false
+	const m = metadata as Record<string, unknown>
+	const rootId = String(m.couponId ?? m.id ?? '').trim()
+	const rootTok = String(m.issuedTokenId ?? '').trim()
+	if (rootId === couponId) {
+		if (rootTok === '' || rootTok === issuedTokenIdNorm) return true
+	}
+	const props = m.properties
+	if (props && typeof props === 'object' && !Array.isArray(props)) {
+		const bc = (props as Record<string, unknown>).beamioCoupon
+		if (bc && typeof bc === 'object' && !Array.isArray(bc)) {
+			const b = bc as Record<string, unknown>
+			const bid = String(b.couponId ?? b.id ?? '').trim()
+			const btok = String(b.issuedTokenId ?? '').trim()
+			if (bid === couponId) {
+				if (btok === '' || btok === issuedTokenIdNorm) return true
+			}
+		}
+	}
+	return false
+}
+
 /** Beamio 默认 metadata image（与 BeamioUserCard 一致） */
 const DEFAULT_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x44e7a175e57a337bf5d0a98deb19a0a545e362d504092a7af1aecd58798eab'
 
@@ -1435,42 +1463,67 @@ const routing = ( router: Router ) => {
 					const tok = String(item?.issuedTokenId ?? '').trim()
 					return id === couponId && tok === tokenIdNorm
 				})
+				let seriesOnlyPath = false
 				if (couponIdx < 0) {
+					const seriesProbe = await getSeriesByCardAndTokenId(cardNorm, tokenIdNorm)
+					const seriesMatch = seriesProbe
+						? seriesMetadataMatchesIssuedCoupon(seriesProbe.metadata, couponId, tokenIdNorm)
+						: false
 					const keysForLog = coupons.slice(0, 12).map((item) => ({
 						couponId: String(item?.couponId ?? '').trim() || undefined,
 						id: String(item?.id ?? '').trim() || undefined,
 						issuedTokenId: String(item?.issuedTokenId ?? '').trim() || undefined,
 					}))
+					if (!seriesProbe || !seriesMatch) {
+						logger(
+							Colors.yellow(
+								`[updateIssuedCouponMetadata] no shareTokenMetadata coupon match wanted couponId=${couponId} issuedTokenId=${tokenIdNorm} couponsLen=${coupons.length} seriesRow=${Boolean(seriesProbe)} seriesMetaMatch=${seriesMatch} sample=${inspect(keysForLog, false, 4, true)}`
+							)
+						)
+						return res.status(404).json({ success: false, error: 'Issued coupon metadata row not found' }).end()
+					}
+					seriesOnlyPath = true
 					logger(
-						Colors.yellow(
-							`[updateIssuedCouponMetadata] no shareTokenMetadata coupon match wanted couponId=${couponId} issuedTokenId=${tokenIdNorm} couponsLen=${coupons.length} sample=${inspect(keysForLog, false, 4, true)}`
+						Colors.cyan(
+							`[updateIssuedCouponMetadata] series-only path (shareTokenMetadata.coupons empty/mismatch; beamio_nft_series metadata matches) card=${cardNorm} tokenId=${tokenIdNorm}`
 						)
 					)
-					return res.status(404).json({ success: false, error: 'Issued coupon metadata row not found' }).end()
+				} else {
+					const coupon = { ...coupons[couponIdx] }
+					delete coupon.discountPercent
+					setOrDeleteStringField(coupon, 'icon', String(body.icon ?? ''))
+					setOrDeleteStringField(coupon, 'backgroundColor', String(body.backgroundColor ?? ''))
+					setOrDeleteStringField(coupon, 'description', String(body.description ?? ''))
+					setOrDeleteStringField(coupon, 'couponImage', couponImageTrim)
+					coupons[couponIdx] = coupon
+					shareTokenMetadata.coupons = coupons
+					const applyRes = await applyBeamioCardShareMetadataUpdate({
+						cardAddress: cardNorm,
+						shareTokenMetadata,
+						...(Array.isArray(cardMeta.tiers) ? { tiers: cardMeta.tiers as Array<Record<string, unknown>> } : {}),
+						...(cardMeta.upgradeType != null ? { upgradeType: Number(cardMeta.upgradeType) } : {}),
+						...(typeof cardMeta.transferWhitelistEnabled === 'boolean'
+							? { transferWhitelistEnabled: cardMeta.transferWhitelistEnabled }
+							: {}),
+					})
+					if (!applyRes.success) {
+						logger(Colors.red(`[updateIssuedCouponMetadata] applyBeamioCardShareMetadataUpdate failed card=${cardNorm} err=${applyRes.error ?? 'unknown'}`))
+						return res.status(400).json({ success: false, error: applyRes.error ?? 'Metadata update failed' }).end()
+					}
+					logger(Colors.green(`[updateIssuedCouponMetadata] shareTokenMetadata.coupons updated card=${cardNorm} idx=${couponIdx}`))
 				}
-				const coupon = { ...coupons[couponIdx] }
-				delete coupon.discountPercent
-				setOrDeleteStringField(coupon, 'icon', String(body.icon ?? ''))
-				setOrDeleteStringField(coupon, 'backgroundColor', String(body.backgroundColor ?? ''))
-				setOrDeleteStringField(coupon, 'description', String(body.description ?? ''))
-				setOrDeleteStringField(coupon, 'couponImage', couponImageTrim)
-				coupons[couponIdx] = coupon
-				shareTokenMetadata.coupons = coupons
-				const applyRes = await applyBeamioCardShareMetadataUpdate({
-					cardAddress: cardNorm,
-					shareTokenMetadata,
-					...(Array.isArray(cardMeta.tiers) ? { tiers: cardMeta.tiers as Array<Record<string, unknown>> } : {}),
-					...(cardMeta.upgradeType != null ? { upgradeType: Number(cardMeta.upgradeType) } : {}),
-					...(typeof cardMeta.transferWhitelistEnabled === 'boolean'
-						? { transferWhitelistEnabled: cardMeta.transferWhitelistEnabled }
-						: {}),
-				})
-				if (!applyRes.success) {
-					logger(Colors.red(`[updateIssuedCouponMetadata] applyBeamioCardShareMetadataUpdate failed card=${cardNorm} err=${applyRes.error ?? 'unknown'}`))
-					return res.status(400).json({ success: false, error: applyRes.error ?? 'Metadata update failed' }).end()
-				}
-				logger(Colors.green(`[updateIssuedCouponMetadata] shareTokenMetadata.coupons updated card=${cardNorm} idx=${couponIdx}`))
 				const series = await getSeriesByCardAndTokenId(cardNorm, tokenIdNorm)
+				if (seriesOnlyPath && !series) {
+					logger(
+						Colors.red(
+							`[updateIssuedCouponMetadata] series row disappeared after probe card=${cardNorm} tokenId=${tokenIdNorm}`
+						)
+					)
+					return res
+						.status(500)
+						.json({ success: false, error: 'Issued coupon series row unavailable after validation.' })
+						.end()
+				}
 				const seriesMetaObj =
 					series?.metadata && typeof series.metadata === 'object' && !Array.isArray(series.metadata)
 				logger(
@@ -1567,7 +1620,7 @@ const routing = ( router: Router ) => {
 				}
 				logger(
 					Colors.green(
-						`[updateIssuedCouponMetadata] done 200 card=${cardNorm} couponId=${couponId} tokenId=${tokenIdNorm} icon=${summarizeCouponIconForDebugLog(String(body.icon ?? ''))}`
+						`[updateIssuedCouponMetadata] done 200 card=${cardNorm} couponId=${couponId} tokenId=${tokenIdNorm} seriesOnlyPath=${seriesOnlyPath} icon=${summarizeCouponIconForDebugLog(String(body.icon ?? ''))}`
 					)
 				)
 				return res.status(200).json({ success: true, cardAddress: cardNorm }).end()
