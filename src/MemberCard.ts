@@ -12949,12 +12949,21 @@ export const cardCouponOpenClaimProcess = async () => {
 	try {
 		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
 		const poolFactoryAddr = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
+		const claimContractABI = [
+			'function claimIssuedNftWithUserSig(address cardAddr,address userEOA,uint256 tokenId,uint256 deadline,bytes32 nonce,bytes userSignature)',
+			'error BM_ZeroAddress()',
+			'error BM_NotAuthorized()',
+			'error UC_InvalidTimeWindow(uint256 nowTs, uint256 validAfter, uint256 validBefore)',
+			'error UC_NonceUsed()',
+			'error UC_InvalidSignature(address signer, address expected)',
+			'error UC_IssuedNftInactive(uint256 tokenId)',
+		]
 		const claimContract =
 			cardGateway.toLowerCase() === poolFactoryAddr.toLowerCase()
 				? SC.baseFactoryPaymaster
 				: new ethers.Contract(
 					cardGateway,
-					['function claimIssuedNftWithUserSig(address cardAddr,address userEOA,uint256 tokenId,uint256 deadline,bytes32 nonce,bytes userSignature)'],
+					claimContractABI,
 					SC.walletBase
 				)
 
@@ -12982,19 +12991,34 @@ export const cardCouponOpenClaimProcess = async () => {
 		logger(Colors.green(`[cardCouponOpenClaimProcess] success tx=${tx.hash}`))
 	} catch (e: any) {
 		const errMsg = e?.reason ?? e?.shortMessage ?? e?.message ?? String(e)
+		const errName = e?.name || ''
+		const errorData = {
+			name: errName,
+			reason: e?.reason,
+			shortMessage: e?.shortMessage,
+			message: e?.message,
+			code: e?.code,
+			rawError: String(e),
+		}
+		
 		let clientError = errMsg
-		if (/UC_NonceUsed/i.test(errMsg)) {
+		if (/UC_NonceUsed/i.test(errMsg) || /NonceUsed/i.test(errName)) {
 			clientError = 'This coupon claim signature nonce has already been used.'
-		} else if (/UC_InvalidSignature/i.test(errMsg)) {
+		} else if (/UC_InvalidSignature/i.test(errMsg) || /InvalidSignature/i.test(errName)) {
 			clientError = 'Invalid claim signature.'
 		} else if (/UC_IssuedNftSigClaimAlreadyUsed/i.test(errMsg)) {
 			clientError = 'This wallet already claimed this coupon.'
 		} else if (/UC_IssuedNftNotFree|UC_PurchaseDisabledBecauseFree/i.test(errMsg)) {
 			clientError = 'This coupon is not available for open claim.'
-		} else if (/UC_IssuedNftInactive|UC_InvalidTimeWindow/i.test(errMsg)) {
+		} else if (/UC_IssuedNftInactive|UC_InvalidTimeWindow/i.test(errMsg) || /InvalidTimeWindow|IssuedNftInactive/i.test(errName)) {
 			clientError = 'This coupon is inactive or claim window has expired.'
+		} else if (/BM_NotAuthorized|NotAuthorized/i.test(errMsg) || /NotAuthorized/i.test(errName)) {
+			clientError = 'Card configuration issue: invalid factory gateway.'
+		} else if (/BM_ZeroAddress|ZeroAddress/i.test(errMsg) || /ZeroAddress/i.test(errName)) {
+			clientError = 'Invalid card address or user address.'
 		}
-		logger(Colors.red(`[cardCouponOpenClaimProcess] failed: ${clientError}`))
+		
+		logger(Colors.red(`[cardCouponOpenClaimProcess] failed: ${clientError} (rawError: ${JSON.stringify(errorData)})`))
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, error: clientError }).end()
 		}
