@@ -515,6 +515,34 @@ const cardActiveIssuedCouponSeriesCache = new Map<string, { body: string; expiry
 const seriesSharedMetadataCache = new Map<string, { body: string; expiry: number }>()
 const mintMetadataCache = new Map<string, { body: string; expiry: number }>()
 const getFollowStatusCache = new Map<string, { body: string; expiry: number }>()
+
+/** After issued-coupon metadata changes, drop cluster GET caches so clients see fresh `metadata_json`. */
+function invalidateIssuedCouponSeriesQueryCachesForCard(cardNorm: string, issuedTokenId?: string): void {
+	const lo = ethers.getAddress(cardNorm).toLowerCase()
+	const prefix = `${lo}:`
+	for (const k of cardActiveIssuedCouponSeriesCache.keys()) {
+		if (k.startsWith(prefix)) {
+			cardActiveIssuedCouponSeriesCache.delete(k)
+		}
+	}
+	recentIssuedCouponSeriesCache.clear()
+	if (issuedTokenId) {
+		try {
+			const tk = String(BigInt(issuedTokenId.trim()))
+			seriesSharedMetadataCache.delete(`${lo}:${tk}`)
+		} catch {
+			/* ignore */
+		}
+	}
+}
+
+function summarizeIssuedCouponIconForClusterLog(icon: string | undefined): string {
+	const s = String(icon ?? '').trim()
+	if (!s) return '(empty)'
+	const m = s.match(/hash=(0x[a-fA-F0-9]+)/i)
+	if (m) return `hash=${m[1]} len=${s.length}`
+	return `len=${s.length} head=${s.slice(0, 80)}`
+}
 const getMyFollowStatusCache = new Map<string, { body: string; expiry: number }>()
 
 /** PR #3: USDC charge no-NFC session 跟踪
@@ -6265,9 +6293,47 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		logger(
 			Colors.green('server /api/updateIssuedCouponMetadata preCheck OK, forwarding to master'),
-			inspect({ cardAddress, couponId, issuedTokenId }, false, 2, true)
+			inspect(
+				{
+					cardAddress,
+					couponId,
+					issuedTokenId,
+					icon: summarizeIssuedCouponIconForClusterLog(body.icon),
+					couponImageLen: couponImageTrim.length,
+				},
+				false,
+				2,
+				true
+			)
 		)
-		postLocalhost('/api/updateIssuedCouponMetadata', req.body, res)
+		try {
+			const { statusCode, body: buf } = await postLocalhostBuffer('/api/updateIssuedCouponMetadata', req.body)
+			if (statusCode >= 200 && statusCode < 300) {
+				try {
+					const parsed = JSON.parse(buf) as { success?: boolean }
+					if (parsed?.success === true) {
+						invalidateIssuedCouponSeriesQueryCachesForCard(cardAddress, issuedTokenId)
+						logger(
+							Colors.cyan(
+								`[updateIssuedCouponMetadata] cluster invalidated issued-coupon GET caches for card=${ethers.getAddress(cardAddress)}`
+							)
+						)
+					}
+				} catch {
+					/* ignore JSON parse — still pipe body */
+				}
+			} else {
+				logger(
+					Colors.yellow(
+						`[updateIssuedCouponMetadata] cluster master status=${statusCode} bodyHead=${buf.slice(0, 240)}`
+					)
+				)
+			}
+			res.status(statusCode).type('application/json').send(buf)
+		} catch (e: any) {
+			logger(Colors.red(`[updateIssuedCouponMetadata] cluster forward error:`), e?.message ?? e)
+			return res.status(502).json({ success: false, error: `Forward to master failed: ${e?.message ?? 'error'}` }).end()
+		}
 	})
 
 	/** 仅更新 program `merchantImage` URL（或清除）；Cluster 预检后转发 Master。 */
