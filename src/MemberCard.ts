@@ -12957,6 +12957,7 @@ export const cardCouponOpenClaimProcess = async () => {
 			'error UC_NonceUsed()',
 			'error UC_InvalidSignature(address signer, address expected)',
 			'error UC_IssuedNftInactive(uint256 tokenId)',
+			'error UC_ResolveAccountFailed(address eoa, address aaFactory, address acct)',
 		]
 		const claimContract =
 			cardGateway.toLowerCase() === poolFactoryAddr.toLowerCase()
@@ -13016,6 +13017,8 @@ export const cardCouponOpenClaimProcess = async () => {
 			clientError = 'Card configuration issue: invalid factory gateway.'
 		} else if (/BM_ZeroAddress|ZeroAddress/i.test(errMsg) || /ZeroAddress/i.test(errName)) {
 			clientError = 'Invalid card address or user address.'
+		} else if (/UC_ResolveAccountFailed|ResolveAccountFailed|ad12d341/i.test(errMsg) || /ResolveAccountFailed/i.test(errName)) {
+			clientError = 'User account not deployed on Base. Please deploy your Smart Account first before claiming coupons.'
 		}
 		
 		logger(Colors.red(`[cardCouponOpenClaimProcess] failed: ${clientError} (rawError: ${JSON.stringify(errorData)})`))
