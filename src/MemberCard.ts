@@ -1211,27 +1211,18 @@ export const ensureAAForMintTarget = async (targetAddress: string): Promise<void
 }
 
 /**
- * 为 EOA 确保存在 AA，返回 AA 地址。Cluster 在 cardAddAdmin 添加 admin 前会调用（经 /api/ensureAAForEOA）。
- *
- * 使用 **UserCardFactory._aaFactory()** 上的工厂（与 resolveBeamioAaForEoaWithFallback 一致）；读不到 `_aaFactory` 时抛错，不回退旧 BASE_AA_FACTORY。
- *
- * 注意：cardAddAdminPreCheck 要求 adminManager 的 **to** 与 **body.adminEOA** 为同一 EOA（to 无代码）。误传占位地址时仍会在该键下建 AA 并登记 admin。
+ * Master：在指定 AA 工厂上确保 EOA 已有已部署的 Beamio AA（无则 `DeployingSmartAccount` 创建）。
  */
-export const ensureAAForEOA = async (eoa: string): Promise<string> => {
-	const pool = Settle_ContractPool
-	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
-	const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+async function ensureAAForEOAOnAaFactory(
+	eoa: string,
+	aaFactoryAddress: string,
+	wallet: ethers.Wallet
+): Promise<string> {
 	const eoaNorm = ethers.getAddress(eoa)
-	/** 与 resolveBeamioAaForEoaWithFallback 一致：仅 UserCard._aaFactory()，不用链下 BASE_AA_FACTORY 回退 */
-	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, BASE_CARD_FACTORY)
-	if (!wired) {
-		throw new Error(
-			'ensureAAForEOA: cannot read UserCard _aaFactory(); set BASE_CARD_FACTORY RPC or deploy wiring before ensuring AA'
-		)
-	}
-	const factoryAddr = wired
-	const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, pool[0].walletBase)
-	const acct = await aaFactory.beamioAccountOf(eoaNorm)
+	const factoryAddr = ethers.getAddress(aaFactoryAddress)
+	const provider = wallet.provider ?? providerBaseBackup
+	const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, wallet)
+	const acct = (await aaFactory.beamioAccountOf(eoaNorm)) as string
 	const hasAA = acct && acct !== ethers.ZeroAddress && (await provider.getCode(acct)) !== '0x'
 	if (hasAA) return ethers.getAddress(acct)
 	logger(Colors.cyan(`[ensureAAForEOA] EOA ${eoaNorm} has no AA on ${factoryAddr}, creating...`))
@@ -1250,6 +1241,50 @@ export const ensureAAForEOA = async (eoa: string): Promise<string> => {
 	}
 	logger(Colors.green(`[ensureAAForEOA] created AA ${accountAddress} for EOA ${eoaNorm} (factory=${factoryAddr})`))
 	return accountAddress
+}
+
+/**
+ * 为 EOA 确保存在 AA（使用该卡 `factoryGateway()._aaFactory()`，与 `_toAccount` / open-claim mint 一致）。
+ * 供 `cardCouponOpenClaimProcess` 在 claim 前调用。
+ */
+export const ensureAAForEOAOnCard = async (cardAddress: string, eoa: string): Promise<string> => {
+	const pool = Settle_ContractPool
+	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
+	const cardNorm = ethers.getAddress(cardAddress)
+	const eoaNorm = ethers.getAddress(eoa)
+	const gateway = await getBeamioUserCardFactoryGateway(cardNorm)
+	const gwRead = new ethers.Contract(
+		gateway,
+		['function _aaFactory() view returns (address)'],
+		providerBaseBackup
+	)
+	const aaFactoryAddr = (await gwRead._aaFactory()) as string
+	if (!aaFactoryAddr || aaFactoryAddr === ethers.ZeroAddress) {
+		throw new Error('ensureAAForEOAOnCard: card factoryGateway _aaFactory not configured')
+	}
+	return ensureAAForEOAOnAaFactory(eoaNorm, aaFactoryAddr, pool[0].walletBase as ethers.Wallet)
+}
+
+/**
+ * 为 EOA 确保存在 AA，返回 AA 地址。Cluster 在 cardAddAdmin 添加 admin 前会调用（经 /api/ensureAAForEOA）。
+ *
+ * 使用 **UserCardFactory._aaFactory()** 上的工厂（与 resolveBeamioAaForEoaWithFallback 一致）；读不到 `_aaFactory` 时抛错，不回退旧 BASE_AA_FACTORY。
+ *
+ * 注意：cardAddAdminPreCheck 要求 adminManager 的 **to** 与 **body.adminEOA** 为同一 EOA（to 无代码）。误传占位地址时仍会在该键下建 AA 并登记 admin。
+ */
+export const ensureAAForEOA = async (eoa: string): Promise<string> => {
+	const pool = Settle_ContractPool
+	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
+	const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+	const eoaNorm = ethers.getAddress(eoa)
+	/** 与 resolveBeamioAaForEoaWithFallback 一致：仅 UserCard._aaFactory()，不用链下 BASE_AA_FACTORY 回退 */
+	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, BASE_CARD_FACTORY)
+	if (!wired) {
+		throw new Error(
+			'ensureAAForEOA: cannot read UserCard _aaFactory(); set BASE_CARD_FACTORY RPC or deploy wiring before ensuring AA'
+		)
+	}
+	return ensureAAForEOAOnAaFactory(eoaNorm, wired, pool[0].walletBase as ethers.Wallet)
 }
 
 /**
@@ -11648,7 +11683,7 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 	}
 }
 
-/** cardCouponOpenClaim 集群预检：校验用户签名、couponId↔tokenId 映射、仅允许 open claim（requiresRedeemCode=false）。 */
+/** cardCouponOpenClaim 集群预检：校验用户签名、couponId↔tokenId 映射、仅允许 open claim（requiresRedeemCode=false）。不要求 AA；Master 在 claim 前 `ensureAAForEOAOnCard` 自动创建。 */
 export const cardCouponOpenClaimPreCheck = async (body: {
 	cardAddress?: string
 	couponId?: string
@@ -11703,17 +11738,26 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 				'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
 				'function issuedNftPriceInCurrency6(uint256 tokenId) view returns (uint256)',
 				'function issuedNftUserSigClaimUsed(address userEOA, uint256 tokenId) view returns (bool)',
+				'function issuedNftMaxSupply(uint256 tokenId) view returns (uint256)',
+				'function issuedNftMintedCount(uint256 tokenId) view returns (uint256)',
 			],
 			providerBaseBackup
 		)
-		const [isValid, priceInCurrency6, alreadyClaimed] = await Promise.all([
+		const [isValid, priceInCurrency6, alreadyClaimed, maxSupply, mintedCount] = await Promise.all([
 			cardRead.isIssuedNftValid(tokenIdN) as Promise<boolean>,
 			cardRead.issuedNftPriceInCurrency6(tokenIdN) as Promise<bigint>,
 			cardRead.issuedNftUserSigClaimUsed(userNorm, tokenIdN) as Promise<boolean>,
+			cardRead.issuedNftMaxSupply(tokenIdN) as Promise<bigint>,
+			cardRead.issuedNftMintedCount(tokenIdN) as Promise<bigint>,
 		])
 		if (!isValid) return { success: false, error: 'Issued coupon is inactive or expired' }
 		if (priceInCurrency6 !== 0n) return { success: false, error: 'Coupon open claim is only available for free issued NFT (price=0)' }
 		if (alreadyClaimed) return { success: false, error: 'This address already claimed this coupon and is no longer eligible.' }
+		if (maxSupply > 0n && mintedCount >= maxSupply) {
+			return { success: false, error: 'Coupon supply has been fully claimed.' }
+		}
+
+		// AA 由 Master `cardCouponOpenClaimProcess` 在 claim 前通过 `ensureAAForEOAOnCard` 自动创建（此处不拦截）。
 
 		const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
 		const domain = {
@@ -12947,6 +12991,14 @@ export const cardCouponOpenClaimProcess = async () => {
 		)
 	)
 	try {
+		const userNorm = ethers.getAddress(obj.userEOA)
+		const aaAddress = await ensureAAForEOAOnCard(obj.cardAddress, userNorm)
+		logger(
+			Colors.cyan(
+				`[cardCouponOpenClaimProcess] AA ready ${aaAddress} for userEOA=${userNorm} (card=${obj.cardAddress})`
+			)
+		)
+
 		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
 		const poolFactoryAddr = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
 		const claimContractABI = [
@@ -13019,6 +13071,8 @@ export const cardCouponOpenClaimProcess = async () => {
 			clientError = 'Invalid card address or user address.'
 		} else if (/UC_ResolveAccountFailed|ResolveAccountFailed|ad12d341/i.test(errMsg) || /ResolveAccountFailed/i.test(errName)) {
 			clientError = 'User account not deployed on Base. Please deploy your Smart Account first before claiming coupons.'
+		} else if (/Failed to create AA|ensureAAForEOAOnCard/i.test(errMsg)) {
+			clientError = 'Failed to create Smart Account on Base. Please try again shortly.'
 		}
 		
 		logger(Colors.red(`[cardCouponOpenClaimProcess] failed: ${clientError} (rawError: ${JSON.stringify(errorData)})`))
