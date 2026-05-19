@@ -77,6 +77,10 @@ export type FetchUIDAssetsResult = {
 		cardType: string
 		points: string
 		points6: string
+		/** ERC-1155 token #2 (ChargeRewardModule) balance, formatted with 6 decimals. */
+		chargeRewardPoints: string
+		/** Raw ERC-1155 token #2 balance in 6-decimal fixed units. */
+		chargeRewardPoints6: string
 		cardCurrency: string
 		cardBackground?: string
 		cardImage?: string
@@ -255,6 +259,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	const cardAbi = [
 		'function getOwnership(address user) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 		'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+		'function balanceOf(address account, uint256 id) view returns (uint256)',
 		'function currency() view returns (uint8)',
 		'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds)',
 	]
@@ -309,10 +314,16 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			}
 			cardName = displayNameFromCardMetadata(cardRow?.metadata ?? undefined) ?? fallbackDisplayName
 			const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
-			const [[pointsBalance, nfts], currencyNum] = await Promise.all([
+			const tokenHolder = aaAddr || eoaAddr
+			const [[pointsBalance, nfts], chargeRewardByHolder, chargeRewardByEoa, currencyNum] = await Promise.all([
 				aaAddr ? card.getOwnership(aaAddr) : card.getOwnershipByEOA(eoaAddr),
+				card.balanceOf(tokenHolder, 2n).catch(() => 0n) as Promise<bigint>,
+				tokenHolder.toLowerCase() === eoaAddr.toLowerCase()
+					? Promise.resolve(0n)
+					: (card.balanceOf(eoaAddr, 2n).catch(() => 0n) as Promise<bigint>),
 				card.currency(),
 			])
+			const chargeRewardPointsBalance = chargeRewardByHolder + chargeRewardByEoa
 			const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
 			const nftList = nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
 				tokenId: nft.tokenId.toString(),
@@ -395,8 +406,9 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				}
 			}
 			const hasPoints = pointsBalance > 0n
+			const hasChargeRewardPoints = chargeRewardPointsBalance > 0n
 			const hasNftGt0 = nftList.some((n: { tokenId: string }) => Number(n.tokenId) > 0)
-			const includeRow = hasPoints || hasNftGt0 || merchantInfraOnly || opts?.includeZeroBalanceCards === true
+			const includeRow = hasPoints || hasChargeRewardPoints || hasNftGt0 || merchantInfraOnly || opts?.includeZeroBalanceCards === true
 			if (includeRow) {
 				const row: FetchUIDAssetsResult['cards'][number] = {
 					cardAddress: cardAddr,
@@ -404,6 +416,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 					cardType,
 					points: ethers.formatUnits(pointsBalance, 6),
 					points6: String(pointsBalance),
+					chargeRewardPoints: ethers.formatUnits(chargeRewardPointsBalance, 6),
+					chargeRewardPoints6: String(chargeRewardPointsBalance),
 					cardCurrency: currency,
 					...(cardBackground != null && { cardBackground }),
 					...(cardImage != null && { cardImage }),
@@ -428,6 +442,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 							cardType,
 							points: '0',
 							points6: '0',
+							chargeRewardPoints: '0',
+							chargeRewardPoints6: '0',
 							cardCurrency: currency,
 							nfts: [],
 						},

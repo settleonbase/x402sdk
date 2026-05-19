@@ -1890,6 +1890,8 @@ const routing = ( router: Router ) => {
 				cardAddress: legacyCardFallback,
 				points: firstCard?.points ?? '0',
 				points6: firstCard?.points6 ?? '0',
+				chargeRewardPoints: firstCard?.chargeRewardPoints ?? '0',
+				chargeRewardPoints6: firstCard?.chargeRewardPoints6 ?? '0',
 				usdcBalance: base.usdcBalance,
 				caddBalance: base.caddBalance,
 				cardCurrency: firstCard?.cardCurrency ?? 'CAD',
