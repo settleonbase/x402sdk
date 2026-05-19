@@ -101,6 +101,7 @@ import {
 	replaceNfcCardKeyByTagId,
 	getNfcCardSignedTxGateByTagId,
 	getNfcCardSignedTxGateByUid,
+	listLinkedNfcCardsByOwnerEoa,
 	listCouponIssuedNftSeriesForCardDescending,
 	type NfcLinkAppSessionDb,
 } from './db'
@@ -2836,6 +2837,16 @@ export const cardCouponOpenClaimPool: {
 	deadline: number
 	nonce: string
 	userSignature: string
+	res: Response
+}[] = []
+
+/** POS Balance / QR：终端 admin 代领 open coupon（无 NFC 私钥），Master 代发 `claimIssuedNftForUserByPosAdmin`。 */
+export const cardCouponPosClaimWalletPool: {
+	cardAddress: string
+	couponId: string
+	userEOA: string
+	tokenId: string
+	posAdminEOA: string
 	res: Response
 }[] = []
 
@@ -11351,20 +11362,10 @@ function readCouponRequiresRedeemCode(meta: Record<string, unknown> | null | und
 	return toBool(nested.requiresRedeemCode) || toBool(nested.redeemCodeRequired)
 }
 
-/**
- * POS one-tap coupon claim (NFC card path): build user EIP-712 signature server-side
- * using the NFC private key (uid/tagId) and reuse the standard open-claim precheck.
- */
-export const cardCouponPosClaimPreCheck = async (body: {
-	cardAddress?: string
-	couponId?: string
-	userEOA?: string
-	uid?: string
-	tagIdHex?: string
-	tokenId?: string | number
-}): Promise<
+export type CardCouponPosClaimPreCheckResult =
 	| {
 		success: true
+		route: 'openClaim'
 		preChecked: {
 			cardAddress: string
 			couponId: string
@@ -11375,29 +11376,32 @@ export const cardCouponPosClaimPreCheck = async (body: {
 			userSignature: string
 		}
 	}
-	| { success: false; error: string }
-> => {
-	const cardAddress = String(body.cardAddress ?? '').trim()
-	const couponId = String(body.couponId ?? '').trim()
-	const userEOA = String(body.userEOA ?? '').trim()
-	const uid = String(body.uid ?? '').trim()
-	const tagIdHex = String(body.tagIdHex ?? '').trim().replace(/^0x/i, '').toUpperCase()
-	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
-	if (!couponId) return { success: false, error: 'Missing couponId' }
-	if (!userEOA || !ethers.isAddress(userEOA)) return { success: false, error: 'Invalid userEOA' }
-	if (!uid && !tagIdHex) return { success: false, error: 'uid or tagIdHex is required for POS claim signing' }
-
-	let tokenIdN: bigint | null = null
-	if (body.tokenId != null && String(body.tokenId).trim() !== '') {
-		try {
-			tokenIdN = BigInt(body.tokenId)
-		} catch {
-			return { success: false, error: 'Invalid tokenId' }
+	| {
+		success: true
+		route: 'posWallet'
+		preChecked: {
+			cardAddress: string
+			couponId: string
+			userEOA: string
+			tokenId: string
+			posAdminEOA: string
 		}
 	}
-	const cardNorm = ethers.getAddress(cardAddress)
-	const userNorm = ethers.getAddress(userEOA)
+	| { success: false; error: string }
 
+async function resolvePosCouponTokenId(
+	cardNorm: string,
+	couponId: string,
+	tokenIdRaw: string | number | undefined
+): Promise<{ ok: true; tokenIdN: bigint } | { ok: false; error: string }> {
+	let tokenIdN: bigint | null = null
+	if (tokenIdRaw != null && String(tokenIdRaw).trim() !== '') {
+		try {
+			tokenIdN = BigInt(tokenIdRaw)
+		} catch {
+			return { ok: false, error: 'Invalid tokenId' }
+		}
+	}
 	if (tokenIdN == null) {
 		const rows = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
 		const matched = rows.find((row) => {
@@ -11410,50 +11414,184 @@ export const cardCouponPosClaimPreCheck = async (body: {
 				return false
 			}
 		})
-		if (!matched) return { success: false, error: 'couponId not found for card' }
+		if (!matched) return { ok: false, error: 'couponId not found for card' }
 		tokenIdN = BigInt(String(matched.tokenId))
 	}
+	if (tokenIdN < ISSUED_NFT_START_ID_MEMBER) {
+		return { ok: false, error: 'tokenId must be issued NFT tokenId' }
+	}
+	return { ok: true, tokenIdN }
+}
 
-	let privateKey: string | null = null
-	if (tagIdHex) privateKey = await getNfcCardPrivateKeyByTagId(tagIdHex)
-	if (!privateKey && uid) privateKey = await getNfcCardPrivateKeyByUid(uid)
-	if (!privateKey) return { success: false, error: 'No NFC private key found for this card session' }
-	const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`
-	if (!ethers.isHexString(pk, 32)) return { success: false, error: 'Invalid NFC private key format' }
-	const signerAddr = new ethers.Wallet(pk).address
-	if (ethers.getAddress(signerAddr) !== userNorm) {
-		return { success: false, error: 'NFC signer does not match userEOA' }
+async function validatePosWalletCouponOpenClaim(params: {
+	cardNorm: string
+	userNorm: string
+	couponId: string
+	tokenIdN: bigint
+	posAdminEOA: string
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+	const posAdminNorm = ethers.getAddress(params.posAdminEOA)
+	const candidates = await listCouponIssuedNftSeriesForCardDescending(params.cardNorm, 300)
+	const matchedSeries = candidates.find((row) => {
+		if (String(row.tokenId) !== String(params.tokenIdN)) return false
+		return readCouponIdFromSeriesMetadata(row.metadata ?? null) === params.couponId
+	})
+	if (!matchedSeries) {
+		return { ok: false, error: 'couponId does not match tokenId for this card' }
+	}
+	if (readCouponRequiresRedeemCode(matchedSeries.metadata ?? null)) {
+		return { ok: false, error: 'This coupon requires redeemCode; open claim is disabled.' }
 	}
 
-	const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
-	const deadline = Math.floor(Date.now() / 1000) + 15 * 60
-	const nonce = ethers.keccak256(
-		ethers.toUtf8Bytes(`pos-open-claim:${cardNorm}:${couponId}:${userNorm}:${String(tokenIdN)}:${randomUUID()}`)
+	const cardRead = new ethers.Contract(
+		params.cardNorm,
+		[
+			'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
+			'function issuedNftPriceInCurrency6(uint256 tokenId) view returns (uint256)',
+			'function issuedNftUserSigClaimUsed(address userEOA, uint256 tokenId) view returns (bool)',
+			'function issuedNftMaxSupply(uint256 tokenId) view returns (uint256)',
+			'function issuedNftMintedCount(uint256 tokenId) view returns (uint256)',
+			'function isAdmin(address) view returns (bool)',
+		],
+		providerBaseBackup
 	)
-	const domain = {
-		name: 'BeamioUserCardFactory',
-		version: '1',
-		chainId: BASE_MAINNET_CHAIN_ID,
-		verifyingContract,
+	const [isValid, priceInCurrency6, alreadyClaimed, maxSupply, mintedCount, posIsAdmin] = await Promise.all([
+		cardRead.isIssuedNftValid(params.tokenIdN) as Promise<boolean>,
+		cardRead.issuedNftPriceInCurrency6(params.tokenIdN) as Promise<bigint>,
+		cardRead.issuedNftUserSigClaimUsed(params.userNorm, params.tokenIdN) as Promise<boolean>,
+		cardRead.issuedNftMaxSupply(params.tokenIdN) as Promise<bigint>,
+		cardRead.issuedNftMintedCount(params.tokenIdN) as Promise<bigint>,
+		cardRead.isAdmin(posAdminNorm) as Promise<boolean>,
+	])
+	if (!posIsAdmin) {
+		return { ok: false, error: 'POS terminal is not an admin on this coupon card.' }
 	}
-	const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
-		cardAddress: cardNorm,
-		tokenId: tokenIdN,
-		deadline,
-		nonce,
-	})
-	const signingKey = new ethers.SigningKey(pk as `0x${string}`)
-	const userSignature = ethers.Signature.from(signingKey.sign(digest)).serialized
+	if (!isValid) return { ok: false, error: 'Issued coupon is inactive or expired' }
+	if (priceInCurrency6 !== 0n) {
+		return { ok: false, error: 'Coupon open claim is only available for free issued NFT (price=0)' }
+	}
+	if (alreadyClaimed) {
+		return { ok: false, error: 'This address already claimed this coupon and is no longer eligible.' }
+	}
+	if (maxSupply > 0n && mintedCount >= maxSupply) {
+		return { ok: false, error: 'Coupon supply has been fully claimed.' }
+	}
+	return { ok: true }
+}
 
-	return await cardCouponOpenClaimPreCheck({
-		cardAddress: cardNorm,
+/**
+ * POS one-tap coupon claim:
+ * - NFC: cluster signs with NFC private key (uid/tagId, or linked NFC for member EOA).
+ * - QR / wallet: POS terminal admin calls Factory `claimIssuedNftForUserByPosAdmin`.
+ */
+export const cardCouponPosClaimPreCheck = async (body: {
+	cardAddress?: string
+	couponId?: string
+	userEOA?: string
+	uid?: string
+	tagIdHex?: string
+	tokenId?: string | number
+	signerEOA?: string
+}): Promise<CardCouponPosClaimPreCheckResult> => {
+	const cardAddress = String(body.cardAddress ?? '').trim()
+	const couponId = String(body.couponId ?? '').trim()
+	const userEOA = String(body.userEOA ?? '').trim()
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!couponId) return { success: false, error: 'Missing couponId' }
+	if (!userEOA || !ethers.isAddress(userEOA)) return { success: false, error: 'Invalid userEOA' }
+
+	const cardNorm = ethers.getAddress(cardAddress)
+	const userNorm = ethers.getAddress(userEOA)
+	const tokenResolved = await resolvePosCouponTokenId(cardNorm, couponId, body.tokenId)
+	if (!tokenResolved.ok) return { success: false, error: tokenResolved.error }
+	const tokenIdN = tokenResolved.tokenIdN
+
+	let uid = String(body.uid ?? '').trim()
+	let tagIdHex = String(body.tagIdHex ?? '').trim().replace(/^0x/i, '').toUpperCase()
+	if (!uid && !tagIdHex) {
+		const linked = await listLinkedNfcCardsByOwnerEoa(userNorm)
+		const pick = linked.find((row) => row.linkState === 'active') ?? linked[0]
+		if (pick?.uid) uid = pick.uid
+		if (pick?.tagId) tagIdHex = pick.tagId.toUpperCase()
+	}
+
+	if (uid || tagIdHex) {
+		let privateKey: string | null = null
+		if (tagIdHex) privateKey = await getNfcCardPrivateKeyByTagId(tagIdHex)
+		if (!privateKey && uid) privateKey = await getNfcCardPrivateKeyByUid(uid)
+		if (privateKey) {
+			const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`
+			if (!ethers.isHexString(pk, 32)) return { success: false, error: 'Invalid NFC private key format' }
+			const signerAddr = new ethers.Wallet(pk).address
+			if (ethers.getAddress(signerAddr) !== userNorm) {
+				return { success: false, error: 'NFC signer does not match userEOA' }
+			}
+
+			const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
+			const deadline = Math.floor(Date.now() / 1000) + 15 * 60
+			const nonce = ethers.keccak256(
+				ethers.toUtf8Bytes(`pos-open-claim:${cardNorm}:${couponId}:${userNorm}:${String(tokenIdN)}:${randomUUID()}`)
+			)
+			const domain = {
+				name: 'BeamioUserCardFactory',
+				version: '1',
+				chainId: BASE_MAINNET_CHAIN_ID,
+				verifyingContract,
+			}
+			const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
+				cardAddress: cardNorm,
+				tokenId: tokenIdN,
+				deadline,
+				nonce,
+			})
+			const signingKey = new ethers.SigningKey(pk as `0x${string}`)
+			const userSignature = ethers.Signature.from(signingKey.sign(digest)).serialized
+
+			const openPre = await cardCouponOpenClaimPreCheck({
+				cardAddress: cardNorm,
+				couponId,
+				userEOA: userNorm,
+				tokenId: tokenIdN.toString(),
+				deadline,
+				nonce,
+				userSignature,
+			})
+			if (!openPre.success) return openPre
+			return {
+				success: true,
+				route: 'openClaim',
+				preChecked: openPre.preChecked,
+			}
+		}
+	}
+
+	const posAdmin = String(body.signerEOA ?? '').trim()
+	if (!posAdmin || !ethers.isAddress(posAdmin)) {
+		return {
+			success: false,
+			error: 'POS terminal admin signature required for wallet/QR claim.',
+		}
+	}
+	const walletOk = await validatePosWalletCouponOpenClaim({
+		cardNorm,
+		userNorm,
 		couponId,
-		userEOA: userNorm,
-		tokenId: tokenIdN.toString(),
-		deadline,
-		nonce,
-		userSignature,
+		tokenIdN,
+		posAdminEOA: posAdmin,
 	})
+	if (!walletOk.ok) return { success: false, error: walletOk.error }
+
+	return {
+		success: true,
+		route: 'posWallet',
+		preChecked: {
+			cardAddress: cardNorm,
+			couponId,
+			userEOA: userNorm,
+			tokenId: tokenIdN.toString(),
+			posAdminEOA: ethers.getAddress(posAdmin),
+		},
+	}
 }
 
 export const cardCouponPosConsumePreparePreCheck = async (body: {
@@ -13082,6 +13220,97 @@ export const cardCouponOpenClaimProcess = async () => {
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		setTimeout(() => cardCouponOpenClaimProcess(), 3000)
+	}
+}
+
+/**
+ * cardCouponPosClaimWalletProcess：POS Balance / QR 代领（终端 admin + member wallet，无 NFC 私钥）。
+ */
+export const cardCouponPosClaimWalletProcess = async () => {
+	const obj = cardCouponPosClaimWalletPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		cardCouponPosClaimWalletPool.unshift(obj)
+		return setTimeout(() => cardCouponPosClaimWalletProcess(), 3000)
+	}
+	logger(
+		Colors.cyan(
+			`[cardCouponPosClaimWalletProcess] card=${obj.cardAddress} couponId=${obj.couponId} tokenId=${obj.tokenId} user=${obj.userEOA} posAdmin=${obj.posAdminEOA}`
+		)
+	)
+	try {
+		const userNorm = ethers.getAddress(obj.userEOA)
+		const posAdminNorm = ethers.getAddress(obj.posAdminEOA)
+		await ensureAAForEOAOnCard(obj.cardAddress, userNorm)
+
+		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
+		const poolFactoryAddr = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
+		const claimContractABI = [
+			'function claimIssuedNftForUserByPosAdmin(address cardAddr,address userEOA,uint256 tokenId,address posAdminEOA)',
+			'error BM_ZeroAddress()',
+			'error BM_NotAuthorized()',
+			'error UC_NotAdmin()',
+			'error UC_IssuedNftInactive(uint256 tokenId)',
+			'error UC_IssuedNftSigClaimAlreadyUsed(address userEOA, uint256 tokenId)',
+			'error UC_IssuedNftSigClaimNotFree(uint256 tokenId, uint256 priceInCurrency6)',
+			'error UC_InsufficientBalance(address account, uint256 tokenId, uint256 available, uint256 required)',
+			'error UC_InvalidTokenId(uint256 tokenId, uint256 minTokenId)',
+			'error UC_ResolveAccountFailed(address eoa, address aaFactory, address acct)',
+		]
+		const claimContract =
+			cardGateway.toLowerCase() === poolFactoryAddr.toLowerCase()
+				? SC.baseFactoryPaymaster
+				: new ethers.Contract(cardGateway, claimContractABI, SC.walletBase)
+
+		const tx = await claimContract.claimIssuedNftForUserByPosAdmin(
+			obj.cardAddress,
+			obj.userEOA,
+			BigInt(obj.tokenId),
+			obj.posAdminEOA
+		)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) {
+			throw new Error('Coupon POS wallet claim transaction failed')
+		}
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({
+				success: true,
+				tx: tx.hash,
+				cardAddress: obj.cardAddress,
+				couponId: obj.couponId,
+				tokenId: obj.tokenId,
+			}).end()
+		}
+		logger(Colors.green(`[cardCouponPosClaimWalletProcess] success tx=${tx.hash} posAdmin=${posAdminNorm}`))
+	} catch (e: any) {
+		const errMsg = e?.reason ?? e?.shortMessage ?? e?.message ?? String(e)
+		const errName = e?.name || ''
+		let clientError = errMsg
+		if (/UC_IssuedNftSigClaimAlreadyUsed/i.test(errMsg)) {
+			clientError = 'This wallet already claimed this coupon.'
+		} else if (/UC_IssuedNftSigClaimNotFree|UC_PurchaseDisabledBecauseFree/i.test(errMsg)) {
+			clientError = 'This coupon is not available for open claim.'
+		} else if (/UC_IssuedNftInactive|UC_InvalidTimeWindow/i.test(errMsg) || /IssuedNftInactive/i.test(errName)) {
+			clientError = 'This coupon is inactive or claim window has expired.'
+		} else if (/UC_NotAdmin|NotAdmin/i.test(errMsg)) {
+			clientError = 'POS terminal is not authorized to claim on this card.'
+		} else if (/BM_NotAuthorized|NotAuthorized/i.test(errMsg)) {
+			clientError = 'Card configuration issue: invalid factory gateway.'
+		} else if (/claimIssuedNftForUserByPosAdmin/i.test(errMsg) && /missing|not found|does not exist/i.test(errMsg)) {
+			clientError = 'POS wallet claim is not supported on this factory yet. Redeploy Factory with claimIssuedNftForUserByPosAdmin.'
+		} else if (/UC_ResolveAccountFailed|ResolveAccountFailed|ad12d341/i.test(errMsg)) {
+			clientError = 'User account not deployed on Base. Please deploy your Smart Account first before claiming coupons.'
+		} else if (/Failed to create AA|ensureAAForEOAOnCard/i.test(errMsg)) {
+			clientError = 'Failed to create Smart Account on Base. Please try again shortly.'
+		}
+		logger(Colors.red(`[cardCouponPosClaimWalletProcess] failed: ${clientError} (raw: ${errMsg})`))
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: clientError }).end()
+		}
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => cardCouponPosClaimWalletProcess(), 3000)
 	}
 }
 

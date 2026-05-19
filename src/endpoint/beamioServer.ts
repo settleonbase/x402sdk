@@ -6152,15 +6152,22 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/cardCouponOpenClaim', preCheck.preChecked, res)
 	})
 
-	/** cardCouponPosClaim：POS Balance 一键领取（NFC 卡场景）。Cluster 用卡私钥生成 userSignature 并复用 open-claim 预检后转发 Master。 */
+	/** cardCouponPosClaim：POS Balance 一键领取（NFC 私钥签名 或 QR/钱包 + 终端 admin 代领）。 */
 	router.post('/cardCouponPosClaim', async (req, res) => {
 		const preCheck = await cardCouponPosClaimPreCheck(req.body)
 		if (!preCheck.success) {
 			logger(Colors.red(`server /api/cardCouponPosClaim preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
+		if (preCheck.route === 'posWallet') {
+			logger(
+				Colors.green(`server /api/cardCouponPosClaim preCheck OK (posWallet), forwarding to master`),
+				inspect(preCheck.preChecked, false, 2, true)
+			)
+			return postLocalhost('/api/cardCouponPosClaimWallet', preCheck.preChecked, res)
+		}
 		logger(
-			Colors.green(`server /api/cardCouponPosClaim preCheck OK, forwarding to master`),
+			Colors.green(`server /api/cardCouponPosClaim preCheck OK (openClaim), forwarding to master`),
 			inspect(
 				{
 					cardAddress: preCheck.preChecked.cardAddress,
