@@ -11,7 +11,7 @@ export const BASE_BEAMIO_ACCOUNT_DEPLOYER = '0x139D55591A03550259AF32097A9848ECE
  * Base card factory (createCard / factoryGateway / EIP-712 domain verifyingContract).
  * Canonical: deployments/base-UserCardFactory.json / base-UserCardFactory-DEBUG.json（同址）.
  */
-export const BASE_CARD_FACTORY = '0xbA92e9122CDff1e8dD817eE55BCe7C7f6c9bFc9B'
+export const BASE_CARD_FACTORY = '0x0f8273773Ba91348B308198723BE0402230A8019'
 /**
  * createCardCollectionWithInitCode(address,uint8,uint256,bytes) — selector 0xef759095
  * createCardCollectionWithInitCodeAndTiers(..., (uint256,uint256,uint256)[]) — selector 0x9a7eb0f0

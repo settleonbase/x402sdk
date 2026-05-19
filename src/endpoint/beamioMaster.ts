@@ -16,7 +16,7 @@ import {
 	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, cardRedeemProcess, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED, filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
@@ -1978,17 +1978,21 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** cardRedeem：用户兑换 redeem 码，服务端 redeemForUser，点数/NFT mint 到用户 AA */
+		/** cardRedeem：Cluster 已 cardRedeemPreCheck；Master 只入队 + Settle_ContractPool 并行上链，不再预检。 */
 		router.post('/cardRedeem', (req, res) => {
-			const { cardAddress, redeemCode, toUserEOA } = req.body as { cardAddress?: string; redeemCode?: string; toUserEOA?: string }
-			if (!cardAddress || !redeemCode || !toUserEOA || !ethers.isAddress(cardAddress) || !ethers.isAddress(toUserEOA)) {
-				return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, toUserEOA' })
+			const { cardAddress, redeemCode, toUserEOA } = req.body as {
+				cardAddress?: string
+				redeemCode?: string
+				toUserEOA?: string
 			}
-			cardRedeemPool.push({ cardAddress, redeemCode, toUserEOA, res })
-			logger(Colors.cyan(`[cardRedeem] pushed to pool, card=${cardAddress} to=${toUserEOA}`))
-			cardRedeemProcess().catch((err: any) => {
-				logger(Colors.red('[cardRedeemProcess] unhandled error:'), err?.message ?? err)
+			cardRedeemPool.push({
+				cardAddress: cardAddress as string,
+				redeemCode: redeemCode as string,
+				toUserEOA: toUserEOA as string,
+				res,
 			})
+			logger(Colors.cyan(`[cardRedeem] pushed to pool, queue=${cardRedeemPool.length} card=${cardAddress} to=${toUserEOA}`))
+			kickCardRedeemPoolPress()
 		})
 
 		/** cardCouponOpenClaim：无 redeemcode 的 coupon open-claim，服务端调用 claimIssuedNftWithUserSig。 */
@@ -2051,17 +2055,21 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** redeemSeries：用户使用 redeem code 兑换 NFT，与 cardRedeem 同一逻辑 */
+		/** redeemSeries：与 cardRedeem 同一 pool / worker（Cluster 已预检） */
 		router.post('/redeemSeries', (req, res) => {
-			const { cardAddress, redeemCode, toUserEOA } = req.body as { cardAddress?: string; redeemCode?: string; toUserEOA?: string }
-			if (!cardAddress || !redeemCode || !toUserEOA || !ethers.isAddress(cardAddress) || !ethers.isAddress(toUserEOA)) {
-				return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, toUserEOA' })
+			const { cardAddress, redeemCode, toUserEOA } = req.body as {
+				cardAddress?: string
+				redeemCode?: string
+				toUserEOA?: string
 			}
-			cardRedeemPool.push({ cardAddress, redeemCode, toUserEOA, res })
-			logger(Colors.cyan(`[redeemSeries] pushed to pool, card=${cardAddress} to=${toUserEOA}`))
-			cardRedeemProcess().catch((err: any) => {
-				logger(Colors.red('[cardRedeemProcess] unhandled error:'), err?.message ?? err)
+			cardRedeemPool.push({
+				cardAddress: cardAddress as string,
+				redeemCode: redeemCode as string,
+				toUserEOA: toUserEOA as string,
+				res,
 			})
+			logger(Colors.cyan(`[redeemSeries] pushed to pool, queue=${cardRedeemPool.length} card=${cardAddress} to=${toUserEOA}`))
+			kickCardRedeemPoolPress()
 		})
 
 		/** cardRedeemAdmin：用户兑换 redeem-admin 码，添加 to 为 admin，服务端 redeemAdminForUser */

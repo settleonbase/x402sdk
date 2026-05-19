@@ -400,7 +400,7 @@ export async function nfcLinkAppValidateParams(body: {
 //			RedeemModule 						0x1EC7540EbC03bcEBEc0C5f981C3D91100d206F5F
 //			BeamioQuoteHelperV07 						0x4DD4b418949911B8A8038295F6a8Af7a1eA8de50
 //			BeamioUserCardDeployerV07 					0x820bB3F54A403B298e2F785FFdA225009e9CA7Bf
-//			BeamioUserCardFactoryPaymasterV07			0xbA92e9122CDff1e8dD817eE55BCe7C7f6c9bFc9B
+//			BeamioUserCardFactoryPaymasterV07			0x0f8273773Ba91348B308198723BE0402230A8019
 
 masterSetup.settle_contractAdmin.forEach((n: string) => {
 	const walletBase = new ethers.Wallet(n, providerBaseBackup1)
@@ -2820,13 +2820,29 @@ export const purchasingCardPool: {
 	recommender?: string
 }[] = []
 
-/** 用户兑换 redeem 码：仅 redeemForUser，无需 owner 签名。paymaster 代付 gas。 */
+/** 用户兑换 redeem 码：仅 redeemForUser，无需 owner 签名。paymaster 代付 gas。Cluster 预检合格后 Master 只入队执行。 */
 export const cardRedeemPool: {
 	cardAddress: string
 	redeemCode: string
 	toUserEOA: string
 	res: Response
 }[] = []
+
+/** 有空闲 admin 钱包时立即启动 worker；多请求可并行占用 Settle_ContractPool 中不同钱包（各钱包 nonce 独立递增）。 */
+export function kickCardRedeemPoolPress(): void {
+	cardRedeemPoolPress().catch((err: any) => {
+		logger(Colors.red('[cardRedeemPoolPress] unhandled error:'), err?.message ?? err)
+	})
+}
+
+function scheduleCardRedeemPoolPress(): void {
+	if (cardRedeemPool.length === 0) return
+	if (Settle_ContractPool.length > 0) {
+		kickCardRedeemPoolPress()
+	} else {
+		setTimeout(() => kickCardRedeemPoolPress(), 3000)
+	}
+}
 
 /** Coupon Open Claim（无 redeemcode）：用户 EIP-712 签名申请，Master 代发 `claimIssuedNftWithUserSig`。 */
 export const cardCouponOpenClaimPool: {
@@ -12998,26 +13014,101 @@ export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: s
 	}
 }
 
+const CARD_REDEEM_PRECHECK_ABI = [
+	'function getRedeemStatus(bytes32 hash) view returns (bool active, uint256 totalPoints6)',
+	'function getRedeemStatusEx(bytes32 hash, address claimer) view returns (bool active, uint128 points6, bool isPool)',
+]
+
+/** SilentPassUI / beamio.app 深链格式：beamiocard + redeemcode */
+export function buildBeamioUserCardRedeemShareUrl(cardAddress: string, redeemCode: string): string {
+	const card = ethers.getAddress(cardAddress)
+	const code = redeemCode.trim()
+	return `https://beamio.app/app/?beamiocard=${encodeURIComponent(card)}&redeemcode=${encodeURIComponent(code)}`
+}
+
+/** cardRedeem 集群预检：校验 redeem 码在链上仍可兑换（含 pool 单用户未领）。 */
+export const cardRedeemPreCheck = async (body: {
+	cardAddress?: string
+	redeemCode?: string
+	toUserEOA?: string
+}): Promise<
+	| { success: true; redeemable: true; cardAddress: string; hash: string; shareUrl: string }
+	| { success: false; redeemable: false; error: string }
+> => {
+	const { cardAddress, redeemCode, toUserEOA } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) {
+		return { success: false, redeemable: false, error: 'Invalid cardAddress' }
+	}
+	if (!redeemCode || typeof redeemCode !== 'string' || !redeemCode.trim()) {
+		return { success: false, redeemable: false, error: 'Missing or invalid redeemCode' }
+	}
+	if (!toUserEOA || !ethers.isAddress(toUserEOA)) {
+		return { success: false, redeemable: false, error: 'Invalid toUserEOA' }
+	}
+	try {
+		const cardNorm = ethers.getAddress(cardAddress)
+		const hash = ethers.keccak256(ethers.toUtf8Bytes(redeemCode.trim()))
+		const card = new ethers.Contract(cardNorm, CARD_REDEEM_PRECHECK_ABI, providerBaseBackup)
+		let claimer: string = ethers.ZeroAddress
+		try {
+			const aa = await resolveBeamioAaForEoaWithFallback(providerBaseBackup, ethers.getAddress(toUserEOA))
+			if (aa && ethers.isAddress(aa)) claimer = ethers.getAddress(aa)
+		} catch {
+			claimer = ethers.ZeroAddress
+		}
+		let active = false
+		let isPool = false
+		try {
+			const [aEx, , poolFlag] = (await card.getRedeemStatusEx(hash, claimer)) as [boolean, bigint, boolean]
+			active = Boolean(aEx)
+			isPool = Boolean(poolFlag)
+		} catch {
+			const [a] = (await card.getRedeemStatus(hash)) as [boolean, bigint]
+			active = Boolean(a)
+		}
+		if (!active) {
+			const msg = isPool
+				? 'This redeem code has already been used by this account.'
+				: 'Redeem code is invalid or already used.'
+			return { success: false, redeemable: false, error: msg }
+		}
+		return {
+			success: true,
+			redeemable: true,
+			cardAddress: cardNorm,
+			hash,
+			shareUrl: buildBeamioUserCardRedeemShareUrl(cardNorm, redeemCode),
+		}
+	} catch (e: any) {
+		const msg = e?.message ?? e?.shortMessage ?? String(e)
+		logger(Colors.red(`[cardRedeemPreCheck] ${msg}`))
+		return { success: false, redeemable: false, error: msg }
+	}
+}
+
 /**
- * cardRedeemProcess：用户输入 redeem 码，服务端调用 factory.redeemForUser，将点数 mint 到用户 AA。
+ * cardRedeemPoolPress：Cluster 已预检；Master 从 cardRedeemPool 串行取任务，shift Settle_ContractPool 中一 admin 钱包上链。
+ * 多钱包可并行（与 createCardPoolPress 相同），同一钱包 nonce 由单 worker 串行保证。
  */
-export const cardRedeemProcess = async () => {
+export const cardRedeemPoolPress = async () => {
 	const obj = cardRedeemPool.shift()
 	if (!obj) return
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
 		cardRedeemPool.unshift(obj)
-		return setTimeout(() => cardRedeemProcess(), 3000)
+		return setTimeout(() => kickCardRedeemPoolPress(), 3000)
 	}
-	logger(Colors.cyan(`[cardRedeemProcess] processing card=${obj.cardAddress} toUserEOA=${obj.toUserEOA} codeLen=${obj.redeemCode?.length ?? 0}`))
+	logger(
+		Colors.cyan(
+			`[cardRedeemPoolPress] admin=${SC.walletBase.address} card=${obj.cardAddress} toUserEOA=${obj.toUserEOA} codeLen=${obj.redeemCode?.length ?? 0}`
+		)
+	)
 	try {
 		// 1. 确保 redeem 用户有 AA 账号（与 purchasingCardProcess 一致）
 		const { accountAddress: addr } = await DeployingSmartAccount(obj.toUserEOA, SC.aaAccountFactoryPaymaster)
 		if (!addr) {
-			logger(Colors.red(`❌ cardRedeemProcess: ${obj.toUserEOA} DeployingSmartAccount failed (no AA account)`))
+			logger(Colors.red(`❌ cardRedeemPoolPress: ${obj.toUserEOA} DeployingSmartAccount failed (no AA account)`))
 			if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => cardRedeemProcess(), 3000)
 			return
 		}
 
@@ -13070,7 +13161,7 @@ export const cardRedeemProcess = async () => {
 			if (lastErr) throw lastErr
 		}
 		if (txHash) {
-			logger(Colors.green(`✅ cardRedeemProcess card=${obj.cardAddress} to=${obj.toUserEOA} tx=${txHash}`))
+			logger(Colors.green(`✅ cardRedeemPoolPress card=${obj.cardAddress} to=${obj.toUserEOA} tx=${txHash}`))
 			cardRedeemIndexerAccountingPool.push({
 				cardAddress: obj.cardAddress,
 				toUserEOA: obj.toUserEOA,
@@ -13087,7 +13178,7 @@ export const cardRedeemProcess = async () => {
 		}
 	} catch (e: any) {
 		const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
-		logger(Colors.red(`❌ cardRedeemProcess failed:`), errMsg)
+		logger(Colors.red(`❌ cardRedeemPoolPress failed:`), errMsg)
 		// 从多种位置提取 revert data（ethers v6 等结构可能不同）
 		const dataHex = typeof e?.data === 'string' ? e.data
 			: (e?.data && typeof e.data === 'object' && typeof (e.data as any).data === 'string') ? (e.data as any).data
@@ -13107,9 +13198,12 @@ export const cardRedeemProcess = async () => {
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: clientError }).end()
 	} finally {
 		Settle_ContractPool.unshift(SC)
-		setTimeout(() => cardRedeemProcess(), 3000)
+		scheduleCardRedeemPoolPress()
 	}
 }
+
+/** @deprecated 使用 cardRedeemPoolPress / kickCardRedeemPoolPress */
+export const cardRedeemProcess = cardRedeemPoolPress
 
 /**
  * cardCouponOpenClaimProcess：无 redeemcode 的 issued coupon 直领流程（用户 EIP-712 签名）。

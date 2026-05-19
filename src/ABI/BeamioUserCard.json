@@ -241,6 +241,17 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "kind",
+        "type": "uint8"
+      }
+    ],
+    "name": "UC_ModuleZero",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "UC_NoBeamioAccount",
     "type": "error"
@@ -269,16 +280,6 @@
       }
     ],
     "name": "UC_RedeemDelegateFailed",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_RedeemModuleZero",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_StatsModuleZero",
     "type": "error"
   },
   {
@@ -1607,120 +1608,6 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "admin",
-        "type": "address"
-      }
-    ],
-    "name": "getAdminBurnCounter",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "admin",
-        "type": "address"
-      }
-    ],
-    "name": "getAdminMintCounter",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "admin",
-        "type": "address"
-      }
-    ],
-    "name": "getAdminRedeemMintCounter",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "admin",
-        "type": "address"
-      }
-    ],
-    "name": "getAdminTransferAmountCounter",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "admin",
-        "type": "address"
-      }
-    ],
-    "name": "getAdminTransferCounter",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "admin",
-        "type": "address"
-      }
-    ],
-    "name": "getAdminUSDCMintCounter",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
         "name": "user",
         "type": "address"
       }
@@ -1865,25 +1752,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "isIssuedNftValid",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "effectiveTo",
         "type": "address"
@@ -1933,138 +1801,6 @@
         "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "userEOA",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "issuedNftUserSigClaimUsed",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint64",
-        "name": "hourIndex",
-        "type": "uint64"
-      }
-    ],
-    "name": "membershipFlowBucketAtHour",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "issuedCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "upgradedCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "expiredDiscoveredCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "activeSwitchCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "activatedCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "deactivatedCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "hasData",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint8",
-        "name": "scopeType",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint256",
-        "name": "scopeKey",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "hourIndex",
-        "type": "uint64"
-      }
-    ],
-    "name": "membershipScopedFlowBucketAtHour",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "issuedCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "upgradedCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "expiredDiscoveredCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "activeSwitchCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "activatedCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "deactivatedCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "hasData",
-        "type": "bool"
       }
     ],
     "stateMutability": "view",
