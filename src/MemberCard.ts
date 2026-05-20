@@ -9384,6 +9384,7 @@ export type CreateCardPreChecked = {
 		name?: string
 		description?: string
 		image?: string
+		merchantImage?: string
 		categories?: string[]
 		backgroundColor?: string
 		/** Whole currency units; optional (Card Issuance recharge limits) */
@@ -9395,6 +9396,7 @@ export type CreateCardPreChecked = {
 		Symbol?: string
 		bonusRule?: CreateCardBonusRuleNormalized
 		bonusRules?: CreateCardBonusRuleNormalized[]
+		pointSystem?: CreateCardPointSystemNormalized
 	}
 	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
 	/** CoNET BusinessStartKet #0 burn source; set by Cluster after balance precheck (omit when BEAMIO_SKIP_BUSINESS_START_KET_GATE) */
@@ -9416,6 +9418,18 @@ type CreateCardBonusRuleNormalized = {
 	bonusValue: number
 	/** When true, bonus scales with top-up: principal * (bonusValue / paymentAmount). */
 	bonusProportional?: boolean
+}
+
+type CreateCardPointSystemNormalized = {
+	enabled: boolean
+	chargeRewardRatioE6?: string
+	rewardTokenId?: number
+}
+
+const CREATE_CARD_DEFAULT_POINT_SYSTEM: CreateCardPointSystemNormalized = {
+	enabled: true,
+	chargeRewardRatioE6: '1000000',
+	rewardTokenId: 2,
 }
 
 function parseCreateCardTopupWholeUnit(v: unknown): number | undefined {
@@ -9454,6 +9468,67 @@ function parseCreateCardBonusProportionalFlag(o: Record<string, unknown>): boole
 		}
 	}
 	return false
+}
+
+function parseCreateCardBoolean(v: unknown): boolean | undefined {
+	if (typeof v === 'boolean') return v
+	if (typeof v === 'number' && Number.isFinite(v)) return v !== 0
+	if (typeof v === 'string') {
+		const s = v.trim().toLowerCase()
+		if (['true', '1', 'yes', 'on', 'enabled'].includes(s)) return true
+		if (['false', '0', 'no', 'off', 'disabled'].includes(s)) return false
+	}
+	return undefined
+}
+
+function parseCreateCardNonNegativeIntegerString(v: unknown): string | undefined {
+	if (typeof v === 'bigint') return v >= 0n ? v.toString() : undefined
+	if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return String(Math.trunc(v))
+	if (typeof v === 'string') {
+		const s = v.replace(/,/g, '').trim()
+		if (/^\d+$/.test(s)) return s
+	}
+	return undefined
+}
+
+function normalizeCreateCardPointSystemEntry(
+	raw: unknown,
+): { success: true; pointSystem: CreateCardPointSystemNormalized } | { success: false; error: string } {
+	if (raw == null) return { success: true, pointSystem: CREATE_CARD_DEFAULT_POINT_SYSTEM }
+	if (typeof raw !== 'object' || Array.isArray(raw)) {
+		return { success: false, error: 'shareTokenMetadata.pointSystem must be an object if provided' }
+	}
+	const o = raw as Record<string, unknown>
+	const enabledRaw = o.enabled ?? o.pointSystemEnabled ?? o.pointsEnabled
+	const enabled = enabledRaw == null ? true : parseCreateCardBoolean(enabledRaw)
+	if (enabled == null) {
+		return { success: false, error: 'shareTokenMetadata.pointSystem.enabled must be boolean-like if provided' }
+	}
+	const ratio = parseCreateCardNonNegativeIntegerString(
+		o.chargeRewardRatioE6 ?? o.pointRewardRatioE6 ?? o.consumptionRewardRatioE6
+	)
+	if (enabled && ratio != null && BigInt(ratio) <= 0n) {
+		return { success: false, error: 'shareTokenMetadata.pointSystem.chargeRewardRatioE6 must be > 0 when enabled' }
+	}
+	const tokenRaw = o.rewardTokenId ?? o.pointRewardTokenId
+	let rewardTokenId: number | undefined
+	if (tokenRaw == null) {
+		rewardTokenId = 2
+	} else if (typeof tokenRaw === 'number' && Number.isInteger(tokenRaw) && tokenRaw >= 0) {
+		rewardTokenId = tokenRaw
+	} else if (typeof tokenRaw === 'string' && /^\d+$/.test(tokenRaw.trim())) {
+		rewardTokenId = Number.parseInt(tokenRaw.trim(), 10)
+	} else {
+		return { success: false, error: 'shareTokenMetadata.pointSystem.rewardTokenId must be a non-negative integer if provided' }
+	}
+	return {
+		success: true,
+		pointSystem: {
+			enabled,
+			chargeRewardRatioE6: ratio ?? (enabled ? CREATE_CARD_DEFAULT_POINT_SYSTEM.chargeRewardRatioE6 : '0'),
+			rewardTokenId,
+		},
+	}
 }
 
 function normalizeCreateCardBonusRuleEntry(
@@ -9502,6 +9577,7 @@ export const createCardPreCheck = (body: {
 		name?: string
 		description?: string
 		image?: string
+		merchantImage?: unknown
 		categories?: unknown
 		backgroundColor?: unknown
 		minimumTopup?: unknown
@@ -9510,6 +9586,7 @@ export const createCardPreCheck = (body: {
 		Symbol?: unknown
 		bonusRule?: unknown
 		bonusRules?: unknown
+		pointSystem?: unknown
 	}
 	tiers?: unknown[]
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
@@ -9635,6 +9712,10 @@ export const createCardPreCheck = (body: {
 				normalizedBonusRules = [parsed.rule]
 			}
 		}
+		if (stm.pointSystem != null) {
+			const parsed = normalizeCreateCardPointSystemEntry(stm.pointSystem)
+			if (!parsed.success) return { success: false, error: parsed.error }
+		}
 	}
 	if (body.transferWhitelistEnabled != null && typeof body.transferWhitelistEnabled !== 'boolean') {
 		return { success: false, error: 'transferWhitelistEnabled must be a boolean if provided' }
@@ -9688,6 +9769,18 @@ export const createCardPreCheck = (body: {
 		if (stm.name != null) meta.name = String(stm.name)
 		if (stm.description != null) meta.description = String(stm.description)
 		if (stm.image != null && typeof stm.image === 'string') meta.image = stm.image
+		if (stm.merchantImage != null && typeof stm.merchantImage === 'string') {
+			const merchantImage = stm.merchantImage.trim()
+			if (merchantImage) {
+				if (!isAllowedMerchantImageHttpsUrl(merchantImage)) {
+					return {
+						success: false,
+						error: 'shareTokenMetadata.merchantImage must be a non-localhost https URL (max 2048 characters)',
+					}
+				}
+				meta.merchantImage = merchantImage
+			}
+		}
 		if (stm.categories != null) meta.categories = stm.categories as string[]
 		if (stm.backgroundColor != null && typeof stm.backgroundColor === 'string') {
 			const bg = stm.backgroundColor.trim()
@@ -9729,8 +9822,19 @@ export const createCardPreCheck = (body: {
 			meta.bonusRules = bonusRulesOut
 			meta.bonusRule = bonusRulesOut[0]
 		}
+		const pointSystem = normalizeCreateCardPointSystemEntry(stm.pointSystem)
+		if (!pointSystem.success) return { success: false, error: pointSystem.error }
+		meta.pointSystem = pointSystem.pointSystem
 		if (Object.keys(meta).length > 0) {
 			normalizedShareTokenMetadata = meta
+		}
+	}
+	if (normalizedShareTokenMetadata == null) {
+		normalizedShareTokenMetadata = { pointSystem: CREATE_CARD_DEFAULT_POINT_SYSTEM }
+	} else if (normalizedShareTokenMetadata.pointSystem == null) {
+		normalizedShareTokenMetadata = {
+			...normalizedShareTokenMetadata,
+			pointSystem: CREATE_CARD_DEFAULT_POINT_SYSTEM,
 		}
 	}
 	const preChecked: CreateCardPreChecked = {

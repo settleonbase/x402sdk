@@ -5836,7 +5836,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			unitPriceHuman?: string | number
 			priceInCurrencyE6?: string | number
 			uri?: string
-			shareTokenMetadata?: { name?: string; description?: string; image?: string }
+			shareTokenMetadata?: Record<string, unknown>
 			tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
 		}
 		const preCheck = createCardPreCheck(body)
@@ -6305,6 +6305,57 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		logger(Colors.green(`server /api/executeForOwner forwarding to master`), inspect({ cardAddress }, false, 2, true))
 		postLocalhost('/api/executeForOwner', req.body, res)
+	})
+
+	/**
+	 * 已发卡仅更新链下 card metadata（shareTokenMetadata / tiers 等）。
+	 * Cluster 做格式预检后转发 Master；Master 负责写 metadata 文件与 beamio_cards.metadata_json。
+	 */
+	router.post('/updateCardShareMetadata', async (req, res) => {
+		const body = req.body as {
+			cardAddress?: unknown
+			shareTokenMetadata?: unknown
+			tiers?: unknown
+			upgradeType?: unknown
+			transferWhitelistEnabled?: unknown
+		}
+		const cardAddress = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : ''
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end()
+		}
+		if (!body.shareTokenMetadata || typeof body.shareTokenMetadata !== 'object' || Array.isArray(body.shareTokenMetadata)) {
+			return res.status(400).json({ success: false, error: 'shareTokenMetadata object is required' }).end()
+		}
+		if (body.tiers != null && !Array.isArray(body.tiers)) {
+			return res.status(400).json({ success: false, error: 'tiers must be an array if provided' }).end()
+		}
+		if (body.upgradeType != null) {
+			const ut = Number(body.upgradeType)
+			if (!Number.isInteger(ut) || ut < 0 || ut > 2) {
+				return res.status(400).json({ success: false, error: 'upgradeType must be 0, 1, or 2 if provided' }).end()
+			}
+		}
+		if (body.transferWhitelistEnabled != null && typeof body.transferWhitelistEnabled !== 'boolean') {
+			return res
+				.status(400)
+				.json({ success: false, error: 'transferWhitelistEnabled must be boolean if provided' })
+				.end()
+		}
+		logger(
+			Colors.green('server /api/updateCardShareMetadata preCheck OK, forwarding to master'),
+			inspect(
+				{
+					cardAddress,
+					shareTokenMetadataKeys: Object.keys(body.shareTokenMetadata as Record<string, unknown>),
+					hasPointSystem:
+						!!(body.shareTokenMetadata as Record<string, unknown>).pointSystem,
+				},
+				false,
+				2,
+				true
+			)
+		)
+		postLocalhost('/api/updateCardShareMetadata', req.body, res)
 	})
 
 	/** 已发行 coupon metadata 更新：icon / description / backgroundColor / couponImage（宽屏背景 https URL 或空清除）。 */

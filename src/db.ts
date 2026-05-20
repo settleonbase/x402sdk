@@ -2979,6 +2979,7 @@ export const registerCardToDb = async (params: {
 		name?: string
 		description?: string
 		image?: string
+		merchantImage?: string
 		categories?: string[]
 		Symbol?: string
 		displayName?: string
@@ -2988,6 +2989,11 @@ export const registerCardToDb = async (params: {
 		logoDisplayTier?: number
 		bonusRule?: { paymentAmount: number; bonusValue: number; bonusProportional?: boolean }
 		bonusRules?: Array<{ paymentAmount: number; bonusValue: number; bonusProportional?: boolean }>
+		pointSystem?: {
+			enabled: boolean
+			chargeRewardRatioE6?: string
+			rewardTokenId?: number
+		}
 	}
 	tiers?: Array<{
 		index: number
