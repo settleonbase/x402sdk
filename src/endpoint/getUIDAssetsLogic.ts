@@ -24,6 +24,7 @@ const DEPRECATED_INFRA_CARDS = new Set([
 	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
 	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
 	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
+	'0x5c5376EdAbBf0F0BD52d5F7a93828606a5051694'.toLowerCase(),
 ])
 
 /** 与 util.resolveBeamioBaseHttpRpcUrl 一致；此处不 import util，避免经 db 与 util/server 形成循环依赖 */
