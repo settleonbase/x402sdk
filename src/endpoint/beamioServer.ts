@@ -30,6 +30,7 @@ const DEPRECATED_INFRA_CARDS = new Set([
 	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
 	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
 	'0x5c5376EdAbBf0F0BD52d5F7a93828606a5051694'.toLowerCase(),
+	'0xEaCD6CB7e9E5b2a2652Ad65840997Aab37b828E1'.toLowerCase(),
 ])
 
 function posLedgerKeccakCategory(name: string): string {

@@ -38,6 +38,7 @@ export const LATEST_CARDS_EXCLUDED = new Set([
 	'0x4c66b36ba059b2f05ef3d5f383c67533f19c6219',
 	'0x9cda8477c9f03b8759ac64e21941e578908fd750',
 	'0x5c5376edabbf0f0bd52d5f7a93828606a5051694',
+	'0xeacd6cb7e9e5b2a2652ad65840997aab37b828e1',
 ])
 
 /**
