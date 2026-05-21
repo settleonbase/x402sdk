@@ -15,6 +15,7 @@ import {
 	normalizeProductionCategoryOnTierProperties,
 	normalizeShareTokenMetadataCoupons,
 	normalizeShareTokenMetadataProductions,
+	normalizeShareTokenMetadataServiceCategory,
 	propertiesLookLikeProductionProps,
 } from './couponMetadataCategory'
 import { inspect } from 'util'
@@ -10051,8 +10052,10 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 	transferWhitelistEnabled?: boolean
 }): Promise<{ success: boolean; error?: string }> {
 	try {
-		const shareTokenMetadata = normalizeShareTokenMetadataProductions(
-			normalizeShareTokenMetadataCoupons(params.shareTokenMetadata)
+		const shareTokenMetadata = normalizeShareTokenMetadataServiceCategory(
+			normalizeShareTokenMetadataProductions(
+				normalizeShareTokenMetadataCoupons(params.shareTokenMetadata)
+			)
 		)
 		const cardAddr = ethers.getAddress(params.cardAddress)
 		const row = await getBeamioCardRowForMetadataSync(cardAddr)

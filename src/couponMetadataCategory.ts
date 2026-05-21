@@ -1,4 +1,6 @@
 /** Issued coupon NFT / program coupon definition metadata category label. */
+import { ethers } from 'ethers'
+
 export const BEAMIO_COUPON_NFT_CATEGORY = 'Coupon' as const
 
 /** Issued service / production catalog NFT metadata category label. */
@@ -236,4 +238,45 @@ export function normalizeShareTokenMetadataProductions(share: Record<string, unk
 		return row
 	})
 	return { ...share, productions: next }
+}
+
+/** Card-level global service catalog category chips (`shareTokenMetadata.serviceCategory`). */
+function normalizeServiceCategoryLabelForHash(label: string): string {
+	return label.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function serviceCategoryHashIdFromLabel(label: string): string {
+	const key = normalizeServiceCategoryLabelForHash(label)
+	if (!key) return ''
+	return ethers.keccak256(ethers.toUtf8Bytes(`beamio:serviceCategory:${key}`)).slice(2, 18)
+}
+
+export function normalizeShareTokenMetadataServiceCategory(share: Record<string, unknown>): Record<string, unknown> {
+	const raw = share.serviceCategory
+	if (raw == null) return share
+	if (!Array.isArray(raw)) {
+		const { serviceCategory: _removed, ...rest } = share
+		return rest
+	}
+	const out: Array<{ id: string; label: string }> = []
+	const hashKeysSeen = new Set<string>()
+	const idSeen = new Set<string>()
+	for (const entry of raw) {
+		if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+		const row = entry as Record<string, unknown>
+		const label = typeof row.label === 'string' ? row.label.trim().slice(0, 128) : ''
+		if (!label) continue
+		const hashKey = normalizeServiceCategoryLabelForHash(label)
+		if (hashKeysSeen.has(hashKey)) continue
+		const id = serviceCategoryHashIdFromLabel(label)
+		if (!id || idSeen.has(id)) continue
+		hashKeysSeen.add(hashKey)
+		idSeen.add(id)
+		out.push({ id, label })
+	}
+	if (out.length === 0) {
+		const { serviceCategory: _removed, ...rest } = share
+		return rest
+	}
+	return { ...share, serviceCategory: out }
 }
