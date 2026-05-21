@@ -2155,6 +2155,92 @@ export async function verifyChargeOwnerChildBurnClusterPreCheck(params: {
 	return { ok: true }
 }
 
+const CHARGE_REWARD_TOKEN_ID = 2n
+
+/** Resolve token #2 holder account for burnChargeRewardByAdmin (align ChargeRewardModule.toAccount). */
+async function resolveChargeRewardAccountForBurn(cardAddr: string, target: string): Promise<string | undefined> {
+	const t = ethers.getAddress(target.trim())
+	try {
+		const code = await providerBaseBackup.getCode(t)
+		if (code && code !== '0x' && code.length > 2) {
+			try {
+				const aaRead = new ethers.Contract(
+					t,
+					['function factory() view returns (address)', 'function owner() view returns (address)'],
+					providerBaseBackup
+				)
+				const f = await aaRead.factory()
+				if (f && f !== ethers.ZeroAddress) return t
+			} catch {
+				/* not AA */
+			}
+		}
+	} catch {
+		/* ignore */
+	}
+	const aa = await resolveBeamioAaForEoaWithFallback(providerBaseBackup, t)
+	return aa ?? t
+}
+
+/** Burn charge-reward points (token #2) prepare payload for POS product redemption. */
+export const burnChargeRewardByAdminPreparePayload = async (params: {
+	cardAddress: string
+	target: string
+	amount: string
+}): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string; factoryGateway: string } | { error: string }> => {
+	const { cardAddress, target, amount } = params
+	if (!cardAddress || !ethers.isAddress(cardAddress.trim())) return { error: 'Missing or invalid cardAddress' }
+	if (!target || !ethers.isAddress(target.trim())) return { error: 'Missing or invalid target' }
+	const amt = amount === 'max' || amount === 'all' ? ethers.MaxUint256 : BigInt(amount ?? '0')
+	if (amt <= 0n && amt !== ethers.MaxUint256) return { error: 'Invalid amount (use "max" for burn all)' }
+	const cardAddr = ethers.getAddress(cardAddress.trim())
+	const iface = new ethers.Interface(['function burnChargeRewardByAdmin(address target, uint256 amount)'])
+	const data = iface.encodeFunctionData('burnChargeRewardByAdmin', [ethers.getAddress(target.trim()), amt])
+	const deadline = Math.floor(Date.now() / 1000) + 900
+	const nonce = ethers.hexlify(ethers.randomBytes(32))
+	const factoryGateway = await getBeamioUserCardFactoryGateway(cardAddr)
+	return { cardAddr, data, deadline, nonce, factoryGateway }
+}
+
+/** POST /api/burnChargeRewardByAdminPrepare：POS 扣 charge-reward point；校验 target 链上 token#2 余额 ≥ amount。 */
+export async function verifyBurnChargeRewardByAdminPrepareAllowed(params: {
+	cardAddress: string
+	target: string
+	amount: string
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+	const c = params.cardAddress?.trim()
+	const t = params.target?.trim()
+	const amountRaw = String(params.amount ?? '').trim()
+	if (!c || !ethers.isAddress(c)) return { ok: false, error: 'Missing or invalid cardAddress' }
+	if (!t || !ethers.isAddress(t)) return { ok: false, error: 'Missing or invalid target' }
+	if (!amountRaw) return { ok: false, error: 'Missing amount' }
+	const cardAddr = ethers.getAddress(c)
+	const acct = await resolveChargeRewardAccountForBurn(cardAddr, t)
+	if (!acct) return { ok: false, error: 'Could not resolve account for target' }
+	const card = new ethers.Contract(
+		cardAddr,
+		['function balanceOf(address account, uint256 id) view returns (uint256)'],
+		providerBaseBackup
+	)
+	let bal = 0n
+	try {
+		bal = (await card.balanceOf(acct, CHARGE_REWARD_TOKEN_ID)) as bigint
+	} catch {
+		return { ok: false, error: 'Could not read charge-reward balance' }
+	}
+	if (bal <= 0n) return { ok: false, error: 'Insufficient charge-reward points' }
+	if (amountRaw === 'max' || amountRaw === 'all') return { ok: true }
+	let amt: bigint
+	try {
+		amt = BigInt(amountRaw)
+	} catch {
+		return { ok: false, error: 'Invalid amount' }
+	}
+	if (amt <= 0n) return { ok: false, error: 'amount must be > 0' }
+	if (amt > bal) return { ok: false, error: 'Insufficient charge-reward points' }
+	return { ok: true }
+}
+
 /** POST /api/burnPointsByAdminPrepare：POS 不可信；仅当 target（AA）对应 EOA 在该卡上为 owner 线 admin 时才发放 prepare 载荷 */
 export async function verifyBurnPointsByAdminPrepareAllowed(params: {
 	cardAddress: string
@@ -9405,7 +9491,10 @@ export type CreateCardPreChecked = {
 	createCardOwnerAsRequested?: string
 }
 
-const CREATE_CARD_TOPUP_LIMIT_MAX_UNITS = 1000
+/** Reload limits are expressed as USDC bounds, then converted to the card currency for whole-unit metadata. */
+const CREATE_CARD_TOPUP_MIN_USDC_UNITS = 3
+const CREATE_CARD_TOPUP_LIMIT_USDC_UNITS = 10000
+const CREATE_CARD_ORACLE_CAD_USDC_FALLBACK = 0.740
 const CREATE_CARD_DISPLAY_NAME_MAX_LEN = 128
 const CREATE_CARD_SYMBOL_MAX_LEN = 32
 const CREATE_CARD_BONUS_RULES_MAX = 32
@@ -9443,6 +9532,25 @@ function parseCreateCardTopupWholeUnit(v: unknown): number | undefined {
 		if (Number.isFinite(n) && Number.isFinite(f) && f === n && n > 0) return n
 	}
 	return undefined
+}
+
+function createCardTopupLimitMaxUnitsForCurrency(currencyRaw: string | undefined | null): number {
+	const currency = String(currencyRaw ?? '').trim().toUpperCase()
+	if (currency === 'CAD') {
+		return Math.max(
+			createCardTopupLimitMinUnitsForCurrency(currency),
+			Math.floor(CREATE_CARD_TOPUP_LIMIT_USDC_UNITS / CREATE_CARD_ORACLE_CAD_USDC_FALLBACK)
+		)
+	}
+	return CREATE_CARD_TOPUP_LIMIT_USDC_UNITS
+}
+
+function createCardTopupLimitMinUnitsForCurrency(currencyRaw: string | undefined | null): number {
+	const currency = String(currencyRaw ?? '').trim().toUpperCase()
+	if (currency === 'CAD') {
+		return Math.max(1, Math.ceil(CREATE_CARD_TOPUP_MIN_USDC_UNITS / CREATE_CARD_ORACLE_CAD_USDC_FALLBACK))
+	}
+	return CREATE_CARD_TOPUP_MIN_USDC_UNITS
 }
 
 function parseCreateCardBonusAmount(v: unknown): number | null {
@@ -9636,16 +9744,24 @@ export const createCardPreCheck = (body: {
 		}
 		const minTu = parseCreateCardTopupWholeUnit(stm.minimumTopup ?? stm.minTopup)
 		const maxTu = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
-		if (minTu != null && minTu > CREATE_CARD_TOPUP_LIMIT_MAX_UNITS) {
+		const topupLimitMinUnits = createCardTopupLimitMinUnitsForCurrency(body.currency)
+		const topupLimitMaxUnits = createCardTopupLimitMaxUnitsForCurrency(body.currency)
+		if (minTu != null && minTu < topupLimitMinUnits) {
 			return {
 				success: false,
-				error: `shareTokenMetadata.minimumTopup must not exceed ${CREATE_CARD_TOPUP_LIMIT_MAX_UNITS}`,
+				error: `shareTokenMetadata.minimumTopup must be at least ${topupLimitMinUnits} ${body.currency} (${CREATE_CARD_TOPUP_MIN_USDC_UNITS} USDC equivalent)`,
 			}
 		}
-		if (maxTu != null && maxTu > CREATE_CARD_TOPUP_LIMIT_MAX_UNITS) {
+		if (minTu != null && minTu > topupLimitMaxUnits) {
 			return {
 				success: false,
-				error: `shareTokenMetadata.maximumTopup must not exceed ${CREATE_CARD_TOPUP_LIMIT_MAX_UNITS}`,
+				error: `shareTokenMetadata.minimumTopup must not exceed ${topupLimitMaxUnits} ${body.currency} (${CREATE_CARD_TOPUP_LIMIT_USDC_UNITS} USDC equivalent)`,
+			}
+		}
+		if (maxTu != null && maxTu > topupLimitMaxUnits) {
+			return {
+				success: false,
+				error: `shareTokenMetadata.maximumTopup must not exceed ${topupLimitMaxUnits} ${body.currency} (${CREATE_CARD_TOPUP_LIMIT_USDC_UNITS} USDC equivalent)`,
 			}
 		}
 		if (minTu != null && maxTu != null && minTu > maxTu) {

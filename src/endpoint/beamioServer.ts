@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
@@ -202,6 +202,7 @@ function resolveVerraNdefInstallRedirectUrl(userAgent: string): string {
 const BASE_CHAIN_ID = 8453
 const MINT_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('mintPointsByAdmin(address,uint256)').slice(2, 10)
 const BURN_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers.id('burnPointsByAdmin(address,uint256)').slice(2, 10)
+const BURN_CHARGE_REWARD_BY_ADMIN_SELECTOR = '0x' + ethers.id('burnChargeRewardByAdmin(address,uint256)').slice(2, 10)
 const BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR = '0x' + ethers.id('burnIssuedNftByGateway(address,uint256,uint256)').slice(2, 10)
 
 const ISSUED_NFT_START_ID = 100_000_000_000n
@@ -250,6 +251,17 @@ const tryParseBurnPointsByAdminArgs = (data: string): { target: string; points6:
 		const iface = new ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)'])
 		const decoded = iface.parseTransaction({ data })
 		if (decoded?.name === 'burnPointsByAdmin' && decoded.args[0] != null && decoded.args[1] != null) {
+			return { target: decoded.args[0] as string, points6: BigInt(decoded.args[1]) }
+		}
+	} catch { /* ignore */ }
+	return null
+}
+
+const tryParseBurnChargeRewardByAdminArgs = (data: string): { target: string; points6: bigint } | null => {
+	try {
+		const iface = new ethers.Interface(['function burnChargeRewardByAdmin(address target, uint256 amount)'])
+		const decoded = iface.parseTransaction({ data })
+		if (decoded?.name === 'burnChargeRewardByAdmin' && decoded.args[0] != null && decoded.args[1] != null) {
 			return { target: decoded.args[0] as string, points6: BigInt(decoded.args[1]) }
 		}
 	} catch { /* ignore */ }
@@ -2460,6 +2472,27 @@ const routing = ( router: Router ) => {
 		res.status(200).json(result).end()
 	})
 
+	/** POST /api/burnChargeRewardByAdminPrepare - POS 扣 charge-reward point（token #2）；Admin 签字后 /api/nfcTopup。 */
+	router.post('/burnChargeRewardByAdminPrepare', async (req, res) => {
+		const { cardAddress, target, amount } = req.body as { cardAddress?: string; target?: string; amount?: string }
+		const allow = await verifyBurnChargeRewardByAdminPrepareAllowed({
+			cardAddress: cardAddress ?? '',
+			target: target ?? '',
+			amount: amount ?? '0',
+		})
+		if (!allow.ok) {
+			logger(Colors.yellow(`[burnChargeRewardByAdminPrepare] Cluster REJECT: ${allow.error}`))
+			return res.status(400).json({ success: false, error: allow.error }).end()
+		}
+		const result = await burnChargeRewardByAdminPreparePayload({
+			cardAddress: cardAddress ?? '',
+			target: target ?? '',
+			amount: amount ?? '0',
+		})
+		if ('error' in result) return res.status(400).json({ success: false, error: result.error })
+		res.status(200).json(result).end()
+	})
+
 	/** POS 余额页消费券：预检 couponId/tokenId 与用户余额，返回 executeForAdmin 载荷（POS admin 签字）。 */
 	router.post('/cardCouponPosConsumePrepare', async (req, res) => {
 		const pre = await cardCouponPosConsumePreparePreCheck(req.body)
@@ -2709,10 +2742,11 @@ const routing = ( router: Router ) => {
 			const dataSel = data.slice(0, 10).toLowerCase()
 			const isMint = data.startsWith(MINT_POINTS_BY_ADMIN_SELECTOR)
 			const isBurn = data.startsWith(BURN_POINTS_BY_ADMIN_SELECTOR)
+			const isBurnChargeReward = data.startsWith(BURN_CHARGE_REWARD_BY_ADMIN_SELECTOR)
 			const isBurnIssuedNft = data.startsWith(BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR)
 			const isAdminManager = dataSel === adminManagerSel4 || dataSel === adminManagerSel5
-			if (!isMint && !isBurn && !isBurnIssuedNft && !isAdminManager) {
-				return res.status(400).json({ success: false, error: 'executeForAdmin only supports mintPointsByAdmin, burnPointsByAdmin, burnIssuedNftByGateway, or adminManager' })
+			if (!isMint && !isBurn && !isBurnChargeReward && !isBurnIssuedNft && !isAdminManager) {
+				return res.status(400).json({ success: false, error: 'executeForAdmin only supports mintPointsByAdmin, burnPointsByAdmin, burnChargeRewardByAdmin, burnIssuedNftByGateway, or adminManager' })
 			}
 			const now = Math.floor(Date.now() / 1000)
 			if (now > deadline) {
@@ -2828,6 +2862,13 @@ const routing = ( router: Router ) => {
 			} else if (isBurn) {
 				const bp = tryParseBurnPointsByAdminArgs(data)
 				topupSummaryOp = 'burnPointsByAdmin'
+				if (bp) {
+					topupSummaryPoints6 = bp.points6.toString()
+					topupSummaryRecipient = bp.target
+				}
+			} else if (isBurnChargeReward) {
+				const bp = tryParseBurnChargeRewardByAdminArgs(data)
+				topupSummaryOp = 'burnChargeRewardByAdmin'
 				if (bp) {
 					topupSummaryPoints6 = bp.points6.toString()
 					topupSummaryRecipient = bp.target
