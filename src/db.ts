@@ -11,6 +11,13 @@ import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
 import IPFSAbi from './ABI/Ipfs.abi.json'
 import conetPGPABI from './ABI/conetPGP.json'
+import {
+	normalizeCouponSeriesMetadataJson,
+	normalizeProductionSeriesMetadataJson,
+	filterClientCouponSeriesRows,
+	filterClientProductionSeriesRows,
+	seriesMetadataLooksLikeProduction,
+} from './couponMetadataCategory'
 
 /**
  * 
@@ -3391,7 +3398,14 @@ export const registerSeriesToDb = async (params: {
 	try {
 		await db.connect()
 		await db.query(BEAMIO_NFT_SERIES_TABLE)
-		const meta = params.metadataJson != null ? JSON.stringify(params.metadataJson) : null
+		const meta =
+			params.metadataJson != null
+				? JSON.stringify(
+						seriesMetadataLooksLikeProduction(params.metadataJson)
+							? normalizeProductionSeriesMetadataJson(params.metadataJson)
+							: normalizeCouponSeriesMetadataJson(params.metadataJson)
+					)
+				: null
 		const ipfsCidVal = (params.ipfsCid != null && String(params.ipfsCid).trim() !== '') ? String(params.ipfsCid).trim() : ''
 		await db.query(
 			`
@@ -3430,7 +3444,11 @@ export const updateSeriesMetadataByCardAndToken = async (params: {
 	try {
 		await db.connect()
 		await db.query(BEAMIO_NFT_SERIES_TABLE)
-		const meta = JSON.stringify(params.metadataJson)
+		const meta = JSON.stringify(
+			seriesMetadataLooksLikeProduction(params.metadataJson)
+				? normalizeProductionSeriesMetadataJson(params.metadataJson)
+				: normalizeCouponSeriesMetadataJson(params.metadataJson)
+		)
 		const { rowCount } = await db.query(
 			`
 			UPDATE beamio_nft_series
@@ -3525,7 +3543,45 @@ export const getOwnerNftSeries = async (owner: string, limit = 100): Promise<Arr
 
 const ISSUED_NFT_START_ID_SERIES_FILTER = '100000000000'
 
-/** 全站最近登记的 Program 优惠券 issued-NFT 系列：metadata 含根级 couponId 或 properties.beamioCoupon；按 created_at 倒序（与 registerSeriesToDb 入库时间一致）。 */
+/** SQL predicate: beamio_nft_series row is a Program coupon issued series (category Coupon + legacy markers). */
+const COUPON_ISSUED_SERIES_METADATA_WHERE = `
+(
+	(metadata_json->>'category') = 'Coupon'
+	OR (
+		metadata_json ? 'properties'
+		AND (metadata_json->'properties'->>'category') = 'Coupon'
+	)
+	OR (
+		(
+			NOT (metadata_json ? 'category')
+			OR BTRIM(COALESCE(metadata_json->>'category', '')) = ''
+		)
+		AND (
+			NOT (metadata_json ? 'properties')
+			OR NOT ((metadata_json->'properties') ? 'category')
+			OR BTRIM(COALESCE(metadata_json->'properties'->>'category', '')) = ''
+		)
+		AND (
+			(metadata_json ? 'couponId')
+			OR (
+				metadata_json ? 'properties'
+				AND ((metadata_json->'properties') ? 'beamioCoupon')
+			)
+		)
+	)
+)
+AND (
+	NOT (metadata_json ? 'category')
+	OR (metadata_json->>'category') = 'Coupon'
+)
+AND (
+	NOT (metadata_json ? 'properties')
+	OR NOT ((metadata_json->'properties') ? 'category')
+	OR (metadata_json->'properties'->>'category') = 'Coupon'
+)
+`
+
+/** 全站最近登记的 Program 优惠券 issued-NFT 系列：metadata 含 category=Coupon、根级 couponId 或 properties.beamioCoupon；按 created_at 倒序（与 registerSeriesToDb 入库时间一致）。 */
 export const listRecentBeamioIssuedCouponSeries = async (
 	limit = 20
 ): Promise<Array<{
@@ -3548,13 +3604,7 @@ export const listRecentBeamioIssuedCouponSeries = async (
 			SELECT card_address, token_id, shared_metadata_hash, ipfs_cid, card_owner, metadata_json, created_at
 			FROM beamio_nft_series
 			WHERE metadata_json IS NOT NULL
-			AND (
-				(metadata_json ? 'couponId')
-				OR (
-					(metadata_json ? 'properties')
-					AND ((metadata_json->'properties') ? 'beamioCoupon')
-				)
-			)
+			AND ${COUPON_ISSUED_SERIES_METADATA_WHERE}
 			AND token_id ~ '^[0-9]+$'
 			AND LENGTH(token_id) <= 40
 			AND (token_id::bigint >= $2::bigint)
@@ -3563,15 +3613,17 @@ export const listRecentBeamioIssuedCouponSeries = async (
 			`,
 			[cap, ISSUED_NFT_START_ID_SERIES_FILTER]
 		)
-		return rows.map((r: any) => ({
-			cardAddress: r.card_address,
-			tokenId: r.token_id,
-			sharedMetadataHash: r.shared_metadata_hash,
-			ipfsCid: r.ipfs_cid,
-			cardOwner: r.card_owner,
-			metadata: r.metadata_json,
-			createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
-		}))
+		return filterClientCouponSeriesRows(
+			rows.map((r: any) => ({
+				cardAddress: r.card_address,
+				tokenId: r.token_id,
+				sharedMetadataHash: r.shared_metadata_hash,
+				ipfsCid: r.ipfs_cid,
+				cardOwner: r.card_owner,
+				metadata: r.metadata_json,
+				createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+			}))
+		)
 	} catch (e: any) {
 		logger(Colors.yellow(`[listRecentBeamioIssuedCouponSeries] failed: ${e?.message ?? e}`))
 		return []
@@ -3606,13 +3658,7 @@ export const listCouponIssuedNftSeriesForCardDescending = async (
 			FROM beamio_nft_series
 			WHERE card_address = $1
 			AND metadata_json IS NOT NULL
-			AND (
-				(metadata_json ? 'couponId')
-				OR (
-					(metadata_json ? 'properties')
-					AND ((metadata_json->'properties') ? 'beamioCoupon')
-				)
-			)
+			AND ${COUPON_ISSUED_SERIES_METADATA_WHERE}
 			AND token_id ~ '^[0-9]+$'
 			AND LENGTH(token_id) <= 40
 			AND (token_id::bigint >= $3::bigint)
@@ -3621,17 +3667,97 @@ export const listCouponIssuedNftSeriesForCardDescending = async (
 			`,
 			[cardLower, cap, ISSUED_NFT_START_ID_SERIES_FILTER]
 		)
-		return rows.map((r: any) => ({
-			cardAddress: r.card_address,
-			tokenId: r.token_id,
-			sharedMetadataHash: r.shared_metadata_hash,
-			ipfsCid: r.ipfs_cid,
-			cardOwner: r.card_owner,
-			metadata: r.metadata_json,
-			createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
-		}))
+		return filterClientCouponSeriesRows(
+			rows.map((r: any) => ({
+				cardAddress: r.card_address,
+				tokenId: r.token_id,
+				sharedMetadataHash: r.shared_metadata_hash,
+				ipfsCid: r.ipfs_cid,
+				cardOwner: r.card_owner,
+				metadata: r.metadata_json,
+				createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+			}))
+		)
 	} catch (e: any) {
 		logger(Colors.yellow(`[listCouponIssuedNftSeriesForCardDescending] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** SQL predicate: beamio_nft_series row is a Program productions / service catalog issued series. */
+const PRODUCTION_ISSUED_SERIES_METADATA_WHERE = `
+(
+	(metadata_json->>'category') = 'productions'
+	OR (
+		metadata_json ? 'properties'
+		AND (metadata_json->'properties'->>'category') = 'productions'
+	)
+	OR (
+		(metadata_json ? 'properties')
+		AND ((metadata_json->'properties') ? 'beamioProduction')
+	)
+)
+AND (
+	NOT (metadata_json ? 'category')
+	OR (metadata_json->>'category') = 'productions'
+)
+AND (
+	NOT (metadata_json ? 'properties')
+	OR NOT ((metadata_json->'properties') ? 'category')
+	OR (metadata_json->'properties'->>'category') = 'productions'
+)
+`
+
+/** 指定卡下登记的 Program productions issued 系列，按 created_at 倒序。 */
+export const listProductionIssuedNftSeriesForCardDescending = async (
+	cardAddress: string,
+	scanLimit = 200
+): Promise<Array<{
+	cardAddress: string
+	tokenId: string
+	sharedMetadataHash: string
+	ipfsCid: string
+	cardOwner: string
+	metadata: Record<string, unknown> | null
+	createdAt: string
+}>> => {
+	const lim = Number.isFinite(scanLimit) ? Math.floor(Number(scanLimit)) : 200
+	const cap = Math.min(Math.max(lim, 1), 500)
+	const cardLower = cardAddress.toLowerCase()
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_NFT_SERIES_TABLE)
+		const { rows } = await db.query(
+			`
+			SELECT card_address, token_id, shared_metadata_hash, ipfs_cid, card_owner, metadata_json, created_at
+			FROM beamio_nft_series
+			WHERE card_address = $1
+			AND metadata_json IS NOT NULL
+			AND ${PRODUCTION_ISSUED_SERIES_METADATA_WHERE}
+			AND token_id ~ '^[0-9]+$'
+			AND LENGTH(token_id) <= 40
+			AND (token_id::bigint >= $3::bigint)
+			ORDER BY created_at DESC NULLS LAST
+			LIMIT $2
+			`,
+			[cardLower, cap, ISSUED_NFT_START_ID_SERIES_FILTER]
+		)
+		return filterClientProductionSeriesRows(
+			rows.map((r: any) => ({
+				cardAddress: r.card_address,
+				tokenId: r.token_id,
+				sharedMetadataHash: r.shared_metadata_hash,
+				ipfsCid: r.ipfs_cid,
+				cardOwner: r.card_owner,
+				metadata: r.metadata_json,
+				createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+			}))
+		)
+	} catch (e: any) {
+		logger(Colors.yellow(`[listProductionIssuedNftSeriesForCardDescending] failed: ${e?.message ?? e}`))
 		return []
 	} finally {
 		await db.end().catch(() => {})

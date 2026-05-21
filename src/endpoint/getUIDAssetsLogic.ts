@@ -15,6 +15,7 @@ import {
 	listCouponIssuedNftSeriesForCardDescending,
 } from '../db'
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
+import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCategory'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tierMetadataRowResolve'
@@ -501,6 +502,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			const balances: NonNullable<FetchUIDAssetsResult['merchantCouponBalances']> = []
 			const claimables: NonNullable<FetchUIDAssetsResult['merchantClaimableCoupons']> = []
 			for (const row of seriesRows) {
+				if (!metadataMatchesClientCouponCategoryFilter(row.metadata)) continue
 				const tokenId = String(row.tokenId ?? '').trim()
 				if (!tokenId || seen.has(tokenId)) continue
 				seen.add(tokenId)

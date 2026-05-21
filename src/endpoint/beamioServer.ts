@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult} from '../db'
+import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -18,6 +18,15 @@ import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import {
+	normalizeCouponMetadataExtraProperties,
+	normalizeCouponSeriesMetadataJson,
+	normalizeProductionSeriesMetadataJson,
+	normalizeIssuedNftMetadataExtraProperties,
+	metadataMatchesClientCouponCategoryFilter,
+	metadataMatchesClientProductionCategoryFilter,
+	seriesMetadataLooksLikeProduction,
+} from '../couponMetadataCategory'
 import {
 	runUsdcChargeOrchestrator,
 	runUsdcNfcTopupPosOrchestrator,
@@ -526,6 +535,7 @@ const getNFTMetadataCache = new Map<string, { body: string; expiry: number }>()
 const ownerNftSeriesCache = new Map<string, { body: string; expiry: number }>()
 const recentIssuedCouponSeriesCache = new Map<string, { body: string; expiry: number }>()
 const cardActiveIssuedCouponSeriesCache = new Map<string, { body: string; expiry: number }>()
+const cardActiveIssuedProductionSeriesCache = new Map<string, { body: string; expiry: number }>()
 const seriesSharedMetadataCache = new Map<string, { body: string; expiry: number }>()
 const mintMetadataCache = new Map<string, { body: string; expiry: number }>()
 const getFollowStatusCache = new Map<string, { body: string; expiry: number }>()
@@ -5393,6 +5403,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			}> = []
 			for (const row of ordered) {
 				if (items.length >= limit) break
+				if (!metadataMatchesClientCouponCategoryFilter(row.metadata)) continue
 				let tid: bigint
 				try {
 					tid = BigInt(row.tokenId)
@@ -5451,6 +5462,109 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		} catch (err: any) {
 			logger(Colors.red('[cardActiveIssuedCouponSeries] error:'), err?.message ?? err)
 			return res.status(500).json({ error: err?.message ?? 'Failed to fetch active issued coupons for card' })
+		}
+	})
+
+	/** GET /api/cardActiveIssuedProductionSeries?card=0x&limit=20 — Program productions / services (category=productions). */
+	router.get('/cardActiveIssuedProductionSeries', async (req, res) => {
+		const { card } = req.query as { card?: string; limit?: string }
+		if (!card || !ethers.isAddress(card)) {
+			return res.status(400).json({ error: 'Invalid card address' })
+		}
+		let limit = Number((req.query as { limit?: string }).limit ?? 20)
+		if (!Number.isFinite(limit)) limit = 20
+		limit = Math.floor(limit)
+		limit = Math.min(Math.max(limit, 1), 50)
+		const checksum = ethers.getAddress(card)
+		const cacheKey = `${checksum.toLowerCase()}:${limit}`
+		const cached = cardActiveIssuedProductionSeriesCache.get(cacheKey)
+		if (cached && Date.now() < cached.expiry) {
+			return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body)
+		}
+		try {
+			const scanLimit = Math.min(400, Math.max(60, limit * 25))
+			const candidates = await listProductionIssuedNftSeriesForCardDescending(checksum, scanLimit)
+			const seenToken = new Set<string>()
+			const ordered = [] as typeof candidates
+			for (const row of candidates) {
+				if (seenToken.has(row.tokenId)) continue
+				seenToken.add(row.tokenId)
+				ordered.push(row)
+			}
+			const cardContract = new ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, providerBase)
+			const items: Array<{
+				cardAddress: string
+				tokenId: string
+				sharedMetadataHash: string
+				ipfsCid: string
+				cardOwner: string
+				metadata: Record<string, unknown> | null
+				createdAt: string
+				issuedNftValidAfter: string
+				issuedNftValidBefore: string
+				issuedNftMaxSupply?: string
+				issuedNftMintedCount?: string
+				issuedNftRemainingSupply?: string
+			}> = []
+			for (const row of ordered) {
+				if (items.length >= limit) break
+				if (!metadataMatchesClientProductionCategoryFilter(row.metadata)) continue
+				let tid: bigint
+				try {
+					tid = BigInt(row.tokenId)
+				} catch {
+					continue
+				}
+				if (tid < ISSUED_NFT_START_ID) continue
+				let valid = false
+				try {
+					valid = await cardContract.isIssuedNftValid(tid)
+				} catch {
+					continue
+				}
+				if (!valid) continue
+				let maxSupply: bigint | null = null
+				let mintedCount: bigint | null = null
+				try {
+					const ms = await cardContract.issuedNftMaxSupply(tid)
+					if (ms === 0n) continue
+					maxSupply = ms
+					try {
+						mintedCount = await cardContract.issuedNftMintedCount(tid)
+					} catch {
+						mintedCount = null
+					}
+				} catch {
+					/* keep valid rows */
+				}
+				let va = 0n
+				let vb = 0n
+				try { va = await cardContract.issuedNftValidAfter(tid) } catch { va = 0n }
+				try { vb = await cardContract.issuedNftValidBefore(tid) } catch { vb = 0n }
+				const remainingSupply = maxSupply != null && mintedCount != null
+					? (maxSupply > mintedCount ? maxSupply - mintedCount : 0n)
+					: null
+				items.push({
+					cardAddress: row.cardAddress,
+					tokenId: row.tokenId,
+					sharedMetadataHash: row.sharedMetadataHash,
+					ipfsCid: row.ipfsCid,
+					cardOwner: row.cardOwner,
+					metadata: row.metadata,
+					createdAt: row.createdAt,
+					issuedNftValidAfter: String(va),
+					issuedNftValidBefore: String(vb),
+					...(maxSupply != null ? { issuedNftMaxSupply: String(maxSupply) } : {}),
+					...(mintedCount != null ? { issuedNftMintedCount: String(mintedCount) } : {}),
+					...(remainingSupply != null ? { issuedNftRemainingSupply: String(remainingSupply) } : {}),
+				})
+			}
+			const body = JSON.stringify({ cardAddress: checksum, limit, items })
+			cardActiveIssuedProductionSeriesCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+			res.status(200).json({ cardAddress: checksum, limit, items })
+		} catch (err: any) {
+			logger(Colors.red('[cardActiveIssuedProductionSeries] error:'), err?.message ?? err)
+			return res.status(500).json({ error: err?.message ?? 'Failed to fetch active issued productions for card' })
 		}
 	})
 
@@ -5533,7 +5647,17 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				)
 			)
 		}
-		postLocalhost('/api/registerSeries', req.body, res)
+		const forwardBody = {
+			...(req.body as Record<string, unknown>),
+			...(hasMetadata && metadata
+				? {
+						metadata: seriesMetadataLooksLikeProduction(metadata as Record<string, unknown>)
+							? normalizeProductionSeriesMetadataJson(metadata as Record<string, unknown>)
+							: normalizeCouponSeriesMetadataJson(metadata as Record<string, unknown>),
+					}
+				: {}),
+		}
+		postLocalhost('/api/registerSeries', forwardBody, res)
 	})
 
 	/** registerMintMetadata：cluster 预检格式，合格转发 master。tokenId 必须来自 createIssuedNft 返回值。metadata 为自定义 JSON（如座位、序列号等）。 */
@@ -6149,7 +6273,17 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				inspect(sanitizeExecuteForOwnerCouponWorkflowBody(rawBody), false, 3, true)
 			)
 		}
-		postLocalhost('/api/executeForOwner', req.body, res)
+		const forwardBody = {
+			...(rawBody as Record<string, unknown>),
+			...(rawBody.metadata_extra_properties != null
+				? {
+						metadata_extra_properties: normalizeIssuedNftMetadataExtraProperties(
+							rawBody.metadata_extra_properties as string | Record<string, unknown>
+						),
+					}
+				: {}),
+		}
+		postLocalhost('/api/executeForOwner', forwardBody, res)
 	})
 
 	/** cardMintIssuedNftToAddress：owner 离线签字发行 issued NFT 到指定地址。Cluster 预检 targetAddress 为 EOA、签名有效，编码 data 后转发 master executeForOwner */

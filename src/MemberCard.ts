@@ -9,6 +9,14 @@ import fs from 'node:fs'
 import { homedir } from 'node:os'
 import cluster from 'cluster'
 import { logger } from './logger'
+import {
+	BEAMIO_COUPON_NFT_CATEGORY,
+	normalizeCouponCategoryOnTierProperties,
+	normalizeProductionCategoryOnTierProperties,
+	normalizeShareTokenMetadataCoupons,
+	normalizeShareTokenMetadataProductions,
+	propertiesLookLikeProductionProps,
+} from './couponMetadataCategory'
 import { inspect } from 'util'
 import Colors from 'colors/safe'
 import BeamioUserCardABI from './ABI/BeamioUserCard.json'
@@ -10043,6 +10051,9 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 	transferWhitelistEnabled?: boolean
 }): Promise<{ success: boolean; error?: string }> {
 	try {
+		const shareTokenMetadata = normalizeShareTokenMetadataProductions(
+			normalizeShareTokenMetadataCoupons(params.shareTokenMetadata)
+		)
 		const cardAddr = ethers.getAddress(params.cardAddress)
 		const row = await getBeamioCardRowForMetadataSync(cardAddr)
 		if (!row) {
@@ -10081,7 +10092,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 		}
 
 		const metaContent = buildBeamioErc1155Card0MetadataFileContent({
-			shareTokenMetadata: params.shareTokenMetadata,
+			shareTokenMetadata,
 			tiers: tiersForFile,
 			upgradeType,
 			transferWhitelistEnabled,
@@ -10096,7 +10107,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 			currency: row.currency,
 			priceInCurrencyE6: row.priceInCurrencyE6,
 			uri: row.uri ?? undefined,
-			shareTokenMetadata: params.shareTokenMetadata as Parameters<typeof registerCardToDb>[0]['shareTokenMetadata'],
+			shareTokenMetadata: shareTokenMetadata as Parameters<typeof registerCardToDb>[0]['shareTokenMetadata'],
 			...(tiersForFile && tiersForFile.length > 0 && { tiers: tiersForFile as never }),
 			...(upgradeType != null && { upgradeType: upgradeType as 0 | 1 | 2 }),
 			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
@@ -11572,6 +11583,8 @@ export const couponWorkflowDebugEnabled = (): boolean =>
 	typeof process !== 'undefined' &&
 	(process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === '1' || process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === 'true')
 
+export { BEAMIO_COUPON_NFT_CATEGORY } from './couponMetadataCategory'
+
 function readCouponIdFromSeriesMetadata(meta: Record<string, unknown> | null | undefined): string {
 	if (!meta || typeof meta !== 'object') return ''
 	const rootId = meta.couponId
@@ -12982,6 +12995,13 @@ export const executeForOwnerProcess = async () => {
 				}
 			} else if (rawExtra != null && typeof rawExtra === 'object' && !Array.isArray(rawExtra)) {
 				extraPropsFromBody = rawExtra as Record<string, unknown>
+			}
+			if (extraPropsFromBody) {
+				if (propertiesLookLikeProductionProps(extraPropsFromBody)) {
+					extraPropsFromBody = normalizeProductionCategoryOnTierProperties(extraPropsFromBody)
+				} else {
+					extraPropsFromBody = normalizeCouponCategoryOnTierProperties(extraPropsFromBody)
+				}
 			}
 			;(async () => {
 				try {

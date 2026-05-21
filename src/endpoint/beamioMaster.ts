@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, getCardByAddress, getNftTierMetadataByCardAndToken, upsertNftTierMetadata, updateSeriesMetadataByCardAndToken, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, type BeamioLatestCardItem} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, getCardByAddress, getNftTierMetadataByCardAndToken, upsertNftTierMetadata, updateSeriesMetadataByCardAndToken, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, type BeamioLatestCardItem} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import {
@@ -22,6 +22,13 @@ import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLate
 import { LATEST_CARDS_EXCLUDED, filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import {
+	BEAMIO_COUPON_NFT_CATEGORY,
+	normalizeCouponCategoryOnTierProperties,
+	normalizeCouponSeriesMetadataJson,
+	metadataMatchesClientCouponCategoryFilter,
+	metadataMatchesClientProductionCategoryFilter,
+} from '../couponMetadataCategory'
 
 const masterServerPort = 1111
 
@@ -265,6 +272,7 @@ const getMyFollowStatusCache = new Map<string, { data: unknown; expiry: number }
 const ownerNftSeriesCache = new Map<string, { items: unknown[]; expiry: number }>()
 const recentIssuedCouponSeriesCache = new Map<string, { items: unknown[]; limit: number; expiry: number }>()
 const cardActiveIssuedCouponSeriesCache = new Map<string, { data: { cardAddress: string; limit: number; items: unknown[] }; expiry: number }>()
+const cardActiveIssuedProductionSeriesCache = new Map<string, { data: { cardAddress: string; limit: number; items: unknown[] }; expiry: number }>()
 const seriesSharedMetadataCache = new Map<string, { data: unknown; expiry: number }>()
 const mintMetadataCache = new Map<string, { items: unknown[]; expiry: number }>()
 
@@ -1089,6 +1097,7 @@ const routing = ( router: Router ) => {
 				}> = []
 				for (const row of ordered) {
 					if (items.length >= limit) break
+					if (!metadataMatchesClientCouponCategoryFilter(row.metadata)) continue
 					let tid: bigint
 					try {
 						tid = BigInt(row.tokenId)
@@ -1145,6 +1154,110 @@ const routing = ( router: Router ) => {
 			} catch (err: any) {
 				logger(Colors.red('[cardActiveIssuedCouponSeries] error:'), err?.message ?? err)
 				res.status(500).json({ error: err?.message ?? 'Failed to fetch active issued coupons for card' })
+			}
+		})
+
+		/** GET /api/cardActiveIssuedProductionSeries — Program productions / services (category=productions) */
+		router.get('/cardActiveIssuedProductionSeries', async (req, res) => {
+			const { card } = req.query as { card?: string; limit?: string }
+			if (!card || !ethers.isAddress(card)) {
+				return res.status(400).json({ error: 'Invalid card address' })
+			}
+			let limit = Number((req.query as { limit?: string }).limit ?? 20)
+			if (!Number.isFinite(limit)) limit = 20
+			limit = Math.floor(limit)
+			limit = Math.min(Math.max(limit, 1), 50)
+			const checksum = ethers.getAddress(card)
+			const cacheKey = `${checksum.toLowerCase()}:${limit}`
+			const cached = cardActiveIssuedProductionSeriesCache.get(cacheKey)
+			if (cached && Date.now() < cached.expiry) {
+				return res.status(200).json(cached.data)
+			}
+			try {
+				const scanLimit = Math.min(400, Math.max(60, limit * 25))
+				const candidates = await listProductionIssuedNftSeriesForCardDescending(checksum, scanLimit)
+				const seenToken = new Set<string>()
+				const ordered = [] as typeof candidates
+				for (const row of candidates) {
+					if (seenToken.has(row.tokenId)) continue
+					seenToken.add(row.tokenId)
+					ordered.push(row)
+				}
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const cardContract = new ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, provider)
+				const items: Array<{
+					cardAddress: string
+					tokenId: string
+					sharedMetadataHash: string
+					ipfsCid: string
+					cardOwner: string
+					metadata: Record<string, unknown> | null
+					createdAt: string
+					issuedNftValidAfter: string
+					issuedNftValidBefore: string
+					issuedNftMaxSupply?: string
+					issuedNftMintedCount?: string
+					issuedNftRemainingSupply?: string
+				}> = []
+				for (const row of ordered) {
+					if (items.length >= limit) break
+					if (!metadataMatchesClientProductionCategoryFilter(row.metadata)) continue
+					let tid: bigint
+					try {
+						tid = BigInt(row.tokenId)
+					} catch {
+						continue
+					}
+					if (tid < ISSUED_NFT_START_ID) continue
+					let valid = false
+					try {
+						valid = await cardContract.isIssuedNftValid(tid)
+					} catch {
+						continue
+					}
+					if (!valid) continue
+					let maxSupply: bigint | null = null
+					let mintedCount: bigint | null = null
+					try {
+						const ms = await cardContract.issuedNftMaxSupply(tid)
+						if (ms === 0n) continue
+						maxSupply = ms
+						try {
+							mintedCount = await cardContract.issuedNftMintedCount(tid)
+						} catch {
+							mintedCount = null
+						}
+					} catch {
+						// unknown maxSupply: keep valid rows
+					}
+					let va = 0n
+					let vb = 0n
+					try { va = await cardContract.issuedNftValidAfter(tid) } catch { va = 0n }
+					try { vb = await cardContract.issuedNftValidBefore(tid) } catch { vb = 0n }
+					const remainingSupply = maxSupply != null && mintedCount != null
+						? (maxSupply > mintedCount ? maxSupply - mintedCount : 0n)
+						: null
+					items.push({
+						cardAddress: row.cardAddress,
+						tokenId: row.tokenId,
+						sharedMetadataHash: row.sharedMetadataHash,
+						ipfsCid: row.ipfsCid,
+						cardOwner: row.cardOwner,
+						metadata: row.metadata,
+						createdAt: row.createdAt,
+						issuedNftValidAfter: String(va),
+						issuedNftValidBefore: String(vb),
+						...(maxSupply != null ? { issuedNftMaxSupply: String(maxSupply) } : {}),
+						...(mintedCount != null ? { issuedNftMintedCount: String(mintedCount) } : {}),
+						...(remainingSupply != null ? { issuedNftRemainingSupply: String(remainingSupply) } : {}),
+					})
+				}
+				const data = { cardAddress: checksum, limit, items }
+				cardActiveIssuedProductionSeriesCache.set(cacheKey, { data, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+				res.status(200).json(data)
+			} catch (err: any) {
+				logger(Colors.red('[cardActiveIssuedProductionSeries] error:'), err?.message ?? err)
+				res.status(500).json({ error: err?.message ?? 'Failed to fetch active issued productions for card' })
 			}
 		})
 
@@ -1259,7 +1372,7 @@ const routing = ( router: Router ) => {
 					sharedMetadataHash: expectedHash,
 					ipfsCid: hasIpfs ? String(ipfsCid).trim() : undefined,
 					cardOwner,
-					metadataJson: metadata ?? undefined,
+					metadataJson: metadata ? normalizeCouponSeriesMetadataJson(metadata) : undefined,
 				})
 				res.status(200).json({ success: true })
 			} catch (err: any) {
@@ -1491,6 +1604,7 @@ const routing = ( router: Router ) => {
 				} else {
 					const coupon = { ...coupons[couponIdx] }
 					delete coupon.discountPercent
+					coupon.category = BEAMIO_COUPON_NFT_CATEGORY
 					setOrDeleteStringField(coupon, 'icon', String(body.icon ?? ''))
 					setOrDeleteStringField(coupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(coupon, 'description', String(body.description ?? ''))
@@ -1532,17 +1646,20 @@ const routing = ( router: Router ) => {
 					)
 				)
 				if (series) {
-					const nextSeriesMeta =
+					const nextSeriesMeta = normalizeCouponSeriesMetadataJson(
 						seriesMetaObj
 							? { ...(series.metadata as Record<string, unknown>) }
 							: {}
+					)
 					delete nextSeriesMeta.discountPercent
 					setOrDeleteStringField(nextSeriesMeta, 'icon', String(body.icon ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'description', String(body.description ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'couponImage', couponImageTrim)
 					if (nextSeriesMeta.properties && typeof nextSeriesMeta.properties === 'object' && !Array.isArray(nextSeriesMeta.properties)) {
-						const props = { ...(nextSeriesMeta.properties as Record<string, unknown>) }
+						const props = normalizeCouponCategoryOnTierProperties({
+							...(nextSeriesMeta.properties as Record<string, unknown>),
+						})
 						if (props.beamioCoupon && typeof props.beamioCoupon === 'object' && !Array.isArray(props.beamioCoupon)) {
 							const beamioCoupon = { ...(props.beamioCoupon as Record<string, unknown>) }
 							delete beamioCoupon.discountPercent
@@ -1551,8 +1668,8 @@ const routing = ( router: Router ) => {
 							setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
 							setOrDeleteStringField(beamioCoupon, 'couponImage', couponImageTrim)
 							props.beamioCoupon = beamioCoupon
-							nextSeriesMeta.properties = props
 						}
+						nextSeriesMeta.properties = props
 					}
 					const seriesUpdated = await updateSeriesMetadataByCardAndToken({
 						cardAddress: cardNorm,
@@ -1589,10 +1706,11 @@ const routing = ( router: Router ) => {
 					setOrDeleteStringField(nextTierMeta, 'image', String(body.icon ?? ''))
 					setOrDeleteStringField(nextTierMeta, 'background_color', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(nextTierMeta, 'description', String(body.description ?? ''))
-					const tierProps =
+					const tierProps = normalizeCouponCategoryOnTierProperties(
 						nextTierMeta.properties && typeof nextTierMeta.properties === 'object' && !Array.isArray(nextTierMeta.properties)
 							? { ...(nextTierMeta.properties as Record<string, unknown>) }
 							: {}
+					)
 					const beamioCoupon =
 						tierProps.beamioCoupon && typeof tierProps.beamioCoupon === 'object' && !Array.isArray(tierProps.beamioCoupon)
 							? { ...(tierProps.beamioCoupon as Record<string, unknown>) }
