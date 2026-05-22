@@ -5,6 +5,7 @@ import type { BeamioLatestCardItem } from '../db'
  * latestCards / last-N 发卡列表：Cluster 与 Master 共用排除集（与 SilentPassUI、Alliance USER_CARD_DISPLAY_EXCLUDED 对齐）。
  */
 export const LATEST_CARDS_EXCLUDED = new Set([
+	'0xbccfa50d2a5917c7a8662177f5f4b7a175787270',
 	'0x02bae511632354584b198951b42ec73bacbc4e98',
 	'0xf99018dffdb0c5657c93ca14db2900cebe1168a7',
 	'0xa86a8406b06bd6c332b4b380a0eaced822218eff',

@@ -22,6 +22,7 @@ import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tie
 
 /** 已废弃的旧基础设施卡地址，getUIDAssets 不查询、不返回。当前 BEAMIO_USER_CARD_ASSET_ADDRESS (0x74f35741...) 必须不在本列表。 */
 const DEPRECATED_INFRA_CARDS = new Set([
+	'0xBCcfA50d2a5917C7A8662177F5F4B7A175787270'.toLowerCase(),
 	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
 	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
 	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
@@ -300,7 +301,9 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	const singleInfraScope = merchantInfraOnly || infrastructureOnly
 	const infraFallbackName = 'Infrastructure card'
 	const cardAddresses: { address: string; name: string; type: string }[] = singleInfraScope
-		? [{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' }]
+		? DEPRECATED_INFRA_CARDS.has(infraAddr.toLowerCase())
+			? []
+			: [{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' }]
 		: [
 				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
 				{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' },

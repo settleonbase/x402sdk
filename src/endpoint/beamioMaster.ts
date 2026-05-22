@@ -32,6 +32,10 @@ import {
 
 const masterServerPort = 1111
 
+const DEPRECATED_USER_CARD_ADDRESSES = new Set([
+	'0xBCcfA50d2a5917C7A8662177F5F4B7A175787270'.toLowerCase(),
+])
+
 /** HTTP 记账 body 中的 routeItems 归一化（与 MemberCard 内存路径一致） */
 function normalizeBeamioRouteItemsFromBody(raw: unknown): BeamioTransferRouteItem[] | undefined {
 	if (!Array.isArray(raw) || raw.length === 0) {
@@ -727,6 +731,7 @@ const routing = ( router: Router ) => {
 					const cards: string[] = await factory.cardsOfOwner(o)
 					for (const addr of cards) {
 						const key = addr.toLowerCase()
+						if (DEPRECATED_USER_CARD_ADDRESSES.has(key)) continue
 						if (seen.has(key)) continue
 						seen.add(key)
 						try {

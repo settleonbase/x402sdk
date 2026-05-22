@@ -35,12 +35,21 @@ import {
 } from './usdcChargeOrchestrator'
 /** 服务器返回时强制屏蔽的旧基础设施卡地址 */
 const DEPRECATED_INFRA_CARDS = new Set([
+	'0xBCcfA50d2a5917C7A8662177F5F4B7A175787270'.toLowerCase(),
 	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
 	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
 	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
 	'0x5c5376EdAbBf0F0BD52d5F7a93828606a5051694'.toLowerCase(),
 	'0xEaCD6CB7e9E5b2a2652Ad65840997Aab37b828E1'.toLowerCase(),
 ])
+
+const isDeprecatedInfraCardAddress = (value: string): boolean => {
+	try {
+		return DEPRECATED_INFRA_CARDS.has(ethers.getAddress(value).toLowerCase())
+	} catch {
+		return false
+	}
+}
 
 function posLedgerKeccakCategory(name: string): string {
 	return ethers.keccak256(ethers.toUtf8Bytes(name)).toLowerCase()
@@ -1193,6 +1202,9 @@ const routing = ( router: Router ) => {
 		if (!ethers.isAddress(cardAddr)) {
 			return res.status(400).json({ ok: false, error: 'Invalid cardAddress' }).end()
 		}
+		if (isDeprecatedInfraCardAddress(cardAddr)) {
+			return res.status(404).json({ ok: false, error: 'Deprecated cardAddress' }).end()
+		}
 		try {
 			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_ADMIN_ABI, providerBase)
 			const [owner, adminResult] = await Promise.all([
@@ -1302,6 +1314,9 @@ const routing = ( router: Router ) => {
 		if (!ethers.isAddress(cardAddr)) {
 			return res.status(400).json({ ok: false, error: 'Invalid cardAddress' }).end()
 		}
+		if (isDeprecatedInfraCardAddress(cardAddr)) {
+			return res.status(404).json({ ok: false, error: 'Deprecated cardAddress' }).end()
+		}
 		try {
 			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_STATS_ABI, providerBase)
 			let adminAddr = adminQ?.trim() && ethers.isAddress(adminQ.trim()) ? ethers.getAddress(adminQ.trim()) : null
@@ -1330,6 +1345,9 @@ const routing = ( router: Router ) => {
 		const cardAddr = (cardAddress?.trim() || BEAMIO_USER_CARD_ASSET_ADDRESS)
 		if (!ethers.isAddress(cardAddr)) {
 			return res.status(400).json({ error: 'Invalid cardAddress' }).end()
+		}
+		if (isDeprecatedInfraCardAddress(cardAddr)) {
+			return res.status(404).json({ error: 'Deprecated cardAddress' }).end()
 		}
 		const adminAddr = adminAddress?.trim() && ethers.isAddress(adminAddress.trim()) ? ethers.getAddress(adminAddress.trim()) : null
 		const aaAddr = aaAddress?.trim() && ethers.isAddress(aaAddress.trim()) ? ethers.getAddress(aaAddress.trim()) : null
