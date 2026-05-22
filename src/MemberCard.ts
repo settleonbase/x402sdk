@@ -2680,6 +2680,12 @@ export const executeForAdminProcess = async () => {
 			}
 		}
 		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash} | uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'}`))
+		if (isAdminManager) {
+			const receipt = await tx.wait()
+			if (!receipt || Number(receipt.status ?? 0) !== 1) {
+				throw new Error('executeForAdmin adminManager transaction failed')
+			}
+		}
 		void syncPosTerminalAdminBindingAfterTx(tx, obj.cardAddr, obj.data).catch(() => {})
 		// Base 交易已提交即可回复 UI；BUint / indexer / metadata 见 executeForAdminPostBaseProcess（不阻塞本 worker 归还 SC）
 		if (obj.res && !obj.res.headersSent) {
@@ -12809,9 +12815,9 @@ export const executeForOwnerProcess = async () => {
 	}
 	try {
 		const factory = SC.baseFactoryPaymaster
+		const dataSelector = obj.data?.slice(0, 10).toLowerCase() ?? ''
+		const isAdminManager = dataSelector === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase()
 		if (SC.aaAccountFactoryPaymaster && obj.data) {
-			const dataSelector = obj.data.slice(0, 10).toLowerCase()
-			const isAdminManager = dataSelector === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase()
 			if (isAdminManager) {
 				const iface = dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ? adminManager5ArgIface : adminManager4ArgIface
 				const decoded = iface.parseTransaction({ data: obj.data })
@@ -12912,6 +12918,12 @@ export const executeForOwnerProcess = async () => {
 			obj.ownerSignature
 		)
 		const hash = tx?.hash as string | undefined
+		if (isAdminManager) {
+			const receipt = await tx.wait()
+			if (!receipt || Number(receipt.status ?? 0) !== 1) {
+				throw new Error('executeForOwner adminManager transaction failed')
+			}
+		}
 		void syncPosTerminalAdminBindingAfterTx(tx, obj.cardAddress, obj.data).catch(() => {})
 		let code: string | undefined
 		if (obj.redeemCode != null && obj.toUserEOA != null) {
