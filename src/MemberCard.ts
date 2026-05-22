@@ -425,7 +425,7 @@ export async function nfcLinkAppValidateParams(body: {
 //			RedeemModule 						0x1EC7540EbC03bcEBEc0C5f981C3D91100d206F5F
 //			BeamioQuoteHelperV07 						0x4DD4b418949911B8A8038295F6a8Af7a1eA8de50
 //			BeamioUserCardDeployerV07 					0x820bB3F54A403B298e2F785FFdA225009e9CA7Bf
-//			BeamioUserCardFactoryPaymasterV07			0xec00b58Df88006D2343D1ddDF52e090379043E25
+//			BeamioUserCardFactoryPaymasterV07			0xF2864210577359AcaE448D2B116031a0c5EE1016
 
 masterSetup.settle_contractAdmin.forEach((n: string) => {
 	const walletBase = new ethers.Wallet(n, providerBaseBackup1)
