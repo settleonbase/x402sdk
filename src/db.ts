@@ -3689,24 +3689,24 @@ export const listCouponIssuedNftSeriesForCardDescending = async (
 /** SQL predicate: beamio_nft_series row is a Program productions / service catalog issued series. */
 const PRODUCTION_ISSUED_SERIES_METADATA_WHERE = `
 (
-	(metadata_json->>'category') = 'productions'
+	(metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'productions')
 	OR (
 		metadata_json ? 'properties'
-		AND (metadata_json->'properties'->>'category') = 'productions'
+		AND (
+			(metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'productions')
+			OR (metadata_json->'properties') ? 'beamioProduction'
+		)
 	)
-	OR (
-		(metadata_json ? 'properties')
-		AND ((metadata_json->'properties') ? 'beamioProduction')
-	)
+	OR (metadata_json ? 'productionId')
 )
 AND (
 	NOT (metadata_json ? 'category')
-	OR (metadata_json->>'category') = 'productions'
+	OR (metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'productions')
 )
 AND (
 	NOT (metadata_json ? 'properties')
 	OR NOT ((metadata_json->'properties') ? 'category')
-	OR (metadata_json->'properties'->>'category') = 'productions'
+	OR (metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'productions')
 )
 `
 

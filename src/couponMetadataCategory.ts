@@ -1,12 +1,40 @@
 /** Issued coupon NFT / program coupon definition metadata category label. */
 import { ethers } from 'ethers'
+import {
+	applyBeamioTileBackgroundPhotoRuleToMetadataRow,
+	BEAMIO_CATALOG_TILE_PHOTO_FIELD,
+	BEAMIO_COUPON_TILE_PHOTO_FIELD,
+} from './beamioTileBackgroundMetadata'
 
 export const BEAMIO_COUPON_NFT_CATEGORY = 'Coupon' as const
 
-/** Issued service / production catalog NFT metadata category label. */
+/** Legacy issued service / production catalog NFT metadata category label. */
 export const BEAMIO_PRODUCTION_NFT_CATEGORY = 'productions' as const
 
+/** Catalog item global categories — stored on metadata root `category` (same level as coupon `Coupon`). */
+export const BEAMIO_CATALOG_GLOBAL_CATEGORIES = ['Product', 'Service', 'Menu'] as const
+
+export type BeamioCatalogGlobalCategory = (typeof BEAMIO_CATALOG_GLOBAL_CATEGORIES)[number]
+
+export const DEFAULT_BEAMIO_CATALOG_GLOBAL_CATEGORY: BeamioCatalogGlobalCategory = 'Service'
+
+export function isBeamioCatalogGlobalCategory(value: unknown): value is BeamioCatalogGlobalCategory {
+	return (
+		typeof value === 'string' &&
+		BEAMIO_CATALOG_GLOBAL_CATEGORIES.some((cat) => cat === value.trim())
+	)
+}
+
+export function normalizeBeamioCatalogGlobalCategory(raw: unknown): BeamioCatalogGlobalCategory {
+	if (isBeamioCatalogGlobalCategory(raw)) return raw.trim() as BeamioCatalogGlobalCategory
+	if (typeof raw === 'string' && raw.trim().toLowerCase() === BEAMIO_PRODUCTION_NFT_CATEGORY.toLowerCase()) {
+		return DEFAULT_BEAMIO_CATALOG_GLOBAL_CATEGORY
+	}
+	return DEFAULT_BEAMIO_CATALOG_GLOBAL_CATEGORY
+}
+
 export function isBeamioProductionNftCategory(value: unknown): boolean {
+	if (isBeamioCatalogGlobalCategory(value)) return true
 	return typeof value === 'string' && value.trim().toLowerCase() === BEAMIO_PRODUCTION_NFT_CATEGORY.toLowerCase()
 }
 
@@ -88,7 +116,7 @@ export function normalizeShareTokenMetadataCoupons(share: Record<string, unknown
 		if (id || isBeamioCouponNftCategory(row.category) || row.issueTotal != null) {
 			row.category = BEAMIO_COUPON_NFT_CATEGORY
 		}
-		return row
+		return applyBeamioTileBackgroundPhotoRuleToMetadataRow(row, BEAMIO_COUPON_TILE_PHOTO_FIELD)
 	})
 	return { ...share, coupons: next }
 }
@@ -140,7 +168,7 @@ export function filterShareTokenMetadataCouponsForClient(share: Record<string, u
 	return { ...share, coupons: filtered }
 }
 
-/** Tier / issued-NFT `properties` for Program service catalog (productions). */
+/** Tier / issued-NFT `properties` for Program service catalog (productions / Product / Service / Menu). */
 export function propertiesLookLikeProductionProps(props: Record<string, unknown>): boolean {
 	if (isBeamioProductionNftCategory(props.category)) return true
 	const beamioProduction = props.beamioProduction
@@ -149,7 +177,7 @@ export function propertiesLookLikeProductionProps(props: Record<string, unknown>
 
 export function normalizeProductionCategoryOnTierProperties(props: Record<string, unknown>): Record<string, unknown> {
 	if (!propertiesLookLikeProductionProps(props)) return props
-	return { ...props, category: BEAMIO_PRODUCTION_NFT_CATEGORY }
+	return { ...props, category: normalizeBeamioCatalogGlobalCategory(props.category) }
 }
 
 export function seriesMetadataLooksLikeProduction(meta: Record<string, unknown>): boolean {
@@ -165,14 +193,17 @@ export function seriesMetadataLooksLikeProduction(meta: Record<string, unknown>)
 
 export function normalizeProductionSeriesMetadataJson(meta: Record<string, unknown>): Record<string, unknown> {
 	if (!seriesMetadataLooksLikeProduction(meta)) return meta
-	const out: Record<string, unknown> = { ...meta, category: BEAMIO_PRODUCTION_NFT_CATEGORY }
+	const out: Record<string, unknown> = {
+		...meta,
+		category: normalizeBeamioCatalogGlobalCategory(meta.category),
+	}
 	if (out.properties && typeof out.properties === 'object' && !Array.isArray(out.properties)) {
 		out.properties = normalizeProductionCategoryOnTierProperties(out.properties as Record<string, unknown>)
 	}
 	return out
 }
 
-/** createIssuedNft metadata_extra_properties — coupon or productions. */
+/** createIssuedNft metadata_extra_properties — coupon or catalog item (Product / Service / Menu). */
 export function normalizeIssuedNftMetadataExtraProperties(
 	extra: string | Record<string, unknown> | undefined
 ): string | Record<string, unknown> | undefined {
@@ -233,14 +264,22 @@ export function normalizeShareTokenMetadataProductions(share: Record<string, unk
 		const row = { ...(item as Record<string, unknown>) }
 		const id = String(row.id ?? row.productionId ?? '').trim()
 		if (id || isBeamioProductionNftCategory(row.category) || row.singleSessionPrice != null) {
-			row.category = BEAMIO_PRODUCTION_NFT_CATEGORY
+			row.category = normalizeBeamioCatalogGlobalCategory(row.category)
+			const itemCategoryRaw =
+				typeof row.itemCategory === 'string'
+					? row.itemCategory.trim()
+					: typeof row.serviceCategory === 'string'
+						? row.serviceCategory.trim()
+						: ''
+			if (itemCategoryRaw) row.itemCategory = itemCategoryRaw
+			delete row.serviceCategory
 		}
-		return row
+		return applyBeamioTileBackgroundPhotoRuleToMetadataRow(row, BEAMIO_CATALOG_TILE_PHOTO_FIELD)
 	})
 	return { ...share, productions: next }
 }
 
-/** Card-level global service catalog category chips (`shareTokenMetadata.serviceCategory`). */
+/** Card-level item category chips (`shareTokenMetadata.itemCategory`; legacy `serviceCategory`). */
 function normalizeServiceCategoryLabelForHash(label: string): string {
 	return label.trim().replace(/\s+/g, ' ').toLowerCase()
 }
@@ -251,11 +290,14 @@ function serviceCategoryHashIdFromLabel(label: string): string {
 	return ethers.keccak256(ethers.toUtf8Bytes(`beamio:serviceCategory:${key}`)).slice(2, 18)
 }
 
-export function normalizeShareTokenMetadataServiceCategory(share: Record<string, unknown>): Record<string, unknown> {
-	const raw = share.serviceCategory
-	if (raw == null) return share
+export function normalizeShareTokenMetadataItemCategory(share: Record<string, unknown>): Record<string, unknown> {
+	const raw = share.itemCategory ?? share.serviceCategory
+	if (raw == null) {
+		const { serviceCategory: _legacy, ...rest } = share
+		return rest
+	}
 	if (!Array.isArray(raw)) {
-		const { serviceCategory: _removed, ...rest } = share
+		const { serviceCategory: _legacy, itemCategory: _removed, ...rest } = share
 		return rest
 	}
 	const out: Array<{ id: string; label: string }> = []
@@ -274,9 +316,15 @@ export function normalizeShareTokenMetadataServiceCategory(share: Record<string,
 		idSeen.add(id)
 		out.push({ id, label })
 	}
+	const { serviceCategory: _legacy, ...base } = share
 	if (out.length === 0) {
-		const { serviceCategory: _removed, ...rest } = share
+		const { itemCategory: _removed, ...rest } = base
 		return rest
 	}
-	return { ...share, serviceCategory: out }
+	return { ...base, itemCategory: out }
+}
+
+/** @deprecated Use `normalizeShareTokenMetadataItemCategory`. */
+export function normalizeShareTokenMetadataServiceCategory(share: Record<string, unknown>): Record<string, unknown> {
+	return normalizeShareTokenMetadataItemCategory(share)
 }

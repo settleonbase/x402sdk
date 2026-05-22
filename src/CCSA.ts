@@ -3,8 +3,18 @@ import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
 import BeamioUserCardArtifact from './ABI/BeamioUserCardArtifact.json'
 import {
+  BASE_BEAMIO_USER_CARD_ADMIN_GATEWAY_LIB,
+  BASE_BEAMIO_USER_CARD_FAUCET_GATEWAY_LIB,
   BASE_BEAMIO_USER_CARD_FORMATTING_LIB,
+  BASE_BEAMIO_USER_CARD_GATEWAY_MINT_LIB,
+  BASE_BEAMIO_USER_CARD_GOVERNANCE_LIB,
+  BASE_BEAMIO_USER_CARD_ISSUED_NFT_GATEWAY_LIB,
+  BASE_BEAMIO_USER_CARD_MODULE_ROUTER_LIB,
+  BASE_BEAMIO_USER_CARD_REDEEM_GATEWAY_LIB,
+  BASE_BEAMIO_USER_CARD_REFERRER_LIB,
   BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
+  BASE_BEAMIO_USER_CARD_UPDATE_LIB,
+  BASE_BEAMIO_USER_CARD_VIEWS_LIB,
   BASE_CARD_FACTORY,
 } from './chainAddresses'
 import {
@@ -151,29 +161,32 @@ function getCreateCardGasLimit(): bigint {
 export function resolveBeamioUserCardLibraryAddresses(
   override?: BeamioUserCardLibraryAddresses
 ): BeamioUserCardLibraryAddresses | undefined {
-  const fmtO = override?.BeamioUserCardFormattingLib?.trim()
-  const trO = override?.BeamioUserCardTransferLib?.trim()
-  const fmtE =
-    typeof process !== 'undefined' ? process.env?.BEAMIO_USER_CARD_FORMATTING_LIB?.trim() : undefined
-  const trE = typeof process !== 'undefined' ? process.env?.BEAMIO_USER_CARD_TRANSFER_LIB?.trim() : undefined
-
-  let fmt: string | undefined
-  let tr: string | undefined
-  if (fmtO) fmt = tryNormalizeLibAddress(fmtO)
-  else if (fmtE) fmt = tryNormalizeLibAddress(fmtE)
-  else if (isConfiguredLibAddress(BASE_BEAMIO_USER_CARD_FORMATTING_LIB)) {
-    fmt = tryNormalizeLibAddress(BASE_BEAMIO_USER_CARD_FORMATTING_LIB)
+  const defaults: BeamioUserCardLibraryAddresses = {
+    BeamioUserCardAdminGatewayLib: BASE_BEAMIO_USER_CARD_ADMIN_GATEWAY_LIB,
+    BeamioUserCardFaucetGatewayLib: BASE_BEAMIO_USER_CARD_FAUCET_GATEWAY_LIB,
+    BeamioUserCardFormattingLib: BASE_BEAMIO_USER_CARD_FORMATTING_LIB,
+    BeamioUserCardGatewayMintLib: BASE_BEAMIO_USER_CARD_GATEWAY_MINT_LIB,
+    BeamioUserCardGovernanceLib: BASE_BEAMIO_USER_CARD_GOVERNANCE_LIB,
+    BeamioUserCardIssuedNftGatewayLib: BASE_BEAMIO_USER_CARD_ISSUED_NFT_GATEWAY_LIB,
+    BeamioUserCardModuleRouterLib: BASE_BEAMIO_USER_CARD_MODULE_ROUTER_LIB,
+    BeamioUserCardRedeemGatewayLib: BASE_BEAMIO_USER_CARD_REDEEM_GATEWAY_LIB,
+    BeamioUserCardReferrerLib: BASE_BEAMIO_USER_CARD_REFERRER_LIB,
+    BeamioUserCardTransferLib: BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
+    BeamioUserCardUpdateLib: BASE_BEAMIO_USER_CARD_UPDATE_LIB,
+    BeamioUserCardViewsLib: BASE_BEAMIO_USER_CARD_VIEWS_LIB,
   }
-  if (trO) tr = tryNormalizeLibAddress(trO)
-  else if (trE) tr = tryNormalizeLibAddress(trE)
-  else if (isConfiguredLibAddress(BASE_BEAMIO_USER_CARD_TRANSFER_LIB)) {
-    tr = tryNormalizeLibAddress(BASE_BEAMIO_USER_CARD_TRANSFER_LIB)
+  const out: BeamioUserCardLibraryAddresses = {}
+  for (const libName of Object.keys(defaults)) {
+    const envName = `BEAMIO_USER_CARD_${libName.replace(/^BeamioUserCard/, '').replace(/Lib$/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}_LIB`
+    const raw =
+      override?.[libName]?.trim() ||
+      (typeof process !== 'undefined' ? process.env?.[envName]?.trim() : undefined) ||
+      defaults[libName]
+    const normalized = isConfiguredLibAddress(raw) ? tryNormalizeLibAddress(raw) : undefined
+    if (!normalized) return undefined
+    out[libName] = normalized
   }
-
-  if (fmt && tr) {
-    return { BeamioUserCardFormattingLib: fmt, BeamioUserCardTransferLib: tr }
-  }
-  return undefined
+  return out
 }
 
 export type CreateBeamioCardOptions = {

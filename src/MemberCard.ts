@@ -15,7 +15,7 @@ import {
 	normalizeProductionCategoryOnTierProperties,
 	normalizeShareTokenMetadataCoupons,
 	normalizeShareTokenMetadataProductions,
-	normalizeShareTokenMetadataServiceCategory,
+	normalizeShareTokenMetadataItemCategory,
 	propertiesLookLikeProductionProps,
 } from './couponMetadataCategory'
 import { inspect } from 'util'
@@ -57,8 +57,18 @@ import {
 	BEAMIO_USER_CARD_ASSET_ADDRESS,
 	CONET_MAINNET_CHAIN_ID,
 	BASE_MAINNET_CHAIN_ID,
+	BASE_BEAMIO_USER_CARD_ADMIN_GATEWAY_LIB,
+	BASE_BEAMIO_USER_CARD_FAUCET_GATEWAY_LIB,
 	BASE_BEAMIO_USER_CARD_FORMATTING_LIB,
+	BASE_BEAMIO_USER_CARD_GATEWAY_MINT_LIB,
+	BASE_BEAMIO_USER_CARD_GOVERNANCE_LIB,
+	BASE_BEAMIO_USER_CARD_ISSUED_NFT_GATEWAY_LIB,
+	BASE_BEAMIO_USER_CARD_MODULE_ROUTER_LIB,
+	BASE_BEAMIO_USER_CARD_REDEEM_GATEWAY_LIB,
+	BASE_BEAMIO_USER_CARD_REFERRER_LIB,
 	BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
+	BASE_BEAMIO_USER_CARD_UPDATE_LIB,
+	BASE_BEAMIO_USER_CARD_VIEWS_LIB,
 } from './chainAddresses'
 
 import {
@@ -69,24 +79,30 @@ import {
 
 function beamioUserCardLibrariesFromConfig(override?: BeamioUserCardLibraryAddresses): BeamioUserCardLibraryAddresses {
 	if (override) return override
-	const formatting =
-		(typeof process !== 'undefined' && process.env.BEAMIO_USER_CARD_FORMATTING_LIB?.trim()) ||
-		BASE_BEAMIO_USER_CARD_FORMATTING_LIB
-	const transfer =
-		(typeof process !== 'undefined' && process.env.BEAMIO_USER_CARD_TRANSFER_LIB?.trim()) ||
-		BASE_BEAMIO_USER_CARD_TRANSFER_LIB
-	if (!formatting || !transfer || !ethers.isAddress(formatting) || !ethers.isAddress(transfer)) {
-		throw new Error(
-			'BeamioUserCard requires linked libraries. Set BASE_BEAMIO_USER_CARD_FORMATTING_LIB / BASE_BEAMIO_USER_CARD_TRANSFER_LIB in chainAddresses.ts or BEAMIO_* env after deploying (see BeamioContract scripts/beamioUserCardLibraries.ts).'
-		)
+	const defaults: BeamioUserCardLibraryAddresses = {
+		BeamioUserCardAdminGatewayLib: BASE_BEAMIO_USER_CARD_ADMIN_GATEWAY_LIB,
+		BeamioUserCardFaucetGatewayLib: BASE_BEAMIO_USER_CARD_FAUCET_GATEWAY_LIB,
+		BeamioUserCardFormattingLib: BASE_BEAMIO_USER_CARD_FORMATTING_LIB,
+		BeamioUserCardGatewayMintLib: BASE_BEAMIO_USER_CARD_GATEWAY_MINT_LIB,
+		BeamioUserCardGovernanceLib: BASE_BEAMIO_USER_CARD_GOVERNANCE_LIB,
+		BeamioUserCardIssuedNftGatewayLib: BASE_BEAMIO_USER_CARD_ISSUED_NFT_GATEWAY_LIB,
+		BeamioUserCardModuleRouterLib: BASE_BEAMIO_USER_CARD_MODULE_ROUTER_LIB,
+		BeamioUserCardRedeemGatewayLib: BASE_BEAMIO_USER_CARD_REDEEM_GATEWAY_LIB,
+		BeamioUserCardReferrerLib: BASE_BEAMIO_USER_CARD_REFERRER_LIB,
+		BeamioUserCardTransferLib: BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
+		BeamioUserCardUpdateLib: BASE_BEAMIO_USER_CARD_UPDATE_LIB,
+		BeamioUserCardViewsLib: BASE_BEAMIO_USER_CARD_VIEWS_LIB,
 	}
-	if (formatting === ethers.ZeroAddress || transfer === ethers.ZeroAddress) {
-		throw new Error('BeamioUserCard library addresses must be non-zero')
+	const out: BeamioUserCardLibraryAddresses = {}
+	for (const libName of Object.keys(defaults)) {
+		const envName = `BEAMIO_USER_CARD_${libName.replace(/^BeamioUserCard/, '').replace(/Lib$/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}_LIB`
+		const raw = (typeof process !== 'undefined' && process.env[envName]?.trim()) || defaults[libName]
+		if (!raw || !ethers.isAddress(raw) || raw === ethers.ZeroAddress) {
+			throw new Error(`BeamioUserCard requires linked library ${libName}. Set ${envName} or sync chainAddresses.ts after deploying libraries.`)
+		}
+		out[libName] = ethers.getAddress(raw)
 	}
-	return {
-		BeamioUserCardFormattingLib: ethers.getAddress(formatting),
-		BeamioUserCardTransferLib: ethers.getAddress(transfer),
-	}
+	return out
 }
 import {
 	registerCardToDb,
@@ -409,7 +425,7 @@ export async function nfcLinkAppValidateParams(body: {
 //			RedeemModule 						0x1EC7540EbC03bcEBEc0C5f981C3D91100d206F5F
 //			BeamioQuoteHelperV07 						0x4DD4b418949911B8A8038295F6a8Af7a1eA8de50
 //			BeamioUserCardDeployerV07 					0x820bB3F54A403B298e2F785FFdA225009e9CA7Bf
-//			BeamioUserCardFactoryPaymasterV07			0x0f8273773Ba91348B308198723BE0402230A8019
+//			BeamioUserCardFactoryPaymasterV07			0xec00b58Df88006D2343D1ddDF52e090379043E25
 
 masterSetup.settle_contractAdmin.forEach((n: string) => {
 	const walletBase = new ethers.Wallet(n, providerBaseBackup1)
@@ -10052,7 +10068,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 	transferWhitelistEnabled?: boolean
 }): Promise<{ success: boolean; error?: string }> {
 	try {
-		const shareTokenMetadata = normalizeShareTokenMetadataServiceCategory(
+		const shareTokenMetadata = normalizeShareTokenMetadataItemCategory(
 			normalizeShareTokenMetadataProductions(
 				normalizeShareTokenMetadataCoupons(params.shareTokenMetadata)
 			)

@@ -1,10 +1,7 @@
 import { getAddress, keccak256, toUtf8Bytes } from 'ethers'
 
 /** 与 Hardhat 编译的 BeamioUserCard linkReferences 中短名一致 */
-export type BeamioUserCardLibraryAddresses = {
-  BeamioUserCardFormattingLib: string
-  BeamioUserCardTransferLib: string
-}
+export type BeamioUserCardLibraryAddresses = Record<string, string>
 
 /**
  * 将未链接的 creation bytecode 按 solc 规则填入 external library 地址。
