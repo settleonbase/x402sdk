@@ -122,6 +122,8 @@ export type FetchUIDAssetsResult = {
 /** POS / 客户端可选：指定终端登记的基础设施 BeamioUserCard 地址；若与默认常量不一致则查询该合约。 */
 export type FetchUIDAssetsOptions = {
 	infrastructureCardAddress?: string
+	/** Extra BeamioUserCard addresses from trusted DB/indexer discovery (for NFC all-card inventory refresh). */
+	extraCardAddresses?: string[]
 	/**
 	 * `merchantInfraOnly`：仅返回该基础设施卡一行（含余额为 0），用于 POS「Check Balance」。
 	 * `infrastructureOnly`：仅查询/返回解析后的基础设施卡（`merchantInfraCard` 或默认常量），不附带 CCSA。
@@ -308,6 +310,18 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
 				{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' },
 			].filter(({ address }) => !DEPRECATED_INFRA_CARDS.has(address.toLowerCase()))
+	const seenCardAddresses = new Set(cardAddresses.map((c) => c.address.toLowerCase()))
+	for (const raw of opts?.extraCardAddresses ?? []) {
+		try {
+			const address = ethers.getAddress(raw)
+			const lower = address.toLowerCase()
+			if (DEPRECATED_INFRA_CARDS.has(lower) || seenCardAddresses.has(lower)) continue
+			cardAddresses.push({ address, name: 'BeamioUserCard', type: 'beamio-user-card' })
+			seenCardAddresses.add(lower)
+		} catch {
+			/* ignore invalid DB/cache address */
+		}
+	}
 	const cardsStaged: { row: FetchUIDAssetsResult['cards'][number]; sortMin: bigint }[] = []
 	for (const { address: cardAddr, name: fallbackDisplayName, type: cardType } of cardAddresses) {
 		let cardName = fallbackDisplayName

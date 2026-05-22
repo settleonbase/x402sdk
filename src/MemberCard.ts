@@ -2680,10 +2680,11 @@ export const executeForAdminProcess = async () => {
 			}
 		}
 		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash} | uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'}`))
-		if (isAdminManager) {
+		const shouldWaitReceiptBeforeSuccess = isAdminManager || Boolean(mintParsed) || Boolean(burnParsedForLog)
+		if (shouldWaitReceiptBeforeSuccess) {
 			const receipt = await tx.wait()
 			if (!receipt || Number(receipt.status ?? 0) !== 1) {
-				throw new Error('executeForAdmin adminManager transaction failed')
+				throw new Error(`executeForAdmin transaction failed on-chain: ${tx.hash}`)
 			}
 		}
 		void syncPosTerminalAdminBindingAfterTx(tx, obj.cardAddr, obj.data).catch(() => {})

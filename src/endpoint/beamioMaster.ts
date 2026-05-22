@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, getCardByAddress, getNftTierMetadataByCardAndToken, upsertNftTierMetadata, updateSeriesMetadataByCardAndToken, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, type BeamioLatestCardItem} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, getCardByAddress, getNftTierMetadataByCardAndToken, upsertNftTierMetadata, updateSeriesMetadataByCardAndToken, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards, type BeamioLatestCardItem} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import {
@@ -824,6 +824,13 @@ const routing = ( router: Router ) => {
 				if (wasNewlyProvisioned) logger(Colors.green(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
 				const result = await fetchUIDAssetsForEOA(eoa)
 				if (uid && tagIdHex) {
+					await upsertNfcBeamioUserCardHoldingsFromTrustedCards({
+						tagIdHex,
+						uid: uid.trim(),
+						ownerEoa: eoa,
+						aaAddress: result.aaAddress ?? null,
+						cards: result.cards,
+					})
 					scheduleEnsureNfcBeamioTagForEoa(eoa, uid.trim(), tagIdHex, result.cards)
 				}
 				const counterVal = counterHex && /^[0-9a-fA-F]{6}$/.test(counterHex) ? parseInt(counterHex, 16) : undefined

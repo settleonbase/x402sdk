@@ -1929,6 +1929,26 @@ const NFC_CARDS_PRIVATE_KEY_DROP_NOT_NULL = `ALTER TABLE nfc_cards ALTER COLUMN 
 /** NFC 自动分配的 verra 序号，按 tag_id 绑定便于幂等 */
 const NFC_CARDS_ADD_VERRA_NUMBER = `ALTER TABLE nfc_cards ADD COLUMN IF NOT EXISTS verra_number BIGINT`
 
+/** NFC TagID -> 已可信确认持有资产的 BeamioUserCard 列表。只在可信链上读成功后 upsert，不因失败/空窗口清空。 */
+const NFC_BEAMIO_USER_CARD_HOLDINGS_TABLE = `CREATE TABLE IF NOT EXISTS nfc_beamio_user_card_holdings (
+	id SERIAL PRIMARY KEY,
+	tag_id TEXT NOT NULL,
+	uid TEXT,
+	owner_eoa TEXT NOT NULL,
+	aa_address TEXT,
+	card_address TEXT NOT NULL,
+	card_name TEXT,
+	card_type TEXT,
+	points6 TEXT NOT NULL DEFAULT '0',
+	charge_reward_points6 TEXT NOT NULL DEFAULT '0',
+	primary_member_token_id TEXT,
+	last_trusted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	UNIQUE(tag_id, card_address)
+)`
+const NFC_BEAMIO_USER_CARD_HOLDINGS_IDX_OWNER = `CREATE INDEX IF NOT EXISTS idx_nfc_beamio_user_card_holdings_owner ON nfc_beamio_user_card_holdings (LOWER(TRIM(owner_eoa)))`
+const NFC_BEAMIO_USER_CARD_HOLDINGS_IDX_CARD = `CREATE INDEX IF NOT EXISTS idx_nfc_beamio_user_card_holdings_card ON nfc_beamio_user_card_holdings (LOWER(TRIM(card_address)))`
+
 /** 全局自增 verra 编号（PostgreSQL 单行原子 UPDATE） */
 const BEAMIO_VERRA_SEQ_TABLE = `CREATE TABLE IF NOT EXISTS beamio_verra_seq (
 	id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -1951,6 +1971,206 @@ async function ensureNfcCardsExtendedSchema(db: Client): Promise<void> {
 	await db.query(NFC_CARDS_PRIVATE_KEY_DROP_NOT_NULL)
 	await db.query(NFC_CARDS_ADD_VERRA_NUMBER)
 	await db.query(NFC_CARDS_IDX_LINKED_OWNER)
+}
+
+async function ensureNfcBeamioUserCardHoldingsSchema(db: Client): Promise<void> {
+	await db.query(NFC_BEAMIO_USER_CARD_HOLDINGS_TABLE)
+	await db.query(NFC_BEAMIO_USER_CARD_HOLDINGS_IDX_OWNER)
+	await db.query(NFC_BEAMIO_USER_CARD_HOLDINGS_IDX_CARD)
+}
+
+export type NfcBeamioUserCardHoldingRow = {
+	tagId: string
+	uid: string | null
+	ownerEoa: string
+	aaAddress: string | null
+	cardAddress: string
+	cardName: string | null
+	cardType: string | null
+	points6: string
+	chargeRewardPoints6: string
+	primaryMemberTokenId: string | null
+	lastTrustedAt: string
+}
+
+function normalizeNfcHoldingTagId(tagIdHex: string): string {
+	const tag = String(tagIdHex || '').trim().replace(/^0x/i, '').toUpperCase()
+	if (!tag || tag.length !== 16 || !/^[0-9A-F]+$/.test(tag)) {
+		throw new Error('Invalid NFC tagId')
+	}
+	return tag
+}
+
+function nfcHoldingRowFromDb(r: {
+	tag_id: string
+	uid: string | null
+	owner_eoa: string
+	aa_address: string | null
+	card_address: string
+	card_name: string | null
+	card_type: string | null
+	points6: string | null
+	charge_reward_points6: string | null
+	primary_member_token_id: string | null
+	last_trusted_at: Date | string
+}): NfcBeamioUserCardHoldingRow {
+	return {
+		tagId: String(r.tag_id || '').toUpperCase(),
+		uid: r.uid ?? null,
+		ownerEoa: ethers.getAddress(r.owner_eoa),
+		aaAddress: r.aa_address && ethers.isAddress(r.aa_address) ? ethers.getAddress(r.aa_address) : null,
+		cardAddress: ethers.getAddress(r.card_address),
+		cardName: r.card_name ?? null,
+		cardType: r.card_type ?? null,
+		points6: String(r.points6 ?? '0'),
+		chargeRewardPoints6: String(r.charge_reward_points6 ?? '0'),
+		primaryMemberTokenId: r.primary_member_token_id ?? null,
+		lastTrustedAt: r.last_trusted_at instanceof Date ? r.last_trusted_at.toISOString() : String(r.last_trusted_at),
+	}
+}
+
+export async function upsertNfcBeamioUserCardHoldingsFromTrustedCards(params: {
+	tagIdHex: string
+	uid?: string | null
+	ownerEoa: string
+	aaAddress?: string | null
+	cards: ReadonlyArray<{
+		cardAddress: string
+		cardName?: string
+		cardType?: string
+		points6?: string
+		chargeRewardPoints6?: string
+		primaryMemberTokenId?: string
+		nfts?: ReadonlyArray<{ tokenId?: string }>
+	}>
+}): Promise<void> {
+	const tagId = normalizeNfcHoldingTagId(params.tagIdHex)
+	const owner = ethers.getAddress(params.ownerEoa).toLowerCase()
+	const aa = params.aaAddress && ethers.isAddress(params.aaAddress) ? ethers.getAddress(params.aaAddress).toLowerCase() : null
+	const uid = params.uid ? String(params.uid).trim().replace(/^0x/i, '').toLowerCase() : null
+	const trustedCards = params.cards.filter((c) => {
+		if (!c?.cardAddress || !ethers.isAddress(c.cardAddress)) return false
+		let points6 = 0n
+		let chargeRewardPoints6 = 0n
+		try {
+			points6 = BigInt(String(c.points6 ?? '0'))
+			chargeRewardPoints6 = BigInt(String(c.chargeRewardPoints6 ?? '0'))
+		} catch {
+			return false
+		}
+		const hasNft = Array.isArray(c.nfts) && c.nfts.some((n) => {
+			try {
+				return BigInt(String(n?.tokenId ?? '0')) > 0n
+			} catch {
+				return false
+			}
+		})
+		return points6 > 0n || chargeRewardPoints6 > 0n || hasNft
+	})
+	if (trustedCards.length === 0) return
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcBeamioUserCardHoldingsSchema(db)
+		for (const c of trustedCards) {
+			const card = ethers.getAddress(c.cardAddress).toLowerCase()
+			await db.query(
+				`
+				INSERT INTO nfc_beamio_user_card_holdings (
+					tag_id, uid, owner_eoa, aa_address, card_address,
+					card_name, card_type, points6, charge_reward_points6,
+					primary_member_token_id, last_trusted_at, updated_at
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+				ON CONFLICT (tag_id, card_address) DO UPDATE SET
+					uid = COALESCE(EXCLUDED.uid, nfc_beamio_user_card_holdings.uid),
+					owner_eoa = EXCLUDED.owner_eoa,
+					aa_address = EXCLUDED.aa_address,
+					card_name = COALESCE(EXCLUDED.card_name, nfc_beamio_user_card_holdings.card_name),
+					card_type = COALESCE(EXCLUDED.card_type, nfc_beamio_user_card_holdings.card_type),
+					points6 = EXCLUDED.points6,
+					charge_reward_points6 = EXCLUDED.charge_reward_points6,
+					primary_member_token_id = COALESCE(EXCLUDED.primary_member_token_id, nfc_beamio_user_card_holdings.primary_member_token_id),
+					last_trusted_at = NOW(),
+					updated_at = NOW()
+				`,
+				[
+					tagId,
+					uid,
+					owner,
+					aa,
+					card,
+					c.cardName ?? null,
+					c.cardType ?? null,
+					String(c.points6 ?? '0'),
+					String(c.chargeRewardPoints6 ?? '0'),
+					c.primaryMemberTokenId ?? null,
+				]
+			)
+		}
+		logger(Colors.green(`[upsertNfcBeamioUserCardHoldings] tagId=${tagId.slice(0, 8)}... cards=${trustedCards.length}`))
+	} catch (e: any) {
+		logger(Colors.yellow(`[upsertNfcBeamioUserCardHoldings] failed: ${e?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function listNfcBeamioUserCardHoldingsByTagId(tagIdHex: string): Promise<NfcBeamioUserCardHoldingRow[]> {
+	const tagId = normalizeNfcHoldingTagId(tagIdHex)
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcBeamioUserCardHoldingsSchema(db)
+		const { rows } = await db.query<{
+			tag_id: string
+			uid: string | null
+			owner_eoa: string
+			aa_address: string | null
+			card_address: string
+			card_name: string | null
+			card_type: string | null
+			points6: string | null
+			charge_reward_points6: string | null
+			primary_member_token_id: string | null
+			last_trusted_at: Date | string
+		}>(
+			`
+			SELECT tag_id, uid, owner_eoa, aa_address, card_address, card_name, card_type,
+				points6, charge_reward_points6, primary_member_token_id, last_trusted_at
+			FROM nfc_beamio_user_card_holdings
+			WHERE tag_id = $1
+			ORDER BY last_trusted_at DESC
+			`,
+			[tagId]
+		)
+		return rows.map(nfcHoldingRowFromDb)
+	} catch (e: any) {
+		logger(Colors.yellow(`[listNfcBeamioUserCardHoldingsByTagId] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function nfcBeamioUserCardHoldingContains(tagIdHex: string, cardAddress: string): Promise<boolean> {
+	const tagId = normalizeNfcHoldingTagId(tagIdHex)
+	const card = ethers.getAddress(cardAddress).toLowerCase()
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureNfcBeamioUserCardHoldingsSchema(db)
+		const { rows } = await db.query<{ ok: number }>(
+			`SELECT 1 AS ok FROM nfc_beamio_user_card_holdings WHERE tag_id = $1 AND card_address = $2 LIMIT 1`,
+			[tagId, card]
+		)
+		return rows.length > 0
+	} catch (e: any) {
+		logger(Colors.yellow(`[nfcBeamioUserCardHoldingContains] failed: ${e?.message ?? e}`))
+		return false
+	} finally {
+		await db.end().catch(() => {})
+	}
 }
 
 async function ensureBeamioVerraSeqSchema(db: Client): Promise<void> {
