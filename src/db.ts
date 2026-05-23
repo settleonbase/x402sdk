@@ -3350,6 +3350,45 @@ export const getDistinctBeamioCardOwnerAddressesLower = async (): Promise<string
 	}
 }
 
+/** 读取当前 DB 已登记的全部 BeamioUserCard 地址，用于 API 资产查询按用户过滤实际持有卡。 */
+export const listRegisteredBeamioUserCardAddresses = async (limit = 5000): Promise<string[]> => {
+	const cap = Math.min(Math.max(Math.trunc(limit), 1), 10000)
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_CARDS_TABLE)
+		const { rows } = await db.query<{ card_address: string }>(
+			`
+			SELECT card_address
+			FROM beamio_cards
+			WHERE card_address IS NOT NULL AND TRIM(card_address) <> ''
+			ORDER BY created_at DESC
+			LIMIT $1
+			`,
+			[cap]
+		)
+		const out: string[] = []
+		const seen = new Set<string>()
+		for (const r of rows) {
+			try {
+				const addr = ethers.getAddress(String(r.card_address || '').trim())
+				const lower = addr.toLowerCase()
+				if (seen.has(lower)) continue
+				seen.add(lower)
+				out.push(addr)
+			} catch {
+				/* ignore malformed DB row */
+			}
+		}
+		return out
+	} catch (e: any) {
+		logger(Colors.yellow(`[listRegisteredBeamioUserCardAddresses] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 按 card_address 查单张卡的 card_owner + metadata_json。供 Cluster GET /api/cardMetadata 用，前端 beamioApi 拉取。 */
 export const getCardByAddress = async (cardAddress: string): Promise<{ cardOwner: string; metadata: Record<string, unknown> | null } | null> => {
 	const db = new Client({ connectionString: DB_URL })

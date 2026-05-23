@@ -13,6 +13,7 @@ import {
 	maybeEnqueueNfcCashTreeBeamioTag,
 	maybeEnqueueNfcVerraBeamioTag,
 	listCouponIssuedNftSeriesForCardDescending,
+	listRegisteredBeamioUserCardAddresses,
 } from '../db'
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCategory'
@@ -20,14 +21,9 @@ import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tierMetadataRowResolve'
 
-/** 已废弃的旧基础设施卡地址，getUIDAssets 不查询、不返回。当前 BEAMIO_USER_CARD_ASSET_ADDRESS (0x74f35741...) 必须不在本列表。 */
+/** 不参与 getUIDAssets 全量扫描的卡地址。新发行 BeamioUserCard 默认不排除。 */
 const DEPRECATED_INFRA_CARDS = new Set([
-	'0xBCcfA50d2a5917C7A8662177F5F4B7A175787270'.toLowerCase(),
-	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
-	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
-	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
-	'0x5c5376EdAbBf0F0BD52d5F7a93828606a5051694'.toLowerCase(),
-	'0xEaCD6CB7e9E5b2a2652Ad65840997Aab37b828E1'.toLowerCase(),
+	'0x0722A93120D23ccb7F8e79CF65a3316502D54125'.toLowerCase(),
 ])
 
 /** 与 util.resolveBeamioBaseHttpRpcUrl 一致；此处不 import util，避免经 db 与 util/server 形成循环依赖 */
@@ -124,6 +120,8 @@ export type FetchUIDAssetsOptions = {
 	infrastructureCardAddress?: string
 	/** Extra BeamioUserCard addresses from trusted DB/indexer discovery (for NFC all-card inventory refresh). */
 	extraCardAddresses?: string[]
+	/** Scan DB-registered BeamioUserCard rows and return only cards with trusted on-chain assets for this user. */
+	includeRegisteredBeamioCards?: boolean
 	/**
 	 * `merchantInfraOnly`：仅返回该基础设施卡一行（含余额为 0），用于 POS「Check Balance」。
 	 * `infrastructureOnly`：仅查询/返回解析后的基础设施卡（`merchantInfraCard` 或默认常量），不附带 CCSA。
@@ -311,6 +309,21 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' },
 			].filter(({ address }) => !DEPRECATED_INFRA_CARDS.has(address.toLowerCase()))
 	const seenCardAddresses = new Set(cardAddresses.map((c) => c.address.toLowerCase()))
+	if (!singleInfraScope && opts?.includeRegisteredBeamioCards !== false) {
+		try {
+			const registered = await listRegisteredBeamioUserCardAddresses()
+			for (const raw of registered) {
+				const address = ethers.getAddress(raw)
+				const lower = address.toLowerCase()
+				if (DEPRECATED_INFRA_CARDS.has(lower) || seenCardAddresses.has(lower)) continue
+				cardAddresses.push({ address, name: 'BeamioUserCard', type: 'beamio-user-card' })
+				seenCardAddresses.add(lower)
+			}
+			logger(Colors.gray(`[fetchUIDAssetsForEOA] registered BeamioUserCard candidates=${registered.length} totalCandidates=${cardAddresses.length}`))
+		} catch (e: any) {
+			logger(Colors.yellow(`[fetchUIDAssetsForEOA] list registered BeamioUserCards failed: ${e?.message ?? e}`))
+		}
+	}
 	for (const raw of opts?.extraCardAddresses ?? []) {
 		try {
 			const address = ethers.getAddress(raw)
@@ -428,7 +441,12 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			const hasPoints = pointsBalance > 0n
 			const hasChargeRewardPoints = chargeRewardPointsBalance > 0n
 			const hasNftGt0 = nftList.some((n: { tokenId: string }) => Number(n.tokenId) > 0)
-			const includeRow = hasPoints || hasChargeRewardPoints || hasNftGt0 || merchantInfraOnly || opts?.includeZeroBalanceCards === true
+			const includeRow =
+				hasPoints ||
+				hasChargeRewardPoints ||
+				hasNftGt0 ||
+				merchantInfraOnly ||
+				(opts?.includeZeroBalanceCards === true && cardType !== 'beamio-user-card')
 			if (includeRow) {
 				const row: FetchUIDAssetsResult['cards'][number] = {
 					cardAddress: cardAddr,
