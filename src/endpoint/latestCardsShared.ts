@@ -42,19 +42,19 @@ export const LATEST_CARDS_EXCLUDED = new Set([
 	'0xeacd6cb7e9e5b2a2652ad65840997aab37b828e1',
 ])
 
-/**
- * Discover / `GET /api/latestCards`：API 侧统一过滤当前所有已登记卡，仅保留当前允许公开展示的 merchant owner。
- * 注意：不要只在前端过滤，否则 `/latestCards`、`/cardsByCategory` 等入口仍会暴露旧卡/测试卡。
- */
-const DISCOVER_LEGACY_ALLOWED_CARD_OWNER_LOWER = ethers.getAddress(
-	'0xda2c9e028d7df4338763e1e14b081ae7316b803a',
+/** 旧卡只放行这一张；从该时间点之后新发行的 BeamioUserCard 默认放行。 */
+const DISCOVER_ALLOWED_LEGACY_CARD_LOWER = ethers.getAddress(
+	'0x0722A93120D23ccb7F8e79CF65a3316502D54125',
 ).toLowerCase()
+const DISCOVER_NEW_CARD_ALLOW_AFTER_MS = Date.parse('2026-05-23T00:30:00.000Z')
 
 /** Apply after `LATEST_CARDS_EXCLUDED` + enrichment. */
 export function filterLatestCardsByDiscoverMerchantPolicy(cards: BeamioLatestCardItem[]): BeamioLatestCardItem[] {
 	return cards.filter((c) => {
-		const owner = (c.cardOwner || '').trim()
-		if (!owner || !ethers.isAddress(owner)) return false
-		return ethers.getAddress(owner).toLowerCase() === DISCOVER_LEGACY_ALLOWED_CARD_OWNER_LOWER
+		const cardAddress = (c.cardAddress || '').trim()
+		if (!cardAddress || !ethers.isAddress(cardAddress)) return false
+		if (ethers.getAddress(cardAddress).toLowerCase() === DISCOVER_ALLOWED_LEGACY_CARD_LOWER) return true
+		const createdAtMs = Date.parse(String(c.createdAt || ''))
+		return Number.isFinite(createdAtMs) && createdAtMs >= DISCOVER_NEW_CARD_ALLOW_AFTER_MS
 	})
 }
