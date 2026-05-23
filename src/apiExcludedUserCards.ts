@@ -2,12 +2,15 @@ import { ethers } from 'ethers'
 
 /**
  * Beamio API / 资产扫描 / Discover 共用：须从用户可见结果中排除的 BeamioUserCard 地址。
- * 含已废弃的全局 CashTrees 卡 `0xBCcfA50…`（旧称 infrastructure card；产品层不再使用该概念）。
+ * 含已废弃的全局卡（产品层不再使用）：
+ * - CashTrees 全局卡 `0xBCcfA50…`（旧 infrastructure card）
+ * - CCSA 全局卡 `0x2032A363…`（旧 CCSA 概念）
  *
  * 单一事实来源：Cluster/Master latestCards、getWalletAssets、myCards、SilentPassUI display exclude 须与此对齐。
  */
 export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	'0xbccfa50d2a5917c7a8662177f5f4b7a175787270',
+	'0x2032a363bb2cf331142391fc0dad21d6504922c7',
 	'0x02bae511632354584b198951b42ec73bacbc4e98',
 	'0xf99018dffdb0c5657c93ca14db2900cebe1168a7',
 	'0xa86a8406b06bd6c332b4b380a0eaced822218eff',
@@ -43,6 +46,9 @@ export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	'0x5c5376edabbf0f0bd52d5f7a93828606a5051694',
 	'0xeacd6cb7e9e5b2a2652ad65840997aab37b828e1',
 ])
+
+/** @deprecated 旧全局 CCSA 卡；API/客户端不得扫描或展示。见 apiExcludedUserCards.ts */
+export const DEPRECATED_LEGACY_CCSA_CARD_LOWER = '0x2032a363bb2cf331142391fc0dad21d6504922c7'
 
 /** @deprecated 旧全局卡常量名；新代码请用 isApiExcludedUserCard，勿再引入 infrastructure card 语义。 */
 export const DEPRECATED_LEGACY_GLOBAL_USER_CARD_LOWER =

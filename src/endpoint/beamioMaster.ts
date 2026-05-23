@@ -17,7 +17,7 @@ import {
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
+import { BASE_CARD_FACTORY } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED, filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
 import { isApiExcludedUserCard } from '../apiExcludedUserCards'
@@ -737,24 +737,9 @@ const routing = ( router: Router ) => {
 							const currency = CURRENCY_MAP[Number(currencyNum)] ?? 'USDC'
 							const priceE6 = Number(priceE6Raw)
 							const ptsPer1Currency = priceE6 > 0 ? String(1_000_000 / priceE6) : '0'
-							items.push({ cardAddress: addr, name: addr.toLowerCase() === BASE_CCSA_CARD_ADDRESS.toLowerCase() ? 'CCSA' : 'User Card', currency, priceE6: String(priceE6), ptsPer1Currency })
+							items.push({ cardAddress: addr, name: 'User Card', currency, priceE6: String(priceE6), ptsPer1Currency })
 						} catch (_) {}
 					}
-				}
-				// CCSA fallback: 若任一 owner 为 CCSA owner 且 CCSA 未在列表中，则加入
-				const ccsaLower = BASE_CCSA_CARD_ADDRESS.toLowerCase()
-				if (!seen.has(ccsaLower)) {
-					try {
-						const ccsaOwner = await factory.beamioUserCardOwner(BASE_CCSA_CARD_ADDRESS)
-						if (ccsaOwner && ownerList.some((o) => ccsaOwner.toLowerCase() === o.toLowerCase())) {
-							const card = new ethers.Contract(BASE_CCSA_CARD_ADDRESS, CARD_ABI, provider)
-							const [currencyNum, priceE6Raw] = await Promise.all([card.currency(), card.pointsUnitPriceInCurrencyE6()])
-							const currency = CURRENCY_MAP[Number(currencyNum)] ?? 'USDC'
-							const priceE6 = Number(priceE6Raw)
-							const ptsPer1Currency = priceE6 > 0 ? String(1_000_000 / priceE6) : '0'
-							items.unshift({ cardAddress: BASE_CCSA_CARD_ADDRESS, name: 'CCSA', currency, priceE6: String(priceE6), ptsPer1Currency })
-						}
-					} catch (_) {}
 				}
 				myCardsCache.set(cacheKey, { items, expiry: Date.now() + MY_CARDS_CACHE_TTL_MS })
 				res.status(200).json({ items })

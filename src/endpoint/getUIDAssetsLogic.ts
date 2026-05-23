@@ -15,7 +15,7 @@ import {
 	listCouponIssuedNftSeriesForCardDescending,
 	listRegisteredBeamioUserCardAddresses,
 } from '../db'
-import { BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
+import { BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 import { filterApiExcludedCardRows, isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCategory'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
@@ -122,7 +122,7 @@ export type FetchUIDAssetsOptions = {
 	/**
 	 * `merchantInfraOnly`：仅返回 `merchantInfraCard` 指定程序卡一行（含余额为 0），用于 POS「Check Balance」。
 	 * `infrastructureOnly`（别名）：同上，须显式传卡地址。
-	 * `all`（默认）：CCSA + DB 已登记商户卡 + extra；**不**自动扫描废弃全局卡。
+	 * `all`（默认）：DB 已登记商户卡 + extra；**不**自动扫描 CCSA 或废弃全局卡。
 	 */
 	cardsScope?: 'all' | 'merchantInfraOnly' | 'infrastructureOnly'
 	/** getWalletAssets 历史行为：即使 points/NFT 全空也返回该卡一行。 */
@@ -304,7 +304,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			cardAddresses.push({ address: infraAddr, name: programFallbackName, type: 'beamio-user-card' })
 		}
 	} else {
-		cardAddresses.push({ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' })
+		/* cardsScope=all：仅 DB 已登记 + extraCardAddresses；无全局默认卡 */
 	}
 	const seenCardAddresses = new Set(cardAddresses.map((c) => c.address.toLowerCase()))
 	if (!singleProgramScope && opts?.includeRegisteredBeamioCards !== false) {
