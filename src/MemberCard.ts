@@ -10468,12 +10468,28 @@ async function collectNfcLinkMigrationCardAddresses(tagIdHex?: string): Promise<
 	return out
 }
 
-/** 链上/聚合读数：NFC EOA（含 EOA+AA USDC/CADD、点数、charge reward、会员 NFT）是否有可迁移余额。 */
-async function nfcLinkAppSessionHasMigratableAssets(nfcEoa: string, tagIdHex: string): Promise<boolean> {
+/** 链上/聚合读数：NFC EOA（含 EOA+AA USDC/CADD、#0/#1/#2、会员 NFT、优惠券）是否有可迁移余额。 */
+async function nfcLinkAppSessionHasMigratableAssets(
+	nfcEoa: string,
+	tagIdHex: string,
+	provider?: ethers.Provider
+): Promise<boolean> {
 	const extraCards = await collectNfcLinkMigrationCardAddresses(tagIdHex)
 	const assets = await fetchUIDAssetsForEOA(nfcEoa, { extraCardAddresses: extraCards })
 	if (Number(assets.usdcBalance || 0) > 0) return true
 	if (Number(assets.caddBalance || 0) > 0) return true
+	if (
+		Array.isArray(assets.merchantCouponBalances) &&
+		assets.merchantCouponBalances.some((c) => {
+			try {
+				return BigInt(c.balance || '0') > 0n
+			} catch {
+				return false
+			}
+		})
+	) {
+		return true
+	}
 	for (const c of assets.cards) {
 		try {
 			if (BigInt(c.points6 || '0') > 0n) return true
@@ -10482,6 +10498,17 @@ async function nfcLinkAppSessionHasMigratableAssets(nfcEoa: string, tagIdHex: st
 			/* ignore */
 		}
 		if (Array.isArray(c.nfts) && c.nfts.some((n) => Number(n?.tokenId ?? 0) > 0)) return true
+	}
+	if (provider) {
+		const aa = await resolveDeployedBeamioAaForNfcEoa(nfcEoa, provider)
+		for (const cardAddr of extraCards) {
+			if ((await collectErc1155BalancesForHolder(nfcEoa, cardAddr, provider, 'eoa')).length > 0) {
+				return true
+			}
+			if (aa && (await collectErc1155BalancesForHolder(aa, cardAddr, provider, 'aa')).length > 0) {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -10499,7 +10526,7 @@ async function resolveDeployedBeamioAaForNfcEoa(
 	return ethers.getAddress(aa)
 }
 
-/** 收集 holder（EOA 或 AA）在某张 BeamioUserCard 上全部 ERC-1155 余额（#0/#2 + 会员/issued NFT）。 */
+/** 收集 holder（EOA 或 AA）在某张 BeamioUserCard 上全部 ERC-1155 余额：#0/#1/#2、会员 NFT、全部优惠券 series。 */
 async function collectErc1155BalancesForHolder(
 	holder: string,
 	cardAddr: string,
@@ -10508,7 +10535,7 @@ async function collectErc1155BalancesForHolder(
 ): Promise<NfcLinkErc1155BalanceRow[]> {
 	const card = new ethers.Contract(cardAddr, NFC_LINK_CARD_MIGRATE_ABI, provider)
 	const holderNorm = ethers.getAddress(holder)
-	const tokenIds = new Set<bigint>([0n, 2n])
+	const tokenIds = new Set<bigint>([0n, 1n, 2n])
 	try {
 		const [, nfts] = (mode === 'eoa'
 			? await card.getOwnershipByEOA(holderNorm)
@@ -10518,6 +10545,20 @@ async function collectErc1155BalancesForHolder(
 		}
 	} catch {
 		/* 部分卡可能无 ownership view */
+	}
+	try {
+		const seriesRows = await listCouponIssuedNftSeriesForCardDescending(cardAddr, 200)
+		for (const row of seriesRows) {
+			const tidRaw = String(row.tokenId ?? '').trim()
+			if (!tidRaw) continue
+			try {
+				tokenIds.add(BigInt(tidRaw))
+			} catch {
+				/* ignore invalid series tokenId */
+			}
+		}
+	} catch {
+		/* DB 无 coupon series 时仍迁移 #0/#1/#2 与 membership */
 	}
 	const out: NfcLinkErc1155BalanceRow[] = []
 	for (const tokenId of tokenIds) {
@@ -10531,7 +10572,7 @@ async function collectErc1155BalancesForHolder(
 	return out
 }
 
-/** 从 NFC AA 构建 Container 迁移 items：USDC、CADD、各卡全部 ERC-1155（含会员 NFT）。 */
+/** 从 NFC AA 构建 Container 迁移 items：USDC、CADD、各卡全部 ERC-1155（#0/#1/#2、会员 NFT、优惠券）。 */
 async function buildNfcLinkAppContainerMigrationItems(params: {
 	nfcAa: string
 	tagIdHex: string
@@ -10593,7 +10634,7 @@ async function sweepNfcEoaErc20ToBeneficiaryAa(params: {
 	return txHashes
 }
 
-/** NFC EOA 上 BeamioUserCard ERC-1155（含会员 NFT）直接 safeTransferFrom 至 App AA。 */
+/** NFC EOA 上 BeamioUserCard ERC-1155（#0/#1/#2、会员 NFT、优惠券）直接 safeTransferFrom 至 App AA。 */
 async function sweepNfcEoaErc1155ToBeneficiaryAa(params: {
 	nfcEoa: string
 	beneficiaryAa: string
@@ -10730,7 +10771,7 @@ export const nfcLinkAppExecute = async (
 		const aa = await SC.aaAccountFactoryPaymaster.primaryAccountOf(eoa)
 		const aaCode = aa && aa !== ethers.ZeroAddress ? await SC.walletBase.provider!.getCode(aa) : '0x'
 		const hasDeployedAa = !!(aa && aa !== ethers.ZeroAddress && aaCode && aaCode !== '0x')
-		const hasMigratableAssets = await nfcLinkAppSessionHasMigratableAssets(eoa, tagIdHex)
+		const hasMigratableAssets = await nfcLinkAppSessionHasMigratableAssets(eoa, tagIdHex, SC.walletBase.provider!)
 		if (!hasDeployedAa) {
 			const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
 			try {
@@ -10771,7 +10812,7 @@ export const nfcLinkAppExecute = async (
 					redeemOnChain: false,
 					migrateViaContainer: hasMigratableAssets,
 					note: hasMigratableAssets
-						? 'NFC wallet has migratable assets. When you claim, EOA-only wallets transfer directly; wallets with AA also use a container relay. Membership NFTs are included.'
+						? 'NFC wallet has migratable assets. When you claim, EOA-only wallets transfer directly; wallets with AA also use a container relay. Includes token #0/#1/#2, membership NFTs, and coupons.'
 						: 'No migratable balance on this NFC wallet; link proceeds without asset migration.',
 				})
 				.end()
@@ -10816,7 +10857,7 @@ export const nfcLinkAppExecute = async (
 				redeemOnChain: false,
 				migrateViaContainer: hasMigratableAssets,
 				note: hasMigratableAssets
-					? 'NFC wallet assets (USDC, CADD, Beamio card points and membership NFTs) migrate to your app wallet when you claim. EOA-only NFC wallets are not forced to create AA.'
+					? 'NFC wallet assets (USDC, CADD, Beamio card #0/#1/#2, membership NFTs, and coupons) migrate to your app wallet when you claim. EOA-only NFC wallets are not forced to create AA.'
 					: 'No migratable balance on this NFC wallet; link proceeds without asset migration.',
 			})
 			.end()
@@ -11402,7 +11443,7 @@ function normalizeNfcLinkClaimPrivateKey(raw: unknown): string | null {
 
 /**
  * SilentPassUI deep link claim: validate private key → EOA, validate session, optional chain migrate, replace NFC row key, release session.
- * - `migrateViaContainer`: App 无 AA 则创建；NFC 无 AA 则仅 EOA 直转，有 AA 则 EOA 直转 + Container（含会员 NFT）。
+ * - `migrateViaContainer`: App 无 AA 则创建；NFC 无 AA 则仅 EOA 直转，有 AA 则 EOA 直转 + Container（#0/#1/#2、会员 NFT、优惠券）。
  * - `redeemOnChain`（旧会话）: `redeemForUser` / `redeemPoolForUser`。
  * - 否则仅 DB 换绑。
  * Body: nftRedeemcode, tagid, uid, counter, privateKey (HTTPS; do not log secret).
