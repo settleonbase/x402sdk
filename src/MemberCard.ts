@@ -10772,19 +10772,6 @@ export const nfcLinkAppExecute = async (
 		const aaCode = aa && aa !== ethers.ZeroAddress ? await SC.walletBase.provider!.getCode(aa) : '0x'
 		const hasDeployedAa = !!(aa && aa !== ethers.ZeroAddress && aaCode && aaCode !== '0x')
 		const hasMigratableAssets = await nfcLinkAppSessionHasMigratableAssets(eoa, tagIdHex, SC.walletBase.provider!)
-		if (hasMigratableAssets) {
-			const bUnitPre = await precheckNfcLinkAppMigrationBUnitFee(SC.walletBase.provider!)
-			if (!bUnitPre.ok) {
-				res.status(403)
-					.json({
-						success: false,
-						error: bUnitPre.error,
-						errorCode: 'NFC_LINK_MIGRATION_INSUFFICIENT_BUNITS',
-					})
-					.end()
-				return
-			}
-		}
 		if (!hasDeployedAa) {
 			const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
 			try {
@@ -11224,63 +11211,56 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 	}
 }
 
-/** `/api/nfcLinkAppClaimWithKey` 迁移专用：固定 2 B-Units，由基础设施卡 `owner()`（解析为 EOA）承担，不按转账金额计费。 */
+/** `/api/nfcLinkAppClaimWithKey` 迁移专用：固定 2 B-Units，由 **认领迁移的 App 用户**（EOA，不足时用其 Beamio AA）承担。 */
 const NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6 = 2_000_000n
 
 type NfcLinkMigrationBUnitContext = {
-	cardIssuerEoa: string
+	feePayer: string
 	requiredBUnits6: bigint
+	usedAaFallback: boolean
 }
 
-async function resolveNfcLinkMigrationBUnitIssuer(provider: ethers.Provider): Promise<NfcLinkMigrationBUnitContext> {
-	const infra = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
-	const infraOwnerRead = new ethers.Contract(infra, ['function owner() view returns (address)'], provider)
-	const rawCardOwner = (await infraOwnerRead.owner()) as string
-	const issuerResolve = await resolveCardOwnerToEOA(provider, rawCardOwner)
-	if (!issuerResolve.success) {
-		throw new Error(issuerResolve.error ?? 'Could not resolve infrastructure card owner to EOA for B-Unit fee.')
-	}
-	return {
-		cardIssuerEoa: ethers.getAddress(issuerResolve.cardOwner),
-		requiredBUnits6: NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
-	}
-}
-
-/** 迁移开始前只读预检：基础设施卡 issuer 须有足够 B-Unit，余额不足则拒绝启动迁移。 */
+/** 迁移开始前只读预检：App 认领方须有足够 B-Unit，余额不足则拒绝启动迁移。 */
 async function precheckNfcLinkAppMigrationBUnitFee(
-	provider: ethers.Provider
+	beneficiaryUserEoa: string
 ): Promise<{ ok: true; ctx: NfcLinkMigrationBUnitContext } | { ok: false; error: string }> {
 	try {
-		const ctx = await resolveNfcLinkMigrationBUnitIssuer(provider)
-		const bunitRead = new ethers.Contract(
-			CONET_BUNIT_AIRDROP_ADDRESS,
-			['function getBUnitBalance(address) view returns (uint256)'],
-			providerConet
-		)
-		const balance = (await bunitRead.getBUnitBalance(ctx.cardIssuerEoa)) as bigint
-		if (balance < ctx.requiredBUnits6) {
+		const eoaNorm = ethers.getAddress(beneficiaryUserEoa)
+		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(eoaNorm, NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6, {
+			aaFactoryAddress: BASE_AA_FACTORY,
+		})
+		if (!picked.ok) {
 			return {
 				ok: false,
-				error: `Insufficient B-Units: infrastructure card issuer needs ${Number(ctx.requiredBUnits6) / 1e6} B-Units for link migration (balance: ${Number(balance) / 1e6} B-Units).`,
+				error: `Insufficient B-Units: your app wallet needs ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units for link migration (${picked.error}).`,
 			}
 		}
-		return { ok: true, ctx }
+		return {
+			ok: true,
+			ctx: {
+				feePayer: picked.consumer,
+				requiredBUnits6: NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
+				usedAaFallback: picked.usedAaFallback,
+			},
+		}
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? e.message : String(e)
 		return { ok: false, error: msg }
 	}
 }
 
-/** Cluster 预检：Link 资产迁移所需 B-Unit（固定 2）是否充足。 */
-export async function nfcLinkAppMigrationBUnitClusterPreCheck(): Promise<{ success: boolean; error?: string }> {
-	const pre = await precheckNfcLinkAppMigrationBUnitFee(providerBaseBackup)
+/** Cluster 预检：Link 资产迁移所需 B-Unit（固定 2）是否充足（按 App 认领方 EOA/AA）。 */
+export async function nfcLinkAppMigrationBUnitClusterPreCheck(
+	beneficiaryUserEoa: string
+): Promise<{ success: boolean; error?: string }> {
+	const pre = await precheckNfcLinkAppMigrationBUnitFee(beneficiaryUserEoa)
 	if (!pre.ok) return { success: false, error: pre.error }
 	return { success: true }
 }
 
 /** 迁移链上交易已成功；扣费失败仅记日志，不再向上抛错。 */
 async function consumeNfcLinkMigrationBUnitFeeNonFatal(params: {
-	cardIssuerEoa: string
+	feePayer: string
 	feeTxHash: string
 	gasUsed: bigint
 	walletConet: ethers.Wallet
@@ -11292,7 +11272,7 @@ async function consumeNfcLinkMigrationBUnitFeeNonFatal(params: {
 			params.walletConet
 		)
 		await bunitAirdropWrite.consumeFromUser(
-			params.cardIssuerEoa,
+			params.feePayer,
 			NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
 			params.feeTxHash as `0x${string}`,
 			params.gasUsed,
@@ -11301,7 +11281,7 @@ async function consumeNfcLinkMigrationBUnitFeeNonFatal(params: {
 		)
 		logger(
 			Colors.cyan(
-				`[nfcLinkAppMigrate] consumeFromUser: ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units from infra card issuer ${params.cardIssuerEoa.slice(0, 10)}… tx=${params.feeTxHash}`
+				`[nfcLinkAppMigrate] consumeFromUser: ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units from app fee payer ${params.feePayer.slice(0, 10)}… tx=${params.feeTxHash}`
 			)
 		)
 	} catch (e: unknown) {
@@ -11338,11 +11318,12 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 	if (!SC) throw new Error('Service temporarily unavailable')
 	try {
 		const provider = SC.walletBase.provider!
-		const bUnitPre = await precheckNfcLinkAppMigrationBUnitFee(provider)
+		const beneficiaryEoaNorm = ethers.getAddress(beneficiaryUserEoa)
+		const bUnitPre = await precheckNfcLinkAppMigrationBUnitFee(beneficiaryEoaNorm)
 		if (!bUnitPre.ok) {
 			throw new Error(bUnitPre.error)
 		}
-		const { cardIssuerEoa } = bUnitPre.ctx
+		const { feePayer } = bUnitPre.ctx
 
 		const nfcSigner = nfcWallet.connect(provider)
 		const deployedNfcAa = await resolveDeployedBeamioAaForNfcEoa(nfcEoaNorm, provider)
@@ -11381,7 +11362,7 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 			}
 			const feeTxHash = eoaSweepTxHashes[eoaSweepTxHashes.length - 1]!
 			await consumeNfcLinkMigrationBUnitFeeNonFatal({
-				cardIssuerEoa,
+				feePayer,
 				feeTxHash,
 				gasUsed: 0n,
 				walletConet: SC.walletConet,
@@ -11408,7 +11389,7 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 			}
 			const feeTxHash = eoaSweepTxHashes[eoaSweepTxHashes.length - 1]!
 			await consumeNfcLinkMigrationBUnitFeeNonFatal({
-				cardIssuerEoa,
+				feePayer,
 				feeTxHash,
 				gasUsed: 0n,
 				walletConet: SC.walletConet,
@@ -11493,7 +11474,7 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 		}
 
 		await consumeNfcLinkMigrationBUnitFeeNonFatal({
-			cardIssuerEoa,
+			feePayer,
 			feeTxHash: tx.hash,
 			gasUsed: receipt.gasUsed ?? 0n,
 			walletConet: SC.walletConet,

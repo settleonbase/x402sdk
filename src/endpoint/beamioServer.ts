@@ -2524,7 +2524,8 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ success: false, error: linkSession.error }).end()
 		}
 		if (linkSession.migrateViaContainer) {
-			const bUnitPre = await nfcLinkAppMigrationBUnitClusterPreCheck()
+			const claimUserEoa = ethers.getAddress(new ethers.Wallet(pkHex).address)
+			const bUnitPre = await nfcLinkAppMigrationBUnitClusterPreCheck(claimUserEoa)
 			if (!bUnitPre.success) {
 				return res
 					.status(403)
