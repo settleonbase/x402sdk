@@ -2461,7 +2461,7 @@ const routing = ( router: Router ) => {
 		)
 	})
 
-	/** POST /api/nfcLinkAppClaimWithKey - SilentPassUI 扫 Link 深链：校验参数与私钥格式后转 Master（redeem + 换绑 nfc_cards 私钥） */
+	/** POST /api/nfcLinkAppClaimWithKey - SilentPassUI 扫 Link 深链：校验参数与私钥格式后转 Master（全量资产迁移 + 换绑 nfc_cards 私钥） */
 	router.post('/nfcLinkAppClaimWithKey', async (req, res) => {
 		const body = req.body as {
 			nftRedeemcode?: string

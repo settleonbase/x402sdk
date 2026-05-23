@@ -128,6 +128,8 @@ import {
 	getNfcCardSignedTxGateByUid,
 	listLinkedNfcCardsByOwnerEoa,
 	listCouponIssuedNftSeriesForCardDescending,
+	listRegisteredBeamioUserCardAddresses,
+	listNfcBeamioUserCardHoldingsByTagId,
 	type NfcLinkAppSessionDb,
 } from './db'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './endpoint/getUIDAssetsLogic'
@@ -10415,6 +10417,216 @@ export const buildCardCreateRedeemBatchData = (params: {
 // --- NFC Link App：链上 createRedeemBatch（execute 本体）---
 
 const NFC_LINK_BALANCE_OF_ABI = ['function balanceOf(address account, uint256 id) view returns (uint256)'] as const
+const NFC_LINK_USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+const NFC_LINK_CADD_BASE = '0x16F93eBC5320C89EfC8701577efe49d14A276a06'
+const NFC_LINK_ERC20_BALANCE_ABI = ['function balanceOf(address) view returns (uint256)'] as const
+const NFC_LINK_ERC20_TRANSFER_ABI = ['function transfer(address,uint256) returns (bool)'] as const
+const NFC_LINK_CARD_MIGRATE_ABI = [
+	'function getOwnership(address user) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+	'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
+	'function balanceOf(address account, uint256 id) view returns (uint256)',
+	'function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)',
+] as const
+
+type NfcLinkContainerMigrationItem = {
+	kind: number
+	asset: string
+	amount: string
+	tokenId: string
+	data: string
+}
+
+type NfcLinkErc1155BalanceRow = { tokenId: bigint; amount: bigint }
+
+/** Link 迁移：基础设施卡 + CCSA + 已登记 BeamioUserCard + DB 缓存持有卡（去重）。 */
+async function collectNfcLinkMigrationCardAddresses(tagIdHex?: string): Promise<string[]> {
+	const out: string[] = []
+	const seen = new Set<string>()
+	const pushAddr = (raw: string) => {
+		if (!raw || !ethers.isAddress(raw)) return
+		const norm = ethers.getAddress(raw).toLowerCase()
+		if (seen.has(norm)) return
+		seen.add(norm)
+		out.push(ethers.getAddress(raw))
+	}
+	pushAddr(BEAMIO_USER_CARD_ASSET_ADDRESS)
+	pushAddr(BASE_CCSA_CARD_ADDRESS)
+	try {
+		for (const raw of await listRegisteredBeamioUserCardAddresses()) pushAddr(raw)
+	} catch {
+		/* ignore */
+	}
+	if (tagIdHex) {
+		try {
+			for (const row of await listNfcBeamioUserCardHoldingsByTagId(normalizeNfcLinkTagId(tagIdHex))) {
+				pushAddr(row.cardAddress)
+			}
+		} catch {
+			/* ignore */
+		}
+	}
+	return out
+}
+
+/** 链上/聚合读数：NFC EOA（含 EOA+AA USDC/CADD、点数、charge reward、会员 NFT）是否有可迁移余额。 */
+async function nfcLinkAppSessionHasMigratableAssets(nfcEoa: string, tagIdHex: string): Promise<boolean> {
+	const extraCards = await collectNfcLinkMigrationCardAddresses(tagIdHex)
+	const assets = await fetchUIDAssetsForEOA(nfcEoa, { extraCardAddresses: extraCards })
+	if (Number(assets.usdcBalance || 0) > 0) return true
+	if (Number(assets.caddBalance || 0) > 0) return true
+	for (const c of assets.cards) {
+		try {
+			if (BigInt(c.points6 || '0') > 0n) return true
+			if (BigInt(c.chargeRewardPoints6 || '0') > 0n) return true
+		} catch {
+			/* ignore */
+		}
+		if (Array.isArray(c.nfts) && c.nfts.some((n) => Number(n?.tokenId ?? 0) > 0)) return true
+	}
+	return false
+}
+
+/** 只读：NFC EOA 是否已有已部署 Beamio AA（不创建）。 */
+async function resolveDeployedBeamioAaForNfcEoa(
+	nfcEoa: string,
+	provider: ethers.Provider
+): Promise<string | null> {
+	const eoaNorm = ethers.getAddress(nfcEoa)
+	const aa = await resolveBeamioAaForEoaWithFallback(provider, eoaNorm)
+	if (!aa || aa === ethers.ZeroAddress) return null
+	const code = await provider.getCode(aa)
+	if (!code || code === '0x' || code.length <= 2) return null
+	return ethers.getAddress(aa)
+}
+
+/** 收集 holder（EOA 或 AA）在某张 BeamioUserCard 上全部 ERC-1155 余额（#0/#2 + 会员/issued NFT）。 */
+async function collectErc1155BalancesForHolder(
+	holder: string,
+	cardAddr: string,
+	provider: ethers.Provider,
+	mode: 'eoa' | 'aa'
+): Promise<NfcLinkErc1155BalanceRow[]> {
+	const card = new ethers.Contract(cardAddr, NFC_LINK_CARD_MIGRATE_ABI, provider)
+	const holderNorm = ethers.getAddress(holder)
+	const tokenIds = new Set<bigint>([0n, 2n])
+	try {
+		const [, nfts] = (mode === 'eoa'
+			? await card.getOwnershipByEOA(holderNorm)
+			: await card.getOwnership(holderNorm)) as [bigint, { tokenId: bigint }[]]
+		for (const nft of nfts ?? []) {
+			if (nft.tokenId > 0n) tokenIds.add(nft.tokenId)
+		}
+	} catch {
+		/* 部分卡可能无 ownership view */
+	}
+	const out: NfcLinkErc1155BalanceRow[] = []
+	for (const tokenId of tokenIds) {
+		try {
+			const bal = (await card.balanceOf(holderNorm, tokenId)) as bigint
+			if (bal > 0n) out.push({ tokenId, amount: bal })
+		} catch {
+			/* ignore */
+		}
+	}
+	return out
+}
+
+/** 从 NFC AA 构建 Container 迁移 items：USDC、CADD、各卡全部 ERC-1155（含会员 NFT）。 */
+async function buildNfcLinkAppContainerMigrationItems(params: {
+	nfcAa: string
+	tagIdHex: string
+	provider: ethers.Provider
+}): Promise<NfcLinkContainerMigrationItem[]> {
+	const aaNorm = ethers.getAddress(params.nfcAa)
+	const items: NfcLinkContainerMigrationItem[] = []
+	const usdc = new ethers.Contract(NFC_LINK_USDC_BASE, NFC_LINK_ERC20_BALANCE_ABI, params.provider)
+	const cadd = new ethers.Contract(NFC_LINK_CADD_BASE, NFC_LINK_ERC20_BALANCE_ABI, params.provider)
+	const [usdcBal, caddBal] = await Promise.all([
+		usdc.balanceOf(aaNorm) as Promise<bigint>,
+		cadd.balanceOf(aaNorm).catch(() => 0n) as Promise<bigint>,
+	])
+	if (usdcBal > 0n) {
+		items.push({ kind: 0, asset: NFC_LINK_USDC_BASE, amount: usdcBal.toString(), tokenId: '0', data: '0x' })
+	}
+	if (caddBal > 0n) {
+		items.push({ kind: 0, asset: NFC_LINK_CADD_BASE, amount: caddBal.toString(), tokenId: '0', data: '0x' })
+	}
+	for (const cardAddr of await collectNfcLinkMigrationCardAddresses(params.tagIdHex)) {
+		const rows = await collectErc1155BalancesForHolder(aaNorm, cardAddr, params.provider, 'aa')
+		for (const row of rows) {
+			items.push({
+				kind: 1,
+				asset: cardAddr,
+				amount: row.amount.toString(),
+				tokenId: row.tokenId.toString(),
+				data: '0x',
+			})
+		}
+	}
+	return items
+}
+
+/** NFC EOA 上 USDC/CADD 直接 sweep 至 App AA。 */
+async function sweepNfcEoaErc20ToBeneficiaryAa(params: {
+	nfcEoa: string
+	beneficiaryAa: string
+	wallet: ethers.Wallet
+}): Promise<string[]> {
+	const txHashes: string[] = []
+	const nfcEoaNorm = ethers.getAddress(params.nfcEoa)
+	const toNorm = ethers.getAddress(params.beneficiaryAa)
+	if (ethers.getAddress(params.wallet.address).toLowerCase() !== nfcEoaNorm.toLowerCase()) {
+		throw new Error('NFC private key does not match payer EOA for ERC20 sweep.')
+	}
+	for (const token of [NFC_LINK_USDC_BASE, NFC_LINK_CADD_BASE]) {
+		const erc20 = new ethers.Contract(token, [...NFC_LINK_ERC20_BALANCE_ABI, ...NFC_LINK_ERC20_TRANSFER_ABI], params.wallet)
+		const bal = (await erc20.balanceOf(nfcEoaNorm)) as bigint
+		if (bal <= 0n) continue
+		const tx = await erc20.transfer(toNorm, bal)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) {
+			throw new Error(`ERC20 sweep failed for token ${token}`)
+		}
+		txHashes.push(tx.hash)
+		logger(Colors.green(`[nfcLinkAppMigrate] EOA ERC20 ${token.slice(0, 10)}… amount=${bal} → ${toNorm.slice(0, 10)}… tx=${tx.hash}`))
+	}
+	return txHashes
+}
+
+/** NFC EOA 上 BeamioUserCard ERC-1155（含会员 NFT）直接 safeTransferFrom 至 App AA。 */
+async function sweepNfcEoaErc1155ToBeneficiaryAa(params: {
+	nfcEoa: string
+	beneficiaryAa: string
+	tagIdHex: string
+	wallet: ethers.Wallet
+	provider: ethers.Provider
+}): Promise<string[]> {
+	const txHashes: string[] = []
+	const fromNorm = ethers.getAddress(params.nfcEoa)
+	const toNorm = ethers.getAddress(params.beneficiaryAa)
+	if (ethers.getAddress(params.wallet.address).toLowerCase() !== fromNorm.toLowerCase()) {
+		throw new Error('NFC private key does not match payer EOA for ERC1155 sweep.')
+	}
+	for (const cardAddr of await collectNfcLinkMigrationCardAddresses(params.tagIdHex)) {
+		const rows = await collectErc1155BalancesForHolder(fromNorm, cardAddr, params.provider, 'eoa')
+		if (rows.length === 0) continue
+		const card = new ethers.Contract(cardAddr, NFC_LINK_CARD_MIGRATE_ABI, params.wallet)
+		for (const row of rows) {
+			const tx = await card.safeTransferFrom(fromNorm, toNorm, row.tokenId, row.amount, '0x')
+			const receipt = await tx.wait()
+			if (!receipt || receipt.status !== 1) {
+				throw new Error(`ERC1155 sweep failed for card ${cardAddr} tokenId=${row.tokenId}`)
+			}
+			txHashes.push(tx.hash)
+			logger(
+				Colors.green(
+					`[nfcLinkAppMigrate] EOA ERC1155 card=${cardAddr.slice(0, 10)}… #${row.tokenId} amount=${row.amount} → ${toNorm.slice(0, 10)}… tx=${tx.hash}`
+				)
+			)
+		}
+	}
+	return txHashes
+}
 
 /**
  * Link App 基础设施卡 createRedeemBatch 的 **数量来源**：在 `cardAddress` 上用 `balanceOf(holderAa, 0)` 读取持仓。
@@ -10452,9 +10664,11 @@ function resolveNfcLinkAppCardAddress(body: { cardAddress?: string }): { ok: tru
 }
 
 /**
- * NFC Link App (POS): SUN，读 NFC AA 在基础设施卡上 token #0；**仅**登记 DB + `nftRedeemcode`，不在此步 `createRedeemBatch`。
- * 有 #0 时 `migrate_via_container=true`，认领阶段用 NFC 卡私钥签 Container，把全部 #0 转到 App 用户 AA。
- * 无 #0 则仅换绑。仍含链上 pending redeem 的旧会话认领走 `redeemForUser`；cancel 链上 batch 仍需 `BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY`。
+ * NFC Link App (POS): SUN，读 NFC 侧可迁移资产；**仅**登记 DB + `nftRedeemcode`，不在此步 `createRedeemBatch`。
+ * 有可迁移余额时 `migrate_via_container=true`，认领阶段迁移至 App 钱包：
+ * - NFC **无 AA**：不创建 NFC AA，仅 EOA 直转（USDC/CADD/ERC-1155 含会员 NFT）
+ * - NFC **有 AA**：EOA 直转 + Container 迁 AA 上全部资产（含会员 NFT）；App 无 AA 则先创建
+ * 无余额则仅换绑。
  */
 export const nfcLinkAppExecute = async (
 	body: { uid?: string; e?: string; c?: string; m?: string; cardAddress?: string },
@@ -10516,6 +10730,7 @@ export const nfcLinkAppExecute = async (
 		const aa = await SC.aaAccountFactoryPaymaster.primaryAccountOf(eoa)
 		const aaCode = aa && aa !== ethers.ZeroAddress ? await SC.walletBase.provider!.getCode(aa) : '0x'
 		const hasDeployedAa = !!(aa && aa !== ethers.ZeroAddress && aaCode && aaCode !== '0x')
+		const hasMigratableAssets = await nfcLinkAppSessionHasMigratableAssets(eoa, tagIdHex)
 		if (!hasDeployedAa) {
 			const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
 			try {
@@ -10527,6 +10742,7 @@ export const nfcLinkAppExecute = async (
 						payerEoa: eoa,
 						aaAddress: ethers.ZeroAddress,
 						redeemHashBytes32: null,
+						migrateViaContainer: hasMigratableAssets,
 					},
 					null,
 					redeemSecret,
@@ -10553,19 +10769,14 @@ export const nfcLinkAppExecute = async (
 					deepLinkUrl,
 					txHash: null,
 					redeemOnChain: false,
+					migrateViaContainer: hasMigratableAssets,
+					note: hasMigratableAssets
+						? 'NFC wallet has migratable assets. When you claim, EOA-only wallets transfer directly; wallets with AA also use a container relay. Membership NFTs are included.'
+						: 'No migratable balance on this NFC wallet; link proceeds without asset migration.',
 				})
 				.end()
 			return
 		}
-		const cardResolved = resolveNfcLinkAppCardAddress(body)
-		if (!cardResolved.ok) {
-			res.status(400).json({ success: false, error: cardResolved.error }).end()
-			return
-		}
-		const linkCardAddr = cardResolved.address
-		// `aa` = NFC 绑定 EOA 的 primary AA；bundle 数量为该 AA 在基础设施卡上的 balanceOf(aa,0)，非 EOA getOwnershipByEOA、非商户 admin redeem
-		const bundle = await buildNfcLinkAppRedeemBundleFromChain(linkCardAddr, aa, SC.walletBase.provider!)
-		const hasToken0Points = bundle != null
 		const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
 		try {
 			await registerNfcLinkAppLock(
@@ -10576,7 +10787,7 @@ export const nfcLinkAppExecute = async (
 					payerEoa: eoa,
 					aaAddress: aa,
 					redeemHashBytes32: null,
-					migrateViaContainer: hasToken0Points,
+					migrateViaContainer: hasMigratableAssets,
 				},
 				null,
 				redeemSecret,
@@ -10603,10 +10814,10 @@ export const nfcLinkAppExecute = async (
 				deepLinkUrl,
 				txHash: null,
 				redeemOnChain: false,
-				migrateViaContainer: hasToken0Points,
-				note: hasToken0Points
-					? 'Token #0 on the infrastructure card migrates to your app AA when you claim the link (container transfer signed with the NFC card key). No createRedeemBatch at link time.'
-					: 'No token #0 balance on infrastructure card for this AA; link proceeds without asset migration.',
+				migrateViaContainer: hasMigratableAssets,
+				note: hasMigratableAssets
+					? 'NFC wallet assets (USDC, CADD, Beamio card points and membership NFTs) migrate to your app wallet when you claim. EOA-only NFC wallets are not forced to create AA.'
+					: 'No migratable balance on this NFC wallet; link proceeds without asset migration.',
 			})
 			.end()
 	} catch (e: any) {
@@ -10963,41 +11174,36 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 const NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6 = 2_000_000n
 
 /**
- * Link App 认领：用 DB 中 NFC 卡私钥签 `ContainerMain`，将基础设施卡 ERC-1155 `#0` 全额从 NFC 用户 AA 转到 App 用户 AA。
- * 不经过 createRedeemBatch / redeemForUser。
+ * Link App 认领：App 侧确保 AA；NFC **无 AA** 时仅 EOA 直转，**有 AA** 时 EOA 直转 + Container 迁 AA 全部资产（含会员 NFT）。
  */
-async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
+async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 	nfcTagIdHex: string
 	nfcPayerEoa: string
-	nfcAa: string
 	beneficiaryUserEoa: string
-}): Promise<{ txHash: string } | { skipped: true }> {
-	const { nfcTagIdHex, nfcPayerEoa, nfcAa, beneficiaryUserEoa } = params
-	const infra = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
-	const aaNorm = ethers.getAddress(nfcAa)
-	if (aaNorm === ethers.ZeroAddress) {
-		throw new Error('NFC smart account is not deployed.')
-	}
-	const migrateGate = await getNfcCardSignedTxGateByTagId(normalizeNfcLinkTagId(nfcTagIdHex))
+}): Promise<{ txHash: string | null; eoaSweepTxHashes: string[] } | { skipped: true }> {
+	const { nfcTagIdHex, nfcPayerEoa, beneficiaryUserEoa } = params
+	const tagNorm = normalizeNfcLinkTagId(nfcTagIdHex)
+	const migrateGate = await getNfcCardSignedTxGateByTagId(tagNorm)
 	if (!migrateGate.ok) {
 		throw new Error(migrateGate.message)
 	}
-	const nfcPk = await getNfcCardPrivateKeyByTagId(normalizeNfcLinkTagId(nfcTagIdHex))
+	const nfcPk = await getNfcCardPrivateKeyByTagId(tagNorm)
 	if (!nfcPk) {
 		throw new Error('NFC card private key not found.')
 	}
 	const nfcWallet = new ethers.Wallet(nfcPk)
-	if (ethers.getAddress(nfcWallet.address).toLowerCase() !== ethers.getAddress(nfcPayerEoa).toLowerCase()) {
+	const nfcEoaNorm = ethers.getAddress(nfcPayerEoa)
+	if (ethers.getAddress(nfcWallet.address).toLowerCase() !== nfcEoaNorm.toLowerCase()) {
 		throw new Error('NFC private key does not match the linked card EOA.')
 	}
 
 	const SC = Settle_ContractPool.shift()
 	if (!SC) throw new Error('Service temporarily unavailable')
 	try {
-		const primary = await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, ethers.getAddress(nfcPayerEoa))
-		if (!primary || ethers.getAddress(primary).toLowerCase() !== aaNorm.toLowerCase()) {
-			throw new Error('NFC AA address mismatch.')
-		}
+		const provider = SC.walletBase.provider!
+		const nfcSigner = nfcWallet.connect(provider)
+		const deployedNfcAa = await resolveDeployedBeamioAaForNfcEoa(nfcEoaNorm, provider)
+
 		const { accountAddress: beneficiaryAa } = await DeployingSmartAccount(
 			ethers.getAddress(beneficiaryUserEoa),
 			SC.aaAccountFactoryPaymaster
@@ -11007,16 +11213,55 @@ async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
 		}
 		const toAddr = ethers.getAddress(beneficiaryAa)
 
-		const cardRead = new ethers.Contract(infra, NFC_LINK_BALANCE_OF_ABI, SC.walletBase.provider!)
-		const bal0 = (await cardRead.balanceOf(aaNorm, 0n)) as bigint
-		if (bal0 <= 0n) {
-			logger(Colors.gray(`[nfcLinkAppMigrateContainer] skip: zero token #0 for AA ${aaNorm.slice(0, 10)}…`))
-			return { skipped: true }
+		const eoaSweepTxHashes: string[] = []
+		eoaSweepTxHashes.push(
+			...(await sweepNfcEoaErc20ToBeneficiaryAa({
+				nfcEoa: nfcEoaNorm,
+				beneficiaryAa: toAddr,
+				wallet: nfcSigner,
+			}))
+		)
+		eoaSweepTxHashes.push(
+			...(await sweepNfcEoaErc1155ToBeneficiaryAa({
+				nfcEoa: nfcEoaNorm,
+				beneficiaryAa: toAddr,
+				tagIdHex: tagNorm,
+				wallet: nfcSigner,
+				provider,
+			}))
+		)
+
+		if (!deployedNfcAa) {
+			if (eoaSweepTxHashes.length === 0) {
+				logger(Colors.gray(`[nfcLinkAppMigrate] skip: NFC EOA ${nfcEoaNorm.slice(0, 10)}… has no AA and no EOA assets`))
+				return { skipped: true }
+			}
+			logger(
+				Colors.green(
+					`✅ [nfcLinkAppMigrate] EOA-only path ${nfcEoaNorm.slice(0, 10)}… → ${toAddr.slice(0, 10)}… directTxs=${eoaSweepTxHashes.length}`
+				)
+			)
+			syncNftTierMetadataForUser(BEAMIO_USER_CARD_ASSET_ADDRESS, beneficiaryUserEoa).catch(() => {})
+			return { txHash: eoaSweepTxHashes[0] ?? null, eoaSweepTxHashes }
 		}
 
-		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aaNorm, 'relayed')
+		const aaNorm = deployedNfcAa
+		const items = await buildNfcLinkAppContainerMigrationItems({
+			nfcAa: aaNorm,
+			tagIdHex: tagNorm,
+			provider,
+		})
+		if (items.length === 0) {
+			if (eoaSweepTxHashes.length === 0) {
+				logger(Colors.gray(`[nfcLinkAppMigrate] skip: no AA container items and no EOA assets for ${aaNorm.slice(0, 10)}…`))
+				return { skipped: true }
+			}
+			syncNftTierMetadataForUser(BEAMIO_USER_CARD_ASSET_ADDRESS, beneficiaryUserEoa).catch(() => {})
+			return { txHash: eoaSweepTxHashes[0] ?? null, eoaSweepTxHashes }
+		}
+
+		const nonce = await readContainerNonceFromAAStorage(provider, aaNorm, 'relayed')
 		const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
-		const items = [{ kind: 1, asset: infra, amount: bal0.toString(), tokenId: '0', data: '0x' }]
 		const itemsHash = hashContainerItems(items)
 		const domain = {
 			name: 'BeamioAccount',
@@ -11040,7 +11285,6 @@ async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
 			nonce,
 			deadline,
 		}
-		const nfcSigner = nfcWallet.connect(SC.walletBase.provider!)
 		const signature = await nfcSigner.signTypedData(domain, types, message)
 		const containerPayload: ContainerRelayPayload = {
 			account: aaNorm,
@@ -11061,9 +11305,10 @@ async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
 			throw new Error(pre.error ?? 'Container pre-check failed')
 		}
 
-		const infraOwnerRead = new ethers.Contract(infra, ['function owner() view returns (address)'], SC.walletBase.provider!)
+		const infra = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+		const infraOwnerRead = new ethers.Contract(infra, ['function owner() view returns (address)'], provider)
 		const rawCardOwner = (await infraOwnerRead.owner()) as string
-		const issuerResolve = await resolveCardOwnerToEOA(SC.walletBase.provider!, rawCardOwner)
+		const issuerResolve = await resolveCardOwnerToEOA(provider, rawCardOwner)
 		if (!issuerResolve.success) {
 			throw new Error(issuerResolve.error ?? 'Could not resolve infrastructure card owner to EOA for B-Unit fee.')
 		}
@@ -11136,11 +11381,11 @@ async function performNfcLinkAppMigrateInfraToken0ViaContainer(params: {
 
 		logger(
 			Colors.green(
-				`✅ [nfcLinkAppMigrateContainer] infra #0 amount=${bal0} ${aaNorm.slice(0, 10)}… → ${toAddr.slice(0, 10)}… tx=${tx.hash}`
+				`✅ [nfcLinkAppMigrateContainer] items=${items.length} ${aaNorm.slice(0, 10)}… → ${toAddr.slice(0, 10)}… tx=${tx.hash} directTxs=${eoaSweepTxHashes.length}`
 			)
 		)
 		syncNftTierMetadataForUser(infra, beneficiaryUserEoa).catch(() => {})
-		return { txHash: tx.hash }
+		return { txHash: tx.hash, eoaSweepTxHashes }
 	} finally {
 		Settle_ContractPool.unshift(SC)
 	}
@@ -11157,7 +11402,7 @@ function normalizeNfcLinkClaimPrivateKey(raw: unknown): string | null {
 
 /**
  * SilentPassUI deep link claim: validate private key → EOA, validate session, optional chain migrate, replace NFC row key, release session.
- * - `migrateViaContainer`: ensure App user AA, NFC 私钥签 Container，`relayContainerMainRelayed` 迁基础设施卡 #0 至用户 AA。
+ * - `migrateViaContainer`: App 无 AA 则创建；NFC 无 AA 则仅 EOA 直转，有 AA 则 EOA 直转 + Container（含会员 NFT）。
  * - `redeemOnChain`（旧会话）: `redeemForUser` / `redeemPoolForUser`。
  * - 否则仅 DB 换绑。
  * Body: nftRedeemcode, tagid, uid, counter, privateKey (HTTPS; do not log secret).
@@ -11228,21 +11473,22 @@ export const nfcLinkAppClaimWithKeyExecute = async (
 	}
 
 	let redeemTxHash: string | null = null
+	let migrationEoaSweepTxHashes: string[] = []
 	if (v.migrateViaContainer) {
 		try {
-			const r = await performNfcLinkAppMigrateInfraToken0ViaContainer({
+			const r = await performNfcLinkAppMigrateAllAssetsViaContainer({
 				nfcTagIdHex: tagRaw,
 				nfcPayerEoa: v.payerEoa,
-				nfcAa: v.aaAddress,
 				beneficiaryUserEoa: userEoa,
 			})
 			if ('txHash' in r) {
 				redeemTxHash = r.txHash
+				migrationEoaSweepTxHashes = r.eoaSweepTxHashes ?? []
 			}
 		} catch (e: any) {
 			const errMsg = e?.reason ?? e?.message ?? e?.shortMessage ?? String(e)
 			logger(Colors.red(`[nfcLinkAppClaimWithKey] container migrate failed: ${errMsg}`))
-			res.status(400).json({ success: false, error: errMsg || 'Token migration failed.' }).end()
+			res.status(400).json({ success: false, error: errMsg || 'Asset migration failed.' }).end()
 			return
 		}
 	} else if (v.redeemOnChain) {
@@ -11275,7 +11521,12 @@ export const nfcLinkAppClaimWithKeyExecute = async (
 		logger(Colors.yellow(`[nfcLinkAppClaimWithKey] release session: ${e?.message ?? e}`))
 	}
 
-	res.status(200).json({ success: true, address: userEoa, redeemTxHash }).end()
+	res.status(200).json({
+		success: true,
+		address: userEoa,
+		redeemTxHash,
+		...(migrationEoaSweepTxHashes.length > 0 ? { migrationEoaSweepTxHashes } : {}),
+	}).end()
 }
 
 function _normalizeCardAddress(addr: string): string {
