@@ -317,15 +317,17 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			logger(Colors.yellow(`[fetchUIDAssetsForEOA] list registered BeamioUserCards failed: ${e?.message ?? e}`))
 		}
 	}
-	for (const raw of opts?.extraCardAddresses ?? []) {
-		try {
-			const address = ethers.getAddress(raw)
-			const lower = address.toLowerCase()
-			if (seenCardAddresses.has(lower)) continue
-			cardAddresses.push({ address, name: 'BeamioUserCard', type: 'beamio-user-card' })
-			seenCardAddresses.add(lower)
-		} catch {
-			/* ignore invalid DB/cache address */
+	if (!singleInfraScope) {
+		for (const raw of opts?.extraCardAddresses ?? []) {
+			try {
+				const address = ethers.getAddress(raw)
+				const lower = address.toLowerCase()
+				if (seenCardAddresses.has(lower)) continue
+				cardAddresses.push({ address, name: 'BeamioUserCard', type: 'beamio-user-card' })
+				seenCardAddresses.add(lower)
+			} catch {
+				/* ignore invalid DB/cache address */
+			}
 		}
 	}
 	const cardsStaged: { row: FetchUIDAssetsResult['cards'][number]; sortMin: bigint }[] = []
