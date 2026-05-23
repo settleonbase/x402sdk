@@ -10772,6 +10772,19 @@ export const nfcLinkAppExecute = async (
 		const aaCode = aa && aa !== ethers.ZeroAddress ? await SC.walletBase.provider!.getCode(aa) : '0x'
 		const hasDeployedAa = !!(aa && aa !== ethers.ZeroAddress && aaCode && aaCode !== '0x')
 		const hasMigratableAssets = await nfcLinkAppSessionHasMigratableAssets(eoa, tagIdHex, SC.walletBase.provider!)
+		if (hasMigratableAssets) {
+			const bUnitPre = await precheckNfcLinkAppMigrationBUnitFee(SC.walletBase.provider!)
+			if (!bUnitPre.ok) {
+				res.status(403)
+					.json({
+						success: false,
+						error: bUnitPre.error,
+						errorCode: 'NFC_LINK_MIGRATION_INSUFFICIENT_BUNITS',
+					})
+					.end()
+				return
+			}
+		}
 		if (!hasDeployedAa) {
 			const redeemSecret = `${randomUUID()}-${Date.now()}-${Math.random().toString(36).slice(2)}`
 			try {
@@ -11211,8 +11224,91 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 	}
 }
 
-/** `/api/nfcLinkAppClaimWithKey` Container 迁移专用：固定 2 B-Units，由基础设施卡 `owner()`（解析为 EOA）承担，不按转账金额计费。 */
+/** `/api/nfcLinkAppClaimWithKey` 迁移专用：固定 2 B-Units，由基础设施卡 `owner()`（解析为 EOA）承担，不按转账金额计费。 */
 const NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6 = 2_000_000n
+
+type NfcLinkMigrationBUnitContext = {
+	cardIssuerEoa: string
+	requiredBUnits6: bigint
+}
+
+async function resolveNfcLinkMigrationBUnitIssuer(provider: ethers.Provider): Promise<NfcLinkMigrationBUnitContext> {
+	const infra = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+	const infraOwnerRead = new ethers.Contract(infra, ['function owner() view returns (address)'], provider)
+	const rawCardOwner = (await infraOwnerRead.owner()) as string
+	const issuerResolve = await resolveCardOwnerToEOA(provider, rawCardOwner)
+	if (!issuerResolve.success) {
+		throw new Error(issuerResolve.error ?? 'Could not resolve infrastructure card owner to EOA for B-Unit fee.')
+	}
+	return {
+		cardIssuerEoa: ethers.getAddress(issuerResolve.cardOwner),
+		requiredBUnits6: NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
+	}
+}
+
+/** 迁移开始前只读预检：基础设施卡 issuer 须有足够 B-Unit，余额不足则拒绝启动迁移。 */
+async function precheckNfcLinkAppMigrationBUnitFee(
+	provider: ethers.Provider
+): Promise<{ ok: true; ctx: NfcLinkMigrationBUnitContext } | { ok: false; error: string }> {
+	try {
+		const ctx = await resolveNfcLinkMigrationBUnitIssuer(provider)
+		const bunitRead = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function getBUnitBalance(address) view returns (uint256)'],
+			providerConet
+		)
+		const balance = (await bunitRead.getBUnitBalance(ctx.cardIssuerEoa)) as bigint
+		if (balance < ctx.requiredBUnits6) {
+			return {
+				ok: false,
+				error: `Insufficient B-Units: infrastructure card issuer needs ${Number(ctx.requiredBUnits6) / 1e6} B-Units for link migration (balance: ${Number(balance) / 1e6} B-Units).`,
+			}
+		}
+		return { ok: true, ctx }
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		return { ok: false, error: msg }
+	}
+}
+
+/** Cluster 预检：Link 资产迁移所需 B-Unit（固定 2）是否充足。 */
+export async function nfcLinkAppMigrationBUnitClusterPreCheck(): Promise<{ success: boolean; error?: string }> {
+	const pre = await precheckNfcLinkAppMigrationBUnitFee(providerBaseBackup)
+	if (!pre.ok) return { success: false, error: pre.error }
+	return { success: true }
+}
+
+/** 迁移链上交易已成功；扣费失败仅记日志，不再向上抛错。 */
+async function consumeNfcLinkMigrationBUnitFeeNonFatal(params: {
+	cardIssuerEoa: string
+	feeTxHash: string
+	gasUsed: bigint
+	walletConet: ethers.Wallet
+}): Promise<void> {
+	try {
+		const bunitAirdropWrite = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+			params.walletConet
+		)
+		await bunitAirdropWrite.consumeFromUser(
+			params.cardIssuerEoa,
+			NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
+			params.feeTxHash as `0x${string}`,
+			params.gasUsed,
+			1n,
+			{ gasLimit: 2_500_000 }
+		)
+		logger(
+			Colors.cyan(
+				`[nfcLinkAppMigrate] consumeFromUser: ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units from infra card issuer ${params.cardIssuerEoa.slice(0, 10)}… tx=${params.feeTxHash}`
+			)
+		)
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.yellow(`[nfcLinkAppMigrate] consumeFromUser non-fatal: ${msg}`))
+	}
+}
 
 /**
  * Link App 认领：App 侧确保 AA；NFC **无 AA** 时仅 EOA 直转，**有 AA** 时 EOA 直转 + Container 迁 AA 全部资产（含会员 NFT）。
@@ -11242,6 +11338,12 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 	if (!SC) throw new Error('Service temporarily unavailable')
 	try {
 		const provider = SC.walletBase.provider!
+		const bUnitPre = await precheckNfcLinkAppMigrationBUnitFee(provider)
+		if (!bUnitPre.ok) {
+			throw new Error(bUnitPre.error)
+		}
+		const { cardIssuerEoa } = bUnitPre.ctx
+
 		const nfcSigner = nfcWallet.connect(provider)
 		const deployedNfcAa = await resolveDeployedBeamioAaForNfcEoa(nfcEoaNorm, provider)
 
@@ -11277,6 +11379,13 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 				logger(Colors.gray(`[nfcLinkAppMigrate] skip: NFC EOA ${nfcEoaNorm.slice(0, 10)}… has no AA and no EOA assets`))
 				return { skipped: true }
 			}
+			const feeTxHash = eoaSweepTxHashes[eoaSweepTxHashes.length - 1]!
+			await consumeNfcLinkMigrationBUnitFeeNonFatal({
+				cardIssuerEoa,
+				feeTxHash,
+				gasUsed: 0n,
+				walletConet: SC.walletConet,
+			})
 			logger(
 				Colors.green(
 					`✅ [nfcLinkAppMigrate] EOA-only path ${nfcEoaNorm.slice(0, 10)}… → ${toAddr.slice(0, 10)}… directTxs=${eoaSweepTxHashes.length}`
@@ -11297,6 +11406,13 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 				logger(Colors.gray(`[nfcLinkAppMigrate] skip: no AA container items and no EOA assets for ${aaNorm.slice(0, 10)}…`))
 				return { skipped: true }
 			}
+			const feeTxHash = eoaSweepTxHashes[eoaSweepTxHashes.length - 1]!
+			await consumeNfcLinkMigrationBUnitFeeNonFatal({
+				cardIssuerEoa,
+				feeTxHash,
+				gasUsed: 0n,
+				walletConet: SC.walletConet,
+			})
 			syncNftTierMetadataForUser(BEAMIO_USER_CARD_ASSET_ADDRESS, beneficiaryUserEoa).catch(() => {})
 			return { txHash: eoaSweepTxHashes[0] ?? null, eoaSweepTxHashes }
 		}
@@ -11346,34 +11462,6 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 			throw new Error(pre.error ?? 'Container pre-check failed')
 		}
 
-		const infra = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
-		const infraOwnerRead = new ethers.Contract(infra, ['function owner() view returns (address)'], provider)
-		const rawCardOwner = (await infraOwnerRead.owner()) as string
-		const issuerResolve = await resolveCardOwnerToEOA(provider, rawCardOwner)
-		if (!issuerResolve.success) {
-			throw new Error(issuerResolve.error ?? 'Could not resolve infrastructure card owner to EOA for B-Unit fee.')
-		}
-		const cardIssuerEoa = ethers.getAddress(issuerResolve.cardOwner)
-		const bunitRead = new ethers.Contract(
-			CONET_BUNIT_AIRDROP_ADDRESS,
-			['function getBUnitBalance(address) view returns (uint256)'],
-			providerConet
-		)
-		const issuerBUnitBal = (await bunitRead.getBUnitBalance(cardIssuerEoa)) as bigint
-		const skipBUnitFeeForLinkMigration = issuerBUnitBal === 0n
-		if (issuerBUnitBal > 0n && issuerBUnitBal < NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) {
-			throw new Error(
-				`Insufficient B-Units: infrastructure card issuer needs ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units for link migration (balance: ${Number(issuerBUnitBal) / 1e6} B-Units).`
-			)
-		}
-		if (skipBUnitFeeForLinkMigration) {
-			logger(
-				Colors.yellow(
-					`[nfcLinkAppMigrateContainer] Skipping B-Unit fee: infrastructure card issuer ${cardIssuerEoa.slice(0, 10)}… has 0 B-Units.`
-				)
-			)
-		}
-
 		const relayItems = containerPayload.items.map((it) => {
 			const d = it.data
 			const dataHex = typeof d === 'string' && d.startsWith('0x') ? d : '0x'
@@ -11404,38 +11492,19 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 			throw new Error('Container relay transaction failed')
 		}
 
-		if (!skipBUnitFeeForLinkMigration) {
-			try {
-				const bunitAirdropWrite = new ethers.Contract(
-					CONET_BUNIT_AIRDROP_ADDRESS,
-					['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
-					SC.walletConet
-				)
-				await bunitAirdropWrite.consumeFromUser(
-					cardIssuerEoa,
-					NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
-					tx.hash as `0x${string}`,
-					receipt.gasUsed ?? 0n,
-					1n,
-					{ gasLimit: 2_500_000 }
-				)
-				logger(
-					Colors.cyan(
-						`[nfcLinkAppMigrateContainer] consumeFromUser: ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units from infra card issuer ${cardIssuerEoa.slice(0, 10)}…`
-					)
-				)
-			} catch (e: unknown) {
-				const msg = e instanceof Error ? e.message : String(e)
-				logger(Colors.yellow(`[nfcLinkAppMigrateContainer] consumeFromUser non-fatal: ${msg}`))
-			}
-		}
+		await consumeNfcLinkMigrationBUnitFeeNonFatal({
+			cardIssuerEoa,
+			feeTxHash: tx.hash,
+			gasUsed: receipt.gasUsed ?? 0n,
+			walletConet: SC.walletConet,
+		})
 
 		logger(
 			Colors.green(
 				`✅ [nfcLinkAppMigrateContainer] items=${items.length} ${aaNorm.slice(0, 10)}… → ${toAddr.slice(0, 10)}… tx=${tx.hash} directTxs=${eoaSweepTxHashes.length}`
 			)
 		)
-		syncNftTierMetadataForUser(infra, beneficiaryUserEoa).catch(() => {})
+		syncNftTierMetadataForUser(BEAMIO_USER_CARD_ASSET_ADDRESS, beneficiaryUserEoa).catch(() => {})
 		return { txHash: tx.hash, eoaSweepTxHashes }
 	} finally {
 		Settle_ContractPool.unshift(SC)
