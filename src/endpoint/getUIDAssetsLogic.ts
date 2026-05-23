@@ -16,6 +16,7 @@ import {
 	listRegisteredBeamioUserCardAddresses,
 } from '../db'
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
+import { filterApiExcludedCardRows, isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCategory'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
@@ -87,7 +88,7 @@ export type FetchUIDAssetsResult = {
 		nfts: Array<{ tokenId: string; attribute: string; tier: string; expiry: string; isExpired: boolean }>
 	}>
 	/**
-	 * 本次查询所用基础设施卡（`merchantInfraCard` / `infrastructureCardAddress` 或默认常量）上，该会员 EOA 在 DB 中的最近一笔 top-up。
+	 * 本次查询所用商户程序卡（`merchantInfraCard` / `infrastructureCardAddress`）上，该会员 EOA 在 DB 中的最近一笔 top-up。
 	 * 与 `getMemberLastTopupOnCard` / `insertMemberTopupEvent` 一致；无记录时字段省略。
 	 */
 	posLastTopupAt?: string
@@ -110,33 +111,33 @@ export type FetchUIDAssetsResult = {
 	}>
 }
 
-/** POS / 客户端可选：指定终端登记的基础设施 BeamioUserCard 地址；若与默认常量不一致则查询该合约。 */
+/** POS / 客户端可选：终端登记的商户程序 BeamioUserCard 地址（`merchantInfraCard`）。 */
 export type FetchUIDAssetsOptions = {
+	/** @deprecated 使用 merchantInfraCard；字段名保留兼容。须为终端登记的有效程序卡，无全局默认。 */
 	infrastructureCardAddress?: string
 	/** Extra BeamioUserCard addresses from trusted DB/indexer discovery (for NFC all-card inventory refresh). */
 	extraCardAddresses?: string[]
 	/** Scan DB-registered BeamioUserCard rows and return only cards with trusted on-chain assets for this user. */
 	includeRegisteredBeamioCards?: boolean
 	/**
-	 * `merchantInfraOnly`：仅返回该基础设施卡一行（含余额为 0），用于 POS「Check Balance」。
-	 * `infrastructureOnly`：仅查询/返回解析后的基础设施卡（`merchantInfraCard` 或默认常量），不附带 CCSA。
-	 * `all`（默认）：CCSA + 基础设施（与历史行为一致）。
+	 * `merchantInfraOnly`：仅返回 `merchantInfraCard` 指定程序卡一行（含余额为 0），用于 POS「Check Balance」。
+	 * `infrastructureOnly`（别名）：同上，须显式传卡地址。
+	 * `all`（默认）：CCSA + DB 已登记商户卡 + extra；**不**自动扫描废弃全局卡。
 	 */
 	cardsScope?: 'all' | 'merchantInfraOnly' | 'infrastructureOnly'
 	/** getWalletAssets 历史行为：即使 points/NFT 全空也返回该卡一行。 */
 	includeZeroBalanceCards?: boolean
 }
 
-const resolveInfrastructureCardAddress = (opt?: string): string => {
-	if (opt && typeof opt === 'string') {
-		try {
-			const a = ethers.getAddress(opt.trim())
-			return a
-		} catch {
-			/* fall through */
-		}
+const resolveMerchantProgramCardAddress = (opt?: string): string | null => {
+	if (!opt || typeof opt !== 'string') return null
+	try {
+		const a = ethers.getAddress(opt.trim())
+		if (isApiExcludedUserCard(a)) return null
+		return a
+	} catch {
+		return null
 	}
-	return BEAMIO_USER_CARD_ASSET_ADDRESS
 }
 
 /** 与 MemberCard / cardMetadata 一致：优先 shareTokenMetadata.name，其次顶层 name。 */
@@ -290,22 +291,27 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	const usdcBalance = ethers.formatUnits(usdcTotalRaw, 6)
 	const caddBalance = ethers.formatUnits(caddTotalRaw, caddDecimals)
 	const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
-	const infraAddr = resolveInfrastructureCardAddress(opts?.infrastructureCardAddress)
+	const infraAddr = resolveMerchantProgramCardAddress(opts?.infrastructureCardAddress)
 	const merchantInfraOnly = opts?.cardsScope === 'merchantInfraOnly'
-	const infrastructureOnly = opts?.cardsScope === 'infrastructureOnly'
-	const singleInfraScope = merchantInfraOnly || infrastructureOnly
-	const infraFallbackName = 'Infrastructure card'
-	const cardAddresses: { address: string; name: string; type: string }[] = singleInfraScope
-		? [{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' }]
-		: [
-				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
-				{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' },
-			]
+	const merchantProgramOnly = opts?.cardsScope === 'infrastructureOnly'
+	const singleProgramScope = merchantInfraOnly || merchantProgramOnly
+	const programFallbackName = 'Merchant program card'
+	const cardAddresses: { address: string; name: string; type: string }[] = []
+	if (singleProgramScope) {
+		if (!infraAddr) {
+			logger(Colors.yellow('[fetchUIDAssetsForEOA] merchantInfraOnly/infrastructureOnly requires merchantInfraCard'))
+		} else {
+			cardAddresses.push({ address: infraAddr, name: programFallbackName, type: 'beamio-user-card' })
+		}
+	} else {
+		cardAddresses.push({ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' })
+	}
 	const seenCardAddresses = new Set(cardAddresses.map((c) => c.address.toLowerCase()))
-	if (!singleInfraScope && opts?.includeRegisteredBeamioCards !== false) {
+	if (!singleProgramScope && opts?.includeRegisteredBeamioCards !== false) {
 		try {
 			const registered = await listRegisteredBeamioUserCardAddresses()
 			for (const raw of registered) {
+				if (isApiExcludedUserCard(raw)) continue
 				const address = ethers.getAddress(raw)
 				const lower = address.toLowerCase()
 				if (seenCardAddresses.has(lower)) continue
@@ -317,9 +323,10 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			logger(Colors.yellow(`[fetchUIDAssetsForEOA] list registered BeamioUserCards failed: ${e?.message ?? e}`))
 		}
 	}
-	if (!singleInfraScope) {
+	if (!singleProgramScope) {
 		for (const raw of opts?.extraCardAddresses ?? []) {
 			try {
+				if (isApiExcludedUserCard(raw)) continue
 				const address = ethers.getAddress(raw)
 				const lower = address.toLowerCase()
 				if (seenCardAddresses.has(lower)) continue
@@ -441,7 +448,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				hasChargeRewardPoints ||
 				hasNftGt0 ||
 				merchantInfraOnly ||
-				infrastructureOnly ||
+				merchantProgramOnly ||
 				(opts?.includeZeroBalanceCards === true && cardType !== 'beamio-user-card')
 			if (includeRow) {
 				const row: FetchUIDAssetsResult['cards'][number] = {
@@ -464,7 +471,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			}
 		} catch (cardErr: unknown) {
 			logger(Colors.gray(`[fetchUIDAssetsForEOA] card=${cardAddr} skip: ${(cardErr as Error)?.message ?? cardErr}`))
-			if (singleInfraScope && cardAddr.toLowerCase() === infraAddr.toLowerCase()) {
+			if (singleProgramScope && infraAddr && cardAddr.toLowerCase() === infraAddr.toLowerCase()) {
 				try {
 					const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
 					const currencyNum = await card.currency()
@@ -494,32 +501,34 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 		if (a.sortMin < b.sortMin) return 1
 		return 0
 	})
-	const cards = cardsStaged.map((s) => s.row)
+	const cards = filterApiExcludedCardRows(cardsStaged.map((s) => s.row))
 	const beamioTag = await fetchBeamioTagForEoa(eoaAddr)
-	const infraForPos = resolveInfrastructureCardAddress(opts?.infrastructureCardAddress)
 	let posTopFields: {
 		posLastTopupAt?: string
 		posLastTopupUsdcE6?: string
 		posLastTopupPointsE6?: string
 	} = {}
-	try {
-		const snap = await getMemberLastTopupOnCard(infraForPos, eoaAddr)
-		if (snap) {
-			posTopFields.posLastTopupAt = snap.lastTopupAt
-			if (snap.usdcE6 != null) posTopFields.posLastTopupUsdcE6 = snap.usdcE6
-			if (snap.pointsE6 != null) posTopFields.posLastTopupPointsE6 = snap.pointsE6
+	if (infraAddr) {
+		try {
+			const snap = await getMemberLastTopupOnCard(infraAddr, eoaAddr)
+			if (snap) {
+				posTopFields.posLastTopupAt = snap.lastTopupAt
+				if (snap.usdcE6 != null) posTopFields.posLastTopupUsdcE6 = snap.usdcE6
+				if (snap.pointsE6 != null) posTopFields.posLastTopupPointsE6 = snap.pointsE6
+			}
+		} catch {
+			/* DB 失败不阻塞资产查询 */
 		}
-	} catch {
-		/* DB 失败不阻塞资产查询 */
 	}
 	let merchantCouponBalances: FetchUIDAssetsResult['merchantCouponBalances'] | undefined
 	let merchantClaimableCoupons: FetchUIDAssetsResult['merchantClaimableCoupons'] | undefined
-	try {
-		const seriesRows = await listCouponIssuedNftSeriesForCardDescending(infraForPos, 80)
-		if (seriesRows.length > 0) {
-			const tokenHolder = aaAddr && ethers.isAddress(aaAddr) ? ethers.getAddress(aaAddr) : eoaAddr
-			const couponRead = new ethers.Contract(
-				infraForPos,
+	if (infraAddr) {
+		try {
+			const seriesRows = await listCouponIssuedNftSeriesForCardDescending(infraAddr, 80)
+			if (seriesRows.length > 0) {
+				const tokenHolder = aaAddr && ethers.isAddress(aaAddr) ? ethers.getAddress(aaAddr) : eoaAddr
+				const couponRead = new ethers.Contract(
+					infraAddr,
 				[
 					'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
 					'function issuedNftPriceInCurrency6(uint256 tokenId) view returns (uint256)',
@@ -559,7 +568,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				const bal = balByHolder > balByEoa ? balByHolder : balByEoa
 				if (bal > 0n) {
 					balances.push({
-						cardAddress: infraForPos,
+						cardAddress: infraAddr,
 						couponId,
 						tokenId,
 						title,
@@ -569,7 +578,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				}
 				if (!requiresRedeemCode && priceInCurrency6 === 0n && !alreadyClaimed && bal === 0n) {
 					claimables.push({
-						cardAddress: infraForPos,
+						cardAddress: infraAddr,
 						couponId,
 						tokenId,
 						title,
@@ -580,8 +589,9 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			merchantCouponBalances = balances.length > 0 ? balances : undefined
 			merchantClaimableCoupons = claimables.length > 0 ? claimables : undefined
 		}
-	} catch {
-		/* ignore coupon enrichment failure */
+		} catch {
+			/* ignore coupon enrichment failure */
+		}
 	}
 	return {
 		ok: true,
@@ -597,14 +607,15 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	}
 }
 
-/** 基础设施卡（CashTrees）主会员 NFT：与链上 `tiers[i].minUsdc6` 最高档一致（`primaryMemberTokenId`）。 */
+/** 商户程序卡主会员 NFT：与链上 `tiers[i].minUsdc6` 最高档一致（`primaryMemberTokenId`）。 */
 export const pickInfrastructureCashTreeTierTokenId = (
 	cards: FetchUIDAssetsResult['cards'],
-	infraAddress: string = BEAMIO_USER_CARD_ASSET_ADDRESS
+	programCardAddress?: string | null
 ): string | null => {
-	const row =
-		cards.find((c) => c.cardAddress.toLowerCase() === infraAddress.toLowerCase()) ??
-		cards.find((c) => c.cardType === 'infrastructure')
+	const want = programCardAddress?.trim()
+	const row = want && ethers.isAddress(want)
+		? cards.find((c) => c.cardAddress.toLowerCase() === ethers.getAddress(want).toLowerCase())
+		: cards.find((c) => c.cardType === 'beamio-user-card')
 	if (!row?.nfts?.length) return null
 	const primary = row.primaryMemberTokenId?.trim()
 	if (primary && Number(primary) > 0) return primary

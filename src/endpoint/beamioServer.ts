@@ -13,7 +13,8 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
@@ -1173,7 +1174,7 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** GET /api/getCardAdminInfo?cardAddress=0x...&wallet=0x... - 从 BeamioUserCard 卡合约（Base）获取 owner 与 admin 列表。cardAddress 默认 BEAMIO_USER_CARD_ASSET_ADDRESS。wallet 可选：若提供则返回该终端的上层 admin（upperAdmin）。供 Android 用 upperAdmin/owner 调用 search-users 拉取 BeamioCapsule。 */
+	/** GET /api/getCardAdminInfo?cardAddress=0x...&wallet=0x... - 从 BeamioUserCard 卡合约（Base）获取 owner 与 admin 列表。cardAddress 必填（终端登记的商户程序卡）。wallet 可选：若提供则返回该终端的上层 admin（upperAdmin）。 */
 	const CARD_ADMIN_ABI = [
 		'function owner() view returns (address)',
 		'function getAdminListWithMetadata() view returns (address[] admins, string[] metadatas, address[] parents)',
@@ -1181,10 +1182,14 @@ const routing = ( router: Router ) => {
 	] as const
 	router.get('/getCardAdminInfo', async (req, res) => {
 		const { cardAddress: cardAddrQ, wallet: walletQ } = req.query as { cardAddress?: string; wallet?: string }
-		const cardAddr = (cardAddrQ?.trim() || BEAMIO_USER_CARD_ASSET_ADDRESS)
-		if (!ethers.isAddress(cardAddr)) {
-			return res.status(400).json({ ok: false, error: 'Invalid cardAddress' }).end()
+		const cardAddrRaw = cardAddrQ?.trim() ?? ''
+		if (!cardAddrRaw || !ethers.isAddress(cardAddrRaw)) {
+			return res.status(400).json({ ok: false, error: 'cardAddress is required' }).end()
 		}
+		if (isApiExcludedUserCard(cardAddrRaw)) {
+			return res.status(404).json({ ok: false, error: 'Card not found' }).end()
+		}
+		const cardAddr = ethers.getAddress(cardAddrRaw)
 		try {
 			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_ADMIN_ABI, providerBase)
 			const [owner, adminResult] = await Promise.all([
@@ -1290,10 +1295,14 @@ const routing = ( router: Router ) => {
 	const PERIOD_DAY = 1
 	router.get('/getCardStats', async (req, res) => {
 		const { cardAddress: cardAddrQ, admin: adminQ } = req.query as { cardAddress?: string; admin?: string }
-		const cardAddr = (cardAddrQ?.trim() || BEAMIO_USER_CARD_ASSET_ADDRESS)
-		if (!ethers.isAddress(cardAddr)) {
-			return res.status(400).json({ ok: false, error: 'Invalid cardAddress' }).end()
+		const cardAddrRaw = cardAddrQ?.trim() ?? ''
+		if (!cardAddrRaw || !ethers.isAddress(cardAddrRaw)) {
+			return res.status(400).json({ ok: false, error: 'cardAddress is required' }).end()
 		}
+		if (isApiExcludedUserCard(cardAddrRaw)) {
+			return res.status(404).json({ ok: false, error: 'Card not found' }).end()
+		}
+		const cardAddr = ethers.getAddress(cardAddrRaw)
 		try {
 			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_STATS_ABI, providerBase)
 			let adminAddr = adminQ?.trim() && ethers.isAddress(adminQ.trim()) ? ethers.getAddress(adminQ.trim()) : null
@@ -1319,10 +1328,14 @@ const routing = ( router: Router ) => {
 	/** GET /api/cardTransactions - 代理 BeamioIndexerDiamond 记账数据（asset + account 合并），供 bizSite 前端绕过 CORS 拉取。 */
 	router.get('/cardTransactions', async (req, res) => {
 		const { cardAddress, adminAddress, aaAddress } = req.query as { cardAddress?: string; adminAddress?: string; aaAddress?: string }
-		const cardAddr = (cardAddress?.trim() || BEAMIO_USER_CARD_ASSET_ADDRESS)
-		if (!ethers.isAddress(cardAddr)) {
-			return res.status(400).json({ error: 'Invalid cardAddress' }).end()
+		const cardAddrRaw = cardAddress?.trim() ?? ''
+		if (!cardAddrRaw || !ethers.isAddress(cardAddrRaw)) {
+			return res.status(400).json({ error: 'cardAddress is required' }).end()
 		}
+		if (isApiExcludedUserCard(cardAddrRaw)) {
+			return res.status(404).json({ error: 'Card not found' }).end()
+		}
+		const cardAddr = ethers.getAddress(cardAddrRaw)
 		const adminAddr = adminAddress?.trim() && ethers.isAddress(adminAddress.trim()) ? ethers.getAddress(adminAddress.trim()) : null
 		const aaAddr = aaAddress?.trim() && ethers.isAddress(aaAddress.trim()) ? ethers.getAddress(aaAddress.trim()) : null
 		const INDEXER_ASSET_ABI = ['function getAssetTransactionsByCurrentPeriodOffsetAndAccountModePaged(address asset, address account, uint8 periodType, uint256 periodOffset, uint256 pageOffset, uint256 pageLimit, bytes32 txCategoryFilter, uint8 accountMode, uint256 chainIdFilter) view returns (uint256 total, uint256 periodStart, uint256 periodEnd, tuple(bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, tuple(uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, tuple(uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)']

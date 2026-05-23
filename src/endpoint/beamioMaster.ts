@@ -20,6 +20,7 @@ import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, crea
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED, filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
+import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import {
@@ -31,10 +32,6 @@ import {
 } from '../couponMetadataCategory'
 
 const masterServerPort = 1111
-
-const DEPRECATED_USER_CARD_ADDRESSES = new Set([
-	'0xBCcfA50d2a5917C7A8662177F5F4B7A175787270'.toLowerCase(),
-])
 
 /** HTTP 记账 body 中的 routeItems 归一化（与 MemberCard 内存路径一致） */
 function normalizeBeamioRouteItemsFromBody(raw: unknown): BeamioTransferRouteItem[] | undefined {
@@ -731,7 +728,7 @@ const routing = ( router: Router ) => {
 					const cards: string[] = await factory.cardsOfOwner(o)
 					for (const addr of cards) {
 						const key = addr.toLowerCase()
-						if (DEPRECATED_USER_CARD_ADDRESSES.has(key)) continue
+						if (isApiExcludedUserCard(key)) continue
 						if (seen.has(key)) continue
 						seen.add(key)
 						try {
