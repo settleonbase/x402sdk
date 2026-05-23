@@ -11360,9 +11360,17 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 			providerConet
 		)
 		const issuerBUnitBal = (await bunitRead.getBUnitBalance(cardIssuerEoa)) as bigint
-		if (issuerBUnitBal < NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) {
+		const skipBUnitFeeForLinkMigration = issuerBUnitBal === 0n
+		if (issuerBUnitBal > 0n && issuerBUnitBal < NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) {
 			throw new Error(
 				`Insufficient B-Units: infrastructure card issuer needs ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units for link migration (balance: ${Number(issuerBUnitBal) / 1e6} B-Units).`
+			)
+		}
+		if (skipBUnitFeeForLinkMigration) {
+			logger(
+				Colors.yellow(
+					`[nfcLinkAppMigrateContainer] Skipping B-Unit fee: infrastructure card issuer ${cardIssuerEoa.slice(0, 10)}… has 0 B-Units.`
+				)
 			)
 		}
 
@@ -11396,28 +11404,30 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 			throw new Error('Container relay transaction failed')
 		}
 
-		try {
-			const bunitAirdropWrite = new ethers.Contract(
-				CONET_BUNIT_AIRDROP_ADDRESS,
-				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
-				SC.walletConet
-			)
-			await bunitAirdropWrite.consumeFromUser(
-				cardIssuerEoa,
-				NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
-				tx.hash as `0x${string}`,
-				receipt.gasUsed ?? 0n,
-				1n,
-				{ gasLimit: 2_500_000 }
-			)
-			logger(
-				Colors.cyan(
-					`[nfcLinkAppMigrateContainer] consumeFromUser: ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units from infra card issuer ${cardIssuerEoa.slice(0, 10)}…`
+		if (!skipBUnitFeeForLinkMigration) {
+			try {
+				const bunitAirdropWrite = new ethers.Contract(
+					CONET_BUNIT_AIRDROP_ADDRESS,
+					['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+					SC.walletConet
 				)
-			)
-		} catch (e: unknown) {
-			const msg = e instanceof Error ? e.message : String(e)
-			logger(Colors.yellow(`[nfcLinkAppMigrateContainer] consumeFromUser non-fatal: ${msg}`))
+				await bunitAirdropWrite.consumeFromUser(
+					cardIssuerEoa,
+					NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
+					tx.hash as `0x${string}`,
+					receipt.gasUsed ?? 0n,
+					1n,
+					{ gasLimit: 2_500_000 }
+				)
+				logger(
+					Colors.cyan(
+						`[nfcLinkAppMigrateContainer] consumeFromUser: ${Number(NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6) / 1e6} B-Units from infra card issuer ${cardIssuerEoa.slice(0, 10)}…`
+					)
+				)
+			} catch (e: unknown) {
+				const msg = e instanceof Error ? e.message : String(e)
+				logger(Colors.yellow(`[nfcLinkAppMigrateContainer] consumeFromUser non-fatal: ${msg}`))
+			}
 		}
 
 		logger(
