@@ -44,7 +44,7 @@ export const LATEST_CARDS_EXCLUDED = new Set([
 
 /** 旧卡只放行这一张；从该时间点之后新发行的 BeamioUserCard 默认放行。 */
 const DISCOVER_ALLOWED_LEGACY_CARD_LOWER = ethers.getAddress(
-	'0x0722A93120D23ccb7F8e79CF65a3316502D54125',
+	'0x7334a7c7fE867538018fcC4CEA8b266E47600911',
 ).toLowerCase()
 const DISCOVER_NEW_CARD_ALLOW_AFTER_MS = Date.parse('2026-05-23T00:30:00.000Z')
 
