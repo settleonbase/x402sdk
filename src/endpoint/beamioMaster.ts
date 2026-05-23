@@ -20,7 +20,7 @@ import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, crea
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED, filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
-import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './getUIDAssetsLogic'
+import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import {
 	BEAMIO_COUPON_NFT_CATEGORY,
@@ -810,19 +810,53 @@ const routing = ( router: Router ) => {
 			}
 		})
 
+		const parseMerchantInfraFetchOptions = (body: unknown): FetchUIDAssetsOptions => {
+			const b = body as {
+				merchantInfraCard?: string
+				infrastructureCardAddress?: string
+				merchantInfraOnly?: boolean
+				cardsScope?: string
+				includeZeroBalanceCards?: boolean
+			}
+			const raw =
+				typeof b?.merchantInfraCard === 'string' && b.merchantInfraCard.trim()
+					? b.merchantInfraCard.trim()
+					: typeof b?.infrastructureCardAddress === 'string'
+						? b.infrastructureCardAddress.trim()
+						: ''
+			const resolved =
+				raw !== '' && ethers.isAddress(raw)
+					? ethers.getAddress(raw)
+					: undefined
+			const scopeRaw = typeof b?.cardsScope === 'string' ? b.cardsScope.trim().toLowerCase() : ''
+			let cardsScope: FetchUIDAssetsOptions['cardsScope'] = undefined
+			if (scopeRaw === 'all') {
+				cardsScope = 'all'
+			} else if ((resolved && scopeRaw === '') || (b?.merchantInfraOnly === true && !!resolved)) {
+				cardsScope = 'merchantInfraOnly'
+			} else if (scopeRaw === 'infrastructureonly' || scopeRaw === 'infraonly') {
+				cardsScope = 'infrastructureOnly'
+			}
+			return {
+				...(resolved ? { infrastructureCardAddress: resolved } : {}),
+				...(cardsScope ? { cardsScope } : {}),
+				...(b?.includeZeroBalanceCards === true ? { includeZeroBalanceCards: true } : {}),
+			}
+		}
+
 		/** getUIDAssetsProvision pool：Cluster 预检通过后，TagID 未绑定时转发到此。Master 排队执行 provision → ensureAA → fetchAssets，不预检。 */
-		const getUIDAssetsProvisionPool: Array<{ uid: string; tagIdHex: string; c?: string; res: Response }> = []
+		const getUIDAssetsProvisionPool: Array<{ uid: string; tagIdHex: string; c?: string; opts?: FetchUIDAssetsOptions; res: Response }> = []
 		const getUIDAssetsProvisionPress = async () => {
 			const obj = getUIDAssetsProvisionPool.shift()
 			if (!obj) return
-			const { uid, tagIdHex, c: counterHex, res } = obj
+			const { uid, tagIdHex, c: counterHex, opts, res } = obj
 			try {
 				logger(Colors.cyan(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provision + ensureAA + fetch`))
 				const { eoa, wasNewlyProvisioned } = await provisionOrGetNfcWalletByTagId(tagIdHex, uid || undefined)
 				// 始终确保 AA 存在：wasNewlyProvisioned 仅表示 EOA 新建，但 EOA 已存在时可能因 DeployingSmartAccount 曾失败而无 AA
 				await ensureAAForEOA(ethers.getAddress(eoa))
 				if (wasNewlyProvisioned) logger(Colors.green(`[getUIDAssetsProvision] tagId=${tagIdHex.slice(0, 8)}... provisioned EOA + AA`))
-				const result = await fetchUIDAssetsForEOA(eoa)
+				const result = await fetchUIDAssetsForEOA(eoa, opts)
 				if (uid && tagIdHex) {
 					await upsertNfcBeamioUserCardHoldingsFromTrustedCards({
 						tagIdHex,
@@ -857,7 +891,13 @@ const routing = ( router: Router ) => {
 			if (!tagIdHex || typeof tagIdHex !== 'string' || !tagIdHex.trim()) {
 				return res.status(400).json({ ok: false, error: 'Missing tagIdHex (card unique ID)' })
 			}
-			getUIDAssetsProvisionPool.push({ uid: typeof uid === 'string' ? uid.trim() : '', tagIdHex: tagIdHex.trim(), c: typeof c === 'string' ? c.trim() : undefined, res })
+			getUIDAssetsProvisionPool.push({
+				uid: typeof uid === 'string' ? uid.trim() : '',
+				tagIdHex: tagIdHex.trim(),
+				c: typeof c === 'string' ? c.trim() : undefined,
+				opts: parseMerchantInfraFetchOptions(req.body),
+				res,
+			})
 			getUIDAssetsProvisionPress()
 		})
 

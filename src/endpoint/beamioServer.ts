@@ -1675,23 +1675,33 @@ const routing = ( router: Router ) => {
 		return res.status(200).json(result).end()
 	})
 
-	/** 解析 POS 可选字段：`merchantInfraCard` 指定终端登记的基础设施卡；`merchantInfraOnly` 为真时仅返回该卡一行（须有效 merchantInfraCard）。 */
+	/** 解析 POS 可选字段：携带 `merchantInfraCard` 的 POS 余额/支付查询默认只返回该程序卡，避免展示其它商家的 BeamioUserCard。 */
 	const parseMerchantInfraFetchOptions = (body: unknown): FetchUIDAssetsOptions => {
-		const b = body as { merchantInfraCard?: string; merchantInfraOnly?: boolean; cardsScope?: string; includeZeroBalanceCards?: boolean }
-		const raw = typeof b?.merchantInfraCard === 'string' ? b.merchantInfraCard.trim() : ''
+		const b = body as {
+			merchantInfraCard?: string
+			infrastructureCardAddress?: string
+			merchantInfraOnly?: boolean
+			cardsScope?: string
+			includeZeroBalanceCards?: boolean
+		}
+		const raw =
+			typeof b?.merchantInfraCard === 'string' && b.merchantInfraCard.trim()
+				? b.merchantInfraCard.trim()
+				: typeof b?.infrastructureCardAddress === 'string'
+					? b.infrastructureCardAddress.trim()
+					: ''
 		const resolved =
 			raw !== '' && ethers.isAddress(raw)
 				? ethers.getAddress(raw)
 				: undefined
-		const merchantInfraOnly = b?.merchantInfraOnly === true && !!resolved
 		const scopeRaw = typeof b?.cardsScope === 'string' ? b.cardsScope.trim().toLowerCase() : ''
 		let cardsScope: FetchUIDAssetsOptions['cardsScope'] = undefined
-		if (merchantInfraOnly) {
+		if (scopeRaw === 'all') {
+			cardsScope = 'all'
+		} else if ((resolved && scopeRaw === '') || (b?.merchantInfraOnly === true && !!resolved)) {
 			cardsScope = 'merchantInfraOnly'
 		} else if (scopeRaw === 'infrastructureonly' || scopeRaw === 'infraonly') {
 			cardsScope = 'infrastructureOnly'
-		} else if (scopeRaw === 'all') {
-			cardsScope = 'all'
 		}
 		return {
 			...(resolved ? { infrastructureCardAddress: resolved } : {}),
@@ -1761,7 +1771,7 @@ const routing = ( router: Router ) => {
 				eoaRaw = await getNfcRecipientAddressByTagId(nfcSunTagIdHex)
 				if (!eoaRaw) {
 					logger(Colors.cyan(`[getUIDAssets] tagId=${nfcSunTagIdHex} 未绑定钱包，转发 Master 排队创建`))
-					postLocalhost('/api/getUIDAssetsProvision', { uid: uidTrim, tagIdHex: nfcSunTagIdHex, e: req.body?.e, c: req.body?.c, m: req.body?.m }, res)
+					postLocalhost('/api/getUIDAssetsProvision', { uid: uidTrim, tagIdHex: nfcSunTagIdHex, e: req.body?.e, c: req.body?.c, m: req.body?.m, ...uidAssetsOpts }, res)
 					return
 				}
 				// EOA 已绑定但可能无 AA（如 DeployingSmartAccount 曾失败），getOwnershipByEOA 会 revert UC_ResolveAccountFailed，需转发 Master 确保 AA
@@ -1773,7 +1783,7 @@ const routing = ( router: Router ) => {
 				}
 				if (!hasDeployedAA) {
 					logger(Colors.cyan(`[getUIDAssets] tagId=${nfcSunTagIdHex} EOA 无已部署 AA，转发 Master 确保 AA 后拉取`))
-					postLocalhost('/api/getUIDAssetsProvision', { uid: uidTrim, tagIdHex: nfcSunTagIdHex, e: req.body?.e, c: req.body?.c, m: req.body?.m }, res)
+					postLocalhost('/api/getUIDAssetsProvision', { uid: uidTrim, tagIdHex: nfcSunTagIdHex, e: req.body?.e, c: req.body?.c, m: req.body?.m, ...uidAssetsOpts }, res)
 					return
 				}
 			} else {
