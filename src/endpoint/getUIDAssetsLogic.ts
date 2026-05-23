@@ -21,11 +21,6 @@ import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tierMetadataRowResolve'
 
-/** 不参与 getUIDAssets 全量扫描的卡地址。新发行 BeamioUserCard 默认不排除。 */
-const DEPRECATED_INFRA_CARDS = new Set([
-	'0x0722A93120D23ccb7F8e79CF65a3316502D54125'.toLowerCase(),
-])
-
 /** 与 util.resolveBeamioBaseHttpRpcUrl 一致；此处不 import util，避免经 db 与 util/server 形成循环依赖 */
 const BASE_RPC_URL =
 	(typeof process !== 'undefined' && process.env?.BASE_RPC_URL?.trim()) || 'https://base-rpc.conet.network'
@@ -136,7 +131,7 @@ const resolveInfrastructureCardAddress = (opt?: string): string => {
 	if (opt && typeof opt === 'string') {
 		try {
 			const a = ethers.getAddress(opt.trim())
-			if (!DEPRECATED_INFRA_CARDS.has(a.toLowerCase())) return a
+			return a
 		} catch {
 			/* fall through */
 		}
@@ -301,13 +296,11 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	const singleInfraScope = merchantInfraOnly || infrastructureOnly
 	const infraFallbackName = 'Infrastructure card'
 	const cardAddresses: { address: string; name: string; type: string }[] = singleInfraScope
-		? DEPRECATED_INFRA_CARDS.has(infraAddr.toLowerCase())
-			? []
-			: [{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' }]
+		? [{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' }]
 		: [
 				{ address: BASE_CCSA_CARD_ADDRESS, name: 'CCSA CARD', type: 'ccsa' },
 				{ address: infraAddr, name: infraFallbackName, type: 'infrastructure' },
-			].filter(({ address }) => !DEPRECATED_INFRA_CARDS.has(address.toLowerCase()))
+			]
 	const seenCardAddresses = new Set(cardAddresses.map((c) => c.address.toLowerCase()))
 	if (!singleInfraScope && opts?.includeRegisteredBeamioCards !== false) {
 		try {
@@ -315,7 +308,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			for (const raw of registered) {
 				const address = ethers.getAddress(raw)
 				const lower = address.toLowerCase()
-				if (DEPRECATED_INFRA_CARDS.has(lower) || seenCardAddresses.has(lower)) continue
+				if (seenCardAddresses.has(lower)) continue
 				cardAddresses.push({ address, name: 'BeamioUserCard', type: 'beamio-user-card' })
 				seenCardAddresses.add(lower)
 			}
@@ -328,7 +321,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 		try {
 			const address = ethers.getAddress(raw)
 			const lower = address.toLowerCase()
-			if (DEPRECATED_INFRA_CARDS.has(lower) || seenCardAddresses.has(lower)) continue
+			if (seenCardAddresses.has(lower)) continue
 			cardAddresses.push({ address, name: 'BeamioUserCard', type: 'beamio-user-card' })
 			seenCardAddresses.add(lower)
 		} catch {
@@ -446,6 +439,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				hasChargeRewardPoints ||
 				hasNftGt0 ||
 				merchantInfraOnly ||
+				infrastructureOnly ||
 				(opts?.includeZeroBalanceCards === true && cardType !== 'beamio-user-card')
 			if (includeRow) {
 				const row: FetchUIDAssetsResult['cards'][number] = {
@@ -499,7 +493,6 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 		return 0
 	})
 	const cards = cardsStaged.map((s) => s.row)
-	const cardsFiltered = cards.filter((c) => !DEPRECATED_INFRA_CARDS.has(c.cardAddress.toLowerCase()))
 	const beamioTag = await fetchBeamioTagForEoa(eoaAddr)
 	const infraForPos = resolveInfrastructureCardAddress(opts?.infrastructureCardAddress)
 	let posTopFields: {
@@ -595,7 +588,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 		...(beamioTag != null && beamioTag !== '' ? { beamioTag } : {}),
 		usdcBalance,
 		caddBalance,
-		cards: cardsFiltered,
+		cards,
 		...posTopFields,
 		...(merchantCouponBalances ? { merchantCouponBalances } : {}),
 		...(merchantClaimableCoupons ? { merchantClaimableCoupons } : {}),
@@ -628,7 +621,6 @@ const INFRA_OWNERSHIP_ABI = [
 export async function pickInfrastructureCashTreeTierTokenIdFromChain(eoa: string): Promise<string | null> {
 	const eoaAddr = ethers.getAddress(eoa)
 	try {
-		if (DEPRECATED_INFRA_CARDS.has(BEAMIO_USER_CARD_ASSET_ADDRESS.toLowerCase())) return null
 		const aaAddr = await resolveBeamioAccountOf(eoaAddr)
 		const card = new ethers.Contract(BEAMIO_USER_CARD_ASSET_ADDRESS, INFRA_OWNERSHIP_ABI, providerBase)
 		const [, nfts] = (await (aaAddr ? card.getOwnership(aaAddr) : card.getOwnershipByEOA(eoaAddr))) as [

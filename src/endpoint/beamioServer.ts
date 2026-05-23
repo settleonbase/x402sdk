@@ -10,7 +10,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, nfcBeamioUserCardHoldingContains, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
+import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, BEAMIO_USER_CARD_ASSET_ADDRESS, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
@@ -33,23 +33,6 @@ import {
 	type OrchestratorSessionPatch,
 	type UsdcChargeOrchestratorContext,
 } from './usdcChargeOrchestrator'
-/** 服务器返回时强制屏蔽的旧基础设施卡地址 */
-const DEPRECATED_INFRA_CARDS = new Set([
-	'0xBCcfA50d2a5917C7A8662177F5F4B7A175787270'.toLowerCase(),
-	'0xB7644DDb12656F4854dC746464af47D33C206F0E'.toLowerCase(),
-	'0xC0F1c74fb95100a97b532be53B266a54f41DB615'.toLowerCase(),
-	'0x02BAe511632354584b198951B42eC73BACBc4E98'.toLowerCase(),
-	'0x5c5376EdAbBf0F0BD52d5F7a93828606a5051694'.toLowerCase(),
-	'0xEaCD6CB7e9E5b2a2652Ad65840997Aab37b828E1'.toLowerCase(),
-])
-
-const isDeprecatedInfraCardAddress = (value: string): boolean => {
-	try {
-		return DEPRECATED_INFRA_CARDS.has(ethers.getAddress(value).toLowerCase())
-	} catch {
-		return false
-	}
-}
 
 function posLedgerKeccakCategory(name: string): string {
 	return ethers.keccak256(ethers.toUtf8Bytes(name)).toLowerCase()
@@ -1202,9 +1185,6 @@ const routing = ( router: Router ) => {
 		if (!ethers.isAddress(cardAddr)) {
 			return res.status(400).json({ ok: false, error: 'Invalid cardAddress' }).end()
 		}
-		if (isDeprecatedInfraCardAddress(cardAddr)) {
-			return res.status(404).json({ ok: false, error: 'Deprecated cardAddress' }).end()
-		}
 		try {
 			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_ADMIN_ABI, providerBase)
 			const [owner, adminResult] = await Promise.all([
@@ -1314,9 +1294,6 @@ const routing = ( router: Router ) => {
 		if (!ethers.isAddress(cardAddr)) {
 			return res.status(400).json({ ok: false, error: 'Invalid cardAddress' }).end()
 		}
-		if (isDeprecatedInfraCardAddress(cardAddr)) {
-			return res.status(404).json({ ok: false, error: 'Deprecated cardAddress' }).end()
-		}
 		try {
 			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_STATS_ABI, providerBase)
 			let adminAddr = adminQ?.trim() && ethers.isAddress(adminQ.trim()) ? ethers.getAddress(adminQ.trim()) : null
@@ -1345,9 +1322,6 @@ const routing = ( router: Router ) => {
 		const cardAddr = (cardAddress?.trim() || BEAMIO_USER_CARD_ASSET_ADDRESS)
 		if (!ethers.isAddress(cardAddr)) {
 			return res.status(400).json({ error: 'Invalid cardAddress' }).end()
-		}
-		if (isDeprecatedInfraCardAddress(cardAddr)) {
-			return res.status(404).json({ error: 'Deprecated cardAddress' }).end()
 		}
 		const adminAddr = adminAddress?.trim() && ethers.isAddress(adminAddress.trim()) ? ethers.getAddress(adminAddress.trim()) : null
 		const aaAddr = aaAddress?.trim() && ethers.isAddress(aaAddress.trim()) ? ethers.getAddress(aaAddress.trim()) : null
@@ -1741,41 +1715,6 @@ const routing = ( router: Router ) => {
 		})
 	}
 
-	const ensureNfcQueriedBeamioCardKnown = async (params: {
-		tagIdHex: string
-		uid?: string | null
-		ownerEoa: string
-		cardAddress: string
-	}): Promise<{ ok: true } | { ok: false; error: string; status: number }> => {
-		const cardAddress = ethers.getAddress(params.cardAddress)
-		if (cardAddress.toLowerCase() === BASE_CCSA_CARD_ADDRESS.toLowerCase()) return { ok: true }
-		if (await nfcBeamioUserCardHoldingContains(params.tagIdHex, cardAddress)) return { ok: true }
-
-		// Trusted single-card probe: success with a row means this NFC EOA/AA owns assets on the card.
-		try {
-			const probed = await fetchUIDAssetsForEOA(params.ownerEoa, {
-				infrastructureCardAddress: cardAddress,
-				cardsScope: 'infrastructureOnly',
-			})
-			const matched = probed.cards.find((c) => c.cardAddress.toLowerCase() === cardAddress.toLowerCase())
-			if (matched) {
-				await upsertNfcHoldingsFromTrustedAssets(params.tagIdHex, params.uid ?? null, params.ownerEoa, probed)
-				return { ok: true }
-			}
-			return {
-				ok: false,
-				status: 403,
-				error: 'This NFC card has no trusted BeamioUserCard assets on the requested card.',
-			}
-		} catch (e: any) {
-			return {
-				ok: false,
-				status: 503,
-				error: `Could not verify NFC card ownership for requested BeamioUserCard: ${e?.shortMessage ?? e?.message ?? e}`,
-			}
-		}
-	}
-
 	/** POST /api/getUIDAssets - 查询卡资产。卡的唯一 ID 为 TagID。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 解密得到 TagID，用 TagID 查 EOA/AA。beamioTab 仍按 AccountRegistry 解析。 */
 	router.post('/getUIDAssets', async (req, res) => {
 		const { uid, e, c, m } = req.body as { uid?: string; e?: string; c?: string; m?: string }
@@ -1865,17 +1804,6 @@ const routing = ( router: Router ) => {
 							...(uidAssetsOpts.extraCardAddresses ?? []),
 							...known.map((row) => row.cardAddress),
 						],
-					}
-				}
-				if (uidAssetsOpts.infrastructureCardAddress) {
-					const allow = await ensureNfcQueriedBeamioCardKnown({
-						tagIdHex: nfcSunTagIdHex,
-						uid: uidTrim,
-						ownerEoa: eoa,
-						cardAddress: uidAssetsOpts.infrastructureCardAddress,
-					})
-					if (!allow.ok) {
-						return res.status(allow.status).json({ ok: false, error: allow.error }).end()
 					}
 				}
 			}
@@ -2306,8 +2234,6 @@ const routing = ( router: Router ) => {
 		if (!fiat6Ok && !usdc6Ok) {
 			return res.status(400).json({ success: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' })
 		}
-		let nfcContainerTagId: string | null = null
-		let nfcContainerOwnerEoa: string | null = null
 		if (isNfcUid) {
 			try {
 				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${String(c ?? '').trim()}&e=${String(e ?? '').trim()}&m=${String(m ?? '').trim()}`
@@ -2315,12 +2241,10 @@ const routing = ( router: Router ) => {
 				if (!sunResult.valid) {
 					return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
 				}
-				nfcContainerTagId = sunResult.tagIdHex
-				const eoaFromTag = await getNfcRecipientAddressByTagId(nfcContainerTagId)
+				const eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
 				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
 					return res.status(403).json({ success: false, error: 'NFC card is not linked to a wallet' }).end()
 				}
-				nfcContainerOwnerEoa = ethers.getAddress(eoaFromTag)
 			} catch (e: any) {
 				return res.status(403).json({ success: false, error: `SUN verification error: ${e?.message ?? e}` }).end()
 			}
@@ -2341,19 +2265,6 @@ const routing = ( router: Router ) => {
 				} else if (it.kind === 1) {
 					const cardAddr = ethers.getAddress(it.asset)
 					cardRequired.set(cardAddr, (cardRequired.get(cardAddr) ?? 0n) + amount)
-				}
-			}
-			if (nfcContainerTagId && nfcContainerOwnerEoa) {
-				for (const cardAddr of cardRequired.keys()) {
-					const allow = await ensureNfcQueriedBeamioCardKnown({
-						tagIdHex: nfcContainerTagId,
-						uid: uidTrim,
-						ownerEoa: nfcContainerOwnerEoa,
-						cardAddress: cardAddr,
-					})
-					if (!allow.ok) {
-						return res.status(allow.status).json({ success: false, error: allow.error }).end()
-					}
 				}
 			}
 			const usdcPromise = usdcRequired > 0n ? usdc.balanceOf(account) : Promise.resolve(0n)
@@ -2797,17 +2708,6 @@ const routing = ( router: Router ) => {
 			currency: (currency || 'CAD').trim(),
 			cardAddress: ethers.getAddress(cardAddress.trim())
 		}
-		if (nfcSunTagForEnsure && resolvedWallet) {
-			const allow = await ensureNfcQueriedBeamioCardKnown({
-				tagIdHex: nfcSunTagForEnsure,
-				uid: uidTrim,
-				ownerEoa: resolvedWallet,
-				cardAddress: forwardBody.cardAddress,
-			})
-			if (!allow.ok) {
-				return res.status(allow.status).json({ success: false, error: allow.error }).end()
-			}
-		}
 		try {
 			let prepareCardOwner = ''
 			try {
@@ -2937,17 +2837,6 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: 'Deadline expired' })
 			}
 			const cardAddress = ethers.getAddress(cardAddr)
-			if (nfcTagIdHex && nfcLinkedEOA) {
-				const allow = await ensureNfcQueriedBeamioCardKnown({
-					tagIdHex: nfcTagIdHex,
-					uid: uidTrim,
-					ownerEoa: ethers.getAddress(nfcLinkedEOA),
-					cardAddress,
-				})
-				if (!allow.ok) {
-					return res.status(allow.status).json({ success: false, error: allow.error }).end()
-				}
-			}
 			const verifyingContractGw = await getBeamioUserCardFactoryGateway(cardAddress)
 			const dataHash = ethers.keccak256(data)
 			const domain = {
@@ -4341,16 +4230,6 @@ const routing = ( router: Router ) => {
 				if (!tagIdHex || !recipientEOA) {
 					sessionUpdate({ state: 'error', error: 'NFC card is not linked to a wallet' })
 					return res.status(403).json({ success: false, error: 'NFC card is not linked to a wallet' }).end()
-				}
-				const allow = await ensureNfcQueriedBeamioCardKnown({
-					tagIdHex,
-					uid: uidTrim,
-					ownerEoa: recipientEOA,
-					cardAddress: cardAddr,
-				})
-				if (!allow.ok) {
-					sessionUpdate({ state: 'error', error: allow.error })
-					return res.status(allow.status).json({ success: false, error: allow.error }).end()
 				}
 			} else {
 				logger(Colors.cyan(`[nfcUsdcCharge] no-NFC mode card=${cardAddr.slice(0, 8)}… total=${breakdown.total.toFixed(2)} (third-party wallet, SUN bypass; currency resolved on-chain)`))
