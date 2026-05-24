@@ -20,7 +20,7 @@ import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, crea
 import { BASE_CARD_FACTORY } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { LATEST_CARDS_EXCLUDED, filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
-import { isApiExcludedUserCard } from '../apiExcludedUserCards'
+import { filterApiExcludedCardRows, isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import {
@@ -1078,7 +1078,9 @@ const routing = ( router: Router ) => {
 				return res.status(200).json({ items: cached.items, limit: cached.limit })
 			}
 			try {
-				const items = await listRecentBeamioIssuedCouponSeries(limit)
+				const scanLimit = Math.min(100, Math.max(limit, limit * 4))
+				const rawItems = await listRecentBeamioIssuedCouponSeries(scanLimit)
+				const items = filterApiExcludedCardRows(rawItems).slice(0, limit)
 				recentIssuedCouponSeriesCache.set(cacheKey, { items, limit, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 				res.status(200).json({ items, limit })
 			} catch (err: any) {
@@ -1098,6 +1100,9 @@ const routing = ( router: Router ) => {
 			limit = Math.floor(limit)
 			limit = Math.min(Math.max(limit, 1), 50)
 			const checksum = ethers.getAddress(card)
+			if (isApiExcludedUserCard(checksum)) {
+				return res.status(200).json({ cardAddress: checksum, limit, items: [] })
+			}
 			const cacheKey = `${checksum.toLowerCase()}:${limit}`
 			const cached = cardActiveIssuedCouponSeriesCache.get(cacheKey)
 			if (cached && Date.now() < cached.expiry) {
