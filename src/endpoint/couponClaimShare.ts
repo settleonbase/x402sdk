@@ -1,7 +1,7 @@
 import { ethers } from 'ethers'
 import QRCode from 'qrcode'
 import sharp from 'sharp'
-import { listCouponIssuedNftSeriesForCardDescending } from '../db'
+import { listCouponIssuedNftSeriesForCardDescending, getCardByAddress } from '../db'
 import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCategory'
 
 const BEAMIO_APP_ORIGIN = 'https://beamio.app'
@@ -17,6 +17,8 @@ export type CouponClaimShareParams = {
 export type CouponClaimShareMeta = {
 	cardAddress: string
 	couponId: string
+	/** Program / merchant display name for share headline (e.g. "SilentPass"). */
+	merchantName: string
 	title: string
 	subtitle: string
 	iconUrl: string
@@ -65,6 +67,60 @@ const readMetadataSubtitle = (meta: Record<string, unknown> | null): string => {
 		readString(beamioCoupon?.description)
 	)
 }
+
+const MERCHANT_NAME_KEYS = [
+	'merchantName',
+	'brandName',
+	'storeName',
+	'programName',
+	'brand',
+	'merchant',
+] as const
+
+const readMetadataMerchantName = (meta: Record<string, unknown> | null): string => {
+	if (!meta) return ''
+	const props = asRecord(meta.properties)
+	const beamioCoupon = asRecord(props?.beamioCoupon)
+	for (const src of [meta, beamioCoupon, props]) {
+		if (!src) continue
+		for (const key of MERCHANT_NAME_KEYS) {
+			const v = readString(src[key])
+			if (v) return v
+		}
+	}
+	return ''
+}
+
+const readCardProgramName = (metadata: Record<string, unknown> | null): string => {
+	if (!metadata) return ''
+	const shareTokenMetadata = asRecord(metadata.shareTokenMetadata)
+	return (
+		readString(shareTokenMetadata?.name) ||
+		readString(metadata.name) ||
+		readString(metadata.programName)
+	)
+}
+
+const resolveMerchantNameForShare = async (
+	cardNorm: string,
+	couponMeta: Record<string, unknown> | null
+): Promise<string> => {
+	const fromCoupon = readMetadataMerchantName(couponMeta)
+	if (fromCoupon) return truncateText(fromCoupon, 32)
+
+	try {
+		const cardRow = await getCardByAddress(cardNorm)
+		const fromCard = readCardProgramName(asRecord(cardRow?.metadata ?? null))
+		if (fromCard) return truncateText(fromCard, 32)
+	} catch {
+		// ignore — fall back below
+	}
+
+	return 'Beamio'
+}
+
+const buildClaimHeadline = (merchantName: string): string =>
+	`Claim a ${truncateText(merchantName.trim() || 'Beamio', 28)} Coupon`
 
 const readMetadataIconUrl = (meta: Record<string, unknown> | null): string => {
 	if (!meta) return ''
@@ -302,11 +358,13 @@ export async function resolveCouponClaimShareMeta(
 
 	const title = truncateText(readMetadataTitle(matchedMeta) || 'Beamio Coupon', 48)
 	const subtitle = truncateText(readMetadataSubtitle(matchedMeta) || 'Claim this coupon in the Beamio app.', 72)
+	const merchantName = await resolveMerchantNameForShare(cardNorm, matchedMeta)
 	const expiresLabel = formatCouponExpiryPill(validBeforeSec)
 
 	return {
 		cardAddress: cardNorm,
 		couponId: wantedCouponId,
+		merchantName,
 		title,
 		subtitle,
 		iconUrl: readMetadataIconUrl(matchedMeta),
@@ -326,6 +384,7 @@ export function buildFallbackCouponClaimShareMeta(
 	return {
 		cardAddress: params.cardAddress,
 		couponId: params.couponId,
+		merchantName: 'Beamio',
 		title: 'Beamio Coupon',
 		subtitle: 'Claim this coupon in the Beamio app.',
 		iconUrl: '',
@@ -360,6 +419,7 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
 	const title = escapeXml(meta.title)
 	const subtitle = escapeXml(meta.subtitle)
 	const expires = escapeXml(meta.expiresLabel)
+	const claimHeadline = escapeXml(buildClaimHeadline(meta.merchantName))
 	const initial = escapeXml((meta.title.charAt(0) || 'B').toUpperCase())
 
 	const bgLayer = bgDataUrl
@@ -396,7 +456,7 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
     </pattern>
   </defs>
   <rect width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="${punchBg}" />
-  <text x="600" y="92" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="800" fill="#1a1c1f">Claim a Beamio Coupon</text>
+  <text x="600" y="92" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="800" fill="#1a1c1f">${claimHeadline}</text>
   <text x="600" y="132" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#64748b">Scan the QR or open the link on your phone</text>
   ${bgLayer}
   <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#capsuleShade)" clip-path="url(#capsuleClip)" />
@@ -418,7 +478,7 @@ const ogPngCache = new Map<string, { buf: Buffer; expiry: number }>()
 const OG_PNG_CACHE_TTL_MS = 10 * 60 * 1000
 
 export async function renderCouponClaimOgPng(meta: CouponClaimShareMeta): Promise<Buffer> {
-	const cacheKey = `${meta.cardAddress.toLowerCase()}:${meta.couponId}:${meta.shareUrl}`
+	const cacheKey = `${meta.cardAddress.toLowerCase()}:${meta.couponId}:${meta.merchantName}:${meta.shareUrl}`
 	const cached = ogPngCache.get(cacheKey)
 	if (cached && Date.now() < cached.expiry) return cached.buf
 
