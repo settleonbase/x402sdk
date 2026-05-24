@@ -3420,6 +3420,26 @@ export const getCardByAddress = async (cardAddress: string): Promise<{ cardOwner
 	}
 }
 
+/** beamio_cards.created_at for Discover merchant visibility (Featured Brands / coupon APIs). */
+export const getCardCreatedAtByAddress = async (cardAddress: string): Promise<string | null> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const addr = cardAddress.toLowerCase()
+		const { rows } = await db.query(
+			`SELECT created_at FROM beamio_cards WHERE card_address = $1 LIMIT 1`,
+			[addr]
+		)
+		if (rows.length === 0) return null
+		const createdAt = rows[0].created_at
+		return createdAt instanceof Date ? createdAt.toISOString() : createdAt != null ? String(createdAt) : null
+	} catch {
+		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 写入或更新单张成员 NFT 的 tier metadata（card_owner + token_id 唯一）。由 mint/redeem 成功后 sync 调用。 */
 export const upsertNftTierMetadata = async (params: {
 	cardAddress: string

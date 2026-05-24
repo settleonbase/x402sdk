@@ -19,8 +19,9 @@ import {
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BASE_CARD_FACTORY } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
-import { LATEST_CARDS_EXCLUDED, filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
-import { filterApiExcludedCardRows, isApiExcludedUserCard } from '../apiExcludedUserCards'
+import { filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
+import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
+import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import {
@@ -298,9 +299,8 @@ async function computeLatestCardsForMaster(limit: number): Promise<BeamioLatestC
 	const task = (async () => {
 		try {
 			const raw = await getLatestCards(limit)
-			const filtered = raw.filter((c) => !LATEST_CARDS_EXCLUDED.has((c.cardAddress || '').toLowerCase()))
 			const enriched = await enrichLatestCardsWithBaseErc1155PointsHolderCounts(
-				filtered,
+				raw,
 				providerBaseForLatestCards,
 			)
 			return filterLatestCardsByDiscoverMerchantPolicy(enriched)
@@ -1078,9 +1078,10 @@ const routing = ( router: Router ) => {
 				return res.status(200).json({ items: cached.items, limit: cached.limit })
 			}
 			try {
-				const scanLimit = Math.min(100, Math.max(limit, limit * 4))
+				const scanLimit = Math.min(100, Math.max(limit, limit * 8))
 				const rawItems = await listRecentBeamioIssuedCouponSeries(scanLimit)
-				const items = filterApiExcludedCardRows(rawItems).slice(0, limit)
+				const afterDiscover = await filterCouponSeriesRowsByDiscoverMerchantPolicy(rawItems)
+				const items = afterDiscover.slice(0, limit)
 				recentIssuedCouponSeriesCache.set(cacheKey, { items, limit, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 				res.status(200).json({ items, limit })
 			} catch (err: any) {
@@ -1100,7 +1101,7 @@ const routing = ( router: Router ) => {
 			limit = Math.floor(limit)
 			limit = Math.min(Math.max(limit, 1), 50)
 			const checksum = ethers.getAddress(card)
-			if (isApiExcludedUserCard(checksum)) {
+			if (!(await isCouponCardDiscoverVisible(checksum))) {
 				return res.status(200).json({ cardAddress: checksum, limit, items: [] })
 			}
 			const cacheKey = `${checksum.toLowerCase()}:${limit}`

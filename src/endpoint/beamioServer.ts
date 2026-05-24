@@ -15,6 +15,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { filterApiExcludedCardRows, isApiExcludedUserCard } from '../apiExcludedUserCards'
+import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
@@ -5481,9 +5482,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
 		try {
-			const scanLimit = Math.min(100, Math.max(limit, limit * 4))
+			const scanLimit = Math.min(100, Math.max(limit, limit * 8))
 			const rawItems = await listRecentBeamioIssuedCouponSeries(scanLimit)
-			const items = filterApiExcludedCardRows(rawItems).slice(0, limit)
+			const afterDiscover = await filterCouponSeriesRowsByDiscoverMerchantPolicy(rawItems)
+			const items = afterDiscover.slice(0, limit)
 			const body = JSON.stringify({ items, limit })
 			recentIssuedCouponSeriesCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 			res.status(200).json({ items, limit })
@@ -5504,7 +5506,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		limit = Math.floor(limit)
 		limit = Math.min(Math.max(limit, 1), 50)
 		const checksum = ethers.getAddress(card)
-		if (isApiExcludedUserCard(checksum)) {
+		if (!(await isCouponCardDiscoverVisible(checksum))) {
 			return res.status(200).json({ cardAddress: checksum, limit, items: [] })
 		}
 		const cacheKey = `${checksum.toLowerCase()}:${limit}`

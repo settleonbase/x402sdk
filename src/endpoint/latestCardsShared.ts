@@ -1,25 +1,55 @@
 import { ethers } from 'ethers'
 import type { BeamioLatestCardItem } from '../db'
-import { API_EXCLUDED_USER_CARD_ADDRESSES } from '../apiExcludedUserCards'
+import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 
 /**
- * latestCards / last-N 发卡列表：Cluster 与 Master 共用排除集（与 SilentPassUI USER_CARD_DISPLAY_EXCLUDED 对齐）。
+ * Featured Brands / Discover 商户可见性 — **全项目唯一标准**（见 `.cursor/rules/beamio-discover-merchant-visibility-single-standard.mdc`）。
+ *
+ * Gate 第一步：`isApiExcludedUserCard`（含废弃 infrastructure 卡 `0xBCcfA50…`、CCSA 卡 `0x2032A363…` 及 `apiExcludedUserCards.ts` 全集）。
+ * 适用：Featured Brands、`/api/latestCards`、公开优惠券列表等 **对外 Discover 展示**。
+ * 不适用：用户已持有资产、POS 终端绑定卡、必填 `cardAddress` 的写操作预检（仍可用 `isApiExcludedUserCard` 硬拒绝废弃地址）。
  */
-export const LATEST_CARDS_EXCLUDED = API_EXCLUDED_USER_CARD_ADDRESSES
 
-/** 旧卡只放行这一张；从该时间点之后新发行的 BeamioUserCard 默认放行。 */
-const DISCOVER_ALLOWED_LEGACY_CARD_LOWER = ethers.getAddress(
+/** @deprecated 请改用 `passDiscoverFeaturedBrandsMerchantCardPolicy`；保留别名供存量 import。 */
+export { API_EXCLUDED_USER_CARD_ADDRESSES as LATEST_CARDS_EXCLUDED } from '../apiExcludedUserCards'
+
+/** Legacy 白名单：LongDhang program card — 唯一允许在 cutover 前仍出现在 Discover 的旧卡地址。 */
+export const DISCOVER_ALLOWED_LEGACY_CARD_ADDRESS = ethers.getAddress(
 	'0x7334a7c7fE867538018fcC4CEA8b266E47600911',
-).toLowerCase()
-const DISCOVER_NEW_CARD_ALLOW_AFTER_MS = Date.parse('2026-05-23T00:30:00.000Z')
+)
+const DISCOVER_ALLOWED_LEGACY_CARD_LOWER = DISCOVER_ALLOWED_LEGACY_CARD_ADDRESS.toLowerCase()
 
-/** Apply after `LATEST_CARDS_EXCLUDED` + enrichment. */
+/** 此时间点（含）之后 `beamio_cards.created_at` 的新发卡默认对 Discover 可见。 */
+export const DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_ISO = '2026-05-23T00:30:00.000Z'
+export const DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_MS = Date.parse(DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_ISO)
+
+/**
+ * Featured Brands Discover 可见性（唯一 gate）：废弃全局卡 exclude + legacy 白名单 / 发卡时间 cutover。
+ */
+export function passDiscoverFeaturedBrandsMerchantCardPolicy(card: {
+	cardAddress: string
+	createdAt?: string | null
+}): boolean {
+	const cardAddress = (card.cardAddress || '').trim()
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return false
+	if (isApiExcludedUserCard(cardAddress)) return false
+	if (ethers.getAddress(cardAddress).toLowerCase() === DISCOVER_ALLOWED_LEGACY_CARD_LOWER) return true
+	const createdAtMs = Date.parse(String(card.createdAt ?? ''))
+	return Number.isFinite(createdAtMs) && createdAtMs >= DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_MS
+}
+
+/** @deprecated 内部 cutover 子规则；新代码请用 `passDiscoverFeaturedBrandsMerchantCardPolicy`。 */
+export function passDiscoverMerchantCardPolicy(card: {
+	cardAddress: string
+	createdAt?: string | null
+}): boolean {
+	const cardAddress = (card.cardAddress || '').trim()
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return false
+	if (ethers.getAddress(cardAddress).toLowerCase() === DISCOVER_ALLOWED_LEGACY_CARD_LOWER) return true
+	const createdAtMs = Date.parse(String(card.createdAt ?? ''))
+	return Number.isFinite(createdAtMs) && createdAtMs >= DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_MS
+}
+
 export function filterLatestCardsByDiscoverMerchantPolicy(cards: BeamioLatestCardItem[]): BeamioLatestCardItem[] {
-	return cards.filter((c) => {
-		const cardAddress = (c.cardAddress || '').trim()
-		if (!cardAddress || !ethers.isAddress(cardAddress)) return false
-		if (ethers.getAddress(cardAddress).toLowerCase() === DISCOVER_ALLOWED_LEGACY_CARD_LOWER) return true
-		const createdAtMs = Date.parse(String(c.createdAt || ''))
-		return Number.isFinite(createdAtMs) && createdAtMs >= DISCOVER_NEW_CARD_ALLOW_AFTER_MS
-	})
+	return cards.filter((c) => passDiscoverFeaturedBrandsMerchantCardPolicy(c))
 }
