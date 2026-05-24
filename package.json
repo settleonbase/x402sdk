@@ -27,7 +27,8 @@
 		"@nomicfoundation/hardhat-toolbox": "^7.0.0",
 		"@types/express": "^5.0.5",
 		"@types/node": "^24.9.2",
-		"@types/pg": "^8.15.6"
+		"@types/pg": "^8.15.6",
+		"@types/qrcode": "^1.5.6"
 	},
 	"dependencies": {
 		"@coinbase/cdp-sdk": "^1.39.0",
@@ -43,6 +44,8 @@
 		"node-fetch": "^3.3.2",
 		"openpgp": "^6.3.0",
 		"pg": "^8.16.3",
+		"qrcode": "^1.5.4",
+		"sharp": "^0.33.5",
 		"stripe": "^17.7.0",
 		"uuid": "^13.0.0",
 		"uuid62": "^0.2.1",
