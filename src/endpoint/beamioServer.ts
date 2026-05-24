@@ -196,7 +196,7 @@ import { masterSetup, resolveBeamioBaseHttpRpcUrl } from '../util'
 
 /** Public short link GET /go/verra-ndef → TestFlight (iOS) or Play Store (Android / default). */
 const VERRA_NDEF_PLAY_STORE_URL =
-	'https://play.google.com/store/apps/details?id=com.beamio.android_ntag'
+	'https://play.google.com/store/apps/details?id=com.beamio.pos'
 const VERRA_NDEF_TESTFLIGHT_URL = 'https://testflight.apple.com/join/ytm1F8Aq'
 
 function resolveVerraNdefInstallRedirectUrl(userAgent: string): string {

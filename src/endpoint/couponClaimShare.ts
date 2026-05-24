@@ -9,14 +9,31 @@ const ISSUED_NFT_START_ID = 100_000_000_000n
 const OG_WIDTH = 1200
 const OG_HEIGHT = 630
 
-export type CouponClaimShareParams = {
+export type CouponShareKind = 'open_claim' | 'redeem'
+
+export type CouponOpenClaimShareParams = {
+	kind: 'open_claim'
 	cardAddress: string
 	couponId: string
 }
 
-export type CouponClaimShareMeta = {
+export type CouponRedeemShareParams = {
+	kind: 'redeem'
 	cardAddress: string
-	couponId: string
+	redeemCode: string
+	/** Optional — helps resolve coupon capsule metadata for social previews. */
+	couponId?: string
+}
+
+/** @deprecated alias — prefer BeamioCouponShareParams */
+export type CouponClaimShareParams = CouponOpenClaimShareParams
+
+export type BeamioCouponShareParams = CouponOpenClaimShareParams | CouponRedeemShareParams
+
+export type CouponClaimShareMeta = {
+	shareKind: CouponShareKind
+	cardAddress: string
+	couponId?: string
 	/** Program / merchant display name for share headline (e.g. "SilentPass"). */
 	merchantName: string
 	title: string
@@ -119,8 +136,10 @@ const resolveMerchantNameForShare = async (
 	return 'Beamio'
 }
 
-const buildClaimHeadline = (merchantName: string): string =>
-	`Claim a ${truncateText(merchantName.trim() || 'Beamio', 28)} Coupon`
+const buildShareHeadline = (merchantName: string, shareKind: CouponShareKind): string => {
+	const verb = shareKind === 'redeem' ? 'Redeem' : 'Claim'
+	return `${verb} a ${truncateText(merchantName.trim() || 'Beamio', 28)} Coupon`
+}
 
 const readMetadataIconUrl = (meta: Record<string, unknown> | null): string => {
 	if (!meta) return ''
@@ -230,7 +249,22 @@ function isAllowedBeamioAppPath(pathname: string): boolean {
 	return pathname === '/app/' || pathname === '/app' || pathname.startsWith('/app/')
 }
 
-export function parseCouponClaimFromBeamioAppUrl(raw: string): CouponClaimShareParams | null {
+export function buildCouponRedeemAppDownloadUrl(
+	cardAddress: string,
+	redeemCode: string,
+	couponId?: string
+): string {
+	const card = ethers.getAddress(cardAddress)
+	const params = new URLSearchParams()
+	params.set('beamiocard', card)
+	params.set('redeemcode', redeemCode.trim())
+	const cid = couponId?.trim() ?? ''
+	if (cid) params.set('couponId', cid)
+	const redeemUrl = `${BEAMIO_APP_ORIGIN}/app/?${params.toString()}`
+	return `${BEAMIO_APP_ORIGIN}/app-download?target=${encodeURIComponent(redeemUrl)}`
+}
+
+export function parseCouponClaimFromBeamioAppUrl(raw: string): CouponOpenClaimShareParams | null {
 	const input = raw?.trim() ?? ''
 	if (!input) return null
 	try {
@@ -244,13 +278,52 @@ export function parseCouponClaimFromBeamioAppUrl(raw: string): CouponClaimShareP
 		const claim = (url.searchParams.get('claim') ?? '').trim().toLowerCase()
 		if (!cardAddress || !couponId || !ethers.isAddress(cardAddress)) return null
 		if (claim && claim !== 'open' && claim !== '1' && claim !== 'true') return null
-		return { cardAddress: ethers.getAddress(cardAddress), couponId }
+		return { kind: 'open_claim', cardAddress: ethers.getAddress(cardAddress), couponId }
 	} catch {
 		return null
 	}
 }
 
-export function parseCouponClaimFromAppDownloadTarget(target: string): CouponClaimShareParams | null {
+export function parseRedeemShareFromBeamioAppUrl(raw: string): CouponRedeemShareParams | null {
+	const input = raw?.trim() ?? ''
+	if (!input) return null
+	try {
+		const url = new URL(input)
+		if (url.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isAllowedBeamioAppPath(url.pathname)) return null
+		const cardAddress = (url.searchParams.get('beamiocard') ?? url.searchParams.get('Beamiocard') ?? '').trim()
+		const redeemCode = decodeURIComponent(
+			(url.searchParams.get('redeemcode') ?? url.searchParams.get('Redeemcode') ?? '').trim()
+		)
+		if (!cardAddress || !redeemCode || !ethers.isAddress(cardAddress)) return null
+		const couponId = decodeURIComponent(
+			(url.searchParams.get('couponId') ?? url.searchParams.get('couponid') ?? '').trim()
+		)
+		return {
+			kind: 'redeem',
+			cardAddress: ethers.getAddress(cardAddress),
+			redeemCode,
+			...(couponId ? { couponId } : {}),
+		}
+	} catch {
+		return null
+	}
+}
+
+export function parseRedeemShareFromAppDownloadTarget(target: string): CouponRedeemShareParams | null {
+	const trimmed = target?.trim() ?? ''
+	if (!trimmed) return null
+	try {
+		const wrapper = new URL(trimmed)
+		if (wrapper.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isAllowedBeamioAppPath(wrapper.pathname)) return null
+		return parseRedeemShareFromBeamioAppUrl(trimmed)
+	} catch {
+		return null
+	}
+}
+
+export function parseCouponClaimFromAppDownloadTarget(target: string): CouponOpenClaimShareParams | null {
 	const trimmed = target?.trim() ?? ''
 	if (!trimmed) return null
 	try {
@@ -267,7 +340,7 @@ export function parseCouponClaimShareRequest(query: {
 	target?: string
 	card?: string
 	couponId?: string
-}): { params: CouponClaimShareParams; shareUrl: string } | null {
+}): { params: BeamioCouponShareParams; shareUrl: string } | null {
 	const target = readString(query.target)
 	if (target) {
 		let innerTarget = target
@@ -281,15 +354,24 @@ export function parseCouponClaimShareRequest(query: {
 		} catch {
 			// Use raw target as inner claim URL.
 		}
-		const params = parseCouponClaimFromAppDownloadTarget(innerTarget)
-		if (!params) return null
-		if (!shareUrl) shareUrl = buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId)
-		return { params, shareUrl }
+		const openClaim = parseCouponClaimFromAppDownloadTarget(innerTarget)
+		if (openClaim) {
+			if (!shareUrl) shareUrl = buildCouponClaimAppDownloadUrl(openClaim.cardAddress, openClaim.couponId)
+			return { params: openClaim, shareUrl }
+		}
+		const redeem = parseRedeemShareFromAppDownloadTarget(innerTarget)
+		if (redeem) {
+			if (!shareUrl) {
+				shareUrl = buildCouponRedeemAppDownloadUrl(redeem.cardAddress, redeem.redeemCode, redeem.couponId)
+			}
+			return { params: redeem, shareUrl }
+		}
+		return null
 	}
 	const card = readString(query.card)
 	const couponId = readString(query.couponId)
 	if (!card || !couponId || !ethers.isAddress(card)) return null
-	const params = { cardAddress: ethers.getAddress(card), couponId }
+	const params: CouponOpenClaimShareParams = { kind: 'open_claim', cardAddress: ethers.getAddress(card), couponId }
 	return { params, shareUrl: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId) }
 }
 
@@ -327,18 +409,11 @@ async function fetchImageAsDataUrl(url: string): Promise<string | null> {
 	}
 }
 
-export async function resolveCouponClaimShareMeta(
-	params: CouponClaimShareParams,
-	shareUrl: string
-): Promise<CouponClaimShareMeta | null> {
-	const cardNorm = ethers.getAddress(params.cardAddress)
-	const wantedCouponId = params.couponId.trim()
-	if (!wantedCouponId) return null
-
+async function lookupCouponSeriesMeta(
+	cardNorm: string,
+	wantedCouponId: string
+): Promise<{ matchedMeta: Record<string, unknown> | null; validBeforeSec: number | null }> {
 	const candidates = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
-	let matchedMeta: Record<string, unknown> | null = null
-	let validBeforeSec: number | null = null
-
 	for (const row of candidates) {
 		if (!metadataMatchesClientCouponCategoryFilter(row.metadata)) continue
 		let tid: bigint
@@ -351,10 +426,20 @@ export async function resolveCouponClaimShareMeta(
 		const meta = asRecord(row.metadata)
 		if (!meta) continue
 		if (readMetadataCouponId(meta) !== wantedCouponId) continue
-		matchedMeta = meta
-		validBeforeSec = readMetadataValidBeforeSec(meta)
-		break
+		return { matchedMeta: meta, validBeforeSec: readMetadataValidBeforeSec(meta) }
 	}
+	return { matchedMeta: null, validBeforeSec: null }
+}
+
+async function resolveOpenClaimShareMeta(
+	params: CouponOpenClaimShareParams,
+	shareUrl: string
+): Promise<CouponClaimShareMeta | null> {
+	const cardNorm = ethers.getAddress(params.cardAddress)
+	const wantedCouponId = params.couponId.trim()
+	if (!wantedCouponId) return null
+
+	const { matchedMeta, validBeforeSec } = await lookupCouponSeriesMeta(cardNorm, wantedCouponId)
 
 	const title = truncateText(readMetadataTitle(matchedMeta) || 'Beamio Coupon', 48)
 	const subtitle = truncateText(readMetadataSubtitle(matchedMeta) || 'Claim this coupon in the Beamio app.', 72)
@@ -362,6 +447,7 @@ export async function resolveCouponClaimShareMeta(
 	const expiresLabel = formatCouponExpiryPill(validBeforeSec)
 
 	return {
+		shareKind: 'open_claim',
 		cardAddress: cardNorm,
 		couponId: wantedCouponId,
 		merchantName,
@@ -377,16 +463,66 @@ export async function resolveCouponClaimShareMeta(
 	}
 }
 
+async function resolveRedeemShareMeta(
+	params: CouponRedeemShareParams,
+	shareUrl: string
+): Promise<CouponClaimShareMeta | null> {
+	const cardNorm = ethers.getAddress(params.cardAddress)
+	const wantedCouponId = params.couponId?.trim() ?? ''
+	let matchedMeta: Record<string, unknown> | null = null
+	let validBeforeSec: number | null = null
+	if (wantedCouponId) {
+		const looked = await lookupCouponSeriesMeta(cardNorm, wantedCouponId)
+		matchedMeta = looked.matchedMeta
+		validBeforeSec = looked.validBeforeSec
+	}
+
+	const title = truncateText(readMetadataTitle(matchedMeta) || 'Beamio Coupon', 48)
+	const subtitle = truncateText(readMetadataSubtitle(matchedMeta) || 'Redeem this coupon in the Beamio app.', 72)
+	const merchantName = await resolveMerchantNameForShare(cardNorm, matchedMeta)
+	const expiresLabel = formatCouponExpiryPill(validBeforeSec)
+
+	return {
+		shareKind: 'redeem',
+		cardAddress: cardNorm,
+		...(wantedCouponId ? { couponId: wantedCouponId } : {}),
+		merchantName,
+		title,
+		subtitle,
+		iconUrl: readMetadataIconUrl(matchedMeta),
+		backgroundImage: readMetadataBackgroundImage(matchedMeta),
+		backgroundColorHex: readMetadataBackgroundColor(matchedMeta) || '#2B2E3A',
+		validBeforeSec,
+		expiresLabel,
+		shareUrl,
+		ogImageUrl: buildOgImageUrl(shareUrl),
+	}
+}
+
+export async function resolveCouponClaimShareMeta(
+	params: BeamioCouponShareParams,
+	shareUrl: string
+): Promise<CouponClaimShareMeta | null> {
+	if (params.kind === 'redeem') return resolveRedeemShareMeta(params, shareUrl)
+	return resolveOpenClaimShareMeta(params, shareUrl)
+}
+
 export function buildFallbackCouponClaimShareMeta(
-	params: CouponClaimShareParams,
+	params: BeamioCouponShareParams,
 	shareUrl: string
 ): CouponClaimShareMeta {
+	const isRedeem = params.kind === 'redeem'
 	return {
+		shareKind: params.kind,
 		cardAddress: params.cardAddress,
-		couponId: params.couponId,
+		...(params.kind === 'open_claim'
+			? { couponId: params.couponId }
+			: params.couponId
+				? { couponId: params.couponId }
+				: {}),
 		merchantName: 'Beamio',
 		title: 'Beamio Coupon',
-		subtitle: 'Claim this coupon in the Beamio app.',
+		subtitle: isRedeem ? 'Redeem this coupon in the Beamio app.' : 'Claim this coupon in the Beamio app.',
 		iconUrl: '',
 		backgroundImage: '',
 		backgroundColorHex: '#2B2E3A',
@@ -419,7 +555,7 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
 	const title = escapeXml(meta.title)
 	const subtitle = escapeXml(meta.subtitle)
 	const expires = escapeXml(meta.expiresLabel)
-	const claimHeadline = escapeXml(buildClaimHeadline(meta.merchantName))
+	const claimHeadline = escapeXml(buildShareHeadline(meta.merchantName, meta.shareKind))
 	const initial = escapeXml((meta.title.charAt(0) || 'B').toUpperCase())
 
 	const bgLayer = bgDataUrl
@@ -478,7 +614,7 @@ const ogPngCache = new Map<string, { buf: Buffer; expiry: number }>()
 const OG_PNG_CACHE_TTL_MS = 10 * 60 * 1000
 
 export async function renderCouponClaimOgPng(meta: CouponClaimShareMeta): Promise<Buffer> {
-	const cacheKey = `${meta.cardAddress.toLowerCase()}:${meta.couponId}:${meta.merchantName}:${meta.shareUrl}`
+	const cacheKey = `${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}`
 	const cached = ogPngCache.get(cacheKey)
 	if (cached && Date.now() < cached.expiry) return cached.buf
 
@@ -493,6 +629,10 @@ export function renderCouponClaimShareHtml(meta: CouponClaimShareMeta): string {
 	const description = escapeXml(meta.subtitle)
 	const shareUrl = escapeXml(meta.shareUrl)
 	const ogImage = escapeXml(meta.ogImageUrl)
+	const actionHint =
+		meta.shareKind === 'redeem'
+			? 'Open this link on your phone to redeem in Beamio.'
+			: 'Open this link on your phone to claim in Beamio.'
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -518,7 +658,7 @@ export function renderCouponClaimShareHtml(meta: CouponClaimShareMeta): string {
   <main style="max-width:640px;margin:0 auto;padding:48px 24px;text-align:center;">
     <h1 style="font-size:28px;margin:0 0 12px;">${title}</h1>
     <p style="font-size:18px;color:#64748b;margin:0 0 24px;">${description}</p>
-    <p style="font-size:14px;color:#94a3b8;">Open this link on your phone to claim in Beamio.</p>
+    <p style="font-size:14px;color:#94a3b8;">${actionHint}</p>
     <p><a href="${shareUrl}" style="color:#1562f0;font-weight:600;">Continue to Beamio</a></p>
   </main>
 </body>
