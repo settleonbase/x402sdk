@@ -13818,6 +13818,9 @@ export const cardRedeemPoolPress = async () => {
 			} else {
 				clientError = 'Code not found or already used. Please ensure you\'re redeeming against the correct card (the card where the code was created).'
 			}
+		} else if (/UC_BelowMinThreshold|559d06d7/.test(dataStr)) {
+			clientError =
+				'This issued-coupon redeem cannot complete for a new member: the card requires a minimum membership balance. Use an open-claim coupon, or ask the merchant to upgrade the membership stats module.'
 		}
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: clientError }).end()
 	} finally {

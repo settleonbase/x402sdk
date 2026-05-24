@@ -36,12 +36,25 @@ import {
 	type UsdcChargeOrchestratorContext,
 } from './usdcChargeOrchestrator'
 import {
+	buildCouponClaimAppDownloadUrl,
+	buildCouponRedeemAppDownloadUrl,
 	buildFallbackCouponClaimShareMeta,
+	decodeOgShareToken,
 	parseCouponClaimShareRequest,
+	renderCouponClaimOgJpeg,
 	renderCouponClaimOgPng,
 	renderCouponClaimShareHtml,
 	resolveCouponClaimShareMeta,
 } from './couponClaimShare'
+
+type CouponClaimShareQuery = {
+	target?: string
+	card?: string
+	couponId?: string
+	redeemcode?: string
+	redeemCode?: string
+	v?: string
+}
 
 function posLedgerKeccakCategory(name: string): string {
 	return ethers.keccak256(ethers.toUtf8Bytes(name)).toLowerCase()
@@ -8253,7 +8266,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/** GET /api/share/coupon-claim-meta?target= — JSON for homepage client meta + preview */
 	router.get('/share/coupon-claim-meta', async (req, res) => {
-		const parsed = parseCouponClaimShareRequest(req.query as { target?: string; card?: string; couponId?: string })
+		const parsed = parseCouponClaimShareRequest(req.query as CouponClaimShareQuery)
 		if (!parsed) {
 			return res.status(400).json({ ok: false, error: 'Invalid coupon claim target' })
 		}
@@ -8270,7 +8283,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/** GET /api/share/coupon-claim-html?target= — crawler HTML shell with dynamic Open Graph tags */
 	router.get('/share/coupon-claim-html', async (req, res) => {
-		const parsed = parseCouponClaimShareRequest(req.query as { target?: string; card?: string; couponId?: string })
+		const parsed = parseCouponClaimShareRequest(req.query as CouponClaimShareQuery)
 		if (!parsed) {
 			return res.status(400).type('html').send('<!DOCTYPE html><html><body><p>Invalid coupon claim link.</p></body></html>')
 		}
@@ -8287,9 +8300,34 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
+	/** GET /api/og/s/:token.jpg — short path OG image (WeChat-friendly, no query string) */
+	router.get('/og/s/:token', async (req, res) => {
+		const params = decodeOgShareToken(String(req.params.token ?? ''))
+		if (!params) {
+			return res.status(400).json({ error: 'Invalid coupon share image token' })
+		}
+		try {
+			const shareUrl =
+				params.kind === 'redeem'
+					? buildCouponRedeemAppDownloadUrl(params.cardAddress, params.redeemCode, params.couponId)
+					: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId)
+			const meta =
+				(await resolveCouponClaimShareMeta(params, shareUrl)) ??
+				buildFallbackCouponClaimShareMeta(params, shareUrl)
+			const jpeg = await renderCouponClaimOgJpeg(meta)
+			res.setHeader('Content-Type', 'image/jpeg')
+			res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800')
+			res.removeHeader('X-Powered-By')
+			return res.status(200).send(jpeg)
+		} catch (err: any) {
+			logger(Colors.red('[og/s/:token] error:'), err?.message ?? err)
+			return res.status(500).json({ error: 'Failed to render coupon share image' })
+		}
+	})
+
 	/** GET /api/og/coupon-claim.png?target= — 1200×630 social preview image (coupon capsule + QR) */
 	router.get('/og/coupon-claim.png', async (req, res) => {
-		const parsed = parseCouponClaimShareRequest(req.query as { target?: string; card?: string; couponId?: string })
+		const parsed = parseCouponClaimShareRequest(req.query as CouponClaimShareQuery)
 		if (!parsed) {
 			return res.status(400).json({ error: 'Invalid coupon claim target' })
 		}
@@ -8303,6 +8341,26 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(200).send(png)
 		} catch (err: any) {
 			logger(Colors.red('[og/coupon-claim.png] error:'), err?.message ?? err)
+			return res.status(500).json({ error: 'Failed to render coupon share image' })
+		}
+	})
+
+	/** GET /api/og/coupon-claim.jpg — JPEG variant for WeChat / Meta link previews */
+	router.get('/og/coupon-claim.jpg', async (req, res) => {
+		const parsed = parseCouponClaimShareRequest(req.query as CouponClaimShareQuery)
+		if (!parsed) {
+			return res.status(400).json({ error: 'Invalid coupon claim target' })
+		}
+		try {
+			const meta =
+				(await resolveCouponClaimShareMeta(parsed.params, parsed.shareUrl)) ??
+				buildFallbackCouponClaimShareMeta(parsed.params, parsed.shareUrl)
+			const jpeg = await renderCouponClaimOgJpeg(meta)
+			res.setHeader('Content-Type', 'image/jpeg')
+			res.setHeader('Cache-Control', 'public, max-age=600, stale-while-revalidate=1800')
+			return res.status(200).send(jpeg)
+		} catch (err: any) {
+			logger(Colors.red('[og/coupon-claim.jpg] error:'), err?.message ?? err)
 			return res.status(500).json({ error: 'Failed to render coupon share image' })
 		}
 	})

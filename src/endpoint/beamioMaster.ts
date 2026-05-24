@@ -280,7 +280,7 @@ const mintMetadataCache = new Map<string, { items: unknown[]; expiry: number }>(
 
 /**
  * Master prewarm latestCards：
- *  - 实际只拉一次 limit=300（链上 + enrichment），其它 limit 用 slice 派生，避免 3 次重复打满 RPC。
+ *  - 实际只拉一次 limit=300（DB → Discover filter → 仅对可见卡 enrichment），其它 limit 用 slice 派生，避免 3 次重复打满 RPC。
  *  - 间隔从 6s 调到 30s：trending 数据无需毫秒级新鲜，且 enrichment 本身 RPC 成本高。
  *  - cache stale 与 chain-fetch-protocol 30s TTL 对齐（之前 15s 在窗口尾部高频 miss）。
  */
@@ -299,11 +299,12 @@ async function computeLatestCardsForMaster(limit: number): Promise<BeamioLatestC
 	const task = (async () => {
 		try {
 			const raw = await getLatestCards(limit)
-			const enriched = await enrichLatestCardsWithBaseErc1155PointsHolderCounts(
-				raw,
+			// Discover gate 先于 enrichment：exclude / cutover 外的卡不对链上打 RPC（旧卡常 revert 且不会出现在 API 响应里）
+			const visible = filterLatestCardsByDiscoverMerchantPolicy(raw)
+			return enrichLatestCardsWithBaseErc1155PointsHolderCounts(
+				visible,
 				providerBaseForLatestCards,
 			)
-			return filterLatestCardsByDiscoverMerchantPolicy(enriched)
 		} finally {
 			latestCardsComputeInflight.delete(limit)
 		}
