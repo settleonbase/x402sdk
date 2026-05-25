@@ -2061,10 +2061,11 @@ export function buildTopupRechargeBonusAfterNotePayerJson(
 
 /** 自 POS `/api/nfcTopup` currency split 推导 Recharge Bonus 记账 JSON；无 bonus 时返回空字符串。 */
 export function topupRechargeBonusAfterNotePayerFromSplit(
-	spl: { cardE6: bigint; cashE6: bigint; bonusE6: bigint } | null | undefined
+	spl: { currencyAmountE6?: bigint; cardE6: bigint; cashE6: bigint; bonusE6: bigint } | null | undefined
 ): string {
 	if (!spl || spl.bonusE6 <= 0n) return ''
 	const actualPayment = spl.cardE6 + spl.cashE6
+	if (spl.currencyAmountE6 != null && actualPayment + spl.bonusE6 !== spl.currencyAmountE6) return ''
 	return buildTopupRechargeBonusAfterNotePayerJson(actualPayment, spl.bonusE6)
 }
 
