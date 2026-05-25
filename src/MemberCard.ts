@@ -9609,7 +9609,7 @@ export type CreateCardPreChecked = {
 
 /** Reload limits are expressed as USDC bounds, then converted to the card currency for whole-unit metadata. */
 const CREATE_CARD_TOPUP_MIN_USDC_UNITS = 3
-const CREATE_CARD_TOPUP_LIMIT_USDC_UNITS = 10000
+const CREATE_CARD_TOPUP_LIMIT_USDC_UNITS = 50000
 const CREATE_CARD_ORACLE_CAD_USDC_FALLBACK = 0.740
 const CREATE_CARD_DISPLAY_NAME_MAX_LEN = 128
 const CREATE_CARD_SYMBOL_MAX_LEN = 32
