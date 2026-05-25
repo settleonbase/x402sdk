@@ -69,6 +69,163 @@ export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 	}
 })
 
+const ACCOUNT_REGISTRY_ADMIN_ABI = [
+	'function changeAddressInAdminlist(address account, bool status) external',
+	'function isAdmin(address account) view returns (bool)',
+] as const
+
+const normRegistryAdminPk = (s: string): string => {
+	const t = s.trim()
+	return t.startsWith('0x') ? t : `0x${t}`
+}
+
+const isRegistryAdminPrivateKeyHex = (s: string): boolean => {
+	const hex = s.trim().startsWith('0x') ? s.trim().slice(2) : s.trim()
+	return hex.length === 64 && /^[0-9a-fA-F]+$/.test(hex)
+}
+
+/** ~/.master.json 中应登记为 AccountRegistry admin 的运维钱包地址（去重） */
+const collectAccountRegistryAdminTargetAddresses = (): string[] => {
+	const lower = new Set<string>()
+	const addPk = (pk: string) => {
+		if (!isRegistryAdminPrivateKeyHex(pk)) return
+		lower.add(new ethers.Wallet(normRegistryAdminPk(pk)).address.toLowerCase())
+	}
+
+	for (const pk of masterSetup.beamio_Admins ?? []) addPk(String(pk))
+	for (const pk of masterSetup.settle_contractAdmin ?? []) addPk(String(pk))
+
+	const adminList = (masterSetup as { admin?: unknown[] }).admin
+	if (Array.isArray(adminList)) {
+		for (const entry of adminList) {
+			if (typeof entry !== 'string') continue
+			const t = entry.trim()
+			if (ethers.isAddress(t)) {
+				lower.add(ethers.getAddress(t).toLowerCase())
+			} else if (isRegistryAdminPrivateKeyHex(t)) {
+				addPk(t)
+			}
+		}
+	}
+
+	const extra = process.env.ACCOUNT_REGISTRY_EXTRA_ADMINS?.trim() ?? process.env.REGISTRY_EXTRA_ADMINS?.trim() ?? ''
+	if (extra) {
+		for (const part of extra.split(/[,;\s]+/).filter(Boolean)) {
+			const p = part.trim()
+			if (ethers.isAddress(p)) lower.add(ethers.getAddress(p).toLowerCase())
+		}
+	}
+
+	return [...lower].map((a) => ethers.getAddress(a))
+}
+
+/** 可用于 changeAddressInAdminlist 的 signer 候选（须链上已是 admin） */
+const collectAccountRegistryOwnerSignerCandidates = (): ethers.Wallet[] => {
+	const seen = new Set<string>()
+	const wallets: ethers.Wallet[] = []
+	const tryAdd = (pkRaw: string | undefined) => {
+		if (!pkRaw || !isRegistryAdminPrivateKeyHex(pkRaw)) return
+		const pk = normRegistryAdminPk(pkRaw)
+		if (seen.has(pk)) return
+		seen.add(pk)
+		wallets.push(new ethers.Wallet(pk, providerConet))
+	}
+
+	tryAdd(process.env.REGISTRY_OWNER_PK?.trim())
+	for (const pk of masterSetup.settle_contractAdmin ?? []) tryAdd(String(pk))
+	for (const pk of masterSetup.beamio_Admins ?? []) tryAdd(String(pk))
+
+	const adminList = (masterSetup as { admin?: unknown[] }).admin
+	if (Array.isArray(adminList)) {
+		for (const entry of adminList) {
+			if (typeof entry === 'string' && isRegistryAdminPrivateKeyHex(entry)) tryAdd(entry)
+		}
+	}
+
+	return wallets
+}
+
+let accountRegistryAdminBootstrapDone = false
+
+/**
+ * Master 启动时：检查 ~/.master.json 中 beamio_Admins / settle_contractAdmin 是否已在
+ * AccountRegistry admin 列表；缺失则尝试用已有 admin signer 登记。
+ * 修复 addUserPoolProcess 的 NotAdmin()（224422 新 Registry 部署后常见）。
+ */
+export const ensureAccountRegistryBeamioAdmins = async (): Promise<void> => {
+	if (accountRegistryAdminBootstrapDone) return
+	accountRegistryAdminBootstrapDone = true
+
+	const targets = collectAccountRegistryAdminTargetAddresses()
+	if (!targets.length) {
+		logger(Colors.yellow('[ensureAccountRegistryBeamioAdmins] no target admin addresses in masterSetup'))
+		return
+	}
+
+	const registryRead = new ethers.Contract(beamioConetAccountRegistry, ACCOUNT_REGISTRY_ADMIN_ABI, providerConet)
+
+	const missing: string[] = []
+	for (const addr of targets) {
+		try {
+			const ok = await registryRead.isAdmin(addr)
+			if (!ok) missing.push(addr)
+		} catch (ex: any) {
+			logger(Colors.yellow(`[ensureAccountRegistryBeamioAdmins] isAdmin(${addr}) failed: ${ex?.message ?? ex}`))
+			missing.push(addr)
+		}
+	}
+
+	if (!missing.length) {
+		logger(Colors.green(`[ensureAccountRegistryBeamioAdmins] all ${targets.length} ops wallet(s) are AccountRegistry admins`))
+		return
+	}
+
+	logger(
+		Colors.cyan(
+			`[ensureAccountRegistryBeamioAdmins] ${missing.length}/${targets.length} wallet(s) missing admin — registering…`
+		)
+	)
+
+	let adminSigner: ethers.Wallet | null = null
+	for (const candidate of collectAccountRegistryOwnerSignerCandidates()) {
+		try {
+			if (await registryRead.isAdmin(candidate.address)) {
+				adminSigner = candidate
+				break
+			}
+		} catch {
+			// try next signer
+		}
+	}
+
+	if (!adminSigner) {
+		logger(
+			Colors.red(
+				'[ensureAccountRegistryBeamioAdmins] no signer is AccountRegistry admin — set REGISTRY_OWNER_PK to deployer key or run scripts/addBeamioAdminsToAccountRegistry.ts'
+			)
+		)
+		return
+	}
+
+	logger(Colors.cyan(`[ensureAccountRegistryBeamioAdmins] using admin signer ${adminSigner.address}`))
+
+	const registryWrite = new ethers.Contract(beamioConetAccountRegistry, ACCOUNT_REGISTRY_ADMIN_ABI, adminSigner)
+
+	for (const addr of missing) {
+		try {
+			const already = await registryRead.isAdmin(addr)
+			if (already) continue
+			const tx = await registryWrite.changeAddressInAdminlist(addr, true)
+			logger(Colors.cyan(`[ensureAccountRegistryBeamioAdmins] changeAddressInAdminlist(${addr}, true) tx=${tx.hash}`))
+			await tx.wait()
+			logger(Colors.green(`[ensureAccountRegistryBeamioAdmins] registered admin ${addr}`))
+		} catch (ex: any) {
+			const msg = ex?.shortMessage || ex?.message || String(ex)
+			logger(Colors.red(`[ensureAccountRegistryBeamioAdmins] failed for ${addr}: ${msg}`))
+		}
+	}
+}
+
 let initProcess = false
 
 const initDB = async () => {

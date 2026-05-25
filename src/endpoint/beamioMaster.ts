@@ -7,7 +7,7 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, getCardByAddress, getNftTierMetadataByCardAndToken, upsertNftTierMetadata, updateSeriesMetadataByCardAndToken, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards, type BeamioLatestCardItem} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, getCardByAddress, getNftTierMetadataByCardAndToken, upsertNftTierMetadata, updateSeriesMetadataByCardAndToken, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards, ensureAccountRegistryBeamioAdmins, type BeamioLatestCardItem} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import {
@@ -4358,6 +4358,7 @@ const routing = ( router: Router ) => {
 
 const initialize = async (reactBuildFolder: string, PORT: number) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
+	await ensureAccountRegistryBeamioAdmins()
 	oracleBackoud()
 
 	const defaultPath = join(__dirname, 'workers')
