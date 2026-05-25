@@ -226,6 +226,114 @@ export const ensureAccountRegistryBeamioAdmins = async (): Promise<void> => {
 	}
 }
 
+const ADDRESS_PGP_ADMIN_ABI = [
+	'function changeAddressInAdminlist(address addr, bool status) external',
+	'function adminList(address) view returns (bool)',
+] as const
+
+const collectAddressPgpOwnerSignerCandidates = (): ethers.Wallet[] => {
+	const seen = new Set<string>()
+	const wallets: ethers.Wallet[] = []
+	const tryAdd = (pkRaw: string | undefined) => {
+		if (!pkRaw || !isRegistryAdminPrivateKeyHex(pkRaw)) return
+		const pk = normRegistryAdminPk(pkRaw)
+		if (seen.has(pk)) return
+		seen.add(pk)
+		wallets.push(new ethers.Wallet(pk, providerConet))
+	}
+
+	tryAdd(process.env.ADDRESS_PGP_ADMIN_PK?.trim())
+	tryAdd(process.env.REGISTRY_OWNER_PK?.trim())
+	for (const pk of masterSetup.settle_contractAdmin ?? []) tryAdd(String(pk))
+	for (const pk of masterSetup.beamio_Admins ?? []) tryAdd(String(pk))
+
+	const adminList = (masterSetup as { admin?: unknown[] }).admin
+	if (Array.isArray(adminList)) {
+		for (const entry of adminList) {
+			if (typeof entry === 'string' && isRegistryAdminPrivateKeyHex(entry)) tryAdd(entry)
+		}
+	}
+
+	return wallets
+}
+
+let addressPgpAdminBootstrapDone = false
+
+/** Master 启动时：登记 beamio_Admins 为 AddressPGP admin，修复 regiestChatRoute addPublicPGPByAdmin not admin。 */
+export const ensureAddressPgpBeamioAdmins = async (): Promise<void> => {
+	if (addressPgpAdminBootstrapDone) return
+	addressPgpAdminBootstrapDone = true
+
+	const targets = collectAccountRegistryAdminTargetAddresses()
+	if (!targets.length) {
+		logger(Colors.yellow('[ensureAddressPgpBeamioAdmins] no target admin addresses in masterSetup'))
+		return
+	}
+
+	const pgpRead = new ethers.Contract(addressPGP, ADDRESS_PGP_ADMIN_ABI, providerConet)
+
+	const missing: string[] = []
+	for (const addr of targets) {
+		try {
+			const ok = await pgpRead.adminList(addr)
+			if (!ok) missing.push(addr)
+		} catch (ex: any) {
+			logger(Colors.yellow(`[ensureAddressPgpBeamioAdmins] adminList(${addr}) failed: ${ex?.message ?? ex}`))
+			missing.push(addr)
+		}
+	}
+
+	if (!missing.length) {
+		logger(Colors.green(`[ensureAddressPgpBeamioAdmins] all ${targets.length} ops wallet(s) are AddressPGP admins`))
+		return
+	}
+
+	logger(
+		Colors.cyan(
+			`[ensureAddressPgpBeamioAdmins] ${missing.length}/${targets.length} wallet(s) missing admin — registering…`
+		)
+	)
+
+	let adminSigner: ethers.Wallet | null = null
+	for (const candidate of collectAddressPgpOwnerSignerCandidates()) {
+		try {
+			if (await pgpRead.adminList(candidate.address)) {
+				adminSigner = candidate
+				break
+			}
+		} catch {
+			// try next signer
+		}
+	}
+
+	if (!adminSigner) {
+		logger(
+			Colors.red(
+				'[ensureAddressPgpBeamioAdmins] no signer is AddressPGP admin — set ADDRESS_PGP_ADMIN_PK or run scripts/addBeamioAdminsToAddressPGP.ts'
+			)
+		)
+		return
+	}
+
+	logger(Colors.cyan(`[ensureAddressPgpBeamioAdmins] using admin signer ${adminSigner.address}`))
+
+	const pgpWrite = new ethers.Contract(addressPGP, ADDRESS_PGP_ADMIN_ABI, adminSigner)
+
+	for (const addr of missing) {
+		try {
+			const already = await pgpRead.adminList(addr)
+			if (already) continue
+			const tx = await pgpWrite.changeAddressInAdminlist(addr, true)
+			logger(Colors.cyan(`[ensureAddressPgpBeamioAdmins] changeAddressInAdminlist(${addr}, true) tx=${tx.hash}`))
+			await tx.wait()
+			logger(Colors.green(`[ensureAddressPgpBeamioAdmins] registered admin ${addr}`))
+		} catch (ex: any) {
+			const msg = ex?.shortMessage || ex?.message || String(ex)
+			logger(Colors.red(`[ensureAddressPgpBeamioAdmins] failed for ${addr}: ${msg}`))
+		}
+	}
+}
+
 let initProcess = false
 
 const initDB = async () => {
@@ -1235,6 +1343,11 @@ const regiestChatRouteProcess = async () => {
 		setTimeout(regiestChatRouteProcess, 2000)
 		return
 	}
+	const respond = (status: number, body: object) => {
+		if (!obj.res.headersSent) {
+			obj.res.status(status).json(body)
+		}
+	}
 	try {
 		const tx = await SC.constPgpManager.addPublicPGPByAdmin(
 			obj.wallet,
@@ -1243,13 +1356,21 @@ const regiestChatRouteProcess = async () => {
 			obj.encrypKeyArmored,
 			obj.routeKeyID
 		)
-		await tx.wait()
-		logger('regiestChatRouteProcess addPublicPGPByAdmin SUCCESS!', tx.hash)
-		obj.res.json({ ok: true, txHash: tx.hash })
+		// 立即返回，避免 Cluster/nginx 等待 tx.wait() 超时 502（与 addUser 入队语义一致）
+		respond(200, { ok: true, txHash: tx.hash })
+		void tx
+			.wait()
+			.then(() => {
+				logger('regiestChatRouteProcess addPublicPGPByAdmin SUCCESS!', tx.hash)
+			})
+			.catch((waitErr: unknown) => {
+				const msg = waitErr instanceof Error ? waitErr.message : String(waitErr)
+				logger(Colors.red(`regiestChatRouteProcess tx.wait failed tx=${tx.hash}: ${msg}`))
+			})
 	} catch (err: any) {
 		const msg = err?.shortMessage || err?.message || 'Unknown error'
 		logger('regiestChatRouteProcess Error:', msg)
-		obj.res.status(500).json({ ok: false, error: msg })
+		respond(500, { ok: false, error: msg })
 	}
 	beamio_ContractPool.unshift(SC)
 	setTimeout(regiestChatRouteProcess, 2000)
