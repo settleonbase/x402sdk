@@ -1414,7 +1414,7 @@ function calcChargeFixedBUnitFee(): { bServiceUnits6: bigint; bServiceUSDC6: big
 }
 
 /** CoNET B-Unit ERC20 风格余额合约（balanceOfAll），与 beamioServer /api/getBUnitBalance 一致 */
-const CONET_BUINT_TOKEN_ADDRESS = '0x1330297821814B06A6DafE3557Fa730F690D7007'
+const CONET_BUINT_TOKEN_ADDRESS = '0x9149433F154C508d2a04454b8E527A479C6fd254'
 
 /** Charge consumeFromUser revert 时拉取与 Cluster 预检同源的 getBUnitBalance，并附带代币 balanceOfAll 供对照 */
 async function logChargeConsumeFromUserDiagnostics(

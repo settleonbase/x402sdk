@@ -47,9 +47,9 @@ const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
-const beamioConetAccountRegistry = '0x4afaca09cf8307070a83836223Ae129073eC92e5'
+const beamioConetAccountRegistry = '0x26626a515EDFb5DF9547ac1A32Ec1785352211Ba'
 const IpfsStorageRegistryGlobalDedup = '0x121c4dDCa92f07dc53Fd6Db9bc5A07c2918F9591'
-const addressPGP = '0xb2aABe52f476356AE638839A786EAE425A0c1b66'
+const addressPGP = '0xa5F64dd3c034442F5377c8F2Aa1A03ba378D685e'
 
 export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 	const walletConet = new ethers.Wallet(n, providerConet)
