@@ -17,7 +17,7 @@ import {
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
-import { BASE_CARD_FACTORY } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BEAMIO_INDEXER_DIAMOND } from '../chainAddresses'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
@@ -922,9 +922,7 @@ const routing = ( router: Router ) => {
 		})
 
 		/** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付。用于 Smart Routing 及 beamioTransferIndexerAccounting 前置校验。 */
-		// 源自 deployments/conet-addresses.json:BeamioIndexerDiamond（chain 224422 重启后地址）。
-		// 旧地址 0xd990719B2f05ccab4Acdd5D7A3f7aDfd2Fc584Fe 已废弃。
-		const BEAMIO_INDEXER_ADDRESS = '0x45D45de73465b8913B50974Fc188529dFFb7AfFA'
+		const BEAMIO_INDEXER_ADDRESS = BEAMIO_INDEXER_DIAMOND
 		const CONET_RPC = 'https://rpc1.conet.network'
 		const INDEXER_READ_ABI = [
 			'function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, address topAdmin, address subordinate, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))',
@@ -4358,7 +4356,6 @@ const routing = ( router: Router ) => {
 
 const initialize = async (reactBuildFolder: string, PORT: number) => {
 	console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder)
-	await Promise.all([ensureAccountRegistryBeamioAdmins(), ensureAddressPgpBeamioAdmins()])
 	oracleBackoud()
 
 	const defaultPath = join(__dirname, 'workers')
@@ -4497,6 +4494,10 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		])
 		startNfcLinkAppAutoCancelSweeper()
 		startLatestCardsPrewarmTimer()
+		void Promise.all([ensureAccountRegistryBeamioAdmins(), ensureAddressPgpBeamioAdmins()]).catch((e: unknown) => {
+			const msg = e instanceof Error ? e.message : String(e)
+			logger(Colors.red('[initialize] ensure*BeamioAdmins error:'), msg)
+		})
 	})
 
 	server.on('error', (err: any) => {

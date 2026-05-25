@@ -47,6 +47,7 @@ import {
 	BASE_AA_FACTORY,
 	BASE_CARD_FACTORY,
 	BASE_CCSA_CARD_ADDRESS,
+	CONET_BUINT,
 	CONET_BUNIT_AIRDROP_ADDRESS,
 	CONET_BUINT_REDEEM_AIRDROP,
 	BEAMIO_INDEXER_DIAMOND,
@@ -1414,7 +1415,6 @@ function calcChargeFixedBUnitFee(): { bServiceUnits6: bigint; bServiceUSDC6: big
 }
 
 /** CoNET B-Unit ERC20 风格余额合约（balanceOfAll），与 beamioServer /api/getBUnitBalance 一致 */
-const CONET_BUINT_TOKEN_ADDRESS = '0x9149433F154C508d2a04454b8E527A479C6fd254'
 
 /** Charge consumeFromUser revert 时拉取与 Cluster 预检同源的 getBUnitBalance，并附带代币 balanceOfAll 供对照 */
 async function logChargeConsumeFromUserDiagnostics(
@@ -1433,7 +1433,7 @@ async function logChargeConsumeFromUserDiagnostics(
 			providerConetLike
 		)
 		const buintRead = new ethers.Contract(
-			CONET_BUINT_TOKEN_ADDRESS,
+			CONET_BUINT,
 			['function balanceOfAll(address) view returns (uint256 total, uint256 free, uint256 paid)'],
 			providerConetLike
 		)
