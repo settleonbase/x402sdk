@@ -2028,6 +2028,58 @@ const deriveTopAdminAndSubordinate = (operator: string, operatorParentChain: str
 	return { topAdmin, subordinate }
 }
 
+/** 与 `ChargeRewardModule` / `BeamioUserCardUpdateLib.REWARD_RATIO_ONE_E6` 一致。 */
+export const CHARGE_REWARD_RATIO_ONE_E6 = 1_000_000n
+
+/**
+ * Charge 消费返点（ERC1155 tokenId=2）E6 数量；与链上 `previewChargeRewardAmount` / `_calcChargeRewardAmount` 同口径。
+ * @param amountFiat6 本 Diamond 行的 `finalRequestAmountFiat6`（主单不含小费；`TX_TIP` 行仅为小费 fiat E6）
+ */
+export function calcChargeRewardPoints6FromFiat6(amountFiat6: bigint, chargeRewardRatioE6: bigint): bigint {
+	if (amountFiat6 <= 0n || chargeRewardRatioE6 <= 0n) return 0n
+	return (amountFiat6 * chargeRewardRatioE6) / CHARGE_REWARD_RATIO_ONE_E6
+}
+
+/** Charge 完成后写入 Indexer `meta.afterNotePayer` 的 JSON（readme + beamio-charge-after-note-payer-point.mdc）。 */
+export function buildChargeAfterNotePayerJson(point6: bigint, chargeRewardRatioE6: bigint): string {
+	return JSON.stringify({
+		point: point6.toString(),
+		chargeRewardRatioE6: chargeRewardRatioE6.toString(),
+	})
+}
+
+/** Top-up Recharge Bonus 明细写入 Indexer `meta.afterNotePayer`（readme + beamio-topup-after-note-payer-recharge-bonus.mdc）。 */
+export function buildTopupRechargeBonusAfterNotePayerJson(
+	actualPaymentCurrencyFiat6: bigint,
+	rechargeBonusCurrencyFiat6: bigint
+): string {
+	return JSON.stringify({
+		actualPaymentCurrencyFiat6: actualPaymentCurrencyFiat6.toString(),
+		rechargeBonusCurrencyFiat6: rechargeBonusCurrencyFiat6.toString(),
+	})
+}
+
+/** 自 POS `/api/nfcTopup` currency split 推导 Recharge Bonus 记账 JSON；无 bonus 时返回空字符串。 */
+export function topupRechargeBonusAfterNotePayerFromSplit(
+	spl: { cardE6: bigint; cashE6: bigint; bonusE6: bigint } | null | undefined
+): string {
+	if (!spl || spl.bonusE6 <= 0n) return ''
+	const actualPayment = spl.cardE6 + spl.cashE6
+	return buildTopupRechargeBonusAfterNotePayerJson(actualPayment, spl.bonusE6)
+}
+
+const CHARGE_REWARD_RATIO_READ_ABI = ['function chargeRewardRatioE6() view returns (uint256)']
+
+/** 记账时拉取卡当前 `chargeRewardRatioE6()`（delegatecall 模块 storage，以卡地址 view 为准）。 */
+export async function readCardChargeRewardRatioE6(
+	cardAddr: string,
+	provider: ethers.Provider
+): Promise<bigint> {
+	const card = new ethers.Contract(ethers.getAddress(cardAddr), CHARGE_REWARD_RATIO_READ_ABI, provider)
+	const ratio = await card.chargeRewardRatioE6()
+	return BigInt(ratio)
+}
+
 /** Charge 记账：推导用于 adminParent/topAdmin 的 BeamioUserCard 地址（与实付 route 一致，对齐 NFC）。 */
 function resolveChargeAccountingCardAddress(obj: (typeof beamioTransferIndexerAccountingPool)[0]): string | undefined {
 	if (obj.merchantCardAddress && ethers.isAddress(obj.merchantCardAddress)) {
@@ -3625,6 +3677,27 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				} catch (e: any) {
 					logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] Charge topAdmin resolve failed (non-fatal): ${e?.message ?? e}`))
 				}
+				// Charge afterNotePayer.point：按卡当前 chargeRewardRatioE6 × 本行 finalRequestAmountFiat6（主单/TX_TIP 各自一行）
+				if (finalRequestAmountFiat6 > 0n) {
+					try {
+						const ratioE6 = await readCardChargeRewardRatioE6(cardAddr, SC.walletBase.provider!)
+						const point6 = calcChargeRewardPoints6FromFiat6(finalRequestAmountFiat6, ratioE6)
+						if (point6 > 0n) {
+							transactionInput.meta.afterNotePayer = buildChargeAfterNotePayerJson(point6, ratioE6)
+							logger(
+								Colors.cyan(
+									`[beamioTransferIndexerAccountingProcess] Charge afterNotePayer.point=${point6} ratioE6=${ratioE6} finalFiat6=${finalRequestAmountFiat6} card=${cardAddr}`
+								)
+							)
+						}
+					} catch (chargePointErr: any) {
+						logger(
+							Colors.yellow(
+								`[beamioTransferIndexerAccountingProcess] Charge afterNotePayer.point skipped (non-fatal): ${chargePointErr?.message ?? chargePointErr}`
+							)
+						)
+					}
+				}
 			}
 		}
 
@@ -3953,7 +4026,7 @@ export const cancelRequestPreCheck = async (originalPaymentHash: string, payeeSi
 	} catch (_) {
 		return { success: false, error: 'Invalid payeeSignature' }
 	}
-	const INDEXER_READ_ABI = ['function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))']
+	const INDEXER_READ_ABI = ['function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, address topAdmin, address subordinate, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))']
 	const indexer = new ethers.Contract(BeamioTaskIndexerAddress, INDEXER_READ_ABI, providerConet)
 	let full: unknown = null
 	try {
@@ -4004,7 +4077,7 @@ export const cancelRequestAccountingProcess = async () => {
 		}
 		// Cluster 已验签（payeeSignature 必须为原 request 的 payee），Master 信任预检结果，仅取 payee/isAA 用于记账
 		// 从 Indexer 获取 request_create（txId = originalPaymentHash）
-		const INDEXER_READ_ABI = ['function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))']
+		const INDEXER_READ_ABI = ['function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, address topAdmin, address subordinate, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))']
 		const indexer = new ethers.Contract(BeamioTaskIndexerAddress, INDEXER_READ_ABI, SC.walletConet.provider)
 		let full: unknown = null
 		try {
@@ -6766,6 +6839,8 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 						)
 					)
 				}
+				const topupAfterNotePayer =
+					useSplit && spl ? topupRechargeBonusAfterNotePayerFromSplit(spl) : ''
 				let syncTxHash = ''
 				if (useSplit) {
 					type NfcLeg = { leg: 'credit' | 'cash' | 'bonus'; fiat6: bigint; idxKey: string }
@@ -6856,7 +6931,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 								discountRateBps: 0,
 								taxAmountFiat6: 0n,
 								taxRateBps: 0,
-								afterNotePayer: '',
+								afterNotePayer: topupAfterNotePayer,
 								afterNotePayee: '',
 							},
 							operator: ethers.getAddress(adminCheck.signer),
@@ -6877,7 +6952,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					}
 					logger(
 						Colors.green(
-							`[executeForAdminPostBaseProcess] android topup split accounting done: baseTx=${tx.hash} lastSync=${syncTxHash} legs=${legs.length} baseCat=${topupCategoryRaw}`
+							`[executeForAdminPostBaseProcess] android topup split accounting done: baseTx=${tx.hash} lastSync=${syncTxHash} legs=${legs.length} baseCat=${topupCategoryRaw} afterNotePayer=${topupAfterNotePayer ? 'rechargeBonus' : 'none'}`
 						)
 					)
 				} else {
