@@ -2840,6 +2840,17 @@ const routing = ( router: Router ) => {
 			bonusCurrencyAmount?: string
 			currencyAmount?: string
 		}
+		const bodyForDebug = (req.body ?? {}) as Record<string, unknown>
+		const previewHex = (raw: unknown, front = 14, back = 10): string => {
+			const s = typeof raw === 'string' ? raw.trim() : ''
+			if (!s) return ''
+			return s.length > front + back + 3 ? `${s.slice(0, front)}...${s.slice(-back)}` : s
+		}
+		logger(
+			Colors.cyan(
+				`[nfcTopup][received] ip=${getClientIp(req)} cardAddr=${String(cardAddr ?? '') || '(missing)'} uid=${String(uid ?? '') || '(none)'} wallet=${String(bodyForDebug.wallet ?? '') || '(none)'} beamioTag=${String(bodyForDebug.beamioTag ?? '') || '(none)'} source=${String(bodyForDebug.topupSourceOverride ?? bodyForDebug.source ?? '') || '(default)'} usdcSid=${String(bodyForDebug.usdcTopupSessionId ?? '') || '(none)'} split={currency:${String(currencyAmount ?? '') || '(empty)'}, card:${String(cardCurrencyAmount ?? '') || '(empty)'}, cash:${String(cashCurrencyAmount ?? '') || '(empty)'}, bonus:${String(bonusCurrencyAmount ?? '') || '(empty)'}} deadline=${String(deadline ?? '') || '(missing)'} nonce=${previewHex(nonce)} dataSel=${typeof data === 'string' ? data.slice(0, 10) : '(missing)'} dataLen=${typeof data === 'string' ? data.length : 0} sig=${previewHex(adminSignature)}`
+			)
+		)
 		let nfcTagIdHex: string | null = null
 		let nfcLinkedEOA: string | null = null
 		const uidTrim = uid && typeof uid === 'string' ? uid.trim() : ''
@@ -3107,6 +3118,11 @@ const routing = ( router: Router ) => {
 					splitCluster.cashCurrencyAmount = ethers.formatUnits(cashE, 6)
 					splitCluster.bonusCurrencyAmount = ethers.formatUnits(bE, 6)
 					splitCluster.currencyAmount = ethers.formatUnits(totE, 6)
+					logger(
+						Colors.cyan(
+							`[nfcTopup][split-ok] card=${cardAddress} recipient=${recipientEOA ?? 'N/A'} totalE6=${totE.toString()} cardE6=${cE.toString()} cashE6=${cashE.toString()} bonusE6=${bE.toString()} rawTotal=${String(currencyAmount ?? '') || '(empty)'} rawCard=${String(cardCurrencyAmount ?? '') || '(empty)'} rawCash=${String(cashCurrencyAmount ?? '') || '(empty)'} rawBonus=${String(bonusCurrencyAmount ?? '') || '(empty)'}`
+						)
+					)
 				}
 			}
 			const usdcTopupSid =
