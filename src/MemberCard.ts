@@ -141,6 +141,7 @@ import {
 import { pickBestMembershipNftByMinUsdc6, type RawNftOwnershipRow } from './endpoint/membershipTierPick'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './endpoint/tierMetadataRowResolve'
 import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
+import { isApiExcludedUserCard } from './apiExcludedUserCards'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
@@ -10520,12 +10521,13 @@ type NfcLinkContainerMigrationItem = {
 
 type NfcLinkErc1155BalanceRow = { tokenId: bigint; amount: bigint }
 
-/** Link 迁移：基础设施卡 + CCSA + 已登记 BeamioUserCard + DB 缓存持有卡（去重）。 */
+/** Link 迁移：基础设施卡 + CCSA + 已登记 BeamioUserCard + DB 缓存持有卡（去重）；跳过 `apiExcludedUserCards` filter 名单。 */
 async function collectNfcLinkMigrationCardAddresses(tagIdHex?: string): Promise<string[]> {
 	const out: string[] = []
 	const seen = new Set<string>()
 	const pushAddr = (raw: string) => {
 		if (!raw || !ethers.isAddress(raw)) return
+		if (isApiExcludedUserCard(raw)) return
 		const norm = ethers.getAddress(raw).toLowerCase()
 		if (seen.has(norm)) return
 		seen.add(norm)
@@ -10563,6 +10565,7 @@ async function nfcLinkAppSessionHasMigratableAssets(
 	if (
 		Array.isArray(assets.merchantCouponBalances) &&
 		assets.merchantCouponBalances.some((c) => {
+			if (isApiExcludedUserCard(c.cardAddress)) return false
 			try {
 				return BigInt(c.balance || '0') > 0n
 			} catch {
@@ -10573,6 +10576,7 @@ async function nfcLinkAppSessionHasMigratableAssets(
 		return true
 	}
 	for (const c of assets.cards) {
+		if (isApiExcludedUserCard(c.cardAddress)) continue
 		try {
 			if (BigInt(c.points6 || '0') > 0n) return true
 			if (BigInt(c.chargeRewardPoints6 || '0') > 0n) return true
@@ -10615,6 +10619,7 @@ async function collectErc1155BalancesForHolder(
 	provider: ethers.Provider,
 	mode: 'eoa' | 'aa'
 ): Promise<NfcLinkErc1155BalanceRow[]> {
+	if (isApiExcludedUserCard(cardAddr)) return []
 	const card = new ethers.Contract(cardAddr, NFC_LINK_CARD_MIGRATE_ABI, provider)
 	const holderNorm = ethers.getAddress(holder)
 	const tokenIds = new Set<bigint>([0n, 1n, 2n])
@@ -10763,6 +10768,7 @@ export async function buildNfcLinkAppRedeemBundleFromChain(
 	holderAa: string,
 	provider: ethers.Provider
 ): Promise<{ tokenIds: bigint[]; amounts: bigint[] } | null> {
+	if (isApiExcludedUserCard(cardAddress)) return null
 	const card = ethers.getAddress(cardAddress)
 	const holder = ethers.getAddress(holderAa)
 	const c = new ethers.Contract(card, NFC_LINK_BALANCE_OF_ABI, provider)
@@ -10782,6 +10788,9 @@ function resolveNfcLinkAppCardAddress(body: { cardAddress?: string }): { ok: tru
 	}
 	if (!ethers.isAddress(raw)) {
 		return { ok: false, error: 'Invalid cardAddress.' }
+	}
+	if (isApiExcludedUserCard(raw)) {
+		return { ok: false, error: 'This merchant card cannot be used for NFC Link migration.' }
 	}
 	return { ok: true, address: ethers.getAddress(raw) }
 }

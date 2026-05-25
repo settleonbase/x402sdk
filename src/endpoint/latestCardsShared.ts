@@ -13,18 +13,12 @@ import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 /** @deprecated 请改用 `passDiscoverFeaturedBrandsMerchantCardPolicy`；保留别名供存量 import。 */
 export { API_EXCLUDED_USER_CARD_ADDRESSES as LATEST_CARDS_EXCLUDED } from '../apiExcludedUserCards'
 
-/** Legacy 白名单：LongDhang program card — 唯一允许在 cutover 前仍出现在 Discover 的旧卡地址。 */
-export const DISCOVER_ALLOWED_LEGACY_CARD_ADDRESS = ethers.getAddress(
-	'0x7334a7c7fE867538018fcC4CEA8b266E47600911',
-)
-const DISCOVER_ALLOWED_LEGACY_CARD_LOWER = DISCOVER_ALLOWED_LEGACY_CARD_ADDRESS.toLowerCase()
-
 /** 此时间点（含）之后 `beamio_cards.created_at` 的新发卡默认对 Discover 可见。 */
 export const DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_ISO = '2026-05-23T00:30:00.000Z'
 export const DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_MS = Date.parse(DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_ISO)
 
 /**
- * Featured Brands Discover 可见性（唯一 gate）：废弃全局卡 exclude + legacy 白名单 / 发卡时间 cutover。
+ * Featured Brands Discover 可见性（唯一 gate）：`apiExcludedUserCards` exclude + 发卡时间 cutover。
  */
 export function passDiscoverFeaturedBrandsMerchantCardPolicy(card: {
 	cardAddress: string
@@ -33,7 +27,6 @@ export function passDiscoverFeaturedBrandsMerchantCardPolicy(card: {
 	const cardAddress = (card.cardAddress || '').trim()
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return false
 	if (isApiExcludedUserCard(cardAddress)) return false
-	if (ethers.getAddress(cardAddress).toLowerCase() === DISCOVER_ALLOWED_LEGACY_CARD_LOWER) return true
 	const createdAtMs = Date.parse(String(card.createdAt ?? ''))
 	return Number.isFinite(createdAtMs) && createdAtMs >= DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_MS
 }
@@ -43,11 +36,7 @@ export function passDiscoverMerchantCardPolicy(card: {
 	cardAddress: string
 	createdAt?: string | null
 }): boolean {
-	const cardAddress = (card.cardAddress || '').trim()
-	if (!cardAddress || !ethers.isAddress(cardAddress)) return false
-	if (ethers.getAddress(cardAddress).toLowerCase() === DISCOVER_ALLOWED_LEGACY_CARD_LOWER) return true
-	const createdAtMs = Date.parse(String(card.createdAt ?? ''))
-	return Number.isFinite(createdAtMs) && createdAtMs >= DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_MS
+	return passDiscoverFeaturedBrandsMerchantCardPolicy(card)
 }
 
 export function filterLatestCardsByDiscoverMerchantPolicy(cards: BeamioLatestCardItem[]): BeamioLatestCardItem[] {

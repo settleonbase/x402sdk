@@ -45,6 +45,7 @@ export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	'0x9cda8477c9f03b8759ac64e21941e578908fd750',
 	'0x5c5376edabbf0f0bd52d5f7a93828606a5051694',
 	'0xeacd6cb7e9e5b2a2652ad65840997aab37b828e1',
+	'0x7334a7c7fe867538018fcc4cea8b266e47600911',
 ])
 
 /** @deprecated 旧全局 CCSA 卡；API/客户端不得扫描或展示。见 apiExcludedUserCards.ts */
