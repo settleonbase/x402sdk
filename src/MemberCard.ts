@@ -5929,19 +5929,25 @@ function nfcSplitMintPointsByCurrencyLegs(totalPts: bigint, fiat6ByLeg: bigint[]
 /** 1 B-Unit = 0.01 USDC，与 calcBeamioBUnitFee 一致 */
 const BUNIT_TO_USDC_DIVISOR = 100n
 
-/** Topup（NFC/QR mint 与 USDC 购点）：按 **折算后 USDC（6 位）名义金额** 的 **2%** 收取 B-Unit；1 B-Unit = 0.01 USDC ⇒ feeBUnits6 = feeUSDC6 × 100 */
+/** Topup（NFC/QR mint 与 USDC 购点）：按 **折算后 USDC（6 位）名义金额** 的 **2%** 收取 B-Unit；1 B-Unit = 0.01 USDC ⇒ feeBUnits6 = feeUSDC6 × 100；上限 **2000 B-Unit**。 */
 const TOPUP_BUNIT_FEE_BPS = 200n
 const TOPUP_BUNIT_BPS_DENOM = 10_000n
+/** 2000 B-Unit（6 位小数） */
+const TOPUP_BUNIT_FEE_MAX_UNITS6 = 2_000_000_000n
 
 export function calcTopupBUnitFeeFromUsdcNotional(amountUSDC6: bigint): { feeUSDC6: bigint; feeBUnits6: bigint } {
 	if (amountUSDC6 <= 0n) return { feeUSDC6: 0n, feeBUnits6: 0n }
-	const feeUSDC6 = (amountUSDC6 * TOPUP_BUNIT_FEE_BPS + TOPUP_BUNIT_BPS_DENOM - 1n) / TOPUP_BUNIT_BPS_DENOM
-	const feeBUnits6 = feeUSDC6 * BUNIT_TO_USDC_DIVISOR
+	const feeUSDC6Raw = (amountUSDC6 * TOPUP_BUNIT_FEE_BPS + TOPUP_BUNIT_BPS_DENOM - 1n) / TOPUP_BUNIT_BPS_DENOM
+	let feeBUnits6 = feeUSDC6Raw * BUNIT_TO_USDC_DIVISOR
+	if (feeBUnits6 > TOPUP_BUNIT_FEE_MAX_UNITS6) {
+		feeBUnits6 = TOPUP_BUNIT_FEE_MAX_UNITS6
+	}
+	const feeUSDC6 = feeBUnits6 / BUNIT_TO_USDC_DIVISOR
 	return { feeUSDC6, feeBUnits6 }
 }
 
 /** Cluster 预检（mintPointsByAdmin / NFC 与 QR 同路径）：卡发行方 owner 的 B-Units 是否足够。
- * 规则：按 topup 金额折算 USDC（与 quoteUSDCForPoints / executeForAdmin 记账一致：points6 * quoteUnitPointInUSDC6 / 1e6）后收取 **2%** 对应的 B-Unit；
+ * 规则：按 topup 金额折算 USDC（与 quoteUSDCForPoints / executeForAdmin 记账一致：points6 * quoteUnitPointInUSDC6 / 1e6）后收取 **2%** 对应的 B-Unit（上限 **2000 B-Unit**）；
  * 1 B-Unit = 0.01 USDC => feeBUnits6 = feeUSDC6 * 100。不再区分是否首次发卡。
  */
 export const nfcTopupPreCheckBUnitFee = async (
