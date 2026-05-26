@@ -250,6 +250,13 @@ const readMetadataValidBeforeSec = (meta: Record<string, unknown> | null): numbe
 const couponExpiryUsesUrgentVariant = (expiresLabel: string): boolean =>
 	expiresLabel === 'EXPIRED' || /\bEXPIRES IN \d+H\b|\bEXPIRES IN \d+M\b/.test(expiresLabel)
 
+/** Hide non-actionable open-ended status pills on coupon ticket UI. */
+export const shouldShowCouponExpiryPill = (expiresLabel: string): boolean => {
+	const normalized = expiresLabel.trim().toUpperCase()
+	if (!normalized) return false
+	return normalized !== 'VALID NOW' && normalized !== 'NO EXPIRY'
+}
+
 export function buildCouponClaimAppDownloadUrl(cardAddress: string, couponId: string): string {
 	const card = ethers.getAddress(cardAddress)
 	const claimUrl = `${BEAMIO_APP_ORIGIN}/app/?beamiocard=${encodeURIComponent(
@@ -666,10 +673,12 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const titleRaw = meta.title.trim()
 	const subtitleRaw = meta.subtitle.trim()
 	const expiresRaw = meta.expiresLabel.trim()
+	const showExpiryPill = shouldShowCouponExpiryPill(expiresRaw)
 	const claimHeadlineRaw = meta.shareHeadline?.trim() || buildShareHeadline(meta.merchantName, meta.shareKind)
-	const initialRaw = (titleRaw.charAt(0) || 'B').toUpperCase()
-	const expiryPillW = Math.min(360, Math.max(160, expiresRaw.length * 11 + 48))
+	const expiryPillW = showExpiryPill ? Math.min(360, Math.max(160, expiresRaw.length * 11 + 48)) : 0
 	const textLayers: OgTextLayer[] = []
+	const innerTextStartX = iconDataUrl ? capsuleX + 200 : capsuleX + 48
+	const innerTextMaxWidth = iconDataUrl ? capsuleW - 420 : capsuleW - 260
 
 	const bgLayer = bgDataUrl
 		? `<image href="${bgDataUrl}" x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" preserveAspectRatio="xMidYMid slice" clip-path="url(#capsuleClip)" />
@@ -680,19 +689,10 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const iconLayer = iconDataUrl
 		? `<image href="${iconDataUrl}" x="${iconCx - 56}" y="${iconCy - 56}" width="112" height="112" preserveAspectRatio="xMidYMid slice" clip-path="url(#iconClip)" />`
 		: ''
-
-	if (!iconDataUrl && initialRaw) {
-		textLayers.push({
-			text: initialRaw,
-			x: iconCx,
-			y: iconCy + 14,
-			fontSize: 42,
-			fontWeight: 800,
-			color: '#334155',
-			align: 'center',
-			maxWidth: 112,
-		})
-	}
+	const iconCircleLayer = iconDataUrl
+		? `<circle cx="${iconCx}" cy="${iconCy}" r="58" fill="rgba(255,255,255,0.95)" stroke="rgba(255,255,255,0.4)" stroke-width="4" />
+  ${iconLayer}`
+		: ''
 
 	textLayers.push({
 		text: claimHeadlineRaw,
@@ -724,44 +724,43 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
   <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
   <circle cx="${capsuleX}" cy="${iconCy}" r="18" fill="${punchBg}" />
   <circle cx="${capsuleX + capsuleW}" cy="${iconCy}" r="18" fill="${punchBg}" />
-  <circle cx="${iconCx}" cy="${iconCy}" r="58" fill="rgba(255,255,255,0.95)" stroke="rgba(255,255,255,0.4)" stroke-width="4" />
-  ${iconLayer}`
+  ${iconCircleLayer}`
 
 	const innerTextLayer =
-		!hasBanner && (titleRaw || subtitleRaw || expiresRaw)
+		!hasBanner && showExpiryPill && (titleRaw || subtitleRaw || expiresRaw)
 			? `
-  <rect x="${capsuleX + 200}" y="${capsuleY + (titleRaw || subtitleRaw ? 198 : 128)}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${innerExpiryFill}" />`
+  <rect x="${innerTextStartX}" y="${capsuleY + (titleRaw || subtitleRaw ? 198 : 128)}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${innerExpiryFill}" />`
 			: ''
 
 	if (!hasBanner) {
 		if (titleRaw) {
 			textLayers.push({
 				text: titleRaw,
-				x: capsuleX + 200,
+				x: innerTextStartX,
 				y: capsuleY + 128,
 				fontSize: 34,
 				fontWeight: 800,
 				color: '#ffffff',
 				align: 'left',
-				maxWidth: capsuleW - 420,
+				maxWidth: innerTextMaxWidth,
 			})
 		}
 		if (subtitleRaw) {
 			textLayers.push({
 				text: subtitleRaw,
-				x: capsuleX + 200,
+				x: innerTextStartX,
 				y: capsuleY + 172,
 				fontSize: 24,
 				fontWeight: 600,
 				color: 'rgba(255,255,255,0.92)',
 				align: 'left',
-				maxWidth: capsuleW - 420,
+				maxWidth: innerTextMaxWidth,
 			})
 		}
-		if (expiresRaw) {
+		if (showExpiryPill && expiresRaw) {
 			textLayers.push({
 				text: expiresRaw,
-				x: capsuleX + 224,
+				x: innerTextStartX + 24,
 				y: capsuleY + (titleRaw || subtitleRaw ? 222 : 152),
 				fontSize: 16,
 				fontWeight: 800,
@@ -808,22 +807,24 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 			metaBelowY += 34
 		}
 		const pillY = metaBelowY - 8
-		metaLines.push(
-			`<rect x="${capsuleX}" y="${pillY}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${externalExpiryFill}" stroke="${externalExpiryStroke}" stroke-width="2" />`
-		)
-		if (expiresRaw) {
-			textLayers.push({
-				text: expiresRaw,
-				x: capsuleX + 24,
-				y: pillY + 24,
-				fontSize: 16,
-				fontWeight: 800,
-				color: urgent ? '#ffffff' : '#595c5e',
-				align: 'left',
-				maxWidth: expiryPillW - 48,
-			})
+		if (showExpiryPill) {
+			metaLines.push(
+				`<rect x="${capsuleX}" y="${pillY}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${externalExpiryFill}" stroke="${externalExpiryStroke}" stroke-width="2" />`
+			)
+			if (expiresRaw) {
+				textLayers.push({
+					text: expiresRaw,
+					x: capsuleX + 24,
+					y: pillY + 24,
+					fontSize: 16,
+					fontWeight: 800,
+					color: urgent ? '#ffffff' : '#595c5e',
+					align: 'left',
+					maxWidth: expiryPillW - 48,
+				})
+			}
+			metaBelowY = pillY + 36
 		}
-		metaBelowY = pillY + 36
 	}
 
 	const qrSize = hasBanner ? 120 : 0
@@ -888,7 +889,7 @@ const OG_IMAGE_CACHE_TTL_MS = 10 * 60 * 1000
 
 async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'png' | 'jpeg'): Promise<Buffer> {
 	const hasBanner = Boolean(meta.backgroundImage?.trim())
-	const cacheKey = `${format}:wide:v4:${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}:${hasBanner ? 'banner' : 'solid'}`
+	const cacheKey = `${format}:wide:v6:${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}:${hasBanner ? 'banner' : 'solid'}:${meta.iconUrl ? 'icon' : 'noicon'}`
 	const cached = ogImageCache.get(cacheKey)
 	if (cached && Date.now() < cached.expiry) return cached.buf
 
