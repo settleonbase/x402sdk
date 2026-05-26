@@ -11,11 +11,11 @@ const OG_WIDTH = 1200
 const OG_HEIGHT = 630
 /** Hi-res Lanczos preprocess multiplier for banner/icon embed (layout stays 1×). */
 const OG_IMAGE_PREP_SCALE = 2
-/** Banner ticket strip height (OG px) — taller than legacy 150px to preserve upload detail. */
-const OG_BANNER_CAPSULE_H = 210
+/** Match homepage app-download ticket ratio: max-w-lg (512px) / 7.5rem (120px) ≈ 4.27:1. */
+const OG_BANNER_CAPSULE_H = 258
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 10
+const OG_LAYOUT_REV = 11
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -769,7 +769,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const capsuleX = 50
 	const capsuleW = 1100
 	const capsuleRx = 28
-	const capsuleY = hasBanner ? 96 : 165
+	const capsuleY = hasBanner ? 86 : 165
 	const capsuleH = hasBanner ? OG_BANNER_CAPSULE_H : 300
 	const iconCx = capsuleX + 112
 	const iconCy = capsuleY + capsuleH / 2
@@ -898,7 +898,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
   <image href="${qrDataUrl}" x="${capsuleX + capsuleW - 184}" y="${capsuleY + 90}" width="132" height="132" />`
 		: ''
 
-	let metaBelowY = capsuleY + capsuleH + 36
+	let metaBelowY = capsuleY + capsuleH + 24
 	const metaLines: string[] = []
 	if (hasBanner) {
 		if (titleRaw) {
@@ -906,26 +906,26 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 				text: titleRaw,
 				x: capsuleX,
 				y: metaBelowY,
-				fontSize: 30,
+				fontSize: 28,
 				fontWeight: 800,
 				color: '#2c2f31',
 				align: 'left',
 				maxWidth: capsuleW,
 			})
-			metaBelowY += 38
+			metaBelowY += 34
 		}
 		if (subtitleRaw) {
 			textLayers.push({
 				text: subtitleRaw,
 				x: capsuleX,
 				y: metaBelowY,
-				fontSize: 22,
+				fontSize: 20,
 				fontWeight: 600,
 				color: '#595c5e',
 				align: 'left',
 				maxWidth: capsuleW,
 			})
-			metaBelowY += 34
+			metaBelowY += 28
 		}
 		const pillY = metaBelowY - 8
 		if (showExpiryPill) {
@@ -948,8 +948,8 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		}
 	}
 
-	const qrSize = hasBanner ? 120 : 0
-	const qrY = hasBanner ? metaBelowY + 20 : 0
+	const qrSize = hasBanner ? 104 : 0
+	const qrY = hasBanner ? metaBelowY + 12 : 0
 	const qrX = (OG_WIDTH - qrSize) / 2
 	const externalQrLayer = hasBanner
 		? `
@@ -957,13 +957,13 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
   <image href="${qrDataUrl}" x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" />`
 		: ''
 
-	const scanHintY = hasBanner ? qrY + qrSize + 32 : 132
+	const scanHintY = hasBanner ? qrY + qrSize + 24 : 132
 	if (hasBanner) {
 		textLayers.push({
 			text: 'Scan the QR code above or open this link on your phone',
 			x: OG_WIDTH / 2,
 			y: scanHintY,
-			fontSize: 20,
+			fontSize: 18,
 			fontWeight: 600,
 			color: '#64748b',
 			align: 'center',
