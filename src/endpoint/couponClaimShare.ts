@@ -15,9 +15,14 @@ const OG_IMAGE_PREP_SCALE = 2
 const OG_BANNER_CAPSULE_H = 258
 /** Homepage uses `mt-3` (12 CSS px); scaled from 512px ticket to 1100px OG ticket. */
 const OG_BANNER_META_TOP_GAP = 26
+const OG_BANNER_HEADLINE_FONT_SIZE = 34
+const OG_BANNER_HEADLINE_BASELINE_Y = 56
+const OG_BANNER_HEADLINE_TOP_GAP = OG_BANNER_HEADLINE_BASELINE_Y - OG_BANNER_HEADLINE_FONT_SIZE
+/** Bottom breathing room mirrors the top headline margin, doubled for social preview chrome. */
+const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_TOP_GAP * 2
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 12
+const OG_LAYOUT_REV = 13
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -820,8 +825,8 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	textLayers.push({
 		text: claimHeadlineRaw,
 		x: OG_WIDTH / 2,
-		y: hasBanner ? 56 : 92,
-		fontSize: 34,
+		y: hasBanner ? OG_BANNER_HEADLINE_BASELINE_Y : 92,
+		fontSize: OG_BANNER_HEADLINE_FONT_SIZE,
 		fontWeight: 800,
 		color: '#1a1c1f',
 		align: 'center',
@@ -952,7 +957,12 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		}
 	}
 
-	const qrSize = hasBanner ? 104 : 0
+	const scanHintFontSize = 18
+	const desiredScanHintBaselineY =
+		OG_HEIGHT - OG_BANNER_BOTTOM_EXTRA_GAP - Math.ceil(scanHintFontSize * 0.45)
+	const idealQrSize =
+		desiredScanHintBaselineY - scanHintFontSize - OG_BANNER_META_TOP_GAP - (metaBelowY + 12)
+	const qrSize = hasBanner ? Math.max(64, Math.min(104, idealQrSize)) : 0
 	const qrY = hasBanner ? metaBelowY + 12 : 0
 	const qrX = (OG_WIDTH - qrSize) / 2
 	const externalQrLayer = hasBanner
@@ -961,13 +971,13 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
   <image href="${qrDataUrl}" x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" />`
 		: ''
 
-	const scanHintY = hasBanner ? qrY + qrSize + 24 : 132
+	const scanHintY = hasBanner ? qrY + qrSize + OG_BANNER_META_TOP_GAP + scanHintFontSize : 132
 	if (hasBanner) {
 		textLayers.push({
 			text: 'Scan the QR code above or open this link on your phone',
 			x: OG_WIDTH / 2,
 			y: scanHintY,
-			fontSize: 18,
+			fontSize: scanHintFontSize,
 			fontWeight: 600,
 			color: '#64748b',
 			align: 'center',
