@@ -15,7 +15,7 @@ const OG_IMAGE_PREP_SCALE = 2
 const OG_BANNER_CAPSULE_H = 210
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 9
+const OG_LAYOUT_REV = 10
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -539,6 +539,83 @@ async function fetchImageCoverPngDataUrl(
 	}
 }
 
+async function resizeStripToFill(strip: Buffer, width: number, height: number): Promise<Buffer | null> {
+	if (width <= 0 || height <= 0) return null
+	return sharp(strip)
+		.resize(Math.round(width), Math.round(height), {
+			fit: 'fill',
+			kernel: sharp.kernel.lanczos3,
+		})
+		.blur(8)
+		.png({ compressionLevel: 6 })
+		.toBuffer()
+}
+
+async function fetchBannerFitHeightPngDataUrl(
+	url: string,
+	width: number,
+	height: number
+): Promise<string | null> {
+	const buf = await fetchImageBuffer(url)
+	const slotW = Math.round(width)
+	const slotH = Math.round(height)
+	if (!buf || slotW <= 0 || slotH <= 0) return null
+	try {
+		const foregroundResult = await sharp(buf)
+			.rotate()
+			.toColorspace('srgb')
+			.resize({ height: slotH, kernel: sharp.kernel.lanczos3 })
+			.withIccProfile('srgb')
+			.png({ compressionLevel: 6 })
+			.toBuffer({ resolveWithObject: true })
+		const foreground = foregroundResult.data
+		const foregroundW = foregroundResult.info.width
+		if (foregroundW >= slotW) {
+			const left = Math.max(0, Math.floor((foregroundW - slotW) / 2))
+			const cropped = await sharp(foreground)
+				.extract({ left, top: 0, width: slotW, height: slotH })
+				.withIccProfile('srgb')
+				.png({ compressionLevel: 6 })
+				.toBuffer()
+			return `data:image/png;base64,${cropped.toString('base64')}`
+		}
+
+		const totalGap = slotW - foregroundW
+		const leftGap = Math.floor(totalGap / 2)
+		const rightGap = totalGap - leftGap
+		const stripW = Math.max(1, Math.min(foregroundW, Math.round(foregroundW * 0.08)))
+		const leftStrip = await sharp(foreground)
+			.extract({ left: 0, top: 0, width: stripW, height: slotH })
+			.png({ compressionLevel: 6 })
+			.toBuffer()
+		const rightStrip = await sharp(foreground)
+			.extract({ left: foregroundW - stripW, top: 0, width: stripW, height: slotH })
+			.png({ compressionLevel: 6 })
+			.toBuffer()
+		const leftFill = await resizeStripToFill(leftStrip, leftGap, slotH)
+		const rightFill = await resizeStripToFill(rightStrip, rightGap, slotH)
+		const composites: sharp.OverlayOptions[] = []
+		if (leftFill) composites.push({ input: leftFill, left: 0, top: 0 })
+		composites.push({ input: foreground, left: leftGap, top: 0 })
+		if (rightFill) composites.push({ input: rightFill, left: leftGap + foregroundW, top: 0 })
+		const canvas = await sharp({
+			create: {
+				width: slotW,
+				height: slotH,
+				channels: 4,
+				background: { r: 0, g: 0, b: 0, alpha: 0 },
+			},
+		})
+			.composite(composites)
+			.withIccProfile('srgb')
+			.png({ compressionLevel: 6 })
+			.toBuffer()
+		return `data:image/png;base64,${canvas.toString('base64')}`
+	} catch {
+		return null
+	}
+}
+
 async function lookupCouponSeriesMeta(
 	cardNorm: string,
 	wantedCouponId: string
@@ -707,7 +784,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		? await fetchImageCoverPngDataUrl(meta.iconUrl, iconSize * imgPrep, iconSize * imgPrep)
 		: null
 	const bgDataUrl = hasBanner
-		? await fetchImageCoverPngDataUrl(meta.backgroundImage, capsuleW * imgPrep, capsuleH * imgPrep)
+		? await fetchBannerFitHeightPngDataUrl(meta.backgroundImage, capsuleW * imgPrep, capsuleH * imgPrep)
 		: null
 	const qrDataUrl = await QRCode.toDataURL(meta.shareUrl, {
 		width: 560,
