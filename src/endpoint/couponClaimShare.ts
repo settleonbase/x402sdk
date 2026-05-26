@@ -15,7 +15,7 @@ const OG_IMAGE_PREP_SCALE = 2
 const OG_BANNER_CAPSULE_H = 210
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 8
+const OG_LAYOUT_REV = 9
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -524,11 +524,13 @@ async function fetchImageCoverPngDataUrl(
 	try {
 		const png = await sharp(buf)
 			.rotate()
+			.toColorspace('srgb')
 			.resize(Math.round(width), Math.round(height), {
 				fit: 'cover',
 				position: 'centre',
 				kernel: sharp.kernel.lanczos3,
 			})
+			.withIccProfile('srgb')
 			.png({ compressionLevel: 6 })
 			.toBuffer()
 		return `data:image/png;base64,${png.toString('base64')}`
@@ -724,8 +726,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const innerTextMaxWidth = iconDataUrl ? capsuleW - 420 : capsuleW - 260
 
 	const bgLayer = bgDataUrl
-		? `<image href="${bgDataUrl}" x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" preserveAspectRatio="xMidYMid slice" clip-path="url(#capsuleClip)" />
-<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" fill="url(#photoShade)" clip-path="url(#capsuleClip)" />`
+		? `<image href="${bgDataUrl}" x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" preserveAspectRatio="xMidYMid slice" clip-path="url(#capsuleClip)" />`
 		: `<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="${escapeXml(meta.backgroundColorHex)}" />
 <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#stripePattern)" opacity="0.12" clip-path="url(#capsuleClip)" />`
 
@@ -763,7 +764,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 
 	const ticketShell = `
   ${bgLayer}
-  <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#capsuleShade)" clip-path="url(#capsuleClip)" />
+  ${hasBanner ? '' : `<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#capsuleShade)" clip-path="url(#capsuleClip)" />`}
   <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
   <circle cx="${capsuleX}" cy="${iconCy}" r="18" fill="${punchBg}" />
   <circle cx="${capsuleX + capsuleW}" cy="${iconCy}" r="18" fill="${punchBg}" />
@@ -906,11 +907,6 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
       <stop offset="0%" stop-color="#ffffff" stop-opacity="0.15" />
       <stop offset="100%" stop-color="#000000" stop-opacity="0.30" />
     </linearGradient>
-    <linearGradient id="photoShade" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#000000" stop-opacity="0.72" />
-      <stop offset="55%" stop-color="#000000" stop-opacity="0.52" />
-      <stop offset="100%" stop-color="#000000" stop-opacity="0.35" />
-    </linearGradient>
     <pattern id="stripePattern" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(-26)">
       <rect width="8" height="8" fill="transparent" />
       <rect width="1" height="8" fill="#ffffff" />
@@ -940,6 +936,8 @@ async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'pn
 	const textComposites = buildOgTextComposites(textLayers)
 	const baseRaster = await sharp(Buffer.from(svg))
 		.resize(OG_WIDTH, OG_HEIGHT, { fit: 'fill' })
+		.toColorspace('srgb')
+		.withIccProfile('srgb')
 		.png()
 		.toBuffer()
 	let pipeline = sharp(baseRaster).composite(textComposites)
@@ -952,8 +950,9 @@ async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'pn
 						mozjpeg: true,
 						chromaSubsampling: '4:4:4',
 					})
+					.withIccProfile('srgb')
 					.toBuffer()
-			: await pipeline.png({ compressionLevel: 6 }).toBuffer()
+			: await pipeline.withIccProfile('srgb').png({ compressionLevel: 6 }).toBuffer()
 	ogImageCache.set(cacheKey, { buf, expiry: Date.now() + OG_IMAGE_CACHE_TTL_MS })
 	return buf
 }
