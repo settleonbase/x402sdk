@@ -150,7 +150,17 @@ export function renderOgTextLayerPng(layer: OgTextLayer): { buffer: Buffer; left
 	const text = layer.text.trim()
 	const maxWidth = Math.max(32, layer.maxWidth ?? 1100)
 	const canvasHeight = Math.ceil(layer.fontSize * 1.45)
-	const canvas = createCanvas(maxWidth, canvasHeight)
+	const measureCanvas = createCanvas(maxWidth, canvasHeight)
+	const measureCtx = measureCanvas.getContext('2d')
+	measureCtx.font = ogCanvasFont(layer.fontWeight, layer.fontSize)
+	measureCtx.direction = textDirection(text)
+
+	const displayText = layer.align === 'left' ? truncateToWidth(measureCtx, text, maxWidth) : text
+	const measuredWidth = Math.ceil(measureCtx.measureText(displayText).width)
+	const overlayWidth =
+		layer.align === 'left' ? Math.min(maxWidth, Math.max(1, measuredWidth)) : maxWidth
+
+	const canvas = createCanvas(overlayWidth, canvasHeight)
 	const ctx = canvas.getContext('2d')
 	ctx.font = ogCanvasFont(layer.fontWeight, layer.fontSize)
 	ctx.fillStyle = layer.color
@@ -158,14 +168,15 @@ export function renderOgTextLayerPng(layer: OgTextLayer): { buffer: Buffer; left
 	ctx.textAlign = layer.align === 'center' ? 'center' : 'left'
 	ctx.direction = textDirection(text)
 
-	const displayText = layer.align === 'left' ? truncateToWidth(ctx, text, maxWidth) : text
-	const textX = layer.align === 'center' ? maxWidth / 2 : 0
+	const textX = layer.align === 'center' ? overlayWidth / 2 : 0
 	const textY = layer.fontSize
 	ctx.fillText(displayText, textX, textY)
 
 	const left =
-		layer.align === 'center' ? Math.round(layer.x - maxWidth / 2) : Math.round(layer.x)
-	const top = Math.round(layer.y - layer.fontSize)
+		layer.align === 'center'
+			? Math.max(0, Math.round(layer.x - overlayWidth / 2))
+			: Math.max(0, Math.round(layer.x))
+	const top = Math.max(0, Math.round(layer.y - layer.fontSize))
 
 	return { buffer: canvas.toBuffer('image/png'), left, top }
 }
