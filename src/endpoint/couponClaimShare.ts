@@ -636,28 +636,37 @@ export function buildFallbackCouponClaimShareMeta(
 
 async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string> {
 	const punchBg = '#f9f9fe'
+	const hasBanner = Boolean(meta.backgroundImage?.trim())
 	const capsuleX = 50
-	const capsuleY = 165
 	const capsuleW = 1100
-	const capsuleH = 300
 	const capsuleRx = 28
+	const capsuleY = hasBanner ? 96 : 165
+	const capsuleH = hasBanner ? 150 : 300
+	const iconCx = capsuleX + 112
+	const iconCy = capsuleY + capsuleH / 2
 	const urgent = couponExpiryUsesUrgentVariant(meta.expiresLabel)
-	const expiryFill = urgent ? '#dc2626' : 'rgba(15,23,42,0.65)'
-	const expiryText = urgent ? '#ffffff' : '#ffffff'
+	const innerExpiryFill = urgent ? '#dc2626' : 'rgba(15,23,42,0.65)'
+	const innerExpiryText = '#ffffff'
+	const externalExpiryFill = urgent ? '#dc2626' : '#eef1f3'
+	const externalExpiryStroke = urgent ? '#dc2626' : 'rgba(171,173,175,0.35)'
+	const externalExpiryText = urgent ? '#ffffff' : '#595c5e'
 
 	const iconDataUrl = meta.iconUrl ? await fetchImageAsDataUrl(meta.iconUrl) : null
-	const bgDataUrl = meta.backgroundImage ? await fetchImageAsDataUrl(meta.backgroundImage) : null
+	const bgDataUrl = hasBanner ? await fetchImageAsDataUrl(meta.backgroundImage) : null
 	const qrDataUrl = await QRCode.toDataURL(meta.shareUrl, {
 		width: 280,
 		margin: 1,
 		color: { dark: '#111827', light: '#ffffff' },
 	})
 
-	const title = escapeXml(meta.title)
-	const subtitle = escapeXml(meta.subtitle)
+	const titleRaw = meta.title.trim()
+	const subtitleRaw = meta.subtitle.trim()
+	const title = titleRaw ? escapeXml(titleRaw) : ''
+	const subtitle = subtitleRaw ? escapeXml(subtitleRaw) : ''
 	const expires = escapeXml(meta.expiresLabel)
 	const claimHeadline = escapeXml(meta.shareHeadline || buildShareHeadline(meta.merchantName, meta.shareKind))
-	const initial = escapeXml((meta.title.charAt(0) || 'B').toUpperCase())
+	const initial = escapeXml((titleRaw.charAt(0) || 'B').toUpperCase())
+	const expiryPillW = Math.min(360, Math.max(160, expires.length * 11 + 48))
 
 	const bgLayer = bgDataUrl
 		? `<image href="${bgDataUrl}" x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" preserveAspectRatio="xMidYMid slice" clip-path="url(#capsuleClip)" />
@@ -666,8 +675,71 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
 <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#stripePattern)" opacity="0.12" clip-path="url(#capsuleClip)" />`
 
 	const iconLayer = iconDataUrl
-		? `<image href="${iconDataUrl}" x="${capsuleX + 56}" y="${capsuleY + 94}" width="112" height="112" preserveAspectRatio="xMidYMid slice" clip-path="url(#iconClip)" />`
-		: `<text x="${capsuleX + 112}" y="${capsuleY + 162}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="800" fill="#334155">${initial}</text>`
+		? `<image href="${iconDataUrl}" x="${iconCx - 56}" y="${iconCy - 56}" width="112" height="112" preserveAspectRatio="xMidYMid slice" clip-path="url(#iconClip)" />`
+		: `<text x="${iconCx}" y="${iconCy + 14}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="800" fill="#334155">${initial}</text>`
+
+	const ticketShell = `
+  ${bgLayer}
+  <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#capsuleShade)" clip-path="url(#capsuleClip)" />
+  <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
+  <circle cx="${capsuleX}" cy="${iconCy}" r="18" fill="${punchBg}" />
+  <circle cx="${capsuleX + capsuleW}" cy="${iconCy}" r="18" fill="${punchBg}" />
+  <circle cx="${iconCx}" cy="${iconCy}" r="58" fill="rgba(255,255,255,0.95)" stroke="rgba(255,255,255,0.4)" stroke-width="4" />
+  ${iconLayer}`
+
+	const innerTextLayer =
+		!hasBanner && (title || subtitle)
+			? `
+  ${title ? `<text x="${capsuleX + 200}" y="${capsuleY + 128}" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="800" fill="#ffffff">${title}</text>` : ''}
+  ${subtitle ? `<text x="${capsuleX + 200}" y="${capsuleY + 172}" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="600" fill="rgba(255,255,255,0.92)">${subtitle}</text>` : ''}
+  <rect x="${capsuleX + 200}" y="${capsuleY + 198}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${innerExpiryFill}" />
+  <text x="${capsuleX + 224}" y="${capsuleY + 222}" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="800" fill="${innerExpiryText}">${expires}</text>`
+			: !hasBanner
+				? `
+  <rect x="${capsuleX + 200}" y="${capsuleY + 128}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${innerExpiryFill}" />
+  <text x="${capsuleX + 224}" y="${capsuleY + 152}" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="800" fill="${innerExpiryText}">${expires}</text>`
+				: ''
+
+	const innerQrLayer = !hasBanner
+		? `
+  <rect x="${capsuleX + capsuleW - 196}" y="${capsuleY + 78}" width="156" height="156" rx="20" fill="#ffffff" />
+  <image href="${qrDataUrl}" x="${capsuleX + capsuleW - 184}" y="${capsuleY + 90}" width="132" height="132" />`
+		: ''
+
+	let metaBelowY = capsuleY + capsuleH + 36
+	const metaLines: string[] = []
+	if (hasBanner) {
+		if (title) {
+			metaLines.push(
+				`<text x="${capsuleX}" y="${metaBelowY}" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="800" fill="#2c2f31">${title}</text>`
+			)
+			metaBelowY += 38
+		}
+		if (subtitle) {
+			metaLines.push(
+				`<text x="${capsuleX}" y="${metaBelowY}" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="600" fill="#595c5e">${subtitle}</text>`
+			)
+			metaBelowY += 34
+		}
+		const pillY = metaBelowY - 8
+		metaLines.push(
+			`<rect x="${capsuleX}" y="${pillY}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${externalExpiryFill}" stroke="${externalExpiryStroke}" stroke-width="2" />`,
+			`<text x="${capsuleX + 24}" y="${pillY + 24}" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="800" fill="${externalExpiryText}">${expires}</text>`
+		)
+		metaBelowY = pillY + 36
+	}
+
+	const qrSize = hasBanner ? 120 : 0
+	const qrY = hasBanner ? metaBelowY + 20 : 0
+	const qrX = (OG_WIDTH - qrSize) / 2
+	const externalQrLayer = hasBanner
+		? `
+  <rect x="${qrX - 12}" y="${qrY - 12}" width="${qrSize + 24}" height="${qrSize + 24}" rx="20" fill="#ffffff" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
+  <image href="${qrDataUrl}" x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" />`
+		: ''
+
+	const scanHintY = hasBanner ? qrY + qrSize + 44 : 132
+	const scanHint = 'Scan the QR code above or open this link on your phone'
 
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${OG_WIDTH}" height="${OG_HEIGHT}" viewBox="0 0 ${OG_WIDTH} ${OG_HEIGHT}">
@@ -676,7 +748,7 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
       <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" />
     </clipPath>
     <clipPath id="iconClip">
-      <circle cx="${capsuleX + 112}" cy="${capsuleY + 150}" r="56" />
+      <circle cx="${iconCx}" cy="${iconCy}" r="56" />
     </clipPath>
     <linearGradient id="capsuleShade" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#ffffff" stop-opacity="0.15" />
@@ -693,21 +765,14 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
     </pattern>
   </defs>
   <rect width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="${punchBg}" />
-  <text x="600" y="92" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="800" fill="#1a1c1f">${claimHeadline}</text>
-  <text x="600" y="132" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#64748b">Scan the QR or open the link on your phone</text>
-  ${bgLayer}
-  <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#capsuleShade)" clip-path="url(#capsuleClip)" />
-  <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
-  <circle cx="${capsuleX}" cy="${capsuleY + capsuleH / 2}" r="18" fill="${punchBg}" />
-  <circle cx="${capsuleX + capsuleW}" cy="${capsuleY + capsuleH / 2}" r="18" fill="${punchBg}" />
-  <circle cx="${capsuleX + 112}" cy="${capsuleY + 150}" r="58" fill="rgba(255,255,255,0.95)" stroke="rgba(255,255,255,0.4)" stroke-width="4" />
-  ${iconLayer}
-  <text x="${capsuleX + 200}" y="${capsuleY + 128}" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="800" fill="#ffffff">${title}</text>
-  <text x="${capsuleX + 200}" y="${capsuleY + 172}" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="600" fill="rgba(255,255,255,0.92)">${subtitle}</text>
-  <rect x="${capsuleX + 200}" y="${capsuleY + 198}" rx="18" ry="18" width="${Math.min(360, Math.max(160, expires.length * 11 + 48))}" height="36" fill="${expiryFill}" />
-  <text x="${capsuleX + 224}" y="${capsuleY + 222}" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="800" fill="${expiryText}">${expires}</text>
-  <rect x="${capsuleX + capsuleW - 196}" y="${capsuleY + 78}" width="156" height="156" rx="20" fill="#ffffff" />
-  <image href="${qrDataUrl}" x="${capsuleX + capsuleW - 184}" y="${capsuleY + 90}" width="132" height="132" />
+  <text x="600" y="${hasBanner ? 56 : 92}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="800" fill="#1a1c1f">${claimHeadline}</text>
+  ${!hasBanner ? `<text x="600" y="132" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#64748b">Scan the QR or open the link on your phone</text>` : ''}
+  ${ticketShell}
+  ${innerTextLayer}
+  ${innerQrLayer}
+  ${hasBanner ? metaLines.join('\n  ') : ''}
+  ${externalQrLayer}
+  ${hasBanner ? `<text x="600" y="${scanHintY}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#64748b">${scanHint}</text>` : ''}
 </svg>`
 }
 
@@ -715,7 +780,8 @@ const ogImageCache = new Map<string, { buf: Buffer; expiry: number }>()
 const OG_IMAGE_CACHE_TTL_MS = 10 * 60 * 1000
 
 async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'png' | 'jpeg'): Promise<Buffer> {
-	const cacheKey = `${format}:wide:${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}`
+	const hasBanner = Boolean(meta.backgroundImage?.trim())
+	const cacheKey = `${format}:wide:v2:${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}:${hasBanner ? 'banner' : 'solid'}`
 	const cached = ogImageCache.get(cacheKey)
 	if (cached && Date.now() < cached.expiry) return cached.buf
 
