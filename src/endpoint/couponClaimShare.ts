@@ -13,9 +13,11 @@ const OG_HEIGHT = 630
 const OG_IMAGE_PREP_SCALE = 2
 /** Match homepage app-download ticket ratio: max-w-lg (512px) / 7.5rem (120px) ≈ 4.27:1. */
 const OG_BANNER_CAPSULE_H = 258
+/** Homepage uses `mt-3` (12 CSS px); scaled from 512px ticket to 1100px OG ticket. */
+const OG_BANNER_META_TOP_GAP = 26
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 11
+const OG_LAYOUT_REV = 12
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -898,21 +900,23 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
   <image href="${qrDataUrl}" x="${capsuleX + capsuleW - 184}" y="${capsuleY + 90}" width="132" height="132" />`
 		: ''
 
-	let metaBelowY = capsuleY + capsuleH + 24
+	let metaBelowY = capsuleY + capsuleH
 	const metaLines: string[] = []
 	if (hasBanner) {
 		if (titleRaw) {
+			const titleFontSize = 28
+			metaBelowY += OG_BANNER_META_TOP_GAP + titleFontSize
 			textLayers.push({
 				text: titleRaw,
 				x: capsuleX,
 				y: metaBelowY,
-				fontSize: 28,
+				fontSize: titleFontSize,
 				fontWeight: 800,
 				color: '#2c2f31',
 				align: 'left',
 				maxWidth: capsuleW,
 			})
-			metaBelowY += 34
+			metaBelowY += 32
 		}
 		if (subtitleRaw) {
 			textLayers.push({
