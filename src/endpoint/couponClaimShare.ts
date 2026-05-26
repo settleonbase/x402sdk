@@ -3,6 +3,7 @@ import QRCode from 'qrcode'
 import sharp from 'sharp'
 import { listCouponIssuedNftSeriesForCardDescending, getCardByAddress } from '../db'
 import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCategory'
+import { buildOgTextComposites, type OgTextLayer } from './couponClaimShareOgText'
 
 const BEAMIO_APP_ORIGIN = 'https://beamio.app'
 const ISSUED_NFT_START_ID = 100_000_000_000n
@@ -634,7 +635,12 @@ export function buildFallbackCouponClaimShareMeta(
 	}
 }
 
-async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string> {
+type CouponClaimOgRasterParts = {
+	svg: string
+	textLayers: OgTextLayer[]
+}
+
+async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promise<CouponClaimOgRasterParts> {
 	const punchBg = '#f9f9fe'
 	const hasBanner = Boolean(meta.backgroundImage?.trim())
 	const capsuleX = 50
@@ -646,10 +652,8 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
 	const iconCy = capsuleY + capsuleH / 2
 	const urgent = couponExpiryUsesUrgentVariant(meta.expiresLabel)
 	const innerExpiryFill = urgent ? '#dc2626' : 'rgba(15,23,42,0.65)'
-	const innerExpiryText = '#ffffff'
 	const externalExpiryFill = urgent ? '#dc2626' : '#eef1f3'
 	const externalExpiryStroke = urgent ? '#dc2626' : 'rgba(171,173,175,0.35)'
-	const externalExpiryText = urgent ? '#ffffff' : '#595c5e'
 
 	const iconDataUrl = meta.iconUrl ? await fetchImageAsDataUrl(meta.iconUrl) : null
 	const bgDataUrl = hasBanner ? await fetchImageAsDataUrl(meta.backgroundImage) : null
@@ -661,12 +665,11 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
 
 	const titleRaw = meta.title.trim()
 	const subtitleRaw = meta.subtitle.trim()
-	const title = titleRaw ? escapeXml(titleRaw) : ''
-	const subtitle = subtitleRaw ? escapeXml(subtitleRaw) : ''
-	const expires = escapeXml(meta.expiresLabel)
-	const claimHeadline = escapeXml(meta.shareHeadline || buildShareHeadline(meta.merchantName, meta.shareKind))
-	const initial = escapeXml((titleRaw.charAt(0) || 'B').toUpperCase())
-	const expiryPillW = Math.min(360, Math.max(160, expires.length * 11 + 48))
+	const expiresRaw = meta.expiresLabel.trim()
+	const claimHeadlineRaw = meta.shareHeadline?.trim() || buildShareHeadline(meta.merchantName, meta.shareKind)
+	const initialRaw = (titleRaw.charAt(0) || 'B').toUpperCase()
+	const expiryPillW = Math.min(360, Math.max(160, expiresRaw.length * 11 + 48))
+	const textLayers: OgTextLayer[] = []
 
 	const bgLayer = bgDataUrl
 		? `<image href="${bgDataUrl}" x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" preserveAspectRatio="xMidYMid slice" clip-path="url(#capsuleClip)" />
@@ -676,7 +679,44 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
 
 	const iconLayer = iconDataUrl
 		? `<image href="${iconDataUrl}" x="${iconCx - 56}" y="${iconCy - 56}" width="112" height="112" preserveAspectRatio="xMidYMid slice" clip-path="url(#iconClip)" />`
-		: `<text x="${iconCx}" y="${iconCy + 14}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="800" fill="#334155">${initial}</text>`
+		: ''
+
+	if (!iconDataUrl && initialRaw) {
+		textLayers.push({
+			text: initialRaw,
+			x: iconCx,
+			y: iconCy + 14,
+			fontSize: 42,
+			fontWeight: 800,
+			color: '#334155',
+			align: 'center',
+			maxWidth: 112,
+		})
+	}
+
+	textLayers.push({
+		text: claimHeadlineRaw,
+		x: OG_WIDTH / 2,
+		y: hasBanner ? 56 : 92,
+		fontSize: 34,
+		fontWeight: 800,
+		color: '#1a1c1f',
+		align: 'center',
+		maxWidth: OG_WIDTH - 80,
+	})
+
+	if (!hasBanner) {
+		textLayers.push({
+			text: 'Scan the QR or open the link on your phone',
+			x: OG_WIDTH / 2,
+			y: 132,
+			fontSize: 20,
+			fontWeight: 600,
+			color: '#64748b',
+			align: 'center',
+			maxWidth: OG_WIDTH - 120,
+		})
+	}
 
 	const ticketShell = `
   ${bgLayer}
@@ -688,17 +728,49 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
   ${iconLayer}`
 
 	const innerTextLayer =
-		!hasBanner && (title || subtitle)
+		!hasBanner && (titleRaw || subtitleRaw || expiresRaw)
 			? `
-  ${title ? `<text x="${capsuleX + 200}" y="${capsuleY + 128}" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="800" fill="#ffffff">${title}</text>` : ''}
-  ${subtitle ? `<text x="${capsuleX + 200}" y="${capsuleY + 172}" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="600" fill="rgba(255,255,255,0.92)">${subtitle}</text>` : ''}
-  <rect x="${capsuleX + 200}" y="${capsuleY + 198}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${innerExpiryFill}" />
-  <text x="${capsuleX + 224}" y="${capsuleY + 222}" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="800" fill="${innerExpiryText}">${expires}</text>`
-			: !hasBanner
-				? `
-  <rect x="${capsuleX + 200}" y="${capsuleY + 128}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${innerExpiryFill}" />
-  <text x="${capsuleX + 224}" y="${capsuleY + 152}" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="800" fill="${innerExpiryText}">${expires}</text>`
-				: ''
+  <rect x="${capsuleX + 200}" y="${capsuleY + (titleRaw || subtitleRaw ? 198 : 128)}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${innerExpiryFill}" />`
+			: ''
+
+	if (!hasBanner) {
+		if (titleRaw) {
+			textLayers.push({
+				text: titleRaw,
+				x: capsuleX + 200,
+				y: capsuleY + 128,
+				fontSize: 34,
+				fontWeight: 800,
+				color: '#ffffff',
+				align: 'left',
+				maxWidth: capsuleW - 420,
+			})
+		}
+		if (subtitleRaw) {
+			textLayers.push({
+				text: subtitleRaw,
+				x: capsuleX + 200,
+				y: capsuleY + 172,
+				fontSize: 24,
+				fontWeight: 600,
+				color: 'rgba(255,255,255,0.92)',
+				align: 'left',
+				maxWidth: capsuleW - 420,
+			})
+		}
+		if (expiresRaw) {
+			textLayers.push({
+				text: expiresRaw,
+				x: capsuleX + 224,
+				y: capsuleY + (titleRaw || subtitleRaw ? 222 : 152),
+				fontSize: 16,
+				fontWeight: 800,
+				color: '#ffffff',
+				align: 'left',
+				maxWidth: expiryPillW - 48,
+			})
+		}
+	}
 
 	const innerQrLayer = !hasBanner
 		? `
@@ -709,23 +781,48 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
 	let metaBelowY = capsuleY + capsuleH + 36
 	const metaLines: string[] = []
 	if (hasBanner) {
-		if (title) {
-			metaLines.push(
-				`<text x="${capsuleX}" y="${metaBelowY}" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="800" fill="#2c2f31">${title}</text>`
-			)
+		if (titleRaw) {
+			textLayers.push({
+				text: titleRaw,
+				x: capsuleX,
+				y: metaBelowY,
+				fontSize: 30,
+				fontWeight: 800,
+				color: '#2c2f31',
+				align: 'left',
+				maxWidth: capsuleW,
+			})
 			metaBelowY += 38
 		}
-		if (subtitle) {
-			metaLines.push(
-				`<text x="${capsuleX}" y="${metaBelowY}" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="600" fill="#595c5e">${subtitle}</text>`
-			)
+		if (subtitleRaw) {
+			textLayers.push({
+				text: subtitleRaw,
+				x: capsuleX,
+				y: metaBelowY,
+				fontSize: 22,
+				fontWeight: 600,
+				color: '#595c5e',
+				align: 'left',
+				maxWidth: capsuleW,
+			})
 			metaBelowY += 34
 		}
 		const pillY = metaBelowY - 8
 		metaLines.push(
-			`<rect x="${capsuleX}" y="${pillY}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${externalExpiryFill}" stroke="${externalExpiryStroke}" stroke-width="2" />`,
-			`<text x="${capsuleX + 24}" y="${pillY + 24}" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="800" fill="${externalExpiryText}">${expires}</text>`
+			`<rect x="${capsuleX}" y="${pillY}" rx="18" ry="18" width="${expiryPillW}" height="36" fill="${externalExpiryFill}" stroke="${externalExpiryStroke}" stroke-width="2" />`
 		)
+		if (expiresRaw) {
+			textLayers.push({
+				text: expiresRaw,
+				x: capsuleX + 24,
+				y: pillY + 24,
+				fontSize: 16,
+				fontWeight: 800,
+				color: urgent ? '#ffffff' : '#595c5e',
+				align: 'left',
+				maxWidth: expiryPillW - 48,
+			})
+		}
 		metaBelowY = pillY + 36
 	}
 
@@ -739,9 +836,20 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
 		: ''
 
 	const scanHintY = hasBanner ? qrY + qrSize + 44 : 132
-	const scanHint = 'Scan the QR code above or open this link on your phone'
+	if (hasBanner) {
+		textLayers.push({
+			text: 'Scan the QR code above or open this link on your phone',
+			x: OG_WIDTH / 2,
+			y: scanHintY,
+			fontSize: 20,
+			fontWeight: 600,
+			color: '#64748b',
+			align: 'center',
+			maxWidth: OG_WIDTH - 120,
+		})
+	}
 
-	return `<?xml version="1.0" encoding="UTF-8"?>
+	const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${OG_WIDTH}" height="${OG_HEIGHT}" viewBox="0 0 ${OG_WIDTH} ${OG_HEIGHT}">
   <defs>
     <clipPath id="capsuleClip">
@@ -765,15 +873,14 @@ async function buildCouponClaimOgSvg(meta: CouponClaimShareMeta): Promise<string
     </pattern>
   </defs>
   <rect width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="${punchBg}" />
-  <text x="600" y="${hasBanner ? 56 : 92}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="800" fill="#1a1c1f">${claimHeadline}</text>
-  ${!hasBanner ? `<text x="600" y="132" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#64748b">Scan the QR or open the link on your phone</text>` : ''}
   ${ticketShell}
   ${innerTextLayer}
   ${innerQrLayer}
   ${hasBanner ? metaLines.join('\n  ') : ''}
   ${externalQrLayer}
-  ${hasBanner ? `<text x="600" y="${scanHintY}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#64748b">${scanHint}</text>` : ''}
 </svg>`
+
+	return { svg, textLayers }
 }
 
 const ogImageCache = new Map<string, { buf: Buffer; expiry: number }>()
@@ -781,17 +888,19 @@ const OG_IMAGE_CACHE_TTL_MS = 10 * 60 * 1000
 
 async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'png' | 'jpeg'): Promise<Buffer> {
 	const hasBanner = Boolean(meta.backgroundImage?.trim())
-	const cacheKey = `${format}:wide:v2:${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}:${hasBanner ? 'banner' : 'solid'}`
+	const cacheKey = `${format}:wide:v4:${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}:${hasBanner ? 'banner' : 'solid'}`
 	const cached = ogImageCache.get(cacheKey)
 	if (cached && Date.now() < cached.expiry) return cached.buf
 
-	const svg = await buildCouponClaimOgSvg(meta)
+	const { svg, textLayers } = await buildCouponClaimOgRasterParts(meta)
+	const textComposites = buildOgTextComposites(textLayers)
+	let pipeline = sharp(Buffer.from(svg)).composite(textComposites)
 	const buf =
 		format === 'jpeg'
-			? await sharp(Buffer.from(svg))
+			? await pipeline
 					.jpeg({ quality: 80, progressive: false, mozjpeg: true, chromaSubsampling: '4:2:0' })
 					.toBuffer()
-			: await sharp(Buffer.from(svg)).png({ quality: 90 }).toBuffer()
+			: await pipeline.png({ quality: 90 }).toBuffer()
 	ogImageCache.set(cacheKey, { buf, expiry: Date.now() + OG_IMAGE_CACHE_TTL_MS })
 	return buf
 }
