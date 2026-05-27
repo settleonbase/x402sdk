@@ -25,11 +25,11 @@ const OG_BANNER_HEADLINE_BOX_TOP_GAP = OG_BANNER_HEADLINE_BASELINE_Y - OG_BANNER
 const OG_BANNER_HEADLINE_VISUAL_TOP_GAP = Math.round(OG_BANNER_HEADLINE_BOX_TOP_GAP / 2)
 /** Bottom breathing room is 4× the headline visual top margin. */
 const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
-/** Keep the OG QR visually closer to the app-download QR instead of shrinking to a tiny footer mark. */
-const OG_BANNER_QR_TARGET_SIZE = 96
+/** Banner mode external QR size; doubled from 96 to match the larger app-download preview emphasis. */
+const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 14
+const OG_LAYOUT_REV = 16
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -571,18 +571,6 @@ async function fetchImageCoverPngDataUrl(
 	}
 }
 
-async function resizeStripToFill(strip: Buffer, width: number, height: number): Promise<Buffer | null> {
-	if (width <= 0 || height <= 0) return null
-	return sharp(strip)
-		.resize(Math.round(width), Math.round(height), {
-			fit: 'fill',
-			kernel: sharp.kernel.lanczos3,
-		})
-		.blur(8)
-		.png({ compressionLevel: 6 })
-		.toBuffer()
-}
-
 async function fetchBannerFitHeightPngDataUrl(
 	url: string,
 	width: number,
@@ -593,6 +581,19 @@ async function fetchBannerFitHeightPngDataUrl(
 	const slotH = Math.round(height)
 	if (!buf || slotW <= 0 || slotH <= 0) return null
 	try {
+		const blurredCover = await sharp(buf)
+			.rotate()
+			.toColorspace('srgb')
+			.resize(slotW, slotH, {
+				fit: 'cover',
+				position: 'centre',
+				kernel: sharp.kernel.lanczos3,
+			})
+			.blur(24)
+			.withIccProfile('srgb')
+			.png({ compressionLevel: 6 })
+			.toBuffer()
+
 		const foregroundResult = await sharp(buf)
 			.rotate()
 			.toColorspace('srgb')
@@ -602,43 +603,18 @@ async function fetchBannerFitHeightPngDataUrl(
 			.toBuffer({ resolveWithObject: true })
 		const foreground = foregroundResult.data
 		const foregroundW = foregroundResult.info.width
-		if (foregroundW >= slotW) {
-			const left = Math.max(0, Math.floor((foregroundW - slotW) / 2))
-			const cropped = await sharp(foreground)
-				.extract({ left, top: 0, width: slotW, height: slotH })
+		const cropLeft = Math.max(0, Math.floor((foregroundW - slotW) / 2))
+		const foregroundInput =
+			foregroundW > slotW
+				? await sharp(foreground)
+				.extract({ left: cropLeft, top: 0, width: slotW, height: slotH })
 				.withIccProfile('srgb')
 				.png({ compressionLevel: 6 })
 				.toBuffer()
-			return `data:image/png;base64,${cropped.toString('base64')}`
-		}
-
-		const totalGap = slotW - foregroundW
-		const leftGap = Math.floor(totalGap / 2)
-		const rightGap = totalGap - leftGap
-		const stripW = Math.max(1, Math.min(foregroundW, Math.round(foregroundW * 0.08)))
-		const leftStrip = await sharp(foreground)
-			.extract({ left: 0, top: 0, width: stripW, height: slotH })
-			.png({ compressionLevel: 6 })
-			.toBuffer()
-		const rightStrip = await sharp(foreground)
-			.extract({ left: foregroundW - stripW, top: 0, width: stripW, height: slotH })
-			.png({ compressionLevel: 6 })
-			.toBuffer()
-		const leftFill = await resizeStripToFill(leftStrip, leftGap, slotH)
-		const rightFill = await resizeStripToFill(rightStrip, rightGap, slotH)
-		const composites: sharp.OverlayOptions[] = []
-		if (leftFill) composites.push({ input: leftFill, left: 0, top: 0 })
-		composites.push({ input: foreground, left: leftGap, top: 0 })
-		if (rightFill) composites.push({ input: rightFill, left: leftGap + foregroundW, top: 0 })
-		const canvas = await sharp({
-			create: {
-				width: slotW,
-				height: slotH,
-				channels: 4,
-				background: { r: 0, g: 0, b: 0, alpha: 0 },
-			},
-		})
-			.composite(composites)
+				: foreground
+		const foregroundLeft = foregroundW > slotW ? 0 : Math.floor((slotW - foregroundW) / 2)
+		const canvas = await sharp(blurredCover)
+			.composite([{ input: foregroundInput, left: foregroundLeft, top: 0 }])
 			.withIccProfile('srgb')
 			.png({ compressionLevel: 6 })
 			.toBuffer()
@@ -983,12 +959,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		}
 	}
 
-	const scanHintFontSize = 18
-	const desiredScanHintBaselineY =
-		OG_HEIGHT - OG_BANNER_BOTTOM_EXTRA_GAP - Math.ceil(scanHintFontSize * 0.45)
-	const idealQrSize =
-		desiredScanHintBaselineY - scanHintFontSize - OG_BANNER_META_TOP_GAP - (metaBelowY + 12)
-	const qrSize = hasBanner ? Math.max(80, Math.min(OG_BANNER_QR_TARGET_SIZE, idealQrSize + 32)) : 0
+	const qrSize = hasBanner ? OG_BANNER_QR_TARGET_SIZE : 0
 	const qrY = hasBanner ? metaBelowY + 12 : 0
 	const qrX = (OG_WIDTH - qrSize) / 2
 	const externalQrLayer = hasBanner
@@ -996,20 +967,6 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
   <rect x="${qrX - 12}" y="${qrY - 12}" width="${qrSize + 24}" height="${qrSize + 24}" rx="20" fill="#ffffff" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
   <image href="${qrDataUrl}" x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" />`
 		: ''
-
-	const scanHintY = hasBanner ? qrY + qrSize + OG_BANNER_META_TOP_GAP + scanHintFontSize : 132
-	if (hasBanner) {
-		textLayers.push({
-			text: 'Scan the QR code above or open this link on your phone',
-			x: OG_WIDTH / 2,
-			y: scanHintY,
-			fontSize: scanHintFontSize,
-			fontWeight: 600,
-			color: '#64748b',
-			align: 'center',
-			maxWidth: OG_WIDTH - 120,
-		})
-	}
 
 	const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${OG_WIDTH}" height="${OG_HEIGHT}" viewBox="0 0 ${OG_WIDTH} ${OG_HEIGHT}">
