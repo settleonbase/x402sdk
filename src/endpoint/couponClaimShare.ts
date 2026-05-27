@@ -13,6 +13,10 @@ const OG_HEIGHT = 630
 const OG_IMAGE_PREP_SCALE = 2
 /** Match homepage app-download ticket ratio: max-w-lg (512px) / 7.5rem (120px) ≈ 4.27:1. */
 const OG_BANNER_CAPSULE_H = 258
+/** Match homepage `rounded-[1.75rem]` on a 7.5rem ticket: 28 / 120 × 258 ≈ 60. */
+const OG_BANNER_CAPSULE_RX = 60
+/** Match homepage side notch diameter 36px on a 120px ticket: 18 / 120 × 258 ≈ 39. */
+const OG_BANNER_NOTCH_R = 39
 /** Homepage uses `mt-3` (12 CSS px); scaled from 512px ticket to 1100px OG ticket. */
 const OG_BANNER_META_TOP_GAP = 26
 const OG_BANNER_HEADLINE_FONT_SIZE = 34
@@ -21,9 +25,11 @@ const OG_BANNER_HEADLINE_BOX_TOP_GAP = OG_BANNER_HEADLINE_BASELINE_Y - OG_BANNER
 const OG_BANNER_HEADLINE_VISUAL_TOP_GAP = Math.round(OG_BANNER_HEADLINE_BOX_TOP_GAP / 2)
 /** Bottom breathing room is 4× the headline visual top margin. */
 const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
+/** Keep the OG QR visually closer to the app-download QR instead of shrinking to a tiny footer mark. */
+const OG_BANNER_QR_TARGET_SIZE = 96
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 13
+const OG_LAYOUT_REV = 14
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -794,7 +800,8 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const hasBanner = Boolean(meta.backgroundImage?.trim())
 	const capsuleX = 50
 	const capsuleW = 1100
-	const capsuleRx = 28
+	const capsuleRx = hasBanner ? OG_BANNER_CAPSULE_RX : 28
+	const notchR = hasBanner ? OG_BANNER_NOTCH_R : 18
 	const capsuleY = hasBanner ? 86 : 165
 	const capsuleH = hasBanner ? OG_BANNER_CAPSULE_H : 300
 	const iconCx = capsuleX + 112
@@ -869,8 +876,8 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
   ${bgLayer}
   ${hasBanner ? '' : `<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#capsuleShade)" clip-path="url(#capsuleClip)" />`}
   <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
-  <circle cx="${capsuleX}" cy="${iconCy}" r="18" fill="${punchBg}" />
-  <circle cx="${capsuleX + capsuleW}" cy="${iconCy}" r="18" fill="${punchBg}" />
+  <circle cx="${capsuleX}" cy="${iconCy}" r="${notchR}" fill="${punchBg}" />
+  <circle cx="${capsuleX + capsuleW}" cy="${iconCy}" r="${notchR}" fill="${punchBg}" />
   ${iconCircleLayer}`
 
 	const innerTextLayer =
@@ -981,7 +988,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		OG_HEIGHT - OG_BANNER_BOTTOM_EXTRA_GAP - Math.ceil(scanHintFontSize * 0.45)
 	const idealQrSize =
 		desiredScanHintBaselineY - scanHintFontSize - OG_BANNER_META_TOP_GAP - (metaBelowY + 12)
-	const qrSize = hasBanner ? Math.max(64, Math.min(104, idealQrSize)) : 0
+	const qrSize = hasBanner ? Math.max(80, Math.min(OG_BANNER_QR_TARGET_SIZE, idealQrSize + 32)) : 0
 	const qrY = hasBanner ? metaBelowY + 12 : 0
 	const qrX = (OG_WIDTH - qrSize) / 2
 	const externalQrLayer = hasBanner
