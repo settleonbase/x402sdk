@@ -17,9 +17,10 @@ const OG_BANNER_CAPSULE_H = 258
 const OG_BANNER_META_TOP_GAP = 26
 const OG_BANNER_HEADLINE_FONT_SIZE = 34
 const OG_BANNER_HEADLINE_BASELINE_Y = 56
-const OG_BANNER_HEADLINE_TOP_GAP = OG_BANNER_HEADLINE_BASELINE_Y - OG_BANNER_HEADLINE_FONT_SIZE
-/** Bottom breathing room mirrors the top headline margin, doubled for social preview chrome. */
-const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_TOP_GAP * 2
+const OG_BANNER_HEADLINE_BOX_TOP_GAP = OG_BANNER_HEADLINE_BASELINE_Y - OG_BANNER_HEADLINE_FONT_SIZE
+const OG_BANNER_HEADLINE_VISUAL_TOP_GAP = Math.round(OG_BANNER_HEADLINE_BOX_TOP_GAP / 2)
+/** Bottom breathing room is 4× the headline visual top margin. */
+const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
 const OG_LAYOUT_REV = 13
@@ -393,9 +394,10 @@ export function parseCouponClaimShareRequest(query: {
 	redeemcode?: string
 	redeemCode?: string
 	v?: string
+	iiis?: string
 }): { params: BeamioCouponShareParams; shareUrl: string } | null {
 	const target = readString(query.target)
-	const cacheBustV = readString(query.v)
+	const cacheBustV = readString(query.v) || readString(query.iiis)
 	const withCacheBust = (url: string) => appendAppDownloadCacheBust(url, cacheBustV)
 	if (target) {
 		let innerTarget = target
@@ -440,8 +442,18 @@ export function parseCouponClaimShareRequest(query: {
 	return { params, shareUrl: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId) }
 }
 
+function readShareUrlCacheBust(shareUrl: string): string {
+	try {
+		const url = new URL(shareUrl)
+		return readString(url.searchParams.get('v'))
+	} catch {
+		return ''
+	}
+}
+
 /** Prefer path-based OG URL (no query string) for WeChat; JPEG for preview compatibility. */
-function encodeOgShareToken(params: BeamioCouponShareParams): string {
+function encodeOgShareToken(params: BeamioCouponShareParams, shareUrl?: string): string {
+	const cacheBust = shareUrl ? readShareUrlCacheBust(shareUrl) : ''
 	const payload =
 		params.kind === 'redeem'
 			? {
@@ -449,9 +461,16 @@ function encodeOgShareToken(params: BeamioCouponShareParams): string {
 					c: params.cardAddress,
 					r: params.redeemCode,
 					v: OG_LAYOUT_REV,
+					...(cacheBust ? { b: cacheBust } : {}),
 					...(params.couponId ? { i: params.couponId } : {}),
 				}
-			: { k: 'o' as const, c: params.cardAddress, i: params.couponId, v: OG_LAYOUT_REV }
+			: {
+					k: 'o' as const,
+					c: params.cardAddress,
+					i: params.couponId,
+					v: OG_LAYOUT_REV,
+					...(cacheBust ? { b: cacheBust } : {}),
+				}
 	return Buffer.from(JSON.stringify(payload)).toString('base64url')
 }
 
@@ -486,7 +505,7 @@ export function decodeOgShareToken(tokenRaw: string): BeamioCouponShareParams | 
 
 function buildOgImageUrl(_shareUrl: string, params?: BeamioCouponShareParams): string {
 	if (params) {
-		return `${BEAMIO_APP_ORIGIN}/og/s/${encodeOgShareToken(params)}.jpg`
+		return `${BEAMIO_APP_ORIGIN}/og/s/${encodeOgShareToken(params, _shareUrl)}.jpg`
 	}
 	return `${BEAMIO_APP_ORIGIN}/og.png`
 }

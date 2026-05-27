@@ -54,6 +54,7 @@ type CouponClaimShareQuery = {
 	redeemcode?: string
 	redeemCode?: string
 	v?: string
+	iiis?: string
 }
 
 function posLedgerKeccakCategory(name: string): string {
