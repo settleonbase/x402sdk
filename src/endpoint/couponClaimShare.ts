@@ -29,7 +29,7 @@ const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 16
+const OG_LAYOUT_REV = 17
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -789,7 +789,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const externalExpiryFill = urgent ? '#dc2626' : '#eef1f3'
 	const externalExpiryStroke = urgent ? '#dc2626' : 'rgba(171,173,175,0.35)'
 
-	const iconDataUrl = meta.iconUrl
+	const iconDataUrl = !hasBanner && meta.iconUrl
 		? await fetchImageCoverPngDataUrl(meta.iconUrl, iconSize * imgPrep, iconSize * imgPrep)
 		: null
 	const bgDataUrl = hasBanner
@@ -1002,7 +1002,7 @@ const OG_IMAGE_CACHE_TTL_MS = 10 * 60 * 1000
 
 async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'png' | 'jpeg'): Promise<Buffer> {
 	const hasBanner = Boolean(meta.backgroundImage?.trim())
-	const cacheKey = `${format}:wide:v${OG_LAYOUT_REV}:${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}:${hasBanner ? 'banner' : 'solid'}:${meta.iconUrl ? 'icon' : 'noicon'}`
+	const cacheKey = `${format}:wide:v${OG_LAYOUT_REV}:${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}:${hasBanner ? 'banner' : 'solid'}:${!hasBanner && meta.iconUrl ? 'icon' : 'noicon'}`
 	const cached = ogImageCache.get(cacheKey)
 	if (cached && Date.now() < cached.expiry) return cached.buf
 
