@@ -1,3 +1,7 @@
+import fs from 'fs/promises'
+import fsSync from 'fs'
+import os from 'os'
+import path from 'path'
 import { ethers } from 'ethers'
 import QRCode from 'qrcode'
 import sharp from 'sharp'
@@ -30,6 +34,8 @@ const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
 const OG_LAYOUT_REV = 20
+/** Cross-worker OG JPEG cache (Cluster forks do not share in-memory ogImageCache). */
+const OG_DISK_CACHE_DIR = path.join(os.tmpdir(), 'beamio-og-share-cache', `v${OG_LAYOUT_REV}`)
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -480,7 +486,9 @@ function encodeOgShareToken(params: BeamioCouponShareParams, shareUrl?: string):
 	return Buffer.from(JSON.stringify(payload)).toString('base64url')
 }
 
-export function decodeOgShareToken(tokenRaw: string): BeamioCouponShareParams | null {
+export function decodeOgShareTokenPayload(
+	tokenRaw: string
+): { params: BeamioCouponShareParams; cacheBust?: string } | null {
 	let token = tokenRaw.replace(/\.jpg$/i, '').trim()
 	if (!token) return null
 	// Legacy WeChat square suffix — always serve full 1200×630 wide card art.
@@ -491,22 +499,80 @@ export function decodeOgShareToken(tokenRaw: string): BeamioCouponShareParams | 
 			c?: string
 			r?: string
 			i?: string
+			b?: string
 		}
+		const cacheBust = readString(raw.b)
 		if (raw.k === 'r' && raw.c && raw.r && ethers.isAddress(raw.c)) {
 			return {
-				kind: 'redeem',
-				cardAddress: ethers.getAddress(raw.c),
-				redeemCode: raw.r,
-				...(raw.i ? { couponId: raw.i } : {}),
+				params: {
+					kind: 'redeem',
+					cardAddress: ethers.getAddress(raw.c),
+					redeemCode: raw.r,
+					...(raw.i ? { couponId: raw.i } : {}),
+				},
+				...(cacheBust ? { cacheBust } : {}),
 			}
 		}
 		if (raw.k === 'o' && raw.c && raw.i && ethers.isAddress(raw.c)) {
-			return { kind: 'open_claim', cardAddress: ethers.getAddress(raw.c), couponId: raw.i }
+			return {
+				params: { kind: 'open_claim', cardAddress: ethers.getAddress(raw.c), couponId: raw.i },
+				...(cacheBust ? { cacheBust } : {}),
+			}
 		}
 		return null
 	} catch {
 		return null
 	}
+}
+
+export function decodeOgShareToken(tokenRaw: string): BeamioCouponShareParams | null {
+	return decodeOgShareTokenPayload(tokenRaw)?.params ?? null
+}
+
+export function buildShareUrlForOgToken(params: BeamioCouponShareParams, cacheBust?: string): string {
+	const base =
+		params.kind === 'redeem'
+			? buildCouponRedeemAppDownloadUrl(params.cardAddress, params.redeemCode, params.couponId)
+			: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId)
+	return cacheBust ? appendAppDownloadCacheBust(base, cacheBust) : base
+}
+
+function ogShareTokenFromImageUrl(ogImageUrl: string): string | null {
+	const trimmed = ogImageUrl.trim()
+	const prefix = `${BEAMIO_APP_ORIGIN}/og/s/`
+	if (!trimmed.startsWith(prefix)) return null
+	return trimmed.slice(prefix.length).replace(/\.jpg$/i, '')
+}
+
+function ogShareDiskCachePath(token: string): string {
+	return path.join(OG_DISK_CACHE_DIR, `${token}.jpg`)
+}
+
+async function ensureOgDiskCacheDir(): Promise<void> {
+	await fs.mkdir(OG_DISK_CACHE_DIR, { recursive: true })
+}
+
+async function readOgShareDiskCache(token: string): Promise<Buffer | null> {
+	try {
+		const cachePath = ogShareDiskCachePath(token)
+		if (!fsSync.existsSync(cachePath)) return null
+		const buf = await fs.readFile(cachePath)
+		return buf.length > 0 ? buf : null
+	} catch {
+		return null
+	}
+}
+
+async function writeOgShareDiskCache(token: string, buf: Buffer): Promise<void> {
+	await ensureOgDiskCacheDir()
+	const finalPath = ogShareDiskCachePath(token)
+	const tmpPath = `${finalPath}.${process.pid}.tmp`
+	await fs.writeFile(tmpPath, buf)
+	await fs.rename(tmpPath, finalPath)
+}
+
+function ogShareMemoryCacheKey(format: 'png' | 'jpeg', token: string): string {
+	return `${format}:wide:v${OG_LAYOUT_REV}:${token}`
 }
 
 function buildOgImageUrl(_shareUrl: string, params?: BeamioCouponShareParams): string {
@@ -1002,7 +1068,20 @@ const OG_IMAGE_CACHE_TTL_MS = 10 * 60 * 1000
 
 async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'png' | 'jpeg'): Promise<Buffer> {
 	const hasBanner = Boolean(meta.backgroundImage?.trim())
-	const cacheKey = `${format}:wide:v${OG_LAYOUT_REV}:${meta.shareKind}:${meta.cardAddress.toLowerCase()}:${meta.couponId ?? ''}:${meta.merchantName}:${meta.shareUrl}:${hasBanner ? 'banner' : 'solid'}:${!hasBanner && meta.iconUrl ? 'icon' : 'noicon'}`
+	const ogToken =
+		ogShareTokenFromImageUrl(meta.ogImageUrl) ??
+		encodeOgShareToken(
+			meta.shareKind === 'redeem'
+				? {
+						kind: 'redeem',
+						cardAddress: meta.cardAddress,
+						redeemCode: '',
+						...(meta.couponId ? { couponId: meta.couponId } : {}),
+					}
+				: { kind: 'open_claim', cardAddress: meta.cardAddress, couponId: meta.couponId ?? '' },
+			meta.shareUrl
+		)
+	const cacheKey = ogShareMemoryCacheKey(format, ogToken)
 	const cached = ogImageCache.get(cacheKey)
 	if (cached && Date.now() < cached.expiry) return cached.buf
 
@@ -1036,8 +1115,26 @@ export async function renderCouponClaimOgPng(meta: CouponClaimShareMeta): Promis
 	return renderCouponClaimOgRaster(meta, 'png')
 }
 
+export async function warmCouponClaimOgJpeg(meta: CouponClaimShareMeta): Promise<Buffer> {
+	const token = ogShareTokenFromImageUrl(meta.ogImageUrl)
+	if (token) {
+		const diskCached = await readOgShareDiskCache(token)
+		if (diskCached) {
+			ogImageCache.set(ogShareMemoryCacheKey('jpeg', token), {
+				buf: diskCached,
+				expiry: Date.now() + OG_IMAGE_CACHE_TTL_MS,
+			})
+			return diskCached
+		}
+	}
+
+	const buf = await renderCouponClaimOgRaster(meta, 'jpeg')
+	if (token) await writeOgShareDiskCache(token, buf)
+	return buf
+}
+
 export async function renderCouponClaimOgJpeg(meta: CouponClaimShareMeta): Promise<Buffer> {
-	return renderCouponClaimOgRaster(meta, 'jpeg')
+	return warmCouponClaimOgJpeg(meta)
 }
 
 export function renderCouponClaimShareHtml(meta: CouponClaimShareMeta): string {

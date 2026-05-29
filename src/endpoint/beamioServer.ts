@@ -43,12 +43,14 @@ import {
 	buildCouponClaimAppDownloadUrl,
 	buildCouponRedeemAppDownloadUrl,
 	buildFallbackCouponClaimShareMeta,
-	decodeOgShareToken,
+	buildShareUrlForOgToken,
+	decodeOgShareTokenPayload,
 	parseCouponClaimShareRequest,
 	renderCouponClaimOgJpeg,
 	renderCouponClaimOgPng,
 	renderCouponClaimShareHtml,
 	resolveCouponClaimShareMeta,
+	warmCouponClaimOgJpeg,
 } from './couponClaimShare'
 
 type CouponClaimShareQuery = {
@@ -8313,6 +8315,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const meta =
 				(await resolveCouponClaimShareMeta(parsed.params, parsed.shareUrl)) ??
 				buildFallbackCouponClaimShareMeta(parsed.params, parsed.shareUrl)
+			// Pre-render OG JPEG before HTML so WhatsApp (~1s image timeout) hits warm disk cache.
+			await warmCouponClaimOgJpeg(meta)
 			res.setHeader('Content-Type', 'text/html; charset=utf-8')
 			res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
 			return res.status(200).send(renderCouponClaimShareHtml(meta))
@@ -8324,19 +8328,16 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/** GET /api/og/s/:token.jpg — short path OG image (WeChat-friendly, no query string) */
 	router.get('/og/s/:token', async (req, res) => {
-		const params = decodeOgShareToken(String(req.params.token ?? ''))
-		if (!params) {
+		const decoded = decodeOgShareTokenPayload(String(req.params.token ?? ''))
+		if (!decoded) {
 			return res.status(400).json({ error: 'Invalid coupon share image token' })
 		}
 		try {
-			const shareUrl =
-				params.kind === 'redeem'
-					? buildCouponRedeemAppDownloadUrl(params.cardAddress, params.redeemCode, params.couponId)
-					: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId)
+			const shareUrl = buildShareUrlForOgToken(decoded.params, decoded.cacheBust)
 			const meta =
-				(await resolveCouponClaimShareMeta(params, shareUrl)) ??
-				buildFallbackCouponClaimShareMeta(params, shareUrl)
-			const jpeg = await renderCouponClaimOgJpeg(meta)
+				(await resolveCouponClaimShareMeta(decoded.params, shareUrl)) ??
+				buildFallbackCouponClaimShareMeta(decoded.params, shareUrl)
+			const jpeg = await warmCouponClaimOgJpeg(meta)
 			res.setHeader('Content-Type', 'image/jpeg')
 			res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800')
 			res.removeHeader('X-Powered-By')
