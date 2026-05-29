@@ -29,7 +29,7 @@ const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 17
+const OG_LAYOUT_REV = 18
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -1020,7 +1020,8 @@ async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'pn
 			? await pipeline
 					.jpeg({
 						quality: OG_JPEG_QUALITY,
-						progressive: true,
+						// Baseline JPEG: Meta/WhatsApp link-preview crawlers often fail on progressive JPEG.
+						progressive: false,
 						mozjpeg: true,
 						chromaSubsampling: '4:4:4',
 					})
