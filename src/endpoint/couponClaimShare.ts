@@ -29,7 +29,7 @@ const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 18
+const OG_LAYOUT_REV = 20
 
 export type CouponShareKind = 'open_claim' | 'redeem'
 
@@ -1018,14 +1018,14 @@ async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'pn
 	const buf =
 		format === 'jpeg'
 			? await pipeline
+					.withIccProfile('srgb')
 					.jpeg({
 						quality: OG_JPEG_QUALITY,
-						// Baseline JPEG: Meta/WhatsApp link-preview crawlers often fail on progressive JPEG.
+						// Baseline only: mozjpeg ignores progressive:false and emits SOF2 (breaks WhatsApp previews).
 						progressive: false,
-						mozjpeg: true,
+						mozjpeg: false,
 						chromaSubsampling: '4:4:4',
 					})
-					.withIccProfile('srgb')
 					.toBuffer()
 			: await pipeline.withIccProfile('srgb').png({ compressionLevel: 6 }).toBuffer()
 	ogImageCache.set(cacheKey, { buf, expiry: Date.now() + OG_IMAGE_CACHE_TTL_MS })
