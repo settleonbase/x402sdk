@@ -251,6 +251,41 @@ function isSettleContractNonceRaceError(e: unknown): boolean {
 	)
 }
 
+/** nonce race / 并发创建后：解析 EOA 是否已有 index=0 的已部署 AA。 */
+async function resolveDeployedSmartAccountIndex0(
+	creatorAddress: string,
+	SC: ethers.Contract,
+	provider: ethers.Provider | null
+): Promise<string | null> {
+	const prov = provider ?? providerBaseBackup
+	try {
+		const nextIndex = (await SC.nextIndexOfCreator(creatorAddress)) as bigint
+		if (nextIndex === 0n) return null
+		const getAddressFn = SC.getFunction('getAddress(address,uint256)')
+		const predicted = (await getAddressFn(creatorAddress, 0n)) as string
+		const code = await prov.getCode(predicted)
+		if (code && code !== '0x' && code !== '') return ethers.getAddress(predicted)
+		const primary = (await SC.beamioAccountOf(creatorAddress).catch(() => null)) as string | null
+		if (primary && primary !== ethers.ZeroAddress) {
+			const codeAtPrimary = await prov.getCode(primary).catch(() => '')
+			if (codeAtPrimary && codeAtPrimary !== '0x') return ethers.getAddress(primary)
+		}
+	} catch {
+		/* ignore */
+	}
+	return null
+}
+
+async function sendCreateAccountForTx(SC: ethers.Contract, creatorAddress: string) {
+	const runner = SC.runner
+	if (!runner || !(runner instanceof ethers.Wallet)) {
+		throw new Error('DeployingSmartAccount: SC.runner must be ethers.Wallet')
+	}
+	const provider = runner.provider ?? providerBaseBackup
+	const nonce = await provider.getTransactionCount(runner.address, 'pending')
+	return SC.createAccountFor(creatorAddress, { nonce })
+}
+
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const USDC_DECIMALS = 6;
 const USDC_SmartContract = new ethers.Contract(USDC_ADDRESS, USDC_ABI, providerBaseBackup)
@@ -1116,8 +1151,13 @@ if (cluster.isPrimary) {
  * 合约语义：nextIndexOfCreator(creator)=0 表示尚无账户，=1 表示已分配 index 0；
  * getAddress(creator, 0) 为 CREATE2 预测地址，createAccountFor(creator) 仅在此处用于创建唯一的 index=0 账户。
  */
-const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promise<{ accountAddress: string, alreadyExisted: boolean }> => {
+const DeployingSmartAccount = async (
+	wallet: string,
+	SC: ethers.Contract,
+	retryAttempt = 0
+): Promise<{ accountAddress: string, alreadyExisted: boolean }> => {
 	const INDEX_AA_PER_EOA = 0n
+	const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
 
 	try {
 		const creatorAddress = wallet
@@ -1133,7 +1173,6 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 			if (nextIndex > 1n) {
 				logger(Colors.yellow(`DeployingSmartAccount: ${wallet} 已有多个 AA (nextIndex=${nextIndex})，本逻辑仅支持一个 AA，只返回 index=0 的地址`))
 			}
-			const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
 			const code = await provider.getCode(predictedAddress)
 			if (code === '0x' || code === '') {
 				logger(Colors.red(`DeployingSmartAccount: ${wallet} nextIndex=${nextIndex} 但 index=0 地址未部署，状态异常`))
@@ -1144,10 +1183,9 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 		}
 
 		// 尚无账户，由 Paymaster 调用 createAccountFor(creator)；仅此路径会创建 AA，且仅创建 index=0 的一个
-		const tx = await SC.createAccountFor(wallet)
+		const tx = await sendCreateAccountForTx(SC, wallet)
 		logger(`DeployingSmartAccount: 创建账户交易已发送，hash=${tx.hash}`)
 		// confirmations: 0 = 仅等待 tx 被打包，不轮询区块确认，避免部分公共 RPC 的 "block too new" 一致性检查
-		const provider = (SC.runner as ethers.Wallet)?.provider ?? providerBaseBackup
 		let receipt = await tx.wait(0).catch((e: unknown) => {
 			logger(Colors.yellow(`DeployingSmartAccount: tx.wait(0) error (tx may still confirm): ${e instanceof Error ? e.message : String(e)}`))
 			return null
@@ -1237,6 +1275,26 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
 		return { accountAddress: predictedAddress, alreadyExisted: false }
 	} catch (error: unknown) {
 		const msg = error instanceof Error ? error.message : String(error)
+		if (isSettleContractNonceRaceError(error)) {
+			const resolved = await resolveDeployedSmartAccountIndex0(wallet, SC, provider)
+			if (resolved) {
+				logger(
+					Colors.yellow(
+						`DeployingSmartAccount: nonce race but AA already deployed for ${wallet} at ${resolved}`
+					)
+				)
+				return { accountAddress: resolved, alreadyExisted: true }
+			}
+			if (retryAttempt < 1) {
+				logger(Colors.yellow(`DeployingSmartAccount: nonce race for ${wallet}, retrying once after delay`))
+				await new Promise((r) => setTimeout(r, 1500))
+				const resolvedAfterWait = await resolveDeployedSmartAccountIndex0(wallet, SC, provider)
+				if (resolvedAfterWait) {
+					return { accountAddress: resolvedAfterWait, alreadyExisted: true }
+				}
+				return DeployingSmartAccount(wallet, SC, retryAttempt + 1)
+			}
+		}
 		logger(Colors.red(`DeployingSmartAccount error! ${msg}`))
 		throw new Error(`DeployingSmartAccount failed for ${wallet}: ${msg}`)
 	}
