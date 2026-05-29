@@ -1239,24 +1239,20 @@ const DeployingSmartAccount = async (wallet: string, SC: ethers.Contract): Promi
  * 若 EOA 无 AA 则先调用 createAccountFor 创建，再返回；Master 在 push executeForOwner 前调用。
  */
 export const ensureAAForMintTarget = async (targetAddress: string): Promise<void> => {
-	const pool = Settle_ContractPool
-	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
-	const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, BASE_CARD_FACTORY)
+	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
+	const targetNorm = ethers.getAddress(targetAddress)
+	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerBaseBackup, BASE_CARD_FACTORY)
 	if (!wired) {
 		throw new Error(
 			'ensureAAForMintTarget: cannot read UserCard _aaFactory(); cannot ensure AA for mint target'
 		)
 	}
-	const factoryAddr = wired
-	const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, pool[0].walletBase)
-	const acct = await aaFactory.beamioAccountOf(targetAddress)
-	const hasAA = acct && acct !== ethers.ZeroAddress && (await provider.getCode(acct)) !== '0x'
-	if (hasAA) return
-	logger(Colors.cyan(`[ensureAAForMintTarget] targetAddress ${targetAddress} has no AA, creating...`))
-	const { accountAddress } = await DeployingSmartAccount(targetAddress, aaFactory)
-	if (!accountAddress) throw new Error(`Failed to create AA for ${targetAddress}`)
-	logger(Colors.green(`[ensureAAForMintTarget] created AA ${accountAddress} for ${targetAddress}`))
+	const aaFactoryReadOnly = new ethers.Contract(
+		wired,
+		BeamioAAAccountFactoryPaymasterABI,
+		providerBaseBackup
+	)
+	await ensureAAForEOAOnAaFactory(targetNorm, wired, aaFactoryReadOnly)
 }
 
 /**
