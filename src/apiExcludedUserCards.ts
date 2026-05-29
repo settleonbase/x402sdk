@@ -6,7 +6,7 @@ import { ethers } from 'ethers'
  * - CashTrees 全局卡 `0xBCcfA50…`（旧 infrastructure card）
  * - CCSA 全局卡 `0x2032A363…`（旧 CCSA 概念）
  *
- * 单一事实来源：Cluster/Master latestCards、getWalletAssets、myCards、SilentPassUI display exclude 须与此对齐。
+ * 单一事实来源：Cluster/Master latestCards、getWalletAssets、myCards；UI 经 GET /api/excludedUserCards 动态拉取，勿硬编码。
  */
 export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	'0xbccfa50d2a5917c7a8662177f5f4b7a175787270',
@@ -85,4 +85,9 @@ export function filterApiExcludedUserCardAddresses(addresses: string[]): string[
 
 export function filterApiExcludedCardRows<T extends { cardAddress?: string }>(rows: T[]): T[] {
 	return rows.filter((row) => !isApiExcludedUserCard(row.cardAddress))
+}
+
+/** Cluster `GET /api/excludedUserCards` — UI 动态拉取，勿在客户端硬编码维护。 */
+export function listApiExcludedUserCardAddressesChecksum(): string[] {
+	return [...API_EXCLUDED_USER_CARD_ADDRESSES].map((lower) => ethers.getAddress(lower))
 }

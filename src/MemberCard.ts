@@ -223,6 +223,25 @@ export let Settle_ContractPool: {
 	BeamioUserCardGateway: ethers.Contract
 }[] = []
 
+type SettleContractPoolEntry = (typeof Settle_ContractPool)[number]
+
+const SETTLE_CONTRACT_SHIFT_POLL_MS = 300
+const SETTLE_CONTRACT_SHIFT_MAX_WAIT_MS = 120_000
+
+/** shift 一名 admin 钱包用于链上写；池空时轮询等待（供 ensureAAForEOA 等 HTTP / 同步路径）。 */
+async function shiftSettleContractForWrite(logTag: string): Promise<SettleContractPoolEntry> {
+	if (!Settle_ContractPool.length) {
+		throw new Error(`${logTag}: Settle_ContractPool not initialized`)
+	}
+	const deadline = Date.now() + SETTLE_CONTRACT_SHIFT_MAX_WAIT_MS
+	while (Date.now() < deadline) {
+		const SC = Settle_ContractPool.shift()
+		if (SC) return SC
+		await new Promise((r) => setTimeout(r, SETTLE_CONTRACT_SHIFT_POLL_MS))
+	}
+	throw new Error(`${logTag}: Settle_ContractPool busy (no admin wallet available)`)
+}
+
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const USDC_DECIMALS = 6;
 const USDC_SmartContract = new ethers.Contract(USDC_ADDRESS, USDC_ABI, providerBaseBackup)
@@ -1242,35 +1261,47 @@ export const ensureAAForMintTarget = async (targetAddress: string): Promise<void
 
 /**
  * Master：在指定 AA 工厂上确保 EOA 已有已部署的 Beamio AA（无则 `DeployingSmartAccount` 创建）。
+ * 链上写路径须 shift Settle_ContractPool，与 *PoolPress 一致，避免 Paymaster nonce 冲突。
  */
 async function ensureAAForEOAOnAaFactory(
 	eoa: string,
 	aaFactoryAddress: string,
-	wallet: ethers.Wallet
+	aaFactoryReadOnly: ethers.Contract
 ): Promise<string> {
 	const eoaNorm = ethers.getAddress(eoa)
 	const factoryAddr = ethers.getAddress(aaFactoryAddress)
-	const provider = wallet.provider ?? providerBaseBackup
-	const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, wallet)
-	const acct = (await aaFactory.beamioAccountOf(eoaNorm)) as string
+	const provider = aaFactoryReadOnly.runner?.provider ?? providerBaseBackup
+	const acct = (await aaFactoryReadOnly.beamioAccountOf(eoaNorm)) as string
 	const hasAA = acct && acct !== ethers.ZeroAddress && (await provider.getCode(acct)) !== '0x'
 	if (hasAA) return ethers.getAddress(acct)
-	logger(Colors.cyan(`[ensureAAForEOA] EOA ${eoaNorm} has no AA on ${factoryAddr}, creating...`))
-	const { accountAddress, alreadyExisted } = await DeployingSmartAccount(eoaNorm, aaFactory)
-	if (!accountAddress) {
-		let predicted: string | null = null
-		try {
-			const fn = aaFactory.getFunction('getAddress(address,uint256)')
-			predicted = await fn(eoaNorm, 0n)
-		} catch {
-			/* ignore */
+
+	const SC = await shiftSettleContractForWrite('ensureAAForEOA')
+	try {
+		const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, SC.walletBase)
+		const acctAfterLock = (await aaFactory.beamioAccountOf(eoaNorm)) as string
+		const hasAAAfterLock =
+			acctAfterLock && acctAfterLock !== ethers.ZeroAddress && (await provider.getCode(acctAfterLock)) !== '0x'
+		if (hasAAAfterLock) return ethers.getAddress(acctAfterLock)
+
+		logger(Colors.cyan(`[ensureAAForEOA] EOA ${eoaNorm} has no AA on ${factoryAddr}, creating...`))
+		const { accountAddress, alreadyExisted } = await DeployingSmartAccount(eoaNorm, aaFactory)
+		if (!accountAddress) {
+			let predicted: string | null = null
+			try {
+				const fn = aaFactory.getFunction('getAddress(address,uint256)')
+				predicted = await fn(eoaNorm, 0n)
+			} catch {
+				/* ignore */
+			}
+			logger(Colors.red(`[ensureAAForEOA] error: Failed to create AA for ${eoaNorm}`))
+			logger(Colors.red(`  [debug] factory=${factoryAddr} predictedAddress=${predicted ?? '?'} alreadyExisted=${alreadyExisted}`))
+			throw new Error(`Failed to create AA for ${eoaNorm}`)
 		}
-		logger(Colors.red(`[ensureAAForEOA] error: Failed to create AA for ${eoaNorm}`))
-		logger(Colors.red(`  [debug] factory=${factoryAddr} predictedAddress=${predicted ?? '?'} alreadyExisted=${alreadyExisted}`))
-		throw new Error(`Failed to create AA for ${eoaNorm}`)
+		logger(Colors.green(`[ensureAAForEOA] created AA ${accountAddress} for EOA ${eoaNorm} (factory=${factoryAddr})`))
+		return accountAddress
+	} finally {
+		Settle_ContractPool.unshift(SC)
 	}
-	logger(Colors.green(`[ensureAAForEOA] created AA ${accountAddress} for EOA ${eoaNorm} (factory=${factoryAddr})`))
-	return accountAddress
 }
 
 /**
@@ -1278,8 +1309,7 @@ async function ensureAAForEOAOnAaFactory(
  * 供 `cardCouponOpenClaimProcess` 在 claim 前调用。
  */
 export const ensureAAForEOAOnCard = async (cardAddress: string, eoa: string): Promise<string> => {
-	const pool = Settle_ContractPool
-	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
+	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
 	const cardNorm = ethers.getAddress(cardAddress)
 	const eoaNorm = ethers.getAddress(eoa)
 	const gateway = await getBeamioUserCardFactoryGateway(cardNorm)
@@ -1292,7 +1322,12 @@ export const ensureAAForEOAOnCard = async (cardAddress: string, eoa: string): Pr
 	if (!aaFactoryAddr || aaFactoryAddr === ethers.ZeroAddress) {
 		throw new Error('ensureAAForEOAOnCard: card factoryGateway _aaFactory not configured')
 	}
-	return ensureAAForEOAOnAaFactory(eoaNorm, aaFactoryAddr, pool[0].walletBase as ethers.Wallet)
+	const aaFactoryReadOnly = new ethers.Contract(
+		aaFactoryAddr,
+		BeamioAAAccountFactoryPaymasterABI,
+		providerBaseBackup
+	)
+	return ensureAAForEOAOnAaFactory(eoaNorm, aaFactoryAddr, aaFactoryReadOnly)
 }
 
 /**
@@ -1303,18 +1338,21 @@ export const ensureAAForEOAOnCard = async (cardAddress: string, eoa: string): Pr
  * 注意：cardAddAdminPreCheck 要求 adminManager 的 **to** 与 **body.adminEOA** 为同一 EOA（to 无代码）。误传占位地址时仍会在该键下建 AA 并登记 admin。
  */
 export const ensureAAForEOA = async (eoa: string): Promise<string> => {
-	const pool = Settle_ContractPool
-	if (!pool?.length) throw new Error('Settle_ContractPool not initialized')
-	const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
+	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
 	const eoaNorm = ethers.getAddress(eoa)
 	/** 与 resolveBeamioAaForEoaWithFallback 一致：仅 UserCard._aaFactory()，不用链下 BASE_AA_FACTORY 回退 */
-	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, BASE_CARD_FACTORY)
+	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerBaseBackup, BASE_CARD_FACTORY)
 	if (!wired) {
 		throw new Error(
 			'ensureAAForEOA: cannot read UserCard _aaFactory(); set BASE_CARD_FACTORY RPC or deploy wiring before ensuring AA'
 		)
 	}
-	return ensureAAForEOAOnAaFactory(eoaNorm, wired, pool[0].walletBase as ethers.Wallet)
+	const aaFactoryReadOnly = new ethers.Contract(
+		wired,
+		BeamioAAAccountFactoryPaymasterABI,
+		providerBaseBackup
+	)
+	return ensureAAForEOAOnAaFactory(eoaNorm, wired, aaFactoryReadOnly)
 }
 
 /**
@@ -13930,16 +13968,12 @@ export const cardRedeemProcess = cardRedeemPoolPress
 export const cardCouponOpenClaimProcess = async () => {
 	const obj = cardCouponOpenClaimPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-		cardCouponOpenClaimPool.unshift(obj)
-		return setTimeout(() => cardCouponOpenClaimProcess(), 3000)
-	}
 	logger(
 		Colors.cyan(
 			`[cardCouponOpenClaimProcess] processing card=${obj.cardAddress} couponId=${obj.couponId} tokenId=${obj.tokenId} user=${obj.userEOA}`
 		)
 	)
+	let SC: SettleContractPoolEntry | undefined
 	try {
 		const userNorm = ethers.getAddress(obj.userEOA)
 		const aaAddress = await ensureAAForEOAOnCard(obj.cardAddress, userNorm)
@@ -13948,6 +13982,12 @@ export const cardCouponOpenClaimProcess = async () => {
 				`[cardCouponOpenClaimProcess] AA ready ${aaAddress} for userEOA=${userNorm} (card=${obj.cardAddress})`
 			)
 		)
+
+		SC = Settle_ContractPool.shift()
+		if (!SC) {
+			cardCouponOpenClaimPool.unshift(obj)
+			return setTimeout(() => cardCouponOpenClaimProcess(), 3000)
+		}
 
 		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
 		const poolFactoryAddr = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
@@ -14030,7 +14070,7 @@ export const cardCouponOpenClaimProcess = async () => {
 			obj.res.status(400).json({ success: false, error: clientError }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		if (SC) Settle_ContractPool.unshift(SC)
 		setTimeout(() => cardCouponOpenClaimProcess(), 3000)
 	}
 }
@@ -14041,20 +14081,22 @@ export const cardCouponOpenClaimProcess = async () => {
 export const cardCouponPosClaimWalletProcess = async () => {
 	const obj = cardCouponPosClaimWalletPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
-	if (!SC) {
-		cardCouponPosClaimWalletPool.unshift(obj)
-		return setTimeout(() => cardCouponPosClaimWalletProcess(), 3000)
-	}
 	logger(
 		Colors.cyan(
 			`[cardCouponPosClaimWalletProcess] card=${obj.cardAddress} couponId=${obj.couponId} tokenId=${obj.tokenId} user=${obj.userEOA} posAdmin=${obj.posAdminEOA}`
 		)
 	)
+	let SC: SettleContractPoolEntry | undefined
 	try {
 		const userNorm = ethers.getAddress(obj.userEOA)
 		const posAdminNorm = ethers.getAddress(obj.posAdminEOA)
 		await ensureAAForEOAOnCard(obj.cardAddress, userNorm)
+
+		SC = Settle_ContractPool.shift()
+		if (!SC) {
+			cardCouponPosClaimWalletPool.unshift(obj)
+			return setTimeout(() => cardCouponPosClaimWalletProcess(), 3000)
+		}
 
 		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
 		const poolFactoryAddr = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
@@ -14121,7 +14163,7 @@ export const cardCouponPosClaimWalletProcess = async () => {
 			obj.res.status(400).json({ success: false, error: clientError }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		if (SC) Settle_ContractPool.unshift(SC)
 		setTimeout(() => cardCouponPosClaimWalletProcess(), 3000)
 	}
 }
