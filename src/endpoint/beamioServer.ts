@@ -24,6 +24,7 @@ import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import { validateYoutubeProductionVideoUrl } from './youtubeProductionVideo'
 import {
 	normalizeCouponMetadataExtraProperties,
 	normalizeCouponSeriesMetadataJson,
@@ -708,7 +709,58 @@ const masterSessionConsumePosSig = async (sid: string): Promise<
 type JsonObject = Record<string, unknown>
 
 const ERC1155_METADATA_PATH_RE = /^(?:0x)?([0-9a-fA-F]{40})([0-9a-fA-F]{64})\.json$/
-const DEFAULT_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x44e7a175e57a337bf5d0a98deb19a0a545e362d504092a7af1aecd58798eab'
+/** Fallback when series/card has no renderable image (must return 200 + image/* for BaseScan). */
+const DEFAULT_METADATA_IMAGE_URL =
+	'https://ipfs.conet.network/api/getFragment?hash=0x6022e4efb44990767d1faa1642f570ed8a49ab0417b370aaae35f84884061c97'
+
+/** Coupon / catalog issued-NFT: map banner + icon into OpenSea `image` (BaseScan only reads `image`). */
+const resolveBeamioSeriesExplorerImage = (meta: JsonObject): string | undefined => {
+	const props = isJsonObject(meta.properties) ? meta.properties : {}
+	const couponNest = isJsonObject(props.beamioCoupon)
+		? props.beamioCoupon
+		: isJsonObject(meta.beamioCoupon)
+			? meta.beamioCoupon
+			: null
+	const productionNest = isJsonObject(props.beamioProduction)
+		? props.beamioProduction
+		: isJsonObject(meta.beamioProduction)
+			? meta.beamioProduction
+			: null
+	const fromCoupon = couponNest
+		? firstNonEmptyString(
+				couponNest.image,
+				couponNest.couponImage,
+				couponNest.coupon_image,
+				couponNest.icon
+			)
+		: undefined
+	const fromProduction = productionNest
+		? firstNonEmptyString(
+				productionNest.image,
+				productionNest.productionImage,
+				productionNest.production_image,
+				productionNest.icon
+			)
+		: undefined
+	return firstNonEmptyString(
+		meta.image,
+		meta.image_url,
+		meta.imageUrl,
+		meta.couponImage,
+		meta.coupon_image,
+		meta.productionImage,
+		meta.production_image,
+		meta.icon,
+		fromCoupon,
+		fromProduction,
+		props.image,
+		props.couponImage,
+		props.coupon_image,
+		props.productionImage,
+		props.production_image,
+		props.icon
+	)
+}
 
 const isJsonObject = (value: unknown): value is JsonObject =>
 	typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -734,6 +786,7 @@ const mergeMetadataObjects = (...sources: Array<unknown>): JsonObject => {
 const ensureMetadataImage = (meta: JsonObject): JsonObject => {
 	const props = isJsonObject(meta.properties) ? meta.properties : {}
 	const image = firstNonEmptyString(
+		resolveBeamioSeriesExplorerImage(meta),
 		meta.image,
 		meta.image_url,
 		meta.imageUrl,
@@ -5168,10 +5221,19 @@ const routing = ( router: Router ) => {
 					extra: baseExtra,
 				})
 			} else {
+				const seriesExplorerImage =
+					resolveBeamioSeriesExplorerImage(tokenMeta) ??
+					resolveBeamioSeriesExplorerImage(merged) ??
+					defaultImage
+				const issuedName =
+					firstNonEmptyString(tokenMeta.name, tokenMeta.title) ??
+					`${cardName} Issued NFT #${tokenId}`
+				const issuedDescription =
+					firstNonEmptyString(tokenMeta.description) ?? `${cardName} issued NFT #${tokenId}.`
 				out = normalizeExplorerMetadata(merged, {
-					name: `${cardName} Issued NFT #${tokenId}`,
-					description: `${cardName} issued NFT #${tokenId}.`,
-					image: defaultImage,
+					name: issuedName,
+					description: issuedDescription,
+					image: seriesExplorerImage,
 					attributes: [
 						{ trait_type: 'asset_type', value: 'ISSUED_NFT' },
 						{ trait_type: 'token_id', value: tokenId },
@@ -8667,6 +8729,23 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			return
 		}
 		return res.status(400).json({ error: 'Invalid metadata filename format (expected 0x{40hex}{suffix}.json, suffix = tokenId decimal or 64 hex)' })
+	})
+
+	router.post('/youtubeProductionVideo/validate', async (req, res) => {
+		try {
+			const url = String((req.body as { url?: string })?.url ?? '').trim()
+			if (!url) {
+				return res.status(400).json({ ok: false, error: 'YouTube URL is required.' })
+			}
+			const result = await validateYoutubeProductionVideoUrl(url)
+			if (!result.ok) {
+				return res.status(400).json(result)
+			}
+			return res.json(result)
+		} catch (err: unknown) {
+			const message = err instanceof Error ? err.message : 'Could not validate YouTube video.'
+			return res.status(500).json({ ok: false, error: message })
+		}
 	})
 
 		app.get('/_debug', (req, res) => {
