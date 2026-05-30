@@ -51,8 +51,13 @@ import {
 	renderCouponClaimOgPng,
 	renderCouponClaimShareHtml,
 	resolveCouponClaimShareMeta,
+	buildIssuedNftExplorerImageUrl,
+	computeIssuedSeriesMetadataRevision,
+	resolveIssuedNftExplorerShareMeta,
 	warmCouponClaimOgJpeg,
+	warmIssuedNftExplorerOgJpeg,
 } from './couponClaimShare'
+import { requestExplorerNftMetadataRefresh } from './baseExplorerNftMetadataRefresh'
 
 type CouponClaimShareQuery = {
 	target?: string
@@ -5221,10 +5226,15 @@ const routing = ( router: Router ) => {
 					extra: baseExtra,
 				})
 			} else {
-				const seriesExplorerImage =
-					resolveBeamioSeriesExplorerImage(tokenMeta) ??
-					resolveBeamioSeriesExplorerImage(merged) ??
-					defaultImage
+				const seriesMetaForRev = mergeMetadataObjects(tokenMeta, sharedSeriesMetadata)
+				const metaRev = computeIssuedSeriesMetadataRevision(seriesMetaForRev)
+				const explorerPreviewImage = buildIssuedNftExplorerImageUrl(cardAddress, tokenId, metaRev)
+				void warmIssuedNftExplorerOgJpeg(cardAddress, tokenId).catch((warmErr: unknown) => {
+					logger(
+						Colors.yellow('[metadata route] issued-nft OG warm failed:'),
+						warmErr instanceof Error ? warmErr.message : warmErr
+					)
+				})
 				const issuedName =
 					firstNonEmptyString(tokenMeta.name, tokenMeta.title) ??
 					`${cardName} Issued NFT #${tokenId}`
@@ -5233,7 +5243,7 @@ const routing = ( router: Router ) => {
 				out = normalizeExplorerMetadata(merged, {
 					name: issuedName,
 					description: issuedDescription,
-					image: seriesExplorerImage,
+					image: explorerPreviewImage,
 					attributes: [
 						{ trait_type: 'asset_type', value: 'ISSUED_NFT' },
 						{ trait_type: 'token_id', value: tokenId },
@@ -6889,10 +6899,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				try {
 					const parsed = JSON.parse(buf) as { success?: boolean }
 					if (parsed?.success === true) {
-						invalidateIssuedCouponSeriesQueryCachesForCard(cardAddress, issuedTokenId)
+						const cardNorm = ethers.getAddress(cardAddress)
+						invalidateIssuedCouponSeriesQueryCachesForCard(cardNorm, issuedTokenId)
+						void requestExplorerNftMetadataRefresh({
+							contractAddress: cardNorm,
+							tokenId: issuedTokenId,
+						}).catch((refreshErr: unknown) => {
+							logger(
+								Colors.yellow('[updateIssuedCouponMetadata] explorer refresh failed:'),
+								refreshErr instanceof Error ? refreshErr.message : refreshErr
+							)
+						})
 						logger(
 							Colors.cyan(
-								`[updateIssuedCouponMetadata] cluster invalidated issued-coupon GET caches for card=${ethers.getAddress(cardAddress)}`
+								`[updateIssuedCouponMetadata] cluster invalidated issued-coupon GET caches for card=${cardNorm}`
 							)
 						)
 					}
@@ -8504,6 +8524,56 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		} catch (err: any) {
 			logger(Colors.red('[og/coupon-claim.png] error:'), err?.message ?? err)
 			return res.status(500).json({ error: 'Failed to render coupon share image' })
+		}
+	})
+
+	/** GET /api/og/issued-nft.jpg?card=0x&tokenId=100…&v=rev — Coupon Preview OG for BaseScan ERC-1155 `image`. */
+	router.get('/og/issued-nft.jpg', async (req, res) => {
+		const card = typeof req.query.card === 'string' ? req.query.card.trim() : ''
+		const tokenId = typeof req.query.tokenId === 'string' ? req.query.tokenId.trim() : ''
+		if (!card || !ethers.isAddress(card) || !tokenId || !/^\d+$/.test(tokenId)) {
+			return res.status(400).json({ error: 'Invalid card or tokenId' })
+		}
+		try {
+			if (BigInt(tokenId) < ISSUED_NFT_START_ID) {
+				return res.status(400).json({ error: 'tokenId must be an issued NFT series id' })
+			}
+		} catch {
+			return res.status(400).json({ error: 'Invalid tokenId' })
+		}
+		try {
+			const meta = await resolveIssuedNftExplorerShareMeta(card, tokenId)
+			if (!meta) {
+				return res.status(404).json({ error: 'Issued NFT series not found' })
+			}
+			const jpeg = await warmIssuedNftExplorerOgJpeg(card, tokenId, meta)
+			res.setHeader('Content-Type', 'image/jpeg')
+			res.setHeader('Cache-Control', 'public, max-age=600, stale-while-revalidate=1800')
+			res.removeHeader('X-Powered-By')
+			return res.status(200).send(jpeg)
+		} catch (err: any) {
+			logger(Colors.red('[og/issued-nft.jpg] error:'), err?.message ?? err)
+			return res.status(500).json({ error: 'Failed to render issued NFT explorer image' })
+		}
+	})
+
+	/** POST /api/requestExplorerNftMetadataRefresh — after biz edits; warms OG + optional OpenSea refresh. */
+	router.post('/requestExplorerNftMetadataRefresh', async (req, res) => {
+		const body = req.body as { cardAddress?: string; tokenId?: string }
+		const cardAddress = body.cardAddress?.trim() ?? ''
+		const tokenId = body.tokenId?.trim() ?? ''
+		if (!cardAddress || !ethers.isAddress(cardAddress) || !tokenId) {
+			return res.status(400).json({ success: false, error: 'Invalid cardAddress or tokenId' })
+		}
+		try {
+			const result = await requestExplorerNftMetadataRefresh({
+				contractAddress: ethers.getAddress(cardAddress),
+				tokenId,
+			})
+			return res.status(200).json({ success: result.ok, ...result })
+		} catch (err: any) {
+			logger(Colors.red('[requestExplorerNftMetadataRefresh] error:'), err?.message ?? err)
+			return res.status(500).json({ success: false, error: err?.message ?? 'Refresh failed' })
 		}
 	})
 

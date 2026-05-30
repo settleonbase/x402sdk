@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import fs from 'fs/promises'
 import fsSync from 'fs'
 import os from 'os'
@@ -9,6 +10,7 @@ import {
 	listCouponIssuedNftSeriesForCardDescending,
 	listProductionIssuedNftSeriesForCardDescending,
 	getCardByAddress,
+	getSeriesByCardAndTokenId,
 } from '../db'
 import {
 	metadataMatchesClientCouponCategoryFilter,
@@ -42,7 +44,7 @@ const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 20
+const OG_LAYOUT_REV = 21
 /** Cross-worker OG JPEG cache (Cluster forks do not share in-memory ogImageCache). */
 const OG_DISK_CACHE_DIR = path.join(os.tmpdir(), 'beamio-og-share-cache', `v${OG_LAYOUT_REV}`)
 
@@ -81,7 +83,7 @@ export type CouponClaimShareMeta = {
 	shareHeadline: string
 	title: string
 	subtitle: string
-	/** Catalog only — Product | Service | Menu. */
+	/** Catalog only — Product | Service | Menu | SalesManagement. */
 	globalCategory?: string
 	/** Catalog only — resolved item category chip label. */
 	itemCategory?: string
@@ -206,6 +208,7 @@ export const buildCatalogShareHeadline = (merchantName: string): string => {
 const catalogGlobalCategoryLabel = (id: BeamioCatalogGlobalCategory): string => {
 	if (id === 'Product') return 'Product'
 	if (id === 'Menu') return 'Menu'
+	if (id === 'SalesManagement') return 'Sales Management'
 	return 'Service'
 }
 
@@ -985,6 +988,116 @@ export async function resolveCouponClaimShareMeta(
 	return resolveOpenClaimShareMeta(params, shareUrl)
 }
 
+/** Revision for `/api/og/issued-nft.jpg?v=` — changes when series visuals change (biz edit / publish). */
+export function computeIssuedSeriesMetadataRevision(meta: Record<string, unknown> | null): string {
+	if (!meta) return String(OG_LAYOUT_REV)
+	const payload = {
+		layoutRev: OG_LAYOUT_REV,
+		title: readMetadataTitle(meta),
+		subtitle: readMetadataSubtitle(meta),
+		icon: readMetadataIconUrl(meta),
+		banner: readMetadataBackgroundImage(meta),
+		bg: readMetadataBackgroundColor(meta),
+	}
+	return createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+}
+
+/** BaseScan / OpenSea `image` — same Coupon Preview OG raster as Programs share. */
+export function buildIssuedNftExplorerImageUrl(
+	cardAddress: string,
+	tokenId: string,
+	metadataRevision?: string
+): string {
+	const card = ethers.getAddress(cardAddress)
+	const tid = String(tokenId).trim()
+	const rev = metadataRevision?.trim() || String(OG_LAYOUT_REV)
+	const q = new URLSearchParams({ card, tokenId: tid, v: rev })
+	return `${BEAMIO_APP_ORIGIN}/api/og/issued-nft.jpg?${q.toString()}`
+}
+
+/** Resolve issued-series metadata by on-chain tokenId (coupon or catalog). */
+export async function resolveIssuedNftExplorerShareMeta(
+	cardAddress: string,
+	tokenId: string
+): Promise<CouponClaimShareMeta | null> {
+	const cardNorm = ethers.getAddress(cardAddress)
+	const tid = String(tokenId).trim()
+	let tidBig: bigint
+	try {
+		tidBig = BigInt(tid)
+	} catch {
+		return null
+	}
+	if (tidBig < ISSUED_NFT_START_ID) return null
+
+	const series = await getSeriesByCardAndTokenId(cardNorm, tid)
+	if (!series) return null
+	const matchedMeta = asRecord(series.metadata)
+	if (!matchedMeta) return null
+
+	const validBeforeSec = readMetadataValidBeforeSec(matchedMeta)
+	const expiresLabel = formatCouponExpiryPill(validBeforeSec)
+	const merchantName = await resolveMerchantNameForShare(cardNorm, matchedMeta)
+
+	if (metadataMatchesClientProductionCategoryFilter(matchedMeta)) {
+		const productionId = readMetadataProductionId(matchedMeta) || tid
+		const fields = readProductionShareFields(matchedMeta)
+		const itemCategory = await resolveItemCategoryLabelForShare(cardNorm, fields.itemCategoryId)
+		const title = truncateText(fields.name, 48)
+		const subtitle = truncateText(fields.subtitle, 120)
+		const shareUrl = buildCouponClaimAppDownloadUrl(cardNorm, productionId)
+		const rev = computeIssuedSeriesMetadataRevision(matchedMeta)
+		return {
+			shareKind: 'open_claim',
+			distributionKind: 'catalog',
+			cardAddress: cardNorm,
+			couponId: productionId,
+			merchantName,
+			shareHeadline: buildCatalogShareHeadline(merchantName),
+			title,
+			subtitle,
+			globalCategory: fields.globalCategory,
+			itemCategory,
+			iconUrl: fields.iconUrl,
+			backgroundImage: fields.backgroundImage,
+			backgroundColorHex: fields.backgroundColorHex,
+			validBeforeSec,
+			expiresLabel,
+			shareUrl,
+			ogImageUrl: buildIssuedNftExplorerImageUrl(cardNorm, tid, rev),
+		}
+	}
+
+	const couponId = readMetadataCouponId(matchedMeta)
+	const shareUrl = couponId
+		? buildCouponClaimAppDownloadUrl(cardNorm, couponId)
+		: `${BEAMIO_APP_ORIGIN}/app/?beamiocard=${encodeURIComponent(cardNorm)}`
+	const title = truncateText(readMetadataTitle(matchedMeta) || 'Beamio Coupon', 48)
+	const rawSubtitle = readMetadataSubtitle(matchedMeta)
+	const subtitle = truncateText(
+		rawSubtitle || (title !== 'Beamio Coupon' ? `${title} — ${merchantName}` : 'Claim this coupon in the Beamio app.'),
+		120
+	)
+	const rev = computeIssuedSeriesMetadataRevision(matchedMeta)
+	return {
+		shareKind: 'open_claim',
+		distributionKind: 'coupon',
+		cardAddress: cardNorm,
+		...(couponId ? { couponId } : {}),
+		merchantName,
+		shareHeadline: buildShareHeadline(merchantName, 'open_claim'),
+		title,
+		subtitle,
+		iconUrl: readMetadataIconUrl(matchedMeta),
+		backgroundImage: readMetadataBackgroundImage(matchedMeta),
+		backgroundColorHex: readMetadataBackgroundColor(matchedMeta) || '#2B2E3A',
+		validBeforeSec,
+		expiresLabel,
+		shareUrl,
+		ogImageUrl: buildIssuedNftExplorerImageUrl(cardNorm, tid, rev),
+	}
+}
+
 export function buildFallbackCouponClaimShareMeta(
 	params: BeamioCouponShareParams,
 	shareUrl: string
@@ -1317,6 +1430,40 @@ export async function warmCouponClaimOgJpeg(meta: CouponClaimShareMeta): Promise
 
 export async function renderCouponClaimOgJpeg(meta: CouponClaimShareMeta): Promise<Buffer> {
 	return warmCouponClaimOgJpeg(meta)
+}
+
+function issuedNftExplorerOgDiskCachePath(cardAddress: string, tokenId: string, revision: string): string {
+	const card = ethers.getAddress(cardAddress).toLowerCase()
+	const tid = String(tokenId).trim()
+	const rev = revision.trim() || String(OG_LAYOUT_REV)
+	return path.join(OG_DISK_CACHE_DIR, `issued-${card}-${tid}-v${rev}.jpg`)
+}
+
+/** Warm issued-NFT explorer JPEG (Coupon Preview OG layout) for BaseScan / OpenSea crawlers. */
+export async function warmIssuedNftExplorerOgJpeg(
+	cardAddress: string,
+	tokenId: string,
+	shareMeta?: CouponClaimShareMeta | null
+): Promise<Buffer> {
+	const meta = shareMeta ?? (await resolveIssuedNftExplorerShareMeta(cardAddress, tokenId))
+	if (!meta) throw new Error('Issued NFT series metadata not found')
+	const revMatch = meta.ogImageUrl.match(/[?&]v=([^&]+)/)
+	const rev = revMatch?.[1]?.trim() || String(OG_LAYOUT_REV)
+	const cachePath = issuedNftExplorerOgDiskCachePath(cardAddress, tokenId, rev)
+	try {
+		if (fsSync.existsSync(cachePath)) {
+			const diskCached = await fs.readFile(cachePath)
+			if (diskCached.length > 0) return diskCached
+		}
+	} catch {
+		/* render */
+	}
+	const buf = await renderCouponClaimOgRaster(meta, 'jpeg')
+	await ensureOgDiskCacheDir()
+	const tmpPath = `${cachePath}.${process.pid}.tmp`
+	await fs.writeFile(tmpPath, buf)
+	await fs.rename(tmpPath, cachePath)
+	return buf
 }
 
 export function renderCouponClaimShareHtml(meta: CouponClaimShareMeta): string {
