@@ -5240,7 +5240,17 @@ const routing = ( router: Router ) => {
 					`${cardName} Issued NFT #${tokenId}`
 				const issuedDescription =
 					firstNonEmptyString(tokenMeta.description) ?? `${cardName} issued NFT #${tokenId}.`
-				out = normalizeExplorerMetadata(merged, {
+				// Coupon Preview OG must win over series icon/banner fragment URLs in merged metadata.
+				const mergedForIssuedExplorer: JsonObject = { ...merged }
+				delete mergedForIssuedExplorer.image
+				delete mergedForIssuedExplorer.image_url
+				delete mergedForIssuedExplorer.imageUrl
+				if (isJsonObject(mergedForIssuedExplorer.properties)) {
+					const propsWithoutImage = { ...mergedForIssuedExplorer.properties }
+					delete propsWithoutImage.image
+					mergedForIssuedExplorer.properties = propsWithoutImage
+				}
+				out = normalizeExplorerMetadata(mergedForIssuedExplorer, {
 					name: issuedName,
 					description: issuedDescription,
 					image: explorerPreviewImage,
