@@ -1,6 +1,6 @@
 [Unit]
-Description=Watch native reth payload progress and restart on stall
-After=network-online.target base-op-reth-native.service
+Description=Watch native reth payload progress and restart op-node on stall
+After=network-online.target base-op-reth-native.service base-op-node-native.service
 Wants=network-online.target
 
 [Service]
