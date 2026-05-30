@@ -129,6 +129,7 @@ import {
 	getNfcCardSignedTxGateByUid,
 	listLinkedNfcCardsByOwnerEoa,
 	listCouponIssuedNftSeriesForCardDescending,
+	listProductionIssuedNftSeriesForCardDescending,
 	listRegisteredBeamioUserCardAddresses,
 	listNfcBeamioUserCardHoldingsByTagId,
 	type NfcLinkAppSessionDb,
@@ -12300,6 +12301,20 @@ function readCouponIdFromSeriesMetadata(meta: Record<string, unknown> | null | u
 	return typeof nestedId === 'string' && nestedId.trim() ? nestedId.trim() : ''
 }
 
+function readProductionIdFromSeriesMetadata(meta: Record<string, unknown> | null | undefined): string {
+	if (!meta || typeof meta !== 'object') return ''
+	const rootProductionId = meta.productionId
+	if (typeof rootProductionId === 'string' && rootProductionId.trim()) return rootProductionId.trim()
+	const rootId = meta.id
+	if (typeof rootId === 'string' && rootId.trim()) return rootId.trim()
+	const properties = meta.properties
+	if (!properties || typeof properties !== 'object') return ''
+	const beamioProduction = (properties as Record<string, unknown>).beamioProduction
+	if (!beamioProduction || typeof beamioProduction !== 'object') return ''
+	const nestedId = (beamioProduction as Record<string, unknown>).productionId
+	return typeof nestedId === 'string' && nestedId.trim() ? nestedId.trim() : ''
+}
+
 function readCouponRequiresRedeemCode(meta: Record<string, unknown> | null | undefined): boolean {
 	if (!meta || typeof meta !== 'object') return false
 	const root = meta as Record<string, unknown>
@@ -12968,11 +12983,19 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 
 	try {
 		const candidates = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
-		const matchedSeries = candidates.find((row) => {
+		let matchedSeries = candidates.find((row) => {
 			if (String(row.tokenId) !== String(tokenIdN)) return false
 			const seriesCouponId = readCouponIdFromSeriesMetadata(row.metadata ?? null)
 			return seriesCouponId === couponIdTrimmed
 		})
+		if (!matchedSeries) {
+			const productionCandidates = await listProductionIssuedNftSeriesForCardDescending(cardNorm, 300)
+			matchedSeries = productionCandidates.find((row) => {
+				if (String(row.tokenId) !== String(tokenIdN)) return false
+				const seriesProductionId = readProductionIdFromSeriesMetadata(row.metadata ?? null)
+				return seriesProductionId === couponIdTrimmed
+			})
+		}
 		if (!matchedSeries) {
 			return { success: false, error: 'couponId does not match tokenId for this card' }
 		}

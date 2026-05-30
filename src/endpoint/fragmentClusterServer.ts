@@ -12,6 +12,8 @@ import { keccak256, toUtf8Bytes } from "ethers"
 
 const storagePATH = masterSetup.storagePATH
 
+/** Max bytes per storageFragmentChunk body (32 KiB). */
+export const FRAGMENT_UPLOAD_CHUNK_BYTES = 32 * 1024
 
 const workerNumber = Cluster?.worker?.id ? `worker : ${Cluster.worker.id} ` : `${ Cluster?.isPrimary ? 'Cluster Master': 'Cluster unknow'}`
 
@@ -22,6 +24,132 @@ function fragmentPaths(hash: string) {
 		binary: `${base}.bin`,
 		meta: `${base}.meta.json`,
 	}
+}
+
+function fragmentUploadPaths(hash: string) {
+	return {
+		partial: `${storagePATH}/${hash}.upload`,
+		meta: `${storagePATH}/${hash}.upload.meta.json`,
+	}
+}
+
+type FragmentUploadMeta = {
+	totalSize: number
+	wallet: string
+}
+
+function verifyFragmentWalletSign(wallet?: string, signMessage?: string): boolean {
+	if (!wallet || !signMessage) return false
+	return Boolean(checkSign(wallet, signMessage, wallet))
+}
+
+async function fragmentFinalExists(hash: string): Promise<boolean> {
+	try {
+		await Fs.promises.access(fragmentPaths(hash).text)
+		return true
+	} catch {
+		return false
+	}
+}
+
+async function readFragmentUploadMeta(hash: string): Promise<FragmentUploadMeta | null> {
+	try {
+		const raw = await Fs.promises.readFile(fragmentUploadPaths(hash).meta, 'utf8')
+		const parsed = JSON.parse(raw) as FragmentUploadMeta
+		if (!parsed?.wallet || !Number.isFinite(parsed.totalSize) || parsed.totalSize <= 0) return null
+		return parsed
+	} catch {
+		return null
+	}
+}
+
+async function writeFragmentUploadMeta(hash: string, meta: FragmentUploadMeta): Promise<void> {
+	await Fs.promises.writeFile(fragmentUploadPaths(hash).meta, JSON.stringify(meta))
+}
+
+async function getFragmentUploadReceivedBytes(hash: string): Promise<number> {
+	try {
+		const stat = await Fs.promises.stat(fragmentUploadPaths(hash).partial)
+		return stat.size
+	} catch {
+		return 0
+	}
+}
+
+async function finalizeFragmentChunkUpload(hash: string): Promise<boolean> {
+	const uploadPaths = fragmentUploadPaths(hash)
+	const meta = await readFragmentUploadMeta(hash)
+	if (!meta) return false
+
+	const received = await getFragmentUploadReceivedBytes(hash)
+	if (received !== meta.totalSize) {
+		logger(Colors.red(`finalizeFragmentChunkUpload [${hash}] size mismatch received=${received} expected=${meta.totalSize}`))
+		return false
+	}
+
+	const data = await Fs.promises.readFile(uploadPaths.partial, 'utf8')
+	const computed = keccak256(toUtf8Bytes(data))
+	if (computed.toLowerCase() !== hash.toLowerCase()) {
+		logger(Colors.red(`finalizeFragmentChunkUpload [${hash}] hash mismatch`))
+		return false
+	}
+
+	const ok = await saveFragment(hash, data)
+	await Fs.promises.unlink(uploadPaths.partial).catch(() => undefined)
+	await Fs.promises.unlink(uploadPaths.meta).catch(() => undefined)
+	return ok
+}
+
+async function writeFragmentUploadChunk(args: {
+	hash: string
+	wallet: string
+	totalSize: number
+	offset: number
+	chunk: Buffer
+}): Promise<{ received: number; complete: boolean }> {
+	const { hash, wallet, totalSize, offset, chunk } = args
+	if (chunk.length <= 0 || chunk.length > FRAGMENT_UPLOAD_CHUNK_BYTES) {
+		throw new Error('Invalid chunk size')
+	}
+	if (offset < 0 || offset + chunk.length > totalSize) {
+		throw new Error('Chunk out of range')
+	}
+
+	if (await fragmentFinalExists(hash)) {
+		return { received: totalSize, complete: true }
+	}
+
+	const uploadPaths = fragmentUploadPaths(hash)
+	let meta = await readFragmentUploadMeta(hash)
+	if (!meta) {
+		meta = { totalSize, wallet }
+		await writeFragmentUploadMeta(hash, meta)
+		await Fs.promises.writeFile(uploadPaths.partial, Buffer.alloc(0))
+	} else {
+		if (meta.wallet.toLowerCase() !== wallet.toLowerCase()) {
+			throw new Error('Upload wallet mismatch')
+		}
+		if (meta.totalSize !== totalSize) {
+			throw new Error('Upload totalSize mismatch')
+		}
+	}
+
+	const receivedBefore = await getFragmentUploadReceivedBytes(hash)
+	if (offset < receivedBefore) {
+		return { received: receivedBefore, complete: receivedBefore >= totalSize }
+	}
+	if (offset > receivedBefore) {
+		throw new Error('Upload gap — resume from last received byte')
+	}
+
+	await Fs.promises.appendFile(uploadPaths.partial, chunk)
+	const received = receivedBefore + chunk.length
+	if (received >= totalSize) {
+		const ok = await finalizeFragmentChunkUpload(hash)
+		if (!ok) throw new Error('Finalize upload failed')
+		return { received: totalSize, complete: true }
+	}
+	return { received, complete: false }
 }
 
 function isRangeStreamableMime(mime: string): boolean {
@@ -253,8 +381,8 @@ class server {
 	private startServer = async () => {
 		const Cors = require('cors')
 		const app = Express()
-		/** JSON body limit: image base64 ~4/3 of raw size; 50MB raw → ~67MB. Use 70mb to allow tier images. */
-		app.use(Express.json({ limit: '70mb' }))
+		/** JSON body limit: image base64 ~4/3 of raw size; catalog video clips up to ~50MB raw → ~67MB base64. Match nginx 256m. */
+		app.use(Express.json({ limit: '256mb' }))
 		app.use(Express.urlencoded({ extended: true }))
 		app.disable('x-powered-by')
 		app.use(Express.urlencoded({ extended: false }));
@@ -291,6 +419,84 @@ class server {
 
 	private router ( router: Router ) {
 		
+		router.get('/storageFragmentChunkStatus', async (req, res) => {
+			const { hash, wallet, signMessage } = req.query as {
+				hash?: string
+				wallet?: string
+				signMessage?: string
+			}
+			const ipaddress = getIpAddressFromForwardHeader(req)
+			if (!hash || !verifyFragmentWalletSign(wallet, signMessage)) {
+				logger(Colors.grey(`Router /storageFragmentChunkStatus auth error ${ipaddress}`))
+				return res.status(403).json({ ok: false, error: 'Unauthorized' })
+			}
+
+			if (await fragmentFinalExists(hash)) {
+				const meta = await readFragmentUploadMeta(hash)
+				return res.status(200).json({
+					ok: true,
+					complete: true,
+					received: meta?.totalSize ?? 0,
+					totalSize: meta?.totalSize ?? 0,
+				})
+			}
+
+			const meta = await readFragmentUploadMeta(hash)
+			const received = await getFragmentUploadReceivedBytes(hash)
+			return res.status(200).json({
+				ok: true,
+				complete: false,
+				received,
+				totalSize: meta?.totalSize ?? null,
+			})
+		})
+
+		router.post('/storageFragmentChunk', async (req: any, res: any) => {
+			const { wallet, signMessage, hash, totalSize, offset, chunkBase64 } = req.body as {
+				wallet?: string
+				signMessage?: string
+				hash?: string
+				totalSize?: number
+				offset?: number
+				chunkBase64?: string
+			}
+			const ipaddress = getIpAddressFromForwardHeader(req)
+			if (!verifyFragmentWalletSign(wallet, signMessage) || !hash || !chunkBase64) {
+				logger(Colors.grey(`Router /storageFragmentChunk auth/format error ${ipaddress}`))
+				return res.status(403).json({ ok: false, error: 'Unauthorized' })
+			}
+			if (!Number.isFinite(totalSize) || totalSize! <= 0 || !Number.isFinite(offset) || offset! < 0) {
+				return res.status(400).json({ ok: false, error: 'Invalid totalSize or offset' })
+			}
+			const totalSizeN = Number(totalSize)
+			const offsetN = Number(offset)
+
+			let chunk: Buffer
+			try {
+				chunk = Buffer.from(String(chunkBase64), 'base64')
+			} catch {
+				return res.status(400).json({ ok: false, error: 'Invalid chunkBase64' })
+			}
+			if (chunk.length === 0 || chunk.length > FRAGMENT_UPLOAD_CHUNK_BYTES) {
+				return res.status(400).json({ ok: false, error: 'Invalid chunk size' })
+			}
+
+			try {
+				const result = await writeFragmentUploadChunk({
+					hash,
+					wallet: String(wallet),
+					totalSize: totalSizeN,
+					offset: offsetN,
+					chunk,
+				})
+				return res.status(200).json({ ok: true, ...result })
+			} catch (err: unknown) {
+				const message = err instanceof Error ? err.message : String(err)
+				logger(Colors.red(`storageFragmentChunk [${hash}] ${message}`))
+				return res.status(400).json({ ok: false, error: message })
+			}
+		})
+
 		router.post ('/storageFragment',  async (req: any, res: any) => {
 			const { wallet, signMessage, image } = req.body as {
 				wallet?: string

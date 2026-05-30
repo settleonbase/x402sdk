@@ -5,8 +5,17 @@ import path from 'path'
 import { ethers } from 'ethers'
 import QRCode from 'qrcode'
 import sharp from 'sharp'
-import { listCouponIssuedNftSeriesForCardDescending, getCardByAddress } from '../db'
-import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCategory'
+import {
+	listCouponIssuedNftSeriesForCardDescending,
+	listProductionIssuedNftSeriesForCardDescending,
+	getCardByAddress,
+} from '../db'
+import {
+	metadataMatchesClientCouponCategoryFilter,
+	metadataMatchesClientProductionCategoryFilter,
+	normalizeBeamioCatalogGlobalCategory,
+	type BeamioCatalogGlobalCategory,
+} from '../couponMetadataCategory'
 import { buildOgTextComposites, type OgTextLayer } from './couponClaimShareOgText'
 
 const BEAMIO_APP_ORIGIN = 'https://beamio.app'
@@ -58,8 +67,12 @@ export type CouponClaimShareParams = CouponOpenClaimShareParams
 
 export type BeamioCouponShareParams = CouponOpenClaimShareParams | CouponRedeemShareParams
 
+export type CouponClaimDistributionKind = 'coupon' | 'catalog'
+
 export type CouponClaimShareMeta = {
 	shareKind: CouponShareKind
+	/** Coupon open-claim vs Business catalog item distribution. */
+	distributionKind?: CouponClaimDistributionKind
 	cardAddress: string
 	couponId?: string
 	/** Program / merchant display name for share headline (e.g. "CoNET Labs Inc."). */
@@ -68,6 +81,10 @@ export type CouponClaimShareMeta = {
 	shareHeadline: string
 	title: string
 	subtitle: string
+	/** Catalog only — Product | Service | Menu. */
+	globalCategory?: string
+	/** Catalog only — resolved item category chip label. */
+	itemCategory?: string
 	iconUrl: string
 	backgroundImage: string
 	backgroundColorHex: string
@@ -179,6 +196,108 @@ const resolveMerchantNameForShare = async (
 export const buildShareHeadline = (merchantName: string, shareKind: CouponShareKind): string => {
 	const verb = shareKind === 'redeem' ? 'Redeem' : 'Claim'
 	return `${verb} a ${truncateText(merchantName.trim() || 'Beamio', 28)} Coupon`
+}
+
+export const buildCatalogShareHeadline = (merchantName: string): string => {
+	const trimmed = truncateText(merchantName.trim() || 'Beamio', 28)
+	return `Get a ${trimmed} Catalog Item`
+}
+
+const catalogGlobalCategoryLabel = (id: BeamioCatalogGlobalCategory): string => {
+	if (id === 'Product') return 'Product'
+	if (id === 'Menu') return 'Menu'
+	return 'Service'
+}
+
+const readMetadataProductionId = (meta: Record<string, unknown> | null): string => {
+	if (!meta) return ''
+	const root = readString(meta.productionId) || readString(meta.id)
+	if (root) return root
+	const props = asRecord(meta.properties)
+	const beamioProduction = asRecord(props?.beamioProduction)
+	return readString(beamioProduction?.productionId)
+}
+
+type ProductionShareFields = {
+	name: string
+	subtitle: string
+	globalCategory: string
+	itemCategoryId: string
+	iconUrl: string
+	backgroundImage: string
+	backgroundColorHex: string
+}
+
+const readProductionShareFields = (meta: Record<string, unknown> | null): ProductionShareFields => {
+	if (!meta) {
+		return {
+			name: '',
+			subtitle: '',
+			globalCategory: 'Service',
+			itemCategoryId: '',
+			iconUrl: '',
+			backgroundImage: '',
+			backgroundColorHex: '#ea580c',
+		}
+	}
+	const props = asRecord(meta.properties)
+	const beamioProduction = asRecord(props?.beamioProduction)
+	const globalCategory = catalogGlobalCategoryLabel(
+		normalizeBeamioCatalogGlobalCategory(meta.category ?? props?.category ?? beamioProduction?.category)
+	)
+	const itemCategoryId =
+		readString(beamioProduction?.itemCategory) ||
+		readString(meta.itemCategory) ||
+		readString(meta.serviceCategory)
+	const name =
+		readString(beamioProduction?.name) || readString(meta.name) || readString(meta.title) || 'Catalog Item'
+	const subtitle =
+		readString(beamioProduction?.subtitle) ||
+		readString(meta.subtitle) ||
+		''
+	const iconUrl = readString(beamioProduction?.icon) || readString(meta.icon) || readString(meta.iconUrl)
+	const backgroundImage =
+		readString(beamioProduction?.productionImage) ||
+		readString(meta.productionImage) ||
+		readString(meta.backgroundImage)
+	const bgRaw =
+		readString(beamioProduction?.backgroundColor) ||
+		readMetadataStringFromKeys(meta, COUPON_BACKGROUND_COLOR_KEYS)
+	const backgroundColorHex = bgRaw ? (bgRaw.startsWith('#') ? bgRaw : `#${bgRaw}`) : '#ea580c'
+	return {
+		name,
+		subtitle,
+		globalCategory,
+		itemCategoryId,
+		iconUrl,
+		backgroundImage,
+		backgroundColorHex,
+	}
+}
+
+const resolveItemCategoryLabelForShare = async (
+	cardNorm: string,
+	itemCategoryId: string
+): Promise<string> => {
+	const id = itemCategoryId.trim()
+	if (!id) return ''
+	try {
+		const cardRow = await getCardByAddress(cardNorm)
+		const shareTokenMetadata = asRecord(asRecord(cardRow?.metadata ?? null)?.shareTokenMetadata)
+		const chips = shareTokenMetadata?.itemCategory ?? shareTokenMetadata?.serviceCategory
+		if (Array.isArray(chips)) {
+			for (const row of chips) {
+				const chip = asRecord(row)
+				if (!chip) continue
+				if (readString(chip.id) === id) {
+					return readString(chip.label) || id
+				}
+			}
+		}
+	} catch {
+		// ignore — fall back to raw id
+	}
+	return id
 }
 
 const readMetadataIconUrl = (meta: Record<string, unknown> | null): string => {
@@ -712,29 +831,92 @@ async function lookupCouponSeriesMeta(
 	return { matchedMeta: null, validBeforeSec: null }
 }
 
+async function lookupProductionSeriesMeta(
+	cardNorm: string,
+	wantedProductionId: string
+): Promise<{ matchedMeta: Record<string, unknown> | null; validBeforeSec: number | null }> {
+	const candidates = await listProductionIssuedNftSeriesForCardDescending(cardNorm, 300)
+	for (const row of candidates) {
+		if (!metadataMatchesClientProductionCategoryFilter(row.metadata)) continue
+		let tid: bigint
+		try {
+			tid = BigInt(row.tokenId)
+		} catch {
+			continue
+		}
+		if (tid < ISSUED_NFT_START_ID) continue
+		const meta = asRecord(row.metadata)
+		if (!meta) continue
+		if (readMetadataProductionId(meta) !== wantedProductionId) continue
+		return { matchedMeta: meta, validBeforeSec: readMetadataValidBeforeSec(meta) }
+	}
+	return { matchedMeta: null, validBeforeSec: null }
+}
+
 async function resolveOpenClaimShareMeta(
 	params: CouponOpenClaimShareParams,
 	shareUrl: string
 ): Promise<CouponClaimShareMeta | null> {
 	const cardNorm = ethers.getAddress(params.cardAddress)
-	const wantedCouponId = params.couponId.trim()
-	if (!wantedCouponId) return null
+	const wantedId = params.couponId.trim()
+	if (!wantedId) return null
 
-	const { matchedMeta, validBeforeSec } = await lookupCouponSeriesMeta(cardNorm, wantedCouponId)
+	let matchedMeta: Record<string, unknown> | null = null
+	let validBeforeSec: number | null = null
+	let distributionKind: CouponClaimDistributionKind = 'coupon'
+
+	const couponLookup = await lookupCouponSeriesMeta(cardNorm, wantedId)
+	matchedMeta = couponLookup.matchedMeta
+	validBeforeSec = couponLookup.validBeforeSec
+
+	if (!matchedMeta) {
+		const productionLookup = await lookupProductionSeriesMeta(cardNorm, wantedId)
+		matchedMeta = productionLookup.matchedMeta
+		validBeforeSec = productionLookup.validBeforeSec
+		if (matchedMeta) distributionKind = 'catalog'
+	}
+
+	const merchantName = await resolveMerchantNameForShare(cardNorm, matchedMeta)
+	const expiresLabel = formatCouponExpiryPill(validBeforeSec)
+
+	if (distributionKind === 'catalog' && matchedMeta) {
+		const fields = readProductionShareFields(matchedMeta)
+		const itemCategory = await resolveItemCategoryLabelForShare(cardNorm, fields.itemCategoryId)
+		const title = truncateText(fields.name, 48)
+		const subtitle = truncateText(fields.subtitle, 120)
+		return {
+			shareKind: 'open_claim',
+			distributionKind: 'catalog',
+			cardAddress: cardNorm,
+			couponId: wantedId,
+			merchantName,
+			shareHeadline: buildCatalogShareHeadline(merchantName),
+			title,
+			subtitle,
+			globalCategory: fields.globalCategory,
+			itemCategory,
+			iconUrl: fields.iconUrl,
+			backgroundImage: fields.backgroundImage,
+			backgroundColorHex: fields.backgroundColorHex,
+			validBeforeSec,
+			expiresLabel,
+			shareUrl,
+			ogImageUrl: buildOgImageUrl(shareUrl, { kind: 'open_claim', cardAddress: cardNorm, couponId: wantedId }),
+		}
+	}
 
 	const title = truncateText(readMetadataTitle(matchedMeta) || 'Beamio Coupon', 48)
-	const merchantName = await resolveMerchantNameForShare(cardNorm, matchedMeta)
 	const rawSubtitle = readMetadataSubtitle(matchedMeta)
 	const subtitle = truncateText(
 		rawSubtitle || (title !== 'Beamio Coupon' ? `${title} — ${merchantName}` : 'Claim this coupon in the Beamio app.'),
 		120
 	)
-	const expiresLabel = formatCouponExpiryPill(validBeforeSec)
 
 	return {
 		shareKind: 'open_claim',
+		distributionKind: 'coupon',
 		cardAddress: cardNorm,
-		couponId: wantedCouponId,
+		couponId: wantedId,
 		merchantName,
 		shareHeadline: buildShareHeadline(merchantName, 'open_claim'),
 		title,
@@ -745,7 +927,7 @@ async function resolveOpenClaimShareMeta(
 		validBeforeSec,
 		expiresLabel,
 		shareUrl,
-		ogImageUrl: buildOgImageUrl(shareUrl, { kind: 'open_claim', cardAddress: cardNorm, couponId: wantedCouponId }),
+		ogImageUrl: buildOgImageUrl(shareUrl, { kind: 'open_claim', cardAddress: cardNorm, couponId: wantedId }),
 	}
 }
 
