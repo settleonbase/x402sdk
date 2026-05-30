@@ -10286,7 +10286,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 	transferWhitelistEnabled?: boolean
 }): Promise<{ success: boolean; error?: string }> {
 	try {
-		const shareTokenMetadata = normalizeShareTokenMetadataItemCategory(
+		const shareTokenMetadataInput = normalizeShareTokenMetadataItemCategory(
 			normalizeShareTokenMetadataProductions(
 				normalizeShareTokenMetadataCoupons(params.shareTokenMetadata)
 			)
@@ -10299,10 +10299,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 				error: 'Card is not registered in beamio_cards. Publish a new card first, or register this address.',
 			}
 		}
-		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
-		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
-		const metaPath = resolve(METADATA_BASE, metaFilename)
-		const metaDir = resolve(METADATA_BASE)
+		const { metaDir, metaPath, metaFilename } = beamioCard0MetadataFilePath(cardAddr)
 		if (!metaPath.startsWith(metaDir + '/') && metaPath !== metaDir) {
 			return { success: false, error: 'Invalid metadata path' }
 		}
@@ -10310,6 +10307,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 		let upgradeType = params.upgradeType
 		let transferWhitelistEnabled = params.transferWhitelistEnabled
 		let tiersForFile = params.tiers
+		let fileShare: Record<string, unknown> = {}
 		if (fs.existsSync(metaPath)) {
 			try {
 				const prev = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as Record<string, unknown>
@@ -10323,10 +10321,12 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 				if (tiersForFile === undefined && Array.isArray(prev.tiers)) {
 					tiersForFile = prev.tiers as Array<Record<string, unknown>>
 				}
+				fileShare = readShareTokenMetadataFromCard0File(cardAddr)
 			} catch {
 				/* keep params-only */
 			}
 		}
+		const shareTokenMetadata = mergeShareTokenMetadataRecords(fileShare, shareTokenMetadataInput)
 
 		const metaContent = buildBeamioErc1155Card0MetadataFileContent({
 			shareTokenMetadata,
@@ -10357,6 +10357,42 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 }
 
 const MERCHANT_IMAGE_URL_MAX_LEN = 2048
+
+function beamioCard0MetadataFilePath(cardAddr: string): { metaDir: string; metaPath: string; metaFilename: string } {
+	const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
+	const metaFilename = `0x${ethers.getAddress(cardAddr).slice(2).toLowerCase()}0.json`
+	const metaDir = resolve(METADATA_BASE)
+	const metaPath = resolve(METADATA_BASE, metaFilename)
+	return { metaDir, metaPath, metaFilename }
+}
+
+function readShareTokenMetadataFromCard0File(cardAddr: string): Record<string, unknown> {
+	const { metaDir, metaPath } = beamioCard0MetadataFilePath(cardAddr)
+	if (!metaPath.startsWith(metaDir + '/') && metaPath !== metaDir) return {}
+	if (!fs.existsSync(metaPath)) return {}
+	try {
+		const prev = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as Record<string, unknown>
+		const share = prev.shareTokenMetadata
+		if (share != null && typeof share === 'object' && !Array.isArray(share)) {
+			return { ...(share as Record<string, unknown>) }
+		}
+	} catch {
+		/* ignore corrupt file */
+	}
+	return {}
+}
+
+function mergeShareTokenMetadataRecords(
+	...sources: Array<Record<string, unknown> | null | undefined>
+): Record<string, unknown> {
+	const out: Record<string, unknown> = {}
+	for (const src of sources) {
+		if (src != null && typeof src === 'object' && !Array.isArray(src)) {
+			Object.assign(out, src)
+		}
+	}
+	return out
+}
 
 /** Shared rule for `merchantImage`, coupon `couponImage`, etc. (https, non-localhost, max length). */
 export function isAllowedMerchantImageHttpsUrl(raw: string): boolean {
@@ -10389,12 +10425,16 @@ export async function applyBeamioCardMerchantImageUrlUpdate(params: {
 			return { success: false, error: 'Card is not registered in beamio_cards or has no metadata.' }
 		}
 		const meta = row.metadata as Record<string, unknown>
-		const share =
+		const dbShare =
 			meta.shareTokenMetadata != null &&
 			typeof meta.shareTokenMetadata === 'object' &&
 			!Array.isArray(meta.shareTokenMetadata)
-				? { ...(meta.shareTokenMetadata as Record<string, unknown>) }
+				? (meta.shareTokenMetadata as Record<string, unknown>)
 				: {}
+		const share = mergeShareTokenMetadataRecords(
+			readShareTokenMetadataFromCard0File(cardAddr),
+			dbShare
+		)
 		const trimmed = String(params.merchantImage ?? '').trim()
 		if (trimmed) {
 			if (!isAllowedMerchantImageHttpsUrl(trimmed)) {
@@ -10449,12 +10489,16 @@ export async function applyBeamioCardProgramImageUrlUpdate(params: {
 			return { success: false, error: 'Card is not registered in beamio_cards or has no metadata.' }
 		}
 		const meta = row.metadata as Record<string, unknown>
-		const share =
+		const dbShare =
 			meta.shareTokenMetadata != null &&
 			typeof meta.shareTokenMetadata === 'object' &&
 			!Array.isArray(meta.shareTokenMetadata)
-				? { ...(meta.shareTokenMetadata as Record<string, unknown>) }
+				? (meta.shareTokenMetadata as Record<string, unknown>)
 				: {}
+		const share = mergeShareTokenMetadataRecords(
+			readShareTokenMetadataFromCard0File(cardAddr),
+			dbShare
+		)
 		const trimmed = String(params.image ?? '').trim()
 		if (trimmed) {
 			if (!isAllowedMerchantImageHttpsUrl(trimmed)) {

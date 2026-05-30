@@ -3470,6 +3470,39 @@ export const upsertBeamioSunLastCounterByUid = async (params: {
 	}
 }
 
+/** Deep-merge metadata_json patch into an existing beamio_cards row (shareTokenMetadata shallow-merged). */
+export function mergeBeamioCardMetadataJsonPatch(
+	existing: Record<string, unknown> | null | undefined,
+	patch: Record<string, unknown>
+): Record<string, unknown> {
+	const base =
+		existing != null && typeof existing === 'object' && !Array.isArray(existing) ? { ...existing } : {}
+	const patchShare =
+		patch.shareTokenMetadata != null &&
+		typeof patch.shareTokenMetadata === 'object' &&
+		!Array.isArray(patch.shareTokenMetadata)
+			? (patch.shareTokenMetadata as Record<string, unknown>)
+			: null
+	const baseShare =
+		base.shareTokenMetadata != null &&
+		typeof base.shareTokenMetadata === 'object' &&
+		!Array.isArray(base.shareTokenMetadata)
+			? (base.shareTokenMetadata as Record<string, unknown>)
+			: {}
+	const merged: Record<string, unknown> = { ...base, ...patch }
+	if (patchShare || Object.keys(baseShare).length > 0) {
+		merged.shareTokenMetadata = { ...baseShare, ...(patchShare ?? {}) }
+	}
+	if (patch.tiers === undefined && base.tiers !== undefined) merged.tiers = base.tiers
+	if (patch.upgradeType === undefined && base.upgradeType !== undefined) {
+		merged.upgradeType = base.upgradeType
+	}
+	if (patch.transferWhitelistEnabled === undefined && base.transferWhitelistEnabled !== undefined) {
+		merged.transferWhitelistEnabled = base.transferWhitelistEnabled
+	}
+	return merged
+}
+
 /** createCard 成功后登记到本地 DB */
 export const registerCardToDb = async (params: {
 	cardAddress: string
@@ -3517,14 +3550,23 @@ export const registerCardToDb = async (params: {
 	try {
 		await db.connect()
 		await db.query(BEAMIO_CARDS_TABLE)
-		const metadataJson = JSON.stringify({
+		const addrLower = params.cardAddress.toLowerCase()
+		const existingRes = await db.query<{ metadata_json: Record<string, unknown> | null }>(
+			`SELECT metadata_json FROM beamio_cards WHERE card_address = $1 LIMIT 1`,
+			[addrLower]
+		)
+		const existingMeta = existingRes.rows[0]?.metadata_json ?? null
+		const patchJson: Record<string, unknown> = {
 			...(params.shareTokenMetadata && { shareTokenMetadata: params.shareTokenMetadata }),
 			...(params.tiers && params.tiers.length > 0 && { tiers: params.tiers }),
 			...(params.upgradeType != null && { upgradeType: params.upgradeType }),
 			...(typeof params.transferWhitelistEnabled === 'boolean' && {
 				transferWhitelistEnabled: params.transferWhitelistEnabled,
 			}),
-		}) || null
+		}
+		const mergedMetadata = mergeBeamioCardMetadataJsonPatch(existingMeta, patchJson)
+		const metadataJson =
+			Object.keys(mergedMetadata).length > 0 ? JSON.stringify(mergedMetadata) : null
 		await db.query(
 			`
 			INSERT INTO beamio_cards (card_address, card_owner, currency, price_in_currency_e6, uri, metadata_json, tx_hash)
@@ -3538,12 +3580,12 @@ export const registerCardToDb = async (params: {
 				tx_hash = EXCLUDED.tx_hash
 			`,
 			[
-				params.cardAddress.toLowerCase(),
+				addrLower,
 				params.cardOwner.toLowerCase(),
 				params.currency,
 				params.priceInCurrencyE6,
 				params.uri ?? null,
-				metadataJson && metadataJson !== '{}' ? metadataJson : null,
+				metadataJson,
 				params.txHash ?? null,
 			]
 		)
@@ -3559,6 +3601,7 @@ export const registerCardToDb = async (params: {
 		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[registerCardToDb] failed: ${e?.message ?? e}`))
+		throw e
 	} finally {
 		await db.end().catch(() => {})
 	}
