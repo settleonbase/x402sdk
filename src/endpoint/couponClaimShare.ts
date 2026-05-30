@@ -206,9 +206,10 @@ export const buildCatalogShareHeadline = (merchantName: string): string => {
 }
 
 const catalogGlobalCategoryLabel = (id: BeamioCatalogGlobalCategory): string => {
-	if (id === 'Product') return 'Product'
-	if (id === 'Menu') return 'Menu'
-	if (id === 'SalesManagement') return 'Sales Management'
+	const s = String(id)
+	if (s === 'Product') return 'Product'
+	if (s === 'Menu') return 'Menu'
+	if (s === 'SalesManagement') return 'Sales Management'
 	return 'Service'
 }
 
