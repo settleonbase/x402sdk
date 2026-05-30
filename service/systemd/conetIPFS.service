@@ -1,0 +1,19 @@
+[Unit]
+Description=CoNET IPFS fragment API (x402sdk fragmentDaemon, port 8002)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /home/peter/x402sdk/dist/endpoint/fragmentDaemon.js
+Restart=always
+RestartSec=10
+WorkingDirectory=/home/peter/x402sdk
+User=peter
+Group=peter
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=conet-ipfs
+
+[Install]
+WantedBy=multi-user.target
