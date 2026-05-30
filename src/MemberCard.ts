@@ -2586,6 +2586,17 @@ const tryParseMintPointsByAdminRecipient = (data: string): string | null => {
 	return null
 }
 
+/** mintPointsByAdmin / mintIssuedNftByOwner 等需 _toAccount 的 executeForAdmin 载荷：解析 beneficiary EOA/AA。 */
+const tryParseExecuteForAdminAaRecipient = (data: string): string | null => {
+	const mintPts = tryParseMintPointsByAdminRecipient(data)
+	if (mintPts) return mintPts
+	try {
+		const decoded = mintIssuedNftByOwnerIface.parseTransaction({ data })
+		if (decoded?.name === 'mintIssuedNftByOwner' && decoded.args[0]) return decoded.args[0] as string
+	} catch { /* ignore */ }
+	return null
+}
+
 /** 获取 card 使用的 AA Factory 地址（card.factoryGateway()._aaFactory()），与 mintPointsByAdmin 的 _toAccount 解析逻辑一致 */
 const getCardAaFactoryAddress = async (cardAddr: string): Promise<string> => {
 	const cardAbi = ['function factoryGateway() view returns (address)']
@@ -2737,7 +2748,7 @@ export const executeForAdminProcess = async () => {
 		}
 		// NFC Topup：mintPointsByAdmin 要求 recipient 已有 AA 账户，否则 _toAccount 会 revert UC_ResolveAccountFailed
 		// 必须使用 card 的 factoryGateway()._aaFactory()，与合约内 _resolveAccount 一致；若用配置的 AA Factory 可能不匹配导致 UC_ResolveAccountFailed
-		const recipientEOA = tryParseMintPointsByAdminRecipient(obj.data)
+		const recipientEOA = tryParseExecuteForAdminAaRecipient(obj.data)
 		const mintParsed = tryParseMintPointsByAdminArgs(obj.data)
 		let burnParsedForLog: { target: string; amount: bigint } | null = null
 		if (!mintParsed) {
@@ -10422,6 +10433,64 @@ export async function applyBeamioCardMerchantImageUrlUpdate(params: {
 	}
 }
 
+/**
+ * 仅更新 `shareTokenMetadata.image`（或清除），合并 DB 现有 shareTokenMetadata 与顶层 tiers / upgradeType。
+ * 供 `POST /api/updateCardProgramImage` 使用；写 `0x{card}0.json` + `registerCardToDb`。
+ */
+export async function applyBeamioCardProgramImageUrlUpdate(params: {
+	cardAddress: string
+	/** https URL to set; empty string removes image */
+	image: string
+}): Promise<{ success: boolean; error?: string }> {
+	try {
+		const cardAddr = ethers.getAddress(params.cardAddress.trim())
+		const row = await getCardByAddress(cardAddr)
+		if (!row?.metadata || typeof row.metadata !== 'object') {
+			return { success: false, error: 'Card is not registered in beamio_cards or has no metadata.' }
+		}
+		const meta = row.metadata as Record<string, unknown>
+		const share =
+			meta.shareTokenMetadata != null &&
+			typeof meta.shareTokenMetadata === 'object' &&
+			!Array.isArray(meta.shareTokenMetadata)
+				? { ...(meta.shareTokenMetadata as Record<string, unknown>) }
+				: {}
+		const trimmed = String(params.image ?? '').trim()
+		if (trimmed) {
+			if (!isAllowedMerchantImageHttpsUrl(trimmed)) {
+				return {
+					success: false,
+					error: 'image must be a non-localhost https URL (max 2048 characters).',
+				}
+			}
+			share.image = trimmed
+		} else {
+			delete share.image
+		}
+		const tiers =
+			Array.isArray(meta.tiers) && meta.tiers.length > 0
+				? (meta.tiers as Array<Record<string, unknown>>)
+				: undefined
+		let upgradeType: number | undefined
+		if (meta.upgradeType != null) {
+			const u = Number(meta.upgradeType)
+			if (u === 0 || u === 1 || u === 2) upgradeType = u
+		}
+		const transferWhitelistEnabled =
+			typeof meta.transferWhitelistEnabled === 'boolean' ? meta.transferWhitelistEnabled : undefined
+
+		return applyBeamioCardShareMetadataUpdate({
+			cardAddress: cardAddr,
+			shareTokenMetadata: share,
+			...(tiers && tiers.length > 0 && { tiers }),
+			...(upgradeType !== undefined && { upgradeType: upgradeType as 0 | 1 | 2 }),
+			...(transferWhitelistEnabled !== undefined && { transferWhitelistEnabled }),
+		})
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
 export const createCardPoolPress = async () => {
 	const obj = createCardPool.shift() as (CreateCardPreChecked & { res: Response }) | undefined
 	if (!obj) return
@@ -12155,6 +12224,12 @@ const burnIssuedNftByGatewayIface = new ethers.Interface([
 const BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR = (
 	burnIssuedNftByGatewayIface.getFunction('burnIssuedNftByGateway')?.selector ?? ''
 ).toLowerCase()
+const mintIssuedNftByOwnerIface = new ethers.Interface([
+	'function mintIssuedNftByOwner(address to, uint256 tokenId, uint256 amount)',
+])
+const MINT_ISSUED_NFT_BY_OWNER_SELECTOR = (
+	mintIssuedNftByOwnerIface.getFunction('mintIssuedNftByOwner')?.selector ?? ''
+).toLowerCase()
 const CREATE_ISSUED_NFT_SELECTOR = createIssuedNftIface.getFunction('createIssuedNft')?.selector ?? ''
 
 const createRedeemBatchIfaceCouponDbg = new ethers.Interface([
@@ -12209,17 +12284,6 @@ export type CardCouponPosClaimPreCheckResult =
 			userSignature: string
 		}
 	}
-	| {
-		success: true
-		route: 'posWallet'
-		preChecked: {
-			cardAddress: string
-			couponId: string
-			userEOA: string
-			tokenId: string
-			posAdminEOA: string
-		}
-	}
 	| { success: false; error: string }
 
 async function resolvePosCouponTokenId(
@@ -12256,6 +12320,24 @@ async function resolvePosCouponTokenId(
 	return { ok: true, tokenIdN }
 }
 
+async function resolveCouponHolderAccount(userNorm: string): Promise<string> {
+	let holderAccount = userNorm
+	try {
+		const aaFactory = new ethers.Contract(
+			BASE_AA_FACTORY,
+			['function primaryAccountOf(address) view returns (address)'],
+			providerBaseBackup
+		)
+		const aaCandidate = await aaFactory.primaryAccountOf(userNorm) as string
+		if (aaCandidate && aaCandidate !== ethers.ZeroAddress && ethers.isAddress(aaCandidate)) {
+			holderAccount = ethers.getAddress(aaCandidate)
+		}
+	} catch {
+		/* keep EOA as fallback holder */
+	}
+	return holderAccount
+}
+
 async function validatePosWalletCouponOpenClaim(params: {
 	cardNorm: string
 	userNorm: string
@@ -12285,16 +12367,19 @@ async function validatePosWalletCouponOpenClaim(params: {
 			'function issuedNftMaxSupply(uint256 tokenId) view returns (uint256)',
 			'function issuedNftMintedCount(uint256 tokenId) view returns (uint256)',
 			'function isAdmin(address) view returns (bool)',
+			'function balanceOf(address account, uint256 id) view returns (uint256)',
 		],
 		providerBaseBackup
 	)
-	const [isValid, priceInCurrency6, alreadyClaimed, maxSupply, mintedCount, posIsAdmin] = await Promise.all([
+	const holderAccount = await resolveCouponHolderAccount(params.userNorm)
+	const [isValid, priceInCurrency6, alreadyClaimed, maxSupply, mintedCount, posIsAdmin, holderBal] = await Promise.all([
 		cardRead.isIssuedNftValid(params.tokenIdN) as Promise<boolean>,
 		cardRead.issuedNftPriceInCurrency6(params.tokenIdN) as Promise<bigint>,
 		cardRead.issuedNftUserSigClaimUsed(params.userNorm, params.tokenIdN) as Promise<boolean>,
 		cardRead.issuedNftMaxSupply(params.tokenIdN) as Promise<bigint>,
 		cardRead.issuedNftMintedCount(params.tokenIdN) as Promise<bigint>,
 		cardRead.isAdmin(posAdminNorm) as Promise<boolean>,
+		cardRead.balanceOf(holderAccount, params.tokenIdN) as Promise<bigint>,
 	])
 	if (!posIsAdmin) {
 		return { ok: false, error: 'POS terminal is not an admin on this coupon card.' }
@@ -12306,6 +12391,9 @@ async function validatePosWalletCouponOpenClaim(params: {
 	if (alreadyClaimed) {
 		return { ok: false, error: 'This address already claimed this coupon and is no longer eligible.' }
 	}
+	if (holderBal > 0n) {
+		return { ok: false, error: 'This wallet already holds this coupon.' }
+	}
 	if (maxSupply > 0n && mintedCount >= maxSupply) {
 		return { ok: false, error: 'Coupon supply has been fully claimed.' }
 	}
@@ -12315,7 +12403,7 @@ async function validatePosWalletCouponOpenClaim(params: {
 /**
  * POS one-tap coupon claim:
  * - NFC: cluster signs with NFC private key (uid/tagId, or linked NFC for member EOA).
- * - QR / wallet: POS terminal admin calls Factory `claimIssuedNftForUserByPosAdmin`.
+ * - QR / wallet: POS terminal admin signs ExecuteForAdmin(mintIssuedNftByOwner) via prepare/submit.
  */
 export const cardCouponPosClaimPreCheck = async (body: {
 	cardAddress?: string
@@ -12415,15 +12503,160 @@ export const cardCouponPosClaimPreCheck = async (body: {
 	if (!walletOk.ok) return { success: false, error: walletOk.error }
 
 	return {
+		success: false,
+		error: 'QR/wallet claim requires POS admin ExecuteForAdmin signature. Use /api/cardCouponPosClaimPrepare then /api/cardCouponPosClaimSubmit.',
+	}
+}
+
+/** POS Balance / QR open-coupon claim prepare：返回 mintIssuedNftByOwner executeForAdmin 载荷。 */
+export const cardCouponPosClaimPreparePreCheck = async (body: {
+	cardAddress?: string
+	couponId?: string
+	userEOA?: string
+	signerEOA?: string
+	tokenId?: string | number
+}): Promise<
+	| {
+		success: true
+		preChecked: {
+			cardAddress: string
+			couponId: string
+			userEOA: string
+			tokenId: string
+			data: string
+			deadline: number
+			nonce: string
+			factoryGateway: string
+		}
+	}
+	| { success: false; error: string }
+> => {
+	const cardAddress = String(body.cardAddress ?? '').trim()
+	const couponId = String(body.couponId ?? '').trim()
+	const userEOA = String(body.userEOA ?? '').trim()
+	const signerEOA = String(body.signerEOA ?? '').trim()
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!couponId) return { success: false, error: 'Missing couponId' }
+	if (!userEOA || !ethers.isAddress(userEOA)) return { success: false, error: 'Invalid userEOA' }
+	if (!signerEOA || !ethers.isAddress(signerEOA)) {
+		return { success: false, error: 'POS terminal admin signature required for wallet/QR claim.' }
+	}
+
+	const cardNorm = ethers.getAddress(cardAddress)
+	const userNorm = ethers.getAddress(userEOA)
+	const tokenResolved = await resolvePosCouponTokenId(cardNorm, couponId, body.tokenId)
+	if (!tokenResolved.ok) return { success: false, error: tokenResolved.error }
+	const tokenIdN = tokenResolved.tokenIdN
+
+	const walletOk = await validatePosWalletCouponOpenClaim({
+		cardNorm,
+		userNorm,
+		couponId,
+		tokenIdN,
+		posAdminEOA: signerEOA,
+	})
+	if (!walletOk.ok) return { success: false, error: walletOk.error }
+
+	const data = mintIssuedNftByOwnerIface.encodeFunctionData('mintIssuedNftByOwner', [userNorm, tokenIdN, 1n])
+	const deadline = Math.floor(Date.now() / 1000) + 15 * 60
+	const nonce = ethers.keccak256(
+		ethers.toUtf8Bytes(`pos-claim-coupon:${cardNorm}:${couponId}:${userNorm}:${String(tokenIdN)}:${randomUUID()}`)
+	)
+	const factoryGateway = await getBeamioUserCardFactoryGateway(cardNorm)
+
+	return {
 		success: true,
-		route: 'posWallet',
 		preChecked: {
 			cardAddress: cardNorm,
 			couponId,
 			userEOA: userNorm,
-			tokenId: tokenIdN.toString(),
-			posAdminEOA: ethers.getAddress(posAdmin),
+			tokenId: String(tokenIdN),
+			data,
+			deadline,
+			nonce,
+			factoryGateway,
 		},
+	}
+}
+
+export const cardCouponPosClaimSubmitPreCheck = async (body: {
+	cardAddress?: string
+	data?: string
+	deadline?: number
+	nonce?: string
+	adminSignature?: string
+	signerEOA?: string
+}): Promise<
+	| {
+		success: true
+		preChecked: {
+			cardAddress: string
+			data: string
+			deadline: number
+			nonce: string
+			adminSignature: string
+		}
+	}
+	| { success: false; error: string }
+> => {
+	const cardAddress = String(body.cardAddress ?? '').trim()
+	const data = String(body.data ?? '').trim()
+	const nonce = String(body.nonce ?? '').trim()
+	const adminSignature = String(body.adminSignature ?? '').trim()
+	const signerEOA = String(body.signerEOA ?? '').trim()
+	const deadline = Number(body.deadline)
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!data || !ethers.isHexString(data) || data.length < 10) return { success: false, error: 'Invalid data' }
+	if (!Number.isFinite(deadline) || deadline <= 0) return { success: false, error: 'Invalid deadline' }
+	if (!nonce) return { success: false, error: 'Missing nonce' }
+	if (!adminSignature || !ethers.isHexString(adminSignature)) return { success: false, error: 'Invalid adminSignature' }
+	if (signerEOA && !ethers.isAddress(signerEOA)) return { success: false, error: 'Invalid signerEOA' }
+
+	const selector = data.slice(0, 10).toLowerCase()
+	if (selector !== MINT_ISSUED_NFT_BY_OWNER_SELECTOR) {
+		return { success: false, error: 'Data must be mintIssuedNftByOwner calldata' }
+	}
+
+	try {
+		const decoded = mintIssuedNftByOwnerIface.parseTransaction({ data })
+		if (!decoded || decoded.name !== 'mintIssuedNftByOwner') {
+			return { success: false, error: 'Invalid mintIssuedNftByOwner calldata' }
+		}
+		const to = decoded.args[0] as string
+		const tokenId = BigInt(decoded.args[1] as bigint)
+		const amount = BigInt(decoded.args[2] as bigint)
+		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid recipient in calldata' }
+		if (tokenId < ISSUED_NFT_START_ID_MEMBER) return { success: false, error: 'tokenId must be issued NFT tokenId' }
+		if (amount <= 0n) return { success: false, error: 'amount must be > 0' }
+
+		const cardNorm = ethers.getAddress(cardAddress)
+		const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
+			cardAddr: cardNorm,
+			data,
+			deadline,
+			nonce,
+			adminSignature,
+		})
+		if (!adminCheck.ok) return { success: false, error: adminCheck.error }
+		if (signerEOA && ethers.getAddress(signerEOA) !== ethers.getAddress(adminCheck.signer)) {
+			return {
+				success: false,
+				error: `signerEOA mismatch. signerEOA=${ethers.getAddress(signerEOA)} recovered=${ethers.getAddress(adminCheck.signer)}`,
+			}
+		}
+
+		return {
+			success: true,
+			preChecked: {
+				cardAddress: cardNorm,
+				data,
+				deadline,
+				nonce,
+				adminSignature,
+			},
+		}
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
 	}
 }
 
@@ -14184,7 +14417,6 @@ export const cardCouponPosClaimWalletProcess = async () => {
 		await ensureAAForEOAOnCard(obj.cardAddress, userNorm, SC)
 
 		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
-		const poolFactoryAddr = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
 		const claimContractABI = [
 			'function claimIssuedNftForUserByPosAdmin(address cardAddr,address userEOA,uint256 tokenId,address posAdminEOA)',
 			'error BM_ZeroAddress()',
@@ -14197,10 +14429,11 @@ export const cardCouponPosClaimWalletProcess = async () => {
 			'error UC_InvalidTokenId(uint256 tokenId, uint256 minTokenId)',
 			'error UC_ResolveAccountFailed(address eoa, address aaFactory, address acct)',
 		]
-		const claimContract =
-			cardGateway.toLowerCase() === poolFactoryAddr.toLowerCase()
-				? SC.baseFactoryPaymaster
-				: new ethers.Contract(cardGateway, claimContractABI, SC.walletBase)
+		const claimContract = new ethers.Contract(
+			cardGateway,
+			claimContractABI,
+			SC.walletBase
+		)
 
 		const tx = await claimContract.claimIssuedNftForUserByPosAdmin(
 			obj.cardAddress,

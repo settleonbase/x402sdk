@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import {
 	filterApiExcludedCardRows,
@@ -2649,6 +2649,62 @@ const routing = ( router: Router ) => {
 		})
 		if ('error' in result) return res.status(400).json({ success: false, error: result.error })
 		res.status(200).json(result).end()
+	})
+
+	/** POS 余额页 open coupon 领取 prepare：返回 mintIssuedNftByOwner executeForAdmin 载荷（POS admin 签字）。 */
+	router.post('/cardCouponPosClaimPrepare', async (req, res) => {
+		const pre = await cardCouponPosClaimPreparePreCheck(req.body)
+		if (!pre.success) {
+			logger(Colors.red(`server /api/cardCouponPosClaimPrepare preCheck FAIL: ${pre.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: pre.error }).end()
+		}
+		const out = pre.preChecked
+		logger(
+			Colors.green(`server /api/cardCouponPosClaimPrepare preCheck OK`),
+			inspect(
+				{
+					cardAddress: out.cardAddress,
+					couponId: out.couponId,
+					userEOA: out.userEOA,
+					tokenId: out.tokenId,
+				},
+				false,
+				2,
+				true
+			)
+		)
+		return res.status(200).json({
+			success: true,
+			cardAddress: out.cardAddress,
+			couponId: out.couponId,
+			userEOA: out.userEOA,
+			tokenId: out.tokenId,
+			data: out.data,
+			deadline: out.deadline,
+			nonce: out.nonce,
+			factoryGateway: out.factoryGateway,
+		}).end()
+	})
+
+	/** POS 余额页 open coupon 领取 submit：admin 对 prepare 返回的 payload 做 ExecuteForAdmin 签字后提交。 */
+	router.post('/cardCouponPosClaimSubmit', async (req, res) => {
+		const pre = await cardCouponPosClaimSubmitPreCheck(req.body)
+		if (!pre.success) {
+			logger(Colors.red(`server /api/cardCouponPosClaimSubmit preCheck FAIL: ${pre.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: pre.error }).end()
+		}
+		const out = pre.preChecked
+		logger(
+			Colors.green(`server /api/cardCouponPosClaimSubmit preCheck OK, forwarding to master executeForAdmin`),
+			inspect({ cardAddress: out.cardAddress }, false, 2, true)
+		)
+		postLocalhost('/api/executeForAdmin', {
+			cardAddr: out.cardAddress,
+			data: out.data,
+			deadline: out.deadline,
+			nonce: out.nonce,
+			adminSignature: out.adminSignature,
+		}, res)
 	})
 
 	/** POS 余额页消费券：预检 couponId/tokenId 与用户余额，返回 executeForAdmin 载荷（POS admin 签字）。 */
@@ -6543,19 +6599,15 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/cardCouponOpenClaim', preCheck.preChecked, res)
 	})
 
-	/** cardCouponPosClaim：POS Balance 一键领取（NFC 私钥签名 或 QR/钱包 + 终端 admin 代领）。 */
+	/** cardCouponPosClaim：POS Balance 一键领取（NFC 私钥 → openClaim；QR/钱包 → cardCouponPosClaimPrepare + Submit）。 */
 	router.post('/cardCouponPosClaim', async (req, res) => {
 		const preCheck = await cardCouponPosClaimPreCheck(req.body)
 		if (!preCheck.success) {
 			logger(Colors.red(`server /api/cardCouponPosClaim preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
-		if (preCheck.route === 'posWallet') {
-			logger(
-				Colors.green(`server /api/cardCouponPosClaim preCheck OK (posWallet), forwarding to master`),
-				inspect(preCheck.preChecked, false, 2, true)
-			)
-			return postLocalhost('/api/cardCouponPosClaimWallet', preCheck.preChecked, res)
+		if (preCheck.route !== 'openClaim') {
+			return res.status(400).json({ success: false, error: 'Unexpected claim route' }).end()
 		}
 		logger(
 			Colors.green(`server /api/cardCouponPosClaim preCheck OK (openClaim), forwarding to master`),
@@ -6812,6 +6864,31 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			inspect({ cardAddress }, false, 2, true)
 		)
 		postLocalhost('/api/updateCardMerchantImage', { cardAddress, merchantImage }, res)
+	})
+
+	/** 仅更新 program square `image` URL（或清除）；Cluster 预检后转发 Master。 */
+	router.post('/updateCardProgramImage', async (req, res) => {
+		const body = req.body as { cardAddress?: unknown; image?: unknown }
+		const cardAddress = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : ''
+		const image = typeof body.image === 'string' ? body.image : ''
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end()
+		}
+		const imageTrim = image.trim()
+		if (imageTrim && !isAllowedMerchantImageHttpsUrl(imageTrim)) {
+			return res
+				.status(400)
+				.json({
+					success: false,
+					error: 'image must be a non-localhost https URL (max 2048 characters).',
+				})
+				.end()
+		}
+		logger(
+			Colors.green('server /api/updateCardProgramImage preCheck OK, forwarding to master'),
+			inspect({ cardAddress }, false, 2, true)
+		)
+		postLocalhost('/api/updateCardProgramImage', { cardAddress, image }, res)
 	})
 
 	/** cardUpdateTiers：owner 离线签字整体替换 BeamioUserCard.tiers，并同步 card metadata。 */
