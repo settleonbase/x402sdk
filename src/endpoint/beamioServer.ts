@@ -718,6 +718,9 @@ const ERC1155_METADATA_PATH_RE = /^(?:0x)?([0-9a-fA-F]{40})([0-9a-fA-F]{64})\.js
 const DEFAULT_METADATA_IMAGE_URL =
 	'https://ipfs.conet.network/api/getFragment?hash=0x6022e4efb44990767d1faa1642f570ed8a49ab0417b370aaae35f84884061c97'
 
+/** EIP-1155 metadata schema `decimals` for token #0 (matches BeamioUserCard `POINTS_DECIMALS`). */
+const BEAMIO_POINTS_METADATA_DECIMALS = 6
+
 /** Coupon / catalog issued-NFT: map banner + icon into OpenSea `image` (BaseScan only reads `image`). */
 const resolveBeamioSeriesExplorerImage = (meta: JsonObject): string | undefined => {
 	const props = isJsonObject(meta.properties) ? meta.properties : {}
@@ -810,6 +813,8 @@ const normalizeExplorerMetadata = (
 		image?: string
 		externalUrl?: string
 		attributes?: unknown[]
+		/** EIP-1155 metadata schema: display divisor for on-chain quantity (e.g. 6 → ÷ 1e6). */
+		decimals?: number
 		extra?: JsonObject
 	}
 ): JsonObject => {
@@ -837,6 +842,7 @@ const normalizeExplorerMetadata = (
 	for (const [key, value] of Object.entries(meta)) {
 		if (out[key] === undefined) out[key] = value
 	}
+	if (defaults.decimals !== undefined) out.decimals = defaults.decimals
 	return out
 }
 
@@ -5206,11 +5212,16 @@ const routing = ( router: Router ) => {
 			if (tokenIdBigInt === 0n) {
 				out = normalizeExplorerMetadata(merged, {
 					name: `${cardName} Points`,
-					description: `${cardName} ERC-1155 points balance token on Beamio.`,
+					description: `${cardName} ERC-1155 points balance token on Beamio. On-chain quantity uses ${BEAMIO_POINTS_METADATA_DECIMALS} decimal places (divide by 1,000,000 for display).`,
 					image: defaultImage,
+					decimals: BEAMIO_POINTS_METADATA_DECIMALS,
 					attributes: [
 						{ trait_type: 'asset_type', value: 'POINTS' },
 						{ trait_type: 'token_id', value: tokenId },
+						{
+							trait_type: 'display_decimals',
+							value: String(BEAMIO_POINTS_METADATA_DECIMALS),
+						},
 					],
 					extra: baseExtra,
 				})
