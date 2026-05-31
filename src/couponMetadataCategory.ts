@@ -12,7 +12,7 @@ export const BEAMIO_COUPON_NFT_CATEGORY = 'Coupon' as const
 export const BEAMIO_PRODUCTION_NFT_CATEGORY = 'productions' as const
 
 /** Catalog item global categories — stored on metadata root `category` (same level as coupon `Coupon`). */
-export const BEAMIO_CATALOG_GLOBAL_CATEGORIES = ['Product', 'Service', 'Menu', 'SalesManagement'] as const
+export const BEAMIO_CATALOG_GLOBAL_CATEGORIES = ['Product', 'Service', 'Menu', 'ShareLink', 'SalesManagement'] as const
 
 export type BeamioCatalogGlobalCategory = (typeof BEAMIO_CATALOG_GLOBAL_CATEGORIES)[number]
 

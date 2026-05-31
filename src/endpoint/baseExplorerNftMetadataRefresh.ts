@@ -1,9 +1,19 @@
 import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
+import {
+	BEAMIO_ISSUED_NFT_START_ID,
+	BEAMIO_MEMBERSHIP_NFT_START_ID,
+	listMembershipNftTierTokenIdsByCard,
+} from '../db'
 import { warmIssuedNftExplorerOgJpeg, resolveIssuedNftExplorerShareMeta } from './couponClaimShare'
+import { resolveBeamioBaseHttpRpcUrl } from '../util'
 
 const ISSUED_NFT_START_ID = 100_000_000_000n
+const MEMBERSHIP_NFT_START_ID = BigInt(BEAMIO_MEMBERSHIP_NFT_START_ID)
+const MEMBERSHIP_REFETCH_DELAY_MS = 280
+
+const BEAMIO_CARD_MEMBERSHIP_COUNT_ABI = ['function totalMembershipIssued() view returns (uint256)']
 const BASE_CHAIN_SLUG = 'base'
 /** Base mainnet — Blockscout PRO REST uses `https://api.blockscout.com/{chainId}/api/v2/...` */
 export const BLOCKSCOUT_BASE_CHAIN_ID = 8453
@@ -149,9 +159,92 @@ export async function requestBlockscoutErc1155MetadataRefetch(opts: {
 	return { ok, channels, errors }
 }
 
-/** Fire-and-forget: refresh Blockscout index for card-level `0x{card}0.json` (token #0). */
+function sleepMs(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Membership minted tokenIds: [NFT_START_ID, NFT_START_ID + totalMembershipIssued) plus DB tier rows. */
+export async function listMembershipTokenIdsForBlockscoutRefetch(
+	contractAddress: string
+): Promise<string[]> {
+	let card: string
+	try {
+		card = ethers.getAddress(contractAddress)
+	} catch {
+		return []
+	}
+	const ids = new Set<string>()
+	for (const tid of await listMembershipNftTierTokenIdsByCard(card)) {
+		if (tid >= BEAMIO_MEMBERSHIP_NFT_START_ID && tid < BEAMIO_ISSUED_NFT_START_ID) {
+			ids.add(String(tid))
+		}
+	}
+	try {
+		const provider = new ethers.JsonRpcProvider(resolveBeamioBaseHttpRpcUrl())
+		const cardContract = new ethers.Contract(card, BEAMIO_CARD_MEMBERSHIP_COUNT_ABI, provider)
+		const total = await cardContract.totalMembershipIssued()
+		const totalN = Number(total)
+		if (Number.isFinite(totalN) && totalN > 0) {
+			const start = BEAMIO_MEMBERSHIP_NFT_START_ID
+			const end = Math.min(start + totalN, BEAMIO_ISSUED_NFT_START_ID)
+			for (let tid = start; tid < end; tid++) ids.add(String(tid))
+		}
+	} catch (e: unknown) {
+		logger(
+			Colors.yellow(
+				`[blockscoutMetadataRefetch] totalMembershipIssued read failed card=${card}: ${e instanceof Error ? e.message : e}`
+			)
+		)
+	}
+	return [...ids].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0))
+}
+
+/**
+ * Refetch Blockscout for token #0 and every membership NFT id in [100, currentIndex) space.
+ * `currentIndex` ≈ NFT_START_ID + totalMembershipIssued() on-chain.
+ */
+export async function requestBlockscoutCardCatalogMetadataRefetch(
+	contractAddress: string
+): Promise<BlockscoutMetadataRefetchResult> {
+	const channels: string[] = []
+	const errors: string[] = []
+
+	const r0 = await requestBlockscoutErc1155MetadataRefetch({
+		contractAddress,
+		tokenId: '0',
+	})
+	channels.push(...r0.channels)
+	errors.push(...r0.errors)
+
+	const membershipIds = await listMembershipTokenIdsForBlockscoutRefetch(contractAddress)
+	for (const tid of membershipIds) {
+		if (tid === '0') continue
+		try {
+			const tidBig = BigInt(tid)
+			if (tidBig < MEMBERSHIP_NFT_START_ID || tidBig >= ISSUED_NFT_START_ID) continue
+		} catch {
+			continue
+		}
+		const r = await requestBlockscoutErc1155MetadataRefetch({ contractAddress, tokenId: tid })
+		channels.push(...r.channels)
+		errors.push(...r.errors)
+		await sleepMs(MEMBERSHIP_REFETCH_DELAY_MS)
+	}
+
+	const ok = channels.length > 0
+	if (ok) {
+		logger(
+			Colors.cyan(
+				`[blockscoutMetadataRefetch] card catalog card=${contractAddress} membershipCount=${membershipIds.length} channels=${channels.length}`
+			)
+		)
+	}
+	return { ok, channels, errors }
+}
+
+/** Fire-and-forget: token #0 + membership ids [NFT_START_ID, NFT_START_ID + totalMembershipIssued). */
 export function scheduleBeamioUserCardBlockscoutMetadataRefetch(contractAddress: string): void {
-	void requestBlockscoutErc1155MetadataRefetch({ contractAddress }).catch((e: unknown) => {
+	void requestBlockscoutCardCatalogMetadataRefetch(contractAddress).catch((e: unknown) => {
 		logger(
 			Colors.yellow('[blockscoutMetadataRefetch] schedule failed:'),
 			e instanceof Error ? e.message : e

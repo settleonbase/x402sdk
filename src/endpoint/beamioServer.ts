@@ -58,6 +58,12 @@ import {
 	warmIssuedNftExplorerOgJpeg,
 } from './couponClaimShare'
 import { requestExplorerNftMetadataRefresh } from './baseExplorerNftMetadataRefresh'
+import {
+	DEFAULT_METADATA_IMAGE_PROXY_URL,
+	explorerProxyImageUrl,
+	registerBeamioFragmentProxyRoute,
+	resolveCatalogPointsExplorerImageUrl,
+} from './beamioFragmentImageProxy'
 
 type CouponClaimShareQuery = {
 	target?: string
@@ -242,6 +248,8 @@ const BURN_CHARGE_REWARD_BY_ADMIN_SELECTOR = '0x' + ethers.id('burnChargeRewardB
 const BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR = '0x' + ethers.id('burnIssuedNftByGateway(address,uint256,uint256)').slice(2, 10)
 
 const ISSUED_NFT_START_ID = 100_000_000_000n
+/** Fungible / catalog ERC-1155 ids 0–99; membership NFTs start at 100 (BeamioERC1155Logic). */
+const MEMBERSHIP_NFT_START_ID = 100n
 
 /** 仅 issued NFT 读函数，避免依赖完整 ABI 同步 */
 const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
@@ -714,7 +722,7 @@ const masterSessionConsumePosSig = async (sid: string): Promise<
 type JsonObject = Record<string, unknown>
 
 const ERC1155_METADATA_PATH_RE = /^(?:0x)?([0-9a-fA-F]{40})([0-9a-fA-F]{64})\.json$/
-/** Fallback when series/card has no renderable image (must return 200 + image/* for BaseScan). */
+/** Fallback when series/card has no renderable image (ipfs hash; explorers get proxy via token #0 rewrite). */
 const DEFAULT_METADATA_IMAGE_URL =
 	'https://ipfs.conet.network/api/getFragment?hash=0x6022e4efb44990767d1faa1642f570ed8a49ab0417b370aaae35f84884061c97'
 
@@ -5145,6 +5153,8 @@ const routing = ( router: Router ) => {
 		}
 	})
 
+	registerBeamioFragmentProxyRoute(router)
+
 	/** GET /api/metadata/0x{contract}{64hexTokenId}.json - BaseScan/ERC-1155 兼容元数据路由 */
 	router.get('/metadata/:resource', async (req, res) => {
 		const resource = typeof req.params.resource === 'string' ? req.params.resource : ''
@@ -5189,12 +5199,14 @@ const routing = ( router: Router ) => {
 					sharedSeriesMetadata = series.metadata
 				}
 				tokenMeta = mergeMetadataObjects(series?.metadata, sharedSeriesMetadata)
-			} else if (tokenIdBigInt > 0n) {
+			} else if (tokenIdBigInt >= MEMBERSHIP_NFT_START_ID && tokenIdBigInt < ISSUED_NFT_START_ID) {
 				const tierMetaByOwner = cardRow?.cardOwner
 					? await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, tokenIdBigInt)
 					: null
 				const tierMetaByCard = await getNftTierMetadataByCardAndToken(cardAddress, tokenIdBigInt)
 				tokenMeta = mergeMetadataObjects(tierMetaByOwner, tierMetaByCard)
+			} else if (tokenIdBigInt > 0n) {
+				tokenMeta = mergeMetadataObjects(cardMeta.pointsMetadata, cardProps.pointsMetadata)
 			} else {
 				tokenMeta = mergeMetadataObjects(
 					cardMeta.pointsMetadata,
@@ -5208,12 +5220,14 @@ const routing = ( router: Router ) => {
 				token_id: tokenId,
 			}
 
+			const catalogPointsImage = resolveCatalogPointsExplorerImageUrl(defaultImage)
+
 			let out: JsonObject
 			if (tokenIdBigInt === 0n) {
 				out = normalizeExplorerMetadata(merged, {
 					name: `${cardName} Points`,
 					description: `${cardName} ERC-1155 points balance token on Beamio. On-chain quantity uses ${BEAMIO_POINTS_METADATA_DECIMALS} decimal places (divide by 1,000,000 for display).`,
-					image: defaultImage,
+					image: catalogPointsImage,
 					decimals: BEAMIO_POINTS_METADATA_DECIMALS,
 					attributes: [
 						{ trait_type: 'asset_type', value: 'POINTS' },
@@ -5225,17 +5239,40 @@ const routing = ( router: Router ) => {
 					],
 					extra: baseExtra,
 				})
+				out.image = catalogPointsImage
+			} else if (tokenIdBigInt < MEMBERSHIP_NFT_START_ID) {
+				const mergedCatalog: JsonObject = { ...merged }
+				delete mergedCatalog.image
+				delete mergedCatalog.image_url
+				delete mergedCatalog.imageUrl
+				out = normalizeExplorerMetadata(mergedCatalog, {
+					name: `${cardName} #${tokenId}`,
+					description: `${cardName} program token #${tokenId} on Beamio.`,
+					image: catalogPointsImage,
+					attributes: [
+						{ trait_type: 'asset_type', value: 'CATALOG' },
+						{ trait_type: 'token_id', value: tokenId },
+					],
+					extra: baseExtra,
+				})
+				out.image = catalogPointsImage
 			} else if (tokenIdBigInt < ISSUED_NFT_START_ID) {
+				const membershipImage =
+					explorerProxyImageUrl(defaultImage) ?? DEFAULT_METADATA_IMAGE_PROXY_URL
 				out = normalizeExplorerMetadata(merged, {
 					name: `${cardName} Membership #${tokenId}`,
 					description: `${cardName} membership NFT #${tokenId}.`,
-					image: defaultImage,
+					image: membershipImage,
 					attributes: [
 						{ trait_type: 'asset_type', value: 'MEMBERSHIP' },
 						{ trait_type: 'token_id', value: tokenId },
 					],
 					extra: baseExtra,
 				})
+				const proxiedMembershipImage = explorerProxyImageUrl(
+					typeof out.image === 'string' ? out.image : undefined
+				)
+				if (proxiedMembershipImage) out.image = proxiedMembershipImage
 			} else {
 				const seriesMetaForRev = mergeMetadataObjects(tokenMeta, sharedSeriesMetadata)
 				const metaRev = computeIssuedSeriesMetadataRevision(seriesMetaForRev)

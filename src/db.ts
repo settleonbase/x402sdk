@@ -3813,6 +3813,37 @@ export const getNftTierMetadataByOwnerAndToken = async (cardOwner: string, token
 	}
 }
 
+/** 会员档 NFT tokenId 区间（与 BeamioERC1155Logic 一致）。 */
+export const BEAMIO_MEMBERSHIP_NFT_START_ID = 100
+export const BEAMIO_ISSUED_NFT_START_ID = 100_000_000_000
+
+/** 已登记在 DB 的会员档 tokenId（供 Blockscout 批量 refetch）。 */
+export const listMembershipNftTierTokenIdsByCard = async (cardAddress: string): Promise<number[]> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const normalized = cardAddress.toLowerCase().startsWith('0x')
+			? cardAddress.toLowerCase()
+			: '0x' + cardAddress.toLowerCase()
+		const { rows } = await db.query<{ token_id: number }>(
+			`SELECT token_id FROM beamio_nft_tier_metadata
+			 WHERE card_address = $1 AND token_id >= $2 AND token_id < $3
+			 ORDER BY token_id ASC`,
+			[normalized, BEAMIO_MEMBERSHIP_NFT_START_ID, BEAMIO_ISSUED_NFT_START_ID]
+		)
+		return rows.map((r) => Number(r.token_id)).filter((n) => Number.isFinite(n))
+	} catch (e: unknown) {
+		logger(
+			Colors.yellow(
+				`[listMembershipNftTierTokenIdsByCard] failed: ${e instanceof Error ? e.message : e}`
+			)
+		)
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 按 ERC-1155 合约地址 + tokenId 查询该 NFT 的 tier metadata。GET /metadata/0x{cardAddress}{tokenId}.json 用，符合 Base Explorer / EIP-1155 约定（40hex 为合约地址）。 */
 export const getNftTierMetadataByCardAndToken = async (cardAddress: string, tokenId: number | bigint): Promise<Record<string, unknown> | null> => {
 	const db = new Client({ connectionString: DB_URL })
@@ -4289,11 +4320,11 @@ export const listCouponIssuedNftSeriesForCardDescending = async (
 /** SQL predicate: beamio_nft_series row is a Program productions / service catalog issued series. */
 const PRODUCTION_ISSUED_SERIES_METADATA_WHERE = `
 (
-	(metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'SalesManagement', 'productions')
+	(metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'ShareLink', 'SalesManagement', 'productions')
 	OR (
 		metadata_json ? 'properties'
 		AND (
-			(metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'SalesManagement', 'productions')
+			(metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'ShareLink', 'SalesManagement', 'productions')
 			OR (metadata_json->'properties') ? 'beamioProduction'
 		)
 	)
@@ -4301,12 +4332,12 @@ const PRODUCTION_ISSUED_SERIES_METADATA_WHERE = `
 )
 AND (
 	NOT (metadata_json ? 'category')
-	OR (metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'SalesManagement', 'productions')
+	OR (metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'ShareLink', 'SalesManagement', 'productions')
 )
 AND (
 	NOT (metadata_json ? 'properties')
 	OR NOT ((metadata_json->'properties') ? 'category')
-	OR (metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'SalesManagement', 'productions')
+	OR (metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'ShareLink', 'SalesManagement', 'productions')
 )
 `
 

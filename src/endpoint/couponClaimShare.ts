@@ -83,7 +83,7 @@ export type CouponClaimShareMeta = {
 	shareHeadline: string
 	title: string
 	subtitle: string
-	/** Catalog only — Product | Service | Menu | SalesManagement. */
+	/** Catalog only — Product | Service | Menu | ShareLink | SalesManagement. */
 	globalCategory?: string
 	/** Catalog only — resolved item category chip label. */
 	itemCategory?: string
@@ -210,6 +210,7 @@ const catalogGlobalCategoryLabel = (id: BeamioCatalogGlobalCategory): string => 
 	if (s === 'Product') return 'Product'
 	if (s === 'Menu') return 'Menu'
 	if (s === 'SalesManagement') return 'Sales Management'
+	if (s === 'ShareLink') return 'Share link'
 	return 'Service'
 }
 
