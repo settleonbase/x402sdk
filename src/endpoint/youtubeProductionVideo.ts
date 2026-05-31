@@ -63,18 +63,29 @@ type YoutubeOEmbedResponse = {
 	thumbnail_url?: string
 }
 
-/** Prefer `@handle` from `https://www.youtube.com/@handle` oEmbed author_url. */
+/** oEmbed often returns percent-encoded handles in `author_url` (e.g. `/@%E7%9D%A1…`). */
+export function decodeYoutubeUrlPathSegment(segment: string): string {
+	const raw = String(segment ?? '').trim()
+	if (!raw) return ''
+	try {
+		return decodeURIComponent(raw.replace(/\+/g, ' '))
+	} catch {
+		return raw
+	}
+}
+
+/** Prefer decoded `@handle` from `https://www.youtube.com/@handle` oEmbed author_url. */
 export function youtubeChannelUsernameFromAuthorUrl(authorUrl: string, authorName: string): string {
 	const url = String(authorUrl ?? '').trim()
 	if (url) {
 		try {
 			const parsed = new URL(url)
 			const handleMatch = parsed.pathname.match(/^\/@([^/?#]+)/)
-			if (handleMatch?.[1]) return handleMatch[1].trim()
+			if (handleMatch?.[1]) return decodeYoutubeUrlPathSegment(handleMatch[1])
 			const userMatch = parsed.pathname.match(/^\/user\/([^/?#]+)/)
-			if (userMatch?.[1]) return userMatch[1].trim()
+			if (userMatch?.[1]) return decodeYoutubeUrlPathSegment(userMatch[1])
 			const cMatch = parsed.pathname.match(/^\/c\/([^/?#]+)/)
-			if (cMatch?.[1]) return cMatch[1].trim()
+			if (cMatch?.[1]) return decodeYoutubeUrlPathSegment(cMatch[1])
 		} catch {
 			// fall through
 		}
