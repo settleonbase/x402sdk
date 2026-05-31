@@ -141,6 +141,7 @@ import {
 } from './endpoint/resolveBeamioAaViaUserCardFactory'
 import { pickBestMembershipNftByMinUsdc6, type RawNftOwnershipRow } from './endpoint/membershipTierPick'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './endpoint/tierMetadataRowResolve'
+import { scheduleBeamioUserCardBlockscoutMetadataRefetch } from './endpoint/baseExplorerNftMetadataRefresh'
 import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
 import { isApiExcludedUserCard } from './apiExcludedUserCards'
 
@@ -10351,6 +10352,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
 			txHash: row.txHash ?? undefined,
 		})
+		scheduleBeamioUserCardBlockscoutMetadataRefetch(cardAddr)
 		return { success: true }
 	} catch (e: any) {
 		return { success: false, error: e?.message ?? String(e) }
@@ -10632,6 +10634,7 @@ export const createCardPoolPress = async () => {
 			}
 		}
 		logger(Colors.green(`[createCardPoolPress] card created: ${cardAddress} hash=${hash}`))
+		scheduleBeamioUserCardBlockscoutMetadataRefetch(cardAddr)
 		registerCardToDb({
 			cardAddress,
 			cardOwner,

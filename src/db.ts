@@ -4289,11 +4289,11 @@ export const listCouponIssuedNftSeriesForCardDescending = async (
 /** SQL predicate: beamio_nft_series row is a Program productions / service catalog issued series. */
 const PRODUCTION_ISSUED_SERIES_METADATA_WHERE = `
 (
-	(metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'productions')
+	(metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'SalesManagement', 'productions')
 	OR (
 		metadata_json ? 'properties'
 		AND (
-			(metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'productions')
+			(metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'SalesManagement', 'productions')
 			OR (metadata_json->'properties') ? 'beamioProduction'
 		)
 	)
@@ -4301,12 +4301,12 @@ const PRODUCTION_ISSUED_SERIES_METADATA_WHERE = `
 )
 AND (
 	NOT (metadata_json ? 'category')
-	OR (metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'productions')
+	OR (metadata_json->>'category') IN ('Product', 'Service', 'Menu', 'SalesManagement', 'productions')
 )
 AND (
 	NOT (metadata_json ? 'properties')
 	OR NOT ((metadata_json->'properties') ? 'category')
-	OR (metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'productions')
+	OR (metadata_json->'properties'->>'category') IN ('Product', 'Service', 'Menu', 'SalesManagement', 'productions')
 )
 `
 
