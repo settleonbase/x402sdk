@@ -18,6 +18,12 @@ import {
 	normalizeBeamioCatalogGlobalCategory,
 	type BeamioCatalogGlobalCategory,
 } from '../couponMetadataCategory'
+import {
+	flattenIssuedProductionSeriesMetadata,
+	inferProductionImageMimeFromUrl,
+	resolveCatalogProductionSharePresentation,
+	type CatalogProductionVideoOgLayout,
+} from '../catalogProductionVideoOg'
 import { buildOgTextComposites, type OgTextLayer } from './couponClaimShareOgText'
 
 const BEAMIO_APP_ORIGIN = 'https://beamio.app'
@@ -44,7 +50,7 @@ const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 21
+const OG_LAYOUT_REV = 23
 /** Cross-worker OG JPEG cache (Cluster forks do not share in-memory ogImageCache). */
 const OG_DISK_CACHE_DIR = path.join(os.tmpdir(), 'beamio-og-share-cache', `v${OG_LAYOUT_REV}`)
 
@@ -87,6 +93,10 @@ export type CouponClaimShareMeta = {
 	globalCategory?: string
 	/** Catalog only — resolved item category chip label. */
 	itemCategory?: string
+	/** Catalog video background — YouTube OG row (icon right, title = video subtitle). */
+	catalogLayout?: CatalogProductionVideoOgLayout
+	/** Catalog video — `@publisherTag · channelName` below title/description. */
+	publisherLine?: string
 	iconUrl: string
 	backgroundImage: string
 	backgroundColorHex: string
@@ -226,11 +236,14 @@ const readMetadataProductionId = (meta: Record<string, unknown> | null): string 
 type ProductionShareFields = {
 	name: string
 	subtitle: string
+	description: string
 	globalCategory: string
 	itemCategoryId: string
 	iconUrl: string
 	backgroundImage: string
+	backgroundImageMime: string
 	backgroundColorHex: string
+	publisherBeamioTag: string
 }
 
 const readProductionShareFields = (meta: Record<string, unknown> | null): ProductionShareFields => {
@@ -238,15 +251,23 @@ const readProductionShareFields = (meta: Record<string, unknown> | null): Produc
 		return {
 			name: '',
 			subtitle: '',
+			description: '',
 			globalCategory: 'Service',
 			itemCategoryId: '',
 			iconUrl: '',
 			backgroundImage: '',
+			backgroundImageMime: '',
 			backgroundColorHex: '#ea580c',
+			publisherBeamioTag: '',
 		}
 	}
 	const props = asRecord(meta.properties)
-	const beamioProduction = asRecord(props?.beamioProduction)
+	const fromPropsBp = asRecord(props?.beamioProduction)
+	const fromRootBp = asRecord(meta.beamioProduction)
+	const beamioProduction =
+		fromPropsBp || fromRootBp
+			? ({ ...fromPropsBp, ...fromRootBp } as Record<string, unknown>)
+			: undefined
 	const globalCategory = catalogGlobalCategoryLabel(
 		normalizeBeamioCatalogGlobalCategory(meta.category ?? props?.category ?? beamioProduction?.category)
 	)
@@ -260,23 +281,67 @@ const readProductionShareFields = (meta: Record<string, unknown> | null): Produc
 		readString(beamioProduction?.subtitle) ||
 		readString(meta.subtitle) ||
 		''
+	const description =
+		readString(beamioProduction?.description) ||
+		readString(meta.description) ||
+		''
 	const iconUrl = readString(beamioProduction?.icon) || readString(meta.icon) || readString(meta.iconUrl)
 	const backgroundImage =
 		readString(beamioProduction?.productionImage) ||
 		readString(meta.productionImage) ||
 		readString(meta.backgroundImage)
+	let backgroundImageMime =
+		readString(beamioProduction?.productionImageMime) || readString(meta.productionImageMime) || ''
+	if (!backgroundImageMime.trim() && backgroundImage.trim()) {
+		backgroundImageMime = inferProductionImageMimeFromUrl(backgroundImage)
+	}
 	const bgRaw =
 		readString(beamioProduction?.backgroundColor) ||
 		readMetadataStringFromKeys(meta, COUPON_BACKGROUND_COLOR_KEYS)
 	const backgroundColorHex = bgRaw ? (bgRaw.startsWith('#') ? bgRaw : `#${bgRaw}`) : '#ea580c'
+	const publisherBeamioTag =
+		readString(beamioProduction?.publisherBeamioTag) ||
+		readString(meta.publisherBeamioTag) ||
+		readString(meta.publisherAccountName) ||
+		''
 	return {
 		name,
 		subtitle,
+		description,
 		globalCategory,
 		itemCategoryId,
 		iconUrl,
 		backgroundImage,
+		backgroundImageMime,
 		backgroundColorHex,
+		publisherBeamioTag,
+	}
+}
+
+function buildCatalogCouponClaimShareCopy(fields: ProductionShareFields): {
+	catalogLayout: CatalogProductionVideoOgLayout
+	title: string
+	subtitle: string
+	publisherLine?: string
+	iconUrl: string
+	backgroundImage: string
+} {
+	const presentation = resolveCatalogProductionSharePresentation({
+		channelName: fields.name,
+		videoTitle: fields.subtitle,
+		description: fields.description,
+		productionImage: fields.backgroundImage,
+		productionImageMime: fields.backgroundImageMime,
+		iconUrl: fields.iconUrl,
+		publisherBeamioTag: fields.publisherBeamioTag,
+	})
+	return {
+		catalogLayout: presentation.layout,
+		title: presentation.title,
+		subtitle: presentation.subtitle,
+		...(presentation.publisherLine ? { publisherLine: presentation.publisherLine } : {}),
+		iconUrl: presentation.iconUrl,
+		backgroundImage: presentation.bannerImageUrl,
 	}
 }
 
@@ -836,6 +901,51 @@ async function lookupCouponSeriesMeta(
 	return { matchedMeta: null, validBeforeSec: null }
 }
 
+function lookupProductionRowFromShareTokenMetadata(
+	cardRow: { metadata?: unknown } | null | undefined,
+	wantedProductionId: string
+): Record<string, unknown> | null {
+	const shareTokenMetadata = asRecord(asRecord(cardRow?.metadata ?? null)?.shareTokenMetadata)
+	const productions = shareTokenMetadata?.productions
+	if (!Array.isArray(productions)) return null
+	for (const entry of productions) {
+		const row = asRecord(entry)
+		if (!row) continue
+		const id = readString(row.id) || readString(row.productionId)
+		if (id !== wantedProductionId) continue
+		return row
+	}
+	return null
+}
+
+function productionShareFieldsNeedShareTokenHydration(fields: ProductionShareFields): boolean {
+	if (fields.backgroundImage.trim()) return false
+	if (fields.subtitle.trim() || fields.description.trim()) return false
+	if (fields.name.trim() && fields.name !== 'Catalog Item') return false
+	return true
+}
+
+async function resolveCatalogSeriesMetaForShare(
+	cardNorm: string,
+	wantedProductionId: string,
+	seriesMeta: Record<string, unknown> | null
+): Promise<Record<string, unknown> | null> {
+	let merged = seriesMeta ? flattenIssuedProductionSeriesMetadata(seriesMeta) : null
+	let fields = readProductionShareFields(merged)
+	if (!productionShareFieldsNeedShareTokenHydration(fields)) return merged
+	try {
+		const cardRow = await getCardByAddress(cardNorm)
+		const fromShare = lookupProductionRowFromShareTokenMetadata(cardRow, wantedProductionId)
+		if (fromShare) {
+			const flatShare = flattenIssuedProductionSeriesMetadata(fromShare)
+			merged = { ...merged, ...flatShare }
+		}
+	} catch {
+		// ignore — keep flattened series meta
+	}
+	return merged
+}
+
 async function lookupProductionSeriesMeta(
 	cardNorm: string,
 	wantedProductionId: string
@@ -885,23 +995,27 @@ async function resolveOpenClaimShareMeta(
 	const expiresLabel = formatCouponExpiryPill(validBeforeSec)
 
 	if (distributionKind === 'catalog' && matchedMeta) {
-		const fields = readProductionShareFields(matchedMeta)
+		const enrichedMeta = await resolveCatalogSeriesMetaForShare(cardNorm, wantedId, matchedMeta)
+		const fields = readProductionShareFields(enrichedMeta)
 		const itemCategory = await resolveItemCategoryLabelForShare(cardNorm, fields.itemCategoryId)
-		const title = truncateText(fields.name, 48)
-		const subtitle = truncateText(fields.subtitle, 120)
+		const copy = buildCatalogCouponClaimShareCopy(fields)
+		const title = truncateText(copy.title, 48)
+		const subtitle = truncateText(copy.subtitle, 120)
 		return {
 			shareKind: 'open_claim',
 			distributionKind: 'catalog',
 			cardAddress: cardNorm,
 			couponId: wantedId,
 			merchantName,
-			shareHeadline: buildCatalogShareHeadline(merchantName),
+			shareHeadline: '',
 			title,
 			subtitle,
+			catalogLayout: copy.catalogLayout,
+			...(copy.publisherLine ? { publisherLine: truncateText(copy.publisherLine, 80) } : {}),
 			globalCategory: fields.globalCategory,
 			itemCategory,
-			iconUrl: fields.iconUrl,
-			backgroundImage: fields.backgroundImage,
+			iconUrl: copy.iconUrl,
+			backgroundImage: copy.backgroundImage,
 			backgroundColorHex: fields.backgroundColorHex,
 			validBeforeSec,
 			expiresLabel,
@@ -1043,10 +1157,12 @@ export async function resolveIssuedNftExplorerShareMeta(
 
 	if (metadataMatchesClientProductionCategoryFilter(matchedMeta)) {
 		const productionId = readMetadataProductionId(matchedMeta) || tid
-		const fields = readProductionShareFields(matchedMeta)
+		const enrichedMeta = await resolveCatalogSeriesMetaForShare(cardNorm, productionId, matchedMeta)
+		const fields = readProductionShareFields(enrichedMeta)
 		const itemCategory = await resolveItemCategoryLabelForShare(cardNorm, fields.itemCategoryId)
-		const title = truncateText(fields.name, 48)
-		const subtitle = truncateText(fields.subtitle, 120)
+		const copy = buildCatalogCouponClaimShareCopy(fields)
+		const title = truncateText(copy.title, 48)
+		const subtitle = truncateText(copy.subtitle, 120)
 		const shareUrl = buildCouponClaimAppDownloadUrl(cardNorm, productionId)
 		const rev = computeIssuedSeriesMetadataRevision(matchedMeta)
 		return {
@@ -1055,13 +1171,15 @@ export async function resolveIssuedNftExplorerShareMeta(
 			cardAddress: cardNorm,
 			couponId: productionId,
 			merchantName,
-			shareHeadline: buildCatalogShareHeadline(merchantName),
+			shareHeadline: '',
 			title,
 			subtitle,
+			catalogLayout: copy.catalogLayout,
+			...(copy.publisherLine ? { publisherLine: truncateText(copy.publisherLine, 80) } : {}),
 			globalCategory: fields.globalCategory,
 			itemCategory,
-			iconUrl: fields.iconUrl,
-			backgroundImage: fields.backgroundImage,
+			iconUrl: copy.iconUrl,
+			backgroundImage: copy.backgroundImage,
 			backgroundColorHex: fields.backgroundColorHex,
 			validBeforeSec,
 			expiresLabel,
@@ -1136,7 +1254,8 @@ type CouponClaimOgRasterParts = {
 async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promise<CouponClaimOgRasterParts> {
 	const imgPrep = OG_IMAGE_PREP_SCALE
 	const punchBg = '#f9f9fe'
-	const hasBanner = Boolean(meta.backgroundImage?.trim())
+	const isCatalogVideoOg = meta.catalogLayout === 'videoOg'
+	const hasBanner = isCatalogVideoOg || Boolean(meta.backgroundImage?.trim())
 	const capsuleX = 50
 	const capsuleW = 1100
 	const capsuleRx = hasBanner ? OG_BANNER_CAPSULE_RX : 28
@@ -1152,9 +1271,10 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const externalExpiryFill = urgent ? '#dc2626' : '#eef1f3'
 	const externalExpiryStroke = urgent ? '#dc2626' : 'rgba(171,173,175,0.35)'
 
-	const iconDataUrl = !hasBanner && meta.iconUrl
-		? await fetchImageCoverPngDataUrl(meta.iconUrl, iconSize * imgPrep, iconSize * imgPrep)
-		: null
+	const iconDataUrl =
+		!hasBanner && meta.iconUrl.trim()
+			? await fetchImageCoverPngDataUrl(meta.iconUrl, iconSize * imgPrep, iconSize * imgPrep)
+			: null
 	const bgDataUrl = hasBanner
 		? await fetchBannerFitHeightPngDataUrl(meta.backgroundImage, capsuleW * imgPrep, capsuleH * imgPrep)
 		: null
@@ -1166,9 +1286,13 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 
 	const titleRaw = meta.title.trim()
 	const subtitleRaw = meta.subtitle.trim()
+	const publisherRaw = meta.publisherLine?.trim() ?? ''
 	const expiresRaw = meta.expiresLabel.trim()
 	const showExpiryPill = shouldShowCouponExpiryPill(expiresRaw)
-	const claimHeadlineRaw = meta.shareHeadline?.trim() || buildShareHeadline(meta.merchantName, meta.shareKind)
+	const isCatalogDistribution = meta.distributionKind === 'catalog'
+	const claimHeadlineRaw = isCatalogDistribution
+		? ''
+		: meta.shareHeadline?.trim() || buildShareHeadline(meta.merchantName, meta.shareKind)
 	const expiryPillW = showExpiryPill ? Math.min(360, Math.max(160, expiresRaw.length * 11 + 48)) : 0
 	const textLayers: OgTextLayer[] = []
 	const innerTextStartX = iconDataUrl ? capsuleX + 200 : capsuleX + 48
@@ -1187,18 +1311,20 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
   ${iconLayer}`
 		: ''
 
-	textLayers.push({
-		text: claimHeadlineRaw,
-		x: OG_WIDTH / 2,
-		y: hasBanner ? OG_BANNER_HEADLINE_BASELINE_Y : 92,
-		fontSize: OG_BANNER_HEADLINE_FONT_SIZE,
-		fontWeight: 800,
-		color: '#1a1c1f',
-		align: 'center',
-		maxWidth: OG_WIDTH - 80,
-	})
+	if (claimHeadlineRaw) {
+		textLayers.push({
+			text: claimHeadlineRaw,
+			x: OG_WIDTH / 2,
+			y: hasBanner ? OG_BANNER_HEADLINE_BASELINE_Y : 92,
+			fontSize: OG_BANNER_HEADLINE_FONT_SIZE,
+			fontWeight: 800,
+			color: '#1a1c1f',
+			align: 'center',
+			maxWidth: OG_WIDTH - 80,
+		})
+	}
 
-	if (!hasBanner) {
+	if (!hasBanner && !isCatalogDistribution) {
 		textLayers.push({
 			text: 'Scan the QR or open the link on your phone',
 			x: OG_WIDTH / 2,
@@ -1272,34 +1398,52 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 
 	let metaBelowY = capsuleY + capsuleH
 	const metaLines: string[] = []
+	const videoOgMetaTextMaxWidth = capsuleW
+	const videoOgMetaTextX = capsuleX
+	const videoOgIconClipDef = ''
+	const videoOgIconRasterLayer = ''
+
 	if (hasBanner) {
 		if (titleRaw) {
 			const titleFontSize = 28
 			metaBelowY += OG_BANNER_META_TOP_GAP + titleFontSize
 			textLayers.push({
 				text: titleRaw,
-				x: capsuleX,
+				x: videoOgMetaTextX,
 				y: metaBelowY,
 				fontSize: titleFontSize,
 				fontWeight: 800,
 				color: '#2c2f31',
 				align: 'left',
-				maxWidth: capsuleW,
+				maxWidth: videoOgMetaTextMaxWidth,
 			})
 			metaBelowY += 32
 		}
 		if (subtitleRaw) {
 			textLayers.push({
 				text: subtitleRaw,
-				x: capsuleX,
+				x: videoOgMetaTextX,
 				y: metaBelowY,
 				fontSize: 20,
 				fontWeight: 600,
 				color: '#595c5e',
 				align: 'left',
-				maxWidth: capsuleW,
+				maxWidth: videoOgMetaTextMaxWidth,
 			})
 			metaBelowY += 28
+		}
+		if (publisherRaw) {
+			textLayers.push({
+				text: publisherRaw,
+				x: videoOgMetaTextX,
+				y: metaBelowY,
+				fontSize: 18,
+				fontWeight: 600,
+				color: '#747779',
+				align: 'left',
+				maxWidth: videoOgMetaTextMaxWidth,
+			})
+			metaBelowY += 26
 		}
 		const pillY = metaBelowY - 8
 		if (showExpiryPill) {
@@ -1340,6 +1484,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
     <clipPath id="iconClip">
       <circle cx="${iconCx}" cy="${iconCy}" r="${iconClipR}" />
     </clipPath>
+    ${videoOgIconClipDef}
     <linearGradient id="capsuleShade" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#ffffff" stop-opacity="0.15" />
       <stop offset="100%" stop-color="#000000" stop-opacity="0.30" />
@@ -1354,6 +1499,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
   ${innerTextLayer}
   ${innerQrLayer}
   ${hasBanner ? metaLines.join('\n  ') : ''}
+  ${videoOgIconRasterLayer}
   ${externalQrLayer}
 </svg>`
 
@@ -1364,7 +1510,7 @@ const ogImageCache = new Map<string, { buf: Buffer; expiry: number }>()
 const OG_IMAGE_CACHE_TTL_MS = 10 * 60 * 1000
 
 async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'png' | 'jpeg'): Promise<Buffer> {
-	const hasBanner = Boolean(meta.backgroundImage?.trim())
+	const hasBanner = meta.catalogLayout === 'videoOg' || Boolean(meta.backgroundImage?.trim())
 	const ogToken =
 		ogShareTokenFromImageUrl(meta.ogImageUrl) ??
 		encodeOgShareToken(
@@ -1469,7 +1615,10 @@ export async function warmIssuedNftExplorerOgJpeg(
 }
 
 export function renderCouponClaimShareHtml(meta: CouponClaimShareMeta): string {
-	const headline = escapeXml(meta.shareHeadline || buildShareHeadline(meta.merchantName, meta.shareKind))
+	const headline =
+		meta.distributionKind === 'catalog'
+			? escapeXml(meta.title)
+			: escapeXml(meta.shareHeadline || buildShareHeadline(meta.merchantName, meta.shareKind))
 	const title = escapeXml(meta.title)
 	const description = escapeXml(meta.subtitle)
 	const shareUrl = escapeXml(meta.shareUrl)
