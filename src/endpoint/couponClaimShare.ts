@@ -50,7 +50,7 @@ const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 23
+const OG_LAYOUT_REV = 24
 /** Cross-worker OG JPEG cache (Cluster forks do not share in-memory ogImageCache). */
 const OG_DISK_CACHE_DIR = path.join(os.tmpdir(), 'beamio-og-share-cache', `v${OG_LAYOUT_REV}`)
 
@@ -1256,11 +1256,13 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const punchBg = '#f9f9fe'
 	const isCatalogVideoOg = meta.catalogLayout === 'videoOg'
 	const hasBanner = isCatalogVideoOg || Boolean(meta.backgroundImage?.trim())
+	/** Coupon share tickets use side notches + bottom QR; catalog videoOg matches Business Catalogs (plain card). */
+	const isCouponBannerTicket = hasBanner && !isCatalogVideoOg
 	const capsuleX = 50
 	const capsuleW = 1100
-	const capsuleRx = hasBanner ? OG_BANNER_CAPSULE_RX : 28
-	const notchR = hasBanner ? OG_BANNER_NOTCH_R : 18
-	const capsuleY = hasBanner ? 86 : 165
+	const capsuleRx = isCatalogVideoOg ? 32 : hasBanner ? OG_BANNER_CAPSULE_RX : 28
+	const notchR = isCouponBannerTicket ? OG_BANNER_NOTCH_R : 18
+	const capsuleY = isCatalogVideoOg ? 48 : hasBanner ? 86 : 165
 	const capsuleH = hasBanner ? OG_BANNER_CAPSULE_H : 300
 	const iconCx = capsuleX + 112
 	const iconCy = capsuleY + capsuleH / 2
@@ -1337,12 +1339,19 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		})
 	}
 
+	const couponNotchLayer = isCouponBannerTicket
+		? `<circle cx="${capsuleX}" cy="${iconCy}" r="${notchR}" fill="${punchBg}" />
+  <circle cx="${capsuleX + capsuleW}" cy="${iconCy}" r="${notchR}" fill="${punchBg}" />`
+		: ''
+	const catalogCardShell = isCatalogVideoOg
+		? `<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH + OG_BANNER_META_TOP_GAP + 200}" rx="${capsuleRx}" fill="#ffffff" stroke="rgba(0,0,0,0.08)" stroke-width="2" />`
+		: ''
 	const ticketShell = `
+  ${isCatalogVideoOg ? catalogCardShell : ''}
   ${bgLayer}
   ${hasBanner ? '' : `<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#capsuleShade)" clip-path="url(#capsuleClip)" />`}
-  <rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
-  <circle cx="${capsuleX}" cy="${iconCy}" r="${notchR}" fill="${punchBg}" />
-  <circle cx="${capsuleX + capsuleW}" cy="${iconCy}" r="${notchR}" fill="${punchBg}" />
+  ${isCatalogVideoOg ? '' : `<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="2" />`}
+  ${couponNotchLayer}
   ${iconCircleLayer}`
 
 	const innerTextLayer =
@@ -1404,9 +1413,25 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const videoOgIconRasterLayer = ''
 
 	if (hasBanner) {
+		const categoryRaw = [meta.globalCategory?.trim(), meta.itemCategory?.trim()].filter(Boolean).join(' · ')
+		if (isCatalogVideoOg && categoryRaw) {
+			metaBelowY += OG_BANNER_META_TOP_GAP
+			textLayers.push({
+				text: categoryRaw.toUpperCase(),
+				x: videoOgMetaTextX + 4,
+				y: metaBelowY + 14,
+				fontSize: 14,
+				fontWeight: 800,
+				color: '#ea580c',
+				align: 'left',
+				maxWidth: videoOgMetaTextMaxWidth,
+			})
+			metaBelowY += 22
+		}
 		if (titleRaw) {
 			const titleFontSize = 28
-			metaBelowY += OG_BANNER_META_TOP_GAP + titleFontSize
+			metaBelowY += isCatalogVideoOg && !categoryRaw ? OG_BANNER_META_TOP_GAP : 0
+			metaBelowY += titleFontSize
 			textLayers.push({
 				text: titleRaw,
 				x: videoOgMetaTextX,
@@ -1466,10 +1491,10 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		}
 	}
 
-	const qrSize = hasBanner ? OG_BANNER_QR_TARGET_SIZE : 0
-	const qrY = hasBanner ? metaBelowY + 12 : 0
+	const qrSize = isCouponBannerTicket ? OG_BANNER_QR_TARGET_SIZE : 0
+	const qrY = isCouponBannerTicket ? metaBelowY + 12 : 0
 	const qrX = (OG_WIDTH - qrSize) / 2
-	const externalQrLayer = hasBanner
+	const externalQrLayer = isCouponBannerTicket
 		? `
   <rect x="${qrX - 12}" y="${qrY - 12}" width="${qrSize + 24}" height="${qrSize + 24}" rx="20" fill="#ffffff" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
   <image href="${qrDataUrl}" x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" />`
