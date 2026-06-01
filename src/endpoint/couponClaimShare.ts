@@ -19,6 +19,7 @@ import {
 	type BeamioCatalogGlobalCategory,
 } from '../couponMetadataCategory'
 import {
+	buildCatalogVideoOgPlayBadgeSvgParts,
 	flattenIssuedProductionSeriesMetadata,
 	inferProductionImageMimeFromUrl,
 	resolveCatalogProductionSharePresentation,
@@ -50,7 +51,7 @@ const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 24
+const OG_LAYOUT_REV = 25
 /** Cross-worker OG JPEG cache (Cluster forks do not share in-memory ogImageCache). */
 const OG_DISK_CACHE_DIR = path.join(os.tmpdir(), 'beamio-og-share-cache', `v${OG_LAYOUT_REV}`)
 
@@ -1346,9 +1347,16 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const catalogCardShell = isCatalogVideoOg
 		? `<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH + OG_BANNER_META_TOP_GAP + 200}" rx="${capsuleRx}" fill="#ffffff" stroke="rgba(0,0,0,0.08)" stroke-width="2" />`
 		: ''
+	const catalogPlayBadgeParts =
+		isCatalogVideoOg && bgDataUrl
+			? buildCatalogVideoOgPlayBadgeSvgParts(capsuleX, capsuleY, capsuleW, capsuleH)
+			: null
+	const catalogPlayBadgeFilterDef = catalogPlayBadgeParts?.filterDef ?? ''
+	const catalogPlayBadgeLayer = catalogPlayBadgeParts?.badgeLayer ?? ''
 	const ticketShell = `
   ${isCatalogVideoOg ? catalogCardShell : ''}
   ${bgLayer}
+  ${catalogPlayBadgeLayer}
   ${hasBanner ? '' : `<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="url(#capsuleShade)" clip-path="url(#capsuleClip)" />`}
   ${isCatalogVideoOg ? '' : `<rect x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" rx="${capsuleRx}" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="2" />`}
   ${couponNotchLayer}
@@ -1510,6 +1518,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
       <circle cx="${iconCx}" cy="${iconCy}" r="${iconClipR}" />
     </clipPath>
     ${videoOgIconClipDef}
+    ${catalogPlayBadgeFilterDef}
     <linearGradient id="capsuleShade" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#ffffff" stop-opacity="0.15" />
       <stop offset="100%" stop-color="#000000" stop-opacity="0.30" />
