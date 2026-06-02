@@ -51,7 +51,7 @@ const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 25
+const OG_LAYOUT_REV = 26
 /** Cross-worker OG JPEG cache (Cluster forks do not share in-memory ogImageCache). */
 const OG_DISK_CACHE_DIR = path.join(os.tmpdir(), 'beamio-og-share-cache', `v${OG_LAYOUT_REV}`)
 
@@ -1299,7 +1299,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const expiryPillW = showExpiryPill ? Math.min(360, Math.max(160, expiresRaw.length * 11 + 48)) : 0
 	const textLayers: OgTextLayer[] = []
 	const innerTextStartX = iconDataUrl ? capsuleX + 200 : capsuleX + 48
-	const innerTextMaxWidth = iconDataUrl ? capsuleW - 420 : capsuleW - 260
+	const innerTextMaxWidth = iconDataUrl ? capsuleW - 248 : capsuleW - 96
 
 	const bgLayer = bgDataUrl
 		? `<image href="${bgDataUrl}" x="${capsuleX}" y="${capsuleY}" width="${capsuleW}" height="${capsuleH}" preserveAspectRatio="xMidYMid slice" clip-path="url(#capsuleClip)" />`
@@ -1407,11 +1407,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		}
 	}
 
-	const innerQrLayer = !hasBanner
-		? `
-  <rect x="${capsuleX + capsuleW - 196}" y="${capsuleY + 78}" width="156" height="156" rx="20" fill="#ffffff" />
-  <image href="${qrDataUrl}" x="${capsuleX + capsuleW - 184}" y="${capsuleY + 90}" width="132" height="132" />`
-		: ''
+	const innerQrLayer = ''
 
 	let metaBelowY = capsuleY + capsuleH
 	const metaLines: string[] = []
@@ -1499,10 +1495,13 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		}
 	}
 
-	const qrSize = isCouponBannerTicket ? OG_BANNER_QR_TARGET_SIZE : 0
-	const qrY = isCouponBannerTicket ? metaBelowY + 12 : 0
+	const showCouponShareQrBelow = !isCatalogVideoOg && (isCouponBannerTicket || !hasBanner)
+	const qrSize = showCouponShareQrBelow ? OG_BANNER_QR_TARGET_SIZE : 0
+	const qrY = showCouponShareQrBelow
+		? (isCouponBannerTicket ? metaBelowY + 12 : capsuleY + capsuleH + 12)
+		: 0
 	const qrX = (OG_WIDTH - qrSize) / 2
-	const externalQrLayer = isCouponBannerTicket
+	const externalQrLayer = showCouponShareQrBelow
 		? `
   <rect x="${qrX - 12}" y="${qrY - 12}" width="${qrSize + 24}" height="${qrSize + 24}" rx="20" fill="#ffffff" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
   <image href="${qrDataUrl}" x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" />`

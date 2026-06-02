@@ -1,5 +1,6 @@
 import Express, { Router } from 'express'
-import type {Response, Request } from 'express'
+import type { Response, Request } from 'express'
+import multer from 'multer'
 import { logger } from '../logger'
 import Colors from 'colors/safe'
 import {createServer} from 'node:http'
@@ -12,8 +13,13 @@ import { keccak256, toUtf8Bytes } from "ethers"
 
 const storagePATH = masterSetup.storagePATH
 
-/** Max bytes per storageFragmentChunk body (32 KiB). */
-export const FRAGMENT_UPLOAD_CHUNK_BYTES = 32 * 1024
+/** Max bytes per storageFragmentChunk part (512 KiB). Client uses multipart `chunk`; legacy JSON uses chunkBase64. */
+export const FRAGMENT_UPLOAD_CHUNK_BYTES = 512 * 1024
+
+const fragmentChunkMulter = multer({
+	storage: multer.memoryStorage(),
+	limits: { fileSize: FRAGMENT_UPLOAD_CHUNK_BYTES },
+})
 
 const workerNumber = Cluster?.worker?.id ? `worker : ${Cluster.worker.id} ` : `${ Cluster?.isPrimary ? 'Cluster Master': 'Cluster unknow'}`
 
@@ -451,31 +457,58 @@ class server {
 			})
 		})
 
-		router.post('/storageFragmentChunk', async (req: any, res: any) => {
-			const { wallet, signMessage, hash, totalSize, offset, chunkBase64 } = req.body as {
-				wallet?: string
-				signMessage?: string
-				hash?: string
-				totalSize?: number
-				offset?: number
-				chunkBase64?: string
+		const storageFragmentChunkMultipart = fragmentChunkMulter.single('chunk')
+		router.post('/storageFragmentChunk', (req: Request, res: Response, next) => {
+			const ct = (req.headers['content-type'] || '').toLowerCase()
+			if (ct.includes('multipart/form-data')) {
+				return storageFragmentChunkMultipart(req, res, next)
 			}
+			return next()
+		}, async (req: any, res: any) => {
 			const ipaddress = getIpAddressFromForwardHeader(req)
-			if (!verifyFragmentWalletSign(wallet, signMessage) || !hash || !chunkBase64) {
+			let wallet: string | undefined
+			let signMessage: string | undefined
+			let hash: string | undefined
+			let totalSizeN: number
+			let offsetN: number
+			let chunk: Buffer | undefined
+
+			if (req.file?.buffer) {
+				wallet = req.body?.wallet
+				signMessage = req.body?.signMessage
+				hash = req.body?.hash
+				totalSizeN = Number(req.body?.totalSize)
+				offsetN = Number(req.body?.offset)
+				chunk = req.file.buffer as Buffer
+			} else {
+				const body = req.body as {
+					wallet?: string
+					signMessage?: string
+					hash?: string
+					totalSize?: number
+					offset?: number
+					chunkBase64?: string
+				}
+				wallet = body.wallet
+				signMessage = body.signMessage
+				hash = body.hash
+				totalSizeN = Number(body.totalSize)
+				offsetN = Number(body.offset)
+				if (body.chunkBase64) {
+					try {
+						chunk = Buffer.from(String(body.chunkBase64), 'base64')
+					} catch {
+						return res.status(400).json({ ok: false, error: 'Invalid chunkBase64' })
+					}
+				}
+			}
+
+			if (!verifyFragmentWalletSign(wallet, signMessage) || !hash || !chunk) {
 				logger(Colors.grey(`Router /storageFragmentChunk auth/format error ${ipaddress}`))
 				return res.status(403).json({ ok: false, error: 'Unauthorized' })
 			}
-			if (!Number.isFinite(totalSize) || totalSize! <= 0 || !Number.isFinite(offset) || offset! < 0) {
+			if (!Number.isFinite(totalSizeN) || totalSizeN <= 0 || !Number.isFinite(offsetN) || offsetN < 0) {
 				return res.status(400).json({ ok: false, error: 'Invalid totalSize or offset' })
-			}
-			const totalSizeN = Number(totalSize)
-			const offsetN = Number(offset)
-
-			let chunk: Buffer
-			try {
-				chunk = Buffer.from(String(chunkBase64), 'base64')
-			} catch {
-				return res.status(400).json({ ok: false, error: 'Invalid chunkBase64' })
 			}
 			if (chunk.length === 0 || chunk.length > FRAGMENT_UPLOAD_CHUNK_BYTES) {
 				return res.status(400).json({ ok: false, error: 'Invalid chunk size' })
