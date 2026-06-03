@@ -175,6 +175,16 @@ export function propertiesLookLikeProductionProps(props: Record<string, unknown>
 	return beamioProduction != null && typeof beamioProduction === 'object' && !Array.isArray(beamioProduction)
 }
 
+/** `cardCreateIssuedNft` metadata_extra_properties → coupon vs catalog (B-Unit indexer + UI). */
+export function resolveIssuedNftProductKindFromMetadataExtra(
+	extra: Record<string, unknown> | undefined
+): 'coupon' | 'catalog' {
+	if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return 'coupon'
+	if (propertiesLookLikeProductionProps(extra)) return 'catalog'
+	if (propertiesLookLikeCouponProps(extra)) return 'coupon'
+	return 'coupon'
+}
+
 export function normalizeProductionCategoryOnTierProperties(props: Record<string, unknown>): Record<string, unknown> {
 	if (!propertiesLookLikeProductionProps(props)) return props
 	return { ...props, category: normalizeBeamioCatalogGlobalCategory(props.category) }

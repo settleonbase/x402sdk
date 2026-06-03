@@ -17,6 +17,7 @@ import {
 	normalizeShareTokenMetadataProductions,
 	normalizeShareTokenMetadataItemCategory,
 	propertiesLookLikeProductionProps,
+	resolveIssuedNftProductKindFromMetadataExtra,
 	resolveIssuedNftDistributionFieldsFromSeriesMetadata,
 } from './couponMetadataCategory'
 import { inspect } from 'util'
@@ -3483,6 +3484,8 @@ export const beamioTransferIndexerAccountingPool: {
 	bServiceUSDC6?: string
 	/** B 服务费单位数 6 位精度，写入 FeeInfo.bServiceUnits6 */
 	bServiceUnits6?: string
+	/** CoNET consumeFromUser tx hash（Charge 单独 B-Unit indexer 行 txId） */
+	bunitConsumeTxHash?: string
 	res?: Response
 	/** 多条 route 项（同一 tx 多资产时）。有则优先于 routeAsset */
 	routeItems?: BeamioTransferRouteItem[]
@@ -3884,6 +3887,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			}
 		}
 
+		let chargeBunitConsumeTxHash: string | null = null
 		// OpenContainer 商户收款：BUnit 由卡 owner 负担，每笔固定 2 B-Units（与 Cluster / pool 一致）
 		if (obj.source === 'open-container' && feePayer && feePayer !== ethers.ZeroAddress) {
 			const bunitFeeAmount = CHARGE_FIXED_BUNIT_FEE_UNITS6
@@ -3904,6 +3908,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 					{ gasLimit: 2_500_000 }
 				)
 				await consumeTx.wait()
+				chargeBunitConsumeTxHash = consumeTx.hash
 				logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] consumeFromUser ok: ${Number(bunitFeeAmount) / 1e6} B-Units from payee ${feePayer} baseHash=${txHash} (open-container)`))
 			} catch (consumeErr: any) {
 				logger(Colors.red(`[beamioTransferIndexerAccountingProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
@@ -3945,6 +3950,17 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] Charge accounting TransactionInput: ${inspect(txForLog, false, 4, true)}`))
 		}
 
+		const chargeSourcesForStandaloneBunit =
+			obj.source === 'open-container' || obj.source === 'container'
+		if (isCharge && chargeSourcesForStandaloneBunit) {
+			transactionInput.fees = {
+				...transactionInput.fees,
+				bServiceUSDC6: 0n,
+				bServiceUnits6: 0n,
+				feePayer: ethers.ZeroAddress,
+			}
+		}
+
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 		const conetBalance = await SC.walletConet.provider!.getBalance(SC.walletConet.address).catch(() => 0n)
 		if (conetBalance === 0n || conetBalance < 10n ** 14n) {
@@ -3956,6 +3972,51 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		await tx.wait().catch((waitErr: any) => {
 			logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] syncTokenAction.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
 		})
+		const bunitConsumeForCharge =
+			chargeBunitConsumeTxHash ??
+			(typeof obj.bunitConsumeTxHash === 'string' && obj.bunitConsumeTxHash.length > 0 ? obj.bunitConsumeTxHash : null)
+		const chargeFeeUnits6 = BigInt(obj.bServiceUnits6 ?? '0')
+		if (
+			isCharge &&
+			chargeSourcesForStandaloneBunit &&
+			bunitConsumeForCharge &&
+			feePayer &&
+			feePayer !== ethers.ZeroAddress &&
+			chargeFeeUnits6 > 0n
+		) {
+			try {
+				const cardAddrCharge = resolveChargeAccountingCardAddress(obj) ?? ethers.ZeroAddress
+				const opForCharge = transactionInput.subordinate !== ethers.ZeroAddress ? transactionInput.subordinate : transactionInput.payee
+				const opChainCharge =
+					cardAddrCharge !== ethers.ZeroAddress
+						? await fetchOperatorParentChain(cardAddrCharge, opForCharge)
+						: []
+				const { topAdmin: topAdminCharge, subordinate: subCharge } = deriveTopAdminAndSubordinate(opForCharge, opChainCharge)
+				await syncStandaloneBunitServiceFeeToIndexer({
+					walletConet: SC.walletConet,
+					BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
+					consumeTxHash: bunitConsumeForCharge,
+					basePaymentHash: txHash,
+					cardAddress: cardAddrCharge !== ethers.ZeroAddress ? cardAddrCharge : resolveChargeFeePayerCardFromOpenContainerItems([]),
+					feePayer,
+					bServiceUnits6: chargeFeeUnits6,
+					txCategory: TX_CATEGORY_CHARGE_BUNIT_SERVICE,
+					title: 'Charge B-Unit service fee',
+					source: 'chargeBUnit',
+					operator: opForCharge,
+					operatorParentChain: opChainCharge,
+					topAdmin: topAdminCharge,
+					subordinate: subCharge,
+					logLabel: 'beamioTransferIndexerAccountingProcess',
+				})
+			} catch (chargeBunitIdxErr: any) {
+				logger(
+					Colors.yellow(
+						`[beamioTransferIndexerAccountingProcess] Charge B-Unit standalone indexer non-critical: ${chargeBunitIdxErr?.shortMessage ?? chargeBunitIdxErr?.message ?? String(chargeBunitIdxErr)}`
+					)
+				)
+			}
+		}
 		logger(Colors.green(`[beamioTransferIndexerAccountingProcess] indexed txHash=${txHash} syncTx=${tx.hash} from=${obj.from} to=${obj.to} amountUSDC6=${amountUSDC6} isInternal=${isInternalTransfer}`))
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, indexed: true, txHash, syncTx: tx.hash }).end()
@@ -5523,6 +5584,7 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 			aaFactoryAddress: aaFactoryRedeem,
 		})
 		const feePayerForLedger = feePayerPick.ok ? feePayerPick.consumer : payerAddr
+		let redeemBunitConsumeTxHash: string | null = null
 		if (!feePayerPick.ok) {
 			logger(
 				Colors.yellow(
@@ -5546,6 +5608,7 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 					{ gasLimit: 2_500_000 }
 				)
 				await consumeTx.wait()
+				redeemBunitConsumeTxHash = consumeTx.hash
 				logger(
 					Colors.cyan(
 						`[cardRedeemIndexerAccountingProcess] consumeFromUser ok: ${Number(bServiceUnits6) / 1e6} B-Units from ${feePayerForLedger} baseHash=${txHash}`
@@ -5651,9 +5714,9 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 				gasWei: 0n,
 				gasUSDC6: 0n,
 				serviceUSDC6: 0n,
-				bServiceUSDC6,
-				bServiceUnits6,
-				feePayer: feePayerForLedger,
+				bServiceUSDC6: 0n,
+				bServiceUnits6: 0n,
+				feePayer: ethers.ZeroAddress,
 			},
 			meta: {
 				requestAmountFiat6: finalRequestAmountFiat6,
@@ -5673,9 +5736,37 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 		}
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 		const tx = await actionFacetSync.syncTokenAction(transactionInput)
+		if (redeemBunitConsumeTxHash && bServiceUnits6 > 0n) {
+			try {
+				await syncStandaloneBunitServiceFeeToIndexer({
+					walletConet: SC.walletConet,
+					BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
+					consumeTxHash: redeemBunitConsumeTxHash,
+					basePaymentHash: txHash,
+					cardAddress: obj.cardAddress,
+					feePayer: feePayerForLedger,
+					bServiceUnits6,
+					txCategory: TX_CATEGORY_CARD_REDEEM_BUNIT_SERVICE,
+					title: 'Claim B-Unit service fee',
+					source: 'cardRedeemBUnit',
+					operator: ethers.getAddress(redeemOperator),
+					operatorParentChain: redeemOpChain,
+					topAdmin: redeemTopAdmin,
+					subordinate: subordinateForLedger,
+					extraDisplay: { redeemCategory: redeemCategoryRaw },
+					logLabel: 'cardRedeemIndexerAccountingProcess',
+				})
+			} catch (bunitIdxErr: any) {
+				logger(
+					Colors.yellow(
+						`[cardRedeemIndexerAccountingProcess] B-Unit standalone indexer non-critical: ${bunitIdxErr?.shortMessage ?? bunitIdxErr?.message ?? String(bunitIdxErr)}`
+					)
+				)
+			}
+		}
 		logger(
 			Colors.green(
-				`[cardRedeemIndexerAccountingProcess] indexed txHash=${txHash} syncTx=${tx.hash} card=${obj.cardAddress} subordinate=${subordinateForLedger} bUnits=${Number(bServiceUnits6) / 1e6} feePayer=${feePayerForLedger}`
+				`[cardRedeemIndexerAccountingProcess] indexed txHash=${txHash} syncTx=${tx.hash} card=${obj.cardAddress} subordinate=${subordinateForLedger} bUnitRow=${redeemBunitConsumeTxHash ?? 'none'}`
 			)
 		)
 	} catch (error: any) {
@@ -6074,7 +6165,120 @@ const TX_CATEGORY_USDC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes
 /** Indexer：Create Coupon / API `cardCreateIssuedNft` 商户 B-Unit 费一条（便于关联 Base createIssuedNft tx） */
 const TX_CATEGORY_CREATE_ISSUED_NFT_COUPON_BUNIT_SERVICE = ethers.keccak256(
 	ethers.toUtf8Bytes('createIssuedNftCoupon:bunitService')
+)
+/** Indexer：Create Catalogs（Programs production）issued NFT B-Unit 费 — 与 coupon 分账类目 */
+const TX_CATEGORY_CREATE_ISSUED_NFT_CATALOG_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('createIssuedNftCatalog:bunitService')
 ) as `0x${string}`
+/** Indexer：Claim redeem code（cardRedeem）B-Unit 服务费单独一条（txId = CoNET consumeFromUser tx） */
+const TX_CATEGORY_CARD_REDEEM_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('cardRedeem:bunitService')
+) as `0x${string}`
+/** Indexer：POS 核销烧毁客户券（burnIssuedNftByGateway）B-Unit 服务费单独一条 */
+const TX_CATEGORY_POS_COUPON_BURN_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('posCouponBurn:bunitService')
+) as `0x${string}`
+/** Indexer：Charge（open-container / container）B-Unit 服务费单独一条 */
+const TX_CATEGORY_CHARGE_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('charge:bunitService')) as `0x${string}`
+
+type SyncStandaloneBunitServiceFeeArgs = {
+	walletConet: ethers.Wallet
+	BeamioTaskDiamondAction: ethers.Contract
+	consumeTxHash: string
+	basePaymentHash: string
+	cardAddress: string
+	feePayer: string
+	bServiceUnits6: bigint
+	txCategory: `0x${string}`
+	title: string
+	source: string
+	operator: string
+	operatorParentChain: string[]
+	topAdmin: string
+	subordinate: string
+	extraDisplay?: Record<string, unknown>
+	logLabel?: string
+}
+
+/** Merchant Transactions：B-Unit 扣款须单独 syncTokenAction（txId=consume tx；originalPaymentHash=Base 业务 tx） */
+async function syncStandaloneBunitServiceFeeToIndexer(args: SyncStandaloneBunitServiceFeeArgs): Promise<string | null> {
+	const bServiceUSDC6 = args.bServiceUnits6 > 0n ? args.bServiceUnits6 / BUNIT_TO_USDC_DIVISOR : 0n
+	if (bServiceUSDC6 <= 0n || !ethers.isAddress(args.feePayer)) return null
+	const feePayer = ethers.getAddress(args.feePayer)
+	const displayJson = JSON.stringify({
+		title: args.title,
+		source: args.source,
+		basePaymentHash: args.basePaymentHash,
+		consumeTxHash: args.consumeTxHash,
+		cardAddress: args.cardAddress,
+		bUnits: Number(args.bServiceUnits6) / 1e6,
+		...(args.extraDisplay ?? {}),
+	})
+	const bunitOnlyInput: PurchasingCardAccountingInput = {
+		txId: args.consumeTxHash as `0x${string}`,
+		originalPaymentHash: args.basePaymentHash as `0x${string}`,
+		chainId: BigInt(CONET_MAINNET_CHAIN_ID),
+		txCategory: args.txCategory,
+		displayJson,
+		timestamp: 0n,
+		payer: feePayer,
+		payee: ethers.getAddress(CONET_BUNIT_AIRDROP_ADDRESS),
+		finalRequestAmountFiat6: 0n,
+		finalRequestAmountUSDC6: bServiceUSDC6,
+		isAAAccount: false,
+		route: [
+			{
+				asset: ethers.getAddress(USDC_ADDRESS),
+				amountE6: bServiceUSDC6,
+				assetType: 0,
+				source: 0,
+				tokenId: 0n,
+				itemCurrencyType: 4,
+				offsetInRequestCurrencyE6: bServiceUSDC6,
+			},
+		],
+		fees: {
+			gasChainType: 0,
+			gasWei: 0n,
+			gasUSDC6: 0n,
+			serviceUSDC6: 0n,
+			bServiceUSDC6,
+			bServiceUnits6: args.bServiceUnits6,
+			feePayer,
+		},
+		meta: {
+			requestAmountFiat6: 0n,
+			requestAmountUSDC6: bServiceUSDC6,
+			currencyFiat: 4,
+			discountAmountFiat6: 0n,
+			discountRateBps: 0,
+			taxAmountFiat6: 0n,
+			taxRateBps: 0,
+			afterNotePayer: '',
+			afterNotePayee: '',
+		},
+		operator: ethers.getAddress(args.operator),
+		operatorParentChain: args.operatorParentChain,
+		topAdmin: args.topAdmin,
+		subordinate: args.subordinate,
+	}
+	const syncHash = await runPurchasingCardAccountingJob(
+		{
+			input: bunitOnlyInput,
+			baseTxHash: args.consumeTxHash,
+			from: feePayer,
+			cardAddress: args.cardAddress,
+			attempt: 0,
+		},
+		{ walletConet: args.walletConet, BeamioTaskDiamondAction: args.BeamioTaskDiamondAction }
+	)
+	logger(
+		Colors.green(
+			`[${args.logLabel ?? 'syncStandaloneBunitServiceFee'}] ok consumeTx=${args.consumeTxHash} baseTx=${args.basePaymentHash} sync=${syncHash}`
+		)
+	)
+	return syncHash
+}
 
 /** NFC top-up 拆分记账（与 readme 2.3 及 bizSite `INDEXER_TX_TOPUP_CATEGORIES` 对齐；`txId` 须与 Base mint tx 不同，见 `nfcTopupIndexerLegTxId`） */
 const NFC_TOPUP_TX_CREDIT_TOPUP_CARD = ethers.keccak256(ethers.toUtf8Bytes('creditTopupCard')) as `0x${string}`
@@ -6951,6 +7155,50 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				logger(Colors.cyan(`[executeForAdminPostBaseProcess] consumeFromUser ok: ${Number(obj.topupFeeBUnits) / 1e6} B-Units from ${topupFeeConsumer}`))
 			} catch (consumeErr: any) {
 				logger(Colors.red(`[executeForAdminPostBaseProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
+			}
+		}
+		const burnCouponCalldata =
+			obj.data.slice(0, 10).toLowerCase() === BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR
+		if (
+			baseTxOk &&
+			nfcTopupBunitConsumeTxHash &&
+			topupBunitFeePayerResolved &&
+			obj.topupFeeBUnits &&
+			obj.topupFeeBUnits > 0n &&
+			burnCouponCalldata &&
+			!(recipientEOA && mintParsed && mintParsed.points6 > 0n)
+		) {
+			try {
+				const operatorParentChain = await fetchOperatorParentChain(obj.cardAddr, adminCheck.signer)
+				const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(adminCheck.signer, operatorParentChain)
+				let subordinateForLedger = subordinate
+				const posOpRaw = typeof obj.posOperator === 'string' ? obj.posOperator.trim() : ''
+				if (posOpRaw && ethers.isAddress(posOpRaw)) {
+					subordinateForLedger = ethers.getAddress(posOpRaw)
+				}
+				await syncStandaloneBunitServiceFeeToIndexer({
+					walletConet: SC.walletConet,
+					BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
+					consumeTxHash: nfcTopupBunitConsumeTxHash,
+					basePaymentHash: tx.hash,
+					cardAddress: obj.cardAddr,
+					feePayer: topupBunitFeePayerResolved,
+					bServiceUnits6: obj.topupFeeBUnits,
+					txCategory: TX_CATEGORY_POS_COUPON_BURN_BUNIT_SERVICE,
+					title: 'In-store coupon burn B-Unit service fee',
+					source: 'posCouponBurnBUnit',
+					operator: ethers.getAddress(adminCheck.signer),
+					operatorParentChain,
+					topAdmin,
+					subordinate: subordinateForLedger,
+					logLabel: 'executeForAdminPostBaseProcess',
+				})
+			} catch (burnBunitIdxErr: any) {
+				logger(
+					Colors.yellow(
+						`[executeForAdminPostBaseProcess] coupon burn B-Unit standalone indexer non-critical: ${burnBunitIdxErr?.shortMessage ?? burnBunitIdxErr?.message ?? String(burnBunitIdxErr)}`
+					)
+				)
 			}
 		}
 		if (baseTxOk && recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) {
@@ -9239,6 +9487,7 @@ export const ContainerRelayProcess = async () => {
       logger(Colors.yellow(`[AAtoEOA/Container] B-Unit payer pick failed at master, fallback EOA: ${feePayerPickContainer.error}`))
     }
     const baseGas = receipt?.gasUsed ?? 0n
+    let containerBunitConsumeTxHash: string | null = null
     if (feePayerEOA && feePayerEOA !== ethers.ZeroAddress && feeBUnits6 > 0n) {
       const baseHashBytes32 = tx.hash as `0x${string}`
       const bunitAirdropWrite = new ethers.Contract(
@@ -9273,6 +9522,7 @@ export const ContainerRelayProcess = async () => {
           return null
         })
         if (consumeRcpt) {
+          containerBunitConsumeTxHash = consumeTx.hash
           logger(Colors.cyan(`[AAtoEOA/Container] consumeFromUser ok: ${Number(feeBUnits6) / 1e6} B-Units from ${feePayerEOA} baseHash=${tx.hash}`))
         }
       } catch (consumeErr: any) {
@@ -9535,6 +9785,7 @@ export const ContainerRelayProcess = async () => {
       merchantCardAddress: obj.merchantCardAddress,
       bServiceUSDC6: containerBUsdc6.toString(),
       bServiceUnits6: feeBUnits6.toString(),
+      ...(containerBunitConsumeTxHash ? { bunitConsumeTxHash: containerBunitConsumeTxHash } : {}),
       ...(collectedRouteItems.length > 0 ? { routeItems: collectedRouteItems } : {}),
       ...(hasNfcBreakdown
         ? {
@@ -14061,9 +14312,40 @@ export const executeForOwnerProcess = async () => {
 							const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(feeCtx.cardOwnerEOA, opChain)
 							const bServiceUnits6Line = CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6
 							const bServiceUSDC6Line = bServiceUnits6Line / BUNIT_TO_USDC_DIVISOR
+							const issuedProductKind = resolveIssuedNftProductKindFromMetadataExtra(extraPropsFromBody)
+							const productionId =
+								issuedProductKind === 'catalog' &&
+								extraPropsFromBody?.beamioProduction != null &&
+								typeof extraPropsFromBody.beamioProduction === 'object' &&
+								!Array.isArray(extraPropsFromBody.beamioProduction)
+									? String(
+											(extraPropsFromBody.beamioProduction as { productionId?: unknown }).productionId ??
+												''
+									  ).trim()
+									: ''
+							const couponId =
+								issuedProductKind === 'coupon' &&
+								extraPropsFromBody?.beamioCoupon != null &&
+								typeof extraPropsFromBody.beamioCoupon === 'object' &&
+								!Array.isArray(extraPropsFromBody.beamioCoupon)
+									? String(
+											(extraPropsFromBody.beamioCoupon as { couponId?: unknown }).couponId ?? ''
+									  ).trim()
+									: ''
+							const globalCategory =
+								issuedProductKind === 'catalog'
+									? String(extraPropsFromBody?.category ?? '').trim()
+									: issuedProductKind === 'coupon'
+									  ? BEAMIO_COUPON_NFT_CATEGORY
+									  : ''
 							const bunitDisplayJson = JSON.stringify({
-								title: 'Create Coupon issued NFT B-Unit fee',
+								title:
+									issuedProductKind === 'catalog' ? 'Create Catalogs fee' : 'Create Coupon',
 								source: 'createIssuedNftCoupon',
+								distributionKind: issuedProductKind,
+								...(globalCategory ? { globalCategory } : {}),
+								...(productionId ? { productionId } : {}),
+								...(couponId ? { couponId } : {}),
 								baseCreateIssuedNftTxHash: baseCreateHash,
 								consumeTxHash: feeCtx.consumeTxHash,
 								cardAddress,
@@ -14074,7 +14356,9 @@ export const executeForOwnerProcess = async () => {
 								txId: feeCtx.consumeTxHash as `0x${string}`,
 								originalPaymentHash: baseCreateHash as `0x${string}`,
 								chainId: BigInt(CONET_MAINNET_CHAIN_ID),
-								txCategory: TX_CATEGORY_CREATE_ISSUED_NFT_COUPON_BUNIT_SERVICE,
+								txCategory: (issuedProductKind === 'catalog'
+									? TX_CATEGORY_CREATE_ISSUED_NFT_CATALOG_BUNIT_SERVICE
+									: TX_CATEGORY_CREATE_ISSUED_NFT_COUPON_BUNIT_SERVICE) as `0x${string}`,
 								displayJson: bunitDisplayJson,
 								timestamp: 0n,
 								payer: ethers.getAddress(feeCtx.feePayer),
