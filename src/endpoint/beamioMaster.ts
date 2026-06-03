@@ -2164,16 +2164,18 @@ const routing = ( router: Router ) => {
 
 		/** cardRedeem：Cluster 已 cardRedeemPreCheck；Master 只入队 + Settle_ContractPool 并行上链，不再预检。 */
 		router.post('/cardRedeem', (req, res) => {
-			const { cardAddress, redeemCode, toUserEOA } = req.body as {
+			const { cardAddress, redeemCode, toUserEOA, posOperator } = req.body as {
 				cardAddress?: string
 				redeemCode?: string
 				toUserEOA?: string
+				posOperator?: string
 			}
 			cardRedeemPool.push({
 				cardAddress: cardAddress as string,
 				redeemCode: redeemCode as string,
 				toUserEOA: toUserEOA as string,
 				res,
+				...(posOperator && ethers.isAddress(posOperator) ? { posOperator: ethers.getAddress(posOperator) } : {}),
 			})
 			logger(Colors.cyan(`[cardRedeem] pushed to pool, queue=${cardRedeemPool.length} card=${cardAddress} to=${toUserEOA}`))
 			kickCardRedeemPoolPress()
@@ -3116,13 +3118,28 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/executeForAdmin - cardAddAdminByAdmin 等：Cluster 预检后转发，Master 推入 executeForAdminPool */
 		router.post('/executeForAdmin', async (req, res) => {
-			const { cardAddress, cardAddr, data, deadline, nonce, adminSignature } = req.body as {
+			const {
+				cardAddress,
+				cardAddr,
+				data,
+				deadline,
+				nonce,
+				adminSignature,
+				cardOwnerEOA,
+				topupFeeBUnits,
+				topupKind,
+				posOperator,
+			} = req.body as {
 				cardAddress?: string
 				cardAddr?: string
 				data?: string
 				deadline?: number
 				nonce?: string
 				adminSignature?: string
+				cardOwnerEOA?: string
+				topupFeeBUnits?: string
+				topupKind?: number
+				posOperator?: string
 			}
 			const addr = cardAddr ?? cardAddress
 			if (!addr || !ethers.isAddress(addr) || !data || typeof data !== 'string' || data.length === 0) {
@@ -3131,13 +3148,32 @@ const routing = ( router: Router ) => {
 			if (typeof deadline !== 'number' || deadline <= 0 || !nonce || typeof nonce !== 'string' || !adminSignature || typeof adminSignature !== 'string') {
 				return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce/adminSignature' })
 			}
+			let feeBUnits: bigint | undefined
+			if (topupFeeBUnits != null && String(topupFeeBUnits).trim() !== '') {
+				try {
+					feeBUnits = BigInt(String(topupFeeBUnits).trim())
+				} catch {
+					return res.status(400).json({ success: false, error: 'Invalid topupFeeBUnits' })
+				}
+			}
+			const ownerEoa =
+				cardOwnerEOA && ethers.isAddress(cardOwnerEOA) ? ethers.getAddress(cardOwnerEOA) : undefined
+			const posOp =
+				posOperator && ethers.isAddress(posOperator) ? ethers.getAddress(posOperator) : undefined
+			const kindRaw = Number(topupKind)
+			const kindParsed: 1 | 2 | 3 | undefined =
+				kindRaw === 1 || kindRaw === 2 || kindRaw === 3 ? (kindRaw as 1 | 2 | 3) : undefined
 			executeForAdminPool.push({
 				cardAddr: ethers.getAddress(addr),
 				data,
 				deadline,
 				nonce,
 				adminSignature,
-				res
+				...(ownerEoa ? { cardOwnerEOA: ownerEoa } : {}),
+				...(feeBUnits != null && feeBUnits > 0n ? { topupFeeBUnits: feeBUnits } : {}),
+				...(kindParsed != null ? { topupKind: kindParsed } : {}),
+				...(posOp ? { posOperator: posOp } : {}),
+				res,
 			})
 			logger(Colors.cyan(`[executeForAdmin] pushed to pool, card=${addr}`))
 			executeForAdminProcess().catch((err: any) => {
@@ -3162,6 +3198,7 @@ const routing = ( router: Router ) => {
 				bonusCurrencyAmount,
 				currencyAmount,
 				usdcTopupSessionId,
+				posOperator,
 			} = req.body as {
 				cardAddr?: string
 				data?: string
@@ -3177,6 +3214,7 @@ const routing = ( router: Router ) => {
 				bonusCurrencyAmount?: string
 				currencyAmount?: string
 				usdcTopupSessionId?: string
+				posOperator?: string
 			}
 			/** 仅当本请求成功消费 `awaiting_beneficiary` session 时由本 handler 填入（忽略 body 里伪造的对账元数据）。 */
 			let usdcPhase2OriginatingTx: string | undefined
@@ -3311,6 +3349,12 @@ const routing = ( router: Router ) => {
 				}
 				topupCurrencySplit = { currencyAmountE6: totE, cardE6: cE, cashE6: cashE, bonusE6: bE }
 			}
+			const posOpNfc =
+				typeof posOperator === 'string' && ethers.isAddress(posOperator.trim())
+					? ethers.getAddress(posOperator.trim())
+					: undefined
+			const kindNfc: 1 | 2 | 3 =
+				topupKind === 1 || topupKind === 2 || topupKind === 3 ? (topupKind as 1 | 2 | 3) : 2
 			executeForAdminPool.push({
 				cardAddr: ethers.getAddress(cardAddr),
 				data,
@@ -3320,9 +3364,10 @@ const routing = ( router: Router ) => {
 				uid: typeof uid === 'string' ? uid : undefined,
 				cardOwnerEOA: cardOwnerEOA && ethers.isAddress(cardOwnerEOA) ? ethers.getAddress(cardOwnerEOA) : undefined,
 				topupFeeBUnits: topupFeeBUnits ? BigInt(topupFeeBUnits) : undefined,
-				topupKind: topupKind === 2 || topupKind === 3 ? topupKind : 2,
+				topupKind: kindNfc,
 				res,
 				topupCurrencySplit,
+				...(posOpNfc ? { posOperator: posOpNfc } : {}),
 				...(usdcPhase2ChargeSid && usdcPhase2OriginatingTx
 					? {
 							originatingUSDCTx: usdcPhase2OriginatingTx,

@@ -17,6 +17,7 @@ import {
 	normalizeShareTokenMetadataProductions,
 	normalizeShareTokenMetadataItemCategory,
 	propertiesLookLikeProductionProps,
+	resolveIssuedNftDistributionFieldsFromSeriesMetadata,
 } from './couponMetadataCategory'
 import { inspect } from 'util'
 import Colors from 'colors/safe'
@@ -130,6 +131,7 @@ import {
 	listLinkedNfcCardsByOwnerEoa,
 	listCouponIssuedNftSeriesForCardDescending,
 	listProductionIssuedNftSeriesForCardDescending,
+	getSeriesByCardAndTokenId,
 	listRegisteredBeamioUserCardAddresses,
 	listNfcBeamioUserCardHoldingsByTagId,
 	type NfcLinkAppSessionDb,
@@ -1992,7 +1994,8 @@ export const executeForAdminPool: Array<{
 	uid?: string
 	cardOwnerEOA?: string
 	topupFeeBUnits?: bigint
-	topupKind?: 2 | 3
+	/** consumeFromUser kind：Charge/redeem/coupon burn 固定费为 1；NFC mint topup 为 2 */
+	topupKind?: 1 | 2 | 3
 	res?: Response
 	/** POS 可选：卡币种入账拆分（6 位小数整数）；缺省则 indexer 仍为单笔 legacy `topupCard`/`newCard`/`upgradeNewCard` */
 	topupCurrencySplit?: { currencyAmountE6: bigint; cardE6: bigint; cashE6: bigint; bonusE6: bigint }
@@ -2753,14 +2756,29 @@ export const executeForAdminProcess = async () => {
 		const recipientEOA = tryParseExecuteForAdminAaRecipient(obj.data)
 		const mintParsed = tryParseMintPointsByAdminArgs(obj.data)
 		let burnParsedForLog: { target: string; amount: bigint } | null = null
+		let burnIssuedNftParsed: { holder: string; tokenId: bigint; amount: bigint } | null = null
 		if (!mintParsed) {
-			try {
-				const iface = new ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)'])
-				const dec = iface.parseTransaction({ data: obj.data })
-				if (dec?.name === 'burnPointsByAdmin' && dec.args[0] != null && dec.args[1] != null) {
-					burnParsedForLog = { target: dec.args[0] as string, amount: BigInt(dec.args[1]) }
-				}
-			} catch { /* ignore */ }
+			const dataSelLocal = obj.data.slice(0, 10).toLowerCase()
+			if (dataSelLocal === BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR) {
+				try {
+					const dec = burnIssuedNftByGatewayIface.parseTransaction({ data: obj.data })
+					if (dec?.name === 'burnIssuedNftByGateway') {
+						burnIssuedNftParsed = {
+							holder: dec.args[0] as string,
+							tokenId: BigInt(dec.args[1] as bigint),
+							amount: BigInt(dec.args[2] as bigint),
+						}
+					}
+				} catch { /* ignore */ }
+			} else {
+				try {
+					const iface = new ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)'])
+					const dec = iface.parseTransaction({ data: obj.data })
+					if (dec?.name === 'burnPointsByAdmin' && dec.args[0] != null && dec.args[1] != null) {
+						burnParsedForLog = { target: dec.args[0] as string, amount: BigInt(dec.args[1]) }
+					}
+				} catch { /* ignore */ }
+			}
 		}
 		try {
 			const posSigner = adminCheck.signer
@@ -2779,6 +2797,10 @@ export const executeForAdminProcess = async () => {
 				op = 'burnPointsByAdmin'
 				pts6 = burnParsedForLog.amount.toString()
 				rcpt = burnParsedForLog.target
+			} else if (burnIssuedNftParsed) {
+				op = 'burnIssuedNftByGateway'
+				pts6 = burnIssuedNftParsed.amount.toString()
+				rcpt = burnIssuedNftParsed.holder
 			}
 			if (op !== 'other' || obj.uid) {
 				logger(Colors.cyan(`[nfcTopup] POS topup summary | cardAddr=${obj.cardAddr} | cardOwner=${cardOwnerLog || 'N/A'} | posEOA=${posSigner} | op=${op} | points6=${pts6 || 'N/A'} | recipient=${rcpt} | uid=${obj.uid ?? '(none)'}`))
@@ -2864,7 +2886,8 @@ export const executeForAdminProcess = async () => {
 			}
 		}
 		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash} | uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'}`))
-		const shouldWaitReceiptBeforeSuccess = isAdminManager || Boolean(mintParsed) || Boolean(burnParsedForLog)
+		const shouldWaitReceiptBeforeSuccess =
+			isAdminManager || Boolean(mintParsed) || Boolean(burnParsedForLog) || Boolean(burnIssuedNftParsed)
 		if (shouldWaitReceiptBeforeSuccess) {
 			const receipt = await tx.wait()
 			if (!receipt || Number(receipt.status ?? 0) !== 1) {
@@ -3128,6 +3151,8 @@ export const cardRedeemPool: {
 	redeemCode: string
 	toUserEOA: string
 	res: Response
+	/** POS / NFC / QR terminal EOA — indexer subordinate when distinct from payer/payee (same as Charge posOperator). */
+	posOperator?: string
 }[] = []
 
 /** 有空闲 admin 钱包时立即启动 worker；多请求可并行占用 Settle_ContractPool 中不同钱包（各钱包 nonce 独立递增）。 */
@@ -3177,6 +3202,8 @@ export const cardRedeemIndexerAccountingPool: {
 	beforeNfts?: unknown[]
 	/** 创建 redeem 的 admin/owner，兑换时计入其统计及 parent 链；0 则用 card owner 兜底 */
 	creator?: string
+	/** In-store redeem: POS terminal EOA for ActionFacet accountActionIds[subordinate]. */
+	posOperator?: string
 }[] = []
 
 /** 通用 executeForOwner：客户端提交 owner 签名的 calldata，服务端免 gas 执行。可选 redeemCode+toUserEOA 时额外执行 redeemForUser（空投）。可选 description/image/background_color 用于 createIssuedNft 后组装 EIP-1155 metadata。 */
@@ -5455,11 +5482,12 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 			throw new Error('txHash must be bytes32')
 		}
 		const transferToAa: { tokenId: bigint; value: bigint }[] = []
+		let redeemReceipt: ethers.TransactionReceipt | null = null
 		try {
-			const receipt = await SC.walletBase.provider!.getTransactionReceipt(txHash)
-			if (receipt?.logs) {
+			redeemReceipt = await SC.walletBase.provider!.getTransactionReceipt(txHash)
+			if (redeemReceipt?.logs) {
 				const cardAddr = obj.cardAddress.toLowerCase()
-				for (const log of receipt.logs) {
+				for (const log of redeemReceipt.logs) {
 					if (log.address.toLowerCase() !== cardAddr || log.topics[0] !== TRANSFER_SINGLE_TOPIC) continue
 					const decoded = ethers.AbiCoder.defaultAbiCoder().decode(['uint256', 'uint256'], log.data)
 					const toAddr = log.topics[3] ? ethers.getAddress('0x' + String(log.topics[3]).slice(-40)) : ''
@@ -5489,6 +5517,57 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 			finalRequestAmountUSDC6 = currencyFiatNum === 4 ? finalRequestAmountFiat6 : 0n
 		}
 		if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
+		const { bServiceUnits6, bServiceUSDC6 } = calcChargeFixedBUnitFee()
+		const aaFactoryRedeem = await getCardAaFactoryAddress(obj.cardAddress)
+		const feePayerPick = await pickBUnitFeeConsumerPreferEoaThenAa(payerAddr, bServiceUnits6, {
+			aaFactoryAddress: aaFactoryRedeem,
+		})
+		const feePayerForLedger = feePayerPick.ok ? feePayerPick.consumer : payerAddr
+		if (!feePayerPick.ok) {
+			logger(
+				Colors.yellow(
+					`[cardRedeemIndexerAccountingProcess] B-Unit pick failed at master (Cluster should have blocked): ${feePayerPick.error}`
+				)
+			)
+		} else {
+			const baseGas = redeemReceipt?.gasUsed ?? 0n
+			const bunitAirdropWrite = new ethers.Contract(
+				CONET_BUNIT_AIRDROP_ADDRESS,
+				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+				SC.walletConet
+			)
+			try {
+				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+					feePayerForLedger,
+					bServiceUnits6,
+					txHash as `0x${string}`,
+					baseGas,
+					1n,
+					{ gasLimit: 2_500_000 }
+				)
+				await consumeTx.wait()
+				logger(
+					Colors.cyan(
+						`[cardRedeemIndexerAccountingProcess] consumeFromUser ok: ${Number(bServiceUnits6) / 1e6} B-Units from ${feePayerForLedger} baseHash=${txHash}`
+					)
+				)
+			} catch (consumeErr: any) {
+				logger(
+					Colors.red(
+						`[cardRedeemIndexerAccountingProcess] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`
+					)
+				)
+				await logChargeConsumeFromUserDiagnostics(
+					SC.walletConet.provider ?? providerConet,
+					feePayerForLedger,
+					bServiceUnits6,
+					finalRequestAmountUSDC6,
+					undefined,
+					txHash,
+					'cardRedeemIndexerAccountingProcess'
+				)
+			}
+		}
 		// redeem txCategory: redeemNewCard / redeemUpgradeNewCard / redeemTopupCard
 		const hasNewTierInTransfer = transferToAa.some((t) => t.tokenId > 0n)
 		const beforeTokenIds = extractTokenIdsFromOwnership(obj.beforeNfts ?? [])
@@ -5497,13 +5576,6 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 			: 'redeemTopupCard'
 		const TX_REDEEM = ethers.keccak256(ethers.toUtf8Bytes(redeemCategoryRaw))
 		const CHAIN_ID_BASE = 8453n
-		const displayJson = JSON.stringify({
-			title: redeemCategoryRaw === 'redeemNewCard' ? 'Redeem New Card' : (redeemCategoryRaw === 'redeemUpgradeNewCard' ? 'Redeem Upgrade Card' : 'Redeem Top Up'),
-			handle: `Redeem to ${obj.aaAddress.slice(0, 10)}…`,
-			finishedHash: txHash,
-			source: 'cardRedeem',
-			topupCategory: redeemCategoryRaw,
-		})
 		// TopUp RouteItem per spec: asset=card, assetType=ERC1155, source=UserCardPoint, tokenId=NFT card#, itemCurrencyType=currency, amountE6=topup amount, offsetInRequestCurrencyE6=0
 		// tokenId: newly minted tier from transferToAa, or existing tier from getOwnership when points-only redeem
 		let tokenIdForRoute = transferToAa.find((t) => t.tokenId > 0n)?.tokenId ?? 0n
@@ -5514,6 +5586,30 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 				tokenIdForRoute = tierIds[0] ?? 0n
 			} catch (_) { /* keep 0n */ }
 		}
+		let distributionFields: ReturnType<typeof resolveIssuedNftDistributionFieldsFromSeriesMetadata> = null
+		if (tokenIdForRoute >= ISSUED_NFT_START_ID_MEMBER) {
+			try {
+				const series = await getSeriesByCardAndTokenId(obj.cardAddress, tokenIdForRoute.toString())
+				const seriesMeta =
+					series?.metadata && typeof series.metadata === 'object' && !Array.isArray(series.metadata)
+						? (series.metadata as Record<string, unknown>)
+						: null
+				distributionFields = resolveIssuedNftDistributionFieldsFromSeriesMetadata(seriesMeta)
+			} catch (_) {
+				/* optional DB metadata */
+			}
+		}
+		const displayJson = JSON.stringify({
+			title: redeemCategoryRaw === 'redeemNewCard' ? 'Redeem New Card' : (redeemCategoryRaw === 'redeemUpgradeNewCard' ? 'Redeem Upgrade Card' : 'Redeem Top Up'),
+			handle: `Redeem to ${obj.aaAddress.slice(0, 10)}…`,
+			finishedHash: txHash,
+			source: 'cardRedeem',
+			topupCategory: redeemCategoryRaw,
+			...(distributionFields?.distributionKind ? { distributionKind: distributionFields.distributionKind } : {}),
+			...(distributionFields?.globalCategory ? { globalCategory: distributionFields.globalCategory } : {}),
+			...(distributionFields?.couponId ? { couponId: distributionFields.couponId } : {}),
+			...(distributionFields?.productionId ? { productionId: distributionFields.productionId } : {}),
+		})
 		const topupRouteItem = {
 			asset: ethers.getAddress(obj.cardAddress),
 			amountE6,
@@ -5527,6 +5623,16 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 		const redeemOperator = (obj.creator && obj.creator !== ethers.ZeroAddress) ? obj.creator : payerAddr
 		const redeemOpChain = await fetchOperatorParentChain(obj.cardAddress, redeemOperator)
 		const { topAdmin: redeemTopAdmin, subordinate: redeemSubordinate } = deriveTopAdminAndSubordinate(redeemOperator, redeemOpChain)
+		let subordinateForLedger = redeemSubordinate
+		const posOpRaw = typeof obj.posOperator === 'string' ? obj.posOperator.trim() : ''
+		if (posOpRaw && ethers.isAddress(posOpRaw)) {
+			const posAddr = ethers.getAddress(posOpRaw)
+			const payerLc = payerAddr.toLowerCase()
+			const payeeLc = ethers.getAddress(obj.aaAddress).toLowerCase()
+			if (posAddr.toLowerCase() !== payerLc && posAddr.toLowerCase() !== payeeLc) {
+				subordinateForLedger = posAddr
+			}
+		}
 		const transactionInput = {
 			txId: txHash as `0x${string}`,
 			originalPaymentHash: ethers.ZeroHash as `0x${string}`,
@@ -5545,9 +5651,9 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 				gasWei: 0n,
 				gasUSDC6: 0n,
 				serviceUSDC6: 0n,
-				bServiceUSDC6: 0n,
-				bServiceUnits6: 0n,
-				feePayer: ethers.ZeroAddress,
+				bServiceUSDC6,
+				bServiceUnits6,
+				feePayer: feePayerForLedger,
 			},
 			meta: {
 				requestAmountFiat6: finalRequestAmountFiat6,
@@ -5563,11 +5669,15 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 			operator: ethers.getAddress(redeemOperator),
 			operatorParentChain: redeemOpChain,
 			topAdmin: redeemTopAdmin,
-			subordinate: redeemSubordinate,
+			subordinate: subordinateForLedger,
 		}
 		const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 		const tx = await actionFacetSync.syncTokenAction(transactionInput)
-		logger(Colors.green(`[cardRedeemIndexerAccountingProcess] indexed txHash=${txHash} syncTx=${tx.hash} card=${obj.cardAddress}`))
+		logger(
+			Colors.green(
+				`[cardRedeemIndexerAccountingProcess] indexed txHash=${txHash} syncTx=${tx.hash} card=${obj.cardAddress} subordinate=${subordinateForLedger} bUnits=${Number(bServiceUnits6) / 1e6} feePayer=${feePayerForLedger}`
+			)
+		)
 	} catch (error: any) {
 		const msg = error?.shortMessage ?? error?.message ?? String(error)
 		logger(Colors.yellow(`[cardRedeemIndexerAccountingProcess] failed: ${msg}`), inspect(obj, false, 3, true))
@@ -12743,6 +12853,8 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 			deadline: number
 			nonce: string
 			factoryGateway: string
+			cardOwnerEOA: string
+			topupFeeBUnits: string
 		}
 	}
 	| { success: false; error: string }
@@ -12844,6 +12956,11 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 	if (!isValid) return { success: false, error: 'Issued coupon is inactive or expired' }
 	if (bal < amountN) return { success: false, error: 'Insufficient coupon balance to consume' }
 
+	const bunit = await cardRedeemPreCheckBUnitBalance(cardNorm)
+	if (!bunit.success) {
+		return { success: false, error: bunit.error ?? 'Insufficient B-Units for coupon consume' }
+	}
+
 	const data = burnIssuedNftByGatewayIface.encodeFunctionData('burnIssuedNftByGateway', [holderAccount, tokenIdN, amountN])
 	const deadline = Math.floor(Date.now() / 1000) + 15 * 60
 	const nonce = ethers.keccak256(
@@ -12864,6 +12981,8 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 			deadline,
 			nonce,
 			factoryGateway,
+			cardOwnerEOA: bunit.cardOwnerEOA ?? ownerNorm,
+			topupFeeBUnits: String(bunit.feeBUnits6 ?? 0n),
 		},
 	}
 }
@@ -12884,6 +13003,10 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 			deadline: number
 			nonce: string
 			adminSignature: string
+			cardOwnerEOA: string
+			topupFeeBUnits: string
+			posOperator: string
+			topupKind: 1
 		}
 	}
 	| { success: false; error: string }
@@ -12934,6 +13057,27 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 			}
 		}
 
+		const cardRead = new ethers.Contract(
+			cardNorm,
+			[
+				'function balanceOf(address account, uint256 id) view returns (uint256)',
+				'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
+			],
+			providerBaseBackup
+		)
+		const holderNorm = ethers.getAddress(holder)
+		const [bal, isValid] = await Promise.all([
+			cardRead.balanceOf(holderNorm, tokenId) as Promise<bigint>,
+			cardRead.isIssuedNftValid(tokenId) as Promise<boolean>,
+		])
+		if (!isValid) return { success: false, error: 'Issued coupon is inactive or expired' }
+		if (bal < amount) return { success: false, error: 'Insufficient coupon balance to consume' }
+
+		const bunit = await cardRedeemPreCheckBUnitBalance(cardNorm)
+		if (!bunit.success || !bunit.cardOwnerEOA || !bunit.feeBUnits6) {
+			return { success: false, error: bunit.error ?? 'Insufficient B-Units for coupon consume' }
+		}
+
 		return {
 			success: true,
 			preChecked: {
@@ -12942,6 +13086,10 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 				deadline,
 				nonce,
 				adminSignature,
+				cardOwnerEOA: bunit.cardOwnerEOA,
+				topupFeeBUnits: String(bunit.feeBUnits6),
+				posOperator: ethers.getAddress(adminCheck.signer),
+				topupKind: 1 as const,
 			},
 		}
 	} catch (e: any) {
@@ -14159,6 +14307,48 @@ export function buildBeamioUserCardRedeemShareUrl(cardAddress: string, redeemCod
 	return `https://beamio.app/app/?beamiocard=${encodeURIComponent(card)}&redeemcode=${encodeURIComponent(code)}`
 }
 
+/**
+ * Cluster 预检：Claim（cardRedeem / Coupon·Catalog redeem code）由 BeamioUserCard owner 承担 B-Unit，每笔固定 2 B-Units（与 Charge 一致）。
+ */
+export const cardRedeemPreCheckBUnitBalance = async (
+	cardAddress: string
+): Promise<{
+	success: boolean
+	error?: string
+	feeBUnits6?: bigint
+	feePayerEOA?: string
+	/** 卡 issuer owner（EOA），供 executeForAdmin / indexer 记账 */
+	cardOwnerEOA?: string
+}> => {
+	try {
+		const cardNorm = ethers.getAddress(cardAddress)
+		const card = new ethers.Contract(cardNorm, ['function owner() view returns (address)'], providerBaseBackup)
+		const owner = (await card.owner()) as string
+		if (!owner || owner === ethers.ZeroAddress) {
+			return { success: false, error: 'Card owner not found for B-Unit fee' }
+		}
+		const resolveResult = await resolveCardOwnerToEOA(providerBaseBackup, owner)
+		if (!resolveResult.success) {
+			return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA for B-Unit fee' }
+		}
+		const cardOwnerEOA = resolveResult.cardOwner
+		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
+		const aaFactoryAddr = await getCardAaFactoryAddress(cardNorm)
+		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeBUnits6, {
+			aaFactoryAddress: aaFactoryAddr,
+		})
+		if (!picked.ok) {
+			return { success: false, error: `Insufficient B-Units for redeem (${picked.error})` }
+		}
+		return { success: true, feeBUnits6, feePayerEOA: picked.consumer, cardOwnerEOA }
+	} catch (e: any) {
+		return {
+			success: false,
+			error: `Redeem B-Unit balance check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
+		}
+	}
+}
+
 /** cardRedeem 集群预检：校验 redeem 码在链上仍可兑换（含 pool 单用户未领）。 */
 export const cardRedeemPreCheck = async (body: {
 	cardAddress?: string
@@ -14204,6 +14394,10 @@ export const cardRedeemPreCheck = async (body: {
 				? 'This redeem code has already been used by this account.'
 				: 'Redeem code is invalid or already used.'
 			return { success: false, redeemable: false, error: msg }
+		}
+		const bunit = await cardRedeemPreCheckBUnitBalance(cardNorm)
+		if (!bunit.success) {
+			return { success: false, redeemable: false, error: bunit.error ?? 'Insufficient B-Units for redeem' }
 		}
 		return {
 			success: true,
@@ -14302,6 +14496,9 @@ export const cardRedeemPoolPress = async () => {
 				txHash,
 				beforeNfts,
 				creator: creator ? ethers.getAddress(creator) : undefined,
+				...(obj.posOperator && ethers.isAddress(obj.posOperator)
+					? { posOperator: ethers.getAddress(obj.posOperator) }
+					: {}),
 			})
 			cardRedeemIndexerAccountingProcess().catch((err: any) => {
 				logger(Colors.red('[cardRedeemIndexerAccountingProcess] unhandled:'), err?.message ?? err)

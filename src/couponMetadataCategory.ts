@@ -256,6 +256,45 @@ export function filterClientProductionSeriesRows<
 	return rows.filter((row) => metadataMatchesClientProductionCategoryFilter(row.metadata))
 }
 
+/** Issued-NFT series row → ledger / displayJson distribution fields (coupon vs catalog global category). */
+export function resolveIssuedNftDistributionFieldsFromSeriesMetadata(
+	meta: Record<string, unknown> | null | undefined
+): {
+	distributionKind: 'coupon' | 'catalog'
+	globalCategory: string
+	couponId?: string
+	productionId?: string
+} | null {
+	if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null
+	if (metadataMatchesClientCouponCategoryFilter(meta)) {
+		const couponId =
+			typeof meta.couponId === 'string' && meta.couponId.trim()
+				? meta.couponId.trim()
+				: typeof meta.id === 'string' && meta.id.trim()
+					? meta.id.trim()
+					: undefined
+		return {
+			distributionKind: 'coupon',
+			globalCategory: BEAMIO_COUPON_NFT_CATEGORY,
+			...(couponId ? { couponId } : {}),
+		}
+	}
+	if (metadataMatchesClientProductionCategoryFilter(meta)) {
+		const productionId =
+			typeof meta.productionId === 'string' && meta.productionId.trim()
+				? meta.productionId.trim()
+				: typeof meta.id === 'string' && meta.id.trim()
+					? meta.id.trim()
+					: undefined
+		return {
+			distributionKind: 'catalog',
+			globalCategory: normalizeBeamioCatalogGlobalCategory(meta.category),
+			...(productionId ? { productionId } : {}),
+		}
+	}
+	return null
+}
+
 export function normalizeShareTokenMetadataProductions(share: Record<string, unknown>): Record<string, unknown> {
 	const productions = share.productions
 	if (!Array.isArray(productions) || productions.length === 0) return share

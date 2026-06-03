@@ -100,6 +100,9 @@ export type CouponClaimShareMeta = {
 	publisherLine?: string
 	iconUrl: string
 	backgroundImage: string
+	/** Original catalog production asset (YouTube watch URL or uploaded MP4/IPFS). */
+	productionVideoUrl?: string
+	productionVideoMime?: string
 	backgroundColorHex: string
 	validBeforeSec: number | null
 	expiresLabel: string
@@ -1017,6 +1020,8 @@ async function resolveOpenClaimShareMeta(
 			itemCategory,
 			iconUrl: copy.iconUrl,
 			backgroundImage: copy.backgroundImage,
+			productionVideoUrl: fields.backgroundImage,
+			productionVideoMime: fields.backgroundImageMime,
 			backgroundColorHex: fields.backgroundColorHex,
 			validBeforeSec,
 			expiresLabel,
@@ -1181,6 +1186,8 @@ export async function resolveIssuedNftExplorerShareMeta(
 			itemCategory,
 			iconUrl: copy.iconUrl,
 			backgroundImage: copy.backgroundImage,
+			productionVideoUrl: fields.backgroundImage,
+			productionVideoMime: fields.backgroundImageMime,
 			backgroundColorHex: fields.backgroundColorHex,
 			validBeforeSec,
 			expiresLabel,
