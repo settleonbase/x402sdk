@@ -19,6 +19,18 @@ const MIN_CACHED_BYTES = 4096
 
 const inflightMirror = new Map<string, Promise<string>>()
 
+export function ipfsFragmentPublicOrigin(): string {
+	return (process.env.BEAMIO_IPFS_FRAGMENT_ORIGIN || 'https://ipfs.conet.network').replace(/\/$/, '')
+}
+
+/** Public URL for browser `<video src>` (hosted on ipfs.conet.network). */
+export function catalogYoutubeStreamPublicUrl(videoId: string): string {
+	const id = videoId.trim()
+	return `${ipfsFragmentPublicOrigin()}/api/catalogYoutubeStream?v=${encodeURIComponent(id)}`
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
 function ytDlpBin(): string {
 	return (process.env.YT_DLP_PATH || 'yt-dlp').trim() || 'yt-dlp'
 }
@@ -37,10 +49,9 @@ export function catalogYoutubeMirrorCachePath(videoId: string): string {
 	return Path.join(catalogYoutubeMirrorCacheDir(), `${videoId}.mp4`)
 }
 
-/** Same-origin stream URL for homepage / share `<video src>`. */
+/** @deprecated Prefer catalogYoutubeStreamPublicUrl (IPFS host). */
 export function catalogYoutubeStreamProxyUrl(videoId: string): string {
-	const id = videoId.trim()
-	return `/api/catalogYoutubeStream?v=${encodeURIComponent(id)}`
+	return catalogYoutubeStreamPublicUrl(videoId)
 }
 
 function parseBytesRange(
@@ -169,6 +180,19 @@ async function mirrorYoutubeToCache(videoId: string): Promise<string> {
 	return out
 }
 
+async function waitForCachedFile(out: string, attempts = 180): Promise<string | null> {
+	for (let i = 0; i < attempts; i += 1) {
+		try {
+			const st = await FsPromises.stat(out)
+			if (st.isFile() && st.size >= MIN_CACHED_BYTES) return out
+		} catch {
+			/* not ready */
+		}
+		await sleep(1000)
+	}
+	return null
+}
+
 async function resolveCachedMirrorPath(videoId: string): Promise<string> {
 	const out = catalogYoutubeMirrorCachePath(videoId)
 	try {
@@ -180,7 +204,21 @@ async function resolveCachedMirrorPath(videoId: string): Promise<string> {
 
 	let task = inflightMirror.get(videoId)
 	if (!task) {
-		task = mirrorYoutubeToCache(videoId).finally(() => {
+		task = (async () => {
+			const lockPath = `${out}.lock`
+			try {
+				await FsPromises.writeFile(lockPath, `${process.pid}@${Date.now()}`, { flag: 'wx' })
+			} catch {
+				const ready = await waitForCachedFile(out)
+				if (ready) return ready
+				throw new Error('YouTube mirror already in progress; try again shortly')
+			}
+			try {
+				return await mirrorYoutubeToCache(videoId)
+			} finally {
+				await FsPromises.unlink(lockPath).catch(() => {})
+			}
+		})().finally(() => {
 			inflightMirror.delete(videoId)
 		})
 		inflightMirror.set(videoId, task)

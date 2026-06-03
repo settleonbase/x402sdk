@@ -10,6 +10,7 @@ import Cluster from 'node:cluster'
 import {writeFile} from 'node:fs'
 import {beamio_ContractPool} from '../db'
 import { keccak256, toUtf8Bytes } from "ethers"
+import { registerCatalogYoutubeStreamProxyRoute } from './catalogYoutubeStreamProxy'
 
 const storagePATH = masterSetup.storagePATH
 
@@ -424,7 +425,8 @@ class server {
 	}
 
 	private router ( router: Router ) {
-		
+		registerCatalogYoutubeStreamProxyRoute(router)
+
 		router.get('/storageFragmentChunkStatus', async (req, res) => {
 			const { hash, wallet, signMessage } = req.query as {
 				hash?: string

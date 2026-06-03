@@ -64,7 +64,6 @@ import {
 	registerBeamioFragmentProxyRoute,
 	resolveCatalogPointsExplorerImageUrl,
 } from './beamioFragmentImageProxy'
-import { registerCatalogYoutubeStreamProxyRoute } from './catalogYoutubeStreamProxy'
 
 type CouponClaimShareQuery = {
 	target?: string
@@ -5155,7 +5154,6 @@ const routing = ( router: Router ) => {
 	})
 
 	registerBeamioFragmentProxyRoute(router)
-	registerCatalogYoutubeStreamProxyRoute(router)
 
 	/** GET /api/metadata/0x{contract}{64hexTokenId}.json - BaseScan/ERC-1155 兼容元数据路由 */
 	router.get('/metadata/:resource', async (req, res) => {
