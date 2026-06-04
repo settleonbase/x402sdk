@@ -57,6 +57,7 @@ import {
 	warmCouponClaimOgJpeg,
 	warmIssuedNftExplorerOgJpeg,
 } from './couponClaimShare'
+import { listIssuedNftClaimWallets } from './issuedNftClaimWallets'
 import { requestExplorerNftMetadataRefresh } from './baseExplorerNftMetadataRefresh'
 import {
 	DEFAULT_METADATA_IMAGE_PROXY_URL,
@@ -573,6 +574,7 @@ const cardActiveIssuedCouponSeriesCache = new Map<string, { body: string; expiry
 const cardActiveIssuedProductionSeriesCache = new Map<string, { body: string; expiry: number }>()
 const seriesSharedMetadataCache = new Map<string, { body: string; expiry: number }>()
 const mintMetadataCache = new Map<string, { body: string; expiry: number }>()
+const issuedNftClaimWalletsCache = new Map<string, { body: string; expiry: number }>()
 const getFollowStatusCache = new Map<string, { body: string; expiry: number }>()
 
 /** After issued-coupon metadata changes, drop cluster GET caches so clients see fresh `metadata_json`. */
@@ -6082,6 +6084,41 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(500).json({ error: err?.message ?? 'Failed to fetch mint metadata' })
 		}
 	})
+
+	/** GET /api/issuedNftClaimWallets?card=&tokenId=&page=&pageSize= — wallets that minted/claimed this issued NFT. */
+	router.get('/issuedNftClaimWallets', async (req, res) => {
+		const { card, tokenId, page, pageSize } = req.query as {
+			card?: string
+			tokenId?: string
+			page?: string
+			pageSize?: string
+		}
+		if (!card || !ethers.isAddress(card) || !tokenId?.trim()) {
+			return res.status(400).json({ ok: false, error: 'Invalid card or tokenId' })
+		}
+		const pageN = Math.max(1, Math.floor(Number(page ?? 1) || 1))
+		const pageSizeN = Math.min(50, Math.max(1, Math.floor(Number(pageSize ?? 10) || 10)))
+		const cacheKey = `${ethers.getAddress(card).toLowerCase()}:${tokenId.trim()}:${pageN}:${pageSizeN}`
+		const cached = issuedNftClaimWalletsCache.get(cacheKey)
+		if (cached && Date.now() < cached.expiry) {
+			return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body)
+		}
+		try {
+			const data = await listIssuedNftClaimWallets({
+				cardAddress: card,
+				tokenId: tokenId.trim(),
+				page: pageN,
+				pageSize: pageSizeN,
+			})
+			const body = JSON.stringify(data)
+			issuedNftClaimWalletsCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+			res.status(200).setHeader('Content-Type', 'application/json').send(body)
+		} catch (err: any) {
+			logger(Colors.red('[issuedNftClaimWallets] error:'), err?.message ?? err)
+			return res.status(500).json({ ok: false, error: err?.message ?? 'Failed to list claim wallets' })
+		}
+	})
+
 	router.post('/addUser', async (req,res) => {
 		const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, pgpKeyID, pgpKey, signMessage } = req.body as {
 			accountName?: string
