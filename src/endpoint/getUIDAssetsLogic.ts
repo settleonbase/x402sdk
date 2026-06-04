@@ -12,6 +12,7 @@ import {
 	getMemberLastTopupOnCard,
 	maybeEnqueueNfcCashTreeBeamioTag,
 	maybeEnqueueNfcVerraBeamioTag,
+	maybeClearLegacyNfcBeamioProfileNames,
 	listCouponIssuedNftSeriesForCardDescending,
 	listRegisteredBeamioUserCardAddresses,
 } from '../db'
@@ -680,7 +681,10 @@ export function scheduleEnsureNfcBeamioTagForEoa(
 			} catch {
 				exists = false
 			}
-			if (exists && accName !== '') return
+			if (exists && accName !== '') {
+				maybeClearLegacyNfcBeamioProfileNames(wallet)
+				return
+			}
 
 			let tierTokenId: string | null = null
 			if (cards && cards.length > 0) {

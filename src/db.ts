@@ -779,6 +779,21 @@ const sanitizeName = (s: string | undefined): string => {
 	return String(s).split(/[\r\n]/)[0].trim().slice(0, 128)
 }
 
+/** 历史 NFC 自动登记曾把 uid / SUN TagID 写入 firstName / lastName（纯 hex）。 */
+const NFC_LEGACY_STORED_NAME_HEX_RE = /^[0-9A-Fa-f]{8,32}$/
+
+const isLegacyNfcStoredProfileName = (s: string): boolean => {
+	const t = String(s || '').trim()
+	return t !== '' && NFC_LEGACY_STORED_NAME_HEX_RE.test(t)
+}
+
+const nfcProfileNamesNeedClear = (firstName: string, lastName: string): boolean =>
+	isLegacyNfcStoredProfileName(firstName) || isLegacyNfcStoredProfileName(lastName)
+
+/** NFC 持卡 beamioTag 登记：链上 profile 的 first/last 须为空（uid/tagId 仅存 DB，不进 AccountRegistry 姓名）。 */
+const NFC_BEAMIO_PROFILE_FIRST_NAME = ''
+const NFC_BEAMIO_PROFILE_LAST_NAME = ''
+
 /** 与 Cluster `/addUser` 一致：beamioTag 仅允许 3–20 位字母数字与 _ . */
 const BEAMIO_ACCOUNT_NAME_RE = /^[a-zA-Z0-9_.]{3,20}$/
 
@@ -858,37 +873,40 @@ export const maybeEnqueueNfcCashTreeBeamioTag = (params: {
 			let accName = ''
 			let fnOn = ''
 			let lnOn = ''
+			let onchain: Awaited<ReturnType<typeof reg.getAccount>> | null = null
 			try {
-				const o = await reg.getAccount(wallet)
-				exists = !!o?.exists
-				accName = String(o?.accountName ?? '').trim()
-				fnOn = sanitizeName(o?.firstName as string | undefined)
-				lnOn = sanitizeName(o?.lastName as string | undefined)
+				onchain = await reg.getAccount(wallet)
+				exists = !!onchain?.exists
+				accName = String(onchain?.accountName ?? '').trim()
+				fnOn = sanitizeName(onchain?.firstName as string | undefined)
+				lnOn = sanitizeName(onchain?.lastName as string | undefined)
 			} catch {
 				exists = false
+				onchain = null
 			}
-
-			const uidF = sanitizeName(uid)
-			const tagF = sanitizeName(tagId || '')
 
 			if (exists && accName !== '' && accName !== expectedName) {
 				logger(Colors.gray(`[maybeEnqueueNfcCashTreeBeamioTag] skip: wallet already has tag ${accName} (expected ${expectedName})`))
 				return
 			}
-			if (exists && accName === expectedName && fnOn === uidF && lnOn === tagF) {
+			if (exists && accName === expectedName && fnOn === NFC_BEAMIO_PROFILE_FIRST_NAME && lnOn === NFC_BEAMIO_PROFILE_LAST_NAME) {
+				return
+			}
+			if (exists && accName === expectedName && !nfcProfileNamesNeedClear(fnOn, lnOn) && (fnOn !== '' || lnOn !== '')) {
+				logger(Colors.gray(`[maybeEnqueueNfcCashTreeBeamioTag] skip: wallet has custom profile names`))
 				return
 			}
 
 			const getExistsUserData = await getUserData(expectedName)
 			const fullInput: beamioAccount = {
 				accountName: expectedName,
-				image: '',
-				darkTheme: false,
-				isUSDCFaucet: false,
-				isETHFaucet: false,
+				image: exists && onchain ? String(onchain.image ?? '') : '',
+				darkTheme: exists && onchain ? !!onchain.darkTheme : false,
+				isUSDCFaucet: exists && onchain ? !!onchain.isUSDCFaucet : false,
+				isETHFaucet: exists && onchain ? !!onchain.isETHFaucet : false,
 				initialLoading: true,
-				firstName: uidF,
-				lastName: tagF,
+				firstName: NFC_BEAMIO_PROFILE_FIRST_NAME,
+				lastName: NFC_BEAMIO_PROFILE_LAST_NAME,
 				pgpKeyID: '',
 				pgpKey: '',
 				address: wallet,
@@ -902,7 +920,7 @@ export const maybeEnqueueNfcCashTreeBeamioTag = (params: {
 				followBeamioOfficial: false,
 			})
 			addUserPoolProcess()
-			logger(Colors.cyan(`[maybeEnqueueNfcCashTreeBeamioTag] queued setAccountByAdmin wallet=${wallet.slice(0, 10)}… tag=${expectedName} uidLen=${uidF.length} tagIdLen=${tagF.length}`))
+			logger(Colors.cyan(`[maybeEnqueueNfcCashTreeBeamioTag] queued setAccountByAdmin wallet=${wallet.slice(0, 10)}… tag=${expectedName} (empty profile names)`))
 		} catch (e: any) {
 			logger(Colors.yellow(`[maybeEnqueueNfcCashTreeBeamioTag] error: ${e?.message ?? e}`))
 		}
@@ -986,9 +1004,10 @@ export const maybeEnqueueNfcVerraBeamioTag = (params: {
 			let tagId = tagOk ? tagRaw : null
 			if (!tagId) tagId = (await getNfcTagIdByUid(uid))?.toUpperCase() ?? null
 
-			const uidF = sanitizeName(uid)
-			const tagF = sanitizeName(tagId || '')
-			if (exists && accName === expectedName && fnOn === uidF && lnOn === tagF) {
+			if (exists && accName === expectedName && fnOn === NFC_BEAMIO_PROFILE_FIRST_NAME && lnOn === NFC_BEAMIO_PROFILE_LAST_NAME) {
+				return
+			}
+			if (exists && accName === expectedName && !nfcProfileNamesNeedClear(fnOn, lnOn) && (fnOn !== '' || lnOn !== '')) {
 				return
 			}
 
@@ -1000,8 +1019,8 @@ export const maybeEnqueueNfcVerraBeamioTag = (params: {
 				isUSDCFaucet: false,
 				isETHFaucet: false,
 				initialLoading: true,
-				firstName: uidF,
-				lastName: tagF,
+				firstName: NFC_BEAMIO_PROFILE_FIRST_NAME,
+				lastName: NFC_BEAMIO_PROFILE_LAST_NAME,
 				pgpKeyID: '',
 				pgpKey: '',
 				address: wallet,
@@ -1016,11 +1035,72 @@ export const maybeEnqueueNfcVerraBeamioTag = (params: {
 			addUserPoolProcess()
 			logger(
 				Colors.cyan(
-					`[maybeEnqueueNfcVerraBeamioTag] queued setAccountByAdmin wallet=${wallet.slice(0, 10)}… tag=${expectedName} uidLen=${uidF.length} tagIdLen=${tagF.length}`
+					`[maybeEnqueueNfcVerraBeamioTag] queued setAccountByAdmin wallet=${wallet.slice(0, 10)}… tag=${expectedName} (empty profile names)`
 				)
 			)
 		} catch (e: any) {
 			logger(Colors.yellow(`[maybeEnqueueNfcVerraBeamioTag] error: ${e?.message ?? e}`))
+		}
+	})()
+}
+
+/**
+ * 将历史误写入 AccountRegistry 的 NFC uid/tagId（hex）从 firstName/lastName 清空。
+ * 在持卡 EOA 已有 beamioTag 时由 scheduleEnsureNfcBeamioTagForEoa 触发。
+ */
+export const maybeClearLegacyNfcBeamioProfileNames = (wallet: string): void => {
+	void (async () => {
+		try {
+			const w = ethers.getAddress(String(wallet || '').trim())
+			const reg = beamio_ContractPool[0]?.constAccountRegistry
+			if (!reg) return
+
+			let onchain: Awaited<ReturnType<typeof reg.getAccount>> | null = null
+			try {
+				onchain = await reg.getAccount(w)
+			} catch {
+				return
+			}
+			if (!onchain?.exists) return
+
+			const accName = String(onchain.accountName ?? '').trim()
+			if (!accName) return
+
+			const fnOn = sanitizeName(onchain.firstName as string | undefined)
+			const lnOn = sanitizeName(onchain.lastName as string | undefined)
+			if (!nfcProfileNamesNeedClear(fnOn, lnOn)) return
+			if (fnOn === NFC_BEAMIO_PROFILE_FIRST_NAME && lnOn === NFC_BEAMIO_PROFILE_LAST_NAME) return
+
+			const getExistsUserData = await getUserData(accName)
+			const fullInput: beamioAccount = {
+				accountName: accName,
+				image: String(onchain.image ?? ''),
+				darkTheme: !!onchain.darkTheme,
+				isUSDCFaucet: !!onchain.isUSDCFaucet,
+				isETHFaucet: !!onchain.isETHFaucet,
+				initialLoading: !!onchain.initialLoading,
+				firstName: NFC_BEAMIO_PROFILE_FIRST_NAME,
+				lastName: NFC_BEAMIO_PROFILE_LAST_NAME,
+				pgpKeyID: '',
+				pgpKey: '',
+				address: w,
+				createdAt: getExistsUserData?.createdAt,
+			}
+
+			addUserPool.push({
+				wallet: w,
+				account: fullInput,
+				recover: [],
+				followBeamioOfficial: false,
+			})
+			addUserPoolProcess()
+			logger(
+				Colors.cyan(
+					`[maybeClearLegacyNfcBeamioProfileNames] queued clear legacy hex names wallet=${w.slice(0, 10)}… tag=${accName}`
+				)
+			)
+		} catch (e: any) {
+			logger(Colors.yellow(`[maybeClearLegacyNfcBeamioProfileNames] error: ${e?.message ?? e}`))
 		}
 	})()
 }
