@@ -11,6 +11,11 @@ const ISSUED_NFT_MINTED_IFACE = new ethers.Interface([
 ])
 const ISSUED_NFT_MINTED_TOPIC = ISSUED_NFT_MINTED_IFACE.getEvent('IssuedNftMinted')!.topicHash
 
+const ISSUED_NFT_BURNED_IFACE = new ethers.Interface([
+	'event IssuedNftBurned(uint256 indexed tokenId, address indexed holder, uint256 amount)',
+])
+const ISSUED_NFT_BURNED_TOPIC = ISSUED_NFT_BURNED_IFACE.getEvent('IssuedNftBurned')!.topicHash
+
 /** ERC-1155 issued coupon/catalog series start at 100_000_000_000. */
 const ISSUED_NFT_TOKEN_ID_MIN = 100_000_000_000n
 
@@ -22,6 +27,8 @@ export type IssuedNftClaimWalletRow = {
 	wallet: string
 	holder: string
 	claimedAt: string
+	/** ISO timestamp of latest on-chain IssuedNftBurned for this holder; empty if not burned yet. */
+	burnedAt: string
 	txHash: string
 	blockNumber: number
 }
@@ -110,6 +117,77 @@ async function fetchIssuedNftMintedLogs(
 	return out
 }
 
+async function fetchIssuedNftBurnedLogs(
+	provider: ethers.JsonRpcProvider,
+	cardAddress: string,
+	tokenId: bigint,
+	fromBlock: bigint,
+	toBlock: bigint
+): Promise<ethers.Log[]> {
+	const tokenTopic = ethers.zeroPadValue(ethers.toBeHex(tokenId), 32)
+	const out: ethers.Log[] = []
+	let cursor = fromBlock
+	while (cursor <= toBlock) {
+		const end = cursor + LOG_CHUNK_SIZE > toBlock ? toBlock : cursor + LOG_CHUNK_SIZE
+		try {
+			const chunk = await provider.getLogs({
+				address: cardAddress,
+				topics: [ISSUED_NFT_BURNED_TOPIC, tokenTopic],
+				fromBlock: cursor,
+				toBlock: end,
+			})
+			out.push(...chunk)
+		} catch (e: any) {
+			logger(
+				Colors.yellow(
+					`[issuedNftClaimWallets] burn getLogs chunk failed card=${cardAddress} tokenId=${tokenId} ${cursor}-${end}: ${e?.message ?? e}`
+				)
+			)
+			if (end - cursor <= 50_000n) throw e
+			const mid = cursor + (end - cursor) / 2n
+			const left = await fetchIssuedNftBurnedLogs(provider, cardAddress, tokenId, cursor, mid)
+			const right = await fetchIssuedNftBurnedLogs(provider, cardAddress, tokenId, mid + 1n, end)
+			out.push(...left, ...right)
+		}
+		cursor = end + 1n
+	}
+	return out
+}
+
+/** holder (lowercase) → latest burn block for this issued series tokenId */
+function buildLatestBurnBlockByHolder(burnLogs: ethers.Log[]): Map<string, number> {
+	const byHolder = new Map<string, number>()
+	for (const log of burnLogs) {
+		let holder: string
+		try {
+			const parsed = ISSUED_NFT_BURNED_IFACE.parseLog({ topics: log.topics as string[], data: log.data })
+			if (!parsed) continue
+			holder = ethers.getAddress(String(parsed.args.holder)).toLowerCase()
+		} catch {
+			continue
+		}
+		const blockNumber = Number(log.blockNumber ?? 0)
+		const prev = byHolder.get(holder)
+		if (!prev || blockNumber >= prev) {
+			byHolder.set(holder, blockNumber)
+		}
+	}
+	return byHolder
+}
+
+async function blockToIso(provider: ethers.JsonRpcProvider, blockNumber: number): Promise<string> {
+	if (!Number.isFinite(blockNumber) || blockNumber <= 0) return ''
+	try {
+		const block = await provider.getBlock(blockNumber)
+		if (block?.timestamp) {
+			return new Date(Number(block.timestamp) * 1000).toISOString()
+		}
+	} catch {
+		/* optional */
+	}
+	return ''
+}
+
 /** Paginated wallets that received this issued NFT (mint / open-claim / redeem mint). */
 export async function listIssuedNftClaimWallets(args: {
 	cardAddress: string
@@ -135,14 +213,18 @@ export async function listIssuedNftClaimWallets(args: {
 	const series = await getSeriesByCardAndTokenId(cardNorm, tokenIdN.toString())
 	const fromBlock = await estimateFromBlock(provider, series?.createdAt)
 	const head = BigInt(await provider.getBlockNumber())
-	const logs = await fetchIssuedNftMintedLogs(provider, cardNorm, tokenIdN, fromBlock, head)
+	const [mintLogs, burnLogs] = await Promise.all([
+		fetchIssuedNftMintedLogs(provider, cardNorm, tokenIdN, fromBlock, head),
+		fetchIssuedNftBurnedLogs(provider, cardNorm, tokenIdN, fromBlock, head),
+	])
+	const burnBlockByHolder = buildLatestBurnBlockByHolder(burnLogs)
 
 	const byWallet = new Map<
 		string,
 		{ holder: string; wallet: string; blockNumber: number; txHash: string; claimedAt: string }
 	>()
 
-	for (const log of logs) {
+	for (const log of mintLogs) {
 		let recipient: string
 		try {
 			const parsed = ISSUED_NFT_MINTED_IFACE.parseLog({ topics: log.topics as string[], data: log.data })
@@ -170,16 +252,13 @@ export async function listIssuedNftClaimWallets(args: {
 	const walletResolved = await Promise.all(
 		sorted.map(async (row) => {
 			const wallet = await resolveDisplayWallet(provider, row.holder)
-			let claimedAt = ''
-			try {
-				const block = await provider.getBlock(row.blockNumber)
-				if (block?.timestamp) {
-					claimedAt = new Date(Number(block.timestamp) * 1000).toISOString()
-				}
-			} catch {
-				/* optional timestamp */
-			}
-			return { ...row, wallet, claimedAt }
+			const claimedAt = await blockToIso(provider, row.blockNumber)
+			const burnBlock =
+				burnBlockByHolder.get(row.holder.toLowerCase()) ??
+				burnBlockByHolder.get(wallet.toLowerCase()) ??
+				0
+			const burnedAt = burnBlock > 0 ? await blockToIso(provider, burnBlock) : ''
+			return { ...row, wallet, claimedAt, burnedAt }
 		})
 	)
 
@@ -189,6 +268,7 @@ export async function listIssuedNftClaimWallets(args: {
 		wallet: row.wallet,
 		holder: row.holder,
 		claimedAt: row.claimedAt,
+		burnedAt: row.burnedAt,
 		txHash: row.txHash,
 		blockNumber: row.blockNumber,
 	}))

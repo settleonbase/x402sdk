@@ -11,7 +11,7 @@ import {
 	beamio_ContractPool,
 	getMemberLastTopupOnCard,
 	maybeEnqueueNfcCashTreeBeamioTag,
-	maybeEnqueueNfcVerraBeamioTag,
+	maybeEnqueueNfcBeamioTag,
 	maybeClearLegacyNfcBeamioProfileNames,
 	listCouponIssuedNftSeriesForCardDescending,
 	listRegisteredBeamioUserCardAddresses,
@@ -657,7 +657,7 @@ export async function pickInfrastructureCashTreeTierTokenIdFromChain(eoa: string
 
 /**
  * NFC 流程在校验 SUN、且 EOA 已有部署 AA 之后：若链上尚无 beamioTag，则排队登记。
- * 优先基础设施卡 NFT 对应的 CashTreeDamo_*；否则分配 verra_{N}（全局序号 + nfc_cards.verra_number）。
+ * 优先基础设施卡 NFT 对应的 CashTreeDamo_*；否则分配 beamio_nfc_{N}（beamio_nfc_seq + 链上占用校验）。
  */
 export function scheduleEnsureNfcBeamioTagForEoa(
 	eoa: string,
@@ -696,7 +696,7 @@ export function scheduleEnsureNfcBeamioTagForEoa(
 			if (tierTokenId) {
 				maybeEnqueueNfcCashTreeBeamioTag({ wallet, uid: uidS, tagIdHex, tierTokenId })
 			} else {
-				maybeEnqueueNfcVerraBeamioTag({ wallet, uid: uidS, tagIdHex })
+				maybeEnqueueNfcBeamioTag({ wallet, uid: uidS, tagIdHex })
 			}
 		} catch (e: unknown) {
 			logger(Colors.yellow(`[scheduleEnsureNfcBeamioTagForEoa] ${(e as Error)?.message ?? e}`))
@@ -705,7 +705,7 @@ export function scheduleEnsureNfcBeamioTagForEoa(
 }
 
 /**
- * @deprecated Prefer scheduleEnsureNfcBeamioTagForEoa（含无 NFT 时的 verra_*）
+ * @deprecated Prefer scheduleEnsureNfcBeamioTagForEoa（含无 NFT 时的 beamio_nfc_*）
  */
 export const ensureNfcCashTreeBeamioTagAfterFetch = (
 	eoa: string,
