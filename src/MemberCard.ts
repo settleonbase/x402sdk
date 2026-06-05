@@ -3528,7 +3528,7 @@ export const beamioTransferIndexerAccountingPool: {
 	feePayer?: string
 	isInternalTransfer?: boolean
 	/** 'x402' = BeamioTransfer x402 转账，需扣 2 B-Units；'open-container' = OpenContainer 商户收款；'container' = Container 商户收款（Charge） */
-	source?: 'x402' | 'open-container' | 'container'
+	source?: 'x402' | 'open-container' | 'container' | 'gift'
 	/** B 服务费 USDC 6 位精度，写入 FeeInfo.bServiceUSDC6 */
 	bServiceUSDC6?: string
 	/** B 服务费单位数 6 位精度，写入 FeeInfo.bServiceUnits6 */
@@ -3548,7 +3548,7 @@ export const beamioTransferIndexerAccountingPool: {
 	routeTokenId?: string
 	/** CCSA 时：route 的 amountE6（与 amountUSDC6 相同时可省略） */
 	routeAmountE6?: string
-	/** Charge 记账：受益人 to 的 EOA，记入 subordinate。OpenContainer 已有；Container 需在 push 前解析 */
+	/** Charge 记账：受益人 to 的 EOA（解析 AA owner），仅用于 topAdmin 链推导；不得写入 subordinate（subordinate 仅 POS 终端） */
 	payeeEOA?: string
 	/** POS 终端 EOA：存在且非 payer/payee 时，作为 Diamond `subordinate` 写入 `accountActionIds`，便于 `posLedger`/getAccountTransactionsPaged(POS) */
 	posOperator?: string
@@ -3814,10 +3814,15 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			subordinate: ethers.ZeroAddress,
 		}
 
-		// Charge 记账：subordinate 优先 posOperator（POS EOA，与 ActionFacet accountActionIds 对齐）；否则受益人 EOA。topAdmin 仍由 payee 链解析
+		// Charge 记账：subordinate 仅 POS 终端 EOA（与 ActionFacet accountActionIds 对齐）；用户间 Gift / 无 POS 的 Charge 保持 ZeroAddress。topAdmin 仍由 payee 链解析
 		const isCharge =
 			!isGiftLedger &&
+			obj.source !== 'gift' &&
 			(obj.source === 'open-container' || obj.source === 'container' || (obj.routeItems && obj.routeItems.length > 0))
+		if (isGiftLedger) {
+			transactionInput.subordinate = ethers.ZeroAddress
+			transactionInput.topAdmin = ethers.ZeroAddress
+		}
 		if (isCharge) {
 			let payeeEOA: string
 			if (obj.payeeEOA && ethers.isAddress(obj.payeeEOA)) {
@@ -3836,8 +3841,8 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 					payeeEOA = ethers.getAddress(obj.to)
 				}
 			}
-			/** ActionFacet：subordinate 与 payer/payee 均不同时才进 accountActionIds[subordinate]。POS charge 须用 POS EOA，否则仅 top-up 等会出现在 POS 维度。 */
-			let subordinateForLedger = payeeEOA
+			/** subordinate 仅记录 POS 终端；不得用 payee / 受益人 EOA 回填 */
+			let subordinateForLedger = ethers.ZeroAddress
 			const posOpRaw = typeof obj.posOperator === 'string' ? obj.posOperator.trim() : ''
 			if (posOpRaw && ethers.isAddress(posOpRaw)) {
 				const posAddr = ethers.getAddress(posOpRaw)
@@ -3943,8 +3948,8 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 
 		let chargeBunitConsumeTxHash: string | null = null
-		// OpenContainer 商户收款：BUnit 由卡 owner 负担，每笔固定 2 B-Units（与 Cluster / pool 一致）
-		if (obj.source === 'open-container' && feePayer && feePayer !== ethers.ZeroAddress) {
+		// OpenContainer / Gift：BUnit 由卡 owner 负担，每笔固定 2 B-Units（与 Cluster / pool 一致）
+		if ((obj.source === 'open-container' || obj.source === 'gift') && feePayer && feePayer !== ethers.ZeroAddress) {
 			const bunitFeeAmount = CHARGE_FIXED_BUNIT_FEE_UNITS6
 			const baseHashBytes32 = txHash as `0x${string}`
 			const baseGas = BigInt(obj.baseGas ?? '0')
@@ -4006,8 +4011,8 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 
 		const chargeSourcesForStandaloneBunit =
-			obj.source === 'open-container' || obj.source === 'container'
-		if (isCharge && chargeSourcesForStandaloneBunit) {
+			obj.source === 'open-container' || obj.source === 'gift' || obj.source === 'container'
+		if ((isCharge || isGiftLedger) && chargeSourcesForStandaloneBunit) {
 			transactionInput.fees = {
 				...transactionInput.fees,
 				bServiceUSDC6: 0n,
@@ -4032,7 +4037,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			(typeof obj.bunitConsumeTxHash === 'string' && obj.bunitConsumeTxHash.length > 0 ? obj.bunitConsumeTxHash : null)
 		const chargeFeeUnits6 = BigInt(obj.bServiceUnits6 ?? '0')
 		if (
-			isCharge &&
+			(isCharge || isGiftLedger) &&
 			chargeSourcesForStandaloneBunit &&
 			bunitConsumeForCharge &&
 			feePayer &&
@@ -4041,12 +4046,20 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		) {
 			try {
 				const cardAddrCharge = resolveChargeAccountingCardAddress(obj) ?? ethers.ZeroAddress
-				const opForCharge = transactionInput.subordinate !== ethers.ZeroAddress ? transactionInput.subordinate : transactionInput.payee
-				const opChainCharge =
-					cardAddrCharge !== ethers.ZeroAddress
-						? await fetchOperatorParentChain(cardAddrCharge, opForCharge)
-						: []
-				const { topAdmin: topAdminCharge, subordinate: subCharge } = deriveTopAdminAndSubordinate(opForCharge, opChainCharge)
+				let operatorForBunit = ethers.ZeroAddress
+				let opChainCharge: string[] = []
+				let topAdminCharge = ethers.ZeroAddress
+				let subCharge = ethers.ZeroAddress
+				if (!isGiftLedger && transactionInput.subordinate !== ethers.ZeroAddress) {
+					operatorForBunit = transactionInput.subordinate
+					opChainCharge =
+						cardAddrCharge !== ethers.ZeroAddress
+							? await fetchOperatorParentChain(cardAddrCharge, operatorForBunit)
+							: []
+					const derived = deriveTopAdminAndSubordinate(operatorForBunit, opChainCharge)
+					topAdminCharge = derived.topAdmin
+					subCharge = derived.subordinate
+				}
 				await syncStandaloneBunitServiceFeeToIndexer({
 					walletConet: SC.walletConet,
 					BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
@@ -4058,7 +4071,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 					txCategory: TX_CATEGORY_CHARGE_BUNIT_SERVICE,
 					title: 'Charge B-Unit service fee',
 					source: 'chargeBUnit',
-					operator: opForCharge,
+					operator: operatorForBunit,
 					operatorParentChain: opChainCharge,
 					topAdmin: topAdminCharge,
 					subordinate: subCharge,
@@ -9283,7 +9296,7 @@ export const OpenContainerRelayProcess = async () => {
         isInternalTransfer: !isConsumerGiftOpen,
         requestHash: obj.requestHash,
         routeItems: collectedRouteItems,
-        source: 'open-container',
+        source: isConsumerGiftOpen ? 'gift' : 'open-container',
         bServiceUSDC6: feeBUsdc6.toString(),
         bServiceUnits6: feeBUnits6.toString(),
         payeeEOA,
