@@ -16531,7 +16531,16 @@ export const cardOpenTransferPreCheck = async (
 		const factory = Settle_ContractPool[0]?.baseFactoryPaymaster
 		if (!factory) return { success: false, error: 'Factory not configured' }
 
-		await factory.redeemOpenTransfer.staticCall(
+		const redeemOpen = factory.redeemOpenTransfer
+		if (typeof redeemOpen?.staticCall !== 'function') {
+			return {
+				success: false,
+				error:
+					'OpenTransfer is not deployed on the User Card Factory yet. Use OpenContainer gift relay (/api/AAtoEOA) instead.',
+			}
+		}
+
+		await redeemOpen.staticCall(
 			cardAddress,
 			fromEOA,
 			to,
@@ -16575,6 +16584,14 @@ export const cardOpenTransferPoolPress = async () => {
 	}
 	try {
 		const factory = SC.baseFactoryPaymaster
+		if (typeof factory.redeemOpenTransfer !== 'function') {
+			const err =
+				'OpenTransfer is not deployed on the User Card Factory yet. Use OpenContainer gift relay (/api/AAtoEOA) instead.'
+			if (obj.res && !obj.res.headersSent) {
+				obj.res.status(400).json({ success: false, error: err }).end()
+			}
+			return
+		}
 		const tx = await factory.redeemOpenTransfer(
 			ethers.getAddress(obj.cardAddress),
 			ethers.getAddress(obj.fromEOA),
