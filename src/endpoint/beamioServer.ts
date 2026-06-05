@@ -12,7 +12,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import {
 	filterApiExcludedCardRows,
@@ -6734,6 +6734,67 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		logger(Colors.green(`server /api/cardRedeemPreCheck OK`), { cardAddress: resolvedCard, toUserEOA })
 		return res.status(200).json(preCheck).end()
+	})
+
+	/** cardOpenTransferPreCheck：Gift 点数 OpenTransfer 预检（签名 + B-Unit + staticCall） */
+	router.post('/cardOpenTransferPreCheck', async (req, res) => {
+		const body = req.body as Record<string, unknown>
+		const required = ['cardAddress', 'fromEOA', 'to', 'id', 'amount', 'maxAmount', 'validAfter', 'validBefore', 'nonce', 'signature'] as const
+		for (const k of required) {
+			if (body[k] == null || String(body[k]).trim() === '') {
+				return res.status(400).json({ success: false, error: `Missing ${k}` })
+			}
+		}
+		if (!ethers.isAddress(String(body.cardAddress)) || !ethers.isAddress(String(body.fromEOA)) || !ethers.isAddress(String(body.to))) {
+			return res.status(400).json({ success: false, error: 'Invalid cardAddress, fromEOA, or to' })
+		}
+		const preCheck = await cardOpenTransferPreCheck({
+			cardAddress: ethers.getAddress(String(body.cardAddress)),
+			fromEOA: ethers.getAddress(String(body.fromEOA)),
+			to: ethers.getAddress(String(body.to)),
+			id: String(body.id),
+			amount: String(body.amount),
+			maxAmount: String(body.maxAmount),
+			validAfter: String(body.validAfter),
+			validBefore: String(body.validBefore),
+			nonce: String(body.nonce),
+			signature: String(body.signature),
+		})
+		if (!preCheck.success) {
+			return res.status(403).json(preCheck).end()
+		}
+		return res.status(200).json(preCheck).end()
+	})
+
+	/** cardOpenTransfer：Gift 商户点数，Cluster 预检后转发 Master */
+	router.post('/cardOpenTransfer', async (req, res) => {
+		const body = req.body as Record<string, unknown>
+		const required = ['cardAddress', 'fromEOA', 'to', 'id', 'amount', 'maxAmount', 'validAfter', 'validBefore', 'nonce', 'signature'] as const
+		for (const k of required) {
+			if (body[k] == null || String(body[k]).trim() === '') {
+				return res.status(400).json({ success: false, error: `Missing ${k}` })
+			}
+		}
+		if (!ethers.isAddress(String(body.cardAddress)) || !ethers.isAddress(String(body.fromEOA)) || !ethers.isAddress(String(body.to))) {
+			return res.status(400).json({ success: false, error: 'Invalid cardAddress, fromEOA, or to' })
+		}
+		const payload = {
+			cardAddress: ethers.getAddress(String(body.cardAddress)),
+			fromEOA: ethers.getAddress(String(body.fromEOA)),
+			to: ethers.getAddress(String(body.to)),
+			id: String(body.id),
+			amount: String(body.amount),
+			maxAmount: String(body.maxAmount),
+			validAfter: String(body.validAfter),
+			validBefore: String(body.validBefore),
+			nonce: String(body.nonce),
+			signature: String(body.signature),
+		}
+		const preCheck = await cardOpenTransferPreCheck(payload)
+		if (!preCheck.success) {
+			return res.status(403).json({ success: false, error: preCheck.error }).end()
+		}
+		postLocalhost('/api/cardOpenTransfer', payload, res)
 	})
 
 	/** cardRedeem：用户兑换 redeem 码，Cluster 预检后转发 master */

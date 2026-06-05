@@ -16455,4 +16455,154 @@ const card = new ethers.Contract(sign.cardAddress, [
 
 // forward1155ERC3009SignatureData()
 
+export type CardOpenTransferPayload = {
+	fromEOA: string
+	to: string
+	id: string
+	amount: string
+	maxAmount: string
+	validAfter: string
+	validBefore: string
+	nonce: string
+	signature: string
+	cardAddress: string
+}
+
+async function verifyCardOpenTransferSignature(
+	payload: CardOpenTransferPayload
+): Promise<{ ok: boolean; error?: string }> {
+	try {
+		const env = Settle_ContractPool[0]
+		const factory = env?.baseFactoryPaymaster
+		if (!factory) return { ok: false, error: 'Factory not configured' }
+		const factoryAddr = await factory.getAddress()
+		const provider = factory.runner!.provider! as ethers.Provider
+		const chainId = (await provider.getNetwork()).chainId
+		const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+			['string', 'address', 'address', 'uint256', 'address', 'uint256', 'uint256', 'uint256', 'uint256', 'bytes32'],
+			[
+				'OpenTransfer',
+				factoryAddr,
+				ethers.getAddress(payload.cardAddress),
+				chainId,
+				ethers.getAddress(payload.fromEOA),
+				BigInt(payload.id),
+				BigInt(payload.maxAmount),
+				BigInt(payload.validAfter),
+				BigInt(payload.validBefore),
+				payload.nonce,
+			]
+		)
+		const hash = ethers.keccak256(encoded)
+		const recovered = ethers.verifyMessage(ethers.getBytes(hash), payload.signature)
+		if (recovered.toLowerCase() !== ethers.getAddress(payload.fromEOA).toLowerCase()) {
+			return { ok: false, error: 'Invalid OpenTransfer signature' }
+		}
+		if (BigInt(payload.amount) <= 0n || BigInt(payload.amount) > BigInt(payload.maxAmount)) {
+			return { ok: false, error: 'Amount exceeds signed maximum' }
+		}
+		const now = BigInt(Math.floor(Date.now() / 1000))
+		if (now < BigInt(payload.validAfter) || now > BigInt(payload.validBefore)) {
+			return { ok: false, error: 'Signature expired' }
+		}
+		return { ok: true }
+	} catch (e: any) {
+		return { ok: false, error: e?.shortMessage ?? e?.message ?? 'Signature verification failed' }
+	}
+}
+
+/** Cluster 预检：OpenTransfer 签名 + B-Unit + factory.redeemOpenTransfer.staticCall */
+export const cardOpenTransferPreCheck = async (
+	raw: CardOpenTransferPayload
+): Promise<{ success: boolean; error?: string }> => {
+	try {
+		const cardAddress = ethers.getAddress(raw.cardAddress)
+		const fromEOA = ethers.getAddress(raw.fromEOA)
+		const to = ethers.getAddress(raw.to)
+		if (fromEOA.toLowerCase() === to.toLowerCase()) {
+			return { success: false, error: 'Cannot gift to yourself' }
+		}
+		const sig = await verifyCardOpenTransferSignature({ ...raw, cardAddress, fromEOA, to })
+		if (!sig.ok) return { success: false, error: sig.error }
+
+		const bunit = await transferPreCheckBUnit({ account: fromEOA })
+		if (!bunit.success) return bunit
+
+		const factory = Settle_ContractPool[0]?.baseFactoryPaymaster
+		if (!factory) return { success: false, error: 'Factory not configured' }
+
+		await factory.redeemOpenTransfer.staticCall(
+			cardAddress,
+			fromEOA,
+			to,
+			BigInt(raw.id),
+			BigInt(raw.amount),
+			BigInt(raw.maxAmount),
+			BigInt(raw.validAfter),
+			BigInt(raw.validBefore),
+			raw.nonce,
+			raw.signature
+		)
+		return { success: true }
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(Colors.red(`[cardOpenTransferPreCheck] ${msg}`))
+		return { success: false, error: msg }
+	}
+}
+
+export const cardOpenTransferPool: (CardOpenTransferPayload & { res: Response })[] = []
+
+export function kickCardOpenTransferPoolPress(): void {
+	cardOpenTransferPoolPress().catch((err: any) => {
+		logger(Colors.red('[cardOpenTransferPoolPress] unhandled error:'), err?.message ?? err)
+	})
+}
+
+function scheduleCardOpenTransferPoolPress(): void {
+	if (cardOpenTransferPool.length === 0) return
+	if (Settle_ContractPool.length > 0) kickCardOpenTransferPoolPress()
+	else setTimeout(() => kickCardOpenTransferPoolPress(), 3000)
+}
+
+export const cardOpenTransferPoolPress = async () => {
+	const obj = cardOpenTransferPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		cardOpenTransferPool.unshift(obj)
+		return setTimeout(() => kickCardOpenTransferPoolPress(), 3000)
+	}
+	try {
+		const factory = SC.baseFactoryPaymaster
+		const tx = await factory.redeemOpenTransfer(
+			ethers.getAddress(obj.cardAddress),
+			ethers.getAddress(obj.fromEOA),
+			ethers.getAddress(obj.to),
+			BigInt(obj.id),
+			BigInt(obj.amount),
+			BigInt(obj.maxAmount),
+			BigInt(obj.validAfter),
+			BigInt(obj.validBefore),
+			obj.nonce,
+			obj.signature
+		)
+		await tx.wait()
+		const txHash = tx.hash
+		logger(Colors.green(`[cardOpenTransferPoolPress] ok card=${obj.cardAddress} to=${obj.to} tx=${txHash}`))
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, tx: txHash }).end()
+		}
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(Colors.red(`[cardOpenTransferPoolPress] failed: ${msg}`))
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: msg }).end()
+		}
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		scheduleCardOpenTransferPoolPress()
+	}
+}
+
 export { buildNfcCardLinkStateSignMessage, NFC_CARD_LINK_STATE_SCOPE } from './db'
