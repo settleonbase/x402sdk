@@ -3365,6 +3365,55 @@ export type BeamioTransferRouteItem = {
 
 /** keccak256("TX_TIP")：Charge 小费独立 Diamond 行 ledgerTxCategory */
 export const TX_TIP_LEDGER_CATEGORY_HEX = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP')) as `0x${string}`
+/** keccak256("gift:confirmed")：用户间商户卡点数 Gift（OpenContainer P2P，非 POS/账单 Charge） */
+export const TX_GIFT_CONFIRMED = ethers.keccak256(ethers.toUtf8Bytes('gift:confirmed')) as `0x${string}`
+
+/** displayJson.source === gift，或 legacy open-container + Merchant gift 备注 */
+export function isGiftDisplayJson(displayJson: string | undefined | null): boolean {
+	if (!displayJson || !String(displayJson).trim()) return false
+	try {
+		const d = JSON.parse(String(displayJson)) as { source?: string; handle?: string; forText?: string }
+		const src = String(d.source ?? '').toLowerCase()
+		if (src === 'gift') return true
+		const handle = String(d.handle ?? d.forText ?? '')
+			.trim()
+			.toLowerCase()
+		return src === 'open-container' && handle === 'merchant gift'
+	} catch {
+		return false
+	}
+}
+
+/**
+ * OpenContainer 为用户间点数转赠（非 POS Charge / QR 账单 / requestHash 账单）。
+ * 条件：仅 ERC1155 tokenId=0 点数项，且无 posOperator、requestHash、账单拆分、chargeOwnerChildBurn。
+ */
+export function isOpenContainerConsumerGiftRelay(input: {
+	forText?: string
+	requestHash?: string
+	posOperator?: string
+	nfcSubtotalCurrencyAmount?: string
+	chargeOwnerChildBurn?: unknown
+	items?: { kind: number; tokenId: string | bigint }[]
+}): boolean {
+	const posOp = typeof input.posOperator === 'string' ? input.posOperator.trim() : ''
+	if (posOp && ethers.isAddress(posOp)) return false
+	if (input.chargeOwnerChildBurn) return false
+	const rh = String(input.requestHash ?? '').trim()
+	if (rh && ethers.isHexString(rh) && ethers.dataLength(rh) === 32) return false
+	if (String(input.nfcSubtotalCurrencyAmount ?? '').trim() !== '') return false
+	const items = input.items ?? []
+	if (items.length === 0) return false
+	const onlyProgramPoints = items.every((it) => {
+		if (Number(it.kind) !== 1) return false
+		try {
+			return BigInt(it.tokenId) === 0n
+		} catch {
+			return false
+		}
+	})
+	return onlyProgramPoints
+}
 
 /** HTTP body / pool 条目共用的 readme Transaction 预览输入 */
 export type ChargeIndexerAccountingPreviewBody = {
@@ -3668,6 +3717,10 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		if (ledgerCatValid) {
 			txCategory = obj.ledgerTxCategory as `0x${string}`
 		}
+		const isGiftLedger = txCategory === TX_GIFT_CONFIRMED || isGiftDisplayJson(displayJsonStr)
+		if (isGiftLedger && txCategory !== TX_GIFT_CONFIRMED) {
+			txCategory = TX_GIFT_CONFIRMED
+		}
 		const ledgerTxIdValid =
 			obj.ledgerTxId && ethers.isHexString(obj.ledgerTxId) && ethers.dataLength(obj.ledgerTxId) === 32
 		const txIdForLedger = (ledgerTxIdValid ? obj.ledgerTxId! : txHash) as `0x${string}`
@@ -3762,7 +3815,9 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 
 		// Charge 记账：subordinate 优先 posOperator（POS EOA，与 ActionFacet accountActionIds 对齐）；否则受益人 EOA。topAdmin 仍由 payee 链解析
-		const isCharge = obj.source === 'open-container' || obj.source === 'container' || (obj.routeItems && obj.routeItems.length > 0)
+		const isCharge =
+			!isGiftLedger &&
+			(obj.source === 'open-container' || obj.source === 'container' || (obj.routeItems && obj.routeItems.length > 0))
 		if (isCharge) {
 			let payeeEOA: string
 			if (obj.payeeEOA && ethers.isAddress(obj.payeeEOA)) {
@@ -9159,15 +9214,31 @@ export const OpenContainerRelayProcess = async () => {
             : undefined
       }
 
-      const displayJsonOpen: DisplayJsonData = {
-        /** 与 ContainerRelay NFC 的「NFC Merchant Payment」对位，便于索引/报表区分 QR Charge */
-        title: hasOpenBillBreakdown ? 'QR Merchant Payment' : 'Merchant Payment',
-        source: 'open-container',
-        finishedHash: tx.hash,
-        handle: obj.forText?.trim()?.slice(0, 80),
-        forText: obj.forText?.trim(),
-      }
-      if (hasOpenBillBreakdown) {
+      const isConsumerGiftOpen = isOpenContainerConsumerGiftRelay({
+        forText: obj.forText,
+        requestHash: obj.requestHash,
+        posOperator: obj.posOperator,
+        nfcSubtotalCurrencyAmount: obj.nfcSubtotalCurrencyAmount,
+        chargeOwnerChildBurn: obj.chargeOwnerChildBurn,
+        items: payload.items,
+      })
+      const displayJsonOpen: DisplayJsonData = isConsumerGiftOpen
+        ? {
+            title: 'Merchant Gift',
+            source: 'gift',
+            finishedHash: tx.hash,
+            handle: obj.forText?.trim()?.slice(0, 80) || 'Merchant gift',
+            forText: obj.forText?.trim() || 'Merchant gift',
+          }
+        : {
+            /** 与 ContainerRelay NFC 的「NFC Merchant Payment」对位，便于索引/报表区分 QR Charge */
+            title: hasOpenBillBreakdown ? 'QR Merchant Payment' : 'Merchant Payment',
+            source: 'open-container',
+            finishedHash: tx.hash,
+            handle: obj.forText?.trim()?.slice(0, 80),
+            forText: obj.forText?.trim(),
+          }
+      if (!isConsumerGiftOpen && hasOpenBillBreakdown) {
         const discountBOpen =
           obj.nfcDiscountAmountFiat6 != null && obj.nfcDiscountAmountFiat6 !== '' ? BigInt(obj.nfcDiscountAmountFiat6) : 0n
         const taxBOpen =
@@ -9209,8 +9280,7 @@ export const OpenContainerRelayProcess = async () => {
         gasUSDC6: '0',
         gasChainType: 0,
         feePayer: feePayerEOA,
-        /** 与 ContainerRelayProcess 主单一致：AA→商户 container 记账走 internal 语义 */
-        isInternalTransfer: true,
+        isInternalTransfer: !isConsumerGiftOpen,
         requestHash: obj.requestHash,
         routeItems: collectedRouteItems,
         source: 'open-container',
@@ -9218,6 +9288,7 @@ export const OpenContainerRelayProcess = async () => {
         bServiceUnits6: feeBUnits6.toString(),
         payeeEOA,
         merchantCardAddress: obj.merchantCardAddress,
+        ...(isConsumerGiftOpen ? { ledgerTxCategory: TX_GIFT_CONFIRMED } : {}),
         ...(hasOpenBillBreakdown
           ? {
               ledgerFinalRequestAmountFiat6: ledgerFinalFiat6,
