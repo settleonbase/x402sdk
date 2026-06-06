@@ -9242,6 +9242,9 @@ export const OpenContainerRelayProcess = async () => {
             finishedHash: tx.hash,
             handle: obj.forText?.trim()?.slice(0, 80) || 'Merchant gift',
             forText: obj.forText?.trim() || 'Merchant gift',
+            ...(obj.merchantCardAddress && ethers.isAddress(obj.merchantCardAddress)
+              ? { cardAddress: ethers.getAddress(obj.merchantCardAddress) }
+              : {}),
           }
         : {
             /** 与 ContainerRelay NFC 的「NFC Merchant Payment」对位，便于索引/报表区分 QR Charge */

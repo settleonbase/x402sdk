@@ -3478,10 +3478,11 @@ const routing = ( router: Router ) => {
 	 *   4. x402 settle（USDC → cardOwner）
 	 *   5a. **sid+pos**（POS admin 与卡绑定）：立刻 200 给顾客；后台 `runUsdcNfcTopupPosOrchestrator` 推 session
 	 *       `awaiting_topup_auth` → POS 签 `/api/nfcUsdcChargeTopupAuth` → Master `nfcUsdcTopup`（preSigned）
-	 *   5b. **无 sid+pos**（历史浏览器）：cluster 直接 `postLocalhost` Master，由 service-admin 签 ExecuteForAdmin
+	 *   5b. **无 sid+pos**（历史浏览器 NFC）：cluster 直接 `postLocalhost` Master，由 service-admin 签 ExecuteForAdmin
+	 *   5c. **workflow=clientTopup + beneficiary**（非 admin 消费者）：仅 x402 结算 USDC → beneficiary EOA；卡内 topup 由客户端 `/api/usdcTopup`
 	 */
 	router.post('/nfcUsdcTopup', async (req, res) => {
-		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature } = req.body as {
+		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature } = req.body as {
 			cardAddress?: string
 			cardOwner?: string
 			uid?: string
@@ -3492,6 +3493,8 @@ const routing = ( router: Router ) => {
 			currency?: string
 			sid?: string
 			pos?: string
+			beneficiary?: string
+			workflow?: string
 			paymentToken?: string
 			payer?: string
 			value?: string
@@ -3595,13 +3598,31 @@ const routing = ( router: Router ) => {
 				return { payer: payerNorm, USDC_tx: txHash, usdcAmount6: BigInt(valueRaw) }
 			}
 
-			if (!hasFullNfc && !sessionPath) {
+			const beneficiaryStr = String(beneficiary ?? '').trim()
+			const beneficiaryAddr =
+				beneficiaryStr && ethers.isAddress(beneficiaryStr) ? ethers.getAddress(beneficiaryStr) : null
+			const workflowNorm = String(workflow ?? '').trim().toLowerCase()
+			const clientTopupOnly =
+				workflowNorm === 'clienttopup' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
+
+			if (clientTopupOnly && (sidNorm || posAddr)) {
+				return res
+					.status(400)
+					.json({
+						success: false,
+						error: 'clientTopup workflow must not include sid/pos (use POS admin QR for terminal top-up)',
+					})
+					.end()
+			}
+
+			if (!hasFullNfc && !sessionPath && !clientTopupOnly) {
 				sessionUpdate({ state: 'error', error: 'Invalid uid' })
 				return res
 					.status(400)
 					.json({
 						success: false,
-						error: 'Invalid uid (expect 14-hex NFC UID); without NFC use the POS QR link (sid+pos).',
+						error:
+							'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin) or clientTopup (beneficiary+workflow).',
 					})
 					.end()
 			}
@@ -3621,6 +3642,57 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
 			}
 			const payToOwner = onChainOwner ?? ownerAddr
+
+			/** Discover / consumer：非卡 admin 受益人 — 仅 x402 把 USDC 结算到 beneficiary EOA；卡内入账由客户端 `/api/usdcTopup` 完成。 */
+			if (clientTopupOnly && beneficiaryAddr) {
+				const { amount6: quotedClient, usesOracle: clientUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+				if (quotedClient <= 0n) {
+					if (!clientUsesOracle) {
+						return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end()
+					}
+					const fresh = isOracleFresh()
+					const omsg = fresh
+						? `Oracle rate not available for ${cur}, please retry shortly`
+						: `Oracle rate stale, please retry shortly`
+					return res.status(503).json({ success: false, error: omsg }).end()
+				}
+				const settledByRawSigClient = await settleWithRawSigIfNeeded(
+					quotedClient,
+					`Beamio ${paymentTokenNorm} clientTopup (${cur} ${amt} → beneficiary ${beneficiaryAddr.slice(0, 8)}…)`,
+				)
+				if (settledByRawSigClient === null) {
+					return
+				}
+				const settledClient =
+					settledByRawSigClient ??
+					(await settleBeamioX402ToCardOwner(req, res, {
+						cardOwner: beneficiaryAddr,
+						quotedUsdc6: quotedClient,
+						description: `Beamio USDC clientTopup (${cur} ${amt} → ${beneficiaryAddr.slice(0, 8)}…)`,
+					}))
+				if (!settledClient) {
+					return
+				}
+				logger(
+					Colors.green(
+						`[nfcUsdcTopup/clientTopup] settle OK card=${cardAddr} beneficiary=${beneficiaryAddr} payer=${settledClient.payer} usdc6=${settledClient.usdcAmount6} USDC_tx=${settledClient.USDC_tx}`,
+					),
+				)
+				if (!res.headersSent) {
+					res
+						.status(200)
+						.json({
+							success: true,
+							clientTopupOnly: true,
+							beneficiary: beneficiaryAddr,
+							USDC_tx: settledClient.USDC_tx,
+							usdcAmount6: settledClient.usdcAmount6.toString(),
+							payer: settledClient.payer,
+						})
+						.end()
+				}
+				return
+			}
 
 			let isAdminPos = false
 			if (posAddr && sessionPath) {
