@@ -54,6 +54,10 @@ export const CONET_BUNIT_AIRDROP_ADDRESS = '0x67d01e0E9c859A89def4098aC7803f04BF
 export const CONET_BUINT_REDEEM_AIRDROP = '0x05a19aA5100B9F6C22446cCD801F010Dc42D25E5'
 export const BEAMIO_INDEXER_DIAMOND = '0xd764eBA64536cFF1bbE7e7c7Bbc90F35620f72a9'
 export const MERCHANT_POS_MANAGEMENT_CONET = '0x74140e0C8118889538da8625Fc96Aac6B1342AE5'
+/** CoNET BeamioOracle；与 deployments/conet-addresses.json `beamioOracle` 同步 */
+export const CONET_BEAMIO_ORACLE = '0x102E9FBE87a28BaC10ADbc0E67a2b0385C8Bd0E9'
+/** Base BeamioOracle */
+export const BASE_BEAMIO_ORACLE = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
 
 /**
  * BusinessStartKet ERC-1155（CoNET）。与 deployments/conet-addresses.json `BusinessStartKet` 同步。

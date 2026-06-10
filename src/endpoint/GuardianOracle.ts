@@ -4,6 +4,7 @@ import { logger } from '../logger'
 import Colors from 'colors/safe'
 import {inspect} from 'node:util'
 import SeamioOracle_ABI from '../ABI/SeamioOracleABI.json'
+import { BASE_BEAMIO_ORACLE, CONET_BEAMIO_ORACLE } from '../chainAddresses'
 
 const CoinMarketCap = require('coinmarketcap-api')
 interface quote {
@@ -50,12 +51,12 @@ const testData1 = [
   537.1435821764862
 ]
 
-logger(`admin wallet ${managerWallet.address} | GuardianOracle CoNET | BeamioOracle L1 ${providerBaseBackup}`)
-
-const beamioOracleBaseAddr = process.env.BASE_BEAMIO_ORACLE_ADDRESS || '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
-const beamioOracleConetAddr = process.env.CONET_BEAMIO_ORACLE_ADDRESS || '0x32aa4fC3D3506850b27F767Bf582f4ec449de224'
+const beamioOracleBaseAddr = process.env.BASE_BEAMIO_ORACLE_ADDRESS || BASE_BEAMIO_ORACLE
+const beamioOracleConetAddr = process.env.CONET_BEAMIO_ORACLE_ADDRESS || CONET_BEAMIO_ORACLE
 const beamioOracleBase = new ethers.Contract(beamioOracleBaseAddr, SeamioOracle_ABI, beamioWallet)
 const beamioOracleConet = new ethers.Contract(beamioOracleConetAddr, SeamioOracle_ABI, beamioWalletConet)
+
+logger(`admin wallet ${managerWallet.address} | BeamioOracle CoNET ${beamioOracleConetAddr} | Base ${beamioOracleBaseAddr}`)
 
 /** BeamioCurrency.CurrencyType: CAD=0, USD=1, JPY=2, CNY=3, USDC=4, HKD=5, EUR=6, SGD=7, TWD=8, ETH=9, BNB=10... */
 
@@ -73,16 +74,20 @@ const updateBeamioOracleOnChain = async (
 	ids: number[],
 	rates: bigint[]
 ) => {
-	const feeData = await provider.getFeeData();
-	const gasPrice = feeData.gasPrice ? (feeData.gasPrice * 120n / 100n) : undefined;
-	logger(Colors.cyan(`Sending Batch TX to BeamioOracle (${label})...`));
-	const tx = await oracleContract.updateRatesBatch(ids, rates, { gasPrice });
-	logger(Colors.yellow(`[${label}] Batch TX sent: ${tx.hash}`));
-	const receipt = await tx.wait();
-	if (receipt.status === 1) {
-		logger(Colors.green(`✅ [${label}] BeamioOracle batch update successful in block ${receipt.blockNumber}!`));
-	} else {
-		throw new Error(`[${label}] transaction reverted by network`);
+	try {
+		const feeData = await provider.getFeeData();
+		const gasPrice = feeData.gasPrice ? (feeData.gasPrice * 120n / 100n) : undefined;
+		logger(Colors.cyan(`Sending Batch TX to BeamioOracle (${label})...`));
+		const tx = await oracleContract.updateRatesBatch(ids, rates, { gasPrice });
+		logger(Colors.yellow(`[${label}] Batch TX sent: ${tx.hash}`));
+		const receipt = await tx.wait();
+		if (receipt.status === 1) {
+			logger(Colors.green(`✅ [${label}] BeamioOracle batch update successful in block ${receipt.blockNumber}!`));
+		} else {
+			throw new Error(`[${label}] transaction reverted by network`);
+		}
+	} catch (ex) {
+		logger(Colors.red(`❌ [${label}] updateBeamioOracle Error!`), ex);
 	}
 }
 
@@ -134,7 +139,7 @@ const updateBeamioOracle = async (fx: any, cmcQuotes: any) => {
 		]);
 
     } catch (ex) {
-        logger(Colors.red(`❌ updateBeamioOracle Error!`), ex);
+        logger(Colors.red(`❌ updateBeamioOracle prepare Error!`), ex);
         // 如果是特定错误，可以在此增加重试逻辑
     }
 }
