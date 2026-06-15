@@ -4,9 +4,14 @@
  */
 export const BASE_MAINNET_CHAIN_ID = 8453
 
-export const BASE_AA_FACTORY = '0x4b31D6a05Cdc817CAc1B06369555b37a5b182122'
-/** BeamioAccountDeployer（与 config/base-addresses.json BEAMIO_ACCOUNT_DEPLOYER 同步） */
-export const BASE_BEAMIO_ACCOUNT_DEPLOYER = '0x139D55591A03550259AF32097A9848ECE9869C90'
+/** CoNET PoS HTTP RPC；与 deployments/conet-addresses.json `rpcUrl` 同步 */
+export const CONET_RPC_URL = 'https://publicrpc.conet.network'
+
+/** 跨链同址 BeamioFactoryPaymasterV07（Nick CREATE2；Base + CoNET 同值） */
+export const BEAMIO_AA_FACTORY = '0xe58F457Cd5674516400013E8d338054be556A730'
+
+/** @deprecated 使用 BEAMIO_AA_FACTORY（跨链同址） */
+export const BASE_AA_FACTORY = BEAMIO_AA_FACTORY
 /**
  * Base card factory (createCard / factoryGateway / EIP-712 domain verifyingContract).
  * Canonical: deployments/base-UserCardFactory.json / base-UserCardFactory-DEBUG.json（同址）.
@@ -49,15 +54,19 @@ export const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 /** CoNET BUint ERC20（balanceOfAll）；与 deployments/conet-addresses.json `BUint` 同步 */
 export const CONET_BUINT = '0x9149433F154C508d2a04454b8E527A479C6fd254'
-export const CONET_BUNIT_AIRDROP_ADDRESS = '0x67d01e0E9c859A89def4098aC7803f04BF0d77af'
+export const CONET_BUNIT_AIRDROP_ADDRESS = '0xFd60936707cb4583c08D8AacBA19E4bfaEE446B8'
 /** BuintRedeemAirdrop（CoNET）；与 deployments/conet-addresses.json 同步 */
 export const CONET_BUINT_REDEEM_AIRDROP = '0x05a19aA5100B9F6C22446cCD801F010Dc42D25E5'
 export const BEAMIO_INDEXER_DIAMOND = '0xd764eBA64536cFF1bbE7e7c7Bbc90F35620f72a9'
 export const MERCHANT_POS_MANAGEMENT_CONET = '0x74140e0C8118889538da8625Fc96Aac6B1342AE5'
+/** 跨链同址 BeamioOracle（Nick CREATE2；Base + CoNET 同值） */
+export const BEAMIO_ORACLE = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008'
+/** 跨链同址 BeamioQuoteHelperV07 */
+export const BEAMIO_QUOTE_HELPER = '0xD3f275774831810006d744d32E6b024507C0d374'
 /** CoNET BeamioOracle；与 deployments/conet-addresses.json `beamioOracle` 同步 */
-export const CONET_BEAMIO_ORACLE = '0x102E9FBE87a28BaC10ADbc0E67a2b0385C8Bd0E9'
+export const CONET_BEAMIO_ORACLE = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008'
 /** Base BeamioOracle */
-export const BASE_BEAMIO_ORACLE = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
+export const BASE_BEAMIO_ORACLE = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008'
 
 /**
  * BusinessStartKet ERC-1155（CoNET）。与 deployments/conet-addresses.json `BusinessStartKet` 同步。
@@ -72,8 +81,7 @@ export const CONET_BUSINESS_START_KET = '0x61A206aD8fFdBA847fCB92eB8EE4bfAa25462
 export const CONET_BUSINESS_START_KET_REDEEM = '0x980340A8Eb23117b624b1f037b8a489F54C7b6a5'
 
 export const BASE_MAINNET_FACTORIES = {
-  AA_FACTORY: BASE_AA_FACTORY,
-  BEAMIO_ACCOUNT_DEPLOYER: BASE_BEAMIO_ACCOUNT_DEPLOYER,
+  AA_FACTORY: BEAMIO_AA_FACTORY,
   CARD_FACTORY: BASE_CARD_FACTORY,
   BeamioCardCCSA_ADDRESS: BASE_CCSA_CARD_ADDRESS,
 } as const
@@ -84,8 +92,7 @@ export const CONET_MAINNET_CHAIN_ID = 224422
 export const CONTRACT_ADDRESSES = {
   base: {
     chainId: BASE_MAINNET_CHAIN_ID,
-    aaFactory: BASE_AA_FACTORY,
-    beamioAccountDeployer: BASE_BEAMIO_ACCOUNT_DEPLOYER,
+    aaFactory: BEAMIO_AA_FACTORY,
     cardFactory: BASE_CARD_FACTORY,
     ccsaCard: BASE_CCSA_CARD_ADDRESS,
     baseTreasury: BASE_TREASURY,
@@ -93,6 +100,7 @@ export const CONTRACT_ADDRESSES = {
   },
   conet: {
     chainId: CONET_MAINNET_CHAIN_ID,
+    aaFactory: BEAMIO_AA_FACTORY,
     bUint: CONET_BUINT,
     bUnitAirdrop: CONET_BUNIT_AIRDROP_ADDRESS,
     buintRedeemAirdrop: CONET_BUINT_REDEEM_AIRDROP,

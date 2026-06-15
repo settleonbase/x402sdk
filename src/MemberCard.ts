@@ -152,7 +152,7 @@ import { isApiExcludedUserCard } from './apiExcludedUserCards'
 
 const BeamioUserCardFactoryPaymasterV2 = BASE_CARD_FACTORY
 const BeamioAAAccountFactoryPaymaster = BASE_AA_FACTORY
-const BeamioOracle = '0xDa4AE8301262BdAaf1bb68EC91259E6C512A9A2B'
+const BeamioOracle = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 /** UserCard EIP-712 / gateway：与 `BASE_CARD_FACTORY._aaFactory()` 及 `BASE_AA_FACTORY`（config）一致 */
 const BeamioUserCardGatewayAddress = BASE_AA_FACTORY

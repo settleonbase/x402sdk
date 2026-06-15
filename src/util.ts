@@ -36,7 +36,7 @@ import beamiobaseABI from './ABI/beamio-base-abi.json'
 import beamioConetABI from './ABI/beamio-conet.abi.json'
 import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
-import { CONET_BUNIT_AIRDROP_ADDRESS } from './chainAddresses'
+import { CONET_BUNIT_AIRDROP_ADDRESS, CONET_RPC_URL } from './chainAddresses'
 
 
 
@@ -77,6 +77,12 @@ export const BEAMIO_BASE_HTTP_RPC_DEFAULT = 'https://base-rpc.conet.network'
 export function resolveBeamioBaseHttpRpcUrl(): string {
 	const env = typeof process !== 'undefined' ? process.env?.BASE_RPC_URL?.trim() : ''
 	return env || BEAMIO_BASE_HTTP_RPC_DEFAULT
+}
+
+/** CoNET PoS HTTP RPC；与 deployments/conet-addresses.json `rpcUrl` 同步；CONET_RPC_URL 可覆盖。 */
+export function resolveBeamioConetHttpRpcUrl(): string {
+	const env = typeof process !== 'undefined' ? process.env?.CONET_RPC_URL?.trim() : ''
+	return env || CONET_RPC_URL
 }
 
 export const masterSetup: IMasterSetup = require ( setupFile )
