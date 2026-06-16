@@ -10,7 +10,7 @@ import conetPGPABI from "./ABI/conetPGP.json"
 
 const beamioApi = 'https://beamio.app'
 
-const conetDepinProvider = new ethers.JsonRpcProvider('https://rpc1.conet.network')
+const conetDepinProvider = new ethers.JsonRpcProvider('https://publicrpc.conet.network')
 const searchUrl = `${beamioApi}/api/search-users`
 
 const GuardianNodesMainnet = new ethers.Contract(

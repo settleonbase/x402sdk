@@ -72,6 +72,7 @@ import {
 	BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
 	BASE_BEAMIO_USER_CARD_UPDATE_LIB,
 	BASE_BEAMIO_USER_CARD_VIEWS_LIB,
+	CONET_RPC_URL,
 } from './chainAddresses'
 
 import {
@@ -201,7 +202,7 @@ async function contractForExecuteForAdmin(
 	return new ethers.Contract(gw, ['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'], SC.walletBase)
 }
 
-const conetEndpoint = 'https://rpc1.conet.network'
+const conetEndpoint = CONET_RPC_URL
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint, undefined, JSONRPC_NO_BATCH)
 /**
  * Settle_ContractPool：factory 登记的 owner 列表，每项为一名 admin（含 baseFactoryPaymaster、walletBase 等）。

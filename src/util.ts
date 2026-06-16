@@ -91,7 +91,7 @@ import {reflashData} from './server'
 const facilitator1 = createFacilitatorConfig(masterSetup.base.CDP_API_KEY_ID,masterSetup.base.CDP_API_KEY_SECRET)
 
 const x402Version = 1
-const conetEndpoint = 'https://rpc1.conet.network'
+const conetEndpoint = resolveBeamioConetHttpRpcUrl()
 const CashCodeBaseAddr = '0x3977f35c531895CeD50fAf5e02bd9e7EB890D2D1'
 const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
@@ -109,8 +109,8 @@ const eventContract = '0x18A976ee42A89025f0d3c7Fb8B32e0f8B840E1F3'
 
 const {verify, settle} = useFacilitator(facilitator1)
 
-const GuardianNodeInfo_mainnet = '0x359F781A5eEb17630A44e15Bc2aC57b248b81790'
-const CONET_MAINNET = new ethers.JsonRpcProvider('https://rpc1.conet.network') 
+const GuardianNodeInfo_mainnet = '0xBC6b53065b5647261396d002bDBA0d3396E0722f'
+const CONET_MAINNET = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl())
 const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNodeInfoABI, CONET_MAINNET)
 
 
@@ -119,7 +119,7 @@ const GuardianNodesMainnet = new ethers.Contract(GuardianNodeInfo_mainnet, newNo
 const beamiobase = GuardianNodeInfo_mainnet
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
-const beamioConetAccountRegistry = '0x26626a515EDFb5DF9547ac1A32Ec1785352211Ba'
+const beamioConetAccountRegistry = '0xfFDc8d2021A41F4638Cb3eCf58B5155383EE9f6d'
 
 let Guardian_Nodes: nodeInfo[] = []
 

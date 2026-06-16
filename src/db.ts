@@ -11,6 +11,7 @@ import conetAirdropABI from './ABI/conet_airdrop.abi.json'
 import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
 import IPFSAbi from './ABI/Ipfs.abi.json'
 import conetPGPABI from './ABI/conetPGP.json'
+import { CONET_RPC_URL } from './chainAddresses'
 import {
 	normalizeCouponSeriesMetadataJson,
 	normalizeProductionSeriesMetadataJson,
@@ -26,7 +27,7 @@ import {
  */
 
 
-const RPC_URL = "https://rpc1.conet.network"
+const RPC_URL = CONET_RPC_URL
 const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
 
 /**
@@ -47,9 +48,9 @@ const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 
 const beamioConet = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
 const airdropRecord = '0x070BcBd163a3a280Ab6106bA62A079f228139379'
-const beamioConetAccountRegistry = '0x26626a515EDFb5DF9547ac1A32Ec1785352211Ba'
+const beamioConetAccountRegistry = '0xfFDc8d2021A41F4638Cb3eCf58B5155383EE9f6d'
 const IpfsStorageRegistryGlobalDedup = '0x121c4dDCa92f07dc53Fd6Db9bc5A07c2918F9591'
-const addressPGP = '0xa5F64dd3c034442F5377c8F2Aa1A03ba378D685e'
+const addressPGP = '0x684b0ac760cEE9c9b85de36d69746420648Cf9e2'
 
 export const beamio_ContractPool = masterSetup.beamio_Admins.map(n => {
 	const walletConet = new ethers.Wallet(n, providerConet)
