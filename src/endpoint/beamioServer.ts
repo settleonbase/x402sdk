@@ -1,6 +1,6 @@
 import express, { Request, Response, Router} from 'express'
 import { GoogleGenAI } from '@google/genai'
-import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh, submitUsdcChargeSettleIndexer, TX_CATEGORY_TERMINAL_RESET } from '../util'
+import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh, submitUsdcChargeSettleIndexer, resolveBeamioConetHttpRpcUrl, TX_CATEGORY_TERMINAL_RESET } from '../util'
 import { checkSmartAccount } from '../MemberCard'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
@@ -364,8 +364,8 @@ async function assertAdminEoaHasVisibleAaAfterEnsure(
 	}
 	return { ok: true, canonicalAa }
 }
-const CONET_RPC = 'https://rpc1.conet.network'
-const providerConet = new ethers.JsonRpcProvider(CONET_RPC)
+const JSONRPC_NO_BATCH = { batchMaxCount: 1 as const }
+const providerConet = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(), undefined, JSONRPC_NO_BATCH)
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -396,7 +396,7 @@ const fetchOracleFromMaster = () => {
 }
 
 const startClusterOracleSync = () => {
-	const conetRpc = new ethers.JsonRpcProvider('https://rpc1.conet.network')
+	const conetRpc = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl())
 	conetRpc.on('block', (blockNumber: bigint | number) => {
 		const n = typeof blockNumber === 'bigint' ? Number(blockNumber) : blockNumber
 		if (n % 10 !== 0) return

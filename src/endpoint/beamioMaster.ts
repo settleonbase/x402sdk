@@ -1,5 +1,5 @@
 import express, { Request, Response, Router} from 'express'
-import {getClientIp, oracleBackoud, getOracleRequest, masterSetup, resolveBeamioBaseHttpRpcUrl, submitUsdcChargeSettleIndexer} from '../util'
+import {getClientIp, oracleBackoud, getOracleRequest, masterSetup, resolveBeamioBaseHttpRpcUrl, resolveBeamioConetHttpRpcUrl, submitUsdcChargeSettleIndexer} from '../util'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
@@ -938,7 +938,6 @@ const routing = ( router: Router ) => {
 
 		/** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付。用于 Smart Routing 及 beamioTransferIndexerAccounting 前置校验。 */
 		const BEAMIO_INDEXER_ADDRESS = BEAMIO_INDEXER_DIAMOND
-		const CONET_RPC = 'https://rpc1.conet.network'
 		const INDEXER_READ_ABI = [
 			'function getTransactionFullByTxId(bytes32 txId) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, address topAdmin, address subordinate, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta))',
 			'function getAccountTransactionsByMonthOffsetPaged(address account, uint256 periodOffset, uint256 pageOffset, uint256 pageLimit, bytes32 txCategoryFilter) view returns (uint256 total, uint256 periodStart, uint256 periodEnd, (bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists, address topAdmin, address subordinate)[] page)',
@@ -958,7 +957,7 @@ const routing = ( router: Router ) => {
 				return { expired: false, fulfilled: false, error: 'validDays must be >= 1' }
 			}
 			try {
-				const provider = new ethers.JsonRpcProvider(CONET_RPC)
+				const provider = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl())
 				const indexer = new ethers.Contract(BEAMIO_INDEXER_ADDRESS, INDEXER_READ_ABI, provider)
 				const txHashBytes32 = ethers.getBytes(requestHash).length === 32 ? (requestHash as `0x${string}`) : ethers.hexlify(ethers.zeroPadValue(requestHash, 32)) as `0x${string}`
 
