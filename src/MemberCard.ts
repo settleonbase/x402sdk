@@ -226,6 +226,51 @@ async function contractForExecuteForAdmin(
 	return new ethers.Contract(gw, ['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'], relayWallet)
 }
 
+/** 对 `executeForOwner` 的链上入口：按卡所在链路由 Base / CoNET factory 与 relay 钱包。 */
+async function contractForExecuteForOwner(
+	SC: {
+		baseFactoryPaymaster: ethers.Contract
+		conetFactoryPaymaster: ethers.Contract
+		walletBase: ethers.Wallet
+		walletConet: ethers.Wallet
+	},
+	cardAddr: string,
+): Promise<ethers.Contract> {
+	const gw = await getBeamioUserCardFactoryGateway(cardAddr)
+	const chain = await resolveUserCardChain(cardAddr)
+	const poolFactory =
+		chain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+	const relayWallet = settleRelayWalletForChain(SC, chain)
+	let pinned: string
+	try {
+		pinned = ethers.getAddress(await poolFactory.getAddress())
+	} catch {
+		pinned = ethers.getAddress(cardFactoryForUserCardChain(chain))
+	}
+	if (gw.toLowerCase() === pinned.toLowerCase()) return poolFactory
+	logger(Colors.yellow(`[executeForOwner] gateway ${gw} != pool factory ${pinned}; routing on-chain call to card gateway`))
+	return new ethers.Contract(
+		gw,
+		['function executeForOwner(address,bytes,uint256,bytes32,bytes)', 'function redeemForUser(address,string,address)'],
+		relayWallet
+	)
+}
+
+/** Cluster 预检：卡须在 Base 或 CoNET 之一有 bytecode。 */
+async function requireBeamioUserCardBytecode(
+	cardAddress: string,
+): Promise<
+	| { ok: true; chain: BeamioUserCardChainKey; provider: ethers.JsonRpcProvider }
+	| { ok: false; error: string }
+> {
+	const addr = ethers.getAddress(cardAddress)
+	const chain = await resolveUserCardChain(addr)
+	const provider = providerForUserCardChain(chain)
+	const code = await provider.getCode(addr)
+	if (!code || code === '0x') return { ok: false, error: 'Card contract not found' }
+	return { ok: true, chain, provider }
+}
+
 const conetEndpoint = resolveBeamioConetHttpRpcUrl()
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint, undefined, JSONRPC_NO_BATCH)
 /**
@@ -13731,19 +13776,20 @@ export const cardCreateIssuedNftPreCheck = async (body: {
 		}
 		const pool = Settle_ContractPool
 		if (pool?.length) {
-			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-			const codeAtCard = await provider.getCode(cardAddress)
-			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+			const cardProbe = await requireBeamioUserCardBytecode(cardAddress)
+			if (!cardProbe.ok) return { success: false, error: cardProbe.error }
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 		try {
+			const cardChain = await resolveUserCardChain(ethers.getAddress(cardAddress))
+			const cardProvider = providerForUserCardChain(cardChain)
 			const cardForOwnerProbe = new ethers.Contract(
 				ethers.getAddress(cardAddress),
 				['function owner() view returns (address)'],
-				providerBaseBackup
+				cardProvider
 			)
 			const rawOwn = await cardForOwnerProbe.owner()
-			const ro = await resolveCardOwnerToEOA(providerBaseBackup, rawOwn as string)
+			const ro = await resolveCardOwnerToEOA(cardProvider, rawOwn as string)
 			if (!ro.success) return { success: false, error: ro.error ?? 'Cannot resolve card owner for B-Unit fee' }
 			const aaFc = await getCardAaFactoryAddress(ethers.getAddress(cardAddress))
 			const pickBu = await pickBUnitFeeConsumerPreferEoaThenAa(ro.cardOwner, CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6, {
@@ -13997,9 +14043,8 @@ export const cardCreateRedeemAdminPreCheck = async (body: {
 		if (!hash || hash === ethers.ZeroHash) return { success: false, error: 'hash must be non-zero (keccak256 of secret code)' }
 		const pool = Settle_ContractPool
 		if (pool?.length) {
-			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-			const codeAtCard = await provider.getCode(cardAddress)
-			if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
+			const cardProbe = await requireBeamioUserCardBytecode(cardAddress)
+			if (!cardProbe.ok) return { success: false, error: cardProbe.error }
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 		return { success: true }
@@ -14176,12 +14221,11 @@ export const cardCreateRedeemPreCheck = async (body: {
 		})
 		const pool = Settle_ContractPool
 		if (pool?.length) {
-			const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-			const code = await provider.getCode(cardAddress)
-			if (!code || code === '0x') {
-				return { success: false, error: 'Card contract not found or not deployed' }
+			const cardProbe = await requireBeamioUserCardBytecode(cardAddress)
+			if (!cardProbe.ok) {
+				return { success: false, error: cardProbe.error === 'Card contract not found' ? 'Card contract not found or not deployed' : cardProbe.error }
 			}
-			const card = new ethers.Contract(cardAddress, ['function factoryGateway() view returns (address)'], provider)
+			const card = new ethers.Contract(cardAddress, ['function factoryGateway() view returns (address)'], cardProbe.provider)
 			const gw = await card.factoryGateway()
 			if (!gw || gw === ethers.ZeroAddress) {
 				return { success: false, error: 'Card factoryGateway not configured' }
@@ -14248,7 +14292,7 @@ export const executeForOwnerProcess = async () => {
 		}
 	}
 	try {
-		const factory = SC.baseFactoryPaymaster
+		const factory = await contractForExecuteForOwner(SC, obj.cardAddress)
 		const dataSelector = obj.data?.slice(0, 10).toLowerCase() ?? ''
 		const isAdminManager = dataSelector === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase()
 		if (SC.aaAccountFactoryPaymaster && obj.data) {
@@ -14292,9 +14336,11 @@ export const executeForOwnerProcess = async () => {
 		}
 		if (obj.data?.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase() && !createIssuedNftCouponBunitCtx) {
 			const cardAddrN = ethers.getAddress(obj.cardAddress)
-			const cardOwnerRead = new ethers.Contract(cardAddrN, ['function owner() view returns (address)'], providerBaseBackup)
+			const cardChain = await resolveUserCardChain(cardAddrN)
+			const cardProvider = providerForUserCardChain(cardChain)
+			const cardOwnerRead = new ethers.Contract(cardAddrN, ['function owner() view returns (address)'], cardProvider)
 			const rawOwner = await cardOwnerRead.owner()
-			const resolveResult = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner as string)
+			const resolveResult = await resolveCardOwnerToEOA(cardProvider, rawOwner as string)
 			if (!resolveResult.success) {
 				throw new Error(resolveResult.error ?? 'Cannot resolve card owner to EOA for B-Unit fee')
 			}
