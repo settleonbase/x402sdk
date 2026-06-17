@@ -6972,11 +6972,13 @@ export const OpenContainerRelayPreCheckBUnitFee = async (
 		if (items.length === 0) return { success: false, error: 'items required for charge fee check' }
 		const itemSlice = items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
 		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
-		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(providerBaseBackup, itemSlice)
 		const cardAddr = resolveChargeFeePayerCardFromOpenContainerItems(itemSlice)
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
+		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(cardProvider, itemSlice)
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
 		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
 			aaFactoryAddress: aaFactoryAddr,
+			aaFactoryProvider: cardProvider,
 		})
 		if (!picked.ok) {
 			return {
@@ -7012,11 +7014,13 @@ export const ContainerRelayPreCheckBUnitBalance = async (
 		if (!amountOk) return { success: false, error: 'amount must be > 0 for container relay' }
 		const itemSlice = items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
 		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
-		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(providerBaseBackup, itemSlice)
 		const cardAddr = resolveChargeFeePayerCardFromOpenContainerItems(itemSlice)
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
+		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(cardProvider, itemSlice)
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
 		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
 			aaFactoryAddress: aaFactoryAddr,
+			aaFactoryProvider: cardProvider,
 		})
 		if (!picked.ok) {
 			return {
@@ -9302,6 +9306,7 @@ export const OpenContainerRelayProcess = async () => {
       const aaFactoryOpen = await getCardAaFactoryAddress(feePayerCard)
       const feePayerPickOpen = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
         aaFactoryAddress: aaFactoryOpen,
+        aaFactoryProvider: relayProvider,
       })
       const feePayerEOA = feePayerPickOpen.ok ? feePayerPickOpen.consumer : feePayerOwnerEoa
       if (!feePayerPickOpen.ok) {
@@ -9772,6 +9777,7 @@ export const ContainerRelayProcess = async () => {
     const aaFactoryContainer = await getCardAaFactoryAddress(feePayerCardContainer)
     const feePayerPickContainer = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoaContainer, feeBUnits6, {
       aaFactoryAddress: aaFactoryContainer,
+      aaFactoryProvider: relayProviderC,
     })
     const feePayerEOA = feePayerPickContainer.ok ? feePayerPickContainer.consumer : feePayerOwnerEoaContainer
     if (!feePayerPickContainer.ok) {
