@@ -1340,20 +1340,7 @@ const DeployingSmartAccount = async (
  * 若 EOA 无 AA 则先调用 createAccountFor 创建，再返回；Master 在 push executeForOwner 前调用。
  */
 export const ensureAAForMintTarget = async (targetAddress: string): Promise<void> => {
-	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
-	const targetNorm = ethers.getAddress(targetAddress)
-	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerBaseBackup, BASE_CARD_FACTORY)
-	if (!wired) {
-		throw new Error(
-			'ensureAAForMintTarget: cannot read UserCard _aaFactory(); cannot ensure AA for mint target'
-		)
-	}
-	const aaFactoryReadOnly = new ethers.Contract(
-		wired,
-		BeamioAAAccountFactoryPaymasterABI,
-		providerBaseBackup
-	)
-	await ensureAAForEOAOnAaFactory(targetNorm, wired, aaFactoryReadOnly)
+	await ensureAAForEOAOnConet(ethers.getAddress(targetAddress))
 }
 
 /**
@@ -1451,11 +1438,13 @@ export const ensureAAForEOAOnCard = async (
 	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
 	const cardNorm = ethers.getAddress(cardAddress)
 	const eoaNorm = ethers.getAddress(eoa)
+	const chain = await resolveUserCardChain(cardNorm)
+	const provider = providerForUserCardChain(chain)
 	const gateway = await getBeamioUserCardFactoryGateway(cardNorm)
 	const gwRead = new ethers.Contract(
 		gateway,
 		['function _aaFactory() view returns (address)'],
-		providerBaseBackup
+		provider
 	)
 	const aaFactoryAddr = (await gwRead._aaFactory()) as string
 	if (!aaFactoryAddr || aaFactoryAddr === ethers.ZeroAddress) {
@@ -1464,9 +1453,29 @@ export const ensureAAForEOAOnCard = async (
 	const aaFactoryReadOnly = new ethers.Contract(
 		aaFactoryAddr,
 		BeamioAAAccountFactoryPaymasterABI,
-		providerBaseBackup
+		provider
 	)
-	return ensureAAForEOAOnAaFactory(eoaNorm, aaFactoryAddr, aaFactoryReadOnly, heldSC)
+	if (heldSC) {
+		return ensureAAForEOAOnAaFactory(
+			eoaNorm,
+			aaFactoryAddr,
+			aaFactoryReadOnly,
+			heldSC,
+			settleRelayWalletForChain(heldSC, chain)
+		)
+	}
+	const sc = await shiftSettleContractForWrite('ensureAAForEOAOnCard')
+	try {
+		return await ensureAAForEOAOnAaFactory(
+			eoaNorm,
+			aaFactoryAddr,
+			aaFactoryReadOnly,
+			sc,
+			settleRelayWalletForChain(sc, chain)
+		)
+	} finally {
+		Settle_ContractPool.unshift(sc)
+	}
 }
 
 /**
@@ -1476,22 +1485,9 @@ export const ensureAAForEOAOnCard = async (
  *
  * 注意：cardAddAdminPreCheck 要求 adminManager 的 **to** 与 **body.adminEOA** 为同一 EOA（to 无代码）。误传占位地址时仍会在该键下建 AA 并登记 admin。
  */
+/** 新 AA 仅在 CoNET（224422）部署；Base 不再 createAccountFor。 */
 export const ensureAAForEOA = async (eoa: string): Promise<string> => {
-	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
-	const eoaNorm = ethers.getAddress(eoa)
-	/** 与 resolveBeamioAaForEoaWithFallback 一致：仅 UserCard._aaFactory()，不用链下 BASE_AA_FACTORY 回退 */
-	const wired = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerBaseBackup, BASE_CARD_FACTORY)
-	if (!wired) {
-		throw new Error(
-			'ensureAAForEOA: cannot read UserCard _aaFactory(); set BASE_CARD_FACTORY RPC or deploy wiring before ensuring AA'
-		)
-	}
-	const aaFactoryReadOnly = new ethers.Contract(
-		wired,
-		BeamioAAAccountFactoryPaymasterABI,
-		providerBaseBackup
-	)
-	return ensureAAForEOAOnAaFactory(eoaNorm, wired, aaFactoryReadOnly)
+	return ensureAAForEOAOnConet(eoa)
 }
 
 /**

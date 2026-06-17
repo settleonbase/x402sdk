@@ -17,13 +17,14 @@ import {
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
-import { BASE_CARD_FACTORY, BEAMIO_INDEXER_DIAMOND } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY } from '../chainAddresses'
+import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
 import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
-import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import { resolveBeamioAaForEoaWithFallback, resolveBeamioAaOnConet } from './resolveBeamioAaViaUserCardFactory'
 import {
 	BEAMIO_COUPON_NFT_CATEGORY,
 	normalizeCouponCategoryOnTierProperties,
@@ -719,27 +720,35 @@ const routing = ( router: Router ) => {
 				return res.status(200).json({ items: cached.items })
 			}
 			const CARD_ABI = ['function currency() view returns (uint8)', 'function pointsUnitPriceInCurrencyE6() view returns (uint256)']
+			const FACTORY_ABI = ['function cardsOfOwner(address) view returns (address[])']
 			const CURRENCY_MAP: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
+			const factoryQueries = [
+				{ factory: CONET_CARD_FACTORY, provider: providerForUserCardChain('conet') },
+				{ factory: BASE_CARD_FACTORY, provider: providerForUserCardChain('base') },
+			]
 			try {
-				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
-				const factory = new ethers.Contract(BASE_CARD_FACTORY, ['function cardsOfOwner(address) view returns (address[])', 'function beamioUserCardOwner(address) view returns (address)'], provider)
 				const seen = new Set<string>()
 				const items: Array<{ cardAddress: string; name: string; currency: string; priceE6: string; ptsPer1Currency: string }> = []
 				for (const o of ownerList) {
-					const cards: string[] = await factory.cardsOfOwner(o)
-					for (const addr of cards) {
-						const key = addr.toLowerCase()
-						if (isApiExcludedUserCard(key)) continue
-						if (seen.has(key)) continue
-						seen.add(key)
-						try {
-							const card = new ethers.Contract(addr, CARD_ABI, provider)
-							const [currencyNum, priceE6Raw] = await Promise.all([card.currency(), card.pointsUnitPriceInCurrencyE6()])
-							const currency = CURRENCY_MAP[Number(currencyNum)] ?? 'USDC'
-							const priceE6 = Number(priceE6Raw)
-							const ptsPer1Currency = priceE6 > 0 ? String(1_000_000 / priceE6) : '0'
-							items.push({ cardAddress: addr, name: 'User Card', currency, priceE6: String(priceE6), ptsPer1Currency })
-						} catch (_) {}
+					for (const { factory, provider } of factoryQueries) {
+						const factoryContract = new ethers.Contract(factory, FACTORY_ABI, provider)
+						const cards: string[] = await factoryContract.cardsOfOwner(o)
+						for (const addr of cards) {
+							const key = addr.toLowerCase()
+							if (isApiExcludedUserCard(key)) continue
+							if (seen.has(key)) continue
+							seen.add(key)
+							try {
+								const chain = await resolveUserCardChain(addr)
+								const cardProvider = providerForUserCardChain(chain)
+								const card = new ethers.Contract(addr, CARD_ABI, cardProvider)
+								const [currencyNum, priceE6Raw] = await Promise.all([card.currency(), card.pointsUnitPriceInCurrencyE6()])
+								const currency = CURRENCY_MAP[Number(currencyNum)] ?? 'USDC'
+								const priceE6 = Number(priceE6Raw)
+								const ptsPer1Currency = priceE6 > 0 ? String(1_000_000 / priceE6) : '0'
+								items.push({ cardAddress: addr, name: 'User Card', currency, priceE6: String(priceE6), ptsPer1Currency })
+							} catch (_) {}
+						}
 					}
 				}
 				myCardsCache.set(cacheKey, { items, expiry: Date.now() + MY_CARDS_CACHE_TTL_MS })
@@ -750,7 +759,7 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** GET /api/getAAAccount?eoa=0x... - 仅 UserCard 绑定 _aaFactory → beamioAccountOf（与 resolveBeamioAaForEoaWithFallback 一致）。30 秒缓存。 */
+		/** GET /api/getAAAccount?eoa=0x... - CoNET BEAMIO_AA_FACTORY beamioAccountOf（新 AA 仅 224422）。30 秒缓存。 */
 		const GET_AA_CACHE_TTL_MS = 30 * 1000
 		const getAAAccountCache = new Map<string, { account: string | null; expiry: number }>()
 		router.get('/getAAAccount', async (req, res) => {
@@ -764,8 +773,7 @@ const routing = ( router: Router ) => {
 				return res.status(200).json({ account: cached.account })
 			}
 			try {
-				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
-				const account = await resolveBeamioAaForEoaWithFallback(provider, eoa)
+				const account = await resolveBeamioAaOnConet(eoa)
 				if (!account) {
 					getAAAccountCache.set(cacheKey, { account: null, expiry: Date.now() + GET_AA_CACHE_TTL_MS })
 					return res.status(200).json({ account: null })
@@ -778,7 +786,7 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** GET /api/ensureAAForEOA?eoa=0x... - 为 EOA 确保存在 AA（无则创建），返回 { aa }。cardAddAdmin 预检要求 adminManager.to 与 body.adminEOA 同为真实商户 EOA（无 code），勿用占位地址。 */
+		/** GET /api/ensureAAForEOA?eoa=0x... - 在 CoNET 224422 确保 AA（无则 createAccountFor）；与 ensureAAForEOAOnConet 等价。 */
 		router.get('/ensureAAForEOA', async (req, res) => {
 			const { eoa } = req.query as { eoa?: string }
 			if (!eoa || !ethers.isAddress(eoa)) {
