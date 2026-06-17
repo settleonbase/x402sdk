@@ -49,6 +49,7 @@ import {
 	BASE_AA_FACTORY,
 	BASE_CARD_FACTORY,
 	BASE_CCSA_CARD_ADDRESS,
+	CONET_CARD_FACTORY,
 	CONET_BUINT,
 	CONET_BUNIT_AIRDROP_ADDRESS,
 	CONET_BUINT_REDEEM_AIRDROP,
@@ -79,6 +80,19 @@ import {
 	createBeamioCardWithFactoryReturningHash,
 	type BeamioUserCardLibraryAddresses,
 } from './CCSA'
+
+import {
+	defaultMerchantUserCardChain,
+	defaultMerchantProgramCardAddress,
+	merchantCardRelayContext,
+	resolveUserCardChain,
+	providerForUserCardChain,
+	chainIdForUserCardChain,
+	cardFactoryForUserCardChain,
+	beamioUserCardLibrariesForChain,
+	settleRelayWalletForChain,
+	type BeamioUserCardChainKey,
+} from './beamioUserCardChain'
 
 function beamioUserCardLibrariesFromConfig(override?: BeamioUserCardLibraryAddresses): BeamioUserCardLibraryAddresses {
 	if (override) return override
@@ -176,7 +190,9 @@ const providerBaseBackup1 = new ethers.JsonRpcProvider(BASE_RPC_URL, undefined, 
 /** EIP-712 `verifyingContract`：须与 BeamioUserCard（含历史卡）的 `factoryGateway()` 一致，不得写死为新部署的 BASE_CARD_FACTORY。 */
 export async function getBeamioUserCardFactoryGateway(cardAddress: string): Promise<string> {
 	const addr = ethers.getAddress(cardAddress.trim())
-	const read = new ethers.Contract(addr, ['function factoryGateway() view returns (address)'], providerBaseBackup)
+	const chain = await resolveUserCardChain(addr)
+	const provider = providerForUserCardChain(chain)
+	const read = new ethers.Contract(addr, ['function factoryGateway() view returns (address)'], provider)
 	const gw = (await read.factoryGateway()) as string
 	if (!gw || gw === ethers.ZeroAddress || !ethers.isAddress(gw)) {
 		throw new Error('factoryGateway invalid or missing on card')
@@ -184,21 +200,30 @@ export async function getBeamioUserCardFactoryGateway(cardAddress: string): Prom
 	return ethers.getAddress(gw)
 }
 
-/** 对 `executeForAdmin` 的链上入口：须为卡记录之 `factoryGateway()`；与 Settle 池内默认 `baseFactoryPaymaster` 不一致时仍须路由到正确合约。 */
+/** 对 `executeForAdmin` 的链上入口：须为卡记录之 `factoryGateway()`；与 Settle 池内默认 factory 不一致时仍须路由到正确合约与链上钱包。 */
 async function contractForExecuteForAdmin(
-	SC: { baseFactoryPaymaster: ethers.Contract; walletBase: ethers.Wallet },
+	SC: {
+		baseFactoryPaymaster: ethers.Contract
+		conetFactoryPaymaster: ethers.Contract
+		walletBase: ethers.Wallet
+		walletConet: ethers.Wallet
+	},
 	cardAddr: string,
 ): Promise<ethers.Contract> {
 	const gw = await getBeamioUserCardFactoryGateway(cardAddr)
+	const chain = await resolveUserCardChain(cardAddr)
+	const poolFactory =
+		chain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+	const relayWallet = settleRelayWalletForChain(SC, chain)
 	let pinned: string
 	try {
-		pinned = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
+		pinned = ethers.getAddress(await poolFactory.getAddress())
 	} catch {
-		pinned = ethers.getAddress(BASE_CARD_FACTORY)
+		pinned = ethers.getAddress(cardFactoryForUserCardChain(chain))
 	}
-	if (gw.toLowerCase() === pinned.toLowerCase()) return SC.baseFactoryPaymaster
+	if (gw.toLowerCase() === pinned.toLowerCase()) return poolFactory
 	logger(Colors.yellow(`[executeForAdmin] gateway ${gw} != pool factory ${pinned}; routing on-chain call to card gateway`))
-	return new ethers.Contract(gw, ['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'], SC.walletBase)
+	return new ethers.Contract(gw, ['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'], relayWallet)
 }
 
 const conetEndpoint = resolveBeamioConetHttpRpcUrl()
@@ -212,6 +237,8 @@ const providerConet = new ethers.JsonRpcProvider(conetEndpoint, undefined, JSONR
  */
 export let Settle_ContractPool: {
 	baseFactoryPaymaster: ethers.Contract
+	/** CoNET UserCard Factory（224422）；商户发卡 / Charge relay 默认链 */
+	conetFactoryPaymaster: ethers.Contract
 	walletBase: ethers.Wallet
 	walletConet: ethers.Wallet
 	aaAccountFactoryPaymaster: ethers.Contract
@@ -503,6 +530,7 @@ masterSetup.settle_contractAdmin.forEach((n: string) => {
 	const walletBase = new ethers.Wallet(n, providerBaseBackup1)
 	const walletConet = new ethers.Wallet(n, providerConet)
 	const baseFactoryPaymaster = new ethers.Contract(BeamioUserCardFactoryPaymasterV2, BeamioFactoryPaymasterABI, walletBase)
+	const conetFactoryPaymaster = new ethers.Contract(CONET_CARD_FACTORY, BeamioFactoryPaymasterABI, walletConet)
 	const aaAccountFactoryPaymaster = new ethers.Contract(BeamioAAAccountFactoryPaymaster, BeamioAAAccountFactoryPaymasterABI, walletBase)
 	const BeamioTaskDiamondCut = new ethers.Contract(BeamioTaskIndexerAddress, IDiamondCutABI, walletConet)
 	const BeamioTaskDiamondLoupe = new ethers.Contract(BeamioTaskIndexerAddress, DiamondLoupeFacetABI, walletConet)
@@ -517,6 +545,7 @@ masterSetup.settle_contractAdmin.forEach((n: string) => {
 	const BeamioUserCardGateway = new ethers.Contract(BeamioUserCardGatewayAddress, BeamioUserCardGatewayABI, walletBase)
 	Settle_ContractPool.push ({
 		baseFactoryPaymaster,
+		conetFactoryPaymaster,
 		walletBase,
 		walletConet,
 		aaAccountFactoryPaymaster,
@@ -2105,11 +2134,13 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 	try {
 		const dataHash = ethers.keccak256(obj.data)
 		const cardAddrNorm = ethers.getAddress(obj.cardAddr)
+		const cardChain = await resolveUserCardChain(cardAddrNorm)
+		const provider = providerForUserCardChain(cardChain)
 		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddrNorm)
 		const domain = {
 			name: 'BeamioUserCardFactory',
 			version: '1',
-			chainId: 8453,
+			chainId: chainIdForUserCardChain(cardChain),
 			verifyingContract,
 		}
 		const types = {
@@ -2129,7 +2160,6 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 		const digest = ethers.TypedDataEncoder.hash(domain, types, message)
 		const signer = ethers.recoverAddress(digest, obj.adminSignature)
 		const cardAbi = ['function isAdmin(address) view returns (bool)']
-		const provider = providerBaseBackup
 		const card = new ethers.Contract(cardAddrNorm, cardAbi, provider)
 		const isAdmin = await card.isAdmin(signer)
 		if (!isAdmin) {
@@ -2139,7 +2169,7 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 					: obj.adminSignature
 			logger(
 				Colors.red(
-					`[executeForAdmin][eip712] signer is not admin card=${cardAddrNorm} verifyingContract=${verifyingContract} chainId=8453 recovered=${signer} digest=${digest} dataHash=${dataHash} deadline=${obj.deadline} nonce=${message.nonce} sig=${sigPreview}`
+					`[executeForAdmin][eip712] signer is not admin card=${cardAddrNorm} verifyingContract=${verifyingContract} chainId=${chainIdForUserCardChain(cardChain)} recovered=${signer} digest=${digest} dataHash=${dataHash} deadline=${obj.deadline} nonce=${message.nonce} sig=${sigPreview}`
 				)
 			)
 			return {
@@ -2246,7 +2276,7 @@ function resolveChargeAccountingCardAddress(obj: (typeof beamioTransferIndexerAc
 		}
 	}
 	if (obj.source === 'open-container' || obj.source === 'container') {
-		return ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+		return ethers.getAddress(defaultMerchantProgramCardAddress())
 	}
 	return undefined
 }
@@ -2254,14 +2284,17 @@ function resolveChargeAccountingCardAddress(obj: (typeof beamioTransferIndexerAc
 /** Charge：beneficiary EOA 的 adminParent 是否等于卡 owner（owner 通过 adminManagerByAdmin 等职级添加的直接下级）。用于记账 topAdmin=owner EOA 与可选链上 burn。 */
 export const chargePayeeParentIsCardOwner = async (
 	cardAddr: string,
-	payeeEOA: string
+	payeeEOA: string,
+	providerOverride?: ethers.Provider
 ): Promise<{ yes: boolean; cardOwnerEOAForIndexer: string }> => {
+	const chain = await resolveUserCardChain(cardAddr)
+	const provider = providerOverride ?? providerForUserCardChain(chain)
 	const cardAbi = [
 		'function adminParent(address) view returns (address)',
 		'function owner() view returns (address)',
 		'function isAdmin(address) view returns (bool)',
 	]
-	const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+	const card = new ethers.Contract(cardAddr, cardAbi, provider)
 	const payee = ethers.getAddress(payeeEOA)
 	const [parent, rawOwner, isPayeeAdmin] = await Promise.all([
 		card.adminParent(payee) as Promise<string>,
@@ -2276,7 +2309,7 @@ export const chargePayeeParentIsCardOwner = async (
 	const yes = parentIsOwner || ownerLineAdmin
 	let cardOwnerEOAForIndexer = own
 	try {
-		const resolved = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner)
+		const resolved = await resolveCardOwnerToEOA(provider, rawOwner)
 		if (resolved?.success && resolved.cardOwner) cardOwnerEOAForIndexer = ethers.getAddress(resolved.cardOwner)
 	} catch {
 		/* keep contract owner address */
@@ -2304,7 +2337,7 @@ export function resolveChargeCardAddressFromRelayItems(params: {
 			}
 		}
 	}
-	return ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
+	return ethers.getAddress(defaultMerchantProgramCardAddress())
 }
 
 /** 收款 `to`（AA 或 EOA）解析为受益人 EOA（与 maybeExecuteChargeOwnerChildBurn / 记账一致） */
@@ -2633,11 +2666,13 @@ const tryParseExecuteForAdminAaRecipient = (data: string): string | null => {
 
 /** 获取 card 使用的 AA Factory 地址（card.factoryGateway()._aaFactory()），与 mintPointsByAdmin 的 _toAccount 解析逻辑一致 */
 const getCardAaFactoryAddress = async (cardAddr: string): Promise<string> => {
+	const chain = await resolveUserCardChain(cardAddr)
+	const provider = providerForUserCardChain(chain)
 	const cardAbi = ['function factoryGateway() view returns (address)']
 	const factoryAbi = ['function _aaFactory() view returns (address)']
-	const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+	const card = new ethers.Contract(cardAddr, cardAbi, provider)
 	const gateway = await card.factoryGateway()
-	const factory = new ethers.Contract(gateway, factoryAbi, providerBaseBackup)
+	const factory = new ethers.Contract(gateway, factoryAbi, provider)
 	return factory._aaFactory()
 }
 
@@ -3728,7 +3763,17 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		const TX_INTERNAL = ethers.keccak256(ethers.toUtf8Bytes('internal_transfer:confirmed')) as `0x${string}`
 		const TX_REQUEST_FULFILLED = ethers.keccak256(ethers.toUtf8Bytes('request_fulfilled:confirmed')) as `0x${string}`
 		const TX_TIP = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP')) as `0x${string}`
-		const CHAIN_ID_BASE = 8453n
+		const chargeCardAddrForChain = resolveChargeAccountingCardAddress(obj)
+		let merchantChainForIndexer: BeamioUserCardChainKey = defaultMerchantUserCardChain()
+		if (chargeCardAddrForChain) {
+			try {
+				merchantChainForIndexer = await resolveUserCardChain(chargeCardAddrForChain)
+			} catch {
+				/* keep default */
+			}
+		}
+		const CHAIN_ID_BASE = BigInt(chainIdForUserCardChain(merchantChainForIndexer))
+		const cardProviderForCharge = providerForUserCardChain(merchantChainForIndexer)
 		const requestHashValid = obj.requestHash && ethers.isHexString(obj.requestHash) && ethers.dataLength(obj.requestHash) === 32
 		const ledgerOrigValid =
 			obj.ledgerOriginalPaymentHash &&
@@ -3884,7 +3929,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			const cardAddr = resolveChargeAccountingCardAddress(obj)
 			if (cardAddr) {
 				try {
-					const parentIsOwner = await chargePayeeParentIsCardOwner(cardAddr, payeeEOA)
+					const parentIsOwner = await chargePayeeParentIsCardOwner(cardAddr, payeeEOA, cardProviderForCharge)
 					if (parentIsOwner.yes && parentIsOwner.cardOwnerEOAForIndexer) {
 						transactionInput.topAdmin = ethers.getAddress(parentIsOwner.cardOwnerEOAForIndexer)
 						logger(
@@ -3896,7 +3941,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 						const opChain = await fetchOperatorParentChain(cardAddr, payeeEOA)
 						const { topAdmin: topAdminInChain } = deriveTopAdminAndSubordinate(payeeEOA, opChain)
 						// topAdminInChain 可能是 EOA 或 AA（链上 adminParent 接受 AA 作为 admin）
-						const topAdminCode = await SC.walletBase.provider!.getCode(topAdminInChain)
+						const topAdminCode = await cardProviderForCharge.getCode(topAdminInChain)
 						const topAdminIsAA = topAdminCode && topAdminCode !== '0x' && topAdminCode.length > 2
 						let topAdminAA: string
 						if (topAdminIsAA) {
@@ -3911,7 +3956,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 							}
 						}
 						if (topAdminAA && topAdminAA !== ethers.ZeroAddress) {
-							const aaCode = await SC.walletBase.provider!.getCode(topAdminAA)
+							const aaCode = await cardProviderForCharge.getCode(topAdminAA)
 							if (aaCode && aaCode !== '0x' && aaCode.length > 2) {
 								transactionInput.topAdmin = ethers.getAddress(topAdminAA)
 								logger(
@@ -3928,7 +3973,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				// Charge afterNotePayer.point：按卡当前 chargeRewardRatioE6 × 本行 finalRequestAmountFiat6（主单/TX_TIP 各自一行）
 				if (finalRequestAmountFiat6 > 0n) {
 					try {
-						const ratioE6 = await readCardChargeRewardRatioE6(cardAddr, SC.walletBase.provider!)
+						const ratioE6 = await readCardChargeRewardRatioE6(cardAddr, cardProviderForCharge)
 						const point6 = calcChargeRewardPoints6FromFiat6(finalRequestAmountFiat6, ratioE6)
 						if (point6 > 0n) {
 							transactionInput.meta.afterNotePayer = buildChargeAfterNotePayerJson(point6, ratioE6)
@@ -6742,7 +6787,7 @@ export const resolveChargeFeePayerCardFromOpenContainerItems = (items: { kind: n
 			if (a.toLowerCase() !== ccsaLower) return a
 		} catch (_) {}
 	}
-	return BEAMIO_USER_CARD_ASSET_ADDRESS
+	return defaultMerchantProgramCardAddress()
 }
 
 /**
@@ -8830,7 +8875,19 @@ export const OpenContainerRelayProcess = async () => {
     const sigHex = typeof payload.signature === 'string' && payload.signature.startsWith('0x') ? payload.signature : '0x' + payload.signature
     const sigBytes = ethers.getBytes(sigHex)
 
-    const accountCode = await SC.walletBase.provider!.getCode(account)
+    const has1155 = items.some((it: { kind: number }) => it.kind === 1)
+    const erc1155CardAddr = items.find((it) => it.kind === 1)?.asset
+    const merchantCardRaw = (obj as { merchantCardAddress?: string }).merchantCardAddress
+    const merchantCardNorm =
+      merchantCardRaw && ethers.isAddress(merchantCardRaw) ? ethers.getAddress(merchantCardRaw) : null
+    const relayCardSeed = erc1155CardAddr ?? merchantCardNorm
+    const relayCtx = await merchantCardRelayContext(SC, relayCardSeed)
+    const relayWallet = relayCtx.wallet
+    const relayProvider = relayCtx.provider
+    const relayFactoryPaymaster =
+      relayCtx.chain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+
+    const accountCode = await relayProvider.getCode(account)
     if (!accountCode || accountCode === '0x' || accountCode.length <= 2) {
       obj.res.status(400).json({ success: false, error: 'account has no contract code' }).end()
       Settle_ContractPool.unshift(SC)
@@ -8846,11 +8903,6 @@ export const OpenContainerRelayProcess = async () => {
 
     // 与 getWalletAssets / resolveBeamioAaForEoaWithFallback 一致：须用 **该笔 OpenContainer 涉及卡** 在 factoryGateway 上绑定的 _aaFactory()。
     // 勿硬编码 BASE_AA_FACTORY：卡工厂已指向新 AA 工厂时，旧工厂的 isBeamioAccount 会对真实商户 AA 恒 false，导致 Charge REJECT。
-    const has1155 = items.some((it: { kind: number }) => it.kind === 1)
-    const erc1155CardAddr = items.find((it) => it.kind === 1)?.asset
-    const merchantCardRaw = (obj as { merchantCardAddress?: string }).merchantCardAddress
-    const merchantCardNorm =
-      merchantCardRaw && ethers.isAddress(merchantCardRaw) ? ethers.getAddress(merchantCardRaw) : null
     let relayAaFactoryAddr: string | null = null
     try {
       if (erc1155CardAddr) {
@@ -8859,8 +8911,8 @@ export const OpenContainerRelayProcess = async () => {
         relayAaFactoryAddr = await getCardAaFactoryAddress(merchantCardNorm)
       } else {
         relayAaFactoryAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(
-          SC.walletBase.provider!,
-          BASE_CARD_FACTORY
+          relayProvider,
+          relayCtx.cardFactory
         )
       }
     } catch (facErr: any) {
@@ -8891,10 +8943,10 @@ export const OpenContainerRelayProcess = async () => {
     const FactoryWithRelay = new ethers.Contract(
       relayAaFactoryAddr,
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_OPEN_ABI],
-      SC.walletBase
+      relayWallet
     )
     // BeamioUserCard 要求 points(ERC1155) 只能转给 BeamioAccount；若 payload 含 ERC1155 或 to 为 EOA，将 to 解析为受益人 primary AA（严禁用付款方 account 的 AA 作为 to）
-    const toIsEOA = !(await SC.walletBase.provider!.getCode(to).then((c: string) => c && c !== '0x' && c.length > 2))
+    const toIsEOA = !(await relayProvider.getCode(to).then((c: string) => c && c !== '0x' && c.length > 2))
     const needResolveTo = has1155 || toIsEOA
     if (needResolveTo) {
       try {
@@ -8928,11 +8980,11 @@ export const OpenContainerRelayProcess = async () => {
             )
             try {
               const ownerAbi = ['function owner() view returns (address)']
-              const benef = new ethers.Contract(ethers.getAddress(to), ownerAbi, SC.walletBase.provider!)
+              const benef = new ethers.Contract(ethers.getAddress(to), ownerAbi, relayProvider)
               const own = await benef.owner()
               if (own && own !== ethers.ZeroAddress) {
                 const beneficiaryEoa = ethers.getAddress(own)
-                const canonical = await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, beneficiaryEoa)
+                const canonical = await resolveBeamioAaForEoaWithFallback(relayProvider, beneficiaryEoa)
                 if (canonical) {
                   const c = ethers.getAddress(canonical)
                   const ok = await FactoryWithRelay.isBeamioAccount(c).catch(() => false)
@@ -9011,7 +9063,7 @@ export const OpenContainerRelayProcess = async () => {
     if (openRelayReceipt && obj.chargeOwnerChildBurn) {
       await maybeExecuteChargeOwnerChildBurnAfterContainerRelay({
         SC,
-        provider: SC.walletBase.provider!,
+        provider: relayProvider,
         obj,
         payeeAATo: to,
         items,
@@ -9038,7 +9090,7 @@ export const OpenContainerRelayProcess = async () => {
     let primaryCurrencyAmount = ''
     let ccsacardUnitPriceUSDC6 = 0n
     try {
-      ccsacardUnitPriceUSDC6 = await SC.baseFactoryPaymaster.quoteUnitPointInUSDC6(ccsacardAddress)
+      ccsacardUnitPriceUSDC6 = await relayFactoryPaymaster.quoteUnitPointInUSDC6(ccsacardAddress)
     } catch (_) {}
 
     for (let i = 0; i < items.length; i++) {
@@ -9105,7 +9157,7 @@ export const OpenContainerRelayProcess = async () => {
       } else if (isOtherErc1155) {
         let other1155UnitPriceUSDC6 = 0n
         try {
-          other1155UnitPriceUSDC6 = await SC.baseFactoryPaymaster.quoteUnitPointInUSDC6(itemAsset)
+          other1155UnitPriceUSDC6 = await relayFactoryPaymaster.quoteUnitPointInUSDC6(itemAsset)
         } catch (_) {}
         const tokenIdVal = item.tokenId
         const routeSource = tokenIdVal === 0n ? 1 : 2
@@ -9129,7 +9181,7 @@ export const OpenContainerRelayProcess = async () => {
       )
       const feePayerItems = items.map((it) => ({ kind: it.kind, asset: it.asset }))
       const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcChargeFixedBUnitFee()
-      const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(SC.walletBase.provider!, feePayerItems)
+      const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(relayProvider, feePayerItems)
       const aaFactoryOpen = await getCardAaFactoryAddress(feePayerCard)
       const feePayerPickOpen = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
         aaFactoryAddress: aaFactoryOpen,
@@ -9138,7 +9190,7 @@ export const OpenContainerRelayProcess = async () => {
       if (!feePayerPickOpen.ok) {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] B-Unit payer pick failed at master, fallback EOA for consume: ${feePayerPickOpen.error}`))
       }
-      const { payeeEOA } = await resolveChargeFeePayer(to, feePayerCard, SC.walletBase.provider!)
+      const { payeeEOA } = await resolveChargeFeePayer(to, feePayerCard, relayProvider)
       const amountUSDC6ForFee = totalAmountUSDC6ForFee > 0n ? totalAmountUSDC6ForFee : totalAmountE6
       /** 与 ContainerRelay 一致：用 USDC6 等价总额做账本分栏与 TX_TIP 拆分（优于混加 raw item amount） */
       const usdcAmountRaw = amountUSDC6ForFee
@@ -9498,7 +9550,18 @@ export const ContainerRelayProcess = async () => {
     const sigHex = typeof payload.signature === 'string' && payload.signature.startsWith('0x') ? payload.signature : '0x' + payload.signature
     const sigBytes = ethers.getBytes(sigHex)
 
-    const accountCode = await SC.walletBase.provider!.getCode(account)
+    const erc1155CardAddrC = items.find((it) => it.kind === 1)?.asset
+    const merchantCardRawC = (obj as { merchantCardAddress?: string }).merchantCardAddress
+    const merchantCardNormC =
+      merchantCardRawC && ethers.isAddress(merchantCardRawC) ? ethers.getAddress(merchantCardRawC) : null
+    const relayCardSeedC = erc1155CardAddrC ?? merchantCardNormC
+    const relayCtxC = await merchantCardRelayContext(SC, relayCardSeedC)
+    const relayWalletC = relayCtxC.wallet
+    const relayProviderC = relayCtxC.provider
+    const relayFactoryPaymasterC =
+      relayCtxC.chain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+
+    const accountCode = await relayProviderC.getCode(account)
     if (!accountCode || accountCode === '0x' || accountCode.length <= 2) {
       obj.res.status(400).json({ success: false, error: 'account has no contract code' }).end()
       Settle_ContractPool.unshift(SC)
@@ -9512,7 +9575,7 @@ export const ContainerRelayProcess = async () => {
       return setTimeout(() => ContainerRelayProcess(), 3000)
     }
 
-    const chainNonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, account, 'relayed')
+    const chainNonce = await readContainerNonceFromAAStorage(relayProviderC, account, 'relayed')
     if (chainNonce !== nonce_) {
       const errMsg = `Nonce mismatch: payload nonce=${nonce_} but chain relayedNonce=${chainNonce}. Please refresh and try again (do not resubmit the same request).`
       logger(Colors.red(`[AAtoEOA/Container] ${errMsg}`))
@@ -9521,10 +9584,6 @@ export const ContainerRelayProcess = async () => {
       return setTimeout(() => ContainerRelayProcess(), 3000)
     }
 
-    const erc1155CardAddrC = items.find((it) => it.kind === 1)?.asset
-    const merchantCardRawC = (obj as { merchantCardAddress?: string }).merchantCardAddress
-    const merchantCardNormC =
-      merchantCardRawC && ethers.isAddress(merchantCardRawC) ? ethers.getAddress(merchantCardRawC) : null
     let relayAaFactoryContainer: string | null = null
     try {
       if (erc1155CardAddrC) {
@@ -9533,8 +9592,8 @@ export const ContainerRelayProcess = async () => {
         relayAaFactoryContainer = await getCardAaFactoryAddress(merchantCardNormC)
       } else {
         relayAaFactoryContainer = await getAaFactoryAddressFromUserCardFactoryPaymaster(
-          SC.walletBase.provider!,
-          BASE_CARD_FACTORY
+          relayProviderC,
+          relayCtxC.cardFactory
         )
       }
     } catch (facErr: any) {
@@ -9564,7 +9623,7 @@ export const ContainerRelayProcess = async () => {
     const FactoryWithRelay = new ethers.Contract(
       relayAaFactoryContainer,
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_MAIN_ABI],
-      SC.walletBase
+      relayWalletC
     )
     const tx = await FactoryWithRelay.relayContainerMainRelayed(account, to, items, nonce_, deadline_, sigBytes)
     logger(`[AAtoEOA/Container] relay tx submitted hash=${tx.hash}`)
@@ -9579,7 +9638,7 @@ export const ContainerRelayProcess = async () => {
     if (receipt) {
       await maybeExecuteChargeOwnerChildBurnAfterContainerRelay({
         SC,
-        provider: SC.walletBase.provider!,
+        provider: relayProviderC,
         obj,
         payeeAATo: to,
         items,
@@ -9590,7 +9649,7 @@ export const ContainerRelayProcess = async () => {
 
     const usdcAmountRaw = obj.amountUSDC6 ? BigInt(obj.amountUSDC6) : BigInt(payload.items[0].amount)
     const feePayerItems = payload.items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset) }))
-    const feePayerOwnerEoaContainer = await resolveChargeBUnitFeePayerCardOwner(SC.walletBase.provider!, feePayerItems)
+    const feePayerOwnerEoaContainer = await resolveChargeBUnitFeePayerCardOwner(relayProviderC, feePayerItems)
     const feePayerCardContainer = resolveChargeFeePayerCardFromOpenContainerItems(feePayerItems)
     const { bServiceUnits6: feeBUnits6, bServiceUSDC6: containerBUsdc6 } = calcChargeFixedBUnitFee()
     const aaFactoryContainer = await getCardAaFactoryAddress(feePayerCardContainer)
@@ -11037,10 +11096,12 @@ export const createCardPoolPress = async () => {
 	} = payload
 
 	// Settle_ContractPool = factory 登记的 owner 列表，shift 取一 admin 用于 RPC，支持多 request 并行（多 admin 同时送上链）
-	const factory = SC.baseFactoryPaymaster
+	const merchantChain = defaultMerchantUserCardChain()
+	const factory = merchantChain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+	const relayWallet = settleRelayWalletForChain(SC, merchantChain)
 	logger(
 		Colors.cyan(
-			`[createCardPoolPress] admin=${SC.walletBase.address} cardOwner=${cardOwner} currency=${currency} priceE6=${priceInCurrencyE6}` +
+			`[createCardPoolPress] chain=${merchantChain} admin=${relayWallet.address} cardOwner=${cardOwner} currency=${currency} priceE6=${priceInCurrencyE6}` +
 				(transferWhitelistEnabled ? ' transferWhitelist=ON' : '')
 		)
 	)
@@ -11082,8 +11143,9 @@ export const createCardPoolPress = async () => {
 				...(tiersForCreate && { tiers: tiersForCreate }),
 				...(transferWhitelistEnabled === true && { transferWhitelistEnabled: true }),
 				...(ut != null && { upgradeType: ut }),
+				libraryAddresses: beamioUserCardLibrariesForChain(merchantChain),
 			},
-			SC.baseFactoryPaymaster
+			factory
 		)
 		// master 侧写入 metadata（shareTokenMetadata、tiers）到 0x{cardAddress}0.json（ERC-1155 约定）
 		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
@@ -15940,6 +16002,7 @@ export const payByNfcUidPrepare = async (params: {
 	amountUsdc6?: string
 	amountFiat6?: string
 	currency?: string
+	merchantInfraCard?: string
 	e?: string
 	c?: string
 	m?: string
@@ -15954,7 +16017,7 @@ export const payByNfcUidPrepare = async (params: {
 	pointsUnitPriceInCurrencyE6?: string
 	error?: string
 }> => {
-	const { uid, payee, amountUsdc6, amountFiat6, currency, e, c, m } = params
+	const { uid, payee, amountUsdc6, amountFiat6, currency, merchantInfraCard, e, c, m } = params
 	const fiat6Ok = !!amountFiat6 && /^[0-9]+$/.test(amountFiat6) && BigInt(amountFiat6) > 0n && !!currency
 	const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(amountUsdc6) && BigInt(amountUsdc6) > 0n
 	if (!fiat6Ok && !usdc6Ok) return { ok: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' }
@@ -16003,31 +16066,40 @@ export const payByNfcUidPrepare = async (params: {
 	if (Settle_ContractPool.length === 0) return { ok: false, error: 'Settle_ContractPool empty' }
 	const SC = Settle_ContractPool[0]
 	try {
+		const cardForPrepare =
+			merchantInfraCard && ethers.isAddress(merchantInfraCard)
+				? ethers.getAddress(merchantInfraCard)
+				: defaultMerchantProgramCardAddress()
+		const relayCtx = await merchantCardRelayContext(SC, cardForPrepare)
+		const relayProvider = relayCtx.provider
+		const relayWallet = relayCtx.wallet
+		const relayFactoryPaymaster =
+			relayCtx.chain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
 		const wallet = new ethers.Wallet(privateKey)
 		const eoa = await wallet.getAddress()
 		// 必须与 getUIDAssets / resolveBeamioAaForEoaWithFallback 一致：用 UserCard 绑定的 _aaFactory()，勿用 BASE_AA_FACTORY.primaryAccountOf
-		const aaRaw = await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, eoa)
+		const aaRaw = await resolveBeamioAaForEoaWithFallback(relayProvider, eoa)
 		if (!aaRaw) {
 			return { ok: false, error: 'NO_AA' }
 		}
 		const aa = ethers.getAddress(aaRaw)
-		const aaCode = await SC.walletBase.provider!.getCode(aa)
+		const aaCode = await relayProvider.getCode(aa)
 		if (!aaCode || aaCode === '0x') return { ok: false, error: 'NO_AA' }
 		const linkBlockPrepare = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: aa, payerEoa: eoa })
 		if (linkBlockPrepare) return { ok: false, error: linkBlockPrepare }
 		let toResolved = ethers.getAddress(payee)
-		const payeeCode = await SC.walletBase.provider!.getCode(toResolved)
+		const payeeCode = await relayProvider.getCode(toResolved)
 		const isPayeeEOA = !payeeCode || payeeCode === '0x'
 		if (isPayeeEOA) {
-			let payeeAA = (await resolveBeamioAaForEoaWithFallback(SC.walletBase.provider!, toResolved)) ?? null
+			let payeeAA = (await resolveBeamioAaForEoaWithFallback(relayProvider, toResolved)) ?? null
 			if (!payeeAA) {
 				try {
-					const facAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(SC.walletBase.provider!, BASE_CARD_FACTORY)
+					const facAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(relayProvider, relayCtx.cardFactory)
 					if (facAddr) {
 						const payeeFac = new ethers.Contract(
 							facAddr,
 							BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
-							SC.walletBase
+							relayWallet
 						)
 						const { accountAddress } = await DeployingSmartAccount(toResolved, payeeFac)
 						if (accountAddress) payeeAA = accountAddress
@@ -16036,11 +16108,11 @@ export const payByNfcUidPrepare = async (params: {
 			}
 			if (payeeAA) toResolved = ethers.getAddress(payeeAA)
 		}
-		const nonce = await readContainerNonceFromAAStorage(SC.walletBase.provider!, aa, 'relayed')
+		const nonce = await readContainerNonceFromAAStorage(relayProvider, aa, 'relayed')
 		const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
 		let unitPriceUSDC6 = 0n
 		try {
-			const { unitPriceUSDC6: up } = await quotePointsForUSDC_raw(BASE_CCSA_CARD_ADDRESS, 1_000_000n, SC.baseFactoryPaymaster)
+			const { unitPriceUSDC6: up } = await quotePointsForUSDC_raw(cardForPrepare, 1_000_000n, relayFactoryPaymaster)
 			unitPriceUSDC6 = up
 		} catch (e) {
 			logger(Colors.yellow(`[payByNfcUidPrepare] quote failed: ${(e as Error)?.message}`))
@@ -16052,9 +16124,9 @@ export const payByNfcUidPrepare = async (params: {
 		let pointsPriceE6Str: string | undefined
 		try {
 			const cardRead = new ethers.Contract(
-				BASE_CCSA_CARD_ADDRESS,
+				cardForPrepare,
 				['function currency() view returns (uint8)', 'function pointsUnitPriceInCurrencyE6() view returns (uint256)'],
-				SC.walletBase.provider!
+				relayProvider
 			)
 			const [curEnum, priceE6] = await Promise.all([cardRead.currency() as Promise<bigint | number>, cardRead.pointsUnitPriceInCurrencyE6() as Promise<bigint>])
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }

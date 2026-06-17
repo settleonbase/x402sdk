@@ -2253,7 +2253,17 @@ const routing = ( router: Router ) => {
 	/** POST /api/payByNfcUidPrepare - Android/iOS 构建 container 前的准备（读操作，Cluster 可直处理或转发 Master）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。
 	 *  fiat6-only 协议（推荐）：传 `amountFiat6` + `currency`（卡币种）。`amountUsdc6` 已 deprecated，仅在 `amountFiat6` 缺失时作为向后兼容回退；同时存在则忽略 `amountUsdc6` 并打 deprecation 日志。 */
 	router.post('/payByNfcUidPrepare', async (req, res) => {
-		const { uid, payee, amountUsdc6, amountFiat6, currency, e, c, m } = req.body as { uid?: string; payee?: string; amountUsdc6?: string; amountFiat6?: string; currency?: string; e?: string; c?: string; m?: string }
+		const { uid, payee, amountUsdc6, amountFiat6, currency, merchantInfraCard, e, c, m } = req.body as {
+			uid?: string
+			payee?: string
+			amountUsdc6?: string
+			amountFiat6?: string
+			currency?: string
+			merchantInfraCard?: string
+			e?: string
+			c?: string
+			m?: string
+		}
 		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 			return res.status(400).json({ ok: false, error: 'Missing uid' })
 		}
@@ -2290,6 +2300,11 @@ const routing = ( router: Router ) => {
 				payee: ethers.getAddress(payee),
 				...(fiat6Ok ? { amountFiat6: fiat6Trim, currency: currencyTrim } : {}),
 				...(usdc6Ok ? { amountUsdc6 } : {}),
+				...(typeof merchantInfraCard === 'string' &&
+				merchantInfraCard.trim() &&
+				ethers.isAddress(merchantInfraCard.trim())
+					? { merchantInfraCard: ethers.getAddress(merchantInfraCard.trim()) }
+					: {}),
 				...(isNfcUid && { e, c, m }),
 			},
 			res
