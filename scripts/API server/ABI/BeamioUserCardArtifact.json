@@ -4229,7 +4229,7 @@
     }
   },
   "immutableReferences": {
-    "19866": [
+    "28275": [
       {
         "length": 32,
         "start": 14120
@@ -4237,5 +4237,5 @@
     ]
   },
   "inputSourceName": "project/src/BeamioUserCard/BeamioUserCard.sol",
-  "buildInfoId": "solc-0_8_33-c1b6f9bc87c9977390f67f15f9a27f05fa48cfcd"
+  "buildInfoId": "solc-0_8_33-d7e2f32c1c58d627431f2c99c5dc926af28a7520"
 }

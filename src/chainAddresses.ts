@@ -90,6 +90,12 @@ export const BASE_MAINNET_FACTORIES = {
 export const CONET_CARD_FACTORY = '0xfA52a0CcC96C19cF4b6Ea864615F6d52BD0774FB'
 /** CoNET Factory ExecuteLib（linked library） */
 export const CONET_BEAMIO_USER_CARD_FACTORY_EXECUTE_LIB = '0xbc6f3926691d2306c96357ac08aadB5F50Ab0784'
+/** CoNET 默认 BeamioUserCard（AA Factory `beamioUserCard`） */
+export const CONET_BEAMIO_USER_CARD_DEFAULT = '0xA5C727d11d04BeBC095bd814c6530c4e77fD6662'
+/** CoNET USDC（ConetTreasury `FactoryERC20`）；UserCard Factory `USDC_TOKEN` */
+export const CONET_USDC = '0x40E302aBC19f6c9f376D7Dee037192a7a203e3Aa'
+export const CONET_BEAMIO_USER_CARD_FORMATTING_LIB = '0x9727136BC5DAA5540e7397C9086e9980EBDD0e48'
+export const CONET_BEAMIO_USER_CARD_TRANSFER_LIB = '0xBcf3f8C5994B02B89fB743e1dee6AFDD5a49a664'
 
 /** CoNET 主网 chainId（BUnitAirdrop / consumeFromUser / 独立 BUint indexer 记账） */
 export const CONET_MAINNET_CHAIN_ID = 224422
@@ -107,6 +113,8 @@ export const CONTRACT_ADDRESSES = {
     chainId: CONET_MAINNET_CHAIN_ID,
     aaFactory: BEAMIO_AA_FACTORY,
     cardFactory: CONET_CARD_FACTORY,
+    defaultUserCard: CONET_BEAMIO_USER_CARD_DEFAULT,
+    usdc: CONET_USDC,
     bUint: CONET_BUINT,
     bUnitAirdrop: CONET_BUNIT_AIRDROP_ADDRESS,
     buintRedeemAirdrop: CONET_BUINT_REDEEM_AIRDROP,
