@@ -12,9 +12,9 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
-import { chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
+import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import {
 	filterApiExcludedCardRows,
 	isApiExcludedUserCard,
@@ -28,7 +28,7 @@ import {
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
-import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaViaUserCardFactory, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { validateYoutubeProductionVideoUrl } from './youtubeProductionVideo'
 import {
 	normalizeCouponMetadataExtraProperties,
@@ -7534,11 +7534,21 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				logger(Colors.red(`[AAtoEOA] server OpenContainer pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
-			/** 付款 AA 必须与 UserCard 工厂链路 canonical 一致，否则链上 balanceOf(account,0) 为 0 导致 CM_Reserved1155Violation */
+			/** 付款 AA 必须与本次收款卡所在链的 UserCard 工厂链路 canonical 一致，否则链上会在 CoNET/Base 不同 owner 间恢复出错。 */
 			try {
 				const acc = ethers.getAddress(body.openContainerPayload.account)
+				const openContainerItems = body.openContainerPayload.items ?? []
+				const merchantCardRaw =
+					typeof body.merchantCardAddress === 'string' && ethers.isAddress(body.merchantCardAddress.trim())
+						? ethers.getAddress(body.merchantCardAddress.trim())
+						: resolveChargeFeePayerCardFromOpenContainerItems(
+								openContainerItems.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
+						  )
+				const merchantCardChain = await resolveUserCardChain(merchantCardRaw)
+				const merchantCardProvider = providerForUserCardChain(merchantCardChain)
+				const merchantCardFactory = cardFactoryForUserCardChain(merchantCardChain)
 				const aaOwnerAbi = ['function owner() view returns (address)']
-				const aaContract = new ethers.Contract(acc, aaOwnerAbi, providerBase)
+				const aaContract = new ethers.Contract(acc, aaOwnerAbi, merchantCardProvider)
 				const ownerRaw = await aaContract.owner()
 				if (!ownerRaw || ownerRaw === ethers.ZeroAddress) {
 					logger(Colors.red(`[AAtoEOA] server OpenContainer REJECT: invalid AA owner for ${acc}`))
@@ -7548,9 +7558,28 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 						.end()
 				}
 				const eoa = ethers.getAddress(ownerRaw)
-				const canonical = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
+				const canonical = await resolveBeamioAaForEoaViaUserCardFactory(merchantCardProvider, eoa, merchantCardFactory)
 				if (canonical && canonical.toLowerCase() !== acc.toLowerCase()) {
 					const msg = `openContainer account ${acc} does not match canonical AA ${canonical} for owner ${eoa}. Refresh aaAddress from getWalletAssets or getAAAccount and re-sign.`
+					logger(Colors.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`))
+					return res.status(400).json({ success: false, error: msg }).end()
+				}
+				const simulateAbi = [
+					'function simulateOpenContainer(address to, tuple(uint8 kind,address asset,uint256 amount,uint256 tokenId,bytes data)[] items, uint8 currencyType, uint256 maxAmount, uint256 nonce_, uint256 deadline_, bytes sig) view returns (bool ok, string reason)',
+				]
+				const sim = new ethers.Contract(acc, simulateAbi, merchantCardProvider)
+				const openPayloadCompat = body.openContainerPayload as typeof body.openContainerPayload & { validBefore?: string | number | bigint }
+				const [simOk, simReason] = (await sim.simulateOpenContainer(
+					body.openContainerPayload.to,
+					openContainerItems,
+					Number(body.openContainerPayload.currencyType),
+					BigInt(String(body.openContainerPayload.maxAmount ?? '0')),
+					BigInt(String(body.openContainerPayload.nonce ?? '0')),
+					BigInt(String(body.openContainerPayload.deadline ?? openPayloadCompat.validBefore ?? '0')),
+					body.openContainerPayload.signature,
+				)) as [boolean, string]
+				if (!simOk) {
+					const msg = `OpenContainer signature/account check failed on ${merchantCardChain}: ${simReason || 'simulation failed'}. Refresh the payer wallet QR and re-sign.`
 					logger(Colors.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`))
 					return res.status(400).json({ success: false, error: msg }).end()
 				}
