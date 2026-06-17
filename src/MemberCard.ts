@@ -12846,6 +12846,44 @@ const CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE = {
 		{ name: 'nonce', type: 'bytes32' },
 	],
 }
+const CLAIM_ISSUED_NFT_WITH_USER_SIG_ABI = [
+	'function claimIssuedNftWithUserSig(address cardAddr,address userEOA,uint256 tokenId,uint256 deadline,bytes32 nonce,bytes userSignature)',
+	'error BM_ZeroAddress()',
+	'error BM_NotAuthorized()',
+	'error UC_InvalidTimeWindow(uint256 nowTs, uint256 validAfter, uint256 validBefore)',
+	'error UC_NonceUsed()',
+	'error UC_InvalidSignature(address signer, address expected)',
+	'error UC_IssuedNftInactive(uint256 tokenId)',
+	'error UC_ResolveAccountFailed(address eoa, address aaFactory, address acct)',
+] as const
+
+async function eip712DomainForClaimIssuedNftWithUserSig(cardNorm: string) {
+	const chain = await resolveUserCardChain(cardNorm)
+	return {
+		name: 'BeamioUserCardFactory' as const,
+		version: '1' as const,
+		chainId: chainIdForUserCardChain(chain),
+		verifyingContract: await getBeamioUserCardFactoryGateway(cardNorm),
+	}
+}
+
+async function contractForClaimIssuedNftWithUserSig(
+	SC: SettleContractPoolEntry,
+	cardAddr: string,
+): Promise<ethers.Contract> {
+	const chain = await resolveUserCardChain(cardAddr)
+	const cardGateway = await getBeamioUserCardFactoryGateway(cardAddr)
+	const poolFactory = chain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+	const relayWallet = settleRelayWalletForChain(SC, chain)
+	let pinned: string
+	try {
+		pinned = ethers.getAddress(await poolFactory.getAddress())
+	} catch {
+		pinned = ethers.getAddress(cardFactoryForUserCardChain(chain))
+	}
+	if (cardGateway.toLowerCase() === pinned.toLowerCase()) return poolFactory
+	return new ethers.Contract(cardGateway, CLAIM_ISSUED_NFT_WITH_USER_SIG_ABI, relayWallet)
+}
 const ISSUED_NFT_START_ID_MEMBER = 100_000_000_000n
 const burnIssuedNftByGatewayIface = new ethers.Interface([
 	'function burnIssuedNftByGateway(address holder, uint256 tokenId, uint256 amount)',
@@ -13001,6 +13039,8 @@ async function validatePosWalletCouponOpenClaim(params: {
 		return { ok: false, error: 'This coupon requires redeemCode; open claim is disabled.' }
 	}
 
+	const chain = await resolveUserCardChain(params.cardNorm)
+	const cardProvider = providerForUserCardChain(chain)
 	const cardRead = new ethers.Contract(
 		params.cardNorm,
 		[
@@ -13012,7 +13052,7 @@ async function validatePosWalletCouponOpenClaim(params: {
 			'function isAdmin(address) view returns (bool)',
 			'function balanceOf(address account, uint256 id) view returns (uint256)',
 		],
-		providerBaseBackup
+		cardProvider
 	)
 	const holderAccount = await resolveCouponHolderAccount(params.userNorm)
 	const [isValid, priceInCurrency6, alreadyClaimed, maxSupply, mintedCount, posIsAdmin, holderBal] = await Promise.all([
@@ -13091,17 +13131,11 @@ export const cardCouponPosClaimPreCheck = async (body: {
 				return { success: false, error: 'NFC signer does not match userEOA' }
 			}
 
-			const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
 			const deadline = Math.floor(Date.now() / 1000) + 15 * 60
 			const nonce = ethers.keccak256(
 				ethers.toUtf8Bytes(`pos-open-claim:${cardNorm}:${couponId}:${userNorm}:${String(tokenIdN)}:${randomUUID()}`)
 			)
-			const domain = {
-				name: 'BeamioUserCardFactory',
-				version: '1',
-				chainId: BASE_MAINNET_CHAIN_ID,
-				verifyingContract,
-			}
+			const domain = await eip712DomainForClaimIssuedNftWithUserSig(cardNorm)
 			const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
 				cardAddress: cardNorm,
 				tokenId: tokenIdN,
@@ -13625,6 +13659,8 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 			return { success: false, error: 'This coupon requires redeemCode; open claim is disabled.' }
 		}
 
+		const chain = await resolveUserCardChain(cardNorm)
+		const cardProvider = providerForUserCardChain(chain)
 		const cardRead = new ethers.Contract(
 			cardNorm,
 			[
@@ -13634,7 +13670,7 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 				'function issuedNftMaxSupply(uint256 tokenId) view returns (uint256)',
 				'function issuedNftMintedCount(uint256 tokenId) view returns (uint256)',
 			],
-			providerBaseBackup
+			cardProvider
 		)
 		const [isValid, priceInCurrency6, alreadyClaimed, maxSupply, mintedCount] = await Promise.all([
 			cardRead.isIssuedNftValid(tokenIdN) as Promise<boolean>,
@@ -13652,13 +13688,7 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 
 		// AA 由 Master `cardCouponOpenClaimProcess` 在 claim 前通过 `ensureAAForEOAOnCard` 自动创建（此处不拦截）。
 
-		const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
-		const domain = {
-			name: 'BeamioUserCardFactory',
-			version: '1',
-			chainId: BASE_MAINNET_CHAIN_ID,
-			verifyingContract,
-		}
+		const domain = await eip712DomainForClaimIssuedNftWithUserSig(cardNorm)
 		const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
 			cardAddress: cardNorm,
 			tokenId: tokenIdN,
@@ -15172,26 +15202,7 @@ export const cardCouponOpenClaimProcess = async () => {
 			)
 		)
 
-		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
-		const poolFactoryAddr = ethers.getAddress(await SC.baseFactoryPaymaster.getAddress())
-		const claimContractABI = [
-			'function claimIssuedNftWithUserSig(address cardAddr,address userEOA,uint256 tokenId,uint256 deadline,bytes32 nonce,bytes userSignature)',
-			'error BM_ZeroAddress()',
-			'error BM_NotAuthorized()',
-			'error UC_InvalidTimeWindow(uint256 nowTs, uint256 validAfter, uint256 validBefore)',
-			'error UC_NonceUsed()',
-			'error UC_InvalidSignature(address signer, address expected)',
-			'error UC_IssuedNftInactive(uint256 tokenId)',
-			'error UC_ResolveAccountFailed(address eoa, address aaFactory, address acct)',
-		]
-		const claimContract =
-			cardGateway.toLowerCase() === poolFactoryAddr.toLowerCase()
-				? SC.baseFactoryPaymaster
-				: new ethers.Contract(
-					cardGateway,
-					claimContractABI,
-					SC.walletBase
-				)
+		const claimContract = await contractForClaimIssuedNftWithUserSig(SC, obj.cardAddress)
 
 		const tx = await claimContract.claimIssuedNftWithUserSig(
 			obj.cardAddress,
@@ -15288,6 +15299,7 @@ export const cardCouponPosClaimWalletProcess = async () => {
 		const posAdminNorm = ethers.getAddress(obj.posAdminEOA)
 		await ensureAAForEOAOnCard(obj.cardAddress, userNorm, SC)
 
+		const chain = await resolveUserCardChain(obj.cardAddress)
 		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
 		const claimContractABI = [
 			'function claimIssuedNftForUserByPosAdmin(address cardAddr,address userEOA,uint256 tokenId,address posAdminEOA)',
@@ -15304,7 +15316,7 @@ export const cardCouponPosClaimWalletProcess = async () => {
 		const claimContract = new ethers.Contract(
 			cardGateway,
 			claimContractABI,
-			SC.walletBase
+			settleRelayWalletForChain(SC, chain)
 		)
 
 		const tx = await claimContract.claimIssuedNftForUserByPosAdmin(
