@@ -13,7 +13,7 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import {
 	filterApiExcludedCardRows,
 	isApiExcludedUserCard,
@@ -854,6 +854,32 @@ const normalizeExplorerMetadata = (
 	}
 	if (defaults.decimals !== undefined) out.decimals = defaults.decimals
 	return out
+}
+
+/** CoNET BusinessStartKet ERC-1155：Blockscout / 钱包读 uri(id) 后拉取的 JSON（须含 `name`）。 */
+function buildBusinessStartKetExplorerMetadata(tokenIdBigInt: bigint): JsonObject {
+	const tokenId = tokenIdBigInt.toString()
+	const baseName = 'BusinessStartKet NFT'
+	const name = tokenIdBigInt === 0n ? baseName : `${baseName} #${tokenId}`
+	const description =
+		tokenIdBigInt === 0n
+			? 'Business Starter Kit certificate on CoNET. Required to issue a merchant program card on Beamio.'
+			: `BusinessStartKet ERC-1155 token #${tokenId} on CoNET.`
+	return normalizeExplorerMetadata(
+		{},
+		{
+			name,
+			description,
+			image: DEFAULT_METADATA_IMAGE_URL,
+			externalUrl: 'https://beamio.app/app/',
+			decimals: 0,
+			attributes: [
+				{ trait_type: 'asset_type', value: 'BUSINESS_START_KET' },
+				{ trait_type: 'token_id', value: tokenId },
+				{ trait_type: 'contract', value: CONET_BUSINESS_START_KET },
+			],
+		}
+	)
 }
 
 const SC = beamio_ContractPool[0].constAccountRegistry
@@ -5247,9 +5273,24 @@ const routing = ( router: Router ) => {
 
 	registerBeamioFragmentProxyRoute(router)
 
+	/** GET /api/metadata/business-start-ket/{64hex}.json — BusinessStartKet ERC-1155（与合约 uri 模板一致） */
+	router.get('/metadata/business-start-ket/:tokenIdFile', async (req, res) => {
+		const tokenIdFile = typeof req.params.tokenIdFile === 'string' ? req.params.tokenIdFile.trim() : ''
+		const hexMatch = /^([0-9a-fA-F]{64})\.json$/i.exec(tokenIdFile)
+		if (!hexMatch) {
+			return res.status(404).json({ error: 'Invalid BusinessStartKet metadata path' })
+		}
+		const tokenIdBigInt = BigInt(`0x${hexMatch[1].toLowerCase()}`)
+		const out = buildBusinessStartKetExplorerMetadata(tokenIdBigInt)
+		res.setHeader('Content-Type', 'application/json')
+		res.setHeader('Cache-Control', 'public, max-age=300')
+		return res.status(200).json(out)
+	})
+
 	/** GET /api/metadata/0x{contract}{64hexTokenId}.json - BaseScan/ERC-1155 兼容元数据路由 */
 	router.get('/metadata/:resource', async (req, res) => {
 		const resource = typeof req.params.resource === 'string' ? req.params.resource : ''
+
 		const match = ERC1155_METADATA_PATH_RE.exec(resource)
 		if (!match) {
 			return res.status(404).json({ error: 'Invalid metadata path' })
