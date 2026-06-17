@@ -871,21 +871,24 @@ function resolveConetBusinessStartKetAddressForCreateCardGate(): string | null {
 	}
 }
 
-/**
- * 与 merchantKitStripe 一致：若 `walletAddress` 为某 EOA 的 Beamio AA，则 Ket mint/recipient 以 EOA 为准。
- */
-async function resolveBusinessStartKetMintRecipientEoaOnBase(walletAddress: string): Promise<string> {
+const AA_OWNER_VIEW_ABI = ['function owner() view returns (address)'] as const
+
+/** 若地址在 `provider` 上有合约 code 且为 Beamio AA，返回其 owner EOA；否则返回原地址。 */
+async function resolveBeamioAaToOwnerEoaOnProvider(
+	walletAddress: string,
+	provider: ethers.Provider
+): Promise<string> {
 	const addr = ethers.getAddress(walletAddress)
 	let code: string
 	try {
-		code = await providerBaseBackup.getCode(addr)
+		code = await provider.getCode(addr)
 	} catch {
 		return addr
 	}
-	if (!code || code === '0x') {
+	if (!code || code === '0x' || code.length <= 2) {
 		return addr
 	}
-	const acct = new ethers.Contract(addr, ['function owner() view returns (address)'], providerBaseBackup)
+	const acct = new ethers.Contract(addr, AA_OWNER_VIEW_ABI, provider)
 	let ownerRaw: string
 	try {
 		ownerRaw = await acct.owner()
@@ -901,7 +904,7 @@ async function resolveBusinessStartKetMintRecipientEoaOnBase(walletAddress: stri
 	} catch {
 		return addr
 	}
-	const fac = new ethers.Contract(BeamioAAAccountFactoryPaymaster, AA_FACTORY_RESOLVE_FOR_KET_ABI, providerBaseBackup)
+	const fac = new ethers.Contract(BeamioAAAccountFactoryPaymaster, AA_FACTORY_RESOLVE_FOR_KET_ABI, provider)
 	try {
 		let aa = await fac.beamioAccountOf(ownerAddr)
 		if (!aa || aa === ethers.ZeroAddress) {
@@ -914,6 +917,20 @@ async function resolveBusinessStartKetMintRecipientEoaOnBase(walletAddress: stri
 		/* not Beamio AA */
 	}
 	return addr
+}
+
+/**
+ * 与 merchantKitStripe 一致：若 `walletAddress` 为某 EOA 的 Beamio AA，则 Ket mint/recipient 以 EOA 为准。
+ */
+async function resolveBusinessStartKetMintRecipientEoaOnBase(walletAddress: string): Promise<string> {
+	return resolveBeamioAaToOwnerEoaOnProvider(walletAddress, providerBaseBackup)
+}
+
+/**
+ * CoNET 224422：新 AA 仅在此链部署；同一地址在 Base 上可能仍是 EOA，Ket 却记在 owner EOA 上。
+ */
+async function resolveBusinessStartKetMintRecipientEoaOnConet(walletAddress: string): Promise<string> {
+	return resolveBeamioAaToOwnerEoaOnProvider(walletAddress, providerConet)
 }
 
 export type CreateCardBusinessStartKetClusterPreCheckResult =
@@ -955,14 +972,14 @@ export async function createCardBusinessStartKetClusterPreCheck(
 	}
 	push(orig)
 	push(resolved)
-	try {
-		push(await resolveBusinessStartKetMintRecipientEoaOnBase(orig))
-	} catch {
-		/* ignore */
-	}
-	if (orig.toLowerCase() !== resolved.toLowerCase()) {
+	for (const candidate of [orig, resolved]) {
 		try {
-			push(await resolveBusinessStartKetMintRecipientEoaOnBase(resolved))
+			push(await resolveBusinessStartKetMintRecipientEoaOnBase(candidate))
+		} catch {
+			/* ignore */
+		}
+		try {
+			push(await resolveBusinessStartKetMintRecipientEoaOnConet(candidate))
 		} catch {
 			/* ignore */
 		}
@@ -10218,6 +10235,7 @@ export const createBeamioCardAdmin = async (
 	pointsUnitPriceInCurrencyE6: number | bigint,
 	opts?: {
 		uri?: string
+		contractName?: string
 		transferWhitelistEnabled?: boolean
 		upgradeType?: 0 | 1 | 2
 		libraryAddresses?: BeamioUserCardLibraryAddresses
@@ -10229,6 +10247,7 @@ export const createBeamioCardAdmin = async (
 		libraryAddresses: beamioUserCardLibrariesFromConfig(opts?.libraryAddresses),
 	}
 	if (opts?.uri) initOpts.uri = opts.uri
+	if (opts?.contractName?.trim()) initOpts.contractName = opts.contractName.trim()
 	if (opts?.transferWhitelistEnabled === true) initOpts.transferWhitelistEnabled = true
 	if (opts?.upgradeType === 1 || opts?.upgradeType === 2) initOpts.upgradeType = opts.upgradeType
 	return createBeamioCardWithFactory(
@@ -10249,6 +10268,7 @@ export const createBeamioCardAdminWithHash = async (
 	pointsUnitPriceInCurrencyE6: number | bigint,
 	opts?: {
 		uri?: string
+		contractName?: string
 		tiers?: Array<{ minUsdc6: string; attr: number; tierExpirySeconds?: number }>
 		transferWhitelistEnabled?: boolean
 		upgradeType?: 0 | 1 | 2
@@ -10267,6 +10287,7 @@ export const createBeamioCardAdminWithHash = async (
 		libraryAddresses: beamioUserCardLibrariesFromConfig(opts?.libraryAddresses),
 	}
 	if (opts?.uri) initOpts.uri = opts.uri
+	if (opts?.contractName?.trim()) initOpts.contractName = opts.contractName.trim()
 	if (opts?.transferWhitelistEnabled === true) initOpts.transferWhitelistEnabled = true
 	if (opts?.upgradeType === 1 || opts?.upgradeType === 2) initOpts.upgradeType = opts.upgradeType
 	return createBeamioCardWithFactoryReturningHash(
@@ -10301,6 +10322,10 @@ export type CreateCardPreChecked = {
 		maximumTopup?: number
 		/** Consumer-facing short title (Card Configurator) */
 		displayName?: string
+		businessName?: string
+		storeName?: string
+		merchantName?: string
+		brandName?: string
 		/** Points token label for dashboard */
 		Symbol?: string
 		bonusRule?: CreateCardBonusRuleNormalized
@@ -10733,6 +10758,12 @@ export const createCardPreCheck = (body: {
 			const dn = stm.displayName.trim()
 			if (dn.length > 0) meta.displayName = dn.slice(0, CREATE_CARD_DISPLAY_NAME_MAX_LEN)
 		}
+		for (const k of ['businessName', 'storeName', 'merchantName', 'brandName'] as const) {
+			if (stm[k] != null && typeof stm[k] === 'string') {
+				const v = stm[k].trim()
+				if (v.length > 0) meta[k] = v.slice(0, CREATE_CARD_DISPLAY_NAME_MAX_LEN)
+			}
+		}
 		if (stm.Symbol != null && typeof stm.Symbol === 'string') {
 			const sym = stm.Symbol.trim()
 			if (sym.length > 0) meta.Symbol = sym.slice(0, CREATE_CARD_SYMBOL_MAX_LEN)
@@ -10810,19 +10841,28 @@ export const resolveCardOwnerToEOA = async (
 ): Promise<{ success: true; cardOwner: string } | { success: false; error: string }> => {
 	const addr = ethers.getAddress(cardOwner)
 	const code = await provider.getCode(addr)
-	if (!code || code === '0x' || code.length <= 2) {
-		return { success: true, cardOwner: addr }
-	}
-	try {
-		const aaContract = new ethers.Contract(addr, ['function owner() view returns (address)'], provider)
-		const eoaOwner = await aaContract.owner()
-		if (eoaOwner && ethers.isAddress(eoaOwner) && ethers.getAddress(eoaOwner) !== ethers.ZeroAddress) {
-			return { success: true, cardOwner: ethers.getAddress(eoaOwner) }
+	if (code && code !== '0x' && code.length > 2) {
+		try {
+			const aaContract = new ethers.Contract(addr, AA_OWNER_VIEW_ABI, provider)
+			const eoaOwner = await aaContract.owner()
+			if (eoaOwner && ethers.isAddress(eoaOwner) && ethers.getAddress(eoaOwner) !== ethers.ZeroAddress) {
+				return { success: true, cardOwner: ethers.getAddress(eoaOwner) }
+			}
+			return { success: false, error: 'cardOwner is an AA account but owner() returned invalid address. Use EOA as cardOwner.' }
+		} catch (e: any) {
+			return { success: false, error: `cardOwner is an AA account but owner() failed: ${e?.message ?? e}` }
 		}
-		return { success: false, error: 'cardOwner is an AA account but owner() returned invalid address. Use EOA as cardOwner.' }
-	} catch (e: any) {
-		return { success: false, error: `cardOwner is an AA account but owner() failed: ${e?.message ?? e}` }
 	}
+	// CoNET-only AA：Base 上无 code，但 224422 上已部署 Beamio AA（与 merchantKitStripe / Ket mint 语义一致）
+	try {
+		const conetEoa = await resolveBusinessStartKetMintRecipientEoaOnConet(addr)
+		if (conetEoa.toLowerCase() !== addr.toLowerCase()) {
+			return { success: true, cardOwner: conetEoa }
+		}
+	} catch {
+		/* treat as plain EOA */
+	}
+	return { success: true, cardOwner: addr }
 }
 
 export const createCardPool: (CreateCardPreChecked & { res: Response })[] = []
@@ -10851,6 +10891,51 @@ export function buildBeamioErc1155Card0MetadataFileContent(opts: {
 		},
 		null,
 		2
+	)
+}
+
+function readStringFieldForContractName(obj: Record<string, unknown> | undefined, keys: string[]): string {
+	if (!obj) return ''
+	for (const key of keys) {
+		const raw = obj[key]
+		if (typeof raw !== 'string') continue
+		const value = raw.trim()
+		if (value) return value
+	}
+	return ''
+}
+
+function resolveBeamioUserCardContractNameFromShareMetadata(
+	shareTokenMetadata?: Record<string, unknown> | null
+): string {
+	const share =
+		shareTokenMetadata != null && typeof shareTokenMetadata === 'object' && !Array.isArray(shareTokenMetadata)
+			? shareTokenMetadata
+			: undefined
+	const businessMetadata =
+		share?.businessMetadata != null && typeof share.businessMetadata === 'object' && !Array.isArray(share.businessMetadata)
+			? (share.businessMetadata as Record<string, unknown>)
+			: undefined
+	const ownerBusinessMetadata =
+		share?.ownerBusinessMetadata != null && typeof share.ownerBusinessMetadata === 'object' && !Array.isArray(share.ownerBusinessMetadata)
+			? (share.ownerBusinessMetadata as Record<string, unknown>)
+			: undefined
+	const businessProfile =
+		share?.businessProfile != null && typeof share.businessProfile === 'object' && !Array.isArray(share.businessProfile)
+			? (share.businessProfile as Record<string, unknown>)
+			: undefined
+	const cardBusiness =
+		share?.cardBusiness != null && typeof share.cardBusiness === 'object' && !Array.isArray(share.cardBusiness)
+			? (share.cardBusiness as Record<string, unknown>)
+			: undefined
+	return (
+		readStringFieldForContractName(ownerBusinessMetadata, ['storeName', 'businessName']) ||
+		readStringFieldForContractName(businessMetadata, ['storeName', 'businessName']) ||
+		readStringFieldForContractName(businessProfile, ['storeName', 'businessName']) ||
+		readStringFieldForContractName(cardBusiness, ['storeName', 'businessName', 'merchantName', 'brandName']) ||
+		readStringFieldForContractName(share, ['displayName', 'businessName', 'storeName', 'merchantName', 'brandName']) ||
+		readStringFieldForContractName(share, ['name']) ||
+		'Beamio User Card'
 	)
 }
 
@@ -11183,6 +11268,9 @@ export const createCardPoolPress = async () => {
 			BigInt(priceInCurrencyE6),
 			{
 				...(uri && { uri }),
+				contractName: resolveBeamioUserCardContractNameFromShareMetadata(
+					shareTokenMetadata as Record<string, unknown> | undefined
+				),
 				...(tiersForCreate && { tiers: tiersForCreate }),
 				...(transferWhitelistEnabled === true && { transferWhitelistEnabled: true }),
 				...(ut != null && { upgradeType: ut }),
