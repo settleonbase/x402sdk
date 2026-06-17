@@ -1332,7 +1332,7 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** GET /api/getCardAdminInfo?cardAddress=0x...&wallet=0x... - 从 BeamioUserCard 卡合约（Base）获取 owner 与 admin 列表。cardAddress 必填（终端登记的商户程序卡）。wallet 可选：若提供则返回该终端的上层 admin（upperAdmin）。 */
+	/** GET /api/getCardAdminInfo?cardAddress=0x...&wallet=0x... - 从 BeamioUserCard 卡合约获取 owner 与 admin 列表。cardAddress 必填（终端登记的商户程序卡）。wallet 可选：若提供则返回该终端的上层 admin（upperAdmin）。 */
 	const CARD_ADMIN_ABI = [
 		'function owner() view returns (address)',
 		'function getAdminListWithMetadata() view returns (address[] admins, string[] metadatas, address[] parents)',
@@ -1349,7 +1349,9 @@ const routing = ( router: Router ) => {
 		}
 		const cardAddr = ethers.getAddress(cardAddrRaw)
 		try {
-			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_ADMIN_ABI, providerBase)
+			const cardChain = await resolveUserCardChain(cardAddr)
+			const cardProvider = providerForUserCardChain(cardChain)
+			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_ADMIN_ABI, cardProvider)
 			const [owner, adminResult] = await Promise.all([
 				card.owner() as Promise<string>,
 				card.getAdminListWithMetadata() as Promise<[string[], string[], string[]]>,
@@ -1462,11 +1464,13 @@ const routing = ( router: Router ) => {
 		}
 		const cardAddr = ethers.getAddress(cardAddrRaw)
 		try {
-			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_STATS_ABI, providerBase)
+			const cardChain = await resolveUserCardChain(cardAddr)
+			const cardProvider = providerForUserCardChain(cardChain)
+			const card = new ethers.Contract(ethers.getAddress(cardAddr), CARD_STATS_ABI, cardProvider)
 			let adminAddr = adminQ?.trim() && ethers.isAddress(adminQ.trim()) ? ethers.getAddress(adminQ.trim()) : null
 			if (!adminAddr) {
 				const ownerAbi = ['function owner() view returns (address)']
-				const ownerCard = new ethers.Contract(ethers.getAddress(cardAddr), ownerAbi, providerBase)
+				const ownerCard = new ethers.Contract(ethers.getAddress(cardAddr), ownerAbi, cardProvider)
 				const owner = await ownerCard.owner() as string
 				adminAddr = owner && owner !== ethers.ZeroAddress ? ethers.getAddress(owner) : null
 			}
@@ -1652,19 +1656,20 @@ const routing = ( router: Router ) => {
 		const TERMINAL_RESET_LOWER = TX_CATEGORY_TERMINAL_RESET.toLowerCase()
 
 		try {
-			// BeamioUserCard lives on Base — must use providerBase (CoNET RPC has no code at this address → decode errors / 0x)
-			const stats = new ethers.Contract(cardAddr, ADMIN_STATS_FULL_ABI, providerBase)
+			const cardChain = await resolveUserCardChain(cardAddr)
+			const cardProvider = providerForUserCardChain(cardChain)
+			const stats = new ethers.Contract(cardAddr, ADMIN_STATS_FULL_ABI, cardProvider)
 			let topUpFromClear6 = 0n
 			let chargeFromClear6 = 0n
 			try {
-				const v: any = await stats.getAdminStatsFull(adminAddr, 0, 0, 0)
+				const v: any = await stats.getAdminStatsFull(adminAddr, PERIOD_DAY, 0, 0)
 				const mintFromClear = v?.mintCounterFromClear ?? v?.[16]
 				const xferAmtFromClear = v?.transferAmountFromClear ?? v?.[19]
 				if (mintFromClear != null) topUpFromClear6 = BigInt(mintFromClear)
 				if (xferAmtFromClear != null) chargeFromClear6 = BigInt(xferAmtFromClear)
 			} catch (e) {
 				// `getAdminStatsFull` 可能 revert（如 admin 未登记到 card）；此时 fallback 0/0 → 不裁剪上限，仅按可获取的 items 返回。
-				logger(Colors.yellow(`[posLedger] getAdminStatsFull failed admin=${adminAddr} card=${cardAddr}: ${(e as Error)?.message ?? e}`))
+				// Keep this path quiet: POS polls frequently and indexer-only ledger is the intended fallback.
 			}
 
 			const indexer = new ethers.Contract(BEAMIO_INDEXER_DIAMOND, POS_LEDGER_INDEXER_ABI, providerConet)
@@ -2990,7 +2995,8 @@ const routing = ( router: Router ) => {
 		try {
 			let prepareCardOwner = ''
 			try {
-				const cprep = new ethers.Contract(forwardBody.cardAddress, ['function owner() view returns (address)'], providerBase)
+				const prepCardProvider = providerForUserCardChain(await resolveUserCardChain(forwardBody.cardAddress))
+				const cprep = new ethers.Contract(forwardBody.cardAddress, ['function owner() view returns (address)'], prepCardProvider)
 				const ow = await cprep.owner() as string
 				if (ow && ethers.isAddress(ow)) prepareCardOwner = ethers.getAddress(ow)
 			} catch { /* ignore */ }
@@ -3127,12 +3133,14 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: 'Deadline expired' })
 			}
 			const cardAddress = ethers.getAddress(cardAddr)
+			const cardChain = await resolveUserCardChain(cardAddress)
+			const cardProvider = providerForUserCardChain(cardChain)
 			const verifyingContractGw = await getBeamioUserCardFactoryGateway(cardAddress)
 			const dataHash = ethers.keccak256(data)
 			const domain = {
 				name: 'BeamioUserCardFactory',
 				version: '1',
-				chainId: BASE_CHAIN_ID,
+				chainId: chainIdForUserCardChain(cardChain),
 				verifyingContract: verifyingContractGw
 			}
 			const types = {
@@ -3157,11 +3165,11 @@ const routing = ( router: Router ) => {
 					: String(adminSignature ?? '')
 			logger(
 				Colors.gray(
-					`[nfcTopup][eip712] card=${cardAddress} verifyingContract=${verifyingContractGw} chainConfiguredFactory=${BASE_CARD_FACTORY} chainId=${BASE_CHAIN_ID} dataHash=${dataHash} deadline=${deadline} nonce=${message.nonce} digest=${digest} recovered=${signer} sig=${sigPreview}`
+					`[nfcTopup][eip712] card=${cardAddress} verifyingContract=${verifyingContractGw} chainConfiguredFactory=${BASE_CARD_FACTORY} chainId=${chainIdForUserCardChain(cardChain)} dataHash=${dataHash} deadline=${deadline} nonce=${message.nonce} digest=${digest} recovered=${signer} sig=${sigPreview}`
 				)
 			)
 			const cardAbi = ['function isAdmin(address) view returns (bool)', 'function owner() view returns (address)', 'function adminParent(address) view returns (address)']
-			const card = new ethers.Contract(cardAddress, cardAbi, providerBase)
+			const card = new ethers.Contract(cardAddress, cardAbi, cardProvider)
 			const isAdmin = await card.isAdmin(signer)
 			if (!isAdmin) {
 				const mintParsed = tryParseMintPointsByAdminArgs(data)
@@ -6662,7 +6670,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
-	/** cardAddAdmin：owner 管理 admin（添加/移除）。添加时 body.adminEOA 须与 calldata adminManager.to 同为商户 EOA；Cluster ensureAAForEOA 后须能在 Base 上读到规范 AA，再预检转发。移除时无需 adminEOA。 */
+	/** cardAddAdmin：owner 管理 admin（添加/移除）。添加时 body.adminEOA 须与 calldata adminManager.to 同为商户 EOA；admin 本身是 EOA，不在此路径创建 AA。移除时无需 adminEOA。 */
 	router.post('/cardAddAdmin', async (req, res) => {
 		const data = req.body?.data as string
 		let isAddingAdmin = false
@@ -6675,29 +6683,6 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				const decoded = (is5 ? iface5 : iface4).parseTransaction({ data })
 				if (decoded?.name === 'adminManager') isAddingAdmin = decoded.args[1] === true
 			} catch (_) { /* ignore */ }
-		}
-		if (isAddingAdmin) {
-			const adminEOA = (req.body?.adminEOA as string)?.trim()
-			if (!adminEOA || !ethers.isAddress(adminEOA)) {
-				return res.status(400).json({ success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }).end()
-			}
-			const adminNorm = ethers.getAddress(adminEOA)
-			let ensureBody = ''
-			try {
-				const { statusCode, body: eb } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(adminNorm))
-				ensureBody = eb
-				if (statusCode !== 200) {
-					const err = (() => { try { const j = JSON.parse(ensureBody); return j?.error ?? 'Failed to ensure AA for EOA' } catch { return 'Failed to ensure AA for EOA' } })()
-					return res.status(400).json({ success: false, error: err }).end()
-				}
-			} catch (e: any) {
-				logger(Colors.red(`[cardAddAdmin] ensureAAForEOA failed: ${e?.message ?? e}`))
-				return res.status(502).json({ success: false, error: 'Failed to ensure AA for EOA' }).end()
-			}
-			const visible = await assertAdminEoaHasVisibleAaAfterEnsure(adminNorm, ensureBody, 'cardAddAdmin')
-			if (!visible.ok) {
-				return res.status(400).json({ success: false, error: visible.error }).end()
-			}
 		}
 		const preCheck = await cardAddAdminPreCheck(req.body)
 		if (!preCheck.success) {
@@ -6767,7 +6752,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', req.body, res)
 	})
 
-	/** cardAddAdminByAdmin：admin 为自己下层登记 admin。添加时：仅允许 EOA，body 必须含 adminEOA，Cluster 先 ensureAAForEOA（若 EOA 无 AA 则创建），再预检并转发。移除时无需 adminEOA。 */
+	/** cardAddAdminByAdmin：admin 为自己下层登记 admin。添加时：仅允许 EOA，body 必须含 adminEOA；不在此路径创建 AA。移除时无需 adminEOA。 */
 	router.post('/cardAddAdminByAdmin', async (req, res) => {
 		const data = req.body?.data as string
 		let isAddingAdmin = false
@@ -6780,29 +6765,6 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				const decoded = (is5 ? iface5 : iface4).parseTransaction({ data })
 				if (decoded?.name === 'adminManager') isAddingAdmin = decoded.args[1] === true
 			} catch (_) { /* ignore */ }
-		}
-		if (isAddingAdmin) {
-			const adminEOA = (req.body?.adminEOA as string)?.trim()
-			if (!adminEOA || !ethers.isAddress(adminEOA)) {
-				return res.status(400).json({ success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }).end()
-			}
-			const adminNorm = ethers.getAddress(adminEOA)
-			let ensureBody = ''
-			try {
-				const { statusCode, body: eb } = await getLocalhostBuffer('/api/ensureAAForEOA?eoa=' + encodeURIComponent(adminNorm))
-				ensureBody = eb
-				if (statusCode !== 200) {
-					const err = (() => { try { const j = JSON.parse(ensureBody); return j?.error ?? 'Failed to ensure AA for EOA' } catch { return 'Failed to ensure AA for EOA' } })()
-					return res.status(400).json({ success: false, error: err }).end()
-				}
-			} catch (e: any) {
-				logger(Colors.red(`[cardAddAdminByAdmin] ensureAAForEOA failed: ${e?.message ?? e}`))
-				return res.status(502).json({ success: false, error: 'Failed to ensure AA for EOA' }).end()
-			}
-			const visible = await assertAdminEoaHasVisibleAaAfterEnsure(adminNorm, ensureBody, 'cardAddAdminByAdmin')
-			if (!visible.ok) {
-				return res.status(400).json({ success: false, error: visible.error }).end()
-			}
 		}
 		const preCheck = await cardAddAdminByAdminPreCheck(req.body)
 		if (!preCheck.success) {

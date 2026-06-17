@@ -1995,6 +1995,8 @@ export const nfcTopupPreparePayload = async (params: {
 		return { error: 'Missing or invalid cardAddress' }
 	}
 	const cardAddr = ethers.getAddress(clientCardAddress.trim())
+	const cardChain = await resolveUserCardChain(cardAddr)
+	const cardProvider = providerForUserCardChain(cardChain)
 	let recipientEOA: string | null = null
 	if (wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())) {
 		recipientEOA = ethers.getAddress(wallet.trim())
@@ -2044,7 +2046,7 @@ export const nfcTopupPreparePayload = async (params: {
 		const readCard = new ethers.Contract(
 			cardAddr,
 			['function currency() view returns (uint8)', 'function pointsUnitPriceInCurrencyE6() view returns (uint256)'],
-			providerBaseBackup
+			cardProvider
 		)
 		const [cardCurrencyId, priceInCurrency6] = await Promise.all([
 			readCard.currency() as Promise<bigint>,
@@ -2248,7 +2250,8 @@ const verifyExecuteForAdminSignerIsAdmin = async (obj: {
 const fetchOperatorParentChain = async (cardAddr: string, operator: string): Promise<string[]> => {
 	const chain: string[] = []
 	const cardAbi = ['function adminParent(address) view returns (address)']
-	const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+	const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
+	const card = new ethers.Contract(cardAddr, cardAbi, cardProvider)
 	let current = operator
 	for (let i = 0; i < 32; i++) {
 		const parent = await card.adminParent(current) as string
@@ -2851,30 +2854,10 @@ export const executeForAdminProcess = async () => {
 			setTimeout(() => executeForAdminProcess(), 1000)
 			return
 		}
-		// adminManager(add admin)：必须链上校验 to；若 to 无 code 视为 EOA，先创建 AA（与 executeForOwnerProcess 一致）。客户端应传 EOA 而非预测 AA。
+		// adminManager(add admin)：当前协议仅允许把 EOA 登记为 admin（Cluster 已拒绝 AA）。
+		// POS terminal binding also uses the EOA as the on-chain subordinate; do not create AA here.
 		const dataSel = obj.data.slice(0, 10).toLowerCase()
 		const isAdminManager = dataSel === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || dataSel === ADMIN_MANAGER_5_SELECTOR.toLowerCase()
-		if (isAdminManager && SC.aaAccountFactoryPaymaster) {
-			const iface = dataSel === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ? adminManager5ArgIface : adminManager4ArgIface
-			const decoded = iface.parseTransaction({ data: obj.data })
-			if (decoded?.name === 'adminManager' && decoded.args[1] === true) {
-				const to = decoded.args[0] as string
-				if (to && ethers.isAddress(to)) {
-					const provider = (SC.walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-					const codeAtTo = await provider.getCode(to)
-					if (!codeAtTo || codeAtTo === '0x') {
-						let aaAddr = await SC.aaAccountFactoryPaymaster.beamioAccountOf(to)
-						if (!aaAddr || aaAddr === ethers.ZeroAddress) aaAddr = await SC.aaAccountFactoryPaymaster.primaryAccountOf(to)
-						const hasAA = aaAddr && aaAddr !== ethers.ZeroAddress && (await provider.getCode(aaAddr)) !== '0x'
-						if (!hasAA) {
-							logger(Colors.cyan(`[cardAddAdminByAdmin] EOA ${to} has no AA, creating...`))
-							await DeployingSmartAccount(to, SC.aaAccountFactoryPaymaster)
-							logger(Colors.green(`[cardAddAdminByAdmin] AA created for EOA ${to}, proceeding`))
-						}
-					}
-				}
-			}
-		}
 		// NFC Topup：mintPointsByAdmin 要求 recipient 已有 AA 账户，否则 _toAccount 会 revert UC_ResolveAccountFailed
 		// 必须使用 card 的 factoryGateway()._aaFactory()，与合约内 _resolveAccount 一致；若用配置的 AA Factory 可能不匹配导致 UC_ResolveAccountFailed
 		const recipientEOA = tryParseExecuteForAdminAaRecipient(obj.data)
@@ -2907,7 +2890,9 @@ export const executeForAdminProcess = async () => {
 		try {
 			const posSigner = adminCheck.signer
 			let cardOwnerLog = ''
-			const ownCard = new ethers.Contract(obj.cardAddr, ['function owner() view returns (address)'], providerBaseBackup)
+			const cardChainForLog = await resolveUserCardChain(obj.cardAddr)
+			const cardProviderForLog = providerForUserCardChain(cardChainForLog)
+			const ownCard = new ethers.Contract(obj.cardAddr, ['function owner() view returns (address)'], cardProviderForLog)
 			const rawOw = await ownCard.owner() as string
 			if (rawOw && ethers.isAddress(rawOw)) cardOwnerLog = ethers.getAddress(rawOw)
 			let op: string = 'other'
@@ -2938,17 +2923,8 @@ export const executeForAdminProcess = async () => {
 		let cardOwnerEOAForAccounting = ''
 		let cardCurrencyFiat = 0
 		if (recipientEOA) {
-			const cardAaFactoryAddr = await getCardAaFactoryAddress(obj.cardAddr)
-			const configAaAddr = await SC.aaAccountFactoryPaymaster.getAddress()
-			const aaFactoryContract = cardAaFactoryAddr.toLowerCase() === configAaAddr.toLowerCase()
-				? SC.aaAccountFactoryPaymaster
-				: new ethers.Contract(cardAaFactoryAddr, BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi, SC.walletBase)
-			if (cardAaFactoryAddr.toLowerCase() !== configAaAddr.toLowerCase()) {
-				logger(Colors.yellow(`[nfcTopup] Card _aaFactory(${cardAaFactoryAddr}) != config(${configAaAddr}), using card's aaFactory`))
-			}
-			const { accountAddress: addr } = await DeployingSmartAccount(recipientEOA, aaFactoryContract)
-			aaAddr = addr
-			if (!addr) {
+			aaAddr = await ensureAAForEOAOnCard(obj.cardAddr, recipientEOA, SC)
+			if (!aaAddr) {
 				logger(Colors.red(`[executeForAdminProcess] DeployingSmartAccount failed for recipient=${recipientEOA}`))
 				if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: 'Recipient has no Beamio account. Please activate the Beamio app first.' }).end()
 				Settle_ContractPool.unshift(SC)
@@ -2956,6 +2932,7 @@ export const executeForAdminProcess = async () => {
 				return
 			}
 			try {
+				const cardProvider = providerForUserCardChain(await resolveUserCardChain(obj.cardAddr))
 				const cardRead = new ethers.Contract(
 					obj.cardAddr,
 					[
@@ -2963,7 +2940,7 @@ export const executeForAdminProcess = async () => {
 						'function owner() view returns (address)',
 						'function currency() view returns (uint8)',
 					],
-					providerBaseBackup
+					cardProvider
 				)
 				const [ownership, rawOwner, rawCurrency] = await Promise.all([
 					cardRead.getOwnershipByEOA(recipientEOA) as Promise<[bigint, Array<{ tokenId: bigint }>]>,
@@ -2974,7 +2951,7 @@ export const executeForAdminProcess = async () => {
 				beforeNfts = Array.isArray(ownership?.[1]) ? ownership[1] : []
 				cardCurrencyFiat = Number(rawCurrency ?? 0n)
 				try {
-					const resolvedOwner = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner)
+					const resolvedOwner = await resolveCardOwnerToEOA(cardProvider, rawOwner)
 					cardOwnerEOAForAccounting = resolvedOwner?.success ? resolvedOwner.cardOwner : ''
 				} catch {
 					cardOwnerEOAForAccounting = ethers.isAddress(rawOwner) ? ethers.getAddress(rawOwner) : ''
@@ -6253,8 +6230,9 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 		const cardForTiers = new ethers.Contract(
 			cardNorm,
 			[...membershipAbi, 'function tiers(uint256) view returns (uint256 minUsdc6,uint256,uint256)'],
-			providerBaseBackup
+			providerForUserCardChain(await resolveUserCardChain(cardNorm))
 		)
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
 		const tiersResolved = await readCardTiers(cardForTiers, cardNorm)
 		if (tiersResolved.length === 0) return { success: true }
 
@@ -6266,7 +6244,7 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 
 		const aaFactoryAddr = ethers.getAddress(await getCardAaFactoryAddress(cardNorm))
 		const facAbi = ['function isBeamioAccount(address) view returns (bool)', 'function beamioAccountOf(address) view returns (address)']
-		const fac = new ethers.Contract(aaFactoryAddr, facAbi as ethers.InterfaceAbi, providerBaseBackup)
+		const fac = new ethers.Contract(aaFactoryAddr, facAbi as ethers.InterfaceAbi, cardProvider)
 
 		let acct: string
 		let isAcct = false
@@ -6294,7 +6272,7 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 		let hasValid = false
 		if (acct !== ethers.ZeroAddress) {
 			try {
-				const cardM = new ethers.Contract(cardNorm, membershipAbi, providerBaseBackup)
+				const cardM = new ethers.Contract(cardNorm, membershipAbi, cardProvider)
 				const aid = BigInt(await cardM.activeMembershipId(acct))
 				if (aid > 0n) {
 					const bal = BigInt(await cardM.balanceOf(acct, aid))
@@ -6322,7 +6300,7 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 			7: 'SGD',
 			8: 'TWD',
 		}
-		const cardPricing = new ethers.Contract(cardNorm, membershipAbi, providerBaseBackup)
+		const cardPricing = new ethers.Contract(cardNorm, membershipAbi, cardProvider)
 		let ccy = 'CAD'
 		let priceE6 = 1_000_000n
 		try {
@@ -6609,15 +6587,16 @@ export const nfcTopupPreCheckBUnitFee = async (
 		}
 		const cardAbi = ['function owner() view returns (address)', 'function factoryGateway() view returns (address)']
 		const gatewayAbi = ['function quoteUnitPointInUSDC6(address) view returns (uint256)']
-		const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
+		const card = new ethers.Contract(cardAddr, cardAbi, cardProvider)
 		const rawOwner = await card.owner()
-		const resolveResult = await resolveCardOwnerToEOA(providerBaseBackup, rawOwner)
+		const resolveResult = await resolveCardOwnerToEOA(cardProvider, rawOwner)
 		if (!resolveResult.success) {
 			return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA' }
 		}
 		const cardOwnerEOA = resolveResult.cardOwner
 		const gatewayAddr = await card.factoryGateway()
-		const gateway = new ethers.Contract(gatewayAddr, gatewayAbi, providerBaseBackup)
+		const gateway = new ethers.Contract(gatewayAddr, gatewayAbi, cardProvider)
 		const unitPriceUSDC6: bigint = await gateway.quoteUnitPointInUSDC6(cardAddr)
 		if (unitPriceUSDC6 === 0n) {
 			return {
@@ -6671,7 +6650,8 @@ export const nfcTopupPreCheckAdminAirdropLimit = async (
 			'function adminParent(address) view returns (address)',
 			'function getAdminAirdropLimit(address) view returns (tuple(address admin, address parent, uint256 limit, uint256 usedFromClear, uint256 remainingAvailable, bool unlimited))',
 		] as const
-		const card = new ethers.Contract(cardAddr, cardAbi, providerBaseBackup)
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
+		const card = new ethers.Contract(cardAddr, cardAbi, cardProvider)
 		const owner = (await card.owner()) as string
 		const ownerLc = owner.toLowerCase()
 		let current: string = ethers.getAddress(signer)
@@ -7264,6 +7244,12 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 	}
 	const { obj, tx, recipientEOA, mintParsed, adminCheck, beforePoint6, beforeNfts, cardOwnerEOAForAccounting, cardCurrencyFiat } = job
 	try {
+		const topupCardChain = ethers.isAddress(obj.cardAddr)
+			? await resolveUserCardChain(obj.cardAddr)
+			: defaultMerchantUserCardChain()
+		const topupCardProvider = providerForUserCardChain(topupCardChain)
+		const topupCardChainId = BigInt(chainIdForUserCardChain(topupCardChain))
+		const topupRelayWallet = settleRelayWalletForChain(SC, topupCardChain)
 		let baseReceipt: ethers.TransactionReceipt | null = null
 		/** 含链上回滚：tx.wait() 常直接抛错，须轮询 receipt 才能读到 status=0 */
 		const ensureBaseReceipt = async (): Promise<ethers.TransactionReceipt | null> => {
@@ -7279,7 +7265,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			if (!baseReceipt) {
 				for (let i = 0; i < 15; i++) {
 					await new Promise((r) => setTimeout(r, 2000))
-					const r = await providerBaseBackup.getTransactionReceipt(tx.hash)
+					const r = await topupCardProvider.getTransactionReceipt(tx.hash)
 					if (r) {
 						logger(
 							Colors.green(
@@ -7305,7 +7291,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 		if (!baseTxOk && (obj.cardOwnerEOA || recipientEOA)) {
 			logger(
 				Colors.red(
-					`[executeForAdminPostBaseProcess] Skip B-Unit charge and NFC topup indexer (Base tx not successful). hash=${tx.hash} — UI may have already received 200; check BaseScan for revert reason.`
+					`[executeForAdminPostBaseProcess] Skip B-Unit charge and NFC topup indexer (card-chain tx not successful). hash=${tx.hash} chain=${topupCardChain} — UI may have already received 200; check explorer for revert reason.`
 				)
 			)
 		}
@@ -7407,7 +7393,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				const cardRead = new ethers.Contract(
 					obj.cardAddr,
 					['function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)'],
-					providerBaseBackup
+					topupCardProvider
 				)
 				const [, nAfter] = await cardRead.getOwnershipByEOA(recipientEOA) as [bigint, Array<{ tokenId: bigint }>]
 				const beforeTokenIds = extractTokenIdsFromOwnership(beforeNfts ?? [])
@@ -7430,7 +7416,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 							: new ethers.Contract(
 									cardAaFactoryAddrNfc,
 									BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
-									SC.walletBase
+									topupRelayWallet
 							  )
 					const { accountAddress: aaNfc } = await DeployingSmartAccount(recipientEOA, aaFactoryContractNfc)
 					memberAaForDb = aaNfc || ''
@@ -7589,7 +7575,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 						const inputLeg: PurchasingCardAccountingInput = {
 							txId: legTxId,
 							originalPaymentHash: ethers.ZeroHash as `0x${string}`,
-							chainId: 8453n,
+							chainId: topupCardChainId,
 							txCategory: cat,
 							displayJson: legDisplayJson,
 							timestamp: 0n,
@@ -7662,7 +7648,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					const input: PurchasingCardAccountingInput = {
 						txId: tx.hash as `0x${string}`,
 						originalPaymentHash: ethers.ZeroHash as `0x${string}`,
-						chainId: 8453n,
+						chainId: topupCardChainId,
 						txCategory: txCategoryTopup,
 						displayJson,
 						timestamp: 0n,
@@ -12795,20 +12781,17 @@ export const cardAddAdminByAdminPreCheck = async (body: {
 		if (!decoded || decoded.name !== 'adminManager') return { success: false, error: 'Invalid adminManager calldata' }
 		const to = decoded.args[0] as string
 		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
+		const cardProbe = await requireBeamioUserCardBytecode(cardAddress)
+		if (!cardProbe.ok) return { success: false, error: cardProbe.error }
+		const cardReadProvider = cardProbe.provider
 		if (decoded.args[1] === true) {
 			if (!adminEOA || !ethers.isAddress(adminEOA)) return { success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }
 			if (to.toLowerCase() !== ethers.getAddress(adminEOA).toLowerCase()) {
 				return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
 			}
-			const pool = Settle_ContractPool
-			if (pool?.length) {
-				const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-				const codeAtCard = await provider.getCode(cardAddress)
-				if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
-				const codeAtTo = await provider.getCode(to)
-				if (codeAtTo && codeAtTo !== '0x') {
-					return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
-				}
+			const codeAtTo = await cardReadProvider.getCode(to)
+			if (codeAtTo && codeAtTo !== '0x') {
+				return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
 			}
 		}
 		if (deadline == null || !nonce || !adminSignature) return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
@@ -12822,9 +12805,8 @@ export const cardAddAdminByAdminPreCheck = async (body: {
 		if (!adminCheck.ok) return { success: false, error: adminCheck.error }
 		if (decoded.args[1] === true) {
 			const signer = (adminCheck as { ok: true; signer?: string }).signer
-			if (signer && Settle_ContractPool?.length) {
-				const provider = (Settle_ContractPool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-				const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)', 'function adminParent(address) view returns (address)'], provider)
+			if (signer) {
+				const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)', 'function adminParent(address) view returns (address)'], cardReadProvider)
 				const alreadyAdmin = await card.isAdmin(ethers.getAddress(to)) as boolean
 				if (alreadyAdmin) {
 					const parent = await card.adminParent(ethers.getAddress(to)) as string
@@ -12869,39 +12851,33 @@ export const cardAddAdminPreCheck = async (body: {
 		if (!decoded || decoded.name !== 'adminManager') return { success: false, error: 'Invalid adminManager calldata' }
 		const to = decoded.args[0] as string
 		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
+		const cardProbe = await requireBeamioUserCardBytecode(cardAddress)
+		if (!cardProbe.ok) return { success: false, error: cardProbe.error }
+		const cardReadProvider = cardProbe.provider
 		if (decoded.args[1] === true) {
 			if (!adminEOA || !ethers.isAddress(adminEOA)) return { success: false, error: 'adminEOA is required when adding admin. Pass the EOA address to add.' }
 			if (to.toLowerCase() !== ethers.getAddress(adminEOA).toLowerCase()) {
 				return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
 			}
-			const pool = Settle_ContractPool
-			if (pool?.length) {
-				const provider = (pool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-				const codeAtCard = await provider.getCode(cardAddress)
-				if (!codeAtCard || codeAtCard === '0x') return { success: false, error: 'Card contract not found' }
-				const codeAtTo = await provider.getCode(to)
-				if (codeAtTo && codeAtTo !== '0x') {
-					return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
-				}
+			const codeAtTo = await cardReadProvider.getCode(to)
+			if (codeAtTo && codeAtTo !== '0x') {
+				return { success: false, error: 'Adding AA as admin is no longer allowed. Pass adminEOA and encode adminManager(adminEOA, ...).' }
 			}
 			if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 			const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
-			const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract }
+			const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: chainIdForUserCardChain(cardProbe.chain), verifyingContract }
 			const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
 			const dataHash = ethers.keccak256(data)
 			const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
 			const value = { cardAddress: ethers.getAddress(cardAddress), dataHash, deadline: Number(deadline), nonce: nonceBytes }
 			const digest = ethers.TypedDataEncoder.hash(domain, types, value)
 			const signer = ethers.recoverAddress(digest, ownerSignature)
-			if (Settle_ContractPool?.length) {
-				const provider = (Settle_ContractPool[0].walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-				const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)', 'function adminParent(address) view returns (address)'], provider)
-				const alreadyAdmin = await card.isAdmin(ethers.getAddress(to)) as boolean
-				if (alreadyAdmin) {
-					const parent = await card.adminParent(ethers.getAddress(to)) as string
-					if (parent && parent !== ethers.ZeroAddress) {
-						return { success: false, error: 'EOA is already admin under another admin. Only the parent admin who added it can update.' }
-					}
+			const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)', 'function adminParent(address) view returns (address)'], cardReadProvider)
+			const alreadyAdmin = await card.isAdmin(ethers.getAddress(to)) as boolean
+			if (alreadyAdmin) {
+				const parent = await card.adminParent(ethers.getAddress(to)) as string
+				if (parent && parent !== ethers.ZeroAddress) {
+					return { success: false, error: 'EOA is already admin under another admin. Only the parent admin who added it can update.' }
 				}
 			}
 			const metadata = decoded.args[3] as string
@@ -14461,31 +14437,8 @@ export const executeForOwnerProcess = async () => {
 		const factory = await contractForExecuteForOwner(SC, obj.cardAddress)
 		const dataSelector = obj.data?.slice(0, 10).toLowerCase() ?? ''
 		const isAdminManager = dataSelector === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase()
-		if (SC.aaAccountFactoryPaymaster && obj.data) {
-			if (isAdminManager) {
-				const iface = dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ? adminManager5ArgIface : adminManager4ArgIface
-				const decoded = iface.parseTransaction({ data: obj.data })
-				if (decoded?.name === 'adminManager' && decoded.args[1] === true) {
-					const to = decoded.args[0] as string
-					if (to && ethers.isAddress(to)) {
-						const provider = (SC.walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
-						const codeAtTo = await provider.getCode(to)
-						// 必须链上校验：不能因收到 AA 地址就跳过检测。若 to 有 code 则视为已部署 AA，直接执行；若无 code 则视为 EOA，需为其创建 AA。
-						if (!codeAtTo || codeAtTo === '0x') {
-							// to 无 code：可能是 EOA 或预测的 AA。仅 EOA 可作 createAccountFor(creator)；预测 AA 不可。客户端应传 EOA 而非预测地址。
-							let aaAddr = await SC.aaAccountFactoryPaymaster.beamioAccountOf(to)
-							if (!aaAddr || aaAddr === ethers.ZeroAddress) aaAddr = await SC.aaAccountFactoryPaymaster.primaryAccountOf(to)
-							const hasAA = aaAddr && aaAddr !== ethers.ZeroAddress && (await provider.getCode(aaAddr)) !== '0x'
-							if (!hasAA) {
-								logger(Colors.cyan(`[cardAddAdmin] EOA ${to} has no AA, creating...`))
-								await DeployingSmartAccount(to, SC.aaAccountFactoryPaymaster)
-								logger(Colors.green(`[cardAddAdmin] AA created for EOA ${to}, proceeding with original data (EOA as admin)`))
-							}
-						}
-					}
-				}
-			}
-		}
+		// adminManager(add admin)：当前协议仅允许把 EOA 登记为 admin（Cluster 已拒绝 AA）。
+		// Do not create AA before executing owner/admin management calldata.
 		// [cardAddAdmin] debug: 写入链上的数据详情
 		if (obj.data && (obj.data.slice(0, 10).toLowerCase() === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || obj.data.slice(0, 10).toLowerCase() === ADMIN_MANAGER_5_SELECTOR.toLowerCase())) {
 			try {
@@ -14945,12 +14898,21 @@ const ISSUED_NFT_START_ID = 100_000_000_000
  */
 export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: string): Promise<void> => {
 	try {
-		const SC = Settle_ContractPool[0]
-		if (!SC) return
-		const getAddressFn = SC.aaAccountFactoryPaymaster.getFunction('getAddress(address,uint256)')
-		const accountAddress = await getAddressFn(userEOA, 0n).catch(() => null) as string | null
+		const cardChain = await resolveUserCardChain(cardAddress)
+		const cardProvider = providerForUserCardChain(cardChain)
+		const aaFactoryAddress = await getCardAaFactoryAddress(cardAddress)
+		const aaFactory = new ethers.Contract(
+			aaFactoryAddress,
+			BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
+			cardProvider
+		)
+		const getAddressFn = aaFactory.getFunction('getAddress(address,uint256)')
+		const accountAddress = await getAddressFn(userEOA, 0n).catch(async () => {
+			const beamio = await (aaFactory as any).beamioAccountOf?.(userEOA).catch(() => null)
+			return beamio || null
+		}) as string | null
 		if (!accountAddress || accountAddress === ethers.ZeroAddress) return
-		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, providerBase)
+		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, cardProvider)
 		const [cardOwner, ownership] = await Promise.all([
 			card.owner(),
 			card.getOwnership(accountAddress),

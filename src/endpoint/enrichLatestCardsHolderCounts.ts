@@ -2,6 +2,7 @@ import { ethers } from 'ethers'
 import type { BeamioLatestCardItem } from '../db'
 import { logger } from '../logger'
 import Colors from 'colors/safe'
+import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 
 /** AdminStatsPeriodLib: valid periodType; cumulative slice when cumulativeStartTs=0 仍见合约实现 */
 const PERIOD_HOUR = 0
@@ -175,13 +176,8 @@ async function enrichOneCard(
 					return p
 				} catch (e: unknown) {
 					globalStatsSkipUntil.set(addrLo, Date.now() + GLOBAL_STATS_FAIL_COOLDOWN_MS)
-					if (shouldLogHolderEnrichErr('getGlobalStatsFull', cardAddress)) {
-						logger(
-							Colors.gray(
-								`[latestCards holders] ${cardAddress} getGlobalStatsFull: ${shortRpcCallErr(e)} (cooldown ${GLOBAL_STATS_FAIL_COOLDOWN_MS / 60000}m)`,
-							),
-						)
-					}
+					// Optional enrichment only. Some deployed cards/modules do not expose stats through fallback;
+					// keep latestCards healthy and avoid noisy restart/prewarm logs.
 					return { cumulativeMint: 0n, cumulativeIssuedPlusUpgraded: 0n }
 				}
 			})()
@@ -239,8 +235,11 @@ export async function enrichLatestCardsWithBaseErc1155PointsHolderCounts(
 			return { ...it, ...cached.value }
 		}
 		try {
+			const cardProvider = await resolveUserCardChain(it.cardAddress)
+				.then((chain) => providerForUserCardChain(chain))
+				.catch(() => provider)
 			const fresh = await withTimeout(
-				enrichOneCard(it.cardAddress, provider),
+				enrichOneCard(it.cardAddress, cardProvider),
 				PER_CARD_BUDGET_MS,
 				`enrich ${it.cardAddress}`,
 			)

@@ -22,6 +22,7 @@ import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCate
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tierMetadataRowResolve'
+import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 
 /** 与 util.resolveBeamioBaseHttpRpcUrl 一致；此处不 import util，避免经 db 与 util/server 形成循环依赖 */
 const BASE_RPC_URL =
@@ -349,7 +350,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				/* DB 失败仍用链上数据 */
 			}
 			cardName = displayNameFromCardMetadata(cardRow?.metadata ?? undefined) ?? fallbackDisplayName
-			const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
+			const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
+			const card = new ethers.Contract(cardAddr, cardAbi, cardProvider)
 			const tokenHolder = aaAddr || eoaAddr
 			const [[pointsBalance, nfts], chargeRewardByHolder, chargeRewardByEoa, currencyNum] = await Promise.all([
 				aaAddr ? card.getOwnership(aaAddr) : card.getOwnershipByEOA(eoaAddr),
@@ -474,7 +476,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			logger(Colors.gray(`[fetchUIDAssetsForEOA] card=${cardAddr} skip: ${(cardErr as Error)?.message ?? cardErr}`))
 			if (singleProgramScope && infraAddr && cardAddr.toLowerCase() === infraAddr.toLowerCase()) {
 				try {
-					const card = new ethers.Contract(cardAddr, cardAbi, providerBase)
+					const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
+					const card = new ethers.Contract(cardAddr, cardAbi, cardProvider)
 					const currencyNum = await card.currency()
 					const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
 					cardsStaged.push({
@@ -528,7 +531,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			const seriesRows = await listCouponIssuedNftSeriesForCardDescending(infraAddr, 80)
 			if (seriesRows.length > 0) {
 				const tokenHolder = aaAddr && ethers.isAddress(aaAddr) ? ethers.getAddress(aaAddr) : eoaAddr
-				const couponRead = new ethers.Contract(
+			const couponProvider = providerForUserCardChain(await resolveUserCardChain(infraAddr))
+			const couponRead = new ethers.Contract(
 					infraAddr,
 				[
 					'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
@@ -536,7 +540,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 					'function issuedNftUserSigClaimUsed(address userEOA, uint256 tokenId) view returns (bool)',
 					'function balanceOf(address account, uint256 id) view returns (uint256)',
 				],
-				providerBase
+				couponProvider
 			)
 			const seen = new Set<string>()
 			const balances: NonNullable<FetchUIDAssetsResult['merchantCouponBalances']> = []
