@@ -7571,28 +7571,66 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					logger(Colors.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`))
 					return res.status(400).json({ success: false, error: msg }).end()
 				}
+				const openPayloadCompat = body.openContainerPayload as typeof body.openContainerPayload & { validBefore?: string | number | bigint }
+				const payloadDeadline = BigInt(String(body.openContainerPayload.deadline ?? openPayloadCompat.validBefore ?? '0'))
+				const payloadCurrencyType = Number(body.openContainerPayload.currencyType)
+				const payloadMaxAmount = BigInt(String(body.openContainerPayload.maxAmount ?? '0'))
+				const signer = ethers.verifyTypedData(
+					{
+						name: 'BeamioAccount',
+						version: '1',
+						chainId: chainIdForUserCardChain(merchantCardChain),
+						verifyingContract: acc,
+					},
+					{
+						OpenContainerMain: [
+							{ name: 'account', type: 'address' },
+							{ name: 'currencyType', type: 'uint8' },
+							{ name: 'maxAmount', type: 'uint256' },
+							{ name: 'nonce', type: 'uint256' },
+							{ name: 'deadline', type: 'uint256' },
+						],
+					},
+					{
+						account: acc,
+						currencyType: payloadCurrencyType,
+						maxAmount: payloadMaxAmount,
+						nonce: payloadNonce,
+						deadline: payloadDeadline,
+					},
+					body.openContainerPayload.signature
+				)
+				if (ethers.getAddress(signer).toLowerCase() !== eoa.toLowerCase()) {
+					const msg = `OpenContainer signature/account check failed on ${merchantCardChain}: signer ${ethers.getAddress(signer)} is not AA owner ${eoa}. Refresh the payer wallet QR and re-sign.`
+					logger(Colors.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`))
+					return res.status(400).json({ success: false, error: msg }).end()
+				}
 				const simulateAbi = [
 					'function simulateOpenContainer(address to, tuple(uint8 kind,address asset,uint256 amount,uint256 tokenId,bytes data)[] items, uint8 currencyType, uint256 maxAmount, uint256 nonce_, uint256 deadline_, bytes sig) view returns (bool ok, string reason)',
 				]
 				const sim = new ethers.Contract(acc, simulateAbi, merchantCardProvider)
-				const openPayloadCompat = body.openContainerPayload as typeof body.openContainerPayload & { validBefore?: string | number | bigint }
-				const payloadDeadline = BigInt(String(body.openContainerPayload.deadline ?? openPayloadCompat.validBefore ?? '0'))
 				const [simOk, simReason] = (await sim.simulateOpenContainer(
 					body.openContainerPayload.to,
 					openContainerItems,
-					Number(body.openContainerPayload.currencyType),
-					BigInt(String(body.openContainerPayload.maxAmount ?? '0')),
+					payloadCurrencyType,
+					payloadMaxAmount,
 					payloadNonce,
 					payloadDeadline,
 					body.openContainerPayload.signature,
 				)) as [boolean, string]
 				if (!simOk) {
 					const reason = simReason || 'simulation failed'
-					const msg = reason.toLowerCase().includes('nonce')
-						? `OpenContainer simulation nonce check failed on ${merchantCardChain}: payload nonce=${payloadNonce}, storage openRelayedNonce=${chainOpenRelayedNonce}, simulate returned "${reason}". Refresh the payer wallet QR and re-sign.`
-						: `OpenContainer signature/account check failed on ${merchantCardChain}: ${reason}. Refresh the payer wallet QR and re-sign.`
-					logger(Colors.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`))
-					return res.status(400).json({ success: false, error: msg }).end()
+					if (reason.toLowerCase().includes('nonce')) {
+						logger(
+							Colors.yellow(
+								`[AAtoEOA] server OpenContainer simulate stale nonce on ${merchantCardChain}: payload nonce=${payloadNonce}, storage openRelayedNonce=${chainOpenRelayedNonce}, simulate returned "${reason}". Continuing after storage nonce + owner signature pre-check.`
+							)
+						)
+					} else {
+						const msg = `OpenContainer signature/account check failed on ${merchantCardChain}: ${reason}. Refresh the payer wallet QR and re-sign.`
+						logger(Colors.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`))
+						return res.status(400).json({ success: false, error: msg }).end()
+					}
 				}
 			} catch (e: any) {
 				const m = e?.shortMessage ?? e?.message ?? String(e)
