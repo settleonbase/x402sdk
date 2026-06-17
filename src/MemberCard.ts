@@ -899,6 +899,85 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 				)
 			)
 		}
+
+		// ----- CoNET AA account factory paymasters -----
+		// OpenContainer Charge on CoNET relays through the AA factory on CoNET, so the same settle admins must
+		// be registered there too. Registering only the Base AA factory leaves relayContainerMainRelayedOpen
+		// blocked by BeamioFactoryPaymasterV07.onlyPayMaster.
+		let conetAaFactoryAddrForPaymasters = BeamioAAAccountFactoryPaymaster
+		try {
+			const r = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerConet, CONET_CARD_FACTORY)
+			if (r) conetAaFactoryAddrForPaymasters = ethers.getAddress(r)
+		} catch {
+			/* use chainAddresses */
+		}
+		const readOnlyConetAaFactory = new ethers.Contract(
+			conetAaFactoryAddrForPaymasters,
+			BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
+			providerConet
+		)
+		let conetAaAdminOnChain: string | null = null
+		try {
+			conetAaAdminOnChain = String(await readOnlyConetAaFactory.admin())
+		} catch (e: any) {
+			logger(Colors.red(`[factory-admin-init] conet-aa: admin() failed: ${e?.message ?? e}`))
+		}
+		const conetAaAdminOnChainLower = conetAaAdminOnChain?.toLowerCase() ?? ''
+		if (conetAaAdminOnChain && ownerConetWallet.address.toLowerCase() === conetAaAdminOnChainLower) {
+			const ownerConetAaFactory = new ethers.Contract(
+				conetAaFactoryAddrForPaymasters,
+				BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi,
+				ownerConetWallet
+			)
+			for (const adminAddr of adminTargets) {
+				const adminLower = adminAddr.toLowerCase()
+				if (adminLower === conetAaAdminOnChainLower) {
+					continue
+				}
+
+				let isPayMasterAddr = false
+				try {
+					isPayMasterAddr = !!(await readOnlyConetAaFactory.isPayMaster(adminAddr))
+				} catch (e: any) {
+					logger(Colors.red(`[factory-admin-init] conet-aa: isPayMaster(${adminAddr}) failed: ${e?.message ?? e}`))
+					continue
+				}
+
+				if (isPayMasterAddr) {
+					continue
+				}
+
+				try {
+					const tx = await ownerConetAaFactory.addPayMaster(adminAddr)
+					await tx.wait()
+					logger(Colors.green(`[factory-admin-init] conet-aa: added paymaster: ${adminAddr}`))
+				} catch (e: any) {
+					const msg = String(e?.message ?? e)
+					const isNonceRace =
+						msg.includes('nonce too low') ||
+						msg.includes('nonce has already been used') ||
+						e?.code === 'NONCE_EXPIRED'
+					if (isNonceRace) {
+						try {
+							const nowPm = !!(await readOnlyConetAaFactory.isPayMaster(adminAddr))
+							if (nowPm) {
+								logger(Colors.yellow(`[factory-admin-init] conet-aa: nonce race but paymaster already set: ${adminAddr}`))
+								continue
+							}
+						} catch {
+							// ignore and fall through to error log
+						}
+					}
+					logger(Colors.red(`[factory-admin-init] conet-aa: addPayMaster failed for ${adminAddr}: ${msg}`))
+				}
+			}
+		} else if (conetAaAdminOnChain) {
+			logger(
+				Colors.yellow(
+					`[factory-admin-init] conet-aa: skip: settle_contractAdmin[0]=${ownerConetWallet.address} is not AA factory admin (${conetAaAdminOnChain})`
+				)
+			)
+		}
 	} catch (e: any) {
 		logger(Colors.red(`[factory-admin-init] unexpected error: ${e?.message ?? e}`))
 	} finally {
@@ -9066,6 +9145,15 @@ export const OpenContainerRelayProcess = async () => {
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_OPEN_ABI],
       relayWallet
     )
+    const relayWalletIsPaymaster = await FactoryWithRelay.isPayMaster(relayWallet.address).catch(() => false)
+    if (!relayWalletIsPaymaster) {
+      const factoryAddr = await FactoryWithRelay.getAddress().catch(() => relayAaFactoryAddr)
+      const err = `OpenContainer relay wallet ${relayWallet.address} is not paymaster on AA factory ${factoryAddr} (${relayCtx.chain}). Restart API after factory-admin-init or register this settle admin with addPayMaster.`
+      logger(Colors.red(`[AAtoEOA/OpenContainer] REJECT: ${err}`))
+      obj.res.status(500).json({ success: false, error: err }).end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+    }
     // BeamioUserCard 要求 points(ERC1155) 只能转给 BeamioAccount；若 payload 含 ERC1155 或 to 为 EOA，将 to 解析为受益人 primary AA（严禁用付款方 account 的 AA 作为 to）
     const toIsEOA = !(await relayProvider.getCode(to).then((c: string) => c && c !== '0x' && c.length > 2))
     const needResolveTo = has1155 || toIsEOA
