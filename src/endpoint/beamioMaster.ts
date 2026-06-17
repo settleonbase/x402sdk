@@ -22,6 +22,10 @@ import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCar
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
+import {
+	invalidateIssuedCouponSeriesQueryCachesForCard,
+	registerIssuedCouponSeriesQueryCacheInvalidator,
+} from './issuedCouponSeriesQueryCache'
 import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback, resolveBeamioAaOnConet } from './resolveBeamioAaViaUserCardFactory'
@@ -278,6 +282,29 @@ const cardActiveIssuedCouponSeriesCache = new Map<string, { data: { cardAddress:
 const cardActiveIssuedProductionSeriesCache = new Map<string, { data: { cardAddress: string; limit: number; items: unknown[] }; expiry: number }>()
 const seriesSharedMetadataCache = new Map<string, { data: unknown; expiry: number }>()
 const mintMetadataCache = new Map<string, { items: unknown[]; expiry: number }>()
+
+registerIssuedCouponSeriesQueryCacheInvalidator((cardLo, issuedTokenId) => {
+	const prefix = `${cardLo}:`
+	for (const k of cardActiveIssuedCouponSeriesCache.keys()) {
+		if (k.startsWith(prefix)) {
+			cardActiveIssuedCouponSeriesCache.delete(k)
+		}
+	}
+	for (const k of cardActiveIssuedProductionSeriesCache.keys()) {
+		if (k.startsWith(prefix)) {
+			cardActiveIssuedProductionSeriesCache.delete(k)
+		}
+	}
+	recentIssuedCouponSeriesCache.clear()
+	if (issuedTokenId) {
+		try {
+			const tk = String(BigInt(issuedTokenId.trim()))
+			seriesSharedMetadataCache.delete(`${cardLo}:${tk}`)
+		} catch {
+			/* ignore */
+		}
+	}
+})
 
 /**
  * Master prewarm latestCards：
@@ -1140,7 +1167,8 @@ const routing = ( router: Router ) => {
 					seenToken.add(row.tokenId)
 					ordered.push(row)
 				}
-				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const chain = await resolveUserCardChain(checksum)
+				const provider = providerForUserCardChain(chain)
 				const cardContract = new ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, provider)
 				const items: Array<{
 					cardAddress: string
@@ -1244,7 +1272,8 @@ const routing = ( router: Router ) => {
 					seenToken.add(row.tokenId)
 					ordered.push(row)
 				}
-				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const chain = await resolveUserCardChain(checksum)
+				const provider = providerForUserCardChain(chain)
 				const cardContract = new ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, provider)
 				const items: Array<{
 					cardAddress: string
@@ -1419,8 +1448,10 @@ const routing = ( router: Router ) => {
 				)
 			}
 			try {
-				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
-				const cardContract = new ethers.Contract(cardAddress, BEAMIO_USER_CARD_ISSUED_NFT_ABI, provider)
+				const cardAddrNorm = ethers.getAddress(cardAddress)
+				const chain = await resolveUserCardChain(cardAddrNorm)
+				const provider = providerForUserCardChain(chain)
+				const cardContract = new ethers.Contract(cardAddrNorm, BEAMIO_USER_CARD_ISSUED_NFT_ABI, provider)
 				const cardOwner = await cardContract.owner()
 				const onChainHash = await cardContract.issuedNftSharedMetadataHash(tokenId)
 				const expectedHash = sharedMetadataHash.startsWith('0x') ? sharedMetadataHash : '0x' + sharedMetadataHash
@@ -1435,6 +1466,7 @@ const routing = ( router: Router ) => {
 					cardOwner,
 					metadataJson: metadata ? normalizeCouponSeriesMetadataJson(metadata) : undefined,
 				})
+				invalidateIssuedCouponSeriesQueryCachesForCard(cardAddrNorm, String(tokenId))
 				res.status(200).json({ success: true })
 			} catch (err: any) {
 				logger(Colors.red('[registerSeries] error:'), err?.message ?? err)

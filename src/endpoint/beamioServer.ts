@@ -14,12 +14,17 @@ import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDisti
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, isAllowedMerchantImageHttpsUrl } from '../MemberCard'
 import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import {
 	filterApiExcludedCardRows,
 	isApiExcludedUserCard,
 	listApiExcludedUserCardAddressesChecksum,
 } from '../apiExcludedUserCards'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
+import {
+	invalidateIssuedCouponSeriesQueryCachesForCard,
+	registerIssuedCouponSeriesQueryCacheInvalidator,
+} from './issuedCouponSeriesQueryCache'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
@@ -577,25 +582,28 @@ const mintMetadataCache = new Map<string, { body: string; expiry: number }>()
 const issuedNftClaimWalletsCache = new Map<string, { body: string; expiry: number }>()
 const getFollowStatusCache = new Map<string, { body: string; expiry: number }>()
 
-/** After issued-coupon metadata changes, drop cluster GET caches so clients see fresh `metadata_json`. */
-function invalidateIssuedCouponSeriesQueryCachesForCard(cardNorm: string, issuedTokenId?: string): void {
-	const lo = ethers.getAddress(cardNorm).toLowerCase()
-	const prefix = `${lo}:`
+registerIssuedCouponSeriesQueryCacheInvalidator((cardLo, issuedTokenId) => {
+	const prefix = `${cardLo}:`
 	for (const k of cardActiveIssuedCouponSeriesCache.keys()) {
 		if (k.startsWith(prefix)) {
 			cardActiveIssuedCouponSeriesCache.delete(k)
+		}
+	}
+	for (const k of cardActiveIssuedProductionSeriesCache.keys()) {
+		if (k.startsWith(prefix)) {
+			cardActiveIssuedProductionSeriesCache.delete(k)
 		}
 	}
 	recentIssuedCouponSeriesCache.clear()
 	if (issuedTokenId) {
 		try {
 			const tk = String(BigInt(issuedTokenId.trim()))
-			seriesSharedMetadataCache.delete(`${lo}:${tk}`)
+			seriesSharedMetadataCache.delete(`${cardLo}:${tk}`)
 		} catch {
 			/* ignore */
 		}
 	}
-}
+})
 
 function summarizeIssuedCouponIconForClusterLog(icon: string | undefined): string {
 	const s = String(icon ?? '').trim()
@@ -5932,7 +5940,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				seenToken.add(row.tokenId)
 				ordered.push(row)
 			}
-			const cardContract = new ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, providerBase)
+			const chain = await resolveUserCardChain(checksum)
+			const cardProvider = providerForUserCardChain(chain)
+			const cardContract = new ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, cardProvider)
 			const items: Array<{
 				cardAddress: string
 				tokenId: string
@@ -6037,7 +6047,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				seenToken.add(row.tokenId)
 				ordered.push(row)
 			}
-			const cardContract = new ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, providerBase)
+			const chain = await resolveUserCardChain(checksum)
+			const cardProvider = providerForUserCardChain(chain)
+			const cardContract = new ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, cardProvider)
 			const items: Array<{
 				cardAddress: string
 				tokenId: string
@@ -7397,14 +7409,17 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			}
 		}
 		try {
-			const card = new ethers.Contract(ethers.getAddress(cardAddress), ['function owner() view returns (address)'], providerBase)
+			const cardAddrNorm = ethers.getAddress(cardAddress)
+			const chain = await resolveUserCardChain(cardAddrNorm)
+			const cardProvider = providerForUserCardChain(chain)
+			const card = new ethers.Contract(cardAddrNorm, ['function owner() view returns (address)'], cardProvider)
 			const owner = ethers.getAddress(await card.owner())
-			const vc = await getBeamioUserCardFactoryGateway(ethers.getAddress(cardAddress))
+			const vc = await getBeamioUserCardFactoryGateway(cardAddrNorm)
 			const digest = ethers.TypedDataEncoder.hash(
 				{
 					name: 'BeamioUserCardFactory',
 					version: '1',
-					chainId: BASE_CHAIN_ID,
+					chainId: chainIdForUserCardChain(chain),
 					verifyingContract: vc,
 				},
 				{

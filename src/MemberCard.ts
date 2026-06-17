@@ -149,8 +149,10 @@ import {
 	getSeriesByCardAndTokenId,
 	listRegisteredBeamioUserCardAddresses,
 	listNfcBeamioUserCardHoldingsByTagId,
+	registerSeriesToDb,
 	type NfcLinkAppSessionDb,
 } from './db'
+import { invalidateIssuedCouponSeriesQueryCachesForCard } from './endpoint/issuedCouponSeriesQueryCache'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './endpoint/getUIDAssetsLogic'
 import {
 	getAaFactoryAddressFromUserCardFactoryPaymaster,
@@ -13778,6 +13780,52 @@ export const cardCreateIssuedNftPreCheck = async (body: {
 		if (pool?.length) {
 			const cardProbe = await requireBeamioUserCardBytecode(cardAddress)
 			if (!cardProbe.ok) return { success: false, error: cardProbe.error }
+			const gw = await getBeamioUserCardFactoryGateway(cardAddress)
+			const cardChain = await resolveUserCardChain(ethers.getAddress(cardAddress))
+			const cardProvider = providerForUserCardChain(cardChain)
+			const factoryReader = new ethers.Contract(
+				gw,
+				[
+					'function defaultAdminStatsQueryModule() view returns (address)',
+					'function defaultIssuedNftModule() view returns (address)',
+				],
+				cardProvider,
+			)
+			const adminStats = (await factoryReader.defaultAdminStatsQueryModule()) as string
+			const issuedMod = (await factoryReader.defaultIssuedNftModule()) as string
+			if (!adminStats || adminStats === ethers.ZeroAddress) {
+				return {
+					success: false,
+					error:
+						'UC_GlobalMisconfigured: factory defaultAdminStatsQueryModule is not configured (createIssuedNft requires AdminStatsQueryModule)',
+				}
+			}
+			const adminCode = await cardProvider.getCode(adminStats)
+			if (!adminCode || adminCode === '0x') {
+				return { success: false, error: `UC_GlobalMisconfigured: AdminStatsQueryModule has no code at ${adminStats}` }
+			}
+			if (!issuedMod || issuedMod === ethers.ZeroAddress) {
+				return { success: false, error: 'UC_GlobalMisconfigured: factory defaultIssuedNftModule is not configured' }
+			}
+			const issuedCode = await cardProvider.getCode(issuedMod)
+			if (!issuedCode || issuedCode === '0x') {
+				return { success: false, error: `UC_GlobalMisconfigured: IssuedNftModule has no code at ${issuedMod}` }
+			}
+			const routeReader = new ethers.Contract(
+				adminStats,
+				['function selectorModuleKind(bytes4) view returns (uint8)'],
+				cardProvider,
+			)
+			const createIssuedSel =
+				createIssuedNftIface.getFunction('createIssuedNft')?.selector ?? '0x'
+			const routeKind = Number(await routeReader.selectorModuleKind(createIssuedSel))
+			// BeamioUserCardModuleKinds.ISSUED_NFT = 2
+			if (routeKind !== 2) {
+				return {
+					success: false,
+					error: `UC_GlobalMisconfigured: AdminStatsQueryModule does not route createIssuedNft (kind=${routeKind}, expected=2)`,
+				}
+			}
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 		try {
@@ -14654,12 +14702,17 @@ export const executeForOwnerProcess = async () => {
 						const parsed = BeamioUserCardIface.parseLog({ topics: log.topics, data: log.data })
 						if (!parsed || parsed.name !== 'IssuedNftCreated') continue
 						const tokenId = Number(parsed.args.tokenId)
+						const tokenIdStr = String(tokenId)
+						const issuedProductKind = resolveIssuedNftProductKindFromMetadataExtra(extraPropsFromBody)
+						const chain = await resolveUserCardChain(cardAddress)
+						const cardProvider = providerForUserCardChain(chain)
+						const cardOnChain = new ethers.Contract(cardAddress, BeamioUserCardABI, cardProvider)
 						let cardOwner = (await getCardByAddress(cardAddress))?.cardOwner
 						if (!cardOwner) {
-							const card = new ethers.Contract(cardAddress, BeamioUserCardABI, providerBase)
-							const owner = await card.owner()
+							const owner = await cardOnChain.owner()
 							cardOwner = typeof owner === 'string' ? owner : String(owner)
 						}
+						const cardOwnerStr = ethers.getAddress(cardOwner)
 						const baseProps: Record<string, unknown> = {
 							...(backgroundColorFromBody && { background_color: backgroundColorFromBody }),
 							...(extraPropsFromBody && Object.keys(extraPropsFromBody).length > 0 ? extraPropsFromBody : {}),
@@ -14671,8 +14724,57 @@ export const executeForOwnerProcess = async () => {
 							...(backgroundColorFromBody && { background_color: backgroundColorFromBody }),
 							properties: baseProps,
 						}
-						await upsertNftTierMetadata({ cardAddress, cardOwner, tokenId, metadataJson })
+						await upsertNftTierMetadata({ cardAddress, cardOwner: cardOwnerStr, tokenId, metadataJson })
 						logger(Colors.green(`[createIssuedNft] upserted tier metadata card=${cardAddress} tokenId=${tokenId}`))
+
+						let seriesMetadata: Record<string, unknown>
+						if (issuedProductKind === 'catalog') {
+							seriesMetadata = {
+								...(extraPropsFromBody ?? {}),
+								issuedTokenId: tokenIdStr,
+							}
+							const beamioProduction =
+								extraPropsFromBody?.beamioProduction != null &&
+								typeof extraPropsFromBody.beamioProduction === 'object' &&
+								!Array.isArray(extraPropsFromBody.beamioProduction)
+									? (extraPropsFromBody.beamioProduction as { productionId?: unknown })
+									: undefined
+							const productionId = beamioProduction ? String(beamioProduction.productionId ?? '').trim() : ''
+							if (productionId) seriesMetadata.productionId = productionId
+						} else if (issuedProductKind === 'coupon') {
+							const beamioCoupon =
+								extraPropsFromBody?.beamioCoupon != null &&
+								typeof extraPropsFromBody.beamioCoupon === 'object' &&
+								!Array.isArray(extraPropsFromBody.beamioCoupon)
+									? (extraPropsFromBody.beamioCoupon as Record<string, unknown>)
+									: undefined
+							seriesMetadata = {
+								category: BEAMIO_COUPON_NFT_CATEGORY,
+								...(beamioCoupon ?? {}),
+								issuedTokenId: tokenIdStr,
+							}
+						} else {
+							seriesMetadata = {
+								...(extraPropsFromBody ?? {}),
+								issuedTokenId: tokenIdStr,
+							}
+						}
+						let sharedMetadataHash = ethers.ZeroHash
+						try {
+							const onChainHash = await cardOnChain.issuedNftSharedMetadataHash(tokenIdStr)
+							sharedMetadataHash = ethers.hexlify(onChainHash)
+						} catch {
+							/* keep ZeroHash — aligns with bizSite postRegisterIssuedNftSeries default */
+						}
+						await registerSeriesToDb({
+							cardAddress,
+							tokenId: tokenIdStr,
+							sharedMetadataHash,
+							cardOwner: cardOwnerStr,
+							metadataJson: seriesMetadata,
+						})
+						invalidateIssuedCouponSeriesQueryCachesForCard(cardAddress, tokenIdStr)
+						logger(Colors.green(`[createIssuedNft] registered series in DB card=${cardAddress} tokenId=${tokenIdStr}`))
 						break
 					}
 				} catch (e: any) {
