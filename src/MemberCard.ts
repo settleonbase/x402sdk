@@ -2774,7 +2774,7 @@ async function resolveBeamioAaAddressForEoaOnFactory(
 async function pickBUnitFeeConsumerPreferEoaThenAa(
 	payerEoa: string,
 	feeBUnits6: bigint,
-	opts?: { aaFactoryAddress?: string | null; explicitAaFallback?: string | null }
+	opts?: { aaFactoryAddress?: string | null; aaFactoryProvider?: ethers.Provider | null; explicitAaFallback?: string | null }
 ): Promise<{ ok: true; consumer: string; usedAaFallback: boolean } | { ok: false; error: string }> {
 	if (feeBUnits6 <= 0n) {
 		return { ok: false, error: 'B-Unit fee amount must be > 0' }
@@ -2804,7 +2804,7 @@ async function pickBUnitFeeConsumerPreferEoaThenAa(
 		if (hit) return hit
 	}
 	if (opts?.aaFactoryAddress && ethers.isAddress(opts.aaFactoryAddress)) {
-		const linkedAa = await resolveBeamioAaAddressForEoaOnFactory(providerBaseBackup, opts.aaFactoryAddress, eoaN)
+		const linkedAa = await resolveBeamioAaAddressForEoaOnFactory(opts.aaFactoryProvider ?? providerBaseBackup, opts.aaFactoryAddress, eoaN)
 		if (linkedAa) {
 			const hit = await tryConsumeAa(linkedAa)
 			if (hit) return hit
@@ -13460,6 +13460,8 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 
 	const cardNorm = ethers.getAddress(cardAddress)
 	const userNorm = ethers.getAddress(userEOA)
+	const cardChain = await resolveUserCardChain(cardNorm)
+	const cardProvider = providerForUserCardChain(cardChain)
 	const rows = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
 	if (tokenIdN == null) {
 		const matched = rows.find((row) => {
@@ -13485,12 +13487,16 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 
 	let holderAccount = userNorm
 	try {
+		const aaFactoryAddr = await getCardAaFactoryAddress(cardNorm)
 		const aaFactory = new ethers.Contract(
-			BASE_AA_FACTORY,
-			['function primaryAccountOf(address) view returns (address)'],
-			providerBaseBackup
+			aaFactoryAddr,
+			AA_FACTORY_READ_ABI as ethers.InterfaceAbi,
+			cardProvider
 		)
-		const aaCandidate = await aaFactory.primaryAccountOf(userNorm) as string
+		let aaCandidate = await aaFactory.beamioAccountOf(userNorm).catch(() => ethers.ZeroAddress) as string
+		if (!aaCandidate || aaCandidate === ethers.ZeroAddress) {
+			aaCandidate = await aaFactory.primaryAccountOf(userNorm).catch(() => ethers.ZeroAddress) as string
+		}
 		if (aaCandidate && aaCandidate !== ethers.ZeroAddress && ethers.isAddress(aaCandidate)) {
 			holderAccount = ethers.getAddress(aaCandidate)
 		}
@@ -13506,7 +13512,7 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 			'function isAdmin(address) view returns (bool)',
 			'function owner() view returns (address)',
 		],
-		providerBaseBackup
+		cardProvider
 	)
 	const signerNorm = signerEOA ? ethers.getAddress(signerEOA) : null
 	const [bal, isValid, signerIsAdmin, cardOwner] = await Promise.all([
@@ -13611,6 +13617,7 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 		if (amount <= 0n) return { success: false, error: 'amount must be > 0' }
 
 		const cardNorm = ethers.getAddress(cardAddress)
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
 		const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
 			cardAddr: cardNorm,
 			data,
@@ -13632,7 +13639,7 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 				'function balanceOf(address account, uint256 id) view returns (uint256)',
 				'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
 			],
-			providerBaseBackup
+			cardProvider
 		)
 		const holderNorm = ethers.getAddress(holder)
 		const [bal, isValid] = await Promise.all([
@@ -15007,12 +15014,13 @@ export const cardRedeemPreCheckBUnitBalance = async (
 }> => {
 	try {
 		const cardNorm = ethers.getAddress(cardAddress)
-		const card = new ethers.Contract(cardNorm, ['function owner() view returns (address)'], providerBaseBackup)
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
+		const card = new ethers.Contract(cardNorm, ['function owner() view returns (address)'], cardProvider)
 		const owner = (await card.owner()) as string
 		if (!owner || owner === ethers.ZeroAddress) {
 			return { success: false, error: 'Card owner not found for B-Unit fee' }
 		}
-		const resolveResult = await resolveCardOwnerToEOA(providerBaseBackup, owner)
+		const resolveResult = await resolveCardOwnerToEOA(cardProvider, owner)
 		if (!resolveResult.success) {
 			return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA for B-Unit fee' }
 		}
@@ -15021,6 +15029,7 @@ export const cardRedeemPreCheckBUnitBalance = async (
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardNorm)
 		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeBUnits6, {
 			aaFactoryAddress: aaFactoryAddr,
+			aaFactoryProvider: cardProvider,
 		})
 		if (!picked.ok) {
 			return { success: false, error: `Insufficient B-Units for redeem (${picked.error})` }
