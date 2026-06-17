@@ -6251,20 +6251,14 @@ export function hashContainerItems(items: { kind: number; asset: string; amount:
 	return ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['bytes32[]'], [hashes]))
 }
 
-/** 与 BeamioContainerStorageV07 布局一致：从 AA 账户 storage 读 container module 的 relayedNonce / openRelayedNonce */
-function containerNonceSlotBase(): bigint {
-	const slotHex = ethers.keccak256(ethers.toUtf8Bytes('beamio.container.module.storage.v07'))
-	return BigInt(slotHex)
-}
-
 export async function readContainerNonceFromAAStorage(
 	provider: ethers.Provider,
 	aaAccount: string,
 	kind: 'relayed' | 'openRelayed'
 ): Promise<bigint> {
-	const base = containerNonceSlotBase()
+	const base = BigInt(ethers.keccak256(ethers.toUtf8Bytes('beamio.container.module.storage.v07')))
 	const slot = kind === 'relayed' ? base : base + 1n
-	const raw = await provider.getStorage(aaAccount, slot)
+	const raw = await provider.getStorage(ethers.getAddress(aaAccount), slot)
 	return BigInt(raw)
 }
 
@@ -9248,6 +9242,14 @@ export const OpenContainerRelayProcess = async () => {
       Settle_ContractPool.unshift(SC)
       return setTimeout(() => OpenContainerRelayProcess(), 3000)
     }
+    const chainNonce = await readContainerNonceFromAAStorage(relayProvider, account, 'openRelayed')
+    if (chainNonce !== nonce_) {
+      const errMsg = `Payment code was already used or refreshed: payload nonce=${nonce_} but chain openRelayedNonce=${chainNonce}. Ask the customer to refresh Pay QR and scan the new code.`
+      logger(Colors.red(`[AAtoEOA/OpenContainer] ${errMsg}`))
+      obj.res.status(400).json({ success: false, error: errMsg }).end()
+      Settle_ContractPool.unshift(SC)
+      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+    }
     const tx = await FactoryWithRelay.relayContainerMainRelayedOpen(
       account,
       to,
@@ -9701,8 +9703,14 @@ export const OpenContainerRelayProcess = async () => {
       }
     } catch (_) {}
     logger(Colors.red(`❌ OpenContainerRelayProcess failed: ${msg}`))
+    const dataHex = typeof error?.data === 'string' ? error.data : ''
+    const isBadNonce = dataHex.length >= 10 && dataHex.slice(0, 10).toLowerCase() === '0x74794617'
+    const isInsufficientBalance = dataHex.length >= 10 && dataHex.slice(0, 10).toLowerCase() === '0xc6d837a8'
+    const clientError = isBadNonce
+      ? 'Payment code was already used. Ask the customer to refresh Pay QR and scan the new code.'
+      : msg
     try {
-      if (!obj.res?.headersSent) obj.res.status(500).json({ success: false, error: msg }).end()
+      if (!obj.res?.headersSent) obj.res.status(isBadNonce || isInsufficientBalance ? 400 : 500).json({ success: false, error: clientError }).end()
     } catch (resErr: any) {
       logger(Colors.red(`[AAtoEOA/OpenContainer] failed to send error response: ${resErr?.message ?? resErr}`))
     }
