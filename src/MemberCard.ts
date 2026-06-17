@@ -1337,7 +1337,8 @@ async function ensureAAForEOAOnAaFactory(
 	eoa: string,
 	aaFactoryAddress: string,
 	aaFactoryReadOnly: ethers.Contract,
-	heldSC?: SettleContractPoolEntry
+	heldSC?: SettleContractPoolEntry,
+	deployWalletOverride?: ethers.Wallet
 ): Promise<string> {
 	const eoaNorm = ethers.getAddress(eoa)
 	const factoryAddr = ethers.getAddress(aaFactoryAddress)
@@ -1372,12 +1373,39 @@ async function ensureAAForEOAOnAaFactory(
 	}
 
 	if (heldSC) {
-		return deployWithWallet(heldSC.walletBase)
+		return deployWithWallet(deployWalletOverride ?? heldSC.walletBase)
 	}
 
 	const SC = await shiftSettleContractForWrite('ensureAAForEOA')
 	try {
-		return await deployWithWallet(SC.walletBase)
+		return await deployWithWallet(deployWalletOverride ?? SC.walletBase)
+	} finally {
+		Settle_ContractPool.unshift(SC)
+	}
+}
+
+/**
+ * Master：在 **CoNET（224422）** 上确保 EOA 已有已部署的 Beamio AA（无则 createAccountFor）。
+ * 使用跨链同址 `BEAMIO_AA_FACTORY` + `walletConet` 送链。
+ */
+export const ensureAAForEOAOnConet = async (eoa: string): Promise<string> => {
+	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
+	const eoaNorm = ethers.getAddress(eoa)
+	const factoryAddr = ethers.getAddress(BASE_AA_FACTORY)
+	const aaFactoryReadOnly = new ethers.Contract(
+		factoryAddr,
+		BeamioAAAccountFactoryPaymasterABI,
+		providerConet
+	)
+	const SC = await shiftSettleContractForWrite('ensureAAForEOAOnConet')
+	try {
+		return await ensureAAForEOAOnAaFactory(
+			eoaNorm,
+			factoryAddr,
+			aaFactoryReadOnly,
+			SC,
+			SC.walletConet
+		)
 	} finally {
 		Settle_ContractPool.unshift(SC)
 	}

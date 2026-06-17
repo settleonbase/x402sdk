@@ -86,7 +86,12 @@ export const BASE_MAINNET_FACTORIES = {
   BeamioCardCCSA_ADDRESS: BASE_CCSA_CARD_ADDRESS,
 } as const
 
-/** CoNET 主网 chainId（BUnitAirdrop / consumeFromUser / 独立 BUint  indexer 记账） */
+/** CoNET UserCard Factory（224422）；与 deployments/conet-addresses.json `CARD_FACTORY` 同步 */
+export const CONET_CARD_FACTORY = '0xfA52a0CcC96C19cF4b6Ea864615F6d52BD0774FB'
+/** CoNET Factory ExecuteLib（linked library） */
+export const CONET_BEAMIO_USER_CARD_FACTORY_EXECUTE_LIB = '0xbc6f3926691d2306c96357ac08aadB5F50Ab0784'
+
+/** CoNET 主网 chainId（BUnitAirdrop / consumeFromUser / 独立 BUint indexer 记账） */
 export const CONET_MAINNET_CHAIN_ID = 224422
 
 export const CONTRACT_ADDRESSES = {
@@ -101,6 +106,7 @@ export const CONTRACT_ADDRESSES = {
   conet: {
     chainId: CONET_MAINNET_CHAIN_ID,
     aaFactory: BEAMIO_AA_FACTORY,
+    cardFactory: CONET_CARD_FACTORY,
     bUint: CONET_BUINT,
     bUnitAirdrop: CONET_BUNIT_AIRDROP_ADDRESS,
     buintRedeemAirdrop: CONET_BUINT_REDEEM_AIRDROP,

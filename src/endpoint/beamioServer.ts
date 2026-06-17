@@ -8276,6 +8276,22 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
+	/** GET /api/ensureAAForEOAOnConet?eoa=0x... - 转发 Master；在 CoNET 链上 ensure AA。 */
+	router.get('/ensureAAForEOAOnConet', async (req, res) => {
+		const { eoa } = req.query as { eoa?: string }
+		if (!eoa || !ethers.isAddress(eoa)) {
+			return res.status(400).json({ error: 'Invalid eoa: require valid 0x address' })
+		}
+		try {
+			const path = '/api/ensureAAForEOAOnConet?eoa=' + encodeURIComponent(eoa)
+			const { statusCode, body } = await getLocalhostBuffer(path)
+			res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[ensureAAForEOAOnConet] forward error:'), e?.message ?? e)
+			res.status(502).json({ error: e?.message ?? 'Failed to ensure CoNET AA for EOA' })
+		}
+	})
+
 	/** GET /api/getAAAccount?eoa=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */
 	router.get('/getAAAccount', async (req, res) => {
 		const { eoa } = req.query as { eoa?: string }
