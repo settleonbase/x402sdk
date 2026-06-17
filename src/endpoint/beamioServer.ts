@@ -724,6 +724,9 @@ const masterSessionConsumePosSig = async (sid: string): Promise<
 type JsonObject = Record<string, unknown>
 
 const ERC1155_METADATA_PATH_RE = /^(?:0x)?([0-9a-fA-F]{40})([0-9a-fA-F]{64})\.json$/
+/** BusinessStartKet NFT metadata image（Beamio logo PNG → IPFS fragment） */
+const BUSINESS_START_KET_METADATA_IMAGE_URL =
+	'https://ipfs.conet.network/api/getFragment?hash=0x3e94721678833790ab22c27fd80d2206c90847094c7a7331513aff361f0c83e5'
 /** Fallback when series/card has no renderable image (ipfs hash; explorers get proxy via token #0 rewrite). */
 const DEFAULT_METADATA_IMAGE_URL =
 	'https://ipfs.conet.network/api/getFragment?hash=0x6022e4efb44990767d1faa1642f570ed8a49ab0417b370aaae35f84884061c97'
@@ -870,7 +873,7 @@ function buildBusinessStartKetExplorerMetadata(tokenIdBigInt: bigint): JsonObjec
 		{
 			name,
 			description,
-			image: DEFAULT_METADATA_IMAGE_URL,
+			image: BUSINESS_START_KET_METADATA_IMAGE_URL,
 			externalUrl: 'https://beamio.app/app/',
 			decimals: 0,
 			attributes: [
