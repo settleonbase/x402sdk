@@ -113,6 +113,8 @@ function createCardRevertHint(decoded: string | null): string {
 export type CreateBeamioCardInitCodeOptions = {
   /** BeamioUserCard 的 metadata URI（constructor 占位，合约 uri() 重写为 0x{address(this)}{id}.json） */
   uri?: string
+  /** Explorer-facing BeamioUserCard.name(); should be merchant / store display name. */
+  contractName?: string
   /** 已废弃/忽略：gateway 强制为 factory.getAddress()，勿传其它地址以免 BM_DeployFailedAtStep(1) */
   gateway?: string
   /** 0=按单次 topup/redeem 金额升级；1=按 points 余额；2=按累计向 admin 转账 points。constructor 固定，默认 0 */
@@ -281,7 +283,8 @@ export async function buildBeamioUserCardInitCode(
   gateway: string,
   upgradeType: 0 | 1 | 2 = 0,
   initialTransferWhitelistEnabled = false,
-  libraryAddresses?: BeamioUserCardLibraryAddresses
+  libraryAddresses?: BeamioUserCardLibraryAddresses,
+  contractName = ''
 ): Promise<string> {
   const fs = require('fs') as typeof import('fs')
   const raw = fs.readFileSync(artifactPath, 'utf-8')
@@ -314,7 +317,8 @@ export async function buildBeamioUserCardInitCode(
     initialOwner,
     gateway,
     upgradeType,
-    initialTransferWhitelistEnabled
+    initialTransferWhitelistEnabled,
+    contractName
   )
   const initCode = deployTx?.data
   if (!initCode) throw new Error('Failed to build BeamioUserCard initCode')
@@ -330,7 +334,8 @@ async function buildBeamioUserCardInitCodeFromParams(
   gateway: string,
   upgradeType: 0 | 1 | 2,
   initialTransferWhitelistEnabled = false,
-  libraryAddresses?: BeamioUserCardLibraryAddresses
+  libraryAddresses?: BeamioUserCardLibraryAddresses,
+  contractName = ''
 ): Promise<string> {
   const artifact = BeamioUserCardArtifact as {
     abi: ethers.InterfaceAbi
@@ -362,7 +367,8 @@ async function buildBeamioUserCardInitCodeFromParams(
     initialOwner,
     gateway,
     upgradeType,
-    initialTransferWhitelistEnabled
+    initialTransferWhitelistEnabled,
+    contractName
   )
   const initCode = deployTx?.data
   if (!initCode) throw new Error('Failed to build BeamioUserCard initCode')
@@ -430,7 +436,8 @@ export async function createBeamioCardWithFactory(
       gateway,
       upgradeType,
       wlOn,
-      initCodeOrOptions.libraryAddresses
+      initCodeOrOptions.libraryAddresses,
+      initCodeOrOptions.contractName?.trim() ?? ''
     )
     initCodeSource = 'builtFromOptions'
   }
@@ -806,7 +813,8 @@ export async function createBeamioCardWithFactoryReturningHash(
       gateway,
       upgradeType2,
       wlOn,
-      initCodeOrOptions.libraryAddresses
+      initCodeOrOptions.libraryAddresses,
+      initCodeOrOptions.contractName?.trim() ?? ''
     )
     initCodeSource = 'builtFromOptions'
   }
