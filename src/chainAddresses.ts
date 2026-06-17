@@ -72,13 +72,13 @@ export const BASE_BEAMIO_ORACLE = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008'
  * BusinessStartKet ERC-1155（CoNET）。与 deployments/conet-addresses.json `BusinessStartKet` 同步。
  * 未部署时留空串；可用环境变量 CONET_BUSINESS_START_KET 覆盖（便于未提交地址前的本地联调）。
  */
-export const CONET_BUSINESS_START_KET = '0xe747faB957eD29ec07B81Edab546AF5C6724fCf2'
+export const CONET_BUSINESS_START_KET = '0xAcf20dbb4DE0992d8947Ef00b505bBc17E6A03b2'
 
 /**
  * BusinessStartKetRedeem（CoNET）。与 deployments/conet-addresses.json `BusinessStartKetRedeem` 同步。
  * 环境变量 CONET_BUSINESS_START_KET_REDEEM 可覆盖。
  */
-export const CONET_BUSINESS_START_KET_REDEEM = '0x4C3995D1Cad52a9EE65024C8Ad80Ad6B51b098ce'
+export const CONET_BUSINESS_START_KET_REDEEM = '0xe9CeDC2c9F7DE7c0e6d1f1ba1F7e7126F0F1D3c8'
 
 export const BASE_MAINNET_FACTORIES = {
   AA_FACTORY: BEAMIO_AA_FACTORY,

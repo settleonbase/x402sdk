@@ -885,6 +885,25 @@ function buildBusinessStartKetExplorerMetadata(tokenIdBigInt: bigint): JsonObjec
 	)
 }
 
+/** CoNET BusinessStartKet 合约级 metadata（`contractURI()` → Blockscout 集合名称） */
+function buildBusinessStartKetContractMetadata(): JsonObject {
+	return normalizeExplorerMetadata(
+		{},
+		{
+			name: 'BusinessStartKet NFT',
+			description:
+				'Business Starter Kit ERC-1155 on CoNET. Token #0 is the merchant card issuance certificate on Beamio.',
+			image: BUSINESS_START_KET_METADATA_IMAGE_URL,
+			externalUrl: 'https://beamio.app/app/',
+			attributes: [
+				{ trait_type: 'asset_type', value: 'BUSINESS_START_KET' },
+				{ trait_type: 'contract', value: CONET_BUSINESS_START_KET },
+				{ trait_type: 'symbol', value: 'BSK' },
+			],
+		}
+	)
+}
+
 const SC = beamio_ContractPool[0].constAccountRegistry
 
 const userOwnershipCheck = async (accountName: string, wallet: string) => {
@@ -5275,6 +5294,14 @@ const routing = ( router: Router ) => {
 	})
 
 	registerBeamioFragmentProxyRoute(router)
+
+	/** GET /api/metadata/business-start-ket/contract.json — BusinessStartKet `contractURI()` */
+	router.get('/metadata/business-start-ket/contract.json', async (_req, res) => {
+		const out = buildBusinessStartKetContractMetadata()
+		res.setHeader('Content-Type', 'application/json')
+		res.setHeader('Cache-Control', 'public, max-age=300')
+		return res.status(200).json(out)
+	})
 
 	/** GET /api/metadata/business-start-ket/{64hex}.json — BusinessStartKet ERC-1155（与合约 uri 模板一致） */
 	router.get('/metadata/business-start-ket/:tokenIdFile', async (req, res) => {
