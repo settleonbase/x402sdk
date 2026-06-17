@@ -614,6 +614,7 @@ masterSetup.settle_contractAdmin.forEach((n: string) => {
 /**
  * 启动时确保 ~/.master.json 的 settle_contractAdmin 地址在以下工厂具备 paymaster 权限：
  * - BeamioUserCardFactoryPaymasterV07（BASE_CARD_FACTORY）：owner + changePaymasterStatus / isPaymaster
+ * - BeamioUserCardFactoryPaymasterV07（CONET_CARD_FACTORY）：owner + changePaymasterStatus / isPaymaster
  * - BeamioFactoryPaymasterV07（UserCard._aaFactory / BASE_AA_FACTORY）：admin + addPayMaster / isPayMaster
  * - 幂等：已存在则跳过
  * - 仅使用 settle_contractAdmin[0] 作为写入 signer，避免多 signer/multi-worker 并发 nonce 冲突
@@ -748,6 +749,76 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 			logger(
 				Colors.yellow(
 					`[factory-admin-init] card: skip: settle_contractAdmin[0]=${ownerWallet.address} is not factory owner (${cardOwnerOnChain})`
+				)
+			)
+		}
+
+		// ----- CoNET UserCard factory paymasters -----
+		const ownerConetWallet = new ethers.Wallet(ownerPk, providerConet)
+		const readOnlyConetCardFactory = new ethers.Contract(
+			CONET_CARD_FACTORY,
+			BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
+			providerConet
+		)
+		let conetCardOwnerOnChain: string | null = null
+		try {
+			conetCardOwnerOnChain = String(await readOnlyConetCardFactory.owner())
+		} catch (e: any) {
+			logger(Colors.red(`[factory-admin-init] conet-card: owner() failed: ${e?.message ?? e}`))
+		}
+		const conetCardOwnerOnChainLower = conetCardOwnerOnChain?.toLowerCase() ?? ''
+		if (conetCardOwnerOnChain && ownerConetWallet.address.toLowerCase() === conetCardOwnerOnChainLower) {
+			const ownerConetCardFactory = new ethers.Contract(
+				CONET_CARD_FACTORY,
+				BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
+				ownerConetWallet
+			)
+			for (const adminAddr of adminTargets) {
+				const adminLower = adminAddr.toLowerCase()
+				if (adminLower === conetCardOwnerOnChainLower) {
+					continue
+				}
+
+				let isPaymaster = false
+				try {
+					isPaymaster = !!(await readOnlyConetCardFactory.isPaymaster(adminAddr))
+				} catch (e: any) {
+					logger(Colors.red(`[factory-admin-init] conet-card: isPaymaster(${adminAddr}) failed: ${e?.message ?? e}`))
+					continue
+				}
+
+				if (isPaymaster) {
+					continue
+				}
+
+				try {
+					const tx = await ownerConetCardFactory.changePaymasterStatus(adminAddr, true)
+					await tx.wait()
+					logger(Colors.green(`[factory-admin-init] conet-card: added paymaster(admin): ${adminAddr}`))
+				} catch (e: any) {
+					const msg = String(e?.message ?? e)
+					const isNonceRace =
+						msg.includes('nonce too low') ||
+						msg.includes('nonce has already been used') ||
+						e?.code === 'NONCE_EXPIRED'
+					if (isNonceRace) {
+						try {
+							const nowPaymaster = !!(await readOnlyConetCardFactory.isPaymaster(adminAddr))
+							if (nowPaymaster) {
+								logger(Colors.yellow(`[factory-admin-init] conet-card: nonce race but admin already set: ${adminAddr}`))
+								continue
+							}
+						} catch {
+							// ignore and fall through to error log
+						}
+					}
+					logger(Colors.red(`[factory-admin-init] conet-card: add paymaster(admin) failed for ${adminAddr}: ${msg}`))
+				}
+			}
+		} else if (conetCardOwnerOnChain) {
+			logger(
+				Colors.yellow(
+					`[factory-admin-init] conet-card: skip: settle_contractAdmin[0]=${ownerConetWallet.address} is not factory owner (${conetCardOwnerOnChain})`
 				)
 			)
 		}
