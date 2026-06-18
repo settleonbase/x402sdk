@@ -95,6 +95,22 @@ import {
 	type BeamioUserCardChainKey,
 } from './beamioUserCardChain'
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+		promise.then(
+			(value) => {
+				clearTimeout(timer)
+				resolve(value)
+			},
+			(error) => {
+				clearTimeout(timer)
+				reject(error)
+			}
+		)
+	})
+}
+
 function beamioUserCardLibrariesFromConfig(override?: BeamioUserCardLibraryAddresses): BeamioUserCardLibraryAddresses {
 	if (override) return override
 	const defaults: BeamioUserCardLibraryAddresses = {
@@ -9287,18 +9303,49 @@ export const OpenContainerRelayProcess = async () => {
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_OPEN_ABI],
       relayWallet
     )
-    const relayWalletIsPaymaster = await FactoryWithRelay.isPayMaster(relayWallet.address).catch(() => false)
-    if (!relayWalletIsPaymaster) {
-      const factoryAddr = await FactoryWithRelay.getAddress().catch(() => relayAaFactoryAddr)
-      const err = `OpenContainer relay wallet ${relayWallet.address} is not paymaster on AA factory ${factoryAddr} (${relayCtx.chain}). Restart API after factory-admin-init or register this settle admin with addPayMaster.`
-      logger(Colors.red(`[AAtoEOA/OpenContainer] REJECT: ${err}`))
-      obj.res.status(500).json({ success: false, error: err }).end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+    logger(
+      Colors.gray(
+        `[AAtoEOA/OpenContainer] skip isPayMaster preflight for relay wallet=${relayWallet.address} factory=${relayAaFactoryAddr} chain=${relayCtx.chain}; relay tx will enforce permission on-chain`
+      )
+    )
+    let payeeResolvedFromMerchantCard = false
+    if (has1155 && relayCardSeed) {
+      try {
+        const payeeCard = new ethers.Contract(
+          ethers.getAddress(relayCardSeed),
+          ['function owner() view returns (address)'],
+          relayProvider
+        )
+        const merchantOwner = (await payeeCard.owner()) as string
+        if (!merchantOwner || merchantOwner === ethers.ZeroAddress) {
+          throw new Error(`merchant card ${relayCardSeed} has no owner`)
+        }
+        const merchantOwnerEoa = ethers.getAddress(merchantOwner)
+        const merchantOwnerAa = await ensureAAForEOAOnCard(ethers.getAddress(relayCardSeed), merchantOwnerEoa, SC)
+        const resolvedPayeeAa = ethers.getAddress(merchantOwnerAa)
+        if (resolvedPayeeAa.toLowerCase() === account.toLowerCase()) {
+          obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same. Check merchant card owner / payer account.' }).end()
+          Settle_ContractPool.unshift(SC)
+          return setTimeout(() => OpenContainerRelayProcess(), 3000)
+        }
+        to = resolvedPayeeAa
+        payeeResolvedFromMerchantCard = true
+        logger(
+          Colors.cyan(
+            `[AAtoEOA/OpenContainer] POS ERC1155 payee resolved from merchant card owner ${merchantOwnerEoa} -> AA ${to}`
+          )
+        )
+      } catch (e: any) {
+        const err = `OpenContainer ERC1155: cannot resolve merchant card owner AA: ${e?.shortMessage ?? e?.message ?? String(e)}`
+        logger(Colors.red(`[AAtoEOA/OpenContainer] REJECT: ${err}`))
+        obj.res.status(500).json({ success: false, error: err }).end()
+        Settle_ContractPool.unshift(SC)
+        return setTimeout(() => OpenContainerRelayProcess(), 3000)
+      }
     }
     // BeamioUserCard 要求 points(ERC1155) 只能转给 BeamioAccount；若 payload 含 ERC1155 或 to 为 EOA，将 to 解析为受益人 primary AA（严禁用付款方 account 的 AA 作为 to）
-    const toIsEOA = !(await relayProvider.getCode(to).then((c: string) => c && c !== '0x' && c.length > 2))
-    const needResolveTo = has1155 || toIsEOA
+    const toIsEOA = payeeResolvedFromMerchantCard ? false : !(await relayProvider.getCode(to).then((c: string) => c && c !== '0x' && c.length > 2))
+    const needResolveTo = !payeeResolvedFromMerchantCard && (has1155 || toIsEOA)
     if (needResolveTo) {
       try {
         // 仅当 to 为 EOA 时需通过 primaryAccountOf(EOA) 解析为 AA；primaryAccountOf 的 key 是 EOA 而非 AA
@@ -9374,7 +9421,7 @@ export const OpenContainerRelayProcess = async () => {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] resolve beneficiary ${payload.to} failed: ${e?.message ?? e}`))
       }
     }
-    if (has1155) {
+    if (has1155 && !payeeResolvedFromMerchantCard) {
       const payeeReg = await FactoryWithRelay.isBeamioAccount(ethers.getAddress(to)).catch(() => false)
       if (!payeeReg) {
         const err =
@@ -9398,17 +9445,54 @@ export const OpenContainerRelayProcess = async () => {
       Settle_ContractPool.unshift(SC)
       return setTimeout(() => OpenContainerRelayProcess(), 3000)
     }
-    const tx = await FactoryWithRelay.relayContainerMainRelayedOpen(
-      account,
+    logger(
+      Colors.gray(
+        `[AAtoEOA/OpenContainer] sending EntryPoint relay account=${account} to=${to} nonce=${nonce_} chain=${relayCtx.chain}`
+      )
+    )
+    const entryPointAddress = ethers.getAddress((await FactoryWithRelay.ENTRY_POINT()) as string)
+    const entryPointRead = new ethers.Contract(entryPointAddress, EntryPointHandleOpsABI, relayProvider)
+    const accountIface = new ethers.Interface([
+      'function containerMainRelayedOpenFromEntryPoint(address to,(uint8 kind,address asset,uint256 amount,uint256 tokenId,bytes data)[] items,uint8 currencyType,uint256 maxAmount,uint256 nonce_,uint256 deadline_,bytes sig)',
+    ])
+    const callData = accountIface.encodeFunctionData('containerMainRelayedOpenFromEntryPoint', [
       to,
       items,
       payload.currencyType,
       maxAmount,
       nonce_,
       deadline_,
-      sigBytes
+      sigBytes,
+    ])
+    const userOpNonce = (await entryPointRead.getNonce(account, 0n)) as bigint
+    const feeDataOpen = await relayProvider.getFeeData()
+    const maxFeePerGasOpen = feeDataOpen.maxFeePerGas ?? 2_000_000_000n
+    const maxPriorityFeePerGasOpen = feeDataOpen.maxPriorityFeePerGas ?? 100_000_000n
+    const packedOpenOp: AAtoEOAUserOp = {
+      sender: account,
+      nonce: userOpNonce,
+      initCode: '0x',
+      callData,
+      accountGasLimits: packUserOpUints128(8_000_000n, 8_000_000n),
+      preVerificationGas: 300_000n,
+      gasFees: packUserOpUints128(maxPriorityFeePerGasOpen, maxFeePerGasOpen),
+      paymasterAndData: buildPaymasterAndDataV07(relayAaFactoryAddr),
+      signature: sigHex,
+    }
+    logger(
+      Colors.gray(
+        `[AAtoEOA/OpenContainer] relayHandleOps via EntryPoint=${entryPointAddress} userOpNonce=${userOpNonce.toString()} callDataBytes=${hexBytesLen(callData)}`
+      )
     )
-    logger(`[AAtoEOA/OpenContainer] relay tx submitted hash=${tx.hash}`)
+    const txOp = {
+      ...packedOpenOp,
+      nonce: asBigInt(packedOpenOp.nonce, 0n),
+      preVerificationGas: asBigInt(packedOpenOp.preVerificationGas, 0n),
+      signature: sigBytes,
+    }
+    const beneficiary = await relayWallet.getAddress()
+    const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+    logger(`[AAtoEOA/OpenContainer] EntryPoint relayHandleOps tx submitted hash=${tx.hash}`)
     // 立即返回 hash 给客户端，避免 tx.wait() 等待链上确认导致 502 超时
     if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
     const openRelayReceipt = await tx.wait().catch((waitErr: any) => {

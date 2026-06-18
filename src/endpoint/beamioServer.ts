@@ -2087,12 +2087,26 @@ const routing = ( router: Router ) => {
 			const addr = ethers.getAddress(wallet.trim())
 			const code = await providerBase.getCode(addr)
 			const isAA = code && code !== '0x' && code.length > 2
+			const aaOwnerAbi = ['function owner() view returns (address)']
+			const conetAaOwner = isAA
+				? ''
+				: await (async () => {
+					try {
+						const aaContract = new ethers.Contract(addr, aaOwnerAbi, providerConet)
+						const owner = await aaContract.owner()
+						return owner && owner !== ethers.ZeroAddress && ethers.isAddress(owner)
+							? ethers.getAddress(owner)
+							: ''
+					} catch {
+						return ''
+					}
+				})()
+			const isConetAA = !isAA && !!conetAaOwner
 
 			let eoa: string
 			let aaAddr: string
 
 			if (isAA) {
-				const aaOwnerAbi = ['function owner() view returns (address)']
 				const aaContract = new ethers.Contract(addr, aaOwnerAbi, providerBase)
 				const owner = await aaContract.owner()
 				if (!owner || owner === ethers.ZeroAddress) {
@@ -2116,6 +2130,10 @@ const routing = ( router: Router ) => {
 					)
 				}
 				aaAddr = canonicalAa
+			} else if (isConetAA) {
+				eoa = conetAaOwner
+				const canonicalAa = await resolveBeamioAaForEoaWithFallback(providerBase, eoa).catch(() => null)
+				aaAddr = canonicalAa ? ethers.getAddress(canonicalAa) : addr
 			} else {
 				eoa = addr
 				const primary = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
