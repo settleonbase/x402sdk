@@ -8441,7 +8441,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		try {
 			const out = await prepareAAAccountCreationViaEntryPoint(ethers.getAddress(eoa))
-			return res.status(200).json({ success: true, ...out })
+			return res.status(200).json(convertBigIntToString({ success: true, ...out }))
 		} catch (e: any) {
 			logger(Colors.red('[aaCreateViaEntryPointPrepare] error:'), e?.message ?? e)
 			return res.status(500).json({ success: false, error: e?.message ?? 'Failed to prepare AA creation UserOp' })
