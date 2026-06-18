@@ -701,6 +701,31 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 			})
 			.filter((a): a is string => !!a)
 
+		const resolveRelayerAaPaymasterTargets = async (
+			chain: BeamioUserCardChainKey,
+			aaFactoryOverride?: string
+		): Promise<string[]> => {
+			const out: string[] = []
+			for (const sc of Settle_ContractPool) {
+				try {
+					const relayer = await ensureRelayerBeamioAccountForEntryPoint(
+						sc,
+						chain,
+						`factory-admin-init:${chain}-relayer-aa`,
+						aaFactoryOverride
+					)
+					out.push(relayer.aaAccount)
+				} catch (e: any) {
+					logger(
+						Colors.yellow(
+							`[factory-admin-init] ${chain}: relayer AA prepare failed for ${settleRelayWalletForChain(sc, chain).address}: ${e?.shortMessage ?? e?.message ?? e}`
+						)
+					)
+				}
+			}
+			return [...new Set(out.map((a) => ethers.getAddress(a)))]
+		}
+
 		// ----- UserCard factory paymasters -----
 		const readOnlyCardFactory = new ethers.Contract(
 			BeamioUserCardFactoryPaymasterV2,
@@ -720,7 +745,18 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 				BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
 				ownerWallet
 			)
-			for (const adminAddr of adminTargets) {
+			let baseCardAaFactoryForRelayer = aaFactoryForUserCardChain('base')
+			try {
+				const r = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerBaseBackup, BeamioUserCardFactoryPaymasterV2)
+				if (r) baseCardAaFactoryForRelayer = ethers.getAddress(r)
+			} catch {
+				/* use configured base AA factory */
+			}
+			const baseFactoryPaymasterTargets = [
+				...adminTargets,
+				...(await resolveRelayerAaPaymasterTargets('base', baseCardAaFactoryForRelayer)),
+			]
+			for (const adminAddr of baseFactoryPaymasterTargets) {
 				const adminLower = adminAddr.toLowerCase()
 				if (adminLower === cardOwnerOnChainLower) {
 					continue
@@ -741,7 +777,7 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 				try {
 					const tx = await ownerCardFactory.changePaymasterStatus(adminAddr, true)
 					await tx.wait()
-					logger(Colors.green(`[factory-admin-init] card: added paymaster(admin): ${adminAddr}`))
+					logger(Colors.green(`[factory-admin-init] card: added paymaster: ${adminAddr}`))
 				} catch (e: any) {
 					const msg = String(e?.message ?? e)
 					const isNonceRace =
@@ -759,7 +795,7 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 							// ignore and fall through to error log
 						}
 					}
-					logger(Colors.red(`[factory-admin-init] card: add paymaster(admin) failed for ${adminAddr}: ${msg}`))
+					logger(Colors.red(`[factory-admin-init] card: add paymaster failed for ${adminAddr}: ${msg}`))
 				}
 			}
 		} else if (cardOwnerOnChain) {
@@ -790,7 +826,18 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 				BeamioFactoryPaymasterABI as ethers.InterfaceAbi,
 				ownerConetWallet
 			)
-			for (const adminAddr of adminTargets) {
+			let conetCardAaFactoryForRelayer = aaFactoryForUserCardChain('conet')
+			try {
+				const r = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerConet, CONET_CARD_FACTORY)
+				if (r) conetCardAaFactoryForRelayer = ethers.getAddress(r)
+			} catch {
+				/* use configured conet AA factory */
+			}
+			const conetFactoryPaymasterTargets = [
+				...adminTargets,
+				...(await resolveRelayerAaPaymasterTargets('conet', conetCardAaFactoryForRelayer)),
+			]
+			for (const adminAddr of conetFactoryPaymasterTargets) {
 				const adminLower = adminAddr.toLowerCase()
 				if (adminLower === conetCardOwnerOnChainLower) {
 					continue
@@ -811,7 +858,7 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 				try {
 					const tx = await ownerConetCardFactory.changePaymasterStatus(adminAddr, true)
 					await tx.wait()
-					logger(Colors.green(`[factory-admin-init] conet-card: added paymaster(admin): ${adminAddr}`))
+					logger(Colors.green(`[factory-admin-init] conet-card: added paymaster: ${adminAddr}`))
 				} catch (e: any) {
 					const msg = String(e?.message ?? e)
 					const isNonceRace =
@@ -829,7 +876,7 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 							// ignore and fall through to error log
 						}
 					}
-					logger(Colors.red(`[factory-admin-init] conet-card: add paymaster(admin) failed for ${adminAddr}: ${msg}`))
+					logger(Colors.red(`[factory-admin-init] conet-card: add paymaster failed for ${adminAddr}: ${msg}`))
 				}
 			}
 		} else if (conetCardOwnerOnChain) {
@@ -2855,17 +2902,22 @@ async function maybeExecuteChargeOwnerChildBurnAfterContainerRelay(params: {
 	try {
 		let tx: ethers.ContractTransactionResponse
 		const factory = await contractForExecuteForAdmin(params.SC, cardNorm)
-		try {
-			tx = await factory.executeForAdmin(cardNorm, burn.data, BigInt(deadlineNum), nonceHex, burn.adminSignature)
-		} catch (gasErr: any) {
-			if (/estimateGas|missing revert data|CALL_EXCEPTION/i.test(gasErr?.message ?? '')) {
-				tx = await factory.executeForAdmin(cardNorm, burn.data, BigInt(deadlineNum), nonceHex, burn.adminSignature, {
-					gasLimit: 650_000,
-				})
-			} else {
-				throw gasErr
-			}
-		}
+		const factoryAddress = ethers.getAddress(await factory.getAddress())
+		const factoryIface = new ethers.Interface(['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'])
+		const cardChain = await resolveUserCardChain(cardNorm)
+		tx = await relayUserCardFactoryCallViaEntryPoint({
+			SC: params.SC,
+			chain: cardChain,
+			factoryAddress,
+			factoryCallData: factoryIface.encodeFunctionData('executeForAdmin', [
+				cardNorm,
+				burn.data,
+				BigInt(deadlineNum),
+				nonceHex,
+				burn.adminSignature,
+			]),
+			logTag: 'chargeOwnerChildBurn',
+		})
 		logger(Colors.green(`[chargeOwnerChildBurn] executeForAdmin ok tx=${tx.hash}`))
 		await tx.wait().catch(() => {})
 	} catch (e: any) {
@@ -3129,30 +3181,22 @@ export const executeForAdminProcess = async () => {
 		}
 		const factory = await contractForExecuteForAdmin(SC, obj.cardAddr)
 		let tx: ethers.ContractTransactionResponse
-		try {
-			tx = await factory.executeForAdmin(
+		const factoryAddress = ethers.getAddress(await factory.getAddress())
+		const factoryIface = new ethers.Interface(['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'])
+		const executeCardChain = await resolveUserCardChain(obj.cardAddr)
+		tx = await relayUserCardFactoryCallViaEntryPoint({
+			SC,
+			chain: executeCardChain,
+			factoryAddress,
+			factoryCallData: factoryIface.encodeFunctionData('executeForAdmin', [
 				obj.cardAddr,
 				obj.data,
 				obj.deadline,
 				obj.nonce,
-				obj.adminSignature
-			)
-		} catch (gasErr: any) {
-			// 部分 RPC 在 estimateGas 时返回 "missing revert data"，直接发送可成功。用固定 gasLimit 重试
-			if (/estimateGas|missing revert data|CALL_EXCEPTION/i.test(gasErr?.message ?? '')) {
-				logger(Colors.yellow(`[executeForAdminProcess] estimateGas failed, retrying with gasLimit=600000`))
-				tx = await factory.executeForAdmin(
-					obj.cardAddr,
-					obj.data,
-					obj.deadline,
-					obj.nonce,
-					obj.adminSignature,
-					{ gasLimit: 600_000 }
-				)
-			} else {
-				throw gasErr
-			}
-		}
+				obj.adminSignature,
+			]),
+			logTag: 'executeForAdminProcess',
+		})
 		logger(Colors.green(`[executeForAdminProcess] tx=${tx.hash} | uid=${obj.uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'}`))
 		const shouldWaitReceiptBeforeSuccess =
 			isAdminManager || Boolean(mintParsed) || Boolean(burnParsedForLog) || Boolean(burnIssuedNftParsed)
@@ -8554,6 +8598,145 @@ function buildPaymasterAndDataV07(factoryAddress: string, verificationGasLimit =
 	)
 }
 
+function aaFactoryForUserCardChain(chain: BeamioUserCardChainKey): string {
+	return chain === 'conet' ? CONET_AA_FACTORY : BASE_AA_FACTORY
+}
+
+const BeamioAccountExecuteABI = [
+	'function execute(address dest,uint256 value,bytes func)',
+] as const
+
+const BeamioUserCardFactoryPaymasterStatusABI = [
+	'function isPaymaster(address account) view returns (bool)',
+	'function changePaymasterStatus(address account,bool ok)',
+] as const
+
+async function ensureRelayerBeamioAccountForEntryPoint(
+	SC: SettleContractPoolEntry,
+	chain: BeamioUserCardChainKey,
+	logTag: string,
+	aaFactoryOverride?: string
+): Promise<{
+	aaFactoryAddress: string
+	aaAccount: string
+	entryPointAddress: string
+	provider: ethers.JsonRpcProvider
+	wallet: ethers.Wallet
+	aaFactory: ethers.Contract
+}> {
+	const provider = providerForUserCardChain(chain)
+	const wallet = settleRelayWalletForChain(SC, chain)
+	const relayerEoa = ethers.getAddress(await wallet.getAddress())
+	const aaFactoryAddress = ethers.getAddress(aaFactoryOverride ?? aaFactoryForUserCardChain(chain))
+	const aaFactory = new ethers.Contract(aaFactoryAddress, BeamioAAAccountFactoryPaymasterABI, wallet)
+	const entryPointAddress = ethers.getAddress((await aaFactory.ENTRY_POINT()) as string)
+	let aaAccount = ethers.ZeroAddress
+	try {
+		aaAccount = ethers.getAddress((await aaFactory.primaryAccountOf(relayerEoa)) as string)
+	} catch {}
+	if (aaAccount === ethers.ZeroAddress) {
+		const getAddressFn = aaFactory.getFunction('getAddress(address,uint256)')
+		aaAccount = ethers.getAddress((await getAddressFn(relayerEoa, 0n)) as string)
+	}
+	let code = await provider.getCode(aaAccount)
+	if (!code || code === '0x') {
+		logger(Colors.cyan(`[${logTag}] creating relayer BeamioAccount via AA factory=${aaFactoryAddress} owner=${relayerEoa} predicted=${aaAccount}`))
+		const createTx = await aaFactory.createAccount({ gasLimit: 5_000_000n })
+		await createTx.wait()
+		aaAccount = ethers.getAddress((await aaFactory.primaryAccountOf(relayerEoa)) as string)
+		code = await provider.getCode(aaAccount)
+		if (!code || code === '0x') {
+			throw new Error(`[${logTag}] failed to deploy relayer BeamioAccount ${aaAccount}`)
+		}
+	}
+	return { aaFactoryAddress, aaAccount, entryPointAddress, provider, wallet, aaFactory }
+}
+
+async function ensureUserCardFactoryAllowsRelayerAA(params: {
+	factoryAddress: string
+	relayerAA: string
+	wallet: ethers.Wallet
+	logTag: string
+}): Promise<void> {
+	const factory = new ethers.Contract(
+		ethers.getAddress(params.factoryAddress),
+		BeamioUserCardFactoryPaymasterStatusABI,
+		params.wallet
+	)
+	const relayerAA = ethers.getAddress(params.relayerAA)
+	const allowed = Boolean(await factory.isPaymaster(relayerAA))
+	if (allowed) return
+	logger(Colors.yellow(`[${params.logTag}] relayer AA ${relayerAA} is not a UserCardFactory paymaster; attempting on-chain enable`))
+	try {
+		const tx = await factory.changePaymasterStatus(relayerAA, true, { gasLimit: 200_000n })
+		await tx.wait()
+	} catch (error: any) {
+		throw new Error(
+			`[${params.logTag}] UserCardFactory ${await factory.getAddress()} must allow relayer AA ${relayerAA} as paymaster before EntryPoint relay can execute. ` +
+			`Call changePaymasterStatus(${relayerAA}, true) with the factory owner. ${error?.shortMessage ?? error?.message ?? String(error)}`
+		)
+	}
+}
+
+async function relayUserCardFactoryCallViaEntryPoint(params: {
+	SC: SettleContractPoolEntry
+	chain: BeamioUserCardChainKey
+	factoryAddress: string
+	factoryCallData: string
+	logTag: string
+	gasLimit?: bigint
+}): Promise<ethers.ContractTransactionResponse> {
+	const factoryAddress = ethers.getAddress(params.factoryAddress)
+	const provider = providerForUserCardChain(params.chain)
+	let aaFactoryAddress = aaFactoryForUserCardChain(params.chain)
+	try {
+		const onChainAaFactory = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, factoryAddress)
+		if (onChainAaFactory) aaFactoryAddress = ethers.getAddress(onChainAaFactory)
+	} catch (e: any) {
+		logger(Colors.yellow(`[${params.logTag}] could not read UserCardFactory._aaFactory(), using configured AA factory: ${e?.message ?? e}`))
+	}
+	const relayer = await ensureRelayerBeamioAccountForEntryPoint(params.SC, params.chain, params.logTag, aaFactoryAddress)
+	await ensureUserCardFactoryAllowsRelayerAA({
+		factoryAddress,
+		relayerAA: relayer.aaAccount,
+		wallet: relayer.wallet,
+		logTag: params.logTag,
+	})
+	const entryPoint = new ethers.Contract(relayer.entryPointAddress, EntryPointHandleOpsABI, relayer.provider)
+	const accountIface = new ethers.Interface(BeamioAccountExecuteABI)
+	const callData = accountIface.encodeFunctionData('execute', [factoryAddress, 0n, params.factoryCallData])
+	const nonce = (await entryPoint.getNonce(relayer.aaAccount, 0n)) as bigint
+	const fee = await relayer.provider.getFeeData()
+	const maxFeePerGas = fee.maxFeePerGas ?? 2_000_000_000n
+	const maxPriorityFeePerGas = fee.maxPriorityFeePerGas ?? 100_000_000n
+	const opForHash: AAtoEOAUserOp = {
+		sender: relayer.aaAccount,
+		nonce,
+		initCode: '0x',
+		callData,
+		accountGasLimits: packUserOpUints128(8_000_000n, 8_000_000n),
+		preVerificationGas: 300_000n,
+		gasFees: packUserOpUints128(maxPriorityFeePerGas, maxFeePerGas),
+		paymasterAndData: buildPaymasterAndDataV07(relayer.aaFactoryAddress),
+		signature: '0x',
+	}
+	const userOpHash = (await entryPoint.getUserOpHash(opForHash)) as string
+	const signature = await relayer.wallet.signMessage(ethers.getBytes(userOpHash))
+	const txOp = {
+		...opForHash,
+		nonce: asBigInt(opForHash.nonce, 0n),
+		preVerificationGas: asBigInt(opForHash.preVerificationGas, 0n),
+		signature: ethers.getBytes(signature),
+	}
+	const beneficiary = await relayer.wallet.getAddress()
+	logger(
+		Colors.cyan(
+			`[${params.logTag}] relay via EntryPoint=${relayer.entryPointAddress} aaFactory=${relayer.aaFactoryAddress} relayerAA=${relayer.aaAccount} target=${factoryAddress} userOpNonce=${nonce.toString()}`
+		)
+	)
+	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, { gasLimit: params.gasLimit ?? 20_000_000n })
+}
+
 async function buildAAAccountCreationUserOpForHash(eoa: string): Promise<AAAccountCreationPrepareResult> {
 	const eoaNorm = ethers.getAddress(eoa)
 	const factoryAddr = ethers.getAddress(CONET_AA_FACTORY)
@@ -12374,7 +12557,19 @@ export async function nfcLinkAppUnlockActiveSessionRowCore(row: NfcLinkAppSessio
 		}
 		const ownerWalletWithProvider = new ethers.Wallet(pk, SC.walletBase.provider!)
 		const ownerSignature = await ownerWalletWithProvider.signTypedData(domain, types, value)
-		const tx = await SC.baseFactoryPaymaster.executeForOwner(infra, data, deadline, nonce, ownerSignature)
+		const tx = await relayUserCardFactoryCallViaEntryPoint({
+			SC,
+			chain: 'base',
+			factoryAddress: verifyingContract,
+			factoryCallData: new ethers.Interface(['function executeForOwner(address,bytes,uint256,bytes32,bytes)']).encodeFunctionData('executeForOwner', [
+				infra,
+				data,
+				deadline,
+				nonce,
+				ownerSignature,
+			]),
+			logTag: 'nfcLinkAppUnlock',
+		})
 		const receipt = await tx.wait()
 		if (!receipt || receipt.status !== 1) {
 			return { ok: false, released: false, httpStatus: 500, error: 'On-chain cancel transaction failed.' }
@@ -12521,7 +12716,12 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 			throw new Error('Account not found or failed to create. Please create/activate your Beamio account first.')
 		}
 
-		const factory = SC.baseFactoryPaymaster
+		const cardChain = await resolveUserCardChain(cardAddress)
+		const cardGateway = await getBeamioUserCardFactoryGateway(cardAddress)
+		const factoryIface = new ethers.Interface([
+			'function redeemForUser(address cardAddr,string code,address userEOA)',
+			'function redeemPoolForUser(address cardAddr,string code,address userEOA)',
+		])
 		let beforeNfts: unknown[] | undefined
 		try {
 			const cardRead = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
@@ -12543,7 +12743,13 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 		}
 
 		try {
-			const tx1 = await factory.redeemForUser(cardAddress, redeemCode, toUserEOA)
+			const tx1 = await relayUserCardFactoryCallViaEntryPoint({
+				SC,
+				chain: cardChain,
+				factoryAddress: cardGateway,
+				factoryCallData: factoryIface.encodeFunctionData('redeemForUser', [cardAddress, redeemCode, toUserEOA]),
+				logTag: 'nfcLinkAppClaimWithKey:redeemForUser',
+			})
 			await tx1.wait()
 			txHash = tx1.hash
 		} catch (oneTimeErr: any) {
@@ -12561,7 +12767,13 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 			})()
 			if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669|reverted/i.test(msg)) {
 				try {
-					const tx2 = await factory.redeemPoolForUser(cardAddress, redeemCode, toUserEOA)
+					const tx2 = await relayUserCardFactoryCallViaEntryPoint({
+						SC,
+						chain: cardChain,
+						factoryAddress: cardGateway,
+						factoryCallData: factoryIface.encodeFunctionData('redeemPoolForUser', [cardAddress, redeemCode, toUserEOA]),
+						logTag: 'nfcLinkAppClaimWithKey:redeemPoolForUser',
+					})
 					await tx2.wait()
 					txHash = tx2.hash
 					lastErr = null
@@ -14556,14 +14768,20 @@ export const cardClearAdminMintCounterProcess = async (payload: {
 	// 1) Card 链上记账：Factory.executeClearAdminMintCounter（须为卡绑定的 gateway）
 	const factoryAbi = ['function executeClearAdminMintCounter(address cardAddress,address subordinate,uint256 deadline,bytes32 nonce,bytes adminSignature)']
 	const gw = await getBeamioUserCardFactoryGateway(ethers.getAddress(cardAddress))
-	const factory = new ethers.Contract(gw, factoryAbi, SC.walletBase)
-	const txCard = await factory.executeClearAdminMintCounter(
-		ethers.getAddress(cardAddress),
-		ethers.getAddress(subordinate),
-		Number(deadline),
-		nonceBytes32,
-		adminSignature as `0x${string}`
-	)
+	const chain = await resolveUserCardChain(ethers.getAddress(cardAddress))
+	const txCard = await relayUserCardFactoryCallViaEntryPoint({
+		SC,
+		chain,
+		factoryAddress: gw,
+		factoryCallData: new ethers.Interface(factoryAbi).encodeFunctionData('executeClearAdminMintCounter', [
+			ethers.getAddress(cardAddress),
+			ethers.getAddress(subordinate),
+			Number(deadline),
+			nonceBytes32,
+			adminSignature as `0x${string}`,
+		]),
+		logTag: 'cardClearAdminMintCounter',
+	})
 	await txCard.wait()
 
 	// 2) Indexer Stats：清零持卡侧计数（mint 等）
@@ -14668,7 +14886,6 @@ export const cardRedeemAdminProcess = async () => {
 	}
 	logger(Colors.cyan(`[cardRedeemAdminProcess] processing card=${obj.cardAddress} to(EOA)=${obj.to} codeLen=${obj.redeemCode?.length ?? 0}`))
 	try {
-		const factory = SC.baseFactoryPaymaster
 		let toForRedeem = obj.to
 		if (SC.aaAccountFactoryPaymaster && obj.to && ethers.isAddress(obj.to)) {
 			const provider = (SC.walletBase as ethers.Wallet)?.provider ?? providerBaseBackup
@@ -14689,7 +14906,19 @@ export const cardRedeemAdminProcess = async () => {
 				}
 			}
 		}
-		const tx = await factory.redeemAdminForUser(obj.cardAddress, obj.redeemCode, toForRedeem)
+		const cardChain = await resolveUserCardChain(obj.cardAddress)
+		const factoryAddress = await getBeamioUserCardFactoryGateway(obj.cardAddress)
+		const tx = await relayUserCardFactoryCallViaEntryPoint({
+			SC,
+			chain: cardChain,
+			factoryAddress,
+			factoryCallData: new ethers.Interface(['function redeemAdminForUser(address cardAddr,string code,address to)']).encodeFunctionData('redeemAdminForUser', [
+				obj.cardAddress,
+				obj.redeemCode,
+				toForRedeem,
+			]),
+			logTag: 'cardRedeemAdminProcess',
+		})
 		await tx.wait()
 		const txHash = tx.hash
 		void upsertPosTerminalAdminCardBinding({
@@ -14921,13 +15150,21 @@ export const executeForOwnerProcess = async () => {
 		}
 		let issuedNftTokenIdForApi: string | undefined
 		let createIssuedNftReceiptForBg: TransactionReceipt | null = null
-		const tx = await factory.executeForOwner(
-			obj.cardAddress,
-			obj.data,
-			obj.deadline,
-			obj.nonce,
-			obj.ownerSignature
-		)
+		const factoryAddress = ethers.getAddress(await factory.getAddress())
+		const cardChain = await resolveUserCardChain(obj.cardAddress)
+		const tx = await relayUserCardFactoryCallViaEntryPoint({
+			SC,
+			chain: cardChain,
+			factoryAddress,
+			factoryCallData: new ethers.Interface(['function executeForOwner(address,bytes,uint256,bytes32,bytes)']).encodeFunctionData('executeForOwner', [
+				obj.cardAddress,
+				obj.data,
+				obj.deadline,
+				obj.nonce,
+				obj.ownerSignature,
+			]),
+			logTag: 'executeForOwnerProcess',
+		})
 		const hash = tx?.hash as string | undefined
 		if (isAdminManager) {
 			const receipt = await tx.wait()
@@ -14938,7 +15175,18 @@ export const executeForOwnerProcess = async () => {
 		void syncPosTerminalAdminBindingAfterTx(tx, obj.cardAddress, obj.data).catch(() => {})
 		let code: string | undefined
 		if (obj.redeemCode != null && obj.toUserEOA != null) {
-			await factory.redeemForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
+			const redeemTx = await relayUserCardFactoryCallViaEntryPoint({
+				SC,
+				chain: cardChain,
+				factoryAddress,
+				factoryCallData: new ethers.Interface(['function redeemForUser(address cardAddr,string code,address userEOA)']).encodeFunctionData('redeemForUser', [
+					obj.cardAddress,
+					obj.redeemCode,
+					obj.toUserEOA,
+				]),
+				logTag: 'executeForOwnerProcess:redeemForUser',
+			})
+			await redeemTx.wait()
 			code = obj.redeemCode
 			logger(Colors.green(`✅ executeForOwnerProcess + redeemForUser card=${obj.cardAddress} to=${obj.toUserEOA}`))
 		} else {
@@ -15538,7 +15786,12 @@ export const cardRedeemPoolPress = async () => {
 			return
 		}
 
-		const factory = SC.baseFactoryPaymaster
+		const cardChain = await resolveUserCardChain(obj.cardAddress)
+		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
+		const factoryIface = new ethers.Interface([
+			'function redeemForUser(address cardAddr,string code,address userEOA)',
+			'function redeemPoolForUser(address cardAddr,string code,address userEOA)',
+		])
 		let beforeNfts: unknown[] | undefined
 		try {
 			const cardRead = new ethers.Contract(obj.cardAddress, BeamioUserCardABI, SC.walletBase)
@@ -15558,7 +15811,13 @@ export const cardRedeemPoolPress = async () => {
 		} catch (_) { /* 旧卡无 getRedeemCreator 时忽略 */ }
 		// 先尝试 one-time redeem；若 UC_InvalidProposal（code 可能为 pool 类型）则回退到 redeemPoolForUser
 		try {
-			const tx1 = await factory.redeemForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
+			const tx1 = await relayUserCardFactoryCallViaEntryPoint({
+				SC,
+				chain: cardChain,
+				factoryAddress: cardGateway,
+				factoryCallData: factoryIface.encodeFunctionData('redeemForUser', [obj.cardAddress, obj.redeemCode, obj.toUserEOA]),
+				logTag: 'cardRedeemPoolPress:redeemForUser',
+			})
 			await tx1.wait()
 			txHash = tx1.hash
 		} catch (oneTimeErr: any) {
@@ -15576,7 +15835,13 @@ export const cardRedeemPoolPress = async () => {
 			})()
 			if (/UC_InvalidProposal|UC_RedeemDelegateFailed|0xfb713d2b|dccff669|reverted/i.test(msg)) {
 				try {
-					const tx2 = await factory.redeemPoolForUser(obj.cardAddress, obj.redeemCode, obj.toUserEOA)
+					const tx2 = await relayUserCardFactoryCallViaEntryPoint({
+						SC,
+						chain: cardChain,
+						factoryAddress: cardGateway,
+						factoryCallData: factoryIface.encodeFunctionData('redeemPoolForUser', [obj.cardAddress, obj.redeemCode, obj.toUserEOA]),
+						logTag: 'cardRedeemPoolPress:redeemPoolForUser',
+					})
 					await tx2.wait()
 					txHash = tx2.hash
 					lastErr = null
@@ -15666,16 +15931,22 @@ export const cardCouponOpenClaimProcess = async () => {
 			)
 		)
 
-		const claimContract = await contractForClaimIssuedNftWithUserSig(SC, obj.cardAddress)
-
-		const tx = await claimContract.claimIssuedNftWithUserSig(
-			obj.cardAddress,
-			obj.userEOA,
-			BigInt(obj.tokenId),
-			BigInt(obj.deadline),
-			obj.nonce as `0x${string}`,
-			obj.userSignature,
-		)
+		const cardChain = await resolveUserCardChain(obj.cardAddress)
+		const claimGateway = ethers.getAddress(await (await contractForClaimIssuedNftWithUserSig(SC, obj.cardAddress)).getAddress())
+		const tx = await relayUserCardFactoryCallViaEntryPoint({
+			SC,
+			chain: cardChain,
+			factoryAddress: claimGateway,
+			factoryCallData: new ethers.Interface(['function claimIssuedNftWithUserSig(address cardAddr,address userEOA,uint256 tokenId,uint256 deadline,bytes32 nonce,bytes userSignature)']).encodeFunctionData('claimIssuedNftWithUserSig', [
+				obj.cardAddress,
+				obj.userEOA,
+				BigInt(obj.tokenId),
+				BigInt(obj.deadline),
+				obj.nonce as `0x${string}`,
+				obj.userSignature,
+			]),
+			logTag: 'cardCouponOpenClaimProcess',
+		})
 		const receipt = await tx.wait()
 		if (!receipt || receipt.status !== 1) {
 			throw new Error('Coupon open claim transaction failed')
@@ -15777,18 +16048,18 @@ export const cardCouponPosClaimWalletProcess = async () => {
 			'error UC_InvalidTokenId(uint256 tokenId, uint256 minTokenId)',
 			'error UC_ResolveAccountFailed(address eoa, address aaFactory, address acct)',
 		]
-		const claimContract = new ethers.Contract(
-			cardGateway,
-			claimContractABI,
-			settleRelayWalletForChain(SC, chain)
-		)
-
-		const tx = await claimContract.claimIssuedNftForUserByPosAdmin(
-			obj.cardAddress,
-			obj.userEOA,
-			BigInt(obj.tokenId),
-			obj.posAdminEOA
-		)
+		const tx = await relayUserCardFactoryCallViaEntryPoint({
+			SC,
+			chain,
+			factoryAddress: cardGateway,
+			factoryCallData: new ethers.Interface(claimContractABI).encodeFunctionData('claimIssuedNftForUserByPosAdmin', [
+				obj.cardAddress,
+				obj.userEOA,
+				BigInt(obj.tokenId),
+				obj.posAdminEOA,
+			]),
+			logTag: 'cardCouponPosClaimWalletProcess',
+		})
 		const receipt = await tx.wait()
 		if (!receipt || receipt.status !== 1) {
 			throw new Error('Coupon POS wallet claim transaction failed')
