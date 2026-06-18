@@ -7,7 +7,7 @@ export const BASE_MAINNET_CHAIN_ID = 8453
 /** CoNET PoS HTTP RPC；与 deployments/conet-addresses.json `rpcUrl` 同步 */
 export const CONET_RPC_URL = 'https://publicrpc.conet.network'
 
-/** 跨链同址 BeamioFactoryPaymasterV07（Nick CREATE2；Base + CoNET 同值） */
+/** BeamioFactoryPaymasterV07 on Base. CoNET uses CONET_AA_FACTORY until the new bytecode is deployed on Base too. */
 export const BEAMIO_AA_FACTORY = '0xe58F457Cd5674516400013E8d338054be556A730'
 
 /** @deprecated 使用 BEAMIO_AA_FACTORY（跨链同址） */
@@ -88,6 +88,8 @@ export const BASE_MAINNET_FACTORIES = {
 
 /** CoNET UserCard Factory（224422）；与 deployments/conet-addresses.json `CARD_FACTORY` 同步 */
 export const CONET_CARD_FACTORY = '0xfA52a0CcC96C19cF4b6Ea864615F6d52BD0774FB'
+/** CoNET EntryPoint-aware BeamioFactoryPaymasterV07（224422）；与 deployments/conet-addresses.json `AA_FACTORY` 同步 */
+export const CONET_AA_FACTORY = '0x23a331ee3BD3ab8F8772c7AC4a57fc45867C5B07'
 /** CoNET Factory ExecuteLib（linked library） */
 export const CONET_BEAMIO_USER_CARD_FACTORY_EXECUTE_LIB = '0xbc6f3926691d2306c96357ac08aadB5F50Ab0784'
 /** CoNET 默认 BeamioUserCard（AA Factory `beamioUserCard`） */
@@ -122,7 +124,7 @@ export const CONTRACT_ADDRESSES = {
   },
   conet: {
     chainId: CONET_MAINNET_CHAIN_ID,
-    aaFactory: BEAMIO_AA_FACTORY,
+    aaFactory: CONET_AA_FACTORY,
     cardFactory: CONET_CARD_FACTORY,
     defaultUserCard: CONET_BEAMIO_USER_CARD_DEFAULT,
     usdc: CONET_USDC,

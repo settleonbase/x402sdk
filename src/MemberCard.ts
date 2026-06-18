@@ -49,6 +49,7 @@ import {
 	BASE_AA_FACTORY,
 	BASE_CARD_FACTORY,
 	BASE_CCSA_CARD_ADDRESS,
+	CONET_AA_FACTORY,
 	CONET_CARD_FACTORY,
 	CONET_BUINT,
 	CONET_BUNIT_AIRDROP_ADDRESS,
@@ -1615,12 +1616,12 @@ async function ensureAAForEOAOnAaFactory(
 
 /**
  * Master：在 **CoNET（224422）** 上确保 EOA 已有已部署的 Beamio AA（无则 createAccountFor）。
- * 使用跨链同址 `BEAMIO_AA_FACTORY` + `walletConet` 送链。
+ * 使用 CoNET 当前 AA Factory + `walletConet` 送链。
  */
 export const ensureAAForEOAOnConet = async (eoa: string): Promise<string> => {
 	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
 	const eoaNorm = ethers.getAddress(eoa)
-	const factoryAddr = ethers.getAddress(BASE_AA_FACTORY)
+	const factoryAddr = ethers.getAddress(CONET_AA_FACTORY)
 	const aaFactoryReadOnly = new ethers.Contract(
 		factoryAddr,
 		BeamioAAAccountFactoryPaymasterABI,
@@ -3494,6 +3495,17 @@ export type AAtoEOAUserOp = {
 	paymasterAndData: string
 	signature: string
 }
+
+export type AAAccountCreationPrepareResult = {
+	eoa: string
+	aa: string
+	factory: string
+	entryPoint: string
+	userOpHash: string
+	packedUserOp: AAtoEOAUserOp
+	alreadyDeployed: boolean
+}
+
 export const AAtoEOAPool: {
 	toEOA: string
 	amountUSDC6: string
@@ -8510,7 +8522,143 @@ export const purchasingCardProcess = async () => {
 const EntryPointHandleOpsABI = [
 	'function handleOps(tuple(address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature)[] ops, address beneficiary) external',
 	'function getUserOpHash(tuple(address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature) userOp) view returns (bytes32)',
+	'function getNonce(address sender, uint192 key) view returns (uint256)',
 ]
+
+function packUserOpUints128(low: bigint, high: bigint): string {
+	return ethers.toBeHex((high << 128n) | low, 32)
+}
+
+function buildPaymasterAndDataV07(factoryAddress: string, verificationGasLimit = 4_000_000n, postOpGasLimit = 100_000n): string {
+	return (
+		'0x' +
+		ethers.zeroPadValue(ethers.getAddress(factoryAddress), 20).slice(2) +
+		ethers.toBeHex(verificationGasLimit, 16).slice(2) +
+		ethers.toBeHex(postOpGasLimit, 16).slice(2)
+	)
+}
+
+async function buildAAAccountCreationUserOpForHash(eoa: string): Promise<AAAccountCreationPrepareResult> {
+	const eoaNorm = ethers.getAddress(eoa)
+	const factoryAddr = ethers.getAddress(CONET_AA_FACTORY)
+	const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, providerConet)
+	const getAddressFn = aaFactory.getFunction('getAddress(address,uint256)')
+	const predictedAa = ethers.getAddress((await getAddressFn(eoaNorm, 0n)) as string)
+	const entryPointAddress = ethers.getAddress((await aaFactory.ENTRY_POINT()) as string)
+	const entryPoint = new ethers.Contract(entryPointAddress, EntryPointHandleOpsABI, providerConet)
+	const currentCode = await providerConet.getCode(predictedAa)
+	const alreadyDeployed = !!currentCode && currentCode !== '0x'
+
+	const factoryIface = new ethers.Interface(BeamioAAAccountFactoryPaymasterABI)
+	const accountIface = new ethers.Interface([
+		'function executeBatch(address[] dest, uint256[] value, bytes[] func)',
+	])
+	const initCallData = factoryIface.encodeFunctionData('createAccountForEntryPoint', [eoaNorm])
+	const initCode = ethers.concat([ethers.zeroPadValue(factoryAddr, 20), initCallData])
+	const callData = accountIface.encodeFunctionData('executeBatch', [[], [], []])
+	const nonce = (await entryPoint.getNonce(predictedAa, 0n)) as bigint
+	const fee = await providerConet.getFeeData()
+	const maxFeePerGas = fee.maxFeePerGas ?? 2_000_000_000n
+	const maxPriorityFeePerGas = fee.maxPriorityFeePerGas ?? 100_000_000n
+	const accountGasLimits = packUserOpUints128(8_000_000n, 8_000_000n)
+	const gasFees = packUserOpUints128(maxPriorityFeePerGas, maxFeePerGas)
+	const preVerificationGas = 300_000n
+	const paymasterAndData = buildPaymasterAndDataV07(factoryAddr)
+
+	const packedUserOp: AAtoEOAUserOp = {
+		sender: predictedAa,
+		nonce,
+		initCode,
+		callData,
+		accountGasLimits,
+		preVerificationGas,
+		gasFees,
+		paymasterAndData,
+		signature: '0x',
+	}
+	const userOpHash = (await entryPoint.getUserOpHash(packedUserOp)) as string
+	return {
+		eoa: eoaNorm,
+		aa: predictedAa,
+		factory: factoryAddr,
+		entryPoint: entryPointAddress,
+		userOpHash,
+		packedUserOp,
+		alreadyDeployed,
+	}
+}
+
+export async function prepareAAAccountCreationViaEntryPoint(eoa: string): Promise<AAAccountCreationPrepareResult> {
+	if (!ethers.isAddress(eoa)) throw new Error('Invalid eoa')
+	return buildAAAccountCreationUserOpForHash(eoa)
+}
+
+export async function submitAAAccountCreationViaEntryPoint(params: {
+	eoa: string
+	packedUserOp: AAtoEOAUserOp
+	signature: string
+}): Promise<{ success: true; aa: string; txHash?: string; alreadyDeployed: boolean }> {
+	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
+	const prepared = await buildAAAccountCreationUserOpForHash(params.eoa)
+	if (prepared.alreadyDeployed) {
+		return { success: true, aa: prepared.aa, alreadyDeployed: true }
+	}
+	const submitted = params.packedUserOp
+	const signature = typeof params.signature === 'string' && params.signature.startsWith('0x')
+		? params.signature
+		: '0x' + String(params.signature ?? '')
+	if (hexBytesLen(signature) !== 65) throw new Error('Invalid signature length')
+
+	const fieldsToMatch: Array<keyof AAtoEOAUserOp> = [
+		'sender',
+		'initCode',
+		'callData',
+	]
+	for (const key of fieldsToMatch) {
+		if (String(submitted[key] ?? '').toLowerCase() !== String(prepared.packedUserOp[key] ?? '').toLowerCase()) {
+			throw new Error(`PackedUserOp mismatch: ${key}`)
+		}
+	}
+	if (asBigInt(submitted.nonce, -1n) !== asBigInt(prepared.packedUserOp.nonce, -2n)) {
+		throw new Error('PackedUserOp mismatch: nonce')
+	}
+	if (isZeroBytes32(submitted.accountGasLimits) || isZeroBytes32(submitted.gasFees) || asBigInt(submitted.preVerificationGas, 0n) === 0n) {
+		throw new Error('Invalid gas fields for ERC-4337 v0.7')
+	}
+	const pm = parsePaymasterFromPnd(String(submitted.paymasterAndData ?? '0x'))
+	if (!pm || pm.toLowerCase() !== prepared.factory.toLowerCase()) {
+		throw new Error('PackedUserOp paymaster must be the Beamio AA factory')
+	}
+
+	const entryPoint = new ethers.Contract(prepared.entryPoint, EntryPointHandleOpsABI, providerConet)
+	const opForHash = { ...submitted, signature: '0x' }
+	const userOpHash = (await entryPoint.getUserOpHash(opForHash)) as string
+	const recovered = ethers.getAddress(ethers.verifyMessage(ethers.getBytes(userOpHash), signature))
+	if (recovered !== prepared.eoa) {
+		throw new Error(`Signature signer (${recovered}) is not creator EOA (${prepared.eoa})`)
+	}
+
+	const SC = await shiftSettleContractForWrite('submitAAAccountCreationViaEntryPoint')
+	try {
+		const relayFactory = new ethers.Contract(prepared.factory, BeamioAAAccountFactoryPaymasterABI, SC.walletConet)
+		const beneficiary = await SC.walletConet.getAddress()
+		const txOp = {
+			...submitted,
+			nonce: asBigInt(submitted.nonce, 0n),
+			preVerificationGas: asBigInt(submitted.preVerificationGas, 0n),
+			signature: ethers.getBytes(signature),
+		}
+		const tx = await relayFactory.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+		logger(Colors.cyan(`[aaCreateViaEntryPoint] relayHandleOps submitted tx=${tx.hash} aa=${prepared.aa}`))
+		const receipt = await tx.wait()
+		if (!receipt) throw new Error('relayHandleOps tx.wait() returned null')
+		const code = await providerConet.getCode(prepared.aa)
+		if (!code || code === '0x') throw new Error('EntryPoint handleOps confirmed but AA code is missing')
+		return { success: true, aa: prepared.aa, txHash: tx.hash, alreadyDeployed: false }
+	} finally {
+		Settle_ContractPool.unshift(SC)
+	}
+}
 
 
 export const getMyAssets = async (userEOA: string, cardAddress: string) => {
