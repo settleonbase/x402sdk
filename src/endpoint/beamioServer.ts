@@ -6999,7 +6999,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/cardTerminalSettlementClear', req.body, res)
 	})
 
-	/** cardCreateIssuedNft：owner 定义新发行 NFT 类型。Cluster 预检含 createIssuedNft 合法性 + 卡主（owner）至少 100 B-Unit；合格后转发 master；Master 先于 Base 于 CoNET 扣 100 B-Unit 再 executeForOwner */
+	/** cardCreateIssuedNft：owner 定义新发行 NFT 类型。Cluster 预检含 createIssuedNft 合法性 + 卡主（owner）至少 100 B-Unit；Master EntryPoint 确认后返回，B-Unit 扣款与 indexer 后台执行。 */
 	router.post('/cardCreateIssuedNft', async (req, res) => {
 		const rawBody = req.body as Record<string, unknown>
 		const preCheck = await cardCreateIssuedNftPreCheck(req.body)

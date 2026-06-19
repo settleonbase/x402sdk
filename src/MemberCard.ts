@@ -3544,8 +3544,6 @@ export const executeForOwnerPool: {
 		upgradeType?: number
 		transferWhitelistEnabled?: boolean
 	}
-	/** 已成功预扣 Create Coupon createIssuedNft 的 B-Unit（nonce 重队列时复用，禁止二次扣费） */
-	createIssuedNftCouponBunitDeferred?: { consumeTxHash: string; feePayer: string; cardOwnerEOA: string }
 }[] = []
 
 /** AA→EOA 转账请求：客户端提交 ERC-4337 已签字的 UserOp，由 Beamio 代付 Gas 并提交到链上 */
@@ -9492,29 +9490,37 @@ export const AAtoEOAProcess = async () => {
       return
     }
 
-    // --- deduct 2 B-Units fee from feePayer on CoNET (with Base tx hash) ---
-    const baseHashBytes32 = tx.hash as `0x${string}` // 32-byte tx hash as bytes32
+    // EntryPoint 业务 UserOp 确认后立即返回；B-Unit 扣款与 indexer 在 beamioTransferIndexerAccountingPool 后台执行
+    if (!obj.res?.headersSent) {
+      obj.res.status(200).json({
+        success: true,
+        USDC_tx: tx.hash,
+        ...(aaRelayCheck.userOpHash ? { userOpHash: aaRelayCheck.userOpHash } : {}),
+      }).end()
+    }
+
+    const baseHashBytes32 = tx.hash as `0x${string}`
     const baseGas = receipt.gasUsed
     const bunitAirdropWrite = new ethers.Contract(
       CONET_BUNIT_AIRDROP_ADDRESS,
       ['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
       SC.walletConet
     )
-    try {
-      const consumeTx = await bunitAirdropWrite.consumeFromUser(
+    void bunitAirdropWrite
+      .consumeFromUser(
         feePayer,
         BUNIT_FEE_AMOUNT,
         baseHashBytes32,
         baseGas,
-        1n, // kind=1 -> txCategory=keccak256("sendUSDC")，需预先 registerKind(1,"sendUSDC")
+        1n,
         { gasLimit: 2_500_000 }
       )
-      await consumeTx.wait()
-      logger(Colors.cyan(`[AAtoEOA] consumeFromUser ok: 2 B-Units from ${feePayer} baseHash=${tx.hash}`))
-    } catch (consumeErr: any) {
-      logger(Colors.red(`[AAtoEOA] consumeFromUser failed (non-fatal): ${consumeErr?.shortMessage ?? consumeErr?.message ?? consumeErr}`))
-      // USDC transfer already succeeded; log but do not fail the response
-    }
+      .then((consumeTx: { hash: string; wait: () => Promise<unknown> }) => consumeTx.wait())
+      .then(() => logger(Colors.cyan(`[AAtoEOA] consumeFromUser ok: 2 B-Units from ${feePayer} baseHash=${tx.hash}`)))
+      .catch((consumeErr: unknown) => {
+        const err = consumeErr as { shortMessage?: string; message?: string }
+        logger(Colors.red(`[AAtoEOA] consumeFromUser failed (non-fatal): ${err?.shortMessage ?? err?.message ?? consumeErr}`))
+      })
 
     // 记账：syncTokenAction via beamioTransferIndexerAccountingPool（USDC 转账，card 为 USDC 地址，title 为 "Express Pay to EOA"）
     const toEOA = ethers.getAddress(obj.toEOA)
@@ -9546,7 +9552,6 @@ export const AAtoEOAProcess = async () => {
     })
 
     logger(Colors.green(`✅ AAtoEOAProcess success! tx=${tx.hash}`))
-    obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
   } catch (error: any) {
     const msg = error?.shortMessage || error?.message || String(error)
     const decoded = tryDecodeFailedOp(error?.data)
@@ -9864,8 +9869,6 @@ export const OpenContainerRelayProcess = async () => {
     const beneficiary = await relayWallet.getAddress()
     const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
     logger(`[AAtoEOA/OpenContainer] EntryPoint relayHandleOps tx submitted hash=${tx.hash}`)
-    // 立即返回 hash 给客户端，避免 tx.wait() 等待链上确认导致 502 超时
-    if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
     const openRelayReceipt = await tx.wait().catch((waitErr: any) => {
       try {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, tx submitted): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
@@ -9884,7 +9887,22 @@ export const OpenContainerRelayProcess = async () => {
           `[AAtoEOA/OpenContainer] Skip B-Unit and indexer (${openRelayCheck.reason}) bundlerTx=${tx.hash} userOpHash=${openRelayCheck.userOpHash ?? 'n/a'}`
         )
       )
+      if (!obj.res?.headersSent) {
+        obj.res.status(400).json({
+          success: false,
+          error: `Payment failed on-chain: ${openRelayCheck.reason}`,
+          USDC_tx: tx.hash,
+          ...(openRelayCheck.userOpHash ? { userOpHash: openRelayCheck.userOpHash } : {}),
+        }).end()
+      }
       return
+    }
+    if (!obj.res?.headersSent) {
+      obj.res.status(200).json({
+        success: true,
+        USDC_tx: tx.hash,
+        ...(openRelayCheck.userOpHash ? { userOpHash: openRelayCheck.userOpHash } : {}),
+      }).end()
     }
     if (openRelayReceipt && obj.chargeOwnerChildBurn) {
       await maybeExecuteChargeOwnerChildBurnAfterContainerRelay({
@@ -12127,7 +12145,21 @@ export const createCardPoolPress = async () => {
 			},
 			factory
 		)
-		// master 侧写入 metadata（shareTokenMetadata、tiers）到 0x{cardAddress}0.json（ERC-1155 约定）
+		logger(Colors.green(`[createCardPoolPress] card created: ${cardAddress} hash=${hash}`))
+		registerCardToDb({
+			cardAddress,
+			cardOwner,
+			currency,
+			priceInCurrencyE6,
+			uri: uri ?? undefined,
+			...(upgradeType != null && { upgradeType }),
+			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
+			shareTokenMetadata,
+			tiers,
+			txHash: hash,
+		}).catch(() => {})
+		if (res && !res.headersSent) res.status(200).json({ success: true, cardAddress, hash }).end()
+		// metadata 写盘 + Blockscout refetch 不阻塞 HTTP（链上 create tx 已确认）
 		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
 		const cardAddr = ethers.getAddress(cardAddress)
 		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
@@ -12142,30 +12174,19 @@ export const createCardPoolPress = async () => {
 			const metaPath = resolve(METADATA_BASE, metaFilename)
 			const metaDir = resolve(METADATA_BASE)
 			if (metaPath.startsWith(metaDir + '/') || metaPath === metaDir) {
-				try {
-					if (!fs.existsSync(metaDir)) fs.mkdirSync(metaDir, { recursive: true })
-					fs.writeFileSync(metaPath, metaContent, 'utf-8')
-					logger(Colors.green(`[createCardPoolPress] wrote metadata: ${metaFilename}`))
-				} catch (metaErr: any) {
-					logger(Colors.yellow(`[createCardPoolPress] metadata write failed: ${metaErr?.message ?? metaErr}`))
-				}
+				void (async () => {
+					try {
+						if (!fs.existsSync(metaDir)) fs.mkdirSync(metaDir, { recursive: true })
+						fs.writeFileSync(metaPath, metaContent, 'utf-8')
+						logger(Colors.green(`[createCardPoolPress] wrote metadata: ${metaFilename}`))
+					} catch (metaErr: unknown) {
+						const err = metaErr as { message?: string }
+						logger(Colors.yellow(`[createCardPoolPress] metadata write failed: ${err?.message ?? metaErr}`))
+					}
+				})()
 			}
 		}
-		logger(Colors.green(`[createCardPoolPress] card created: ${cardAddress} hash=${hash}`))
 		scheduleBeamioUserCardBlockscoutMetadataRefetch(cardAddr)
-		registerCardToDb({
-			cardAddress,
-			cardOwner,
-			currency,
-			priceInCurrencyE6,
-			uri: uri ?? undefined,
-			...(upgradeType != null && { upgradeType }),
-			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
-			shareTokenMetadata,
-			tiers,
-			txHash: hash,
-		}).catch(() => {})
-		if (res && !res.headersSent) res.status(200).json({ success: true, cardAddress, hash }).end()
 	} catch (err: any) {
 		const msg = err?.message ?? String(err)
 		logger(Colors.red(`[createCardPoolPress] failed:`), msg)
@@ -15433,6 +15454,68 @@ export const cardCreateRedeemPreCheck = async (body: {
 	}
 }
 
+/** createIssuedNft：Cluster 已预检 B-Unit 余额；EntryPoint 业务 tx 成功后再后台扣款 + indexer（不阻塞 HTTP）。 */
+async function consumeCreateIssuedNftBunitFeeInBackground(
+	cardAddress: string,
+	logTag: string
+): Promise<{ consumeTxHash: string; feePayer: string; cardOwnerEOA: string } | null> {
+	let SC: SettleContractPoolEntry | undefined
+	try {
+		SC = await shiftSettleContractForWrite(logTag)
+		const cardAddrN = ethers.getAddress(cardAddress)
+		const cardChain = await resolveUserCardChain(cardAddrN)
+		const cardProvider = providerForUserCardChain(cardChain)
+		const cardOwnerRead = new ethers.Contract(cardAddrN, ['function owner() view returns (address)'], cardProvider)
+		const rawOwner = await cardOwnerRead.owner()
+		const resolveResult = await resolveCardOwnerToEOA(cardProvider, rawOwner as string)
+		if (!resolveResult.success) {
+			logger(Colors.yellow(`[${logTag}] skip B-Unit debit: ${resolveResult.error ?? 'owner resolve failed'}`))
+			return null
+		}
+		const cardOwnerEOA = resolveResult.cardOwner
+		const aaFac = await getCardAaFactoryAddress(cardAddrN)
+		const pickedFee = await pickBUnitFeeConsumerPreferEoaThenAa(
+			cardOwnerEOA,
+			CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6,
+			{ aaFactoryAddress: aaFac }
+		)
+		if (!pickedFee.ok) {
+			logger(Colors.yellow(`[${logTag}] skip B-Unit debit: ${pickedFee.error}`))
+			return null
+		}
+		const bunitWrite = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+			SC.walletConet
+		)
+		const consumeTxFee = await bunitWrite.consumeFromUser(
+			pickedFee.consumer,
+			CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6,
+			ethers.ZeroHash,
+			0n,
+			BUNIT_KIND_CREATE_ISSUED_NFT_TOPUP_FAMILY,
+			{ gasLimit: 2_500_000 }
+		)
+		const consumeReceipt = await consumeTxFee.wait()
+		if (!consumeReceipt || Number(consumeReceipt.status) === 0) {
+			logger(Colors.yellow(`[${logTag}] B-Unit consume reverted tx=${consumeTxFee.hash}`))
+			return null
+		}
+		logger(
+			Colors.cyan(
+				`[${logTag}] createIssuedNft B-Unit debited (background) payer=${pickedFee.consumer} tx=${consumeTxFee.hash}`
+			)
+		)
+		return { consumeTxHash: consumeTxFee.hash, feePayer: pickedFee.consumer, cardOwnerEOA }
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		logger(Colors.yellow(`[${logTag}] background B-Unit consume failed: ${err?.message ?? String(e)}`))
+		return null
+	} finally {
+		if (SC) Settle_ContractPool.unshift(SC)
+	}
+}
+
 /**
  * executeForOwnerProcess：通用，owner 签名的 calldata 由 paymaster 执行。若带 redeemCode+toUserEOA 则额外执行 redeemForUser（空投）。
  */
@@ -15444,10 +15527,6 @@ export const executeForOwnerProcess = async () => {
 		executeForOwnerPool.unshift(obj)
 		return setTimeout(() => executeForOwnerProcess(), 3000)
 	}
-	/** Merchant Create Coupon B-Unit；Base executeForOwner（createIssuedNft）失败时款已扣（见产品说明）。重队列时复用 `createIssuedNftCouponBunitDeferred` 避免二次扣费 */
-	let createIssuedNftCouponBunitCtx:
-		| { consumeTxHash: string; feePayer: string; cardOwnerEOA: string }
-		| null = obj.createIssuedNftCouponBunitDeferred ?? null
 	if (couponWorkflowDebugEnabled() && obj.data && obj.data.length >= 10) {
 		const sel = obj.data.slice(0, 10).toLowerCase()
 		if (sel === CREATE_ISSUED_NFT_SELECTOR.toLowerCase()) {
@@ -15497,60 +15576,6 @@ export const executeForOwnerProcess = async () => {
 			} catch (e: any) {
 				logger(Colors.yellow(`[cardAddAdmin] chainWrite debug failed: ${e?.message ?? e}`))
 			}
-		}
-		if (obj.data?.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase() && !createIssuedNftCouponBunitCtx) {
-			const cardAddrN = ethers.getAddress(obj.cardAddress)
-			const cardChain = await resolveUserCardChain(cardAddrN)
-			const cardProvider = providerForUserCardChain(cardChain)
-			const cardOwnerRead = new ethers.Contract(cardAddrN, ['function owner() view returns (address)'], cardProvider)
-			const rawOwner = await cardOwnerRead.owner()
-			const resolveResult = await resolveCardOwnerToEOA(cardProvider, rawOwner as string)
-			if (!resolveResult.success) {
-				throw new Error(resolveResult.error ?? 'Cannot resolve card owner to EOA for B-Unit fee')
-			}
-			const cardOwnerEOA = resolveResult.cardOwner
-			const aaFac = await getCardAaFactoryAddress(cardAddrN)
-			const pickedFee = await pickBUnitFeeConsumerPreferEoaThenAa(
-				cardOwnerEOA,
-				CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6,
-				{ aaFactoryAddress: aaFac }
-			)
-			if (!pickedFee.ok) {
-				throw new Error(
-					`Insufficient B-Units for createIssuedNft — program card owner must have at least ${Number(CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6) / 1e6} B-Units: ${pickedFee.error}`
-				)
-			}
-			const feeConsumer = pickedFee.consumer
-			const bunitWrite = new ethers.Contract(
-				CONET_BUNIT_AIRDROP_ADDRESS,
-				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
-				SC.walletConet
-			)
-			let consumeTxFee: ethers.ContractTransactionResponse
-			try {
-				consumeTxFee = await bunitWrite.consumeFromUser(
-					feeConsumer,
-					CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6,
-					ethers.ZeroHash,
-					0n,
-					BUNIT_KIND_CREATE_ISSUED_NFT_TOPUP_FAMILY,
-					{ gasLimit: 2_500_000 }
-				)
-				await consumeTxFee.wait()
-			} catch (buErr: any) {
-				throw new Error(`B-Unit debit before createIssuedNft failed: ${buErr?.shortMessage ?? buErr?.message ?? buErr}`)
-			}
-			createIssuedNftCouponBunitCtx = {
-				consumeTxHash: consumeTxFee.hash,
-				feePayer: feeConsumer,
-				cardOwnerEOA,
-			}
-			obj.createIssuedNftCouponBunitDeferred = createIssuedNftCouponBunitCtx
-			logger(
-				Colors.cyan(
-					`[executeForOwnerProcess] createIssuedNft 100 B-Unit pre-debited CoNET payer=${feeConsumer} tx=${consumeTxFee.hash}`
-				)
-			)
 		}
 		let issuedNftTokenIdForApi: string | undefined
 		let createIssuedNftReceiptForBg: TransactionReceipt | null = null
@@ -15621,7 +15646,7 @@ export const executeForOwnerProcess = async () => {
 			)
 		}
 
-		/** Create Coupon / cardCreateIssuedNft：等同步 Base receipt 后把 `issuedNftTokenId` 返回客户端（不再由浏览器轮询 issuedNftIndex）。CoNET B-Uint 记账仍在下方 background IIFE，不阻塞 JSON。 */
+		/** Create Coupon / cardCreateIssuedNft：EntryPoint 业务 UserOp 确认后立即返回 `issuedNftTokenId`；B-Unit 扣款与 indexer 在 background IIFE，不阻塞 JSON。 */
 		const isCreateIssuedNftNoShareMetaUpdate =
 			Boolean(
 				hash &&
@@ -15696,10 +15721,9 @@ export const executeForOwnerProcess = async () => {
 				})
 				.end()
 		}
-		// createIssuedNft 成功后异步：CoNET B-Uint indexer 记账 + EIP-1155 tier metadata upsert（不阻塞 API 响应；receipt 已在主流程 await）
+		// createIssuedNft 成功后异步：CoNET B-Unit 扣款 + indexer 记账 + EIP-1155 tier metadata upsert（不阻塞 API 响应）
 		if (createIssuedNftReceiptForBg && hash && obj.data && obj.data.slice(0, 10).toLowerCase() === CREATE_ISSUED_NFT_SELECTOR.toLowerCase()) {
 			const cardAddress = obj.cardAddress
-			const feeCtx = createIssuedNftCouponBunitCtx
 			const baseCreateHash = hash
 			const descriptionFromBody = typeof obj.description === 'string' && obj.description.trim() ? obj.description.trim() : undefined
 			const imageFromBody = typeof obj.image === 'string' && obj.image.trim() ? obj.image.trim() : undefined
@@ -15732,11 +15756,16 @@ export const executeForOwnerProcess = async () => {
 					if (!bgRelayCheck.ok) {
 						logger(
 							Colors.yellow(
-								`[createIssuedNft] skip bg indexer/B-Unit line: ${bgRelayCheck.reason} userOpHash=${bgRelayCheck.userOpHash ?? 'n/a'}`
+								`[createIssuedNft] skip bg B-Unit/indexer: ${bgRelayCheck.reason} userOpHash=${bgRelayCheck.userOpHash ?? 'n/a'}`
 							)
 						)
 						return
 					}
+
+					const feeCtx = await consumeCreateIssuedNftBunitFeeInBackground(
+						cardAddress,
+						'createIssuedNft:bgBunit'
+					)
 
 					if (
 						feeCtx &&
