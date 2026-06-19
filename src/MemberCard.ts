@@ -3202,8 +3202,13 @@ export const executeForAdminProcess = async () => {
 			isAdminManager || Boolean(mintParsed) || Boolean(burnParsedForLog) || Boolean(burnIssuedNftParsed)
 		if (shouldWaitReceiptBeforeSuccess) {
 			const receipt = await tx.wait()
-			if (!receipt || Number(receipt.status ?? 0) !== 1) {
-				throw new Error(`executeForAdmin transaction failed on-chain: ${tx.hash}`)
+			const adminRelayCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+				logTag: 'executeForAdminProcess',
+			})
+			if (!adminRelayCheck.ok) {
+				throw new Error(
+					`executeForAdmin transaction failed on-chain: ${tx.hash} (${adminRelayCheck.reason}) userOpHash=${adminRelayCheck.userOpHash ?? 'n/a'}`
+				)
 			}
 		}
 		void syncPosTerminalAdminBindingAfterTx(tx, obj.cardAddr, obj.data).catch(() => {})
@@ -3642,6 +3647,8 @@ export const ContainerRelayPool: {
 	amountUSDC6?: string
 	/** Charge 记账：商户卡地址，用于推导 topAdmin。可选 */
 	merchantCardAddress?: string
+	/** NFC card charge：仅内存队列使用，用于按实时 EntryPoint nonce 签 UserOpHash；不得记录到日志或持久化。 */
+	nfcCardPrivateKey?: string
 	/** NFC 扣款：扣款成功后补登记 beamioTag */
 	nfcUid?: string
 	nfcPayerEoa?: string
@@ -4033,6 +4040,23 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 		const CHAIN_ID_BASE = BigInt(chainIdForUserCardChain(merchantChainForIndexer))
 		const cardProviderForCharge = providerForUserCardChain(merchantChainForIndexer)
+		const onChainReceiptEarly = await cardProviderForCharge.getTransactionReceipt(txHash).catch(() => null)
+		const onChainRelayCheckEarly = checkBusinessRelayTxSuccessful(onChainReceiptEarly ?? undefined, {
+			expectedSender: obj.from,
+			logTag: 'beamioTransferIndexerAccountingProcess',
+		})
+		if (!onChainRelayCheckEarly.ok) {
+			throw new Error(
+				`Skip indexer and B-Unit: on-chain business tx not successful (${onChainRelayCheckEarly.reason}) txHash=${txHash} userOpHash=${onChainRelayCheckEarly.userOpHash ?? 'n/a'}`
+			)
+		}
+		if (onChainRelayCheckEarly.kind === 'entrypoint' && onChainRelayCheckEarly.userOpHash) {
+			logger(
+				Colors.gray(
+					`[beamioTransferIndexerAccountingProcess] verified EntryPoint UserOp success userOpHash=${onChainRelayCheckEarly.userOpHash} bundlerTx=${txHash}`
+				)
+			)
+		}
 		const requestHashValid = obj.requestHash && ethers.isHexString(obj.requestHash) && ethers.dataLength(obj.requestHash) === 32
 		const ledgerOrigValid =
 			obj.ledgerOriginalPaymentHash &&
@@ -5942,10 +5966,12 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 		if (!ethers.isHexString(txHash) || ethers.dataLength(txHash) !== 32) {
 			throw new Error('txHash must be bytes32')
 		}
+		const redeemCardChain = await resolveUserCardChain(obj.cardAddress)
+		const redeemCardProvider = providerForUserCardChain(redeemCardChain)
 		const transferToAa: { tokenId: bigint; value: bigint }[] = []
 		let redeemReceipt: ethers.TransactionReceipt | null = null
 		try {
-			redeemReceipt = await SC.walletBase.provider!.getTransactionReceipt(txHash)
+			redeemReceipt = await redeemCardProvider.getTransactionReceipt(txHash)
 			if (redeemReceipt?.logs) {
 				const cardAddr = obj.cardAddress.toLowerCase()
 				for (const log of redeemReceipt.logs) {
@@ -5958,6 +5984,14 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 				}
 			}
 		} catch (_) { /* 解析失败时 transferToAa 为空 */ }
+		const redeemRelayCheck = checkBusinessRelayTxSuccessful(redeemReceipt ?? undefined, {
+			logTag: 'cardRedeemIndexerAccountingProcess',
+		})
+		if (!redeemRelayCheck.ok) {
+			throw new Error(
+				`Skip redeem B-Unit and indexer: on-chain redeem tx not successful (${redeemRelayCheck.reason}) txHash=${txHash} userOpHash=${redeemRelayCheck.userOpHash ?? 'n/a'}`
+			)
+		}
 		const pointsItem = transferToAa.find((t) => t.tokenId === 0n)
 		const amountE6 = pointsItem && pointsItem.value > 0n ? pointsItem.value : 1n
 		const cardContract = new ethers.Contract(obj.cardAddress, BeamioUserCardABI, SC.walletBase)
@@ -7423,6 +7457,29 @@ const runPurchasingCardAccountingJob = async (
 	job: PurchasingCardAccountingRetryJob,
 	SC: { walletConet: ethers.Wallet; BeamioTaskDiamondAction: ethers.Contract }
 ) => {
+	const businessTxToVerify =
+		job.input.originalPaymentHash && job.input.originalPaymentHash !== ethers.ZeroHash
+			? String(job.input.originalPaymentHash)
+			: job.baseTxHash
+	if (businessTxToVerify && businessTxToVerify !== ethers.ZeroHash) {
+		let cardChainForVerify: BeamioUserCardChainKey = defaultMerchantUserCardChain()
+		try {
+			cardChainForVerify = await resolveUserCardChain(job.cardAddress)
+		} catch {
+			/* keep default */
+		}
+		const bizProvider = providerForUserCardChain(cardChainForVerify)
+		const bizReceipt = await bizProvider.getTransactionReceipt(businessTxToVerify).catch(() => null)
+		const bizCheck = checkBusinessRelayTxSuccessful(bizReceipt ?? undefined, {
+			expectedSender: job.from,
+			logTag: 'runPurchasingCardAccountingJob',
+		})
+		if (!bizCheck.ok) {
+			throw new Error(
+				`Skip syncTokenAction: underlying business tx not successful (${bizCheck.reason}) tx=${businessTxToVerify} userOpHash=${bizCheck.userOpHash ?? 'n/a'}`
+			)
+		}
+	}
 	const actionFacet = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, SC.walletConet)
 	const feeData = await SC.walletConet.provider?.getFeeData().catch(() => null)
 	logger(Colors.cyan(`[purchasingCardProcess][DEBUG] BeamioIndexerDiamond payload(JSON):\n${accountingToDebugJson(job.input)}`))
@@ -7507,11 +7564,14 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			return baseReceipt
 		}
 		const resolvedReceipt = await ensureBaseReceipt()
-		const baseTxOk = resolvedReceipt != null && Number(resolvedReceipt.status ?? 0) === 1
+		const adminPostRelayCheck = checkBusinessRelayTxSuccessful(resolvedReceipt ?? undefined, {
+			logTag: 'executeForAdminPostBaseProcess',
+		})
+		const baseTxOk = adminPostRelayCheck.ok
 		if (!baseTxOk && (obj.cardOwnerEOA || recipientEOA)) {
 			logger(
 				Colors.red(
-					`[executeForAdminPostBaseProcess] Skip B-Unit charge and NFC topup indexer (card-chain tx not successful). hash=${tx.hash} chain=${topupCardChain} — UI may have already received 200; check explorer for revert reason.`
+					`[executeForAdminPostBaseProcess] Skip B-Unit charge and NFC topup indexer (${adminPostRelayCheck.reason}). hash=${tx.hash} chain=${topupCardChain} userOpHash=${adminPostRelayCheck.userOpHash ?? 'n/a'} — UI may have already received 200; check explorer for revert reason.`
 				)
 			)
 		}
@@ -8206,11 +8266,14 @@ export const purchasingCardProcess = async () => {
 				}
 			}
 		}
-		const basePurchTxOk = purchReceipt != null && Number(purchReceipt.status ?? 0) === 1
+		const basePurchRelayCheck = checkBusinessRelayTxSuccessful(purchReceipt ?? undefined, {
+			logTag: 'purchasingCardProcess',
+		})
+		const basePurchTxOk = basePurchRelayCheck.ok
 		if (!basePurchTxOk) {
 			logger(
 				Colors.red(
-					`[purchasingCardProcess] Base buyPointsForUser tx not successful; skip B-Unit charge. hash=${tx.hash} status=${purchReceipt?.status ?? 'unknown'}`
+					`[purchasingCardProcess] Base buyPointsForUser tx not successful; skip B-Unit charge and indexer. hash=${tx.hash} status=${purchReceipt?.status ?? 'unknown'} reason=${basePurchRelayCheck.reason} userOpHash=${basePurchRelayCheck.userOpHash ?? 'n/a'}`
 				)
 			)
 		}
@@ -8437,7 +8500,8 @@ export const purchasingCardProcess = async () => {
 
 		logger(Colors.green(`✅ purchasingCardProcess note: ${payMe}`))
 
-		// 以下记账（syncTokenAction -> BeamioIndexerDiamond）在后台执行，客户端已收到 hash；失败不影响购点成功
+		// 以下记账（syncTokenAction -> BeamioIndexerDiamond）在后台执行，客户端已收到 hash；链上业务失败则不入账
+		if (basePurchTxOk) {
 		try {
 			const syncTxHash = await runPurchasingCardAccountingJob(
 				{
@@ -8546,6 +8610,7 @@ export const purchasingCardProcess = async () => {
 				attempt: 0,
 			})
 		}
+		}
 		syncNftTierMetadataForUser(cardAddress, from).catch(() => {})
 		
 		
@@ -8584,6 +8649,106 @@ const EntryPointHandleOpsABI = [
 	'function getUserOpHash(tuple(address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature) userOp) view returns (bytes32)',
 	'function getNonce(address sender, uint192 key) view returns (uint256)',
 ]
+
+const ENTRY_POINT_USER_OPERATION_EVENT_TOPIC = ethers.id(
+	'UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)'
+)
+const EntryPointUserOperationEventIface = new ethers.Interface([
+	'event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)',
+])
+
+type BusinessRelayTxSuccessCheck =
+	| { ok: true; kind: 'direct' | 'entrypoint'; userOpHash?: string }
+	| { ok: false; reason: string; userOpHash?: string }
+
+function parseEntryPointUserOpEventsFromReceipt(
+	receipt: ethers.TransactionReceipt,
+	expectedSender?: string
+): Array<{ userOpHash: string; sender: string; success: boolean }> {
+	const expectedLower = expectedSender && ethers.isAddress(expectedSender) ? expectedSender.toLowerCase() : null
+	const out: Array<{ userOpHash: string; sender: string; success: boolean }> = []
+	for (const log of receipt.logs ?? []) {
+		if ((log.topics[0] ?? '').toLowerCase() !== ENTRY_POINT_USER_OPERATION_EVENT_TOPIC.toLowerCase()) continue
+		try {
+			const parsed = EntryPointUserOperationEventIface.parseLog({
+				topics: log.topics as string[],
+				data: log.data,
+			})
+			if (!parsed) continue
+			const sender = ethers.getAddress(parsed.args.sender as string)
+			if (expectedLower && sender.toLowerCase() !== expectedLower) continue
+			out.push({
+				userOpHash: String(parsed.args.userOpHash),
+				sender,
+				success: Boolean(parsed.args.success),
+			})
+		} catch {
+			/* skip malformed log */
+		}
+	}
+	return out
+}
+
+/** relayHandleOps / handleOps：bundler tx 可能成功但 UserOp 执行失败；仅 success=true 才视为业务成功。 */
+function checkBusinessRelayTxSuccessful(
+	receipt: ethers.TransactionReceipt | null | undefined,
+	opts?: { expectedSender?: string; logTag?: string }
+): BusinessRelayTxSuccessCheck {
+	const tag = opts?.logTag ? `[${opts.logTag}] ` : ''
+	if (!receipt) {
+		return { ok: false, reason: `${tag}missing transaction receipt` }
+	}
+	if (Number(receipt.status ?? 0) !== 1) {
+		return { ok: false, reason: `${tag}transaction reverted (status=${receipt.status ?? 'unknown'})` }
+	}
+	const userOpEvents = parseEntryPointUserOpEventsFromReceipt(receipt, opts?.expectedSender)
+	if (userOpEvents.length > 0) {
+		const failed = userOpEvents.find((e) => !e.success)
+		if (failed) {
+			return {
+				ok: false,
+				reason: `${tag}UserOperation execution failed (EntryPoint success=false)`,
+				userOpHash: failed.userOpHash,
+			}
+		}
+		return { ok: true, kind: 'entrypoint', userOpHash: userOpEvents[0]!.userOpHash }
+	}
+	return { ok: true, kind: 'direct' }
+}
+
+async function fetchReceiptAndCheckBusinessRelaySuccess(
+	provider: ethers.Provider,
+	txHash: string,
+	opts?: { expectedSender?: string; logTag?: string; pollAttempts?: number; pollIntervalMs?: number }
+): Promise<
+	| { ok: true; receipt: ethers.TransactionReceipt; userOpHash?: string }
+	| { ok: false; reason: string; userOpHash?: string; receipt: ethers.TransactionReceipt | null }
+> {
+	let receipt: ethers.TransactionReceipt | null = null
+	try {
+		receipt = await provider.getTransactionReceipt(txHash)
+	} catch {
+		receipt = null
+	}
+	const pollAttempts = opts?.pollAttempts ?? 0
+	const pollIntervalMs = opts?.pollIntervalMs ?? 2000
+	for (let i = 0; receipt == null && i < pollAttempts; i++) {
+		await new Promise((r) => setTimeout(r, pollIntervalMs))
+		try {
+			receipt = await provider.getTransactionReceipt(txHash)
+		} catch {
+			receipt = null
+		}
+	}
+	const check = checkBusinessRelayTxSuccessful(receipt ?? undefined, opts)
+	if (!check.ok) {
+		return { ok: false, reason: check.reason, userOpHash: check.userOpHash, receipt }
+	}
+	if (!receipt) {
+		return { ok: false, reason: `${opts?.logTag ? `[${opts.logTag}] ` : ''}missing transaction receipt`, receipt: null }
+	}
+	return { ok: true, receipt, userOpHash: check.userOpHash }
+}
 
 function packUserOpUints128(low: bigint, high: bigint): string {
 	return ethers.toBeHex((high << 128n) | low, 32)
@@ -9303,6 +9468,29 @@ export const AAtoEOAProcess = async () => {
     if (!receipt) {
       throw new Error('handleOps tx.wait() returned null')
     }
+    const aaRelayCheck = checkBusinessRelayTxSuccessful(receipt, {
+      expectedSender: sender,
+      logTag: 'AAtoEOA',
+    })
+    if (!aaRelayCheck.ok) {
+      const errMsg = `Payment failed on-chain: ${aaRelayCheck.reason}`
+      logger(
+        Colors.red(
+          `[AAtoEOA] Skip B-Unit and indexer (${aaRelayCheck.reason}) bundlerTx=${tx.hash} userOpHash=${aaRelayCheck.userOpHash ?? 'n/a'}`
+        )
+      )
+      if (!obj.res?.headersSent) {
+        obj.res.status(400).json({
+          success: false,
+          error: errMsg,
+          USDC_tx: tx.hash,
+          ...(aaRelayCheck.userOpHash ? { userOpHash: aaRelayCheck.userOpHash } : {}),
+        }).end()
+      }
+      Settle_ContractPool.unshift(SC)
+      setTimeout(() => AAtoEOAProcess(), 3000)
+      return
+    }
 
     // --- deduct 2 B-Units fee from feePayer on CoNET (with Base tx hash) ---
     const baseHashBytes32 = tx.hash as `0x${string}` // 32-byte tx hash as bytes32
@@ -9686,6 +9874,18 @@ export const OpenContainerRelayProcess = async () => {
       }
       return null
     })
+    const openRelayCheck = checkBusinessRelayTxSuccessful(openRelayReceipt ?? undefined, {
+      expectedSender: account,
+      logTag: 'AAtoEOA/OpenContainer',
+    })
+    if (!openRelayCheck.ok) {
+      logger(
+        Colors.red(
+          `[AAtoEOA/OpenContainer] Skip B-Unit and indexer (${openRelayCheck.reason}) bundlerTx=${tx.hash} userOpHash=${openRelayCheck.userOpHash ?? 'n/a'}`
+        )
+      )
+      return
+    }
     if (openRelayReceipt && obj.chargeOwnerChildBurn) {
       await maybeExecuteChargeOwnerChildBurnAfterContainerRelay({
         SC,
@@ -10258,8 +10458,57 @@ export const ContainerRelayProcess = async () => {
       [...(BeamioAAAccountFactoryPaymasterABI as any[]), RELAY_MAIN_ABI],
       relayWalletC
     )
-    const tx = await FactoryWithRelay.relayContainerMainRelayed(account, to, items, nonce_, deadline_, sigBytes)
-    logger(`[AAtoEOA/Container] relay tx submitted hash=${tx.hash}`)
+    let tx: ethers.ContractTransactionResponse
+    if (obj.nfcCardPrivateKey) {
+      const entryPointAddress = ethers.getAddress((await FactoryWithRelay.ENTRY_POINT()) as string)
+      const entryPointRead = new ethers.Contract(entryPointAddress, EntryPointHandleOpsABI, relayProviderC)
+      const accountIface = new ethers.Interface([
+        'function containerMainRelayedFromEntryPoint(address to,(uint8 kind,address asset,uint256 amount,uint256 tokenId,bytes data)[] items,uint256 nonce_,uint256 deadline_,bytes sig)',
+      ])
+      const callData = accountIface.encodeFunctionData('containerMainRelayedFromEntryPoint', [
+        to,
+        items,
+        nonce_,
+        deadline_,
+        sigBytes,
+      ])
+      const userOpNonce = (await entryPointRead.getNonce(account, 0n)) as bigint
+      const feeDataContainer = await relayProviderC.getFeeData()
+      const maxFeePerGasContainer = feeDataContainer.maxFeePerGas ?? 2_000_000_000n
+      const maxPriorityFeePerGasContainer = feeDataContainer.maxPriorityFeePerGas ?? 100_000_000n
+      const opForHash: AAtoEOAUserOp = {
+        sender: account,
+        nonce: userOpNonce,
+        initCode: '0x',
+        callData,
+        accountGasLimits: packUserOpUints128(8_000_000n, 8_000_000n),
+        preVerificationGas: 300_000n,
+        gasFees: packUserOpUints128(maxPriorityFeePerGasContainer, maxFeePerGasContainer),
+        paymasterAndData: buildPaymasterAndDataV07(relayAaFactoryContainer),
+        signature: '0x',
+      }
+      const userOpHash = (await entryPointRead.getUserOpHash(opForHash)) as string
+      const userOpSigner = new ethers.Wallet(obj.nfcCardPrivateKey)
+      const userOpSignature = await userOpSigner.signMessage(ethers.getBytes(userOpHash))
+      const txOp = {
+        ...opForHash,
+        nonce: asBigInt(opForHash.nonce, 0n),
+        preVerificationGas: asBigInt(opForHash.preVerificationGas, 0n),
+        signature: ethers.getBytes(userOpSignature),
+      }
+      const beneficiary = await relayWalletC.getAddress()
+      logger(
+        Colors.gray(
+          `[AAtoEOA/Container] relayHandleOps via EntryPoint=${entryPointAddress} userOpNonce=${userOpNonce.toString()} callDataBytes=${hexBytesLen(callData)} chain=${relayCtxC.chain}`
+        )
+      )
+      tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+      logger(`[AAtoEOA/Container] EntryPoint relayHandleOps tx submitted hash=${tx.hash}`)
+    } else {
+      logger(Colors.yellow('[AAtoEOA/Container] legacy direct relay path used for non-NFC container payload'))
+      tx = await FactoryWithRelay.relayContainerMainRelayed(account, to, items, nonce_, deadline_, sigBytes)
+      logger(`[AAtoEOA/Container] relay tx submitted hash=${tx.hash}`)
+    }
     const receipt = await tx.wait().catch((waitErr: any) => {
       try {
         logger(Colors.yellow(`[AAtoEOA/Container] tx.wait() failed (RPC): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
@@ -10268,6 +10517,26 @@ export const ContainerRelayProcess = async () => {
       }
       return null
     })
+    const containerRelayCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+      expectedSender: account,
+      logTag: 'AAtoEOA/Container',
+    })
+    if (!containerRelayCheck.ok) {
+      logger(
+        Colors.red(
+          `[AAtoEOA/Container] Skip B-Unit and indexer (${containerRelayCheck.reason}) bundlerTx=${tx.hash} userOpHash=${containerRelayCheck.userOpHash ?? 'n/a'}`
+        )
+      )
+      if (!obj.res?.headersSent) {
+        obj.res.status(400).json({
+          success: false,
+          error: `Payment failed on-chain: ${containerRelayCheck.reason}`,
+          USDC_tx: tx.hash,
+          ...(containerRelayCheck.userOpHash ? { userOpHash: containerRelayCheck.userOpHash } : {}),
+        }).end()
+      }
+      return
+    }
     if (receipt) {
       await maybeExecuteChargeOwnerChildBurnAfterContainerRelay({
         SC,
@@ -10278,7 +10547,13 @@ export const ContainerRelayProcess = async () => {
       })
     }
     // Base 转账完成后立即返回 hash 给客户端，不等待记账
-    if (!obj.res?.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
+    if (!obj.res?.headersSent) {
+      obj.res.status(200).json({
+        success: true,
+        USDC_tx: tx.hash,
+        ...(containerRelayCheck.userOpHash ? { userOpHash: containerRelayCheck.userOpHash } : {}),
+      }).end()
+    }
 
     const usdcAmountRaw = obj.amountUSDC6 ? BigInt(obj.amountUSDC6) : BigInt(payload.items[0].amount)
     const feePayerItems = payload.items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset) }))
@@ -12750,7 +13025,13 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 				factoryCallData: factoryIface.encodeFunctionData('redeemForUser', [cardAddress, redeemCode, toUserEOA]),
 				logTag: 'nfcLinkAppClaimWithKey:redeemForUser',
 			})
-			await tx1.wait()
+			const claimReceipt1 = await tx1.wait()
+			const claimCheck1 = checkBusinessRelayTxSuccessful(claimReceipt1 ?? undefined, {
+				logTag: 'nfcLinkAppClaimWithKey:redeemForUser',
+			})
+			if (!claimCheck1.ok) {
+				throw new Error(`${claimCheck1.reason} userOpHash=${claimCheck1.userOpHash ?? 'n/a'}`)
+			}
 			txHash = tx1.hash
 		} catch (oneTimeErr: any) {
 			lastErr = oneTimeErr
@@ -12774,7 +13055,13 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 						factoryCallData: factoryIface.encodeFunctionData('redeemPoolForUser', [cardAddress, redeemCode, toUserEOA]),
 						logTag: 'nfcLinkAppClaimWithKey:redeemPoolForUser',
 					})
-					await tx2.wait()
+					const claimReceipt2 = await tx2.wait()
+					const claimCheck2 = checkBusinessRelayTxSuccessful(claimReceipt2 ?? undefined, {
+						logTag: 'nfcLinkAppClaimWithKey:redeemPoolForUser',
+					})
+					if (!claimCheck2.ok) {
+						throw new Error(`${claimCheck2.reason} userOpHash=${claimCheck2.userOpHash ?? 'n/a'}`)
+					}
 					txHash = tx2.hash
 					lastErr = null
 				} catch (poolErr: any) {
@@ -15285,8 +15572,13 @@ export const executeForOwnerProcess = async () => {
 		const hash = tx?.hash as string | undefined
 		if (isAdminManager) {
 			const receipt = await tx.wait()
-			if (!receipt || Number(receipt.status ?? 0) !== 1) {
-				throw new Error('executeForOwner adminManager transaction failed')
+			const adminMgrCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+				logTag: 'executeForOwnerProcess:adminManager',
+			})
+			if (!adminMgrCheck.ok) {
+				throw new Error(
+					`executeForOwner adminManager transaction failed: ${adminMgrCheck.reason} userOpHash=${adminMgrCheck.userOpHash ?? 'n/a'}`
+				)
 			}
 		}
 		void syncPosTerminalAdminBindingAfterTx(tx, obj.cardAddress, obj.data).catch(() => {})
@@ -15303,7 +15595,15 @@ export const executeForOwnerProcess = async () => {
 				]),
 				logTag: 'executeForOwnerProcess:redeemForUser',
 			})
-			await redeemTx.wait()
+			const redeemReceiptInline = await redeemTx.wait()
+			const redeemInlineCheck = checkBusinessRelayTxSuccessful(redeemReceiptInline ?? undefined, {
+				logTag: 'executeForOwnerProcess:redeemForUser',
+			})
+			if (!redeemInlineCheck.ok) {
+				throw new Error(
+					`${redeemInlineCheck.reason} userOpHash=${redeemInlineCheck.userOpHash ?? 'n/a'}`
+				)
+			}
 			code = obj.redeemCode
 			logger(Colors.green(`✅ executeForOwnerProcess + redeemForUser card=${obj.cardAddress} to=${obj.toUserEOA}`))
 		} else {
@@ -15332,8 +15632,16 @@ export const executeForOwnerProcess = async () => {
 		if (isCreateIssuedNftNoShareMetaUpdate) {
 			const receipt = await tx.wait()
 			createIssuedNftReceiptForBg = receipt
-			if (!receipt || Number(receipt.status ?? 0) !== 1) {
-				throw new Error('createIssuedNft executeForOwner transaction failed')
+			const createIssuedRelayCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+				logTag: 'executeForOwnerProcess:createIssuedNft',
+			})
+			if (!createIssuedRelayCheck.ok) {
+				throw new Error(
+					`createIssuedNft executeForOwner transaction failed: ${createIssuedRelayCheck.reason} userOpHash=${createIssuedRelayCheck.userOpHash ?? 'n/a'}`
+				)
+			}
+			if (!receipt) {
+				throw new Error('createIssuedNft executeForOwner transaction failed: missing receipt')
 			}
 			const cardLower = ethers.getAddress(obj.cardAddress).toLowerCase()
 			for (const log of receipt.logs) {
@@ -15355,8 +15663,13 @@ export const executeForOwnerProcess = async () => {
 
 		if (obj.metadataUpdate) {
 			const receipt = await tx.wait()
-			if (!receipt || Number(receipt.status ?? 0) !== 1) {
-				throw new Error('executeForOwner transaction failed before metadata update')
+			const metaRelayCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+				logTag: 'executeForOwnerProcess:metadataUpdate',
+			})
+			if (!metaRelayCheck.ok) {
+				throw new Error(
+					`executeForOwner transaction failed before metadata update: ${metaRelayCheck.reason} userOpHash=${metaRelayCheck.userOpHash ?? 'n/a'}`
+				)
 			}
 			const meta = await applyBeamioCardShareMetadataUpdate({
 				cardAddress: obj.cardAddress,
@@ -15413,7 +15726,17 @@ export const executeForOwnerProcess = async () => {
 			;(async () => {
 				try {
 					const receipt = createIssuedNftReceiptForBg
-					if (!receipt || Number(receipt.status ?? 0) !== 1) return
+					const bgRelayCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+						logTag: 'createIssuedNft:bgIndexer',
+					})
+					if (!bgRelayCheck.ok) {
+						logger(
+							Colors.yellow(
+								`[createIssuedNft] skip bg indexer/B-Unit line: ${bgRelayCheck.reason} userOpHash=${bgRelayCheck.userOpHash ?? 'n/a'}`
+							)
+						)
+						return
+					}
 
 					if (
 						feeCtx &&
@@ -15935,7 +16258,13 @@ export const cardRedeemPoolPress = async () => {
 				factoryCallData: factoryIface.encodeFunctionData('redeemForUser', [obj.cardAddress, obj.redeemCode, obj.toUserEOA]),
 				logTag: 'cardRedeemPoolPress:redeemForUser',
 			})
-			await tx1.wait()
+			const redeemReceipt1 = await tx1.wait()
+			const redeemCheck1 = checkBusinessRelayTxSuccessful(redeemReceipt1 ?? undefined, {
+				logTag: 'cardRedeemPoolPress:redeemForUser',
+			})
+			if (!redeemCheck1.ok) {
+				throw new Error(`${redeemCheck1.reason} userOpHash=${redeemCheck1.userOpHash ?? 'n/a'}`)
+			}
 			txHash = tx1.hash
 		} catch (oneTimeErr: any) {
 			lastErr = oneTimeErr
@@ -15959,7 +16288,13 @@ export const cardRedeemPoolPress = async () => {
 						factoryCallData: factoryIface.encodeFunctionData('redeemPoolForUser', [obj.cardAddress, obj.redeemCode, obj.toUserEOA]),
 						logTag: 'cardRedeemPoolPress:redeemPoolForUser',
 					})
-					await tx2.wait()
+					const redeemReceipt2 = await tx2.wait()
+					const redeemCheck2 = checkBusinessRelayTxSuccessful(redeemReceipt2 ?? undefined, {
+						logTag: 'cardRedeemPoolPress:redeemPoolForUser',
+					})
+					if (!redeemCheck2.ok) {
+						throw new Error(`${redeemCheck2.reason} userOpHash=${redeemCheck2.userOpHash ?? 'n/a'}`)
+					}
 					txHash = tx2.hash
 					lastErr = null
 				} catch (poolErr: any) {
@@ -17083,6 +17418,11 @@ export const payByNfcUidPrepare = async (params: {
 		const relayWallet = relayCtx.wallet
 		const relayFactoryPaymaster =
 			relayCtx.chain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+		logger(
+			Colors.gray(
+				`[payByNfcUidPrepare] target cardForPrepare=${cardForPrepare} merchantInfraCard=${merchantInfraCard ?? 'none'} chain=${relayCtx.chain}`
+			)
+		)
 		const wallet = new ethers.Wallet(privateKey)
 		const eoa = await wallet.getAddress()
 		// 必须与 getUIDAssets / resolveBeamioAaForEoaWithFallback 一致：用 UserCard 绑定的 _aaFactory()，勿用 BASE_AA_FACTORY.primaryAccountOf
@@ -17140,8 +17480,13 @@ export const payByNfcUidPrepare = async (params: {
 			const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
 			cardCurrencyStr = currencyMap[Number(curEnum)] ?? 'CAD'
 			pointsPriceE6Str = priceE6.toString()
+			logger(
+				Colors.gray(
+					`[payByNfcUidPrepare] card currency cardForPrepare=${cardForPrepare} chain=${relayCtx.chain} currency=${cardCurrencyStr} priceE6=${pointsPriceE6Str} client=${currency ?? 'none'}`
+				)
+			)
 			if (fiat6Ok && currency && currency.toUpperCase() !== cardCurrencyStr.toUpperCase()) {
-				logger(Colors.yellow(`[payByNfcUidPrepare] fiat6 currency mismatch: client=${currency} card=${cardCurrencyStr}. Client must input amount in card currency.`))
+				logger(Colors.yellow(`[payByNfcUidPrepare] fiat6 currency mismatch: client=${currency} card=${cardCurrencyStr} cardForPrepare=${cardForPrepare} chain=${relayCtx.chain}. Client must input amount in card currency.`))
 				return { ok: false, error: `Currency mismatch: client sent ${currency}, card is ${cardCurrencyStr}. POS must input amount in card currency (fiat6-only protocol).` }
 			}
 		} catch (e) {
@@ -17179,6 +17524,8 @@ export const payByNfcUidSignContainer = async (params: {
 	amountFiat6?: string
 	/** fiat6-only 协议必填：账单币种（必须与目标 BeamioUserCard.currency() 一致）。 */
 	currency?: string
+	/** POS 绑定商户 program card；用于日志、记账/附加预检与 relay context seed。 */
+	merchantInfraCard?: string
 	res: Response
 	e?: string
 	c?: string
@@ -17201,6 +17548,7 @@ export const payByNfcUidSignContainer = async (params: {
 		amountUsdc6,
 		amountFiat6,
 		currency,
+		merchantInfraCard,
 		res,
 		e,
 		c,
@@ -17221,6 +17569,15 @@ export const payByNfcUidSignContainer = async (params: {
 	if (fiat6Ok && currency && nfcRequestCurrency && currency.toUpperCase() !== String(nfcRequestCurrency).trim().toUpperCase()) {
 		logger(Colors.yellow(`[payByNfcUidSignContainer] fiat6 currency=${currency} mismatches nfcRequestCurrency=${nfcRequestCurrency}; using fiat6 currency.`))
 	}
+	const merchantInfraForContainer =
+		typeof merchantInfraCard === 'string' && merchantInfraCard.trim() && ethers.isAddress(merchantInfraCard.trim())
+			? ethers.getAddress(merchantInfraCard.trim())
+			: undefined
+	logger(
+		Colors.gray(
+			`[payByNfcUidSignContainer] merchantInfraCard=${merchantInfraForContainer ?? 'none'} currency=${fiat6Ok ? currency?.toUpperCase() : 'none'} amountFiat6=${amountFiat6 ?? 'none'}`
+		)
+	)
 	// fiat6-only 协议：当客户端只传 fiat6（推荐）时，服务端按链上单源 oracle 派生 USDC6 用于
 	// 下游 BUnit 收费 / 记账等附属用途。**实际 ContainerItem 转账金额仍以 items[].amount 为准**（客户端按 priceE6 直算，零漂移）。
 	let amountUsdc6Effective: string | undefined = amountUsdc6
@@ -17304,6 +17661,16 @@ export const payByNfcUidSignContainer = async (params: {
 	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
 	const wallet = new ethers.Wallet(privateKey)
 	const eoa = await wallet.getAddress()
+	const erc1155CardForContainer = containerPayload.items.find((it) => Number(it.kind) === 1)?.asset
+	const relayCardSeed =
+		merchantInfraForContainer ??
+		(erc1155CardForContainer && ethers.isAddress(erc1155CardForContainer)
+			? ethers.getAddress(erc1155CardForContainer)
+			: undefined)
+	const relayChainForContainer = relayCardSeed
+		? await resolveUserCardChain(relayCardSeed)
+		: defaultMerchantUserCardChain()
+	const relayChainIdForContainer = chainIdForUserCardChain(relayChainForContainer)
 	const aaResolved = await resolveBeamioAaForEoaWithFallback(Settle_ContractPool[0].walletBase.provider!, eoa)
 	if (!aaResolved || ethers.getAddress(containerPayload.account) !== ethers.getAddress(aaResolved)) {
 		return { pushed: false, error: 'Container account does not match the AA resolved for this NFC UID.' }
@@ -17318,7 +17685,7 @@ export const payByNfcUidSignContainer = async (params: {
 		const domain = {
 			name: 'BeamioAccount',
 			version: '1',
-			chainId: BASE_CHAIN_ID,
+			chainId: relayChainIdForContainer,
 			verifyingContract: containerPayload.account as `0x${string}`,
 		}
 		const types = {
@@ -17350,6 +17717,8 @@ export const payByNfcUidSignContainer = async (params: {
 			currencyAmount: nfcSubStr,
 			forText: `NFC pay uid=${uid.slice(0, 12)}...`,
 			amountUSDC6: amountUsdc6Effective ?? amountUsdc6 ?? '0',
+			merchantCardAddress: merchantInfraForContainer,
+			nfcCardPrivateKey: privateKey,
 			nfcUid: uidTrim,
 			nfcPayerEoa: eoa,
 			nfcSubtotalCurrencyAmount: nfcSubStr,
