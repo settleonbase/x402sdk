@@ -1615,6 +1615,46 @@ export const getPosTerminalCardBindingRow = async (
 	}
 }
 
+export const listPosTerminalCardBindingsByCard = async (
+	cardAddressLoose: string
+): Promise<Array<{ posEoa: string; cardAddress: string; txHash: string | null; terminalMetadata: unknown | null }>> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioPosTerminalAdminCardSchema(db)
+		const card = ethers.getAddress(cardAddressLoose).toLowerCase()
+		const { rows } = await db.query<{
+			pos_eoa: string
+			card_address: string
+			tx_hash: string | null
+			metadata_json: unknown | null
+		}>(
+			`SELECT pos_eoa, card_address, tx_hash, metadata_json
+			 FROM beamio_pos_terminal_admin_card
+			 WHERE LOWER(TRIM(card_address)) = $1
+			 ORDER BY updated_at ASC`,
+			[card]
+		)
+		const out: Array<{ posEoa: string; cardAddress: string; txHash: string | null; terminalMetadata: unknown | null }> = []
+		for (const row of rows) {
+			if (!row.pos_eoa || !ethers.isAddress(row.pos_eoa)) continue
+			if (!row.card_address || !ethers.isAddress(row.card_address)) continue
+			out.push({
+				posEoa: ethers.getAddress(row.pos_eoa),
+				cardAddress: ethers.getAddress(row.card_address),
+				txHash: row.tx_hash ?? null,
+				terminalMetadata: row.metadata_json ?? null,
+			})
+		}
+		return out
+	} catch (e: any) {
+		logger(Colors.yellow(`[listPosTerminalCardBindingsByCard] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** beamio_nft_series 表：存储 issued NFT 系列，含 sharedSeriesMetadata 的 IPFS 引用；metadata_json 为通用型 JSONB（应用场景扩展用，如电影/演唱会/商品等） */
 const BEAMIO_NFT_SERIES_TABLE = `CREATE TABLE IF NOT EXISTS beamio_nft_series (
 	id SERIAL PRIMARY KEY,

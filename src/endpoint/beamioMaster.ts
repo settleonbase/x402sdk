@@ -36,6 +36,10 @@ import {
 	metadataMatchesClientCouponCategoryFilter,
 	metadataMatchesClientProductionCategoryFilter,
 } from '../couponMetadataCategory'
+import {
+	createLongDhangConetMigrationCard,
+	runLongDhangConetMigrationBatch,
+} from './longDhangConetMigration'
 
 const masterServerPort = 1111
 
@@ -1553,6 +1557,37 @@ const routing = ( router: Router ) => {
 			createCardPool.push({ ...body, res })
 			logger(Colors.cyan(`[createCard] pushed to pool, cardOwner=${body.cardOwner}`))
 			createCardPoolPress()
+		})
+
+		router.post('/longDhangMigrationCreateCard', async (_req, res) => {
+			try {
+				const result = await createLongDhangConetMigrationCard()
+				if (!result.success) {
+					return res.status(400).json(result).end()
+				}
+				return res.status(200).json(result).end()
+			} catch (e: any) {
+				logger(Colors.red(`[longDhangMigrationCreateCard] failed: ${e?.message ?? e}`))
+				return res.status(500).json({ success: false, error: e?.message ?? 'Create LongDhang CoNET card failed.' }).end()
+			}
+		})
+
+		router.post('/longDhangMigrationRun', async (req, res) => {
+			const body = req.body as { newCardAddress?: string; snapshotHash?: string; limit?: number }
+			try {
+				if (!body.newCardAddress || !ethers.isAddress(body.newCardAddress)) {
+					return res.status(400).json({ success: false, error: 'Invalid newCardAddress.' }).end()
+				}
+				const result = await runLongDhangConetMigrationBatch({
+					newCardAddress: body.newCardAddress,
+					snapshotHash: body.snapshotHash,
+					limit: Number.isFinite(Number(body.limit)) ? Math.max(1, Math.floor(Number(body.limit))) : undefined,
+				})
+				return res.status(result.success ? 200 : 400).json(result).end()
+			} catch (e: any) {
+				logger(Colors.red(`[longDhangMigrationRun] failed: ${e?.message ?? e}`))
+				return res.status(500).json({ success: false, error: e?.message ?? 'LongDhang migration failed.' }).end()
+			}
 		})
 
 		/**

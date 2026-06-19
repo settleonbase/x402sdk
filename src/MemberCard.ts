@@ -13513,6 +13513,118 @@ export const cardAddAdminPreCheck = async (body: {
 const createIssuedNftIface = new ethers.Interface([
 	'function createIssuedNft(bytes32 title, uint64 validAfter, uint64 validBefore, uint256 maxSupply, uint256 priceInCurrency6, bytes32 sharedMetadataHash)',
 ])
+const issuedNftInteractionIface = new ethers.Interface([
+	'function recordIssuedNftReferralStat(uint256 tokenId, address wallet, uint8 statKind, uint256 amount)',
+	'function recordIssuedNftTraffic(uint256 tokenId, address wallet, uint256 trafficGB18)',
+	'function recordIssuedNftShare(uint256 tokenId, address wallet)',
+	'function setIssuedNftLike(uint256 tokenId, address wallet, bool liked)',
+	'function recordIssuedNftComment(uint256 tokenId, address wallet, bytes32 commentIpfsHash)',
+	'function recordIssuedNftAccess(uint256 tokenId, address wallet, uint256 trafficGB18)',
+	'function recordIssuedNftPurchase(uint256 tokenId, address wallet, uint256 amount6)',
+])
+export const ISSUED_NFT_INTERACTION_ENTRYPOINT_ROUTE = 'executeForAdmin' as const
+export const ISSUED_NFT_INTERACTION_ENTRYPOINT_SUBMIT_PATH = '/api/executeForAdmin' as const
+
+type IssuedNftInteractionBaseInput = {
+	tokenId: ethers.BigNumberish
+	wallet: string
+}
+
+export type IssuedNftInteractionCalldataInput =
+	| (IssuedNftInteractionBaseInput & { kind: 'referralStat'; statKind: number; amount: ethers.BigNumberish })
+	| (IssuedNftInteractionBaseInput & { kind: 'traffic'; trafficGB18: ethers.BigNumberish })
+	| (IssuedNftInteractionBaseInput & { kind: 'share' })
+	| (IssuedNftInteractionBaseInput & { kind: 'like'; liked: boolean })
+	| (IssuedNftInteractionBaseInput & { kind: 'comment'; commentIpfsHash: string })
+	| (IssuedNftInteractionBaseInput & { kind: 'access'; trafficGB18: ethers.BigNumberish })
+	| (IssuedNftInteractionBaseInput & { kind: 'purchase'; amount6: ethers.BigNumberish })
+
+export type IssuedNftInteractionExecuteForAdminRoute = {
+	cardAddress: string
+	data: string
+	route: typeof ISSUED_NFT_INTERACTION_ENTRYPOINT_ROUTE
+	submitPath: typeof ISSUED_NFT_INTERACTION_ENTRYPOINT_SUBMIT_PATH
+	factoryGateway: string
+	/** Future endpoints should collect an admin signature over this `data`, then forward to Master `/api/executeForAdmin`. */
+	note: string
+}
+
+function normalizeIssuedNftInteractionBase(input: IssuedNftInteractionBaseInput): { tokenId: bigint; wallet: string } {
+	const tokenId = BigInt(input.tokenId)
+	const wallet = ethers.getAddress(input.wallet)
+	if (tokenId < ISSUED_NFT_START_ID_MEMBER) throw new Error('tokenId must be an issued NFT token id')
+	return { tokenId, wallet }
+}
+
+/**
+ * Builds only the BeamioUserCard calldata for issued-NFT stats/social writes.
+ *
+ * Do not call the module/card contract directly from API code. The intended server flow is:
+ * Cluster precheck -> admin signs ExecuteForAdmin(data) -> Master `/api/executeForAdmin`
+ * -> `executeForAdminProcess` -> `relayUserCardFactoryCallViaEntryPoint`.
+ */
+export function buildIssuedNftInteractionExecuteForAdminData(input: IssuedNftInteractionCalldataInput): string {
+	const base = normalizeIssuedNftInteractionBase(input)
+	switch (input.kind) {
+		case 'referralStat':
+			return issuedNftInteractionIface.encodeFunctionData('recordIssuedNftReferralStat', [
+				base.tokenId,
+				base.wallet,
+				Number(input.statKind),
+				BigInt(input.amount),
+			])
+		case 'traffic':
+			return issuedNftInteractionIface.encodeFunctionData('recordIssuedNftTraffic', [
+				base.tokenId,
+				base.wallet,
+				BigInt(input.trafficGB18),
+			])
+		case 'share':
+			return issuedNftInteractionIface.encodeFunctionData('recordIssuedNftShare', [base.tokenId, base.wallet])
+		case 'like':
+			return issuedNftInteractionIface.encodeFunctionData('setIssuedNftLike', [base.tokenId, base.wallet, Boolean(input.liked)])
+		case 'comment':
+			if (!ethers.isHexString(input.commentIpfsHash) || ethers.dataLength(input.commentIpfsHash) !== 32) {
+				throw new Error('commentIpfsHash must be bytes32')
+			}
+			return issuedNftInteractionIface.encodeFunctionData('recordIssuedNftComment', [base.tokenId, base.wallet, input.commentIpfsHash])
+		case 'access':
+			return issuedNftInteractionIface.encodeFunctionData('recordIssuedNftAccess', [
+				base.tokenId,
+				base.wallet,
+				BigInt(input.trafficGB18),
+			])
+		case 'purchase':
+			return issuedNftInteractionIface.encodeFunctionData('recordIssuedNftPurchase', [
+				base.tokenId,
+				base.wallet,
+				BigInt(input.amount6),
+			])
+	}
+}
+
+/**
+ * Minimal future-API skeleton for issued-NFT interactions.
+ *
+ * This intentionally returns the existing EntryPoint-backed executeForAdmin route
+ * instead of exposing a direct transaction helper.
+ */
+export async function prepareIssuedNftInteractionExecuteForAdminRoute(params: {
+	cardAddress: string
+	interaction: IssuedNftInteractionCalldataInput
+}): Promise<IssuedNftInteractionExecuteForAdminRoute> {
+	const cardAddress = ethers.getAddress(params.cardAddress)
+	const data = buildIssuedNftInteractionExecuteForAdminData(params.interaction)
+	const factoryGateway = await getBeamioUserCardFactoryGateway(cardAddress)
+	return {
+		cardAddress,
+		data,
+		route: ISSUED_NFT_INTERACTION_ENTRYPOINT_ROUTE,
+		submitPath: ISSUED_NFT_INTERACTION_ENTRYPOINT_SUBMIT_PATH,
+		factoryGateway,
+		note: 'Collect ExecuteForAdmin admin signature for this data and forward to /api/executeForAdmin; Master relays via EntryPoint/UserOp.',
+	}
+}
 const mintIssuedNftByGatewayIface = new ethers.Interface([
 	'function mintIssuedNftByGateway(address userEOA, uint256 tokenId, uint256 amount)',
 ])

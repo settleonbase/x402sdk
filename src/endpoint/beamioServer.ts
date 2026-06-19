@@ -70,6 +70,14 @@ import {
 	registerBeamioFragmentProxyRoute,
 	resolveCatalogPointsExplorerImageUrl,
 } from './beamioFragmentImageProxy'
+import {
+	LONGDHANG_OLD_BASE_CARD,
+	LONGDHANG_OLD_CARD_OWNER,
+	getLongDhangMigrationAdminAddress,
+	previewLongDhangConetMigrationSnapshot,
+	verifyLongDhangConetMigration,
+	verifyLongDhangOwnerAuthorization,
+} from './longDhangConetMigration'
 
 type CouponClaimShareQuery = {
 	target?: string
@@ -6649,6 +6657,98 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		logger(Colors.green(`server /api/createCard preCheck OK, forwarding to master`), inspect({ cardOwner: preCheck.preChecked.cardOwner, currency: preCheck.preChecked.currency }, false, 2, true))
 		postLocalhost('/api/createCard', preCheck.preChecked, res)
+	})
+
+	router.get('/longDhangMigrationConfig', (_req, res) => {
+		return res.status(200).json({
+			success: true,
+			version: 'longdhang-conet-migration-v1',
+			oldBaseCard: LONGDHANG_OLD_BASE_CARD,
+			oldBaseCardOwner: LONGDHANG_OLD_CARD_OWNER,
+			migrationAdmin: getLongDhangMigrationAdminAddress(),
+		}).end()
+	})
+
+	router.post('/longDhangMigrationPreview', async (req, res) => {
+		try {
+			const force = Boolean((req.body as { force?: unknown } | undefined)?.force)
+			const snapshot = await previewLongDhangConetMigrationSnapshot({ force })
+			return res.status(200).json({ success: true, snapshot }).end()
+		} catch (e: any) {
+			logger(Colors.red(`[longDhangMigrationPreview] failed: ${e?.message ?? e}`))
+			return res.status(500).json({ success: false, error: e?.message ?? 'Snapshot preview failed.' }).end()
+		}
+	})
+
+	router.post('/longDhangMigrationCreateCard', async (req, res) => {
+		const body = req.body as {
+			ownerEoa?: string
+			snapshotHash?: string
+			ownerSignature?: string
+		}
+		if (!body.ownerEoa || !body.snapshotHash || !body.ownerSignature) {
+			return res.status(400).json({ success: false, error: 'Missing ownerEoa, snapshotHash, or ownerSignature.' }).end()
+		}
+		const verified = verifyLongDhangOwnerAuthorization({
+			action: 'create-card',
+			ownerEoa: body.ownerEoa,
+			snapshotHash: body.snapshotHash,
+			signature: body.ownerSignature,
+		})
+		if (!verified.ok) {
+			return res.status(403).json({ success: false, error: verified.error }).end()
+		}
+		postLocalhost('/api/longDhangMigrationCreateCard', {
+			ownerEoa: ethers.getAddress(body.ownerEoa),
+			snapshotHash: body.snapshotHash,
+			ownerSignature: body.ownerSignature,
+		}, res)
+	})
+
+	router.post('/longDhangMigrationRun', async (req, res) => {
+		const body = req.body as {
+			newCardAddress?: string
+			ownerEoa?: string
+			snapshotHash?: string
+			ownerSignature?: string
+			limit?: number
+		}
+		if (!body.newCardAddress || !ethers.isAddress(body.newCardAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid newCardAddress.' }).end()
+		}
+		if (!body.ownerEoa || !body.snapshotHash || !body.ownerSignature) {
+			return res.status(400).json({ success: false, error: 'Missing ownerEoa, snapshotHash, or ownerSignature.' }).end()
+		}
+		const verified = verifyLongDhangOwnerAuthorization({
+			action: 'run-migration',
+			ownerEoa: body.ownerEoa,
+			snapshotHash: body.snapshotHash,
+			signature: body.ownerSignature,
+			newCardAddress: body.newCardAddress,
+		})
+		if (!verified.ok) {
+			return res.status(403).json({ success: false, error: verified.error }).end()
+		}
+		postLocalhost('/api/longDhangMigrationRun', {
+			newCardAddress: ethers.getAddress(body.newCardAddress),
+			ownerEoa: ethers.getAddress(body.ownerEoa),
+			snapshotHash: body.snapshotHash,
+			ownerSignature: body.ownerSignature,
+			limit: Number.isFinite(Number(body.limit)) ? Math.max(1, Math.floor(Number(body.limit))) : undefined,
+		}, res)
+	})
+
+	router.post('/longDhangMigrationVerify', async (req, res) => {
+		const body = req.body as { newCardAddress?: string }
+		if (!body.newCardAddress || !ethers.isAddress(body.newCardAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid newCardAddress.' }).end()
+		}
+		try {
+			const result = await verifyLongDhangConetMigration(body.newCardAddress)
+			return res.status(200).json(result).end()
+		} catch (e: any) {
+			return res.status(500).json({ success: false, error: e?.message ?? 'Migration verification failed.' }).end()
+		}
 	})
 
 	/** cardCreateRedeem：集群预检，合格转发 master。master 使用 executeForOwnerPool + Settle_ContractPool 排队处理。默认 createRedeemBatch（多 hash array）*/
