@@ -14711,11 +14711,13 @@ export const cardClearAdminMintCounterPreCheck = async (body: {
 	if (deadline == null || !nonce || !adminSignature) return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
 	if (deadline < Math.floor(Date.now() / 1000)) return { success: false, error: 'Signature expired' }
 	try {
-		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], providerBaseBackup)
+		const cardChain = await resolveUserCardChain(ethers.getAddress(cardAddress))
+		const cardProvider = providerForUserCardChain(cardChain)
+		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], cardProvider)
 		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
 		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
 		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
-		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract }
+		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: chainIdForUserCardChain(cardChain), verifyingContract }
 		const types = { ClearAdminMintCounter: [{ name: 'cardAddress', type: 'address' }, { name: 'subordinate', type: 'address' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
 		const nonceBytes = nonce.length === 66 && nonce.startsWith('0x') ? (nonce as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`
 		const value = { cardAddress: ethers.getAddress(cardAddress), subordinate: ethers.getAddress(subordinate), deadline: Number(deadline), nonce: nonceBytes }
@@ -14744,11 +14746,13 @@ export const cardTerminalSettlementClearPreCheck = async (body: {
 	if (deadline == null || !nonce || !adminSignature) return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
 	if (deadline < Math.floor(Date.now() / 1000)) return { success: false, error: 'Signature expired' }
 	try {
-		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], providerBaseBackup)
+		const cardChain = await resolveUserCardChain(ethers.getAddress(cardAddress))
+		const cardProvider = providerForUserCardChain(cardChain)
+		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], cardProvider)
 		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
 		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
 		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
-		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: 8453, verifyingContract }
+		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: chainIdForUserCardChain(cardChain), verifyingContract }
 		const types = {
 			TerminalSettlementClear: [
 				{ name: 'cardAddress', type: 'address' },
@@ -14785,11 +14789,12 @@ export const cardTerminalSettlementClearProcess = async (payload: {
 	const nonceBytes32 = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
 	const cardNorm = ethers.getAddress(cardAddress)
 	const payeeTerminal = ethers.getAddress(subordinate)
+	const cardChain = await resolveUserCardChain(cardNorm)
 	const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
 	const domain = {
 		name: 'BeamioUserCardFactory',
 		version: '1',
-		chainId: 8453,
+		chainId: chainIdForUserCardChain(cardChain),
 		verifyingContract,
 	}
 	const types = {
