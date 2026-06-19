@@ -3980,14 +3980,22 @@ export const listRegisteredBeamioUserCardAddresses = async (limit = 5000): Promi
 }
 
 /** 按 card_address 查单张卡的 card_owner + metadata_json。供 Cluster GET /api/cardMetadata 用，前端 beamioApi 拉取。 */
-export const getCardByAddress = async (cardAddress: string): Promise<{ cardOwner: string; metadata: Record<string, unknown> | null } | null> => {
+export const getCardByAddress = async (cardAddress: string): Promise<{
+	cardOwner: string
+	currency: string
+	priceInCurrencyE6: string
+	uri: string | null
+	txHash: string | null
+	createdAt: string | null
+	metadata: Record<string, unknown> | null
+} | null> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		const addr = cardAddress.toLowerCase()
 		logger(Colors.cyan(`[getCardByAddress] SELECT WHERE card_address = '${addr}'`))
 		const { rows } = await db.query(
-			`SELECT card_owner, metadata_json FROM beamio_cards WHERE card_address = $1 LIMIT 1`,
+			`SELECT card_owner, currency, price_in_currency_e6, uri, tx_hash, created_at, metadata_json FROM beamio_cards WHERE card_address = $1 LIMIT 1`,
 			[addr]
 		)
 		logger(Colors.cyan(`[getCardByAddress] rows=${rows.length}`))
@@ -3998,8 +4006,14 @@ export const getCardByAddress = async (cardAddress: string): Promise<{ cardOwner
 			logger(Colors.yellow(`[getCardByAddress] beamio_cards total rows=${(countResult.rows[0] as any)?.c ?? '?'}, sample card_addresses: ${JSON.stringify((sampleResult.rows as any[])?.map((r: any) => r?.card_address) ?? [])}`))
 			return null
 		}
+		const createdAt = rows[0].created_at
 		return {
 			cardOwner: rows[0].card_owner as string,
+			currency: String(rows[0].currency ?? ''),
+			priceInCurrencyE6: String(rows[0].price_in_currency_e6 ?? ''),
+			uri: rows[0].uri ?? null,
+			txHash: rows[0].tx_hash ?? null,
+			createdAt: createdAt instanceof Date ? createdAt.toISOString() : createdAt != null ? String(createdAt) : null,
 			metadata: rows[0].metadata_json as Record<string, unknown> | null ?? null,
 		}
 	} catch (e: any) {
@@ -4025,6 +4039,62 @@ export const getCardCreatedAtByAddress = async (cardAddress: string): Promise<st
 		return createdAt instanceof Date ? createdAt.toISOString() : createdAt != null ? String(createdAt) : null
 	} catch {
 		return null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** Merchant-initiated API blacklist rows (Programs delete → hide assets / Discover / coupons). */
+const BEAMIO_API_EXCLUDED_USER_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_api_excluded_user_cards (
+	card_address TEXT PRIMARY KEY,
+	excluded_by TEXT NOT NULL,
+	created_at TIMESTAMPTZ DEFAULT NOW()
+)`
+
+async function ensureBeamioApiExcludedUserCardsSchema(db: Client): Promise<void> {
+	await db.query(BEAMIO_API_EXCLUDED_USER_CARDS_TABLE)
+}
+
+export const listApiExcludedUserCardAddressesFromDb = async (): Promise<string[]> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioApiExcludedUserCardsSchema(db)
+		const { rows } = await db.query<{ card_address: string }>(
+			`SELECT card_address FROM beamio_api_excluded_user_cards ORDER BY created_at ASC`
+		)
+		return rows.map((r) => ethers.getAddress(r.card_address))
+	} catch (e: unknown) {
+		logger(Colors.yellow(`[listApiExcludedUserCardAddressesFromDb] failed: ${e instanceof Error ? e.message : String(e)}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export const insertApiExcludedUserCard = async (params: {
+	cardAddress: string
+	excludedBy: string
+}): Promise<{ ok: true } | { ok: false; error: string }> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioApiExcludedUserCardsSchema(db)
+		const card = ethers.getAddress(params.cardAddress).toLowerCase()
+		const by = ethers.getAddress(params.excludedBy).toLowerCase()
+		await db.query(
+			`
+			INSERT INTO beamio_api_excluded_user_cards (card_address, excluded_by)
+			VALUES ($1, $2)
+			ON CONFLICT (card_address) DO UPDATE SET excluded_by = EXCLUDED.excluded_by
+			`,
+			[card, by]
+		)
+		return { ok: true }
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.red(`[insertApiExcludedUserCard] failed: ${msg}`))
+		return { ok: false, error: 'Could not persist card blacklist entry.' }
 	} finally {
 		await db.end().catch(() => {})
 	}

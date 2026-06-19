@@ -80,6 +80,12 @@ export const CONET_BUSINESS_START_KET = '0xAcf20dbb4DE0992d8947Ef00b505bBc17E6A0
  */
 export const CONET_BUSINESS_START_KET_REDEEM = '0xe9CeDC2c9F7DE7c0e6d1f1ba1F7e7126F0F1D3c8'
 
+/** ValidatorDepositRedeem（CoNET）；与 deployments/conet-addresses.json `ValidatorDepositRedeem` 同步 */
+export const CONET_VALIDATOR_DEPOSIT_REDEEM = '0xdcfFFDD58E8d1242b5ee52FBcdfeB698f4cd5681'
+export const CONET_DEPOSIT_CONTRACT = '0x4242424242424242424242424242424242424242'
+export const CONET_VALIDATOR_DEPOSIT_FUNDER = '0x0981275553A41E00ec1006fe074971285E00c2A3'
+export const CONET_VALIDATOR_NODE_IP = ''
+
 export const BASE_MAINNET_FACTORIES = {
   AA_FACTORY: BEAMIO_AA_FACTORY,
   CARD_FACTORY: BASE_CARD_FACTORY,
@@ -134,6 +140,7 @@ export const CONTRACT_ADDRESSES = {
     beamioIndexerDiamond: BEAMIO_INDEXER_DIAMOND,
     businessStartKet: CONET_BUSINESS_START_KET || undefined,
     businessStartKetRedeem: CONET_BUSINESS_START_KET_REDEEM || undefined,
+    validatorDepositRedeem: CONET_VALIDATOR_DEPOSIT_REDEEM || undefined,
   },
 } as const
 

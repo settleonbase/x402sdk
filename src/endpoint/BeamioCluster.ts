@@ -4,6 +4,7 @@ import Cluster from 'node:cluster'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
 import startMaster from './beamioMaster'
+import { startValidatorDepositRedeemListener } from './validatorDepositRedeem'
 
 if (Cluster.isPrimary) {
 	const forkWorker = () => {
@@ -30,6 +31,7 @@ if (Cluster.isPrimary) {
 	forkWorker()
 
 	startMaster()
+	startValidatorDepositRedeemListener()
 	
 } else {
 	startServer()

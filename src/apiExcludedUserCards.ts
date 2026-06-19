@@ -53,6 +53,24 @@ export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	'0xcfcc6ce088d5d1b0cda726fb2b401b55bd59125c',
 ])
 
+/** Merchant-initiated / DB-backed excludes (merged with static set at runtime). */
+const DYNAMIC_API_EXCLUDED_USER_CARD_ADDRESSES: Set<string> = new Set()
+
+export function registerDynamicApiExcludedUserCard(raw: unknown): boolean {
+	const lower = normalizeUserCardAddressLower(raw)
+	if (!lower) return false
+	DYNAMIC_API_EXCLUDED_USER_CARD_ADDRESSES.add(lower)
+	return true
+}
+
+export function setDynamicApiExcludedUserCards(lowers: Iterable<string>): void {
+	DYNAMIC_API_EXCLUDED_USER_CARD_ADDRESSES.clear()
+	for (const raw of lowers) {
+		const lower = normalizeUserCardAddressLower(raw)
+		if (lower) DYNAMIC_API_EXCLUDED_USER_CARD_ADDRESSES.add(lower)
+	}
+}
+
 /** @deprecated 旧全局 CCSA 卡；API/客户端不得扫描或展示。见 apiExcludedUserCards.ts */
 export const DEPRECATED_LEGACY_CCSA_CARD_LOWER = '0x2032a363bb2cf331142391fc0dad21d6504922c7'
 
@@ -69,7 +87,8 @@ export function normalizeUserCardAddressLower(raw: unknown): string | null {
 
 export function isApiExcludedUserCard(raw: unknown): boolean {
 	const lower = normalizeUserCardAddressLower(raw)
-	return lower != null && API_EXCLUDED_USER_CARD_ADDRESSES.has(lower)
+	if (lower == null) return false
+	return API_EXCLUDED_USER_CARD_ADDRESSES.has(lower) || DYNAMIC_API_EXCLUDED_USER_CARD_ADDRESSES.has(lower)
 }
 
 export function filterApiExcludedUserCardAddresses(addresses: string[]): string[] {
@@ -90,5 +109,6 @@ export function filterApiExcludedCardRows<T extends { cardAddress?: string }>(ro
 
 /** Cluster `GET /api/excludedUserCards` — UI 动态拉取，勿在客户端硬编码维护。 */
 export function listApiExcludedUserCardAddressesChecksum(): string[] {
-	return [...API_EXCLUDED_USER_CARD_ADDRESSES].map((lower) => ethers.getAddress(lower))
+	const merged = new Set<string>([...API_EXCLUDED_USER_CARD_ADDRESSES, ...DYNAMIC_API_EXCLUDED_USER_CARD_ADDRESSES])
+	return [...merged].map((lower) => ethers.getAddress(lower))
 }

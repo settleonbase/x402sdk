@@ -27,6 +27,7 @@ import {
 	registerIssuedCouponSeriesQueryCacheInvalidator,
 } from './issuedCouponSeriesQueryCache'
 import { isApiExcludedUserCard } from '../apiExcludedUserCards'
+import { applyExcludeUserCard, warmDynamicApiExcludedUserCardsFromDb } from '../excludeUserCardApi'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback, resolveBeamioAaOnConet } from './resolveBeamioAaViaUserCardFactory'
 import {
@@ -40,6 +41,14 @@ import {
 	createLongDhangConetMigrationCard,
 	runLongDhangConetMigrationBatch,
 } from './longDhangConetMigration'
+import {
+	validatorDepositRedeemCancelPool,
+	validatorDepositRedeemCancelProcess,
+	validatorDepositRedeemClaimPool,
+	validatorDepositRedeemClaimProcess,
+	validatorDepositRedeemCreatePool,
+	validatorDepositRedeemCreateProcess,
+} from './validatorDepositRedeem'
 
 const masterServerPort = 1111
 
@@ -1648,6 +1657,35 @@ const routing = ( router: Router ) => {
 		})
 
 		/**
+		 * Merchant owner blacklists program card — DB + runtime exclude set (no on-chain tx).
+		 */
+		router.post('/excludeUserCard', async (req, res) => {
+			const body = req.body as { cardAddress?: string; excludedBy?: string }
+			const cardAddress = body.cardAddress?.trim()
+			const excludedBy = body.excludedBy?.trim()
+			if (!cardAddress || !ethers.isAddress(cardAddress)) {
+				res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end()
+				return
+			}
+			if (!excludedBy || !ethers.isAddress(excludedBy)) {
+				res.status(400).json({ success: false, error: 'Invalid or missing excludedBy' }).end()
+				return
+			}
+			try {
+				const r = await applyExcludeUserCard({ cardAddress, excludedBy })
+				if (!r.success) {
+					res.status(400).json({ success: false, error: r.error ?? 'Exclude failed' }).end()
+					return
+				}
+				res.status(200).json({ success: true, cardAddress: r.cardAddress }).end()
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err)
+				logger(Colors.red('[excludeUserCard] error:'), msg)
+				res.status(500).json({ success: false, error: msg }).end()
+			}
+		})
+
+		/**
 		 * 仅更新 `shareTokenMetadata.merchantImage`（https URL）或传空字符串清除；合并 DB 现有 metadata 后写 JSON + beamio_cards。
 		 */
 		router.post('/updateCardMerchantImage', async (req, res) => {
@@ -2899,6 +2937,98 @@ const routing = ( router: Router ) => {
 			})
 		})
 
+		router.post('/validatorDepositRedeemAdminCreate', (req, res) => {
+			const b = req.body as {
+				contract?: string
+				admin?: string
+				codeHash?: string
+				allowedClaimer?: string
+				validatorCount?: string
+				targetNodeIp?: string
+				conetDepinNodeIps?: string[]
+				gbMiningNodeCount?: string
+				validAfter?: string
+				validBefore?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			if (
+				!b.contract ||
+				!b.admin ||
+				!b.codeHash ||
+				!b.allowedClaimer ||
+				!b.validatorCount ||
+				!b.targetNodeIp ||
+				!Array.isArray(b.conetDepinNodeIps) ||
+				!b.gbMiningNodeCount ||
+				b.validAfter == null ||
+				b.validBefore == null ||
+				b.nonce == null ||
+				b.deadline == null ||
+				!b.signature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing validator redeem create fields' }).end()
+			}
+			validatorDepositRedeemCreatePool.push({
+				contract: ethers.getAddress(b.contract),
+				admin: ethers.getAddress(b.admin),
+				codeHash: b.codeHash,
+				allowedClaimer: ethers.getAddress(b.allowedClaimer),
+				validatorCount: BigInt(b.validatorCount),
+				targetNodeIp: b.targetNodeIp,
+				conetDepinNodeIps: b.conetDepinNodeIps,
+				gbMiningNodeCount: BigInt(b.gbMiningNodeCount),
+				validAfter: BigInt(b.validAfter),
+				validBefore: BigInt(b.validBefore),
+				nonce: BigInt(b.nonce),
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				res,
+			})
+			validatorDepositRedeemCreateProcess().catch((err: any) => {
+				logger(Colors.red('[validatorDepositRedeemCreateProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		router.post('/validatorDepositRedeemAdminCancel', (req, res) => {
+			const b = req.body as { contract?: string; admin?: string; codeHash?: string; nonce?: string; deadline?: string; signature?: string }
+			if (!b.contract || !b.admin || !b.codeHash || b.nonce == null || b.deadline == null || !b.signature) {
+				return res.status(400).json({ success: false, error: 'Missing validator redeem cancel fields' }).end()
+			}
+			validatorDepositRedeemCancelPool.push({
+				contract: ethers.getAddress(b.contract),
+				admin: ethers.getAddress(b.admin),
+				codeHash: b.codeHash,
+				nonce: BigInt(b.nonce),
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				res,
+			})
+			validatorDepositRedeemCancelProcess().catch((err: any) => {
+				logger(Colors.red('[validatorDepositRedeemCancelProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		router.post('/validatorDepositRedeemClaim', (req, res) => {
+			const b = req.body as { contract?: string; claimer?: string; beneficiary?: string; code?: string; deadline?: string; signature?: string }
+			if (!b.contract || !b.claimer || !b.beneficiary || typeof b.code !== 'string' || b.deadline == null || !b.signature) {
+				return res.status(400).json({ success: false, error: 'Missing validator redeem claim fields' }).end()
+			}
+			validatorDepositRedeemClaimPool.push({
+				contract: ethers.getAddress(b.contract),
+				claimer: ethers.getAddress(b.claimer),
+				beneficiary: ethers.getAddress(b.beneficiary),
+				code: b.code,
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				res,
+			})
+			validatorDepositRedeemClaimProcess().catch((err: any) => {
+				logger(Colors.red('[validatorDepositRedeemClaimProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
 		/** POST /api/purchaseBUnitFromBase - 由 cluster 预检后转发，master 推入 purchaseBUnitFromBasePool，经 Settle_ContractPool 执行 BaseTreasury.purchaseBUnitWith3009Authorization */
 		router.post('/purchaseBUnitFromBase', (req, res) => {
 			const body = req.body as { from?: string; amount?: string; validAfter?: number; validBefore?: number; nonce?: string; signature?: string }
@@ -3014,7 +3144,7 @@ const routing = ( router: Router ) => {
 		/** POST /api/payByNfcUidPrepare - 客户端构建 container 前的准备，返回 account、nonce、deadline、payeeAA、cardCurrency、pointsUnitPriceInCurrencyE6（fiat6-only 协议）以及兼容的 unitPriceUSDC6。
 		 *  fiat6-only 协议：传 `amountFiat6` + `currency`；`amountUsdc6` 已 deprecated，仅作回退。NFC 格式时需 e/c/m 做 SUN 校验。 */
 		router.post('/payByNfcUidPrepare', async (req, res) => {
-			const { uid, payee, amountUsdc6, amountFiat6, currency, e, c, m } = req.body as { uid?: string; payee?: string; amountUsdc6?: string; amountFiat6?: string; currency?: string; e?: string; c?: string; m?: string }
+			const { uid, payee, amountUsdc6, amountFiat6, currency, merchantInfraCard, e, c, m } = req.body as { uid?: string; payee?: string; amountUsdc6?: string; amountFiat6?: string; currency?: string; merchantInfraCard?: string; e?: string; c?: string; m?: string }
 			if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 				return res.status(400).json({ ok: false, error: 'Missing uid' })
 			}
@@ -3028,12 +3158,22 @@ const routing = ( router: Router ) => {
 			if (!fiat6Ok && !usdc6Ok) {
 				return res.status(400).json({ ok: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' })
 			}
+			const merchantInfraForPrepare =
+				typeof merchantInfraCard === 'string' && merchantInfraCard.trim() && ethers.isAddress(merchantInfraCard.trim())
+					? ethers.getAddress(merchantInfraCard.trim())
+					: undefined
+			logger(
+				Colors.cyan(
+					`[payByNfcUidPrepare] Master received uid=${uid.trim().slice(0, 16)}... fiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} usdc6=${usdc6Ok ? amountUsdc6 : 'none'} merchantInfraCard=${merchantInfraForPrepare ?? 'none'}`
+				)
+			)
 			const result = await payByNfcUidPrepare({
 				uid: uid.trim(),
 				payee: ethers.getAddress(payee),
 				amountUsdc6: usdc6Ok ? amountUsdc6 : undefined,
 				amountFiat6: fiat6Ok ? fiat6Trim : undefined,
 				currency: fiat6Ok ? currencyTrim : undefined,
+				merchantInfraCard: merchantInfraForPrepare,
 				e,
 				c,
 				m,
@@ -3049,6 +3189,7 @@ const routing = ( router: Router ) => {
 				amountUsdc6,
 				amountFiat6,
 				currency,
+				merchantInfraCard,
 				e,
 				c,
 				m,
@@ -3067,6 +3208,7 @@ const routing = ( router: Router ) => {
 				amountUsdc6?: string
 				amountFiat6?: string
 				currency?: string
+				merchantInfraCard?: string
 				e?: string
 				c?: string
 				m?: string
@@ -3090,7 +3232,11 @@ const routing = ( router: Router ) => {
 			const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : ''
 			const fiat6Ok = fiat6Trim !== '' && /^[0-9]+$/.test(fiat6Trim) && BigInt(fiat6Trim) > 0n && currencyTrim !== ''
 			const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(String(amountUsdc6).trim()) && BigInt(String(amountUsdc6).trim()) > 0n
-			logger(Colors.cyan(`[payByNfcUidSignContainer] Master received container uid=${uid.slice(0, 16)}... amountFiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} amountUsdc6=${usdc6Ok ? amountUsdc6 : 'none'}\n` + inspect(containerPayload, false, 4, true)))
+			const merchantInfraForContainer =
+				typeof merchantInfraCard === 'string' && merchantInfraCard.trim() && ethers.isAddress(merchantInfraCard.trim())
+					? ethers.getAddress(merchantInfraCard.trim())
+					: undefined
+			logger(Colors.cyan(`[payByNfcUidSignContainer] Master received container uid=${uid.slice(0, 16)}... amountFiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} amountUsdc6=${usdc6Ok ? amountUsdc6 : 'none'} merchantInfraCard=${merchantInfraForContainer ?? 'none'}\n` + inspect(containerPayload, false, 4, true)))
 			const preCheck = ContainerRelayPreCheckUnsigned(containerPayload)
 			if (!preCheck.success) {
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
@@ -3115,6 +3261,7 @@ const routing = ( router: Router ) => {
 				amountUsdc6: usdc6Ok ? amountUsdc6 : undefined,
 				amountFiat6: fiat6Ok ? fiat6Trim : undefined,
 				currency: fiat6Ok ? currencyTrim : undefined,
+				merchantInfraCard: merchantInfraForContainer,
 				res,
 				e,
 				c,
@@ -4719,6 +4866,10 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		])
 		startNfcLinkAppAutoCancelSweeper()
 		startLatestCardsPrewarmTimer()
+		void warmDynamicApiExcludedUserCardsFromDb().catch((e: unknown) => {
+			const msg = e instanceof Error ? e.message : String(e)
+			logger(Colors.red('[initialize] warmDynamicApiExcludedUserCardsFromDb error:'), msg)
+		})
 		void Promise.all([ensureAccountRegistryBeamioAdmins(), ensureAddressPgpBeamioAdmins()]).catch((e: unknown) => {
 			const msg = e instanceof Error ? e.message : String(e)
 			logger(Colors.red('[initialize] ensure*BeamioAdmins error:'), msg)
