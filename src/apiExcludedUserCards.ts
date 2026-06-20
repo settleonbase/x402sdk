@@ -53,6 +53,9 @@ export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	'0xcfcc6ce088d5d1b0cda726fb2b401b55bd59125c',
 	'0x15690c6898cf01d7a066e820ba9b6947b87adaf3',
 	'0xae5a268e31beee7d44efb39617107838bac8d395',
+	/** LongDhang CoNET migration test / duplicate merchant cards — hide from assets & Discover */
+	'0xed8266dcfac4517d939994204ddfe00e9e46d557',
+	'0xa97a3e1ec8bc7ac273a263a3da3dc38d52cdef5a',
 ])
 
 /** Merchant-initiated / DB-backed excludes (merged with static set at runtime). */
