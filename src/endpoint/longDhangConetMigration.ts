@@ -38,6 +38,21 @@ import {
 	registerCardToDb,
 	upsertPosTerminalAdminCardBinding,
 } from '../db'
+import {
+	isLongDhangFrozenSnapshotEnabled,
+	LONGDHANG_FROZEN_TERMINALS,
+	LONGDHANG_MIGRATION_VERSION,
+	longDhangFrozenSnapshotScanMeta,
+	longDhangFrozenSnapshotStablePayload,
+} from './longDhangConetMigrationFrozen'
+
+export {
+	isLongDhangFrozenSnapshotEnabled,
+	LONGDHANG_FROZEN_HOLDERS,
+	LONGDHANG_FROZEN_TERMINALS,
+	LONGDHANG_FROZEN_TOTAL_BALANCE_E6,
+	LONGDHANG_MIGRATION_VERSION,
+} from './longDhangConetMigrationFrozen'
 
 const BeamioFactoryPaymasterABI = (
 	Array.isArray(BeamioFactoryPaymasterArtifact)
@@ -54,7 +69,6 @@ export const LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS = [
 	LONGDHANG_OLD_CARD_OWNER,
 	LONGDHANG_MIGRATION_PARTNER_MERCHANT_EOA,
 ] as const
-export const LONGDHANG_MIGRATION_VERSION = 'longdhang-conet-migration-v1'
 /** Base mainnet deploy block for LONGDHANG_OLD_BASE_CARD (~2026-05-25). Never scan from 0 — pruned RPC rejects ancient eth_getLogs. */
 export const LONGDHANG_OLD_BASE_CARD_DEPLOY_BLOCK = 46_475_352
 
@@ -181,7 +195,13 @@ export type LongDhangMigrationAutoResult = {
 	snapshotHash: string
 	phases: Array<{ phase: string; ok: boolean; detail?: string }>
 	members: { total: number; minted: number; skipped: number; failed: number }
-	admins: { total: number; registered: number; skipped: number; failed: number }
+	admins: {
+		total: number
+		registered: number
+		skipped: number
+		failed: number
+		rows?: TerminalMigrationRow[]
+	}
 	verify?: {
 		success: boolean
 		memberMatches: number
@@ -252,7 +272,7 @@ export function isLongDhangMigrationAuthorizedOwner(raw?: string | null): boolea
 }
 
 export function buildLongDhangMigrationAuthMessage(args: {
-	action: 'create-card' | 'run-migration' | 'start-migration'
+	action: 'create-card' | 'run-migration' | 'start-migration' | 'repair-terminals'
 	ownerEoa: string
 	snapshotHash: string
 	newCardAddress?: string
@@ -276,7 +296,7 @@ export function buildLongDhangMigrationAuthMessage(args: {
 }
 
 export function verifyLongDhangOwnerAuthorization(args: {
-	action: 'create-card' | 'run-migration' | 'start-migration'
+	action: 'create-card' | 'run-migration' | 'start-migration' | 'repair-terminals'
 	ownerEoa: string
 	snapshotHash: string
 	signature: string
@@ -487,25 +507,96 @@ const adminManagerIface = new ethers.Interface([
 	'function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)',
 ])
 
+/** Base/CoNET admin list entry (AA or EOA) → terminal EOA for adminManager.to (Cluster rejects AA). */
+async function resolveSubordinateAdminEoa(provider: ethers.Provider, addr: string): Promise<string> {
+	if (!addr || !ethers.isAddress(addr)) throw new Error(`Invalid subordinate address: ${addr}`)
+	const raw = normalizeAddress(addr)
+	const code = await provider.getCode(raw)
+	if (code && code !== '0x' && code.length > 2) {
+		try {
+			const ownerRes = await provider.call({ to: raw, data: '0x8da5cb5b' })
+			if (ownerRes && typeof ownerRes === 'string' && ownerRes.length >= 66) {
+				return normalizeAddress(`0x${ownerRes.slice(-40)}`)
+			}
+		} catch {
+			/* fall through */
+		}
+	}
+	return raw
+}
+
+function normalizeLongDhangTerminalMetadataForCoNet(
+	metaObj: Record<string, unknown> | null,
+	fallback?: Record<string, unknown>
+): string {
+	const base =
+		metaObj && typeof metaObj === 'object' && !Array.isArray(metaObj)
+			? { ...metaObj }
+			: { ...(fallback ?? {}) }
+	const deviceName =
+		typeof base.deviceName === 'string' && base.deviceName.trim()
+			? base.deviceName.trim()
+			: typeof base.name === 'string' && base.name.trim()
+				? base.name.trim()
+				: 'POS Terminal'
+	const handleRaw = typeof base.handle === 'string' ? base.handle.trim() : ''
+	const handle = handleRaw ? (handleRaw.startsWith('@') ? handleRaw : `@${handleRaw}`) : ''
+	const allowedTopupMethods = Array.isArray(base.allowedTopupMethods)
+		? base.allowedTopupMethods.map((x) => String(x))
+		: ['cash', 'bankCard']
+	const payload: Record<string, unknown> = {
+		...base,
+		deviceName,
+		...(handle ? { handle } : {}),
+		allowedTopupMethods,
+		migratedFromCard: normalizeAddress(LONGDHANG_OLD_BASE_CARD),
+		source: 'longdhangConetMigration',
+	}
+	return JSON.stringify(payload)
+}
+
 async function collectLongDhangSubAdmins(provider: ethers.Provider): Promise<Array<{
 	posEoa: string
 	metadata: string
 	mintLimitE6: string
 }>> {
+	if (isLongDhangFrozenSnapshotEnabled()) {
+		return LONGDHANG_FROZEN_TERMINALS.map((t) => {
+			let metaObj: Record<string, unknown> = {}
+			try {
+				const parsed = JSON.parse(t.metadataJson) as unknown
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+					metaObj = parsed as Record<string, unknown>
+				}
+			} catch {
+				metaObj = { rawMetadata: t.metadataJson }
+			}
+			return {
+				posEoa: normalizeAddress(t.posEoa),
+				metadata: normalizeLongDhangTerminalMetadataForCoNet(metaObj),
+				mintLimitE6: t.mintLimitE6,
+			}
+		}).sort((a, b) => a.posEoa.localeCompare(b.posEoa))
+	}
 	const out = new Map<string, { posEoa: string; metadata: string; mintLimitE6: string }>()
 	const ownerNorm = normalizeAddress(LONGDHANG_OLD_CARD_OWNER).toLowerCase()
 	const dbRows = await listPosTerminalCardBindingsByCard(LONGDHANG_OLD_BASE_CARD)
 	for (const row of dbRows) {
 		if (!ethers.isAddress(row.posEoa)) continue
-		const posNorm = ethers.getAddress(row.posEoa)
-		if (posNorm.toLowerCase() === ownerNorm) continue
+		let posEoa: string
+		try {
+			posEoa = await resolveSubordinateAdminEoa(provider, row.posEoa)
+		} catch {
+			continue
+		}
+		if (posEoa.toLowerCase() === ownerNorm) continue
 		const metadataObj =
 			row.terminalMetadata && typeof row.terminalMetadata === 'object' && !Array.isArray(row.terminalMetadata)
 				? (row.terminalMetadata as Record<string, unknown>)
 				: { source: 'longdhangConetMigration', role: 'sub-admin' }
-		out.set(posNorm.toLowerCase(), {
-			posEoa: posNorm,
-			metadata: JSON.stringify({ ...metadataObj, migratedFromCard: ethers.getAddress(LONGDHANG_OLD_BASE_CARD) }),
+		out.set(posEoa.toLowerCase(), {
+			posEoa,
+			metadata: normalizeLongDhangTerminalMetadataForCoNet(metadataObj),
 			mintLimitE6: '0',
 		})
 	}
@@ -522,29 +613,41 @@ async function collectLongDhangSubAdmins(provider: ethers.Provider): Promise<Arr
 		for (let i = 0; i < admins.length; i++) {
 			const pos = admins[i]
 			if (!pos || !ethers.isAddress(pos)) continue
-			const posNorm = ethers.getAddress(pos)
-			if (posNorm.toLowerCase() === ownerNorm) continue
-			const metaRaw = typeof metadatas[i] === 'string' && metadatas[i].trim() ? metadatas[i].trim() : '{}'
-			let metaObj: unknown = null
+			const chainAdmin = normalizeAddress(pos)
+			if (chainAdmin.toLowerCase() === ownerNorm) continue
+			let posEoa: string
 			try {
-				metaObj = JSON.parse(metaRaw)
+				posEoa = await resolveSubordinateAdminEoa(provider, chainAdmin)
+			} catch {
+				continue
+			}
+			const metaRaw = typeof metadatas[i] === 'string' && metadatas[i].trim() ? metadatas[i].trim() : '{}'
+			let metaObj: Record<string, unknown> | null = null
+			try {
+				const parsed = JSON.parse(metaRaw) as unknown
+				metaObj =
+					parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+						? (parsed as Record<string, unknown>)
+						: { rawMetadata: metaRaw }
 			} catch {
 				metaObj = { rawMetadata: metaRaw }
 			}
 			let limit = 0n
 			try {
-				limit = BigInt(await card.adminMintLimit(posNorm))
+				limit = BigInt(await card.adminMintLimit(chainAdmin))
 			} catch {
-				limit = 0n
+				try {
+					limit = BigInt(await card.adminMintLimit(posEoa))
+				} catch {
+					limit = 0n
+				}
 			}
-			const merged =
-				metaObj && typeof metaObj === 'object' && !Array.isArray(metaObj)
-					? { ...(metaObj as Record<string, unknown>), migratedFromCard: ethers.getAddress(LONGDHANG_OLD_BASE_CARD) }
-					: { source: 'longdhangConetMigration', role: 'sub-admin', migratedFromCard: ethers.getAddress(LONGDHANG_OLD_BASE_CARD) }
-			out.set(posNorm.toLowerCase(), {
-				posEoa: posNorm,
-				metadata: JSON.stringify(merged),
-				mintLimitE6: limit > 0n ? limit.toString() : (out.get(posNorm.toLowerCase())?.mintLimitE6 ?? '0'),
+			const prior = out.get(posEoa.toLowerCase())
+			out.set(posEoa.toLowerCase(), {
+				posEoa,
+				metadata: normalizeLongDhangTerminalMetadataForCoNet(metaObj, prior ? JSON.parse(prior.metadata) : undefined),
+				mintLimitE6:
+					limit > 0n ? limit.toString() : (prior?.mintLimitE6 ?? '0'),
 			})
 		}
 	} catch (e: any) {
@@ -779,6 +882,35 @@ export async function previewLongDhangConetMigrationSnapshot(
 ): Promise<LongDhangMigrationSnapshot> {
 	const cacheTtlMs = Number(process.env.LONGDHANG_SNAPSHOT_CACHE_TTL_MS ?? 60_000)
 	if (!options.force && snapshotCache && Date.now() - snapshotCache.at < cacheTtlMs) return snapshotCache.value
+
+	if (isLongDhangFrozenSnapshotEnabled()) {
+		const stable = longDhangFrozenSnapshotStablePayload()
+		const scanMeta = longDhangFrozenSnapshotScanMeta()
+		const holders: SnapshotHolder[] = stable.holders.map((h) => ({
+			...h,
+			sourceHolder: 'frozen-snapshot',
+		}))
+		const basePayload = {
+			...stable,
+			baseRpcUrl: scanMeta.baseRpcUrl,
+			baseFromBlock: scanMeta.baseFromBlock,
+			baseToBlock: scanMeta.baseToBlock,
+			holderCount: holders.length,
+			excludedCount: 0,
+			holders,
+			excluded: [] as SnapshotExcludedHolder[],
+			anomalies: [] as SnapshotExcludedHolder[],
+		}
+		const snapshot: LongDhangMigrationSnapshot = {
+			...basePayload,
+			snapshotHash: stableSnapshotHash(basePayload),
+			migrationAdmin: getLongDhangMigrationAdminAddress(),
+			generatedAt: scanMeta.generatedAt,
+		}
+		snapshotCache = { at: Date.now(), value: snapshot }
+		rememberSnapshotByHash(snapshot)
+		return snapshot
+	}
 
 	const provider = baseProvider()
 	const oldCard = new ethers.Contract(LONGDHANG_OLD_BASE_CARD, ERC1155_TRANSFER_ABI, provider)
@@ -1181,7 +1313,8 @@ async function copyLongDhangPaymentTerminalsToNewCard(args: {
 	card: ethers.Contract
 }): Promise<{ total: number; registered: number; skipped: number; failed: number; rows: TerminalMigrationRow[] }> {
 	const base = baseProvider()
-	const terminals = await collectLongDhangPaymentTerminals(base)
+	const conet = conetProvider()
+	const terminals = await collectLongDhangSubAdmins(base)
 	const rows: TerminalMigrationRow[] = []
 	let registered = 0
 	let skipped = 0
@@ -1196,10 +1329,15 @@ async function copyLongDhangPaymentTerminalsToNewCard(args: {
 		}
 		rows.push(row)
 		try {
-			const alreadyAdmin = Boolean(await args.card.isAdmin(t.posEoa))
+			const posEoa = normalizeAddress(t.posEoa)
+			const codeAtPos = await conet.getCode(posEoa)
+			if (codeAtPos && codeAtPos !== '0x') {
+				throw new Error(`Terminal ${posEoa} is a contract; adminManager requires EOA.`)
+			}
+			const alreadyAdmin = Boolean(await args.card.isAdmin(posEoa))
 			if (alreadyAdmin) {
 				await upsertPosTerminalAdminCardBinding({
-					posEoa: t.posEoa,
+					posEoa,
 					cardAddress: args.newCard,
 					metadataJson: JSON.parse(t.metadata),
 				})
@@ -1212,7 +1350,7 @@ async function copyLongDhangPaymentTerminalsToNewCard(args: {
 			const mintLimit = oldLimit > 0n ? oldLimit : fallbackLimit
 			row.mintLimitE6 = mintLimit.toString()
 			const data = adminManagerIface.encodeFunctionData('adminManager(address,bool,uint256,string,uint256)', [
-				t.posEoa,
+				posEoa,
 				true,
 				1n,
 				t.metadata,
@@ -1221,11 +1359,25 @@ async function copyLongDhangPaymentTerminalsToNewCard(args: {
 			const deadline = BigInt(Math.floor(Date.now() / 1000) + 15 * 60)
 			const nonce = ethers.hexlify(ethers.randomBytes(32))
 			const signature = await signExecuteForAdminWithWallet(args.wallet, args.newCard, data, deadline, nonce)
-			const tx = await args.factory.executeForAdmin(args.newCard, data, deadline, nonce, signature, { gasLimit: 1_500_000 })
+			let gasLimit = 2_000_000n
+			try {
+				const estimated = await args.factory.executeForAdmin.estimateGas(
+					args.newCard,
+					data,
+					deadline,
+					nonce,
+					signature
+				)
+				gasLimit = (estimated * 125n) / 100n + 200_000n
+				if (gasLimit < 2_000_000n) gasLimit = 2_000_000n
+			} catch {
+				/* conservative fallback */
+			}
+			const tx = await args.factory.executeForAdmin(args.newCard, data, deadline, nonce, signature, { gasLimit })
 			const receipt = await tx.wait()
-			if (!receipt || Number(receipt.status ?? 0) !== 1) throw new Error(`terminal admin tx reverted for ${t.posEoa}`)
+			if (!receipt || Number(receipt.status ?? 0) !== 1) throw new Error(`terminal admin tx reverted for ${posEoa}`)
 			await upsertPosTerminalAdminCardBinding({
-				posEoa: t.posEoa,
+				posEoa,
 				cardAddress: args.newCard,
 				txHash: tx.hash,
 				metadataJson: JSON.parse(t.metadata),
@@ -1241,6 +1393,62 @@ async function copyLongDhangPaymentTerminalsToNewCard(args: {
 		}
 	}
 	return { total: terminals.length, registered, skipped, failed, rows }
+}
+
+/** Re-register Base sub-admin terminals (EOA + metadata) on an existing migrated CoNET card. */
+export async function repairLongDhangMigrationTerminalsOnly(options: {
+	newCardAddress: string
+	snapshotHash?: string
+}): Promise<{
+	success: boolean
+	newCardAddress: string
+	admins: { total: number; registered: number; skipped: number; failed: number; rows: TerminalMigrationRow[] }
+	verify: Awaited<ReturnType<typeof verifyLongDhangConetMigration>>['terminals']
+	error?: string
+}> {
+	const newCard = normalizeAddress(options.newCardAddress)
+	const snapshot = await resolveLongDhangMigrationSnapshot({ requestedHash: options.snapshotHash })
+	const sc = Settle_ContractPool.shift()
+	if (!sc) {
+		return {
+			success: false,
+			newCardAddress: newCard,
+			admins: { total: 0, registered: 0, skipped: 0, failed: 0, rows: [] },
+			verify: { total: 0, matches: 0, mismatches: [] },
+			error: 'Settle_ContractPool is busy or not initialized.',
+		}
+	}
+	try {
+		const card = new ethers.Contract(newCard, USER_CARD_ADMIN_ABI, sc.walletConet)
+		const owner = normalizeAddress(await card.owner())
+		if (!isLongDhangMigrationAuthorizedOwner(owner)) {
+			throw new Error(`CoNET card owner is not an authorized migration operator: ${owner}`)
+		}
+		const adminAddr = normalizeAddress(sc.walletConet.address)
+		if (!Boolean(await card.isAdmin(adminAddr))) {
+			throw new Error(`Migration admin ${adminAddr} is not authorized on ${newCard}.`)
+		}
+		const factory = new ethers.Contract(CONET_CARD_FACTORY, BeamioFactoryPaymasterABI, sc.walletConet)
+		const admins = await copyLongDhangPaymentTerminalsToNewCard({
+			newCard,
+			snapshotTotalBalanceE6: snapshot.totalBalanceE6,
+			wallet: sc.walletConet,
+			factory,
+			card,
+		})
+		const verify = await verifyLongDhangConetMigration(newCard)
+		return {
+			success: admins.failed === 0 && verify.terminals.mismatches.length === 0,
+			newCardAddress: newCard,
+			admins,
+			verify: verify.terminals,
+			...(admins.failed > 0 || verify.terminals.mismatches.length > 0
+				? { error: `${admins.failed} terminal row(s) failed; ${verify.terminals.mismatches.length} verify mismatch(es).` }
+				: {}),
+		}
+	} finally {
+		Settle_ContractPool.unshift(sc)
+	}
 }
 
 export async function runLongDhangConetMigrationBatch(
@@ -1464,7 +1672,7 @@ export async function executeLongDhangConetMigrationAuto(options: {
 			requestedHash: options.snapshotHash,
 			force: true,
 		})
-		pushPhase('snapshot', true, `${snapshot.holderCount} members from Members directory`)
+		pushPhase('snapshot', true, `${snapshot.holderCount} members from frozen Base snapshot (${LONGDHANG_FROZEN_TERMINALS.length} terminals)`)
 
 		let newCardAddress = options.existingNewCardAddress?.trim() ?? ''
 		if (!newCardAddress || !ethers.isAddress(newCardAddress)) {
@@ -1536,6 +1744,7 @@ export async function executeLongDhangConetMigrationAuto(options: {
 				registered: adminStats?.registered ?? 0,
 				skipped: adminStats?.skipped ?? 0,
 				failed: adminStats?.failed ?? 0,
+				rows: adminStats?.rows ?? [],
 			},
 			verify: {
 				success: verify.success,

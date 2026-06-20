@@ -84,12 +84,16 @@ import {
 	LONGDHANG_OLD_BASE_CARD_DEPLOY_BLOCK,
 	LONGDHANG_OLD_CARD_OWNER,
 	LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS,
+	LONGDHANG_MIGRATION_VERSION,
+	LONGDHANG_FROZEN_HOLDERS,
+	LONGDHANG_FROZEN_TERMINALS,
 	getLongDhangMigrationAdminAddress,
+	isLongDhangFrozenSnapshotEnabled,
 	previewLongDhangConetMigrationSnapshot,
+	repairLongDhangMigrationTerminalsOnly,
 	verifyLongDhangConetMigration,
 	verifyLongDhangOwnerAuthorization,
 } from './longDhangConetMigration'
-
 type CouponClaimShareQuery = {
 	target?: string
 	card?: string
@@ -6735,7 +6739,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.get('/longDhangMigrationConfig', (_req, res) => {
 		return res.status(200).json({
 			success: true,
-			version: 'longdhang-conet-migration-v1',
+			version: LONGDHANG_MIGRATION_VERSION,
+			frozenSnapshot: isLongDhangFrozenSnapshotEnabled(),
+			frozenMemberCount: LONGDHANG_FROZEN_HOLDERS.length,
+			frozenTerminalCount: LONGDHANG_FROZEN_TERMINALS.length,
 			oldBaseCard: LONGDHANG_OLD_BASE_CARD,
 			oldBaseCardOwner: LONGDHANG_OLD_CARD_OWNER,
 			authorizedOwnerEoa: [...LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS],
@@ -6853,6 +6860,36 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			...(body.existingNewCardAddress && ethers.isAddress(body.existingNewCardAddress)
 				? { existingNewCardAddress: ethers.getAddress(body.existingNewCardAddress) }
 				: {}),
+		}, res)
+	})
+
+	router.post('/longDhangMigrationRepairTerminals', async (req, res) => {
+		const body = req.body as {
+			newCardAddress?: string
+			ownerEoa?: string
+			snapshotHash?: string
+			ownerSignature?: string
+		}
+		if (!body.newCardAddress || !ethers.isAddress(body.newCardAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid newCardAddress.' }).end()
+		}
+		if (!body.ownerEoa || !body.snapshotHash || !body.ownerSignature) {
+			return res.status(400).json({ success: false, error: 'Missing ownerEoa, snapshotHash, or ownerSignature.' }).end()
+		}
+		const verified = verifyLongDhangOwnerAuthorization({
+			action: 'repair-terminals',
+			ownerEoa: body.ownerEoa,
+			snapshotHash: body.snapshotHash,
+			signature: body.ownerSignature,
+			newCardAddress: body.newCardAddress,
+		})
+		if (!verified.ok) {
+			return res.status(403).json({ success: false, error: verified.error }).end()
+		}
+		postLocalhost('/api/longDhangMigrationRepairTerminals', {
+			newCardAddress: ethers.getAddress(body.newCardAddress),
+			ownerEoa: ethers.getAddress(body.ownerEoa),
+			snapshotHash: body.snapshotHash,
 		}, res)
 	})
 

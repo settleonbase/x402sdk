@@ -40,6 +40,7 @@ import {
 import {
 	createLongDhangConetMigrationCard,
 	executeLongDhangConetMigrationAuto,
+	repairLongDhangMigrationTerminalsOnly,
 	runLongDhangConetMigrationBatch,
 } from './longDhangConetMigration'
 import {
@@ -1615,6 +1616,23 @@ const routing = ( router: Router ) => {
 			} catch (e: any) {
 				logger(Colors.red(`[longDhangMigrationExecuteAuto] failed: ${e?.message ?? e}`))
 				return res.status(500).json({ success: false, error: e?.message ?? 'LongDhang auto migration failed.' }).end()
+			}
+		})
+
+		router.post('/longDhangMigrationRepairTerminals', async (req, res) => {
+			const body = req.body as { newCardAddress?: string; snapshotHash?: string }
+			if (!body.newCardAddress || !ethers.isAddress(body.newCardAddress)) {
+				return res.status(400).json({ success: false, error: 'Invalid newCardAddress.' }).end()
+			}
+			try {
+				const result = await repairLongDhangMigrationTerminalsOnly({
+					newCardAddress: body.newCardAddress,
+					snapshotHash: body.snapshotHash,
+				})
+				return res.status(result.success ? 200 : 400).json(result).end()
+			} catch (e: any) {
+				logger(Colors.red(`[longDhangMigrationRepairTerminals] failed: ${e?.message ?? e}`))
+				return res.status(500).json({ success: false, error: e?.message ?? 'Terminal repair failed.' }).end()
 			}
 		})
 
