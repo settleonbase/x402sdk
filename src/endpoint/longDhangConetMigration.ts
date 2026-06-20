@@ -27,6 +27,7 @@ import {
 	CONET_RPC_URL,
 } from '../chainAddresses'
 import { resolveBeamioBaseHttpRpcUrl } from '../util'
+import { ensureShareTokenProgramIconAssembled } from '../shareTokenProgramIcon'
 import { Settle_ContractPool } from '../MemberCard'
 import { createBeamioCardWithFactoryReturningHash } from '../CCSA'
 import BeamioFactoryPaymasterArtifact from '../ABI/BeamioUserCardFactoryPaymaster.json'
@@ -438,6 +439,11 @@ function normalizeOldCardMetadataForNewCard(raw: Record<string, unknown> | null)
 	}
 	if (!shareTokenMetadata.image && typeof base.image === 'string') shareTokenMetadata.image = base.image
 	if (!shareTokenMetadata.name) shareTokenMetadata.name = 'LongDhang'
+	Object.assign(shareTokenMetadata, ensureShareTokenProgramIconAssembled(shareTokenMetadata))
+	const shareIcon =
+		typeof shareTokenMetadata.icon === 'string' && shareTokenMetadata.icon.trim()
+			? shareTokenMetadata.icon.trim()
+			: ''
 	const tiers = Array.isArray(base.tiers) ? (base.tiers as Array<Record<string, unknown>>) : undefined
 	const upgradeRaw = Number(base.upgradeType)
 	const upgradeType = upgradeRaw === 0 || upgradeRaw === 1 || upgradeRaw === 2 ? (upgradeRaw as 0 | 1 | 2) : undefined
@@ -451,10 +457,11 @@ function normalizeOldCardMetadataForNewCard(raw: Record<string, unknown> | null)
 			: typeof shareTokenMetadata.description === 'string'
 				? { description: shareTokenMetadata.description }
 				: {}),
-		...(typeof base.image === 'string' && base.image.trim()
-			? { image: base.image }
-			: typeof shareTokenMetadata.image === 'string'
-				? { image: shareTokenMetadata.image }
+		...(shareIcon ? { icon: shareIcon } : {}),
+		...(typeof shareTokenMetadata.image === 'string' && shareTokenMetadata.image.trim()
+			? { image: shareTokenMetadata.image.trim() }
+			: typeof base.image === 'string' && base.image.trim()
+				? { image: base.image }
 				: {}),
 		shareTokenMetadata,
 		...(tiers && tiers.length > 0 && { tiers }),

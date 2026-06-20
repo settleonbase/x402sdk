@@ -20,6 +20,7 @@ import {
 	resolveIssuedNftProductKindFromMetadataExtra,
 	resolveIssuedNftDistributionFieldsFromSeriesMetadata,
 } from './couponMetadataCategory'
+import { ensureShareTokenProgramIconAssembled } from './shareTokenProgramIcon'
 import { inspect } from 'util'
 import Colors from 'colors/safe'
 import BeamioUserCardABI from './ABI/BeamioUserCard.json'
@@ -11734,7 +11735,6 @@ export const resolveCardOwnerToEOA = async (
 
 export const createCardPool: (CreateCardPreChecked & { res: Response })[] = []
 
-/** ERC-1155 卡级 `0x{cardAddress}0.json` 内容，与 createCardPoolPress 写入格式一致。 */
 export function buildBeamioErc1155Card0MetadataFileContent(opts: {
 	shareTokenMetadata?: Record<string, unknown> | null
 	tiers?: Array<Record<string, unknown>>
@@ -11744,10 +11744,13 @@ export function buildBeamioErc1155Card0MetadataFileContent(opts: {
 	const stm = opts.shareTokenMetadata
 	const topName =
 		stm?.name != null && String(stm.name).trim() !== '' ? String(stm.name).trim() : 'Beamio CCSA Card'
+	const topIcon =
+		stm?.icon != null && String(stm.icon).trim() !== '' ? String(stm.icon).trim() : ''
 	return JSON.stringify(
 		{
 			name: topName,
 			...(stm?.description != null && { description: String(stm.description) }),
+			...(topIcon && { icon: topIcon }),
 			...(stm?.image != null && String(stm.image).trim() !== '' && { image: String(stm.image).trim() }),
 			...(stm && Object.keys(stm).length > 0 && { shareTokenMetadata: { ...stm } }),
 			...(opts.tiers && opts.tiers.length > 0 && { tiers: opts.tiers }),
@@ -11818,9 +11821,11 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 	transferWhitelistEnabled?: boolean
 }): Promise<{ success: boolean; error?: string }> {
 	try {
-		const shareTokenMetadataInput = normalizeShareTokenMetadataItemCategory(
-			normalizeShareTokenMetadataProductions(
-				normalizeShareTokenMetadataCoupons(params.shareTokenMetadata)
+		const shareTokenMetadataInput = ensureShareTokenProgramIconAssembled(
+			normalizeShareTokenMetadataItemCategory(
+				normalizeShareTokenMetadataProductions(
+					normalizeShareTokenMetadataCoupons(params.shareTokenMetadata)
+				)
 			)
 		)
 		const cardAddr = ethers.getAddress(params.cardAddress)
