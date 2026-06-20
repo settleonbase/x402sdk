@@ -39,6 +39,7 @@ import {
 } from '../couponMetadataCategory'
 import {
 	createLongDhangConetMigrationCard,
+	executeLongDhangConetMigrationAuto,
 	runLongDhangConetMigrationBatch,
 } from './longDhangConetMigration'
 import {
@@ -1568,9 +1569,12 @@ const routing = ( router: Router ) => {
 			createCardPoolPress()
 		})
 
-		router.post('/longDhangMigrationCreateCard', async (_req, res) => {
+		router.post('/longDhangMigrationCreateCard', async (req, res) => {
+			const body = req.body as { ownerEoa?: string }
 			try {
-				const result = await createLongDhangConetMigrationCard()
+				const result = await createLongDhangConetMigrationCard({
+					cardOwnerEoa: body.ownerEoa,
+				})
 				if (!result.success) {
 					return res.status(400).json(result).end()
 				}
@@ -1596,6 +1600,21 @@ const routing = ( router: Router ) => {
 			} catch (e: any) {
 				logger(Colors.red(`[longDhangMigrationRun] failed: ${e?.message ?? e}`))
 				return res.status(500).json({ success: false, error: e?.message ?? 'LongDhang migration failed.' }).end()
+			}
+		})
+
+		router.post('/longDhangMigrationExecuteAuto', async (req, res) => {
+			const body = req.body as { existingNewCardAddress?: string; snapshotHash?: string; ownerEoa?: string }
+			try {
+				const result = await executeLongDhangConetMigrationAuto({
+					existingNewCardAddress: body.existingNewCardAddress,
+					snapshotHash: body.snapshotHash,
+					cardOwnerEoa: body.ownerEoa,
+				})
+				return res.status(result.success ? 200 : 400).json(result).end()
+			} catch (e: any) {
+				logger(Colors.red(`[longDhangMigrationExecuteAuto] failed: ${e?.message ?? e}`))
+				return res.status(500).json({ success: false, error: e?.message ?? 'LongDhang auto migration failed.' }).end()
 			}
 		})
 

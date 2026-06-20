@@ -33,6 +33,7 @@ import BeamioFactoryPaymasterArtifact from '../ABI/BeamioUserCardFactoryPaymaste
 import {
 	getCardByAddress,
 	getPosTerminalCardBindingRow,
+	listDistinctCardMemberTopupMembers,
 	listPosTerminalCardBindingsByCard,
 	registerCardToDb,
 	upsertPosTerminalAdminCardBinding,
@@ -46,7 +47,16 @@ const BeamioFactoryPaymasterABI = (
 
 export const LONGDHANG_OLD_BASE_CARD = '0x30d80cD71Fd1FFD346737b387dA11C7412363EFF'
 export const LONGDHANG_OLD_CARD_OWNER = '0xA2d21FBd33F7D754D8d7A53fe2B4e5C39A008a1F'
+/** Partner merchant EOA — migration test operator + included in Members snapshot when on Base card. */
+export const LONGDHANG_MIGRATION_PARTNER_MERCHANT_EOA = '0xedb035E5D244a7bD987B950d3ac8d42afDe2D387'
+/** EOAs allowed to open migration UI and sign create / start-migration (production owner + test operator). */
+export const LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS = [
+	LONGDHANG_OLD_CARD_OWNER,
+	LONGDHANG_MIGRATION_PARTNER_MERCHANT_EOA,
+] as const
 export const LONGDHANG_MIGRATION_VERSION = 'longdhang-conet-migration-v1'
+/** Base mainnet deploy block for LONGDHANG_OLD_BASE_CARD (~2026-05-25). Never scan from 0 — pruned RPC rejects ancient eth_getLogs. */
+export const LONGDHANG_OLD_BASE_CARD_DEPLOY_BLOCK = 46_475_352
 
 const DEFAULT_BASE_LOG_CHUNK = 15_000
 const DEFAULT_MAX_RUN_ITEMS = 25
@@ -146,12 +156,37 @@ export type RunLongDhangMigrationResult = {
 	skipped: number
 	failed: number
 	rows: RunLongDhangMigrationRow[]
+	admins?: {
+		total: number
+		registered: number
+		skipped: number
+		failed: number
+		rows: TerminalMigrationRow[]
+	}
+	/** @deprecated use admins */
 	terminals?: {
 		total: number
 		registered: number
 		skipped: number
 		failed: number
 		rows: TerminalMigrationRow[]
+	}
+	error?: string
+}
+
+export type LongDhangMigrationAutoResult = {
+	success: boolean
+	newCardAddress: string
+	snapshotHash: string
+	phases: Array<{ phase: string; ok: boolean; detail?: string }>
+	members: { total: number; minted: number; skipped: number; failed: number }
+	admins: { total: number; registered: number; skipped: number; failed: number }
+	verify?: {
+		success: boolean
+		memberMatches: number
+		memberTotal: number
+		adminMatches: number
+		adminTotal: number
 	}
 	error?: string
 }
@@ -174,7 +209,17 @@ function conetProvider(): ethers.JsonRpcProvider {
 }
 
 function baseProvider(): ethers.JsonRpcProvider {
-	return new ethers.JsonRpcProvider(resolveBeamioBaseHttpRpcUrl(), undefined, { batchMaxCount: 1 })
+	const url = process.env.LONGDHANG_BASE_RPC_URL?.trim() || resolveBeamioBaseHttpRpcUrl()
+	return new ethers.JsonRpcProvider(url, undefined, { batchMaxCount: 1 })
+}
+
+function resolveLongDhangBaseFromBlock(): number {
+	const raw = process.env.LONGDHANG_BASE_OLD_CARD_FROM_BLOCK?.trim()
+	if (raw) {
+		const n = Number(raw)
+		if (Number.isFinite(n) && n >= 0) return Math.floor(n)
+	}
+	return LONGDHANG_OLD_BASE_CARD_DEPLOY_BLOCK
 }
 
 function normalizeAddress(raw: string): string {
@@ -195,8 +240,18 @@ export function getLongDhangMigrationAdminAddress(): string {
 	return ethers.ZeroAddress
 }
 
+export function isLongDhangMigrationAuthorizedOwner(raw?: string | null): boolean {
+	try {
+		if (!raw?.trim()) return false
+		const norm = normalizeAddress(raw).toLowerCase()
+		return LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS.some((a) => normalizeAddress(a).toLowerCase() === norm)
+	} catch {
+		return false
+	}
+}
+
 export function buildLongDhangMigrationAuthMessage(args: {
-	action: 'create-card' | 'run-migration'
+	action: 'create-card' | 'run-migration' | 'start-migration'
 	ownerEoa: string
 	snapshotHash: string
 	newCardAddress?: string
@@ -220,7 +275,7 @@ export function buildLongDhangMigrationAuthMessage(args: {
 }
 
 export function verifyLongDhangOwnerAuthorization(args: {
-	action: 'create-card' | 'run-migration'
+	action: 'create-card' | 'run-migration' | 'start-migration'
 	ownerEoa: string
 	snapshotHash: string
 	signature: string
@@ -228,8 +283,8 @@ export function verifyLongDhangOwnerAuthorization(args: {
 }): { ok: true; signer: string } | { ok: false; error: string } {
 	try {
 		const owner = normalizeAddress(args.ownerEoa)
-		if (owner !== normalizeAddress(LONGDHANG_OLD_CARD_OWNER)) {
-			return { ok: false, error: 'Only the LongDhang owner can authorize this migration.' }
+		if (!isLongDhangMigrationAuthorizedOwner(owner)) {
+			return { ok: false, error: 'Only an authorized LongDhang migration operator can authorize this migration.' }
 		}
 		if (!ethers.isHexString(args.snapshotHash, 32)) {
 			return { ok: false, error: 'Invalid snapshotHash.' }
@@ -431,28 +486,24 @@ const adminManagerIface = new ethers.Interface([
 	'function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)',
 ])
 
-function metadataLooksLikePaymentTerminal(raw: unknown): boolean {
-	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
-	const json = raw as Record<string, unknown>
-	const s = JSON.stringify(json).toLowerCase()
-	return s.includes('terminal') || s.includes('softpos') || s.includes('pos')
-}
-
-async function collectLongDhangPaymentTerminals(provider: ethers.Provider): Promise<Array<{
+async function collectLongDhangSubAdmins(provider: ethers.Provider): Promise<Array<{
 	posEoa: string
 	metadata: string
 	mintLimitE6: string
 }>> {
 	const out = new Map<string, { posEoa: string; metadata: string; mintLimitE6: string }>()
+	const ownerNorm = normalizeAddress(LONGDHANG_OLD_CARD_OWNER).toLowerCase()
 	const dbRows = await listPosTerminalCardBindingsByCard(LONGDHANG_OLD_BASE_CARD)
 	for (const row of dbRows) {
 		if (!ethers.isAddress(row.posEoa)) continue
+		const posNorm = ethers.getAddress(row.posEoa)
+		if (posNorm.toLowerCase() === ownerNorm) continue
 		const metadataObj =
 			row.terminalMetadata && typeof row.terminalMetadata === 'object' && !Array.isArray(row.terminalMetadata)
 				? (row.terminalMetadata as Record<string, unknown>)
-				: { source: 'longdhangConetMigration', role: 'payment-terminal' }
-		out.set(row.posEoa.toLowerCase(), {
-			posEoa: ethers.getAddress(row.posEoa),
+				: { source: 'longdhangConetMigration', role: 'sub-admin' }
+		out.set(posNorm.toLowerCase(), {
+			posEoa: posNorm,
 			metadata: JSON.stringify({ ...metadataObj, migratedFromCard: ethers.getAddress(LONGDHANG_OLD_BASE_CARD) }),
 			mintLimitE6: '0',
 		})
@@ -471,7 +522,7 @@ async function collectLongDhangPaymentTerminals(provider: ethers.Provider): Prom
 			const pos = admins[i]
 			if (!pos || !ethers.isAddress(pos)) continue
 			const posNorm = ethers.getAddress(pos)
-			if (posNorm === ethers.getAddress(LONGDHANG_OLD_CARD_OWNER)) continue
+			if (posNorm.toLowerCase() === ownerNorm) continue
 			const metaRaw = typeof metadatas[i] === 'string' && metadatas[i].trim() ? metadatas[i].trim() : '{}'
 			let metaObj: unknown = null
 			try {
@@ -479,7 +530,6 @@ async function collectLongDhangPaymentTerminals(provider: ethers.Provider): Prom
 			} catch {
 				metaObj = { rawMetadata: metaRaw }
 			}
-			if (!metadataLooksLikePaymentTerminal(metaObj) && !out.has(posNorm.toLowerCase())) continue
 			let limit = 0n
 			try {
 				limit = BigInt(await card.adminMintLimit(posNorm))
@@ -489,7 +539,7 @@ async function collectLongDhangPaymentTerminals(provider: ethers.Provider): Prom
 			const merged =
 				metaObj && typeof metaObj === 'object' && !Array.isArray(metaObj)
 					? { ...(metaObj as Record<string, unknown>), migratedFromCard: ethers.getAddress(LONGDHANG_OLD_BASE_CARD) }
-					: { source: 'longdhangConetMigration', role: 'payment-terminal', migratedFromCard: ethers.getAddress(LONGDHANG_OLD_BASE_CARD) }
+					: { source: 'longdhangConetMigration', role: 'sub-admin', migratedFromCard: ethers.getAddress(LONGDHANG_OLD_BASE_CARD) }
 			out.set(posNorm.toLowerCase(), {
 				posEoa: posNorm,
 				metadata: JSON.stringify(merged),
@@ -502,18 +552,29 @@ async function collectLongDhangPaymentTerminals(provider: ethers.Provider): Prom
 	return [...out.values()].sort((a, b) => a.posEoa.localeCompare(b.posEoa))
 }
 
+/** @deprecated use collectLongDhangSubAdmins */
+async function collectLongDhangPaymentTerminals(provider: ethers.Provider) {
+	return collectLongDhangSubAdmins(provider)
+}
+
 function stableSnapshotHash(payload: Omit<LongDhangMigrationSnapshot, 'snapshotHash' | 'generatedAt' | 'migrationAdmin'>): string {
+	// Hash only migration payload — exclude scan window (baseFromBlock/baseToBlock/baseRpcUrl) so
+	// preview → create-card → addAdmin → executeAuto does not drift when Base head advances.
 	const stable = {
 		version: payload.version,
 		oldBaseCard: normalizeAddress(payload.oldBaseCard),
 		oldBaseCardOwner: normalizeAddress(payload.oldBaseCardOwner),
 		baseChainId: payload.baseChainId,
 		conetChainId: payload.conetChainId,
-		baseFromBlock: payload.baseFromBlock,
-		baseToBlock: payload.baseToBlock,
 		oldBaseAaFactory: normalizeAddress(payload.oldBaseAaFactory),
 		totalBalanceE6: payload.totalBalanceE6,
-		holders: [...payload.holders].sort((a, b) => a.eoa.localeCompare(b.eoa)),
+		holders: [...payload.holders]
+			.sort((a, b) => a.eoa.localeCompare(b.eoa))
+			.map((h) => ({
+				eoa: normalizeAddress(h.eoa),
+				oldBaseAA: normalizeAddress(h.oldBaseAA),
+				balanceE6: h.balanceE6,
+			})),
 	}
 	return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(stable)))
 }
@@ -530,12 +591,25 @@ async function collectToken0HoldersFromTransfers(
 	const chunk = Math.max(1_000, Number(process.env.LONGDHANG_BASE_LOG_CHUNK ?? DEFAULT_BASE_LOG_CHUNK))
 	for (let start = fromBlock; start <= toBlock; start += chunk) {
 		const end = Math.min(toBlock, start + chunk - 1)
-		const logs = await provider.getLogs({
-			address: cardAddress,
-			fromBlock: start,
-			toBlock: end,
-			topics: [[topicSingle, topicBatch]],
-		})
+		let logs: ethers.Log[]
+		try {
+			logs = await provider.getLogs({
+				address: cardAddress,
+				fromBlock: start,
+				toBlock: end,
+				topics: [[topicSingle, topicBatch]],
+			})
+		} catch (e: any) {
+			const msg = String(e?.error?.message ?? e?.message ?? e)
+			if (/pruned history|pruned/i.test(msg)) {
+				throw new Error(
+					`Base RPC cannot serve eth_getLogs for blocks ${start}–${end} (pruned history). ` +
+						`Set LONGDHANG_BASE_OLD_CARD_FROM_BLOCK to the card deploy block (default ${LONGDHANG_OLD_BASE_CARD_DEPLOY_BLOCK}) ` +
+						`or LONGDHANG_BASE_RPC_URL to a full/archive Base node.`,
+				)
+			}
+			throw e
+		}
 		for (const log of logs) {
 			try {
 				const parsed = ERC1155_TRANSFER_ABI.parseLog(log)
@@ -573,6 +647,131 @@ async function collectToken0HoldersFromTransfers(
 }
 
 let snapshotCache: { at: number; value: LongDhangMigrationSnapshot } | null = null
+const snapshotByHashCache = new Map<string, LongDhangMigrationSnapshot>()
+const SNAPSHOT_BY_HASH_TTL_MS = 2 * 60 * 60 * 1000
+
+function rememberSnapshotByHash(snapshot: LongDhangMigrationSnapshot): void {
+	snapshotByHashCache.set(snapshot.snapshotHash.toLowerCase(), snapshot)
+	const cutoff = Date.now() - SNAPSHOT_BY_HASH_TTL_MS
+	for (const [hash, snap] of snapshotByHashCache) {
+		if (Date.parse(snap.generatedAt) < cutoff) snapshotByHashCache.delete(hash)
+	}
+}
+
+async function resolveLongDhangMigrationSnapshot(options: {
+	requestedHash?: string
+	force?: boolean
+}): Promise<LongDhangMigrationSnapshot> {
+	const requested = options.requestedHash?.trim().toLowerCase()
+	if (requested && ethers.isHexString(requested, 32)) {
+		const cached = snapshotByHashCache.get(requested)
+		if (cached) return cached
+	}
+	const snapshot = await previewLongDhangConetMigrationSnapshot({ force: options.force ?? Boolean(requested) })
+	if (requested && snapshot.snapshotHash.toLowerCase() !== requested) {
+		throw new Error(
+			`Snapshot hash mismatch. Current=${snapshot.snapshotHash}, requested=${options.requestedHash}. ` +
+				`Members or Base balances changed since preview — refresh and Start Migration again.`
+		)
+	}
+	return snapshot
+}
+
+async function upsertMemberHolderFromBaseBalance(args: {
+	oldCard: ethers.Contract
+	aaFactory: string
+	provider: ethers.Provider
+	eoa: string
+	preferredAa?: string
+	holderByEoa: Map<string, SnapshotHolder>
+	excluded: SnapshotExcludedHolder[]
+}): Promise<void> {
+	const eoa = normalizeAddress(args.eoa)
+	let oldBaseAA = ''
+	if (args.preferredAa && ethers.isAddress(args.preferredAa) && ethers.getAddress(args.preferredAa) !== ethers.ZeroAddress) {
+		oldBaseAA = ethers.getAddress(args.preferredAa)
+	} else {
+		oldBaseAA = await resolveBaseAaForEoa(args.aaFactory, eoa, args.provider)
+	}
+	const balance = BigInt(await args.oldCard.balanceOf(oldBaseAA, 0n).catch(() => 0n))
+	if (balance <= 0n) {
+		args.excluded.push({ holder: eoa, balanceE6: '0', reason: 'Member has zero tokenId=0 balance on Base card.' })
+		return
+	}
+	const key = eoa.toLowerCase()
+	const existing = args.holderByEoa.get(key)
+	if (!existing || BigInt(existing.balanceE6) < balance) {
+		args.holderByEoa.set(key, {
+			eoa,
+			oldBaseAA,
+			balanceE6: balance.toString(),
+			sourceHolder: 'members-directory',
+		})
+	}
+}
+
+async function buildHoldersFromMembersDirectory(args: {
+	oldCard: ethers.Contract
+	aaFactory: string
+	provider: ethers.Provider
+}): Promise<{ holders: SnapshotHolder[]; excluded: SnapshotExcludedHolder[]; anomalies: SnapshotExcludedHolder[] }> {
+	const holderByEoa = new Map<string, SnapshotHolder>()
+	const excluded: SnapshotExcludedHolder[] = []
+	const anomalies: SnapshotExcludedHolder[] = []
+	const pageSize = 2000
+	let offset = 0
+	let total = 0
+	do {
+		const page = await listDistinctCardMemberTopupMembers(LONGDHANG_OLD_BASE_CARD, { limit: pageSize, offset })
+		total = page.total
+		for (const m of page.items) {
+			if (!m.memberEoa || !ethers.isAddress(m.memberEoa)) continue
+			try {
+				await upsertMemberHolderFromBaseBalance({
+					oldCard: args.oldCard,
+					aaFactory: args.aaFactory,
+					provider: args.provider,
+					eoa: m.memberEoa,
+					preferredAa: m.memberAa,
+					holderByEoa,
+					excluded,
+				})
+			} catch (e: any) {
+				anomalies.push({
+					holder: m.memberEoa,
+					balanceE6: '0',
+					reason: e?.message ?? String(e),
+				})
+			}
+		}
+		if (page.items.length < pageSize) break
+		offset += pageSize
+	} while (offset < total)
+
+	// Ensure partner merchant (e.g. BeamioDemo100) is included when they hold Base token #0.
+	try {
+		await upsertMemberHolderFromBaseBalance({
+			oldCard: args.oldCard,
+			aaFactory: args.aaFactory,
+			provider: args.provider,
+			eoa: LONGDHANG_MIGRATION_PARTNER_MERCHANT_EOA,
+			holderByEoa,
+			excluded,
+		})
+	} catch (e: any) {
+		anomalies.push({
+			holder: LONGDHANG_MIGRATION_PARTNER_MERCHANT_EOA,
+			balanceE6: '0',
+			reason: e?.message ?? String(e),
+		})
+	}
+
+	return {
+		holders: [...holderByEoa.values()].sort((a, b) => a.eoa.localeCompare(b.eoa)),
+		excluded,
+		anomalies,
+	}
+}
 
 export async function previewLongDhangConetMigrationSnapshot(
 	options: { force?: boolean } = {}
@@ -583,83 +782,91 @@ export async function previewLongDhangConetMigrationSnapshot(
 	const provider = baseProvider()
 	const oldCard = new ethers.Contract(LONGDHANG_OLD_BASE_CARD, ERC1155_TRANSFER_ABI, provider)
 	const latest = await provider.getBlockNumber()
-	const fromBlock = Number(process.env.LONGDHANG_BASE_OLD_CARD_FROM_BLOCK ?? 0)
+	const fromBlock = resolveLongDhangBaseFromBlock()
 	const toBlock = Number(process.env.LONGDHANG_BASE_OLD_CARD_TO_BLOCK ?? latest)
 	const ownerOnChain = normalizeAddress(await oldCard.owner())
 	if (ownerOnChain !== normalizeAddress(LONGDHANG_OLD_CARD_OWNER)) {
 		throw new Error(`Unexpected LongDhang old card owner: ${ownerOnChain}`)
 	}
 	const aaFactory = await resolveOldBaseAaFactory(oldCard, provider)
-	const transferBalances = await collectToken0HoldersFromTransfers(provider, LONGDHANG_OLD_BASE_CARD, fromBlock, toBlock)
-	const holders: SnapshotHolder[] = []
-	const excluded: SnapshotExcludedHolder[] = []
-	const anomalies: SnapshotExcludedHolder[] = []
-	const holderByEoa = new Map<string, SnapshotHolder>()
-	let total = 0n
+	const useMembersDirectory = String(process.env.LONGDHANG_SNAPSHOT_USE_MEMBERS ?? 'true').toLowerCase() !== 'false'
+	let holders: SnapshotHolder[] = []
+	let excluded: SnapshotExcludedHolder[] = []
+	let anomalies: SnapshotExcludedHolder[] = []
 
-	for (const [holder, eventBalance] of [...transferBalances.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-		let currentBalance = 0n
-		try {
-			currentBalance = BigInt(await oldCard.balanceOf(holder, 0n))
-		} catch (e: any) {
-			anomalies.push({ holder, balanceE6: eventBalance.toString(), reason: `balanceOf failed: ${e?.message ?? e}` })
-			continue
-		}
-		if (currentBalance <= 0n) continue
-		if (currentBalance !== eventBalance) {
-			anomalies.push({
-				holder,
-				balanceE6: currentBalance.toString(),
-				reason: `event replay balance ${eventBalance.toString()} differs from balanceOf`,
-			})
-		}
-		const code = await provider.getCode(holder)
-		if (!code || code === '0x') {
-			let oldBaseAA = ''
+	if (useMembersDirectory) {
+		const built = await buildHoldersFromMembersDirectory({ oldCard, aaFactory, provider })
+		holders = built.holders
+		excluded = built.excluded
+		anomalies = built.anomalies
+	} else {
+		const transferBalances = await collectToken0HoldersFromTransfers(provider, LONGDHANG_OLD_BASE_CARD, fromBlock, toBlock)
+		const holderByEoa = new Map<string, SnapshotHolder>()
+		for (const [holder, eventBalance] of [...transferBalances.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+			let currentBalance = 0n
 			try {
-				oldBaseAA = await resolveBaseAaForEoa(aaFactory, holder, provider)
+				currentBalance = BigInt(await oldCard.balanceOf(holder, 0n))
 			} catch (e: any) {
-				excluded.push({
+				anomalies.push({ holder, balanceE6: eventBalance.toString(), reason: `balanceOf failed: ${e?.message ?? e}` })
+				continue
+			}
+			if (currentBalance <= 0n) continue
+			if (currentBalance !== eventBalance) {
+				anomalies.push({
 					holder,
 					balanceE6: currentBalance.toString(),
-					reason: `direct EOA holder; could not resolve Base AA: ${e?.message ?? e}`,
+					reason: `event replay balance ${eventBalance.toString()} differs from balanceOf`,
+				})
+			}
+			const code = await provider.getCode(holder)
+			if (!code || code === '0x') {
+				let oldBaseAA = ''
+				try {
+					oldBaseAA = await resolveBaseAaForEoa(aaFactory, holder, provider)
+				} catch (e: any) {
+					excluded.push({
+						holder,
+						balanceE6: currentBalance.toString(),
+						reason: `direct EOA holder; could not resolve Base AA: ${e?.message ?? e}`,
+					})
+					continue
+				}
+				const aaBalance = BigInt(await oldCard.balanceOf(oldBaseAA, 0n).catch(() => 0n))
+				if (aaBalance <= 0n) {
+					excluded.push({
+						holder,
+						balanceE6: currentBalance.toString(),
+						reason: `direct EOA holder; Base AA ${oldBaseAA} has zero tokenId=0 balance`,
+					})
+					continue
+				}
+				holderByEoa.set(holder.toLowerCase(), {
+					eoa: ethers.getAddress(holder),
+					oldBaseAA,
+					balanceE6: aaBalance.toString(),
+					sourceHolder: holder,
 				})
 				continue
 			}
-			const aaBalance = BigInt(await oldCard.balanceOf(oldBaseAA, 0n).catch(() => 0n))
-			if (aaBalance <= 0n) {
-				excluded.push({
-					holder,
-					balanceE6: currentBalance.toString(),
-					reason: `direct EOA holder; Base AA ${oldBaseAA} has zero tokenId=0 balance`,
-				})
+			const eoa = await resolveBeamioAccountOwner(holder, provider)
+			if (!eoa) {
+				excluded.push({ holder, balanceE6: currentBalance.toString(), reason: 'holder is not a readable BeamioAccount' })
 				continue
 			}
-			holderByEoa.set(holder.toLowerCase(), {
-				eoa: ethers.getAddress(holder),
-				oldBaseAA,
-				balanceE6: aaBalance.toString(),
-				sourceHolder: holder,
-			})
-			continue
+			const matches = await aaFactoryMatchesHolder(aaFactory, eoa, holder, provider)
+			if (!matches) {
+				excluded.push({ holder, balanceE6: currentBalance.toString(), reason: 'holder is not the EOA primary/index-0 AA' })
+				continue
+			}
+			const eoaKey = eoa.toLowerCase()
+			const existing = holderByEoa.get(eoaKey)
+			if (!existing || BigInt(existing.balanceE6) < currentBalance) {
+				holderByEoa.set(eoaKey, { eoa, oldBaseAA: holder, balanceE6: currentBalance.toString(), sourceHolder: holder })
+			}
 		}
-		const eoa = await resolveBeamioAccountOwner(holder, provider)
-		if (!eoa) {
-			excluded.push({ holder, balanceE6: currentBalance.toString(), reason: 'holder is not a readable BeamioAccount' })
-			continue
-		}
-		const matches = await aaFactoryMatchesHolder(aaFactory, eoa, holder, provider)
-		if (!matches) {
-			excluded.push({ holder, balanceE6: currentBalance.toString(), reason: 'holder is not the EOA primary/index-0 AA' })
-			continue
-		}
-		const eoaKey = eoa.toLowerCase()
-		const existing = holderByEoa.get(eoaKey)
-		if (!existing || BigInt(existing.balanceE6) < currentBalance) {
-			holderByEoa.set(eoaKey, { eoa, oldBaseAA: holder, balanceE6: currentBalance.toString(), sourceHolder: holder })
-		}
+		holders = [...holderByEoa.values()].sort((a, b) => a.eoa.localeCompare(b.eoa))
 	}
-	holders.push(...[...holderByEoa.values()].sort((a, b) => a.eoa.localeCompare(b.eoa)))
+	let total = 0n
 	for (const row of holders) total += BigInt(row.balanceE6)
 
 	const basePayload = {
@@ -686,6 +893,7 @@ export async function previewLongDhangConetMigrationSnapshot(
 		generatedAt: new Date().toISOString(),
 	}
 	snapshotCache = { at: Date.now(), value: snapshot }
+	rememberSnapshotByHash(snapshot)
 	return snapshot
 }
 
@@ -694,7 +902,10 @@ function currencyEnumToSymbol(n: number): 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC'
 	return symbols[n] ?? 'CAD'
 }
 
-export async function createLongDhangConetMigrationCard(): Promise<{
+export async function createLongDhangConetMigrationCard(options?: {
+	/** When set (and authorized), new CoNET card `owner()` is this EOA — required for test-operator dry runs. */
+	cardOwnerEoa?: string
+}): Promise<{
 	success: true
 	cardAddress: string
 	txHash: string
@@ -703,6 +914,14 @@ export async function createLongDhangConetMigrationCard(): Promise<{
 } | { success: false; error: string }> {
 	const sc = Settle_ContractPool.shift()
 	if (!sc) return { success: false, error: 'Settle_ContractPool is busy or not initialized.' }
+	let cardOwner = normalizeAddress(LONGDHANG_OLD_CARD_OWNER)
+	if (options?.cardOwnerEoa && ethers.isAddress(options.cardOwnerEoa)) {
+		const candidate = normalizeAddress(options.cardOwnerEoa)
+		if (!isLongDhangMigrationAuthorizedOwner(candidate)) {
+			return { success: false, error: 'cardOwnerEoa is not an authorized migration operator.' }
+		}
+		cardOwner = candidate
+	}
 	try {
 		const base = baseProvider()
 		const oldCard = new ethers.Contract(LONGDHANG_OLD_BASE_CARD, ERC1155_TRANSFER_ABI, base)
@@ -712,7 +931,7 @@ export async function createLongDhangConetMigrationCard(): Promise<{
 		const factory = new ethers.Contract(CONET_CARD_FACTORY, BeamioFactoryPaymasterABI, sc.walletConet)
 		const result = await createBeamioCardWithFactoryReturningHash(
 			factory,
-			normalizeAddress(LONGDHANG_OLD_CARD_OWNER),
+			cardOwner,
 			currency,
 			price,
 			{
@@ -738,7 +957,7 @@ export async function createLongDhangConetMigrationCard(): Promise<{
 		)
 		await copyLongDhangOldCardMetadataToNewCard({
 			newCardAddress: result.cardAddress,
-			cardOwner: normalizeAddress(LONGDHANG_OLD_CARD_OWNER),
+			cardOwner,
 			currency,
 			priceInCurrencyE6: price.toString(),
 			txHash: result.hash,
@@ -747,7 +966,7 @@ export async function createLongDhangConetMigrationCard(): Promise<{
 			success: true,
 			cardAddress: result.cardAddress,
 			txHash: result.hash,
-			ownerEoa: normalizeAddress(LONGDHANG_OLD_CARD_OWNER),
+			ownerEoa: cardOwner,
 			migrationAdmin: normalizeAddress(sc.walletConet.address),
 		}
 	} catch (e: any) {
@@ -812,9 +1031,22 @@ async function ensureConetAaForEoaWithWallet(
 		const code = await wallet.provider!.getCode(aa)
 		if (code && code !== '0x') return { aa }
 	}
-	const tx = await factory.createAccountFor(eoaNorm, { gasLimit: 1_800_000 })
+	// CoNET AA CREATE2 deploy needs ~2.8M gas; 1.8M OOG → LibDeployFailed() with empty code at predicted address.
+	let gasLimit = 3_500_000n
+	try {
+		const estimated = await factory.createAccountFor.estimateGas(eoaNorm)
+		gasLimit = (estimated * 125n) / 100n + 150_000n
+		if (gasLimit < 3_000_000n) gasLimit = 3_000_000n
+	} catch {
+		/* keep conservative fallback */
+	}
+	const tx = await factory.createAccountFor(eoaNorm, { gasLimit })
 	const receipt = await tx.wait()
-	if (!receipt || Number(receipt.status ?? 0) !== 1) throw new Error(`createAccountFor failed for ${eoaNorm}`)
+	if (!receipt || Number(receipt.status ?? 0) !== 1) {
+		throw new Error(
+			`createAccountFor failed for ${eoaNorm} (CoNET AA deploy likely needs ≥3M gas; check LibDeployFailed / CREATE2 OOG)`
+		)
+	}
 	const created = String(await factory.beamioAccountOf(eoaNorm))
 	if (!ethers.isAddress(created) || ethers.getAddress(created) === ethers.ZeroAddress) {
 		throw new Error(`AA factory did not register account for ${eoaNorm}`)
@@ -987,10 +1219,7 @@ export async function runLongDhangConetMigrationBatch(
 	options: RunLongDhangMigrationOptions
 ): Promise<RunLongDhangMigrationResult> {
 	const newCard = normalizeAddress(options.newCardAddress)
-	const snapshot = await previewLongDhangConetMigrationSnapshot()
-	if (options.snapshotHash && options.snapshotHash.toLowerCase() !== snapshot.snapshotHash.toLowerCase()) {
-		throw new Error(`Snapshot hash mismatch. Current=${snapshot.snapshotHash}, requested=${options.snapshotHash}`)
-	}
+	const snapshot = await resolveLongDhangMigrationSnapshot({ requestedHash: options.snapshotHash })
 	const sc = Settle_ContractPool.shift()
 	if (!sc) {
 		return {
@@ -1014,8 +1243,8 @@ export async function runLongDhangConetMigrationBatch(
 	try {
 		const card = new ethers.Contract(newCard, USER_CARD_ADMIN_ABI, sc.walletConet)
 		const owner = normalizeAddress(await card.owner())
-		if (owner !== normalizeAddress(LONGDHANG_OLD_CARD_OWNER)) {
-			throw new Error(`New CoNET card owner mismatch: ${owner}`)
+		if (!isLongDhangMigrationAuthorizedOwner(owner)) {
+			throw new Error(`New CoNET card owner is not an authorized migration operator: ${owner}`)
 		}
 		const adminAddr = normalizeAddress(sc.walletConet.address)
 		const isAdmin = Boolean(await card.isAdmin(adminAddr))
@@ -1030,8 +1259,11 @@ export async function runLongDhangConetMigrationBatch(
 			card,
 		})
 		const mintIface = new ethers.Interface(['function mintPointsByAdmin(address user,uint256 points6)'])
-		const limit = Math.max(1, Math.min(Number(options.limit ?? DEFAULT_MAX_RUN_ITEMS), snapshot.holders.length))
-		for (const row of snapshot.holders.slice(0, limit)) {
+		const holderRows =
+			options.limit != null && Number.isFinite(Number(options.limit))
+				? snapshot.holders.slice(0, Math.max(1, Math.floor(Number(options.limit))))
+				: snapshot.holders
+		for (const row of holderRows) {
 			const out: RunLongDhangMigrationRow = { ...row, status: 'failed' }
 			rows.push(out)
 			try {
@@ -1076,7 +1308,7 @@ export async function runLongDhangConetMigrationBatch(
 			}
 		}
 		return {
-			success: failed === 0,
+			success: failed === 0 && terminals.failed === 0,
 			newCardAddress: newCard,
 			snapshotHash: snapshot.snapshotHash,
 			totalSnapshotRows: snapshot.holders.length,
@@ -1085,9 +1317,10 @@ export async function runLongDhangConetMigrationBatch(
 			skipped,
 			failed,
 			rows,
+			admins: terminals,
 			terminals,
 			...((failed > 0 || terminals.failed > 0) && {
-				error: `${failed} migration row(s), ${terminals.failed} terminal row(s) failed.`,
+				error: `${failed} member row(s), ${terminals.failed} sub-admin row(s) failed.`,
 			}),
 		}
 	} finally {
@@ -1137,7 +1370,7 @@ export async function verifyLongDhangConetMigration(newCardAddress: string): Pro
 			mismatches.push({ ...row, reason: e?.message ?? String(e) })
 		}
 	}
-	const expectedTerminals = await collectLongDhangPaymentTerminals(baseProvider())
+	const expectedTerminals = await collectLongDhangSubAdmins(baseProvider())
 	const terminalMismatches: Array<{ posEoa: string; reason: string; dbCardAddress?: string | null }> = []
 	let terminalMatches = 0
 	for (const t of expectedTerminals) {
@@ -1170,6 +1403,122 @@ export async function verifyLongDhangConetMigration(newCardAddress: string): Pro
 			matches: terminalMatches,
 			mismatches: terminalMismatches,
 		},
+	}
+}
+
+/** One-shot server migration after owner has authorized migration admin on the new CoNET card. */
+export async function executeLongDhangConetMigrationAuto(options: {
+	existingNewCardAddress?: string
+	snapshotHash?: string
+	/** Authorized signer EOA — CoNET card owner when creating a new card mid-flight. */
+	cardOwnerEoa?: string
+}): Promise<LongDhangMigrationAutoResult> {
+	const phases: LongDhangMigrationAutoResult['phases'] = []
+	const pushPhase = (phase: string, ok: boolean, detail?: string) => {
+		phases.push({ phase, ok, detail })
+	}
+	try {
+		const snapshot = await resolveLongDhangMigrationSnapshot({
+			requestedHash: options.snapshotHash,
+			force: true,
+		})
+		pushPhase('snapshot', true, `${snapshot.holderCount} members from Members directory`)
+
+		let newCardAddress = options.existingNewCardAddress?.trim() ?? ''
+		if (!newCardAddress || !ethers.isAddress(newCardAddress)) {
+			const created = await createLongDhangConetMigrationCard({
+				cardOwnerEoa: options.cardOwnerEoa,
+			})
+			if (!created.success) {
+				pushPhase('create-card', false, created.error)
+				throw new Error(created.error ?? 'Create CoNET card failed.')
+			}
+			newCardAddress = created.cardAddress
+			pushPhase('create-card', true, newCardAddress)
+		} else {
+			newCardAddress = ethers.getAddress(newCardAddress)
+			pushPhase('create-card', true, `Using existing card ${newCardAddress}`)
+		}
+
+		const migrationAdmin = getLongDhangMigrationAdminAddress()
+		const conetCard = new ethers.Contract(newCardAddress, USER_CARD_ADMIN_ABI, conetProvider())
+		const isAdmin = migrationAdmin !== ethers.ZeroAddress && Boolean(await conetCard.isAdmin(migrationAdmin))
+		if (!isAdmin) {
+			pushPhase('authorize-admin', false, `Migration admin ${migrationAdmin} is not authorized on ${newCardAddress}.`)
+			throw new Error(`Migration admin is not authorized on ${newCardAddress}. Unlock wallet and retry Start Migration.`)
+		}
+		pushPhase('authorize-admin', true, migrationAdmin)
+
+		const run = await runLongDhangConetMigrationBatch({
+			newCardAddress,
+			snapshotHash: snapshot.snapshotHash,
+		})
+		const adminStats = run.admins ?? run.terminals
+		pushPhase(
+			'migrate-members',
+			run.failed === 0,
+			`${run.minted} minted, ${run.skipped} skipped, ${run.failed} failed (${run.totalSnapshotRows} total)`
+		)
+		pushPhase(
+			'migrate-admins',
+			(adminStats?.failed ?? 0) === 0,
+			`${adminStats?.registered ?? 0} registered, ${adminStats?.skipped ?? 0} skipped, ${adminStats?.failed ?? 0} failed`
+		)
+		if (!run.success) {
+			throw new Error(run.error ?? 'Member or sub-admin migration failed.')
+		}
+
+		const verify = await verifyLongDhangConetMigration(newCardAddress)
+		pushPhase(
+			'verify',
+			verify.success,
+			`${verify.matches}/${verify.totalRows} members, ${verify.terminals.matches}/${verify.terminals.total} sub-admins`
+		)
+		if (!verify.success) {
+			throw new Error('Verification found balance or sub-admin mismatches.')
+		}
+
+		return {
+			success: true,
+			newCardAddress,
+			snapshotHash: snapshot.snapshotHash,
+			phases,
+			members: {
+				total: run.totalSnapshotRows,
+				minted: run.minted,
+				skipped: run.skipped,
+				failed: run.failed,
+			},
+			admins: {
+				total: adminStats?.total ?? 0,
+				registered: adminStats?.registered ?? 0,
+				skipped: adminStats?.skipped ?? 0,
+				failed: adminStats?.failed ?? 0,
+			},
+			verify: {
+				success: verify.success,
+				memberMatches: verify.matches,
+				memberTotal: verify.totalRows,
+				adminMatches: verify.terminals.matches,
+				adminTotal: verify.terminals.total,
+			},
+		}
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		if (phases.length === 0 || phases[phases.length - 1]?.ok) {
+			pushPhase('failed', false, msg)
+		}
+		return {
+			success: false,
+			newCardAddress: options.existingNewCardAddress && ethers.isAddress(options.existingNewCardAddress)
+				? ethers.getAddress(options.existingNewCardAddress)
+				: ethers.ZeroAddress,
+			snapshotHash: '',
+			phases,
+			members: { total: 0, minted: 0, skipped: 0, failed: 0 },
+			admins: { total: 0, registered: 0, skipped: 0, failed: 0 },
+			error: msg,
+		}
 	}
 }
 

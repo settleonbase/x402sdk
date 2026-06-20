@@ -81,7 +81,9 @@ import {
 } from './beamioFragmentImageProxy'
 import {
 	LONGDHANG_OLD_BASE_CARD,
+	LONGDHANG_OLD_BASE_CARD_DEPLOY_BLOCK,
 	LONGDHANG_OLD_CARD_OWNER,
+	LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS,
 	getLongDhangMigrationAdminAddress,
 	previewLongDhangConetMigrationSnapshot,
 	verifyLongDhangConetMigration,
@@ -6736,7 +6738,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			version: 'longdhang-conet-migration-v1',
 			oldBaseCard: LONGDHANG_OLD_BASE_CARD,
 			oldBaseCardOwner: LONGDHANG_OLD_CARD_OWNER,
+			authorizedOwnerEoa: [...LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS],
 			migrationAdmin: getLongDhangMigrationAdminAddress(),
+			baseFromBlockDefault: LONGDHANG_OLD_BASE_CARD_DEPLOY_BLOCK,
 		}).end()
 	})
 
@@ -6820,6 +6824,36 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		} catch (e: any) {
 			return res.status(500).json({ success: false, error: e?.message ?? 'Migration verification failed.' }).end()
 		}
+	})
+
+	router.post('/longDhangMigrationExecuteAuto', async (req, res) => {
+		const body = req.body as {
+			ownerEoa?: string
+			snapshotHash?: string
+			ownerSignature?: string
+			existingNewCardAddress?: string
+		}
+		if (!body.ownerEoa || !body.snapshotHash || !body.ownerSignature) {
+			return res.status(400).json({ success: false, error: 'Missing ownerEoa, snapshotHash, or ownerSignature.' }).end()
+		}
+		const verified = verifyLongDhangOwnerAuthorization({
+			action: 'start-migration',
+			ownerEoa: body.ownerEoa,
+			snapshotHash: body.snapshotHash,
+			signature: body.ownerSignature,
+			newCardAddress: body.existingNewCardAddress,
+		})
+		if (!verified.ok) {
+			return res.status(403).json({ success: false, error: verified.error }).end()
+		}
+		postLocalhost('/api/longDhangMigrationExecuteAuto', {
+			ownerEoa: ethers.getAddress(body.ownerEoa),
+			snapshotHash: body.snapshotHash,
+			ownerSignature: body.ownerSignature,
+			...(body.existingNewCardAddress && ethers.isAddress(body.existingNewCardAddress)
+				? { existingNewCardAddress: ethers.getAddress(body.existingNewCardAddress) }
+				: {}),
+		}, res)
 	})
 
 	/** cardCreateRedeem：集群预检，合格转发 master。master 使用 executeForOwnerPool + Settle_ContractPool 排队处理。默认 createRedeemBatch（多 hash array）*/
