@@ -62,6 +62,9 @@ export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	'0xbd951e8164907c1eebe2182c94dfaa9d33e5e149',
 	'0x2d3e9a6605ee6bb0b922bc54c27c01dd956e3b7d',
 	'0xbbc7d15988e2bf73ca5299e040091543b5eec54a',
+	/** Merchant program cards — operator blacklist */
+	'0x48b0e8c3cdc0cf80b6239283cff3d1de16501f3b',
+	'0x52af5f5e7c136cc1bd596d64cb44eb7f5c9d2d6c',
 ])
 
 /** Merchant-initiated / DB-backed excludes (merged with static set at runtime). */
