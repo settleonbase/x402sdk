@@ -138,6 +138,9 @@ export type LongDhangMigrationSnapshot = {
 	snapshotHash: string
 	migrationAdmin: string
 	generatedAt: string
+	/** POS terminals to register under owner after member migration (client-side). */
+	terminals?: Array<{ posEoa: string; metadata: string; mintLimitE6: string }>
+	terminalCount?: number
 }
 
 type RunLongDhangMigrationOptions = {
@@ -883,6 +886,12 @@ export async function previewLongDhangConetMigrationSnapshot(
 			snapshotHash: stableSnapshotHash(basePayload),
 			migrationAdmin: getLongDhangMigrationAdminAddress(),
 			generatedAt: scanMeta.generatedAt,
+			terminals: LONGDHANG_FROZEN_TERMINALS.map((t) => ({
+				posEoa: normalizeAddress(t.posEoa),
+				metadata: normalizeLongDhangTerminalMetadataForCoNet(JSON.parse(t.metadataJson) as Record<string, unknown>),
+				mintLimitE6: t.mintLimitE6,
+			})),
+			terminalCount: LONGDHANG_FROZEN_TERMINALS.length,
 		}
 		snapshotCache = { at: Date.now(), value: snapshot }
 		rememberSnapshotByHash(snapshot)
@@ -996,11 +1005,14 @@ export async function previewLongDhangConetMigrationSnapshot(
 		excluded,
 		anomalies,
 	}
+	const terminalRows = await collectLongDhangSubAdmins(provider)
 	const snapshot: LongDhangMigrationSnapshot = {
 		...basePayload,
 		snapshotHash: stableSnapshotHash(basePayload),
 		migrationAdmin: getLongDhangMigrationAdminAddress(),
 		generatedAt: new Date().toISOString(),
+		terminals: terminalRows,
+		terminalCount: terminalRows.length,
 	}
 	snapshotCache = { at: Date.now(), value: snapshot }
 	rememberSnapshotByHash(snapshot)
@@ -1282,6 +1294,7 @@ async function trySyncMigrationIndexerRow(
 	}
 }
 
+/** @deprecated Server-side POS registration under migration admin — use client owner-signed path per beamio-pos-terminal-admin-hierarchy.mdc */
 async function copyLongDhangPaymentTerminalsToNewCard(args: {
 	newCard: string
 	snapshotTotalBalanceE6: string
@@ -1372,7 +1385,7 @@ async function copyLongDhangPaymentTerminalsToNewCard(args: {
 	return { total: terminals.length, registered, skipped, failed, rows }
 }
 
-/** Re-register Base sub-admin terminals (EOA + metadata) on an existing migrated CoNET card. */
+/** Re-register terminals on CoNET card under merchant owner admin (client-side; owner signs). */
 export async function repairLongDhangMigrationTerminalsOnly(options: {
 	newCardAddress: string
 	snapshotHash?: string
@@ -1384,47 +1397,13 @@ export async function repairLongDhangMigrationTerminalsOnly(options: {
 	error?: string
 }> {
 	const newCard = normalizeAddress(options.newCardAddress)
-	const snapshot = await resolveLongDhangMigrationSnapshot({ requestedHash: options.snapshotHash })
-	const sc = Settle_ContractPool.shift()
-	if (!sc) {
-		return {
-			success: false,
-			newCardAddress: newCard,
-			admins: { total: 0, registered: 0, skipped: 0, failed: 0, rows: [] },
-			verify: { total: 0, matches: 0, mismatches: [] },
-			error: 'Settle_ContractPool is busy or not initialized.',
-		}
-	}
-	try {
-		const card = new ethers.Contract(newCard, USER_CARD_ADMIN_ABI, sc.walletConet)
-		const owner = normalizeAddress(await card.owner())
-		if (!isLongDhangMigrationAuthorizedOwner(owner)) {
-			throw new Error(`CoNET card owner is not an authorized migration operator: ${owner}`)
-		}
-		const adminAddr = normalizeAddress(sc.walletConet.address)
-		if (!Boolean(await card.isAdmin(adminAddr))) {
-			throw new Error(`Migration admin ${adminAddr} is not authorized on ${newCard}.`)
-		}
-		const factory = new ethers.Contract(CONET_CARD_FACTORY, BeamioFactoryPaymasterABI, sc.walletConet)
-		const admins = await copyLongDhangPaymentTerminalsToNewCard({
-			newCard,
-			snapshotTotalBalanceE6: snapshot.totalBalanceE6,
-			wallet: sc.walletConet,
-			factory,
-			card,
-		})
-		const verify = await verifyLongDhangConetMigration(newCard)
-		return {
-			success: admins.failed === 0 && verify.terminals.mismatches.length === 0,
-			newCardAddress: newCard,
-			admins,
-			verify: verify.terminals,
-			...(admins.failed > 0 || verify.terminals.mismatches.length > 0
-				? { error: `${admins.failed} terminal row(s) failed; ${verify.terminals.mismatches.length} verify mismatch(es).` }
-				: {}),
-		}
-	} finally {
-		Settle_ContractPool.unshift(sc)
+	return {
+		success: false,
+		newCardAddress: newCard,
+		admins: { total: 0, registered: 0, skipped: 0, failed: 0, rows: [] },
+		verify: { total: 0, matches: 0, mismatches: [] },
+		error:
+			'Terminal repair must run client-side with merchant owner wallet (POST /api/longDhangMigrationRepairTerminals auth + biz registerMigrationTerminalsUnderOwnerAdmin). See beamio-pos-terminal-admin-hierarchy.mdc.',
 	}
 }
 
@@ -1464,13 +1443,14 @@ export async function runLongDhangConetMigrationBatch(
 		if (!isAdmin) throw new Error(`Migration admin ${adminAddr} is not authorized on ${newCard}.`)
 		const factory = new ethers.Contract(CONET_CARD_FACTORY, BeamioFactoryPaymasterABI, sc.walletConet)
 		const indexer = new ethers.Contract(BEAMIO_INDEXER_DIAMOND, ACTION_SYNC_TOKEN_ABI, sc.walletConet)
-		const terminals = await copyLongDhangPaymentTerminalsToNewCard({
-			newCard,
-			snapshotTotalBalanceE6: snapshot.totalBalanceE6,
-			wallet: sc.walletConet,
-			factory,
-			card,
-		})
+		// POS terminals: owner EOA registers subordinate admins client-side (see beamio-pos-terminal-admin-hierarchy.mdc).
+		const terminals = {
+			total: 0,
+			registered: 0,
+			skipped: 0,
+			failed: 0,
+			rows: [] as TerminalMigrationRow[],
+		}
 		const mintIface = new ethers.Interface(['function mintPointsByAdmin(address user,uint256 points6)'])
 		const holderRows =
 			options.limit != null && Number.isFinite(Number(options.limit))
@@ -1555,7 +1535,10 @@ export async function runLongDhangConetMigrationBatch(
 	}
 }
 
-export async function verifyLongDhangConetMigration(newCardAddress: string): Promise<{
+export async function verifyLongDhangConetMigration(
+	newCardAddress: string,
+	options: { membersOnly?: boolean } = {}
+): Promise<{
 	success: boolean
 	newCardAddress: string
 	snapshotHash: string
@@ -1597,7 +1580,7 @@ export async function verifyLongDhangConetMigration(newCardAddress: string): Pro
 			mismatches.push({ ...row, reason: e?.message ?? String(e) })
 		}
 	}
-	const expectedTerminals = await collectLongDhangSubAdmins(baseProvider())
+	const expectedTerminals = options.membersOnly ? [] : await collectLongDhangSubAdmins(baseProvider())
 	const terminalMismatches: Array<{ posEoa: string; reason: string; dbCardAddress?: string | null }> = []
 	let terminalMatches = 0
 	for (const t of expectedTerminals) {
@@ -1605,8 +1588,18 @@ export async function verifyLongDhangConetMigration(newCardAddress: string): Pro
 			const isAdmin = Boolean(await card.isAdmin(t.posEoa))
 			const dbRow = await getPosTerminalCardBindingRow(t.posEoa)
 			const dbCard = dbRow?.cardAddress ?? null
+			const cardOwner = normalizeAddress(await card.owner())
+			const parent = normalizeAddress((await card.adminParent(t.posEoa)) as string)
 			if (!isAdmin) {
 				terminalMismatches.push({ posEoa: t.posEoa, reason: 'Terminal is not admin on new card.', dbCardAddress: dbCard })
+				continue
+			}
+			if (parent !== cardOwner) {
+				terminalMismatches.push({
+					posEoa: t.posEoa,
+					reason: `adminParent ${parent} must equal card owner ${cardOwner} (POS under merchant owner admin).`,
+					dbCardAddress: dbCard,
+				})
 				continue
 			}
 			if (!dbCard || ethers.getAddress(dbCard) !== newCard) {
@@ -1619,7 +1612,7 @@ export async function verifyLongDhangConetMigration(newCardAddress: string): Pro
 		}
 	}
 	return {
-		success: mismatches.length === 0 && terminalMismatches.length === 0,
+		success: mismatches.length === 0 && (options.membersOnly || terminalMismatches.length === 0),
 		newCardAddress: newCard,
 		snapshotHash: snapshot.snapshotHash,
 		totalRows: snapshot.holders.length,
@@ -1688,14 +1681,14 @@ export async function executeLongDhangConetMigrationAuto(options: {
 		)
 		pushPhase(
 			'migrate-admins',
-			(adminStats?.failed ?? 0) === 0,
-			`${adminStats?.registered ?? 0} registered, ${adminStats?.skipped ?? 0} skipped, ${adminStats?.failed ?? 0} failed`
+			true,
+			'Deferred — merchant owner registers POS subordinate admins client-side (beamio-pos-terminal-admin-hierarchy).'
 		)
 		if (!run.success) {
-			throw new Error(run.error ?? 'Member or sub-admin migration failed.')
+			throw new Error(run.error ?? 'Member migration failed.')
 		}
 
-		const verify = await verifyLongDhangConetMigration(newCardAddress)
+		const verify = await verifyLongDhangConetMigration(newCardAddress, { membersOnly: true })
 		pushPhase(
 			'verify',
 			verify.success,

@@ -15005,98 +15005,70 @@ const createRedeemAdmin5ArgIface = new ethers.Interface([
 const CREATE_REDEEM_ADMIN_4_SELECTOR = createRedeemAdmin4ArgIface.getFunction('createRedeemAdmin')?.selector ?? ''
 const CREATE_REDEEM_ADMIN_5_SELECTOR = createRedeemAdmin5ArgIface.getFunction('createRedeemAdmin')?.selector ?? ''
 
-/** cardClearAdminMintCounter 集群预检：parent admin 签字清零 subordinate 的 mint 计数。校验 signer == card.adminParent(subordinate)。 */
-export const cardClearAdminMintCounterPreCheck = async (body: {
-	cardAddress?: string
-	subordinate?: string
-	deadline?: number
-	nonce?: string
-	adminSignature?: string
-}): Promise<{ success: true } | { success: false; error: string }> => {
-	const { cardAddress, subordinate, deadline, nonce, adminSignature } = body
-	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
-	if (!subordinate || !ethers.isAddress(subordinate)) return { success: false, error: 'Invalid subordinate' }
-	if (deadline == null || !nonce || !adminSignature) return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
-	if (deadline < Math.floor(Date.now() / 1000)) return { success: false, error: 'Signature expired' }
-	try {
-		const cardChain = await resolveUserCardChain(ethers.getAddress(cardAddress))
-		const cardProvider = providerForUserCardChain(cardChain)
-		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], cardProvider)
-		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
-		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
-		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
-		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: chainIdForUserCardChain(cardChain), verifyingContract }
-		const types = { ClearAdminMintCounter: [{ name: 'cardAddress', type: 'address' }, { name: 'subordinate', type: 'address' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
-		const nonceBytes = nonce.length === 66 && nonce.startsWith('0x') ? (nonce as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`
-		const value = { cardAddress: ethers.getAddress(cardAddress), subordinate: ethers.getAddress(subordinate), deadline: Number(deadline), nonce: nonceBytes }
-		const digest = ethers.TypedDataEncoder.hash(domain, types, value)
-		const signer = ethers.recoverAddress(digest, adminSignature)
-		if (ethers.getAddress(signer) !== ethers.getAddress(parent)) {
-			return { success: false, error: 'Signer must be subordinate\'s parent admin' }
-		}
-		return { success: true }
-	} catch (e: any) {
-		return { success: false, error: e?.message ?? String(e) }
+function settlePoolServiceAdminAddresses(): string[] {
+	const out: string[] = []
+	for (const sc of Settle_ContractPool ?? []) {
+		const a = sc.walletConet?.address
+		if (a && ethers.isAddress(a)) out.push(ethers.getAddress(a))
 	}
+	return out
 }
 
-/** Merchant OS 「Settlement clear」集群预检：仅 indexer 标点；签名为独立 EIP-712 类型 TerminalSettlementClear。校验 signer == card.adminParent(subordinate)。 */
-export const cardTerminalSettlementClearPreCheck = async (body: {
-	cardAddress?: string
-	subordinate?: string
-	deadline?: number
-	nonce?: string
-	adminSignature?: string
-}): Promise<{ success: true } | { success: false; error: string }> => {
-	const { cardAddress, subordinate, deadline, nonce, adminSignature } = body
-	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
-	if (!subordinate || !ethers.isAddress(subordinate)) return { success: false, error: 'Invalid subordinate' }
-	if (deadline == null || !nonce || !adminSignature) return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
-	if (deadline < Math.floor(Date.now() / 1000)) return { success: false, error: 'Signature expired' }
-	try {
-		const cardChain = await resolveUserCardChain(ethers.getAddress(cardAddress))
-		const cardProvider = providerForUserCardChain(cardChain)
-		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], cardProvider)
-		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
-		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
-		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
-		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: chainIdForUserCardChain(cardChain), verifyingContract }
-		const types = {
-			TerminalSettlementClear: [
-				{ name: 'cardAddress', type: 'address' },
-				{ name: 'subordinate', type: 'address' },
-				{ name: 'deadline', type: 'uint256' },
-				{ name: 'nonce', type: 'bytes32' },
-			],
-		}
-		const nonceBytes = nonce.length === 66 && nonce.startsWith('0x') ? (nonce as `0x${string}`) : ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`
-		const value = { cardAddress: ethers.getAddress(cardAddress), subordinate: ethers.getAddress(subordinate), deadline: Number(deadline), nonce: nonceBytes }
-		const digest = ethers.TypedDataEncoder.hash(domain, types, value)
-		const signer = ethers.recoverAddress(digest, adminSignature)
-		if (ethers.getAddress(signer) !== ethers.getAddress(parent)) {
-			return { success: false, error: 'Signer must be subordinate\'s parent admin' }
-		}
-		return { success: true }
-	} catch (e: any) {
-		return { success: false, error: e?.message ?? String(e) }
-	}
+function findSettlePoolEntryByConetWallet(adminAddr: string): SettleContractPoolEntry | undefined {
+	const norm = ethers.getAddress(adminAddr)
+	return Settle_ContractPool.find(
+		(sc) => sc.walletConet?.address && ethers.getAddress(sc.walletConet.address) === norm
+	)
 }
 
-/** Settlement clear 执行：仅 CoNET ActionFacet `syncTokenAction`，`txCategory=TX_Terminal_RESET`；不调用 Base Factory / 不清 mint 计数。 */
-export const cardTerminalSettlementClearProcess = async (payload: {
-	cardAddress: string
-	subordinate: string
-	deadline: number
+function normalizeClearAdminMintCounterNonce(nonce: string): `0x${string}` {
+	return (nonce.length === 66 && nonce.startsWith('0x')
+		? nonce
+		: ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+}
+
+async function buildClearAdminMintCounterTypedData(
+	cardAddress: string,
+	subordinate: string,
+	deadline: number,
 	nonce: string
-	adminSignature: string
-}): Promise<{ success: true; syncTx: string } | { success: false; error: string }> => {
-	const { cardAddress, subordinate, deadline, nonce, adminSignature } = payload
-	const pool = Settle_ContractPool
-	if (!pool?.length) return { success: false, error: 'Settle_ContractPool empty' }
-	const SC = pool[0]
-	const nonceBytes32 = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+) {
 	const cardNorm = ethers.getAddress(cardAddress)
-	const payeeTerminal = ethers.getAddress(subordinate)
+	const subNorm = ethers.getAddress(subordinate)
+	const cardChain = await resolveUserCardChain(cardNorm)
+	const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
+	const domain = {
+		name: 'BeamioUserCardFactory',
+		version: '1',
+		chainId: chainIdForUserCardChain(cardChain),
+		verifyingContract,
+	}
+	const types = {
+		ClearAdminMintCounter: [
+			{ name: 'cardAddress', type: 'address' },
+			{ name: 'subordinate', type: 'address' },
+			{ name: 'deadline', type: 'uint256' },
+			{ name: 'nonce', type: 'bytes32' },
+		],
+	}
+	const nonceBytes = normalizeClearAdminMintCounterNonce(nonce)
+	const value = {
+		cardAddress: cardNorm,
+		subordinate: subNorm,
+		deadline: Number(deadline),
+		nonce: nonceBytes,
+	}
+	return { domain, types, value, nonceBytes, cardChain }
+}
+
+async function buildTerminalSettlementClearTypedData(
+	cardAddress: string,
+	subordinate: string,
+	deadline: number,
+	nonce: string
+) {
+	const cardNorm = ethers.getAddress(cardAddress)
+	const subNorm = ethers.getAddress(subordinate)
 	const cardChain = await resolveUserCardChain(cardNorm)
 	const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
 	const domain = {
@@ -15113,14 +15085,299 @@ export const cardTerminalSettlementClearProcess = async (payload: {
 			{ name: 'nonce', type: 'bytes32' },
 		],
 	}
+	const nonceBytes = normalizeClearAdminMintCounterNonce(nonce)
 	const value = {
 		cardAddress: cardNorm,
-		subordinate: payeeTerminal,
+		subordinate: subNorm,
 		deadline: Number(deadline),
-		nonce: nonceBytes32,
+		nonce: nonceBytes,
 	}
+	return { domain, types, value, nonceBytes, cardChain }
+}
+
+/** 卡主可代签路径：parent 须为 Settle pool 一层 service admin（如 migration 挂终端时用的 admin）。 */
+async function isOwnerDelegatableTerminalParentAdmin(cardAddress: string, parentAddr: string): Promise<boolean> {
+	const parent = ethers.getAddress(parentAddr)
+	const poolAddrs = settlePoolServiceAdminAddresses()
+	if (!poolAddrs.some((a) => a === parent)) return false
+	const cardChain = await resolveUserCardChain(ethers.getAddress(cardAddress))
+	const cardProvider = providerForUserCardChain(cardChain)
+	const card = new ethers.Contract(
+		cardAddress,
+		['function adminParent(address) view returns (address)', 'function isAdmin(address) view returns (bool)'],
+		cardProvider
+	)
+	if (!(await card.isAdmin(parent))) return false
+	const parentOfParent = (await card.adminParent(parent)) as string
+	return !parentOfParent || parentOfParent === ethers.ZeroAddress
+}
+
+async function verifyOwnerDelegateClearAdminMintCounter(body: {
+	cardAddress: string
+	subordinate: string
+	deadline: number
+	nonce: string
+	ownerSignature: string
+}): Promise<{ ok: true; parent: string } | { ok: false; error: string }> {
+	const { cardAddress, subordinate, deadline, nonce, ownerSignature } = body
+	if (deadline < Math.floor(Date.now() / 1000)) return { ok: false, error: 'Signature expired' }
+	const cardNorm = ethers.getAddress(cardAddress)
+	const subNorm = ethers.getAddress(subordinate)
+	const cardChain = await resolveUserCardChain(cardNorm)
+	const cardProvider = providerForUserCardChain(cardChain)
+	const card = new ethers.Contract(
+		cardNorm,
+		['function adminParent(address) view returns (address)', 'function owner() view returns (address)'],
+		cardProvider
+	)
+	const parent = (await card.adminParent(subNorm)) as string
+	if (!parent || parent === ethers.ZeroAddress) {
+		return { ok: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
+	}
+	if (!(await isOwnerDelegatableTerminalParentAdmin(cardNorm, parent))) {
+		return { ok: false, error: 'Card owner cannot delegate reset for this terminal parent admin' }
+	}
+	const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
+	const domain = {
+		name: 'BeamioUserCardFactory',
+		version: '1',
+		chainId: chainIdForUserCardChain(cardChain),
+		verifyingContract,
+	}
+	const types = {
+		OwnerDelegateClearAdminMintCounter: [
+			{ name: 'cardAddress', type: 'address' },
+			{ name: 'subordinate', type: 'address' },
+			{ name: 'deadline', type: 'uint256' },
+			{ name: 'nonce', type: 'bytes32' },
+		],
+	}
+	const nonceBytes = normalizeClearAdminMintCounterNonce(nonce)
+	const value = { cardAddress: cardNorm, subordinate: subNorm, deadline: Number(deadline), nonce: nonceBytes }
 	const digest = ethers.TypedDataEncoder.hash(domain, types, value)
-	const payerParent = ethers.recoverAddress(digest, adminSignature as `0x${string}`)
+	const ownerSigner = ethers.recoverAddress(digest, ownerSignature)
+	const cardOwner = (await card.owner()) as string
+	if (ethers.getAddress(ownerSigner) !== ethers.getAddress(cardOwner)) {
+		return { ok: false, error: 'Owner signature must be from card owner' }
+	}
+	return { ok: true, parent: ethers.getAddress(parent) }
+}
+
+async function verifyOwnerDelegateTerminalSettlementClear(body: {
+	cardAddress: string
+	subordinate: string
+	deadline: number
+	nonce: string
+	ownerSignature: string
+}): Promise<{ ok: true; parent: string } | { ok: false; error: string }> {
+	const { cardAddress, subordinate, deadline, nonce, ownerSignature } = body
+	if (deadline < Math.floor(Date.now() / 1000)) return { ok: false, error: 'Signature expired' }
+	const cardNorm = ethers.getAddress(cardAddress)
+	const subNorm = ethers.getAddress(subordinate)
+	const cardChain = await resolveUserCardChain(cardNorm)
+	const cardProvider = providerForUserCardChain(cardChain)
+	const card = new ethers.Contract(
+		cardNorm,
+		['function adminParent(address) view returns (address)', 'function owner() view returns (address)'],
+		cardProvider
+	)
+	const parent = (await card.adminParent(subNorm)) as string
+	if (!parent || parent === ethers.ZeroAddress) {
+		return { ok: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
+	}
+	if (!(await isOwnerDelegatableTerminalParentAdmin(cardNorm, parent))) {
+		return { ok: false, error: 'Card owner cannot delegate settlement clear for this terminal parent admin' }
+	}
+	const verifyingContract = await getBeamioUserCardFactoryGateway(cardNorm)
+	const domain = {
+		name: 'BeamioUserCardFactory',
+		version: '1',
+		chainId: chainIdForUserCardChain(cardChain),
+		verifyingContract,
+	}
+	const types = {
+		OwnerDelegateTerminalSettlementClear: [
+			{ name: 'cardAddress', type: 'address' },
+			{ name: 'subordinate', type: 'address' },
+			{ name: 'deadline', type: 'uint256' },
+			{ name: 'nonce', type: 'bytes32' },
+		],
+	}
+	const nonceBytes = normalizeClearAdminMintCounterNonce(nonce)
+	const value = { cardAddress: cardNorm, subordinate: subNorm, deadline: Number(deadline), nonce: nonceBytes }
+	const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+	const ownerSigner = ethers.recoverAddress(digest, ownerSignature)
+	const cardOwner = (await card.owner()) as string
+	if (ethers.getAddress(ownerSigner) !== ethers.getAddress(cardOwner)) {
+		return { ok: false, error: 'Owner signature must be from card owner' }
+	}
+	return { ok: true, parent: ethers.getAddress(parent) }
+}
+
+async function signClearAdminMintCounterAsPoolParent(
+	parentAdmin: string,
+	cardAddress: string,
+	subordinate: string,
+	deadline: number,
+	nonce: string
+): Promise<{ adminSignature: string } | { error: string }> {
+	const sc = findSettlePoolEntryByConetWallet(parentAdmin)
+	if (!sc?.walletConet) return { error: `No settle pool wallet for parent admin ${parentAdmin}` }
+	const { domain, types, value } = await buildClearAdminMintCounterTypedData(cardAddress, subordinate, deadline, nonce)
+	const adminSignature = await sc.walletConet.signTypedData(domain, types, value)
+	return { adminSignature }
+}
+
+async function signTerminalSettlementClearAsPoolParent(
+	parentAdmin: string,
+	cardAddress: string,
+	subordinate: string,
+	deadline: number,
+	nonce: string
+): Promise<{ adminSignature: string } | { error: string }> {
+	const sc = findSettlePoolEntryByConetWallet(parentAdmin)
+	if (!sc?.walletConet) return { error: `No settle pool wallet for parent admin ${parentAdmin}` }
+	const { domain, types, value } = await buildTerminalSettlementClearTypedData(cardAddress, subordinate, deadline, nonce)
+	const adminSignature = await sc.walletConet.signTypedData(domain, types, value)
+	return { adminSignature }
+}
+
+/** cardClearAdminMintCounter 集群预检：parent admin 签字清零 subordinate 的 mint 计数；或卡主 OwnerDelegate 后由 pool parent 代签。 */
+export const cardClearAdminMintCounterPreCheck = async (body: {
+	cardAddress?: string
+	subordinate?: string
+	deadline?: number
+	nonce?: string
+	adminSignature?: string
+	ownerSignature?: string
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, subordinate, deadline, nonce, adminSignature, ownerSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!subordinate || !ethers.isAddress(subordinate)) return { success: false, error: 'Invalid subordinate' }
+	if (deadline == null || !nonce) return { success: false, error: 'Missing deadline or nonce' }
+	if (deadline < Math.floor(Date.now() / 1000)) return { success: false, error: 'Signature expired' }
+	if (!adminSignature?.trim() && !ownerSignature?.trim()) {
+		return { success: false, error: 'Missing adminSignature or ownerSignature' }
+	}
+	try {
+		if (ownerSignature?.trim() && !adminSignature?.trim()) {
+			const delegated = await verifyOwnerDelegateClearAdminMintCounter({
+				cardAddress: ethers.getAddress(cardAddress),
+				subordinate: ethers.getAddress(subordinate),
+				deadline: Number(deadline),
+				nonce,
+				ownerSignature,
+			})
+			if (!delegated.ok) return { success: false, error: delegated.error }
+			return { success: true }
+		}
+		const cardChain = await resolveUserCardChain(ethers.getAddress(cardAddress))
+		const cardProvider = providerForUserCardChain(cardChain)
+		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], cardProvider)
+		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
+		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
+		const { domain, types, value } = await buildClearAdminMintCounterTypedData(
+			cardAddress,
+			subordinate,
+			Number(deadline),
+			nonce
+		)
+		const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+		const signer = ethers.recoverAddress(digest, adminSignature!)
+		if (ethers.getAddress(signer) !== ethers.getAddress(parent)) {
+			return { success: false, error: 'Signer must be subordinate\'s parent admin' }
+		}
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+/** Merchant OS 「Settlement clear」集群预检：indexer 标点；parent admin 签名或卡主 OwnerDelegate 后 pool 代签。 */
+export const cardTerminalSettlementClearPreCheck = async (body: {
+	cardAddress?: string
+	subordinate?: string
+	deadline?: number
+	nonce?: string
+	adminSignature?: string
+	ownerSignature?: string
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, subordinate, deadline, nonce, adminSignature, ownerSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!subordinate || !ethers.isAddress(subordinate)) return { success: false, error: 'Invalid subordinate' }
+	if (deadline == null || !nonce) return { success: false, error: 'Missing deadline or nonce' }
+	if (deadline < Math.floor(Date.now() / 1000)) return { success: false, error: 'Signature expired' }
+	if (!adminSignature?.trim() && !ownerSignature?.trim()) {
+		return { success: false, error: 'Missing adminSignature or ownerSignature' }
+	}
+	try {
+		if (ownerSignature?.trim() && !adminSignature?.trim()) {
+			const delegated = await verifyOwnerDelegateTerminalSettlementClear({
+				cardAddress: ethers.getAddress(cardAddress),
+				subordinate: ethers.getAddress(subordinate),
+				deadline: Number(deadline),
+				nonce,
+				ownerSignature,
+			})
+			if (!delegated.ok) return { success: false, error: delegated.error }
+			return { success: true }
+		}
+		const cardChain = await resolveUserCardChain(ethers.getAddress(cardAddress))
+		const cardProvider = providerForUserCardChain(cardChain)
+		const card = new ethers.Contract(cardAddress, ['function adminParent(address) view returns (address)'], cardProvider)
+		const parent = await card.adminParent(ethers.getAddress(subordinate)) as string
+		if (!parent || parent === ethers.ZeroAddress) return { success: false, error: 'Subordinate has no parent (owner-added admin cannot be cleared by another admin)' }
+		const { domain, types, value } = await buildTerminalSettlementClearTypedData(
+			cardAddress,
+			subordinate,
+			Number(deadline),
+			nonce
+		)
+		const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+		const signer = ethers.recoverAddress(digest, adminSignature!)
+		if (ethers.getAddress(signer) !== ethers.getAddress(parent)) {
+			return { success: false, error: 'Signer must be subordinate\'s parent admin' }
+		}
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+/** Settlement clear 执行：仅 CoNET ActionFacet `syncTokenAction`，`txCategory=TX_Terminal_RESET`；不调用 Base Factory / 不清 mint 计数。 */
+export const cardTerminalSettlementClearProcess = async (payload: {
+	cardAddress: string
+	subordinate: string
+	deadline: number
+	nonce: string
+	adminSignature?: string
+	ownerSignature?: string
+}): Promise<{ success: true; syncTx: string } | { success: false; error: string }> => {
+	const { cardAddress, subordinate, deadline, nonce, adminSignature, ownerSignature } = payload
+	const pool = Settle_ContractPool
+	if (!pool?.length) return { success: false, error: 'Settle_ContractPool empty' }
+	const SC = pool[0]
+	let adminSig = adminSignature?.trim() ?? ''
+	if (!adminSig) {
+		if (!ownerSignature?.trim()) return { success: false, error: 'Missing adminSignature or ownerSignature' }
+		const delegated = await verifyOwnerDelegateTerminalSettlementClear({
+			cardAddress,
+			subordinate,
+			deadline,
+			nonce,
+			ownerSignature,
+		})
+		if (!delegated.ok) return { success: false, error: delegated.error }
+		const signed = await signTerminalSettlementClearAsPoolParent(delegated.parent, cardAddress, subordinate, deadline, nonce)
+		if ('error' in signed) return { success: false, error: signed.error }
+		adminSig = signed.adminSignature
+	}
+	const cardNorm = ethers.getAddress(cardAddress)
+	const payeeTerminal = ethers.getAddress(subordinate)
+	const { domain, types, value } = await buildTerminalSettlementClearTypedData(cardAddress, subordinate, deadline, nonce)
+	const digest = ethers.TypedDataEncoder.hash(domain, types, value)
+	const payerParent = ethers.recoverAddress(digest, adminSig as `0x${string}`)
+	const nonceBytes32 = value.nonce
 	const ledgerTxId = ethers.solidityPackedKeccak256(
 		['string', 'bytes32', 'address', 'address'],
 		['TX_Terminal_RESET:settlement:', nonceBytes32, cardNorm, payeeTerminal]
@@ -15182,13 +15439,29 @@ export const cardClearAdminMintCounterProcess = async (payload: {
 	subordinate: string
 	deadline: number
 	nonce: string
-	adminSignature: string
+	adminSignature?: string
+	ownerSignature?: string
 }): Promise<{ success: true; tx: string } | { success: false; error: string }> => {
-	const { cardAddress, subordinate, deadline, nonce, adminSignature } = payload
+	const { cardAddress, subordinate, deadline, nonce, adminSignature, ownerSignature } = payload
 	const pool = Settle_ContractPool
 	if (!pool?.length) return { success: false, error: 'Settle_ContractPool empty' }
 	const SC = pool[0]
-	const nonceBytes32 = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+	let adminSig = adminSignature?.trim() ?? ''
+	if (!adminSig) {
+		if (!ownerSignature?.trim()) return { success: false, error: 'Missing adminSignature or ownerSignature' }
+		const delegated = await verifyOwnerDelegateClearAdminMintCounter({
+			cardAddress,
+			subordinate,
+			deadline,
+			nonce,
+			ownerSignature,
+		})
+		if (!delegated.ok) return { success: false, error: delegated.error }
+		const signed = await signClearAdminMintCounterAsPoolParent(delegated.parent, cardAddress, subordinate, deadline, nonce)
+		if ('error' in signed) return { success: false, error: signed.error }
+		adminSig = signed.adminSignature
+	}
+	const { nonceBytes } = await buildClearAdminMintCounterTypedData(cardAddress, subordinate, deadline, nonce)
 
 	// 1) Card 链上记账：Factory.executeClearAdminMintCounter（须为卡绑定的 gateway）
 	const factoryAbi = ['function executeClearAdminMintCounter(address cardAddress,address subordinate,uint256 deadline,bytes32 nonce,bytes adminSignature)']
@@ -15202,8 +15475,8 @@ export const cardClearAdminMintCounterProcess = async (payload: {
 			ethers.getAddress(cardAddress),
 			ethers.getAddress(subordinate),
 			Number(deadline),
-			nonceBytes32,
-			adminSignature as `0x${string}`,
+			nonceBytes,
+			adminSig as `0x${string}`,
 		]),
 		logTag: 'cardClearAdminMintCounter',
 	})

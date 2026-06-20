@@ -2496,16 +2496,19 @@ const routing = ( router: Router ) => {
 
 		/** cardClearAdminMintCounter：parent admin 签字清零 subordinate 的 mint 计数。Cluster 已预检，Master 调用 Factory（Card）+ Indexer */
 		router.post('/cardClearAdminMintCounter', async (req, res) => {
-			const { cardAddress, subordinate, deadline, nonce, adminSignature } = req.body as {
-				cardAddress?: string; subordinate?: string; deadline?: number; nonce?: string; adminSignature?: string
+			const { cardAddress, subordinate, deadline, nonce, adminSignature, ownerSignature } = req.body as {
+				cardAddress?: string; subordinate?: string; deadline?: number; nonce?: string; adminSignature?: string; ownerSignature?: string
 			}
 			if (!cardAddress || !subordinate || !ethers.isAddress(cardAddress) || !ethers.isAddress(subordinate)) {
 				return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, subordinate' }).end()
 			}
-			if (deadline == null || !nonce || !adminSignature) {
-				return res.status(400).json({ success: false, error: 'Missing: deadline, nonce, adminSignature' }).end()
+			if (deadline == null || !nonce) {
+				return res.status(400).json({ success: false, error: 'Missing: deadline, nonce' }).end()
 			}
-			const result = await cardClearAdminMintCounterProcess({ cardAddress, subordinate, deadline, nonce, adminSignature })
+			if (!adminSignature?.trim() && !ownerSignature?.trim()) {
+				return res.status(400).json({ success: false, error: 'Missing: adminSignature or ownerSignature' }).end()
+			}
+			const result = await cardClearAdminMintCounterProcess({ cardAddress, subordinate, deadline, nonce, adminSignature, ownerSignature })
 			if (!result.success) {
 				return res.status(400).json(result).end()
 			}
@@ -2514,16 +2517,19 @@ const routing = ( router: Router ) => {
 
 		/** cardTerminalSettlementClear：parent admin 签 TerminalSettlementClear；仅 indexer TX_Terminal_RESET，不清 Base mint。Cluster 已预检。 */
 		router.post('/cardTerminalSettlementClear', async (req, res) => {
-			const { cardAddress, subordinate, deadline, nonce, adminSignature } = req.body as {
-				cardAddress?: string; subordinate?: string; deadline?: number; nonce?: string; adminSignature?: string
+			const { cardAddress, subordinate, deadline, nonce, adminSignature, ownerSignature } = req.body as {
+				cardAddress?: string; subordinate?: string; deadline?: number; nonce?: string; adminSignature?: string; ownerSignature?: string
 			}
 			if (!cardAddress || !subordinate || !ethers.isAddress(cardAddress) || !ethers.isAddress(subordinate)) {
 				return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, subordinate' }).end()
 			}
-			if (deadline == null || !nonce || !adminSignature) {
-				return res.status(400).json({ success: false, error: 'Missing: deadline, nonce, adminSignature' }).end()
+			if (deadline == null || !nonce) {
+				return res.status(400).json({ success: false, error: 'Missing: deadline, nonce' }).end()
 			}
-			const result = await cardTerminalSettlementClearProcess({ cardAddress, subordinate, deadline, nonce, adminSignature })
+			if (!adminSignature?.trim() && !ownerSignature?.trim()) {
+				return res.status(400).json({ success: false, error: 'Missing: adminSignature or ownerSignature' }).end()
+			}
+			const result = await cardTerminalSettlementClearProcess({ cardAddress, subordinate, deadline, nonce, adminSignature, ownerSignature })
 			if (!result.success) {
 				return res.status(400).json(result).end()
 			}
