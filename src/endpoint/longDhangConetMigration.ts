@@ -143,6 +143,7 @@ type RunLongDhangMigrationRow = SnapshotHolder & {
 	reason?: string
 	mintTx?: string
 	indexerTx?: string
+	indexerError?: string
 	txId?: string
 }
 
@@ -1089,7 +1090,8 @@ async function syncMigrationIndexerRow(args: {
 		oldBaseAA: normalizeAddress(args.row.oldBaseAA),
 		conetAA: normalizeAddress(args.conetAA),
 		eoa: normalizeAddress(args.row.eoa),
-		baseMintTxHash: args.mintTx,
+		...(args.mintTx &&
+			args.mintTx !== ethers.ZeroHash && { baseMintTxHash: args.mintTx }),
 	})
 	const input = {
 		txId,
@@ -1099,10 +1101,10 @@ async function syncMigrationIndexerRow(args: {
 		displayJson,
 		timestamp: BigInt(Math.floor(Date.now() / 1000)),
 		payer: normalizeAddress(args.row.eoa),
-		payee: normalizeAddress(LONGDHANG_OLD_CARD_OWNER),
+		payee: normalizeAddress(args.conetAA),
 		finalRequestAmountFiat6: amount,
 		finalRequestAmountUSDC6: 0n,
-		isAAAccount: false,
+		isAAAccount: true,
 		route: [
 			{
 				asset: normalizeAddress(args.newCard),
@@ -1139,10 +1141,36 @@ async function syncMigrationIndexerRow(args: {
 		topAdmin: normalizeAddress(args.operator),
 		subordinate: ethers.ZeroAddress,
 	}
-	const tx = await args.indexer.syncTokenAction(input, { gasLimit: 1_000_000 })
+	let gasLimit = 2_500_000n
+	try {
+		const estimated = await args.indexer.syncTokenAction.estimateGas(input)
+		gasLimit = (estimated * 125n) / 100n + 200_000n
+		if (gasLimit < 2_500_000n) gasLimit = 2_500_000n
+	} catch {
+		/* conservative fallback — 1M OOG observed on CoNET (~985k used) */
+	}
+	const tx = await args.indexer.syncTokenAction(input, { gasLimit })
 	const receipt = await tx.wait()
 	if (!receipt || Number(receipt.status ?? 0) !== 1) throw new Error(`syncTokenAction failed for ${txId}`)
 	return tx.hash
+}
+
+/** Indexer 记账失败不得推翻已成功的链上 mint；返回 hash 或 undefined + 打日志。 */
+async function trySyncMigrationIndexerRow(
+	args: Parameters<typeof syncMigrationIndexerRow>[0]
+): Promise<{ indexerTx?: string; indexerError?: string }> {
+	try {
+		const indexerTx = await syncMigrationIndexerRow(args)
+		return { indexerTx }
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(
+			Colors.yellow(
+				`${migrationLogPrefix()} indexer sync failed (mint may still succeed on-chain): ${msg}`
+			)
+		)
+		return { indexerError: msg }
+	}
 }
 
 async function copyLongDhangPaymentTerminalsToNewCard(args: {
@@ -1273,9 +1301,24 @@ export async function runLongDhangConetMigrationBatch(
 				const current = BigInt(await card.balanceOf(aa, 0n))
 				const txId = migrationTxId(newCard, row, snapshot.snapshotHash)
 				out.txId = txId
+				const indexerArgs = {
+					indexer,
+					txId,
+					newCard,
+					row,
+					conetAA: aa,
+					mintTx: out.mintTx ?? ethers.ZeroHash,
+					snapshotHash: snapshot.snapshotHash,
+					operator: adminAddr,
+				}
 				if (current >= expected) {
+					const { indexerTx, indexerError } = await trySyncMigrationIndexerRow(indexerArgs)
+					if (indexerTx) out.indexerTx = indexerTx
+					if (indexerError) out.indexerError = indexerError
 					out.status = 'skipped'
-					out.reason = 'CoNET AA already has the snapshot balance.'
+					out.reason = indexerError
+						? 'CoNET AA already has the snapshot balance; indexer sync pending retry.'
+						: 'CoNET AA already has the snapshot balance.'
 					skipped += 1
 					continue
 				}
@@ -1288,16 +1331,15 @@ export async function runLongDhangConetMigrationBatch(
 				const receipt = await tx.wait()
 				if (!receipt || Number(receipt.status ?? 0) !== 1) throw new Error(`executeForAdmin reverted for ${row.eoa}`)
 				out.mintTx = tx.hash
-				out.indexerTx = await syncMigrationIndexerRow({
-					indexer,
-					txId,
-					newCard,
-					row,
-					conetAA: aa,
+				const { indexerTx, indexerError } = await trySyncMigrationIndexerRow({
+					...indexerArgs,
 					mintTx: tx.hash,
-					snapshotHash: snapshot.snapshotHash,
-					operator: adminAddr,
 				})
+				if (indexerTx) out.indexerTx = indexerTx
+				if (indexerError) {
+					out.indexerError = indexerError
+					out.reason = `Mint ok (${tx.hash}); indexer sync failed: ${indexerError}`
+				}
 				out.status = 'minted'
 				minted += 1
 			} catch (e: any) {
