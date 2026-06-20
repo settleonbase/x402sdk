@@ -62,13 +62,8 @@ const BeamioFactoryPaymasterABI = (
 
 export const LONGDHANG_OLD_BASE_CARD = '0x30d80cD71Fd1FFD346737b387dA11C7412363EFF'
 export const LONGDHANG_OLD_CARD_OWNER = '0xA2d21FBd33F7D754D8d7A53fe2B4e5C39A008a1F'
-/** Partner merchant EOA — migration test operator + included in Members snapshot when on Base card. */
-export const LONGDHANG_MIGRATION_PARTNER_MERCHANT_EOA = '0xedb035E5D244a7bD987B950d3ac8d42afDe2D387'
-/** EOAs allowed to open migration UI and sign create / start-migration (production owner + test operator). */
-export const LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS = [
-	LONGDHANG_OLD_CARD_OWNER,
-	LONGDHANG_MIGRATION_PARTNER_MERCHANT_EOA,
-] as const
+/** EOAs allowed to open migration UI and sign create / start-migration. */
+export const LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS = [LONGDHANG_OLD_CARD_OWNER] as const
 /** Base mainnet deploy block for LONGDHANG_OLD_BASE_CARD (~2026-05-25). Never scan from 0 — pruned RPC rejects ancient eth_getLogs. */
 export const LONGDHANG_OLD_BASE_CARD_DEPLOY_BLOCK = 46_475_352
 
@@ -852,24 +847,6 @@ async function buildHoldersFromMembersDirectory(args: {
 		offset += pageSize
 	} while (offset < total)
 
-	// Ensure partner merchant (e.g. BeamioDemo100) is included when they hold Base token #0.
-	try {
-		await upsertMemberHolderFromBaseBalance({
-			oldCard: args.oldCard,
-			aaFactory: args.aaFactory,
-			provider: args.provider,
-			eoa: LONGDHANG_MIGRATION_PARTNER_MERCHANT_EOA,
-			holderByEoa,
-			excluded,
-		})
-	} catch (e: any) {
-		anomalies.push({
-			holder: LONGDHANG_MIGRATION_PARTNER_MERCHANT_EOA,
-			balanceE6: '0',
-			reason: e?.message ?? String(e),
-		})
-	}
-
 	return {
 		holders: [...holderByEoa.values()].sort((a, b) => a.eoa.localeCompare(b.eoa)),
 		excluded,
@@ -1036,7 +1013,7 @@ function currencyEnumToSymbol(n: number): 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC'
 }
 
 export async function createLongDhangConetMigrationCard(options?: {
-	/** When set (and authorized), new CoNET card `owner()` is this EOA — required for test-operator dry runs. */
+	/** When set (and authorized), new CoNET card `owner()` is this EOA instead of the default production owner. */
 	cardOwnerEoa?: string
 }): Promise<{
 	success: true
