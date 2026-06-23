@@ -17883,14 +17883,27 @@ export const payByNfcUidSignContainer = async (params: {
 	if (fiat6Ok && !usdc6Ok) {
 		try {
 			if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
-			const { unitPriceUSDC6 } = await quotePointsForUSDC_raw(BASE_CCSA_CARD_ADDRESS, 1_000_000n, Settle_ContractPool[0].baseFactoryPaymaster)
+			const SC = Settle_ContractPool[0]
+			const programItem = containerPayload.items?.find(
+				(it) => it.kind === 1 && typeof it.asset === 'string' && ethers.isAddress(it.asset.trim())
+			)
+			const cardForQuote = merchantInfraForContainer
+				?? (programItem ? ethers.getAddress(programItem.asset.trim()) : defaultMerchantProgramCardAddress())
+			const relayCtx = await merchantCardRelayContext(SC, cardForQuote)
+			const relayFactoryPaymaster =
+				relayCtx.chain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+			const { unitPriceUSDC6 } = await quotePointsForUSDC_raw(cardForQuote, 1_000_000n, relayFactoryPaymaster)
 			if (unitPriceUSDC6 <= 0n) {
 				return { pushed: false, error: 'Chain oracle quote returned 0 (cannot derive USDC6 from fiat6)' }
 			}
 			// amountUsdc6 = ceil(amountFiat6 * unitPriceUSDC6 / 1e6)
 			const fiatBig = BigInt(amountFiat6!)
 			amountUsdc6Effective = ((fiatBig * unitPriceUSDC6 + 999_999n) / 1_000_000n).toString()
-			logger(Colors.gray(`[payByNfcUidSignContainer] fiat6→USDC6 derived (chain oracle): ${amountFiat6} ${currency} * ${unitPriceUSDC6} / 1e6 = ${amountUsdc6Effective}`))
+			logger(
+				Colors.gray(
+					`[payByNfcUidSignContainer] fiat6→USDC6 derived (chain oracle): card=${cardForQuote} chain=${relayCtx.chain} ${amountFiat6} ${currency} * ${unitPriceUSDC6} / 1e6 = ${amountUsdc6Effective}`
+				)
+			)
 		} catch (qErr: any) {
 			logger(Colors.red(`[payByNfcUidSignContainer] fiat6→USDC6 derive failed: ${qErr?.message ?? qErr}`))
 			return { pushed: false, error: 'Server unable to derive USDC6 from fiat6 (chain quote failed)' }
