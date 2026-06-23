@@ -2,11 +2,12 @@ import { ethers } from "ethers";
 import * as fs from "fs";
 import * as path from "path";
 import { homedir } from "os";
+import { resolveBeamioConetHttpRpcUrl } from "./util";
 
 import IDiamondCutABI from "./ABI/DiamondCutFacetABI.json";
 import LoupeABI from "./ABI/LoupeABI.json";
 
-const RPC_URL = "https://rpc1.conet.network";
+const RPC_URL = resolveBeamioConetHttpRpcUrl();
 const ZERO = ethers.ZeroAddress;
 
 // 从 deployments/conet-IndexerDiamond.json 读取（与 MemberCard BeamioTaskIndexerAddress 一致）

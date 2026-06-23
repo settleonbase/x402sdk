@@ -8,7 +8,7 @@
  *     1. `ethers.Wallet.createRandom()` 生成 ephemeral EOA（仅在内存）。
  *     2. `nfcTopupPreparePayload({ wallet: tmpEOA, amount: total, currency, cardAddress })`
  *        编码 `mintPointsByAdmin(tmpEOA, points6)` 的 ExecuteForAdmin payload。
- *     3. `nfcTopupPreCheckBUnitFee(cardAddr, data)` 算 issuer 须扣的 B-Unit 服务费（与 NFC topup 路径一致 2%）。
+ *     3. `nfcTopupPreCheckBUnitFee(cardAddr, data)` 算 issuer 须扣的 B-Unit 服务费（与 NFC topup 路径一致，每笔固定 20 B-Unit）。
  *     4. **PR #4 v2** 推 session 进 `awaiting_topup_auth` 暴露 pendingTopup* 字段，等 POS 终端用 admin EOA 私钥
  *        `BeamioEthWallet.signExecuteForAdmin` 离线签 ExecuteForAdmin 后 POST 回 `/api/nfcUsdcChargeTopupAuth`。
  *        cluster 验签 recover==session.pos 后注入 `posTopupSignature`，本编排器 `awaitTopupSignature` 解析返回。
@@ -38,7 +38,7 @@
  *
  * Gas/费用：
  *   - L1 部署 tmpAA + mint：由 Master 持有的 paymaster signer 付（与 NFC topup 链路完全一致，不新增 gas 模型）。
- *   - L1 B-Unit 服务费：issuer（cardOwner）按 NFC topup 同款 2% 扣（PR #4 修补的既存缺口，q3 = a）。
+ *   - L1 B-Unit 服务费：issuer（cardOwner）按 NFC topup 同款固定 20 B-Unit 扣（PR #4 修补的既存缺口，q3 = a）。
  *   - L2 relay：由 Master paymaster 付 gas；charge 端固定 2 B-Unit 也由 issuer 付（既存机制）。
  *
  * 原子性：

@@ -134,11 +134,12 @@ import OwnershipFacetABI from "./ABI/OwnershipABI.json";
 
 import {showSelectorsPlusCuts} from './developshowSelectorsPlusCuts'
 import { logger } from "./logger";
+import { resolveBeamioConetHttpRpcUrl } from "./util";
 
 
 const LoupeABI = DiamondLoupeFacetABI
 
-const RPC_URL = "https://rpc1.conet.network";
+const RPC_URL = resolveBeamioConetHttpRpcUrl();
 const DIAMOND = "0x0DBDF27E71f9c89353bC5e4dC27c9C5dAe0cc612";
 
 //										DiamondCutFacet

@@ -184,7 +184,7 @@ import { isApiExcludedUserCard } from './apiExcludedUserCards'
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
-const BeamioUserCardFactoryPaymasterV2 = BASE_CARD_FACTORY
+const BeamioUserCardFactoryPaymasterV2 = CONET_CARD_FACTORY
 const BeamioAAAccountFactoryPaymaster = BASE_AA_FACTORY
 const BeamioOracle = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008'
 const beamioConetAddress = '0xCE8e2Cda88FfE2c99bc88D9471A3CBD08F519FEd'
@@ -2247,7 +2247,7 @@ export const nfcTopupPreparePayload = async (params: {
 	}
 
 	// Android admin topup 需要支持首发/升级/普通 topup 三类路径：
-	// 这里不再阻断“无会员卡”用户；B-Unit 服务费仅按 topup 折算 USDC 的 2%（见 nfcTopupPreCheckBUnitFee），与是否首发无关。
+	// 这里不再阻断“无会员卡”用户；B-Unit 服务费为每笔 topup 固定 20 B-Unit（见 nfcTopupPreCheckBUnitFee），与是否首发无关。
 
 	const cur = (currency || 'CAD').toUpperCase()
 	const ONE_E6 = 1_000_000n
@@ -3444,7 +3444,7 @@ export type PurchasingCardPreChecked = {
 	isMember: boolean
 	/** 与 NFC topup 一致：发卡方 EOA（B-Unit 扣款主体） */
 	cardOwnerEOA?: string
-	/** 2% USDC 名义对应的 B-Unit（6 位小数），字符串化 bigint */
+	/** 每笔 topup 固定 20 B-Unit（6 位小数），字符串化 bigint */
 	topupFeeBUnits?: string
 	topupKind?: number
 }
@@ -6800,26 +6800,22 @@ function nfcSplitMintPointsByCurrencyLegs(totalPts: bigint, fiat6ByLeg: bigint[]
 /** 1 B-Unit = 0.01 USDC，与 calcBeamioBUnitFee 一致 */
 const BUNIT_TO_USDC_DIVISOR = 100n
 
-/** Topup（NFC/QR mint 与 USDC 购点）：按 **折算后 USDC（6 位）名义金额** 的 **2%** 收取 B-Unit；1 B-Unit = 0.01 USDC ⇒ feeBUnits6 = feeUSDC6 × 100；上限 **2000 B-Unit**。 */
-const TOPUP_BUNIT_FEE_BPS = 200n
-const TOPUP_BUNIT_BPS_DENOM = 10_000n
-/** 2000 B-Unit（6 位小数） */
-const TOPUP_BUNIT_FEE_MAX_UNITS6 = 2_000_000_000n
+/** Topup（NFC/QR mint 与 USDC 购点）：每笔固定 20 B-Unit（6 位小数），不按 topup 金额比例 */
+const TOPUP_FIXED_BUNIT_FEE_UNITS6 = 20_000_000n
 
-export function calcTopupBUnitFeeFromUsdcNotional(amountUSDC6: bigint): { feeUSDC6: bigint; feeBUnits6: bigint } {
-	if (amountUSDC6 <= 0n) return { feeUSDC6: 0n, feeBUnits6: 0n }
-	const feeUSDC6Raw = (amountUSDC6 * TOPUP_BUNIT_FEE_BPS + TOPUP_BUNIT_BPS_DENOM - 1n) / TOPUP_BUNIT_BPS_DENOM
-	let feeBUnits6 = feeUSDC6Raw * BUNIT_TO_USDC_DIVISOR
-	if (feeBUnits6 > TOPUP_BUNIT_FEE_MAX_UNITS6) {
-		feeBUnits6 = TOPUP_BUNIT_FEE_MAX_UNITS6
-	}
-	const feeUSDC6 = feeBUnits6 / BUNIT_TO_USDC_DIVISOR
+export function calcTopupFixedBUnitFee(): { feeUSDC6: bigint; feeBUnits6: bigint } {
+	const feeBUnits6 = TOPUP_FIXED_BUNIT_FEE_UNITS6
+	const feeUSDC6 = feeBUnits6 / BUNIT_TO_USDC_DIVISOR // 0.20 USDC
 	return { feeUSDC6, feeBUnits6 }
 }
 
+/** @deprecated 保留兼容调用签名；topup 已改为固定费，不再使用 USDC 名义金额 */
+export function calcTopupBUnitFeeFromUsdcNotional(_amountUSDC6: bigint): { feeUSDC6: bigint; feeBUnits6: bigint } {
+	return calcTopupFixedBUnitFee()
+}
+
 /** Cluster 预检（mintPointsByAdmin / NFC 与 QR 同路径）：卡发行方 owner 的 B-Units 是否足够。
- * 规则：按 topup 金额折算 USDC（与 quoteUSDCForPoints / executeForAdmin 记账一致：points6 * quoteUnitPointInUSDC6 / 1e6）后收取 **2%** 对应的 B-Unit（上限 **2000 B-Unit**）；
- * 1 B-Unit = 0.01 USDC => feeBUnits6 = feeUSDC6 * 100。不再区分是否首次发卡。
+ * 规则：每笔 topup 固定 **20 B-Unit**（与 topup 金额无关）。不再区分是否首次发卡。
  */
 export const nfcTopupPreCheckBUnitFee = async (
 	cardAddr: string,
@@ -6834,8 +6830,7 @@ export const nfcTopupPreCheckBUnitFee = async (
 		if (parsed.points6 <= 0n) {
 			return { success: false, error: 'Invalid mintPointsByAdmin amount' }
 		}
-		const cardAbi = ['function owner() view returns (address)', 'function factoryGateway() view returns (address)']
-		const gatewayAbi = ['function quoteUnitPointInUSDC6(address) view returns (uint256)']
+		const cardAbi = ['function owner() view returns (address)']
 		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
 		const card = new ethers.Contract(cardAddr, cardAbi, cardProvider)
 		const rawOwner = await card.owner()
@@ -6844,20 +6839,7 @@ export const nfcTopupPreCheckBUnitFee = async (
 			return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA' }
 		}
 		const cardOwnerEOA = resolveResult.cardOwner
-		const gatewayAddr = await card.factoryGateway()
-		const gateway = new ethers.Contract(gatewayAddr, gatewayAbi, cardProvider)
-		const unitPriceUSDC6: bigint = await gateway.quoteUnitPointInUSDC6(cardAddr)
-		if (unitPriceUSDC6 === 0n) {
-			return {
-				success: false,
-				error: 'UC_PriceZero: quoteUnitPointInUSDC6(card)=0 (cannot compute USDC value for B-Unit fee)',
-			}
-		}
-		const amountUSDC6 = (parsed.points6 * unitPriceUSDC6) / POINTS_ONE
-		if (amountUSDC6 <= 0n) {
-			return { success: false, error: 'Topup USDC notional is zero' }
-		}
-		const { feeBUnits6: feeAmount } = calcTopupBUnitFeeFromUsdcNotional(amountUSDC6)
+		const { feeBUnits6: feeAmount } = calcTopupFixedBUnitFee()
 		const topupKind = KIND_CARD_TOPUP as 2 | 3
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
 		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeAmount, {
@@ -8146,6 +8128,10 @@ export const purchasingCardProcess = async () => {
 	
 	try {
 		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, preChecked } = obj
+		const cardChain = await resolveUserCardChain(cardAddress)
+		const relayWallet = settleRelayWalletForChain(SC, cardChain)
+		const relayProvider = relayWallet.provider ?? providerForUserCardChain(cardChain)
+		const relayFactoryPaymaster = cardChain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
 		const isCCSA = cardAddress?.toLowerCase() === BASE_CCSA_CARD_ADDRESS.toLowerCase()
 		logger(Colors.cyan(`[purchasingCardProcess] cardAddress=${cardAddress} isCCSA=${isCCSA} (expected CCSA: ${BASE_CCSA_CARD_ADDRESS})`))
 
@@ -8186,12 +8172,12 @@ export const purchasingCardProcess = async () => {
 			logger(Colors.green(`✅ purchasingCardProcess [preChecked] cardAddress = ${cardAddress} ${obj.from} AA: ${accountAddress} isMember: ${isMember} pointsBalance: ${pointsBalance} nfts: ${nfts?.length}`));
 		} else {
 			// currencyAmount: derived from usdcAmount (EIP-3009 signed value) via oracle; never from client input
-			const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
+			const card = new ethers.Contract(cardAddress, BeamioUserCardABI, relayWallet)
 			const [[pb, n], o, c, ca] = await Promise.all([
 				card.getOwnership(accountAddress),
 				card.owner(),
 				card.currency(),
-				quotePointsForUSDC_raw(cardAddress, BigInt(usdcAmount), SC.baseFactoryPaymaster)
+				quotePointsForUSDC_raw(cardAddress, BigInt(usdcAmount), relayFactoryPaymaster)
 			])
 			pointsBalance = pb
 			nfts = Array.isArray(n) ? n : []
@@ -8212,15 +8198,15 @@ export const purchasingCardProcess = async () => {
 			return
 		}
 
-		// 新合约设计：购点通过 Card Factory.buyPointsForUser，不再直接调用 card.buyPointsWith3009Authorization
-		// 显式使用 BASE_CARD_FACTORY，避免错误配置导致调用到卡地址（卡无 buyPointsForUser 会 revert）
+		// 新合约设计：购点通过当前商家卡链路的 Card Factory.buyPointsForUser，不再直接调用 card.buyPointsWith3009Authorization
 		const factoryAbiWithTopupRecommender = [
 			...BeamioFactoryPaymasterABI,
 			'function buyPointsForUser(address cardAddr,address fromEOA,uint256 usdcAmount6,uint256 validAfter,uint256 validBefore,bytes32 nonce,bytes signature,uint256 minPointsOut6,address recommender) returns (uint256)',
 		] as ethers.InterfaceAbi
-		const cardFactory = new ethers.Contract(BASE_CARD_FACTORY, factoryAbiWithTopupRecommender, SC.walletBase)
+		const cardFactoryAddress = cardFactoryForUserCardChain(cardChain)
+		const cardFactory = new ethers.Contract(cardFactoryAddress, factoryAbiWithTopupRecommender, relayWallet)
 		const nonceBytes32 = (typeof nonce === 'string' && nonce.startsWith('0x') ? ethers.zeroPadValue(nonce, 32) : ethers.zeroPadValue(ethers.toBeHex(BigInt(nonce)), 32)) as `0x${string}`
-		logger(Colors.gray(`[purchasingCardProcess] buyPointsForUser factory=${BASE_CARD_FACTORY} card=${cardAddress}`))
+		logger(Colors.gray(`[purchasingCardProcess] buyPointsForUser chain=${cardChain} factory=${cardFactoryAddress} card=${cardAddress}`))
 		const tx = await (obj.recommender && obj.recommender !== ethers.ZeroAddress
 			? cardFactory["buyPointsForUser(address,address,uint256,uint256,uint256,bytes32,bytes,uint256,address)"](
 				cardAddress,
@@ -8258,7 +8244,7 @@ export const purchasingCardProcess = async () => {
 		if (!purchReceipt) {
 			for (let i = 0; i < 15; i++) {
 				await new Promise((r) => setTimeout(r, 2000))
-				const r = await providerBaseBackup.getTransactionReceipt(tx.hash)
+				const r = await relayProvider.getTransactionReceipt(tx.hash)
 				if (r) {
 					purchReceipt = r
 					break
@@ -8272,11 +8258,11 @@ export const purchasingCardProcess = async () => {
 		if (!basePurchTxOk) {
 			logger(
 				Colors.red(
-					`[purchasingCardProcess] Base buyPointsForUser tx not successful; skip B-Unit charge and indexer. hash=${tx.hash} status=${purchReceipt?.status ?? 'unknown'} reason=${basePurchRelayCheck.reason} userOpHash=${basePurchRelayCheck.userOpHash ?? 'n/a'}`
+					`[purchasingCardProcess] buyPointsForUser tx not successful; skip B-Unit charge and indexer. hash=${tx.hash} status=${purchReceipt?.status ?? 'unknown'} reason=${basePurchRelayCheck.reason} userOpHash=${basePurchRelayCheck.userOpHash ?? 'n/a'}`
 				)
 			)
 		}
-		// Base 转账完成后立即返回 hash 给客户端，不等待记账
+		// 业务链上交易完成后立即返回 hash 给客户端，不等待记账
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, USDC_tx: tx.hash }).end()
 
 		const to = owner
@@ -8284,7 +8270,7 @@ export const purchasingCardProcess = async () => {
 		let operatorAddr: string
 		if (obj.recommender && obj.recommender !== ethers.ZeroAddress) {
 			try {
-				const cardRead = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], SC.walletBase)
+				const cardRead = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], relayWallet)
 				const isAdmin = await cardRead.isAdmin(ethers.getAddress(obj.recommender)) as boolean
 				operatorAddr = isAdmin ? ethers.getAddress(obj.recommender) : ethers.getAddress(to)
 			} catch (_) {
@@ -8322,7 +8308,7 @@ export const purchasingCardProcess = async () => {
 		let afterTokenIds: bigint[] = []
 		let actualPointsMinted = 0n
 		try {
-			const cardRead = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
+			const cardRead = new ethers.Contract(cardAddress, BeamioUserCardABI, relayWallet)
 			const [ptAfter, nAfter] = await cardRead.getOwnership(accountAddress) as [bigint, unknown[]]
 			afterTokenIds = extractTokenIdsFromOwnership(Array.isArray(nAfter) ? nAfter : [])
 			upgradedByMint = afterTokenIds.some((id) => !beforeTokenSet.has(id.toString()))
@@ -8417,7 +8403,7 @@ export const purchasingCardProcess = async () => {
 		let topupFeeBUnitsForJob =
 			obj.preChecked?.topupFeeBUnits != null && String(obj.preChecked.topupFeeBUnits).length > 0
 				? BigInt(obj.preChecked.topupFeeBUnits)
-				: calcTopupBUnitFeeFromUsdcNotional(usdc6Signed).feeBUnits6
+				: calcTopupFixedBUnitFee().feeBUnits6
 		let cardOwnerEOAForBunit = ''
 		if (obj.preChecked?.cardOwnerEOA && ethers.isAddress(obj.preChecked.cardOwnerEOA)) {
 			cardOwnerEOAForBunit = ethers.getAddress(obj.preChecked.cardOwnerEOA)
@@ -16940,13 +16926,15 @@ export const purchasingCardPreCheck = async (
 	const pool = Settle_ContractPool
 	if (!pool?.length) return { success: false, error: 'Settle_ContractPool empty' }
 	const SC = pool[0]
-	const factory = SC.baseFactoryPaymaster
 	const usdc6 = BigInt(usdcAmount)
 	if (usdc6 <= 0n) return { success: false, error: 'usdcAmount must be > 0' }
 	try {
+		const cardChain = await resolveUserCardChain(cardAddress)
+		const factory = cardChain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+		const relayWallet = settleRelayWalletForChain(SC, cardChain)
 		const getAddressFn = SC.aaAccountFactoryPaymaster.getFunction('getAddress(address,uint256)')
 		const counterfactualAccount = await getAddressFn(from, 0n) as string
-		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, SC.walletBase)
+		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, relayWallet)
 		const [[pointsBalance, nfts], owner, _currency, currencyAmount] = await Promise.all([
 			card.getOwnership(counterfactualAccount),
 			card.owner(),
@@ -16969,7 +16957,7 @@ export const purchasingCardPreCheck = async (
 			nfts: Array.isArray(nfts) ? nfts : [],
 			isMember
 		}
-		const { feeBUnits6 } = calcTopupBUnitFeeFromUsdcNotional(usdc6)
+		const { feeBUnits6 } = calcTopupFixedBUnitFee()
 		const resolveOwnerForBunit = await resolveCardOwnerToEOA(providerBaseBackup, preChecked.owner)
 		if (!resolveOwnerForBunit.success) {
 			return { success: false, error: resolveOwnerForBunit.error ?? 'Cannot resolve card owner to EOA' }
@@ -17073,7 +17061,9 @@ const resolveUsdcTopupRules = async (
 		const nextTierPoints6 = nextTier?.minUsdc6
 		const currentPoints6 = pt ?? 0n
 
-		const unitPriceUSDC6 = await SC.baseFactoryPaymaster.quoteUnitPointInUSDC6(cardAddress) as bigint
+		const cardChainForQuote = await resolveUserCardChain(cardAddress)
+		const quoteFactory = cardChainForQuote === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+		const unitPriceUSDC6 = await quoteFactory.quoteUnitPointInUSDC6(cardAddress) as bigint
 		if (unitPriceUSDC6 <= 0n) {
 			return { success: false, error: 'UC_PriceZero: quoteUnitPointInUSDC6(card)=0' }
 		}
@@ -17216,7 +17206,8 @@ export const quoteUSDCForPoints = async (
 	cardAddress: string,
 	pointsHuman: string   // ✅ 人类可读，例如 "10" / "1.5"
   ) => {
-	const factory = Settle_ContractPool[0].baseFactoryPaymaster;
+	const chain = await resolveUserCardChain(cardAddress)
+	const factory = chain === 'conet' ? Settle_ContractPool[0].conetFactoryPaymaster : Settle_ContractPool[0].baseFactoryPaymaster;
   
 	if (!pointsHuman || Number(pointsHuman) <= 0) {
 	  throw new Error("points must be > 0 (human readable)");
@@ -17267,7 +17258,8 @@ export const quotePointsForUSDC = async (
 	cardAddress: string,
 	usdcHuman: string // 人类可读 USDC，例如 "10.5"
   ) => {
-	const factory = Settle_ContractPool[0].baseFactoryPaymaster;
+	const chain = await resolveUserCardChain(cardAddress)
+	const factory = chain === 'conet' ? Settle_ContractPool[0].conetFactoryPaymaster : Settle_ContractPool[0].baseFactoryPaymaster;
   
 	// 1) USDC 人类可读 -> USDC6
 	const usdc6 = ethers.parseUnits(usdcHuman, 6);
@@ -17295,7 +17287,7 @@ export const quotePointsForUSDC = async (
 };
 
 /** 与主 RPC 一致，unitPrice 主 RPC 返回 0 时重试用 */
-const QUOTE_FALLBACK_RPC = BASE_RPC_URL
+const QUOTE_FALLBACK_RPC = conetEndpoint
 
 /**
  * 为何 quoteUnitPointInUSDC6(cardAddress) 可能返回 0？
@@ -17308,11 +17300,11 @@ const QUOTE_FALLBACK_RPC = BASE_RPC_URL
 export const quotePointsForUSDC_raw = async (
 		cardAddress: string,
 		usdc6: bigint, // 已经是 raw USDC（6 decimals）
-		factoryOverride?: ethers.Contract // 调用方传入时使用（如 purchasingCardProcess 中已 shift 的 SC.baseFactoryPaymaster），否则用 Settle_ContractPool[0]
+		factoryOverride?: ethers.Contract // 调用方传入时使用（如 purchasingCardProcess 中已 shift 的当前链路 factory），否则用 Settle_ContractPool[0].conetFactoryPaymaster
 	) => {
 		const isCCSA = cardAddress?.toLowerCase() === BASE_CCSA_CARD_ADDRESS.toLowerCase()
 		logger(Colors.cyan(`[quotePointsForUSDC_raw] cardAddress=${cardAddress} isCCSA=${isCCSA} usdc6=${usdc6}`))
-		const factory = factoryOverride ?? Settle_ContractPool[0]?.baseFactoryPaymaster;
+		const factory = factoryOverride ?? Settle_ContractPool[0]?.conetFactoryPaymaster;
 		if (!factory) throw new Error("quotePointsForUSDC_raw: no factory (pool empty or not inited)");
 	
 		if (usdc6 <= 0n) {
@@ -18176,7 +18168,8 @@ const forward1155ERC3009SignatureData = async (
 	  };
 	
 	  const env = Settle_ContractPool[0];
-	  const factory = env.baseFactoryPaymaster; // BeamioUserCardFactoryPaymasterV07 contract instance (connected signer)
+	  const cardChain = await resolveUserCardChain(sign.cardAddress)
+	  const factory = cardChain === 'conet' ? env.conetFactoryPaymaster : env.baseFactoryPaymaster; // BeamioUserCardFactoryPaymasterV07 contract instance (connected signer)
 	  const provider = factory.runner!.provider! as ethers.Provider;
 	  const signer = factory.runner! as ethers.Signer;
 	
@@ -18399,7 +18392,8 @@ export const cardOpenTransferPreCheck = async (
 		const bunit = await transferPreCheckBUnit({ account: fromEOA })
 		if (!bunit.success) return bunit
 
-		const factory = Settle_ContractPool[0]?.baseFactoryPaymaster
+		const cardChain = await resolveUserCardChain(cardAddress)
+		const factory = cardChain === 'conet' ? Settle_ContractPool[0]?.conetFactoryPaymaster : Settle_ContractPool[0]?.baseFactoryPaymaster
 		if (!factory) return { success: false, error: 'Factory not configured' }
 
 		const redeemOpen = factory.redeemOpenTransfer

@@ -106,7 +106,7 @@ diamondCut(
  */
 
 import { ethers } from "ethers";
-import { masterSetup } from "./util";
+import { masterSetup, resolveBeamioConetHttpRpcUrl } from "./util";
 
 import IDiamondCutABI from "./ABI/DiamondCutFacetABI.json";
 import LoupeABI from "./ABI/LoupeABI.json";
@@ -116,7 +116,7 @@ import StatsABI from "./ABI/StatsABI.json";
 import CatalogABI from "./ABI/CatalogABI.json";
 import ActionABI from "./ABI/ActionABI.json";
 
-const RPC_URL = "https://rpc1.conet.network";
+const RPC_URL = resolveBeamioConetHttpRpcUrl();
 const DIAMOND = "0xCfCfD5E8428051B84D53aE1B39DeFD50705d967f";
 
 //										DiamondCutFacet

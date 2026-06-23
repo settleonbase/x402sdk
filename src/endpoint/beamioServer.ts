@@ -13,7 +13,7 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
-import { BASE_CARD_FACTORY, BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import {
 	filterApiExcludedCardRows,
@@ -1213,7 +1213,7 @@ const routing = ( router: Router ) => {
 			/* ignore */
 		}
 		try {
-			const fac = new ethers.Contract(BASE_CARD_FACTORY, FACTORY_CARDS_OF_OWNER_ABI, providerBase)
+			const fac = new ethers.Contract(CONET_CARD_FACTORY, FACTORY_CARDS_OF_OWNER_ABI, providerForUserCardChain('conet'))
 			const cards = (await fac.cardsOfOwner(eoa)) as string[]
 			const cap = 48
 			for (const c of (cards ?? []).slice(0, cap)) {
@@ -1231,7 +1231,7 @@ const routing = ( router: Router ) => {
 		await Promise.all(
 			unique.map(async (cardAddr) => {
 				try {
-					const card = new ethers.Contract(cardAddr, CARD_ADMIN_ABI_OWNER_AND_LIST, providerBase)
+					const card = new ethers.Contract(cardAddr, CARD_ADMIN_ABI_OWNER_AND_LIST, providerForUserCardChain('conet'))
 					const [owner, adminResult] = await Promise.all([
 						card.owner() as Promise<string>,
 						card.getAdminListWithMetadata() as Promise<[string[], string[], string[]]>,
@@ -1255,7 +1255,7 @@ const routing = ( router: Router ) => {
 
 	/**
 	 * GET /api/search-users-by-card-owner-or-admin?keyward=...&wallet=0x...&extraCardAddresses=0x...,0x...
-	 * 先按 search-users 逻辑查 BeamioTag，再过滤：accounts.address 在 beamio_cards 登记过的发卡 owner，或与 wallet 关联卡（POS 绑定卡 + factory.cardsOfOwner + extra）链上 owner/admin 集合命中。
+	 * 先按 search-users 逻辑查 BeamioTag，再过滤：accounts.address 在 beamio_cards 登记过的发卡 owner，或与 wallet 关联卡（POS 绑定卡 + CoNET factory.cardsOfOwner + extra）链上 owner/admin 集合命中。
 	 * 无 wallet 时仅保留「DB 登记发卡 owner」命中项（链上 admin 需传 wallet 或 extraCardAddresses）。
 	 */
 	router.get('/search-users-by-card-owner-or-admin', async (req, res) => {
@@ -2173,15 +2173,15 @@ const routing = ( router: Router ) => {
 			let beamioUserCard = ''
 			try {
 				const factoryAbi = ['function quoteUnitPointInUSDC6(address) view returns (uint256)']
-				const factory = new ethers.Contract(BASE_CARD_FACTORY, factoryAbi, providerBase)
-				const up = await factory.quoteUnitPointInUSDC6(BASE_CCSA_CARD_ADDRESS)
+				const factory = new ethers.Contract(CONET_CARD_FACTORY, factoryAbi, providerForUserCardChain('conet'))
+				const up = await factory.quoteUnitPointInUSDC6(CONET_BEAMIO_USER_CARD_DEFAULT)
 				unitPriceUSDC6 = String(up)
 			} catch (_) { /* ignore */ }
 			try {
-				const aaFacAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerBase, BASE_CARD_FACTORY)
+				const aaFacAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(providerForUserCardChain('conet'), CONET_CARD_FACTORY)
 				if (aaFacAddr) {
 					const aaFactoryAbi = ['function beamioUserCard() view returns (address)']
-					const aaFactory = new ethers.Contract(aaFacAddr, aaFactoryAbi, providerBase)
+					const aaFactory = new ethers.Contract(aaFacAddr, aaFactoryAbi, providerForUserCardChain('conet'))
 					const uc = await aaFactory.beamioUserCard()
 					if (uc && uc !== ethers.ZeroAddress) beamioUserCard = ethers.getAddress(uc)
 				}
@@ -2191,7 +2191,7 @@ const routing = ( router: Router ) => {
 			const legacyCardFallback =
 				firstCard?.cardAddress ??
 				walletAssetsOpts.infrastructureCardAddress ??
-				BASE_CCSA_CARD_ADDRESS
+				CONET_BEAMIO_USER_CARD_DEFAULT
 			const beamioTag = base.beamioTag ?? (await fetchBeamioTagForEoa(eoa))
 			const result = {
 				ok: true,
@@ -3233,7 +3233,7 @@ const routing = ( router: Router ) => {
 					: String(adminSignature ?? '')
 			logger(
 				Colors.gray(
-					`[nfcTopup][eip712] card=${cardAddress} verifyingContract=${verifyingContractGw} chainConfiguredFactory=${BASE_CARD_FACTORY} chainId=${chainIdForUserCardChain(cardChain)} dataHash=${dataHash} deadline=${deadline} nonce=${message.nonce} digest=${digest} recovered=${signer} sig=${sigPreview}`
+					`[nfcTopup][eip712] card=${cardAddress} verifyingContract=${verifyingContractGw} chainConfiguredFactory=${cardFactoryForUserCardChain(cardChain)} chainId=${chainIdForUserCardChain(cardChain)} dataHash=${dataHash} deadline=${deadline} nonce=${message.nonce} digest=${digest} recovered=${signer} sig=${sigPreview}`
 				)
 			)
 			const cardAbi = ['function isAdmin(address) view returns (bool)', 'function owner() view returns (address)', 'function adminParent(address) view returns (address)']
@@ -6737,12 +6737,21 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	router.get('/longDhangMigrationConfig', (_req, res) => {
+		const frozenHolders =
+			isLongDhangFrozenSnapshotEnabled()
+				? LONGDHANG_FROZEN_HOLDERS.map((h) => ({
+						eoa: ethers.getAddress(h.eoa),
+						oldBaseAA: ethers.getAddress(h.oldBaseAA),
+						balanceE6: String(h.balanceE6),
+					}))
+				: []
 		return res.status(200).json({
 			success: true,
 			version: LONGDHANG_MIGRATION_VERSION,
 			frozenSnapshot: isLongDhangFrozenSnapshotEnabled(),
 			frozenMemberCount: LONGDHANG_FROZEN_HOLDERS.length,
 			frozenTerminalCount: LONGDHANG_FROZEN_TERMINALS.length,
+			frozenHolders,
 			oldBaseCard: LONGDHANG_OLD_BASE_CARD,
 			oldBaseCardOwner: LONGDHANG_OLD_CARD_OWNER,
 			authorizedOwnerEoa: [...LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS],

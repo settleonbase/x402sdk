@@ -4,7 +4,7 @@
  * **不再回退 `BASE_AA_FACTORY`（0x4b31…）**：该常量与当前卡工厂 `_aaFactory()` 常不一致，回退会解析到「旧部署」上的 AA，与 OpenContainer / getUIDAssets 卡路径分裂。
  */
 import { ethers } from 'ethers'
-import { BASE_CARD_FACTORY, CONET_AA_FACTORY } from '../chainAddresses'
+import { CONET_AA_FACTORY, CONET_CARD_FACTORY } from '../chainAddresses'
 import { providerForUserCardChain } from '../beamioUserCardChain'
 
 const userCardFactoryPaymasterAbi = ['function _aaFactory() view returns (address)'] as const
@@ -12,7 +12,7 @@ const aaFactoryAbi = ['function beamioAccountOf(address) view returns (address)'
 
 export async function getAaFactoryAddressFromUserCardFactoryPaymaster(
 	provider: ethers.Provider,
-	userCardFactoryPaymaster: string = BASE_CARD_FACTORY
+	userCardFactoryPaymaster: string = CONET_CARD_FACTORY
 ): Promise<string | null> {
 	try {
 		const fac = new ethers.Contract(userCardFactoryPaymaster, userCardFactoryPaymasterAbi, provider)
@@ -43,7 +43,7 @@ async function beamioAaFromFactory(provider: ethers.Provider, eoa: string, aaFac
 export async function resolveBeamioAaForEoaViaUserCardFactory(
 	provider: ethers.Provider,
 	eoa: string,
-	userCardFactoryPaymaster: string = BASE_CARD_FACTORY
+	userCardFactoryPaymaster: string = CONET_CARD_FACTORY
 ): Promise<string | null> {
 	const aaFac = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, userCardFactoryPaymaster)
 	if (!aaFac) return null
