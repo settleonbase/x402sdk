@@ -4196,14 +4196,18 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 					payeeEOA = ethers.getAddress(obj.to)
 				}
 			}
-			/** subordinate 仅记录 POS 终端；不得用 payee / 受益人 EOA 回填 */
+			/**
+			 * subordinate 仅记录显式 POS 终端 EOA；不得用 payee / 受益人 EOA「自动回填」。
+			 * 但 POS PWA 模型下终端钱包同时是收款 payee（下级 admin），因此 posOperator == payee
+			 * 是合法的「POS 终端即收款方+执行方」情形，必须写入 subordinate；唯一硬约束是 ≠ payer
+			 * （付款客户不能被记成执行终端）。见 .cursor/rules/beamio-indexer-subordinate-pos-only.mdc。
+			 */
 			let subordinateForLedger = ethers.ZeroAddress
 			const posOpRaw = typeof obj.posOperator === 'string' ? obj.posOperator.trim() : ''
 			if (posOpRaw && ethers.isAddress(posOpRaw)) {
 				const posAddr = ethers.getAddress(posOpRaw)
 				const payerLc = transactionInput.payer.toLowerCase()
-				const payeeLc = transactionInput.payee.toLowerCase()
-				if (posAddr.toLowerCase() !== payerLc && posAddr.toLowerCase() !== payeeLc) {
+				if (posAddr.toLowerCase() !== payerLc) {
 					subordinateForLedger = posAddr
 				}
 			}
@@ -6120,12 +6124,13 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 		const redeemOpChain = await fetchOperatorParentChain(obj.cardAddress, redeemOperator)
 		const { topAdmin: redeemTopAdmin, subordinate: redeemSubordinate } = deriveTopAdminAndSubordinate(redeemOperator, redeemOpChain)
 		let subordinateForLedger = redeemSubordinate
+		// POS 终端 EOA：≠ payer 即写入 subordinate（允许 == payee，POS 终端即执行方）。
+		// 见 .cursor/rules/beamio-indexer-subordinate-pos-only.mdc。
 		const posOpRaw = typeof obj.posOperator === 'string' ? obj.posOperator.trim() : ''
 		if (posOpRaw && ethers.isAddress(posOpRaw)) {
 			const posAddr = ethers.getAddress(posOpRaw)
 			const payerLc = payerAddr.toLowerCase()
-			const payeeLc = ethers.getAddress(obj.aaAddress).toLowerCase()
-			if (posAddr.toLowerCase() !== payerLc && posAddr.toLowerCase() !== payeeLc) {
+			if (posAddr.toLowerCase() !== payerLc) {
 				subordinateForLedger = posAddr
 			}
 		}
