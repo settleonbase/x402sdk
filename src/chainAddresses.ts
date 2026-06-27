@@ -81,9 +81,15 @@ export const CONET_BUSINESS_START_KET = '0xAcf20dbb4DE0992d8947Ef00b505bBc17E6A0
 export const CONET_BUSINESS_START_KET_REDEEM = '0xe9CeDC2c9F7DE7c0e6d1f1ba1F7e7126F0F1D3c8'
 
 /** ValidatorDepositRedeem（CoNET）；与 deployments/conet-addresses.json `ValidatorDepositRedeem` 同步 */
-export const CONET_VALIDATOR_DEPOSIT_REDEEM = '0x4319A3A3572C6311BA6E7f95B07620eb0861cE2E'
+export const CONET_VALIDATOR_DEPOSIT_REDEEM = '0x970792658C09A96E27Fc4D8B69fF9989C2AcB50E'
+/** ValidatorDepositRedeem deploy block（CoNET）；listener 补扫下限，不得低于此块 */
+export const CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK = 155396
 export const CONET_DEPOSIT_CONTRACT = '0x4242424242424242424242424242424242424242'
 export const CONET_VALIDATOR_DEPOSIT_FUNDER = '0x0981275553A41E00ec1006fe074971285E00c2A3'
+/** ValidatorDepositRedeem contract admin (withdrawNative only; not redeem admin). Sync from deployments/conet-ValidatorDepositRedeem.json */
+export const CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
+/** ValidatorDepositRedeem redeem admin on validator node 38.102.85.33 (~/.master.json key_38.102.85.33) */
+export const CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN = '0xE974c5d10cc36738bC2619FC73b075504D5c6d1E'
 export const CONET_VALIDATOR_NODE_IP = ''
 /** ValidatorNodeRewardIndexer（CoNET）：每节点/每受益人小时原子 CNET 收益账本 + 周期统计；
  *  与 deployments/conet-addresses.json `ValidatorNodeRewardIndexer` 同步。留空则由主合约 rewardIndexer() 解析。 */

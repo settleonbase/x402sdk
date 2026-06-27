@@ -2993,6 +2993,7 @@ const routing = ( router: Router ) => {
 				admin?: string
 				codeHash?: string
 				allowedClaimer?: string
+				referrer?: string
 				validatorCount?: string
 				targetNodeIp?: string
 				gbMiningNodeCount?: string
@@ -3006,7 +3007,8 @@ const routing = ( router: Router ) => {
 				!b.contract ||
 				!b.admin ||
 				!b.codeHash ||
-				!b.allowedClaimer ||
+				b.allowedClaimer == null ||
+				b.referrer == null ||
 				!b.validatorCount ||
 				!b.targetNodeIp ||
 				!b.gbMiningNodeCount ||
@@ -3023,6 +3025,7 @@ const routing = ( router: Router ) => {
 				admin: ethers.getAddress(b.admin),
 				codeHash: b.codeHash,
 				allowedClaimer: ethers.getAddress(b.allowedClaimer),
+				referrer: ethers.getAddress(b.referrer),
 				validatorCount: BigInt(b.validatorCount),
 				targetNodeIp: b.targetNodeIp,
 				gbMiningNodeCount: BigInt(b.gbMiningNodeCount),
@@ -3058,7 +3061,7 @@ const routing = ( router: Router ) => {
 		})
 
 		router.post('/validatorDepositRedeemClaim', (req, res) => {
-			const b = req.body as { contract?: string; claimer?: string; beneficiary?: string; referrer?: string; code?: string; deadline?: string; signature?: string }
+			const b = req.body as { contract?: string; claimer?: string; beneficiary?: string; code?: string; deadline?: string; signature?: string }
 			if (!b.contract || !b.claimer || !b.beneficiary || typeof b.code !== 'string' || b.deadline == null || !b.signature) {
 				return res.status(400).json({ success: false, error: 'Missing validator redeem claim fields' }).end()
 			}
@@ -3066,10 +3069,7 @@ const routing = ( router: Router ) => {
 				contract: ethers.getAddress(b.contract),
 				claimer: ethers.getAddress(b.claimer),
 				beneficiary: ethers.getAddress(b.beneficiary),
-				referrer:
-					typeof b.referrer === 'string' && b.referrer.trim() && ethers.isAddress(b.referrer)
-						? ethers.getAddress(b.referrer)
-						: ethers.ZeroAddress,
+				referrer: ethers.ZeroAddress,
 				code: b.code,
 				deadline: BigInt(b.deadline),
 				signature: b.signature,

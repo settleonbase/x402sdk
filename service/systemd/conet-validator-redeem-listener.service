@@ -1,0 +1,21 @@
+[Unit]
+Description=CoNET ValidatorDepositRedeem event listener (validator node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+Group=peter
+WorkingDirectory=/home/peter/x402sdk
+EnvironmentFile=-/etc/default/conet-validator-redeem-listener
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/endpoint/validatorDepositRedeemListenerDaemon.js
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=conet-validator-redeem-listener
+
+[Install]
+WantedBy=multi-user.target
