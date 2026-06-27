@@ -13,6 +13,7 @@ import {
 	CONET_VALIDATOR_DEPOSIT_FUNDER,
 	CONET_VALIDATOR_DEPOSIT_REDEEM,
 	CONET_VALIDATOR_NODE_IP,
+	CONET_VALIDATOR_NODE_REWARD_INDEXER,
 } from '../chainAddresses'
 import { Settle_ContractPool } from '../MemberCard'
 
@@ -23,13 +24,98 @@ const DEFAULT_NEW_CONET_DIR = '/Users/peter/Downloads/seguro-pro/CoNET-DL-master
 
 const VALIDATOR_DEPOSIT_REDEEM_ABI = [
 	'event ValidatorRedeemClaimed(bytes32 indexed requestId, bytes32 indexed codeHash, address indexed claimer, address beneficiary, uint256 validatorCount, string targetNodeIp, string[] conetDepinNodeIps, uint256 gbMiningNodeCount)',
-	'function createRedeemFor(address admin, bytes32 codeHash, address allowedClaimer, uint256 validatorCount, string targetNodeIp, string[] conetDepinNodeIps, uint256 gbMiningNodeCount, uint256 validAfter, uint256 validBefore, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function createRedeemFor(address admin, bytes32 codeHash, address allowedClaimer, uint256 validatorCount, string targetNodeIp, uint256 gbMiningNodeCount, uint256 validAfter, uint256 validBefore, uint256 nonce, uint256 deadline, bytes signature) external',
 	'function cancelRedeemFor(address admin, bytes32 codeHash, uint256 nonce, uint256 deadline, bytes signature) external',
-	'function claimRedeemFor(address claimer, address beneficiary, string code, uint256 deadline, bytes signature) external returns (bytes32)',
+	'function claimRedeemFor(address claimer, address beneficiary, address referrer, string code, uint256 deadline, bytes signature) external returns (bytes32)',
+	'function referrerExtension() view returns (address)',
+	'function grantReferrerRewardNodes(address referrer, uint256 count) external',
+	'function getReferrerRewardNodes(address referrer) view returns (uint256[] guardianNodeIds, address[] nodeWallets, string[] depinNodeIps)',
 	'function redeemAdminNonces(address account) view returns (uint256)',
 	'function redeemAdmins(address account) view returns (bool)',
-	'function getRedeem(bytes32 codeHash) view returns (address allowedClaimer, uint256 validatorCount, string targetNodeIp, string[] conetDepinNodeIps, uint256 gbMiningNodeCount, uint64 validAfter, uint64 validBefore, bool active, bool consumed)',
+	'function getRedeem(bytes32 codeHash) view returns (address allowedClaimer, uint256 validatorCount, string targetNodeIp, uint256 gbMiningNodeCount, uint64 validAfter, uint64 validBefore, bool active, bool consumed)',
+	'function registerNodeValidators(address[] nodeWallets, bytes[] pubkeys) external',
+	'function getNodeValidator(address nodeWallet) view returns (bytes pubkey, address withdrawalBeneficiary, uint64 registeredAt, uint64 exitedAt, bool active)',
+	'function getBeneficiaryNodeBundle(address beneficiary) view returns (tuple(address beneficiary, uint256[] guardianNodeIds, string[] depinNodeIps, address[] nodeWallets, bytes[] validatorPubkeys, bool[] validatorActive, uint256 validatorNodeCount, uint256 gbMiningNodeCount, uint256 claimCount, uint256 nativeBalance, uint256 gbBalance, uint256 usdcBalance))',
+	'function resolveNodeBundle(address maybeWallet, string conetDepinNodeIp) view returns (tuple(address beneficiary, uint256[] guardianNodeIds, string[] depinNodeIps, address[] nodeWallets, bytes[] validatorPubkeys, bool[] validatorActive, uint256 validatorNodeCount, uint256 gbMiningNodeCount, uint256 claimCount, uint256 nativeBalance, uint256 gbBalance, uint256 usdcBalance))',
+	'function resolveUnifiedIncomeStats(address maybeWallet, string conetDepinNodeIp, uint256 anchorTs) view returns (tuple(address beneficiary, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) gbBeneficiary, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) cnetBeneficiary, tuple(address nodeWallet, string depinNodeIp, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) gb, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) cnet)[] nodes))',
+	'function transferNodes(address fromBeneficiary, address toBeneficiary, address[] nodeWallets, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function getTransferNodesDigest(address fromBeneficiary, address toBeneficiary, address[] nodeWallets, uint256 nonce, uint256 deadline) view returns (bytes32)',
+	'function beneficiaryNonces(address account) view returns (uint256)',
+	'function getBeneficiaryByNodeWallet(address nodeWallet) view returns (address beneficiary)',
+	'function getNodeByValidatorPubkeyHash(bytes32 pubkeyHash) view returns (address nodeWallet)',
+	'function createTransferOrder(address seller, address[] nodeWallets, uint256 priceUsdc6, uint256 nonce, uint256 deadline, bytes signature) external returns (uint256 orderId)',
+	'function cancelTransferOrder(uint256 orderId, address seller, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function fulfillTransferOrder(uint256 orderId, address buyer, uint256 nonce, uint256 deadline, bytes signature, uint256 payValidAfter, uint256 payValidBefore, bytes32 payNonce, bytes paySignature) external',
+	'function getTransferOrder(uint256 orderId) view returns (address seller, address[] nodeWallets, uint256 priceUsdc6, bool active, address buyer, uint64 createdAt, uint64 filledAt)',
+	'function nodeOrder(address nodeWallet) view returns (uint256)',
+	'function usdcToken() view returns (address)',
+	'function setDepositContract(address depositContract_) external',
+	'function depositContract() view returns (address)',
+	'function selfWithdrawalCredentials() view returns (bytes32)',
+	'function stakedValidatorCountOf(address beneficiary) view returns (uint256)',
+	'function fundedDepositTotal() view returns (uint256)',
+	'function exitSettledPubkey(bytes32 pubkeyHash) view returns (bool)',
+	'function fundAndDepositValidators(address[] nodeWallets, bytes[] pubkeys, bytes[] withdrawalCredentials, bytes[] signatures, bytes32[] depositDataRoots) external',
+	'function requestFullExit(address beneficiary, address[] nodeWallets, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function settleFullExitPayout(address beneficiary, address[] nodeWallets) external',
+	'function getRequestFullExitDigest(address beneficiary, address[] nodeWallets, uint256 nonce, uint256 deadline) view returns (bytes32)',
+	'function rewardIndexer() view returns (address)',
+	'function getClaimRedeemDigest(address claimer, bytes32 codeHash, address beneficiary, address referrer, uint256 deadline) view returns (bytes32)',
+	'function setRewardIndexer(address rewardIndexer_) external',
+	'event RewardIndexerConfigured(address indexed rewardIndexer)',
+	'event TransferOrderCreated(uint256 indexed orderId, address indexed seller, uint256 priceUsdc6, address[] nodeWallets)',
+	'event TransferOrderCancelled(uint256 indexed orderId, address indexed seller)',
+	'event TransferOrderFilled(uint256 indexed orderId, address indexed seller, address indexed buyer, uint256 priceUsdc6)',
+	'event NodesTransferred(address indexed fromBeneficiary, address indexed toBeneficiary, address[] nodeWallets)',
+	'event NodeValidatorBeneficiaryUpdated(address indexed nodeWallet, bytes32 indexed pubkeyHash, address indexed fromBeneficiary, address toBeneficiary)',
+	'event ValidatorDeposited(address indexed nodeWallet, address indexed beneficiary, bytes32 indexed pubkeyHash, uint256 amount)',
+	'event FullExitRequested(address indexed beneficiary, address[] nodeWallets)',
+	'event FullExitSettled(address indexed beneficiary, uint256 validatorCount, uint256 amount)',
+	// Retired (no longer emitted; kept for back-compat decoding of historical logs).
+	'event NodeValidatorExitRequested(address indexed nodeWallet, bytes32 indexed pubkeyHash, address indexed fromBeneficiary, address toBeneficiary)',
 ] as const
+
+const VALIDATOR_DEPOSIT_REDEEM_REFERRER_ABI = [
+	'function REFERRER_NODES_PER_REWARD() view returns (uint256)',
+	'function referrerOfBeneficiary(address beneficiary) view returns (address)',
+	'function referrerReferralNodeTotal(address referrer) view returns (uint256)',
+	'function referrerRewardMilestonePaid(address referrer) view returns (uint256)',
+	'function getReferrerReferredBeneficiaryCount(address referrer) view returns (uint256)',
+	'function getReferrerReferredBeneficiaries(address referrer, uint256 offset, uint256 limit) view returns (address[])',
+	'function getReferrerSummary(address referrer) view returns (uint256 referredBeneficiaryCount, uint256 referralNodeTotal, uint256 rewardMilestonePaid, uint256 pendingRewardNodes, uint256 referredNodesOwnedTotal)',
+	'function resolveReferrerDetail(address referrer, uint256 beneficiaryOffset, uint256 beneficiaryLimit) view returns (address[] referredBeneficiaries, uint256 referralNodeTotal, uint256 rewardNodesGranted, uint256 pendingRewardNodes, tuple(uint256 guardianNodeId, address nodeWallet, string depinNodeIp)[] rewardNodes)',
+] as const
+
+/**
+ * ValidatorNodeRewardIndexer — standalone per-node / per-beneficiary hourly CNET reward ledger + period stats.
+ * All reads here are RPC-direct (no centralized API), per the project RPC-first rule. The relayer write
+ * (reportNodeRewardHourly) is the only gas-sponsored on-chain action and goes through a Settle wallet.
+ */
+const VALIDATOR_NODE_REWARD_INDEXER_ABI = [
+	'function admins(address account) view returns (bool)',
+	'function redeem() view returns (address)',
+	'function reportNodeRewardHourly(address[] nodeWallets, uint256[] hourIds, uint256[] hourlyRewards) external',
+	'function nodeHourlyReward(address nodeWallet, uint256 hourId) view returns (uint256)',
+	'function beneficiaryHourlyReward(address beneficiary, uint256 hourId) view returns (uint256)',
+	'function nodeCumulativeReward(address nodeWallet) view returns (uint256)',
+	'function beneficiaryCumulativeReward(address beneficiary) view returns (uint256)',
+	'function totalCumulativeReward() view returns (uint256)',
+	'function nodeFirstHour(address nodeWallet) view returns (uint64)',
+	'function nodeLastHour(address nodeWallet) view returns (uint64)',
+	'function beneficiaryFirstHour(address beneficiary) view returns (uint64)',
+	'function beneficiaryLastHour(address beneficiary) view returns (uint64)',
+	'function getNodeRewardBetween(address nodeWallet, uint256 startTs, uint256 endTs) view returns (uint256)',
+	'function getBeneficiaryRewardBetween(address beneficiary, uint256 startTs, uint256 endTs) view returns (uint256)',
+	'function getNodePeriodReports(address nodeWallet, uint8 periodType, uint256 periods, uint256 anchorTs) view returns (tuple(uint256 periodStart, uint256 periodEnd, uint256 reward)[])',
+	'function getBeneficiaryPeriodReports(address beneficiary, uint8 periodType, uint256 periods, uint256 anchorTs) view returns (tuple(uint256 periodStart, uint256 periodEnd, uint256 reward)[])',
+	'function getNodeRewardSummary(address nodeWallet, uint256 anchorTs) view returns (uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year)',
+	'function getBeneficiaryRewardSummary(address beneficiary, uint256 anchorTs) view returns (uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year)',
+	'event NodeRewardHourSet(address indexed nodeWallet, address indexed beneficiary, uint256 indexed hourId, uint256 reward)',
+] as const
+
+/** Reward indexer period type ids (mirror ValidatorNodeRewardIndexer / AdminStatsPeriodLib). */
+export const REWARD_PERIOD = { HOUR: 0, DAY: 1, WEEK: 2, MONTH: 3, QUARTER: 4, YEAR: 5 } as const
+export type RewardPeriodType = (typeof REWARD_PERIOD)[keyof typeof REWARD_PERIOD]
 
 export type ValidatorRedeemState = {
 	requestId: string
@@ -69,11 +155,6 @@ function codeHashOf(code: string): string {
 	return ethers.keccak256(ethers.toUtf8Bytes(code))
 }
 
-function hashStringArray(values: string[]): string {
-	const hashes = values.map((v) => ethers.keccak256(ethers.toUtf8Bytes(v)))
-	return ethers.keccak256(ethers.concat(hashes))
-}
-
 export function resolveValidatorDepositRedeemAddress(): string | null {
 	const raw = process.env.CONET_VALIDATOR_DEPOSIT_REDEEM?.trim() || CONET_VALIDATOR_DEPOSIT_REDEEM
 	if (!raw) return null
@@ -83,6 +164,478 @@ export function resolveValidatorDepositRedeemAddress(): string | null {
 	} catch {
 		return null
 	}
+}
+
+/** Reads {referrerExtension} from main redeem contract (RPC-direct). */
+export async function resolveValidatorReferrerExtensionAddress(): Promise<string | null> {
+	const envRaw = process.env.CONET_VALIDATOR_REFERRER_EXTENSION?.trim()
+	if (envRaw) {
+		try {
+			const a = ethers.getAddress(envRaw)
+			if (a !== ethers.ZeroAddress) return a
+		} catch {
+			/* fall through */
+		}
+	}
+	const main = resolveValidatorDepositRedeemAddress()
+	if (!main) return null
+	try {
+		const c = new ethers.Contract(main, ['function referrerExtension() view returns (address)'], conetProvider())
+		const ext = ethers.getAddress(String(await c.referrerExtension!()))
+		return ext === ethers.ZeroAddress ? null : ext
+	} catch {
+		return null
+	}
+}
+
+/**
+ * Resolve the ValidatorNodeRewardIndexer address. Prefers the explicit env / chainAddresses value; if unset,
+ * reads it on-chain from the main ValidatorDepositRedeem contract's {rewardIndexer} pointer (RPC-direct).
+ */
+export async function resolveValidatorNodeRewardIndexerAddress(): Promise<string | null> {
+	const raw = process.env.CONET_VALIDATOR_NODE_REWARD_INDEXER?.trim() || CONET_VALIDATOR_NODE_REWARD_INDEXER
+	if (raw) {
+		try {
+			const a = ethers.getAddress(raw)
+			if (a !== ethers.ZeroAddress) return a
+		} catch {
+			/* fall through to on-chain lookup */
+		}
+	}
+	const main = resolveValidatorDepositRedeemAddress()
+	if (!main) return null
+	try {
+		const c = new ethers.Contract(main, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+		const a = ethers.getAddress(await c.rewardIndexer())
+		return a === ethers.ZeroAddress ? null : a
+	} catch {
+		return null
+	}
+}
+
+// ---- ValidatorNodeRewardIndexer: RPC-direct reads + relayer write ------------------------------------
+
+export type RewardSummary = {
+	/** cumulative CNET reward since first reported hour (18-decimal string) */
+	cumulative: string
+	/** current hour bucket total */
+	hour: string
+	/** current UTC day total */
+	day: string
+	/** current ISO week (Mon-start) total */
+	week: string
+	/** current calendar month total */
+	month: string
+	/** current calendar year total */
+	year: string
+}
+
+export type RewardPeriodReport = {
+	/** inclusive unix start of the period (seconds) */
+	periodStart: number
+	/** inclusive unix end of the period (seconds) */
+	periodEnd: number
+	/** CNET reward summed over the period (18-decimal string) */
+	reward: string
+}
+
+/** GB or CNET income bucket totals (18-decimal raw + formatted strings). */
+export type IncomeTotals = {
+	cumulative: string
+	hour: string
+	day: string
+	week: string
+	month: string
+	year: string
+}
+
+export type NodeIncomeRow = {
+	nodeWallet: string
+	depinNodeIp: string
+	gb: IncomeTotals
+	cnet: IncomeTotals
+}
+
+/** Unified GB + CNET income snapshot from {resolveUnifiedIncomeStats}. */
+export type UnifiedIncomeStats = {
+	beneficiary: string | null
+	gbBeneficiary: IncomeTotals
+	cnetBeneficiary: IncomeTotals
+	nodes: NodeIncomeRow[]
+}
+
+function incomeTotalsFromTuple(t: { cumulative: bigint; hour: bigint; day: bigint; week: bigint; month: bigint; year: bigint } | bigint[]): IncomeTotals {
+	return rewardSummaryFromTuple(t)
+}
+
+function rewardSummaryFromTuple(t: { cumulative: bigint; hour: bigint; day: bigint; week: bigint; month: bigint; year: bigint } | bigint[]): RewardSummary {
+	const v = (k: keyof RewardSummary, i: number): string =>
+		((Array.isArray(t) ? t[i] : (t as Record<string, bigint>)[k]) ?? 0n).toString()
+	return {
+		cumulative: v('cumulative', 0),
+		hour: v('hour', 1),
+		day: v('day', 2),
+		week: v('week', 3),
+		month: v('month', 4),
+		year: v('year', 5),
+	}
+}
+
+function rewardPeriodReportsFromTuples(rows: Array<{ periodStart: bigint; periodEnd: bigint; reward: bigint } | bigint[]>): RewardPeriodReport[] {
+	return (rows || []).map((r) => ({
+		periodStart: Number(Array.isArray(r) ? r[0] : r.periodStart),
+		periodEnd: Number(Array.isArray(r) ? r[1] : r.periodEnd),
+		reward: (Array.isArray(r) ? r[2] : r.reward).toString(),
+	}))
+}
+
+async function rewardIndexerReadContract(): Promise<{ ok: true; c: ethers.Contract; address: string } | { ok: false; error: string }> {
+	const address = await resolveValidatorNodeRewardIndexerAddress()
+	if (!address) return { ok: false as const, error: 'ValidatorNodeRewardIndexer not configured' }
+	return { ok: true as const, c: new ethers.Contract(address, VALIDATOR_NODE_REWARD_INDEXER_ABI, conetProvider()), address }
+}
+
+/**
+ * One-shot CNET reward summary for a BENEFICIARY across ALL its staked nodes (total income):
+ * cumulative + current hour/day/week/month/year. RPC-direct, no centralized API.
+ * @param anchorTs optional anchor unix seconds (0 / omit = now).
+ */
+export async function validatorRewardReadBeneficiarySummary(
+	beneficiary: string,
+	anchorTs = 0
+): Promise<{ ok: true; beneficiary: string; summary: RewardSummary } | { ok: false; error: string }> {
+	let addr: string
+	try {
+		addr = ethers.getAddress(beneficiary)
+	} catch {
+		return { ok: false as const, error: 'bad beneficiary address' }
+	}
+	const r = await rewardIndexerReadContract()
+	if (!r.ok) return r
+	try {
+		const t = await r.c.getBeneficiaryRewardSummary!(addr, BigInt(anchorTs || 0))
+		return { ok: true as const, beneficiary: addr, summary: rewardSummaryFromTuple(t) }
+	} catch (ex) {
+		return { ok: false as const, error: `reward summary read failed: ${(ex as Error).message}` }
+	}
+}
+
+/** One-shot CNET reward summary for a single NODE wallet (per-node income). RPC-direct. */
+export async function validatorRewardReadNodeSummary(
+	nodeWallet: string,
+	anchorTs = 0
+): Promise<{ ok: true; nodeWallet: string; summary: RewardSummary } | { ok: false; error: string }> {
+	let addr: string
+	try {
+		addr = ethers.getAddress(nodeWallet)
+	} catch {
+		return { ok: false as const, error: 'bad node wallet address' }
+	}
+	const r = await rewardIndexerReadContract()
+	if (!r.ok) return r
+	try {
+		const t = await r.c.getNodeRewardSummary!(addr, BigInt(anchorTs || 0))
+		return { ok: true as const, nodeWallet: addr, summary: rewardSummaryFromTuple(t) }
+	} catch (ex) {
+		return { ok: false as const, error: `node reward summary read failed: ${(ex as Error).message}` }
+	}
+}
+
+/**
+ * Single eth_call to ValidatorDepositRedeem.resolveUnifiedIncomeStats:
+ * beneficiary GB (ConetGB1155) + CNET (ValidatorNodeRewardIndexer) totals and per-node rows.
+ * Contract internally staticcalls gbToken + rewardIndexer — no centralized read API.
+ */
+export async function validatorDepositRedeemReadUnifiedIncomeStats(
+	ipOrWallet: string,
+	anchorTs = 0
+): Promise<{ ok: true; query: string; stats: UnifiedIncomeStats } | { ok: false; error: string }> {
+	const main = resolveValidatorDepositRedeemAddress()
+	if (!main) return { ok: false as const, error: 'no validator redeem contract configured' }
+	const raw = String(ipOrWallet ?? '').trim()
+	if (!raw) return { ok: false as const, error: 'empty query' }
+	const isAddr = ethers.isAddress(raw)
+	const maybeWallet = isAddr ? ethers.getAddress(raw) : ethers.ZeroAddress
+	const ip = isAddr ? '' : normalizeIp(raw)
+	try {
+		const c = new ethers.Contract(main, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+		const r = await c.resolveUnifiedIncomeStats!(maybeWallet, ip, BigInt(Math.max(0, anchorTs)))
+		const beneficiaryAddr = ethers.getAddress(String(r.beneficiary ?? r[0]))
+		const beneficiary = beneficiaryAddr === ethers.ZeroAddress ? null : beneficiaryAddr
+		const gbBeneficiary = incomeTotalsFromTuple(r.gbBeneficiary ?? r[1])
+		const cnetBeneficiary = incomeTotalsFromTuple(r.cnetBeneficiary ?? r[2])
+		const nodeRows = (r.nodes ?? r[3] ?? []) as Array<Record<string, unknown> | unknown[]>
+		const nodes: NodeIncomeRow[] = nodeRows.map((row) => {
+			const nr = row as Record<string, unknown>
+			const nArr = row as unknown[]
+			const nGet = (name: string, idx: number): unknown => (nr[name] !== undefined ? nr[name] : nArr[idx])
+			return {
+				nodeWallet: ethers.getAddress(String(nGet('nodeWallet', 0))),
+				depinNodeIp: normalizeIp(String(nGet('depinNodeIp', 1))),
+				gb: incomeTotalsFromTuple(nGet('gb', 2) as bigint[]),
+				cnet: incomeTotalsFromTuple(nGet('cnet', 3) as bigint[]),
+			}
+		})
+		return { ok: true as const, query: raw, stats: { beneficiary, gbBeneficiary, cnetBeneficiary, nodes } }
+	} catch (ex) {
+		return { ok: false as const, error: `resolveUnifiedIncomeStats read failed: ${(ex as Error).message}` }
+	}
+}
+
+export type ReferrerRewardNodeDetail = {
+	guardianNodeId: string
+	nodeWallet: string
+	depinNodeIp: string
+}
+
+export type ReferrerDetail = {
+	referrer: string
+	referredBeneficiaries: string[]
+	referralNodeTotal: string
+	rewardNodesGranted: string
+	pendingRewardNodes: string
+	nodesPerReward: string
+	rewardNodes: ReferrerRewardNodeDetail[]
+}
+
+function parseReferrerRewardNodeRows(raw: unknown): ReferrerRewardNodeDetail[] {
+	if (!Array.isArray(raw)) return []
+	return raw.map((row) => {
+		const r = row as Record<string, unknown> | unknown[]
+		const get = (name: string, idx: number): unknown =>
+			r && typeof r === 'object' && !Array.isArray(r) && name in r ? (r as Record<string, unknown>)[name] : (r as unknown[])[idx]
+		return {
+			guardianNodeId: String(get('guardianNodeId', 0) ?? '0'),
+			nodeWallet: ethers.getAddress(String(get('nodeWallet', 1))),
+			depinNodeIp: normalizeIp(String(get('depinNodeIp', 2) ?? '')),
+		}
+	})
+}
+
+/** RPC-direct referrer detail (extension.resolveReferrerDetail + reward node rows from redeem host). */
+export async function validatorDepositRedeemReadReferrerDetail(
+	referrer: string,
+	opts?: { beneficiaryOffset?: number; beneficiaryLimit?: number }
+): Promise<{ ok: true; detail: ReferrerDetail } | { ok: false; error: string }> {
+	const ext = await resolveValidatorReferrerExtensionAddress()
+	if (!ext) return { ok: false as const, error: 'no validator referrer extension configured' }
+	let addr: string
+	try {
+		addr = ethers.getAddress(referrer)
+	} catch {
+		return { ok: false as const, error: 'bad referrer address' }
+	}
+	const beneficiaryOffset = Math.max(0, opts?.beneficiaryOffset ?? 0)
+	const beneficiaryLimit = Math.max(0, opts?.beneficiaryLimit ?? 0)
+	try {
+		const c = new ethers.Contract(ext, VALIDATOR_DEPOSIT_REDEEM_REFERRER_ABI, conetProvider())
+		const [detail, nodesPerReward] = await Promise.all([
+			c.resolveReferrerDetail!(addr, BigInt(beneficiaryOffset), BigInt(beneficiaryLimit)),
+			c.REFERRER_NODES_PER_REWARD!(),
+		])
+		return {
+			ok: true as const,
+			detail: {
+				referrer: addr,
+				referredBeneficiaries: ((detail[0] as string[]) ?? []).map((a) => ethers.getAddress(a)),
+				referralNodeTotal: (detail[1] as bigint).toString(),
+				rewardNodesGranted: (detail[2] as bigint).toString(),
+				pendingRewardNodes: (detail[3] as bigint).toString(),
+				nodesPerReward: (nodesPerReward as bigint).toString(),
+				rewardNodes: parseReferrerRewardNodeRows(detail[4]),
+			},
+		}
+	} catch (ex) {
+		return { ok: false as const, error: `referrer detail read failed: ${(ex as Error).message}` }
+	}
+}
+
+export type ReferrerSummary = {
+	referrer: string
+	referredBeneficiaryCount: string
+	referralNodeTotal: string
+	rewardMilestonePaid: string
+	pendingRewardNodes: string
+	referredNodesOwnedTotal: string
+	nodesPerReward: string
+}
+
+/** RPC-direct referrer dashboard (introduced wallets + node totals + reward progress). */
+export async function validatorDepositRedeemReadReferrerSummary(
+	referrer: string
+): Promise<{ ok: true; summary: ReferrerSummary } | { ok: false; error: string }> {
+	const ext = await resolveValidatorReferrerExtensionAddress()
+	if (!ext) return { ok: false as const, error: 'no validator referrer extension configured' }
+	let addr: string
+	try {
+		addr = ethers.getAddress(referrer)
+	} catch {
+		return { ok: false as const, error: 'bad referrer address' }
+	}
+	try {
+		const c = new ethers.Contract(ext, VALIDATOR_DEPOSIT_REDEEM_REFERRER_ABI, conetProvider())
+		const [summaryTuple, nodesPerReward] = await Promise.all([c.getReferrerSummary!(addr), c.REFERRER_NODES_PER_REWARD!()])
+		const s = summaryTuple as bigint[]
+		return {
+			ok: true as const,
+			summary: {
+				referrer: addr,
+				referredBeneficiaryCount: s[0].toString(),
+				referralNodeTotal: s[1].toString(),
+				rewardMilestonePaid: s[2].toString(),
+				pendingRewardNodes: s[3].toString(),
+				referredNodesOwnedTotal: s[4].toString(),
+				nodesPerReward: (nodesPerReward as bigint).toString(),
+			},
+		}
+	} catch (ex) {
+		return { ok: false as const, error: `referrer summary read failed: ${(ex as Error).message}` }
+	}
+}
+
+export async function validatorDepositRedeemReadReferrerReferredBeneficiaries(
+	referrer: string,
+	offset = 0,
+	limit = 50
+): Promise<{ ok: true; beneficiaries: string[] } | { ok: false; error: string }> {
+	const ext = await resolveValidatorReferrerExtensionAddress()
+	if (!ext) return { ok: false as const, error: 'no validator referrer extension configured' }
+	let addr: string
+	try {
+		addr = ethers.getAddress(referrer)
+	} catch {
+		return { ok: false as const, error: 'bad referrer address' }
+	}
+	try {
+		const c = new ethers.Contract(ext, VALIDATOR_DEPOSIT_REDEEM_REFERRER_ABI, conetProvider())
+		const rows = (await c.getReferrerReferredBeneficiaries!(addr, BigInt(offset), BigInt(limit))) as string[]
+		return { ok: true as const, beneficiaries: rows.map((a) => ethers.getAddress(a)) }
+	} catch (ex) {
+		return { ok: false as const, error: `referrer beneficiaries read failed: ${(ex as Error).message}` }
+	}
+}
+
+/**
+ * Beneficiary total income + a per-node breakdown in one call: resolves the beneficiary's node bundle from the
+ * main contract, then fetches each node's CNET summary plus the beneficiary aggregate. RPC-direct.
+ * @deprecated Prefer {validatorDepositRedeemReadUnifiedIncomeStats} for GB + CNET in one eth_call.
+ */
+export async function validatorRewardReadBeneficiaryWithNodes(
+	beneficiary: string,
+	anchorTs = 0
+): Promise<
+	| { ok: true; beneficiary: string; total: RewardSummary; nodes: Array<{ nodeWallet: string; depinNodeIp: string; summary: RewardSummary }> }
+	| { ok: false; error: string }
+> {
+	let addr: string
+	try {
+		addr = ethers.getAddress(beneficiary)
+	} catch {
+		return { ok: false as const, error: 'bad beneficiary address' }
+	}
+	const main = resolveValidatorDepositRedeemAddress()
+	if (!main) return { ok: false as const, error: 'no validator redeem contract configured' }
+	const r = await rewardIndexerReadContract()
+	if (!r.ok) return r
+	try {
+		const cMain = new ethers.Contract(main, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+		const bundle = await cMain.getBeneficiaryNodeBundle!(addr)
+		const wallets = (bundle.nodeWallets as string[]) || []
+		const ips = (bundle.depinNodeIps as string[]) || []
+		const anchor = BigInt(anchorTs || 0)
+		const total = rewardSummaryFromTuple(await r.c.getBeneficiaryRewardSummary!(addr, anchor))
+		const nodes = await Promise.all(
+			wallets.map(async (w, i) => {
+				const nodeWallet = ethers.getAddress(w)
+				const summary = rewardSummaryFromTuple(await r.c.getNodeRewardSummary!(nodeWallet, anchor))
+				return { nodeWallet, depinNodeIp: normalizeIp(ips[i] || ''), summary }
+			})
+		)
+		return { ok: true as const, beneficiary: addr, total, nodes }
+	} catch (ex) {
+		return { ok: false as const, error: `beneficiary reward breakdown read failed: ${(ex as Error).message}` }
+	}
+}
+
+/** Period (hour/day/week/month/quarter/year) CNET reward series for a NODE, newest first. RPC-direct. */
+export async function validatorRewardReadNodePeriods(
+	nodeWallet: string,
+	periodType: RewardPeriodType,
+	periods: number,
+	anchorTs = 0
+): Promise<{ ok: true; nodeWallet: string; reports: RewardPeriodReport[] } | { ok: false; error: string }> {
+	let addr: string
+	try {
+		addr = ethers.getAddress(nodeWallet)
+	} catch {
+		return { ok: false as const, error: 'bad node wallet address' }
+	}
+	const r = await rewardIndexerReadContract()
+	if (!r.ok) return r
+	try {
+		const rows = await r.c.getNodePeriodReports!(addr, periodType, BigInt(periods), BigInt(anchorTs || 0))
+		return { ok: true as const, nodeWallet: addr, reports: rewardPeriodReportsFromTuples(rows) }
+	} catch (ex) {
+		return { ok: false as const, error: `node period reports read failed: ${(ex as Error).message}` }
+	}
+}
+
+/** Period CNET reward series for a BENEFICIARY (all nodes aggregated), newest first. RPC-direct. */
+export async function validatorRewardReadBeneficiaryPeriods(
+	beneficiary: string,
+	periodType: RewardPeriodType,
+	periods: number,
+	anchorTs = 0
+): Promise<{ ok: true; beneficiary: string; reports: RewardPeriodReport[] } | { ok: false; error: string }> {
+	let addr: string
+	try {
+		addr = ethers.getAddress(beneficiary)
+	} catch {
+		return { ok: false as const, error: 'bad beneficiary address' }
+	}
+	const r = await rewardIndexerReadContract()
+	if (!r.ok) return r
+	try {
+		const rows = await r.c.getBeneficiaryPeriodReports!(addr, periodType, BigInt(periods), BigInt(anchorTs || 0))
+		return { ok: true as const, beneficiary: addr, reports: rewardPeriodReportsFromTuples(rows) }
+	} catch (ex) {
+		return { ok: false as const, error: `beneficiary period reports read failed: ${(ex as Error).message}` }
+	}
+}
+
+/**
+ * Relayer write: feed off-chain measured hourly CNET reward into the indexer (idempotent set-absolute per hour
+ * bucket). Only a redeem admin in {Settle_ContractPool} pays CNET gas; this MOVES NO USER FUNDS. The contract
+ * pins each (node, hour)'s beneficiary on first report so a later node transfer never re-attributes past hours.
+ * @param entries parallel arrays: node wallet, UTC hourId (unix/3600), absolute CNET reward (18-decimal bigint/string).
+ */
+export async function validatorRewardReportHourly(
+	entries: Array<{ nodeWallet: string; hourId: number | bigint; hourlyReward: bigint | string }>
+): Promise<{ ok: true; txHash: string; count: number } | { ok: false; error: string }> {
+	if (!entries.length) return { ok: false as const, error: 'empty entries' }
+	const address = await resolveValidatorNodeRewardIndexerAddress()
+	if (!address) return { ok: false as const, error: 'ValidatorNodeRewardIndexer not configured' }
+	if (!Settle_ContractPool.length) return { ok: false as const, error: 'no relayer wallet available (Settle pool empty)' }
+
+	let nodeWallets: string[]
+	let hourIds: bigint[]
+	let rewards: bigint[]
+	try {
+		nodeWallets = entries.map((e) => ethers.getAddress(e.nodeWallet))
+		hourIds = entries.map((e) => BigInt(e.hourId))
+		rewards = entries.map((e) => BigInt(e.hourlyReward))
+	} catch (ex) {
+		return { ok: false as const, error: `bad entry: ${(ex as Error).message}` }
+	}
+
+	const txHash = await withSettleWallet('validatorRewardReportHourly', async (sc) => {
+		const c = new ethers.Contract(address, VALIDATOR_NODE_REWARD_INDEXER_ABI, sc.walletConet)
+		const tx = await c.reportNodeRewardHourly!(nodeWallets, hourIds, rewards, { gasLimit: 4_000_000 })
+		await tx.wait()
+		return tx.hash as string
+	})
+	if (!txHash) return { ok: false as const, error: 'relayer submit failed' }
+	return { ok: true as const, txHash, count: entries.length }
 }
 
 export function resolveValidatorNodeIp(): string {
@@ -186,7 +739,6 @@ export const validatorDepositRedeemCreateTypes: Record<string, { name: string; t
 		{ name: 'allowedClaimer', type: 'address' },
 		{ name: 'validatorCount', type: 'uint256' },
 		{ name: 'targetNodeIp', type: 'string' },
-		{ name: 'conetDepinNodeIpsHash', type: 'bytes32' },
 		{ name: 'gbMiningNodeCount', type: 'uint256' },
 		{ name: 'validAfter', type: 'uint256' },
 		{ name: 'validBefore', type: 'uint256' },
@@ -209,11 +761,61 @@ export const validatorDepositRedeemClaimTypes: Record<string, { name: string; ty
 		{ name: 'claimer', type: 'address' },
 		{ name: 'codeHash', type: 'bytes32' },
 		{ name: 'beneficiary', type: 'address' },
+		{ name: 'referrer', type: 'address' },
 		{ name: 'validatorCount', type: 'uint256' },
 		{ name: 'targetNodeIp', type: 'string' },
-		{ name: 'conetDepinNodeIpsHash', type: 'bytes32' },
 		{ name: 'gbMiningNodeCount', type: 'uint256' },
 		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
+export const validatorDepositRedeemTransferTypes: Record<string, { name: string; type: string }[]> = {
+	TransferNodes: [
+		{ name: 'fromBeneficiary', type: 'address' },
+		{ name: 'toBeneficiary', type: 'address' },
+		{ name: 'nodeWallets', type: 'address[]' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
+export const validatorCreateTransferOrderTypes: Record<string, { name: string; type: string }[]> = {
+	CreateTransferOrder: [
+		{ name: 'seller', type: 'address' },
+		{ name: 'nodeWallets', type: 'address[]' },
+		{ name: 'priceUsdc6', type: 'uint256' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
+export const validatorCancelTransferOrderTypes: Record<string, { name: string; type: string }[]> = {
+	CancelTransferOrder: [
+		{ name: 'seller', type: 'address' },
+		{ name: 'orderId', type: 'uint256' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
+export const validatorFulfillTransferOrderTypes: Record<string, { name: string; type: string }[]> = {
+	FulfillTransferOrder: [
+		{ name: 'buyer', type: 'address' },
+		{ name: 'orderId', type: 'uint256' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
+/** CoNET-USDC（FactoryERC20 / EIP20Permit3009）EIP-3009 TransferWithAuthorization typed data. */
+export const usdcTransferWithAuthorizationTypes: Record<string, { name: string; type: string }[]> = {
+	TransferWithAuthorization: [
+		{ name: 'from', type: 'address' },
+		{ name: 'to', type: 'address' },
+		{ name: 'value', type: 'uint256' },
+		{ name: 'validAfter', type: 'uint256' },
+		{ name: 'validBefore', type: 'uint256' },
+		{ name: 'nonce', type: 'bytes32' },
 	],
 }
 
@@ -230,6 +832,10 @@ export async function validatorDepositRedeemReadAdminNonce(adminAddress: string)
 	}
 }
 
+// NOTE: 链上「节点档案 / 受益人反查」读路径已下沉到各客户端，直连 RPC（见 beamio-rpc-first-no-centralized-api.mdc）。
+// 参考客户端实现：src/SilentPassUI/src/services/validatorWalletNodeProfile.ts（fetchValidatorWalletNodeProfile / fetchNodeBeneficiaryProfile）。
+// x402sdk 仅保留「代付 gas 的链上写」路径（createRedeemFor / claimRedeemFor relay 等）。
+
 function parseUintField(name: string, value: unknown): bigint | string {
 	try {
 		const n = BigInt(String(value ?? ''))
@@ -240,20 +846,12 @@ function parseUintField(name: string, value: unknown): bigint | string {
 	}
 }
 
-function parseIpArray(value: unknown): string[] | string {
-	if (!Array.isArray(value)) return 'conetDepinNodeIps must be an array'
-	const ips = value.map((v) => (typeof v === 'string' ? normalizeIp(v) : ''))
-	if (ips.some((ip) => !isValidIpLike(ip))) return 'Invalid conetDepinNodeIps'
-	return ips
-}
-
 export async function validatorDepositRedeemCreateClusterPreCheck(body: {
 	admin?: string
 	codeHash?: string
 	allowedClaimer?: string
 	validatorCount?: unknown
 	targetNodeIp?: string
-	conetDepinNodeIps?: unknown
 	gbMiningNodeCount?: unknown
 	validAfter?: unknown
 	validBefore?: unknown
@@ -275,9 +873,7 @@ export async function validatorDepositRedeemCreateClusterPreCheck(body: {
 	if (typeof validatorCount === 'string' || validatorCount <= 0n) return { success: false as const, error: typeof validatorCount === 'string' ? validatorCount : 'validatorCount must be positive' }
 	const targetNodeIp = normalizeIp(body.targetNodeIp || '')
 	if (!isValidIpLike(targetNodeIp)) return { success: false as const, error: 'Invalid targetNodeIp' }
-	const conetDepinNodeIps = parseIpArray(body.conetDepinNodeIps)
-	if (typeof conetDepinNodeIps === 'string') return { success: false as const, error: conetDepinNodeIps }
-	if (BigInt(conetDepinNodeIps.length) !== validatorCount) return { success: false as const, error: 'conetDepinNodeIps length must equal validatorCount' }
+	// All redeems auto-allocate Guardian nodes at claim time; no manual DePIN IP list is accepted.
 	const gbMiningNodeCount = parseUintField('gbMiningNodeCount', body.gbMiningNodeCount ?? validatorCount.toString())
 	if (typeof gbMiningNodeCount === 'string') return { success: false as const, error: gbMiningNodeCount }
 	const validAfter = parseUintField('validAfter', body.validAfter ?? '0')
@@ -302,7 +898,6 @@ export async function validatorDepositRedeemCreateClusterPreCheck(body: {
 		allowedClaimer,
 		validatorCount,
 		targetNodeIp,
-		conetDepinNodeIpsHash: hashStringArray(conetDepinNodeIps),
 		gbMiningNodeCount,
 		validAfter,
 		validBefore,
@@ -311,7 +906,7 @@ export async function validatorDepositRedeemCreateClusterPreCheck(body: {
 	}
 	const recovered = ethers.verifyTypedData(validatorDepositRedeemEip712Domain(contract), validatorDepositRedeemCreateTypes, message, signature)
 	if (recovered.toLowerCase() !== admin.toLowerCase()) return { success: false as const, error: 'Signer is not admin' }
-	return { success: true as const, preChecked: { contract, ...message, conetDepinNodeIps, signature } }
+	return { success: true as const, preChecked: { contract, ...message, signature } }
 }
 
 export async function validatorDepositRedeemCancelClusterPreCheck(body: {
@@ -344,6 +939,7 @@ export async function validatorDepositRedeemCancelClusterPreCheck(body: {
 export async function validatorDepositRedeemClaimClusterPreCheck(body: {
 	claimer?: string
 	beneficiary?: string
+	referrer?: string
 	code?: string
 	deadline?: unknown
 	signature?: unknown
@@ -354,6 +950,12 @@ export async function validatorDepositRedeemClaimClusterPreCheck(body: {
 	if (!body.beneficiary || !ethers.isAddress(body.beneficiary)) return { success: false as const, error: 'Invalid beneficiary' }
 	const claimer = ethers.getAddress(body.claimer)
 	const beneficiary = ethers.getAddress(body.beneficiary)
+	let referrer = ethers.ZeroAddress
+	if (typeof body.referrer === 'string' && body.referrer.trim()) {
+		if (!ethers.isAddress(body.referrer)) return { success: false as const, error: 'Invalid referrer' }
+		referrer = ethers.getAddress(body.referrer)
+	}
+	if (referrer.toLowerCase() === beneficiary.toLowerCase()) return { success: false as const, error: 'Referrer cannot equal beneficiary' }
 	const code = typeof body.code === 'string' ? body.code : ''
 	if (!code || ethers.toUtf8Bytes(code).length > MAX_REDEEM_CODE_BYTES) return { success: false as const, error: 'Invalid code' }
 	const deadline = parseUintField('deadline', body.deadline)
@@ -366,15 +968,14 @@ export async function validatorDepositRedeemClaimClusterPreCheck(body: {
 	const allowedClaimer = ethers.getAddress(redeem[0])
 	const validatorCount = redeem[1] as bigint
 	const targetNodeIp = normalizeIp(redeem[2] as string)
-	const conetDepinNodeIps = (redeem[3] as string[]).map(normalizeIp)
-	const gbMiningNodeCount = redeem[4] as bigint
-	const active = Boolean(redeem[7])
-	const consumed = Boolean(redeem[8])
+	const gbMiningNodeCount = redeem[3] as bigint
+	const active = Boolean(redeem[6])
+	const consumed = Boolean(redeem[7])
 	if (!active || consumed) return { success: false as const, error: 'Redeem not active' }
 	if (allowedClaimer !== ethers.ZeroAddress && allowedClaimer.toLowerCase() !== claimer.toLowerCase()) {
 		return { success: false as const, error: 'Claimer not allowed' }
 	}
-	if (BigInt(conetDepinNodeIps.length) !== validatorCount) return { success: false as const, error: 'Invalid on-chain DePIN IP count' }
+	// DePIN node IPs are auto-allocated from Guardian on-chain at claim; nothing to verify here.
 	const recovered = ethers.verifyTypedData(
 		validatorDepositRedeemEip712Domain(contract),
 		validatorDepositRedeemClaimTypes,
@@ -382,16 +983,247 @@ export async function validatorDepositRedeemClaimClusterPreCheck(body: {
 			claimer,
 			codeHash,
 			beneficiary,
+			referrer,
 			validatorCount,
 			targetNodeIp,
-			conetDepinNodeIpsHash: hashStringArray(conetDepinNodeIps),
 			gbMiningNodeCount,
 			deadline,
 		},
 		signature
 	)
 	if (recovered.toLowerCase() !== claimer.toLowerCase()) return { success: false as const, error: 'Signer is not claimer' }
-	return { success: true as const, preChecked: { contract, claimer, beneficiary, code, deadline, signature } }
+	return { success: true as const, preChecked: { contract, claimer, beneficiary, referrer, code, deadline, signature } }
+}
+
+export async function validatorDepositRedeemTransferClusterPreCheck(body: {
+	fromBeneficiary?: string
+	toBeneficiary?: string
+	nodeWallets?: unknown
+	nonce?: unknown
+	deadline?: unknown
+	signature?: unknown
+}) {
+	const contract = resolveValidatorDepositRedeemAddress()
+	if (!contract) return { success: false as const, error: 'CONET_VALIDATOR_DEPOSIT_REDEEM not configured' }
+	if (!body.fromBeneficiary || !ethers.isAddress(body.fromBeneficiary)) return { success: false as const, error: 'Invalid fromBeneficiary' }
+	if (!body.toBeneficiary || !ethers.isAddress(body.toBeneficiary)) return { success: false as const, error: 'Invalid toBeneficiary' }
+	const fromBeneficiary = ethers.getAddress(body.fromBeneficiary)
+	const toBeneficiary = ethers.getAddress(body.toBeneficiary)
+	if (fromBeneficiary.toLowerCase() === toBeneficiary.toLowerCase()) return { success: false as const, error: 'Same beneficiary' }
+	if (!Array.isArray(body.nodeWallets) || body.nodeWallets.length === 0) return { success: false as const, error: 'Empty nodeWallets' }
+	let nodeWallets: string[]
+	try {
+		nodeWallets = (body.nodeWallets as unknown[]).map((a) => ethers.getAddress(String(a)))
+	} catch {
+		return { success: false as const, error: 'Invalid nodeWallets' }
+	}
+	const deadline = parseUintField('deadline', body.deadline)
+	if (typeof deadline === 'string') return { success: false as const, error: deadline }
+	if (deadline !== 0n && deadline < BigInt(Math.floor(Date.now() / 1000))) return { success: false as const, error: 'Signature expired' }
+	const nonce = parseUintField('nonce', body.nonce)
+	if (typeof nonce === 'string') return { success: false as const, error: nonce }
+	const signature = typeof body.signature === 'string' ? body.signature.trim() : ''
+	if (!ethers.isHexString(signature) || ethers.dataLength(signature) < 64) return { success: false as const, error: 'Invalid signature' }
+
+	const read = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+	const onchainNonce = (await read.beneficiaryNonces!(fromBeneficiary)) as bigint
+	if (onchainNonce !== nonce) return { success: false as const, error: `Bad nonce (expected ${onchainNonce.toString()})` }
+
+	// Every node must currently belong to fromBeneficiary (strict 1:1 ownership).
+	for (const nodeWallet of nodeWallets) {
+		const owner = ethers.getAddress(await read.getBeneficiaryByNodeWallet!(nodeWallet))
+		if (owner.toLowerCase() !== fromBeneficiary.toLowerCase()) {
+			return { success: false as const, error: `Node ${nodeWallet} not owned by fromBeneficiary` }
+		}
+	}
+
+	const recovered = ethers.verifyTypedData(
+		validatorDepositRedeemEip712Domain(contract),
+		validatorDepositRedeemTransferTypes,
+		{ fromBeneficiary, toBeneficiary, nodeWallets, nonce, deadline },
+		signature
+	)
+	if (recovered.toLowerCase() !== fromBeneficiary.toLowerCase()) return { success: false as const, error: 'Signer is not fromBeneficiary' }
+
+	return {
+		success: true as const,
+		preChecked: { contract, fromBeneficiary, toBeneficiary, nodeWallets, nonce, deadline, signature },
+	}
+}
+
+export async function createTransferOrderClusterPreCheck(body: {
+	seller?: string
+	nodeWallets?: unknown
+	priceUsdc6?: unknown
+	nonce?: unknown
+	deadline?: unknown
+	signature?: unknown
+}) {
+	const contract = resolveValidatorDepositRedeemAddress()
+	if (!contract) return { success: false as const, error: 'CONET_VALIDATOR_DEPOSIT_REDEEM not configured' }
+	if (!body.seller || !ethers.isAddress(body.seller)) return { success: false as const, error: 'Invalid seller' }
+	const seller = ethers.getAddress(body.seller)
+	if (!Array.isArray(body.nodeWallets) || body.nodeWallets.length === 0) return { success: false as const, error: 'Empty nodeWallets' }
+	let nodeWallets: string[]
+	try {
+		nodeWallets = (body.nodeWallets as unknown[]).map((a) => ethers.getAddress(String(a)))
+	} catch {
+		return { success: false as const, error: 'Invalid nodeWallets' }
+	}
+	const priceUsdc6 = parseUintField('priceUsdc6', body.priceUsdc6)
+	if (typeof priceUsdc6 === 'string') return { success: false as const, error: priceUsdc6 }
+	if (priceUsdc6 <= 0n) return { success: false as const, error: 'Price must be > 0' }
+	const deadline = parseUintField('deadline', body.deadline)
+	if (typeof deadline === 'string') return { success: false as const, error: deadline }
+	if (deadline !== 0n && deadline < BigInt(Math.floor(Date.now() / 1000))) return { success: false as const, error: 'Signature expired' }
+	const nonce = parseUintField('nonce', body.nonce)
+	if (typeof nonce === 'string') return { success: false as const, error: nonce }
+	const signature = typeof body.signature === 'string' ? body.signature.trim() : ''
+	if (!ethers.isHexString(signature) || ethers.dataLength(signature) < 64) return { success: false as const, error: 'Invalid signature' }
+
+	const read = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+	const onchainNonce = (await read.beneficiaryNonces!(seller)) as bigint
+	if (onchainNonce !== nonce) return { success: false as const, error: `Bad nonce (expected ${onchainNonce.toString()})` }
+	for (const nodeWallet of nodeWallets) {
+		const owner = ethers.getAddress(await read.getBeneficiaryByNodeWallet!(nodeWallet))
+		if (owner.toLowerCase() !== seller.toLowerCase()) return { success: false as const, error: `Node ${nodeWallet} not owned by seller` }
+		const listed = (await read.nodeOrder!(nodeWallet)) as bigint
+		if (listed !== 0n) return { success: false as const, error: `Node ${nodeWallet} already listed (order ${listed.toString()})` }
+	}
+	const recovered = ethers.verifyTypedData(
+		validatorDepositRedeemEip712Domain(contract),
+		validatorCreateTransferOrderTypes,
+		{ seller, nodeWallets, priceUsdc6, nonce, deadline },
+		signature
+	)
+	if (recovered.toLowerCase() !== seller.toLowerCase()) return { success: false as const, error: 'Signer is not seller' }
+	return { success: true as const, preChecked: { contract, seller, nodeWallets, priceUsdc6, nonce, deadline, signature } }
+}
+
+export async function cancelTransferOrderClusterPreCheck(body: {
+	orderId?: unknown
+	seller?: string
+	nonce?: unknown
+	deadline?: unknown
+	signature?: unknown
+}) {
+	const contract = resolveValidatorDepositRedeemAddress()
+	if (!contract) return { success: false as const, error: 'CONET_VALIDATOR_DEPOSIT_REDEEM not configured' }
+	if (!body.seller || !ethers.isAddress(body.seller)) return { success: false as const, error: 'Invalid seller' }
+	const seller = ethers.getAddress(body.seller)
+	const orderId = parseUintField('orderId', body.orderId)
+	if (typeof orderId === 'string') return { success: false as const, error: orderId }
+	const deadline = parseUintField('deadline', body.deadline)
+	if (typeof deadline === 'string') return { success: false as const, error: deadline }
+	if (deadline !== 0n && deadline < BigInt(Math.floor(Date.now() / 1000))) return { success: false as const, error: 'Signature expired' }
+	const nonce = parseUintField('nonce', body.nonce)
+	if (typeof nonce === 'string') return { success: false as const, error: nonce }
+	const signature = typeof body.signature === 'string' ? body.signature.trim() : ''
+	if (!ethers.isHexString(signature) || ethers.dataLength(signature) < 64) return { success: false as const, error: 'Invalid signature' }
+
+	const read = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+	const order = await read.getTransferOrder!(orderId)
+	if (!Boolean(order[3])) return { success: false as const, error: 'Order not active' }
+	if (ethers.getAddress(order[0]).toLowerCase() !== seller.toLowerCase()) return { success: false as const, error: 'Not order seller' }
+	const onchainNonce = (await read.beneficiaryNonces!(seller)) as bigint
+	if (onchainNonce !== nonce) return { success: false as const, error: `Bad nonce (expected ${onchainNonce.toString()})` }
+	const recovered = ethers.verifyTypedData(
+		validatorDepositRedeemEip712Domain(contract),
+		validatorCancelTransferOrderTypes,
+		{ seller, orderId, nonce, deadline },
+		signature
+	)
+	if (recovered.toLowerCase() !== seller.toLowerCase()) return { success: false as const, error: 'Signer is not seller' }
+	return { success: true as const, preChecked: { contract, orderId, seller, nonce, deadline, signature } }
+}
+
+export async function fulfillTransferOrderClusterPreCheck(body: {
+	orderId?: unknown
+	buyer?: string
+	nonce?: unknown
+	deadline?: unknown
+	signature?: unknown
+	payValidAfter?: unknown
+	payValidBefore?: unknown
+	payNonce?: unknown
+	paySignature?: unknown
+}) {
+	const contract = resolveValidatorDepositRedeemAddress()
+	if (!contract) return { success: false as const, error: 'CONET_VALIDATOR_DEPOSIT_REDEEM not configured' }
+	if (!body.buyer || !ethers.isAddress(body.buyer)) return { success: false as const, error: 'Invalid buyer' }
+	const buyer = ethers.getAddress(body.buyer)
+	const orderId = parseUintField('orderId', body.orderId)
+	if (typeof orderId === 'string') return { success: false as const, error: orderId }
+	const deadline = parseUintField('deadline', body.deadline)
+	if (typeof deadline === 'string') return { success: false as const, error: deadline }
+	if (deadline !== 0n && deadline < BigInt(Math.floor(Date.now() / 1000))) return { success: false as const, error: 'Signature expired' }
+	const nonce = parseUintField('nonce', body.nonce)
+	if (typeof nonce === 'string') return { success: false as const, error: nonce }
+	const signature = typeof body.signature === 'string' ? body.signature.trim() : ''
+	if (!ethers.isHexString(signature) || ethers.dataLength(signature) < 64) return { success: false as const, error: 'Invalid signature' }
+
+	// EIP-3009 payment authorization fields (zero-approve).
+	const payValidAfter = parseUintField('payValidAfter', body.payValidAfter)
+	if (typeof payValidAfter === 'string') return { success: false as const, error: payValidAfter }
+	const payValidBefore = parseUintField('payValidBefore', body.payValidBefore)
+	if (typeof payValidBefore === 'string') return { success: false as const, error: payValidBefore }
+	const nowSec = BigInt(Math.floor(Date.now() / 1000))
+	if (payValidBefore <= nowSec) return { success: false as const, error: 'Payment authorization expired' }
+	const payNonce = typeof body.payNonce === 'string' ? body.payNonce.trim() : ''
+	if (!ethers.isHexString(payNonce, 32)) return { success: false as const, error: 'Invalid payNonce' }
+	const paySignature = typeof body.paySignature === 'string' ? body.paySignature.trim() : ''
+	if (!ethers.isHexString(paySignature) || ethers.dataLength(paySignature) < 64) return { success: false as const, error: 'Invalid paySignature' }
+
+	const read = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+	const order = await read.getTransferOrder!(orderId)
+	if (!Boolean(order[3])) return { success: false as const, error: 'Order not active' }
+	const seller = ethers.getAddress(order[0])
+	const priceUsdc6 = order[2] as bigint
+	if (seller.toLowerCase() === buyer.toLowerCase()) return { success: false as const, error: 'Buyer is seller' }
+	const onchainNonce = (await read.beneficiaryNonces!(buyer)) as bigint
+	if (onchainNonce !== nonce) return { success: false as const, error: `Bad nonce (expected ${onchainNonce.toString()})` }
+
+	// Buyer must hold enough CoNET-USDC; with EIP-3009 no approve/allowance is required.
+	const usdcAddr = ethers.getAddress(await read.usdcToken!())
+	if (usdcAddr === ethers.ZeroAddress) return { success: false as const, error: 'USDC token unset' }
+	const usdc = new ethers.Contract(
+		usdcAddr,
+		[
+			'function balanceOf(address) view returns (uint256)',
+			'function name() view returns (string)',
+			'function authorizationState(address authorizer, bytes32 nonce) view returns (bool)',
+		],
+		conetProvider()
+	)
+	const bal = (await usdc.balanceOf!(buyer)) as bigint
+	if (bal < priceUsdc6) return { success: false as const, error: 'Insufficient CoNET-USDC balance' }
+	const authUsed = (await usdc.authorizationState!(buyer, payNonce)) as boolean
+	if (authUsed) return { success: false as const, error: 'Payment authorization already used' }
+
+	// Verify the buyer's fulfill binding signature (ValidatorDepositRedeem domain).
+	const recovered = ethers.verifyTypedData(
+		validatorDepositRedeemEip712Domain(contract),
+		validatorFulfillTransferOrderTypes,
+		{ buyer, orderId, nonce, deadline },
+		signature
+	)
+	if (recovered.toLowerCase() !== buyer.toLowerCase()) return { success: false as const, error: 'Signer is not buyer' }
+
+	// Verify the EIP-3009 payment authorization (CoNET-USDC token domain): buyer -> seller priceUsdc6.
+	const tokenName = (await usdc.name!()) as string
+	const usdcDomain = { name: tokenName, version: '1', chainId: validatorDepositRedeemEip712Domain(contract).chainId, verifyingContract: usdcAddr }
+	const payRecovered = ethers.verifyTypedData(
+		usdcDomain,
+		usdcTransferWithAuthorizationTypes,
+		{ from: buyer, to: seller, value: priceUsdc6, validAfter: payValidAfter, validBefore: payValidBefore, nonce: payNonce },
+		paySignature
+	)
+	if (payRecovered.toLowerCase() !== buyer.toLowerCase()) return { success: false as const, error: 'Payment signer is not buyer' }
+
+	return {
+		success: true as const,
+		preChecked: { contract, orderId, buyer, nonce, deadline, signature, payValidAfter, payValidBefore, payNonce, paySignature },
+	}
 }
 
 export type ValidatorDepositRedeemCreatePayload = {
@@ -401,7 +1233,6 @@ export type ValidatorDepositRedeemCreatePayload = {
 	allowedClaimer: string
 	validatorCount: bigint
 	targetNodeIp: string
-	conetDepinNodeIps: string[]
 	gbMiningNodeCount: bigint
 	validAfter: bigint
 	validBefore: bigint
@@ -425,15 +1256,66 @@ export type ValidatorDepositRedeemClaimPayload = {
 	contract: string
 	claimer: string
 	beneficiary: string
+	referrer: string
 	code: string
 	deadline: bigint
 	signature: string
 	res?: Response
 }
 
+export type ValidatorDepositRedeemTransferPayload = {
+	contract: string
+	fromBeneficiary: string
+	toBeneficiary: string
+	nodeWallets: string[]
+	nonce: bigint
+	deadline: bigint
+	signature: string
+	res?: Response
+}
+
+export type ValidatorCreateTransferOrderPayload = {
+	contract: string
+	seller: string
+	nodeWallets: string[]
+	priceUsdc6: bigint
+	nonce: bigint
+	deadline: bigint
+	signature: string
+	res?: Response
+}
+
+export type ValidatorCancelTransferOrderPayload = {
+	contract: string
+	orderId: bigint
+	seller: string
+	nonce: bigint
+	deadline: bigint
+	signature: string
+	res?: Response
+}
+
+export type ValidatorFulfillTransferOrderPayload = {
+	contract: string
+	orderId: bigint
+	buyer: string
+	nonce: bigint
+	deadline: bigint
+	signature: string
+	payValidAfter: bigint
+	payValidBefore: bigint
+	payNonce: string
+	paySignature: string
+	res?: Response
+}
+
 export const validatorDepositRedeemCreatePool: ValidatorDepositRedeemCreatePayload[] = []
 export const validatorDepositRedeemCancelPool: ValidatorDepositRedeemCancelPayload[] = []
 export const validatorDepositRedeemClaimPool: ValidatorDepositRedeemClaimPayload[] = []
+export const validatorDepositRedeemTransferPool: ValidatorDepositRedeemTransferPayload[] = []
+export const validatorCreateTransferOrderPool: ValidatorCreateTransferOrderPayload[] = []
+export const validatorCancelTransferOrderPool: ValidatorCancelTransferOrderPayload[] = []
+export const validatorFulfillTransferOrderPool: ValidatorFulfillTransferOrderPayload[] = []
 
 async function withSettleWallet<T>(poolName: string, fn: (wallet: (typeof Settle_ContractPool)[number]) => Promise<T>): Promise<T | undefined> {
 	if (!Settle_ContractPool.length) return undefined
@@ -462,7 +1344,6 @@ export const validatorDepositRedeemCreateProcess = async () => {
 				obj.allowedClaimer,
 				obj.validatorCount,
 				obj.targetNodeIp,
-				obj.conetDepinNodeIps,
 				obj.gbMiningNodeCount,
 				obj.validAfter,
 				obj.validBefore,
@@ -518,7 +1399,7 @@ export const validatorDepositRedeemClaimProcess = async () => {
 	try {
 		const txHash = await withSettleWallet('validatorDepositRedeemClaim', async (sc) => {
 			const c = new ethers.Contract(obj.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
-			const tx = await c.claimRedeemFor!(obj.claimer, obj.beneficiary, obj.code, obj.deadline, obj.signature, { gasLimit: 1_200_000 })
+			const tx = await c.claimRedeemFor!(obj.claimer, obj.beneficiary, obj.referrer, obj.code, obj.deadline, obj.signature, { gasLimit: 1_800_000 })
 			await tx.wait()
 			return tx.hash as string
 		})
@@ -529,6 +1410,143 @@ export const validatorDepositRedeemClaimProcess = async () => {
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
 		setTimeout(() => void validatorDepositRedeemClaimProcess(), 3000)
+	}
+}
+
+export const validatorDepositRedeemTransferProcess = async () => {
+	const obj = validatorDepositRedeemTransferPool.shift()
+	if (!obj) return
+	if (!Settle_ContractPool.length) {
+		validatorDepositRedeemTransferPool.unshift(obj)
+		return setTimeout(() => void validatorDepositRedeemTransferProcess(), 3000)
+	}
+	try {
+		const txHash = await withSettleWallet('validatorDepositRedeemTransfer', async (sc) => {
+			const c = new ethers.Contract(obj.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+			const tx = await c.transferNodes!(
+				obj.fromBeneficiary,
+				obj.toBeneficiary,
+				obj.nodeWallets,
+				obj.nonce,
+				obj.deadline,
+				obj.signature,
+				{ gasLimit: 3_000_000 }
+			)
+			await tx.wait()
+			return tx.hash as string
+		})
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash }).end()
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(Colors.red('[validatorDepositRedeemTransferProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		setTimeout(() => void validatorDepositRedeemTransferProcess(), 3000)
+	}
+}
+
+export const validatorCreateTransferOrderProcess = async () => {
+	const obj = validatorCreateTransferOrderPool.shift()
+	if (!obj) return
+	if (!Settle_ContractPool.length) {
+		validatorCreateTransferOrderPool.unshift(obj)
+		return setTimeout(() => void validatorCreateTransferOrderProcess(), 3000)
+	}
+	try {
+		const result = await withSettleWallet('validatorCreateTransferOrder', async (sc) => {
+			const c = new ethers.Contract(obj.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+			const tx = await c.createTransferOrder!(
+				obj.seller,
+				obj.nodeWallets,
+				obj.priceUsdc6,
+				obj.nonce,
+				obj.deadline,
+				obj.signature,
+				{ gasLimit: 3_000_000 }
+			)
+			const receipt = await tx.wait()
+			// Parse orderId from the TransferOrderCreated event.
+			let orderId: string | undefined
+			for (const log of receipt?.logs ?? []) {
+				try {
+					const parsed = c.interface.parseLog(log)
+					if (parsed?.name === 'TransferOrderCreated') {
+						orderId = (parsed.args[0] as bigint).toString()
+						break
+					}
+				} catch {
+					// not our event
+				}
+			}
+			return { txHash: tx.hash as string, orderId }
+		})
+		if (!result) throw new Error('No settle wallet available')
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, ...result }).end()
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(Colors.red('[validatorCreateTransferOrderProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		setTimeout(() => void validatorCreateTransferOrderProcess(), 3000)
+	}
+}
+
+export const validatorCancelTransferOrderProcess = async () => {
+	const obj = validatorCancelTransferOrderPool.shift()
+	if (!obj) return
+	if (!Settle_ContractPool.length) {
+		validatorCancelTransferOrderPool.unshift(obj)
+		return setTimeout(() => void validatorCancelTransferOrderProcess(), 3000)
+	}
+	try {
+		const txHash = await withSettleWallet('validatorCancelTransferOrder', async (sc) => {
+			const c = new ethers.Contract(obj.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+			const tx = await c.cancelTransferOrder!(obj.orderId, obj.seller, obj.nonce, obj.deadline, obj.signature, { gasLimit: 2_000_000 })
+			await tx.wait()
+			return tx.hash as string
+		})
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash }).end()
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(Colors.red('[validatorCancelTransferOrderProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		setTimeout(() => void validatorCancelTransferOrderProcess(), 3000)
+	}
+}
+
+export const validatorFulfillTransferOrderProcess = async () => {
+	const obj = validatorFulfillTransferOrderPool.shift()
+	if (!obj) return
+	if (!Settle_ContractPool.length) {
+		validatorFulfillTransferOrderPool.unshift(obj)
+		return setTimeout(() => void validatorFulfillTransferOrderProcess(), 3000)
+	}
+	try {
+		const txHash = await withSettleWallet('validatorFulfillTransferOrder', async (sc) => {
+			const c = new ethers.Contract(obj.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+			const tx = await c.fulfillTransferOrder!(
+				obj.orderId,
+				obj.buyer,
+				obj.nonce,
+				obj.deadline,
+				obj.signature,
+				obj.payValidAfter,
+				obj.payValidBefore,
+				obj.payNonce,
+				obj.paySignature,
+				{ gasLimit: 3_000_000 },
+			)
+			await tx.wait()
+			return tx.hash as string
+		})
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash }).end()
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(Colors.red('[validatorFulfillTransferOrderProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		setTimeout(() => void validatorFulfillTransferOrderProcess(), 3000)
 	}
 }
 
@@ -548,6 +1566,276 @@ function runCommand(label: string, command: string, args: string[], cwd: string,
 			reject(new Error(`${label} exited ${code}: ${out.slice(-4000)}`))
 		})
 	})
+}
+
+/**
+ * Read the last {count} validator BLS pubkeys appended to a staking deposit-cli style JSON file.
+ * The generate script APPENDS {validatorCount} entries per claim, so this claim's validators are the tail.
+ * Returns 0x-prefixed 48-byte pubkeys; empty array if the file is unreadable or malformed.
+ */
+function readLastNDepositPubkeys(depositFile: string, count: number): string[] {
+	try {
+		if (count <= 0 || !fs.existsSync(depositFile)) return []
+		const parsed = JSON.parse(fs.readFileSync(depositFile, 'utf8'))
+		const arr = Array.isArray(parsed) ? parsed : []
+		const tail = arr.slice(-count)
+		const out: string[] = []
+		for (const entry of tail) {
+			const raw = String(entry?.pubkey ?? '').trim().toLowerCase()
+			const hex = raw.startsWith('0x') ? raw.slice(2) : raw
+			if (!/^[0-9a-f]{96}$/.test(hex)) return [] // 48 bytes; reject partial/garbage
+			out.push(`0x${hex}`)
+		}
+		return out
+	} catch {
+		return []
+	}
+}
+
+/**
+ * After validators are deployed for a claimed beneficiary, pair each allocated DePIN node wallet (1:1) with a
+ * deployed validator pubkey and register the binding on chain (withdrawal -> beneficiary). The deployment node's
+ * relayer (a redeem admin in {Settle_ContractPool}) submits and pays CNET gas. Failures here do NOT roll back the
+ * deployment (validators already exist); the stage is marked so it can be retried later.
+ */
+async function registerDeployedValidators(
+	state: ValidatorRedeemState,
+	mark: (stage: string, ok: boolean, detail?: string) => void
+): Promise<void> {
+	const contractAddr = resolveValidatorDepositRedeemAddress()
+	if (!contractAddr) return mark('register-validators', false, 'no validator redeem contract configured')
+	const count = Number(state.validatorCount)
+	if (!Number.isFinite(count) || count <= 0) return mark('register-validators', true, 'no validators to register')
+
+	const depositFile = path.join(resolveNewCoNETDir(), 'validator_deposits.json')
+	const pubkeys = readLastNDepositPubkeys(depositFile, count)
+	if (pubkeys.length !== count) {
+		return mark('register-validators', false, `deposit pubkeys ${pubkeys.length} != validatorCount ${count}`)
+	}
+
+	const provider = conetProvider()
+	const cRead = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
+	const bundle = await cRead.getBeneficiaryNodeBundle!(state.beneficiary)
+	const bundleIps = (bundle.depinNodeIps as string[]).map(normalizeIp)
+	const bundleWallets = bundle.nodeWallets as string[]
+	const ipToWallet = new Map<string, string>()
+	bundleIps.forEach((ip, i) => {
+		if (ip && bundleWallets[i] && bundleWallets[i] !== ethers.ZeroAddress) ipToWallet.set(ip, bundleWallets[i])
+	})
+
+	// Pair this claim's allocated DePIN node wallets (from the event IP list) with deployed validator pubkeys.
+	const claimIps = state.conetDepinNodeIps.map(normalizeIp)
+	const pairs: { wallet: string; pubkey: string }[] = []
+	for (let i = 0; i < pubkeys.length; i++) {
+		const ip = claimIps[i]
+		const wallet = ip ? ipToWallet.get(ip) : undefined
+		if (wallet) pairs.push({ wallet, pubkey: pubkeys[i] })
+	}
+	if (!pairs.length) return mark('register-validators', false, 'no DePIN node wallets resolved for this claim')
+
+	const txHash = await withSettleWallet('registerNodeValidators', async (sc) => {
+		const cw = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+		const tx = await cw.registerNodeValidators!(
+			pairs.map((p) => p.wallet),
+			pairs.map((p) => p.pubkey),
+			{ gasLimit: 2_500_000 }
+		)
+		await tx.wait()
+		return tx.hash as string
+	})
+	if (!txHash) return mark('register-validators', false, 'no relayer wallet available (Settle pool empty)')
+	mark('register-validators', true, `registered ${pairs.length} validators; tx=${txHash}`)
+}
+
+/** True if the deposit-cli JSON file contains a validator entry whose pubkey matches {pubkeyHex} (0x..). */
+function depositFileHasPubkey(depositFile: string, pubkeyHex: string): boolean {
+	try {
+		if (!fs.existsSync(depositFile)) return false
+		const want = pubkeyHex.toLowerCase().replace(/^0x/, '')
+		const arr = JSON.parse(fs.readFileSync(depositFile, 'utf8'))
+		if (!Array.isArray(arr)) return false
+		return arr.some((e) => String(e?.pubkey ?? '').toLowerCase().replace(/^0x/, '') === want)
+	} catch {
+		return false
+	}
+}
+
+/**
+ * Transfer step on the validator node (staking-custody model): when a {NodeValidatorBeneficiaryUpdated}
+ * event names a validator this node deployed, HOT-UPDATE its fee_recipient to the new economic beneficiary.
+ * The validator is NOT exited and NOT redeployed: same BLS pubkey, withdrawal_credentials stay pointed at
+ * the ValidatorDepositRedeem contract (immutable custody). Only the execution-layer fee_recipient changes.
+ * Best-effort: missing scripts / dry-run only record stages and never throw out of the listener.
+ */
+async function executeFeeRecipientHotUpdate(args: {
+	contract: string
+	nodeWallet: string
+	toBeneficiary: string
+	pubkeyHash: string
+}): Promise<void> {
+	const rid = `feerecipient:${args.nodeWallet.toLowerCase()}:${args.pubkeyHash.toLowerCase()}`
+	const base: ValidatorRedeemState = {
+		requestId: rid,
+		codeHash: '',
+		claimer: args.nodeWallet,
+		beneficiary: args.toBeneficiary,
+		validatorCount: '1',
+		targetNodeIp: resolveValidatorNodeIp(),
+		conetDepinNodeIps: [],
+		gbMiningNodeCount: '0',
+		status: 'received',
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		stages: {},
+	}
+	const mark = (stage: string, ok: boolean, detail?: string) =>
+		upsertState(rid, (cur) => ({
+			...(cur || base),
+			status: ok ? 'running' : 'failed',
+			updatedAt: new Date().toISOString(),
+			error: ok ? cur?.error : detail,
+			stages: { ...(cur?.stages || base.stages), [stage]: { ok, at: new Date().toISOString(), detail } },
+		}))
+
+	const provider = conetProvider()
+	const cRead = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
+	const onchain = await cRead.getNodeValidator!(args.nodeWallet)
+	const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
+	const newCoNETDir = resolveNewCoNETDir()
+	const depositFile = path.join(newCoNETDir, 'validator_deposits.json')
+
+	if (!pubkey || pubkey === '0x' || !depositFileHasPubkey(depositFile, pubkey)) {
+		// Not a validator this node deployed; ignore silently.
+		return
+	}
+	mark('feerecipient-matched', true, `nodeWallet=${args.nodeWallet} -> ${args.toBeneficiary}`)
+
+	if (validatorDryRun()) {
+		mark('dry-run', true, 'skipped fee_recipient hot-update')
+		upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
+		return
+	}
+
+	const env = {
+		...process.env,
+		VALIDATOR_PUBKEY: pubkey,
+		EXIT_VALIDATOR_PUBKEY: pubkey,
+		FEE_RECIPIENT: args.toBeneficiary,
+		FEE_RECIPIENT_ADDRESS: args.toBeneficiary,
+		RPC_URL: process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL || masterSetup.validatorDeposit?.rpcUrl || resolveBeamioConetHttpRpcUrl(),
+		CHAIN_ID: String(CONET_MAINNET_CHAIN_ID),
+	}
+
+	// Hot-update fee_recipient via a node-local script (keymanager API / proposer-settings + reload).
+	const feeScript = process.env.CONET_VALIDATOR_FEE_RECIPIENT_SCRIPT?.trim() || './07_update_fee_recipient.sh'
+	if (fs.existsSync(path.join(newCoNETDir, feeScript))) {
+		const out = await runCommand('update fee_recipient', 'bash', [feeScript], newCoNETDir, env)
+		mark('feerecipient-update', true, out)
+		upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
+	} else {
+		mark('feerecipient-update', false, `fee_recipient script missing: ${feeScript} (manual hot-update required)`)
+	}
+}
+
+/**
+ * Full-exit step on the validator node: when a {FullExitRequested} event names node wallets whose validators
+ * this node deployed, exit each validator. The 32-CNET principal auto-returns to the ValidatorDepositRedeem
+ * contract (0x01 withdrawal target). After broadcasting the exit, the relayer calls {settleFullExitPayout}
+ * which advances 32×count CNET from the contract pool to the beneficiary. Best-effort; never throws out.
+ */
+async function executeValidatorFullExit(args: {
+	contract: string
+	beneficiary: string
+	nodeWallets: string[]
+}): Promise<void> {
+	const rid = `fullexit:${args.beneficiary.toLowerCase()}:${args.nodeWallets.map((w) => w.toLowerCase()).join(',')}`
+	const base: ValidatorRedeemState = {
+		requestId: rid,
+		codeHash: '',
+		claimer: args.beneficiary,
+		beneficiary: args.beneficiary,
+		validatorCount: String(args.nodeWallets.length),
+		targetNodeIp: resolveValidatorNodeIp(),
+		conetDepinNodeIps: [],
+		gbMiningNodeCount: '0',
+		status: 'received',
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		stages: {},
+	}
+	const mark = (stage: string, ok: boolean, detail?: string) =>
+		upsertState(rid, (cur) => ({
+			...(cur || base),
+			status: ok ? 'running' : 'failed',
+			updatedAt: new Date().toISOString(),
+			error: ok ? cur?.error : detail,
+			stages: { ...(cur?.stages || base.stages), [stage]: { ok, at: new Date().toISOString(), detail } },
+		}))
+
+	const provider = conetProvider()
+	const cRead = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
+	const newCoNETDir = resolveNewCoNETDir()
+	const depositFile = path.join(newCoNETDir, 'validator_deposits.json')
+
+	// Filter to the node wallets whose validator this node actually deployed.
+	const localNodeWallets: string[] = []
+	for (const nodeWallet of args.nodeWallets) {
+		try {
+			const onchain = await cRead.getNodeValidator!(nodeWallet)
+			const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
+			if (pubkey && pubkey !== '0x' && depositFileHasPubkey(depositFile, pubkey)) {
+				localNodeWallets.push(nodeWallet)
+			}
+		} catch {
+			// ignore unreadable node
+		}
+	}
+	if (!localNodeWallets.length) return // no local validators in this exit request
+	mark('fullexit-matched', true, `local nodeWallets=${localNodeWallets.join(',')}`)
+
+	if (validatorDryRun()) {
+		mark('dry-run', true, 'skipped exit + settle')
+		upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
+		return
+	}
+
+	const baseEnv = {
+		...process.env,
+		RPC_URL: process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL || masterSetup.validatorDeposit?.rpcUrl || resolveBeamioConetHttpRpcUrl(),
+		CHAIN_ID: String(CONET_MAINNET_CHAIN_ID),
+		DEPOSIT_CONTRACT: CONET_DEPOSIT_CONTRACT,
+	}
+	const exitScript = process.env.CONET_VALIDATOR_EXIT_SCRIPT?.trim() || './06_exit_validator.sh'
+	if (!fs.existsSync(path.join(newCoNETDir, exitScript))) {
+		mark('fullexit-exit', false, `exit script missing: ${exitScript} (manual exit required)`)
+		return
+	}
+
+	// 1) Exit each local validator (principal returns to the contract's 0x01 withdrawal target).
+	for (const nodeWallet of localNodeWallets) {
+		const onchain = await cRead.getNodeValidator!(nodeWallet)
+		const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
+		const out = await runCommand(`exit validator ${pubkey.slice(0, 12)}`, 'bash', [exitScript], newCoNETDir, {
+			...baseEnv,
+			EXIT_VALIDATOR_PUBKEY: pubkey,
+		})
+		mark(`fullexit-exit-${pubkey.slice(2, 12)}`, true, out)
+	}
+
+	// 2) Advance the 32×count CNET payout from the contract pool to the beneficiary (relayer / Settle wallet).
+	const txHash = await withSettleWallet('settleFullExitPayout', async (sc) => {
+		const cw = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+		const tx = await cw.settleFullExitPayout!(args.beneficiary, localNodeWallets, { gasLimit: 1_500_000 })
+		await tx.wait()
+		return tx.hash as string
+	})
+	if (txHash) {
+		mark('fullexit-settle', true, `tx=${txHash}`)
+		upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
+	} else {
+		// Pool can't cover the advance yet (or no relayer); retry once the auto-returned principal lands.
+		mark('fullexit-settle', false, 'settle deferred (pool insufficient or no relayer); will retry')
+	}
 }
 
 async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void> {
@@ -605,6 +1893,14 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 		{ ...env, CONFIRM_SUBMIT: 'YES' }
 	)
 	mark('submit-deposits', true, depositOut)
+
+	// Register each deployed validator (BLS pubkey) against its paired DePIN node wallet on chain so the
+	// (node + validator) pair can later be exited / transferred to a new beneficiary. Non-fatal on failure.
+	try {
+		await registerDeployedValidators(state, mark)
+	} catch (e: any) {
+		mark('register-validators', false, e?.shortMessage ?? e?.message ?? String(e))
+	}
 
 	const restartOut = await runCommand('restart beacon validator', 'bash', ['./05_restart_beacon_validator.sh'], newCoNETDir, env)
 	mark('restart-validator', true, restartOut)
@@ -673,6 +1969,41 @@ export function startValidatorDepositRedeemListener(): void {
 				const msg = e?.message ?? String(e)
 				logger(Colors.red('[validatorDepositRedeemListener] execute failed:'), msg)
 				upsertState(rid, (cur) => ({ ...(cur || next), status: 'failed', error: msg, updatedAt: new Date().toISOString() }))
+			}
+		})()
+	})
+
+	// Transfer (free transfer OR EIP-3009 marketplace fulfilment): a node's validator changed economic
+	// beneficiary. The owning validator node HOT-UPDATES fee_recipient to the new beneficiary — NO exit,
+	// NO redeploy (same BLS pubkey, withdrawal_credentials stay on the contract).
+	c.on('NodeValidatorBeneficiaryUpdated', (nodeWallet, pubkeyHash, _fromBeneficiary, toBeneficiary) => {
+		void (async () => {
+			try {
+				await executeFeeRecipientHotUpdate({
+					contract,
+					nodeWallet: ethers.getAddress(String(nodeWallet)),
+					toBeneficiary: ethers.getAddress(String(toBeneficiary)),
+					pubkeyHash: String(pubkeyHash),
+				})
+			} catch (e: any) {
+				logger(Colors.red('[validatorDepositRedeemListener] fee_recipient hot-update failed:'), e?.message ?? String(e))
+			}
+		})()
+	})
+
+	// Full exit: the beneficiary requested a full exit of selected node wallets. The owning validator node
+	// exits each local validator (principal auto-returns to the contract), then the relayer advances the
+	// 32×count CNET payout via {settleFullExitPayout}.
+	c.on('FullExitRequested', (beneficiary, nodeWallets) => {
+		void (async () => {
+			try {
+				await executeValidatorFullExit({
+					contract,
+					beneficiary: ethers.getAddress(String(beneficiary)),
+					nodeWallets: (nodeWallets as string[]).map((w) => ethers.getAddress(String(w))),
+				})
+			} catch (e: any) {
+				logger(Colors.red('[validatorDepositRedeemListener] full exit failed:'), e?.message ?? String(e))
 			}
 		})()
 	})

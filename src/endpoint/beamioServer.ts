@@ -35,6 +35,10 @@ import {
 	getValidatorDepositRedeemStatus,
 	validatorDepositRedeemCancelClusterPreCheck,
 	validatorDepositRedeemClaimClusterPreCheck,
+	validatorDepositRedeemTransferClusterPreCheck,
+	createTransferOrderClusterPreCheck,
+	cancelTransferOrderClusterPreCheck,
+	fulfillTransferOrderClusterPreCheck,
 	validatorDepositRedeemConfig,
 	validatorDepositRedeemCreateClusterPreCheck,
 	validatorDepositRedeemReadAdminNonce,
@@ -8482,7 +8486,6 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					allowedClaimer: p.allowedClaimer,
 					validatorCount: p.validatorCount.toString(),
 					targetNodeIp: p.targetNodeIp,
-					conetDepinNodeIps: p.conetDepinNodeIps,
 					gbMiningNodeCount: p.gbMiningNodeCount.toString(),
 					validAfter: p.validAfter.toString(),
 					validBefore: p.validBefore.toString(),
@@ -8536,9 +8539,116 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					contract: p.contract,
 					claimer: p.claimer,
 					beneficiary: p.beneficiary,
+					referrer: p.referrer,
 					code: p.code,
 					deadline: p.deadline.toString(),
 					signature: p.signature,
+				},
+				res
+			)
+		} catch (e: any) {
+			return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/validatorDepositRedeemTransfer', async (req, res) => {
+		try {
+			const pre = await validatorDepositRedeemTransferClusterPreCheck(req.body)
+			if (!pre.success) {
+				logger(Colors.red(`server /api/validatorDepositRedeemTransfer preCheck FAIL: ${pre.error}`))
+				return res.status(400).json({ success: false, error: pre.error }).end()
+			}
+			const p = pre.preChecked
+			postLocalhost(
+				'/api/validatorDepositRedeemTransfer',
+				{
+					contract: p.contract,
+					fromBeneficiary: p.fromBeneficiary,
+					toBeneficiary: p.toBeneficiary,
+					nodeWallets: p.nodeWallets,
+					nonce: p.nonce.toString(),
+					deadline: p.deadline.toString(),
+					signature: p.signature,
+				},
+				res
+			)
+		} catch (e: any) {
+			return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/validatorCreateTransferOrder', async (req, res) => {
+		try {
+			const pre = await createTransferOrderClusterPreCheck(req.body)
+			if (!pre.success) {
+				logger(Colors.red(`server /api/validatorCreateTransferOrder preCheck FAIL: ${pre.error}`))
+				return res.status(400).json({ success: false, error: pre.error }).end()
+			}
+			const p = pre.preChecked
+			postLocalhost(
+				'/api/validatorCreateTransferOrder',
+				{
+					contract: p.contract,
+					seller: p.seller,
+					nodeWallets: p.nodeWallets,
+					priceUsdc6: p.priceUsdc6.toString(),
+					nonce: p.nonce.toString(),
+					deadline: p.deadline.toString(),
+					signature: p.signature,
+				},
+				res
+			)
+		} catch (e: any) {
+			return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/validatorCancelTransferOrder', async (req, res) => {
+		try {
+			const pre = await cancelTransferOrderClusterPreCheck(req.body)
+			if (!pre.success) {
+				logger(Colors.red(`server /api/validatorCancelTransferOrder preCheck FAIL: ${pre.error}`))
+				return res.status(400).json({ success: false, error: pre.error }).end()
+			}
+			const p = pre.preChecked
+			postLocalhost(
+				'/api/validatorCancelTransferOrder',
+				{
+					contract: p.contract,
+					orderId: p.orderId.toString(),
+					seller: p.seller,
+					nonce: p.nonce.toString(),
+					deadline: p.deadline.toString(),
+					signature: p.signature,
+				},
+				res
+			)
+		} catch (e: any) {
+			return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/validatorFulfillTransferOrder', async (req, res) => {
+		try {
+			const pre = await fulfillTransferOrderClusterPreCheck(req.body)
+			if (!pre.success) {
+				logger(Colors.red(`server /api/validatorFulfillTransferOrder preCheck FAIL: ${pre.error}`))
+				return res.status(400).json({ success: false, error: pre.error }).end()
+			}
+			const p = pre.preChecked
+			postLocalhost(
+				'/api/validatorFulfillTransferOrder',
+				{
+					contract: p.contract,
+					orderId: p.orderId.toString(),
+					buyer: p.buyer,
+					nonce: p.nonce.toString(),
+					deadline: p.deadline.toString(),
+					signature: p.signature,
+					payValidAfter: p.payValidAfter.toString(),
+					payValidBefore: p.payValidBefore.toString(),
+					payNonce: p.payNonce,
+					paySignature: p.paySignature,
 				},
 				res
 			)

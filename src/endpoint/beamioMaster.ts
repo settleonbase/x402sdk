@@ -48,6 +48,14 @@ import {
 	validatorDepositRedeemCancelProcess,
 	validatorDepositRedeemClaimPool,
 	validatorDepositRedeemClaimProcess,
+	validatorDepositRedeemTransferPool,
+	validatorDepositRedeemTransferProcess,
+	validatorCreateTransferOrderPool,
+	validatorCreateTransferOrderProcess,
+	validatorCancelTransferOrderPool,
+	validatorCancelTransferOrderProcess,
+	validatorFulfillTransferOrderPool,
+	validatorFulfillTransferOrderProcess,
 	validatorDepositRedeemCreatePool,
 	validatorDepositRedeemCreateProcess,
 } from './validatorDepositRedeem'
@@ -2987,7 +2995,6 @@ const routing = ( router: Router ) => {
 				allowedClaimer?: string
 				validatorCount?: string
 				targetNodeIp?: string
-				conetDepinNodeIps?: string[]
 				gbMiningNodeCount?: string
 				validAfter?: string
 				validBefore?: string
@@ -3002,7 +3009,6 @@ const routing = ( router: Router ) => {
 				!b.allowedClaimer ||
 				!b.validatorCount ||
 				!b.targetNodeIp ||
-				!Array.isArray(b.conetDepinNodeIps) ||
 				!b.gbMiningNodeCount ||
 				b.validAfter == null ||
 				b.validBefore == null ||
@@ -3019,7 +3025,6 @@ const routing = ( router: Router ) => {
 				allowedClaimer: ethers.getAddress(b.allowedClaimer),
 				validatorCount: BigInt(b.validatorCount),
 				targetNodeIp: b.targetNodeIp,
-				conetDepinNodeIps: b.conetDepinNodeIps,
 				gbMiningNodeCount: BigInt(b.gbMiningNodeCount),
 				validAfter: BigInt(b.validAfter),
 				validBefore: BigInt(b.validBefore),
@@ -3053,7 +3058,7 @@ const routing = ( router: Router ) => {
 		})
 
 		router.post('/validatorDepositRedeemClaim', (req, res) => {
-			const b = req.body as { contract?: string; claimer?: string; beneficiary?: string; code?: string; deadline?: string; signature?: string }
+			const b = req.body as { contract?: string; claimer?: string; beneficiary?: string; referrer?: string; code?: string; deadline?: string; signature?: string }
 			if (!b.contract || !b.claimer || !b.beneficiary || typeof b.code !== 'string' || b.deadline == null || !b.signature) {
 				return res.status(400).json({ success: false, error: 'Missing validator redeem claim fields' }).end()
 			}
@@ -3061,6 +3066,10 @@ const routing = ( router: Router ) => {
 				contract: ethers.getAddress(b.contract),
 				claimer: ethers.getAddress(b.claimer),
 				beneficiary: ethers.getAddress(b.beneficiary),
+				referrer:
+					typeof b.referrer === 'string' && b.referrer.trim() && ethers.isAddress(b.referrer)
+						? ethers.getAddress(b.referrer)
+						: ethers.ZeroAddress,
 				code: b.code,
 				deadline: BigInt(b.deadline),
 				signature: b.signature,
@@ -3068,6 +3077,144 @@ const routing = ( router: Router ) => {
 			})
 			validatorDepositRedeemClaimProcess().catch((err: any) => {
 				logger(Colors.red('[validatorDepositRedeemClaimProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		router.post('/validatorDepositRedeemTransfer', (req, res) => {
+			const b = req.body as {
+				contract?: string
+				fromBeneficiary?: string
+				toBeneficiary?: string
+				nodeWallets?: string[]
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			if (
+				!b.contract ||
+				!b.fromBeneficiary ||
+				!b.toBeneficiary ||
+				!Array.isArray(b.nodeWallets) ||
+				b.nodeWallets.length === 0 ||
+				b.nonce == null ||
+				b.deadline == null ||
+				!b.signature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing validator redeem transfer fields' }).end()
+			}
+			validatorDepositRedeemTransferPool.push({
+				contract: ethers.getAddress(b.contract),
+				fromBeneficiary: ethers.getAddress(b.fromBeneficiary),
+				toBeneficiary: ethers.getAddress(b.toBeneficiary),
+				nodeWallets: b.nodeWallets.map((a) => ethers.getAddress(a)),
+				nonce: BigInt(b.nonce),
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				res,
+			})
+			validatorDepositRedeemTransferProcess().catch((err: any) => {
+				logger(Colors.red('[validatorDepositRedeemTransferProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		router.post('/validatorCreateTransferOrder', (req, res) => {
+			const b = req.body as {
+				contract?: string
+				seller?: string
+				nodeWallets?: string[]
+				priceUsdc6?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			if (
+				!b.contract ||
+				!b.seller ||
+				!Array.isArray(b.nodeWallets) ||
+				b.nodeWallets.length === 0 ||
+				b.priceUsdc6 == null ||
+				b.nonce == null ||
+				b.deadline == null ||
+				!b.signature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing create transfer order fields' }).end()
+			}
+			validatorCreateTransferOrderPool.push({
+				contract: ethers.getAddress(b.contract),
+				seller: ethers.getAddress(b.seller),
+				nodeWallets: b.nodeWallets.map((a) => ethers.getAddress(a)),
+				priceUsdc6: BigInt(b.priceUsdc6),
+				nonce: BigInt(b.nonce),
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				res,
+			})
+			validatorCreateTransferOrderProcess().catch((err: any) => {
+				logger(Colors.red('[validatorCreateTransferOrderProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		router.post('/validatorCancelTransferOrder', (req, res) => {
+			const b = req.body as { contract?: string; orderId?: string; seller?: string; nonce?: string; deadline?: string; signature?: string }
+			if (!b.contract || b.orderId == null || !b.seller || b.nonce == null || b.deadline == null || !b.signature) {
+				return res.status(400).json({ success: false, error: 'Missing cancel transfer order fields' }).end()
+			}
+			validatorCancelTransferOrderPool.push({
+				contract: ethers.getAddress(b.contract),
+				orderId: BigInt(b.orderId),
+				seller: ethers.getAddress(b.seller),
+				nonce: BigInt(b.nonce),
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				res,
+			})
+			validatorCancelTransferOrderProcess().catch((err: any) => {
+				logger(Colors.red('[validatorCancelTransferOrderProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		router.post('/validatorFulfillTransferOrder', (req, res) => {
+			const b = req.body as {
+				contract?: string
+				orderId?: string
+				buyer?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+				payValidAfter?: string
+				payValidBefore?: string
+				payNonce?: string
+				paySignature?: string
+			}
+			if (
+				!b.contract ||
+				b.orderId == null ||
+				!b.buyer ||
+				b.nonce == null ||
+				b.deadline == null ||
+				!b.signature ||
+				b.payValidAfter == null ||
+				b.payValidBefore == null ||
+				!b.payNonce ||
+				!b.paySignature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing fulfill transfer order fields' }).end()
+			}
+			validatorFulfillTransferOrderPool.push({
+				contract: ethers.getAddress(b.contract),
+				orderId: BigInt(b.orderId),
+				buyer: ethers.getAddress(b.buyer),
+				nonce: BigInt(b.nonce),
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				payValidAfter: BigInt(b.payValidAfter),
+				payValidBefore: BigInt(b.payValidBefore),
+				payNonce: b.payNonce,
+				paySignature: b.paySignature,
+				res,
+			})
+			validatorFulfillTransferOrderProcess().catch((err: any) => {
+				logger(Colors.red('[validatorFulfillTransferOrderProcess] unhandled error:'), err?.message ?? err)
 			})
 		})
 
