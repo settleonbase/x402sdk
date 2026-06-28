@@ -2224,7 +2224,27 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 
 	await fundAndDepositViaContract(state, mark)
 
-	const restartOut = await runCommand('restart beacon validator', 'bash', ['./05_restart_beacon_validator.sh'], newCoNETDir, env)
+	// Default skip: 05_restart_beacon_validator.sh restarts CL/VC; listener must not restart chain infra unless explicitly enabled.
+	const skipBeaconRestart = process.env.CONET_VALIDATOR_SKIP_BEACON_RESTART?.trim().toUpperCase() !== 'NO'
+	if (skipBeaconRestart) {
+		mark(
+			'restart-validator',
+			true,
+			'skipped (set CONET_VALIDATOR_SKIP_BEACON_RESTART=NO to run 05_restart_beacon_validator.sh)'
+		)
+		return
+	}
+
+	const restartEnv = {
+		...env,
+		PRYSM_BEACON_BINARY:
+			process.env.PRYSM_BEACON_BINARY?.trim() ||
+			path.join(newCoNETDir, 'dependencies/prysm-v7.1.5/beacon-chain'),
+		PRYSM_VALIDATOR_BINARY:
+			process.env.PRYSM_VALIDATOR_BINARY?.trim() ||
+			path.join(newCoNETDir, 'dependencies/prysm-v7.1.5/validator'),
+	}
+	const restartOut = await runCommand('restart beacon validator', 'bash', ['./05_restart_beacon_validator.sh'], newCoNETDir, restartEnv)
 	mark('restart-validator', true, restartOut)
 }
 
@@ -2259,6 +2279,14 @@ const LISTENER_EVENT_NAMES = [
 ] as const
 
 const VALIDATOR_DEPOSIT_REDEEM_IFACE = new ethers.Interface(VALIDATOR_DEPOSIT_REDEEM_ABI)
+
+function isStaleRunningRedeemState(existing: { status?: string; updatedAt?: string } | undefined): boolean {
+	if (!existing || existing.status !== 'running') return false
+	const updatedAt = Date.parse(existing.updatedAt || '')
+	const staleMs = Number(process.env.CONET_VALIDATOR_REDEEM_STALE_RUNNING_MS || 10 * 60 * 1000)
+	if (!Number.isFinite(updatedAt) || staleMs <= 0) return false
+	return Date.now() - updatedAt >= staleMs
+}
 
 async function handleValidatorRedeemClaimedEvent(
 	contract: string,
@@ -2299,7 +2327,11 @@ async function handleValidatorRedeemClaimedEvent(
 			return
 		}
 		const existing = getValidatorDepositRedeemStatus(rid)
-		if (existing?.status === 'running' || existing?.status === 'succeeded') return
+		if (existing?.status === 'succeeded') return
+		if (existing?.status === 'running' && !isStaleRunningRedeemState(existing)) return
+		if (existing?.status === 'running' && isStaleRunningRedeemState(existing)) {
+			logger(Colors.yellow(`[validatorDepositRedeemListener] retry stale running claim ${rid.slice(0, 12)}…`))
+		}
 		const next = upsertState(rid, () => ({
 			requestId: rid,
 			codeHash: args.codeHash,
