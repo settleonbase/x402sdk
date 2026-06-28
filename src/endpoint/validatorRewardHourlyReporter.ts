@@ -136,7 +136,7 @@ function readLocalDepositPubkeys(): string[] {
 				// skip malformed
 			}
 		}
-		return [...new Set(out.map((p) => p.toLowerCase()))].map((p) => ethers.getAddress(p))
+		return [...new Set(out.map((p) => p.toLowerCase()))]
 	} catch (e: unknown) {
 		logger(Colors.yellow(`[validatorRewardHourlyReporter] deposit file read failed: ${(e as Error)?.message ?? e}`))
 		return []
