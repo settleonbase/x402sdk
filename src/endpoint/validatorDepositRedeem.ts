@@ -673,6 +673,24 @@ function resolveDepositPrivateKeyFile(): string {
 	)
 }
 
+/** Prysm validator keystore password — same value used by deposit CLI on this node. */
+function resolveKeystorePasswordFile(): string {
+	return (
+		process.env.CONET_VALIDATOR_KEYSTORE_PASSWORD_FILE?.trim() ||
+		path.join(resolveNewCoNETDir(), 'secrets/validator_keystore_password.txt')
+	)
+}
+
+function resolveKeystorePassword(): string {
+	const inline = process.env.KEYSTORE_PASSWORD?.trim()
+	if (inline) return inline
+	const file = resolveKeystorePasswordFile()
+	if (file && fs.existsSync(file)) {
+		return fs.readFileSync(file, 'utf8').trim()
+	}
+	return ''
+}
+
 function loadRedeemAdminWallet(): ethers.Wallet {
 	const file = resolveDepositPrivateKeyFile()
 	if (!file || !fs.existsSync(file)) {
@@ -2129,9 +2147,16 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 			'CONET_VALIDATOR_REDEEM_ADMIN_PRIVATE_KEY_FILE missing; fundAndDepositValidators requires redeem admin key (key_38.102.85.33)'
 		)
 	}
+	const keystorePassword = resolveKeystorePassword()
+	if (!dryRun && !keystorePassword) {
+		throw new Error(
+			'KEYSTORE_PASSWORD or CONET_VALIDATOR_KEYSTORE_PASSWORD_FILE missing; required for 01_generate_append_validator_deposits.sh (must match validator keystore password on this node)'
+		)
+	}
 
 	const env = {
 		...process.env,
+		KEYSTORE_PASSWORD: keystorePassword,
 		VALIDATOR_COUNT: state.validatorCount,
 		// Withdrawal credentials must point at ValidatorDepositRedeem (0x01 + contract), not beneficiary EOA.
 		WITHDRAWAL_ADDRESS_RAW: contractAddr,
