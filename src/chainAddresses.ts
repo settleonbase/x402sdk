@@ -81,9 +81,9 @@ export const CONET_BUSINESS_START_KET = '0xAcf20dbb4DE0992d8947Ef00b505bBc17E6A0
 export const CONET_BUSINESS_START_KET_REDEEM = '0xe9CeDC2c9F7DE7c0e6d1f1ba1F7e7126F0F1D3c8'
 
 /** ValidatorDepositRedeem（CoNET）；与 deployments/conet-addresses.json `ValidatorDepositRedeem` 同步 */
-export const CONET_VALIDATOR_DEPOSIT_REDEEM = '0x02C425537E3E2C7B9F3071DdFc4E0d81DD3B2EFC'
+export const CONET_VALIDATOR_DEPOSIT_REDEEM = '0x27d45092dA7847967aA8d3D5b490E2c5eb6c294f'
 /** ValidatorDepositRedeem deploy block（CoNET）；listener 补扫下限，不得低于此块 */
-export const CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK = 156606
+export const CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK = 159057
 export const CONET_DEPOSIT_CONTRACT = '0x4242424242424242424242424242424242424242'
 export const CONET_VALIDATOR_DEPOSIT_FUNDER = '0x0981275553A41E00ec1006fe074971285E00c2A3'
 /** ValidatorDepositRedeem contract admin (withdrawNative only; not redeem admin). Sync from deployments/conet-ValidatorDepositRedeem.json */

@@ -17,6 +17,7 @@ import {
 	CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN,
 	CONET_VALIDATOR_NODE_IP,
 	CONET_VALIDATOR_NODE_REWARD_INDEXER,
+	CONET_GUARDIAN_NODES_INFO_V6,
 } from '../chainAddresses'
 import { Settle_ContractPool } from '../MemberCard'
 
@@ -66,6 +67,10 @@ const VALIDATOR_DEPOSIT_REDEEM_ABI = [
 	'function getRequestFullExitDigest(address beneficiary, address[] nodeWallets, uint256 nonce, uint256 deadline) view returns (bytes32)',
 	'function rewardIndexer() view returns (address)',
 	'function getClaimRedeemDigest(address claimer, bytes32 codeHash, address beneficiary, uint256 deadline) view returns (bytes32)',
+	'function nextGuardianAllocId() view returns (uint256)',
+	'function guardianAllocStartId() view returns (uint256)',
+	'function guardianIdBeneficiary(uint256 nodeId) view returns (address)',
+	'function nodeWalletBeneficiary(address nodeWallet) view returns (address)',
 	'function setRewardIndexer(address rewardIndexer_) external',
 	'event RewardIndexerConfigured(address indexed rewardIndexer)',
 	'event TransferOrderCreated(uint256 indexed orderId, address indexed seller, uint256 priceUsdc6, address[] nodeWallets)',
@@ -158,6 +163,79 @@ function isValidIpLike(raw: string): boolean {
 
 function codeHashOf(code: string): string {
 	return ethers.keccak256(ethers.toUtf8Bytes(code))
+}
+
+const GUARDIAN_NODES_ALLOC_ABI = [
+	'function id2ip(uint256 id) view returns (string)',
+	'function idOwner(uint256 id) view returns (address)',
+	'function ipaddress2owner(string ip) view returns (address)',
+	'function ipaddressExisting(string ip) view returns (bool)',
+] as const
+
+function formatEthersRevert(e: unknown): string {
+	const err = e as { reason?: string; shortMessage?: string; message?: string }
+	if (typeof err?.reason === 'string' && err.reason.trim()) return err.reason.trim()
+	if (typeof err?.shortMessage === 'string' && err.shortMessage.trim()) return err.shortMessage.trim()
+	if (typeof err?.message === 'string' && err.message.trim()) return err.message.trim()
+	return 'Claim would revert on-chain'
+}
+
+/** Mirrors on-chain guardian allocation checks before claimRedeemFor (RPC-direct). */
+export async function validatorDepositRedeemClaimAllocationPreflight(
+	beneficiary: string,
+	validatorCount: bigint
+): Promise<{ ok: true } | { ok: false; error: string }> {
+	const redeemAddr = resolveValidatorDepositRedeemAddress()
+	if (!redeemAddr) return { ok: false, error: 'CONET_VALIDATOR_DEPOSIT_REDEEM not configured' }
+	if (validatorCount <= 0n) return { ok: true }
+
+	const provider = conetProvider()
+	const redeem = new ethers.Contract(redeemAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
+	const guardian = new ethers.Contract(CONET_GUARDIAN_NODES_INFO_V6, GUARDIAN_NODES_ALLOC_ABI, provider)
+	const ben = ethers.getAddress(beneficiary)
+
+	let nextId = (await redeem.nextGuardianAllocId!()) as bigint
+	const startId = (await redeem.guardianAllocStartId!()) as bigint
+
+	for (let need = 0n; need < validatorCount; need++) {
+		let resolved = false
+		while (!resolved) {
+			if (nextId < startId) {
+				return { ok: false, error: 'Guardian allocation pool exhausted (before pool start id)' }
+			}
+			const idOwner = ethers.getAddress((await redeem.guardianIdBeneficiary!(nextId)) as string)
+			if (idOwner !== ethers.ZeroAddress) {
+				nextId++
+				continue
+			}
+			const ip = String(await guardian.id2ip!(nextId))
+			if (!ip || ip.length === 0) {
+				return { ok: false, error: `Guardian node id ${nextId.toString()} has no IP` }
+			}
+			const ipOk = Boolean(await guardian.ipaddressExisting!(ip))
+			if (!ipOk) {
+				return { ok: false, error: `Guardian IP ${ip} is not registered on-chain` }
+			}
+			let nodeWallet = ethers.getAddress((await guardian.idOwner!(nextId)) as string)
+			if (nodeWallet === ethers.ZeroAddress) {
+				nodeWallet = ethers.getAddress((await guardian.ipaddress2owner!(ip)) as string)
+			}
+			if (nodeWallet === ethers.ZeroAddress) {
+				return { ok: false, error: `Guardian node id ${nextId.toString()} has no operator wallet` }
+			}
+			const walletBen = ethers.getAddress((await redeem.nodeWalletBeneficiary!(nodeWallet)) as string)
+			if (walletBen !== ethers.ZeroAddress && walletBen.toLowerCase() !== ben.toLowerCase()) {
+				return {
+					ok: false,
+					error:
+						'DePIN operator wallet is already bound to another beneficiary (ValidatorRedeem: node wallet other beneficiary). Redeploy ValidatorDepositRedeem with the shared-operator fix, or claim with the same beneficiary wallet as the prior claim.',
+				}
+			}
+			resolved = true
+			nextId++
+		}
+	}
+	return { ok: true }
 }
 
 export function resolveValidatorDepositRedeemAddress(): string | null {
@@ -1167,6 +1245,16 @@ export async function validatorDepositRedeemClaimClusterPreCheck(body: {
 		signature
 	)
 	if (recovered.toLowerCase() !== claimer.toLowerCase()) return { success: false as const, error: 'Signer is not claimer' }
+
+	const alloc = await validatorDepositRedeemClaimAllocationPreflight(beneficiary, validatorCount as bigint)
+	if (!alloc.ok) return { success: false as const, error: alloc.error }
+
+	try {
+		await read.claimRedeemFor!.staticCall(claimer, beneficiary, code, deadline, signature)
+	} catch (e: unknown) {
+		return { success: false as const, error: formatEthersRevert(e) }
+	}
+
 	return { success: true as const, preChecked: { contract, claimer, beneficiary, referrer, code, deadline, signature } }
 }
 
@@ -2214,21 +2302,54 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 		return
 	}
 
-	const generateOut = await runCommand('generate validators', 'bash', ['./01_generate_append_validator_deposits.sh'], newCoNETDir, env)
+	const generateOut = await runCommand(
+		'generate validators',
+		'bash',
+		['./01_generate_append_validator_deposits_listener.sh'],
+		newCoNETDir,
+		env
+	)
 	mark('generate-validators', true, generateOut)
 
-	if ((process.env.CONET_VALIDATOR_RUN_JOIN_SCRIPT || '').toUpperCase() === 'YES') {
-		const joinOut = await runCommand('join/import validators', 'bash', ['./03_join_v714.sh'], newCoNETDir, env)
-		mark('join-import-validators', true, joinOut)
-	}
+	// Password files must stay stable for Prysm wallet; re-read after wrapper restore.
+	const importKeystorePassword = resolveKeystorePassword()
+	const importWalletPassword = resolveWalletPassword()
 
 	await fundAndDepositViaContract(state, mark)
 
-	// Default skip: 05_restart_beacon_validator.sh restarts CL/VC; listener must not restart chain infra unless explicitly enabled.
+	const prysmValidatorBinary =
+		process.env.PRYSM_VALIDATOR_BINARY?.trim() ||
+		path.join(newCoNETDir, 'dependencies/prysm-v7.1.5/validator')
+	const importEnv = {
+		...env,
+		KEYSTORE_PASSWORD: importKeystorePassword,
+		WALLET_PASSWORD: importWalletPassword,
+		KEYSTORE_PASSWORD_FILE: resolveKeystorePasswordFile(),
+		WALLET_PASSWORD_FILE: resolveWalletPasswordFile(),
+		PRYSM_VALIDATOR_BINARY: prysmValidatorBinary,
+		RELOAD_VALIDATOR_AFTER_IMPORT:
+			process.env.CONET_VALIDATOR_RELOAD_VALIDATOR_AFTER_IMPORT?.trim().toUpperCase() === 'NO' ? 'NO' : 'YES',
+	}
+
+	const skipImport = process.env.CONET_VALIDATOR_SKIP_IMPORT?.trim().toUpperCase() === 'YES'
+	if (skipImport) {
+		mark('import-validator-keys', true, 'skipped (CONET_VALIDATOR_SKIP_IMPORT=YES)')
+	} else {
+		const importOut = await runCommand(
+			'import append validator keys',
+			'bash',
+			['./08_import_append_validator_keys.sh'],
+			newCoNETDir,
+			importEnv
+		)
+		mark('import-validator-keys', true, importOut)
+	}
+
+	// Optional full beacon+validator restart (does NOT import keys). Default skip — import script reloads validator only.
 	const skipBeaconRestart = process.env.CONET_VALIDATOR_SKIP_BEACON_RESTART?.trim().toUpperCase() !== 'NO'
 	if (skipBeaconRestart) {
 		mark(
-			'restart-validator',
+			'restart-beacon-validator',
 			true,
 			'skipped (set CONET_VALIDATOR_SKIP_BEACON_RESTART=NO to run 05_restart_beacon_validator.sh)'
 		)
@@ -2236,16 +2357,13 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 	}
 
 	const restartEnv = {
-		...env,
+		...importEnv,
 		PRYSM_BEACON_BINARY:
 			process.env.PRYSM_BEACON_BINARY?.trim() ||
 			path.join(newCoNETDir, 'dependencies/prysm-v7.1.5/beacon-chain'),
-		PRYSM_VALIDATOR_BINARY:
-			process.env.PRYSM_VALIDATOR_BINARY?.trim() ||
-			path.join(newCoNETDir, 'dependencies/prysm-v7.1.5/validator'),
 	}
 	const restartOut = await runCommand('restart beacon validator', 'bash', ['./05_restart_beacon_validator.sh'], newCoNETDir, restartEnv)
-	mark('restart-validator', true, restartOut)
+	mark('restart-beacon-validator', true, restartOut)
 }
 
 let listenerStarted = false
