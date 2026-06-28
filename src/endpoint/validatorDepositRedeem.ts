@@ -2186,6 +2186,10 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 		// Withdrawal credentials must point at ValidatorDepositRedeem (0x01 + contract), not beneficiary EOA.
 		WITHDRAWAL_ADDRESS_RAW: contractAddr,
 		CONFIRM_OVERRIDE_WITHDRAWAL_ADDRESS: 'YES',
+		// 01_generate_append_validator_deposits.sh: skip "Type REPLACE" prompt when prior local output exists.
+		CONFIRM_REPLACE: 'REPLACE',
+		// EthStaker deposit CLI: no TTY prompts (listener stdin is ignored).
+		DEPOSIT_NON_INTERACTIVE: process.env.CONET_VALIDATOR_DEPOSIT_NON_INTERACTIVE?.trim() === 'NO' ? '' : 'YES',
 		PRIVATE_KEY_FILE: depositPrivateKeyFile,
 		DEPOSIT_DATA_FILE: path.join(newCoNETDir, 'validator_deposits.json'),
 		RPC_URL: process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL || masterSetup.validatorDeposit?.rpcUrl || resolveBeamioConetHttpRpcUrl(),
