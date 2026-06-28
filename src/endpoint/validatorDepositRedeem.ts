@@ -17,6 +17,7 @@ import {
 	CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN,
 	CONET_VALIDATOR_NODE_IP,
 	CONET_VALIDATOR_NODE_REWARD_INDEXER,
+	CONET_VALIDATOR_REFERRER_EXTENSION,
 	CONET_GUARDIAN_NODES_INFO_V6,
 } from '../chainAddresses'
 import { Settle_ContractPool, ensureSettleContractPoolInitialized } from '../settleContractPool'
@@ -272,15 +273,15 @@ export function resolveValidatorDepositRedeemAddress(): string | null {
 	}
 }
 
-/** Reads {referrerExtension} from main redeem contract (RPC-direct). */
+/** Reads {referrerExtension} from env / chainAddresses, else main redeem contract (RPC-direct). */
 export async function resolveValidatorReferrerExtensionAddress(): Promise<string | null> {
-	const envRaw = process.env.CONET_VALIDATOR_REFERRER_EXTENSION?.trim()
-	if (envRaw) {
+	const raw = process.env.CONET_VALIDATOR_REFERRER_EXTENSION?.trim() || CONET_VALIDATOR_REFERRER_EXTENSION
+	if (raw) {
 		try {
-			const a = ethers.getAddress(envRaw)
+			const a = ethers.getAddress(raw)
 			if (a !== ethers.ZeroAddress) return a
 		} catch {
-			/* fall through */
+			/* fall through to on-chain lookup */
 		}
 	}
 	const main = resolveValidatorDepositRedeemAddress()

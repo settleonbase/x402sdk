@@ -94,6 +94,8 @@ export const CONET_VALIDATOR_NODE_IP = ''
 /** ValidatorNodeRewardIndexer（CoNET）：每节点/每受益人小时原子 CNET 收益账本 + 周期统计；
  *  与 deployments/conet-addresses.json `ValidatorNodeRewardIndexer` 同步。留空则由主合约 rewardIndexer() 解析。 */
 export const CONET_VALIDATOR_NODE_REWARD_INDEXER = '0xFD8D3237e45FaAa15b9ac884bc33e410b35ECD1C'
+/** ValidatorDepositRedeemReferrerExtension（CoNET）；与 deployments/conet-addresses.json 同步 */
+export const CONET_VALIDATOR_REFERRER_EXTENSION = '0xF3097FB1339DbA0135196667FA2f13B313E4d08e'
 
 export const BASE_MAINNET_FACTORIES = {
   AA_FACTORY: BEAMIO_AA_FACTORY,
