@@ -1,6 +1,6 @@
 import Colors from 'colors/safe'
 import { logger } from '../logger'
-import { startValidatorDepositRedeemListener } from './validatorDepositRedeem'
+import { startValidatorDepositRedeemListener, waitForRunCommandChildren } from './validatorDepositRedeem'
 import { startValidatorRewardHourlyReporter, stopValidatorRewardHourlyReporter } from './validatorRewardHourlyReporter'
 
 /**
@@ -12,10 +12,24 @@ logger(Colors.cyan('[validatorDepositRedeemListenerDaemon] starting'))
 startValidatorDepositRedeemListener()
 startValidatorRewardHourlyReporter()
 
-function shutdown(): void {
+let shuttingDown = false
+
+async function shutdown(signal: string): Promise<void> {
+	if (shuttingDown) return
+	shuttingDown = true
+	logger(
+		Colors.yellow(
+			`[validatorDepositRedeemListenerDaemon] ${signal}; waiting for helper scripts (08_import, …) before exit`
+		)
+	)
 	stopValidatorRewardHourlyReporter()
+	await waitForRunCommandChildren()
 	process.exit(0)
 }
 
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+process.on('SIGINT', () => {
+	void shutdown('SIGINT')
+})
+process.on('SIGTERM', () => {
+	void shutdown('SIGTERM')
+})

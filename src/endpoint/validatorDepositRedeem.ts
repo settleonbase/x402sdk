@@ -3,7 +3,7 @@ import type { Response } from 'express'
 import fs from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
 import { masterSetup, resolveBeamioConetHttpRpcUrl } from '../util'
@@ -145,6 +145,8 @@ export type ValidatorRedeemState = {
 	error?: string
 	stages: Record<string, { ok: boolean; at: string; detail?: string }>
 	depositPrivateKeyFile?: string
+	/** BLS pubkeys deployed in the claim's fund-and-deposit step (for register retry). */
+	deployedPubkeys?: string[]
 }
 
 type StateFile = Record<string, ValidatorRedeemState>
@@ -1843,9 +1845,15 @@ export const validatorFulfillTransferOrderProcess = async () => {
 	}
 }
 
+const activeRunCommandChildren = new Set<ChildProcess>()
+
 function runCommand(label: string, command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+		activeRunCommandChildren.add(child)
+		const detach = () => {
+			activeRunCommandChildren.delete(child)
+		}
 		let out = ''
 		child.stdout.on('data', (d) => {
 			out += d.toString()
@@ -1853,12 +1861,39 @@ function runCommand(label: string, command: string, args: string[], cwd: string,
 		child.stderr.on('data', (d) => {
 			out += d.toString()
 		})
-		child.on('error', reject)
+		child.on('error', (err) => {
+			detach()
+			reject(err)
+		})
 		child.on('close', (code) => {
+			detach()
 			if (code === 0) return resolve(out.slice(-4000))
 			reject(new Error(`${label} exited ${code}: ${out.slice(-4000)}`))
 		})
 	})
+}
+
+/** Active bash helper scripts (08_import, generate, exit, …) spawned via runCommand. */
+export function getActiveRunCommandChildCount(): number {
+	return activeRunCommandChildren.size
+}
+
+/** Wait for in-flight runCommand children before listener exit (systemctl restart grace). */
+export async function waitForRunCommandChildren(timeoutMs?: number): Promise<void> {
+	const grace = timeoutMs ?? Number(process.env.CONET_VALIDATOR_LISTENER_STOP_GRACE_MS || 120_000)
+	if (!Number.isFinite(grace) || grace <= 0 || activeRunCommandChildren.size === 0) return
+	const deadline = Date.now() + grace
+	while (activeRunCommandChildren.size > 0) {
+		if (Date.now() >= deadline) {
+			logger(
+				Colors.yellow(
+					`[validatorDepositRedeem] waitForRunCommandChildren timeout (${grace}ms); ${activeRunCommandChildren.size} child(ren) still running`
+				)
+			)
+			return
+		}
+		await new Promise((r) => setTimeout(r, 200))
+	}
 }
 
 /**
@@ -1867,8 +1902,20 @@ function runCommand(label: string, command: string, args: string[], cwd: string,
  * Returns 0x-prefixed 48-byte pubkeys; empty array if the file is unreadable or malformed.
  */
 function readLastNDepositPubkeys(depositFile: string, count: number): string[] {
+	if (count <= 0 || !fs.existsSync(depositFile)) return []
 	try {
-		return readLastNDepositEntries(depositFile, count).map((e) => e.pubkey)
+		const parsed = JSON.parse(fs.readFileSync(depositFile, 'utf8'))
+		const arr = Array.isArray(parsed) ? parsed : []
+		const tail = arr.slice(-count)
+		const out: string[] = []
+		for (const entry of tail) {
+			try {
+				out.push(hexBytesField(entry?.pubkey, 48, 'pubkey'))
+			} catch {
+				// skip pubkey-only / malformed tail entries
+			}
+		}
+		return out
 	} catch {
 		return []
 	}
@@ -2001,11 +2048,17 @@ async function fundAndDepositViaContract(
 		{ gasLimit: 800_000 + 350_000 * count }
 	)
 	const receipt = await tx.wait()
+	const deployedPubkeys = entries.map((e) => e.pubkey)
 	mark(
 		'fund-and-deposit',
 		true,
 		`deposited ${count} validators from contract balance; tx=${receipt?.hash ?? tx.hash}; admin=${admin.address}`
 	)
+	upsertState(state.requestId, (cur) => ({
+		...(cur || state),
+		deployedPubkeys,
+		updatedAt: new Date().toISOString(),
+	}))
 }
 
 /**
@@ -2024,7 +2077,10 @@ async function registerDeployedValidators(
 	if (!Number.isFinite(count) || count <= 0) return mark('register-validators', true, 'no validators to register')
 
 	const depositFile = path.join(resolveNewCoNETDir(), 'validator_deposits.json')
-	const pubkeys = readLastNDepositPubkeys(depositFile, count)
+	let pubkeys = (state.deployedPubkeys ?? []).slice(0, count)
+	if (pubkeys.length !== count) {
+		pubkeys = readLastNDepositPubkeys(depositFile, count)
+	}
 	if (pubkeys.length !== count) {
 		return mark('register-validators', false, `deposit pubkeys ${pubkeys.length} != validatorCount ${count}`)
 	}
@@ -2049,18 +2105,73 @@ async function registerDeployedValidators(
 	}
 	if (!pairs.length) return mark('register-validators', false, 'no DePIN node wallets resolved for this claim')
 
+	const pending: { wallet: string; pubkey: string }[] = []
+	for (const p of pairs) {
+		const pkHash = ethers.keccak256(p.pubkey)
+		const bound = ethers.getAddress(await cRead.getNodeByValidatorPubkeyHash!(pkHash))
+		if (bound !== ethers.ZeroAddress && bound.toLowerCase() === p.wallet.toLowerCase()) continue
+		if (bound !== ethers.ZeroAddress && bound.toLowerCase() !== p.wallet.toLowerCase()) {
+			return mark('register-validators', false, `pubkey already bound to ${bound}`)
+		}
+		pending.push(p)
+	}
+	if (!pending.length) {
+		return mark('register-validators', true, `already registered ${pairs.length} validators on chain`)
+	}
+
 	const txHash = await withSettleWallet('registerNodeValidators', async (sc) => {
 		const cw = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
 		const tx = await cw.registerNodeValidators!(
-			pairs.map((p) => p.wallet),
-			pairs.map((p) => p.pubkey),
+			pending.map((p) => p.wallet),
+			pending.map((p) => p.pubkey),
 			{ gasLimit: 2_500_000 }
 		)
 		await tx.wait()
 		return tx.hash as string
 	})
 	if (!txHash) return mark('register-validators', false, 'no relayer wallet available (Settle pool empty)')
-	mark('register-validators', true, `registered ${pairs.length} validators; tx=${txHash}`)
+	mark('register-validators', true, `registered ${pending.length} validators; tx=${txHash}`)
+}
+
+/** Manual / retry: register validators for succeeded redeem claims missing register-validators stage. */
+export async function retryRegisterDeployedValidatorsForRedeemState(): Promise<
+	Array<{ requestId: string; ok: boolean; detail: string }>
+> {
+	const stateFile = resolveStateFile()
+	if (!fs.existsSync(stateFile)) return []
+	const all = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as Record<string, ValidatorRedeemState>
+	const results: Array<{ requestId: string; ok: boolean; detail: string }> = []
+	for (const [requestId, state] of Object.entries(all)) {
+		if (state?.status !== 'succeeded') continue
+		if (state.stages?.['register-validators']?.ok) {
+			results.push({ requestId, ok: true, detail: 'already registered' })
+			continue
+		}
+		const stages: ValidatorRedeemState['stages'] = { ...(state.stages || {}) }
+		const mark = (stage: string, ok: boolean, detail?: string) => {
+			stages[stage] = { ok, at: new Date().toISOString(), detail }
+		}
+		try {
+			await registerDeployedValidators({ ...state, requestId, stages }, mark)
+			const ok = Boolean(stages['register-validators']?.ok)
+			results.push({ requestId, ok, detail: stages['register-validators']?.detail ?? 'unknown' })
+			upsertState(requestId, (cur) => ({
+				...(cur || state),
+				stages,
+				updatedAt: new Date().toISOString(),
+			}))
+		} catch (e: unknown) {
+			const detail = (e as Error)?.message ?? String(e)
+			mark('register-validators', false, detail)
+			results.push({ requestId, ok: false, detail })
+			upsertState(requestId, (cur) => ({
+				...(cur || state),
+				stages,
+				updatedAt: new Date().toISOString(),
+			}))
+		}
+	}
+	return results
 }
 
 /** True if the deposit-cli JSON file contains a validator entry whose pubkey matches {pubkeyHex} (0x..). */
@@ -2340,6 +2451,7 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 	const importWalletPassword = resolveWalletPassword()
 
 	await fundAndDepositViaContract(state, mark)
+	await registerDeployedValidators(state, mark)
 
 	const prysmValidatorBinary =
 		process.env.PRYSM_VALIDATOR_BINARY?.trim() ||

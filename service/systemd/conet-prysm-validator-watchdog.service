@@ -1,0 +1,12 @@
+[Unit]
+Description=Ensure CoNET Prysm validator client is running (node-0)
+After=network-online.target conet-prysm-validator.service
+Wants=conet-prysm-validator.service
+
+[Service]
+Type=oneshot
+User=peter
+Group=peter
+WorkingDirectory=/home/peter/ethereum-pos-mainnet
+EnvironmentFile=-/etc/default/conet-validator-redeem-listener
+ExecStart=/home/peter/ethereum-pos-mainnet/09_ensure_validator_running.sh

@@ -74,6 +74,16 @@ function resolveReportChunkSize(): number {
 	return Number.isFinite(n) && n >= 1 ? Math.min(200, Math.floor(n)) : 40
 }
 
+/** Only capture hourStart within this many seconds after UTC hour boundary (avoid mid-hour baselines). */
+function resolveBaselineGraceSec(): number {
+	const n = Number(process.env.CONET_VALIDATOR_HOURLY_REWARD_BASELINE_GRACE_SEC || 300)
+	return Number.isFinite(n) && n >= 30 ? Math.min(900, Math.floor(n)) : 300
+}
+
+function secondsIntoUtcHour(unixSec: number): number {
+	return unixSec % 3600
+}
+
 function reporterDryRun(): boolean {
 	const v = (process.env.CONET_VALIDATOR_HOURLY_REWARD_DRY_RUN || process.env.CONET_VALIDATOR_DRY_RUN || '').trim().toLowerCase()
 	return v === '1' || v === 'true' || v === 'yes'
@@ -120,27 +130,74 @@ function writeState(state: HourlyRewardReporterState): void {
 	fs.writeFileSync(file, JSON.stringify(state, null, 2) + '\n', 'utf8')
 }
 
-function readLocalDepositPubkeys(): string[] {
-	const depositFile = path.join(resolveNewCoNETDir(), 'validator_deposits.json')
-	if (!fs.existsSync(depositFile)) return []
+function normalizePubkeyHex(raw: string): string | null {
+	const pk = String(raw ?? '').trim()
+	if (!pk) return null
 	try {
-		const arr = JSON.parse(fs.readFileSync(depositFile, 'utf8'))
-		if (!Array.isArray(arr)) return []
-		const out: string[] = []
-		for (const entry of arr) {
-			const pk = String(entry?.pubkey ?? '').trim()
-			if (!pk) continue
+		return ethers.hexlify(ethers.getBytes(pk.startsWith('0x') ? pk : `0x${pk}`)).toLowerCase()
+	} catch {
+		return null
+	}
+}
+
+function readExtraTrackPubkeys(): string[] {
+	const inline = (process.env.CONET_VALIDATOR_TRACK_PUBKEYS || '').trim()
+	if (!inline) return []
+	return [
+		...new Set(
+			inline
+				.split(/[\s,]+/)
+				.map((s) => normalizePubkeyHex(s))
+				.filter((s): s is string => Boolean(s))
+		),
+	]
+}
+
+/** List validator pubkeys from Prysm wallet account metadata (optional supplement to deposit file). */
+function readPrysmWalletPubkeys(): string[] {
+	const walletDir =
+		process.env.CONET_VALIDATOR_PRYSM_WALLET_DIR?.trim() ||
+		path.join(resolveNewCoNETDir(), 'network/node-0/consensus/validator-wallet')
+	const accountsDir = path.join(walletDir, 'direct/accounts')
+	if (!fs.existsSync(accountsDir)) return []
+	const out: string[] = []
+	try {
+		for (const file of fs.readdirSync(accountsDir)) {
+			if (!file.endsWith('.json')) continue
 			try {
-				out.push(ethers.hexlify(ethers.getBytes(pk.startsWith('0x') ? pk : `0x${pk}`)))
+				const meta = JSON.parse(fs.readFileSync(path.join(accountsDir, file), 'utf8')) as {
+					validator?: { publicKey?: string }
+				}
+				const pk = normalizePubkeyHex(String(meta?.validator?.publicKey ?? ''))
+				if (pk) out.push(pk)
 			} catch {
-				// skip malformed
+				// skip corrupt account file
 			}
 		}
-		return [...new Set(out.map((p) => p.toLowerCase()))]
-	} catch (e: unknown) {
-		logger(Colors.yellow(`[validatorRewardHourlyReporter] deposit file read failed: ${(e as Error)?.message ?? e}`))
+	} catch {
 		return []
 	}
+	return [...new Set(out)]
+}
+
+function readLocalDepositPubkeys(): string[] {
+	const depositFile = path.join(resolveNewCoNETDir(), 'validator_deposits.json')
+	const out: string[] = []
+	if (fs.existsSync(depositFile)) {
+		try {
+			const arr = JSON.parse(fs.readFileSync(depositFile, 'utf8'))
+			if (Array.isArray(arr)) {
+				for (const entry of arr) {
+					const pk = normalizePubkeyHex(String(entry?.pubkey ?? ''))
+					if (pk) out.push(pk)
+				}
+			}
+		} catch (e: unknown) {
+			logger(Colors.yellow(`[validatorRewardHourlyReporter] deposit file read failed: ${(e as Error)?.message ?? e}`))
+		}
+	}
+	out.push(...readPrysmWalletPubkeys(), ...readExtraTrackPubkeys())
+	return [...new Set(out)]
 }
 
 async function loadTrackedValidators(contract: string): Promise<TrackedValidator[]> {
@@ -313,12 +370,30 @@ async function reporterTick(): Promise<void> {
 		const endSnap = await snapshotValidators(validators)
 
 		if (!Object.keys(state.hourStart).length) {
+			const intoHour = secondsIntoUtcHour(nowSec)
+			const grace = resolveBaselineGraceSec()
+			if (intoHour > grace) {
+				state.trackingHourId = nowHour + 1
+				state.lastReportedHourId = Math.max(state.lastReportedHourId, nowHour)
+				writeState(state)
+				logger(
+					Colors.cyan(
+						`[validatorRewardHourlyReporter] mid-hour startup (t+${intoHour}s); defer baseline to UTC hour ${state.trackingHourId}`
+					)
+				)
+				return
+			}
 			for (const [pk, snap] of endSnap.entries()) {
 				state.hourStart[pk] = snap
 			}
 			state.trackingHourId = nowHour
 			writeState(state)
-			logger(Colors.cyan(`[validatorRewardHourlyReporter] baseline ${endSnap.size} validators for hour ${nowHour}`))
+			logger(Colors.cyan(`[validatorRewardHourlyReporter] UTC baseline ${endSnap.size} validators for hour ${nowHour}`))
+			return
+		}
+
+		if (state.trackingHourId > nowHour) {
+			writeState(state)
 			return
 		}
 

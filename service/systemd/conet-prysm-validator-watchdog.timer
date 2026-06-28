@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic Prysm validator liveness check (node-0)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
