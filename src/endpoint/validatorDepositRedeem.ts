@@ -19,7 +19,9 @@ import {
 	CONET_VALIDATOR_NODE_REWARD_INDEXER,
 	CONET_GUARDIAN_NODES_INFO_V6,
 } from '../chainAddresses'
-import { Settle_ContractPool } from '../MemberCard'
+import { Settle_ContractPool, ensureSettleContractPoolInitialized } from '../settleContractPool'
+
+ensureSettleContractPoolInitialized()
 
 const VALIDATOR_REDEEM_VERSION = 'validator-deposit-redeem-v1'
 const VALIDATOR_STAKE_WEI = 32n * 10n ** 18n
@@ -146,8 +148,29 @@ export type ValidatorRedeemState = {
 
 type StateFile = Record<string, ValidatorRedeemState>
 
+let cachedConetProvider: ethers.JsonRpcProvider | undefined
+
+/** CoNET JSON-RPC for listener + redeem paths; longer timeout + staticNetwork to survive public RPC blips. */
 function conetProvider(): ethers.JsonRpcProvider {
-	return new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(), undefined, { batchMaxCount: 1 })
+	if (cachedConetProvider) return cachedConetProvider
+	const url = resolveBeamioConetHttpRpcUrl()
+	const fetchReq = new ethers.FetchRequest(url)
+	const timeoutMs = Math.max(
+		15_000,
+		Number(process.env.CONET_RPC_HTTP_TIMEOUT_MS || 60_000) || 60_000
+	)
+	fetchReq.timeout = timeoutMs
+	const network = ethers.Network.from(CONET_MAINNET_CHAIN_ID)
+	const pollingInterval = Math.max(
+		4_000,
+		Number(process.env.CONET_LISTENER_POLLING_MS || 12_000) || 12_000
+	)
+	cachedConetProvider = new ethers.JsonRpcProvider(fetchReq, network, {
+		staticNetwork: network,
+		batchMaxCount: 1,
+		pollingInterval,
+	})
+	return cachedConetProvider
 }
 
 function normalizeIp(raw: string): string {
