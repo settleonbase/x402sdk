@@ -2059,6 +2059,59 @@ async function fundAndDepositViaContract(
 		deployedPubkeys,
 		updatedAt: new Date().toISOString(),
 	}))
+
+	// Post-fund on-chain verification (replaces the previously redundant registerNodeValidators tx):
+	// fundAndDepositValidators binds pubkey -> node wallet INLINE (see _registerOneNodeValidator), so the
+	// standard path only needs to confirm the binding. We pair deployed pubkeys 1:1 with the same node wallets
+	// passed into fundAndDepositValidators (no IP/bundle re-resolution → avoids "no DePIN node wallets resolved").
+	const cVerify = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
+	const unbound: { wallet: string; pubkey: string }[] = []
+	const mismatched: string[] = []
+	for (let i = 0; i < deployedPubkeys.length; i++) {
+		const pubkey = deployedPubkeys[i]
+		const wallet = nodeWallets[i]
+		const pkHash = ethers.keccak256(pubkey)
+		let bound = ethers.ZeroAddress
+		try {
+			bound = ethers.getAddress(await cVerify.getNodeByValidatorPubkeyHash!(pkHash))
+		} catch {
+			bound = ethers.ZeroAddress
+		}
+		if (bound === ethers.ZeroAddress) unbound.push({ wallet, pubkey })
+		else if (bound.toLowerCase() !== wallet.toLowerCase()) mismatched.push(`${pubkey.slice(0, 12)}…->${bound}`)
+	}
+
+	if (mismatched.length) {
+		return mark('register-validators', false, `pubkey bound to unexpected node: ${mismatched.join(', ')}`)
+	}
+	if (!unbound.length) {
+		return mark(
+			'register-validators',
+			true,
+			`verified ${deployedPubkeys.length} validator binding(s) on chain (bound inline by fundAndDepositValidators)`
+		)
+	}
+
+	// Fallback only: contract did NOT inline-bind (legacy bytecode) — register the missing pairs once via a
+	// Settle relayer. Uses the explicit (wallet, pubkey) pairs from this claim, not bundle/IP resolution.
+	const txHash = await withSettleWallet('registerNodeValidators', async (sc) => {
+		const cwReg = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+		const regTx = await cwReg.registerNodeValidators!(
+			unbound.map((p) => p.wallet),
+			unbound.map((p) => p.pubkey),
+			{ gasLimit: 2_500_000 }
+		)
+		await regTx.wait()
+		return regTx.hash as string
+	})
+	if (!txHash) {
+		return mark(
+			'register-validators',
+			false,
+			`${unbound.length} validator(s) unbound after fund; no relayer wallet available (Settle pool empty) — retry later`
+		)
+	}
+	mark('register-validators', true, `fallback-registered ${unbound.length} validator(s); tx=${txHash}`)
 }
 
 /**
@@ -2450,8 +2503,10 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 	const importKeystorePassword = resolveKeystorePassword()
 	const importWalletPassword = resolveWalletPassword()
 
+	// fundAndDepositValidators binds pubkey -> node wallet inline; fundAndDepositViaContract now performs the
+	// post-fund on-chain binding verification (and a one-shot fallback register only if the contract did not
+	// inline-bind). The standalone registerDeployedValidators is reserved for manual retry of older/failed claims.
 	await fundAndDepositViaContract(state, mark)
-	await registerDeployedValidators(state, mark)
 
 	const prysmValidatorBinary =
 		process.env.PRYSM_VALIDATOR_BINARY?.trim() ||
