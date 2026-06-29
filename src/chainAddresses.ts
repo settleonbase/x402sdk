@@ -52,6 +52,18 @@ export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xB7644DDb12656F4854dC746464af47D
 export const PURCHASING_CARD_METADATA_ADDRESS = '0xf99018DfFdb0c5657C93ca14DB2900CEbe1168A7'
 export const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
+/**
+ * NodeSaleSplitter（Base，UUPS ERC1967 代理）：节点购买 USDC 拆账。
+ * 每节点 = nodePrice(1250 USDC → BASE_TREASURY) + serverFee(120 USDC → 0x87cA…05E1)。
+ * 部署后用 deployments/base-NodeSaleSplitter.json 的 `address` 回填；环境变量 NODE_SALE_SPLITTER_BASE 可覆盖。
+ */
+export const NODE_SALE_SPLITTER_BASE =
+  process.env.NODE_SALE_SPLITTER_BASE || '0x648D628e05DaD493dcECf8C8cDDb4E8867635d49'
+/** 每节点本金（USDC，6 位精度）→ BASE_TREASURY */
+export const NODE_SALE_NODE_PRICE_USDC6 = 1_250_000_000n
+/** 每节点服务器费（USDC，6 位精度）→ CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN(0x87cA…05E1) */
+export const NODE_SALE_SERVER_FEE_USDC6 = 120_000_000n
+
 /** CoNET BUint ERC20（balanceOfAll）；与 deployments/conet-addresses.json `BUint` 同步 */
 export const CONET_BUINT = '0xa354CC4c414568Dd14F6d63b53013f35483427f0'
 export const CONET_BUNIT_AIRDROP_ADDRESS = '0xb9cf45AF87b16853c8F48a16b0495F030309e70f'

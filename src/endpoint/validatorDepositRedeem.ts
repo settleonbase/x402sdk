@@ -1222,7 +1222,12 @@ export async function validatorDepositRedeemCreateClusterPreCheck(body: {
 		deadline,
 	}
 	const recovered = ethers.verifyTypedData(validatorDepositRedeemEip712Domain(contract), validatorDepositRedeemCreateTypes, message, signature)
-	if (recovered.toLowerCase() !== admin.toLowerCase()) return { success: false as const, error: 'Signer is not admin' }
+	if (recovered.toLowerCase() !== admin.toLowerCase()) {
+		return {
+			success: false as const,
+			error: `EIP-712 signer (${recovered}) does not match admin (${admin}). Sign with the redeem-admin wallet.`,
+		}
+	}
 	return { success: true as const, preChecked: { contract, ...message, signature } }
 }
 
@@ -1251,7 +1256,12 @@ export async function validatorDepositRedeemCancelClusterPreCheck(body: {
 	if (!isAdmin) return { success: false as const, error: 'Not a redeem admin' }
 	if ((chainNonce as bigint) !== nonce) return { success: false as const, error: 'Stale nonce; refresh and sign again' }
 	const recovered = ethers.verifyTypedData(validatorDepositRedeemEip712Domain(contract), validatorDepositRedeemCancelTypes, { admin, codeHash, nonce, deadline }, signature)
-	if (recovered.toLowerCase() !== admin.toLowerCase()) return { success: false as const, error: 'Signer is not admin' }
+	if (recovered.toLowerCase() !== admin.toLowerCase()) {
+		return {
+			success: false as const,
+			error: `EIP-712 signer (${recovered}) does not match admin (${admin}). Sign with the redeem-admin wallet.`,
+		}
+	}
 	return { success: true as const, preChecked: { contract, admin, codeHash, nonce, deadline, signature } }
 }
 
