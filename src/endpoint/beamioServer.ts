@@ -8592,7 +8592,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					contract: p.contract,
 					fromBeneficiary: p.fromBeneficiary,
 					toBeneficiary: p.toBeneficiary,
-					nodeWallets: p.nodeWallets,
+					guardianIds: p.guardianIds.map((g) => g.toString()),
 					nonce: p.nonce.toString(),
 					deadline: p.deadline.toString(),
 					signature: p.signature,
@@ -8617,7 +8617,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				{
 					contract: p.contract,
 					seller: p.seller,
-					nodeWallets: p.nodeWallets,
+					guardianIds: p.guardianIds.map((g) => g.toString()),
 					priceUsdc6: p.priceUsdc6.toString(),
 					nonce: p.nonce.toString(),
 					deadline: p.deadline.toString(),

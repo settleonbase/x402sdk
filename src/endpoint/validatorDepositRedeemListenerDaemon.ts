@@ -2,15 +2,20 @@ import Colors from 'colors/safe'
 import { logger } from '../logger'
 import { startValidatorDepositRedeemListener, waitForRunCommandChildren } from './validatorDepositRedeem'
 import { startValidatorRewardHourlyReporter, stopValidatorRewardHourlyReporter } from './validatorRewardHourlyReporter'
+import {
+	startValidatorClRewardPayoutReporter,
+	stopValidatorClRewardPayoutReporter,
+} from './validatorClRewardPayoutReporter'
 
 /**
  * Lightweight CoNET validator-node daemon: event listener + hourly CNET reward reporter
- * (no BeamioCluster / Master / port 2222). Deploy on the validator host that matches
+ * + CL skim payout reporter (no BeamioCluster / Master / port 2222). Deploy on the validator host that matches
  * targetNodeIp (e.g. 38.102.85.33) alongside the CoNET-DL / newCoNET Prysm stack.
  */
 logger(Colors.cyan('[validatorDepositRedeemListenerDaemon] starting'))
 startValidatorDepositRedeemListener()
 startValidatorRewardHourlyReporter()
+startValidatorClRewardPayoutReporter()
 
 let shuttingDown = false
 
@@ -23,6 +28,7 @@ async function shutdown(signal: string): Promise<void> {
 		)
 	)
 	stopValidatorRewardHourlyReporter()
+	stopValidatorClRewardPayoutReporter()
 	await waitForRunCommandChildren()
 	process.exit(0)
 }

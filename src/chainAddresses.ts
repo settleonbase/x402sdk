@@ -81,9 +81,9 @@ export const CONET_BUSINESS_START_KET = '0xAcf20dbb4DE0992d8947Ef00b505bBc17E6A0
 export const CONET_BUSINESS_START_KET_REDEEM = '0xe9CeDC2c9F7DE7c0e6d1f1ba1F7e7126F0F1D3c8'
 
 /** ValidatorDepositRedeem（CoNET）；与 deployments/conet-addresses.json `ValidatorDepositRedeem` 同步 */
-export const CONET_VALIDATOR_DEPOSIT_REDEEM = '0x7001c3637CE602aB10DE113A12aD09bD7B3Ce457'
+export const CONET_VALIDATOR_DEPOSIT_REDEEM = '0xc71e246DD78B37C2fABc905D340932F28F503433'
 /** ValidatorDepositRedeem deploy block（CoNET）；listener 补扫下限，不得低于此块 */
-export const CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK = 172334
+export const CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK = 181083
 export const CONET_DEPOSIT_CONTRACT = '0x4242424242424242424242424242424242424242'
 export const CONET_VALIDATOR_DEPOSIT_FUNDER = '0x0981275553A41E00ec1006fe074971285E00c2A3'
 /** ValidatorDepositRedeem contract admin (withdrawNative only; not redeem admin). Sync from deployments/conet-ValidatorDepositRedeem.json */
@@ -93,9 +93,9 @@ export const CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN = '0xE974c5d10cc36738bC2619FC7
 export const CONET_VALIDATOR_NODE_IP = ''
 /** ValidatorNodeRewardIndexer（CoNET）：每节点/每受益人小时原子 CNET 收益账本 + 周期统计；
  *  与 deployments/conet-addresses.json `ValidatorNodeRewardIndexer` 同步。留空则由主合约 rewardIndexer() 解析。 */
-export const CONET_VALIDATOR_NODE_REWARD_INDEXER = '0x76C316e1A0ed1f11819c3eBa04C77eFD30056553'
+export const CONET_VALIDATOR_NODE_REWARD_INDEXER = '0xCA83d2d766701d3939Ef1644e2A911dc87CeA39D'
 /** ValidatorDepositRedeemReferrerExtension（CoNET）；与 deployments/conet-addresses.json 同步 */
-export const CONET_VALIDATOR_REFERRER_EXTENSION = '0x06AFcf64be6045EB42178970A2099a48e4f65086'
+export const CONET_VALIDATOR_REFERRER_EXTENSION = '0xa7410a532544aB7d1bA70701D9D0E389e4f4Cc1F'
 
 export const BASE_MAINNET_FACTORIES = {
   AA_FACTORY: BEAMIO_AA_FACTORY,

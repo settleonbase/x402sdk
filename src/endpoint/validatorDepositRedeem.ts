@@ -48,21 +48,22 @@ const VALIDATOR_DEPOSIT_REDEEM_ABI = [
 	'event AirdropAccrued(address indexed beneficiary, bytes32 indexed codeHash, uint256 added, uint256 newTotal)',
 	'event AirdropClaimed(address indexed beneficiary, uint256 amount)',
 	'event AirdropClaimableAtSet(uint64 claimableAt)',
-	'function registerNodeValidators(address[] nodeWallets, bytes[] pubkeys) external',
-	'function getNodeValidator(address nodeWallet) view returns (bytes pubkey, address withdrawalBeneficiary, uint64 registeredAt, uint64 exitedAt, bool active)',
+	'function registerNodeValidators(uint256[] guardianIds, bytes[] pubkeys) external',
+	'function registerNodeValidatorsFor(address admin, uint256[] guardianIds, bytes[] pubkeys, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function getNodeValidator(uint256 guardianId) view returns (bytes pubkey, address withdrawalBeneficiary, uint64 registeredAt, uint64 exitedAt, bool active)',
 	'function getBeneficiaryNodeBundle(address beneficiary) view returns (tuple(address beneficiary, uint256[] guardianNodeIds, string[] depinNodeIps, address[] nodeWallets, bytes[] validatorPubkeys, bool[] validatorActive, uint256 validatorNodeCount, uint256 gbMiningNodeCount, uint256 claimCount, uint256 nativeBalance, uint256 gbBalance, uint256 usdcBalance))',
 	'function resolveNodeBundle(address maybeWallet, string conetDepinNodeIp) view returns (tuple(address beneficiary, uint256[] guardianNodeIds, string[] depinNodeIps, address[] nodeWallets, bytes[] validatorPubkeys, bool[] validatorActive, uint256 validatorNodeCount, uint256 gbMiningNodeCount, uint256 claimCount, uint256 nativeBalance, uint256 gbBalance, uint256 usdcBalance))',
 	'function resolveUnifiedIncomeStats(address maybeWallet, string conetDepinNodeIp, uint256 anchorTs) view returns (tuple(address beneficiary, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) gbBeneficiary, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) cnetBeneficiary, tuple(address nodeWallet, string depinNodeIp, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) gb, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) cnet)[] nodes))',
-	'function transferNodes(address fromBeneficiary, address toBeneficiary, address[] nodeWallets, uint256 nonce, uint256 deadline, bytes signature) external',
-	'function getTransferNodesDigest(address fromBeneficiary, address toBeneficiary, address[] nodeWallets, uint256 nonce, uint256 deadline) view returns (bytes32)',
+	'function transferNodes(address fromBeneficiary, address toBeneficiary, uint256[] guardianIds, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function getTransferNodesDigest(address fromBeneficiary, address toBeneficiary, uint256[] guardianIds, uint256 nonce, uint256 deadline) view returns (bytes32)',
 	'function beneficiaryNonces(address account) view returns (uint256)',
 	'function getBeneficiaryByNodeWallet(address nodeWallet) view returns (address beneficiary)',
-	'function getNodeByValidatorPubkeyHash(bytes32 pubkeyHash) view returns (address nodeWallet)',
-	'function createTransferOrder(address seller, address[] nodeWallets, uint256 priceUsdc6, uint256 nonce, uint256 deadline, bytes signature) external returns (uint256 orderId)',
+	'function getNodeByValidatorPubkeyHash(bytes32 pubkeyHash) view returns (uint256 guardianId)',
+	'function createTransferOrder(address seller, uint256[] guardianIds, uint256 priceUsdc6, uint256 nonce, uint256 deadline, bytes signature) external returns (uint256 orderId)',
 	'function cancelTransferOrder(uint256 orderId, address seller, uint256 nonce, uint256 deadline, bytes signature) external',
 	'function fulfillTransferOrder(uint256 orderId, address buyer, uint256 nonce, uint256 deadline, bytes signature, uint256 payValidAfter, uint256 payValidBefore, bytes32 payNonce, bytes paySignature) external',
-	'function getTransferOrder(uint256 orderId) view returns (address seller, address[] nodeWallets, uint256 priceUsdc6, bool active, address buyer, uint64 createdAt, uint64 filledAt)',
-	'function nodeOrder(address nodeWallet) view returns (uint256)',
+	'function getTransferOrder(uint256 orderId) view returns (address seller, uint256[] guardianIds, uint256 priceUsdc6, bool active, address buyer, uint64 createdAt, uint64 filledAt)',
+	'function nodeOrder(uint256 guardianId) view returns (uint256)',
 	'function usdcToken() view returns (address)',
 	'function setDepositContract(address depositContract_) external',
 	'function depositContract() view returns (address)',
@@ -70,10 +71,16 @@ const VALIDATOR_DEPOSIT_REDEEM_ABI = [
 	'function stakedValidatorCountOf(address beneficiary) view returns (uint256)',
 	'function fundedDepositTotal() view returns (uint256)',
 	'function exitSettledPubkey(bytes32 pubkeyHash) view returns (bool)',
-	'function fundAndDepositValidators(address[] nodeWallets, bytes[] pubkeys, bytes[] withdrawalCredentials, bytes[] signatures, bytes32[] depositDataRoots) external',
-	'function requestFullExit(address beneficiary, address[] nodeWallets, uint256 nonce, uint256 deadline, bytes signature) external',
-	'function settleFullExitPayout(address beneficiary, address[] nodeWallets) external',
-	'function getRequestFullExitDigest(address beneficiary, address[] nodeWallets, uint256 nonce, uint256 deadline) view returns (bytes32)',
+	'function fundAndDepositValidators(uint256[] guardianIds, bytes[] pubkeys, bytes[] withdrawalCredentials, bytes[] signatures, bytes32[] depositDataRoots) external',
+	'function requestFullExit(address beneficiary, uint256[] guardianIds, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function settleFullExitPayout(address beneficiary, uint256[] guardianIds) external',
+	'function settleNodeRewards(uint256[] guardianIds, uint256[] amounts, bytes32[] eventKeys) external',
+	'function consumedRewardEventKey(bytes32 key) view returns (bool)',
+	'function clRewardPaid(address beneficiary) view returns (uint256)',
+	'function totalStakedValidatorCount() view returns (uint256)',
+	'function totalRewardPaid() view returns (uint256)',
+	'function getRewardPayoutStats() view returns (uint256 stakedCount, uint256 rewardPaidTotal, uint256 contractBalance, uint256 principalReserve)',
+	'function getRequestFullExitDigest(address beneficiary, uint256[] guardianIds, uint256 nonce, uint256 deadline) view returns (bytes32)',
 	'function rewardIndexer() view returns (address)',
 	'function getClaimRedeemDigest(address claimer, bytes32 codeHash, address beneficiary, uint256 deadline) view returns (bytes32)',
 	'function nextGuardianAllocId() view returns (uint256)',
@@ -82,14 +89,15 @@ const VALIDATOR_DEPOSIT_REDEEM_ABI = [
 	'function nodeWalletBeneficiary(address nodeWallet) view returns (address)',
 	'function setRewardIndexer(address rewardIndexer_) external',
 	'event RewardIndexerConfigured(address indexed rewardIndexer)',
-	'event TransferOrderCreated(uint256 indexed orderId, address indexed seller, uint256 priceUsdc6, address[] nodeWallets)',
+	'event TransferOrderCreated(uint256 indexed orderId, address indexed seller, uint256 priceUsdc6, uint256[] guardianIds)',
 	'event TransferOrderCancelled(uint256 indexed orderId, address indexed seller)',
 	'event TransferOrderFilled(uint256 indexed orderId, address indexed seller, address indexed buyer, uint256 priceUsdc6)',
-	'event NodesTransferred(address indexed fromBeneficiary, address indexed toBeneficiary, address[] nodeWallets)',
-	'event NodeValidatorBeneficiaryUpdated(address indexed nodeWallet, bytes32 indexed pubkeyHash, address indexed fromBeneficiary, address toBeneficiary)',
-	'event ValidatorDeposited(address indexed nodeWallet, address indexed beneficiary, bytes32 indexed pubkeyHash, uint256 amount)',
-	'event FullExitRequested(address indexed beneficiary, address[] nodeWallets)',
+	'event NodesTransferred(address indexed fromBeneficiary, address indexed toBeneficiary, uint256[] guardianIds)',
+	'event NodeValidatorBeneficiaryUpdated(uint256 indexed guardianId, bytes32 indexed pubkeyHash, address indexed fromBeneficiary, address toBeneficiary)',
+	'event ValidatorDeposited(uint256 indexed guardianId, address indexed beneficiary, bytes32 indexed pubkeyHash, uint256 amount)',
+	'event FullExitRequested(address indexed beneficiary, uint256[] guardianIds)',
 	'event FullExitSettled(address indexed beneficiary, uint256 validatorCount, uint256 amount)',
+	'event NodeRewardSettled(uint256 indexed guardianId, address indexed beneficiary, uint256 amount, bytes32 indexed eventKey)',
 	// Retired (no longer emitted; kept for back-compat decoding of historical logs).
 	'event NodeValidatorExitRequested(address indexed nodeWallet, bytes32 indexed pubkeyHash, address indexed fromBeneficiary, address toBeneficiary)',
 ] as const
@@ -1057,7 +1065,7 @@ export const validatorDepositRedeemTransferTypes: Record<string, { name: string;
 	TransferNodes: [
 		{ name: 'fromBeneficiary', type: 'address' },
 		{ name: 'toBeneficiary', type: 'address' },
-		{ name: 'nodeWallets', type: 'address[]' },
+		{ name: 'guardianIds', type: 'uint256[]' },
 		{ name: 'nonce', type: 'uint256' },
 		{ name: 'deadline', type: 'uint256' },
 	],
@@ -1066,7 +1074,7 @@ export const validatorDepositRedeemTransferTypes: Record<string, { name: string;
 export const validatorCreateTransferOrderTypes: Record<string, { name: string; type: string }[]> = {
 	CreateTransferOrder: [
 		{ name: 'seller', type: 'address' },
-		{ name: 'nodeWallets', type: 'address[]' },
+		{ name: 'guardianIds', type: 'uint256[]' },
 		{ name: 'priceUsdc6', type: 'uint256' },
 		{ name: 'nonce', type: 'uint256' },
 		{ name: 'deadline', type: 'uint256' },
@@ -1366,10 +1374,25 @@ export async function validatorDepositRedeemClaimAirdropClusterPreCheck(body: {
 	return { success: true as const, preChecked: { contract, beneficiary, amount, nonce, deadline, signature } }
 }
 
+function parseGuardianIdArray(value: unknown): bigint[] | string {
+	if (!Array.isArray(value) || value.length === 0) return 'Empty guardianIds'
+	const out: bigint[] = []
+	for (const v of value as unknown[]) {
+		try {
+			const n = BigInt(String(v))
+			if (n <= 0n) return 'Invalid guardianId (must be > 0)'
+			out.push(n)
+		} catch {
+			return 'Invalid guardianIds'
+		}
+	}
+	return out
+}
+
 export async function validatorDepositRedeemTransferClusterPreCheck(body: {
 	fromBeneficiary?: string
 	toBeneficiary?: string
-	nodeWallets?: unknown
+	guardianIds?: unknown
 	nonce?: unknown
 	deadline?: unknown
 	signature?: unknown
@@ -1381,13 +1404,8 @@ export async function validatorDepositRedeemTransferClusterPreCheck(body: {
 	const fromBeneficiary = ethers.getAddress(body.fromBeneficiary)
 	const toBeneficiary = ethers.getAddress(body.toBeneficiary)
 	if (fromBeneficiary.toLowerCase() === toBeneficiary.toLowerCase()) return { success: false as const, error: 'Same beneficiary' }
-	if (!Array.isArray(body.nodeWallets) || body.nodeWallets.length === 0) return { success: false as const, error: 'Empty nodeWallets' }
-	let nodeWallets: string[]
-	try {
-		nodeWallets = (body.nodeWallets as unknown[]).map((a) => ethers.getAddress(String(a)))
-	} catch {
-		return { success: false as const, error: 'Invalid nodeWallets' }
-	}
+	const guardianIds = parseGuardianIdArray(body.guardianIds)
+	if (typeof guardianIds === 'string') return { success: false as const, error: guardianIds }
 	const deadline = parseUintField('deadline', body.deadline)
 	if (typeof deadline === 'string') return { success: false as const, error: deadline }
 	const expiredTransfer = clusterRejectIfSignatureDeadlineExpired(deadline)
@@ -1401,31 +1419,31 @@ export async function validatorDepositRedeemTransferClusterPreCheck(body: {
 	const onchainNonce = (await read.beneficiaryNonces!(fromBeneficiary)) as bigint
 	if (onchainNonce !== nonce) return { success: false as const, error: `Bad nonce (expected ${onchainNonce.toString()})` }
 
-	// Every node must currently belong to fromBeneficiary (strict 1:1 ownership).
-	for (const nodeWallet of nodeWallets) {
-		const owner = ethers.getAddress(await read.getBeneficiaryByNodeWallet!(nodeWallet))
+	// Every guardian id must currently belong to fromBeneficiary (strict 1:1 ownership).
+	for (const guardianId of guardianIds) {
+		const owner = ethers.getAddress(await read.guardianIdBeneficiary!(guardianId))
 		if (owner.toLowerCase() !== fromBeneficiary.toLowerCase()) {
-			return { success: false as const, error: `Node ${nodeWallet} not owned by fromBeneficiary` }
+			return { success: false as const, error: `Guardian #${guardianId.toString()} not owned by fromBeneficiary` }
 		}
 	}
 
 	const recovered = ethers.verifyTypedData(
 		validatorDepositRedeemEip712Domain(contract),
 		validatorDepositRedeemTransferTypes,
-		{ fromBeneficiary, toBeneficiary, nodeWallets, nonce, deadline },
+		{ fromBeneficiary, toBeneficiary, guardianIds, nonce, deadline },
 		signature
 	)
 	if (recovered.toLowerCase() !== fromBeneficiary.toLowerCase()) return { success: false as const, error: 'Signer is not fromBeneficiary' }
 
 	return {
 		success: true as const,
-		preChecked: { contract, fromBeneficiary, toBeneficiary, nodeWallets, nonce, deadline, signature },
+		preChecked: { contract, fromBeneficiary, toBeneficiary, guardianIds, nonce, deadline, signature },
 	}
 }
 
 export async function createTransferOrderClusterPreCheck(body: {
 	seller?: string
-	nodeWallets?: unknown
+	guardianIds?: unknown
 	priceUsdc6?: unknown
 	nonce?: unknown
 	deadline?: unknown
@@ -1435,13 +1453,8 @@ export async function createTransferOrderClusterPreCheck(body: {
 	if (!contract) return { success: false as const, error: 'CONET_VALIDATOR_DEPOSIT_REDEEM not configured' }
 	if (!body.seller || !ethers.isAddress(body.seller)) return { success: false as const, error: 'Invalid seller' }
 	const seller = ethers.getAddress(body.seller)
-	if (!Array.isArray(body.nodeWallets) || body.nodeWallets.length === 0) return { success: false as const, error: 'Empty nodeWallets' }
-	let nodeWallets: string[]
-	try {
-		nodeWallets = (body.nodeWallets as unknown[]).map((a) => ethers.getAddress(String(a)))
-	} catch {
-		return { success: false as const, error: 'Invalid nodeWallets' }
-	}
+	const guardianIds = parseGuardianIdArray(body.guardianIds)
+	if (typeof guardianIds === 'string') return { success: false as const, error: guardianIds }
 	const priceUsdc6 = parseUintField('priceUsdc6', body.priceUsdc6)
 	if (typeof priceUsdc6 === 'string') return { success: false as const, error: priceUsdc6 }
 	if (priceUsdc6 <= 0n) return { success: false as const, error: 'Price must be > 0' }
@@ -1457,20 +1470,18 @@ export async function createTransferOrderClusterPreCheck(body: {
 	const read = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
 	const onchainNonce = (await read.beneficiaryNonces!(seller)) as bigint
 	if (onchainNonce !== nonce) return { success: false as const, error: `Bad nonce (expected ${onchainNonce.toString()})` }
-	for (const nodeWallet of nodeWallets) {
-		const owner = ethers.getAddress(await read.getBeneficiaryByNodeWallet!(nodeWallet))
-		if (owner.toLowerCase() !== seller.toLowerCase()) return { success: false as const, error: `Node ${nodeWallet} not owned by seller` }
-		const listed = (await read.nodeOrder!(nodeWallet)) as bigint
-		if (listed !== 0n) return { success: false as const, error: `Node ${nodeWallet} already listed (order ${listed.toString()})` }
+	for (const guardianId of guardianIds) {
+		const owner = ethers.getAddress(await read.guardianIdBeneficiary!(guardianId))
+		if (owner.toLowerCase() !== seller.toLowerCase()) return { success: false as const, error: `Guardian #${guardianId.toString()} not owned by seller` }
 	}
 	const recovered = ethers.verifyTypedData(
 		validatorDepositRedeemEip712Domain(contract),
 		validatorCreateTransferOrderTypes,
-		{ seller, nodeWallets, priceUsdc6, nonce, deadline },
+		{ seller, guardianIds, priceUsdc6, nonce, deadline },
 		signature
 	)
 	if (recovered.toLowerCase() !== seller.toLowerCase()) return { success: false as const, error: 'Signer is not seller' }
-	return { success: true as const, preChecked: { contract, seller, nodeWallets, priceUsdc6, nonce, deadline, signature } }
+	return { success: true as const, preChecked: { contract, seller, guardianIds, priceUsdc6, nonce, deadline, signature } }
 }
 
 export async function cancelTransferOrderClusterPreCheck(body: {
@@ -1654,7 +1665,7 @@ export type ValidatorDepositRedeemTransferPayload = {
 	contract: string
 	fromBeneficiary: string
 	toBeneficiary: string
-	nodeWallets: string[]
+	guardianIds: bigint[]
 	nonce: bigint
 	deadline: bigint
 	signature: string
@@ -1664,7 +1675,7 @@ export type ValidatorDepositRedeemTransferPayload = {
 export type ValidatorCreateTransferOrderPayload = {
 	contract: string
 	seller: string
-	nodeWallets: string[]
+	guardianIds: bigint[]
 	priceUsdc6: bigint
 	nonce: bigint
 	deadline: bigint
@@ -1840,7 +1851,7 @@ export const validatorDepositRedeemTransferProcess = async () => {
 			const tx = await c.transferNodes!(
 				obj.fromBeneficiary,
 				obj.toBeneficiary,
-				obj.nodeWallets,
+				obj.guardianIds,
 				obj.nonce,
 				obj.deadline,
 				obj.signature,
@@ -1871,7 +1882,7 @@ export const validatorCreateTransferOrderProcess = async () => {
 			const c = new ethers.Contract(obj.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
 			const tx = await c.createTransferOrder!(
 				obj.seller,
-				obj.nodeWallets,
+				obj.guardianIds,
 				obj.priceUsdc6,
 				obj.nonce,
 				obj.deadline,
@@ -2077,28 +2088,29 @@ function readLastNDepositEntries(depositFile: string, count: number): DepositJso
 	return out
 }
 
-/** Resolve DePIN node wallets (1:1 with claim IPs) for the last N deposit entries. */
-async function resolveNodeWalletsForClaim(state: ValidatorRedeemState, count: number): Promise<string[]> {
+/** Resolve guardian node ids (1:1 with claim IPs) for the last N deposit entries. */
+async function resolveGuardianIdsForClaim(state: ValidatorRedeemState, count: number): Promise<bigint[]> {
 	const contractAddr = resolveValidatorDepositRedeemAddress()
 	if (!contractAddr) throw new Error('no validator redeem contract configured')
 	const provider = conetProvider()
 	const cRead = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
 	const bundle = await cRead.getBeneficiaryNodeBundle!(state.beneficiary)
 	const bundleIps = (bundle.depinNodeIps as string[]).map(normalizeIp)
-	const bundleWallets = bundle.nodeWallets as string[]
-	const ipToWallet = new Map<string, string>()
+	const bundleGuardianIds = (bundle.guardianNodeIds as bigint[]) || []
+	const ipToGuardianId = new Map<string, bigint>()
 	bundleIps.forEach((ip, i) => {
-		if (ip && bundleWallets[i] && bundleWallets[i] !== ethers.ZeroAddress) ipToWallet.set(ip, bundleWallets[i])
+		const gid = bundleGuardianIds[i]
+		if (ip && gid !== undefined && gid > 0n) ipToGuardianId.set(ip, gid)
 	})
 	const claimIps = state.conetDepinNodeIps.map(normalizeIp)
-	const wallets: string[] = []
+	const guardianIds: bigint[] = []
 	for (let i = 0; i < count; i++) {
 		const ip = claimIps[i]
-		const wallet = ip ? ipToWallet.get(ip) : undefined
-		if (!wallet) throw new Error(`no DePIN node wallet for ip=${ip ?? '?'}`)
-		wallets.push(ethers.getAddress(wallet))
+		const gid = ip ? ipToGuardianId.get(ip) : undefined
+		if (gid === undefined) throw new Error(`no DePIN guardian id for ip=${ip ?? '?'}`)
+		guardianIds.push(gid)
 	}
-	return wallets
+	return guardianIds
 }
 
 /**
@@ -2139,9 +2151,9 @@ async function fundAndDepositViaContract(
 		}
 	}
 
-	let nodeWallets: string[]
+	let guardianIds: bigint[]
 	try {
-		nodeWallets = await resolveNodeWalletsForClaim(state, count)
+		guardianIds = await resolveGuardianIdsForClaim(state, count)
 	} catch (e: any) {
 		return mark('fund-and-deposit', false, e?.message ?? String(e))
 	}
@@ -2159,7 +2171,7 @@ async function fundAndDepositViaContract(
 	const admin = loadRedeemAdminWallet()
 	const cw = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, admin)
 	const tx = await cw.fundAndDepositValidators!(
-		nodeWallets,
+		guardianIds,
 		entries.map((e) => e.pubkey),
 		entries.map((e) => e.withdrawalCredentials),
 		entries.map((e) => e.signature),
@@ -2180,28 +2192,28 @@ async function fundAndDepositViaContract(
 	}))
 
 	// Post-fund on-chain verification (replaces the previously redundant registerNodeValidators tx):
-	// fundAndDepositValidators binds pubkey -> node wallet INLINE (see _registerOneNodeValidator), so the
-	// standard path only needs to confirm the binding. We pair deployed pubkeys 1:1 with the same node wallets
-	// passed into fundAndDepositValidators (no IP/bundle re-resolution → avoids "no DePIN node wallets resolved").
+	// fundAndDepositValidators binds pubkey -> guardian id INLINE (see _registerOneNodeValidator), so the
+	// standard path only needs to confirm the binding. We pair deployed pubkeys 1:1 with the same guardian ids
+	// passed into fundAndDepositValidators (no IP/bundle re-resolution → avoids "no DePIN guardian ids resolved").
 	const cVerify = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
-	const unbound: { wallet: string; pubkey: string }[] = []
+	const unbound: { guardianId: bigint; pubkey: string }[] = []
 	const mismatched: string[] = []
 	for (let i = 0; i < deployedPubkeys.length; i++) {
 		const pubkey = deployedPubkeys[i]
-		const wallet = nodeWallets[i]
+		const guardianId = guardianIds[i]
 		const pkHash = ethers.keccak256(pubkey)
-		let bound = ethers.ZeroAddress
+		let bound = 0n
 		try {
-			bound = ethers.getAddress(await cVerify.getNodeByValidatorPubkeyHash!(pkHash))
+			bound = (await cVerify.getNodeByValidatorPubkeyHash!(pkHash)) as bigint
 		} catch {
-			bound = ethers.ZeroAddress
+			bound = 0n
 		}
-		if (bound === ethers.ZeroAddress) unbound.push({ wallet, pubkey })
-		else if (bound.toLowerCase() !== wallet.toLowerCase()) mismatched.push(`${pubkey.slice(0, 12)}…->${bound}`)
+		if (bound === 0n) unbound.push({ guardianId, pubkey })
+		else if (bound !== guardianId) mismatched.push(`${pubkey.slice(0, 12)}…->#${bound.toString()}`)
 	}
 
 	if (mismatched.length) {
-		return mark('register-validators', false, `pubkey bound to unexpected node: ${mismatched.join(', ')}`)
+		return mark('register-validators', false, `pubkey bound to unexpected guardian: ${mismatched.join(', ')}`)
 	}
 	if (!unbound.length) {
 		return mark(
@@ -2212,11 +2224,11 @@ async function fundAndDepositViaContract(
 	}
 
 	// Fallback only: contract did NOT inline-bind (legacy bytecode) — register the missing pairs once via a
-	// Settle relayer. Uses the explicit (wallet, pubkey) pairs from this claim, not bundle/IP resolution.
+	// Settle relayer. Uses the explicit (guardianId, pubkey) pairs from this claim, not bundle/IP resolution.
 	const txHash = await withSettleWallet('registerNodeValidators', async (sc) => {
 		const cwReg = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
 		const regTx = await cwReg.registerNodeValidators!(
-			unbound.map((p) => p.wallet),
+			unbound.map((p) => p.guardianId),
 			unbound.map((p) => p.pubkey),
 			{ gasLimit: 2_500_000 }
 		)
@@ -2261,29 +2273,30 @@ async function registerDeployedValidators(
 	const cRead = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
 	const bundle = await cRead.getBeneficiaryNodeBundle!(state.beneficiary)
 	const bundleIps = (bundle.depinNodeIps as string[]).map(normalizeIp)
-	const bundleWallets = bundle.nodeWallets as string[]
-	const ipToWallet = new Map<string, string>()
+	const bundleGuardianIds = (bundle.guardianNodeIds as bigint[]) || []
+	const ipToGuardianId = new Map<string, bigint>()
 	bundleIps.forEach((ip, i) => {
-		if (ip && bundleWallets[i] && bundleWallets[i] !== ethers.ZeroAddress) ipToWallet.set(ip, bundleWallets[i])
+		const gid = bundleGuardianIds[i]
+		if (ip && gid !== undefined && gid > 0n) ipToGuardianId.set(ip, gid)
 	})
 
-	// Pair this claim's allocated DePIN node wallets (from the event IP list) with deployed validator pubkeys.
+	// Pair this claim's allocated DePIN guardian ids (from the event IP list) with deployed validator pubkeys.
 	const claimIps = state.conetDepinNodeIps.map(normalizeIp)
-	const pairs: { wallet: string; pubkey: string }[] = []
+	const pairs: { guardianId: bigint; pubkey: string }[] = []
 	for (let i = 0; i < pubkeys.length; i++) {
 		const ip = claimIps[i]
-		const wallet = ip ? ipToWallet.get(ip) : undefined
-		if (wallet) pairs.push({ wallet, pubkey: pubkeys[i] })
+		const gid = ip ? ipToGuardianId.get(ip) : undefined
+		if (gid !== undefined) pairs.push({ guardianId: gid, pubkey: pubkeys[i] })
 	}
-	if (!pairs.length) return mark('register-validators', false, 'no DePIN node wallets resolved for this claim')
+	if (!pairs.length) return mark('register-validators', false, 'no DePIN guardian ids resolved for this claim')
 
-	const pending: { wallet: string; pubkey: string }[] = []
+	const pending: { guardianId: bigint; pubkey: string }[] = []
 	for (const p of pairs) {
 		const pkHash = ethers.keccak256(p.pubkey)
-		const bound = ethers.getAddress(await cRead.getNodeByValidatorPubkeyHash!(pkHash))
-		if (bound !== ethers.ZeroAddress && bound.toLowerCase() === p.wallet.toLowerCase()) continue
-		if (bound !== ethers.ZeroAddress && bound.toLowerCase() !== p.wallet.toLowerCase()) {
-			return mark('register-validators', false, `pubkey already bound to ${bound}`)
+		const bound = (await cRead.getNodeByValidatorPubkeyHash!(pkHash)) as bigint
+		if (bound !== 0n && bound === p.guardianId) continue
+		if (bound !== 0n && bound !== p.guardianId) {
+			return mark('register-validators', false, `pubkey already bound to guardian #${bound.toString()}`)
 		}
 		pending.push(p)
 	}
@@ -2294,7 +2307,7 @@ async function registerDeployedValidators(
 	const txHash = await withSettleWallet('registerNodeValidators', async (sc) => {
 		const cw = new ethers.Contract(contractAddr, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
 		const tx = await cw.registerNodeValidators!(
-			pending.map((p) => p.wallet),
+			pending.map((p) => p.guardianId),
 			pending.map((p) => p.pubkey),
 			{ gasLimit: 2_500_000 }
 		)
@@ -2368,11 +2381,11 @@ function depositFileHasPubkey(depositFile: string, pubkeyHex: string): boolean {
  */
 async function executeFeeRecipientHotUpdate(args: {
 	contract: string
-	nodeWallet: string
+	guardianId: bigint
 	toBeneficiary: string
 	pubkeyHash: string
 }): Promise<void> {
-	const rid = `feerecipient:${args.nodeWallet.toLowerCase()}:${args.pubkeyHash.toLowerCase()}`
+	const rid = `feerecipient:${args.guardianId.toString()}:${args.pubkeyHash.toLowerCase()}`
 	const flightKey = `feerecipient:${rid}`
 	if (!tryBeginListenerEvent(flightKey)) return
 	try {
@@ -2381,7 +2394,7 @@ async function executeFeeRecipientHotUpdate(args: {
 		const base: ValidatorRedeemState = {
 			requestId: rid,
 			codeHash: '',
-			claimer: args.nodeWallet,
+			claimer: args.toBeneficiary,
 			beneficiary: args.toBeneficiary,
 			validatorCount: '1',
 			targetNodeIp: resolveValidatorNodeIp(),
@@ -2403,7 +2416,7 @@ async function executeFeeRecipientHotUpdate(args: {
 
 		const provider = conetProvider()
 		const cRead = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
-		const onchain = await cRead.getNodeValidator!(args.nodeWallet)
+		const onchain = await cRead.getNodeValidator!(args.guardianId)
 		const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
 		const newCoNETDir = resolveNewCoNETDir()
 		const depositFile = path.join(newCoNETDir, 'validator_deposits.json')
@@ -2411,7 +2424,7 @@ async function executeFeeRecipientHotUpdate(args: {
 		if (!pubkey || pubkey === '0x' || !depositFileHasPubkey(depositFile, pubkey)) {
 			return
 		}
-		mark('feerecipient-matched', true, `nodeWallet=${args.nodeWallet} -> ${args.toBeneficiary}`)
+		mark('feerecipient-matched', true, `guardian #${args.guardianId.toString()} -> ${args.toBeneficiary}`)
 
 		if (validatorDryRun()) {
 			mark('dry-run', true, 'skipped fee_recipient hot-update')
@@ -2451,9 +2464,9 @@ async function executeFeeRecipientHotUpdate(args: {
 async function executeValidatorFullExit(args: {
 	contract: string
 	beneficiary: string
-	nodeWallets: string[]
+	guardianIds: bigint[]
 }): Promise<void> {
-	const rid = `fullexit:${args.beneficiary.toLowerCase()}:${args.nodeWallets.map((w) => w.toLowerCase()).join(',')}`
+	const rid = `fullexit:${args.beneficiary.toLowerCase()}:${args.guardianIds.map((g) => g.toString()).join(',')}`
 	const flightKey = `fullexit:${rid}`
 	if (!tryBeginListenerEvent(flightKey)) return
 	try {
@@ -2464,7 +2477,7 @@ async function executeValidatorFullExit(args: {
 			codeHash: '',
 			claimer: args.beneficiary,
 			beneficiary: args.beneficiary,
-			validatorCount: String(args.nodeWallets.length),
+			validatorCount: String(args.guardianIds.length),
 			targetNodeIp: resolveValidatorNodeIp(),
 			conetDepinNodeIps: [],
 			gbMiningNodeCount: '0',
@@ -2487,20 +2500,20 @@ async function executeValidatorFullExit(args: {
 		const newCoNETDir = resolveNewCoNETDir()
 		const depositFile = path.join(newCoNETDir, 'validator_deposits.json')
 
-		const localNodeWallets: string[] = []
-		for (const nodeWallet of args.nodeWallets) {
+		const localGuardianIds: bigint[] = []
+		for (const guardianId of args.guardianIds) {
 			try {
-				const onchain = await cRead.getNodeValidator!(nodeWallet)
+				const onchain = await cRead.getNodeValidator!(guardianId)
 				const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
 				if (pubkey && pubkey !== '0x' && depositFileHasPubkey(depositFile, pubkey)) {
-					localNodeWallets.push(nodeWallet)
+					localGuardianIds.push(guardianId)
 				}
 			} catch {
 				// ignore unreadable node
 			}
 		}
-		if (!localNodeWallets.length) return
-		mark('fullexit-matched', true, `local nodeWallets=${localNodeWallets.join(',')}`)
+		if (!localGuardianIds.length) return
+		mark('fullexit-matched', true, `local guardianIds=${localGuardianIds.map((g) => g.toString()).join(',')}`)
 
 		if (validatorDryRun()) {
 			mark('dry-run', true, 'skipped exit + settle')
@@ -2520,8 +2533,8 @@ async function executeValidatorFullExit(args: {
 			return
 		}
 
-		for (const nodeWallet of localNodeWallets) {
-			const onchain = await cRead.getNodeValidator!(nodeWallet)
+		for (const guardianId of localGuardianIds) {
+			const onchain = await cRead.getNodeValidator!(guardianId)
 			const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
 			const out = await runCommand(`exit validator ${pubkey.slice(0, 12)}`, 'bash', [exitScript], newCoNETDir, {
 				...baseEnv,
@@ -2532,7 +2545,7 @@ async function executeValidatorFullExit(args: {
 
 		const txHash = await withSettleWallet('settleFullExitPayout', async (sc) => {
 			const cw = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
-			const tx = await cw.settleFullExitPayout!(args.beneficiary, localNodeWallets, { gasLimit: 1_500_000 })
+			const tx = await cw.settleFullExitPayout!(args.beneficiary, localGuardianIds, { gasLimit: 1_500_000 })
 			await tx.wait()
 			return tx.hash as string
 		})
@@ -2816,7 +2829,7 @@ async function dispatchValidatorDepositRedeemListenerLog(
 			noteListenerBlock(contract, blockNumber)
 			await executeFeeRecipientHotUpdate({
 				contract,
-				nodeWallet: ethers.getAddress(String(parsed.args.nodeWallet)),
+				guardianId: BigInt(String(parsed.args.guardianId)),
 				toBeneficiary: ethers.getAddress(String(parsed.args.toBeneficiary)),
 				pubkeyHash: String(parsed.args.pubkeyHash),
 			})
@@ -2826,7 +2839,7 @@ async function dispatchValidatorDepositRedeemListenerLog(
 			await executeValidatorFullExit({
 				contract,
 				beneficiary: ethers.getAddress(String(parsed.args.beneficiary)),
-				nodeWallets: (parsed.args.nodeWallets as string[]).map((w) => ethers.getAddress(String(w))),
+				guardianIds: (parsed.args.guardianIds as unknown[]).map((g) => BigInt(String(g))),
 			})
 			return
 		default:
@@ -2959,13 +2972,13 @@ function attachValidatorDepositRedeemLiveListeners(
 		})
 	})
 
-	c.on('NodeValidatorBeneficiaryUpdated', (nodeWallet, pubkeyHash, _fromBeneficiary, toBeneficiary, ev) => {
+	c.on('NodeValidatorBeneficiaryUpdated', (guardianId, pubkeyHash, _fromBeneficiary, toBeneficiary, ev) => {
 		const blockNumber = (ev as { log?: { blockNumber?: number } })?.log?.blockNumber ?? 0
 		if (!shouldHandleLiveListenerBlock(blockNumber)) return
 		noteListenerBlock(contract, blockNumber)
 		void executeFeeRecipientHotUpdate({
 			contract,
-			nodeWallet: ethers.getAddress(String(nodeWallet)),
+			guardianId: BigInt(String(guardianId)),
 			toBeneficiary: ethers.getAddress(String(toBeneficiary)),
 			pubkeyHash: String(pubkeyHash),
 		}).catch((e: any) => {
@@ -2973,14 +2986,14 @@ function attachValidatorDepositRedeemLiveListeners(
 		})
 	})
 
-	c.on('FullExitRequested', (beneficiary, nodeWallets, ev) => {
+	c.on('FullExitRequested', (beneficiary, guardianIds, ev) => {
 		const blockNumber = (ev as { log?: { blockNumber?: number } })?.log?.blockNumber ?? 0
 		if (!shouldHandleLiveListenerBlock(blockNumber)) return
 		noteListenerBlock(contract, blockNumber)
 		void executeValidatorFullExit({
 			contract,
 			beneficiary: ethers.getAddress(String(beneficiary)),
-			nodeWallets: (nodeWallets as string[]).map((w) => ethers.getAddress(String(w))),
+			guardianIds: (guardianIds as unknown[]).map((g) => BigInt(String(g))),
 		}).catch((e: any) => {
 			logger(Colors.red('[validatorDepositRedeemListener] full exit failed:'), e?.message ?? String(e))
 		})

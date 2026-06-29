@@ -3108,7 +3108,7 @@ const routing = ( router: Router ) => {
 				contract?: string
 				fromBeneficiary?: string
 				toBeneficiary?: string
-				nodeWallets?: string[]
+				guardianIds?: string[]
 				nonce?: string
 				deadline?: string
 				signature?: string
@@ -3117,8 +3117,8 @@ const routing = ( router: Router ) => {
 				!b.contract ||
 				!b.fromBeneficiary ||
 				!b.toBeneficiary ||
-				!Array.isArray(b.nodeWallets) ||
-				b.nodeWallets.length === 0 ||
+				!Array.isArray(b.guardianIds) ||
+				b.guardianIds.length === 0 ||
 				b.nonce == null ||
 				b.deadline == null ||
 				!b.signature
@@ -3129,7 +3129,7 @@ const routing = ( router: Router ) => {
 				contract: ethers.getAddress(b.contract),
 				fromBeneficiary: ethers.getAddress(b.fromBeneficiary),
 				toBeneficiary: ethers.getAddress(b.toBeneficiary),
-				nodeWallets: b.nodeWallets.map((a) => ethers.getAddress(a)),
+				guardianIds: b.guardianIds.map((g) => BigInt(g)),
 				nonce: BigInt(b.nonce),
 				deadline: BigInt(b.deadline),
 				signature: b.signature,
@@ -3144,7 +3144,7 @@ const routing = ( router: Router ) => {
 			const b = req.body as {
 				contract?: string
 				seller?: string
-				nodeWallets?: string[]
+				guardianIds?: string[]
 				priceUsdc6?: string
 				nonce?: string
 				deadline?: string
@@ -3153,8 +3153,8 @@ const routing = ( router: Router ) => {
 			if (
 				!b.contract ||
 				!b.seller ||
-				!Array.isArray(b.nodeWallets) ||
-				b.nodeWallets.length === 0 ||
+				!Array.isArray(b.guardianIds) ||
+				b.guardianIds.length === 0 ||
 				b.priceUsdc6 == null ||
 				b.nonce == null ||
 				b.deadline == null ||
@@ -3165,7 +3165,7 @@ const routing = ( router: Router ) => {
 			validatorCreateTransferOrderPool.push({
 				contract: ethers.getAddress(b.contract),
 				seller: ethers.getAddress(b.seller),
-				nodeWallets: b.nodeWallets.map((a) => ethers.getAddress(a)),
+				guardianIds: b.guardianIds.map((g) => BigInt(g)),
 				priceUsdc6: BigInt(b.priceUsdc6),
 				nonce: BigInt(b.nonce),
 				deadline: BigInt(b.deadline),
