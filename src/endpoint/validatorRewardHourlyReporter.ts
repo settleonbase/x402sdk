@@ -9,7 +9,7 @@ import {
 	resolveValidatorDepositRedeemAddress,
 	resolveValidatorNodeIp,
 	resolveValidatorNodeRewardIndexerAddress,
-	validatorRewardReportHourly,
+	validatorRewardReport,
 } from './validatorDepositRedeem'
 
 const DEFAULT_NEW_CONET_DIR = '/Users/peter/Downloads/seguro-pro/CoNET-DL-master/newCoNET'
@@ -31,12 +31,10 @@ type BalanceSnapshot = {
 	feeRecipientWei: string
 }
 
-type HourlyRewardReporterState = {
+type RewardReporterState = {
 	updatedAt: string
-	trackingHourId: number
-	lastReportedHourId: number
-	/** Balances captured at the start of {trackingHourId} (UTC hour bucket). */
-	hourStart: Record<string, BalanceSnapshot>
+	/** Last observed balances per validator pubkey (lowercase hex). */
+	lastSnapshot: Record<string, BalanceSnapshot>
 }
 
 let reporterStarted = false
@@ -47,10 +45,11 @@ function resolveNewCoNETDir(): string {
 	return process.env.CONET_VALIDATOR_NEWCONET_DIR?.trim() || masterSetup.validatorDeposit?.newCoNETDir?.trim() || DEFAULT_NEW_CONET_DIR
 }
 
-function resolveHourlyRewardStateFile(): string {
+function resolveRewardReporterStateFile(): string {
 	return (
 		process.env.CONET_VALIDATOR_HOURLY_REWARD_STATE_FILE?.trim() ||
-		path.join(homedir(), '.conet-validator-hourly-reward-state.json')
+		process.env.CONET_VALIDATOR_REWARD_REPORTER_STATE_FILE?.trim() ||
+		path.join(homedir(), '.conet-validator-reward-reporter-state.json')
 	)
 }
 
@@ -59,72 +58,62 @@ function resolveBeaconRestUrl(): string {
 }
 
 function resolveReporterTickMs(): number {
-	const n = Number(process.env.CONET_VALIDATOR_HOURLY_REWARD_TICK_MS || 60_000)
+	const n = Number(process.env.CONET_VALIDATOR_HOURLY_REWARD_TICK_MS || process.env.CONET_VALIDATOR_REWARD_REPORTER_TICK_MS || 60_000)
 	return Number.isFinite(n) && n >= 15_000 ? Math.floor(n) : 60_000
 }
 
-/** Seconds after UTC hour boundary before closing the previous hour (balance settle). */
-function resolveReportDelaySec(): number {
-	const n = Number(process.env.CONET_VALIDATOR_HOURLY_REWARD_REPORT_DELAY_SEC || 120)
-	return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 120
-}
-
 function resolveReportChunkSize(): number {
-	const n = Number(process.env.CONET_VALIDATOR_HOURLY_REWARD_CHUNK || 40)
+	const n = Number(process.env.CONET_VALIDATOR_HOURLY_REWARD_CHUNK || process.env.CONET_VALIDATOR_REWARD_REPORTER_CHUNK || 40)
 	return Number.isFinite(n) && n >= 1 ? Math.min(200, Math.floor(n)) : 40
 }
 
-/** Only capture hourStart within this many seconds after UTC hour boundary (avoid mid-hour baselines). */
-function resolveBaselineGraceSec(): number {
-	const n = Number(process.env.CONET_VALIDATOR_HOURLY_REWARD_BASELINE_GRACE_SEC || 300)
-	return Number.isFinite(n) && n >= 30 ? Math.min(900, Math.floor(n)) : 300
-}
-
-function secondsIntoUtcHour(unixSec: number): number {
-	return unixSec % 3600
-}
-
 function reporterDryRun(): boolean {
-	const v = (process.env.CONET_VALIDATOR_HOURLY_REWARD_DRY_RUN || process.env.CONET_VALIDATOR_DRY_RUN || '').trim().toLowerCase()
+	const v = (process.env.CONET_VALIDATOR_HOURLY_REWARD_DRY_RUN || process.env.CONET_VALIDATOR_REWARD_REPORTER_DRY_RUN || process.env.CONET_VALIDATOR_DRY_RUN || '').trim().toLowerCase()
 	return v === '1' || v === 'true' || v === 'yes'
 }
 
 function reporterEnabled(): boolean {
 	if (process.env.CONET_VALIDATOR_HOURLY_REWARD_REPORT === '0') return false
+	if (process.env.CONET_VALIDATOR_REWARD_REPORTER === '0') return false
 	if (process.env.CONET_VALIDATOR_HOURLY_REWARD_REPORT === '1') return true
+	if (process.env.CONET_VALIDATOR_REWARD_REPORTER === '1') return true
 	// Default: follow redeem listener flag when unset.
 	return process.env.CONET_VALIDATOR_REDEEM_LISTENER === '1'
-}
-
-function utcHourId(unixSec: number): number {
-	return Math.floor(unixSec / 3600)
 }
 
 function gweiToWei(gwei: bigint): bigint {
 	return gwei * 1_000_000_000n
 }
 
-function readState(): HourlyRewardReporterState {
-	const file = resolveHourlyRewardStateFile()
+function readState(): RewardReporterState {
+	const file = resolveRewardReporterStateFile()
 	try {
 		if (!fs.existsSync(file)) {
-			const now = utcHourId(Math.floor(Date.now() / 1000))
-			return { updatedAt: new Date().toISOString(), trackingHourId: now, lastReportedHourId: now - 1, hourStart: {} }
+			return { updatedAt: new Date().toISOString(), lastSnapshot: {} }
 		}
-		const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as HourlyRewardReporterState
-		if (typeof raw.trackingHourId !== 'number' || typeof raw.lastReportedHourId !== 'number' || !raw.hourStart) {
-			throw new Error('invalid shape')
+		const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as RewardReporterState & {
+			hourStart?: Record<string, BalanceSnapshot>
+			trackingHourId?: number
 		}
-		return raw
+		if (raw.lastSnapshot && typeof raw.lastSnapshot === 'object') {
+			return { updatedAt: raw.updatedAt ?? new Date().toISOString(), lastSnapshot: raw.lastSnapshot }
+		}
+		if (raw.hourStart && typeof raw.hourStart === 'object') {
+			logger(
+				Colors.yellow(
+					'[validatorRewardReporter] migrated legacy UTC-hour state → delta baseline (re-baselining on next tick)'
+				)
+			)
+		}
+		return { updatedAt: new Date().toISOString(), lastSnapshot: {} }
 	} catch (e: unknown) {
-		logger(Colors.yellow(`[validatorRewardHourlyReporter] state reset: ${(e as Error)?.message ?? e}`))
-		const now = utcHourId(Math.floor(Date.now() / 1000))
-		return { updatedAt: new Date().toISOString(), trackingHourId: now, lastReportedHourId: now - 1, hourStart: {} }
+		logger(Colors.yellow(`[validatorRewardReporter] state reset: ${(e as Error)?.message ?? e}`))
+		return { updatedAt: new Date().toISOString(), lastSnapshot: {} }
 	}
 }
 
-function writeState(state: HourlyRewardReporterState): void {
-	const file = resolveHourlyRewardStateFile()
+function writeState(state: RewardReporterState): void {
+	const file = resolveRewardReporterStateFile()
 	state.updatedAt = new Date().toISOString()
 	fs.mkdirSync(path.dirname(file), { recursive: true })
 	fs.writeFileSync(file, JSON.stringify(state, null, 2) + '\n', 'utf8')
@@ -193,7 +182,7 @@ function readLocalDepositPubkeys(): string[] {
 				}
 			}
 		} catch (e: unknown) {
-			logger(Colors.yellow(`[validatorRewardHourlyReporter] deposit file read failed: ${(e as Error)?.message ?? e}`))
+			logger(Colors.yellow(`[validatorRewardReporter] deposit file read failed: ${(e as Error)?.message ?? e}`))
 		}
 	}
 	out.push(...readPrysmWalletPubkeys(), ...readExtraTrackPubkeys())
@@ -269,12 +258,26 @@ async function snapshotValidators(validators: TrackedValidator[]): Promise<Map<s
 	return out
 }
 
-function computeHourlyEntries(
+function rewardEventKey(pubkey: string, start: BalanceSnapshot, end: BalanceSnapshot): string {
+	return ethers.keccak256(
+		ethers.AbiCoder.defaultAbiCoder().encode(
+			['bytes32', 'uint256', 'uint256', 'uint256', 'uint256'],
+			[
+				ethers.keccak256(pubkey),
+				BigInt(start.beaconGwei),
+				BigInt(end.beaconGwei),
+				BigInt(start.feeRecipientWei),
+				BigInt(end.feeRecipientWei),
+			]
+		)
+	)
+}
+
+function computeRewardEntries(
 	validators: TrackedValidator[],
-	hourId: number,
 	start: Map<string, BalanceSnapshot>,
 	end: Map<string, BalanceSnapshot>
-): Array<{ nodeWallet: string; hourId: number; hourlyReward: bigint }> {
+): Array<{ eventKey: string; nodeWallet: string; pubkey: string; amount: bigint }> {
 	const byBeneficiary = new Map<string, TrackedValidator[]>()
 	for (const v of validators) {
 		const key = v.beneficiary.toLowerCase()
@@ -283,7 +286,7 @@ function computeHourlyEntries(
 		byBeneficiary.set(key, list)
 	}
 
-	const entries: Array<{ nodeWallet: string; hourId: number; hourlyReward: bigint }> = []
+	const entries: Array<{ eventKey: string; nodeWallet: string; pubkey: string; amount: bigint }> = []
 
 	for (const v of validators) {
 		const pk = v.pubkey.toLowerCase()
@@ -304,14 +307,21 @@ function computeHourlyEntries(
 		}
 
 		if (reward <= 0n) continue
-		entries.push({ nodeWallet: v.nodeWallet, hourId, hourlyReward: reward })
+		entries.push({
+			eventKey: rewardEventKey(pk, s, e),
+			nodeWallet: v.nodeWallet,
+			pubkey: pk,
+			amount: reward,
+		})
 	}
 
 	return entries
 }
 
-async function submitHourlyReports(
-	entries: Array<{ nodeWallet: string; hourId: number; hourlyReward: bigint }>
+async function submitRewardReports(
+	entries: Array<{ eventKey: string; nodeWallet: string; pubkey: string; amount: bigint }>,
+	endSnap: Map<string, BalanceSnapshot>,
+	state: RewardReporterState
 ): Promise<void> {
 	if (!entries.length) return
 	const chunk = resolveReportChunkSize()
@@ -320,24 +330,34 @@ async function submitHourlyReports(
 		if (reporterDryRun()) {
 			logger(
 				Colors.cyan(
-					`[validatorRewardHourlyReporter] dry-run report ${slice.length} rows hour=${slice[0]?.hourId} sample=${slice[0]?.nodeWallet}`
+					`[validatorRewardReporter] dry-run report ${slice.length} rows sample=${slice[0]?.nodeWallet} amount=${slice[0]?.amount.toString()}`
 				)
 			)
+			for (const row of slice) {
+				const snap = endSnap.get(row.pubkey)
+				if (snap) state.lastSnapshot[row.pubkey] = snap
+			}
+			writeState(state)
 			continue
 		}
-		const res = await validatorRewardReportHourly(
+		const res = await validatorRewardReport(
 			slice.map((e) => ({
+				eventKey: e.eventKey,
 				nodeWallet: e.nodeWallet,
-				hourId: e.hourId,
-				hourlyReward: e.hourlyReward,
+				amount: e.amount,
 			}))
 		)
 		if (!res.ok) {
 			throw new Error(res.error)
 		}
+		for (const row of slice) {
+			const snap = endSnap.get(row.pubkey)
+			if (snap) state.lastSnapshot[row.pubkey] = snap
+		}
+		writeState(state)
 		logger(
 			Colors.green(
-				`[validatorRewardHourlyReporter] reported ${res.count} node-hour rows tx=${res.txHash} hour=${slice[0]?.hourId}`
+				`[validatorRewardReporter] reported ${res.added}/${res.count} rows tx=${res.txHash} sample=${slice[0]?.nodeWallet}`
 			)
 		)
 	}
@@ -349,87 +369,47 @@ async function reporterTick(): Promise<void> {
 	try {
 		const contract = resolveValidatorDepositRedeemAddress()
 		if (!contract) {
-			logger(Colors.yellow('[validatorRewardHourlyReporter] skip: ValidatorDepositRedeem not configured'))
+			logger(Colors.yellow('[validatorRewardReporter] skip: ValidatorDepositRedeem not configured'))
 			return
 		}
 		const indexer = await resolveValidatorNodeRewardIndexerAddress()
 		if (!indexer) {
-			logger(Colors.yellow('[validatorRewardHourlyReporter] skip: ValidatorNodeRewardIndexer not configured'))
+			logger(Colors.yellow('[validatorRewardReporter] skip: ValidatorNodeRewardIndexer not configured'))
 			return
 		}
 
 		const validators = await loadTrackedValidators(contract)
 		if (!validators.length) {
-			logger(Colors.yellow('[validatorRewardHourlyReporter] no active local validators to track'))
+			logger(Colors.yellow('[validatorRewardReporter] no active local validators to track'))
 			return
 		}
 
-		const nowSec = Math.floor(Date.now() / 1000)
-		const nowHour = utcHourId(nowSec)
 		const state = readState()
 		const endSnap = await snapshotValidators(validators)
 
-		if (!Object.keys(state.hourStart).length) {
-			const intoHour = secondsIntoUtcHour(nowSec)
-			const grace = resolveBaselineGraceSec()
-			if (intoHour > grace) {
-				state.trackingHourId = nowHour + 1
-				state.lastReportedHourId = Math.max(state.lastReportedHourId, nowHour)
-				writeState(state)
-				logger(
-					Colors.cyan(
-						`[validatorRewardHourlyReporter] mid-hour startup (t+${intoHour}s); defer baseline to UTC hour ${state.trackingHourId}`
-					)
-				)
-				return
-			}
+		if (!Object.keys(state.lastSnapshot).length) {
 			for (const [pk, snap] of endSnap.entries()) {
-				state.hourStart[pk] = snap
+				state.lastSnapshot[pk] = snap
 			}
-			state.trackingHourId = nowHour
 			writeState(state)
-			logger(Colors.cyan(`[validatorRewardHourlyReporter] UTC baseline ${endSnap.size} validators for hour ${nowHour}`))
+			logger(Colors.cyan(`[validatorRewardReporter] baseline ${endSnap.size} validators (no report until reward delta)`))
 			return
 		}
 
-		if (state.trackingHourId > nowHour) {
-			writeState(state)
-			return
+		const startMap = new Map<string, BalanceSnapshot>()
+		for (const [pk, snap] of Object.entries(state.lastSnapshot)) startMap.set(pk, snap)
+
+		const entries = computeRewardEntries(validators, startMap, endSnap)
+		if (entries.length) {
+			await submitRewardReports(entries, endSnap, state)
 		}
 
-		const closeDeadlineSec = (state.trackingHourId + 1) * 3600 + resolveReportDelaySec()
-		const readyToCloseTrackedHour = nowSec >= closeDeadlineSec && state.lastReportedHourId < state.trackingHourId
-
-		if (readyToCloseTrackedHour) {
-			const hourToReport = state.trackingHourId
-			const startMap = new Map<string, BalanceSnapshot>()
-			for (const [pk, snap] of Object.entries(state.hourStart)) startMap.set(pk, snap)
-
-			const entries = computeHourlyEntries(validators, hourToReport, startMap, endSnap)
-			if (entries.length) {
-				await submitHourlyReports(entries)
-			} else {
-				logger(Colors.cyan(`[validatorRewardHourlyReporter] hour ${hourToReport}: zero measurable reward rows`))
-			}
-			state.lastReportedHourId = hourToReport
-
-			if (nowHour > hourToReport + 1) {
-				logger(
-					Colors.yellow(
-						`[validatorRewardHourlyReporter] skipped ${nowHour - hourToReport - 1} hour(s) while offline; rebaselining at hour ${nowHour}`
-					)
-				)
-			}
-			state.trackingHourId = nowHour
-			state.hourStart = {}
-			for (const [pk, snap] of endSnap.entries()) {
-				state.hourStart[pk] = snap
-			}
+		for (const [pk, snap] of endSnap.entries()) {
+			state.lastSnapshot[pk] = snap
 		}
-
 		writeState(state)
 	} catch (e: unknown) {
-		logger(Colors.red('[validatorRewardHourlyReporter] tick failed:'), (e as Error)?.message ?? String(e))
+		logger(Colors.red('[validatorRewardReporter] tick failed:'), (e as Error)?.message ?? String(e))
 	} finally {
 		reporterInFlight = false
 	}
@@ -446,18 +426,18 @@ function scheduleReporterTick(): void {
 	}, resolveReporterTickMs())
 }
 
-/** CoNET validator-node listener: measure hourly CL+EL CNET reward and report via {validatorRewardReportHourly}. */
+/** CoNET validator-node listener: detect CL+EL CNET reward deltas and report via {validatorRewardReport}. */
 export function startValidatorRewardHourlyReporter(): void {
 	if (reporterStarted) return
 	reporterStarted = true
 	if (!reporterEnabled()) {
-		logger(Colors.yellow('[validatorRewardHourlyReporter] disabled (set CONET_VALIDATOR_HOURLY_REWARD_REPORT=1)'))
+		logger(Colors.yellow('[validatorRewardReporter] disabled (set CONET_VALIDATOR_HOURLY_REWARD_REPORT=1)'))
 		return
 	}
 	const nodeIp = resolveValidatorNodeIp()
 	logger(
 		Colors.cyan(
-			`[validatorRewardHourlyReporter] starting nodeIp=${nodeIp || '?'} beacon=${resolveBeaconRestUrl()} tick=${resolveReporterTickMs()}ms`
+			`[validatorRewardReporter] starting nodeIp=${nodeIp || '?'} beacon=${resolveBeaconRestUrl()} tick=${resolveReporterTickMs()}ms`
 		)
 	)
 	void reporterTick().finally(() => scheduleReporterTick())

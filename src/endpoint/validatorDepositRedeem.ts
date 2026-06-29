@@ -32,7 +32,7 @@ const DEFAULT_NEW_CONET_DIR = '/Users/peter/Downloads/seguro-pro/CoNET-DL-master
 
 const VALIDATOR_DEPOSIT_REDEEM_ABI = [
 	'event ValidatorRedeemClaimed(bytes32 indexed requestId, bytes32 indexed codeHash, address indexed claimer, address beneficiary, uint256 validatorCount, string targetNodeIp, string[] conetDepinNodeIps, uint256 gbMiningNodeCount)',
-	'function createRedeemFor(address admin, bytes32 codeHash, address allowedClaimer, address referrer, uint256 validatorCount, string targetNodeIp, uint256 gbMiningNodeCount, uint256 validAfter, uint256 validBefore, uint256 nonce, uint256 deadline, bytes signature) external',
+	'function createRedeemFor(address admin, bytes32 codeHash, address allowedClaimer, address referrer, uint256 validatorCount, string targetNodeIp, uint256 gbMiningNodeCount, bool airdrop, uint256 validAfter, uint256 validBefore, uint256 nonce, uint256 deadline, bytes signature) external',
 	'function cancelRedeemFor(address admin, bytes32 codeHash, uint256 nonce, uint256 deadline, bytes signature) external',
 	'function claimRedeemFor(address claimer, address beneficiary, string code, uint256 deadline, bytes signature) external returns (bytes32)',
 	'function referrerExtension() view returns (address)',
@@ -41,7 +41,13 @@ const VALIDATOR_DEPOSIT_REDEEM_ABI = [
 	'function redeemAdminNonces(address account) view returns (uint256)',
 	'function redeemAdmins(address account) view returns (bool)',
 	'function admins(address account) view returns (bool)',
-	'function getRedeem(bytes32 codeHash) view returns (address allowedClaimer, address referrer, uint256 validatorCount, string targetNodeIp, uint256 gbMiningNodeCount, uint64 validAfter, uint64 validBefore, bool active, bool consumed)',
+	'function getRedeem(bytes32 codeHash) view returns (address allowedClaimer, address referrer, uint256 validatorCount, string targetNodeIp, uint256 gbMiningNodeCount, uint64 validAfter, uint64 validBefore, bool active, bool consumed, bool airdrop)',
+	'function airdropInfoOf(address beneficiary) view returns (uint256 accrued, uint256 claimed, uint256 claimable, uint64 claimableAt)',
+	'function setAirdropClaimableAt(uint64 claimableAt) external',
+	'function claimAirdropFor(address beneficiary, uint256 amount, uint256 nonce, uint256 deadline, bytes signature) external',
+	'event AirdropAccrued(address indexed beneficiary, bytes32 indexed codeHash, uint256 added, uint256 newTotal)',
+	'event AirdropClaimed(address indexed beneficiary, uint256 amount)',
+	'event AirdropClaimableAtSet(uint64 claimableAt)',
 	'function registerNodeValidators(address[] nodeWallets, bytes[] pubkeys) external',
 	'function getNodeValidator(address nodeWallet) view returns (bytes pubkey, address withdrawalBeneficiary, uint64 registeredAt, uint64 exitedAt, bool active)',
 	'function getBeneficiaryNodeBundle(address beneficiary) view returns (tuple(address beneficiary, uint256[] guardianNodeIds, string[] depinNodeIps, address[] nodeWallets, bytes[] validatorPubkeys, bool[] validatorActive, uint256 validatorNodeCount, uint256 gbMiningNodeCount, uint256 claimCount, uint256 nativeBalance, uint256 gbBalance, uint256 usdcBalance))',
@@ -100,14 +106,15 @@ const VALIDATOR_DEPOSIT_REDEEM_REFERRER_ABI = [
 ] as const
 
 /**
- * ValidatorNodeRewardIndexer — standalone per-node / per-beneficiary hourly CNET reward ledger + period stats.
+ * ValidatorNodeRewardIndexer — standalone per-node / per-beneficiary CNET reward ledger + period stats.
  * All reads here are RPC-direct (no centralized API), per the project RPC-first rule. The relayer write
- * (reportNodeRewardHourly) is the only gas-sponsored on-chain action and goes through a Settle wallet.
+ * (reportNodeReward) is the only gas-sponsored on-chain action and goes through a Settle wallet.
  */
 const VALIDATOR_NODE_REWARD_INDEXER_ABI = [
 	'function admins(address account) view returns (bool)',
 	'function redeem() view returns (address)',
-	'function reportNodeRewardHourly(address[] nodeWallets, uint256[] hourIds, uint256[] hourlyRewards) external',
+	'function reportNodeReward(bytes32[] eventKeys, address[] nodeWallets, uint256[] amounts) external returns (uint256 added)',
+	'function consumedEventKey(bytes32 key) view returns (bool)',
 	'function nodeHourlyReward(address nodeWallet, uint256 hourId) view returns (uint256)',
 	'function beneficiaryHourlyReward(address beneficiary, uint256 hourId) view returns (uint256)',
 	'function nodeCumulativeReward(address nodeWallet) view returns (uint256)',
@@ -123,7 +130,7 @@ const VALIDATOR_NODE_REWARD_INDEXER_ABI = [
 	'function getBeneficiaryPeriodReports(address beneficiary, uint8 periodType, uint256 periods, uint256 anchorTs) view returns (tuple(uint256 periodStart, uint256 periodEnd, uint256 reward)[])',
 	'function getNodeRewardSummary(address nodeWallet, uint256 anchorTs) view returns (uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year)',
 	'function getBeneficiaryRewardSummary(address beneficiary, uint256 anchorTs) view returns (uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year)',
-	'event NodeRewardHourSet(address indexed nodeWallet, address indexed beneficiary, uint256 indexed hourId, uint256 reward)',
+	'event NodeRewardReported(address indexed nodeWallet, address indexed beneficiary, uint256 indexed hourId, uint256 amount, uint256 newHourTotal, bytes32 eventKey)',
 ] as const
 
 /** Reward indexer period type ids (mirror ValidatorNodeRewardIndexer / AdminStatsPeriodLib). */
@@ -713,38 +720,47 @@ export async function validatorRewardReadBeneficiaryPeriods(
 }
 
 /**
- * Relayer write: feed off-chain measured hourly CNET reward into the indexer (idempotent set-absolute per hour
- * bucket). Only a redeem admin in {Settle_ContractPool} pays CNET gas; this MOVES NO USER FUNDS. The contract
- * pins each (node, hour)'s beneficiary on first report so a later node transfer never re-attributes past hours.
- * @param entries parallel arrays: node wallet, UTC hourId (unix/3600), absolute CNET reward (18-decimal bigint/string).
+ * Relayer write: accumulate measured CNET reward into the indexer (BeamioIndexerDiamond-style: contract
+ * buckets by block.timestamp/3600). Only a redeem admin in {Settle_ContractPool} pays CNET gas; MOVES NO FUNDS.
+ * Each entry carries a unique {eventKey} for on-chain idempotency (listener restart / retry safe).
  */
-export async function validatorRewardReportHourly(
-	entries: Array<{ nodeWallet: string; hourId: number | bigint; hourlyReward: bigint | string }>
-): Promise<{ ok: true; txHash: string; count: number } | { ok: false; error: string }> {
+export async function validatorRewardReport(
+	entries: Array<{ eventKey: string; nodeWallet: string; amount: bigint | string }>
+): Promise<{ ok: true; txHash: string; count: number; added: number } | { ok: false; error: string }> {
 	if (!entries.length) return { ok: false as const, error: 'empty entries' }
 	const address = await resolveValidatorNodeRewardIndexerAddress()
 	if (!address) return { ok: false as const, error: 'ValidatorNodeRewardIndexer not configured' }
 	if (!Settle_ContractPool.length) return { ok: false as const, error: 'no relayer wallet available (Settle pool empty)' }
 
+	let eventKeys: string[]
 	let nodeWallets: string[]
-	let hourIds: bigint[]
-	let rewards: bigint[]
+	let amounts: bigint[]
 	try {
+		eventKeys = entries.map((e) => {
+			const key = String(e.eventKey).trim()
+			if (!key || key === ethers.ZeroHash) throw new Error('zero eventKey')
+			return key
+		})
 		nodeWallets = entries.map((e) => ethers.getAddress(e.nodeWallet))
-		hourIds = entries.map((e) => BigInt(e.hourId))
-		rewards = entries.map((e) => BigInt(e.hourlyReward))
+		amounts = entries.map((e) => BigInt(e.amount))
 	} catch (ex) {
 		return { ok: false as const, error: `bad entry: ${(ex as Error).message}` }
 	}
 
-	const txHash = await withSettleWallet('validatorRewardReportHourly', async (sc) => {
+	const txResult = await withSettleWallet('validatorRewardReport', async (sc) => {
 		const c = new ethers.Contract(address, VALIDATOR_NODE_REWARD_INDEXER_ABI, sc.walletConet)
-		const tx = await c.reportNodeRewardHourly!(nodeWallets, hourIds, rewards, { gasLimit: 4_000_000 })
+		let added = entries.length
+		try {
+			added = Number(await c.reportNodeReward!.staticCall(eventKeys, nodeWallets, amounts))
+		} catch {
+			// fall back to batch size when staticCall unavailable
+		}
+		const tx = await c.reportNodeReward!(eventKeys, nodeWallets, amounts, { gasLimit: 4_000_000 })
 		await tx.wait()
-		return tx.hash as string
+		return { hash: tx.hash as string, added }
 	})
-	if (!txHash) return { ok: false as const, error: 'relayer submit failed' }
-	return { ok: true as const, txHash, count: entries.length }
+	if (!txResult) return { ok: false as const, error: 'relayer submit failed' }
+	return { ok: true as const, txHash: txResult.hash, count: entries.length, added: txResult.added }
 }
 
 export function resolveValidatorNodeIp(): string {
@@ -996,8 +1012,20 @@ export const validatorDepositRedeemCreateTypes: Record<string, { name: string; t
 		{ name: 'validatorCount', type: 'uint256' },
 		{ name: 'targetNodeIp', type: 'string' },
 		{ name: 'gbMiningNodeCount', type: 'uint256' },
+		{ name: 'airdrop', type: 'bool' },
 		{ name: 'validAfter', type: 'uint256' },
 		{ name: 'validBefore', type: 'uint256' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
+// ClaimAirdrop: signed by the beneficiary; relayed via {claimAirdropFor} (gas-sponsored). Must stay byte-identical
+// to ValidatorDepositRedeemStatsLib.CLAIM_AIRDROP_TYPEHASH.
+export const validatorDepositRedeemClaimAirdropTypes: Record<string, { name: string; type: string }[]> = {
+	ClaimAirdrop: [
+		{ name: 'beneficiary', type: 'address' },
+		{ name: 'amount', type: 'uint256' },
 		{ name: 'nonce', type: 'uint256' },
 		{ name: 'deadline', type: 'uint256' },
 	],
@@ -1117,6 +1145,7 @@ export async function validatorDepositRedeemCreateClusterPreCheck(body: {
 	validatorCount?: unknown
 	targetNodeIp?: string
 	gbMiningNodeCount?: unknown
+	airdrop?: unknown
 	validAfter?: unknown
 	validBefore?: unknown
 	nonce?: unknown
@@ -1145,6 +1174,7 @@ export async function validatorDepositRedeemCreateClusterPreCheck(body: {
 	// All redeems auto-allocate Guardian nodes at claim time; no manual DePIN IP list is accepted.
 	const gbMiningNodeCount = parseUintField('gbMiningNodeCount', body.gbMiningNodeCount ?? validatorCount.toString())
 	if (typeof gbMiningNodeCount === 'string') return { success: false as const, error: gbMiningNodeCount }
+	const airdrop = body.airdrop === true || body.airdrop === 'true' || body.airdrop === 1 || body.airdrop === '1'
 	const validAfter = parseUintField('validAfter', body.validAfter ?? '0')
 	const validBefore = parseUintField('validBefore', body.validBefore ?? '0')
 	const nonce = parseUintField('nonce', body.nonce)
@@ -1177,6 +1207,7 @@ export async function validatorDepositRedeemCreateClusterPreCheck(body: {
 		validatorCount,
 		targetNodeIp,
 		gbMiningNodeCount,
+		airdrop,
 		validAfter,
 		validBefore,
 		nonce,
@@ -1282,6 +1313,57 @@ export async function validatorDepositRedeemClaimClusterPreCheck(body: {
 	}
 
 	return { success: true as const, preChecked: { contract, claimer, beneficiary, referrer, code, deadline, signature } }
+}
+
+/**
+ * Cluster pre-check for the gas-sponsored airdrop claim. The beneficiary signs EIP-712 {ClaimAirdrop}; we verify the
+ * signature, nonce (beneficiaryNonces), deadline, claim-open time and that `amount` does not exceed the on-chain
+ * claimable balance, then static-call {claimAirdropFor} so master relay never reverts on a valid pre-check.
+ */
+export async function validatorDepositRedeemClaimAirdropClusterPreCheck(body: {
+	beneficiary?: string
+	amount?: unknown
+	nonce?: unknown
+	deadline?: unknown
+	signature?: unknown
+}) {
+	const contract = resolveValidatorDepositRedeemAddress()
+	if (!contract) return { success: false as const, error: 'CONET_VALIDATOR_DEPOSIT_REDEEM not configured' }
+	if (!body.beneficiary || !ethers.isAddress(body.beneficiary)) return { success: false as const, error: 'Invalid beneficiary' }
+	const beneficiary = ethers.getAddress(body.beneficiary)
+	const amount = parseUintField('amount', body.amount)
+	if (typeof amount === 'string' || amount <= 0n) return { success: false as const, error: typeof amount === 'string' ? amount : 'amount must be positive' }
+	const nonce = parseUintField('nonce', body.nonce)
+	const deadline = parseUintField('deadline', body.deadline)
+	if (typeof nonce === 'string' || typeof deadline === 'string') return { success: false as const, error: 'Invalid nonce or deadline' }
+	const expired = clusterRejectIfSignatureDeadlineExpired(deadline)
+	if (expired) return expired
+	const signature = typeof body.signature === 'string' ? body.signature.trim() : ''
+	if (!ethers.isHexString(signature) || ethers.dataLength(signature) < 64) return { success: false as const, error: 'Invalid signature' }
+
+	const read = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+	const [chainNonce, info] = await Promise.all([read.beneficiaryNonces!(beneficiary), read.airdropInfoOf!(beneficiary)])
+	if ((chainNonce as bigint) !== nonce) return { success: false as const, error: 'Stale nonce; refresh and sign again' }
+	const claimable = info[2] as bigint
+	const claimableAt = info[3] as bigint
+	if (claimableAt === 0n || BigInt(Math.floor(Date.now() / 1000)) < claimableAt) return { success: false as const, error: 'Airdrop claim not open yet' }
+	if (amount > claimable) return { success: false as const, error: 'Amount exceeds claimable airdrop' }
+
+	const recovered = ethers.verifyTypedData(
+		validatorDepositRedeemEip712Domain(contract),
+		validatorDepositRedeemClaimAirdropTypes,
+		{ beneficiary, amount, nonce, deadline },
+		signature
+	)
+	if (recovered.toLowerCase() !== beneficiary.toLowerCase()) return { success: false as const, error: 'Signer is not beneficiary' }
+
+	try {
+		await read.claimAirdropFor!.staticCall(beneficiary, amount, nonce, deadline, signature)
+	} catch (e: unknown) {
+		return { success: false as const, error: formatEthersRevert(e) }
+	}
+
+	return { success: true as const, preChecked: { contract, beneficiary, amount, nonce, deadline, signature } }
 }
 
 export async function validatorDepositRedeemTransferClusterPreCheck(body: {
@@ -1528,6 +1610,7 @@ export type ValidatorDepositRedeemCreatePayload = {
 	validatorCount: bigint
 	targetNodeIp: string
 	gbMiningNodeCount: bigint
+	airdrop: boolean
 	validAfter: bigint
 	validBefore: bigint
 	nonce: bigint
@@ -1552,6 +1635,16 @@ export type ValidatorDepositRedeemClaimPayload = {
 	beneficiary: string
 	referrer: string
 	code: string
+	deadline: bigint
+	signature: string
+	res?: Response
+}
+
+export type ValidatorDepositRedeemClaimAirdropPayload = {
+	contract: string
+	beneficiary: string
+	amount: bigint
+	nonce: bigint
 	deadline: bigint
 	signature: string
 	res?: Response
@@ -1606,6 +1699,7 @@ export type ValidatorFulfillTransferOrderPayload = {
 export const validatorDepositRedeemCreatePool: ValidatorDepositRedeemCreatePayload[] = []
 export const validatorDepositRedeemCancelPool: ValidatorDepositRedeemCancelPayload[] = []
 export const validatorDepositRedeemClaimPool: ValidatorDepositRedeemClaimPayload[] = []
+export const validatorDepositRedeemClaimAirdropPool: ValidatorDepositRedeemClaimAirdropPayload[] = []
 export const validatorDepositRedeemTransferPool: ValidatorDepositRedeemTransferPayload[] = []
 export const validatorCreateTransferOrderPool: ValidatorCreateTransferOrderPayload[] = []
 export const validatorCancelTransferOrderPool: ValidatorCancelTransferOrderPayload[] = []
@@ -1640,6 +1734,7 @@ export const validatorDepositRedeemCreateProcess = async () => {
 				obj.validatorCount,
 				obj.targetNodeIp,
 				obj.gbMiningNodeCount,
+				obj.airdrop,
 				obj.validAfter,
 				obj.validBefore,
 				obj.nonce,
@@ -1657,6 +1752,30 @@ export const validatorDepositRedeemCreateProcess = async () => {
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
 		setTimeout(() => void validatorDepositRedeemCreateProcess(), 3000)
+	}
+}
+
+export const validatorDepositRedeemClaimAirdropProcess = async () => {
+	const obj = validatorDepositRedeemClaimAirdropPool.shift()
+	if (!obj) return
+	if (!Settle_ContractPool.length) {
+		validatorDepositRedeemClaimAirdropPool.unshift(obj)
+		return setTimeout(() => void validatorDepositRedeemClaimAirdropProcess(), 3000)
+	}
+	try {
+		const txHash = await withSettleWallet('validatorDepositRedeemClaimAirdrop', async (sc) => {
+			const c = new ethers.Contract(obj.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+			const tx = await c.claimAirdropFor!(obj.beneficiary, obj.amount, obj.nonce, obj.deadline, obj.signature, { gasLimit: 600_000 })
+			await tx.wait()
+			return tx.hash as string
+		})
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash }).end()
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(Colors.red('[validatorDepositRedeemClaimAirdropProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		setTimeout(() => void validatorDepositRedeemClaimAirdropProcess(), 3000)
 	}
 }
 

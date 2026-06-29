@@ -58,6 +58,8 @@ import {
 	validatorFulfillTransferOrderProcess,
 	validatorDepositRedeemCreatePool,
 	validatorDepositRedeemCreateProcess,
+	validatorDepositRedeemClaimAirdropPool,
+	validatorDepositRedeemClaimAirdropProcess,
 } from './validatorDepositRedeem'
 
 const masterServerPort = 1111
@@ -2997,6 +2999,7 @@ const routing = ( router: Router ) => {
 				validatorCount?: string
 				targetNodeIp?: string
 				gbMiningNodeCount?: string
+				airdrop?: unknown
 				validAfter?: string
 				validBefore?: string
 				nonce?: string
@@ -3029,6 +3032,7 @@ const routing = ( router: Router ) => {
 				validatorCount: BigInt(b.validatorCount),
 				targetNodeIp: b.targetNodeIp,
 				gbMiningNodeCount: BigInt(b.gbMiningNodeCount),
+				airdrop: b.airdrop === true || b.airdrop === 'true' || b.airdrop === 1 || b.airdrop === '1',
 				validAfter: BigInt(b.validAfter),
 				validBefore: BigInt(b.validBefore),
 				nonce: BigInt(b.nonce),
@@ -3077,6 +3081,25 @@ const routing = ( router: Router ) => {
 			})
 			validatorDepositRedeemClaimProcess().catch((err: any) => {
 				logger(Colors.red('[validatorDepositRedeemClaimProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		router.post('/validatorDepositRedeemClaimAirdrop', (req, res) => {
+			const b = req.body as { contract?: string; beneficiary?: string; amount?: string; nonce?: string; deadline?: string; signature?: string }
+			if (!b.contract || !b.beneficiary || !b.amount || b.nonce == null || b.deadline == null || !b.signature) {
+				return res.status(400).json({ success: false, error: 'Missing validator redeem airdrop claim fields' }).end()
+			}
+			validatorDepositRedeemClaimAirdropPool.push({
+				contract: ethers.getAddress(b.contract),
+				beneficiary: ethers.getAddress(b.beneficiary),
+				amount: BigInt(b.amount),
+				nonce: BigInt(b.nonce),
+				deadline: BigInt(b.deadline),
+				signature: b.signature,
+				res,
+			})
+			validatorDepositRedeemClaimAirdropProcess().catch((err: any) => {
+				logger(Colors.red('[validatorDepositRedeemClaimAirdropProcess] unhandled error:'), err?.message ?? err)
 			})
 		})
 

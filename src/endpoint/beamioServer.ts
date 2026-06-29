@@ -41,6 +41,7 @@ import {
 	fulfillTransferOrderClusterPreCheck,
 	validatorDepositRedeemConfig,
 	validatorDepositRedeemCreateClusterPreCheck,
+	validatorDepositRedeemClaimAirdropClusterPreCheck,
 	validatorDepositRedeemReadAdminNonce,
 } from './validatorDepositRedeem'
 import {
@@ -8488,6 +8489,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					validatorCount: p.validatorCount.toString(),
 					targetNodeIp: p.targetNodeIp,
 					gbMiningNodeCount: p.gbMiningNodeCount.toString(),
+					airdrop: p.airdrop,
 					validAfter: p.validAfter.toString(),
 					validBefore: p.validBefore.toString(),
 					nonce: p.nonce.toString(),
@@ -8541,6 +8543,31 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					claimer: p.claimer,
 					beneficiary: p.beneficiary,
 					code: p.code,
+					deadline: p.deadline.toString(),
+					signature: p.signature,
+				},
+				res
+			)
+		} catch (e: any) {
+			return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/validatorDepositRedeemClaimAirdrop', async (req, res) => {
+		try {
+			const pre = await validatorDepositRedeemClaimAirdropClusterPreCheck(req.body)
+			if (!pre.success) {
+				logger(Colors.red(`server /api/validatorDepositRedeemClaimAirdrop preCheck FAIL: ${pre.error}`))
+				return res.status(400).json({ success: false, error: pre.error }).end()
+			}
+			const p = pre.preChecked
+			postLocalhost(
+				'/api/validatorDepositRedeemClaimAirdrop',
+				{
+					contract: p.contract,
+					beneficiary: p.beneficiary,
+					amount: p.amount.toString(),
+					nonce: p.nonce.toString(),
 					deadline: p.deadline.toString(),
 					signature: p.signature,
 				},
