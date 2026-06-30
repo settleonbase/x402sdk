@@ -167,6 +167,13 @@ export type ValidatorRedeemState = {
 type StateFile = Record<string, ValidatorRedeemState>
 
 let cachedConetProvider: ethers.JsonRpcProvider | undefined
+let conetProviderListenerHooksInstalled = false
+
+function isFilterNotFoundRpcError(e: unknown): boolean {
+	const err = e as { error?: { message?: string }; message?: string; shortMessage?: string }
+	const msg = [err?.error?.message, err?.message, err?.shortMessage].filter(Boolean).join(' ')
+	return /filter not found/i.test(msg)
+}
 
 /** CoNET JSON-RPC for listener + redeem paths; longer timeout + staticNetwork to survive public RPC blips. */
 function conetProvider(): ethers.JsonRpcProvider {
@@ -2745,9 +2752,162 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 }
 
 let listenerStarted = false
+let listenerBackfillTimer: ReturnType<typeof setTimeout> | undefined
+let listenerBackfillInFlight = false
+let liveListenerRebuildInFlight = false
+let pendingLiveListenerRebuild = false
+let liveListenerRebuildTimer: ReturnType<typeof setTimeout> | undefined
+let lastListenerLagAlertAt = 0
+let listenerContract: ethers.Contract | null = null
+let listenerContext: { contract: string; nodeIp: string; deployFloor: number } | null = null
 
 /** First block handled by live subscription; blocks below this are backfill-only. Set after live attach. */
 let liveListenFromBlock = 0
+
+function resolveListenerBackfillTickMs(): number {
+	const raw = Number(process.env.CONET_VALIDATOR_REDEEM_LISTENER_BACKFILL_TICK_MS || 180_000)
+	if (!Number.isFinite(raw)) return 180_000
+	return Math.min(Math.max(Math.floor(raw), 60_000), 300_000)
+}
+
+function resolveListenerLagAlertBlocks(): number {
+	const raw = Number(process.env.CONET_VALIDATOR_REDEEM_LISTENER_LAG_ALERT_BLOCKS || 500)
+	if (!Number.isFinite(raw) || raw <= 0) return 500
+	return Math.floor(raw)
+}
+
+function resolveListenerLagAlertCooldownMs(): number {
+	const raw = Number(process.env.CONET_VALIDATOR_REDEEM_LISTENER_LAG_ALERT_COOLDOWN_MS || 600_000)
+	if (!Number.isFinite(raw) || raw < 60_000) return 600_000
+	return Math.floor(raw)
+}
+
+function rebuildLiveListenersEachBackfillTick(): boolean {
+	const raw = (process.env.CONET_VALIDATOR_REDEEM_LISTENER_REBUILD_LIVE_EACH_TICK || 'YES').trim().toUpperCase()
+	return raw !== 'NO' && raw !== '0' && raw !== 'FALSE'
+}
+
+function scheduleLiveListenerRebuild(reason: string): void {
+	if (!listenerStarted || !listenerContext) return
+	if (pendingLiveListenerRebuild) return
+	pendingLiveListenerRebuild = true
+	if (liveListenerRebuildTimer !== undefined) clearTimeout(liveListenerRebuildTimer)
+	liveListenerRebuildTimer = setTimeout(() => {
+		pendingLiveListenerRebuild = false
+		liveListenerRebuildTimer = undefined
+		void rebuildLiveListeners(reason)
+	}, 500)
+}
+
+function ensureConetProviderListenerHooks(): void {
+	if (conetProviderListenerHooksInstalled) return
+	conetProviderListenerHooksInstalled = true
+	const provider = conetProvider()
+	const origSend = provider.send.bind(provider)
+	provider.send = async (method: string, params?: Array<unknown> | Record<string, unknown>) => {
+		try {
+			return await origSend(method, params as Array<unknown>)
+		} catch (e: unknown) {
+			if (method === 'eth_getFilterChanges' && isFilterNotFoundRpcError(e)) {
+				scheduleLiveListenerRebuild('eth_getFilterChanges filter not found')
+				void runIncrementalListenerBackfill('filter not found')
+			}
+			throw e
+		}
+	}
+}
+
+async function maybeAlertListenerCheckpointLag(contract: string, deployFloor: number, head: number): Promise<number> {
+	const prior = loadListenerBlockCheckpoint(contract, deployFloor)
+	if (prior == null) return 0
+	const lag = head - prior
+	const threshold = resolveListenerLagAlertBlocks()
+	if (lag <= threshold) return lag
+	const now = Date.now()
+	if (now - lastListenerLagAlertAt < resolveListenerLagAlertCooldownMs()) return lag
+	lastListenerLagAlertAt = now
+	logger(
+		Colors.red(
+			`[validatorDepositRedeemListener] ALERT: checkpoint lag ${lag} blocks (checkpoint=${prior}, head=${head}, threshold=${threshold}) — run incremental backfill`
+		)
+	)
+	scheduleLiveListenerRebuild(`checkpoint lag ${lag} blocks`)
+	return lag
+}
+
+async function runIncrementalListenerBackfill(reason: string): Promise<void> {
+	if (!listenerContext) return
+	if (listenerBackfillInFlight) {
+		logger(Colors.yellow(`[validatorDepositRedeemListener] incremental backfill skipped (${reason}): prior tick in flight`))
+		return
+	}
+	listenerBackfillInFlight = true
+	const { contract, nodeIp, deployFloor } = listenerContext
+	try {
+		const provider = conetProvider()
+		const head = await provider.getBlockNumber()
+		const lag = await maybeAlertListenerCheckpointLag(contract, deployFloor, head)
+		const prior = loadListenerBlockCheckpoint(contract, deployFloor)
+		if (prior == null) {
+			logger(
+				Colors.yellow(
+					`[validatorDepositRedeemListener] incremental backfill skipped (${reason}): no checkpoint yet`
+				)
+			)
+			return
+		}
+		const fromBlock = prior + 1
+		if (fromBlock > head) return
+		logger(
+			Colors.cyan(
+				`[validatorDepositRedeemListener] incremental backfill ${fromBlock}..${head} (${reason}, lag=${lag})`
+			)
+		)
+		await backfillValidatorDepositRedeemListenerEvents(contract, nodeIp, fromBlock, head, deployFloor)
+		if (rebuildLiveListenersEachBackfillTick() || lag > resolveListenerLagAlertBlocks()) {
+			scheduleLiveListenerRebuild(`after incremental backfill (${reason})`)
+		}
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.red(`[validatorDepositRedeemListener] incremental backfill failed (${reason}):`), msg)
+	} finally {
+		listenerBackfillInFlight = false
+	}
+}
+
+function scheduleListenerBackfillTick(): void {
+	if (!listenerStarted) return
+	listenerBackfillTimer = setTimeout(async () => {
+		await runIncrementalListenerBackfill('periodic tick')
+		scheduleListenerBackfillTick()
+	}, resolveListenerBackfillTickMs())
+}
+
+async function rebuildLiveListeners(reason: string): Promise<void> {
+	if (!listenerContext || liveListenerRebuildInFlight) return
+	liveListenerRebuildInFlight = true
+	const { contract, nodeIp } = listenerContext
+	try {
+		if (listenerContract) {
+			listenerContract.removeAllListeners()
+		}
+		const provider = conetProvider()
+		const head = await provider.getBlockNumber()
+		listenerContract = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
+		attachValidatorDepositRedeemLiveListeners(listenerContract, contract, nodeIp)
+		liveListenFromBlock = head + 1
+		logger(
+			Colors.yellow(
+				`[validatorDepositRedeemListener] live listeners rebuilt (${reason}); live from block ${liveListenFromBlock}`
+			)
+		)
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.red('[validatorDepositRedeemListener] live listener rebuild failed:'), msg)
+	} finally {
+		liveListenerRebuildInFlight = false
+	}
+}
 
 function shouldHandleLiveListenerBlock(blockNumber: number): boolean {
 	// Before boundary is resolved, accept live events (dedup handles any overlap with backfill).
@@ -3076,15 +3236,17 @@ async function bootstrapValidatorDepositRedeemListener(): Promise<void> {
 	const deployFloor = resolveListenerDeployBlockFloor()
 	const priorSaved = loadListenerBlockCheckpoint(contract, deployFloor)
 
-	const c = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
-	attachValidatorDepositRedeemLiveListeners(c, contract, nodeIp)
+	listenerContext = { contract, nodeIp, deployFloor }
+	ensureConetProviderListenerHooks()
+
+	listenerContract = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
+	attachValidatorDepositRedeemLiveListeners(listenerContract, contract, nodeIp)
 
 	const { liveListenFromBlock: liveFrom, checkpointBlock } = await resolveLiveListenBoundary(provider)
 	liveListenFromBlock = liveFrom
-	saveListenerBlockCheckpoint(contract, checkpointBlock)
 	logger(
 		Colors.green(
-			`[validatorDepositRedeemListener] live from block ${liveFrom}; checkpoint=${checkpointBlock} (prior=${priorSaved ?? 'none'})`
+			`[validatorDepositRedeemListener] live from block ${liveFrom}; backfill target=${checkpointBlock} (prior=${priorSaved ?? 'none'}); tick=${resolveListenerBackfillTickMs()}ms lagAlert>${resolveListenerLagAlertBlocks()} blocks`
 		)
 	)
 
@@ -3095,9 +3257,33 @@ async function bootstrapValidatorDepositRedeemListener(): Promise<void> {
 		checkpointBlock,
 		deployFloor,
 		liveFrom
-	).catch((e: any) => {
-		logger(Colors.red('[validatorDepositRedeemListener] backfill failed:'), e?.message ?? String(e))
-	})
+	)
+		.catch((e: unknown) => {
+			const msg = e instanceof Error ? e.message : String(e)
+			logger(Colors.red('[validatorDepositRedeemListener] bootstrap backfill failed:'), msg)
+		})
+		.finally(() => {
+			scheduleListenerBackfillTick()
+		})
+}
+
+export function stopValidatorDepositRedeemListener(): void {
+	listenerStarted = false
+	if (listenerBackfillTimer !== undefined) {
+		clearTimeout(listenerBackfillTimer)
+		listenerBackfillTimer = undefined
+	}
+	if (liveListenerRebuildTimer !== undefined) {
+		clearTimeout(liveListenerRebuildTimer)
+		liveListenerRebuildTimer = undefined
+	}
+	pendingLiveListenerRebuild = false
+	if (listenerContract) {
+		listenerContract.removeAllListeners()
+		listenerContract = null
+	}
+	listenerContext = null
+	liveListenFromBlock = 0
 }
 
 export function startValidatorDepositRedeemListener(): void {
@@ -3105,9 +3291,11 @@ export function startValidatorDepositRedeemListener(): void {
 	listenerStarted = true
 	if (process.env.CONET_VALIDATOR_REDEEM_LISTENER !== '1') {
 		logger(Colors.yellow('[validatorDepositRedeemListener] disabled; set CONET_VALIDATOR_REDEEM_LISTENER=1'))
+		listenerStarted = false
 		return
 	}
-	void bootstrapValidatorDepositRedeemListener().catch((e: any) => {
-		logger(Colors.red('[validatorDepositRedeemListener] bootstrap failed:'), e?.message ?? String(e))
+	void bootstrapValidatorDepositRedeemListener().catch((e: unknown) => {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.red('[validatorDepositRedeemListener] bootstrap failed:'), msg)
 	})
 }
