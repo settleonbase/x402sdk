@@ -8545,6 +8545,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					code: p.code,
 					deadline: p.deadline.toString(),
 					signature: p.signature,
+					gasLimit: String(p.gasLimit),
 				},
 				res
 			)

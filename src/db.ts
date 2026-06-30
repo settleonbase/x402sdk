@@ -19,6 +19,7 @@ import {
 	filterClientProductionSeriesRows,
 	seriesMetadataLooksLikeProduction,
 } from './couponMetadataCategory'
+import { isApiExcludedUserCard } from './apiExcludedUserCards'
 
 /**
  * 
@@ -3964,6 +3965,7 @@ export const listRegisteredBeamioUserCardAddresses = async (limit = 5000): Promi
 				const addr = ethers.getAddress(String(r.card_address || '').trim())
 				const lower = addr.toLowerCase()
 				if (seen.has(lower)) continue
+				if (isApiExcludedUserCard(lower)) continue
 				seen.add(lower)
 				out.push(addr)
 			} catch {

@@ -85,6 +85,17 @@ export async function resolveUserCardChain(
 	return 'conet'
 }
 
+/** True when BeamioUserCard bytecode exists on CoNET (224422). Base-only legacy cards return false. */
+export async function hasCoNETUserCardBytecode(cardAddress: string): Promise<boolean> {
+	try {
+		const addr = ethers.getAddress(cardAddress)
+		const code = await providerForUserCardChain('conet').getCode(addr)
+		return !!(code && code !== '0x')
+	} catch {
+		return false
+	}
+}
+
 export type MerchantCardRelayContext = {
 	chain: BeamioUserCardChainKey
 	chainId: number

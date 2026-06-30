@@ -221,6 +221,33 @@ function formatEthersRevert(e: unknown): string {
 	return 'Claim would revert on-chain'
 }
 
+/** claimRedeemFor gas scales ~linearly with validatorCount; fixed 1.8M OOGs at 9+ nodes on mainnet. */
+export function resolveClaimRedeemForGasLimit(validatorCount: bigint): number {
+	const n = Number(validatorCount)
+	if (!Number.isFinite(n) || n <= 0) return 800_000
+	const estimated = 800_000 + 250_000 * n
+	return Math.min(Math.max(estimated, 1_800_000), 8_000_000)
+}
+
+async function resolveClaimRedeemForGasLimitWithEstimate(
+	read: ethers.Contract,
+	claimer: string,
+	beneficiary: string,
+	code: string,
+	deadline: bigint,
+	signature: string,
+	validatorCount: bigint
+): Promise<number> {
+	const fallback = resolveClaimRedeemForGasLimit(validatorCount)
+	try {
+		const est = (await read.claimRedeemFor!.estimateGas(claimer, beneficiary, code, deadline, signature)) as bigint
+		const withBuffer = (est * 120n) / 100n
+		return Number(withBuffer > BigInt(fallback) ? withBuffer : BigInt(fallback))
+	} catch {
+		return fallback
+	}
+}
+
 /** Mirrors on-chain guardian allocation checks before claimRedeemFor (RPC-direct). */
 export async function validatorDepositRedeemClaimAllocationPreflight(
 	beneficiary: string,
@@ -1324,13 +1351,26 @@ export async function validatorDepositRedeemClaimClusterPreCheck(body: {
 	const alloc = await validatorDepositRedeemClaimAllocationPreflight(beneficiary, validatorCount as bigint)
 	if (!alloc.ok) return { success: false as const, error: alloc.error }
 
+	const gasLimit = await resolveClaimRedeemForGasLimitWithEstimate(
+		read,
+		claimer,
+		beneficiary,
+		code,
+		deadline,
+		signature,
+		validatorCount as bigint
+	)
+
 	try {
-		await read.claimRedeemFor!.staticCall(claimer, beneficiary, code, deadline, signature)
+		await read.claimRedeemFor!.staticCall(claimer, beneficiary, code, deadline, signature, { gasLimit })
 	} catch (e: unknown) {
 		return { success: false as const, error: formatEthersRevert(e) }
 	}
 
-	return { success: true as const, preChecked: { contract, claimer, beneficiary, referrer, code, deadline, signature } }
+	return {
+		success: true as const,
+		preChecked: { contract, claimer, beneficiary, referrer, code, deadline, signature, gasLimit },
+	}
 }
 
 /**
@@ -1658,6 +1698,7 @@ export type ValidatorDepositRedeemClaimPayload = {
 	code: string
 	deadline: bigint
 	signature: string
+	gasLimit: number
 	res?: Response
 }
 
@@ -1832,16 +1873,20 @@ export const validatorDepositRedeemClaimProcess = async () => {
 		return setTimeout(() => void validatorDepositRedeemClaimProcess(), 3000)
 	}
 	try {
+		const gasLimit = obj.gasLimit > 0 ? obj.gasLimit : 1_800_000
 		const txHash = await withSettleWallet('validatorDepositRedeemClaim', async (sc) => {
 			const c = new ethers.Contract(obj.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
-			const tx = await c.claimRedeemFor!(obj.claimer, obj.beneficiary, obj.code, obj.deadline, obj.signature, { gasLimit: 1_800_000 })
-			await tx.wait()
+			const tx = await c.claimRedeemFor!(obj.claimer, obj.beneficiary, obj.code, obj.deadline, obj.signature, { gasLimit })
+			const receipt = await tx.wait()
+			if (receipt?.status !== 1) {
+				throw new Error(`claimRedeemFor reverted (gasLimit=${gasLimit}, gasUsed=${receipt?.gasUsed?.toString() ?? '?'})`)
+			}
 			return tx.hash as string
 		})
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash }).end()
 	} catch (e: any) {
 		const msg = e?.shortMessage ?? e?.message ?? String(e)
-		logger(Colors.red('[validatorDepositRedeemClaimProcess] failed:'), msg)
+		logger(Colors.red(`[validatorDepositRedeemClaimProcess] failed (gasLimit=${obj.gasLimit}):`), msg)
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
 		setTimeout(() => void validatorDepositRedeemClaimProcess(), 3000)

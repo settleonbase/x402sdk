@@ -46,7 +46,16 @@ export const BASE_BEAMIO_USER_CARD_UPDATE_LIB = '0xD021f61d70e1B72ec1ED49950F7F5
 export const BASE_BEAMIO_USER_CARD_VIEWS_LIB = '0x2e3a136733e400f579DcB71fAf78922563d8D7EC'
 /** @deprecated 废弃全局 CCSA 卡；API/客户端不得扫描或展示。见 apiExcludedUserCards.ts 与 beamio-no-legacy-global-cards.mdc */
 export const BASE_CCSA_CARD_ADDRESS = '0x2032A363BB2cf331142391fC0DAd21D6504922C7'
-export const BASE_TREASURY = '0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58'
+/** 统一国库 ConetTreasury（CREATE2 跨链同址 Base + CoNET）；USDC 入金、投票出金、mint/burn peer */
+export const CONET_TREASURY_CREATE2 = '0xa311c8fBE7CafC611603Ee925465A62493B73B30'
+/** Base 主网国库收款（与 CONET_TREASURY_CREATE2 同址；已部署 Base 8453） */
+export const BASE_TREASURY = CONET_TREASURY_CREATE2
+/** CoNET 主网国库投票/mint（与 CONET_TREASURY_CREATE2 同址；须 CoNET L1 CREATE2 部署后才有 code） */
+export const CONET_TREASURY = CONET_TREASURY_CREATE2
+/** @deprecated 旧 BaseTreasury；单一国库设计已弃用 */
+export const BASE_TREASURY_LEGACY = '0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58'
+/** @deprecated 旧 CoNET 非 CREATE2 ConetTreasury */
+export const CONET_TREASURY_LEGACY = '0x6dC686831A497c2a9d0a2ff5A000E3Bb40a2E795'
 /** @deprecated 废弃全局 CashTrees 卡；API/客户端不得作为默认商户卡。见 apiExcludedUserCards.ts 与 beamio-no-legacy-global-cards.mdc */
 export const BEAMIO_USER_CARD_ASSET_ADDRESS = '0xB7644DDb12656F4854dC746464af47D33C206F0E'
 export const PURCHASING_CARD_METADATA_ADDRESS = '0xf99018DfFdb0c5657C93ca14DB2900CEbe1168A7'
@@ -54,7 +63,7 @@ export const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 /**
  * NodeSaleSplitter（Base，UUPS ERC1967 代理）：节点购买 USDC 拆账。
- * 每节点 = nodePrice(1250 USDC → BASE_TREASURY) + serverFee(120 USDC → 0x87cA…05E1)。
+ * 每节点 = nodePrice(1250 USDC → CONET_TREASURY_CREATE2 / BASE_TREASURY) + serverFee(120 USDC → 0x87cA…05E1)。
  * 部署后用 deployments/base-NodeSaleSplitter.json 的 `address` 回填；环境变量 NODE_SALE_SPLITTER_BASE 可覆盖。
  */
 export const NODE_SALE_SPLITTER_BASE =
@@ -155,6 +164,7 @@ export const CONTRACT_ADDRESSES = {
     cardFactory: BASE_CARD_FACTORY,
     ccsaCard: BASE_CCSA_CARD_ADDRESS,
     baseTreasury: BASE_TREASURY,
+    conetTreasury: CONET_TREASURY,
     usdc: USDC_BASE,
   },
   conet: {
@@ -166,6 +176,7 @@ export const CONTRACT_ADDRESSES = {
     bUint: CONET_BUINT,
     bUnitAirdrop: CONET_BUNIT_AIRDROP_ADDRESS,
     buintRedeemAirdrop: CONET_BUINT_REDEEM_AIRDROP,
+    conetTreasury: CONET_TREASURY,
     beamioIndexerDiamond: BEAMIO_INDEXER_DIAMOND,
     businessStartKet: CONET_BUSINESS_START_KET || undefined,
     businessStartKetRedeem: CONET_BUSINESS_START_KET_REDEEM || undefined,

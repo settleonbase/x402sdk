@@ -3065,10 +3065,20 @@ const routing = ( router: Router ) => {
 		})
 
 		router.post('/validatorDepositRedeemClaim', (req, res) => {
-			const b = req.body as { contract?: string; claimer?: string; beneficiary?: string; code?: string; deadline?: string; signature?: string }
+			const b = req.body as {
+				contract?: string
+				claimer?: string
+				beneficiary?: string
+				code?: string
+				deadline?: string
+				signature?: string
+				gasLimit?: string
+			}
 			if (!b.contract || !b.claimer || !b.beneficiary || typeof b.code !== 'string' || b.deadline == null || !b.signature) {
 				return res.status(400).json({ success: false, error: 'Missing validator redeem claim fields' }).end()
 			}
+			const gasLimitRaw = b.gasLimit != null ? Number(b.gasLimit) : 0
+			const gasLimit = Number.isFinite(gasLimitRaw) && gasLimitRaw > 0 ? Math.floor(gasLimitRaw) : 1_800_000
 			validatorDepositRedeemClaimPool.push({
 				contract: ethers.getAddress(b.contract),
 				claimer: ethers.getAddress(b.claimer),
@@ -3077,6 +3087,7 @@ const routing = ( router: Router ) => {
 				code: b.code,
 				deadline: BigInt(b.deadline),
 				signature: b.signature,
+				gasLimit,
 				res,
 			})
 			validatorDepositRedeemClaimProcess().catch((err: any) => {

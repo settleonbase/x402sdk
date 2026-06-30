@@ -22,7 +22,28 @@ import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCate
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tierMetadataRowResolve'
-import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
+import { hasCoNETUserCardBytecode, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
+
+/** Drop blacklist + Base-only legacy rows before asset-scan RPC (CoNET merchant cards only). */
+async function filterBeamioUserCardAddressesForAssetScan(addresses: string[]): Promise<string[]> {
+	const out: string[] = []
+	const seen = new Set<string>()
+	for (const raw of addresses) {
+		if (isApiExcludedUserCard(raw)) continue
+		let addr: string
+		try {
+			addr = ethers.getAddress(String(raw || '').trim())
+		} catch {
+			continue
+		}
+		const lower = addr.toLowerCase()
+		if (seen.has(lower)) continue
+		if (!(await hasCoNETUserCardBytecode(addr))) continue
+		seen.add(lower)
+		out.push(addr)
+	}
+	return out
+}
 
 /** 与 util.resolveBeamioBaseHttpRpcUrl 一致；此处不 import util，避免经 db 与 util/server 形成循环依赖 */
 const BASE_RPC_URL =
@@ -311,10 +332,10 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	const seenCardAddresses = new Set(cardAddresses.map((c) => c.address.toLowerCase()))
 	if (!singleProgramScope && opts?.includeRegisteredBeamioCards !== false) {
 		try {
-			const registered = await listRegisteredBeamioUserCardAddresses()
-			for (const raw of registered) {
-				if (isApiExcludedUserCard(raw)) continue
-				const address = ethers.getAddress(raw)
+			const registered = await filterBeamioUserCardAddressesForAssetScan(
+				await listRegisteredBeamioUserCardAddresses()
+			)
+			for (const address of registered) {
 				const lower = address.toLowerCase()
 				if (seenCardAddresses.has(lower)) continue
 				cardAddresses.push({ address, name: 'BeamioUserCard', type: 'beamio-user-card' })
@@ -341,8 +362,10 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 	}
 	const cardsStaged: { row: FetchUIDAssetsResult['cards'][number]; sortMin: bigint }[] = []
 	for (const { address: cardAddr, name: fallbackDisplayName, type: cardType } of cardAddresses) {
+		if (isApiExcludedUserCard(cardAddr)) continue
 		let cardName = fallbackDisplayName
 		try {
+			if (!(await hasCoNETUserCardBytecode(cardAddr))) continue
 			let cardRow: { cardOwner: string; metadata: Record<string, unknown> | null } | null = null
 			try {
 				cardRow = await getCardByAddress(cardAddr)

@@ -7,13 +7,14 @@
  * Run: npm run base-treasury:listen
  * Or:  node build/BaseTreasury/node.js (after yarn build)
  *
- * Config: BASE_RPC (default: wss://base-rpc.conet.network/ws), BASE_TREASURY_ADDRESS
+ * Config: BASE_RPC (default: wss://base-rpc.conet.network/ws), BASE_TREASURY_ADDRESS (unified ConetTreasury CREATE2)
  */
 
 import { ethers } from "ethers"
 
 const BASE_RPC = process.env.BASE_RPC || "wss://base-rpc.conet.network/ws"
-const BASE_TREASURY_ADDRESS = process.env.BASE_TREASURY_ADDRESS || "0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58"
+const BASE_TREASURY_ADDRESS =
+  process.env.BASE_TREASURY_ADDRESS || "0xa311c8fBE7CafC611603Ee925465A62493B73B30"
 
 const BASE_TREASURY_EVENTS_ABI = [
   "event ERC20Transferred(address indexed token, address indexed to, uint256 amount)",
