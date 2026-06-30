@@ -2075,6 +2075,52 @@ export function getActiveRunCommandChildCount(): number {
 	return activeRunCommandChildren.size
 }
 
+/** Preserve keystores before 01_generate REPLACE wipes append_validator_keys/ (restart re-import safety). */
+function archiveAppendValidatorKeystoresBeforeGenerate(newCoNETDir: string): string {
+	const sourceDir = path.join(newCoNETDir, 'append_validator_keys')
+	const archiveDir = path.join(
+		newCoNETDir,
+		process.env.CONET_VALIDATOR_KEYS_ARCHIVE_DIR?.trim() || 'append_validator_keys_archive'
+	)
+	fs.mkdirSync(archiveDir, { recursive: true })
+	let copied = 0
+	const walk = (dir: string) => {
+		if (!fs.existsSync(dir)) return
+		for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, ent.name)
+			if (ent.isDirectory()) {
+				walk(full)
+				continue
+			}
+			if (!ent.name.startsWith('keystore-') || !ent.name.endsWith('.json')) continue
+			const dest = path.join(archiveDir, ent.name)
+			if (!fs.existsSync(dest)) {
+				fs.copyFileSync(full, dest)
+				try {
+					fs.chmodSync(dest, 0o600)
+				} catch {
+					/* ignore chmod on some hosts */
+				}
+				copied++
+			}
+		}
+	}
+	walk(sourceDir)
+	return `archived ${copied} keystore(s) to ${archiveDir}`
+}
+
+function assertImportWalletAccountCount(importOut: string): void {
+	if (importOut.includes('wallet locked by running validator')) return
+	const m = importOut.match(/OK: wallet accounts=(\d+)/)
+	if (!m) {
+		throw new Error(`import did not report wallet account count: ${importOut.slice(-800)}`)
+	}
+	const n = Number(m[1])
+	if (!Number.isFinite(n) || n < 1) {
+		throw new Error(`import reported invalid wallet account count: ${m[1]}`)
+	}
+}
+
 /** Wait for in-flight runCommand children before listener exit (systemctl restart grace). */
 export async function waitForRunCommandChildren(timeoutMs?: number): Promise<void> {
 	const grace = timeoutMs ?? Number(process.env.CONET_VALIDATOR_LISTENER_STOP_GRACE_MS || 120_000)
@@ -2693,6 +2739,9 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 		return
 	}
 
+	const archiveDetail = archiveAppendValidatorKeystoresBeforeGenerate(newCoNETDir)
+	mark('archive-prior-keystores', true, archiveDetail)
+
 	const generateOut = await runCommand(
 		'generate validators',
 		'bash',
@@ -2721,6 +2770,10 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 		KEYSTORE_PASSWORD_FILE: resolveKeystorePasswordFile(),
 		WALLET_PASSWORD_FILE: resolveWalletPasswordFile(),
 		PRYSM_VALIDATOR_BINARY: prysmValidatorBinary,
+		VALIDATOR_KEYS_ARCHIVE_DIR: path.join(
+			newCoNETDir,
+			process.env.CONET_VALIDATOR_KEYS_ARCHIVE_DIR?.trim() || 'append_validator_keys_archive'
+		),
 		RELOAD_VALIDATOR_AFTER_IMPORT:
 			process.env.CONET_VALIDATOR_RELOAD_VALIDATOR_AFTER_IMPORT?.trim().toUpperCase() === 'NO' ? 'NO' : 'YES',
 	}
@@ -2736,6 +2789,7 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 			newCoNETDir,
 			importEnv
 		)
+		assertImportWalletAccountCount(importOut)
 		mark('import-validator-keys', true, importOut)
 	}
 
