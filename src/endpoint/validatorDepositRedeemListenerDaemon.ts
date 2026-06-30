@@ -1,6 +1,6 @@
 import Colors from 'colors/safe'
 import { logger } from '../logger'
-import { startValidatorDepositRedeemListener, stopValidatorDepositRedeemListener, waitForRunCommandChildren } from './validatorDepositRedeem'
+import { startValidatorDepositRedeemListener, stopValidatorDepositRedeemListener, waitForListenerSerialQueue, waitForRunCommandChildren } from './validatorDepositRedeem'
 import { startValidatorRewardHourlyReporter, stopValidatorRewardHourlyReporter } from './validatorRewardHourlyReporter'
 import {
 	startValidatorClRewardPayoutReporter,
@@ -30,6 +30,7 @@ async function shutdown(signal: string): Promise<void> {
 	stopValidatorRewardHourlyReporter()
 	stopValidatorClRewardPayoutReporter()
 	stopValidatorDepositRedeemListener()
+	await waitForListenerSerialQueue()
 	await waitForRunCommandChildren()
 	process.exit(0)
 }

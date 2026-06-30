@@ -21,6 +21,11 @@ import {
 	CONET_GUARDIAN_NODES_INFO_V6,
 } from '../chainAddresses'
 import { Settle_ContractPool, ensureSettleContractPoolInitialized } from '../settleContractPool'
+import {
+	CONET_VALIDATOR_NODE_ONCHAIN_LANE,
+	enqueueOnchainTxWork,
+	waitForOnchainTxQueue,
+} from '../onchainTxSerialQueue'
 
 ensureSettleContractPoolInitialized()
 
@@ -2453,65 +2458,67 @@ async function executeFeeRecipientHotUpdate(args: {
 	try {
 		const prior = getValidatorDepositRedeemStatus(rid)
 		if (prior?.status === 'succeeded' || prior?.status === 'running') return
-		const base: ValidatorRedeemState = {
-			requestId: rid,
-			codeHash: '',
-			claimer: args.toBeneficiary,
-			beneficiary: args.toBeneficiary,
-			validatorCount: '1',
-			targetNodeIp: resolveValidatorNodeIp(),
-			conetDepinNodeIps: [],
-			gbMiningNodeCount: '0',
-			status: 'received',
-			createdAt: new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
-			stages: {},
-		}
-		const mark = (stage: string, ok: boolean, detail?: string) =>
-			upsertState(rid, (cur) => ({
-				...(cur || base),
-				status: ok ? 'running' : 'failed',
+		await enqueueListenerOnchainWork(`feerecipient #${args.guardianId.toString()}`, async () => {
+			const base: ValidatorRedeemState = {
+				requestId: rid,
+				codeHash: '',
+				claimer: args.toBeneficiary,
+				beneficiary: args.toBeneficiary,
+				validatorCount: '1',
+				targetNodeIp: resolveValidatorNodeIp(),
+				conetDepinNodeIps: [],
+				gbMiningNodeCount: '0',
+				status: 'received',
+				createdAt: new Date().toISOString(),
 				updatedAt: new Date().toISOString(),
-				error: ok ? cur?.error : detail,
-				stages: { ...(cur?.stages || base.stages), [stage]: { ok, at: new Date().toISOString(), detail } },
-			}))
+				stages: {},
+			}
+			const mark = (stage: string, ok: boolean, detail?: string) =>
+				upsertState(rid, (cur) => ({
+					...(cur || base),
+					status: ok ? 'running' : 'failed',
+					updatedAt: new Date().toISOString(),
+					error: ok ? cur?.error : detail,
+					stages: { ...(cur?.stages || base.stages), [stage]: { ok, at: new Date().toISOString(), detail } },
+				}))
 
-		const provider = conetProvider()
-		const cRead = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
-		const onchain = await cRead.getNodeValidator!(args.guardianId)
-		const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
-		const newCoNETDir = resolveNewCoNETDir()
-		const depositFile = path.join(newCoNETDir, 'validator_deposits.json')
+			const provider = conetProvider()
+			const cRead = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
+			const onchain = await cRead.getNodeValidator!(args.guardianId)
+			const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
+			const newCoNETDir = resolveNewCoNETDir()
+			const depositFile = path.join(newCoNETDir, 'validator_deposits.json')
 
-		if (!pubkey || pubkey === '0x' || !depositFileHasPubkey(depositFile, pubkey)) {
-			return
-		}
-		mark('feerecipient-matched', true, `guardian #${args.guardianId.toString()} -> ${args.toBeneficiary}`)
+			if (!pubkey || pubkey === '0x' || !depositFileHasPubkey(depositFile, pubkey)) {
+				return
+			}
+			mark('feerecipient-matched', true, `guardian #${args.guardianId.toString()} -> ${args.toBeneficiary}`)
 
-		if (validatorDryRun()) {
-			mark('dry-run', true, 'skipped fee_recipient hot-update')
-			upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
-			return
-		}
+			if (validatorDryRun()) {
+				mark('dry-run', true, 'skipped fee_recipient hot-update')
+				upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
+				return
+			}
 
-		const env = {
-			...process.env,
-			VALIDATOR_PUBKEY: pubkey,
-			EXIT_VALIDATOR_PUBKEY: pubkey,
-			FEE_RECIPIENT: args.toBeneficiary,
-			FEE_RECIPIENT_ADDRESS: args.toBeneficiary,
-			RPC_URL: process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL || masterSetup.validatorDeposit?.rpcUrl || resolveBeamioConetHttpRpcUrl(),
-			CHAIN_ID: String(CONET_MAINNET_CHAIN_ID),
-		}
+			const env = {
+				...process.env,
+				VALIDATOR_PUBKEY: pubkey,
+				EXIT_VALIDATOR_PUBKEY: pubkey,
+				FEE_RECIPIENT: args.toBeneficiary,
+				FEE_RECIPIENT_ADDRESS: args.toBeneficiary,
+				RPC_URL: process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL || masterSetup.validatorDeposit?.rpcUrl || resolveBeamioConetHttpRpcUrl(),
+				CHAIN_ID: String(CONET_MAINNET_CHAIN_ID),
+			}
 
-		const feeScript = process.env.CONET_VALIDATOR_FEE_RECIPIENT_SCRIPT?.trim() || './07_update_fee_recipient.sh'
-		if (fs.existsSync(path.join(newCoNETDir, feeScript))) {
-			const out = await runCommand('update fee_recipient', 'bash', [feeScript], newCoNETDir, env)
-			mark('feerecipient-update', true, out)
-			upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
-		} else {
-			mark('feerecipient-update', false, `fee_recipient script missing: ${feeScript} (manual hot-update required)`)
-		}
+			const feeScript = process.env.CONET_VALIDATOR_FEE_RECIPIENT_SCRIPT?.trim() || './07_update_fee_recipient.sh'
+			if (fs.existsSync(path.join(newCoNETDir, feeScript))) {
+				const out = await runCommand('update fee_recipient', 'bash', [feeScript], newCoNETDir, env)
+				mark('feerecipient-update', true, out)
+				upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
+			} else {
+				mark('feerecipient-update', false, `fee_recipient script missing: ${feeScript} (manual hot-update required)`)
+			}
+		})
 	} finally {
 		endListenerEvent(flightKey)
 	}
@@ -2534,89 +2541,91 @@ async function executeValidatorFullExit(args: {
 	try {
 		const prior = getValidatorDepositRedeemStatus(rid)
 		if (prior?.status === 'succeeded' || prior?.status === 'running') return
-		const base: ValidatorRedeemState = {
-			requestId: rid,
-			codeHash: '',
-			claimer: args.beneficiary,
-			beneficiary: args.beneficiary,
-			validatorCount: String(args.guardianIds.length),
-			targetNodeIp: resolveValidatorNodeIp(),
-			conetDepinNodeIps: [],
-			gbMiningNodeCount: '0',
-			status: 'received',
-			createdAt: new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
-			stages: {},
-		}
-		const mark = (stage: string, ok: boolean, detail?: string) =>
-			upsertState(rid, (cur) => ({
-				...(cur || base),
-				status: ok ? 'running' : 'failed',
+		await enqueueListenerOnchainWork(`fullexit ${args.beneficiary.slice(0, 10)}…`, async () => {
+			const base: ValidatorRedeemState = {
+				requestId: rid,
+				codeHash: '',
+				claimer: args.beneficiary,
+				beneficiary: args.beneficiary,
+				validatorCount: String(args.guardianIds.length),
+				targetNodeIp: resolveValidatorNodeIp(),
+				conetDepinNodeIps: [],
+				gbMiningNodeCount: '0',
+				status: 'received',
+				createdAt: new Date().toISOString(),
 				updatedAt: new Date().toISOString(),
-				error: ok ? cur?.error : detail,
-				stages: { ...(cur?.stages || base.stages), [stage]: { ok, at: new Date().toISOString(), detail } },
-			}))
+				stages: {},
+			}
+			const mark = (stage: string, ok: boolean, detail?: string) =>
+				upsertState(rid, (cur) => ({
+					...(cur || base),
+					status: ok ? 'running' : 'failed',
+					updatedAt: new Date().toISOString(),
+					error: ok ? cur?.error : detail,
+					stages: { ...(cur?.stages || base.stages), [stage]: { ok, at: new Date().toISOString(), detail } },
+				}))
 
-		const provider = conetProvider()
-		const cRead = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
-		const newCoNETDir = resolveNewCoNETDir()
-		const depositFile = path.join(newCoNETDir, 'validator_deposits.json')
+			const provider = conetProvider()
+			const cRead = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
+			const newCoNETDir = resolveNewCoNETDir()
+			const depositFile = path.join(newCoNETDir, 'validator_deposits.json')
 
-		const localGuardianIds: bigint[] = []
-		for (const guardianId of args.guardianIds) {
-			try {
+			const localGuardianIds: bigint[] = []
+			for (const guardianId of args.guardianIds) {
+				try {
+					const onchain = await cRead.getNodeValidator!(guardianId)
+					const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
+					if (pubkey && pubkey !== '0x' && depositFileHasPubkey(depositFile, pubkey)) {
+						localGuardianIds.push(guardianId)
+					}
+				} catch {
+					// ignore unreadable node
+				}
+			}
+			if (!localGuardianIds.length) return
+			mark('fullexit-matched', true, `local guardianIds=${localGuardianIds.map((g) => g.toString()).join(',')}`)
+
+			if (validatorDryRun()) {
+				mark('dry-run', true, 'skipped exit + settle')
+				upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
+				return
+			}
+
+			const baseEnv = {
+				...process.env,
+				RPC_URL: process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL || masterSetup.validatorDeposit?.rpcUrl || resolveBeamioConetHttpRpcUrl(),
+				CHAIN_ID: String(CONET_MAINNET_CHAIN_ID),
+				DEPOSIT_CONTRACT: CONET_DEPOSIT_CONTRACT,
+			}
+			const exitScript = process.env.CONET_VALIDATOR_EXIT_SCRIPT?.trim() || './06_exit_validator.sh'
+			if (!fs.existsSync(path.join(newCoNETDir, exitScript))) {
+				mark('fullexit-exit', false, `exit script missing: ${exitScript} (manual exit required)`)
+				return
+			}
+
+			for (const guardianId of localGuardianIds) {
 				const onchain = await cRead.getNodeValidator!(guardianId)
 				const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
-				if (pubkey && pubkey !== '0x' && depositFileHasPubkey(depositFile, pubkey)) {
-					localGuardianIds.push(guardianId)
-				}
-			} catch {
-				// ignore unreadable node
+				const out = await runCommand(`exit validator ${pubkey.slice(0, 12)}`, 'bash', [exitScript], newCoNETDir, {
+					...baseEnv,
+					EXIT_VALIDATOR_PUBKEY: pubkey,
+				})
+				mark(`fullexit-exit-${pubkey.slice(2, 12)}`, true, out)
 			}
-		}
-		if (!localGuardianIds.length) return
-		mark('fullexit-matched', true, `local guardianIds=${localGuardianIds.map((g) => g.toString()).join(',')}`)
 
-		if (validatorDryRun()) {
-			mark('dry-run', true, 'skipped exit + settle')
-			upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
-			return
-		}
-
-		const baseEnv = {
-			...process.env,
-			RPC_URL: process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL || masterSetup.validatorDeposit?.rpcUrl || resolveBeamioConetHttpRpcUrl(),
-			CHAIN_ID: String(CONET_MAINNET_CHAIN_ID),
-			DEPOSIT_CONTRACT: CONET_DEPOSIT_CONTRACT,
-		}
-		const exitScript = process.env.CONET_VALIDATOR_EXIT_SCRIPT?.trim() || './06_exit_validator.sh'
-		if (!fs.existsSync(path.join(newCoNETDir, exitScript))) {
-			mark('fullexit-exit', false, `exit script missing: ${exitScript} (manual exit required)`)
-			return
-		}
-
-		for (const guardianId of localGuardianIds) {
-			const onchain = await cRead.getNodeValidator!(guardianId)
-			const pubkey = String(onchain?.[0] ?? onchain?.pubkey ?? '').toLowerCase()
-			const out = await runCommand(`exit validator ${pubkey.slice(0, 12)}`, 'bash', [exitScript], newCoNETDir, {
-				...baseEnv,
-				EXIT_VALIDATOR_PUBKEY: pubkey,
+			const txHash = await withSettleWallet('settleFullExitPayout', async (sc) => {
+				const cw = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+				const tx = await cw.settleFullExitPayout!(args.beneficiary, localGuardianIds, { gasLimit: 1_500_000 })
+				await tx.wait()
+				return tx.hash as string
 			})
-			mark(`fullexit-exit-${pubkey.slice(2, 12)}`, true, out)
-		}
-
-		const txHash = await withSettleWallet('settleFullExitPayout', async (sc) => {
-			const cw = new ethers.Contract(args.contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
-			const tx = await cw.settleFullExitPayout!(args.beneficiary, localGuardianIds, { gasLimit: 1_500_000 })
-			await tx.wait()
-			return tx.hash as string
+			if (txHash) {
+				mark('fullexit-settle', true, `tx=${txHash}`)
+				upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
+			} else {
+				mark('fullexit-settle', false, 'settle deferred (pool insufficient or no relayer); will retry')
+			}
 		})
-		if (txHash) {
-			mark('fullexit-settle', true, `tx=${txHash}`)
-			upsertState(rid, (cur) => ({ ...(cur || base), status: 'succeeded', updatedAt: new Date().toISOString() }))
-		} else {
-			mark('fullexit-settle', false, 'settle deferred (pool insufficient or no relayer); will retry')
-		}
 	} finally {
 		endListenerEvent(flightKey)
 	}
@@ -2918,6 +2927,17 @@ function shouldHandleLiveListenerBlock(blockNumber: number): boolean {
 /** Prevents duplicate work when backfill and live subscription overlap on the same event. */
 const listenerEventInFlight = new Set<string>()
 
+const LISTENER_ONCHAIN_LOG_PREFIX = '[validatorDepositRedeemListener]'
+
+function enqueueListenerOnchainWork<T>(label: string, fn: () => Promise<T>): Promise<T> {
+	return enqueueOnchainTxWork(CONET_VALIDATOR_NODE_ONCHAIN_LANE, label, fn, LISTENER_ONCHAIN_LOG_PREFIX)
+}
+
+/** Wait until the serial on-chain queue is idle (for graceful SIGTERM). */
+export async function waitForListenerSerialQueue(maxWaitMs = 30 * 60 * 1000): Promise<void> {
+	await waitForOnchainTxQueue(CONET_VALIDATOR_NODE_ONCHAIN_LANE, maxWaitMs)
+}
+
 function tryBeginListenerEvent(key: string): boolean {
 	if (listenerEventInFlight.has(key)) return false
 	listenerEventInFlight.add(key)
@@ -2988,29 +3008,31 @@ async function handleValidatorRedeemClaimedEvent(
 		if (existing?.status === 'running' && isStaleRunningRedeemState(existing)) {
 			logger(Colors.yellow(`[validatorDepositRedeemListener] retry stale running claim ${rid.slice(0, 12)}…`))
 		}
-		const next = upsertState(rid, () => ({
-			requestId: rid,
-			codeHash: args.codeHash,
-			claimer: ethers.getAddress(args.claimer),
-			beneficiary: ethers.getAddress(args.beneficiary),
-			validatorCount: args.validatorCount,
-			targetNodeIp: target,
-			conetDepinNodeIps: args.conetDepinNodeIps.map(normalizeIp),
-			gbMiningNodeCount: args.gbMiningNodeCount,
-			status: 'received',
-			createdAt: existing?.createdAt || new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
-			stages: { event: { ok: true, at: new Date().toISOString(), detail: `block=${blockNumber}` } },
-		}))
-		try {
-			upsertState(rid, (cur) => ({ ...(cur || next), status: 'running', updatedAt: new Date().toISOString() }))
-			await executeValidatorRedeem(next)
-			upsertState(rid, (cur) => ({ ...(cur || next), status: 'succeeded', updatedAt: new Date().toISOString() }))
-		} catch (e: any) {
-			const msg = e?.message ?? String(e)
-			logger(Colors.red('[validatorDepositRedeemListener] execute failed:'), msg)
-			upsertState(rid, (cur) => ({ ...(cur || next), status: 'failed', error: msg, updatedAt: new Date().toISOString() }))
-		}
+		await enqueueListenerOnchainWork(`claim ${rid.slice(0, 12)}…`, async () => {
+			const next = upsertState(rid, () => ({
+				requestId: rid,
+				codeHash: args.codeHash,
+				claimer: ethers.getAddress(args.claimer),
+				beneficiary: ethers.getAddress(args.beneficiary),
+				validatorCount: args.validatorCount,
+				targetNodeIp: target,
+				conetDepinNodeIps: args.conetDepinNodeIps.map(normalizeIp),
+				gbMiningNodeCount: args.gbMiningNodeCount,
+				status: 'received',
+				createdAt: existing?.createdAt || new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				stages: { event: { ok: true, at: new Date().toISOString(), detail: `block=${blockNumber}` } },
+			}))
+			try {
+				upsertState(rid, (cur) => ({ ...(cur || next), status: 'running', updatedAt: new Date().toISOString() }))
+				await executeValidatorRedeem(next)
+				upsertState(rid, (cur) => ({ ...(cur || next), status: 'succeeded', updatedAt: new Date().toISOString() }))
+			} catch (e: any) {
+				const msg = e?.message ?? String(e)
+				logger(Colors.red('[validatorDepositRedeemListener] execute failed:'), msg)
+				upsertState(rid, (cur) => ({ ...(cur || next), status: 'failed', error: msg, updatedAt: new Date().toISOString() }))
+			}
+		})
 	} finally {
 		endListenerEvent(flightKey)
 	}

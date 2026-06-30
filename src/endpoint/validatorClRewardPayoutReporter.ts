@@ -15,6 +15,7 @@ import Colors from 'colors/safe'
 import { logger } from '../logger'
 import { masterSetup, resolveBeamioConetHttpRpcUrl } from '../util'
 import { Settle_ContractPool, ensureSettleContractPoolInitialized } from '../settleContractPool'
+import { CONET_VALIDATOR_NODE_ONCHAIN_LANE, enqueueOnchainTxWork } from '../onchainTxSerialQueue'
 import {
 	CONET_VALIDATOR_DEPOSIT_REDEEM,
 	CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK,
@@ -241,6 +242,16 @@ async function withSettleWallet<T>(label: string, fn: (wallet: (typeof Settle_Co
 }
 
 async function submitPayoutBatch(contractAddr: string, entries: PayoutEntry[]): Promise<boolean> {
+	if (!entries.length) return true
+	return enqueueOnchainTxWork(
+		CONET_VALIDATOR_NODE_ONCHAIN_LANE,
+		`settleNodeRewards n=${entries.length}`,
+		async () => submitPayoutBatchOnchain(contractAddr, entries),
+		'[validatorClRewardPayout]'
+	)
+}
+
+async function submitPayoutBatchOnchain(contractAddr: string, entries: PayoutEntry[]): Promise<boolean> {
 	if (!entries.length) return true
 	const guardianIds = entries.map((e) => e.guardianId)
 	const amounts = entries.map((e) => e.amount)
