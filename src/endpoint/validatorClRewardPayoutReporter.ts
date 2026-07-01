@@ -3,7 +3,7 @@
  * credited to ValidatorDepositRedeem proxy, maps validatorIndex → guardianId → current beneficiary,
  * and calls {settleNodeRewards} on-chain (idempotent eventKey per withdrawal).
  *
- * Restart / catch-up semantics (see beamio-validator-cl-reward-payout-scan.mdc):
+ * Restart / catch-up semantics (see beamio-chain-listener-block-scan-ceiling.mdc):
  * - Each scan session snapshots chain head once into state.scanTargetBlock (ceiling).
  * - While lastProcessedBlock < scanTargetBlock, ticks only advance toward that ceiling — never
  *   re-read live head and extend the range mid-catch-up (restart-safe).

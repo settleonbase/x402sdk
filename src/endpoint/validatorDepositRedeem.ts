@@ -920,6 +920,8 @@ function writeStateFile(state: StateFile): void {
 type ListenerBlockCheckpoint = {
 	contractAddress: string
 	lastProcessedBlock: number
+	/** Chain head at scan-session start / last listen interrupt; catch-up scans through this block only. */
+	scanTargetBlock?: number
 	updatedAt: string
 }
 
@@ -931,6 +933,23 @@ function resolveListenerBlockFile(): string {
 }
 
 function loadListenerBlockCheckpoint(contract: string, deployFloor: number): number | null {
+	const raw = readListenerBlockCheckpointRaw(contract, deployFloor)
+	return raw?.lastProcessedBlock ?? null
+}
+
+function normalizeListenerScanTargetBlock(raw: unknown): number | undefined {
+	if (raw == null) return undefined
+	const n = Number(raw)
+	return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined
+}
+
+function writeListenerCheckpointFile(payload: ListenerBlockCheckpoint): void {
+	const file = resolveListenerBlockFile()
+	fs.mkdirSync(path.dirname(file), { recursive: true })
+	fs.writeFileSync(file, JSON.stringify(payload, null, 2) + '\n', 'utf-8')
+}
+
+function readListenerBlockCheckpointRaw(contract: string, deployFloor: number): ListenerBlockCheckpoint | null {
 	const file = resolveListenerBlockFile()
 	if (!fs.existsSync(file)) return null
 	try {
@@ -948,26 +967,58 @@ function loadListenerBlockCheckpoint(contract: string, deployFloor: number): num
 			)
 			return null
 		}
-		return block
+		return {
+			contractAddress: ethers.getAddress(raw.contractAddress),
+			lastProcessedBlock: block,
+			scanTargetBlock: normalizeListenerScanTargetBlock(raw.scanTargetBlock),
+			updatedAt: raw.updatedAt ?? new Date().toISOString(),
+		}
 	} catch {
 		return null
 	}
 }
 
+/** Persist catch-up ceiling (requires existing checkpoint). See beamio-chain-listener-block-scan-ceiling.mdc */
+function saveListenerScanTargetBlock(
+	contract: string,
+	scanTargetBlock: number,
+	opts?: { force?: boolean }
+): void {
+	const deployFloor = resolveListenerDeployBlockFloor()
+	const target = Math.max(deployFloor, Math.floor(scanTargetBlock))
+	const raw = readListenerBlockCheckpointRaw(contract, deployFloor)
+	if (!raw) {
+		logger(
+			Colors.yellow(
+				`[validatorDepositRedeemListener] scanTargetBlock=${target} not persisted (no checkpoint yet)`
+			)
+		)
+		return
+	}
+	const caughtUp =
+		raw.scanTargetBlock == null || raw.lastProcessedBlock >= (raw.scanTargetBlock ?? raw.lastProcessedBlock)
+	const finalTarget = opts?.force || caughtUp ? target : (raw.scanTargetBlock ?? target)
+	writeListenerCheckpointFile({
+		...raw,
+		scanTargetBlock: finalTarget,
+		updatedAt: new Date().toISOString(),
+	})
+}
+
 function saveListenerBlockCheckpoint(contract: string, blockNumber: number): void {
-	const file = resolveListenerBlockFile()
 	const deployFloor = resolveListenerDeployBlockFloor()
 	const block = Math.floor(blockNumber)
 	if (block < deployFloor) return
 	const prev = loadListenerBlockCheckpoint(contract, deployFloor)
 	if (prev != null && block <= prev) return
+	const raw = readListenerBlockCheckpointRaw(contract, deployFloor)
 	const payload: ListenerBlockCheckpoint = {
 		contractAddress: ethers.getAddress(contract),
 		lastProcessedBlock: block,
+		scanTargetBlock: raw?.scanTargetBlock,
 		updatedAt: new Date().toISOString(),
 	}
-	fs.mkdirSync(path.dirname(file), { recursive: true })
-	fs.writeFileSync(file, JSON.stringify(payload, null, 2) + '\n', 'utf-8')
+	writeListenerCheckpointFile(payload)
 }
 
 function noteListenerBlock(contract: string, blockNumber: number): void {
@@ -1000,6 +1051,17 @@ function listenerBackfillFromBlock(requestedFrom: number, deployFloor: number): 
 		return deployFloor
 	}
 	return from
+}
+
+function resolveListenerLogChunk(): number {
+	const n = Number(process.env.CONET_VALIDATOR_REDEEM_LISTENER_LOG_CHUNK || 2000)
+	return Number.isFinite(n) && n >= 1 ? Math.min(10_000, Math.floor(n)) : 2000
+}
+
+/** Max eth_getLogs chunks per incremental backfill tick (default 1). See beamio-chain-listener-block-scan-ceiling.mdc */
+function resolveListenerBackfillChunksPerTick(): number {
+	const n = Number(process.env.CONET_VALIDATOR_REDEEM_LISTENER_BACKFILL_CHUNKS_PER_TICK || 1)
+	return Number.isFinite(n) && n >= 1 ? Math.min(64, Math.floor(n)) : 1
 }
 
 function upsertState(requestId: string, update: (current?: ValidatorRedeemState) => ValidatorRedeemState): ValidatorRedeemState {
@@ -2908,8 +2970,8 @@ async function runIncrementalListenerBackfill(reason: string): Promise<void> {
 	const { contract, nodeIp, deployFloor } = listenerContext
 	try {
 		const provider = conetProvider()
-		const head = await provider.getBlockNumber()
-		const lag = await maybeAlertListenerCheckpointLag(contract, deployFloor, head)
+		const liveHead = await provider.getBlockNumber()
+		const lag = await maybeAlertListenerCheckpointLag(contract, deployFloor, liveHead)
 		const prior = loadListenerBlockCheckpoint(contract, deployFloor)
 		if (prior == null) {
 			logger(
@@ -2919,14 +2981,36 @@ async function runIncrementalListenerBackfill(reason: string): Promise<void> {
 			)
 			return
 		}
+		const raw = readListenerBlockCheckpointRaw(contract, deployFloor)
+		const caughtUp =
+			raw?.scanTargetBlock == null || prior >= (raw.scanTargetBlock ?? prior)
+		if (caughtUp) {
+			saveListenerScanTargetBlock(contract, liveHead)
+			logger(
+				Colors.cyan(
+					`[validatorDepositRedeemListener] new backfill session scanTargetBlock=${liveHead} (lastProcessed=${prior})`
+				)
+			)
+		} else if (raw?.scanTargetBlock != null) {
+			logger(
+				Colors.cyan(
+					`[validatorDepositRedeemListener] catch-up toward scanTargetBlock=${raw.scanTargetBlock} (lastProcessed=${prior}, liveHead=${liveHead})`
+				)
+			)
+		}
+		const scanTargetBlock = readListenerBlockCheckpointRaw(contract, deployFloor)?.scanTargetBlock ?? liveHead
 		const fromBlock = prior + 1
-		if (fromBlock > head) return
+		if (fromBlock > scanTargetBlock) return
+		const chunk = resolveListenerLogChunk()
+		const chunksPerTick = resolveListenerBackfillChunksPerTick()
+		const maxBlocksThisTick = chunk * chunksPerTick
+		const tickEnd = Math.min(fromBlock + maxBlocksThisTick - 1, scanTargetBlock)
 		logger(
 			Colors.cyan(
-				`[validatorDepositRedeemListener] incremental backfill ${fromBlock}..${head} (${reason}, lag=${lag})`
+				`[validatorDepositRedeemListener] incremental backfill ${fromBlock}..${tickEnd} (target=${scanTargetBlock}, liveHead=${liveHead}, ${reason}, lag=${lag})`
 			)
 		)
-		await backfillValidatorDepositRedeemListenerEvents(contract, nodeIp, fromBlock, head, deployFloor)
+		await backfillValidatorDepositRedeemListenerEvents(contract, nodeIp, fromBlock, tickEnd, deployFloor)
 		if (rebuildLiveListenersEachBackfillTick() || lag > resolveListenerLagAlertBlocks()) {
 			scheduleLiveListenerRebuild(`after incremental backfill (${reason})`)
 		}
@@ -2949,13 +3033,17 @@ function scheduleListenerBackfillTick(): void {
 async function rebuildLiveListeners(reason: string): Promise<void> {
 	if (!listenerContext || liveListenerRebuildInFlight) return
 	liveListenerRebuildInFlight = true
-	const { contract, nodeIp } = listenerContext
+	const { contract, nodeIp, deployFloor } = listenerContext
 	try {
 		if (listenerContract) {
 			listenerContract.removeAllListeners()
 		}
 		const provider = conetProvider()
 		const head = await provider.getBlockNumber()
+		const prior = loadListenerBlockCheckpoint(contract, deployFloor)
+		if (prior != null && prior < head) {
+			saveListenerScanTargetBlock(contract, head, { force: true })
+		}
 		listenerContract = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, provider)
 		attachValidatorDepositRedeemLiveListeners(listenerContract, contract, nodeIp)
 		liveListenFromBlock = head + 1
@@ -2964,6 +3052,9 @@ async function rebuildLiveListeners(reason: string): Promise<void> {
 				`[validatorDepositRedeemListener] live listeners rebuilt (${reason}); live from block ${liveListenFromBlock}`
 			)
 		)
+		if (prior != null && prior < head) {
+			void runIncrementalListenerBackfill(`live rebuild (${reason})`)
+		}
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? e.message : String(e)
 		logger(Colors.red('[validatorDepositRedeemListener] live listener rebuild failed:'), msg)
@@ -3149,7 +3240,7 @@ async function backfillValidatorDepositRedeemListenerEvents(
 	if (safeFrom > toBlock) return
 	const provider = conetProvider()
 	const topics = LISTENER_EVENT_NAMES.map((name) => VALIDATOR_DEPOSIT_REDEEM_IFACE.getEvent(name)!.topicHash)
-	const chunk = Math.max(1, Number(process.env.CONET_VALIDATOR_REDEEM_LISTENER_LOG_CHUNK || 2000))
+	const chunk = resolveListenerLogChunk()
 	logger(
 		Colors.cyan(
 			`[validatorDepositRedeemListener] backfill blocks ${safeFrom}..${toBlock} (chunk=${chunk}) contract=${contract}`
@@ -3320,6 +3411,9 @@ async function bootstrapValidatorDepositRedeemListener(): Promise<void> {
 
 	const { liveListenFromBlock: liveFrom, checkpointBlock } = await resolveLiveListenBoundary(provider)
 	liveListenFromBlock = liveFrom
+	if (priorSaved != null && priorSaved < checkpointBlock) {
+		saveListenerScanTargetBlock(contract, checkpointBlock, { force: true })
+	}
 	logger(
 		Colors.green(
 			`[validatorDepositRedeemListener] live from block ${liveFrom}; backfill target=${checkpointBlock} (prior=${priorSaved ?? 'none'}); tick=${resolveListenerBackfillTickMs()}ms lagAlert>${resolveListenerLagAlertBlocks()} blocks`
@@ -3360,6 +3454,55 @@ export function stopValidatorDepositRedeemListener(): void {
 	}
 	listenerContext = null
 	liveListenFromBlock = 0
+}
+
+/** One-shot replay for a missed local ValidatorRedeemClaimed (manual Plan A catch-up). */
+export async function replayValidatorRedeemClaimedEvent(requestId: string): Promise<ValidatorRedeemState | null> {
+	const contract = resolveValidatorDepositRedeemAddress()
+	const nodeIp = resolveValidatorNodeIp()
+	if (!contract || !nodeIp) throw new Error('missing contract or nodeIp')
+	if (!ethers.isHexString(requestId, 32)) throw new Error(`invalid requestId: ${requestId}`)
+	const rid = requestId.toLowerCase()
+	const existing = getValidatorDepositRedeemStatus(rid)
+	if (existing?.status === 'succeeded') {
+		logger(Colors.cyan(`[validatorDepositRedeemListener] replay skip ${rid.slice(0, 12)}… already succeeded`))
+		return existing
+	}
+	const provider = conetProvider()
+	const topic = VALIDATOR_DEPOSIT_REDEEM_IFACE.getEvent('ValidatorRedeemClaimed')!.topicHash
+	const logs = await provider.getLogs({
+		address: contract,
+		fromBlock: resolveListenerDeployBlockFloor(),
+		toBlock: 'latest',
+		topics: [topic, rid],
+	})
+	if (!logs.length) throw new Error(`no ValidatorRedeemClaimed log for ${rid}`)
+	const log = logs[logs.length - 1]!
+	const parsed = VALIDATOR_DEPOSIT_REDEEM_IFACE.parseLog(log)
+	if (!parsed) throw new Error('parseLog failed')
+	logger(
+		Colors.cyan(
+			`[validatorDepositRedeemListener] replay claim ${rid.slice(0, 12)}… block=${log.blockNumber} count=${String(parsed.args.validatorCount)}`
+		)
+	)
+	await handleValidatorRedeemClaimedEvent(
+		contract,
+		nodeIp,
+		{
+			requestId: String(parsed.args.requestId),
+			codeHash: String(parsed.args.codeHash),
+			claimer: String(parsed.args.claimer),
+			beneficiary: String(parsed.args.beneficiary),
+			validatorCount: String(parsed.args.validatorCount),
+			targetNodeIp: String(parsed.args.targetNodeIp),
+			conetDepinNodeIps: (parsed.args.conetDepinNodeIps as string[]) || [],
+			gbMiningNodeCount: String(parsed.args.gbMiningNodeCount),
+		},
+		log.blockNumber
+	)
+	await waitForListenerSerialQueue()
+	await waitForRunCommandChildren()
+	return getValidatorDepositRedeemStatus(rid)
 }
 
 export function startValidatorDepositRedeemListener(): void {
