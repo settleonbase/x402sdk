@@ -3,8 +3,12 @@
  * credited to ValidatorDepositRedeem proxy, maps validatorIndex → guardianId → current beneficiary,
  * and calls {settleNodeRewards} on-chain (idempotent eventKey per withdrawal).
  *
- * Restart semantics: persists lastProcessedBlock; on boot scans [lastProcessed+1, head] only
- * (never below proxy deploy block / genesis).
+ * Restart / catch-up semantics (see beamio-validator-cl-reward-payout-scan.mdc):
+ * - Each scan session snapshots chain head once into state.scanTargetBlock (ceiling).
+ * - While lastProcessedBlock < scanTargetBlock, ticks only advance toward that ceiling — never
+ *   re-read live head and extend the range mid-catch-up (restart-safe).
+ * - After caught up, the next tick starts a new session with a fresh scanTargetBlock = live head.
+ * - Each tick processes at most CHUNKS_PER_TICK × CHUNK_BLOCKS blocks (default 1×32).
  */
 
 import fs from 'node:fs'
@@ -32,6 +36,8 @@ const PAYOUT_ABI = [
 
 type ClPayoutState = {
 	lastProcessedBlock: number
+	/** Chain head snapshot at scan-session start; catch-up scans through this block only. */
+	scanTargetBlock?: number
 	updatedAt: string
 }
 
@@ -80,6 +86,25 @@ function resolveChunkBlocks(): number {
 	return Number.isFinite(n) && n >= 1 ? Math.min(512, Math.floor(n)) : 32
 }
 
+/** Max eth_getBlock chunks processed per tick (default 1 — avoids monopolizing on-chain queue). */
+function resolveChunksPerTick(): number {
+	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_CHUNKS_PER_TICK || 1)
+	return Number.isFinite(n) && n >= 1 ? Math.min(64, Math.floor(n)) : 1
+}
+
+function normalizeScanTargetBlock(raw: unknown): number | undefined {
+	if (raw == null) return undefined
+	const n = Number(raw)
+	return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined
+}
+
+/** True when catch-up to the persisted ceiling is complete (or no ceiling yet). */
+function isScanCatchUpComplete(state: ClPayoutState): boolean {
+	const target = normalizeScanTargetBlock(state.scanTargetBlock)
+	if (target == null) return true
+	return state.lastProcessedBlock >= target
+}
+
 function payoutDryRun(): boolean {
 	const v = (process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_DRY_RUN || process.env.CONET_VALIDATOR_DRY_RUN || '').trim().toLowerCase()
 	return v === '1' || v === 'true' || v === 'yes'
@@ -114,8 +139,10 @@ function readState(): ClPayoutState {
 		if (!Number.isFinite(last)) {
 			return { lastProcessedBlock: floor - 1, updatedAt: new Date().toISOString() }
 		}
+		const scanTargetBlock = normalizeScanTargetBlock(raw.scanTargetBlock)
 		return {
 			lastProcessedBlock: Math.max(floor - 1, Math.floor(last)),
+			scanTargetBlock,
 			updatedAt: raw.updatedAt ?? new Date().toISOString(),
 		}
 	} catch (e: unknown) {
@@ -324,19 +351,45 @@ async function payoutTick(): Promise<void> {
 
 		const floor = resolveDeployBlockFloor()
 		const state = readState()
-		const head = Number(await provider.getBlockNumber())
+		const liveHead = Number(await provider.getBlockNumber())
+		if (!Number.isFinite(liveHead) || liveHead < floor) return
+
+		// New scan session: snapshot live head once as ceiling. Restart mid-catch-up keeps the prior ceiling.
+		if (isScanCatchUpComplete(state)) {
+			if (state.scanTargetBlock !== liveHead) {
+				state.scanTargetBlock = liveHead
+				writeState(state)
+				logger(
+					Colors.cyan(
+						`[validatorClRewardPayout] new scan session scanTargetBlock=${liveHead} (lastProcessed=${state.lastProcessedBlock})`
+					)
+				)
+			}
+		} else {
+			logger(
+				Colors.cyan(
+					`[validatorClRewardPayout] catch-up toward scanTargetBlock=${state.scanTargetBlock} (lastProcessed=${state.lastProcessedBlock}, liveHead=${liveHead})`
+				)
+			)
+		}
+
+		const scanTargetBlock = state.scanTargetBlock ?? liveHead
 		let from = Math.max(floor, state.lastProcessedBlock + 1)
-		if (from > head) return
+		if (from > scanTargetBlock) return
 
 		const chunk = resolveChunkBlocks()
+		const chunksPerTick = resolveChunksPerTick()
+		const maxBlocksThisTick = chunk * chunksPerTick
+		const tickEnd = Math.min(from + maxBlocksThisTick - 1, scanTargetBlock)
+
 		logger(
 			Colors.cyan(
-				`[validatorClRewardPayout] scan blocks ${from}..${head} (floor=${floor}, proxy=${proxyAddr.slice(0, 10)}…)`
+				`[validatorClRewardPayout] scan blocks ${from}..${tickEnd} (target=${scanTargetBlock}, liveHead=${liveHead}, floor=${floor}, proxy=${proxyAddr.slice(0, 10)}…)`
 			)
 		)
 
-		while (from <= head) {
-			const to = Math.min(from + chunk - 1, head)
+		while (from <= tickEnd) {
+			const to = Math.min(from + chunk - 1, tickEnd)
 			const ok = await processBlockRange(provider, readContract, proxyAddr, from, to)
 			if (!ok) {
 				logger(Colors.yellow(`[validatorClRewardPayout] partial failure ${from}..${to}; will retry next tick`))
