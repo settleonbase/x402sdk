@@ -27,6 +27,7 @@ import {
 	registerIssuedCouponSeriesQueryCacheInvalidator,
 } from './issuedCouponSeriesQueryCache'
 import { isApiExcludedUserCard } from '../apiExcludedUserCards'
+import { pushCardGatewayRewardPoolTask } from '../userCumulativeStatRewardPoolMaster'
 import { applyExcludeUserCard, warmDynamicApiExcludedUserCardsFromDb } from '../excludeUserCardApi'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback, resolveBeamioAaOnConet } from './resolveBeamioAaViaUserCardFactory'
@@ -2545,6 +2546,29 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({ success: true, syncTx: result.syncTx }).end()
 		})
 
+		/** POST /api/cardGatewayRewardPool — Cluster 预检后转发；factory.gatewayInvokeCard 写路径（#13 奖励池 / topup 累计）。 */
+		router.post('/cardGatewayRewardPool', async (req, res) => {
+			const { cardAddress, factoryCallData, label } = req.body as {
+				cardAddress?: string
+				factoryCallData?: string
+				label?: string
+			}
+			if (!cardAddress || !ethers.isAddress(cardAddress)) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' }).end()
+			}
+			if (!factoryCallData || typeof factoryCallData !== 'string' || factoryCallData.length < 10) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid factoryCallData' }).end()
+			}
+			const taskLabel = typeof label === 'string' && label.trim() ? label.trim() : 'cardGatewayRewardPool'
+			pushCardGatewayRewardPoolTask({
+				cardAddress: ethers.getAddress(cardAddress),
+				factoryCallData,
+				label: taskLabel,
+				res,
+			})
+			logger(Colors.cyan(`[cardGatewayRewardPool] pushed to pool label=${taskLabel} card=${cardAddress}`))
+		})
+
 		router.post('/executeForOwner', async (req, res) => {
 			const {
 				cardAddress,
@@ -2865,7 +2889,15 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/claimBUnits - 由 cluster 预检后转发，master 推入 claimBUnitsPool，经 Settle_ContractPool 执行 BUnitAirdrop.claimFor */
 		router.post('/claimBUnits', (req, res) => {
-			const body = req.body as { claimant?: string; nonce?: string; deadline?: string; signature?: string }
+			const body = req.body as {
+				claimant?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+				merchantCard?: string
+				targetTokenId?: string
+				referrer?: string
+			}
 			if (!body.claimant || !body.nonce || !body.deadline || !body.signature) {
 				return res.status(400).json({ success: false, error: 'Missing claimant, nonce, deadline, or signature' }).end()
 			}
@@ -2874,6 +2906,9 @@ const routing = ( router: Router ) => {
 				nonce: body.nonce,
 				deadline: body.deadline,
 				signature: body.signature,
+				merchantCard: body.merchantCard,
+				targetTokenId: body.targetTokenId,
+				referrer: body.referrer,
 				res,
 			})
 			claimBUnitsProcess().catch((err: any) => {

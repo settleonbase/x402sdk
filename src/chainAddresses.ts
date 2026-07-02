@@ -74,7 +74,7 @@ export const NODE_SALE_NODE_PRICE_USDC6 = 1_250_000_000n
 export const NODE_SALE_SERVER_FEE_USDC6 = 120_000_000n
 
 /** CoNET BUint ERC20（balanceOfAll）；与 deployments/conet-addresses.json `BUint` 同步 */
-export const CONET_BUINT = '0xa354CC4c414568Dd14F6d63b53013f35483427f0'
+export const CONET_BUINT = '0x54ac4672cE75EC5ACebaeF1a7aFC6F49E77Ae9Ae'
 export const CONET_BUNIT_AIRDROP_ADDRESS = '0xb9cf45AF87b16853c8F48a16b0495F030309e70f'
 /** BuintRedeemAirdrop（CoNET）；与 deployments/conet-addresses.json 同步 */
 export const CONET_BUINT_REDEEM_AIRDROP = '0x02e954D352EB4C687AB066f0967E35D41E7721b6'
@@ -133,7 +133,9 @@ export const CONET_BEAMIO_USER_CARD_FACTORY_EXECUTE_LIB = '0xbc6f3926691d2306c96
 /** CoNET 默认 BeamioUserCard（AA Factory `beamioUserCard`） */
 export const CONET_BEAMIO_USER_CARD_DEFAULT = '0xA5C727d11d04BeBC095bd814c6530c4e77fD6662'
 /** CoNET USDC（ConetTreasury `FactoryERC20`）；UserCard Factory `USDC_TOKEN` */
-export const CONET_USDC = '0x2975c85D8Cc8F5d263492E332A6dAa7ad11aDBdC'
+export const CONET_USDC = '0x84e55A7d82aEa1243cB88b20dDde9Ba5cea0E134'
+/** @deprecated legacy FactoryERC20 (non-UUPS) */
+export const CONET_USDC_LEGACY = '0x2975c85D8Cc8F5d263492E332A6dAa7ad11aDBdC'
 /** CoNET GB ERC1155（ConetGB1155）；id=0 为累计净 GB（18 decimals） */
 export const CONET_GB1155 = '0x3Dc53e528d45225e8F38c391Cc6a72CDec435748'
 /** CoNET GB total（ConetGB_total，1155 净额聚合） */

@@ -16,6 +16,17 @@ import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPre
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import {
+	cardBootstrapIssuedNftV2StatPreCheck,
+	cardConfigureEventRewardRulePreCheck,
+	cardDispatchEventReward13PreCheck,
+	cardInitializeUserCumulativeStatPreCheck,
+	cardPurchaseRewardProgramPreCheck,
+	cardRecordTopupCumulativeStatPreCheck,
+	cardRecordUserCumulativeStatPreCheck,
+	cardRecordUserLikePreCheck,
+	readCardUserCumulativeStatStatus,
+} from '../userCumulativeStatRewardPool'
+import {
 	filterApiExcludedCardRows,
 	isApiExcludedUserCard,
 	listApiExcludedUserCardAddressesChecksum,
@@ -7113,6 +7124,140 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				: {}),
 		}
 		postLocalhost('/api/executeForOwner', forwardBody, res)
+	})
+
+	/** GET /api/cardUserCumulativeStatStatus?cardAddress=0x… — 读卡级累计统计 token 是否已 initialize（Cluster 直读链）。 */
+	router.get('/cardUserCumulativeStatStatus', async (req, res) => {
+		const cardAddress = String(req.query?.cardAddress ?? '').trim()
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' }).end()
+		}
+		try {
+			const status = await readCardUserCumulativeStatStatus(ethers.getAddress(cardAddress))
+			return res.status(200).json({ success: true, ...status }).end()
+		} catch (e: unknown) {
+			const err = e as { message?: string }
+			logger(Colors.red(`server /api/cardUserCumulativeStatStatus FAIL: ${err?.message ?? e}`))
+			return res.status(400).json({ success: false, error: err?.message ?? String(e) }).end()
+		}
+	})
+
+	/** cardInitializeUserCumulativeStat：卡主 executeForOwner → initializeCardUserCumulativeStatTokens（每张卡一次，幂等）。 */
+	router.post('/cardInitializeUserCumulativeStat', async (req, res) => {
+		const preCheck = await cardInitializeUserCumulativeStatPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardInitializeUserCumulativeStat preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardInitializeUserCumulativeStat preCheck OK → executeForOwner`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost('/api/executeForOwner', preCheck.preChecked, res)
+	})
+
+	/** cardBootstrapIssuedNftV2Stat：旧 issued 系列补建 V2 per-coupon stat tokens。 */
+	router.post('/cardBootstrapIssuedNftV2Stat', async (req, res) => {
+		const preCheck = await cardBootstrapIssuedNftV2StatPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardBootstrapIssuedNftV2Stat preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardBootstrapIssuedNftV2Stat preCheck OK → executeForOwner`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost('/api/executeForOwner', preCheck.preChecked, res)
+	})
+
+	/** cardConfigureEventRewardRule：owner 配置 #13 奖励规则（ChargeReward V2）。 */
+	router.post('/cardConfigureEventRewardRule', async (req, res) => {
+		const preCheck = await cardConfigureEventRewardRulePreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardConfigureEventRewardRule preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardConfigureEventRewardRule preCheck OK → executeForOwner`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost('/api/executeForOwner', preCheck.preChecked, res)
+	})
+
+	/** Gateway-only：purchaseRewardProgram（Master gatewayInvokeCard 队列）。 */
+	router.post('/cardPurchaseRewardProgram', async (req, res) => {
+		const preCheck = await cardPurchaseRewardProgramPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardPurchaseRewardProgram preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardPurchaseRewardProgram preCheck OK → cardGatewayRewardPool`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'purchaseRewardProgram' }, res)
+	})
+
+	/** Gateway-only：dispatchEventReward13（Master gatewayInvokeCard 队列）。 */
+	router.post('/cardDispatchEventReward13', async (req, res) => {
+		const preCheck = await cardDispatchEventReward13PreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardDispatchEventReward13 preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardDispatchEventReward13 preCheck OK → cardGatewayRewardPool`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'dispatchEventReward13' }, res)
+	})
+
+	/** Owner executeForOwner：recordUserCumulativeStat。 */
+	router.post('/cardRecordUserCumulativeStat', async (req, res) => {
+		const preCheck = await cardRecordUserCumulativeStatPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardRecordUserCumulativeStat preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardRecordUserCumulativeStat preCheck OK → executeForOwner`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost('/api/executeForOwner', preCheck.preChecked, res)
+	})
+
+	/** Gateway-only：recordTopupCumulativeStat（Master gatewayInvokeCard 队列；NFC top-up 亦内部挂钩）。 */
+	router.post('/cardRecordTopupCumulativeStat', async (req, res) => {
+		const preCheck = await cardRecordTopupCumulativeStatPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardRecordTopupCumulativeStat preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardRecordTopupCumulativeStat preCheck OK → cardGatewayRewardPool`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'recordTopupCumulativeStat' }, res)
+	})
+
+	/** Gateway-only：用户 EIP-712 点赞 / 解除点赞（burn like stat token ≈ 转 0x0）。 */
+	router.post('/cardRecordUserLike', async (req, res) => {
+		const preCheck = await cardRecordUserLikePreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardRecordUserLike preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		const liked = Boolean(req.body?.liked)
+		const targetKind = Number(req.body?.targetKind ?? 1)
+		logger(
+			Colors.green(`server /api/cardRecordUserLike preCheck OK → cardGatewayRewardPool liked=${liked} targetKind=${targetKind}`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost(
+			'/api/cardGatewayRewardPool',
+			{ ...preCheck.preChecked, label: liked ? 'recordUserLike' : 'burnUserLike' },
+			res,
+		)
 	})
 
 	/** cardMintIssuedNftToAddress：owner 离线签字发行 issued NFT 到指定地址。Cluster 预检 targetAddress 为 EOA、签名有效，编码 data 后转发 master executeForOwner */

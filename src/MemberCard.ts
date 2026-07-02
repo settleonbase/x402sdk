@@ -4770,6 +4770,7 @@ const BUNIT_AIRDROP_ABI = [
 	'function hasClaimed(address) view returns (bool)',
 	'function claimNonces(address) view returns (uint256)',
 	'function claimFor(address claimant, uint256 nonce, uint256 deadline, bytes calldata signature)',
+	'function claimForV2(address claimant, uint256 nonce, uint256 deadline, address merchantCard, uint256 targetTokenId, address referrer, bytes calldata signature)',
 ] as const
 
 /** EIP-712 domain 与 BUnitAirdrop contract 一致，用于 Cluster 签名预检 */
@@ -4786,18 +4787,39 @@ const CLAIM_AIRDROP_TYPES = {
 		{ name: 'deadline', type: 'uint256' },
 	],
 }
+const CLAIM_AIRDROP_V2_TYPES = {
+	ClaimAirdropV2: [
+		{ name: 'claimant', type: 'address' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+		{ name: 'merchantCard', type: 'address' },
+		{ name: 'targetTokenId', type: 'uint256' },
+		{ name: 'referrer', type: 'address' },
+	],
+}
 
 export type ClaimBUnitsPayload = {
 	claimant: string
 	nonce: string | number
 	deadline: string | number
 	signature: string
+	merchantCard?: string
+	targetTokenId?: string | number
+	referrer?: string
 	res?: Response
 }
 
 export const claimBUnitsPool: ClaimBUnitsPayload[] = []
 
-export const claimBUnitsPreCheck = (body: { claimant?: string; nonce?: unknown; deadline?: unknown; signature?: unknown }): { success: true; preChecked: ClaimBUnitsPayload } | { success: false; error: string } => {
+export const claimBUnitsPreCheck = (body: {
+	claimant?: string
+	nonce?: unknown
+	deadline?: unknown
+	signature?: unknown
+	merchantCard?: unknown
+	targetTokenId?: unknown
+	referrer?: unknown
+}): { success: true; preChecked: ClaimBUnitsPayload } | { success: false; error: string } => {
 	if (!body.claimant || !ethers.isAddress(body.claimant)) {
 		return { success: false, error: 'Invalid claimant address' }
 	}
@@ -4813,27 +4835,79 @@ export const claimBUnitsPreCheck = (body: { claimant?: string; nonce?: unknown; 
 	if (typeof sig !== 'string' || !/^0x[a-fA-F0-9]+$/.test(sig) || (sig.length - 2) / 2 !== 65) {
 		return { success: false, error: 'Invalid signature (must be 65 bytes hex)' }
 	}
-	// Cluster 预检：EIP-712 签名必须由 claimant 本人签署，否则不转发 Master
 	const claimant = ethers.getAddress(body.claimant)
-	const value = { claimant, nonce, deadline: BigInt(deadline) }
+
+	let merchantCard = ethers.ZeroAddress
+	if (body.merchantCard != null && body.merchantCard !== '' && body.merchantCard !== ethers.ZeroAddress) {
+		if (typeof body.merchantCard !== 'string' || !ethers.isAddress(body.merchantCard)) {
+			return { success: false, error: 'Invalid merchantCard address' }
+		}
+		merchantCard = ethers.getAddress(body.merchantCard)
+		if (isApiExcludedUserCard(merchantCard)) {
+			return { success: false, error: 'merchantCard is not allowed' }
+		}
+	}
+
+	let targetTokenId = 0n
+	if (body.targetTokenId != null && body.targetTokenId !== '' && body.targetTokenId !== 0 && body.targetTokenId !== '0') {
+		try {
+			targetTokenId =
+				typeof body.targetTokenId === 'string'
+					? BigInt(body.targetTokenId)
+					: typeof body.targetTokenId === 'number'
+						? BigInt(Math.floor(body.targetTokenId))
+						: -1n
+		} catch {
+			return { success: false, error: 'Invalid targetTokenId' }
+		}
+		if (targetTokenId < 0n) return { success: false, error: 'Invalid targetTokenId' }
+	}
+
+	let referrer = ethers.ZeroAddress
+	if (body.referrer != null && body.referrer !== '' && body.referrer !== ethers.ZeroAddress) {
+		if (typeof body.referrer !== 'string' || !ethers.isAddress(body.referrer)) {
+			return { success: false, error: 'Invalid referrer address' }
+		}
+		referrer = ethers.getAddress(body.referrer)
+	}
+
+	const useV2 = merchantCard !== ethers.ZeroAddress
 	let recovered: string
 	try {
-		recovered = ethers.verifyTypedData(CLAIM_AIRDROP_DOMAIN, CLAIM_AIRDROP_TYPES, value, sig)
+		if (useV2) {
+			recovered = ethers.verifyTypedData(
+				CLAIM_AIRDROP_DOMAIN,
+				CLAIM_AIRDROP_V2_TYPES,
+				{ claimant, nonce, deadline: BigInt(deadline), merchantCard, targetTokenId, referrer },
+				sig,
+			)
+		} else {
+			recovered = ethers.verifyTypedData(
+				CLAIM_AIRDROP_DOMAIN,
+				CLAIM_AIRDROP_TYPES,
+				{ claimant, nonce, deadline: BigInt(deadline) },
+				sig,
+			)
+		}
 	} catch {
 		return { success: false, error: 'Invalid signature (verification failed)' }
 	}
 	if (recovered.toLowerCase() !== claimant.toLowerCase()) {
 		return { success: false, error: 'Invalid signature: signer does not match claimant' }
 	}
-	return {
-		success: true,
-		preChecked: {
-			claimant,
-			nonce: String(nonce),
-			deadline: String(deadline),
-			signature: sig,
-		},
+
+	const preChecked: ClaimBUnitsPayload = {
+		claimant,
+		nonce: String(nonce),
+		deadline: String(deadline),
+		signature: sig,
 	}
+	if (useV2) {
+		preChecked.merchantCard = merchantCard
+		preChecked.targetTokenId = String(targetTokenId)
+		preChecked.referrer = referrer
+	}
+	return { success: true, preChecked }
 }
 
 export const claimBUnitsProcess = async () => {
@@ -4847,8 +4921,20 @@ export const claimBUnitsProcess = async () => {
 	logger(Colors.cyan(`[claimBUnitsProcess] claimant=${obj.claimant} nonce=${obj.nonce}`))
 	try {
 		const airdrop = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, BUNIT_AIRDROP_ABI, SC.walletConet)
-		// claimFor 内部会调用 syncTokenAction 向 Indexer 记账，需约 55 万 gas；gas limit 过低会导致 out of gas，claim 成功但 Indexer 无记账
-		const tx = await airdrop.claimFor(obj.claimant, obj.nonce, obj.deadline, obj.signature, { gasLimit: 1_200_000 })
+		const gasLimit = obj.merchantCard ? 1_500_000 : 1_200_000
+		const tx =
+			obj.merchantCard
+				? await airdrop.claimForV2(
+						obj.claimant,
+						obj.nonce,
+						obj.deadline,
+						obj.merchantCard,
+						obj.targetTokenId ?? 0,
+						obj.referrer ?? ethers.ZeroAddress,
+						obj.signature,
+						{ gasLimit },
+					)
+				: await airdrop.claimFor(obj.claimant, obj.nonce, obj.deadline, obj.signature, { gasLimit })
 		logger(Colors.green(`[claimBUnitsProcess] tx=${tx.hash}`))
 		await tx.wait()
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
@@ -8003,6 +8089,23 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			} catch (accountingErr: any) {
 				logger(Colors.yellow(`[executeForAdminPostBaseProcess] android topup accounting non-critical: ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
 			}
+			try {
+				const topupCardChain = await resolveUserCardChain(obj.cardAddr)
+				if (topupCardChain === 'conet') {
+					const { enqueueRecordTopupCumulativeStatGateway } = await import('./userCumulativeStatRewardPoolMaster.js')
+					enqueueRecordTopupCumulativeStatGateway({
+						cardAddress: obj.cardAddr,
+						userEOA: recipientEOA,
+						points6: mintParsed.points6,
+					})
+				}
+			} catch (cumStatErr: any) {
+				logger(
+					Colors.yellow(
+						`[executeForAdminPostBaseProcess] recordTopupCumulativeStat gateway enqueue non-critical: ${cumStatErr?.message ?? cumStatErr}`
+					)
+				)
+			}
 		}
 		if (recipientEOA && obj.cardAddr) {
 			syncNftTierMetadataForUser(obj.cardAddr, recipientEOA).catch((err: any) => {
@@ -8776,7 +8879,7 @@ async function ensureUserCardFactoryAllowsRelayerAA(params: {
 	}
 }
 
-async function relayUserCardFactoryCallViaEntryPoint(params: {
+export async function relayUserCardFactoryCallViaEntryPoint(params: {
 	SC: SettleContractPoolEntry
 	chain: BeamioUserCardChainKey
 	factoryAddress: string
