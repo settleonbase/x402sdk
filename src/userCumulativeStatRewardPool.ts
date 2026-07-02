@@ -682,12 +682,13 @@ export type GatewayRewardPoolForwardBody = {
 	factoryCallData: string
 }
 
-async function gatewayRewardPoolBasePreCheck(cardAddress: string): Promise<{ card: string } | { error: string }> {
+async function gatewayRewardPoolBasePreCheck(
+	cardAddress: string,
+): Promise<{ card: string; needsInit: boolean } | { error: string }> {
 	const card = ethers.getAddress(cardAddress)
 	if (!(await hasCoNETUserCardBytecode(card))) return { error: 'Card not found on CoNET' }
 	const status = await readCardUserCumulativeStatStatus(card)
-	if (!status.initialized) return { error: 'cardUserCumulativeStatTokens not initialized' }
-	return { card }
+	return { card, needsInit: !status.initialized }
 }
 
 /** Cluster：gateway recordTopupCumulativeStat（Master gatewayInvokeCard 队列）。 */
@@ -703,6 +704,14 @@ export const cardRecordTopupCumulativeStatPreCheck = async (body: {
 	try {
 		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
 		if ('error' in base) return { success: false, error: base.error }
+		if (base.needsInit) {
+			const initRouteErr = await assertAdminStatsRoutesIssuedNftSelector(
+				base.card,
+				INITIALIZE_CARD_USER_CUMUL_STAT_SELECTOR,
+				'initializeCardUserCumulativeStatTokens',
+			)
+			if (initRouteErr) return { success: false, error: initRouteErr }
+		}
 		const cardCalldata = buildRecordTopupCumulativeStatCalldata(body.userEOA, points6)
 		const routeErr = await assertAdminStatsRoutesChargeRewardSelector(
 			base.card,
@@ -922,6 +931,15 @@ export const cardRecordUserLikePreCheck = async (body: {
 		const base = await gatewayRewardPoolBasePreCheck(cardAddress)
 		if ('error' in base) return { success: false, error: base.error }
 		const cardNorm = base.card
+
+		if (base.needsInit) {
+			const initRouteErr = await assertAdminStatsRoutesIssuedNftSelector(
+				cardNorm,
+				INITIALIZE_CARD_USER_CUMUL_STAT_SELECTOR,
+				'initializeCardUserCumulativeStatTokens',
+			)
+			if (initRouteErr) return { success: false, error: initRouteErr }
+		}
 
 		const domain = await eip712DomainForRecordUserLike(cardNorm)
 		const digest = ethers.TypedDataEncoder.hash(domain, RECORD_USER_LIKE_EIP712_TYPE, {

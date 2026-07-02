@@ -9,7 +9,9 @@ import { resolveUserCardChain, providerForUserCardChain, type BeamioUserCardChai
 import { getBeamioUserCardFactoryGateway, relayUserCardFactoryCallViaEntryPoint, Settle_ContractPool } from './MemberCard'
 import {
 	CHARGE_REWARD_V2_IFACE,
+	buildInitializeCardUserCumulativeStatCalldata,
 	encodeGatewayInvokeCardFactoryCalldata,
+	readCardUserCumulativeStatStatus,
 } from './userCumulativeStatRewardPool'
 
 const FACTORY_GATEWAY_IFACE = new ethers.Interface([
@@ -59,6 +61,34 @@ function scheduleCardGatewayRewardPoolPress(): void {
 	setTimeout(() => kickCardGatewayRewardPoolPress(), 1000)
 }
 
+async function ensureCardUserCumulativeStatInitialized(params: {
+	SC: (typeof Settle_ContractPool)[number]
+	chain: BeamioUserCardChainKey
+	factoryAddress: string
+	cardAddress: string
+	logTag: string
+}): Promise<{ ok: true } | { ok: false; error: string; hash?: string }> {
+	const status = await readCardUserCumulativeStatStatus(params.cardAddress)
+	if (status.initialized) return { ok: true }
+	const initFactoryCallData = encodeGatewayInvokeCardFactoryCalldata(
+		params.cardAddress,
+		buildInitializeCardUserCumulativeStatCalldata(),
+	)
+	logger(Colors.cyan(`[${params.logTag}] auto-init cardUserCumulativeStatTokens card=${params.cardAddress}`))
+	const tx = await relayUserCardFactoryCallViaEntryPoint({
+		SC: params.SC,
+		chain: params.chain,
+		factoryAddress: params.factoryAddress,
+		factoryCallData: initFactoryCallData,
+		logTag: `${params.logTag}:initUserCumulativeStat`,
+	})
+	const receipt = await tx.wait()
+	if (!receipt || receipt.status !== 1) {
+		return { ok: false, error: 'initializeCardUserCumulativeStatTokens tx reverted', hash: tx.hash }
+	}
+	return { ok: true }
+}
+
 export async function cardGatewayRewardPoolPress(): Promise<void> {
 	const obj = cardGatewayRewardPool.shift()
 	if (!obj) return
@@ -83,6 +113,21 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 				'Factory gatewayInvokeCard not deployed on-chain; upgrade CoNET UserCard factory before gateway reward-pool writes.'
 			logger(Colors.red(`[${obj.label}] ${err}`))
 			obj.res?.status(503).json({ success: false, error: err, code: 'UC_FACTORY_GATEWAY_INVOKE_NOT_DEPLOYED' }).end()
+			return
+		}
+		const initResult = await ensureCardUserCumulativeStatInitialized({
+			SC,
+			chain,
+			factoryAddress: factory,
+			cardAddress: obj.cardAddress,
+			logTag: obj.label,
+		})
+		if (!initResult.ok) {
+			logger(Colors.red(`[${obj.label}] ${initResult.error}`))
+			obj.res
+				?.status(500)
+				.json({ success: false, error: initResult.error, hash: initResult.hash })
+				.end()
 			return
 		}
 		const tx = await relayUserCardFactoryCallViaEntryPoint({
