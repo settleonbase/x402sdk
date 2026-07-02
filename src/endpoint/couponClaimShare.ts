@@ -4,7 +4,6 @@ import fsSync from 'fs'
 import os from 'os'
 import path from 'path'
 import { ethers } from 'ethers'
-import QRCode from 'qrcode'
 import sharp from 'sharp'
 import {
 	listCouponIssuedNftSeriesForCardDescending,
@@ -47,15 +46,13 @@ const OG_BANNER_HEADLINE_BOX_TOP_GAP = OG_BANNER_HEADLINE_BASELINE_Y - OG_BANNER
 const OG_BANNER_HEADLINE_VISUAL_TOP_GAP = Math.round(OG_BANNER_HEADLINE_BOX_TOP_GAP / 2)
 /** Bottom breathing room is 4× the headline visual top margin. */
 const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
-/** Banner mode external QR size; doubled from 96 to match the larger app-download preview emphasis. */
-const OG_BANNER_QR_TARGET_SIZE = 192
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 26
+const OG_LAYOUT_REV = 27
 /** Cross-worker OG JPEG cache (Cluster forks do not share in-memory ogImageCache). */
 const OG_DISK_CACHE_DIR = path.join(os.tmpdir(), 'beamio-og-share-cache', `v${OG_LAYOUT_REV}`)
 
-export type CouponShareKind = 'open_claim' | 'redeem'
+export type CouponShareKind = 'open_claim' | 'redeem' | 'discover_merchant'
 
 export type CouponOpenClaimShareParams = {
 	kind: 'open_claim'
@@ -71,12 +68,23 @@ export type CouponRedeemShareParams = {
 	couponId?: string
 }
 
-/** @deprecated alias — prefer BeamioCouponShareParams */
+export type DiscoverMerchantShareParams = {
+	kind: 'discover_merchant'
+	cardAddress: string
+}
+
+/** @deprecated alias — prefer BeamioShareParams */
 export type CouponClaimShareParams = CouponOpenClaimShareParams
 
-export type BeamioCouponShareParams = CouponOpenClaimShareParams | CouponRedeemShareParams
+export type BeamioCouponShareParams =
+	| CouponOpenClaimShareParams
+	| CouponRedeemShareParams
+	| DiscoverMerchantShareParams
 
-export type CouponClaimDistributionKind = 'coupon' | 'catalog'
+/** @deprecated alias — prefer BeamioShareParams */
+export type BeamioShareParams = BeamioCouponShareParams
+
+export type CouponClaimDistributionKind = 'coupon' | 'catalog' | 'merchant'
 
 export type CouponClaimShareMeta = {
 	shareKind: CouponShareKind
@@ -209,9 +217,21 @@ const resolveMerchantNameForShare = async (
 	return 'Beamio'
 }
 
-export const buildShareHeadline = (merchantName: string, shareKind: CouponShareKind): string => {
+export const buildShareHeadline = (
+	merchantName: string,
+	shareKind: Extract<CouponShareKind, 'open_claim' | 'redeem'>
+): string => {
 	const verb = shareKind === 'redeem' ? 'Redeem' : 'Claim'
 	return `${verb} a ${truncateText(merchantName.trim() || 'Beamio', 28)} Coupon`
+}
+
+export const buildDiscoverMerchantShareHeadline = (merchantName: string): string =>
+	`Discover ${truncateText(merchantName.trim() || 'Beamio', 32)} on Beamio`
+
+export function buildDiscoverMerchantAppDownloadUrl(cardAddress: string): string {
+	const card = ethers.getAddress(cardAddress)
+	const discoverUrl = `${BEAMIO_APP_ORIGIN}/app/?beamiocard=${encodeURIComponent(card)}&discover=open`
+	return `${BEAMIO_APP_ORIGIN}/app-download?target=${encodeURIComponent(discoverUrl)}`
 }
 
 export const buildCatalogShareHeadline = (merchantName: string): string => {
@@ -516,6 +536,43 @@ function appendAppDownloadCacheBust(appDownloadUrl: string, v?: string): string 
 	}
 }
 
+export function parseDiscoverMerchantFromBeamioAppUrl(raw: string): DiscoverMerchantShareParams | null {
+	const input = raw?.trim() ?? ''
+	if (!input) return null
+	try {
+		const url = new URL(input)
+		if (url.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isAllowedBeamioAppPath(url.pathname)) return null
+		const cardAddress = (url.searchParams.get('beamiocard') ?? url.searchParams.get('Beamiocard') ?? '').trim()
+		const redeemCode = decodeURIComponent(
+			(url.searchParams.get('redeemcode') ?? url.searchParams.get('Redeemcode') ?? '').trim()
+		)
+		const couponId = decodeURIComponent(
+			(url.searchParams.get('couponId') ?? url.searchParams.get('couponid') ?? '').trim()
+		)
+		const discover = (url.searchParams.get('discover') ?? '').trim().toLowerCase()
+		if (!cardAddress || !ethers.isAddress(cardAddress)) return null
+		if (redeemCode || couponId) return null
+		if (discover !== 'open' && discover !== '1' && discover !== 'true') return null
+		return { kind: 'discover_merchant', cardAddress: ethers.getAddress(cardAddress) }
+	} catch {
+		return null
+	}
+}
+
+export function parseDiscoverMerchantFromAppDownloadTarget(target: string): DiscoverMerchantShareParams | null {
+	const trimmed = target?.trim() ?? ''
+	if (!trimmed) return null
+	try {
+		const wrapper = new URL(trimmed)
+		if (wrapper.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isAllowedBeamioAppPath(wrapper.pathname)) return null
+		return parseDiscoverMerchantFromBeamioAppUrl(trimmed)
+	} catch {
+		return null
+	}
+}
+
 export function parseCouponClaimFromBeamioAppUrl(raw: string): CouponOpenClaimShareParams | null {
 	const input = raw?.trim() ?? ''
 	if (!input) return null
@@ -618,11 +675,16 @@ export function parseCouponClaimShareRequest(query: {
 		}
 		const openClaim = parseCouponClaimFromAppDownloadTarget(innerTarget)
 		const redeem = parseRedeemShareFromAppDownloadTarget(innerTarget)
+		const discoverMerchant = parseDiscoverMerchantFromAppDownloadTarget(innerTarget)
 		if (redeem) {
 			if (!shareUrl) {
 				shareUrl = buildCouponRedeemAppDownloadUrl(redeem.cardAddress, redeem.redeemCode, redeem.couponId)
 			}
 			return { params: redeem, shareUrl: withCacheBust(shareUrl) }
+		}
+		if (discoverMerchant) {
+			if (!shareUrl) shareUrl = buildDiscoverMerchantAppDownloadUrl(discoverMerchant.cardAddress)
+			return { params: discoverMerchant, shareUrl: withCacheBust(shareUrl) }
 		}
 		if (openClaim) {
 			if (!shareUrl) shareUrl = buildCouponClaimAppDownloadUrl(openClaim.cardAddress, openClaim.couponId)
@@ -669,13 +731,20 @@ function encodeOgShareToken(params: BeamioCouponShareParams, shareUrl?: string):
 					...(cacheBust ? { b: cacheBust } : {}),
 					...(params.couponId ? { i: params.couponId } : {}),
 				}
-			: {
-					k: 'o' as const,
-					c: params.cardAddress,
-					i: params.couponId,
-					v: OG_LAYOUT_REV,
-					...(cacheBust ? { b: cacheBust } : {}),
-				}
+			: params.kind === 'discover_merchant'
+				? {
+						k: 'd' as const,
+						c: params.cardAddress,
+						v: OG_LAYOUT_REV,
+						...(cacheBust ? { b: cacheBust } : {}),
+					}
+				: {
+						k: 'o' as const,
+						c: params.cardAddress,
+						i: params.couponId,
+						v: OG_LAYOUT_REV,
+						...(cacheBust ? { b: cacheBust } : {}),
+					}
 	return Buffer.from(JSON.stringify(payload)).toString('base64url')
 }
 
@@ -706,6 +775,12 @@ export function decodeOgShareTokenPayload(
 				...(cacheBust ? { cacheBust } : {}),
 			}
 		}
+		if (raw.k === 'd' && raw.c && ethers.isAddress(raw.c)) {
+			return {
+				params: { kind: 'discover_merchant', cardAddress: ethers.getAddress(raw.c) },
+				...(cacheBust ? { cacheBust } : {}),
+			}
+		}
 		if (raw.k === 'o' && raw.c && raw.i && ethers.isAddress(raw.c)) {
 			return {
 				params: { kind: 'open_claim', cardAddress: ethers.getAddress(raw.c), couponId: raw.i },
@@ -726,7 +801,9 @@ export function buildShareUrlForOgToken(params: BeamioCouponShareParams, cacheBu
 	const base =
 		params.kind === 'redeem'
 			? buildCouponRedeemAppDownloadUrl(params.cardAddress, params.redeemCode, params.couponId)
-			: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId)
+			: params.kind === 'discover_merchant'
+				? buildDiscoverMerchantAppDownloadUrl(params.cardAddress)
+				: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId)
 	return cacheBust ? appendAppDownloadCacheBust(base, cacheBust) : base
 }
 
@@ -1106,8 +1183,79 @@ export async function resolveCouponClaimShareMeta(
 	params: BeamioCouponShareParams,
 	shareUrl: string
 ): Promise<CouponClaimShareMeta | null> {
+	if (params.kind === 'discover_merchant') return resolveDiscoverMerchantShareMeta(params, shareUrl)
 	if (params.kind === 'redeem') return resolveRedeemShareMeta(params, shareUrl)
 	return resolveOpenClaimShareMeta(params, shareUrl)
+}
+
+async function readCardDiscoverSharePresentation(cardNorm: string): Promise<{
+	merchantName: string
+	title: string
+	subtitle: string
+	backgroundImage: string
+	iconUrl: string
+	backgroundColorHex: string
+}> {
+	let meta: Record<string, unknown> | null = null
+	try {
+		meta = asRecord((await getCardByAddress(cardNorm))?.metadata ?? null)
+	} catch {
+		meta = null
+	}
+	const share = asRecord(meta?.shareTokenMetadata)
+	const merchantName = await resolveMerchantNameForShare(cardNorm, null)
+	const businessName =
+		readString(meta?.businessName) ||
+		readString(share?.businessName) ||
+		readString(share?.displayName) ||
+		merchantName
+	const title = truncateText(businessName || merchantName, 48)
+	const rawDescription =
+		readString(share?.description) ||
+		readString(meta?.description) ||
+		readString(meta?.programDescription) ||
+		''
+	const subtitle = truncateText(rawDescription || `${title} on Beamio`, 120)
+	const backgroundImage =
+		readString(share?.merchantImage) ||
+		readString(share?.background) ||
+		readString(share?.backgroundImage) ||
+		readString(share?.backgroundImageUrl) ||
+		readString(meta?.programBackgroundImage) ||
+		readMetadataStringFromKeys(meta, COUPON_BACKGROUND_IMAGE_KEYS) ||
+		readMetadataStringFromKeys(share, COUPON_BACKGROUND_IMAGE_KEYS)
+	const iconUrl =
+		readString(share?.image) ||
+		readString(share?.icon) ||
+		readString(meta?.programIconUrl) ||
+		readString(meta?.logoUrl) ||
+		''
+	const backgroundColorHex = readMetadataBackgroundColor(meta) || readMetadataBackgroundColor(share) || '#2B2E3A'
+	return { merchantName, title, subtitle, backgroundImage, iconUrl, backgroundColorHex }
+}
+
+async function resolveDiscoverMerchantShareMeta(
+	params: DiscoverMerchantShareParams,
+	shareUrl: string
+): Promise<CouponClaimShareMeta | null> {
+	const cardNorm = ethers.getAddress(params.cardAddress)
+	const fields = await readCardDiscoverSharePresentation(cardNorm)
+	return {
+		shareKind: 'discover_merchant',
+		distributionKind: 'merchant',
+		cardAddress: cardNorm,
+		merchantName: fields.merchantName,
+		shareHeadline: buildDiscoverMerchantShareHeadline(fields.merchantName),
+		title: fields.title,
+		subtitle: fields.subtitle,
+		iconUrl: fields.iconUrl,
+		backgroundImage: fields.backgroundImage,
+		backgroundColorHex: fields.backgroundColorHex,
+		validBeforeSec: null,
+		expiresLabel: 'VALID NOW',
+		shareUrl,
+		ogImageUrl: buildOgImageUrl(shareUrl, { kind: 'discover_merchant', cardAddress: cardNorm }),
+	}
 }
 
 /** Revision for `/api/og/issued-nft.jpg?v=` — changes when series visuals change (biz edit / publish). */
@@ -1230,6 +1378,25 @@ export function buildFallbackCouponClaimShareMeta(
 	params: BeamioCouponShareParams,
 	shareUrl: string
 ): CouponClaimShareMeta {
+	if (params.kind === 'discover_merchant') {
+		const merchantName = 'Beamio'
+		return {
+			shareKind: 'discover_merchant',
+			distributionKind: 'merchant',
+			cardAddress: params.cardAddress,
+			merchantName,
+			shareHeadline: buildDiscoverMerchantShareHeadline(merchantName),
+			title: merchantName,
+			subtitle: 'Explore this brand in the Beamio app.',
+			iconUrl: '',
+			backgroundImage: '',
+			backgroundColorHex: '#2B2E3A',
+			validBeforeSec: null,
+			expiresLabel: 'VALID NOW',
+			shareUrl,
+			ogImageUrl: buildOgImageUrl(shareUrl, params),
+		}
+	}
 	const isRedeem = params.kind === 'redeem'
 	const merchantName = 'Beamio'
 	return {
@@ -1241,7 +1408,7 @@ export function buildFallbackCouponClaimShareMeta(
 				? { couponId: params.couponId }
 				: {}),
 		merchantName,
-		shareHeadline: buildShareHeadline(merchantName, params.kind),
+		shareHeadline: buildShareHeadline(merchantName, isRedeem ? 'redeem' : 'open_claim'),
 		title: 'Beamio Coupon',
 		subtitle: isRedeem ? 'Redeem this coupon in the Beamio app.' : 'Claim this coupon in the Beamio app.',
 		iconUrl: '',
@@ -1264,7 +1431,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const punchBg = '#f9f9fe'
 	const isCatalogVideoOg = meta.catalogLayout === 'videoOg'
 	const hasBanner = isCatalogVideoOg || Boolean(meta.backgroundImage?.trim())
-	/** Coupon share tickets use side notches + bottom QR; catalog videoOg matches Business Catalogs (plain card). */
+	/** Coupon share tickets use side notches; catalog videoOg matches Business Catalogs (plain card). No QR in OG raster. */
 	const isCouponBannerTicket = hasBanner && !isCatalogVideoOg
 	const capsuleX = 50
 	const capsuleW = 1100
@@ -1288,11 +1455,6 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const bgDataUrl = hasBanner
 		? await fetchBannerFitHeightPngDataUrl(meta.backgroundImage, capsuleW * imgPrep, capsuleH * imgPrep)
 		: null
-	const qrDataUrl = await QRCode.toDataURL(meta.shareUrl, {
-		width: 560,
-		margin: 1,
-		color: { dark: '#111827', light: '#ffffff' },
-	})
 
 	const titleRaw = meta.title.trim()
 	const subtitleRaw = meta.subtitle.trim()
@@ -1300,9 +1462,17 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const expiresRaw = meta.expiresLabel.trim()
 	const showExpiryPill = shouldShowCouponExpiryPill(expiresRaw)
 	const isCatalogDistribution = meta.distributionKind === 'catalog'
+	const isDiscoverMerchant =
+		meta.shareKind === 'discover_merchant' || meta.distributionKind === 'merchant'
 	const claimHeadlineRaw = isCatalogDistribution
 		? ''
-		: meta.shareHeadline?.trim() || buildShareHeadline(meta.merchantName, meta.shareKind)
+		: isDiscoverMerchant
+			? meta.shareHeadline?.trim() || buildDiscoverMerchantShareHeadline(meta.merchantName)
+			: meta.shareHeadline?.trim() ||
+				buildShareHeadline(
+					meta.merchantName,
+					meta.shareKind === 'redeem' ? 'redeem' : 'open_claim'
+				)
 	const expiryPillW = showExpiryPill ? Math.min(360, Math.max(160, expiresRaw.length * 11 + 48)) : 0
 	const textLayers: OgTextLayer[] = []
 	const innerTextStartX = iconDataUrl ? capsuleX + 200 : capsuleX + 48
@@ -1334,9 +1504,9 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		})
 	}
 
-	if (!hasBanner && !isCatalogDistribution) {
+	if (!hasBanner && !isCatalogDistribution && !isDiscoverMerchant) {
 		textLayers.push({
-			text: 'Scan the QR or open the link on your phone',
+			text: 'Open the link on your phone to continue in Beamio',
 			x: OG_WIDTH / 2,
 			y: 132,
 			fontSize: 20,
@@ -1502,17 +1672,7 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 		}
 	}
 
-	const showCouponShareQrBelow = !isCatalogVideoOg && (isCouponBannerTicket || !hasBanner)
-	const qrSize = showCouponShareQrBelow ? OG_BANNER_QR_TARGET_SIZE : 0
-	const qrY = showCouponShareQrBelow
-		? (isCouponBannerTicket ? metaBelowY + 12 : capsuleY + capsuleH + 12)
-		: 0
-	const qrX = (OG_WIDTH - qrSize) / 2
-	const externalQrLayer = showCouponShareQrBelow
-		? `
-  <rect x="${qrX - 12}" y="${qrY - 12}" width="${qrSize + 24}" height="${qrSize + 24}" rx="20" fill="#ffffff" stroke="rgba(0,0,0,0.08)" stroke-width="2" />
-  <image href="${qrDataUrl}" x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" />`
-		: ''
+	const externalQrLayer = ''
 
 	const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${OG_WIDTH}" height="${OG_HEIGHT}" viewBox="0 0 ${OG_WIDTH} ${OG_HEIGHT}">
@@ -1561,7 +1721,9 @@ async function renderCouponClaimOgRaster(meta: CouponClaimShareMeta, format: 'pn
 						redeemCode: '',
 						...(meta.couponId ? { couponId: meta.couponId } : {}),
 					}
-				: { kind: 'open_claim', cardAddress: meta.cardAddress, couponId: meta.couponId ?? '' },
+				: meta.shareKind === 'discover_merchant'
+					? { kind: 'discover_merchant', cardAddress: meta.cardAddress }
+					: { kind: 'open_claim', cardAddress: meta.cardAddress, couponId: meta.couponId ?? '' },
 			meta.shareUrl
 		)
 	const cacheKey = ogShareMemoryCacheKey(format, ogToken)
@@ -1655,16 +1817,27 @@ export async function warmIssuedNftExplorerOgJpeg(
 }
 
 export function renderCouponClaimShareHtml(meta: CouponClaimShareMeta): string {
+	const isDiscoverMerchant =
+		meta.shareKind === 'discover_merchant' || meta.distributionKind === 'merchant'
 	const headline =
 		meta.distributionKind === 'catalog'
 			? escapeXml(meta.title)
-			: escapeXml(meta.shareHeadline || buildShareHeadline(meta.merchantName, meta.shareKind))
+			: isDiscoverMerchant
+				? escapeXml(meta.shareHeadline || buildDiscoverMerchantShareHeadline(meta.merchantName))
+				: escapeXml(
+						meta.shareHeadline ||
+							buildShareHeadline(
+								meta.merchantName,
+								meta.shareKind === 'redeem' ? 'redeem' : 'open_claim'
+							)
+					)
 	const title = escapeXml(meta.title)
 	const description = escapeXml(meta.subtitle)
 	const shareUrl = escapeXml(meta.shareUrl)
 	const ogImage = escapeXml(meta.ogImageUrl)
-	const actionHint =
-		meta.shareKind === 'redeem'
+	const actionHint = isDiscoverMerchant
+		? 'Open this link on your phone to explore this brand in Beamio.'
+		: meta.shareKind === 'redeem'
 			? 'Open this link on your phone to redeem in Beamio.'
 			: 'Open this link on your phone to claim in Beamio.'
 	return `<!DOCTYPE html>
