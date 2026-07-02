@@ -2546,23 +2546,33 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({ success: true, syncTx: result.syncTx }).end()
 		})
 
-		/** POST /api/cardGatewayRewardPool — Cluster 预检后转发；factory.gatewayInvokeCard 写路径（#13 奖励池 / topup 累计）。 */
+		/** POST /api/cardGatewayRewardPool — Cluster 预检后转发；factory.gatewayInvokeCard 或 Plan A cardCallData 直调。 */
 		router.post('/cardGatewayRewardPool', async (req, res) => {
-			const { cardAddress, factoryCallData, label } = req.body as {
+			const { cardAddress, factoryCallData, cardCallData, label, initOnly } = req.body as {
 				cardAddress?: string
 				factoryCallData?: string
+				cardCallData?: string
 				label?: string
+				initOnly?: boolean
 			}
 			if (!cardAddress || !ethers.isAddress(cardAddress)) {
 				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' }).end()
 			}
-			if (!factoryCallData || typeof factoryCallData !== 'string' || factoryCallData.length < 10) {
-				return res.status(400).json({ success: false, error: 'Missing or invalid factoryCallData' }).end()
+			const hasFactory =
+				typeof factoryCallData === 'string' && factoryCallData.length >= 10
+			const hasCard = typeof cardCallData === 'string' && cardCallData.length >= 10
+			if (!initOnly && !hasFactory && !hasCard) {
+				return res
+					.status(400)
+					.json({ success: false, error: 'Missing or invalid factoryCallData / cardCallData' })
+					.end()
 			}
 			const taskLabel = typeof label === 'string' && label.trim() ? label.trim() : 'cardGatewayRewardPool'
 			pushCardGatewayRewardPoolTask({
 				cardAddress: ethers.getAddress(cardAddress),
-				factoryCallData,
+				...(hasFactory ? { factoryCallData } : {}),
+				...(hasCard ? { cardCallData } : {}),
+				...(initOnly ? { initOnly: true } : {}),
 				label: taskLabel,
 				res,
 			})
