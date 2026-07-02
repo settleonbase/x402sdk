@@ -13,6 +13,11 @@ import {
 	encodeGatewayInvokeCardFactoryCalldata,
 	readCardUserCumulativeStatStatus,
 } from './userCumulativeStatRewardPool'
+import {
+	insertCardProgramShareClick,
+	removeCardProgramLike,
+	upsertCardProgramLike,
+} from './cardProgramSocialDb'
 
 const FACTORY_GATEWAY_IFACE = new ethers.Interface([
 	'function gatewayInvokeCard(address cardAddr, bytes data) returns (bytes)',
@@ -20,6 +25,27 @@ const FACTORY_GATEWAY_IFACE = new ethers.Interface([
 
 export const GATEWAY_INVOKE_CARD_SELECTOR =
 	FACTORY_GATEWAY_IFACE.getFunction('gatewayInvokeCard')?.selector ?? '0x0a76307f'
+
+export type CardProgramSocialDbMeta =
+	| {
+			kind: 'like'
+			userEOA: string
+			targetKind: number
+			issuedParentId: string
+	  }
+	| {
+			kind: 'unlike'
+			userEOA: string
+			targetKind: number
+			issuedParentId: string
+	  }
+	| {
+			kind: 'shareClick'
+			actorEOA: string
+			referrerEOA?: string | null
+			targetKind: number
+			issuedParentId: string
+	  }
 
 export type CardGatewayRewardPoolTask = {
 	cardAddress: string
@@ -30,6 +56,8 @@ export type CardGatewayRewardPoolTask = {
 	label: string
 	/** 仅 gateway 初始化 cumulative stat tokens，无需卡主 owner 签名。 */
 	initOnly?: boolean
+	/** 链上 tx 成功后写入 beamio_card_program_*（不做历史回填）。 */
+	socialDb?: CardProgramSocialDbMeta
 	res?: Response
 }
 
@@ -64,6 +92,43 @@ export function kickCardGatewayRewardPoolPress(): void {
 function scheduleCardGatewayRewardPoolPress(): void {
 	if (cardGatewayRewardPool.length === 0) return
 	setTimeout(() => kickCardGatewayRewardPoolPress(), 1000)
+}
+
+async function persistCardProgramSocialDbAfterTx(
+	cardAddress: string,
+	txHash: string,
+	meta: CardProgramSocialDbMeta | undefined,
+): Promise<void> {
+	if (!meta) return
+	if (meta.kind === 'like') {
+		await upsertCardProgramLike({
+			cardAddress,
+			userEOA: meta.userEOA,
+			targetKind: meta.targetKind,
+			issuedParentId: meta.issuedParentId,
+			txHash,
+		})
+		return
+	}
+	if (meta.kind === 'unlike') {
+		await removeCardProgramLike({
+			cardAddress,
+			userEOA: meta.userEOA,
+			targetKind: meta.targetKind,
+			issuedParentId: meta.issuedParentId,
+		})
+		return
+	}
+	if (meta.kind === 'shareClick') {
+		await insertCardProgramShareClick({
+			cardAddress,
+			actorEOA: meta.actorEOA,
+			referrerEOA: meta.referrerEOA ?? null,
+			targetKind: meta.targetKind,
+			issuedParentId: meta.issuedParentId,
+			txHash,
+		})
+	}
 }
 
 async function ensureCardUserCumulativeStatInitialized(params: {
@@ -185,6 +250,7 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 				return
 			}
 			logger(Colors.green(`[${obj.label}] ok (direct card) hash=${tx.hash} card=${obj.cardAddress}`))
+			await persistCardProgramSocialDbAfterTx(obj.cardAddress, tx.hash, obj.socialDb)
 			obj.res?.status(200).json({ success: true, hash: tx.hash }).end()
 			return
 		}
@@ -216,6 +282,7 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 			return
 		}
 		logger(Colors.green(`[${obj.label}] ok hash=${tx.hash} card=${obj.cardAddress}`))
+		await persistCardProgramSocialDbAfterTx(obj.cardAddress, tx.hash, obj.socialDb)
 		obj.res?.status(200).json({ success: true, hash: tx.hash }).end()
 	} catch (e: unknown) {
 		const err = e as { shortMessage?: string; message?: string }

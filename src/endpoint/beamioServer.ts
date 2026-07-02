@@ -15,6 +15,8 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
+import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
+import { readCardProgramSocialChainTotals } from '../cardProgramSocialStats'
 import {
 	cardBootstrapIssuedNftV2StatPreCheck,
 	cardConfigureEventRewardRulePreCheck,
@@ -7210,7 +7212,24 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			Colors.green(`server /api/cardDispatchEventReward13 preCheck OK → cardGatewayRewardPool`),
 			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
 		)
-		postLocalhost('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'dispatchEventReward13' }, res)
+		postLocalhost(
+			'/api/cardGatewayRewardPool',
+			{
+				...preCheck.preChecked,
+				label: 'dispatchEventReward13',
+				socialDb: {
+					kind: 'shareClick',
+					actorEOA: String(req.body?.actorWallet ?? ''),
+					referrerEOA:
+						req.body?.refWallet && ethers.isAddress(String(req.body.refWallet))
+							? ethers.getAddress(String(req.body.refWallet))
+							: null,
+					targetKind: Number(req.body?.cumulativeTargetKind ?? 1),
+					issuedParentId: String(req.body?.cumulativeIssuedParentId ?? '0'),
+				},
+			},
+			res,
+		)
 	})
 
 	/** Owner executeForOwner：recordUserCumulativeStat。 */
@@ -7284,7 +7303,16 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		)
 		postLocalhost(
 			'/api/cardGatewayRewardPool',
-			{ ...preCheck.preChecked, label: liked ? 'recordUserLike' : 'burnUserLike' },
+			{
+				...preCheck.preChecked,
+				label: liked ? 'recordUserLike' : 'burnUserLike',
+				socialDb: {
+					kind: liked ? 'like' : 'unlike',
+					userEOA: ethers.getAddress(String(req.body?.userEOA ?? '')),
+					targetKind,
+					issuedParentId: preCheck.preChecked.issuedParentId,
+				},
+			},
 			res,
 		)
 	})
@@ -9482,6 +9510,84 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		} catch (err: any) {
 			logger(Colors.red('[cardMemberTopups] error:'), err?.message ?? err)
 			return res.status(500).json({ error: 'Failed to fetch card member top-ups' })
+		}
+	})
+
+	/**
+	 * GET /api/cardProgramSocial?cardAddress=0x…&mode=summary|likes|shareClicks&limit=&offset=
+	 * summary：链上 totalSupply(19/21) 与 Discover 客户端一致；likes/shareClicks 仅返回 DB 自启用后记录（不做历史回填）。
+	 */
+	router.get('/cardProgramSocial', async (req, res) => {
+		const q = req.query as {
+			cardAddress?: string
+			mode?: string
+			limit?: string
+			offset?: string
+			targetKind?: string
+			issuedParentId?: string
+		}
+		const { cardAddress, mode, limit: limitQ, offset: offsetQ, targetKind: targetKindQ, issuedParentId: issuedParentIdQ } = q
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ error: 'Invalid cardAddress: require valid 0x address' })
+		}
+		const m = String(mode || 'summary').toLowerCase()
+		const parsedLimit = limitQ != null && String(limitQ).trim() !== '' ? Number(limitQ) : 20
+		const limit = Math.min(Math.max(Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : 20, 1), 2000)
+		const parsedOffset = offsetQ != null && String(offsetQ).trim() !== '' ? Number(offsetQ) : 0
+		const offset = Number.isFinite(parsedOffset) && parsedOffset > 0 ? Math.floor(parsedOffset) : 0
+		const targetKind = targetKindQ != null && String(targetKindQ).trim() !== '' ? Number(targetKindQ) : 1
+		const issuedParentId = String(issuedParentIdQ ?? '0')
+		const addrNorm = ethers.getAddress(cardAddress)
+		try {
+			if (m === 'likes') {
+				const { items, total } = await listCardProgramLikes(cardAddress, { limit, offset, targetKind, issuedParentId })
+				return res.status(200).json({
+					mode: 'likes',
+					cardAddress: addrNorm,
+					targetKind,
+					issuedParentId,
+					total,
+					limit,
+					offset,
+					likes: items,
+				})
+			}
+			if (m === 'shareclicks') {
+				const { items, total } = await listCardProgramShareClicks(cardAddress, { limit, offset, targetKind, issuedParentId })
+				return res.status(200).json({
+					mode: 'shareClicks',
+					cardAddress: addrNorm,
+					targetKind,
+					issuedParentId,
+					total,
+					limit,
+					offset,
+					shareClicks: items,
+				})
+			}
+			const chainTotals = await readCardProgramSocialChainTotals(cardAddress)
+			const [likesPage, sharePage] = await Promise.all([
+				listCardProgramLikes(cardAddress, { limit, offset, targetKind, issuedParentId }),
+				listCardProgramShareClicks(cardAddress, { limit, offset, targetKind, issuedParentId }),
+			])
+			return res.status(200).json({
+				mode: 'summary',
+				cardAddress: addrNorm,
+				targetKind,
+				issuedParentId,
+				likeCount: chainTotals.likeCount,
+				shareClickCount: chainTotals.shareClickCount,
+				dbLikeTotal: likesPage.total,
+				dbShareClickTotal: sharePage.total,
+				limit,
+				offset,
+				likes: likesPage.items,
+				shareClicks: sharePage.items,
+			})
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err)
+			logger(Colors.red('[cardProgramSocial] error:'), msg)
+			return res.status(500).json({ error: 'Failed to fetch card program social stats' })
 		}
 	})
 

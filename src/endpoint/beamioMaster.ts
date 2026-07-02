@@ -2548,12 +2548,13 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/cardGatewayRewardPool — Cluster 预检后转发；factory.gatewayInvokeCard 或 Plan A cardCallData 直调。 */
 		router.post('/cardGatewayRewardPool', async (req, res) => {
-			const { cardAddress, factoryCallData, cardCallData, label, initOnly } = req.body as {
+			const { cardAddress, factoryCallData, cardCallData, label, initOnly, socialDb } = req.body as {
 				cardAddress?: string
 				factoryCallData?: string
 				cardCallData?: string
 				label?: string
 				initOnly?: boolean
+				socialDb?: import('../userCumulativeStatRewardPoolMaster').CardProgramSocialDbMeta
 			}
 			if (!cardAddress || !ethers.isAddress(cardAddress)) {
 				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' }).end()
@@ -2573,6 +2574,7 @@ const routing = ( router: Router ) => {
 				...(hasFactory ? { factoryCallData } : {}),
 				...(hasCard ? { cardCallData } : {}),
 				...(initOnly ? { initOnly: true } : {}),
+				...(socialDb ? { socialDb } : {}),
 				label: taskLabel,
 				res,
 			})
