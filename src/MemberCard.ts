@@ -8938,6 +8938,67 @@ export async function relayUserCardFactoryCallViaEntryPoint(params: {
 	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, { gasLimit: params.gasLimit ?? 20_000_000n })
 }
 
+/** Plan A: relayer AA execute(card, 0, cardCalldata) — no Factory gatewayInvokeCard. */
+export async function relayUserCardCallViaEntryPoint(params: {
+	SC: SettleContractPoolEntry
+	chain: BeamioUserCardChainKey
+	cardAddress: string
+	cardCallData: string
+	logTag: string
+	gasLimit?: bigint
+}): Promise<ethers.ContractTransactionResponse> {
+	const cardAddress = ethers.getAddress(params.cardAddress)
+	const provider = providerForUserCardChain(params.chain)
+	let aaFactoryAddress = aaFactoryForUserCardChain(params.chain)
+	const factoryAddress = await getBeamioUserCardFactoryGateway(cardAddress)
+	try {
+		const onChainAaFactory = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, factoryAddress)
+		if (onChainAaFactory) aaFactoryAddress = ethers.getAddress(onChainAaFactory)
+	} catch (e: any) {
+		logger(Colors.yellow(`[${params.logTag}] could not read UserCardFactory._aaFactory(), using configured AA factory: ${e?.message ?? e}`))
+	}
+	const relayer = await ensureRelayerBeamioAccountForEntryPoint(params.SC, params.chain, params.logTag, aaFactoryAddress)
+	await ensureUserCardFactoryAllowsRelayerAA({
+		factoryAddress,
+		relayerAA: relayer.aaAccount,
+		wallet: relayer.wallet,
+		logTag: params.logTag,
+	})
+	const entryPoint = new ethers.Contract(relayer.entryPointAddress, EntryPointHandleOpsABI, relayer.provider)
+	const accountIface = new ethers.Interface(BeamioAccountExecuteABI)
+	const callData = accountIface.encodeFunctionData('execute', [cardAddress, 0n, params.cardCallData])
+	const nonce = (await entryPoint.getNonce(relayer.aaAccount, 0n)) as bigint
+	const fee = await relayer.provider.getFeeData()
+	const maxFeePerGas = fee.maxFeePerGas ?? 2_000_000_000n
+	const maxPriorityFeePerGas = fee.maxPriorityFeePerGas ?? 100_000_000n
+	const opForHash: AAtoEOAUserOp = {
+		sender: relayer.aaAccount,
+		nonce,
+		initCode: '0x',
+		callData,
+		accountGasLimits: packUserOpUints128(8_000_000n, 8_000_000n),
+		preVerificationGas: 300_000n,
+		gasFees: packUserOpUints128(maxPriorityFeePerGas, maxFeePerGas),
+		paymasterAndData: buildPaymasterAndDataV07(relayer.aaFactoryAddress),
+		signature: '0x',
+	}
+	const userOpHash = (await entryPoint.getUserOpHash(opForHash)) as string
+	const signature = await relayer.wallet.signMessage(ethers.getBytes(userOpHash))
+	const txOp = {
+		...opForHash,
+		nonce: asBigInt(opForHash.nonce, 0n),
+		preVerificationGas: asBigInt(opForHash.preVerificationGas, 0n),
+		signature: ethers.getBytes(signature),
+	}
+	const beneficiary = await relayer.wallet.getAddress()
+	logger(
+		Colors.cyan(
+			`[${params.logTag}] relay card direct via EntryPoint=${relayer.entryPointAddress} relayerAA=${relayer.aaAccount} card=${cardAddress} userOpNonce=${nonce.toString()}`
+		)
+	)
+	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, { gasLimit: params.gasLimit ?? 20_000_000n })
+}
+
 async function buildAAAccountCreationUserOpForHash(eoa: string): Promise<AAAccountCreationPrepareResult> {
 	const eoaNorm = ethers.getAddress(eoa)
 	const factoryAddr = ethers.getAddress(CONET_AA_FACTORY)

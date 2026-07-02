@@ -2569,6 +2569,31 @@ const routing = ( router: Router ) => {
 			logger(Colors.cyan(`[cardGatewayRewardPool] pushed to pool label=${taskLabel} card=${cardAddress}`))
 		})
 
+		/** POST /api/cardGatewayInitializeUserCumulativeStat — Cluster 预检后仅初始化 cumulative stat tokens（无 owner 签名）。 */
+		router.post('/cardGatewayInitializeUserCumulativeStat', async (req, res) => {
+			const { cardAddress, initOnly, label } = req.body as {
+				cardAddress?: string
+				initOnly?: boolean
+				label?: string
+			}
+			if (!cardAddress || !ethers.isAddress(cardAddress)) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' }).end()
+			}
+			const taskLabel =
+				typeof label === 'string' && label.trim() ? label.trim() : 'initializeCardUserCumulativeStat'
+			pushCardGatewayRewardPoolTask({
+				cardAddress: ethers.getAddress(cardAddress),
+				initOnly: initOnly !== false,
+				label: taskLabel,
+				res,
+			})
+			logger(
+				Colors.cyan(
+					`[cardGatewayInitializeUserCumulativeStat] pushed initOnly card=${cardAddress} label=${taskLabel}`,
+				),
+			)
+		})
+
 		router.post('/executeForOwner', async (req, res) => {
 			const {
 				cardAddress,

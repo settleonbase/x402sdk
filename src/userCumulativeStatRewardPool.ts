@@ -8,10 +8,9 @@ import {
 	hasCoNETUserCardBytecode,
 	providerForUserCardChain,
 	resolveUserCardChain,
+	type BeamioUserCardChainKey,
 } from './beamioUserCardChain'
 import { getBeamioUserCardFactoryGateway } from './MemberCard'
-
-export const ISSUED_NFT_START_ID_MEMBER = 100_000_000_000n
 
 export const USER_CUMULATIVE_STAT_IFACE = new ethers.Interface([
 	'function initializeCardUserCumulativeStatTokens()',
@@ -19,6 +18,7 @@ export const USER_CUMULATIVE_STAT_IFACE = new ethers.Interface([
 	'function cardUserCumulativeStatTokensInitialized() view returns (bool)',
 	'function recordUserCumulativeStat(address wallet, uint8 metricKind, uint8 targetKind, uint256 issuedParentId, uint256 delta)',
 	'function burnUserCumulativeStatByGateway(address wallet, uint8 metricKind, uint8 targetKind, uint256 issuedParentId, uint256 delta)',
+	'function applyUserLikeWithSignature(address userEOA, uint8 targetKind, uint256 issuedParentId, bool liked, uint256 deadline, bytes32 nonce, bytes userSignature)',
 	'function resolveUserCumulativeStatTokenId(uint8 metricKind, uint8 targetKind, uint256 issuedParentId) view returns (uint256 globalTokenId, uint256 scopedTokenId)',
 ])
 
@@ -45,8 +45,15 @@ export const RECORD_USER_CUMULATIVE_STAT_SELECTOR =
 export const BURN_USER_CUMULATIVE_STAT_SELECTOR =
 	USER_CUMULATIVE_STAT_IFACE.getFunction('burnUserCumulativeStatByGateway')?.selector ?? '0x00000000'
 
+/** Plan A: user EIP-712 like/unlike on card (no Factory gatewayInvokeCard). */
+export const APPLY_USER_LIKE_WITH_SIGNATURE_SELECTOR =
+	USER_CUMULATIVE_STAT_IFACE.getFunction('applyUserLikeWithSignature')?.selector ?? '0x4e5759fe'
+
 /** L1 merchant-card user-like scoped stat token (UserCumulativeStatLib.MERCHANT_CARD_LIKE_TOKEN_ID). */
 export const MERCHANT_CARD_USER_LIKE_SCOPED_TOKEN_ID = 19n
+
+/** Issued NFT series start (matches BeamioERC1155Logic.ISSUED_NFT_START_ID). */
+export const ISSUED_NFT_START_ID_MEMBER = 100_000_000_000n
 
 export const RECORD_USER_LIKE_EIP712_TYPE = {
 	RecordUserLike: [
@@ -173,6 +180,30 @@ export function buildBurnUserCumulativeStatCalldata(args: {
 	])
 }
 
+export function buildApplyUserLikeWithSignatureCalldata(args: {
+	userEOA: string
+	targetKind: number
+	issuedParentId: bigint | string | number
+	liked: boolean
+	deadline: number
+	nonce: string
+	userSignature: string
+}): string {
+	const nonceBytes32 =
+		args.nonce.length === 66 && args.nonce.startsWith('0x')
+			? (args.nonce as `0x${string}`)
+			: (ethers.keccak256(ethers.toUtf8Bytes(args.nonce)) as `0x${string}`)
+	return USER_CUMULATIVE_STAT_IFACE.encodeFunctionData('applyUserLikeWithSignature', [
+		ethers.getAddress(args.userEOA),
+		args.targetKind,
+		BigInt(args.issuedParentId),
+		args.liked,
+		BigInt(args.deadline),
+		nonceBytes32,
+		args.userSignature,
+	])
+}
+
 export function buildRecordTopupCumulativeStatCalldata(userEOA: string, points6: bigint | string | number): string {
 	return CHARGE_REWARD_V2_IFACE.encodeFunctionData('recordTopupCumulativeStat', [
 		ethers.getAddress(userEOA),
@@ -219,6 +250,52 @@ export function buildDispatchEventReward13Calldata(args: {
 const FACTORY_GATEWAY_IFACE = new ethers.Interface([
 	'function gatewayInvokeCard(address cardAddr, bytes data) returns (bytes)',
 ])
+
+const GATEWAY_INVOKE_CARD_SELECTOR =
+	FACTORY_GATEWAY_IFACE.getFunction('gatewayInvokeCard')?.selector ?? '0x0a76307f'
+
+async function factorySupportsGatewayInvokeCard(
+	factoryAddress: string,
+	chain: BeamioUserCardChainKey = 'conet',
+): Promise<boolean> {
+	if (chain !== 'conet') return false
+	try {
+		const provider = providerForUserCardChain(chain)
+		const code = await provider.getCode(factoryAddress)
+		if (!code || code === '0x') return false
+		return code.toLowerCase().includes(GATEWAY_INVOKE_CARD_SELECTOR.slice(2).toLowerCase())
+	} catch {
+		return false
+	}
+}
+
+/** Plan A: IssuedNft V2 module exposes applyUserLikeWithSignature (CoNET merchant cards). */
+export async function cardSupportsApplyUserLikeWithSignature(cardAddress: string): Promise<boolean> {
+	try {
+		const chain = await resolveUserCardChain(cardAddress)
+		if (chain !== 'conet') return false
+		const routeErr = await assertAdminStatsRoutesIssuedNftSelector(
+			cardAddress,
+			APPLY_USER_LIKE_WITH_SIGNATURE_SELECTOR,
+			'applyUserLikeWithSignature',
+		)
+		if (routeErr) return false
+		const provider = providerForUserCardChain(chain)
+		const gw = await getBeamioUserCardFactoryGateway(cardAddress)
+		const factory = new ethers.Contract(
+			gw,
+			['function defaultIssuedNftModule() view returns (address)'],
+			provider,
+		)
+		const issuedMod = (await factory.defaultIssuedNftModule()) as string
+		if (!issuedMod || issuedMod === ethers.ZeroAddress) return false
+		const code = await provider.getCode(issuedMod)
+		if (!code || code === '0x') return false
+		return code.toLowerCase().includes(APPLY_USER_LIKE_WITH_SIGNATURE_SELECTOR.slice(2).toLowerCase())
+	} catch {
+		return false
+	}
+}
 
 export function encodeGatewayInvokeCardFactoryCalldata(cardAddress: string, cardCalldata: string): string {
 	return FACTORY_GATEWAY_IFACE.encodeFunctionData('gatewayInvokeCard', [
@@ -691,6 +768,61 @@ async function gatewayRewardPoolBasePreCheck(
 	return { card, needsInit: !status.initialized }
 }
 
+export type CardGatewayInitializeForwardBody = {
+	cardAddress: string
+	initOnly: true
+	label: 'initializeCardUserCumulativeStat'
+}
+
+/** Cluster：gateway 代付 initializeCardUserCumulativeStatTokens（无需卡主 owner 签名）。 */
+export const cardGatewayInitializeUserCumulativeStatPreCheck = async (body: {
+	cardAddress?: string
+}): Promise<
+	| { success: true; preChecked: CardGatewayInitializeForwardBody }
+	| { success: false; error: string; alreadyInitialized?: boolean }
+> => {
+	if (!body.cardAddress || !ethers.isAddress(body.cardAddress)) {
+		return { success: false, error: 'Invalid cardAddress' }
+	}
+	try {
+		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
+		if ('error' in base) return { success: false, error: base.error }
+		if (!base.needsInit) {
+			return {
+				success: false,
+				error: 'cardUserCumulativeStatTokens already initialized (idempotent no-op on-chain)',
+				alreadyInitialized: true,
+			}
+		}
+		const initRouteErr = await assertAdminStatsRoutesIssuedNftSelector(
+			base.card,
+			INITIALIZE_CARD_USER_CUMUL_STAT_SELECTOR,
+			'initializeCardUserCumulativeStatTokens',
+		)
+		if (initRouteErr) return { success: false, error: initRouteErr }
+		const chain = await resolveUserCardChain(base.card)
+		const factory = await getBeamioUserCardFactoryGateway(base.card)
+		if (!(await factorySupportsGatewayInvokeCard(factory, chain))) {
+			return {
+				success: false,
+				error:
+					'Factory gatewayInvokeCard not deployed on-chain; upgrade CoNET UserCard factory before gateway initialize.',
+			}
+		}
+		return {
+			success: true,
+			preChecked: {
+				cardAddress: base.card,
+				initOnly: true,
+				label: 'initializeCardUserCumulativeStat',
+			},
+		}
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		return { success: false, error: err?.message ?? String(e) }
+	}
+}
+
 /** Cluster：gateway recordTopupCumulativeStat（Master gatewayInvokeCard 队列）。 */
 export const cardRecordTopupCumulativeStatPreCheck = async (body: {
 	cardAddress?: string
@@ -882,7 +1014,10 @@ export async function readUserLikeScopedTokenBalance(
 
 export type CardRecordUserLikeForwardBody = {
 	cardAddress: string
-	factoryCallData: string
+	/** Plan A: relayer EntryPoint → card.call (preferred on CoNET). */
+	cardCallData?: string
+	/** Legacy: factory.gatewayInvokeCard wrapper (only if factory bytecode includes selector). */
+	factoryCallData?: string
 	liked: boolean
 	targetKind: number
 	issuedParentId: string
@@ -933,12 +1068,11 @@ export const cardRecordUserLikePreCheck = async (body: {
 		const cardNorm = base.card
 
 		if (base.needsInit) {
-			const initRouteErr = await assertAdminStatsRoutesIssuedNftSelector(
-				cardNorm,
-				INITIALIZE_CARD_USER_CUMUL_STAT_SELECTOR,
-				'initializeCardUserCumulativeStatTokens',
-			)
-			if (initRouteErr) return { success: false, error: initRouteErr }
+			return {
+				success: false,
+				error:
+					'cardUserCumulativeStatTokens not initialized; merchant must call cardInitializeUserCumulativeStat first',
+			}
 		}
 
 		const domain = await eip712DomainForRecordUserLike(cardNorm)
@@ -965,6 +1099,29 @@ export const cardRecordUserLikePreCheck = async (body: {
 			return { success: false, error: 'User has not liked this target' }
 		}
 
+		const planASupported = await cardSupportsApplyUserLikeWithSignature(cardNorm)
+		if (planASupported) {
+			const cardCallData = buildApplyUserLikeWithSignatureCalldata({
+				userEOA: userNorm,
+				targetKind,
+				issuedParentId,
+				liked,
+				deadline: Number(deadline),
+				nonce,
+				userSignature,
+			})
+			return {
+				success: true,
+				preChecked: {
+					cardAddress: cardNorm,
+					cardCallData,
+					liked,
+					targetKind,
+					issuedParentId: String(issuedParentId),
+				},
+			}
+		}
+
 		const statArgs = {
 			wallet: userNorm,
 			metricKind: UC_METRIC.USER_LIKE,
@@ -972,7 +1129,7 @@ export const cardRecordUserLikePreCheck = async (body: {
 			issuedParentId,
 			delta: 1,
 		}
-		const cardCalldata = liked
+		const legacyCardCalldata = liked
 			? buildRecordUserCumulativeStatCalldata(statArgs)
 			: buildBurnUserCumulativeStatCalldata(statArgs)
 		const selector = liked ? RECORD_USER_CUMULATIVE_STAT_SELECTOR : BURN_USER_CUMULATIVE_STAT_SELECTOR
@@ -983,11 +1140,21 @@ export const cardRecordUserLikePreCheck = async (body: {
 		)
 		if (routeErr) return { success: false, error: routeErr }
 
+		const factoryGw = await getBeamioUserCardFactoryGateway(cardNorm)
+		const chain = await resolveUserCardChain(cardNorm)
+		if (!(await factorySupportsGatewayInvokeCard(factoryGw, chain))) {
+			return {
+				success: false,
+				error:
+					'CoNET card missing applyUserLikeWithSignature module; upgrade IssuedNft V2 + AdminStats V2 on CoNET Factory.',
+			}
+		}
+
 		return {
 			success: true,
 			preChecked: {
 				cardAddress: cardNorm,
-				factoryCallData: encodeGatewayInvokeCardFactoryCalldata(cardNorm, cardCalldata),
+				factoryCallData: encodeGatewayInvokeCardFactoryCalldata(cardNorm, legacyCardCalldata),
 				liked,
 				targetKind,
 				issuedParentId: String(issuedParentId),

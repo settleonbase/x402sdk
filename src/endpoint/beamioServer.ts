@@ -19,6 +19,7 @@ import {
 	cardBootstrapIssuedNftV2StatPreCheck,
 	cardConfigureEventRewardRulePreCheck,
 	cardDispatchEventReward13PreCheck,
+	cardGatewayInitializeUserCumulativeStatPreCheck,
 	cardInitializeUserCumulativeStatPreCheck,
 	cardPurchaseRewardProgramPreCheck,
 	cardRecordTopupCumulativeStatPreCheck,
@@ -7238,6 +7239,34 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
 		)
 		postLocalhost('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'recordTopupCumulativeStat' }, res)
+	})
+
+	/** Gateway-only：initializeCardUserCumulativeStatTokens（无需卡主签名；relayer 经 gatewayInvokeCard 代付）。 */
+	router.post('/cardGatewayInitializeUserCumulativeStat', async (req, res) => {
+		const preCheck = await cardGatewayInitializeUserCumulativeStatPreCheck(req.body)
+		if (!preCheck.success) {
+			if (preCheck.alreadyInitialized) {
+				return res
+					.status(200)
+					.json({
+						success: true,
+						skipped: true,
+						initialized: true,
+						reason: preCheck.error,
+					})
+					.end()
+			}
+			logger(
+				Colors.red(`server /api/cardGatewayInitializeUserCumulativeStat preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardGatewayInitializeUserCumulativeStat preCheck OK → cardGatewayRewardPool initOnly`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost('/api/cardGatewayInitializeUserCumulativeStat', preCheck.preChecked, res)
 	})
 
 	/** Gateway-only：用户 EIP-712 点赞 / 解除点赞（burn like stat token ≈ 转 0x0）。 */

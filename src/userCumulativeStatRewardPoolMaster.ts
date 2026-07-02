@@ -6,7 +6,7 @@ import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from './logger'
 import { resolveUserCardChain, providerForUserCardChain, type BeamioUserCardChainKey } from './beamioUserCardChain'
-import { getBeamioUserCardFactoryGateway, relayUserCardFactoryCallViaEntryPoint, Settle_ContractPool } from './MemberCard'
+import { getBeamioUserCardFactoryGateway, relayUserCardFactoryCallViaEntryPoint, relayUserCardCallViaEntryPoint, Settle_ContractPool } from './MemberCard'
 import {
 	CHARGE_REWARD_V2_IFACE,
 	buildInitializeCardUserCumulativeStatCalldata,
@@ -23,8 +23,13 @@ export const GATEWAY_INVOKE_CARD_SELECTOR =
 
 export type CardGatewayRewardPoolTask = {
 	cardAddress: string
-	factoryCallData: string
+	/** Legacy gatewayInvokeCard(factory, card, data). */
+	factoryCallData?: string
+	/** Plan A: direct card calldata via relayer AA execute(card, 0, data). */
+	cardCallData?: string
 	label: string
+	/** 仅 gateway 初始化 cumulative stat tokens，无需卡主 owner 签名。 */
+	initOnly?: boolean
 	res?: Response
 }
 
@@ -67,9 +72,9 @@ async function ensureCardUserCumulativeStatInitialized(params: {
 	factoryAddress: string
 	cardAddress: string
 	logTag: string
-}): Promise<{ ok: true } | { ok: false; error: string; hash?: string }> {
+}): Promise<{ ok: true; hash?: string; skipped?: boolean } | { ok: false; error: string; hash?: string }> {
 	const status = await readCardUserCumulativeStatStatus(params.cardAddress)
-	if (status.initialized) return { ok: true }
+	if (status.initialized) return { ok: true, skipped: true }
 	const initFactoryCallData = encodeGatewayInvokeCardFactoryCalldata(
 		params.cardAddress,
 		buildInitializeCardUserCumulativeStatCalldata(),
@@ -86,7 +91,7 @@ async function ensureCardUserCumulativeStatInitialized(params: {
 	if (!receipt || receipt.status !== 1) {
 		return { ok: false, error: 'initializeCardUserCumulativeStatTokens tx reverted', hash: tx.hash }
 	}
-	return { ok: true }
+	return { ok: true, hash: tx.hash }
 }
 
 export async function cardGatewayRewardPoolPress(): Promise<void> {
@@ -107,12 +112,45 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 			return
 		}
 		const factory = await getBeamioUserCardFactoryGateway(obj.cardAddress)
-		const supported = await factorySupportsGatewayInvokeCard(factory, chain)
-		if (!supported) {
-			const err =
-				'Factory gatewayInvokeCard not deployed on-chain; upgrade CoNET UserCard factory before gateway reward-pool writes.'
-			logger(Colors.red(`[${obj.label}] ${err}`))
-			obj.res?.status(503).json({ success: false, error: err, code: 'UC_FACTORY_GATEWAY_INVOKE_NOT_DEPLOYED' }).end()
+		const gatewaySupported = await factorySupportsGatewayInvokeCard(factory, chain)
+		const hasDirectCard = Boolean(obj.cardCallData && obj.cardCallData.length >= 10)
+		if (obj.initOnly) {
+			if (!gatewaySupported) {
+				const err =
+					'Factory gatewayInvokeCard not deployed on-chain; use cardInitializeUserCumulativeStat (executeForOwner) instead.'
+				logger(Colors.red(`[${obj.label}] ${err}`))
+				obj.res?.status(503).json({ success: false, error: err, code: 'UC_FACTORY_GATEWAY_INVOKE_NOT_DEPLOYED' }).end()
+				return
+			}
+			const initResult = await ensureCardUserCumulativeStatInitialized({
+				SC,
+				chain,
+				factoryAddress: factory,
+				cardAddress: obj.cardAddress,
+				logTag: obj.label,
+			})
+			if (!initResult.ok) {
+				logger(Colors.red(`[${obj.label}] ${initResult.error}`))
+				obj.res
+					?.status(500)
+					.json({ success: false, error: initResult.error, hash: initResult.hash })
+					.end()
+				return
+			}
+			logger(
+				Colors.green(
+					`[${obj.label}] ok card=${obj.cardAddress} skipped=${Boolean(initResult.skipped)} hash=${initResult.hash ?? 'n/a'}`,
+				),
+			)
+			obj.res
+				?.status(200)
+				.json({
+					success: true,
+					hash: initResult.hash,
+					skipped: Boolean(initResult.skipped),
+					initialized: true,
+				})
+				.end()
 			return
 		}
 		const initResult = await ensureCardUserCumulativeStatInitialized({
@@ -128,6 +166,39 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 				?.status(500)
 				.json({ success: false, error: initResult.error, hash: initResult.hash })
 				.end()
+			return
+		}
+		const useDirectCard = hasDirectCard && (!obj.factoryCallData || obj.factoryCallData.length < 10)
+		if (useDirectCard) {
+			const tx = await relayUserCardCallViaEntryPoint({
+				SC,
+				chain,
+				cardAddress: obj.cardAddress,
+				cardCallData: obj.cardCallData!,
+				logTag: obj.label,
+			})
+			const receipt = await tx.wait()
+			if (!receipt || receipt.status !== 1) {
+				const err = 'Direct card reward-pool tx reverted'
+				logger(Colors.red(`[${obj.label}] ${err} hash=${tx.hash}`))
+				obj.res?.status(500).json({ success: false, error: err, hash: tx.hash }).end()
+				return
+			}
+			logger(Colors.green(`[${obj.label}] ok (direct card) hash=${tx.hash} card=${obj.cardAddress}`))
+			obj.res?.status(200).json({ success: true, hash: tx.hash }).end()
+			return
+		}
+		if (!gatewaySupported) {
+			const err =
+				'CoNET card missing applyUserLikeWithSignature and Factory gatewayInvokeCard; upgrade IssuedNft V2 on CoNET Factory.'
+			logger(Colors.red(`[${obj.label}] ${err}`))
+			obj.res?.status(503).json({ success: false, error: err, code: 'UC_FACTORY_GATEWAY_INVOKE_NOT_DEPLOYED' }).end()
+			return
+		}
+		if (!obj.factoryCallData || obj.factoryCallData.length < 10) {
+			const err = 'Missing or invalid factoryCallData / cardCallData'
+			logger(Colors.red(`[${obj.label}] ${err}`))
+			obj.res?.status(400).json({ success: false, error: err }).end()
 			return
 		}
 		const tx = await relayUserCardFactoryCallViaEntryPoint({
