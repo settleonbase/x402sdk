@@ -971,6 +971,8 @@ export function verifyDiscoverShareClickAttestation(body: {
 export const cardRecordDiscoverShareClickPreCheck = async (body: {
 	cardAddress?: string
 	actorWallet?: string
+	/** Share-link referrer EOA — receives METRIC_REF_CLICK (not the clicker). */
+	refWallet?: string
 	cumulativeTargetKind?: number
 	cumulativeIssuedParentId?: string | number
 	clickAttestation?: string
@@ -989,6 +991,11 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 	const targetKind = Number(body.cumulativeTargetKind ?? UC_TARGET.MERCHANT_CARD_COUPON)
 	const issuedParentId = BigInt(body.cumulativeIssuedParentId ?? 0)
 	const actor = ethers.getAddress(body.actorWallet)
+	let refWallet: string | null = null
+	if (body.refWallet && ethers.isAddress(body.refWallet)) {
+		const ref = ethers.getAddress(body.refWallet)
+		if (ref !== actor) refWallet = ref
+	}
 	const userClickErr = validateMetricTargetCombo(UC_METRIC.USER_CLICK, targetKind, issuedParentId)
 	if (userClickErr) return { success: false, error: userClickErr }
 	const refClickErr = validateMetricTargetCombo(UC_METRIC.REF_CLICK, targetKind, issuedParentId)
@@ -1005,8 +1012,9 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 			issuedParentId,
 			delta: 1,
 		})
+		// REF_CLICK → referrer when present (BountyBoard referral detail); else actor so totalSupply(21) KPI still moves.
 		const refClickCalldata = buildRecordUserCumulativeStatCalldata({
-			wallet: actor,
+			wallet: refWallet ?? actor,
 			metricKind: UC_METRIC.REF_CLICK,
 			targetKind,
 			issuedParentId,
