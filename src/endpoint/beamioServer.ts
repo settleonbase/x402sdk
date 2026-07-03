@@ -16,7 +16,7 @@ import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPre
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
-import { readCardProgramSocialChainTotals } from '../cardProgramSocialStats'
+import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
 import {
 	cardBootstrapIssuedNftV2StatPreCheck,
 	cardConfigureEventRewardRulePreCheck,
@@ -9619,7 +9619,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				targetKind,
 				issuedParentId,
 				likeCount: chainTotals.likeCount,
-				shareClickCount: chainTotals.shareClickCount,
+				shareClickCount: resolveProgramSocialShareClickCount(chainTotals.shareClickCount, sharePage.total),
+				chainShareClickCount: chainTotals.shareClickCount,
 				dbLikeTotal: likesPage.total,
 				dbShareClickTotal: sharePage.total,
 				limit,

@@ -235,9 +235,10 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 				.end()
 			return
 		}
+		const hasExtraSteps = (obj.extraCardCallData?.length ?? 0) > 0
 		const useDirectCard =
 			hasDirectCard &&
-			(!gatewaySupported || !obj.factoryCallData || obj.factoryCallData.length < 10)
+			(hasExtraSteps || !gatewaySupported || !obj.factoryCallData || obj.factoryCallData.length < 10)
 		if (useDirectCard) {
 			const directSteps = [obj.cardCallData!, ...(obj.extraCardCallData ?? [])].filter(
 				(d) => typeof d === 'string' && d.length >= 10,

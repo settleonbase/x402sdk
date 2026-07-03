@@ -12,6 +12,20 @@ export type CardProgramSocialChainTotals = {
 	shareClickCount: number | null
 }
 
+/**
+ * Share-link KPI: chain totalSupply(21) is canonical for Discover RPC reads, but DB rows
+ * (`recorded going forward`) may lead when gateway relay skipped REF_CLICK (legacy bug).
+ */
+export function resolveProgramSocialShareClickCount(
+	chainCount: number | null,
+	dbTotal: number,
+): number | null {
+	const db = Math.max(0, Math.trunc(Number.isFinite(dbTotal) ? dbTotal : 0))
+	if (chainCount == null) return db > 0 ? db : null
+	const chain = Math.max(0, Math.trunc(chainCount))
+	return Math.max(chain, db)
+}
+
 async function readMerchantScopedTotalSupply(cardAddress: string, tokenId: bigint): Promise<number | null> {
 	try {
 		const card = ethers.getAddress(cardAddress)
