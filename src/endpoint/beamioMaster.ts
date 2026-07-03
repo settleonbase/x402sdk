@@ -2548,10 +2548,11 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/cardGatewayRewardPool — Cluster 预检后转发；factory.gatewayInvokeCard 或 Plan A cardCallData 直调。 */
 		router.post('/cardGatewayRewardPool', async (req, res) => {
-			const { cardAddress, factoryCallData, cardCallData, label, initOnly, socialDb } = req.body as {
+			const { cardAddress, factoryCallData, cardCallData, extraCardCallData, label, initOnly, socialDb } = req.body as {
 				cardAddress?: string
 				factoryCallData?: string
 				cardCallData?: string
+				extraCardCallData?: string[]
 				label?: string
 				initOnly?: boolean
 				socialDb?: import('../userCumulativeStatRewardPoolMaster').CardProgramSocialDbMeta
@@ -2569,10 +2570,14 @@ const routing = ( router: Router ) => {
 					.end()
 			}
 			const taskLabel = typeof label === 'string' && label.trim() ? label.trim() : 'cardGatewayRewardPool'
+			const extraSteps = Array.isArray(extraCardCallData)
+				? extraCardCallData.filter((d) => typeof d === 'string' && d.length >= 10)
+				: undefined
 			pushCardGatewayRewardPoolTask({
 				cardAddress: ethers.getAddress(cardAddress),
 				...(hasFactory ? { factoryCallData } : {}),
 				...(hasCard ? { cardCallData } : {}),
+				...(extraSteps && extraSteps.length > 0 ? { extraCardCallData: extraSteps } : {}),
 				...(initOnly ? { initOnly: true } : {}),
 				...(socialDb ? { socialDb } : {}),
 				label: taskLabel,

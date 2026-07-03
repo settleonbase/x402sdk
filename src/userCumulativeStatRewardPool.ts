@@ -756,7 +756,21 @@ export const cardRecordUserCumulativeStatPreCheck = async (body: {
 
 export type GatewayRewardPoolForwardBody = {
 	cardAddress: string
-	factoryCallData: string
+	/** Plan A：relayer AA EntryPoint → card.execute（CoNET 无 gatewayInvokeCard 时使用）。 */
+	cardCallData: string
+	/** Legacy：factory.gatewayInvokeCard（仅当 Factory bytecode 含 selector 时 Master 使用）。 */
+	factoryCallData?: string
+}
+
+export function buildGatewayRewardPoolForwardBody(
+	card: string,
+	cardCalldata: string,
+): GatewayRewardPoolForwardBody {
+	return {
+		cardAddress: card,
+		cardCallData: cardCalldata,
+		factoryCallData: encodeGatewayInvokeCardFactoryCalldata(card, cardCalldata),
+	}
 }
 
 async function gatewayRewardPoolBasePreCheck(
@@ -853,10 +867,7 @@ export const cardRecordTopupCumulativeStatPreCheck = async (body: {
 		if (routeErr) return { success: false, error: routeErr }
 		return {
 			success: true,
-			preChecked: {
-				cardAddress: base.card,
-				factoryCallData: encodeGatewayInvokeCardFactoryCalldata(base.card, cardCalldata),
-			},
+			preChecked: buildGatewayRewardPoolForwardBody(base.card, cardCalldata),
 		}
 	} catch (e: unknown) {
 		const err = e as { message?: string }
@@ -904,9 +915,114 @@ export const cardPurchaseRewardProgramPreCheck = async (body: {
 		if (routeErr) return { success: false, error: routeErr }
 		return {
 			success: true,
+			preChecked: buildGatewayRewardPoolForwardBody(base.card, cardCalldata),
+		}
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		return { success: false, error: err?.message ?? String(e) }
+	}
+}
+
+const DISCOVER_SHARE_CLICK_ATTESTATION_KIND = 'beamio_discover_share_click_v1'
+const DISCOVER_SHARE_CLICK_ATTESTATION_MAX_AGE_MS = 15 * 60 * 1000
+
+/** Verify homepage app-download share-click signMessage attestation. */
+export function verifyDiscoverShareClickAttestation(body: {
+	cardAddress: string
+	actorEOA: string
+	clickAttestation: string
+	attestationTs: number
+}): { ok: true } | { ok: false; error: string } {
+	let card: string
+	let actor: string
+	try {
+		card = ethers.getAddress(body.cardAddress)
+		actor = ethers.getAddress(body.actorEOA)
+	} catch {
+		return { ok: false, error: 'Invalid cardAddress or actorEOA' }
+	}
+	const sig = body.clickAttestation
+	if (!sig || typeof sig !== 'string' || !ethers.isHexString(sig)) {
+		return { ok: false, error: 'Invalid clickAttestation' }
+	}
+	const ts = Number(body.attestationTs)
+	if (!Number.isFinite(ts) || ts <= 0) return { ok: false, error: 'Invalid attestationTs' }
+	if (Math.abs(Date.now() - ts) > DISCOVER_SHARE_CLICK_ATTESTATION_MAX_AGE_MS) {
+		return { ok: false, error: 'clickAttestation expired' }
+	}
+	const payload = JSON.stringify({
+		kind: DISCOVER_SHARE_CLICK_ATTESTATION_KIND,
+		cardAddress: card,
+		actor,
+		ts,
+	})
+	try {
+		const recovered = ethers.verifyMessage(payload, sig)
+		if (ethers.getAddress(recovered) !== actor) {
+			return { ok: false, error: 'clickAttestation signer mismatch' }
+		}
+	} catch {
+		return { ok: false, error: 'clickAttestation verify failed' }
+	}
+	return { ok: true }
+}
+
+/** Cluster：Discover 分享链接打开计数（gateway recordUserCumulativeStat；无需 reward budget / active rule）。 */
+export const cardRecordDiscoverShareClickPreCheck = async (body: {
+	cardAddress?: string
+	actorWallet?: string
+	cumulativeTargetKind?: number
+	cumulativeIssuedParentId?: string | number
+	clickAttestation?: string
+	attestationTs?: number
+}): Promise<{ success: true; preChecked: GatewayRewardPoolForwardBody & { extraCardCallData: string[] } } | { success: false; error: string }> => {
+	if (!body.cardAddress || !ethers.isAddress(body.cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!body.actorWallet || !ethers.isAddress(body.actorWallet)) return { success: false, error: 'Invalid actorWallet' }
+	const attestation = verifyDiscoverShareClickAttestation({
+		cardAddress: body.cardAddress,
+		actorEOA: body.actorWallet,
+		clickAttestation: String(body.clickAttestation ?? ''),
+		attestationTs: Number(body.attestationTs ?? 0),
+	})
+	if (!attestation.ok) return { success: false, error: attestation.error }
+
+	const targetKind = Number(body.cumulativeTargetKind ?? UC_TARGET.MERCHANT_CARD_COUPON)
+	const issuedParentId = BigInt(body.cumulativeIssuedParentId ?? 0)
+	const actor = ethers.getAddress(body.actorWallet)
+	const userClickErr = validateMetricTargetCombo(UC_METRIC.USER_CLICK, targetKind, issuedParentId)
+	if (userClickErr) return { success: false, error: userClickErr }
+	const refClickErr = validateMetricTargetCombo(UC_METRIC.REF_CLICK, targetKind, issuedParentId)
+	if (refClickErr) return { success: false, error: refClickErr }
+
+	try {
+		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
+		if ('error' in base) return { success: false, error: base.error }
+		const card = base.card
+		const userClickCalldata = buildRecordUserCumulativeStatCalldata({
+			wallet: actor,
+			metricKind: UC_METRIC.USER_CLICK,
+			targetKind,
+			issuedParentId,
+			delta: 1,
+		})
+		const refClickCalldata = buildRecordUserCumulativeStatCalldata({
+			wallet: actor,
+			metricKind: UC_METRIC.REF_CLICK,
+			targetKind,
+			issuedParentId,
+			delta: 1,
+		})
+		const routeErr = await assertAdminStatsRoutesIssuedNftSelector(
+			card,
+			RECORD_USER_CUMULATIVE_STAT_SELECTOR,
+			'recordUserCumulativeStat',
+		)
+		if (routeErr) return { success: false, error: routeErr }
+		return {
+			success: true,
 			preChecked: {
-				cardAddress: base.card,
-				factoryCallData: encodeGatewayInvokeCardFactoryCalldata(base.card, cardCalldata),
+				...buildGatewayRewardPoolForwardBody(card, userClickCalldata),
+				extraCardCallData: [refClickCalldata],
 			},
 		}
 	} catch (e: unknown) {
@@ -951,10 +1067,7 @@ export const cardDispatchEventReward13PreCheck = async (body: {
 		if (routeErr) return { success: false, error: routeErr }
 		return {
 			success: true,
-			preChecked: {
-				cardAddress: base.card,
-				factoryCallData: encodeGatewayInvokeCardFactoryCalldata(base.card, cardCalldata),
-			},
+			preChecked: buildGatewayRewardPoolForwardBody(base.card, cardCalldata),
 		}
 	} catch (e: unknown) {
 		const err = e as { message?: string }

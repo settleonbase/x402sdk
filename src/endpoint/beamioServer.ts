@@ -24,6 +24,7 @@ import {
 	cardGatewayInitializeUserCumulativeStatPreCheck,
 	cardInitializeUserCumulativeStatPreCheck,
 	cardPurchaseRewardProgramPreCheck,
+	cardRecordDiscoverShareClickPreCheck,
 	cardRecordTopupCumulativeStatPreCheck,
 	cardRecordUserCumulativeStatPreCheck,
 	cardRecordUserLikePreCheck,
@@ -7212,11 +7213,53 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			Colors.green(`server /api/cardDispatchEventReward13 preCheck OK → cardGatewayRewardPool`),
 			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
 		)
+		const cumulativeDelta = BigInt(req.body?.cumulativeDelta ?? 0)
 		postLocalhost(
 			'/api/cardGatewayRewardPool',
 			{
 				...preCheck.preChecked,
 				label: 'dispatchEventReward13',
+				...(cumulativeDelta > 0n
+					? {
+							socialDb: {
+								kind: 'shareClick',
+								actorEOA: String(req.body?.actorWallet ?? ''),
+								referrerEOA:
+									req.body?.refWallet && ethers.isAddress(String(req.body.refWallet))
+										? ethers.getAddress(String(req.body.refWallet))
+										: null,
+								targetKind: Number(req.body?.cumulativeTargetKind ?? 1),
+								issuedParentId: String(req.body?.cumulativeIssuedParentId ?? '0'),
+							},
+						}
+					: {}),
+			},
+			res,
+		)
+	})
+
+	/** Gateway-only：Discover 分享链接打开计数（无需 reward budget / active rule）。 */
+	router.post('/cardRecordDiscoverShareClick', async (req, res) => {
+		const preCheck = await cardRecordDiscoverShareClickPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(
+				Colors.red(`server /api/cardRecordDiscoverShareClick preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardRecordDiscoverShareClick preCheck OK → cardGatewayRewardPool`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost(
+			'/api/cardGatewayRewardPool',
+			{
+				cardAddress: preCheck.preChecked.cardAddress,
+				cardCallData: preCheck.preChecked.cardCallData,
+				factoryCallData: preCheck.preChecked.factoryCallData,
+				extraCardCallData: preCheck.preChecked.extraCardCallData,
+				label: 'recordDiscoverShareClick',
 				socialDb: {
 					kind: 'shareClick',
 					actorEOA: String(req.body?.actorWallet ?? ''),

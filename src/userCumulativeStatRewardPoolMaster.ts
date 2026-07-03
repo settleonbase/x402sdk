@@ -53,6 +53,8 @@ export type CardGatewayRewardPoolTask = {
 	factoryCallData?: string
 	/** Plan A: direct card calldata via relayer AA execute(card, 0, data). */
 	cardCallData?: string
+	/** Optional follow-up direct card calls in the same worker (e.g. USER_CLICK then REF_CLICK). */
+	extraCardCallData?: string[]
 	label: string
 	/** 仅 gateway 初始化 cumulative stat tokens，无需卡主 owner 签名。 */
 	initOnly?: boolean
@@ -233,30 +235,40 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 				.end()
 			return
 		}
-		const useDirectCard = hasDirectCard && (!obj.factoryCallData || obj.factoryCallData.length < 10)
+		const useDirectCard =
+			hasDirectCard &&
+			(!gatewaySupported || !obj.factoryCallData || obj.factoryCallData.length < 10)
 		if (useDirectCard) {
-			const tx = await relayUserCardCallViaEntryPoint({
-				SC,
-				chain,
-				cardAddress: obj.cardAddress,
-				cardCallData: obj.cardCallData!,
-				logTag: obj.label,
-			})
-			const receipt = await tx.wait()
-			if (!receipt || receipt.status !== 1) {
-				const err = 'Direct card reward-pool tx reverted'
-				logger(Colors.red(`[${obj.label}] ${err} hash=${tx.hash}`))
-				obj.res?.status(500).json({ success: false, error: err, hash: tx.hash }).end()
-				return
+			const directSteps = [obj.cardCallData!, ...(obj.extraCardCallData ?? [])].filter(
+				(d) => typeof d === 'string' && d.length >= 10,
+			)
+			let lastHash = ''
+			for (let i = 0; i < directSteps.length; i++) {
+				const stepLabel = `${obj.label}:step${i + 1}`
+				const tx = await relayUserCardCallViaEntryPoint({
+					SC,
+					chain,
+					cardAddress: obj.cardAddress,
+					cardCallData: directSteps[i]!,
+					logTag: stepLabel,
+				})
+				const receipt = await tx.wait()
+				if (!receipt || receipt.status !== 1) {
+					const err = 'Direct card reward-pool tx reverted'
+					logger(Colors.red(`[${stepLabel}] ${err} hash=${tx.hash}`))
+					obj.res?.status(500).json({ success: false, error: err, hash: tx.hash }).end()
+					return
+				}
+				lastHash = tx.hash
 			}
-			logger(Colors.green(`[${obj.label}] ok (direct card) hash=${tx.hash} card=${obj.cardAddress}`))
-			await persistCardProgramSocialDbAfterTx(obj.cardAddress, tx.hash, obj.socialDb)
-			obj.res?.status(200).json({ success: true, hash: tx.hash }).end()
+			logger(Colors.green(`[${obj.label}] ok (direct card) hash=${lastHash} card=${obj.cardAddress}`))
+			await persistCardProgramSocialDbAfterTx(obj.cardAddress, lastHash, obj.socialDb)
+			obj.res?.status(200).json({ success: true, hash: lastHash }).end()
 			return
 		}
-		if (!gatewaySupported) {
+		if (!gatewaySupported && !hasDirectCard) {
 			const err =
-				'CoNET card missing applyUserLikeWithSignature and Factory gatewayInvokeCard; upgrade IssuedNft V2 on CoNET Factory.'
+				'CoNET Factory lacks gatewayInvokeCard and no direct cardCallData; upgrade ChargeRewardModuleV2 (paymaster relay) and ensure Cluster forwards cardCallData.'
 			logger(Colors.red(`[${obj.label}] ${err}`))
 			obj.res?.status(503).json({ success: false, error: err, code: 'UC_FACTORY_GATEWAY_INVOKE_NOT_DEPLOYED' }).end()
 			return
@@ -313,6 +325,7 @@ export function enqueueRecordTopupCumulativeStatGateway(params: {
 	const factoryCallData = encodeGatewayInvokeCardFactoryCalldata(card, cardCalldata)
 	pushCardGatewayRewardPoolTask({
 		cardAddress: card,
+		cardCallData: cardCalldata,
 		factoryCallData,
 		label: 'recordTopupCumulativeStat',
 	})
