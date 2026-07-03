@@ -1,0 +1,22 @@
+[Unit]
+Description=CoNET SilentPass download redirect (Guardian node picker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+Group=peter
+WorkingDirectory=/home/peter/x402sdk
+EnvironmentFile=-/etc/default/conet-silentpass-redirect
+Environment=NODE_ENV=production
+Environment=SILENTPASS_REDIRECT_PORT=14000
+ExecStart=/usr/bin/node dist/endpoint/silentpass.io.random.redirect.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=conet-silentpass-redirect
+
+[Install]
+WantedBy=multi-user.target
