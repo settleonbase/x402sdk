@@ -6,7 +6,7 @@ import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from './logger'
 import { resolveUserCardChain, providerForUserCardChain, type BeamioUserCardChainKey } from './beamioUserCardChain'
-import { getBeamioUserCardFactoryGateway, relayUserCardFactoryCallViaEntryPoint, relayUserCardCallViaEntryPoint, Settle_ContractPool } from './MemberCard'
+import { getBeamioUserCardFactoryGateway, relayUserCardFactoryCallViaEntryPoint, relayUserCardCallViaEntryPoint, Settle_ContractPool, chargeCardProgramSocialBunitFeeInBackground } from './MemberCard'
 import {
 	CHARGE_REWARD_V2_IFACE,
 	buildInitializeCardUserCumulativeStatCalldata,
@@ -161,6 +161,25 @@ async function ensureCardUserCumulativeStatInitialized(params: {
 	return { ok: true, hash: tx.hash }
 }
 
+function scheduleSocialBunitFeeAfterGatewaySuccess(
+	task: CardGatewayRewardPoolTask,
+	basePaymentHash: string,
+	baseGas: bigint,
+): void {
+	const kind = task.socialDb?.kind
+	if (kind !== 'like' && kind !== 'shareClick') return
+	void chargeCardProgramSocialBunitFeeInBackground({
+		cardAddress: task.cardAddress,
+		basePaymentHash,
+		kind,
+		baseGas,
+		logTag: `${task.label}:bunit`,
+	}).catch((e: unknown) => {
+		const err = e as { message?: string }
+		logger(Colors.yellow(`[${task.label}:bunit] unhandled: ${err?.message ?? String(e)}`))
+	})
+}
+
 export async function cardGatewayRewardPoolPress(): Promise<void> {
 	const obj = cardGatewayRewardPool.shift()
 	if (!obj) return
@@ -244,6 +263,7 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 				(d) => typeof d === 'string' && d.length >= 10,
 			)
 			let lastHash = ''
+			let lastGas = 0n
 			for (let i = 0; i < directSteps.length; i++) {
 				const stepLabel = `${obj.label}:step${i + 1}`
 				const tx = await relayUserCardCallViaEntryPoint({
@@ -261,10 +281,12 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 					return
 				}
 				lastHash = tx.hash
+				lastGas = receipt.gasUsed ?? 0n
 			}
 			logger(Colors.green(`[${obj.label}] ok (direct card) hash=${lastHash} card=${obj.cardAddress}`))
 			await persistCardProgramSocialDbAfterTx(obj.cardAddress, lastHash, obj.socialDb)
 			obj.res?.status(200).json({ success: true, hash: lastHash }).end()
+			scheduleSocialBunitFeeAfterGatewaySuccess(obj, lastHash, lastGas)
 			return
 		}
 		if (!gatewaySupported && !hasDirectCard) {
@@ -297,6 +319,7 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 		logger(Colors.green(`[${obj.label}] ok hash=${tx.hash} card=${obj.cardAddress}`))
 		await persistCardProgramSocialDbAfterTx(obj.cardAddress, tx.hash, obj.socialDb)
 		obj.res?.status(200).json({ success: true, hash: tx.hash }).end()
+		scheduleSocialBunitFeeAfterGatewaySuccess(obj, tx.hash, receipt.gasUsed ?? 0n)
 	} catch (e: unknown) {
 		const err = e as { shortMessage?: string; message?: string }
 		const msg = err?.shortMessage ?? err?.message ?? String(e)

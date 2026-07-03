@@ -1810,6 +1810,15 @@ function calcChargeFixedBUnitFee(): { bServiceUnits6: bigint; bServiceUSDC6: big
   return { bServiceUnits6, bServiceUSDC6 }
 }
 
+/** Discover 社交点赞 / 分享链接点击：商户卡 owner 每笔 0.1 B-Unit（6 位小数）。 */
+export const SOCIAL_ENGAGEMENT_BUNIT_FEE_UNITS6 = 100_000n
+
+export function calcSocialEngagementBUnitFee(): { bServiceUnits6: bigint; bServiceUSDC6: bigint } {
+	const bServiceUnits6 = SOCIAL_ENGAGEMENT_BUNIT_FEE_UNITS6
+	const bServiceUSDC6 = bServiceUnits6 / 100n
+	return { bServiceUnits6, bServiceUSDC6 }
+}
+
 /** CoNET B-Unit ERC20 风格余额合约（balanceOfAll），与 beamioServer /api/getBUnitBalance 一致 */
 
 /** Charge consumeFromUser revert 时拉取与 Cluster 预检同源的 getBUnitBalance，并附带代币 balanceOfAll 供对照 */
@@ -6642,6 +6651,14 @@ const TX_CATEGORY_POS_COUPON_BURN_BUNIT_SERVICE = ethers.keccak256(
 ) as `0x${string}`
 /** Indexer：Charge（open-container / container）B-Unit 服务费单独一条 */
 const TX_CATEGORY_CHARGE_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('charge:bunitService')) as `0x${string}`
+/** Indexer：Discover 社交点赞 B-Unit 服务费单独一条 */
+const TX_CATEGORY_SOCIAL_LIKE_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('socialLike:bunitService')
+) as `0x${string}`
+/** Indexer：Discover 分享链接点击 B-Unit 服务费单独一条 */
+const TX_CATEGORY_SOCIAL_SHARE_CLICK_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('socialShareClick:bunitService')
+) as `0x${string}`
 
 type SyncStandaloneBunitServiceFeeArgs = {
 	walletConet: ethers.Wallet
@@ -6846,6 +6863,41 @@ export function calcTopupFixedBUnitFee(): { feeUSDC6: bigint; feeBUnits6: bigint
 /** @deprecated 保留兼容调用签名；topup 已改为固定费，不再使用 USDC 名义金额 */
 export function calcTopupBUnitFeeFromUsdcNotional(_amountUSDC6: bigint): { feeUSDC6: bigint; feeBUnits6: bigint } {
 	return calcTopupFixedBUnitFee()
+}
+
+/** Cluster 预检：Discover 社交点赞 / 分享链接点击 — 卡 owner B-Unit ≥ 0.1。 */
+export const cardProgramSocialBunitFeePreCheck = async (
+	cardAddr: string
+): Promise<{ success: true; cardOwnerEOA: string; feeAmount: bigint } | { success: false; error: string }> => {
+	try {
+		const cardAddress = ethers.getAddress(cardAddr)
+		const cardAbi = ['function owner() view returns (address)']
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddress))
+		const card = new ethers.Contract(cardAddress, cardAbi, cardProvider)
+		const rawOwner = await card.owner()
+		const resolveResult = await resolveCardOwnerToEOA(cardProvider, rawOwner as string)
+		if (!resolveResult.success) {
+			return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA' }
+		}
+		const { bServiceUnits6: feeAmount } = calcSocialEngagementBUnitFee()
+		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddress)
+		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(resolveResult.cardOwner, feeAmount, {
+			aaFactoryAddress: aaFactoryAddr,
+		})
+		if (!picked.ok) {
+			return {
+				success: false,
+				error: `Insufficient B-Units for social engagement (${picked.error})`,
+			}
+		}
+		return { success: true, cardOwnerEOA: resolveResult.cardOwner, feeAmount }
+	} catch (e: unknown) {
+		const err = e as { message?: string; shortMessage?: string }
+		return {
+			success: false,
+			error: `Social engagement B-Unit fee check failed: ${err?.shortMessage ?? err?.message ?? String(e)}`,
+		}
+	}
 }
 
 /** Cluster 预检（mintPointsByAdmin / NFC 与 QR 同路径）：卡发行方 owner 的 B-Units 是否足够。
@@ -15827,6 +15879,98 @@ export const cardCreateRedeemPreCheck = async (body: {
 		}
 	} catch (e: any) {
 		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+export type CardProgramSocialBunitKind = 'like' | 'shareClick'
+
+/** Discover 点赞 / 分享点击：社交链上 tx 成功后后台扣 0.1 B-Unit + indexer（不阻塞 HTTP）。 */
+export async function chargeCardProgramSocialBunitFeeInBackground(args: {
+	cardAddress: string
+	basePaymentHash: string
+	kind: CardProgramSocialBunitKind
+	baseGas?: bigint
+	logTag: string
+}): Promise<void> {
+	let SC: SettleContractPoolEntry | undefined
+	try {
+		SC = await shiftSettleContractForWrite(args.logTag)
+		const cardAddrN = ethers.getAddress(args.cardAddress)
+		const baseHash = args.basePaymentHash
+		if (!baseHash || !ethers.isHexString(baseHash)) {
+			logger(Colors.yellow(`[${args.logTag}] skip social B-Unit: invalid basePaymentHash`))
+			return
+		}
+		const cardChain = await resolveUserCardChain(cardAddrN)
+		const cardProvider = providerForUserCardChain(cardChain)
+		const cardOwnerRead = new ethers.Contract(cardAddrN, ['function owner() view returns (address)'], cardProvider)
+		const rawOwner = await cardOwnerRead.owner()
+		const resolveResult = await resolveCardOwnerToEOA(cardProvider, rawOwner as string)
+		if (!resolveResult.success) {
+			logger(Colors.yellow(`[${args.logTag}] skip social B-Unit: ${resolveResult.error ?? 'owner resolve failed'}`))
+			return
+		}
+		const { bServiceUnits6 } = calcSocialEngagementBUnitFee()
+		const aaFac = await getCardAaFactoryAddress(cardAddrN)
+		const pickedFee = await pickBUnitFeeConsumerPreferEoaThenAa(resolveResult.cardOwner, bServiceUnits6, {
+			aaFactoryAddress: aaFac,
+		})
+		if (!pickedFee.ok) {
+			logger(Colors.yellow(`[${args.logTag}] skip social B-Unit: ${pickedFee.error}`))
+			return
+		}
+		const bunitWrite = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+			SC.walletConet
+		)
+		const consumeTx = await bunitWrite.consumeFromUser(
+			pickedFee.consumer,
+			bServiceUnits6,
+			baseHash as `0x${string}`,
+			args.baseGas ?? 0n,
+			1n,
+			{ gasLimit: 2_500_000 }
+		)
+		const consumeReceipt = await consumeTx.wait()
+		if (!consumeReceipt || Number(consumeReceipt.status) === 0) {
+			logger(Colors.yellow(`[${args.logTag}] social B-Unit consume reverted tx=${consumeTx.hash}`))
+			return
+		}
+		logger(
+			Colors.cyan(
+				`[${args.logTag}] social B-Unit debited kind=${args.kind} payer=${pickedFee.consumer} consumeTx=${consumeTx.hash} baseTx=${baseHash}`
+			)
+		)
+		const opChain = await fetchOperatorParentChain(cardAddrN, resolveResult.cardOwner)
+		const { topAdmin } = deriveTopAdminAndSubordinate(resolveResult.cardOwner, opChain)
+		const txCategory =
+			args.kind === 'like' ? TX_CATEGORY_SOCIAL_LIKE_BUNIT_SERVICE : TX_CATEGORY_SOCIAL_SHARE_CLICK_BUNIT_SERVICE
+		const title = args.kind === 'like' ? 'Social Like' : 'Social Share Click'
+		const source = args.kind === 'like' ? 'socialLike' : 'socialShareClick'
+		await syncStandaloneBunitServiceFeeToIndexer({
+			walletConet: SC.walletConet,
+			BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
+			consumeTxHash: consumeTx.hash,
+			basePaymentHash: baseHash,
+			cardAddress: cardAddrN,
+			feePayer: pickedFee.consumer,
+			bServiceUnits6,
+			txCategory,
+			title,
+			source,
+			operator: resolveResult.cardOwner,
+			operatorParentChain: opChain,
+			topAdmin,
+			subordinate: ethers.ZeroAddress,
+			extraDisplay: { socialKind: args.kind },
+			logLabel: args.logTag,
+		})
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		logger(Colors.yellow(`[${args.logTag}] background social B-Unit failed: ${err?.message ?? String(e)}`))
+	} finally {
+		if (SC) Settle_ContractPool.unshift(SC)
 	}
 }
 

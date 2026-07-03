@@ -10,7 +10,7 @@ import {
 	resolveUserCardChain,
 	type BeamioUserCardChainKey,
 } from './beamioUserCardChain'
-import { getBeamioUserCardFactoryGateway } from './MemberCard'
+import { getBeamioUserCardFactoryGateway, cardProgramSocialBunitFeePreCheck } from './MemberCard'
 
 export const USER_CUMULATIVE_STAT_IFACE = new ethers.Interface([
 	'function initializeCardUserCumulativeStatTokens()',
@@ -1018,6 +1018,10 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 			'recordUserCumulativeStat',
 		)
 		if (routeErr) return { success: false, error: routeErr }
+		const bunitCheck = await cardProgramSocialBunitFeePreCheck(card)
+		if (!bunitCheck.success) {
+			return { success: false, error: bunitCheck.error }
+		}
 		return {
 			success: true,
 			preChecked: {
@@ -1210,6 +1214,13 @@ export const cardRecordUserLikePreCheck = async (body: {
 		}
 		if (!liked && scopedBal <= 0n) {
 			return { success: false, error: 'User has not liked this target' }
+		}
+
+		if (liked) {
+			const bunitCheck = await cardProgramSocialBunitFeePreCheck(cardNorm)
+			if (!bunitCheck.success) {
+				return { success: false, error: bunitCheck.error }
+			}
 		}
 
 		const planASupported = await cardSupportsApplyUserLikeWithSignature(cardNorm)
