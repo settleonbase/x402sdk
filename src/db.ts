@@ -796,23 +796,24 @@ const nfcProfileNamesNeedClear = (firstName: string, lastName: string): boolean 
 const NFC_BEAMIO_PROFILE_FIRST_NAME = ''
 const NFC_BEAMIO_PROFILE_LAST_NAME = ''
 
-/** 与 Cluster `/addUser` 一致：beamioTag 仅允许 3–20 位字母数字与 _ . */
-const BEAMIO_ACCOUNT_NAME_RE = /^[a-zA-Z0-9_.]{3,20}$/
+/** 与 Cluster `/addUser` 一致：beamioTag 仅允许 3–26 位字母数字与 _ . */
+const BEAMIO_ACCOUNT_NAME_RE = /^[a-zA-Z0-9_.]{3,26}$/
+const BEAMIO_ACCOUNT_NAME_MAX_LEN = 26
 
 /**
  * NFC CashTree 基础设施卡发卡后的 beamioTag：语义为 CashTreeDamo-{NFT#}，链上/接口不允许 `-`，用 `_`。
- * 过长时缩短为 `CT_` + tokenId 尾部，仍超长则用 `c` + keccak 前 19 位 hex（总长 20）。
+ * 过长时缩短为 `CT_` + tokenId 尾部，仍超长则用 `c` + keccak hex（总长 ≤26）。
  */
 export const buildCashTreeNfcBeamioAccountName = (tierTokenId: string): string => {
 	const raw = String(tierTokenId || '').replace(/\s/g, '')
 	if (!raw || !/^\d+$/.test(raw)) return ''
 	let candidate = `CashTreeDamo_${raw}`
-	if (candidate.length <= 20 && BEAMIO_ACCOUNT_NAME_RE.test(candidate)) return candidate
-	const tail = raw.length > 14 ? raw.slice(-14) : raw
+	if (candidate.length <= BEAMIO_ACCOUNT_NAME_MAX_LEN && BEAMIO_ACCOUNT_NAME_RE.test(candidate)) return candidate
+	const tail = raw.length > 20 ? raw.slice(-20) : raw
 	candidate = `CT_${tail}`
-	if (candidate.length <= 20 && BEAMIO_ACCOUNT_NAME_RE.test(candidate)) return candidate
-	const h = ethers.keccak256(ethers.toUtf8Bytes(`nfcCashTree:${raw}`)).slice(2, 21)
-	return (`c${h}`).slice(0, 20)
+	if (candidate.length <= BEAMIO_ACCOUNT_NAME_MAX_LEN && BEAMIO_ACCOUNT_NAME_RE.test(candidate)) return candidate
+	const h = ethers.keccak256(ethers.toUtf8Bytes(`nfcCashTree:${raw}`)).slice(2, 27)
+	return (`c${h}`).slice(0, BEAMIO_ACCOUNT_NAME_MAX_LEN)
 }
 
 /** 根据 UID 查 NFC 卡 tag_id（SUN TagID），无则 null */
@@ -2751,7 +2752,7 @@ export const upsertNfcCardBeamioNfcNumberByTagId = async (tagIdHex: string, nfcN
 	}
 }
 
-/** NFC 自动 beamioTag：beamio_nfc_{N}（accountName 3–20，须链上未被他人占用） */
+/** NFC 自动 beamioTag：beamio_nfc_{N}（accountName 3–26，须链上未被他人占用） */
 export const buildBeamioNfcBeamioAccountName = (nfcNumber: number): string => {
 	const n = Math.floor(Number(nfcNumber))
 	if (!Number.isFinite(n) || n <= 0) return ''

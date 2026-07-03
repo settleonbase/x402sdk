@@ -6437,7 +6437,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 
 		const trimmed = accountName?.trim().replace('@','')
-		if (!trimmed || !/^[a-zA-Z0-9_\.]{3,20}$/.test(trimmed) || !ethers.isAddress(wallet) || wallet === ethers.ZeroAddress || !signMessage || signMessage?.trim() === '') {
+		if (!trimmed || !/^[a-zA-Z0-9_\.]{3,26}$/.test(trimmed) || !ethers.isAddress(wallet) || wallet === ethers.ZeroAddress || !signMessage || signMessage?.trim() === '') {
 			return res.status(400).json({ error: "Invalid data format" })
 		}
 
