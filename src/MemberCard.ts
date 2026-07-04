@@ -9381,8 +9381,8 @@ export const AAtoEOAProcess = async () => {
         : '0x' + (rawSig || '')
     const sigLen = hexBytesLen(sigHex)
 
-    if (sigLen !== 65) {
-      const errMsg = `Invalid signature length: expected 65 bytes, got ${sigLen} bytes`
+    if (sigLen < 65 || sigLen % 65 !== 0) {
+      const errMsg = `Invalid signature length: expected a positive multiple of 65 bytes, got ${sigLen} bytes`
       obj.res.status(400).json({ success: false, error: errMsg }).end()
       return
     }
@@ -9395,10 +9395,33 @@ export const AAtoEOAProcess = async () => {
       obj.res.status(400).json({ success: false, error: errMsg }).end()
       return
     }
-    if (sigBytes.length !== 65) {
-      const errMsg = `Signature decoded length is ${sigBytes.length}, expected 65`
+    if (sigBytes.length < 65 || sigBytes.length % 65 !== 0) {
+      const errMsg = `Signature decoded length is ${sigBytes.length}, expected multiple of 65`
       obj.res.status(400).json({ success: false, error: errMsg }).end()
       return
+    }
+
+    // Multisig: require at least `threshold` signatures on-chain (AA validateUserOp).
+    if (sigBytes.length > 65) {
+      try {
+        const aaRead = new ethers.Contract(
+          sender,
+          ['function threshold() view returns (uint256)'],
+          SC.walletBase.provider!
+        )
+        const thresholdBn = await aaRead.threshold!()
+        const threshold = Number(thresholdBn)
+        const minSigLen = 65 * (Number.isFinite(threshold) && threshold > 0 ? threshold : 1)
+        if (sigBytes.length < minSigLen) {
+          const errMsg = `Multisig signature too short: need at least ${threshold} signatures (${minSigLen} bytes), got ${sigBytes.length} bytes`
+          obj.res.status(400).json({ success: false, error: errMsg }).end()
+          return
+        }
+      } catch (e: any) {
+        const errMsg = `Multisig threshold read failed: ${e?.message ?? e}`
+        obj.res.status(400).json({ success: false, error: errMsg }).end()
+        return
+      }
     }
 
     logger(`[AAtoEOA] signature bytes length=${sigBytes.length} hexLen=${sigHex.length}`)
