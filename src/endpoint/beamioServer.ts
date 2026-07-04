@@ -2,6 +2,7 @@ import express, { Request, Response, Router} from 'express'
 import { GoogleGenAI } from '@google/genai'
 import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh, submitUsdcChargeSettleIndexer, resolveBeamioConetHttpRpcUrl, TX_CATEGORY_TERMINAL_RESET } from '../util'
 import { checkSmartAccount } from '../MemberCard'
+import { resolveAaUserOpRelayChainFromRequest } from '../aaTransferRelayChain'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
@@ -7982,6 +7983,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			chargeSessionId?: string
 			/** NFC USD-settled charge: oracle subtotal USDC6 for indexer main row (no CAD/USDC mix). */
 			chargeLedgerMainUsdc6?: string
+			/** Smart Wallet UserOp relay：以用户所选资产为主（如 cnet / base_usdc）。 */
+			transferAsset?: string
+			/** 显式 relay 链（transferAsset 未传时的备选，如 base）。 */
+			relayChain?: string
 		}
 		logger(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`)
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true))
@@ -8285,12 +8290,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			logger(Colors.red(`[AAtoEOA] server pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
-		const senderCheck = await AAtoEOAPreCheckSenderHasCode(packedUserOp!)
+		const relayResolved = resolveAaUserOpRelayChainFromRequest({
+			transferAsset: body.transferAsset,
+			relayChain: body.relayChain,
+		})
+		if (!relayResolved.ok) {
+			logger(Colors.red(`[AAtoEOA] server relay chain FAIL: ${relayResolved.error}`))
+			return res.status(400).json({ success: false, error: relayResolved.error }).end()
+		}
+		const senderCheck = await AAtoEOAPreCheckSenderHasCode(packedUserOp!, relayResolved.chain)
 		if (!senderCheck.success) {
 			logger(Colors.red(`[AAtoEOA] server sender pre-check FAIL: ${senderCheck.error}`))
 			return res.status(400).json({ success: false, error: senderCheck.error }).end()
 		}
-		const bunitCheck = await AAtoEOAPreCheckBUnitBalance(packedUserOp!)
+		const bunitCheck = await AAtoEOAPreCheckBUnitBalance(packedUserOp!, relayResolved.chain)
 		if (!bunitCheck.success) {
 			logger(Colors.red(`[AAtoEOA] server B-Unit balance pre-check FAIL: ${bunitCheck.error}`))
 			return res.status(400).json({ success: false, error: bunitCheck.error }).end()
@@ -8304,7 +8317,19 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			}
 		}
 		logger(Colors.green(`[AAtoEOA] server pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`))
-		postLocalhost('/api/AAtoEOA', { toEOA, amountUSDC6, packedUserOp, requestHash: body.requestHash, validDays: body.validDays }, res)
+		postLocalhost(
+			'/api/AAtoEOA',
+			{
+				toEOA,
+				amountUSDC6,
+				packedUserOp,
+				relayChain: relayResolved.chain,
+				...(relayResolved.transferAsset ? { transferAsset: relayResolved.transferAsset } : {}),
+				requestHash: body.requestHash,
+				validDays: body.validDays,
+			},
+			res
+		)
 	})
 
 	/** regiestChatRoute：集群预检格式，合格转发 master。master 使用 beamio_ContractPool 排队并发处理。*/

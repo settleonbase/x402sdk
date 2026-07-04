@@ -19,6 +19,7 @@ import {
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, submitAAAccountCreationViaEntryPoint, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, aaMultisigOfflineSubmitPool, kickAaMultisigOfflineSubmitProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY } from '../chainAddresses'
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
+import { resolveAaUserOpRelayChainFromRequest } from '../aaTransferRelayChain'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
 import { filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
@@ -2751,6 +2752,8 @@ const routing = ( router: Router ) => {
 				toEOA?: string
 				amountUSDC6?: string
 				packedUserOp?: AAtoEOAUserOp
+				transferAsset?: string
+				relayChain?: string
 				openContainerPayload?: OpenContainerRelayPayload
 				containerPayload?: ContainerRelayPayload
 				currency?: string | string[]
@@ -2928,10 +2931,15 @@ const routing = ( router: Router ) => {
 				return
 			}
 
-			const { toEOA, amountUSDC6, packedUserOp } = body
+			const { toEOA, amountUSDC6, packedUserOp, relayChain, transferAsset } = body
 			if (!ethers.isAddress(toEOA) || !amountUSDC6 || !packedUserOp?.sender || !packedUserOp?.callData || packedUserOp?.signature === undefined) {
 				logger(Colors.red(`[AAtoEOA] master validation FAIL: need toEOA, amountUSDC6, packedUserOp OR containerPayload OR openContainerPayload`))
 				return res.status(400).json({ success: false, error: 'Invalid data: need toEOA, amountUSDC6, packedUserOp OR containerPayload OR openContainerPayload' }).end()
+			}
+			const relayResolved = resolveAaUserOpRelayChainFromRequest({ transferAsset, relayChain })
+			if (!relayResolved.ok) {
+				logger(Colors.red(`[AAtoEOA] master relay chain FAIL: ${relayResolved.error}`))
+				return res.status(400).json({ success: false, error: relayResolved.error }).end()
 			}
 			const reqHashValid = body.requestHash && ethers.isHexString(body.requestHash) && ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined
 			const poolLenBefore = AAtoEOAPool.length
@@ -2939,6 +2947,8 @@ const routing = ( router: Router ) => {
 				toEOA: toEOA as string,
 				amountUSDC6,
 				packedUserOp: packedUserOp as AAtoEOAUserOp,
+				relayChain: relayResolved.chain,
+				...(relayResolved.transferAsset ? { transferAsset: relayResolved.transferAsset } : {}),
 				requestHash: reqHashValid,
 				res,
 			})

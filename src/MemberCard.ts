@@ -95,6 +95,10 @@ import {
 	settleRelayWalletForChain,
 	type BeamioUserCardChainKey,
 } from './beamioUserCardChain'
+import {
+	resolveAaUserOpRelayChainFromRequest,
+	type AaTransferAssetId,
+} from './aaTransferRelayChain'
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
 	return new Promise<T>((resolve, reject) => {
@@ -3526,6 +3530,9 @@ export const AAtoEOAPool: {
 	toEOA: string
 	amountUSDC6: string
 	packedUserOp: AAtoEOAUserOp
+	/** 客户端声明的 relay 链（由 transferAsset / relayChain 解析，禁止服务端猜链）。 */
+	relayChain: BeamioUserCardChainKey
+	transferAsset?: AaTransferAssetId
 	/** Bill 支付时 URL 的 requestHash（bytes32），供记账写入 originalPaymentHash 以关联 request_create */
 	requestHash?: string
 	res: Response
@@ -6423,11 +6430,18 @@ export const AAtoEOAPreCheck = (toEOA: string, amountUSDC6: string, packedUserOp
 	return { success: true }
 }
 
-/** Worker 预检：sender 必须有合约 code（拒绝 EOA），在转发到 master 前调用，避免 AA93。 */
-export const AAtoEOAPreCheckSenderHasCode = async (packedUserOp: AAtoEOAUserOp): Promise<{ success: boolean; error?: string }> => {
-	const code = await providerBaseBackup.getCode(packedUserOp.sender)
+/** Worker 预检：sender 在客户端声明的 relay 链上必须有合约 code。 */
+export const AAtoEOAPreCheckSenderHasCode = async (
+	packedUserOp: AAtoEOAUserOp,
+	relayChain: BeamioUserCardChainKey
+): Promise<{ success: boolean; error?: string }> => {
+	const provider = providerForUserCardChain(relayChain)
+	const code = await provider.getCode(packedUserOp.sender)
 	if (!code || code === '0x' || code.length <= 2) {
-		return { success: false, error: 'Invalid sender: must be the Smart Account contract (with code), not the EOA. Use primaryAccountOf(owner) as sender.' }
+		return {
+			success: false,
+			error: `Invalid sender: Smart Account has no bytecode on ${relayChain} (declared relay chain). Check transferAsset / relayChain matches where the AA was deployed.`,
+		}
 	}
 	return { success: true }
 }
@@ -7219,13 +7233,17 @@ export const transferPreCheckBUnit = async (opts: { account?: string; aaAddress?
 }
 
 /** Cluster 预检：AAtoEOA 手续费优先查 AA owner 的 EOA；不足再查 AA（sender）上的 B-Unit。Master 再次用同一规则选扣款地址。 */
-export const AAtoEOAPreCheckBUnitBalance = async (packedUserOp: AAtoEOAUserOp): Promise<{ success: boolean; error?: string }> => {
+export const AAtoEOAPreCheckBUnitBalance = async (
+	packedUserOp: AAtoEOAUserOp,
+	relayChain: BeamioUserCardChainKey
+): Promise<{ success: boolean; error?: string }> => {
 	const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
 	try {
+		const provider = providerForUserCardChain(relayChain)
 		const aaRead = new ethers.Contract(
 			packedUserOp.sender,
 			['function owner() view returns (address)'],
-			providerBaseBackup
+			provider
 		)
 		const aaOwner = await aaRead.owner()
 		if (!aaOwner || aaOwner === ethers.ZeroAddress) {
@@ -9437,6 +9455,20 @@ function parsePaymasterFromPnd(pnd: string): string | null {
   }
 }
 
+/** Smart Wallet AA 可能只在 CoNET 或 Base 一侧有 bytecode（CREATE2 同址工厂）。仅用于对照，不用于选链。 */
+async function aaHasBytecodeOnChain(sender: string, chain: BeamioUserCardChainKey): Promise<boolean> {
+	const addr = ethers.getAddress(sender)
+	const provider = providerForUserCardChain(chain)
+	try {
+		const code = await provider.getCode(addr)
+		return !!(code && code !== '0x' && code.length > 2)
+	} catch {
+		return false
+	}
+}
+
+export { resolveAaUserOpRelayChainFromRequest } from './aaTransferRelayChain'
+
 export const AAtoEOAProcess = async () => {
   const obj = AAtoEOAPool.shift()
   if (!obj) return
@@ -9513,13 +9545,22 @@ export const AAtoEOAProcess = async () => {
       return
     }
 
+    logger(`[AAtoEOA] signature bytes length=${sigBytes.length} hexLen=${sigHex.length}`)
+
+    const relayChain = obj.relayChain
+    const relayProvider = providerForUserCardChain(relayChain)
+    const relayWallet = settleRelayWalletForChain(SC, relayChain)
+    logger(
+      `[AAtoEOA] relayChain=${relayChain} transferAsset=${obj.transferAsset ?? 'n/a'} sender=${sender}`
+    )
+
     // Multisig: require at least `threshold` signatures on-chain (AA validateUserOp).
     if (sigBytes.length > 65) {
       try {
         const aaRead = new ethers.Contract(
           sender,
           ['function threshold() view returns (uint256)'],
-          SC.walletBase.provider!
+          relayProvider
         )
         const thresholdBn = await aaRead.threshold!()
         const threshold = Number(thresholdBn)
@@ -9536,20 +9577,30 @@ export const AAtoEOAProcess = async () => {
       }
     }
 
-    logger(`[AAtoEOA] signature bytes length=${sigBytes.length} hexLen=${sigHex.length}`)
-
-    // --- sender must be contract ---
-    const senderCode = await SC.walletBase.provider!.getCode(sender)
+    // --- sender must be contract on declared relay chain ---
+    const senderCode = await relayProvider.getCode(sender)
     if (!senderCode || senderCode === '0x' || senderCode.length <= 2) {
-      const errMsg = `Invalid sender: ${sender} has no contract code`
+      const errMsg = `Invalid sender: ${sender} has no contract code on declared relay chain ${relayChain}`
       obj.res.status(400).json({ success: false, error: errMsg }).end()
       return
     }
+    const onOtherChain =
+      relayChain === 'conet'
+        ? await aaHasBytecodeOnChain(sender, 'base')
+        : await aaHasBytecodeOnChain(sender, 'conet')
+    if (onOtherChain) {
+      logger(
+        Colors.yellow(
+          `[AAtoEOA] sender also has bytecode on the other chain; using declared relayChain=${relayChain} transferAsset=${obj.transferAsset ?? 'n/a'}`
+        )
+      )
+    }
 
-	
+    const pmFromOp = parsePaymasterFromPnd(op.paymasterAndData ?? '0x') ?? ethers.getAddress(CONET_AA_FACTORY)
+    const aaFactoryRead = new ethers.Contract(pmFromOp, BeamioAAAccountFactoryPaymasterABI, relayProvider)
 
     // --- entryPoint ---
-    const entryPointAddress = await SC.aaAccountFactoryPaymaster.ENTRY_POINT()
+    const entryPointAddress = ethers.getAddress((await aaFactoryRead.ENTRY_POINT()) as string)
     logger(`[AAtoEOA] ENTRY_POINT address: ${entryPointAddress}`)
     if (!entryPointAddress || entryPointAddress === ethers.ZeroAddress) {
       const errMsg = 'ENTRY_POINT not configured'
@@ -9560,13 +9611,13 @@ export const AAtoEOAProcess = async () => {
     const entryPoint = new ethers.Contract(
       entryPointAddress,
       EntryPointHandleOpsABI,
-      SC.walletBase
+      relayWallet
     )
 
     const entryPointRead = new ethers.Contract(
       entryPointAddress,
       ['function balanceOf(address account) view returns (uint256)'],
-      SC.walletBase.provider!
+      relayProvider
     )
 
     // --- gas sanity checks (VERY IMPORTANT) ---
@@ -9609,7 +9660,7 @@ export const AAtoEOAProcess = async () => {
       const pmc = new ethers.Contract(
         pm,
         ['function isBeamioAccount(address) view returns (bool)'],
-        SC.walletBase.provider!
+        relayProvider
       )
       const okSender = await safeCall(() => pmc.isBeamioAccount(sender) as Promise<boolean>)
       if (okSender === false) {
@@ -9668,7 +9719,7 @@ export const AAtoEOAProcess = async () => {
       const aaRead = new ethers.Contract(
         sender,
         ['function owner() view returns (address)', 'function factory() view returns (address)'],
-        SC.walletBase.provider!
+        relayProvider
       )
       aaOwner = await aaRead.owner()
       aaFactory = await aaRead.factory()
@@ -9716,9 +9767,9 @@ export const AAtoEOAProcess = async () => {
     const feePayer = bunitPick.consumer
 
 	 // --- submit ---
-	 const beneficiary = await SC.walletBase.getAddress()
+	 const beneficiary = await relayWallet.getAddress()
 	 logger(
-	   `[AAtoEOA] calling handleOps sender=${sender} beneficiary=${beneficiary} callDataBytes=${hexBytesLen(callData)} sigLen=${sigBytes.length}`
+	   `[AAtoEOA] calling ${relayChain === 'conet' ? 'relayHandleOps' : 'handleOps'} sender=${sender} beneficiary=${beneficiary} callDataBytes=${hexBytesLen(callData)} sigLen=${sigBytes.length} chain=${relayChain}`
 	 )
  
 
@@ -9729,7 +9780,7 @@ export const AAtoEOAProcess = async () => {
       ])
       const data = simIface.encodeFunctionData('simulateValidation', [packedOp])
 
-      await SC.walletBase.provider!.call({ to: entryPointAddress, data })
+      await relayProvider.call({ to: entryPointAddress, data })
       logger('[AAtoEOA] simulateValidation eth_call ok')
     } catch (e: any) {
       const m = e?.shortMessage || e?.message || String(e)
@@ -9742,12 +9793,19 @@ export const AAtoEOAProcess = async () => {
 
     // --- deposit/eth snapshot ---
     const deposit = await entryPointRead.balanceOf(sender)
-    const aaETH = await SC.walletBase.provider!.getBalance(sender)
-    logger(`[AAtoEOA] entryPointDeposit=${deposit.toString()} aaETH=${aaETH.toString()}`)
+    const aaETH = await relayProvider.getBalance(sender)
+    logger(`[AAtoEOA] entryPointDeposit=${deposit.toString()} aaETH=${aaETH.toString()} chain=${relayChain}`)
 
-   
-    const tx = await entryPoint.handleOps([packedOp], beneficiary)
-    logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
+    let tx: ethers.ContractTransactionResponse
+    if (relayChain === 'conet') {
+      const relayFactory = new ethers.Contract(pmFromOp, BeamioAAAccountFactoryPaymasterABI, relayWallet)
+      const txOp = { ...packedOp, signature: sigBytes }
+      tx = await relayFactory.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+      logger(`[AAtoEOA] CoNET relayHandleOps tx submitted hash=${tx.hash}`)
+    } else {
+      tx = await entryPoint.handleOps([packedOp], beneficiary)
+      logger(`[AAtoEOA] handleOps tx submitted hash=${tx.hash}`)
+    }
     const receipt = await tx.wait()
     if (!receipt) {
       throw new Error('handleOps tx.wait() returned null')
