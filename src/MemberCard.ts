@@ -6659,6 +6659,118 @@ const TX_CATEGORY_SOCIAL_LIKE_BUNIT_SERVICE = ethers.keccak256(
 const TX_CATEGORY_SOCIAL_SHARE_CLICK_BUNIT_SERVICE = ethers.keccak256(
 	ethers.toUtf8Bytes('socialShareClick:bunitService')
 ) as `0x${string}`
+/** Indexer：AA Smart Wallet 离线签字提交 B-Unit 服务费（无主业务主行） */
+const TX_CATEGORY_AA_MULTISIG_OFFLINE_SUBMIT_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('aaMultisigOfflineSubmit:bunitService')
+) as `0x${string}`
+
+/** 进程内 dedupe：同一 sign 包不重复扣 0.1 B-Unit。 */
+const aaMultisigOfflineSubmitDedupeKeys = new Set<string>()
+
+export type AaMultisigOfflineSubmitPoolItem = {
+	inner: import('./aaMultisigOfflineSubmit').AaMultisigOfflineSubmitInner
+	submitterEoa: string
+	feePayer: string
+	feeAmount: bigint
+	dedupeKey: string
+	res?: Response
+}
+
+export const aaMultisigOfflineSubmitPool: AaMultisigOfflineSubmitPoolItem[] = []
+
+export function kickAaMultisigOfflineSubmitProcess(): void {
+	aaMultisigOfflineSubmitProcess().catch((err: unknown) => {
+		const e = err as { message?: string }
+		logger(Colors.red(`[aaMultisigOfflineSubmitProcess] unhandled: ${e?.message ?? String(err)}`))
+	})
+}
+
+export const aaMultisigOfflineSubmitProcess = async () => {
+	const obj = aaMultisigOfflineSubmitPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		aaMultisigOfflineSubmitPool.unshift(obj)
+		return setTimeout(() => kickAaMultisigOfflineSubmitProcess(), 3000)
+	}
+	const respond = (status: number, body: Record<string, unknown>) => {
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(status).json(body).end()
+		}
+	}
+	try {
+		if (aaMultisigOfflineSubmitDedupeKeys.has(obj.dedupeKey)) {
+			respond(200, { success: true, alreadySubmitted: true })
+			return
+		}
+		const { AA_MULTISIG_OFFLINE_SUBMIT_BUNIT_UNITS6 } = await import('./aaMultisigOfflineSubmit.js')
+		const feeAmount = obj.feeAmount > 0n ? obj.feeAmount : AA_MULTISIG_OFFLINE_SUBMIT_BUNIT_UNITS6
+		const basePaymentHash = obj.inner.userOpHash ?? ethers.ZeroHash
+		const bunitWrite = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+			SC.walletConet
+		)
+		const consumeTx = await bunitWrite.consumeFromUser(
+			obj.feePayer,
+			feeAmount,
+			basePaymentHash as `0x${string}`,
+			0n,
+			1n,
+			{ gasLimit: 2_500_000 }
+		)
+		const consumeReceipt = await consumeTx.wait()
+		if (!consumeReceipt || Number(consumeReceipt.status) === 0) {
+			respond(500, { success: false, error: 'B-Unit consume reverted' })
+			return
+		}
+		aaMultisigOfflineSubmitDedupeKeys.add(obj.dedupeKey)
+		logger(
+			Colors.cyan(
+				`[aaMultisigOfflineSubmit] B-Unit debited payer=${obj.feePayer} consumeTx=${consumeTx.hash} task=${obj.inner.taskId} aa=${obj.inner.aaAccount}`
+			)
+		)
+		await syncStandaloneBunitServiceFeeToIndexer({
+			walletConet: SC.walletConet,
+			BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
+			consumeTxHash: consumeTx.hash,
+			basePaymentHash,
+			cardAddress: obj.inner.aaAccount,
+			feePayer: obj.feePayer,
+			bServiceUnits6: feeAmount,
+			txCategory: TX_CATEGORY_AA_MULTISIG_OFFLINE_SUBMIT_BUNIT_SERVICE,
+			title: 'AA Multisig Offline Sign',
+			source: 'aaMultisigOfflineSubmit',
+			operator: obj.submitterEoa,
+			operatorParentChain: [],
+			topAdmin: ethers.ZeroAddress,
+			subordinate: ethers.ZeroAddress,
+			extraDisplay: {
+				taskId: obj.inner.taskId,
+				aaAccount: obj.inner.aaAccount,
+				signerEoa: obj.inner.signerEoa,
+				userOpHash: obj.inner.userOpHash,
+				sendId: obj.inner.sendId,
+			},
+			logLabel: 'aaMultisigOfflineSubmit',
+		})
+		respond(200, {
+			success: true,
+			consumeTxHash: consumeTx.hash,
+			taskId: obj.inner.taskId,
+			bUnits: Number(feeAmount) / 1e6,
+		})
+	} catch (e: unknown) {
+		const err = e as { message?: string; shortMessage?: string }
+		logger(Colors.yellow(`[aaMultisigOfflineSubmit] failed: ${err?.shortMessage ?? err?.message ?? String(e)}`))
+		respond(500, { success: false, error: err?.shortMessage ?? err?.message ?? String(e) })
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		if (aaMultisigOfflineSubmitPool.length > 0) {
+			setTimeout(() => kickAaMultisigOfflineSubmitProcess(), 1000)
+		}
+	}
+}
 
 type SyncStandaloneBunitServiceFeeArgs = {
 	walletConet: ethers.Wallet

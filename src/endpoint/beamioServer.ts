@@ -12,11 +12,13 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
+import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
+import { aaMultisigOfflineSubmitPreCheck } from '../aaMultisigOfflineSubmit'
 import {
 	cardBootstrapIssuedNftV2StatPreCheck,
 	cardConfigureEventRewardRulePreCheck,
@@ -609,6 +611,11 @@ const GET_BALANCE_CACHE_TTL_MS = 30 * 1000
 const getBalanceCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
 const GET_BUNIT_CACHE_TTL_MS = 30 * 1000
 const getBUnitBalanceCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
+const BASE_AA_SMART_WALLET_BALANCES_CACHE_TTL_MS = 30 * 1000
+const baseAaSmartWalletBalancesCache = new Map<
+	string,
+	{ body: string; statusCode: number; expiry: number }
+>()
 const getBUnitLedgerCache = new Map<string, { body: string; statusCode: number; expiry: number }>()
 
 /** 通用查询缓存：30 秒协议 */
@@ -7275,6 +7282,21 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		)
 	})
 
+	/** AA Smart Wallet 离线签字提交：Cluster 预检 sign 包 + B-Unit ≥ 0.1 → Master 扣款 + indexer。 */
+	router.post('/aaMultisigOfflineSubmit', async (req, res) => {
+		const preCheck = await aaMultisigOfflineSubmitPreCheck(req.body as { inner?: unknown; submitterEoa?: string })
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/aaMultisigOfflineSubmit preCheck FAIL: ${preCheck.error}`))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(
+				`server /api/aaMultisigOfflineSubmit preCheck OK task=${preCheck.preChecked.inner.taskId} signer=${preCheck.preChecked.submitterEoa}`
+			)
+		)
+		postLocalhost('/api/aaMultisigOfflineSubmit', preCheck.preChecked, res)
+	})
+
 	/** Owner executeForOwner：recordUserCumulativeStat。 */
 	router.post('/cardRecordUserCumulativeStat', async (req, res) => {
 		const preCheck = await cardRecordUserCumulativeStatPreCheck(req.body)
@@ -9295,6 +9317,36 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		} catch (e: any) {
 			logger(Colors.red('[getBUnitBalance] error:'), e?.message ?? e)
 			res.status(502).json({ error: e?.message ?? 'Failed to fetch B-Unit balance' })
+		}
+	})
+
+	/**
+	 * GET /api/baseAaSmartWalletBalances?address=0x...
+	 * Base Smart Wallet (AA) must have code; then CDP aggregates token balances (ETH, USDC).
+	 */
+	router.get('/baseAaSmartWalletBalances', async (req, res) => {
+		const { address } = req.query as { address?: string }
+		if (!address || !ethers.isAddress(address)) {
+			return res.status(400).json({ ok: false, error: 'Invalid address: require valid 0x address' })
+		}
+		const cacheKey = ethers.getAddress(address).toLowerCase()
+		const cached = baseAaSmartWalletBalancesCache.get(cacheKey)
+		if (cached && Date.now() < cached.expiry) {
+			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
+		}
+		try {
+			const result = await fetchBaseAaSmartWalletBalancesViaCdp(address, providerBase)
+			const payload = { ok: true as const, ...result }
+			const body = JSON.stringify(payload)
+			baseAaSmartWalletBalancesCache.set(cacheKey, {
+				body,
+				statusCode: 200,
+				expiry: Date.now() + BASE_AA_SMART_WALLET_BALANCES_CACHE_TTL_MS,
+			})
+			res.status(200).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[baseAaSmartWalletBalances] error:'), e?.message ?? e)
+			res.status(502).json({ ok: false, error: e?.message ?? 'Failed to fetch Base AA balances via CDP' })
 		}
 	})
 
