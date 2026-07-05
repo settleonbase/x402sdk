@@ -20,6 +20,8 @@ import {
 	seriesMetadataLooksLikeProduction,
 } from './couponMetadataCategory'
 import { isApiExcludedUserCard } from './apiExcludedUserCards'
+import { resolveBeamioWalletIdentityFromAddress } from './beamioWalletIdentity'
+import { resolveBeamioAaOnConet } from './endpoint/resolveBeamioAaViaUserCardFactory'
 
 /**
  * 
@@ -4812,29 +4814,89 @@ export const getMintMetadataForOwner = async (
 	}
 }
 
-/** Base 上：EOA 返回自身小写；合约则必须能解析出非零 owner()，否则 null（search 返回空）。getCode 失败时按 EOA 处理以免 RPC 抖动误杀。 */
+/** CoNET factory + owner()：输入地址 → accounts 表用的 EOA 小写。getCode 失败时按 EOA 处理以免 RPC 抖动误杀。 */
 export const resolveSearchAddressToEOALower = async (address: string): Promise<string | null> => {
-	if (!ethers.isAddress(address)) return null
-	const addr = ethers.getAddress(address)
-	let code: string
 	try {
-		code = await providerBase.getCode(addr)
+		const identity = await resolveBeamioWalletIdentityFromAddress(address, {
+			conetProvider: providerConet,
+			baseProvider: providerBase,
+		})
+		return identity?.eoa?.toLowerCase() ?? null
 	} catch (e) {
-		logger(`resolveSearchAddressToEOALower getCode(${addr}) failed: ${(e as Error)?.message ?? e}`)
-		return addr.toLowerCase()
+		logger(`resolveSearchAddressToEOALower failed: ${(e as Error)?.message ?? e}`)
+		if (!ethers.isAddress(address)) return null
+		return ethers.getAddress(address).toLowerCase()
 	}
-	const isContract = Boolean(code && code !== "0x" && code.length > 2)
-	if (!isContract) {
-		return addr.toLowerCase()
+}
+
+function enrichSearchRowWithWalletIdentity(row: Record<string, unknown>, identity: Awaited<ReturnType<typeof resolveBeamioWalletIdentityFromAddress>>) {
+	if (!identity) return row
+	return {
+		...row,
+		address: identity.eoa,
+		aaAccount: identity.aaAccount ?? row.aaAccount ?? null,
+		queriedAddress: identity.queriedAddress,
+		walletKind: identity.inputKind,
 	}
-	try {
-		const aa = new ethers.Contract(addr, ["function owner() view returns (address)"], providerBase)
-		const owner = await aa.owner()
-		if (!owner || owner === ethers.ZeroAddress) return null
-		return ethers.getAddress(owner).toLowerCase()
-	} catch {
-		// 非 Ownable 合约（常见于 ERC-4337 AA、`owner()` 无或 eth_call 空返回）：无法用 owner 转成 EOA，仍可按该地址精确查 `accounts.address`
-		return addr.toLowerCase()
+}
+
+async function searchUsersByAddressWithIdentity(normalized: string) {
+	const identity = await resolveBeamioWalletIdentityFromAddress(normalized, {
+		conetProvider: providerConet,
+		baseProvider: providerBase,
+	})
+	if (!identity) {
+		return { results: [] as Record<string, unknown>[] }
+	}
+	if (
+		identity.inputKind === 'aa' &&
+		identity.eoa.toLowerCase() === identity.queriedAddress.toLowerCase()
+	) {
+		try {
+			const c = new ethers.Contract(
+				identity.queriedAddress,
+				['function owner() view returns (address)'],
+				providerConet
+			)
+			const o = (await c.owner()) as string
+			if (!o || o === ethers.ZeroAddress) {
+				return { results: [] as Record<string, unknown>[] }
+			}
+			identity.eoa = ethers.getAddress(o)
+		} catch {
+			return { results: [] as Record<string, unknown>[] }
+		}
+	}
+	const eoaLower = identity.eoa.toLowerCase()
+	const ret = await _searchExactByAddress(eoaLower)
+	if ('error' in ret && ret.error) {
+		return { error: String(ret.error) }
+	}
+	const dbRows = (ret.results ?? []) as Record<string, unknown>[]
+	if (dbRows.length > 0) {
+		let aaAccount = identity.aaAccount
+		if (!aaAccount) {
+			aaAccount = await resolveBeamioAaOnConet(identity.eoa)
+		}
+		const enrichedIdentity = { ...identity, aaAccount: aaAccount ?? identity.aaAccount }
+		return { results: dbRows.map((row) => enrichSearchRowWithWalletIdentity(row, enrichedIdentity)) }
+	}
+	return {
+		results: [
+			enrichSearchRowWithWalletIdentity(
+				{
+					address: identity.eoa,
+					username: 'unknow',
+					created_at: 0,
+					image: '',
+					first_name: '',
+					last_name: '',
+					follow_count: '0',
+					follower_count: '0',
+				},
+				identity
+			),
+		],
 	}
 }
 
@@ -4979,11 +5041,7 @@ export const searchUsersResultsForKeyward = async (
 	}
 	if (ethers.isAddress(_keywork)) {
 		const normalized = ethers.getAddress(_keywork)
-		const eoaLower = await resolveSearchAddressToEOALower(normalized)
-		if (eoaLower === null) {
-			return { results: [] }
-		}
-		const ret = await _searchExactByAddress(eoaLower)
+		const ret = await searchUsersByAddressWithIdentity(normalized)
 		if ("error" in ret && ret.error) {
 			return { error: String(ret.error) }
 		}
@@ -5009,11 +5067,10 @@ export const searchUsers = async (req: Request, res: Response) => {
 
 	if (ethers.isAddress(_keywork)) {
 		const normalized = ethers.getAddress(_keywork)
-		const eoaLower = await resolveSearchAddressToEOALower(normalized)
-		if (eoaLower === null) {
-			return res.status(200).json({ results: [] }).end()
+		const ret = await searchUsersByAddressWithIdentity(normalized)
+		if ("error" in ret && ret.error) {
+			return res.status(500).json({ error: ret.error }).end()
 		}
-		const ret = await _searchExactByAddress(eoaLower)
 		return res.status(200).json(ret).end()
 	}
 

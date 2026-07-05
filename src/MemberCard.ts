@@ -2946,11 +2946,17 @@ async function resolveBeamioAaAddressForEoaOnFactory(
 	return ethers.getAddress(aa)
 }
 
-/** CoNET：优先从 payer EOA 扣 B-Unit；不足时再尝试同一控制下的 Beamio AA 地址（Factory 解析或显式传入，如 AAtoEOA 的 sender）。 */
-async function pickBUnitFeeConsumerPreferEoaThenAa(
+/** CoNET B-Unit 扣款：默认 owner EOA 优先，不足再扣 linked / explicit AA（与 biz top-up 一致）。 */
+async function pickBUnitFeeConsumer(
 	payerEoa: string,
 	feeBUnits6: bigint,
-	opts?: { aaFactoryAddress?: string | null; aaFactoryProvider?: ethers.Provider | null; explicitAaFallback?: string | null }
+	opts?: {
+		aaFactoryAddress?: string | null
+		aaFactoryProvider?: ethers.Provider | null
+		explicitAaFallback?: string | null
+		/** true = 保留兼容；当前产品统一 EOA 优先，勿对新路径启用 */
+		preferAa?: boolean
+	}
 ): Promise<{ ok: true; consumer: string; usedAaFallback: boolean } | { ok: false; error: string }> {
 	if (feeBUnits6 <= 0n) {
 		return { ok: false, error: 'B-Unit fee amount must be > 0' }
@@ -2961,10 +2967,6 @@ async function pickBUnitFeeConsumerPreferEoaThenAa(
 		['function getBUnitBalance(address) view returns (uint256)'],
 		providerConet
 	)
-	const balEoa = (await bunitAirdropRead.getBUnitBalance(eoaN)) as bigint
-	if (balEoa >= feeBUnits6) {
-		return { ok: true, consumer: eoaN, usedAaFallback: false }
-	}
 	const tryConsumeAa = async (aaRaw: string): Promise<{ ok: true; consumer: string; usedAaFallback: boolean } | null> => {
 		if (!aaRaw || !ethers.isAddress(aaRaw)) return null
 		const aaN = ethers.getAddress(aaRaw)
@@ -2975,33 +2977,78 @@ async function pickBUnitFeeConsumerPreferEoaThenAa(
 		}
 		return null
 	}
-	if (opts?.explicitAaFallback && ethers.isAddress(opts.explicitAaFallback)) {
-		const hit = await tryConsumeAa(opts.explicitAaFallback)
-		if (hit) return hit
+	const tryConsumeEoa = async (): Promise<{ ok: true; consumer: string; usedAaFallback: boolean } | null> => {
+		const balEoa = (await bunitAirdropRead.getBUnitBalance(eoaN)) as bigint
+		if (balEoa >= feeBUnits6) {
+			return { ok: true, consumer: eoaN, usedAaFallback: false }
+		}
+		return null
 	}
-	if (opts?.aaFactoryAddress && ethers.isAddress(opts.aaFactoryAddress)) {
-		const linkedAa = await resolveBeamioAaAddressForEoaOnFactory(opts.aaFactoryProvider ?? providerBaseBackup, opts.aaFactoryAddress, eoaN)
-		if (linkedAa) {
-			const hit = await tryConsumeAa(linkedAa)
+	const resolveLinkedAa = async (): Promise<string | null> => {
+		if (opts?.explicitAaFallback && ethers.isAddress(opts.explicitAaFallback)) {
+			return ethers.getAddress(opts.explicitAaFallback)
+		}
+		if (opts?.aaFactoryAddress && ethers.isAddress(opts.aaFactoryAddress)) {
+			return resolveBeamioAaAddressForEoaOnFactory(opts.aaFactoryProvider ?? providerBaseBackup, opts.aaFactoryAddress, eoaN)
+		}
+		return null
+	}
+	if (opts?.preferAa) {
+		const aaCandidates: string[] = []
+		if (opts?.explicitAaFallback && ethers.isAddress(opts.explicitAaFallback)) {
+			aaCandidates.push(ethers.getAddress(opts.explicitAaFallback))
+		}
+		const linked = await resolveLinkedAa()
+		if (linked && !aaCandidates.some((a) => a.toLowerCase() === linked.toLowerCase())) {
+			aaCandidates.push(linked)
+		}
+		for (const aa of aaCandidates) {
+			const hit = await tryConsumeAa(aa)
 			if (hit) return hit
 		}
-	}
-	let aaBalHint = ''
-	if (opts?.explicitAaFallback && ethers.isAddress(opts.explicitAaFallback)) {
-		const aaN = ethers.getAddress(opts.explicitAaFallback)
-		if (aaN.toLowerCase() !== eoaN.toLowerCase()) {
-			try {
-				const b = (await bunitAirdropRead.getBUnitBalance(aaN)) as bigint
-				aaBalHint = `, AA ${aaN.slice(0, 8)}… balance ${Number(b) / 1e6}`
-			} catch {
-				aaBalHint = ', AA balance unreadable'
+		const eoaHit = await tryConsumeEoa()
+		if (eoaHit) return eoaHit
+	} else {
+		const eoaHit = await tryConsumeEoa()
+		if (eoaHit) return eoaHit
+		if (opts?.explicitAaFallback && ethers.isAddress(opts.explicitAaFallback)) {
+			const hit = await tryConsumeAa(opts.explicitAaFallback)
+			if (hit) return hit
+		}
+		if (opts?.aaFactoryAddress && ethers.isAddress(opts.aaFactoryAddress)) {
+			const linkedAa = await resolveLinkedAa()
+			if (linkedAa) {
+				const hit = await tryConsumeAa(linkedAa)
+				if (hit) return hit
 			}
 		}
 	}
+	let aaBalHint = ''
+	const aaHintAddr = opts?.explicitAaFallback && ethers.isAddress(opts.explicitAaFallback)
+		? ethers.getAddress(opts.explicitAaFallback)
+		: null
+	if (aaHintAddr && aaHintAddr.toLowerCase() !== eoaN.toLowerCase()) {
+		try {
+			const b = (await bunitAirdropRead.getBUnitBalance(aaHintAddr)) as bigint
+			aaBalHint = `, AA ${aaHintAddr.slice(0, 8)}… balance ${Number(b) / 1e6}`
+		} catch {
+			aaBalHint = ', AA balance unreadable'
+		}
+	}
+	const balEoa = (await bunitAirdropRead.getBUnitBalance(eoaN)) as bigint
 	return {
 		ok: false,
 		error: `Insufficient B-Units: need ${Number(feeBUnits6) / 1e6} B-Units (EOA balance ${Number(balEoa) / 1e6}${aaBalHint})`,
 	}
+}
+
+/** @deprecated 命名保留；内部转发 preferAa=false */
+async function pickBUnitFeeConsumerPreferEoaThenAa(
+	payerEoa: string,
+	feeBUnits6: bigint,
+	opts?: { aaFactoryAddress?: string | null; aaFactoryProvider?: ethers.Provider | null; explicitAaFallback?: string | null }
+): Promise<{ ok: true; consumer: string; usedAaFallback: boolean } | { ok: false; error: string }> {
+	return pickBUnitFeeConsumer(payerEoa, feeBUnits6, { ...opts, preferAa: false })
 }
 
 export const executeForAdminProcess = async () => {
@@ -4786,6 +4833,8 @@ const BUNIT_AIRDROP_ABI = [
 	'function hasClaimed(address) view returns (bool)',
 	'function claimNonces(address) view returns (uint256)',
 	'function claimFor(address claimant, uint256 nonce, uint256 deadline, bytes calldata signature)',
+	'function claimForWithBeneficiary(address claimantEoa, address beneficiary, uint256 nonce, uint256 deadline, bytes calldata signature)',
+	'function relocateFreePoolToOwnerBeamioAa(address eoaOwner, address aaAccount)',
 	'function claimForV2(address claimant, uint256 nonce, uint256 deadline, address merchantCard, uint256 targetTokenId, address referrer, bytes calldata signature)',
 ] as const
 
@@ -4819,6 +4868,8 @@ export type ClaimBUnitsPayload = {
 	nonce: string | number
 	deadline: string | number
 	signature: string
+	/** Smart Wallet：mint 至 AA；EIP-712 仍签 claimant（EOA） */
+	mintBeneficiary?: string
 	merchantCard?: string
 	targetTokenId?: string | number
 	referrer?: string
@@ -4832,6 +4883,7 @@ export const claimBUnitsPreCheck = (body: {
 	nonce?: unknown
 	deadline?: unknown
 	signature?: unknown
+	mintBeneficiary?: unknown
 	merchantCard?: unknown
 	targetTokenId?: unknown
 	referrer?: unknown
@@ -4850,6 +4902,13 @@ export const claimBUnitsPreCheck = (body: {
 	const sig = body.signature
 	if (typeof sig !== 'string' || !/^0x[a-fA-F0-9]+$/.test(sig) || (sig.length - 2) / 2 !== 65) {
 		return { success: false, error: 'Invalid signature (must be 65 bytes hex)' }
+	}
+	if (
+		body.mintBeneficiary != null &&
+		body.mintBeneficiary !== '' &&
+		body.mintBeneficiary !== ethers.ZeroAddress
+	) {
+		return { success: false, error: 'B-Unit airdrop mints to claimant EOA only (mintBeneficiary not supported)' }
 	}
 	const claimant = ethers.getAddress(body.claimant)
 
@@ -4934,23 +4993,61 @@ export const claimBUnitsProcess = async () => {
 		claimBUnitsPool.unshift(obj)
 		return setTimeout(() => claimBUnitsProcess(), 3000)
 	}
-	logger(Colors.cyan(`[claimBUnitsProcess] claimant=${obj.claimant} nonce=${obj.nonce}`))
+	logger(Colors.cyan(`[claimBUnitsProcess] claimant=${obj.claimant} nonce=${obj.nonce} mintBeneficiary=${obj.mintBeneficiary ?? 'eoa'}`))
 	try {
 		const airdrop = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, BUNIT_AIRDROP_ABI, SC.walletConet)
 		const gasLimit = obj.merchantCard ? 1_500_000 : 1_200_000
-		const tx =
-			obj.merchantCard
-				? await airdrop.claimForV2(
-						obj.claimant,
-						obj.nonce,
-						obj.deadline,
-						obj.merchantCard,
-						obj.targetTokenId ?? 0,
-						obj.referrer ?? ethers.ZeroAddress,
-						obj.signature,
-						{ gasLimit },
+		let tx: ethers.ContractTransactionResponse
+		if (obj.merchantCard) {
+			tx = await airdrop.claimForV2(
+				obj.claimant,
+				obj.nonce,
+				obj.deadline,
+				obj.merchantCard,
+				obj.targetTokenId ?? 0,
+				obj.referrer ?? ethers.ZeroAddress,
+				obj.signature,
+				{ gasLimit },
+			)
+		} else if (obj.mintBeneficiary && obj.mintBeneficiary.toLowerCase() !== obj.claimant.toLowerCase()) {
+			try {
+				tx = await airdrop.claimForWithBeneficiary!(
+					obj.claimant,
+					obj.mintBeneficiary,
+					obj.nonce,
+					obj.deadline,
+					obj.signature,
+					{ gasLimit },
+				)
+			} catch (beneficiaryErr: any) {
+				logger(
+					Colors.yellow(
+						`[claimBUnitsProcess] claimForWithBeneficiary unavailable, fallback claimFor+relocate: ${beneficiaryErr?.shortMessage ?? beneficiaryErr?.message ?? beneficiaryErr}`,
+					),
+				)
+				tx = await airdrop.claimFor(obj.claimant, obj.nonce, obj.deadline, obj.signature, { gasLimit })
+				await tx.wait()
+				try {
+					const relocTx = await airdrop.relocateFreePoolToOwnerBeamioAa!(obj.claimant, obj.mintBeneficiary, {
+						gasLimit: 600_000,
+					})
+					logger(Colors.green(`[claimBUnitsProcess] relocateFreePool tx=${relocTx.hash}`))
+					await relocTx.wait()
+				} catch (relocErr: any) {
+					logger(
+						Colors.yellow(
+							`[claimBUnitsProcess] relocateFreePoolToOwnerBeamioAa skipped: ${relocErr?.shortMessage ?? relocErr?.message ?? relocErr}`,
+						),
 					)
-				: await airdrop.claimFor(obj.claimant, obj.nonce, obj.deadline, obj.signature, { gasLimit })
+				}
+				if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+				Settle_ContractPool.unshift(SC)
+				setTimeout(() => claimBUnitsProcess(), 3000)
+				return
+			}
+		} else {
+			tx = await airdrop.claimFor(obj.claimant, obj.nonce, obj.deadline, obj.signature, { gasLimit })
+		}
 		logger(Colors.green(`[claimBUnitsProcess] tx=${tx.hash}`))
 		await tx.wait()
 		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
@@ -4959,8 +5056,59 @@ export const claimBUnitsProcess = async () => {
 		logger(Colors.red(`[claimBUnitsProcess] failed:`), msg)
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
-	Settle_ContractPool.unshift(SC)
-	setTimeout(() => claimBUnitsProcess(), 3000)
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => claimBUnitsProcess(), 3000)
+	}
+}
+
+export type RelocateBUnitsToSmartWalletPayload = {
+	eoaOwner: string
+	aaAccount: string
+	res?: Response
+}
+
+export const relocateBUnitsToSmartWalletPool: RelocateBUnitsToSmartWalletPayload[] = []
+
+export const relocateBUnitsToSmartWalletPreCheck = (body: {
+	eoaOwner?: string
+	aaAccount?: string
+}): { success: true; preChecked: RelocateBUnitsToSmartWalletPayload } | { success: false; error: string } => {
+	if (!body.eoaOwner || !ethers.isAddress(body.eoaOwner)) {
+		return { success: false, error: 'Invalid eoaOwner address' }
+	}
+	if (!body.aaAccount || !ethers.isAddress(body.aaAccount)) {
+		return { success: false, error: 'Invalid aaAccount address' }
+	}
+	const eoaOwner = ethers.getAddress(body.eoaOwner)
+	const aaAccount = ethers.getAddress(body.aaAccount)
+	if (eoaOwner.toLowerCase() === aaAccount.toLowerCase()) {
+		return { success: false, error: 'aaAccount must differ from eoaOwner' }
+	}
+	return { success: true, preChecked: { eoaOwner, aaAccount } }
+}
+
+export const relocateBUnitsToSmartWalletProcess = async () => {
+	const obj = relocateBUnitsToSmartWalletPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		relocateBUnitsToSmartWalletPool.unshift(obj)
+		return setTimeout(() => relocateBUnitsToSmartWalletProcess(), 3000)
+	}
+	logger(Colors.cyan(`[relocateBUnitsToSmartWallet] eoa=${obj.eoaOwner} aa=${obj.aaAccount}`))
+	try {
+		const airdrop = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, BUNIT_AIRDROP_ABI, SC.walletConet)
+		const tx = await airdrop.relocateFreePoolToOwnerBeamioAa!(obj.eoaOwner, obj.aaAccount, { gasLimit: 600_000 })
+		logger(Colors.green(`[relocateBUnitsToSmartWallet] tx=${tx.hash}`))
+		await tx.wait()
+		if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red(`[relocateBUnitsToSmartWallet] failed:`), msg)
+		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		setTimeout(() => relocateBUnitsToSmartWalletProcess(), 3000)
 	}
 }
 
@@ -7232,7 +7380,7 @@ export const transferPreCheckBUnit = async (opts: { account?: string; aaAddress?
 	}
 }
 
-/** Cluster 预检：AAtoEOA 手续费优先查 AA owner 的 EOA；不足再查 AA（sender）上的 B-Unit。Master 再次用同一规则选扣款地址。 */
+/** Cluster 预检：AAtoEOA 与 biz 一致 — owner EOA B-Unit 优先，不足再扣 AA sender。 */
 export const AAtoEOAPreCheckBUnitBalance = async (
 	packedUserOp: AAtoEOAUserOp,
 	relayChain: BeamioUserCardChainKey
@@ -9742,7 +9890,7 @@ export const AAtoEOAProcess = async () => {
       }
     }
 
-    // --- fee payer for consumeFromUser：优先 AA owner 的 EOA，不足则扣 AA（sender）---
+    // --- fee payer for consumeFromUser：owner EOA 优先，不足再扣 AA sender（与 biz top-up 一致）---
     const ownerForBunit =
       aaOwner !== ethers.ZeroAddress ? ethers.getAddress(aaOwner) : recoveredSigner ? ethers.getAddress(recoveredSigner) : null
     if (!ownerForBunit) {
@@ -9788,7 +9936,16 @@ export const AAtoEOAProcess = async () => {
       logger(Colors.red(`[AAtoEOA] simulateValidation failed: ${m}`))
       if (decoded) logger(Colors.red(`[AAtoEOA] simulateValidation decoded: ${decoded}`))
       if (e?.data) logger(Colors.red(`[AAtoEOA] simulateValidation data=${e.data}`))
-      // 不在这里 return，让后续 handleOps 去给最终错误（但日志会更完整）
+      const errMsg = decoded
+        ? `UserOp validation failed: ${decoded}`
+        : `UserOp validation failed: ${m}`
+      logger(Colors.red(`❌ [AAtoEOA] ${errMsg} (skipping handleOps to avoid burning EntryPoint nonce)`))
+      if (!obj.res?.headersSent) {
+        obj.res.status(400).json({ success: false, error: errMsg }).end()
+      }
+      Settle_ContractPool.unshift(SC)
+      setTimeout(() => AAtoEOAProcess(), 3000)
+      return
     }
 
     // --- deposit/eth snapshot ---

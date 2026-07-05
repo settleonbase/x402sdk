@@ -16,7 +16,7 @@ import {
 	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, submitAAAccountCreationViaEntryPoint, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, aaMultisigOfflineSubmitPool, kickAaMultisigOfflineSubmitProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, relocateBUnitsToSmartWalletPool, relocateBUnitsToSmartWalletProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, submitAAAccountCreationViaEntryPoint, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, aaMultisigOfflineSubmitPool, kickAaMultisigOfflineSubmitProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY } from '../chainAddresses'
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { resolveAaUserOpRelayChainFromRequest } from '../aaTransferRelayChain'
@@ -2965,6 +2965,7 @@ const routing = ( router: Router ) => {
 				nonce?: string
 				deadline?: string
 				signature?: string
+				mintBeneficiary?: string
 				merchantCard?: string
 				targetTokenId?: string
 				referrer?: string
@@ -2977,6 +2978,7 @@ const routing = ( router: Router ) => {
 				nonce: body.nonce,
 				deadline: body.deadline,
 				signature: body.signature,
+				mintBeneficiary: body.mintBeneficiary,
 				merchantCard: body.merchantCard,
 				targetTokenId: body.targetTokenId,
 				referrer: body.referrer,
@@ -2984,6 +2986,22 @@ const routing = ( router: Router ) => {
 			})
 			claimBUnitsProcess().catch((err: any) => {
 				logger(Colors.red('[claimBUnitsProcess] unhandled error:'), err?.message ?? err)
+			})
+		})
+
+		/** POST /api/relocateBUnitToSmartWallet - 已 claim 至 EOA 的免费池 B-Unit 迁至 Beamio AA */
+		router.post('/relocateBUnitToSmartWallet', (req, res) => {
+			const body = req.body as { eoaOwner?: string; aaAccount?: string }
+			if (!body.eoaOwner || !body.aaAccount) {
+				return res.status(400).json({ success: false, error: 'Missing eoaOwner or aaAccount' }).end()
+			}
+			relocateBUnitsToSmartWalletPool.push({
+				eoaOwner: body.eoaOwner,
+				aaAccount: body.aaAccount,
+				res,
+			})
+			relocateBUnitsToSmartWalletProcess().catch((err: any) => {
+				logger(Colors.red('[relocateBUnitsToSmartWalletProcess] unhandled error:'), err?.message ?? err)
 			})
 		})
 
