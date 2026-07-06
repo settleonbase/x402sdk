@@ -12454,8 +12454,13 @@ function mergeShareTokenMetadataRecords(
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = {}
 	for (const src of sources) {
-		if (src != null && typeof src === 'object' && !Array.isArray(src)) {
-			Object.assign(out, src)
+		if (src == null || typeof src !== 'object' || Array.isArray(src)) continue
+		for (const [key, value] of Object.entries(src)) {
+			if (value === null) {
+				delete out[key]
+			} else {
+				out[key] = value
+			}
 		}
 	}
 	return out
