@@ -27,6 +27,7 @@ import {
 	cardGatewayInitializeUserCumulativeStatPreCheck,
 	cardInitializeUserCumulativeStatPreCheck,
 	cardPurchaseRewardProgramPreCheck,
+	cardFundSocialExchangeUsdcEscrowPreCheck,
 	cardRecordDiscoverShareClickPreCheck,
 	cardRecordTopupCumulativeStatPreCheck,
 	cardRecordUserCumulativeStatPreCheck,
@@ -7208,6 +7209,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
 		)
 		postLocalhost('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'purchaseRewardProgram' }, res)
+	})
+
+	/** cardFundSocialExchangeUsdcEscrow：商户 owner 向 card escrow 充值 CONET-USDC（须先 approve card）。 */
+	router.post('/cardFundSocialExchangeUsdcEscrow', async (req, res) => {
+		const preCheck = await cardFundSocialExchangeUsdcEscrowPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/cardFundSocialExchangeUsdcEscrow preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardFundSocialExchangeUsdcEscrow preCheck OK → cardGatewayRewardPool`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'fundSocialExchangeUsdcEscrow' }, res)
 	})
 
 	/** Gateway-only：dispatchEventReward13（Master gatewayInvokeCard 队列）。 */

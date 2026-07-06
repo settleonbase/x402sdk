@@ -28,6 +28,8 @@ export const CHARGE_REWARD_V2_IFACE = new ethers.Interface([
 	'function dispatchEventReward13(uint256 ruleId, address actorWallet, address refWallet, uint8 cumulativeTargetKind, uint256 cumulativeIssuedParentId, uint256 cumulativeDelta)',
 	'function recordTopupCumulativeStat(address userEOA, uint256 points6)',
 	'function rewardMintBudget13() view returns (uint256)',
+	'function fundSocialExchangeUsdcEscrow(address payerEOA, uint256 amount6)',
+	'function rewardEscrowUsdc6() view returns (uint256)',
 ])
 
 export const INITIALIZE_CARD_USER_CUMUL_STAT_SELECTOR =
@@ -78,6 +80,16 @@ export const PURCHASE_REWARD_PROGRAM_SELECTOR =
 
 export const DISPATCH_EVENT_REWARD13_SELECTOR =
 	CHARGE_REWARD_V2_IFACE.getFunction('dispatchEventReward13')?.selector ?? '0x19b043d8'
+
+export const FUND_SOCIAL_EXCHANGE_USDC_ESCROW_SELECTOR =
+	CHARGE_REWARD_V2_IFACE.getFunction('fundSocialExchangeUsdcEscrow')?.selector ?? '0x00000000'
+
+export function buildFundSocialExchangeUsdcEscrowCalldata(payerEOA: string, amount6: bigint | string | number): string {
+	return CHARGE_REWARD_V2_IFACE.encodeFunctionData('fundSocialExchangeUsdcEscrow', [
+		ethers.getAddress(payerEOA),
+		BigInt(amount6),
+	])
+}
 
 /** UserCumulativeStatLib metric kinds (subset for API validation). */
 export const UC_METRIC = {
@@ -911,6 +923,44 @@ export const cardPurchaseRewardProgramPreCheck = async (body: {
 			base.card,
 			PURCHASE_REWARD_PROGRAM_SELECTOR,
 			'purchaseRewardProgram',
+		)
+		if (routeErr) return { success: false, error: routeErr }
+		return {
+			success: true,
+			preChecked: buildGatewayRewardPoolForwardBody(base.card, cardCalldata),
+		}
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		return { success: false, error: err?.message ?? String(e) }
+	}
+}
+
+/** Cluster：gateway fundSocialExchangeUsdcEscrow（商户 owner 须先 approve CONET-USDC 给 card）。 */
+export const cardFundSocialExchangeUsdcEscrowPreCheck = async (body: {
+	cardAddress?: string
+	payerEOA?: string
+	amount6?: string | number
+}): Promise<{ success: true; preChecked: GatewayRewardPoolForwardBody } | { success: false; error: string }> => {
+	if (!body.cardAddress || !ethers.isAddress(body.cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!body.payerEOA || !ethers.isAddress(body.payerEOA)) return { success: false, error: 'Invalid payerEOA' }
+	const amount6 = BigInt(body.amount6 ?? 0)
+	if (amount6 <= 0n) return { success: false, error: 'amount6 must be > 0' }
+	try {
+		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
+		if ('error' in base) return { success: false, error: base.error }
+		const cardOwner = (await new ethers.Contract(
+			base.card,
+			['function owner() view returns (address)'],
+			providerForUserCardChain(await resolveUserCardChain(base.card)),
+		).owner()) as string
+		if (ethers.getAddress(cardOwner) !== ethers.getAddress(body.payerEOA)) {
+			return { success: false, error: 'payerEOA must be card owner' }
+		}
+		const cardCalldata = buildFundSocialExchangeUsdcEscrowCalldata(body.payerEOA, amount6)
+		const routeErr = await assertAdminStatsRoutesChargeRewardSelector(
+			base.card,
+			FUND_SOCIAL_EXCHANGE_USDC_ESCROW_SELECTOR,
+			'fundSocialExchangeUsdcEscrow',
 		)
 		if (routeErr) return { success: false, error: routeErr }
 		return {

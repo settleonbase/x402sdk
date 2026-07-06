@@ -56,6 +56,33 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "ECDSAInvalidSignature",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "length",
+        "type": "uint256"
+      }
+    ],
+    "name": "ECDSAInvalidSignatureLength",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "s",
+        "type": "bytes32"
+      }
+    ],
+    "name": "ECDSAInvalidSignatureS",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
@@ -226,6 +253,43 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "recovered",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "expected",
+        "type": "address"
+      }
+    ],
+    "name": "UC_InvalidSignature",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "nowTs",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "validAfter",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "validBefore",
+        "type": "uint256"
+      }
+    ],
+    "name": "UC_InvalidTimeWindow",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "UC_InvalidUpgradeType",
     "type": "error"
@@ -233,6 +297,11 @@
   {
     "inputs": [],
     "name": "UC_NoBeamioAccount",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "UC_NonceUsed",
     "type": "error"
   },
   {
@@ -1549,6 +1618,24 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "userEOA",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "pointsCost",
+        "type": "uint256"
+      }
+    ],
+    "name": "burnSocialPointsForExchange",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "acct",
         "type": "address"
       },
@@ -1559,6 +1646,29 @@
       }
     ],
     "name": "cardSelfAppendMembershipNftIfMissing",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "from",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "cardSelfBurn",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -2055,6 +2165,49 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "userEOA",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "pointsCost",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "usdcReward6",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "deadline",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "nonce",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes",
+        "name": "userSignature",
+        "type": "bytes"
+      }
+    ],
+    "name": "claimSocialExchangeWithUserSignature",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "subordinate",
         "type": "address"
       },
@@ -2300,6 +2453,24 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "payerEOA",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount6",
+        "type": "uint256"
+      }
+    ],
+    "name": "fundSocialExchangeUsdcEscrow",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -3006,6 +3177,24 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "userEOA",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "usdcReward6",
+        "type": "uint256"
+      }
+    ],
+    "name": "payoutSocialExchangeUsdc",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "user",
         "type": "address"
       }
@@ -3142,6 +3331,24 @@
       }
     ],
     "name": "recordAdminMintForStats",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "userEOA",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "recordSocialExchangeUsdcClaim",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

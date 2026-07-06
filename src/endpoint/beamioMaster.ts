@@ -2436,7 +2436,7 @@ const routing = ( router: Router ) => {
 
 		/** cardCouponOpenClaim：无 redeemcode 的 coupon open-claim，服务端调用 claimIssuedNftWithUserSig。 */
 		router.post('/cardCouponOpenClaim', (req, res) => {
-			const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature } = req.body as {
+			const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature, pointsCost, usdcReward6, isSocialExchange } = req.body as {
 				cardAddress?: string
 				couponId?: string
 				userEOA?: string
@@ -2444,6 +2444,9 @@ const routing = ( router: Router ) => {
 				deadline?: number
 				nonce?: string
 				userSignature?: string
+				pointsCost?: string
+				usdcReward6?: string
+				isSocialExchange?: boolean
 			}
 			if (!cardAddress || !couponId || !userEOA || !tokenId || deadline == null || !nonce || !userSignature) {
 				return res.status(400).json({ success: false, error: 'Missing required fields for cardCouponOpenClaim' }).end()
@@ -2456,6 +2459,9 @@ const routing = ( router: Router ) => {
 				deadline: Number(deadline),
 				nonce,
 				userSignature,
+				...(isSocialExchange ? { isSocialExchange: true } : {}),
+				...(pointsCost != null ? { pointsCost: String(pointsCost) } : {}),
+				...(usdcReward6 != null ? { usdcReward6: String(usdcReward6) } : {}),
 				res,
 			})
 			logger(Colors.cyan(`[cardCouponOpenClaim] pushed to pool, card=${cardAddress} couponId=${couponId} tokenId=${tokenId}`))

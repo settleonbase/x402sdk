@@ -26,6 +26,7 @@ import {
 	type TopupPromotionNormalized,
 } from './programTopupPromotion'
 import { ensureShareTokenProgramIconAssembled } from './shareTokenProgramIcon'
+import { readSocialExchangeFromMetadata, REWARD_VOUCHER_TOKEN_ID } from './socialExchangeMetadata'
 import { inspect } from 'util'
 import Colors from 'colors/safe'
 import BeamioUserCardABI from './ABI/BeamioUserCard.json'
@@ -3497,7 +3498,7 @@ function scheduleCardRedeemPoolPress(): void {
 	}
 }
 
-/** Coupon Open Claim（无 redeemcode）：用户 EIP-712 签名申请，Master 代发 `claimIssuedNftWithUserSig`。 */
+/** Coupon Open Claim（无 redeemcode）：用户 EIP-712 签名申请，Master 代发 `claimIssuedNftWithUserSig` / `claimSocialExchangeWithUserSig`。 */
 export const cardCouponOpenClaimPool: {
 	cardAddress: string
 	couponId: string
@@ -3506,6 +3507,9 @@ export const cardCouponOpenClaimPool: {
 	deadline: number
 	nonce: string
 	userSignature: string
+	isSocialExchange?: boolean
+	pointsCost?: string
+	usdcReward6?: string
 	res: Response
 }[] = []
 
@@ -14477,8 +14481,19 @@ const CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE = {
 		{ name: 'nonce', type: 'bytes32' },
 	],
 }
+const CLAIM_SOCIAL_EXCHANGE_WITH_USER_SIG_TYPE = {
+	ClaimSocialExchange: [
+		{ name: 'cardAddress', type: 'address' },
+		{ name: 'tokenId', type: 'uint256' },
+		{ name: 'pointsCost', type: 'uint256' },
+		{ name: 'usdcReward6', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+		{ name: 'nonce', type: 'bytes32' },
+	],
+}
 const CLAIM_ISSUED_NFT_WITH_USER_SIG_ABI = [
 	'function claimIssuedNftWithUserSig(address cardAddr,address userEOA,uint256 tokenId,uint256 deadline,bytes32 nonce,bytes userSignature)',
+	'function claimSocialExchangeWithUserSig(address cardAddr,address userEOA,uint256 tokenId,uint256 pointsCost,uint256 usdcReward6,uint256 deadline,bytes32 nonce,bytes userSignature)',
 	'error BM_ZeroAddress()',
 	'error BM_NotAuthorized()',
 	'error UC_InvalidTimeWindow(uint256 nowTs, uint256 validAfter, uint256 validBefore)',
@@ -14496,6 +14511,18 @@ async function eip712DomainForClaimIssuedNftWithUserSig(cardNorm: string) {
 		chainId: chainIdForUserCardChain(chain),
 		verifyingContract: await getBeamioUserCardFactoryGateway(cardNorm),
 	}
+}
+
+const CLAIM_SOCIAL_EXCHANGE_FACTORY_SELECTOR = '0x4e1ad204'
+const CLAIM_SOCIAL_EXCHANGE_CARD_SELECTOR = '0xef79d366'
+const CLAIM_SOCIAL_EXCHANGE_CARD_ABI = [
+	'function claimSocialExchangeWithUserSignature(address userEOA,uint256 tokenId,uint256 pointsCost,uint256 usdcReward6,uint256 deadline,bytes32 nonce,bytes userSignature)',
+] as const
+
+async function bytecodeHasSelector(provider: ethers.Provider, address: string, selector: string): Promise<boolean> {
+	const code = await provider.getCode(address)
+	if (!code || code === '0x') return false
+	return code.toLowerCase().includes(selector.slice(2).toLowerCase())
 }
 
 async function contractForClaimIssuedNftWithUserSig(
@@ -15241,6 +15268,40 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 }
 
 /** cardCouponOpenClaim 集群预检：校验用户签名、couponId↔tokenId 映射、仅允许 open claim（requiresRedeemCode=false）。不要求 AA；Master 在 claim 前 `ensureAAForEOAOnCard` 自动创建。 */
+async function readUserRewardVoucher13BalanceOnCard(
+	cardNorm: string,
+	userNorm: string,
+	cardProvider: ethers.Provider,
+): Promise<bigint | null> {
+	try {
+		const gateway = await getBeamioUserCardFactoryGateway(cardNorm)
+		const fac = new ethers.Contract(gateway, ['function beamioAccountOf(address) view returns (address)'], cardProvider)
+		const aa = (await fac.beamioAccountOf(userNorm)) as string
+		if (!aa || aa === ethers.ZeroAddress) return 0n
+		const card = new ethers.Contract(
+			cardNorm,
+			['function balanceOf(address account, uint256 id) view returns (uint256)'],
+			cardProvider,
+		)
+		return (await card.balanceOf(aa, REWARD_VOUCHER_TOKEN_ID)) as bigint
+	} catch {
+		return null
+	}
+}
+
+async function readCardRewardEscrowUsdc6(cardNorm: string, cardProvider: ethers.Provider): Promise<bigint | null> {
+	try {
+		const card = new ethers.Contract(
+			cardNorm,
+			['function rewardEscrowUsdc6() view returns (uint256)'],
+			cardProvider,
+		)
+		return (await card.rewardEscrowUsdc6()) as bigint
+	} catch {
+		return null
+	}
+}
+
 export const cardCouponOpenClaimPreCheck = async (body: {
 	cardAddress?: string
 	couponId?: string
@@ -15249,7 +15310,23 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 	deadline?: number
 	nonce?: string
 	userSignature?: string
-}): Promise<{ success: true; preChecked: { cardAddress: string; couponId: string; userEOA: string; tokenId: string; deadline: number; nonce: string; userSignature: string } } | { success: false; error: string }> => {
+	pointsCost?: string | number
+	usdcReward6?: string | number
+}): Promise<{
+	success: true
+	preChecked: {
+		cardAddress: string
+		couponId: string
+		userEOA: string
+		tokenId: string
+		deadline: number
+		nonce: string
+		userSignature: string
+		isSocialExchange?: boolean
+		pointsCost?: string
+		usdcReward6?: string
+	}
+} | { success: false; error: string }> => {
 	const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature } = body
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 	if (!userEOA || !ethers.isAddress(userEOA)) return { success: false, error: 'Invalid userEOA' }
@@ -15326,7 +15403,60 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 
 		// AA 由 Master `cardCouponOpenClaimProcess` 在 claim 前通过 `ensureAAForEOAOnCard` 自动创建（此处不拦截）。
 
+		const socialExchange = readSocialExchangeFromMetadata(matchedSeries.metadata ?? null)
 		const domain = await eip712DomainForClaimIssuedNftWithUserSig(cardNorm)
+
+		if (socialExchange) {
+			const pointsCostN = BigInt(socialExchange.pointsCost)
+			const usdcReward6N = socialExchange.kind === 'usdc' ? socialExchange.usdcReward6 : 0n
+			if (body.pointsCost != null && BigInt(body.pointsCost) !== pointsCostN) {
+				return { success: false, error: 'pointsCost does not match social exchange activity' }
+			}
+			if (socialExchange.kind === 'usdc') {
+				if (body.usdcReward6 == null || BigInt(body.usdcReward6) !== usdcReward6N) {
+					return { success: false, error: 'usdcReward6 does not match social exchange activity' }
+				}
+				const escrow = await readCardRewardEscrowUsdc6(cardNorm, cardProvider)
+				if (escrow == null) return { success: false, error: 'Could not verify USDC escrow balance' }
+				if (escrow < usdcReward6N) {
+					return { success: false, error: 'Insufficient USDC escrow for this social exchange activity' }
+				}
+			}
+			const pointsBal = await readUserRewardVoucher13BalanceOnCard(cardNorm, userNorm, cardProvider)
+			if (pointsBal == null) return { success: false, error: 'Could not verify social points balance' }
+			if (pointsBal < pointsCostN) {
+				return {
+					success: false,
+					error: `Insufficient social points. Need ${pointsCostN.toString()}, available ${pointsBal.toString()}.`,
+				}
+			}
+			const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_SOCIAL_EXCHANGE_WITH_USER_SIG_TYPE, {
+				cardAddress: cardNorm,
+				tokenId: tokenIdN,
+				pointsCost: pointsCostN,
+				usdcReward6: usdcReward6N,
+				deadline: Number(deadline),
+				nonce: nonceBytes32,
+			})
+			const signer = ethers.recoverAddress(digest, userSignature)
+			if (ethers.getAddress(signer) !== userNorm) return { success: false, error: 'userSignature signer mismatch' }
+			return {
+				success: true,
+				preChecked: {
+					cardAddress: cardNorm,
+					couponId: couponIdTrimmed,
+					userEOA: userNorm,
+					tokenId: String(tokenIdN),
+					deadline: Number(deadline),
+					nonce: nonceBytes32,
+					userSignature: String(userSignature),
+					isSocialExchange: true,
+					pointsCost: String(pointsCostN),
+					usdcReward6: String(usdcReward6N),
+				},
+			}
+		}
+
 		const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
 			cardAddress: cardNorm,
 			tokenId: tokenIdN,
@@ -17308,21 +17438,89 @@ export const cardCouponOpenClaimProcess = async () => {
 		)
 
 		const cardChain = await resolveUserCardChain(obj.cardAddress)
-		const claimGateway = ethers.getAddress(await (await contractForClaimIssuedNftWithUserSig(SC, obj.cardAddress)).getAddress())
-		const tx = await relayUserCardFactoryCallViaEntryPoint({
-			SC,
-			chain: cardChain,
-			factoryAddress: claimGateway,
-			factoryCallData: new ethers.Interface(['function claimIssuedNftWithUserSig(address cardAddr,address userEOA,uint256 tokenId,uint256 deadline,bytes32 nonce,bytes userSignature)']).encodeFunctionData('claimIssuedNftWithUserSig', [
+		const cardNorm = ethers.getAddress(obj.cardAddress)
+		const cardProvider = providerForUserCardChain(cardChain)
+
+		let tx: ethers.ContractTransactionResponse
+		if (obj.isSocialExchange) {
+			const claimGateway = ethers.getAddress(
+				await (await contractForClaimIssuedNftWithUserSig(SC, obj.cardAddress)).getAddress(),
+			)
+			const factoryHasSocialClaim = await bytecodeHasSelector(
+				cardProvider,
+				claimGateway,
+				CLAIM_SOCIAL_EXCHANGE_FACTORY_SELECTOR,
+			)
+			const cardHasPlanA = await bytecodeHasSelector(cardProvider, cardNorm, CLAIM_SOCIAL_EXCHANGE_CARD_SELECTOR)
+			if (!factoryHasSocialClaim && cardHasPlanA) {
+				const cardClaimIface = new ethers.Interface(CLAIM_SOCIAL_EXCHANGE_CARD_ABI)
+				const cardCallData = cardClaimIface.encodeFunctionData('claimSocialExchangeWithUserSignature', [
+					obj.userEOA,
+					BigInt(obj.tokenId),
+					BigInt(obj.pointsCost ?? '0'),
+					BigInt(obj.usdcReward6 ?? '0'),
+					BigInt(obj.deadline),
+					obj.nonce as `0x${string}`,
+					obj.userSignature,
+				])
+				logger(
+					Colors.cyan(
+						`[cardCouponOpenClaimProcess] Plan A social exchange via card.claimSocialExchangeWithUserSignature card=${cardNorm}`,
+					),
+				)
+				tx = await relayUserCardCallViaEntryPoint({
+					SC,
+					chain: cardChain,
+					cardAddress: cardNorm,
+					cardCallData,
+					logTag: 'cardCouponOpenClaimProcess',
+				})
+			} else if (!factoryHasSocialClaim && !cardHasPlanA) {
+				throw new Error(
+					'Social exchange claim unavailable: redeploy merchant program card with latest initCode and run upgradeSocialExchangeModulesConet.ts',
+				)
+			} else {
+				const claimGatewayAddr = claimGateway
+				const claimIface = new ethers.Interface(CLAIM_ISSUED_NFT_WITH_USER_SIG_ABI)
+				const factoryCallData = claimIface.encodeFunctionData('claimSocialExchangeWithUserSig', [
+					obj.cardAddress,
+					obj.userEOA,
+					BigInt(obj.tokenId),
+					BigInt(obj.pointsCost ?? '0'),
+					BigInt(obj.usdcReward6 ?? '0'),
+					BigInt(obj.deadline),
+					obj.nonce as `0x${string}`,
+					obj.userSignature,
+				])
+				tx = await relayUserCardFactoryCallViaEntryPoint({
+					SC,
+					chain: cardChain,
+					factoryAddress: claimGatewayAddr,
+					factoryCallData,
+					logTag: 'cardCouponOpenClaimProcess',
+				})
+			}
+		} else {
+			const claimGateway = ethers.getAddress(
+				await (await contractForClaimIssuedNftWithUserSig(SC, obj.cardAddress)).getAddress(),
+			)
+			const claimIface = new ethers.Interface(CLAIM_ISSUED_NFT_WITH_USER_SIG_ABI)
+			const factoryCallData = claimIface.encodeFunctionData('claimIssuedNftWithUserSig', [
 				obj.cardAddress,
 				obj.userEOA,
 				BigInt(obj.tokenId),
 				BigInt(obj.deadline),
 				obj.nonce as `0x${string}`,
 				obj.userSignature,
-			]),
-			logTag: 'cardCouponOpenClaimProcess',
-		})
+			])
+			tx = await relayUserCardFactoryCallViaEntryPoint({
+				SC,
+				chain: cardChain,
+				factoryAddress: claimGateway,
+				factoryCallData,
+				logTag: 'cardCouponOpenClaimProcess',
+			})
+		}
 		const receipt = await tx.wait()
 		if (!receipt || receipt.status !== 1) {
 			throw new Error('Coupon open claim transaction failed')
@@ -17372,6 +17570,10 @@ export const cardCouponOpenClaimProcess = async () => {
 			clientError = 'Invalid card address or user address.'
 		} else if (/UC_ResolveAccountFailed|ResolveAccountFailed|ad12d341/i.test(errMsg) || /ResolveAccountFailed/i.test(errName)) {
 			clientError = 'User account not deployed on Base. Please deploy your Smart Account first before claiming coupons.'
+		} else if (/UC_InsufficientBalance/i.test(errMsg)) {
+			clientError = 'Insufficient social points for this exchange.'
+		} else if (/UC_RewardBudgetInsufficient/i.test(errMsg)) {
+			clientError = 'Merchant USDC escrow is insufficient for this exchange.'
 		} else if (/Failed to create AA|ensureAAForEOAOnCard/i.test(errMsg)) {
 			clientError = 'Failed to create Smart Account on Base. Please try again shortly.'
 		}
