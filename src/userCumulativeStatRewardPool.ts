@@ -83,6 +83,10 @@ export const DISPATCH_EVENT_REWARD13_SELECTOR =
 
 export const FUND_SOCIAL_EXCHANGE_USDC_ESCROW_SELECTOR =
 	CHARGE_REWARD_V2_IFACE.getFunction('fundSocialExchangeUsdcEscrow')?.selector ?? '0x00000000'
+export const CLAIM_SOCIAL_EXCHANGE_WITH_USER_SIGNATURE_SELECTOR =
+	new ethers.Interface([
+		'function claimSocialExchangeWithUserSignature(address userEOA,uint256 tokenId,uint256 pointsCost,uint256 usdcReward6,uint256 deadline,bytes32 nonce,bytes userSignature)',
+	]).getFunction('claimSocialExchangeWithUserSignature')?.selector ?? '0xef79d366'
 
 export function buildFundSocialExchangeUsdcEscrowCalldata(payerEOA: string, amount6: bigint | string | number): string {
 	return CHARGE_REWARD_V2_IFACE.encodeFunctionData('fundSocialExchangeUsdcEscrow', [
@@ -452,6 +456,39 @@ async function assertAdminStatsRoutesChargeRewardSelector(
 		// BeamioUserCardModuleKinds.CHARGE_REWARD = 5
 		if (kind !== 5) {
 			return `AdminStatsQueryModule routes ${label} to kind=${kind}, expected 5 (ChargeReward)`
+		}
+		return null
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		return err?.message ?? String(e)
+	}
+}
+
+/** Legacy merchant cards: claim via card fallback → IssuedNftModuleV2 (AdminStats routes selector). */
+export async function assertSocialExchangeClaimViaCardFallback(cardAddress: string): Promise<string | null> {
+	const routeErr = await assertAdminStatsRoutesIssuedNftSelector(
+		cardAddress,
+		CLAIM_SOCIAL_EXCHANGE_WITH_USER_SIGNATURE_SELECTOR,
+		'claimSocialExchangeWithUserSignature',
+	)
+	if (routeErr) return routeErr
+	try {
+		const chain = await resolveUserCardChain(cardAddress)
+		const provider = providerForUserCardChain(chain)
+		const gw = await getBeamioUserCardFactoryGateway(cardAddress)
+		const factory = new ethers.Contract(
+			gw,
+			['function defaultIssuedNftModule() view returns (address)'],
+			provider,
+		)
+		const mod = (await factory.defaultIssuedNftModule()) as string
+		if (!mod || mod === ethers.ZeroAddress) {
+			return 'factory defaultIssuedNftModule not configured (claimSocialExchangeWithUserSignature)'
+		}
+		const code = await provider.getCode(mod)
+		const needle = CLAIM_SOCIAL_EXCHANGE_WITH_USER_SIGNATURE_SELECTOR.slice(2).toLowerCase()
+		if (!code || code === '0x' || !code.toLowerCase().includes(needle)) {
+			return 'IssuedNftModule missing claimSocialExchangeWithUserSignature; run upgradeSocialExchangeModulesConet.ts'
 		}
 		return null
 	} catch (e: unknown) {

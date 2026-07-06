@@ -17451,8 +17451,17 @@ export const cardCouponOpenClaimProcess = async () => {
 				claimGateway,
 				CLAIM_SOCIAL_EXCHANGE_FACTORY_SELECTOR,
 			)
-			const cardHasPlanA = await bytecodeHasSelector(cardProvider, cardNorm, CLAIM_SOCIAL_EXCHANGE_CARD_SELECTOR)
-			if (!factoryHasSocialClaim && cardHasPlanA) {
+			const cardHasPlanANative = await bytecodeHasSelector(
+				cardProvider,
+				cardNorm,
+				CLAIM_SOCIAL_EXCHANGE_CARD_SELECTOR,
+			)
+			const { assertSocialExchangeClaimViaCardFallback } = await import('./userCumulativeStatRewardPool.js')
+			const fallbackErr = factoryHasSocialClaim
+				? null
+				: await assertSocialExchangeClaimViaCardFallback(cardNorm)
+			const cardCanClaimSocial = cardHasPlanANative || fallbackErr === null
+			if (!factoryHasSocialClaim && cardCanClaimSocial) {
 				const cardClaimIface = new ethers.Interface(CLAIM_SOCIAL_EXCHANGE_CARD_ABI)
 				const cardCallData = cardClaimIface.encodeFunctionData('claimSocialExchangeWithUserSignature', [
 					obj.userEOA,
@@ -17465,7 +17474,9 @@ export const cardCouponOpenClaimProcess = async () => {
 				])
 				logger(
 					Colors.cyan(
-						`[cardCouponOpenClaimProcess] Plan A social exchange via card.claimSocialExchangeWithUserSignature card=${cardNorm}`,
+						cardHasPlanANative
+							? `[cardCouponOpenClaimProcess] Plan A social exchange via card.claimSocialExchangeWithUserSignature (native) card=${cardNorm}`
+							: `[cardCouponOpenClaimProcess] Plan A social exchange via card fallback → IssuedNftModuleV2 card=${cardNorm}`,
 					),
 				)
 				tx = await relayUserCardCallViaEntryPoint({
@@ -17475,9 +17486,10 @@ export const cardCouponOpenClaimProcess = async () => {
 					cardCallData,
 					logTag: 'cardCouponOpenClaimProcess',
 				})
-			} else if (!factoryHasSocialClaim && !cardHasPlanA) {
+			} else if (!factoryHasSocialClaim && !cardCanClaimSocial) {
 				throw new Error(
-					'Social exchange claim unavailable: redeploy merchant program card with latest initCode and run upgradeSocialExchangeModulesConet.ts',
+					fallbackErr ??
+						'Social exchange claim unavailable: run upgradeSocialExchangeModulesConet.ts (AdminStats routes + IssuedNftModuleV2 claim) or redeploy merchant card with latest initCode',
 				)
 			} else {
 				const claimGatewayAddr = claimGateway
