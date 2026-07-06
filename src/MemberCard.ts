@@ -20,6 +20,11 @@ import {
 	resolveIssuedNftProductKindFromMetadataExtra,
 	resolveIssuedNftDistributionFieldsFromSeriesMetadata,
 } from './couponMetadataCategory'
+import {
+	normalizeTopupPromotionEntry,
+	topupPromotionToBonusRule,
+	type TopupPromotionNormalized,
+} from './programTopupPromotion'
 import { ensureShareTokenProgramIconAssembled } from './shareTokenProgramIcon'
 import { inspect } from 'util'
 import Colors from 'colors/safe'
@@ -11696,6 +11701,7 @@ export type CreateCardPreChecked = {
 		brandName?: string
 		/** Points token label for dashboard */
 		Symbol?: string
+		topupPromotion?: TopupPromotionNormalized
 		bonusRule?: CreateCardBonusRuleNormalized
 		bonusRules?: CreateCardBonusRuleNormalized[]
 		pointSystem?: CreateCardPointSystemNormalized
@@ -12007,15 +12013,24 @@ export const createCardPreCheck = (body: {
 				}
 			}
 		}
+		let normalizedTopupPromotion: TopupPromotionNormalized | undefined
+		if (stm.topupPromotion != null) {
+			const parsed = normalizeTopupPromotionEntry(stm.topupPromotion, 'shareTokenMetadata.topupPromotion')
+			if (!parsed.success) return { success: false, error: parsed.error }
+			normalizedTopupPromotion = parsed.promotion
+		}
 		let normalizedBonusRules: CreateCardBonusRuleNormalized[] | undefined
-		if (stm.bonusRules != null) {
+		if (normalizedTopupPromotion) {
+			const derived = topupPromotionToBonusRule(normalizedTopupPromotion)
+			if (derived) normalizedBonusRules = [derived]
+		} else if (stm.bonusRules != null) {
 			if (!Array.isArray(stm.bonusRules)) {
 				return { success: false, error: 'shareTokenMetadata.bonusRules must be an array if provided' }
 			}
 			if (stm.bonusRules.length > CREATE_CARD_BONUS_RULES_MAX) {
 				return {
 					success: false,
-					error: `shareTokenMetadata.bonusRules must have at most ${CREATE_CARD_BONUS_RULES_MAX} entries`,
+					error: `shareTokenMetadata.bonusRules must have at most ${CREATE_CARD_BONUS_RULES_MAX} entries (prefer topupPromotion for a single global rule)`,
 				}
 			}
 			normalizedBonusRules = []
@@ -12025,7 +12040,7 @@ export const createCardPreCheck = (body: {
 				normalizedBonusRules.push(parsed.rule)
 			}
 		}
-		if (stm.bonusRule != null) {
+		if (stm.bonusRule != null && !normalizedTopupPromotion) {
 			const parsed = normalizeCreateCardBonusRuleEntry(stm.bonusRule, 'shareTokenMetadata.bonusRule')
 			if (!parsed.success) return { success: false, error: parsed.error }
 			if (normalizedBonusRules && normalizedBonusRules.length > 0) {
@@ -12137,7 +12152,17 @@ export const createCardPreCheck = (body: {
 			if (sym.length > 0) meta.Symbol = sym.slice(0, CREATE_CARD_SYMBOL_MAX_LEN)
 		}
 		let bonusRulesOut: CreateCardBonusRuleNormalized[] | undefined
-		if (stm.bonusRules != null && Array.isArray(stm.bonusRules)) {
+		if (stm.topupPromotion != null && typeof stm.topupPromotion === 'object') {
+			const p = normalizeTopupPromotionEntry(stm.topupPromotion, 'topupPromotion')
+			if (p.success) {
+				meta.topupPromotion = p.promotion
+				const derived = topupPromotionToBonusRule(p.promotion)
+				if (derived) {
+					meta.bonusRule = derived
+					meta.bonusRules = [derived]
+				}
+			}
+		} else if (stm.bonusRules != null && Array.isArray(stm.bonusRules)) {
 			bonusRulesOut = []
 			for (const br of stm.bonusRules) {
 				const p = normalizeCreateCardBonusRuleEntry(br, 'bonusRules')
@@ -12145,7 +12170,7 @@ export const createCardPreCheck = (body: {
 			}
 			if (bonusRulesOut.length === 0) bonusRulesOut = undefined
 		}
-		if (stm.bonusRule != null && typeof stm.bonusRule === 'object') {
+		if (stm.bonusRule != null && typeof stm.bonusRule === 'object' && !meta.topupPromotion) {
 			const p = normalizeCreateCardBonusRuleEntry(stm.bonusRule, 'bonusRule')
 			if (p.success) {
 				if (bonusRulesOut && bonusRulesOut.length > 0) {
