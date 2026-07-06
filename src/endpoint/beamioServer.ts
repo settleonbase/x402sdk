@@ -570,6 +570,42 @@ const postLocalhostBuffer = (path: string, obj: any): Promise<{ statusCode: numb
 		req.end()
 	})
 
+/** SUN 校验通过后 tag 未绑定时，同步转发 Master getUIDAssetsProvision（provision EOA + ensure AA）。 */
+const ensureNfcTagProvisionedViaMaster = async (params: {
+	uid: string
+	tagIdHex: string
+	e?: string
+	c?: string
+	m?: string
+	logPrefix?: string
+}): Promise<{ ok: true; eoa: string } | { ok: false; statusCode: number; error: string }> => {
+	const prefix = params.logPrefix ?? '[ensureNfcTagProvision]'
+	logger(Colors.cyan(`${prefix} tagId=${params.tagIdHex.slice(0, 8)}... 未绑定，转发 Master 创建`))
+	const { statusCode, body } = await postLocalhostBuffer('/api/getUIDAssetsProvision', {
+		uid: params.uid,
+		tagIdHex: params.tagIdHex,
+		e: params.e,
+		c: params.c,
+		m: params.m,
+	})
+	let parsed: { ok?: boolean; error?: string; address?: string }
+	try {
+		parsed = JSON.parse(body)
+	} catch {
+		return { ok: false, statusCode: statusCode >= 400 ? statusCode : 500, error: 'Invalid provision response' }
+	}
+	if (statusCode !== 200 || !parsed.address || !ethers.isAddress(parsed.address)) {
+		return {
+			ok: false,
+			statusCode: statusCode >= 400 ? statusCode : 500,
+			error: parsed.error ?? 'Failed to provision NFC wallet',
+		}
+	}
+	const eoa = ethers.getAddress(parsed.address)
+	logger(Colors.green(`${prefix} tagId=${params.tagIdHex.slice(0, 8)}... provisioned EOA=${eoa.slice(0, 10)}...`))
+	return { ok: true, eoa }
+}
+
 /** GET 请求转发到 master 并返回 body（用于缓存） */
 const getLocalhostBuffer = (path: string): Promise<{ statusCode: number; body: string }> =>
 	new Promise((resolve, reject) => {
@@ -2532,9 +2568,19 @@ const routing = ( router: Router ) => {
 				if (!sunResult.valid) {
 					return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
 				}
-				const eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
+				let eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
 				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
-					return res.status(403).json({ success: false, error: 'NFC card is not linked to a wallet' }).end()
+					const prov = await ensureNfcTagProvisionedViaMaster({
+						uid: uidTrim,
+						tagIdHex: sunResult.tagIdHex,
+						e: String(e ?? '').trim(),
+						c: String(c ?? '').trim(),
+						m: String(m ?? '').trim(),
+						logPrefix: '[payByNfcUidSignContainer]',
+					})
+					if (!prov.ok) {
+						return res.status(prov.statusCode).json({ success: false, error: prov.error }).end()
+					}
 				}
 			} catch (e: any) {
 				return res.status(403).json({ success: false, error: `SUN verification error: ${e?.message ?? e}` }).end()
@@ -3066,11 +3112,22 @@ const routing = ( router: Router ) => {
 				if (!topPrepGate.ok) {
 					return res.status(403).json({ success: false, error: topPrepGate.message, errorCode: topPrepGate.code }).end()
 				}
-				const eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
+				let eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
 				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
-					const err = { success: false, error: 'Card not provisioned. SUN valid but tagId not bound to wallet.' }
-					logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} 未绑定钱包 返回 403`))
-					return res.status(403).json(err).end()
+					const prov = await ensureNfcTagProvisionedViaMaster({
+						uid: uidTrim,
+						tagIdHex: sunResult.tagIdHex,
+						e: eTrim,
+						c: cTrim,
+						m: mTrim,
+						logPrefix: '[nfcTopupPrepare]',
+					})
+					if (!prov.ok) {
+						const err = { success: false, error: prov.error }
+						logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} provision 失败 返回 ${prov.statusCode}: ${prov.error}`))
+						return res.status(prov.statusCode).json(err).end()
+					}
+					eoaFromTag = prov.eoa
 				}
 				resolvedWallet = ethers.getAddress(eoaFromTag)
 				nfcSunTagForEnsure = sunResult.tagIdHex
@@ -4002,10 +4059,21 @@ const routing = ( router: Router ) => {
 					sessionUpdate({ state: 'error', error: topGate.message })
 					return res.status(403).json({ success: false, error: topGate.message, errorCode: topGate.code }).end()
 				}
-				const eoaFromTag = await getNfcRecipientAddressByTagId(tagIdHex)
+				let eoaFromTag = await getNfcRecipientAddressByTagId(tagIdHex)
 				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
-					sessionUpdate({ state: 'error', error: 'Card not provisioned' })
-					return res.status(403).json({ success: false, error: 'Card not provisioned. SUN valid but tagId not bound to wallet.' }).end()
+					const prov = await ensureNfcTagProvisionedViaMaster({
+						uid: uidTrim,
+						tagIdHex,
+						e: eTrim,
+						c: cTrim,
+						m: mTrim,
+						logPrefix: '[nfcUsdcTopup]',
+					})
+					if (!prov.ok) {
+						sessionUpdate({ state: 'error', error: prov.error })
+						return res.status(prov.statusCode).json({ success: false, error: prov.error }).end()
+					}
+					eoaFromTag = prov.eoa
 				}
 				recipientEOA = ethers.getAddress(eoaFromTag)
 			} catch (sunErr: any) {
@@ -4702,12 +4770,29 @@ const routing = ( router: Router ) => {
 						return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
 					}
 					tagIdHex = sunResult.tagIdHex
+					let eoaFromTag: string | null = null
 					try {
-						const eoaFromTag = await getNfcRecipientAddressByTagId(tagIdHex)
-						if (eoaFromTag && ethers.isAddress(eoaFromTag)) {
-							recipientEOA = ethers.getAddress(eoaFromTag)
+						const raw = await getNfcRecipientAddressByTagId(tagIdHex)
+						if (raw && ethers.isAddress(raw)) {
+							eoaFromTag = ethers.getAddress(raw)
 						}
 					} catch (_) { /* charge: best-effort */ }
+					if (!eoaFromTag) {
+						const prov = await ensureNfcTagProvisionedViaMaster({
+							uid: uidTrim,
+							tagIdHex,
+							e: eTrim,
+							c: cTrim,
+							m: mTrim,
+							logPrefix: '[nfcUsdcCharge]',
+						})
+						if (!prov.ok) {
+							sessionUpdate({ state: 'error', error: prov.error })
+							return res.status(prov.statusCode).json({ success: false, error: prov.error }).end()
+						}
+						eoaFromTag = prov.eoa
+					}
+					recipientEOA = eoaFromTag
 				} catch (sunErr: any) {
 					logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验异常: ${sunErr?.message ?? sunErr}`))
 					sessionUpdate({ state: 'error', error: `SUN verification error: ${sunErr?.message ?? sunErr}` })
