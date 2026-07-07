@@ -27,6 +27,7 @@ import {
 } from './programTopupPromotion'
 import { ensureShareTokenProgramIconAssembled } from './shareTokenProgramIcon'
 import { readSocialExchangeFromMetadata, REWARD_VOUCHER_TOKEN_ID } from './socialExchangeMetadata'
+import { syncCardProgramReferrerEventsFromReceipt } from './cardProgramReferrerDb'
 import { inspect } from 'util'
 import Colors from 'colors/safe'
 import BeamioUserCardABI from './ABI/BeamioUserCard.json'
@@ -8469,6 +8470,16 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 		if (recipientEOA && obj.cardAddr) {
 			syncNftTierMetadataForUser(obj.cardAddr, recipientEOA).catch((err: any) => {
 				logger(Colors.yellow(`[executeForAdminPostBaseProcess] syncNftTierMetadataForUser after nfcTopup: ${err?.message ?? err}`))
+			})
+		}
+		if (baseTxOk && resolvedReceipt && obj.cardAddr) {
+			void syncCardProgramReferrerEventsFromReceipt({
+				cardAddress: obj.cardAddr,
+				receipt: resolvedReceipt,
+				txHash: tx.hash,
+			}).catch((refIdxErr: unknown) => {
+				const msg = refIdxErr instanceof Error ? refIdxErr.message : String(refIdxErr)
+				logger(Colors.yellow(`[executeForAdminPostBaseProcess] cardProgramReferrer indexer non-critical: ${msg}`))
 			})
 		}
 	} catch (e: any) {

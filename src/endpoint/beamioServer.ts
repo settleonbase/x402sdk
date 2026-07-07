@@ -19,6 +19,17 @@ import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
+import {
+	listCardProgramRegisteredReferees,
+	listCardProgramReferees,
+	listCardProgramRefereesByReferrer,
+} from '../cardProgramReferrerDb'
+import {
+	readCardProgramReferrerChainSummary,
+	readRefereeChargePointsTotal6,
+	readRefereeCountByReferrer,
+	readReferrerRewardBalance,
+} from '../cardProgramReferrerChain'
 import { aaMultisigOfflineSubmitPreCheck } from '../aaMultisigOfflineSubmit'
 import {
 	cardBootstrapIssuedNftV2StatPreCheck,
@@ -9809,6 +9820,103 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const msg = err instanceof Error ? err.message : String(err)
 			logger(Colors.red('[cardProgramSocial] error:'), msg)
 			return res.status(500).json({ error: 'Failed to fetch card program social stats' })
+		}
+	})
+
+	/**
+	 * GET /api/cardProgramReferrers?cardAddress=0x…&mode=summary|referrers|refereesByReferrer|registeredReferees&referrerAA=&limit=&offset=
+	 * summary：链上 referrerTotalCount / registeredRefereeTotalCount（RPC 优先）+ DB 自启用后计数。
+	 * 列表模式替代 v28 主卡已移除的 getReferrersPage / getRefereesByReferrerPage / getRegisteredRefereesPage。
+	 */
+	router.get('/cardProgramReferrers', async (req, res) => {
+		const q = req.query as {
+			cardAddress?: string
+			mode?: string
+			referrerAA?: string
+			limit?: string
+			offset?: string
+		}
+		const { cardAddress, mode, referrerAA, limit: limitQ, offset: offsetQ } = q
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ error: 'Invalid cardAddress: require valid 0x address' })
+		}
+		const m = String(mode || 'summary').toLowerCase()
+		const parsedLimit = limitQ != null && String(limitQ).trim() !== '' ? Number(limitQ) : 20
+		const limit = Math.min(Math.max(Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : 20, 1), 2000)
+		const parsedOffset = offsetQ != null && String(offsetQ).trim() !== '' ? Number(offsetQ) : 0
+		const offset = Number.isFinite(parsedOffset) && parsedOffset > 0 ? Math.floor(parsedOffset) : 0
+		const addrNorm = ethers.getAddress(cardAddress)
+		try {
+			if (m === 'summary') {
+				const chainTotals = await readCardProgramReferrerChainSummary(cardAddress)
+				const dbRegistered = await listCardProgramRegisteredReferees(cardAddress, { limit: 1, offset: 0 })
+				const dbReferrers = await listCardProgramReferees(cardAddress, { limit: 1, offset: 0 })
+				return res.status(200).json({
+					mode: 'summary',
+					cardAddress: addrNorm,
+					chainReferrerTotalCount: chainTotals.referrerTotalCount,
+					chainRegisteredRefereeTotalCount: chainTotals.registeredRefereeTotalCount,
+					dbRegisteredRefereeTotal: dbRegistered.total,
+					dbReferrerTotal: dbReferrers.total,
+				})
+			}
+			if (m === 'referrers') {
+				const page = await listCardProgramReferees(cardAddress, { limit, offset })
+				const referrers = await Promise.all(
+					page.items.map(async (row) => ({
+						referrerAa: row.referrerAa,
+						refereeCount: row.refereeCount,
+						chainRefereeCount: await readRefereeCountByReferrer(cardAddress, row.referrerAa),
+						referrerRewardBalance: await readReferrerRewardBalance(cardAddress, row.referrerAa),
+					})),
+				)
+				return res.status(200).json({
+					mode: 'referrers',
+					cardAddress: addrNorm,
+					total: page.total,
+					limit,
+					offset,
+					referrers,
+				})
+			}
+			if (m === 'refereesbyreferrer') {
+				if (!referrerAA || !ethers.isAddress(referrerAA)) {
+					return res.status(400).json({ error: 'referrerAA required for mode=refereesByReferrer' })
+				}
+				const referrerNorm = ethers.getAddress(referrerAA)
+				const page = await listCardProgramRefereesByReferrer(cardAddress, referrerNorm, { limit, offset })
+				const referees = await Promise.all(
+					page.items.map(async (row) => ({
+						...row,
+						refereeChargePointsTotal6: await readRefereeChargePointsTotal6(cardAddress, row.refereeAa),
+					})),
+				)
+				return res.status(200).json({
+					mode: 'refereesByReferrer',
+					cardAddress: addrNorm,
+					referrerAA: referrerNorm,
+					total: page.total,
+					limit,
+					offset,
+					referees,
+				})
+			}
+			if (m === 'registeredreferees') {
+				const page = await listCardProgramRegisteredReferees(cardAddress, { limit, offset })
+				return res.status(200).json({
+					mode: 'registeredReferees',
+					cardAddress: addrNorm,
+					total: page.total,
+					limit,
+					offset,
+					referees: page.items,
+				})
+			}
+			return res.status(400).json({ error: 'Invalid mode: use summary|referrers|refereesByReferrer|registeredReferees' })
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err)
+			logger(Colors.red('[cardProgramReferrers] error:'), msg)
+			return res.status(500).json({ error: 'Failed to fetch card program referrer registry' })
 		}
 	})
 
