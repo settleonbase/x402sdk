@@ -33,6 +33,7 @@ import {
 import { aaMultisigOfflineSubmitPreCheck } from '../aaMultisigOfflineSubmit'
 import {
 	cardBootstrapIssuedNftV2StatPreCheck,
+	cardConfigureEventRewardRuleGatewayPreCheck,
 	cardConfigureEventRewardRulePreCheck,
 	cardDispatchEventReward13PreCheck,
 	cardGatewayInitializeUserCumulativeStatPreCheck,
@@ -7291,6 +7292,27 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
 		)
 		postLocalhost('/api/executeForOwner', preCheck.preChecked, res)
+	})
+
+	/** Gateway-only：configureEventRewardRule（Social Promotion 保存；与 link click 发奖同 gateway 队列，无需 owner/admin 签名）。 */
+	router.post('/cardConfigureEventRewardRuleGateway', async (req, res) => {
+		const preCheck = await cardConfigureEventRewardRuleGatewayPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(
+				Colors.red(`server /api/cardConfigureEventRewardRuleGateway preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardConfigureEventRewardRuleGateway preCheck OK → cardGatewayRewardPool`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress, ruleId: req.body?.ruleId }, false, 2, true),
+		)
+		postLocalhost(
+			'/api/cardGatewayRewardPool',
+			{ ...preCheck.preChecked, label: 'configureEventRewardRule' },
+			res,
+		)
 	})
 
 	/** Gateway-only：purchaseRewardProgram（Master gatewayInvokeCard 队列）。 */

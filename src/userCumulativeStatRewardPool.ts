@@ -135,6 +135,15 @@ const EXECUTE_FOR_OWNER_TYPES = {
 	],
 }
 
+const EXECUTE_FOR_ADMIN_TYPES = {
+	ExecuteForAdmin: [
+		{ name: 'cardAddress', type: 'address' },
+		{ name: 'dataHash', type: 'bytes32' },
+		{ name: 'deadline', type: 'uint256' },
+		{ name: 'nonce', type: 'bytes32' },
+	],
+}
+
 export function buildInitializeCardUserCumulativeStatCalldata(): string {
 	return USER_CUMULATIVE_STAT_IFACE.encodeFunctionData('initializeCardUserCumulativeStatTokens', [])
 }
@@ -446,6 +455,51 @@ async function verifyExecuteForOwnerOwnerSignature(params: {
 	return { ok: true, owner: ethers.getAddress(owner) }
 }
 
+async function verifyExecuteForAdminAdminSignature(params: {
+	cardAddress: string
+	data: string
+	deadline: number
+	nonce: string
+	adminSignature: string
+}): Promise<{ ok: true; signer: string } | { ok: false; error: string }> {
+	const card = ethers.getAddress(params.cardAddress)
+	const chain = await resolveUserCardChain(card)
+	const provider = providerForUserCardChain(chain)
+	const code = await provider.getCode(card)
+	if (!code || code === '0x') return { ok: false, error: 'Card contract not found on CoNET' }
+
+	const verifyingContract = await getBeamioUserCardFactoryGateway(card)
+	const chainId = chainIdForUserCardChain(chain)
+	const domain = {
+		name: 'BeamioUserCardFactory',
+		version: '1',
+		chainId,
+		verifyingContract,
+	}
+	const dataHash = ethers.keccak256(params.data)
+	const nonceBytes =
+		params.nonce.length === 66 && params.nonce.startsWith('0x')
+			? (params.nonce as `0x${string}`)
+			: (ethers.keccak256(ethers.toUtf8Bytes(params.nonce)) as `0x${string}`)
+	const value = {
+		cardAddress: card,
+		dataHash,
+		deadline: Number(params.deadline),
+		nonce: nonceBytes,
+	}
+	const digest = ethers.TypedDataEncoder.hash(domain, EXECUTE_FOR_ADMIN_TYPES, value)
+	const signer = ethers.recoverAddress(digest, params.adminSignature)
+	const cardReader = new ethers.Contract(card, ['function isAdmin(address) view returns (bool)'], provider)
+	const isAdmin = (await cardReader.isAdmin(signer)) as boolean
+	if (!isAdmin) {
+		return { ok: false, error: `Signer is not card admin (recovered=${ethers.getAddress(signer)})` }
+	}
+	if (Number(params.deadline) < Math.floor(Date.now() / 1000)) {
+		return { ok: false, error: 'deadline expired' }
+	}
+	return { ok: true, signer: ethers.getAddress(signer) }
+}
+
 async function assertAdminStatsRoutesIssuedNftSelector(
 	cardAddress: string,
 	selector: string,
@@ -555,6 +609,14 @@ export type ExecuteForOwnerForwardBody = {
 	deadline: number
 	nonce: string
 	ownerSignature: string
+}
+
+export type ExecuteForAdminForwardBody = {
+	cardAddress: string
+	data: string
+	deadline: number
+	nonce: string
+	adminSignature: string
 }
 
 /** Cluster：卡主 initializeCardUserCumulativeStatTokens（幂等；已初始化则拒绝）。 */
@@ -692,6 +754,90 @@ export const cardBootstrapIssuedNftV2StatPreCheck = async (body: {
 	}
 }
 
+function configureEventRewardRuleCalldataFromBody(body: {
+	data?: string
+	ruleId?: string | number
+	active?: boolean
+	eventKind?: number
+	targetKind?: number
+	issuedParentId?: string | number
+	actorMint13?: string | number
+	refMint13?: string | number
+}): { ok: true; data: string } | { ok: false; error: string } {
+	const data =
+		body.data && typeof body.data === 'string' && body.data.length >= 10
+			? body.data
+			: buildConfigureEventRewardRuleCalldata({
+					ruleId: body.ruleId ?? 0,
+					active: body.active !== false,
+					eventKind: Number(body.eventKind ?? 0),
+					targetKind: Number(body.targetKind ?? 0),
+					issuedParentId: body.issuedParentId ?? 0,
+					actorMint13: body.actorMint13 ?? 0,
+					refMint13: body.refMint13 ?? 0,
+				})
+	if (data.slice(0, 10).toLowerCase() !== CONFIGURE_EVENT_REWARD_RULE_SELECTOR.toLowerCase()) {
+		return { ok: false, error: 'data must be configureEventRewardRule(...) calldata' }
+	}
+	return { ok: true, data }
+}
+
+/** Cluster：card admin 配置 #13 奖励规则 configureEventRewardRule（executeForAdmin → onlyOwnerOrGateway）。 */
+export const cardConfigureEventRewardRuleAdminPreCheck = async (body: {
+	cardAddress?: string
+	ruleId?: string | number
+	active?: boolean
+	eventKind?: number
+	targetKind?: number
+	issuedParentId?: string | number
+	actorMint13?: string | number
+	refMint13?: string | number
+	deadline?: number
+	nonce?: string
+	adminSignature?: string
+	data?: string
+}): Promise<{ success: true; preChecked: ExecuteForAdminForwardBody } | { success: false; error: string }> => {
+	const { cardAddress, deadline, nonce, adminSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (deadline == null || !nonce || !adminSignature) {
+		return { success: false, error: 'Missing deadline, nonce, or adminSignature' }
+	}
+	const calldata = configureEventRewardRuleCalldataFromBody(body)
+	if (!calldata.ok) return { success: false, error: calldata.error }
+	try {
+		const card = ethers.getAddress(cardAddress)
+		const routeErr = await assertAdminStatsRoutesChargeRewardSelector(
+			card,
+			CONFIGURE_EVENT_REWARD_RULE_SELECTOR,
+			'configureEventRewardRule',
+		)
+		if (routeErr) return { success: false, error: routeErr }
+
+		const sig = await verifyExecuteForAdminAdminSignature({
+			cardAddress: card,
+			data: calldata.data,
+			deadline: Number(deadline),
+			nonce: String(nonce),
+			adminSignature: String(adminSignature),
+		})
+		if (!sig.ok) return { success: false, error: sig.error }
+
+		return {
+			success: true,
+			preChecked: {
+				cardAddress: card,
+				data: calldata.data,
+				deadline: Number(deadline),
+				nonce: String(nonce),
+				adminSignature: String(adminSignature),
+			},
+		}
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		return { success: false, error: err?.message ?? String(e) }
+	}
+}
+
 /** Cluster：owner 配置 #13 奖励规则 configureEventRewardRule。 */
 export const cardConfigureEventRewardRulePreCheck = async (body: {
 	cardAddress?: string
@@ -712,21 +858,8 @@ export const cardConfigureEventRewardRulePreCheck = async (body: {
 	if (deadline == null || !nonce || !ownerSignature) {
 		return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
 	}
-	const data =
-		body.data && typeof body.data === 'string' && body.data.length >= 10
-			? body.data
-			: buildConfigureEventRewardRuleCalldata({
-					ruleId: body.ruleId ?? 0,
-					active: body.active !== false,
-					eventKind: Number(body.eventKind ?? 0),
-					targetKind: Number(body.targetKind ?? 0),
-					issuedParentId: body.issuedParentId ?? 0,
-					actorMint13: body.actorMint13 ?? 0,
-					refMint13: body.refMint13 ?? 0,
-				})
-	if (data.slice(0, 10).toLowerCase() !== CONFIGURE_EVENT_REWARD_RULE_SELECTOR.toLowerCase()) {
-		return { success: false, error: 'data must be configureEventRewardRule(...) calldata' }
-	}
+	const calldata = configureEventRewardRuleCalldataFromBody(body)
+	if (!calldata.ok) return { success: false, error: calldata.error }
 	try {
 		const card = ethers.getAddress(cardAddress)
 		const routeErr = await assertAdminStatsRoutesChargeRewardSelector(
@@ -738,7 +871,7 @@ export const cardConfigureEventRewardRulePreCheck = async (body: {
 
 		const sig = await verifyExecuteForOwnerOwnerSignature({
 			cardAddress: card,
-			data,
+			data: calldata.data,
 			deadline: Number(deadline),
 			nonce: String(nonce),
 			ownerSignature: String(ownerSignature),
@@ -749,11 +882,64 @@ export const cardConfigureEventRewardRulePreCheck = async (body: {
 			success: true,
 			preChecked: {
 				cardAddress: card,
-				data,
+				data: calldata.data,
 				deadline: Number(deadline),
 				nonce: String(nonce),
 				ownerSignature: String(ownerSignature),
 			},
+		}
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		return { success: false, error: err?.message ?? String(e) }
+	}
+}
+
+/** Cluster：gateway configureEventRewardRule（与 cardDispatchEventReward13 同路径，无需 owner/admin 签名）。 */
+export const cardConfigureEventRewardRuleGatewayPreCheck = async (body: {
+	cardAddress?: string
+	ruleId?: string | number
+	active?: boolean
+	eventKind?: number
+	targetKind?: number
+	issuedParentId?: string | number
+	actorMint13?: string | number
+	refMint13?: string | number
+}): Promise<{ success: true; preChecked: GatewayRewardPoolForwardBody } | { success: false; error: string }> => {
+	if (!body.cardAddress || !ethers.isAddress(body.cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	const ruleId = BigInt(body.ruleId ?? 0)
+	if (ruleId <= 0n) return { success: false, error: 'ruleId must be > 0' }
+	const eventKind = Number(body.eventKind ?? 0)
+	const targetKind = Number(body.targetKind ?? 0)
+	const issuedParentId = BigInt(body.issuedParentId ?? 0)
+	const active = body.active !== false
+	const actorMint13 = active ? BigInt(body.actorMint13 ?? 0) : 0n
+	const refMint13 = active ? BigInt(body.refMint13 ?? 0) : 0n
+	if (active && actorMint13 <= 0n && refMint13 <= 0n) {
+		return { success: false, error: 'active rule requires actorMint13 or refMint13 > 0' }
+	}
+	const comboErr = validateMetricTargetCombo(eventKind, targetKind, issuedParentId)
+	if (comboErr) return { success: false, error: comboErr }
+	try {
+		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
+		if ('error' in base) return { success: false, error: base.error }
+		const cardCalldata = buildConfigureEventRewardRuleCalldata({
+			ruleId,
+			active,
+			eventKind,
+			targetKind,
+			issuedParentId,
+			actorMint13,
+			refMint13,
+		})
+		const routeErr = await assertAdminStatsRoutesChargeRewardSelector(
+			base.card,
+			CONFIGURE_EVENT_REWARD_RULE_SELECTOR,
+			'configureEventRewardRule',
+		)
+		if (routeErr) return { success: false, error: routeErr }
+		return {
+			success: true,
+			preChecked: buildGatewayRewardPoolForwardBody(base.card, cardCalldata),
 		}
 	} catch (e: unknown) {
 		const err = e as { message?: string }
