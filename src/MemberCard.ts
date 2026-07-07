@@ -4997,6 +4997,26 @@ export const claimBUnitsPreCheck = (body: {
 export const claimBUnitsProcess = async () => {
 	const obj = claimBUnitsPool.shift()
 	if (!obj) return
+
+	// 首次 claim B-Unit，检测 EOA 是否在 conet 已经存在 AA，如果没有则为 eoa 创建 AA
+	let aaAddress = ''
+	try {
+		logger(Colors.cyan(`[claimBUnitsProcess] ensuring AA for claimant EOA: ${obj.claimant}`))
+		aaAddress = await ensureAAForEOAOnConet(obj.claimant)
+		logger(Colors.cyan(`[claimBUnitsProcess] AA ensured for claimant EOA: ${obj.claimant} -> AA=${aaAddress}`))
+
+		// 如果成功获取/创建了 AA，且没有指定其它的 mintBeneficiary，我们自动将其设置为该 AA 账户，
+		// 这样 B-Unit 就会直接被 首次 领入 AA 智能钱包中
+		if (aaAddress && ethers.isAddress(aaAddress) && aaAddress !== ethers.ZeroAddress) {
+			if (!obj.mintBeneficiary || obj.mintBeneficiary === ethers.ZeroAddress || obj.mintBeneficiary.toLowerCase() === obj.claimant.toLowerCase()) {
+				obj.mintBeneficiary = aaAddress
+				logger(Colors.cyan(`[claimBUnitsProcess] automatically mapped mintBeneficiary to claimant's AA: ${aaAddress}`))
+			}
+		}
+	} catch (aaEx: any) {
+		logger(Colors.red(`[claimBUnitsProcess] non-fatal: ensure AA for claimant EOA failed: ${aaEx?.message ?? aaEx}`))
+	}
+
 	const SC = Settle_ContractPool.shift()
 	if (!SC) {
 		claimBUnitsPool.unshift(obj)

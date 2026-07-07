@@ -1171,6 +1171,16 @@ const addUserPoolProcess = async () => {
 		}
 
 		await updateUserDB(obj.account)
+
+		// 注册 @tag 成功后，检测 EOA 是否在 conet 拥有 AA，如果没有则为 eoa 创建 AA
+		try {
+			const { ensureAAForEOAOnConet } = await import('./MemberCard.js')
+			logger(`[addUserPoolProcess] ensuring AA for registered user: wallet=${obj.wallet}`)
+			const aaAddr = await ensureAAForEOAOnConet(obj.wallet)
+			logger(`[addUserPoolProcess] AA ensured for registered user: wallet=${obj.wallet} -> AA=${aaAddr}`)
+		} catch (aaEx: any) {
+			logger(Colors.red(`[addUserPoolProcess] non-fatal: ensure AA for registered user failed: ${aaEx?.message ?? aaEx}`))
+		}
 		
 		// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial。
 		// 先用 getAccount 探测 BeamioOfficial 是否已经在 registry 上注册；
