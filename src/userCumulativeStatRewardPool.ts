@@ -263,6 +263,58 @@ export function buildDispatchEventReward13Calldata(args: {
 	])
 }
 
+/** bizSite programSocialPromotion — merchant card top-up slot (ruleId=2). */
+export const SOCIAL_PROMOTION_TOPUP_RULE_ID = 2
+/** UserCumulativeStatLib.METRIC_TOPUP */
+export const UC_METRIC_TOPUP = 1
+
+export type ActiveTopupSocialRewardRule = {
+	ruleId: number
+	targetKind: number
+	issuedParentId: bigint
+	actorMint13: bigint
+	refMint13: bigint
+}
+
+/** Active merchant top-up #13 rule from getRewardRule(2); null when inactive or untrusted read. */
+export async function readActiveTopupSocialRewardRule(
+	cardAddress: string,
+): Promise<ActiveTopupSocialRewardRule | null> {
+	try {
+		const card = ethers.getAddress(cardAddress)
+		const chain = await resolveUserCardChain(card)
+		if (chain !== 'conet') return null
+		const provider = providerForUserCardChain(chain)
+		const reader = new ethers.Contract(
+			card,
+			[
+				'function getRewardRule(uint256 ruleId) view returns (bool active, uint8 eventKind, uint8 targetKind, uint256 issuedParentId, uint256 actorMint13, uint256 refMint13)',
+			],
+			provider,
+		)
+		const row = (await reader.getRewardRule(SOCIAL_PROMOTION_TOPUP_RULE_ID)) as [
+			boolean,
+			number,
+			number,
+			bigint,
+			bigint,
+			bigint,
+		]
+		const [active, eventKind, targetKind, issuedParentId, actorMint13, refMint13] = row
+		if (!active || Number(eventKind) !== UC_METRIC_TOPUP) return null
+		if (actorMint13 <= 0n && refMint13 <= 0n) return null
+		return {
+			ruleId: SOCIAL_PROMOTION_TOPUP_RULE_ID,
+			targetKind: Number(targetKind),
+			issuedParentId,
+			actorMint13,
+			refMint13,
+		}
+	} catch {
+		return null
+	}
+}
+
 const FACTORY_GATEWAY_IFACE = new ethers.Interface([
 	'function gatewayInvokeCard(address cardAddr, bytes data) returns (bytes)',
 ])

@@ -15,6 +15,7 @@ import {
   BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
   BASE_BEAMIO_USER_CARD_UPDATE_LIB,
   BASE_BEAMIO_USER_CARD_VIEWS_LIB,
+  BASE_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB,
   BASE_CARD_FACTORY,
 } from './chainAddresses'
 import {
@@ -176,6 +177,7 @@ export function resolveBeamioUserCardLibraryAddresses(
     BeamioUserCardTransferLib: BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
     BeamioUserCardUpdateLib: BASE_BEAMIO_USER_CARD_UPDATE_LIB,
     BeamioUserCardViewsLib: BASE_BEAMIO_USER_CARD_VIEWS_LIB,
+    BeamioUserCardMembershipGateLib: BASE_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB,
   }
   const out: BeamioUserCardLibraryAddresses = {}
   for (const libName of Object.keys(defaults)) {
@@ -189,6 +191,41 @@ export function resolveBeamioUserCardLibraryAddresses(
     out[libName] = normalized
   }
   return out
+}
+
+/** EIP-170 runtime bytecode limit (24 KiB). */
+export const BEAMIO_USER_CARD_EIP170_MAX_BYTES = 24576
+
+/** Fail fast when linked deployed bytecode would exceed EIP-170 (BM_DeployFailedAtStep(0)). */
+export function assertBeamioUserCardLinkedDeployedBytecodeFitsEip170(
+  libraryAddresses?: BeamioUserCardLibraryAddresses
+): void {
+  const artifact = BeamioUserCardArtifact as {
+    deployedBytecode: string
+    linkReferences?: Record<string, Record<string, unknown[]>>
+  }
+  if (!artifact?.deployedBytecode) {
+    throw new Error('BeamioUserCard artifact missing deployedBytecode')
+  }
+  let deployed = artifact.deployedBytecode
+  const lr = artifact.linkReferences
+  if (lr && Object.keys(lr).length > 0) {
+    const libs = resolveBeamioUserCardLibraryAddresses(libraryAddresses)
+    if (!libs) {
+      throw new Error(
+        'BeamioUserCard library addresses incomplete (including BeamioUserCardMembershipGateLib). ' +
+          'Run ensureConetUserCardLibraries and sync chainAddresses.ts.'
+      )
+    }
+    deployed = linkBeamioUserCardBytecode(deployed, lr, libs)
+  }
+  const bytes = (deployed.length - 2) / 2
+  if (bytes > BEAMIO_USER_CARD_EIP170_MAX_BYTES) {
+    throw new Error(
+      `BeamioUserCard deployed bytecode ${bytes} bytes exceeds EIP-170 limit ${BEAMIO_USER_CARD_EIP170_MAX_BYTES} ` +
+        `(createCard would fail with BM_DeployFailedAtStep(0)). Recompile with Scheme C/A/B size reductions.`
+    )
+  }
 }
 
 export type CreateBeamioCardOptions = {
@@ -357,6 +394,7 @@ async function buildBeamioUserCardInitCodeFromParams(
       )
     }
     bytecode = linkBeamioUserCardBytecode(bytecode, lr, libs)
+    assertBeamioUserCardLinkedDeployedBytecodeFitsEip170(libraryAddresses)
   }
 
   const factory = new ethers.ContractFactory(artifact.abi, bytecode)
@@ -374,8 +412,6 @@ async function buildBeamioUserCardInitCodeFromParams(
   if (!initCode) throw new Error('Failed to build BeamioUserCard initCode')
   return initCode
 }
-
-
 
 /**
  * 使用已实例化的工厂合约创建 BeamioUserCard，并返回新卡地址。

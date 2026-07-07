@@ -56,33 +56,6 @@
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "ECDSAInvalidSignature",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "length",
-        "type": "uint256"
-      }
-    ],
-    "name": "ECDSAInvalidSignatureLength",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "s",
-        "type": "bytes32"
-      }
-    ],
-    "name": "ECDSAInvalidSignatureS",
-    "type": "error"
-  },
-  {
     "inputs": [
       {
         "internalType": "address",
@@ -218,11 +191,6 @@
   },
   {
     "inputs": [],
-    "name": "UC_BelowMinThreshold",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "UC_GlobalMisconfigured",
     "type": "error"
   },
@@ -253,43 +221,6 @@
     "type": "error"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "recovered",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "expected",
-        "type": "address"
-      }
-    ],
-    "name": "UC_InvalidSignature",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "nowTs",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "validAfter",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "validBefore",
-        "type": "uint256"
-      }
-    ],
-    "name": "UC_InvalidTimeWindow",
-    "type": "error"
-  },
-  {
     "inputs": [],
     "name": "UC_InvalidUpgradeType",
     "type": "error"
@@ -297,11 +228,6 @@
   {
     "inputs": [],
     "name": "UC_NoBeamioAccount",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_NonceUsed",
     "type": "error"
   },
   {
@@ -2165,49 +2091,6 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "userEOA",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "pointsCost",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "usdcReward6",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "deadline",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "nonce",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "bytes",
-        "name": "userSignature",
-        "type": "bytes"
-      }
-    ],
-    "name": "claimSocialExchangeWithUserSignature",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
         "name": "subordinate",
         "type": "address"
       },
@@ -2583,123 +2466,6 @@
         "internalType": "struct NFTDetail[]",
         "name": "nfts",
         "type": "tuple[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "referrerAA",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "offset",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "pageSize",
-        "type": "uint256"
-      }
-    ],
-    "name": "getRefereesByReferrerPage",
-    "outputs": [
-      {
-        "internalType": "address[]",
-        "name": "referees",
-        "type": "address[]"
-      },
-      {
-        "internalType": "uint256[]",
-        "name": "refereeChargeTotals6",
-        "type": "uint256[]"
-      },
-      {
-        "internalType": "uint256",
-        "name": "total",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "nextOffset",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "offset",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "pageSize",
-        "type": "uint256"
-      }
-    ],
-    "name": "getReferrersPage",
-    "outputs": [
-      {
-        "internalType": "address[]",
-        "name": "referrers",
-        "type": "address[]"
-      },
-      {
-        "internalType": "uint256[]",
-        "name": "referrerRewardBalances",
-        "type": "uint256[]"
-      },
-      {
-        "internalType": "uint256",
-        "name": "total",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "nextOffset",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "offset",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "pageSize",
-        "type": "uint256"
-      }
-    ],
-    "name": "getRegisteredRefereesPage",
-    "outputs": [
-      {
-        "internalType": "address[]",
-        "name": "referees",
-        "type": "address[]"
-      },
-      {
-        "internalType": "uint256",
-        "name": "total",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "nextOffset",
-        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -3842,6 +3608,19 @@
       {
         "internalType": "uint256",
         "name": "tierExpirySeconds",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "tiersLength",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
         "type": "uint256"
       }
     ],

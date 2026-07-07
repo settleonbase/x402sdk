@@ -86,6 +86,7 @@ import {
 import {
 	createBeamioCardWithFactory,
 	createBeamioCardWithFactoryReturningHash,
+	assertBeamioUserCardLinkedDeployedBytecodeFitsEip170,
 	type BeamioUserCardLibraryAddresses,
 } from './CCSA'
 
@@ -124,24 +125,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 function beamioUserCardLibrariesFromConfig(override?: BeamioUserCardLibraryAddresses): BeamioUserCardLibraryAddresses {
 	if (override) return override
-	const defaults: BeamioUserCardLibraryAddresses = {
-		BeamioUserCardAdminGatewayLib: BASE_BEAMIO_USER_CARD_ADMIN_GATEWAY_LIB,
-		BeamioUserCardFaucetGatewayLib: BASE_BEAMIO_USER_CARD_FAUCET_GATEWAY_LIB,
-		BeamioUserCardFormattingLib: BASE_BEAMIO_USER_CARD_FORMATTING_LIB,
-		BeamioUserCardGatewayMintLib: BASE_BEAMIO_USER_CARD_GATEWAY_MINT_LIB,
-		BeamioUserCardGovernanceLib: BASE_BEAMIO_USER_CARD_GOVERNANCE_LIB,
-		BeamioUserCardIssuedNftGatewayLib: BASE_BEAMIO_USER_CARD_ISSUED_NFT_GATEWAY_LIB,
-		BeamioUserCardModuleRouterLib: BASE_BEAMIO_USER_CARD_MODULE_ROUTER_LIB,
-		BeamioUserCardRedeemGatewayLib: BASE_BEAMIO_USER_CARD_REDEEM_GATEWAY_LIB,
-		BeamioUserCardReferrerLib: BASE_BEAMIO_USER_CARD_REFERRER_LIB,
-		BeamioUserCardTransferLib: BASE_BEAMIO_USER_CARD_TRANSFER_LIB,
-		BeamioUserCardUpdateLib: BASE_BEAMIO_USER_CARD_UPDATE_LIB,
-		BeamioUserCardViewsLib: BASE_BEAMIO_USER_CARD_VIEWS_LIB,
-	}
+	const defaults = beamioUserCardLibrariesForChain(defaultMerchantUserCardChain())
 	const out: BeamioUserCardLibraryAddresses = {}
 	for (const libName of Object.keys(defaults)) {
 		const envName = `BEAMIO_USER_CARD_${libName.replace(/^BeamioUserCard/, '').replace(/Lib$/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}_LIB`
-		const raw = (typeof process !== 'undefined' && process.env[envName]?.trim()) || defaults[libName]
+		const raw = (typeof process !== 'undefined' && process.env[envName]?.trim()) || defaults[libName as keyof typeof defaults]
 		if (!raw || !ethers.isAddress(raw) || raw === ethers.ZeroAddress) {
 			throw new Error(`BeamioUserCard requires linked library ${libName}. Set ${envName} or sync chainAddresses.ts after deploying libraries.`)
 		}
@@ -8451,11 +8439,23 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			try {
 				const topupCardChain = await resolveUserCardChain(obj.cardAddr)
 				if (topupCardChain === 'conet') {
-					const { enqueueRecordTopupCumulativeStatGateway } = await import('./userCumulativeStatRewardPoolMaster.js')
+					const { enqueueRecordTopupCumulativeStatGateway, enqueueTopupSocialReward13IfConfigured } =
+						await import('./userCumulativeStatRewardPoolMaster.js')
 					enqueueRecordTopupCumulativeStatGateway({
 						cardAddress: obj.cardAddr,
 						userEOA: recipientEOA,
 						points6: mintParsed.points6,
+					})
+					void enqueueTopupSocialReward13IfConfigured({
+						cardAddress: obj.cardAddr,
+						userEOA: recipientEOA,
+					}).catch((rewardErr: unknown) => {
+						const err = rewardErr as { message?: string }
+						logger(
+							Colors.yellow(
+								`[executeForAdminPostBaseProcess] dispatchEventReward13 topup enqueue non-critical: ${err?.message ?? String(rewardErr)}`
+							)
+						)
 					})
 				}
 			} catch (cumStatErr: any) {
@@ -9004,6 +9004,36 @@ export const purchasingCardProcess = async () => {
 				cardAddress,
 				attempt: 0,
 			})
+		}
+		try {
+			const purchCardChain = await resolveUserCardChain(cardAddress)
+			if (purchCardChain === 'conet' && currentTopupPoint6 > 0n) {
+				const { enqueueRecordTopupCumulativeStatGateway, enqueueTopupSocialReward13IfConfigured } =
+					await import('./userCumulativeStatRewardPoolMaster.js')
+				enqueueRecordTopupCumulativeStatGateway({
+					cardAddress,
+					userEOA: from,
+					points6: currentTopupPoint6,
+				})
+				void enqueueTopupSocialReward13IfConfigured({
+					cardAddress,
+					userEOA: from,
+				}).catch((rewardErr: unknown) => {
+					const err = rewardErr as { message?: string }
+					logger(
+						Colors.yellow(
+							`[purchasingCardProcess] dispatchEventReward13 topup enqueue non-critical: ${err?.message ?? String(rewardErr)}`
+						)
+					)
+				})
+			}
+		} catch (cumStatErr: unknown) {
+			const err = cumStatErr as { message?: string }
+			logger(
+				Colors.yellow(
+					`[purchasingCardProcess] recordTopupCumulativeStat gateway enqueue non-critical: ${err?.message ?? String(cumStatErr)}`
+				)
+			)
 		}
 		}
 		syncNftTierMetadataForUser(cardAddress, from).catch(() => {})
@@ -11945,6 +11975,14 @@ export const createCardPreCheck = (body: {
 	tiers?: unknown[]
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
 	const validCurrency = ['CAD', 'USD', 'JPY', 'CNY', 'USDC', 'HKD', 'EUR', 'SGD', 'TWD']
+	try {
+		assertBeamioUserCardLinkedDeployedBytecodeFitsEip170(
+			beamioUserCardLibrariesForChain(defaultMerchantUserCardChain())
+		)
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		return { success: false, error: msg }
+	}
 	if (!body.cardOwner || !ethers.isAddress(body.cardOwner)) {
 		return { success: false, error: 'cardOwner is required and must be a valid address' }
 	}

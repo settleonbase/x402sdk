@@ -9,8 +9,10 @@ import { resolveUserCardChain, providerForUserCardChain, type BeamioUserCardChai
 import { getBeamioUserCardFactoryGateway, relayUserCardFactoryCallViaEntryPoint, relayUserCardCallViaEntryPoint, Settle_ContractPool, chargeCardProgramSocialBunitFeeInBackground } from './MemberCard'
 import {
 	CHARGE_REWARD_V2_IFACE,
+	buildDispatchEventReward13Calldata,
 	buildInitializeCardUserCumulativeStatCalldata,
 	encodeGatewayInvokeCardFactoryCalldata,
+	readActiveTopupSocialRewardRule,
 	readCardUserCumulativeStatStatus,
 } from './userCumulativeStatRewardPool'
 import {
@@ -352,5 +354,52 @@ export function enqueueRecordTopupCumulativeStatGateway(params: {
 		cardCallData: cardCalldata,
 		factoryCallData,
 		label: 'recordTopupCumulativeStat',
+	})
+}
+
+function resolveTopupRefWalletForDispatch(
+	userEOA: string,
+	refWalletRaw: string | null | undefined,
+	refMint13: bigint,
+): string {
+	if (refMint13 <= 0n) return ethers.ZeroAddress
+	const raw = refWalletRaw?.trim() ?? ''
+	if (!raw || !ethers.isAddress(raw)) return ethers.ZeroAddress
+	try {
+		const ref = ethers.getAddress(raw)
+		const actor = ethers.getAddress(userEOA)
+		return ref === actor ? ethers.ZeroAddress : ref
+	} catch {
+		return ethers.ZeroAddress
+	}
+}
+
+/** Top-up 成功后：若链上 ruleId=2 active，后台 dispatchEventReward13 mint #13（cumulativeDelta=0，stat 已由 recordTopup 写入）。 */
+export async function enqueueTopupSocialReward13IfConfigured(params: {
+	cardAddress: string
+	userEOA: string
+	refWallet?: string | null
+}): Promise<void> {
+	const rule = await readActiveTopupSocialRewardRule(params.cardAddress)
+	if (!rule) return
+	if (rule.actorMint13 <= 0n && rule.refMint13 <= 0n) return
+
+	const card = ethers.getAddress(params.cardAddress)
+	const user = ethers.getAddress(params.userEOA)
+	const refWallet = resolveTopupRefWalletForDispatch(user, params.refWallet, rule.refMint13)
+	const cardCalldata = buildDispatchEventReward13Calldata({
+		ruleId: rule.ruleId,
+		actorWallet: user,
+		refWallet,
+		cumulativeTargetKind: rule.targetKind,
+		cumulativeIssuedParentId: rule.issuedParentId,
+		cumulativeDelta: 0,
+	})
+	const factoryCallData = encodeGatewayInvokeCardFactoryCalldata(card, cardCalldata)
+	pushCardGatewayRewardPoolTask({
+		cardAddress: card,
+		cardCallData: cardCalldata,
+		factoryCallData,
+		label: 'dispatchEventReward13:topup',
 	})
 }
