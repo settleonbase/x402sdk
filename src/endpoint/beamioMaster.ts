@@ -2516,7 +2516,7 @@ const routing = ( router: Router ) => {
 
 		/** cardCouponOpenClaim：无 redeemcode 的 coupon open-claim，服务端调用 claimIssuedNftWithUserSig。 */
 		router.post('/cardCouponOpenClaim', (req, res) => {
-			const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature, pointsCost, usdcReward6, isSocialExchange } = req.body as {
+			const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature, pointsCost, usdcReward6, isSocialExchange, refWallet } = req.body as {
 				cardAddress?: string
 				couponId?: string
 				userEOA?: string
@@ -2527,6 +2527,7 @@ const routing = ( router: Router ) => {
 				pointsCost?: string
 				usdcReward6?: string
 				isSocialExchange?: boolean
+				refWallet?: string
 			}
 			if (!cardAddress || !couponId || !userEOA || !tokenId || deadline == null || !nonce || !userSignature) {
 				return res.status(400).json({ success: false, error: 'Missing required fields for cardCouponOpenClaim' }).end()
@@ -2542,6 +2543,7 @@ const routing = ( router: Router ) => {
 				...(isSocialExchange ? { isSocialExchange: true } : {}),
 				...(pointsCost != null ? { pointsCost: String(pointsCost) } : {}),
 				...(usdcReward6 != null ? { usdcReward6: String(usdcReward6) } : {}),
+				...(refWallet && ethers.isAddress(String(refWallet)) ? { refWallet: ethers.getAddress(String(refWallet)) } : {}),
 				res,
 			})
 			logger(Colors.cyan(`[cardCouponOpenClaim] pushed to pool, card=${cardAddress} couponId=${couponId} tokenId=${tokenId}`))
@@ -3862,6 +3864,8 @@ const routing = ( router: Router ) => {
 				topupFeeBUnits,
 				topupKind,
 				posOperator,
+				couponBurnUserEOA,
+				couponBurnRefWallet,
 			} = req.body as {
 				cardAddress?: string
 				cardAddr?: string
@@ -3873,6 +3877,8 @@ const routing = ( router: Router ) => {
 				topupFeeBUnits?: string
 				topupKind?: number
 				posOperator?: string
+				couponBurnUserEOA?: string
+				couponBurnRefWallet?: string
 			}
 			const addr = cardAddr ?? cardAddress
 			if (!addr || !ethers.isAddress(addr) || !data || typeof data !== 'string' || data.length === 0) {
@@ -3893,6 +3899,14 @@ const routing = ( router: Router ) => {
 				cardOwnerEOA && ethers.isAddress(cardOwnerEOA) ? ethers.getAddress(cardOwnerEOA) : undefined
 			const posOp =
 				posOperator && ethers.isAddress(posOperator) ? ethers.getAddress(posOperator) : undefined
+			const burnUser =
+				couponBurnUserEOA && ethers.isAddress(couponBurnUserEOA)
+					? ethers.getAddress(couponBurnUserEOA)
+					: undefined
+			const burnRef =
+				couponBurnRefWallet && ethers.isAddress(couponBurnRefWallet)
+					? ethers.getAddress(couponBurnRefWallet)
+					: undefined
 			const kindRaw = Number(topupKind)
 			const kindParsed: 1 | 2 | 3 | undefined =
 				kindRaw === 1 || kindRaw === 2 || kindRaw === 3 ? (kindRaw as 1 | 2 | 3) : undefined
@@ -3906,6 +3920,8 @@ const routing = ( router: Router ) => {
 				...(feeBUnits != null && feeBUnits > 0n ? { topupFeeBUnits: feeBUnits } : {}),
 				...(kindParsed != null ? { topupKind: kindParsed } : {}),
 				...(posOp ? { posOperator: posOp } : {}),
+				...(burnUser ? { couponBurnUserEOA: burnUser } : {}),
+				...(burnRef ? { couponBurnRefWallet: burnRef } : {}),
 				res,
 			})
 			logger(Colors.cyan(`[executeForAdmin] pushed to pool, card=${addr}`))

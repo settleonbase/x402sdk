@@ -2293,6 +2293,10 @@ export const executeForAdminPool: Array<{
 	originatingUSDCTx?: string
 	chargeSessionId?: string
 	posOperator?: string
+	/** POS coupon burn: customer EOA (actor for REF_BURN #13). */
+	couponBurnUserEOA?: string
+	/** Optional share referrer EOA for coupon burn #13 ref mint. */
+	couponBurnRefWallet?: string
 }> = []
 
 /** Base `executeForAdmin` 已返回 txHash 且 HTTP 已 200 之后的后台任务（BUint / indexer / metadata），不占用 Settle_ContractPool 主槽位 */
@@ -3500,6 +3504,7 @@ export const cardCouponOpenClaimPool: {
 	isSocialExchange?: boolean
 	pointsCost?: string
 	usdcReward6?: string
+	refWallet?: string
 	res: Response
 }[] = []
 
@@ -8030,6 +8035,40 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 						`[executeForAdminPostBaseProcess] coupon burn B-Unit standalone indexer non-critical: ${burnBunitIdxErr?.shortMessage ?? burnBunitIdxErr?.message ?? String(burnBunitIdxErr)}`
 					)
 				)
+			}
+			if (obj.couponBurnUserEOA && ethers.isAddress(obj.couponBurnUserEOA)) {
+				try {
+					const decoded = burnIssuedNftByGatewayIface.parseTransaction({ data: obj.data })
+					if (decoded?.name === 'burnIssuedNftByGateway') {
+						const holder = decoded.args[0] as string
+						const tokenId = BigInt(decoded.args[1] as bigint)
+						const { enqueueCouponSocialReward13IfConfigured } = await import(
+							'./userCumulativeStatRewardPoolMaster.js'
+						)
+						const { resolveCouponBurnRefWallet } = await import('./couponSocialPromotionReward.js')
+						const actor = ethers.getAddress(obj.couponBurnUserEOA)
+						const refWallet = await resolveCouponBurnRefWallet({
+							cardAddress: obj.cardAddr,
+							holderAccount: holder,
+							actorEOA: actor,
+							explicitRefWallet: obj.couponBurnRefWallet ?? null,
+						})
+						await enqueueCouponSocialReward13IfConfigured({
+							cardAddress: obj.cardAddr,
+							userEOA: actor,
+							issuedTokenId: tokenId,
+							eventKey: 'burn',
+							refWallet: refWallet !== ethers.ZeroAddress ? refWallet : null,
+							cumulativeDelta: 1,
+						})
+					}
+				} catch (burnRewardErr: any) {
+					logger(
+						Colors.yellow(
+							`[executeForAdminPostBaseProcess] coupon burn #13 enqueue non-critical: ${burnRewardErr?.shortMessage ?? burnRewardErr?.message ?? String(burnRewardErr)}`,
+						),
+					)
+				}
 			}
 		}
 		if (baseTxOk && recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) {
@@ -15257,6 +15296,10 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 	nonce?: string
 	adminSignature?: string
 	signerEOA?: string
+	userEOA?: string
+	refWallet?: string
+	referrerEOA?: string
+	referrerEoa?: string
 }): Promise<
 	| {
 		success: true
@@ -15270,6 +15313,8 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 			topupFeeBUnits: string
 			posOperator: string
 			topupKind: 1
+			couponBurnUserEOA?: string
+			couponBurnRefWallet?: string
 		}
 	}
 	| { success: false; error: string }
@@ -15342,6 +15387,17 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 			return { success: false, error: bunit.error ?? 'Insufficient B-Units for coupon consume' }
 		}
 
+		const userRaw = String(body.userEOA ?? '').trim()
+		let couponBurnUserEOA: string | undefined
+		if (userRaw && ethers.isAddress(userRaw)) {
+			couponBurnUserEOA = ethers.getAddress(userRaw)
+		}
+		const refRaw = String(body.refWallet ?? body.referrerEOA ?? body.referrerEoa ?? '').trim()
+		let couponBurnRefWallet: string | undefined
+		if (refRaw && ethers.isAddress(refRaw)) {
+			couponBurnRefWallet = ethers.getAddress(refRaw)
+		}
+
 		return {
 			success: true,
 			preChecked: {
@@ -15354,6 +15410,8 @@ export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 				topupFeeBUnits: String(bunit.feeBUnits6),
 				posOperator: ethers.getAddress(adminCheck.signer),
 				topupKind: 1 as const,
+				...(couponBurnUserEOA ? { couponBurnUserEOA } : {}),
+				...(couponBurnRefWallet ? { couponBurnRefWallet } : {}),
 			},
 		}
 	} catch (e: any) {
@@ -15406,6 +15464,9 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 	userSignature?: string
 	pointsCost?: string | number
 	usdcReward6?: string | number
+	refWallet?: string
+	referrerEOA?: string
+	referrerEoa?: string
 }): Promise<{
 	success: true
 	preChecked: {
@@ -15419,6 +15480,7 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 		isSocialExchange?: boolean
 		pointsCost?: string
 		usdcReward6?: string
+		refWallet?: string
 	}
 } | { success: false; error: string }> => {
 	const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature } = body
@@ -15438,6 +15500,13 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 	}
 	if (!nonce || typeof nonce !== 'string' || !nonce.trim()) return { success: false, error: 'Missing nonce' }
 	if (!userSignature || !ethers.isHexString(userSignature)) return { success: false, error: 'Invalid userSignature' }
+
+	const refRaw = String(body.refWallet ?? body.referrerEOA ?? body.referrerEoa ?? '').trim()
+	let refWallet: string | undefined
+	if (refRaw && ethers.isAddress(refRaw)) {
+		const ref = ethers.getAddress(refRaw)
+		if (ref !== ethers.getAddress(userEOA)) refWallet = ref
+	}
 
 	const cardNorm = ethers.getAddress(cardAddress)
 	const userNorm = ethers.getAddress(userEOA)
@@ -15547,6 +15616,7 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 					isSocialExchange: true,
 					pointsCost: String(pointsCostN),
 					usdcReward6: String(usdcReward6N),
+					...(refWallet ? { refWallet } : {}),
 				},
 			}
 		}
@@ -15570,6 +15640,7 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 				deadline: Number(deadline),
 				nonce: nonceBytes32,
 				userSignature: String(userSignature),
+				...(refWallet ? { refWallet } : {}),
 			},
 		}
 	} catch (e: any) {
@@ -17641,6 +17712,26 @@ export const cardCouponOpenClaimProcess = async () => {
 			}).end()
 		}
 		logger(Colors.green(`[cardCouponOpenClaimProcess] success tx=${tx.hash}`))
+		void (async () => {
+			try {
+				const { enqueueCouponSocialReward13IfConfigured } = await import('./userCumulativeStatRewardPoolMaster.js')
+				await enqueueCouponSocialReward13IfConfigured({
+					cardAddress: obj.cardAddress,
+					userEOA: userNorm,
+					issuedTokenId: obj.tokenId,
+					eventKey: 'claim',
+					refWallet: obj.refWallet ?? null,
+					cumulativeDelta: 1,
+				})
+			} catch (rewardErr: unknown) {
+				const err = rewardErr as { message?: string }
+				logger(
+					Colors.yellow(
+						`[cardCouponOpenClaimProcess] coupon claim #13 enqueue non-critical: ${err?.message ?? String(rewardErr)}`,
+					),
+				)
+			}
+		})()
 	} catch (e: any) {
 		const errMsg = e?.reason ?? e?.shortMessage ?? e?.message ?? String(e)
 		if (isSettleContractNonceRaceError(e)) {

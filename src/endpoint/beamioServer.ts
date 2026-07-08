@@ -3079,6 +3079,8 @@ const routing = ( router: Router ) => {
 			topupFeeBUnits: out.topupFeeBUnits,
 			topupKind: out.topupKind,
 			posOperator: out.posOperator,
+			...(out.couponBurnUserEOA ? { couponBurnUserEOA: out.couponBurnUserEOA } : {}),
+			...(out.couponBurnRefWallet ? { couponBurnRefWallet: out.couponBurnRefWallet } : {}),
 		}, res)
 	})
 

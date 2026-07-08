@@ -23,6 +23,11 @@ import {
 	readCardUserCumulativeStatStatus,
 } from './userCumulativeStatRewardPool'
 import {
+	readActiveCouponSocialRewardRule,
+	resolveRefWalletForDispatch,
+	type CouponSocialPromotionEventKey,
+} from './couponSocialPromotionReward'
+import {
 	insertCardProgramShareClick,
 	removeCardProgramLike,
 	upsertCardProgramLike,
@@ -381,6 +386,45 @@ function resolveTopupRefWalletForDispatch(
 	} catch {
 		return ethers.ZeroAddress
 	}
+}
+
+/** L2 coupon social event (#13) — claim / burn / optional server-side linkClick. cumulativeDelta=1 records stat in dispatch. */
+export async function enqueueCouponSocialReward13IfConfigured(params: {
+	cardAddress: string
+	userEOA: string
+	issuedTokenId: bigint | string | number
+	eventKey: CouponSocialPromotionEventKey
+	refWallet?: string | null
+	/** 0 when stat already written (share click / like); 1 for claim/burn. */
+	cumulativeDelta?: bigint | number
+}): Promise<void> {
+	const rule = await readActiveCouponSocialRewardRule({
+		cardAddress: params.cardAddress,
+		issuedTokenId: params.issuedTokenId,
+		eventKey: params.eventKey,
+	})
+	if (!rule) return
+	if (rule.actorMint13 <= 0n && rule.refMint13 <= 0n) return
+
+	const card = ethers.getAddress(params.cardAddress)
+	const user = ethers.getAddress(params.userEOA)
+	const refWallet = resolveRefWalletForDispatch(user, params.refWallet, rule.refMint13)
+	const cumulativeDelta = BigInt(params.cumulativeDelta ?? 1)
+	const cardCalldata = buildDispatchEventReward13Calldata({
+		ruleId: rule.ruleId,
+		actorWallet: user,
+		refWallet,
+		cumulativeTargetKind: rule.targetKind,
+		cumulativeIssuedParentId: rule.issuedParentId,
+		cumulativeDelta,
+	})
+	const factoryCallData = encodeGatewayInvokeCardFactoryCalldata(card, cardCalldata)
+	pushCardGatewayRewardPoolTask({
+		cardAddress: card,
+		cardCallData: cardCalldata,
+		factoryCallData,
+		label: `dispatchEventReward13:coupon:${params.eventKey}`,
+	})
 }
 
 /** Top-up 成功后：若链上 ruleId=2 active，后台 dispatchEventReward13 mint #13（cumulativeDelta=0，stat 已由 recordTopup 写入）。 */

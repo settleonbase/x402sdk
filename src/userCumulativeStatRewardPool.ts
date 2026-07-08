@@ -19,6 +19,7 @@ export const USER_CUMULATIVE_STAT_IFACE = new ethers.Interface([
 	'function recordUserCumulativeStat(address wallet, uint8 metricKind, uint8 targetKind, uint256 issuedParentId, uint256 delta)',
 	'function burnUserCumulativeStatByGateway(address wallet, uint8 metricKind, uint8 targetKind, uint256 issuedParentId, uint256 delta)',
 	'function applyUserLikeWithSignature(address userEOA, uint8 targetKind, uint256 issuedParentId, bool liked, uint256 deadline, bytes32 nonce, bytes userSignature)',
+	'function applyDiscoverShareClickWithSignature(address actorEOA, address refWallet, uint8 targetKind, uint256 issuedParentId, uint256 deadline, bytes32 nonce, bytes userSignature)',
 	'function resolveUserCumulativeStatTokenId(uint8 metricKind, uint8 targetKind, uint256 issuedParentId) view returns (uint256 globalTokenId, uint256 scopedTokenId)',
 ])
 
@@ -65,6 +66,10 @@ export const BURN_USER_CUMULATIVE_STAT_SELECTOR =
 export const APPLY_USER_LIKE_WITH_SIGNATURE_SELECTOR =
 	USER_CUMULATIVE_STAT_IFACE.getFunction('applyUserLikeWithSignature')?.selector ?? '0x4e5759fe'
 
+/** Plan A: Discover share-link click (USER_CLICK + REF_CLICK) without Factory gatewayInvokeCard. */
+export const APPLY_DISCOVER_SHARE_CLICK_WITH_SIGNATURE_SELECTOR =
+	USER_CUMULATIVE_STAT_IFACE.getFunction('applyDiscoverShareClickWithSignature')?.selector ?? '0x2f2c0f7b'
+
 /** L1 merchant-card user-like scoped stat token (UserCumulativeStatLib.MERCHANT_CARD_LIKE_TOKEN_ID). */
 export const MERCHANT_CARD_USER_LIKE_SCOPED_TOKEN_ID = 19n
 
@@ -78,6 +83,18 @@ export const RECORD_USER_LIKE_EIP712_TYPE = {
 		{ name: 'targetKind', type: 'uint8' },
 		{ name: 'issuedParentId', type: 'uint256' },
 		{ name: 'liked', type: 'bool' },
+		{ name: 'deadline', type: 'uint256' },
+		{ name: 'nonce', type: 'bytes32' },
+	],
+}
+
+export const RECORD_DISCOVER_SHARE_CLICK_EIP712_TYPE = {
+	RecordDiscoverShareClick: [
+		{ name: 'cardAddress', type: 'address' },
+		{ name: 'actorEOA', type: 'address' },
+		{ name: 'refWallet', type: 'address' },
+		{ name: 'targetKind', type: 'uint8' },
+		{ name: 'issuedParentId', type: 'uint256' },
 		{ name: 'deadline', type: 'uint256' },
 		{ name: 'nonce', type: 'bytes32' },
 	],
@@ -258,6 +275,32 @@ export function buildApplyUserLikeWithSignatureCalldata(args: {
 	])
 }
 
+export function buildApplyDiscoverShareClickWithSignatureCalldata(args: {
+	actorEOA: string
+	refWallet: string
+	targetKind: number
+	issuedParentId: bigint | string | number
+	deadline: number
+	nonce: string
+	userSignature: string
+}): string {
+	const nonceBytes32 =
+		args.nonce.length === 66 && args.nonce.startsWith('0x')
+			? (args.nonce as `0x${string}`)
+			: (ethers.keccak256(ethers.toUtf8Bytes(args.nonce)) as `0x${string}`)
+	const refWallet =
+		args.refWallet && ethers.isAddress(args.refWallet) ? ethers.getAddress(args.refWallet) : ethers.ZeroAddress
+	return USER_CUMULATIVE_STAT_IFACE.encodeFunctionData('applyDiscoverShareClickWithSignature', [
+		ethers.getAddress(args.actorEOA),
+		refWallet,
+		args.targetKind,
+		BigInt(args.issuedParentId),
+		BigInt(args.deadline),
+		nonceBytes32,
+		args.userSignature,
+	])
+}
+
 export function buildRecordTopupCumulativeStatCalldata(userEOA: string, points6: bigint | string | number): string {
 	return CHARGE_REWARD_V2_IFACE.encodeFunctionData('recordTopupCumulativeStat', [
 		ethers.getAddress(userEOA),
@@ -398,6 +441,34 @@ export async function cardSupportsApplyUserLikeWithSignature(cardAddress: string
 		const code = await provider.getCode(issuedMod)
 		if (!code || code === '0x') return false
 		return code.toLowerCase().includes(APPLY_USER_LIKE_WITH_SIGNATURE_SELECTOR.slice(2).toLowerCase())
+	} catch {
+		return false
+	}
+}
+
+/** Plan A: IssuedNft V2 module exposes applyDiscoverShareClickWithSignature (CoNET merchant cards). */
+export async function cardSupportsApplyDiscoverShareClickWithSignature(cardAddress: string): Promise<boolean> {
+	try {
+		const chain = await resolveUserCardChain(cardAddress)
+		if (chain !== 'conet') return false
+		const routeErr = await assertAdminStatsRoutesIssuedNftSelector(
+			cardAddress,
+			APPLY_DISCOVER_SHARE_CLICK_WITH_SIGNATURE_SELECTOR,
+			'applyDiscoverShareClickWithSignature',
+		)
+		if (routeErr) return false
+		const provider = providerForUserCardChain(chain)
+		const gw = await getBeamioUserCardFactoryGateway(cardAddress)
+		const factory = new ethers.Contract(
+			gw,
+			['function defaultIssuedNftModule() view returns (address)'],
+			provider,
+		)
+		const issuedMod = (await factory.defaultIssuedNftModule()) as string
+		if (!issuedMod || issuedMod === ethers.ZeroAddress) return false
+		const code = await provider.getCode(issuedMod)
+		if (!code || code === '0x') return false
+		return code.toLowerCase().includes(APPLY_DISCOVER_SHARE_CLICK_WITH_SIGNATURE_SELECTOR.slice(2).toLowerCase())
 	} catch {
 		return false
 	}
@@ -1497,7 +1568,7 @@ export function verifyDiscoverShareClickAttestation(body: {
 	return { ok: true }
 }
 
-/** Cluster：Discover 分享链接打开计数（gateway recordUserCumulativeStat；无需 reward budget / active rule）。 */
+/** Cluster：Discover 分享链接打开计数（Plan A applyDiscoverShareClickWithSignature；legacy gateway 两步 fallback）。 */
 export const cardRecordDiscoverShareClickPreCheck = async (body: {
 	cardAddress?: string
 	actorWallet?: string
@@ -1505,23 +1576,20 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 	refWallet?: string
 	cumulativeTargetKind?: number
 	cumulativeIssuedParentId?: string | number
+	deadline?: number
+	nonce?: string
+	userSignature?: string
+	/** @deprecated legacy EIP-191 attestation — use userSignature + deadline + nonce */
 	clickAttestation?: string
 	attestationTs?: number
-}): Promise<{ success: true; preChecked: GatewayRewardPoolForwardBody & { extraCardCallData: string[] } } | { success: false; error: string }> => {
+}): Promise<{ success: true; preChecked: GatewayRewardPoolForwardBody } | { success: false; error: string }> => {
 	if (!body.cardAddress || !ethers.isAddress(body.cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 	if (!body.actorWallet || !ethers.isAddress(body.actorWallet)) return { success: false, error: 'Invalid actorWallet' }
-	const attestation = verifyDiscoverShareClickAttestation({
-		cardAddress: body.cardAddress,
-		actorEOA: body.actorWallet,
-		clickAttestation: String(body.clickAttestation ?? ''),
-		attestationTs: Number(body.attestationTs ?? 0),
-	})
-	if (!attestation.ok) return { success: false, error: attestation.error }
 
 	const targetKind = Number(body.cumulativeTargetKind ?? UC_TARGET.MERCHANT_CARD_COUPON)
 	const issuedParentId = BigInt(body.cumulativeIssuedParentId ?? 0)
 	const actor = ethers.getAddress(body.actorWallet)
-	let refWallet: string | null = null
+	let refWallet = ethers.ZeroAddress
 	if (body.refWallet && ethers.isAddress(body.refWallet)) {
 		const ref = ethers.getAddress(body.refWallet)
 		if (ref !== actor) refWallet = ref
@@ -1531,10 +1599,96 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 	const refClickErr = validateMetricTargetCombo(UC_METRIC.REF_CLICK, targetKind, issuedParentId)
 	if (refClickErr) return { success: false, error: refClickErr }
 
+	const hasEip712 =
+		body.deadline != null &&
+		Number.isFinite(Number(body.deadline)) &&
+		body.nonce &&
+		typeof body.nonce === 'string' &&
+		body.nonce.trim() &&
+		body.userSignature &&
+		ethers.isHexString(body.userSignature)
+
+	if (!hasEip712) {
+		const attestation = verifyDiscoverShareClickAttestation({
+			cardAddress: body.cardAddress,
+			actorEOA: body.actorWallet,
+			clickAttestation: String(body.clickAttestation ?? ''),
+			attestationTs: Number(body.attestationTs ?? 0),
+		})
+		if (!attestation.ok) {
+			return {
+				success: false,
+				error: `${attestation.error}; Plan A requires deadline, nonce, and userSignature (EIP-712)`,
+			}
+		}
+	}
+
 	try {
 		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
 		if ('error' in base) return { success: false, error: base.error }
 		const card = base.card
+
+		if (base.needsInit) {
+			return {
+				success: false,
+				error:
+					'cardUserCumulativeStatTokens not initialized; merchant must call cardInitializeUserCumulativeStat first',
+			}
+		}
+
+		const bunitPre = await cardProgramSocialBunitFeePreCheck(card)
+		if (!bunitPre.success) {
+			return { success: false, error: bunitPre.error }
+		}
+
+		if (hasEip712) {
+			const deadline = Number(body.deadline)
+			if (deadline <= Math.floor(Date.now() / 1000)) {
+				return { success: false, error: 'Missing or expired deadline' }
+			}
+			const nonce = String(body.nonce).trim()
+			const userSignature = String(body.userSignature)
+			const nonceBytes32 =
+				nonce.length === 66 && nonce.startsWith('0x')
+					? (nonce as `0x${string}`)
+					: (ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`)
+
+			const domain = await eip712DomainForRecordUserLike(card)
+			const digest = ethers.TypedDataEncoder.hash(domain, RECORD_DISCOVER_SHARE_CLICK_EIP712_TYPE, {
+				cardAddress: card,
+				actorEOA: actor,
+				refWallet,
+				targetKind,
+				issuedParentId,
+				deadline: BigInt(deadline),
+				nonce: nonceBytes32,
+			})
+			const signer = ethers.recoverAddress(digest, userSignature)
+			if (ethers.getAddress(signer) !== actor) {
+				return { success: false, error: 'userSignature signer mismatch' }
+			}
+
+			const planASupported = await cardSupportsApplyDiscoverShareClickWithSignature(card)
+			if (planASupported) {
+				const cardCallData = buildApplyDiscoverShareClickWithSignatureCalldata({
+					actorEOA: actor,
+					refWallet,
+					targetKind,
+					issuedParentId,
+					deadline,
+					nonce,
+					userSignature,
+				})
+				return {
+					success: true,
+					preChecked: {
+						cardAddress: card,
+						cardCallData,
+					},
+				}
+			}
+		}
+
 		const userClickCalldata = buildRecordUserCumulativeStatCalldata({
 			wallet: actor,
 			metricKind: UC_METRIC.USER_CLICK,
@@ -1542,9 +1696,8 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 			issuedParentId,
 			delta: 1,
 		})
-		// REF_CLICK → referrer when present (BountyBoard referral detail); else actor so totalSupply(21) KPI still moves.
 		const refClickCalldata = buildRecordUserCumulativeStatCalldata({
-			wallet: refWallet ?? actor,
+			wallet: refWallet !== ethers.ZeroAddress ? refWallet : actor,
 			metricKind: UC_METRIC.REF_CLICK,
 			targetKind,
 			issuedParentId,
@@ -1556,10 +1709,17 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 			'recordUserCumulativeStat',
 		)
 		if (routeErr) return { success: false, error: routeErr }
-		const bunitPre = await cardProgramSocialBunitFeePreCheck(card)
-		if (!bunitPre.success) {
-			return { success: false, error: bunitPre.error }
+
+		const factoryGw = await getBeamioUserCardFactoryGateway(card)
+		const chain = await resolveUserCardChain(card)
+		if (!(await factorySupportsGatewayInvokeCard(factoryGw, chain))) {
+			return {
+				success: false,
+				error:
+					'CoNET card missing applyDiscoverShareClickWithSignature module; upgrade IssuedNft V2 + AdminStats V2 on CoNET Factory.',
+			}
 		}
+
 		return {
 			success: true,
 			preChecked: {
