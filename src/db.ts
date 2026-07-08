@@ -3773,8 +3773,12 @@ export function mergeBeamioCardMetadataJsonPatch(
 			? (base.shareTokenMetadata as Record<string, unknown>)
 			: {}
 	const merged: Record<string, unknown> = { ...base, ...patch }
-	if (patchShare || Object.keys(baseShare).length > 0) {
-		merged.shareTokenMetadata = { ...baseShare, ...(patchShare ?? {}) }
+	if (patchShare) {
+		// Authoritative full share snapshot from metadata file merge — replace nested object
+		// so cleared keys (e.g. topupPromotion) are not resurrected from DB stale rows.
+		merged.shareTokenMetadata = { ...patchShare }
+	} else if (Object.keys(baseShare).length > 0) {
+		merged.shareTokenMetadata = { ...baseShare }
 	}
 	if (patch.tiers === undefined && base.tiers !== undefined) merged.tiers = base.tiers
 	if (patch.upgradeType === undefined && base.upgradeType !== undefined) {
