@@ -6815,6 +6815,70 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 	}
 }
 
+const MINT_GATEWAY_PRECHECK_ERROR_IFACE = new ethers.Interface([
+	'error UC_BelowMinThreshold()',
+	'error UC_AmountZero()',
+	'error BM_ZeroAddress()',
+	'error BM_CallFailed()',
+])
+
+/**
+ * eth_call mintPointsByAdmin from factory gateway — catches membership gate ABI / broken linked library
+ * before Master relays UserOp (empty revert → BM_CallFailed on-chain).
+ */
+export async function nfcTopupPreCheckMintGatewaySimulation(
+	cardAddrRaw: string,
+	mintCalldata: string
+): Promise<{ success: boolean; error?: string }> {
+	const parsed = tryParseMintPointsByAdminArgs(mintCalldata)
+	if (!parsed?.recipient || !ethers.isAddress(parsed.recipient)) return { success: true }
+	try {
+		const cardNorm = ethers.getAddress(cardAddrRaw.trim())
+		const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
+		const cardMeta = new ethers.Contract(
+			cardNorm,
+			['function factoryGateway() view returns (address)'],
+			provider
+		)
+		const factory = ethers.getAddress((await cardMeta.factoryGateway()) as string)
+		const iface = new ethers.Interface(['function mintPointsByAdmin(address user, uint256 points6)'])
+		await provider.call({
+			from: factory,
+			to: cardNorm,
+			data: iface.encodeFunctionData('mintPointsByAdmin', [parsed.recipient, parsed.points6]),
+		})
+		return { success: true }
+	} catch (e: any) {
+		const revertData: string | undefined = e?.data ?? e?.info?.error?.data
+		if (revertData && revertData !== '0x') {
+			try {
+				const decoded = MINT_GATEWAY_PRECHECK_ERROR_IFACE.parseError(revertData)
+				if (decoded?.name === 'UC_BelowMinThreshold') {
+					return {
+						success: false,
+						error:
+							'Top-up points below first membership tier minimum for this customer (UC_BelowMinThreshold).',
+					}
+				}
+			} catch {
+				/* fall through */
+			}
+		}
+		if (!revertData || revertData === '0x') {
+			return {
+				success: false,
+				error:
+					'This merchant program card cannot mint points on-chain (membership gate failure). ' +
+					'Create a new program card with the fixed library stack; existing card bytecode cannot be upgraded.',
+			}
+		}
+		return {
+			success: false,
+			error: `mintPointsByAdmin simulation failed (${revertData.slice(0, 18)}…)`,
+		}
+	}
+}
+
 /** Indexer：NFC admin topup 卡 owner B-Unit 服务费单独一条（txId = CoNET consumeFromUser tx） */
 const TX_CATEGORY_NFC_TOPUP_BUNIT_SERVICE = ethers.keccak256(ethers.toUtf8Bytes('nfcTopup:bunitService')) as `0x${string}`
 /** Indexer：USDC buyPointsForUser topup 的 B-Unit 服务费单独一条 */
