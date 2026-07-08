@@ -15,6 +15,7 @@ import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDisti
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, getRedeemStatusBatchApi, claimBUnitsPreCheck, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
+import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
@@ -9449,7 +9450,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
-	/** GET /api/getBUnitBalance?address=0x... - CoNET B-Unit 余额（total/free/paid），30 秒缓存。供前端绕过 CORS 获取。 */
+	/** GET /api/getBUnitBalance?address=0x... - CoNET B-Unit 余额（fee-usable + free/paid + legacy），30 秒缓存。 */
 	router.get('/getBUnitBalance', async (req, res) => {
 		const { address } = req.query as { address?: string }
 		if (!address || !ethers.isAddress(address)) {
@@ -9461,13 +9462,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
 		try {
-			const buint = new ethers.Contract(CONET_BUINT, ['function balanceOfAll(address) view returns (uint256 total, uint256 free, uint256 paid)'], providerConet)
-			const [total, free, paid] = await buint.balanceOfAll(address)
-			const decimals = 6
+			const snap = await readBUnitBalanceSnapshot(providerConet, address)
 			const data = {
-				total: Number(total) / 10 ** decimals,
-				free: Number(free) / 10 ** decimals,
-				paid: Number(paid) / 10 ** decimals,
+				total: snap.total,
+				feeUsable: snap.feeUsable,
+				free: snap.free,
+				paid: snap.paid,
+				legacyDeprecatedTotal: snap.legacyDeprecatedTotal,
+				legacyDeprecatedByContract: snap.legacyDeprecatedByContract,
+				...(snap.legacyDeprecatedTotal > 0
+					? {
+							legacyNote:
+								'Legacy B-Unit on deprecated contracts cannot pay network fees. Run migration or redeem on the updated Business Kit redeem contract.',
+						}
+					: {}),
 			}
 			const body = JSON.stringify(data)
 			getBUnitBalanceCache.set(cacheKey, { body, statusCode: 200, expiry: Date.now() + GET_BUNIT_CACHE_TTL_MS })

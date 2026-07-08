@@ -86,6 +86,23 @@ export const NODE_SALE_SERVER_FEE_USDC6 = 120_000_000n
 /** CoNET BUint ERC20（balanceOfAll）；与 deployments/conet-addresses.json `BUint` 同步 */
 export const CONET_BUINT = '0x54ac4672cE75EC5ACebaeF1a7aFC6F49E77Ae9Ae'
 export const CONET_BUNIT_AIRDROP_ADDRESS = '0xa01DFfD68b355540B840310a9f0C1E7a779C3Ce8'
+/**
+ * 已废弃 BUint 合约（Business Kit redeem 旧部署曾 wired 至 0xf548…）。
+ * 余额只读展示 / 迁移脚本用；扣费与 /api/getBUnitBalance.total 仅认 canonical CONET_BUINT。
+ */
+export const CONET_DEPRECATED_BUINT_ADDRESSES = [
+	'0x2B7d42E560fC324f34ec57ce2FB8968F517EC7f9',
+	'0xfA52a0CcC96C19cF4b6Ea864615F6d52BD0774FB',
+	'0x4A3E59519eE72B9Dcf376f0617fF0a0a5a1ef879',
+	'0x1330297821814B06A6DafE3557Fa730F690D7007',
+	'0xf5484F11b7De647E17aea1089e3CbD6BF15dfC0f',
+	'0x9149433F154C508d2a04454b8E527A479C6fd254',
+	'0xC97CEbb4DF827cB2D1453A9Df7FEf6dADa1C16Ad',
+	'0xa354CC4c414568Dd14F6d63b53013f35483427f0',
+	'0x4289601782F7a5572fF9409DdbBE4572107CcdA9',
+] as const
+/** 旧 BusinessStartKetRedeem（constructor buint=0xf548…）；新 redeem 部署后仅作对照 */
+export const CONET_BUSINESS_START_KET_REDEEM_LEGACY = '0xe9CeDC2c9F7DE7c0e6d1f1ba1F7e7126F0F1D3c8'
 /** BuintRedeemAirdrop（CoNET）；与 deployments/conet-addresses.json 同步 */
 export const CONET_BUINT_REDEEM_AIRDROP = '0x74Fc5C1f105E64663689692e3240127DdE649AF1'
 export const BEAMIO_INDEXER_DIAMOND = '0x6113fE738489c0aB64B4606Ce333aD29b44ED0C4'
@@ -109,7 +126,7 @@ export const CONET_BUSINESS_START_KET = '0xAcf20dbb4DE0992d8947Ef00b505bBc17E6A0
  * BusinessStartKetRedeem（CoNET）。与 deployments/conet-addresses.json `BusinessStartKetRedeem` 同步。
  * 环境变量 CONET_BUSINESS_START_KET_REDEEM 可覆盖。
  */
-export const CONET_BUSINESS_START_KET_REDEEM = '0xe9CeDC2c9F7DE7c0e6d1f1ba1F7e7126F0F1D3c8'
+export const CONET_BUSINESS_START_KET_REDEEM = '0x02F98E8A2066F15F83E7758c5230398027D29f56'
 
 /** ValidatorDepositRedeem（CoNET）；与 deployments/conet-addresses.json `ValidatorDepositRedeem` 同步 */
 export const CONET_VALIDATOR_DEPOSIT_REDEEM = '0xc71e246DD78B37C2fABc905D340932F28F503433'

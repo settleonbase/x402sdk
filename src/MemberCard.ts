@@ -7157,7 +7157,7 @@ export function calcTopupBUnitFeeFromUsdcNotional(_amountUSDC6: bigint): { feeUS
 	return calcTopupFixedBUnitFee()
 }
 
-/** Cluster 预检：Discover 社交点赞 / 分享链接点击 — 卡 owner B-Unit ≥ 0.1。 */
+/** Cluster 阻塞预检：卡 owner 在 BUnitAirdrop 账本须 ≥ 社交费（0.1 B-Unit）。不足则不得使用 Like / Share Click 等网络能力。 */
 export const cardProgramSocialBunitFeePreCheck = async (
 	cardAddr: string
 ): Promise<{ success: true; cardOwnerEOA: string; feeAmount: bigint } | { success: false; error: string }> => {
