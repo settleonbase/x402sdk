@@ -6,7 +6,14 @@ import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from './logger'
 import { resolveUserCardChain, providerForUserCardChain, type BeamioUserCardChainKey } from './beamioUserCardChain'
-import { getBeamioUserCardFactoryGateway, relayUserCardFactoryCallViaEntryPoint, relayUserCardCallViaEntryPoint, Settle_ContractPool, chargeCardProgramSocialBunitFeeInBackground } from './MemberCard'
+import {
+	checkBusinessRelayTxSuccessful,
+	getBeamioUserCardFactoryGateway,
+	relayUserCardFactoryCallViaEntryPoint,
+	relayUserCardCallViaEntryPoint,
+	Settle_ContractPool,
+	chargeCardProgramSocialBunitFeeInBackground,
+} from './MemberCard'
 import {
 	CHARGE_REWARD_V2_IFACE,
 	buildDispatchEventReward13Calldata,
@@ -276,14 +283,15 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 					logTag: stepLabel,
 				})
 				const receipt = await tx.wait()
-				if (!receipt || receipt.status !== 1) {
-					const err = 'Direct card reward-pool tx reverted'
+				const relayCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, { logTag: stepLabel })
+				if (!relayCheck.ok) {
+					const err = relayCheck.reason ?? 'Direct card reward-pool UserOp failed'
 					logger(Colors.red(`[${stepLabel}] ${err} hash=${tx.hash}`))
 					obj.res?.status(500).json({ success: false, error: err, hash: tx.hash }).end()
 					return
 				}
 				lastHash = tx.hash
-				lastGas = receipt.gasUsed ?? 0n
+				lastGas = receipt?.gasUsed ?? 0n
 			}
 			logger(Colors.green(`[${obj.label}] ok (direct card) hash=${lastHash} card=${obj.cardAddress}`))
 			await persistCardProgramSocialDbAfterTx(obj.cardAddress, lastHash, obj.socialDb)
@@ -312,8 +320,9 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 			logTag: obj.label,
 		})
 		const receipt = await tx.wait()
-		if (!receipt || receipt.status !== 1) {
-			const err = 'Gateway reward-pool tx reverted'
+		const relayCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, { logTag: obj.label })
+		if (!relayCheck.ok) {
+			const err = relayCheck.reason ?? 'Gateway reward-pool UserOp failed'
 			logger(Colors.red(`[${obj.label}] ${err} hash=${tx.hash}`))
 			obj.res?.status(500).json({ success: false, error: err, hash: tx.hash }).end()
 			return
@@ -321,7 +330,7 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 		logger(Colors.green(`[${obj.label}] ok hash=${tx.hash} card=${obj.cardAddress}`))
 		await persistCardProgramSocialDbAfterTx(obj.cardAddress, tx.hash, obj.socialDb)
 		obj.res?.status(200).json({ success: true, hash: tx.hash }).end()
-		scheduleSocialBunitFeeAfterGatewaySuccess(obj, tx.hash, receipt.gasUsed ?? 0n)
+		scheduleSocialBunitFeeAfterGatewaySuccess(obj, tx.hash, receipt?.gasUsed ?? 0n)
 	} catch (e: unknown) {
 		const err = e as { shortMessage?: string; message?: string }
 		const msg = err?.shortMessage ?? err?.message ?? String(e)

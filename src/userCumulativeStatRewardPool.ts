@@ -24,6 +24,7 @@ export const USER_CUMULATIVE_STAT_IFACE = new ethers.Interface([
 
 export const CHARGE_REWARD_V2_IFACE = new ethers.Interface([
 	'function configureEventRewardRule(uint256 ruleId, bool active, uint8 eventKind, uint8 targetKind, uint256 issuedParentId, uint256 actorMint13, uint256 refMint13)',
+	'function configureEventRewardRulesBatch((uint256 ruleId,bool active,uint8 eventKind,uint8 targetKind,uint256 issuedParentId,uint256 actorMint13,uint256 refMint13)[] configs)',
 	'function purchaseRewardProgram(address payerEOA, uint8 assetKind, uint256 amount, uint256 budget13PerUnit, uint8 cumulativeTargetKind, uint256 cumulativeIssuedParentId)',
 	'function dispatchEventReward13(uint256 ruleId, address actorWallet, address refWallet, uint8 cumulativeTargetKind, uint256 cumulativeIssuedParentId, uint256 cumulativeDelta)',
 	'function recordTopupCumulativeStat(address userEOA, uint256 points6)',
@@ -40,6 +41,19 @@ export const BOOTSTRAP_ISSUED_NFT_V2_STAT_SELECTOR =
 
 export const CONFIGURE_EVENT_REWARD_RULE_SELECTOR =
 	CHARGE_REWARD_V2_IFACE.getFunction('configureEventRewardRule')?.selector ?? '0x3dd26ef8'
+
+export const CONFIGURE_EVENT_REWARD_RULES_BATCH_SELECTOR =
+	CHARGE_REWARD_V2_IFACE.getFunction('configureEventRewardRulesBatch')?.selector ?? '0x00000000'
+
+export type EventRewardRuleConfigInput = {
+	ruleId: bigint | string | number
+	active: boolean
+	eventKind: number
+	targetKind: number
+	issuedParentId: bigint | string | number
+	actorMint13: bigint | string | number
+	refMint13: bigint | string | number
+}
 
 export const RECORD_USER_CUMULATIVE_STAT_SELECTOR =
 	USER_CUMULATIVE_STAT_IFACE.getFunction('recordUserCumulativeStat')?.selector ?? '0xba62e9d5'
@@ -170,6 +184,21 @@ export function buildConfigureEventRewardRuleCalldata(args: {
 		BigInt(args.actorMint13),
 		BigInt(args.refMint13),
 	])
+}
+
+export function buildConfigureEventRewardRulesBatchCalldata(
+	configs: EventRewardRuleConfigInput[],
+): string {
+	const rows = configs.map((c) => ({
+		ruleId: BigInt(c.ruleId),
+		active: c.active,
+		eventKind: c.eventKind,
+		targetKind: c.targetKind,
+		issuedParentId: BigInt(c.issuedParentId),
+		actorMint13: c.active ? BigInt(c.actorMint13) : 0n,
+		refMint13: c.active ? BigInt(c.refMint13) : 0n,
+	}))
+	return CHARGE_REWARD_V2_IFACE.encodeFunctionData('configureEventRewardRulesBatch', [rows])
 }
 
 export function buildRecordUserCumulativeStatCalldata(args: {
@@ -947,6 +976,180 @@ export const cardConfigureEventRewardRuleGatewayPreCheck = async (body: {
 	}
 }
 
+function normalizeEventRewardRuleConfigRow(
+	raw: unknown,
+): { ok: true; row: EventRewardRuleConfigInput } | { ok: false; error: string } {
+	if (!raw || typeof raw !== 'object') return { ok: false, error: 'Invalid rule row' }
+	const r = raw as Record<string, unknown>
+	const ruleId = BigInt(String(r.ruleId ?? 0))
+	if (ruleId <= 0n) return { ok: false, error: 'ruleId must be > 0' }
+	const eventKind = Number(r.eventKind ?? 0)
+	const targetKind = Number(r.targetKind ?? 0)
+	const issuedParentId = BigInt(String(r.issuedParentId ?? 0))
+	const active = r.active !== false
+	const actorMint13 = active ? BigInt(String(r.actorMint13 ?? 0)) : 0n
+	const refMint13 = active ? BigInt(String(r.refMint13 ?? 0)) : 0n
+	if (active && actorMint13 <= 0n && refMint13 <= 0n) {
+		return { ok: false, error: 'active rule requires actorMint13 or refMint13 > 0' }
+	}
+	const comboErr = validateMetricTargetCombo(eventKind, targetKind, issuedParentId)
+	if (comboErr) return { ok: false, error: comboErr }
+	return {
+		ok: true,
+		row: {
+			ruleId,
+			active,
+			eventKind,
+			targetKind,
+			issuedParentId,
+			actorMint13,
+			refMint13,
+		},
+	}
+}
+
+function parseEventRewardRuleConfigsFromBody(body: {
+	data?: string
+	rules?: unknown[]
+}): { ok: true; configs: EventRewardRuleConfigInput[]; data: string } | { ok: false; error: string } {
+	if (body.data && typeof body.data === 'string' && body.data.length >= 10) {
+		if (body.data.slice(0, 10).toLowerCase() !== CONFIGURE_EVENT_REWARD_RULES_BATCH_SELECTOR.toLowerCase()) {
+			return { ok: false, error: 'data must be configureEventRewardRulesBatch(...) calldata' }
+		}
+		return { ok: true, configs: [], data: body.data }
+	}
+	if (!Array.isArray(body.rules) || body.rules.length === 0) {
+		return { ok: false, error: 'rules[] must be a non-empty array' }
+	}
+	const configs: EventRewardRuleConfigInput[] = []
+	for (let i = 0; i < body.rules.length; i++) {
+		const row = normalizeEventRewardRuleConfigRow(body.rules[i])
+		if (!row.ok) return { ok: false, error: `rules[${i}]: ${row.error}` }
+		configs.push(row.row)
+	}
+	return {
+		ok: true,
+		configs,
+		data: buildConfigureEventRewardRulesBatchCalldata(configs),
+	}
+}
+
+/** Cluster：owner 批量配置 #13 奖励规则（一次 executeForOwner / 一次签名）。 */
+export const cardConfigureEventRewardRulesBatchPreCheck = async (body: {
+	cardAddress?: string
+	rules?: unknown[]
+	deadline?: number
+	nonce?: string
+	ownerSignature?: string
+	data?: string
+}): Promise<{ success: true; preChecked: ExecuteForOwnerForwardBody } | { success: false; error: string }> => {
+	const { cardAddress, deadline, nonce, ownerSignature } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (deadline == null || !nonce || !ownerSignature) {
+		return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+	}
+	const parsed = parseEventRewardRuleConfigsFromBody(body)
+	if (!parsed.ok) return { success: false, error: parsed.error }
+	try {
+		const card = ethers.getAddress(cardAddress)
+		const routeErr = await assertAdminStatsRoutesChargeRewardSelector(
+			card,
+			CONFIGURE_EVENT_REWARD_RULES_BATCH_SELECTOR,
+			'configureEventRewardRulesBatch',
+		)
+		if (routeErr) {
+			return {
+				success: false,
+				error: `${routeErr} (upgrade ChargeRewardModuleV2 with configureEventRewardRulesBatch)`,
+			}
+		}
+
+		const sig = await verifyExecuteForOwnerOwnerSignature({
+			cardAddress: card,
+			data: parsed.data,
+			deadline: Number(deadline),
+			nonce: String(nonce),
+			ownerSignature: String(ownerSignature),
+		})
+		if (!sig.ok) return { success: false, error: sig.error }
+
+		return {
+			success: true,
+			preChecked: {
+				cardAddress: card,
+				data: parsed.data,
+				deadline: Number(deadline),
+				nonce: String(nonce),
+				ownerSignature: String(ownerSignature),
+			},
+		}
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		return { success: false, error: err?.message ?? String(e) }
+	}
+}
+
+/** Cluster：gateway 批量 configureEventRewardRule（优先单 tx batch；未部署时 extraCardCallData 串行）。 */
+export const cardConfigureEventRewardRulesBatchGatewayPreCheck = async (body: {
+	cardAddress?: string
+	rules?: unknown[]
+}): Promise<{ success: true; preChecked: GatewayRewardPoolForwardBody } | { success: false; error: string }> => {
+	if (!body.cardAddress || !ethers.isAddress(body.cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!Array.isArray(body.rules) || body.rules.length === 0) {
+		return { success: false, error: 'rules[] must be a non-empty array' }
+	}
+	const parsed = parseEventRewardRuleConfigsFromBody({ rules: body.rules })
+	if (!parsed.ok) return { success: false, error: parsed.error }
+	try {
+		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
+		if ('error' in base) return { success: false, error: base.error }
+
+		const batchRouteErr = await assertAdminStatsRoutesChargeRewardSelector(
+			base.card,
+			CONFIGURE_EVENT_REWARD_RULES_BATCH_SELECTOR,
+			'configureEventRewardRulesBatch',
+		)
+		if (!batchRouteErr) {
+			return {
+				success: true,
+				preChecked: buildGatewayRewardPoolForwardBody(base.card, parsed.data),
+			}
+		}
+
+		const calldatas = parsed.configs.map((c) =>
+			buildConfigureEventRewardRuleCalldata({
+				ruleId: c.ruleId,
+				active: c.active,
+				eventKind: c.eventKind,
+				targetKind: c.targetKind,
+				issuedParentId: c.issuedParentId,
+				actorMint13: c.actorMint13,
+				refMint13: c.refMint13,
+			}),
+		)
+		for (let i = 0; i < calldatas.length; i++) {
+			const routeErr = await assertAdminStatsRoutesChargeRewardSelector(
+				base.card,
+				CONFIGURE_EVENT_REWARD_RULE_SELECTOR,
+				'configureEventRewardRule',
+			)
+			if (routeErr) return { success: false, error: routeErr }
+		}
+		const [first, ...rest] = calldatas
+		if (!first) return { success: false, error: 'rules[] must be a non-empty array' }
+		return {
+			success: true,
+			preChecked: {
+				...buildGatewayRewardPoolForwardBody(base.card, first),
+				...(rest.length > 0 ? { extraCardCallData: rest } : {}),
+			},
+		}
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		return { success: false, error: err?.message ?? String(e) }
+	}
+}
+
 function validateMetricTargetCombo(metricKind: number, targetKind: number, issuedParentId: bigint): string | null {
 	if (metricKind === UC_METRIC.TOPUP || metricKind === UC_METRIC.CHARGE) {
 		if (targetKind !== UC_TARGET.GLOBAL_ONLY) {
@@ -1047,6 +1250,8 @@ export type GatewayRewardPoolForwardBody = {
 	cardCallData: string
 	/** Legacy：factory.gatewayInvokeCard（仅当 Factory bytecode 含 selector 时 Master 使用）。 */
 	factoryCallData?: string
+	/** Optional follow-up direct card calls in the same worker (e.g. batch fallback or share click). */
+	extraCardCallData?: string[]
 }
 
 export function buildGatewayRewardPoolForwardBody(

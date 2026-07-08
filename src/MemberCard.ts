@@ -170,6 +170,7 @@ import {
 	type NfcLinkAppSessionDb,
 } from './db'
 import { invalidateIssuedCouponSeriesQueryCachesForCard } from './endpoint/issuedCouponSeriesQueryCache'
+import { syncAllIssuedCouponSocialPromotionFromShareMetadata } from './endpoint/issuedCouponSocialPromotionMetadataSync'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './endpoint/getUIDAssetsLogic'
 import {
 	getAaFactoryAddressFromUserCardFactoryPaymaster,
@@ -9126,7 +9127,7 @@ function parseEntryPointUserOpEventsFromReceipt(
 }
 
 /** relayHandleOps / handleOps：bundler tx 可能成功但 UserOp 执行失败；仅 success=true 才视为业务成功。 */
-function checkBusinessRelayTxSuccessful(
+export function checkBusinessRelayTxSuccessful(
 	receipt: ethers.TransactionReceipt | null | undefined,
 	opts?: { expectedSender?: string; logTag?: string }
 ): BusinessRelayTxSuccessCheck {
@@ -12486,6 +12487,24 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 			txHash: row.txHash ?? undefined,
 		})
 		scheduleBeamioUserCardBlockscoutMetadataRefetch(cardAddr)
+		const socialSync = await syncAllIssuedCouponSocialPromotionFromShareMetadata({
+			cardAddress: cardAddr,
+			cardOwner: row.cardOwner,
+			shareTokenMetadata,
+		})
+		if (socialSync.errors.length > 0) {
+			logger(
+				Colors.yellow(
+					`[applyBeamioCardShareMetadataUpdate] issued coupon social sync partial card=${cardAddr} errors=${socialSync.errors.join('; ')}`
+				)
+			)
+		} else if (socialSync.syncedTokenIds.length > 0) {
+			logger(
+				Colors.green(
+					`[applyBeamioCardShareMetadataUpdate] synced socialPromotion to series/tier for tokenIds=${socialSync.syncedTokenIds.join(',')}`
+				)
+			)
+		}
 		return { success: true }
 	} catch (e: any) {
 		return { success: false, error: e?.message ?? String(e) }

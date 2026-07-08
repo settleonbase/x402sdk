@@ -27,6 +27,7 @@ import {
 	invalidateIssuedCouponSeriesQueryCachesForCard,
 	registerIssuedCouponSeriesQueryCacheInvalidator,
 } from './issuedCouponSeriesQueryCache'
+import { syncIssuedCouponSocialPromotionMetadata } from './issuedCouponSocialPromotionMetadataSync'
 import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { pushCardGatewayRewardPoolTask } from '../userCumulativeStatRewardPoolMaster'
 import { applyExcludeUserCard, warmDynamicApiExcludedUserCardsFromDb } from '../excludeUserCardApi'
@@ -2015,6 +2016,85 @@ const routing = ( router: Router ) => {
 			} catch (err: any) {
 				logger(Colors.red('[updateIssuedCouponMetadata] error:'), err?.message ?? err)
 				return res.status(500).json({ success: false, error: err?.message ?? 'Issued coupon metadata update failed' }).end()
+			}
+		})
+
+		/** Sync issued coupon socialPromotion from biz into beamio_nft_series + nft_tier_metadata (after card publish or explicit save). */
+		router.post('/updateIssuedCouponSocialPromotion', async (req, res) => {
+			try {
+				const body = req.body as {
+					cardAddress?: string
+					couponId?: string
+					issuedTokenId?: string
+					socialPromotion?: unknown
+				}
+				const cardAddress = body.cardAddress?.trim()
+				const couponId = body.couponId?.trim() ?? ''
+				const issuedTokenIdRaw = body.issuedTokenId?.trim() ?? ''
+				if (!cardAddress || !ethers.isAddress(cardAddress)) {
+					return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end()
+				}
+				if (!couponId) {
+					return res.status(400).json({ success: false, error: 'couponId is required' }).end()
+				}
+				let tokenIdNorm: string
+				try {
+					tokenIdNorm = String(BigInt(issuedTokenIdRaw))
+				} catch {
+					return res.status(400).json({ success: false, error: 'issuedTokenId must be an integer string' }).end()
+				}
+				const cardNorm = ethers.getAddress(cardAddress)
+				const cardRow = await getCardByAddress(cardNorm)
+				if (!cardRow) {
+					return res.status(404).json({ success: false, error: 'Card metadata not found' }).end()
+				}
+				let socialPromotion: Record<string, unknown> | null | undefined
+				if (body.socialPromotion === null) {
+					socialPromotion = null
+				} else if (body.socialPromotion === undefined) {
+					socialPromotion = undefined
+				} else if (typeof body.socialPromotion === 'object' && !Array.isArray(body.socialPromotion)) {
+					socialPromotion = body.socialPromotion as Record<string, unknown>
+				} else {
+					return res.status(400).json({ success: false, error: 'socialPromotion must be an object or null' }).end()
+				}
+				logger(
+					Colors.cyan(
+						`[updateIssuedCouponSocialPromotion] start card=${cardNorm} couponId=${couponId} tokenId=${tokenIdNorm} hasSocial=${socialPromotion != null}`
+					)
+				)
+				const syncRes = await syncIssuedCouponSocialPromotionMetadata({
+					cardAddress: cardNorm,
+					cardOwner: cardRow.cardOwner,
+					couponId,
+					issuedTokenId: tokenIdNorm,
+					socialPromotion,
+					invalidateQueryCaches: true,
+				})
+				if (!syncRes.success) {
+					return res.status(400).json({ success: false, error: syncRes.error ?? 'Social promotion sync failed' }).end()
+				}
+				logger(
+					Colors.green(
+						`[updateIssuedCouponSocialPromotion] done card=${cardNorm} tokenId=${tokenIdNorm} series=${syncRes.seriesUpdated} tier=${syncRes.tierUpdated}`
+					)
+				)
+				return res
+					.status(200)
+					.json({
+						success: true,
+						cardAddress: cardNorm,
+						issuedTokenId: tokenIdNorm,
+						seriesUpdated: syncRes.seriesUpdated,
+						tierUpdated: syncRes.tierUpdated,
+					})
+					.end()
+			} catch (err: any) {
+				logger(Colors.red('[updateIssuedCouponSocialPromotion] error:'), err?.message ?? err)
+				return res
+					.status(500)
+					.json({ success: false, error: err?.message ?? 'Issued coupon social promotion sync failed' })
+					.end()
 			}
 		})
 

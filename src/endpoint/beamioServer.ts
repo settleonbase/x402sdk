@@ -36,6 +36,8 @@ import {
 	cardBootstrapIssuedNftV2StatPreCheck,
 	cardConfigureEventRewardRuleGatewayPreCheck,
 	cardConfigureEventRewardRulePreCheck,
+	cardConfigureEventRewardRulesBatchGatewayPreCheck,
+	cardConfigureEventRewardRulesBatchPreCheck,
 	cardDispatchEventReward13PreCheck,
 	cardGatewayInitializeUserCumulativeStatPreCheck,
 	cardInitializeUserCumulativeStatPreCheck,
@@ -7297,6 +7299,53 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/executeForOwner', preCheck.preChecked, res)
 	})
 
+	/** cardConfigureEventRewardRulesBatch：owner 一次签名批量配置 #13 奖励规则。 */
+	router.post('/cardConfigureEventRewardRulesBatch', async (req, res) => {
+		const preCheck = await cardConfigureEventRewardRulesBatchPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(
+				Colors.red(`server /api/cardConfigureEventRewardRulesBatch preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardConfigureEventRewardRulesBatch preCheck OK → executeForOwner`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress, ruleCount: req.body?.rules?.length }, false, 2, true),
+		)
+		postLocalhost('/api/executeForOwner', preCheck.preChecked, res)
+	})
+
+	/** Gateway-only：批量 configureEventRewardRule（单 tx batch 或 extraCardCallData 回退）。 */
+	router.post('/cardConfigureEventRewardRulesBatchGateway', async (req, res) => {
+		const preCheck = await cardConfigureEventRewardRulesBatchGatewayPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(
+				Colors.red(`server /api/cardConfigureEventRewardRulesBatchGateway preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardConfigureEventRewardRulesBatchGateway preCheck OK → cardGatewayRewardPool`),
+			inspect(
+				{
+					cardAddress: preCheck.preChecked.cardAddress,
+					ruleCount: req.body?.rules?.length,
+					extraSteps: preCheck.preChecked.extraCardCallData?.length ?? 0,
+				},
+				false,
+				2,
+				true,
+			),
+		)
+		postLocalhost(
+			'/api/cardGatewayRewardPool',
+			{ ...preCheck.preChecked, label: 'configureEventRewardRulesBatch' },
+			res,
+		)
+	})
+
 	/** Gateway-only：configureEventRewardRule（Social Promotion 保存；与 link click 发奖同 gateway 队列，无需 owner/admin 签名）。 */
 	router.post('/cardConfigureEventRewardRuleGateway', async (req, res) => {
 		const preCheck = await cardConfigureEventRewardRuleGatewayPreCheck(req.body)
@@ -7917,6 +7966,63 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			res.status(statusCode).type('application/json').send(buf)
 		} catch (e: any) {
 			logger(Colors.red(`[updateIssuedCouponMetadata] cluster forward error:`), e?.message ?? e)
+			return res.status(502).json({ success: false, error: `Forward to master failed: ${e?.message ?? 'error'}` }).end()
+		}
+	})
+
+	/** Sync issued coupon socialPromotion into beamio_nft_series + tier metadata (Cluster precheck → Master). */
+	router.post('/updateIssuedCouponSocialPromotion', async (req, res) => {
+		const body = req.body as {
+			cardAddress?: string
+			couponId?: string
+			issuedTokenId?: string
+			socialPromotion?: unknown
+		}
+		const cardAddress = body.cardAddress?.trim()
+		const couponId = body.couponId?.trim() ?? ''
+		const issuedTokenId = body.issuedTokenId?.trim() ?? ''
+		if (!cardAddress || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end()
+		}
+		if (!couponId) {
+			return res.status(400).json({ success: false, error: 'couponId is required' }).end()
+		}
+		try {
+			void BigInt(issuedTokenId)
+		} catch {
+			return res.status(400).json({ success: false, error: 'issuedTokenId must be an integer string' }).end()
+		}
+		if (
+			body.socialPromotion != null &&
+			(typeof body.socialPromotion !== 'object' || Array.isArray(body.socialPromotion))
+		) {
+			return res.status(400).json({ success: false, error: 'socialPromotion must be an object or null' }).end()
+		}
+		try {
+			const { statusCode, body: buf } = await postLocalhostBuffer('/api/updateIssuedCouponSocialPromotion', req.body)
+			if (statusCode >= 200 && statusCode < 300) {
+				try {
+					const parsed = JSON.parse(buf) as { success?: boolean }
+					if (parsed?.success === true) {
+						const cardNorm = ethers.getAddress(cardAddress)
+						invalidateIssuedCouponSeriesQueryCachesForCard(cardNorm, issuedTokenId)
+						void requestExplorerNftMetadataRefresh({
+							contractAddress: cardNorm,
+							tokenId: issuedTokenId,
+						}).catch((refreshErr: unknown) => {
+							logger(
+								Colors.yellow('[updateIssuedCouponSocialPromotion] explorer refresh failed:'),
+								refreshErr instanceof Error ? refreshErr.message : refreshErr
+							)
+						})
+					}
+				} catch {
+					/* ignore JSON parse */
+				}
+			}
+			res.status(statusCode).type('application/json').send(buf)
+		} catch (e: any) {
+			logger(Colors.red(`[updateIssuedCouponSocialPromotion] cluster forward error:`), e?.message ?? e)
 			return res.status(502).json({ success: false, error: `Forward to master failed: ${e?.message ?? 'error'}` }).end()
 		}
 	})
