@@ -16898,6 +16898,28 @@ export const executeForOwnerProcess = async () => {
 			if (!meta.success) throw new Error(meta.error ?? 'Metadata update failed after tier update')
 			logger(Colors.green(`[executeForOwnerProcess] card tiers metadata synced card=${obj.cardAddress}`))
 		}
+
+		const configureRewardSelector = obj.data?.slice(0, 10).toLowerCase() ?? ''
+		const { CONFIGURE_EVENT_REWARD_RULE_SELECTOR, CONFIGURE_EVENT_REWARD_RULES_BATCH_SELECTOR } =
+			await import('./userCumulativeStatRewardPool.js')
+		const isConfigureEventRewardRule =
+			Boolean(hash && obj.data) &&
+			!obj.metadataUpdate &&
+			!isCreateIssuedNftNoShareMetaUpdate &&
+			(configureRewardSelector === CONFIGURE_EVENT_REWARD_RULE_SELECTOR.toLowerCase() ||
+				configureRewardSelector === CONFIGURE_EVENT_REWARD_RULES_BATCH_SELECTOR.toLowerCase())
+		if (isConfigureEventRewardRule) {
+			const receipt = await tx.wait()
+			const configureRelayCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+				logTag: 'executeForOwnerProcess:configureEventRewardRule',
+			})
+			if (!configureRelayCheck.ok) {
+				throw new Error(
+					`configureEventRewardRule executeForOwner transaction failed: ${configureRelayCheck.reason} userOpHash=${configureRelayCheck.userOpHash ?? 'n/a'}`
+				)
+			}
+		}
+
 		if (obj.res && !obj.res.headersSent) {
 			const cardAddrChecksummed = ethers.getAddress(obj.cardAddress)
 			obj.res
