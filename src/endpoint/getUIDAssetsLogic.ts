@@ -101,9 +101,9 @@ export type FetchUIDAssetsResult = {
 		chargeRewardPoints: string
 		/** Raw ERC-1155 token #2 balance in 6-decimal fixed units. */
 		chargeRewardPoints6: string
-		/** ERC-1155 token #13 (Social / dispatchEventReward13) balance on EOA+AA, 6-decimal display. */
+		/** ERC-1155 token #13 (Social / dispatchEventReward13) integer balance (EOA+AA sum). */
 		socialRewardPoints: string
-		/** Raw ERC-1155 token #13 balance in 6-decimal fixed units. */
+		/** Same as socialRewardPoints — #13 uses integer units, not 6-decimal fixed point. */
 		socialRewardPoints6: string
 		cardCurrency: string
 		cardBackground?: string
@@ -504,7 +504,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 					points6: String(pointsBalance),
 					chargeRewardPoints: ethers.formatUnits(chargeRewardPointsBalance, 6),
 					chargeRewardPoints6: String(chargeRewardPointsBalance),
-					socialRewardPoints: ethers.formatUnits(socialRewardPointsBalance, 6),
+					socialRewardPoints: String(socialRewardPointsBalance),
 					socialRewardPoints6: String(socialRewardPointsBalance),
 					cardCurrency: currency,
 					...(cardBackground != null && { cardBackground }),
