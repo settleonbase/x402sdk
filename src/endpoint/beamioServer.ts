@@ -2280,6 +2280,8 @@ const routing = ( router: Router ) => {
 				points6: firstCard?.points6 ?? '0',
 				chargeRewardPoints: firstCard?.chargeRewardPoints ?? '0',
 				chargeRewardPoints6: firstCard?.chargeRewardPoints6 ?? '0',
+				socialRewardPoints: firstCard?.socialRewardPoints ?? '0',
+				socialRewardPoints6: firstCard?.socialRewardPoints6 ?? '0',
 				usdcBalance: base.usdcBalance,
 				caddBalance: base.caddBalance,
 				cardCurrency: firstCard?.cardCurrency ?? 'CAD',

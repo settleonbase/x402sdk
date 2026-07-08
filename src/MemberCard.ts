@@ -12959,6 +12959,7 @@ async function nfcLinkAppSessionHasMigratableAssets(
 		try {
 			if (BigInt(c.points6 || '0') > 0n) return true
 			if (BigInt(c.chargeRewardPoints6 || '0') > 0n) return true
+			if (BigInt(c.socialRewardPoints6 || '0') > 0n) return true
 		} catch {
 			/* ignore */
 		}

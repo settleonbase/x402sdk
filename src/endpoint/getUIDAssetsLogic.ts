@@ -23,6 +23,7 @@ import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tierMetadataRowResolve'
 import { hasCoNETUserCardBytecode, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
+import { REWARD_VOUCHER_TOKEN_ID } from '../socialExchangeMetadata'
 
 /** Drop blacklist + Base-only legacy rows before asset-scan RPC (CoNET merchant cards only). */
 async function filterBeamioUserCardAddressesForAssetScan(addresses: string[]): Promise<string[]> {
@@ -100,6 +101,10 @@ export type FetchUIDAssetsResult = {
 		chargeRewardPoints: string
 		/** Raw ERC-1155 token #2 balance in 6-decimal fixed units. */
 		chargeRewardPoints6: string
+		/** ERC-1155 token #13 (Social / dispatchEventReward13) balance on EOA+AA, 6-decimal display. */
+		socialRewardPoints: string
+		/** Raw ERC-1155 token #13 balance in 6-decimal fixed units. */
+		socialRewardPoints6: string
 		cardCurrency: string
 		cardBackground?: string
 		cardImage?: string
@@ -376,15 +381,27 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
 			const card = new ethers.Contract(cardAddr, cardAbi, cardProvider)
 			const tokenHolder = aaAddr || eoaAddr
-			const [[pointsBalance, nfts], chargeRewardByHolder, chargeRewardByEoa, currencyNum] = await Promise.all([
+			const [
+				[pointsBalance, nfts],
+				chargeRewardByHolder,
+				chargeRewardByEoa,
+				socialRewardByHolder,
+				socialRewardByEoa,
+				currencyNum,
+			] = await Promise.all([
 				aaAddr ? card.getOwnership(aaAddr) : card.getOwnershipByEOA(eoaAddr),
 				card.balanceOf(tokenHolder, 2n).catch(() => 0n) as Promise<bigint>,
 				tokenHolder.toLowerCase() === eoaAddr.toLowerCase()
 					? Promise.resolve(0n)
 					: (card.balanceOf(eoaAddr, 2n).catch(() => 0n) as Promise<bigint>),
+				card.balanceOf(tokenHolder, REWARD_VOUCHER_TOKEN_ID).catch(() => 0n) as Promise<bigint>,
+				tokenHolder.toLowerCase() === eoaAddr.toLowerCase()
+					? Promise.resolve(0n)
+					: (card.balanceOf(eoaAddr, REWARD_VOUCHER_TOKEN_ID).catch(() => 0n) as Promise<bigint>),
 				card.currency(),
 			])
 			const chargeRewardPointsBalance = chargeRewardByHolder + chargeRewardByEoa
+			const socialRewardPointsBalance = socialRewardByHolder + socialRewardByEoa
 			const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
 			const nftList = nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
 				tokenId: nft.tokenId.toString(),
@@ -468,10 +485,12 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			}
 			const hasPoints = pointsBalance > 0n
 			const hasChargeRewardPoints = chargeRewardPointsBalance > 0n
+			const hasSocialRewardPoints = socialRewardPointsBalance > 0n
 			const hasNftGt0 = nftList.some((n: { tokenId: string }) => Number(n.tokenId) > 0)
 			const includeRow =
 				hasPoints ||
 				hasChargeRewardPoints ||
+				hasSocialRewardPoints ||
 				hasNftGt0 ||
 				merchantInfraOnly ||
 				merchantProgramOnly ||
@@ -485,6 +504,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 					points6: String(pointsBalance),
 					chargeRewardPoints: ethers.formatUnits(chargeRewardPointsBalance, 6),
 					chargeRewardPoints6: String(chargeRewardPointsBalance),
+					socialRewardPoints: ethers.formatUnits(socialRewardPointsBalance, 6),
+					socialRewardPoints6: String(socialRewardPointsBalance),
 					cardCurrency: currency,
 					...(cardBackground != null && { cardBackground }),
 					...(cardImage != null && { cardImage }),
@@ -512,6 +533,8 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 							points6: '0',
 							chargeRewardPoints: '0',
 							chargeRewardPoints6: '0',
+							socialRewardPoints: '0',
+							socialRewardPoints6: '0',
 							cardCurrency: currency,
 							nfts: [],
 						},
