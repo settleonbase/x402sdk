@@ -61,6 +61,7 @@ import {
 	CONET_CARD_FACTORY,
 	CONET_BUINT,
 	CONET_BUNIT_AIRDROP_ADDRESS,
+	CONET_BUNIT_AIRDROP_LEGACY_ADDRESS,
 	CONET_BUINT_REDEEM_AIRDROP,
 	BEAMIO_INDEXER_DIAMOND,
 	CONET_BUSINESS_START_KET,
@@ -4833,14 +4834,43 @@ export const cancelRequestAccountingProcess = async () => {
 }
 
 /** BUnit Airdrop claimFor：CoNET 上 BUnitAirdrop.claimFor(claimant, nonce, deadline, signature)，使用 walletConet 代付 gas */
-const BUNIT_AIRDROP_ABI = [
+const BUNIT_AIRDROP_CLAIM_VIEW_ABI = [
 	'function hasClaimed(address) view returns (bool)',
 	'function claimNonces(address) view returns (uint256)',
+] as const
+
+const BUNIT_AIRDROP_ABI = [
+	...BUNIT_AIRDROP_CLAIM_VIEW_ABI,
 	'function claimFor(address claimant, uint256 nonce, uint256 deadline, bytes calldata signature)',
 	'function claimForWithBeneficiary(address claimantEoa, address beneficiary, uint256 nonce, uint256 deadline, bytes calldata signature)',
 	'function relocateFreePoolToOwnerBeamioAa(address eoaOwner, address aaAccount)',
 	'function claimForV2(address claimant, uint256 nonce, uint256 deadline, address merchantCard, uint256 targetTokenId, address referrer, bytes calldata signature)',
 ] as const
+
+/** 当前 + legacy BUnitAirdrop 是否仍可领免费 20 B-Unit（Cluster 读链单一事实来源） */
+export async function resolveBUnitFreeClaimEligibility(
+	provider: ethers.Provider,
+	rawAddress: string,
+): Promise<{ canClaim: boolean; nonce: string; reason?: 'already_claimed' | 'invalid_address' }> {
+	if (!rawAddress || !ethers.isAddress(rawAddress)) {
+		return { canClaim: false, nonce: '0', reason: 'invalid_address' }
+	}
+	const claimant = ethers.getAddress(rawAddress)
+	const canonical = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, BUNIT_AIRDROP_CLAIM_VIEW_ABI, provider)
+	const legacy = new ethers.Contract(CONET_BUNIT_AIRDROP_LEGACY_ADDRESS, BUNIT_AIRDROP_CLAIM_VIEW_ABI, provider)
+	for (const airdrop of [canonical, legacy]) {
+		try {
+			if (await airdrop.hasClaimed(claimant)) {
+				const nonce = await canonical.claimNonces(claimant)
+				return { canClaim: false, nonce: String(nonce), reason: 'already_claimed' }
+			}
+		} catch {
+			// legacy 合约读失败时不阻塞；canonical 会在下一轮或 nonce 读时暴露
+		}
+	}
+	const nonce = await canonical.claimNonces(claimant)
+	return { canClaim: true, nonce: String(nonce) }
+}
 
 /** EIP-712 domain 与 BUnitAirdrop contract 一致，用于 Cluster 签名预检 */
 const CLAIM_AIRDROP_DOMAIN = {
@@ -4989,9 +5019,74 @@ export const claimBUnitsPreCheck = (body: {
 	return { success: true, preChecked }
 }
 
+export type ClaimBUnitsClusterPreCheckResult =
+	| { success: true; preChecked: ClaimBUnitsPayload }
+	| {
+			success: false
+			error: string
+			code: 'already_claimed' | 'invalid_nonce' | 'invalid_request' | 'chain_read_failed'
+	  }
+
+/** Cluster 专用：签名/格式预检 + 链上 hasClaimed/nonce；仅 success 时可 postLocalhost 到 Master */
+export async function claimBUnitsClusterPreCheck(
+	provider: ethers.Provider,
+	body: Parameters<typeof claimBUnitsPreCheck>[0],
+): Promise<ClaimBUnitsClusterPreCheckResult> {
+	const sync = claimBUnitsPreCheck(body)
+	if (!sync.success) {
+		return { success: false, error: sync.error, code: 'invalid_request' }
+	}
+	try {
+		const eligibility = await resolveBUnitFreeClaimEligibility(provider, sync.preChecked.claimant)
+		if (!eligibility.canClaim) {
+			return {
+				success: false,
+				error: 'B-Unit free airdrop already claimed for this wallet',
+				code: 'already_claimed',
+			}
+		}
+		const bodyNonce = BigInt(sync.preChecked.nonce)
+		const chainNonce = BigInt(eligibility.nonce)
+		if (bodyNonce !== chainNonce) {
+			return {
+				success: false,
+				error: 'Claim nonce does not match on-chain state',
+				code: 'invalid_nonce',
+			}
+		}
+		return { success: true, preChecked: sync.preChecked }
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		return {
+			success: false,
+			error: msg || 'Failed to verify claim eligibility on chain',
+			code: 'chain_read_failed',
+		}
+	}
+}
+
 export const claimBUnitsProcess = async () => {
 	const obj = claimBUnitsPool.shift()
 	if (!obj) return
+
+	try {
+		const eligibility = await resolveBUnitFreeClaimEligibility(providerConet, obj.claimant)
+		if (!eligibility.canClaim) {
+			logger(Colors.yellow(`[claimBUnitsProcess] skip already claimed claimant=${obj.claimant}`))
+			if (obj.res && !obj.res.headersSent) {
+				obj.res.status(400).json({ success: false, error: 'B-Unit free airdrop already claimed for this wallet' }).end()
+			}
+			setTimeout(() => claimBUnitsProcess(), 3000)
+			return
+		}
+	} catch (e: any) {
+		logger(Colors.red(`[claimBUnitsProcess] eligibility read failed: ${e?.message ?? e}`))
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(500).json({ success: false, error: e?.message ?? 'Failed to verify claim eligibility' }).end()
+		}
+		setTimeout(() => claimBUnitsProcess(), 3000)
+		return
+	}
 
 	// 首次 claim B-Unit，检测 EOA 是否在 conet 已经存在 AA，如果没有则为 eoa 创建 AA
 	let aaAddress = ''
