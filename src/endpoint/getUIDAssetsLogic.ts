@@ -18,7 +18,7 @@ import {
 } from '../db'
 import { BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 import { filterApiExcludedCardRows, isApiExcludedUserCard } from '../apiExcludedUserCards'
-import { metadataMatchesClientCouponCategoryFilter } from '../couponMetadataCategory'
+import { metadataMatchesClientCouponCategoryFilter, readCouponDisabledFromMetadata } from '../couponMetadataCategory'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tierMetadataRowResolve'
@@ -604,6 +604,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 				}
 				const couponId = readCouponIdFromSeriesMetadata(row.metadata ?? null)
 				if (!couponId) continue
+				const isDelisted = readCouponDisabledFromMetadata(row.metadata ?? null)
 				const requiresRedeemCode = readCouponRequiresRedeemCode(row.metadata ?? null)
 				const title = readCouponTitleFromSeriesMetadata(row.metadata ?? null, tokenId)
 				const [isValid, priceInCurrency6, alreadyClaimed, balByHolder, balByEoa] = await Promise.all([
@@ -627,7 +628,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 						requiresRedeemCode,
 					})
 				}
-				if (!requiresRedeemCode && priceInCurrency6 === 0n && !alreadyClaimed && bal === 0n) {
+				if (!requiresRedeemCode && priceInCurrency6 === 0n && !alreadyClaimed && bal === 0n && !isDelisted) {
 					claimables.push({
 						cardAddress: infraAddr,
 						couponId,

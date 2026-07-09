@@ -160,6 +160,43 @@ export function filterClientCouponSeriesRows<
 	return rows.filter((row) => metadataMatchesClientCouponCategoryFilter(row.metadata))
 }
 
+/** Merchant delisted coupon (`disable: true` in series / shareTokenMetadata). */
+export function readCouponDisabledFromMetadata(meta: unknown): boolean {
+	if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false
+	const m = meta as Record<string, unknown>
+	if (m.disable === true) return true
+	const props = m.properties
+	if (props && typeof props === 'object' && !Array.isArray(props)) {
+		const beamioCoupon = (props as Record<string, unknown>).beamioCoupon
+		if (
+			beamioCoupon &&
+			typeof beamioCoupon === 'object' &&
+			!Array.isArray(beamioCoupon) &&
+			(beamioCoupon as Record<string, unknown>).disable === true
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+/** Client discover / claim lists: category Coupon and not delisted. */
+export function metadataMatchesListedClientCouponFilter(meta: unknown): boolean {
+	if (!metadataMatchesClientCouponCategoryFilter(meta)) return false
+	return !readCouponDisabledFromMetadata(meta)
+}
+
+export function filterListedClientCouponSeriesRows<
+	T extends { metadata: Record<string, unknown> | null },
+>(rows: T[]): T[] {
+	return rows.filter((row) => metadataMatchesListedClientCouponFilter(row.metadata))
+}
+
+export function shareTokenMetadataCouponItemIsListed(item: unknown): boolean {
+	if (!shareTokenMetadataCouponItemMatchesCategoryFilter(item)) return false
+	return !readCouponDisabledFromMetadata(item)
+}
+
 export function filterShareTokenMetadataCouponsForClient(share: Record<string, unknown>): Record<string, unknown> {
 	const coupons = share.coupons
 	if (!Array.isArray(coupons) || coupons.length === 0) return share

@@ -19,6 +19,7 @@ import {
 	propertiesLookLikeProductionProps,
 	resolveIssuedNftProductKindFromMetadataExtra,
 	resolveIssuedNftDistributionFieldsFromSeriesMetadata,
+	readCouponDisabledFromMetadata,
 } from './couponMetadataCategory'
 import {
 	normalizeTopupPromotionEntry,
@@ -15725,6 +15726,9 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 		}
 		if (readCouponRequiresRedeemCode(matchedSeries.metadata ?? null)) {
 			return { success: false, error: 'This coupon requires redeemCode; open claim is disabled.' }
+		}
+		if (readCouponDisabledFromMetadata(matchedSeries.metadata ?? null)) {
+			return { success: false, error: 'This coupon is no longer available for claim.' }
 		}
 
 		const chain = await resolveUserCardChain(cardNorm)

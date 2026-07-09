@@ -38,6 +38,7 @@ import {
 	normalizeCouponCategoryOnTierProperties,
 	normalizeCouponSeriesMetadataJson,
 	metadataMatchesClientCouponCategoryFilter,
+	metadataMatchesListedClientCouponFilter,
 	metadataMatchesClientProductionCategoryFilter,
 } from '../couponMetadataCategory'
 import {
@@ -124,6 +125,14 @@ function setOrDeleteStringField(target: Record<string, unknown>, key: string, va
 	const v = String(value ?? '').trim()
 	if (v) {
 		target[key] = v
+		return
+	}
+	delete target[key]
+}
+
+function setOrDeleteBooleanField(target: Record<string, unknown>, key: string, value: boolean): void {
+	if (value) {
+		target[key] = true
 		return
 	}
 	delete target[key]
@@ -1243,6 +1252,7 @@ const routing = ( router: Router ) => {
 				for (const row of ordered) {
 					if (items.length >= limit) break
 					if (!metadataMatchesClientCouponCategoryFilter(row.metadata)) continue
+					if (!metadataMatchesListedClientCouponFilter(row.metadata)) continue
 					let tid: bigint
 					try {
 						tid = BigInt(row.tokenId)
@@ -1799,6 +1809,8 @@ const routing = ( router: Router ) => {
 					backgroundColor?: string
 					description?: string
 					couponImage?: string
+					/** When true, hide from client discover/claim; existing holders may still POS burn. */
+					disable?: boolean
 				}
 				const cardAddress = body.cardAddress?.trim()
 				const couponId = body.couponId?.trim() ?? ''
@@ -1880,6 +1892,9 @@ const routing = ( router: Router ) => {
 					setOrDeleteStringField(coupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(coupon, 'description', String(body.description ?? ''))
 					setOrDeleteStringField(coupon, 'couponImage', couponImageTrim)
+					if (typeof body.disable === 'boolean') {
+						setOrDeleteBooleanField(coupon, 'disable', body.disable)
+					}
 					coupons[couponIdx] = coupon
 					shareTokenMetadata.coupons = coupons
 					const applyRes = await applyBeamioCardShareMetadataUpdate({
@@ -1927,6 +1942,9 @@ const routing = ( router: Router ) => {
 					setOrDeleteStringField(nextSeriesMeta, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'description', String(body.description ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'couponImage', couponImageTrim)
+					if (typeof body.disable === 'boolean') {
+						setOrDeleteBooleanField(nextSeriesMeta, 'disable', body.disable)
+					}
 					if (nextSeriesMeta.properties && typeof nextSeriesMeta.properties === 'object' && !Array.isArray(nextSeriesMeta.properties)) {
 						const props = normalizeCouponCategoryOnTierProperties({
 							...(nextSeriesMeta.properties as Record<string, unknown>),
@@ -1938,6 +1956,9 @@ const routing = ( router: Router ) => {
 							setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 							setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
 							setOrDeleteStringField(beamioCoupon, 'couponImage', couponImageTrim)
+							if (typeof body.disable === 'boolean') {
+								setOrDeleteBooleanField(beamioCoupon, 'disable', body.disable)
+							}
 							props.beamioCoupon = beamioCoupon
 						}
 						nextSeriesMeta.properties = props
@@ -1991,6 +2012,9 @@ const routing = ( router: Router ) => {
 					setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
 					setOrDeleteStringField(beamioCoupon, 'couponImage', couponImageTrim)
+					if (typeof body.disable === 'boolean') {
+						setOrDeleteBooleanField(beamioCoupon, 'disable', body.disable)
+					}
 					if (Object.keys(beamioCoupon).length > 0) {
 						tierProps.beamioCoupon = beamioCoupon
 					}

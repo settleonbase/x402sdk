@@ -84,7 +84,9 @@ import {
 	normalizeProductionSeriesMetadataJson,
 	normalizeIssuedNftMetadataExtraProperties,
 	metadataMatchesClientCouponCategoryFilter,
+	metadataMatchesListedClientCouponFilter,
 	metadataMatchesClientProductionCategoryFilter,
+	filterListedClientCouponSeriesRows,
 	seriesMetadataLooksLikeProduction,
 } from '../couponMetadataCategory'
 import {
@@ -6205,7 +6207,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const scanLimit = Math.min(100, Math.max(limit, limit * 8))
 			const rawItems = await listRecentBeamioIssuedCouponSeries(scanLimit)
 			const afterDiscover = await filterCouponSeriesRowsByDiscoverMerchantPolicy(rawItems)
-			const items = afterDiscover.slice(0, limit)
+			const afterListed = filterListedClientCouponSeriesRows(afterDiscover)
+			const items = afterListed.slice(0, limit)
 			const body = JSON.stringify({ items, limit })
 			recentIssuedCouponSeriesCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 			res.status(200).json({ items, limit })
@@ -6264,6 +6267,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			for (const row of ordered) {
 				if (items.length >= limit) break
 				if (!metadataMatchesClientCouponCategoryFilter(row.metadata)) continue
+				if (!metadataMatchesListedClientCouponFilter(row.metadata)) continue
 				let tid: bigint
 				try {
 					tid = BigInt(row.tokenId)
@@ -7948,6 +7952,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			backgroundColor?: string
 			description?: string
 			couponImage?: string
+			disable?: boolean
 		}
 		const cardAddress = body.cardAddress?.trim()
 		const couponId = body.couponId?.trim() ?? ''
@@ -7969,6 +7974,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		if (body.couponImage != null && typeof body.couponImage !== 'string') {
 			return res.status(400).json({ success: false, error: 'couponImage must be a string if provided' }).end()
+		}
+		if (body.disable != null && typeof body.disable !== 'boolean') {
+			return res.status(400).json({ success: false, error: 'disable must be a boolean if provided' }).end()
 		}
 		const couponImageTrim = typeof body.couponImage === 'string' ? body.couponImage.trim() : ''
 		if (couponImageTrim && !isAllowedMerchantImageHttpsUrl(couponImageTrim)) {

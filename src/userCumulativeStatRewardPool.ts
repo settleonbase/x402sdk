@@ -11,6 +11,8 @@ import {
 	type BeamioUserCardChainKey,
 } from './beamioUserCardChain'
 import { cardProgramSocialBunitFeePreCheck, getBeamioUserCardFactoryGateway } from './MemberCard'
+import { getSeriesByCardAndTokenId } from './db'
+import { readCouponDisabledFromMetadata } from './couponMetadataCategory'
 
 export const USER_CUMULATIVE_STAT_IFACE = new ethers.Interface([
 	'function initializeCardUserCumulativeStatTokens()',
@@ -149,6 +151,24 @@ export const UC_TARGET = {
 	MERCHANT_CARD_COUPON: 1,
 	ISSUED_COUPON: 2,
 } as const
+
+async function rejectDelistedIssuedCouponSocial(
+	cardAddress: string,
+	targetKind: number,
+	issuedParentId: bigint,
+): Promise<{ success: false; error: string } | null> {
+	if (targetKind !== UC_TARGET.ISSUED_COUPON || issuedParentId <= 0n) return null
+	try {
+		const card = ethers.getAddress(cardAddress)
+		const series = await getSeriesByCardAndTokenId(card, String(issuedParentId))
+		if (series?.metadata && readCouponDisabledFromMetadata(series.metadata)) {
+			return { success: false, error: 'This coupon is delisted.' }
+		}
+	} catch {
+		/* untrusted read: do not block */
+	}
+	return null
+}
 
 /** RewardPoolStorage asset kinds supported by purchaseRewardProgram (USDC/GB/B-Unit 仍 revert)。 */
 export const UC_REWARD_ASSET = {
@@ -1599,6 +1619,9 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 	const refClickErr = validateMetricTargetCombo(UC_METRIC.REF_CLICK, targetKind, issuedParentId)
 	if (refClickErr) return { success: false, error: refClickErr }
 
+	const delistedErr = await rejectDelistedIssuedCouponSocial(body.cardAddress, targetKind, issuedParentId)
+	if (delistedErr) return delistedErr
+
 	const hasEip712 =
 		body.deadline != null &&
 		Number.isFinite(Number(body.deadline)) &&
@@ -1750,6 +1773,10 @@ export const cardDispatchEventReward13PreCheck = async (body: {
 	const cumulativeDelta = BigInt(body.cumulativeDelta ?? 0)
 	const refWallet =
 		body.refWallet && ethers.isAddress(body.refWallet) ? ethers.getAddress(body.refWallet) : ethers.ZeroAddress
+	const targetKind = Number(body.cumulativeTargetKind ?? 0)
+	const issuedParentId = BigInt(body.cumulativeIssuedParentId ?? 0)
+	const delistedErr = await rejectDelistedIssuedCouponSocial(body.cardAddress, targetKind, issuedParentId)
+	if (delistedErr) return delistedErr
 	try {
 		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
 		if ('error' in base) return { success: false, error: base.error }
@@ -1869,6 +1896,9 @@ export const cardRecordUserLikePreCheck = async (body: {
 	const liked = Boolean(body.liked)
 	const comboErr = validateMetricTargetCombo(UC_METRIC.USER_LIKE, targetKind, issuedParentId)
 	if (comboErr) return { success: false, error: comboErr }
+
+	const delistedErr = await rejectDelistedIssuedCouponSocial(cardAddress, targetKind, issuedParentId)
+	if (delistedErr) return delistedErr
 
 	const cardNorm = ethers.getAddress(cardAddress)
 	const userNorm = ethers.getAddress(userEOA)

@@ -5,6 +5,8 @@
 import { ethers } from 'ethers'
 import { resolveUserCardChain, providerForUserCardChain } from './beamioUserCardChain'
 import { UC_METRIC, UC_TARGET } from './userCumulativeStatRewardPool'
+import { getSeriesByCardAndTokenId } from './db'
+import { readCouponDisabledFromMetadata } from './couponMetadataCategory'
 
 export type CouponSocialPromotionEventKey = 'linkClick' | 'like' | 'claim' | 'burn'
 
@@ -103,11 +105,15 @@ export async function readActiveCouponSocialRewardRule(params: {
 }): Promise<ActiveCouponSocialRewardRule | null> {
 	try {
 		const card = ethers.getAddress(params.cardAddress)
+		const expectedParentId = BigInt(String(params.issuedTokenId).trim())
+		const series = await getSeriesByCardAndTokenId(card, String(expectedParentId))
+		if (series?.metadata && readCouponDisabledFromMetadata(series.metadata)) {
+			return null
+		}
 		const chain = await resolveUserCardChain(card)
 		if (chain !== 'conet') return null
 		const provider = providerForUserCardChain(chain)
 		const reader = new ethers.Contract(card, REWARD_RULE_ABI, provider)
-		const expectedParentId = BigInt(String(params.issuedTokenId).trim())
 		const preferredRuleId = couponSocialPromotionRuleIdForEvent(expectedParentId, params.eventKey)
 		if (!(await ruleMatchesCouponEvent(reader, preferredRuleId, params.eventKey, expectedParentId))) {
 			return null
