@@ -1629,6 +1629,65 @@ export const getPosTerminalCardBindingRow = async (
 	}
 }
 
+/** Delete POS ↔ merchant card binding (forces terminal to re-request permission). */
+export const deletePosTerminalCardBinding = async (walletLoose: string): Promise<boolean> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioPosTerminalAdminCardSchema(db)
+		const w = ethers.getAddress(walletLoose).toLowerCase()
+		const result = await db.query(
+			`DELETE FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1`,
+			[w]
+		)
+		return (result.rowCount ?? 0) > 0
+	} catch (e: any) {
+		logger(Colors.yellow(`[deletePosTerminalCardBinding] failed: ${e?.message ?? e}`))
+		return false
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/**
+ * Owner's merchant program cards in `beamio_cards`, newest first (`created_at DESC`).
+ * Caller skips API-excluded / blacklisted addresses when choosing the latest usable card.
+ */
+export const listMerchantCardAddressesForOwnerNewestFirst = async (
+	ownerEoaLoose: string
+): Promise<Array<{ cardAddress: string; createdAt: string | null }>> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_CARDS_TABLE)
+		const owner = ethers.getAddress(ownerEoaLoose).toLowerCase()
+		const { rows } = await db.query<{ card_address: string; created_at: Date | string | null }>(
+			`SELECT card_address, created_at
+			 FROM beamio_cards
+			 WHERE LOWER(TRIM(card_owner)) = $1
+			 ORDER BY created_at DESC NULLS LAST`,
+			[owner]
+		)
+		const out: Array<{ cardAddress: string; createdAt: string | null }> = []
+		for (const row of rows) {
+			if (!row.card_address || !ethers.isAddress(row.card_address)) continue
+			const createdAt =
+				row.created_at == null
+					? null
+					: row.created_at instanceof Date
+						? row.created_at.toISOString()
+						: String(row.created_at)
+			out.push({ cardAddress: ethers.getAddress(row.card_address), createdAt })
+		}
+		return out
+	} catch (e: any) {
+		logger(Colors.yellow(`[listMerchantCardAddressesForOwnerNewestFirst] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 export const listPosTerminalCardBindingsByCard = async (
 	cardAddressLoose: string
 ): Promise<Array<{ posEoa: string; cardAddress: string; txHash: string | null; terminalMetadata: unknown | null }>> => {
