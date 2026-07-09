@@ -29,6 +29,34 @@ function parseYmd(raw: unknown): string | undefined {
 	return t
 }
 
+function approxEq(a: number, b: number): boolean {
+	return Math.abs(a - b) < 0.005
+}
+
+/**
+ * Heal legacy buggy encode: `rewardType: percent` + unscaled `bonusValue === rewardValue`
+ * (should have been `paymentAmount * rewardValue / 100`). Treat as **fixed**.
+ */
+export function healTopupPromotionRewardType(
+	promo: TopupPromotionNormalized,
+	legacyBonus?: CreateCardBonusRuleNormalized | null,
+): TopupPromotionNormalized {
+	if (promo.rewardType !== 'percent') return promo
+	const min = promo.minimumTopupAmount
+	const reward = promo.rewardValue
+	if (!(min > 0) || !(reward > 0)) return promo
+	const scaled = Math.round(min * reward) / 100
+	if (!legacyBonus) return promo
+	const bv = legacyBonus.bonusValue
+	if (!legacyBonus.bonusProportional && approxEq(bv, reward)) {
+		return { ...promo, rewardType: 'fixed' }
+	}
+	if (legacyBonus.bonusProportional && approxEq(bv, reward) && !approxEq(bv, scaled)) {
+		return { ...promo, rewardType: 'fixed' }
+	}
+	return promo
+}
+
 export function normalizeTopupPromotionEntry(
 	raw: unknown,
 	idxLabel: string,
@@ -49,8 +77,9 @@ export function normalizeTopupPromotionEntry(
 		return { success: false, error: `${idxLabel} minimumTopupAmount and rewardValue must be > 0` }
 	}
 	const rewardTypeRaw = String(o.rewardType ?? o.reward_type ?? '').trim().toLowerCase()
+	// Missing / unknown → fixed (not percent).
 	const rewardType: TopupPromotionRewardType =
-		rewardTypeRaw === 'fixed' ? 'fixed' : rewardTypeRaw === 'percent' ? 'percent' : 'percent'
+		rewardTypeRaw === 'percent' ? 'percent' : 'fixed'
 	if (rewardType === 'percent' && reward > 100) {
 		return { success: false, error: `${idxLabel} percentage rewardValue cannot exceed 100` }
 	}
@@ -79,14 +108,27 @@ export function normalizeTopupPromotionEntry(
 	}
 }
 
+/**
+ * Canonical → legacy bonusRule for POS:
+ * - fixed: bonusValue = rewardValue, not proportional
+ * - percent: bonusValue = paymentAmount * rewardValue / 100, proportional
+ *   so `principal * bonusValue / paymentAmount` == `principal * rewardValue / 100`
+ */
 export function topupPromotionToBonusRule(
 	promo: TopupPromotionNormalized,
 ): CreateCardBonusRuleNormalized | null {
 	if (!promo.enabled) return null
-	const rule: CreateCardBonusRuleNormalized = {
+	if (promo.rewardType === 'percent') {
+		const bonusValue = Math.round(promo.minimumTopupAmount * promo.rewardValue) / 100
+		if (bonusValue <= 0) return null
+		return {
+			paymentAmount: promo.minimumTopupAmount,
+			bonusValue,
+			bonusProportional: true,
+		}
+	}
+	return {
 		paymentAmount: promo.minimumTopupAmount,
 		bonusValue: promo.rewardValue,
 	}
-	if (promo.rewardType === 'percent') rule.bonusProportional = true
-	return rule
 }

@@ -22,6 +22,7 @@ import {
 } from './couponMetadataCategory'
 import {
 	normalizeTopupPromotionEntry,
+	healTopupPromotionRewardType,
 	topupPromotionToBonusRule,
 	type TopupPromotionNormalized,
 } from './programTopupPromotion'
@@ -11991,7 +11992,8 @@ const CREATE_CARD_BONUS_AMOUNT_MAX = 1_000_000_000
 type CreateCardBonusRuleNormalized = {
 	paymentAmount: number
 	bonusValue: number
-	/** When true, bonus scales with top-up: principal * (bonusValue / paymentAmount). */
+	/** When true, bonus scales with top-up: principal * (bonusValue / paymentAmount).
+	 * For percent promotions, bonusValue is stored as paymentAmount * (percent/100). */
 	bonusProportional?: boolean
 }
 
@@ -12293,6 +12295,27 @@ export const createCardPreCheck = (body: {
 		}
 		let normalizedBonusRules: CreateCardBonusRuleNormalized[] | undefined
 		if (normalizedTopupPromotion) {
+			// Heal legacy percent+unscaled bonusRule before deriving POS rule.
+			if (stm.bonusRule != null && typeof stm.bonusRule === 'object') {
+				const legacyParsed = normalizeCreateCardBonusRuleEntry(stm.bonusRule, 'shareTokenMetadata.bonusRule')
+				if (legacyParsed.success) {
+					normalizedTopupPromotion = healTopupPromotionRewardType(
+						normalizedTopupPromotion,
+						legacyParsed.rule,
+					)
+				}
+			} else if (Array.isArray(stm.bonusRules) && stm.bonusRules[0] != null) {
+				const legacyParsed = normalizeCreateCardBonusRuleEntry(
+					stm.bonusRules[0],
+					'shareTokenMetadata.bonusRules[0]',
+				)
+				if (legacyParsed.success) {
+					normalizedTopupPromotion = healTopupPromotionRewardType(
+						normalizedTopupPromotion,
+						legacyParsed.rule,
+					)
+				}
+			}
 			const derived = topupPromotionToBonusRule(normalizedTopupPromotion)
 			if (derived) normalizedBonusRules = [derived]
 		} else if (stm.bonusRules != null) {
@@ -12427,8 +12450,16 @@ export const createCardPreCheck = (body: {
 		if (stm.topupPromotion != null && typeof stm.topupPromotion === 'object') {
 			const p = normalizeTopupPromotionEntry(stm.topupPromotion, 'topupPromotion')
 			if (p.success) {
-				meta.topupPromotion = p.promotion
-				const derived = topupPromotionToBonusRule(p.promotion)
+				let promo = p.promotion
+				if (stm.bonusRule != null && typeof stm.bonusRule === 'object') {
+					const legacyParsed = normalizeCreateCardBonusRuleEntry(stm.bonusRule, 'bonusRule')
+					if (legacyParsed.success) promo = healTopupPromotionRewardType(promo, legacyParsed.rule)
+				} else if (Array.isArray(stm.bonusRules) && stm.bonusRules[0] != null) {
+					const legacyParsed = normalizeCreateCardBonusRuleEntry(stm.bonusRules[0], 'bonusRules[0]')
+					if (legacyParsed.success) promo = healTopupPromotionRewardType(promo, legacyParsed.rule)
+				}
+				meta.topupPromotion = promo
+				const derived = topupPromotionToBonusRule(promo)
 				if (derived) {
 					meta.bonusRule = derived
 					meta.bonusRules = [derived]
