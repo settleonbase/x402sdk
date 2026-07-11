@@ -3082,16 +3082,52 @@ const routing = ( router: Router ) => {
 			return res.status(400).json({ success: false, error: pre.error }).end()
 		}
 		const out = pre.preChecked
-		logger(
-			Colors.green(`server /api/cardCouponPosConsumePrepare preCheck OK`),
-			inspect(
-				{
+		if (pre.mode === 'openContainerSurrender') {
+			logger(
+				Colors.green(`server /api/cardCouponPosConsumePrepare openContainerSurrender OK`),
+				inspect(
+					{
+						cardAddress: out.cardAddress,
+						couponId: out.couponId,
+						userEOA: out.userEOA,
+						userAccount: out.userAccount,
+						tokenId: out.tokenId,
+						amount: out.amount,
+					},
+					false,
+					2,
+					true
+				)
+			)
+			return res
+				.status(200)
+				.json({
+					success: true,
+					useOpenContainerSurrender: true,
 					cardAddress: out.cardAddress,
 					couponId: out.couponId,
 					userEOA: out.userEOA,
 					userAccount: out.userAccount,
 					tokenId: out.tokenId,
 					amount: out.amount,
+					targetAddress: out.userAccount,
+				})
+				.end()
+		}
+		if (pre.mode !== 'burn') {
+			return res.status(500).json({ success: false, error: 'Unexpected prepare mode' }).end()
+		}
+		const burnOut = pre.preChecked
+		logger(
+			Colors.green(`server /api/cardCouponPosConsumePrepare preCheck OK`),
+			inspect(
+				{
+					cardAddress: burnOut.cardAddress,
+					couponId: burnOut.couponId,
+					userEOA: burnOut.userEOA,
+					userAccount: burnOut.userAccount,
+					tokenId: burnOut.tokenId,
+					amount: burnOut.amount,
 				},
 				false,
 				2,
@@ -3102,14 +3138,14 @@ const routing = ( router: Router ) => {
 			.status(200)
 			.json({
 				success: true,
-				cardAddress: out.cardAddress,
-				data: out.data,
-				deadline: out.deadline,
-				nonce: out.nonce,
-				factoryGateway: out.factoryGateway,
-				tokenId: out.tokenId,
-				amount: out.amount,
-				targetAddress: out.userAccount,
+				cardAddress: burnOut.cardAddress,
+				data: burnOut.data,
+				deadline: burnOut.deadline,
+				nonce: burnOut.nonce,
+				factoryGateway: burnOut.factoryGateway,
+				tokenId: burnOut.tokenId,
+				amount: burnOut.amount,
+				targetAddress: burnOut.userAccount,
 			})
 			.end()
 	})
@@ -8299,6 +8335,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			transferAsset?: string
 			/** 显式 relay 链（transferAsset 未传时的备选，如 base）。 */
 			relayChain?: string
+			/** POS 旧卡券交还：OpenContainer maxAmount=0 + issued ERC1155 转回商户 owner AA */
+			couponOpenContainerSurrender?: boolean
+			couponBurnUserEOA?: string
+			couponBurnRefWallet?: string
 		}
 		logger(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`)
 		logger(`[AAtoEOA] server received POST /api/AAtoEOA`, inspect({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true))
@@ -8591,6 +8631,13 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					: {}),
 				...(body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object'
 					? { chargeOwnerChildBurn: body.chargeOwnerChildBurn }
+					: {}),
+				...(body.couponOpenContainerSurrender === true ? { couponOpenContainerSurrender: true } : {}),
+				...(typeof body.couponBurnUserEOA === 'string' && ethers.isAddress(body.couponBurnUserEOA.trim())
+					? { couponBurnUserEOA: ethers.getAddress(body.couponBurnUserEOA.trim()) }
+					: {}),
+				...(typeof body.couponBurnRefWallet === 'string' && ethers.isAddress(body.couponBurnRefWallet.trim())
+					? { couponBurnRefWallet: ethers.getAddress(body.couponBurnRefWallet.trim()) }
 					: {}),
 			}, res)
 			return

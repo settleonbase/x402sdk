@@ -2891,6 +2891,9 @@ const routing = ( router: Router ) => {
 				chargeSessionId?: string
 				posOperator?: string
 				chargeLedgerMainUsdc6?: string
+				couponOpenContainerSurrender?: boolean
+				couponBurnUserEOA?: string
+				couponBurnRefWallet?: string
 			}
 			logger(`[AAtoEOA] [DEBUG] Master received openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 40)}…"` : 'n/a'} OpenContainerRelayPool.len=${OpenContainerRelayPool.length} Settle_ContractPool.len=${Settle_ContractPool.length}`)
 			logger(`[AAtoEOA] master received POST /api/AAtoEOA`, inspect({ toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a', forText: body?.forText ? `${body.forText.slice(0, 40)}…` : 'n/a' }, false, 3, true))
@@ -3033,6 +3036,13 @@ const routing = ( router: Router ) => {
 					posOperator: posOpOpenNorm,
 					...(typeof body.chargeLedgerMainUsdc6 === 'string' && body.chargeLedgerMainUsdc6.trim() !== ''
 						? { chargeLedgerMainUsdc6: body.chargeLedgerMainUsdc6.trim() }
+						: {}),
+					...(body.couponOpenContainerSurrender === true ? { couponOpenContainerSurrender: true } : {}),
+					...(typeof body.couponBurnUserEOA === 'string' && ethers.isAddress(body.couponBurnUserEOA.trim())
+						? { couponBurnUserEOA: ethers.getAddress(body.couponBurnUserEOA.trim()) }
+						: {}),
+					...(typeof body.couponBurnRefWallet === 'string' && ethers.isAddress(body.couponBurnRefWallet.trim())
+						? { couponBurnRefWallet: ethers.getAddress(body.couponBurnRefWallet.trim()) }
 						: {}),
 					res,
 				})

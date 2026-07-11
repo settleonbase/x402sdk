@@ -3626,11 +3626,16 @@ export const OpenContainerRelayPool: {
 	nfcTaxRateBps?: number
 	/** owner 直属下级 OpenContainer Charge：POS 提交的 burn，relay 成功后焚烧入账 points（与 NFC/封闭 container 对齐） */
 	chargeOwnerChildBurn?: ChargeOwnerChildBurnPayload
-	/** 与 ContainerRelayPool：POS 终端 EOA，用于 indexer subordinate → accountActionIds(POS) */
-	posOperator?: string
-	/** 与 ContainerRelayPool：显式主单 finalRequestAmountUSDC6（小计 USDC6），避免 points relay 原子单位混减 tip */
-	chargeLedgerMainUsdc6?: string
-	res: Response
+  /** 与 ContainerRelayPool：POS 终端 EOA，用于 indexer subordinate → accountActionIds(POS) */
+  posOperator?: string
+  /** 与 ContainerRelayPool：显式主单 finalRequestAmountUSDC6（小计 USDC6），避免 points relay 原子单位混减 tip */
+  chargeLedgerMainUsdc6?: string
+  /** 旧卡无 cardSelfBurn：OpenContainer 交还 issued coupon（transfer 至商户 owner AA，非 burn） */
+  couponOpenContainerSurrender?: boolean
+  /** POS coupon burn / surrender：客户 EOA（#13 REF_BURN 等社交奖励 actor） */
+  couponBurnUserEOA?: string
+  couponBurnRefWallet?: string
+  res: Response
 }[] = []
 
 /** ContainerRelayPayload：UI 提交的 containerMainRelayed（绑定 to）签名结果，与 SilentPassUI ContainerRelayPayload 一致 */
@@ -3754,6 +3759,37 @@ export function isOpenContainerConsumerGiftRelay(input: {
 		}
 	})
 	return onlyProgramPoints
+}
+
+/** OpenContainer POS 旧卡券交还：issued ERC1155 + posOperator，无 Charge 账单拆分。 */
+export function isOpenContainerCouponSurrenderRelay(input: {
+	couponOpenContainerSurrender?: boolean
+	forText?: string
+	requestHash?: string
+	nfcSubtotalCurrencyAmount?: string
+	chargeOwnerChildBurn?: unknown
+	posOperator?: string
+	items?: { kind: number; asset: string; tokenId: string | bigint; amount: string | bigint }[]
+}): boolean {
+	if (input.couponOpenContainerSurrender === true) return true
+	const ft = String(input.forText ?? '').trim().toLowerCase()
+	if (ft === 'pos coupon surrender') return true
+	const posOp = typeof input.posOperator === 'string' ? input.posOperator.trim() : ''
+	if (!posOp || !ethers.isAddress(posOp)) return false
+	if (input.chargeOwnerChildBurn) return false
+	const rh = String(input.requestHash ?? '').trim()
+	if (rh && ethers.isHexString(rh) && ethers.dataLength(rh) === 32) return false
+	if (String(input.nfcSubtotalCurrencyAmount ?? '').trim() !== '') return false
+	const items = input.items ?? []
+	if (items.length === 0) return false
+	return items.some((it) => {
+		if (Number(it.kind) !== 1) return false
+		try {
+			return BigInt(it.tokenId) >= 100_000_000_000n
+		} catch {
+			return false
+		}
+	})
 }
 
 /** HTTP body / pool 条目共用的 readme Transaction 预览输入 */
@@ -10685,6 +10721,37 @@ export const OpenContainerRelayProcess = async () => {
         items,
       })
     }
+    if (openRelayCheck.ok && obj.couponOpenContainerSurrender && obj.couponBurnUserEOA && ethers.isAddress(obj.couponBurnUserEOA)) {
+      try {
+        const issuedItem = items.find((it) => it.kind === 1 && it.tokenId >= ISSUED_NFT_START_ID_MEMBER)
+        const cardForReward = merchantCardNorm ?? (issuedItem ? ethers.getAddress(issuedItem.asset) : null)
+        if (issuedItem && cardForReward) {
+          const { enqueueCouponSocialReward13IfConfigured } = await import('./userCumulativeStatRewardPoolMaster.js')
+          const { resolveCouponBurnRefWallet } = await import('./couponSocialPromotionReward.js')
+          const actor = ethers.getAddress(obj.couponBurnUserEOA)
+          const refWallet = await resolveCouponBurnRefWallet({
+            cardAddress: cardForReward,
+            holderAccount: account,
+            actorEOA: actor,
+            explicitRefWallet: obj.couponBurnRefWallet ?? null,
+          })
+          await enqueueCouponSocialReward13IfConfigured({
+            cardAddress: cardForReward,
+            userEOA: actor,
+            issuedTokenId: issuedItem.tokenId,
+            eventKey: 'burn',
+            refWallet: refWallet !== ethers.ZeroAddress ? refWallet : null,
+            cumulativeDelta: 1,
+          })
+        }
+      } catch (surrenderRewardErr: any) {
+        logger(
+          Colors.yellow(
+            `[AAtoEOA/OpenContainer] coupon surrender #13 enqueue non-critical: ${surrenderRewardErr?.shortMessage ?? surrenderRewardErr?.message ?? String(surrenderRewardErr)}`
+          )
+        )
+      }
+    }
 
     // 以下记账通过 beamioTransferIndexerAccountingPool -> BeamioIndexerDiamond，客户端已收到 hash
     const currencyFromClient = obj.currency
@@ -10932,7 +10999,27 @@ export const OpenContainerRelayProcess = async () => {
         chargeOwnerChildBurn: obj.chargeOwnerChildBurn,
         items: payload.items,
       })
-      const displayJsonOpen: DisplayJsonData = isConsumerGiftOpen
+      const isCouponSurrenderOpen = isOpenContainerCouponSurrenderRelay({
+        couponOpenContainerSurrender: obj.couponOpenContainerSurrender,
+        forText: obj.forText,
+        requestHash: obj.requestHash,
+        posOperator: obj.posOperator,
+        nfcSubtotalCurrencyAmount: obj.nfcSubtotalCurrencyAmount,
+        chargeOwnerChildBurn: obj.chargeOwnerChildBurn,
+        items: payload.items,
+      })
+      const displayJsonOpen: DisplayJsonData = isCouponSurrenderOpen
+        ? {
+            title: 'In-Store Coupon Redeem',
+            source: 'posCouponSurrender',
+            finishedHash: tx.hash,
+            handle: obj.forText?.trim()?.slice(0, 80) || 'POS coupon surrender',
+            forText: obj.forText?.trim() || 'POS coupon surrender',
+            ...(obj.merchantCardAddress && ethers.isAddress(obj.merchantCardAddress)
+              ? { cardAddress: ethers.getAddress(obj.merchantCardAddress) }
+              : {}),
+          }
+        : isConsumerGiftOpen
         ? {
             title: 'Merchant Gift',
             source: 'gift',
@@ -10996,7 +11083,7 @@ export const OpenContainerRelayProcess = async () => {
         isInternalTransfer: !isConsumerGiftOpen,
         requestHash: obj.requestHash,
         routeItems: collectedRouteItems,
-        source: isConsumerGiftOpen ? 'gift' : 'open-container',
+        source: isCouponSurrenderOpen ? 'open-container' : isConsumerGiftOpen ? 'gift' : 'open-container',
         bServiceUSDC6: feeBUsdc6.toString(),
         bServiceUnits6: feeBUnits6.toString(),
         payeeEOA,
@@ -14873,6 +14960,25 @@ const burnIssuedNftByGatewayIface = new ethers.Interface([
 const BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR = (
 	burnIssuedNftByGatewayIface.getFunction('burnIssuedNftByGateway')?.selector ?? ''
 ).toLowerCase()
+const cardSelfBurnIface = new ethers.Interface([
+	'function cardSelfBurn(address from, uint256 id, uint256 amount) external',
+])
+const CARD_SELF_BURN_SELECTOR = (cardSelfBurnIface.getFunction('cardSelfBurn')?.selector ?? '').toLowerCase()
+
+/** 链上商户卡是否含 cardSelfBurn（旧卡 bytecode 缺失则 POS burn 须走 OpenContainer 交还）。 */
+export async function merchantCardSupportsCouponBurn(cardAddress: string): Promise<boolean> {
+	try {
+		const cardNorm = ethers.getAddress(cardAddress)
+		const cardChain = await resolveUserCardChain(cardNorm)
+		const provider = providerForUserCardChain(cardChain)
+		const code = await provider.getCode(cardNorm)
+		if (!code || code === '0x' || code.length <= 2) return false
+		if (!CARD_SELF_BURN_SELECTOR) return false
+		return code.toLowerCase().includes(CARD_SELF_BURN_SELECTOR.slice(2))
+	} catch {
+		return false
+	}
+}
 const mintIssuedNftByOwnerIface = new ethers.Interface([
 	'function mintIssuedNftByOwner(address to, uint256 tokenId, uint256 amount)',
 ])
@@ -15329,6 +15435,7 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 }): Promise<
 	| {
 		success: true
+		mode: 'burn'
 		preChecked: {
 			cardAddress: string
 			couponId: string
@@ -15342,6 +15449,19 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 			factoryGateway: string
 			cardOwnerEOA: string
 			topupFeeBUnits: string
+		}
+	}
+	| {
+		success: true
+		mode: 'openContainerSurrender'
+		preChecked: {
+			cardAddress: string
+			couponId: string
+			userEOA: string
+			userAccount: string
+			tokenId: string
+			amount: string
+			cardOwnerEOA: string
 		}
 	}
 	| { success: false; error: string }
@@ -15454,6 +15574,24 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 		return { success: false, error: bunit.error ?? 'Insufficient B-Units for coupon consume' }
 	}
 
+	const cardOwnerResolved = bunit.cardOwnerEOA ?? ownerNorm
+	const supportsBurn = await merchantCardSupportsCouponBurn(cardNorm)
+	if (!supportsBurn) {
+		return {
+			success: true,
+			mode: 'openContainerSurrender',
+			preChecked: {
+				cardAddress: cardNorm,
+				couponId,
+				userEOA: userNorm,
+				userAccount: holderAccount,
+				tokenId: String(tokenIdN),
+				amount: String(amountN),
+				cardOwnerEOA: cardOwnerResolved,
+			},
+		}
+	}
+
 	const data = burnIssuedNftByGatewayIface.encodeFunctionData('burnIssuedNftByGateway', [holderAccount, tokenIdN, amountN])
 	const deadline = Math.floor(Date.now() / 1000) + 15 * 60
 	const nonce = ethers.keccak256(
@@ -15461,8 +15599,31 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 	)
 	const factoryGateway = await getBeamioUserCardFactoryGateway(cardNorm)
 
+	try {
+		await cardProvider.call({ to: cardNorm, from: factoryGateway, data })
+	} catch (simErr: unknown) {
+		const msg = simErr instanceof Error ? simErr.message : String(simErr)
+		if (msg.includes('36550849') || msg.toLowerCase().includes('callfailed')) {
+			return {
+				success: true,
+				mode: 'openContainerSurrender',
+				preChecked: {
+					cardAddress: cardNorm,
+					couponId,
+					userEOA: userNorm,
+					userAccount: holderAccount,
+					tokenId: String(tokenIdN),
+					amount: String(amountN),
+					cardOwnerEOA: cardOwnerResolved,
+				},
+			}
+		}
+		return { success: false, error: `Coupon burn simulation failed: ${msg}` }
+	}
+
 	return {
 		success: true,
+		mode: 'burn',
 		preChecked: {
 			cardAddress: cardNorm,
 			couponId,
@@ -15474,7 +15635,7 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 			deadline,
 			nonce,
 			factoryGateway,
-			cardOwnerEOA: bunit.cardOwnerEOA ?? ownerNorm,
+			cardOwnerEOA: cardOwnerResolved,
 			topupFeeBUnits: String(bunit.feeBUnits6 ?? 0n),
 		},
 	}
