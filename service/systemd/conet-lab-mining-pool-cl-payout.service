@@ -1,0 +1,22 @@
+[Unit]
+Description=CoNET Lab staking CL skim payout to ConetLabMiningPool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+Group=peter
+WorkingDirectory=/home/peter/x402sdk
+EnvironmentFile=-/etc/default/conet-lab-mining-pool-cl-payout
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/endpoint/labMiningPoolClPayoutDaemon.js
+Restart=always
+RestartSec=15
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=conet-lab-mining-pool-cl-payout
+
+[Install]
+WantedBy=multi-user.target

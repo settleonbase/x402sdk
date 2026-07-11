@@ -31,6 +31,7 @@ ensureSettleContractPoolInitialized()
 const PAYOUT_ABI = [
 	'function settleNodeRewards(uint256[] guardianIds, uint256[] amounts, bytes32[] eventKeys) external',
 	'function getNodeByValidatorPubkeyHash(bytes32 pubkeyHash) view returns (uint256 guardianId)',
+	'function guardianIdBeneficiary(uint256 guardianId) view returns (address)',
 	'function consumedRewardEventKey(bytes32 key) view returns (bool)',
 ] as const
 
@@ -211,11 +212,18 @@ async function resolveGuardianIdForWithdrawal(
 ): Promise<bigint | null> {
 	const pubkey = await fetchValidatorPubkeyByIndex(validatorIndex)
 	if (!pubkey) return null
+
 	const pkHash = ethers.keccak256(pubkey)
 	try {
 		const guardianId = await contract.getNodeByValidatorPubkeyHash!(pkHash)
 		const gid = BigInt(guardianId)
-		return gid > 0n ? gid : null
+		if (gid <= 0n) return null
+
+		// adminRelease clears beneficiary; legacy pubkey→gid mapping may remain (Lab 136 341–476).
+		const beneficiary = String(await contract.guardianIdBeneficiary!(gid))
+		if (beneficiary === ethers.ZeroAddress) return null
+
+		return gid
 	} catch {
 		return null
 	}
