@@ -113,6 +113,7 @@ import {
 	warmIssuedNftExplorerOgJpeg,
 } from './couponClaimShare'
 import { listIssuedNftClaimWallets } from './issuedNftClaimWallets'
+import { getConetValidatorDashboard } from './conetValidatorDashboard'
 import { requestExplorerNftMetadataRefresh } from './baseExplorerNftMetadataRefresh'
 import {
 	DEFAULT_METADATA_IMAGE_PROXY_URL,
@@ -9126,6 +9127,11 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	router.get('/validatorDepositRedeemConfig', (_req, res) => {
 		return res.status(200).json(validatorDepositRedeemConfig()).end()
+	})
+
+	router.get('/v2/conet/validators/:pubkey', async (req, res) => {
+		const result = await getConetValidatorDashboard(req.params.pubkey)
+		return res.status(result.status).json(result.body).end()
 	})
 
 	router.get('/validatorDepositRedeemAdminNonce', async (req, res) => {
