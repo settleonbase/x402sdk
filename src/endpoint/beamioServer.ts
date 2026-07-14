@@ -14,7 +14,7 @@ import { ethers } from "ethers"
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
 import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
@@ -386,6 +386,41 @@ const tryParseBurnChargeRewardByAdminArgs = (data: string): { target: string; po
 /** 解析 EOA 对应的 AA：仅 UserCardFactoryPaymaster._aaFactory() 路径（与发卡工厂绑定；无回退旧 AA 工厂） */
 const resolveBeamioAccountOf = async (eoa: string): Promise<string | null> =>
 	resolveBeamioAaForEoaWithFallback(providerBase, eoa)
+
+/**
+ * QR / beamioTag Check Balance：若 EOA 已 Link 到 API 托管私钥的 NFC，附加 nfcApiHostedSigning + uid/tagIdHex。
+ * 查找失败不伪造「未 Link」——省略字段，客户端保持纯 QR workflow。
+ * 不返回 private_key。物理 NFC 已有 SUN uid/tagIdHex 时不覆盖，仍可标 nfcApiHostedSigning。
+ */
+async function enrichAssetsWithLinkedNfcHostedSigning<T extends Record<string, unknown>>(
+	eoa: string,
+	base: T,
+): Promise<T & {
+	nfcApiHostedSigning?: boolean
+	uid?: string
+	tagIdHex?: string
+	linkedNfcCards?: Array<{ uid: string; tagId: string; linkState: 'active' | 'deactive' }>
+}> {
+	try {
+		const linked = await listLinkedNfcCardsByOwnerEoa(eoa)
+		if (!linked.length) return base
+		const pick = linked.find((row) => row.linkState === 'active') ?? linked[0]
+		if (!pick) return base
+		const existingUid = typeof base.uid === 'string' ? base.uid.trim() : ''
+		const existingTag = typeof base.tagIdHex === 'string' ? base.tagIdHex.trim() : ''
+		return {
+			...base,
+			nfcApiHostedSigning: true,
+			...(existingUid ? {} : pick.uid ? { uid: pick.uid } : {}),
+			...(existingTag ? {} : pick.tagId ? { tagIdHex: pick.tagId } : {}),
+			linkedNfcCards: linked,
+		}
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.yellow(`[enrichAssetsWithLinkedNfcHostedSigning] skip eoa=${eoa.slice(0, 10)}…: ${msg}`))
+		return base
+	}
+}
 
 /**
  * cardAddAdmin：Master ensureAAForEOA 成功后，Cluster 必须能用同一解析路径在链上看到已部署 AA。
@@ -2164,10 +2199,11 @@ const routing = ( router: Router ) => {
 			if (nfcExtras) {
 				logger(Colors.gray(`[getUIDAssets] debug 推算 tagIdHex=${nfcExtras.tagIdHex} counter=${nfcExtras.counter} counterHex=${nfcExtras.counterHex}`))
 			}
-			const merged = {
+			const mergedBase = {
 				...result,
 				...(nfcExtras ?? {}),
 			}
+			const merged = await enrichAssetsWithLinkedNfcHostedSigning(eoa, mergedBase)
 			if (nfcSunTagIdHex) {
 				await upsertNfcHoldingsFromTrustedAssets(nfcSunTagIdHex, uidTrim, eoa, result)
 				scheduleEnsureNfcBeamioTagForEoa(eoa, uidTrim, nfcSunTagIdHex, result.cards)
@@ -2331,7 +2367,7 @@ const routing = ( router: Router ) => {
 				walletAssetsOpts.infrastructureCardAddress ??
 				CONET_BEAMIO_USER_CARD_DEFAULT
 			const beamioTag = base.beamioTag ?? (await fetchBeamioTagForEoa(eoa))
-			const result = {
+			const resultBase = {
 				ok: true,
 				address: base.address,
 				aaAddress: aaAddr,
@@ -2353,6 +2389,7 @@ const routing = ( router: Router ) => {
 				merchantClaimableCoupons: base.merchantClaimableCoupons,
 				...(beamioTag != null && beamioTag !== '' ? { beamioTag } : {}),
 			}
+			const result = await enrichAssetsWithLinkedNfcHostedSigning(eoa, resultBase)
 			const resultJson = JSON.stringify(result, null, 2)
 			logger(Colors.cyan(`[getWalletAssets] 返回客户端 JSON (wallet=${eoa}):\n${resultJson}`))
 			logger(Colors.green(`[getWalletAssets] wallet=${eoa} aa=${aaAddr} 成功 cards=${cards.length}`))
@@ -3019,7 +3056,7 @@ const routing = ( router: Router ) => {
 		res.status(200).json(result).end()
 	})
 
-	/** POS 余额页 open coupon 领取 prepare：返回 mintIssuedNftByOwner executeForAdmin 载荷（POS admin 签字）。 */
+	/** POS 余额页 open coupon 领取 prepare：返回 mintIssuedNftByOwner ExecuteForAdmin 载荷（仅作 POS admin 授权证明；submit 不执行 Owner mint）。 */
 	router.post('/cardCouponPosClaimPrepare', async (req, res) => {
 		const pre = await cardCouponPosClaimPreparePreCheck(req.body)
 		if (!pre.success) {
@@ -3054,7 +3091,7 @@ const routing = ( router: Router ) => {
 		}).end()
 	})
 
-	/** POS 余额页 open coupon 领取 submit：admin 对 prepare 返回的 payload 做 ExecuteForAdmin 签字后提交。 */
+	/** POS 余额页 open coupon 领取 submit：验 POS admin 签名后转发 Master claimIssuedNftForUserByPosAdmin（写 once-claim 标志，非 Owner mint）。 */
 	router.post('/cardCouponPosClaimSubmit', async (req, res) => {
 		const pre = await cardCouponPosClaimSubmitPreCheck(req.body)
 		if (!pre.success) {
@@ -3063,15 +3100,26 @@ const routing = ( router: Router ) => {
 		}
 		const out = pre.preChecked
 		logger(
-			Colors.green(`server /api/cardCouponPosClaimSubmit preCheck OK, forwarding to master executeForAdmin`),
-			inspect({ cardAddress: out.cardAddress }, false, 2, true)
+			Colors.green(`server /api/cardCouponPosClaimSubmit preCheck OK, forwarding to master cardCouponPosClaimWallet`),
+			inspect(
+				{
+					cardAddress: out.cardAddress,
+					couponId: out.couponId,
+					userEOA: out.userEOA,
+					tokenId: out.tokenId,
+					posAdminEOA: out.posAdminEOA,
+				},
+				false,
+				2,
+				true
+			)
 		)
-		postLocalhost('/api/executeForAdmin', {
-			cardAddr: out.cardAddress,
-			data: out.data,
-			deadline: out.deadline,
-			nonce: out.nonce,
-			adminSignature: out.adminSignature,
+		postLocalhost('/api/cardCouponPosClaimWallet', {
+			cardAddress: out.cardAddress,
+			couponId: out.couponId,
+			userEOA: out.userEOA,
+			tokenId: out.tokenId,
+			posAdminEOA: out.posAdminEOA,
 		}, res)
 	})
 
@@ -3192,6 +3240,49 @@ const routing = ( router: Router ) => {
 			...(out.couponBurnUserEOA ? { couponBurnUserEOA: out.couponBurnUserEOA } : {}),
 			...(out.couponBurnRefWallet ? { couponBurnRefWallet: out.couponBurnRefWallet } : {}),
 		}, res)
+	})
+
+	/**
+	 * Legacy card coupon consume via Check Balance NFC / Linked NFC hosted key:
+	 * signs OpenContainer with API-hosted NFC private key (fresh openRelayedNonce), returns payload
+	 * for client `/api/AAtoEOA` — no second NFC tap / Customer Pay QR.
+	 */
+	router.post('/cardCouponPosConsumeNfcSign', async (req, res) => {
+		const pre = await cardCouponPosConsumeNfcSignPreCheck(req.body)
+		if (!pre.success) {
+			logger(Colors.red(`server /api/cardCouponPosConsumeNfcSign preCheck FAIL: ${pre.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: pre.error }).end()
+		}
+		const out = pre.preChecked
+		logger(
+			Colors.green(`server /api/cardCouponPosConsumeNfcSign OK`),
+			inspect(
+				{
+					cardAddress: out.cardAddress,
+					couponId: out.couponId,
+					userEOA: out.userEOA,
+					tokenId: out.tokenId,
+					posOperator: out.posOperator,
+				},
+				false,
+				2,
+				true,
+			),
+		)
+		return res
+			.status(200)
+			.json({
+				success: true,
+				openContainerPayload: out.openContainerPayload,
+				cardAddress: out.cardAddress,
+				couponId: out.couponId,
+				userEOA: out.userEOA,
+				userAccount: out.userAccount,
+				tokenId: out.tokenId,
+				amount: out.amount,
+				posOperator: out.posOperator,
+			})
+			.end()
 	})
 
 	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）、wallet（Scan QR）或 beamioTag（Scan QR 的 beamio 参数，按 AccountRegistry 解析 EOA）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查 EOA，无法推导 tagID 的不予受理。 */

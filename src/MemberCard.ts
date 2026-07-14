@@ -15172,6 +15172,9 @@ async function validatePosWalletCouponOpenClaim(params: {
 	if (readCouponRequiresRedeemCode(matchedSeries.metadata ?? null)) {
 		return { ok: false, error: 'This coupon requires redeemCode; open claim is disabled.' }
 	}
+	if (readCouponDisabledFromMetadata(matchedSeries.metadata ?? null)) {
+		return { ok: false, error: 'This coupon is no longer available for claim.' }
+	}
 
 	const chain = await resolveUserCardChain(params.cardNorm)
 	const cardProvider = providerForUserCardChain(chain)
@@ -15220,7 +15223,8 @@ async function validatePosWalletCouponOpenClaim(params: {
 /**
  * POS one-tap coupon claim:
  * - NFC: cluster signs with NFC private key (uid/tagId, or linked NFC for member EOA).
- * - QR / wallet: POS terminal admin signs ExecuteForAdmin(mintIssuedNftByOwner) via prepare/submit.
+ * - QR / wallet: POS terminal admin signs ExecuteForAdmin(mintIssuedNftByOwner) as auth proof via prepare/submit;
+ *   Master then relays Factory `claimIssuedNftForUserByPosAdmin` (sets issuedNftUserSigClaimUsed — never Owner mint).
  */
 export const cardCouponPosClaimPreCheck = async (body: {
 	cardAddress?: string
@@ -15319,7 +15323,11 @@ export const cardCouponPosClaimPreCheck = async (body: {
 	}
 }
 
-/** POS Balance / QR open-coupon claim prepare：返回 mintIssuedNftByOwner executeForAdmin 载荷。 */
+/**
+ * POS Balance / QR open-coupon claim prepare.
+ * Returns mintIssuedNftByOwner ExecuteForAdmin payload for POS admin EIP-712 auth only —
+ * submit does **not** execute that mint; it relays claimIssuedNftForUserByPosAdmin.
+ */
 export const cardCouponPosClaimPreparePreCheck = async (body: {
 	cardAddress?: string
 	couponId?: string
@@ -15390,8 +15398,14 @@ export const cardCouponPosClaimPreparePreCheck = async (body: {
 	}
 }
 
+/**
+ * POS QR claim submit: verify POS admin ExecuteForAdmin signature on prepare payload,
+ * then pre-check once-per-user claim eligibility. Master relays claimIssuedNftForUserByPosAdmin
+ * (does **not** execute mintIssuedNftByOwner).
+ */
 export const cardCouponPosClaimSubmitPreCheck = async (body: {
 	cardAddress?: string
+	couponId?: string
 	data?: string
 	deadline?: number
 	nonce?: string
@@ -15402,21 +15416,23 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 		success: true
 		preChecked: {
 			cardAddress: string
-			data: string
-			deadline: number
-			nonce: string
-			adminSignature: string
+			couponId: string
+			userEOA: string
+			tokenId: string
+			posAdminEOA: string
 		}
 	}
 	| { success: false; error: string }
 > => {
 	const cardAddress = String(body.cardAddress ?? '').trim()
+	const couponId = String(body.couponId ?? '').trim()
 	const data = String(body.data ?? '').trim()
 	const nonce = String(body.nonce ?? '').trim()
 	const adminSignature = String(body.adminSignature ?? '').trim()
 	const signerEOA = String(body.signerEOA ?? '').trim()
 	const deadline = Number(body.deadline)
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!couponId) return { success: false, error: 'Missing couponId' }
 	if (!data || !ethers.isHexString(data) || data.length < 10) return { success: false, error: 'Invalid data' }
 	if (!Number.isFinite(deadline) || deadline <= 0) return { success: false, error: 'Invalid deadline' }
 	if (!nonce) return { success: false, error: 'Missing nonce' }
@@ -15425,7 +15441,7 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 
 	const selector = data.slice(0, 10).toLowerCase()
 	if (selector !== MINT_ISSUED_NFT_BY_OWNER_SELECTOR) {
-		return { success: false, error: 'Data must be mintIssuedNftByOwner calldata' }
+		return { success: false, error: 'Data must be mintIssuedNftByOwner calldata (POS admin auth proof)' }
 	}
 
 	try {
@@ -15438,9 +15454,10 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 		const amount = BigInt(decoded.args[2] as bigint)
 		if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid recipient in calldata' }
 		if (tokenId < ISSUED_NFT_START_ID_MEMBER) return { success: false, error: 'tokenId must be issued NFT tokenId' }
-		if (amount <= 0n) return { success: false, error: 'amount must be > 0' }
+		if (amount !== 1n) return { success: false, error: 'Open claim amount must be 1' }
 
 		const cardNorm = ethers.getAddress(cardAddress)
+		const userNorm = ethers.getAddress(to)
 		const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
 			cardAddr: cardNorm,
 			data,
@@ -15449,21 +15466,31 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 			adminSignature,
 		})
 		if (!adminCheck.ok) return { success: false, error: adminCheck.error }
-		if (signerEOA && ethers.getAddress(signerEOA) !== ethers.getAddress(adminCheck.signer)) {
+		const posAdminEOA = ethers.getAddress(adminCheck.signer)
+		if (signerEOA && ethers.getAddress(signerEOA) !== posAdminEOA) {
 			return {
 				success: false,
-				error: `signerEOA mismatch. signerEOA=${ethers.getAddress(signerEOA)} recovered=${ethers.getAddress(adminCheck.signer)}`,
+				error: `signerEOA mismatch. signerEOA=${ethers.getAddress(signerEOA)} recovered=${posAdminEOA}`,
 			}
 		}
+
+		const walletOk = await validatePosWalletCouponOpenClaim({
+			cardNorm,
+			userNorm,
+			couponId,
+			tokenIdN: tokenId,
+			posAdminEOA,
+		})
+		if (!walletOk.ok) return { success: false, error: walletOk.error }
 
 		return {
 			success: true,
 			preChecked: {
 				cardAddress: cardNorm,
-				data,
-				deadline,
-				nonce,
-				adminSignature,
+				couponId,
+				userEOA: userNorm,
+				tokenId: String(tokenId),
+				posAdminEOA,
 			},
 		}
 	} catch (e: any) {
@@ -16107,19 +16134,25 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 				'function issuedNftUserSigClaimUsed(address userEOA, uint256 tokenId) view returns (bool)',
 				'function issuedNftMaxSupply(uint256 tokenId) view returns (uint256)',
 				'function issuedNftMintedCount(uint256 tokenId) view returns (uint256)',
+				'function balanceOf(address account, uint256 id) view returns (uint256)',
 			],
 			cardProvider
 		)
-		const [isValid, priceInCurrency6, alreadyClaimed, maxSupply, mintedCount] = await Promise.all([
+		const holderAccount = await resolveCouponHolderAccount(userNorm)
+		const [isValid, priceInCurrency6, alreadyClaimed, maxSupply, mintedCount, holderBal] = await Promise.all([
 			cardRead.isIssuedNftValid(tokenIdN) as Promise<boolean>,
 			cardRead.issuedNftPriceInCurrency6(tokenIdN) as Promise<bigint>,
 			cardRead.issuedNftUserSigClaimUsed(userNorm, tokenIdN) as Promise<boolean>,
 			cardRead.issuedNftMaxSupply(tokenIdN) as Promise<bigint>,
 			cardRead.issuedNftMintedCount(tokenIdN) as Promise<bigint>,
+			cardRead.balanceOf(holderAccount, tokenIdN) as Promise<bigint>,
 		])
 		if (!isValid) return { success: false, error: 'Issued coupon is inactive or expired' }
 		if (priceInCurrency6 !== 0n) return { success: false, error: 'Coupon open claim is only available for free issued NFT (price=0)' }
 		if (alreadyClaimed) return { success: false, error: 'This address already claimed this coupon and is no longer eligible.' }
+		if (holderBal > 0n) {
+			return { success: false, error: 'This wallet already holds this coupon.' }
+		}
 		if (maxSupply > 0n && mintedCount >= maxSupply) {
 			return { success: false, error: 'Coupon supply has been fully claimed.' }
 		}
