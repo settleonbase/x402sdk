@@ -180,8 +180,18 @@ function scheduleSocialBunitFeeAfterGatewaySuccess(
 	basePaymentHash: string,
 	baseGas: bigint,
 ): void {
-	const kind = task.socialDb?.kind
-	if (kind !== 'like' && kind !== 'shareClick') return
+	const kindFromDb = task.socialDb?.kind
+	let kind: import('./MemberCard').CardProgramSocialBunitKind | null = null
+	if (kindFromDb === 'like' || kindFromDb === 'shareClick') {
+		kind = kindFromDb
+	} else {
+		const label = task.label || ''
+		if (label.includes('dispatchEventReward13:coupon:claim')) kind = 'claim'
+		else if (label.includes('dispatchEventReward13:coupon:burn')) kind = 'burn'
+		else if (label.includes('dispatchEventReward13:coupon:linkClick')) kind = 'linkClick'
+		else if (label.includes('dispatchEventReward13:topup')) kind = 'topup'
+	}
+	if (!kind) return
 	void chargeCardProgramSocialBunitFeeInBackground({
 		cardAddress: task.cardAddress,
 		basePaymentHash,

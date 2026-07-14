@@ -321,6 +321,39 @@ async function shiftSettleContractForWrite(logTag: string): Promise<SettleContra
 	throw new Error(`${logTag}: Settle_ContractPool busy (no admin wallet available)`)
 }
 
+/** CoNET EntryPoint relay（claim / handleOps）预估 gas 上限偏大，中继 EOA 须有足够原生 CNET。 */
+const SETTLE_CONET_RELAY_MIN_WEI = ethers.parseEther('0.05')
+
+type ShiftSettleConetRelayResult =
+	| { ok: true; SC: SettleContractPoolEntry }
+	| { ok: false; reason: 'busy' | 'underfunded' }
+
+/**
+ * 为 CoNET 代付 relay 挑选 settle 钱包：跳过 CNET 余额 < 0.05 的 EOA，避免 `insufficient funds for intrinsic transaction cost`。
+ * underfunded：池内有钱包但全部低于门槛（已全部归还）；busy：池空。
+ */
+async function shiftSettleContractForConetRelay(logTag: string): Promise<ShiftSettleConetRelayResult> {
+	if (!Settle_ContractPool.length) return { ok: false, reason: 'busy' }
+	const underfunded: SettleContractPoolEntry[] = []
+	while (Settle_ContractPool.length > 0) {
+		const SC = Settle_ContractPool.shift()
+		if (!SC) break
+		const bal = await SC.walletConet.provider!.getBalance(SC.walletConet.address).catch(() => 0n)
+		if (bal >= SETTLE_CONET_RELAY_MIN_WEI) {
+			for (const u of underfunded) Settle_ContractPool.push(u)
+			return { ok: true, SC }
+		}
+		logger(
+			Colors.yellow(
+				`[${logTag}] skip Conet admin ${SC.walletConet.address} balance=${ethers.formatEther(bal)} CNET (need >= 0.05)`,
+			),
+		)
+		underfunded.push(SC)
+	}
+	for (const u of underfunded) Settle_ContractPool.push(u)
+	return { ok: false, reason: underfunded.length > 0 ? 'underfunded' : 'busy' }
+}
+
 function isSettleContractNonceRaceError(e: unknown): boolean {
 	const msg = String((e as { message?: string })?.message ?? e)
 	return (
@@ -1804,16 +1837,16 @@ function calcBeamioBUnitFee(amountUSDC6: bigint): { bServiceUnits6: bigint; bSer
   return { bServiceUnits6: clamped, bServiceUSDC6 }
 }
 
-/** Charge（OpenContainer / Container）：每笔固定 2 B-Unit（6 位小数），不按转账金额比例 */
-const CHARGE_FIXED_BUNIT_FEE_UNITS6 = 2_000_000n
+/** Charge（NFC/QR OpenContainer / Container）：每笔固定 5 B-Unit（6 位小数），不按转账金额比例 */
+const CHARGE_FIXED_BUNIT_FEE_UNITS6 = 5_000_000n
 
 function calcChargeFixedBUnitFee(): { bServiceUnits6: bigint; bServiceUSDC6: bigint } {
   const bServiceUnits6 = CHARGE_FIXED_BUNIT_FEE_UNITS6
-  const bServiceUSDC6 = bServiceUnits6 / 100n // 1 B-Unit = 0.01 USDC
+  const bServiceUSDC6 = bServiceUnits6 / 100n // 1 B-Unit = 0.01 USDC → 0.05 USDC
   return { bServiceUnits6, bServiceUSDC6 }
 }
 
-/** Discover 社交点赞 / 分享链接点击：商户卡 owner 每笔 0.1 B-Unit（6 位小数）。 */
+/** 全部社交 event（点赞 / 分享点击 / claim / burn / topup / linkClick）：商户卡 owner 每笔 0.1 B-Unit（6 位小数）。 */
 export const SOCIAL_ENGAGEMENT_BUNIT_FEE_UNITS6 = 100_000n
 
 export function calcSocialEngagementBUnitFee(): { bServiceUnits6: bigint; bServiceUSDC6: bigint } {
@@ -4356,7 +4389,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 
 		let chargeBunitConsumeTxHash: string | null = null
-		// OpenContainer / Gift：BUnit 由卡 owner 负担，每笔固定 2 B-Units（与 Cluster / pool 一致）
+		// OpenContainer / Gift：BUnit 由卡 owner 负担，每笔固定 5 B-Units（与 Cluster / pool 一致）
 		if ((obj.source === 'open-container' || obj.source === 'gift') && feePayer && feePayer !== ethers.ZeroAddress) {
 			const bunitFeeAmount = CHARGE_FIXED_BUNIT_FEE_UNITS6
 			const baseHashBytes32 = txHash as `0x${string}`
@@ -7042,6 +7075,19 @@ const TX_CATEGORY_SOCIAL_LIKE_BUNIT_SERVICE = ethers.keccak256(
 const TX_CATEGORY_SOCIAL_SHARE_CLICK_BUNIT_SERVICE = ethers.keccak256(
 	ethers.toUtf8Bytes('socialShareClick:bunitService')
 ) as `0x${string}`
+/** Indexer：社交 claim / burn / topup / linkClick #13 事件 B-Unit 服务费 */
+const TX_CATEGORY_SOCIAL_CLAIM_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('socialClaim:bunitService')
+) as `0x${string}`
+const TX_CATEGORY_SOCIAL_BURN_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('socialBurn:bunitService')
+) as `0x${string}`
+const TX_CATEGORY_SOCIAL_TOPUP_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('socialTopup:bunitService')
+) as `0x${string}`
+const TX_CATEGORY_SOCIAL_LINK_CLICK_BUNIT_SERVICE = ethers.keccak256(
+	ethers.toUtf8Bytes('socialLinkClick:bunitService')
+) as `0x${string}`
 /** Indexer：AA Smart Wallet 离线签字提交 B-Unit 服务费（无主业务主行） */
 const TX_CATEGORY_AA_MULTISIG_OFFLINE_SUBMIT_BUNIT_SERVICE = ethers.keccak256(
 	ethers.toUtf8Bytes('aaMultisigOfflineSubmit:bunitService')
@@ -7706,7 +7752,7 @@ export const resolveChargeFeePayer = async (
 	return { feePayerEOA, payeeEOA }
 }
 
-/** Cluster 预检：Charge（OpenContainer）由收款侧卡 owner 承担 B-Unit，每笔固定 2 B-Units。 */
+/** Cluster 预检：Charge（OpenContainer）由收款侧卡 owner 承担 B-Unit，每笔固定 5 B-Units。 */
 export const OpenContainerRelayPreCheckBUnitFee = async (
 	payload: OpenContainerRelayPayload,
 	_currency: string | string[],
@@ -7740,7 +7786,7 @@ export const OpenContainerRelayPreCheckBUnitFee = async (
 	}
 }
 
-/** Cluster 预检：Container 路径下由收款侧卡 owner 承担 B-Unit，每笔固定 2 B-Units。currency/currencyAmount 仅用于校验存在正金额（与转账语义一致）。 */
+/** Cluster 预检：Container 路径下由收款侧卡 owner 承担 B-Unit，每笔固定 5 B-Units。currency/currencyAmount 仅用于校验存在正金额（与转账语义一致）。 */
 export const ContainerRelayPreCheckBUnitBalance = async (
 	containerPayload: ContainerRelayPayload,
 	currency?: string | string[],
@@ -15641,6 +15687,165 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 	}
 }
 
+/**
+ * Legacy merchant card (no cardSelfBurn): after Check Balance NFC / Linked NFC session,
+ * sign OpenContainer coupon surrender with API-hosted NFC key — reuse uid/tagIdHex from
+ * the balance session (fresh openRelayedNonce from chain; not a stale Check Balance nonce).
+ */
+export const cardCouponPosConsumeNfcSignPreCheck = async (body: {
+	cardAddress?: string
+	couponId?: string
+	userEOA?: string
+	uid?: string
+	tagIdHex?: string
+	signerEOA?: string
+	tokenId?: string | number
+	amount?: string | number
+	posOperator?: string
+}): Promise<
+	| {
+		success: true
+		preChecked: {
+			openContainerPayload: OpenContainerRelayPayload
+			cardAddress: string
+			couponId: string
+			userEOA: string
+			userAccount: string
+			tokenId: string
+			amount: string
+			posOperator: string
+		}
+	}
+	| { success: false; error: string }
+> => {
+	const posOperatorRaw = String(body.posOperator ?? '').trim()
+	if (!posOperatorRaw || !ethers.isAddress(posOperatorRaw)) {
+		return { success: false, error: 'Invalid posOperator' }
+	}
+	const posOperator = ethers.getAddress(posOperatorRaw)
+
+	const prep = await cardCouponPosConsumePreparePreCheck({
+		cardAddress: body.cardAddress,
+		couponId: body.couponId,
+		userEOA: body.userEOA,
+		signerEOA: body.signerEOA,
+		tokenId: body.tokenId,
+		amount: body.amount,
+	})
+	if (!prep.success) return prep
+	if (prep.mode !== 'openContainerSurrender') {
+		return {
+			success: false,
+			error: 'Merchant card supports burn — use prepare/submit consume, not NFC OpenContainer surrender.',
+		}
+	}
+
+	const userNorm = prep.preChecked.userEOA
+	let uid = String(body.uid ?? '').trim()
+	let tagIdHex = String(body.tagIdHex ?? '').trim().replace(/^0x/i, '').toUpperCase()
+	if (!uid && !tagIdHex) {
+		const linked = await listLinkedNfcCardsByOwnerEoa(userNorm)
+		const pick = linked.find((row) => row.linkState === 'active') ?? linked[0]
+		if (pick?.uid) uid = pick.uid
+		if (pick?.tagId) tagIdHex = pick.tagId.toUpperCase()
+	}
+	if (!uid && !tagIdHex) {
+		return { success: false, error: 'NFC uid/tagIdHex required for hosted coupon surrender (or Link App NFC).' }
+	}
+
+	let privateKey: string | null = null
+	if (tagIdHex) privateKey = await getNfcCardPrivateKeyByTagId(tagIdHex)
+	if (!privateKey && uid) privateKey = await getNfcCardPrivateKeyByUid(uid)
+	if (!privateKey) {
+		return { success: false, error: 'NFC private key not found for this card session.' }
+	}
+	const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`
+	if (!ethers.isHexString(pk, 32)) return { success: false, error: 'Invalid NFC private key format' }
+	const wallet = new ethers.Wallet(pk)
+	if (ethers.getAddress(wallet.address) !== userNorm) {
+		return { success: false, error: 'NFC signer does not match userEOA' }
+	}
+
+	const cardNorm = prep.preChecked.cardAddress
+	const holderAccount = prep.preChecked.userAccount
+	const tokenIdStr = prep.preChecked.tokenId
+	const amountStr = prep.preChecked.amount
+	const cardChain = await resolveUserCardChain(cardNorm)
+	const cardProvider = providerForUserCardChain(cardChain)
+	const chainId = chainIdForUserCardChain(cardChain)
+
+	const aaCode = await cardProvider.getCode(holderAccount)
+	if (!aaCode || aaCode === '0x' || aaCode.length <= 2) {
+		return { success: false, error: 'Coupon holder AA has no code on merchant card chain' }
+	}
+
+	const nonce = await readContainerNonceFromAAStorage(cardProvider, holderAccount, 'openRelayed')
+	const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
+	const currencyType = 4
+	const maxAmount = 0n
+	const domain = {
+		name: 'BeamioAccount',
+		version: '1',
+		chainId,
+		verifyingContract: holderAccount as `0x${string}`,
+	}
+	const types = {
+		OpenContainerMain: [
+			{ name: 'account', type: 'address' },
+			{ name: 'currencyType', type: 'uint8' },
+			{ name: 'maxAmount', type: 'uint256' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	}
+	const message = {
+		account: holderAccount,
+		currencyType,
+		maxAmount,
+		nonce,
+		deadline,
+	}
+	const signature = await wallet.signTypedData(domain, types, message)
+	const openContainerPayload: OpenContainerRelayPayload = {
+		account: holderAccount,
+		to: posOperator,
+		items: [
+			{
+				kind: 1,
+				asset: cardNorm,
+				tokenId: tokenIdStr,
+				amount: amountStr,
+				data: '0x',
+			},
+		],
+		currencyType,
+		maxAmount: maxAmount.toString(),
+		nonce: nonce.toString(),
+		deadline: deadline.toString(),
+		signature,
+	}
+
+	logger(
+		Colors.green(
+			`[cardCouponPosConsumeNfcSign] signed openContainer surrender card=${cardNorm.slice(0, 10)}… user=${userNorm.slice(0, 10)}… tokenId=${tokenIdStr} nonce=${nonce.toString()}`,
+		),
+	)
+
+	return {
+		success: true,
+		preChecked: {
+			openContainerPayload,
+			cardAddress: cardNorm,
+			couponId: prep.preChecked.couponId,
+			userEOA: userNorm,
+			userAccount: holderAccount,
+			tokenId: tokenIdStr,
+			amount: amountStr,
+			posOperator,
+		},
+	}
+}
+
 export const cardCouponPosConsumeSubmitPreCheck = async (body: {
 	cardAddress?: string
 	data?: string
@@ -16907,9 +17112,60 @@ export const cardCreateRedeemPreCheck = async (body: {
 	}
 }
 
-export type CardProgramSocialBunitKind = 'like' | 'shareClick'
+export type CardProgramSocialBunitKind =
+	| 'like'
+	| 'shareClick'
+	| 'claim'
+	| 'burn'
+	| 'topup'
+	| 'linkClick'
 
-/** Discover 点赞 / 分享点击：社交链上 tx 成功后后台扣 0.1 B-Unit + indexer（不阻塞 HTTP）。 */
+function socialBunitIndexerMeta(kind: CardProgramSocialBunitKind): {
+	txCategory: `0x${string}`
+	title: string
+	source: string
+} {
+	switch (kind) {
+		case 'like':
+			return {
+				txCategory: TX_CATEGORY_SOCIAL_LIKE_BUNIT_SERVICE,
+				title: 'Social Like',
+				source: 'socialLike',
+			}
+		case 'shareClick':
+			return {
+				txCategory: TX_CATEGORY_SOCIAL_SHARE_CLICK_BUNIT_SERVICE,
+				title: 'Social Share Click',
+				source: 'socialShareClick',
+			}
+		case 'claim':
+			return {
+				txCategory: TX_CATEGORY_SOCIAL_CLAIM_BUNIT_SERVICE,
+				title: 'Social Claim',
+				source: 'socialClaim',
+			}
+		case 'burn':
+			return {
+				txCategory: TX_CATEGORY_SOCIAL_BURN_BUNIT_SERVICE,
+				title: 'Social Burn',
+				source: 'socialBurn',
+			}
+		case 'topup':
+			return {
+				txCategory: TX_CATEGORY_SOCIAL_TOPUP_BUNIT_SERVICE,
+				title: 'Social Top-up',
+				source: 'socialTopup',
+			}
+		case 'linkClick':
+			return {
+				txCategory: TX_CATEGORY_SOCIAL_LINK_CLICK_BUNIT_SERVICE,
+				title: 'Social Link Click',
+				source: 'socialLinkClick',
+			}
+	}
+}
+
+/** 社交 event：链上 tx 成功后后台扣 0.1 B-Unit + indexer（不阻塞 HTTP）。 */
 export async function chargeCardProgramSocialBunitFeeInBackground(args: {
 	cardAddress: string
 	basePaymentHash: string
@@ -16969,10 +17225,7 @@ export async function chargeCardProgramSocialBunitFeeInBackground(args: {
 		)
 		const opChain = await fetchOperatorParentChain(cardAddrN, resolveResult.cardOwner)
 		const { topAdmin } = deriveTopAdminAndSubordinate(resolveResult.cardOwner, opChain)
-		const txCategory =
-			args.kind === 'like' ? TX_CATEGORY_SOCIAL_LIKE_BUNIT_SERVICE : TX_CATEGORY_SOCIAL_SHARE_CLICK_BUNIT_SERVICE
-		const title = args.kind === 'like' ? 'Social Like' : 'Social Share Click'
-		const source = args.kind === 'like' ? 'socialLike' : 'socialShareClick'
+		const { txCategory, title, source } = socialBunitIndexerMeta(args.kind)
 		await syncStandaloneBunitServiceFeeToIndexer({
 			walletConet: SC.walletConet,
 			BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
@@ -17689,7 +17942,7 @@ export function buildBeamioUserCardRedeemShareUrl(cardAddress: string, redeemCod
 }
 
 /**
- * Cluster 预检：Claim（cardRedeem / Coupon·Catalog redeem code）由 BeamioUserCard owner 承担 B-Unit，每笔固定 2 B-Units（与 Charge 一致）。
+ * Cluster 预检：Claim（cardRedeem / Coupon·Catalog redeem code）由 BeamioUserCard owner 承担 B-Unit，每笔固定 5 B-Units（与 Charge 一致）。
  */
 export const cardRedeemPreCheckBUnitBalance = async (
 	cardAddress: string
@@ -17965,11 +18218,15 @@ export const cardCouponOpenClaimProcess = async () => {
 	let SC: SettleContractPoolEntry | undefined
 	let requeuedForNonceRace = false
 	try {
-		SC = Settle_ContractPool.shift()
-		if (!SC) {
-			cardCouponOpenClaimPool.unshift(obj)
-			return setTimeout(() => cardCouponOpenClaimProcess(), 3000)
+		const picked = await shiftSettleContractForConetRelay('cardCouponOpenClaimProcess')
+		if (!picked.ok) {
+			if (picked.reason === 'busy') {
+				cardCouponOpenClaimPool.unshift(obj)
+				return setTimeout(() => cardCouponOpenClaimProcess(), 3000)
+			}
+			throw new Error('insufficient funds for intrinsic transaction cost')
 		}
+		SC = picked.SC
 
 		const userNorm = ethers.getAddress(obj.userEOA)
 		const aaAddress = await ensureAAForEOAOnCard(obj.cardAddress, userNorm, SC)
@@ -18150,6 +18407,8 @@ export const cardCouponOpenClaimProcess = async () => {
 			clientError = 'Merchant USDC escrow is insufficient for this exchange.'
 		} else if (/Failed to create AA|ensureAAForEOAOnCard/i.test(errMsg)) {
 			clientError = 'Failed to create Smart Account on Base. Please try again shortly.'
+		} else if (/insufficient funds for intrinsic transaction cost/i.test(errMsg)) {
+			clientError = 'Network relay wallet is low on gas. Please try again shortly.'
 		}
 		
 		logger(Colors.red(`[cardCouponOpenClaimProcess] failed: ${clientError} (rawError: ${JSON.stringify(errorData)})`))
@@ -18176,11 +18435,15 @@ export const cardCouponPosClaimWalletProcess = async () => {
 	let SC: SettleContractPoolEntry | undefined
 	let requeuedForNonceRace = false
 	try {
-		SC = Settle_ContractPool.shift()
-		if (!SC) {
-			cardCouponPosClaimWalletPool.unshift(obj)
-			return setTimeout(() => cardCouponPosClaimWalletProcess(), 3000)
+		const picked = await shiftSettleContractForConetRelay('cardCouponPosClaimWalletProcess')
+		if (!picked.ok) {
+			if (picked.reason === 'busy') {
+				cardCouponPosClaimWalletPool.unshift(obj)
+				return setTimeout(() => cardCouponPosClaimWalletProcess(), 3000)
+			}
+			throw new Error('insufficient funds for intrinsic transaction cost')
 		}
+		SC = picked.SC
 
 		const userNorm = ethers.getAddress(obj.userEOA)
 		const posAdminNorm = ethers.getAddress(obj.posAdminEOA)
@@ -18252,6 +18515,8 @@ export const cardCouponPosClaimWalletProcess = async () => {
 			clientError = 'User account not deployed on Base. Please deploy your Smart Account first before claiming coupons.'
 		} else if (/Failed to create AA|ensureAAForEOAOnCard/i.test(errMsg)) {
 			clientError = 'Failed to create Smart Account on Base. Please try again shortly.'
+		} else if (/insufficient funds for intrinsic transaction cost/i.test(errMsg)) {
+			clientError = 'Network relay wallet is low on gas. Please try again shortly.'
 		}
 		logger(Colors.red(`[cardCouponPosClaimWalletProcess] failed: ${clientError} (raw: ${errMsg})`))
 		if (obj.res && !obj.res.headersSent) {

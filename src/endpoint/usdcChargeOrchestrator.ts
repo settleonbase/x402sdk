@@ -39,7 +39,7 @@
  * Gas/费用：
  *   - L1 部署 tmpAA + mint：由 Master 持有的 paymaster signer 付（与 NFC topup 链路完全一致，不新增 gas 模型）。
  *   - L1 B-Unit 服务费：issuer（cardOwner）按 NFC topup 同款固定 20 B-Unit 扣（PR #4 修补的既存缺口，q3 = a）。
- *   - L2 relay：由 Master paymaster 付 gas；charge 端固定 2 B-Unit 也由 issuer 付（既存机制）。
+ *   - L2 relay：由 Master paymaster 付 gas；charge 端固定 5 B-Unit 也由 issuer 付（既存机制）。
  *
  * 原子性：
  *   - 「USDC settle 成功 + L1 + L2 全部成功」是 happy path，单 sid 在 in-memory `chargeSessions` 推进至 `success`。
