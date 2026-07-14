@@ -15425,14 +15425,13 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 	| { success: false; error: string }
 > => {
 	const cardAddress = String(body.cardAddress ?? '').trim()
-	const couponId = String(body.couponId ?? '').trim()
+	let couponId = String(body.couponId ?? '').trim()
 	const data = String(body.data ?? '').trim()
 	const nonce = String(body.nonce ?? '').trim()
 	const adminSignature = String(body.adminSignature ?? '').trim()
 	const signerEOA = String(body.signerEOA ?? '').trim()
 	const deadline = Number(body.deadline)
 	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
-	if (!couponId) return { success: false, error: 'Missing couponId' }
 	if (!data || !ethers.isHexString(data) || data.length < 10) return { success: false, error: 'Invalid data' }
 	if (!Number.isFinite(deadline) || deadline <= 0) return { success: false, error: 'Invalid deadline' }
 	if (!nonce) return { success: false, error: 'Missing nonce' }
@@ -15457,6 +15456,12 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 		if (amount !== 1n) return { success: false, error: 'Open claim amount must be 1' }
 
 		const cardNorm = ethers.getAddress(cardAddress)
+		if (!couponId) {
+			const candidates = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
+			const matched = candidates.find((row) => String(row.tokenId) === String(tokenId))
+			couponId = matched ? readCouponIdFromSeriesMetadata(matched.metadata ?? null) : ''
+			if (!couponId) return { success: false, error: 'Missing couponId and could not resolve from tokenId' }
+		}
 		const userNorm = ethers.getAddress(to)
 		const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
 			cardAddr: cardNorm,
