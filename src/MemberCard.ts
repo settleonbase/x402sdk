@@ -4389,8 +4389,17 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		}
 
 		let chargeBunitConsumeTxHash: string | null = null
-		// OpenContainer / Gift：BUnit 由卡 owner 负担，每笔固定 5 B-Units（与 Cluster / pool 一致）
-		if ((obj.source === 'open-container' || obj.source === 'gift') && feePayer && feePayer !== ethers.ZeroAddress) {
+		// OpenContainer / Gift：BUnit 由卡 owner 负担，每笔固定 5 B-Units（与 Cluster / pool 一致）。
+		// TX_TIP 子行亦为 source=open-container，但 bServiceUnits6=0 —— 不得再扣一次，否则有小费的 QR Charge 会双扣 5+5。
+		const openContainerFeeUnits6 = BigInt(obj.bServiceUnits6 ?? '0')
+		const isOpenContainerTipRow = txCategory === TX_TIP || isChargeLedgerTxTipRow(obj.ledgerTxCategory)
+		if (
+			(obj.source === 'open-container' || obj.source === 'gift') &&
+			feePayer &&
+			feePayer !== ethers.ZeroAddress &&
+			openContainerFeeUnits6 > 0n &&
+			!isOpenContainerTipRow
+		) {
 			const bunitFeeAmount = CHARGE_FIXED_BUNIT_FEE_UNITS6
 			const baseHashBytes32 = txHash as `0x${string}`
 			const baseGas = BigInt(obj.baseGas ?? '0')
@@ -8497,7 +8506,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 							bonusCurrencyAmountE6: spl!.bonusE6.toString(),
 						})
 						const legTxId = nfcTopupIndexerLegTxId(tx.hash, `${topupCategoryRaw}:${legs[i]!.idxKey}`)
-						const attachFee = i === 0
+						/** B-Unit 只写独立 `nfcTopup:bunitService` 行；主业务腿 fees 恒为 0（避免 biz 合并腿时 20×N）。 */
 						const inputLeg: PurchasingCardAccountingInput = {
 							txId: legTxId,
 							originalPaymentHash: ethers.ZeroHash as `0x${string}`,
@@ -8526,9 +8535,9 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 								gasWei: 0n,
 								gasUSDC6: 0n,
 								serviceUSDC6: 0n,
-								bServiceUSDC6: attachFee ? bServiceUSDC6Topup : 0n,
-								bServiceUnits6: attachFee ? bServiceUnits6Topup : 0n,
-								feePayer: attachFee ? feePayerCardOwner : ethers.ZeroAddress,
+								bServiceUSDC6: 0n,
+								bServiceUnits6: 0n,
+								feePayer: ethers.ZeroAddress,
 							},
 							meta: {
 								requestAmountFiat6: pts,
@@ -8589,9 +8598,10 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 							gasWei: 0n,
 							gasUSDC6: 0n,
 							serviceUSDC6: 0n,
-							bServiceUSDC6: bServiceUSDC6Topup,
-							bServiceUnits6: bServiceUnits6Topup,
-							feePayer: feePayerCardOwner,
+							/** B-Unit 仅独立 `*:bunitService` 行；主行恒 0 */
+							bServiceUSDC6: 0n,
+							bServiceUnits6: 0n,
+							feePayer: ethers.ZeroAddress,
 						},
 						meta: {
 							requestAmountFiat6: mintParsed.points6,
@@ -9165,9 +9175,10 @@ export const purchasingCardProcess = async () => {
 						: cardOwnerEOAForBunit
 			  )
 			: ethers.ZeroAddress
-		input.fees.bServiceUSDC6 = bServiceUSDC6UsdcTopup
-		input.fees.bServiceUnits6 = bServiceUnits6UsdcTopup
-		input.fees.feePayer = feePayerCardOwnerUsdc
+		/** 主业务行 fees 恒 0；B-Unit 仅写下方 `usdcTopup:bunitService` 独立行（与 NFC topup / ledger 双轨一致）。 */
+		input.fees.bServiceUSDC6 = 0n
+		input.fees.bServiceUnits6 = 0n
+		input.fees.feePayer = ethers.ZeroAddress
 
 		if (basePurchTxOk) {
 			const hadMembershipBeforeApp = ownershipSnapshotHasValidMembershipNft(nfts as unknown[])
