@@ -9,6 +9,8 @@ import {
 const PUBKEY_RE = /^0x[0-9a-f]{96}$/
 const CACHE_TTL_MS = 30_000
 const BEACON_TIMEOUT_MS = 8_000
+const DEFAULT_SECONDS_PER_SLOT = '12'
+const DEFAULT_SLOTS_PER_EPOCH = '32'
 
 const VALIDATOR_DASHBOARD_ABI = [
 	'function getNodeByValidatorPubkeyHash(bytes32 pubkeyHash) view returns (uint256 guardianId)',
@@ -49,6 +51,12 @@ type BeaconValidatorResponse = {
 	}
 }
 
+type BeaconTiming = {
+	genesisTime: string | null
+	secondsPerSlot: string
+	slotsPerEpoch: string
+}
+
 type CachedDashboard = {
 	value: ConetValidatorDashboard
 	fetchedAt: number
@@ -82,6 +90,9 @@ export type ConetValidatorDashboard = {
 		activationEpoch: string | null
 		exitEpoch: string | null
 		withdrawableEpoch: string | null
+		genesisTime: string | null
+		secondsPerSlot: string
+		slotsPerEpoch: string
 	}
 	meta: {
 		partial: boolean
@@ -163,7 +174,37 @@ async function fetchBeaconValidator(pubkey: string): Promise<{
 	}
 }
 
-function emptyBeacon() {
+async function fetchBeaconTiming(base: string): Promise<BeaconTiming> {
+	try {
+		const [genesisResponse, specResponse] = await Promise.all([
+			fetch(`${base}/eth/v1/beacon/genesis`, { signal: AbortSignal.timeout(BEACON_TIMEOUT_MS) }),
+			fetch(`${base}/eth/v1/config/spec`, { signal: AbortSignal.timeout(BEACON_TIMEOUT_MS) }),
+		])
+		const genesisPayload = genesisResponse.ok
+			? (await genesisResponse.json() as { data?: { genesis_time?: string } })
+			: null
+		const specPayload = specResponse.ok
+			? (await specResponse.json() as { data?: Record<string, string> })
+			: null
+		return {
+			genesisTime: genesisPayload?.data?.genesis_time ?? null,
+			secondsPerSlot: specPayload?.data?.SECONDS_PER_SLOT ?? DEFAULT_SECONDS_PER_SLOT,
+			slotsPerEpoch: specPayload?.data?.SLOTS_PER_EPOCH ?? DEFAULT_SLOTS_PER_EPOCH,
+		}
+	} catch {
+		return {
+			genesisTime: null,
+			secondsPerSlot: DEFAULT_SECONDS_PER_SLOT,
+			slotsPerEpoch: DEFAULT_SLOTS_PER_EPOCH,
+		}
+	}
+}
+
+function emptyBeacon(timing: BeaconTiming = {
+	genesisTime: null,
+	secondsPerSlot: DEFAULT_SECONDS_PER_SLOT,
+	slotsPerEpoch: DEFAULT_SLOTS_PER_EPOCH,
+}) {
 	return {
 		available: false,
 		index: null,
@@ -176,6 +217,9 @@ function emptyBeacon() {
 		activationEpoch: null,
 		exitEpoch: null,
 		withdrawableEpoch: null,
+		genesisTime: timing.genesisTime,
+		secondsPerSlot: timing.secondsPerSlot,
+		slotsPerEpoch: timing.slotsPerEpoch,
 	}
 }
 
@@ -220,10 +264,12 @@ export async function getConetValidatorDashboard(
 		const beneficiary = toAddress(beneficiaryRaw)
 		const bundle = normalizeBundle(await contract.getBeneficiaryNodeBundle(beneficiary))
 		const index = findBundleIndex(bundle, pubkey, guardianId)
+		const beaconBase = (process.env.CONET_VALIDATOR_BEACON_REST_URL?.trim() || 'http://127.0.0.1:4100').replace(/\/$/, '')
 		const [incomeResult, beacon] = await Promise.all([
 			validatorDepositRedeemReadUnifiedIncomeStats(beneficiary),
 			fetchBeaconValidator(pubkey),
 		])
+		const beaconTiming = await fetchBeaconTiming(beaconBase)
 		const beaconRow = beacon.value
 		const beaconValidator = beaconRow?.validator
 		const previous = cached?.value
@@ -240,8 +286,9 @@ export async function getConetValidatorDashboard(
 					activationEpoch: beaconValidator.activation_epoch ?? null,
 					exitEpoch: beaconValidator.exit_epoch ?? null,
 					withdrawableEpoch: beaconValidator.withdrawable_epoch ?? null,
+					...beaconTiming,
 				}
-			: previous?.beacon ?? emptyBeacon()
+			: previous?.beacon ?? emptyBeacon(beaconTiming)
 		const value: ConetValidatorDashboard = {
 			success: true,
 			pubkey,

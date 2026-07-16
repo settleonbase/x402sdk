@@ -6,6 +6,10 @@ import {
 	startValidatorClRewardPayoutReporter,
 	stopValidatorClRewardPayoutReporter,
 } from './validatorClRewardPayoutReporter'
+import {
+	CONET_VALIDATOR_CL_PAYOUT_ONCHAIN_LANE,
+	waitForOnchainTxQueue,
+} from '../onchainTxSerialQueue'
 
 /**
  * Lightweight CoNET validator-node daemon: event listener + hourly CNET reward reporter
@@ -31,6 +35,7 @@ async function shutdown(signal: string): Promise<void> {
 	stopValidatorClRewardPayoutReporter()
 	stopValidatorDepositRedeemListener()
 	await waitForListenerSerialQueue()
+	await waitForOnchainTxQueue(CONET_VALIDATOR_CL_PAYOUT_ONCHAIN_LANE)
 	await waitForRunCommandChildren()
 	process.exit(0)
 }

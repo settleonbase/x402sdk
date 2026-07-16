@@ -133,10 +133,21 @@ export async function waitForAllOnchainTxQueues(maxWaitMs = 30 * 60 * 1000): Pro
 }
 
 /**
- * CoNET validator-node listener daemon: redeem admin + settle relayer + Prysm scripts share one process lane.
- * Prefer per-signer lanes (`eoa:0x…`) when multiple distinct hot wallets sign in the same service.
+ * Legacy shared lane name (kept for callers that have not split yet).
+ * Prefer {@link CONET_VALIDATOR_REDEEM_WORKFLOW_ONCHAIN_LANE} vs {@link CONET_VALIDATOR_CL_PAYOUT_ONCHAIN_LANE}.
  */
 export const CONET_VALIDATOR_NODE_ONCHAIN_LANE = 'conet-validator-node:onchain'
+
+/**
+ * Claim / fee-recipient / full-exit workflow (redeem admin + Prysm helper scripts).
+ * Isolated from CL skim so long settleNodeRewards batches cannot starve claim jobs.
+ */
+export const CONET_VALIDATOR_REDEEM_WORKFLOW_ONCHAIN_LANE = 'conet-validator-node:redeem-workflow'
+
+/**
+ * CL skim settleNodeRewards / withdrawNative payout reporter only.
+ */
+export const CONET_VALIDATOR_CL_PAYOUT_ONCHAIN_LANE = 'conet-validator-node:cl-payout'
 
 /** Lane key for a single hot-wallet signer (checksum-agnostic). */
 export function onchainTxLaneForSigner(signerAddress: string): string {
