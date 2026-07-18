@@ -20358,4 +20358,126 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 	}
 }
 
+// --- ReferralRegistryVaultV1 gasless Admin L0 management relay ---
+const REFERRAL_REGISTRY_ADMIN_MANAGEMENT_ABI = [
+	'function setL0RebateRateFor(address admin,address l0,uint256 rebateBps,uint256 nonce,uint256 deadline,bytes signature)',
+	'function assignMerchantToL0For(address admin,address l0,address merchant,address card,uint256 nonce,uint256 deadline,bytes signature)',
+	'function members(address) view returns (uint8 role,address parentAdmin,address parentL0,uint256 rebateBps,uint256 ratioBps,bool active)',
+] as const
+
+export type ReferralRegistryAdminManagementAction = 'setL0Rate' | 'assignMerchant'
+export const referralRegistryAdminManagementPool: Array<{
+	contract: string
+	action: ReferralRegistryAdminManagementAction
+	admin: string
+	l0: string
+	merchant?: string
+	card?: string
+	rebateBps?: string
+	nonce: string
+	deadline: string
+	signature: string
+	res: Response
+}> = []
+
+export function kickReferralRegistryAdminManagementRelay(): void {
+	void referralRegistryAdminManagementProcess().catch((error: any) => {
+		logger(Colors.red('[referralRegistryAdminManagement] unhandled error:'), error?.message ?? error)
+	})
+}
+
+function scheduleReferralRegistryAdminManagementRelay(): void {
+	if (referralRegistryAdminManagementPool.length === 0) return
+	if (Settle_ContractPool.length > 0) {
+		kickReferralRegistryAdminManagementRelay()
+		return
+	}
+	setTimeout(() => kickReferralRegistryAdminManagementRelay(), 3000)
+}
+
+export async function referralRegistryAdminManagementProcess(): Promise<void> {
+	const job = referralRegistryAdminManagementPool.shift()
+	if (!job) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		referralRegistryAdminManagementPool.unshift(job)
+		return scheduleReferralRegistryAdminManagementRelay()
+	}
+	try {
+		const registry = new ethers.Contract(job.contract, REFERRAL_REGISTRY_ADMIN_MANAGEMENT_ABI, SC.walletConet)
+		const tx = job.action === 'setL0Rate'
+			? await registry.setL0RebateRateFor(
+				ethers.getAddress(job.admin),
+				ethers.getAddress(job.l0),
+				BigInt(job.rebateBps ?? '0'),
+				BigInt(job.nonce),
+				BigInt(job.deadline),
+				job.signature,
+			)
+			: await registry.assignMerchantToL0For(
+				ethers.getAddress(job.admin),
+				ethers.getAddress(job.l0),
+				ethers.getAddress(job.merchant ?? ''),
+				ethers.getAddress(job.card ?? ''),
+				BigInt(job.nonce),
+				BigInt(job.deadline),
+				job.signature,
+			)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) throw new Error('Referral Admin management transaction failed')
+
+		const parsedLogs = receipt.logs
+			.map((log: any) => {
+				try {
+					return new ethers.Interface([
+						'event L0RateUpdated(address indexed l0,uint256 rebateBps)',
+						'event MerchantAssignedToL0(address indexed merchant,address indexed l0,address indexed card,address admin)',
+					]).parseLog(log)
+				} catch {
+					return null
+				}
+			})
+			.filter(Boolean)
+		if (job.action === 'setL0Rate') {
+			const event = parsedLogs.find((item: any) => item.name === 'L0RateUpdated')
+			if (!event) throw new Error('L0RateUpdated event was not found')
+			const member = await registry.members(ethers.getAddress(job.l0))
+			await upsertReferralRegistryTreeMember({
+				account: job.l0,
+				role: 'l0',
+				parentAdmin: member.parentAdmin,
+				parentL0: null,
+				rebateBps: event.args.rebateBps.toString(),
+				ratioBps: '0',
+				active: Boolean(member.active),
+				blockNumber: receipt.blockNumber.toString(),
+				txHash: tx.hash,
+			})
+		} else {
+			const event = parsedLogs.find((item: any) => item.name === 'MerchantAssignedToL0')
+			if (!event) throw new Error('MerchantAssignedToL0 event was not found')
+			await upsertReferralRegistryTreeMember({
+				account: event.args.merchant,
+				role: 'merchant',
+				parentAdmin: null,
+				parentL0: event.args.l0,
+				rebateBps: '0',
+				ratioBps: '0',
+				active: true,
+				blockNumber: receipt.blockNumber.toString(),
+				txHash: tx.hash,
+			})
+		}
+		logger(Colors.green(`[referralRegistryAdminManagement] action=${job.action} l0=${job.l0} tx=${tx.hash}`))
+		if (!job.res.headersSent) job.res.status(200).json({ success: true, txHash: tx.hash }).end()
+	} catch (error: any) {
+		const message = error?.shortMessage ?? error?.message ?? String(error)
+		logger(Colors.red(`[referralRegistryAdminManagement] failed: ${message}`))
+		if (!job.res.headersSent) job.res.status(400).json({ success: false, error: message }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		scheduleReferralRegistryAdminManagementRelay()
+	}
+}
+
 export { buildNfcCardLinkStateSignMessage, NFC_CARD_LINK_STATE_SCOPE } from './db'

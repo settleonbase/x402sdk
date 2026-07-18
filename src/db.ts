@@ -4391,6 +4391,51 @@ export const getDistinctBeamioCardOwnerAddressesLower = async (): Promise<string
 	}
 }
 
+export type ReferralMerchantCandidateRow = {
+	merchant: string
+	cardAddress: string
+	metadata: Record<string, unknown> | null
+}
+
+/** Candidate merchant card owners for Admin referral assignment. */
+export const listReferralMerchantCandidates = async (limit = 500): Promise<ReferralMerchantCandidateRow[]> => {
+	const cap = Math.min(Math.max(Math.trunc(limit), 1), 2000)
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_CARDS_TABLE)
+		const { rows } = await db.query<{
+			card_owner: string
+			card_address: string
+			metadata_json: unknown
+		}>(
+			`SELECT card_owner, card_address, metadata_json
+			 FROM beamio_cards
+			 WHERE card_owner IS NOT NULL
+			   AND TRIM(card_owner) <> ''
+			   AND card_address IS NOT NULL
+			   AND TRIM(card_address) <> ''
+			 ORDER BY created_at DESC
+			 LIMIT $1`,
+			[cap],
+		)
+		return rows
+			.filter((row) => ethers.isAddress(row.card_owner) && ethers.isAddress(row.card_address))
+			.map((row) => ({
+				merchant: ethers.getAddress(row.card_owner),
+				cardAddress: ethers.getAddress(row.card_address),
+				metadata: row.metadata_json && typeof row.metadata_json === 'object'
+					? row.metadata_json as Record<string, unknown>
+					: null,
+			}))
+	} catch (e: any) {
+		logger(Colors.yellow(`[listReferralMerchantCandidates] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 读取当前 DB 已登记的全部 BeamioUserCard 地址，用于 API 资产查询按用户过滤实际持有卡。 */
 export const listRegisteredBeamioUserCardAddresses = async (limit = 5000): Promise<string[]> => {
 	const cap = Math.min(Math.max(Math.trunc(limit), 1), 10000)

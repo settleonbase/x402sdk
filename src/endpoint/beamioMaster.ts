@@ -29,6 +29,11 @@ import {
 	type ReferralRegistryRedeemRelayAction,
 } from '../MemberCard'
 import {
+	kickReferralRegistryAdminManagementRelay,
+	referralRegistryAdminManagementPool,
+	type ReferralRegistryAdminManagementAction,
+} from '../MemberCard'
+import {
 	invalidateIssuedCouponSeriesQueryCachesForCard,
 	registerIssuedCouponSeriesQueryCacheInvalidator,
 } from './issuedCouponSeriesQueryCache'
@@ -2523,6 +2528,46 @@ const routing = ( router: Router ) => {
 				res,
 			})
 			kickReferralRegistryRedeemRelay()
+		})
+
+		router.post('/referralRegistryAdminManagement', (req, res) => {
+			const body = req.body as {
+				action?: ReferralRegistryAdminManagementAction
+				contract?: string
+				admin?: string
+				l0?: string
+				merchant?: string
+				card?: string
+				rebateBps?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			if (
+				!body.action ||
+				!body.contract ||
+				!body.admin ||
+				!body.l0 ||
+				!body.nonce ||
+				!body.deadline ||
+				!body.signature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing Referral Admin management fields' }).end()
+			}
+			referralRegistryAdminManagementPool.push({
+				action: body.action,
+				contract: body.contract,
+				admin: body.admin,
+				l0: body.l0,
+				merchant: body.merchant,
+				card: body.card,
+				rebateBps: body.rebateBps,
+				nonce: body.nonce,
+				deadline: body.deadline,
+				signature: body.signature,
+				res,
+			})
+			kickReferralRegistryAdminManagementRelay()
 		})
 
 		router.post('/referralRegistryClaim', async (req, res) => {

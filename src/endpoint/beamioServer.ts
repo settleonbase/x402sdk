@@ -11,7 +11,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import { listReferralRegistryClaimsByParent, listReferralRegistryTreeByAccount, getReferralRegistryTreeSync } from '../db'
+import { listReferralRegistryClaimsByParent, listReferralRegistryTreeByAccount, getReferralRegistryTreeSync, listReferralMerchantCandidates } from '../db'
 import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
@@ -38,6 +38,11 @@ import {
 	kickReferralRegistryRedeemRelay,
 	referralRegistryRedeemPool,
 	type ReferralRegistryRedeemRelayAction,
+} from '../MemberCard'
+import {
+	kickReferralRegistryAdminManagementRelay,
+	referralRegistryAdminManagementPool,
+	type ReferralRegistryAdminManagementAction,
 } from '../MemberCard'
 import {
 	cardBootstrapIssuedNftV2StatPreCheck,
@@ -482,6 +487,8 @@ const providerConet = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(),
 const REFERRAL_REDEEM_READ_ABI = [
 	'function admins(address) view returns (bool)',
 	'function members(address) view returns (uint8 role,address parentAdmin,address parentL0,uint256 rebateBps,uint256 ratioBps,bool active)',
+	'function userCardFactory() view returns (address)',
+	'function claimedMerchantL0(address) view returns (address)',
 	'function redeemActionNonces(address) view returns (uint256)',
 	'function referralClaimNonces(address) view returns (uint256)',
 	'function l0RedeemCodes(bytes32) view returns (address issuerAdmin,uint256 rebateBps,uint64 validAfter,uint64 validBefore,bool active,bool claimed,bool cancelled)',
@@ -492,6 +499,28 @@ const REFERRAL_REDEEM_DOMAIN = {
 	version: '1',
 	chainId: 224422,
 	verifyingContract: CONET_REFERRAL_REGISTRY_VAULT_V1,
+} as const
+
+const REFERRAL_ADMIN_MANAGEMENT_TYPES = {
+	setL0Rate: {
+		SetL0Rate: [
+			{ name: 'admin', type: 'address' },
+			{ name: 'l0', type: 'address' },
+			{ name: 'rebateBps', type: 'uint256' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+	assignMerchant: {
+		AssignMerchantToL0: [
+			{ name: 'admin', type: 'address' },
+			{ name: 'l0', type: 'address' },
+			{ name: 'merchant', type: 'address' },
+			{ name: 'card', type: 'address' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
 } as const
 
 const REFERRAL_CLAIM_TYPES = {
@@ -583,6 +612,105 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: rebateBps.toString(), nonce: nonce.toString(), deadline: deadline.toString(), signature } }
 	} catch (error: any) {
 		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral redeem request' }
+	}
+}
+
+async function referralRegistryAdminManagementPreCheck(body: any): Promise<
+	| {
+			success: true
+			preChecked: {
+				action: ReferralRegistryAdminManagementAction
+				contract: string
+				admin: string
+				l0: string
+				merchant?: string
+				card?: string
+				rebateBps?: string
+				nonce: string
+				deadline: string
+				signature: string
+			}
+	  }
+	| { success: false; error: string }
+> {
+	try {
+		const action = String(body?.action ?? '') as ReferralRegistryAdminManagementAction
+		if (action !== 'setL0Rate' && action !== 'assignMerchant') {
+			return { success: false, error: 'Invalid Referral Admin management action' }
+		}
+		const admin = ethers.getAddress(String(body?.admin ?? ''))
+		const l0 = ethers.getAddress(String(body?.l0 ?? ''))
+		const nonce = BigInt(String(body?.nonce ?? ''))
+		const deadline = BigInt(String(body?.deadline ?? ''))
+		const signature = String(body?.signature ?? '')
+		if (!ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+			return { success: false, error: 'Invalid or expired Referral Admin signature request' }
+		}
+		const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+		if (!Boolean(await registry.admins(admin))) return { success: false, error: 'Account is not a ReferralRegistry admin' }
+		const expectedNonce = BigInt((await registry.redeemActionNonces(admin)).toString())
+		if (nonce !== expectedNonce) return { success: false, error: 'Stale Referral Admin management nonce' }
+		const l0Member = await registry.members(l0)
+		if (Number(l0Member[0]) !== 1 || !Boolean(l0Member[5])) return { success: false, error: 'L0 is not active' }
+
+		let message: Record<string, unknown>
+		let preChecked: {
+			action: ReferralRegistryAdminManagementAction
+			contract: string
+			admin: string
+			l0: string
+			merchant?: string
+			card?: string
+			rebateBps?: string
+			nonce: string
+			deadline: string
+			signature: string
+		}
+		if (action === 'setL0Rate') {
+			const rebateBps = BigInt(String(body?.rebateBps ?? ''))
+			if (rebateBps > 10_000n) return { success: false, error: 'rebateBps must be between 0 and 10000' }
+			message = { admin, l0, rebateBps, nonce, deadline }
+			preChecked = {
+				action,
+				contract: CONET_REFERRAL_REGISTRY_VAULT_V1,
+				admin,
+				l0,
+				rebateBps: rebateBps.toString(),
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+			}
+		} else {
+			const merchant = ethers.getAddress(String(body?.merchant ?? ''))
+			const card = ethers.getAddress(String(body?.card ?? ''))
+			const merchantMember = await registry.members(merchant)
+			if (Number(merchantMember[0]) !== 0) return { success: false, error: 'Merchant wallet is already registered' }
+			const factoryAddress = ethers.getAddress(await registry.userCardFactory())
+			const factory = new ethers.Contract(factoryAddress, ['function isBeamioUserCard(address) view returns (bool)'], providerConet)
+			const cardContract = new ethers.Contract(card, ['function owner() view returns (address)'], providerConet)
+			if (!Boolean(await factory.isBeamioUserCard(card))) return { success: false, error: 'Selected card is not a BeamioUserCard' }
+			if (ethers.getAddress(await cardContract.owner()) !== merchant) return { success: false, error: 'Selected card is not owned by the merchant' }
+			message = { admin, l0, merchant, card, nonce, deadline }
+			preChecked = {
+				action,
+				contract: CONET_REFERRAL_REGISTRY_VAULT_V1,
+				admin,
+				l0,
+				merchant,
+				card,
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+			}
+		}
+		const types = REFERRAL_ADMIN_MANAGEMENT_TYPES[action] as any
+		const digest = ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types, message)
+		if (ethers.recoverAddress(digest, signature).toLowerCase() !== admin.toLowerCase()) {
+			return { success: false, error: 'Referral Admin signature does not match account' }
+		}
+		return { success: true, preChecked }
+	} catch (error: any) {
+		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid Referral Admin management request' }
 	}
 }
 
@@ -9375,6 +9503,45 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		} catch (error: any) {
 			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Nonce read failed' }).end()
 		}
+	})
+
+	router.get('/referralRegistryAdminNonce', async (req, res) => {
+		try {
+			const account = ethers.getAddress(String(req.query.account ?? ''))
+			const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+			const nonce = await registry.redeemActionNonces(account)
+			return res.status(200).json({ success: true, nonce: nonce.toString() }).end()
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Admin nonce read failed' }).end()
+		}
+	})
+
+	router.get('/referralRegistryMerchantCandidates', async (req, res) => {
+		try {
+			const admin = ethers.getAddress(String(req.query.admin ?? ''))
+			const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+			if (!Boolean(await registry.admins(admin))) {
+				return res.status(403).json({ success: false, error: 'Account is not a ReferralRegistry admin' }).end()
+			}
+			const candidates = await listReferralMerchantCandidates()
+			const available = []
+			for (const candidate of candidates) {
+				if (candidate.merchant.toLowerCase() === admin.toLowerCase()) continue
+				const member = await registry.members(candidate.merchant)
+				if (Number(member[0]) !== 0) continue
+				if ((await registry.claimedMerchantL0(candidate.merchant)) !== ethers.ZeroAddress) continue
+				available.push(candidate)
+			}
+			return res.status(200).json({ success: true, candidates: available }).end()
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.message ?? 'Merchant candidates unavailable' }).end()
+		}
+	})
+
+	router.post('/referralRegistryAdminManagement', async (req, res) => {
+		const pre = await referralRegistryAdminManagementPreCheck(req.body)
+		if (!pre.success) return res.status(400).json({ success: false, error: pre.error }).end()
+		postLocalhost('/api/referralRegistryAdminManagement', pre.preChecked, res)
 	})
 
 	router.get('/referralRegistryClaimNonce', async (req, res) => {
