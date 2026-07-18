@@ -170,6 +170,7 @@ import {
 	listRegisteredBeamioUserCardAddresses,
 	listNfcBeamioUserCardHoldingsByTagId,
 	registerSeriesToDb,
+	upsertReferralRegistryClaim,
 	type NfcLinkAppSessionDb,
 } from './db'
 import { invalidateIssuedCouponSeriesQueryCachesForCard } from './endpoint/issuedCouponSeriesQueryCache'
@@ -20227,9 +20228,11 @@ const REFERRAL_REGISTRY_REDEEM_RELAY_ABI = [
 	'function issueL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 l1RebateBps,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelL0RedeemCodeFor(address admin,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function claimL0RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 ] as const
 
-export type ReferralRegistryRedeemRelayAction = 'issueL0' | 'issueL1' | 'cancelL0' | 'cancelL1'
+export type ReferralRegistryRedeemRelayAction = 'issueL0' | 'issueL1' | 'cancelL0' | 'cancelL1' | 'claimL0' | 'claimL1'
 export const referralRegistryRedeemPool: Array<{
 	contract: string
 	action: ReferralRegistryRedeemRelayAction
@@ -20239,6 +20242,7 @@ export const referralRegistryRedeemPool: Array<{
 	nonce: string
 	deadline: string
 	signature: string
+	secret?: string
 	res: Response
 }> = []
 
@@ -20282,6 +20286,14 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 			BigInt(job.deadline),
 			job.signature,
 		] as const
+		const claimArgs = [
+			ethers.getAddress(job.account),
+			ethers.toUtf8Bytes(job.secret ?? ''),
+			job.redeemHash,
+			BigInt(job.nonce),
+			BigInt(job.deadline),
+			job.signature,
+		] as const
 		const tx =
 			job.action === 'issueL0'
 				? await registry.issueL0RedeemCodeFor(...issueArgs)
@@ -20289,9 +20301,39 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 					? await registry.issueL1RedeemCodeFor(...issueArgs)
 					: job.action === 'cancelL0'
 						? await registry.cancelL0RedeemCodeFor(...cancelArgs)
-						: await registry.cancelL1RedeemCodeFor(...cancelArgs)
+					: job.action === 'cancelL1'
+						? await registry.cancelL1RedeemCodeFor(...cancelArgs)
+						: job.action === 'claimL0'
+							? await registry.claimL0RedeemCodeFor(...claimArgs)
+							: await registry.claimL1RedeemCodeFor(...claimArgs)
 		const receipt = await tx.wait()
 		if (!receipt || receipt.status !== 1) throw new Error('Referral redeem relay transaction failed')
+		if (job.action === 'claimL0' || job.action === 'claimL1') {
+			const claimEvent = receipt.logs
+				.map((log: any) => {
+					try {
+						return new ethers.Interface([
+							'event L0RedeemCodeClaimed(bytes32 indexed redeemHash,address indexed l0,address indexed admin,uint256 rebateBps)',
+							'event L1RedeemCodeClaimed(bytes32 indexed redeemHash,address indexed l1,address indexed l0,uint256 rebateBps,uint256 ratioBps)',
+						]).parseLog(log)
+					} catch {
+						return null
+					}
+				})
+				.find((parsed: any) => parsed?.name === (job.action === 'claimL0' ? 'L0RedeemCodeClaimed' : 'L1RedeemCodeClaimed'))
+			if (!claimEvent) throw new Error('Referral claim event was not found')
+			await upsertReferralRegistryClaim({
+				claimTxHash: tx.hash,
+				redeemHash: job.redeemHash,
+				kind: job.action === 'claimL0' ? 'l0' : 'l1',
+				claimer: job.account,
+				parentL0: job.action === 'claimL1' ? claimEvent.args.l0 : null,
+				parentAdmin: job.action === 'claimL0' ? claimEvent.args.admin : null,
+				rebateBps: claimEvent.args.rebateBps.toString(),
+				ratioBps: job.action === 'claimL1' ? claimEvent.args.ratioBps.toString() : '0',
+				blockNumber: receipt.blockNumber.toString(),
+			})
+		}
 		logger(Colors.green(`[referralRegistryRedeemRelay] action=${job.action} account=${job.account} tx=${tx.hash}`))
 		if (!job.res.headersSent) job.res.status(200).json({ success: true, txHash: tx.hash }).end()
 	} catch (error: any) {

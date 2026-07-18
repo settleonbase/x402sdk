@@ -2505,6 +2505,7 @@ const routing = ( router: Router ) => {
 				nonce?: string
 				deadline?: string
 				signature?: string
+				secret?: string
 			}
 			if (!body.action || !body.contract || !body.account || !body.redeemHash || !body.nonce || !body.deadline || !body.signature) {
 				return res.status(400).json({ success: false, error: 'Missing referral redeem relay fields' }).end()
@@ -2518,6 +2519,33 @@ const routing = ( router: Router ) => {
 				nonce: body.nonce,
 				deadline: body.deadline,
 				signature: body.signature,
+				secret: body.secret,
+				res,
+			})
+			kickReferralRegistryRedeemRelay()
+		})
+
+		router.post('/referralRegistryClaim', async (req, res) => {
+			const body = req.body as {
+				action?: 'claimL0' | 'claimL1'
+				contract?: string
+				account?: string
+				redeemHash?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+				secret?: string
+			}
+			referralRegistryRedeemPool.push({
+				action: body.action as ReferralRegistryRedeemRelayAction,
+				contract: body.contract as string,
+				account: body.account as string,
+				redeemHash: body.redeemHash as string,
+				rebateBps: '0',
+				nonce: body.nonce as string,
+				deadline: body.deadline as string,
+				signature: body.signature as string,
+				secret: body.secret,
 				res,
 			})
 			kickReferralRegistryRedeemRelay()

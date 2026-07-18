@@ -1496,6 +1496,115 @@ const BEAMIO_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_cards (
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
+const REFERRAL_REGISTRY_CLAIMS_TABLE = `CREATE TABLE IF NOT EXISTS referral_registry_claims (
+	claim_tx_hash TEXT PRIMARY KEY,
+	redeem_hash TEXT NOT NULL,
+	claim_kind TEXT NOT NULL CHECK (claim_kind IN ('l0', 'l1')),
+	claimer_eoa TEXT NOT NULL,
+	parent_l0 TEXT,
+	parent_admin TEXT,
+	rebate_bps TEXT NOT NULL,
+	ratio_bps TEXT NOT NULL,
+	block_number BIGINT,
+	claimed_at TIMESTAMPTZ DEFAULT NOW(),
+	created_at TIMESTAMPTZ DEFAULT NOW()
+)`
+const REFERRAL_REGISTRY_CLAIMS_PARENT_IDX = `CREATE INDEX IF NOT EXISTS idx_referral_registry_claims_parents ON referral_registry_claims (LOWER(parent_l0), LOWER(parent_admin))`
+
+export type ReferralRegistryClaimRow = {
+	claimTxHash: string
+	redeemHash: string
+	kind: 'l0' | 'l1'
+	claimer: string
+	parentL0: string | null
+	parentAdmin: string | null
+	rebateBps: string
+	ratioBps: string
+	blockNumber: string | null
+	claimedAt: string
+}
+
+async function ensureReferralRegistryClaimsSchema(db: Client): Promise<void> {
+	await db.query(REFERRAL_REGISTRY_CLAIMS_TABLE)
+	await db.query(REFERRAL_REGISTRY_CLAIMS_PARENT_IDX)
+}
+
+export async function upsertReferralRegistryClaim(params: {
+	claimTxHash: string
+	redeemHash: string
+	kind: 'l0' | 'l1'
+	claimer: string
+	parentL0?: string | null
+	parentAdmin?: string | null
+	rebateBps: string
+	ratioBps: string
+	blockNumber?: string | null
+}): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureReferralRegistryClaimsSchema(db)
+		await db.query(
+			`INSERT INTO referral_registry_claims
+				(claim_tx_hash, redeem_hash, claim_kind, claimer_eoa, parent_l0, parent_admin, rebate_bps, ratio_bps, block_number)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 ON CONFLICT (claim_tx_hash) DO UPDATE SET
+				redeem_hash = EXCLUDED.redeem_hash,
+				claim_kind = EXCLUDED.claim_kind,
+				claimer_eoa = EXCLUDED.claimer_eoa,
+				parent_l0 = EXCLUDED.parent_l0,
+				parent_admin = EXCLUDED.parent_admin,
+				rebate_bps = EXCLUDED.rebate_bps,
+				ratio_bps = EXCLUDED.ratio_bps,
+				block_number = EXCLUDED.block_number`,
+			[
+				params.claimTxHash.toLowerCase(),
+				params.redeemHash.toLowerCase(),
+				params.kind,
+				ethers.getAddress(params.claimer).toLowerCase(),
+				params.parentL0 ? ethers.getAddress(params.parentL0).toLowerCase() : null,
+				params.parentAdmin ? ethers.getAddress(params.parentAdmin).toLowerCase() : null,
+				params.rebateBps,
+				params.ratioBps,
+				params.blockNumber ?? null,
+			],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function listReferralRegistryClaimsByParent(parent: string): Promise<ReferralRegistryClaimRow[]> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureReferralRegistryClaimsSchema(db)
+		const normalized = ethers.getAddress(parent).toLowerCase()
+		const result = await db.query(
+			`SELECT claim_tx_hash, redeem_hash, claim_kind, claimer_eoa, parent_l0, parent_admin,
+				rebate_bps, ratio_bps, block_number, claimed_at
+			 FROM referral_registry_claims
+			 WHERE LOWER(parent_l0) = $1 OR LOWER(parent_admin) = $1
+			 ORDER BY claimed_at DESC`,
+			[normalized],
+		)
+		return result.rows.map((row) => ({
+			claimTxHash: row.claim_tx_hash,
+			redeemHash: row.redeem_hash,
+			kind: row.claim_kind,
+			claimer: ethers.getAddress(row.claimer_eoa),
+			parentL0: row.parent_l0 ? ethers.getAddress(row.parent_l0) : null,
+			parentAdmin: row.parent_admin ? ethers.getAddress(row.parent_admin) : null,
+			rebateBps: String(row.rebate_bps),
+			ratioBps: String(row.ratio_bps),
+			blockNumber: row.block_number === null ? null : String(row.block_number),
+			claimedAt: new Date(row.claimed_at).toISOString(),
+		}))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** POS 终端 EOA（商户子 admin）→ 登记为 admin 的 BeamioUserCard；供跨卡冲突拒绝与 GET myPosAddress。 */
 const BEAMIO_POS_TERMINAL_ADMIN_CARD_TABLE = `CREATE TABLE IF NOT EXISTS beamio_pos_terminal_admin_card (
 	pos_eoa TEXT PRIMARY KEY,

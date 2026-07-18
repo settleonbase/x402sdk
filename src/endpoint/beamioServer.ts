@@ -11,6 +11,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
+import { listReferralRegistryClaimsByParent } from '../db'
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
@@ -481,12 +482,34 @@ const REFERRAL_REDEEM_READ_ABI = [
 	'function admins(address) view returns (bool)',
 	'function members(address) view returns (uint8 role,address parentAdmin,address parentL0,uint256 rebateBps,uint256 ratioBps,bool active)',
 	'function redeemActionNonces(address) view returns (uint256)',
+	'function referralClaimNonces(address) view returns (uint256)',
+	'function l0RedeemCodes(bytes32) view returns (address issuerAdmin,uint256 rebateBps,uint64 validAfter,uint64 validBefore,bool active,bool claimed,bool cancelled)',
+	'function l1RedeemCodes(bytes32) view returns (address issuerL0,uint256 rebateBps,uint256 ratioBps,uint64 validAfter,uint64 validBefore,bool active,bool claimed,bool cancelled)',
 ] as const
 const REFERRAL_REDEEM_DOMAIN = {
 	name: 'ReferralRegistryVaultV1',
 	version: '1',
 	chainId: 224422,
 	verifyingContract: CONET_REFERRAL_REGISTRY_VAULT_V1,
+} as const
+
+const REFERRAL_CLAIM_TYPES = {
+	claimL0: {
+		ClaimL0RedeemCode: [
+			{ name: 'claimer', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+	claimL1: {
+		ClaimL1RedeemCode: [
+			{ name: 'claimer', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
 } as const
 const REFERRAL_REDEEM_TYPES = {
 	issueL0: {
@@ -526,11 +549,11 @@ const REFERRAL_REDEEM_TYPES = {
 } as const
 
 async function referralRedeemRelayPreCheck(body: any): Promise<
-	| { success: true; preChecked: { action: ReferralRegistryRedeemRelayAction; contract: string; account: string; redeemHash: string; rebateBps: string; nonce: string; deadline: string; signature: string } }
+	| { success: true; preChecked: { action: Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>; contract: string; account: string; redeemHash: string; rebateBps: string; nonce: string; deadline: string; signature: string } }
 	| { success: false; error: string }
 > {
 	try {
-		const action = String(body?.action ?? '') as ReferralRegistryRedeemRelayAction
+		const action = String(body?.action ?? '') as Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>
 		if (!['issueL0', 'issueL1', 'cancelL0', 'cancelL1'].includes(action)) return { success: false, error: 'Invalid referral redeem action' }
 		const account = ethers.getAddress(String(body?.account ?? ''))
 		const redeemHash = String(body?.redeemHash ?? '')
@@ -559,6 +582,41 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: rebateBps.toString(), nonce: nonce.toString(), deadline: deadline.toString(), signature } }
 	} catch (error: any) {
 		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral redeem request' }
+	}
+}
+
+async function referralClaimRelayPreCheck(body: any): Promise<
+	| { success: true; preChecked: { action: 'claimL0' | 'claimL1'; contract: string; account: string; redeemHash: string; rebateBps: string; nonce: string; deadline: string; signature: string; secret: string } }
+	| { success: false; error: string }
+> {
+	try {
+		const kind = String(body?.kind ?? '') as 'l0' | 'l1'
+		const action = kind === 'l0' ? 'claimL0' : kind === 'l1' ? 'claimL1' : ''
+		if (!action) return { success: false, error: 'Invalid referral claim kind' }
+		const account = ethers.getAddress(String(body?.account ?? body?.claimer ?? ''))
+		const secret = String(body?.secret ?? '')
+		const redeemHash = String(body?.redeemHash ?? '')
+		if (!secret || !ethers.isHexString(redeemHash, 32) || ethers.keccak256(ethers.toUtf8Bytes(secret)).toLowerCase() !== redeemHash.toLowerCase()) {
+			return { success: false, error: 'Invalid referral claim secret or hash' }
+		}
+		const nonce = BigInt(String(body?.nonce ?? ''))
+		const deadline = BigInt(String(body?.deadline ?? ''))
+		const signature = String(body?.signature ?? '')
+		if (!ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) return { success: false, error: 'Invalid or expired claim signature' }
+		const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+		const expectedNonce = BigInt((await registry.referralClaimNonces(account)).toString())
+		if (nonce !== expectedNonce) return { success: false, error: 'Stale referral claim nonce' }
+		const raw = kind === 'l0' ? await registry.l0RedeemCodes(redeemHash) : await registry.l1RedeemCodes(redeemHash)
+		if (!raw.active || raw.claimed || raw.cancelled) return { success: false, error: 'Referral redeem code is not active' }
+		const member = await registry.members(account)
+		if (Boolean(await registry.admins(account)) || Number(member[0]) !== 0) return { success: false, error: 'Wallet is already registered' }
+		const types = REFERRAL_CLAIM_TYPES[action]
+		const message = { claimer: account, redeemHash, nonce, deadline }
+		const digest = ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types as any, message)
+		if (ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase()) return { success: false, error: 'Claim signature does not match wallet' }
+		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: '0', nonce: nonce.toString(), deadline: deadline.toString(), signature, secret } }
+	} catch (error: any) {
+		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral claim request' }
 	}
 }
 
@@ -9318,11 +9376,38 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
+	router.get('/referralRegistryClaimNonce', async (req, res) => {
+		try {
+			const account = ethers.getAddress(String(req.query.account ?? ''))
+			const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+			const nonce = await registry.referralClaimNonces(account)
+			return res.status(200).json({ success: true, nonce: nonce.toString() }).end()
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Claim nonce read failed' }).end()
+		}
+	})
+
 	/** ReferralRegistryVaultV1: verify the offline EIP-712 authorization, then relay through Master. */
 	router.post('/referralRegistryRedeem', async (req, res) => {
 		const pre = await referralRedeemRelayPreCheck(req.body)
 		if (!pre.success) return res.status(400).json({ success: false, error: pre.error }).end()
 		postLocalhost('/api/referralRegistryRedeem', pre.preChecked, res)
+	})
+
+	router.get('/referralRegistryClaims', async (req, res) => {
+		try {
+			const parent = ethers.getAddress(String(req.query.parent ?? ''))
+			const claims = await listReferralRegistryClaimsByParent(parent)
+			return res.status(200).json({ success: true, claims }).end()
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.message ?? 'Referral claim history unavailable' }).end()
+		}
+	})
+
+	router.post('/referralRegistryClaim', async (req, res) => {
+		const pre = await referralClaimRelayPreCheck(req.body)
+		if (!pre.success) return res.status(400).json({ success: false, error: pre.error }).end()
+		postLocalhost('/api/referralRegistryClaim', pre.preChecked, res)
 	})
 
 	router.get('/validatorDepositRedeemConfig', (_req, res) => {
