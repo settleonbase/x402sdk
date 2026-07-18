@@ -16,7 +16,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_REGISTRY_VAULT_V1, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
@@ -32,6 +32,11 @@ import {
 	readReferrerRewardBalance,
 } from '../cardProgramReferrerChain'
 import { aaMultisigOfflineSubmitPreCheck } from '../aaMultisigOfflineSubmit'
+import {
+	kickReferralRegistryRedeemRelay,
+	referralRegistryRedeemPool,
+	type ReferralRegistryRedeemRelayAction,
+} from '../MemberCard'
 import {
 	cardBootstrapIssuedNftV2StatPreCheck,
 	cardConfigureEventRewardRuleGatewayPreCheck,
@@ -471,6 +476,91 @@ async function assertAdminEoaHasVisibleAaAfterEnsure(
 }
 const JSONRPC_NO_BATCH = { batchMaxCount: 1 as const }
 const providerConet = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(), undefined, JSONRPC_NO_BATCH)
+
+const REFERRAL_REDEEM_READ_ABI = [
+	'function admins(address) view returns (bool)',
+	'function members(address) view returns (uint8 role,address parentAdmin,address parentL0,uint256 rebateBps,uint256 ratioBps,bool active)',
+	'function redeemActionNonces(address) view returns (uint256)',
+] as const
+const REFERRAL_REDEEM_DOMAIN = {
+	name: 'ReferralRegistryVaultV1',
+	version: '1',
+	chainId: 224422,
+	verifyingContract: CONET_REFERRAL_REGISTRY_VAULT_V1,
+} as const
+const REFERRAL_REDEEM_TYPES = {
+	issueL0: {
+		IssueL0RedeemCode: [
+			{ name: 'admin', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'rebateBps', type: 'uint256' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+	issueL1: {
+		IssueL1RedeemCode: [
+			{ name: 'l0', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'rebateBps', type: 'uint256' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+	cancelL0: {
+		CancelL0RedeemCode: [
+			{ name: 'admin', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+	cancelL1: {
+		CancelL1RedeemCode: [
+			{ name: 'l0', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+} as const
+
+async function referralRedeemRelayPreCheck(body: any): Promise<
+	| { success: true; preChecked: { action: ReferralRegistryRedeemRelayAction; contract: string; account: string; redeemHash: string; rebateBps: string; nonce: string; deadline: string; signature: string } }
+	| { success: false; error: string }
+> {
+	try {
+		const action = String(body?.action ?? '') as ReferralRegistryRedeemRelayAction
+		if (!['issueL0', 'issueL1', 'cancelL0', 'cancelL1'].includes(action)) return { success: false, error: 'Invalid referral redeem action' }
+		const account = ethers.getAddress(String(body?.account ?? ''))
+		const redeemHash = String(body?.redeemHash ?? '')
+		if (!ethers.isHexString(redeemHash, 32)) return { success: false, error: 'redeemHash must be bytes32' }
+		const nonce = BigInt(String(body?.nonce ?? ''))
+		const deadline = BigInt(String(body?.deadline ?? ''))
+		const signature = String(body?.signature ?? '')
+		if (!ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) return { success: false, error: 'Invalid or expired signature request' }
+		const rebateBps = action.startsWith('issue') ? BigInt(String(body?.rebateBps ?? '')) : 0n
+		if (rebateBps < 0n || rebateBps > 10_000n) return { success: false, error: 'rebateBps must be between 0 and 10000' }
+		const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+		const expectedNonce = BigInt((await registry.redeemActionNonces(account)).toString())
+		if (nonce !== expectedNonce) return { success: false, error: 'Stale referral redeem nonce' }
+		const isAdmin = Boolean(await registry.admins(account))
+		const member = await registry.members(account)
+		const isL0 = Number(member[0]) === 1 && Boolean(member[5])
+		if ((action === 'issueL0' || action === 'cancelL0') && !isAdmin) return { success: false, error: 'Account is not a ReferralRegistry admin' }
+		if ((action === 'issueL1' || action === 'cancelL1') && !isL0) return { success: false, error: 'Account is not an active L0' }
+		const typeName = action === 'issueL0' ? 'IssueL0RedeemCode' : action === 'issueL1' ? 'IssueL1RedeemCode' : action === 'cancelL0' ? 'CancelL0RedeemCode' : 'CancelL1RedeemCode'
+		const types = REFERRAL_REDEEM_TYPES[action] as any
+		const message = action === 'issueL0' || action === 'cancelL0'
+			? { admin: account, redeemHash, ...(action.startsWith('issue') ? { rebateBps } : {}), nonce, deadline }
+			: { l0: account, redeemHash, ...(action.startsWith('issue') ? { rebateBps } : {}), nonce, deadline }
+		const digest = ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types, message)
+		if (ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase()) return { success: false, error: 'Referral redeem signature does not match account' }
+		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: rebateBps.toString(), nonce: nonce.toString(), deadline: deadline.toString(), signature } }
+	} catch (error: any) {
+		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral redeem request' }
+	}
+}
 
 const masterServerPort = 1111
 const serverPort = 2222
@@ -9214,6 +9304,25 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			},
 			res
 		)
+	})
+
+	/** ReferralRegistryVaultV1: read the per-account meta-transaction nonce. */
+	router.get('/referralRegistryRedeemNonce', async (req, res) => {
+		try {
+			const account = ethers.getAddress(String(req.query.account ?? ''))
+			const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+			const nonce = await registry.redeemActionNonces(account)
+			return res.status(200).json({ success: true, nonce: nonce.toString() }).end()
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Nonce read failed' }).end()
+		}
+	})
+
+	/** ReferralRegistryVaultV1: verify the offline EIP-712 authorization, then relay through Master. */
+	router.post('/referralRegistryRedeem', async (req, res) => {
+		const pre = await referralRedeemRelayPreCheck(req.body)
+		if (!pre.success) return res.status(400).json({ success: false, error: pre.error }).end()
+		postLocalhost('/api/referralRegistryRedeem', pre.preChecked, res)
 	})
 
 	router.get('/validatorDepositRedeemConfig', (_req, res) => {

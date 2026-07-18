@@ -89,6 +89,8 @@ export const CONET_BUINT = '0x54ac4672cE75EC5ACebaeF1a7aFC6F49E77Ae9Ae'
 export const CONET_BUNIT_AIRDROP_ADDRESS = '0x305f90A7f38289219BA1b4be98CB5b47e7b15Ac2'
 /** 旧版 BUnitAirdrop；V2 内部继续查询 hasClaimed，避免重复免费领取。 */
 export const CONET_BUNIT_AIRDROP_LEGACY_ADDRESS = '0xa01DFfD68b355540B840310a9f0C1E7a779C3Ce8'
+/** CoNET ReferralRegistryVaultV1 ERC1967 proxy; referral redeem writes are relayed by Master. */
+export const CONET_REFERRAL_REGISTRY_VAULT_V1 = '0xD6252Cbf266B80231397Ac2a4f25ed2d9b01DEE6'
 /**
  * 已废弃 BUint 合约（Business Kit redeem 旧部署曾 wired 至 0xf548…）。
  * 余额只读展示 / 迁移脚本用；扣费与 /api/getBUnitBalance.total 仅认 canonical CONET_BUINT。

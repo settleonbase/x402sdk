@@ -24,6 +24,11 @@ import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLate
 import { filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
 import {
+	kickReferralRegistryRedeemRelay,
+	referralRegistryRedeemPool,
+	type ReferralRegistryRedeemRelayAction,
+} from '../MemberCard'
+import {
 	invalidateIssuedCouponSeriesQueryCachesForCard,
 	registerIssuedCouponSeriesQueryCacheInvalidator,
 } from './issuedCouponSeriesQueryCache'
@@ -2487,6 +2492,35 @@ const routing = ( router: Router ) => {
 			executeForOwnerProcess().catch((err: any) => {
 				logger(Colors.red(`[executeForOwnerProcess] unhandled error:`), err?.message ?? err)
 			})
+		})
+
+		/** ReferralRegistryVaultV1: Cluster has verified the signed authorization; Master only queues the relay. */
+		router.post('/referralRegistryRedeem', (req, res) => {
+			const body = req.body as {
+				action?: ReferralRegistryRedeemRelayAction
+				contract?: string
+				account?: string
+				redeemHash?: string
+				rebateBps?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			if (!body.action || !body.contract || !body.account || !body.redeemHash || !body.nonce || !body.deadline || !body.signature) {
+				return res.status(400).json({ success: false, error: 'Missing referral redeem relay fields' }).end()
+			}
+			referralRegistryRedeemPool.push({
+				action: body.action,
+				contract: body.contract,
+				account: body.account,
+				redeemHash: body.redeemHash,
+				rebateBps: body.rebateBps ?? '0',
+				nonce: body.nonce,
+				deadline: body.deadline,
+				signature: body.signature,
+				res,
+			})
+			kickReferralRegistryRedeemRelay()
 		})
 
 		/** cardOpenTransfer：Cluster 已预检；Master 入队 redeemOpenTransfer */

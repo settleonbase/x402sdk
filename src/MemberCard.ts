@@ -20221,4 +20221,87 @@ export const cardOpenTransferPoolPress = async () => {
 	}
 }
 
+// --- ReferralRegistryVaultV1 gasless redeem-code relay ---
+const REFERRAL_REGISTRY_REDEEM_RELAY_ABI = [
+	'function issueL0RedeemCodeFor(address admin,bytes32 redeemHash,uint256 rebateBps,uint256 nonce,uint256 deadline,bytes signature)',
+	'function issueL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 l1RebateBps,uint256 nonce,uint256 deadline,bytes signature)',
+	'function cancelL0RedeemCodeFor(address admin,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function cancelL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+] as const
+
+export type ReferralRegistryRedeemRelayAction = 'issueL0' | 'issueL1' | 'cancelL0' | 'cancelL1'
+export const referralRegistryRedeemPool: Array<{
+	contract: string
+	action: ReferralRegistryRedeemRelayAction
+	account: string
+	redeemHash: string
+	rebateBps: string
+	nonce: string
+	deadline: string
+	signature: string
+	res: Response
+}> = []
+
+export function kickReferralRegistryRedeemRelay(): void {
+	void referralRegistryRedeemRelayProcess().catch((error: any) => {
+		logger(Colors.red('[referralRegistryRedeemRelay] unhandled error:'), error?.message ?? error)
+	})
+}
+
+function scheduleReferralRegistryRedeemRelay(): void {
+	if (referralRegistryRedeemPool.length === 0) return
+	if (Settle_ContractPool.length > 0) {
+		kickReferralRegistryRedeemRelay()
+		return
+	}
+	setTimeout(() => kickReferralRegistryRedeemRelay(), 3000)
+}
+
+export async function referralRegistryRedeemRelayProcess(): Promise<void> {
+	const job = referralRegistryRedeemPool.shift()
+	if (!job) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		referralRegistryRedeemPool.unshift(job)
+		return scheduleReferralRegistryRedeemRelay()
+	}
+	try {
+		const registry = new ethers.Contract(job.contract, REFERRAL_REGISTRY_REDEEM_RELAY_ABI, SC.walletConet)
+		const issueArgs = [
+			ethers.getAddress(job.account),
+			job.redeemHash,
+			BigInt(job.rebateBps),
+			BigInt(job.nonce),
+			BigInt(job.deadline),
+			job.signature,
+		] as const
+		const cancelArgs = [
+			ethers.getAddress(job.account),
+			job.redeemHash,
+			BigInt(job.nonce),
+			BigInt(job.deadline),
+			job.signature,
+		] as const
+		const tx =
+			job.action === 'issueL0'
+				? await registry.issueL0RedeemCodeFor(...issueArgs)
+				: job.action === 'issueL1'
+					? await registry.issueL1RedeemCodeFor(...issueArgs)
+					: job.action === 'cancelL0'
+						? await registry.cancelL0RedeemCodeFor(...cancelArgs)
+						: await registry.cancelL1RedeemCodeFor(...cancelArgs)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) throw new Error('Referral redeem relay transaction failed')
+		logger(Colors.green(`[referralRegistryRedeemRelay] action=${job.action} account=${job.account} tx=${tx.hash}`))
+		if (!job.res.headersSent) job.res.status(200).json({ success: true, txHash: tx.hash }).end()
+	} catch (error: any) {
+		const message = error?.shortMessage ?? error?.message ?? String(error)
+		logger(Colors.red(`[referralRegistryRedeemRelay] failed: ${message}`))
+		if (!job.res.headersSent) job.res.status(400).json({ success: false, error: message }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		scheduleReferralRegistryRedeemRelay()
+	}
+}
+
 export { buildNfcCardLinkStateSignMessage, NFC_CARD_LINK_STATE_SCOPE } from './db'
