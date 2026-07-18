@@ -171,6 +171,7 @@ import {
 	listNfcBeamioUserCardHoldingsByTagId,
 	registerSeriesToDb,
 	upsertReferralRegistryClaim,
+	upsertReferralRegistryTreeMember,
 	type NfcLinkAppSessionDb,
 } from './db'
 import { invalidateIssuedCouponSeriesQueryCachesForCard } from './endpoint/issuedCouponSeriesQueryCache'
@@ -20332,6 +20333,17 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 				rebateBps: claimEvent.args.rebateBps.toString(),
 				ratioBps: job.action === 'claimL1' ? claimEvent.args.ratioBps.toString() : '0',
 				blockNumber: receipt.blockNumber.toString(),
+			})
+			await upsertReferralRegistryTreeMember({
+				account: job.account,
+				role: job.action === 'claimL0' ? 'l0' : 'l1',
+				parentAdmin: job.action === 'claimL0' ? claimEvent.args.admin : null,
+				parentL0: job.action === 'claimL1' ? claimEvent.args.l0 : null,
+				rebateBps: claimEvent.args.rebateBps.toString(),
+				ratioBps: job.action === 'claimL1' ? claimEvent.args.ratioBps.toString() : '0',
+				active: true,
+				blockNumber: receipt.blockNumber.toString(),
+				txHash: tx.hash,
 			})
 		}
 		logger(Colors.green(`[referralRegistryRedeemRelay] action=${job.action} account=${job.account} tx=${tx.hash}`))

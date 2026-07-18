@@ -1605,6 +1605,271 @@ export async function listReferralRegistryClaimsByParent(parent: string): Promis
 	}
 }
 
+const REFERRAL_REGISTRY_MEMBERS_TABLE = `CREATE TABLE IF NOT EXISTS referral_registry_members (
+	account_eoa TEXT PRIMARY KEY,
+	is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+	member_role TEXT NOT NULL CHECK (member_role IN ('none', 'l0', 'l1', 'merchant')),
+	parent_admin TEXT,
+	parent_l0 TEXT,
+	rebate_bps TEXT NOT NULL DEFAULT '0',
+	ratio_bps TEXT NOT NULL DEFAULT '0',
+	active BOOLEAN NOT NULL DEFAULT FALSE,
+	first_seen_block BIGINT,
+	last_seen_block BIGINT,
+	last_tx_hash TEXT,
+	updated_at TIMESTAMPTZ DEFAULT NOW()
+)`
+const REFERRAL_REGISTRY_MEMBERS_PARENT_IDX = `CREATE INDEX IF NOT EXISTS idx_referral_registry_members_parent
+	ON referral_registry_members (LOWER(parent_admin), LOWER(parent_l0), member_role)`
+const REFERRAL_REGISTRY_TREE_SYNC_TABLE = `CREATE TABLE IF NOT EXISTS referral_registry_tree_sync (
+	singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
+	deployment_block BIGINT NOT NULL,
+	synced_through_block BIGINT,
+	rebuilding BOOLEAN NOT NULL DEFAULT FALSE,
+	updated_at TIMESTAMPTZ DEFAULT NOW()
+)`
+
+export type ReferralRegistryTreeMemberRow = {
+	account: string
+	isAdmin: boolean
+	role: 'none' | 'l0' | 'l1' | 'merchant'
+	parentAdmin: string | null
+	parentL0: string | null
+	rebateBps: string
+	ratioBps: string
+	active: boolean
+	firstSeenBlock: string | null
+	lastSeenBlock: string | null
+	lastTxHash: string | null
+	updatedAt: string
+}
+
+export type ReferralRegistryTreeSyncRow = {
+	deploymentBlock: string
+	syncedThroughBlock: string | null
+	rebuilding: boolean
+}
+
+async function ensureReferralRegistryTreeSchema(db: Client): Promise<void> {
+	await db.query(REFERRAL_REGISTRY_MEMBERS_TABLE)
+	await db.query(REFERRAL_REGISTRY_MEMBERS_PARENT_IDX)
+	await db.query(REFERRAL_REGISTRY_TREE_SYNC_TABLE)
+	await db.query(
+		`INSERT INTO referral_registry_tree_sync (singleton, deployment_block)
+		 VALUES (TRUE, $1)
+		 ON CONFLICT (singleton) DO NOTHING`,
+		['431457'],
+	)
+}
+
+function mapReferralRegistryTreeMemberRow(row: any): ReferralRegistryTreeMemberRow {
+	return {
+		account: ethers.getAddress(row.account_eoa),
+		isAdmin: Boolean(row.is_admin),
+		role: row.member_role,
+		parentAdmin: row.parent_admin ? ethers.getAddress(row.parent_admin) : null,
+		parentL0: row.parent_l0 ? ethers.getAddress(row.parent_l0) : null,
+		rebateBps: String(row.rebate_bps),
+		ratioBps: String(row.ratio_bps),
+		active: Boolean(row.active),
+		firstSeenBlock: row.first_seen_block === null ? null : String(row.first_seen_block),
+		lastSeenBlock: row.last_seen_block === null ? null : String(row.last_seen_block),
+		lastTxHash: row.last_tx_hash,
+		updatedAt: new Date(row.updated_at).toISOString(),
+	}
+}
+
+export async function getReferralRegistryTreeSync(): Promise<ReferralRegistryTreeSyncRow> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureReferralRegistryTreeSchema(db)
+		const result = await db.query(
+			`SELECT deployment_block, synced_through_block, rebuilding
+			 FROM referral_registry_tree_sync
+			 WHERE singleton = TRUE`,
+		)
+		const row = result.rows[0]
+		return {
+			deploymentBlock: String(row.deployment_block),
+			syncedThroughBlock: row.synced_through_block === null ? null : String(row.synced_through_block),
+			rebuilding: Boolean(row.rebuilding),
+		}
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function setReferralRegistryTreeRebuilding(rebuilding: boolean): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureReferralRegistryTreeSchema(db)
+		await db.query(
+			`UPDATE referral_registry_tree_sync
+			 SET rebuilding = $1, updated_at = NOW()
+			 WHERE singleton = TRUE`,
+			[rebuilding],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function tryStartReferralRegistryTreeRebuild(): Promise<boolean> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureReferralRegistryTreeSchema(db)
+		const result = await db.query(
+			`UPDATE referral_registry_tree_sync
+			 SET rebuilding = TRUE, updated_at = NOW()
+			 WHERE singleton = TRUE
+			   AND synced_through_block IS NULL
+			   AND (rebuilding = FALSE OR updated_at < NOW() - INTERVAL '5 minutes')
+			 RETURNING singleton`,
+		)
+		return result.rowCount === 1
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function replaceReferralRegistryTreeMembers(
+	rows: Array<{
+		account: string
+		isAdmin: boolean
+		role: ReferralRegistryTreeMemberRow['role']
+		parentAdmin?: string | null
+		parentL0?: string | null
+		rebateBps?: string
+		ratioBps?: string
+		active?: boolean
+		firstSeenBlock?: string | null
+		lastSeenBlock?: string | null
+		lastTxHash?: string | null
+	}>,
+	syncedThroughBlock: string,
+): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureReferralRegistryTreeSchema(db)
+		await db.query('BEGIN')
+		try {
+			await db.query('TRUNCATE referral_registry_members')
+			for (const row of rows) {
+				await db.query(
+					`INSERT INTO referral_registry_members
+						(account_eoa, is_admin, member_role, parent_admin, parent_l0, rebate_bps, ratio_bps,
+						 active, first_seen_block, last_seen_block, last_tx_hash)
+					 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+					[
+						ethers.getAddress(row.account).toLowerCase(),
+						row.isAdmin,
+						row.role,
+						row.parentAdmin ? ethers.getAddress(row.parentAdmin).toLowerCase() : null,
+						row.parentL0 ? ethers.getAddress(row.parentL0).toLowerCase() : null,
+						row.rebateBps ?? '0',
+						row.ratioBps ?? '0',
+						row.active ?? false,
+						row.firstSeenBlock ?? null,
+						row.lastSeenBlock ?? null,
+						row.lastTxHash ?? null,
+					],
+				)
+			}
+			await db.query(
+				`UPDATE referral_registry_tree_sync
+				 SET synced_through_block = $1, rebuilding = FALSE, updated_at = NOW()
+				 WHERE singleton = TRUE`,
+				[syncedThroughBlock],
+			)
+			await db.query('COMMIT')
+		} catch (error) {
+			await db.query('ROLLBACK')
+			throw error
+		}
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function upsertReferralRegistryTreeMember(params: {
+	account: string
+	isAdmin?: boolean
+	role: ReferralRegistryTreeMemberRow['role']
+	parentAdmin?: string | null
+	parentL0?: string | null
+	rebateBps?: string
+	ratioBps?: string
+	active?: boolean
+	blockNumber?: string | null
+	txHash?: string | null
+}): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureReferralRegistryTreeSchema(db)
+		const account = ethers.getAddress(params.account).toLowerCase()
+		const parentAdmin = params.parentAdmin ? ethers.getAddress(params.parentAdmin).toLowerCase() : null
+		const parentL0 = params.parentL0 ? ethers.getAddress(params.parentL0).toLowerCase() : null
+		await db.query(
+			`INSERT INTO referral_registry_members
+				(account_eoa, is_admin, member_role, parent_admin, parent_l0, rebate_bps, ratio_bps, active,
+				 first_seen_block, last_seen_block, last_tx_hash)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)
+			 ON CONFLICT (account_eoa) DO UPDATE SET
+				is_admin = EXCLUDED.is_admin,
+				member_role = EXCLUDED.member_role,
+				parent_admin = EXCLUDED.parent_admin,
+				parent_l0 = EXCLUDED.parent_l0,
+				rebate_bps = EXCLUDED.rebate_bps,
+				ratio_bps = EXCLUDED.ratio_bps,
+				active = EXCLUDED.active,
+				last_seen_block = EXCLUDED.last_seen_block,
+				last_tx_hash = EXCLUDED.last_tx_hash,
+				updated_at = NOW()`,
+			[
+				account,
+				params.isAdmin ?? false,
+				params.role,
+				parentAdmin,
+				parentL0,
+				params.rebateBps ?? '0',
+				params.ratioBps ?? '0',
+				params.active ?? true,
+				params.blockNumber ?? null,
+				params.txHash ?? null,
+			],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function listReferralRegistryTreeByAccount(account: string): Promise<ReferralRegistryTreeMemberRow[]> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureReferralRegistryTreeSchema(db)
+		const normalized = ethers.getAddress(account).toLowerCase()
+		const result = await db.query(
+			`SELECT account_eoa, is_admin, member_role, parent_admin, parent_l0, rebate_bps, ratio_bps,
+				active, first_seen_block, last_seen_block, last_tx_hash, updated_at
+			 FROM referral_registry_members
+			 WHERE LOWER(account_eoa) = $1
+			    OR LOWER(parent_admin) = $1
+			    OR LOWER(parent_l0) = $1
+			 ORDER BY member_role, account_eoa`,
+			[normalized],
+		)
+		return result.rows.map(mapReferralRegistryTreeMemberRow)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** POS 终端 EOA（商户子 admin）→ 登记为 admin 的 BeamioUserCard；供跨卡冲突拒绝与 GET myPosAddress。 */
 const BEAMIO_POS_TERMINAL_ADMIN_CARD_TABLE = `CREATE TABLE IF NOT EXISTS beamio_pos_terminal_admin_card (
 	pos_eoa TEXT PRIMARY KEY,

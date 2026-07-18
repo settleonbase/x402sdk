@@ -11,7 +11,8 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
-import { listReferralRegistryClaimsByParent } from '../db'
+import { listReferralRegistryClaimsByParent, listReferralRegistryTreeByAccount, getReferralRegistryTreeSync } from '../db'
+import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
@@ -9401,6 +9402,34 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(200).json({ success: true, claims }).end()
 		} catch (error: any) {
 			return res.status(400).json({ success: false, error: error?.message ?? 'Referral claim history unavailable' }).end()
+		}
+	})
+
+	router.get('/referralRegistryTree', async (req, res) => {
+		try {
+			const account = ethers.getAddress(String(req.query.account ?? ''))
+			await ensureReferralRegistryTreeReady()
+			const sync = await getReferralRegistryTreeSync()
+			const members = await listReferralRegistryTreeByAccount(account)
+			const normalized = account.toLowerCase()
+			const directChildren = members.filter((member) =>
+				member.parentAdmin?.toLowerCase() === normalized ||
+				member.parentL0?.toLowerCase() === normalized,
+			)
+			const self = members.find((member) => member.account.toLowerCase() === normalized) ?? null
+			return res.status(200).json({
+				success: true,
+				account,
+				self,
+				directChildren,
+				sync: {
+					deploymentBlock: sync.deploymentBlock,
+					syncedThroughBlock: sync.syncedThroughBlock,
+					rebuilding: sync.rebuilding,
+				},
+			}).end()
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.message ?? 'Referral registry tree unavailable' }).end()
 		}
 	})
 
