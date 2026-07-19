@@ -522,6 +522,15 @@ const REFERRAL_ADMIN_MANAGEMENT_TYPES = {
 			{ name: 'deadline', type: 'uint256' },
 		],
 	},
+	setL0StarterQuota: {
+		SetL0StarterKetQuota: [
+			{ name: 'admin', type: 'address' },
+			{ name: 'l0', type: 'address' },
+			{ name: 'starterKetRemaining', type: 'uint256' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
 	assignMerchant: {
 		AssignMerchantToL0: [
 			{ name: 'admin', type: 'address' },
@@ -648,7 +657,7 @@ async function referralRegistryAdminManagementPreCheck(body: any): Promise<
 > {
 	try {
 		const action = String(body?.action ?? '') as ReferralRegistryAdminManagementAction
-		if (action !== 'setL0Rate' && action !== 'setL0Quota' && action !== 'assignMerchant') {
+		if (action !== 'setL0Rate' && action !== 'setL0Quota' && action !== 'setL0StarterQuota' && action !== 'assignMerchant') {
 			return { success: false, error: 'Invalid Referral Admin management action' }
 		}
 		const admin = ethers.getAddress(String(body?.admin ?? ''))
@@ -691,6 +700,20 @@ async function referralRegistryAdminManagementPreCheck(body: any): Promise<
 				admin,
 				l0,
 				rebateBps: rebateBps.toString(),
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+			}
+		} else if (action === 'setL0StarterQuota') {
+			const starterKetRemaining = BigInt(String(body?.starterKetRemaining ?? ''))
+			if (starterKetRemaining < 0n) return { success: false, error: 'Start Kit limit cannot be negative' }
+			message = { admin, l0, starterKetRemaining, nonce, deadline }
+			preChecked = {
+				action,
+				contract: CONET_REFERRAL_REGISTRY_VAULT_V1,
+				admin,
+				l0,
+				starterKetRemaining: starterKetRemaining.toString(),
 				nonce: nonce.toString(),
 				deadline: deadline.toString(),
 				signature,
