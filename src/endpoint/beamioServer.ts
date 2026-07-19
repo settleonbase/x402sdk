@@ -685,6 +685,7 @@ async function referralRegistryAdminManagementPreCheck(body: any): Promise<
 			const card = ethers.getAddress(String(body?.card ?? ''))
 			const merchantMember = await registry.members(merchant)
 			if (Number(merchantMember[0]) !== 0) return { success: false, error: 'Merchant wallet is already registered' }
+			if (isApiExcludedUserCard(card)) return { success: false, error: 'Selected merchant card is not eligible for referral assignment' }
 			const factoryAddress = ethers.getAddress(await registry.userCardFactory())
 			const factory = new ethers.Contract(factoryAddress, ['function isBeamioUserCard(address) view returns (bool)'], providerConet)
 			const cardContract = new ethers.Contract(card, ['function owner() view returns (address)'], providerConet)
@@ -9527,6 +9528,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const available = []
 			for (const candidate of candidates) {
 				if (candidate.merchant.toLowerCase() === admin.toLowerCase()) continue
+				if (isApiExcludedUserCard(candidate.cardAddress)) continue
 				const member = await registry.members(candidate.merchant)
 				if (Number(member[0]) !== 0) continue
 				if ((await registry.claimedMerchantL0(candidate.merchant)) !== ethers.ZeroAddress) continue
