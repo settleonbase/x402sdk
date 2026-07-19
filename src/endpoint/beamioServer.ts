@@ -487,6 +487,7 @@ const providerConet = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(),
 const REFERRAL_REDEEM_READ_ABI = [
 	'function admins(address) view returns (bool)',
 	'function members(address) view returns (uint8 role,address parentAdmin,address parentL0,uint256 rebateBps,uint256 ratioBps,bool active)',
+	'function merchantQuotas(address) view returns (uint256 starterKetRemaining,uint256 paidBunitRemaining,uint256 issuedCodeCount,uint256 claimedCodeCount)',
 	'function userCardFactory() view returns (address)',
 	'function claimedMerchantL0(address) view returns (address)',
 	'function redeemActionNonces(address) view returns (uint256)',
@@ -507,6 +508,16 @@ const REFERRAL_ADMIN_MANAGEMENT_TYPES = {
 			{ name: 'admin', type: 'address' },
 			{ name: 'l0', type: 'address' },
 			{ name: 'rebateBps', type: 'uint256' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+	setL0Quota: {
+		SetL0Quota: [
+			{ name: 'admin', type: 'address' },
+			{ name: 'l0', type: 'address' },
+			{ name: 'starterKetRemaining', type: 'uint256' },
+			{ name: 'paidBunitRemaining', type: 'uint256' },
 			{ name: 'nonce', type: 'uint256' },
 			{ name: 'deadline', type: 'uint256' },
 		],
@@ -626,6 +637,8 @@ async function referralRegistryAdminManagementPreCheck(body: any): Promise<
 				merchant?: string
 				card?: string
 				rebateBps?: string
+				starterKetRemaining?: string
+				paidBunitRemaining?: string
 				nonce: string
 				deadline: string
 				signature: string
@@ -635,7 +648,7 @@ async function referralRegistryAdminManagementPreCheck(body: any): Promise<
 > {
 	try {
 		const action = String(body?.action ?? '') as ReferralRegistryAdminManagementAction
-		if (action !== 'setL0Rate' && action !== 'assignMerchant') {
+		if (action !== 'setL0Rate' && action !== 'setL0Quota' && action !== 'assignMerchant') {
 			return { success: false, error: 'Invalid Referral Admin management action' }
 		}
 		const admin = ethers.getAddress(String(body?.admin ?? ''))
@@ -662,6 +675,8 @@ async function referralRegistryAdminManagementPreCheck(body: any): Promise<
 			merchant?: string
 			card?: string
 			rebateBps?: string
+			starterKetRemaining?: string
+			paidBunitRemaining?: string
 			nonce: string
 			deadline: string
 			signature: string
@@ -676,6 +691,22 @@ async function referralRegistryAdminManagementPreCheck(body: any): Promise<
 				admin,
 				l0,
 				rebateBps: rebateBps.toString(),
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+			}
+		} else if (action === 'setL0Quota') {
+			const starterKetRemaining = BigInt(String(body?.starterKetRemaining ?? ''))
+			const paidBunitRemaining = BigInt(String(body?.paidBunitRemaining ?? ''))
+			if (starterKetRemaining < 0n || paidBunitRemaining < 0n) return { success: false, error: 'Quota values cannot be negative' }
+			message = { admin, l0, starterKetRemaining, paidBunitRemaining, nonce, deadline }
+			preChecked = {
+				action,
+				contract: CONET_REFERRAL_REGISTRY_VAULT_V1,
+				admin,
+				l0,
+				starterKetRemaining: starterKetRemaining.toString(),
+				paidBunitRemaining: paidBunitRemaining.toString(),
 				nonce: nonce.toString(),
 				deadline: deadline.toString(),
 				signature,
@@ -9514,6 +9545,25 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(200).json({ success: true, nonce: nonce.toString() }).end()
 		} catch (error: any) {
 			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Admin nonce read failed' }).end()
+		}
+	})
+
+	router.get('/referralRegistryL0Quota', async (req, res) => {
+		try {
+			const l0 = ethers.getAddress(String(req.query.l0 ?? ''))
+			const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+			const member = await registry.members(l0)
+			if (Number(member[0]) !== 1 || !Boolean(member[5])) {
+				return res.status(400).json({ success: false, error: 'L0 is not active' }).end()
+			}
+			const quota = await registry.merchantQuotas(l0)
+			return res.status(200).json({
+				success: true,
+				starterKetRemaining: quota.starterKetRemaining.toString(),
+				paidBunitRemaining: quota.paidBunitRemaining.toString(),
+			}).end()
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'L0 quota read failed' }).end()
 		}
 	})
 

@@ -20361,11 +20361,12 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 // --- ReferralRegistryVaultV1 gasless Admin L0 management relay ---
 const REFERRAL_REGISTRY_ADMIN_MANAGEMENT_ABI = [
 	'function setL0RebateRateFor(address admin,address l0,uint256 rebateBps,uint256 nonce,uint256 deadline,bytes signature)',
+	'function setL0QuotaFor(address admin,address l0,uint256 starterKetRemaining,uint256 paidBunitRemaining,uint256 nonce,uint256 deadline,bytes signature)',
 	'function assignMerchantToL0For(address admin,address l0,address merchant,address card,uint256 nonce,uint256 deadline,bytes signature)',
 	'function members(address) view returns (uint8 role,address parentAdmin,address parentL0,uint256 rebateBps,uint256 ratioBps,bool active)',
 ] as const
 
-export type ReferralRegistryAdminManagementAction = 'setL0Rate' | 'assignMerchant'
+export type ReferralRegistryAdminManagementAction = 'setL0Rate' | 'setL0Quota' | 'assignMerchant'
 export const referralRegistryAdminManagementPool: Array<{
 	contract: string
 	action: ReferralRegistryAdminManagementAction
@@ -20374,6 +20375,8 @@ export const referralRegistryAdminManagementPool: Array<{
 	merchant?: string
 	card?: string
 	rebateBps?: string
+	starterKetRemaining?: string
+	paidBunitRemaining?: string
 	nonce: string
 	deadline: string
 	signature: string
@@ -20414,7 +20417,17 @@ export async function referralRegistryAdminManagementProcess(): Promise<void> {
 				BigInt(job.deadline),
 				job.signature,
 			)
-			: await registry.assignMerchantToL0For(
+			: job.action === 'setL0Quota'
+				? await registry.setL0QuotaFor(
+					ethers.getAddress(job.admin),
+					ethers.getAddress(job.l0),
+					BigInt(job.starterKetRemaining ?? '0'),
+					BigInt(job.paidBunitRemaining ?? '0'),
+					BigInt(job.nonce),
+					BigInt(job.deadline),
+					job.signature,
+				)
+				: await registry.assignMerchantToL0For(
 				ethers.getAddress(job.admin),
 				ethers.getAddress(job.l0),
 				ethers.getAddress(job.merchant ?? ''),
