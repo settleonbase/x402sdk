@@ -20525,7 +20525,24 @@ export async function referralRegistryAdminManagementProcess(): Promise<void> {
 		logger(Colors.green(`[referralRegistryAdminManagement] action=${job.action} l0=${job.l0} tx=${tx.hash}`))
 		if (!job.res.headersSent) job.res.status(200).json({ success: true, txHash: tx.hash }).end()
 	} catch (error: any) {
-		const message = error?.shortMessage ?? error?.message ?? String(error)
+		let message = error?.shortMessage ?? error?.message ?? String(error)
+		const rawData = error?.data ?? error?.info?.error?.data ?? error?.error?.data
+		if (typeof rawData === 'string' && rawData.startsWith('0x')) {
+			try {
+				const parsed = new ethers.Interface([
+					'error Unauthorized()',
+					'error NotRegistered()',
+					'error SignatureExpired()',
+					'error InvalidSignature()',
+					'error NonceUsed()',
+					'error InvalidAmount()',
+					'error InvalidAddress()',
+				]).parseError(rawData)
+				if (parsed?.name) message = parsed.name
+			} catch {
+				/* keep ethers shortMessage */
+			}
+		}
 		logger(Colors.red(`[referralRegistryAdminManagement] failed: ${message}`))
 		if (!job.res.headersSent) job.res.status(400).json({ success: false, error: message }).end()
 	} finally {

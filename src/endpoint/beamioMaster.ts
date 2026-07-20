@@ -2542,6 +2542,8 @@ const routing = ( router: Router ) => {
 				merchant?: string
 				card?: string
 				rebateBps?: string
+				starterKetRemaining?: string
+				paidBunitRemaining?: string
 				nonce?: string
 				deadline?: string
 				signature?: string
@@ -2557,6 +2559,15 @@ const routing = ( router: Router ) => {
 			) {
 				return res.status(400).json({ success: false, error: 'Missing Referral Admin management fields' }).end()
 			}
+			if (
+				(body.action === 'setL0StarterQuota' || body.action === 'setL0Quota') &&
+				(body.starterKetRemaining === undefined || body.starterKetRemaining === '')
+			) {
+				return res.status(400).json({ success: false, error: 'Missing starterKetRemaining' }).end()
+			}
+			if (body.action === 'setL0Quota' && (body.paidBunitRemaining === undefined || body.paidBunitRemaining === '')) {
+				return res.status(400).json({ success: false, error: 'Missing paidBunitRemaining' }).end()
+			}
 			referralRegistryAdminManagementPool.push({
 				action: body.action,
 				contract: body.contract,
@@ -2565,6 +2576,8 @@ const routing = ( router: Router ) => {
 				merchant: body.merchant,
 				card: body.card,
 				rebateBps: body.rebateBps,
+				starterKetRemaining: body.starterKetRemaining,
+				paidBunitRemaining: body.paidBunitRemaining,
 				nonce: body.nonce,
 				deadline: body.deadline,
 				signature: body.signature,
