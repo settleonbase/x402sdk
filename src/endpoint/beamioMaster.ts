@@ -2507,20 +2507,23 @@ const routing = ( router: Router ) => {
 				account?: string
 				redeemHash?: string
 				rebateBps?: string
+				amount?: string
 				nonce?: string
 				deadline?: string
 				signature?: string
 				secret?: string
 			}
-			if (!body.action || !body.contract || !body.account || !body.redeemHash || !body.nonce || !body.deadline || !body.signature) {
+			const requiresRedeemHash = body.action !== 'setMerchantAirdrop'
+			if (!body.action || !body.contract || !body.account || (requiresRedeemHash && !body.redeemHash) || (body.action === 'setMerchantAirdrop' && !body.amount) || !body.nonce || !body.deadline || !body.signature) {
 				return res.status(400).json({ success: false, error: 'Missing referral redeem relay fields' }).end()
 			}
 			referralRegistryRedeemPool.push({
 				action: body.action,
 				contract: body.contract,
 				account: body.account,
-				redeemHash: body.redeemHash,
+				redeemHash: body.redeemHash ?? '',
 				rebateBps: body.rebateBps ?? '0',
+				amount: body.amount,
 				nonce: body.nonce,
 				deadline: body.deadline,
 				signature: body.signature,

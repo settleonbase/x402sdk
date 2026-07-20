@@ -494,6 +494,9 @@ const REFERRAL_REDEEM_READ_ABI = [
 	'function referralClaimNonces(address) view returns (uint256)',
 	'function l0RedeemCodes(bytes32) view returns (address issuerAdmin,uint256 rebateBps,uint64 validAfter,uint64 validBefore,bool active,bool claimed,bool cancelled)',
 	'function l1RedeemCodes(bytes32) view returns (address issuerL0,uint256 rebateBps,uint256 ratioBps,uint64 validAfter,uint64 validBefore,bool active,bool claimed,bool cancelled)',
+	'function merchantCodeCount() view returns (uint256)',
+	'function merchantCodeHashAt(uint256) view returns (bytes32)',
+	'function merchantCodes(bytes32) view returns (address issuerL0,uint256 paidBunitAmount,uint64 validAfter,uint64 validBefore,bool active,bool claimed)',
 ] as const
 const REFERRAL_REDEEM_DOMAIN = {
 	name: 'ReferralRegistryVaultV1',
@@ -580,6 +583,14 @@ const REFERRAL_REDEEM_TYPES = {
 			{ name: 'deadline', type: 'uint256' },
 		],
 	},
+	issueMerchant: {
+		IssueMerchantRedeemCode: [
+			{ name: 'l0', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
 	cancelL0: {
 		CancelL0RedeemCode: [
 			{ name: 'admin', type: 'address' },
@@ -596,23 +607,41 @@ const REFERRAL_REDEEM_TYPES = {
 			{ name: 'deadline', type: 'uint256' },
 		],
 	},
+	cancelMerchant: {
+		CancelMerchantRedeemCode: [
+			{ name: 'l0', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+	setMerchantAirdrop: {
+		SetMerchantRedeemBunitAirdrop: [
+			{ name: 'admin', type: 'address' },
+			{ name: 'amount', type: 'uint256' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
 } as const
 
 async function referralRedeemRelayPreCheck(body: any): Promise<
-	| { success: true; preChecked: { action: Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>; contract: string; account: string; redeemHash: string; rebateBps: string; nonce: string; deadline: string; signature: string } }
+	| { success: true; preChecked: { action: Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>; contract: string; account: string; redeemHash: string; rebateBps: string; amount: string; nonce: string; deadline: string; signature: string } }
 	| { success: false; error: string }
 > {
 	try {
 		const action = String(body?.action ?? '') as Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>
-		if (!['issueL0', 'issueL1', 'cancelL0', 'cancelL1'].includes(action)) return { success: false, error: 'Invalid referral redeem action' }
+		if (!['issueL0', 'issueL1', 'issueMerchant', 'cancelL0', 'cancelL1', 'cancelMerchant', 'setMerchantAirdrop'].includes(action)) return { success: false, error: 'Invalid referral redeem action' }
 		const account = ethers.getAddress(String(body?.account ?? ''))
 		const redeemHash = String(body?.redeemHash ?? '')
-		if (!ethers.isHexString(redeemHash, 32)) return { success: false, error: 'redeemHash must be bytes32' }
+		if (action !== 'setMerchantAirdrop' && !ethers.isHexString(redeemHash, 32)) return { success: false, error: 'redeemHash must be bytes32' }
 		const nonce = BigInt(String(body?.nonce ?? ''))
 		const deadline = BigInt(String(body?.deadline ?? ''))
 		const signature = String(body?.signature ?? '')
 		if (!ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) return { success: false, error: 'Invalid or expired signature request' }
-		const rebateBps = action.startsWith('issue') ? BigInt(String(body?.rebateBps ?? '')) : 0n
+		const amount = action === 'setMerchantAirdrop' ? BigInt(String(body?.amount ?? '')) : 0n
+		if (action === 'setMerchantAirdrop' && amount <= 0n) return { success: false, error: 'Airdrop amount must be greater than zero' }
+		const rebateBps = action === 'issueL0' || action === 'issueL1' ? BigInt(String(body?.rebateBps ?? '')) : 0n
 		if (rebateBps < 0n || rebateBps > 10_000n) return { success: false, error: 'rebateBps must be between 0 and 10000' }
 		const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
 		const expectedNonce = BigInt((await registry.redeemActionNonces(account)).toString())
@@ -620,16 +649,35 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 		const isAdmin = Boolean(await registry.admins(account))
 		const member = await registry.members(account)
 		const isL0 = Number(member[0]) === 1 && Boolean(member[5])
-		if ((action === 'issueL0' || action === 'cancelL0') && !isAdmin) return { success: false, error: 'Account is not a ReferralRegistry admin' }
-		if ((action === 'issueL1' || action === 'cancelL1') && !isL0) return { success: false, error: 'Account is not an active L0' }
-		const typeName = action === 'issueL0' ? 'IssueL0RedeemCode' : action === 'issueL1' ? 'IssueL1RedeemCode' : action === 'cancelL0' ? 'CancelL0RedeemCode' : 'CancelL1RedeemCode'
+		if (action === 'issueL0' || action === 'cancelL0') {
+			if (!isAdmin) return { success: false, error: 'Account is not a ReferralRegistry admin' }
+		} else if (action === 'issueL1' || action === 'cancelL1' || action === 'issueMerchant' || action === 'cancelMerchant') {
+			if (!isL0) return { success: false, error: 'Account is not an active L0' }
+		} else if (action === 'setMerchantAirdrop' && !isAdmin) {
+			return { success: false, error: 'Account is not a ReferralRegistry admin' }
+		}
+		const typeName = action === 'issueL0'
+			? 'IssueL0RedeemCode'
+			: action === 'issueL1'
+				? 'IssueL1RedeemCode'
+				: action === 'issueMerchant'
+					? 'IssueMerchantRedeemCode'
+					: action === 'cancelL0'
+						? 'CancelL0RedeemCode'
+						: action === 'cancelL1'
+							? 'CancelL1RedeemCode'
+							: action === 'cancelMerchant'
+								? 'CancelMerchantRedeemCode'
+								: 'SetMerchantRedeemBunitAirdrop'
 		const types = REFERRAL_REDEEM_TYPES[action] as any
-		const message = action === 'issueL0' || action === 'cancelL0'
+		const message = action === 'setMerchantAirdrop'
+			? { admin: account, amount, nonce, deadline }
+			: action === 'issueL0' || action === 'cancelL0'
 			? { admin: account, redeemHash, ...(action.startsWith('issue') ? { rebateBps } : {}), nonce, deadline }
-			: { l0: account, redeemHash, ...(action.startsWith('issue') ? { rebateBps } : {}), nonce, deadline }
+			: { l0: account, redeemHash, ...((action === 'issueL1') ? { rebateBps } : {}), nonce, deadline }
 		const digest = ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types, message)
 		if (ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase()) return { success: false, error: 'Referral redeem signature does not match account' }
-		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: rebateBps.toString(), nonce: nonce.toString(), deadline: deadline.toString(), signature } }
+		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: rebateBps.toString(), amount: amount.toString(), nonce: nonce.toString(), deadline: deadline.toString(), signature } }
 	} catch (error: any) {
 		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral redeem request' }
 	}

@@ -20227,19 +20227,23 @@ export const cardOpenTransferPoolPress = async () => {
 const REFERRAL_REGISTRY_REDEEM_RELAY_ABI = [
 	'function issueL0RedeemCodeFor(address admin,bytes32 redeemHash,uint256 rebateBps,uint256 nonce,uint256 deadline,bytes signature)',
 	'function issueL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 l1RebateBps,uint256 nonce,uint256 deadline,bytes signature)',
+	'function issueMerchantRedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelL0RedeemCodeFor(address admin,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function cancelMerchantRedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function setMerchantRedeemBunitAirdropFor(address admin,uint256 amount,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimL0RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 ] as const
 
-export type ReferralRegistryRedeemRelayAction = 'issueL0' | 'issueL1' | 'cancelL0' | 'cancelL1' | 'claimL0' | 'claimL1'
+export type ReferralRegistryRedeemRelayAction = 'issueL0' | 'issueL1' | 'issueMerchant' | 'cancelL0' | 'cancelL1' | 'cancelMerchant' | 'setMerchantAirdrop' | 'claimL0' | 'claimL1'
 export const referralRegistryRedeemPool: Array<{
 	contract: string
 	action: ReferralRegistryRedeemRelayAction
 	account: string
 	redeemHash: string
-	rebateBps: string
+		rebateBps: string
+	amount?: string
 	nonce: string
 	deadline: string
 	signature: string
@@ -20295,15 +20299,35 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 			BigInt(job.deadline),
 			job.signature,
 		] as const
+		const merchantArgs = [
+			ethers.getAddress(job.account),
+			job.redeemHash,
+			BigInt(job.nonce),
+			BigInt(job.deadline),
+			job.signature,
+		] as const
+		const amountArgs = [
+			ethers.getAddress(job.account),
+			BigInt(job.amount ?? '0'),
+			BigInt(job.nonce),
+			BigInt(job.deadline),
+			job.signature,
+		] as const
 		const tx =
 			job.action === 'issueL0'
 				? await registry.issueL0RedeemCodeFor(...issueArgs)
 				: job.action === 'issueL1'
 					? await registry.issueL1RedeemCodeFor(...issueArgs)
+					: job.action === 'issueMerchant'
+						? await registry.issueMerchantRedeemCodeFor(...merchantArgs)
 					: job.action === 'cancelL0'
 						? await registry.cancelL0RedeemCodeFor(...cancelArgs)
 					: job.action === 'cancelL1'
 						? await registry.cancelL1RedeemCodeFor(...cancelArgs)
+					: job.action === 'cancelMerchant'
+						? await registry.cancelMerchantRedeemCodeFor(...cancelArgs)
+					: job.action === 'setMerchantAirdrop'
+						? await registry.setMerchantRedeemBunitAirdropFor(...amountArgs)
 						: job.action === 'claimL0'
 							? await registry.claimL0RedeemCodeFor(...claimArgs)
 							: await registry.claimL1RedeemCodeFor(...claimArgs)
