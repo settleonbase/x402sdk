@@ -85,10 +85,9 @@ export const NODE_SALE_SERVER_FEE_USDC6 = 120_000_000n
 
 /** CoNET BUint ERC20（balanceOfAll）；与 deployments/conet-addresses.json `BUint` 同步 */
 export const CONET_BUINT = '0x54ac4672cE75EC5ACebaeF1a7aFC6F49E77Ae9Ae'
-/** CoNET BUnitAirdropV2 ERC1967 proxy；所有新写路径使用 proxy。 */
-export const CONET_BUNIT_AIRDROP_ADDRESS = '0x305f90A7f38289219BA1b4be98CB5b47e7b15Ac2'
-/** 旧版 BUnitAirdrop；V2 内部继续查询 hasClaimed，避免重复免费领取。 */
-export const CONET_BUNIT_AIRDROP_LEGACY_ADDRESS = '0xa01DFfD68b355540B840310a9f0C1E7a779C3Ce8'
+export const CONET_BUNIT_AIRDROP_ADDRESS = '0xa01DFfD68b355540B840310a9f0C1E7a779C3Ce8'
+/** 旧版 BUnitAirdrop（2026 前）；hasClaimed 须一并检查，避免已领用户在新合约重复 eligible */
+export const CONET_BUNIT_AIRDROP_LEGACY_ADDRESS = '0xb9cf45AF87b16853c8F48a16b0495F030309e70f'
 /** CoNET ReferralRegistryVaultV1 ERC1967 proxy; referral redeem writes are relayed by Master. */
 export const CONET_REFERRAL_REGISTRY_VAULT_V1 = '0xD6252Cbf266B80231397Ac2a4f25ed2d9b01DEE6'
 /**
@@ -143,9 +142,9 @@ export const CONET_DEPOSIT_CONTRACT = '0x424242424242424242424242424242424242424
 export const CONET_VALIDATOR_DEPOSIT_FUNDER = '0x0981275553A41E00ec1006fe074971285E00c2A3'
 /** ValidatorDepositRedeem contract admin (withdrawNative only; not redeem admin). Sync from deployments/conet-ValidatorDepositRedeem.json */
 export const CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
-/** ValidatorDepositRedeem redeem admin on validator node 38.102.85.33 (Redeem listener + Hourly reporter) */
-export const CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN = '0xd2cDeA6e5c59941625313AFaE2428F8d60C81cE4'
-export const CONET_VALIDATOR_NODE_IP = ''
+/** ValidatorDepositRedeem redeem admin on validator node 38.102.85.33 (~/.master.json key_38.102.85.33) */
+export const CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN = '0xE974c5d10cc36738bC2619FC73b075504D5c6d1E'
+export const CONET_VALIDATOR_NODE_IP = '212.227.242.207'
 /** ValidatorNodeRewardIndexer（CoNET）：每节点/每受益人小时原子 CNET 收益账本 + 周期统计；
  *  与 deployments/conet-addresses.json `ValidatorNodeRewardIndexer` 同步。留空则由主合约 rewardIndexer() 解析。 */
 export const CONET_VALIDATOR_NODE_REWARD_INDEXER = '0xCA83d2d766701d3939Ef1644e2A911dc87CeA39D'

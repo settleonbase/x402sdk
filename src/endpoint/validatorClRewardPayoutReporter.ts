@@ -27,7 +27,7 @@ import Colors from 'colors/safe'
 import { logger } from '../logger'
 import { masterSetup, resolveBeamioConetHttpRpcUrl } from '../util'
 import { Settle_ContractPool, ensureSettleContractPoolInitialized } from '../settleContractPool'
-import { CONET_VALIDATOR_CL_PAYOUT_ONCHAIN_LANE, enqueueOnchainTxWork } from '../onchainTxSerialQueue'
+import { CONET_VALIDATOR_NODE_ONCHAIN_LANE, enqueueOnchainTxWork } from '../onchainTxSerialQueue'
 import {
 	CONET_VALIDATOR_DEPOSIT_REDEEM,
 	CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK,
@@ -42,55 +42,6 @@ const PAYOUT_ABI = [
 	'function guardianIdBeneficiary(uint256 guardianId) view returns (address)',
 	'function consumedRewardEventKey(bytes32 key) view returns (bool)',
 ] as const
-
-function resolveClPayoutAdminKeyFile(): string {
-	return (
-		process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_ADMIN_PRIVATE_KEY_FILE?.trim() ||
-		path.join(homedir(), 'secrets', 'cl_settle_admin.txt')
-	)
-}
-
-/** Dedicated signer for settleNodeRewards (preferred over Settle_ContractPool). */
-function loadClPayoutWallet(provider: ethers.Provider): ethers.Wallet | null {
-	const file = resolveClPayoutAdminKeyFile()
-	if (file && fs.existsSync(file)) {
-		const raw = fs.readFileSync(file, 'utf8').trim()
-		if (raw) {
-			const pk = raw.startsWith('0x') ? raw : `0x${raw}`
-			return new ethers.Wallet(pk, provider)
-		}
-	}
-	const sc = Settle_ContractPool[0]
-	return sc?.walletConet ?? null
-}
-
-async function withClPayoutWallet<T>(
-	provider: ethers.Provider,
-	label: string,
-	fn: (wallet: ethers.Wallet) => Promise<T>
-): Promise<T | undefined> {
-	const wallet = loadClPayoutWallet(provider)
-	if (!wallet) {
-		logger(Colors.red(`[validatorClRewardPayout] ${label} failed: no CL payout admin key`))
-		return undefined
-	}
-	try {
-		return await fn(wallet)
-	} catch (e: unknown) {
-		logger(Colors.red(`[validatorClRewardPayout] ${label} failed: ${(e as Error)?.message ?? e}`))
-		return undefined
-	}
-}
-
-function peekClPayoutWalletAddress(provider?: ethers.Provider): string | null {
-	try {
-		const p = provider ?? new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl())
-		const w = loadClPayoutWallet(p)
-		return w ? ethers.getAddress(w.address) : null
-	} catch {
-		return null
-	}
-}
 
 type PendingEntryJson = {
 	guardianId: string
@@ -440,12 +391,13 @@ async function resolveGuardianIdForWithdrawal(
 ): Promise<bigint | null> {
 	const pubkey = await fetchValidatorPubkeyByIndex(validatorIndex)
 	if (!pubkey) return null
+
 	const pkHash = ethers.keccak256(pubkey)
 	try {
 		const guardianId = await contract.getNodeByValidatorPubkeyHash!(pkHash)
 		const gid = BigInt(guardianId)
 		if (gid <= 0n) return null
-		// adminRelease clears beneficiary; legacy pubkey→gid mapping may remain.
+		// adminRelease clears beneficiary; legacy pubkey→gid mapping may remain (Lab 136 341–476).
 		const beneficiary = String(await contract.guardianIdBeneficiary!(gid))
 		if (beneficiary === ethers.ZeroAddress) return null
 		return gid
@@ -585,7 +537,7 @@ async function submitPayoutBatch(
 ): Promise<boolean> {
 	if (!entries.length) return true
 	return enqueueOnchainTxWork(
-		CONET_VALIDATOR_CL_PAYOUT_ONCHAIN_LANE,
+		CONET_VALIDATOR_NODE_ONCHAIN_LANE,
 		`settleNodeRewards n=${entries.length}`,
 		async () => submitPayoutBatchOnchain(contractAddr, entries, gasPriceWei),
 		'[validatorClRewardPayout]'

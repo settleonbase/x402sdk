@@ -22,7 +22,7 @@ import {
 } from '../chainAddresses'
 import { Settle_ContractPool, ensureSettleContractPoolInitialized } from '../settleContractPool'
 import {
-	CONET_VALIDATOR_REDEEM_WORKFLOW_ONCHAIN_LANE,
+	CONET_VALIDATOR_NODE_ONCHAIN_LANE,
 	enqueueOnchainTxWork,
 	waitForOnchainTxQueue,
 } from '../onchainTxSerialQueue'
@@ -1278,8 +1278,8 @@ export async function validatorDepositRedeemCreateClusterPreCheck(body: {
 	}
 	const validatorCount = parseUintField('validatorCount', body.validatorCount)
 	if (typeof validatorCount === 'string' || validatorCount <= 0n) return { success: false as const, error: typeof validatorCount === 'string' ? validatorCount : 'validatorCount must be positive' }
-	const targetNodeIp = normalizeIp(body.targetNodeIp || '')
-	if (!isValidIpLike(targetNodeIp)) return { success: false as const, error: 'Invalid targetNodeIp' }
+	const targetNodeIp = normalizeIp(body.targetNodeIp || resolveValidatorNodeIp() || '')
+	if (!isValidIpLike(targetNodeIp)) return { success: false as const, error: 'Invalid targetNodeIp (set body.targetNodeIp or CONET_VALIDATOR_NODE_IP)' }
 	// All redeems auto-allocate Guardian nodes at claim time; no manual DePIN IP list is accepted.
 	const gbMiningNodeCount = parseUintField('gbMiningNodeCount', body.gbMiningNodeCount ?? validatorCount.toString())
 	if (typeof gbMiningNodeCount === 'string') return { success: false as const, error: gbMiningNodeCount }
@@ -2226,41 +2226,6 @@ function readLastNDepositPubkeys(depositFile: string, count: number): string[] {
 	}
 }
 
-/**
- * Point EL priority-fee recipient at the economic beneficiary for each BLS pubkey.
- * Writes proposer-settings.json and best-effort Keymanager API update (see 07_update_fee_recipient.sh).
- * CL skim still uses Redeem WC + settleNodeRewards → guardianIdBeneficiary (unchanged).
- */
-async function applyBeneficiaryFeeRecipients(args: {
-	beneficiary: string
-	pubkeys: string[]
-	newCoNETDir: string
-}): Promise<string> {
-	const feeScript = process.env.CONET_VALIDATOR_FEE_RECIPIENT_SCRIPT?.trim() || './07_update_fee_recipient.sh'
-	const scriptPath = path.join(args.newCoNETDir, feeScript)
-	if (!fs.existsSync(scriptPath) && !fs.existsSync(path.join(args.newCoNETDir, feeScript.replace(/^\.\//, '')))) {
-		throw new Error(`fee_recipient script missing: ${feeScript}`)
-	}
-	const lines: string[] = []
-	for (const pubkey of args.pubkeys) {
-		const out = await runCommand(
-			'update fee_recipient',
-			'bash',
-			[feeScript],
-			args.newCoNETDir,
-			{
-				...process.env,
-				VALIDATOR_PUBKEY: pubkey,
-				EXIT_VALIDATOR_PUBKEY: pubkey,
-				FEE_RECIPIENT: args.beneficiary,
-				FEE_RECIPIENT_ADDRESS: args.beneficiary,
-			}
-		)
-		lines.push(`${pubkey.slice(0, 12)}… -> ${args.beneficiary}: ${out.slice(0, 200)}`)
-	}
-	return `updated ${args.pubkeys.length} fee_recipient(s) -> ${args.beneficiary}\n${lines.join('\n')}`
-}
-
 type DepositJsonEntry = {
 	pubkey: string
 	withdrawalCredentials: string
@@ -2601,22 +2566,21 @@ async function executeFeeRecipientHotUpdate(args: {
 	try {
 		const prior = getValidatorDepositRedeemStatus(rid)
 		if (prior?.status === 'succeeded' || prior?.status === 'running') return
-		const base: ValidatorRedeemState = {
-			requestId: rid,
-			codeHash: '',
-			claimer: args.toBeneficiary,
-			beneficiary: args.toBeneficiary,
-			validatorCount: '1',
-			targetNodeIp: resolveValidatorNodeIp(),
-			conetDepinNodeIps: [],
-			gbMiningNodeCount: '0',
-			status: 'received',
-			createdAt: prior?.createdAt || new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
-			stages: prior?.stages || {},
-		}
-		upsertState(rid, () => base)
 		await enqueueListenerOnchainWork(`feerecipient #${args.guardianId.toString()}`, async () => {
+			const base: ValidatorRedeemState = {
+				requestId: rid,
+				codeHash: '',
+				claimer: args.toBeneficiary,
+				beneficiary: args.toBeneficiary,
+				validatorCount: '1',
+				targetNodeIp: resolveValidatorNodeIp(),
+				conetDepinNodeIps: [],
+				gbMiningNodeCount: '0',
+				status: 'received',
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				stages: {},
+			}
 			const mark = (stage: string, ok: boolean, detail?: string) =>
 				upsertState(rid, (cur) => ({
 					...(cur || base),
@@ -2685,22 +2649,21 @@ async function executeValidatorFullExit(args: {
 	try {
 		const prior = getValidatorDepositRedeemStatus(rid)
 		if (prior?.status === 'succeeded' || prior?.status === 'running') return
-		const base: ValidatorRedeemState = {
-			requestId: rid,
-			codeHash: '',
-			claimer: args.beneficiary,
-			beneficiary: args.beneficiary,
-			validatorCount: String(args.guardianIds.length),
-			targetNodeIp: resolveValidatorNodeIp(),
-			conetDepinNodeIps: [],
-			gbMiningNodeCount: '0',
-			status: 'received',
-			createdAt: prior?.createdAt || new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
-			stages: prior?.stages || {},
-		}
-		upsertState(rid, () => base)
 		await enqueueListenerOnchainWork(`fullexit ${args.beneficiary.slice(0, 10)}…`, async () => {
+			const base: ValidatorRedeemState = {
+				requestId: rid,
+				codeHash: '',
+				claimer: args.beneficiary,
+				beneficiary: args.beneficiary,
+				validatorCount: String(args.guardianIds.length),
+				targetNodeIp: resolveValidatorNodeIp(),
+				conetDepinNodeIps: [],
+				gbMiningNodeCount: '0',
+				status: 'received',
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				stages: {},
+			}
 			const mark = (stage: string, ok: boolean, detail?: string) =>
 				upsertState(rid, (cur) => ({
 					...(cur || base),
@@ -2890,28 +2853,6 @@ async function executeValidatorRedeem(state: ValidatorRedeemState): Promise<void
 		)
 		assertImportWalletAccountCount(importOut)
 		mark('import-validator-keys', true, importOut)
-	}
-
-	// EL priority fees must go to the claim beneficiary (not process-level suggested-fee-recipient).
-	const deployedFromState = getValidatorDepositRedeemStatus(requestId)?.deployedPubkeys ?? []
-	const feeCount = Number(state.validatorCount) || 0
-	const feeList =
-		deployedFromState.length > 0
-			? deployedFromState.slice(0, feeCount || deployedFromState.length)
-			: readLastNDepositPubkeys(path.join(newCoNETDir, 'validator_deposits.json'), feeCount)
-	if (feeList.length > 0 && ethers.isAddress(state.beneficiary)) {
-		const feeOut = await applyBeneficiaryFeeRecipients({
-			beneficiary: ethers.getAddress(state.beneficiary),
-			pubkeys: feeList,
-			newCoNETDir,
-		})
-		mark('fee-recipient', true, feeOut)
-	} else {
-		mark(
-			'fee-recipient',
-			true,
-			`skipped: pubkeys=${feeList.length} beneficiary=${state.beneficiary || 'none'}`
-		)
 	}
 
 	// Optional full beacon+validator restart (does NOT import keys). Default skip — import script reloads validator only.
@@ -3134,17 +3075,12 @@ const listenerEventInFlight = new Set<string>()
 const LISTENER_ONCHAIN_LOG_PREFIX = '[validatorDepositRedeemListener]'
 
 function enqueueListenerOnchainWork<T>(label: string, fn: () => Promise<T>): Promise<T> {
-	return enqueueOnchainTxWork(
-		CONET_VALIDATOR_REDEEM_WORKFLOW_ONCHAIN_LANE,
-		label,
-		fn,
-		LISTENER_ONCHAIN_LOG_PREFIX
-	)
+	return enqueueOnchainTxWork(CONET_VALIDATOR_NODE_ONCHAIN_LANE, label, fn, LISTENER_ONCHAIN_LOG_PREFIX)
 }
 
-/** Wait until the redeem-workflow serial queue is idle (for graceful SIGTERM / replay). */
+/** Wait until the serial on-chain queue is idle (for graceful SIGTERM). */
 export async function waitForListenerSerialQueue(maxWaitMs = 30 * 60 * 1000): Promise<void> {
-	await waitForOnchainTxQueue(CONET_VALIDATOR_REDEEM_WORKFLOW_ONCHAIN_LANE, maxWaitMs)
+	await waitForOnchainTxQueue(CONET_VALIDATOR_NODE_ONCHAIN_LANE, maxWaitMs)
 }
 
 function tryBeginListenerEvent(key: string): boolean {
@@ -3216,33 +3152,22 @@ async function handleValidatorRedeemClaimedEvent(
 		if (existing?.status === 'running' && !isStaleRunningRedeemState(existing)) return
 		if (existing?.status === 'running' && isStaleRunningRedeemState(existing)) {
 			logger(Colors.yellow(`[validatorDepositRedeemListener] retry stale running claim ${rid.slice(0, 12)}…`))
-		} else if (existing?.status === 'received' || existing?.status === 'failed') {
-			logger(
-				Colors.yellow(
-					`[validatorDepositRedeemListener] resume claim ${rid.slice(0, 12)}… prior=${existing.status}`
-				)
-			)
 		}
-		// Persist `received` before enqueue so SIGTERM / kill cannot drop the claim after
-		// the checkpoint advances but before the serial job starts.
-		const next = upsertState(rid, () => ({
-			requestId: rid,
-			codeHash: args.codeHash,
-			claimer: ethers.getAddress(args.claimer),
-			beneficiary: ethers.getAddress(args.beneficiary),
-			validatorCount: args.validatorCount,
-			targetNodeIp: target,
-			conetDepinNodeIps: args.conetDepinNodeIps.map(normalizeIp),
-			gbMiningNodeCount: args.gbMiningNodeCount,
-			status: 'received',
-			createdAt: existing?.createdAt || new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
-			stages: {
-				...(existing?.stages || {}),
-				event: { ok: true, at: new Date().toISOString(), detail: `block=${blockNumber}` },
-			},
-		}))
 		await enqueueListenerOnchainWork(`claim ${rid.slice(0, 12)}…`, async () => {
+			const next = upsertState(rid, () => ({
+				requestId: rid,
+				codeHash: args.codeHash,
+				claimer: ethers.getAddress(args.claimer),
+				beneficiary: ethers.getAddress(args.beneficiary),
+				validatorCount: args.validatorCount,
+				targetNodeIp: target,
+				conetDepinNodeIps: args.conetDepinNodeIps.map(normalizeIp),
+				gbMiningNodeCount: args.gbMiningNodeCount,
+				status: 'received',
+				createdAt: existing?.createdAt || new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				stages: { event: { ok: true, at: new Date().toISOString(), detail: `block=${blockNumber}` } },
+			}))
 			try {
 				upsertState(rid, (cur) => ({ ...(cur || next), status: 'running', updatedAt: new Date().toISOString() }))
 				await executeValidatorRedeem(next)
@@ -3467,37 +3392,6 @@ async function resolveLiveListenBoundary(provider: ethers.JsonRpcProvider): Prom
 	return { liveListenFromBlock: liveFrom, checkpointBlock: liveFrom - 1 }
 }
 
-/**
- * Re-queue local claim workflows persisted as `received` (or stale `running`) before the
- * process died — checkpoint alone cannot recover these after the scan cursor advanced.
- * Does NOT auto-resume `failed` (those need explicit replay after ops review).
- */
-async function resumePendingLocalClaimWorkflows(nodeIp: string): Promise<void> {
-	const all = readStateFile()
-	const pending: string[] = []
-	for (const [rid, st] of Object.entries(all)) {
-		if (!ethers.isHexString(rid, 32)) continue
-		if (normalizeIp(st.targetNodeIp || '') !== nodeIp) continue
-		if (st.status === 'received' || isStaleRunningRedeemState(st)) {
-			pending.push(rid.toLowerCase())
-		}
-	}
-	if (!pending.length) return
-	logger(
-		Colors.cyan(
-			`[validatorDepositRedeemListener] resume ${pending.length} pending claim(s) from state file`
-		)
-	)
-	for (const rid of pending) {
-		try {
-			await replayValidatorRedeemClaimedEvent(rid)
-		} catch (e: unknown) {
-			const msg = e instanceof Error ? e.message : String(e)
-			logger(Colors.red(`[validatorDepositRedeemListener] resume ${rid.slice(0, 12)}… failed:`), msg)
-		}
-	}
-}
-
 async function bootstrapValidatorDepositRedeemListener(): Promise<void> {
 	const contract = resolveValidatorDepositRedeemAddress()
 	const nodeIp = resolveValidatorNodeIp()
@@ -3526,27 +3420,20 @@ async function bootstrapValidatorDepositRedeemListener(): Promise<void> {
 		)
 	)
 
-	void resumePendingLocalClaimWorkflows(nodeIp)
+	void runValidatorDepositRedeemListenerBackfill(
+		contract,
+		nodeIp,
+		priorSaved,
+		checkpointBlock,
+		deployFloor,
+		liveFrom
+	)
 		.catch((e: unknown) => {
 			const msg = e instanceof Error ? e.message : String(e)
-			logger(Colors.red('[validatorDepositRedeemListener] resume pending claims failed:'), msg)
+			logger(Colors.red('[validatorDepositRedeemListener] bootstrap backfill failed:'), msg)
 		})
 		.finally(() => {
-			void runValidatorDepositRedeemListenerBackfill(
-				contract,
-				nodeIp,
-				priorSaved,
-				checkpointBlock,
-				deployFloor,
-				liveFrom
-			)
-				.catch((e: unknown) => {
-					const msg = e instanceof Error ? e.message : String(e)
-					logger(Colors.red('[validatorDepositRedeemListener] bootstrap backfill failed:'), msg)
-				})
-				.finally(() => {
-					scheduleListenerBackfillTick()
-				})
+			scheduleListenerBackfillTick()
 		})
 }
 
