@@ -20227,7 +20227,7 @@ export const cardOpenTransferPoolPress = async () => {
 const REFERRAL_REGISTRY_REDEEM_RELAY_ABI = [
 	'function issueL0RedeemCodeFor(address admin,bytes32 redeemHash,uint256 rebateBps,uint256 nonce,uint256 deadline,bytes signature)',
 	'function issueL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 l1RebateBps,uint256 nonce,uint256 deadline,bytes signature)',
-	'function issueMerchantRedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function issueMerchantRedeemCodeFor(address l0,address l1,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelL0RedeemCodeFor(address admin,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelMerchantRedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
@@ -20244,6 +20244,7 @@ export const referralRegistryRedeemPool: Array<{
 	redeemHash: string
 		rebateBps: string
 	amount?: string
+	l1?: string
 	nonce: string
 	deadline: string
 	signature: string
@@ -20301,6 +20302,7 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 		] as const
 		const merchantArgs = [
 			ethers.getAddress(job.account),
+			ethers.getAddress(job.l1 ?? ethers.ZeroAddress),
 			job.redeemHash,
 			BigInt(job.nonce),
 			BigInt(job.deadline),

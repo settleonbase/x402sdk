@@ -586,6 +586,7 @@ const REFERRAL_REDEEM_TYPES = {
 	issueMerchant: {
 		IssueMerchantRedeemCode: [
 			{ name: 'l0', type: 'address' },
+			{ name: 'l1', type: 'address' },
 			{ name: 'redeemHash', type: 'bytes32' },
 			{ name: 'nonce', type: 'uint256' },
 			{ name: 'deadline', type: 'uint256' },
@@ -626,7 +627,7 @@ const REFERRAL_REDEEM_TYPES = {
 } as const
 
 async function referralRedeemRelayPreCheck(body: any): Promise<
-	| { success: true; preChecked: { action: Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>; contract: string; account: string; redeemHash: string; rebateBps: string; amount: string; nonce: string; deadline: string; signature: string } }
+	| { success: true; preChecked: { action: Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>; contract: string; account: string; redeemHash: string; rebateBps: string; amount: string; l1: string; nonce: string; deadline: string; signature: string } }
 	| { success: false; error: string }
 > {
 	try {
@@ -643,6 +644,15 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 		if (action === 'setMerchantAirdrop' && amount <= 0n) return { success: false, error: 'Airdrop amount must be greater than zero' }
 		const rebateBps = action === 'issueL0' || action === 'issueL1' ? BigInt(String(body?.rebateBps ?? '')) : 0n
 		if (rebateBps < 0n || rebateBps > 10_000n) return { success: false, error: 'rebateBps must be between 0 and 10000' }
+		let l1 = ethers.ZeroAddress
+		if (action === 'issueMerchant') {
+			try {
+				l1 = ethers.getAddress(String(body?.l1 ?? ''))
+			} catch {
+				return { success: false, error: 'Start Kit codes require a valid L1 address' }
+			}
+			if (l1 === ethers.ZeroAddress) return { success: false, error: 'Start Kit codes require a valid L1 address' }
+		}
 		const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
 		const expectedNonce = BigInt((await registry.redeemActionNonces(account)).toString())
 		if (nonce !== expectedNonce) return { success: false, error: 'Stale referral redeem nonce' }
@@ -655,6 +665,12 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 			if (!isL0) return { success: false, error: 'Account is not an active L0' }
 		} else if (action === 'setMerchantAirdrop' && !isAdmin) {
 			return { success: false, error: 'Account is not a ReferralRegistry admin' }
+		}
+		if (action === 'issueMerchant') {
+			const l1Member = await registry.members(l1)
+			if (Number(l1Member[0]) !== 2 || !Boolean(l1Member[5]) || ethers.getAddress(l1Member[2]) !== account) {
+				return { success: false, error: 'Selected L1 is not an active member under this L0' }
+			}
 		}
 		const typeName = action === 'issueL0'
 			? 'IssueL0RedeemCode'
@@ -674,10 +690,12 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 			? { admin: account, amount, nonce, deadline }
 			: action === 'issueL0' || action === 'cancelL0'
 			? { admin: account, redeemHash, ...(action.startsWith('issue') ? { rebateBps } : {}), nonce, deadline }
+			: action === 'issueMerchant'
+				? { l0: account, l1, redeemHash, nonce, deadline }
 			: { l0: account, redeemHash, ...((action === 'issueL1') ? { rebateBps } : {}), nonce, deadline }
 		const digest = ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types, message)
 		if (ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase()) return { success: false, error: 'Referral redeem signature does not match account' }
-		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: rebateBps.toString(), amount: amount.toString(), nonce: nonce.toString(), deadline: deadline.toString(), signature } }
+		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: rebateBps.toString(), amount: amount.toString(), l1, nonce: nonce.toString(), deadline: deadline.toString(), signature } }
 	} catch (error: any) {
 		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral redeem request' }
 	}

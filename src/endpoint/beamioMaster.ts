@@ -2508,6 +2508,7 @@ const routing = ( router: Router ) => {
 				redeemHash?: string
 				rebateBps?: string
 				amount?: string
+				l1?: string
 				nonce?: string
 				deadline?: string
 				signature?: string
@@ -2517,6 +2518,9 @@ const routing = ( router: Router ) => {
 			if (!body.action || !body.contract || !body.account || (requiresRedeemHash && !body.redeemHash) || (body.action === 'setMerchantAirdrop' && !body.amount) || !body.nonce || !body.deadline || !body.signature) {
 				return res.status(400).json({ success: false, error: 'Missing referral redeem relay fields' }).end()
 			}
+			if (body.action === 'issueMerchant' && (!body.l1 || !ethers.isAddress(body.l1))) {
+				return res.status(400).json({ success: false, error: 'Missing l1 for Start Kit issue' }).end()
+			}
 			referralRegistryRedeemPool.push({
 				action: body.action,
 				contract: body.contract,
@@ -2524,6 +2528,7 @@ const routing = ( router: Router ) => {
 				redeemHash: body.redeemHash ?? '',
 				rebateBps: body.rebateBps ?? '0',
 				amount: body.amount,
+				l1: body.l1,
 				nonce: body.nonce,
 				deadline: body.deadline,
 				signature: body.signature,
