@@ -20478,6 +20478,7 @@ export async function referralRegistryAdminManagementProcess(): Promise<void> {
 				try {
 					return new ethers.Interface([
 						'event L0RateUpdated(address indexed l0,uint256 rebateBps)',
+						'event L0QuotaUpdated(address indexed l0,uint256 starterKetRemaining,uint256 paidBunitRemaining)',
 						'event MerchantAssignedToL0(address indexed merchant,address indexed l0,address indexed card,address admin)',
 					]).parseLog(log)
 				} catch {
@@ -20500,6 +20501,12 @@ export async function referralRegistryAdminManagementProcess(): Promise<void> {
 				blockNumber: receipt.blockNumber.toString(),
 				txHash: tx.hash,
 			})
+		} else if (job.action === 'setL0Quota' || job.action === 'setL0StarterQuota') {
+			const event = parsedLogs.find((item: any) => item.name === 'L0QuotaUpdated')
+			if (!event) throw new Error('L0QuotaUpdated event was not found')
+			if (event.args.l0.toLowerCase() !== ethers.getAddress(job.l0).toLowerCase()) {
+				throw new Error('L0QuotaUpdated event did not match the requested L0')
+			}
 		} else {
 			const event = parsedLogs.find((item: any) => item.name === 'MerchantAssignedToL0')
 			if (!event) throw new Error('MerchantAssignedToL0 event was not found')
