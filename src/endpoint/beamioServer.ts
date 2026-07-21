@@ -10495,6 +10495,35 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
+	/**
+	 * GET|POST /api/createInstitutionalAa — Cluster 校验 eoa 后转发 Master（createAccountFor next index）。
+	 */
+	const forwardCreateInstitutionalAa = async (req: Request, res: Response) => {
+		const eoaRaw =
+			(req.query as { eoa?: string }).eoa ??
+			(req.body as { eoa?: string } | undefined)?.eoa
+		if (!eoaRaw || !ethers.isAddress(eoaRaw)) {
+			return res.status(400).json({ success: false, error: 'Invalid eoa: require valid 0x address' })
+		}
+		const eoa = ethers.getAddress(eoaRaw)
+		try {
+			if (req.method === 'POST') {
+				const { statusCode, body } = await postLocalhostBuffer('/api/createInstitutionalAa', { eoa })
+				return res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+			}
+			const path = '/api/createInstitutionalAa?eoa=' + encodeURIComponent(eoa)
+			const { statusCode, body } = await getLocalhostBuffer(path)
+			return res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+		} catch (e: any) {
+			logger(Colors.red('[createInstitutionalAa] forward error:'), e?.message ?? e)
+			return res
+				.status(502)
+				.json({ success: false, error: e?.message ?? 'Failed to create institutional AA' })
+		}
+	}
+	router.get('/createInstitutionalAa', forwardCreateInstitutionalAa)
+	router.post('/createInstitutionalAa', forwardCreateInstitutionalAa)
+
 	/** POST /api/aaCreateViaEntryPointPrepare - 生成 CoNET AA 创建 UserOp，客户端须用 EOA 对 userOpHash 做 signMessage。 */
 	router.post('/aaCreateViaEntryPointPrepare', async (req, res) => {
 		const { eoa } = (req.body ?? {}) as { eoa?: string }

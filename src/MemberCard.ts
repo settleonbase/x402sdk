@@ -1687,6 +1687,135 @@ export const ensureAAForEOAOnConet = async (eoa: string): Promise<string> => {
 	}
 }
 
+export class CreateInstitutionalAaHttpError extends Error {
+	readonly statusCode: number
+	constructor(statusCode: number, message: string) {
+		super(message)
+		this.name = 'CreateInstitutionalAaHttpError'
+		this.statusCode = statusCode
+	}
+}
+
+/**
+ * Master：在 CoNET 上为 EOA 创建下一枚 **institutional** AA（index ≥ 1）。
+ * 先 ensure index=0（与 `ensureAAForEOA` 相同），再 `createAccountFor` 一次得到 nextIndex−1。
+ * **不**改变 `ensureAAForEOA` / `DeployingSmartAccount` 的「只保证 index=0」语义。
+ */
+export const createInstitutionalAaForEoa = async (
+	eoa: string
+): Promise<{ aa: string; index: number; txHash: string }> => {
+	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
+	const eoaNorm = ethers.getAddress(eoa)
+	const factoryAddr = ethers.getAddress(CONET_AA_FACTORY)
+	const aaFactoryReadOnly = new ethers.Contract(
+		factoryAddr,
+		BeamioAAAccountFactoryPaymasterABI,
+		providerConet
+	)
+	const SC = await shiftSettleContractForWrite('createInstitutionalAa')
+	try {
+		const wallet = SC.walletConet
+		const provider = wallet.provider ?? providerConet
+		await ensureAAForEOAOnAaFactory(eoaNorm, factoryAddr, aaFactoryReadOnly, SC, wallet)
+
+		const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, wallet)
+		const nextIndex = (await aaFactory.nextIndexOfCreator(eoaNorm)) as bigint
+		if (nextIndex === 0n) {
+			throw new CreateInstitutionalAaHttpError(
+				500,
+				'createInstitutionalAa: primary AA (index=0) missing after ensure'
+			)
+		}
+		const accountLimit = (await aaFactory.accountLimit()) as bigint
+		if (nextIndex >= accountLimit) {
+			throw new CreateInstitutionalAaHttpError(
+				400,
+				`Account limit reached (nextIndex=${nextIndex.toString()}, limit=${accountLimit.toString()})`
+			)
+		}
+
+		const getAddressFn = aaFactory.getFunction('getAddress(address,uint256)')
+		const predicted = ethers.getAddress((await getAddressFn(eoaNorm, nextIndex)) as string)
+		const codeBefore = await provider.getCode(predicted)
+		if (codeBefore && codeBefore !== '0x' && codeBefore !== '') {
+			logger(
+				Colors.yellow(
+					`[createInstitutionalAa] predicted ${predicted} already deployed for ${eoaNorm} index=${nextIndex}`
+				)
+			)
+			return { aa: predicted, index: Number(nextIndex), txHash: '' }
+		}
+
+		logger(
+			Colors.cyan(
+				`[createInstitutionalAa] creating institutional AA for ${eoaNorm} index=${nextIndex} → ${predicted}`
+			)
+		)
+		const tx = await sendCreateAccountForTx(aaFactory, eoaNorm)
+		let receipt = await tx.wait(0).catch((e: unknown) => {
+			logger(
+				Colors.yellow(
+					`[createInstitutionalAa] tx.wait(0) error (tx may still confirm): ${
+						e instanceof Error ? e.message : String(e)
+					}`
+				)
+			)
+			return null
+		})
+		if (receipt) {
+			const st = receipt.status
+			const failed = st === 0n || st === 0 || st === false
+			if (failed) {
+				throw new CreateInstitutionalAaHttpError(
+					500,
+					`createInstitutionalAa: createAccountFor reverted (tx=${tx.hash})`
+				)
+			}
+		} else {
+			try {
+				receipt = await provider.getTransactionReceipt(tx.hash)
+			} catch {
+				/* ignore */
+			}
+			if (receipt) {
+				const st = receipt.status
+				const failed = st === 0n || st === 0 || st === false
+				if (failed) {
+					throw new CreateInstitutionalAaHttpError(
+						500,
+						`createInstitutionalAa: createAccountFor reverted (tx=${tx.hash})`
+					)
+				}
+			}
+		}
+
+		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+		let code = await provider.getCode(predicted)
+		if (code === '0x' || code === '') {
+			for (let attempt = 1; attempt <= 3; attempt++) {
+				await sleep(2 * attempt * 1000)
+				code = await provider.getCode(predicted)
+				if (code && code !== '0x' && code !== '') break
+			}
+		}
+		if (code === '0x' || code === '') {
+			throw new CreateInstitutionalAaHttpError(
+				500,
+				`createInstitutionalAa: tx confirmed but AA not deployed at ${predicted} (tx=${tx.hash})`
+			)
+		}
+
+		logger(
+			Colors.green(
+				`[createInstitutionalAa] created AA ${predicted} index=${nextIndex} for ${eoaNorm} tx=${tx.hash}`
+			)
+		)
+		return { aa: predicted, index: Number(nextIndex), txHash: tx.hash as string }
+	} finally {
+		Settle_ContractPool.unshift(SC)
+	}
+}
+
 /**
  * 为 EOA 确保存在 AA（使用该卡 `factoryGateway()._aaFactory()`，与 `_toAccount` / open-claim mint 一致）。
  * 供 `cardCouponOpenClaimProcess` 在 claim 前调用。
