@@ -20250,6 +20250,7 @@ const REFERRAL_REGISTRY_REDEEM_RELAY_ABI = [
 	'function cancelAdminMerchantPackageCodeFor(address admin,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimL0RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function claimMerchantCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 ] as const
 
 export type ReferralRegistryRedeemRelayAction =
@@ -20264,6 +20265,7 @@ export type ReferralRegistryRedeemRelayAction =
 	| 'cancelAdminMerchantPackage'
 	| 'claimL0'
 	| 'claimL1'
+	| 'claimMerchant'
 export const referralRegistryRedeemPool: Array<{
 	contract: string
 	action: ReferralRegistryRedeemRelayAction
@@ -20380,7 +20382,9 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 						? await registry.cancelAdminMerchantPackageCodeFor(...cancelArgs)
 						: job.action === 'claimL0'
 							? await registry.claimL0RedeemCodeFor(...claimArgs)
-							: await registry.claimL1RedeemCodeFor(...claimArgs)
+							: job.action === 'claimL1'
+								? await registry.claimL1RedeemCodeFor(...claimArgs)
+								: await registry.claimMerchantCodeFor(...claimArgs)
 		const receipt = await tx.wait()
 		if (!receipt || receipt.status !== 1) throw new Error('Referral redeem relay transaction failed')
 		if (job.action === 'claimL0' || job.action === 'claimL1') {
@@ -20419,6 +20423,19 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 				blockNumber: receipt.blockNumber.toString(),
 				txHash: tx.hash,
 			})
+		} else if (job.action === 'claimMerchant') {
+			const claimEvent = receipt.logs
+				.map((log: any) => {
+					try {
+						return new ethers.Interface([
+							'event MerchantCodeClaimed(bytes32 indexed redeemHash,address indexed merchant,address indexed l0,uint256 paidBunitAmount)',
+						]).parseLog(log)
+					} catch {
+						return null
+					}
+				})
+				.find((parsed: any) => parsed?.name === 'MerchantCodeClaimed')
+			if (!claimEvent) throw new Error('Start Kit claim event was not found')
 		}
 		logger(Colors.green(`[referralRegistryRedeemRelay] action=${job.action} account=${job.account} tx=${tx.hash}`))
 		if (!job.res.headersSent) job.res.status(200).json({ success: true, txHash: tx.hash }).end()

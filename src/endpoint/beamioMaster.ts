@@ -2643,7 +2643,7 @@ const routing = ( router: Router ) => {
 
 		router.post('/referralRegistryClaim', async (req, res) => {
 			const body = req.body as {
-				action?: 'claimL0' | 'claimL1'
+				action?: 'claimL0' | 'claimL1' | 'claimMerchant'
 				contract?: string
 				account?: string
 				redeemHash?: string

@@ -499,6 +499,7 @@ const REFERRAL_REDEEM_READ_ABI = [
 	'function merchantCodeCount() view returns (uint256)',
 	'function merchantCodeHashAt(uint256) view returns (bytes32)',
 	'function merchantCodes(bytes32) view returns (address issuerL0,uint256 paidBunitAmount,uint64 validAfter,uint64 validBefore,bool active,bool claimed)',
+	'function merchantCodeCancelled(bytes32) view returns (bool)',
 ] as const
 const REFERRAL_REDEEM_DOMAIN = {
 	name: 'ReferralRegistryVaultV1',
@@ -559,6 +560,14 @@ const REFERRAL_CLAIM_TYPES = {
 	},
 	claimL1: {
 		ClaimL1RedeemCode: [
+			{ name: 'claimer', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+	claimMerchant: {
+		ClaimMerchantRedeemCode: [
 			{ name: 'claimer', type: 'address' },
 			{ name: 'redeemHash', type: 'bytes32' },
 			{ name: 'nonce', type: 'uint256' },
@@ -653,7 +662,7 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 	| {
 			success: true
 			preChecked: {
-				action: Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>
+				action: Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1' | 'claimMerchant'>
 				contract: string
 				account: string
 				redeemHash: string
@@ -673,7 +682,10 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 	| { success: false; error: string }
 > {
 	try {
-		const action = String(body?.action ?? '') as Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>
+		const action = String(body?.action ?? '') as Exclude<
+			ReferralRegistryRedeemRelayAction,
+			'claimL0' | 'claimL1' | 'claimMerchant'
+		>
 		if (
 			![
 				'issueL0',
@@ -1019,12 +1031,26 @@ async function referralRegistryMerchantSharePreCheck(body: any): Promise<
 }
 
 async function referralClaimRelayPreCheck(body: any): Promise<
-	| { success: true; preChecked: { action: 'claimL0' | 'claimL1'; contract: string; account: string; redeemHash: string; rebateBps: string; nonce: string; deadline: string; signature: string; secret: string } }
+	| {
+			success: true
+			preChecked: {
+				action: 'claimL0' | 'claimL1' | 'claimMerchant'
+				contract: string
+				account: string
+				redeemHash: string
+				rebateBps: string
+				nonce: string
+				deadline: string
+				signature: string
+				secret: string
+			}
+	  }
 	| { success: false; error: string }
 > {
 	try {
-		const kind = String(body?.kind ?? '') as 'l0' | 'l1'
-		const action = kind === 'l0' ? 'claimL0' : kind === 'l1' ? 'claimL1' : ''
+		const kind = String(body?.kind ?? '') as 'l0' | 'l1' | 'merchant'
+		const action =
+			kind === 'l0' ? 'claimL0' : kind === 'l1' ? 'claimL1' : kind === 'merchant' ? 'claimMerchant' : ''
 		if (!action) return { success: false, error: 'Invalid referral claim kind' }
 		const account = ethers.getAddress(String(body?.account ?? body?.claimer ?? ''))
 		const secret = String(body?.secret ?? '')
@@ -1039,10 +1065,20 @@ async function referralClaimRelayPreCheck(body: any): Promise<
 		const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
 		const expectedNonce = BigInt((await registry.referralClaimNonces(account)).toString())
 		if (nonce !== expectedNonce) return { success: false, error: 'Stale referral claim nonce' }
-		const raw = kind === 'l0' ? await registry.l0RedeemCodes(redeemHash) : await registry.l1RedeemCodes(redeemHash)
-		if (!raw.active || raw.claimed || raw.cancelled) return { success: false, error: 'Referral redeem code is not active' }
-		const member = await registry.members(account)
-		if (Boolean(await registry.admins(account)) || Number(member[0]) !== 0) return { success: false, error: 'Wallet is already registered' }
+		if (kind === 'merchant') {
+			const raw = await registry.merchantCodes(redeemHash)
+			const cancelled = Boolean(await registry.merchantCodeCancelled(redeemHash).catch(() => false))
+			if (!raw.active || raw.claimed || cancelled) return { success: false, error: 'Start Kit redeem code is not active' }
+			const member = await registry.members(account)
+			if (Number(member[0]) !== 0 || (await registry.claimedMerchantL0(account)) !== ethers.ZeroAddress) {
+				return { success: false, error: 'Wallet already claimed a Start Kit or is registered' }
+			}
+		} else {
+			const raw = kind === 'l0' ? await registry.l0RedeemCodes(redeemHash) : await registry.l1RedeemCodes(redeemHash)
+			if (!raw.active || raw.claimed || raw.cancelled) return { success: false, error: 'Referral redeem code is not active' }
+			const member = await registry.members(account)
+			if (Boolean(await registry.admins(account)) || Number(member[0]) !== 0) return { success: false, error: 'Wallet is already registered' }
+		}
 		const types = REFERRAL_CLAIM_TYPES[action]
 		const message = { claimer: account, redeemHash, nonce, deadline }
 		const digest = ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types as any, message)
