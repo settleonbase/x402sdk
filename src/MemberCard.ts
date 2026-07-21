@@ -20251,6 +20251,7 @@ const REFERRAL_REGISTRY_REDEEM_RELAY_ABI = [
 	'function claimL0RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimMerchantCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function claimAdminMerchantPackageCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 ] as const
 
 export type ReferralRegistryRedeemRelayAction =
@@ -20266,6 +20267,7 @@ export type ReferralRegistryRedeemRelayAction =
 	| 'claimL0'
 	| 'claimL1'
 	| 'claimMerchant'
+	| 'claimAdminMerchantPackage'
 export const referralRegistryRedeemPool: Array<{
 	contract: string
 	action: ReferralRegistryRedeemRelayAction
@@ -20384,7 +20386,9 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 							? await registry.claimL0RedeemCodeFor(...claimArgs)
 							: job.action === 'claimL1'
 								? await registry.claimL1RedeemCodeFor(...claimArgs)
-								: await registry.claimMerchantCodeFor(...claimArgs)
+								: job.action === 'claimAdminMerchantPackage'
+									? await registry.claimAdminMerchantPackageCodeFor(...claimArgs)
+									: await registry.claimMerchantCodeFor(...claimArgs)
 		const receipt = await tx.wait()
 		if (!receipt || receipt.status !== 1) throw new Error('Referral redeem relay transaction failed')
 		if (job.action === 'claimL0' || job.action === 'claimL1') {
