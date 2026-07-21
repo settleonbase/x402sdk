@@ -9937,21 +9937,99 @@ async function safeCall<T>(fn: () => Promise<T>): Promise<T | null> {
   }
 }
 
-// decode EntryPoint FailedOp (0x65c8fd4d) -> string reason
+/** EntryPoint v0.7 custom errors used by simulateValidation / handleOps. */
+const ENTRY_POINT_SIM_ERRORS = new ethers.Interface([
+	'error ValidationResult((uint256 preOpGas,uint256 prefund,bool sigFailed,uint48 validAfter,uint48 validUntil,bytes paymasterContext) returnInfo,(uint256 stake,uint256 unstakeDelaySec) senderInfo,(uint256 stake,uint256 unstakeDelaySec) factoryInfo,(uint256 stake,uint256 unstakeDelaySec) paymasterInfo)',
+	'error ValidationResultWithAggregation((uint256 preOpGas,uint256 prefund,bool sigFailed,uint48 validAfter,uint48 validUntil,bytes paymasterContext) returnInfo,(uint256 stake,uint256 unstakeDelaySec) senderInfo,(uint256 stake,uint256 unstakeDelaySec) factoryInfo,(uint256 stake,uint256 unstakeDelaySec) paymasterInfo,(address aggregator,(address addr,uint256 stake,uint256 unstakeDelaySec) stakeInfo) aggregatorInfo)',
+	'error FailedOp(uint256 opIndex, string reason)',
+	'error FailedOpWithRevert(uint256 opIndex, string reason, bytes inner)',
+])
+
+function extractCallRevertData(err: any): string | null {
+	const candidates: unknown[] = [
+		err?.data,
+		err?.info?.error?.data,
+		err?.error?.data,
+		err?.info?.data,
+		err?.receipt?.data,
+	]
+	for (const c of candidates) {
+		if (typeof c === 'string' && c.startsWith('0x') && c.length >= 10) return c
+		if (c && typeof c === 'object' && typeof (c as { data?: unknown }).data === 'string') {
+			const d = (c as { data: string }).data
+			if (d.startsWith('0x') && d.length >= 10) return d
+		}
+	}
+	return null
+}
+
+/**
+ * ERC-4337 simulateValidation always reverts:
+ * - ValidationResult* = validation finished (check returnInfo.sigFailed)
+ * - FailedOp* = hard failure
+ */
+function interpretSimulateValidationRevert(err: any): {
+	ok: boolean
+	sigFailed?: boolean
+	failedReason?: string
+	rawMessage: string
+} {
+	const rawMessage = err?.shortMessage || err?.message || String(err)
+	const data = extractCallRevertData(err)
+	if (data) {
+		try {
+			const parsed = ENTRY_POINT_SIM_ERRORS.parseError(data)
+			if (parsed?.name === 'ValidationResult' || parsed?.name === 'ValidationResultWithAggregation') {
+				const returnInfo = parsed.args[0] as { sigFailed?: boolean } | unknown[]
+				const sigFailed =
+					Array.isArray(returnInfo)
+						? Boolean(returnInfo[2])
+						: Boolean((returnInfo as { sigFailed?: boolean }).sigFailed)
+				return { ok: !sigFailed, sigFailed, rawMessage }
+			}
+			if (parsed?.name === 'FailedOp' || parsed?.name === 'FailedOpWithRevert') {
+				const reason = String(parsed.args[1] ?? 'FailedOp')
+				return {
+					ok: false,
+					failedReason: `${parsed.name}(opIndex=${parsed.args[0]?.toString?.() ?? '?'}): ${reason}`,
+					rawMessage,
+				}
+			}
+		} catch {
+			/* fall through */
+		}
+		const decoded = tryDecodeFailedOp(data)
+		if (decoded) return { ok: false, failedReason: decoded, rawMessage }
+	}
+	// CoNET / some RPCs strip custom-error data. simulateValidation success looks like empty revert.
+	// Do not hard-fail — handleOps is the real gate (comment historically: debug only).
+	const looksLikeEmptyRevert =
+		/no data present|require\(false\)|execution reverted/i.test(rawMessage) && !data
+	if (looksLikeEmptyRevert) {
+		return { ok: true, rawMessage }
+	}
+	return { ok: false, failedReason: rawMessage, rawMessage }
+}
+
+// decode EntryPoint FailedOp / FailedOpWithRevert -> string reason
 function tryDecodeFailedOp(data: any): string | null {
   try {
     if (typeof data !== 'string') return null
-    const hex = data.startsWith('0x') ? data.slice(2) : data
+    const hexFull = data.startsWith('0x') ? data : `0x${data}`
+    try {
+      const parsed = ENTRY_POINT_SIM_ERRORS.parseError(hexFull)
+      if (parsed?.name === 'FailedOp' || parsed?.name === 'FailedOpWithRevert') {
+        return `${parsed.name}(opIndex=${parsed.args[0]?.toString?.() ?? '?'}): ${String(parsed.args[1] ?? '')}`
+      }
+    } catch {
+      /* legacy decode below */
+    }
+    const hex = hexFull.startsWith('0x') ? hexFull.slice(2) : hexFull
     if (hex.length < 8) return null
-    const selector = hex.slice(0, 8)
-    if (selector !== '65c8fd4d') return null // FailedOp selector
-    // layout: selector + (opIndex) + (paymaster?) + (offsetReason) + ...
-    // easiest: search ASCII tail "AAxx ..." often is last arg string
-    // robust decode with AbiCoder:
+    const selector = hex.slice(0, 8).toLowerCase()
+    // FailedOpWithRevert (v0.7) = 65c8fd4d; FailedOp = 220266b6
+    if (selector !== '65c8fd4d' && selector !== '220266b6') return null
     const coder = ethers.AbiCoder.defaultAbiCoder()
-    // FailedOp(uint256 opIndex, string reason)
-    // BUT some EntryPoint versions: FailedOp(uint256 opIndex, address paymaster, string reason)
-    // We'll try both.
     try {
       const decoded = coder.decode(['uint256', 'string'], '0x' + hex.slice(8))
       return `FailedOp(opIndex=${decoded[0].toString()}): ${decoded[1]}`
@@ -10221,13 +10299,15 @@ export const AAtoEOAProcess = async () => {
 		}
 	  }
 
-    // --- recover signer from userOpHash (best-effort, for debug & pre-reject) ---
+    // --- recover signer(s) from userOpHash (best-effort, for debug & pre-reject) ---
     try {
       const opForHash: any = { ...packedOp, signature: '0x' } // IMPORTANT
       const userOpHash = await entryPoint.getUserOpHash(opForHash) as string
 
-      // ✅ 正确：链上是 toEthSignedMessageHash(userOpHash)，等价于 verifyMessage(bytes32, sig)
-      recoveredSigner = ethers.verifyMessage(ethers.getBytes(userOpHash), sigHex)
+      // Multisig: concatenated 65-byte eth_sign sigs; recover the first for logging / manager check.
+      const firstSig =
+        sigBytes.length >= 65 ? ethers.hexlify(sigBytes.slice(0, 65)) : sigHex
+      recoveredSigner = ethers.verifyMessage(ethers.getBytes(userOpHash), firstSig)
 
       logger(
         `[AAtoEOA] recoveredSigner=${recoveredSigner} (should be AA owner / threshold manager)`
@@ -10240,18 +10320,34 @@ export const AAtoEOAProcess = async () => {
       )
     }
 
-    // --- read AA owner + factory (best-effort) ---
+    // --- read AA owner + factory + threshold managers (best-effort) ---
     let aaOwner = ethers.ZeroAddress
     let aaFactory = ethers.ZeroAddress
+    let signerIsThresholdManager: boolean | null = null
     try {
       const aaRead = new ethers.Contract(
         sender,
-        ['function owner() view returns (address)', 'function factory() view returns (address)'],
+        [
+          'function owner() view returns (address)',
+          'function factory() view returns (address)',
+          'function isThresholdManager(address) view returns (bool)',
+        ],
         relayProvider
       )
       aaOwner = await aaRead.owner()
       aaFactory = await aaRead.factory()
-      logger(`[AAtoEOA] AA owner=${aaOwner} AA factory=${aaFactory}`)
+      if (recoveredSigner) {
+        try {
+          signerIsThresholdManager = Boolean(
+            await aaRead.isThresholdManager(recoveredSigner)
+          )
+        } catch {
+          signerIsThresholdManager = null
+        }
+      }
+      logger(
+        `[AAtoEOA] AA owner=${aaOwner} AA factory=${aaFactory} signerIsManager=${signerIsThresholdManager}`
+      )
     } catch (e: any) {
       logger(
         Colors.yellow(
@@ -10260,10 +10356,13 @@ export const AAtoEOAProcess = async () => {
       )
     }
 
-    // --- enforce signer == owner when both known ---
-    if (aaOwner !== ethers.ZeroAddress && recoveredSigner) {
-      if (aaOwner.toLowerCase() !== recoveredSigner.toLowerCase()) {
-        const errMsg = `Signature signer (${recoveredSigner}) is not AA owner (${aaOwner})`
+    // --- enforce signer is owner OR threshold manager (multisig) ---
+    if (recoveredSigner) {
+      const isOwner =
+        aaOwner !== ethers.ZeroAddress &&
+        aaOwner.toLowerCase() === recoveredSigner.toLowerCase()
+      if (!isOwner && signerIsThresholdManager === false) {
+        const errMsg = `Signature signer (${recoveredSigner}) is not AA owner (${aaOwner}) or threshold manager`
         logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
         obj.res.status(400).json({ success: false, error: errMsg }).end()
         return
@@ -10301,7 +10400,9 @@ export const AAtoEOAProcess = async () => {
 	 )
  
 
-    // --- simulateValidation via eth_call (debug only, but super useful) ---
+    // --- simulateValidation via eth_call ---
+    // EntryPoint ALWAYS reverts: ValidationResult* = success path, FailedOp* = hard fail.
+    // CoNET RPC may strip custom-error data → empty "require(false)"; do not treat that as failure.
     try {
       const simIface = new ethers.Interface([
         'function simulateValidation((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature) userOp) external'
@@ -10309,23 +10410,40 @@ export const AAtoEOAProcess = async () => {
       const data = simIface.encodeFunctionData('simulateValidation', [packedOp])
 
       await relayProvider.call({ to: entryPointAddress, data })
-      logger('[AAtoEOA] simulateValidation eth_call ok')
+      logger('[AAtoEOA] simulateValidation eth_call returned without revert (unexpected for EntryPoint)')
     } catch (e: any) {
-      const m = e?.shortMessage || e?.message || String(e)
-      const decoded = tryDecodeFailedOp(e?.data)
-      logger(Colors.red(`[AAtoEOA] simulateValidation failed: ${m}`))
-      if (decoded) logger(Colors.red(`[AAtoEOA] simulateValidation decoded: ${decoded}`))
-      if (e?.data) logger(Colors.red(`[AAtoEOA] simulateValidation data=${e.data}`))
-      const errMsg = decoded
-        ? `UserOp validation failed: ${decoded}`
-        : `UserOp validation failed: ${m}`
-      logger(Colors.red(`❌ [AAtoEOA] ${errMsg} (skipping handleOps to avoid burning EntryPoint nonce)`))
-      if (!obj.res?.headersSent) {
-        obj.res.status(400).json({ success: false, error: errMsg }).end()
+      const interpreted = interpretSimulateValidationRevert(e)
+      if (interpreted.ok && !interpreted.sigFailed) {
+        logger(
+          `[AAtoEOA] simulateValidation OK (${
+            extractCallRevertData(e) ? 'ValidationResult' : 'empty-revert-tolerant'
+          })`
+        )
+      } else if (interpreted.sigFailed) {
+        const errMsg =
+          'UserOp validation failed: signature rejected by Smart Wallet (AA24 / SIG_VALIDATION_FAILED)'
+        logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
+        if (!obj.res?.headersSent) {
+          obj.res.status(400).json({ success: false, error: errMsg }).end()
+        }
+        Settle_ContractPool.unshift(SC)
+        setTimeout(() => AAtoEOAProcess(), 3000)
+        return
+      } else {
+        const errMsg = interpreted.failedReason
+          ? `UserOp validation failed: ${interpreted.failedReason}`
+          : `UserOp validation failed: ${interpreted.rawMessage}`
+        logger(Colors.red(`[AAtoEOA] simulateValidation failed: ${interpreted.rawMessage}`))
+        const revertData = extractCallRevertData(e)
+        if (revertData) logger(Colors.red(`[AAtoEOA] simulateValidation data=${revertData}`))
+        logger(Colors.red(`❌ [AAtoEOA] ${errMsg} (skipping handleOps to avoid burning EntryPoint nonce)`))
+        if (!obj.res?.headersSent) {
+          obj.res.status(400).json({ success: false, error: errMsg }).end()
+        }
+        Settle_ContractPool.unshift(SC)
+        setTimeout(() => AAtoEOAProcess(), 3000)
+        return
       }
-      Settle_ContractPool.unshift(SC)
-      setTimeout(() => AAtoEOAProcess(), 3000)
-      return
     }
 
     // --- deposit/eth snapshot ---
