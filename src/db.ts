@@ -1173,13 +1173,16 @@ const addUserPoolProcess = async () => {
 		await updateUserDB(obj.account)
 
 		// 注册 @tag 成功后，检测 EOA 是否在 conet 拥有 AA，如果没有则为 eoa 创建 AA
-		try {
-			const { ensureAAForEOAOnConet } = await import('./MemberCard.js')
-			logger(`[addUserPoolProcess] ensuring AA for registered user: wallet=${obj.wallet}`)
-			const aaAddr = await ensureAAForEOAOnConet(obj.wallet)
-			logger(`[addUserPoolProcess] AA ensured for registered user: wallet=${obj.wallet} -> AA=${aaAddr}`)
-		} catch (aaEx: any) {
-			logger(Colors.red(`[addUserPoolProcess] non-fatal: ensure AA for registered user failed: ${aaEx?.message ?? aaEx}`))
+		// Institutional AA tagging must set skipEnsureAa — wallet is already an AA address.
+		if (!obj.skipEnsureAa) {
+			try {
+				const { ensureAAForEOAOnConet } = await import('./MemberCard.js')
+				logger(`[addUserPoolProcess] ensuring AA for registered user: wallet=${obj.wallet}`)
+				const aaAddr = await ensureAAForEOAOnConet(obj.wallet)
+				logger(`[addUserPoolProcess] AA ensured for registered user: wallet=${obj.wallet} -> AA=${aaAddr}`)
+			} catch (aaEx: any) {
+				logger(Colors.red(`[addUserPoolProcess] non-fatal: ensure AA for registered user failed: ${aaEx?.message ?? aaEx}`))
+			}
 		}
 		
 		// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial。
@@ -1338,6 +1341,112 @@ const reconcileLocalDbBeforeAddUser = async (
 				`[reconcileLocalDbBeforeAddUser] skipped: ${ex?.shortMessage || ex?.message || ex}`
 			)
 		)
+	}
+}
+
+/** Normalize @BeamioTag: strip leading @, validate 3–26 alnum / _ / . */
+export const normalizeBeamioAccountName = (raw: string): string => {
+	const trimmed = String(raw || '')
+		.trim()
+		.replace(/^@+/, '')
+	return BEAMIO_ACCOUNT_NAME_RE.test(trimmed) ? trimmed : ''
+}
+
+/** True when AccountRegistry has no owner for this tag (or empty-result). */
+export const isBeamioAccountNameAvailable = async (accountName: string): Promise<boolean> => {
+	const name = normalizeBeamioAccountName(accountName)
+	if (!name) return false
+	const reg = beamio_ContractPool[0]?.constAccountRegistry
+	if (!reg) return false
+	try {
+		const owner = (await reg.getOwnerByAccountName(name)) as string
+		return !owner || owner === ethers.ZeroAddress
+	} catch (ex: any) {
+		if (isOnchainEmptyResult(ex)) return true
+		throw ex
+	}
+}
+
+/**
+ * Bind a BeamioTag to an arbitrary address (EOA or Smart Wallet / AA) via setAccountByAdmin.
+ * Does **not** call ensureAA — safe for institutional AA naming after createAccountFor.
+ */
+export const registerBeamioTagForAddress = async (params: {
+	wallet: string
+	accountName: string
+	firstName?: string
+	lastName?: string
+	image?: string
+}): Promise<{ txHash: string; accountName: string }> => {
+	const name = normalizeBeamioAccountName(params.accountName)
+	if (!name) {
+		const err = new Error('Invalid BeamioTag: use 3–26 letters, numbers, _ or .')
+		;(err as { statusCode?: number }).statusCode = 400
+		throw err
+	}
+	if (!ethers.isAddress(params.wallet) || params.wallet === ethers.ZeroAddress) {
+		const err = new Error('Invalid wallet address')
+		;(err as { statusCode?: number }).statusCode = 400
+		throw err
+	}
+	const wallet = ethers.getAddress(params.wallet)
+
+	const waitForSc = async () => {
+		for (let i = 0; i < 40; i++) {
+			const SC = beamio_ContractPool.shift()
+			if (SC) return SC
+			await new Promise((r) => setTimeout(r, 500))
+		}
+		throw new Error('AccountRegistry admin pool busy')
+	}
+
+	const SC = await waitForSc()
+	try {
+		try {
+			const owner = (await SC.constAccountRegistry.getOwnerByAccountName(name)) as string
+			if (owner && owner !== ethers.ZeroAddress && owner.toLowerCase() !== wallet.toLowerCase()) {
+				const err = new Error(`BeamioTag @${name} is already taken`)
+				;(err as { statusCode?: number }).statusCode = 400
+				throw err
+			}
+		} catch (ex: any) {
+			if (ex?.statusCode === 400) throw ex
+			if (!isOnchainEmptyResult(ex)) throw ex
+		}
+
+		const getExistsUserData = await getUserData(name)
+		const account: beamioAccount = {
+			accountName: name,
+			image: params.image ?? '',
+			darkTheme: false,
+			isUSDCFaucet: false,
+			isETHFaucet: false,
+			initialLoading: true,
+			firstName: sanitizeName(params.firstName ?? 'Institutional'),
+			lastName: sanitizeName(params.lastName ?? 'Smart Wallet'),
+			pgpKeyID: '',
+			pgpKey: '',
+			address: wallet,
+			createdAt: getExistsUserData?.createdAt,
+		}
+		const tx = await SC.constAccountRegistry.setAccountByAdmin(wallet, {
+			accountName: account.accountName,
+			image: account.image,
+			darkTheme: account.darkTheme,
+			isUSDCFaucet: account.isUSDCFaucet,
+			isETHFaucet: account.isETHFaucet,
+			initialLoading: account.initialLoading,
+			firstName: account.firstName,
+			lastName: account.lastName,
+			pgpKeyID: account.pgpKeyID,
+			pgpKey: account.pgpKey,
+		})
+		await tx.wait()
+		await updateUserDB(account)
+		logger(Colors.green(`[registerBeamioTagForAddress] @${name} → ${wallet} tx=${tx.hash}`))
+		return { txHash: tx.hash as string, accountName: name }
+	} finally {
+		beamio_ContractPool.unshift(SC)
 	}
 }
 

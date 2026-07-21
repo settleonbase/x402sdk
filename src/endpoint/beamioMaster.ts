@@ -7,7 +7,10 @@ import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
-import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, getCardByAddress, getNftTierMetadataByCardAndToken, upsertNftTierMetadata, updateSeriesMetadataByCardAndToken, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards, ensureAccountRegistryBeamioAdmins, ensureAddressPgpBeamioAdmins, type BeamioLatestCardItem} from '../db'
+import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDataProcess, ipfsAccessPool, ipfsAccessProcess, getLatestCards, getLatestCardsGroupedByCategory, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, registerSeriesToDb, registerMintMetadataToDb, getCardByAddress, getNftTierMetadataByCardAndToken, upsertNftTierMetadata, updateSeriesMetadataByCardAndToken, searchUsers, FollowerStatus, getMyFollowStatus, getNfcCardByUid, getNfcCardPrivateKeyByUid, registerNfcCardToDb, provisionOrGetNfcWalletByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards, ensureAccountRegistryBeamioAdmins, ensureAddressPgpBeamioAdmins, type BeamioLatestCardItem,
+	registerBeamioTagForAddress,
+	normalizeBeamioAccountName,
+	isBeamioAccountNameAvailable} from '../db'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import {
@@ -893,18 +896,55 @@ const routing = ( router: Router ) => {
 
 		/**
 		 * GET|POST /api/createInstitutionalAa?eoa= / body.eoa —
+		 * Optional body.accountName (BeamioTag) binds AccountRegistry name → new AA.
 		 * Ensure index=0, then createAccountFor → next institutional AA (index ≥ 1).
 		 */
 		const handleCreateInstitutionalAa = async (req: Request, res: Response) => {
-			const eoaRaw =
-				(req.query as { eoa?: string }).eoa ??
-				(req.body as { eoa?: string } | undefined)?.eoa
+			const body = (req.body ?? {}) as { eoa?: string; accountName?: string }
+			const eoaRaw = (req.query as { eoa?: string }).eoa ?? body.eoa
+			const accountNameRaw =
+				(req.query as { accountName?: string }).accountName ?? body.accountName
 			if (!eoaRaw || !ethers.isAddress(eoaRaw)) {
 				return res.status(400).json({ success: false, error: 'Invalid eoa: require valid 0x address' })
 			}
+			const accountName = accountNameRaw ? normalizeBeamioAccountName(accountNameRaw) : ''
+			if (accountNameRaw && !accountName) {
+				return res.status(400).json({
+					success: false,
+					error: 'Invalid BeamioTag: use 3–26 letters, numbers, _ or .',
+				})
+			}
 			try {
+				if (accountName) {
+					const available = await isBeamioAccountNameAvailable(accountName)
+					if (!available) {
+						return res.status(400).json({
+							success: false,
+							error: `BeamioTag @${accountName} is already taken`,
+						})
+					}
+				}
 				const out = await createInstitutionalAaForEoa(ethers.getAddress(eoaRaw))
-				res.status(200).json({ success: true, aa: out.aa, index: out.index, txHash: out.txHash })
+				let tagTxHash = ''
+				let boundTag = ''
+				if (accountName) {
+					const tagged = await registerBeamioTagForAddress({
+						wallet: out.aa,
+						accountName,
+						firstName: 'Institutional',
+						lastName: 'Smart Wallet',
+					})
+					tagTxHash = tagged.txHash
+					boundTag = tagged.accountName
+				}
+				res.status(200).json({
+					success: true,
+					aa: out.aa,
+					index: out.index,
+					txHash: out.txHash,
+					accountName: boundTag || undefined,
+					tagTxHash: tagTxHash || undefined,
+				})
 			} catch (err: any) {
 				const status =
 					err instanceof CreateInstitutionalAaHttpError

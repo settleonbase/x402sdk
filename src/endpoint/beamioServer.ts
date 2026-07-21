@@ -10496,24 +10496,52 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	/**
-	 * GET|POST /api/createInstitutionalAa — Cluster 校验 eoa 后转发 Master（createAccountFor next index）。
+	 * GET|POST /api/createInstitutionalAa — Cluster 校验 eoa + optional BeamioTag 后转发 Master。
 	 */
 	const forwardCreateInstitutionalAa = async (req: Request, res: Response) => {
-		const eoaRaw =
-			(req.query as { eoa?: string }).eoa ??
-			(req.body as { eoa?: string } | undefined)?.eoa
+		const body = (req.body ?? {}) as { eoa?: string; accountName?: string }
+		const eoaRaw = (req.query as { eoa?: string }).eoa ?? body.eoa
+		const accountNameRaw =
+			(req.query as { accountName?: string }).accountName ?? body.accountName
 		if (!eoaRaw || !ethers.isAddress(eoaRaw)) {
 			return res.status(400).json({ success: false, error: 'Invalid eoa: require valid 0x address' })
 		}
 		const eoa = ethers.getAddress(eoaRaw)
+		let accountName = ''
+		if (accountNameRaw != null && String(accountNameRaw).trim() !== '') {
+			const trimmed = String(accountNameRaw).trim().replace(/^@+/, '')
+			if (!/^[a-zA-Z0-9_.]{3,26}$/.test(trimmed)) {
+				return res.status(400).json({
+					success: false,
+					error: 'Invalid BeamioTag: use 3–26 letters, numbers, _ or .',
+				})
+			}
+			const ownship = await userOwnershipCheck(trimmed, ethers.ZeroAddress)
+			// Name must be completely free (not owned by anyone, including caller EOA).
+			if (!ownship) {
+				return res.status(400).json({
+					success: false,
+					error: `BeamioTag @${trimmed} is already taken`,
+				})
+			}
+			// Double-check: ZeroAddress ownership check treats taken-by-anyone as false only when
+			// owner !== ZeroAddress. userOwnershipCheck(name, ZeroAddress) returns false if taken.
+			accountName = trimmed
+		}
 		try {
 			if (req.method === 'POST') {
-				const { statusCode, body } = await postLocalhostBuffer('/api/createInstitutionalAa', { eoa })
-				return res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+				const payload: { eoa: string; accountName?: string } = { eoa }
+				if (accountName) payload.accountName = accountName
+				const { statusCode, body: responseBody } = await postLocalhostBuffer(
+					'/api/createInstitutionalAa',
+					payload
+				)
+				return res.status(statusCode).setHeader('Content-Type', 'application/json').send(responseBody)
 			}
-			const path = '/api/createInstitutionalAa?eoa=' + encodeURIComponent(eoa)
-			const { statusCode, body } = await getLocalhostBuffer(path)
-			return res.status(statusCode).setHeader('Content-Type', 'application/json').send(body)
+			let path = '/api/createInstitutionalAa?eoa=' + encodeURIComponent(eoa)
+			if (accountName) path += '&accountName=' + encodeURIComponent(accountName)
+			const { statusCode, body: responseBody } = await getLocalhostBuffer(path)
+			return res.status(statusCode).setHeader('Content-Type', 'application/json').send(responseBody)
 		} catch (e: any) {
 			logger(Colors.red('[createInstitutionalAa] forward error:'), e?.message ?? e)
 			return res

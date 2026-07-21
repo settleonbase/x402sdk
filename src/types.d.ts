@@ -221,6 +221,8 @@ type IAddUserPool = {
 	account: beamioAccount
 	recover?: IAccountRecover[]
 	followBeamioOfficial?: boolean
+	/** When true, skip ensureAAForEOA after setAccountByAdmin (e.g. tagging an AA address). */
+	skipEnsureAa?: boolean
 }
 
 type ICurrency = 'CAD'|'USD'|'JPY'|'CNY'|'USDC'|'HKD'|'EUR'|'SGD'|'TWD'
@@ -230,6 +232,8 @@ type IAddUserPool = {
 	account: beamioAccount
 	recover?: IAccountRecover[]
 	followBeamioOfficial?: boolean
+	/** When true, skip ensureAAForEOA after setAccountByAdmin (e.g. tagging an AA address). */
+	skipEnsureAa?: boolean
 }
 
 
