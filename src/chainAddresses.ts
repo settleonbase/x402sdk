@@ -85,11 +85,23 @@ export const NODE_SALE_SERVER_FEE_USDC6 = 120_000_000n
 
 /** CoNET BUint ERC20（balanceOfAll）；与 deployments/conet-addresses.json `BUint` 同步 */
 export const CONET_BUINT = '0x54ac4672cE75EC5ACebaeF1a7aFC6F49E77Ae9Ae'
-export const CONET_BUNIT_AIRDROP_ADDRESS = '0xa01DFfD68b355540B840310a9f0C1E7a779C3Ce8'
-/** 旧版 BUnitAirdrop（2026 前）；hasClaimed 须一并检查，避免已领用户在新合约重复 eligible */
+/**
+ * Canonical CoNET BUnitAirdropV2 proxy — free claim + consume + Referral free redeem share one hasClaimed gate.
+ * Free 20 B-Unit (new EOA) and free Referral package codes are mutually exclusive (once per EOA).
+ */
+export const CONET_BUNIT_AIRDROP_ADDRESS = '0x305f90A7f38289219BA1b4be98CB5b47e7b15Ac2'
+/**
+ * Previous BUnitAirdrop (pre–Referral V2 cutover). V2.legacyBunitAirdrop points here;
+ * free-claim eligibility also checks it for accounts that claimed before cutover.
+ */
+export const CONET_BUNIT_AIRDROP_PREVIOUS_ADDRESS = '0xa01DFfD68b355540B840310a9f0C1E7a779C3Ce8'
+/** Oldest BUnitAirdrop; hasClaimed 须一并检查，避免已领用户在新合约重复 eligible */
 export const CONET_BUNIT_AIRDROP_LEGACY_ADDRESS = '0xb9cf45AF87b16853c8F48a16b0495F030309e70f'
 /** CoNET ReferralRegistryVaultV1 ERC1967 proxy; referral redeem writes are relayed by Master. */
 export const CONET_REFERRAL_REGISTRY_VAULT_V1 = '0xD6252Cbf266B80231397Ac2a4f25ed2d9b01DEE6'
+/** CoNET ReferralMerchantShareModuleV1 proxy — L0 merchant→L1 rebate share config. */
+export const CONET_REFERRAL_MERCHANT_SHARE_MODULE = process.env.CONET_REFERRAL_MERCHANT_SHARE_MODULE
+	|| '0xe3e06f47D89159713d67ec8530E4FE97D31Bb708'
 /**
  * 已废弃 BUint 合约（Business Kit redeem 旧部署曾 wired 至 0xf548…）。
  * 余额只读展示 / 迁移脚本用；扣费与 /api/getBUnitBalance.total 仅认 canonical CONET_BUINT。

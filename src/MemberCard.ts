@@ -63,6 +63,7 @@ import {
 	CONET_CARD_FACTORY,
 	CONET_BUINT,
 	CONET_BUNIT_AIRDROP_ADDRESS,
+	CONET_BUNIT_AIRDROP_PREVIOUS_ADDRESS,
 	CONET_BUNIT_AIRDROP_LEGACY_ADDRESS,
 	CONET_BUINT_REDEEM_AIRDROP,
 	BEAMIO_INDEXER_DIAMOND,
@@ -4915,9 +4916,10 @@ export const cancelRequestAccountingProcess = async () => {
 	setTimeout(() => cancelRequestAccountingProcess(), 1000)
 }
 
-/** BUnit Airdrop claimFor：CoNET 上 BUnitAirdrop.claimFor(claimant, nonce, deadline, signature)，使用 walletConet 代付 gas */
+/** BUnit Airdrop claimFor：CoNET 上 BUnitAirdropV2.claimFor(claimant, nonce, deadline, signature)，使用 walletConet 代付 gas */
 const BUNIT_AIRDROP_CLAIM_VIEW_ABI = [
 	'function hasClaimed(address) view returns (bool)',
+	'function alreadyClaimedFree(address) view returns (bool)',
 	'function claimNonces(address) view returns (uint256)',
 ] as const
 
@@ -4929,7 +4931,10 @@ const BUNIT_AIRDROP_ABI = [
 	'function claimForV2(address claimant, uint256 nonce, uint256 deadline, address merchantCard, uint256 targetTokenId, address referrer, bytes calldata signature)',
 ] as const
 
-/** 当前 + legacy BUnitAirdrop 是否仍可领免费 20 B-Unit（Cluster 读链单一事实来源） */
+/**
+ * Canonical V2 + previous + oldest airdrop：是否仍可领免费 20 B-Unit（Cluster 读链单一事实来源）。
+ * V2.alreadyClaimedFree 已覆盖 V2.hasClaimed 与 V2.legacyBunitAirdrop（previous）；再补查 oldest legacy。
+ */
 export async function resolveBUnitFreeClaimEligibility(
 	provider: ethers.Provider,
 	rawAddress: string,
@@ -4939,15 +4944,24 @@ export async function resolveBUnitFreeClaimEligibility(
 	}
 	const claimant = ethers.getAddress(rawAddress)
 	const canonical = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, BUNIT_AIRDROP_CLAIM_VIEW_ABI, provider)
-	const legacy = new ethers.Contract(CONET_BUNIT_AIRDROP_LEGACY_ADDRESS, BUNIT_AIRDROP_CLAIM_VIEW_ABI, provider)
-	for (const airdrop of [canonical, legacy]) {
+	try {
+		if (await canonical.alreadyClaimedFree(claimant)) {
+			const nonce = await canonical.claimNonces(claimant)
+			return { canClaim: false, nonce: String(nonce), reason: 'already_claimed' }
+		}
+	} catch {
+		// Fall through to hasClaimed multi-contract probe if alreadyClaimedFree unavailable.
+	}
+	const previous = new ethers.Contract(CONET_BUNIT_AIRDROP_PREVIOUS_ADDRESS, BUNIT_AIRDROP_CLAIM_VIEW_ABI, provider)
+	const oldest = new ethers.Contract(CONET_BUNIT_AIRDROP_LEGACY_ADDRESS, BUNIT_AIRDROP_CLAIM_VIEW_ABI, provider)
+	for (const airdrop of [canonical, previous, oldest]) {
 		try {
 			if (await airdrop.hasClaimed(claimant)) {
 				const nonce = await canonical.claimNonces(claimant)
 				return { canClaim: false, nonce: String(nonce), reason: 'already_claimed' }
 			}
 		} catch {
-			// legacy 合约读失败时不阻塞；canonical 会在下一轮或 nonce 读时暴露
+			// 单合约读失败不阻塞；canonical nonce 读失败再暴露
 		}
 	}
 	const nonce = await canonical.claimNonces(claimant)
@@ -20227,24 +20241,42 @@ export const cardOpenTransferPoolPress = async () => {
 const REFERRAL_REGISTRY_REDEEM_RELAY_ABI = [
 	'function issueL0RedeemCodeFor(address admin,bytes32 redeemHash,uint256 rebateBps,uint256 nonce,uint256 deadline,bytes signature)',
 	'function issueL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 l1RebateBps,uint256 nonce,uint256 deadline,bytes signature)',
-	'function issueMerchantRedeemCodeFor(address l0,address l1,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function issueMerchantRedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelL0RedeemCodeFor(address admin,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelMerchantRedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function setMerchantRedeemBunitAirdropFor(address admin,uint256 amount,uint256 nonce,uint256 deadline,bytes signature)',
+	'function issueAdminMerchantPackageCodeFor(address admin,bytes32 redeemHash,address optionalL0,uint256 bunitAmount,bool isPaid,bool includeStartKet,uint8 paymentMethod,string description,uint256 nonce,uint256 deadline,bytes signature)',
+	'function cancelAdminMerchantPackageCodeFor(address admin,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimL0RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 ] as const
 
-export type ReferralRegistryRedeemRelayAction = 'issueL0' | 'issueL1' | 'issueMerchant' | 'cancelL0' | 'cancelL1' | 'cancelMerchant' | 'setMerchantAirdrop' | 'claimL0' | 'claimL1'
+export type ReferralRegistryRedeemRelayAction =
+	| 'issueL0'
+	| 'issueL1'
+	| 'issueMerchant'
+	| 'cancelL0'
+	| 'cancelL1'
+	| 'cancelMerchant'
+	| 'setMerchantAirdrop'
+	| 'issueAdminMerchantPackage'
+	| 'cancelAdminMerchantPackage'
+	| 'claimL0'
+	| 'claimL1'
 export const referralRegistryRedeemPool: Array<{
 	contract: string
 	action: ReferralRegistryRedeemRelayAction
 	account: string
 	redeemHash: string
-		rebateBps: string
+	rebateBps: string
 	amount?: string
-	l1?: string
+	optionalL0?: string
+	bunitAmount?: string
+	isPaid?: boolean
+	includeStartKet?: boolean
+	paymentMethod?: string
+	description?: string
 	nonce: string
 	deadline: string
 	signature: string
@@ -20302,7 +20334,6 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 		] as const
 		const merchantArgs = [
 			ethers.getAddress(job.account),
-			ethers.getAddress(job.l1 ?? ethers.ZeroAddress),
 			job.redeemHash,
 			BigInt(job.nonce),
 			BigInt(job.deadline),
@@ -20311,6 +20342,19 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 		const amountArgs = [
 			ethers.getAddress(job.account),
 			BigInt(job.amount ?? '0'),
+			BigInt(job.nonce),
+			BigInt(job.deadline),
+			job.signature,
+		] as const
+		const adminPackageIssueArgs = [
+			ethers.getAddress(job.account),
+			job.redeemHash,
+			ethers.getAddress(job.optionalL0 ?? ethers.ZeroAddress),
+			BigInt(job.bunitAmount ?? '0'),
+			Boolean(job.isPaid),
+			Boolean(job.includeStartKet),
+			Number(job.paymentMethod ?? '0'),
+			String(job.description ?? ''),
 			BigInt(job.nonce),
 			BigInt(job.deadline),
 			job.signature,
@@ -20330,6 +20374,10 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 						? await registry.cancelMerchantRedeemCodeFor(...cancelArgs)
 					: job.action === 'setMerchantAirdrop'
 						? await registry.setMerchantRedeemBunitAirdropFor(...amountArgs)
+					: job.action === 'issueAdminMerchantPackage'
+						? await registry.issueAdminMerchantPackageCodeFor(...adminPackageIssueArgs)
+					: job.action === 'cancelAdminMerchantPackage'
+						? await registry.cancelAdminMerchantPackageCodeFor(...cancelArgs)
 						: job.action === 'claimL0'
 							? await registry.claimL0RedeemCodeFor(...claimArgs)
 							: await registry.claimL1RedeemCodeFor(...claimArgs)
@@ -20550,6 +20598,100 @@ export async function referralRegistryAdminManagementProcess(): Promise<void> {
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		scheduleReferralRegistryAdminManagementRelay()
+	}
+}
+
+// --- ReferralMerchantShareModuleV1: L0 merchant→L1 rebate share (gasless) ---
+const REFERRAL_MERCHANT_SHARE_ABI = [
+	'function setMerchantL1ShareFor(address l0,address merchant,address l1,uint256 shareBps,uint256 nonce,uint256 deadline,bytes signature)',
+] as const
+
+export const referralRegistryMerchantSharePool: Array<{
+	contract: string
+	l0: string
+	merchant: string
+	l1: string
+	shareBps: string
+	nonce: string
+	deadline: string
+	signature: string
+	res: Response
+}> = []
+
+export function kickReferralRegistryMerchantShareRelay(): void {
+	void referralRegistryMerchantShareProcess().catch((error: any) => {
+		logger(Colors.red('[referralRegistryMerchantShare] unhandled error:'), error?.message ?? error)
+	})
+}
+
+function scheduleReferralRegistryMerchantShareRelay(): void {
+	if (referralRegistryMerchantSharePool.length === 0) return
+	if (Settle_ContractPool.length > 0) {
+		kickReferralRegistryMerchantShareRelay()
+		return
+	}
+	setTimeout(() => kickReferralRegistryMerchantShareRelay(), 3000)
+}
+
+export async function referralRegistryMerchantShareProcess(): Promise<void> {
+	const job = referralRegistryMerchantSharePool.shift()
+	if (!job) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		referralRegistryMerchantSharePool.unshift(job)
+		return scheduleReferralRegistryMerchantShareRelay()
+	}
+	try {
+		const module = new ethers.Contract(job.contract, REFERRAL_MERCHANT_SHARE_ABI, SC.walletConet)
+		const tx = await module.setMerchantL1ShareFor(
+			ethers.getAddress(job.l0),
+			ethers.getAddress(job.merchant),
+			ethers.getAddress(job.l1),
+			BigInt(job.shareBps),
+			BigInt(job.nonce),
+			BigInt(job.deadline),
+			job.signature,
+		)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) throw new Error('Merchant L1 share transaction failed')
+		const event = receipt.logs
+			.map((log: any) => {
+				try {
+					return new ethers.Interface([
+						'event MerchantL1ShareUpdated(address indexed l0,address indexed merchant,address indexed l1,uint256 shareBps)',
+					]).parseLog(log)
+				} catch {
+					return null
+				}
+			})
+			.find(Boolean)
+		if (!event) throw new Error('MerchantL1ShareUpdated event was not found')
+		logger(Colors.green(`[referralRegistryMerchantShare] l0=${job.l0} merchant=${job.merchant} l1=${job.l1} bps=${job.shareBps} tx=${tx.hash}`))
+		if (!job.res.headersSent) job.res.status(200).json({ success: true, txHash: tx.hash }).end()
+	} catch (error: any) {
+		let message = error?.shortMessage ?? error?.message ?? String(error)
+		const rawData = error?.data ?? error?.info?.error?.data ?? error?.error?.data
+		if (typeof rawData === 'string' && rawData.startsWith('0x')) {
+			try {
+				const parsed = new ethers.Interface([
+					'error Unauthorized()',
+					'error NotRegistered()',
+					'error SignatureExpired()',
+					'error InvalidSignature()',
+					'error NonceUsed()',
+					'error InvalidAmount()',
+					'error QuotaExceeded()',
+				]).parseError(rawData)
+				if (parsed?.name) message = parsed.name
+			} catch {
+				/* keep */
+			}
+		}
+		logger(Colors.red(`[referralRegistryMerchantShare] failed: ${message}`))
+		if (!job.res.headersSent) job.res.status(400).json({ success: false, error: message }).end()
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		scheduleReferralRegistryMerchantShareRelay()
 	}
 }
 

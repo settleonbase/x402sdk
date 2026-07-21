@@ -31,6 +31,8 @@ import {
 import {
 	kickReferralRegistryAdminManagementRelay,
 	referralRegistryAdminManagementPool,
+	kickReferralRegistryMerchantShareRelay,
+	referralRegistryMerchantSharePool,
 	type ReferralRegistryAdminManagementAction,
 } from '../MemberCard'
 import {
@@ -2508,7 +2510,12 @@ const routing = ( router: Router ) => {
 				redeemHash?: string
 				rebateBps?: string
 				amount?: string
-				l1?: string
+				optionalL0?: string
+				bunitAmount?: string
+				isPaid?: boolean
+				includeStartKet?: boolean
+				paymentMethod?: string
+				description?: string
 				nonce?: string
 				deadline?: string
 				signature?: string
@@ -2518,8 +2525,8 @@ const routing = ( router: Router ) => {
 			if (!body.action || !body.contract || !body.account || (requiresRedeemHash && !body.redeemHash) || (body.action === 'setMerchantAirdrop' && !body.amount) || !body.nonce || !body.deadline || !body.signature) {
 				return res.status(400).json({ success: false, error: 'Missing referral redeem relay fields' }).end()
 			}
-			if (body.action === 'issueMerchant' && (!body.l1 || !ethers.isAddress(body.l1))) {
-				return res.status(400).json({ success: false, error: 'Missing l1 for Start Kit issue' }).end()
+			if (body.action === 'issueAdminMerchantPackage' && !body.bunitAmount) {
+				return res.status(400).json({ success: false, error: 'Missing admin merchant package fields' }).end()
 			}
 			referralRegistryRedeemPool.push({
 				action: body.action,
@@ -2528,7 +2535,12 @@ const routing = ( router: Router ) => {
 				redeemHash: body.redeemHash ?? '',
 				rebateBps: body.rebateBps ?? '0',
 				amount: body.amount,
-				l1: body.l1,
+				optionalL0: body.optionalL0,
+				bunitAmount: body.bunitAmount,
+				isPaid: body.isPaid,
+				includeStartKet: body.includeStartKet,
+				paymentMethod: body.paymentMethod,
+				description: body.description,
 				nonce: body.nonce,
 				deadline: body.deadline,
 				signature: body.signature,
@@ -2589,6 +2601,44 @@ const routing = ( router: Router ) => {
 				res,
 			})
 			kickReferralRegistryAdminManagementRelay()
+		})
+
+		router.post('/referralRegistryMerchantShare', (req, res) => {
+			const body = req.body as {
+				contract?: string
+				l0?: string
+				merchant?: string
+				l1?: string
+				shareBps?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			if (
+				!body.contract ||
+				!body.l0 ||
+				!body.merchant ||
+				!body.l1 ||
+				body.shareBps === undefined ||
+				body.shareBps === '' ||
+				!body.nonce ||
+				!body.deadline ||
+				!body.signature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing merchant L1 share fields' }).end()
+			}
+			referralRegistryMerchantSharePool.push({
+				contract: body.contract,
+				l0: body.l0,
+				merchant: body.merchant,
+				l1: body.l1,
+				shareBps: body.shareBps,
+				nonce: body.nonce,
+				deadline: body.deadline,
+				signature: body.signature,
+				res,
+			})
+			kickReferralRegistryMerchantShareRelay()
 		})
 
 		router.post('/referralRegistryClaim', async (req, res) => {

@@ -18,7 +18,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_REGISTRY_VAULT_V1, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
@@ -42,6 +42,8 @@ import {
 import {
 	kickReferralRegistryAdminManagementRelay,
 	referralRegistryAdminManagementPool,
+	kickReferralRegistryMerchantShareRelay,
+	referralRegistryMerchantSharePool,
 	type ReferralRegistryAdminManagementAction,
 } from '../MemberCard'
 import {
@@ -586,7 +588,6 @@ const REFERRAL_REDEEM_TYPES = {
 	issueMerchant: {
 		IssueMerchantRedeemCode: [
 			{ name: 'l0', type: 'address' },
-			{ name: 'l1', type: 'address' },
 			{ name: 'redeemHash', type: 'bytes32' },
 			{ name: 'nonce', type: 'uint256' },
 			{ name: 'deadline', type: 'uint256' },
@@ -624,15 +625,70 @@ const REFERRAL_REDEEM_TYPES = {
 			{ name: 'deadline', type: 'uint256' },
 		],
 	},
+	issueAdminMerchantPackage: {
+		IssueAdminMerchantPackageCode: [
+			{ name: 'admin', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'optionalL0', type: 'address' },
+			{ name: 'bunitAmount', type: 'uint256' },
+			{ name: 'isPaid', type: 'bool' },
+			{ name: 'includeStartKet', type: 'bool' },
+			{ name: 'paymentMethod', type: 'uint8' },
+			{ name: 'description', type: 'string' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
+	cancelAdminMerchantPackage: {
+		CancelAdminMerchantPackageCode: [
+			{ name: 'admin', type: 'address' },
+			{ name: 'redeemHash', type: 'bytes32' },
+			{ name: 'nonce', type: 'uint256' },
+			{ name: 'deadline', type: 'uint256' },
+		],
+	},
 } as const
 
 async function referralRedeemRelayPreCheck(body: any): Promise<
-	| { success: true; preChecked: { action: Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>; contract: string; account: string; redeemHash: string; rebateBps: string; amount: string; l1: string; nonce: string; deadline: string; signature: string } }
+	| {
+			success: true
+			preChecked: {
+				action: Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>
+				contract: string
+				account: string
+				redeemHash: string
+				rebateBps: string
+				amount: string
+				optionalL0?: string
+				bunitAmount?: string
+				isPaid?: boolean
+				includeStartKet?: boolean
+				paymentMethod?: string
+				description?: string
+				nonce: string
+				deadline: string
+				signature: string
+			}
+	  }
 	| { success: false; error: string }
 > {
 	try {
 		const action = String(body?.action ?? '') as Exclude<ReferralRegistryRedeemRelayAction, 'claimL0' | 'claimL1'>
-		if (!['issueL0', 'issueL1', 'issueMerchant', 'cancelL0', 'cancelL1', 'cancelMerchant', 'setMerchantAirdrop'].includes(action)) return { success: false, error: 'Invalid referral redeem action' }
+		if (
+			![
+				'issueL0',
+				'issueL1',
+				'issueMerchant',
+				'cancelL0',
+				'cancelL1',
+				'cancelMerchant',
+				'setMerchantAirdrop',
+				'issueAdminMerchantPackage',
+				'cancelAdminMerchantPackage',
+			].includes(action)
+		) {
+			return { success: false, error: 'Invalid referral redeem action' }
+		}
 		const account = ethers.getAddress(String(body?.account ?? ''))
 		const redeemHash = String(body?.redeemHash ?? '')
 		if (action !== 'setMerchantAirdrop' && !ethers.isHexString(redeemHash, 32)) return { success: false, error: 'redeemHash must be bytes32' }
@@ -644,14 +700,17 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 		if (action === 'setMerchantAirdrop' && amount <= 0n) return { success: false, error: 'Airdrop amount must be greater than zero' }
 		const rebateBps = action === 'issueL0' || action === 'issueL1' ? BigInt(String(body?.rebateBps ?? '')) : 0n
 		if (rebateBps < 0n || rebateBps > 10_000n) return { success: false, error: 'rebateBps must be between 0 and 10000' }
-		let l1 = ethers.ZeroAddress
-		if (action === 'issueMerchant') {
-			try {
-				l1 = ethers.getAddress(String(body?.l1 ?? ''))
-			} catch {
-				return { success: false, error: 'Start Kit codes require a valid L1 address' }
-			}
-			if (l1 === ethers.ZeroAddress) return { success: false, error: 'Start Kit codes require a valid L1 address' }
+		const optionalL0Raw = String(body?.optionalL0 ?? ethers.ZeroAddress)
+		const optionalL0 = ethers.isAddress(optionalL0Raw) ? ethers.getAddress(optionalL0Raw) : ethers.ZeroAddress
+		const bunitAmount = action === 'issueAdminMerchantPackage' ? BigInt(String(body?.bunitAmount ?? '')) : 0n
+		const isPaid = Boolean(body?.isPaid)
+		const includeStartKet = Boolean(body?.includeStartKet)
+		const paymentMethod = Number(body?.paymentMethod ?? 0)
+		const description = String(body?.description ?? '')
+		if (action === 'issueAdminMerchantPackage') {
+			if (bunitAmount <= 0n) return { success: false, error: 'B-Unit amount must be greater than zero' }
+			if (paymentMethod < 0 || paymentMethod > 3) return { success: false, error: 'Invalid payment method' }
+			if (description.length > 512) return { success: false, error: 'Description exceeds 512 characters' }
 		}
 		const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
 		const expectedNonce = BigInt((await registry.redeemActionNonces(account)).toString())
@@ -659,43 +718,79 @@ async function referralRedeemRelayPreCheck(body: any): Promise<
 		const isAdmin = Boolean(await registry.admins(account))
 		const member = await registry.members(account)
 		const isL0 = Number(member[0]) === 1 && Boolean(member[5])
-		if (action === 'issueL0' || action === 'cancelL0') {
+		if (
+			action === 'issueL0' ||
+			action === 'cancelL0' ||
+			action === 'setMerchantAirdrop' ||
+			action === 'issueAdminMerchantPackage' ||
+			action === 'cancelAdminMerchantPackage'
+		) {
 			if (!isAdmin) return { success: false, error: 'Account is not a ReferralRegistry admin' }
 		} else if (action === 'issueL1' || action === 'cancelL1' || action === 'issueMerchant' || action === 'cancelMerchant') {
 			if (!isL0) return { success: false, error: 'Account is not an active L0' }
-		} else if (action === 'setMerchantAirdrop' && !isAdmin) {
-			return { success: false, error: 'Account is not a ReferralRegistry admin' }
 		}
-		if (action === 'issueMerchant') {
-			const l1Member = await registry.members(l1)
-			if (Number(l1Member[0]) !== 2 || !Boolean(l1Member[5]) || ethers.getAddress(l1Member[2]) !== account) {
-				return { success: false, error: 'Selected L1 is not an active member under this L0' }
+		if (action === 'issueAdminMerchantPackage' && optionalL0 !== ethers.ZeroAddress) {
+			const l0Member = await registry.members(optionalL0)
+			if (Number(l0Member[0]) !== 1 || !Boolean(l0Member[5])) {
+				return { success: false, error: 'optionalL0 is not an active L0' }
 			}
 		}
-		const typeName = action === 'issueL0'
-			? 'IssueL0RedeemCode'
-			: action === 'issueL1'
-				? 'IssueL1RedeemCode'
-				: action === 'issueMerchant'
-					? 'IssueMerchantRedeemCode'
-					: action === 'cancelL0'
-						? 'CancelL0RedeemCode'
-						: action === 'cancelL1'
-							? 'CancelL1RedeemCode'
-							: action === 'cancelMerchant'
-								? 'CancelMerchantRedeemCode'
-								: 'SetMerchantRedeemBunitAirdrop'
 		const types = REFERRAL_REDEEM_TYPES[action] as any
-		const message = action === 'setMerchantAirdrop'
-			? { admin: account, amount, nonce, deadline }
-			: action === 'issueL0' || action === 'cancelL0'
-			? { admin: account, redeemHash, ...(action.startsWith('issue') ? { rebateBps } : {}), nonce, deadline }
-			: action === 'issueMerchant'
-				? { l0: account, l1, redeemHash, nonce, deadline }
-			: { l0: account, redeemHash, ...((action === 'issueL1') ? { rebateBps } : {}), nonce, deadline }
+		const message =
+			action === 'setMerchantAirdrop'
+				? { admin: account, amount, nonce, deadline }
+				: action === 'issueAdminMerchantPackage'
+					? {
+							admin: account,
+							redeemHash,
+							optionalL0,
+							bunitAmount,
+							isPaid,
+							includeStartKet,
+							paymentMethod,
+							description,
+							nonce,
+							deadline,
+						}
+					: action === 'cancelAdminMerchantPackage' || action === 'issueL0' || action === 'cancelL0'
+						? {
+								admin: account,
+								redeemHash,
+								...(action === 'issueL0' ? { rebateBps } : {}),
+								nonce,
+								deadline,
+							}
+						: {
+								l0: account,
+								redeemHash,
+								...(action === 'issueL1' ? { rebateBps } : {}),
+								nonce,
+								deadline,
+							}
 		const digest = ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types, message)
-		if (ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase()) return { success: false, error: 'Referral redeem signature does not match account' }
-		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: rebateBps.toString(), amount: amount.toString(), l1, nonce: nonce.toString(), deadline: deadline.toString(), signature } }
+		if (ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase()) {
+			return { success: false, error: 'Referral redeem signature does not match account' }
+		}
+		return {
+			success: true,
+			preChecked: {
+				action,
+				contract: CONET_REFERRAL_REGISTRY_VAULT_V1,
+				account,
+				redeemHash,
+				rebateBps: rebateBps.toString(),
+				amount: amount.toString(),
+				optionalL0,
+				bunitAmount: bunitAmount.toString(),
+				isPaid,
+				includeStartKet,
+				paymentMethod: String(paymentMethod),
+				description,
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+			},
+		}
 	} catch (error: any) {
 		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral redeem request' }
 	}
@@ -832,6 +927,94 @@ async function referralRegistryAdminManagementPreCheck(body: any): Promise<
 		return { success: true, preChecked }
 	} catch (error: any) {
 		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid Referral Admin management request' }
+	}
+}
+
+async function referralRegistryMerchantSharePreCheck(body: any): Promise<
+	| {
+			success: true
+			preChecked: {
+				contract: string
+				l0: string
+				merchant: string
+				l1: string
+				shareBps: string
+				nonce: string
+				deadline: string
+				signature: string
+			}
+	  }
+	| { success: false; error: string }
+> {
+	try {
+		if (!CONET_REFERRAL_MERCHANT_SHARE_MODULE || CONET_REFERRAL_MERCHANT_SHARE_MODULE === ethers.ZeroAddress) {
+			return { success: false, error: 'Merchant share module is not configured' }
+		}
+		const l0 = ethers.getAddress(String(body?.l0 ?? body?.account ?? ''))
+		const merchant = ethers.getAddress(String(body?.merchant ?? ''))
+		const l1 = ethers.getAddress(String(body?.l1 ?? ''))
+		const shareBps = BigInt(String(body?.shareBps ?? ''))
+		const nonce = BigInt(String(body?.nonce ?? ''))
+		const deadline = BigInt(String(body?.deadline ?? ''))
+		const signature = String(body?.signature ?? '')
+		if (shareBps < 0n || shareBps > 10_000n) return { success: false, error: 'shareBps must be between 0 and 10000' }
+		if (!ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+			return { success: false, error: 'Invalid or expired signature request' }
+		}
+		const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+		const shareModule = new ethers.Contract(
+			CONET_REFERRAL_MERCHANT_SHARE_MODULE,
+			['function shareActionNonces(address) view returns (uint256)'],
+			providerConet,
+		)
+		const expectedNonce = BigInt((await shareModule.shareActionNonces(l0)).toString())
+		if (nonce !== expectedNonce) return { success: false, error: 'Stale merchant share nonce' }
+		const l0Member = await registry.members(l0)
+		if (Number(l0Member[0]) !== 1 || !Boolean(l0Member[5])) return { success: false, error: 'Account is not an active L0' }
+		const merchantMember = await registry.members(merchant)
+		if (Number(merchantMember[0]) !== 3 || !Boolean(merchantMember[5]) || ethers.getAddress(merchantMember[2]) !== l0) {
+			return { success: false, error: 'Merchant is not an active member under this L0' }
+		}
+		const l1Member = await registry.members(l1)
+		if (Number(l1Member[0]) !== 2 || !Boolean(l1Member[5]) || ethers.getAddress(l1Member[2]) !== l0) {
+			return { success: false, error: 'L1 is not an active member under this L0' }
+		}
+		const types = {
+			SetMerchantL1Share: [
+				{ name: 'l0', type: 'address' },
+				{ name: 'merchant', type: 'address' },
+				{ name: 'l1', type: 'address' },
+				{ name: 'shareBps', type: 'uint256' },
+				{ name: 'nonce', type: 'uint256' },
+				{ name: 'deadline', type: 'uint256' },
+			],
+		}
+		const domain = {
+			name: 'ReferralMerchantShareModuleV1',
+			version: '1',
+			chainId: 224422,
+			verifyingContract: CONET_REFERRAL_MERCHANT_SHARE_MODULE,
+		}
+		const message = { l0, merchant, l1, shareBps, nonce, deadline }
+		const digest = ethers.TypedDataEncoder.hash(domain, types as any, message)
+		if (ethers.recoverAddress(digest, signature).toLowerCase() !== l0.toLowerCase()) {
+			return { success: false, error: 'L0 signature does not match account' }
+		}
+		return {
+			success: true,
+			preChecked: {
+				contract: CONET_REFERRAL_MERCHANT_SHARE_MODULE,
+				l0,
+				merchant,
+				l1,
+				shareBps: shareBps.toString(),
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+			},
+		}
+	} catch (error: any) {
+		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid merchant L1 share request' }
 	}
 }
 
@@ -9683,6 +9866,12 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		const pre = await referralRegistryAdminManagementPreCheck(req.body)
 		if (!pre.success) return res.status(400).json({ success: false, error: pre.error }).end()
 		postLocalhost('/api/referralRegistryAdminManagement', pre.preChecked, res)
+	})
+
+	router.post('/referralRegistryMerchantShare', async (req, res) => {
+		const pre = await referralRegistryMerchantSharePreCheck(req.body)
+		if (!pre.success) return res.status(400).json({ success: false, error: pre.error }).end()
+		postLocalhost('/api/referralRegistryMerchantShare', pre.preChecked, res)
 	})
 
 	router.get('/referralRegistryClaimNonce', async (req, res) => {
