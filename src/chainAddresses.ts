@@ -21,7 +21,7 @@ export const BEAMIO_AA_FACTORY_V1 = BEAMIO_AA_FACTORY
  * V2 Factory（BeamioFactoryInstitutionalV2）— 新 AA + 全部 institutional-grade。
  * CoNET 224422：deployments/conet-BeamioFactoryInstitutionalV2.json
  */
-export const BEAMIO_AA_FACTORY_V2 = '0x02F00061ae54d76C3308EA24D2B3d0a24df60fAd'
+export const BEAMIO_AA_FACTORY_V2 = '0xda92E1216774f8801150B9049FBAD190f3A845BB'
 
 /** @deprecated 使用 BEAMIO_AA_FACTORY（跨链同址） */
 export const BASE_AA_FACTORY = BEAMIO_AA_FACTORY
