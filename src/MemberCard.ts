@@ -7430,6 +7430,29 @@ type AaV2RelayPoolItem = {
 	res?: Response
 }
 
+/** Parse TaskProposed from AA logs — do not use nextTaskId() (races under concurrent proposes). */
+function parseInstitutionalAaV2TaskIdFromReceipt(
+	receipt: { logs?: ReadonlyArray<{ address: string; topics: ReadonlyArray<string>; data: string }> },
+	account: string
+): string | null {
+	const aaIface = new ethers.Interface([
+		'event TaskProposed(uint256 indexed taskId, uint8 kind, address indexed proposer)',
+	])
+	const acct = ethers.getAddress(account).toLowerCase()
+	for (const log of receipt.logs ?? []) {
+		if ((log.address || '').toLowerCase() !== acct) continue
+		try {
+			const parsed = aaIface.parseLog({ topics: [...log.topics], data: log.data })
+			if (parsed?.name === 'TaskProposed') {
+				return (parsed.args.taskId as bigint).toString()
+			}
+		} catch {
+			/* not this event */
+		}
+	}
+	return null
+}
+
 export const aaInstitutionalV2RelayPool: AaV2RelayPoolItem[] = []
 
 export function kickAaInstitutionalV2RelayProcess(): void {
@@ -7492,13 +7515,16 @@ export const aaInstitutionalV2RelayProcess = async () => {
 				respond(500, { success: false, error: 'proposeTransfer reverted', txHash: tx.hash })
 				return
 			}
-			const aa = new ethers.Contract(
-				b.account,
-				['function nextTaskId() view returns (uint256)'],
-				providerConet
-			)
-			const nextId = (await aa.nextTaskId()) as bigint
-			respond(200, { success: true, txHash: tx.hash, taskId: nextId.toString() })
+			const taskId = parseInstitutionalAaV2TaskIdFromReceipt(receipt, b.account)
+			if (!taskId) {
+				respond(500, {
+					success: false,
+					error: 'proposeTransfer confirmed but TaskProposed event not found',
+					txHash: tx.hash,
+				})
+				return
+			}
+			respond(200, { success: true, txHash: tx.hash, taskId })
 			return
 		}
 
@@ -7524,13 +7550,16 @@ export const aaInstitutionalV2RelayProcess = async () => {
 				respond(500, { success: false, error: 'proposeSetPolicy reverted', txHash: tx.hash })
 				return
 			}
-			const aa = new ethers.Contract(
-				b.account,
-				['function nextTaskId() view returns (uint256)'],
-				providerConet
-			)
-			const nextId = (await aa.nextTaskId()) as bigint
-			respond(200, { success: true, txHash: tx.hash, taskId: nextId.toString() })
+			const taskId = parseInstitutionalAaV2TaskIdFromReceipt(receipt, b.account)
+			if (!taskId) {
+				respond(500, {
+					success: false,
+					error: 'proposeSetPolicy confirmed but TaskProposed event not found',
+					txHash: tx.hash,
+				})
+				return
+			}
+			respond(200, { success: true, txHash: tx.hash, taskId })
 			return
 		}
 
