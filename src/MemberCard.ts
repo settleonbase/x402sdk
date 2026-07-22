@@ -59,6 +59,7 @@ import {
 	BASE_AA_FACTORY,
 	BASE_CARD_FACTORY,
 	BASE_CCSA_CARD_ADDRESS,
+	BEAMIO_AA_FACTORY_V2,
 	CONET_AA_FACTORY,
 	CONET_CARD_FACTORY,
 	CONET_BUINT,
@@ -1025,6 +1026,53 @@ const ensureSettleAdminsAsFactoryPaymasters = async (): Promise<void> => {
 				)
 			)
 		}
+
+		// ----- CoNET Institutional V2 Factory paymasters -----
+		try {
+			const { AA_V2_FACTORY_ABI } = await import('./aaInstitutionalV2Multisig.js')
+			const v2FactoryAddr = ethers.getAddress(BEAMIO_AA_FACTORY_V2)
+			const readOnlyV2 = new ethers.Contract(v2FactoryAddr, AA_V2_FACTORY_ABI, providerConet)
+			let v2Admin: string | null = null
+			try {
+				v2Admin = String(await readOnlyV2.admin())
+			} catch (e: any) {
+				logger(Colors.red(`[factory-admin-init] conet-aa-v2: admin() failed: ${e?.message ?? e}`))
+			}
+			const v2AdminLower = v2Admin?.toLowerCase() ?? ''
+			if (v2Admin && ownerConetWallet.address.toLowerCase() === v2AdminLower) {
+				const ownerV2 = new ethers.Contract(v2FactoryAddr, AA_V2_FACTORY_ABI, ownerConetWallet)
+				for (const adminAddr of adminTargets) {
+					const adminLower = adminAddr.toLowerCase()
+					if (adminLower === v2AdminLower) continue
+					let isPm = false
+					try {
+						isPm = !!(await readOnlyV2.isPayMaster(adminAddr))
+					} catch {
+						continue
+					}
+					if (isPm) continue
+					try {
+						const tx = await ownerV2.setPayMaster(adminAddr, true)
+						await tx.wait()
+						logger(Colors.green(`[factory-admin-init] conet-aa-v2: setPayMaster ${adminAddr}`))
+					} catch (e: any) {
+						logger(
+							Colors.red(
+								`[factory-admin-init] conet-aa-v2: setPayMaster failed for ${adminAddr}: ${e?.message ?? e}`
+							)
+						)
+					}
+				}
+			} else if (v2Admin) {
+				logger(
+					Colors.yellow(
+						`[factory-admin-init] conet-aa-v2: skip: settle_contractAdmin[0]=${ownerConetWallet.address} is not V2 factory admin (${v2Admin})`
+					)
+				)
+			}
+		} catch (e: any) {
+			logger(Colors.red(`[factory-admin-init] conet-aa-v2 unexpected: ${e?.message ?? e}`))
+		}
 	} catch (e: any) {
 		logger(Colors.red(`[factory-admin-init] unexpected error: ${e?.message ?? e}`))
 	} finally {
@@ -1697,35 +1745,24 @@ export class CreateInstitutionalAaHttpError extends Error {
 }
 
 /**
- * Master：在 CoNET 上为 EOA 创建下一枚 **institutional** AA（index ≥ 1）。
- * 先 ensure index=0（与 `ensureAAForEOA` 相同），再 `createAccountFor` 一次得到 nextIndex−1。
- * **不**改变 `ensureAAForEOA` / `DeployingSmartAccount` 的「只保证 index=0」语义。
+ * Master：在 CoNET **V2 Factory** 上为 EOA 创建下一枚 institutional AA（beamio-aa-account-dev.mdc）。
+ * 不再走 V1 Factory index≥1；旧 V1 机构 AA 已遗弃。
  */
 export const createInstitutionalAaForEoa = async (
 	eoa: string
 ): Promise<{ aa: string; index: number; txHash: string }> => {
 	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
 	const eoaNorm = ethers.getAddress(eoa)
-	const factoryAddr = ethers.getAddress(CONET_AA_FACTORY)
-	const aaFactoryReadOnly = new ethers.Contract(
-		factoryAddr,
-		BeamioAAAccountFactoryPaymasterABI,
-		providerConet
-	)
+	const factoryAddr = ethers.getAddress(BEAMIO_AA_FACTORY_V2)
+	const { AA_V2_FACTORY_ABI } = await import('./aaInstitutionalV2Multisig.js')
 	const SC = await shiftSettleContractForWrite('createInstitutionalAa')
 	try {
 		const wallet = SC.walletConet
 		const provider = wallet.provider ?? providerConet
-		await ensureAAForEOAOnAaFactory(eoaNorm, factoryAddr, aaFactoryReadOnly, SC, wallet)
+		await ensureInstitutionalV2PayMaster(wallet)
 
-		const aaFactory = new ethers.Contract(factoryAddr, BeamioAAAccountFactoryPaymasterABI, wallet)
+		const aaFactory = new ethers.Contract(factoryAddr, AA_V2_FACTORY_ABI, wallet)
 		const nextIndex = (await aaFactory.nextIndexOfCreator(eoaNorm)) as bigint
-		if (nextIndex === 0n) {
-			throw new CreateInstitutionalAaHttpError(
-				500,
-				'createInstitutionalAa: primary AA (index=0) missing after ensure'
-			)
-		}
 		const accountLimit = (await aaFactory.accountLimit()) as bigint
 		if (nextIndex >= accountLimit) {
 			throw new CreateInstitutionalAaHttpError(
@@ -1740,7 +1777,7 @@ export const createInstitutionalAaForEoa = async (
 		if (codeBefore && codeBefore !== '0x' && codeBefore !== '') {
 			logger(
 				Colors.yellow(
-					`[createInstitutionalAa] predicted ${predicted} already deployed for ${eoaNorm} index=${nextIndex}`
+					`[createInstitutionalAa] V2 predicted ${predicted} already deployed for ${eoaNorm} index=${nextIndex}`
 				)
 			)
 			return { aa: predicted, index: Number(nextIndex), txHash: '' }
@@ -1748,10 +1785,10 @@ export const createInstitutionalAaForEoa = async (
 
 		logger(
 			Colors.cyan(
-				`[createInstitutionalAa] creating institutional AA for ${eoaNorm} index=${nextIndex} → ${predicted}`
+				`[createInstitutionalAa] V2 creating for ${eoaNorm} index=${nextIndex} → ${predicted}`
 			)
 		)
-		const tx = await sendCreateAccountForTx(aaFactory, eoaNorm)
+		const tx = await aaFactory.createAccountFor(eoaNorm)
 		let receipt = await tx.wait(0).catch((e: unknown) => {
 			logger(
 				Colors.yellow(
@@ -1807,13 +1844,43 @@ export const createInstitutionalAaForEoa = async (
 
 		logger(
 			Colors.green(
-				`[createInstitutionalAa] created AA ${predicted} index=${nextIndex} for ${eoaNorm} tx=${tx.hash}`
+				`[createInstitutionalAa] V2 created AA ${predicted} index=${nextIndex} for ${eoaNorm} tx=${tx.hash}`
 			)
 		)
 		return { aa: predicted, index: Number(nextIndex), txHash: tx.hash as string }
 	} finally {
 		Settle_ContractPool.unshift(SC)
 	}
+}
+
+/** Ensure settle wallet can call V2 Factory onlyPayMaster methods. */
+async function ensureInstitutionalV2PayMaster(wallet: ethers.Wallet): Promise<void> {
+	const { AA_V2_FACTORY_ABI } = await import('./aaInstitutionalV2Multisig.js')
+	const factoryAddr = ethers.getAddress(BEAMIO_AA_FACTORY_V2)
+	const readOnly = new ethers.Contract(factoryAddr, AA_V2_FACTORY_ABI, providerConet)
+	const addr = wallet.address
+	let isPm = false
+	try {
+		isPm = !!(await readOnly.isPayMaster(addr))
+	} catch {
+		return
+	}
+	if (isPm) return
+	let adminOnChain = ''
+	try {
+		adminOnChain = String(await readOnly.admin())
+	} catch {
+		return
+	}
+	if (adminOnChain.toLowerCase() !== addr.toLowerCase()) {
+		logger(
+			Colors.yellow(
+				`[createInstitutionalAa] settle ${addr} is not V2 paymaster; factory admin=${adminOnChain}`
+			)
+		)
+		return
+	}
+	// Admin is already paymaster in constructor; nothing to do.
 }
 
 /**
@@ -7351,6 +7418,157 @@ export const aaMultisigOfflineSubmitProcess = async () => {
 		Settle_ContractPool.unshift(SC)
 		if (aaMultisigOfflineSubmitPool.length > 0) {
 			setTimeout(() => kickAaMultisigOfflineSubmitProcess(), 1000)
+		}
+	}
+}
+
+// ——— Institutional AA V2 propose / vote (EIP-712 + Factory paymaster) ———
+
+type AaV2RelayPoolItem = {
+	kind: 'proposeTransfer' | 'proposeSetPolicy' | 'vote'
+	body: Record<string, unknown>
+	res?: Response
+}
+
+export const aaInstitutionalV2RelayPool: AaV2RelayPoolItem[] = []
+
+export function kickAaInstitutionalV2RelayProcess(): void {
+	aaInstitutionalV2RelayProcess().catch((err: unknown) => {
+		const e = err as { message?: string }
+		logger(Colors.red(`[aaInstitutionalV2RelayProcess] unhandled: ${e?.message ?? String(err)}`))
+	})
+}
+
+export const aaInstitutionalV2RelayProcess = async () => {
+	const obj = aaInstitutionalV2RelayPool.shift()
+	if (!obj) return
+	const SC = Settle_ContractPool.shift()
+	if (!SC) {
+		aaInstitutionalV2RelayPool.unshift(obj)
+		return setTimeout(() => kickAaInstitutionalV2RelayProcess(), 3000)
+	}
+	const respond = (status: number, body: Record<string, unknown>) => {
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(status).json(body).end()
+		}
+	}
+	try {
+		const { AA_V2_FACTORY_ABI } = await import('./aaInstitutionalV2Multisig.js')
+		const factory = new ethers.Contract(
+			ethers.getAddress(BEAMIO_AA_FACTORY_V2),
+			AA_V2_FACTORY_ABI,
+			SC.walletConet
+		)
+		const isPm = !!(await factory.isPayMaster(SC.walletConet.address))
+		if (!isPm) {
+			respond(500, {
+				success: false,
+				error: `Settle wallet ${SC.walletConet.address} is not a V2 Factory paymaster`,
+			})
+			return
+		}
+
+		if (obj.kind === 'proposeTransfer') {
+			const b = obj.body as {
+				account: string
+				token: string
+				to: string
+				amount: string
+				deadline: number
+				nonce: string
+				signature: string
+			}
+			const tx = await factory.proposeTransfer(
+				b.account,
+				b.token,
+				b.to,
+				BigInt(b.amount),
+				b.deadline,
+				b.nonce,
+				b.signature
+			)
+			const receipt = await tx.wait()
+			if (!receipt || Number(receipt.status) === 0) {
+				respond(500, { success: false, error: 'proposeTransfer reverted', txHash: tx.hash })
+				return
+			}
+			const aa = new ethers.Contract(
+				b.account,
+				['function nextTaskId() view returns (uint256)'],
+				providerConet
+			)
+			const nextId = (await aa.nextTaskId()) as bigint
+			respond(200, { success: true, txHash: tx.hash, taskId: nextId.toString() })
+			return
+		}
+
+		if (obj.kind === 'proposeSetPolicy') {
+			const b = obj.body as {
+				account: string
+				managersSorted: string[]
+				newThreshold: number
+				deadline: number
+				nonce: string
+				signature: string
+			}
+			const tx = await factory.proposeSetPolicy(
+				b.account,
+				b.managersSorted,
+				b.newThreshold,
+				b.deadline,
+				b.nonce,
+				b.signature
+			)
+			const receipt = await tx.wait()
+			if (!receipt || Number(receipt.status) === 0) {
+				respond(500, { success: false, error: 'proposeSetPolicy reverted', txHash: tx.hash })
+				return
+			}
+			const aa = new ethers.Contract(
+				b.account,
+				['function nextTaskId() view returns (uint256)'],
+				providerConet
+			)
+			const nextId = (await aa.nextTaskId()) as bigint
+			respond(200, { success: true, txHash: tx.hash, taskId: nextId.toString() })
+			return
+		}
+
+		if (obj.kind === 'vote') {
+			const b = obj.body as {
+				account: string
+				taskId: string
+				approve: boolean
+				deadline: number
+				nonce: string
+				signature: string
+			}
+			const tx = await factory.vote(
+				b.account,
+				BigInt(b.taskId),
+				b.approve,
+				b.deadline,
+				b.nonce,
+				b.signature
+			)
+			const receipt = await tx.wait()
+			if (!receipt || Number(receipt.status) === 0) {
+				respond(500, { success: false, error: 'vote reverted', txHash: tx.hash })
+				return
+			}
+			respond(200, { success: true, txHash: tx.hash, taskId: b.taskId })
+			return
+		}
+
+		respond(400, { success: false, error: 'Unknown relay kind' })
+	} catch (e: unknown) {
+		const err = e as { message?: string; shortMessage?: string }
+		logger(Colors.yellow(`[aaInstitutionalV2Relay] failed: ${err?.shortMessage ?? err?.message ?? String(e)}`))
+		respond(500, { success: false, error: err?.shortMessage ?? err?.message ?? String(e) })
+	} finally {
+		Settle_ContractPool.unshift(SC)
+		if (aaInstitutionalV2RelayPool.length > 0) {
+			setTimeout(() => kickAaInstitutionalV2RelayProcess(), 1000)
 		}
 	}
 }

@@ -12,13 +12,24 @@ export const CONET_RPC_URL = 'https://publicrpc.conet.network'
  * 与 deployments/beamioAAFactory-create2-meta.json、`UserCardFactory._aaFactory()` 同步。
  * AA 账户 `createAccountFor` 仅 CoNET（224422）；Base 侧用于 isBeamioAccount / paymaster relay 等只读或 relay，不在 Base 部署新 AA。
  */
+/** V1 Factory — 存量 Express Pay；勿用于新机构 AA（见 beamio-aa-account-dev.mdc） */
 export const BEAMIO_AA_FACTORY = '0x869B31C87ABd9bFB858F5183Ef6021b28ED225E2'
+/** @deprecated 同 BEAMIO_AA_FACTORY（V1） */
+export const BEAMIO_AA_FACTORY_V1 = BEAMIO_AA_FACTORY
+
+/**
+ * V2 Factory（BeamioFactoryInstitutionalV2）— 新 AA + 全部 institutional-grade。
+ * CoNET 224422：deployments/conet-BeamioFactoryInstitutionalV2.json
+ */
+export const BEAMIO_AA_FACTORY_V2 = '0x02F00061ae54d76C3308EA24D2B3d0a24df60fAd'
 
 /** @deprecated 使用 BEAMIO_AA_FACTORY（跨链同址） */
 export const BASE_AA_FACTORY = BEAMIO_AA_FACTORY
 
-/** CoNET 224422 同址别名（ensureAAForEOAOnConet / resolveBeamioAaOnConet） */
+/** CoNET 224422 同址别名（ensureAAForEOAOnConet / resolveBeamioAaOnConet）— V1 */
 export const CONET_AA_FACTORY = BEAMIO_AA_FACTORY
+/** CoNET V2 Factory 别名 */
+export const CONET_AA_FACTORY_V2 = BEAMIO_AA_FACTORY_V2
 /**
  * Base card factory (createCard / factoryGateway / EIP-712 domain verifyingContract).
  * Canonical: deployments/base-UserCardFactory.json / base-UserCardFactory-DEBUG.json（同址）.

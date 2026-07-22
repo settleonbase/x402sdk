@@ -35,6 +35,11 @@ import {
 } from '../cardProgramReferrerChain'
 import { aaMultisigOfflineSubmitPreCheck } from '../aaMultisigOfflineSubmit'
 import {
+	aaInstitutionalV2ProposeTransferPreCheck,
+	aaInstitutionalV2ProposeSetPolicyPreCheck,
+	aaInstitutionalV2VotePreCheck,
+} from '../aaInstitutionalV2Multisig'
+import {
 	kickReferralRegistryRedeemRelay,
 	referralRegistryRedeemPool,
 	type ReferralRegistryRedeemRelayAction,
@@ -8345,6 +8350,34 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			)
 		)
 		postLocalhost('/api/aaMultisigOfflineSubmit', preCheck.preChecked, res)
+	})
+
+	/** Institutional AA V2 — EIP-712 propose transfer (Cluster precheck → Master paymaster). */
+	router.post('/aaInstitutionalV2ProposeTransfer', async (req, res) => {
+		const preCheck = await aaInstitutionalV2ProposeTransferPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/aaInstitutionalV2ProposeTransfer FAIL: ${preCheck.error}`))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		postLocalhost('/api/aaInstitutionalV2ProposeTransfer', preCheck.preChecked, res)
+	})
+
+	router.post('/aaInstitutionalV2ProposeSetPolicy', async (req, res) => {
+		const preCheck = await aaInstitutionalV2ProposeSetPolicyPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/aaInstitutionalV2ProposeSetPolicy FAIL: ${preCheck.error}`))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		postLocalhost('/api/aaInstitutionalV2ProposeSetPolicy', preCheck.preChecked, res)
+	})
+
+	router.post('/aaInstitutionalV2Vote', async (req, res) => {
+		const preCheck = await aaInstitutionalV2VotePreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/aaInstitutionalV2Vote FAIL: ${preCheck.error}`))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		postLocalhost('/api/aaInstitutionalV2Vote', preCheck.preChecked, res)
 	})
 
 	/** Owner executeForOwner：recordUserCumulativeStat。 */
