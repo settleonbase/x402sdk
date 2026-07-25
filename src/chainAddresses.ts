@@ -73,6 +73,10 @@ export const CONET_TREASURY_CREATE2 = '0xa311c8fBE7CafC611603Ee925465A62493B73B3
 export const BASE_TREASURY = CONET_TREASURY_CREATE2
 /** CoNET 主网国库投票/mint（与 CONET_TREASURY_CREATE2 同址；须 CoNET L1 CREATE2 部署后才有 code） */
 export const CONET_TREASURY = CONET_TREASURY_CREATE2
+/** ConetTreasuryPeer（CREATE2 跨链同址）；矿工监听 StableSwapBridgeOut / burn*ForBridge，非 Discover x402 settle 目标 */
+export const CONET_TREASURY_PEER_CREATE2 = '0x025eC62F801B2f63d5C5b3eB066bab21B12Bbeb5'
+export const BASE_TREASURY_PEER = CONET_TREASURY_PEER_CREATE2
+export const CONET_TREASURY_PEER = CONET_TREASURY_PEER_CREATE2
 /** @deprecated 旧 BaseTreasury；单一国库设计已弃用 */
 export const BASE_TREASURY_LEGACY = '0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58'
 /** @deprecated 旧 CoNET 非 CREATE2 ConetTreasury */

@@ -18,7 +18,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
@@ -4596,10 +4596,12 @@ const routing = ( router: Router ) => {
 	 *   5a. **sid+pos**（POS admin 与卡绑定）：立刻 200 给顾客；后台 `runUsdcNfcTopupPosOrchestrator` 推 session
 	 *       `awaiting_topup_auth` → POS 签 `/api/nfcUsdcChargeTopupAuth` → Master `nfcUsdcTopup`（preSigned）
 	 *   5b. **无 sid+pos**（历史浏览器 NFC）：cluster 直接 `postLocalhost` Master，由 service-admin 签 ExecuteForAdmin
-	 *   5c. **workflow=clientTopup + beneficiary**（非 admin 消费者）：仅 x402 结算 USDC → beneficiary EOA；卡内 topup 由客户端 `/api/usdcTopup`
+	 *   5c. **workflow=clientTopup + beneficiary**（遗留）：仅 x402 结算 USDC → beneficiary EOA；卡内 topup 由客户端 `/api/usdcTopup`
+	 *   5d. **workflow=treasuryBridge + aa**：Discover 国库桥 — settle USDC → BASE_TREASURY（矿工异步铸 CONET-USDC → owner）；
+	 *       Master 立刻 mintPointsByAdmin → 用户 AA（不等 CoNET mint）
 	 */
 	router.post('/nfcUsdcTopup', async (req, res) => {
-		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature } = req.body as {
+		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature } = req.body as {
 			cardAddress?: string
 			cardOwner?: string
 			uid?: string
@@ -4612,6 +4614,9 @@ const routing = ( router: Router ) => {
 			pos?: string
 			beneficiary?: string
 			workflow?: string
+			/** Discover treasuryBridge：用户 Smart Wallet（卡点 #0 入账目标） */
+			aa?: string
+			recipientAA?: string
 			paymentToken?: string
 			payer?: string
 			value?: string
@@ -4667,9 +4672,14 @@ const routing = ( router: Router ) => {
 
 			const settleWithRawSigIfNeeded = async (
 				expectedAmount6: bigint,
-				description: string
+				description: string,
+				payToOverride?: string,
 			): Promise<{ payer: string; USDC_tx: string; usdcAmount6: bigint } | null | undefined> => {
 				if (paymentTokenNorm !== 'CADD') return undefined
+				const payToAddr =
+					payToOverride && ethers.isAddress(payToOverride)
+						? ethers.getAddress(payToOverride)
+						: payToOwner
 				const payerAddrRaw = String(payer ?? '').trim()
 				const valueRaw = String(value ?? '').trim()
 				const permitDeadlineRaw = String(permitDeadline ?? '').trim()
@@ -4695,7 +4705,7 @@ const routing = ( router: Router ) => {
 				}
 				const r = await postLocalhostBuffer('/api/tokenTransferRawSig', {
 					paymentToken: 'CADD',
-					cardOwner: payToOwner,
+					cardOwner: payToAddr,
 					payer: payerAddrRaw,
 					value: valueRaw,
 					permitDeadline: permitDeadlineRaw,
@@ -4719,37 +4729,43 @@ const routing = ( router: Router ) => {
 			const beneficiaryAddr =
 				beneficiaryStr && ethers.isAddress(beneficiaryStr) ? ethers.getAddress(beneficiaryStr) : null
 			const workflowNorm = String(workflow ?? '').trim().toLowerCase()
+			const aaRaw = String(aa ?? recipientAA ?? '').trim()
+			const recipientAaAddr = aaRaw && ethers.isAddress(aaRaw) ? ethers.getAddress(aaRaw) : null
+			const treasuryBridgeOnly =
+				workflowNorm === 'treasurybridge' && !!recipientAaAddr && !sessionPath && !hasFullNfc
 			const clientTopupOnly =
 				workflowNorm === 'clienttopup' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
 
-			if (clientTopupOnly && (sidNorm || posAddr)) {
+			if ((clientTopupOnly || treasuryBridgeOnly) && (sidNorm || posAddr)) {
 				return res
 					.status(400)
 					.json({
 						success: false,
-						error: 'clientTopup workflow must not include sid/pos (use POS admin QR for terminal top-up)',
+						error: `${treasuryBridgeOnly ? 'treasuryBridge' : 'clientTopup'} workflow must not include sid/pos (use POS admin QR for terminal top-up)`,
 					})
 					.end()
 			}
 
-			if (!hasFullNfc && !sessionPath && !clientTopupOnly) {
+			if (!hasFullNfc && !sessionPath && !clientTopupOnly && !treasuryBridgeOnly) {
 				sessionUpdate({ state: 'error', error: 'Invalid uid' })
 				return res
 					.status(400)
 					.json({
 						success: false,
 						error:
-							'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin) or clientTopup (beneficiary+workflow).',
+							'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin), treasuryBridge (aa+workflow), or clientTopup (beneficiary+workflow).',
 					})
 					.end()
 			}
 			// 1. 校验 card.owner() + POS session verifying（先于 SUN，阶段 1 无 SUN）
 			let onChainOwner: string | null = null
 			try {
+				const cardChain = await resolveUserCardChain(cardAddr)
+				const cardProvider = providerForUserCardChain(cardChain)
 				const cprep = new ethers.Contract(
 					cardAddr,
 					['function owner() view returns (address)', 'function isAdmin(address) view returns (bool)'],
-					providerBase
+					cardProvider
 				)
 				const o = (await cprep.owner()) as string
 				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
@@ -4760,7 +4776,80 @@ const routing = ( router: Router ) => {
 			}
 			const payToOwner = onChainOwner ?? ownerAddr
 
-			/** Discover / consumer：非卡 admin 受益人 — 仅 x402 把 USDC 结算到 beneficiary EOA；卡内入账由客户端 `/api/usdcTopup` 完成。 */
+			/**
+			 * Discover 完整国库桥：x402 settle Base USDC → BASE_TREASURY（同址 0xa311…）。
+			 * 矿工按 Base 入金异步 2/3 投票铸 CONET-USDC → card.owner()；Master 确认入金后立刻 mint 卡点 #0 → 用户 AA。
+			 * 不等待 CoNET-USDC mint。
+			 */
+			if (treasuryBridgeOnly && recipientAaAddr) {
+				const { amount6: quotedTreasury, usesOracle: treasuryUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+				if (quotedTreasury <= 0n) {
+					if (!treasuryUsesOracle) {
+						return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end()
+					}
+					const fresh = isOracleFresh()
+					const omsg = fresh
+						? `Oracle rate not available for ${cur}, please retry shortly`
+						: `Oracle rate stale, please retry shortly`
+					return res.status(503).json({ success: false, error: omsg }).end()
+				}
+				const preparedTreasury = await nfcTopupPreparePayload({
+					wallet: recipientAaAddr,
+					amount: amt,
+					currency: cur,
+					cardAddress: cardAddr,
+				})
+				if ('error' in preparedTreasury) {
+					return res.status(400).json({ success: false, error: preparedTreasury.error }).end()
+				}
+				const bunitPre = await nfcTopupPreCheckBUnitFee(cardAddr, preparedTreasury.data)
+				if (!bunitPre.success) {
+					return res.status(400).json({ success: false, error: bunitPre.error ?? 'B-Unit precheck failed' }).end()
+				}
+				const settleDesc =
+					`Beamio USDC treasuryBridge (${cur} ${amt} → treasury ${BASE_TREASURY.slice(0, 10)}… recipientOwner=${payToOwner.slice(0, 10)}… aa=${recipientAaAddr.slice(0, 10)}…)`
+				const settledByRawSigTreasury = await settleWithRawSigIfNeeded(quotedTreasury, settleDesc, BASE_TREASURY)
+				if (settledByRawSigTreasury === null) {
+					return
+				}
+				const settledTreasury =
+					settledByRawSigTreasury ??
+					(await settleBeamioX402ToCardOwner(req, res, {
+						cardOwner: BASE_TREASURY,
+						quotedUsdc6: quotedTreasury,
+						description: settleDesc,
+					}))
+				if (!settledTreasury) {
+					return
+				}
+				logger(
+					Colors.green(
+						`[nfcUsdcTopup/treasuryBridge] settle OK card=${cardAddr} treasury=${BASE_TREASURY} owner=${payToOwner} aa=${recipientAaAddr} payer=${settledTreasury.payer} usdc6=${settledTreasury.usdcAmount6} USDC_tx=${settledTreasury.USDC_tx}`,
+					),
+				)
+				postLocalhost(
+					'/api/nfcUsdcTopup',
+					{
+						cardAddr: preparedTreasury.cardAddr,
+						data: preparedTreasury.data,
+						deadline: preparedTreasury.deadline,
+						nonce: preparedTreasury.nonce,
+						recipientEOA: recipientAaAddr,
+						cardOwner: payToOwner,
+						currency: cur,
+						currencyAmount: amt,
+						payer: settledTreasury.payer,
+						USDC_tx: settledTreasury.USDC_tx,
+						usdcAmount6: settledTreasury.usdcAmount6.toString(),
+						topupSourceOverride: 'usdcPurchasingCard',
+						originatingUSDCTx: settledTreasury.USDC_tx,
+					},
+					res,
+				)
+				return
+			}
+
+			/** Discover / consumer 遗留：非卡 admin 受益人 — 仅 x402 把 USDC 结算到 beneficiary EOA；卡内入账由客户端 `/api/usdcTopup` 完成。 */
 			if (clientTopupOnly && beneficiaryAddr) {
 				const { amount6: quotedClient, usesOracle: clientUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
 				if (quotedClient <= 0n) {

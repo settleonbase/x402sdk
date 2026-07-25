@@ -2563,11 +2563,13 @@ export const signExecuteForAdminWithServiceAdmin = async (obj: {
 		if (!pk) return { error: 'Service admin private key not configured (masterSetup.settle_contractAdmin[0])' }
 		const wallet = new ethers.Wallet(pk)
 		const dataHash = ethers.keccak256(obj.data)
-		const verifyingContract = await getBeamioUserCardFactoryGateway(obj.cardAddr)
+		const cardAddrNorm = ethers.getAddress(obj.cardAddr)
+		const cardChain = await resolveUserCardChain(cardAddrNorm)
+		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddrNorm)
 		const domain = {
 			name: 'BeamioUserCardFactory',
 			version: '1',
-			chainId: 8453,
+			chainId: chainIdForUserCardChain(cardChain),
 			verifyingContract,
 		}
 		const types = {
@@ -18464,6 +18466,18 @@ export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: s
 			const image = tier?.image ?? shareTokenMetadata?.image
 			const backgroundColor = tier?.backgroundColor != null && String(tier.backgroundColor).trim() !== '' ? String(tier.backgroundColor).trim() : undefined
 			const bgFormatted = backgroundColor ? (backgroundColor.startsWith('#') ? backgroundColor : `#${backgroundColor.replace(/^#/, '')}`) : undefined
+			const logoDisplayScaleRaw =
+				tier?.logoDisplayScale != null ? String(tier.logoDisplayScale).trim().toLowerCase() : ''
+			const logoDisplayScale =
+				logoDisplayScaleRaw === '2x' ||
+				logoDisplayScaleRaw === '4x' ||
+				logoDisplayScaleRaw === '6x' ||
+				logoDisplayScaleRaw === '8x' ||
+				logoDisplayScaleRaw === 'hidden'
+					? logoDisplayScaleRaw
+					: undefined
+			const imageFitRaw = tier && 'imageFit' in tier ? String((tier as { imageFit?: unknown }).imageFit ?? '').trim() : ''
+			const imageFit = imageFitRaw === 'height' || imageFitRaw === 'width' ? imageFitRaw : undefined
 			await upsertNftTierMetadata({
 				cardAddress,
 				cardOwner: cardOwnerStr,
@@ -18479,6 +18493,8 @@ export const syncNftTierMetadataForUser = async (cardAddress: string, userEOA: s
 						...(tier?.name && { tier_name: tier.name }),
 						...(tier?.description != null && { tier_description: tier.description }),
 						...(bgFormatted != null && { background_color: bgFormatted }),
+						...(imageFit ? { image_fit: imageFit } : {}),
+						...(logoDisplayScale ? { logo_display_scale: logoDisplayScale } : {}),
 					},
 				},
 			})
