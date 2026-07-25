@@ -14,7 +14,10 @@ export type CardTierMetadataRow = {
 	name?: string
 	description?: string
 	image?: string
+	imageFit?: 'width' | 'height'
 	backgroundColor?: string
+	/** Pass card top-left logo scale for client UI. */
+	logoDisplayScale?: '2x' | '4x' | '6x' | '8x' | 'hidden'
 }
 
 /** 与链上 attributes[tokenId]、登记 tiers[].attr 一致时才接受「按槽位」选中的行。 */
