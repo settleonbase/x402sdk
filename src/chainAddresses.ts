@@ -67,12 +67,18 @@ export const BASE_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB =
   process.env.BASE_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB || ''
 /** @deprecated 废弃全局 CCSA 卡；API/客户端不得扫描或展示。见 apiExcludedUserCards.ts 与 beamio-no-legacy-global-cards.mdc */
 export const BASE_CCSA_CARD_ADDRESS = '0x2032A363BB2cf331142391fC0DAd21D6504922C7'
-/** 统一国库 ConetTreasury（CREATE2 跨链同址 Base + CoNET）；USDC 入金、投票出金、mint/burn peer */
+/**
+ * @deprecated 旧工厂 ConetTreasury CREATE2（Base + CoNET 同址）。
+ * Base Circle USDC settle / NodeSale 仍可指向此址；CoNET 业务国库已改绑 TreasuryBridgeV3。
+ */
 export const CONET_TREASURY_CREATE2 = '0xa311c8fBE7CafC611603Ee925465A62493B73B30'
-/** Base 主网国库收款（与 CONET_TREASURY_CREATE2 同址；已部署 Base 8453） */
+/** Base 主网 Circle USDC 入金（仍为 CREATE2 ConetTreasury；与 NodeSale / nfcUsdcTopup settle 一致） */
 export const BASE_TREASURY = CONET_TREASURY_CREATE2
-/** CoNET 主网国库投票/mint（与 CONET_TREASURY_CREATE2 同址；须 CoNET L1 CREATE2 部署后才有 code） */
-export const CONET_TREASURY = CONET_TREASURY_CREATE2
+/**
+ * CoNET 业务国库 = TreasuryBridgeV3（feeSettlement mint / 桥 / 唯一 conet-USDC 增发入口）。
+ * 别名见下方 `CONET_TREASURY_BRIDGE_V3`。
+ */
+export const CONET_TREASURY = '0xa208982212978550594A7FEEB70a61665d129003'
 /** ConetTreasuryPeer（CREATE2 跨链同址）；矿工监听 StableSwapBridgeOut / burn*ForBridge，非 Discover x402 settle 目标 */
 export const CONET_TREASURY_PEER_CREATE2 = '0x025eC62F801B2f63d5C5b3eB066bab21B12Bbeb5'
 export const BASE_TREASURY_PEER = CONET_TREASURY_PEER_CREATE2
@@ -97,6 +103,16 @@ export const NODE_SALE_SPLITTER_BASE =
 export const NODE_SALE_NODE_PRICE_USDC6 = 1_250_000_000n
 /** 每节点服务器费（USDC，6 位精度）→ CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN(0x87cA…05E1) */
 export const NODE_SALE_SERVER_FEE_USDC6 = 120_000_000n
+
+/**
+ * Discover Genesis Node Seat（x402）：整笔 USDC settle 收款地址（1250 节点价 + 120 Cloud Included）。
+ * Cluster 硬编码 payTo，不信任客户端改写。
+ */
+export const GENESIS_NODE_SEAT_PAYTO = '0x17FCE32f01f88FFBDAf6BA51cef9138bF6BD637A'
+/** 每节点应收 USDC（6 位精度）= NODE_SALE_NODE_PRICE + NODE_SALE_SERVER_FEE */
+export const GENESIS_NODE_SEAT_USDC_PER_NODE6 = NODE_SALE_NODE_PRICE_USDC6 + NODE_SALE_SERVER_FEE_USDC6
+/** Discover Genesis 商家卡（SilentPassUI /discover 明细） */
+export const GENESIS_NODE_SEAT_CARD_ADDRESS = '0xafE482D2612327a0D723544B9fB713C514a793a2'
 
 /** CoNET BUint ERC20（balanceOfAll）；与 deployments/conet-addresses.json `BUint` 同步 */
 export const CONET_BUINT = '0x54ac4672cE75EC5ACebaeF1a7aFC6F49E77Ae9Ae'
@@ -190,8 +206,17 @@ export const CONET_CARD_FACTORY = '0xfA52a0CcC96C19cF4b6Ea864615F6d52BD0774FB'
 export const CONET_BEAMIO_USER_CARD_FACTORY_EXECUTE_LIB = '0xbc6f3926691d2306c96357ac08aadB5F50Ab0784'
 /** CoNET 默认 BeamioUserCard（AA Factory `beamioUserCard`） */
 export const CONET_BEAMIO_USER_CARD_DEFAULT = '0xA5C727d11d04BeBC095bd814c6530c4e77fD6662'
-/** CoNET USDC（Treasury.createERC20 工厂登记）；UserCard Factory `USDC_TOKEN` */
-export const CONET_USDC = '0xfD0D7B0706AaB5E4351bcED37bC3C77ed6813907'
+/**
+ * CoNET 唯一 canonical USDC（Treasury V3 `TreasuryCanonicalERC20V3`）。
+ * 收费 B-Unit 焚烧 mint、钱包展示、Referral claimable 均指向此地址。
+ */
+export const CONET_USDC = '0x5209865D404aA5646eDe5B91CD4218909eA72eDA'
+/** TreasuryBridgeV3 proxy — 与 {@link CONET_TREASURY} 同址 */
+export const CONET_TREASURY_BRIDGE_V3 = CONET_TREASURY
+/** @deprecated 工厂版 USDC（旧 ConetTreasury.createERC20）；停增发，仅存量 */
+export const CONET_USDC_FACTORY_LEGACY = '0xfD0D7B0706AaB5E4351bcED37bC3C77ed6813907'
+/** @deprecated alias of CONET_USDC_FACTORY_LEGACY */
+export const CONET_USDC_LEGACY_FACTORY = CONET_USDC_FACTORY_LEGACY
 /** @deprecated Nick CREATE2 UUPS USDC（未进工厂白名单） */
 export const CONET_USDC_LEGACY_UUPS_CREATE2 = '0xF9240fd613C00d5C479f1E9f1690130c5Fdc8BC3'
 /** @deprecated minter=旧国库 0x6dC6… */

@@ -1,6 +1,7 @@
 import { ethers } from 'ethers'
 import type { Response } from 'express'
 import fs from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -3503,6 +3504,271 @@ export async function replayValidatorRedeemClaimedEvent(requestId: string): Prom
 	await waitForListenerSerialQueue()
 	await waitForRunCommandChildren()
 	return getValidatorDepositRedeemStatus(rid)
+}
+
+// ─── Genesis Node Seat fulfill (x402 settle → createRedeemFor + claimRedeemFor) ───
+
+export type GenesisNodeSeatFulfillPayload = {
+	beneficiary: string
+	qty: bigint
+	payer: string
+	USDC_tx: string
+	usdcAmount6: string
+	res?: Response
+}
+
+type GenesisNodeSeatFulfillRecord = {
+	beneficiary: string
+	qty: string
+	payer: string
+	USDC_tx: string
+	usdcAmount6: string
+	createTxHash: string
+	claimTxHash: string
+	fulfilledAt: string
+}
+
+export const genesisNodeSeatFulfillPool: GenesisNodeSeatFulfillPayload[] = []
+
+function resolveGenesisNodeSeatFulfillFile(): string {
+	return (
+		process.env.CONET_GENESIS_NODE_SEAT_FULFILL_FILE?.trim() ||
+		path.join(homedir(), '.conet-genesis-node-seat-fulfill.json')
+	)
+}
+
+function readGenesisNodeSeatFulfillFile(): Record<string, GenesisNodeSeatFulfillRecord> {
+	const file = resolveGenesisNodeSeatFulfillFile()
+	if (!fs.existsSync(file)) return {}
+	try {
+		return JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, GenesisNodeSeatFulfillRecord>
+	} catch {
+		return {}
+	}
+}
+
+function writeGenesisNodeSeatFulfillRecord(record: GenesisNodeSeatFulfillRecord): void {
+	const file = resolveGenesisNodeSeatFulfillFile()
+	const all = readGenesisNodeSeatFulfillFile()
+	all[record.USDC_tx.toLowerCase()] = record
+	fs.mkdirSync(path.dirname(file), { recursive: true })
+	fs.writeFileSync(file, JSON.stringify(all, null, 2) + '\n', 'utf-8')
+}
+
+function lookupGenesisNodeSeatFulfill(usdcTx: string): GenesisNodeSeatFulfillRecord | null {
+	const key = usdcTx.trim().toLowerCase()
+	if (!key) return null
+	return readGenesisNodeSeatFulfillFile()[key] || null
+}
+
+function generateEphemeralRedeemCode(): string {
+	// Memory-only secret; never log or persist plaintext.
+	return `beamio-gens-${randomBytes(18).toString('base64url')}`
+}
+
+export function kickGenesisNodeSeatFulfillPoolPress(): void {
+	void genesisNodeSeatFulfillProcess().catch((e: unknown) => {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.red('[genesisNodeSeatFulfillProcess] kick error:'), msg)
+	})
+}
+
+function scheduleGenesisNodeSeatFulfillPoolPress(): void {
+	if (genesisNodeSeatFulfillPool.length === 0) return
+	if (Settle_ContractPool.length > 0) kickGenesisNodeSeatFulfillPoolPress()
+	else setTimeout(() => kickGenesisNodeSeatFulfillPoolPress(), 3000)
+}
+
+/**
+ * Master: after Base USDC settle to GENESIS_NODE_SEAT_PAYTO, create + claim validator redeem for buyer.
+ * Idempotent on USDC_tx. Redeem plaintext code stays in-process memory only.
+ */
+export const genesisNodeSeatFulfillProcess = async () => {
+	const obj = genesisNodeSeatFulfillPool.shift()
+	if (!obj) return
+	if (!Settle_ContractPool.length) {
+		genesisNodeSeatFulfillPool.unshift(obj)
+		return setTimeout(() => void genesisNodeSeatFulfillProcess(), 3000)
+	}
+
+	const usdcTx = String(obj.USDC_tx ?? '').trim()
+	try {
+		if (!/^0x[0-9a-fA-F]{64}$/.test(usdcTx)) {
+			throw new Error('Invalid USDC_tx')
+		}
+		if (!ethers.isAddress(obj.beneficiary) || obj.qty <= 0n) {
+			throw new Error('Invalid beneficiary or qty')
+		}
+
+		const existing = lookupGenesisNodeSeatFulfill(usdcTx)
+		if (existing) {
+			logger(
+				Colors.cyan(
+					`[genesisNodeSeatFulfill] idempotent hit USDC_tx=${usdcTx.slice(0, 12)}… create=${existing.createTxHash.slice(0, 12)}… claim=${existing.claimTxHash.slice(0, 12)}…`,
+				),
+			)
+			if (obj.res && !obj.res.headersSent) {
+				obj.res
+					.status(200)
+					.json({
+						success: true,
+						idempotent: true,
+						beneficiary: existing.beneficiary,
+						qty: existing.qty,
+						USDC_tx: existing.USDC_tx,
+						createTxHash: existing.createTxHash,
+						claimTxHash: existing.claimTxHash,
+					})
+					.end()
+			}
+			return
+		}
+
+		const contract = resolveValidatorDepositRedeemAddress()
+		if (!contract) throw new Error('CONET_VALIDATOR_DEPOSIT_REDEEM not configured')
+		const targetNodeIp = resolveValidatorNodeIp()
+		if (!isValidIpLike(targetNodeIp)) {
+			throw new Error('CONET_VALIDATOR_NODE_IP not configured (required for genesisNodeSeat fulfill)')
+		}
+
+		const adminWallet = loadRedeemAdminWallet()
+		const admin = ethers.getAddress(adminWallet.address)
+		const beneficiary = ethers.getAddress(obj.beneficiary)
+		const code = generateEphemeralRedeemCode()
+		const codeHash = codeHashOf(code)
+		const allowedClaimer = ethers.ZeroAddress
+		const referrer = ethers.ZeroAddress
+		const validatorCount = obj.qty
+		const gbMiningNodeCount = 0n
+		const airdrop = false
+		const validAfter = 0n
+		const validBefore = 0n
+		const now = Math.floor(Date.now() / 1000)
+		const createDeadline = BigInt(now + 3600)
+		const claimDeadline = BigInt(now + 3600)
+
+		const read = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+		const chainNonce = (await read.redeemAdminNonces!(admin)) as bigint
+
+		const createMessage = {
+			admin,
+			codeHash,
+			allowedClaimer,
+			referrer,
+			validatorCount,
+			targetNodeIp,
+			gbMiningNodeCount,
+			airdrop,
+			validAfter,
+			validBefore,
+			nonce: chainNonce,
+			deadline: createDeadline,
+		}
+		const createSignature = await adminWallet.signTypedData(
+			validatorDepositRedeemEip712Domain(contract),
+			validatorDepositRedeemCreateTypes,
+			createMessage,
+		)
+
+		const createTxHash = await withSettleWallet('genesisNodeSeatCreate', async (sc) => {
+			const c = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+			const tx = await c.createRedeemFor!(
+				admin,
+				codeHash,
+				allowedClaimer,
+				referrer,
+				validatorCount,
+				targetNodeIp,
+				gbMiningNodeCount,
+				airdrop,
+				validAfter,
+				validBefore,
+				chainNonce,
+				createDeadline,
+				createSignature,
+				{ gasLimit: 1_800_000 },
+			)
+			await tx.wait()
+			return tx.hash as string
+		})
+		if (!createTxHash) throw new Error('createRedeemFor failed (no settle wallet)')
+
+		const claimMessage = {
+			claimer: admin,
+			codeHash,
+			beneficiary,
+			referrer,
+			validatorCount,
+			targetNodeIp,
+			gbMiningNodeCount,
+			deadline: claimDeadline,
+		}
+		const claimSignature = await adminWallet.signTypedData(
+			validatorDepositRedeemEip712Domain(contract),
+			validatorDepositRedeemClaimTypes,
+			claimMessage,
+		)
+
+		const gasLimit = await resolveClaimRedeemForGasLimitWithEstimate(
+			read,
+			admin,
+			beneficiary,
+			code,
+			claimDeadline,
+			claimSignature,
+			validatorCount,
+		)
+
+		const claimTxHash = await withSettleWallet('genesisNodeSeatClaim', async (sc) => {
+			const c = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, sc.walletConet)
+			const tx = await c.claimRedeemFor!(admin, beneficiary, code, claimDeadline, claimSignature, { gasLimit })
+			const receipt = await tx.wait()
+			if (receipt?.status !== 1) {
+				throw new Error(`claimRedeemFor reverted (gasLimit=${gasLimit}, gasUsed=${receipt?.gasUsed?.toString() ?? '?'})`)
+			}
+			return tx.hash as string
+		})
+		if (!claimTxHash) throw new Error('claimRedeemFor failed (no settle wallet)')
+
+		const record: GenesisNodeSeatFulfillRecord = {
+			beneficiary,
+			qty: validatorCount.toString(),
+			payer: ethers.isAddress(obj.payer) ? ethers.getAddress(obj.payer) : String(obj.payer ?? ''),
+			USDC_tx: usdcTx,
+			usdcAmount6: String(obj.usdcAmount6 ?? ''),
+			createTxHash,
+			claimTxHash,
+			fulfilledAt: new Date().toISOString(),
+		}
+		writeGenesisNodeSeatFulfillRecord(record)
+
+		logger(
+			Colors.green(
+				`[genesisNodeSeatFulfill] OK USDC_tx=${usdcTx.slice(0, 12)}… qty=${record.qty} beneficiary=${beneficiary.slice(0, 10)}… create=${createTxHash.slice(0, 12)}… claim=${claimTxHash.slice(0, 12)}…`,
+			),
+		)
+		if (obj.res && !obj.res.headersSent) {
+			obj.res
+				.status(200)
+				.json({
+					success: true,
+					beneficiary,
+					qty: record.qty,
+					USDC_tx: usdcTx,
+					createTxHash,
+					claimTxHash,
+				})
+				.end()
+		}
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(Colors.red('[genesisNodeSeatFulfillProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: msg }).end()
+		}
+	} finally {
+		scheduleGenesisNodeSeatFulfillPoolPress()
+	}
 }
 
 export function startValidatorDepositRedeemListener(): void {

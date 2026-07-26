@@ -79,6 +79,8 @@ import {
 	validatorDepositRedeemCreateProcess,
 	validatorDepositRedeemClaimAirdropPool,
 	validatorDepositRedeemClaimAirdropProcess,
+	genesisNodeSeatFulfillPool,
+	kickGenesisNodeSeatFulfillPoolPress,
 } from './validatorDepositRedeem'
 
 const masterServerPort = 1111
@@ -3552,6 +3554,38 @@ const routing = ( router: Router ) => {
 			validatorDepositRedeemCreateProcess().catch((err: any) => {
 				logger(Colors.red('[validatorDepositRedeemCreateProcess] unhandled error:'), err?.message ?? err)
 			})
+		})
+
+		/** After Genesis Seat x402 settle: idempotent createRedeemFor + claimRedeemFor (Cluster already settled USDC). */
+		router.post('/genesisNodeSeatFulfill', (req, res) => {
+			const b = req.body as {
+				beneficiary?: string
+				qty?: string | number
+				payer?: string
+				USDC_tx?: string
+				usdcAmount6?: string
+			}
+			const beneficiary = String(b.beneficiary ?? '').trim()
+			const usdcTx = String(b.USDC_tx ?? '').trim()
+			const qtyRaw = String(b.qty ?? '').trim()
+			if (!beneficiary || !ethers.isAddress(beneficiary)) {
+				return res.status(400).json({ success: false, error: 'Invalid beneficiary' }).end()
+			}
+			if (!/^0x[0-9a-fA-F]{64}$/.test(usdcTx)) {
+				return res.status(400).json({ success: false, error: 'Invalid USDC_tx' }).end()
+			}
+			if (!/^\d+$/.test(qtyRaw) || BigInt(qtyRaw) <= 0n) {
+				return res.status(400).json({ success: false, error: 'Invalid qty' }).end()
+			}
+			genesisNodeSeatFulfillPool.push({
+				beneficiary: ethers.getAddress(beneficiary),
+				qty: BigInt(qtyRaw),
+				payer: String(b.payer ?? '').trim(),
+				USDC_tx: usdcTx,
+				usdcAmount6: String(b.usdcAmount6 ?? ''),
+				res,
+			})
+			kickGenesisNodeSeatFulfillPoolPress()
 		})
 
 		router.post('/validatorDepositRedeemAdminCancel', (req, res) => {

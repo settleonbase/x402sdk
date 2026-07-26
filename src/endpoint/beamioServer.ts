@@ -18,7 +18,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
@@ -4599,9 +4599,11 @@ const routing = ( router: Router ) => {
 	 *   5c. **workflow=clientTopup + beneficiary**（遗留）：仅 x402 结算 USDC → beneficiary EOA；卡内 topup 由客户端 `/api/usdcTopup`
 	 *   5d. **workflow=treasuryBridge + aa**：Discover 国库桥 — settle USDC → BASE_TREASURY（矿工异步铸 CONET-USDC → owner）；
 	 *       Master 立刻 mintPointsByAdmin → 用户 AA（不等 CoNET mint）
+	 *   5e. **workflow=genesisNodeSeat + beneficiary + qty**：Discover Genesis Seat — settle USDC → GENESIS_NODE_SEAT_PAYTO；
+	 *       Master `genesisNodeSeatFulfill` 自动 createRedeemFor + claimRedeemFor（listener 部署节点）
 	 */
 	router.post('/nfcUsdcTopup', async (req, res) => {
-		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature } = req.body as {
+		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty } = req.body as {
 			cardAddress?: string
 			cardOwner?: string
 			uid?: string
@@ -4626,6 +4628,8 @@ const routing = ( router: Router ) => {
 			permitDeadline?: string | number
 			permitNonce?: string | number
 			signature?: string
+			/** Genesis Node Seat：节点数量（正整数） */
+			qty?: string | number
 		}
 		const sidNorm: string | null = isValidSid(sid) ? (sid as string).trim().toLowerCase() : null
 		const posStr = (pos ?? '').toString().trim()
@@ -4735,25 +4739,29 @@ const routing = ( router: Router ) => {
 				workflowNorm === 'treasurybridge' && !!recipientAaAddr && !sessionPath && !hasFullNfc
 			const clientTopupOnly =
 				workflowNorm === 'clienttopup' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
+			const genesisNodeSeatOnly =
+				workflowNorm === 'genesisnodeseat' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
 
-			if ((clientTopupOnly || treasuryBridgeOnly) && (sidNorm || posAddr)) {
+			if ((clientTopupOnly || treasuryBridgeOnly || genesisNodeSeatOnly) && (sidNorm || posAddr)) {
 				return res
 					.status(400)
 					.json({
 						success: false,
-						error: `${treasuryBridgeOnly ? 'treasuryBridge' : 'clientTopup'} workflow must not include sid/pos (use POS admin QR for terminal top-up)`,
+						error: `${
+							treasuryBridgeOnly ? 'treasuryBridge' : genesisNodeSeatOnly ? 'genesisNodeSeat' : 'clientTopup'
+						} workflow must not include sid/pos (use POS admin QR for terminal top-up)`,
 					})
 					.end()
 			}
 
-			if (!hasFullNfc && !sessionPath && !clientTopupOnly && !treasuryBridgeOnly) {
+			if (!hasFullNfc && !sessionPath && !clientTopupOnly && !treasuryBridgeOnly && !genesisNodeSeatOnly) {
 				sessionUpdate({ state: 'error', error: 'Invalid uid' })
 				return res
 					.status(400)
 					.json({
 						success: false,
 						error:
-							'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin), treasuryBridge (aa+workflow), or clientTopup (beneficiary+workflow).',
+							'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin), treasuryBridge (aa+workflow), clientTopup (beneficiary+workflow), or genesisNodeSeat (beneficiary+qty+workflow).',
 					})
 					.end()
 			}
@@ -4775,6 +4783,72 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
 			}
 			const payToOwner = onChainOwner ?? ownerAddr
+
+			/**
+			 * Discover Genesis Node Seat：x402 settle Base USDC → GENESIS_NODE_SEAT_PAYTO（硬编码）；
+			 * 成功后 Master 幂等 createRedeemFor + claimRedeemFor，listener 听 ValidatorRedeemClaimed 部署节点。
+			 * 不走卡点 mint / nfcUsdcTopup Master 路径。
+			 */
+			if (genesisNodeSeatOnly && beneficiaryAddr) {
+				const genesisCard = ethers.getAddress(GENESIS_NODE_SEAT_CARD_ADDRESS)
+				if (cardAddr.toLowerCase() !== genesisCard.toLowerCase()) {
+					return res
+						.status(400)
+						.json({
+							success: false,
+							error: `genesisNodeSeat requires card ${genesisCard}`,
+						})
+						.end()
+				}
+				if (cur !== 'USDC' || paymentTokenNorm !== 'USDC') {
+					return res.status(400).json({ success: false, error: 'genesisNodeSeat requires currency/paymentToken USDC' }).end()
+				}
+				const qtyRaw = String(qty ?? '').trim()
+				if (!/^\d+$/.test(qtyRaw) || BigInt(qtyRaw) <= 0n) {
+					return res.status(400).json({ success: false, error: 'Invalid qty (expect positive integer)' }).end()
+				}
+				const qtyBn = BigInt(qtyRaw)
+				if (qtyBn > 100n) {
+					return res.status(400).json({ success: false, error: 'qty too large (max 100)' }).end()
+				}
+				const expectedUsdc6 = qtyBn * GENESIS_NODE_SEAT_USDC_PER_NODE6
+				const { amount6: quotedGenesis } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+				if (quotedGenesis !== expectedUsdc6) {
+					return res
+						.status(400)
+						.json({
+							success: false,
+							error: `genesisNodeSeat amount mismatch: quoted ${quotedGenesis.toString()} != qty*1370e6 (${expectedUsdc6.toString()})`,
+						})
+						.end()
+				}
+				const settleDesc = `Beamio USDC genesisNodeSeat (qty=${qtyRaw} → payTo ${GENESIS_NODE_SEAT_PAYTO.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+				const settledGenesis = await settleBeamioX402ToCardOwner(req, res, {
+					cardOwner: GENESIS_NODE_SEAT_PAYTO,
+					quotedUsdc6: expectedUsdc6,
+					description: settleDesc,
+				})
+				if (!settledGenesis) {
+					return
+				}
+				logger(
+					Colors.green(
+						`[nfcUsdcTopup/genesisNodeSeat] settle OK card=${cardAddr} payTo=${GENESIS_NODE_SEAT_PAYTO} beneficiary=${beneficiaryAddr} qty=${qtyRaw} payer=${settledGenesis.payer} usdc6=${settledGenesis.usdcAmount6} USDC_tx=${settledGenesis.USDC_tx}`,
+					),
+				)
+				postLocalhost(
+					'/api/genesisNodeSeatFulfill',
+					{
+						beneficiary: beneficiaryAddr,
+						qty: qtyRaw,
+						payer: settledGenesis.payer,
+						USDC_tx: settledGenesis.USDC_tx,
+						usdcAmount6: settledGenesis.usdcAmount6.toString(),
+					},
+					res,
+				)
+				return
+			}
 
 			/**
 			 * Discover 完整国库桥：x402 settle Base USDC → BASE_TREASURY（同址 0xa311…）。
