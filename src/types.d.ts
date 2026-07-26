@@ -40,6 +40,11 @@ type IMasterSetup = {
 		dryRun?: boolean
 		rpcUrl?: string
 	}
+	/**
+	 * Genesis Node Seat / ValidatorDepositRedeem redeem-admin 私钥（EOA =
+	 * `CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN`）。API 主机优先用此字段签 createRedeemFor / claimRedeemFor。
+	 */
+	GenesisNode?: string
 }
 
 /**

@@ -16,6 +16,7 @@ import {
 	CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK,
 	CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN,
 	CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN,
+	CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN_LEGACY,
 	CONET_VALIDATOR_NODE_IP,
 	CONET_VALIDATOR_NODE_REWARD_INDEXER,
 	CONET_VALIDATOR_REFERRER_EXTENSION,
@@ -877,22 +878,50 @@ function resolveWalletPassword(): string {
 	return ''
 }
 
+function allowedRedeemAdminAddresses(): string[] {
+	const fromEnv = (process.env.CONET_VALIDATOR_DEPOSIT_REDEEM_ADMINS || '')
+		.split(/[\s,]+/)
+		.map((s) => s.trim())
+		.filter((s) => ethers.isAddress(s))
+		.map((s) => ethers.getAddress(s))
+	const defaults = [
+		CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN,
+		CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN_LEGACY,
+	]
+		.filter((s) => ethers.isAddress(s))
+		.map((s) => ethers.getAddress(s))
+	return [...new Set([...defaults, ...fromEnv].map((a) => a.toLowerCase()))]
+}
+
+/** Prefer API-host `~/.master.json` `GenesisNode` (Genesis Seat fulfill); else private key file (validator node deposit). */
 function loadRedeemAdminWallet(): ethers.Wallet {
+	const provider = conetProvider()
+	const allowed = allowedRedeemAdminAddresses()
+
+	const assertAllowed = (wallet: ethers.Wallet, source: string): ethers.Wallet => {
+		if (!allowed.includes(wallet.address.toLowerCase())) {
+			throw new Error(
+				`redeem admin key mismatch (${source}): got ${wallet.address}, allowed ${allowed.join(', ')}`
+			)
+		}
+		return wallet
+	}
+
+	const genesisRaw = String(masterSetup.GenesisNode ?? '').trim()
+	if (genesisRaw) {
+		const pk = genesisRaw.startsWith('0x') ? genesisRaw : `0x${genesisRaw}`
+		return assertAllowed(new ethers.Wallet(pk, provider), 'master.json GenesisNode')
+	}
+
 	const file = resolveDepositPrivateKeyFile()
 	if (!file || !fs.existsSync(file)) {
 		throw new Error(
-			'CONET_VALIDATOR_REDEEM_ADMIN_PRIVATE_KEY_FILE (or CONET_VALIDATOR_DEPOSIT_PRIVATE_KEY_FILE) missing; required for fundAndDepositValidators'
+			'GenesisNode missing in ~/.master.json and CONET_VALIDATOR_REDEEM_ADMIN_PRIVATE_KEY_FILE (or CONET_VALIDATOR_DEPOSIT_PRIVATE_KEY_FILE) missing'
 		)
 	}
 	const raw = fs.readFileSync(file, 'utf8').trim()
 	const pk = raw.startsWith('0x') ? raw : `0x${raw}`
-	const wallet = new ethers.Wallet(pk, conetProvider())
-	if (wallet.address.toLowerCase() !== CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN.toLowerCase()) {
-		throw new Error(
-			`redeem admin key mismatch: expected ${CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN}, got ${wallet.address}`
-		)
-	}
-	return wallet
+	return assertAllowed(new ethers.Wallet(pk, provider), `file ${file}`)
 }
 
 function validatorDryRun(): boolean {

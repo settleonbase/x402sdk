@@ -185,8 +185,13 @@ export const CONET_DEPOSIT_CONTRACT = '0x424242424242424242424242424242424242424
 export const CONET_VALIDATOR_DEPOSIT_FUNDER = '0x0981275553A41E00ec1006fe074971285E00c2A3'
 /** ValidatorDepositRedeem contract admin (withdrawNative only; not redeem admin). Sync from deployments/conet-ValidatorDepositRedeem.json */
 export const CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
-/** ValidatorDepositRedeem redeem admin on validator node 38.102.85.33 (~/.master.json key_38.102.85.33) */
-export const CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN = '0xE974c5d10cc36738bC2619FC73b075504D5c6d1E'
+/**
+ * ValidatorDepositRedeem redeem admin used by API genesisNodeSeat fulfill
+ * (`~/.master.json` `GenesisNode` private key → this address).
+ */
+export const CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN = '0x6CC9e08b6050Aef5Edeae9D5a065E96c360701E5'
+/** Legacy redeem admin (validator node deposit key / prior ops); still valid on-chain. */
+export const CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN_LEGACY = '0xE974c5d10cc36738bC2619FC73b075504D5c6d1E'
 export const CONET_VALIDATOR_NODE_IP = '212.227.242.207'
 /** ValidatorNodeRewardIndexer（CoNET）：每节点/每受益人小时原子 CNET 收益账本 + 周期统计；
  *  与 deployments/conet-addresses.json `ValidatorNodeRewardIndexer` 同步。留空则由主合约 rewardIndexer() 解析。 */
