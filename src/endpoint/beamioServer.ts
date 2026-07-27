@@ -4850,18 +4850,52 @@ const routing = ( router: Router ) => {
 						`[nfcUsdcTopup/genesisNodeSeat] settle OK${genesisTestMode ? ' TEST' : ''} card=${cardAddr} payTo=${GENESIS_NODE_SEAT_PAYTO} beneficiary=${beneficiaryAddr} qty=${qtyRaw} payer=${settledGenesis.payer} usdc6=${settledGenesis.usdcAmount6} USDC_tx=${settledGenesis.USDC_tx}`,
 					),
 				)
-				postLocalhost(
-					'/api/genesisNodeSeatFulfill',
-					{
-						beneficiary: beneficiaryAddr,
-						qty: qtyRaw,
-						payer: settledGenesis.payer,
-						USDC_tx: settledGenesis.USDC_tx,
-						usdcAmount6: settledGenesis.usdcAmount6.toString(),
-						testMode: genesisTestMode,
-					},
-					res,
-				)
+				// Return immediately after USDC settle — do not block the client (esp. mobile
+				// in-app browsers) on createRedeemFor + claimRedeemFor (can take tens of seconds
+				// and blank Base/MetaMask WebViews). Fulfill runs in background on Master.
+				if (!res.headersSent) {
+					res
+						.status(200)
+						.json({
+							success: true,
+							workflow: 'genesisNodeSeat',
+							USDC_tx: settledGenesis.USDC_tx,
+							payer: settledGenesis.payer,
+							usdcAmount6: settledGenesis.usdcAmount6.toString(),
+							beneficiary: beneficiaryAddr,
+							qty: qtyRaw,
+							fulfillPending: true,
+							testMode: genesisTestMode,
+						})
+						.end()
+				}
+				void postLocalhostBuffer('/api/genesisNodeSeatFulfill', {
+					beneficiary: beneficiaryAddr,
+					qty: qtyRaw,
+					payer: settledGenesis.payer,
+					USDC_tx: settledGenesis.USDC_tx,
+					usdcAmount6: settledGenesis.usdcAmount6.toString(),
+					testMode: genesisTestMode,
+				})
+					.then((r) => {
+						if (r.statusCode >= 400) {
+							logger(
+								Colors.red(
+									`[nfcUsdcTopup/genesisNodeSeat] background fulfill HTTP ${r.statusCode}: ${r.body.slice(0, 400)}`,
+								),
+							)
+						} else {
+							logger(
+								Colors.green(
+									`[nfcUsdcTopup/genesisNodeSeat] background fulfill OK USDC_tx=${settledGenesis.USDC_tx?.slice(0, 12)}…`,
+								),
+							)
+						}
+					})
+					.catch((e: unknown) => {
+						const msg = e instanceof Error ? e.message : String(e)
+						logger(Colors.red(`[nfcUsdcTopup/genesisNodeSeat] background fulfill error: ${msg}`))
+					})
 				return
 			}
 
