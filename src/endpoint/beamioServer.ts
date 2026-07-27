@@ -18,7 +18,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
@@ -4603,7 +4603,7 @@ const routing = ( router: Router ) => {
 	 *       Master `genesisNodeSeatFulfill` 自动 createRedeemFor + claimRedeemFor（listener 部署节点）
 	 */
 	router.post('/nfcUsdcTopup', async (req, res) => {
-		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty } = req.body as {
+		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty, test } = req.body as {
 			cardAddress?: string
 			cardOwner?: string
 			uid?: string
@@ -4630,6 +4630,8 @@ const routing = ( router: Router ) => {
 			signature?: string
 			/** Genesis Node Seat：节点数量（正整数） */
 			qty?: string | number
+			/** Genesis E2E test gate (`test=332266` → settle 1 USDC, still fulfill) */
+			test?: string | number
 		}
 		const sidNorm: string | null = isValidSid(sid) ? (sid as string).trim().toLowerCase() : null
 		const posStr = (pos ?? '').toString().trim()
@@ -4811,21 +4813,33 @@ const routing = ( router: Router ) => {
 				if (qtyBn > 100n) {
 					return res.status(400).json({ success: false, error: 'qty too large (max 100)' }).end()
 				}
-				const expectedUsdc6 = qtyBn * GENESIS_NODE_SEAT_USDC_PER_NODE6
-				const { amount6: quotedGenesis } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
-				if (quotedGenesis !== expectedUsdc6) {
+				const genesisTestMode = String(test ?? '').trim() === GENESIS_NODE_SEAT_TEST_CODE
+				if (genesisTestMode && qtyBn !== 1n) {
 					return res
 						.status(400)
-						.json({
-							success: false,
-							error: `genesisNodeSeat amount mismatch: quoted ${quotedGenesis.toString()} != qty*1370e6 (${expectedUsdc6.toString()})`,
-						})
+						.json({ success: false, error: 'genesisNodeSeat test mode allows qty=1 only' })
 						.end()
 				}
-				const settleDesc = `Beamio USDC genesisNodeSeat (qty=${qtyRaw} → payTo ${GENESIS_NODE_SEAT_PAYTO.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+				const expectedUsdc6 = qtyBn * GENESIS_NODE_SEAT_USDC_PER_NODE6
+				const settleUsdc6 = genesisTestMode ? GENESIS_NODE_SEAT_TEST_USDC6 : expectedUsdc6
+				if (!genesisTestMode) {
+					const { amount6: quotedGenesis } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+					if (quotedGenesis !== expectedUsdc6) {
+						return res
+							.status(400)
+							.json({
+								success: false,
+								error: `genesisNodeSeat amount mismatch: quoted ${quotedGenesis.toString()} != qty*1370e6 (${expectedUsdc6.toString()})`,
+							})
+							.end()
+					}
+				}
+				const settleDesc = genesisTestMode
+					? `Beamio USDC genesisNodeSeat TEST (pay 1.00 USDC; fulfill qty=${qtyRaw} → payTo ${GENESIS_NODE_SEAT_PAYTO.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+					: `Beamio USDC genesisNodeSeat (qty=${qtyRaw} → payTo ${GENESIS_NODE_SEAT_PAYTO.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
 				const settledGenesis = await settleBeamioX402ToCardOwner(req, res, {
 					cardOwner: GENESIS_NODE_SEAT_PAYTO,
-					quotedUsdc6: expectedUsdc6,
+					quotedUsdc6: settleUsdc6,
 					description: settleDesc,
 				})
 				if (!settledGenesis) {
@@ -4833,7 +4847,7 @@ const routing = ( router: Router ) => {
 				}
 				logger(
 					Colors.green(
-						`[nfcUsdcTopup/genesisNodeSeat] settle OK card=${cardAddr} payTo=${GENESIS_NODE_SEAT_PAYTO} beneficiary=${beneficiaryAddr} qty=${qtyRaw} payer=${settledGenesis.payer} usdc6=${settledGenesis.usdcAmount6} USDC_tx=${settledGenesis.USDC_tx}`,
+						`[nfcUsdcTopup/genesisNodeSeat] settle OK${genesisTestMode ? ' TEST' : ''} card=${cardAddr} payTo=${GENESIS_NODE_SEAT_PAYTO} beneficiary=${beneficiaryAddr} qty=${qtyRaw} payer=${settledGenesis.payer} usdc6=${settledGenesis.usdcAmount6} USDC_tx=${settledGenesis.USDC_tx}`,
 					),
 				)
 				postLocalhost(
@@ -4844,6 +4858,7 @@ const routing = ( router: Router ) => {
 						payer: settledGenesis.payer,
 						USDC_tx: settledGenesis.USDC_tx,
 						usdcAmount6: settledGenesis.usdcAmount6.toString(),
+						testMode: genesisTestMode,
 					},
 					res,
 				)

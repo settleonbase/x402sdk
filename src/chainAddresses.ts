@@ -113,6 +113,14 @@ export const GENESIS_NODE_SEAT_PAYTO = '0x17FCE32f01f88FFBDAf6BA51cef9138bF6BD63
 export const GENESIS_NODE_SEAT_USDC_PER_NODE6 = NODE_SALE_NODE_PRICE_USDC6 + NODE_SALE_SERVER_FEE_USDC6
 /** Discover Genesis 商家卡（SilentPassUI /discover 明细） */
 export const GENESIS_NODE_SEAT_CARD_ADDRESS = '0xafE482D2612327a0D723544B9fB713C514a793a2'
+/**
+ * E2E test gate for `/usdc-topup?...&workflow=genesisNodeSeat&test=…`.
+ * When body `test` matches, Cluster settles **1.00 USDC** then still runs full
+ * `genesisNodeSeatFulfill` (createRedeemFor + claimRedeemFor) for `qty` (max 1).
+ */
+export const GENESIS_NODE_SEAT_TEST_CODE = '332266'
+/** Test-mode x402 settle amount (1.00 USDC, 6 decimals) */
+export const GENESIS_NODE_SEAT_TEST_USDC6 = 1_000_000n
 
 /** CoNET BUint ERC20（balanceOfAll）；与 deployments/conet-addresses.json `BUint` 同步 */
 export const CONET_BUINT = '0x54ac4672cE75EC5ACebaeF1a7aFC6F49E77Ae9Ae'
