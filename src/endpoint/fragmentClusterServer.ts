@@ -11,6 +11,7 @@ import {writeFile} from 'node:fs'
 import {beamio_ContractPool} from '../db'
 import { keccak256, toUtf8Bytes } from "ethers"
 import { registerCatalogYoutubeStreamProxyRoute } from './catalogYoutubeStreamProxy'
+import { scheduleFragmentKuboReplication } from './kuboFragmentPin'
 
 const storagePATH = masterSetup.storagePATH
 
@@ -295,6 +296,8 @@ const saveFragment = (hash: string, data: string): Promise<boolean> => new Promi
 			return resolve (false)
 		}
 		logger(`saveFragment storage [${fileName}] data length = ${data.length} success!`)
+		// Local store is primary; durable Kubo peers are background pin replicas.
+		scheduleFragmentKuboReplication(hash, data)
 
 		const parsed = parseBase64(data)
 		if (!parsed || !isRangeStreamableMime(parsed.mime)) {

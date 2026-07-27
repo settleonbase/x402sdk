@@ -1,0 +1,32 @@
+[Unit]
+Description=CoNET Kubo fragment ingest (pin from ipfs.conet.network only)
+Documentation=https://ipfs.conet.network/
+After=network-online.target ipfs.service
+Wants=network-online.target
+Requires=ipfs.service
+
+[Service]
+Type=simple
+User=ipfs
+Group=ipfs
+Environment=IPFS_PATH=/var/lib/ipfs
+Environment=CONET_KUBO_INGEST_HOST=0.0.0.0
+Environment=CONET_KUBO_INGEST_PORT=9545
+Environment=CONET_KUBO_INGEST_TOKEN_FILE=/etc/conet-kubo-ingest/token
+Environment=CONET_KUBO_INGEST_MAP_DIR=/var/lib/ipfs/conet-fragment-map
+Environment=CONET_KUBO_INGEST_TMP_DIR=/var/lib/ipfs/tmp
+Environment=CONET_KUBO_INGEST_ALLOW_IPS=38.102.126.30,127.0.0.1,::1
+ExecStart=/usr/bin/python3 /opt/conet-kubo-ingest/conet_kubo_ingest.py
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/ipfs
+ReadOnlyPaths=/etc/conet-kubo-ingest /opt/conet-kubo-ingest /usr/local/bin/ipfs
+
+[Install]
+WantedBy=multi-user.target
