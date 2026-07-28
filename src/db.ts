@@ -1979,61 +1979,104 @@ export async function listReferralRegistryTreeByAccount(account: string): Promis
 	}
 }
 
-/** POS 终端 EOA（商户子 admin）→ 登记为 admin 的 BeamioUserCard；供跨卡冲突拒绝与 GET myPosAddress。 */
+/**
+ * POS 终端 EOA → 可登记多张 BeamioUserCard（一 EOA 多商家）。
+ * PK = (pos_eoa, card_address)；`is_active` 标记当前 POS 使用的活跃卡（GET myPosAddress）。
+ */
 const BEAMIO_POS_TERMINAL_ADMIN_CARD_TABLE = `CREATE TABLE IF NOT EXISTS beamio_pos_terminal_admin_card (
-	pos_eoa TEXT PRIMARY KEY,
+	pos_eoa TEXT NOT NULL,
 	card_address TEXT NOT NULL,
 	tx_hash TEXT,
-	updated_at TIMESTAMPTZ DEFAULT NOW()
+	is_active BOOLEAN NOT NULL DEFAULT false,
+	updated_at TIMESTAMPTZ DEFAULT NOW(),
+	PRIMARY KEY (pos_eoa, card_address)
 )`
 const BEAMIO_POS_TERMINAL_ADMIN_CARD_IDX_CARD = `CREATE INDEX IF NOT EXISTS idx_beamio_pos_terminal_admin_card_card ON beamio_pos_terminal_admin_card (LOWER(TRIM(card_address)))`
+const BEAMIO_POS_TERMINAL_ADMIN_CARD_IDX_ACTIVE = `CREATE INDEX IF NOT EXISTS idx_beamio_pos_terminal_admin_card_active ON beamio_pos_terminal_admin_card (pos_eoa) WHERE is_active = true`
 
 async function ensureBeamioPosTerminalAdminCardSchema(db: Client): Promise<void> {
 	await db.query(BEAMIO_POS_TERMINAL_ADMIN_CARD_TABLE)
 	await db.query(BEAMIO_POS_TERMINAL_ADMIN_CARD_IDX_CARD)
+	await db.query(BEAMIO_POS_TERMINAL_ADMIN_CARD_IDX_ACTIVE).catch(() => {})
 	await db.query(
 		`ALTER TABLE beamio_pos_terminal_admin_card ADD COLUMN IF NOT EXISTS metadata_json JSONB`
 	).catch(() => {})
+	await db.query(
+		`ALTER TABLE beamio_pos_terminal_admin_card ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT false`
+	).catch(() => {})
+
+	// Legacy: pos_eoa-only PRIMARY KEY → composite (pos_eoa, card_address) for multi-merchant.
+	const { rows: pkCols } = await db.query<{ column_name: string }>(
+		`SELECT a.attname AS column_name
+		 FROM pg_index i
+		 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+		 JOIN pg_class c ON c.oid = i.indrelid
+		 JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE i.indisprimary
+		   AND n.nspname = 'public'
+		   AND c.relname = 'beamio_pos_terminal_admin_card'
+		 ORDER BY a.attnum`
+	).catch(() => ({ rows: [] as Array<{ column_name: string }> }))
+	const pkNames = pkCols.map((r) => r.column_name)
+	const isLegacyPk = pkNames.length === 1 && pkNames[0] === 'pos_eoa'
+	if (isLegacyPk) {
+		await db.query(`
+			ALTER TABLE beamio_pos_terminal_admin_card DROP CONSTRAINT IF EXISTS beamio_pos_terminal_admin_card_pkey;
+			ALTER TABLE beamio_pos_terminal_admin_card
+				ADD CONSTRAINT beamio_pos_terminal_admin_card_pkey PRIMARY KEY (pos_eoa, card_address);
+		`)
+		logger(Colors.magenta('[ensureBeamioPosTerminalAdminCardSchema] migrated PK → (pos_eoa, card_address)'))
+	}
+
+	// Ensure each POS has exactly one active row when any bindings exist.
+	await db.query(`
+		UPDATE beamio_pos_terminal_admin_card t
+		SET is_active = true
+		FROM (
+			SELECT DISTINCT ON (pos_eoa) pos_eoa, card_address
+			FROM beamio_pos_terminal_admin_card
+			ORDER BY pos_eoa, is_active DESC, updated_at DESC NULLS LAST
+		) pick
+		WHERE t.pos_eoa = pick.pos_eoa
+		  AND t.card_address = pick.card_address
+		  AND NOT EXISTS (
+			SELECT 1 FROM beamio_pos_terminal_admin_card x
+			WHERE x.pos_eoa = t.pos_eoa AND x.is_active = true
+		  )
+	`).catch(() => {})
 }
 
-/** cardAddAdmin 预检：POS EOA 已绑定其他卡则拒绝。同一卡重复登记允许（更新 mint limit 等）。 */
+/**
+ * cardAddAdmin 预检：同一卡重复登记允许。
+ * 一终端可绑定多商家卡（不再因「已绑其它卡」拒绝）。
+ */
 export const assertPosEoaAvailableForCardBinding = async (
-	posLoose: string,
-	cardAddressLoose: string
+	_posLoose: string,
+	_cardAddressLoose: string
 ): Promise<{ ok: true } | { ok: false; error: string }> => {
-	const db = new Client({ connectionString: DB_URL })
 	try {
-		await db.connect()
-		await ensureBeamioPosTerminalAdminCardSchema(db)
-		const pos = ethers.getAddress(posLoose).toLowerCase()
-		const card = ethers.getAddress(cardAddressLoose).toLowerCase()
-		const { rows } = await db.query<{ card_address: string }>(
-			`SELECT card_address FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 LIMIT 1`,
-			[pos]
-		)
-		if (rows.length > 0 && rows[0].card_address !== card) {
-			return {
-				ok: false,
-				error:
-					'This terminal address is already registered as a POS terminal. Remove it there before linking to this POS terminal.',
-			}
+		if (!_posLoose || !ethers.isAddress(_posLoose)) {
+			return { ok: false, error: 'Invalid terminal address.' }
+		}
+		if (!_cardAddressLoose || !ethers.isAddress(_cardAddressLoose)) {
+			return { ok: false, error: 'Invalid merchant card address.' }
 		}
 		return { ok: true }
 	} catch (e: any) {
 		logger(Colors.yellow(`[assertPosEoaAvailableForCardBinding] failed: ${e?.message ?? e}`))
 		return { ok: false, error: 'Could not verify terminal registration. Try again later.' }
-	} finally {
-		await db.end().catch(() => {})
 	}
 }
 
-/** adminManager(add) 上链成功后写入；remove 成功后可 delete。metadataJson：Link terminal UI 随 calldata 上链的 JSON（同步解析入库）。 */
+/** adminManager(add) 上链成功后写入；新绑定默认设为该 POS 的活跃卡。 */
 export const upsertPosTerminalAdminCardBinding = async (params: {
 	posEoa: string
 	cardAddress: string
 	txHash?: string
 	/** Parsed object or JSON-serializable value; omit on non-terminal upserts (e.g. redeem) to preserve existing row. */
 	metadataJson?: unknown
+	/** When false, do not flip is_active (rare). Default true — new/updated binding becomes active. */
+	makeActive?: boolean
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
@@ -2042,20 +2085,30 @@ export const upsertPosTerminalAdminCardBinding = async (params: {
 		const pos = ethers.getAddress(params.posEoa).toLowerCase()
 		const card = ethers.getAddress(params.cardAddress).toLowerCase()
 		const meta = params.metadataJson === undefined ? null : params.metadataJson
+		const makeActive = params.makeActive !== false
+		await db.query('BEGIN')
+		if (makeActive) {
+			await db.query(
+				`UPDATE beamio_pos_terminal_admin_card SET is_active = false WHERE pos_eoa = $1 AND is_active = true`,
+				[pos]
+			)
+		}
 		await db.query(
 			`
-			INSERT INTO beamio_pos_terminal_admin_card (pos_eoa, card_address, tx_hash, metadata_json, updated_at)
-			VALUES ($1, $2, $3, $4::jsonb, NOW())
-			ON CONFLICT (pos_eoa) DO UPDATE SET
-				card_address = EXCLUDED.card_address,
-				tx_hash = EXCLUDED.tx_hash,
+			INSERT INTO beamio_pos_terminal_admin_card (pos_eoa, card_address, tx_hash, metadata_json, is_active, updated_at)
+			VALUES ($1, $2, $3, $4::jsonb, $5, NOW())
+			ON CONFLICT (pos_eoa, card_address) DO UPDATE SET
+				tx_hash = COALESCE(EXCLUDED.tx_hash, beamio_pos_terminal_admin_card.tx_hash),
 				metadata_json = COALESCE(EXCLUDED.metadata_json, beamio_pos_terminal_admin_card.metadata_json),
+				is_active = CASE WHEN $5 THEN true ELSE beamio_pos_terminal_admin_card.is_active END,
 				updated_at = NOW()
 			`,
-			[pos, card, params.txHash ?? null, meta]
+			[pos, card, params.txHash ?? null, meta, makeActive]
 		)
-		logger(Colors.green(`[upsertPosTerminalAdminCardBinding] pos=${pos} card=${card}`))
+		await db.query('COMMIT')
+		logger(Colors.green(`[upsertPosTerminalAdminCardBinding] pos=${pos} card=${card} active=${makeActive}`))
 	} catch (e: any) {
+		await db.query('ROLLBACK').catch(() => {})
 		logger(Colors.yellow(`[upsertPosTerminalAdminCardBinding] failed: ${e?.message ?? e}`))
 	} finally {
 		await db.end().catch(() => {})

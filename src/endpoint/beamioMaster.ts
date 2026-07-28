@@ -2951,7 +2951,9 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({ success: true, syncTx: result.syncTx }).end()
 		})
 
-		/** POST /api/cardGatewayRewardPool — Cluster 预检后转发；factory.gatewayInvokeCard 或 Plan A cardCallData 直调。 */
+		/** POST /api/cardGatewayRewardPool — Cluster 预检后转发；factory.gatewayInvokeCard 或 Plan A cardCallData 直调。
+		 * recordUserLike / burnUserLike：入队即返回 `{ success, queued }`（对齐 cardCouponOpenClaim），勿等 EntryPoint 确认。
+		 */
 		router.post('/cardGatewayRewardPool', async (req, res) => {
 			const { cardAddress, factoryCallData, cardCallData, extraCardCallData, label, initOnly, socialDb } = req.body as {
 				cardAddress?: string
@@ -2975,6 +2977,9 @@ const routing = ( router: Router ) => {
 					.end()
 			}
 			const taskLabel = typeof label === 'string' && label.trim() ? label.trim() : 'cardGatewayRewardPool'
+			/** Coupons / Discover 点赞：预检合格入队后立即成功，改善 UI 等待。 */
+			const respondOnEnqueue =
+				taskLabel === 'recordUserLike' || taskLabel === 'burnUserLike'
 			const extraSteps = Array.isArray(extraCardCallData)
 				? extraCardCallData.filter((d) => typeof d === 'string' && d.length >= 10)
 				: undefined
@@ -2986,9 +2991,20 @@ const routing = ( router: Router ) => {
 				...(initOnly ? { initOnly: true } : {}),
 				...(socialDb ? { socialDb } : {}),
 				label: taskLabel,
-				res,
+				...(respondOnEnqueue ? {} : { res }),
 			})
 			logger(Colors.cyan(`[cardGatewayRewardPool] pushed to pool label=${taskLabel} card=${cardAddress}`))
+			if (respondOnEnqueue) {
+				return res
+					.status(200)
+					.json({
+						success: true,
+						queued: true,
+						cardAddress: ethers.getAddress(cardAddress),
+						label: taskLabel,
+					})
+					.end()
+			}
 		})
 
 		/** POST /api/cardGatewayInitializeUserCumulativeStat — Cluster 预检后仅初始化 cumulative stat tokens（无 owner 签名）。 */

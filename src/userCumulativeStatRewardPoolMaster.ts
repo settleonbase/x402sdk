@@ -74,6 +74,10 @@ export type CardGatewayRewardPoolTask = {
 	initOnly?: boolean
 	/** 链上 tx 成功后写入 beamio_card_program_*（不做历史回填）。 */
 	socialDb?: CardProgramSocialDbMeta
+	/**
+	 * HTTP response handle. Omitted for recordUserLike / burnUserLike when Master already
+	 * returned `{ success, queued }` at enqueue (client must not wait for EntryPoint).
+	 */
 	res?: Response
 }
 
@@ -310,7 +314,10 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 			}
 			logger(Colors.green(`[${obj.label}] ok (direct card) hash=${lastHash} card=${obj.cardAddress}`))
 			await persistCardProgramSocialDbAfterTx(obj.cardAddress, lastHash, obj.socialDb)
-			obj.res?.status(200).json({ success: true, hash: lastHash }).end()
+			/** like/unlike already returned `{ queued: true }` at enqueue — do not rewrite HTTP. */
+			if (obj.res && !obj.res.headersSent) {
+				obj.res.status(200).json({ success: true, hash: lastHash }).end()
+			}
 			scheduleSocialBunitFeeAfterGatewaySuccess(obj, lastHash, lastGas)
 			return
 		}
@@ -344,13 +351,17 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 		}
 		logger(Colors.green(`[${obj.label}] ok hash=${tx.hash} card=${obj.cardAddress}`))
 		await persistCardProgramSocialDbAfterTx(obj.cardAddress, tx.hash, obj.socialDb)
-		obj.res?.status(200).json({ success: true, hash: tx.hash }).end()
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(200).json({ success: true, hash: tx.hash }).end()
+		}
 		scheduleSocialBunitFeeAfterGatewaySuccess(obj, tx.hash, receipt?.gasUsed ?? 0n)
 	} catch (e: unknown) {
 		const err = e as { shortMessage?: string; message?: string }
 		const msg = err?.shortMessage ?? err?.message ?? String(e)
 		logger(Colors.red(`[${obj.label}] failed: ${msg}`))
-		obj.res?.status(500).json({ success: false, error: msg }).end()
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(500).json({ success: false, error: msg }).end()
+		}
 	} finally {
 		Settle_ContractPool.unshift(SC)
 		scheduleCardGatewayRewardPoolPress()

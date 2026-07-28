@@ -8648,7 +8648,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/cardGatewayInitializeUserCumulativeStat', preCheck.preChecked, res)
 	})
 
-	/** Gateway-only：用户 EIP-712 点赞 / 解除点赞（burn like stat token ≈ 转 0x0）。 */
+	/** Gateway-only：用户 EIP-712 点赞 / 解除点赞。Cluster 预检后转发；Master 对 like/unlike 入队即返回 queued（链上后台执行）。 */
 	router.post('/cardRecordUserLike', async (req, res) => {
 		const preCheck = await cardRecordUserLikePreCheck(req.body)
 		if (!preCheck.success) {
@@ -8658,7 +8658,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		const liked = Boolean(req.body?.liked)
 		const targetKind = Number(req.body?.targetKind ?? 1)
 		logger(
-			Colors.green(`server /api/cardRecordUserLike preCheck OK → cardGatewayRewardPool liked=${liked} targetKind=${targetKind}`),
+			Colors.green(
+				`server /api/cardRecordUserLike preCheck OK → cardGatewayRewardPool liked=${liked} targetKind=${targetKind} (enqueue→queued)`,
+			),
 			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
 		)
 		postLocalhost(
