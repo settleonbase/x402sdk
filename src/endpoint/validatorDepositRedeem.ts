@@ -3773,11 +3773,11 @@ export const genesisNodeSeatFulfillProcess = async () => {
 		const treasury = ethers.getAddress(CONET_TREASURY)
 		const beneficiary = ethers.getAddress(obj.beneficiary)
 		const testMode = Boolean(obj.testMode)
-		let referrer = ethers.ZeroAddress
+		let saleReferrer = ethers.ZeroAddress
 		const refRaw = String(obj.referrerL0 ?? '').trim()
 		if (refRaw && ethers.isAddress(refRaw)) {
 			// Client field may be Admin, L0, or L1 — vault bindSale resolves the role.
-			referrer = ethers.getAddress(refRaw)
+			saleReferrer = ethers.getAddress(refRaw)
 		}
 
 		if (testMode) {
@@ -3817,7 +3817,7 @@ export const genesisNodeSeatFulfillProcess = async () => {
 			})
 
 			const vaultConet = new ethers.Contract(vault, GENESIS_VAULT_BIND_ABI, sc.walletConet)
-			const bindTx = await vaultConet.bindSale!(operationId, referrer, beneficiary, obj.qty, testMode, {
+			const bindTx = await vaultConet.bindSale!(operationId, saleReferrer, beneficiary, obj.qty, testMode, {
 				gasLimit: 300_000,
 			})
 			await bindTx.wait()
@@ -3962,7 +3962,7 @@ export const genesisNodeSeatFulfillProcess = async () => {
 			payer: ethers.isAddress(obj.payer) ? ethers.getAddress(obj.payer) : String(obj.payer ?? ''),
 			USDC_tx: usdcTx,
 			usdcAmount6: String(obj.usdcAmount6 ?? ''),
-			referrerL0: referrer !== ethers.ZeroAddress ? referrer : '',
+			referrerL0: saleReferrer !== ethers.ZeroAddress ? saleReferrer : '',
 			testMode,
 			operationId: bridgeResult.operationId,
 			bindTxHash: bridgeResult.bindTxHash,
