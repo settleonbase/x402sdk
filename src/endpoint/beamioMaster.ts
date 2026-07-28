@@ -2803,7 +2803,9 @@ const routing = ( router: Router ) => {
 			kickCardRedeemPoolPress()
 		})
 
-		/** cardCouponOpenClaim：无 redeemcode 的 coupon open-claim，服务端调用 claimIssuedNftWithUserSig。 */
+		/** cardCouponOpenClaim：无 redeemcode 的 coupon open-claim，服务端调用 claimIssuedNftWithUserSig。
+		 * 产品例外：Cluster 预检已通过后，入队即返回 `{ success, queued }`，链上 claim 后台执行（勿等 tx.wait）。
+		 */
 		router.post('/cardCouponOpenClaim', (req, res) => {
 			const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature, pointsCost, usdcReward6, isSocialExchange, refWallet } = req.body as {
 				cardAddress?: string
@@ -2833,9 +2835,15 @@ const routing = ( router: Router ) => {
 				...(pointsCost != null ? { pointsCost: String(pointsCost) } : {}),
 				...(usdcReward6 != null ? { usdcReward6: String(usdcReward6) } : {}),
 				...(refWallet && ethers.isAddress(String(refWallet)) ? { refWallet: ethers.getAddress(String(refWallet)) } : {}),
-				res,
 			})
-			logger(Colors.cyan(`[cardCouponOpenClaim] pushed to pool, card=${cardAddress} couponId=${couponId} tokenId=${tokenId}`))
+			logger(Colors.cyan(`[cardCouponOpenClaim] queued, card=${cardAddress} couponId=${couponId} tokenId=${tokenId}`))
+			res.status(200).json({
+				success: true,
+				queued: true,
+				cardAddress,
+				couponId,
+				tokenId,
+			}).end()
 			cardCouponOpenClaimProcess().catch((err: any) => {
 				logger(Colors.red('[cardCouponOpenClaimProcess] unhandled error:'), err?.message ?? err)
 			})

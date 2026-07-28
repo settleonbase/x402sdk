@@ -3729,7 +3729,9 @@ function scheduleCardRedeemPoolPress(): void {
 	}
 }
 
-/** Coupon Open Claim（无 redeemcode）：用户 EIP-712 签名申请，Master 代发 `claimIssuedNftWithUserSig` / `claimSocialExchangeWithUserSig`。 */
+/** Coupon Open Claim（无 redeemcode）：用户 EIP-712 签名申请，Master 代发 `claimIssuedNftWithUserSig` / `claimSocialExchangeWithUserSig`。
+ * HTTP 在入队时已返回；`res` 可选（兼容旧路径），后台 worker 不再依赖它向客户端写成功/失败。
+ */
 export const cardCouponOpenClaimPool: {
 	cardAddress: string
 	couponId: string
@@ -3742,7 +3744,7 @@ export const cardCouponOpenClaimPool: {
 	pointsCost?: string
 	usdcReward6?: string
 	refWallet?: string
-	res: Response
+	res?: Response
 }[] = []
 
 /** POS Balance / QR：终端 admin 代领 open coupon（无 NFC 私钥），Master 代发 `claimIssuedNftForUserByPosAdmin`。 */
@@ -18911,15 +18913,7 @@ export const cardCouponOpenClaimProcess = async () => {
 		if (!receipt || receipt.status !== 1) {
 			throw new Error('Coupon open claim transaction failed')
 		}
-		if (obj.res && !obj.res.headersSent) {
-			obj.res.status(200).json({
-				success: true,
-				tx: tx.hash,
-				cardAddress: obj.cardAddress,
-				couponId: obj.couponId,
-				tokenId: obj.tokenId,
-			}).end()
-		}
+		// HTTP already returned `{ success, queued }` at enqueue; do not write client response here.
 		logger(Colors.green(`[cardCouponOpenClaimProcess] success tx=${tx.hash}`))
 		void (async () => {
 			try {
@@ -18987,9 +18981,7 @@ export const cardCouponOpenClaimProcess = async () => {
 		}
 		
 		logger(Colors.red(`[cardCouponOpenClaimProcess] failed: ${clientError} (rawError: ${JSON.stringify(errorData)})`))
-		if (obj.res && !obj.res.headersSent) {
-			obj.res.status(400).json({ success: false, error: clientError }).end()
-		}
+		// Background failure only — client already received queued success; do not rewrite HTTP.
 	} finally {
 		if (SC) Settle_ContractPool.unshift(SC)
 		setTimeout(() => cardCouponOpenClaimProcess(), requeuedForNonceRace ? 1500 : 3000)
