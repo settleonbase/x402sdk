@@ -18,7 +18,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
@@ -44,6 +44,7 @@ import {
 	referralRegistryRedeemPool,
 	type ReferralRegistryRedeemRelayAction,
 } from '../MemberCard'
+import { type GenesisNodeReferralRedeemAction } from '../genesisNodeReferralRedeem'
 import {
 	kickReferralRegistryAdminManagementRelay,
 	referralRegistryAdminManagementPool,
@@ -4661,7 +4662,7 @@ const routing = ( router: Router ) => {
 	 *       Master `genesisNodeSeatFulfill` 自动 createRedeemFor + claimRedeemFor（listener 部署节点）
 	 */
 	router.post('/nfcUsdcTopup', async (req, res) => {
-		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty, test } = req.body as {
+		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty, test, referrerL0 } = req.body as {
 			cardAddress?: string
 			cardOwner?: string
 			uid?: string
@@ -4690,6 +4691,8 @@ const routing = ( router: Router ) => {
 			qty?: string | number
 			/** Genesis E2E test gate (`test=332266` → settle 1 USDC, still fulfill) */
 			test?: string | number
+			/** Genesis Evangelist L0 EOA (optional); must be registered L0 when non-zero */
+			referrerL0?: string
 		}
 		const sidNorm: string | null = isValidSid(sid) ? (sid as string).trim().toLowerCase() : null
 		const posStr = (pos ?? '').toString().trim()
@@ -4845,9 +4848,8 @@ const routing = ( router: Router ) => {
 			const payToOwner = onChainOwner ?? ownerAddr
 
 			/**
-			 * Discover Genesis Node Seat：x402 settle Base USDC → GENESIS_NODE_SEAT_PAYTO（硬编码）；
-			 * 成功后 Master 幂等 createRedeemFor + claimRedeemFor，listener 听 ValidatorRedeemClaimed 部署节点。
-			 * 不走卡点 mint / nfcUsdcTopup Master 路径。
+			 * Discover Genesis Node Seat：x402 settle Base USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+			 * Master bindSale + LockMint → vault onBridgeMint 分账，再 createRedeemFor + claimRedeemFor。
 			 */
 			if (genesisNodeSeatOnly && beneficiaryAddr) {
 				const genesisCard = ethers.getAddress(GENESIS_NODE_SEAT_CARD_ADDRESS)
@@ -4892,11 +4894,50 @@ const routing = ( router: Router ) => {
 							.end()
 					}
 				}
+				let referrerL1Addr = ''
+				const refRaw = String(
+					(req.body as { referrerL1?: string; referrer?: string; referrerL0?: string }).referrerL1
+						?? (req.body as { referrer?: string }).referrer
+						?? referrerL0
+						?? '',
+				).trim()
+				if (refRaw) {
+					if (!ethers.isAddress(refRaw)) {
+						return res.status(400).json({ success: false, error: 'Invalid referrerL1' }).end()
+					}
+					referrerL1Addr = ethers.getAddress(refRaw)
+					try {
+						const genesisVault = new ethers.Contract(
+							CONET_GENESIS_NODE_REFERRAL_VAULT,
+							['function isActiveL1(address) view returns (bool)'],
+							providerConet,
+						)
+						const ok = Boolean(await genesisVault.isActiveL1!(referrerL1Addr))
+						if (!ok) {
+							return res
+								.status(400)
+								.json({
+									success: false,
+									error: 'referrer must be an active Genesis L1 Evangelist (not L0)',
+								})
+								.end()
+						}
+					} catch (e: any) {
+						return res
+							.status(400)
+							.json({
+								success: false,
+								error: e?.shortMessage ?? e?.message ?? 'Could not verify Genesis L1 referrer',
+							})
+							.end()
+					}
+				}
+				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
 				const settleDesc = genesisTestMode
-					? `Beamio USDC genesisNodeSeat TEST (pay 1.00 USDC; fulfill qty=${qtyRaw} → payTo ${GENESIS_NODE_SEAT_PAYTO.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
-					: `Beamio USDC genesisNodeSeat (qty=${qtyRaw} → payTo ${GENESIS_NODE_SEAT_PAYTO.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+					? `Beamio USDC genesisNodeSeat TEST (pay 1.00 USDC; LockMint → vault; fulfill qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+					: `Beamio USDC genesisNodeSeat (qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… LockMint vault; beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
 				const settledGenesis = await settleBeamioX402ToCardOwner(req, res, {
-					cardOwner: GENESIS_NODE_SEAT_PAYTO,
+					cardOwner: settlePayTo,
 					quotedUsdc6: settleUsdc6,
 					description: settleDesc,
 				})
@@ -4905,12 +4946,11 @@ const routing = ( router: Router ) => {
 				}
 				logger(
 					Colors.green(
-						`[nfcUsdcTopup/genesisNodeSeat] settle OK${genesisTestMode ? ' TEST' : ''} card=${cardAddr} payTo=${GENESIS_NODE_SEAT_PAYTO} beneficiary=${beneficiaryAddr} qty=${qtyRaw} payer=${settledGenesis.payer} usdc6=${settledGenesis.usdcAmount6} USDC_tx=${settledGenesis.USDC_tx}`,
+						`[nfcUsdcTopup/genesisNodeSeat] settle OK${genesisTestMode ? ' TEST' : ''} card=${cardAddr} payTo=${settlePayTo} beneficiary=${beneficiaryAddr} qty=${qtyRaw} referrerL1=${referrerL1Addr || '0x0'} payer=${settledGenesis.payer} usdc6=${settledGenesis.usdcAmount6} USDC_tx=${settledGenesis.USDC_tx}`,
 					),
 				)
 				// Return immediately after USDC settle — do not block the client (esp. mobile
-				// in-app browsers) on createRedeemFor + claimRedeemFor (can take tens of seconds
-				// and blank Base/MetaMask WebViews). Fulfill runs in background on Master.
+				// in-app browsers) on bindSale + LockMint + createRedeemFor + claimRedeemFor.
 				if (!res.headersSent) {
 					res
 						.status(200)
@@ -4922,6 +4962,8 @@ const routing = ( router: Router ) => {
 							usdcAmount6: settledGenesis.usdcAmount6.toString(),
 							beneficiary: beneficiaryAddr,
 							qty: qtyRaw,
+							referrerL1: referrerL1Addr || null,
+							referrerL0: referrerL1Addr || null,
 							fulfillPending: true,
 							testMode: genesisTestMode,
 						})
@@ -4934,6 +4976,9 @@ const routing = ( router: Router ) => {
 					USDC_tx: settledGenesis.USDC_tx,
 					usdcAmount6: settledGenesis.usdcAmount6.toString(),
 					testMode: genesisTestMode,
+					...(referrerL1Addr
+						? { referrerL1: referrerL1Addr, referrerL0: referrerL1Addr }
+						: {}),
 				})
 					.then((r) => {
 						if (r.statusCode >= 400) {
@@ -10173,6 +10218,195 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			},
 			res
 		)
+	})
+
+	/** GenesisNodeReferralVaultV1: per-account redeemActionNonces / claimNonces. */
+	router.get('/genesisNodeReferralRedeemNonce', async (req, res) => {
+		try {
+			const account = ethers.getAddress(String(req.query.account ?? ''))
+			const kind = String(req.query.kind ?? 'action').toLowerCase()
+			const vault = new ethers.Contract(
+				CONET_GENESIS_NODE_REFERRAL_VAULT,
+				[
+					'function redeemActionNonces(address) view returns (uint256)',
+					'function claimNonces(address) view returns (uint256)',
+				],
+				providerConet,
+			)
+			const nonce =
+				kind === 'claim' ? await vault.claimNonces!(account) : await vault.redeemActionNonces!(account)
+			return res.status(200).json({ success: true, nonce: nonce.toString() }).end()
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Nonce read failed' }).end()
+		}
+	})
+
+	router.post('/genesisNodeReferralRedeem', async (req, res) => {
+		try {
+			const action = String(req.body?.action ?? '') as GenesisNodeReferralRedeemAction
+			const allowed: GenesisNodeReferralRedeemAction[] = [
+				'issueL0',
+				'cancelL0',
+				'claimL0',
+				'issueL1',
+				'cancelL1',
+				'claimL1',
+			]
+			if (!allowed.includes(action)) {
+				return res.status(400).json({ success: false, error: 'Invalid genesis referral redeem action' }).end()
+			}
+			const account = ethers.getAddress(String(req.body?.account ?? ''))
+			const redeemHash = String(req.body?.redeemHash ?? '')
+			if (!ethers.isHexString(redeemHash, 32)) {
+				return res.status(400).json({ success: false, error: 'redeemHash must be bytes32' }).end()
+			}
+			const nonce = BigInt(String(req.body?.nonce ?? ''))
+			const deadline = BigInt(String(req.body?.deadline ?? ''))
+			const signature = String(req.body?.signature ?? '')
+			if (!ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+				return res.status(400).json({ success: false, error: 'Invalid or expired signature request' }).end()
+			}
+			const eip712Domain = {
+				name: 'GenesisNodeReferralVaultV1',
+				version: '1',
+				chainId: 224422,
+				verifyingContract: CONET_GENESIS_NODE_REFERRAL_VAULT,
+			}
+			const vault = new ethers.Contract(
+				CONET_GENESIS_NODE_REFERRAL_VAULT,
+				[
+					'function admins(address) view returns (bool)',
+					'function isActiveL0(address) view returns (bool)',
+					'function redeemActionNonces(address) view returns (uint256)',
+					'function claimNonces(address) view returns (uint256)',
+					'function members(address) view returns (uint8 role,address parentAdmin,bool active,address parentL0,uint256 ratioBps)',
+				],
+				providerConet,
+			)
+
+			const forwardBody: Record<string, string> = {
+				action,
+				account,
+				redeemHash,
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+			}
+
+			if (action === 'issueL0' || action === 'cancelL0') {
+				const isAdmin = Boolean(await vault.admins!(account))
+				if (!isAdmin) {
+					return res.status(403).json({ success: false, error: 'Account is not a Genesis referral admin' }).end()
+				}
+				const expectedNonce = BigInt((await vault.redeemActionNonces!(account)).toString())
+				if (nonce !== expectedNonce) {
+					return res.status(400).json({ success: false, error: 'Stale redeem nonce' }).end()
+				}
+				const typeName = action === 'issueL0' ? 'IssueL0RedeemCode' : 'CancelL0RedeemCode'
+				const digest = ethers.TypedDataEncoder.hash(
+					eip712Domain,
+					{
+						[typeName]: [
+							{ name: 'admin', type: 'address' },
+							{ name: 'redeemHash', type: 'bytes32' },
+							{ name: 'nonce', type: 'uint256' },
+							{ name: 'deadline', type: 'uint256' },
+						],
+					},
+					{ admin: account, redeemHash, nonce, deadline },
+				)
+				const recovered = ethers.recoverAddress(digest, signature)
+				if (recovered.toLowerCase() !== account.toLowerCase()) {
+					return res.status(403).json({ success: false, error: 'Invalid signature' }).end()
+				}
+			} else if (action === 'issueL1' || action === 'cancelL1') {
+				const isL0 = Boolean(await vault.isActiveL0!(account))
+				if (!isL0) {
+					return res.status(403).json({ success: false, error: 'Account is not an active Genesis L0' }).end()
+				}
+				const expectedNonce = BigInt((await vault.redeemActionNonces!(account)).toString())
+				if (nonce !== expectedNonce) {
+					return res.status(400).json({ success: false, error: 'Stale redeem nonce' }).end()
+				}
+				if (action === 'issueL1') {
+					const ratioBpsRaw = String(req.body?.ratioBps ?? '')
+					if (!/^\d+$/.test(ratioBpsRaw)) {
+						return res.status(400).json({ success: false, error: 'ratioBps required for issueL1' }).end()
+					}
+					const ratioBps = BigInt(ratioBpsRaw)
+					if (ratioBps > 10_000n) {
+						return res.status(400).json({ success: false, error: 'ratioBps must be 0–10000' }).end()
+					}
+					const digest = ethers.TypedDataEncoder.hash(
+						eip712Domain,
+						{
+							IssueL1RedeemCode: [
+								{ name: 'l0', type: 'address' },
+								{ name: 'redeemHash', type: 'bytes32' },
+								{ name: 'ratioBps', type: 'uint256' },
+								{ name: 'nonce', type: 'uint256' },
+								{ name: 'deadline', type: 'uint256' },
+							],
+						},
+						{ l0: account, redeemHash, ratioBps, nonce, deadline },
+					)
+					const recovered = ethers.recoverAddress(digest, signature)
+					if (recovered.toLowerCase() !== account.toLowerCase()) {
+						return res.status(403).json({ success: false, error: 'Invalid signature' }).end()
+					}
+					forwardBody.ratioBps = ratioBps.toString()
+				} else {
+					const digest = ethers.TypedDataEncoder.hash(
+						eip712Domain,
+						{
+							CancelL1RedeemCode: [
+								{ name: 'l0', type: 'address' },
+								{ name: 'redeemHash', type: 'bytes32' },
+								{ name: 'nonce', type: 'uint256' },
+								{ name: 'deadline', type: 'uint256' },
+							],
+						},
+						{ l0: account, redeemHash, nonce, deadline },
+					)
+					const recovered = ethers.recoverAddress(digest, signature)
+					if (recovered.toLowerCase() !== account.toLowerCase()) {
+						return res.status(403).json({ success: false, error: 'Invalid signature' }).end()
+					}
+				}
+			} else {
+				// claimL0 | claimL1
+				const expectedNonce = BigInt((await vault.claimNonces!(account)).toString())
+				if (nonce !== expectedNonce) {
+					return res.status(400).json({ success: false, error: 'Stale claim nonce' }).end()
+				}
+				const secret = String(req.body?.secret ?? '')
+				if (!secret) {
+					return res.status(400).json({ success: false, error: 'Missing secret' }).end()
+				}
+				const typeName = action === 'claimL0' ? 'ClaimL0RedeemCode' : 'ClaimL1RedeemCode'
+				const digest = ethers.TypedDataEncoder.hash(
+					eip712Domain,
+					{
+						[typeName]: [
+							{ name: 'claimer', type: 'address' },
+							{ name: 'redeemHash', type: 'bytes32' },
+							{ name: 'nonce', type: 'uint256' },
+							{ name: 'deadline', type: 'uint256' },
+						],
+					},
+					{ claimer: account, redeemHash, nonce, deadline },
+				)
+				const recovered = ethers.recoverAddress(digest, signature)
+				if (recovered.toLowerCase() !== account.toLowerCase()) {
+					return res.status(403).json({ success: false, error: 'Invalid signature' }).end()
+				}
+				forwardBody.secret = secret
+			}
+
+			postLocalhost('/api/genesisNodeReferralRedeem', forwardBody, res)
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' }).end()
+		}
 	})
 
 	/** ReferralRegistryVaultV1: read the per-account meta-transaction nonce. */

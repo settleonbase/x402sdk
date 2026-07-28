@@ -7,7 +7,7 @@ import path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
-import { masterSetup, resolveBeamioConetHttpRpcUrl } from '../util'
+import { masterSetup, resolveBeamioConetHttpRpcUrl, resolveBeamioBaseHttpRpcUrl } from '../util'
 import {
 	CONET_DEPOSIT_CONTRACT,
 	CONET_MAINNET_CHAIN_ID,
@@ -21,6 +21,12 @@ import {
 	CONET_VALIDATOR_NODE_REWARD_INDEXER,
 	CONET_VALIDATOR_REFERRER_EXTENSION,
 	CONET_GUARDIAN_NODES_INFO_V6,
+	CONET_GENESIS_NODE_REFERRAL_VAULT,
+	CONET_TREASURY,
+	CONET_USDC,
+	GENESIS_NODE_BRIDGE_INITIATOR,
+	GENESIS_NODE_SEAT_USDC_PER_NODE6,
+	USDC_BASE,
 } from '../chainAddresses'
 import { Settle_ContractPool, ensureSettleContractPoolInitialized } from '../settleContractPool'
 import {
@@ -3535,7 +3541,95 @@ export async function replayValidatorRedeemClaimedEvent(requestId: string): Prom
 	return getValidatorDepositRedeemStatus(rid)
 }
 
-// ─── Genesis Node Seat fulfill (x402 settle → createRedeemFor + claimRedeemFor) ───
+// ─── Genesis Node Seat fulfill (x402 settle → bindSale + LockMint → createRedeemFor + claimRedeemFor) ───
+
+const GENESIS_VAULT_BIND_ABI = [
+	'function bindSale(bytes32 operationId,address referrerL1,address buyer,uint256 qty,bool testMode)',
+] as const
+
+const TREASURY_LOCK_MINT_ABI = [
+	'function initiateLockMint(uint256 destinationChainId,address sourceAsset,address destinationAsset,address[] beneficiaries,uint256[] amounts,bytes32 sourceTxHash,uint256 nonce,address callbackTarget) returns (bytes32)',
+	'function destinationFeeBps(uint256 destinationChainId) view returns (uint256)',
+] as const
+
+const ERC20_APPROVE_ABI = [
+	'function approve(address spender,uint256 amount) returns (bool)',
+	'function allowance(address owner,address spender) view returns (uint256)',
+	'function balanceOf(address account) view returns (uint256)',
+] as const
+
+/** TreasuryBridgeV3.AssetMode.LockMint */
+const ASSET_MODE_LOCK_MINT = 1
+
+function computeLockMintOperationId(params: {
+	sourceChainId: bigint
+	destinationChainId: bigint
+	sourceTreasury: string
+	sourceAsset: string
+	destinationAsset: string
+	beneficiaries: string[]
+	amounts: bigint[]
+	grossAmount: bigint
+	feeAmount: bigint
+	sourceTxHash: string
+	nonce: bigint
+	callbackTarget: string
+}): string {
+	const coder = ethers.AbiCoder.defaultAbiCoder()
+	const beneficiariesHash = ethers.keccak256(
+		coder.encode(['address[]', 'uint256[]'], [params.beneficiaries, params.amounts]),
+	)
+	return ethers.keccak256(
+		coder.encode(
+			[
+				'uint256',
+				'uint256',
+				'address',
+				'address',
+				'address',
+				'bytes32',
+				'uint8',
+				'uint256',
+				'uint256',
+				'bytes32',
+				'uint256',
+				'address',
+			],
+			[
+				params.sourceChainId,
+				params.destinationChainId,
+				params.sourceTreasury,
+				params.sourceAsset,
+				params.destinationAsset,
+				beneficiariesHash,
+				ASSET_MODE_LOCK_MINT,
+				params.grossAmount,
+				params.feeAmount,
+				params.sourceTxHash,
+				params.nonce,
+				params.callbackTarget,
+			],
+		),
+	)
+}
+
+async function withGenesisBridgeInitiatorWallet<T>(
+	fn: (wallet: (typeof Settle_ContractPool)[number]) => Promise<T>,
+): Promise<T> {
+	const want = GENESIS_NODE_BRIDGE_INITIATOR.toLowerCase()
+	const idx = Settle_ContractPool.findIndex((sc) => sc.walletBase.address.toLowerCase() === want)
+	if (idx < 0) {
+		throw new Error(
+			`Genesis bridge initiator ${GENESIS_NODE_BRIDGE_INITIATOR} not in Settle_ContractPool (check settle_contractAdmin)`,
+		)
+	}
+	const [sc] = Settle_ContractPool.splice(idx, 1)
+	try {
+		return await fn(sc)
+	} finally {
+		Settle_ContractPool.unshift(sc)
+	}
+}
 
 export type GenesisNodeSeatFulfillPayload = {
 	beneficiary: string
@@ -3543,6 +3637,8 @@ export type GenesisNodeSeatFulfillPayload = {
 	payer: string
 	USDC_tx: string
 	usdcAmount6: string
+	referrerL0?: string
+	testMode?: boolean
 	res?: Response
 }
 
@@ -3552,6 +3648,11 @@ type GenesisNodeSeatFulfillRecord = {
 	payer: string
 	USDC_tx: string
 	usdcAmount6: string
+	referrerL0: string
+	testMode: boolean
+	operationId: string
+	bindTxHash: string
+	lockMintTxHash: string
 	createTxHash: string
 	claimTxHash: string
 	fulfilledAt: string
@@ -3609,7 +3710,10 @@ function scheduleGenesisNodeSeatFulfillPoolPress(): void {
 }
 
 /**
- * Master: after Base USDC settle to GENESIS_NODE_SEAT_PAYTO, create + claim validator redeem for buyer.
+ * Master: after Base USDC settle to GENESIS_NODE_BRIDGE_INITIATOR:
+ * 1) bindSale on CoNET vault
+ * 2) approve + initiateLockMint (callbackTarget = vault)
+ * 3) createRedeemFor + claimRedeemFor (seat deploy; unchanged)
  * Idempotent on USDC_tx. Redeem plaintext code stays in-process memory only.
  */
 export const genesisNodeSeatFulfillProcess = async () => {
@@ -3645,6 +3749,9 @@ export const genesisNodeSeatFulfillProcess = async () => {
 						beneficiary: existing.beneficiary,
 						qty: existing.qty,
 						USDC_tx: existing.USDC_tx,
+						operationId: existing.operationId,
+						bindTxHash: existing.bindTxHash,
+						lockMintTxHash: existing.lockMintTxHash,
 						createTxHash: existing.createTxHash,
 						claimTxHash: existing.claimTxHash,
 					})
@@ -3660,9 +3767,88 @@ export const genesisNodeSeatFulfillProcess = async () => {
 			throw new Error('CONET_VALIDATOR_NODE_IP not configured (required for genesisNodeSeat fulfill)')
 		}
 
+		const vault = ethers.getAddress(CONET_GENESIS_NODE_REFERRAL_VAULT)
+		const treasury = ethers.getAddress(CONET_TREASURY)
+		const beneficiary = ethers.getAddress(obj.beneficiary)
+		const testMode = Boolean(obj.testMode)
+		let referrerL1 = ethers.ZeroAddress
+		if (obj.referrerL0 && ethers.isAddress(obj.referrerL0)) {
+			// Field name kept for client compat; value must be an active Genesis L1 Evangelist.
+			referrerL1 = ethers.getAddress(obj.referrerL0)
+		}
+
+		const lockAmount = testMode
+			? BigInt(String(obj.usdcAmount6 || '1000000'))
+			: obj.qty * GENESIS_NODE_SEAT_USDC_PER_NODE6
+		const sourceTxHash = usdcTx as `0x${string}`
+		const nonce = BigInt(ethers.hexlify(ethers.randomBytes(16)))
+
+		const bridgeResult = await withGenesisBridgeInitiatorWallet(async (sc) => {
+			const baseProvider = sc.walletBase.provider!
+			const treasuryRead = new ethers.Contract(treasury, TREASURY_LOCK_MINT_ABI, baseProvider)
+			const feeBps = (await treasuryRead.destinationFeeBps!(CONET_MAINNET_CHAIN_ID)) as bigint
+			const feeAmount = (lockAmount * feeBps) / 10_000n
+			const beneficiaries = [vault]
+			const amounts = [lockAmount]
+			const operationId = computeLockMintOperationId({
+				sourceChainId: 8453n,
+				destinationChainId: BigInt(CONET_MAINNET_CHAIN_ID),
+				sourceTreasury: treasury,
+				sourceAsset: ethers.getAddress(USDC_BASE),
+				destinationAsset: ethers.getAddress(CONET_USDC),
+				beneficiaries,
+				amounts,
+				grossAmount: lockAmount,
+				feeAmount,
+				sourceTxHash,
+				nonce,
+				callbackTarget: vault,
+			})
+
+			const vaultConet = new ethers.Contract(vault, GENESIS_VAULT_BIND_ABI, sc.walletConet)
+			const bindTx = await vaultConet.bindSale!(operationId, referrerL1, beneficiary, obj.qty, testMode, {
+				gasLimit: 300_000,
+			})
+			await bindTx.wait()
+
+			const usdc = new ethers.Contract(USDC_BASE, ERC20_APPROVE_ABI, sc.walletBase)
+			const needApprove = lockAmount + feeAmount
+			const bal = (await usdc.balanceOf!(sc.walletBase.address)) as bigint
+			if (bal < needApprove) {
+				throw new Error(
+					`Bridge initiator USDC balance ${bal.toString()} < required ${needApprove.toString()} (settle may have landed elsewhere)`,
+				)
+			}
+			const allowance = (await usdc.allowance!(sc.walletBase.address, treasury)) as bigint
+			if (allowance < needApprove) {
+				const approveTx = await usdc.approve!(treasury, needApprove)
+				await approveTx.wait()
+			}
+
+			const treasuryWrite = new ethers.Contract(treasury, TREASURY_LOCK_MINT_ABI, sc.walletBase)
+			const mintTx = await treasuryWrite.initiateLockMint!(
+				CONET_MAINNET_CHAIN_ID,
+				ethers.getAddress(USDC_BASE),
+				ethers.getAddress(CONET_USDC),
+				beneficiaries,
+				amounts,
+				sourceTxHash,
+				nonce,
+				vault,
+				{ gasLimit: 500_000 },
+			)
+			const mintReceipt = await mintTx.wait()
+			if (mintReceipt?.status !== 1) throw new Error('initiateLockMint reverted')
+
+			return {
+				operationId,
+				bindTxHash: bindTx.hash as string,
+				lockMintTxHash: mintTx.hash as string,
+			}
+		})
+
 		const adminWallet = loadRedeemAdminWallet()
 		const admin = ethers.getAddress(adminWallet.address)
-		const beneficiary = ethers.getAddress(obj.beneficiary)
 		const code = generateEphemeralRedeemCode()
 		const codeHash = codeHashOf(code)
 		const allowedClaimer = ethers.ZeroAddress
@@ -3765,6 +3951,11 @@ export const genesisNodeSeatFulfillProcess = async () => {
 			payer: ethers.isAddress(obj.payer) ? ethers.getAddress(obj.payer) : String(obj.payer ?? ''),
 			USDC_tx: usdcTx,
 			usdcAmount6: String(obj.usdcAmount6 ?? ''),
+			referrerL0: referrerL1 !== ethers.ZeroAddress ? referrerL1 : '',
+			testMode,
+			operationId: bridgeResult.operationId,
+			bindTxHash: bridgeResult.bindTxHash,
+			lockMintTxHash: bridgeResult.lockMintTxHash,
 			createTxHash,
 			claimTxHash,
 			fulfilledAt: new Date().toISOString(),
@@ -3773,7 +3964,7 @@ export const genesisNodeSeatFulfillProcess = async () => {
 
 		logger(
 			Colors.green(
-				`[genesisNodeSeatFulfill] OK USDC_tx=${usdcTx.slice(0, 12)}… qty=${record.qty} beneficiary=${beneficiary.slice(0, 10)}… create=${createTxHash.slice(0, 12)}… claim=${claimTxHash.slice(0, 12)}…`,
+				`[genesisNodeSeatFulfill] OK USDC_tx=${usdcTx.slice(0, 12)}… qty=${record.qty} beneficiary=${beneficiary.slice(0, 10)}… op=${bridgeResult.operationId.slice(0, 12)}… create=${createTxHash.slice(0, 12)}… claim=${claimTxHash.slice(0, 12)}…`,
 			),
 		)
 		if (obj.res && !obj.res.headersSent) {
@@ -3784,6 +3975,9 @@ export const genesisNodeSeatFulfillProcess = async () => {
 					beneficiary,
 					qty: record.qty,
 					USDC_tx: usdcTx,
+					operationId: bridgeResult.operationId,
+					bindTxHash: bridgeResult.bindTxHash,
+					lockMintTxHash: bridgeResult.lockMintTxHash,
 					createTxHash,
 					claimTxHash,
 				})

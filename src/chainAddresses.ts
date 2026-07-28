@@ -105,10 +105,19 @@ export const NODE_SALE_NODE_PRICE_USDC6 = 1_250_000_000n
 export const NODE_SALE_SERVER_FEE_USDC6 = 120_000_000n
 
 /**
- * Discover Genesis Node Seat（x402）：整笔 USDC settle 收款地址（1250 节点价 + 120 Cloud Included）。
- * Cluster 硬编码 payTo，不信任客户端改写。
+ * Genesis Node Seat：Base USDC x402 settle → bridge initiator EOA，再 LockMint 入国库。
+ * 必须与 Master `settle_contractAdmin` 中某一 `walletBase` 同址（当前 = vault.bridgeBinder）。
  */
-export const GENESIS_NODE_SEAT_PAYTO = '0x17FCE32f01f88FFBDAf6BA51cef9138bF6BD637A'
+export const GENESIS_NODE_BRIDGE_INITIATOR = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
+/**
+ * @deprecated Alias of {@link GENESIS_NODE_BRIDGE_INITIATOR}. Historical payTo `0x17FC…637A` retired —
+ * settle no longer lands on that EOA; funds LockMint into {@link CONET_GENESIS_NODE_REFERRAL_VAULT}.
+ */
+export const GENESIS_NODE_SEAT_PAYTO = GENESIS_NODE_BRIDGE_INITIATOR
+/** CoNET GenesisNodeReferralVaultV1 ERC1967 proxy (LockMint beneficiary + onBridgeMint splitter). */
+export const CONET_GENESIS_NODE_REFERRAL_VAULT = '0x051b65E5711E6E74bC236Fe220dcA7021841855C'
+export const CONET_GENESIS_NODE_REFERRAL_VAULT_IMPL = '0xbcD2Fcd8586C11c21029f74931A61DF5B284d481'
+export const CONET_GENESIS_NODE_REFERRAL_VAULT_DEPLOY_BLOCK = 594820
 /** 每节点应收 USDC（6 位精度）= NODE_SALE_NODE_PRICE + NODE_SALE_SERVER_FEE */
 export const GENESIS_NODE_SEAT_USDC_PER_NODE6 = NODE_SALE_NODE_PRICE_USDC6 + NODE_SALE_SERVER_FEE_USDC6
 /** Discover Genesis 商家卡（SilentPassUI /discover 明细） */

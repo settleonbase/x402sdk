@@ -32,6 +32,11 @@ import {
 	type ReferralRegistryRedeemRelayAction,
 } from '../MemberCard'
 import {
+	kickGenesisNodeReferralRedeemRelay,
+	genesisNodeReferralRedeemPool,
+	type GenesisNodeReferralRedeemAction,
+} from '../genesisNodeReferralRedeem'
+import {
 	kickReferralRegistryAdminManagementRelay,
 	referralRegistryAdminManagementPool,
 	kickReferralRegistryMerchantShareRelay,
@@ -3580,7 +3585,7 @@ const routing = ( router: Router ) => {
 			})
 		})
 
-		/** After Genesis Seat x402 settle: idempotent createRedeemFor + claimRedeemFor (Cluster already settled USDC). */
+		/** After Genesis Seat x402 settle: bindSale + LockMint, then createRedeemFor + claimRedeemFor. */
 		router.post('/genesisNodeSeatFulfill', (req, res) => {
 			const b = req.body as {
 				beneficiary?: string
@@ -3588,6 +3593,9 @@ const routing = ( router: Router ) => {
 				payer?: string
 				USDC_tx?: string
 				usdcAmount6?: string
+				referrerL1?: string
+				referrerL0?: string
+				testMode?: boolean
 			}
 			const beneficiary = String(b.beneficiary ?? '').trim()
 			const usdcTx = String(b.USDC_tx ?? '').trim()
@@ -3601,15 +3609,53 @@ const routing = ( router: Router ) => {
 			if (!/^\d+$/.test(qtyRaw) || BigInt(qtyRaw) <= 0n) {
 				return res.status(400).json({ success: false, error: 'Invalid qty' }).end()
 			}
+			// Client may send referrerL1 (preferred) or legacy referrerL0 field — value must be L1 EOA.
+			const refRaw = String(b.referrerL1 ?? b.referrerL0 ?? '').trim()
 			genesisNodeSeatFulfillPool.push({
 				beneficiary: ethers.getAddress(beneficiary),
 				qty: BigInt(qtyRaw),
 				payer: String(b.payer ?? '').trim(),
 				USDC_tx: usdcTx,
 				usdcAmount6: String(b.usdcAmount6 ?? ''),
+				referrerL0: refRaw && ethers.isAddress(refRaw) ? ethers.getAddress(refRaw) : undefined,
+				testMode: Boolean(b.testMode),
 				res,
 			})
 			kickGenesisNodeSeatFulfillPoolPress()
+		})
+
+		router.post('/genesisNodeReferralRedeem', (req, res) => {
+			const body = req.body as {
+				action?: GenesisNodeReferralRedeemAction
+				account?: string
+				redeemHash?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+				secret?: string
+				ratioBps?: string
+			}
+			if (!body.action || !body.account || !body.redeemHash || !body.nonce || !body.deadline || !body.signature) {
+				return res.status(400).json({ success: false, error: 'Missing genesis referral redeem fields' }).end()
+			}
+			if ((body.action === 'claimL0' || body.action === 'claimL1') && !body.secret) {
+				return res.status(400).json({ success: false, error: `Missing secret for ${body.action}` }).end()
+			}
+			if (body.action === 'issueL1' && (body.ratioBps == null || body.ratioBps === '')) {
+				return res.status(400).json({ success: false, error: 'Missing ratioBps for issueL1' }).end()
+			}
+			genesisNodeReferralRedeemPool.push({
+				action: body.action,
+				account: body.account,
+				redeemHash: body.redeemHash,
+				nonce: body.nonce,
+				deadline: body.deadline,
+				signature: body.signature,
+				secret: body.secret,
+				ratioBps: body.ratioBps,
+				res,
+			})
+			kickGenesisNodeReferralRedeemRelay()
 		})
 
 		router.post('/validatorDepositRedeemAdminCancel', (req, res) => {
