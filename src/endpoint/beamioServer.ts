@@ -13,7 +13,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import { listReferralRegistryClaimsByParent, listReferralRegistryTreeByAccount, getReferralRegistryTreeSync, listReferralMerchantCandidates } from '../db'
 import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
-import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
+import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listPosTerminalCardBindingsForWallet, setActivePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
@@ -2236,7 +2236,8 @@ const routing = ( router: Router ) => {
 				error: string,
 				extra?: Record<string, unknown>
 			) => {
-				await deletePosTerminalCardBinding(posEoa)
+				// Multi-merchant: only clear this card row — never wipe all bindings for the POS.
+				await deletePosTerminalCardBinding(posEoa, cardAddress)
 				logger(
 					Colors.yellow(
 						`[myPosAddress] cleared stale binding pos=${posEoa} card=${cardAddress} reason=${reason}`
@@ -2301,6 +2302,63 @@ const routing = ( router: Router ) => {
 	}
 	router.get('/myPosAddress', myPosAddressHandler)
 	router.post('/myPosAddress', myPosAddressHandler)
+
+	/** GET /api/myPosAddresses?wallet=0x… — all merchant card bindings for this POS (multi-workspace). */
+	router.get('/myPosAddresses', async (req, res) => {
+		const raw = parseMyPosWallet(req)
+		if (!raw || !ethers.isAddress(raw)) {
+			return res.status(400).json({ ok: false, error: 'wallet or posEOA (address) required' }).end()
+		}
+		try {
+			const posEoa = ethers.getAddress(raw)
+			const items = await listPosTerminalCardBindingsForWallet(posEoa)
+			return res.status(200).json({ ok: true, wallet: posEoa, items }).end()
+		} catch (e) {
+			logger(Colors.red(`[myPosAddresses] error: ${(e as Error)?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
+		}
+	})
+
+	/**
+	 * POST /api/setActivePosAddress — set which bound merchant card is active for Charge/Top-up/myPosAddress.
+	 * Body: { wallet, cardAddress }. Card must already be a binding row.
+	 */
+	router.post('/setActivePosAddress', async (req, res) => {
+		const b = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {}
+		const walletRaw =
+			(typeof b.wallet === 'string' && b.wallet.trim()) ||
+			(typeof b.posEOA === 'string' && b.posEOA.trim()) ||
+			''
+		const cardRaw = typeof b.cardAddress === 'string' ? b.cardAddress.trim() : ''
+		if (!walletRaw || !ethers.isAddress(walletRaw)) {
+			return res.status(400).json({ ok: false, error: 'wallet (address) required' }).end()
+		}
+		if (!cardRaw || !ethers.isAddress(cardRaw)) {
+			return res.status(400).json({ ok: false, error: 'cardAddress required' }).end()
+		}
+		try {
+			const result = await setActivePosTerminalCardBinding(walletRaw, cardRaw)
+			if (!result.ok) {
+				return res
+					.status(404)
+					.json({ ok: false, error: result.error })
+					.end()
+			}
+			const active = await getPosTerminalCardBindingRow(walletRaw)
+			return res
+				.status(200)
+				.json({
+					ok: true,
+					wallet: ethers.getAddress(walletRaw),
+					cardAddress: active?.cardAddress ?? ethers.getAddress(cardRaw),
+					myPosAddress: active?.cardAddress ?? ethers.getAddress(cardRaw),
+				})
+				.end()
+		} catch (e) {
+			logger(Colors.red(`[setActivePosAddress] error: ${(e as Error)?.message ?? e}`))
+			return res.status(500).json({ ok: false, error: (e as Error)?.message ?? 'Internal error' }).end()
+		}
+	})
 
 	/** GET /api/getCardStats?cardAddress=0x...&admin=0x... - 从 BeamioUserCard 获取 periodTransferAmount（Charge，当天数据）与 redeemMintCounterFromClear（Top-Up）。periodType=PERIOD_DAY、anchorTs=0 即当天。admin 为终端 EOA，默认用 owner。 */
 	const CARD_STATS_ABI = [

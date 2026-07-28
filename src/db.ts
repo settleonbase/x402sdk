@@ -2068,14 +2068,18 @@ export const assertPosEoaAvailableForCardBinding = async (
 	}
 }
 
-/** adminManager(add) 上链成功后写入；新绑定默认设为该 POS 的活跃卡。 */
+/**
+ * adminManager(add) 上链成功后写入。
+ * - 该 POS 尚无任何绑定 → 强制 `is_active=true`（首次绑定）。
+ * - 追加绑定：默认 `makeActive=false`（Approve 不自动切 current）；显式 `makeActive=true` 才切换活跃卡。
+ */
 export const upsertPosTerminalAdminCardBinding = async (params: {
 	posEoa: string
 	cardAddress: string
 	txHash?: string
 	/** Parsed object or JSON-serializable value; omit on non-terminal upserts (e.g. redeem) to preserve existing row. */
 	metadataJson?: unknown
-	/** When false, do not flip is_active (rare). Default true — new/updated binding becomes active. */
+	/** When true, this card becomes the sole active binding. Default false for additional merchants. */
 	makeActive?: boolean
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
@@ -2085,8 +2089,13 @@ export const upsertPosTerminalAdminCardBinding = async (params: {
 		const pos = ethers.getAddress(params.posEoa).toLowerCase()
 		const card = ethers.getAddress(params.cardAddress).toLowerCase()
 		const meta = params.metadataJson === undefined ? null : params.metadataJson
-		const makeActive = params.makeActive !== false
 		await db.query('BEGIN')
+		const { rows: existing } = await db.query<{ n: string }>(
+			`SELECT COUNT(*)::text AS n FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1`,
+			[pos]
+		)
+		const count = Number(existing[0]?.n ?? '0')
+		const makeActive = count === 0 ? true : params.makeActive === true
 		if (makeActive) {
 			await db.query(
 				`UPDATE beamio_pos_terminal_admin_card SET is_active = false WHERE pos_eoa = $1 AND is_active = true`,
@@ -2116,18 +2125,7 @@ export const upsertPosTerminalAdminCardBinding = async (params: {
 }
 
 export const deletePosTerminalAdminCardBinding = async (posLoose: string, cardAddressLoose: string): Promise<void> => {
-	const db = new Client({ connectionString: DB_URL })
-	try {
-		await db.connect()
-		await ensureBeamioPosTerminalAdminCardSchema(db)
-		const pos = ethers.getAddress(posLoose).toLowerCase()
-		const card = ethers.getAddress(cardAddressLoose).toLowerCase()
-		await db.query(`DELETE FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 AND card_address = $2`, [pos, card])
-	} catch (e: any) {
-		logger(Colors.yellow(`[deletePosTerminalAdminCardBinding] failed: ${e?.message ?? e}`))
-	} finally {
-		await db.end().catch(() => {})
-	}
+	await deletePosTerminalCardBinding(posLoose, cardAddressLoose)
 }
 
 /** POS 问询已登记商户卡地址（Registration Device 成功且链上 confirm 后即有记录）。 */
@@ -2136,17 +2134,33 @@ export const getPosTerminalCardAddressForWallet = async (walletLoose: string): P
 	return row?.cardAddress ?? null
 }
 
-/** 含 DB 内保存的终端 metadata（Link & activate terminal 时从链上 adminManager metadata 解析）。 */
+export type PosTerminalCardBindingRow = {
+	cardAddress: string
+	txHash: string | null
+	terminalMetadata: unknown | null
+	isActive: boolean
+}
+
+/** 含 DB 内保存的终端 metadata；优先返回 `is_active` 行。 */
 export const getPosTerminalCardBindingRow = async (
 	walletLoose: string
-): Promise<{ cardAddress: string; txHash: string | null; terminalMetadata: unknown | null } | null> => {
+): Promise<PosTerminalCardBindingRow | null> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		await ensureBeamioPosTerminalAdminCardSchema(db)
 		const w = ethers.getAddress(walletLoose).toLowerCase()
-		const { rows } = await db.query<{ card_address: string; tx_hash: string | null; metadata_json: unknown | null }>(
-			`SELECT card_address, tx_hash, metadata_json FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 LIMIT 1`,
+		const { rows } = await db.query<{
+			card_address: string
+			tx_hash: string | null
+			metadata_json: unknown | null
+			is_active: boolean
+		}>(
+			`SELECT card_address, tx_hash, metadata_json, is_active
+			 FROM beamio_pos_terminal_admin_card
+			 WHERE pos_eoa = $1
+			 ORDER BY is_active DESC, updated_at DESC NULLS LAST
+			 LIMIT 1`,
 			[w]
 		)
 		if (rows.length === 0) return null
@@ -2156,6 +2170,7 @@ export const getPosTerminalCardBindingRow = async (
 			cardAddress: ethers.getAddress(raw),
 			txHash: rows[0].tx_hash ?? null,
 			terminalMetadata: rows[0].metadata_json ?? null,
+			isActive: Boolean(rows[0].is_active),
 		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[getPosTerminalCardBindingRow] failed: ${e?.message ?? e}`))
@@ -2165,19 +2180,138 @@ export const getPosTerminalCardBindingRow = async (
 	}
 }
 
-/** Delete POS ↔ merchant card binding (forces terminal to re-request permission). */
-export const deletePosTerminalCardBinding = async (walletLoose: string): Promise<boolean> => {
+/** List all merchant-card bindings for a POS EOA (multi-merchant). */
+export const listPosTerminalCardBindingsForWallet = async (
+	walletLoose: string
+): Promise<PosTerminalCardBindingRow[]> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		await ensureBeamioPosTerminalAdminCardSchema(db)
 		const w = ethers.getAddress(walletLoose).toLowerCase()
-		const result = await db.query(
-			`DELETE FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1`,
+		const { rows } = await db.query<{
+			card_address: string
+			tx_hash: string | null
+			metadata_json: unknown | null
+			is_active: boolean
+		}>(
+			`SELECT card_address, tx_hash, metadata_json, is_active
+			 FROM beamio_pos_terminal_admin_card
+			 WHERE pos_eoa = $1
+			 ORDER BY is_active DESC, updated_at DESC NULLS LAST`,
 			[w]
 		)
+		const out: PosTerminalCardBindingRow[] = []
+		for (const row of rows) {
+			if (!row.card_address || !ethers.isAddress(row.card_address)) continue
+			out.push({
+				cardAddress: ethers.getAddress(row.card_address),
+				txHash: row.tx_hash ?? null,
+				terminalMetadata: row.metadata_json ?? null,
+				isActive: Boolean(row.is_active),
+			})
+		}
+		return out
+	} catch (e: any) {
+		logger(Colors.yellow(`[listPosTerminalCardBindingsForWallet] failed: ${e?.message ?? e}`))
+		return []
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** Mark one bound card as the sole active binding for this POS. */
+export const setActivePosTerminalCardBinding = async (
+	walletLoose: string,
+	cardAddressLoose: string
+): Promise<{ ok: true } | { ok: false; error: string }> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioPosTerminalAdminCardSchema(db)
+		const w = ethers.getAddress(walletLoose).toLowerCase()
+		const card = ethers.getAddress(cardAddressLoose).toLowerCase()
+		await db.query('BEGIN')
+		const { rows: existingRows } = await db.query(
+			`SELECT 1 FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 AND card_address = $2`,
+			[w, card]
+		)
+		if (existingRows.length === 0) {
+			await db.query('ROLLBACK')
+			return { ok: false, error: 'Terminal is not bound to this merchant card' }
+		}
+		await db.query(
+			`UPDATE beamio_pos_terminal_admin_card SET is_active = false WHERE pos_eoa = $1 AND is_active = true`,
+			[w]
+		)
+		await db.query(
+			`UPDATE beamio_pos_terminal_admin_card SET is_active = true, updated_at = NOW() WHERE pos_eoa = $1 AND card_address = $2`,
+			[w, card]
+		)
+		await db.query('COMMIT')
+		return { ok: true }
+	} catch (e: any) {
+		await db.query('ROLLBACK').catch(() => {})
+		logger(Colors.yellow(`[setActivePosTerminalCardBinding] failed: ${e?.message ?? e}`))
+		return { ok: false, error: 'Could not set active merchant card' }
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/**
+ * Delete one POS ↔ merchant card binding (blacklist / stale).
+ * If the deleted row was active, promote another remaining binding.
+ * @deprecated Prefer {@link deletePosTerminalAdminCardBinding} + promote; this name kept for callers that pass (wallet, card).
+ */
+export const deletePosTerminalCardBinding = async (
+	walletLoose: string,
+	cardAddressLoose?: string
+): Promise<boolean> => {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioPosTerminalAdminCardSchema(db)
+		const w = ethers.getAddress(walletLoose).toLowerCase()
+		if (!cardAddressLoose || !ethers.isAddress(cardAddressLoose)) {
+			logger(
+				Colors.yellow(
+					`[deletePosTerminalCardBinding] refused full wipe for pos=${w}; pass cardAddress`
+				)
+			)
+			return false
+		}
+		const card = ethers.getAddress(cardAddressLoose).toLowerCase()
+		await db.query('BEGIN')
+		const { rows: before } = await db.query<{ is_active: boolean }>(
+			`SELECT is_active FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 AND card_address = $2`,
+			[w, card]
+		)
+		const wasActive = Boolean(before[0]?.is_active)
+		const result = await db.query(
+			`DELETE FROM beamio_pos_terminal_admin_card WHERE pos_eoa = $1 AND card_address = $2`,
+			[w, card]
+		)
+		if (wasActive && (result.rowCount ?? 0) > 0) {
+			await db.query(
+				`
+				UPDATE beamio_pos_terminal_admin_card t
+				SET is_active = true, updated_at = NOW()
+				FROM (
+					SELECT card_address FROM beamio_pos_terminal_admin_card
+					WHERE pos_eoa = $1
+					ORDER BY updated_at DESC NULLS LAST
+					LIMIT 1
+				) pick
+				WHERE t.pos_eoa = $1 AND t.card_address = pick.card_address
+				`,
+				[w]
+			)
+		}
+		await db.query('COMMIT')
 		return (result.rowCount ?? 0) > 0
 	} catch (e: any) {
+		await db.query('ROLLBACK').catch(() => {})
 		logger(Colors.yellow(`[deletePosTerminalCardBinding] failed: ${e?.message ?? e}`))
 		return false
 	} finally {
