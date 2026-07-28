@@ -3593,6 +3593,7 @@ const routing = ( router: Router ) => {
 				payer?: string
 				USDC_tx?: string
 				usdcAmount6?: string
+				referrer?: string
 				referrerL1?: string
 				referrerL0?: string
 				testMode?: boolean
@@ -3609,8 +3610,8 @@ const routing = ( router: Router ) => {
 			if (!/^\d+$/.test(qtyRaw) || BigInt(qtyRaw) <= 0n) {
 				return res.status(400).json({ success: false, error: 'Invalid qty' }).end()
 			}
-			// Client may send referrerL1 (preferred) or legacy referrerL0 field — value must be L1 EOA.
-			const refRaw = String(b.referrerL1 ?? b.referrerL0 ?? '').trim()
+			// Client may send referrer / referrerL1 / referrerL0 — Admin, L0, or L1; vault resolves role.
+			const refRaw = String(b.referrer ?? b.referrerL1 ?? b.referrerL0 ?? '').trim()
 			genesisNodeSeatFulfillPool.push({
 				beneficiary: ethers.getAddress(beneficiary),
 				qty: BigInt(qtyRaw),

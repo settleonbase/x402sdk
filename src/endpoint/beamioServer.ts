@@ -4894,7 +4894,7 @@ const routing = ( router: Router ) => {
 							.end()
 					}
 				}
-				let referrerL1Addr = ''
+				let referrerAddr = ''
 				const refRaw = String(
 					(req.body as { referrerL1?: string; referrer?: string; referrerL0?: string }).referrerL1
 						?? (req.body as { referrer?: string }).referrer
@@ -4903,22 +4903,30 @@ const routing = ( router: Router ) => {
 				).trim()
 				if (refRaw) {
 					if (!ethers.isAddress(refRaw)) {
-						return res.status(400).json({ success: false, error: 'Invalid referrerL1' }).end()
+						return res.status(400).json({ success: false, error: 'Invalid referrer' }).end()
 					}
-					referrerL1Addr = ethers.getAddress(refRaw)
+					referrerAddr = ethers.getAddress(refRaw)
 					try {
 						const genesisVault = new ethers.Contract(
 							CONET_GENESIS_NODE_REFERRAL_VAULT,
-							['function isActiveL1(address) view returns (bool)'],
+							[
+								'function isActiveL1(address) view returns (bool)',
+								'function isActiveL0(address) view returns (bool)',
+								'function admins(address) view returns (bool)',
+							],
 							providerConet,
 						)
-						const ok = Boolean(await genesisVault.isActiveL1!(referrerL1Addr))
-						if (!ok) {
+						const [isL1, isL0, isAdmin] = await Promise.all([
+							genesisVault.isActiveL1!(referrerAddr) as Promise<boolean>,
+							genesisVault.isActiveL0!(referrerAddr) as Promise<boolean>,
+							genesisVault.admins!(referrerAddr) as Promise<boolean>,
+						])
+						if (!Boolean(isL1) && !Boolean(isL0) && !Boolean(isAdmin)) {
 							return res
 								.status(400)
 								.json({
 									success: false,
-									error: 'referrer must be an active Genesis L1 Evangelist (not L0)',
+									error: 'referrer must be a Genesis Admin, active L0, or active L1 Evangelist',
 								})
 								.end()
 						}
@@ -4927,14 +4935,14 @@ const routing = ( router: Router ) => {
 							.status(400)
 							.json({
 								success: false,
-								error: e?.shortMessage ?? e?.message ?? 'Could not verify Genesis L1 referrer',
+								error: e?.shortMessage ?? e?.message ?? 'Could not verify Genesis referrer',
 							})
 							.end()
 					}
 				}
 				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
 				const settleDesc = genesisTestMode
-					? `Beamio USDC genesisNodeSeat TEST (pay 1.00 USDC; LockMint → vault; fulfill qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+					? `Beamio USDC genesisNodeSeat TEST (pay 1.37 USDC; LockMint → vault; fulfill qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
 					: `Beamio USDC genesisNodeSeat (qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… LockMint vault; beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
 				const settledGenesis = await settleBeamioX402ToCardOwner(req, res, {
 					cardOwner: settlePayTo,
@@ -4946,7 +4954,7 @@ const routing = ( router: Router ) => {
 				}
 				logger(
 					Colors.green(
-						`[nfcUsdcTopup/genesisNodeSeat] settle OK${genesisTestMode ? ' TEST' : ''} card=${cardAddr} payTo=${settlePayTo} beneficiary=${beneficiaryAddr} qty=${qtyRaw} referrerL1=${referrerL1Addr || '0x0'} payer=${settledGenesis.payer} usdc6=${settledGenesis.usdcAmount6} USDC_tx=${settledGenesis.USDC_tx}`,
+						`[nfcUsdcTopup/genesisNodeSeat] settle OK${genesisTestMode ? ' TEST' : ''} card=${cardAddr} payTo=${settlePayTo} beneficiary=${beneficiaryAddr} qty=${qtyRaw} referrer=${referrerAddr || '0x0'} payer=${settledGenesis.payer} usdc6=${settledGenesis.usdcAmount6} USDC_tx=${settledGenesis.USDC_tx}`,
 					),
 				)
 				// Return immediately after USDC settle — do not block the client (esp. mobile
@@ -4962,8 +4970,9 @@ const routing = ( router: Router ) => {
 							usdcAmount6: settledGenesis.usdcAmount6.toString(),
 							beneficiary: beneficiaryAddr,
 							qty: qtyRaw,
-							referrerL1: referrerL1Addr || null,
-							referrerL0: referrerL1Addr || null,
+							referrer: referrerAddr || null,
+							referrerL1: referrerAddr || null,
+							referrerL0: referrerAddr || null,
 							fulfillPending: true,
 							testMode: genesisTestMode,
 						})
@@ -4976,8 +4985,8 @@ const routing = ( router: Router ) => {
 					USDC_tx: settledGenesis.USDC_tx,
 					usdcAmount6: settledGenesis.usdcAmount6.toString(),
 					testMode: genesisTestMode,
-					...(referrerL1Addr
-						? { referrerL1: referrerL1Addr, referrerL0: referrerL1Addr }
+					...(referrerAddr
+						? { referrer: referrerAddr, referrerL1: referrerAddr, referrerL0: referrerAddr }
 						: {}),
 				})
 					.then((r) => {
