@@ -4689,7 +4689,7 @@ const routing = ( router: Router ) => {
 			signature?: string
 			/** Genesis Node Seat：节点数量（正整数） */
 			qty?: string | number
-			/** Genesis E2E test gate (`test=332266` → settle 1 USDC, still fulfill) */
+			/** Genesis E2E: `test=332266` → settle 1.37 USDC + vault micro-split (third-party code gate; PWA buyer allowlist is client-side) */
 			test?: string | number
 			/** Genesis Evangelist L0 EOA (optional); must be registered L0 when non-zero */
 			referrerL0?: string

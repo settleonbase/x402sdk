@@ -125,8 +125,12 @@ export const GENESIS_NODE_SEAT_CARD_ADDRESS = '0xafE482D2612327a0D723544B9fB713C
 /**
  * E2E test gate for `/usdc-topup?...&workflow=genesisNodeSeat&test=…`.
  * When body `test` matches, Cluster settles **1.37 USDC** (1/1000 seat) then runs
- * `genesisNodeSeatFulfill` with vault `testMode=true` (micro split). Disabled forever
- * after on-chain `disableSaleTestMode`.
+ * `genesisNodeSeatFulfill` with vault `testMode=true` (micro split).
+ *
+ * **Third-party**: code-only (`test=332266`); no buyer allowlist on API.
+ * **PWA**: client attaches `test` only for buyers on SilentPassUI
+ * `GENESIS_NODE_SEAT_PWA_TEST_BUYER_WHITELIST`. Disabled forever after on-chain
+ * `disableSaleTestMode`.
  */
 export const GENESIS_NODE_SEAT_TEST_CODE = '332266'
 /** Test-mode settle amount per seat (1.37 USDC = 1.25 + 0.12, 6 decimals) */
