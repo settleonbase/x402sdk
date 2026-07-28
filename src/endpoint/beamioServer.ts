@@ -10251,15 +10251,13 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				'issueL1',
 				'cancelL1',
 				'claimL1',
+				'setFoundation',
+				'setDefaultAdminPayout',
 			]
 			if (!allowed.includes(action)) {
 				return res.status(400).json({ success: false, error: 'Invalid genesis referral redeem action' }).end()
 			}
 			const account = ethers.getAddress(String(req.body?.account ?? ''))
-			const redeemHash = String(req.body?.redeemHash ?? '')
-			if (!ethers.isHexString(redeemHash, 32)) {
-				return res.status(400).json({ success: false, error: 'redeemHash must be bytes32' }).end()
-			}
 			const nonce = BigInt(String(req.body?.nonce ?? ''))
 			const deadline = BigInt(String(req.body?.deadline ?? ''))
 			const signature = String(req.body?.signature ?? '')
@@ -10284,14 +10282,56 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				providerConet,
 			)
 
+			const isPayoutAction = action === 'setFoundation' || action === 'setDefaultAdminPayout'
 			const forwardBody: Record<string, string> = {
 				action,
 				account,
-				redeemHash,
 				nonce: nonce.toString(),
 				deadline: deadline.toString(),
 				signature,
 			}
+
+			if (isPayoutAction) {
+				const payoutRaw = String(req.body?.payoutAddress ?? '')
+				if (!ethers.isAddress(payoutRaw) || payoutRaw === ethers.ZeroAddress) {
+					return res.status(400).json({ success: false, error: 'payoutAddress must be a non-zero address' }).end()
+				}
+				const payoutAddress = ethers.getAddress(payoutRaw)
+				const isAdmin = Boolean(await vault.admins!(account))
+				if (!isAdmin) {
+					return res.status(403).json({ success: false, error: 'Account is not a Genesis referral admin' }).end()
+				}
+				const expectedNonce = BigInt((await vault.redeemActionNonces!(account)).toString())
+				if (nonce !== expectedNonce) {
+					return res.status(400).json({ success: false, error: 'Stale redeem nonce' }).end()
+				}
+				const typeName = action === 'setFoundation' ? 'SetFoundation' : 'SetDefaultAdminPayout'
+				const fieldName = action === 'setFoundation' ? 'foundation' : 'payout'
+				const digest = ethers.TypedDataEncoder.hash(
+					eip712Domain,
+					{
+						[typeName]: [
+							{ name: 'admin', type: 'address' },
+							{ name: fieldName, type: 'address' },
+							{ name: 'nonce', type: 'uint256' },
+							{ name: 'deadline', type: 'uint256' },
+						],
+					},
+					{ admin: account, [fieldName]: payoutAddress, nonce, deadline },
+				)
+				const recovered = ethers.recoverAddress(digest, signature)
+				if (recovered.toLowerCase() !== account.toLowerCase()) {
+					return res.status(403).json({ success: false, error: 'Invalid signature' }).end()
+				}
+				forwardBody.payoutAddress = payoutAddress
+				return postLocalhost('/api/genesisNodeReferralRedeem', forwardBody, res)
+			}
+
+			const redeemHash = String(req.body?.redeemHash ?? '')
+			if (!ethers.isHexString(redeemHash, 32)) {
+				return res.status(400).json({ success: false, error: 'redeemHash must be bytes32' }).end()
+			}
+			forwardBody.redeemHash = redeemHash
 
 			if (action === 'issueL0' || action === 'cancelL0') {
 				const isAdmin = Boolean(await vault.admins!(account))

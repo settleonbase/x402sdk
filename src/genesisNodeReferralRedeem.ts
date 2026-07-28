@@ -18,6 +18,8 @@ const GENESIS_REFERRAL_REDEEM_ABI = [
 	'function issueL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 ratioBps,uint256 nonce,uint256 deadline,bytes signature)',
 	'function cancelL1RedeemCodeFor(address l0,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function setFoundationFor(address admin,address foundation,uint256 nonce,uint256 deadline,bytes signature)',
+	'function setDefaultAdminPayoutFor(address admin,address payout,uint256 nonce,uint256 deadline,bytes signature)',
 ] as const
 
 export type GenesisNodeReferralRedeemAction =
@@ -27,11 +29,14 @@ export type GenesisNodeReferralRedeemAction =
 	| 'issueL1'
 	| 'cancelL1'
 	| 'claimL1'
+	| 'setFoundation'
+	| 'setDefaultAdminPayout'
 
 export const genesisNodeReferralRedeemPool: Array<{
 	action: GenesisNodeReferralRedeemAction
 	account: string
-	redeemHash: string
+	redeemHash?: string
+	payoutAddress?: string
 	nonce: string
 	deadline: string
 	signature: string
@@ -72,10 +77,28 @@ export async function genesisNodeReferralRedeemRelayProcess(): Promise<void> {
 		)
 		const account = ethers.getAddress(job.account)
 		let tx: ethers.ContractTransactionResponse
-		if (job.action === 'issueL0') {
+		if (job.action === 'setFoundation') {
+			tx = await vault.setFoundationFor!(
+				account,
+				ethers.getAddress(job.payoutAddress!),
+				BigInt(job.nonce),
+				BigInt(job.deadline),
+				job.signature,
+				{ gasLimit: 200_000 },
+			)
+		} else if (job.action === 'setDefaultAdminPayout') {
+			tx = await vault.setDefaultAdminPayoutFor!(
+				account,
+				ethers.getAddress(job.payoutAddress!),
+				BigInt(job.nonce),
+				BigInt(job.deadline),
+				job.signature,
+				{ gasLimit: 200_000 },
+			)
+		} else if (job.action === 'issueL0') {
 			tx = await vault.issueL0RedeemCodeFor!(
 				account,
-				job.redeemHash,
+				job.redeemHash!,
 				BigInt(job.nonce),
 				BigInt(job.deadline),
 				job.signature,
@@ -84,7 +107,7 @@ export async function genesisNodeReferralRedeemRelayProcess(): Promise<void> {
 		} else if (job.action === 'cancelL0') {
 			tx = await vault.cancelL0RedeemCodeFor!(
 				account,
-				job.redeemHash,
+				job.redeemHash!,
 				BigInt(job.nonce),
 				BigInt(job.deadline),
 				job.signature,
@@ -94,7 +117,7 @@ export async function genesisNodeReferralRedeemRelayProcess(): Promise<void> {
 			tx = await vault.claimL0RedeemCodeFor!(
 				account,
 				ethers.toUtf8Bytes(job.secret ?? ''),
-				job.redeemHash,
+				job.redeemHash!,
 				BigInt(job.nonce),
 				BigInt(job.deadline),
 				job.signature,
@@ -103,7 +126,7 @@ export async function genesisNodeReferralRedeemRelayProcess(): Promise<void> {
 		} else if (job.action === 'issueL1') {
 			tx = await vault.issueL1RedeemCodeFor!(
 				account,
-				job.redeemHash,
+				job.redeemHash!,
 				BigInt(job.ratioBps ?? '0'),
 				BigInt(job.nonce),
 				BigInt(job.deadline),
@@ -113,7 +136,7 @@ export async function genesisNodeReferralRedeemRelayProcess(): Promise<void> {
 		} else if (job.action === 'cancelL1') {
 			tx = await vault.cancelL1RedeemCodeFor!(
 				account,
-				job.redeemHash,
+				job.redeemHash!,
 				BigInt(job.nonce),
 				BigInt(job.deadline),
 				job.signature,
@@ -123,7 +146,7 @@ export async function genesisNodeReferralRedeemRelayProcess(): Promise<void> {
 			tx = await vault.claimL1RedeemCodeFor!(
 				account,
 				ethers.toUtf8Bytes(job.secret ?? ''),
-				job.redeemHash,
+				job.redeemHash!,
 				BigInt(job.nonce),
 				BigInt(job.deadline),
 				job.signature,

@@ -3629,14 +3629,24 @@ const routing = ( router: Router ) => {
 				action?: GenesisNodeReferralRedeemAction
 				account?: string
 				redeemHash?: string
+				payoutAddress?: string
 				nonce?: string
 				deadline?: string
 				signature?: string
 				secret?: string
 				ratioBps?: string
 			}
-			if (!body.action || !body.account || !body.redeemHash || !body.nonce || !body.deadline || !body.signature) {
+			if (!body.action || !body.account || body.nonce == null || body.deadline == null || !body.signature) {
 				return res.status(400).json({ success: false, error: 'Missing genesis referral redeem fields' }).end()
+			}
+			const isPayout =
+				body.action === 'setFoundation' || body.action === 'setDefaultAdminPayout'
+			if (isPayout) {
+				if (!body.payoutAddress || !ethers.isAddress(body.payoutAddress)) {
+					return res.status(400).json({ success: false, error: 'Missing payoutAddress' }).end()
+				}
+			} else if (!body.redeemHash) {
+				return res.status(400).json({ success: false, error: 'Missing redeemHash' }).end()
 			}
 			if ((body.action === 'claimL0' || body.action === 'claimL1') && !body.secret) {
 				return res.status(400).json({ success: false, error: `Missing secret for ${body.action}` }).end()
@@ -3648,6 +3658,7 @@ const routing = ( router: Router ) => {
 				action: body.action,
 				account: body.account,
 				redeemHash: body.redeemHash,
+				payoutAddress: body.payoutAddress,
 				nonce: body.nonce,
 				deadline: body.deadline,
 				signature: body.signature,
