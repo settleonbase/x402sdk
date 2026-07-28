@@ -3545,6 +3545,7 @@ export async function replayValidatorRedeemClaimedEvent(requestId: string): Prom
 
 const GENESIS_VAULT_BIND_ABI = [
 	'function bindSale(bytes32 operationId,address referrerL1,address buyer,uint256 qty,bool testMode)',
+	'function saleTestModePermanentlyDisabled() view returns (bool)',
 ] as const
 
 const TREASURY_LOCK_MINT_ABI = [
@@ -3775,6 +3776,14 @@ export const genesisNodeSeatFulfillProcess = async () => {
 		if (obj.referrerL0 && ethers.isAddress(obj.referrerL0)) {
 			// Field name kept for client compat; value must be an active Genesis L1 Evangelist.
 			referrerL1 = ethers.getAddress(obj.referrerL0)
+		}
+
+		if (testMode) {
+			const vaultRead = new ethers.Contract(vault, GENESIS_VAULT_BIND_ABI, conetProvider())
+			const disabled = Boolean(await vaultRead.saleTestModePermanentlyDisabled!())
+			if (disabled) {
+				throw new Error('Genesis vault sale testMode is permanently disabled')
+			}
 		}
 
 		const lockAmount = testMode
