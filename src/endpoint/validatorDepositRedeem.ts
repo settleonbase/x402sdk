@@ -25,6 +25,7 @@ import {
 	CONET_TREASURY,
 	CONET_USDC,
 	GENESIS_NODE_BRIDGE_INITIATOR,
+	GENESIS_NODE_SEAT_TEST_USDC6,
 	GENESIS_NODE_SEAT_USDC_PER_NODE6,
 	USDC_BASE,
 } from '../chainAddresses'
@@ -3787,7 +3788,7 @@ export const genesisNodeSeatFulfillProcess = async () => {
 		}
 
 		const lockAmount = testMode
-			? BigInt(String(obj.usdcAmount6 || '1000000'))
+			? BigInt(obj.qty) * GENESIS_NODE_SEAT_TEST_USDC6
 			: obj.qty * GENESIS_NODE_SEAT_USDC_PER_NODE6
 		const sourceTxHash = usdcTx as `0x${string}`
 		const nonce = BigInt(ethers.hexlify(ethers.randomBytes(16)))
