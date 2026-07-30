@@ -79,6 +79,12 @@ export const BASE_TREASURY = CONET_TREASURY_CREATE2
  * 别名见下方 `CONET_TREASURY_BRIDGE_V3`。
  */
 export const CONET_TREASURY = '0xa208982212978550594A7FEEB70a61665d129003'
+/**
+ * TreasuryBridgeV3 (`CONET_TREASURY`) CREATE2 部署块高。
+ * 创建 tx `0x116a43ebd7b813…` → block **557036**（`eth_getTransactionReceipt`）。
+ * Genesis `voteBridgeOperation` / settle-hash 日志扫描下限必须用此值。
+ */
+export const CONET_TREASURY_BRIDGE_V3_DEPLOY_BLOCK = 557036
 /** ConetTreasuryPeer（CREATE2 跨链同址）；矿工监听 StableSwapBridgeOut / burn*ForBridge，非 Discover x402 settle 目标 */
 export const CONET_TREASURY_PEER_CREATE2 = '0x025eC62F801B2f63d5C5b3eB066bab21B12Bbeb5'
 export const BASE_TREASURY_PEER = CONET_TREASURY_PEER_CREATE2

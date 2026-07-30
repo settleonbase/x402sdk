@@ -8,9 +8,9 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import {
 	CONET_GENESIS_NODE_REFERRAL_VAULT,
-	CONET_GENESIS_NODE_REFERRAL_VAULT_DEPLOY_BLOCK,
 	CONET_RPC_URL,
 	CONET_TREASURY_BRIDGE_V3,
+	CONET_TREASURY_BRIDGE_V3_DEPLOY_BLOCK,
 } from './chainAddresses'
 import {
 	getGenesisNodeReferralPurchaseByUsdcTx,
@@ -53,26 +53,42 @@ function providerConet(): ethers.JsonRpcProvider {
 
 /**
  * Resolve CoNET `voteBridgeOperation` tx that mints conet-USDC and runs vault Tokens transferred.
+ * Log scan floor = TreasuryBridgeV3 create block ({@link CONET_TREASURY_BRIDGE_V3_DEPLOY_BLOCK}).
  * Looks up vault (preferred) then TreasuryBridge logs indexed by operationId.
  */
 export async function resolveGenesisBridgeSettleTxHash(operationId: string): Promise<string | null> {
 	const op = String(operationId ?? '').trim()
 	if (!/^0x[0-9a-fA-F]{64}$/.test(op)) return null
 	const provider = providerConet()
-	const fromBlock = Math.max(0, Number(CONET_GENESIS_NODE_REFERRAL_VAULT_DEPLOY_BLOCK) || 0)
+	const floor = Math.max(0, Number(CONET_TREASURY_BRIDGE_V3_DEPLOY_BLOCK) || 0)
+	let latest = 0
+	try {
+		latest = await provider.getBlockNumber()
+	} catch {
+		return null
+	}
+	if (latest < floor) return null
+
+	/** Chunked eth_getLogs — full tip ranges often exceed RPC limits / time out. */
+	const CHUNK = 25_000
 	const tryAddress = async (address: string): Promise<string | null> => {
-		try {
-			const logs = await provider.getLogs({
-				address,
-				topics: [null, op],
-				fromBlock,
-				toBlock: 'latest',
-			})
-			const hash = logs.find((log) => /^0x[0-9a-fA-F]{64}$/.test(log.transactionHash))?.transactionHash
-			return hash ?? null
-		} catch {
-			return null
+		for (let from = floor; from <= latest; from += CHUNK) {
+			const to = Math.min(latest, from + CHUNK - 1)
+			try {
+				const logs = await provider.getLogs({
+					address,
+					topics: [null, op],
+					fromBlock: from,
+					toBlock: to,
+				})
+				const hash = logs.find((log) => /^0x[0-9a-fA-F]{64}$/.test(log.transactionHash))
+					?.transactionHash
+				if (hash) return hash
+			} catch {
+				/* try next chunk */
+			}
 		}
+		return null
 	}
 	return (
 		(await tryAddress(CONET_GENESIS_NODE_REFERRAL_VAULT)) ||
