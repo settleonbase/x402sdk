@@ -51,10 +51,18 @@ function providerConet(): ethers.JsonRpcProvider {
 	return new ethers.JsonRpcProvider(CONET_RPC_URL)
 }
 
+/** Vault `SaleSettled(bytes32 indexed operationId, …)` — emitted inside voteBridge mint+split. */
+const VAULT_SALE_SETTLED_TOPIC0 =
+	'0x71b421ea5fb7db4cdcb886e62dcc5bde41df263d90486fcae2629ad45b8e374a'
+/** TreasuryBridgeV3 `BridgeOperation(bytes32 indexed operationId, …)` settle phase. */
+const TREASURY_BRIDGE_OPERATION_TOPIC0 =
+	'0x3da6c53997af9ec249ba82273b099b7529ae3c371e100fda75e390d8a1f122ba'
+
 /**
  * Resolve CoNET `voteBridgeOperation` tx that mints conet-USDC and runs vault Tokens transferred.
  * Log scan floor = TreasuryBridgeV3 create block ({@link CONET_TREASURY_BRIDGE_V3_DEPLOY_BLOCK}).
- * Looks up vault (preferred) then TreasuryBridge logs indexed by operationId.
+ * Prefer vault SaleSettled(opId); fallback Treasury BridgeOperation(opId).
+ * Chunk size must stay ≤ ~5k on publicrpc (larger ranges → "could not coalesce").
  */
 export async function resolveGenesisBridgeSettleTxHash(operationId: string): Promise<string | null> {
 	const op = String(operationId ?? '').trim()
@@ -69,15 +77,14 @@ export async function resolveGenesisBridgeSettleTxHash(operationId: string): Pro
 	}
 	if (latest < floor) return null
 
-	/** Chunked eth_getLogs — full tip ranges often exceed RPC limits / time out. */
-	const CHUNK = 25_000
-	const tryAddress = async (address: string): Promise<string | null> => {
+	const CHUNK = 2_000
+	const tryFilter = async (address: string, topic0: string): Promise<string | null> => {
 		for (let from = floor; from <= latest; from += CHUNK) {
 			const to = Math.min(latest, from + CHUNK - 1)
 			try {
 				const logs = await provider.getLogs({
 					address,
-					topics: [null, op],
+					topics: [topic0, op],
 					fromBlock: from,
 					toBlock: to,
 				})
@@ -91,8 +98,8 @@ export async function resolveGenesisBridgeSettleTxHash(operationId: string): Pro
 		return null
 	}
 	return (
-		(await tryAddress(CONET_GENESIS_NODE_REFERRAL_VAULT)) ||
-		(await tryAddress(CONET_TREASURY_BRIDGE_V3)) ||
+		(await tryFilter(CONET_GENESIS_NODE_REFERRAL_VAULT, VAULT_SALE_SETTLED_TOPIC0)) ||
+		(await tryFilter(CONET_TREASURY_BRIDGE_V3, TREASURY_BRIDGE_OPERATION_TOPIC0)) ||
 		null
 	)
 }
