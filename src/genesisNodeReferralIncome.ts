@@ -371,21 +371,40 @@ export async function backfillGenesisNodeReferralIncomeFromFulfillFile(): Promis
 	return written
 }
 
-/** Cluster read path: backfill legacy file, resolve missing settle hashes, then return income. */
+/** Cluster read path: backfill legacy file, resolve missing settle hashes, then return income page. */
 export async function loadGenesisNodeReferralIncomeForAccount(
 	account: string,
-): Promise<GenesisNodeReferralIncomeItem[]> {
-	try {
-		await backfillGenesisNodeReferralIncomeFromFulfillFile()
-	} catch (error: unknown) {
-		const msg = error instanceof Error ? error.message : String(error)
-		logger(Colors.yellow(`[genesisNodeReferralIncome] backfill error: ${msg}`))
+	options: {
+		sinceMs?: number
+		beforeMs?: number
+		limit?: number
+		/** Skip fulfill-file backfill (incremental daemon polls). */
+		skipBackfill?: boolean
+	} = {},
+): Promise<{
+	items: GenesisNodeReferralIncomeItem[]
+	hasMore: boolean
+	newestTimestampMs: number
+	oldestTimestampMs: number
+}> {
+	const incremental = typeof options.sinceMs === 'number' && options.sinceMs > 0
+	if (!options.skipBackfill && !incremental) {
+		try {
+			await backfillGenesisNodeReferralIncomeFromFulfillFile()
+		} catch (error: unknown) {
+			const msg = error instanceof Error ? error.message : String(error)
+			logger(Colors.yellow(`[genesisNodeReferralIncome] backfill error: ${msg}`))
+		}
 	}
 	try {
-		await enrichGenesisBridgeSettleTxHashes(40)
+		await enrichGenesisBridgeSettleTxHashes(incremental ? 10 : 40)
 	} catch (error: unknown) {
 		const msg = error instanceof Error ? error.message : String(error)
 		logger(Colors.yellow(`[genesisNodeReferralIncome] settle enrich error: ${msg}`))
 	}
-	return listGenesisNodeReferralIncomeForAccount(account)
+	return listGenesisNodeReferralIncomeForAccount(account, {
+		sinceMs: options.sinceMs,
+		beforeMs: options.beforeMs,
+		limit: options.limit,
+	})
 }

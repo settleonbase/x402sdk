@@ -10254,12 +10254,42 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	/**
 	 * Genesis Partnership Income details — purchase hashes credited to this wallet.
 	 * Source: Master ledger written on each genesisNodeSeat fulfill (x402 + in-app gas sponsored).
+	 *
+	 * Query:
+	 * - `account` (required)
+	 * - `sinceMs` — incremental: only purchases after this timestamp (daemon)
+	 * - `beforeMs` — older page: purchases before this timestamp
+	 * - `limit` — purchase-row page size (default 50, max 200)
 	 */
 	router.get('/genesisNodeReferralIncome', async (req, res) => {
 		try {
 			const account = ethers.getAddress(String(req.query.account ?? ''))
-			const items = await loadGenesisNodeReferralIncomeForAccount(account)
-			return res.status(200).json({ success: true, account, items }).end()
+			const sinceRaw = Number(req.query.sinceMs)
+			const beforeRaw = Number(req.query.beforeMs)
+			const limitRaw = Number(req.query.limit)
+			const sinceMs =
+				Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : undefined
+			const beforeMs =
+				Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : undefined
+			const limit =
+				Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : undefined
+			const page = await loadGenesisNodeReferralIncomeForAccount(account, {
+				sinceMs,
+				beforeMs,
+				limit,
+				skipBackfill: Boolean(sinceMs),
+			})
+			return res
+				.status(200)
+				.json({
+					success: true,
+					account,
+					items: page.items,
+					hasMore: page.hasMore,
+					newestTimestampMs: page.newestTimestampMs,
+					oldestTimestampMs: page.oldestTimestampMs,
+				})
+				.end()
 		} catch (error: any) {
 			return res
 				.status(400)

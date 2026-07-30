@@ -2028,22 +2028,67 @@ export function expandGenesisNodeReferralIncomeItems(
 
 export async function listGenesisNodeReferralPurchasesForAccount(
 	account: string,
-): Promise<GenesisNodeReferralPurchaseRow[]> {
+	options: {
+		/** Inclusive lower bound is exclusive: purchased_at > sinceMs */
+		sinceMs?: number
+		/** Exclusive upper bound: purchased_at < beforeMs (older page) */
+		beforeMs?: number
+		/** Max purchase rows (not expanded income lines). Default 50, max 200. */
+		limit?: number
+	} = {},
+): Promise<{ rows: GenesisNodeReferralPurchaseRow[]; hasMore: boolean }> {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		await ensureGenesisNodeReferralPurchasesSchema(db)
+		await db.query(
+			`CREATE INDEX IF NOT EXISTS idx_genesis_node_referral_purchases_purchased_at
+			 ON genesis_node_referral_purchases (purchased_at DESC)`,
+		)
 		const normalized = ethers.getAddress(account).toLowerCase()
+		const limitRaw = Number(options.limit)
+		const limit = Math.min(200, Math.max(1, Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 50))
+		const sinceMs =
+			typeof options.sinceMs === 'number' && Number.isFinite(options.sinceMs) && options.sinceMs > 0
+				? Math.floor(options.sinceMs)
+				: null
+		const beforeMs =
+			typeof options.beforeMs === 'number' && Number.isFinite(options.beforeMs) && options.beforeMs > 0
+				? Math.floor(options.beforeMs)
+				: null
+
+		const params: Array<string | number> = [normalized]
+		let timeClause = ''
+		let orderClause = 'ORDER BY purchased_at DESC'
+		if (sinceMs != null) {
+			params.push(sinceMs)
+			timeClause = ` AND purchased_at > to_timestamp($${params.length}::double precision / 1000.0)`
+			orderClause = 'ORDER BY purchased_at ASC'
+		} else if (beforeMs != null) {
+			params.push(beforeMs)
+			timeClause = ` AND purchased_at < to_timestamp($${params.length}::double precision / 1000.0)`
+			orderClause = 'ORDER BY purchased_at DESC'
+		}
+		params.push(limit + 1)
+		const limitParam = `$${params.length}`
+
 		const result = await db.query(
 			`SELECT * FROM genesis_node_referral_purchases
-			 WHERE LOWER(referrer_l0) = $1
-			    OR LOWER(referrer_l1) = $1
-			    OR LOWER(admin_payout) = $1
-			    OR LOWER(foundation_payout) = $1
-			 ORDER BY purchased_at DESC`,
-			[normalized],
+			 WHERE (
+			        LOWER(referrer_l0) = $1
+			     OR LOWER(referrer_l1) = $1
+			     OR LOWER(admin_payout) = $1
+			     OR LOWER(foundation_payout) = $1
+			 )
+			 ${timeClause}
+			 ${orderClause}
+			 LIMIT ${limitParam}`,
+			params,
 		)
-		return result.rows.map(mapGenesisPurchaseRow)
+		const mapped = result.rows.map(mapGenesisPurchaseRow)
+		const hasMore = mapped.length > limit
+		const rows = hasMore ? mapped.slice(0, limit) : mapped
+		return { rows, hasMore }
 	} finally {
 		await db.end().catch(() => {})
 	}
@@ -2051,9 +2096,27 @@ export async function listGenesisNodeReferralPurchasesForAccount(
 
 export async function listGenesisNodeReferralIncomeForAccount(
 	account: string,
-): Promise<GenesisNodeReferralIncomeItem[]> {
-	const rows = await listGenesisNodeReferralPurchasesForAccount(account)
-	return expandGenesisNodeReferralIncomeItems(account, rows)
+	options: {
+		sinceMs?: number
+		beforeMs?: number
+		limit?: number
+	} = {},
+): Promise<{
+	items: GenesisNodeReferralIncomeItem[]
+	hasMore: boolean
+	newestTimestampMs: number
+	oldestTimestampMs: number
+}> {
+	const { rows, hasMore } = await listGenesisNodeReferralPurchasesForAccount(account, options)
+	const items = expandGenesisNodeReferralIncomeItems(account, rows)
+	let newestTimestampMs = 0
+	let oldestTimestampMs = 0
+	for (const item of items) {
+		if (!item.timestampMs) continue
+		if (item.timestampMs > newestTimestampMs) newestTimestampMs = item.timestampMs
+		if (!oldestTimestampMs || item.timestampMs < oldestTimestampMs) oldestTimestampMs = item.timestampMs
+	}
+	return { items, hasMore, newestTimestampMs, oldestTimestampMs }
 }
 
 const REFERRAL_REGISTRY_MEMBERS_TABLE = `CREATE TABLE IF NOT EXISTS referral_registry_members (
