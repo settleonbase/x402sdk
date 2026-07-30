@@ -45,6 +45,7 @@ import {
 	type ReferralRegistryRedeemRelayAction,
 } from '../MemberCard'
 import { type GenesisNodeReferralRedeemAction } from '../genesisNodeReferralRedeem'
+import { loadGenesisNodeReferralIncomeForAccount } from '../genesisNodeReferralIncome'
 import {
 	kickReferralRegistryAdminManagementRelay,
 	referralRegistryAdminManagementPool,
@@ -10247,6 +10248,26 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(200).json({ success: true, nonce: nonce.toString() }).end()
 		} catch (error: any) {
 			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Nonce read failed' }).end()
+		}
+	})
+
+	/**
+	 * Genesis Partnership Income details — purchase hashes credited to this wallet.
+	 * Source: Master ledger written on each genesisNodeSeat fulfill (x402 + in-app gas sponsored).
+	 */
+	router.get('/genesisNodeReferralIncome', async (req, res) => {
+		try {
+			const account = ethers.getAddress(String(req.query.account ?? ''))
+			const items = await loadGenesisNodeReferralIncomeForAccount(account)
+			return res.status(200).json({ success: true, account, items }).end()
+		} catch (error: any) {
+			return res
+				.status(400)
+				.json({
+					success: false,
+					error: error?.shortMessage ?? error?.message ?? 'Could not load Genesis income details',
+				})
+				.end()
 		}
 	})
 

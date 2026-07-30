@@ -35,6 +35,7 @@ import {
 	enqueueOnchainTxWork,
 	waitForOnchainTxQueue,
 } from '../onchainTxSerialQueue'
+import { recordGenesisNodeReferralPurchaseIncomeInBackground } from '../genesisNodeReferralIncome'
 
 ensureSettleContractPoolInitialized()
 
@@ -3742,6 +3743,18 @@ export const genesisNodeSeatFulfillProcess = async () => {
 					`[genesisNodeSeatFulfill] idempotent hit USDC_tx=${usdcTx.slice(0, 12)}… create=${existing.createTxHash.slice(0, 12)}… claim=${existing.claimTxHash.slice(0, 12)}…`,
 				),
 			)
+			recordGenesisNodeReferralPurchaseIncomeInBackground({
+				usdcTxHash: existing.USDC_tx,
+				operationId: existing.operationId,
+				bindTxHash: existing.bindTxHash,
+				lockMintTxHash: existing.lockMintTxHash,
+				buyer: existing.beneficiary,
+				payer: existing.payer,
+				qty: existing.qty,
+				testMode: existing.testMode,
+				referrer: existing.referrerL0 || null,
+				purchasedAt: existing.fulfilledAt,
+			})
 			if (obj.res && !obj.res.headersSent) {
 				obj.res
 					.status(200)
@@ -3972,6 +3985,18 @@ export const genesisNodeSeatFulfillProcess = async () => {
 			fulfilledAt: new Date().toISOString(),
 		}
 		writeGenesisNodeSeatFulfillRecord(record)
+		recordGenesisNodeReferralPurchaseIncomeInBackground({
+			usdcTxHash: record.USDC_tx,
+			operationId: record.operationId,
+			bindTxHash: record.bindTxHash,
+			lockMintTxHash: record.lockMintTxHash,
+			buyer: record.beneficiary,
+			payer: record.payer,
+			qty: record.qty,
+			testMode: record.testMode,
+			referrer: record.referrerL0 || null,
+			purchasedAt: record.fulfilledAt,
+		})
 
 		logger(
 			Colors.green(

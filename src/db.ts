@@ -1714,6 +1714,281 @@ export async function listReferralRegistryClaimsByParent(parent: string): Promis
 	}
 }
 
+/** Genesis Node Seat purchase ledger — written by Master on fulfill; Cluster serves income details. */
+const GENESIS_NODE_REFERRAL_PURCHASES_TABLE = `CREATE TABLE IF NOT EXISTS genesis_node_referral_purchases (
+	usdc_tx_hash TEXT PRIMARY KEY,
+	operation_id TEXT NOT NULL,
+	bind_tx_hash TEXT,
+	lock_mint_tx_hash TEXT,
+	buyer TEXT NOT NULL,
+	payer TEXT,
+	qty TEXT NOT NULL,
+	test_mode BOOLEAN NOT NULL DEFAULT FALSE,
+	referrer TEXT,
+	referrer_l0 TEXT,
+	referrer_l1 TEXT,
+	admin_payout TEXT,
+	foundation_payout TEXT,
+	l0_amount_usdc6 TEXT NOT NULL DEFAULT '0',
+	l1_amount_usdc6 TEXT NOT NULL DEFAULT '0',
+	admin_amount_usdc6 TEXT NOT NULL DEFAULT '0',
+	foundation_amount_usdc6 TEXT NOT NULL DEFAULT '0',
+	purchased_at TIMESTAMPTZ DEFAULT NOW(),
+	created_at TIMESTAMPTZ DEFAULT NOW()
+)`
+const GENESIS_NODE_REFERRAL_PURCHASES_BENEFICIARY_IDX = `CREATE INDEX IF NOT EXISTS idx_genesis_node_referral_purchases_beneficiaries
+	ON genesis_node_referral_purchases (
+		LOWER(referrer_l0), LOWER(referrer_l1), LOWER(admin_payout), LOWER(foundation_payout)
+	)`
+
+export type GenesisNodeReferralPurchaseRow = {
+	usdcTxHash: string
+	operationId: string
+	bindTxHash: string | null
+	lockMintTxHash: string | null
+	buyer: string
+	payer: string | null
+	qty: string
+	testMode: boolean
+	referrer: string | null
+	referrerL0: string | null
+	referrerL1: string | null
+	adminPayout: string | null
+	foundationPayout: string | null
+	l0AmountUsdc6: string
+	l1AmountUsdc6: string
+	adminAmountUsdc6: string
+	foundationAmountUsdc6: string
+	purchasedAt: string
+}
+
+export type GenesisNodeReferralIncomeRole = 'l0' | 'l1' | 'admin' | 'foundation'
+
+export type GenesisNodeReferralIncomeItem = {
+	/** Base USDC purchase tx — primary hash shown in Income details. */
+	transactionHash: string
+	operationId: string
+	bindTxHash: string | null
+	lockMintTxHash: string | null
+	amountUsdc6: string
+	role: GenesisNodeReferralIncomeRole
+	qty: string
+	testMode: boolean
+	buyer: string
+	timestampMs: number
+}
+
+async function ensureGenesisNodeReferralPurchasesSchema(db: Client): Promise<void> {
+	await db.query(GENESIS_NODE_REFERRAL_PURCHASES_TABLE)
+	await db.query(GENESIS_NODE_REFERRAL_PURCHASES_BENEFICIARY_IDX)
+}
+
+function mapGenesisPurchaseRow(row: any): GenesisNodeReferralPurchaseRow {
+	return {
+		usdcTxHash: String(row.usdc_tx_hash),
+		operationId: String(row.operation_id),
+		bindTxHash: row.bind_tx_hash ? String(row.bind_tx_hash) : null,
+		lockMintTxHash: row.lock_mint_tx_hash ? String(row.lock_mint_tx_hash) : null,
+		buyer: ethers.getAddress(String(row.buyer)),
+		payer: row.payer && ethers.isAddress(row.payer) ? ethers.getAddress(String(row.payer)) : null,
+		qty: String(row.qty ?? '0'),
+		testMode: Boolean(row.test_mode),
+		referrer: row.referrer && ethers.isAddress(row.referrer) ? ethers.getAddress(String(row.referrer)) : null,
+		referrerL0: row.referrer_l0 && ethers.isAddress(row.referrer_l0) ? ethers.getAddress(String(row.referrer_l0)) : null,
+		referrerL1: row.referrer_l1 && ethers.isAddress(row.referrer_l1) ? ethers.getAddress(String(row.referrer_l1)) : null,
+		adminPayout:
+			row.admin_payout && ethers.isAddress(row.admin_payout) ? ethers.getAddress(String(row.admin_payout)) : null,
+		foundationPayout:
+			row.foundation_payout && ethers.isAddress(row.foundation_payout)
+				? ethers.getAddress(String(row.foundation_payout))
+				: null,
+		l0AmountUsdc6: String(row.l0_amount_usdc6 ?? '0'),
+		l1AmountUsdc6: String(row.l1_amount_usdc6 ?? '0'),
+		adminAmountUsdc6: String(row.admin_amount_usdc6 ?? '0'),
+		foundationAmountUsdc6: String(row.foundation_amount_usdc6 ?? '0'),
+		purchasedAt: new Date(row.purchased_at).toISOString(),
+	}
+}
+
+export async function upsertGenesisNodeReferralPurchase(params: {
+	usdcTxHash: string
+	operationId: string
+	bindTxHash?: string | null
+	lockMintTxHash?: string | null
+	buyer: string
+	payer?: string | null
+	qty: string
+	testMode: boolean
+	referrer?: string | null
+	referrerL0?: string | null
+	referrerL1?: string | null
+	adminPayout?: string | null
+	foundationPayout?: string | null
+	l0AmountUsdc6: string
+	l1AmountUsdc6: string
+	adminAmountUsdc6: string
+	foundationAmountUsdc6: string
+	purchasedAt?: string | null
+}): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureGenesisNodeReferralPurchasesSchema(db)
+		const usdcTx = params.usdcTxHash.trim().toLowerCase()
+		await db.query(
+			`INSERT INTO genesis_node_referral_purchases
+				(usdc_tx_hash, operation_id, bind_tx_hash, lock_mint_tx_hash, buyer, payer, qty, test_mode,
+				 referrer, referrer_l0, referrer_l1, admin_payout, foundation_payout,
+				 l0_amount_usdc6, l1_amount_usdc6, admin_amount_usdc6, foundation_amount_usdc6, purchased_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,COALESCE($18::timestamptz, NOW()))
+			 ON CONFLICT (usdc_tx_hash) DO UPDATE SET
+				operation_id = EXCLUDED.operation_id,
+				bind_tx_hash = EXCLUDED.bind_tx_hash,
+				lock_mint_tx_hash = EXCLUDED.lock_mint_tx_hash,
+				buyer = EXCLUDED.buyer,
+				payer = EXCLUDED.payer,
+				qty = EXCLUDED.qty,
+				test_mode = EXCLUDED.test_mode,
+				referrer = EXCLUDED.referrer,
+				referrer_l0 = EXCLUDED.referrer_l0,
+				referrer_l1 = EXCLUDED.referrer_l1,
+				admin_payout = EXCLUDED.admin_payout,
+				foundation_payout = EXCLUDED.foundation_payout,
+				l0_amount_usdc6 = EXCLUDED.l0_amount_usdc6,
+				l1_amount_usdc6 = EXCLUDED.l1_amount_usdc6,
+				admin_amount_usdc6 = EXCLUDED.admin_amount_usdc6,
+				foundation_amount_usdc6 = EXCLUDED.foundation_amount_usdc6,
+				purchased_at = COALESCE(EXCLUDED.purchased_at, genesis_node_referral_purchases.purchased_at)`,
+			[
+				usdcTx,
+				params.operationId,
+				params.bindTxHash ?? null,
+				params.lockMintTxHash ?? null,
+				ethers.getAddress(params.buyer).toLowerCase(),
+				params.payer && ethers.isAddress(params.payer) ? ethers.getAddress(params.payer).toLowerCase() : null,
+				params.qty,
+				params.testMode,
+				params.referrer && ethers.isAddress(params.referrer)
+					? ethers.getAddress(params.referrer).toLowerCase()
+					: null,
+				params.referrerL0 && ethers.isAddress(params.referrerL0)
+					? ethers.getAddress(params.referrerL0).toLowerCase()
+					: null,
+				params.referrerL1 && ethers.isAddress(params.referrerL1)
+					? ethers.getAddress(params.referrerL1).toLowerCase()
+					: null,
+				params.adminPayout && ethers.isAddress(params.adminPayout)
+					? ethers.getAddress(params.adminPayout).toLowerCase()
+					: null,
+				params.foundationPayout && ethers.isAddress(params.foundationPayout)
+					? ethers.getAddress(params.foundationPayout).toLowerCase()
+					: null,
+				params.l0AmountUsdc6,
+				params.l1AmountUsdc6,
+				params.adminAmountUsdc6,
+				params.foundationAmountUsdc6,
+				params.purchasedAt ?? null,
+			],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function getGenesisNodeReferralPurchaseByUsdcTx(
+	usdcTxHash: string,
+): Promise<GenesisNodeReferralPurchaseRow | null> {
+	const key = usdcTxHash.trim().toLowerCase()
+	if (!key) return null
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureGenesisNodeReferralPurchasesSchema(db)
+		const result = await db.query(
+			`SELECT * FROM genesis_node_referral_purchases WHERE usdc_tx_hash = $1 LIMIT 1`,
+			[key],
+		)
+		if (!result.rows[0]) return null
+		return mapGenesisPurchaseRow(result.rows[0])
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** Flatten purchase rows into per-beneficiary income lines for one account. */
+export function expandGenesisNodeReferralIncomeItems(
+	account: string,
+	rows: GenesisNodeReferralPurchaseRow[],
+): GenesisNodeReferralIncomeItem[] {
+	const eoaLower = ethers.getAddress(account).toLowerCase()
+	const items: GenesisNodeReferralIncomeItem[] = []
+	const push = (
+		row: GenesisNodeReferralPurchaseRow,
+		role: GenesisNodeReferralIncomeRole,
+		payee: string | null,
+		amountUsdc6: string,
+	) => {
+		if (!payee || !ethers.isAddress(payee)) return
+		if (ethers.getAddress(payee).toLowerCase() !== eoaLower) return
+		let amount = 0n
+		try {
+			amount = BigInt(amountUsdc6 || '0')
+		} catch {
+			return
+		}
+		if (amount <= 0n) return
+		items.push({
+			transactionHash: row.usdcTxHash.startsWith('0x') ? row.usdcTxHash : `0x${row.usdcTxHash}`,
+			operationId: row.operationId,
+			bindTxHash: row.bindTxHash,
+			lockMintTxHash: row.lockMintTxHash,
+			amountUsdc6: amount.toString(),
+			role,
+			qty: row.qty,
+			testMode: row.testMode,
+			buyer: row.buyer,
+			timestampMs: Date.parse(row.purchasedAt) || 0,
+		})
+	}
+	for (const row of rows) {
+		push(row, 'l0', row.referrerL0, row.l0AmountUsdc6)
+		push(row, 'l1', row.referrerL1, row.l1AmountUsdc6)
+		push(row, 'admin', row.adminPayout, row.adminAmountUsdc6)
+		push(row, 'foundation', row.foundationPayout, row.foundationAmountUsdc6)
+	}
+	return items.sort((a, b) => b.timestampMs - a.timestampMs)
+}
+
+export async function listGenesisNodeReferralPurchasesForAccount(
+	account: string,
+): Promise<GenesisNodeReferralPurchaseRow[]> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureGenesisNodeReferralPurchasesSchema(db)
+		const normalized = ethers.getAddress(account).toLowerCase()
+		const result = await db.query(
+			`SELECT * FROM genesis_node_referral_purchases
+			 WHERE LOWER(referrer_l0) = $1
+			    OR LOWER(referrer_l1) = $1
+			    OR LOWER(admin_payout) = $1
+			    OR LOWER(foundation_payout) = $1
+			 ORDER BY purchased_at DESC`,
+			[normalized],
+		)
+		return result.rows.map(mapGenesisPurchaseRow)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function listGenesisNodeReferralIncomeForAccount(
+	account: string,
+): Promise<GenesisNodeReferralIncomeItem[]> {
+	const rows = await listGenesisNodeReferralPurchasesForAccount(account)
+	return expandGenesisNodeReferralIncomeItems(account, rows)
+}
+
 const REFERRAL_REGISTRY_MEMBERS_TABLE = `CREATE TABLE IF NOT EXISTS referral_registry_members (
 	account_eoa TEXT PRIMARY KEY,
 	is_admin BOOLEAN NOT NULL DEFAULT FALSE,
