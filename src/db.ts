@@ -1720,6 +1720,7 @@ const GENESIS_NODE_REFERRAL_PURCHASES_TABLE = `CREATE TABLE IF NOT EXISTS genesi
 	operation_id TEXT NOT NULL,
 	bind_tx_hash TEXT,
 	lock_mint_tx_hash TEXT,
+	bridge_settle_tx_hash TEXT,
 	buyer TEXT NOT NULL,
 	payer TEXT,
 	qty TEXT NOT NULL,
@@ -1736,6 +1737,8 @@ const GENESIS_NODE_REFERRAL_PURCHASES_TABLE = `CREATE TABLE IF NOT EXISTS genesi
 	purchased_at TIMESTAMPTZ DEFAULT NOW(),
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
+const GENESIS_NODE_REFERRAL_PURCHASES_BRIDGE_SETTLE_COL = `ALTER TABLE genesis_node_referral_purchases
+	ADD COLUMN IF NOT EXISTS bridge_settle_tx_hash TEXT`
 const GENESIS_NODE_REFERRAL_PURCHASES_BENEFICIARY_IDX = `CREATE INDEX IF NOT EXISTS idx_genesis_node_referral_purchases_beneficiaries
 	ON genesis_node_referral_purchases (
 		LOWER(referrer_l0), LOWER(referrer_l1), LOWER(admin_payout), LOWER(foundation_payout)
@@ -1746,6 +1749,8 @@ export type GenesisNodeReferralPurchaseRow = {
 	operationId: string
 	bindTxHash: string | null
 	lockMintTxHash: string | null
+	/** CoNET TreasuryBridgeV3 voteBridgeOperation — mint + vault Tokens transferred. */
+	bridgeSettleTxHash: string | null
 	buyer: string
 	payer: string | null
 	qty: string
@@ -1770,6 +1775,8 @@ export type GenesisNodeReferralIncomeItem = {
 	operationId: string
 	bindTxHash: string | null
 	lockMintTxHash: string | null
+	/** CoNET voteBridgeOperation (mint + split transfers). Prefer this over bindSale. */
+	bridgeSettleTxHash: string | null
 	amountUsdc6: string
 	role: GenesisNodeReferralIncomeRole
 	qty: string
@@ -1780,6 +1787,7 @@ export type GenesisNodeReferralIncomeItem = {
 
 async function ensureGenesisNodeReferralPurchasesSchema(db: Client): Promise<void> {
 	await db.query(GENESIS_NODE_REFERRAL_PURCHASES_TABLE)
+	await db.query(GENESIS_NODE_REFERRAL_PURCHASES_BRIDGE_SETTLE_COL)
 	await db.query(GENESIS_NODE_REFERRAL_PURCHASES_BENEFICIARY_IDX)
 }
 
@@ -1789,6 +1797,7 @@ function mapGenesisPurchaseRow(row: any): GenesisNodeReferralPurchaseRow {
 		operationId: String(row.operation_id),
 		bindTxHash: row.bind_tx_hash ? String(row.bind_tx_hash) : null,
 		lockMintTxHash: row.lock_mint_tx_hash ? String(row.lock_mint_tx_hash) : null,
+		bridgeSettleTxHash: row.bridge_settle_tx_hash ? String(row.bridge_settle_tx_hash) : null,
 		buyer: ethers.getAddress(String(row.buyer)),
 		payer: row.payer && ethers.isAddress(row.payer) ? ethers.getAddress(String(row.payer)) : null,
 		qty: String(row.qty ?? '0'),
@@ -1815,6 +1824,7 @@ export async function upsertGenesisNodeReferralPurchase(params: {
 	operationId: string
 	bindTxHash?: string | null
 	lockMintTxHash?: string | null
+	bridgeSettleTxHash?: string | null
 	buyer: string
 	payer?: string | null
 	qty: string
@@ -1835,16 +1845,21 @@ export async function upsertGenesisNodeReferralPurchase(params: {
 		await db.connect()
 		await ensureGenesisNodeReferralPurchasesSchema(db)
 		const usdcTx = params.usdcTxHash.trim().toLowerCase()
+		const bridgeSettle =
+			params.bridgeSettleTxHash && /^0x[0-9a-fA-F]{64}$/.test(params.bridgeSettleTxHash.trim())
+				? params.bridgeSettleTxHash.trim().toLowerCase()
+				: null
 		await db.query(
 			`INSERT INTO genesis_node_referral_purchases
-				(usdc_tx_hash, operation_id, bind_tx_hash, lock_mint_tx_hash, buyer, payer, qty, test_mode,
+				(usdc_tx_hash, operation_id, bind_tx_hash, lock_mint_tx_hash, bridge_settle_tx_hash, buyer, payer, qty, test_mode,
 				 referrer, referrer_l0, referrer_l1, admin_payout, foundation_payout,
 				 l0_amount_usdc6, l1_amount_usdc6, admin_amount_usdc6, foundation_amount_usdc6, purchased_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,COALESCE($18::timestamptz, NOW()))
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,COALESCE($19::timestamptz, NOW()))
 			 ON CONFLICT (usdc_tx_hash) DO UPDATE SET
 				operation_id = EXCLUDED.operation_id,
-				bind_tx_hash = EXCLUDED.bind_tx_hash,
-				lock_mint_tx_hash = EXCLUDED.lock_mint_tx_hash,
+				bind_tx_hash = COALESCE(EXCLUDED.bind_tx_hash, genesis_node_referral_purchases.bind_tx_hash),
+				lock_mint_tx_hash = COALESCE(EXCLUDED.lock_mint_tx_hash, genesis_node_referral_purchases.lock_mint_tx_hash),
+				bridge_settle_tx_hash = COALESCE(EXCLUDED.bridge_settle_tx_hash, genesis_node_referral_purchases.bridge_settle_tx_hash),
 				buyer = EXCLUDED.buyer,
 				payer = EXCLUDED.payer,
 				qty = EXCLUDED.qty,
@@ -1864,6 +1879,7 @@ export async function upsertGenesisNodeReferralPurchase(params: {
 				params.operationId,
 				params.bindTxHash ?? null,
 				params.lockMintTxHash ?? null,
+				bridgeSettle,
 				ethers.getAddress(params.buyer).toLowerCase(),
 				params.payer && ethers.isAddress(params.payer) ? ethers.getAddress(params.payer).toLowerCase() : null,
 				params.qty,
@@ -1890,6 +1906,56 @@ export async function upsertGenesisNodeReferralPurchase(params: {
 				params.purchasedAt ?? null,
 			],
 		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function updateGenesisNodeReferralBridgeSettleTx(params: {
+	usdcTxHash: string
+	bridgeSettleTxHash: string
+}): Promise<void> {
+	const usdcTx = params.usdcTxHash.trim().toLowerCase()
+	const settle = params.bridgeSettleTxHash.trim().toLowerCase()
+	if (!usdcTx || !/^0x[0-9a-fA-F]{64}$/.test(settle)) return
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureGenesisNodeReferralPurchasesSchema(db)
+		await db.query(
+			`UPDATE genesis_node_referral_purchases
+			 SET bridge_settle_tx_hash = $2
+			 WHERE usdc_tx_hash = $1
+			   AND (bridge_settle_tx_hash IS NULL OR bridge_settle_tx_hash = '')`,
+			[usdcTx, settle],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** Purchases that still need CoNET voteBridgeOperation hash resolution. */
+export async function listGenesisNodeReferralPurchasesMissingBridgeSettle(
+	limit = 40,
+): Promise<Array<{ usdcTxHash: string; operationId: string }>> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureGenesisNodeReferralPurchasesSchema(db)
+		const result = await db.query(
+			`SELECT usdc_tx_hash, operation_id
+			 FROM genesis_node_referral_purchases
+			 WHERE operation_id IS NOT NULL
+			   AND operation_id <> ''
+			   AND (bridge_settle_tx_hash IS NULL OR bridge_settle_tx_hash = '')
+			 ORDER BY purchased_at DESC NULLS LAST
+			 LIMIT $1`,
+			[Math.max(1, Math.min(limit, 100))],
+		)
+		return result.rows.map((row: any) => ({
+			usdcTxHash: String(row.usdc_tx_hash),
+			operationId: String(row.operation_id),
+		}))
 	} finally {
 		await db.end().catch(() => {})
 	}
@@ -1942,6 +2008,7 @@ export function expandGenesisNodeReferralIncomeItems(
 			operationId: row.operationId,
 			bindTxHash: row.bindTxHash,
 			lockMintTxHash: row.lockMintTxHash,
+			bridgeSettleTxHash: row.bridgeSettleTxHash,
 			amountUsdc6: amount.toString(),
 			role,
 			qty: row.qty,

@@ -6,10 +6,17 @@ import { ethers } from 'ethers'
 import fs from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
-import { CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_RPC_URL } from './chainAddresses'
+import {
+	CONET_GENESIS_NODE_REFERRAL_VAULT,
+	CONET_GENESIS_NODE_REFERRAL_VAULT_DEPLOY_BLOCK,
+	CONET_RPC_URL,
+	CONET_TREASURY_BRIDGE_V3,
+} from './chainAddresses'
 import {
 	getGenesisNodeReferralPurchaseByUsdcTx,
 	listGenesisNodeReferralIncomeForAccount,
+	listGenesisNodeReferralPurchasesMissingBridgeSettle,
+	updateGenesisNodeReferralBridgeSettleTx,
 	upsertGenesisNodeReferralPurchase,
 	type GenesisNodeReferralIncomeItem,
 } from './db'
@@ -42,6 +49,52 @@ export type GenesisPurchaseSplit = {
 
 function providerConet(): ethers.JsonRpcProvider {
 	return new ethers.JsonRpcProvider(CONET_RPC_URL)
+}
+
+/**
+ * Resolve CoNET `voteBridgeOperation` tx that mints conet-USDC and runs vault Tokens transferred.
+ * Looks up vault (preferred) then TreasuryBridge logs indexed by operationId.
+ */
+export async function resolveGenesisBridgeSettleTxHash(operationId: string): Promise<string | null> {
+	const op = String(operationId ?? '').trim()
+	if (!/^0x[0-9a-fA-F]{64}$/.test(op)) return null
+	const provider = providerConet()
+	const fromBlock = Math.max(0, Number(CONET_GENESIS_NODE_REFERRAL_VAULT_DEPLOY_BLOCK) || 0)
+	const tryAddress = async (address: string): Promise<string | null> => {
+		try {
+			const logs = await provider.getLogs({
+				address,
+				topics: [null, op],
+				fromBlock,
+				toBlock: 'latest',
+			})
+			const hash = logs.find((log) => /^0x[0-9a-fA-F]{64}$/.test(log.transactionHash))?.transactionHash
+			return hash ?? null
+		} catch {
+			return null
+		}
+	}
+	return (
+		(await tryAddress(CONET_GENESIS_NODE_REFERRAL_VAULT)) ||
+		(await tryAddress(CONET_TREASURY_BRIDGE_V3)) ||
+		null
+	)
+}
+
+/** Best-effort fill bridge_settle_tx_hash for purchases still missing the voteBridgeOperation hash. */
+export async function enrichGenesisBridgeSettleTxHashes(limit = 40): Promise<number> {
+	const missing = await listGenesisNodeReferralPurchasesMissingBridgeSettle(limit)
+	let updated = 0
+	for (const row of missing) {
+		const settle = await resolveGenesisBridgeSettleTxHash(row.operationId)
+		if (!settle) continue
+		await updateGenesisNodeReferralBridgeSettleTx({
+			usdcTxHash: row.usdcTxHash,
+			bridgeSettleTxHash: settle,
+		})
+		updated += 1
+	}
+	return updated
 }
 
 /**
@@ -134,6 +187,7 @@ export type RecordGenesisPurchaseIncomeParams = {
 	operationId: string
 	bindTxHash?: string | null
 	lockMintTxHash?: string | null
+	bridgeSettleTxHash?: string | null
 	buyer: string
 	payer?: string | null
 	qty: string | bigint
@@ -157,7 +211,21 @@ export async function recordGenesisNodeReferralPurchaseIncome(
 	if (qty <= 0n) throw new Error('Invalid qty for genesis income ledger')
 
 	const existing = await getGenesisNodeReferralPurchaseByUsdcTx(usdcTx)
-	if (existing) return
+	if (existing) {
+		if (!existing.bridgeSettleTxHash) {
+			const settle =
+				(params.bridgeSettleTxHash && /^0x[0-9a-fA-F]{64}$/.test(params.bridgeSettleTxHash.trim())
+					? params.bridgeSettleTxHash.trim()
+					: null) || (await resolveGenesisBridgeSettleTxHash(params.operationId))
+			if (settle) {
+				await updateGenesisNodeReferralBridgeSettleTx({
+					usdcTxHash: usdcTx,
+					bridgeSettleTxHash: settle,
+				})
+			}
+		}
+		return
+	}
 
 	const split = await resolveGenesisPurchaseSplit({
 		referrer: params.referrer,
@@ -165,11 +233,20 @@ export async function recordGenesisNodeReferralPurchaseIncome(
 		testMode: params.testMode,
 	})
 
+	let bridgeSettle =
+		params.bridgeSettleTxHash && /^0x[0-9a-fA-F]{64}$/.test(params.bridgeSettleTxHash.trim())
+			? params.bridgeSettleTxHash.trim()
+			: null
+	if (!bridgeSettle) {
+		bridgeSettle = await resolveGenesisBridgeSettleTxHash(params.operationId)
+	}
+
 	await upsertGenesisNodeReferralPurchase({
 		usdcTxHash: usdcTx,
 		operationId: params.operationId,
 		bindTxHash: params.bindTxHash ?? null,
 		lockMintTxHash: params.lockMintTxHash ?? null,
+		bridgeSettleTxHash: bridgeSettle,
 		buyer: params.buyer,
 		payer: params.payer ?? null,
 		qty: qty.toString(),
@@ -238,7 +315,18 @@ export async function backfillGenesisNodeReferralIncomeFromFulfillFile(): Promis
 		if (!row.operationId) continue
 		try {
 			const existing = await getGenesisNodeReferralPurchaseByUsdcTx(usdcTx)
-			if (existing) continue
+			if (existing) {
+				if (!existing.bridgeSettleTxHash) {
+					const settle = await resolveGenesisBridgeSettleTxHash(String(row.operationId))
+					if (settle) {
+						await updateGenesisNodeReferralBridgeSettleTx({
+							usdcTxHash: usdcTx,
+							bridgeSettleTxHash: settle,
+						})
+					}
+				}
+				continue
+			}
 			await recordGenesisNodeReferralPurchaseIncome({
 				usdcTxHash: usdcTx,
 				operationId: String(row.operationId),
@@ -260,7 +348,7 @@ export async function backfillGenesisNodeReferralIncomeFromFulfillFile(): Promis
 	return written
 }
 
-/** Cluster read path: backfill legacy file then return income lines for account. */
+/** Cluster read path: backfill legacy file, resolve missing settle hashes, then return income. */
 export async function loadGenesisNodeReferralIncomeForAccount(
 	account: string,
 ): Promise<GenesisNodeReferralIncomeItem[]> {
@@ -269,6 +357,12 @@ export async function loadGenesisNodeReferralIncomeForAccount(
 	} catch (error: unknown) {
 		const msg = error instanceof Error ? error.message : String(error)
 		logger(Colors.yellow(`[genesisNodeReferralIncome] backfill error: ${msg}`))
+	}
+	try {
+		await enrichGenesisBridgeSettleTxHashes(40)
+	} catch (error: unknown) {
+		const msg = error instanceof Error ? error.message : String(error)
+		logger(Colors.yellow(`[genesisNodeReferralIncome] settle enrich error: ${msg}`))
 	}
 	return listGenesisNodeReferralIncomeForAccount(account)
 }
