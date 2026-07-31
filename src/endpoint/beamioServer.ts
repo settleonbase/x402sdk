@@ -132,6 +132,7 @@ import {
 	resolveIssuedNftExplorerShareMeta,
 	warmCouponClaimOgJpeg,
 	warmIssuedNftExplorerOgJpeg,
+	layoutAppDownloadCacheBust,
 } from './couponClaimShare'
 import { listIssuedNftClaimWallets } from './issuedNftClaimWallets'
 import { getConetValidatorDashboard } from './conetValidatorDashboard'
@@ -10313,6 +10314,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				'claimL1',
 				'setFoundation',
 				'setDefaultAdminPayout',
+				'setL1Ratio',
 			]
 			if (!allowed.includes(action)) {
 				return res.status(400).json({ success: false, error: 'Invalid genesis referral redeem action' }).end()
@@ -10349,6 +10351,60 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				nonce: nonce.toString(),
 				deadline: deadline.toString(),
 				signature,
+			}
+
+			if (action === 'setL1Ratio') {
+				const l1Raw = String(req.body?.l1Address ?? '')
+				if (!ethers.isAddress(l1Raw) || l1Raw === ethers.ZeroAddress) {
+					return res.status(400).json({ success: false, error: 'l1Address must be a non-zero address' }).end()
+				}
+				const l1Address = ethers.getAddress(l1Raw)
+				const ratioBpsRaw = String(req.body?.ratioBps ?? '')
+				if (!/^\d+$/.test(ratioBpsRaw)) {
+					return res.status(400).json({ success: false, error: 'ratioBps required for setL1Ratio' }).end()
+				}
+				const ratioBps = BigInt(ratioBpsRaw)
+				if (ratioBps > 10_000n) {
+					return res.status(400).json({ success: false, error: 'ratioBps must be 0–10000' }).end()
+				}
+				const isL0 = Boolean(await vault.isActiveL0!(account))
+				if (!isL0) {
+					return res.status(403).json({ success: false, error: 'Account is not an active Genesis L0' }).end()
+				}
+				const expectedNonce = BigInt((await vault.redeemActionNonces!(account)).toString())
+				if (nonce !== expectedNonce) {
+					return res.status(400).json({ success: false, error: 'Stale redeem nonce' }).end()
+				}
+				const member = await vault.members!(l1Address)
+				const role = Number(member.role ?? member[0] ?? 0)
+				const active = Boolean(member.active ?? member[2])
+				const parentL0 = String(member.parentL0 ?? member[3] ?? '')
+				if (role !== 2 || !active) {
+					return res.status(400).json({ success: false, error: 'Target is not an active Genesis L1' }).end()
+				}
+				if (!ethers.isAddress(parentL0) || ethers.getAddress(parentL0) !== account) {
+					return res.status(403).json({ success: false, error: 'L1 is not under this L0' }).end()
+				}
+				const digest = ethers.TypedDataEncoder.hash(
+					eip712Domain,
+					{
+						SetL1Ratio: [
+							{ name: 'l0', type: 'address' },
+							{ name: 'l1', type: 'address' },
+							{ name: 'ratioBps', type: 'uint256' },
+							{ name: 'nonce', type: 'uint256' },
+							{ name: 'deadline', type: 'uint256' },
+						],
+					},
+					{ l0: account, l1: l1Address, ratioBps, nonce, deadline },
+				)
+				const recovered = ethers.recoverAddress(digest, signature)
+				if (recovered.toLowerCase() !== account.toLowerCase()) {
+					return res.status(403).json({ success: false, error: 'Invalid signature' }).end()
+				}
+				forwardBody.l1Address = l1Address
+				forwardBody.ratioBps = ratioBps.toString()
+				return postLocalhost('/api/genesisNodeReferralRedeem', forwardBody, res)
 			}
 
 			if (isPayoutAction) {
@@ -11890,7 +11946,19 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/** GET /api/share/coupon-claim-html?target= — crawler HTML shell with dynamic Open Graph tags */
 	router.get('/share/coupon-claim-html', async (req, res) => {
-		const parsed = parseCouponClaimShareRequest(req.query as CouponClaimShareQuery)
+		const q = req.query as CouponClaimShareQuery & { v?: string; iiis?: string }
+		const targetRaw = typeof q.target === 'string' ? q.target.trim() : ''
+		const hasBust = Boolean(String(q.v ?? q.iiis ?? '').trim())
+		// WhatsApp/Meta cache by the pasted URL. Links without `v=` that once failed to fetch
+		// `/og/s/` stick as title-only forever — 302 onto a layout-stable `v=` forces re-key.
+		if (targetRaw && !hasBust) {
+			const redirect = new URL('https://beamio.app/app-download')
+			redirect.searchParams.set('target', targetRaw)
+			redirect.searchParams.set('v', layoutAppDownloadCacheBust())
+			res.setHeader('Cache-Control', 'no-store')
+			return res.redirect(302, redirect.pathname + redirect.search)
+		}
+		const parsed = parseCouponClaimShareRequest(q)
 		if (!parsed) {
 			return res.status(400).type('html').send('<!DOCTYPE html><html><body><p>Invalid coupon claim link.</p></body></html>')
 		}

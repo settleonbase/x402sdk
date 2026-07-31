@@ -48,7 +48,11 @@ const OG_BANNER_HEADLINE_VISUAL_TOP_GAP = Math.round(OG_BANNER_HEADLINE_BOX_TOP_
 const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-const OG_LAYOUT_REV = 28
+export const OG_LAYOUT_REV = 29
+/** Stable `v=` when crawlers hit a share URL that omitted cache-bust (forces Meta/WhatsApp re-key). */
+export function layoutAppDownloadCacheBust(): string {
+	return `l${OG_LAYOUT_REV}`
+}
 /** Discover merchant videoOg hero — taller 4:3-ish banner (not coupon ticket strip). */
 const DISCOVER_MERCHANT_OG_BANNER_H = 360
 /** Cross-worker OG JPEG cache (Cluster forks do not share in-memory ogImageCache). */
