@@ -86,9 +86,15 @@ export const CONET_TREASURY = '0xa208982212978550594A7FEEB70a61665d129003'
  */
 export const CONET_TREASURY_BRIDGE_V3_DEPLOY_BLOCK = 557036
 /** ConetTreasuryPeer（CREATE2 跨链同址）；矿工监听 StableSwapBridgeOut / burn*ForBridge，非 Discover x402 settle 目标 */
-export const CONET_TREASURY_PEER_CREATE2 = '0x025eC62F801B2f63d5C5b3eB066bab21B12Bbeb5'
+/** CoNET Peer v4（bridgeStableSwapFor + DepositLib；离线签字经 Offline 模块） */
+export const CONET_TREASURY_PEER_CREATE2 = '0x6093871d8a3EE6EaADc9869451D1693973cFBCC0'
+/** @deprecated Peer v3（无 offline StableSwap） */
+export const CONET_TREASURY_PEER_CREATE2_V3 = '0x025eC62F801B2f63d5C5b3eB066bab21B12Bbeb5'
 export const BASE_TREASURY_PEER = CONET_TREASURY_PEER_CREATE2
 export const CONET_TREASURY_PEER = CONET_TREASURY_PEER_CREATE2
+/** 本链离线签字 StableSwap 入口（EIP-712 verifyingContract = Peer） */
+export const CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE =
+  '0xdB91AaFf8d076a8B45B48f5d8bA8A1191627f1F2'
 /** @deprecated 旧 BaseTreasury；单一国库设计已弃用 */
 export const BASE_TREASURY_LEGACY = '0x5c64a8b0935DA72d60933bBD8cD10579E1C40c58'
 /** @deprecated 旧 CoNET 非 CREATE2 ConetTreasury */
@@ -122,7 +128,8 @@ export const GENESIS_NODE_BRIDGE_INITIATOR = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC969
 export const GENESIS_NODE_SEAT_PAYTO = GENESIS_NODE_BRIDGE_INITIATOR
 /** CoNET GenesisNodeReferralVaultV1 ERC1967 proxy (LockMint beneficiary + onBridgeMint splitter). */
 export const CONET_GENESIS_NODE_REFERRAL_VAULT = '0x051b65E5711E6E74bC236Fe220dcA7021841855C'
-export const CONET_GENESIS_NODE_REFERRAL_VAULT_IMPL = '0xbcD2Fcd8586C11c21029f74931A61DF5B284d481'
+/** Current UUPS impl (setL1Ratio). Proxy address above is canonical. */
+export const CONET_GENESIS_NODE_REFERRAL_VAULT_IMPL = '0xC841e5Cef2e4774990bf34031594C3a65bFcaE39'
 export const CONET_GENESIS_NODE_REFERRAL_VAULT_DEPLOY_BLOCK = 594820
 /** 每节点应收 USDC（6 位精度）= NODE_SALE_NODE_PRICE + NODE_SALE_SERVER_FEE */
 export const GENESIS_NODE_SEAT_USDC_PER_NODE6 = NODE_SALE_NODE_PRICE_USDC6 + NODE_SALE_SERVER_FEE_USDC6

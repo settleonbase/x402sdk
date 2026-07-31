@@ -18,7 +18,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
@@ -46,6 +46,15 @@ import {
 } from '../MemberCard'
 import { type GenesisNodeReferralRedeemAction } from '../genesisNodeReferralRedeem'
 import { loadGenesisNodeReferralIncomeForAccount } from '../genesisNodeReferralIncome'
+import {
+	CANONICAL_BUINT_ERC20,
+	CANONICAL_GB_ERC20,
+	CANONICAL_USDC_ERC20,
+	CONET_STABLE_SWAP_CHAIN_ID,
+	TREASURY_STABLE_SWAP_TYPES,
+	isLocalUsdcStableSwapPair,
+	treasuryStableSwapEip712Domain,
+} from '../treasuryStableSwapRelay'
 import {
 	kickReferralRegistryAdminManagementRelay,
 	referralRegistryAdminManagementPool,
@@ -10508,6 +10517,218 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			postLocalhost('/api/genesisNodeReferralRedeem', forwardBody, res)
 		} catch (error: any) {
 			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' }).end()
+		}
+	})
+
+	/**
+	 * CoNET 本链离线签字 StableSwap（USDC ↔ paid GB / USDC ↔ paid B-Unit）。
+	 * Cluster 预检 → Master Settle_ContractPool → Offline.bridgeStableSwapWithSignature。
+	 */
+	router.get('/treasuryStableSwapNonce', async (req, res) => {
+		try {
+			const user = ethers.getAddress(String(req.query.user ?? req.query.account ?? ''))
+			const offline = new ethers.Contract(
+				CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE,
+				['function stableSwapNonces(address) view returns (uint256)'],
+				providerConet,
+			)
+			const nonce = await offline.stableSwapNonces!(user)
+			return res
+				.status(200)
+				.json({
+					success: true,
+					nonce: nonce.toString(),
+					peer: CONET_TREASURY_PEER,
+					offline: CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE,
+					domain: treasuryStableSwapEip712Domain(),
+				})
+				.end()
+		} catch (error: any) {
+			return res
+				.status(400)
+				.json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Nonce read failed' })
+				.end()
+		}
+	})
+
+	router.post('/treasuryStableSwap', async (req, res) => {
+		try {
+			const user = ethers.getAddress(String(req.body?.user ?? ''))
+			const burnAssetKind = Number(req.body?.burnAssetKind)
+			const creditAssetKind = Number(req.body?.creditAssetKind)
+			const amount = BigInt(String(req.body?.amount ?? '0'))
+			const destinationChainId = BigInt(String(req.body?.destinationChainId ?? '0'))
+			const recipientRaw = String(req.body?.recipient ?? user)
+			const recipient = ethers.getAddress(recipientRaw || user)
+			const minCreditAmount = BigInt(String(req.body?.minCreditAmount ?? '0'))
+			const nonce = BigInt(String(req.body?.nonce ?? ''))
+			const deadline = BigInt(String(req.body?.deadline ?? ''))
+			const signature = String(req.body?.signature ?? '')
+
+			if (!Number.isInteger(burnAssetKind) || !Number.isInteger(creditAssetKind)) {
+				return res.status(400).json({ success: false, error: 'Invalid asset kind' }).end()
+			}
+			if (amount <= 0n) {
+				return res.status(400).json({ success: false, error: 'amount must be > 0' }).end()
+			}
+			if (destinationChainId !== CONET_STABLE_SWAP_CHAIN_ID) {
+				return res.status(400).json({ success: false, error: 'destinationChainId must be 224422 (local only)' }).end()
+			}
+			if (!isLocalUsdcStableSwapPair(burnAssetKind, creditAssetKind)) {
+				return res
+					.status(400)
+					.json({ success: false, error: 'Local swap requires USDC on one side (no GB↔B-Unit)' })
+					.end()
+			}
+			if (!ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+				return res.status(400).json({ success: false, error: 'Invalid or expired signature request' }).end()
+			}
+
+			const peer = new ethers.Contract(
+				CONET_TREASURY_PEER,
+				[
+					'function quoteStableSwap(uint8,uint256,uint8) view returns (uint256)',
+					'function usdc6PerFullGb() view returns (uint256)',
+					'function usdcErc20() view returns (address)',
+					'function gbTokenErc20() view returns (address)',
+					'function buint() view returns (address)',
+				],
+				providerConet,
+			)
+			const offline = new ethers.Contract(
+				CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE,
+				['function stableSwapNonces(address) view returns (uint256)'],
+				providerConet,
+			)
+
+			const expectedNonce = BigInt((await offline.stableSwapNonces!(user)).toString())
+			if (nonce !== expectedNonce) {
+				return res.status(400).json({ success: false, error: 'Stale stableSwap nonce' }).end()
+			}
+
+			if (
+				burnAssetKind === CANONICAL_GB_ERC20 ||
+				creditAssetKind === CANONICAL_GB_ERC20
+			) {
+				const rate = BigInt((await peer.usdc6PerFullGb!()).toString())
+				if (rate === 0n) {
+					return res.status(400).json({ success: false, error: 'usdc6PerFullGb is not set' }).end()
+				}
+			}
+
+			const quote = BigInt(
+				(await peer.quoteStableSwap!(burnAssetKind, amount, creditAssetKind)).toString(),
+			)
+			if (quote < minCreditAmount) {
+				return res.status(400).json({ success: false, error: 'quote below minCreditAmount' }).end()
+			}
+
+			const digest = ethers.TypedDataEncoder.hash(
+				treasuryStableSwapEip712Domain(),
+				TREASURY_STABLE_SWAP_TYPES,
+				{
+					user,
+					burnAssetKind,
+					amount,
+					destinationChainId,
+					recipient,
+					creditAssetKind,
+					minCreditAmount,
+					nonce,
+					deadline,
+				},
+			)
+			const recovered = ethers.recoverAddress(digest, signature)
+			if (recovered.toLowerCase() !== user.toLowerCase()) {
+				return res.status(403).json({ success: false, error: 'Invalid signature' }).end()
+			}
+
+			const usdcAddr = ethers.getAddress(await peer.usdcErc20!())
+			const gbAddr = ethers.getAddress(await peer.gbTokenErc20!())
+			const buintAddr = ethers.getAddress(await peer.buint!())
+
+			const erc20 = (addr: string) =>
+				new ethers.Contract(
+					addr,
+					[
+						'function balanceOf(address) view returns (uint256)',
+						'function allowance(address,address) view returns (uint256)',
+						'function bridgeableBalanceOf(address) view returns (uint256)',
+					],
+					providerConet,
+				)
+
+			if (burnAssetKind === CANONICAL_USDC_ERC20) {
+				const token = erc20(usdcAddr || CONET_USDC)
+				const bal = BigInt((await token.balanceOf!(user)).toString())
+				if (bal < amount) {
+					return res.status(400).json({ success: false, error: 'Insufficient USDC balance' }).end()
+				}
+				// FactoryERC20 burnFrom(minter) 不需 approve；若客户端附带 permit 则 Master 先提交。
+			} else if (burnAssetKind === CANONICAL_GB_ERC20) {
+				const token = erc20(gbAddr)
+				let paid = 0n
+				try {
+					paid = BigInt((await token.bridgeableBalanceOf!(user)).toString())
+				} catch {
+					paid = BigInt((await token.balanceOf!(user)).toString())
+				}
+				if (paid < amount) {
+					return res.status(400).json({ success: false, error: 'Insufficient paid GB' }).end()
+				}
+			} else if (burnAssetKind === CANONICAL_BUINT_ERC20) {
+				const token = erc20(buintAddr || CONET_BUINT)
+				let paid = 0n
+				try {
+					paid = BigInt((await token.bridgeableBalanceOf!(user)).toString())
+				} catch {
+					paid = BigInt((await token.balanceOf!(user)).toString())
+				}
+				if (paid < amount) {
+					return res.status(400).json({ success: false, error: 'Insufficient paid B-Unit' }).end()
+				}
+			}
+
+			const permitBody = req.body?.permit as
+				| { value?: string; deadline?: string; v?: number; r?: string; s?: string }
+				| undefined
+			const forwardBody: Record<string, unknown> = {
+				user,
+				burnAssetKind,
+				amount: amount.toString(),
+				destinationChainId: destinationChainId.toString(),
+				recipient,
+				creditAssetKind,
+				minCreditAmount: minCreditAmount.toString(),
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+				quote: quote.toString(),
+				treasury: CONET_TREASURY_CREATE2,
+			}
+			if (
+				permitBody &&
+				permitBody.r &&
+				permitBody.s &&
+				permitBody.v != null &&
+				permitBody.value != null &&
+				permitBody.deadline != null
+			) {
+				forwardBody.permit = {
+					value: String(permitBody.value),
+					deadline: String(permitBody.deadline),
+					v: Number(permitBody.v),
+					r: String(permitBody.r),
+					s: String(permitBody.s),
+				}
+			}
+
+			return postLocalhost('/api/treasuryStableSwap', forwardBody, res)
+		} catch (error: any) {
+			return res
+				.status(400)
+				.json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' })
+				.end()
 		}
 	})
 

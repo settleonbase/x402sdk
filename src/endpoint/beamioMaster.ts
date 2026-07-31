@@ -37,6 +37,10 @@ import {
 	type GenesisNodeReferralRedeemAction,
 } from '../genesisNodeReferralRedeem'
 import {
+	kickTreasuryStableSwapRelay,
+	treasuryStableSwapPool,
+} from '../treasuryStableSwapRelay'
+import {
 	kickReferralRegistryAdminManagementRelay,
 	referralRegistryAdminManagementPool,
 	kickReferralRegistryMerchantShareRelay,
@@ -3625,12 +3629,64 @@ const routing = ( router: Router ) => {
 			kickGenesisNodeSeatFulfillPoolPress()
 		})
 
+		router.post('/treasuryStableSwap', (req, res) => {
+			const body = req.body as {
+				user?: string
+				burnAssetKind?: number
+				amount?: string
+				destinationChainId?: string
+				recipient?: string
+				creditAssetKind?: number
+				minCreditAmount?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+				permit?: {
+					value: string
+					deadline: string
+					v: number
+					r: string
+					s: string
+				}
+			}
+			if (
+				!body.user ||
+				body.burnAssetKind == null ||
+				body.creditAssetKind == null ||
+				!body.amount ||
+				!body.destinationChainId ||
+				!body.recipient ||
+				body.minCreditAmount == null ||
+				body.nonce == null ||
+				body.deadline == null ||
+				!body.signature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing treasuryStableSwap fields' }).end()
+			}
+			treasuryStableSwapPool.push({
+				user: body.user,
+				burnAssetKind: Number(body.burnAssetKind),
+				amount: String(body.amount),
+				destinationChainId: String(body.destinationChainId),
+				recipient: body.recipient,
+				creditAssetKind: Number(body.creditAssetKind),
+				minCreditAmount: String(body.minCreditAmount),
+				nonce: String(body.nonce),
+				deadline: String(body.deadline),
+				signature: body.signature,
+				permit: body.permit,
+				res,
+			})
+			kickTreasuryStableSwapRelay()
+		})
+
 		router.post('/genesisNodeReferralRedeem', (req, res) => {
 			const body = req.body as {
 				action?: GenesisNodeReferralRedeemAction
 				account?: string
 				redeemHash?: string
 				payoutAddress?: string
+				l1Address?: string
 				nonce?: string
 				deadline?: string
 				signature?: string
@@ -3642,7 +3698,14 @@ const routing = ( router: Router ) => {
 			}
 			const isPayout =
 				body.action === 'setFoundation' || body.action === 'setDefaultAdminPayout'
-			if (isPayout) {
+			if (body.action === 'setL1Ratio') {
+				if (!body.l1Address || !ethers.isAddress(body.l1Address)) {
+					return res.status(400).json({ success: false, error: 'Missing l1Address' }).end()
+				}
+				if (body.ratioBps == null || body.ratioBps === '') {
+					return res.status(400).json({ success: false, error: 'Missing ratioBps for setL1Ratio' }).end()
+				}
+			} else if (isPayout) {
 				if (!body.payoutAddress || !ethers.isAddress(body.payoutAddress)) {
 					return res.status(400).json({ success: false, error: 'Missing payoutAddress' }).end()
 				}
@@ -3660,6 +3723,7 @@ const routing = ( router: Router ) => {
 				account: body.account,
 				redeemHash: body.redeemHash,
 				payoutAddress: body.payoutAddress,
+				l1Address: body.l1Address,
 				nonce: body.nonce,
 				deadline: body.deadline,
 				signature: body.signature,

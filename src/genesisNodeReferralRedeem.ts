@@ -20,6 +20,7 @@ const GENESIS_REFERRAL_REDEEM_ABI = [
 	'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function setFoundationFor(address admin,address foundation,uint256 nonce,uint256 deadline,bytes signature)',
 	'function setDefaultAdminPayoutFor(address admin,address payout,uint256 nonce,uint256 deadline,bytes signature)',
+	'function setL1RatioFor(address l0,address l1,uint256 ratioBps,uint256 nonce,uint256 deadline,bytes signature)',
 ] as const
 
 export type GenesisNodeReferralRedeemAction =
@@ -31,12 +32,14 @@ export type GenesisNodeReferralRedeemAction =
 	| 'claimL1'
 	| 'setFoundation'
 	| 'setDefaultAdminPayout'
+	| 'setL1Ratio'
 
 export const genesisNodeReferralRedeemPool: Array<{
 	action: GenesisNodeReferralRedeemAction
 	account: string
 	redeemHash?: string
 	payoutAddress?: string
+	l1Address?: string
 	nonce: string
 	deadline: string
 	signature: string
@@ -94,6 +97,16 @@ export async function genesisNodeReferralRedeemRelayProcess(): Promise<void> {
 				BigInt(job.deadline),
 				job.signature,
 				{ gasLimit: 200_000 },
+			)
+		} else if (job.action === 'setL1Ratio') {
+			tx = await vault.setL1RatioFor!(
+				account,
+				ethers.getAddress(job.l1Address!),
+				BigInt(job.ratioBps ?? '0'),
+				BigInt(job.nonce),
+				BigInt(job.deadline),
+				job.signature,
+				{ gasLimit: 250_000 },
 			)
 		} else if (job.action === 'issueL0') {
 			tx = await vault.issueL0RedeemCodeFor!(
