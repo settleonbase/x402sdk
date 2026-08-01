@@ -37,6 +37,13 @@ import {
 	type GenesisNodeReferralRedeemAction,
 } from '../genesisNodeReferralRedeem'
 import {
+	gbDepinChargeUserPool,
+	kickGbDepinChargeUserPoolPress,
+	gbDepinAirdropAllPool,
+	kickGbDepinAirdropAllPoolPress,
+	startGbDepinAirdropCron,
+} from '../gbDepinAirdrop'
+import {
 	kickTreasuryStableSwapRelay,
 	treasuryStableSwapPool,
 } from '../treasuryStableSwapRelay'
@@ -3803,6 +3810,37 @@ const routing = ( router: Router ) => {
 			})
 		})
 
+		router.post('/gbDepinChargeUserGb', (req, res) => {
+			const b = req.body as { guardianNodeId?: string; user?: string; amount?: string }
+			if (b.guardianNodeId == null || !b.user || b.amount == null) {
+				return res.status(400).json({ success: false, error: 'Missing guardianNodeId, user, or amount' }).end()
+			}
+			let guardianNodeId: bigint
+			try {
+				guardianNodeId = BigInt(String(b.guardianNodeId))
+			} catch {
+				return res.status(400).json({ success: false, error: 'invalid guardianNodeId' }).end()
+			}
+			let amount: bigint
+			try {
+				amount = BigInt(String(b.amount))
+			} catch {
+				return res.status(400).json({ success: false, error: 'invalid amount' }).end()
+			}
+			gbDepinChargeUserPool.push({
+				guardianNodeId,
+				user: ethers.getAddress(b.user),
+				amount,
+				res,
+			})
+			kickGbDepinChargeUserPoolPress()
+		})
+
+		router.post('/gbDepinAirdropPaidAll', (req, res) => {
+			gbDepinAirdropAllPool.push({ res })
+			kickGbDepinAirdropAllPoolPress()
+		})
+
 		router.post('/validatorDepositRedeemTransfer', (req, res) => {
 			const b = req.body as {
 				contract?: string
@@ -5792,6 +5830,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		])
 		startNfcLinkAppAutoCancelSweeper()
 		startLatestCardsPrewarmTimer()
+		startGbDepinAirdropCron()
 		void warmDynamicApiExcludedUserCardsFromDb().catch((e: unknown) => {
 			const msg = e instanceof Error ? e.message : String(e)
 			logger(Colors.red('[initialize] warmDynamicApiExcludedUserCardsFromDb error:'), msg)

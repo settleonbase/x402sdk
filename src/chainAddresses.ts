@@ -2,6 +2,8 @@
  * x402sdk 是独立项目，发布/构建时不能跨项目相对引用 BeamioContract 根仓配置。
  * 本文件必须保持自包含，地址由同步脚本或手工更新。
  */
+import { ethers } from 'ethers'
+
 export const BASE_MAINNET_CHAIN_ID = 8453
 
 /** CoNET PoS HTTP RPC；与 deployments/conet-addresses.json `rpcUrl` 同步 */
@@ -263,9 +265,30 @@ export const CONET_USDC_LEGACY_UUPS_CREATE2 = '0xF9240fd613C00d5C479f1E9f1690130
 export const CONET_USDC_LEGACY_UUPS_V1 = '0x84e55A7d82aEa1243cB88b20dDde9Ba5cea0E134'
 /** @deprecated legacy FactoryERC20 (non-UUPS) */
 export const CONET_USDC_LEGACY = '0x2975c85D8Cc8F5d263492E332A6dAa7ad11aDBdC'
-/** CoNET GB ERC1155（ConetGB1155）；id=0 为累计净 GB（18 decimals） */
+/**
+ * CoNET canonical GB — `GBToken` ERC20（9 decimals；free/paid 双池；可转账 / 跨链 / StableSwap）。
+ * 全项目「GB」默认语义见 `.cursor/rules/beamio-gb-erc20-canonical.mdc`。
+ */
+export const CONET_GB_ERC20 = '0xC3EF02DaE632b4C10abB66e07d92a387c10838D8'
+/** @alias CONET_GB_ERC20 — 活跃 GB 地址 */
+export const CONET_GB = CONET_GB_ERC20
+/** GBToken decimals：1 GB = 1e9 */
+export const CONET_GB_DECIMALS = 9
+/**
+ * GBDepinAirdrop — DePIN 协议补贴 + 用户带宽 GB 扣费/记账（须 GBToken V2 consumeGb）。
+ * 部署后写入 deployments/conet-GBDepinAirdrop.json；可用 CONET_GB_DEPIN_AIRDROP 环境变量覆盖。
+ */
+export const CONET_GB_DEPIN_AIRDROP = '0xBBd504a88dB1EA143A1D3a83E331F979dD3A5e44'
+
+export function resolveConetGbDepinAirdropAddress(): string | null {
+	const raw = CONET_GB_DEPIN_AIRDROP.trim()
+	if (!raw || !ethers.isAddress(raw)) return null
+	return ethers.getAddress(raw)
+}
+
+/** @deprecated ConetGB1155 挖矿记账轨已弃用；勿在新功能当作 canonical GB。只读遗留见 beamio-gb-erc20-canonical.mdc */
 export const CONET_GB1155 = '0x3Dc53e528d45225e8F38c391Cc6a72CDec435748'
-/** CoNET GB total（ConetGB_total，1155 净额聚合） */
+/** @deprecated ConetGB_total（1155 全网聚合）已弃用；Dashboard 遗留只读 */
 export const CONET_GB_TOTAL = '0x949ed49faB0e999f685f16e09Cf5EaaF4090F290'
 /** CoNET GuardianNodesInfoV6 — DePIN 节点 IP ↔ 运营钱包；与 deployments/conet-addresses.json 同步 */
 export const CONET_GUARDIAN_NODES_INFO_V6 = '0xBC6b53065b5647261396d002bDBA0d3396E0722f'
@@ -312,6 +335,12 @@ export const CONTRACT_ADDRESSES = {
     businessStartKet: CONET_BUSINESS_START_KET || undefined,
     businessStartKetRedeem: CONET_BUSINESS_START_KET_REDEEM || undefined,
     validatorDepositRedeem: CONET_VALIDATOR_DEPOSIT_REDEEM || undefined,
+    gbErc20: CONET_GB_ERC20,
+    gbDepinAirdrop: CONET_GB_DEPIN_AIRDROP || undefined,
+    /** @deprecated legacy ConetGB1155 — do not use in new code */
+    conetGb1155: CONET_GB1155,
+    /** @deprecated legacy ConetGB_total */
+    conetGbTotal: CONET_GB_TOTAL,
   },
 } as const
 

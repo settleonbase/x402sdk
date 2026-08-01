@@ -109,6 +109,10 @@ import {
 	validatorDepositRedeemReadAdminNonce,
 } from './validatorDepositRedeem'
 import {
+	gbDepinChargeUserClusterPreCheck,
+	gbDepinAirdropAllClusterPreCheck,
+} from '../gbDepinAirdrop'
+import {
 	normalizeCouponMetadataExtraProperties,
 	normalizeCouponSeriesMetadataJson,
 	normalizeProductionSeriesMetadataJson,
@@ -10991,6 +10995,41 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				},
 				res
 			)
+		} catch (e: any) {
+			return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/gbDepinChargeUserGb', async (req, res) => {
+		try {
+			const pre = await gbDepinChargeUserClusterPreCheck(req.body)
+			if (!pre.success) {
+				logger(Colors.red(`server /api/gbDepinChargeUserGb preCheck FAIL: ${pre.error}`))
+				return res.status(400).json({ success: false, error: pre.error }).end()
+			}
+			const p = pre.preChecked
+			postLocalhost(
+				'/api/gbDepinChargeUserGb',
+				{
+					guardianNodeId: p.guardianNodeId.toString(),
+					user: p.user,
+					amount: p.amount.toString(),
+				},
+				res
+			)
+		} catch (e: any) {
+			return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/gbDepinAirdropPaidAll', async (req, res) => {
+		try {
+			const pre = await gbDepinAirdropAllClusterPreCheck()
+			if (!pre.success) {
+				logger(Colors.yellow(`server /api/gbDepinAirdropPaidAll preCheck skip: ${pre.error}`))
+				return res.status(400).json({ success: false, error: pre.error }).end()
+			}
+			postLocalhost('/api/gbDepinAirdropPaidAll', {}, res)
 		} catch (e: any) {
 			return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end()
 		}

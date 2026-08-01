@@ -516,7 +516,8 @@ export async function validatorRewardReadNodeSummary(
 
 /**
  * Single eth_call to ValidatorDepositRedeem.resolveUnifiedIncomeStats:
- * beneficiary GB (ConetGB1155) + CNET (ValidatorNodeRewardIndexer) totals and per-node rows.
+ * beneficiary GB (**legacy ConetGB1155** 18-dec mining accounting) + CNET totals and per-node rows.
+ * Wallet/canonical GB balances use GBToken ERC20 — see beamio-gb-erc20-canonical.mdc.
  * Contract internally staticcalls gbToken + rewardIndexer — no centralized read API.
  */
 export async function validatorDepositRedeemReadUnifiedIncomeStats(
