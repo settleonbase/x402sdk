@@ -177,11 +177,26 @@ export async function gbDepinAirdropAllPoolPress(): Promise<void> {
 		const airdrop = requireAirdropAddress()
 		const c = new ethers.Contract(airdrop, GB_DEPIN_AIRDROP_ABI, sc.walletConet)
 		const usePage = obj.pageStart !== undefined && obj.pageSize !== undefined
+		const maxGasLimit = resolveGbDepinAirdropMaxGasLimit()
+		let gasLimit = maxGasLimit
+		if (usePage) {
+			try {
+				const est = await c.airdropDepinPaidPage!.estimateGas(
+					obj.pageStart,
+					obj.pageSize,
+					Boolean(obj.advanceGlobalClock),
+				)
+				gasLimit = (est * 120n) / 100n + 50_000n
+				if (gasLimit > maxGasLimit) gasLimit = maxGasLimit
+			} catch {
+				/* keep maxGasLimit */
+			}
+		}
 		const tx = usePage
 			? await c.airdropDepinPaidPage!(obj.pageStart, obj.pageSize, Boolean(obj.advanceGlobalClock), {
-					gasLimit: 18_000_000,
+					gasLimit,
 				})
-			: await c.airdropDepinPaidAll!({ gasLimit: 18_000_000 })
+			: await c.airdropDepinPaidAll!({ gasLimit: maxGasLimit })
 		const receipt = await tx.wait()
 		if (obj.silent && usePage) {
 			if (obj.advanceGlobalClock) gbDepinCronPageStart = 0
@@ -291,8 +306,14 @@ function resolveGbDepinCronIntervalMs(): number {
 }
 
 function resolveGbDepinAirdropPageSize(): number {
-	const raw = Number(process.env.CONET_GB_DEPIN_AIRDROP_PAGE_SIZE ?? 100)
-	return Number.isFinite(raw) && raw >= 1 ? Math.min(Math.floor(raw), 500) : 100
+	/** ~3M gas @ 10 nodes; pageSize=100 can exceed 18M block gas on mainnet. */
+	const raw = Number(process.env.CONET_GB_DEPIN_AIRDROP_PAGE_SIZE ?? 10)
+	return Number.isFinite(raw) && raw >= 1 ? Math.min(Math.floor(raw), 500) : 10
+}
+
+function resolveGbDepinAirdropMaxGasLimit(): bigint {
+	const raw = Number(process.env.CONET_GB_DEPIN_AIRDROP_MAX_GAS_LIMIT ?? 18_000_000)
+	return Number.isFinite(raw) && raw >= 500_000 ? BigInt(Math.floor(raw)) : 18_000_000n
 }
 
 /** Only submit when eth_gasPrice ≤ this many gwei (default 2). CONET often sits at exactly 2.0 gwei — use ≤. */
