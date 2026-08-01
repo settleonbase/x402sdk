@@ -3889,12 +3889,13 @@ const routing = ( router: Router ) => {
 		}
 		const out = pre.preChecked
 		if (pre.mode === 'openContainerSurrender') {
-			// Legacy merchant card: no cardSelfBurn / burnIssuedNftByGateway.
-			// Wallet/Pay-QR (Homepage Smart Wallet) cannot finish redeem without NFC hosted key.
-			const legacyMsg =
-				'This merchant program card cannot burn Smart Wallet coupons. Redeem requires a linked NFC card session, or an upgraded program card with on-chain burn support.'
+			// Legacy merchant card: no cardSelfBurn — transfer coupon via OpenContainer to POS/admin/owner.
+			const transferRecipient =
+				'transferRecipient' in out && typeof out.transferRecipient === 'string'
+					? out.transferRecipient
+					: out.cardOwnerEOA
 			logger(
-				Colors.yellow(`server /api/cardCouponPosConsumePrepare openContainerSurrender (legacy card, no burn)`),
+				Colors.yellow(`server /api/cardCouponPosConsumePrepare openContainerSurrender (legacy transfer)`),
 				inspect(
 					{
 						cardAddress: out.cardAddress,
@@ -3903,6 +3904,7 @@ const routing = ( router: Router ) => {
 						userAccount: out.userAccount,
 						tokenId: out.tokenId,
 						amount: out.amount,
+						transferRecipient,
 					},
 					false,
 					2,
@@ -3913,16 +3915,18 @@ const routing = ( router: Router ) => {
 				.status(200)
 				.json({
 					success: true,
+					mode: 'transfer',
 					useOpenContainerSurrender: true,
-					requiresNfcSurrender: true,
-					message: legacyMsg,
-					error: legacyMsg,
+					/** Client may finish via NFC hosted key (/cardCouponPosConsumeNfcSign) or Scan-to-Pay OpenContainer signature + /api/AAtoEOA. */
+					requiresCustomerAuth: true,
 					cardAddress: out.cardAddress,
 					couponId: out.couponId,
 					userEOA: out.userEOA,
 					userAccount: out.userAccount,
 					tokenId: out.tokenId,
 					amount: out.amount,
+					cardOwnerEOA: out.cardOwnerEOA,
+					transferRecipient,
 					targetAddress: out.userAccount,
 				})
 				.end()
@@ -3951,6 +3955,7 @@ const routing = ( router: Router ) => {
 			.status(200)
 			.json({
 				success: true,
+				mode: 'burn',
 				cardAddress: burnOut.cardAddress,
 				data: burnOut.data,
 				deadline: burnOut.deadline,

@@ -16035,6 +16035,8 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 	signerEOA?: string
 	tokenId?: string | number
 	amount?: string | number
+	/** Legacy transfer recipient preference: POS terminal / admin EOA (fallback: card owner). */
+	posOperator?: string
 }): Promise<
 	| {
 		success: true
@@ -16065,6 +16067,8 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 			tokenId: string
 			amount: string
 			cardOwnerEOA: string
+			/** Transfer issued coupon to POS / admin / owner (legacy cards without burn). */
+			transferRecipient: string
 		}
 	}
 	| { success: false; error: string }
@@ -16178,6 +16182,11 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 	}
 
 	const cardOwnerResolved = bunit.cardOwnerEOA ?? ownerNorm
+	const posOpRaw = String(body.posOperator ?? body.signerEOA ?? '').trim()
+	const transferRecipient =
+		posOpRaw && ethers.isAddress(posOpRaw)
+			? ethers.getAddress(posOpRaw)
+			: cardOwnerResolved
 	const supportsBurn = await merchantCardSupportsCouponBurn(cardNorm)
 	if (!supportsBurn) {
 		return {
@@ -16191,6 +16200,7 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 				tokenId: String(tokenIdN),
 				amount: String(amountN),
 				cardOwnerEOA: cardOwnerResolved,
+				transferRecipient,
 			},
 		}
 	}
@@ -16218,6 +16228,7 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 					tokenId: String(tokenIdN),
 					amount: String(amountN),
 					cardOwnerEOA: cardOwnerResolved,
+					transferRecipient,
 				},
 			}
 		}
@@ -16288,6 +16299,7 @@ export const cardCouponPosConsumeNfcSignPreCheck = async (body: {
 		signerEOA: body.signerEOA,
 		tokenId: body.tokenId,
 		amount: body.amount,
+		posOperator,
 	})
 	if (!prep.success) return prep
 	if (prep.mode !== 'openContainerSurrender') {
@@ -16298,6 +16310,7 @@ export const cardCouponPosConsumeNfcSignPreCheck = async (body: {
 	}
 
 	const userNorm = prep.preChecked.userEOA
+	const transferTo = prep.preChecked.transferRecipient || posOperator
 	let uid = String(body.uid ?? '').trim()
 	let tagIdHex = String(body.tagIdHex ?? '').trim().replace(/^0x/i, '').toUpperCase()
 	if (!uid && !tagIdHex) {
@@ -16365,7 +16378,7 @@ export const cardCouponPosConsumeNfcSignPreCheck = async (body: {
 	const signature = await wallet.signTypedData(domain, types, message)
 	const openContainerPayload: OpenContainerRelayPayload = {
 		account: holderAccount,
-		to: posOperator,
+		to: transferTo,
 		items: [
 			{
 				kind: 1,
@@ -16398,7 +16411,7 @@ export const cardCouponPosConsumeNfcSignPreCheck = async (body: {
 			userAccount: holderAccount,
 			tokenId: tokenIdStr,
 			amount: amountStr,
-			posOperator,
+			posOperator: transferTo,
 		},
 	}
 }
