@@ -68,6 +68,8 @@ let gbDepinCronTimer: ReturnType<typeof setTimeout> | undefined
 let gbDepinCronInFlight = false
 /** Resume index for multi-tick paginated cron (reset when global clock advances). */
 let gbDepinCronPageStart = 0
+/** Wall-clock ms when cron first skipped due to gas > max (force execute after wait window). */
+let gbDepinCronGasWaitStartedAt: number | undefined
 
 export function kickGbDepinChargeUserPoolPress(): void {
 	void gbDepinChargeUserPoolPress().catch((error: unknown) => {
@@ -175,9 +177,9 @@ export async function gbDepinAirdropAllPoolPress(): Promise<void> {
 		const usePage = obj.pageStart !== undefined && obj.pageSize !== undefined
 		const tx = usePage
 			? await c.airdropDepinPaidPage!(obj.pageStart, obj.pageSize, Boolean(obj.advanceGlobalClock), {
-					gasLimit: 4_000_000,
+					gasLimit: 14_000_000,
 				})
-			: await c.airdropDepinPaidAll!({ gasLimit: 8_000_000 })
+			: await c.airdropDepinPaidAll!({ gasLimit: 14_000_000 })
 		const receipt = await tx.wait()
 		if (obj.silent && usePage) {
 			if (obj.advanceGlobalClock) gbDepinCronPageStart = 0
@@ -198,13 +200,17 @@ export async function gbDepinAirdropAllPoolPress(): Promise<void> {
 		} else if (obj.silent) {
 			const pageInfo =
 				usePage ? ` page=${obj.pageStart}+${obj.pageSize} advance=${obj.advanceGlobalClock ? '1' : '0'}` : ''
+			clearGbDepinGasWait()
 			logger(Colors.green(`[gbDepinAirdropCron] ok tx=${tx.hash}${pageInfo} admin=${sc.walletConet.address}`))
 		}
 	} catch (e: unknown) {
 		const err = e as { shortMessage?: string; message?: string; reason?: string }
 		const msg = err?.shortMessage ?? err?.reason ?? err?.message ?? String(e)
 		if (msg.includes('NothingToAirdrop') || msg.includes('Nothing to airdrop')) {
-			if (obj.silent) logger(Colors.gray('[gbDepinAirdropCron] nothing to airdrop'))
+			if (obj.silent) {
+				clearGbDepinGasWait()
+				logger(Colors.gray('[gbDepinAirdropCron] nothing to airdrop'))
+			}
 			else if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, skipped: true, reason: 'nothing_to_airdrop' }).end()
 		} else {
 			logger(Colors.red('[gbDepinAirdropAllPoolPress] failed:'), msg)
@@ -287,6 +293,72 @@ function resolveGbDepinAirdropPageSize(): number {
 	return Number.isFinite(raw) && raw >= 1 ? Math.min(Math.floor(raw), 500) : 100
 }
 
+/** Only submit when eth_gasPrice ≤ this many gwei (default 2). CONET often sits at exactly 2.0 gwei — use ≤. */
+function resolveGbDepinMaxGasPriceWei(): bigint {
+	const gwei = Number(process.env.CONET_GB_DEPIN_AIRDROP_MAX_GAS_PRICE_GWEI ?? 2)
+	const safe = Number.isFinite(gwei) && gwei > 0 ? gwei : 2
+	return ethers.parseUnits(String(safe), 'gwei')
+}
+
+/** After this many ms waiting on high gas, force one airdrop at live gasPrice (default 10 min). */
+function resolveGbDepinGasWaitForceMs(): number {
+	const raw = Number(process.env.CONET_GB_DEPIN_AIRDROP_GAS_WAIT_FORCE_MS ?? 600_000)
+	return Number.isFinite(raw) && raw >= 60_000 ? Math.floor(raw) : 600_000
+}
+
+function clearGbDepinGasWait(): void {
+	gbDepinCronGasWaitStartedAt = undefined
+}
+
+function formatGbDepinGasWaitCountdown(elapsedMs: number, forceMs: number): string {
+	const leftMs = Math.max(0, forceMs - elapsedMs)
+	const elapsedSec = Math.floor(elapsedMs / 1000)
+	const leftSec = Math.ceil(leftMs / 1000)
+	const forceSec = Math.floor(forceMs / 1000)
+	return `${elapsedSec}s/${forceSec}s (force in ${leftSec}s)`
+}
+
+async function readConetGasPriceWei(): Promise<bigint> {
+	const provider = conetProvider()
+	try {
+		const fee = await provider.getFeeData()
+		if (fee.gasPrice != null && fee.gasPrice > 0n) return fee.gasPrice
+		if (fee.maxFeePerGas != null && fee.maxFeePerGas > 0n) return fee.maxFeePerGas
+	} catch {
+		/* fall through */
+	}
+	const hex = (await provider.send('eth_gasPrice', [])) as string
+	return BigInt(hex)
+}
+
+type GbDepinCronGasGate = { run: true; force: boolean; gasPrice: bigint } | { run: false; gasPrice: bigint }
+
+/** Mid-pagination must finish; otherwise wait for gas ≤ max or force after wait window. */
+async function resolveGbDepinCronGasGate(): Promise<GbDepinCronGasGate> {
+	if (gbDepinCronPageStart > 0) {
+		return { run: true, force: false, gasPrice: await readConetGasPriceWei() }
+	}
+
+	const maxGas = resolveGbDepinMaxGasPriceWei()
+	const gasDustWei = 50_000_000n // 0.05 gwei — CONET quotes e.g. 2.000000007 gwei
+	const gasPrice = await readConetGasPriceWei()
+	const forceMs = resolveGbDepinGasWaitForceMs()
+
+	if (gasPrice <= maxGas + gasDustWei) {
+		clearGbDepinGasWait()
+		return { run: true, force: false, gasPrice }
+	}
+
+	const now = Date.now()
+	if (gbDepinCronGasWaitStartedAt === undefined) gbDepinCronGasWaitStartedAt = now
+	const elapsedMs = now - gbDepinCronGasWaitStartedAt
+	if (elapsedMs >= forceMs) {
+		return { run: true, force: true, gasPrice }
+	}
+
+	return { run: false, gasPrice }
+}
+
 async function fetchGuardianNodesPageLength(start: number, maxLength: number): Promise<number> {
 	const guardian = CONET_GUARDIAN_NODES_INFO_V6
 	if (!guardian || !ethers.isAddress(guardian)) return 0
@@ -300,6 +372,27 @@ async function gbDepinCronTick(): Promise<void> {
 	if (!resolveConetGbDepinAirdropAddress()) return
 	gbDepinCronInFlight = true
 	try {
+		const gasGate = await resolveGbDepinCronGasGate()
+		if (!gasGate.run) {
+			const maxGas = resolveGbDepinMaxGasPriceWei()
+			const forceMs = resolveGbDepinGasWaitForceMs()
+			const elapsedMs = Date.now() - (gbDepinCronGasWaitStartedAt ?? Date.now())
+			logger(
+				Colors.yellow(
+					`[gbDepinAirdropCron] skip tick: gasPrice=${ethers.formatUnits(gasGate.gasPrice, 'gwei')} gwei > max=${ethers.formatUnits(maxGas, 'gwei')} gwei ` +
+						`wait ${formatGbDepinGasWaitCountdown(elapsedMs, forceMs)}`
+				)
+			)
+			return
+		}
+		if (gasGate.force) {
+			logger(
+				Colors.yellow(
+					`[gbDepinAirdropCron] force tick: gasPrice=${ethers.formatUnits(gasGate.gasPrice, 'gwei')} gwei exceeds max=${ethers.formatUnits(resolveGbDepinMaxGasPriceWei(), 'gwei')} gwei after ${Math.floor(resolveGbDepinGasWaitForceMs() / 1000)}s wait`
+				)
+			)
+		}
+
 		if (gbDepinCronPageStart === 0) {
 			const pre = await gbDepinAirdropAllClusterPreCheck()
 			if (!pre.success) return
@@ -347,7 +440,7 @@ export function startGbDepinAirdropCron(): void {
 	}
 	logger(
 		Colors.cyan(
-			`[gbDepinAirdropCron] starting interval=${resolveGbDepinCronIntervalMs()}ms pageSize=${resolveGbDepinAirdropPageSize()} airdrop=${resolveConetGbDepinAirdropAddress()} settleAdmins=${Settle_ContractPool.length}`
+			`[gbDepinAirdropCron] starting interval=${resolveGbDepinCronIntervalMs()}ms pageSize=${resolveGbDepinAirdropPageSize()} maxGasGwei=${ethers.formatUnits(resolveGbDepinMaxGasPriceWei(), 'gwei')} gasWaitForceMs=${resolveGbDepinGasWaitForceMs()} airdrop=${resolveConetGbDepinAirdropAddress()} settleAdmins=${Settle_ContractPool.length}`
 		)
 	)
 	void gbDepinCronTick().finally(() => scheduleGbDepinCron())
