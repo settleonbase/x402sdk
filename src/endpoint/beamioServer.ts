@@ -3889,8 +3889,12 @@ const routing = ( router: Router ) => {
 		}
 		const out = pre.preChecked
 		if (pre.mode === 'openContainerSurrender') {
+			// Legacy merchant card: no cardSelfBurn / burnIssuedNftByGateway.
+			// Wallet/Pay-QR (Homepage Smart Wallet) cannot finish redeem without NFC hosted key.
+			const legacyMsg =
+				'This merchant program card cannot burn Smart Wallet coupons. Redeem requires a linked NFC card session, or an upgraded program card with on-chain burn support.'
 			logger(
-				Colors.green(`server /api/cardCouponPosConsumePrepare openContainerSurrender OK`),
+				Colors.yellow(`server /api/cardCouponPosConsumePrepare openContainerSurrender (legacy card, no burn)`),
 				inspect(
 					{
 						cardAddress: out.cardAddress,
@@ -3910,6 +3914,9 @@ const routing = ( router: Router ) => {
 				.json({
 					success: true,
 					useOpenContainerSurrender: true,
+					requiresNfcSurrender: true,
+					message: legacyMsg,
+					error: legacyMsg,
 					cardAddress: out.cardAddress,
 					couponId: out.couponId,
 					userEOA: out.userEOA,
