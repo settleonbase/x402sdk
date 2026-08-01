@@ -164,6 +164,23 @@ function mergeGuardianGbIntoNodes(stats: UnifiedIncomeStats, byGuardianGb: Map<n
 	}
 }
 
+/** Blockscout beneficiary panels read gbBeneficiary/cnetBeneficiary, not per-node rows. */
+function rollupNodeIncomeToBeneficiary(stats: UnifiedIncomeStats): void {
+	if (stats.nodes.length === 0) return
+	for (const k of INCOME_PERIOD_FIELDS) {
+		let gbMax = fieldToBigInt(stats.gbBeneficiary[k])
+		let cnetMax = fieldToBigInt(stats.cnetBeneficiary[k])
+		for (const node of stats.nodes) {
+			const gv = fieldToBigInt(node.gb[k])
+			const cv = fieldToBigInt(node.cnet[k])
+			if (gv > gbMax) gbMax = gv
+			if (cv > cnetMax) cnetMax = cv
+		}
+		stats.gbBeneficiary[k] = gbMax.toString()
+		stats.cnetBeneficiary[k] = cnetMax.toString()
+	}
+}
+
 async function readClPaidSummary(beneficiary: string, anchorTs = 0): Promise<IncomeTotals | null> {
 	try {
 		const provider = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(), undefined, { batchMaxCount: 1 })
@@ -356,6 +373,8 @@ export async function enrichUnifiedIncomeStats(
 			out.nodes[0].gb = bumpGbTotalsCumulative(out.nodes[0].gb, depinGb.total)
 		}
 	}
+
+	rollupNodeIncomeToBeneficiary(out)
 
 	return out
 }
