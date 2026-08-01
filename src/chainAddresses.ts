@@ -278,7 +278,7 @@ export const CONET_GB_DECIMALS = 9
  * GBDepinAirdrop — DePIN 协议补贴 + 用户带宽 GB 扣费/记账（须 GBToken V2 consumeGb）。
  * 部署后写入 deployments/conet-GBDepinAirdrop.json；可用 CONET_GB_DEPIN_AIRDROP 环境变量覆盖。
  */
-export const CONET_GB_DEPIN_AIRDROP = '0xBBd504a88dB1EA143A1D3a83E331F979dD3A5e44'
+export const CONET_GB_DEPIN_AIRDROP = '0x62bcc59cC36C737E8AfBb0914F840d12cd33025f'
 
 export function resolveConetGbDepinAirdropAddress(): string | null {
 	const raw = CONET_GB_DEPIN_AIRDROP.trim()

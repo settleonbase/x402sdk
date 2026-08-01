@@ -18,7 +18,6 @@ const VALIDATOR_DASHBOARD_ABI = [
 	'function getNodeValidator(uint256 guardianId) view returns (bytes pubkey, address withdrawalBeneficiary, uint64 registeredAt, uint64 exitedAt, bool active)',
 	'function guardianIdBeneficiary(uint256 guardianId) view returns (address)',
 	'function getBeneficiaryNodeBundle(address beneficiary) view returns (tuple(address beneficiary, uint256[] guardianNodeIds, string[] depinNodeIps, address[] nodeWallets, bytes[] validatorPubkeys, bool[] validatorActive, uint256 validatorNodeCount, uint256 gbMiningNodeCount, uint256 claimCount, uint256 nativeBalance, uint256 gbBalance, uint256 usdcBalance))',
-	'function clRewardPaid(address beneficiary) view returns (uint256)',
 ] as const
 
 type NodeBundle = {
@@ -250,10 +249,9 @@ export async function getConetValidatorDashboard(
 			return { status: 404, body: { success: false, error: 'Validator pubkey is not registered on CoNET' } }
 		}
 
-		const [validatorRaw, beneficiaryRaw, rewardRaw] = await Promise.all([
+		const [validatorRaw, beneficiaryRaw] = await Promise.all([
 			contract.getNodeValidator(guardianId),
 			contract.guardianIdBeneficiary(guardianId),
-			contract.clRewardPaid(await contract.guardianIdBeneficiary(guardianId)),
 		])
 		const validator = {
 			pubkey: normalizeBytes(validatorRaw[0]),
@@ -300,11 +298,11 @@ export async function getConetValidatorDashboard(
 			income = adaptUnifiedIncomeStatsForBlockscoutValidatorUi(
 				await enrichUnifiedIncomeStats(income, {
 					beneficiary,
-					clRewardPaidWei: toStringValue(rewardRaw),
 					nodeHints,
 				}),
 			)
 		}
+		const clRewardPaidWei = income?.cnetBeneficiary?.cumulative ?? '0'
 		const value: ConetValidatorDashboard = {
 			success: true,
 			pubkey,
@@ -318,7 +316,7 @@ export async function getConetValidatorDashboard(
 				active: validator.active,
 				nodeWallet: index >= 0 ? bundle.nodeWallets[index] ?? null : null,
 				depinNodeIp: index >= 0 ? bundle.depinNodeIps[index] ?? null : null,
-				clRewardPaidWei: toStringValue(rewardRaw),
+				clRewardPaidWei,
 			},
 			income,
 			beacon: beaconState,

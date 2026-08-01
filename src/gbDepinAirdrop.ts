@@ -19,6 +19,8 @@ const GB_DEPIN_AIRDROP_ABI = [
 	'function previewStandardPaidOwed(uint256 timestamp) view returns (uint256 owed, uint256 elapsedSeconds, uint256 perSecond)',
 	'function paidGbReceivedOf(address beneficiary) view returns (uint256)',
 	'function paidGbReceivedOfGuardianNode(uint256 guardianNodeId) view returns (uint256)',
+	'function paidGbSummaryOf(address beneficiary, uint256 anchorTs) view returns (tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year))',
+	'function paidGbSummaryOfGuardianNode(uint256 guardianNodeId, uint256 anchorTs) view returns (tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year))',
 ] as const
 
 const GUARDIAN_NODES_PAGE_ABI = [
@@ -177,9 +179,9 @@ export async function gbDepinAirdropAllPoolPress(): Promise<void> {
 		const usePage = obj.pageStart !== undefined && obj.pageSize !== undefined
 		const tx = usePage
 			? await c.airdropDepinPaidPage!(obj.pageStart, obj.pageSize, Boolean(obj.advanceGlobalClock), {
-					gasLimit: 14_000_000,
+					gasLimit: 18_000_000,
 				})
-			: await c.airdropDepinPaidAll!({ gasLimit: 14_000_000 })
+			: await c.airdropDepinPaidAll!({ gasLimit: 18_000_000 })
 		const receipt = await tx.wait()
 		if (obj.silent && usePage) {
 			if (obj.advanceGlobalClock) gbDepinCronPageStart = 0

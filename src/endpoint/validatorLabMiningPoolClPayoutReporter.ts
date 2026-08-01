@@ -67,7 +67,7 @@ const READ_ABI = [
 	'function getNodeByValidatorPubkeyHash(bytes32 pubkeyHash) view returns (uint256 guardianId)',
 	'function guardianIdBeneficiary(uint256 guardianId) view returns (address)',
 	'function consumedRewardEventKey(bytes32 key) view returns (bool)',
-	'function getRewardPayoutStats() view returns (uint256 stakedCount, uint256 rewardPaidTotal, uint256 contractBalance, uint256 principalReserve)',
+	'function totalStakedValidatorCount() view returns (uint256)',
 ] as const
 
 const WRITE_ABI = [
@@ -542,8 +542,8 @@ async function resolveMaxSkimPayoutWei(
 	state: LabClPayoutState
 ): Promise<bigint> {
 	const redeem = new ethers.Contract(redeemAddr, READ_ABI, provider)
-	const stats = await redeem.getRewardPayoutStats!()
-	const onChainReserve = BigInt(stats.principalReserve ?? stats[3] ?? 0)
+	const stakedCount = BigInt(String(await redeem.totalStakedValidatorCount!()))
+	const onChainReserve = VALIDATOR_STAKE_WEI * stakedCount
 	const balance = await provider.getBalance(redeemAddr)
 	const exitedCount = Object.keys(state.exitedPubkeys).length
 	const labActive = Math.max(0, labPubkeySet.size - exitedCount)

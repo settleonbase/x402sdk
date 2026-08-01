@@ -13,12 +13,75 @@ const NATIVE_DECIMALS = 18
 const BLOCKSCOUT_INCOME_DECIMALS = 18
 /** GBDepinAirdrop paidGb* amounts are GB ERC20 9-dec; scale up before Blockscout 18-dec formatting. */
 const GB_NINE_TO_EIGHTEEN_SCALE = 10n ** 9n
+/** Values below this are treated as 9-decimal GB raw (legacy ConetGB1155 mining stats use 18-dec). */
+const GB_NINE_DEC_HEURISTIC_MAX = 10n ** 15n
 
-const REDEEM_VIEW_ABI = ['function clRewardPaid(address beneficiary) view returns (uint256)'] as const
+const INCOME_PERIOD_FIELDS = ['cumulative', 'hour', 'day', 'week', 'month', 'year'] as const
+
+function fieldToBigInt(raw: unknown): bigint {
+	const s = String(raw ?? '0')
+	if (!s || s === '0') return 0n
+	try {
+		if (s.includes('.')) return ethers.parseUnits(s, NATIVE_DECIMALS)
+		return BigInt(s)
+	} catch {
+		return 0n
+	}
+}
+
+function normalizeCnetIncomeField(raw: unknown): string {
+	return fieldToBigInt(raw).toString()
+}
+
+/** Scale 9-dec GB ledger fields to 18-dec wei strings for Blockscout `/10^18` formatting. */
+function normalizeGbIncomeField(raw: unknown): string {
+	const v = fieldToBigInt(raw)
+	if (v <= 0n) return '0'
+	if (v < GB_NINE_DEC_HEURISTIC_MAX) return (v * GB_NINE_TO_EIGHTEEN_SCALE).toString()
+	return v.toString()
+}
+
+function normalizeCnetIncomeTotals(t: IncomeTotals): IncomeTotals {
+	return {
+		cumulative: normalizeCnetIncomeField(t.cumulative),
+		hour: normalizeCnetIncomeField(t.hour),
+		day: normalizeCnetIncomeField(t.day),
+		week: normalizeCnetIncomeField(t.week),
+		month: normalizeCnetIncomeField(t.month),
+		year: normalizeCnetIncomeField(t.year),
+	}
+}
+
+function normalizeGbIncomeTotals(t: IncomeTotals): IncomeTotals {
+	return {
+		cumulative: normalizeGbIncomeField(t.cumulative),
+		hour: normalizeGbIncomeField(t.hour),
+		day: normalizeGbIncomeField(t.day),
+		week: normalizeGbIncomeField(t.week),
+		month: normalizeGbIncomeField(t.month),
+		year: normalizeGbIncomeField(t.year),
+	}
+}
+
+function maxIncomeTotals(a: IncomeTotals, b: IncomeTotals): IncomeTotals {
+	const out = { ...a }
+	for (const k of INCOME_PERIOD_FIELDS) {
+		const av = fieldToBigInt(a[k])
+		const bv = fieldToBigInt(b[k])
+		out[k] = (av >= bv ? av : bv).toString()
+	}
+	return out
+}
+
+const REDEEM_VIEW_ABI = [
+	'function resolveUnifiedIncomeStats(address maybeWallet, string conetDepinNodeIp, uint256 anchorTs) view returns (tuple(address beneficiary, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) gbBeneficiary, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) cnetBeneficiary, tuple(address nodeWallet, string depinNodeIp, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) gb, tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year) cnet)[] nodes))',
+] as const
 
 const GB_DEPIN_LEDGER_ABI = [
 	'function paidGbReceivedOf(address beneficiary) view returns (uint256)',
 	'function paidGbReceivedOfGuardianNode(uint256 guardianNodeId) view returns (uint256)',
+	'function paidGbSummaryOf(address beneficiary, uint256 anchorTs) view returns (tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year))',
+	'function paidGbSummaryOfGuardianNode(uint256 guardianNodeId, uint256 anchorTs) view returns (tuple(uint256 cumulative, uint256 hour, uint256 day, uint256 week, uint256 month, uint256 year))',
 ] as const
 
 export type IncomeEnrichmentNodeHint = {
@@ -45,10 +108,7 @@ function bumpTotalsCumulative(t: IncomeTotals, rawWei: bigint): IncomeTotals {
 
 /** Normalize GB cumulative to 18-dec wei for Blockscout (legacy indexer may already be 18-dec). */
 function gbCumulativeAsEighteenDec(t: IncomeTotals): bigint {
-	const raw = totalsRaw(t)
-	if (raw <= 0n) return 0n
-	if (raw < 10n ** 15n) return raw * GB_NINE_TO_EIGHTEEN_SCALE
-	return raw
+	return fieldToBigInt(normalizeGbIncomeField(t.cumulative))
 }
 
 function bumpGbTotalsCumulative(t: IncomeTotals, paidGbNineDec: bigint): IncomeTotals {
@@ -104,14 +164,71 @@ function mergeGuardianGbIntoNodes(stats: UnifiedIncomeStats, byGuardianGb: Map<n
 	}
 }
 
-async function readClRewardPaidWei(beneficiary: string): Promise<bigint | null> {
+async function readClPaidSummary(beneficiary: string, anchorTs = 0): Promise<IncomeTotals | null> {
 	try {
 		const provider = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(), undefined, { batchMaxCount: 1 })
 		const c = new ethers.Contract(CONET_VALIDATOR_DEPOSIT_REDEEM, REDEEM_VIEW_ABI, provider)
-		return BigInt(String(await c.clRewardPaid!(beneficiary)))
+		const stats = await c.resolveUnifiedIncomeStats!(beneficiary, '', BigInt(Math.max(0, anchorTs)))
+		const row = stats.cnetBeneficiary ?? stats[2]
+		if (!row) return null
+		const get = (i: number, k: string) => BigInt(String(Array.isArray(row) ? row[i] : row[k] ?? 0))
+		return {
+			cumulative: get(0, 'cumulative').toString(),
+			hour: get(1, 'hour').toString(),
+			day: get(2, 'day').toString(),
+			week: get(3, 'week').toString(),
+			month: get(4, 'month').toString(),
+			year: get(5, 'year').toString(),
+		}
 	} catch {
 		return null
 	}
+}
+
+async function readDepinPaidGbSummary(
+	beneficiary: string,
+	guardianIds: number[],
+	anchorTs = 0,
+): Promise<{ beneficiary: IncomeTotals | null; byGuardian: Map<number, IncomeTotals> }> {
+	const airdrop = resolveConetGbDepinAirdropAddress()
+	if (!airdrop) return { beneficiary: null, byGuardian: new Map() }
+	const parseSummary = (t: unknown): IncomeTotals => {
+		const row = t as bigint[] | Record<string, bigint>
+		const get = (i: number, k: string) => BigInt(String(Array.isArray(row) ? row[i] : row[k] ?? 0))
+		return {
+			cumulative: get(0, 'cumulative').toString(),
+			hour: get(1, 'hour').toString(),
+			day: get(2, 'day').toString(),
+			week: get(3, 'week').toString(),
+			month: get(4, 'month').toString(),
+			year: get(5, 'year').toString(),
+		}
+	}
+	try {
+		const provider = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(), undefined, { batchMaxCount: 1 })
+		const c = new ethers.Contract(airdrop, GB_DEPIN_LEDGER_ABI, provider)
+		const ts = BigInt(Math.max(0, anchorTs))
+		const beneficiarySummary = parseSummary(await c.paidGbSummaryOf!(beneficiary, ts))
+		const byGuardian = new Map<number, IncomeTotals>()
+		const unique = [...new Set(guardianIds.filter((id) => Number.isFinite(id) && id > 0))]
+		if (unique.length > 0) {
+			const rows = await Promise.all(
+				unique.map(async (id) => {
+					const s = parseSummary(await c.paidGbSummaryOfGuardianNode!(id, ts))
+					return [id, s] as const
+				}),
+			)
+			for (const [id, s] of rows) byGuardian.set(id, s)
+		}
+		return { beneficiary: beneficiarySummary, byGuardian }
+	} catch {
+		return { beneficiary: null, byGuardian: new Map() }
+	}
+}
+
+async function readClRewardPaidWei(_beneficiary: string): Promise<bigint | null> {
+	// clRewardPaid mapping is private on upgraded VDR; CL settle totals merge in resolveUnifiedIncomeStats.
+	return null
 }
 
 async function readDepinPaidGb(
@@ -202,6 +319,11 @@ export async function enrichUnifiedIncomeStats(
 		out.cnetBeneficiary = bumpTotalsCumulative(out.cnetBeneficiary, clPaid)
 	}
 
+	const clSummary = await readClPaidSummary(beneficiary)
+	if (clSummary) {
+		out.cnetBeneficiary = maxIncomeTotals(out.cnetBeneficiary, clSummary)
+	}
+
 	const guardianCl = getBeneficiaryGuardianClPaidMap(beneficiary)
 	mergeGuardianClIntoNodes(out, guardianCl)
 
@@ -210,6 +332,20 @@ export async function enrichUnifiedIncomeStats(
 		out.gbBeneficiary = bumpGbTotalsCumulative(out.gbBeneficiary, depinGb.total)
 	}
 	mergeGuardianGbIntoNodes(out, depinGb.byGuardian)
+
+	const depinSummary = await readDepinPaidGbSummary(beneficiary, guardianIds)
+	if (depinSummary.beneficiary) {
+		out.gbBeneficiary = maxIncomeTotals(out.gbBeneficiary, depinSummary.beneficiary)
+	}
+	if (depinSummary.byGuardian.size > 0) {
+		for (const node of out.nodes) {
+			const gid = (node as NodeIncomeRow & { guardianId?: number }).guardianId
+			if (gid === undefined) continue
+			const s = depinSummary.byGuardian.get(gid)
+			if (!s) continue
+			node.gb = maxIncomeTotals(node.gb, s)
+		}
+	}
 
 	// Single-node beneficiaries: per-guardian log cache may lag during daemon backfill.
 	if (out.nodes.length === 1) {
@@ -224,33 +360,16 @@ export async function enrichUnifiedIncomeStats(
 	return out
 }
 
-/** Blockscout validator page expects integer wei strings and divides by 10^18 client-side. */
+/** Blockscout validator page expects integer wei strings and divides by 10^18 client-side for all six period fields. */
 export function adaptUnifiedIncomeStatsForBlockscoutValidatorUi(stats: UnifiedIncomeStats): UnifiedIncomeStats {
-	const normalizeCnetTotals = (t: IncomeTotals): IncomeTotals => {
-		const raw = String(t.cumulative ?? '0')
-		if (!raw.includes('.')) return t
-		try {
-			return { ...t, cumulative: ethers.parseUnits(raw, NATIVE_DECIMALS).toString() }
-		} catch {
-			return t
-		}
-	}
-	const normalizeGbTotals = (t: IncomeTotals): IncomeTotals => {
-		const raw = totalsRaw(t)
-		if (raw <= 0n) return t
-		if (raw < 10n ** 15n) {
-			return { ...t, cumulative: (raw * GB_NINE_TO_EIGHTEEN_SCALE).toString() }
-		}
-		return t
-	}
 	return {
 		...stats,
-		gbBeneficiary: normalizeGbTotals(stats.gbBeneficiary),
-		cnetBeneficiary: normalizeCnetTotals(stats.cnetBeneficiary),
+		gbBeneficiary: normalizeGbIncomeTotals(stats.gbBeneficiary),
+		cnetBeneficiary: normalizeCnetIncomeTotals(stats.cnetBeneficiary),
 		nodes: stats.nodes.map((n) => ({
 			...n,
-			gb: normalizeGbTotals(n.gb),
-			cnet: normalizeCnetTotals(n.cnet),
+			gb: normalizeGbIncomeTotals(n.gb),
+			cnet: normalizeCnetIncomeTotals(n.cnet),
 		})),
 	}
 }
