@@ -5,6 +5,7 @@ import Colors from 'colors/safe'
 import { logger } from '../logger'
 import startMaster from './beamioMaster'
 import { startValidatorDepositRedeemListener } from './validatorDepositRedeem'
+import { startConetBlockscoutIncomeDaemon } from './conetBlockscoutIncomeDaemon'
 
 if (Cluster.isPrimary) {
 	const forkWorker = () => {
@@ -32,6 +33,7 @@ if (Cluster.isPrimary) {
 
 	startMaster()
 	startValidatorDepositRedeemListener()
+	startConetBlockscoutIncomeDaemon()
 	
 } else {
 	startServer()

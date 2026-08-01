@@ -5,6 +5,7 @@ import {
 	validatorDepositRedeemReadUnifiedIncomeStats,
 	type UnifiedIncomeStats,
 } from './validatorDepositRedeem'
+import { enrichUnifiedIncomeStats, formatEnrichedIncomeDisplay } from './conetUnifiedIncomeEnrichment'
 
 const PUBKEY_RE = /^0x[0-9a-f]{96}$/
 const CACHE_TTL_MS = 30_000
@@ -289,6 +290,21 @@ export async function getConetValidatorDashboard(
 					...beaconTiming,
 				}
 			: previous?.beacon ?? emptyBeacon(beaconTiming)
+		let income: UnifiedIncomeStats | null = incomeResult.ok ? incomeResult.stats : cached?.value.income ?? null
+		if (income) {
+			const nodeHints = bundle.guardianNodeIds.map((gid, i) => ({
+				guardianId: Number(gid),
+				depinNodeIp: bundle.depinNodeIps[i] ?? null,
+				nodeWallet: bundle.nodeWallets[i] ?? null,
+			}))
+			income = formatEnrichedIncomeDisplay(
+				await enrichUnifiedIncomeStats(income, {
+					beneficiary,
+					clRewardPaidWei: toStringValue(rewardRaw),
+					nodeHints,
+				}),
+			)
+		}
 		const value: ConetValidatorDashboard = {
 			success: true,
 			pubkey,
@@ -304,7 +320,7 @@ export async function getConetValidatorDashboard(
 				depinNodeIp: index >= 0 ? bundle.depinNodeIps[index] ?? null : null,
 				clRewardPaidWei: toStringValue(rewardRaw),
 			},
-			income: incomeResult.ok ? incomeResult.stats : cached?.value.income ?? null,
+			income,
 			beacon: beaconState,
 			meta: {
 				partial: !beacon.available,

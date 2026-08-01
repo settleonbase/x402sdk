@@ -107,6 +107,7 @@ import {
 	validatorDepositRedeemCreateClusterPreCheck,
 	validatorDepositRedeemClaimAirdropClusterPreCheck,
 	validatorDepositRedeemReadAdminNonce,
+	validatorDepositRedeemReadUnifiedIncomeStats,
 } from './validatorDepositRedeem'
 import {
 	gbDepinChargeUserClusterPreCheck,
@@ -149,6 +150,13 @@ import {
 } from './couponClaimShare'
 import { listIssuedNftClaimWallets } from './issuedNftClaimWallets'
 import { getConetValidatorDashboard } from './conetValidatorDashboard'
+import {
+	getConetBlockscoutIncomeDaemonStatus,
+} from './conetBlockscoutIncomeDaemon'
+import {
+	enrichUnifiedIncomeStats,
+	formatEnrichedIncomeDisplay,
+} from './conetUnifiedIncomeEnrichment'
 import { requestExplorerNftMetadataRefresh } from './baseExplorerNftMetadataRefresh'
 import {
 	DEFAULT_METADATA_IMAGE_PROXY_URL,
@@ -10882,6 +10890,34 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.get('/v2/conet/validators/:pubkey', async (req, res) => {
 		const result = await getConetValidatorDashboard(req.params.pubkey)
 		return res.status(result.status).json(result.body).end()
+	})
+
+	router.get('/v2/conet/beneficiary-income/:wallet', async (req, res) => {
+		const wallet = String(req.params.wallet ?? '').trim()
+		if (!ethers.isAddress(wallet)) {
+			return res.status(400).json({ success: false, error: 'Invalid wallet address' }).end()
+		}
+		const anchorTs = Number(req.query.anchorTs ?? 0)
+		const base = await validatorDepositRedeemReadUnifiedIncomeStats(ethers.getAddress(wallet), anchorTs)
+		if (!base.ok) {
+			return res.status(503).json({ success: false, error: base.error }).end()
+		}
+		const enriched = formatEnrichedIncomeDisplay(
+			await enrichUnifiedIncomeStats(base.stats, { beneficiary: ethers.getAddress(wallet) }),
+		)
+		return res
+			.status(200)
+			.json({
+				success: true,
+				wallet: ethers.getAddress(wallet),
+				stats: enriched,
+				meta: getConetBlockscoutIncomeDaemonStatus(),
+			})
+			.end()
+	})
+
+	router.get('/v2/conet/blockscout-income-daemon/status', (_req, res) => {
+		return res.status(200).json({ success: true, ...getConetBlockscoutIncomeDaemonStatus() }).end()
 	})
 
 	router.get('/validatorDepositRedeemAdminNonce', async (req, res) => {
