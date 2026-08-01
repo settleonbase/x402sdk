@@ -5,7 +5,7 @@ import {
 	validatorDepositRedeemReadUnifiedIncomeStats,
 	type UnifiedIncomeStats,
 } from './validatorDepositRedeem'
-import { enrichUnifiedIncomeStats, formatEnrichedIncomeDisplay } from './conetUnifiedIncomeEnrichment'
+import { enrichUnifiedIncomeStats, adaptUnifiedIncomeStatsForBlockscoutValidatorUi } from './conetUnifiedIncomeEnrichment'
 
 const PUBKEY_RE = /^0x[0-9a-f]{96}$/
 const CACHE_TTL_MS = 30_000
@@ -297,7 +297,7 @@ export async function getConetValidatorDashboard(
 				depinNodeIp: bundle.depinNodeIps[i] ?? null,
 				nodeWallet: bundle.nodeWallets[i] ?? null,
 			}))
-			income = formatEnrichedIncomeDisplay(
+			income = adaptUnifiedIncomeStatsForBlockscoutValidatorUi(
 				await enrichUnifiedIncomeStats(income, {
 					beneficiary,
 					clRewardPaidWei: toStringValue(rewardRaw),

@@ -9,6 +9,10 @@ import { getBeneficiaryGuardianClPaidMap } from './conetBlockscoutIncomeDaemon'
 import type { IncomeTotals, NodeIncomeRow, UnifiedIncomeStats } from './validatorDepositRedeem'
 
 const NATIVE_DECIMALS = 18
+/** Blockscout validator UI always divides income totals by 10^18 (see mainnet.conet.network validator bundle). */
+const BLOCKSCOUT_INCOME_DECIMALS = 18
+/** GBDepinAirdrop paidGb* amounts are GB ERC20 9-dec; scale up before Blockscout 18-dec formatting. */
+const GB_NINE_TO_EIGHTEEN_SCALE = 10n ** 9n
 
 const REDEEM_VIEW_ABI = ['function clRewardPaid(address beneficiary) view returns (uint256)'] as const
 
@@ -31,14 +35,27 @@ function totalsRaw(t: IncomeTotals): bigint {
 	}
 }
 
-function bumpTotalsCumulative(t: IncomeTotals, rawWei: bigint, decimals: number): IncomeTotals {
+function bumpTotalsCumulative(t: IncomeTotals, rawWei: bigint): IncomeTotals {
 	if (rawWei <= totalsRaw(t)) return t
 	return {
 		...t,
 		cumulative: rawWei.toString(),
-		// Blockscout validator UI formats cumulative with token decimals client-side.
-		// Keep hour/day/week/month/year from indexer; only cumulative is authoritative on-chain.
 	}
+}
+
+/** Normalize GB cumulative to 18-dec wei for Blockscout (legacy indexer may already be 18-dec). */
+function gbCumulativeAsEighteenDec(t: IncomeTotals): bigint {
+	const raw = totalsRaw(t)
+	if (raw <= 0n) return 0n
+	if (raw < 10n ** 15n) return raw * GB_NINE_TO_EIGHTEEN_SCALE
+	return raw
+}
+
+function bumpGbTotalsCumulative(t: IncomeTotals, paidGbNineDec: bigint): IncomeTotals {
+	if (paidGbNineDec <= 0n) return t
+	const paid18 = paidGbNineDec * GB_NINE_TO_EIGHTEEN_SCALE
+	if (paid18 <= gbCumulativeAsEighteenDec(t)) return t
+	return { ...t, cumulative: paid18.toString() }
 }
 
 function normalizeIp(ip: unknown): string {
@@ -72,7 +89,7 @@ function mergeGuardianClIntoNodes(stats: UnifiedIncomeStats, guardianCl: Map<num
 		if (gid === undefined) continue
 		const clWei = guardianCl.get(gid)
 		if (clWei === undefined || clWei <= 0n) continue
-		node.cnet = bumpTotalsCumulative(node.cnet, clWei, NATIVE_DECIMALS)
+		node.cnet = bumpTotalsCumulative(node.cnet, clWei)
 	}
 }
 
@@ -83,7 +100,7 @@ function mergeGuardianGbIntoNodes(stats: UnifiedIncomeStats, byGuardianGb: Map<n
 		if (gid === undefined) continue
 		const gbRaw = byGuardianGb.get(gid)
 		if (gbRaw === undefined || gbRaw <= 0n) continue
-		node.gb = bumpTotalsCumulative(node.gb, gbRaw, CONET_GB_DECIMALS)
+		node.gb = bumpGbTotalsCumulative(node.gb, gbRaw)
 	}
 }
 
@@ -182,7 +199,7 @@ export async function enrichUnifiedIncomeStats(
 	}
 	if (clPaid === null) clPaid = await readClRewardPaidWei(beneficiary)
 	if (clPaid !== null && clPaid > 0n) {
-		out.cnetBeneficiary = bumpTotalsCumulative(out.cnetBeneficiary, clPaid, NATIVE_DECIMALS)
+		out.cnetBeneficiary = bumpTotalsCumulative(out.cnetBeneficiary, clPaid)
 	}
 
 	const guardianCl = getBeneficiaryGuardianClPaidMap(beneficiary)
@@ -190,24 +207,55 @@ export async function enrichUnifiedIncomeStats(
 
 	const depinGb = await readDepinPaidGb(beneficiary, guardianIds)
 	if (depinGb.total !== null && depinGb.total > 0n) {
-		out.gbBeneficiary = bumpTotalsCumulative(out.gbBeneficiary, depinGb.total, CONET_GB_DECIMALS)
+		out.gbBeneficiary = bumpGbTotalsCumulative(out.gbBeneficiary, depinGb.total)
 	}
 	mergeGuardianGbIntoNodes(out, depinGb.byGuardian)
 
 	// Single-node beneficiaries: per-guardian log cache may lag during daemon backfill.
 	if (out.nodes.length === 1) {
 		if (clPaid !== null && clPaid > totalsRaw(out.nodes[0].cnet)) {
-			out.nodes[0].cnet = bumpTotalsCumulative(out.nodes[0].cnet, clPaid, NATIVE_DECIMALS)
+			out.nodes[0].cnet = bumpTotalsCumulative(out.nodes[0].cnet, clPaid)
 		}
-		if (depinGb.total !== null && depinGb.total > totalsRaw(out.nodes[0].gb)) {
-			out.nodes[0].gb = bumpTotalsCumulative(out.nodes[0].gb, depinGb.total, CONET_GB_DECIMALS)
+		if (depinGb.total !== null && depinGb.total > 0n) {
+			out.nodes[0].gb = bumpGbTotalsCumulative(out.nodes[0].gb, depinGb.total)
 		}
 	}
 
 	return out
 }
 
-/** Human-readable cumulative strings for API consumers that expect formatted units. */
+/** Blockscout validator page expects integer wei strings and divides by 10^18 client-side. */
+export function adaptUnifiedIncomeStatsForBlockscoutValidatorUi(stats: UnifiedIncomeStats): UnifiedIncomeStats {
+	const normalizeCnetTotals = (t: IncomeTotals): IncomeTotals => {
+		const raw = String(t.cumulative ?? '0')
+		if (!raw.includes('.')) return t
+		try {
+			return { ...t, cumulative: ethers.parseUnits(raw, NATIVE_DECIMALS).toString() }
+		} catch {
+			return t
+		}
+	}
+	const normalizeGbTotals = (t: IncomeTotals): IncomeTotals => {
+		const raw = totalsRaw(t)
+		if (raw <= 0n) return t
+		if (raw < 10n ** 15n) {
+			return { ...t, cumulative: (raw * GB_NINE_TO_EIGHTEEN_SCALE).toString() }
+		}
+		return t
+	}
+	return {
+		...stats,
+		gbBeneficiary: normalizeGbTotals(stats.gbBeneficiary),
+		cnetBeneficiary: normalizeCnetTotals(stats.cnetBeneficiary),
+		nodes: stats.nodes.map((n) => ({
+			...n,
+			gb: normalizeGbTotals(n.gb),
+			cnet: normalizeCnetTotals(n.cnet),
+		})),
+	}
+}
+
+/** Human-readable cumulative strings for PWA / JSON consumers that expect decimal units. */
 export function formatEnrichedIncomeDisplay(stats: UnifiedIncomeStats): UnifiedIncomeStats {
 	const fmt = (raw: string, decimals: number): string => {
 		try {
@@ -216,27 +264,26 @@ export function formatEnrichedIncomeDisplay(stats: UnifiedIncomeStats): UnifiedI
 			return '0'
 		}
 	}
-	const mapTotals = (t: IncomeTotals, decimals: number): IncomeTotals => {
+	const mapCnetTotals = (t: IncomeTotals): IncomeTotals => {
 		const raw = String(t.cumulative || '0')
-		const asBig = (() => {
-			try {
-				return BigInt(raw)
-			} catch {
-				return 0n
-			}
-		})()
-		// If already looks like a decimal string (contains '.'), leave as-is.
 		if (raw.includes('.')) return t
-		return { ...t, cumulative: fmt(String(asBig), decimals) }
+		return { ...t, cumulative: fmt(raw, NATIVE_DECIMALS) }
+	}
+	const mapGbTotals = (t: IncomeTotals): IncomeTotals => {
+		const raw = String(t.cumulative || '0')
+		if (raw.includes('.')) return t
+		const asBig = totalsRaw(t)
+		const decimals = asBig >= 10n ** 15n ? BLOCKSCOUT_INCOME_DECIMALS : CONET_GB_DECIMALS
+		return { ...t, cumulative: fmt(raw, decimals) }
 	}
 	return {
 		...stats,
-		gbBeneficiary: mapTotals(stats.gbBeneficiary, CONET_GB_DECIMALS),
-		cnetBeneficiary: mapTotals(stats.cnetBeneficiary, NATIVE_DECIMALS),
+		gbBeneficiary: mapGbTotals(stats.gbBeneficiary),
+		cnetBeneficiary: mapCnetTotals(stats.cnetBeneficiary),
 		nodes: stats.nodes.map((n) => ({
 			...n,
-			gb: mapTotals(n.gb, CONET_GB_DECIMALS),
-			cnet: mapTotals(n.cnet, NATIVE_DECIMALS),
+			gb: mapGbTotals(n.gb),
+			cnet: mapCnetTotals(n.cnet),
 		})),
 	}
 }
