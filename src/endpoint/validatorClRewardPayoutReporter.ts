@@ -118,9 +118,10 @@ function resolveChunksPerTick(): number {
 
 /** Hard cap on entries per settleNodeRewards tx (before gas/calldata split). */
 function resolveMaxEntriesPerTx(): number {
-	// Measured on CONET mainnet: n=64 ≈ 2.43M gas > default 2M limit (reverts); n=48 ≈ 1.83M.
-	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_MAX_ENTRIES || 40)
-	return Number.isFinite(n) && n >= 1 ? Math.min(256, Math.floor(n)) : 40
+	// Measured on CONET mainnet (2026-08): n=40 estimateGas ≈ 2.29M > 2M gasLimit (OOG);
+	// n=64 ≈ 2.43M; n=48 ≈ 1.83M. Default 29 keeps ~1.66M est + 20% buffer under 2M.
+	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_MAX_ENTRIES || 29)
+	return Number.isFinite(n) && n >= 1 ? Math.min(256, Math.floor(n)) : 29
 }
 
 function resolveGasLimit(): number {
@@ -128,15 +129,15 @@ function resolveGasLimit(): number {
 	return Number.isFinite(n) && n >= 100_000 ? Math.min(8_000_000, Math.floor(n)) : 2_000_000
 }
 
-/** Conservative gas model for pre-split (mainnet estimateGas ≈ 93k + ~37k/entry). */
+/** Conservative gas model for pre-split (mainnet estimateGas ≈ 100k + ~55k/entry incl. period accumulate). */
 function resolveGasBase(): number {
 	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_BASE || 100_000)
 	return Number.isFinite(n) && n >= 21_000 ? Math.floor(n) : 100_000
 }
 
 function resolveGasPerEntry(): number {
-	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_PER_ENTRY || 40_000)
-	return Number.isFinite(n) && n >= 1_000 ? Math.floor(n) : 40_000
+	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_PER_ENTRY || 55_000)
+	return Number.isFinite(n) && n >= 1_000 ? Math.floor(n) : 55_000
 }
 
 /** Max calldata bytes per tx (RPC / node limits); leave headroom under common 128KiB caps. */
@@ -297,6 +298,24 @@ function splitEntriesForOnchain(entries: PayoutEntry[]): PayoutEntry[][] {
 
 function estimateBatchGas(n: number): number {
 	return resolveGasBase() + resolveGasPerEntry() * n
+}
+
+/** estimateGas + 20% headroom; returns null when buffered estimate exceeds configured gasLimit. */
+async function resolveSubmitGasLimit(
+	contract: ethers.Contract,
+	guardianIds: bigint[],
+	amounts: bigint[],
+	eventKeys: string[]
+): Promise<number | null> {
+	const cap = resolveGasLimit()
+	try {
+		const est = await contract.settleNodeRewards!.estimateGas(guardianIds, amounts, eventKeys)
+		const buffered = (est * 120n) / 100n + 50_000n
+		if (buffered > BigInt(cap)) return null
+		return Number(buffered)
+	} catch {
+		return cap
+	}
 }
 
 function readState(): ClPayoutState {
@@ -497,7 +516,6 @@ async function submitPayoutBatchOnchain(
 	const guardianIds = entries.map((e) => e.guardianId)
 	const amounts = entries.map((e) => e.amount)
 	const eventKeys = entries.map((e) => e.eventKey)
-	const gasLimit = resolveGasLimit()
 
 	if (payoutDryRun()) {
 		logger(
@@ -512,6 +530,15 @@ async function submitPayoutBatchOnchain(
 
 	const txHash = await withSettleWallet('settleNodeRewards', async (sc) => {
 		const c = new ethers.Contract(contractAddr, PAYOUT_ABI, sc.walletConet)
+		const gasLimit = await resolveSubmitGasLimit(c, guardianIds, amounts, eventKeys)
+		if (gasLimit == null) {
+			logger(
+				Colors.yellow(
+					`[validatorClRewardPayout] skip submit: n=${entries.length} estimateGas+20% exceeds gasLimit=${resolveGasLimit()} — split smaller batch`
+				)
+			)
+			return null
+		}
 		// Prefer legacy gasPrice: EIP-1559 tip=0 is rejected by some CONET nodes
 		// ("tip cap 0, minimum needed 1"); tip=1 wei can enter mempool but never mine
 		// while eth_gasPrice stays ~2 gwei. Legacy gasPrice matches the network quote.
