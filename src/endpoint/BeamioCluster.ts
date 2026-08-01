@@ -33,8 +33,8 @@ if (Cluster.isPrimary) {
 
 	startMaster()
 	startValidatorDepositRedeemListener()
-	startConetBlockscoutIncomeDaemon()
 	
 } else {
 	startServer()
+	startConetBlockscoutIncomeDaemon()
 }
