@@ -14,7 +14,10 @@
  * - Scanned withdrawals are merged into a persisted pending pool (dedupe by eventKey).
  * - Checkpoint advances after a block is successfully scanned into the pool (settle may lag).
  * - Flush submits settleNodeRewards in split batches when gasPrice ≤ max and settle wallet
- *   has enough balance for gasLimit × gasPrice; failed batches stay in the pool.
+ *   has enough balance for gasLimit × gasPrice.
+ * - If estimateGas / submit fails for n>1, auto-bisect and retry both halves (never stall the
+ *   whole pending pool on one oversized batch). A singleton that still fails is skipped for this
+ *   flush round and retried later; remaining batches continue.
  * - If gas stays above max for longer than the force-wait window (default 3 min), flush anyway
  *   at the live gasPrice to drain the pending pool (countdown logged while waiting).
  */
@@ -296,10 +299,6 @@ function splitEntriesForOnchain(entries: PayoutEntry[]): PayoutEntry[][] {
 	return batches
 }
 
-function estimateBatchGas(n: number): number {
-	return resolveGasBase() + resolveGasPerEntry() * n
-}
-
 /** estimateGas + 20% headroom; returns null when buffered estimate exceeds configured gasLimit. */
 async function resolveSubmitGasLimit(
 	contract: ethers.Contract,
@@ -507,12 +506,17 @@ async function filterUnconsumed(
 	return out
 }
 
+/** Outcome of one on-chain settle attempt (before auto-bisect). */
+type SubmitOutcome = 'ok' | 'needs_split' | 'failed'
+
+const NEEDS_SPLIT_MARKER = Symbol('validatorClRewardPayout.needs_split')
+
 async function submitPayoutBatchOnchain(
 	contractAddr: string,
 	entries: PayoutEntry[],
 	gasPriceWei: bigint
-): Promise<boolean> {
-	if (!entries.length) return true
+): Promise<SubmitOutcome> {
+	if (!entries.length) return 'ok'
 	const guardianIds = entries.map((e) => e.guardianId)
 	const amounts = entries.map((e) => e.amount)
 	const eventKeys = entries.map((e) => e.eventKey)
@@ -525,19 +529,19 @@ async function submitPayoutBatchOnchain(
 				)} CNET`
 			)
 		)
-		return true
+		return 'ok'
 	}
 
-	const txHash = await withSettleWallet('settleNodeRewards', async (sc) => {
+	const result = await withSettleWallet('settleNodeRewards', async (sc) => {
 		const c = new ethers.Contract(contractAddr, PAYOUT_ABI, sc.walletConet)
 		const gasLimit = await resolveSubmitGasLimit(c, guardianIds, amounts, eventKeys)
 		if (gasLimit == null) {
 			logger(
 				Colors.yellow(
-					`[validatorClRewardPayout] skip submit: n=${entries.length} estimateGas+20% exceeds gasLimit=${resolveGasLimit()} — split smaller batch`
+					`[validatorClRewardPayout] estimateGas+20% exceeds gasLimit=${resolveGasLimit()} for n=${entries.length} — will auto-split`
 				)
 			)
-			return null
+			return NEEDS_SPLIT_MARKER
 		}
 		// Prefer legacy gasPrice: EIP-1559 tip=0 is rejected by some CONET nodes
 		// ("tip cap 0, minimum needed 1"); tip=1 wei can enter mempool but never mine
@@ -550,24 +554,100 @@ async function submitPayoutBatchOnchain(
 		return tx.hash as string
 	})
 
-	if (txHash) {
-		logger(Colors.green(`[validatorClRewardPayout] settleNodeRewards ok tx=${txHash} n=${entries.length}`))
-		return true
+	if (result === NEEDS_SPLIT_MARKER) return 'needs_split'
+	if (typeof result === 'string' && result.length > 0) {
+		logger(Colors.green(`[validatorClRewardPayout] settleNodeRewards ok tx=${result} n=${entries.length}`))
+		return 'ok'
 	}
-	return false
+	return 'failed'
 }
 
 async function submitPayoutBatch(
 	contractAddr: string,
 	entries: PayoutEntry[],
 	gasPriceWei: bigint
-): Promise<boolean> {
-	if (!entries.length) return true
-	return enqueueOnchainTxWork(
+): Promise<SubmitOutcome> {
+	if (!entries.length) return 'ok'
+	const outcome = await enqueueOnchainTxWork(
 		CONET_VALIDATOR_NODE_ONCHAIN_LANE,
 		`settleNodeRewards n=${entries.length}`,
 		async () => submitPayoutBatchOnchain(contractAddr, entries, gasPriceWei),
 		'[validatorClRewardPayout]'
+	)
+	return outcome ?? 'failed'
+}
+
+/**
+ * Submit a batch; on estimate/tx failure with n>1, bisect and retry both halves.
+ * Singleton hard-failures stay in pending for a later tick so the rest of the pool can drain.
+ */
+async function submitPayoutBatchAutoSplit(
+	contractAddr: string,
+	entries: PayoutEntry[],
+	gasPriceWei: bigint,
+	state: ClPayoutState,
+	pending: Map<string, PayoutEntry>,
+	provider: ethers.JsonRpcProvider,
+	settleAddr: string,
+	intrinsicCost: bigint
+): Promise<'continue' | 'stop_balance'> {
+	if (!entries.length) return 'continue'
+
+	const balNow = await provider.getBalance(settleAddr)
+	if (balNow < intrinsicCost) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] stop flush mid-way: balance=${ethers.formatEther(balNow)} < intrinsic=${ethers.formatEther(intrinsicCost)} (pending=${pending.size})`
+			)
+		)
+		return 'stop_balance'
+	}
+
+	const outcome = await submitPayoutBatch(contractAddr, entries, gasPriceWei)
+	if (outcome === 'ok') {
+		for (const e of entries) pending.delete(e.eventKey)
+		persistPending(state, pending)
+		return 'continue'
+	}
+
+	if (entries.length === 1) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] singleton settle failed (${outcome}); leave in pending and continue (eventKey=${entries[0]!.eventKey.slice(0, 18)}…)`
+			)
+		)
+		return 'continue'
+	}
+
+	const mid = Math.max(1, Math.floor(entries.length / 2))
+	const left = entries.slice(0, mid)
+	const right = entries.slice(mid)
+	logger(
+		Colors.yellow(
+			`[validatorClRewardPayout] auto-split n=${entries.length} → ${left.length}+${right.length} (reason=${outcome})`
+		)
+	)
+
+	const leftResult = await submitPayoutBatchAutoSplit(
+		contractAddr,
+		left,
+		gasPriceWei,
+		state,
+		pending,
+		provider,
+		settleAddr,
+		intrinsicCost
+	)
+	if (leftResult === 'stop_balance') return 'stop_balance'
+	return submitPayoutBatchAutoSplit(
+		contractAddr,
+		right,
+		gasPriceWei,
+		state,
+		pending,
+		provider,
+		settleAddr,
+		intrinsicCost
 	)
 }
 
@@ -694,56 +774,22 @@ async function flushPendingBatches(
 	)
 
 	for (const batch of batches) {
-		const est = estimateBatchGas(batch.length)
-		if (est > resolveGasLimit()) {
-			// Should not happen after split; force singleton re-split as safety.
-			logger(
-				Colors.yellow(
-					`[validatorClRewardPayout] batch n=${batch.length} estGas=${est} exceeds gasLimit; re-splitting`
-				)
-			)
-			const safer = splitEntriesForOnchain(batch)
-			for (const sub of safer) {
-				const ok = await submitPayoutBatch(contractAddr, sub, gasPrice)
-				if (!ok) {
-					logger(
-						Colors.yellow(
-							`[validatorClRewardPayout] batch failed n=${sub.length}; remaining stay in pending pool`
-						)
-					)
-					persistPending(state, pending)
-					return
-				}
-				for (const e of sub) pending.delete(e.eventKey)
-				persistPending(state, pending)
-			}
-			continue
-		}
-
-		// Re-check balance before each batch (prior tx may have spent gas).
-		const balNow = await provider.getBalance(settleAddr)
-		if (balNow < intrinsicCost) {
-			logger(
-				Colors.yellow(
-					`[validatorClRewardPayout] stop flush mid-way: balance=${ethers.formatEther(balNow)} < intrinsic=${ethers.formatEther(intrinsicCost)} (pending=${pending.size})`
-				)
-			)
+		// Heuristic pre-split is a first cut; real estimateGas may still exceed gasLimit.
+		// Always go through auto-split so oversized / reverted batches bisect instead of stalling.
+		const result = await submitPayoutBatchAutoSplit(
+			contractAddr,
+			batch,
+			gasPrice,
+			state,
+			pending,
+			provider,
+			settleAddr,
+			intrinsicCost
+		)
+		if (result === 'stop_balance') {
 			persistPending(state, pending)
 			return
 		}
-
-		const ok = await submitPayoutBatch(contractAddr, batch, gasPrice)
-		if (!ok) {
-			logger(
-				Colors.yellow(
-					`[validatorClRewardPayout] batch failed n=${batch.length}; remaining stay in pending pool (pending=${pending.size})`
-				)
-			)
-			persistPending(state, pending)
-			return
-		}
-		for (const e of batch) pending.delete(e.eventKey)
-		persistPending(state, pending)
 	}
 
 	if (!pending.size && clearGasWait(state)) persistPending(state, pending)
