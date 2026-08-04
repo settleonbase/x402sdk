@@ -18,7 +18,9 @@ const DB_URL = 'postgres://postgres:your_password@127.0.0.1:5432/postgres'
 
 const ALLOWED_BUNDLE_IDS = new Set(['com.beamio.beamio', 'com.beamio.app'])
 const SIGN_MAX_SKEW_MS = 10 * 60 * 1000
-const NOTIFY_DEDUP_MS = 55_000
+/** Burst dedup for multi-entry fan-out (same msg → many saveLocal). Keep short so a second
+ * real offline message within a minute still gets APNs (55s previously blocked force-quit retests). */
+const NOTIFY_DEDUP_MS = 2_500
 
 const PUSH_DEVICES_TABLE = `CREATE TABLE IF NOT EXISTS beamio_push_devices (
 	id SERIAL PRIMARY KEY,
@@ -742,6 +744,7 @@ export async function notifyOfflineChatProcess(payload: {
 	const now = Date.now()
 	const last = recentNotifyKeys.get(dedupKey) || 0
 	if (now - last < NOTIFY_DEDUP_MS) {
+		logger(Colors.gray(`[notifyOfflineChat] dedup ${NOTIFY_DEDUP_MS}ms eoa=${eoa}`))
 		return { success: true, eoa, skipped: 'dedup' }
 	}
 	recentNotifyKeys.set(dedupKey, now)
