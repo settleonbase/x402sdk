@@ -32,6 +32,11 @@ import {
 	readRefereeChargePointsTotal6,
 	readRefereeCountByReferrer,
 	readReferrerRewardBalance,
+	readReferrersPageFromChain,
+	readRefereesByReferrerPageFromChain,
+	readRegisteredRefereesPageFromChain,
+	resolveReferrerRegistryAaToEoa,
+	resolveReferrerRegistryLookupAa,
 } from '../cardProgramReferrerChain'
 import { aaMultisigOfflineSubmitPreCheck } from '../aaMultisigOfflineSubmit'
 import {
@@ -74,6 +79,7 @@ import {
 	cardPurchaseRewardProgramPreCheck,
 	cardFundSocialExchangeUsdcEscrowPreCheck,
 	cardRecordDiscoverShareClickPreCheck,
+	cardBindShareRefereePreCheck,
 	cardRecordTopupCumulativeStatPreCheck,
 	cardRecordUserCumulativeStatPreCheck,
 	cardRecordUserLikePreCheck,
@@ -92,6 +98,11 @@ import {
 } from './issuedCouponSeriesQueryCache'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
+import {
+	registerPushDevicePreCheck,
+	syncChatBadgePreCheck,
+	notifyOfflineChatPreCheck,
+} from './offlineChatPush'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaViaUserCardFactory, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { validateYoutubeProductionVideoUrl } from './youtubeProductionVideo'
@@ -4316,13 +4327,67 @@ const routing = ( router: Router ) => {
 					}
 				} catch (_) { /* ignore */ }
 				const nfcLinkedAA = nfcLinkedEOA ? await resolveBeamioAccountOf(nfcLinkedEOA) : null
-				logger(Colors.red(`[nfcTopup] Signer is not card admin - DEBUG: cardAddr=${cardAddress} | verifyingContract=${verifyingContractGw} | tagIdHex=${nfcTagIdHex ?? '(not NFC)'} | tagIdLinkedEOA=${nfcLinkedEOA ?? 'N/A'} | tagIdLinkedAA=${nfcLinkedAA ?? 'N/A'} | toRecipient=${recipientTo ?? 'N/A'} | amountPoints6=${points6.toString()} | cardOwner=${cardOwner || 'N/A'} | signer=${signer} | signerAdminParent=${signerAdminParent || 'N/A'} | signerDbBoundCard=${signerDbBoundCard} | signerDbBoundCardMatch=${signerDbBoundCardMatch} | digest=${digest} | nonce=${message.nonce} | dataHash=${dataHash}`))
+				const expectedChainId = chainIdForUserCardChain(cardChain)
+				/** POS may send the wallet it believes signed — used to distinguish domain bugs from true non-admin. */
+				const expectedSignerRaw = String(
+					bodyForDebug.signerEOA ?? bodyForDebug.expectedSigner ?? bodyForDebug.posOperator ?? '',
+				).trim()
+				let expectedSigner: string | undefined
+				if (expectedSignerRaw && ethers.isAddress(expectedSignerRaw)) {
+					try {
+						expectedSigner = ethers.getAddress(expectedSignerRaw)
+					} catch {
+						expectedSigner = undefined
+					}
+				}
+				/** Legacy POS bug: signed EIP-712 with Base 8453 while Cluster recovers with CoNET 224422. */
+				let recoveredUnderBase8453: string | undefined
+				let recoveredBaseIsAdmin = false
+				try {
+					const digestBase = ethers.TypedDataEncoder.hash(
+						{ ...domain, chainId: 8453 },
+						types,
+						message,
+					)
+					recoveredUnderBase8453 = ethers.recoverAddress(digestBase, adminSignature)
+					recoveredBaseIsAdmin = Boolean(await card.isAdmin(recoveredUnderBase8453))
+				} catch {
+					/* ignore */
+				}
+				let errorCode = 'SIGNER_NOT_CARD_ADMIN'
+				let error =
+					`Terminal wallet ${signer} is not an admin on this merchant card. Ask Staff to approve this POS, then retry.`
+				if (
+					recoveredUnderBase8453 &&
+					recoveredBaseIsAdmin &&
+					recoveredUnderBase8453.toLowerCase() !== signer.toLowerCase()
+				) {
+					errorCode = 'EIP712_CHAIN_ID_MISMATCH'
+					error =
+						`ExecuteForAdmin EIP-712 chainId mismatch: signature recovers to admin ${recoveredUnderBase8453} under Base (8453), but recovers to non-admin ${signer} under CoNET (${expectedChainId}). POS must sign with chainId ${expectedChainId}.`
+				} else if (
+					expectedSigner &&
+					expectedSigner.toLowerCase() !== signer.toLowerCase()
+				) {
+					errorCode = 'EIP712_SIGNATURE_RECOVERY_MISMATCH'
+					error =
+						`ExecuteForAdmin signature does not recover to the POS wallet. Expected ${expectedSigner}, recovered ${signer}. Usually wrong EIP-712 domain (chainId or verifyingContract).`
+				}
+				logger(
+					Colors.red(
+						`[nfcTopup] ${errorCode} - DEBUG: cardAddr=${cardAddress} | verifyingContract=${verifyingContractGw} | expectedChainId=${expectedChainId} | tagIdHex=${nfcTagIdHex ?? '(not NFC)'} | tagIdLinkedEOA=${nfcLinkedEOA ?? 'N/A'} | tagIdLinkedAA=${nfcLinkedAA ?? 'N/A'} | toRecipient=${recipientTo ?? 'N/A'} | amountPoints6=${points6.toString()} | cardOwner=${cardOwner || 'N/A'} | recovered=${signer} | expectedSigner=${expectedSigner ?? 'N/A'} | recoveredUnderBase8453=${recoveredUnderBase8453 ?? 'N/A'} | recoveredBaseIsAdmin=${recoveredBaseIsAdmin} | signerAdminParent=${signerAdminParent || 'N/A'} | signerDbBoundCard=${signerDbBoundCard} | signerDbBoundCardMatch=${signerDbBoundCardMatch} | digest=${digest} | nonce=${message.nonce} | dataHash=${dataHash}`,
+					),
+				)
 				return res.status(403).json({
 					success: false,
-					error: 'Signer is not card admin',
+					errorCode,
+					error,
 					signer,
+					expectedSigner,
+					recoveredUnderBase8453,
+					expectedChainId,
 					cardOwner: cardOwner || undefined,
-					cardAddr: cardAddress
+					cardAddr: cardAddress,
 				})
 			}
 			/** adminManager(add) 经 nfcTopup 时须与 cardAddAdminByAdmin 一致：禁止同一终端 EOA 已绑定其他商户卡后再加为 admin（此前仅此路径未做 DB 预检）。 */
@@ -8696,6 +8761,33 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		)
 	})
 
+	/** Plan A：分享落地绑定 referee（EOA downline → referee EOA；链上写 AA）。 */
+	router.post('/cardBindShareReferee', async (req, res) => {
+		const preCheck = await cardBindShareRefereePreCheck(req.body)
+		if (!preCheck.success) {
+			logger(
+				Colors.red(`server /api/cardBindShareReferee preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/cardBindShareReferee preCheck OK → cardGatewayRewardPool`),
+			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
+		)
+		postLocalhost(
+			'/api/cardGatewayRewardPool',
+			{
+				cardAddress: preCheck.preChecked.cardAddress,
+				cardCallData: preCheck.preChecked.cardCallData,
+				factoryCallData: preCheck.preChecked.factoryCallData,
+				extraCardCallData: preCheck.preChecked.extraCardCallData,
+				label: 'bindShareReferee',
+			},
+			res,
+		)
+	})
+
 	/** AA Smart Wallet 离线签字提交：Cluster 预检 sign 包 + B-Unit ≥ 0.1 → Master 扣款 + indexer。 */
 	router.post('/aaMultisigOfflineSubmit', async (req, res) => {
 		const preCheck = await aaMultisigOfflineSubmitPreCheck(req.body as { inner?: unknown; submitterEoa?: string })
@@ -9880,6 +9972,33 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			encrypKeyArmored: encrypKeyArmored.trim(),
 			routeKeyID: routeKeyID.trim()
 		}, res)
+	})
+
+	/** Offline chat APNs: register device token (EOA personal_sign precheck → Master). */
+	router.post('/registerPushDevice', (req, res) => {
+		const checked = registerPushDevicePreCheck(req.body)
+		if (!checked.ok) {
+			return res.status(checked.status).json({ success: false, error: checked.error }).end()
+		}
+		postLocalhost('/api/registerPushDevice', checked.payload, res)
+	})
+
+	/** Sync app icon / chat unread badge after local messageCount changes. */
+	router.post('/syncChatBadge', (req, res) => {
+		const checked = syncChatBadgePreCheck(req.body)
+		if (!checked.ok) {
+			return res.status(checked.status).json({ success: false, error: checked.error }).end()
+		}
+		postLocalhost('/api/syncChatBadge', checked.payload, res)
+	})
+
+	/** CoNET-SI only: offline mailbox save → increment unread + APNs badge. */
+	router.post('/notifyOfflineChat', async (req, res) => {
+		const checked = await notifyOfflineChatPreCheck(req.body)
+		if (!checked.ok) {
+			return res.status(checked.status).json({ success: false, error: checked.error }).end()
+		}
+		postLocalhost('/api/notifyOfflineChat', checked.payload, res)
 	})
 
 	/** GET /api/transferPreCheckBUnit - UI 自检转账前 B-Unit 是否 >= 2。account=EOA 或 aaAddress=AA（解析 owner 后检查） */
@@ -11990,8 +12109,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/**
 	 * GET /api/cardProgramReferrers?cardAddress=0x…&mode=summary|referrers|refereesByReferrer|registeredReferees&referrerAA=&limit=&offset=
-	 * summary：链上 referrerTotalCount / registeredRefereeTotalCount（RPC 优先）+ DB 自启用后计数。
-	 * 列表模式替代 v28 主卡已移除的 getReferrersPage / getRefereesByReferrerPage / getRegisteredRefereesPage。
+	 * SoT：链上 get*Page / *TotalCount；DB 仅作 optional mirror（链上失败时不覆盖可信链上值）。
 	 */
 	router.get('/cardProgramReferrers', async (req, res) => {
 		const q = req.query as {
@@ -12007,37 +12125,56 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		const m = String(mode || 'summary').toLowerCase()
 		const parsedLimit = limitQ != null && String(limitQ).trim() !== '' ? Number(limitQ) : 20
-		const limit = Math.min(Math.max(Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : 20, 1), 2000)
+		const limit = Math.min(Math.max(Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : 20, 1), 100)
 		const parsedOffset = offsetQ != null && String(offsetQ).trim() !== '' ? Number(offsetQ) : 0
 		const offset = Number.isFinite(parsedOffset) && parsedOffset > 0 ? Math.floor(parsedOffset) : 0
 		const addrNorm = ethers.getAddress(cardAddress)
 		try {
 			if (m === 'summary') {
 				const chainTotals = await readCardProgramReferrerChainSummary(cardAddress)
-				const dbRegistered = await listCardProgramRegisteredReferees(cardAddress, { limit: 1, offset: 0 })
-				const dbReferrers = await listCardProgramReferees(cardAddress, { limit: 1, offset: 0 })
 				return res.status(200).json({
 					mode: 'summary',
 					cardAddress: addrNorm,
 					chainReferrerTotalCount: chainTotals.referrerTotalCount,
 					chainRegisteredRefereeTotalCount: chainTotals.registeredRefereeTotalCount,
-					dbRegisteredRefereeTotal: dbRegistered.total,
-					dbReferrerTotal: dbReferrers.total,
+					/** @deprecated alias — UI should prefer chain* fields */
+					referrerTotalCount: chainTotals.referrerTotalCount,
+					registeredRefereeTotalCount: chainTotals.registeredRefereeTotalCount,
 				})
 			}
 			if (m === 'referrers') {
+				const chainPage = await readReferrersPageFromChain(cardAddress, offset, limit)
+				if (chainPage.ok) {
+					return res.status(200).json({
+						mode: 'referrers',
+						cardAddress: addrNorm,
+						source: 'chain',
+						total: chainPage.total,
+						limit,
+						offset,
+						nextOffset: chainPage.nextOffset,
+						/** referrerAa fields are login EOAs (AA resolved via owner()). */
+						referrers: chainPage.referrers,
+					})
+				}
 				const page = await listCardProgramReferees(cardAddress, { limit, offset })
+				const chain = await resolveUserCardChain(addrNorm)
+				const provider = providerForUserCardChain(chain)
 				const referrers = await Promise.all(
-					page.items.map(async (row) => ({
-						referrerAa: row.referrerAa,
-						refereeCount: row.refereeCount,
-						chainRefereeCount: await readRefereeCountByReferrer(cardAddress, row.referrerAa),
-						referrerRewardBalance: await readReferrerRewardBalance(cardAddress, row.referrerAa),
-					})),
+					page.items.map(async (row) => {
+						const referrerEoa = await resolveReferrerRegistryAaToEoa(provider, row.referrerAa)
+						return {
+							referrerAa: referrerEoa,
+							refereeCount: row.refereeCount,
+							chainRefereeCount: await readRefereeCountByReferrer(cardAddress, row.referrerAa),
+							referrerRewardBalance: await readReferrerRewardBalance(cardAddress, row.referrerAa),
+						}
+					}),
 				)
 				return res.status(200).json({
 					mode: 'referrers',
 					cardAddress: addrNorm,
+					source: 'db_fallback',
 					total: page.total,
 					limit,
 					offset,
@@ -12046,20 +12183,51 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			}
 			if (m === 'refereesbyreferrer') {
 				if (!referrerAA || !ethers.isAddress(referrerAA)) {
-					return res.status(400).json({ error: 'referrerAA required for mode=refereesByReferrer' })
+					return res.status(400).json({ error: 'referrerAA required for mode=refereesByReferrer (EOA preferred)' })
 				}
 				const referrerNorm = ethers.getAddress(referrerAA)
+				const chainPage = await readRefereesByReferrerPageFromChain(cardAddress, referrerNorm, offset, limit)
+				if (chainPage.ok) {
+					return res.status(200).json({
+						mode: 'refereesByReferrer',
+						cardAddress: addrNorm,
+						/** Product: login EOA (not AA). */
+						referrerAA: chainPage.referrerEoa,
+						source: 'chain',
+						total: chainPage.total,
+						limit,
+						offset,
+						nextOffset: chainPage.nextOffset,
+						referees: chainPage.referees,
+					})
+				}
 				const page = await listCardProgramRefereesByReferrer(cardAddress, referrerNorm, { limit, offset })
+				const chain = await resolveUserCardChain(addrNorm)
+				const provider = providerForUserCardChain(chain)
+				const referrerEoa = await resolveReferrerRegistryAaToEoa(provider, referrerNorm)
+				const lookupAa = await resolveReferrerRegistryLookupAa(provider, referrerNorm)
 				const referees = await Promise.all(
-					page.items.map(async (row) => ({
-						...row,
-						refereeChargePointsTotal6: await readRefereeChargePointsTotal6(cardAddress, row.refereeAa),
-					})),
+					page.items.map(async (row) => {
+						const refereeEoa = await resolveReferrerRegistryAaToEoa(provider, row.refereeAa)
+						const uplinkEoa = row.referrerAa
+							? await resolveReferrerRegistryAaToEoa(provider, row.referrerAa)
+							: null
+						return {
+							...row,
+							refereeAa: refereeEoa,
+							referrerAa: uplinkEoa,
+							refereeChargePointsTotal6: await readRefereeChargePointsTotal6(
+								cardAddress,
+								row.refereeAa || lookupAa,
+							),
+						}
+					}),
 				)
 				return res.status(200).json({
 					mode: 'refereesByReferrer',
 					cardAddress: addrNorm,
-					referrerAA: referrerNorm,
+					referrerAA: referrerEoa,
+					source: 'db_fallback',
 					total: page.total,
 					limit,
 					offset,
@@ -12067,14 +12235,40 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				})
 			}
 			if (m === 'registeredreferees') {
+				const chainPage = await readRegisteredRefereesPageFromChain(cardAddress, offset, limit)
+				if (chainPage.ok) {
+					return res.status(200).json({
+						mode: 'registeredReferees',
+						cardAddress: addrNorm,
+						source: 'chain',
+						total: chainPage.total,
+						limit,
+						offset,
+						nextOffset: chainPage.nextOffset,
+						/** refereeAa / referrerAa are login EOAs. */
+						referees: chainPage.referees,
+					})
+				}
 				const page = await listCardProgramRegisteredReferees(cardAddress, { limit, offset })
+				const chain = await resolveUserCardChain(addrNorm)
+				const provider = providerForUserCardChain(chain)
+				const referees = await Promise.all(
+					page.items.map(async (row) => ({
+						...row,
+						refereeAa: await resolveReferrerRegistryAaToEoa(provider, row.refereeAa),
+						referrerAa: row.referrerAa
+							? await resolveReferrerRegistryAaToEoa(provider, row.referrerAa)
+							: null,
+					})),
+				)
 				return res.status(200).json({
 					mode: 'registeredReferees',
 					cardAddress: addrNorm,
+					source: 'db_fallback',
 					total: page.total,
 					limit,
 					offset,
-					referees: page.items,
+					referees,
 				})
 			}
 			return res.status(400).json({ error: 'Invalid mode: use summary|referrers|refereesByReferrer|registeredReferees' })

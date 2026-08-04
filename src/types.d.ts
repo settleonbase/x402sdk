@@ -55,6 +55,25 @@ type IMasterSetup = {
 	 * `CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN`）。API 主机优先用此字段签 createRedeemFor / claimRedeemFor。
 	 */
 	GenesisNode?: string
+	/**
+	 * APNs Auth Key (.p8) for offline-chat badge pushes. Prefer env APNS_* —
+	 * never commit .p8. `apns_p8_path` = absolute path on API host, or `apns_p8` = PEM.
+	 */
+	apns_key_id?: string
+	apns_team_id?: string
+	apns_bundle_id?: string
+	apns_p8?: string
+	apns_p8_path?: string
+	apns_production?: boolean
+	/**
+	 * FCM HTTP v1 (Android). Prefer env FCM_* — never commit service-account private keys.
+	 * `fcm_service_account_path` = absolute JSON path, or `fcm_service_account_json` = full JSON string.
+	 */
+	fcm_project_id?: string
+	fcm_service_account_json?: string
+	fcm_service_account_path?: string
+	/** Shared secret for CoNET-SI → POST /api/notifyOfflineChat (also env SI_OFFLINE_PUSH_SECRET). */
+	si_offline_push_secret?: string
 }
 
 /**

@@ -14,6 +14,11 @@ import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDa
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import {
+	handleRegisterPushDeviceMaster,
+	handleSyncChatBadgeMaster,
+	handleNotifyOfflineChatMaster,
+} from './offlineChatPush'
+import {
 	createMerchantKitCheckoutSession,
 	getMerchantKitSessionStatus,
 	handleMerchantKitStripeWebhook,
@@ -542,6 +547,18 @@ const routing = ( router: Router ) => {
 
 	router.post('/regiestChatRoute', (req, res) => {
 		return regiestChatRoute(req, res)
+	})
+
+	router.post('/registerPushDevice', (req, res) => {
+		return handleRegisterPushDeviceMaster(req, res)
+	})
+
+	router.post('/syncChatBadge', (req, res) => {
+		return handleSyncChatBadgeMaster(req, res)
+	})
+
+	router.post('/notifyOfflineChat', (req, res) => {
+		return handleNotifyOfflineChatMaster(req, res)
 	})
 
 	/** Cluster 每 1 分钟从此接口拉取 oracle，供 UI getOracle 直接响应 */

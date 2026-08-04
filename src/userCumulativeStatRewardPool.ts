@@ -13,6 +13,7 @@ import {
 import { cardProgramSocialBunitFeePreCheck, getBeamioUserCardFactoryGateway } from './MemberCard'
 import { getSeriesByCardAndTokenId } from './db'
 import { readCouponDisabledFromMetadata } from './couponMetadataCategory'
+import { CONET_AA_FACTORY } from './chainAddresses'
 
 export const USER_CUMULATIVE_STAT_IFACE = new ethers.Interface([
 	'function initializeCardUserCumulativeStatTokens()',
@@ -22,6 +23,7 @@ export const USER_CUMULATIVE_STAT_IFACE = new ethers.Interface([
 	'function burnUserCumulativeStatByGateway(address wallet, uint8 metricKind, uint8 targetKind, uint256 issuedParentId, uint256 delta)',
 	'function applyUserLikeWithSignature(address userEOA, uint8 targetKind, uint256 issuedParentId, bool liked, uint256 deadline, bytes32 nonce, bytes userSignature)',
 	'function applyDiscoverShareClickWithSignature(address actorEOA, address refWallet, uint8 targetKind, uint256 issuedParentId, uint256 deadline, bytes32 nonce, bytes userSignature)',
+	'function bindShareRefereeWithSignature(address downlineEOA, address refereeEOA, uint256 deadline, bytes32 nonce, bytes userSignature) returns (address downlineAA, address refereeAA)',
 	'function resolveUserCumulativeStatTokenId(uint8 metricKind, uint8 targetKind, uint256 issuedParentId) view returns (uint256 globalTokenId, uint256 scopedTokenId)',
 ])
 
@@ -72,6 +74,10 @@ export const APPLY_USER_LIKE_WITH_SIGNATURE_SELECTOR =
 export const APPLY_DISCOVER_SHARE_CLICK_WITH_SIGNATURE_SELECTOR =
 	USER_CUMULATIVE_STAT_IFACE.getFunction('applyDiscoverShareClickWithSignature')?.selector ?? '0x2f2c0f7b'
 
+/** Plan A: share-landing referee bind (registerReferee + setRefereeReferrer via EIP-712). */
+export const BIND_SHARE_REFEREE_WITH_SIGNATURE_SELECTOR =
+	USER_CUMULATIVE_STAT_IFACE.getFunction('bindShareRefereeWithSignature')?.selector ?? '0x00000000'
+
 /** L1 merchant-card user-like scoped stat token (UserCumulativeStatLib.MERCHANT_CARD_LIKE_TOKEN_ID). */
 export const MERCHANT_CARD_USER_LIKE_SCOPED_TOKEN_ID = 19n
 
@@ -97,6 +103,16 @@ export const RECORD_DISCOVER_SHARE_CLICK_EIP712_TYPE = {
 		{ name: 'refWallet', type: 'address' },
 		{ name: 'targetKind', type: 'uint8' },
 		{ name: 'issuedParentId', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+		{ name: 'nonce', type: 'bytes32' },
+	],
+}
+
+export const BIND_SHARE_REFEREE_EIP712_TYPE = {
+	BindShareReferee: [
+		{ name: 'cardAddress', type: 'address' },
+		{ name: 'downlineEOA', type: 'address' },
+		{ name: 'refereeEOA', type: 'address' },
 		{ name: 'deadline', type: 'uint256' },
 		{ name: 'nonce', type: 'bytes32' },
 	],
@@ -321,6 +337,26 @@ export function buildApplyDiscoverShareClickWithSignatureCalldata(args: {
 	])
 }
 
+export function buildBindShareRefereeWithSignatureCalldata(args: {
+	downlineEOA: string
+	refereeEOA: string
+	deadline: number
+	nonce: string
+	userSignature: string
+}): string {
+	const nonceBytes32 =
+		args.nonce.length === 66 && args.nonce.startsWith('0x')
+			? (args.nonce as `0x${string}`)
+			: (ethers.keccak256(ethers.toUtf8Bytes(args.nonce)) as `0x${string}`)
+	return USER_CUMULATIVE_STAT_IFACE.encodeFunctionData('bindShareRefereeWithSignature', [
+		ethers.getAddress(args.downlineEOA),
+		ethers.getAddress(args.refereeEOA),
+		BigInt(args.deadline),
+		nonceBytes32,
+		args.userSignature,
+	])
+}
+
 export function buildRecordTopupCumulativeStatCalldata(userEOA: string, points6: bigint | string | number): string {
 	return CHARGE_REWARD_V2_IFACE.encodeFunctionData('recordTopupCumulativeStat', [
 		ethers.getAddress(userEOA),
@@ -494,6 +530,34 @@ export async function cardSupportsApplyDiscoverShareClickWithSignature(cardAddre
 	}
 }
 
+/** Plan A: AdminStats module exposes bindShareRefereeWithSignature (ROUTE_STATS_QUERY). */
+export async function cardSupportsBindShareRefereeWithSignature(cardAddress: string): Promise<boolean> {
+	try {
+		const chain = await resolveUserCardChain(cardAddress)
+		if (chain !== 'conet') return false
+		const routeErr = await assertAdminStatsRoutesStatsQuerySelector(
+			cardAddress,
+			BIND_SHARE_REFEREE_WITH_SIGNATURE_SELECTOR,
+			'bindShareRefereeWithSignature',
+		)
+		if (routeErr) return false
+		const provider = providerForUserCardChain(chain)
+		const gw = await getBeamioUserCardFactoryGateway(cardAddress)
+		const factory = new ethers.Contract(
+			gw,
+			['function defaultAdminStatsQueryModule() view returns (address)'],
+			provider,
+		)
+		const adminMod = (await factory.defaultAdminStatsQueryModule()) as string
+		if (!adminMod || adminMod === ethers.ZeroAddress) return false
+		const code = await provider.getCode(adminMod)
+		if (!code || code === '0x') return false
+		return code.toLowerCase().includes(BIND_SHARE_REFEREE_WITH_SIGNATURE_SELECTOR.slice(2).toLowerCase())
+	} catch {
+		return false
+	}
+}
+
 export function encodeGatewayInvokeCardFactoryCalldata(cardAddress: string, cardCalldata: string): string {
 	return FACTORY_GATEWAY_IFACE.encodeFunctionData('gatewayInvokeCard', [
 		ethers.getAddress(cardAddress),
@@ -647,6 +711,41 @@ async function assertAdminStatsRoutesIssuedNftSelector(
 		// BeamioUserCardModuleKinds.ISSUED_NFT = 2
 		if (kind !== 2) {
 			return `AdminStatsQueryModule routes ${label} to kind=${kind}, expected 2 (IssuedNft)`
+		}
+		return null
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		return err?.message ?? String(e)
+	}
+}
+
+/** ROUTE_STATS_QUERY = type(uint8).max - 1 = 254 — handled by AdminStats module itself. */
+async function assertAdminStatsRoutesStatsQuerySelector(
+	cardAddress: string,
+	selector: string,
+	label: string,
+): Promise<string | null> {
+	try {
+		const chain = await resolveUserCardChain(cardAddress)
+		const provider = providerForUserCardChain(chain)
+		const gw = await getBeamioUserCardFactoryGateway(cardAddress)
+		const factory = new ethers.Contract(
+			gw,
+			['function defaultAdminStatsQueryModule() view returns (address)'],
+			provider,
+		)
+		const adminStats = (await factory.defaultAdminStatsQueryModule()) as string
+		if (!adminStats || adminStats === ethers.ZeroAddress) {
+			return `factory defaultAdminStatsQueryModule not configured (${label})`
+		}
+		const routeReader = new ethers.Contract(
+			adminStats,
+			['function selectorModuleKind(bytes4) view returns (uint8)'],
+			provider,
+		)
+		const kind = Number(await routeReader.selectorModuleKind(selector))
+		if (kind !== 254) {
+			return `AdminStatsQueryModule routes ${label} to kind=${kind}, expected 254 (STATS_QUERY)`
 		}
 		return null
 	} catch (e: unknown) {
@@ -1748,6 +1847,151 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 			preChecked: {
 				...buildGatewayRewardPoolForwardBody(card, userClickCalldata),
 				extraCardCallData: [refClickCalldata],
+			},
+		}
+		} catch (e: unknown) {
+		const err = e as { message?: string }
+		return { success: false, error: err?.message ?? String(e) }
+	}
+}
+
+/** Cluster：分享落地绑定 referee（Plan A bindShareRefereeWithSignature；EOA only；同卡不可改 uplink）。 */
+export const cardBindShareRefereePreCheck = async (body: {
+	cardAddress?: string
+	/** Opener / downline EOA (signer). */
+	downlineEOA?: string
+	actorWallet?: string
+	/** Share-link ref= referee EOA. */
+	refereeEOA?: string
+	refWallet?: string
+	deadline?: number
+	nonce?: string
+	userSignature?: string
+}): Promise<{ success: true; preChecked: GatewayRewardPoolForwardBody } | { success: false; error: string }> => {
+	if (!body.cardAddress || !ethers.isAddress(body.cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	const downlineRaw = body.downlineEOA || body.actorWallet
+	const refereeRaw = body.refereeEOA || body.refWallet
+	if (!downlineRaw || !ethers.isAddress(downlineRaw)) return { success: false, error: 'Invalid downlineEOA' }
+	if (!refereeRaw || !ethers.isAddress(refereeRaw)) return { success: false, error: 'Invalid refereeEOA' }
+
+	const downlineEOA = ethers.getAddress(downlineRaw)
+	const refereeEOA = ethers.getAddress(refereeRaw)
+	if (downlineEOA === refereeEOA) return { success: false, error: 'downlineEOA must differ from refereeEOA' }
+
+	if (
+		body.deadline == null ||
+		!Number.isFinite(Number(body.deadline)) ||
+		!body.nonce ||
+		typeof body.nonce !== 'string' ||
+		!body.nonce.trim() ||
+		!body.userSignature ||
+		!ethers.isHexString(body.userSignature)
+	) {
+		return { success: false, error: 'Plan A requires deadline, nonce, and userSignature (EIP-712)' }
+	}
+	const deadline = Number(body.deadline)
+	if (deadline <= Math.floor(Date.now() / 1000)) {
+		return { success: false, error: 'Missing or expired deadline' }
+	}
+
+	try {
+		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
+		if ('error' in base) return { success: false, error: base.error }
+		const card = base.card
+		const chain = await resolveUserCardChain(card)
+		const provider = providerForUserCardChain(chain)
+
+		const aaFactoryAddr = CONET_AA_FACTORY
+		const aaFac = new ethers.Contract(
+			aaFactoryAddr,
+			[
+				'function isBeamioAccount(address) view returns (bool)',
+				'function beamioAccountOf(address) view returns (address)',
+			],
+			provider,
+		)
+
+		const rejectIfAa = async (label: string, addr: string): Promise<string | null> => {
+			try {
+				if (await aaFac.isBeamioAccount(addr)) {
+					return `${label} must be an EOA (got Beamio AA)`
+				}
+			} catch {
+				/* ignore */
+			}
+			const aa = (await aaFac.beamioAccountOf(addr)) as string
+			if (!aa || aa === ethers.ZeroAddress) {
+				return `${label} has no Beamio AA (register Express Pay first)`
+			}
+			return null
+		}
+		const downErr = await rejectIfAa('downlineEOA', downlineEOA)
+		if (downErr) return { success: false, error: downErr }
+		const refErr = await rejectIfAa('refereeEOA', refereeEOA)
+		if (refErr) return { success: false, error: refErr }
+
+		const downlineAA = ethers.getAddress((await aaFac.beamioAccountOf(downlineEOA)) as string)
+		const refereeAA = ethers.getAddress((await aaFac.beamioAccountOf(refereeEOA)) as string)
+
+		const cardReader = new ethers.Contract(
+			card,
+			['function refereeReferrer(address) view returns (address)'],
+			provider,
+		)
+		let existing: string = ethers.ZeroAddress
+		try {
+			existing = ethers.getAddress((await cardReader.refereeReferrer(downlineAA)) as string)
+		} catch {
+			existing = ethers.ZeroAddress
+		}
+		if (existing !== ethers.ZeroAddress && existing !== refereeAA) {
+			return {
+				success: false,
+				error: `Already bound to another referee on this card (${existing})`,
+			}
+		}
+
+		const nonce = String(body.nonce).trim()
+		const userSignature = String(body.userSignature)
+		const nonceBytes32 =
+			nonce.length === 66 && nonce.startsWith('0x')
+				? (nonce as `0x${string}`)
+				: (ethers.keccak256(ethers.toUtf8Bytes(nonce)) as `0x${string}`)
+
+		const domain = await eip712DomainForRecordUserLike(card)
+		const digest = ethers.TypedDataEncoder.hash(domain, BIND_SHARE_REFEREE_EIP712_TYPE, {
+			cardAddress: card,
+			downlineEOA,
+			refereeEOA,
+			deadline: BigInt(deadline),
+			nonce: nonceBytes32,
+		})
+		const signer = ethers.recoverAddress(digest, userSignature)
+		if (ethers.getAddress(signer) !== downlineEOA) {
+			return { success: false, error: 'userSignature signer mismatch' }
+		}
+
+		const planASupported = await cardSupportsBindShareRefereeWithSignature(card)
+		if (!planASupported) {
+			return {
+				success: false,
+				error:
+					'CoNET card missing bindShareRefereeWithSignature; upgrade AdminStats V4 (upgradeReferrerShareBindModulesConet.ts).',
+			}
+		}
+
+		const cardCallData = buildBindShareRefereeWithSignatureCalldata({
+			downlineEOA,
+			refereeEOA,
+			deadline,
+			nonce,
+			userSignature,
+		})
+		return {
+			success: true,
+			preChecked: {
+				cardAddress: card,
+				cardCallData,
 			},
 		}
 	} catch (e: unknown) {
