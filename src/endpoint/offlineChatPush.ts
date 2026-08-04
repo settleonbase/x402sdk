@@ -678,23 +678,29 @@ export async function notifyOfflineChatPreCheck(
 		}
 		const okNode = await isRegisteredGuardianNodeWallet(recovered)
 		if (!okNode) return { ok: false, error: 'Signer is not a registered Guardian node', status: 403 }
+		const countRaw = Number(body?.count)
+		const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(50, Math.floor(countRaw))) : 1
 		return {
 			ok: true,
 			payload: {
 				pgpKeyId: pgpKeyId || undefined,
 				eoa: eoaNorm || undefined,
 				nodeWallet: recovered.toLowerCase(),
+				count,
 			},
 		}
 	}
 
 	// Optional fallback for ops / legacy — not required on SI nodes
 	if (expectedSecret && secret && secret === expectedSecret) {
+		const countRaw = Number(body?.count)
+		const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(50, Math.floor(countRaw))) : 1
 		return {
 			ok: true,
 			payload: {
 				pgpKeyId: pgpKeyId || undefined,
 				eoa: eoaNorm || undefined,
+				count,
 			},
 		}
 	}
@@ -731,6 +737,7 @@ const recentNotifyKeys = new Map<string, number>()
 export async function notifyOfflineChatProcess(payload: {
 	pgpKeyId?: string
 	eoa?: string
+	count?: number
 }): Promise<{ success: true; eoa?: string; unread?: number; skipped?: string }> {
 	let eoa = payload.eoa
 	if (!eoa && payload.pgpKeyId) {
@@ -740,6 +747,7 @@ export async function notifyOfflineChatProcess(payload: {
 	}
 	if (!eoa) return { success: true, skipped: 'missing_eoa' }
 
+	const count = Math.max(1, Math.min(50, Math.floor(Number(payload.count) || 1)))
 	const dedupKey = `${eoa}:${payload.pgpKeyId || ''}`
 	const now = Date.now()
 	const last = recentNotifyKeys.get(dedupKey) || 0
@@ -754,7 +762,7 @@ export async function notifyOfflineChatProcess(payload: {
 		}
 	}
 
-	const unread = await incrementPushUnread(eoa, 1)
+	const unread = await incrementPushUnread(eoa, count)
 	void pushBadgeToEoa(eoa, unread).catch((e) =>
 		logger(Colors.yellow(`[notifyOfflineChat] APNs: ${(e as Error)?.message ?? e}`)),
 	)
@@ -799,6 +807,7 @@ export async function handleNotifyOfflineChatMaster(req: Request, res: Response)
 		const out = await notifyOfflineChatProcess({
 			pgpKeyId: body.pgpKeyId ? String(body.pgpKeyId) : undefined,
 			eoa: body.eoa ? String(body.eoa) : undefined,
+			count: body.count != null ? Number(body.count) : 1,
 		})
 		res.status(200).json(out).end()
 	} catch (e: any) {
