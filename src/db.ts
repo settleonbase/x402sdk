@@ -1116,8 +1116,9 @@ const addUserPoolProcess = async () => {
 		pgpKey: obj.account.pgpKey ?? ''
 	}
 
-	// 写入数据库和 CoNET L1 之前，查询链上记录是否有变化；无变化则跳过
-	const isUnchanged = async (): Promise<boolean> => {
+	// Profile 字段与链上一致时可跳过 setAccountByAdmin；但 Rotate Recovery / Security Backup
+	// 只更新 recover 加密包，profile 不变 — 仍须写 setBase64NameByAdmin，不得整单 skip。
+	const isProfileUnchanged = async (): Promise<boolean> => {
 		try {
 			const onchain = await SC.constAccountRegistry.getAccount(obj.wallet)
 			if (!onchain?.exists) return false
@@ -1137,7 +1138,11 @@ const addUserPoolProcess = async () => {
 			return false
 		}
 	}
-	if (await isUnchanged()) {
+	const hasRecoverWrites = Array.isArray(obj.recover) && obj.recover.some(
+		(n: any) => !!(n?.encrypto && n?.hash && n.hash !== ethers.ZeroHash)
+	)
+	const profileUnchanged = await isProfileUnchanged()
+	if (profileUnchanged && !hasRecoverWrites) {
 		logger(Colors.cyan(`[addUserPoolProcess] skip: no change from on-chain wallet=${obj.wallet} accountName=${obj.account?.accountName}`))
 		beamio_ContractPool.unshift(SC)
 		setTimeout(addUserPoolProcess, 2000)
@@ -1145,11 +1150,15 @@ const addUserPoolProcess = async () => {
 	}
 
 	try {
-		const tx = await SC.constAccountRegistry.setAccountByAdmin(
-			obj.wallet, account
-		)
-		await tx.wait()
-		logger('addUserPoolProcess constAccountRegistry SUCCESS!', tx.hash)
+		if (!profileUnchanged) {
+			const tx = await SC.constAccountRegistry.setAccountByAdmin(
+				obj.wallet, account
+			)
+			await tx.wait()
+			logger('addUserPoolProcess constAccountRegistry SUCCESS!', tx.hash)
+		} else {
+			logger(Colors.cyan(`[addUserPoolProcess] profile unchanged; writing recover blobs only wallet=${obj.wallet} accountName=${obj.account?.accountName}`))
+		}
 		if (obj.recover?.length) {
 			for (const n of obj.recover) {
 				if (!n?.encrypto || !n?.hash || n.hash === ethers.ZeroHash) continue
@@ -1165,52 +1174,54 @@ const addUserPoolProcess = async () => {
 				} catch (ex: any) {
 					const msg = ex?.shortMessage || ex?.message || ''
 					logger(`addUserPoolProcess setBase64NameByAdmin failed (non-fatal): ${msg} | wallet=${obj.wallet} hash=${n.hash?.slice(0, 18)}...`)
-					// 不抛出：setAccountByAdmin 已成功，recover 写入失败时仍完成 updateUserDB 与 follow
+					// 不抛出：setAccountByAdmin 已成功（或本轮仅写 recover），recover 写入失败时仍完成后续
 				}
 			}
 		}
 
-		await updateUserDB(obj.account)
+		if (!profileUnchanged) {
+			await updateUserDB(obj.account)
 
-		// 注册 @tag 成功后，检测 EOA 是否在 conet 拥有 AA，如果没有则为 eoa 创建 AA
-		// Institutional AA tagging must set skipEnsureAa — wallet is already an AA address.
-		if (!obj.skipEnsureAa) {
-			try {
-				const { ensureAAForEOAOnConet } = await import('./MemberCard.js')
-				logger(`[addUserPoolProcess] ensuring AA for registered user: wallet=${obj.wallet}`)
-				const aaAddr = await ensureAAForEOAOnConet(obj.wallet)
-				logger(`[addUserPoolProcess] AA ensured for registered user: wallet=${obj.wallet} -> AA=${aaAddr}`)
-			} catch (aaEx: any) {
-				logger(Colors.red(`[addUserPoolProcess] non-fatal: ensure AA for registered user failed: ${aaEx?.message ?? aaEx}`))
-			}
-		}
-		
-		// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial。
-		// 先用 getAccount 探测 BeamioOfficial 是否已经在 registry 上注册；
-		// 链上无账户时 ethers 会抛 BAD_DATA: could not decode result data（返回 0x），
-		// 与 AccountNotFound 同义，视作"BeamioOfficial 还没注册"安静跳过即可，避免误报为 followByAdmin 失败。
-		if (obj.wallet.toLowerCase() !== BeamioOfficial.toLowerCase() && obj.followBeamioOfficial) {
-			let officialExists = false
-			try {
-				const onchain = await (SC.constAccountRegistry as any).getAccount(BeamioOfficial)
-				officialExists = !!onchain?.exists
-			} catch (_probeEx: any) {
-				officialExists = false
-			}
-			if (!officialExists) {
-				logger(`addUserPoolProcess skip followBeamioOfficial: BeamioOfficial not yet onchain | wallet=${obj.wallet}`)
-			} else {
+			// 注册 @tag 成功后，检测 EOA 是否在 conet 拥有 AA，如果没有则为 eoa 创建 AA
+			// Institutional AA tagging must set skipEnsureAa — wallet is already an AA address.
+			if (!obj.skipEnsureAa) {
 				try {
-					const followTx = await SC.constAccountRegistry.followByAdmin(obj.wallet, BeamioOfficial)
-					await followTx.wait()
-					logger('addUserPoolProcess followByAdmin BeamioOfficial SUCCESS!', followTx.hash)
-					await updateUserFollowDB(obj.wallet, BeamioOfficial)
-				} catch (followEx: any) {
-					const msg = followEx?.shortMessage || followEx?.message || ''
-					if (/AccountNotFound|routePgpKeyID not in|route key not recorded|could not decode result data|BAD_DATA/i.test(msg)) {
-						logger(`addUserPoolProcess skip followBeamioOfficial: ${msg}`)
-					} else {
-						logger(`addUserPoolProcess followByAdmin Error: ${msg} | wallet=${obj.wallet}`)
+					const { ensureAAForEOAOnConet } = await import('./MemberCard.js')
+					logger(`[addUserPoolProcess] ensuring AA for registered user: wallet=${obj.wallet}`)
+					const aaAddr = await ensureAAForEOAOnConet(obj.wallet)
+					logger(`[addUserPoolProcess] AA ensured for registered user: wallet=${obj.wallet} -> AA=${aaAddr}`)
+				} catch (aaEx: any) {
+					logger(Colors.red(`[addUserPoolProcess] non-fatal: ensure AA for registered user failed: ${aaEx?.message ?? aaEx}`))
+				}
+			}
+
+			// 在 setAccountByAdmin 成功后执行 follow BeamioOfficial。
+			// 先用 getAccount 探测 BeamioOfficial 是否已经在 registry 上注册；
+			// 链上无账户时 ethers 会抛 BAD_DATA: could not decode result data（返回 0x），
+			// 与 AccountNotFound 同义，视作"BeamioOfficial 还没注册"安静跳过即可，避免误报为 followByAdmin 失败。
+			if (obj.wallet.toLowerCase() !== BeamioOfficial.toLowerCase() && obj.followBeamioOfficial) {
+				let officialExists = false
+				try {
+					const onchain = await (SC.constAccountRegistry as any).getAccount(BeamioOfficial)
+					officialExists = !!onchain?.exists
+				} catch (_probeEx: any) {
+					officialExists = false
+				}
+				if (!officialExists) {
+					logger(`addUserPoolProcess skip followBeamioOfficial: BeamioOfficial not yet onchain | wallet=${obj.wallet}`)
+				} else {
+					try {
+						const followTx = await SC.constAccountRegistry.followByAdmin(obj.wallet, BeamioOfficial)
+						await followTx.wait()
+						logger('addUserPoolProcess followByAdmin BeamioOfficial SUCCESS!', followTx.hash)
+						await updateUserFollowDB(obj.wallet, BeamioOfficial)
+					} catch (followEx: any) {
+						const msg = followEx?.shortMessage || followEx?.message || ''
+						if (/AccountNotFound|routePgpKeyID not in|route key not recorded|could not decode result data|BAD_DATA/i.test(msg)) {
+							logger(`addUserPoolProcess skip followBeamioOfficial: ${msg}`)
+						} else {
+							logger(`addUserPoolProcess followByAdmin Error: ${msg} | wallet=${obj.wallet}`)
+						}
 					}
 				}
 			}
