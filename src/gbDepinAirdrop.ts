@@ -6,7 +6,13 @@ import type { Response } from 'express'
 import Colors from 'colors/safe'
 import { logger } from './logger'
 import { CONET_GB_ERC20, CONET_GUARDIAN_NODES_INFO_V6, resolveConetGbDepinAirdropAddress } from './chainAddresses'
-import { Settle_ContractPool, ensureSettleContractPoolInitialized } from './settleContractPool'
+import {
+	Settle_ContractPool,
+	ensureSettleContractPoolInitialized,
+	hasIdleSettleConet,
+	shiftSettleConet,
+	unshiftSettleConet,
+} from './settleContractPool'
 import { resolveBeamioConetHttpRpcUrl } from './util'
 
 ensureSettleContractPoolInitialized()
@@ -82,7 +88,7 @@ export function kickGbDepinChargeUserPoolPress(): void {
 
 function scheduleGbDepinChargeUserPoolPress(): void {
 	if (gbDepinChargeUserPool.length === 0) return
-	if (Settle_ContractPool.length > 0) kickGbDepinChargeUserPoolPress()
+	if (hasIdleSettleConet()) kickGbDepinChargeUserPoolPress()
 	else setTimeout(() => kickGbDepinChargeUserPoolPress(), 3000)
 }
 
@@ -94,7 +100,7 @@ export async function gbDepinChargeUserPoolPress(): Promise<void> {
 		gbDepinChargeUserRunning = false
 		return
 	}
-	const sc = Settle_ContractPool.shift()
+	const sc = shiftSettleConet()
 	if (!sc) {
 		gbDepinChargeUserPool.unshift(obj)
 		gbDepinChargeUserRunning = false
@@ -120,7 +126,7 @@ export async function gbDepinChargeUserPoolPress(): Promise<void> {
 		logger(Colors.red('[gbDepinChargeUserPoolPress] failed:'), msg)
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
-		Settle_ContractPool.unshift(sc)
+		unshiftSettleConet(sc)
 		gbDepinChargeUserRunning = false
 		scheduleGbDepinChargeUserPoolPress()
 	}
@@ -155,7 +161,7 @@ export function kickGbDepinAirdropAllPoolPress(): void {
 
 function scheduleGbDepinAirdropAllPoolPress(): void {
 	if (gbDepinAirdropAllPool.length === 0) return
-	if (Settle_ContractPool.length > 0) kickGbDepinAirdropAllPoolPress()
+	if (hasIdleSettleConet()) kickGbDepinAirdropAllPoolPress()
 	else setTimeout(() => kickGbDepinAirdropAllPoolPress(), 3000)
 }
 
@@ -167,7 +173,7 @@ export async function gbDepinAirdropAllPoolPress(): Promise<void> {
 		gbDepinAirdropAllRunning = false
 		return
 	}
-	const sc = Settle_ContractPool.shift()
+	const sc = shiftSettleConet()
 	if (!sc) {
 		gbDepinAirdropAllPool.unshift(obj)
 		gbDepinAirdropAllRunning = false
@@ -234,7 +240,7 @@ export async function gbDepinAirdropAllPoolPress(): Promise<void> {
 			if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(sc)
+		unshiftSettleConet(sc)
 		gbDepinAirdropAllRunning = false
 		scheduleGbDepinAirdropAllPoolPress()
 	}

@@ -191,11 +191,33 @@ import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
 import { isApiExcludedUserCard } from './apiExcludedUserCards'
 import {
 	Settle_ContractPool,
+	Settle_ContractRoster,
+	Settle_BasePool,
+	Settle_ConetPool,
 	initSettleContractPool,
+	settleRosterInitialized,
+	hasIdleSettleBase,
+	hasIdleSettleConet,
+	shiftSettleBase,
+	shiftSettleConet,
+	shiftSettleBoth,
+	unshiftSettleBase,
+	unshiftSettleConet,
+	unshiftSettleBoth,
+	settlePoolIdleSummary,
 	type SettleContractPoolEntry,
 } from './settleContractPool'
 
-export { Settle_ContractPool }
+export {
+	Settle_ContractPool,
+	Settle_ContractRoster,
+	Settle_BasePool,
+	Settle_ConetPool,
+	settleRosterInitialized,
+	hasIdleSettleBase,
+	hasIdleSettleConet,
+	settlePoolIdleSummary,
+}
 
 /** Base 主网：与 chainAddresses.ts / config/base-addresses.ts 一致 */
 
@@ -312,18 +334,32 @@ const providerConet = new ethers.JsonRpcProvider(conetEndpoint, undefined, JSONR
 const SETTLE_CONTRACT_SHIFT_POLL_MS = 300
 const SETTLE_CONTRACT_SHIFT_MAX_WAIT_MS = 120_000
 
-/** shift 一名 admin 钱包用于链上写；池空时轮询等待（供 ensureAAForEOA 等 HTTP / 同步路径）。 */
+/** shift 一名 CoNET admin 钱包用于链上写；池空时轮询等待（供 ensureAAForEOA 等 HTTP / 同步路径）。 */
 async function shiftSettleContractForWrite(logTag: string): Promise<SettleContractPoolEntry> {
-	if (!Settle_ContractPool.length) {
+	if (!settleRosterInitialized()) {
 		throw new Error(`${logTag}: Settle_ContractPool not initialized`)
 	}
 	const deadline = Date.now() + SETTLE_CONTRACT_SHIFT_MAX_WAIT_MS
 	while (Date.now() < deadline) {
-		const SC = Settle_ContractPool.shift()
+		const SC = shiftSettleConet()
 		if (SC) return SC
 		await new Promise((r) => setTimeout(r, SETTLE_CONTRACT_SHIFT_POLL_MS))
 	}
-	throw new Error(`${logTag}: Settle_ContractPool busy (no admin wallet available)`)
+	throw new Error(`${logTag}: Settle_ConetPool busy (no admin wallet available)`)
+}
+
+/** shift 一名 Base admin 钱包；池空时轮询等待。 */
+async function shiftSettleContractForBaseWrite(logTag: string): Promise<SettleContractPoolEntry> {
+	if (!settleRosterInitialized()) {
+		throw new Error(`${logTag}: Settle_ContractPool not initialized`)
+	}
+	const deadline = Date.now() + SETTLE_CONTRACT_SHIFT_MAX_WAIT_MS
+	while (Date.now() < deadline) {
+		const SC = shiftSettleBase()
+		if (SC) return SC
+		await new Promise((r) => setTimeout(r, SETTLE_CONTRACT_SHIFT_POLL_MS))
+	}
+	throw new Error(`${logTag}: Settle_BasePool busy (no admin wallet available)`)
 }
 
 /** CoNET EntryPoint relay（claim / handleOps）预估 gas 上限偏大，中继 EOA 须有足够原生 CNET。 */
@@ -338,14 +374,14 @@ type ShiftSettleConetRelayResult =
  * underfunded：池内有钱包但全部低于门槛（已全部归还）；busy：池空。
  */
 async function shiftSettleContractForConetRelay(logTag: string): Promise<ShiftSettleConetRelayResult> {
-	if (!Settle_ContractPool.length) return { ok: false, reason: 'busy' }
+	if (!hasIdleSettleConet()) return { ok: false, reason: 'busy' }
 	const underfunded: SettleContractPoolEntry[] = []
-	while (Settle_ContractPool.length > 0) {
-		const SC = Settle_ContractPool.shift()
+	while (Settle_ConetPool.length > 0) {
+		const SC = shiftSettleConet()
 		if (!SC) break
 		const bal = await SC.walletConet.provider!.getBalance(SC.walletConet.address).catch(() => 0n)
 		if (bal >= SETTLE_CONET_RELAY_MIN_WEI) {
-			for (const u of underfunded) Settle_ContractPool.push(u)
+			for (const u of underfunded) Settle_ConetPool.push(u)
 			return { ok: true, SC }
 		}
 		logger(
@@ -355,7 +391,7 @@ async function shiftSettleContractForConetRelay(logTag: string): Promise<ShiftSe
 		)
 		underfunded.push(SC)
 	}
-	for (const u of underfunded) Settle_ContractPool.push(u)
+	for (const u of underfunded) Settle_ConetPool.push(u)
 	return { ok: false, reason: underfunded.length > 0 ? 'underfunded' : 'busy' }
 }
 
@@ -1721,7 +1757,7 @@ async function ensureAAForEOAOnAaFactory(
 	try {
 		return await deployWithWallet(deployWalletOverride ?? SC.walletBase)
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 	}
 }
 
@@ -1730,7 +1766,7 @@ async function ensureAAForEOAOnAaFactory(
  * 使用 CoNET 当前 AA Factory + `walletConet` 送链。
  */
 export const ensureAAForEOAOnConet = async (eoa: string): Promise<string> => {
-	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
+	if (!settleRosterInitialized()) throw new Error('Settle_ContractPool not initialized')
 	const eoaNorm = ethers.getAddress(eoa)
 	const factoryAddr = ethers.getAddress(CONET_AA_FACTORY)
 	const aaFactoryReadOnly = new ethers.Contract(
@@ -1748,7 +1784,7 @@ export const ensureAAForEOAOnConet = async (eoa: string): Promise<string> => {
 			SC.walletConet
 		)
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 	}
 }
 
@@ -1768,7 +1804,7 @@ export class CreateInstitutionalAaHttpError extends Error {
 export const createInstitutionalAaForEoa = async (
 	eoa: string
 ): Promise<{ aa: string; index: number; txHash: string }> => {
-	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
+	if (!settleRosterInitialized()) throw new Error('Settle_ContractPool not initialized')
 	const eoaNorm = ethers.getAddress(eoa)
 	const factoryAddr = ethers.getAddress(BEAMIO_AA_FACTORY_V2)
 	const { AA_V2_FACTORY_ABI } = await import('./aaInstitutionalV2Multisig.js')
@@ -1866,7 +1902,7 @@ export const createInstitutionalAaForEoa = async (
 		)
 		return { aa: predicted, index: Number(nextIndex), txHash: tx.hash as string }
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 	}
 }
 
@@ -1909,7 +1945,7 @@ export const ensureAAForEOAOnCard = async (
 	eoa: string,
 	heldSC?: SettleContractPoolEntry
 ): Promise<string> => {
-	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
+	if (!settleRosterInitialized()) throw new Error('Settle_ContractPool not initialized')
 	const cardNorm = ethers.getAddress(cardAddress)
 	const eoaNorm = ethers.getAddress(eoa)
 	const chain = await resolveUserCardChain(cardNorm)
@@ -1948,7 +1984,7 @@ export const ensureAAForEOAOnCard = async (
 			settleRelayWalletForChain(sc, chain)
 		)
 	} finally {
-		Settle_ContractPool.unshift(sc)
+		unshiftSettleConet(sc)
 	}
 }
 
@@ -3308,7 +3344,7 @@ async function pickBUnitFeeConsumerPreferEoaThenAa(
 export const executeForAdminProcess = async () => {
 	const obj = executeForAdminPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		executeForAdminPool.unshift(obj)
 		return setTimeout(() => executeForAdminProcess(), 3000)
@@ -3327,8 +3363,6 @@ export const executeForAdminProcess = async () => {
 				)
 			)
 			if (obj.res && !obj.res.headersSent) obj.res.status(403).json({ success: false, error: adminCheck.error }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => executeForAdminProcess(), 1000)
 			return
 		}
 		// adminManager(add admin)：当前协议仅允许把 EOA 登记为 admin（Cluster 已拒绝 AA）。
@@ -3404,8 +3438,6 @@ export const executeForAdminProcess = async () => {
 			if (!aaAddr) {
 				logger(Colors.red(`[executeForAdminProcess] DeployingSmartAccount failed for recipient=${recipientEOA}`))
 				if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: 'Recipient has no Beamio account. Please activate the Beamio app first.' }).end()
-				Settle_ContractPool.unshift(SC)
-				setTimeout(() => executeForAdminProcess(), 1000)
 				return
 			}
 			try {
@@ -3500,7 +3532,7 @@ export const executeForAdminProcess = async () => {
 			obj.res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'executeForAdmin failed' }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => executeForAdminProcess(), 1000)
 	}
 }
@@ -3739,7 +3771,7 @@ export function kickCardRedeemPoolPress(): void {
 
 function scheduleCardRedeemPoolPress(): void {
 	if (cardRedeemPool.length === 0) return
-	if (Settle_ContractPool.length > 0) {
+	if (hasIdleSettleConet()) {
 		kickCardRedeemPoolPress()
 	} else {
 		setTimeout(() => kickCardRedeemPoolPress(), 3000)
@@ -4208,14 +4240,14 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 	}
 	logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] dequeue one job (queue ${queueBefore} -> ${beamioTransferIndexerAccountingPool.length}) txHash=${obj.finishedHash}`))
 	logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] 关联钱包: from(payer)=${obj.from} to(payee)=${obj.to}`))
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] no admin wallet available, requeue txHash=${obj.finishedHash}`))
 		beamioTransferIndexerAccountingPool.unshift(obj)
 		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] queue restore -> ${beamioTransferIndexerAccountingPool.length}`))
 		return setTimeout(() => beamioTransferIndexerAccountingProcess(), 3000)
 	}
-	logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] picked admin=${SC.walletConet.address}, remaining admins=${Settle_ContractPool.length}`))
+	logger(Colors.cyan(`[beamioTransferIndexerAccountingProcess] picked admin=${SC.walletConet.address}, ${settlePoolIdleSummary()}`))
 
 	try {
 		if (!ethers.isAddress(obj.from) || !ethers.isAddress(obj.to)) {
@@ -4769,8 +4801,6 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 			if (obj.res && !obj.res.headersSent) {
 				obj.res.status(200).json({ success: true, indexed: true, txHash: existingTxHash, alreadyExists: true }).end()
 			}
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => beamioTransferIndexerAccountingProcess(), 1000)
 			return
 		}
 		const isInsufficientFunds = /insufficient funds for intrinsic transaction cost/i.test(msg)
@@ -4784,11 +4814,11 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
 		}
+	} finally {
+		unshiftSettleConet(SC)
+		logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] admin wallet returned=${SC.walletConet.address}, ${settlePoolIdleSummary()}, queue=${beamioTransferIndexerAccountingPool.length}`))
+		setTimeout(() => beamioTransferIndexerAccountingProcess(), 1000)
 	}
-
-	Settle_ContractPool.unshift(SC)
-	logger(Colors.gray(`[beamioTransferIndexerAccountingProcess] admin wallet returned=${SC.walletConet.address}, admins=${Settle_ContractPool.length}, queue=${beamioTransferIndexerAccountingPool.length}`))
-	setTimeout(() => beamioTransferIndexerAccountingProcess(), 1000)
 }
 
 /** Beamio Pay Me 生成 request 时的记账请求（txCategory=request_create:confirmed，originalPaymentHash=requestHash） */
@@ -4808,7 +4838,7 @@ export const requestAccountingPool: {
 export const requestAccountingProcess = async () => {
 	const obj = requestAccountingPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		requestAccountingPool.unshift(obj)
 		return setTimeout(() => requestAccountingProcess(), 3000)
@@ -4930,7 +4960,7 @@ export const requestAccountingProcess = async () => {
 		}
 		// 登记成功后向发出方收取 B-Unit 费用（后台执行，不阻塞 UI 响应；SC 在 consumeFromUser 完成后才归还 pool）
 		const releaseSC = () => {
-			Settle_ContractPool.unshift(SC)
+			unshiftSettleConet(SC)
 			setTimeout(() => requestAccountingProcess(), 1000)
 		}
 		if (obj.payerEOA && obj.feeBUnits && obj.feeBUnits > 0n) {
@@ -4963,7 +4993,7 @@ export const requestAccountingProcess = async () => {
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
 		}
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => requestAccountingProcess(), 1000)
 	}
 }
@@ -5021,7 +5051,7 @@ export const cancelRequestAccountingPool: {
 export const cancelRequestAccountingProcess = async () => {
 	const obj = cancelRequestAccountingPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		cancelRequestAccountingPool.unshift(obj)
 		return setTimeout(() => cancelRequestAccountingProcess(), 3000)
@@ -5128,9 +5158,10 @@ export const cancelRequestAccountingProcess = async () => {
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, indexed: false, error: msg }).end()
 		}
+	} finally {
+		unshiftSettleConet(SC)
+		setTimeout(() => cancelRequestAccountingProcess(), 1000)
 	}
-	Settle_ContractPool.unshift(SC)
-	setTimeout(() => cancelRequestAccountingProcess(), 1000)
 }
 
 /** BUnit Airdrop claimFor：CoNET 上 BUnitAirdropV2.claimFor(claimant, nonce, deadline, signature)，使用 walletConet 代付 gas */
@@ -5420,7 +5451,7 @@ export const claimBUnitsProcess = async () => {
 		logger(Colors.red(`[claimBUnitsProcess] non-fatal: ensure AA for claimant EOA failed: ${aaEx?.message ?? aaEx}`))
 	}
 
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		claimBUnitsPool.unshift(obj)
 		return setTimeout(() => claimBUnitsProcess(), 3000)
@@ -5473,8 +5504,6 @@ export const claimBUnitsProcess = async () => {
 					)
 				}
 				if (obj.res && !obj.res.headersSent) obj.res.status(200).json({ success: true, txHash: tx.hash }).end()
-				Settle_ContractPool.unshift(SC)
-				setTimeout(() => claimBUnitsProcess(), 3000)
 				return
 			}
 		} else {
@@ -5488,7 +5517,7 @@ export const claimBUnitsProcess = async () => {
 		logger(Colors.red(`[claimBUnitsProcess] failed:`), msg)
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => claimBUnitsProcess(), 3000)
 	}
 }
@@ -5522,7 +5551,7 @@ export const relocateBUnitsToSmartWalletPreCheck = (body: {
 export const relocateBUnitsToSmartWalletProcess = async () => {
 	const obj = relocateBUnitsToSmartWalletPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		relocateBUnitsToSmartWalletPool.unshift(obj)
 		return setTimeout(() => relocateBUnitsToSmartWalletProcess(), 3000)
@@ -5539,7 +5568,7 @@ export const relocateBUnitsToSmartWalletProcess = async () => {
 		logger(Colors.red(`[relocateBUnitsToSmartWallet] failed:`), msg)
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => relocateBUnitsToSmartWalletProcess(), 3000)
 	}
 }
@@ -5667,7 +5696,7 @@ export const buintRedeemAirdropPool: BuintRedeemAirdropPoolPayload[] = []
 export const buintRedeemAirdropProcess = async () => {
 	const obj = buintRedeemAirdropPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		buintRedeemAirdropPool.unshift(obj)
 		return setTimeout(() => void buintRedeemAirdropProcess(), 3000)
 	}
@@ -5676,7 +5705,7 @@ export const buintRedeemAirdropProcess = async () => {
 	let SC: (typeof Settle_ContractPool)[number] | undefined
 	try {
 		const aaRecipient = await ensureAAForEOA(eoaNorm)
-		SC = Settle_ContractPool.shift()
+		SC = shiftSettleConet()
 		if (!SC) {
 			buintRedeemAirdropPool.unshift(obj)
 			return setTimeout(() => void buintRedeemAirdropProcess(), 3000)
@@ -5698,7 +5727,7 @@ export const buintRedeemAirdropProcess = async () => {
 			obj.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		if (SC) Settle_ContractPool.unshift(SC)
+		if (SC) unshiftSettleConet(SC)
 		setTimeout(() => void buintRedeemAirdropProcess(), 3000)
 	}
 }
@@ -5821,7 +5850,7 @@ export const businessStartKetRedeemUserRedeemProcess = async () => {
 		setTimeout(() => void businessStartKetRedeemUserRedeemProcess(), 3000)
 		return
 	}
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		businessStartKetRedeemUserRedeemPool.unshift(obj)
 		return setTimeout(() => void businessStartKetRedeemUserRedeemProcess(), 3000)
 	}
@@ -5829,7 +5858,7 @@ export const businessStartKetRedeemUserRedeemProcess = async () => {
 	logger(Colors.cyan(`[businessStartKetRedeemUserRedeemProcess] eoa=${eoaNorm}`))
 	let SC: (typeof Settle_ContractPool)[number] | undefined
 	try {
-		SC = Settle_ContractPool.shift()
+		SC = shiftSettleConet()
 		if (!SC) {
 			businessStartKetRedeemUserRedeemPool.unshift(obj)
 			return setTimeout(() => void businessStartKetRedeemUserRedeemProcess(), 3000)
@@ -5851,7 +5880,7 @@ export const businessStartKetRedeemUserRedeemProcess = async () => {
 			obj.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		if (SC) Settle_ContractPool.unshift(SC)
+		if (SC) unshiftSettleConet(SC)
 		setTimeout(() => void businessStartKetRedeemUserRedeemProcess(), 3000)
 	}
 }
@@ -6202,7 +6231,7 @@ export const businessStartKetRedeemCreatePool: BusinessStartKetRedeemCreatePoolP
 export const businessStartKetRedeemCreateProcess = async () => {
 	const obj = businessStartKetRedeemCreatePool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		businessStartKetRedeemCreatePool.unshift(obj)
 		return setTimeout(() => void businessStartKetRedeemCreateProcess(), 3000)
 	}
@@ -6213,7 +6242,7 @@ export const businessStartKetRedeemCreateProcess = async () => {
 	)
 	let SC: (typeof Settle_ContractPool)[number] | undefined
 	try {
-		SC = Settle_ContractPool.shift()
+		SC = shiftSettleConet()
 		if (!SC) {
 			businessStartKetRedeemCreatePool.unshift(obj)
 			return setTimeout(() => void businessStartKetRedeemCreateProcess(), 3000)
@@ -6244,7 +6273,7 @@ export const businessStartKetRedeemCreateProcess = async () => {
 			obj.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		if (SC) Settle_ContractPool.unshift(SC)
+		if (SC) unshiftSettleConet(SC)
 		setTimeout(() => void businessStartKetRedeemCreateProcess(), 3000)
 	}
 }
@@ -6264,7 +6293,7 @@ export const businessStartKetRedeemCancelPool: BusinessStartKetRedeemCancelPoolP
 export const businessStartKetRedeemCancelProcess = async () => {
 	const obj = businessStartKetRedeemCancelPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		businessStartKetRedeemCancelPool.unshift(obj)
 		return setTimeout(() => void businessStartKetRedeemCancelProcess(), 3000)
 	}
@@ -6275,7 +6304,7 @@ export const businessStartKetRedeemCancelProcess = async () => {
 	)
 	let SC: (typeof Settle_ContractPool)[number] | undefined
 	try {
-		SC = Settle_ContractPool.shift()
+		SC = shiftSettleConet()
 		if (!SC) {
 			businessStartKetRedeemCancelPool.unshift(obj)
 			return setTimeout(() => void businessStartKetRedeemCancelProcess(), 3000)
@@ -6296,7 +6325,7 @@ export const businessStartKetRedeemCancelProcess = async () => {
 			obj.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		if (SC) Settle_ContractPool.unshift(SC)
+		if (SC) unshiftSettleConet(SC)
 		setTimeout(() => void businessStartKetRedeemCancelProcess(), 3000)
 	}
 }
@@ -6360,7 +6389,7 @@ export const registerPOSPool: RegisterPOSChainPayload[] = []
 export const removePOSProcess = async () => {
 	const obj = removePOSPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		removePOSPool.unshift(obj)
 		return setTimeout(() => removePOSProcess(), 3000)
@@ -6393,7 +6422,7 @@ export const removePOSProcess = async () => {
 			if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => removePOSProcess(), 3000)
 	}
 }
@@ -6401,7 +6430,7 @@ export const removePOSProcess = async () => {
 export const registerPOSProcess = async () => {
 	const obj = registerPOSPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		registerPOSPool.unshift(obj)
 		return setTimeout(() => registerPOSProcess(), 3000)
@@ -6419,7 +6448,7 @@ export const registerPOSProcess = async () => {
 		logger(Colors.red(`[registerPOSProcess] failed:`), msg)
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => registerPOSProcess(), 3000)
 	}
 }
@@ -6502,7 +6531,7 @@ const BASE_TREASURY_ABI = [
 export const purchaseBUnitFromBaseProcess = async () => {
 	const obj = purchaseBUnitFromBasePool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleBase()
 	if (!SC) {
 		purchaseBUnitFromBasePool.unshift(obj)
 		return setTimeout(() => purchaseBUnitFromBaseProcess(), 3000)
@@ -6569,7 +6598,7 @@ export const purchaseBUnitFromBaseProcess = async () => {
 		logger(Colors.red(`[purchaseBUnitFromBaseProcess] failed:`), msg)
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: msg }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleBase(SC)
 		setTimeout(() => purchaseBUnitFromBaseProcess(), 3000)
 	}
 }
@@ -6580,7 +6609,7 @@ const TRANSFER_SINGLE_TOPIC = ethers.id('TransferSingle(address,address,address,
 export const cardRedeemIndexerAccountingProcess = async () => {
 	const obj = cardRedeemIndexerAccountingPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		cardRedeemIndexerAccountingPool.unshift(obj)
 		return setTimeout(() => cardRedeemIndexerAccountingProcess(), 3000)
@@ -6836,7 +6865,7 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 		const msg = error?.shortMessage ?? error?.message ?? String(error)
 		logger(Colors.yellow(`[cardRedeemIndexerAccountingProcess] failed: ${msg}`), inspect(obj, false, 3, true))
 	}
-	Settle_ContractPool.unshift(SC)
+	unshiftSettleConet(SC)
 	setTimeout(() => cardRedeemIndexerAccountingProcess(), 1000)
 }
 
@@ -7359,7 +7388,7 @@ export function kickAaMultisigOfflineSubmitProcess(): void {
 export const aaMultisigOfflineSubmitProcess = async () => {
 	const obj = aaMultisigOfflineSubmitPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		aaMultisigOfflineSubmitPool.unshift(obj)
 		return setTimeout(() => kickAaMultisigOfflineSubmitProcess(), 3000)
@@ -7436,7 +7465,7 @@ export const aaMultisigOfflineSubmitProcess = async () => {
 		logger(Colors.yellow(`[aaMultisigOfflineSubmit] failed: ${err?.shortMessage ?? err?.message ?? String(e)}`))
 		respond(500, { success: false, error: err?.shortMessage ?? err?.message ?? String(e) })
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		if (aaMultisigOfflineSubmitPool.length > 0) {
 			setTimeout(() => kickAaMultisigOfflineSubmitProcess(), 1000)
 		}
@@ -7486,7 +7515,7 @@ export function kickAaInstitutionalV2RelayProcess(): void {
 export const aaInstitutionalV2RelayProcess = async () => {
 	const obj = aaInstitutionalV2RelayPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		aaInstitutionalV2RelayPool.unshift(obj)
 		return setTimeout(() => kickAaInstitutionalV2RelayProcess(), 3000)
@@ -7616,7 +7645,7 @@ export const aaInstitutionalV2RelayProcess = async () => {
 		logger(Colors.yellow(`[aaInstitutionalV2Relay] failed: ${err?.shortMessage ?? err?.message ?? String(e)}`))
 		respond(500, { success: false, error: err?.shortMessage ?? err?.message ?? String(e) })
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		if (aaInstitutionalV2RelayPool.length > 0) {
 			setTimeout(() => kickAaInstitutionalV2RelayProcess(), 1000)
 		}
@@ -8547,7 +8576,7 @@ const runPurchasingCardAccountingJob = async (
 async function executeForAdminPostBaseProcess(): Promise<void> {
 	const job = executeForAdminPostBasePool.shift()
 	if (!job) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		executeForAdminPostBasePool.unshift(job)
 		setTimeout(() => void executeForAdminPostBaseProcess().catch(() => {}), 1500)
@@ -9191,7 +9220,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 	} catch (e: any) {
 		logger(Colors.red(`[executeForAdminPostBaseProcess] failed: ${e?.message ?? e}`))
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		if (executeForAdminPostBasePool.length > 0) {
 			setTimeout(() => void executeForAdminPostBaseProcess().catch(() => {}), 400)
 		}
@@ -9216,7 +9245,7 @@ export const purchasingCardAccountingRetryProcess = async () => {
 		purchasingCardAccountingRetryRunning = false
 		return
 	}
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		purchasingCardAccountingRetryPool.unshift(job)
 		setTimeout(() => purchasingCardAccountingRetryProcess(), 1500)
@@ -9236,7 +9265,7 @@ export const purchasingCardAccountingRetryProcess = async () => {
 			logger(Colors.red(`[purchasingCardProcess] dropped accounting job after max retries tx=${job.baseTxHash}`))
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => purchasingCardAccountingRetryProcess(), 1000)
 	}
 }
@@ -9246,7 +9275,7 @@ export const purchasingCardProcess = async () => {
 	if (!obj) {
 		return
 	}
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		purchasingCardPool.unshift(obj)
 		return setTimeout(() => purchasingCardProcess(), 3000)
@@ -9279,8 +9308,6 @@ export const purchasingCardProcess = async () => {
 				if (obj.res && !obj.res.writableEnded) {
 					obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
 				}
-				Settle_ContractPool.unshift(SC)
-				setTimeout(() => purchasingCardProcess(), 3000)
 				return
 			}
 			if (!accountAddress || accountAddress === ethers.ZeroAddress) {
@@ -9288,8 +9315,6 @@ export const purchasingCardProcess = async () => {
 				if (obj.res && !obj.res.writableEnded) {
 					obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
 				}
-				Settle_ContractPool.unshift(SC)
-				setTimeout(() => purchasingCardProcess(), 3000)
 				return
 			}
 		} else {
@@ -9297,8 +9322,6 @@ export const purchasingCardProcess = async () => {
 			if (!addr) {
 				logger(Colors.red(`❌ ${obj.from} purchasingCardProcess DeployingSmartAccount failed (no AA account)`))
 				if (obj.res && !obj.res.writableEnded) obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
-				Settle_ContractPool.unshift(SC)
-				setTimeout(() => purchasingCardProcess(), 3000)
 				return
 			}
 			accountAddress = addr
@@ -9343,8 +9366,6 @@ export const purchasingCardProcess = async () => {
 		if (!cardMeta) {
 			logger(Colors.red(`❌ purchasingCardProcess card not in DB, rejecting topup: ${cardAddress}`))
 			if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: 'Card not found in registry. Please ensure the card was created successfully before purchasing.' }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => purchasingCardProcess(), 3000)
 			return
 		}
 
@@ -9551,8 +9572,6 @@ export const purchasingCardProcess = async () => {
 		logger(Colors.green(`✅ purchasingCardProcess payMe cardAddress = ${cardAddress} payMe = ${inspect(payMe, false, 3, true)}`));
 		if (!payMe) {
 			logger(Colors.red(`❌ purchasingCardProcess payMe is null`));
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => purchasingCardProcess(), 3000)
 			return
 		}
 
@@ -9915,11 +9934,10 @@ export const purchasingCardProcess = async () => {
 		if (obj.res && !obj.res.writableEnded) {
 			obj.res.status(400).json({ success: false, error: clientError }).end()
 		}
+	} finally {
+		unshiftSettleConet(SC)
+		setTimeout(() => purchasingCardProcess(), 3000)
 	}
-
-	Settle_ContractPool.unshift(SC)
-
-	setTimeout(() => purchasingCardProcess(), 3000)
 }
 
 /** EntryPoint v0.7：用于提交 UserOp、查询 userOpHash（与链上校验一致） */
@@ -10302,7 +10320,7 @@ export async function submitAAAccountCreationViaEntryPoint(params: {
 	packedUserOp: AAtoEOAUserOp
 	signature: string
 }): Promise<{ success: true; aa: string; txHash?: string; alreadyDeployed: boolean }> {
-	if (!Settle_ContractPool.length) throw new Error('Settle_ContractPool not initialized')
+	if (!settleRosterInitialized()) throw new Error('Settle_ContractPool not initialized')
 	const prepared = await buildAAAccountCreationUserOpForHash(params.eoa)
 	if (prepared.alreadyDeployed) {
 		return { success: true, aa: prepared.aa, alreadyDeployed: true }
@@ -10360,7 +10378,7 @@ export async function submitAAAccountCreationViaEntryPoint(params: {
 		if (!code || code === '0x') throw new Error('EntryPoint handleOps confirmed but AA code is missing')
 		return { success: true, aa: prepared.aa, txHash: tx.hash, alreadyDeployed: false }
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 	}
 }
 
@@ -10616,11 +10634,12 @@ export const AAtoEOAProcess = async () => {
     `[AAtoEOA] process started, pool had item toEOA=${obj.toEOA} amountUSDC6=${obj.amountUSDC6} sender=${obj.packedUserOp?.sender}`
   )
 
-  const SC = Settle_ContractPool.shift()
+  const relayChain = obj.relayChain
+  const SC = relayChain === 'base' ? shiftSettleBoth() : shiftSettleConet()
   if (!SC) {
     logger(
       Colors.yellow(
-        `[AAtoEOA] process no SC available, re-queue and retry in 3s (pool length ${AAtoEOAPool.length})`
+        `[AAtoEOA] process no SC available (${relayChain === 'base' ? 'Settle_Base+Conet' : 'Settle_ConetPool'}), re-queue and retry in 3s (pool length ${AAtoEOAPool.length})`
       )
     )
     AAtoEOAPool.unshift(obj)
@@ -10686,7 +10705,6 @@ export const AAtoEOAProcess = async () => {
 
     logger(`[AAtoEOA] signature bytes length=${sigBytes.length} hexLen=${sigHex.length}`)
 
-    const relayChain = obj.relayChain
     const relayProvider = providerForUserCardChain(relayChain)
     const relayWallet = settleRelayWalletForChain(SC, relayChain)
     logger(
@@ -10826,8 +10844,6 @@ export const AAtoEOAProcess = async () => {
 			`Need to top up EntryPoint deposit for paymaster ${pm}.`
 		  logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
 		  obj.res.status(400).json({ success: false, error: errMsg }).end()
-		  Settle_ContractPool.unshift(SC)
-		  setTimeout(() => AAtoEOAProcess(), 3000)
 		  return
 		}
 	  }
@@ -10909,8 +10925,6 @@ export const AAtoEOAProcess = async () => {
       const errMsg = 'Cannot determine fee payer (AA owner)'
       logger(Colors.red(`❌ [AAtoEOA] ${errMsg}`))
       obj.res.status(400).json({ success: false, error: errMsg }).end()
-      Settle_ContractPool.unshift(SC)
-      setTimeout(() => AAtoEOAProcess(), 3000)
       return
     }
     const BUNIT_FEE_AMOUNT = 2_000_000n // 2 B-Units (6 decimals)
@@ -10920,8 +10934,6 @@ export const AAtoEOAProcess = async () => {
     if (!bunitPick.ok) {
       logger(Colors.red(`❌ [AAtoEOA] ${bunitPick.error}`))
       obj.res.status(400).json({ success: false, error: bunitPick.error }).end()
-      Settle_ContractPool.unshift(SC)
-      setTimeout(() => AAtoEOAProcess(), 3000)
       return
     }
     const feePayer = bunitPick.consumer
@@ -10959,8 +10971,6 @@ export const AAtoEOAProcess = async () => {
         if (!obj.res?.headersSent) {
           obj.res.status(400).json({ success: false, error: errMsg }).end()
         }
-        Settle_ContractPool.unshift(SC)
-        setTimeout(() => AAtoEOAProcess(), 3000)
         return
       } else {
         const errMsg = interpreted.failedReason
@@ -10973,8 +10983,6 @@ export const AAtoEOAProcess = async () => {
         if (!obj.res?.headersSent) {
           obj.res.status(400).json({ success: false, error: errMsg }).end()
         }
-        Settle_ContractPool.unshift(SC)
-        setTimeout(() => AAtoEOAProcess(), 3000)
         return
       }
     }
@@ -11017,8 +11025,6 @@ export const AAtoEOAProcess = async () => {
           ...(aaRelayCheck.userOpHash ? { userOpHash: aaRelayCheck.userOpHash } : {}),
         }).end()
       }
-      Settle_ContractPool.unshift(SC)
-      setTimeout(() => AAtoEOAProcess(), 3000)
       return
     }
 
@@ -11099,7 +11105,8 @@ export const AAtoEOAProcess = async () => {
 
     obj.res.status(500).json({ success: false, error: clientError }).end()
   } finally {
-    Settle_ContractPool.unshift(SC)
+    if (relayChain === 'base') unshiftSettleBoth(SC)
+    else unshiftSettleConet(SC)
     setTimeout(() => AAtoEOAProcess(), 3000)
   }
 }
@@ -11109,14 +11116,14 @@ export const OpenContainerRelayProcess = async () => {
   const obj = OpenContainerRelayPool.shift()
   if (!obj) return
 
-  logger(Colors.gray(`[DEBUG] OpenContainerRelayProcess entry: objKeys=${Object.keys(obj).join(',')} requestHash=${obj.requestHash ?? 'n/a'} forText=${obj.forText ? `"${String(obj.forText).slice(0, 30)}…"` : 'n/a'} Settle_ContractPool.len=${Settle_ContractPool.length}`))
+  logger(Colors.gray(`[DEBUG] OpenContainerRelayProcess entry: objKeys=${Object.keys(obj).join(',')} requestHash=${obj.requestHash ?? 'n/a'} forText=${obj.forText ? `"${String(obj.forText).slice(0, 30)}…"` : 'n/a'} ${settlePoolIdleSummary()}`))
   const payload = obj.openContainerPayload
   logger(Colors.cyan(`[AAtoEOA/OpenContainer] [DEBUG] received openContainerPayload JSON: ${JSON.stringify(payload)}`))
   logger(`[AAtoEOA/OpenContainer] process started account=${payload.account} to=${payload.to}`)
   logger(`[AAtoEOA/OpenContainer] received obj data: currency=${obj.currency ?? 'null'}, currencyAmount=${obj.currencyAmount ?? 'null'}, payload.currencyType=${payload.currencyType}, payload.maxAmount=${payload.maxAmount}, items.length=${payload.items.length}`)
   logger(`[AAtoEOA/OpenContainer] full obj: ${inspect({ currency: obj.currency, currencyAmount: obj.currencyAmount, hasPayload: !!obj.openContainerPayload }, false, 2, true)}`)
 
-  const SC = Settle_ContractPool.shift()
+  const SC = shiftSettleConet()
   if (!SC) {
     logger(Colors.yellow(`[AAtoEOA/OpenContainer] no SC available, re-queue (pool ${OpenContainerRelayPool.length})`))
     OpenContainerRelayPool.unshift(obj)
@@ -11156,15 +11163,13 @@ export const OpenContainerRelayProcess = async () => {
     const accountCode = await relayProvider.getCode(account)
     if (!accountCode || accountCode === '0x' || accountCode.length <= 2) {
       obj.res.status(400).json({ success: false, error: 'account has no contract code' }).end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+      return
     }
 
     const linkBlOc = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: account })
     if (linkBlOc) {
       obj.res.status(403).json({ success: false, error: linkBlOc }).end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+      return
     }
 
     // 与 getWalletAssets / resolveBeamioAaForEoaWithFallback 一致：须用 **该笔 OpenContainer 涉及卡** 在 factoryGateway 上绑定的 _aaFactory()。
@@ -11195,8 +11200,7 @@ export const OpenContainerRelayProcess = async () => {
             'OpenContainer: could not resolve AA factory from the card. Ensure payload includes ERC1155 from a BeamioUserCard or merchantCardAddress.',
         })
         .end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+      return
     }
     relayAaFactoryAddr = ethers.getAddress(relayAaFactoryAddr)
     if (relayAaFactoryAddr.toLowerCase() !== BeamioAAAccountFactoryPaymaster.toLowerCase()) {
@@ -11233,8 +11237,7 @@ export const OpenContainerRelayProcess = async () => {
         const resolvedPayeeAa = ethers.getAddress(merchantOwnerAa)
         if (resolvedPayeeAa.toLowerCase() === account.toLowerCase()) {
           obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same. Check merchant card owner / payer account.' }).end()
-          Settle_ContractPool.unshift(SC)
-          return setTimeout(() => OpenContainerRelayProcess(), 3000)
+          return
         }
         to = resolvedPayeeAa
         payeeResolvedFromMerchantCard = true
@@ -11247,8 +11250,7 @@ export const OpenContainerRelayProcess = async () => {
         const err = `OpenContainer ERC1155: cannot resolve merchant card owner AA: ${e?.shortMessage ?? e?.message ?? String(e)}`
         logger(Colors.red(`[AAtoEOA/OpenContainer] REJECT: ${err}`))
         obj.res.status(500).json({ success: false, error: err }).end()
-        Settle_ContractPool.unshift(SC)
-        return setTimeout(() => OpenContainerRelayProcess(), 3000)
+        return
       }
     }
     // BeamioUserCard 要求 points(ERC1155) 只能转给 BeamioAccount；若 payload 含 ERC1155 或 to 为 EOA，将 to 解析为受益人 primary AA（严禁用付款方 account 的 AA 作为 to）
@@ -11265,8 +11267,7 @@ export const OpenContainerRelayProcess = async () => {
             const resolvedTo = ethers.getAddress(primary)
             if (resolvedTo === account) {
               obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same (to resolved to sender AA). payload.to must be the recipient EOA/AA, not the payer.' }).end()
-              Settle_ContractPool.unshift(SC)
-              return setTimeout(() => OpenContainerRelayProcess(), 3000)
+              return
             }
             to = resolvedTo
             logger(`[AAtoEOA/OpenContainer] resolved beneficiary EOA -> AA ${to}`)
@@ -11336,22 +11337,19 @@ export const OpenContainerRelayProcess = async () => {
           'OpenContainer ERC1155 requires payee to be a BeamioAccount registered on the AA factory. Use merchant EOA as payload.to so the server can resolve primary AA, or ensure payee AA was created via Beamio factory.'
         logger(Colors.red(`[AAtoEOA/OpenContainer] REJECT: payee not registered BeamioAccount, to=${to}`))
         obj.res.status(400).json({ success: false, error: err }).end()
-        Settle_ContractPool.unshift(SC)
-        return setTimeout(() => OpenContainerRelayProcess(), 3000)
+        return
       }
     }
     if (to === account) {
       obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same. Check payload.to is the recipient address.' }).end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+      return
     }
     const chainNonce = await readContainerNonceFromAAStorage(relayProvider, account, 'openRelayed')
     if (chainNonce !== nonce_) {
       const errMsg = `Payment code was already used or refreshed: payload nonce=${nonce_} but chain openRelayedNonce=${chainNonce}. Ask the customer to refresh Pay QR and scan the new code.`
       logger(Colors.red(`[AAtoEOA/OpenContainer] ${errMsg}`))
       obj.res.status(400).json({ success: false, error: errMsg }).end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => OpenContainerRelayProcess(), 3000)
+      return
     }
     logger(
       Colors.gray(
@@ -11931,7 +11929,7 @@ export const OpenContainerRelayProcess = async () => {
       logger(Colors.red(`[AAtoEOA/OpenContainer] failed to send error response: ${resErr?.message ?? resErr}`))
     }
   } finally {
-    Settle_ContractPool.unshift(SC)
+    unshiftSettleConet(SC)
     setTimeout(() => OpenContainerRelayProcess(), 3000)
   }
 }
@@ -11962,7 +11960,7 @@ export const ContainerRelayProcess = async () => {
   const payload = obj.containerPayload
   logger(`[AAtoEOA/Container] process started account=${payload.account} to=${payload.to}`)
 
-  const SC = Settle_ContractPool.shift()
+  const SC = shiftSettleConet()
   if (!SC) {
     logger(Colors.yellow(`[AAtoEOA/Container] no SC available, re-queue (pool ${ContainerRelayPool.length})`))
     ContainerRelayPool.unshift(obj)
@@ -11998,15 +11996,13 @@ export const ContainerRelayProcess = async () => {
     const accountCode = await relayProviderC.getCode(account)
     if (!accountCode || accountCode === '0x' || accountCode.length <= 2) {
       obj.res.status(400).json({ success: false, error: 'account has no contract code' }).end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => ContainerRelayProcess(), 3000)
+      return
     }
 
     const linkBlCr = await nfcLinkAppPaymentBlockedIfAny({ aaAddress: account })
     if (linkBlCr) {
       obj.res.status(403).json({ success: false, error: linkBlCr }).end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => ContainerRelayProcess(), 3000)
+      return
     }
 
     const chainNonce = await readContainerNonceFromAAStorage(relayProviderC, account, 'relayed')
@@ -12014,8 +12010,7 @@ export const ContainerRelayProcess = async () => {
       const errMsg = `Nonce mismatch: payload nonce=${nonce_} but chain relayedNonce=${chainNonce}. Please refresh and try again (do not resubmit the same request).`
       logger(Colors.red(`[AAtoEOA/Container] ${errMsg}`))
       obj.res.status(400).json({ success: false, error: errMsg }).end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => ContainerRelayProcess(), 3000)
+      return
     }
 
     let relayAaFactoryContainer: string | null = null
@@ -12043,8 +12038,7 @@ export const ContainerRelayProcess = async () => {
             'Container: could not resolve AA factory from the card. Include ERC1155 from a BeamioUserCard or merchantCardAddress.',
         })
         .end()
-      Settle_ContractPool.unshift(SC)
-      return setTimeout(() => ContainerRelayProcess(), 3000)
+      return
     }
     relayAaFactoryContainer = ethers.getAddress(relayAaFactoryContainer)
     if (relayAaFactoryContainer.toLowerCase() !== BeamioAAAccountFactoryPaymaster.toLowerCase()) {
@@ -12634,7 +12628,7 @@ export const ContainerRelayProcess = async () => {
       logger(Colors.red(`[AAtoEOA/Container] failed to send error response: ${resErr?.message ?? resErr}`))
     }
   } finally {
-    Settle_ContractPool.unshift(SC)
+    unshiftSettleConet(SC)
     setTimeout(() => ContainerRelayProcess(), 3000)
   }
 }
@@ -13739,7 +13733,7 @@ export async function applyBeamioCardProgramImageUrlUpdate(params: {
 export const createCardPoolPress = async () => {
 	const obj = createCardPool.shift() as (CreateCardPreChecked & { res: Response }) | undefined
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		createCardPool.unshift(obj)
 		return setTimeout(() => createCardPoolPress(), 3000)
@@ -13860,7 +13854,7 @@ export const createCardPoolPress = async () => {
 		logger(Colors.red(`[createCardPoolPress] failed:`), msg)
 		if (res && !res.headersSent) res.status(500).json({ success: false, error: msg }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => createCardPoolPress(), 3000)
 	}
 }
@@ -14302,7 +14296,7 @@ export const nfcLinkAppExecute = async (
 		res.status(403).json({ success: false, error: 'Card not provisioned.' }).end()
 		return
 	}
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		res.status(503).json({ success: false, error: 'Service temporarily unavailable.' }).end()
 		return
@@ -14407,7 +14401,7 @@ export const nfcLinkAppExecute = async (
 			res.status(500).json({ success: false, error: e?.shortMessage ?? e?.message ?? String(e) }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 	}
 }
 
@@ -14496,7 +14490,7 @@ export async function nfcLinkAppUnlockActiveSessionRowCore(row: NfcLinkAppSessio
 			error: 'BEAMIO_INFRA_CARD_OWNER_PRIVATE_KEY does not match infrastructure card owner().',
 		}
 	}
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleBase()
 	if (!SC) {
 		return { ok: false, released: false, httpStatus: 503, error: 'Service temporarily unavailable.' }
 	}
@@ -14565,7 +14559,7 @@ export async function nfcLinkAppUnlockActiveSessionRowCore(row: NfcLinkAppSessio
 			error: e?.shortMessage ?? e?.message ?? String(e),
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleBase(SC)
 	}
 }
 
@@ -14681,7 +14675,7 @@ export const nfcLinkAppCancelExecute = async (
  */
 async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCode: string): Promise<string> {
 	const cardAddress = ethers.getAddress(BEAMIO_USER_CARD_ASSET_ADDRESS)
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) throw new Error('Service temporarily unavailable')
 	try {
 		// 1. 与 cardRedeemProcess 相同：无 AA 则 createAccountFor，再 redeem
@@ -14788,7 +14782,7 @@ async function performInfraCardRedeemForUserEoaOnce(toUserEOA: string, redeemCod
 
 		return txHash
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 	}
 }
 
@@ -14895,7 +14889,7 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 		throw new Error('NFC private key does not match the linked card EOA.')
 	}
 
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleBoth()
 	if (!SC) throw new Error('Service temporarily unavailable')
 	try {
 		const provider = SC.walletBase.provider!
@@ -15069,7 +15063,7 @@ async function performNfcLinkAppMigrateAllAssetsViaContainer(params: {
 		syncNftTierMetadataForUser(BEAMIO_USER_CARD_ASSET_ADDRESS, beneficiaryUserEoa).catch(() => {})
 		return { txHash: tx.hash, eoaSweepTxHashes }
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleBoth(SC)
 	}
 }
 
@@ -17700,7 +17694,7 @@ export const cardRedeemAdminPool: {
 export const cardRedeemAdminProcess = async () => {
 	const obj = cardRedeemAdminPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		cardRedeemAdminPool.unshift(obj)
 		return setTimeout(() => cardRedeemAdminProcess(), 3000)
@@ -17766,7 +17760,7 @@ export const cardRedeemAdminProcess = async () => {
 		}
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: clientError }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => cardRedeemAdminProcess(), 3000)
 	}
 }
@@ -17986,7 +17980,7 @@ export async function chargeCardProgramSocialBunitFeeInBackground(args: {
 		const err = e as { message?: string }
 		logger(Colors.yellow(`[${args.logTag}] background social B-Unit failed: ${err?.message ?? String(e)}`))
 	} finally {
-		if (SC) Settle_ContractPool.unshift(SC)
+		if (SC) unshiftSettleConet(SC)
 	}
 }
 
@@ -18048,7 +18042,7 @@ async function consumeCreateIssuedNftBunitFeeInBackground(
 		logger(Colors.yellow(`[${logTag}] background B-Unit consume failed: ${err?.message ?? String(e)}`))
 		return null
 	} finally {
-		if (SC) Settle_ContractPool.unshift(SC)
+		if (SC) unshiftSettleConet(SC)
 	}
 }
 
@@ -18058,7 +18052,7 @@ async function consumeCreateIssuedNftBunitFeeInBackground(
 export const executeForOwnerProcess = async () => {
 	const obj = executeForOwnerPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		executeForOwnerPool.unshift(obj)
 		return setTimeout(() => executeForOwnerProcess(), 3000)
@@ -18569,7 +18563,7 @@ export const executeForOwnerProcess = async () => {
 			if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: errMsg }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		setTimeout(() => executeForOwnerProcess(), 3000)
 	}
 }
@@ -18808,7 +18802,7 @@ export const cardRedeemPreCheck = async (body: {
 export const cardRedeemPoolPress = async () => {
 	const obj = cardRedeemPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		cardRedeemPool.unshift(obj)
 		return setTimeout(() => kickCardRedeemPoolPress(), 3000)
@@ -18947,7 +18941,7 @@ export const cardRedeemPoolPress = async () => {
 		}
 		if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: clientError }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		scheduleCardRedeemPoolPress()
 	}
 }
@@ -19158,7 +19152,7 @@ export const cardCouponOpenClaimProcess = async () => {
 		logger(Colors.red(`[cardCouponOpenClaimProcess] failed: ${clientError} (rawError: ${JSON.stringify(errorData)})`))
 		// Background failure only — client already received queued success; do not rewrite HTTP.
 	} finally {
-		if (SC) Settle_ContractPool.unshift(SC)
+		if (SC) unshiftSettleConet(SC)
 		setTimeout(() => cardCouponOpenClaimProcess(), requeuedForNonceRace ? 1500 : 3000)
 	}
 }
@@ -19265,7 +19259,7 @@ export const cardCouponPosClaimWalletProcess = async () => {
 			obj.res.status(400).json({ success: false, error: clientError }).end()
 		}
 	} finally {
-		if (SC) Settle_ContractPool.unshift(SC)
+		if (SC) unshiftSettleConet(SC)
 		setTimeout(() => cardCouponPosClaimWalletProcess(), requeuedForNonceRace ? 1500 : 3000)
 	}
 }
@@ -19882,7 +19876,7 @@ export const payByNfcUidOpenContainer = async (params: {
 		logger(Colors.red(`[payByNfcUidOpenContainer] failed: getNfcCardPrivateKeyByUid returned null for uid=${uid.slice(0, 16)}...`))
 		return { pushed: false, error: 'Card not found' }
 	}
-	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
+	if (!settleRosterInitialized()) return { pushed: false, error: 'Settle_ContractPool empty' }
 	const SC = Settle_ContractPool[0]
 	try {
 		const wallet = new ethers.Wallet(privateKey)
@@ -20058,7 +20052,7 @@ export const payByAccountPrepare = async (params: {
 	if (!account || !ethers.isAddress(account) || !payee || !ethers.isAddress(payee)) {
 		return { ok: false, error: 'Invalid account or payee' }
 	}
-	if (Settle_ContractPool.length === 0) return { ok: false, error: 'Settle_ContractPool empty' }
+	if (!settleRosterInitialized()) return { ok: false, error: 'Settle_ContractPool empty' }
 	const SC = Settle_ContractPool[0]
 	try {
 		let toResolved = ethers.getAddress(payee)
@@ -20171,7 +20165,7 @@ export const payByNfcUidPrepare = async (params: {
 		logger(Colors.red(`[payByNfcUidPrepare] getNfcCardPrivateKey null uid=${uidTrim.slice(0, 16)}...`))
 		return { ok: false, error: 'Card not found' }
 	}
-	if (Settle_ContractPool.length === 0) return { ok: false, error: 'Settle_ContractPool empty' }
+	if (!settleRosterInitialized()) return { ok: false, error: 'Settle_ContractPool empty' }
 	const SC = Settle_ContractPool[0]
 	try {
 		const cardForPrepare =
@@ -20348,7 +20342,7 @@ export const payByNfcUidSignContainer = async (params: {
 	let amountUsdc6Effective: string | undefined = amountUsdc6
 	if (fiat6Ok && !usdc6Ok) {
 		try {
-			if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
+			if (!settleRosterInitialized()) return { pushed: false, error: 'Settle_ContractPool empty' }
 			const SC = Settle_ContractPool[0]
 			const programItem = containerPayload.items?.find(
 				(it) => it.kind === 1 && typeof it.asset === 'string' && ethers.isAddress(it.asset.trim())
@@ -20436,7 +20430,7 @@ export const payByNfcUidSignContainer = async (params: {
 		logger(Colors.red(`[payByNfcUidSignContainer] getNfcCardPrivateKey null uid=${uidTrim.slice(0, 16)}...`))
 		return { pushed: false, error: 'Card not found' }
 	}
-	if (Settle_ContractPool.length === 0) return { pushed: false, error: 'Settle_ContractPool empty' }
+	if (!settleRosterInitialized()) return { pushed: false, error: 'Settle_ContractPool empty' }
 	const wallet = new ethers.Wallet(privateKey)
 	const eoa = await wallet.getAddress()
 	const erc1155CardForContainer = containerPayload.items.find((it) => Number(it.kind) === 1)?.asset
@@ -20914,14 +20908,14 @@ export function kickCardOpenTransferPoolPress(): void {
 
 function scheduleCardOpenTransferPoolPress(): void {
 	if (cardOpenTransferPool.length === 0) return
-	if (Settle_ContractPool.length > 0) kickCardOpenTransferPoolPress()
+	if (hasIdleSettleBase()) kickCardOpenTransferPoolPress()
 	else setTimeout(() => kickCardOpenTransferPoolPress(), 3000)
 }
 
 export const cardOpenTransferPoolPress = async () => {
 	const obj = cardOpenTransferPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleBase()
 	if (!SC) {
 		cardOpenTransferPool.unshift(obj)
 		return setTimeout(() => kickCardOpenTransferPoolPress(), 3000)
@@ -20961,7 +20955,7 @@ export const cardOpenTransferPoolPress = async () => {
 			obj.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleBase(SC)
 		scheduleCardOpenTransferPoolPress()
 	}
 }
@@ -21025,7 +21019,7 @@ export function kickReferralRegistryRedeemRelay(): void {
 
 function scheduleReferralRegistryRedeemRelay(): void {
 	if (referralRegistryRedeemPool.length === 0) return
-	if (Settle_ContractPool.length > 0) {
+	if (hasIdleSettleConet()) {
 		kickReferralRegistryRedeemRelay()
 		return
 	}
@@ -21035,7 +21029,7 @@ function scheduleReferralRegistryRedeemRelay(): void {
 export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 	const job = referralRegistryRedeemPool.shift()
 	if (!job) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		referralRegistryRedeemPool.unshift(job)
 		return scheduleReferralRegistryRedeemRelay()
@@ -21177,7 +21171,7 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 		logger(Colors.red(`[referralRegistryRedeemRelay] failed: ${message}`))
 		if (!job.res.headersSent) job.res.status(400).json({ success: false, error: message }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		scheduleReferralRegistryRedeemRelay()
 	}
 }
@@ -21216,7 +21210,7 @@ export function kickReferralRegistryAdminManagementRelay(): void {
 
 function scheduleReferralRegistryAdminManagementRelay(): void {
 	if (referralRegistryAdminManagementPool.length === 0) return
-	if (Settle_ContractPool.length > 0) {
+	if (hasIdleSettleConet()) {
 		kickReferralRegistryAdminManagementRelay()
 		return
 	}
@@ -21226,7 +21220,7 @@ function scheduleReferralRegistryAdminManagementRelay(): void {
 export async function referralRegistryAdminManagementProcess(): Promise<void> {
 	const job = referralRegistryAdminManagementPool.shift()
 	if (!job) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		referralRegistryAdminManagementPool.unshift(job)
 		return scheduleReferralRegistryAdminManagementRelay()
@@ -21346,7 +21340,7 @@ export async function referralRegistryAdminManagementProcess(): Promise<void> {
 		logger(Colors.red(`[referralRegistryAdminManagement] failed: ${message}`))
 		if (!job.res.headersSent) job.res.status(400).json({ success: false, error: message }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		scheduleReferralRegistryAdminManagementRelay()
 	}
 }
@@ -21376,7 +21370,7 @@ export function kickReferralRegistryMerchantShareRelay(): void {
 
 function scheduleReferralRegistryMerchantShareRelay(): void {
 	if (referralRegistryMerchantSharePool.length === 0) return
-	if (Settle_ContractPool.length > 0) {
+	if (hasIdleSettleConet()) {
 		kickReferralRegistryMerchantShareRelay()
 		return
 	}
@@ -21386,7 +21380,7 @@ function scheduleReferralRegistryMerchantShareRelay(): void {
 export async function referralRegistryMerchantShareProcess(): Promise<void> {
 	const job = referralRegistryMerchantSharePool.shift()
 	if (!job) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		referralRegistryMerchantSharePool.unshift(job)
 		return scheduleReferralRegistryMerchantShareRelay()
@@ -21440,7 +21434,7 @@ export async function referralRegistryMerchantShareProcess(): Promise<void> {
 		logger(Colors.red(`[referralRegistryMerchantShare] failed: ${message}`))
 		if (!job.res.headersSent) job.res.status(400).json({ success: false, error: message }).end()
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		scheduleReferralRegistryMerchantShareRelay()
 	}
 }

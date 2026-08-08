@@ -12,7 +12,12 @@ import {
 	CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE,
 	CONET_USDC,
 } from './chainAddresses'
-import { Settle_ContractPool, ensureSettleContractPoolInitialized } from './settleContractPool'
+import {
+	ensureSettleContractPoolInitialized,
+	hasIdleSettleConet,
+	shiftSettleConet,
+	unshiftSettleConet,
+} from './settleContractPool'
 
 ensureSettleContractPoolInitialized()
 
@@ -62,7 +67,7 @@ export function kickTreasuryStableSwapRelay(): void {
 
 function scheduleTreasuryStableSwapRelay(): void {
 	if (treasuryStableSwapPool.length === 0) return
-	if (Settle_ContractPool.length > 0) {
+	if (hasIdleSettleConet()) {
 		kickTreasuryStableSwapRelay()
 		return
 	}
@@ -72,7 +77,7 @@ function scheduleTreasuryStableSwapRelay(): void {
 export async function treasuryStableSwapRelayProcess(): Promise<void> {
 	const job = treasuryStableSwapPool.shift()
 	if (!job) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		treasuryStableSwapPool.unshift(job)
 		return scheduleTreasuryStableSwapRelay()
@@ -133,7 +138,7 @@ export async function treasuryStableSwapRelayProcess(): Promise<void> {
 			job.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		scheduleTreasuryStableSwapRelay()
 	}
 }

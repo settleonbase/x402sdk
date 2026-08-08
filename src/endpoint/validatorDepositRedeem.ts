@@ -29,7 +29,17 @@ import {
 	GENESIS_NODE_SEAT_USDC_PER_NODE6,
 	USDC_BASE,
 } from '../chainAddresses'
-import { Settle_ContractPool, ensureSettleContractPoolInitialized } from '../settleContractPool'
+import {
+	Settle_ContractPool,
+	ensureSettleContractPoolInitialized,
+	hasIdleSettleConet,
+	hasIdleGenesisInitiatorBase,
+	hasIdleGenesisInitiatorBoth,
+	shiftSettleConet,
+	unshiftSettleConet,
+	withGenesisBridgeInitiatorBase,
+	withGenesisBridgeInitiatorBoth,
+} from '../settleContractPool'
 import {
 	CONET_VALIDATOR_NODE_ONCHAIN_LANE,
 	enqueueOnchainTxWork,
@@ -786,7 +796,7 @@ export async function validatorRewardReport(
 	if (!entries.length) return { ok: false as const, error: 'empty entries' }
 	const address = await resolveValidatorNodeRewardIndexerAddress()
 	if (!address) return { ok: false as const, error: 'ValidatorNodeRewardIndexer not configured' }
-	if (!Settle_ContractPool.length) return { ok: false as const, error: 'no relayer wallet available (Settle pool empty)' }
+	if (!hasIdleSettleConet()) return { ok: false as const, error: 'no relayer wallet available (Settle pool empty)' }
 
 	let eventKeys: string[]
 	let nodeWallets: string[]
@@ -1879,20 +1889,20 @@ export const validatorCancelTransferOrderPool: ValidatorCancelTransferOrderPaylo
 export const validatorFulfillTransferOrderPool: ValidatorFulfillTransferOrderPayload[] = []
 
 async function withSettleWallet<T>(poolName: string, fn: (wallet: (typeof Settle_ContractPool)[number]) => Promise<T>): Promise<T | undefined> {
-	if (!Settle_ContractPool.length) return undefined
-	const sc = Settle_ContractPool.shift()
+	if (!hasIdleSettleConet()) return undefined
+	const sc = shiftSettleConet()
 	if (!sc) return undefined
 	try {
 		return await fn(sc)
 	} finally {
-		Settle_ContractPool.unshift(sc)
+		unshiftSettleConet(sc)
 	}
 }
 
 export const validatorDepositRedeemCreateProcess = async () => {
 	const obj = validatorDepositRedeemCreatePool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		validatorDepositRedeemCreatePool.unshift(obj)
 		return setTimeout(() => void validatorDepositRedeemCreateProcess(), 3000)
 	}
@@ -1931,7 +1941,7 @@ export const validatorDepositRedeemCreateProcess = async () => {
 export const validatorDepositRedeemClaimAirdropProcess = async () => {
 	const obj = validatorDepositRedeemClaimAirdropPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		validatorDepositRedeemClaimAirdropPool.unshift(obj)
 		return setTimeout(() => void validatorDepositRedeemClaimAirdropProcess(), 3000)
 	}
@@ -1955,7 +1965,7 @@ export const validatorDepositRedeemClaimAirdropProcess = async () => {
 export const validatorDepositRedeemCancelProcess = async () => {
 	const obj = validatorDepositRedeemCancelPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		validatorDepositRedeemCancelPool.unshift(obj)
 		return setTimeout(() => void validatorDepositRedeemCancelProcess(), 3000)
 	}
@@ -1979,7 +1989,7 @@ export const validatorDepositRedeemCancelProcess = async () => {
 export const validatorDepositRedeemClaimProcess = async () => {
 	const obj = validatorDepositRedeemClaimPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		validatorDepositRedeemClaimPool.unshift(obj)
 		return setTimeout(() => void validatorDepositRedeemClaimProcess(), 3000)
 	}
@@ -2007,7 +2017,7 @@ export const validatorDepositRedeemClaimProcess = async () => {
 export const validatorDepositRedeemTransferProcess = async () => {
 	const obj = validatorDepositRedeemTransferPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		validatorDepositRedeemTransferPool.unshift(obj)
 		return setTimeout(() => void validatorDepositRedeemTransferProcess(), 3000)
 	}
@@ -2039,7 +2049,7 @@ export const validatorDepositRedeemTransferProcess = async () => {
 export const validatorCreateTransferOrderProcess = async () => {
 	const obj = validatorCreateTransferOrderPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		validatorCreateTransferOrderPool.unshift(obj)
 		return setTimeout(() => void validatorCreateTransferOrderProcess(), 3000)
 	}
@@ -2085,7 +2095,7 @@ export const validatorCreateTransferOrderProcess = async () => {
 export const validatorCancelTransferOrderProcess = async () => {
 	const obj = validatorCancelTransferOrderPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		validatorCancelTransferOrderPool.unshift(obj)
 		return setTimeout(() => void validatorCancelTransferOrderProcess(), 3000)
 	}
@@ -2109,7 +2119,7 @@ export const validatorCancelTransferOrderProcess = async () => {
 export const validatorFulfillTransferOrderProcess = async () => {
 	const obj = validatorFulfillTransferOrderPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleSettleConet()) {
 		validatorFulfillTransferOrderPool.unshift(obj)
 		return setTimeout(() => void validatorFulfillTransferOrderProcess(), 3000)
 	}
@@ -3618,19 +3628,7 @@ function computeLockMintOperationId(params: {
 async function withGenesisBridgeInitiatorWallet<T>(
 	fn: (wallet: (typeof Settle_ContractPool)[number]) => Promise<T>,
 ): Promise<T> {
-	const want = GENESIS_NODE_BRIDGE_INITIATOR.toLowerCase()
-	const idx = Settle_ContractPool.findIndex((sc) => sc.walletBase.address.toLowerCase() === want)
-	if (idx < 0) {
-		throw new Error(
-			`Genesis bridge initiator ${GENESIS_NODE_BRIDGE_INITIATOR} not in Settle_ContractPool (check settle_contractAdmin)`,
-		)
-	}
-	const [sc] = Settle_ContractPool.splice(idx, 1)
-	try {
-		return await fn(sc)
-	} finally {
-		Settle_ContractPool.unshift(sc)
-	}
+	return withGenesisBridgeInitiatorBoth(fn)
 }
 
 export type GenesisNodeSeatFulfillPayload = {
@@ -3707,7 +3705,7 @@ export function kickGenesisNodeSeatFulfillPoolPress(): void {
 
 function scheduleGenesisNodeSeatFulfillPoolPress(): void {
 	if (genesisNodeSeatFulfillPool.length === 0) return
-	if (Settle_ContractPool.length > 0) kickGenesisNodeSeatFulfillPoolPress()
+	if (hasIdleGenesisInitiatorBoth()) kickGenesisNodeSeatFulfillPoolPress()
 	else setTimeout(() => kickGenesisNodeSeatFulfillPoolPress(), 3000)
 }
 
@@ -3721,7 +3719,7 @@ function scheduleGenesisNodeSeatFulfillPoolPress(): void {
 export const genesisNodeSeatFulfillProcess = async () => {
 	const obj = genesisNodeSeatFulfillPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleGenesisInitiatorBoth()) {
 		genesisNodeSeatFulfillPool.unshift(obj)
 		return setTimeout(() => void genesisNodeSeatFulfillProcess(), 3000)
 	}
@@ -3806,7 +3804,7 @@ export const genesisNodeSeatFulfillProcess = async () => {
 		const sourceTxHash = usdcTx as `0x${string}`
 		const nonce = BigInt(ethers.hexlify(ethers.randomBytes(16)))
 
-		const bridgeResult = await withGenesisBridgeInitiatorWallet(async (sc) => {
+		const bridgeResult = await withGenesisBridgeInitiatorBoth(async (sc) => {
 			const baseProvider = sc.walletBase.provider!
 			const treasuryRead = new ethers.Contract(treasury, TREASURY_LOCK_MINT_ABI, baseProvider)
 			const feeBps = (await treasuryRead.destinationFeeBps!(CONET_MAINNET_CHAIN_ID)) as bigint
@@ -4020,6 +4018,10 @@ export const genesisNodeSeatFulfillProcess = async () => {
 		}
 	} catch (e: any) {
 		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		if (String(msg).includes('GENESIS_BRIDGE_INITIATOR_BOTH_BUSY')) {
+			genesisNodeSeatFulfillPool.unshift(obj)
+			return
+		}
 		logger(Colors.red('[genesisNodeSeatFulfillProcess] failed:'), msg)
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, error: msg }).end()
@@ -4091,7 +4093,7 @@ export function kickWalletDepositFulfillPoolPress(): void {
 
 function scheduleWalletDepositFulfillPoolPress(): void {
 	if (walletDepositFulfillPool.length === 0) return
-	if (Settle_ContractPool.length > 0) kickWalletDepositFulfillPoolPress()
+	if (hasIdleGenesisInitiatorBase()) kickWalletDepositFulfillPoolPress()
 	else setTimeout(() => kickWalletDepositFulfillPoolPress(), 3000)
 }
 
@@ -4103,7 +4105,7 @@ function scheduleWalletDepositFulfillPoolPress(): void {
 export const walletDepositFulfillProcess = async () => {
 	const obj = walletDepositFulfillPool.shift()
 	if (!obj) return
-	if (!Settle_ContractPool.length) {
+	if (!hasIdleGenesisInitiatorBase()) {
 		walletDepositFulfillPool.unshift(obj)
 		return setTimeout(() => void walletDepositFulfillProcess(), 3000)
 	}
@@ -4149,7 +4151,7 @@ export const walletDepositFulfillProcess = async () => {
 		const sourceTxHash = usdcTx as `0x${string}`
 		const nonce = BigInt(ethers.hexlify(ethers.randomBytes(16)))
 
-		const bridgeResult = await withGenesisBridgeInitiatorWallet(async (sc) => {
+		const bridgeResult = await withGenesisBridgeInitiatorBase(async (sc) => {
 			const baseProvider = sc.walletBase.provider!
 			const treasuryRead = new ethers.Contract(treasury, TREASURY_LOCK_MINT_ABI, baseProvider)
 			const feeBps = (await treasuryRead.destinationFeeBps!(CONET_MAINNET_CHAIN_ID)) as bigint
@@ -4236,6 +4238,10 @@ export const walletDepositFulfillProcess = async () => {
 		}
 	} catch (e: any) {
 		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		if (String(msg).includes('GENESIS_BRIDGE_INITIATOR_BASE_BUSY')) {
+			walletDepositFulfillPool.unshift(obj)
+			return
+		}
 		logger(Colors.red('[walletDepositFulfillProcess] failed:'), msg)
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, error: msg }).end()

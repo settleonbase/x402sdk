@@ -7,7 +7,12 @@ import type { Response } from 'express'
 import Colors from 'colors/safe'
 import { logger } from './logger'
 import { CONET_GENESIS_NODE_REFERRAL_VAULT } from './chainAddresses'
-import { Settle_ContractPool, ensureSettleContractPoolInitialized } from './settleContractPool'
+import {
+	ensureSettleContractPoolInitialized,
+	hasIdleSettleConet,
+	shiftSettleConet,
+	unshiftSettleConet,
+} from './settleContractPool'
 
 ensureSettleContractPoolInitialized()
 
@@ -57,7 +62,7 @@ export function kickGenesisNodeReferralRedeemRelay(): void {
 
 function scheduleGenesisNodeReferralRedeemRelay(): void {
 	if (genesisNodeReferralRedeemPool.length === 0) return
-	if (Settle_ContractPool.length > 0) {
+	if (hasIdleSettleConet()) {
 		kickGenesisNodeReferralRedeemRelay()
 		return
 	}
@@ -67,7 +72,7 @@ function scheduleGenesisNodeReferralRedeemRelay(): void {
 export async function genesisNodeReferralRedeemRelayProcess(): Promise<void> {
 	const job = genesisNodeReferralRedeemPool.shift()
 	if (!job) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		genesisNodeReferralRedeemPool.unshift(job)
 		return scheduleGenesisNodeReferralRedeemRelay()
@@ -178,7 +183,7 @@ export async function genesisNodeReferralRedeemRelayProcess(): Promise<void> {
 			job.res.status(400).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		scheduleGenesisNodeReferralRedeemRelay()
 	}
 }

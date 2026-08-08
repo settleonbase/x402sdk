@@ -14,6 +14,7 @@ import {
 	Settle_ContractPool,
 	chargeCardProgramSocialBunitFeeInBackground,
 } from './MemberCard'
+import { shiftSettleConet, unshiftSettleConet } from './settleContractPool'
 import {
 	CHARGE_REWARD_V2_IFACE,
 	buildDispatchEventReward13Calldata,
@@ -211,7 +212,7 @@ function scheduleSocialBunitFeeAfterGatewaySuccess(
 export async function cardGatewayRewardPoolPress(): Promise<void> {
 	const obj = cardGatewayRewardPool.shift()
 	if (!obj) return
-	const SC = Settle_ContractPool.shift()
+	const SC = shiftSettleConet()
 	if (!SC) {
 		cardGatewayRewardPool.unshift(obj)
 		setTimeout(() => kickCardGatewayRewardPoolPress(), 3000)
@@ -363,7 +364,7 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 			obj.res.status(500).json({ success: false, error: msg }).end()
 		}
 	} finally {
-		Settle_ContractPool.unshift(SC)
+		unshiftSettleConet(SC)
 		scheduleCardGatewayRewardPoolPress()
 	}
 }

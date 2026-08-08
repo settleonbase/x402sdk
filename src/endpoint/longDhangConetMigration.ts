@@ -28,7 +28,8 @@ import {
 } from '../chainAddresses'
 import { resolveBeamioBaseHttpRpcUrl } from '../util'
 import { ensureShareTokenProgramIconAssembled } from '../shareTokenProgramIcon'
-import { Settle_ContractPool } from '../MemberCard'
+import { Settle_ContractPool, settleRosterInitialized } from '../MemberCard'
+import { shiftSettleConet, unshiftSettleConet } from '../settleContractPool'
 import { createBeamioCardWithFactoryReturningHash } from '../CCSA'
 import BeamioFactoryPaymasterArtifact from '../ABI/BeamioUserCardFactoryPaymaster.json'
 import {
@@ -1041,7 +1042,7 @@ export async function createLongDhangConetMigrationCard(options?: {
 	ownerEoa: string
 	migrationAdmin: string
 } | { success: false; error: string }> {
-	const sc = Settle_ContractPool.shift()
+	const sc = shiftSettleConet()
 	if (!sc) return { success: false, error: 'Settle_ContractPool is busy or not initialized.' }
 	let cardOwner = normalizeAddress(LONGDHANG_OLD_CARD_OWNER)
 	if (options?.cardOwnerEoa && ethers.isAddress(options.cardOwnerEoa)) {
@@ -1102,7 +1103,7 @@ export async function createLongDhangConetMigrationCard(options?: {
 		logger(Colors.red(`${migrationLogPrefix()} create card failed: ${e?.message ?? e}`))
 		return { success: false, error: e?.message ?? String(e) }
 	} finally {
-		Settle_ContractPool.unshift(sc)
+		unshiftSettleConet(sc)
 	}
 }
 
@@ -1419,7 +1420,7 @@ export async function runLongDhangConetMigrationBatch(
 ): Promise<RunLongDhangMigrationResult> {
 	const newCard = normalizeAddress(options.newCardAddress)
 	const snapshot = await resolveLongDhangMigrationSnapshot({ requestedHash: options.snapshotHash })
-	const sc = Settle_ContractPool.shift()
+	const sc = shiftSettleConet()
 	if (!sc) {
 		return {
 			success: false,
@@ -1538,7 +1539,7 @@ export async function runLongDhangConetMigrationBatch(
 			}),
 		}
 	} finally {
-		Settle_ContractPool.unshift(sc)
+		unshiftSettleConet(sc)
 	}
 }
 

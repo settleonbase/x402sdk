@@ -29,7 +29,13 @@ import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
 import { masterSetup, resolveBeamioConetHttpRpcUrl } from '../util'
-import { Settle_ContractPool, ensureSettleContractPoolInitialized } from '../settleContractPool'
+import {
+	Settle_ContractPool,
+	ensureSettleContractPoolInitialized,
+	hasIdleSettleConet,
+	shiftSettleConet,
+	unshiftSettleConet,
+} from '../settleContractPool'
 import { CONET_VALIDATOR_NODE_ONCHAIN_LANE, enqueueOnchainTxWork } from '../onchainTxSerialQueue'
 import {
 	CONET_VALIDATOR_DEPOSIT_REDEEM,
@@ -458,8 +464,8 @@ async function collectPayoutEntriesForBlock(
 }
 
 async function withSettleWallet<T>(label: string, fn: (wallet: (typeof Settle_ContractPool)[number]) => Promise<T>): Promise<T | undefined> {
-	if (!Settle_ContractPool.length) return undefined
-	const sc = Settle_ContractPool.shift()
+	if (!hasIdleSettleConet()) return undefined
+	const sc = shiftSettleConet()
 	if (!sc) return undefined
 	try {
 		return await fn(sc)
@@ -467,7 +473,7 @@ async function withSettleWallet<T>(label: string, fn: (wallet: (typeof Settle_Co
 		logger(Colors.red(`[validatorClRewardPayout] ${label} failed: ${(e as Error)?.message ?? e}`))
 		return undefined
 	} finally {
-		Settle_ContractPool.unshift(sc)
+		unshiftSettleConet(sc)
 	}
 }
 
