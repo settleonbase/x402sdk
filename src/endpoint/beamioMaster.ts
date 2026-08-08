@@ -105,6 +105,10 @@ import {
 	walletDepositFulfillPool,
 	kickWalletDepositFulfillPoolPress,
 } from './validatorDepositRedeem'
+import {
+	treasuryBridgeFulfillPool,
+	kickTreasuryBridgeFulfillPoolPress,
+} from './treasuryBridgeFulfill'
 
 const masterServerPort = 1111
 
@@ -3683,6 +3687,58 @@ const routing = ( router: Router ) => {
 				res,
 			})
 			kickWalletDepositFulfillPoolPress()
+		})
+
+		/** After Discover treasuryBridge settle: LockMint CONET-USDC → card.owner + protocol gateway mint. */
+		router.post('/treasuryBridgeFulfill', (req, res) => {
+			const b = req.body as {
+				cardAddress?: string
+				cardOwner?: string
+				recipientEOA?: string
+				points6?: string
+				payer?: string
+				USDC_tx?: string
+				usdcAmount6?: string
+				currency?: string
+				currencyAmount?: string
+			}
+			const cardAddress = String(b.cardAddress ?? '').trim()
+			const cardOwner = String(b.cardOwner ?? '').trim()
+			const recipientEOA = String(b.recipientEOA ?? '').trim()
+			const usdcTx = String(b.USDC_tx ?? '').trim()
+			const usdcAmount6 = String(b.usdcAmount6 ?? '').trim()
+			const points6 = String(b.points6 ?? '').trim()
+			if (!cardAddress || !ethers.isAddress(cardAddress)) {
+				return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end()
+			}
+			if (!cardOwner || !ethers.isAddress(cardOwner)) {
+				return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end()
+			}
+			if (!recipientEOA || !ethers.isAddress(recipientEOA)) {
+				return res.status(400).json({ success: false, error: 'Invalid recipientEOA' }).end()
+			}
+			if (!/^0x[0-9a-fA-F]{64}$/.test(usdcTx)) {
+				return res.status(400).json({ success: false, error: 'Invalid USDC_tx' }).end()
+			}
+			if (!/^\d+$/.test(usdcAmount6) || BigInt(usdcAmount6) <= 0n) {
+				return res.status(400).json({ success: false, error: 'Invalid usdcAmount6' }).end()
+			}
+			if (!/^\d+$/.test(points6) || BigInt(points6) <= 0n) {
+				return res.status(400).json({ success: false, error: 'Invalid points6' }).end()
+			}
+			treasuryBridgeFulfillPool.push({
+				cardAddress: ethers.getAddress(cardAddress),
+				cardOwner: ethers.getAddress(cardOwner),
+				recipientEOA: ethers.getAddress(recipientEOA),
+				points6,
+				payer: String(b.payer ?? '').trim(),
+				USDC_tx: usdcTx,
+				usdcAmount6,
+				currency: b.currency,
+				currencyAmount: b.currencyAmount,
+				res,
+			})
+			kickTreasuryBridgeFulfillPoolPress()
 		})
 
 		router.post('/treasuryStableSwap', (req, res) => {

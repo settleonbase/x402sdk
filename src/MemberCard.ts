@@ -9373,7 +9373,7 @@ export const purchasingCardProcess = async () => {
 		let tx: ethers.ContractTransactionResponse
 		if (cardChain === 'conet') {
 			// CoNET Factory.USDC_TOKEN is a dead immutable token (supply 0). Discover wallet pays live CONET_USDC
-			// via EIP-3009 → card.owner(), then mintPointsByAdmin (NFT #0 / points) via service-admin executeForAdmin.
+			// via EIP-3009 → card.owner(), then protocol gateway mint (not admin airdrop / ExecuteForAdmin).
 			const fromNorm = ethers.getAddress(from)
 			const ownerNorm = ethers.getAddress(owner)
 			const usdcValue = BigInt(usdcAmount)
@@ -9439,33 +9439,16 @@ export const purchasingCardProcess = async () => {
 				)
 			}
 
-			const mintIface = new ethers.Interface(['function mintPointsByAdmin(address toEOA, uint256 amount)'])
-			const mintData = mintIface.encodeFunctionData('mintPointsByAdmin', [fromNorm, currencyAmount.points6])
-			const mintDeadline = Math.floor(Date.now() / 1000) + 900
-			const mintNonce = ethers.hexlify(ethers.randomBytes(32))
-			const signedAdmin = await signExecuteForAdminWithServiceAdmin({
-				cardAddr: ethers.getAddress(cardAddress),
-				data: mintData,
-				deadline: mintDeadline,
-				nonce: mintNonce,
-			})
-			if ('error' in signedAdmin) {
-				throw new Error(`Service admin ExecuteForAdmin sign failed: ${signedAdmin.error}`)
-			}
-			const factoryAddress = ethers.getAddress(cardFactoryForUserCardChain('conet'))
-			const factoryIface = new ethers.Interface(['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'])
-			logger(Colors.gray(`[purchasingCardProcess] CoNET mintPointsByAdmin recipient=${fromNorm} points6=${currencyAmount.points6} factory=${factoryAddress}`))
-			const mintTx = await relayUserCardFactoryCallViaEntryPoint({
+			logger(
+				Colors.gray(
+					`[purchasingCardProcess] CoNET mintPointsForProtocolUsdcSettlement recipient=${fromNorm} points6=${currencyAmount.points6}`,
+				),
+			)
+			const { mintTx } = await mintPointsForProtocolUsdcSettlementViaEntryPoint({
+				cardAddress: ethers.getAddress(cardAddress),
+				recipientEOA: fromNorm,
+				points6: currencyAmount.points6,
 				SC,
-				chain: 'conet',
-				factoryAddress,
-				factoryCallData: factoryIface.encodeFunctionData('executeForAdmin', [
-					ethers.getAddress(cardAddress),
-					mintData,
-					BigInt(mintDeadline),
-					mintNonce,
-					signedAdmin.adminSignature,
-				]),
 				logTag: 'purchasingCardProcess.conetMint',
 			})
 			const mintReceipt = await mintTx.wait().catch((waitErr: any) => {
@@ -9477,10 +9460,10 @@ export const purchasingCardProcess = async () => {
 			})
 			if (!mintRelayCheck.ok) {
 				throw new Error(
-					`CoNET mintPointsByAdmin failed after USDC transfer ${tx.hash}: mint=${mintTx.hash} (${mintRelayCheck.reason})`,
+					`CoNET protocol mint failed after USDC transfer ${tx.hash}: mint=${mintTx.hash} (${mintRelayCheck.reason})`,
 				)
 			}
-			logger(Colors.green(`✅ purchasingCardProcess CoNET mintPointsByAdmin Hash: ${mintTx.hash}`))
+			logger(Colors.green(`✅ purchasingCardProcess CoNET protocol mint Hash: ${mintTx.hash}`))
 		} else {
 			// Base：购点仍走 Card Factory.buyPointsForUser（Base USDC EIP-3009）。
 			const factoryAbiWithTopupRecommender = [
@@ -10197,6 +10180,38 @@ export async function relayUserCardFactoryCallViaEntryPoint(params: {
 		)
 	)
 	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, { gasLimit: params.gasLimit ?? 20_000_000n })
+}
+
+/**
+ * CoNET protocol CONET-USDC settlement mint (gateway accounting, not admin airdrop).
+ * Relayer AA must be Factory paymaster (`ensureUserCardFactoryAllowsRelayerAA` inside relay).
+ */
+export async function mintPointsForProtocolUsdcSettlementViaEntryPoint(params: {
+	cardAddress: string
+	recipientEOA: string
+	points6: bigint
+	SC: SettleContractPoolEntry
+	logTag: string
+}): Promise<{ mintTx: ethers.ContractTransactionResponse; aaAccount: string }> {
+	const cardAddress = ethers.getAddress(params.cardAddress)
+	const recipientEOA = ethers.getAddress(params.recipientEOA)
+	if (params.points6 <= 0n) throw new Error(`${params.logTag}: points6 must be > 0`)
+	const aaAccount = await ensureAAForEOAOnCard(cardAddress, recipientEOA, params.SC)
+	const iface = new ethers.Interface([
+		'function mintPointsForProtocolUsdcSettlement(address userEOA, uint256 points6)',
+	])
+	const cardCallData = iface.encodeFunctionData('mintPointsForProtocolUsdcSettlement', [
+		recipientEOA,
+		params.points6,
+	])
+	const mintTx = await relayUserCardCallViaEntryPoint({
+		SC: params.SC,
+		chain: 'conet',
+		cardAddress,
+		cardCallData,
+		logTag: params.logTag,
+	})
+	return { mintTx, aaAccount }
 }
 
 /** Plan A: relayer AA execute(card, 0, cardCalldata) — no Factory gatewayInvokeCard. */
@@ -19613,24 +19628,7 @@ export const usdcTopupPreCheck = async (
 
 		const cardChain = await resolveUserCardChain(cardAddress)
 		if (cardChain === 'conet') {
-			const pk = (masterSetup as { settle_contractAdmin?: string[] }).settle_contractAdmin?.[0]
-			if (!pk) {
-				return { success: false, error: 'Service admin is not configured for CoNET-USDC top-up' }
-			}
-			const serviceAdmin = ethers.getAddress(new ethers.Wallet(pk).address)
-			const cardProvider = providerForUserCardChain(cardChain)
-			const cardAdminRead = new ethers.Contract(
-				cardAddress,
-				['function isAdmin(address) view returns (bool)'],
-				cardProvider,
-			)
-			const isServiceAdmin = await cardAdminRead.isAdmin(serviceAdmin) as boolean
-			if (!isServiceAdmin) {
-				return {
-					success: false,
-					error: 'Service admin is not a card admin; CoNET-USDC top-up cannot mint NFT #0',
-				}
-			}
+			// Protocol gateway mint (Factory owner / paymaster) — no card-admin service signer required.
 			const points6Mint = BigInt(preCheck.preChecked.currencyAmount.points6)
 			const minTier = await nfcTopupPreCheckMintMinTierFirstMembership(
 				cardAddress,
@@ -19640,8 +19638,7 @@ export const usdcTopupPreCheck = async (
 			if (!minTier.success) {
 				return { success: false, error: minTier.error ?? 'Top-up below first membership tier' }
 			}
-			// Do not eth_call mintPointsByAdmin here: first-time users may have no AA yet.
-			// Master ensureAAForEOAOnCard runs immediately before mint.
+			// Master ensureAAForEOAOnCard runs immediately before protocol mint.
 		}
 
 		return {

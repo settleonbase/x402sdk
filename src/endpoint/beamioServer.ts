@@ -4778,8 +4778,8 @@ const routing = ( router: Router ) => {
 	 *       `awaiting_topup_auth` → POS 签 `/api/nfcUsdcChargeTopupAuth` → Master `nfcUsdcTopup`（preSigned）
 	 *   5b. **无 sid+pos**（历史浏览器 NFC）：cluster 直接 `postLocalhost` Master，由 service-admin 签 ExecuteForAdmin
 	 *   5c. **workflow=clientTopup + beneficiary**（遗留）：仅 x402 结算 USDC → beneficiary EOA；卡内 topup 由客户端 `/api/usdcTopup`
-	 *   5d. **workflow=treasuryBridge + aa**：Discover 国库桥 — settle USDC → BASE_TREASURY（矿工异步铸 CONET-USDC → owner）；
-	 *       Master 立刻 mintPointsByAdmin → 用户 AA（不等 CoNET mint）
+	 *   5d. **workflow=treasuryBridge + aa**：Discover 国库桥 — settle USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+	 *       Master `treasuryBridgeFulfill` LockMint CONET-USDC → owner + protocol gateway mint → user AA
 	 *   5e. **workflow=genesisNodeSeat + beneficiary + qty**：Discover Genesis Seat — settle USDC → GENESIS_NODE_SEAT_PAYTO；
 	 *       Master `genesisNodeSeatFulfill` 自动 createRedeemFor + claimRedeemFor（listener 部署节点）
 	 *   5f. **workflow=walletDeposit + beneficiary**：Wallet USDC 入金 — settle USDC → GENESIS_NODE_BRIDGE_INITIATOR；
@@ -5233,9 +5233,8 @@ const routing = ( router: Router ) => {
 			}
 
 			/**
-			 * Discover 完整国库桥：x402 settle Base USDC → BASE_TREASURY（同址 0xa311…）。
-			 * 矿工按 Base 入金异步 2/3 投票铸 CONET-USDC → card.owner()；Master 确认入金后立刻 mint 卡点 #0 → 用户 AA。
-			 * 不等待 CoNET-USDC mint。
+			 * Discover treasuryBridge：x402 settle Base USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+			 * Master LockMint CONET-USDC → card.owner()，再 protocol gateway mint 卡点 #0 → 用户（免 admin 空投）。
 			 */
 			if (treasuryBridgeOnly && recipientAaAddr) {
 				const { amount6: quotedTreasury, usesOracle: treasuryUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
@@ -5258,20 +5257,25 @@ const routing = ( router: Router ) => {
 				if ('error' in preparedTreasury) {
 					return res.status(400).json({ success: false, error: preparedTreasury.error }).end()
 				}
+				const mintArgs = tryParseMintPointsByAdminArgs(preparedTreasury.data)
+				if (!mintArgs || mintArgs.points6 <= 0n) {
+					return res.status(400).json({ success: false, error: 'Failed to quote points for treasuryBridge' }).end()
+				}
 				const bunitPre = await nfcTopupPreCheckBUnitFee(cardAddr, preparedTreasury.data)
 				if (!bunitPre.success) {
 					return res.status(400).json({ success: false, error: bunitPre.error ?? 'B-Unit precheck failed' }).end()
 				}
+				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
 				const settleDesc =
-					`Beamio USDC treasuryBridge (${cur} ${amt} → treasury ${BASE_TREASURY.slice(0, 10)}… recipientOwner=${payToOwner.slice(0, 10)}… aa=${recipientAaAddr.slice(0, 10)}…)`
-				const settledByRawSigTreasury = await settleWithRawSigIfNeeded(quotedTreasury, settleDesc, BASE_TREASURY)
+					`Beamio USDC treasuryBridge (${cur} ${amt} → initiator ${settlePayTo.slice(0, 10)}… owner=${payToOwner.slice(0, 10)}… aa=${recipientAaAddr.slice(0, 10)}…)`
+				const settledByRawSigTreasury = await settleWithRawSigIfNeeded(quotedTreasury, settleDesc, settlePayTo)
 				if (settledByRawSigTreasury === null) {
 					return
 				}
 				const settledTreasury =
 					settledByRawSigTreasury ??
 					(await settleBeamioX402ToCardOwner(req, res, {
-						cardOwner: BASE_TREASURY,
+						cardOwner: settlePayTo,
 						quotedUsdc6: quotedTreasury,
 						description: settleDesc,
 					}))
@@ -5280,28 +5284,56 @@ const routing = ( router: Router ) => {
 				}
 				logger(
 					Colors.green(
-						`[nfcUsdcTopup/treasuryBridge] settle OK card=${cardAddr} treasury=${BASE_TREASURY} owner=${payToOwner} aa=${recipientAaAddr} payer=${settledTreasury.payer} usdc6=${settledTreasury.usdcAmount6} USDC_tx=${settledTreasury.USDC_tx}`,
+						`[nfcUsdcTopup/treasuryBridge] settle OK card=${cardAddr} payTo=${settlePayTo} owner=${payToOwner} aa=${recipientAaAddr} payer=${settledTreasury.payer} usdc6=${settledTreasury.usdcAmount6} points6=${mintArgs.points6} USDC_tx=${settledTreasury.USDC_tx}`,
 					),
 				)
-				postLocalhost(
-					'/api/nfcUsdcTopup',
-					{
-						cardAddr: preparedTreasury.cardAddr,
-						data: preparedTreasury.data,
-						deadline: preparedTreasury.deadline,
-						nonce: preparedTreasury.nonce,
-						recipientEOA: recipientAaAddr,
-						cardOwner: payToOwner,
-						currency: cur,
-						currencyAmount: amt,
-						payer: settledTreasury.payer,
-						USDC_tx: settledTreasury.USDC_tx,
-						usdcAmount6: settledTreasury.usdcAmount6.toString(),
-						topupSourceOverride: 'usdcPurchasingCard',
-						originatingUSDCTx: settledTreasury.USDC_tx,
-					},
-					res,
-				)
+				if (!res.headersSent) {
+					res
+						.status(200)
+						.json({
+							success: true,
+							workflow: 'treasuryBridge',
+							USDC_tx: settledTreasury.USDC_tx,
+							payer: settledTreasury.payer,
+							usdcAmount6: settledTreasury.usdcAmount6.toString(),
+							cardAddress: cardAddr,
+							cardOwner: payToOwner,
+							recipientEOA: recipientAaAddr,
+							points6: mintArgs.points6.toString(),
+							fulfillPending: true,
+						})
+						.end()
+				}
+				void postLocalhostBuffer('/api/treasuryBridgeFulfill', {
+					cardAddress: cardAddr,
+					cardOwner: payToOwner,
+					recipientEOA: recipientAaAddr,
+					points6: mintArgs.points6.toString(),
+					payer: settledTreasury.payer,
+					USDC_tx: settledTreasury.USDC_tx,
+					usdcAmount6: settledTreasury.usdcAmount6.toString(),
+					currency: cur,
+					currencyAmount: amt,
+				})
+					.then((r) => {
+						if (r.statusCode >= 400) {
+							logger(
+								Colors.red(
+									`[nfcUsdcTopup/treasuryBridge] background fulfill HTTP ${r.statusCode}: ${r.body.slice(0, 400)}`,
+								),
+							)
+						} else {
+							logger(
+								Colors.green(
+									`[nfcUsdcTopup/treasuryBridge] background fulfill OK USDC_tx=${settledTreasury.USDC_tx?.slice(0, 12)}…`,
+								),
+							)
+						}
+					})
+					.catch((e: unknown) => {
+						const msg = e instanceof Error ? e.message : String(e)
+						logger(Colors.red(`[nfcUsdcTopup/treasuryBridge] background fulfill error: ${msg}`))
+					})
 				return
 			}
 
