@@ -41,6 +41,98 @@ function fragmentUploadPaths(hash: string) {
 	}
 }
 
+/**
+ * Deterministic custom pointer alias (`point-0x<64hex>`) → current content hash.
+ * Used by @beamio/chat-sdk encrypted history: a fixed, EOA-derived locator that always
+ * resolves to the freshest index CID without exposing which fragment is the index.
+ *
+ * Owner-bound + monotonic ts → only the same EOA can re-point (anti-hijack, anti-rollback).
+ */
+const POINTER_PREFIX = 'point-'
+/** point-0x + 64 hex. */
+const POINTER_RE = /^point-0x[0-9a-fA-F]{64}$/
+/** Reject pointer writes whose signed timestamp is older/newer than this window (seconds). */
+const POINTER_TS_WINDOW_SEC = 24 * 60 * 60
+
+type PointerAliasRecord = {
+	/** Content hash (keccak of the pointed fragment) this alias currently resolves to. */
+	hash: string
+	/** EOA that owns this pointer; only it may re-point. */
+	owner: string
+	/** Last accepted signed timestamp (unix seconds) — monotonic, blocks replay rollback. */
+	ts: number
+	updatedAt: number
+}
+
+function isPointerHash(hash: string): boolean {
+	return typeof hash === 'string' && hash.startsWith(POINTER_PREFIX)
+}
+
+function pointerAliasPath(pointer: string): string {
+	// pointer already namespaced by `point-` prefix; keep as its own sidecar file.
+	return `${storagePATH}/${pointer}.alias.json`
+}
+
+async function readPointerAlias(pointer: string): Promise<PointerAliasRecord | null> {
+	try {
+		const raw = await Fs.promises.readFile(pointerAliasPath(pointer), 'utf8')
+		const parsed = JSON.parse(raw) as PointerAliasRecord
+		if (!parsed?.hash || !parsed?.owner) return null
+		return parsed
+	} catch {
+		return null
+	}
+}
+
+async function writePointerAlias(pointer: string, record: PointerAliasRecord): Promise<void> {
+	await Fs.promises.writeFile(pointerAliasPath(pointer), JSON.stringify(record))
+}
+
+/**
+ * Validate + persist a pointer re-point. Returns true when the alias now maps to `contentHash`.
+ * Requires an EOA signature over `${pointer}|${contentHash}|${ts}` and owner-binding.
+ */
+async function applyPointerAlias(args: {
+	pointer?: string
+	owner?: string
+	ts?: number
+	sig?: string
+	contentHash: string
+}): Promise<{ ok: boolean; error?: string }> {
+	const { pointer, owner, ts, sig, contentHash } = args
+	if (!pointer) return { ok: true } // no pointer requested; content-addressed only
+	if (!POINTER_RE.test(pointer)) return { ok: false, error: 'Invalid pointer format' }
+	if (!owner || !sig || !Number.isFinite(ts)) return { ok: false, error: 'Missing pointer owner/ts/sig' }
+
+	const nowSec = Math.floor(Date.now() / 1000)
+	if (Math.abs(nowSec - Number(ts)) > POINTER_TS_WINDOW_SEC) {
+		return { ok: false, error: 'Pointer timestamp out of window' }
+	}
+
+	const message = `${pointer}|${contentHash}|${ts}`
+	const recovered = checkSign(message, sig, owner)
+	if (!recovered) return { ok: false, error: 'Pointer signature invalid' }
+
+	const existing = await readPointerAlias(pointer)
+	if (existing) {
+		if (existing.owner.toLowerCase() !== owner.toLowerCase()) {
+			return { ok: false, error: 'Pointer owned by another wallet' }
+		}
+		if (Number(ts) < existing.ts) {
+			return { ok: false, error: 'Pointer timestamp rollback' }
+		}
+	}
+
+	await writePointerAlias(pointer, {
+		hash: contentHash,
+		owner: owner.toLowerCase(),
+		ts: Number(ts),
+		updatedAt: Date.now(),
+	})
+	logger(`applyPointerAlias [${pointer}] → ${contentHash} owner=${owner.toLowerCase()}`)
+	return { ok: true }
+}
+
 type FragmentUploadMeta = {
 	totalSize: number
 	wallet: string
@@ -317,6 +409,20 @@ const saveFragment = (hash: string, data: string): Promise<boolean> => new Promi
 })
 
 const getFragment = async (req: Request, hash: string, res: Response): Promise<void> => {
+	// Resolve `point-0x…` alias → current content hash before serving.
+	if (isPointerHash(hash)) {
+		if (!POINTER_RE.test(hash)) {
+			res.status(404).end()
+			return
+		}
+		const alias = await readPointerAlias(hash)
+		if (!alias?.hash) {
+			logger(Colors.grey(`getFragment pointer [${hash}] not found`))
+			res.status(404).end()
+			return
+		}
+		hash = alias.hash
+	}
 	const paths = fragmentPaths(hash)
 	logger(`getFragment = ${hash} filename = ${paths.text}`)
 
@@ -536,10 +642,18 @@ class server {
 		})
 
 		router.post ('/storageFragment',  async (req: any, res: any) => {
-			const { wallet, signMessage, image } = req.body as {
+			const { wallet, signMessage, image, pointer, pointerOwner, pointerTs, pointerSig } = req.body as {
 				wallet?: string
 				image?: string
 				signMessage?: string
+				/** Optional deterministic alias `point-0x…` to (re)point at this content. */
+				pointer?: string
+				/** EOA that owns/updates the pointer (must match pointer signature). */
+				pointerOwner?: string
+				/** Unix seconds signed into the pointer message. */
+				pointerTs?: number
+				/** EIP-191 signature over `${pointer}|${contentHash}|${pointerTs}`. */
+				pointerSig?: string
 			}
 			const ipaddress = getIpAddressFromForwardHeader(req)
 			if (!wallet || !signMessage) {
@@ -565,8 +679,41 @@ class server {
 			const hash = keccak256(toUtf8Bytes(image))
 			const SC = beamio_ContractPool[0]
 			const result = await saveFragment(hash, image)
-			return res.status(200).end()
 
+			// Optional deterministic pointer alias (encrypted-history index locator).
+			if (pointer) {
+				const aliasResult = await applyPointerAlias({
+					pointer,
+					owner: pointerOwner,
+					ts: pointerTs,
+					sig: pointerSig,
+					contentHash: hash,
+				})
+				if (!aliasResult.ok) {
+					logger(Colors.grey(`Router /storageFragment pointer error ${aliasResult.error} ${ipaddress}`))
+					return res.status(403).json({ ok: false, error: aliasResult.error, hash })
+				}
+				return res.status(200).json({ ok: true, hash, pointer })
+			}
+
+			return res.status(200).json({ ok: true, hash })
+
+		})
+
+		/**
+		 * Resolve a deterministic pointer alias to its current content hash without
+		 * downloading the fragment body (fast index-locate for encrypted history).
+		 */
+		router.get('/resolvePointer', async (req, res) => {
+			const { pointer } = req.query as { pointer?: string }
+			if (!pointer || !POINTER_RE.test(pointer)) {
+				return res.status(400).json({ ok: false, error: 'Invalid pointer' })
+			}
+			const alias = await readPointerAlias(pointer)
+			if (!alias?.hash) {
+				return res.status(404).json({ ok: false })
+			}
+			return res.status(200).json({ ok: true, hash: alias.hash, owner: alias.owner, ts: alias.ts })
 		})
 
 		router.get ('/getFragment',  async (req, res) => {

@@ -550,6 +550,21 @@ export const verifyPaymentNew = (
 		// RPC 失败时不影响主流程，交给 facilitator 校验
 	}
 
+	// 自转账守卫：付款钱包 == 收款地址（例如误连 initiator / 收款钱包）→ CDP 会以通用 400 拒绝，
+	// 这里提前给出可操作的清晰提示，避免用户看到无意义的 "Bad Request"。
+	try {
+		const selfFrom = (decodedPayment?.payload as { authorization?: { from?: string } })?.authorization?.from
+		const selfPayTo = paymentRequirements?.[0]?.payTo
+		if (selfFrom && selfPayTo && selfFrom.toLowerCase() === selfPayTo.toLowerCase()) {
+			const errMsg = 'The connected wallet is the deposit/receiving address. Please connect a different wallet to pay.'
+			logger(`verifyPayment self-transfer blocked: from==payTo=${selfPayTo}`)
+			res.status(402).json({ x402Version, error: errMsg, accepts: paymentRequirements })
+			return resolve(false)
+		}
+	} catch (selfEx: any) {
+		logger(`verifyPayment self-transfer guard skipped: ${selfEx?.message ?? selfEx}`)
+	}
+
 	// 签名时效检查：validAfter/validBefore 超出则提前返回，便于 UI 提示用户重新签名
 	const authTime = (decodedPayment?.payload as { authorization?: { validAfter?: string; validBefore?: string } })?.authorization
 	if (authTime?.validAfter !== undefined && authTime?.validBefore !== undefined) {
@@ -602,29 +617,44 @@ export const verifyPaymentNew = (
 		}
 
 	} catch (error: any) {
-		const errMsg = error?.message ?? String(error)
+		let errMsg = error?.message ?? String(error)
 		const errCause = error?.cause?.message ?? error?.cause
 		logger(`verifyPayment catch error! ${errMsg}`, errCause ? `cause=${errCause}` : '')
-		if (errMsg.includes('Bad Request') || errMsg.includes('400')) {
+		// x402 lib（verify2）在 facilitator 非 200 时读取 errorData.error 抛出通用 "Failed to verify payment: Bad Request"，
+		// 但 CDP facilitator 的真实原因在 errorMessage / invalidReason。这里复现 verify 请求（发送单个对象，
+		// 与真实调用一致），抓取 CDP 原始 body 并把真实原因回传给前端。
+		if (errMsg.includes('Bad Request') || errMsg.includes('400') || errMsg.includes('Failed to verify payment')) {
 			const payload = decodedPayment?.payload as { authorization?: { from?: string; to?: string; value?: string; resource?: string } } | undefined
 			const auth = payload?.authorization
-			const req0 = paymentRequirements[0]
+			const req0 =
+				findMatchingPaymentRequirements(paymentRequirements, decodedPayment) ||
+				paymentRequirements[0]
 			logger(`[DEBUG] verifyPayment Bad Request - reqResource=${req0?.resource} payTo=${req0?.payTo} authFrom=${auth?.from?.slice(0, 10)}… authTo=${auth?.to?.slice(0, 10)}… authValue=${auth?.value} authResource=${auth?.resource ?? 'n/a'}`)
-			// 复现请求以捕获 facilitator 原始错误详情
 			try {
 				const createAuth = facilitator1?.createAuthHeaders
 				if (createAuth && facilitator1?.url && req0) {
 					const authHeaders = await createAuth()
 					const url = `${facilitator1.url}/verify`
 					const replacer = (_: unknown, v: unknown) => typeof v === 'bigint' ? String(v) : v
+					// 与真实 verify(decodedPayment, selectedPaymentRequirement) 一致：paymentRequirements 为单个对象
 					const body = JSON.stringify({
 						x402Version: decodedPayment?.x402Version ?? 1,
 						paymentPayload: JSON.parse(JSON.stringify(decodedPayment, replacer)),
-						paymentRequirements: [JSON.parse(JSON.stringify(req0, replacer))],
+						paymentRequirements: JSON.parse(JSON.stringify(req0, replacer)),
 					})
 					const debugRes = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders.verify }, body })
 					const debugText = await debugRes.text()
 					logger(`[DEBUG] facilitator raw response: status=${debugRes.status} body=${debugText}`)
+					// 从 CDP 原始响应解析真实原因（CDP 用 errorMessage，x402 lib 误读 error）
+					try {
+						const parsed = JSON.parse(debugText) as { errorMessage?: string; invalidReason?: string; error?: string; message?: string }
+						const realReason = parsed?.errorMessage || parsed?.invalidReason || parsed?.message || parsed?.error
+						if (realReason && typeof realReason === 'string') {
+							errMsg = realReason
+						}
+					} catch {
+						if (debugText && debugText.length < 500) errMsg = `${errMsg} (${debugText})`
+					}
 				}
 			} catch (debugEx: any) {
 				logger(`[DEBUG] facilitator debug fetch failed: ${debugEx?.message ?? debugEx}`)
