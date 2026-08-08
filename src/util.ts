@@ -556,7 +556,7 @@ export const verifyPaymentNew = (
 		const selfFrom = (decodedPayment?.payload as { authorization?: { from?: string } })?.authorization?.from
 		const selfPayTo = paymentRequirements?.[0]?.payTo
 		if (selfFrom && selfPayTo && selfFrom.toLowerCase() === selfPayTo.toLowerCase()) {
-			const errMsg = 'The connected wallet is the deposit/receiving address. Please connect a different wallet to pay.'
+			const errMsg = 'The connected wallet is the Beamio settlement address and cannot fund a deposit to itself. Please connect a different Base wallet that holds USDC.'
 			logger(`verifyPayment self-transfer blocked: from==payTo=${selfPayTo}`)
 			res.status(402).json({ x402Version, error: errMsg, accepts: paymentRequirements })
 			return resolve(false)
