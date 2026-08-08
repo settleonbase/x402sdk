@@ -46,7 +46,10 @@ export function defaultMerchantProgramCardAddress(): string {
 
 export function providerForUserCardChain(_chain: BeamioUserCardChainKey): ethers.JsonRpcProvider {
 	if (!cachedProviderConet) {
-		cachedProviderConet = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(), CONET_MAINNET_CHAIN_ID)
+		cachedProviderConet = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(), CONET_MAINNET_CHAIN_ID, {
+			staticNetwork: true,
+			batchMaxCount: 1,
+		})
 	}
 	return cachedProviderConet
 }
