@@ -75,6 +75,7 @@ import {
 	BEAMIO_USER_CARD_ASSET_ADDRESS,
 	CONET_MAINNET_CHAIN_ID,
 	BASE_MAINNET_CHAIN_ID,
+	CONET_USDC,
 	BASE_BEAMIO_USER_CARD_ADMIN_GATEWAY_LIB,
 	BASE_BEAMIO_USER_CARD_FAUCET_GATEWAY_LIB,
 	BASE_BEAMIO_USER_CARD_FORMATTING_LIB,
@@ -405,6 +406,22 @@ async function sendCreateAccountForTx(SC: ethers.Contract, creatorAddress: strin
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const USDC_DECIMALS = 6;
 const USDC_SmartContract = new ethers.Contract(USDC_ADDRESS, USDC_ABI, providerBaseBackup)
+const CONET_USDC_EIP3009_ABI = [
+	'function name() view returns (string)',
+	'function balanceOf(address) view returns (uint256)',
+	'function authorizationState(address authorizer, bytes32 nonce) view returns (bool)',
+	'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature)',
+] as const
+const CONET_USDC_TRANSFER_WITH_AUTHORIZATION_TYPES: Record<string, { name: string; type: string }[]> = {
+	TransferWithAuthorization: [
+		{ name: 'from', type: 'address' },
+		{ name: 'to', type: 'address' },
+		{ name: 'value', type: 'uint256' },
+		{ name: 'validAfter', type: 'uint256' },
+		{ name: 'validBefore', type: 'uint256' },
+		{ name: 'nonce', type: 'bytes32' },
+	],
+}
 
 const GET_REDEEM_STATUS_BATCH_ABI = [
 	'function getRedeemStatusBatch(bytes32[] hashes) view returns (bool[] active, uint256[] totalPoints6)',
@@ -9245,7 +9262,7 @@ export const purchasingCardProcess = async () => {
 		const isCCSA = cardAddress?.toLowerCase() === BASE_CCSA_CARD_ADDRESS.toLowerCase()
 		logger(Colors.cyan(`[purchasingCardProcess] cardAddress=${cardAddress} isCCSA=${isCCSA} (expected CCSA: ${BASE_CCSA_CARD_ADDRESS})`))
 
-		// 1. AA 账户：仅在 master 用原有的 DeployingSmartAccount 检查/创建；集群不检查 AA、不传 accountAddress。若购卡 EOA 不存在 AA 则在此创建或返回错误。
+		// 1. AA 账户：Base 仍用 DeployingSmartAccount；CoNET 商户卡用 card factoryGateway()._aaFactory()（与 mintPointsByAdmin / _toAccount 一致）。
 		let accountAddress: string
 		let owner: string
 		let _currency: number
@@ -9254,15 +9271,38 @@ export const purchasingCardProcess = async () => {
 		let nfts: unknown[]
 		let isMember: boolean
 
-		const { accountAddress: addr } = await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
-		if (!addr) {
-			logger(Colors.red(`❌ ${obj.from} purchasingCardProcess DeployingSmartAccount failed (no AA account)`));
-			if (obj.res && !obj.res.writableEnded) obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
-			Settle_ContractPool.unshift(SC)
-			setTimeout(() => purchasingCardProcess(), 3000)
-			return
+		if (cardChain === 'conet') {
+			try {
+				accountAddress = await ensureAAForEOAOnCard(cardAddress, obj.from, SC)
+			} catch (aaErr: any) {
+				logger(Colors.red(`❌ ${obj.from} purchasingCardProcess ensureAAForEOAOnCard failed: ${aaErr?.message ?? aaErr}`))
+				if (obj.res && !obj.res.writableEnded) {
+					obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
+				}
+				Settle_ContractPool.unshift(SC)
+				setTimeout(() => purchasingCardProcess(), 3000)
+				return
+			}
+			if (!accountAddress || accountAddress === ethers.ZeroAddress) {
+				logger(Colors.red(`❌ ${obj.from} purchasingCardProcess ensureAAForEOAOnCard returned empty AA`))
+				if (obj.res && !obj.res.writableEnded) {
+					obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
+				}
+				Settle_ContractPool.unshift(SC)
+				setTimeout(() => purchasingCardProcess(), 3000)
+				return
+			}
+		} else {
+			const { accountAddress: addr } = await DeployingSmartAccount(obj.from, SC.aaAccountFactoryPaymaster)
+			if (!addr) {
+				logger(Colors.red(`❌ ${obj.from} purchasingCardProcess DeployingSmartAccount failed (no AA account)`))
+				if (obj.res && !obj.res.writableEnded) obj.res.status(400).json({ success: false, error: 'Account not found or failed to create. Please create/activate your Beamio account first.' }).end()
+				Settle_ContractPool.unshift(SC)
+				setTimeout(() => purchasingCardProcess(), 3000)
+				return
+			}
+			accountAddress = addr
 		}
-		accountAddress = addr
 
 		if (preChecked) {
 			// preChecked.currencyAmount from server's quotePointsForUSDC_raw(usdcAmount); never from client
@@ -9308,38 +9348,151 @@ export const purchasingCardProcess = async () => {
 			return
 		}
 
-		// 新合约设计：购点通过当前商家卡链路的 Card Factory.buyPointsForUser，不再直接调用 card.buyPointsWith3009Authorization
-		const factoryAbiWithTopupRecommender = [
-			...BeamioFactoryPaymasterABI,
-			'function buyPointsForUser(address cardAddr,address fromEOA,uint256 usdcAmount6,uint256 validAfter,uint256 validBefore,bytes32 nonce,bytes signature,uint256 minPointsOut6,address recommender) returns (uint256)',
-		] as ethers.InterfaceAbi
-		const cardFactoryAddress = cardFactoryForUserCardChain(cardChain)
-		const cardFactory = new ethers.Contract(cardFactoryAddress, factoryAbiWithTopupRecommender, relayWallet)
 		const nonceBytes32 = (typeof nonce === 'string' && nonce.startsWith('0x') ? ethers.zeroPadValue(nonce, 32) : ethers.zeroPadValue(ethers.toBeHex(BigInt(nonce)), 32)) as `0x${string}`
-		logger(Colors.gray(`[purchasingCardProcess] buyPointsForUser chain=${cardChain} factory=${cardFactoryAddress} card=${cardAddress}`))
-		const tx = await (obj.recommender && obj.recommender !== ethers.ZeroAddress
-			? cardFactory["buyPointsForUser(address,address,uint256,uint256,uint256,bytes32,bytes,uint256,address)"](
-				cardAddress,
-				from,
-				usdcAmount,
-				validAfter,
-				validBefore,
+		let tx: ethers.ContractTransactionResponse
+		if (cardChain === 'conet') {
+			// CoNET Factory.USDC_TOKEN is a dead immutable token (supply 0). Discover wallet pays live CONET_USDC
+			// via EIP-3009 → card.owner(), then mintPointsByAdmin (NFT #0 / points) via service-admin executeForAdmin.
+			const fromNorm = ethers.getAddress(from)
+			const ownerNorm = ethers.getAddress(owner)
+			const usdcValue = BigInt(usdcAmount)
+			const conetUsdc = new ethers.Contract(CONET_USDC, CONET_USDC_EIP3009_ABI, providerConet)
+			let tokenName = 'CoNET USD Coin'
+			try {
+				const n = await conetUsdc.name() as string
+				if (typeof n === 'string' && n.trim()) tokenName = n.trim()
+			} catch { /* fallback */ }
+			const eip3009Domain = {
+				name: tokenName,
+				version: '1',
+				chainId: CONET_MAINNET_CHAIN_ID,
+				verifyingContract: ethers.getAddress(CONET_USDC),
+			}
+			let recoveredPayer: string
+			try {
+				recoveredPayer = ethers.verifyTypedData(
+					eip3009Domain,
+					CONET_USDC_TRANSFER_WITH_AUTHORIZATION_TYPES,
+					{
+						from: fromNorm,
+						to: ownerNorm,
+						value: usdcValue,
+						validAfter: BigInt(validAfter || '0'),
+						validBefore: BigInt(validBefore),
+						nonce: nonceBytes32,
+					},
+					userSignature,
+				)
+			} catch (sigErr: any) {
+				throw new Error(`Invalid CoNET-USDC EIP-3009 signature: ${sigErr?.message ?? String(sigErr)}`)
+			}
+			if (recoveredPayer.toLowerCase() !== fromNorm.toLowerCase()) {
+				throw new Error(`CoNET-USDC EIP-3009 signer mismatch: recovered=${recoveredPayer} from=${fromNorm}`)
+			}
+			const alreadyUsed = await conetUsdc.authorizationState(fromNorm, nonceBytes32) as boolean
+			if (alreadyUsed) {
+				throw new Error('CoNET-USDC authorization nonce already used')
+			}
+			const conetUsdcWrite = new ethers.Contract(CONET_USDC, CONET_USDC_EIP3009_ABI, SC.walletConet)
+			logger(Colors.gray(`[purchasingCardProcess] CoNET-USDC transferWithAuthorization from=${fromNorm} to=${ownerNorm} value=${usdcValue} token=${CONET_USDC}`))
+			tx = await conetUsdcWrite.transferWithAuthorization(
+				fromNorm,
+				ownerNorm,
+				usdcValue,
+				BigInt(validAfter || '0'),
+				BigInt(validBefore),
 				nonceBytes32,
 				userSignature,
-				0,
-				obj.recommender
 			)
-			: cardFactory["buyPointsForUser(address,address,uint256,uint256,uint256,bytes32,bytes,uint256)"](
-				cardAddress,
-				from,
-				usdcAmount,
-				validAfter,
-				validBefore,
-				nonceBytes32,
-				userSignature,
-				0
-			))
-		logger(Colors.green(`✅ purchasingCardProcess tx submitted Hash: ${tx.hash}`))
+			logger(Colors.green(`✅ purchasingCardProcess CoNET-USDC transfer submitted Hash: ${tx.hash}`))
+			const usdcReceipt = await tx.wait().catch((waitErr: any) => {
+				logger(Colors.yellow(`[purchasingCardProcess] CoNET-USDC tx.wait() failed: ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+				return null
+			})
+			const usdcRelayCheck = checkBusinessRelayTxSuccessful(usdcReceipt ?? undefined, {
+				logTag: 'purchasingCardProcess.conetUsdc',
+			})
+			if (!usdcRelayCheck.ok) {
+				throw new Error(
+					`CoNET-USDC transferWithAuthorization failed: ${tx.hash} (${usdcRelayCheck.reason})`,
+				)
+			}
+
+			const mintIface = new ethers.Interface(['function mintPointsByAdmin(address toEOA, uint256 amount)'])
+			const mintData = mintIface.encodeFunctionData('mintPointsByAdmin', [fromNorm, currencyAmount.points6])
+			const mintDeadline = Math.floor(Date.now() / 1000) + 900
+			const mintNonce = ethers.hexlify(ethers.randomBytes(32))
+			const signedAdmin = await signExecuteForAdminWithServiceAdmin({
+				cardAddr: ethers.getAddress(cardAddress),
+				data: mintData,
+				deadline: mintDeadline,
+				nonce: mintNonce,
+			})
+			if ('error' in signedAdmin) {
+				throw new Error(`Service admin ExecuteForAdmin sign failed: ${signedAdmin.error}`)
+			}
+			const factoryAddress = ethers.getAddress(cardFactoryForUserCardChain('conet'))
+			const factoryIface = new ethers.Interface(['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'])
+			logger(Colors.gray(`[purchasingCardProcess] CoNET mintPointsByAdmin recipient=${fromNorm} points6=${currencyAmount.points6} factory=${factoryAddress}`))
+			const mintTx = await relayUserCardFactoryCallViaEntryPoint({
+				SC,
+				chain: 'conet',
+				factoryAddress,
+				factoryCallData: factoryIface.encodeFunctionData('executeForAdmin', [
+					ethers.getAddress(cardAddress),
+					mintData,
+					BigInt(mintDeadline),
+					mintNonce,
+					signedAdmin.adminSignature,
+				]),
+				logTag: 'purchasingCardProcess.conetMint',
+			})
+			const mintReceipt = await mintTx.wait().catch((waitErr: any) => {
+				logger(Colors.yellow(`[purchasingCardProcess] CoNET mint tx.wait() failed: ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
+				return null
+			})
+			const mintRelayCheck = checkBusinessRelayTxSuccessful(mintReceipt ?? undefined, {
+				logTag: 'purchasingCardProcess.conetMint',
+			})
+			if (!mintRelayCheck.ok) {
+				throw new Error(
+					`CoNET mintPointsByAdmin failed after USDC transfer ${tx.hash}: mint=${mintTx.hash} (${mintRelayCheck.reason})`,
+				)
+			}
+			logger(Colors.green(`✅ purchasingCardProcess CoNET mintPointsByAdmin Hash: ${mintTx.hash}`))
+		} else {
+			// Base：购点仍走 Card Factory.buyPointsForUser（Base USDC EIP-3009）。
+			const factoryAbiWithTopupRecommender = [
+				...BeamioFactoryPaymasterABI,
+				'function buyPointsForUser(address cardAddr,address fromEOA,uint256 usdcAmount6,uint256 validAfter,uint256 validBefore,bytes32 nonce,bytes signature,uint256 minPointsOut6,address recommender) returns (uint256)',
+			] as ethers.InterfaceAbi
+			const cardFactoryAddress = cardFactoryForUserCardChain(cardChain)
+			const cardFactory = new ethers.Contract(cardFactoryAddress, factoryAbiWithTopupRecommender, relayWallet)
+			logger(Colors.gray(`[purchasingCardProcess] buyPointsForUser chain=${cardChain} factory=${cardFactoryAddress} card=${cardAddress}`))
+			tx = await (obj.recommender && obj.recommender !== ethers.ZeroAddress
+				? cardFactory["buyPointsForUser(address,address,uint256,uint256,uint256,bytes32,bytes,uint256,address)"](
+					cardAddress,
+					from,
+					usdcAmount,
+					validAfter,
+					validBefore,
+					nonceBytes32,
+					userSignature,
+					0,
+					obj.recommender
+				)
+				: cardFactory["buyPointsForUser(address,address,uint256,uint256,uint256,bytes32,bytes,uint256)"](
+					cardAddress,
+					from,
+					usdcAmount,
+					validAfter,
+					validBefore,
+					nonceBytes32,
+					userSignature,
+					0
+				))
+			logger(Colors.green(`✅ purchasingCardProcess tx submitted Hash: ${tx.hash}`))
+		}
 
 		let purchReceipt: ethers.TransactionReceipt | null = null
 		try {
@@ -9405,7 +9558,7 @@ export const purchasingCardProcess = async () => {
 
 		
 
-		const CHAIN_ID_BASE = 8453n
+		const CHAIN_ID_BASE = cardChain === 'conet' ? BigInt(CONET_MAINNET_CHAIN_ID) : 8453n
 		const payerAddr = ethers.getAddress(from)
 		const payeeAddr = ethers.getAddress(to)
 		// Accounting: never trust client currency amount. Use USDC from EIP-3009 signature + chain-verified points.
@@ -13715,30 +13868,39 @@ export const createCardPoolPress = async () => {
 export const purchasingCard = async (cardAddress: string, userSignature: string, nonce: string, usdcAmount: string, from: string, validAfter: string, validBefore: string): Promise<{ success: boolean, message: string }|boolean> => {
 	const SC = Settle_ContractPool[0]
 	try {
-		 // 1. 获取受益人 (Owner) - 仅作为签名参数，不需要 Owner 签名
-		 const card = new ethers.Contract(cardAddress, [
-            "function owner() view returns (address)"
-        ], SC.walletBase); // 使用 adminn 账户进行提交
-        
-        const [cardOwner, USDC_Balance] =  await Promise.all([
+		const cardChain = await resolveUserCardChain(cardAddress)
+		const cardProvider = providerForUserCardChain(cardChain)
+		const card = new ethers.Contract(cardAddress, [
+			'function owner() view returns (address)',
+		], cardProvider)
+
+		const payToken =
+			cardChain === 'conet'
+				? new ethers.Contract(CONET_USDC, CONET_USDC_EIP3009_ABI, cardProvider)
+				: USDC_SmartContract
+
+		const [cardOwner, USDC_Balance] = await Promise.all([
 			card.owner(),
-			USDC_SmartContract.balanceOf(from)
+			payToken.balanceOf(from),
 		])
 
-		logger(`[purchasingCard] USDC_Balance = ${USDC_Balance}`);
-		logger(`[purchasingCard] usdcAmount = ${usdcAmount}`);
-		logger(`[purchasingCard] cardOwner = ${cardOwner}`);
-		logger(`[purchasingCard] ethers.parseUnits(usdcAmount, USDC_DECIMALS) = ${ethers.parseUnits(usdcAmount, USDC_DECIMALS)}`);
-		
-		if (USDC_Balance < usdcAmount) {
-			return { success: false, message: 'USDC balance is not enough' }
-		}
-		
+		logger(`[purchasingCard] chain=${cardChain} token=${cardChain === 'conet' ? CONET_USDC : USDC_ADDRESS}`)
+		logger(`[purchasingCard] USDC_Balance = ${USDC_Balance}`)
+		logger(`[purchasingCard] usdcAmount = ${usdcAmount}`)
+		logger(`[purchasingCard] cardOwner = ${cardOwner}`)
+		logger(`[purchasingCard] ethers.parseUnits(usdcAmount, USDC_DECIMALS) = ${ethers.parseUnits(usdcAmount, USDC_DECIMALS)}`)
 
-		
+		if (USDC_Balance < BigInt(usdcAmount)) {
+			return {
+				success: false,
+				message: cardChain === 'conet'
+					? 'CoNET-USDC balance is not enough'
+					: 'USDC balance is not enough',
+			}
+		}
 	} catch (error: any) {
-		logger(Colors.red(`❌ purchasingCard failed:`), error.message);
-		throw error;
+		logger(Colors.red(`❌ purchasingCard failed:`), error.message)
+		throw error
 	}
 
 	return { success: true, message: 'Card purchased successfully!' }
@@ -19156,7 +19318,9 @@ export const validateRecommenderForTopup = async (
 	if (!ethers.isAddress(recommender)) return { ok: false, error: 'Invalid recommender address' }
 	if (!ethers.isAddress(cardAddress)) return { ok: false, error: 'Invalid cardAddress' }
 	try {
-		const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], providerBaseBackup)
+		const cardChain = await resolveUserCardChain(cardAddress)
+		const cardProvider = providerForUserCardChain(cardChain)
+		const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], cardProvider)
 		const isAdmin = await card.isAdmin(ethers.getAddress(recommender)) as boolean
 		if (!isAdmin) return { ok: false, error: 'Recommender must be card admin' }
 		return { ok: true }
@@ -19184,8 +19348,17 @@ export const purchasingCardPreCheck = async (
 		const cardChain = await resolveUserCardChain(cardAddress)
 		const factory = cardChain === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
 		const relayWallet = settleRelayWalletForChain(SC, cardChain)
-		const getAddressFn = SC.aaAccountFactoryPaymaster.getFunction('getAddress(address,uint256)')
-		const counterfactualAccount = await getAddressFn(from, 0n) as string
+		const cardProvider = providerForUserCardChain(cardChain)
+		let counterfactualAccount: string
+		if (cardChain === 'conet') {
+			const aaFactoryAddr = await getCardAaFactoryAddress(cardAddress)
+			const aaFactoryRead = new ethers.Contract(aaFactoryAddr, BeamioAAAccountFactoryPaymasterABI, cardProvider)
+			const getAddressFn = aaFactoryRead.getFunction('getAddress(address,uint256)')
+			counterfactualAccount = await getAddressFn(from, 0n) as string
+		} else {
+			const getAddressFn = SC.aaAccountFactoryPaymaster.getFunction('getAddress(address,uint256)')
+			counterfactualAccount = await getAddressFn(from, 0n) as string
+		}
 		const card = new ethers.Contract(cardAddress, BeamioUserCardABI, relayWallet)
 		const [[pointsBalance, nfts], owner, _currency, currencyAmount] = await Promise.all([
 			card.getOwnership(counterfactualAccount),
@@ -19210,7 +19383,10 @@ export const purchasingCardPreCheck = async (
 			isMember
 		}
 		const { feeBUnits6 } = calcTopupFixedBUnitFee()
-		const resolveOwnerForBunit = await resolveCardOwnerToEOA(providerBaseBackup, preChecked.owner)
+		const resolveOwnerForBunit = await resolveCardOwnerToEOA(
+			cardChain === 'conet' ? cardProvider : providerBaseBackup,
+			preChecked.owner,
+		)
 		if (!resolveOwnerForBunit.success) {
 			return { success: false, error: resolveOwnerForBunit.error ?? 'Cannot resolve card owner to EOA' }
 		}
@@ -19283,13 +19459,15 @@ const resolveUsdcTopupRules = async (
 		if (!pool?.length) return { success: false, error: 'Settle_ContractPool empty' }
 		const SC = pool[0]
 
+		const cardChainForRules = await resolveUserCardChain(cardAddress)
+		const cardProviderForRules = providerForUserCardChain(cardChainForRules)
 		const card = new ethers.Contract(
 			cardAddress,
 			[
 				'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 				'function tiers(uint256 idx) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds)',
 			],
-			SC.walletBase
+			cardProviderForRules
 		)
 
 		const [[pt, nftsRaw], tiers] = await Promise.all([
@@ -19313,8 +19491,7 @@ const resolveUsdcTopupRules = async (
 		const nextTierPoints6 = nextTier?.minUsdc6
 		const currentPoints6 = pt ?? 0n
 
-		const cardChainForQuote = await resolveUserCardChain(cardAddress)
-		const quoteFactory = cardChainForQuote === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
+		const quoteFactory = cardChainForRules === 'conet' ? SC.conetFactoryPaymaster : SC.baseFactoryPaymaster
 		const unitPriceUSDC6 = await quoteFactory.quoteUnitPointInUSDC6(cardAddress) as bigint
 		if (unitPriceUSDC6 <= 0n) {
 			return { success: false, error: 'UC_PriceZero: quoteUnitPointInUSDC6(card)=0' }
@@ -19429,12 +19606,49 @@ export const usdcTopupPreCheck = async (
 
 		if (usdc6 < requiredMinUsdc6) {
 			const need = ethers.formatUnits(requiredMinUsdc6, 6)
-			return { success: false, error: `Amount too small for ${rules.preview.intent}. Minimum required is ${need} USDC.` }
+			const cardChainForMin = await resolveUserCardChain(cardAddress)
+			return {
+				success: false,
+				error: `Amount too small for ${rules.preview.intent}. Minimum required is ${need} ${cardChainForMin === 'conet' ? 'CoNET-USDC' : 'USDC'}.`,
+			}
 		}
 
 		const normalizedUsdcAmount = usdc6.toString()
 		const preCheck = await purchasingCardPreCheck(cardAddress, normalizedUsdcAmount, from)
 		if (!preCheck.success) return preCheck
+
+		const cardChain = await resolveUserCardChain(cardAddress)
+		if (cardChain === 'conet') {
+			const pk = (masterSetup as { settle_contractAdmin?: string[] }).settle_contractAdmin?.[0]
+			if (!pk) {
+				return { success: false, error: 'Service admin is not configured for CoNET-USDC top-up' }
+			}
+			const serviceAdmin = ethers.getAddress(new ethers.Wallet(pk).address)
+			const cardProvider = providerForUserCardChain(cardChain)
+			const cardAdminRead = new ethers.Contract(
+				cardAddress,
+				['function isAdmin(address) view returns (bool)'],
+				cardProvider,
+			)
+			const isServiceAdmin = await cardAdminRead.isAdmin(serviceAdmin) as boolean
+			if (!isServiceAdmin) {
+				return {
+					success: false,
+					error: 'Service admin is not a card admin; CoNET-USDC top-up cannot mint NFT #0',
+				}
+			}
+			const points6Mint = BigInt(preCheck.preChecked.currencyAmount.points6)
+			const minTier = await nfcTopupPreCheckMintMinTierFirstMembership(
+				cardAddress,
+				ethers.getAddress(from),
+				points6Mint,
+			)
+			if (!minTier.success) {
+				return { success: false, error: minTier.error ?? 'Top-up below first membership tier' }
+			}
+			// Do not eth_call mintPointsByAdmin here: first-time users may have no AA yet.
+			// Master ensureAAForEOAOnCard runs immediately before mint.
+		}
 
 		return {
 			success: true,

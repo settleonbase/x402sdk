@@ -8174,7 +8174,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		logger(preCheck.success ? `server /api/purchasingCard preCheck OK, forwarded to master` : `server /api/purchasingCard forwarded to master (no preChecked)`, inspect({ cardAddress, from, usdcAmount, hasPreChecked: !!preCheck.success }, false, 3, true))
 	})
 
-	/** USDC Topup（新接口）：Cluster 执行完整预检（tier/金额/签名字段），通过后转发 Master 执行 buyPointsForUser。 */
+	/** USDC Topup：Cluster 完整预检后转发 Master。CoNET 卡走 conet-USDC EIP-3009 + mintPointsByAdmin；Base 卡仍 buyPointsForUser。 */
 	router.post('/usdcTopup', async (req, res) => {
 		const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, intent, recommender } = req.body as {
 			cardAddress?: string
