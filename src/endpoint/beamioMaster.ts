@@ -102,6 +102,8 @@ import {
 	validatorDepositRedeemClaimAirdropProcess,
 	genesisNodeSeatFulfillPool,
 	kickGenesisNodeSeatFulfillPoolPress,
+	walletDepositFulfillPool,
+	kickWalletDepositFulfillPoolPress,
 } from './validatorDepositRedeem'
 
 const masterServerPort = 1111
@@ -3651,6 +3653,36 @@ const routing = ( router: Router ) => {
 				res,
 			})
 			kickGenesisNodeSeatFulfillPoolPress()
+		})
+
+		/** After wallet USDC x402 settle: LockMint CONET-USDC → beneficiary (EOA or AA). */
+		router.post('/walletDepositFulfill', (req, res) => {
+			const b = req.body as {
+				beneficiary?: string
+				payer?: string
+				USDC_tx?: string
+				usdcAmount6?: string
+			}
+			const beneficiary = String(b.beneficiary ?? '').trim()
+			const usdcTx = String(b.USDC_tx ?? '').trim()
+			const usdcAmount6 = String(b.usdcAmount6 ?? '').trim()
+			if (!beneficiary || !ethers.isAddress(beneficiary)) {
+				return res.status(400).json({ success: false, error: 'Invalid beneficiary' }).end()
+			}
+			if (!/^0x[0-9a-fA-F]{64}$/.test(usdcTx)) {
+				return res.status(400).json({ success: false, error: 'Invalid USDC_tx' }).end()
+			}
+			if (!/^\d+$/.test(usdcAmount6) || BigInt(usdcAmount6) <= 0n) {
+				return res.status(400).json({ success: false, error: 'Invalid usdcAmount6' }).end()
+			}
+			walletDepositFulfillPool.push({
+				beneficiary: ethers.getAddress(beneficiary),
+				payer: String(b.payer ?? '').trim(),
+				USDC_tx: usdcTx,
+				usdcAmount6,
+				res,
+			})
+			kickWalletDepositFulfillPoolPress()
 		})
 
 		router.post('/treasuryStableSwap', (req, res) => {

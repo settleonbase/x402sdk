@@ -4673,38 +4673,60 @@ const routing = ( router: Router ) => {
 
 	/** GET /api/nfcUsdcTopupQuote
 	 * 客户端浏览器钱包页面（verra-home /usdc-topup）展示价格用：根据 currency 与 amount 用 Oracle 折算 USDC6。
-	 * Query: card, owner, amount, currency。
+	 * Query: card, owner, amount, currency；`workflow=walletDeposit` 可省略 card/owner。
 	 * 同步校验 card.owner() 是否与 owner 一致，避免任意 payTo 注入误用。 */
 	router.get('/nfcUsdcTopupQuote', async (req, res) => {
 		try {
-			const { card, owner, amount, currency, paymentToken } = req.query as { card?: string; owner?: string; amount?: string; currency?: string; paymentToken?: string }
-			if (!card || !ethers.isAddress(String(card).trim())) {
-				return res.status(400).json({ success: false, error: 'Invalid card' }).end()
+			const { card, owner, amount, currency, paymentToken, workflow, beneficiary } = req.query as {
+				card?: string
+				owner?: string
+				amount?: string
+				currency?: string
+				paymentToken?: string
+				workflow?: string
+				beneficiary?: string
 			}
-			if (!owner || !ethers.isAddress(String(owner).trim())) {
-				return res.status(400).json({ success: false, error: 'Invalid owner' }).end()
+			const workflowNorm = String(workflow ?? '').trim().toLowerCase()
+			const walletDepositQuote = workflowNorm === 'walletdeposit'
+			if (walletDepositQuote) {
+				const beneficiaryStr = String(beneficiary ?? '').trim()
+				if (!beneficiaryStr || !ethers.isAddress(beneficiaryStr)) {
+					return res.status(400).json({ success: false, error: 'Invalid beneficiary' }).end()
+				}
+			} else {
+				if (!card || !ethers.isAddress(String(card).trim())) {
+					return res.status(400).json({ success: false, error: 'Invalid card' }).end()
+				}
+				if (!owner || !ethers.isAddress(String(owner).trim())) {
+					return res.status(400).json({ success: false, error: 'Invalid owner' }).end()
+				}
 			}
 			const cur = (currency || 'CAD').toString().trim().toUpperCase()
 			const amt = String(amount ?? '').trim()
 			if (!amt || !(Number(amt) > 0)) {
 				return res.status(400).json({ success: false, error: 'Invalid amount' }).end()
 			}
-			const cardAddr = ethers.getAddress(String(card).trim())
-			const ownerAddr = ethers.getAddress(String(owner).trim())
+			const cardAddr = walletDepositQuote ? ethers.ZeroAddress : ethers.getAddress(String(card).trim())
+			const ownerAddr = walletDepositQuote ? ethers.ZeroAddress : ethers.getAddress(String(owner).trim())
 			let onChainOwner: string | null = null
-			try {
-				const c = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
-				const o = (await c.owner()) as string
-				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
-			} catch (_) { /* tolerate transient rpc */ }
-			if (onChainOwner && onChainOwner !== ownerAddr) {
-				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+			if (!walletDepositQuote) {
+				try {
+					const c = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
+					const o = (await c.owner()) as string
+					if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
+				} catch (_) { /* tolerate transient rpc */ }
+				if (onChainOwner && onChainOwner !== ownerAddr) {
+					return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+				}
 			}
 			const paymentTokenNorm = (() => {
 				const t = String(paymentToken ?? '').trim().toUpperCase()
 				if (t === 'USDC' || t === 'CADD') return t as 'USDC' | 'CADD'
 				return cur === 'CADD' ? 'CADD' : 'USDC'
 			})()
+			if (walletDepositQuote && (cur !== 'USDC' || paymentTokenNorm !== 'USDC')) {
+				return res.status(400).json({ success: false, error: 'walletDeposit requires currency/paymentToken USDC' }).end()
+			}
 			const { amount6: usdc6, usesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
 			if (usdc6 <= 0n) {
 				if (!usesOracle) {
@@ -4760,6 +4782,8 @@ const routing = ( router: Router ) => {
 	 *       Master 立刻 mintPointsByAdmin → 用户 AA（不等 CoNET mint）
 	 *   5e. **workflow=genesisNodeSeat + beneficiary + qty**：Discover Genesis Seat — settle USDC → GENESIS_NODE_SEAT_PAYTO；
 	 *       Master `genesisNodeSeatFulfill` 自动 createRedeemFor + claimRedeemFor（listener 部署节点）
+	 *   5f. **workflow=walletDeposit + beneficiary**：Wallet USDC 入金 — settle USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+	 *       Master `walletDepositFulfill` initiateLockMint CONET-USDC → beneficiary（EOA 或 AA，无卡）
 	 */
 	router.post('/nfcUsdcTopup', async (req, res) => {
 		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty, test, referrerL0 } = req.body as {
@@ -4809,13 +4833,20 @@ const routing = ( router: Router ) => {
 					.json({ success: false, error: 'Invalid or missing `pos` (POS EOA required when `sid` is set)' })
 					.end()
 			}
-			if (!cardAddress || !ethers.isAddress(String(cardAddress).trim())) {
-				sessionUpdate({ state: 'error', error: 'Invalid cardAddress' })
-				return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end()
-			}
-			if (!cardOwner || !ethers.isAddress(String(cardOwner).trim())) {
-				sessionUpdate({ state: 'error', error: 'Invalid cardOwner' })
-				return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end()
+			const earlyWorkflowNorm = String(workflow ?? '').trim().toLowerCase()
+			const walletDepositEarly =
+				earlyWorkflowNorm === 'walletdeposit' &&
+				!!String(beneficiary ?? '').trim() &&
+				ethers.isAddress(String(beneficiary).trim())
+			if (!walletDepositEarly) {
+				if (!cardAddress || !ethers.isAddress(String(cardAddress).trim())) {
+					sessionUpdate({ state: 'error', error: 'Invalid cardAddress' })
+					return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end()
+				}
+				if (!cardOwner || !ethers.isAddress(String(cardOwner).trim())) {
+					sessionUpdate({ state: 'error', error: 'Invalid cardOwner' })
+					return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end()
+				}
 			}
 			const uidTrim = (uid ?? '').trim()
 			const eTrim = (e ?? '').trim()
@@ -4834,8 +4865,12 @@ const routing = ( router: Router ) => {
 				sessionUpdate({ state: 'error', error: 'Invalid amount' })
 				return res.status(400).json({ success: false, error: 'Invalid amount' }).end()
 			}
-			const cardAddr = ethers.getAddress(String(cardAddress).trim())
-			const ownerAddr = ethers.getAddress(String(cardOwner).trim())
+			const cardAddr = walletDepositEarly
+				? ethers.ZeroAddress
+				: ethers.getAddress(String(cardAddress).trim())
+			const ownerAddr = walletDepositEarly
+				? ethers.ZeroAddress
+				: ethers.getAddress(String(cardOwner).trim())
 
 			const settleWithRawSigIfNeeded = async (
 				expectedAmount6: bigint,
@@ -4904,48 +4939,134 @@ const routing = ( router: Router ) => {
 				workflowNorm === 'clienttopup' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
 			const genesisNodeSeatOnly =
 				workflowNorm === 'genesisnodeseat' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
+			const walletDepositOnly =
+				workflowNorm === 'walletdeposit' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
 
-			if ((clientTopupOnly || treasuryBridgeOnly || genesisNodeSeatOnly) && (sidNorm || posAddr)) {
+			if ((clientTopupOnly || treasuryBridgeOnly || genesisNodeSeatOnly || walletDepositOnly) && (sidNorm || posAddr)) {
 				return res
 					.status(400)
 					.json({
 						success: false,
 						error: `${
-							treasuryBridgeOnly ? 'treasuryBridge' : genesisNodeSeatOnly ? 'genesisNodeSeat' : 'clientTopup'
+							treasuryBridgeOnly
+								? 'treasuryBridge'
+								: genesisNodeSeatOnly
+									? 'genesisNodeSeat'
+									: walletDepositOnly
+										? 'walletDeposit'
+										: 'clientTopup'
 						} workflow must not include sid/pos (use POS admin QR for terminal top-up)`,
 					})
 					.end()
 			}
 
-			if (!hasFullNfc && !sessionPath && !clientTopupOnly && !treasuryBridgeOnly && !genesisNodeSeatOnly) {
+			if (!hasFullNfc && !sessionPath && !clientTopupOnly && !treasuryBridgeOnly && !genesisNodeSeatOnly && !walletDepositOnly) {
 				sessionUpdate({ state: 'error', error: 'Invalid uid' })
 				return res
 					.status(400)
 					.json({
 						success: false,
 						error:
-							'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin), treasuryBridge (aa+workflow), clientTopup (beneficiary+workflow), or genesisNodeSeat (beneficiary+qty+workflow).',
+							'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin), treasuryBridge (aa+workflow), clientTopup (beneficiary+workflow), genesisNodeSeat (beneficiary+qty+workflow), or walletDeposit (beneficiary+workflow).',
 					})
 					.end()
 			}
 			// 1. 校验 card.owner() + POS session verifying（先于 SUN，阶段 1 无 SUN）
 			let onChainOwner: string | null = null
-			try {
-				const cardChain = await resolveUserCardChain(cardAddr)
-				const cardProvider = providerForUserCardChain(cardChain)
-				const cprep = new ethers.Contract(
-					cardAddr,
-					['function owner() view returns (address)', 'function isAdmin(address) view returns (bool)'],
-					cardProvider
-				)
-				const o = (await cprep.owner()) as string
-				if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
-			} catch (_) { /* tolerate */ }
-			if (onChainOwner && onChainOwner !== ownerAddr) {
-				sessionUpdate({ state: 'error', error: 'cardOwner mismatch' })
-				return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+			if (!walletDepositOnly) {
+				try {
+					const cardChain = await resolveUserCardChain(cardAddr)
+					const cardProvider = providerForUserCardChain(cardChain)
+					const cprep = new ethers.Contract(
+						cardAddr,
+						['function owner() view returns (address)', 'function isAdmin(address) view returns (bool)'],
+						cardProvider
+					)
+					const o = (await cprep.owner()) as string
+					if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
+				} catch (_) { /* tolerate */ }
+				if (onChainOwner && onChainOwner !== ownerAddr) {
+					sessionUpdate({ state: 'error', error: 'cardOwner mismatch' })
+					return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end()
+				}
 			}
 			const payToOwner = onChainOwner ?? ownerAddr
+
+			/**
+			 * Wallet USDC 入金：x402 settle Base USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+			 * Master initiateLockMint CONET-USDC → beneficiary（EOA 或 AA，无卡 / 无 vault）。
+			 */
+			if (walletDepositOnly && beneficiaryAddr) {
+				if (cur !== 'USDC' || paymentTokenNorm !== 'USDC') {
+					return res.status(400).json({ success: false, error: 'walletDeposit requires currency/paymentToken USDC' }).end()
+				}
+				const { amount6: quotedDeposit, usesOracle: depositUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+				if (quotedDeposit <= 0n) {
+					if (!depositUsesOracle) {
+						return res.status(400).json({ success: false, error: 'Invalid USDC amount' }).end()
+					}
+					const fresh = isOracleFresh()
+					const omsg = fresh
+						? `Oracle rate not available for ${cur}, please retry shortly`
+						: `Oracle rate stale, please retry shortly`
+					return res.status(503).json({ success: false, error: omsg }).end()
+				}
+				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
+				const settleDesc = `Beamio USDC walletDeposit (${amt} USDC → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+				const settledDeposit = await settleBeamioX402ToCardOwner(req, res, {
+					cardOwner: settlePayTo,
+					quotedUsdc6: quotedDeposit,
+					description: settleDesc,
+				})
+				if (!settledDeposit) {
+					return
+				}
+				logger(
+					Colors.green(
+						`[nfcUsdcTopup/walletDeposit] settle OK payTo=${settlePayTo} beneficiary=${beneficiaryAddr} payer=${settledDeposit.payer} usdc6=${settledDeposit.usdcAmount6} USDC_tx=${settledDeposit.USDC_tx}`,
+					),
+				)
+				if (!res.headersSent) {
+					res
+						.status(200)
+						.json({
+							success: true,
+							workflow: 'walletDeposit',
+							USDC_tx: settledDeposit.USDC_tx,
+							payer: settledDeposit.payer,
+							usdcAmount6: settledDeposit.usdcAmount6.toString(),
+							beneficiary: beneficiaryAddr,
+							fulfillPending: true,
+						})
+						.end()
+				}
+				void postLocalhostBuffer('/api/walletDepositFulfill', {
+					beneficiary: beneficiaryAddr,
+					payer: settledDeposit.payer,
+					USDC_tx: settledDeposit.USDC_tx,
+					usdcAmount6: settledDeposit.usdcAmount6.toString(),
+				})
+					.then((r) => {
+						if (r.statusCode >= 400) {
+							logger(
+								Colors.red(
+									`[nfcUsdcTopup/walletDeposit] background fulfill HTTP ${r.statusCode}: ${r.body.slice(0, 400)}`,
+								),
+							)
+						} else {
+							logger(
+								Colors.green(
+									`[nfcUsdcTopup/walletDeposit] background fulfill OK USDC_tx=${settledDeposit.USDC_tx?.slice(0, 12)}…`,
+								),
+							)
+						}
+					})
+					.catch((e: unknown) => {
+						const msg = e instanceof Error ? e.message : String(e)
+						logger(Colors.red(`[nfcUsdcTopup/walletDeposit] background fulfill error: ${msg}`))
+					})
+				return
+			}
 
 			/**
 			 * Discover Genesis Node Seat：x402 settle Base USDC → GENESIS_NODE_BRIDGE_INITIATOR；

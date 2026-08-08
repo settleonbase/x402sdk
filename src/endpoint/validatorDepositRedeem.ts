@@ -4029,6 +4029,222 @@ export const genesisNodeSeatFulfillProcess = async () => {
 	}
 }
 
+// ─── Wallet USDC deposit (x402 settle → LockMint CONET-USDC → beneficiary EOA/AA) ───
+
+export type WalletDepositFulfillPayload = {
+	beneficiary: string
+	payer: string
+	USDC_tx: string
+	usdcAmount6: string
+	res?: Response
+}
+
+type WalletDepositFulfillRecord = {
+	beneficiary: string
+	payer: string
+	USDC_tx: string
+	usdcAmount6: string
+	operationId: string
+	lockMintTxHash: string
+	fulfilledAt: string
+}
+
+export const walletDepositFulfillPool: WalletDepositFulfillPayload[] = []
+
+function resolveWalletDepositFulfillFile(): string {
+	return (
+		process.env.CONET_WALLET_DEPOSIT_FULFILL_FILE?.trim() ||
+		path.join(homedir(), '.conet-wallet-deposit-fulfill.json')
+	)
+}
+
+function readWalletDepositFulfillFile(): Record<string, WalletDepositFulfillRecord> {
+	const file = resolveWalletDepositFulfillFile()
+	if (!fs.existsSync(file)) return {}
+	try {
+		return JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, WalletDepositFulfillRecord>
+	} catch {
+		return {}
+	}
+}
+
+function writeWalletDepositFulfillRecord(record: WalletDepositFulfillRecord): void {
+	const file = resolveWalletDepositFulfillFile()
+	const all = readWalletDepositFulfillFile()
+	all[record.USDC_tx.toLowerCase()] = record
+	fs.mkdirSync(path.dirname(file), { recursive: true })
+	fs.writeFileSync(file, JSON.stringify(all, null, 2) + '\n', 'utf-8')
+}
+
+function lookupWalletDepositFulfill(usdcTx: string): WalletDepositFulfillRecord | null {
+	const key = usdcTx.trim().toLowerCase()
+	if (!key) return null
+	return readWalletDepositFulfillFile()[key] || null
+}
+
+export function kickWalletDepositFulfillPoolPress(): void {
+	void walletDepositFulfillProcess().catch((e: unknown) => {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.red('[walletDepositFulfillProcess] kick error:'), msg)
+	})
+}
+
+function scheduleWalletDepositFulfillPoolPress(): void {
+	if (walletDepositFulfillPool.length === 0) return
+	if (Settle_ContractPool.length > 0) kickWalletDepositFulfillPoolPress()
+	else setTimeout(() => kickWalletDepositFulfillPoolPress(), 3000)
+}
+
+/**
+ * Master: after Base USDC settle to GENESIS_NODE_BRIDGE_INITIATOR,
+ * approve + initiateLockMint with beneficiaries=[wallet] (EOA or AA), callbackTarget=0.
+ * Idempotent on USDC_tx. No Genesis vault / redeem.
+ */
+export const walletDepositFulfillProcess = async () => {
+	const obj = walletDepositFulfillPool.shift()
+	if (!obj) return
+	if (!Settle_ContractPool.length) {
+		walletDepositFulfillPool.unshift(obj)
+		return setTimeout(() => void walletDepositFulfillProcess(), 3000)
+	}
+
+	const usdcTx = String(obj.USDC_tx ?? '').trim()
+	try {
+		if (!/^0x[0-9a-fA-F]{64}$/.test(usdcTx)) {
+			throw new Error('Invalid USDC_tx')
+		}
+		if (!ethers.isAddress(obj.beneficiary)) {
+			throw new Error('Invalid beneficiary')
+		}
+		const lockAmount = BigInt(String(obj.usdcAmount6 ?? '0'))
+		if (lockAmount <= 0n) {
+			throw new Error('Invalid usdcAmount6')
+		}
+
+		const existing = lookupWalletDepositFulfill(usdcTx)
+		if (existing) {
+			logger(
+				Colors.cyan(
+					`[walletDepositFulfill] idempotent hit USDC_tx=${usdcTx.slice(0, 12)}… lockMint=${existing.lockMintTxHash.slice(0, 12)}…`,
+				),
+			)
+			if (obj.res && !obj.res.headersSent) {
+				obj.res
+					.status(200)
+					.json({
+						success: true,
+						idempotent: true,
+						beneficiary: existing.beneficiary,
+						USDC_tx: existing.USDC_tx,
+						operationId: existing.operationId,
+						lockMintTxHash: existing.lockMintTxHash,
+					})
+					.end()
+			}
+			return
+		}
+
+		const treasury = ethers.getAddress(CONET_TREASURY)
+		const beneficiary = ethers.getAddress(obj.beneficiary)
+		const sourceTxHash = usdcTx as `0x${string}`
+		const nonce = BigInt(ethers.hexlify(ethers.randomBytes(16)))
+
+		const bridgeResult = await withGenesisBridgeInitiatorWallet(async (sc) => {
+			const baseProvider = sc.walletBase.provider!
+			const treasuryRead = new ethers.Contract(treasury, TREASURY_LOCK_MINT_ABI, baseProvider)
+			const feeBps = (await treasuryRead.destinationFeeBps!(CONET_MAINNET_CHAIN_ID)) as bigint
+			const feeAmount = (lockAmount * feeBps) / 10_000n
+			const beneficiaries = [beneficiary]
+			const amounts = [lockAmount]
+			const operationId = computeLockMintOperationId({
+				sourceChainId: 8453n,
+				destinationChainId: BigInt(CONET_MAINNET_CHAIN_ID),
+				sourceTreasury: treasury,
+				sourceAsset: ethers.getAddress(USDC_BASE),
+				destinationAsset: ethers.getAddress(CONET_USDC),
+				beneficiaries,
+				amounts,
+				grossAmount: lockAmount,
+				feeAmount,
+				sourceTxHash,
+				nonce,
+				callbackTarget: ethers.ZeroAddress,
+			})
+
+			const usdc = new ethers.Contract(USDC_BASE, ERC20_APPROVE_ABI, sc.walletBase)
+			const needApprove = lockAmount + feeAmount
+			const bal = (await usdc.balanceOf!(sc.walletBase.address)) as bigint
+			if (bal < needApprove) {
+				throw new Error(
+					`Bridge initiator USDC balance ${bal.toString()} < required ${needApprove.toString()} (settle may have landed elsewhere)`,
+				)
+			}
+			const allowance = (await usdc.allowance!(sc.walletBase.address, treasury)) as bigint
+			if (allowance < needApprove) {
+				const approveTx = await usdc.approve!(treasury, needApprove)
+				await approveTx.wait()
+			}
+
+			const treasuryWrite = new ethers.Contract(treasury, TREASURY_LOCK_MINT_ABI, sc.walletBase)
+			const mintTx = await treasuryWrite.initiateLockMint!(
+				CONET_MAINNET_CHAIN_ID,
+				ethers.getAddress(USDC_BASE),
+				ethers.getAddress(CONET_USDC),
+				beneficiaries,
+				amounts,
+				sourceTxHash,
+				nonce,
+				ethers.ZeroAddress,
+				{ gasLimit: 500_000 },
+			)
+			const mintReceipt = await mintTx.wait()
+			if (mintReceipt?.status !== 1) throw new Error('initiateLockMint reverted')
+
+			return {
+				operationId,
+				lockMintTxHash: mintTx.hash as string,
+			}
+		})
+
+		const record: WalletDepositFulfillRecord = {
+			beneficiary,
+			payer: ethers.isAddress(obj.payer) ? ethers.getAddress(obj.payer) : String(obj.payer ?? ''),
+			USDC_tx: usdcTx,
+			usdcAmount6: lockAmount.toString(),
+			operationId: bridgeResult.operationId,
+			lockMintTxHash: bridgeResult.lockMintTxHash,
+			fulfilledAt: new Date().toISOString(),
+		}
+		writeWalletDepositFulfillRecord(record)
+
+		logger(
+			Colors.green(
+				`[walletDepositFulfill] OK USDC_tx=${usdcTx.slice(0, 12)}… beneficiary=${beneficiary.slice(0, 10)}… op=${bridgeResult.operationId.slice(0, 12)}… lockMint=${bridgeResult.lockMintTxHash.slice(0, 12)}…`,
+			),
+		)
+		if (obj.res && !obj.res.headersSent) {
+			obj.res
+				.status(200)
+				.json({
+					success: true,
+					beneficiary,
+					USDC_tx: usdcTx,
+					operationId: bridgeResult.operationId,
+					lockMintTxHash: bridgeResult.lockMintTxHash,
+				})
+				.end()
+		}
+	} catch (e: any) {
+		const msg = e?.shortMessage ?? e?.message ?? String(e)
+		logger(Colors.red('[walletDepositFulfillProcess] failed:'), msg)
+		if (obj.res && !obj.res.headersSent) {
+			obj.res.status(400).json({ success: false, error: msg }).end()
+		}
+	} finally {
+		scheduleWalletDepositFulfillPoolPress()
+	}
+}
+
 export function startValidatorDepositRedeemListener(): void {
 	if (listenerStarted) return
 	listenerStarted = true
