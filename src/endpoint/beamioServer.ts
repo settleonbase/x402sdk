@@ -18,7 +18,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
@@ -10813,6 +10813,134 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			postLocalhost('/api/genesisNodeReferralRedeem', forwardBody, res)
 		} catch (error: any) {
 			return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' }).end()
+		}
+	})
+
+	/**
+	 * ChatIndexRegistry — read a wallet's current head pointer + EIP-712 nonce.
+	 * Client uses `nonce` to build the next SetPointer signature; `indexHash`/`ts`/`seq`
+	 * are the last-recorded encrypted-history index for recovery.
+	 */
+	router.get('/chatIndexPointer', async (req, res) => {
+		try {
+			const owner = ethers.getAddress(String(req.query.owner ?? req.query.account ?? ''))
+			const registry = new ethers.Contract(
+				CONET_CHAT_INDEX_REGISTRY,
+				[
+					'function getPointer(address) view returns (bytes32 indexHash,uint64 ts,uint64 seq,uint64 updatedAt)',
+					'function nonceOf(address) view returns (uint256)',
+				],
+				providerConet,
+			)
+			const [ptr, nonce] = await Promise.all([registry.getPointer!(owner), registry.nonceOf!(owner)])
+			return res
+				.status(200)
+				.json({
+					success: true,
+					owner,
+					indexHash: ptr[0],
+					ts: ptr[1].toString(),
+					seq: ptr[2].toString(),
+					updatedAt: ptr[3].toString(),
+					nonce: nonce.toString(),
+					registry: CONET_CHAT_INDEX_REGISTRY,
+					domain: {
+						name: 'ChatIndexRegistry',
+						version: '1',
+						chainId: 224422,
+						verifyingContract: CONET_CHAT_INDEX_REGISTRY,
+					},
+				})
+				.end()
+		} catch (error: any) {
+			return res
+				.status(400)
+				.json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Pointer read failed' })
+				.end()
+		}
+	})
+
+	/**
+	 * ChatIndexRegistry — gasless head-pointer update. Cluster verifies the offline
+	 * EIP-712 signature + nonce + monotonic ts/seq, then forwards to Master relayer (pays gas).
+	 */
+	router.post('/setChatIndexPointer', async (req, res) => {
+		try {
+			const owner = ethers.getAddress(String(req.body?.owner ?? ''))
+			const indexHash = String(req.body?.indexHash ?? '')
+			if (!ethers.isHexString(indexHash, 32) || indexHash === ethers.ZeroHash) {
+				return res.status(400).json({ success: false, error: 'indexHash must be a non-zero bytes32' }).end()
+			}
+			const ts = BigInt(String(req.body?.ts ?? '0'))
+			const seq = BigInt(String(req.body?.seq ?? '0'))
+			const nonce = BigInt(String(req.body?.nonce ?? ''))
+			const signature = String(req.body?.signature ?? '')
+			if (!ethers.isHexString(signature)) {
+				return res.status(400).json({ success: false, error: 'Invalid signature' }).end()
+			}
+			if (ts >= 1n << 64n || seq >= 1n << 64n) {
+				return res.status(400).json({ success: false, error: 'ts/seq out of uint64 range' }).end()
+			}
+			const registry = new ethers.Contract(
+				CONET_CHAT_INDEX_REGISTRY,
+				[
+					'function getPointer(address) view returns (bytes32 indexHash,uint64 ts,uint64 seq,uint64 updatedAt)',
+					'function nonceOf(address) view returns (uint256)',
+				],
+				providerConet,
+			)
+			const [cur, expectedNonce] = await Promise.all([
+				registry.getPointer!(owner),
+				registry.nonceOf!(owner),
+			])
+			if (nonce !== BigInt(expectedNonce.toString())) {
+				return res.status(400).json({ success: false, error: 'Stale pointer nonce' }).end()
+			}
+			if (ts < BigInt(cur[1].toString())) {
+				return res.status(400).json({ success: false, error: 'Stale ts (must be non-decreasing)' }).end()
+			}
+			if (seq < BigInt(cur[2].toString())) {
+				return res.status(400).json({ success: false, error: 'Stale seq (must be non-decreasing)' }).end()
+			}
+			const digest = ethers.TypedDataEncoder.hash(
+				{
+					name: 'ChatIndexRegistry',
+					version: '1',
+					chainId: 224422,
+					verifyingContract: CONET_CHAT_INDEX_REGISTRY,
+				},
+				{
+					SetPointer: [
+						{ name: 'owner', type: 'address' },
+						{ name: 'indexHash', type: 'bytes32' },
+						{ name: 'ts', type: 'uint64' },
+						{ name: 'seq', type: 'uint64' },
+						{ name: 'nonce', type: 'uint256' },
+					],
+				},
+				{ owner, indexHash, ts, seq, nonce },
+			)
+			const recovered = ethers.recoverAddress(digest, signature)
+			if (recovered.toLowerCase() !== owner.toLowerCase()) {
+				return res.status(403).json({ success: false, error: 'Invalid signature' }).end()
+			}
+			return postLocalhost(
+				'/api/setChatIndexPointer',
+				{
+					owner,
+					indexHash,
+					ts: ts.toString(),
+					seq: seq.toString(),
+					nonce: nonce.toString(),
+					signature,
+				},
+				res,
+			)
+		} catch (error: any) {
+			return res
+				.status(400)
+				.json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' })
+				.end()
 		}
 	})
 

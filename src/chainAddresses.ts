@@ -133,6 +133,10 @@ export const CONET_GENESIS_NODE_REFERRAL_VAULT = '0x051b65E5711E6E74bC236Fe220dc
 /** Current UUPS impl (setL1Ratio). Proxy address above is canonical. */
 export const CONET_GENESIS_NODE_REFERRAL_VAULT_IMPL = '0xC841e5Cef2e4774990bf34031594C3a65bFcaE39'
 export const CONET_GENESIS_NODE_REFERRAL_VAULT_DEPLOY_BLOCK = 594820
+/** CoNET ChatIndexRegistry ERC1967 proxy — per-EOA head pointer to encrypted chat-history index (IPFS content hash). */
+export const CONET_CHAT_INDEX_REGISTRY = '0x1511Caa71081C84d8a591490D1b83879088EED72'
+/** Current UUPS impl. Proxy address above is canonical. */
+export const CONET_CHAT_INDEX_REGISTRY_IMPL = '0xF94299760E07E62eC33A8e91fA585f0b40d137Ee'
 /** 每节点应收 USDC（6 位精度）= NODE_SALE_NODE_PRICE + NODE_SALE_SERVER_FEE */
 export const GENESIS_NODE_SEAT_USDC_PER_NODE6 = NODE_SALE_NODE_PRICE_USDC6 + NODE_SALE_SERVER_FEE_USDC6
 /** Discover Genesis 商家卡（SilentPassUI /discover 明细） */
