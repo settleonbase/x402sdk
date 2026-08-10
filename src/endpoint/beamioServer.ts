@@ -4813,7 +4813,7 @@ const routing = ( router: Router ) => {
 			signature?: string
 			/** Genesis Node Seat：节点数量（正整数） */
 			qty?: string | number
-			/** Genesis E2E: `test=332266` → settle 1.37 USDC + vault micro-split (third-party code gate; PWA buyer allowlist is client-side) */
+			/** Genesis E2E: `test=332266` → settle 4.00 USDC + vault micro-split (third-party code gate; PWA buyer allowlist is client-side) */
 			test?: string | number
 			/** Genesis Evangelist L0 EOA (optional); must be registered L0 when non-zero */
 			referrerL0?: string
@@ -5110,7 +5110,7 @@ const routing = ( router: Router ) => {
 							.status(400)
 							.json({
 								success: false,
-								error: `genesisNodeSeat amount mismatch: quoted ${quotedGenesis.toString()} != qty*1370e6 (${expectedUsdc6.toString()})`,
+								error: `genesisNodeSeat amount mismatch: quoted ${quotedGenesis.toString()} != qty*4000e6 (${expectedUsdc6.toString()})`,
 							})
 							.end()
 					}
@@ -5163,7 +5163,7 @@ const routing = ( router: Router ) => {
 				}
 				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
 				const settleDesc = genesisTestMode
-					? `Beamio USDC genesisNodeSeat TEST (pay 1.37 USDC; LockMint → vault; fulfill qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+					? `Beamio USDC genesisNodeSeat TEST (pay 4.00 USDC; LockMint → vault; fulfill qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
 					: `Beamio USDC genesisNodeSeat (qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… LockMint vault; beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
 				const settledGenesis = await settleBeamioX402ToCardOwner(req, res, {
 					cardOwner: settlePayTo,

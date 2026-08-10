@@ -108,14 +108,15 @@ export const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 /**
  * NodeSaleSplitter（Base，UUPS ERC1967 代理）：节点购买 USDC 拆账。
- * 每节点 = nodePrice(1250 USDC → CONET_TREASURY_CREATE2 / BASE_TREASURY) + serverFee(120 USDC → 0x87cA…05E1)。
+ * 每节点 = nodePrice(3880 USDC → CONET_TREASURY_CREATE2 / BASE_TREASURY) + serverFee/OPEX(120 USDC → 0x87cA…05E1)
+ * = **4000 USDC** list price (OPEX included).
  * 部署后用 deployments/base-NodeSaleSplitter.json 的 `address` 回填；环境变量 NODE_SALE_SPLITTER_BASE 可覆盖。
  */
 export const NODE_SALE_SPLITTER_BASE =
   process.env.NODE_SALE_SPLITTER_BASE || '0x648D628e05DaD493dcECf8C8cDDb4E8867635d49'
-/** 每节点本金（USDC，6 位精度）→ BASE_TREASURY */
-export const NODE_SALE_NODE_PRICE_USDC6 = 1_250_000_000n
-/** 每节点服务器费（USDC，6 位精度）→ CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN(0x87cA…05E1) */
+/** 每节点本金（USDC，6 位精度）→ BASE_TREASURY；list 4000 已含 OPEX 后的节点份额 */
+export const NODE_SALE_NODE_PRICE_USDC6 = 3_880_000_000n
+/** 每节点 OPEX / 服务器费（USDC，6 位精度）→ CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN(0x87cA…05E1)；含于 list 4000 */
 export const NODE_SALE_SERVER_FEE_USDC6 = 120_000_000n
 
 /**
@@ -143,7 +144,7 @@ export const GENESIS_NODE_SEAT_USDC_PER_NODE6 = NODE_SALE_NODE_PRICE_USDC6 + NOD
 export const GENESIS_NODE_SEAT_CARD_ADDRESS = '0xafE482D2612327a0D723544B9fB713C514a793a2'
 /**
  * E2E test gate for `/usdc-topup?...&workflow=genesisNodeSeat&test=…`.
- * When body `test` matches, Cluster settles **1.37 USDC** (1/1000 seat) then runs
+ * When body `test` matches, Cluster settles **4.00 USDC** (1/1000 seat) then runs
  * `genesisNodeSeatFulfill` with vault `testMode=true` (micro split).
  *
  * **Third-party**: code-only (`test=332266`); no buyer allowlist on API.
@@ -152,8 +153,8 @@ export const GENESIS_NODE_SEAT_CARD_ADDRESS = '0xafE482D2612327a0D723544B9fB713C
  * `disableSaleTestMode`.
  */
 export const GENESIS_NODE_SEAT_TEST_CODE = '332266'
-/** Test-mode settle amount per seat (1.37 USDC = 1.25 + 0.12, 6 decimals) */
-export const GENESIS_NODE_SEAT_TEST_USDC6 = 1_370_000n
+/** Test-mode settle amount per seat (4.00 USDC = 3.88 + 0.12, 6 decimals) */
+export const GENESIS_NODE_SEAT_TEST_USDC6 = 4_000_000n
 
 /** CoNET BUint ERC20（balanceOfAll）；与 deployments/conet-addresses.json `BUint` 同步 */
 export const CONET_BUINT = '0x54ac4672cE75EC5ACebaeF1a7aFC6F49E77Ae9Ae'
