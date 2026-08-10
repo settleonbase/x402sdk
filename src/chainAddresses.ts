@@ -132,7 +132,7 @@ export const GENESIS_NODE_SEAT_PAYTO = GENESIS_NODE_BRIDGE_INITIATOR
 /** CoNET GenesisNodeReferralVaultV1 ERC1967 proxy (LockMint beneficiary + onBridgeMint splitter). */
 export const CONET_GENESIS_NODE_REFERRAL_VAULT = '0x051b65E5711E6E74bC236Fe220dcA7021841855C'
 /** Current UUPS impl (setL1Ratio). Proxy address above is canonical. */
-export const CONET_GENESIS_NODE_REFERRAL_VAULT_IMPL = '0xC841e5Cef2e4774990bf34031594C3a65bFcaE39'
+export const CONET_GENESIS_NODE_REFERRAL_VAULT_IMPL = '0x23aBCA06b2cBDA37A372Fc071be4194739635b0D'
 export const CONET_GENESIS_NODE_REFERRAL_VAULT_DEPLOY_BLOCK = 594820
 /** CoNET ChatIndexRegistry ERC1967 proxy — per-EOA head pointer to encrypted chat-history index (IPFS content hash). */
 export const CONET_CHAT_INDEX_REGISTRY = '0x1511Caa71081C84d8a591490D1b83879088EED72'
