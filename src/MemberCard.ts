@@ -152,6 +152,7 @@ import {
 	deletePosTerminalAdminCardBinding,
 	getNfcRecipientAddressByUid,
 	getNfcRecipientAddressByTagId,
+	provisionOrGetNfcWalletByTagId,
 	getNfcCardPrivateKeyByUid,
 	getNfcCardPrivateKeyByTagId,
 	getCardByAddress,
@@ -3817,6 +3818,16 @@ export const cardRedeemIndexerAccountingPool: {
 	creator?: string
 	/** In-store redeem: POS terminal EOA for ActionFacet accountActionIds[subordinate]. */
 	posOperator?: string
+	/**
+	 * App / POS open-claim issued NFT（无 redeem code）。
+	 * Cluster 未预检 B-Unit；记账主行仍写 Indexer，但跳过 consumeFromUser。
+	 */
+	issuedNftOpenClaim?: {
+		couponId?: string
+		tokenId?: string
+	}
+	/** Skip B-Unit consume + `cardRedeem:bunitService` (open claim / POS wallet claim). */
+	skipBunit?: boolean
 }[] = []
 
 /** 通用 executeForOwner：客户端提交 owner 签名的 calldata，服务端免 gas 执行。可选 redeemCode+toUserEOA 时额外执行 redeemForUser（空投）。可选 description/image/background_color 用于 createIssuedNft 后组装 EIP-1155 metadata。 */
@@ -3998,6 +4009,8 @@ export type BeamioTransferRouteItem = {
 export const TX_TIP_LEDGER_CATEGORY_HEX = ethers.keccak256(ethers.toUtf8Bytes('TX_TIP')) as `0x${string}`
 /** keccak256("gift:confirmed")：用户间商户卡点数 Gift（OpenContainer P2P，非 POS/账单 Charge） */
 export const TX_GIFT_CONFIRMED = ethers.keccak256(ethers.toUtf8Bytes('gift:confirmed')) as `0x${string}`
+/** keccak256("voucher_burn:confirmed")：POS in-store coupon NFT surrender（非 EOA↔AA Internal Transfer） */
+export const TX_VOUCHER_BURN = ethers.keccak256(ethers.toUtf8Bytes('voucher_burn:confirmed')) as `0x${string}`
 
 /** displayJson.source === gift，或 legacy open-container + Merchant gift 备注 */
 export function isGiftDisplayJson(displayJson: string | undefined | null): boolean {
@@ -4010,6 +4023,23 @@ export function isGiftDisplayJson(displayJson: string | undefined | null): boole
 			.trim()
 			.toLowerCase()
 		return src === 'open-container' && handle === 'merchant gift'
+	} catch {
+		return false
+	}
+}
+
+/** displayJson.source === posCouponSurrender — POS in-store coupon NFT redeem, not Internal Transfer. */
+export function isPosCouponSurrenderDisplayJson(displayJson: string | undefined | null): boolean {
+	if (!displayJson || !String(displayJson).trim()) return false
+	try {
+		const d = JSON.parse(String(displayJson)) as { source?: string; handle?: string; forText?: string; title?: string }
+		const src = String(d.source ?? '').trim().toLowerCase()
+		if (src === 'poscouponsurrender') return true
+		const handle = String(d.handle ?? d.forText ?? '')
+			.trim()
+			.toLowerCase()
+		if (handle === 'pos coupon surrender') return true
+		return String(d.title ?? '').trim().toLowerCase() === 'in-store coupon redeem'
 	} catch {
 		return false
 	}
@@ -4409,6 +4439,10 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 		const isGiftLedger = txCategory === TX_GIFT_CONFIRMED || isGiftDisplayJson(displayJsonStr)
 		if (isGiftLedger && txCategory !== TX_GIFT_CONFIRMED) {
 			txCategory = TX_GIFT_CONFIRMED
+		}
+		const isVoucherBurnLedger = txCategory === TX_VOUCHER_BURN || isPosCouponSurrenderDisplayJson(displayJsonStr)
+		if (isVoucherBurnLedger && txCategory !== TX_VOUCHER_BURN) {
+			txCategory = TX_VOUCHER_BURN
 		}
 		const ledgerTxIdValid =
 			obj.ledgerTxId && ethers.isHexString(obj.ledgerTxId) && ethers.dataLength(obj.ledgerTxId) === 32
@@ -6635,7 +6669,11 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 					if (log.address.toLowerCase() !== cardAddr || log.topics[0] !== TRANSFER_SINGLE_TOPIC) continue
 					const decoded = ethers.AbiCoder.defaultAbiCoder().decode(['uint256', 'uint256'], log.data)
 					const toAddr = log.topics[3] ? ethers.getAddress('0x' + String(log.topics[3]).slice(-40)) : ''
-					if (toAddr.toLowerCase() === obj.aaAddress.toLowerCase()) {
+					const toLc = toAddr.toLowerCase()
+					if (
+						toLc === obj.aaAddress.toLowerCase() ||
+						(ethers.isAddress(obj.toUserEOA) && toLc === obj.toUserEOA.toLowerCase())
+					) {
 						transferToAa.push({ tokenId: decoded[0], value: decoded[1] })
 					}
 				}
@@ -6671,12 +6709,16 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 		if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
 		const { bServiceUnits6, bServiceUSDC6 } = calcChargeFixedBUnitFee()
 		const aaFactoryRedeem = await getCardAaFactoryAddress(obj.cardAddress)
-		const feePayerPick = await pickBUnitFeeConsumerPreferEoaThenAa(payerAddr, bServiceUnits6, {
-			aaFactoryAddress: aaFactoryRedeem,
-		})
+		const feePayerPick = obj.skipBunit
+			? { ok: false as const, error: 'skipBunit' }
+			: await pickBUnitFeeConsumerPreferEoaThenAa(payerAddr, bServiceUnits6, {
+					aaFactoryAddress: aaFactoryRedeem,
+				})
 		const feePayerForLedger = feePayerPick.ok ? feePayerPick.consumer : payerAddr
 		let redeemBunitConsumeTxHash: string | null = null
-		if (!feePayerPick.ok) {
+		if (obj.skipBunit) {
+			logger(Colors.cyan(`[cardRedeemIndexerAccountingProcess] skip B-Unit (open claim) txHash=${txHash}`))
+		} else if (!feePayerPick.ok) {
 			logger(
 				Colors.yellow(
 					`[cardRedeemIndexerAccountingProcess] B-Unit pick failed at master (Cluster should have blocked): ${feePayerPick.error}`
@@ -6740,6 +6782,11 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 				tokenIdForRoute = tierIds[0] ?? 0n
 			} catch (_) { /* keep 0n */ }
 		}
+		if (tokenIdForRoute === 0n && obj.issuedNftOpenClaim?.tokenId) {
+			try {
+				tokenIdForRoute = BigInt(obj.issuedNftOpenClaim.tokenId)
+			} catch (_) { /* keep 0n */ }
+		}
 		let distributionFields: ReturnType<typeof resolveIssuedNftDistributionFieldsFromSeriesMetadata> = null
 		if (tokenIdForRoute >= ISSUED_NFT_START_ID_MEMBER) {
 			try {
@@ -6753,15 +6800,30 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 				/* optional DB metadata */
 			}
 		}
+		const isIssuedNftOpenClaim = Boolean(obj.issuedNftOpenClaim)
+		const openClaimKind =
+			distributionFields?.distributionKind ??
+			(obj.issuedNftOpenClaim?.couponId && tokenIdForRoute >= ISSUED_NFT_START_ID_MEMBER ? 'coupon' : undefined)
 		const displayJson = JSON.stringify({
-			title: redeemCategoryRaw === 'redeemNewCard' ? 'Redeem New Card' : (redeemCategoryRaw === 'redeemUpgradeNewCard' ? 'Redeem Upgrade Card' : 'Redeem Top Up'),
-			handle: `Redeem to ${obj.aaAddress.slice(0, 10)}…`,
+			title: isIssuedNftOpenClaim
+				? (openClaimKind === 'catalog' ? 'Claim Catalog' : 'Claim Coupon')
+				: redeemCategoryRaw === 'redeemNewCard'
+					? 'Redeem New Card'
+					: (redeemCategoryRaw === 'redeemUpgradeNewCard' ? 'Redeem Upgrade Card' : 'Redeem Top Up'),
+			handle: isIssuedNftOpenClaim
+				? `Claim to ${obj.aaAddress.slice(0, 10)}…`
+				: `Redeem to ${obj.aaAddress.slice(0, 10)}…`,
 			finishedHash: txHash,
 			source: 'cardRedeem',
 			topupCategory: redeemCategoryRaw,
+			...(openClaimKind ? { distributionKind: openClaimKind } : {}),
 			...(distributionFields?.distributionKind ? { distributionKind: distributionFields.distributionKind } : {}),
 			...(distributionFields?.globalCategory ? { globalCategory: distributionFields.globalCategory } : {}),
-			...(distributionFields?.couponId ? { couponId: distributionFields.couponId } : {}),
+			...(distributionFields?.couponId
+				? { couponId: distributionFields.couponId }
+				: obj.issuedNftOpenClaim?.couponId
+					? { couponId: obj.issuedNftOpenClaim.couponId }
+					: {}),
 			...(distributionFields?.productionId ? { productionId: distributionFields.productionId } : {}),
 		})
 		const topupRouteItem = {
@@ -11817,7 +11879,7 @@ export const OpenContainerRelayProcess = async () => {
         gasUSDC6: '0',
         gasChainType: 0,
         feePayer: feePayerEOA,
-        isInternalTransfer: !isConsumerGiftOpen,
+        isInternalTransfer: !isConsumerGiftOpen && !isCouponSurrenderOpen,
         requestHash: obj.requestHash,
         routeItems: collectedRouteItems,
         source: isCouponSurrenderOpen ? 'open-container' : isConsumerGiftOpen ? 'gift' : 'open-container',
@@ -11826,6 +11888,7 @@ export const OpenContainerRelayProcess = async () => {
         payeeEOA,
         merchantCardAddress: obj.merchantCardAddress,
         ...(isConsumerGiftOpen ? { ledgerTxCategory: TX_GIFT_CONFIRMED } : {}),
+        ...(isCouponSurrenderOpen ? { ledgerTxCategory: TX_VOUCHER_BURN } : {}),
         ...(hasOpenBillBreakdown
           ? {
               ledgerFinalRequestAmountFiat6: ledgerFinalFiat6,
@@ -14306,9 +14369,17 @@ export const nfcLinkAppExecute = async (
 			.end()
 		return
 	}
-	const eoa = await getNfcRecipientAddressByTagId(tagIdHex)
-	if (!eoa || !ethers.isAddress(eoa)) {
-		res.status(403).json({ success: false, error: 'Card not provisioned.' }).end()
+	// Align with GET /api/sun + sunProvision: SUN-valid cards may not yet have a tag_id row.
+	// Auto-provision (or backfill tag_id onto a legacy uid-only row) instead of "Card not provisioned."
+	let eoa: string
+	try {
+		const provisioned = await provisionOrGetNfcWalletByTagId(tagIdHex, uidTrim)
+		eoa = ethers.getAddress(provisioned.eoa)
+		await ensureAAForEOA(eoa)
+	} catch (e: any) {
+		const msg = e?.message ?? String(e)
+		logger(Colors.red(`[nfcLinkAppExecute] provision failed tagId=${tagIdHex.slice(0, 8)}...: ${msg}`))
+		res.status(500).json({ success: false, error: 'Failed to provision card wallet.' }).end()
 		return
 	}
 	const SC = shiftSettleConet()
@@ -19099,6 +19170,21 @@ export const cardCouponOpenClaimProcess = async () => {
 		}
 		// HTTP already returned `{ success, queued }` at enqueue; do not write client response here.
 		logger(Colors.green(`[cardCouponOpenClaimProcess] success tx=${tx.hash}`))
+		cardRedeemIndexerAccountingPool.push({
+			cardAddress: obj.cardAddress,
+			toUserEOA: userNorm,
+			aaAddress,
+			txHash: tx.hash,
+			beforeNfts: [],
+			skipBunit: true,
+			issuedNftOpenClaim: {
+				couponId: obj.couponId,
+				tokenId: String(obj.tokenId),
+			},
+		})
+		cardRedeemIndexerAccountingProcess().catch((err: any) => {
+			logger(Colors.red('[cardRedeemIndexerAccountingProcess] unhandled:'), err?.message ?? err)
+		})
 		void (async () => {
 			try {
 				const { enqueueCouponSocialReward13IfConfigured } = await import('./userCumulativeStatRewardPoolMaster.js')
@@ -19198,7 +19284,7 @@ export const cardCouponPosClaimWalletProcess = async () => {
 
 		const userNorm = ethers.getAddress(obj.userEOA)
 		const posAdminNorm = ethers.getAddress(obj.posAdminEOA)
-		await ensureAAForEOAOnCard(obj.cardAddress, userNorm, SC)
+		const aaAddress = await ensureAAForEOAOnCard(obj.cardAddress, userNorm, SC)
 
 		const chain = await resolveUserCardChain(obj.cardAddress)
 		const cardGateway = await getBeamioUserCardFactoryGateway(obj.cardAddress)
@@ -19240,6 +19326,22 @@ export const cardCouponPosClaimWalletProcess = async () => {
 			}).end()
 		}
 		logger(Colors.green(`[cardCouponPosClaimWalletProcess] success tx=${tx.hash} posAdmin=${posAdminNorm}`))
+		cardRedeemIndexerAccountingPool.push({
+			cardAddress: obj.cardAddress,
+			toUserEOA: userNorm,
+			aaAddress,
+			txHash: tx.hash,
+			beforeNfts: [],
+			posOperator: posAdminNorm,
+			skipBunit: true,
+			issuedNftOpenClaim: {
+				couponId: obj.couponId,
+				tokenId: String(obj.tokenId),
+			},
+		})
+		cardRedeemIndexerAccountingProcess().catch((err: any) => {
+			logger(Colors.red('[cardRedeemIndexerAccountingProcess] unhandled:'), err?.message ?? err)
+		})
 	} catch (e: any) {
 		const errMsg = e?.reason ?? e?.shortMessage ?? e?.message ?? String(e)
 		if (isSettleContractNonceRaceError(e)) {
