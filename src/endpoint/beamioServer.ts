@@ -16,7 +16,7 @@ import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listPosTerminalCardBindingsForWallet, setActivePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
 import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
@@ -235,7 +235,7 @@ function posLedgerTopupPaymentMethodFromCategoryHex(catHex: string): string {
 }
 
 type PosLedgerRowForMethod = {
-	type: 'topUp' | 'charge' | 'tip'
+	type: 'topUp' | 'charge' | 'tip' | 'couponClaim' | 'couponRedeem'
 	txCategory: string
 	displayJson: string
 	amountUSDC6: string
@@ -244,6 +244,7 @@ type PosLedgerRowForMethod = {
 
 function posLedgerPaymentMethodLabel(row: PosLedgerRowForMethod): string {
 	if (row.type === 'tip') return ''
+	if (row.type === 'couponClaim' || row.type === 'couponRedeem') return 'Coupon'
 	if (row.type === 'topUp') {
 		try {
 			// USDC charge orchestrator L1 rows use `TX_USDC_*` indexer categories but still carry
@@ -282,7 +283,7 @@ function posLedgerPaymentMethodLabel(row: PosLedgerRowForMethod): string {
 type PosLedgerSimplifiedClientItem = {
 	id: string
 	originalPaymentHash?: string
-	type: 'topUp' | 'charge' | 'tip'
+	type: 'topUp' | 'charge' | 'tip' | 'couponClaim' | 'couponRedeem'
 	txCategory: string
 	timestamp: number
 	payer: string
@@ -303,7 +304,7 @@ async function enrichPosLedgerItemsForClients(
 ): Promise<PosLedgerSimplifiedClientItem[]> {
 	const payerSet = new Set<string>()
 	for (const it of items) {
-		if (it.type !== 'topUp' && it.type !== 'charge') continue
+		if (it.type !== 'topUp' && it.type !== 'charge' && it.type !== 'couponClaim' && it.type !== 'couponRedeem') continue
 		const p = String(it.payer || '').trim()
 		if (!p || !ethers.isAddress(p)) continue
 		try {
@@ -2582,7 +2583,44 @@ const routing = ( router: Router ) => {
 			// the actual top-up).
 			hk('nfcTopup:bunitService'),
 			hk('usdcTopup:bunitService'),
+			hk('charge:bunitService'),
+			hk('cardRedeem:bunitService'),
+			hk('posCouponBurn:bunitService'),
 		])
+		const VOUCHER_BURN_LOWER = hk('voucher_burn:confirmed')
+		const classifyPosLedgerCouponType = (
+			catHex: string,
+			displayJson: string,
+		): 'couponClaim' | 'couponRedeem' | null => {
+			let src = ''
+			let title = ''
+			let handle = ''
+			try {
+				const d = JSON.parse(displayJson || '{}') as {
+					source?: string
+					title?: string
+					handle?: string
+					forText?: string
+				}
+				src = String(d.source ?? '').trim().toLowerCase()
+				title = String(d.title ?? '').trim().toLowerCase()
+				handle = String(d.handle ?? d.forText ?? '').trim().toLowerCase()
+			} catch {
+				/* ignore */
+			}
+			if (
+				src === 'poscouponsurrender' ||
+				handle === 'pos coupon surrender' ||
+				title === 'in-store coupon redeem' ||
+				catHex === VOUCHER_BURN_LOWER
+			) {
+				return 'couponRedeem'
+			}
+			if (title.includes('claim coupon') || title.includes('claim catalog')) {
+				return 'couponClaim'
+			}
+			return null
+		}
 		const normalizeCatHex = (cat: unknown): string => {
 			if (cat == null) return ''
 			if (typeof cat === 'string') {
@@ -2653,7 +2691,7 @@ const routing = ( router: Router ) => {
 			type SimplifiedItem = {
 				id: string
 				originalPaymentHash?: string
-				type: 'topUp' | 'charge' | 'tip'
+				type: 'topUp' | 'charge' | 'tip' | 'couponClaim' | 'couponRedeem'
 				txCategory: string
 				timestamp: number
 				payer: string
@@ -2711,7 +2749,14 @@ const routing = ( router: Router ) => {
 					if (catHex === '' || SKIP_CATEGORIES_LOWER.has(catHex)) continue
 					const isTopUp = TOPUP_CATEGORIES_LOWER.has(catHex)
 					const isTip = TIP_CATEGORIES_LOWER.has(catHex)
-					const itemType: 'topUp' | 'charge' | 'tip' = isTip ? 'tip' : isTopUp ? 'topUp' : 'charge'
+					const couponType = classifyPosLedgerCouponType(catHex, tx.displayJson ?? '')
+					const itemType: 'topUp' | 'charge' | 'tip' | 'couponClaim' | 'couponRedeem' = isTip
+						? 'tip'
+						: couponType
+							? couponType
+							: isTopUp
+								? 'topUp'
+								: 'charge'
 					const usdc6 = BigInt(tx.finalRequestAmountUSDC6 ?? 0n)
 					const fiat6 = BigInt(tx.finalRequestAmountFiat6 ?? 0n)
 					const measure6 = usdc6 > 0n ? usdc6 : fiat6
@@ -4049,9 +4094,21 @@ const routing = ( router: Router ) => {
 			.end()
 	})
 
-	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）、wallet（Scan QR）或 beamioTag（Scan QR 的 beamio 参数，按 AccountRegistry 解析 EOA）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查 EOA，无法推导 tagID 的不予受理。 */
+	/** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）、wallet（Scan QR）或 beamioTag（Scan QR 的 beamio 参数，按 AccountRegistry 解析 EOA）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查 EOA，无法推导 tagID 的不予受理。 Optional membershipTierIndex / membershipFeeFiat6 for membership-fee mode. */
 	router.post('/nfcTopupPrepare', async (req, res) => {
-		const { uid, wallet, beamioTag, amount, currency, cardAddress, e, c, m } = req.body as { uid?: string; wallet?: string; beamioTag?: string; amount?: string; currency?: string; cardAddress?: string; e?: string; c?: string; m?: string }
+		const { uid, wallet, beamioTag, amount, currency, cardAddress, e, c, m, membershipTierIndex, membershipFeeFiat6 } = req.body as {
+			uid?: string
+			wallet?: string
+			beamioTag?: string
+			amount?: string
+			currency?: string
+			cardAddress?: string
+			e?: string
+			c?: string
+			m?: string
+			membershipTierIndex?: number | string
+			membershipFeeFiat6?: string | number
+		}
 		const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0
 		const uidTrim = hasUid ? uid!.trim() : ''
 		const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
@@ -4123,23 +4180,38 @@ const routing = ( router: Router ) => {
 				return res.status(403).json(err).end()
 			}
 		}
-		const forwardBody = {
+		const forwardCardAddress = ethers.getAddress(cardAddress.trim())
+		const forwardBody: {
+			uid?: string
+			wallet?: string
+			amount: string
+			currency: string
+			cardAddress: string
+			membershipTierIndex?: number | string
+			membershipFeeFiat6?: string | number
+		} = {
 			uid: hasUid && !resolvedWallet ? uid!.trim() : undefined,
 			wallet: resolvedWallet,
 			amount: String(amount ?? ''),
 			currency: (currency || 'CAD').trim(),
-			cardAddress: ethers.getAddress(cardAddress.trim())
+			cardAddress: forwardCardAddress,
+		}
+		if (membershipTierIndex != null && String(membershipTierIndex).trim() !== '') {
+			forwardBody.membershipTierIndex = membershipTierIndex
+		}
+		if (membershipFeeFiat6 != null && String(membershipFeeFiat6).trim() !== '') {
+			forwardBody.membershipFeeFiat6 = membershipFeeFiat6
 		}
 		try {
 			let prepareCardOwner = ''
 			try {
-				const prepCardProvider = providerForUserCardChain(await resolveUserCardChain(forwardBody.cardAddress))
-				const cprep = new ethers.Contract(forwardBody.cardAddress, ['function owner() view returns (address)'], prepCardProvider)
+				const prepCardProvider = providerForUserCardChain(await resolveUserCardChain(forwardCardAddress))
+				const cprep = new ethers.Contract(forwardCardAddress, ['function owner() view returns (address)'], prepCardProvider)
 				const ow = await cprep.owner() as string
 				if (ow && ethers.isAddress(ow)) prepareCardOwner = ethers.getAddress(ow)
 			} catch { /* ignore */ }
 			const walletLabel = forwardBody.wallet ?? (forwardBody.uid ? `(uid=${forwardBody.uid})` : 'N/A')
-			logger(Colors.cyan(`[nfcTopupPrepare] POS prepare summary | cardAddr=${forwardBody.cardAddress} | cardOwner=${prepareCardOwner || 'N/A'} | amount=${forwardBody.amount} | currency=${forwardBody.currency} | payeeWallet=${walletLabel}`))
+			logger(Colors.cyan(`[nfcTopupPrepare] POS prepare summary | cardAddr=${forwardCardAddress} | cardOwner=${prepareCardOwner || 'N/A'} | amount=${forwardBody.amount} | currency=${forwardBody.currency} | payeeWallet=${walletLabel}`))
 			const { statusCode, body } = await postLocalhostBuffer('/api/nfcTopupPrepare', forwardBody)
 			const parsed = JSON.parse(body)
 			if (resolvedWallet && (hasBeamioTag || (hasUid && isNfcUid)) && parsed.cardAddr && !parsed.error) {
@@ -4181,6 +4253,8 @@ const routing = ( router: Router ) => {
 			cashCurrencyAmount,
 			bonusCurrencyAmount,
 			currencyAmount,
+			membershipTierIndex,
+			membershipFeeFiat6,
 		} = req.body as {
 			cardAddr?: string
 			data?: string
@@ -4195,6 +4269,8 @@ const routing = ( router: Router ) => {
 			cashCurrencyAmount?: string
 			bonusCurrencyAmount?: string
 			currencyAmount?: string
+			membershipTierIndex?: number | string
+			membershipFeeFiat6?: string | number
 		}
 		const bodyForDebug = (req.body ?? {}) as Record<string, unknown>
 		const previewHex = (raw: unknown, front = 14, back = 10): string => {
@@ -4454,6 +4530,14 @@ const routing = ( router: Router ) => {
 			let recipientEOA: string | null = null
 			let aaAddr: string | null = null
 			let bunitFeeCheck: { success: boolean; error?: string; feeAmount?: bigint; cardOwnerEOA?: string; topupKind?: 1 | 2 | 3 } = { success: true }
+			let membershipFeeStageForward:
+				| {
+						recipientEOA: string
+						tierIndex: number
+						feePaid6: string
+						pointsCredit6: string
+				  }
+				| undefined
 			if (isBurnIssuedNft) {
 				const burnBunit = await cardRedeemPreCheckBUnitBalance(cardAddress)
 				if (!burnBunit.success || !burnBunit.cardOwnerEOA || !burnBunit.feeBUnits6) {
@@ -4481,14 +4565,36 @@ const routing = ( router: Router ) => {
 					logger(Colors.red(`[nfcTopup] admin airdrop limit pre-check FAIL: ${airdropLimitCheck.error}`))
 					return res.status(400).json({ success: false, error: airdropLimitCheck.error }).end()
 				}
-				const minTierChk = await nfcTopupPreCheckMintMinTierFirstMembership(
-					cardAddress,
-					recipientEOA,
-					mintAmt.points6
-				)
-				if (!minTierChk.success) {
-					logger(Colors.red(`[nfcTopup] first-membership minimum tier FAIL: ${minTierChk.error}`))
-					return res.status(400).json({ success: false, error: minTierChk.error }).end()
+				/** Fee mode: replace min-tier first-membership gate; metadata min/max top-up quotas are not applied on this path. */
+				const feeMembershipChk = await nfcTopupPreCheckMembershipFeeFirstIssue({
+					cardAddrRaw: cardAddress,
+					mintRecipientAddrRaw: recipientEOA,
+					points6Mint: mintAmt.points6,
+					membershipTierIndex,
+					membershipFeeFiat6,
+					amountFiat6: currencyAmount,
+				})
+				if (!feeMembershipChk.success) {
+					logger(Colors.red(`[nfcTopup] membership fee first-issue FAIL: ${feeMembershipChk.error}`))
+					return res.status(400).json({ success: false, error: feeMembershipChk.error }).end()
+				}
+				if (feeMembershipChk.membershipFeeMode && feeMembershipChk.membershipNeedsFee && feeMembershipChk.stage) {
+					membershipFeeStageForward = {
+						recipientEOA: feeMembershipChk.stage.recipientEOA,
+						tierIndex: feeMembershipChk.stage.tierIndex,
+						feePaid6: feeMembershipChk.stage.feePaid6.toString(),
+						pointsCredit6: feeMembershipChk.stage.pointsCredit6.toString(),
+					}
+				} else if (!feeMembershipChk.membershipFeeMode) {
+					const minTierChk = await nfcTopupPreCheckMintMinTierFirstMembership(
+						cardAddress,
+						recipientEOA,
+						mintAmt.points6
+					)
+					if (!minTierChk.success) {
+						logger(Colors.red(`[nfcTopup] first-membership minimum tier FAIL: ${minTierChk.error}`))
+						return res.status(400).json({ success: false, error: minTierChk.error }).end()
+					}
 				}
 				const mintSimChk = await nfcTopupPreCheckMintGatewaySimulation(cardAddress, data)
 				if (!mintSimChk.success) {
@@ -4638,6 +4744,13 @@ const routing = ( router: Router ) => {
 					...(isBurnIssuedNft ? { posOperator: signer } : {}),
 					...splitCluster,
 					...(usdcTopupSid ? { usdcTopupSessionId: usdcTopupSid } : {}),
+					...(membershipFeeStageForward ? { membershipFeeStage: membershipFeeStageForward } : {}),
+					...(membershipTierIndex != null && String(membershipTierIndex).trim() !== ''
+						? { membershipTierIndex }
+						: {}),
+					...(membershipFeeFiat6 != null && String(membershipFeeFiat6).trim() !== ''
+						? { membershipFeeFiat6 }
+						: {}),
 				},
 				res
 			)

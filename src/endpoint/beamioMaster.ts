@@ -2847,7 +2847,7 @@ const routing = ( router: Router ) => {
 		 * 产品例外：Cluster 预检已通过后，入队即返回 `{ success, queued }`，链上 claim 后台执行（勿等 tx.wait）。
 		 */
 		router.post('/cardCouponOpenClaim', (req, res) => {
-			const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature, pointsCost, usdcReward6, isSocialExchange, refWallet } = req.body as {
+			const { cardAddress, couponId, userEOA, tokenId, deadline, nonce, userSignature, pointsCost, usdcReward6, isSocialExchange, refWallet, posOperator } = req.body as {
 				cardAddress?: string
 				couponId?: string
 				userEOA?: string
@@ -2859,6 +2859,7 @@ const routing = ( router: Router ) => {
 				usdcReward6?: string
 				isSocialExchange?: boolean
 				refWallet?: string
+				posOperator?: string
 			}
 			if (!cardAddress || !couponId || !userEOA || !tokenId || deadline == null || !nonce || !userSignature) {
 				return res.status(400).json({ success: false, error: 'Missing required fields for cardCouponOpenClaim' }).end()
@@ -2875,6 +2876,9 @@ const routing = ( router: Router ) => {
 				...(pointsCost != null ? { pointsCost: String(pointsCost) } : {}),
 				...(usdcReward6 != null ? { usdcReward6: String(usdcReward6) } : {}),
 				...(refWallet && ethers.isAddress(String(refWallet)) ? { refWallet: ethers.getAddress(String(refWallet)) } : {}),
+				...(posOperator && ethers.isAddress(String(posOperator))
+					? { posOperator: ethers.getAddress(String(posOperator)) }
+					: {}),
 			})
 			logger(Colors.cyan(`[cardCouponOpenClaim] queued, card=${cardAddress} couponId=${couponId} tokenId=${tokenId}`))
 			res.status(200).json({
@@ -4470,7 +4474,15 @@ const routing = ( router: Router ) => {
 		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）或 wallet（Scan QR）。 */
 		router.post('/nfcTopupPrepare', async (req, res) => {
 			try {
-				const { uid, wallet, amount, currency, cardAddress } = req.body as { uid?: string; wallet?: string; amount?: string; currency?: string; cardAddress?: string }
+				const { uid, wallet, amount, currency, cardAddress, membershipTierIndex, membershipFeeFiat6 } = req.body as {
+					uid?: string
+					wallet?: string
+					amount?: string
+					currency?: string
+					cardAddress?: string
+					membershipTierIndex?: number | string
+					membershipFeeFiat6?: string | number
+				}
 				const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0
 				const hasWallet = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())
 				if (!hasUid && !hasWallet) {
@@ -4484,7 +4496,13 @@ const routing = ( router: Router ) => {
 					wallet: hasWallet ? ethers.getAddress(wallet!.trim()) : undefined,
 					amount: String(amount ?? ''),
 					currency: (currency || 'CAD').trim(),
-					cardAddress: ethers.getAddress(cardAddress.trim())
+					cardAddress: ethers.getAddress(cardAddress.trim()),
+					...(membershipTierIndex != null && String(membershipTierIndex).trim() !== ''
+						? { membershipTierIndex }
+						: {}),
+					...(membershipFeeFiat6 != null && String(membershipFeeFiat6).trim() !== ''
+						? { membershipFeeFiat6 }
+						: {}),
 				})
 				if ('error' in result) {
 					return res.status(400).json({ success: false, error: result.error })
@@ -4593,6 +4611,7 @@ const routing = ( router: Router ) => {
 				currencyAmount,
 				usdcTopupSessionId,
 				posOperator,
+				membershipFeeStage,
 			} = req.body as {
 				cardAddr?: string
 				data?: string
@@ -4609,6 +4628,12 @@ const routing = ( router: Router ) => {
 				currencyAmount?: string
 				usdcTopupSessionId?: string
 				posOperator?: string
+				membershipFeeStage?: {
+					recipientEOA?: string
+					tierIndex?: number
+					feePaid6?: string
+					pointsCredit6?: string
+				}
 			}
 			/** 仅当本请求成功消费 `awaiting_beneficiary` session 时由本 handler 填入（忽略 body 里伪造的对账元数据）。 */
 			let usdcPhase2OriginatingTx: string | undefined
@@ -4749,6 +4774,41 @@ const routing = ( router: Router ) => {
 					: undefined
 			const kindNfc: 1 | 2 | 3 =
 				topupKind === 1 || topupKind === 2 || topupKind === 3 ? (topupKind as 1 | 2 | 3) : 2
+			let membershipFeeStageParsed:
+				| {
+						recipientEOA: string
+						tierIndex: number
+						feePaid6: bigint
+						pointsCredit6: bigint
+				  }
+				| undefined
+			if (membershipFeeStage && typeof membershipFeeStage === 'object') {
+				const r = membershipFeeStage.recipientEOA
+				const t = Number(membershipFeeStage.tierIndex)
+				try {
+					const feePaid6 = BigInt(String(membershipFeeStage.feePaid6 ?? '').trim())
+					const pointsCredit6 = BigInt(String(membershipFeeStage.pointsCredit6 ?? '').trim())
+					if (
+						r &&
+						ethers.isAddress(r) &&
+						Number.isInteger(t) &&
+						t >= 0 &&
+						feePaid6 > 0n &&
+						pointsCredit6 > 0n
+					) {
+						membershipFeeStageParsed = {
+							recipientEOA: ethers.getAddress(r),
+							tierIndex: t,
+							feePaid6,
+							pointsCredit6,
+						}
+					} else {
+						return res.status(400).json({ success: false, error: 'Invalid membershipFeeStage' }).end()
+					}
+				} catch {
+					return res.status(400).json({ success: false, error: 'Invalid membershipFeeStage amounts' }).end()
+				}
+			}
 			executeForAdminPool.push({
 				cardAddr: ethers.getAddress(cardAddr),
 				data,
@@ -4762,6 +4822,7 @@ const routing = ( router: Router ) => {
 				res,
 				topupCurrencySplit,
 				...(posOpNfc ? { posOperator: posOpNfc } : {}),
+				...(membershipFeeStageParsed ? { membershipFeeStage: membershipFeeStageParsed } : {}),
 				...(usdcPhase2ChargeSid && usdcPhase2OriginatingTx
 					? {
 							originatingUSDCTx: usdcPhase2OriginatingTx,

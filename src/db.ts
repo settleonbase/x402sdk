@@ -4646,13 +4646,68 @@ export const isTagIdRegistered = async (tagIdHex: string): Promise<boolean> => {
 	return addr != null
 }
 
+/**
+ * Legacy rows may exist with uid + private_key but tag_id NULL.
+ * Attach SUN TagID without rotating the card private key.
+ */
+export const backfillNfcCardTagIdByUid = async (params: { uid: string; tagIdHex: string }): Promise<boolean> => {
+	const uid = String(params.uid || '').trim()
+	const tagUpper = String(params.tagIdHex || '')
+		.trim()
+		.replace(/^0x/i, '')
+		.toUpperCase()
+	if (!uid || tagUpper.length !== 16 || !/^[0-9A-F]+$/.test(tagUpper)) return false
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(NFC_CARDS_TABLE)
+		await db.query(NFC_CARDS_ADD_TAG_ID)
+		const r = await db.query(
+			`UPDATE nfc_cards SET tag_id = $2
+			 WHERE LOWER(TRIM(uid)) = LOWER(TRIM($1))
+			   AND (tag_id IS NULL OR TRIM(tag_id) = '')
+			   AND private_key IS NOT NULL AND TRIM(private_key) <> ''`,
+			[uid, tagUpper]
+		)
+		const n = typeof r.rowCount === 'number' ? r.rowCount : 0
+		if (n > 0) {
+			logger(Colors.green(`[backfillNfcCardTagIdByUid] uid=${uid.slice(0, 14)}... tagId=${tagUpper.slice(0, 8)}...`))
+		}
+		return n > 0
+	} catch (e: any) {
+		logger(Colors.yellow(`[backfillNfcCardTagIdByUid] failed: ${e?.message ?? e}`))
+		return false
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 根据 TagID 查找或创建钱包。若已登记则返回 EOA；若未登记则创建新 EOA、登记到 nfc_cards（tag_id 为主键语义）。uidHex 可选，仅兼容旧客户端；缺省时用 tagIdHex 作为 DB uid 列值。 */
 export const provisionOrGetNfcWalletByTagId = async (tagIdHex: string, uidHex?: string): Promise<{ eoa: string; wasNewlyProvisioned: boolean }> => {
 	const existing = await getNfcRecipientAddressByTagId(tagIdHex)
 	if (existing) return { eoa: existing, wasNewlyProvisioned: false }
+
+	const uidTrim = uidHex?.trim() || ''
+	// Legacy: card registered by UID only — bind TagID, keep existing private_key (do not rotate).
+	if (uidTrim) {
+		const byUidPk = await getNfcCardPrivateKeyByUid(uidTrim)
+		if (byUidPk) {
+			await backfillNfcCardTagIdByUid({ uid: uidTrim, tagIdHex })
+			const afterBackfill = await getNfcRecipientAddressByTagId(tagIdHex)
+			if (afterBackfill) {
+				logger(
+					Colors.cyan(
+						`[provisionOrGetNfcWalletByTagId] backfilled tagId for uid=${uidTrim.slice(0, 14)}... eoa=${afterBackfill}`
+					)
+				)
+				return { eoa: afterBackfill, wasNewlyProvisioned: false }
+			}
+		}
+	}
+
 	const wallet = ethers.Wallet.createRandom()
 	await registerNfcCardToDb({
-		uid: uidHex?.trim() || tagIdHex.trim(),
+		uid: uidTrim || tagIdHex.trim(),
 		privateKey: wallet.privateKey,
 		tagId: tagIdHex
 	})
@@ -4730,11 +4785,16 @@ export const registerNfcCardToDb = async (params: { uid: string; privateKey: str
 		const tagId = params.tagId ? String(params.tagId).trim().toUpperCase() : null
 		if (!uid || !privateKey) return
 		if (tagId && tagId.length === 16 && /^[0-9A-F]+$/.test(tagId)) {
+			// Never rotate an existing private_key on uid conflict (would orphan card assets).
+			// Only fill empty private_key / missing tag_id.
 			await db.query(
 				`INSERT INTO nfc_cards (uid, private_key, tag_id) VALUES ($1, $2, $3)
 				ON CONFLICT (uid) DO UPDATE SET
-					private_key = CASE WHEN nfc_cards.tag_id IS NULL THEN EXCLUDED.private_key ELSE nfc_cards.private_key END,
-					tag_id = COALESCE(nfc_cards.tag_id, EXCLUDED.tag_id)`,
+					private_key = CASE
+						WHEN nfc_cards.private_key IS NOT NULL AND TRIM(nfc_cards.private_key) <> '' THEN nfc_cards.private_key
+						ELSE EXCLUDED.private_key
+					END,
+					tag_id = COALESCE(NULLIF(TRIM(nfc_cards.tag_id), ''), EXCLUDED.tag_id)`,
 				[uid, privateKey, tagId]
 			)
 			logger(Colors.green(`[registerNfcCardToDb] registered uid=${uid.slice(0, 16)}... tagId=${tagId.slice(0, 8)}...`))

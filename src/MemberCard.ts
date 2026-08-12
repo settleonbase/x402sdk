@@ -2437,13 +2437,183 @@ export const quoteCurrencyToUsdc6 = (amount: string, currency?: string): bigint 
 }
 
 /** NFC Topup Prepare：根据 uid 或 wallet/amount/currency 生成 executeForAdmin 所需的 data、deadline、nonce。cardAddress 为必填，指定充值的卡。 */
+/** Membership fee duration kinds — mirrors `MembershipFeeStorage.sol`. */
+export const MEMBERSHIP_FEE_DURATION = {
+	NONE: 0,
+	DAY: 1,
+	WEEK: 2,
+	MONTH: 3,
+	QUARTER: 4,
+	YEAR: 5,
+	FOREVER: 6,
+} as const
+
+export type MembershipFeeDurationKind =
+	(typeof MEMBERSHIP_FEE_DURATION)[keyof typeof MEMBERSHIP_FEE_DURATION]
+
+export function membershipFeeDurationLabel(kind: number | bigint): string {
+	switch (Number(kind)) {
+		case MEMBERSHIP_FEE_DURATION.DAY:
+			return 'day'
+		case MEMBERSHIP_FEE_DURATION.WEEK:
+			return 'week'
+		case MEMBERSHIP_FEE_DURATION.MONTH:
+			return 'month'
+		case MEMBERSHIP_FEE_DURATION.QUARTER:
+			return 'quarter'
+		case MEMBERSHIP_FEE_DURATION.YEAR:
+			return 'year'
+		case MEMBERSHIP_FEE_DURATION.FOREVER:
+			return 'forever'
+		default:
+			return 'none'
+	}
+}
+
+export function isValidMembershipFeeDurationKind(kind: number | bigint): boolean {
+	const n = Number(kind)
+	return n >= MEMBERSHIP_FEE_DURATION.DAY && n <= MEMBERSHIP_FEE_DURATION.FOREVER
+}
+
+const MEMBERSHIP_FEE_CARD_ABI = [
+	'function membershipFeeMode() view returns (bool)',
+	'function membershipFees() view returns (uint256[] feeE6, uint8[] durationKind)',
+	'function membershipFeeE6(uint256) view returns (uint256)',
+	'function membershipFeeDurationKind(uint256) view returns (uint8)',
+	'function stageMembershipFeePurchase(address user, uint256 tierIndex, uint256 feePaid6, uint256 pointsCredit6)',
+] as const
+
+const MEMBERSHIP_VALIDITY_ABI = [
+	'function activeMembershipId(address) view returns (uint256)',
+	'function balanceOf(address,uint256) view returns (uint256)',
+	'function expiresAt(uint256) view returns (uint256)',
+] as const
+
+export type NfcTopupPrepareSuccess = {
+	cardAddr: string
+	data: string
+	deadline: number
+	nonce: string
+	factoryGateway: string
+	/** Card has at least one tier with feeE6 > 0. */
+	membershipFeeMode: boolean
+	/** Fee mode and customer has no valid membership — staging required before mint. */
+	membershipNeedsFee: boolean
+	membershipTierIndex?: number
+	membershipFeeFiat6?: string
+	membershipDurationKind?: number
+	membershipDurationLabel?: string
+	/** Points credited from (amountFiat6 - feeFiat6) or full amount. */
+	pointsCredit6?: string
+	amountFiat6?: string
+}
+
+export type NfcTopupMembershipFeeStage = {
+	recipientEOA: string
+	tierIndex: number
+	feePaid6: bigint
+	pointsCredit6: bigint
+}
+
+export async function readCardMembershipFeeMode(cardAddrRaw: string): Promise<boolean> {
+	try {
+		const cardNorm = ethers.getAddress(cardAddrRaw.trim())
+		const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
+		const card = new ethers.Contract(cardNorm, MEMBERSHIP_FEE_CARD_ABI, provider)
+		return Boolean(await card.membershipFeeMode())
+	} catch {
+		return false
+	}
+}
+
+export async function readCardMembershipFees(
+	cardAddrRaw: string
+): Promise<{ feeE6: bigint[]; durationKind: number[] }> {
+	const cardNorm = ethers.getAddress(cardAddrRaw.trim())
+	const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
+	const card = new ethers.Contract(cardNorm, MEMBERSHIP_FEE_CARD_ABI, provider)
+	try {
+		const [feeE6Raw, durationKindRaw] = (await card.membershipFees()) as [bigint[], bigint[] | number[]]
+		const feeE6 = (feeE6Raw ?? []).map((v) => BigInt(v))
+		const durationKind = (durationKindRaw ?? []).map((v) => Number(v))
+		return { feeE6, durationKind }
+	} catch {
+		return { feeE6: [], durationKind: [] }
+	}
+}
+
+/** Resolve whether customer already has a valid (non-expired) membership NFT on this card. */
+export async function resolveCustomerHasValidMembership(
+	cardAddrRaw: string,
+	mintRecipientAddrRaw: string
+): Promise<boolean> {
+	try {
+		const cardNorm = ethers.getAddress(cardAddrRaw.trim())
+		const mintUser = ethers.getAddress(mintRecipientAddrRaw.trim())
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
+		const aaFactoryAddr = ethers.getAddress(await getCardAaFactoryAddress(cardNorm))
+		const facAbi = [
+			'function isBeamioAccount(address) view returns (bool)',
+			'function beamioAccountOf(address) view returns (address)',
+		]
+		const fac = new ethers.Contract(aaFactoryAddr, facAbi as ethers.InterfaceAbi, cardProvider)
+		let acct: string
+		let isAcct = false
+		try {
+			isAcct = (await fac.isBeamioAccount(mintUser)) as boolean
+		} catch {
+			isAcct = false
+		}
+		if (isAcct) {
+			acct = mintUser
+		} else {
+			let aaPred: string = ethers.ZeroAddress
+			try {
+				aaPred = (await fac.beamioAccountOf(mintUser)) as string
+			} catch {
+				aaPred = ethers.ZeroAddress
+			}
+			if (!aaPred || ethers.getAddress(aaPred) === ethers.ZeroAddress) {
+				return false
+			}
+			acct = ethers.getAddress(aaPred)
+		}
+		const cardM = new ethers.Contract(cardNorm, MEMBERSHIP_VALIDITY_ABI, cardProvider)
+		const aid = BigInt(await cardM.activeMembershipId(acct))
+		if (aid <= 0n) return false
+		const bal = BigInt(await cardM.balanceOf(acct, aid))
+		const exp = BigInt(await cardM.expiresAt(aid))
+		const ts = BigInt(Math.floor(Date.now() / 1000))
+		const expired = exp !== 0n && ts > exp
+		return bal > 0n && !expired
+	} catch {
+		return false
+	}
+}
+
+function parseOptionalUint256String(raw: unknown): bigint | null {
+	if (raw == null) return null
+	const s = String(raw).trim().replace(/,/g, '')
+	if (!s) return null
+	try {
+		if (/^\d+$/.test(s)) return BigInt(s)
+		return ethers.parseUnits(s, 6)
+	} catch {
+		return null
+	}
+}
+
 export const nfcTopupPreparePayload = async (params: {
 	uid?: string
 	wallet?: string
 	amount: string
 	currency?: string
 	cardAddress: string
-}): Promise<{ cardAddr: string; data: string; deadline: number; nonce: string; factoryGateway: string } | { error: string }> => {
+	/** Optional tier for membership-fee first issue / renew. */
+	membershipTierIndex?: number | string
+	/** Optional fee in card currency E6 (must match on-chain membershipFeeE6(tier)). */
+	membershipFeeFiat6?: string | number
+}): Promise<NfcTopupPrepareSuccess | { error: string }> => {
 	const { uid, wallet, amount, currency = 'CAD', cardAddress: clientCardAddress } = params
 	const amt = typeof amount === 'string' ? amount : String(amount ?? '')
 	if (!amt || Number(amt) <= 0) return { error: 'Invalid amount' }
@@ -2496,6 +2666,53 @@ export const nfcTopupPreparePayload = async (params: {
 	const amountCurrency6 = ethers.parseUnits(amt, 6)
 	if (amountCurrency6 <= 0n) return { error: 'Invalid amount' }
 
+	const membershipFeeMode = await readCardMembershipFeeMode(cardAddr)
+	const hasValidMembership = membershipFeeMode
+		? await resolveCustomerHasValidMembership(cardAddr, recipientEOA)
+		: false
+	const membershipNeedsFee = membershipFeeMode && !hasValidMembership
+
+	let feeFiat6 = 0n
+	let tierIndexResolved: number | undefined
+	let durationKindResolved: number | undefined
+	if (membershipNeedsFee) {
+		const tierRaw = params.membershipTierIndex
+		if (tierRaw == null || String(tierRaw).trim() === '') {
+			return { error: 'Membership fee mode requires membershipTierIndex for customers without valid membership' }
+		}
+		const tierIndex = Number(tierRaw)
+		if (!Number.isInteger(tierIndex) || tierIndex < 0) {
+			return { error: 'Invalid membershipTierIndex' }
+		}
+		const fees = await readCardMembershipFees(cardAddr)
+		if (tierIndex >= fees.feeE6.length) {
+			return { error: 'membershipTierIndex out of range' }
+		}
+		const expectedFee = fees.feeE6[tierIndex] ?? 0n
+		if (expectedFee <= 0n) {
+			return { error: 'Selected membership tier has no membership fee configured' }
+		}
+		const clientFee = parseOptionalUint256String(params.membershipFeeFiat6)
+		if (clientFee != null && clientFee !== expectedFee) {
+			return { error: 'membershipFeeFiat6 does not match on-chain membership fee for this tier' }
+		}
+		feeFiat6 = expectedFee
+		tierIndexResolved = tierIndex
+		durationKindResolved = fees.durationKind[tierIndex] ?? MEMBERSHIP_FEE_DURATION.NONE
+		if (!isValidMembershipFeeDurationKind(durationKindResolved)) {
+			return { error: 'Invalid membership fee duration for selected tier' }
+		}
+		if (amountCurrency6 < feeFiat6) {
+			return { error: 'Top-up amount must be at least the membership fee' }
+		}
+	}
+
+	/** Points are minted from (amount - fee) when first membership fee applies; else full amount. */
+	const pointsSourceFiat6 = membershipNeedsFee ? amountCurrency6 - feeFiat6 : amountCurrency6
+	if (pointsSourceFiat6 <= 0n) {
+		return { error: 'Top-up after membership fee must credit points (amount must exceed fee)' }
+	}
+
 	// 优先使用“卡币种直算 points6”，避免 currency->USDC->points 的双重向下截断造成 49.999993 这类漏档误差
 	let points6: bigint | null = null
 	try {
@@ -2511,8 +2728,12 @@ export const nfcTopupPreparePayload = async (params: {
 		const currencyMap: Record<number, string> = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' }
 		const cardCurrency = currencyMap[Number(cardCurrencyId)] ?? 'CAD'
 		if (cardCurrency === cur && priceInCurrency6 > 0n) {
-			points6 = ceilDiv(amountCurrency6 * ONE_E6, priceInCurrency6)
-			logger(Colors.gray(`[nfcTopupPreparePayload] direct points calc card=${cardAddr} cur=${cur} amount6=${amountCurrency6} priceE6=${priceInCurrency6} => points6=${points6}`))
+			points6 = ceilDiv(pointsSourceFiat6 * ONE_E6, priceInCurrency6)
+			logger(
+				Colors.gray(
+					`[nfcTopupPreparePayload] direct points calc card=${cardAddr} cur=${cur} amount6=${amountCurrency6} fee6=${feeFiat6} pointsSource6=${pointsSourceFiat6} priceE6=${priceInCurrency6} => points6=${points6}`
+				)
+			)
 		}
 	} catch (_) {
 		// 直算失败时回退 USDC 报价路径
@@ -2521,13 +2742,18 @@ export const nfcTopupPreparePayload = async (params: {
 	if (points6 == null) {
 		// 退到"USDC 报价"路径：必须经 Oracle 折算为 USDC6 后再 quotePointsForUSDC。
 		// 严禁在 oracle 缺失/stale 时悄悄使用写死的固定汇率给客户记账（参见 beamio-currency-protocol）。
-		const usdcAmount6 = quoteCurrencyToUsdc6(amt, cur)
+		const pointsSourceHuman = ethers.formatUnits(pointsSourceFiat6, 6)
+		const usdcAmount6 = quoteCurrencyToUsdc6(pointsSourceHuman, cur)
 		if (usdcAmount6 <= 0n) {
 			return { error: 'Oracle rate unavailable, please retry shortly' }
 		}
 		const quote = await quotePointsForUSDC_raw(cardAddr, usdcAmount6)
 		points6 = quote.points6
-		logger(Colors.gray(`[nfcTopupPreparePayload] quote path card=${cardAddr} cur=${cur} amount6=${amountCurrency6} usdc6=${usdcAmount6} => points6=${points6}`))
+		logger(
+			Colors.gray(
+				`[nfcTopupPreparePayload] quote path card=${cardAddr} cur=${cur} amount6=${amountCurrency6} fee6=${feeFiat6} pointsSource6=${pointsSourceFiat6} usdc6=${usdcAmount6} => points6=${points6}`
+			)
+		)
 	}
 
 	if (points6 <= 0n) return { error: 'quotePointsForUSDC failed' }
@@ -2537,7 +2763,24 @@ export const nfcTopupPreparePayload = async (params: {
 	const deadline = Math.floor(Date.now() / 1000) + 900
 	const nonce = ethers.hexlify(ethers.randomBytes(32))
 	const factoryGateway = await getBeamioUserCardFactoryGateway(cardAddr)
-	return { cardAddr, data, deadline, nonce, factoryGateway }
+	const result: NfcTopupPrepareSuccess = {
+		cardAddr,
+		data,
+		deadline,
+		nonce,
+		factoryGateway,
+		membershipFeeMode,
+		membershipNeedsFee,
+		pointsCredit6: points6.toString(),
+		amountFiat6: amountCurrency6.toString(),
+	}
+	if (membershipNeedsFee && tierIndexResolved != null) {
+		result.membershipTierIndex = tierIndexResolved
+		result.membershipFeeFiat6 = feeFiat6.toString()
+		result.membershipDurationKind = durationKindResolved
+		result.membershipDurationLabel = membershipFeeDurationLabel(durationKindResolved ?? 0)
+	}
+	return result
 }
 
 /** Burn Points Prepare：生成 executeForAdmin 所需的 data、deadline、nonce。Admin 离线签字后提交 /api/nfcTopup。target 为被 burn 的地址，amount 为 "max" 表示 burn 全部。 */
@@ -2586,6 +2829,8 @@ export const executeForAdminPool: Array<{
 	couponBurnUserEOA?: string
 	/** Optional share referrer EOA for coupon burn #13 ref mint. */
 	couponBurnRefWallet?: string
+	/** Membership-fee first issue: stage pending purchase before mintPointsByAdmin. */
+	membershipFeeStage?: NfcTopupMembershipFeeStage
 }> = []
 
 /** Base `executeForAdmin` 已返回 txHash 且 HTTP 已 200 之后的后台任务（BUint / indexer / metadata），不占用 Settle_ContractPool 主槽位 */
@@ -3470,6 +3715,48 @@ export const executeForAdminProcess = async () => {
 				logger(Colors.yellow(`[executeForAdminProcess] pre-topup ownership snapshot failed: ${preOwnershipErr?.shortMessage ?? preOwnershipErr?.message ?? String(preOwnershipErr)}`))
 			}
 		}
+		/** Membership-fee first issue: stage pending purchase on card before mintPointsByAdmin. */
+		if (mintParsed && obj.membershipFeeStage) {
+			const stage = obj.membershipFeeStage
+			const stageRecipient = ethers.getAddress(stage.recipientEOA)
+			if (stageRecipient.toLowerCase() !== mintParsed.recipient.toLowerCase()) {
+				throw new Error('membershipFeeStage recipient mismatch with mintPointsByAdmin')
+			}
+			if (stage.pointsCredit6 !== mintParsed.points6) {
+				throw new Error('membershipFeeStage pointsCredit6 mismatch with mintPointsByAdmin amount')
+			}
+			const stageIface = new ethers.Interface([
+				'function stageMembershipFeePurchase(address user, uint256 tierIndex, uint256 feePaid6, uint256 pointsCredit6)',
+			])
+			const stageCallData = stageIface.encodeFunctionData('stageMembershipFeePurchase', [
+				stageRecipient,
+				BigInt(stage.tierIndex),
+				stage.feePaid6,
+				stage.pointsCredit6,
+			])
+			const stageChain = await resolveUserCardChain(obj.cardAddr)
+			const stageTx = await relayUserCardCallViaEntryPoint({
+				SC,
+				chain: stageChain,
+				cardAddress: obj.cardAddr,
+				cardCallData: stageCallData,
+				logTag: 'executeForAdminProcess:stageMembershipFeePurchase',
+			})
+			logger(
+				Colors.cyan(
+					`[executeForAdminProcess] stageMembershipFeePurchase tx=${stageTx.hash} tier=${stage.tierIndex} fee6=${stage.feePaid6} points6=${stage.pointsCredit6} user=${stageRecipient}`
+				)
+			)
+			const stageReceipt = await stageTx.wait()
+			const stageOk = checkBusinessRelayTxSuccessful(stageReceipt ?? undefined, {
+				logTag: 'executeForAdminProcess:stageMembershipFeePurchase',
+			})
+			if (!stageOk.ok) {
+				throw new Error(
+					`stageMembershipFeePurchase failed on-chain: ${stageTx.hash} (${stageOk.reason}) userOpHash=${stageOk.userOpHash ?? 'n/a'}`
+				)
+			}
+		}
 		const factory = await contractForExecuteForAdmin(SC, obj.cardAddr)
 		let tx: ethers.ContractTransactionResponse
 		const factoryAddress = ethers.getAddress(await factory.getAddress())
@@ -3510,7 +3797,8 @@ export const executeForAdminProcess = async () => {
 		const wantsPostBase =
 			Boolean(obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) ||
 			Boolean(recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) ||
-			Boolean(recipientEOA && obj.cardAddr)
+			Boolean(recipientEOA && obj.cardAddr) ||
+			Boolean(burnIssuedNftParsed)
 		if (wantsPostBase) {
 			executeForAdminPostBasePool.push({
 				obj,
@@ -3794,6 +4082,8 @@ export const cardCouponOpenClaimPool: {
 	pointsCost?: string
 	usdcReward6?: string
 	refWallet?: string
+	/** POS NFC 代领：终端 EOA → indexer subordinate，便于 posLedger 看到领取。 */
+	posOperator?: string
 	res?: Response
 }[] = []
 
@@ -4043,6 +4333,94 @@ export function isPosCouponSurrenderDisplayJson(displayJson: string | undefined 
 	} catch {
 		return false
 	}
+}
+
+/** executeForAdmin `burnIssuedNftByGateway` 主业务行（与 OpenContainer surrender 同 `voucher_burn`）。 */
+async function syncPosCouponBurnMainIndexerRow(args: {
+	walletConet: ethers.Wallet
+	txHash: string
+	cardAddress: string
+	holder: string
+	tokenId: bigint
+	amount: bigint
+	payerEOA: string
+	posOperator: string
+}): Promise<void> {
+	const cardNorm = ethers.getAddress(args.cardAddress)
+	const payer = ethers.getAddress(args.payerEOA)
+	const posOp = ethers.getAddress(args.posOperator)
+	const holder = ethers.getAddress(args.holder)
+	const txHash = args.txHash as `0x${string}`
+	const cardChain = await resolveUserCardChain(cardNorm)
+	const chainId = BigInt(chainIdForUserCardChain(cardChain))
+	const operatorParentChain = await fetchOperatorParentChain(cardNorm, posOp)
+	const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(posOp, operatorParentChain)
+	const amountE6 = args.amount > 0n ? args.amount : 1n
+	const displayJson = JSON.stringify({
+		title: 'In-Store Coupon Redeem',
+		source: 'posCouponSurrender',
+		finishedHash: txHash,
+		handle: 'POS coupon surrender',
+		forText: 'POS coupon surrender',
+		cardAddress: cardNorm,
+		tokenId: args.tokenId.toString(),
+	})
+	const transactionInput = {
+		txId: txHash,
+		originalPaymentHash: ethers.ZeroHash as `0x${string}`,
+		chainId,
+		txCategory: TX_VOUCHER_BURN,
+		displayJson,
+		timestamp: 0n,
+		payer,
+		payee: posOp,
+		finalRequestAmountFiat6: 1n,
+		finalRequestAmountUSDC6: 1n,
+		isAAAccount: true,
+		route: [
+			{
+				asset: cardNorm,
+				amountE6,
+				assetType: 1,
+				source: 1,
+				tokenId: args.tokenId,
+				itemCurrencyType: 4,
+				offsetInRequestCurrencyE6: 0n,
+			},
+		],
+		fees: {
+			gasChainType: 0,
+			gasWei: 0n,
+			gasUSDC6: 0n,
+			serviceUSDC6: 0n,
+			bServiceUSDC6: 0n,
+			bServiceUnits6: 0n,
+			feePayer: ethers.ZeroAddress,
+		},
+		meta: {
+			requestAmountFiat6: 1n,
+			requestAmountUSDC6: 1n,
+			currencyFiat: 4,
+			discountAmountFiat6: 0n,
+			discountRateBps: 0,
+			taxAmountFiat6: 0n,
+			taxRateBps: 0,
+			afterNotePayer: '',
+			afterNotePayee: '',
+		},
+		operator: posOp,
+		operatorParentChain,
+		topAdmin,
+		subordinate: posOp.toLowerCase() !== payer.toLowerCase() ? posOp : subordinate,
+	}
+	const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, args.walletConet)
+	const syncTx = await actionFacetSync.syncTokenAction(transactionInput)
+	await syncTx.wait()
+	logger(
+		Colors.green(
+			`[syncPosCouponBurnMainIndexerRow] indexed burn tx=${txHash} sync=${syncTx.hash} card=${cardNorm} holder=${holder} payer=${payer} pos=${posOp}`
+		)
+	)
 }
 
 /**
@@ -7186,6 +7564,108 @@ const readCardTiers = async (
 	return tiers
 }
 
+/**
+ * Membership-fee first issue / renew Cluster precheck.
+ * When fee mode is on and customer has no valid membership: require tier + fee match + amount >= fee;
+ * mint points must equal points credited from (amountFiat6 - feeFiat6).
+ * Replaces min-tier first-membership gate while fee mode is active.
+ * Metadata min/max top-up quotas do not apply in fee mode (not enforced on this path).
+ */
+export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
+	cardAddrRaw: string
+	mintRecipientAddrRaw: string
+	points6Mint: bigint
+	membershipTierIndex?: number | string | null
+	membershipFeeFiat6?: string | number | null
+	/** Optional total paid in card currency E6 (from currencyAmount). */
+	amountFiat6?: string | number | null
+}): Promise<
+	| { success: true; stage?: NfcTopupMembershipFeeStage; membershipFeeMode: boolean; membershipNeedsFee: boolean }
+	| { success: false; error: string }
+> {
+	const cardNorm = ethers.getAddress(params.cardAddrRaw.trim())
+	const mintUser = ethers.getAddress(params.mintRecipientAddrRaw.trim())
+	const feeMode = await readCardMembershipFeeMode(cardNorm)
+	if (!feeMode) {
+		return { success: true, membershipFeeMode: false, membershipNeedsFee: false }
+	}
+	const hasValid = await resolveCustomerHasValidMembership(cardNorm, mintUser)
+	if (hasValid) {
+		return { success: true, membershipFeeMode: true, membershipNeedsFee: false }
+	}
+	if (params.points6Mint <= 0n) {
+		return { success: false, error: 'Invalid mintPointsByAdmin amount for membership fee purchase' }
+	}
+	const tierRaw = params.membershipTierIndex
+	if (tierRaw == null || String(tierRaw).trim() === '') {
+		return { success: false, error: 'Membership fee mode requires membershipTierIndex for customers without valid membership' }
+	}
+	const tierIndex = Number(tierRaw)
+	if (!Number.isInteger(tierIndex) || tierIndex < 0) {
+		return { success: false, error: 'Invalid membershipTierIndex' }
+	}
+	const fees = await readCardMembershipFees(cardNorm)
+	if (tierIndex >= fees.feeE6.length) {
+		return { success: false, error: 'membershipTierIndex out of range' }
+	}
+	const expectedFee = fees.feeE6[tierIndex] ?? 0n
+	if (expectedFee <= 0n) {
+		return { success: false, error: 'Selected membership tier has no membership fee configured' }
+	}
+	if (!isValidMembershipFeeDurationKind(fees.durationKind[tierIndex] ?? 0)) {
+		return { success: false, error: 'Invalid membership fee duration for selected tier' }
+	}
+	const clientFee = parseOptionalUint256String(params.membershipFeeFiat6)
+	if (clientFee == null) {
+		return { success: false, error: 'membershipFeeFiat6 is required when membership fee staging is needed' }
+	}
+	if (clientFee !== expectedFee) {
+		return { success: false, error: 'membershipFeeFiat6 does not match on-chain membership fee for this tier' }
+	}
+	const amountFiat6 = parseOptionalUint256String(params.amountFiat6)
+	if (amountFiat6 != null) {
+		if (amountFiat6 < expectedFee) {
+			return { success: false, error: 'Top-up amount must be at least the membership fee' }
+		}
+		const pointsSourceFiat6 = amountFiat6 - expectedFee
+		if (pointsSourceFiat6 <= 0n) {
+			return { success: false, error: 'Top-up after membership fee must credit points (amount must exceed fee)' }
+		}
+		try {
+			const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
+			const readCard = new ethers.Contract(
+				cardNorm,
+				['function pointsUnitPriceInCurrencyE6() view returns (uint256)'],
+				provider
+			)
+			const priceInCurrency6 = (await readCard.pointsUnitPriceInCurrencyE6()) as bigint
+			if (priceInCurrency6 > 0n) {
+				const ONE_E6 = 1_000_000n
+				const expectedPoints = (pointsSourceFiat6 * ONE_E6 + priceInCurrency6 - 1n) / priceInCurrency6
+				if (expectedPoints !== params.points6Mint) {
+					return {
+						success: false,
+						error: 'mintPointsByAdmin amount does not match points credited after membership fee',
+					}
+				}
+			}
+		} catch {
+			/* pricing read failed — still stage with client mint amount */
+		}
+	}
+	return {
+		success: true,
+		membershipFeeMode: true,
+		membershipNeedsFee: true,
+		stage: {
+			recipientEOA: mintUser,
+			tierIndex,
+			feePaid6: expectedFee,
+			pointsCredit6: params.points6Mint,
+		},
+	}
+}
+
 /** 对齐 `BeamioUserCard._requirePointsMintAllowsFirstMembership`：无有效会员且配置了 tiers 时，`points6` 须 ≥ 全档最小的 `minUsdc6`。 */
 export async function nfcTopupPreCheckMintMinTierFirstMembership(
 	cardAddrRaw: string,
@@ -7196,6 +7676,11 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 	try {
 		const cardNorm = ethers.getAddress(cardAddrRaw.trim())
 		const mintUser = ethers.getAddress(mintRecipientAddrRaw.trim())
+
+		/** Fee mode first-issue uses `nfcTopupPreCheckMembershipFeeFirstIssue` instead of min-tier points gate. */
+		if (await readCardMembershipFeeMode(cardNorm)) {
+			return { success: true }
+		}
 
 		const membershipAbi = [
 			'function activeMembershipId(address) view returns (uint256)',
@@ -7219,49 +7704,7 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 		}
 		if (minVal <= 0n) return { success: true }
 
-		const aaFactoryAddr = ethers.getAddress(await getCardAaFactoryAddress(cardNorm))
-		const facAbi = ['function isBeamioAccount(address) view returns (bool)', 'function beamioAccountOf(address) view returns (address)']
-		const fac = new ethers.Contract(aaFactoryAddr, facAbi as ethers.InterfaceAbi, cardProvider)
-
-		let acct: string
-		let isAcct = false
-		try {
-			isAcct = (await fac.isBeamioAccount(mintUser)) as boolean
-		} catch {
-			isAcct = false
-		}
-		if (isAcct) {
-			acct = mintUser
-		} else {
-			let aaPred: string = ethers.ZeroAddress
-			try {
-				aaPred = (await fac.beamioAccountOf(mintUser)) as string
-			} catch {
-				aaPred = ethers.ZeroAddress
-			}
-			if (!aaPred || ethers.getAddress(aaPred) === ethers.ZeroAddress) {
-				acct = ethers.ZeroAddress
-			} else {
-				acct = ethers.getAddress(aaPred)
-			}
-		}
-
-		let hasValid = false
-		if (acct !== ethers.ZeroAddress) {
-			try {
-				const cardM = new ethers.Contract(cardNorm, membershipAbi, cardProvider)
-				const aid = BigInt(await cardM.activeMembershipId(acct))
-				if (aid > 0n) {
-					const bal = BigInt(await cardM.balanceOf(acct, aid))
-					const exp = BigInt(await cardM.expiresAt(aid))
-					const ts = BigInt(Math.floor(Date.now() / 1000))
-					const expired = exp !== 0n && ts > exp
-					if (bal > 0n && !expired) hasValid = true
-				}
-			} catch {
-				/* non-member — treat like contract would */
-			}
-		}
+		const hasValid = await resolveCustomerHasValidMembership(cardNorm, mintUser)
 
 		if (hasValid) return { success: true }
 		if (points6Mint >= minVal) return { success: true }
@@ -8753,71 +9196,110 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			obj.data.slice(0, 10).toLowerCase() === BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR
 		if (
 			baseTxOk &&
-			nfcTopupBunitConsumeTxHash &&
-			topupBunitFeePayerResolved &&
-			obj.topupFeeBUnits &&
-			obj.topupFeeBUnits > 0n &&
 			burnCouponCalldata &&
 			!(recipientEOA && mintParsed && mintParsed.points6 > 0n)
 		) {
+			let burnHolder = ''
+			let burnTokenId = 0n
+			let burnAmount = 1n
 			try {
-				const operatorParentChain = await fetchOperatorParentChain(obj.cardAddr, adminCheck.signer)
-				const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(adminCheck.signer, operatorParentChain)
-				let subordinateForLedger = subordinate
-				const posOpRaw = typeof obj.posOperator === 'string' ? obj.posOperator.trim() : ''
-				if (posOpRaw && ethers.isAddress(posOpRaw)) {
-					subordinateForLedger = ethers.getAddress(posOpRaw)
+				const decoded = burnIssuedNftByGatewayIface.parseTransaction({ data: obj.data })
+				if (decoded?.name === 'burnIssuedNftByGateway') {
+					burnHolder = ethers.getAddress(decoded.args[0] as string)
+					burnTokenId = BigInt(decoded.args[1] as bigint)
+					burnAmount = BigInt(decoded.args[2] as bigint)
 				}
-				await syncStandaloneBunitServiceFeeToIndexer({
-					walletConet: SC.walletConet,
-					BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
-					consumeTxHash: nfcTopupBunitConsumeTxHash,
-					basePaymentHash: tx.hash,
-					cardAddress: obj.cardAddr,
-					feePayer: topupBunitFeePayerResolved,
-					bServiceUnits6: obj.topupFeeBUnits,
-					txCategory: TX_CATEGORY_POS_COUPON_BURN_BUNIT_SERVICE,
-					title: 'In-store coupon burn B-Unit service fee',
-					source: 'posCouponBurnBUnit',
-					operator: ethers.getAddress(adminCheck.signer),
-					operatorParentChain,
-					topAdmin,
-					subordinate: subordinateForLedger,
-					logLabel: 'executeForAdminPostBaseProcess',
-				})
-			} catch (burnBunitIdxErr: any) {
+			} catch (burnDecodeErr: any) {
 				logger(
 					Colors.yellow(
-						`[executeForAdminPostBaseProcess] coupon burn B-Unit standalone indexer non-critical: ${burnBunitIdxErr?.shortMessage ?? burnBunitIdxErr?.message ?? String(burnBunitIdxErr)}`
+						`[executeForAdminPostBaseProcess] burnIssuedNftByGateway decode: ${burnDecodeErr?.shortMessage ?? burnDecodeErr?.message ?? String(burnDecodeErr)}`
 					)
 				)
 			}
-			if (obj.couponBurnUserEOA && ethers.isAddress(obj.couponBurnUserEOA)) {
+			const posOpRaw = typeof obj.posOperator === 'string' ? obj.posOperator.trim() : ''
+			const posOpForBurn =
+				posOpRaw && ethers.isAddress(posOpRaw)
+					? ethers.getAddress(posOpRaw)
+					: ethers.getAddress(adminCheck.signer)
+			const payerForBurn =
+				obj.couponBurnUserEOA && ethers.isAddress(obj.couponBurnUserEOA)
+					? ethers.getAddress(obj.couponBurnUserEOA)
+					: burnHolder || posOpForBurn
+			if (burnHolder && burnTokenId > 0n) {
 				try {
-					const decoded = burnIssuedNftByGatewayIface.parseTransaction({ data: obj.data })
-					if (decoded?.name === 'burnIssuedNftByGateway') {
-						const holder = decoded.args[0] as string
-						const tokenId = BigInt(decoded.args[1] as bigint)
-						const { enqueueCouponSocialReward13IfConfigured } = await import(
-							'./userCumulativeStatRewardPoolMaster.js'
+					await syncPosCouponBurnMainIndexerRow({
+						walletConet: SC.walletConet,
+						txHash: tx.hash,
+						cardAddress: obj.cardAddr,
+						holder: burnHolder,
+						tokenId: burnTokenId,
+						amount: burnAmount > 0n ? burnAmount : 1n,
+						payerEOA: payerForBurn,
+						posOperator: posOpForBurn,
+					})
+				} catch (burnMainIdxErr: any) {
+					logger(
+						Colors.yellow(
+							`[executeForAdminPostBaseProcess] coupon burn voucher_burn indexer non-critical: ${burnMainIdxErr?.shortMessage ?? burnMainIdxErr?.message ?? String(burnMainIdxErr)}`
 						)
-						const { resolveCouponBurnRefWallet } = await import('./couponSocialPromotionReward.js')
-						const actor = ethers.getAddress(obj.couponBurnUserEOA)
-						const refWallet = await resolveCouponBurnRefWallet({
-							cardAddress: obj.cardAddr,
-							holderAccount: holder,
-							actorEOA: actor,
-							explicitRefWallet: obj.couponBurnRefWallet ?? null,
-						})
-						await enqueueCouponSocialReward13IfConfigured({
-							cardAddress: obj.cardAddr,
-							userEOA: actor,
-							issuedTokenId: tokenId,
-							eventKey: 'burn',
-							refWallet: refWallet !== ethers.ZeroAddress ? refWallet : null,
-							cumulativeDelta: 1,
-						})
-					}
+					)
+				}
+			}
+			if (
+				nfcTopupBunitConsumeTxHash &&
+				topupBunitFeePayerResolved &&
+				obj.topupFeeBUnits &&
+				obj.topupFeeBUnits > 0n
+			) {
+				try {
+					const operatorParentChain = await fetchOperatorParentChain(obj.cardAddr, adminCheck.signer)
+					const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(adminCheck.signer, operatorParentChain)
+					await syncStandaloneBunitServiceFeeToIndexer({
+						walletConet: SC.walletConet,
+						BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
+						consumeTxHash: nfcTopupBunitConsumeTxHash,
+						basePaymentHash: tx.hash,
+						cardAddress: obj.cardAddr,
+						feePayer: topupBunitFeePayerResolved,
+						bServiceUnits6: obj.topupFeeBUnits,
+						txCategory: TX_CATEGORY_POS_COUPON_BURN_BUNIT_SERVICE,
+						title: 'In-store coupon burn B-Unit service fee',
+						source: 'posCouponBurnBUnit',
+						operator: ethers.getAddress(adminCheck.signer),
+						operatorParentChain,
+						topAdmin,
+						subordinate: posOpForBurn,
+						logLabel: 'executeForAdminPostBaseProcess',
+					})
+				} catch (burnBunitIdxErr: any) {
+					logger(
+						Colors.yellow(
+							`[executeForAdminPostBaseProcess] coupon burn B-Unit standalone indexer non-critical: ${burnBunitIdxErr?.shortMessage ?? burnBunitIdxErr?.message ?? String(burnBunitIdxErr)}`
+						)
+					)
+				}
+			}
+			if (obj.couponBurnUserEOA && ethers.isAddress(obj.couponBurnUserEOA) && burnTokenId > 0n) {
+				try {
+					const { enqueueCouponSocialReward13IfConfigured } = await import(
+						'./userCumulativeStatRewardPoolMaster.js'
+					)
+					const { resolveCouponBurnRefWallet } = await import('./couponSocialPromotionReward.js')
+					const actor = ethers.getAddress(obj.couponBurnUserEOA)
+					const refWallet = await resolveCouponBurnRefWallet({
+						cardAddress: obj.cardAddr,
+						holderAccount: burnHolder || actor,
+						actorEOA: actor,
+						explicitRefWallet: obj.couponBurnRefWallet ?? null,
+					})
+					await enqueueCouponSocialReward13IfConfigured({
+						cardAddress: obj.cardAddr,
+						userEOA: actor,
+						issuedTokenId: burnTokenId,
+						eventKey: 'burn',
+						refWallet: refWallet !== ethers.ZeroAddress ? refWallet : null,
+						cumulativeDelta: 1,
+					})
 				} catch (burnRewardErr: any) {
 					logger(
 						Colors.yellow(
@@ -8909,6 +9391,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				const payeeAddr = ethers.isAddress(cardOwnerEOAForAccounting)
 					? ethers.getAddress(cardOwnerEOAForAccounting)
 					: ethers.ZeroAddress
+				const membershipFeeStage = obj.membershipFeeStage
 				const displayJson = JSON.stringify({
 					title,
 					handle: '',
@@ -8917,6 +9400,15 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					cardName: cardDisplayName || undefined,
 					cardAddress: obj.cardAddr,
 					finishedHash: tx.hash,
+					...(membershipFeeStage
+						? {
+								membershipFeeFiat6: membershipFeeStage.feePaid6.toString(),
+								membershipTierIndex: membershipFeeStage.tierIndex,
+								membershipPointsCredit6: membershipFeeStage.pointsCredit6.toString(),
+								/** Client hint: fee portion of this top-up (main row remains creditTopup / nfc topup). */
+								membershipFeeCategory: 'nfcTopup:membershipFee',
+							}
+						: {}),
 				})
 				const topupRouteItem = {
 					asset: obj.cardAddr,
@@ -9008,6 +9500,14 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 							cardCurrencyAmountE6: spl!.cardE6.toString(),
 							cashCurrencyAmountE6: spl!.cashE6.toString(),
 							bonusCurrencyAmountE6: spl!.bonusE6.toString(),
+							...(membershipFeeStage
+								? {
+										membershipFeeFiat6: membershipFeeStage.feePaid6.toString(),
+										membershipTierIndex: membershipFeeStage.tierIndex,
+										membershipPointsCredit6: membershipFeeStage.pointsCredit6.toString(),
+										membershipFeeCategory: 'nfcTopup:membershipFee',
+									}
+								: {}),
 						})
 						const legTxId = nfcTopupIndexerLegTxId(tx.hash, `${topupCategoryRaw}:${legs[i]!.idxKey}`)
 						/** B-Unit 只写独立 `nfcTopup:bunitService` 行；主业务腿 fees 恒为 0（避免 biz 合并腿时 20×N）。 */
@@ -12862,8 +13362,8 @@ export type CreateCardPreChecked = {
 	createCardOwnerAsRequested?: string
 }
 
-/** Reload limits are expressed as USDC bounds, then converted to the card currency for whole-unit metadata. */
-const CREATE_CARD_TOPUP_MIN_USDC_UNITS = 3
+/** Reload limits are expressed as USDC bounds, then converted to the card currency for whole-unit metadata. `0` = no minimum floor. */
+const CREATE_CARD_TOPUP_MIN_USDC_UNITS = 0
 const CREATE_CARD_TOPUP_LIMIT_USDC_UNITS = 50000
 const CREATE_CARD_ORACLE_CAD_USDC_FALLBACK = 0.740
 const CREATE_CARD_DISPLAY_NAME_MAX_LEN = 128
@@ -12895,13 +13395,13 @@ const CREATE_CARD_DEFAULT_POINT_SYSTEM: CreateCardPointSystemNormalized = {
 
 function parseCreateCardTopupWholeUnit(v: unknown): number | undefined {
 	if (v == null) return undefined
-	if (typeof v === 'number' && Number.isInteger(v) && v > 0) return v
+	if (typeof v === 'number' && Number.isInteger(v) && v >= 0) return v
 	if (typeof v === 'string') {
 		const t = v.replace(/,/g, '').trim()
 		if (!t) return undefined
 		const n = Number.parseInt(t, 10)
 		const f = parseFloat(t)
-		if (Number.isFinite(n) && Number.isFinite(f) && f === n && n > 0) return n
+		if (Number.isFinite(n) && Number.isFinite(f) && f === n && n >= 0) return n
 	}
 	return undefined
 }
@@ -12918,6 +13418,7 @@ function createCardTopupLimitMaxUnitsForCurrency(currencyRaw: string | undefined
 }
 
 function createCardTopupLimitMinUnitsForCurrency(currencyRaw: string | undefined | null): number {
+	if (CREATE_CARD_TOPUP_MIN_USDC_UNITS <= 0) return 0
 	const currency = String(currencyRaw ?? '').trim().toUpperCase()
 	if (currency === 'CAD') {
 		return Math.max(1, Math.ceil(CREATE_CARD_TOPUP_MIN_USDC_UNITS / CREATE_CARD_ORACLE_CAD_USDC_FALLBACK))
@@ -13129,7 +13630,10 @@ export const createCardPreCheck = (body: {
 		if (minTu != null && minTu < topupLimitMinUnits) {
 			return {
 				success: false,
-				error: `shareTokenMetadata.minimumTopup must be at least ${topupLimitMinUnits} ${body.currency} (${CREATE_CARD_TOPUP_MIN_USDC_UNITS} USDC equivalent)`,
+				error:
+					topupLimitMinUnits <= 0
+						? 'shareTokenMetadata.minimumTopup cannot be negative'
+						: `shareTokenMetadata.minimumTopup must be at least ${topupLimitMinUnits} ${body.currency} (${CREATE_CARD_TOPUP_MIN_USDC_UNITS} USDC equivalent)`,
 			}
 		}
 		if (minTu != null && minTu > topupLimitMaxUnits) {
@@ -15864,6 +16368,11 @@ export type CardCouponPosClaimPreCheckResult =
 			deadline: number
 			nonce: string
 			userSignature: string
+			isSocialExchange?: boolean
+			pointsCost?: string
+			usdcReward6?: string
+			refWallet?: string
+			posOperator?: string
 		}
 	}
 	| { success: false; error: string }
@@ -16060,10 +16569,16 @@ export const cardCouponPosClaimPreCheck = async (body: {
 				userSignature,
 			})
 			if (!openPre.success) return openPre
+			const posOpRaw = String(body.signerEOA ?? '').trim()
 			return {
 				success: true,
 				route: 'openClaim',
-				preChecked: openPre.preChecked,
+				preChecked: {
+					...openPre.preChecked,
+					...(posOpRaw && ethers.isAddress(posOpRaw)
+						? { posOperator: ethers.getAddress(posOpRaw) }
+						: {}),
+				},
 			}
 		}
 	}
@@ -19181,6 +19696,9 @@ export const cardCouponOpenClaimProcess = async () => {
 				couponId: obj.couponId,
 				tokenId: String(obj.tokenId),
 			},
+			...(obj.posOperator && ethers.isAddress(obj.posOperator)
+				? { posOperator: ethers.getAddress(obj.posOperator) }
+				: {}),
 		})
 		cardRedeemIndexerAccountingProcess().catch((err: any) => {
 			logger(Colors.red('[cardRedeemIndexerAccountingProcess] unhandled:'), err?.message ?? err)
