@@ -2778,6 +2778,17 @@ const routing = ( router: Router ) => {
 				deadline?: string
 				signature?: string
 				secret?: string
+				linkedValidatorRedeemable?: boolean
+				linkedValidatorClaim?: {
+					contract: string
+					claimer: string
+					beneficiary: string
+					referrer: string
+					code: string
+					deadline: string
+					signature: string
+					gasLimit: string
+				}
 			}
 			referralRegistryRedeemPool.push({
 				action: body.action as ReferralRegistryRedeemRelayAction,
@@ -2789,6 +2800,8 @@ const routing = ( router: Router ) => {
 				deadline: body.deadline as string,
 				signature: body.signature as string,
 				secret: body.secret,
+				linkedValidatorRedeemable: Boolean(body.linkedValidatorRedeemable),
+				linkedValidatorClaim: body.linkedValidatorClaim,
 				res,
 			})
 			kickReferralRegistryRedeemRelay()
@@ -3478,13 +3491,29 @@ const routing = ( router: Router ) => {
 
 		/** POST /api/businessStartKetRedeemRedeem — cluster 预检合格后转发；Settle 代付 gas 调 redeemWithCodeAsAdmin(recipient=用户 EOA) */
 		router.post('/businessStartKetRedeemRedeem', (req, res) => {
-			const body = req.body as { eoa?: string; code?: string }
+			const body = req.body as {
+				eoa?: string
+				code?: string
+				linkedValidatorRedeemable?: boolean
+				linkedValidatorClaim?: {
+					contract: string
+					claimer: string
+					beneficiary: string
+					referrer: string
+					code: string
+					deadline: string
+					signature: string
+					gasLimit: string
+				}
+			}
 			if (!body.eoa || !ethers.isAddress(body.eoa) || typeof body.code !== 'string' || !body.code.trim()) {
 				return res.status(400).json({ success: false, error: 'Missing eoa or code' }).end()
 			}
 			businessStartKetRedeemUserRedeemPool.push({
 				eoa: ethers.getAddress(body.eoa),
 				code: body.code.trim(),
+				linkedValidatorRedeemable: Boolean(body.linkedValidatorRedeemable),
+				linkedValidatorClaim: body.linkedValidatorClaim,
 				res,
 			})
 			businessStartKetRedeemUserRedeemProcess().catch((err: any) => {

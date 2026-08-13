@@ -110,6 +110,7 @@ import {
 	getValidatorDepositRedeemStatus,
 	validatorDepositRedeemCancelClusterPreCheck,
 	validatorDepositRedeemClaimClusterPreCheck,
+	probeLinkedValidatorDepositRedeemByCode,
 	validatorDepositRedeemTransferClusterPreCheck,
 	createTransferOrderClusterPreCheck,
 	cancelTransferOrderClusterPreCheck,
@@ -1083,6 +1084,64 @@ async function referralRegistryMerchantSharePreCheck(body: any): Promise<
 	}
 }
 
+type LinkedValidatorClaimForward = {
+	contract: string
+	claimer: string
+	beneficiary: string
+	referrer: string
+	code: string
+	deadline: string
+	signature: string
+	gasLimit: string
+}
+
+async function tryPreCheckLinkedValidatorClaim(
+	secret: string,
+	linkedRaw: unknown,
+): Promise<{
+	linkedValidatorRedeemable: boolean
+	linkedValidatorClaim?: LinkedValidatorClaimForward
+}> {
+	const probe = await probeLinkedValidatorDepositRedeemByCode(secret)
+	if (!probe.redeemable) {
+		return { linkedValidatorRedeemable: false }
+	}
+	const linked =
+		linkedRaw && typeof linkedRaw === 'object' ? (linkedRaw as Record<string, unknown>) : null
+	if (!linked) {
+		return { linkedValidatorRedeemable: true }
+	}
+	const pre = await validatorDepositRedeemClaimClusterPreCheck({
+		claimer: typeof linked.claimer === 'string' ? linked.claimer : undefined,
+		beneficiary: typeof linked.beneficiary === 'string' ? linked.beneficiary : undefined,
+		code: secret,
+		deadline: linked.deadline,
+		signature: linked.signature,
+	})
+	if (!pre.success) {
+		logger(
+			Colors.yellow(
+				`[linkedValidatorClaim] preCheck skipped (kit claim continues): ${pre.error}`,
+			),
+		)
+		return { linkedValidatorRedeemable: true }
+	}
+	const p = pre.preChecked
+	return {
+		linkedValidatorRedeemable: true,
+		linkedValidatorClaim: {
+			contract: p.contract,
+			claimer: p.claimer,
+			beneficiary: p.beneficiary,
+			referrer: p.referrer,
+			code: p.code,
+			deadline: p.deadline.toString(),
+			signature: p.signature,
+			gasLimit: String(p.gasLimit),
+		},
+	}
+}
+
 async function referralClaimRelayPreCheck(body: any): Promise<
 	| {
 			success: true
@@ -1096,6 +1155,8 @@ async function referralClaimRelayPreCheck(body: any): Promise<
 				deadline: string
 				signature: string
 				secret: string
+				linkedValidatorRedeemable?: boolean
+				linkedValidatorClaim?: LinkedValidatorClaimForward
 			}
 	  }
 	| { success: false; error: string }
@@ -1161,7 +1222,26 @@ async function referralClaimRelayPreCheck(body: any): Promise<
 		const message = { claimer: account, redeemHash, nonce, deadline }
 		const digest = ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types as any, message)
 		if (ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase()) return { success: false, error: 'Claim signature does not match wallet' }
-		return { success: true, preChecked: { action, contract: CONET_REFERRAL_REGISTRY_VAULT_V1, account, redeemHash, rebateBps: '0', nonce: nonce.toString(), deadline: deadline.toString(), signature, secret } }
+		const linked =
+			kind === 'merchant' || kind === 'adminPackage'
+				? await tryPreCheckLinkedValidatorClaim(secret, body?.linkedValidatorClaim)
+				: { linkedValidatorRedeemable: false as const }
+		return {
+			success: true,
+			preChecked: {
+				action,
+				contract: CONET_REFERRAL_REGISTRY_VAULT_V1,
+				account,
+				redeemHash,
+				rebateBps: '0',
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+				secret,
+				linkedValidatorRedeemable: linked.linkedValidatorRedeemable,
+				linkedValidatorClaim: linked.linkedValidatorClaim,
+			},
+		}
 	} catch (error: any) {
 		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral claim request' }
 	}
@@ -10567,7 +10647,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/** POST /api/businessStartKetRedeemRedeem — BusinessStartKetRedeem：Cluster 读链预检后代付 redeemWithCodeAsAdmin（Ket + B-Unit → 用户 EOA，CoNET） */
 	router.post('/businessStartKetRedeemRedeem', async (req, res) => {
-		const body = req.body as { eoa?: string; code?: string }
+		const body = req.body as { eoa?: string; code?: string; linkedValidatorClaim?: unknown }
 		const pre = businessStartKetRedeemRedeemClusterPreCheck(body)
 		if (!pre.success) {
 			logger(Colors.red(`server /api/businessStartKetRedeemRedeem preCheck FAIL: ${pre.error}`))
@@ -10584,8 +10664,18 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			logger(Colors.red('[businessStartKetRedeemRedeem] query error:'), e?.message ?? e)
 			return res.status(400).json({ success: false, error: e?.message ?? 'Query failed' }).end()
 		}
+		const linked = await tryPreCheckLinkedValidatorClaim(pre.code, body.linkedValidatorClaim)
 		logger(Colors.green('server /api/businessStartKetRedeemRedeem preCheck OK, forwarding to master'))
-		postLocalhost('/api/businessStartKetRedeemRedeem', { eoa: pre.eoa, code: pre.code }, res)
+		postLocalhost(
+			'/api/businessStartKetRedeemRedeem',
+			{
+				eoa: pre.eoa,
+				code: pre.code,
+				linkedValidatorRedeemable: linked.linkedValidatorRedeemable,
+				linkedValidatorClaim: linked.linkedValidatorClaim,
+			},
+			res,
+		)
 	})
 
 	/** GET /api/businessStartKetRedeemAdminNonce?admin=0x… — Cluster 直读 CoNET redeemAdminNonces（供签名前） */

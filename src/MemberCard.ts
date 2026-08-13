@@ -188,6 +188,7 @@ import {
 import { pickBestMembershipNftByMinUsdc6, type RawNftOwnershipRow } from './endpoint/membershipTierPick'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './endpoint/tierMetadataRowResolve'
 import { scheduleBeamioUserCardBlockscoutMetadataRefetch } from './endpoint/baseExplorerNftMetadataRefresh'
+import { enqueueLinkedValidatorDepositRedeemClaim } from './endpoint/validatorDepositRedeem'
 import { verifyAndPersistBeamioSunUrl } from './BeamioSun'
 import { isApiExcludedUserCard } from './apiExcludedUserCards'
 import {
@@ -6246,6 +6247,17 @@ export const businessStartKetRedeemRedeemClusterPreCheck = buintRedeemAirdropRed
 export type BusinessStartKetRedeemUserRedeemPoolPayload = {
 	eoa: string
 	code: string
+	linkedValidatorRedeemable?: boolean
+	linkedValidatorClaim?: {
+		contract: string
+		claimer: string
+		beneficiary: string
+		referrer: string
+		code: string
+		deadline: string
+		signature: string
+		gasLimit: string
+	}
 	res?: Response
 }
 
@@ -6279,10 +6291,37 @@ export const businessStartKetRedeemUserRedeemProcess = async () => {
 		const tx = await redeem.redeemWithCodeAsAdmin!(eoaNorm, obj.code, { gasLimit: 1_200_000 })
 		logger(Colors.green(`[businessStartKetRedeemUserRedeemProcess] tx=${tx.hash} eoa=${eoaNorm} recipientEOA=${eoaNorm}`))
 		await tx.wait()
+		let linkedValidatorQueued = false
+		if (obj.linkedValidatorClaim) {
+			try {
+				const lv = obj.linkedValidatorClaim
+				enqueueLinkedValidatorDepositRedeemClaim({
+					contract: ethers.getAddress(lv.contract),
+					claimer: ethers.getAddress(lv.claimer),
+					beneficiary: ethers.getAddress(lv.beneficiary),
+					referrer: ethers.getAddress(lv.referrer),
+					code: lv.code,
+					deadline: BigInt(lv.deadline),
+					signature: lv.signature,
+					gasLimit: Number(lv.gasLimit) > 0 ? Math.floor(Number(lv.gasLimit)) : 1_800_000,
+				})
+				linkedValidatorQueued = true
+				logger(Colors.cyan(`[businessStartKetRedeemUserRedeemProcess] linked validator claim queued codeHash=${ethers.keccak256(ethers.toUtf8Bytes(lv.code))}`))
+			} catch (linkErr: any) {
+				logger(Colors.yellow(`[businessStartKetRedeemUserRedeemProcess] linked validator queue failed: ${linkErr?.message ?? linkErr}`))
+			}
+		}
 		if (obj.res && !obj.res.headersSent) {
 			obj.res
 				.status(200)
-				.json({ success: true, txHash: tx.hash, eoa: eoaNorm, recipient: eoaNorm })
+				.json({
+					success: true,
+					txHash: tx.hash,
+					eoa: eoaNorm,
+					recipient: eoaNorm,
+					linkedValidatorRedeemable: Boolean(obj.linkedValidatorRedeemable),
+					linkedValidatorQueued,
+				})
 				.end()
 		}
 	} catch (e: any) {
@@ -21625,6 +21664,17 @@ export const referralRegistryRedeemPool: Array<{
 	deadline: string
 	signature: string
 	secret?: string
+	linkedValidatorRedeemable?: boolean
+	linkedValidatorClaim?: {
+		contract: string
+		claimer: string
+		beneficiary: string
+		referrer: string
+		code: string
+		deadline: string
+		signature: string
+		gasLimit: string
+	}
 	res: Response
 }> = []
 
@@ -21782,7 +21832,40 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 			if (!claimEvent) throw new Error('Start Kit claim event was not found')
 		}
 		logger(Colors.green(`[referralRegistryRedeemRelay] action=${job.action} account=${job.account} tx=${tx.hash}`))
-		if (!job.res.headersSent) job.res.status(200).json({ success: true, txHash: tx.hash }).end()
+		let linkedValidatorQueued = false
+		if (
+			(job.action === 'claimMerchant' || job.action === 'claimAdminMerchantPackage') &&
+			job.linkedValidatorClaim
+		) {
+			try {
+				const lv = job.linkedValidatorClaim
+				enqueueLinkedValidatorDepositRedeemClaim({
+					contract: ethers.getAddress(lv.contract),
+					claimer: ethers.getAddress(lv.claimer),
+					beneficiary: ethers.getAddress(lv.beneficiary),
+					referrer: ethers.getAddress(lv.referrer),
+					code: lv.code,
+					deadline: BigInt(lv.deadline),
+					signature: lv.signature,
+					gasLimit: Number(lv.gasLimit) > 0 ? Math.floor(Number(lv.gasLimit)) : 1_800_000,
+				})
+				linkedValidatorQueued = true
+				logger(Colors.cyan(`[referralRegistryRedeemRelay] linked validator claim queued action=${job.action}`))
+			} catch (linkErr: any) {
+				logger(Colors.yellow(`[referralRegistryRedeemRelay] linked validator queue failed: ${linkErr?.message ?? linkErr}`))
+			}
+		}
+		if (!job.res.headersSent) {
+			job.res
+				.status(200)
+				.json({
+					success: true,
+					txHash: tx.hash,
+					linkedValidatorRedeemable: Boolean(job.linkedValidatorRedeemable),
+					linkedValidatorQueued,
+				})
+				.end()
+		}
 	} catch (error: any) {
 		const message = error?.shortMessage ?? error?.message ?? String(error)
 		logger(Colors.red(`[referralRegistryRedeemRelay] failed: ${message}`))

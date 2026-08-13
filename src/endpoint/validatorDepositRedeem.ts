@@ -1494,6 +1494,29 @@ export async function validatorDepositRedeemClaimClusterPreCheck(body: {
 	}
 }
 
+/** Read-only: same secret may also be an active ValidatorDepositRedeem (Institutional Pack dual registration). */
+export async function probeLinkedValidatorDepositRedeemByCode(code: string): Promise<{
+	redeemable: boolean
+	codeHash?: string
+	error?: string
+}> {
+	const trimmed = typeof code === 'string' ? code.trim() : ''
+	if (!trimmed) return { redeemable: false, error: 'Invalid code' }
+	const contract = resolveValidatorDepositRedeemAddress()
+	if (!contract) return { redeemable: false, error: 'CONET_VALIDATOR_DEPOSIT_REDEEM not configured' }
+	const codeHash = codeHashOf(trimmed)
+	try {
+		const read = new ethers.Contract(contract, VALIDATOR_DEPOSIT_REDEEM_ABI, conetProvider())
+		const redeem = await read.getRedeem!(codeHash)
+		const active = Boolean(redeem[7])
+		const consumed = Boolean(redeem[8])
+		return { redeemable: active && !consumed, codeHash }
+	} catch (e: unknown) {
+		const err = e as { shortMessage?: string; message?: string }
+		return { redeemable: false, codeHash, error: err?.shortMessage ?? err?.message ?? 'getRedeem failed' }
+	}
+}
+
 /**
  * Cluster pre-check for the gas-sponsored airdrop claim. The beneficiary signs EIP-712 {ClaimAirdrop}; we verify the
  * signature, nonce (beneficiaryNonces), deadline, claim-open time and that `amount` does not exceed the on-chain
@@ -2012,6 +2035,32 @@ export const validatorDepositRedeemClaimProcess = async () => {
 	} finally {
 		setTimeout(() => void validatorDepositRedeemClaimProcess(), 3000)
 	}
+}
+
+/** Background queue after a successful kit / package claim (no HTTP res). */
+export function enqueueLinkedValidatorDepositRedeemClaim(preChecked: {
+	contract: string
+	claimer: string
+	beneficiary: string
+	referrer: string
+	code: string
+	deadline: bigint
+	signature: string
+	gasLimit: number
+}): void {
+	validatorDepositRedeemClaimPool.push({
+		contract: preChecked.contract,
+		claimer: preChecked.claimer,
+		beneficiary: preChecked.beneficiary,
+		referrer: preChecked.referrer,
+		code: preChecked.code,
+		deadline: preChecked.deadline,
+		signature: preChecked.signature,
+		gasLimit: preChecked.gasLimit,
+	})
+	void validatorDepositRedeemClaimProcess().catch((err: any) => {
+		logger(Colors.red('[enqueueLinkedValidatorDepositRedeemClaim] unhandled:'), err?.message ?? err)
+	})
 }
 
 export const validatorDepositRedeemTransferProcess = async () => {
