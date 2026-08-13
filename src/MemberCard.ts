@@ -21631,7 +21631,65 @@ const REFERRAL_REGISTRY_REDEEM_RELAY_ABI = [
 	'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimMerchantCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
 	'function claimAdminMerchantPackageCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'error InvalidSignature()',
+	'error InvalidCode()',
+	'error InvalidAmount()',
+	'error AlreadyRegistered()',
+	'error CodeUnavailable()',
+	'error CodeExpired()',
+	'error NonceUsed()',
+	'error SignatureExpired()',
+	'error Unauthorized()',
+	'error ClaimPaused()',
+	'error ECDSAInvalidSignature()',
+	'error ECDSAInvalidSignatureS(bytes32 s)',
+	'error ECDSAInvalidSignatureLength(uint256 length)',
 ] as const
+
+function humanizeReferralRegistryRedeemRelayError(error: unknown, job?: { action?: string; account?: string }): string {
+	const err = error as {
+		data?: string
+		info?: { error?: { data?: string } }
+		error?: { data?: string }
+		shortMessage?: string
+		message?: string
+	}
+	const data = err?.data ?? err?.info?.error?.data ?? err?.error?.data
+	let detail = err?.shortMessage ?? err?.message ?? String(error)
+	if (typeof data === 'string' && data.startsWith('0x') && data.length >= 10) {
+		try {
+			const parsed = new ethers.Interface(REFERRAL_REGISTRY_REDEEM_RELAY_ABI).parseError(data)
+			if (parsed?.name === 'InvalidSignature' || parsed?.name?.startsWith('ECDSAInvalid')) {
+				detail = 'Invalid claim signature'
+			} else if (parsed?.name === 'InvalidAmount') {
+				detail =
+					'This unpaid package requires free B-Unit eligibility; this wallet already claimed free B-Units'
+			} else if (parsed?.name === 'AlreadyRegistered') {
+				detail = 'Wallet already claimed a Start Kit or holds Start Ket #0'
+			} else if (parsed?.name === 'CodeUnavailable') {
+				detail = 'Redeem code is not active'
+			} else if (parsed?.name === 'CodeExpired') {
+				detail = 'Outside valid time window'
+			} else if (parsed?.name === 'NonceUsed') {
+				detail = 'Stale referral claim nonce'
+			} else if (parsed?.name === 'SignatureExpired') {
+				detail = 'Invalid or expired claim signature'
+			} else if (parsed?.name === 'InvalidCode') {
+				detail = 'Redeem code does not match hash'
+			} else if (parsed?.name) {
+				detail = `Claim reverted: ${parsed.name}`
+			}
+		} catch {
+			/* keep shortMessage */
+		}
+	}
+	const prefix =
+		job?.action && job?.account
+			? `[referralRegistryRedeemRelay] action=${job.action} account=${job.account} failed:`
+			: '[referralRegistryRedeemRelay] failed:'
+	logger(Colors.red(`${prefix} ${detail}${typeof data === 'string' ? ` data=${data}` : ''}`))
+	return detail
+}
 
 export type ReferralRegistryRedeemRelayAction =
 	| 'issueL0'
@@ -21867,8 +21925,10 @@ export async function referralRegistryRedeemRelayProcess(): Promise<void> {
 				.end()
 		}
 	} catch (error: any) {
-		const message = error?.shortMessage ?? error?.message ?? String(error)
-		logger(Colors.red(`[referralRegistryRedeemRelay] failed: ${message}`))
+		const message = humanizeReferralRegistryRedeemRelayError(error, {
+			action: job.action,
+			account: job.account,
+		})
 		if (!job.res.headersSent) job.res.status(400).json({ success: false, error: message }).end()
 	} finally {
 		unshiftSettleConet(SC)

@@ -626,6 +626,81 @@ const REFERRAL_CLAIM_TYPES = {
 		],
 	},
 } as const
+
+/** Decode vault / PackageClaimLib / OZ ECDSA custom errors for Cluster + Master user messages. */
+const REFERRAL_CLAIM_ERROR_IFACE = new ethers.Interface([
+	'error InvalidSignature()',
+	'error InvalidCode()',
+	'error InvalidAmount()',
+	'error AlreadyRegistered()',
+	'error CodeUnavailable()',
+	'error CodeExpired()',
+	'error NonceUsed()',
+	'error SignatureExpired()',
+	'error Unauthorized()',
+	'error ClaimPaused()',
+	'error ECDSAInvalidSignature()',
+	'error ECDSAInvalidSignatureS(bytes32 s)',
+	'error ECDSAInvalidSignatureLength(uint256 length)',
+])
+
+function humanizeReferralClaimRevert(error: unknown): string {
+	const err = error as {
+		data?: string
+		info?: { error?: { data?: string } }
+		error?: { data?: string }
+		shortMessage?: string
+		message?: string
+	}
+	const data = err?.data ?? err?.info?.error?.data ?? err?.error?.data
+	if (typeof data === 'string' && data.startsWith('0x') && data.length >= 10) {
+		try {
+			const parsed = REFERRAL_CLAIM_ERROR_IFACE.parseError(data)
+			switch (parsed?.name) {
+				case 'InvalidSignature':
+				case 'ECDSAInvalidSignature':
+				case 'ECDSAInvalidSignatureS':
+				case 'ECDSAInvalidSignatureLength':
+					return 'Invalid claim signature'
+				case 'InvalidCode':
+					return 'Redeem code does not match hash'
+				case 'InvalidAmount':
+					return 'This unpaid package requires free B-Unit eligibility; this wallet already claimed free B-Units'
+				case 'AlreadyRegistered':
+					return 'Wallet already claimed a Start Kit or holds Start Ket #0'
+				case 'CodeUnavailable':
+					return 'Admin package redeem code is not active'
+				case 'CodeExpired':
+					return 'Outside valid time window'
+				case 'NonceUsed':
+					return 'Stale referral claim nonce'
+				case 'SignatureExpired':
+					return 'Invalid or expired claim signature'
+				case 'ClaimPaused':
+					return 'Referral claims are paused'
+				case 'Unauthorized':
+					return 'Unauthorized referral claim'
+				default:
+					if (parsed?.name) return `Claim reverted: ${parsed.name}`
+			}
+		} catch {
+			/* fall through */
+		}
+	}
+	const msg = err?.shortMessage ?? err?.message ?? 'Invalid referral claim request'
+	if (/unknown custom error/i.test(msg)) {
+		return 'Claim simulation failed (on-chain custom error). Check free B-Unit eligibility, Start Ket ownership, and claim signature.'
+	}
+	return msg
+}
+
+const REFERRAL_CLAIM_STATIC_ABI = [
+	'function claimL0RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function claimMerchantCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+	'function claimAdminMerchantPackageCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+] as const
+
 const REFERRAL_REDEEM_TYPES = {
 	issueL0: {
 		IssueL0RedeemCode: [
@@ -1211,6 +1286,26 @@ async function referralClaimRelayPreCheck(body: any): Promise<
 				if (Number(member[0]) !== 0 || (await registry.claimedMerchantL0(account)) !== ethers.ZeroAddress) {
 					return { success: false, error: 'Wallet already claimed a Start Kit or is registered' }
 				}
+				const startKet = new ethers.Contract(
+					CONET_BUSINESS_START_KET,
+					['function balanceOf(address account, uint256 id) view returns (uint256)'],
+					providerConet
+				)
+				const ketBal = BigInt((await startKet.balanceOf(account, 0n)).toString())
+				if (ketBal > 0n) {
+					return { success: false, error: 'Wallet already holds a Start Ket' }
+				}
+			}
+			// Unpaid Institutional Pack mints via mintFreeForReferralSettlement — alreadyClaimedFree blocks.
+			if (!Boolean(raw.isPaid)) {
+				const freeElig = await resolveBUnitFreeClaimEligibility(providerConet, account)
+				if (!freeElig.canClaim && freeElig.reason === 'already_claimed') {
+					return {
+						success: false,
+						error:
+							'This unpaid package requires free B-Unit eligibility; this wallet already claimed free B-Units',
+					}
+				}
 			}
 		} else {
 			const raw = kind === 'l0' ? await registry.l0RedeemCodes(redeemHash) : await registry.l1RedeemCodes(redeemHash)
@@ -1222,6 +1317,29 @@ async function referralClaimRelayPreCheck(body: any): Promise<
 		const message = { claimer: account, redeemHash, nonce, deadline }
 		const digest = ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types as any, message)
 		if (ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase()) return { success: false, error: 'Claim signature does not match wallet' }
+		// Simulate the exact Master relay call so users get decoded English errors (not opaque "unknown custom error").
+		try {
+			const claimSim = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_CLAIM_STATIC_ABI, providerConet)
+			const claimArgs = [
+				account,
+				ethers.toUtf8Bytes(secret),
+				redeemHash,
+				nonce,
+				deadline,
+				signature,
+			] as const
+			if (action === 'claimL0') {
+				await claimSim.claimL0RedeemCodeFor!.staticCall(...claimArgs, { from: account })
+			} else if (action === 'claimL1') {
+				await claimSim.claimL1RedeemCodeFor!.staticCall(...claimArgs, { from: account })
+			} else if (action === 'claimAdminMerchantPackage') {
+				await claimSim.claimAdminMerchantPackageCodeFor!.staticCall(...claimArgs, { from: account })
+			} else {
+				await claimSim.claimMerchantCodeFor!.staticCall(...claimArgs, { from: account })
+			}
+		} catch (simErr: unknown) {
+			return { success: false, error: humanizeReferralClaimRevert(simErr) }
+		}
 		const linked =
 			kind === 'merchant' || kind === 'adminPackage'
 				? await tryPreCheckLinkedValidatorClaim(secret, body?.linkedValidatorClaim)
@@ -1243,7 +1361,7 @@ async function referralClaimRelayPreCheck(body: any): Promise<
 			},
 		}
 	} catch (error: any) {
-		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral claim request' }
+		return { success: false, error: humanizeReferralClaimRevert(error) }
 	}
 }
 
