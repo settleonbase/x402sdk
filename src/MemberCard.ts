@@ -14385,25 +14385,6 @@ export const createCardPoolPress = async () => {
 	)
 
 	try {
-		if (!businessStartKetCreateCardGateSkipped() && businessStartKetBurnFrom) {
-			const burnAddr = ethers.getAddress(businessStartKetBurnFrom)
-			const reVerify = await createCardBusinessStartKetClusterPreCheck(
-				createCardOwnerAsRequested ?? cardOwner,
-				ethers.getAddress(cardOwner)
-			)
-			if (
-				!reVerify.success ||
-				!reVerify.burnFrom ||
-				ethers.getAddress(reVerify.burnFrom) !== burnAddr
-			) {
-				throw new Error(
-					'BusinessStartKet burn address failed master re-verification. Card issuance was aborted.'
-				)
-			}
-			logger(Colors.cyan(`[createCardPoolPress] BusinessStartKet adminBurn tokenId=0 amount=1 from=${burnAddr}`))
-			const { txHash: ketBurnTxHash } = await burnOneBusinessStartKet0ForCreateCardPool(SC, burnAddr)
-			logger(Colors.green(`[createCardPoolPress] BusinessStartKet burn ok tx=${ketBurnTxHash}`))
-		}
 		const tiersForCreate = tiers && tiers.length > 0
 			? tiers.map((t, i) => ({
 					minUsdc6: t.minUsdc6,
@@ -14429,6 +14410,37 @@ export const createCardPoolPress = async () => {
 			factory
 		)
 		logger(Colors.green(`[createCardPoolPress] card created: ${cardAddress} hash=${hash}`))
+		if (!businessStartKetCreateCardGateSkipped() && businessStartKetBurnFrom) {
+			const burnAddr = ethers.getAddress(businessStartKetBurnFrom)
+			const reVerify = await createCardBusinessStartKetClusterPreCheck(
+				createCardOwnerAsRequested ?? cardOwner,
+				ethers.getAddress(cardOwner)
+			)
+			if (
+				!reVerify.success ||
+				!reVerify.burnFrom ||
+				ethers.getAddress(reVerify.burnFrom) !== burnAddr
+			) {
+				logger(
+					Colors.red(
+						`[createCardPoolPress] BusinessStartKet burn skipped after card create: re-verify failed card=${cardAddress} expected=${burnAddr}`
+					)
+				)
+			} else {
+				logger(Colors.cyan(`[createCardPoolPress] BusinessStartKet adminBurn tokenId=0 amount=1 from=${burnAddr}`))
+				try {
+					const { txHash: ketBurnTxHash } = await burnOneBusinessStartKet0ForCreateCardPool(SC, burnAddr)
+					logger(Colors.green(`[createCardPoolPress] BusinessStartKet burn ok tx=${ketBurnTxHash}`))
+				} catch (burnErr: unknown) {
+					const burnMsg = burnErr instanceof Error ? burnErr.message : String(burnErr)
+					logger(
+						Colors.red(
+							`[createCardPoolPress] card created but BusinessStartKet burn failed card=${cardAddress}: ${burnMsg}`
+						)
+					)
+				}
+			}
+		}
 		registerCardToDb({
 			cardAddress,
 			cardOwner,

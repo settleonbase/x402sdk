@@ -347,15 +347,16 @@ export async function buildBeamioUserCardInitCode(
   }
 
   const factory = new ethers.ContractFactory(artifact.abi, bytecode)
+  // BeamioUserCard constructor is (uri, currency, priceE6, initialOwner, gateway) only.
+  void upgradeType
+  void initialTransferWhitelistEnabled
+  void contractName
   const deployTx = await factory.getDeployTransaction(
     uri,
     currencyEnum,
     pointsUnitPriceInCurrencyE6,
     initialOwner,
-    gateway,
-    upgradeType,
-    initialTransferWhitelistEnabled,
-    contractName
+    gateway
   )
   const initCode = deployTx?.data
   if (!initCode) throw new Error('Failed to build BeamioUserCard initCode')
@@ -398,15 +399,16 @@ async function buildBeamioUserCardInitCodeFromParams(
   }
 
   const factory = new ethers.ContractFactory(artifact.abi, bytecode)
+  // Must match on-chain BeamioUserCard ctor (5 args). Extra options are metadata / post-deploy.
+  void upgradeType
+  void initialTransferWhitelistEnabled
+  void contractName
   const deployTx = await factory.getDeployTransaction(
     uri,
     currencyEnum,
     pointsUnitPriceInCurrencyE6,
     initialOwner,
-    gateway,
-    upgradeType,
-    initialTransferWhitelistEnabled,
-    contractName
+    gateway
   )
   const initCode = deployTx?.data
   if (!initCode) throw new Error('Failed to build BeamioUserCard initCode')
