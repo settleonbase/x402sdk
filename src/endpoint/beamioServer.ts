@@ -19,6 +19,7 @@ import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
 import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { lookupFuelPack, fuelPackFreeBUnits6, fuelPackUsdc6 } from '../fuelPackCatalog'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
@@ -4984,11 +4985,11 @@ const routing = ( router: Router ) => {
 
 	/** GET /api/nfcUsdcTopupQuote
 	 * 客户端浏览器钱包页面（verra-home /usdc-topup）展示价格用：根据 currency 与 amount 用 Oracle 折算 USDC6。
-	 * Query: card, owner, amount, currency；`workflow=walletDeposit` 可省略 card/owner。
+	 * Query: card, owner, amount, currency；`workflow=walletDeposit` / `fuelPack` 可省略 card/owner。
 	 * 同步校验 card.owner() 是否与 owner 一致，避免任意 payTo 注入误用。 */
 	router.get('/nfcUsdcTopupQuote', async (req, res) => {
 		try {
-			const { card, owner, amount, currency, paymentToken, workflow, beneficiary } = req.query as {
+			const { card, owner, amount, currency, paymentToken, workflow, beneficiary, pack, packId } = req.query as {
 				card?: string
 				owner?: string
 				amount?: string
@@ -4996,10 +4997,14 @@ const routing = ( router: Router ) => {
 				paymentToken?: string
 				workflow?: string
 				beneficiary?: string
+				pack?: string
+				packId?: string
 			}
 			const workflowNorm = String(workflow ?? '').trim().toLowerCase()
 			const walletDepositQuote = workflowNorm === 'walletdeposit'
-			if (walletDepositQuote) {
+			const fuelPackQuote = workflowNorm === 'fuelpack'
+			const cardlessQuote = walletDepositQuote || fuelPackQuote
+			if (cardlessQuote) {
 				const beneficiaryStr = String(beneficiary ?? '').trim()
 				if (!beneficiaryStr || !ethers.isAddress(beneficiaryStr)) {
 					return res.status(400).json({ success: false, error: 'Invalid beneficiary' }).end()
@@ -5017,10 +5022,10 @@ const routing = ( router: Router ) => {
 			if (!amt || !(Number(amt) > 0)) {
 				return res.status(400).json({ success: false, error: 'Invalid amount' }).end()
 			}
-			const cardAddr = walletDepositQuote ? ethers.ZeroAddress : ethers.getAddress(String(card).trim())
-			const ownerAddr = walletDepositQuote ? ethers.ZeroAddress : ethers.getAddress(String(owner).trim())
+			const cardAddr = cardlessQuote ? ethers.ZeroAddress : ethers.getAddress(String(card).trim())
+			const ownerAddr = cardlessQuote ? ethers.ZeroAddress : ethers.getAddress(String(owner).trim())
 			let onChainOwner: string | null = null
-			if (!walletDepositQuote) {
+			if (!cardlessQuote) {
 				try {
 					const c = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
 					const o = (await c.owner()) as string
@@ -5035,10 +5040,22 @@ const routing = ( router: Router ) => {
 				if (t === 'USDC' || t === 'CADD') return t as 'USDC' | 'CADD'
 				return cur === 'CADD' ? 'CADD' : 'USDC'
 			})()
-			if (walletDepositQuote && (cur !== 'USDC' || paymentTokenNorm !== 'USDC')) {
-				return res.status(400).json({ success: false, error: 'walletDeposit requires currency/paymentToken USDC' }).end()
+			if (cardlessQuote && (cur !== 'USDC' || paymentTokenNorm !== 'USDC')) {
+				return res.status(400).json({ success: false, error: `${walletDepositQuote ? 'walletDeposit' : 'fuelPack'} requires currency/paymentToken USDC` }).end()
 			}
 			const { amount6: usdc6, usesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+			if (fuelPackQuote) {
+				const packRaw = String(pack ?? packId ?? '').trim()
+				if (packRaw) {
+					const catalogPack = lookupFuelPack(packRaw)
+					if (!catalogPack) {
+						return res.status(400).json({ success: false, error: 'Unknown fuel pack' }).end()
+					}
+					if (usdc6 !== fuelPackUsdc6(catalogPack)) {
+						return res.status(400).json({ success: false, error: `fuelPack amount must be ${catalogPack.usdcAmount} USDC` }).end()
+					}
+				}
+			}
 			if (usdc6 <= 0n) {
 				if (!usesOracle) {
 					return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end()
@@ -5095,9 +5112,11 @@ const routing = ( router: Router ) => {
 	 *       Master `genesisNodeSeatFulfill` 自动 createRedeemFor + claimRedeemFor（listener 部署节点）
 	 *   5f. **workflow=walletDeposit + beneficiary**：Wallet USDC 入金 — settle USDC → GENESIS_NODE_BRIDGE_INITIATOR；
 	 *       Master `walletDepositFulfill` initiateLockMint CONET-USDC → beneficiary（EOA 或 AA，无卡）
+	 *   5g. **workflow=fuelPack + beneficiary**：Custom Fuel pack — settle USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+	 *       Master `fuelPackFulfill` mint B-Units (+ Genesis Ket #0) → merchant beneficiary
 	 */
 	router.post('/nfcUsdcTopup', async (req, res) => {
-		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty, test, referrerL0 } = req.body as {
+		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty, test, referrerL0, pack, packId } = req.body as {
 			cardAddress?: string
 			cardOwner?: string
 			uid?: string
@@ -5128,6 +5147,9 @@ const routing = ( router: Router ) => {
 			test?: string | number
 			/** Genesis Evangelist L0 EOA (optional); must be registered L0 when non-zero */
 			referrerL0?: string
+			/** Custom Fuel pack id (Cluster catalog) */
+			pack?: string
+			packId?: string
 		}
 		const sidNorm: string | null = isValidSid(sid) ? (sid as string).trim().toLowerCase() : null
 		const posStr = (pos ?? '').toString().trim()
@@ -5149,7 +5171,12 @@ const routing = ( router: Router ) => {
 				earlyWorkflowNorm === 'walletdeposit' &&
 				!!String(beneficiary ?? '').trim() &&
 				ethers.isAddress(String(beneficiary).trim())
-			if (!walletDepositEarly) {
+			const fuelPackEarly =
+				earlyWorkflowNorm === 'fuelpack' &&
+				!!String(beneficiary ?? '').trim() &&
+				ethers.isAddress(String(beneficiary).trim())
+			const cardlessEarly = walletDepositEarly || fuelPackEarly
+			if (!cardlessEarly) {
 				if (!cardAddress || !ethers.isAddress(String(cardAddress).trim())) {
 					sessionUpdate({ state: 'error', error: 'Invalid cardAddress' })
 					return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end()
@@ -5176,10 +5203,10 @@ const routing = ( router: Router ) => {
 				sessionUpdate({ state: 'error', error: 'Invalid amount' })
 				return res.status(400).json({ success: false, error: 'Invalid amount' }).end()
 			}
-			const cardAddr = walletDepositEarly
+			const cardAddr = cardlessEarly
 				? ethers.ZeroAddress
 				: ethers.getAddress(String(cardAddress).trim())
-			const ownerAddr = walletDepositEarly
+			const ownerAddr = cardlessEarly
 				? ethers.ZeroAddress
 				: ethers.getAddress(String(cardOwner).trim())
 
@@ -5252,8 +5279,10 @@ const routing = ( router: Router ) => {
 				workflowNorm === 'genesisnodeseat' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
 			const walletDepositOnly =
 				workflowNorm === 'walletdeposit' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
+			const fuelPackOnly =
+				workflowNorm === 'fuelpack' && !!beneficiaryAddr && !sessionPath && !hasFullNfc
 
-			if ((clientTopupOnly || treasuryBridgeOnly || genesisNodeSeatOnly || walletDepositOnly) && (sidNorm || posAddr)) {
+			if ((clientTopupOnly || treasuryBridgeOnly || genesisNodeSeatOnly || walletDepositOnly || fuelPackOnly) && (sidNorm || posAddr)) {
 				return res
 					.status(400)
 					.json({
@@ -5265,26 +5294,28 @@ const routing = ( router: Router ) => {
 									? 'genesisNodeSeat'
 									: walletDepositOnly
 										? 'walletDeposit'
+										: fuelPackOnly
+											? 'fuelPack'
 										: 'clientTopup'
 						} workflow must not include sid/pos (use POS admin QR for terminal top-up)`,
 					})
 					.end()
 			}
 
-			if (!hasFullNfc && !sessionPath && !clientTopupOnly && !treasuryBridgeOnly && !genesisNodeSeatOnly && !walletDepositOnly) {
+			if (!hasFullNfc && !sessionPath && !clientTopupOnly && !treasuryBridgeOnly && !genesisNodeSeatOnly && !walletDepositOnly && !fuelPackOnly) {
 				sessionUpdate({ state: 'error', error: 'Invalid uid' })
 				return res
 					.status(400)
 					.json({
 						success: false,
 						error:
-							'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin), treasuryBridge (aa+workflow), clientTopup (beneficiary+workflow), genesisNodeSeat (beneficiary+qty+workflow), or walletDeposit (beneficiary+workflow).',
+							'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin), treasuryBridge (aa+workflow), clientTopup (beneficiary+workflow), genesisNodeSeat (beneficiary+qty+workflow), walletDeposit (beneficiary+workflow), or fuelPack (beneficiary+pack+workflow).',
 					})
 					.end()
 			}
 			// 1. 校验 card.owner() + POS session verifying（先于 SUN，阶段 1 无 SUN）
 			let onChainOwner: string | null = null
-			if (!walletDepositOnly) {
+			if (!walletDepositOnly && !fuelPackOnly) {
 				try {
 					const cardChain = await resolveUserCardChain(cardAddr)
 					const cardProvider = providerForUserCardChain(cardChain)
@@ -5375,6 +5406,97 @@ const routing = ( router: Router ) => {
 					.catch((e: unknown) => {
 						const msg = e instanceof Error ? e.message : String(e)
 						logger(Colors.red(`[nfcUsdcTopup/walletDeposit] background fulfill error: ${msg}`))
+					})
+				return
+			}
+
+			/**
+			 * Custom Fuel pack：x402 settle Base USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+			 * Master mint B-Units (+ Genesis Ket #0) → merchant beneficiary（非付款人）。
+			 */
+			if (fuelPackOnly && beneficiaryAddr) {
+				if (cur !== 'USDC' || paymentTokenNorm !== 'USDC') {
+					return res.status(400).json({ success: false, error: 'fuelPack requires currency/paymentToken USDC' }).end()
+				}
+				const packRaw = String(pack ?? packId ?? '').trim()
+				const catalogPack = packRaw ? lookupFuelPack(packRaw) : null
+				if (packRaw && !catalogPack) {
+					return res.status(400).json({ success: false, error: 'Unknown fuel pack' }).end()
+				}
+				const { amount6: quotedFuel, usesOracle: fuelUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+				if (quotedFuel <= 0n) {
+					if (!fuelUsesOracle) {
+						return res.status(400).json({ success: false, error: 'Invalid USDC amount' }).end()
+					}
+					const fresh = isOracleFresh()
+					const omsg = fresh
+						? `Oracle rate not available for ${cur}, please retry shortly`
+						: `Oracle rate stale, please retry shortly`
+					return res.status(503).json({ success: false, error: omsg }).end()
+				}
+				if (catalogPack && quotedFuel !== fuelPackUsdc6(catalogPack)) {
+					return res.status(400).json({ success: false, error: `fuelPack amount must be ${catalogPack.usdcAmount} USDC` }).end()
+				}
+				if (quotedFuel < 1_000_000n) {
+					return res.status(400).json({ success: false, error: 'Minimum purchase is 1 USDC' }).end()
+				}
+				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
+				const settleDesc = `Beamio USDC fuelPack (${amt} USDC pack=${catalogPack?.id ?? 'custom'} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+				const settledFuel = await settleBeamioX402ToCardOwner(req, res, {
+					cardOwner: settlePayTo,
+					quotedUsdc6: quotedFuel,
+					description: settleDesc,
+				})
+				if (!settledFuel) {
+					return
+				}
+				logger(
+					Colors.green(
+						`[nfcUsdcTopup/fuelPack] settle OK payTo=${settlePayTo} beneficiary=${beneficiaryAddr} payer=${settledFuel.payer} usdc6=${settledFuel.usdcAmount6} pack=${catalogPack?.id ?? 'custom'} USDC_tx=${settledFuel.USDC_tx}`,
+					),
+				)
+				if (!res.headersSent) {
+					res
+						.status(200)
+						.json({
+							success: true,
+							workflow: 'fuelPack',
+							USDC_tx: settledFuel.USDC_tx,
+							payer: settledFuel.payer,
+							usdcAmount6: settledFuel.usdcAmount6.toString(),
+							beneficiary: beneficiaryAddr,
+							packId: catalogPack?.id,
+							fulfillPending: true,
+						})
+						.end()
+				}
+				void postLocalhostBuffer('/api/fuelPackFulfill', {
+					beneficiary: beneficiaryAddr,
+					payer: settledFuel.payer,
+					USDC_tx: settledFuel.USDC_tx,
+					usdcAmount6: settledFuel.usdcAmount6.toString(),
+					packId: catalogPack?.id ?? '',
+					mintKet: catalogPack?.firstTimeOnly === true,
+					freeBUnits6: catalogPack ? fuelPackFreeBUnits6(catalogPack).toString() : '0',
+				})
+					.then((r) => {
+						if (r.statusCode >= 400) {
+							logger(
+								Colors.red(
+									`[nfcUsdcTopup/fuelPack] background fulfill HTTP ${r.statusCode}: ${r.body.slice(0, 400)}`,
+								),
+							)
+						} else {
+							logger(
+								Colors.green(
+									`[nfcUsdcTopup/fuelPack] background fulfill OK USDC_tx=${settledFuel.USDC_tx?.slice(0, 12)}…`,
+								),
+							)
+						}
+					})
+					.catch((e: unknown) => {
+						const msg = e instanceof Error ? e.message : String(e)
+						logger(Colors.red(`[nfcUsdcTopup/fuelPack] background fulfill error: ${msg}`))
 					})
 				return
 			}

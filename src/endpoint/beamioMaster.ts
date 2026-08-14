@@ -110,6 +110,10 @@ import {
 	treasuryBridgeFulfillPool,
 	kickTreasuryBridgeFulfillPoolPress,
 } from './treasuryBridgeFulfill'
+import {
+	fuelPackFulfillPool,
+	kickFuelPackFulfillPoolPress,
+} from './fuelPackFulfill'
 
 const masterServerPort = 1111
 
@@ -3721,6 +3725,42 @@ const routing = ( router: Router ) => {
 				res,
 			})
 			kickWalletDepositFulfillPoolPress()
+		})
+
+		/** After fuel pack x402 settle: mint B-Units (+ Genesis Ket) → merchant beneficiary. */
+		router.post('/fuelPackFulfill', (req, res) => {
+			const b = req.body as {
+				beneficiary?: string
+				payer?: string
+				USDC_tx?: string
+				usdcAmount6?: string
+				packId?: string
+				mintKet?: boolean | string
+				freeBUnits6?: string
+			}
+			const beneficiary = String(b.beneficiary ?? '').trim()
+			const usdcTx = String(b.USDC_tx ?? '').trim()
+			const usdcAmount6 = String(b.usdcAmount6 ?? '').trim()
+			if (!beneficiary || !ethers.isAddress(beneficiary)) {
+				return res.status(400).json({ success: false, error: 'Invalid beneficiary' }).end()
+			}
+			if (!/^0x[0-9a-fA-F]{64}$/.test(usdcTx)) {
+				return res.status(400).json({ success: false, error: 'Invalid USDC_tx' }).end()
+			}
+			if (!/^\d+$/.test(usdcAmount6) || BigInt(usdcAmount6) <= 0n) {
+				return res.status(400).json({ success: false, error: 'Invalid usdcAmount6' }).end()
+			}
+			fuelPackFulfillPool.push({
+				beneficiary: ethers.getAddress(beneficiary),
+				payer: String(b.payer ?? '').trim(),
+				USDC_tx: usdcTx,
+				usdcAmount6,
+				packId: String(b.packId ?? '').trim(),
+				mintKet: b.mintKet === true || String(b.mintKet ?? '').trim() === 'true',
+				freeBUnits6: String(b.freeBUnits6 ?? '0').trim() || '0',
+				res,
+			})
+			kickFuelPackFulfillPoolPress()
 		})
 
 		/** After Discover treasuryBridge settle: LockMint CONET-USDC → card.owner + protocol gateway mint. */
