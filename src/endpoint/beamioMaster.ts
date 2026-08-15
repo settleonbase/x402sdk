@@ -56,6 +56,8 @@ import {
 import {
 	kickReferralRegistryAdminManagementRelay,
 	referralRegistryAdminManagementPool,
+	kickReferralPurchaseSplitRelay,
+	referralPurchaseSplitPool,
 	kickReferralRegistryMerchantShareRelay,
 	referralRegistryMerchantSharePool,
 	type ReferralRegistryAdminManagementAction,
@@ -2732,6 +2734,47 @@ const routing = ( router: Router ) => {
 				res,
 			})
 			kickReferralRegistryAdminManagementRelay()
+		})
+
+		router.post('/referralPurchaseSplit', (req, res) => {
+			const body = req.body as {
+				contract?: string
+				admin?: string
+				adminPayout?: string
+				adminBps?: string
+				wallets?: string[]
+				bps?: string[]
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			if (
+				!body.contract ||
+				!body.admin ||
+				!body.adminPayout ||
+				body.adminBps === undefined ||
+				body.adminBps === '' ||
+				!Array.isArray(body.wallets) ||
+				!Array.isArray(body.bps) ||
+				!body.nonce ||
+				!body.deadline ||
+				!body.signature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing purchase split fields' }).end()
+			}
+			referralPurchaseSplitPool.push({
+				contract: body.contract,
+				admin: body.admin,
+				adminPayout: body.adminPayout,
+				adminBps: body.adminBps,
+				wallets: body.wallets,
+				bps: body.bps,
+				nonce: body.nonce,
+				deadline: body.deadline,
+				signature: body.signature,
+				res,
+			})
+			kickReferralPurchaseSplitRelay()
 		})
 
 		router.post('/referralRegistryMerchantShare', (req, res) => {

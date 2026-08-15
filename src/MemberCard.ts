@@ -22117,6 +22117,72 @@ export async function referralRegistryAdminManagementProcess(): Promise<void> {
 	}
 }
 
+const REFERRAL_PURCHASE_SPLIT_ABI = [
+	'function setImmediateSplitFor(address admin,address adminPayout,uint256 adminBps,address[] wallets,uint256[] bps,uint256 nonce,uint256 deadline,bytes signature)',
+] as const
+
+export const referralPurchaseSplitPool: Array<{
+	contract: string
+	admin: string
+	adminPayout: string
+	adminBps: string
+	wallets: string[]
+	bps: string[]
+	nonce: string
+	deadline: string
+	signature: string
+	res: Response
+}> = []
+
+export function kickReferralPurchaseSplitRelay(): void {
+	void referralPurchaseSplitProcess().catch((error: any) => {
+		logger(Colors.red('[referralPurchaseSplit] unhandled error:'), error?.message ?? error)
+	})
+}
+
+function scheduleReferralPurchaseSplitRelay(): void {
+	if (referralPurchaseSplitPool.length === 0) return
+	if (hasIdleSettleConet()) {
+		kickReferralPurchaseSplitRelay()
+		return
+	}
+	setTimeout(() => kickReferralPurchaseSplitRelay(), 3000)
+}
+
+export async function referralPurchaseSplitProcess(): Promise<void> {
+	const job = referralPurchaseSplitPool.shift()
+	if (!job) return
+	const SC = shiftSettleConet()
+	if (!SC) {
+		referralPurchaseSplitPool.unshift(job)
+		return scheduleReferralPurchaseSplitRelay()
+	}
+	try {
+		const split = new ethers.Contract(job.contract, REFERRAL_PURCHASE_SPLIT_ABI, SC.walletConet)
+		const tx = await split.setImmediateSplitFor(
+			ethers.getAddress(job.admin),
+			ethers.getAddress(job.adminPayout),
+			BigInt(job.adminBps),
+			job.wallets.map((w) => ethers.getAddress(w)),
+			job.bps.map((b) => BigInt(b)),
+			BigInt(job.nonce),
+			BigInt(job.deadline),
+			job.signature,
+		)
+		const receipt = await tx.wait()
+		if (!receipt || receipt.status !== 1) throw new Error('Purchase split transaction failed')
+		logger(Colors.green(`[referralPurchaseSplit] admin=${job.admin} tx=${tx.hash}`))
+		if (!job.res.headersSent) job.res.status(200).json({ success: true, txHash: tx.hash }).end()
+	} catch (error: any) {
+		const message = error?.shortMessage ?? error?.message ?? String(error)
+		logger(Colors.red(`[referralPurchaseSplit] failed: ${message}`))
+		if (!job.res.headersSent) job.res.status(400).json({ success: false, error: message }).end()
+	} finally {
+		unshiftSettleConet(SC)
+		scheduleReferralPurchaseSplitRelay()
+	}
+}
+
 // --- ReferralMerchantShareModuleV1: L0 merchant→L1 rebate share (gasless) ---
 const REFERRAL_MERCHANT_SHARE_ABI = [
 	'function setMerchantL1ShareFor(address l0,address merchant,address l1,uint256 shareBps,uint256 nonce,uint256 deadline,bytes signature)',

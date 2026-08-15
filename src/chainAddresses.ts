@@ -172,6 +172,9 @@ export const CONET_BUNIT_AIRDROP_PREVIOUS_ADDRESS = '0xa01DFfD68b355540B840310a9
 export const CONET_BUNIT_AIRDROP_LEGACY_ADDRESS = '0xb9cf45AF87b16853c8F48a16b0495F030309e70f'
 /** CoNET ReferralRegistryVaultV1 ERC1967 proxy; referral redeem writes are relayed by Master. */
 export const CONET_REFERRAL_REGISTRY_VAULT_V1 = '0xD6252Cbf266B80231397Ac2a4f25ed2d9b01DEE6'
+/** CoNET ReferralPurchaseSplitV1 proxy — Fuel Pack 60% immediate / 40% deferred. */
+export const CONET_REFERRAL_PURCHASE_SPLIT_V1 = process.env.CONET_REFERRAL_PURCHASE_SPLIT_V1
+	|| '0x7Be303160Dd23DE0B6D420827441a8AaA1Fb0f87'
 /** CoNET ReferralMerchantShareModuleV1 proxy — L0 merchant→L1 rebate share config. */
 export const CONET_REFERRAL_MERCHANT_SHARE_MODULE = process.env.CONET_REFERRAL_MERCHANT_SHARE_MODULE
 	|| '0xe3e06f47D89159713d67ec8530E4FE97D31Bb708'

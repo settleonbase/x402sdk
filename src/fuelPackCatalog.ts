@@ -52,7 +52,7 @@ export const FUEL_PACK_CATALOG: FuelPackCatalogEntry[] = [
 		priceUsdc: 4999,
 		usdcAmount: '4999',
 		paidBUnits: 499900,
-		freeBUnits: 99980,
+		freeBUnits: 0,
 	},
 ]
 

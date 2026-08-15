@@ -18,7 +18,7 @@ import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { lookupFuelPack, fuelPackFreeBUnits6, fuelPackUsdc6 } from '../fuelPackCatalog'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
@@ -64,6 +64,8 @@ import {
 import {
 	kickReferralRegistryAdminManagementRelay,
 	referralRegistryAdminManagementPool,
+	kickReferralPurchaseSplitRelay,
+	referralPurchaseSplitPool,
 	kickReferralRegistryMerchantShareRelay,
 	referralRegistryMerchantSharePool,
 	type ReferralRegistryAdminManagementAction,
@@ -1157,6 +1159,110 @@ async function referralRegistryMerchantSharePreCheck(body: any): Promise<
 		}
 	} catch (error: any) {
 		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid merchant L1 share request' }
+	}
+}
+
+const REFERRAL_PURCHASE_SPLIT_READ_ABI = [
+	'function actionNonces(address) view returns (uint256)',
+	'function immediateSplit() view returns (address payout,uint256 payoutBps,address[] wallets,uint256[] bps)',
+] as const
+
+const REFERRAL_PURCHASE_SPLIT_DOMAIN_NAME = 'ReferralPurchaseSplitV1'
+
+const REFERRAL_PURCHASE_SPLIT_TYPES = {
+	SetImmediateSplit: [
+		{ name: 'admin', type: 'address' },
+		{ name: 'adminPayout', type: 'address' },
+		{ name: 'adminBps', type: 'uint256' },
+		{ name: 'wallets', type: 'address[]' },
+		{ name: 'bps', type: 'uint256[]' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+} as const
+
+async function referralPurchaseSplitPreCheck(body: any): Promise<
+	| {
+			success: true
+			preChecked: {
+				contract: string
+				admin: string
+				adminPayout: string
+				adminBps: string
+				wallets: string[]
+				bps: string[]
+				nonce: string
+				deadline: string
+				signature: string
+			}
+	  }
+	| { success: false; error: string }
+> {
+	try {
+		if (!CONET_REFERRAL_PURCHASE_SPLIT_V1 || CONET_REFERRAL_PURCHASE_SPLIT_V1 === ethers.ZeroAddress) {
+			return { success: false, error: 'Purchase split contract is not configured' }
+		}
+		const admin = ethers.getAddress(String(body?.admin ?? ''))
+		const adminPayout = ethers.getAddress(String(body?.adminPayout ?? ''))
+		const adminBps = BigInt(String(body?.adminBps ?? ''))
+		const walletsRaw = Array.isArray(body?.wallets) ? body.wallets : []
+		const bpsRaw = Array.isArray(body?.bps) ? body.bps : []
+		const nonce = BigInt(String(body?.nonce ?? ''))
+		const deadline = BigInt(String(body?.deadline ?? ''))
+		const signature = String(body?.signature ?? '')
+		if (!ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+			return { success: false, error: 'Invalid or expired purchase split signature' }
+		}
+		if (walletsRaw.length !== bpsRaw.length || walletsRaw.length > 16) {
+			return { success: false, error: 'Project wallets and bps length mismatch' }
+		}
+		const wallets: string[] = []
+		const bps: bigint[] = []
+		let sum = adminBps
+		for (let i = 0; i < walletsRaw.length; i++) {
+			const wallet = ethers.getAddress(String(walletsRaw[i] ?? ''))
+			const share = BigInt(String(bpsRaw[i] ?? ''))
+			if (wallet === ethers.ZeroAddress || share <= 0n) {
+				return { success: false, error: 'Project wallets must be non-zero with positive bps' }
+			}
+			wallets.push(wallet)
+			bps.push(share)
+			sum += share
+		}
+		if (adminPayout === ethers.ZeroAddress) return { success: false, error: 'Admin payout cannot be zero' }
+		if (sum !== 6000n) return { success: false, error: 'Admin + project wallets must total 6000 bps (60%)' }
+		const registry = new ethers.Contract(CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet)
+		if (!Boolean(await registry.admins(admin))) return { success: false, error: 'Account is not a ReferralRegistry admin' }
+		const split = new ethers.Contract(CONET_REFERRAL_PURCHASE_SPLIT_V1, REFERRAL_PURCHASE_SPLIT_READ_ABI, providerConet)
+		const expectedNonce = BigInt((await split.actionNonces(admin)).toString())
+		if (nonce !== expectedNonce) return { success: false, error: 'Stale purchase split nonce' }
+		const domain = {
+			name: REFERRAL_PURCHASE_SPLIT_DOMAIN_NAME,
+			version: '1',
+			chainId: 224422,
+			verifyingContract: CONET_REFERRAL_PURCHASE_SPLIT_V1,
+		}
+		const message = { admin, adminPayout, adminBps, wallets, bps, nonce, deadline }
+		const digest = ethers.TypedDataEncoder.hash(domain, REFERRAL_PURCHASE_SPLIT_TYPES as any, message)
+		if (ethers.recoverAddress(digest, signature).toLowerCase() !== admin.toLowerCase()) {
+			return { success: false, error: 'Purchase split signature does not match admin' }
+		}
+		return {
+			success: true,
+			preChecked: {
+				contract: CONET_REFERRAL_PURCHASE_SPLIT_V1,
+				admin,
+				adminPayout,
+				adminBps: adminBps.toString(),
+				wallets,
+				bps: bps.map((v) => v.toString()),
+				nonce: nonce.toString(),
+				deadline: deadline.toString(),
+				signature,
+			},
+		}
+	} catch (error: any) {
+		return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid purchase split request' }
 	}
 }
 
@@ -11668,6 +11774,12 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		const pre = await referralRegistryAdminManagementPreCheck(req.body)
 		if (!pre.success) return res.status(400).json({ success: false, error: pre.error }).end()
 		postLocalhost('/api/referralRegistryAdminManagement', pre.preChecked, res)
+	})
+
+	router.post('/referralPurchaseSplit', async (req, res) => {
+		const pre = await referralPurchaseSplitPreCheck(req.body)
+		if (!pre.success) return res.status(400).json({ success: false, error: pre.error }).end()
+		postLocalhost('/api/referralPurchaseSplit', pre.preChecked, res)
 	})
 
 	router.post('/referralRegistryMerchantShare', async (req, res) => {
