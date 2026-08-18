@@ -371,8 +371,26 @@ export const oracleBackoud = async (enableOracle = true) => {
 
 /** Base 主网 RPC：与 resolveBeamioBaseHttpRpcUrl 一致（默认 CoNET 官方节点） */
 const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
+/** Official Base tip — only consulted when CoNET Base RPC reports a lower USDC balance (node lag). */
+const BASE_PUBLIC_TIP_RPC = 'https://mainnet.base.org'
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
+
+async function readBaseUsdcBalanceLatest(rpcUrl: string, payer: string): Promise<bigint | null> {
+	const provider = new ethers.JsonRpcProvider(rpcUrl, 8453, { staticNetwork: true })
+	try {
+		const usdc = new ethers.Contract(
+			USDCContract_BASE,
+			['function balanceOf(address) view returns (uint256)'],
+			provider,
+		)
+		return (await usdc.balanceOf(payer, { blockTag: 'latest' })) as bigint
+	} catch {
+		return null
+	} finally {
+		provider.destroy()
+	}
+}
 
 const providerConet = new ethers.JsonRpcProvider(conetEndpoint)
 const oracleSC = new ethers.Contract(oracleSC_addr, GuardianOracle_ABI, providerConet)
@@ -524,15 +542,24 @@ export const verifyPaymentNew = (
 		return resolve(false)
 	}
 
-	// 余额检查：付款方 USDC 不足时提前返回，便于 UI 显示友好错误
+	// 余额检查：付款方 USDC 不足时提前返回，便于 UI 显示友好错误。
+	// 一次性 provider + latest，避免长期 providerBase 把 latest 钉在过期块。
+	// CoNET Base RPC 若落后主网 tip，再读官方 Base 公共 RPC，避免把已到账的充值误判为不足。
 	try {
 		const auth = (decodedPayment?.payload as { authorization?: { from?: string; value?: string } })?.authorization
 		const payer = auth?.from
 		const needAmount = BigInt(auth?.value ?? '0')
 		if (payer && needAmount > 0n) {
-			const usdcBase = new ethers.Contract(USDCContract_BASE, ['function balanceOf(address) view returns (uint256)'], providerBase)
-			const bal = await usdcBase.balanceOf(payer)
-			if (bal < needAmount) {
+			const localBal = await readBaseUsdcBalanceLatest(BASE_RPC_URL, payer)
+			let bal = localBal
+			if (localBal != null && localBal < needAmount) {
+				const tipBal = await readBaseUsdcBalanceLatest(BASE_PUBLIC_TIP_RPC, payer)
+				if (tipBal != null && tipBal > localBal) {
+					logger(`verifyPayment Base RPC lag: local=${localBal} tip=${tipBal} payer=${payer}`)
+					bal = tipBal
+				}
+			}
+			if (bal != null && bal < needAmount) {
 				const balStr = (Number(bal) / 1e6).toFixed(2)
 				const needStr = (Number(needAmount) / 1e6).toFixed(2)
 				const errMsg = `Insufficient USDC balance: account has ${balStr} USDC, need ${needStr} USDC`

@@ -12,6 +12,7 @@ export type FuelPackCatalogEntry = {
 	id: FuelPackId
 	priceUsdc: number
 	usdcAmount: string
+	/** Dual-pool allocation only — never expose Paid/Free split in pack merchandising UI. */
 	paidBUnits: number
 	freeBUnits: number
 	firstTimeOnly?: boolean
