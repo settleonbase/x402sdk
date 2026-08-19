@@ -28,6 +28,12 @@ import {
 	type TopupPromotionNormalized,
 } from './programTopupPromotion'
 import { ensureShareTokenProgramIconAssembled } from './shareTokenProgramIcon'
+import {
+	MEMBERSHIP_FEE_CHECK_BALANCE_HINT,
+	readCardMembershipFeeModeFromMetadata,
+	readMembershipFeesFromCardMetadata,
+	shouldSkipFactoryTiersForCreate,
+} from './membershipFeeMetadata'
 import { readSocialExchangeFromMetadata, REWARD_VOUCHER_TOKEN_ID } from './socialExchangeMetadata'
 import { syncCardProgramReferrerEventsFromReceipt } from './cardProgramReferrerDb'
 import { inspect } from 'util'
@@ -2518,6 +2524,12 @@ export type NfcTopupMembershipFeeStage = {
 
 export async function readCardMembershipFeeMode(cardAddrRaw: string): Promise<boolean> {
 	try {
+		const fromMeta = await readCardMembershipFeeModeFromMetadata(cardAddrRaw)
+		if (fromMeta === true || fromMeta === false) return fromMeta
+	} catch {
+		/* metadata read failed — fall through to on-chain */
+	}
+	try {
 		const cardNorm = ethers.getAddress(cardAddrRaw.trim())
 		const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
 		const card = new ethers.Contract(cardNorm, MEMBERSHIP_FEE_CARD_ABI, provider)
@@ -2530,6 +2542,12 @@ export async function readCardMembershipFeeMode(cardAddrRaw: string): Promise<bo
 export async function readCardMembershipFees(
 	cardAddrRaw: string
 ): Promise<{ feeE6: bigint[]; durationKind: number[] }> {
+	try {
+		const fromMeta = await readMembershipFeesFromCardMetadata(cardAddrRaw)
+		if (fromMeta) return fromMeta
+	} catch {
+		/* metadata read failed — fall through to on-chain */
+	}
 	const cardNorm = ethers.getAddress(cardAddrRaw.trim())
 	const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
 	const card = new ethers.Contract(cardNorm, MEMBERSHIP_FEE_CARD_ABI, provider)
@@ -2679,7 +2697,7 @@ export const nfcTopupPreparePayload = async (params: {
 	if (membershipNeedsFee) {
 		const tierRaw = params.membershipTierIndex
 		if (tierRaw == null || String(tierRaw).trim() === '') {
-			return { error: 'Membership fee mode requires membershipTierIndex for customers without valid membership' }
+			return { error: MEMBERSHIP_FEE_CHECK_BALANCE_HINT }
 		}
 		const tierIndex = Number(tierRaw)
 		if (!Number.isInteger(tierIndex) || tierIndex < 0) {
@@ -2695,7 +2713,7 @@ export const nfcTopupPreparePayload = async (params: {
 		}
 		const clientFee = parseOptionalUint256String(params.membershipFeeFiat6)
 		if (clientFee != null && clientFee !== expectedFee) {
-			return { error: 'membershipFeeFiat6 does not match on-chain membership fee for this tier' }
+			return { error: 'membershipFeeFiat6 does not match card membership fee for this tier' }
 		}
 		feeFiat6 = expectedFee
 		tierIndexResolved = tierIndex
@@ -7637,7 +7655,7 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 	}
 	const tierRaw = params.membershipTierIndex
 	if (tierRaw == null || String(tierRaw).trim() === '') {
-		return { success: false, error: 'Membership fee mode requires membershipTierIndex for customers without valid membership' }
+		return { success: false, error: MEMBERSHIP_FEE_CHECK_BALANCE_HINT }
 	}
 	const tierIndex = Number(tierRaw)
 	if (!Number.isInteger(tierIndex) || tierIndex < 0) {
@@ -7659,7 +7677,7 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 		return { success: false, error: 'membershipFeeFiat6 is required when membership fee staging is needed' }
 	}
 	if (clientFee !== expectedFee) {
-		return { success: false, error: 'membershipFeeFiat6 does not match on-chain membership fee for this tier' }
+		return { success: false, error: 'membershipFeeFiat6 does not match card membership fee for this tier' }
 	}
 	const amountFiat6 = parseOptionalUint256String(params.amountFiat6)
 	if (amountFiat6 != null) {
@@ -13334,7 +13352,6 @@ export const createBeamioCardAdminWithHash = async (
 			minUsdc6: string
 			attr: number
 			tierExpirySeconds?: number
-			upgradeByBalance?: boolean
 		}>
 		transferWhitelistEnabled?: boolean
 		upgradeType?: 0 | 1 | 2
@@ -13348,7 +13365,6 @@ export const createBeamioCardAdminWithHash = async (
 		minUsdc6: t.minUsdc6,
 		attr: t.attr,
 		tierExpirySeconds: t.tierExpirySeconds ?? 0,
-		upgradeByBalance: Boolean(t.upgradeByBalance),
 	}))
 	const initOpts: Parameters<typeof createBeamioCardWithFactoryReturningHash>[4] = {
 		libraryAddresses: beamioUserCardLibrariesFromConfig(opts?.libraryAddresses),
@@ -14431,14 +14447,15 @@ export const createCardPoolPress = async () => {
 	)
 
 	try {
-		const tiersForCreate = tiers && tiers.length > 0
-			? tiers.map((t, i) => ({
-					minUsdc6: t.minUsdc6,
-					attr: Number(t.attr ?? i),
-					tierExpirySeconds: Number(t.tierExpirySeconds ?? 0), // 0 => 使用卡全局 expirySeconds
-					upgradeByBalance: Boolean(t.upgradeByBalance),
-				}))
-			: undefined
+		const skipFactoryTiers = shouldSkipFactoryTiersForCreate(tiers)
+		const tiersForCreate =
+			!skipFactoryTiers && tiers && tiers.length > 0
+				? tiers.map((t, i) => ({
+						minUsdc6: t.minUsdc6,
+						attr: Number(t.attr ?? i),
+						tierExpirySeconds: Number(t.tierExpirySeconds ?? 0), // 0 => 使用卡全局 expirySeconds
+					}))
+				: undefined
 		// 0 = top-up (explicit for membership-fee cards); 1 = balance; 2 = cumulative
 		const ut = upgradeType === 0 || upgradeType === 1 || upgradeType === 2 ? upgradeType : undefined
 		const { cardAddress, hash } = await createBeamioCardAdminWithHash(
