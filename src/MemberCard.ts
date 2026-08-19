@@ -13330,7 +13330,12 @@ export const createBeamioCardAdminWithHash = async (
 	opts?: {
 		uri?: string
 		contractName?: string
-		tiers?: Array<{ minUsdc6: string; attr: number; tierExpirySeconds?: number }>
+		tiers?: Array<{
+			minUsdc6: string
+			attr: number
+			tierExpirySeconds?: number
+			upgradeByBalance?: boolean
+		}>
 		transferWhitelistEnabled?: boolean
 		upgradeType?: 0 | 1 | 2
 		libraryAddresses?: BeamioUserCardLibraryAddresses
@@ -13343,6 +13348,7 @@ export const createBeamioCardAdminWithHash = async (
 		minUsdc6: t.minUsdc6,
 		attr: t.attr,
 		tierExpirySeconds: t.tierExpirySeconds ?? 0,
+		upgradeByBalance: Boolean(t.upgradeByBalance),
 	}))
 	const initOpts: Parameters<typeof createBeamioCardWithFactoryReturningHash>[4] = {
 		libraryAddresses: beamioUserCardLibrariesFromConfig(opts?.libraryAddresses),
@@ -13350,7 +13356,9 @@ export const createBeamioCardAdminWithHash = async (
 	if (opts?.uri) initOpts.uri = opts.uri
 	if (opts?.contractName?.trim()) initOpts.contractName = opts.contractName.trim()
 	if (opts?.transferWhitelistEnabled === true) initOpts.transferWhitelistEnabled = true
-	if (opts?.upgradeType === 1 || opts?.upgradeType === 2) initOpts.upgradeType = opts.upgradeType
+	if (opts?.upgradeType === 0 || opts?.upgradeType === 1 || opts?.upgradeType === 2) {
+		initOpts.upgradeType = opts.upgradeType
+	}
 	return createBeamioCardWithFactoryReturningHash(
 		factory,
 		cardOwner,
@@ -13394,7 +13402,24 @@ export type CreateCardPreChecked = {
 		bonusRules?: CreateCardBonusRuleNormalized[]
 		pointSystem?: CreateCardPointSystemNormalized
 	}
-	tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string }>
+	tiers?: Array<{
+		index: number
+		minUsdc6: string
+		attr: number
+		tierExpirySeconds?: number
+		name?: string
+		description?: string
+		image?: string
+		imageFit?: 'width' | 'height'
+		backgroundColor?: string
+		logoDisplayScale?: string
+		/** Per-tier ABI flag; false = top-up qualify (default). */
+		upgradeByBalance?: boolean
+		/** Membership fee in card currency, 6-decimal fixed; written to global card metadata for POS/UI. */
+		membershipFeeE6?: string
+		membershipFee?: string | number
+		membershipDurationKind?: number
+	}>
 	/** CoNET BusinessStartKet #0 burn source; set by Cluster after balance precheck (omit when BEAMIO_SKIP_BUSINESS_START_KET_GATE) */
 	businessStartKetBurnFrom?: string
 	/** Client-supplied cardOwner before Cluster AA→EOA normalization; Master re-verifies burn target */
@@ -13941,6 +13966,19 @@ export const createCardPreCheck = (body: {
 		...(body.tiers && body.tiers.length > 0 && {
 			tiers: body.tiers.map((t, i) => {
 				const o = t as Record<string, unknown>
+				const membershipFeeE6 =
+					o.membershipFeeE6 != null && String(o.membershipFeeE6).trim() !== ''
+						? String(o.membershipFeeE6).trim()
+						: undefined
+				const membershipDurationKindRaw =
+					o.membershipDurationKind != null ? Number(o.membershipDurationKind) : undefined
+				const membershipDurationKind =
+					membershipDurationKindRaw != null &&
+					Number.isFinite(membershipDurationKindRaw) &&
+					membershipDurationKindRaw >= 0 &&
+					membershipDurationKindRaw <= 6
+						? Math.trunc(membershipDurationKindRaw)
+						: undefined
 				return {
 					index: typeof o.index === 'number' ? o.index : i,
 					minUsdc6: String(o.minUsdc6),
@@ -13949,7 +13987,15 @@ export const createCardPreCheck = (body: {
 					...(o.name != null && { name: String(o.name) }),
 					...(o.description != null && { description: String(o.description) }),
 					...(o.image != null && typeof o.image === 'string' && { image: o.image }),
+					...(o.imageFit === 'width' || o.imageFit === 'height' ? { imageFit: o.imageFit } : {}),
 					...(o.backgroundColor != null && typeof o.backgroundColor === 'string' && { backgroundColor: o.backgroundColor }),
+					...(o.logoDisplayScale != null && typeof o.logoDisplayScale === 'string' && { logoDisplayScale: o.logoDisplayScale }),
+					upgradeByBalance: Boolean(o.upgradeByBalance),
+					...(membershipFeeE6 != null && { membershipFeeE6 }),
+					...(o.membershipFee != null && String(o.membershipFee).trim() !== ''
+						? { membershipFee: o.membershipFee as string | number }
+						: {}),
+					...(membershipDurationKind != null && { membershipDurationKind }),
 				}
 			}),
 		}),
@@ -14390,9 +14436,11 @@ export const createCardPoolPress = async () => {
 					minUsdc6: t.minUsdc6,
 					attr: Number(t.attr ?? i),
 					tierExpirySeconds: Number(t.tierExpirySeconds ?? 0), // 0 => 使用卡全局 expirySeconds
+					upgradeByBalance: Boolean(t.upgradeByBalance),
 				}))
 			: undefined
-		const ut = upgradeType === 1 || upgradeType === 2 ? upgradeType : undefined
+		// 0 = top-up (explicit for membership-fee cards); 1 = balance; 2 = cumulative
+		const ut = upgradeType === 0 || upgradeType === 1 || upgradeType === 2 ? upgradeType : undefined
 		const { cardAddress, hash } = await createBeamioCardAdminWithHash(
 			cardOwner,
 			currency,

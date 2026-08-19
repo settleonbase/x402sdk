@@ -642,22 +642,31 @@ export async function createBeamioCardWithFactory(
   return out
 }
 
-/** Tier 结构（与 BeamioUserCard.Tier 一致） */
+/** Tier 结构（与 BeamioUserCard.Tier 一致：含 upgradeByBalance） */
 export type CreateCardTier = {
   minUsdc6: bigint | string
   attr: number
   tierExpirySeconds?: number | bigint
+  /**
+   * Per-tier qualify mode (ABI component on BeamioUserCard.Tier).
+   * false = top-up / single-payment (default; membership-fee cards);
+   * true = balance-based upgrade.
+   * Required by Factory `createCardCollectionWithInitCodeAndTiers` ABI encoding.
+   */
+  upgradeByBalance?: boolean
 }
 
 /**
  * 过滤 minUsdc6<=0 的档；链上 appendTier 要求 minUsdc6>0（UC_TierMinZero）。
  * 若调用方传了占位 tier（0 门槛），应退回无 tiers 的 createCardCollectionWithInitCode，避免整笔 revert。
+ * Always includes upgradeByBalance (default false) so ethers ABI encode does not throw
+ * "missing value for component upgradeByBalance".
  */
 export function normalizeTiersForCreateCard(
   tiers: CreateCardTier[] | undefined,
-): { minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint }[] {
+): { minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint; upgradeByBalance: boolean }[] {
   if (!tiers?.length) return []
-  const out: { minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint }[] = []
+  const out: { minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint; upgradeByBalance: boolean }[] = []
   for (const t of tiers) {
     const min = BigInt(t.minUsdc6)
     if (min <= 0n) continue
@@ -665,6 +674,7 @@ export function normalizeTiersForCreateCard(
       minUsdc6: min,
       attr: BigInt(t.attr),
       tierExpirySeconds: BigInt(t.tierExpirySeconds ?? 0),
+      upgradeByBalance: Boolean(t.upgradeByBalance),
     })
   }
   return out
@@ -900,6 +910,7 @@ export async function createBeamioCardWithFactoryReturningHash(
       minUsdc6: t.minUsdc6.toString(),
       attr: t.attr.toString(),
       tierExpirySeconds: t.tierExpirySeconds.toString(),
+      upgradeByBalance: t.upgradeByBalance,
     })),
   )
   if (tiers?.length && normalizedTiers.length === 0) {

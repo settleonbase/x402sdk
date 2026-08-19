@@ -10159,7 +10159,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			}
 		}
 		const setTiersIface = new ethers.Interface([
-			'function setTiers(tuple(uint256 minUsdc6,uint256 attr,uint256 tierExpirySeconds)[] newTiers)',
+			'function setTiers(tuple(uint256 minUsdc6,uint256 attr,uint256 tierExpirySeconds,bool upgradeByBalance)[] newTiers)',
 			'function owner() view returns (address)',
 		])
 		let decoded: ethers.TransactionDescription | null

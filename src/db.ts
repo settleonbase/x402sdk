@@ -5035,6 +5035,11 @@ export const registerCardToDb = async (params: {
 		image?: string
 		backgroundColor?: string
 		upgradeByBalance?: boolean
+		membershipFeeE6?: string
+		membershipFee?: string | number
+		membershipDurationKind?: number
+		imageFit?: 'width' | 'height'
+		logoDisplayScale?: string
 	}>
 	txHash?: string
 }): Promise<void> => {
