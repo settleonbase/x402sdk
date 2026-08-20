@@ -2622,6 +2622,16 @@ function parseOptionalUint256String(raw: unknown): bigint | null {
 	}
 }
 
+/** POS Check Balance membership issue/upgrade: client sends tier + fee even when customer already has a card. */
+function nfcTopupExplicitMembershipFeeRequested(
+	membershipTierIndex?: number | string | null,
+	membershipFeeFiat6?: string | number | null
+): boolean {
+	if (membershipTierIndex == null || String(membershipTierIndex).trim() === '') return false
+	const fee = parseOptionalUint256String(membershipFeeFiat6)
+	return fee != null && fee > 0n
+}
+
 export const nfcTopupPreparePayload = async (params: {
 	uid?: string
 	wallet?: string
@@ -2689,7 +2699,11 @@ export const nfcTopupPreparePayload = async (params: {
 	const hasValidMembership = membershipFeeMode
 		? await resolveCustomerHasValidMembership(cardAddr, recipientEOA)
 		: false
-	const membershipNeedsFee = membershipFeeMode && !hasValidMembership
+	const explicitMembershipFee = nfcTopupExplicitMembershipFeeRequested(
+		params.membershipTierIndex,
+		params.membershipFeeFiat6
+	)
+	const membershipNeedsFee = membershipFeeMode && (!hasValidMembership || explicitMembershipFee)
 
 	let feeFiat6 = 0n
 	let tierIndexResolved: number | undefined
@@ -7647,7 +7661,11 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 		return { success: true, membershipFeeMode: false, membershipNeedsFee: false }
 	}
 	const hasValid = await resolveCustomerHasValidMembership(cardNorm, mintUser)
-	if (hasValid) {
+	const explicitMembershipFee = nfcTopupExplicitMembershipFeeRequested(
+		params.membershipTierIndex,
+		params.membershipFeeFiat6
+	)
+	if (hasValid && !explicitMembershipFee) {
 		return { success: true, membershipFeeMode: true, membershipNeedsFee: false }
 	}
 	if (params.points6Mint <= 0n) {
@@ -9381,9 +9399,18 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				const tokenIdForRoute = upgradedByMint
 					? (afterTokenIds.find((id) => !beforeTokenSet.has(id.toString())) ?? afterTokenIds[0] ?? 0n)
 					: (afterTokenIds[0] ?? 0n)
-				const topupCategoryRaw = upgradedByMint
-					? (beforePoint6 > 0n ? 'upgradeNewCard' : 'newCard')
-					: 'topupCard'
+				const hadMembershipBeforeNfc = ownershipSnapshotHasValidMembershipNft(beforeNfts as unknown[])
+				const membershipFeeStage = obj.membershipFeeStage
+				const isMembershipIssueLedger = Boolean(membershipFeeStage)
+				const topupCategoryRaw = isMembershipIssueLedger
+					? hadMembershipBeforeNfc
+						? 'upgradeNewCard'
+						: 'newCard'
+					: upgradedByMint
+						? beforePoint6 > 0n
+							? 'upgradeNewCard'
+							: 'newCard'
+						: 'topupCard'
 				let memberAaForDb = ''
 				try {
 					const cardAaFactoryAddrNfc = await getCardAaFactoryAddress(obj.cardAddr)
@@ -9402,14 +9429,36 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					logger(Colors.yellow(`[executeForAdminPostBaseProcess] AA for member topup DB: ${aaDbErr?.message ?? aaDbErr}`))
 				}
 				let finalRequestAmountUSDC6 = 0n
-				try {
-					const q = await quoteUSDCForPoints(obj.cardAddr, ethers.formatUnits(mintParsed.points6, 6))
-					finalRequestAmountUSDC6 = BigInt(q.usdc6)
-				} catch (_) {
-					finalRequestAmountUSDC6 = cardCurrencyFiat === 4 ? mintParsed.points6 : 0n
+				if (isMembershipIssueLedger && membershipFeeStage) {
+					try {
+						const currencyMap: Record<number, string> = {
+							0: 'CAD',
+							1: 'USD',
+							2: 'JPY',
+							3: 'CNY',
+							4: 'USDC',
+							5: 'HKD',
+							6: 'EUR',
+							7: 'SGD',
+							8: 'TWD',
+						}
+						const cardCur = currencyMap[cardCurrencyFiat] ?? 'CAD'
+						finalRequestAmountUSDC6 = await quoteCurrencyToUsdc6(
+							ethers.formatUnits(membershipFeeStage.feePaid6, 6),
+							cardCur
+						)
+					} catch (_) {
+						finalRequestAmountUSDC6 = cardCurrencyFiat === 4 ? membershipFeeStage.feePaid6 : 0n
+					}
+				} else {
+					try {
+						const q = await quoteUSDCForPoints(obj.cardAddr, ethers.formatUnits(mintParsed.points6, 6))
+						finalRequestAmountUSDC6 = BigInt(q.usdc6)
+					} catch (_) {
+						finalRequestAmountUSDC6 = cardCurrencyFiat === 4 ? mintParsed.points6 : 0n
+					}
 				}
 				if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
-				const hadMembershipBeforeNfc = ownershipSnapshotHasValidMembershipNft(beforeNfts as unknown[])
 				const originatingUsdcTxNorm =
 					typeof obj.originatingUSDCTx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(obj.originatingUSDCTx.trim())
 						? obj.originatingUSDCTx.trim().toLowerCase()
@@ -9441,14 +9490,19 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					cardDisplayName = String(metadata?.shareTokenMetadata?.name ?? metadata?.name ?? '').trim()
 				} catch { /* ignore */ }
 				const baseName = (cardDisplayName || 'Membership').replace(/\s*card\s*$/i, '').trim() || 'Membership'
-				const title = topupCategoryRaw === 'newCard'
-					? `Buy ${baseName} Card`
-					: (topupCategoryRaw === 'upgradeNewCard' ? `Upgrade ${baseName} Card` : `Top Up ${baseName} Card`)
+				const title = isMembershipIssueLedger
+					? hadMembershipBeforeNfc
+						? 'Upgrade Membership Card'
+						: 'Issue New User Card'
+					: topupCategoryRaw === 'newCard'
+						? `Buy ${baseName} Card`
+						: topupCategoryRaw === 'upgradeNewCard'
+							? `Upgrade ${baseName} Card`
+							: `Top Up ${baseName} Card`
 				const payerAddr = ethers.getAddress(recipientEOA)
 				const payeeAddr = ethers.isAddress(cardOwnerEOAForAccounting)
 					? ethers.getAddress(cardOwnerEOAForAccounting)
 					: ethers.ZeroAddress
-				const membershipFeeStage = obj.membershipFeeStage
 				const displayJson = JSON.stringify({
 					title,
 					handle: '',
@@ -9459,17 +9513,20 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					finishedHash: tx.hash,
 					...(membershipFeeStage
 						? {
+								membershipIssueLedger: isMembershipIssueLedger,
+								membershipIssueKind: hadMembershipBeforeNfc ? 'upgrade' : 'issue',
 								membershipFeeFiat6: membershipFeeStage.feePaid6.toString(),
 								membershipTierIndex: membershipFeeStage.tierIndex,
 								membershipPointsCredit6: membershipFeeStage.pointsCredit6.toString(),
-								/** Client hint: fee portion of this top-up (main row remains creditTopup / nfc topup). */
 								membershipFeeCategory: 'nfcTopup:membershipFee',
 							}
 						: {}),
 				})
+				const ledgerFiat6 =
+					isMembershipIssueLedger && membershipFeeStage ? membershipFeeStage.feePaid6 : mintParsed.points6
 				const topupRouteItem = {
 					asset: obj.cardAddr,
-					amountE6: mintParsed.points6,
+					amountE6: ledgerFiat6,
 					assetType: 1,
 					source: 1,
 					tokenId: tokenIdForRoute,
@@ -9497,6 +9554,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				const sumSplit =
 					spl != null ? spl.cardE6 + spl.cashE6 + spl.bonusE6 : 0n
 				const useSplit =
+					!isMembershipIssueLedger &&
 					Boolean(spl) &&
 					spl!.currencyAmountE6 > 0n &&
 					sumSplit === spl!.currencyAmountE6 &&
@@ -9650,7 +9708,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 						timestamp: 0n,
 						payer: payerAddr,
 						payee: payeeAddr,
-						finalRequestAmountFiat6: mintParsed.points6,
+						finalRequestAmountFiat6: ledgerFiat6,
 						finalRequestAmountUSDC6,
 						isAAAccount: false,
 						route: [topupRouteItem],
@@ -9665,7 +9723,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 							feePayer: ethers.ZeroAddress,
 						},
 						meta: {
-							requestAmountFiat6: mintParsed.points6,
+							requestAmountFiat6: ledgerFiat6,
 							requestAmountUSDC6: finalRequestAmountUSDC6,
 							currencyFiat: cardCurrencyFiat,
 							discountAmountFiat6: beforePoint6,
