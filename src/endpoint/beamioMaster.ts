@@ -3818,6 +3818,14 @@ const routing = ( router: Router ) => {
 				usdcAmount6?: string
 				currency?: string
 				currencyAmount?: string
+				membershipFeeStage?: {
+					recipientEOA?: string
+					tierIndex?: number | string
+					feePaid6?: string | number
+					pointsCredit6?: string | number
+					bootstrapOnChain?: boolean
+					durationKind?: number | string
+				}
 			}
 			const cardAddress = String(b.cardAddress ?? '').trim()
 			const cardOwner = String(b.cardOwner ?? '').trim()
@@ -3843,6 +3851,43 @@ const routing = ( router: Router ) => {
 			if (!/^\d+$/.test(points6) || BigInt(points6) <= 0n) {
 				return res.status(400).json({ success: false, error: 'Invalid points6' }).end()
 			}
+			let membershipFeeStage: {
+				recipientEOA: string
+				tierIndex: number
+				feePaid6: bigint
+				pointsCredit6: bigint
+				bootstrapOnChain?: boolean
+				durationKind?: number
+			} | undefined
+			const rawStage = b.membershipFeeStage
+			if (rawStage && typeof rawStage === 'object') {
+				const stageRecipient = String(rawStage.recipientEOA ?? '').trim()
+				const tierIndex = Number(rawStage.tierIndex)
+				const feePaid6 = String(rawStage.feePaid6 ?? '').trim()
+				const pointsCredit6 = String(rawStage.pointsCredit6 ?? '').trim()
+				if (
+					ethers.isAddress(stageRecipient) &&
+					Number.isInteger(tierIndex) &&
+					tierIndex >= 0 &&
+					/^\d+$/.test(feePaid6) &&
+					/^\d+$/.test(pointsCredit6) &&
+					BigInt(feePaid6) > 0n &&
+					BigInt(pointsCredit6) > 0n
+				) {
+					membershipFeeStage = {
+						recipientEOA: ethers.getAddress(stageRecipient),
+						tierIndex,
+						feePaid6: BigInt(feePaid6),
+						pointsCredit6: BigInt(pointsCredit6),
+						...(rawStage.bootstrapOnChain === true
+							? {
+									bootstrapOnChain: true,
+									durationKind: Number(rawStage.durationKind ?? 0),
+								}
+							: {}),
+					}
+				}
+			}
 			treasuryBridgeFulfillPool.push({
 				cardAddress: ethers.getAddress(cardAddress),
 				cardOwner: ethers.getAddress(cardOwner),
@@ -3853,6 +3898,7 @@ const routing = ( router: Router ) => {
 				usdcAmount6,
 				currency: b.currency,
 				currencyAmount: b.currencyAmount,
+				membershipFeeStage,
 				res,
 			})
 			kickTreasuryBridgeFulfillPoolPress()
@@ -4745,6 +4791,8 @@ const routing = ( router: Router ) => {
 					tierIndex?: number
 					feePaid6?: string
 					pointsCredit6?: string
+					bootstrapOnChain?: boolean
+					durationKind?: number
 				}
 			}
 			/** 仅当本请求成功消费 `awaiting_beneficiary` session 时由本 handler 填入（忽略 body 里伪造的对账元数据）。 */
@@ -4892,6 +4940,8 @@ const routing = ( router: Router ) => {
 						tierIndex: number
 						feePaid6: bigint
 						pointsCredit6: bigint
+						bootstrapOnChain?: boolean
+						durationKind?: number
 				  }
 				| undefined
 			if (membershipFeeStage && typeof membershipFeeStage === 'object') {
@@ -4900,19 +4950,27 @@ const routing = ( router: Router ) => {
 				try {
 					const feePaid6 = BigInt(String(membershipFeeStage.feePaid6 ?? '').trim())
 					const pointsCredit6 = BigInt(String(membershipFeeStage.pointsCredit6 ?? '').trim())
+					const bootstrapOnChain = Boolean(membershipFeeStage.bootstrapOnChain)
+					const durationKindRaw = membershipFeeStage.durationKind
+					const durationKind =
+						durationKindRaw != null && String(durationKindRaw).trim() !== ''
+							? Number(durationKindRaw)
+							: undefined
 					if (
 						r &&
 						ethers.isAddress(r) &&
 						Number.isInteger(t) &&
 						t >= 0 &&
 						feePaid6 > 0n &&
-						pointsCredit6 > 0n
+						pointsCredit6 > 0n &&
+						(!bootstrapOnChain || (Number.isInteger(durationKind) && (durationKind ?? 0) >= 1))
 					) {
 						membershipFeeStageParsed = {
 							recipientEOA: ethers.getAddress(r),
 							tierIndex: t,
 							feePaid6,
 							pointsCredit6,
+							...(bootstrapOnChain ? { bootstrapOnChain: true, durationKind } : {}),
 						}
 					} else {
 						return res.status(400).json({ success: false, error: 'Invalid membershipFeeStage' }).end()

@@ -1,7 +1,8 @@
 /**
  * Discover treasuryBridge fulfill (after Base USDC x402 settle → GENESIS_NODE_BRIDGE_INITIATOR):
  * 1) initiateLockMint CONET-USDC → card.owner()
- * 2) mintPointsForProtocolUsdcSettlement(recipientEOA, points6) via EntryPoint (gateway accounting)
+ * 2) optional stageMembershipFeePurchase (first issue / upgrade)
+ * 3) mintPointsForProtocolUsdcSettlement(recipientEOA, points6) via EntryPoint (gateway accounting)
  * Idempotent on USDC_tx.
  */
 import { ethers } from 'ethers'
@@ -32,8 +33,11 @@ import {
 	checkBusinessRelayTxSuccessful,
 	ensureAAForEOAOnCard,
 	mintPointsForProtocolUsdcSettlementViaEntryPoint,
+	relayUserCardCallViaEntryPoint,
 	resolveCardOwnerToEOA,
+	type NfcTopupMembershipFeeStage,
 } from '../MemberCard'
+import { resolveUserCardChain } from '../beamioUserCardChain'
 import { insertMemberTopupEvent } from '../db'
 
 ensureSettleContractPoolInitialized()
@@ -125,6 +129,7 @@ export type TreasuryBridgeFulfillPayload = {
 	usdcAmount6: string
 	currency?: string
 	currencyAmount?: string
+	membershipFeeStage?: NfcTopupMembershipFeeStage
 	res?: Response
 }
 
@@ -313,6 +318,61 @@ export const treasuryBridgeFulfillProcess = async () => {
 		const SC = await shiftSettleConetForWrite('treasuryBridgeFulfill.mint')
 		let mintTxHash = ''
 		try {
+			const stage = obj.membershipFeeStage
+			if (stage) {
+				const stageRecipient = ethers.getAddress(stage.recipientEOA)
+				if (stageRecipient.toLowerCase() !== recipientEOA.toLowerCase()) {
+					throw new Error('membershipFeeStage recipient mismatch with treasuryBridge mint')
+				}
+				if (stage.pointsCredit6 !== points6) {
+					throw new Error('membershipFeeStage pointsCredit6 mismatch with treasuryBridge points6')
+				}
+				const stageIface = new ethers.Interface([
+					'function stageMembershipFeePurchase(address user, uint256 tierIndex, uint256 feePaid6, uint256 pointsCredit6)',
+					'function stageMembershipFeePurchaseWithBootstrap(address user, uint256 tierIndex, uint256 feePaid6, uint256 pointsCredit6, uint8 durationKind)',
+				])
+				const useBootstrap = Boolean(stage.bootstrapOnChain)
+				const stageCallData = useBootstrap
+					? stageIface.encodeFunctionData('stageMembershipFeePurchaseWithBootstrap', [
+							stageRecipient,
+							BigInt(stage.tierIndex),
+							stage.feePaid6,
+							stage.pointsCredit6,
+							Number(stage.durationKind ?? 0),
+						])
+					: stageIface.encodeFunctionData('stageMembershipFeePurchase', [
+							stageRecipient,
+							BigInt(stage.tierIndex),
+							stage.feePaid6,
+							stage.pointsCredit6,
+						])
+				const stageChain = await resolveUserCardChain(cardAddress)
+				const stageTx = await relayUserCardCallViaEntryPoint({
+					SC,
+					chain: stageChain,
+					cardAddress,
+					cardCallData: stageCallData,
+					logTag: useBootstrap
+						? 'treasuryBridgeFulfill:stageMembershipFeePurchaseWithBootstrap'
+						: 'treasuryBridgeFulfill:stageMembershipFeePurchase',
+				})
+				const stageReceipt = await stageTx.wait()
+				const stageOk = checkBusinessRelayTxSuccessful(stageReceipt ?? undefined, {
+					logTag: useBootstrap
+						? 'treasuryBridgeFulfill:stageMembershipFeePurchaseWithBootstrap'
+						: 'treasuryBridgeFulfill:stageMembershipFeePurchase',
+				})
+				if (!stageOk.ok) {
+					throw new Error(
+						`${useBootstrap ? 'stageMembershipFeePurchaseWithBootstrap' : 'stageMembershipFeePurchase'} failed on-chain: ${stageTx.hash} (${stageOk.reason})`,
+					)
+				}
+				logger(
+					Colors.cyan(
+						`[treasuryBridgeFulfill] ${useBootstrap ? 'stageMembershipFeePurchaseWithBootstrap' : 'stageMembershipFeePurchase'} tx=${stageTx.hash} tier=${stage.tierIndex} fee6=${stage.feePaid6} points6=${stage.pointsCredit6} user=${stageRecipient}`,
+					),
+				)
+			}
 			const { mintTx } = await mintPointsForProtocolUsdcSettlementViaEntryPoint({
 				cardAddress,
 				recipientEOA,

@@ -2520,6 +2520,10 @@ export type NfcTopupMembershipFeeStage = {
 	tierIndex: number
 	feePaid6: bigint
 	pointsCredit6: bigint
+	/** Metadata-first card: on-chain feeE6[tier] is zero until first POS purchase bootstraps chain storage. */
+	bootstrapOnChain?: boolean
+	/** Required when bootstrapOnChain — written to chain on first stage. */
+	durationKind?: number
 }
 
 export async function readCardMembershipFeeMode(cardAddrRaw: string): Promise<boolean> {
@@ -2548,6 +2552,23 @@ export async function readCardMembershipFees(
 	} catch {
 		/* metadata read failed — fall through to on-chain */
 	}
+	const cardNorm = ethers.getAddress(cardAddrRaw.trim())
+	const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
+	const card = new ethers.Contract(cardNorm, MEMBERSHIP_FEE_CARD_ABI, provider)
+	try {
+		const [feeE6Raw, durationKindRaw] = (await card.membershipFees()) as [bigint[], bigint[] | number[]]
+		const feeE6 = (feeE6Raw ?? []).map((v) => BigInt(v))
+		const durationKind = (durationKindRaw ?? []).map((v) => Number(v))
+		return { feeE6, durationKind }
+	} catch {
+		return { feeE6: [], durationKind: [] }
+	}
+}
+
+/** On-chain `membershipFees()` only — never reads card metadata (used to detect bootstrap vs synced fee). */
+export async function readCardMembershipFeesOnChainOnly(
+	cardAddrRaw: string
+): Promise<{ feeE6: bigint[]; durationKind: number[] }> {
 	const cardNorm = ethers.getAddress(cardAddrRaw.trim())
 	const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
 	const card = new ethers.Contract(cardNorm, MEMBERSHIP_FEE_CARD_ABI, provider)
@@ -3760,33 +3781,47 @@ export const executeForAdminProcess = async () => {
 			}
 			const stageIface = new ethers.Interface([
 				'function stageMembershipFeePurchase(address user, uint256 tierIndex, uint256 feePaid6, uint256 pointsCredit6)',
+				'function stageMembershipFeePurchaseWithBootstrap(address user, uint256 tierIndex, uint256 feePaid6, uint256 pointsCredit6, uint8 durationKind)',
 			])
-			const stageCallData = stageIface.encodeFunctionData('stageMembershipFeePurchase', [
-				stageRecipient,
-				BigInt(stage.tierIndex),
-				stage.feePaid6,
-				stage.pointsCredit6,
-			])
+			const useBootstrap = Boolean(stage.bootstrapOnChain)
+			const stageCallData = useBootstrap
+				? stageIface.encodeFunctionData('stageMembershipFeePurchaseWithBootstrap', [
+						stageRecipient,
+						BigInt(stage.tierIndex),
+						stage.feePaid6,
+						stage.pointsCredit6,
+						Number(stage.durationKind ?? 0),
+					])
+				: stageIface.encodeFunctionData('stageMembershipFeePurchase', [
+						stageRecipient,
+						BigInt(stage.tierIndex),
+						stage.feePaid6,
+						stage.pointsCredit6,
+					])
 			const stageChain = await resolveUserCardChain(obj.cardAddr)
 			const stageTx = await relayUserCardCallViaEntryPoint({
 				SC,
 				chain: stageChain,
 				cardAddress: obj.cardAddr,
 				cardCallData: stageCallData,
-				logTag: 'executeForAdminProcess:stageMembershipFeePurchase',
+				logTag: useBootstrap
+					? 'executeForAdminProcess:stageMembershipFeePurchaseWithBootstrap'
+					: 'executeForAdminProcess:stageMembershipFeePurchase',
 			})
 			logger(
 				Colors.cyan(
-					`[executeForAdminProcess] stageMembershipFeePurchase tx=${stageTx.hash} tier=${stage.tierIndex} fee6=${stage.feePaid6} points6=${stage.pointsCredit6} user=${stageRecipient}`
+					`[executeForAdminProcess] ${useBootstrap ? 'stageMembershipFeePurchaseWithBootstrap' : 'stageMembershipFeePurchase'} tx=${stageTx.hash} tier=${stage.tierIndex} fee6=${stage.feePaid6} points6=${stage.pointsCredit6} user=${stageRecipient}${useBootstrap ? ` durationKind=${stage.durationKind ?? 0}` : ''}`
 				)
 			)
 			const stageReceipt = await stageTx.wait()
 			const stageOk = checkBusinessRelayTxSuccessful(stageReceipt ?? undefined, {
-				logTag: 'executeForAdminProcess:stageMembershipFeePurchase',
+				logTag: useBootstrap
+					? 'executeForAdminProcess:stageMembershipFeePurchaseWithBootstrap'
+					: 'executeForAdminProcess:stageMembershipFeePurchase',
 			})
 			if (!stageOk.ok) {
 				throw new Error(
-					`stageMembershipFeePurchase failed on-chain: ${stageTx.hash} (${stageOk.reason}) userOpHash=${stageOk.userOpHash ?? 'n/a'}`
+					`${useBootstrap ? 'stageMembershipFeePurchaseWithBootstrap' : 'stageMembershipFeePurchase'} failed on-chain: ${stageTx.hash} (${stageOk.reason}) userOpHash=${stageOk.userOpHash ?? 'n/a'}`
 				)
 			}
 		}
@@ -7679,16 +7714,47 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 	if (!Number.isInteger(tierIndex) || tierIndex < 0) {
 		return { success: false, error: 'Invalid membershipTierIndex' }
 	}
-	const fees = await readCardMembershipFees(cardNorm)
-	if (tierIndex >= fees.feeE6.length) {
-		return { success: false, error: 'membershipTierIndex out of range' }
-	}
-	const expectedFee = fees.feeE6[tierIndex] ?? 0n
-	if (expectedFee <= 0n) {
+	const metaFees = await readMembershipFeesFromCardMetadata(cardNorm)
+	const onChainFees = await readCardMembershipFeesOnChainOnly(cardNorm)
+	const metaFee = metaFees && tierIndex < metaFees.feeE6.length ? metaFees.feeE6[tierIndex] ?? 0n : 0n
+	const onChainFee = onChainFees.feeE6[tierIndex] ?? 0n
+	const metaDurationKind =
+		metaFees && tierIndex < metaFees.durationKind.length ? metaFees.durationKind[tierIndex] ?? 0 : 0
+	const onChainDurationKind =
+		onChainFees.durationKind[tierIndex] ?? 0
+
+	let expectedFee: bigint
+	let bootstrapOnChain = false
+	let stageDurationKind: number | undefined
+
+	if (metaFee > 0n) {
+		expectedFee = metaFee
+		if (onChainFee === 0n) {
+			if (!isValidMembershipFeeDurationKind(metaDurationKind)) {
+				return { success: false, error: 'Invalid membership fee duration for selected tier' }
+			}
+			bootstrapOnChain = true
+			stageDurationKind = metaDurationKind
+		} else {
+			expectedFee = onChainFee
+			if (onChainFee !== metaFee) {
+				logger(
+					Colors.yellow(
+						`[nfcTopupPreCheckMembershipFeeFirstIssue] on-chain fee ${onChainFee} differs from metadata ${metaFee} tier=${tierIndex} card=${cardNorm}; using on-chain`
+					)
+				)
+			}
+			if (!isValidMembershipFeeDurationKind(onChainDurationKind)) {
+				return { success: false, error: 'Invalid membership fee duration for selected tier' }
+			}
+		}
+	} else if (onChainFee > 0n) {
+		expectedFee = onChainFee
+		if (!isValidMembershipFeeDurationKind(onChainDurationKind)) {
+			return { success: false, error: 'Invalid membership fee duration for selected tier' }
+		}
+	} else {
 		return { success: false, error: 'Selected membership tier has no membership fee configured' }
-	}
-	if (!isValidMembershipFeeDurationKind(fees.durationKind[tierIndex] ?? 0)) {
-		return { success: false, error: 'Invalid membership fee duration for selected tier' }
 	}
 	const clientFee = parseOptionalUint256String(params.membershipFeeFiat6)
 	if (clientFee == null) {
@@ -7737,6 +7803,7 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 			tierIndex,
 			feePaid6: expectedFee,
 			pointsCredit6: params.points6Mint,
+			...(bootstrapOnChain ? { bootstrapOnChain: true, durationKind: stageDurationKind } : {}),
 		},
 	}
 }
@@ -13472,6 +13539,7 @@ export type CreateCardPreChecked = {
 		/** Points token label for dashboard */
 		Symbol?: string
 		topupPromotion?: TopupPromotionNormalized
+		unifiedRewardPoints?: CreateCardUnifiedRewardPointsNormalized
 		bonusRule?: CreateCardBonusRuleNormalized
 		bonusRules?: CreateCardBonusRuleNormalized[]
 		pointSystem?: CreateCardPointSystemNormalized
@@ -13523,6 +13591,63 @@ type CreateCardPointSystemNormalized = {
 	enabled: boolean
 	chargeRewardRatioE6?: string
 	rewardTokenId?: number
+}
+
+type CreateCardUnifiedRewardFlowNormalized = {
+	enabled: boolean
+	actorPercentBps?: number
+	referrerPercentBps?: number
+}
+
+type CreateCardUnifiedRewardPointsNormalized = {
+	enabled?: boolean
+	topup?: CreateCardUnifiedRewardFlowNormalized
+	charge?: CreateCardUnifiedRewardFlowNormalized
+	social?: CreateCardUnifiedRewardFlowNormalized
+}
+
+function clampCreateCardRewardPercentBps(raw: unknown): number {
+	const n = typeof raw === 'number' ? raw : Number(raw)
+	if (!Number.isFinite(n)) return 0
+	return Math.max(0, Math.min(10_000, Math.round(n)))
+}
+
+function normalizeCreateCardUnifiedRewardFlow(
+	raw: unknown,
+): CreateCardUnifiedRewardFlowNormalized | undefined {
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+	const o = raw as Record<string, unknown>
+	const actorPercentBps = clampCreateCardRewardPercentBps(o.actorPercentBps)
+	const referrerPercentBps =
+		o.referrerPercentBps != null ? clampCreateCardRewardPercentBps(o.referrerPercentBps) : undefined
+	const enabled = o.enabled === true || (o.enabled !== false && actorPercentBps > 0)
+	return {
+		enabled,
+		actorPercentBps,
+		...(referrerPercentBps != null ? { referrerPercentBps } : {}),
+	}
+}
+
+function normalizeCreateCardUnifiedRewardPoints(raw: unknown):
+	| { success: true; value?: CreateCardUnifiedRewardPointsNormalized }
+	| { success: false; error: string } {
+	if (raw == null) return { success: true, value: undefined }
+	if (typeof raw !== 'object' || Array.isArray(raw)) {
+		return {
+			success: false,
+			error: 'shareTokenMetadata.unifiedRewardPoints must be an object if provided',
+		}
+	}
+	const o = raw as Record<string, unknown>
+	const out: CreateCardUnifiedRewardPointsNormalized = {}
+	if (typeof o.enabled === 'boolean') out.enabled = o.enabled
+	const topup = normalizeCreateCardUnifiedRewardFlow(o.topup)
+	const charge = normalizeCreateCardUnifiedRewardFlow(o.charge)
+	const social = normalizeCreateCardUnifiedRewardFlow(o.social)
+	if (topup) out.topup = topup
+	if (charge) out.charge = charge
+	if (social) out.social = social
+	return { success: true, value: Object.keys(out).length > 0 ? out : undefined }
 }
 
 const CREATE_CARD_DEFAULT_POINT_SYSTEM: CreateCardPointSystemNormalized = {
@@ -13706,6 +13831,8 @@ export const createCardPreCheck = (body: {
 		bonusRule?: unknown
 		bonusRules?: unknown
 		pointSystem?: unknown
+		unifiedRewardPoints?: unknown
+		topupPromotion?: unknown
 	}
 	tiers?: unknown[]
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
@@ -13884,6 +14011,10 @@ export const createCardPreCheck = (body: {
 			const parsed = normalizeCreateCardPointSystemEntry(stm.pointSystem)
 			if (!parsed.success) return { success: false, error: parsed.error }
 		}
+		if (stm.unifiedRewardPoints != null) {
+			const parsed = normalizeCreateCardUnifiedRewardPoints(stm.unifiedRewardPoints)
+			if (!parsed.success) return { success: false, error: parsed.error }
+		}
 	}
 	if (body.transferWhitelistEnabled != null && typeof body.transferWhitelistEnabled !== 'boolean') {
 		return { success: false, error: 'transferWhitelistEnabled must be a boolean if provided' }
@@ -14017,6 +14148,9 @@ export const createCardPreCheck = (body: {
 		const pointSystem = normalizeCreateCardPointSystemEntry(stm.pointSystem)
 		if (!pointSystem.success) return { success: false, error: pointSystem.error }
 		meta.pointSystem = pointSystem.pointSystem
+		const unifiedRewardPoints = normalizeCreateCardUnifiedRewardPoints(stm.unifiedRewardPoints)
+		if (!unifiedRewardPoints.success) return { success: false, error: unifiedRewardPoints.error }
+		if (unifiedRewardPoints.value) meta.unifiedRewardPoints = unifiedRewardPoints.value
 		if (Object.keys(meta).length > 0) {
 			normalizedShareTokenMetadata = meta
 		}

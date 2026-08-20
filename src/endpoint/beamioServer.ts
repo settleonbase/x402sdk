@@ -4841,6 +4841,8 @@ const routing = ( router: Router ) => {
 						tierIndex: number
 						feePaid6: string
 						pointsCredit6: string
+						bootstrapOnChain?: boolean
+						durationKind?: number
 				  }
 				| undefined
 			if (isBurnIssuedNft) {
@@ -4889,6 +4891,12 @@ const routing = ( router: Router ) => {
 						tierIndex: feeMembershipChk.stage.tierIndex,
 						feePaid6: feeMembershipChk.stage.feePaid6.toString(),
 						pointsCredit6: feeMembershipChk.stage.pointsCredit6.toString(),
+						...(feeMembershipChk.stage.bootstrapOnChain
+							? {
+									bootstrapOnChain: true,
+									durationKind: feeMembershipChk.stage.durationKind,
+								}
+							: {}),
 					}
 				} else if (!feeMembershipChk.membershipFeeMode) {
 					const minTierChk = await nfcTopupPreCheckMintMinTierFirstMembership(
@@ -5222,7 +5230,7 @@ const routing = ( router: Router ) => {
 	 *       Master `fuelPackFulfill` mint B-Units (+ Genesis Ket #0) → merchant beneficiary
 	 */
 	router.post('/nfcUsdcTopup', async (req, res) => {
-		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty, test, referrerL0, pack, packId } = req.body as {
+		const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty, test, referrerL0, pack, packId, membershipTierIndex, membershipFeeFiat6 } = req.body as {
 			cardAddress?: string
 			cardOwner?: string
 			uid?: string
@@ -5256,6 +5264,9 @@ const routing = ( router: Router ) => {
 			/** Custom Fuel pack id (Cluster catalog) */
 			pack?: string
 			packId?: string
+			/** Discover membership first-purchase / upgrade (nfcTopupPreparePayload) */
+			membershipTierIndex?: number | string
+			membershipFeeFiat6?: string
 		}
 		const sidNorm: string | null = isValidSid(sid) ? (sid as string).trim().toLowerCase() : null
 		const posStr = (pos ?? '').toString().trim()
@@ -5792,6 +5803,8 @@ const routing = ( router: Router ) => {
 					amount: amt,
 					currency: cur,
 					cardAddress: cardAddr,
+					membershipTierIndex,
+					membershipFeeFiat6,
 				})
 				if ('error' in preparedTreasury) {
 					return res.status(400).json({ success: false, error: preparedTreasury.error }).end()
@@ -5800,6 +5813,31 @@ const routing = ( router: Router ) => {
 				if (!mintArgs || mintArgs.points6 <= 0n) {
 					return res.status(400).json({ success: false, error: 'Failed to quote points for treasuryBridge' }).end()
 				}
+				const membershipFeeIssue = await nfcTopupPreCheckMembershipFeeFirstIssue({
+					cardAddrRaw: cardAddr,
+					mintRecipientAddrRaw: recipientAaAddr,
+					points6Mint: mintArgs.points6,
+					membershipTierIndex,
+					membershipFeeFiat6,
+					amountFiat6: preparedTreasury.amountFiat6,
+				})
+				if (!membershipFeeIssue.success) {
+					return res.status(400).json({ success: false, error: membershipFeeIssue.error }).end()
+				}
+				const membershipFeeStageForward = membershipFeeIssue.stage
+					? {
+							recipientEOA: membershipFeeIssue.stage.recipientEOA,
+							tierIndex: membershipFeeIssue.stage.tierIndex,
+							feePaid6: membershipFeeIssue.stage.feePaid6.toString(),
+							pointsCredit6: membershipFeeIssue.stage.pointsCredit6.toString(),
+							...(membershipFeeIssue.stage.bootstrapOnChain
+								? {
+										bootstrapOnChain: true,
+										durationKind: membershipFeeIssue.stage.durationKind ?? 0,
+									}
+								: {}),
+						}
+					: undefined
 				const bunitPre = await nfcTopupPreCheckBUnitFee(cardAddr, preparedTreasury.data)
 				if (!bunitPre.success) {
 					return res.status(400).json({ success: false, error: bunitPre.error ?? 'B-Unit precheck failed' }).end()
@@ -5853,6 +5891,7 @@ const routing = ( router: Router ) => {
 					usdcAmount6: settledTreasury.usdcAmount6.toString(),
 					currency: cur,
 					currencyAmount: amt,
+					...(membershipFeeStageForward ? { membershipFeeStage: membershipFeeStageForward } : {}),
 				})
 					.then((r) => {
 						if (r.statusCode >= 400) {
