@@ -4037,9 +4037,31 @@ function nfcLinkStateBlocksPosAdmin(state: string | null | undefined): 'deactive
 	return null
 }
 
+function posAdminGateFromNfcRow(row: {
+	nfc_link_state: string | null
+	linked_owner_eoa?: string | null
+	private_key?: string | null
+}): NfcCardSignedTxGate {
+	const blocked = nfcLinkStateBlocksPosAdmin(row.nfc_link_state)
+	if (blocked === 'deactive') {
+		return { ok: false, code: 'NFC_CARD_DEACTIVATED', message: NFC_GATE_DEACTIVATED_MSG }
+	}
+	if (blocked === 'removed') {
+		const recipient = resolveNfcRecipientEoaFromRow(row.linked_owner_eoa, row.private_key)
+		if (!recipient) {
+			return { ok: false, code: 'NFC_CARD_UNLINKED', message: NFC_GATE_UNLINKED_MSG }
+		}
+		// Stale `removed` after re-provision: pk / linked owner still resolve an EOA
+		// (Check Balance works; POS admin must not 403).
+	}
+	return { ok: true }
+}
+
 /**
- * POS terminal admin top-up / membership (executeForAdmin): only block explicit deactive/removed link state.
- * Does NOT require nfc_cards.private_key — POS signs with terminal admin, not the NFC card key.
+ * POS terminal admin top-up / membership (executeForAdmin): block explicit deactive,
+ * and removed only when no recipient EOA remains. Does NOT require private_key for
+ * the happy path — POS signs with terminal admin. Re-provisioned cards may keep a
+ * leftover `nfc_link_state='removed'` while still holding a server pk.
  */
 export const getNfcCardPosAdminGateByTagId = async (tagIdHex: string): Promise<NfcCardSignedTxGate> => {
 	const db = new Client({ connectionString: DB_URL })
@@ -4048,15 +4070,16 @@ export const getNfcCardPosAdminGateByTagId = async (tagIdHex: string): Promise<N
 	try {
 		await db.connect()
 		await ensureNfcCardsExtendedSchema(db)
-		const { rows } = await db.query<{ nfc_link_state: string | null }>(
-			`SELECT nfc_link_state FROM nfc_cards WHERE UPPER(TRIM(tag_id)) = $1 LIMIT 1`,
+		const { rows } = await db.query<{
+			nfc_link_state: string | null
+			linked_owner_eoa: string | null
+			private_key: string | null
+		}>(
+			`SELECT nfc_link_state, linked_owner_eoa, private_key FROM nfc_cards WHERE UPPER(TRIM(tag_id)) = $1 LIMIT 1`,
 			[normalized]
 		)
 		if (rows.length === 0) return { ok: true }
-		const blocked = nfcLinkStateBlocksPosAdmin(rows[0].nfc_link_state)
-		if (blocked === 'removed') return { ok: false, code: 'NFC_CARD_UNLINKED', message: NFC_GATE_UNLINKED_MSG }
-		if (blocked === 'deactive') return { ok: false, code: 'NFC_CARD_DEACTIVATED', message: NFC_GATE_DEACTIVATED_MSG }
-		return { ok: true }
+		return posAdminGateFromNfcRow(rows[0])
 	} catch (e: any) {
 		logger(Colors.yellow(`[getNfcCardPosAdminGateByTagId] failed: ${e?.message ?? e}`))
 		return { ok: true }
@@ -4072,15 +4095,16 @@ export const getNfcCardPosAdminGateByUid = async (uid: string): Promise<NfcCardS
 	try {
 		await db.connect()
 		await ensureNfcCardsExtendedSchema(db)
-		const { rows } = await db.query<{ nfc_link_state: string | null }>(
-			`SELECT nfc_link_state FROM nfc_cards WHERE LOWER(TRIM(uid)) = $1 LIMIT 1`,
+		const { rows } = await db.query<{
+			nfc_link_state: string | null
+			linked_owner_eoa: string | null
+			private_key: string | null
+		}>(
+			`SELECT nfc_link_state, linked_owner_eoa, private_key FROM nfc_cards WHERE LOWER(TRIM(uid)) = $1 LIMIT 1`,
 			[normalizedUid]
 		)
 		if (rows.length === 0) return { ok: true }
-		const blocked = nfcLinkStateBlocksPosAdmin(rows[0].nfc_link_state)
-		if (blocked === 'removed') return { ok: false, code: 'NFC_CARD_UNLINKED', message: NFC_GATE_UNLINKED_MSG }
-		if (blocked === 'deactive') return { ok: false, code: 'NFC_CARD_DEACTIVATED', message: NFC_GATE_DEACTIVATED_MSG }
-		return { ok: true }
+		return posAdminGateFromNfcRow(rows[0])
 	} catch (e: any) {
 		logger(Colors.yellow(`[getNfcCardPosAdminGateByUid] failed: ${e?.message ?? e}`))
 		return { ok: true }
@@ -4863,6 +4887,7 @@ export const registerNfcCardToDb = async (params: { uid: string; privateKey: str
 			const filledByTag = await db.query(
 				`UPDATE nfc_cards SET
 					private_key = $1,
+					nfc_link_state = 'active',
 					uid = CASE
 						WHEN LENGTH(TRIM($2)) = 14 AND $2 ~ '^[0-9A-Fa-f]{14}$' THEN $2
 						ELSE uid
@@ -4878,11 +4903,15 @@ export const registerNfcCardToDb = async (params: { uid: string; privateKey: str
 			// Never rotate an existing private_key on uid conflict (would orphan card assets).
 			// Only fill empty private_key / missing tag_id.
 			await db.query(
-				`INSERT INTO nfc_cards (uid, private_key, tag_id) VALUES ($1, $2, $3)
+				`INSERT INTO nfc_cards (uid, private_key, tag_id, nfc_link_state) VALUES ($1, $2, $3, 'active')
 				ON CONFLICT (uid) DO UPDATE SET
 					private_key = CASE
 						WHEN nfc_cards.private_key IS NOT NULL AND TRIM(nfc_cards.private_key) <> '' THEN nfc_cards.private_key
 						ELSE EXCLUDED.private_key
+					END,
+					nfc_link_state = CASE
+						WHEN nfc_cards.private_key IS NOT NULL AND TRIM(nfc_cards.private_key) <> '' THEN nfc_cards.nfc_link_state
+						ELSE 'active'
 					END,
 					tag_id = COALESCE(NULLIF(TRIM(nfc_cards.tag_id), ''), EXCLUDED.tag_id)`,
 				[uid, privateKey, tagId]
