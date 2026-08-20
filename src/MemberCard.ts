@@ -173,6 +173,7 @@ import {
 	replaceNfcCardKeyByTagId,
 	getNfcCardSignedTxGateByTagId,
 	getNfcCardSignedTxGateByUid,
+	getNfcCardPosAdminGateByUid,
 	listLinkedNfcCardsByOwnerEoa,
 	listCouponIssuedNftSeriesForCardDescending,
 	listProductionIssuedNftSeriesForCardDescending,
@@ -2677,7 +2678,7 @@ export const nfcTopupPreparePayload = async (params: {
 	if (wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())) {
 		recipientEOA = ethers.getAddress(wallet.trim())
 	} else if (uid && typeof uid === 'string' && uid.trim()) {
-		const gateTop = await getNfcCardSignedTxGateByUid(uid.trim())
+		const gateTop = await getNfcCardPosAdminGateByUid(uid.trim())
 		if (!gateTop.ok) {
 			return { error: gateTop.message }
 		}

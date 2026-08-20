@@ -13,7 +13,7 @@ import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import { listReferralRegistryClaimsByParent, listReferralRegistryTreeByAccount, getReferralRegistryTreeSync, listReferralMerchantCandidates } from '../db'
 import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
-import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listPosTerminalCardBindingsForWallet, setActivePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
+import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getNfcCardPosAdminGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listPosTerminalCardBindingsForWallet, setActivePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
@@ -4454,10 +4454,6 @@ const routing = ( router: Router ) => {
 					logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid}`))
 					return res.status(403).json(err).end()
 				}
-				const topPrepGate = await getNfcCardSignedTxGateByTagId(sunResult.tagIdHex)
-				if (!topPrepGate.ok) {
-					return res.status(403).json({ success: false, error: topPrepGate.message, errorCode: topPrepGate.code }).end()
-				}
 				let eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
 				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
 					const prov = await ensureNfcTagProvisionedViaMaster({
@@ -4474,6 +4470,10 @@ const routing = ( router: Router ) => {
 						return res.status(prov.statusCode).json(err).end()
 					}
 					eoaFromTag = prov.eoa
+				}
+				const topPrepGate = await getNfcCardPosAdminGateByTagId(sunResult.tagIdHex)
+				if (!topPrepGate.ok) {
+					return res.status(403).json({ success: false, error: topPrepGate.message, errorCode: topPrepGate.code }).end()
 				}
 				resolvedWallet = ethers.getAddress(eoaFromTag)
 				nfcSunTagForEnsure = sunResult.tagIdHex
@@ -4610,13 +4610,29 @@ const routing = ( router: Router ) => {
 					return res.status(403).json(err).end()
 				}
 				nfcTagIdHex = sunResult.tagIdHex
-				const topGate = await getNfcCardSignedTxGateByTagId(nfcTagIdHex)
+				nfcLinkedEOA = await getNfcRecipientAddressByTagId(nfcTagIdHex)
+				if (!nfcLinkedEOA || !ethers.isAddress(nfcLinkedEOA)) {
+					const prov = await ensureNfcTagProvisionedViaMaster({
+						uid: uidTrim,
+						tagIdHex: nfcTagIdHex,
+						e: eTrim,
+						c: cTrim,
+						m: mTrim,
+						logPrefix: '[nfcTopup]',
+					})
+					if (!prov.ok) {
+						const err = { success: false, error: prov.error }
+						logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} tagId=${nfcTagIdHex} provision 失败 返回 ${prov.statusCode}: ${prov.error}`))
+						return res.status(prov.statusCode).json(err).end()
+					}
+					nfcLinkedEOA = prov.eoa
+				}
+				const topGate = await getNfcCardPosAdminGateByTagId(nfcTagIdHex)
 				if (!topGate.ok) {
 					const err = { success: false, error: topGate.message, errorCode: topGate.code }
-					logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} NFC gate: ${topGate.code}`))
+					logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} NFC POS admin gate: ${topGate.code}`))
 					return res.status(403).json(err).end()
 				}
-				nfcLinkedEOA = await getNfcRecipientAddressByTagId(nfcTagIdHex)
 				logger(Colors.gray(`[nfcTopup] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
 			} catch (sunErr: any) {
 				const msg = sunErr?.message ?? String(sunErr)
@@ -6093,11 +6109,6 @@ const routing = ( router: Router ) => {
 					return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
 				}
 				tagIdHex = sunResult.tagIdHex
-				const topGate = await getNfcCardSignedTxGateByTagId(tagIdHex)
-				if (!topGate.ok) {
-					sessionUpdate({ state: 'error', error: topGate.message })
-					return res.status(403).json({ success: false, error: topGate.message, errorCode: topGate.code }).end()
-				}
 				let eoaFromTag = await getNfcRecipientAddressByTagId(tagIdHex)
 				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
 					const prov = await ensureNfcTagProvisionedViaMaster({
@@ -6113,6 +6124,11 @@ const routing = ( router: Router ) => {
 						return res.status(prov.statusCode).json({ success: false, error: prov.error }).end()
 					}
 					eoaFromTag = prov.eoa
+				}
+				const topGate = await getNfcCardPosAdminGateByTagId(tagIdHex)
+				if (!topGate.ok) {
+					sessionUpdate({ state: 'error', error: topGate.message })
+					return res.status(403).json({ success: false, error: topGate.message, errorCode: topGate.code }).end()
 				}
 				recipientEOA = ethers.getAddress(eoaFromTag)
 			} catch (sunErr: any) {
