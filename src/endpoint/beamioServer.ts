@@ -4925,10 +4925,23 @@ const routing = ( router: Router ) => {
 						return res.status(400).json({ success: false, error: minTierChk.error }).end()
 					}
 				}
-				const mintSimChk = await nfcTopupPreCheckMintGatewaySimulation(cardAddress, data)
-				if (!mintSimChk.success) {
-					logger(Colors.red(`[nfcTopup] mint gateway simulation FAIL: ${mintSimChk.error}`))
-					return res.status(400).json({ success: false, error: mintSimChk.error }).end()
+				/**
+				 * Membership-fee first issue / upgrade: Master `stageMembershipFeePurchase*` then mint.
+				 * A bare `mintPointsByAdmin` eth_call reverts `UC_MembershipFeePendingRequired` (0xece3c3b6)
+				 * even though the real UserOp path is valid — skip simulation when staging is queued.
+				 */
+				if (membershipFeeStageForward) {
+					logger(
+						Colors.gray(
+							`[nfcTopup] skip mint gateway simulation | membershipFeeStage tier=${membershipFeeStageForward.tierIndex} (pending required on-chain until Master stages)`
+						)
+					)
+				} else {
+					const mintSimChk = await nfcTopupPreCheckMintGatewaySimulation(cardAddress, data)
+					if (!mintSimChk.success) {
+						logger(Colors.red(`[nfcTopup] mint gateway simulation FAIL: ${mintSimChk.error}`))
+						return res.status(400).json({ success: false, error: mintSimChk.error }).end()
+					}
 				}
 				aaAddr = recipientEOA ? await resolveBeamioAccountOf(recipientEOA) : null
 				bunitFeeCheck = await nfcTopupPreCheckBUnitFee(cardAddress, data)

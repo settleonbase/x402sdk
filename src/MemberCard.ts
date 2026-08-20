@@ -7905,11 +7905,17 @@ const MINT_GATEWAY_PRECHECK_ERROR_IFACE = new ethers.Interface([
 	'error UC_AmountZero()',
 	'error BM_ZeroAddress()',
 	'error BM_CallFailed()',
+	'error UC_MembershipFeePendingRequired()',
+	'error UC_NoBeamioAccount()',
+	'error UC_UnauthorizedGateway()',
 ])
 
 /**
  * eth_call mintPointsByAdmin from factory gateway — catches membership gate ABI / broken linked library
  * before Master relays UserOp (empty revert → BM_CallFailed on-chain).
+ *
+ * Do **not** call this when Cluster has queued `membershipFeeStage`: membership-fee cards revert
+ * `UC_MembershipFeePendingRequired` until Master stages the purchase, then mints in a later tx.
  */
 export async function nfcTopupPreCheckMintGatewaySimulation(
 	cardAddrRaw: string,
@@ -7943,6 +7949,25 @@ export async function nfcTopupPreCheckMintGatewaySimulation(
 						success: false,
 						error:
 							'Top-up points below first membership tier minimum for this customer (UC_BelowMinThreshold).',
+					}
+				}
+				if (decoded?.name === 'UC_MembershipFeePendingRequired') {
+					return {
+						success: false,
+						error:
+							'This membership purchase must be staged on-chain before points can be minted. Use Issue Membership (tier + fee), not a plain top-up.',
+					}
+				}
+				if (decoded?.name === 'UC_NoBeamioAccount') {
+					return {
+						success: false,
+						error: 'Customer Smart Wallet (AA) is not available for this top-up.',
+					}
+				}
+				if (decoded?.name === 'UC_UnauthorizedGateway') {
+					return {
+						success: false,
+						error: 'This program card rejected the factory gateway mint simulation.',
 					}
 				}
 			} catch {
