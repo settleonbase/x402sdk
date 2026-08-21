@@ -33,6 +33,7 @@ import {
 	removeCardProgramLike,
 	upsertCardProgramLike,
 } from './cardProgramSocialDb'
+import { syncCardProgramReferrerEventsFromReceipt } from './cardProgramReferrerDb'
 
 const FACTORY_GATEWAY_IFACE = new ethers.Interface([
 	'function gatewayInvokeCard(address cardAddr, bytes data) returns (bytes)',
@@ -150,6 +151,24 @@ async function persistCardProgramSocialDbAfterTx(
 			txHash,
 		})
 	}
+}
+
+/** Index ShareRefereeBound / Referee* into DB after gateway UserOp (bindShareReferee + other card writes). */
+function syncCardProgramReferrerFromGatewayReceipt(
+	cardAddress: string,
+	txHash: string,
+	receipt: { logs?: ReadonlyArray<{ address: string; topics: ReadonlyArray<string>; data: string }> } | null | undefined,
+	logTag: string,
+): void {
+	if (!receipt?.logs?.length) return
+	void syncCardProgramReferrerEventsFromReceipt({
+		cardAddress,
+		receipt: { logs: receipt.logs },
+		txHash,
+	}).catch((refIdxErr: unknown) => {
+		const msg = refIdxErr instanceof Error ? refIdxErr.message : String(refIdxErr)
+		logger(Colors.yellow(`[${logTag}] cardProgramReferrer indexer non-critical: ${msg}`))
+	})
 }
 
 async function ensureCardUserCumulativeStatInitialized(params: {
@@ -293,6 +312,8 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 			)
 			let lastHash = ''
 			let lastGas = 0n
+			let lastReceipt: { logs: ReadonlyArray<{ address: string; topics: ReadonlyArray<string>; data: string }>; gasUsed?: bigint } | null =
+				null
 			for (let i = 0; i < directSteps.length; i++) {
 				const stepLabel = `${obj.label}:step${i + 1}`
 				const tx = await relayUserCardCallViaEntryPoint({
@@ -312,9 +333,11 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 				}
 				lastHash = tx.hash
 				lastGas = receipt?.gasUsed ?? 0n
+				lastReceipt = receipt
 			}
 			logger(Colors.green(`[${obj.label}] ok (direct card) hash=${lastHash} card=${obj.cardAddress}`))
 			await persistCardProgramSocialDbAfterTx(obj.cardAddress, lastHash, obj.socialDb)
+			syncCardProgramReferrerFromGatewayReceipt(obj.cardAddress, lastHash, lastReceipt, obj.label)
 			/** like/unlike already returned `{ queued: true }` at enqueue — do not rewrite HTTP. */
 			if (obj.res && !obj.res.headersSent) {
 				obj.res.status(200).json({ success: true, hash: lastHash }).end()
@@ -352,6 +375,7 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 		}
 		logger(Colors.green(`[${obj.label}] ok hash=${tx.hash} card=${obj.cardAddress}`))
 		await persistCardProgramSocialDbAfterTx(obj.cardAddress, tx.hash, obj.socialDb)
+		syncCardProgramReferrerFromGatewayReceipt(obj.cardAddress, tx.hash, receipt, obj.label)
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({ success: true, hash: tx.hash }).end()
 		}

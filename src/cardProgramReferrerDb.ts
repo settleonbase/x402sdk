@@ -261,9 +261,39 @@ const CARD_REFEREE_EVENTS_IFACE = new ethers.Interface([
 	'event RefereeRegistered(address indexed refereeAA, address indexed operator)',
 	'event RefereeUnregistered(address indexed refereeAA, address indexed operator)',
 	'event RefereeReferrerUpdated(address indexed refereeAA, address indexed referrerAA, address indexed operator)',
+	/** Discover share bind (AdminStats V4+). Storage keys are EOAs; AA only in event payload. */
+	'event ShareRefereeBoundWithSignature(address indexed downlineEOA, address indexed refereeEOA, address downlineAA, address refereeAA, bytes32 nonce)',
 ])
 
-/** Master：从 card receipt 解析 Referee* 事件并写入 DB（启用后记录，不做历史回填）。 */
+/**
+ * Share bind: opener (downlineEOA) becomes referee of share-owner (refereeEOA).
+ * DB columns historically named *_aa; product UI resolves via resolveReferrerRegistryAaToEoa (EOA passthrough).
+ */
+async function applyShareRefereeBoundToDb(params: {
+	cardAddress: string
+	downlineEOA: string
+	refereeEOA: string
+	txHash?: string | null
+}): Promise<void> {
+	const downline = normalizeAa(params.downlineEOA)
+	const referrer = normalizeAa(params.refereeEOA)
+	if (!downline || !referrer) return
+	/** Register share-owner as a referrer account row (mirrors on-chain isReferee[refereeEOA]). */
+	await upsertCardProgramRefereeRegistered({
+		cardAddress: params.cardAddress,
+		refereeAA: referrer,
+		txHash: params.txHash,
+	})
+	/** Downline → uplink referrer (canonical registry edge). */
+	await updateCardProgramRefereeReferrer({
+		cardAddress: params.cardAddress,
+		refereeAA: downline,
+		referrerAA: referrer,
+		txHash: params.txHash,
+	})
+}
+
+/** Master：从 card receipt 解析 Referee* / ShareRefereeBound 事件并写入 DB。 */
 export const syncCardProgramReferrerEventsFromReceipt = async (params: {
 	cardAddress: string
 	receipt: { logs: ReadonlyArray<{ address: string; topics: ReadonlyArray<string>; data: string }> }
@@ -301,8 +331,90 @@ export const syncCardProgramReferrerEventsFromReceipt = async (params: {
 				referrerAA: parsed.args.referrerAA as string,
 				txHash,
 			})
+		} else if (parsed.name === 'ShareRefereeBoundWithSignature') {
+			await applyShareRefereeBoundToDb({
+				cardAddress: params.cardAddress,
+				downlineEOA: parsed.args.downlineEOA as string,
+				refereeEOA: parsed.args.refereeEOA as string,
+				txHash,
+			})
 		}
 	}
+}
+
+const SHARE_REFEREE_BOUND_TOPIC =
+	CARD_REFEREE_EVENTS_IFACE.getEvent('ShareRefereeBoundWithSignature')?.topicHash ??
+	ethers.id(
+		'ShareRefereeBoundWithSignature(address,address,address,address,bytes32)',
+	)
+
+/** CoNET eth_getLogs practical window (same ceiling as other scanners). */
+const SHARE_REFEREE_LOG_CHUNK = 4_500
+
+/**
+ * Backfill beamio_card_program_referees from ShareRefereeBoundWithSignature logs.
+ * Use when chain registry views revert (AdminStats unrouted) and DB mirror is empty.
+ */
+export const backfillCardProgramShareRefereeBindsFromLogs = async (params: {
+	cardAddress: string
+	provider: ethers.Provider
+	fromBlock: number
+	toBlock?: number
+}): Promise<{ scanned: number; applied: number }> => {
+	const card = ethers.getAddress(params.cardAddress)
+	const cardLower = card.toLowerCase()
+	const tip = params.toBlock ?? Number(await params.provider.getBlockNumber())
+	const from = Math.max(0, Math.floor(params.fromBlock))
+	const to = Math.max(from, Math.floor(tip))
+	let scanned = 0
+	let applied = 0
+	for (let start = from; start <= to; start += SHARE_REFEREE_LOG_CHUNK) {
+		const end = Math.min(to, start + SHARE_REFEREE_LOG_CHUNK - 1)
+		let logs: ethers.Log[] = []
+		try {
+			logs = await params.provider.getLogs({
+				address: card,
+				topics: [SHARE_REFEREE_BOUND_TOPIC],
+				fromBlock: start,
+				toBlock: end,
+			})
+		} catch (e: unknown) {
+			const err = e as { message?: string }
+			logger(
+				Colors.yellow(
+					`[backfillShareReferee] getLogs failed ${start}-${end}: ${err?.message ?? e}`,
+				),
+			)
+			continue
+		}
+		scanned += logs.length
+		for (const log of logs) {
+			if (log.address.toLowerCase() !== cardLower) continue
+			let parsed: ethers.LogDescription | null = null
+			try {
+				parsed = CARD_REFEREE_EVENTS_IFACE.parseLog({
+					topics: [...log.topics],
+					data: log.data,
+				})
+			} catch {
+				continue
+			}
+			if (!parsed || parsed.name !== 'ShareRefereeBoundWithSignature') continue
+			await applyShareRefereeBoundToDb({
+				cardAddress: card,
+				downlineEOA: parsed.args.downlineEOA as string,
+				refereeEOA: parsed.args.refereeEOA as string,
+				txHash: log.transactionHash,
+			})
+			applied += 1
+		}
+	}
+	logger(
+		Colors.cyan(
+			`[backfillShareReferee] card=${card} from=${from} to=${to} scanned=${scanned} applied=${applied}`,
+		),
+	)
+	return { scanned, applied }
 }
 
 export const listCardProgramRefereesByReferrer = async (
