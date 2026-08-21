@@ -210,6 +210,20 @@ export const listCardProgramRegisteredReferees = async (
 	}
 }
 
+/** DB mirror totals for summary KPI when chain count views revert. */
+export const readCardProgramReferrerDbSummary = async (
+	cardAddress: string,
+): Promise<{ dbReferrerTotal: number; dbRegisteredRefereeTotal: number }> => {
+	const [referrers, registered] = await Promise.all([
+		listCardProgramReferees(cardAddress, { limit: 1, offset: 0 }),
+		listCardProgramRegisteredReferees(cardAddress, { limit: 1, offset: 0 }),
+	])
+	return {
+		dbReferrerTotal: referrers.total,
+		dbRegisteredRefereeTotal: registered.total,
+	}
+}
+
 export const listCardProgramReferees = async (
 	cardAddress: string,
 	opts?: { limit?: number; offset?: number },

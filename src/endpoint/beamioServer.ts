@@ -27,6 +27,7 @@ import {
 	listCardProgramRegisteredReferees,
 	listCardProgramReferees,
 	listCardProgramRefereesByReferrer,
+	readCardProgramReferrerDbSummary,
 } from '../cardProgramReferrerDb'
 import {
 	readCardProgramReferrerChainSummary,
@@ -13047,15 +13048,22 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		const addrNorm = ethers.getAddress(cardAddress)
 		try {
 			if (m === 'summary') {
-				const chainTotals = await readCardProgramReferrerChainSummary(cardAddress)
+				const [chainTotals, dbTotals] = await Promise.all([
+					readCardProgramReferrerChainSummary(cardAddress),
+					readCardProgramReferrerDbSummary(cardAddress),
+				])
 				return res.status(200).json({
 					mode: 'summary',
 					cardAddress: addrNorm,
 					chainReferrerTotalCount: chainTotals.referrerTotalCount,
 					chainRegisteredRefereeTotalCount: chainTotals.registeredRefereeTotalCount,
-					/** @deprecated alias — UI should prefer chain* fields */
-					referrerTotalCount: chainTotals.referrerTotalCount,
-					registeredRefereeTotalCount: chainTotals.registeredRefereeTotalCount,
+					/** DB mirror — use when chain* is null (AdminStats registry views unavailable). */
+					dbReferrerTotal: dbTotals.dbReferrerTotal,
+					dbRegisteredRefereeTotal: dbTotals.dbRegisteredRefereeTotal,
+					/** @deprecated alias — UI should prefer chain* then db* */
+					referrerTotalCount: chainTotals.referrerTotalCount ?? dbTotals.dbReferrerTotal,
+					registeredRefereeTotalCount:
+						chainTotals.registeredRefereeTotalCount ?? dbTotals.dbRegisteredRefereeTotal,
 				})
 			}
 			if (m === 'referrers') {
