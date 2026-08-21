@@ -1933,23 +1933,14 @@ export const cardBindShareRefereePreCheck = async (body: {
 		const downlineAA = ethers.getAddress((await aaFac.beamioAccountOf(downlineEOA)) as string)
 		const refereeAA = ethers.getAddress((await aaFac.beamioAccountOf(refereeEOA)) as string)
 
-		const cardReader = new ethers.Contract(
-			card,
-			['function refereeReferrer(address) view returns (address)'],
-			provider,
-		)
-		let existing: string = ethers.ZeroAddress
-		try {
-			existing = ethers.getAddress((await cardReader.refereeReferrer(downlineAA)) as string)
-		} catch {
-			existing = ethers.ZeroAddress
-		}
-		if (existing !== ethers.ZeroAddress && existing !== refereeAA) {
-			return {
-				success: false,
-				error: `Already bound to another referee on this card (${existing})`,
-			}
-		}
+		/*
+		 * Do not use refereeReferrer() as a pre-check here. Older cards and the
+		 * current AdminStats module do not route that read selector through the
+		 * card, so an eth_call reverts with BM_CallFailed. Treating
+		 * that revert as address(0) made the pre-check report a false "unbound"
+		 * state and encouraged duplicate submissions. The V4 bind entrypoint
+		 * performs the authoritative immutable/idempotent check on-chain.
+		 */
 
 		const nonce = String(body.nonce).trim()
 		const userSignature = String(body.userSignature)

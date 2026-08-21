@@ -65,6 +65,8 @@ export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	/** Merchant program cards — operator blacklist */
 	'0x48b0e8c3cdc0cf80b6239283cff3d1de16501f3b',
 	'0x52af5f5e7c136cc1bd596d64cb44eb7f5c9d2d6c',
+	/** Merchant program card — operator blacklist */
+	'0x4cea622155c82133839a46fe108fcefc5b9d079f',
 	/** Silent Pass CoNET program card — operator blacklist (top-up BM_CallFailed / hide from Discover & assets) */
 	'0x703ca8bad6a1266afc077a5b9f3de0461f5560ff',
 	/** @deprecated Base-era global default merchant card (CoNET-only migration; bytecode on Base only) */

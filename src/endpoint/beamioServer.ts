@@ -9527,7 +9527,19 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(
 				Colors.red(`server /api/cardBindShareReferee preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(
+					{
+						cardAddress: req.body?.cardAddress,
+						downlineEOA: req.body?.downlineEOA,
+						refereeEOA: req.body?.refereeEOA,
+						deadline: req.body?.deadline,
+						hasNonce: Boolean(req.body?.nonce),
+						hasUserSignature: Boolean(req.body?.userSignature),
+					},
+					false,
+					2,
+					true,
+				),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
