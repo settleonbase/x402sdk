@@ -181,6 +181,11 @@
   },
   {
     "inputs": [],
+    "name": "UC_AlreadyInitialized",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "UC_AmountZero",
     "type": "error"
   },
@@ -191,12 +196,12 @@
   },
   {
     "inputs": [],
-    "name": "UC_BeneficiaryMustBeAA",
+    "name": "UC_GlobalMisconfigured",
     "type": "error"
   },
   {
     "inputs": [],
-    "name": "UC_GlobalMisconfigured",
+    "name": "UC_InitializeLocked",
     "type": "error"
   },
   {
@@ -238,11 +243,6 @@
   {
     "inputs": [],
     "name": "UC_NotAdmin",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "UC_PointsToNotWhitelisted",
     "type": "error"
   },
   {
@@ -1782,7 +1782,7 @@
             "type": "bool"
           }
         ],
-        "internalType": "struct BeamioUserCard.NFTDetail[]",
+        "internalType": "struct NFTDetail[]",
         "name": "nfts",
         "type": "tuple[]"
       }
@@ -1833,12 +1833,45 @@
             "type": "bool"
           }
         ],
-        "internalType": "struct BeamioUserCard.NFTDetail[]",
+        "internalType": "struct NFTDetail[]",
         "name": "nfts",
         "type": "tuple[]"
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "uri_",
+        "type": "string"
+      },
+      {
+        "internalType": "enum BeamioCurrency.CurrencyType",
+        "name": "currency_",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "pointsUnitPriceInCurrencyE6_",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "initialOwner",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "gateway_",
+        "type": "address"
+      }
+    ],
+    "name": "initialize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -1893,6 +1926,25 @@
       }
     ],
     "name": "isIssuedNftValid",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "effectiveTo",
+        "type": "address"
+      }
+    ],
+    "name": "isPointsTransferRecipientAllowed",
     "outputs": [
       {
         "internalType": "bool",
@@ -2213,6 +2265,106 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "nftAttributes",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "nftExpiresAt",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "nftInventoryAt",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      }
+    ],
+    "name": "nftInventoryLength",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "nftTierIndexOrMax",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "owner",
     "outputs": [
@@ -2220,6 +2372,25 @@
         "internalType": "address",
         "name": "",
         "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      }
+    ],
+    "name": "pointsBalanceOf",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",

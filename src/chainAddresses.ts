@@ -300,8 +300,8 @@ export const CONET_GB1155 = '0x3Dc53e528d45225e8F38c391Cc6a72CDec435748'
 export const CONET_GB_TOTAL = '0x949ed49faB0e999f685f16e09Cf5EaaF4090F290'
 /** CoNET GuardianNodesInfoV6 — DePIN 节点 IP ↔ 运营钱包；与 deployments/conet-addresses.json 同步 */
 export const CONET_GUARDIAN_NODES_INFO_V6 = '0xBC6b53065b5647261396d002bDBA0d3396E0722f'
-export const CONET_BEAMIO_USER_CARD_FORMATTING_LIB = '0x9727136BC5DAA5540e7397C9086e9980EBDD0e48'
-export const CONET_BEAMIO_USER_CARD_TRANSFER_LIB = '0xBcf3f8C5994B02B89fB743e1dee6AFDD5a49a664'
+export const CONET_BEAMIO_USER_CARD_FORMATTING_LIB = '0x62F18eeC53B423bb36246856Fe2216A7Df270873'
+export const CONET_BEAMIO_USER_CARD_TRANSFER_LIB = '0x4B2F90F252427E7b894BbBC8a146fA8E3fddfDc0'
 export const CONET_BEAMIO_USER_CARD_ADMIN_GATEWAY_LIB = '0x602646B80Df4d46eF3dCF1C2AB60899135e5d0AC'
 export const CONET_BEAMIO_USER_CARD_FAUCET_GATEWAY_LIB = '0xE8BCc970e1C51d0F8fFDcB3beCe1DEAd4B786986'
 export const CONET_BEAMIO_USER_CARD_GATEWAY_MINT_LIB = '0x4d62ab34c4E7df4a124806A45F82C591681E7C4D'
@@ -315,6 +315,28 @@ export const CONET_BEAMIO_USER_CARD_VIEWS_LIB = '0x1c7c122429Da18e6078d9CEbb7B5b
 export const CONET_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB =
   process.env.CONET_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB || '0x048fb5BdEAeF9bFb42b7Af9118f9975E9Be933F2'
 export const CONET_REFERRER_REGISTRY_LIB = '0x1A4D7F46B553528e3e0b64425079cCcD8E15e5Ca'
+
+/**
+ * CoNET UserCard UpgradeableBeacon (P2). Empty until deployed; createCard stays on CREATE initCode
+ * until this is a non-zero address.
+ */
+export const CONET_USER_CARD_BEACON = process.env.CONET_USER_CARD_BEACON?.trim() || '0x01716C6b755a0FBfCF4e548A6d6B7af19ADf6698'
+/** Logic implementation the beacon currently points at. Diagnostic / verify only; initCode uses the beacon. */
+export const CONET_USER_CARD_BEACON_IMPL = process.env.CONET_USER_CARD_BEACON_IMPL?.trim() || '0x910b6A10a086ee41F1E32613FCaDA47A91B81665'
+
+export function resolveConetUserCardBeaconAddress(): string | null {
+	const raw = CONET_USER_CARD_BEACON.trim()
+	if (!raw || !ethers.isAddress(raw) || raw === ethers.ZeroAddress) return null
+	try {
+		return ethers.getAddress(raw)
+	} catch {
+		return null
+	}
+}
+
+export function isConetUserCardBeaconConfigured(): boolean {
+	return resolveConetUserCardBeaconAddress() !== null
+}
 
 /** CoNET 主网 chainId（BUnitAirdrop / consumeFromUser / 独立 BUint indexer 记账） */
 export const CONET_MAINNET_CHAIN_ID = 224422

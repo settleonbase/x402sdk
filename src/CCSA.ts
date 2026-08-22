@@ -17,7 +17,9 @@ import {
   BASE_BEAMIO_USER_CARD_VIEWS_LIB,
   BASE_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB,
   BASE_CARD_FACTORY,
+  isConetUserCardBeaconConfigured,
 } from './chainAddresses'
+import { buildBeamioUserCardBeaconProxyInitCode } from './beamioUserCardBeaconInitCode'
 import {
   linkBeamioUserCardBytecode,
   type BeamioUserCardLibraryAddresses,
@@ -383,6 +385,21 @@ async function buildBeamioUserCardInitCodeFromParams(
   }
   if (!artifact?.bytecode) throw new Error('BeamioUserCard artifact missing bytecode')
 
+  // P2: when the CoNET UpgradeableBeacon is configured, Factory CREATE deploys BeaconProxy
+  // (card address stays stable). Until then keep the existing UserCard constructor CREATE path.
+  void upgradeType
+  void initialTransferWhitelistEnabled
+  void contractName
+  if (isConetUserCardBeaconConfigured()) {
+    return buildBeamioUserCardBeaconProxyInitCode({
+      uri,
+      currencyEnum,
+      pointsUnitPriceInCurrencyE6,
+      initialOwner,
+      gateway,
+    })
+  }
+
   let bytecode = artifact.bytecode
   const lr = artifact.linkReferences
   if (lr && Object.keys(lr).length > 0) {
@@ -400,10 +417,6 @@ async function buildBeamioUserCardInitCodeFromParams(
   }
 
   const factory = new ethers.ContractFactory(artifact.abi, bytecode)
-  // Must match on-chain BeamioUserCard ctor (5 args). Extra options are metadata / post-deploy.
-  void upgradeType
-  void initialTransferWhitelistEnabled
-  void contractName
   const deployTx = await factory.getDeployTransaction(
     uri,
     currencyEnum,

@@ -754,6 +754,106 @@ async function assertAdminStatsRoutesStatsQuerySelector(
 	}
 }
 
+/**
+ * Runtime bytecode needles for BeamioUserCard fallback ChargeReward (kind=5) routing.
+ * V12 CREATE: PUSH2 0x0745 JUMPI → PUSH2 0x3b9b JUMP (includes MODULE_CHARGE_REWARD).
+ * V13 beacon impl: function dispatcher PUSH4 initialize(string,uint8,uint256,address,address)
+ *   (`0x1897af89`) — V13 source always includes MODULE_CHARGE_REWARD; jump dests moved after P1.
+ * Old CREATE: same V12 JUMPI → PUSH2 0x3b88 JUMP (no ChargeReward → BM_CallFailed).
+ */
+const USER_CARD_CHARGE_REWARD_FALLBACK_SUPPORTED_NEEDLES = [
+	'610745613b9b56',
+	'631897af8914',
+] as const
+const USER_CARD_CHARGE_REWARD_FALLBACK_LEGACY_NEEDLE = '610745613b8856'
+
+/** EIP-1967 implementation slot (UUPS / transparent). */
+const EIP1967_IMPLEMENTATION_SLOT =
+	'0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
+/** EIP-1967 beacon slot (BeaconProxy). */
+const EIP1967_BEACON_SLOT = '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50'
+
+function bytecodeSupportsChargeRewardFallback(codeHex: string): boolean | null {
+	const hex = codeHex.toLowerCase().replace(/^0x/, '')
+	if (!hex || hex === '') return null
+	if (USER_CARD_CHARGE_REWARD_FALLBACK_SUPPORTED_NEEDLES.some((n) => hex.includes(n))) return true
+	if (hex.includes(USER_CARD_CHARGE_REWARD_FALLBACK_LEGACY_NEEDLE)) return false
+	return null
+}
+
+async function resolveProxyImplementationCode(
+	provider: ethers.Provider,
+	proxyAddress: string,
+): Promise<string | null> {
+	try {
+		const beaconRaw = await provider.getStorage(proxyAddress, EIP1967_BEACON_SLOT)
+		const beacon = ethers.getAddress(`0x${beaconRaw.slice(-40)}`)
+		if (beacon !== ethers.ZeroAddress) {
+			const beaconReader = new ethers.Contract(
+				beacon,
+				['function implementation() view returns (address)'],
+				provider,
+			)
+			const impl = (await beaconReader.implementation()) as string
+			if (impl && impl !== ethers.ZeroAddress) {
+				const code = await provider.getCode(impl)
+				if (code && code !== '0x') return code
+			}
+		}
+	} catch {
+		/* not a beacon proxy */
+	}
+	try {
+		const implRaw = await provider.getStorage(proxyAddress, EIP1967_IMPLEMENTATION_SLOT)
+		const impl = ethers.getAddress(`0x${implRaw.slice(-40)}`)
+		if (impl !== ethers.ZeroAddress) {
+			const code = await provider.getCode(impl)
+			if (code && code !== '0x') return code
+		}
+	} catch {
+		/* not an ERC1967 impl proxy */
+	}
+	return null
+}
+
+/**
+ * True when the card runtime (or its beacon/ERC1967 implementation) includes the
+ * MODULE_CHARGE_REWARD fallback branch. Fail-closed on RPC / empty code / unknown bytecode.
+ */
+export async function cardSupportsChargeRewardFallback(cardAddress: string): Promise<boolean> {
+	try {
+		const card = ethers.getAddress(cardAddress)
+		const chain = await resolveUserCardChain(card)
+		const provider = providerForUserCardChain(chain)
+		const code = await provider.getCode(card)
+		if (!code || code === '0x') return false
+		const direct = bytecodeSupportsChargeRewardFallback(code)
+		if (direct !== null) return direct
+		const implCode = await resolveProxyImplementationCode(provider, card)
+		if (!implCode) return false
+		const viaProxy = bytecodeSupportsChargeRewardFallback(implCode)
+		return viaProxy === true
+	} catch {
+		return false
+	}
+}
+
+/**
+ * Pre-check helper: returns English error when the card cannot route ChargeReward selectors.
+ * Fail-closed (RPC / unknown bytecode → error).
+ */
+export async function assertCardSupportsChargeRewardFallback(
+	cardAddress: string,
+): Promise<string | null> {
+	const supported = await cardSupportsChargeRewardFallback(cardAddress)
+	if (supported) return null
+	return (
+		`This merchant card runtime does not support ChargeReward fallback (MODULE_CHARGE_REWARD / kind=5). ` +
+		`Social Promotion Top-up / configureEventRewardRule(s) would revert with BM_CallFailed on-chain. ` +
+		`Upgrade to a card whose bytecode includes ChargeReward routing (V12+), or re-issue via the beacon proxy path.`
+	)
+}
+
 async function assertAdminStatsRoutesChargeRewardSelector(
 	cardAddress: string,
 	selector: string,
@@ -782,6 +882,8 @@ async function assertAdminStatsRoutesChargeRewardSelector(
 		if (kind !== 5) {
 			return `AdminStatsQueryModule routes ${label} to kind=${kind}, expected 5 (ChargeReward)`
 		}
+		const fallbackErr = await assertCardSupportsChargeRewardFallback(cardAddress)
+		if (fallbackErr) return fallbackErr
 		return null
 	} catch (e: unknown) {
 		const err = e as { message?: string }
