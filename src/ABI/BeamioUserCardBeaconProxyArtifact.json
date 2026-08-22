@@ -85,7 +85,7 @@
   "linkReferences": {},
   "deployedLinkReferences": {},
   "immutableReferences": {
-    "511": [
+    "3987": [
       {
         "length": 32,
         "start": 24
@@ -93,5 +93,5 @@
     ]
   },
   "inputSourceName": "project/src/BeamioUserCard/BeamioUserCardBeaconProxy.sol",
-  "buildInfoId": "solc-0_8_35-3962dd8ff22d3b4ddc1d31aa9f3c195f33f8a829"
+  "buildInfoId": "solc-0_8_35-7ad991cd8f9fd3ba47260a1101fd49082a739abc"
 }
