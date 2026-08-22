@@ -13299,6 +13299,64 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		return postLocalhost('/api/merchantKitStripe/poll', { sessionId, userClosedCheckout: Boolean(userClosedCheckout) }, res)
 	})
 
+	/**
+	 * Stripe 入金 → Base 原生 USDC 转用户 EOA。Cluster 仅预检后转发 Master（会话 map 只在 Master）。
+	 * body: `{ walletAddress, amountUsdc6 }`（6 位定点；最低 1 USDC，整分，上限 10,000 USDC）
+	 */
+	router.post('/eoaUsdcStripe/createSession', async (req, res) => {
+		const { walletAddress, amountUsdc6 } = req.body ?? {}
+		if (!walletAddress) {
+			return res.status(400).json({ error: 'walletAddress required' }).end()
+		}
+		if (!ethers.isAddress(walletAddress)) {
+			return res.status(400).json({ error: 'Invalid walletAddress' }).end()
+		}
+		const amountStr =
+			typeof amountUsdc6 === 'number' && Number.isFinite(amountUsdc6)
+				? String(Math.trunc(amountUsdc6))
+				: typeof amountUsdc6 === 'string'
+					? amountUsdc6.trim()
+					: ''
+		if (!/^\d+$/.test(amountStr)) {
+			return res.status(400).json({ error: 'amountUsdc6 must be a positive integer string' }).end()
+		}
+		const amount = BigInt(amountStr)
+		if (amount < 1_000_000n) {
+			return res.status(400).json({ error: 'Minimum deposit is 1 USDC' }).end()
+		}
+		if (amount > 10_000_000_000n) {
+			return res.status(400).json({ error: 'Maximum deposit is 10,000 USDC' }).end()
+		}
+		if (amount % 10_000n !== 0n) {
+			return res.status(400).json({ error: 'amountUsdc6 must be a whole USD cent (multiple of 10000)' }).end()
+		}
+		const sk =
+			(typeof process !== 'undefined' && process.env?.STRIPE_SECRET_KEY?.trim()) ||
+			(masterSetup as { stripe_SecretKey?: string }).stripe_SecretKey?.trim() ||
+			''
+		if (!sk) {
+			logger(Colors.red('[eoaUsdcStripe] createSession cluster precheck: Stripe key missing'))
+			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
+		}
+		return postLocalhost(
+			'/api/eoaUsdcStripe/createSession',
+			{ walletAddress: ethers.getAddress(walletAddress), amountUsdc6: amountStr },
+			res
+		)
+	})
+
+	router.post('/eoaUsdcStripe/poll', async (req, res) => {
+		const { sessionId, userClosedCheckout } = req.body ?? {}
+		if (!sessionId || typeof sessionId !== 'string') {
+			return res.status(400).json({ error: 'sessionId required' }).end()
+		}
+		return postLocalhost(
+			'/api/eoaUsdcStripe/poll',
+			{ sessionId, userClosedCheckout: Boolean(userClosedCheckout) },
+			res
+		)
+	})
+
 	/** GET /api/share/coupon-claim-meta?target= — JSON for homepage client meta + preview */
 	router.get('/share/coupon-claim-meta', async (req, res) => {
 		const parsed = parseCouponClaimShareRequest(req.query as CouponClaimShareQuery)
@@ -13497,6 +13555,27 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			)
 			return postLocalhostRaw(
 				'/api/merchant-kit-stripe-webhook',
+				req.body as Buffer,
+				req.headers['stripe-signature'],
+				res
+			)
+		}
+	)
+
+	/** Stripe EOA USDC 入金 webhook：raw body 转发 Master 验签。Stripe Dashboard 配同一 path。 */
+	app.post(
+		'/api/eoa-usdc-stripe-webhook',
+		express.raw({ type: 'application/json' }),
+		async (req: Request, res: Response) => {
+			const ip = getClientIp(req)
+			const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
+			logger(
+				Colors.cyan('[eoa-usdc-stripe-webhook] POST → master'),
+				`ip=${ip || '(none)'}`,
+				`ua=${ua || '(none)'}`
+			)
+			return postLocalhostRaw(
+				'/api/eoa-usdc-stripe-webhook',
 				req.body as Buffer,
 				req.headers['stripe-signature'],
 				res

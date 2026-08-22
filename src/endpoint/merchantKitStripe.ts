@@ -9,10 +9,10 @@ import Colors from 'colors/safe'
 import { masterSetup, resolveBeamioConetHttpRpcUrl } from '../util'
 import { logger } from '../logger'
 import {
-	BASE_AA_FACTORY,
 	CONET_BUNIT_AIRDROP_ADDRESS,
 	CONET_BUSINESS_START_KET,
 } from '../chainAddresses'
+import { resolveStripeMintRecipientEoaOnBase } from '../stripeWalletEoaResolve'
 
 /** CoNET B-Unit / kit mint signer（与 MemberCard Settle 一致） */
 const CONET_MAINNET_RPC_HTTP = resolveBeamioConetHttpRpcUrl()
@@ -24,63 +24,6 @@ const BUNIT_AIRDROP_MINT_FOR_USDC_PURCHASE_ABI = [
 const BUSINESS_START_KET_MINT_ABI = [
 	'function mint(address to, uint256 id, uint256 amount, bytes data) external',
 ] as const
-
-const BASE_RPC_HTTP_DEFAULT = 'https://base-rpc.conet.network'
-
-const AA_FACTORY_RESOLVE_ABI = [
-	'function beamioAccountOf(address) view returns (address)',
-	'function primaryAccountOf(address) view returns (address)',
-] as const
-
-/**
- * CoNET kit mint 必须记入用户 EOA。客户端可能把 Beamio AA（与 profile keyID 相同）当作 wallet 传入。
- * 在 Base 上校验：若地址为合约且 beamioAccountOf(owner)/primaryAccountOf(owner) 等于该地址，则返回 owner。
- */
-async function resolveMerchantKitStripeMintRecipientEoa(walletAddress: string): Promise<string> {
-	const addr = ethers.getAddress(walletAddress)
-	const baseRpc =
-		(typeof process !== 'undefined' && process.env.BASE_RPC_URL?.trim()) || BASE_RPC_HTTP_DEFAULT
-	const provider = new ethers.JsonRpcProvider(baseRpc.replace(/\/$/, ''))
-	let code: string
-	try {
-		code = await provider.getCode(addr)
-	} catch {
-		return addr
-	}
-	if (!code || code === '0x') {
-		return addr
-	}
-	const acct = new ethers.Contract(addr, ['function owner() view returns (address)'], provider)
-	let ownerRaw: string
-	try {
-		ownerRaw = await acct.owner()
-	} catch {
-		return addr
-	}
-	if (!ownerRaw || ownerRaw === ethers.ZeroAddress) {
-		return addr
-	}
-	let ownerAddr: string
-	try {
-		ownerAddr = ethers.getAddress(ownerRaw)
-	} catch {
-		return addr
-	}
-	const fac = new ethers.Contract(BASE_AA_FACTORY, AA_FACTORY_RESOLVE_ABI, provider)
-	try {
-		let aa = await fac.beamioAccountOf(ownerAddr)
-		if (!aa || aa === ethers.ZeroAddress) {
-			aa = await fac.primaryAccountOf(ownerAddr).catch(() => ethers.ZeroAddress)
-		}
-		if (aa && aa !== ethers.ZeroAddress && ethers.getAddress(aa) === addr) {
-			merchantKitDbg('resolveMintRecipient: AA → EOA', addr, '→', ownerAddr)
-			return ownerAddr
-		}
-	} catch {
-		/* not a Beamio AA for this owner */
-	}
-	return addr
-}
 
 /** Set `MERCHANT_KIT_STRIPE_DEBUG=1` (or `true`) for verbose poll/refresh logs. Webhook always logs a short summary line. */
 function merchantKitStripeDebugEnabled(): boolean {
@@ -221,7 +164,7 @@ async function fulfillMerchantKitStripeOnChain(sessionId: string): Promise<void>
 				logger(Colors.red('[merchantKitStripe] fulfill: invalid EOA'), rec.eoaAddress)
 				return
 			}
-			mintRecipient = await resolveMerchantKitStripeMintRecipientEoa(mintRecipient)
+			mintRecipient = await resolveStripeMintRecipientEoaOnBase(mintRecipient)
 			if (mintRecipient.toLowerCase() !== rec.eoaAddress.toLowerCase()) {
 				logger(
 					Colors.cyan('[merchantKitStripe] fulfill: wallet was AA on Base; minting kit to EOA'),
@@ -542,6 +485,12 @@ export async function handleMerchantKitStripeWebhook(
 		`livemode=${event.livemode}`,
 		`api_version=${event.api_version ?? '(n/a)'}`
 	)
+
+	const product = (event.data?.object as Stripe.Checkout.Session | undefined)?.metadata?.product
+	if (product === 'eoaUsdc') {
+		logger(Colors.grey('[merchantKitStripe:hook] ignore eoaUsdc product'))
+		return { ok: true }
+	}
 
 	switch (event.type) {
 		case 'checkout.session.completed': {

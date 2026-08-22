@@ -41,6 +41,8 @@ type IMasterSetup = {
 	stripe_SecretKey?: string
 	/** Merchant kit Checkout webhook signing secret（`~/.master.json`）；也可用环境变量 `STRIPE_WEBHOOK_SECRET_MERCHANT_KIT` 覆盖。 */
 	STRIPE_WEBHOOK_SECRET_MERCHANT_KIT?: string
+	/** Stripe 入金（Base 原生 USDC → 用户 EOA）webhook signing secret；也可用环境变量 `STRIPE_WEBHOOK_SECRET_EOA_USDC` 覆盖。 */
+	STRIPE_WEBHOOK_SECRET_EOA_USDC?: string
 	/** ValidatorDepositRedeem 本地 listener/executor 配置；私钥文件只用于 deposit，不复用 settle/admin 私钥。 */
 	validatorDeposit?: {
 		nodeIp?: string
