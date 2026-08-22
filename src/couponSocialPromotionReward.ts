@@ -3,6 +3,7 @@
  * Aligns bizSite `programSocialPromotion.ts` slot semantics.
  */
 import { ethers } from 'ethers'
+import { resolveReferrerRegistryLookupAa } from './cardProgramReferrerChain.js'
 import { resolveUserCardChain, providerForUserCardChain } from './beamioUserCardChain'
 import { UC_METRIC, UC_TARGET } from './userCumulativeStatRewardPool'
 import { getSeriesByCardAndTokenId } from './db'
@@ -141,7 +142,7 @@ export async function readActiveCouponSocialRewardRule(params: {
 	}
 }
 
-/** Resolve referrer for coupon burn: explicit ref → on-chain refereeReferrer(holder AA). */
+/** Resolve referrer for #13 dispatch: explicit ref → on-chain refereeReferrer(referee AA). */
 export async function resolveCouponBurnRefWallet(params: {
 	cardAddress: string
 	holderAccount: string
@@ -152,9 +153,12 @@ export async function resolveCouponBurnRefWallet(params: {
 	if (explicit !== ethers.ZeroAddress) return explicit
 	try {
 		const card = ethers.getAddress(params.cardAddress)
-		const holder = ethers.getAddress(params.holderAccount)
 		const chain = await resolveUserCardChain(card)
 		const provider = providerForUserCardChain(chain)
+		const holder = ethers.getAddress(
+			await resolveReferrerRegistryLookupAa(provider, params.holderAccount),
+		)
+		if (holder === ethers.ZeroAddress) return ethers.ZeroAddress
 		const reader = new ethers.Contract(
 			card,
 			['function refereeReferrer(address refereeAA) view returns (address)'],

@@ -9952,9 +9952,17 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 						userEOA: recipientEOA,
 						points6: mintParsed.points6,
 					})
+					const { resolveCouponBurnRefWallet } = await import('./couponSocialPromotionReward.js')
+					const topupRefWallet = await resolveCouponBurnRefWallet({
+						cardAddress: obj.cardAddr,
+						holderAccount: recipientEOA,
+						actorEOA: recipientEOA,
+						explicitRefWallet: null,
+					})
 					void enqueueTopupSocialReward13IfConfigured({
 						cardAddress: obj.cardAddr,
 						userEOA: recipientEOA,
+						refWallet: topupRefWallet !== ethers.ZeroAddress ? topupRefWallet : null,
 					}).catch((rewardErr: unknown) => {
 						const err = rewardErr as { message?: string }
 						logger(
@@ -10641,9 +10649,17 @@ export const purchasingCardProcess = async () => {
 					userEOA: from,
 					points6: currentTopupPoint6,
 				})
+				const { resolveCouponBurnRefWallet } = await import('./couponSocialPromotionReward.js')
+				const topupRefWallet = await resolveCouponBurnRefWallet({
+					cardAddress,
+					holderAccount: from,
+					actorEOA: from,
+					explicitRefWallet: null,
+				})
 				void enqueueTopupSocialReward13IfConfigured({
 					cardAddress,
 					userEOA: from,
+					refWallet: topupRefWallet !== ethers.ZeroAddress ? topupRefWallet : null,
 				}).catch((rewardErr: unknown) => {
 					const err = rewardErr as { message?: string }
 					logger(
