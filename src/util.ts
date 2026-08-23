@@ -371,8 +371,9 @@ export const oracleBackoud = async (enableOracle = true) => {
 
 /** Base 主网 RPC：与 resolveBeamioBaseHttpRpcUrl 一致（默认 CoNET 官方节点） */
 const BASE_RPC_URL = resolveBeamioBaseHttpRpcUrl()
-/** Official Base tip — only consulted when CoNET Base RPC reports a lower USDC balance (node lag). */
-const BASE_PUBLIC_TIP_RPC = 'https://mainnet.base.org'
+/** Official Base tip — read/confirm when CoNET Base RPC lags (nonce / receipts / USDC balance). */
+export const BEAMIO_BASE_PUBLIC_TIP_RPC = 'https://mainnet.base.org'
+const BASE_PUBLIC_TIP_RPC = BEAMIO_BASE_PUBLIC_TIP_RPC
 const providerBase = new ethers.JsonRpcProvider(BASE_RPC_URL)
 const providerBaseBackup = new ethers.JsonRpcProvider(BASE_RPC_URL)
 

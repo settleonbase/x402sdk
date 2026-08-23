@@ -530,6 +530,43 @@ export async function cardSupportsApplyDiscoverShareClickWithSignature(cardAddre
 	}
 }
 
+/**
+ * AdminStats V6 is a thin router (~840 bytes): bind lives on immutable `v5()`, not in the
+ * router bytecode. A needle scan of `defaultAdminStatsQueryModule` alone false-negatives
+ * after the V6 cutover and rejects Discover share-link bind with 400.
+ */
+async function adminStatsBytecodeContainsSelector(
+	provider: ethers.Provider,
+	adminMod: string,
+	selector: string,
+): Promise<boolean> {
+	const needle = selector.replace(/^0x/i, '').toLowerCase()
+	const seen = new Set<string>()
+	const visit = async (addr: string): Promise<boolean> => {
+		let checksum: string
+		try {
+			checksum = ethers.getAddress(addr)
+		} catch {
+			return false
+		}
+		const key = checksum.toLowerCase()
+		if (seen.has(key) || checksum === ethers.ZeroAddress) return false
+		seen.add(key)
+		const code = await provider.getCode(checksum)
+		if (!code || code === '0x') return false
+		if (code.toLowerCase().includes(needle)) return true
+		try {
+			const router = new ethers.Contract(checksum, ['function v5() view returns (address)'], provider)
+			const v5 = (await router.v5()) as string
+			if (v5 && v5 !== ethers.ZeroAddress) return visit(v5)
+		} catch {
+			/* V1–V5 have no v5() */
+		}
+		return false
+	}
+	return visit(adminMod)
+}
+
 /** Plan A: AdminStats module exposes bindShareRefereeWithSignature (ROUTE_STATS_QUERY). */
 export async function cardSupportsBindShareRefereeWithSignature(cardAddress: string): Promise<boolean> {
 	try {
@@ -550,9 +587,11 @@ export async function cardSupportsBindShareRefereeWithSignature(cardAddress: str
 		)
 		const adminMod = (await factory.defaultAdminStatsQueryModule()) as string
 		if (!adminMod || adminMod === ethers.ZeroAddress) return false
-		const code = await provider.getCode(adminMod)
-		if (!code || code === '0x') return false
-		return code.toLowerCase().includes(BIND_SHARE_REFEREE_WITH_SIGNATURE_SELECTOR.slice(2).toLowerCase())
+		return adminStatsBytecodeContainsSelector(
+			provider,
+			adminMod,
+			BIND_SHARE_REFEREE_WITH_SIGNATURE_SELECTOR,
+		)
 	} catch {
 		return false
 	}
@@ -2069,7 +2108,7 @@ export const cardBindShareRefereePreCheck = async (body: {
 			return {
 				success: false,
 				error:
-					'CoNET card missing bindShareRefereeWithSignature; upgrade AdminStats V4 (upgradeReferrerShareBindModulesConet.ts).',
+					'CoNET card missing bindShareRefereeWithSignature (AdminStats must route selector 254 and V5/V6 impl must contain the bind function).',
 			}
 		}
 

@@ -2456,6 +2456,13 @@ export const MEMBERSHIP_FEE_DURATION = {
 	FOREVER: 6,
 } as const
 
+/**
+ * Join / upgrade may charge **fee only**. Card `mintPointsByAdmin(0)` reverts `UC_AmountZero`,
+ * and the membership NFT is issued only when that mint consumes the pending stage.
+ * Cluster therefore still mints this 1 min-unit to `#0` (displays as 0.00 at two decimals).
+ */
+export const MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6 = 1n
+
 export type MembershipFeeDurationKind =
 	(typeof MEMBERSHIP_FEE_DURATION)[keyof typeof MEMBERSHIP_FEE_DURATION]
 
@@ -2762,14 +2769,17 @@ export const nfcTopupPreparePayload = async (params: {
 		}
 	}
 
-	/** Points are minted from (amount - fee) when first membership fee applies; else full amount. */
+	/** Points are minted from leftover after fee; fee-only join still mints 1 min-unit (see MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6). */
 	const pointsSourceFiat6 = membershipNeedsFee ? amountCurrency6 - feeFiat6 : amountCurrency6
-	if (pointsSourceFiat6 <= 0n) {
-		return { error: 'Top-up after membership fee must credit points (amount must exceed fee)' }
+	if (pointsSourceFiat6 < 0n) {
+		return { error: 'Top-up amount must be at least the membership fee' }
 	}
 
 	// 优先使用“卡币种直算 points6”，避免 currency->USDC->points 的双重向下截断造成 49.999993 这类漏档误差
 	let points6: bigint | null = null
+	if (membershipNeedsFee && pointsSourceFiat6 === 0n) {
+		points6 = MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6
+	} else {
 	try {
 		const readCard = new ethers.Contract(
 			cardAddr,
@@ -2809,6 +2819,7 @@ export const nfcTopupPreparePayload = async (params: {
 				`[nfcTopupPreparePayload] quote path card=${cardAddr} cur=${cur} amount6=${amountCurrency6} fee6=${feeFiat6} pointsSource6=${pointsSourceFiat6} usdc6=${usdcAmount6} => points6=${points6}`
 			)
 		)
+	}
 	}
 
 	if (points6 <= 0n) return { error: 'quotePointsForUSDC failed' }
@@ -7770,8 +7781,8 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 			return { success: false, error: 'Top-up amount must be at least the membership fee' }
 		}
 		const pointsSourceFiat6 = amountFiat6 - expectedFee
-		if (pointsSourceFiat6 <= 0n) {
-			return { success: false, error: 'Top-up after membership fee must credit points (amount must exceed fee)' }
+		if (pointsSourceFiat6 < 0n) {
+			return { success: false, error: 'Top-up amount must be at least the membership fee' }
 		}
 		try {
 			const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
@@ -7783,7 +7794,10 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 			const priceInCurrency6 = (await readCard.pointsUnitPriceInCurrencyE6()) as bigint
 			if (priceInCurrency6 > 0n) {
 				const ONE_E6 = 1_000_000n
-				const expectedPoints = (pointsSourceFiat6 * ONE_E6 + priceInCurrency6 - 1n) / priceInCurrency6
+				const expectedPoints =
+					pointsSourceFiat6 === 0n
+						? MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6
+						: (pointsSourceFiat6 * ONE_E6 + priceInCurrency6 - 1n) / priceInCurrency6
 				if (expectedPoints !== params.points6Mint) {
 					return {
 						success: false,
