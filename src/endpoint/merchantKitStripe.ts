@@ -13,6 +13,7 @@ import {
 	CONET_BUSINESS_START_KET,
 } from '../chainAddresses'
 import { resolveStripeMintRecipientEoaOnBase } from '../stripeWalletEoaResolve'
+import { getStripeBeamioClient, getStripeBeamioSecretKey } from './stripeBeamio'
 
 /** CoNET B-Unit / kit mint signer（与 MemberCard Settle 一致） */
 const CONET_MAINNET_RPC_HTTP = resolveBeamioConetHttpRpcUrl()
@@ -244,29 +245,11 @@ export function scheduleMerchantKitStripeChainFulfillment(sessionId: string): vo
 }
 
 function getStripeSecretKey(): string {
-	const setup = masterSetup as { stripe_SecretKey?: string }
-	return (
-		(typeof process !== 'undefined' && process.env?.STRIPE_SECRET_KEY?.trim()) ||
-		setup.stripe_SecretKey?.trim() ||
-		''
-	)
-}
-
-function getWebhookSecret(): string {
-	const setup = masterSetup as {
-		STRIPE_WEBHOOK_SECRET_MERCHANT_KIT?: string
-	}
-	return (
-		(typeof process !== 'undefined' && process.env?.STRIPE_WEBHOOK_SECRET_MERCHANT_KIT?.trim()) ||
-		setup.STRIPE_WEBHOOK_SECRET_MERCHANT_KIT?.trim() ||
-		''
-	)
+	return getStripeBeamioSecretKey()
 }
 
 function getStripeClient(): Stripe | null {
-	const key = getStripeSecretKey()
-	if (!key) return null
-	return new Stripe(key)
+	return getStripeBeamioClient()
 }
 
 /** Return base for Stripe redirects (no trailing slash). bizSite CRA `homepage` is `/biz`. */
@@ -448,44 +431,40 @@ function applySessionOutcome(
 	merchantKitDbg('applySessionOutcome', sessionId, meta.lastEvent, '→', status, `pkg=${pkgNorm}`)
 }
 
-export async function handleMerchantKitStripeWebhook(
-	rawBody: Buffer,
-	sigHeader: string | string[] | undefined
-): Promise<{ ok: true } | { ok: false; error: string }> {
+function markMerchantKitPaidSession(session: Stripe.Checkout.Session, lastEvent: string): void {
+	const meta = session.metadata ?? {}
 	logger(
-		Colors.cyan('[merchantKitStripe:hook] inbound'),
-		`bytes=${rawBody.length}`,
-		`stripe-signature=${Boolean(sigHeader && (typeof sigHeader === 'string' ? sigHeader : sigHeader[0]))}`
+		`[merchantKitStripe:hook] ${lastEvent}`,
+		`session=${session.id}`,
+		`payment_status=${session.payment_status}`,
+		`status=${session.status}`,
+		`metadata.pkg=${meta.packageType ?? '?'}`,
+		`metadata.eoa=${meta.eoaAddress ? `${String(meta.eoaAddress).slice(0, 10)}…` : '?'}`
 	)
-
-	const whSecret = getWebhookSecret()
-	if (!whSecret) {
-		logger(Colors.red('[merchantKitStripe:hook] abort: STRIPE_WEBHOOK_SECRET_MERCHANT_KIT / ~/.master.json missing'))
-		return { ok: false, error: 'STRIPE_WEBHOOK_SECRET_MERCHANT_KIT not configured' }
+	if (session.payment_status !== 'paid') {
+		logger(
+			Colors.yellow(`[merchantKitStripe:hook] ${lastEvent} SKIPPED (not paid yet)`),
+			`payment_status=${session.payment_status}`
+		)
+		return
 	}
-	const stripe = getStripeClient()
-	if (!stripe) {
-		logger(Colors.red('[merchantKitStripe:hook] abort: Stripe API key missing'))
-		return { ok: false, error: 'Stripe client not configured' }
-	}
-	const sig = typeof sigHeader === 'string' ? sigHeader : sigHeader?.[0] ?? ''
-	let event: Stripe.Event
-	try {
-		event = stripe.webhooks.constructEvent(rawBody, sig, whSecret)
-	} catch (e: unknown) {
-		const msg = e instanceof Error ? e.message : String(e)
-		logger(Colors.red('[merchantKitStripe:hook] constructEvent FAILED'), msg)
-		return { ok: false, error: msg }
-	}
-
+	const hadLocal = sessions.has(session.id)
+	applySessionOutcome(session.id, 'succeeded', {
+		eoaAddress: session.metadata?.eoaAddress,
+		packageType: session.metadata?.packageType,
+		lastEvent,
+	})
 	logger(
-		Colors.green('[merchantKitStripe:hook] verified'),
-		`id=${event.id}`,
-		`type=${event.type}`,
-		`livemode=${event.livemode}`,
-		`api_version=${event.api_version ?? '(n/a)'}`
+		Colors.green('[merchantKitStripe:hook] → local map UPDATED succeeded'),
+		`session=${session.id}`,
+		`hadLocalRecord=${hadLocal}`
 	)
+	scheduleMerchantKitStripeChainFulfillment(session.id)
+}
 
+export function processMerchantKitStripeEvent(
+	event: Stripe.Event
+): { ok: true } | { ok: false; error: string } {
 	const product = (event.data?.object as Stripe.Checkout.Session | undefined)?.metadata?.product
 	if (product === 'eoaUsdc') {
 		logger(Colors.grey('[merchantKitStripe:hook] ignore eoaUsdc product'))
@@ -493,36 +472,9 @@ export async function handleMerchantKitStripeWebhook(
 	}
 
 	switch (event.type) {
-		case 'checkout.session.completed': {
-			const session = event.data.object as Stripe.Checkout.Session
-			const meta = session.metadata ?? {}
-			logger(
-				'[merchantKitStripe:hook] checkout.session.completed',
-				`session=${session.id}`,
-				`payment_status=${session.payment_status}`,
-				`status=${session.status}`,
-				`metadata.pkg=${meta.packageType ?? '?'}`,
-				`metadata.eoa=${meta.eoaAddress ? `${String(meta.eoaAddress).slice(0, 10)}…` : '?'}`
-			)
-			if (session.payment_status === 'paid') {
-				const hadLocal = sessions.has(session.id)
-				applySessionOutcome(session.id, 'succeeded', {
-					eoaAddress: session.metadata?.eoaAddress,
-					packageType: session.metadata?.packageType,
-					lastEvent: event.type,
-				})
-				logger(
-					Colors.green('[merchantKitStripe:hook] → local map UPDATED succeeded'),
-					`session=${session.id}`,
-					`hadLocalRecord=${hadLocal}`
-				)
-				scheduleMerchantKitStripeChainFulfillment(session.id)
-			} else {
-				logger(
-					Colors.yellow('[merchantKitStripe:hook] checkout.session.completed SKIPPED (not paid yet)'),
-					`payment_status=${session.payment_status}`
-				)
-			}
+		case 'checkout.session.completed':
+		case 'checkout.session.async_payment_succeeded': {
+			markMerchantKitPaidSession(event.data.object as Stripe.Checkout.Session, event.type)
 			break
 		}
 		case 'checkout.session.async_payment_failed': {

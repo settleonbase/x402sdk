@@ -9,7 +9,7 @@ const AA_FACTORY_RESOLVE_ABI = [
 ] as const
 
 /**
- * Stripe 履约必须打到用户 EOA。客户端可能把 Beamio AA（与 profile keyID 相同）当作 wallet 传入。
+ * Stripe Crypto Onramp 创建时锁定收款 EOA。客户端可能把 Beamio AA（与 profile keyID 相同）当作 wallet 传入。
  * 先在 Base 上校验；若该地址在 Base 无 code（Consumer AA 仅 CoNET），再在 CoNET 上用 V1/V2 Factory 解析 owner。
  * RPC 失败时回退原地址（不得把失败当成「无 owner」清空）。
  */

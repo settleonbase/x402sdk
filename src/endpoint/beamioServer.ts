@@ -356,6 +356,7 @@ const OLD_CCSA_REDIRECTS = [
 	'0xA1A9f6f942dc0ED9Aa7eF5df7337bd878c2e157b', // 旧工厂 0x86879fE3 部署的 CCSA（已迁移至新工厂）
 ].map(a => a.toLowerCase())
 import { masterSetup, resolveBeamioBaseHttpRpcUrl } from '../util'
+import { getStripeBeamioSecretKey } from './stripeBeamio'
 
 /** Public short link GET /go/verra-ndef → TestFlight (iOS) or Play Store (Android / default). */
 const VERRA_NDEF_PLAY_STORE_URL =
@@ -13276,12 +13277,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		) {
 			return res.status(400).json({ error: 'Invalid packageType' }).end()
 		}
-		const sk =
-			(typeof process !== 'undefined' && process.env?.STRIPE_SECRET_KEY?.trim()) ||
-			(masterSetup as { stripe_SecretKey?: string }).stripe_SecretKey?.trim() ||
-			''
-		if (!sk) {
-			logger(Colors.red('[merchantKitStripe] createSession cluster precheck: Stripe key missing'))
+		if (!getStripeBeamioSecretKey()) {
+			logger(Colors.red('[merchantKitStripe] createSession cluster precheck: StripeBeamio key missing'))
 			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
 		}
 		return postLocalhost(
@@ -13300,7 +13297,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	/**
-	 * Stripe 入金 → Base 原生 USDC 转用户 EOA。Cluster 仅预检后转发 Master（会话 map 只在 Master）。
+	 * Stripe Crypto Onramp → Stripe 把 Base 原生 USDC 直转用户 EOA。
+	 * Cluster 仅预检后转发 Master（会话 map 只在 Master）。禁止 Beamio 库存 transfer。
 	 * body: `{ walletAddress, amountUsdc6 }`（6 位定点；最低 1 USDC，整分，上限 10,000 USDC）
 	 */
 	router.post('/eoaUsdcStripe/createSession', async (req, res) => {
@@ -13330,12 +13328,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (amount % 10_000n !== 0n) {
 			return res.status(400).json({ error: 'amountUsdc6 must be a whole USD cent (multiple of 10000)' }).end()
 		}
-		const sk =
-			(typeof process !== 'undefined' && process.env?.STRIPE_SECRET_KEY?.trim()) ||
-			(masterSetup as { stripe_SecretKey?: string }).stripe_SecretKey?.trim() ||
-			''
-		if (!sk) {
-			logger(Colors.red('[eoaUsdcStripe] createSession cluster precheck: Stripe key missing'))
+		if (!getStripeBeamioSecretKey()) {
+			logger(Colors.red('[eoaUsdcStripe] createSession cluster precheck: StripeBeamio key missing'))
 			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
 		}
 		return postLocalhost(
@@ -13541,46 +13535,28 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	const app = express()
 	app.set("trust proxy", true);
 
-	/** Stripe merchant-kit webhook must see raw body (before express.json). Configure URL in Stripe Dashboard → same path on beamio.app. */
+	const forwardStripeBeamioHook = (req: Request, res: Response, routeTag: string) => {
+		const ip = getClientIp(req)
+		const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
+		logger(Colors.cyan(`[${routeTag}] POST → master /api/stripeBeamioHook`), `ip=${ip || '(none)'}`, `ua=${ua || '(none)'}`)
+		return postLocalhostRaw('/api/stripeBeamioHook', req.body as Buffer, req.headers['stripe-signature'], res)
+	}
+
+	/** 唯一现役 Stripe webhook。旧 path 兼容转发到同一 Master handler。 */
+	app.post(
+		'/api/stripeBeamioHook',
+		express.raw({ type: 'application/json' }),
+		(req, res) => forwardStripeBeamioHook(req, res, 'stripeBeamioHook')
+	)
 	app.post(
 		'/api/merchant-kit-stripe-webhook',
 		express.raw({ type: 'application/json' }),
-		async (req: Request, res: Response) => {
-			const ip = getClientIp(req)
-			const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
-			logger(
-				Colors.cyan('[merchant-kit-stripe-webhook] POST → master'),
-				`ip=${ip || '(none)'}`,
-				`ua=${ua || '(none)'}`
-			)
-			return postLocalhostRaw(
-				'/api/merchant-kit-stripe-webhook',
-				req.body as Buffer,
-				req.headers['stripe-signature'],
-				res
-			)
-		}
+		(req, res) => forwardStripeBeamioHook(req, res, 'merchant-kit-stripe-webhook')
 	)
-
-	/** Stripe EOA USDC 入金 webhook：raw body 转发 Master 验签。Stripe Dashboard 配同一 path。 */
 	app.post(
 		'/api/eoa-usdc-stripe-webhook',
 		express.raw({ type: 'application/json' }),
-		async (req: Request, res: Response) => {
-			const ip = getClientIp(req)
-			const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
-			logger(
-				Colors.cyan('[eoa-usdc-stripe-webhook] POST → master'),
-				`ip=${ip || '(none)'}`,
-				`ua=${ua || '(none)'}`
-			)
-			return postLocalhostRaw(
-				'/api/eoa-usdc-stripe-webhook',
-				req.body as Buffer,
-				req.headers['stripe-signature'],
-				res
-			)
-		}
+		(req, res) => forwardStripeBeamioHook(req, res, 'eoa-usdc-stripe-webhook')
 	)
 
 	if (!isProd) {

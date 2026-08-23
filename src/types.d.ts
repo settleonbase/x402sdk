@@ -37,11 +37,24 @@ type IMasterSetup = {
 		timeoutMs?: number
 	}
 
-	/** Stripe API secret (`~/.master.json`；与 CoNET paymentHook 一致). 也可用环境变量 `STRIPE_SECRET_KEY` 覆盖。 */
+	/**
+	 * 现役 Stripe 账号 API secret（`~/.master.json`）。Merchant Kit + Consumer Onramp **一律**用此字段。
+	 * 也可用环境变量 `STRIPE_SECRET_KEY` 覆盖。见 `beamio-stripe-account-webhook.mdc`。
+	 */
+	StripeBeamio?: string
+	/**
+	 * @deprecated 旧 Merchant Kit 账号 key。新代码禁止读取；须迁到 `StripeBeamio`。
+	 */
 	stripe_SecretKey?: string
-	/** Merchant kit Checkout webhook signing secret（`~/.master.json`）；也可用环境变量 `STRIPE_WEBHOOK_SECRET_MERCHANT_KIT` 覆盖。 */
+	/**
+	 * 现役 Stripe webhook signing secret（`whsec_`）。
+	 * Dashboard 唯一 URL：`https://beamio.app/api/stripeBeamioHook`。
+	 * 也可用环境变量 `STRIPE_WEBHOOK_SECRET_MERCHANT_KIT` 覆盖。
+	 */
 	STRIPE_WEBHOOK_SECRET_MERCHANT_KIT?: string
-	/** Stripe 入金（Base 原生 USDC → 用户 EOA）webhook signing secret；也可用环境变量 `STRIPE_WEBHOOK_SECRET_EOA_USDC` 覆盖。 */
+	/**
+	 * @deprecated 旧 Onramp 独立 webhook secret。新代码禁止读取；验签只用 `STRIPE_WEBHOOK_SECRET_MERCHANT_KIT`。
+	 */
 	STRIPE_WEBHOOK_SECRET_EOA_USDC?: string
 	/** ValidatorDepositRedeem 本地 listener/executor 配置；私钥文件只用于 deposit，不复用 settle/admin 私钥。 */
 	validatorDeposit?: {

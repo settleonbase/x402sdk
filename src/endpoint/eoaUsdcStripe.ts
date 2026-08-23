@@ -1,16 +1,15 @@
 /**
- * Stripe 入金 → Base 原生 USDC 转到用户 EOA（独立于 merchantKit / walletDeposit LockMint）。
+ * Stripe Crypto Onramp → Stripe 把 Base 原生 USDC 直接转到用户 EOA。
+ * 禁止 Beamio settle 钱包库存 `USDC.transfer`；禁止改 walletDeposit / Merchant Kit。
  * Cluster 预检后转发；会话 map 仅 Master 单进程持有。
  */
 import Stripe from 'stripe'
 import { randomUUID } from 'node:crypto'
 import { ethers } from 'ethers'
 import Colors from 'colors/safe'
-import { masterSetup } from '../util'
 import { logger } from '../logger'
-import { USDC_BASE } from '../chainAddresses'
-import { shiftSettleBase, unshiftSettleBase } from '../settleContractPool'
 import { resolveStripeMintRecipientEoaOnBase } from '../stripeWalletEoaResolve'
+import { getStripeBeamioClient, getStripeBeamioSecretKey } from './stripeBeamio'
 
 export const EOA_USDC_STRIPE_PRODUCT = 'eoaUsdc'
 
@@ -21,10 +20,7 @@ export const EOA_USDC_STRIPE_MAX_USDC6 = 10_000_000_000n
 /** Stripe 以分为单位：1 cent = 10_000（6 位） */
 export const EOA_USDC_STRIPE_CENTS_UNIT = 10_000n
 
-const USDC_TRANSFER_ABI = [
-	'function transfer(address to, uint256 amount) returns (bool)',
-	'function balanceOf(address) view returns (uint256)',
-] as const
+const STRIPE_API_BASE = 'https://api.stripe.com'
 
 export type EoaUsdcStripeChainFulfillment = {
 	usdcTxHash?: string
@@ -39,6 +35,22 @@ type SessionRecord = {
 	createdAt: number
 	lastEvent?: string
 	chainFulfillment?: EoaUsdcStripeChainFulfillment
+}
+
+type StripeOnrampSession = {
+	id: string
+	object?: string
+	status?: string
+	redirect_url?: string
+	created?: number
+	metadata?: Record<string, string>
+	transaction_details?: {
+		transaction_id?: string
+		wallet_address?: string
+		destination_amount?: string
+		destination_currency?: string
+		destination_network?: string
+	}
 }
 
 const sessions = new Map<string, SessionRecord>()
@@ -60,8 +72,6 @@ function scheduleEoaUsdcSessionPrune(): void {
 }
 
 scheduleEoaUsdcSessionPrune()
-
-const fulfillmentInflight = new Map<string, Promise<void>>()
 
 function eoaUsdcStripeDebugEnabled(): boolean {
 	const v = (typeof process !== 'undefined' && process.env?.EOA_USDC_STRIPE_DEBUG?.trim()?.toLowerCase()) || ''
@@ -97,154 +107,250 @@ export function parseEoaUsdcStripeAmountUsdc6(raw: unknown): { ok: true; amount:
 	return { ok: true, amount }
 }
 
-function amountUsdc6ToUsdCents(amountUsdc6: bigint): number {
-	return Number(amountUsdc6 / EOA_USDC_STRIPE_CENTS_UNIT)
+function amountUsdc6ToUsdSourceAmount(amountUsdc6: bigint): string {
+	const cents = amountUsdc6 / EOA_USDC_STRIPE_CENTS_UNIT
+	const dollars = cents / 100n
+	const rem = cents % 100n
+	return `${dollars.toString()}.${rem.toString().padStart(2, '0')}`
 }
 
 function getStripeSecretKey(): string {
-	const setup = masterSetup as { stripe_SecretKey?: string }
-	return (
-		(typeof process !== 'undefined' && process.env?.STRIPE_SECRET_KEY?.trim()) ||
-		setup.stripe_SecretKey?.trim() ||
-		''
-	)
-}
-
-function getWebhookSecret(): string {
-	const setup = masterSetup as {
-		STRIPE_WEBHOOK_SECRET_EOA_USDC?: string
-	}
-	return (
-		(typeof process !== 'undefined' && process.env?.STRIPE_WEBHOOK_SECRET_EOA_USDC?.trim()) ||
-		setup.STRIPE_WEBHOOK_SECRET_EOA_USDC?.trim() ||
-		''
-	)
+	return getStripeBeamioSecretKey()
 }
 
 function getStripeClient(): Stripe | null {
-	const key = getStripeSecretKey()
-	if (!key) return null
-	return new Stripe(key)
+	return getStripeBeamioClient()
 }
 
-function getEoaUsdcStripeReturnBase(): string {
-	const env =
-		(typeof process !== 'undefined' && process.env?.EOA_USDC_STRIPE_RETURN_BASE?.trim()) || ''
-	return env.replace(/\/$/, '') || 'https://beamio.app/app'
-}
-
-export function eoaUsdcStripeSuccessUrl(): string {
-	return `${getEoaUsdcStripeReturnBase()}/?eoa_usdc_stripe=success&session_id={CHECKOUT_SESSION_ID}`
-}
-
-export function eoaUsdcStripeCancelUrl(): string {
-	return `${getEoaUsdcStripeReturnBase()}/?eoa_usdc_stripe=cancel`
-}
-
-async function fulfillEoaUsdcStripeOnChain(sessionId: string): Promise<void> {
-	let inflight = fulfillmentInflight.get(sessionId)
-	if (inflight) {
-		eoaUsdcDbg('fulfill join (in flight)', sessionId)
-		return inflight
+function stripeErrorMessage(payload: unknown, fallback: string): string {
+	if (payload && typeof payload === 'object') {
+		const err = (payload as { error?: { message?: unknown }; message?: unknown }).error
+		const nested = typeof err?.message === 'string' ? err.message.trim() : ''
+		if (nested) return nested
+		const top = (payload as { message?: unknown }).message
+		if (typeof top === 'string' && top.trim()) return top.trim()
 	}
-	inflight = (async () => {
-		let retryBusy = false
-		const getCf = (): EoaUsdcStripeChainFulfillment => sessions.get(sessionId)?.chainFulfillment ?? {}
-		const patchChainFulfillment = (patch: EoaUsdcStripeChainFulfillment) => {
-			const cur = sessions.get(sessionId)
-			if (!cur) {
-				return
-			}
-			sessions.set(sessionId, {
-				...cur,
-				chainFulfillment: { ...cur.chainFulfillment, ...patch },
-			})
-		}
-		try {
-			const rec = sessions.get(sessionId)
-			if (!rec || rec.status !== 'succeeded') {
-				eoaUsdcDbg('fulfill skip (not succeeded)', sessionId, rec?.status ?? '(no record)')
-				return
-			}
-			if (getCf().usdcTxHash) {
-				eoaUsdcDbg('fulfill skip (already transferred)', sessionId, getCf().usdcTxHash)
-				return
-			}
-			const parsed = parseEoaUsdcStripeAmountUsdc6(rec.amountUsdc6)
-			if (!parsed.ok) {
-				logger(Colors.red('[eoaUsdcStripe] fulfill: invalid amount'), rec.amountUsdc6, parsed.error)
-				patchChainFulfillment({ lastError: parsed.error })
-				return
-			}
-			let recipient: string
-			try {
-				recipient = ethers.getAddress(rec.walletAddress)
-			} catch {
-				logger(Colors.red('[eoaUsdcStripe] fulfill: invalid wallet'), rec.walletAddress)
-				patchChainFulfillment({ lastError: 'Invalid wallet address' })
-				return
-			}
-			recipient = await resolveStripeMintRecipientEoaOnBase(recipient)
-			if (recipient.toLowerCase() !== rec.walletAddress.toLowerCase()) {
-				logger(
-					Colors.cyan('[eoaUsdcStripe] fulfill: wallet was AA on Base; transferring USDC to EOA'),
-					rec.walletAddress,
-					'→',
-					recipient
-				)
-			}
-			patchChainFulfillment({ recipientEoa: recipient, lastError: undefined })
-
-			const SC = shiftSettleBase()
-			if (!SC) {
-				logger(Colors.yellow('[eoaUsdcStripe] fulfill: Base settle pool busy; retry in 3s'), sessionId)
-				retryBusy = true
-				return
-			}
-			try {
-				const usdc = new ethers.Contract(USDC_BASE, USDC_TRANSFER_ABI, SC.walletBase)
-				const payer = ethers.getAddress(SC.walletBase.address)
-				const bal = await usdc.balanceOf(payer)
-				if (bal < parsed.amount) {
-					const msg = `Treasury Base USDC balance insufficient (have ${bal.toString()}, need ${parsed.amount.toString()})`
-					logger(Colors.red('[eoaUsdcStripe] fulfill:'), msg)
-					patchChainFulfillment({ lastError: msg })
-					return
-				}
-				const tx = await usdc.transfer(recipient, parsed.amount)
-				const receipt = await tx.wait()
-				const h = receipt?.hash ?? tx.hash
-				patchChainFulfillment({ usdcTxHash: h, recipientEoa: recipient, lastError: undefined })
-				logger(
-					Colors.green('[eoaUsdcStripe] Base USDC transfer ok'),
-					`session=${sessionId}`,
-					`amountUsdc6=${parsed.amount.toString()}`,
-					`to=${recipient}`,
-					`tx=${h}`
-				)
-			} finally {
-				unshiftSettleBase(SC)
-			}
-		} catch (e: unknown) {
-			const msg = e instanceof Error ? e.message : String(e)
-			logger(Colors.red('[eoaUsdcStripe] fulfill FAILED'), sessionId, msg)
-			patchChainFulfillment({ lastError: msg })
-		} finally {
-			fulfillmentInflight.delete(sessionId)
-		}
-		if (retryBusy) {
-			const t = setTimeout(() => {
-				void fulfillEoaUsdcStripeOnChain(sessionId)
-			}, 3000)
-			t.unref?.()
-		}
-	})()
-	fulfillmentInflight.set(sessionId, inflight)
-	return inflight
+	return fallback
 }
 
-export function scheduleEoaUsdcStripeChainFulfillment(sessionId: string): void {
-	void fulfillEoaUsdcStripeOnChain(sessionId)
+function flattenStripeForm(value: unknown, prefix = '', out = new URLSearchParams()): URLSearchParams {
+	if (value === undefined || value === null) return out
+	if (Array.isArray(value)) {
+		value.forEach((item, i) => flattenStripeForm(item, `${prefix}[${i}]`, out))
+		return out
+	}
+	if (typeof value === 'object') {
+		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+			flattenStripeForm(v, prefix ? `${prefix}[${k}]` : k, out)
+		}
+		return out
+	}
+	if (!prefix) return out
+	out.append(prefix, typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value))
+	return out
+}
+
+async function stripeCryptoHttp(
+	method: 'GET' | 'POST',
+	path: string,
+	params?: Record<string, unknown>,
+	idempotencyKey?: string
+): Promise<Record<string, unknown>> {
+	const key = getStripeSecretKey()
+	if (!key) {
+		throw new Error('Stripe is not configured')
+	}
+	const url = new URL(`${STRIPE_API_BASE}${path}`)
+	const headers: Record<string, string> = {
+		Authorization: `Bearer ${key}`,
+	}
+	if (idempotencyKey) {
+		headers['Idempotency-Key'] = idempotencyKey
+	}
+	let body: string | undefined
+	if (method === 'GET' && params) {
+		const form = flattenStripeForm(params)
+		form.forEach((v, k) => url.searchParams.append(k, v))
+	} else if (method === 'POST') {
+		headers['Content-Type'] = 'application/x-www-form-urlencoded'
+		body = params ? flattenStripeForm(params).toString() : ''
+	}
+	const res = await fetch(url, { method, headers, body })
+	const json = (await res.json().catch(() => ({}))) as Record<string, unknown>
+	if (!res.ok) {
+		throw new Error(stripeErrorMessage(json, `Stripe request failed (${res.status})`))
+	}
+	return json
+}
+
+function asOnrampSession(raw: unknown): StripeOnrampSession | null {
+	if (!raw || typeof raw !== 'object') return null
+	const obj = raw as Record<string, unknown>
+	const id = typeof obj.id === 'string' ? obj.id.trim() : ''
+	if (!id) return null
+	const metadata =
+		obj.metadata && typeof obj.metadata === 'object'
+			? Object.fromEntries(
+					Object.entries(obj.metadata as Record<string, unknown>).map(([k, v]) => [k, String(v ?? '')])
+				)
+			: undefined
+	const details = obj.transaction_details && typeof obj.transaction_details === 'object'
+		? (obj.transaction_details as Record<string, unknown>)
+		: undefined
+	return {
+		id,
+		object: typeof obj.object === 'string' ? obj.object : undefined,
+		status: typeof obj.status === 'string' ? obj.status : undefined,
+		redirect_url: typeof obj.redirect_url === 'string' ? obj.redirect_url : undefined,
+		created: typeof obj.created === 'number' ? obj.created : undefined,
+		metadata,
+		transaction_details: details
+			? {
+					transaction_id: typeof details.transaction_id === 'string' ? details.transaction_id : undefined,
+					wallet_address: typeof details.wallet_address === 'string' ? details.wallet_address : undefined,
+					destination_amount:
+						typeof details.destination_amount === 'string' ? details.destination_amount : undefined,
+					destination_currency:
+						typeof details.destination_currency === 'string' ? details.destination_currency : undefined,
+					destination_network:
+						typeof details.destination_network === 'string' ? details.destination_network : undefined,
+				}
+			: undefined,
+	}
+}
+
+function parseOnchainTxHash(raw: unknown): string | undefined {
+	const s = typeof raw === 'string' ? raw.trim() : ''
+	return /^0x[0-9a-fA-F]{64}$/.test(s) ? s : undefined
+}
+
+function mapOnrampStatus(stripeStatus: string | undefined): 'pending' | 'succeeded' | 'failed' {
+	const s = (stripeStatus ?? '').trim().toLowerCase()
+	if (s === 'fulfillment_complete') return 'succeeded'
+	if (s === 'rejected') return 'failed'
+	return 'pending'
+}
+
+function isOnrampOpenUnpaid(stripeStatus: string | undefined): boolean {
+	const s = (stripeStatus ?? '').trim().toLowerCase()
+	return s === 'initialized' || s === 'requires_payment' || s === ''
+}
+
+async function retrieveStripeOnrampSession(sessionId: string): Promise<StripeOnrampSession | null> {
+	const stripe = getStripeClient()
+	const cryptoApi = stripe
+		? ((stripe as unknown as { crypto?: { onrampSessions?: { retrieve?: (id: string) => Promise<unknown> } } })
+				.crypto?.onrampSessions)
+		: undefined
+	try {
+		if (cryptoApi?.retrieve) {
+			return asOnrampSession(await cryptoApi.retrieve(sessionId))
+		}
+		return asOnrampSession(await stripeCryptoHttp('GET', `/v1/crypto/onramp_sessions/${encodeURIComponent(sessionId)}`))
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err)
+		logger(Colors.yellow('[eoaUsdcStripe] onramp retrieve failed'), sessionId, msg)
+		return null
+	}
+}
+
+function isStripeWalletAddressesUnknownError(msg: string): boolean {
+	const m = msg.toLowerCase()
+	return m.includes('parameter_unknown') && m.includes('wallet_address')
+}
+
+async function createStripeOnrampSession(
+	params: Record<string, unknown>,
+	idempotencyKey: string
+): Promise<StripeOnrampSession> {
+	const stripe = getStripeClient()
+	const cryptoApi = stripe
+		? ((stripe as unknown as {
+				crypto?: { onrampSessions?: { create?: (body: unknown, opts?: unknown) => Promise<unknown> } }
+			}).crypto?.onrampSessions)
+		: undefined
+	if (cryptoApi?.create) {
+		const created = asOnrampSession(await cryptoApi.create(params, { idempotencyKey }))
+		if (!created) throw new Error('Stripe Onramp session creation failed')
+		return created
+	}
+	const created = asOnrampSession(
+		await stripeCryptoHttp('POST', '/v1/crypto/onramp_sessions', params, idempotencyKey)
+	)
+	if (!created) throw new Error('Stripe Onramp session creation failed')
+	return created
+}
+
+function applyOnrampSessionToLocal(
+	session: StripeOnrampSession,
+	opts?: { lastEvent?: string; treatOpenUnpaidAsAbandoned?: boolean }
+): SessionRecord | null {
+	const meta = session.metadata ?? {}
+	if (meta.product && meta.product !== EOA_USDC_STRIPE_PRODUCT) {
+		return null
+	}
+	const prev = sessions.get(session.id)
+	const walletNorm = (meta.walletAddress || prev?.walletAddress || '').toLowerCase()
+	const amountNorm = meta.amountUsdc6 || prev?.amountUsdc6 || ''
+	if (!walletNorm || !amountNorm) {
+		return null
+	}
+	const createdAt =
+		prev?.createdAt ??
+		(typeof session.created === 'number' && session.created > 0 ? session.created * 1000 : Date.now())
+	const stripeStatus = session.status ?? ''
+	let status = mapOnrampStatus(stripeStatus)
+	let lastEvent = opts?.lastEvent || stripeStatus || prev?.lastEvent
+	if (opts?.treatOpenUnpaidAsAbandoned && isOnrampOpenUnpaid(stripeStatus) && status === 'pending') {
+		status = 'failed'
+		lastEvent = 'abandoned'
+	}
+	if (prev?.status === 'succeeded' && status !== 'succeeded') {
+		status = 'succeeded'
+		lastEvent = prev.lastEvent
+	}
+	const txHash =
+		parseOnchainTxHash(session.transaction_details?.transaction_id) || prev?.chainFulfillment?.usdcTxHash
+	const recipientFromMeta = meta.recipientEoa?.trim()
+	const recipientFromTx = session.transaction_details?.wallet_address?.trim()
+	let recipientEoa = prev?.chainFulfillment?.recipientEoa
+	for (const cand of [recipientFromMeta, recipientFromTx]) {
+		if (cand && ethers.isAddress(cand)) {
+			recipientEoa = ethers.getAddress(cand)
+			break
+		}
+	}
+	const next: SessionRecord = {
+		status,
+		walletAddress: walletNorm,
+		amountUsdc6: amountNorm,
+		createdAt,
+		lastEvent,
+		chainFulfillment: {
+			...prev?.chainFulfillment,
+			...(recipientEoa ? { recipientEoa } : {}),
+			...(txHash ? { usdcTxHash: txHash, lastError: undefined } : {}),
+		},
+	}
+	sessions.set(session.id, next)
+	return next
+}
+
+function markRetiredCheckoutSession(sessionId: string): SessionRecord | null {
+	const prev = sessions.get(sessionId)
+	if (!prev) return null
+	if (prev.status === 'succeeded') return prev
+	const next: SessionRecord = {
+		...prev,
+		status: 'failed',
+		lastEvent: 'retired.checkout.session',
+		chainFulfillment: {
+			...prev.chainFulfillment,
+			lastError: 'This session used the retired card checkout. Start a new Stripe USDC deposit.',
+		},
+	}
+	sessions.set(sessionId, next)
+	return next
 }
 
 export async function createEoaUsdcStripeCheckoutSession(
@@ -261,53 +367,79 @@ export async function createEoaUsdcStripeCheckoutSession(
 	if (!parsed.ok) {
 		return { error: parsed.error }
 	}
-	const stripe = getStripeClient()
-	if (!stripe) {
+	if (!getStripeSecretKey()) {
 		return { error: 'Stripe is not configured' }
 	}
+
+	let recipientEoa: string
+	try {
+		recipientEoa = await resolveStripeMintRecipientEoaOnBase(wallet)
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err)
+		logger(Colors.yellow('[eoaUsdcStripe] resolve EOA failed; using submitted address'), msg)
+		recipientEoa = wallet
+	}
+	if (recipientEoa.toLowerCase() !== wallet.toLowerCase()) {
+		logger(
+			Colors.cyan('[eoaUsdcStripe] create: submitted wallet is AA; locking Onramp to EOA'),
+			wallet,
+			'→',
+			recipientEoa
+		)
+	}
+
 	const walletLower = wallet.toLowerCase()
 	const amountUsdc6 = parsed.amount.toString()
-	const usdCents = amountUsdc6ToUsdCents(parsed.amount)
-	const usdcHuman = (Number(parsed.amount) / 1e6).toFixed(2)
+	const sourceAmount = amountUsdc6ToUsdSourceAmount(parsed.amount)
+	const idempotencyKey = `eoa-usdc-onramp-${walletLower}-${amountUsdc6}-${randomUUID()}`
 
-	const idempotencyKey = `eoa-usdc-${walletLower}-${amountUsdc6}-${randomUUID()}`
-
-	const session = await stripe.checkout.sessions.create(
-		{
-			mode: 'payment',
-			metadata: {
-				product: EOA_USDC_STRIPE_PRODUCT,
-				walletAddress: walletLower,
-				amountUsdc6,
-			},
-			line_items: [
-				{
-					price_data: {
-						currency: 'usd',
-						unit_amount: usdCents,
-						product_data: {
-							name: 'USDC on Base',
-							description: `${usdcHuman} USDC transferred to your EOA on Base after payment`,
-						},
-					},
-					quantity: 1,
-				},
-			],
-			payment_intent_data: {
-				metadata: {
-					product: EOA_USDC_STRIPE_PRODUCT,
-					walletAddress: walletLower,
-					amountUsdc6,
-				},
-			},
-			success_url: eoaUsdcStripeSuccessUrl(),
-			cancel_url: eoaUsdcStripeCancelUrl(),
+	const onrampParams = {
+		wallet_addresses: { base: recipientEoa },
+		destination_networks: ['base'],
+		destination_network: 'base',
+		destination_currencies: ['usdc'],
+		destination_currency: 'usdc',
+		lock_wallet_address: true,
+		source_amount: sourceAmount,
+		source_currency: 'usd',
+		metadata: {
+			product: EOA_USDC_STRIPE_PRODUCT,
+			walletAddress: walletLower,
+			amountUsdc6,
+			recipientEoa,
 		},
-		{ idempotencyKey }
-	)
+	}
 
-	if (!session.id || !session.url) {
-		return { error: 'Checkout session creation failed' }
+	let session: StripeOnrampSession
+	try {
+		session = await createStripeOnrampSession(onrampParams, idempotencyKey)
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err)
+		if (isStripeWalletAddressesUnknownError(msg)) {
+			logger(
+				Colors.yellow('[eoaUsdcStripe] wallet_addresses unknown; retry wallet_address'),
+				recipientEoa
+			)
+			const { wallet_addresses: _unused, ...fallbackParams } = onrampParams
+			void _unused
+			try {
+				session = await createStripeOnrampSession(
+					{ ...fallbackParams, wallet_address: recipientEoa },
+					`${idempotencyKey}-wa`
+				)
+			} catch (retryErr: unknown) {
+				const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr)
+				logger(Colors.red('[eoaUsdcStripe] onramp create failed'), retryMsg)
+				return { error: retryMsg || 'Could not start Stripe USDC deposit' }
+			}
+		} else {
+			logger(Colors.red('[eoaUsdcStripe] onramp create failed'), msg)
+			return { error: msg || 'Could not start Stripe USDC deposit' }
+		}
+	}
+
+	if (!session.id || !session.redirect_url) {
+		return { error: 'Stripe Onramp session creation failed' }
 	}
 
 	sessions.set(session.id, {
@@ -315,16 +447,18 @@ export async function createEoaUsdcStripeCheckoutSession(
 		walletAddress: walletLower,
 		amountUsdc6,
 		createdAt: Date.now(),
+		lastEvent: session.status || 'initialized',
+		chainFulfillment: { recipientEoa },
 	})
 
 	logger(
 		Colors.green('[eoaUsdcStripe] createSession ok'),
 		`session=${session.id}`,
-		`amountUsdc6=${amountUsdc6}`,
-		`wallet=${walletLower.slice(0, 10)}…`
+		`sourceUsd=${sourceAmount}`,
+		`eoa=${recipientEoa.slice(0, 10)}…`
 	)
 
-	return { sessionId: session.id, url: session.url }
+	return { sessionId: session.id, url: session.redirect_url }
 }
 
 export function getEoaUsdcStripeSessionStatus(sessionId: string): SessionRecord | null {
@@ -339,174 +473,60 @@ export async function refreshEoaUsdcStripeSessionFromStripe(
 	sessionId: string,
 	options?: RefreshEoaUsdcStripeSessionOptions
 ): Promise<void> {
-	const stripe = getStripeClient()
-	if (!stripe) return
-	const rec_ = sessions.get(sessionId)
-	if (rec_?.status !== 'pending') {
-		if (rec_?.status === 'succeeded' && !rec_.chainFulfillment?.usdcTxHash) {
-			scheduleEoaUsdcStripeChainFulfillment(sessionId)
-		}
-		eoaUsdcDbg('refresh skip (not pending)', sessionId, 'local=', rec_?.status ?? '(no record)')
+	if (sessionId.startsWith('cs_')) {
+		const retired = markRetiredCheckoutSession(sessionId)
+		eoaUsdcDbg('refresh retired checkout session', sessionId, retired?.status ?? '(unknown)')
 		return
 	}
-	try {
-		const s = await stripe.checkout.sessions.retrieve(sessionId)
-		eoaUsdcDbg(
-			'retrieve',
-			sessionId,
-			`checkoutStatus=${s.status}`,
-			`payment_status=${s.payment_status}`,
-			`abandonedFlag=${Boolean(options?.treatOpenUnpaidAsAbandoned)}`
-		)
-		if (s.status === 'complete' && s.payment_status === 'paid') {
-			sessions.set(sessionId, {
-				...rec_,
-				status: 'succeeded',
-				lastEvent: 'retrieve.paid',
-			})
-			logger(Colors.green('[eoaUsdcStripe] refresh → succeeded'), sessionId)
-			scheduleEoaUsdcStripeChainFulfillment(sessionId)
-			return
-		}
-		if (s.status === 'expired') {
-			sessions.set(sessionId, {
-				...rec_,
-				status: 'failed',
-				lastEvent: 'expired',
-			})
-			logger(Colors.yellow('[eoaUsdcStripe] refresh → failed (expired)'), sessionId)
-			return
-		}
-		if (
-			options?.treatOpenUnpaidAsAbandoned &&
-			s.status === 'open' &&
-			s.payment_status === 'unpaid'
-		) {
-			sessions.set(sessionId, {
-				...rec_,
-				status: 'failed',
-				lastEvent: 'abandoned',
-			})
-			logger(Colors.yellow('[eoaUsdcStripe] refresh → failed (abandoned open+unpaid)'), sessionId)
-		}
-	} catch (err: unknown) {
-		logger(Colors.yellow(`[eoaUsdcStripe] retrieve error ${sessionId}:`), err)
+	const rec = sessions.get(sessionId)
+	if (rec?.status === 'succeeded' && rec.chainFulfillment?.usdcTxHash) {
+		eoaUsdcDbg('refresh skip (already complete)', sessionId)
+		return
+	}
+	const remote = await retrieveStripeOnrampSession(sessionId)
+	if (!remote) {
+		eoaUsdcDbg('refresh miss', sessionId)
+		return
+	}
+	const next = applyOnrampSessionToLocal(remote, {
+		lastEvent: remote.status || 'retrieve',
+		treatOpenUnpaidAsAbandoned: options?.treatOpenUnpaidAsAbandoned,
+	})
+	if (next) {
+		eoaUsdcDbg('refresh', sessionId, `stripe=${remote.status}`, `local=${next.status}`)
 	}
 }
 
-function applySessionOutcome(
-	sessionId: string,
-	status: 'succeeded' | 'failed',
-	meta: { walletAddress?: string; amountUsdc6?: string; lastEvent: string }
-) {
-	const prev = sessions.get(sessionId)
-	const createdAt = prev?.createdAt ?? Date.now()
-	const walletNorm = (meta.walletAddress ?? prev?.walletAddress ?? '').toLowerCase()
-	const amountNorm = meta.amountUsdc6 ?? prev?.amountUsdc6 ?? ''
-	const next: SessionRecord = {
-		status,
-		walletAddress: walletNorm,
-		amountUsdc6: amountNorm,
-		createdAt,
-		lastEvent: meta.lastEvent,
-		chainFulfillment: prev?.chainFulfillment,
+export function processEoaUsdcStripeEvent(
+	event: Stripe.Event
+): { ok: true } | { ok: false; error: string } {
+	if (event.type.startsWith('checkout.session.')) {
+		logger(Colors.grey('[eoaUsdcStripe:hook] ignore retired Checkout event'), event.type)
+		return { ok: true }
 	}
-	sessions.set(sessionId, next)
-	eoaUsdcDbg('applySessionOutcome', sessionId, meta.lastEvent, '→', status, `amount=${amountNorm}`)
-}
-
-export async function handleEoaUsdcStripeWebhook(
-	rawBody: Buffer,
-	sigHeader: string | string[] | undefined
-): Promise<{ ok: true } | { ok: false; error: string }> {
-	logger(
-		Colors.cyan('[eoaUsdcStripe:hook] inbound'),
-		`bytes=${rawBody.length}`,
-		`stripe-signature=${Boolean(sigHeader && (typeof sigHeader === 'string' ? sigHeader : sigHeader[0]))}`
-	)
-
-	const whSecret = getWebhookSecret()
-	if (!whSecret) {
-		logger(Colors.red('[eoaUsdcStripe:hook] abort: STRIPE_WEBHOOK_SECRET_EOA_USDC / ~/.master.json missing'))
-		return { ok: false, error: 'STRIPE_WEBHOOK_SECRET_EOA_USDC not configured' }
-	}
-	const stripe = getStripeClient()
-	if (!stripe) {
-		logger(Colors.red('[eoaUsdcStripe:hook] abort: Stripe API key missing'))
-		return { ok: false, error: 'Stripe client not configured' }
-	}
-	const sig = typeof sigHeader === 'string' ? sigHeader : sigHeader?.[0] ?? ''
-	let event: Stripe.Event
-	try {
-		event = stripe.webhooks.constructEvent(rawBody, sig, whSecret)
-	} catch (e: unknown) {
-		const msg = e instanceof Error ? e.message : String(e)
-		logger(Colors.red('[eoaUsdcStripe:hook] constructEvent FAILED'), msg)
-		return { ok: false, error: msg }
+	if (!event.type.startsWith('crypto.onramp_session')) {
+		logger(Colors.grey(`[eoaUsdcStripe:hook] unhandled event type (ignored): ${event.type}`))
+		return { ok: true }
 	}
 
-	logger(
-		Colors.green('[eoaUsdcStripe:hook] verified'),
-		`id=${event.id}`,
-		`type=${event.type}`,
-		`livemode=${event.livemode}`
-	)
-
-	const sessionObj = (event.data?.object ?? null) as Stripe.Checkout.Session | null
-	const product = sessionObj?.metadata?.product
+	const session = asOnrampSession(event.data?.object)
+	if (!session) {
+		logger(Colors.yellow('[eoaUsdcStripe:hook] onramp object missing id'))
+		return { ok: true }
+	}
+	const product = session.metadata?.product
 	if (product && product !== EOA_USDC_STRIPE_PRODUCT) {
 		logger(Colors.grey(`[eoaUsdcStripe:hook] ignore other product=${product}`))
 		return { ok: true }
 	}
 
-	switch (event.type) {
-		case 'checkout.session.completed': {
-			const session = event.data.object as Stripe.Checkout.Session
-			const meta = session.metadata ?? {}
-			logger(
-				'[eoaUsdcStripe:hook] checkout.session.completed',
-				`session=${session.id}`,
-				`payment_status=${session.payment_status}`,
-				`amountUsdc6=${meta.amountUsdc6 ?? '?'}`,
-				`wallet=${meta.walletAddress ? `${String(meta.walletAddress).slice(0, 10)}…` : '?'}`
-			)
-			if (session.payment_status === 'paid') {
-				applySessionOutcome(session.id, 'succeeded', {
-					walletAddress: meta.walletAddress,
-					amountUsdc6: meta.amountUsdc6,
-					lastEvent: event.type,
-				})
-				scheduleEoaUsdcStripeChainFulfillment(session.id)
-			} else {
-				logger(
-					Colors.yellow('[eoaUsdcStripe:hook] checkout.session.completed SKIPPED (not paid yet)'),
-					`payment_status=${session.payment_status}`
-				)
-			}
-			break
-		}
-		case 'checkout.session.async_payment_failed': {
-			const session = event.data.object as Stripe.Checkout.Session
-			applySessionOutcome(session.id, 'failed', {
-				walletAddress: session.metadata?.walletAddress,
-				amountUsdc6: session.metadata?.amountUsdc6,
-				lastEvent: event.type,
-			})
-			break
-		}
-		case 'checkout.session.expired': {
-			const session = event.data.object as Stripe.Checkout.Session
-			applySessionOutcome(session.id, 'failed', {
-				walletAddress: session.metadata?.walletAddress,
-				amountUsdc6: session.metadata?.amountUsdc6,
-				lastEvent: event.type,
-			})
-			break
-		}
-		default:
-			logger(Colors.grey(`[eoaUsdcStripe:hook] unhandled event type (ignored): ${event.type}`))
-			break
-	}
-
+	const next = applyOnrampSessionToLocal(session, { lastEvent: event.type })
+	logger(
+		Colors.cyan('[eoaUsdcStripe:hook] onramp'),
+		`session=${session.id}`,
+		`stripe=${session.status ?? '?'}`,
+		`local=${next?.status ?? 'ignored'}`,
+		`tx=${next?.chainFulfillment?.usdcTxHash ?? 'none'}`
+	)
 	return { ok: true }
 }

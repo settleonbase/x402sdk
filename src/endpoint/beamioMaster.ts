@@ -21,15 +21,14 @@ import {
 import {
 	createMerchantKitCheckoutSession,
 	getMerchantKitSessionStatus,
-	handleMerchantKitStripeWebhook,
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
 import {
 	createEoaUsdcStripeCheckoutSession,
 	getEoaUsdcStripeSessionStatus,
-	handleEoaUsdcStripeWebhook,
 	refreshEoaUsdcStripeSessionFromStripe,
 } from './eoaUsdcStripe'
+import { handleStripeBeamioWebhook } from './stripeBeamioHook'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, relocateBUnitsToSmartWalletPool, relocateBUnitsToSmartWalletProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, settlePoolIdleSummary, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, createInstitutionalAaForEoa, CreateInstitutionalAaHttpError, submitAAAccountCreationViaEntryPoint, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, aaMultisigOfflineSubmitPool, kickAaMultisigOfflineSubmitProcess, aaInstitutionalV2RelayPool, kickAaInstitutionalV2RelayProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY } from '../chainAddresses'
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
@@ -6056,7 +6055,8 @@ const routing = ( router: Router ) => {
 		})
 
 		/**
-		 * Stripe 入金 → Base 原生 USDC 转用户 EOA。
+		 * Stripe Crypto Onramp → Stripe 把 Base 原生 USDC 直转用户 EOA。
+		 * Master 创建 Onramp session + 读状态；不占用 Settle_BasePool，不发 USDC.transfer。
 		 * body: `{ walletAddress, amountUsdc6 }`（6 位定点，最低 1 USDC）
 		 */
 		router.post('/eoaUsdcStripe/createSession', async (req, res) => {
@@ -6119,47 +6119,34 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	const app = express()
 	app.set("trust proxy", true)
 
-	/** Stripe merchant-kit webhook：仅在 Master 验签并更新会话 map（Cluster 将 raw body 转发至此） */
+	const handleStripeBeamioWebhookPost = async (req: Request, res: Response, routeTag: string) => {
+		const ip = getClientIp(req)
+		const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
+		logger(Colors.cyan(`[${routeTag}] POST (master)`), `ip=${ip || '(none)'}`, `ua=${ua || '(none)'}`)
+		const result = await handleStripeBeamioWebhook(req.body as Buffer, req.headers['stripe-signature'])
+		if (result.ok) {
+			logger(Colors.green(`[${routeTag}] response 200 received=true`))
+			return res.status(200).json({ received: true }).end()
+		}
+		logger(Colors.red(`[${routeTag}] response 400`), result.error)
+		return res.status(400).send(`Webhook Error: ${result.error}`).end()
+	}
+
+	/** 唯一现役 Stripe webhook。旧 path 兼容转发到同一 handler。 */
+	app.post(
+		'/api/stripeBeamioHook',
+		express.raw({ type: 'application/json' }),
+		(req, res) => void handleStripeBeamioWebhookPost(req, res, 'stripeBeamioHook')
+	)
 	app.post(
 		'/api/merchant-kit-stripe-webhook',
 		express.raw({ type: 'application/json' }),
-		async (req: Request, res: Response) => {
-			const ip = getClientIp(req)
-			const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
-			logger(
-				Colors.cyan('[merchant-kit-stripe-webhook] POST (master)'),
-				`ip=${ip || '(none)'}`,
-				`ua=${ua || '(none)'}`
-			)
-			const result = await handleMerchantKitStripeWebhook(req.body as Buffer, req.headers['stripe-signature'])
-			if (result.ok) {
-				logger(Colors.green('[merchant-kit-stripe-webhook] response 200 received=true'))
-				return res.status(200).json({ received: true }).end()
-			}
-			logger(Colors.red('[merchant-kit-stripe-webhook] response 400'), result.error)
-			return res.status(400).send(`Webhook Error: ${result.error}`).end()
-		}
+		(req, res) => void handleStripeBeamioWebhookPost(req, res, 'merchant-kit-stripe-webhook')
 	)
-
 	app.post(
 		'/api/eoa-usdc-stripe-webhook',
 		express.raw({ type: 'application/json' }),
-		async (req: Request, res: Response) => {
-			const ip = getClientIp(req)
-			const ua = String(req.headers['user-agent'] ?? '').slice(0, 80)
-			logger(
-				Colors.cyan('[eoa-usdc-stripe-webhook] POST (master)'),
-				`ip=${ip || '(none)'}`,
-				`ua=${ua || '(none)'}`
-			)
-			const result = await handleEoaUsdcStripeWebhook(req.body as Buffer, req.headers['stripe-signature'])
-			if (result.ok) {
-				logger(Colors.green('[eoa-usdc-stripe-webhook] response 200 received=true'))
-				return res.status(200).json({ received: true }).end()
-			}
-			logger(Colors.red('[eoa-usdc-stripe-webhook] response 400'), result.error)
-			return res.status(400).send(`Webhook Error: ${result.error}`).end()
-		}
+		(req, res) => void handleStripeBeamioWebhookPost(req, res, 'eoa-usdc-stripe-webhook')
 	)
 
 	if (!isProd) {
