@@ -1586,6 +1586,7 @@ const postLocalhostRaw = (
 		headers,
 	}
 	const reqOut = request(option, (mres) => {
+		_res.status(mres.statusCode || 502)
 		mres.pipe(_res)
 	})
 	reqOut.once('error', (e) => {
