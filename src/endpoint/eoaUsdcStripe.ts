@@ -254,9 +254,27 @@ async function retrieveStripeOnrampSession(sessionId: string): Promise<StripeOnr
 	}
 }
 
-function isStripeWalletAddressesUnknownError(msg: string): boolean {
-	const m = msg.toLowerCase()
-	return m.includes('parameter_unknown') && m.includes('wallet_address')
+function stripeThrownMessage(err: unknown): string {
+	if (err && typeof err === 'object') {
+		const o = err as { message?: unknown; raw?: { message?: unknown } }
+		if (typeof o.message === 'string' && o.message.trim()) return o.message.trim()
+		if (typeof o.raw?.message === 'string' && o.raw.message.trim()) return o.raw.message.trim()
+	}
+	return err instanceof Error ? err.message : String(err)
+}
+
+function isStripeWalletAddressParamUnknownError(err: unknown): boolean {
+	const msg = stripeThrownMessage(err).toLowerCase()
+	const code =
+		err && typeof err === 'object' ? String((err as { code?: unknown }).code ?? '').toLowerCase() : ''
+	const param =
+		err && typeof err === 'object' ? String((err as { param?: unknown }).param ?? '').toLowerCase() : ''
+	const mentionsWallet = msg.includes('wallet_address') || param.includes('wallet_address')
+	const unknown =
+		code === 'parameter_unknown' ||
+		msg.includes('unknown parameter') ||
+		msg.includes('parameter_unknown')
+	return mentionsWallet && unknown
 }
 
 async function createStripeOnrampSession(
@@ -393,8 +411,7 @@ export async function createEoaUsdcStripeCheckoutSession(
 	const sourceAmount = amountUsdc6ToUsdSourceAmount(parsed.amount)
 	const idempotencyKey = `eoa-usdc-onramp-${walletLower}-${amountUsdc6}-${randomUUID()}`
 
-	const onrampParams = {
-		wallet_addresses: { base: recipientEoa },
+	const onrampBase = {
 		destination_networks: ['base'],
 		destination_network: 'base',
 		destination_currencies: ['usdc'],
@@ -410,31 +427,32 @@ export async function createEoaUsdcStripeCheckoutSession(
 		},
 	}
 
+	/** This Stripe account rejects `wallet_addresses[base]`. Lock EOA with `wallet_address`. */
 	let session: StripeOnrampSession
 	try {
-		session = await createStripeOnrampSession(onrampParams, idempotencyKey)
+		session = await createStripeOnrampSession(
+			{ ...onrampBase, wallet_address: recipientEoa },
+			idempotencyKey
+		)
 	} catch (err: unknown) {
-		const msg = err instanceof Error ? err.message : String(err)
-		if (isStripeWalletAddressesUnknownError(msg)) {
-			logger(
-				Colors.yellow('[eoaUsdcStripe] wallet_addresses unknown; retry wallet_address'),
-				recipientEoa
-			)
-			const { wallet_addresses: _unused, ...fallbackParams } = onrampParams
-			void _unused
-			try {
-				session = await createStripeOnrampSession(
-					{ ...fallbackParams, wallet_address: recipientEoa },
-					`${idempotencyKey}-wa`
-				)
-			} catch (retryErr: unknown) {
-				const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr)
-				logger(Colors.red('[eoaUsdcStripe] onramp create failed'), retryMsg)
-				return { error: retryMsg || 'Could not start Stripe USDC deposit' }
-			}
-		} else {
+		const msg = stripeThrownMessage(err)
+		if (!isStripeWalletAddressParamUnknownError(err)) {
 			logger(Colors.red('[eoaUsdcStripe] onramp create failed'), msg)
 			return { error: msg || 'Could not start Stripe USDC deposit' }
+		}
+		logger(
+			Colors.yellow('[eoaUsdcStripe] wallet_address unknown; retry wallet_addresses[base_network]'),
+			recipientEoa
+		)
+		try {
+			session = await createStripeOnrampSession(
+				{ ...onrampBase, wallet_addresses: { base_network: recipientEoa } },
+				`${idempotencyKey}-wan`
+			)
+		} catch (retryErr: unknown) {
+			const retryMsg = stripeThrownMessage(retryErr)
+			logger(Colors.red('[eoaUsdcStripe] onramp create failed'), retryMsg)
+			return { error: retryMsg || 'Could not start Stripe USDC deposit' }
 		}
 	}
 
