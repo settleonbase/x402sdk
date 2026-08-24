@@ -111,6 +111,7 @@ import {
 } from './offlineChatPush'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaViaUserCardFactory, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import { resolveBeamioWalletIdentityFromAddress } from '../beamioWalletIdentity'
 import { validateYoutubeProductionVideoUrl } from './youtubeProductionVideo'
 import {
 	getValidatorDepositRedeemStatus,
@@ -3389,57 +3390,28 @@ const routing = ( router: Router ) => {
 		}
 		try {
 			const addr = ethers.getAddress(wallet.trim())
-			const code = await providerBase.getCode(addr)
-			const isAA = code && code !== '0x' && code.length > 2
-			const aaOwnerAbi = ['function owner() view returns (address)']
-			const conetAaOwner = isAA
-				? ''
-				: await (async () => {
-					try {
-						const aaContract = new ethers.Contract(addr, aaOwnerAbi, providerConet)
-						const owner = await aaContract.owner()
-						return owner && owner !== ethers.ZeroAddress && ethers.isAddress(owner)
-							? ethers.getAddress(owner)
-							: ''
-					} catch {
-						return ''
-					}
-				})()
-			const isConetAA = !isAA && !!conetAaOwner
+			const identity = await resolveBeamioWalletIdentityFromAddress(addr, {
+				conetProvider: providerConet,
+				baseProvider: providerBase,
+			})
+			if (!identity) {
+				const err = { ok: false, error: 'Could not resolve wallet identity' }
+				logger(Colors.yellow(`[getWalletAssets] 返回 400: ${JSON.stringify(err)}`))
+				return res.status(400).json(err).end()
+			}
 
-			let eoa: string
+			const eoa = identity.eoa
 			let aaAddr: string
-
-			if (isAA) {
-				const aaContract = new ethers.Contract(addr, aaOwnerAbi, providerBase)
-				const owner = await aaContract.owner()
-				if (!owner || owner === ethers.ZeroAddress) {
-					const err = { ok: false, error: 'Could not resolve owner for this AA' }
-					logger(Colors.yellow(`[getWalletAssets] AA 无 owner 返回 404: ${JSON.stringify(err)}`))
-					return res.status(404).json(err).end()
-				}
-				eoa = ethers.getAddress(owner)
-				/** 与 getUIDAssets 一致：aaAddress 一律为 UserCard 工厂链路的 canonical AA，禁止沿用调用方传入的「另一工厂」AA */
-				const canonicalAa = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
-				if (!canonicalAa) {
-					const err = { ok: false, error: 'No active Beamio account for this wallet' }
-					logger(Colors.yellow(`[getWalletAssets] EOA 无 canonical AA 返回 404: ${JSON.stringify(err)}`))
-					return res.status(404).json(err).end()
-				}
-				if (canonicalAa.toLowerCase() !== addr.toLowerCase()) {
+			if (identity.aaAccount) {
+				aaAddr = ethers.getAddress(identity.aaAccount)
+				if (aaAddr.toLowerCase() !== addr.toLowerCase() && identity.inputKind === 'aa') {
 					logger(
 						Colors.gray(
-							`[getWalletAssets] wallet 传入 AA ${addr} 与卡工厂解析 AA ${canonicalAa} 不一致，返回 canonical（与 getOwnershipByEOA / OpenContainer 一致）`
+							`[getWalletAssets] wallet 传入 AA ${addr} → true EOA ${eoa} canonical AA ${aaAddr}（unwrap nested / factory primary）`
 						)
 					)
 				}
-				aaAddr = canonicalAa
-			} else if (isConetAA) {
-				eoa = conetAaOwner
-				const canonicalAa = await resolveBeamioAaForEoaWithFallback(providerBase, eoa).catch(() => null)
-				aaAddr = canonicalAa ? ethers.getAddress(canonicalAa) : addr
 			} else {
-				eoa = addr
 				const primary = await resolveBeamioAaForEoaWithFallback(providerBase, eoa)
 				if (!primary) {
 					const err = { ok: false, error: 'No active Beamio account for this wallet' }
@@ -5847,9 +5819,11 @@ const routing = ( router: Router ) => {
 				if (!mintArgs || mintArgs.points6 <= 0n) {
 					return res.status(400).json({ success: false, error: 'Failed to quote points for treasuryBridge' }).end()
 				}
+				/** Must match `mintPointsByAdmin` calldata (prepare unwraps Smart Wallet → true EOA). */
+				const mintRecipientTrueEoa = mintArgs.recipient
 				const membershipFeeIssue = await nfcTopupPreCheckMembershipFeeFirstIssue({
 					cardAddrRaw: cardAddr,
-					mintRecipientAddrRaw: recipientAaAddr,
+					mintRecipientAddrRaw: mintRecipientTrueEoa,
 					points6Mint: mintArgs.points6,
 					membershipTierIndex,
 					membershipFeeFiat6,
@@ -5909,7 +5883,7 @@ const routing = ( router: Router ) => {
 							usdcAmount6: settledTreasury.usdcAmount6.toString(),
 							cardAddress: cardAddr,
 							cardOwner: payToOwner,
-							recipientEOA: recipientAaAddr,
+							recipientEOA: mintRecipientTrueEoa,
 							points6: mintArgs.points6.toString(),
 							fulfillPending: true,
 						})
@@ -5918,7 +5892,7 @@ const routing = ( router: Router ) => {
 				void postLocalhostBuffer('/api/treasuryBridgeFulfill', {
 					cardAddress: cardAddr,
 					cardOwner: payToOwner,
-					recipientEOA: recipientAaAddr,
+					recipientEOA: mintRecipientTrueEoa,
 					points6: mintArgs.points6.toString(),
 					payer: settledTreasury.payer,
 					USDC_tx: settledTreasury.USDC_tx,

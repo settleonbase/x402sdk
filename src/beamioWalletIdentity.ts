@@ -40,6 +40,26 @@ async function readIsBeamioAccount(provider: ethers.Provider, addr: string): Pro
 	}
 }
 
+/**
+ * Walk Beamio AA `owner()` until a non-AA address (true EOA).
+ * Prevents treating a nested AA's owner (primary AA) as the EOA.
+ */
+export async function unwrapTrueEoaFromBeamioAa(
+	maybeAaOrEoa: string,
+	conet: ethers.Provider,
+	maxDepth = 8
+): Promise<string> {
+	let cur = ethers.getAddress(maybeAaOrEoa)
+	for (let depth = 0; depth < maxDepth; depth++) {
+		const isAcct = await readIsBeamioAccount(conet, cur)
+		if (!isAcct) return cur
+		const owner = await readContractOwner(conet, cur)
+		if (!owner || owner.toLowerCase() === cur.toLowerCase()) return cur
+		cur = owner
+	}
+	return cur
+}
+
 /** CoNET getCode + factory isBeamioAccount + owner() → EOA; beamioAccountOf(eoa) → AA. */
 export async function resolveBeamioWalletIdentityFromAddress(
 	input: string,
@@ -64,31 +84,30 @@ export async function resolveBeamioWalletIdentityFromAddress(
 	}
 
 	const isBeamioAa = await readIsBeamioAccount(conet, queriedAddress)
+	if (isBeamioAa) {
+		const trueEoa = await unwrapTrueEoaFromBeamioAa(queriedAddress, conet)
+		const aaFromEoa = await resolveBeamioAaOnConet(trueEoa)
+		return {
+			queriedAddress,
+			eoa: trueEoa,
+			aaAccount: aaFromEoa ?? queriedAddress,
+			inputKind: 'aa',
+		}
+	}
+
 	let owner = await readContractOwner(conet, queriedAddress)
 	if (!owner) {
 		owner = await readContractOwner(base, queriedAddress)
 	}
 
 	if (owner) {
-		const aaFromEoa = await resolveBeamioAaOnConet(owner)
-		const aaAccount =
-			aaFromEoa && aaFromEoa.toLowerCase() === queriedAddress.toLowerCase()
-				? aaFromEoa
-				: aaFromEoa ?? (isBeamioAa ? queriedAddress : null)
+		const trueEoa = await unwrapTrueEoaFromBeamioAa(owner, conet)
+		const aaFromEoa = await resolveBeamioAaOnConet(trueEoa)
 		return {
 			queriedAddress,
-			eoa: owner,
-			aaAccount,
-			inputKind: isBeamioAa || aaAccount === queriedAddress ? 'aa' : 'contract',
-		}
-	}
-
-	if (isBeamioAa) {
-		return {
-			queriedAddress,
-			eoa: queriedAddress,
-			aaAccount: queriedAddress,
-			inputKind: 'aa',
+			eoa: trueEoa,
+			aaAccount: aaFromEoa,
+			inputKind: 'contract',
 		}
 	}
 

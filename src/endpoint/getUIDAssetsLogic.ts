@@ -20,6 +20,7 @@ import { BEAMIO_USER_CARD_ASSET_ADDRESS } from '../chainAddresses'
 import { filterApiExcludedCardRows, isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { metadataMatchesClientCouponCategoryFilter, readCouponDisabledFromMetadata } from '../couponMetadataCategory'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
+import { resolveMergedCardOwnership } from './membershipNftDiscovery'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './tierMetadataRowResolve'
 import { hasCoNETUserCardBytecode, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
@@ -382,14 +383,19 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			const card = new ethers.Contract(cardAddr, cardAbi, cardProvider)
 			const tokenHolder = aaAddr || eoaAddr
 			const [
-				[pointsBalance, nfts],
+				ownershipMerged,
 				chargeRewardByHolder,
 				chargeRewardByEoa,
 				socialRewardByHolder,
 				socialRewardByEoa,
 				currencyNum,
 			] = await Promise.all([
-				aaAddr ? card.getOwnership(aaAddr) : card.getOwnershipByEOA(eoaAddr),
+				resolveMergedCardOwnership({
+					provider: cardProvider,
+					cardAddress: cardAddr,
+					eoa: eoaAddr,
+					aaAddress: aaAddr,
+				}),
 				card.balanceOf(tokenHolder, 2n).catch(() => 0n) as Promise<bigint>,
 				tokenHolder.toLowerCase() === eoaAddr.toLowerCase()
 					? Promise.resolve(0n)
@@ -400,10 +406,12 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 					: (card.balanceOf(eoaAddr, REWARD_VOUCHER_TOKEN_ID).catch(() => 0n) as Promise<bigint>),
 				card.currency(),
 			])
+			const pointsBalance = ownershipMerged.points
+			const nfts = ownershipMerged.nfts
 			const chargeRewardPointsBalance = chargeRewardByHolder + chargeRewardByEoa
 			const socialRewardPointsBalance = socialRewardByHolder + socialRewardByEoa
 			const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
-			const nftList = nfts.map((nft: { tokenId: bigint; attribute: bigint; tierIndexOrMax: bigint; expiry: bigint; isExpired: boolean }) => ({
+			const nftList = nfts.map((nft) => ({
 				tokenId: nft.tokenId.toString(),
 				attribute: nft.attribute.toString(),
 				tier: nft.tierIndexOrMax === ethers.MaxUint256 ? 'Default/Max' : nft.tierIndexOrMax.toString(),
@@ -418,7 +426,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			logger(Colors.gray(`[fetchUIDAssetsForEOA] card=${cardAddr} withTokenId=${withTokenId.length}`))
 			const pick = await pickBestMembershipNftByMinUsdc6(
 				card,
-				nfts.map((nft: { tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }) => ({
+				nfts.map((nft) => ({
 					tokenId: nft.tokenId,
 					tierIndexOrMax: nft.tierIndexOrMax,
 					isExpired: nft.isExpired,
@@ -427,15 +435,16 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			const bestNft = pick ? nftList.find((n: { tokenId: string }) => n.tokenId === pick.tokenId) ?? null : null
 			if (bestNft) {
 				try {
-					let tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestNft.tokenId)
+					const bestTokenId = BigInt(bestNft.tokenId)
+					let tierMeta = await getNftTierMetadataByCardAndToken(cardAddr, bestTokenId)
 					if (!tierMeta && aaAddr) {
-						tierMeta = await getNftTierMetadataByOwnerAndToken(aaAddr, bestNft.tokenId)
+						tierMeta = await getNftTierMetadataByOwnerAndToken(aaAddr, bestTokenId)
 					}
 					if (!tierMeta) {
-						tierMeta = await getNftTierMetadataByOwnerAndToken(eoaAddr, bestNft.tokenId)
+						tierMeta = await getNftTierMetadataByOwnerAndToken(eoaAddr, bestTokenId)
 					}
 					if (!tierMeta && cardRow?.cardOwner) {
-						tierMeta = await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, bestNft.tokenId)
+						tierMeta = await getNftTierMetadataByOwnerAndToken(cardRow.cardOwner, bestTokenId)
 					}
 					if (tierMeta && typeof tierMeta === 'object') {
 						const props = tierMeta.properties as Record<string, unknown> | undefined
@@ -678,7 +687,6 @@ export const pickInfrastructureCashTreeTierTokenId = (
 
 const INFRA_OWNERSHIP_ABI = [
 	'function getOwnership(address user) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
-	'function getOwnershipByEOA(address userEOA) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[] nfts)',
 	'function tiers(uint256) view returns (uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds)',
 ] as const
 
@@ -687,14 +695,16 @@ export async function pickInfrastructureCashTreeTierTokenIdFromChain(eoa: string
 	const eoaAddr = ethers.getAddress(eoa)
 	try {
 		const aaAddr = await resolveBeamioAccountOf(eoaAddr)
+		const ownership = await resolveMergedCardOwnership({
+			provider: providerBase,
+			cardAddress: BEAMIO_USER_CARD_ASSET_ADDRESS,
+			eoa: eoaAddr,
+			aaAddress: aaAddr,
+		})
 		const card = new ethers.Contract(BEAMIO_USER_CARD_ASSET_ADDRESS, INFRA_OWNERSHIP_ABI, providerBase)
-		const [, nfts] = (await (aaAddr ? card.getOwnership(aaAddr) : card.getOwnershipByEOA(eoaAddr))) as [
-			bigint,
-			{ tokenId: bigint; tierIndexOrMax: bigint; isExpired: boolean }[],
-		]
 		const pick = await pickBestMembershipNftByMinUsdc6(
 			card,
-			nfts.map((nft) => ({
+			ownership.nfts.map((nft) => ({
 				tokenId: nft.tokenId,
 				tierIndexOrMax: nft.tierIndexOrMax,
 				isExpired: nft.isExpired,

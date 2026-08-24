@@ -203,6 +203,7 @@ import {
 	resolveBeamioAaForEoaWithFallback,
 } from './endpoint/resolveBeamioAaViaUserCardFactory'
 import { pickBestMembershipNftByMinUsdc6, type RawNftOwnershipRow } from './endpoint/membershipTierPick'
+import { holderHasValidMembershipNft } from './endpoint/membershipNftDiscovery'
 import { pickTierMetadataRowForChainSlot, type CardTierMetadataRow } from './endpoint/tierMetadataRowResolve'
 import { scheduleBeamioUserCardBlockscoutMetadataRefetch } from './endpoint/baseExplorerNftMetadataRefresh'
 import { enqueueLinkedValidatorDepositRedeemClaim } from './endpoint/validatorDepositRedeem'
@@ -1725,9 +1726,93 @@ export const ensureAAForMintTarget = async (targetAddress: string): Promise<void
 }
 
 /**
+ * If `maybeAaOrEoa` is already a Beamio AA on `aaFactory`, walk `owner()` to the true EOA
+ * (never treat an AA as an EOA creator — that creates nested AAs). Otherwise return the address.
+ */
+async function resolveTrueEoaForAaFactory(
+	maybeAaOrEoa: string,
+	aaFactoryReadOnly: ethers.Contract,
+	provider: ethers.Provider
+): Promise<string> {
+	let cur = ethers.getAddress(maybeAaOrEoa)
+	for (let depth = 0; depth < 8; depth++) {
+		let isAcct = false
+		try {
+			isAcct = Boolean(await aaFactoryReadOnly.isBeamioAccount(cur))
+		} catch {
+			isAcct = false
+		}
+		if (!isAcct) return cur
+		let ownerRaw: string
+		try {
+			ownerRaw = (await new ethers.Contract(cur, AA_OWNER_VIEW_ABI, provider).owner()) as string
+		} catch {
+			return cur
+		}
+		if (!ownerRaw || ownerRaw === ethers.ZeroAddress) return cur
+		let ownerAddr: string
+		try {
+			ownerAddr = ethers.getAddress(ownerRaw)
+		} catch {
+			return cur
+		}
+		if (ownerAddr.toLowerCase() === cur.toLowerCase()) return cur
+		cur = ownerAddr
+	}
+	return cur
+}
+
+/**
+ * NFC / membership mint target must be the **true EOA**. Card `_toAccount` then resolves primary AA.
+ * POS often passes Smart Wallet (AA); encoding that AA into `mintPointsByAdmin` is OK for the card
+ * (isBeamioAccount → mint in place) but breaks `ensureAA` / stage naming — unwrap to EOA first.
+ */
+async function resolveNfcTopupMintRecipientTrueEoa(
+	cardAddr: string,
+	maybeAaOrEoa: string
+): Promise<string> {
+	const input = ethers.getAddress(maybeAaOrEoa)
+	try {
+		const chain = await resolveUserCardChain(cardAddr)
+		const provider = providerForUserCardChain(chain)
+		const gateway = await getBeamioUserCardFactoryGateway(cardAddr)
+		const gwRead = new ethers.Contract(
+			gateway,
+			['function _aaFactory() view returns (address)'],
+			provider
+		)
+		const aaFactoryAddr = (await gwRead._aaFactory()) as string
+		if (!aaFactoryAddr || aaFactoryAddr === ethers.ZeroAddress) return input
+		const aaFactoryReadOnly = new ethers.Contract(
+			aaFactoryAddr,
+			BeamioAAAccountFactoryPaymasterABI,
+			provider
+		)
+		const trueEoa = await resolveTrueEoaForAaFactory(input, aaFactoryReadOnly, provider)
+		if (trueEoa.toLowerCase() !== input.toLowerCase()) {
+			logger(
+				Colors.cyan(
+					`[nfcTopup] mint recipient ${input} is Beamio AA → true EOA ${trueEoa} (card=${cardAddr})`
+				)
+			)
+		}
+		return trueEoa
+	} catch (e: any) {
+		logger(
+			Colors.yellow(
+				`[nfcTopup] resolve mint true EOA failed for ${input}: ${e?.message ?? e}; using input`
+			)
+		)
+		return input
+	}
+}
+
+/**
  * Master：在指定 AA 工厂上确保 EOA 已有已部署的 Beamio AA（无则 `DeployingSmartAccount` 创建）。
  * 链上写路径须 shift Settle_ContractPool，与 *PoolPress 一致，避免 Paymaster nonce 冲突。
  * 若调用方已 shift 并传入 `heldSC`，则复用同一 admin 钱包（不再二次 shift），供 coupon claim 等同 wallet 串行 AA+claim。
+ *
+ * 铁律：输入若已是 Beamio AA，**禁止**再 `createAccountFor(AA)`（会造嵌套 AA）；改为解析真 EOA 的 primary AA。
  */
 async function ensureAAForEOAOnAaFactory(
 	eoa: string,
@@ -1736,9 +1821,49 @@ async function ensureAAForEOAOnAaFactory(
 	heldSC?: SettleContractPoolEntry,
 	deployWalletOverride?: ethers.Wallet
 ): Promise<string> {
-	const eoaNorm = ethers.getAddress(eoa)
 	const factoryAddr = ethers.getAddress(aaFactoryAddress)
 	const provider = aaFactoryReadOnly.runner?.provider ?? providerBaseBackup
+	const inputNorm = ethers.getAddress(eoa)
+
+	let isInputAa = false
+	try {
+		isInputAa = Boolean(await aaFactoryReadOnly.isBeamioAccount(inputNorm))
+	} catch {
+		isInputAa = false
+	}
+	if (isInputAa) {
+		const trueEoa = await resolveTrueEoaForAaFactory(inputNorm, aaFactoryReadOnly, provider)
+		const primaryOfTrue = (await aaFactoryReadOnly.beamioAccountOf(trueEoa).catch(() => ethers.ZeroAddress)) as string
+		if (
+			primaryOfTrue &&
+			primaryOfTrue !== ethers.ZeroAddress &&
+			(await provider.getCode(primaryOfTrue)) !== '0x'
+		) {
+			const primary = ethers.getAddress(primaryOfTrue)
+			if (primary.toLowerCase() !== inputNorm.toLowerCase()) {
+				logger(
+					Colors.yellow(
+						`[ensureAAForEOA] input ${inputNorm} is Beamio AA (nested or non-primary); using primary AA ${primary} of EOA ${trueEoa} (no nested create)`
+					)
+				)
+			} else {
+				logger(
+					Colors.cyan(
+						`[ensureAAForEOA] input ${inputNorm} is already primary Beamio AA for EOA ${trueEoa}; skip create`
+					)
+				)
+			}
+			return primary
+		}
+		logger(
+			Colors.cyan(
+				`[ensureAAForEOA] input ${inputNorm} is Beamio AA; skip createAccountFor (no nested AA)`
+			)
+		)
+		return inputNorm
+	}
+
+	const eoaNorm = inputNorm
 	const acct = (await aaFactoryReadOnly.beamioAccountOf(eoaNorm)) as string
 	const hasAA = acct && acct !== ethers.ZeroAddress && (await provider.getCode(acct)) !== '0x'
 	if (hasAA) return ethers.getAddress(acct)
@@ -2616,7 +2741,8 @@ export async function resolveCustomerHasValidMembership(
 			'function beamioAccountOf(address) view returns (address)',
 		]
 		const fac = new ethers.Contract(aaFactoryAddr, facAbi as ethers.InterfaceAbi, cardProvider)
-		let acct: string
+		let eoa = mintUser
+		let aaAddress: string | null = null
 		let isAcct = false
 		try {
 			isAcct = (await fac.isBeamioAccount(mintUser)) as boolean
@@ -2624,7 +2750,20 @@ export async function resolveCustomerHasValidMembership(
 			isAcct = false
 		}
 		if (isAcct) {
-			acct = mintUser
+			aaAddress = mintUser
+			// Membership may sit on the EOA owner while mint recipient is AA (inventory orphans).
+			try {
+				const aaOwner = (await new ethers.Contract(
+					mintUser,
+					['function owner() view returns (address)'] as ethers.InterfaceAbi,
+					cardProvider
+				).owner()) as string
+				if (aaOwner && ethers.getAddress(aaOwner) !== ethers.ZeroAddress) {
+					eoa = ethers.getAddress(aaOwner)
+				}
+			} catch {
+				eoa = mintUser
+			}
 		} else {
 			let aaPred: string = ethers.ZeroAddress
 			try {
@@ -2632,20 +2771,17 @@ export async function resolveCustomerHasValidMembership(
 			} catch {
 				aaPred = ethers.ZeroAddress
 			}
-			if (!aaPred || ethers.getAddress(aaPred) === ethers.ZeroAddress) {
-				return false
+			if (aaPred && ethers.getAddress(aaPred) !== ethers.ZeroAddress) {
+				aaAddress = ethers.getAddress(aaPred)
 			}
-			acct = ethers.getAddress(aaPred)
+			eoa = mintUser
 		}
-		const cardM = new ethers.Contract(cardNorm, MEMBERSHIP_VALIDITY_ABI, cardProvider)
-		const aid = BigInt(await cardM.activeMembershipId(acct))
-		// Dirty activeMembershipId ∈ [1, 99] with no real membership NFT must not block stage/issue.
-		if (!isMembershipNftTokenId(aid)) return false
-		const bal = BigInt(await cardM.balanceOf(acct, aid))
-		const exp = BigInt(await cardM.expiresAt(aid))
-		const ts = BigInt(Math.floor(Date.now() / 1000))
-		const expired = exp !== 0n && ts > exp
-		return bal > 0n && !expired
+		return await holderHasValidMembershipNft({
+			provider: cardProvider,
+			cardAddress: cardNorm,
+			eoa,
+			aaAddress,
+		})
 	} catch {
 		return false
 	}
@@ -2704,6 +2840,8 @@ export const nfcTopupPreparePayload = async (params: {
 		recipientEOA = await getNfcRecipientAddressByUid(uid.trim())
 	}
 	if (!recipientEOA) return { error: wallet ? 'Invalid wallet address' : 'Failed to resolve recipient from uid' }
+	/** Always encode true EOA in mintPointsByAdmin — never a Smart Wallet / nested AA address. */
+	recipientEOA = await resolveNfcTopupMintRecipientTrueEoa(cardAddr, recipientEOA)
 
 	if (Settle_ContractPool.length > 0) {
 		try {
@@ -7738,12 +7876,15 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 	| { success: false; error: string }
 > {
 	const cardNorm = ethers.getAddress(params.cardAddrRaw.trim())
+	/** Must match `mintPointsByAdmin` calldata exactly (Master stage vs mint check). */
 	const mintUser = ethers.getAddress(params.mintRecipientAddrRaw.trim())
+	/** Membership validity: unwrap Smart Wallet → true EOA so AA wallet lookups still hit. */
+	const membershipLookupUser = await resolveNfcTopupMintRecipientTrueEoa(cardNorm, mintUser)
 	const feeMode = await readCardMembershipFeeMode(cardNorm)
 	if (!feeMode) {
 		return { success: true, membershipFeeMode: false, membershipNeedsFee: false }
 	}
-	const hasValid = await resolveCustomerHasValidMembership(cardNorm, mintUser)
+	const hasValid = await resolveCustomerHasValidMembership(cardNorm, membershipLookupUser)
 	const explicitMembershipFee = nfcTopupExplicitMembershipFeeRequested(
 		params.membershipTierIndex,
 		params.membershipFeeFiat6
@@ -7850,7 +7991,8 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 		membershipFeeMode: true,
 		membershipNeedsFee: true,
 		stage: {
-			recipientEOA: mintUser,
+			/** Always true EOA (same as mintPointsByAdmin after prepare unwrap). */
+			recipientEOA: membershipLookupUser,
 			tierIndex,
 			feePaid6: expectedFee,
 			pointsCredit6: params.points6Mint,
@@ -7869,6 +8011,7 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 	try {
 		const cardNorm = ethers.getAddress(cardAddrRaw.trim())
 		const mintUser = ethers.getAddress(mintRecipientAddrRaw.trim())
+		const membershipLookupUser = await resolveNfcTopupMintRecipientTrueEoa(cardNorm, mintUser)
 
 		/** Fee mode first-issue uses `nfcTopupPreCheckMembershipFeeFirstIssue` instead of min-tier points gate. */
 		if (await readCardMembershipFeeMode(cardNorm)) {
@@ -7897,7 +8040,7 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 		}
 		if (minVal <= 0n) return { success: true }
 
-		const hasValid = await resolveCustomerHasValidMembership(cardNorm, mintUser)
+		const hasValid = await resolveCustomerHasValidMembership(cardNorm, membershipLookupUser)
 
 		if (hasValid) return { success: true }
 		if (points6Mint >= minVal) return { success: true }
