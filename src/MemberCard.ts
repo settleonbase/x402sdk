@@ -3202,7 +3202,7 @@ const deriveTopAdminAndSubordinate = (operator: string, operatorParentChain: str
 export const CHARGE_REWARD_RATIO_ONE_E6 = 1_000_000n
 
 /**
- * Charge 消费返点（ERC1155 tokenId=2）E6 数量；与链上 `previewChargeRewardAmount` / `_calcChargeRewardAmount` 同口径。
+ * Charge 消费返点（ERC1155 tokenId=#13 Reward PT）E6 数量；与链上 `previewChargeRewardAmount` / `_calcChargeRewardAmount` 同口径。
  * @param amountFiat6 本 Diamond 行的 `finalRequestAmountFiat6`（主单不含小费；`TX_TIP` 行仅为小费 fiat E6）
  */
 export function calcChargeRewardPoints6FromFiat6(amountFiat6: bigint, chargeRewardRatioE6: bigint): bigint {
@@ -3408,19 +3408,22 @@ export async function verifyChargeOwnerChildBurnClusterPreCheck(params: {
 	return { ok: true }
 }
 
-const CHARGE_REWARD_TOKEN_ID = 2n
+/** V16 ChargeRewardModule / UpdateLib: Reward PT = #13 (not legacy #2). */
+const CHARGE_REWARD_TOKEN_ID = 13n
 
-/** Resolve token #2 holder account for burnChargeRewardByAdmin (align ChargeRewardModule.toAccount). */
+/** Resolve #13 holder account for burnChargeRewardByAdmin (align ChargeRewardModule.toAccount). */
 async function resolveChargeRewardAccountForBurn(cardAddr: string, target: string): Promise<string | undefined> {
 	const t = ethers.getAddress(target.trim())
+	const chain = await resolveUserCardChain(cardAddr)
+	const provider = providerForUserCardChain(chain)
 	try {
-		const code = await providerBaseBackup.getCode(t)
+		const code = await provider.getCode(t)
 		if (code && code !== '0x' && code.length > 2) {
 			try {
 				const aaRead = new ethers.Contract(
 					t,
 					['function factory() view returns (address)', 'function owner() view returns (address)'],
-					providerBaseBackup
+					provider
 				)
 				const f = await aaRead.factory()
 				if (f && f !== ethers.ZeroAddress) return t
@@ -3431,11 +3434,11 @@ async function resolveChargeRewardAccountForBurn(cardAddr: string, target: strin
 	} catch {
 		/* ignore */
 	}
-	const aa = await resolveBeamioAaForEoaWithFallback(providerBaseBackup, t)
+	const aa = await resolveBeamioAaForEoaWithFallback(provider, t)
 	return aa ?? t
 }
 
-/** Burn charge-reward points (token #2) prepare payload for POS product redemption. */
+/** Burn charge-reward points (token #13) prepare payload for POS product redemption. */
 export const burnChargeRewardByAdminPreparePayload = async (params: {
 	cardAddress: string
 	target: string
@@ -3455,7 +3458,7 @@ export const burnChargeRewardByAdminPreparePayload = async (params: {
 	return { cardAddr, data, deadline, nonce, factoryGateway }
 }
 
-/** POST /api/burnChargeRewardByAdminPrepare：POS 扣 charge-reward point；校验 target 链上 token#2 余额 ≥ amount。 */
+/** POST /api/burnChargeRewardByAdminPrepare：POS 扣 Reward PT (#13)；校验 target 链上 #13 余额 ≥ amount。 */
 export async function verifyBurnChargeRewardByAdminPrepareAllowed(params: {
 	cardAddress: string
 	target: string
@@ -3470,10 +3473,11 @@ export async function verifyBurnChargeRewardByAdminPrepareAllowed(params: {
 	const cardAddr = ethers.getAddress(c)
 	const acct = await resolveChargeRewardAccountForBurn(cardAddr, t)
 	if (!acct) return { ok: false, error: 'Could not resolve account for target' }
+	const chain = await resolveUserCardChain(cardAddr)
 	const card = new ethers.Contract(
 		cardAddr,
 		['function balanceOf(address account, uint256 id) view returns (uint256)'],
-		providerBaseBackup
+		providerForUserCardChain(chain)
 	)
 	let bal = 0n
 	try {
@@ -5257,25 +5261,8 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 							)
 						)
 					}
-					// Referrer #13 + charge[referrer][referee] ledger (actor #13 already minted in UpdateLib).
-					try {
-						const payerEoa = ethers.getAddress(transactionInput.payer)
-						if (payerEoa !== ethers.ZeroAddress) {
-							const { enqueueRecordChargeReferrerReward } =
-								await import('./userCumulativeStatRewardPoolMaster.js')
-							enqueueRecordChargeReferrerReward({
-								cardAddress: cardAddr,
-								userEOA: payerEoa,
-								amountFiat6: finalRequestAmountFiat6,
-							})
-						}
-					} catch (chargeRefErr: any) {
-						logger(
-							Colors.yellow(
-								`[beamioTransferIndexerAccountingProcess] recordChargeReferrerReward enqueue non-fatal: ${chargeRefErr?.message ?? chargeRefErr}`
-							)
-						)
-					}
+					// Charge actor + referrer #13: same-cycle on card (UpdateLib V16+).
+					// enqueueRecordChargeReferrerReward is a no-op (kept for legacy import sites).
 				}
 			}
 		}
@@ -10153,25 +10140,8 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			} catch (accountingErr: any) {
 				logger(Colors.yellow(`[executeForAdminPostBaseProcess] android topup accounting non-critical: ${accountingErr?.shortMessage ?? accountingErr?.message ?? String(accountingErr)}`))
 			}
-			try {
-				const topupCardChain = await resolveUserCardChain(obj.cardAddr)
-				if (topupCardChain === 'conet') {
-					const { enqueueRecordTopupCumulativeStatGateway } =
-						await import('./userCumulativeStatRewardPoolMaster.js')
-					// Actor + referrer #13 mint inside recordTopupCumulativeStat (ratios); do not dual-mint ruleId=2.
-					enqueueRecordTopupCumulativeStatGateway({
-						cardAddress: obj.cardAddr,
-						userEOA: recipientEOA,
-						points6: mintParsed.points6,
-					})
-				}
-			} catch (cumStatErr: any) {
-				logger(
-					Colors.yellow(
-						`[executeForAdminPostBaseProcess] recordTopupCumulativeStat gateway enqueue non-critical: ${cumStatErr?.message ?? cumStatErr}`
-					)
-				)
-			}
+			// #13 / METRIC_TOPUP: minted in the same card call as #0 (mintPointsByAdminWithOperator →
+			// recordTopupCumulativeStat). Do not enqueue a second UserOp (design + avoids BM_CallFailed).
 		}
 		if (recipientEOA && obj.cardAddr) {
 			syncNftTierMetadataForUser(obj.cardAddr, recipientEOA).catch((err: any) => {
@@ -10832,25 +10802,7 @@ export const purchasingCardProcess = async () => {
 				attempt: 0,
 			})
 		}
-		try {
-			const purchCardChain = await resolveUserCardChain(cardAddress)
-			if (purchCardChain === 'conet' && currentTopupPoint6 > 0n) {
-				const { enqueueRecordTopupCumulativeStatGateway } =
-					await import('./userCumulativeStatRewardPoolMaster.js')
-				enqueueRecordTopupCumulativeStatGateway({
-					cardAddress,
-					userEOA: from,
-					points6: currentTopupPoint6,
-				})
-			}
-		} catch (cumStatErr: unknown) {
-			const err = cumStatErr as { message?: string }
-			logger(
-				Colors.yellow(
-					`[purchasingCardProcess] recordTopupCumulativeStat gateway enqueue non-critical: ${err?.message ?? String(cumStatErr)}`
-				)
-			)
-		}
+		// #13 / METRIC_TOPUP: same-call on card mintPoints* (beacon V15+). No second gateway UserOp.
 		}
 		syncNftTierMetadataForUser(cardAddress, from).catch(() => {})
 		
@@ -13875,7 +13827,8 @@ function normalizeCreateCardUnifiedRewardPoints(raw: unknown):
 const CREATE_CARD_DEFAULT_POINT_SYSTEM: CreateCardPointSystemNormalized = {
 	enabled: true,
 	chargeRewardRatioE6: '1000000',
-	rewardTokenId: 2,
+	/** V16+ Charge Reward PT = #13 */
+	rewardTokenId: 13,
 }
 
 function parseCreateCardTopupWholeUnit(v: unknown): number | undefined {
@@ -13979,7 +13932,8 @@ function normalizeCreateCardPointSystemEntry(
 	const tokenRaw = o.rewardTokenId ?? o.pointRewardTokenId
 	let rewardTokenId: number | undefined
 	if (tokenRaw == null) {
-		rewardTokenId = 2
+		/** V16+ Charge Reward PT = #13 (legacy default was #2). */
+		rewardTokenId = 13
 	} else if (typeof tokenRaw === 'number' && Number.isInteger(tokenRaw) && tokenRaw >= 0) {
 		rewardTokenId = tokenRaw
 	} else if (typeof tokenRaw === 'string' && /^\d+$/.test(tokenRaw.trim())) {
@@ -13987,6 +13941,8 @@ function normalizeCreateCardPointSystemEntry(
 	} else {
 		return { success: false, error: 'shareTokenMetadata.pointSystem.rewardTokenId must be a non-negative integer if provided' }
 	}
+	/** Remap stale metadata rewardTokenId: 2 → #13 (Beacon V16). */
+	if (rewardTokenId === 2) rewardTokenId = 13
 	return {
 		success: true,
 		pointSystem: {

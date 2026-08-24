@@ -20,7 +20,6 @@ import {
 	buildDispatchEventReward13Calldata,
 	buildInitializeCardUserCumulativeStatCalldata,
 	encodeGatewayInvokeCardFactoryCalldata,
-	readActiveTopupSocialRewardRule,
 	readCardUserCumulativeStatStatus,
 } from './userCumulativeStatRewardPool'
 import {
@@ -398,48 +397,29 @@ export function pushCardGatewayRewardPoolTask(task: CardGatewayRewardPoolTask): 
 	kickCardGatewayRewardPoolPress()
 }
 
-/** NFC top-up 成功后后台记 METRIC_TOPUP + actor/referrer #13（不阻塞 indexer / HTTP）。 */
-export function enqueueRecordTopupCumulativeStatGateway(params: {
+/**
+ * @deprecated Beacon V15+ mints METRIC_TOPUP + #13 inside mintPointsByAdmin*|Gateway* same call.
+ * Kept as no-op so old callers do not enqueue a second UserOp (design violation / BM_CallFailed).
+ */
+export function enqueueRecordTopupCumulativeStatGateway(_params: {
 	cardAddress: string
 	userEOA: string
 	points6: bigint
 }): void {
-	if (params.points6 <= 0n) return
-	const card = ethers.getAddress(params.cardAddress)
-	const user = ethers.getAddress(params.userEOA)
-	const cardCalldata = CHARGE_REWARD_V2_IFACE.encodeFunctionData('recordTopupCumulativeStat', [user, params.points6])
-	const factoryCallData = encodeGatewayInvokeCardFactoryCalldata(card, cardCalldata)
-	pushCardGatewayRewardPoolTask({
-		cardAddress: card,
-		cardCallData: cardCalldata,
-		factoryCallData,
-		label: 'recordTopupCumulativeStat',
-	})
+	/* no-op: same-cycle on card */
 }
 
 /**
- * Charge 成功后：按卡上 `referrerRewardFromChargeRewardRatioE6` mint #13 给 referrer，
- * 并写入 `referrerRefereeLedger`（kind=charge）。Actor #13 已在 UpdateLib 内 mint。
+ * @deprecated Beacon V16+ mints Charge referrer #13 in-card via UpdateLib
+ * (`mintReferrerRewardForChargeIfConfigured` when `referrerChargeAmountRatioE6 > 0`).
+ * Kept as no-op so legacy callers do not dual-mint.
  */
-export function enqueueRecordChargeReferrerReward(params: {
+export function enqueueRecordChargeReferrerReward(_params: {
 	cardAddress: string
 	userEOA: string
 	amountFiat6: bigint
 }): void {
-	if (params.amountFiat6 <= 0n) return
-	const card = ethers.getAddress(params.cardAddress)
-	const user = ethers.getAddress(params.userEOA)
-	const cardCalldata = CHARGE_REWARD_V2_IFACE.encodeFunctionData('recordChargeReferrerReward', [
-		user,
-		params.amountFiat6,
-	])
-	const factoryCallData = encodeGatewayInvokeCardFactoryCalldata(card, cardCalldata)
-	pushCardGatewayRewardPoolTask({
-		cardAddress: card,
-		cardCallData: cardCalldata,
-		factoryCallData,
-		label: 'recordChargeReferrerReward',
-	})
+	/* no-op: same-cycle on card */
 }
 
 function resolveTopupRefWalletForDispatch(
@@ -499,8 +479,9 @@ export async function enqueueCouponSocialReward13IfConfigured(params: {
 }
 
 /**
- * @deprecated Top-up #13 now mints via `recordTopupCumulativeStat` (actor + referrer ratios).
- * Kept as no-op so legacy callers do not dual-mint ruleId=2 fixed amounts.
+ * @deprecated Same-cycle top-up #13 is minted in-card from **ratio storage**
+ * (`topupActorRewardRatioE6` / `referrerTopupAmountRatioE6`) via `recordTopupCumulativeStat`.
+ * Kept as no-op so legacy callers do not dual-mint (fixed `ruleId=2` or a second UserOp).
  */
 export async function enqueueTopupSocialReward13IfConfigured(_params: {
 	cardAddress: string

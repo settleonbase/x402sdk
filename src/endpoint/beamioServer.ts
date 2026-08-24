@@ -4114,7 +4114,7 @@ const routing = ( router: Router ) => {
 		res.status(200).json(result).end()
 	})
 
-	/** POST /api/burnChargeRewardByAdminPrepare - POS 扣 charge-reward point（token #2）；Admin 签字后 /api/nfcTopup。 */
+	/** POST /api/burnChargeRewardByAdminPrepare - POS 扣 Reward PT（token #13）；Admin 签字后 /api/nfcTopup。 */
 	router.post('/burnChargeRewardByAdminPrepare', async (req, res) => {
 		const { cardAddress, target, amount } = req.body as { cardAddress?: string; target?: string; amount?: string }
 		const allow = await verifyBurnChargeRewardByAdminPrepareAllowed({

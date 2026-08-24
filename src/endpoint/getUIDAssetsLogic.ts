@@ -98,13 +98,16 @@ export type FetchUIDAssetsResult = {
 		cardType: string
 		points: string
 		points6: string
-		/** ERC-1155 token #2 (ChargeRewardModule) balance, formatted with 6 decimals. */
+		/** ERC-1155 token #13 (Reward PT / unified charge+social reward) balance, formatted with 6 decimals. */
 		chargeRewardPoints: string
-		/** Raw ERC-1155 token #2 balance in 6-decimal fixed units. */
+		/** Raw ERC-1155 token #13 balance in 6-decimal fixed units. */
 		chargeRewardPoints6: string
-		/** ERC-1155 token #13 (Social / dispatchEventReward13) integer balance (EOA+AA sum). */
+		/**
+		 * Same #13 balance as chargeRewardPoints (legacy field name).
+		 * Formatted with 6 decimals — do **not** add to chargeRewardPoints (would double-count).
+		 */
 		socialRewardPoints: string
-		/** Same as socialRewardPoints — #13 uses integer units, not 6-decimal fixed point. */
+		/** Same as socialRewardPoints6 — raw #13 balance in 6-decimal fixed units. */
 		socialRewardPoints6: string
 		cardCurrency: string
 		cardBackground?: string
@@ -382,12 +385,11 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
 			const card = new ethers.Contract(cardAddr, cardAbi, cardProvider)
 			const tokenHolder = aaAddr || eoaAddr
+			/** V16+: Charge + social Reward PT share ERC-1155 #13 (legacy #2 no longer minted). */
 			const [
 				ownershipMerged,
-				chargeRewardByHolder,
-				chargeRewardByEoa,
-				socialRewardByHolder,
-				socialRewardByEoa,
+				reward13ByHolder,
+				reward13ByEoa,
 				currencyNum,
 			] = await Promise.all([
 				resolveMergedCardOwnership({
@@ -396,10 +398,6 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 					eoa: eoaAddr,
 					aaAddress: aaAddr,
 				}),
-				card.balanceOf(tokenHolder, 2n).catch(() => 0n) as Promise<bigint>,
-				tokenHolder.toLowerCase() === eoaAddr.toLowerCase()
-					? Promise.resolve(0n)
-					: (card.balanceOf(eoaAddr, 2n).catch(() => 0n) as Promise<bigint>),
 				card.balanceOf(tokenHolder, REWARD_VOUCHER_TOKEN_ID).catch(() => 0n) as Promise<bigint>,
 				tokenHolder.toLowerCase() === eoaAddr.toLowerCase()
 					? Promise.resolve(0n)
@@ -408,8 +406,9 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 			])
 			const pointsBalance = ownershipMerged.points
 			const nfts = ownershipMerged.nfts
-			const chargeRewardPointsBalance = chargeRewardByHolder + chargeRewardByEoa
-			const socialRewardPointsBalance = socialRewardByHolder + socialRewardByEoa
+			const reward13Balance = reward13ByHolder + reward13ByEoa
+			const chargeRewardPointsBalance = reward13Balance
+			const socialRewardPointsBalance = reward13Balance
 			const currency = currencyMap[Number(currencyNum)] ?? 'CAD'
 			const nftList = nfts.map((nft) => ({
 				tokenId: nft.tokenId.toString(),
@@ -513,7 +512,7 @@ export const fetchUIDAssetsForEOA = async (eoa: string, opts?: FetchUIDAssetsOpt
 					points6: String(pointsBalance),
 					chargeRewardPoints: ethers.formatUnits(chargeRewardPointsBalance, 6),
 					chargeRewardPoints6: String(chargeRewardPointsBalance),
-					socialRewardPoints: String(socialRewardPointsBalance),
+					socialRewardPoints: ethers.formatUnits(socialRewardPointsBalance, 6),
 					socialRewardPoints6: String(socialRewardPointsBalance),
 					cardCurrency: currency,
 					...(cardBackground != null && { cardBackground }),

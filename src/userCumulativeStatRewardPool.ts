@@ -401,7 +401,12 @@ export function buildDispatchEventReward13Calldata(args: {
 	])
 }
 
-/** bizSite programSocialPromotion — merchant card top-up slot (ruleId=2). */
+/**
+ * @deprecated Legacy Social Promotion fixed-mint top-up slot.
+ * Same-cycle Top-up Reward PT / Referrer use **ratio E6** storage
+ * (`topupActorRewardRatioE6` / `referrerTopupAmountRatioE6`) via `recordTopupCumulativeStat`.
+ * Do **not** mint #13 from `getRewardRule(2)` on the top-up path.
+ */
 export const SOCIAL_PROMOTION_TOPUP_RULE_ID = 2
 /** UserCumulativeStatLib.METRIC_TOPUP */
 export const UC_METRIC_TOPUP = 1
@@ -414,43 +419,15 @@ export type ActiveTopupSocialRewardRule = {
 	refMint13: bigint
 }
 
-/** Active merchant top-up #13 rule from getRewardRule(2); null when inactive or untrusted read. */
+/**
+ * @deprecated Do not use for Top-up #13 mint / enqueue.
+ * Rewards come from ratio E6; `enqueueTopupSocialReward13IfConfigured` is a no-op.
+ * Kept for type/export stability only — always returns null.
+ */
 export async function readActiveTopupSocialRewardRule(
-	cardAddress: string,
+	_cardAddress: string,
 ): Promise<ActiveTopupSocialRewardRule | null> {
-	try {
-		const card = ethers.getAddress(cardAddress)
-		const chain = await resolveUserCardChain(card)
-		if (chain !== 'conet') return null
-		const provider = providerForUserCardChain(chain)
-		const reader = new ethers.Contract(
-			card,
-			[
-				'function getRewardRule(uint256 ruleId) view returns (bool active, uint8 eventKind, uint8 targetKind, uint256 issuedParentId, uint256 actorMint13, uint256 refMint13)',
-			],
-			provider,
-		)
-		const row = (await reader.getRewardRule(SOCIAL_PROMOTION_TOPUP_RULE_ID)) as [
-			boolean,
-			number,
-			number,
-			bigint,
-			bigint,
-			bigint,
-		]
-		const [active, eventKind, targetKind, issuedParentId, actorMint13, refMint13] = row
-		if (!active || Number(eventKind) !== UC_METRIC_TOPUP) return null
-		if (actorMint13 <= 0n && refMint13 <= 0n) return null
-		return {
-			ruleId: SOCIAL_PROMOTION_TOPUP_RULE_ID,
-			targetKind: Number(targetKind),
-			issuedParentId,
-			actorMint13,
-			refMint13,
-		}
-	} catch {
-		return null
-	}
+	return null
 }
 
 const FACTORY_GATEWAY_IFACE = new ethers.Interface([
