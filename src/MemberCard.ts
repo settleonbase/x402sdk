@@ -30,9 +30,19 @@ import {
 import { ensureShareTokenProgramIconAssembled } from './shareTokenProgramIcon'
 import {
 	MEMBERSHIP_FEE_CHECK_BALANCE_HINT,
+	MEMBERSHIP_NFT_MAX_EXCLUSIVE,
+	MEMBERSHIP_NFT_MIN_ID,
+	baseMembershipFeeE6,
+	isMembershipNftTokenId,
+	membershipFeeLockViolation,
+	metadataTierMembershipFeeE6,
+	parseBaseMembership,
 	readCardMembershipFeeModeFromMetadata,
 	readMembershipFeesFromCardMetadata,
 	shouldSkipFactoryTiersForCreate,
+	validateMembershipFeePublishShape,
+	type MembershipFeeMetadataBase,
+	type MembershipFeeMetadataTiers,
 } from './membershipFeeMetadata'
 import { readSocialExchangeFromMetadata, REWARD_VOUCHER_TOKEN_ID } from './socialExchangeMetadata'
 import { syncCardProgramReferrerEventsFromReceipt } from './cardProgramReferrerDb'
@@ -2458,8 +2468,9 @@ export const MEMBERSHIP_FEE_DURATION = {
 
 /**
  * Join / upgrade may charge **fee only**. Card `mintPointsByAdmin(0)` reverts `UC_AmountZero`,
- * and the membership NFT is issued only when that mint consumes the pending stage.
- * Cluster therefore still mints this 1 min-unit to `#0` (displays as 0.00 at two decimals).
+ * so Cluster still mints this 1 min-unit as **`#0` program points** (displays as 0.00).
+ * That leftover `#0` is **not** the membership NFT. Issue must mint `tokenId ∈ [100, 1e11)`.
+ * POS Check Balance sends `amount = feeE6 + 1` so leftover after fee is `1e0` currency units.
  */
 export const MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6 = 1n
 
@@ -2628,7 +2639,8 @@ export async function resolveCustomerHasValidMembership(
 		}
 		const cardM = new ethers.Contract(cardNorm, MEMBERSHIP_VALIDITY_ABI, cardProvider)
 		const aid = BigInt(await cardM.activeMembershipId(acct))
-		if (aid <= 0n) return false
+		// Dirty activeMembershipId ∈ [1, 99] with no real membership NFT must not block stage/issue.
+		if (!isMembershipNftTokenId(aid)) return false
 		const bal = BigInt(await cardM.balanceOf(acct, aid))
 		const exp = BigInt(await cardM.expiresAt(aid))
 		const ts = BigInt(Math.floor(Date.now() / 1000))
@@ -2769,7 +2781,11 @@ export const nfcTopupPreparePayload = async (params: {
 		}
 	}
 
-	/** Points are minted from leftover after fee; fee-only join still mints 1 min-unit (see MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6). */
+	/**
+	 * Leftover after fee becomes `#0` program points (not the membership NFT).
+	 * POS / Discover send amount = locked fee only (2dp). When leftover is 0,
+	 * mint MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6 so mintPointsByAdmin does not revert.
+	 */
 	const pointsSourceFiat6 = membershipNeedsFee ? amountCurrency6 - feeFiat6 : amountCurrency6
 	if (pointsSourceFiat6 < 0n) {
 		return { error: 'Top-up amount must be at least the membership fee' }
@@ -4218,6 +4234,7 @@ export const executeForOwnerPool: {
 	metadataUpdate?: {
 		shareTokenMetadata: Record<string, unknown>
 		tiers?: Array<Record<string, unknown>>
+		baseMembership?: Record<string, unknown> | null
 		upgradeType?: number
 		transferWhitelistEnabled?: boolean
 	}
@@ -5082,7 +5099,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				} catch (e: any) {
 					logger(Colors.yellow(`[beamioTransferIndexerAccountingProcess] Charge topAdmin resolve failed (non-fatal): ${e?.message ?? e}`))
 				}
-				// Charge afterNotePayer.point：按卡当前 chargeRewardRatioE6 × 本行 finalRequestAmountFiat6（主单/TX_TIP 各自一行）
+				// Charge afterNotePayer.point：按卡当前 chargeRewardRatioE6 × 本行 finalRequestAmountFiat6（主单/TX_TIP 各自一行）→ #13
 				if (finalRequestAmountFiat6 > 0n) {
 					try {
 						const ratioE6 = await readCardChargeRewardRatioE6(cardAddr, cardProviderForCharge)
@@ -5099,6 +5116,25 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 						logger(
 							Colors.yellow(
 								`[beamioTransferIndexerAccountingProcess] Charge afterNotePayer.point skipped (non-fatal): ${chargePointErr?.message ?? chargePointErr}`
+							)
+						)
+					}
+					// Referrer #13 + charge[referrer][referee] ledger (actor #13 already minted in UpdateLib).
+					try {
+						const payerEoa = ethers.getAddress(transactionInput.payer)
+						if (payerEoa !== ethers.ZeroAddress) {
+							const { enqueueRecordChargeReferrerReward } =
+								await import('./userCumulativeStatRewardPoolMaster.js')
+							enqueueRecordChargeReferrerReward({
+								cardAddress: cardAddr,
+								userEOA: payerEoa,
+								amountFiat6: finalRequestAmountFiat6,
+							})
+						}
+					} catch (chargeRefErr: any) {
+						logger(
+							Colors.yellow(
+								`[beamioTransferIndexerAccountingProcess] recordChargeReferrerReward enqueue non-fatal: ${chargeRefErr?.message ?? chargeRefErr}`
 							)
 						)
 					}
@@ -9112,9 +9148,6 @@ const PURCHASING_CARD_ACCOUNTING_MAX_RETRY = 3
 export const purchasingCardAccountingRetryPool: PurchasingCardAccountingRetryJob[] = []
 let purchasingCardAccountingRetryRunning = false
 
-const MEMBERSHIP_NFT_MIN_ID = 100n
-const MEMBERSHIP_NFT_MAX_EXCLUSIVE = 100_000_000_000n
-
 /** 与 `resolveUsdcTopupRules` 中 hasMembership 一致：未过期且 tokenId∈[100,1e11)。 */
 const ownershipSnapshotHasValidMembershipNft = (nfts: unknown[] | undefined | null): boolean => {
 	const arr = Array.isArray(nfts) ? nfts : []
@@ -9509,6 +9542,27 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				const hadMembershipBeforeNfc = ownershipSnapshotHasValidMembershipNft(beforeNfts as unknown[])
 				const membershipFeeStage = obj.membershipFeeStage
 				const isMembershipIssueLedger = Boolean(membershipFeeStage)
+				if (isMembershipIssueLedger) {
+					const issuedMembershipNft = afterTokenIds.find(
+						(id) =>
+							!beforeTokenSet.has(id.toString()) &&
+							id >= MEMBERSHIP_NFT_MIN_ID &&
+							id < MEMBERSHIP_NFT_MAX_EXCLUSIVE
+					)
+					if (issuedMembershipNft == null) {
+						logger(
+							Colors.red(
+								`[executeForAdminPostBaseProcess] membership issue produced no NFT in [${MEMBERSHIP_NFT_MIN_ID}, ${MEMBERSHIP_NFT_MAX_EXCLUSIVE}). afterTokenIds=${afterTokenIds.join(',')} hash=${tx.hash} — leftover #0 points are not a membership NFT`
+							)
+						)
+					} else {
+						logger(
+							Colors.green(
+								`[executeForAdminPostBaseProcess] membership NFT issued tokenId=${issuedMembershipNft} hash=${tx.hash}`
+							)
+						)
+					}
+				}
 				const topupCategoryRaw = isMembershipIssueLedger
 					? hadMembershipBeforeNfc
 						? 'upgradeNewCard'
@@ -9959,31 +10013,13 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			try {
 				const topupCardChain = await resolveUserCardChain(obj.cardAddr)
 				if (topupCardChain === 'conet') {
-					const { enqueueRecordTopupCumulativeStatGateway, enqueueTopupSocialReward13IfConfigured } =
+					const { enqueueRecordTopupCumulativeStatGateway } =
 						await import('./userCumulativeStatRewardPoolMaster.js')
+					// Actor + referrer #13 mint inside recordTopupCumulativeStat (ratios); do not dual-mint ruleId=2.
 					enqueueRecordTopupCumulativeStatGateway({
 						cardAddress: obj.cardAddr,
 						userEOA: recipientEOA,
 						points6: mintParsed.points6,
-					})
-					const { resolveCouponBurnRefWallet } = await import('./couponSocialPromotionReward.js')
-					const topupRefWallet = await resolveCouponBurnRefWallet({
-						cardAddress: obj.cardAddr,
-						holderAccount: recipientEOA,
-						actorEOA: recipientEOA,
-						explicitRefWallet: null,
-					})
-					void enqueueTopupSocialReward13IfConfigured({
-						cardAddress: obj.cardAddr,
-						userEOA: recipientEOA,
-						refWallet: topupRefWallet !== ethers.ZeroAddress ? topupRefWallet : null,
-					}).catch((rewardErr: unknown) => {
-						const err = rewardErr as { message?: string }
-						logger(
-							Colors.yellow(
-								`[executeForAdminPostBaseProcess] dispatchEventReward13 topup enqueue non-critical: ${err?.message ?? String(rewardErr)}`
-							)
-						)
 					})
 				}
 			} catch (cumStatErr: any) {
@@ -10656,31 +10692,12 @@ export const purchasingCardProcess = async () => {
 		try {
 			const purchCardChain = await resolveUserCardChain(cardAddress)
 			if (purchCardChain === 'conet' && currentTopupPoint6 > 0n) {
-				const { enqueueRecordTopupCumulativeStatGateway, enqueueTopupSocialReward13IfConfigured } =
+				const { enqueueRecordTopupCumulativeStatGateway } =
 					await import('./userCumulativeStatRewardPoolMaster.js')
 				enqueueRecordTopupCumulativeStatGateway({
 					cardAddress,
 					userEOA: from,
 					points6: currentTopupPoint6,
-				})
-				const { resolveCouponBurnRefWallet } = await import('./couponSocialPromotionReward.js')
-				const topupRefWallet = await resolveCouponBurnRefWallet({
-					cardAddress,
-					holderAccount: from,
-					actorEOA: from,
-					explicitRefWallet: null,
-				})
-				void enqueueTopupSocialReward13IfConfigured({
-					cardAddress,
-					userEOA: from,
-					refWallet: topupRefWallet !== ethers.ZeroAddress ? topupRefWallet : null,
-				}).catch((rewardErr: unknown) => {
-					const err = rewardErr as { message?: string }
-					logger(
-						Colors.yellow(
-							`[purchasingCardProcess] dispatchEventReward13 topup enqueue non-critical: ${err?.message ?? String(rewardErr)}`
-						)
-					)
 				})
 			}
 		} catch (cumStatErr: unknown) {
@@ -13618,6 +13635,12 @@ export type CreateCardPreChecked = {
 		membershipFee?: string | number
 		membershipDurationKind?: number
 	}>
+	/** Base paid membership (index 0); not an Add-tier row. */
+	baseMembership?: {
+		membershipFeeE6: string
+		membershipFee?: string | number
+		membershipDurationKind?: number
+	}
 	/** CoNET BusinessStartKet #0 burn source; set by Cluster after balance precheck (omit when BEAMIO_SKIP_BUSINESS_START_KET_GATE) */
 	businessStartKetBurnFrom?: string
 	/** Client-supplied cardOwner before Cluster AA→EOA normalization; Master re-verifies burn target */
@@ -13891,6 +13914,7 @@ export const createCardPreCheck = (body: {
 		topupPromotion?: unknown
 	}
 	tiers?: unknown[]
+	baseMembership?: unknown
 }): { success: true; preChecked: CreateCardPreChecked } | { success: false; error: string } => {
 	const validCurrency = ['CAD', 'USD', 'JPY', 'CNY', 'USDC', 'HKD', 'EUR', 'SGD', 'TWD']
 	try {
@@ -14264,6 +14288,40 @@ export const createCardPreCheck = (body: {
 			}),
 		}),
 	}
+
+	let normalizedBaseMembership: CreateCardPreChecked['baseMembership'] | undefined
+	if (body.baseMembership != null) {
+		const parsed = parseBaseMembership(body.baseMembership)
+		if (!parsed) {
+			return {
+				success: false,
+				error: 'baseMembership must include membershipFeeE6 > 0 (or membershipFee > 0)',
+			}
+		}
+		const dk = Number(parsed.membershipDurationKind ?? 0)
+		if (dk < 1 || dk > 6) {
+			return {
+				success: false,
+				error: 'baseMembership.membershipDurationKind must be 1–6 when membershipFeeE6 > 0',
+			}
+		}
+		normalizedBaseMembership = {
+			membershipFeeE6: metadataTierMembershipFeeE6(parsed),
+			membershipDurationKind: Math.trunc(dk),
+			...(parsed.membershipFee != null && { membershipFee: parsed.membershipFee }),
+		}
+	}
+
+	const shapeErr = validateMembershipFeePublishShape({
+		baseMembership: normalizedBaseMembership ?? null,
+		tiers: (preChecked.tiers as MembershipFeeMetadataTiers[] | undefined) ?? null,
+	})
+	if (shapeErr) return { success: false, error: shapeErr }
+
+	if (normalizedBaseMembership) {
+		preChecked.baseMembership = normalizedBaseMembership
+	}
+
 	return { success: true, preChecked }
 }
 
@@ -14303,6 +14361,7 @@ export const createCardPool: (CreateCardPreChecked & { res: Response })[] = []
 export function buildBeamioErc1155Card0MetadataFileContent(opts: {
 	shareTokenMetadata?: Record<string, unknown> | null
 	tiers?: Array<Record<string, unknown>>
+	baseMembership?: Record<string, unknown> | null
 	upgradeType?: number
 	transferWhitelistEnabled?: boolean
 }): string {
@@ -14311,6 +14370,10 @@ export function buildBeamioErc1155Card0MetadataFileContent(opts: {
 		stm?.name != null && String(stm.name).trim() !== '' ? String(stm.name).trim() : 'Beamio CCSA Card'
 	const topIcon =
 		stm?.icon != null && String(stm.icon).trim() !== '' ? String(stm.icon).trim() : ''
+	const baseMembership =
+		opts.baseMembership != null && typeof opts.baseMembership === 'object'
+			? opts.baseMembership
+			: undefined
 	return JSON.stringify(
 		{
 			name: topName,
@@ -14318,6 +14381,7 @@ export function buildBeamioErc1155Card0MetadataFileContent(opts: {
 			...(topIcon && { icon: topIcon }),
 			...(stm?.image != null && String(stm.image).trim() !== '' && { image: String(stm.image).trim() }),
 			...(stm && Object.keys(stm).length > 0 && { shareTokenMetadata: { ...stm } }),
+			...(baseMembership && Object.keys(baseMembership).length > 0 && { baseMembership }),
 			...(opts.tiers && opts.tiers.length > 0 && { tiers: opts.tiers }),
 			...(opts.upgradeType != null && { upgradeType: opts.upgradeType }),
 			...(typeof opts.transferWhitelistEnabled === 'boolean' && {
@@ -14382,6 +14446,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 	cardAddress: string
 	shareTokenMetadata: Record<string, unknown>
 	tiers?: Array<Record<string, unknown>>
+	baseMembership?: Record<string, unknown> | null
 	upgradeType?: number
 	transferWhitelistEnabled?: boolean
 }): Promise<{ success: boolean; error?: string }> {
@@ -14409,10 +14474,18 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 		let upgradeType = params.upgradeType
 		let transferWhitelistEnabled = params.transferWhitelistEnabled
 		let tiersForFile = params.tiers
+		let baseMembershipForFile: Record<string, unknown> | undefined =
+			params.baseMembership === null
+				? undefined
+				: params.baseMembership != null
+					? (params.baseMembership as Record<string, unknown>)
+					: undefined
 		let fileShare: Record<string, unknown> = {}
+		let prevFileMeta: Record<string, unknown> | null = null
 		if (fs.existsSync(metaPath)) {
 			try {
 				const prev = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as Record<string, unknown>
+				prevFileMeta = prev
 				if (upgradeType === undefined && prev.upgradeType != null) {
 					const u = Number(prev.upgradeType)
 					if (u === 0 || u === 1 || u === 2) upgradeType = u
@@ -14423,16 +14496,38 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 				if (tiersForFile === undefined && Array.isArray(prev.tiers)) {
 					tiersForFile = prev.tiers as Array<Record<string, unknown>>
 				}
+				if (params.baseMembership === undefined && prev.baseMembership != null && typeof prev.baseMembership === 'object') {
+					baseMembershipForFile = prev.baseMembership as Record<string, unknown>
+				}
 				fileShare = readShareTokenMetadataFromCard0File(cardAddr)
 			} catch {
 				/* keep params-only */
 			}
 		}
+
+		const lockErr = membershipFeeLockViolation(
+			prevFileMeta ?? (row.metadata as Record<string, unknown> | null) ?? null,
+			baseMembershipForFile
+				? parseBaseMembership(baseMembershipForFile)
+				: params.baseMembership === null
+					? null
+					: undefined,
+			tiersForFile as MembershipFeeMetadataTiers[] | undefined,
+		)
+		if (lockErr) return { success: false, error: lockErr }
+
+		const shapeErr = validateMembershipFeePublishShape({
+			baseMembership: baseMembershipForFile ? parseBaseMembership(baseMembershipForFile) : null,
+			tiers: (tiersForFile as MembershipFeeMetadataTiers[] | undefined) ?? null,
+		})
+		if (shapeErr) return { success: false, error: shapeErr }
+
 		const shareTokenMetadata = mergeShareTokenMetadataRecords(fileShare, shareTokenMetadataInput)
 
 		const metaContent = buildBeamioErc1155Card0MetadataFileContent({
 			shareTokenMetadata,
 			tiers: tiersForFile,
+			baseMembership: baseMembershipForFile,
 			upgradeType,
 			transferWhitelistEnabled,
 		})
@@ -14448,6 +14543,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 			uri: row.uri ?? undefined,
 			shareTokenMetadata: shareTokenMetadata as Parameters<typeof registerCardToDb>[0]['shareTokenMetadata'],
 			...(tiersForFile && tiersForFile.length > 0 && { tiers: tiersForFile as never }),
+			...(baseMembershipForFile && { baseMembership: baseMembershipForFile as never }),
 			...(upgradeType != null && { upgradeType: upgradeType as 0 | 1 | 2 }),
 			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
 			txHash: row.txHash ?? undefined,
@@ -14679,6 +14775,7 @@ export const createCardPoolPress = async () => {
 		upgradeType,
 		shareTokenMetadata,
 		tiers,
+		baseMembership,
 		businessStartKetBurnFrom,
 		createCardOwnerAsRequested,
 	} = payload
@@ -14695,7 +14792,10 @@ export const createCardPoolPress = async () => {
 	)
 
 	try {
-		const skipFactoryTiers = shouldSkipFactoryTiersForCreate(tiers)
+		const skipFactoryTiers = shouldSkipFactoryTiersForCreate(tiers, {
+			...(baseMembership && { baseMembership }),
+			...(tiers && { tiers }),
+		})
 		const tiersForCreate =
 			!skipFactoryTiers && tiers && tiers.length > 0
 				? tiers.map((t, i) => ({
@@ -14764,6 +14864,7 @@ export const createCardPoolPress = async () => {
 			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
 			shareTokenMetadata,
 			tiers,
+			...(baseMembership && { baseMembership }),
 			txHash: hash,
 		}).catch(() => {})
 		if (res && !res.headersSent) res.status(200).json({ success: true, cardAddress, hash }).end()
@@ -14771,11 +14872,12 @@ export const createCardPoolPress = async () => {
 		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
 		const cardAddr = ethers.getAddress(cardAddress)
 		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
-		if (shareTokenMetadata || (tiers && tiers.length > 0)) {
+		if (shareTokenMetadata || (tiers && tiers.length > 0) || baseMembership) {
 			const stm = shareTokenMetadata as Record<string, unknown> | undefined
 			const metaContent = buildBeamioErc1155Card0MetadataFileContent({
 				shareTokenMetadata: stm,
 				tiers: tiers as Array<Record<string, unknown>> | undefined,
+				baseMembership: baseMembership as Record<string, unknown> | undefined,
 				upgradeType: upgradeType != null ? upgradeType : undefined,
 				transferWhitelistEnabled,
 			})
@@ -19195,6 +19297,9 @@ export const executeForOwnerProcess = async () => {
 				cardAddress: obj.cardAddress,
 				shareTokenMetadata: obj.metadataUpdate.shareTokenMetadata,
 				...(obj.metadataUpdate.tiers != null && { tiers: obj.metadataUpdate.tiers }),
+				...(obj.metadataUpdate.baseMembership !== undefined && {
+					baseMembership: obj.metadataUpdate.baseMembership,
+				}),
 				...(obj.metadataUpdate.upgradeType != null && { upgradeType: obj.metadataUpdate.upgradeType }),
 				...(typeof obj.metadataUpdate.transferWhitelistEnabled === 'boolean' && {
 					transferWhitelistEnabled: obj.metadataUpdate.transferWhitelistEnabled,

@@ -1803,6 +1803,7 @@ const routing = ( router: Router ) => {
 				cardAddress?: string
 				shareTokenMetadata?: Record<string, unknown>
 				tiers?: Array<Record<string, unknown>>
+				baseMembership?: Record<string, unknown> | null
 				upgradeType?: number
 				transferWhitelistEnabled?: boolean
 			}
@@ -1830,6 +1831,7 @@ const routing = ( router: Router ) => {
 					cardAddress,
 					shareTokenMetadata: body.shareTokenMetadata,
 					...(body.tiers != null && { tiers: body.tiers }),
+					...(body.baseMembership !== undefined && { baseMembership: body.baseMembership }),
 					...(body.upgradeType != null && { upgradeType: body.upgradeType }),
 					...(typeof body.transferWhitelistEnabled === 'boolean' && {
 						transferWhitelistEnabled: body.transferWhitelistEnabled,
@@ -3231,6 +3233,7 @@ const routing = ( router: Router ) => {
 				ownerSignature: string
 				shareTokenMetadata: Record<string, unknown>
 				tiers?: Array<Record<string, unknown>>
+				baseMembership?: Record<string, unknown> | null
 				upgradeType?: number
 				transferWhitelistEnabled?: boolean
 			}
@@ -3244,6 +3247,7 @@ const routing = ( router: Router ) => {
 				metadataUpdate: {
 					shareTokenMetadata: body.shareTokenMetadata,
 					...(body.tiers != null && { tiers: body.tiers }),
+					...(body.baseMembership !== undefined && { baseMembership: body.baseMembership }),
 					...(body.upgradeType != null && { upgradeType: body.upgradeType }),
 					...(typeof body.transferWhitelistEnabled === 'boolean' && {
 						transferWhitelistEnabled: body.transferWhitelistEnabled,

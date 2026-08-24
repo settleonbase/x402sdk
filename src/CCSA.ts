@@ -26,7 +26,7 @@ import {
 } from './linkBeamioUserCardBytecode.js'
 import { emitCreateCardChainTrace } from './createCardChainTrace'
 import { emitCreateCardTiersJson } from './createCardTiersDebug'
-import { shouldSkipFactoryTiersForCreate, type MembershipFeeMetadataTier } from './membershipFeeMetadata'
+import { shouldSkipFactoryTiersForCreate, type MembershipFeeMetadataTiers } from './membershipFeeMetadata'
 
 export type { BeamioUserCardLibraryAddresses } from './linkBeamioUserCardBytecode.js'
 
@@ -912,7 +912,7 @@ export async function createBeamioCardWithFactoryReturningHash(
     }
   }
 
-  const skipFactoryTiers = shouldSkipFactoryTiersForCreate(tiers as MembershipFeeMetadataTier[] | undefined)
+  const skipFactoryTiers = shouldSkipFactoryTiersForCreate(tiers as MembershipFeeMetadataTiers[] | undefined)
   const normalizedTiers = skipFactoryTiers ? [] : normalizeTiersForCreateCard(tiers)
   emitCreateCardTiersJson(
     'CCSA.createBeamioCardWithFactoryReturningHash.normalizedTiersForChain',

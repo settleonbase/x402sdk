@@ -1,6 +1,7 @@
 /**
  * Aligns client "best membership" / primary card with BeamioUserCard `_findBestValidMembership`:
- * among non-expired NFTs with tokenId > 0, prefer the highest `tiers[tierIndex].minUsdc6` (trackable tiers only);
+ * among non-expired membership NFTs (`tokenId ∈ [100, 1e11)`), prefer the highest
+ * `tiers[tierIndex].minUsdc6` (trackable tiers only). Leftover `#0` program points are not membership NFTs.
  * non-trackable tierIndex (e.g. MaxUint256) participates only as fallback when no trackable NFT qualifies.
  */
 import { ethers, type Contract } from 'ethers'
@@ -42,7 +43,14 @@ export async function pickBestMembershipNftByMinUsdc6(
 	card: Contract,
 	rawNfts: RawNftOwnershipRow[]
 ): Promise<PickBestMembershipByMinUsdc6Result | null> {
-	const alive = rawNfts.filter((n) => n.tokenId > 0n && !n.isExpired)
+	const MEMBERSHIP_NFT_MIN_ID = 100n
+	const MEMBERSHIP_NFT_MAX_EXCLUSIVE = 100_000_000_000n
+	const alive = rawNfts.filter(
+		(n) =>
+			n.tokenId >= MEMBERSHIP_NFT_MIN_ID &&
+			n.tokenId < MEMBERSHIP_NFT_MAX_EXCLUSIVE &&
+			!n.isExpired
+	)
 	if (alive.length === 0) return null
 
 	const tiersLen = await readTiersLength(card)

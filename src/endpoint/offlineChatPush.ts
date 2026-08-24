@@ -16,7 +16,14 @@ import type { Request, Response } from 'express'
 
 const DB_URL = 'postgres://postgres:your_password@127.0.0.1:5432/postgres'
 
-const ALLOWED_BUNDLE_IDS = new Set(['com.beamio.beamio', 'com.beamio.app'])
+const ALLOWED_BUNDLE_IDS = new Set([
+	'com.beamio.beamio',
+	'com.beamio.app',
+	/** iOS Beamio POS shell (posPwa WebView) */
+	'com.beamio.app.pos',
+	/** Android softPOS Play applicationId */
+	'com.beamio.pos',
+])
 const SIGN_MAX_SKEW_MS = 10 * 60 * 1000
 /** Burst dedup for multi-entry fan-out (same msg → many saveLocal). Keep short so a second
  * real offline message within a minute still gets APNs (55s previously blocked force-quit retests). */
@@ -545,6 +552,17 @@ function buildSyncBadgeMessage(params: { eoa: string; unread: number; timestamp:
 	].join('\n')
 }
 
+function buildPushDeviceStatusMessage(params: { eoa: string; timestamp: number }): string {
+	return [
+		'Beamio pushDeviceStatus',
+		`eoa:${params.eoa.toLowerCase()}`,
+		`timestamp:${params.timestamp}`,
+	].join('\n')
+}
+
+/** POS shell bundles — used when clients ask “am I registered for POS push?” */
+const POS_PUSH_BUNDLE_IDS = new Set(['com.beamio.app.pos', 'com.beamio.pos'])
+
 function verifyPersonalSign(message: string, signature: string, expectedEoa: string): boolean {
 	try {
 		const recovered = ethers.verifyMessage(message, signature)
@@ -630,6 +648,45 @@ export function syncChatBadgePreCheck(body: any): { ok: true; payload: any } | {
 		return { ok: false, error: 'Invalid signature', status: 403 }
 	}
 	return { ok: true, payload: { eoa: checksum.toLowerCase(), unread: safeUnread, timestamp: ts, signature } }
+}
+
+/**
+ * Cluster read: signed query whether this EOA has push device row(s).
+ * Optional `scope: 'pos'` → only POS shell bundle_ids count as registered.
+ */
+export function pushDeviceStatusPreCheck(body: any): { ok: true; payload: any } | { ok: false; error: string; status: number } {
+	const eoa = String(body?.eoa || '').trim()
+	const signature = String(body?.signature || '').trim()
+	const scopeRaw = String(body?.scope || '').trim().toLowerCase()
+	const scope = scopeRaw === 'pos' ? 'pos' : 'any'
+	const ts = parseTimestamp(body?.timestamp)
+	if (!ethers.isAddress(eoa) || eoa === ethers.ZeroAddress) return { ok: false, error: 'Invalid eoa', status: 400 }
+	if (!signature) return { ok: false, error: 'Missing signature', status: 400 }
+	if (ts == null || Math.abs(Date.now() - ts) > SIGN_MAX_SKEW_MS) return { ok: false, error: 'Invalid or expired timestamp', status: 400 }
+	const checksum = ethers.getAddress(eoa)
+	const message = buildPushDeviceStatusMessage({ eoa: checksum, timestamp: Math.floor(ts / 1000) })
+	const messageMs = buildPushDeviceStatusMessage({ eoa: checksum, timestamp: ts })
+	if (!verifyPersonalSign(message, signature, checksum) && !verifyPersonalSign(messageMs, signature, checksum)) {
+		return { ok: false, error: 'Invalid signature', status: 403 }
+	}
+	return { ok: true, payload: { eoa: checksum.toLowerCase(), scope, timestamp: ts, signature } }
+}
+
+/** Cluster-only read (no Master). Does not return device tokens. */
+export async function pushDeviceStatusProcess(payload: {
+	eoa: string
+	scope?: 'pos' | 'any'
+}): Promise<{ success: true; registered: boolean; count: number; bundleIds: string[] }> {
+	const devices = await listDevicesForEoa(payload.eoa)
+	const filtered =
+		payload.scope === 'pos' ? devices.filter((d) => POS_PUSH_BUNDLE_IDS.has(d.bundleId)) : devices
+	const bundleIds = [...new Set(filtered.map((d) => d.bundleId).filter(Boolean))]
+	return {
+		success: true,
+		registered: filtered.length > 0,
+		count: filtered.length,
+		bundleIds,
+	}
 }
 
 /**
@@ -819,4 +876,5 @@ export async function handleNotifyOfflineChatMaster(req: Request, res: Response)
 export const offlineChatPushSignHelpers = {
 	buildRegisterMessage,
 	buildSyncBadgeMessage,
+	buildPushDeviceStatusMessage,
 }

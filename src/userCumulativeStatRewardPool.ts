@@ -33,6 +33,7 @@ export const CHARGE_REWARD_V2_IFACE = new ethers.Interface([
 	'function purchaseRewardProgram(address payerEOA, uint8 assetKind, uint256 amount, uint256 budget13PerUnit, uint8 cumulativeTargetKind, uint256 cumulativeIssuedParentId)',
 	'function dispatchEventReward13(uint256 ruleId, address actorWallet, address refWallet, uint8 cumulativeTargetKind, uint256 cumulativeIssuedParentId, uint256 cumulativeDelta)',
 	'function recordTopupCumulativeStat(address userEOA, uint256 points6)',
+	'function recordChargeReferrerReward(address userEOA, uint256 amountFiat6)',
 	'function rewardMintBudget13() view returns (uint256)',
 	'function fundSocialExchangeUsdcEscrow(address payerEOA, uint256 amount6)',
 	'function rewardEscrowUsdc6() view returns (uint256)',

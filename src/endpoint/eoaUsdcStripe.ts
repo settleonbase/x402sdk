@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
-import { resolveStripeMintRecipientEoaOnBase } from '../stripeWalletEoaResolve'
+import { resolveStripeOnrampRecipientEoa } from '../stripeWalletEoaResolve'
 import { getStripeBeamioClient, getStripeBeamioSecretKey } from './stripeBeamio'
 
 export const EOA_USDC_STRIPE_PRODUCT = 'eoaUsdc'
@@ -389,9 +389,10 @@ export async function createEoaUsdcStripeCheckoutSession(
 		return { error: 'Stripe is not configured' }
 	}
 
+	/** Do not await Base RPC here — CoNET `base-rpc` lag must not block Opening Stripe. */
 	let recipientEoa: string
 	try {
-		recipientEoa = await resolveStripeMintRecipientEoaOnBase(wallet)
+		recipientEoa = await resolveStripeOnrampRecipientEoa(wallet)
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err)
 		logger(Colors.yellow('[eoaUsdcStripe] resolve EOA failed; using submitted address'), msg)

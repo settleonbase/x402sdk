@@ -2,7 +2,8 @@ import { ethers } from 'ethers'
 import { CONET_AA_FACTORY } from './chainAddresses'
 import { providerForUserCardChain, resolveUserCardChain } from './beamioUserCardChain'
 
-const REFERRER_REWARD_TOKEN_ID = 1n
+/** Unified reward points (#13). Legacy #1 was referrer-only and is no longer minted as spendable. */
+const REFERRER_REWARD_TOKEN_ID = 13n
 
 const CARD_REFERRER_READ_ABI = [
 	'function referrerTotalCount() view returns (uint256)',
@@ -63,6 +64,33 @@ export async function resolveReferrerRegistryAaToEoa(
 	return addr
 }
 
+/**
+ * Lookup keys for referrer-registry mappings.
+ * Bind writes the **login EOA** on-card; older rows may be AA. Always try the
+ * address as-is first — never rewrite EOA → AA before the first read.
+ */
+export async function resolveReferrerRegistryLookupKeys(
+	provider: ethers.Provider,
+	eoaOrAa: string,
+): Promise<string[]> {
+	if (!ethers.isAddress(eoaOrAa) || eoaOrAa === ethers.ZeroAddress) return []
+	const addr = ethers.getAddress(eoaOrAa)
+	const keys = [addr]
+	try {
+		const fac = new ethers.Contract(CONET_AA_FACTORY, AA_FACTORY_ABI, provider)
+		if (await fac.isBeamioAccount(addr)) {
+			const owner = (await new ethers.Contract(addr, AA_OWNER_ABI, provider).owner()) as string
+			if (owner && owner !== ethers.ZeroAddress) keys.push(ethers.getAddress(owner))
+		} else {
+			const aa = (await fac.beamioAccountOf(addr)) as string
+			if (aa && aa !== ethers.ZeroAddress) keys.push(ethers.getAddress(aa))
+		}
+	} catch {
+		/* keep as-is */
+	}
+	return [...new Set(keys)]
+}
+
 /** Accept EOA or AA for chain index lookups; return the AA used on-card. */
 export async function resolveReferrerRegistryLookupAa(
 	provider: ethers.Provider,
@@ -79,6 +107,20 @@ export async function resolveReferrerRegistryLookupAa(
 		/* fall through */
 	}
 	return addr
+}
+
+async function pickLookupWithPreferredHit<T>(
+	keys: string[],
+	read: (key: string) => Promise<T>,
+	isHit: (value: T) => boolean,
+): Promise<{ key: string; value: T } | null> {
+	let last: { key: string; value: T } | null = null
+	for (const key of keys) {
+		const value = await read(key)
+		last = { key, value }
+		if (isHit(value)) return last
+	}
+	return last
 }
 
 async function mapAaListToEoa(provider: ethers.Provider, addrs: string[]): Promise<string[]> {
@@ -107,9 +149,13 @@ export async function readReferrerRewardBalance(cardAddress: string, referrerAA:
 	try {
 		if (!ethers.isAddress(referrerAA)) return null
 		const { card, provider } = await cardReferrerReadContract(cardAddress)
-		const lookupAa = await resolveReferrerRegistryLookupAa(provider, referrerAA)
-		const raw = (await card.balanceOf(lookupAa, REFERRER_REWARD_TOKEN_ID)) as bigint
-		return raw.toString()
+		const keys = await resolveReferrerRegistryLookupKeys(provider, referrerAA)
+		const picked = await pickLookupWithPreferredHit(
+			keys,
+			async (key) => (await card.balanceOf(key, REFERRER_REWARD_TOKEN_ID)) as bigint,
+			(raw) => raw > 0n,
+		)
+		return picked ? picked.value.toString() : null
 	} catch {
 		return null
 	}
@@ -119,9 +165,13 @@ export async function readRefereeChargePointsTotal6(cardAddress: string, referee
 	try {
 		if (!ethers.isAddress(refereeAA)) return null
 		const { card, provider } = await cardReferrerReadContract(cardAddress)
-		const lookupAa = await resolveReferrerRegistryLookupAa(provider, refereeAA)
-		const raw = (await card.refereeChargePointsTotal6(lookupAa)) as bigint
-		return raw.toString()
+		const keys = await resolveReferrerRegistryLookupKeys(provider, refereeAA)
+		const picked = await pickLookupWithPreferredHit(
+			keys,
+			async (key) => (await card.refereeChargePointsTotal6(key)) as bigint,
+			(raw) => raw > 0n,
+		)
+		return picked ? picked.value.toString() : null
 	} catch {
 		return null
 	}
@@ -131,9 +181,13 @@ export async function readRefereeCountByReferrer(cardAddress: string, referrerAA
 	try {
 		if (!ethers.isAddress(referrerAA)) return null
 		const { card, provider } = await cardReferrerReadContract(cardAddress)
-		const lookupAa = await resolveReferrerRegistryLookupAa(provider, referrerAA)
-		const raw = (await card.refereeCountByReferrer(lookupAa)) as bigint
-		return bigintToCount(raw)
+		const keys = await resolveReferrerRegistryLookupKeys(provider, referrerAA)
+		const picked = await pickLookupWithPreferredHit(
+			keys,
+			async (key) => bigintToCount((await card.refereeCountByReferrer(key)) as bigint),
+			(n) => n != null && n > 0,
+		)
+		return picked?.value ?? null
 	} catch {
 		return null
 	}
@@ -204,13 +258,27 @@ export async function readRefereesByReferrerPageFromChain(
 	try {
 		if (!ethers.isAddress(referrerEoaOrAa)) return { ok: false }
 		const { card, provider } = await cardReferrerReadContract(cardAddress)
-		const referrerLookupAa = await resolveReferrerRegistryLookupAa(provider, referrerEoaOrAa)
-		const referrerEoa = await resolveReferrerRegistryAaToEoa(provider, referrerLookupAa)
-		const [referees, chargeTotals, total, nextOffset] = (await card.getRefereesByReferrerPage(
-			referrerLookupAa,
-			BigInt(offset),
-			BigInt(pageSize),
-		)) as [string[], bigint[], bigint, bigint]
+		const keys = await resolveReferrerRegistryLookupKeys(provider, referrerEoaOrAa)
+		if (keys.length === 0) return { ok: false }
+		let referrerLookup = keys[0]!
+		let page: [string[], bigint[], bigint, bigint] | null = null
+		for (const key of keys) {
+			try {
+				const tuple = (await card.getRefereesByReferrerPage(
+					key,
+					BigInt(offset),
+					BigInt(pageSize),
+				)) as [string[], bigint[], bigint, bigint]
+				page = tuple
+				referrerLookup = key
+				if ((bigintToCount(tuple[2]) ?? 0) > 0) break
+			} catch {
+				/* try next key */
+			}
+		}
+		if (!page) return { ok: false }
+		const [referees, chargeTotals, total, nextOffset] = page
+		const referrerEoa = await resolveReferrerRegistryAaToEoa(provider, referrerLookup)
 		const refereeEoas = await mapAaListToEoa(provider, referees)
 		return {
 			ok: true,

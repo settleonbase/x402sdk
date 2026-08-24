@@ -28,10 +28,34 @@ CREATE INDEX IF NOT EXISTS idx_beamio_card_program_referees_card_updated
 ON beamio_card_program_referees (card_address, updated_at DESC);
 `
 
+/** kind: 1=topup, 2=charge — mirrors ReferrerRefereeRewardLedgered. */
+const BEAMIO_CARD_PROGRAM_REFERRER_REWARDS_TABLE = `
+CREATE TABLE IF NOT EXISTS beamio_card_program_referrer_rewards (
+	id BIGSERIAL PRIMARY KEY,
+	card_address TEXT NOT NULL,
+	referrer_aa TEXT NOT NULL,
+	referee_aa TEXT NOT NULL,
+	kind SMALLINT NOT NULL,
+	reward13_e6 NUMERIC(78,0) NOT NULL DEFAULT 0,
+	amount_fiat6 NUMERIC(78,0) NOT NULL DEFAULT 0,
+	last_tx_hash TEXT,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	UNIQUE (card_address, referrer_aa, referee_aa, kind)
+);
+`
+
+const BEAMIO_CARD_PROGRAM_REFERRER_REWARDS_REFERRER_IDX = `
+CREATE INDEX IF NOT EXISTS idx_beamio_card_program_referrer_rewards_card_referrer
+ON beamio_card_program_referrer_rewards (card_address, referrer_aa, kind);
+`
+
 async function ensureCardProgramReferrerSchema(db: Client): Promise<void> {
 	await db.query(BEAMIO_CARD_PROGRAM_REFEREES_TABLE)
 	await db.query(BEAMIO_CARD_PROGRAM_REFEREES_REFERRER_IDX)
 	await db.query(BEAMIO_CARD_PROGRAM_REFEREES_UPDATED_IDX)
+	await db.query(BEAMIO_CARD_PROGRAM_REFERRER_REWARDS_TABLE)
+	await db.query(BEAMIO_CARD_PROGRAM_REFERRER_REWARDS_REFERRER_IDX)
 }
 
 export type CardProgramReferrerRow = {
@@ -277,7 +301,54 @@ const CARD_REFEREE_EVENTS_IFACE = new ethers.Interface([
 	'event RefereeReferrerUpdated(address indexed refereeAA, address indexed referrerAA, address indexed operator)',
 	/** Discover share bind (AdminStats V4+). Storage keys are EOAs; AA only in event payload. */
 	'event ShareRefereeBoundWithSignature(address indexed downlineEOA, address indexed refereeEOA, address downlineAA, address refereeAA, bytes32 nonce)',
+	/** kind 1=topup, 2=charge — #13 mint ledger for referrer UI. */
+	'event ReferrerRefereeRewardLedgered(address indexed referrer, address indexed referee, uint8 kind, uint256 amountFiat6, uint256 reward13E6)',
 ])
+
+/** Upsert cumulative #13 reward from ReferrerRefereeRewardLedgered (additive per event). */
+export const upsertCardProgramReferrerRewardLedger = async (params: {
+	cardAddress: string
+	referrerAA: string
+	refereeAA: string
+	kind: number
+	amountFiat6: bigint | string
+	reward13E6: bigint | string
+	txHash?: string | null
+}): Promise<void> => {
+	const referrer = normalizeAa(params.referrerAA)
+	const referee = normalizeAa(params.refereeAA)
+	const kind = Number(params.kind)
+	if (!referrer || !referee || (kind !== 1 && kind !== 2)) return
+	const amountFiat6 = BigInt(params.amountFiat6).toString()
+	const reward13E6 = BigInt(params.reward13E6).toString()
+	if (BigInt(reward13E6) <= 0n) return
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureCardProgramReferrerSchema(db)
+		const card = ethers.getAddress(params.cardAddress).toLowerCase()
+		const txHash = normalizeTxHash(params.txHash ?? null)
+		await db.query(
+			`
+			INSERT INTO beamio_card_program_referrer_rewards
+				(card_address, referrer_aa, referee_aa, kind, reward13_e6, amount_fiat6, last_tx_hash)
+			VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric, $7)
+			ON CONFLICT (card_address, referrer_aa, referee_aa, kind)
+			DO UPDATE SET
+				reward13_e6 = beamio_card_program_referrer_rewards.reward13_e6 + EXCLUDED.reward13_e6,
+				amount_fiat6 = beamio_card_program_referrer_rewards.amount_fiat6 + EXCLUDED.amount_fiat6,
+				updated_at = NOW(),
+				last_tx_hash = COALESCE(EXCLUDED.last_tx_hash, beamio_card_program_referrer_rewards.last_tx_hash)
+			`,
+			[card, referrer, referee, kind, reward13E6, amountFiat6, txHash],
+		)
+	} catch (e: unknown) {
+		const err = e as { message?: string }
+		logger(Colors.yellow(`[upsertCardProgramReferrerRewardLedger] failed: ${err?.message ?? e}`))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
 
 /**
  * Share bind: opener (downlineEOA) becomes referee of share-owner (refereeEOA).
@@ -350,6 +421,16 @@ export const syncCardProgramReferrerEventsFromReceipt = async (params: {
 				cardAddress: params.cardAddress,
 				downlineEOA: parsed.args.downlineEOA as string,
 				refereeEOA: parsed.args.refereeEOA as string,
+				txHash,
+			})
+		} else if (parsed.name === 'ReferrerRefereeRewardLedgered') {
+			await upsertCardProgramReferrerRewardLedger({
+				cardAddress: params.cardAddress,
+				referrerAA: parsed.args.referrer as string,
+				refereeAA: parsed.args.referee as string,
+				kind: Number(parsed.args.kind),
+				amountFiat6: parsed.args.amountFiat6 as bigint,
+				reward13E6: parsed.args.reward13E6 as bigint,
 				txHash,
 			})
 		}

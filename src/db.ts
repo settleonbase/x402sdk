@@ -5105,6 +5105,9 @@ export function mergeBeamioCardMetadataJsonPatch(
 		merged.shareTokenMetadata = { ...baseShare }
 	}
 	if (patch.tiers === undefined && base.tiers !== undefined) merged.tiers = base.tiers
+	if (patch.baseMembership === undefined && base.baseMembership !== undefined) {
+		merged.baseMembership = base.baseMembership
+	}
 	if (patch.upgradeType === undefined && base.upgradeType !== undefined) {
 		merged.upgradeType = base.upgradeType
 	}
@@ -5160,6 +5163,12 @@ export const registerCardToDb = async (params: {
 		imageFit?: 'width' | 'height'
 		logoDisplayScale?: string
 	}>
+	/** Base paid membership (index 0); not an Add-tier row. */
+	baseMembership?: {
+		membershipFeeE6: string
+		membershipFee?: string | number
+		membershipDurationKind?: number
+	}
 	txHash?: string
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
@@ -5175,6 +5184,7 @@ export const registerCardToDb = async (params: {
 		const patchJson: Record<string, unknown> = {
 			...(params.shareTokenMetadata && { shareTokenMetadata: params.shareTokenMetadata }),
 			...(params.tiers && params.tiers.length > 0 && { tiers: params.tiers }),
+			...(params.baseMembership && { baseMembership: params.baseMembership }),
 			...(params.upgradeType != null && { upgradeType: params.upgradeType }),
 			...(typeof params.transferWhitelistEnabled === 'boolean' && {
 				transferWhitelistEnabled: params.transferWhitelistEnabled,
@@ -5232,6 +5242,8 @@ export const getBeamioCardRowForMetadataSync = async (
 	priceInCurrencyE6: string
 	uri: string | null
 	txHash: string | null
+	/** Trusted last publish — used for membership fee lock checks when card0 file is missing. */
+	metadata: Record<string, unknown> | null
 } | null> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
@@ -5244,18 +5256,24 @@ export const getBeamioCardRowForMetadataSync = async (
 			price_in_currency_e6: string
 			uri: string | null
 			tx_hash: string | null
+			metadata_json: unknown
 		}>(
-			`SELECT card_owner, currency, price_in_currency_e6, uri, tx_hash FROM beamio_cards WHERE card_address = $1 LIMIT 1`,
+			`SELECT card_owner, currency, price_in_currency_e6, uri, tx_hash, metadata_json FROM beamio_cards WHERE card_address = $1 LIMIT 1`,
 			[addr]
 		)
 		if (rows.length === 0) return null
 		const r = rows[0]
+		const meta =
+			r.metadata_json != null && typeof r.metadata_json === 'object' && !Array.isArray(r.metadata_json)
+				? (r.metadata_json as Record<string, unknown>)
+				: null
 		return {
 			cardOwner: r.card_owner as string,
 			currency: r.currency as string,
 			priceInCurrencyE6: String(r.price_in_currency_e6 ?? ''),
 			uri: r.uri ?? null,
 			txHash: r.tx_hash ?? null,
+			metadata: meta,
 		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[getBeamioCardRowForMetadataSync] failed: ${e?.message ?? e}`))

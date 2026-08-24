@@ -398,7 +398,7 @@ export function pushCardGatewayRewardPoolTask(task: CardGatewayRewardPoolTask): 
 	kickCardGatewayRewardPoolPress()
 }
 
-/** NFC top-up 成功后后台记 METRIC_TOPUP（不阻塞 indexer / HTTP）。 */
+/** NFC top-up 成功后后台记 METRIC_TOPUP + actor/referrer #13（不阻塞 indexer / HTTP）。 */
 export function enqueueRecordTopupCumulativeStatGateway(params: {
 	cardAddress: string
 	userEOA: string
@@ -414,6 +414,31 @@ export function enqueueRecordTopupCumulativeStatGateway(params: {
 		cardCallData: cardCalldata,
 		factoryCallData,
 		label: 'recordTopupCumulativeStat',
+	})
+}
+
+/**
+ * Charge 成功后：按卡上 `referrerRewardFromChargeRewardRatioE6` mint #13 给 referrer，
+ * 并写入 `referrerRefereeLedger`（kind=charge）。Actor #13 已在 UpdateLib 内 mint。
+ */
+export function enqueueRecordChargeReferrerReward(params: {
+	cardAddress: string
+	userEOA: string
+	amountFiat6: bigint
+}): void {
+	if (params.amountFiat6 <= 0n) return
+	const card = ethers.getAddress(params.cardAddress)
+	const user = ethers.getAddress(params.userEOA)
+	const cardCalldata = CHARGE_REWARD_V2_IFACE.encodeFunctionData('recordChargeReferrerReward', [
+		user,
+		params.amountFiat6,
+	])
+	const factoryCallData = encodeGatewayInvokeCardFactoryCalldata(card, cardCalldata)
+	pushCardGatewayRewardPoolTask({
+		cardAddress: card,
+		cardCallData: cardCalldata,
+		factoryCallData,
+		label: 'recordChargeReferrerReward',
 	})
 }
 
@@ -473,32 +498,14 @@ export async function enqueueCouponSocialReward13IfConfigured(params: {
 	})
 }
 
-/** Top-up 成功后：若链上 ruleId=2 active，后台 dispatchEventReward13 mint #13（cumulativeDelta=0，stat 已由 recordTopup 写入）。 */
-export async function enqueueTopupSocialReward13IfConfigured(params: {
+/**
+ * @deprecated Top-up #13 now mints via `recordTopupCumulativeStat` (actor + referrer ratios).
+ * Kept as no-op so legacy callers do not dual-mint ruleId=2 fixed amounts.
+ */
+export async function enqueueTopupSocialReward13IfConfigured(_params: {
 	cardAddress: string
 	userEOA: string
 	refWallet?: string | null
 }): Promise<void> {
-	const rule = await readActiveTopupSocialRewardRule(params.cardAddress)
-	if (!rule) return
-	if (rule.actorMint13 <= 0n && rule.refMint13 <= 0n) return
-
-	const card = ethers.getAddress(params.cardAddress)
-	const user = ethers.getAddress(params.userEOA)
-	const refWallet = resolveTopupRefWalletForDispatch(user, params.refWallet, rule.refMint13)
-	const cardCalldata = buildDispatchEventReward13Calldata({
-		ruleId: rule.ruleId,
-		actorWallet: user,
-		refWallet,
-		cumulativeTargetKind: rule.targetKind,
-		cumulativeIssuedParentId: rule.issuedParentId,
-		cumulativeDelta: 0,
-	})
-	const factoryCallData = encodeGatewayInvokeCardFactoryCalldata(card, cardCalldata)
-	pushCardGatewayRewardPoolTask({
-		cardAddress: card,
-		cardCallData: cardCalldata,
-		factoryCallData,
-		label: 'dispatchEventReward13:topup',
-	})
+	return
 }

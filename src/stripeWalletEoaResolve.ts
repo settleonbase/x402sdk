@@ -12,6 +12,9 @@ const AA_FACTORY_RESOLVE_ABI = [
  * Stripe Crypto Onramp 创建时锁定收款 EOA。客户端可能把 Beamio AA（与 profile keyID 相同）当作 wallet 传入。
  * 先在 Base 上校验；若该地址在 Base 无 code（Consumer AA 仅 CoNET），再在 CoNET 上用 V1/V2 Factory 解析 owner。
  * RPC 失败时回退原地址（不得把失败当成「无 owner」清空）。
+ *
+ * Merchant Kit 等仍可用本函数。Onramp 购买成功以 Stripe `fulfillment_complete` 为准，
+ * **不要**在 createSession 里走这条（会打 `base-rpc.conet.network`，追头时可能卡住 Opening）。
  */
 export async function resolveStripeMintRecipientEoaOnBase(walletAddress: string): Promise<string> {
 	const addr = ethers.getAddress(walletAddress)
@@ -27,6 +30,38 @@ export async function resolveStripeMintRecipientEoaOnBase(walletAddress: string)
 		return fromConet
 	}
 	return addr
+}
+
+const ONRAMP_CONET_RESOLVE_MS = 2_000
+
+/**
+ * Onramp create：不打 Base RPC。客户端应传 EOA（`keyID`）。
+ * 若误传 CoNET AA，最多等 2s 解析 owner；超时 / 失败回退原地址。
+ * 购买 loading→success 只信 Stripe，不读 Base 余额。
+ */
+export async function resolveStripeOnrampRecipientEoa(walletAddress: string): Promise<string> {
+	const addr = ethers.getAddress(walletAddress)
+	const fromConet = await withTimeout(
+		tryResolveAaOwnerOnChain(addr, resolveConetRpc(), [CONET_AA_FACTORY, CONET_AA_FACTORY_V2]),
+		ONRAMP_CONET_RESOLVE_MS
+	)
+	return fromConet ?? addr
+}
+
+function withTimeout<T>(work: Promise<T | null>, ms: number): Promise<T | null> {
+	return new Promise((resolve) => {
+		const timer = setTimeout(() => resolve(null), ms)
+		void work.then(
+			(value) => {
+				clearTimeout(timer)
+				resolve(value)
+			},
+			() => {
+				clearTimeout(timer)
+				resolve(null)
+			}
+		)
+	})
 }
 
 function resolveBaseRpc(): string {

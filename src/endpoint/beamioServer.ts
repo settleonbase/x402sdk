@@ -106,6 +106,8 @@ import {
 	registerPushDevicePreCheck,
 	syncChatBadgePreCheck,
 	notifyOfflineChatPreCheck,
+	pushDeviceStatusPreCheck,
+	pushDeviceStatusProcess,
 } from './offlineChatPush'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaViaUserCardFactory, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
@@ -9959,6 +9961,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			cardAddress?: unknown
 			shareTokenMetadata?: unknown
 			tiers?: unknown
+			baseMembership?: unknown
 			upgradeType?: unknown
 			transferWhitelistEnabled?: unknown
 		}
@@ -9971,6 +9974,12 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		if (body.tiers != null && !Array.isArray(body.tiers)) {
 			return res.status(400).json({ success: false, error: 'tiers must be an array if provided' }).end()
+		}
+		if (
+			body.baseMembership != null &&
+			(typeof body.baseMembership !== 'object' || Array.isArray(body.baseMembership))
+		) {
+			return res.status(400).json({ success: false, error: 'baseMembership must be an object if provided' }).end()
 		}
 		if (body.upgradeType != null) {
 			const ut = Number(body.upgradeType)
@@ -10206,6 +10215,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			ownerSignature?: string
 			shareTokenMetadata?: Record<string, unknown>
 			tiers?: Array<Record<string, unknown>>
+			baseMembership?: Record<string, unknown> | null
 			upgradeType?: number
 			transferWhitelistEnabled?: boolean
 		}
@@ -10234,6 +10244,12 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		if (!Array.isArray(body.tiers) || body.tiers.length === 0) {
 			return res.status(400).json({ success: false, error: 'tiers array is required' }).end()
+		}
+		if (
+			body.baseMembership != null &&
+			(typeof body.baseMembership !== 'object' || Array.isArray(body.baseMembership))
+		) {
+			return res.status(400).json({ success: false, error: 'baseMembership must be an object if provided' }).end()
 		}
 		if (body.upgradeType != null) {
 			const ut = Number(body.upgradeType)
@@ -10756,6 +10772,27 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(checked.status).json({ success: false, error: checked.error }).end()
 		}
 		postLocalhost('/api/registerPushDevice', checked.payload, res)
+	})
+
+	/**
+	 * Cluster read: whether this EOA already has push device row(s).
+	 * POS PWA calls on /home; if registered=false → re-bind + registerPushDevice.
+	 */
+	router.post('/pushDeviceStatus', async (req, res) => {
+		const checked = pushDeviceStatusPreCheck(req.body)
+		if (!checked.ok) {
+			return res.status(checked.status).json({ success: false, error: checked.error }).end()
+		}
+		try {
+			const out = await pushDeviceStatusProcess({
+				eoa: String(checked.payload.eoa),
+				scope: checked.payload.scope === 'pos' ? 'pos' : 'any',
+			})
+			return res.status(200).json(out).end()
+		} catch (e: any) {
+			logger(Colors.red(`[pushDeviceStatus] ${e?.message ?? e}`))
+			return res.status(500).json({ success: false, error: 'Internal error' }).end()
+		}
 	})
 
 	/** Sync app icon / chat unread badge after local messageCount changes. */
