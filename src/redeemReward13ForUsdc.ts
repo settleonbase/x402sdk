@@ -39,7 +39,7 @@ const FACTORY_QUOTE_IFACE = new ethers.Interface([
 	'function quoteCurrencyAmountInUSDC6(uint8 currency, uint256 amount6) view returns (uint256)',
 ])
 
-export const REDEEM_REWARD13_EIP712_TYPES = {
+export const REDEEM_REWARD13_EIP712_TYPES: Record<string, Array<{ name: string; type: string }>> = {
 	RedeemReward13ForUsdc: [
 		{ name: 'card', type: 'address' },
 		{ name: 'userEOA', type: 'address' },
@@ -48,7 +48,7 @@ export const REDEEM_REWARD13_EIP712_TYPES = {
 		{ name: 'deadline', type: 'uint256' },
 		{ name: 'nonce', type: 'bytes32' },
 	],
-} as const
+}
 
 const usedNonces = new Set<string>()
 
