@@ -37,6 +37,8 @@ export const CHARGE_REWARD_V2_IFACE = new ethers.Interface([
 	'function rewardMintBudget13() view returns (uint256)',
 	'function fundSocialExchangeUsdcEscrow(address payerEOA, uint256 amount6)',
 	'function rewardEscrowUsdc6() view returns (uint256)',
+	'function burnSocialPointsFromUserForExchange(address userEOA, uint256 pointsCost)',
+	'function payoutSocialExchangeUsdcToUser(address userEOA, uint256 usdcReward6)',
 ])
 
 export const INITIALIZE_CARD_USER_CUMUL_STAT_SELECTOR =

@@ -46,6 +46,7 @@ import {
 	aaInstitutionalV2ProposeSetPolicyPreCheck,
 	aaInstitutionalV2VotePreCheck,
 } from '../aaInstitutionalV2Multisig'
+import { redeemReward13ForUsdcPreCheck } from '../redeemReward13ForUsdc'
 import {
 	kickReferralRegistryRedeemRelay,
 	referralRegistryRedeemPool,
@@ -9807,6 +9808,30 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			)
 		)
 		postLocalhost('/api/cardCouponOpenClaim', preCheck.preChecked, res)
+	})
+
+	/** redeemReward13ForUsdc：burn AA #13 then pay CONET-USDC to EOA. Cluster precheck, Master waits both receipts. */
+	router.post('/redeemReward13ForUsdc', async (req, res) => {
+		const preCheck = await redeemReward13ForUsdcPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(Colors.red(`server /api/redeemReward13ForUsdc preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/redeemReward13ForUsdc preCheck OK, forwarding to master`),
+			inspect(
+				{
+					cardAddress: preCheck.preChecked.cardAddress,
+					userEOA: preCheck.preChecked.userEOA,
+					pointsCost: preCheck.preChecked.pointsCost,
+					usdcReward6: preCheck.preChecked.usdcReward6,
+				},
+				false,
+				2,
+				true,
+			),
+		)
+		postLocalhost('/api/redeemReward13ForUsdc', preCheck.preChecked, res)
 	})
 
 	/** cardCouponPosClaim：POS Balance 一键领取（NFC 私钥 → openClaim；QR/钱包 → cardCouponPosClaimPrepare + Submit）。 */

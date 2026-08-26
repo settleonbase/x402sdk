@@ -74,6 +74,10 @@ import {
 import { syncIssuedCouponSocialPromotionMetadata } from './issuedCouponSocialPromotionMetadataSync'
 import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { pushCardGatewayRewardPoolTask } from '../userCumulativeStatRewardPoolMaster'
+import {
+	kickRedeemReward13ForUsdcProcess,
+	redeemReward13ForUsdcPool,
+} from '../redeemReward13ForUsdc'
 import { applyExcludeUserCard, warmDynamicApiExcludedUserCardsFromDb } from '../excludeUserCardApi'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback, resolveBeamioAaOnConet } from './resolveBeamioAaViaUserCardFactory'
@@ -2290,6 +2294,34 @@ const routing = ( router: Router ) => {
 			purchasingCardProcess().catch((err: any) => {
 				logger(Colors.red('[purchasingCardProcess] unhandled error (fire-and-forget):'), err?.message ?? err)
 			})
+		})
+
+		router.post('/redeemReward13ForUsdc', (req, res) => {
+			redeemReward13ForUsdcPool.push({
+				cardAddress: String(req.body?.cardAddress ?? ''),
+				userEOA: String(req.body?.userEOA ?? ''),
+				pointsCost: String(req.body?.pointsCost ?? ''),
+				usdcReward6: String(req.body?.usdcReward6 ?? ''),
+				deadline: Number(req.body?.deadline ?? 0),
+				nonce: String(req.body?.nonce ?? ''),
+				userSignature: String(req.body?.userSignature ?? ''),
+				res,
+			})
+			logger(
+				` Master GOT /api/redeemReward13ForUsdc doing redeemReward13ForUsdcProcess...`,
+				inspect(
+					{
+						cardAddress: req.body?.cardAddress,
+						userEOA: req.body?.userEOA,
+						pointsCost: req.body?.pointsCost,
+						usdcReward6: req.body?.usdcReward6,
+					},
+					false,
+					3,
+					true,
+				),
+			)
+			kickRedeemReward13ForUsdcProcess()
 		})
 
 		/** USDC Topup（cluster 已完成完整预检）：master 直接入 purchasingCard 队列执行。 */
