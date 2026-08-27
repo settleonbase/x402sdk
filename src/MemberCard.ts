@@ -78,6 +78,7 @@ import {
 	BEAMIO_AA_FACTORY_V2,
 	CONET_AA_FACTORY,
 	CONET_CARD_FACTORY,
+	isConetUserCardBeaconConfigured,
 	CONET_BUINT,
 	CONET_BUNIT_AIRDROP_ADDRESS,
 	CONET_BUNIT_AIRDROP_PREVIOUS_ADDRESS,
@@ -13746,6 +13747,9 @@ export type CreateCardPreChecked = {
 /** Reload limits are expressed as USDC bounds, then converted to the card currency for whole-unit metadata. `0` = no minimum floor. */
 const CREATE_CARD_TOPUP_MIN_USDC_UNITS = 0
 const CREATE_CARD_TOPUP_LIMIT_USDC_UNITS = 50000
+/** Silent defaults for new non-membership cards when the client omits min/max (bizSite hides the fields). */
+const CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MIN_TOPUP = 1
+const CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MAX_TOPUP = CREATE_CARD_TOPUP_LIMIT_USDC_UNITS
 const CREATE_CARD_ORACLE_CAD_USDC_FALLBACK = 0.740
 const CREATE_CARD_DISPLAY_NAME_MAX_LEN = 128
 const CREATE_CARD_SYMBOL_MAX_LEN = 32
@@ -13843,6 +13847,18 @@ function parseCreateCardTopupWholeUnit(v: unknown): number | undefined {
 		if (Number.isFinite(n) && Number.isFinite(f) && f === n && n >= 0) return n
 	}
 	return undefined
+}
+
+function createCardIsMembershipFeeMode(body: { tiers?: unknown; baseMembership?: unknown }): boolean {
+	return shouldSkipFactoryTiersForCreate(
+		Array.isArray(body.tiers) ? (body.tiers as MembershipFeeMetadataTiers[]) : undefined,
+		{
+			...(body.baseMembership != null && typeof body.baseMembership === 'object'
+				? { baseMembership: body.baseMembership as Record<string, unknown> }
+				: {}),
+			...(Array.isArray(body.tiers) ? { tiers: body.tiers } : {}),
+		},
+	)
 }
 
 function createCardTopupLimitMaxUnitsForCurrency(currencyRaw: string | undefined | null): number {
@@ -14068,8 +14084,12 @@ export const createCardPreCheck = (body: {
 				}
 			}
 		}
-		const minTu = parseCreateCardTopupWholeUnit(stm.minimumTopup ?? stm.minTopup)
-		const maxTu = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
+		let minTu = parseCreateCardTopupWholeUnit(stm.minimumTopup ?? stm.minTopup)
+		let maxTu = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
+		if (!createCardIsMembershipFeeMode(body)) {
+			if (minTu == null) minTu = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MIN_TOPUP
+			if (maxTu == null) maxTu = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MAX_TOPUP
+		}
 		const topupLimitMinUnits = createCardTopupLimitMinUnitsForCurrency(body.currency)
 		const topupLimitMaxUnits = createCardTopupLimitMaxUnitsForCurrency(body.currency)
 		if (minTu != null && minTu < topupLimitMinUnits) {
@@ -14265,8 +14285,12 @@ export const createCardPreCheck = (body: {
 			const bg = stm.backgroundColor.trim()
 			if (bg.length > 0 && bg.length <= 64) meta.backgroundColor = bg
 		}
-		const minTup = parseCreateCardTopupWholeUnit(stm.minimumTopup ?? stm.minTopup)
-		const maxTup = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
+		let minTup = parseCreateCardTopupWholeUnit(stm.minimumTopup ?? stm.minTopup)
+		let maxTup = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
+		if (!createCardIsMembershipFeeMode({ tiers: body.tiers, baseMembership: body.baseMembership })) {
+			if (minTup == null) minTup = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MIN_TOPUP
+			if (maxTup == null) maxTup = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MAX_TOPUP
+		}
 		if (minTup != null) meta.minimumTopup = minTup
 		if (maxTup != null) meta.maximumTopup = maxTup
 		if (stm.displayName != null && typeof stm.displayName === 'string') {
@@ -15113,10 +15137,14 @@ export const createCardPoolPress = async () => {
 						minUsdc6: t.minUsdc6,
 						attr: Number(t.attr ?? i),
 						tierExpirySeconds: Number(t.tierExpirySeconds ?? 0), // 0 => 使用卡全局 expirySeconds
+						upgradeByBalance: Boolean(t.upgradeByBalance),
 					}))
 				: undefined
 		const skipAndTiers =
-			skipMembershipTiers || !mappedTiers || isBasicOnlyCreateCardTiers(mappedTiers)
+			skipMembershipTiers ||
+			!mappedTiers ||
+			isBasicOnlyCreateCardTiers(mappedTiers) ||
+			isConetUserCardBeaconConfigured()
 		const tiersForCreate = !skipAndTiers ? mappedTiers : undefined
 		// 0 = top-up (explicit for membership-fee cards); 1 = balance; 2 = cumulative
 		const ut = upgradeType === 0 || upgradeType === 1 || upgradeType === 2 ? upgradeType : undefined

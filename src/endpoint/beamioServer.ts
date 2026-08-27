@@ -10287,6 +10287,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			minUsdc6: BigInt(t.minUsdc6 ?? t[0]).toString(),
 			attr: Number(t.attr ?? t[1]),
 			tierExpirySeconds: BigInt(t.tierExpirySeconds ?? t[2]).toString(),
+			upgradeByBalance: Boolean(t.upgradeByBalance ?? t[3]),
 		}))
 		if (chainTiers.length === 0) {
 			return res.status(400).json({ success: false, error: 'setTiers requires at least one tier' }).end()
@@ -10308,7 +10309,12 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				return res.status(400).json({ success: false, error: `tiers[${i}] must be an object` }).end()
 			}
 			const chain = chainTiers[i]
-			if (!chain || String(meta.minUsdc6) !== chain.minUsdc6 || Number(meta.attr) !== chain.attr) {
+			if (
+				!chain ||
+				String(meta.minUsdc6) !== chain.minUsdc6 ||
+				Number(meta.attr) !== chain.attr ||
+				Boolean(meta.upgradeByBalance) !== chain.upgradeByBalance
+			) {
 				return res.status(400).json({ success: false, error: `tiers[${i}] metadata does not match setTiers calldata` }).end()
 			}
 		}

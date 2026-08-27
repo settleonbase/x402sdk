@@ -990,9 +990,9 @@ export async function createBeamioCardWithFactoryReturningHash(
 
   const skipMembershipTiers = shouldSkipFactoryTiersForCreate(tiers as MembershipFeeMetadataTiers[] | undefined)
   const candidateTiers = skipMembershipTiers ? [] : normalizeTiersForCreateCard(tiers)
-  const skipBasicOnlyTiers = !skipMembershipTiers && candidateTiers.length <= 1
   const skipBeaconAndTiers =
-    !skipMembershipTiers && candidateTiers.length > 1 && isConetUserCardBeaconConfigured()
+    !skipMembershipTiers && candidateTiers.length > 0 && isConetUserCardBeaconConfigured()
+  const skipBasicOnlyTiers = !skipMembershipTiers && !skipBeaconAndTiers && candidateTiers.length <= 1
   const normalizedTiers =
     skipMembershipTiers || skipBasicOnlyTiers || skipBeaconAndTiers ? [] : candidateTiers
   emitCreateCardTiersJson(
@@ -1007,13 +1007,13 @@ export async function createBeamioCardWithFactoryReturningHash(
     console.warn(
       '[CCSA] createCard metadata declares membership fees; using createCardCollectionWithInitCode (no Factory AndTiers).',
     )
+  } else if (skipBeaconAndTiers) {
+    console.warn(
+      '[CCSA] createCard Beacon proxy: skip Factory AndTiers (live Factory AndTiers is 3-tuple; Beacon card setTiers is 4-arg). Client applies 4-arg setTiers via executeForOwner.',
+    )
   } else if (skipBasicOnlyTiers) {
     console.warn(
       '[CCSA] createCard has only the base loyalty tier; using createCardCollectionWithInitCode (no Factory AndTiers).',
-    )
-  } else if (skipBeaconAndTiers) {
-    console.warn(
-      '[CCSA] createCard Beacon proxy: skip Factory AndTiers (live Beacon appendTier is 4-arg; Factory still calls 3-arg). Extra tiers stay in metadata.',
     )
   } else if (tiers?.length && normalizedTiers.length === 0) {
     console.warn(
