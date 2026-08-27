@@ -698,6 +698,14 @@ export function normalizeTiersForCreateCard(
 }
 
 /**
+ * Default/base loyalty row (0 or 1 on-chain-eligible tier) does not need Factory AndTiers.
+ * Live Beacon impl only exposes 4-arg `appendTier`; Factory AndTiers still calls 3-arg and reverts.
+ */
+export function isBasicOnlyCreateCardTiers(tiers: CreateCardTier[] | undefined): boolean {
+  return normalizeTiersForCreateCard(tiers).length <= 1
+}
+
+/**
  * Live CoNET Factory AndTiers is 3-tuple (selector 0x9a7eb0f0).
  * Do not call `factory.createCardCollectionWithInitCodeAndTiers` on the Hardhat
  * artifact ABI — that encodes 4-tuple `upgradeByBalance` (0x62cb913c) and throws
@@ -880,7 +888,9 @@ function appendSnapshotToErrorMessage(base: string, snapshot: CreateCardChainDeb
   }
 }
 
-/** 同 createBeamioCardWithFactory，但返回 { cardAddress, hash } 供 daemon 回传 tx hash 给 UI。可选 tiers 时使用 createCardCollectionWithInitCodeAndTiers 一次性部署+配置 */
+/** Same as createBeamioCardWithFactory, plus `{ cardAddress, hash }`.
+ * AndTiers only when there are 2+ on-chain-eligible loyalty rows, no membership fee, and not Beacon create.
+ * Base-only (0 or 1 row) skips AndTiers and uses `createCardCollectionWithInitCode`. */
 export async function createBeamioCardWithFactoryReturningHash(
   factory: ethers.Contract,
   cardOwner: string,
@@ -978,8 +988,13 @@ export async function createBeamioCardWithFactoryReturningHash(
     }
   }
 
-  const skipFactoryTiers = shouldSkipFactoryTiersForCreate(tiers as MembershipFeeMetadataTiers[] | undefined)
-  const normalizedTiers = skipFactoryTiers ? [] : normalizeTiersForCreateCard(tiers)
+  const skipMembershipTiers = shouldSkipFactoryTiersForCreate(tiers as MembershipFeeMetadataTiers[] | undefined)
+  const candidateTiers = skipMembershipTiers ? [] : normalizeTiersForCreateCard(tiers)
+  const skipBasicOnlyTiers = !skipMembershipTiers && candidateTiers.length <= 1
+  const skipBeaconAndTiers =
+    !skipMembershipTiers && candidateTiers.length > 1 && isConetUserCardBeaconConfigured()
+  const normalizedTiers =
+    skipMembershipTiers || skipBasicOnlyTiers || skipBeaconAndTiers ? [] : candidateTiers
   emitCreateCardTiersJson(
     'CCSA.createBeamioCardWithFactoryReturningHash.normalizedTiersForChain',
     normalizedTiers.map((t) => ({
@@ -988,9 +1003,17 @@ export async function createBeamioCardWithFactoryReturningHash(
       tierExpirySeconds: t.tierExpirySeconds.toString(),
     })),
   )
-  if (skipFactoryTiers) {
+  if (skipMembershipTiers) {
     console.warn(
       '[CCSA] createCard metadata declares membership fees; using createCardCollectionWithInitCode (no Factory AndTiers).',
+    )
+  } else if (skipBasicOnlyTiers) {
+    console.warn(
+      '[CCSA] createCard has only the base loyalty tier; using createCardCollectionWithInitCode (no Factory AndTiers).',
+    )
+  } else if (skipBeaconAndTiers) {
+    console.warn(
+      '[CCSA] createCard Beacon proxy: skip Factory AndTiers (live Beacon appendTier is 4-arg; Factory still calls 3-arg). Extra tiers stay in metadata.',
     )
   } else if (tiers?.length && normalizedTiers.length === 0) {
     console.warn(

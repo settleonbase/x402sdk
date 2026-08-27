@@ -109,6 +109,7 @@ import {
 import {
 	createBeamioCardWithFactory,
 	createBeamioCardWithFactoryReturningHash,
+	isBasicOnlyCreateCardTiers,
 	assertBeamioUserCardLinkedDeployedBytecodeFitsEip170,
 	type BeamioUserCardLibraryAddresses,
 } from './CCSA'
@@ -13633,7 +13634,7 @@ export const createBeamioCardAdmin = async (
 
 /** 同 createBeamioCardAdmin，但返回 { cardAddress, hash } 供 createCardPoolPress 回传 tx hash。
  * @param factoryOverride 当 createCardPoolPress 传入 shift 出的 SC.baseFactoryPaymaster 时使用，确保使用正确的 signer（owner/paymaster）
- * @param tiers 可选，创建时一并传入链上（createCardCollectionWithInitCodeAndTiers） */
+ * @param tiers 可选；仅多于一档且非会员费卡才走 Factory AndTiers。只有基本档则跳过。 */
 export const createBeamioCardAdminWithHash = async (
 	cardOwner: string,
 	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD',
@@ -14891,18 +14892,21 @@ export const createCardPoolPress = async () => {
 	)
 
 	try {
-		const skipFactoryTiers = shouldSkipFactoryTiersForCreate(tiers, {
+		const skipMembershipTiers = shouldSkipFactoryTiersForCreate(tiers, {
 			...(baseMembership && { baseMembership }),
 			...(tiers && { tiers }),
 		})
-		const tiersForCreate =
-			!skipFactoryTiers && tiers && tiers.length > 0
+		const mappedTiers =
+			tiers && tiers.length > 0
 				? tiers.map((t, i) => ({
 						minUsdc6: t.minUsdc6,
 						attr: Number(t.attr ?? i),
 						tierExpirySeconds: Number(t.tierExpirySeconds ?? 0), // 0 => 使用卡全局 expirySeconds
 					}))
 				: undefined
+		const skipAndTiers =
+			skipMembershipTiers || !mappedTiers || isBasicOnlyCreateCardTiers(mappedTiers)
+		const tiersForCreate = !skipAndTiers ? mappedTiers : undefined
 		// 0 = top-up (explicit for membership-fee cards); 1 = balance; 2 = cumulative
 		const ut = upgradeType === 0 || upgradeType === 1 || upgradeType === 2 ? upgradeType : undefined
 		const { cardAddress, hash } = await createBeamioCardAdminWithHash(

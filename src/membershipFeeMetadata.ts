@@ -199,6 +199,7 @@ export async function readCardMembershipFeeModeFromMetadata(
 /**
  * Membership-fee cards must not pass tiers to Factory AndTiers (use initCode-only create).
  * Pass optional metadata so baseMembership-only cards (no tiers[]) still skip AndTiers.
+ * Loyalty cards with only the default/base row skip AndTiers in CCSA (`isBasicOnlyCreateCardTiers`).
  */
 export function shouldSkipFactoryTiersForCreate(
 	tiers: MembershipFeeMetadataTiers[] | undefined | null,
