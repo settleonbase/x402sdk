@@ -40,12 +40,19 @@ export const BASE_CARD_FACTORY = '0xF2864210577359AcaE448D2B116031a0c5EE1016'
 /**
  * createCardCollectionWithInitCode(address,uint8,uint256,bytes) — selector 0xef759095
  * createCardCollectionWithInitCodeAndTiers(..., (uint256,uint256,uint256)[]) — selector 0x9a7eb0f0
- * 编码须用完整 Factory ABI（如 ABI/BeamioUserCardFactoryPaymaster.json），勿把两函数 selector 混用：
- * 用 0x9a7eb0f0 调 4 参、或用精简 ABI 导致缺少 AndTiers，均会整笔 revert。
+ *
+ * CoNET live Factory AndTiers is **3-tuple only**. Encode with the explicit 3-tuple
+ * fragment (`encodeCreateCardCollectionWithInitCodeAndTiersCalldata` in CCSA.ts).
+ * Hardhat V07 source compiles 4-tuple (`upgradeByBalance`) → selector 0x62cb913c,
+ * which is **not** on the live Factory. Never send 0x62cb913c. Do not upgrade Factory
+ * to add it. Calling the artifact ABI method throws
+ * `missing value for component upgradeByBalance` before RPC.
  */
 export const FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_SELECTOR = '0xef759095' as const
-/** 5 参工厂方法（含 Tier[]）；与 4 参方法并存，勿与 0xef759095 混淆 */
+/** Live CoNET AndTiers (3-tuple Tier). Do not confuse with 0xef759095 or 0x62cb913c. */
 export const FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_SELECTOR = '0x9a7eb0f0' as const
+/** @deprecated Hardhat 4-tuple AndTiers (includes upgradeByBalance). Not on live CoNET Factory. */
+export const FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_4TUPLE_SELECTOR = '0x62cb913c' as const
 /**
  * BeamioUserCardFormattingLib（发卡 initCode 链接用）。必须与当前 npm 编译产物 linkReferences 一致；
  * 旧地址会导致 initCode 与链上库 bytecode 不匹配，CREATE / AndTiers 整笔 revert（见成功 tx 0xda9bd5d5… 与失败 0xe67c4054… 对比）。

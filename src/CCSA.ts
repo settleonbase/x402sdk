@@ -17,6 +17,8 @@ import {
   BASE_BEAMIO_USER_CARD_VIEWS_LIB,
   BASE_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB,
   BASE_CARD_FACTORY,
+  FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_4TUPLE_SELECTOR,
+  FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_SELECTOR,
   isConetUserCardBeaconConfigured,
 } from './chainAddresses'
 import { buildBeamioUserCardBeaconProxyInitCode } from './beamioUserCardBeaconInitCode'
@@ -609,7 +611,7 @@ export async function createBeamioCardWithFactory(
             '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
             '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
             '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（BM_DeployFailedAtStep 2–4）；\n' +
-            '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero），或 Factory ABI 缺少 createCardCollectionWithInitCodeAndTiers。\n' +
+            '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero）；或误用 Hardhat 4-tuple ABI（upgradeByBalance / 0x62cb913c）。现网须 3-tuple 0x9a7eb0f0。\n' +
             (hint ? hint : '') +
             (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
             (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
@@ -672,11 +674,17 @@ export type CreateCardTier = {
  * 若调用方传了占位 tier（0 门槛），应退回无 tiers 的 createCardCollectionWithInitCode，避免整笔 revert。
  * CoNET Factory AndTiers ABI is 3-tuple (no upgradeByBalance).
  */
+export type NormalizedCreateCardTier = {
+  minUsdc6: bigint
+  attr: bigint
+  tierExpirySeconds: bigint
+}
+
 export function normalizeTiersForCreateCard(
   tiers: CreateCardTier[] | undefined,
-): { minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint }[] {
+): NormalizedCreateCardTier[] {
   if (!tiers?.length) return []
-  const out: { minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint }[] = []
+  const out: NormalizedCreateCardTier[] = []
   for (const t of tiers) {
     const min = BigInt(t.minUsdc6)
     if (min <= 0n) continue
@@ -687,6 +695,64 @@ export function normalizeTiersForCreateCard(
     })
   }
   return out
+}
+
+/**
+ * Live CoNET Factory AndTiers is 3-tuple (selector 0x9a7eb0f0).
+ * Do not call `factory.createCardCollectionWithInitCodeAndTiers` on the Hardhat
+ * artifact ABI — that encodes 4-tuple `upgradeByBalance` (0x62cb913c) and throws
+ * `missing value for component upgradeByBalance` before RPC.
+ */
+const CONET_FACTORY_AND_TIERS_IFACE = new ethers.Interface([
+  'function createCardCollectionWithInitCodeAndTiers(address cardOwner,uint8 currency,uint256 priceInCurrencyE6,bytes initCode,(uint256 minUsdc6,uint256 attr,uint256 tierExpirySeconds)[] tiers) returns (address card)',
+])
+
+export function encodeCreateCardCollectionWithInitCodeAndTiersCalldata(
+  cardOwner: string,
+  currencyEnum: number,
+  priceE6: bigint,
+  initCode: string,
+  tiers: NormalizedCreateCardTier[],
+): string {
+  const data = CONET_FACTORY_AND_TIERS_IFACE.encodeFunctionData(
+    'createCardCollectionWithInitCodeAndTiers',
+    [cardOwner, currencyEnum, priceE6, initCode, tiers],
+  )
+  const sel = data.slice(0, 10).toLowerCase()
+  if (sel !== FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_SELECTOR) {
+    throw new Error(
+      `AndTiers calldata selector ${sel} is not CoNET 3-tuple ${FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_SELECTOR}. ` +
+        `Do not encode upgradeByBalance (4-tuple ${FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_4TUPLE_SELECTOR}).`,
+    )
+  }
+  return data
+}
+
+async function sendCreateCardCollectionWithInitCodeAndTiers(
+  factory: ethers.Contract,
+  cardOwner: string,
+  currencyEnum: number,
+  priceE6: bigint,
+  initCode: string,
+  tiers: NormalizedCreateCardTier[],
+  gasLimit: bigint,
+): Promise<ethers.TransactionResponse> {
+  const signer = factory.runner
+  if (!signer || typeof (signer as ethers.Signer).sendTransaction !== 'function') {
+    throw new Error('Factory contract has no signer. Cannot send AndTiers createCard.')
+  }
+  const data = encodeCreateCardCollectionWithInitCodeAndTiersCalldata(
+    cardOwner,
+    currencyEnum,
+    priceE6,
+    initCode,
+    tiers,
+  )
+  return (signer as ethers.Signer).sendTransaction({
+    to: await resolveFactoryAddressForInitCode(factory),
+    data,
+    gasLimit,
+  })
 }
 
 async function resolveFactoryAddressForInitCode(factory: ethers.Contract): Promise<string> {
@@ -962,17 +1028,18 @@ export async function createBeamioCardWithFactoryReturningHash(
     normalizedTierCount: normalizedTiers.length,
   })
 
-  let tx: ethers.ContractTransactionResponse
+  let tx: ethers.TransactionResponse
   let receipt: ethers.TransactionReceipt | null = null
   try {
     if (normalizedTiers.length > 0) {
-      tx = await factory.createCardCollectionWithInitCodeAndTiers(
+      tx = await sendCreateCardCollectionWithInitCodeAndTiers(
+        factory,
         cardOwner,
         currencyEnum,
         priceE6,
         initCode,
         normalizedTiers,
-        { gasLimit },
+        gasLimit,
       )
     } else {
       tx = await factory.createCardCollectionWithInitCode(
@@ -1023,7 +1090,7 @@ export async function createBeamioCardWithFactoryReturningHash(
             '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
             '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
             '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（BM_DeployFailedAtStep 2–4）；\n' +
-            '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero），或 Factory ABI 缺少 createCardCollectionWithInitCodeAndTiers。\n' +
+            '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero）；或误用 Hardhat 4-tuple ABI（upgradeByBalance / 0x62cb913c）。现网须 3-tuple 0x9a7eb0f0。\n' +
             (hint ? hint : '') +
             (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
             (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
