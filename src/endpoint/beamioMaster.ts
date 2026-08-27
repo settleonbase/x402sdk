@@ -1722,7 +1722,8 @@ const routing = ( router: Router ) => {
 				priceInCurrencyE6: string
 				uri?: string
 				shareTokenMetadata?: { name?: string; description?: string; image?: string }
-				tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
+				tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean; upgradeByCharge?: boolean }>
+				upgradeType?: 0 | 1 | 2
 				/** Set by Cluster when BusinessStartKet #0 must be burned before deploy */
 				businessStartKetBurnFrom?: string
 				createCardOwnerAsRequested?: string

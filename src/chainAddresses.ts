@@ -41,7 +41,11 @@ export const BASE_CARD_FACTORY = '0xF2864210577359AcaE448D2B116031a0c5EE1016'
  * createCardCollectionWithInitCode(address,uint8,uint256,bytes) — selector 0xef759095
  * createCardCollectionWithInitCodeAndTiers(..., (uint256,uint256,uint256)[]) — selector 0x9a7eb0f0
  *
- * CoNET live Factory AndTiers is **3-tuple only**. Encode with the explicit 3-tuple
+ * New merchant cards: `createCardCollectionWithInitCode` then serial `appendTierForCard`
+ * (4-arg: minUsdc6, attr, tierExpirySeconds, upgradeByBalance). Do not send AndTiers
+ * (`0x9a7eb0f0`) or Hardhat 4-tuple AndTiers (`0x62cb913c`) on the create path.
+ *
+ * CoNET live Factory AndTiers is **3-tuple only** (legacy). Encode with the explicit 3-tuple
  * fragment (`encodeCreateCardCollectionWithInitCodeAndTiersCalldata` in CCSA.ts).
  * Hardhat V07 source compiles 4-tuple (`upgradeByBalance`) → selector 0x62cb913c,
  * which is **not** on the live Factory. Never send 0x62cb913c. Do not upgrade Factory

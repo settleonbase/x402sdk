@@ -5163,6 +5163,8 @@ export const registerCardToDb = async (params: {
 		image?: string
 		backgroundColor?: string
 		upgradeByBalance?: boolean
+		/** Metadata-only; Charge vs Top-up distinguished by upgradeType === 2. */
+		upgradeByCharge?: boolean
 		membershipFeeE6?: string
 		membershipFee?: string | number
 		membershipDurationKind?: number

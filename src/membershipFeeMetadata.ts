@@ -1,6 +1,8 @@
 /**
  * Membership-fee cards: metadata is the source of truth (not on-chain setMembershipFees).
- * CoNET Factory AndTiers uses 3-tuple Tier (no upgradeByBalance); membership-fee cards skip Factory tiers entirely.
+ * New non-membership loyalty cards: createCardCollectionWithInitCode, then serial
+ * Factory `appendTierForCard` (4-arg, including a single base row). Do not send AndTiers
+ * (0x9a7eb0f0 / 0x62cb913c). Membership-fee cards skip Factory append entirely.
  *
  * Product model: baseMembership = index 0 (not Add-tier); tiers[] = higher paid memberships only.
  * Membership NFT tokenId ∈ [100, 1e11). Leftover #0 is program points, not a membership NFT.
@@ -197,9 +199,9 @@ export async function readCardMembershipFeeModeFromMetadata(
 }
 
 /**
- * Membership-fee cards must not pass tiers to Factory AndTiers (use initCode-only create).
- * Pass optional metadata so baseMembership-only cards (no tiers[]) still skip AndTiers.
- * Loyalty cards with only the default/base row skip AndTiers in CCSA (`isBasicOnlyCreateCardTiers`).
+ * Membership-fee cards must not pass tiers to Factory create (use initCode-only create; no append).
+ * Pass optional metadata so baseMembership-only cards (no tiers[]) still skip Factory tiers.
+ * Non-membership loyalty cards always append via `appendTierForCard` (including a single base row).
  */
 export function shouldSkipFactoryTiersForCreate(
 	tiers: MembershipFeeMetadataTiers[] | undefined | null,

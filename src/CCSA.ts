@@ -159,11 +159,19 @@ function tryNormalizeLibAddress(s: string | undefined): string | undefined {
  */
 /** 与 Master 失败笔对齐：gas 上限需覆盖 ~25KB initCode 的 CREATE；可用 BEAMIO_CREATE_CARD_GAS_LIMIT 覆盖 */
 const DEFAULT_CREATE_CARD_GAS_LIMIT = 8_500_000n
+/** Factory appendTierForCard after create; available via BEAMIO_APPEND_TIER_GAS_LIMIT */
+const DEFAULT_APPEND_TIER_GAS_LIMIT = 1_000_000n
 
 function getCreateCardGasLimit(): bigint {
   const raw = typeof process !== 'undefined' ? process.env?.BEAMIO_CREATE_CARD_GAS_LIMIT?.trim() : undefined
   if (raw && /^\d+$/.test(raw)) return BigInt(raw)
   return DEFAULT_CREATE_CARD_GAS_LIMIT
+}
+
+function getAppendTierForCardGasLimit(): bigint {
+  const raw = typeof process !== 'undefined' ? process.env?.BEAMIO_APPEND_TIER_GAS_LIMIT?.trim() : undefined
+  if (raw && /^\d+$/.test(raw)) return BigInt(raw)
+  return DEFAULT_APPEND_TIER_GAS_LIMIT
 }
 
 export function resolveBeamioUserCardLibraryAddresses(
@@ -607,11 +615,11 @@ export async function createBeamioCardWithFactory(
       const hint = createCardRevertHint(decoded)
       throw new Error(
         appendSnapshotToErrorMessage(
-          `createCardCollectionWithInitCode(或 WithInitCodeAndTiers) 链上执行 revert（${reasonLine}）。常见原因：\n` +
+          `createCardCollectionWithInitCode 链上执行 revert（${reasonLine}）。常见原因：\n` +
             '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
             '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
             '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（BM_DeployFailedAtStep 2–4）；\n' +
-            '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero）；或误用 Hardhat 4-tuple ABI（upgradeByBalance / 0x62cb913c）。现网须 3-tuple 0x9a7eb0f0。\n' +
+            '  4) 新卡 loyalty 档在 create 成功后走 appendTierForCard（4 参），禁止发 AndTiers 0x9a7eb0f0 / 0x62cb913c。\n' +
             (hint ? hint : '') +
             (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
             (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
@@ -658,30 +666,42 @@ export async function createBeamioCardWithFactory(
   return out
 }
 
-/** Tier 结构（CoNET Factory AndTiers：3 元组 minUsdc6 / attr / tierExpirySeconds） */
+/** Loyalty tier for createCard. New cards use 4-arg Factory `appendTierForCard`, not AndTiers. */
 export type CreateCardTier = {
   minUsdc6: bigint | string
   attr: number
   tierExpirySeconds?: number | bigint
-  /** Metadata-only; not sent to Factory AndTiers on CoNET. */
+  /** Maps to appendTierForCard `upgradeByBalance`. upgradeType 1 (balance) ⇒ true. */
   upgradeByBalance?: boolean
+  /** Metadata-only Charge flag (`upgradeType === 2`). Not in live 4-tuple ABI. */
+  upgradeByCharge?: boolean
   membershipFeeE6?: string
   membershipDurationKind?: number
 }
 
 /**
- * 过滤 minUsdc6<=0 的档；链上 appendTier 要求 minUsdc6>0（UC_TierMinZero）。
- * 若调用方传了占位 tier（0 门槛），应退回无 tiers 的 createCardCollectionWithInitCode，避免整笔 revert。
- * CoNET Factory AndTiers ABI is 3-tuple (no upgradeByBalance).
+ * Filter minUsdc6<=0 (UC_TierMinZero). Eligible rows are appended after createCardCollectionWithInitCode.
  */
 export type NormalizedCreateCardTier = {
   minUsdc6: bigint
   attr: bigint
   tierExpirySeconds: bigint
+  upgradeByBalance: boolean
+}
+
+export function resolveCreateCardTierUpgradeByBalance(
+  tier: Pick<CreateCardTier, 'upgradeByBalance'>,
+  cardUpgradeType?: 0 | 1 | 2,
+): boolean {
+  if (cardUpgradeType === 0 || cardUpgradeType === 1 || cardUpgradeType === 2) {
+    return cardUpgradeType === 1
+  }
+  return Boolean(tier.upgradeByBalance)
 }
 
 export function normalizeTiersForCreateCard(
   tiers: CreateCardTier[] | undefined,
+  cardUpgradeType?: 0 | 1 | 2,
 ): NormalizedCreateCardTier[] {
   if (!tiers?.length) return []
   const out: NormalizedCreateCardTier[] = []
@@ -692,14 +712,15 @@ export function normalizeTiersForCreateCard(
       minUsdc6: min,
       attr: BigInt(t.attr),
       tierExpirySeconds: BigInt(t.tierExpirySeconds ?? 0),
+      upgradeByBalance: resolveCreateCardTierUpgradeByBalance(t, cardUpgradeType),
     })
   }
   return out
 }
 
 /**
- * Default/base loyalty row (0 or 1 on-chain-eligible tier) does not need Factory AndTiers.
- * Live Beacon impl only exposes 4-arg `appendTier`; Factory AndTiers still calls 3-arg and reverts.
+ * @deprecated New non-membership cards always append eligible tiers (including a single base row).
+ * Kept for diagnostics; do not use to skip Factory append.
  */
 export function isBasicOnlyCreateCardTiers(tiers: CreateCardTier[] | undefined): boolean {
   return normalizeTiersForCreateCard(tiers).length <= 1
@@ -724,7 +745,17 @@ export function encodeCreateCardCollectionWithInitCodeAndTiersCalldata(
 ): string {
   const data = CONET_FACTORY_AND_TIERS_IFACE.encodeFunctionData(
     'createCardCollectionWithInitCodeAndTiers',
-    [cardOwner, currencyEnum, priceE6, initCode, tiers],
+    [
+      cardOwner,
+      currencyEnum,
+      priceE6,
+      initCode,
+      tiers.map((t) => ({
+        minUsdc6: t.minUsdc6,
+        attr: t.attr,
+        tierExpirySeconds: t.tierExpirySeconds,
+      })),
+    ],
   )
   const sel = data.slice(0, 10).toLowerCase()
   if (sel !== FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_SELECTOR) {
@@ -736,7 +767,8 @@ export function encodeCreateCardCollectionWithInitCodeAndTiersCalldata(
   return data
 }
 
-async function sendCreateCardCollectionWithInitCodeAndTiers(
+/** @deprecated New cards use initCode + serial `appendTierForCard`. Do not call from create. */
+export async function sendCreateCardCollectionWithInitCodeAndTiers(
   factory: ethers.Contract,
   cardOwner: string,
   currencyEnum: number,
@@ -772,6 +804,67 @@ async function resolveFactoryAddressForInitCode(factory: ethers.Contract): Promi
   return ethers.getAddress(a)
 }
 
+const CONET_FACTORY_APPEND_TIER_IFACE = new ethers.Interface([
+  'function appendTierForCard(address cardAddr, uint256 minUsdc6, uint256 attr, uint256 tierExpirySeconds, bool upgradeByBalance)',
+])
+
+export function encodeAppendTierForCardCalldata(
+  cardAddr: string,
+  minUsdc6: bigint,
+  attr: bigint,
+  tierExpirySeconds: bigint,
+  upgradeByBalance: boolean,
+): string {
+  const data = CONET_FACTORY_APPEND_TIER_IFACE.encodeFunctionData('appendTierForCard', [
+    cardAddr,
+    minUsdc6,
+    attr,
+    tierExpirySeconds,
+    upgradeByBalance,
+  ])
+  const sel = data.slice(0, 10).toLowerCase()
+  if (
+    sel === FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_SELECTOR ||
+    sel === FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_4TUPLE_SELECTOR
+  ) {
+    throw new Error(
+      `appendTierForCard calldata selector ${sel} collided with AndTiers. ` +
+        `Do not send ${FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_SELECTOR} or ` +
+        `${FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_4TUPLE_SELECTOR}.`,
+    )
+  }
+  return data
+}
+
+async function sendAppendTierForCard(
+  factory: ethers.Contract,
+  cardAddr: string,
+  tier: NormalizedCreateCardTier,
+): Promise<ethers.TransactionReceipt> {
+  const signer = factory.runner
+  if (!signer || typeof (signer as ethers.Signer).sendTransaction !== 'function') {
+    throw new Error('Factory contract has no signer. Cannot send appendTierForCard.')
+  }
+  const data = encodeAppendTierForCardCalldata(
+    cardAddr,
+    tier.minUsdc6,
+    tier.attr,
+    tier.tierExpirySeconds,
+    tier.upgradeByBalance,
+  )
+  const tx = await (signer as ethers.Signer).sendTransaction({
+    to: await resolveFactoryAddressForInitCode(factory),
+    data,
+    gasLimit: getAppendTierForCardGasLimit(),
+  })
+  const receipt = await tx.wait()
+  if (!receipt) throw new Error('appendTierForCard: missing receipt')
+  if (Number(receipt.status) === 0) {
+    throw new Error(`appendTierForCard reverted (tx=${tx.hash})`)
+  }
+  return receipt
+}
+
 function isVerboseCreateCardDebug(): boolean {
   return typeof process !== 'undefined' && process.env?.BEAMIO_CREATE_CARD_DEBUG === '1'
 }
@@ -792,7 +885,10 @@ export async function collectCreateCardChainDebugSnapshot(
     priceE6: bigint
     signerAddress: string
     gasLimit: bigint
-    callKind: 'createCardCollectionWithInitCode' | 'createCardCollectionWithInitCodeAndTiers'
+    callKind:
+      | 'createCardCollectionWithInitCode'
+      | 'createCardCollectionWithInitCodeAndTiers'
+      | 'createCardCollectionWithInitCodeThenAppendTiers'
     initCodeSource: 'prebuiltHex' | 'builtFromOptions'
     gatewayUsedWhenBuilding?: string
     libraryOverride?: BeamioUserCardLibraryAddresses
@@ -889,8 +985,8 @@ function appendSnapshotToErrorMessage(base: string, snapshot: CreateCardChainDeb
 }
 
 /** Same as createBeamioCardWithFactory, plus `{ cardAddress, hash }`.
- * AndTiers only when there are 2+ on-chain-eligible loyalty rows, no membership fee, and not Beacon create.
- * Base-only (0 or 1 row) skips AndTiers and uses `createCardCollectionWithInitCode`. */
+ * Always `createCardCollectionWithInitCode`. Non-membership cards then serial
+ * `appendTierForCard` (4-arg, including a single base loyalty row). Membership-fee cards skip append. */
 export async function createBeamioCardWithFactoryReturningHash(
   factory: ethers.Contract,
   cardOwner: string,
@@ -989,43 +1085,37 @@ export async function createBeamioCardWithFactoryReturningHash(
   }
 
   const skipMembershipTiers = shouldSkipFactoryTiersForCreate(tiers as MembershipFeeMetadataTiers[] | undefined)
-  const candidateTiers = skipMembershipTiers ? [] : normalizeTiersForCreateCard(tiers)
-  const skipBeaconAndTiers =
-    !skipMembershipTiers && candidateTiers.length > 0 && isConetUserCardBeaconConfigured()
-  const skipBasicOnlyTiers = !skipMembershipTiers && !skipBeaconAndTiers && candidateTiers.length <= 1
-  const normalizedTiers =
-    skipMembershipTiers || skipBasicOnlyTiers || skipBeaconAndTiers ? [] : candidateTiers
+  const cardUpgradeType: 0 | 1 | 2 | undefined =
+    typeof initCodeOrOptions === 'object'
+      ? initCodeOrOptions.upgradeType === 1 || initCodeOrOptions.upgradeType === 2
+        ? initCodeOrOptions.upgradeType
+        : 0
+      : undefined
+  const tiersToAppend = skipMembershipTiers ? [] : normalizeTiersForCreateCard(tiers, cardUpgradeType)
   emitCreateCardTiersJson(
     'CCSA.createBeamioCardWithFactoryReturningHash.normalizedTiersForChain',
-    normalizedTiers.map((t) => ({
+    tiersToAppend.map((t) => ({
       minUsdc6: t.minUsdc6.toString(),
       attr: t.attr.toString(),
       tierExpirySeconds: t.tierExpirySeconds.toString(),
+      upgradeByBalance: t.upgradeByBalance,
     })),
   )
   if (skipMembershipTiers) {
     console.warn(
-      '[CCSA] createCard metadata declares membership fees; using createCardCollectionWithInitCode (no Factory AndTiers).',
+      '[CCSA] createCard metadata declares membership fees; using createCardCollectionWithInitCode (no appendTierForCard).',
     )
-  } else if (skipBeaconAndTiers) {
+  } else if (tiers?.length && tiersToAppend.length === 0) {
     console.warn(
-      '[CCSA] createCard Beacon proxy: skip Factory AndTiers (live Factory AndTiers is 3-tuple; Beacon card setTiers is 4-arg). Client applies 4-arg setTiers via executeForOwner.',
-    )
-  } else if (skipBasicOnlyTiers) {
-    console.warn(
-      '[CCSA] createCard has only the base loyalty tier; using createCardCollectionWithInitCode (no Factory AndTiers).',
-    )
-  } else if (tiers?.length && normalizedTiers.length === 0) {
-    console.warn(
-      '[CCSA] createCard tiers input had only minUsdc6<=0 entries; using createCardCollectionWithInitCode (no AndTiers) to avoid UC_TierMinZero.',
+      '[CCSA] createCard tiers input had only minUsdc6<=0 entries; using createCardCollectionWithInitCode (no appendTierForCard) to avoid UC_TierMinZero.',
     )
   }
 
   const gasLimit = getCreateCardGasLimit()
 
   const callKind =
-    normalizedTiers.length > 0
-      ? 'createCardCollectionWithInitCodeAndTiers'
+    tiersToAppend.length > 0
+      ? 'createCardCollectionWithInitCodeThenAppendTiers'
       : 'createCardCollectionWithInitCode'
   const createCardDebugSnap = await collectCreateCardChainDebugSnapshot(factory, initCode, {
     cardOwner,
@@ -1038,7 +1128,7 @@ export async function createBeamioCardWithFactoryReturningHash(
     gatewayUsedWhenBuilding,
     libraryOverride: libraryOverrideForDebug,
     rawTierCount: tiers?.length ?? 0,
-    normalizedTierCount: normalizedTiers.length,
+    normalizedTierCount: tiersToAppend.length,
   })
   if (isVerboseCreateCardDebug()) emitCreateCardDebug('preflight', createCardDebugSnap)
 
@@ -1048,31 +1138,19 @@ export async function createBeamioCardWithFactoryReturningHash(
     signerAddress: createCardDebugSnap.signerAddress,
     initCodeKeccak256: createCardDebugSnap.initCodeKeccak256,
     initCodeByteLength: createCardDebugSnap.initCodeByteLength,
-    normalizedTierCount: normalizedTiers.length,
+    normalizedTierCount: tiersToAppend.length,
   })
 
   let tx: ethers.TransactionResponse
   let receipt: ethers.TransactionReceipt | null = null
   try {
-    if (normalizedTiers.length > 0) {
-      tx = await sendCreateCardCollectionWithInitCodeAndTiers(
-        factory,
-        cardOwner,
-        currencyEnum,
-        priceE6,
-        initCode,
-        normalizedTiers,
-        gasLimit,
-      )
-    } else {
-      tx = await factory.createCardCollectionWithInitCode(
-        cardOwner,
-        currencyEnum,
-        priceE6,
-        initCode,
-        { gasLimit },
-      )
-    }
+    tx = await factory.createCardCollectionWithInitCode(
+      cardOwner,
+      currencyEnum,
+      priceE6,
+      initCode,
+      { gasLimit },
+    )
     receipt = await tx.wait()
     if (!receipt) throw new Error('Transaction failed')
     if (Number(receipt.status) === 0) {
@@ -1109,11 +1187,11 @@ export async function createBeamioCardWithFactoryReturningHash(
       const hint = createCardRevertHint(decoded)
       throw new Error(
         appendSnapshotToErrorMessage(
-          `createCardCollectionWithInitCode(或 WithInitCodeAndTiers) 链上执行 revert（${reasonLine}）。常见原因：\n` +
+          `createCardCollectionWithInitCode 链上执行 revert（${reasonLine}）。常见原因：\n` +
             '  1) Deployer 未配置：工厂使用的 Deployer 合约需由其 owner 调用 setFactory(工厂地址)。运行 npm run check:createcard-deployer:base 诊断，修复：npm run set:card-deployer-factory:base\n' +
             '  2) 新卡 constructor revert：例如 gateway 地址无 code（UC_GlobalMisconfigured）；\n' +
             '  3) 工厂校验失败：部署后 factoryGateway/owner/currency/price 与传入不一致（BM_DeployFailedAtStep 2–4）；\n' +
-            '  4) 使用 AndTiers 时某档 minUsdc6==0（UC_TierMinZero）；或误用 Hardhat 4-tuple ABI（upgradeByBalance / 0x62cb913c）。现网须 3-tuple 0x9a7eb0f0。\n' +
+            '  4) 新卡 loyalty 档在 create 成功后走 appendTierForCard（4 参），禁止发 AndTiers 0x9a7eb0f0 / 0x62cb913c。\n' +
             (hint ? hint : '') +
             (dataStr ? `原始 data（前 74 字符）: ${dataStr.slice(0, 74)}${dataStr.length > 74 ? '...' : ''}\n` : '') +
             (dataStr ? `rawRevertDataForRpc=${dataStr}\n` : '') +
@@ -1154,9 +1232,24 @@ export async function createBeamioCardWithFactoryReturningHash(
     throw new Error('Could not resolve new BeamioUserCard address from receipt')
   }
   const resolved = ethers.getAddress(cardAddress)
+  if (tiersToAppend.length > 0) {
+    for (let i = 0; i < tiersToAppend.length; i++) {
+      const t = tiersToAppend[i]
+      try {
+        await sendAppendTierForCard(factory, resolved, t)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        throw new Error(
+          `appendTierForCard failed for cardAddress=${resolved} (tier index ${i}, minUsdc6=${t.minUsdc6.toString()}). ` +
+            `The card was created (hash=${hash}); retry append or recover from this address. ${msg}`,
+        )
+      }
+    }
+  }
   emitCreateCardChainTrace('CCSA.createBeamioCardWithFactoryReturningHash.success', {
     cardAddress: resolved,
     txHash: hash,
+    appendedTierCount: tiersToAppend.length,
   })
   return { cardAddress: resolved, hash }
 }

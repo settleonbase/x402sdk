@@ -78,7 +78,6 @@ import {
 	BEAMIO_AA_FACTORY_V2,
 	CONET_AA_FACTORY,
 	CONET_CARD_FACTORY,
-	isConetUserCardBeaconConfigured,
 	CONET_BUINT,
 	CONET_BUNIT_AIRDROP_ADDRESS,
 	CONET_BUNIT_AIRDROP_PREVIOUS_ADDRESS,
@@ -110,10 +109,11 @@ import {
 import {
 	createBeamioCardWithFactory,
 	createBeamioCardWithFactoryReturningHash,
-	isBasicOnlyCreateCardTiers,
 	assertBeamioUserCardLinkedDeployedBytecodeFitsEip170,
+	resolveCreateCardTierUpgradeByBalance,
 	type BeamioUserCardLibraryAddresses,
 } from './CCSA'
+import { inferLoyaltyUpgradeType, stampLoyaltyUpgradeFlagsOnTiers } from './loyaltyUpgradeFlags'
 
 import {
 	defaultMerchantUserCardChain,
@@ -13635,7 +13635,7 @@ export const createBeamioCardAdmin = async (
 
 /** 同 createBeamioCardAdmin，但返回 { cardAddress, hash } 供 createCardPoolPress 回传 tx hash。
  * @param factoryOverride 当 createCardPoolPress 传入 shift 出的 SC.baseFactoryPaymaster 时使用，确保使用正确的 signer（owner/paymaster）
- * @param tiers 可选；仅多于一档且非会员费卡才走 Factory AndTiers。只有基本档则跳过。 */
+ * @param tiers 可选；非会员费卡 create 后串行 Factory `appendTierForCard`（含仅基本档）。 */
 export const createBeamioCardAdminWithHash = async (
 	cardOwner: string,
 	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD',
@@ -13647,6 +13647,9 @@ export const createBeamioCardAdminWithHash = async (
 			minUsdc6: string
 			attr: number
 			tierExpirySeconds?: number
+			upgradeByBalance?: boolean
+			/** Metadata-only; Charge vs Top-up on-chain both use upgradeByBalance=false. */
+			upgradeByCharge?: boolean
 		}>
 		transferWhitelistEnabled?: boolean
 		upgradeType?: 0 | 1 | 2
@@ -13660,6 +13663,7 @@ export const createBeamioCardAdminWithHash = async (
 		minUsdc6: t.minUsdc6,
 		attr: t.attr,
 		tierExpirySeconds: t.tierExpirySeconds ?? 0,
+		upgradeByBalance: resolveCreateCardTierUpgradeByBalance(t, opts?.upgradeType),
 	}))
 	const initOpts: Parameters<typeof createBeamioCardWithFactoryReturningHash>[4] = {
 		libraryAddresses: beamioUserCardLibrariesFromConfig(opts?.libraryAddresses),
@@ -13727,6 +13731,8 @@ export type CreateCardPreChecked = {
 		logoDisplayScale?: string
 		/** Per-tier ABI flag; false = top-up qualify (default). */
 		upgradeByBalance?: boolean
+		/** Metadata-only; Charge vs Top-up distinguished by upgradeType === 2. */
+		upgradeByCharge?: boolean
 		/** Membership fee in card currency, 6-decimal fixed; written to global card metadata for POS/UI. */
 		membershipFeeE6?: string
 		membershipFee?: string | number
@@ -13747,7 +13753,7 @@ export type CreateCardPreChecked = {
 /** Reload limits are expressed as USDC bounds, then converted to the card currency for whole-unit metadata. `0` = no minimum floor. */
 const CREATE_CARD_TOPUP_MIN_USDC_UNITS = 0
 const CREATE_CARD_TOPUP_LIMIT_USDC_UNITS = 50000
-/** Silent defaults for new non-membership cards when the client omits min/max (bizSite hides the fields). */
+/** Forced min/max for new non-membership cards (card-currency whole units; not USDC conversion). */
 const CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MIN_TOPUP = 1
 const CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MAX_TOPUP = CREATE_CARD_TOPUP_LIMIT_USDC_UNITS
 const CREATE_CARD_ORACLE_CAD_USDC_FALLBACK = 0.740
@@ -14087,8 +14093,8 @@ export const createCardPreCheck = (body: {
 		let minTu = parseCreateCardTopupWholeUnit(stm.minimumTopup ?? stm.minTopup)
 		let maxTu = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
 		if (!createCardIsMembershipFeeMode(body)) {
-			if (minTu == null) minTu = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MIN_TOPUP
-			if (maxTu == null) maxTu = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MAX_TOPUP
+			minTu = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MIN_TOPUP
+			maxTu = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MAX_TOPUP
 		}
 		const topupLimitMinUnits = createCardTopupLimitMinUnitsForCurrency(body.currency)
 		const topupLimitMaxUnits = createCardTopupLimitMaxUnitsForCurrency(body.currency)
@@ -14288,8 +14294,8 @@ export const createCardPreCheck = (body: {
 		let minTup = parseCreateCardTopupWholeUnit(stm.minimumTopup ?? stm.minTopup)
 		let maxTup = parseCreateCardTopupWholeUnit(stm.maximumTopup ?? stm.maxTopup)
 		if (!createCardIsMembershipFeeMode({ tiers: body.tiers, baseMembership: body.baseMembership })) {
-			if (minTup == null) minTup = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MIN_TOPUP
-			if (maxTup == null) maxTup = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MAX_TOPUP
+			minTup = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MIN_TOPUP
+			maxTup = CREATE_CARD_DEFAULT_NON_MEMBERSHIP_MAX_TOPUP
 		}
 		if (minTup != null) meta.minimumTopup = minTup
 		if (maxTup != null) meta.maximumTopup = maxTup
@@ -14403,6 +14409,7 @@ export const createCardPreCheck = (body: {
 					...(o.backgroundColor != null && typeof o.backgroundColor === 'string' && { backgroundColor: o.backgroundColor }),
 					...(o.logoDisplayScale != null && typeof o.logoDisplayScale === 'string' && { logoDisplayScale: o.logoDisplayScale }),
 					upgradeByBalance: Boolean(o.upgradeByBalance),
+					upgradeByCharge: Boolean(o.upgradeByCharge),
 					...(membershipFeeE6 != null && { membershipFeeE6 }),
 					...(o.membershipFee != null && String(o.membershipFee).trim() !== ''
 						? { membershipFee: o.membershipFee as string | number }
@@ -14444,6 +14451,20 @@ export const createCardPreCheck = (body: {
 
 	if (normalizedBaseMembership) {
 		preChecked.baseMembership = normalizedBaseMembership
+	}
+
+	const membershipFee = createCardIsMembershipFeeMode({
+		tiers: preChecked.tiers,
+		baseMembership: preChecked.baseMembership ?? normalizedBaseMembership,
+	})
+	const stampedType = inferLoyaltyUpgradeType(preChecked.upgradeType, membershipFee, preChecked.tiers)
+	preChecked.upgradeType = stampedType
+	if (preChecked.tiers) {
+		preChecked.tiers = stampLoyaltyUpgradeFlagsOnTiers(
+			preChecked.tiers as Array<Record<string, unknown>>,
+			stampedType,
+			membershipFee,
+		) as CreateCardPreChecked['tiers']
 	}
 
 	return { success: true, preChecked }
@@ -14762,6 +14783,37 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 			tiers: (tiersForFile as MembershipFeeMetadataTiers[] | undefined) ?? null,
 		})
 		if (shapeErr) return { success: false, error: shapeErr }
+
+		const membershipFee = shouldSkipFactoryTiersForCreate(
+			(tiersForFile as MembershipFeeMetadataTiers[] | undefined) ?? null,
+			{
+				...(baseMembershipForFile && { baseMembership: baseMembershipForFile }),
+				...(tiersForFile && { tiers: tiersForFile }),
+			},
+		)
+		const requestHasUpgradeType = params.upgradeType != null
+		const requestHasTiers = params.tiers != null
+		if (membershipFee) {
+			upgradeType = 0
+			tiersForFile = stampLoyaltyUpgradeFlagsOnTiers(tiersForFile, 0, true)
+		} else if (requestHasUpgradeType) {
+			const stampedType = inferLoyaltyUpgradeType(params.upgradeType, false, tiersForFile)
+			upgradeType = stampedType
+			if (tiersForFile) {
+				tiersForFile = stampLoyaltyUpgradeFlagsOnTiers(tiersForFile, stampedType, false)
+			}
+		} else if (requestHasTiers) {
+			const inferred = inferLoyaltyUpgradeType(undefined, false, params.tiers)
+			if (inferred === 1 || inferred === 2) {
+				upgradeType = inferred
+				tiersForFile = stampLoyaltyUpgradeFlagsOnTiers(tiersForFile, inferred, false)
+			} else if (upgradeType === 1 || upgradeType === 2) {
+				tiersForFile = stampLoyaltyUpgradeFlagsOnTiers(tiersForFile, upgradeType as 0 | 1 | 2, false)
+			} else {
+				upgradeType = 0
+				tiersForFile = stampLoyaltyUpgradeFlagsOnTiers(tiersForFile, 0, false)
+			}
+		}
 
 		const shareTokenMetadata = mergeShareTokenMetadataRecords(fileShare, shareTokenMetadataInput)
 
@@ -15131,23 +15183,27 @@ export const createCardPoolPress = async () => {
 			...(baseMembership && { baseMembership }),
 			...(tiers && { tiers }),
 		})
+		const stampedUpgradeType = inferLoyaltyUpgradeType(upgradeType, skipMembershipTiers, tiers)
+		const stampedTiers = stampLoyaltyUpgradeFlagsOnTiers(
+			tiers as Array<Record<string, unknown>> | undefined,
+			stampedUpgradeType,
+			skipMembershipTiers,
+		) as typeof tiers
 		const mappedTiers =
-			tiers && tiers.length > 0
-				? tiers.map((t, i) => ({
+			stampedTiers && stampedTiers.length > 0
+				? stampedTiers.map((t, i) => ({
 						minUsdc6: t.minUsdc6,
 						attr: Number(t.attr ?? i),
 						tierExpirySeconds: Number(t.tierExpirySeconds ?? 0), // 0 => 使用卡全局 expirySeconds
-						upgradeByBalance: Boolean(t.upgradeByBalance),
+						upgradeByBalance: resolveCreateCardTierUpgradeByBalance(t, stampedUpgradeType),
 					}))
 				: undefined
-		const skipAndTiers =
-			skipMembershipTiers ||
-			!mappedTiers ||
-			isBasicOnlyCreateCardTiers(mappedTiers) ||
-			isConetUserCardBeaconConfigured()
-		const tiersForCreate = !skipAndTiers ? mappedTiers : undefined
+		const tiersForCreate = skipMembershipTiers ? undefined : mappedTiers
 		// 0 = top-up (explicit for membership-fee cards); 1 = balance; 2 = cumulative
-		const ut = upgradeType === 0 || upgradeType === 1 || upgradeType === 2 ? upgradeType : undefined
+		const ut =
+			stampedUpgradeType === 0 || stampedUpgradeType === 1 || stampedUpgradeType === 2
+				? stampedUpgradeType
+				: undefined
 		const { cardAddress, hash } = await createBeamioCardAdminWithHash(
 			cardOwner,
 			currency,
@@ -15203,10 +15259,10 @@ export const createCardPoolPress = async () => {
 			priceInCurrencyE6,
 			uri: uri ?? undefined,
 			preferExistingShareTokenMetadata: true,
-			...(upgradeType != null && { upgradeType }),
+			upgradeType: stampedUpgradeType,
 			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
 			shareTokenMetadata,
-			tiers,
+			tiers: stampedTiers,
 			...(baseMembership && { baseMembership }),
 			txHash: hash,
 		}).catch((regErr: unknown) => {
@@ -15218,13 +15274,13 @@ export const createCardPoolPress = async () => {
 		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
 		const cardAddr = ethers.getAddress(cardAddress)
 		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
-		if (shareTokenMetadata || (tiers && tiers.length > 0) || baseMembership) {
+		if (shareTokenMetadata || (stampedTiers && stampedTiers.length > 0) || baseMembership) {
 			const stm = shareTokenMetadata as Record<string, unknown> | undefined
 			const createMetaContent = buildBeamioErc1155Card0MetadataFileContent({
 				shareTokenMetadata: stm,
-				tiers: tiers as Array<Record<string, unknown>> | undefined,
+				tiers: stampedTiers as Array<Record<string, unknown>> | undefined,
 				baseMembership: baseMembership as Record<string, unknown> | undefined,
-				upgradeType: upgradeType != null ? upgradeType : undefined,
+				upgradeType: stampedUpgradeType,
 				transferWhitelistEnabled,
 			})
 			const metaPath = resolve(METADATA_BASE, metaFilename)

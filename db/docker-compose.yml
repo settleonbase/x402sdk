@@ -7,9 +7,23 @@ services:
       POSTGRES_PASSWORD: your_password
       POSTGRES_DB: beamio
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Existing library from the previous Docker data-root
+      # (/home/peter/docker-data). Do not use a fresh named volume.
+      - /home/peter/docker-data/volumes/db_pgdata/_data:/var/lib/postgresql/data
+      - /dev/hugepages:/dev/hugepages:rw
     ports:
-      - "5432:5432"
-
-volumes:
-  pgdata:
+      - "127.0.0.1:5432:5432"
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    shm_size: "256mb"
+    command:
+      - postgres
+      - -c
+      - huge_pages=try
+      - -c
+      - shared_buffers=512MB

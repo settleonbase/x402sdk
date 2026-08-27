@@ -1,0 +1,19 @@
+[Unit]
+Description=Beamio API local Postgres (docker compose)
+Documentation=file:///home/peter/x402sdk/db/docker-compose.yml
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/peter/x402sdk/db
+ExecStart=/usr/bin/docker compose -f /home/peter/x402sdk/db/docker-compose.yml up -d
+ExecStartPost=/usr/bin/docker exec beamio-postgres pg_isready -U postgres -t 60
+ExecStop=/usr/bin/docker compose -f /home/peter/x402sdk/db/docker-compose.yml stop
+TimeoutStartSec=180
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

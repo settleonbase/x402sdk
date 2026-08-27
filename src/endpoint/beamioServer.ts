@@ -21,6 +21,12 @@ import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
 import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { lookupFuelPack, fuelPackFreeBUnits6, fuelPackUsdc6 } from '../fuelPackCatalog'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
+import {
+	inferLoyaltyUpgradeType,
+	loyaltyUpgradeFlagsFromType,
+	stampLoyaltyUpgradeFlagsOnTiers,
+} from '../loyaltyUpgradeFlags'
+import { shouldSkipFactoryTiersForCreate, type MembershipFeeMetadataTiers } from '../membershipFeeMetadata'
 import { listCardProgramLikes, listCardProgramShareClicks } from '../cardProgramSocialDb'
 import { readCardProgramSocialChainTotals, resolveProgramSocialShareClickCount } from '../cardProgramSocialStats'
 import {
@@ -8870,7 +8876,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			priceInCurrencyE6?: string | number
 			uri?: string
 			shareTokenMetadata?: Record<string, unknown>
-			tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean }>
+			tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean; upgradeByCharge?: boolean }>
+			upgradeType?: 0 | 1 | 2
 		}
 		const preCheck = createCardPreCheck(body)
 		if (!preCheck.success) {
@@ -10312,8 +10319,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			if (
 				!chain ||
 				String(meta.minUsdc6) !== chain.minUsdc6 ||
-				Number(meta.attr) !== chain.attr ||
-				Boolean(meta.upgradeByBalance) !== chain.upgradeByBalance
+				Number(meta.attr) !== chain.attr
 			) {
 				return res.status(400).json({ success: false, error: `tiers[${i}] metadata does not match setTiers calldata` }).end()
 			}
@@ -10354,8 +10360,59 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		} catch (e: any) {
 			return res.status(400).json({ success: false, error: e?.message ?? 'Failed to verify owner signature' }).end()
 		}
-		logger(Colors.green(`server /api/cardUpdateTiers preCheck OK, forwarding to master`), inspect({ cardAddress, tierCount: chainTiers.length }, false, 2, true))
-		postLocalhost('/api/cardUpdateTiers', req.body, res)
+		const membershipFee = shouldSkipFactoryTiersForCreate(body.tiers as MembershipFeeMetadataTiers[], {
+			...(body.baseMembership && { baseMembership: body.baseMembership }),
+			tiers: body.tiers,
+		})
+		let stampedType: 0 | 1 | 2
+		if (membershipFee) {
+			stampedType = 0
+		} else if (body.upgradeType != null) {
+			stampedType = inferLoyaltyUpgradeType(body.upgradeType, false, body.tiers)
+		} else if (body.tiers.some((t) => t.upgradeByCharge === true)) {
+			stampedType = 2
+		} else if (body.tiers.some((t) => t.upgradeByBalance === true)) {
+			stampedType = 1
+		} else {
+			return res
+				.status(400)
+				.json({
+					success: false,
+					error: 'upgradeType is required to distinguish Charge vs Top-up (0=Top-up, 1=Balance, 2=Charge)',
+				})
+				.end()
+		}
+		const stampedTiers =
+			stampLoyaltyUpgradeFlagsOnTiers(
+				body.tiers as Array<Record<string, unknown>>,
+				stampedType,
+				membershipFee,
+			) ?? body.tiers
+		const flags = loyaltyUpgradeFlagsFromType(stampedType, membershipFee)
+		for (let i = 0; i < chainTiers.length; i++) {
+			if (flags.upgradeByBalance !== chainTiers[i].upgradeByBalance) {
+				return res
+					.status(400)
+					.json({
+						success: false,
+						error: `tiers[${i}] upgradeByBalance does not match loyalty upgradeType (0=Top-up, 1=Balance, 2=Charge)`,
+					})
+					.end()
+			}
+		}
+		logger(
+			Colors.green(`server /api/cardUpdateTiers preCheck OK, forwarding to master`),
+			inspect({ cardAddress, tierCount: chainTiers.length, upgradeType: stampedType }, false, 2, true)
+		)
+		postLocalhost(
+			'/api/cardUpdateTiers',
+			{
+				...req.body,
+				upgradeType: stampedType,
+				tiers: stampedTiers,
+			},
+			res
+		)
 	})
 
 	/** AA→EOA：支持三种提交。(1) packedUserOp；(2) openContainerPayload；(3) containerPayload（绑定 to）*/
