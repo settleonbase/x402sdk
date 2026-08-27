@@ -14538,6 +14538,127 @@ function resolveBeamioUserCardContractNameFromShareMetadata(
 	)
 }
 
+const BEAMIO_CARD0_METADATA_BASE_URI = 'https://beamio.app/api/metadata/0x'
+
+const MERCHANT_CARD_CURRENCY_ID_TO_ISO: Record<number, string> = {
+	0: 'CAD',
+	1: 'USD',
+	2: 'JPY',
+	3: 'CNY',
+	4: 'USDC',
+	5: 'HKD',
+	6: 'EUR',
+	7: 'SGD',
+	8: 'TWD',
+}
+
+export type OnChainMerchantCardRegistryIdentity = {
+	cardOwner: string
+	currency: string
+	priceInCurrencyE6: string
+}
+
+export type OnChainMerchantCardRegistryLookup =
+	| { status: 'found'; identity: OnChainMerchantCardRegistryIdentity }
+	| { status: 'missing' }
+	| { status: 'untrusted' }
+
+/**
+ * CoNET RPC identity for a merchant program card. Distinguishes trusted-empty (no code)
+ * from untrusted RPC failure so Cluster / Master do not treat a timeout as "unpublished".
+ */
+export async function lookupOnChainMerchantCardRegistryIdentity(
+	cardAddress: string
+): Promise<OnChainMerchantCardRegistryLookup> {
+	if (!ethers.isAddress(cardAddress) || isApiExcludedUserCard(cardAddress)) {
+		return { status: 'missing' }
+	}
+	try {
+		const cardAddr = ethers.getAddress(cardAddress)
+		const provider = providerForUserCardChain(defaultMerchantUserCardChain())
+		const code = await provider.getCode(cardAddr)
+		if (!code || code === '0x') return { status: 'missing' }
+		const card = new ethers.Contract(
+			cardAddr,
+			[
+				'function owner() view returns (address)',
+				'function currency() view returns (uint8)',
+				'function pointsUnitPriceInCurrencyE6() view returns (uint256)',
+			],
+			provider
+		)
+		const [owner, currencyId, price] = await Promise.all([
+			card.owner() as Promise<string>,
+			card.currency() as Promise<bigint>,
+			card.pointsUnitPriceInCurrencyE6() as Promise<bigint>,
+		])
+		if (!ethers.isAddress(owner) || owner === ethers.ZeroAddress) return { status: 'missing' }
+		const currency = MERCHANT_CARD_CURRENCY_ID_TO_ISO[Number(currencyId)] ?? 'CAD'
+		return {
+			status: 'found',
+			identity: {
+				cardOwner: ethers.getAddress(owner),
+				currency,
+				priceInCurrencyE6: price.toString(),
+			},
+		}
+	} catch (e: unknown) {
+		logger(Colors.yellow(`[lookupOnChainMerchantCardRegistryIdentity] failed card=${cardAddress}: ${e}`))
+		return { status: 'untrusted' }
+	}
+}
+
+async function ensureBeamioCardRowForMetadataSync(cardAddress: string): Promise<
+	| { ok: true; row: NonNullable<Awaited<ReturnType<typeof getBeamioCardRowForMetadataSync>>> }
+	| { ok: false; error: string }
+> {
+	const existing = await getBeamioCardRowForMetadataSync(cardAddress)
+	if (existing) return { ok: true, row: existing }
+
+	const lookup = await lookupOnChainMerchantCardRegistryIdentity(cardAddress)
+	if (lookup.status === 'missing') {
+		return { ok: false, error: 'Card not found on CoNET. Publish a new card first.' }
+	}
+	if (lookup.status === 'untrusted') {
+		return { ok: false, error: 'Could not verify this card on CoNET. Retry shortly.' }
+	}
+
+	const seed = readCard0FileRegistrySeed(cardAddress)
+	try {
+		await registerCardToDb({
+			cardAddress,
+			cardOwner: lookup.identity.cardOwner,
+			currency: lookup.identity.currency,
+			priceInCurrencyE6: lookup.identity.priceInCurrencyE6,
+			uri: BEAMIO_CARD0_METADATA_BASE_URI,
+			preferExistingShareTokenMetadata: true,
+			...(seed.shareTokenMetadata && {
+				shareTokenMetadata: seed.shareTokenMetadata as Parameters<typeof registerCardToDb>[0]['shareTokenMetadata'],
+			}),
+			...(seed.tiers && seed.tiers.length > 0 && { tiers: seed.tiers as never }),
+			...(seed.baseMembership && { baseMembership: seed.baseMembership as never }),
+			...(seed.upgradeType != null && { upgradeType: seed.upgradeType }),
+			...(typeof seed.transferWhitelistEnabled === 'boolean' && {
+				transferWhitelistEnabled: seed.transferWhitelistEnabled,
+			}),
+		})
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.yellow(`[ensureBeamioCardRowForMetadataSync] register failed card=${cardAddress}: ${msg}`))
+		return {
+			ok: false,
+			error: msg ? `Could not register card in beamio_cards: ${msg}` : 'Could not register card in beamio_cards.',
+		}
+	}
+
+	const row = await getBeamioCardRowForMetadataSync(cardAddress)
+	if (!row) {
+		return { ok: false, error: 'Could not read beamio_cards after register. Retry shortly.' }
+	}
+	logger(Colors.green(`[ensureBeamioCardRowForMetadataSync] registered missing row card=${cardAddress}`))
+	return { ok: true, row }
+}
+
 /**
  * 已发卡仅更新链下 metadata（`METADATA_BASE/0x{card}0.json` + beamio_cards.metadata_json）。
  * 供商户在 Card Configurator / Programs 中修改 recharge bonus 等后点 Publish，无需重新部署合约。
@@ -14559,13 +14680,9 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 			)
 		)
 		const cardAddr = ethers.getAddress(params.cardAddress)
-		const row = await getBeamioCardRowForMetadataSync(cardAddr)
-		if (!row) {
-			return {
-				success: false,
-				error: 'Card is not registered in beamio_cards. Publish a new card first, or register this address.',
-			}
-		}
+		const ensured = await ensureBeamioCardRowForMetadataSync(cardAddr)
+		if (!ensured.ok) return { success: false, error: ensured.error }
+		const row = ensured.row
 		const { metaDir, metaPath, metaFilename } = beamioCard0MetadataFilePath(cardAddr)
 		if (!metaPath.startsWith(metaDir + '/') && metaPath !== metaDir) {
 			return { success: false, error: 'Invalid metadata path' }
@@ -14697,6 +14814,100 @@ function readShareTokenMetadataFromCard0File(cardAddr: string): Record<string, u
 		/* ignore corrupt file */
 	}
 	return {}
+}
+
+function readCard0FileRegistrySeed(cardAddr: string): {
+	shareTokenMetadata?: Record<string, unknown>
+	tiers?: Array<Record<string, unknown>>
+	baseMembership?: Record<string, unknown>
+	upgradeType?: 0 | 1 | 2
+	transferWhitelistEnabled?: boolean
+} {
+	const { metaDir, metaPath } = beamioCard0MetadataFilePath(cardAddr)
+	if (!metaPath.startsWith(metaDir + '/') && metaPath !== metaDir) return {}
+	if (!fs.existsSync(metaPath)) return {}
+	try {
+		const prev = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as Record<string, unknown>
+		const out: ReturnType<typeof readCard0FileRegistrySeed> = {}
+		if (prev.shareTokenMetadata != null && typeof prev.shareTokenMetadata === 'object' && !Array.isArray(prev.shareTokenMetadata)) {
+			out.shareTokenMetadata = { ...(prev.shareTokenMetadata as Record<string, unknown>) }
+		}
+		if (Array.isArray(prev.tiers) && prev.tiers.length > 0) {
+			out.tiers = prev.tiers as Array<Record<string, unknown>>
+		}
+		if (prev.baseMembership != null && typeof prev.baseMembership === 'object' && !Array.isArray(prev.baseMembership)) {
+			out.baseMembership = { ...(prev.baseMembership as Record<string, unknown>) }
+		}
+		if (prev.upgradeType != null) {
+			const u = Number(prev.upgradeType)
+			if (u === 0 || u === 1 || u === 2) out.upgradeType = u as 0 | 1 | 2
+		}
+		if (typeof prev.transferWhitelistEnabled === 'boolean') {
+			out.transferWhitelistEnabled = prev.transferWhitelistEnabled
+		}
+		return out
+	} catch {
+		return {}
+	}
+}
+
+/** Late createCard write must not overwrite Promotion / Reward PT already saved after HTTP 200. */
+function mergeCreateCard0MetadataFileIfExists(metaPath: string, createContent: string): string {
+	if (!fs.existsSync(metaPath)) return createContent
+	try {
+		const existing = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as Record<string, unknown>
+		const createParsed = JSON.parse(createContent) as Record<string, unknown>
+		const existingShare =
+			existing.shareTokenMetadata != null &&
+			typeof existing.shareTokenMetadata === 'object' &&
+			!Array.isArray(existing.shareTokenMetadata)
+				? (existing.shareTokenMetadata as Record<string, unknown>)
+				: {}
+		const createShare =
+			createParsed.shareTokenMetadata != null &&
+			typeof createParsed.shareTokenMetadata === 'object' &&
+			!Array.isArray(createParsed.shareTokenMetadata)
+				? (createParsed.shareTokenMetadata as Record<string, unknown>)
+				: {}
+		const existingHasShare = Object.keys(existingShare).length > 0
+		if (!existingHasShare && !existing.baseMembership && !Array.isArray(existing.tiers)) {
+			return createContent
+		}
+		const mergedShare = { ...createShare, ...existingShare }
+		const existingTiers = Array.isArray(existing.tiers) ? (existing.tiers as Array<Record<string, unknown>>) : undefined
+		const createTiers = Array.isArray(createParsed.tiers) ? (createParsed.tiers as Array<Record<string, unknown>>) : undefined
+		const existingBase =
+			existing.baseMembership != null &&
+			typeof existing.baseMembership === 'object' &&
+			!Array.isArray(existing.baseMembership)
+				? (existing.baseMembership as Record<string, unknown>)
+				: undefined
+		const createBase =
+			createParsed.baseMembership != null &&
+			typeof createParsed.baseMembership === 'object' &&
+			!Array.isArray(createParsed.baseMembership)
+				? (createParsed.baseMembership as Record<string, unknown>)
+				: undefined
+		return buildBeamioErc1155Card0MetadataFileContent({
+			shareTokenMetadata: Object.keys(mergedShare).length > 0 ? mergedShare : undefined,
+			tiers: existingTiers ?? createTiers,
+			baseMembership: existingBase ?? createBase,
+			upgradeType:
+				existing.upgradeType != null
+					? Number(existing.upgradeType)
+					: createParsed.upgradeType != null
+						? Number(createParsed.upgradeType)
+						: undefined,
+			transferWhitelistEnabled:
+				typeof existing.transferWhitelistEnabled === 'boolean'
+					? existing.transferWhitelistEnabled
+					: typeof createParsed.transferWhitelistEnabled === 'boolean'
+						? createParsed.transferWhitelistEnabled
+						: undefined,
+		})
+	} catch {
+		return createContent
+	}
 }
 
 function mergeShareTokenMetadataRecords(
@@ -14963,13 +15174,17 @@ export const createCardPoolPress = async () => {
 			currency,
 			priceInCurrencyE6,
 			uri: uri ?? undefined,
+			preferExistingShareTokenMetadata: true,
 			...(upgradeType != null && { upgradeType }),
 			...(typeof transferWhitelistEnabled === 'boolean' && { transferWhitelistEnabled }),
 			shareTokenMetadata,
 			tiers,
 			...(baseMembership && { baseMembership }),
 			txHash: hash,
-		}).catch(() => {})
+		}).catch((regErr: unknown) => {
+			const msg = regErr instanceof Error ? regErr.message : String(regErr)
+			logger(Colors.yellow(`[createCardPoolPress] registerCardToDb failed card=${cardAddress}: ${msg}`))
+		})
 		if (res && !res.headersSent) res.status(200).json({ success: true, cardAddress, hash }).end()
 		// metadata 写盘 + Blockscout refetch 不阻塞 HTTP（链上 create tx 已确认）
 		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
@@ -14977,7 +15192,7 @@ export const createCardPoolPress = async () => {
 		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
 		if (shareTokenMetadata || (tiers && tiers.length > 0) || baseMembership) {
 			const stm = shareTokenMetadata as Record<string, unknown> | undefined
-			const metaContent = buildBeamioErc1155Card0MetadataFileContent({
+			const createMetaContent = buildBeamioErc1155Card0MetadataFileContent({
 				shareTokenMetadata: stm,
 				tiers: tiers as Array<Record<string, unknown>> | undefined,
 				baseMembership: baseMembership as Record<string, unknown> | undefined,
@@ -14990,6 +15205,7 @@ export const createCardPoolPress = async () => {
 				void (async () => {
 					try {
 						if (!fs.existsSync(metaDir)) fs.mkdirSync(metaDir, { recursive: true })
+						const metaContent = mergeCreateCard0MetadataFileIfExists(metaPath, createMetaContent)
 						fs.writeFileSync(metaPath, metaContent, 'utf-8')
 						logger(Colors.green(`[createCardPoolPress] wrote metadata: ${metaFilename}`))
 					} catch (metaErr: unknown) {

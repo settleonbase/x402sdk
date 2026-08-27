@@ -5080,7 +5080,8 @@ export const upsertBeamioSunLastCounterByUid = async (params: {
 /** Deep-merge metadata_json patch into an existing beamio_cards row (shareTokenMetadata shallow-merged). */
 export function mergeBeamioCardMetadataJsonPatch(
 	existing: Record<string, unknown> | null | undefined,
-	patch: Record<string, unknown>
+	patch: Record<string, unknown>,
+	options?: { preferExistingShareTokenMetadata?: boolean }
 ): Record<string, unknown> {
 	const base =
 		existing != null && typeof existing === 'object' && !Array.isArray(existing) ? { ...existing } : {}
@@ -5098,9 +5099,14 @@ export function mergeBeamioCardMetadataJsonPatch(
 			: {}
 	const merged: Record<string, unknown> = { ...base, ...patch }
 	if (patchShare) {
-		// Authoritative full share snapshot from metadata file merge — replace nested object
-		// so cleared keys (e.g. topupPromotion) are not resurrected from DB stale rows.
-		merged.shareTokenMetadata = { ...patchShare }
+		if (options?.preferExistingShareTokenMetadata && Object.keys(baseShare).length > 0) {
+			// Late createCard register must not wipe Promotion / Reward PT written after HTTP 200.
+			merged.shareTokenMetadata = { ...patchShare, ...baseShare }
+		} else {
+			// Authoritative full share snapshot from metadata file merge — replace nested object
+			// so cleared keys (e.g. topupPromotion) are not resurrected from DB stale rows.
+			merged.shareTokenMetadata = { ...patchShare }
+		}
 	} else if (Object.keys(baseShare).length > 0) {
 		merged.shareTokenMetadata = { ...baseShare }
 	}
@@ -5170,6 +5176,11 @@ export const registerCardToDb = async (params: {
 		membershipDurationKind?: number
 	}
 	txHash?: string
+	/**
+	 * When a createCard register races a later metadata Save, keep already-written
+	 * shareTokenMetadata keys (topupPromotion / unifiedRewardPoints) instead of replacing.
+	 */
+	preferExistingShareTokenMetadata?: boolean
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
 	try {
@@ -5190,7 +5201,9 @@ export const registerCardToDb = async (params: {
 				transferWhitelistEnabled: params.transferWhitelistEnabled,
 			}),
 		}
-		const mergedMetadata = mergeBeamioCardMetadataJsonPatch(existingMeta, patchJson)
+		const mergedMetadata = mergeBeamioCardMetadataJsonPatch(existingMeta, patchJson, {
+			preferExistingShareTokenMetadata: params.preferExistingShareTokenMetadata === true,
+		})
 		const metadataJson =
 			Object.keys(mergedMetadata).length > 0 ? JSON.stringify(mergedMetadata) : null
 		await db.query(
