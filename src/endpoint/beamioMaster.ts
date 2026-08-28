@@ -71,6 +71,7 @@ import {
 	invalidateIssuedCouponSeriesQueryCachesForCard,
 	registerIssuedCouponSeriesQueryCacheInvalidator,
 } from './issuedCouponSeriesQueryCache'
+import { registerLatestCardsQueryCacheInvalidator } from './latestCardsQueryCache'
 import { syncIssuedCouponSocialPromotionMetadata } from './issuedCouponSocialPromotionMetadataSync'
 import { isApiExcludedUserCard } from '../apiExcludedUserCards'
 import { pushCardGatewayRewardPoolTask } from '../userCumulativeStatRewardPoolMaster'
@@ -414,49 +415,65 @@ const LATEST_CARDS_CACHE_STALE_MS = 30 * 1000
 const LATEST_CARDS_PREWARM_LIMITS = [20, 100, 300] as const
 const LATEST_CARDS_SUPERSET_LIMIT = 300
 
-/** 合并同 limit 的并发 enrich（prewarm 与 GET /latestCards 缓存未命中常同时触发，避免同一批卡重复 RPC + 重复日志） */
-const latestCardsComputeInflight = new Map<number, Promise<BeamioLatestCardItem[]>>()
+/**
+ * Discover 必须先超采再 filter：`getLatestCards(20)` 后再 cutover/exclude 会把刚登记的新卡
+ * 挤出窗口（旧卡占满 LIMIT）。prewarm / GET miss 一律拉 SUPERSET，再 slice。
+ */
+let latestCardsCacheGeneration = 0
+let latestCardsInvalidateKickTimer: ReturnType<typeof setTimeout> | undefined
+const latestCardsComputeInflight = new Map<string, Promise<BeamioLatestCardItem[]>>()
 
-async function computeLatestCardsForMaster(limit: number): Promise<BeamioLatestCardItem[]> {
-	const inflight = latestCardsComputeInflight.get(limit)
+function writeLatestCardsCacheIfCurrent(
+	generation: number,
+	key: string,
+	items: unknown[],
+): void {
+	if (generation !== latestCardsCacheGeneration) return
+	latestCardsCache.set(key, { items, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
+}
+
+async function computeLatestCardsSuperset(): Promise<BeamioLatestCardItem[]> {
+	const gen = latestCardsCacheGeneration
+	const inflightKey = `${gen}:${LATEST_CARDS_SUPERSET_LIMIT}`
+	const inflight = latestCardsComputeInflight.get(inflightKey)
 	if (inflight) return inflight
 
 	const task = (async () => {
 		try {
-			const raw = await getLatestCards(limit)
-			// Discover gate 先于 enrichment：exclude / cutover 外的卡不对链上打 RPC（旧卡常 revert 且不会出现在 API 响应里）
+			const raw = await getLatestCards(LATEST_CARDS_SUPERSET_LIMIT)
+			// Discover gate 先于 enrichment：exclude / cutover 外的卡不对链上打 RPC
 			const visible = filterLatestCardsByDiscoverMerchantPolicy(raw)
 			return enrichLatestCardsWithBaseErc1155PointsHolderCounts(
 				visible,
 				providerBaseForLatestCards,
 			)
 		} finally {
-			latestCardsComputeInflight.delete(limit)
+			latestCardsComputeInflight.delete(inflightKey)
 		}
 	})()
 
-	latestCardsComputeInflight.set(limit, task)
+	latestCardsComputeInflight.set(inflightKey, task)
 	return task
 }
 
+async function computeLatestCardsForMaster(limit: number): Promise<BeamioLatestCardItem[]> {
+	const superset = await computeLatestCardsSuperset()
+	return superset.slice(0, limit)
+}
+
 async function prewarmLatestCardsCacheMaster(): Promise<void> {
-	// 1) 拉超集 limit=300 一次，命中后 slice 派生其它 limit（避免 3 倍 RPC）
+	const gen = latestCardsCacheGeneration
 	let superset: BeamioLatestCardItem[] | null = null
 	try {
-		superset = await computeLatestCardsForMaster(LATEST_CARDS_SUPERSET_LIMIT)
-		latestCardsCache.set(
-			`limit:${LATEST_CARDS_SUPERSET_LIMIT}`,
-			{ items: superset, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS },
-		)
+		superset = await computeLatestCardsSuperset()
+		writeLatestCardsCacheIfCurrent(gen, `limit:${LATEST_CARDS_SUPERSET_LIMIT}`, superset)
 	} catch (e: any) {
 		logger(Colors.yellow(`[latestCards prewarm] limit=${LATEST_CARDS_SUPERSET_LIMIT}: ${e?.message ?? e}`))
 	}
-	// 2) 派生剩余 limit；untrusted 失败时绝不写空，让旧 trusted cache 自然 stale
 	if (!superset) return
 	for (const lim of LATEST_CARDS_PREWARM_LIMITS) {
 		if (lim === LATEST_CARDS_SUPERSET_LIMIT) continue
-		const sliced = superset.slice(0, lim)
-		latestCardsCache.set(`limit:${lim}`, { items: sliced, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
+		writeLatestCardsCacheIfCurrent(gen, `limit:${lim}`, superset.slice(0, lim))
 	}
 }
 
@@ -483,6 +500,20 @@ function startLatestCardsPrewarmTimer(): void {
 		}
 	})()
 }
+
+registerLatestCardsQueryCacheInvalidator(() => {
+	latestCardsCacheGeneration += 1
+	latestCardsCache.clear()
+	cardsByCategoryCache.clear()
+	if (latestCardsInvalidateKickTimer !== undefined) {
+		clearTimeout(latestCardsInvalidateKickTimer)
+	}
+	latestCardsInvalidateKickTimer = setTimeout(() => {
+		latestCardsInvalidateKickTimer = undefined
+		void prewarmLatestCardsCacheMaster()
+	}, 50)
+	latestCardsInvalidateKickTimer.unref?.()
+})
 
 const DEBUG_INBOUND =
 	process.env.DEBUG_INBOUND === '1' ||
@@ -795,18 +826,22 @@ const routing = ( router: Router ) => {
 				return res.status(200).json({ items: cached.items })
 			}
 
-			// 用超集 cache 派生：避免对每个 limit 都触发 enrichment
+			// 用未过期超集 cache 派生：避免对每个 limit 都触发 enrichment。
+			// 不过要求 items.length >= limit：Discover filter 后可见数常小于请求 limit。
 			const supersetCacheKey = `limit:${LATEST_CARDS_SUPERSET_LIMIT}`
 			const superset = latestCardsCache.get(supersetCacheKey)
-			if (superset && limit < LATEST_CARDS_SUPERSET_LIMIT && superset.items.length >= limit) {
+			if (superset && Date.now() < superset.expiry && limit <= LATEST_CARDS_SUPERSET_LIMIT) {
 				const sliced = superset.items.slice(0, limit)
 				latestCardsCache.set(cacheKey, { items: sliced, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
 				return res.status(200).json({ items: sliced })
 			}
 
 			try {
-				const items = await computeLatestCardsForMaster(limit)
-				latestCardsCache.set(cacheKey, { items, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
+				const gen = latestCardsCacheGeneration
+				const supersetItems = await computeLatestCardsSuperset()
+				writeLatestCardsCacheIfCurrent(gen, supersetCacheKey, supersetItems)
+				const items = supersetItems.slice(0, limit)
+				writeLatestCardsCacheIfCurrent(gen, cacheKey, items)
 				res.status(200).json({ items })
 			} catch (e: any) {
 				logger(Colors.red('[latestCards] error:'), e?.message ?? e)

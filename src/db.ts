@@ -22,6 +22,7 @@ import {
 import { isApiExcludedUserCard } from './apiExcludedUserCards'
 import { resolveBeamioWalletIdentityFromAddress } from './beamioWalletIdentity'
 import { resolveBeamioAaOnConet } from './endpoint/resolveBeamioAaViaUserCardFactory'
+import { invalidateLatestCardsQueryCaches } from './endpoint/latestCardsQueryCache'
 
 /**
  * 
@@ -5123,6 +5124,17 @@ export function mergeBeamioCardMetadataJsonPatch(
 	return merged
 }
 
+function serializeBeamioCardMetadataJson(meta: Record<string, unknown>): string | null {
+	if (Object.keys(meta).length === 0) return null
+	try {
+		return JSON.stringify(meta, (_key, value) => (typeof value === 'bigint' ? value.toString() : value))
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(Colors.yellow(`[registerCardToDb] metadata JSON stringify failed: ${msg}`))
+		return null
+	}
+}
+
 /** createCard 成功后登记到本地 DB */
 export const registerCardToDb = async (params: {
 	cardAddress: string
@@ -5206,8 +5218,7 @@ export const registerCardToDb = async (params: {
 		const mergedMetadata = mergeBeamioCardMetadataJsonPatch(existingMeta, patchJson, {
 			preferExistingShareTokenMetadata: params.preferExistingShareTokenMetadata === true,
 		})
-		const metadataJson =
-			Object.keys(mergedMetadata).length > 0 ? JSON.stringify(mergedMetadata) : null
+		const metadataJson = serializeBeamioCardMetadataJson(mergedMetadata)
 		await db.query(
 			`
 			INSERT INTO beamio_cards (card_address, card_owner, currency, price_in_currency_e6, uri, metadata_json, tx_hash)
@@ -5239,6 +5250,11 @@ export const registerCardToDb = async (params: {
 			)
 		} else {
 			logger(Colors.green(`[registerCardToDb] registered card=${params.cardAddress}`))
+		}
+		try {
+			invalidateLatestCardsQueryCaches()
+		} catch {
+			/* Discover cache hook is best-effort */
 		}
 	} catch (e: any) {
 		logger(Colors.yellow(`[registerCardToDb] failed: ${e?.message ?? e}`))
@@ -5701,7 +5717,7 @@ export const getLatestCards = async (limit = 20): Promise<BeamioLatestCardItem[]
 		return (rows as any[]).map(mapBeamioCardSqlRow)
 	} catch (e: any) {
 		logger(Colors.yellow(`[getLatestCards] failed: ${e?.message ?? e}`))
-		return []
+		throw e
 	} finally {
 		await db.end().catch(() => {})
 	}

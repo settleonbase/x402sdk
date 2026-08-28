@@ -14704,6 +14704,103 @@ async function ensureBeamioCardRowForMetadataSync(cardAddress: string): Promise<
 	return { ok: true, row }
 }
 
+type RegisterCreatedMerchantCardParams = Parameters<typeof registerCardToDb>[0]
+
+const CREATE_CARD_REGISTER_RETRY_DELAYS_MS = [0, 250, 750] as const
+const CREATE_CARD_REGISTER_BG_MAX_ATTEMPTS = 8
+
+function waitRegisterCreatedMerchantCardMs(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function scheduleRegisterCreatedMerchantCardRetry(
+	params: RegisterCreatedMerchantCardParams,
+	attempt: number,
+): void {
+	if (attempt >= CREATE_CARD_REGISTER_BG_MAX_ATTEMPTS) {
+		logger(
+			Colors.red(
+				`[registerCreatedMerchantCardForDiscover] giving up card=${params.cardAddress} after ${attempt} background attempts`
+			)
+		)
+		return
+	}
+	const delay = Math.min(30_000, 1000 * 2 ** attempt)
+	const timer = setTimeout(() => {
+		void (async () => {
+			try {
+				await registerCardToDb(params)
+				logger(
+					Colors.green(
+						`[registerCreatedMerchantCardForDiscover] background retry ok card=${params.cardAddress} attempt=${attempt}`
+					)
+				)
+			} catch (e: unknown) {
+				const msg = e instanceof Error ? e.message : String(e)
+				logger(
+					Colors.yellow(
+						`[registerCreatedMerchantCardForDiscover] background retry failed card=${params.cardAddress} attempt=${attempt}: ${msg}`
+					)
+				)
+				scheduleRegisterCreatedMerchantCardRetry(params, attempt + 1)
+			}
+		})()
+	}, delay)
+	timer.unref?.()
+}
+
+/**
+ * createCard 上链成功后必须真正写入 `beamio_cards`（Discover `/api/latestCards` 只读该表）。
+ * 全量 payload 失败则降级最小行；仍失败则后台 `setTimeout` 链补偿。不向外 throw，以免挡住 HTTP 200。
+ */
+async function registerCreatedMerchantCardForDiscover(
+	full: RegisterCreatedMerchantCardParams,
+): Promise<void> {
+	for (let i = 0; i < CREATE_CARD_REGISTER_RETRY_DELAYS_MS.length; i++) {
+		const wait = CREATE_CARD_REGISTER_RETRY_DELAYS_MS[i]
+		if (wait > 0) await waitRegisterCreatedMerchantCardMs(wait)
+		try {
+			await registerCardToDb(full)
+			return
+		} catch (e: unknown) {
+			const msg = e instanceof Error ? e.message : String(e)
+			logger(
+				Colors.yellow(
+					`[registerCreatedMerchantCardForDiscover] attempt ${i + 1} failed card=${full.cardAddress}: ${msg}`
+				)
+			)
+		}
+	}
+
+	const minimal: RegisterCreatedMerchantCardParams = {
+		cardAddress: full.cardAddress,
+		cardOwner: full.cardOwner,
+		currency: full.currency,
+		priceInCurrencyE6: full.priceInCurrencyE6,
+		preferExistingShareTokenMetadata: true,
+		...(full.uri ? { uri: full.uri } : {}),
+		...(full.txHash ? { txHash: full.txHash } : {}),
+	}
+	try {
+		await registerCardToDb(minimal)
+		logger(
+			Colors.green(
+				`[registerCreatedMerchantCardForDiscover] minimal payload ok card=${full.cardAddress}`
+			)
+		)
+		return
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e)
+		logger(
+			Colors.yellow(
+				`[registerCreatedMerchantCardForDiscover] minimal payload failed card=${full.cardAddress}: ${msg}`
+			)
+		)
+	}
+
+	scheduleRegisterCreatedMerchantCardRetry(minimal, 0)
+}
+
 /**
  * 已发卡仅更新链下 metadata（`METADATA_BASE/0x{card}0.json` + beamio_cards.metadata_json）。
  * 供商户在 Card Configurator / Programs 中修改 recharge bonus 等后点 Publish，无需重新部署合约。
@@ -15252,7 +15349,7 @@ export const createCardPoolPress = async () => {
 				}
 			}
 		}
-		registerCardToDb({
+		await registerCreatedMerchantCardForDiscover({
 			cardAddress,
 			cardOwner,
 			currency,
@@ -15265,9 +15362,6 @@ export const createCardPoolPress = async () => {
 			tiers: stampedTiers,
 			...(baseMembership && { baseMembership }),
 			txHash: hash,
-		}).catch((regErr: unknown) => {
-			const msg = regErr instanceof Error ? regErr.message : String(regErr)
-			logger(Colors.yellow(`[createCardPoolPress] registerCardToDb failed card=${cardAddress}: ${msg}`))
 		})
 		if (res && !res.headersSent) res.status(200).json({ success: true, cardAddress, hash }).end()
 		// metadata 写盘 + Blockscout refetch 不阻塞 HTTP（链上 create tx 已确认）
