@@ -14772,6 +14772,7 @@ async function registerCreatedMerchantCardForDiscover(
 		}
 	}
 
+	/** Minimal row must still keep Loyalty Rule Type (upgradeType 0/1/2 + Charge/Balance tier flags). */
 	const minimal: RegisterCreatedMerchantCardParams = {
 		cardAddress: full.cardAddress,
 		cardOwner: full.cardOwner,
@@ -14780,6 +14781,17 @@ async function registerCreatedMerchantCardForDiscover(
 		preferExistingShareTokenMetadata: true,
 		...(full.uri ? { uri: full.uri } : {}),
 		...(full.txHash ? { txHash: full.txHash } : {}),
+		...(full.upgradeType === 0 || full.upgradeType === 1 || full.upgradeType === 2
+			? { upgradeType: full.upgradeType }
+			: {}),
+		...(typeof full.transferWhitelistEnabled === 'boolean' && {
+			transferWhitelistEnabled: full.transferWhitelistEnabled,
+		}),
+		...(full.shareTokenMetadata ? { shareTokenMetadata: full.shareTokenMetadata } : {}),
+		...(full.tiers && Array.isArray(full.tiers) && full.tiers.length > 0
+			? { tiers: full.tiers }
+			: {}),
+		...(full.baseMembership ? { baseMembership: full.baseMembership } : {}),
 	}
 	try {
 		await registerCardToDb(minimal)
@@ -15364,11 +15376,12 @@ export const createCardPoolPress = async () => {
 			txHash: hash,
 		})
 		if (res && !res.headersSent) res.status(200).json({ success: true, cardAddress, hash }).end()
-		// metadata 写盘 + Blockscout refetch 不阻塞 HTTP（链上 create tx 已确认）
+		// Always write card0 after create so Loyalty Rule Type (upgradeType 0/1/2 + Charge flags)
+		// survives beacon upgradeType() often stuck at 0. Do not gate on share/tiers/base alone.
 		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
 		const cardAddr = ethers.getAddress(cardAddress)
 		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
-		if (shareTokenMetadata || (stampedTiers && stampedTiers.length > 0) || baseMembership) {
+		{
 			const stm = shareTokenMetadata as Record<string, unknown> | undefined
 			const createMetaContent = buildBeamioErc1155Card0MetadataFileContent({
 				shareTokenMetadata: stm,
@@ -15385,7 +15398,11 @@ export const createCardPoolPress = async () => {
 						if (!fs.existsSync(metaDir)) fs.mkdirSync(metaDir, { recursive: true })
 						const metaContent = mergeCreateCard0MetadataFileIfExists(metaPath, createMetaContent)
 						fs.writeFileSync(metaPath, metaContent, 'utf-8')
-						logger(Colors.green(`[createCardPoolPress] wrote metadata: ${metaFilename}`))
+						logger(
+							Colors.green(
+								`[createCardPoolPress] wrote metadata: ${metaFilename} upgradeType=${stampedUpgradeType}`
+							)
+						)
 					} catch (metaErr: unknown) {
 						const err = metaErr as { message?: string }
 						logger(Colors.yellow(`[createCardPoolPress] metadata write failed: ${err?.message ?? metaErr}`))
