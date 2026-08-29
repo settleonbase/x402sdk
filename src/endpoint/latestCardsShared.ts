@@ -42,3 +42,31 @@ export function passDiscoverMerchantCardPolicy(card: {
 export function filterLatestCardsByDiscoverMerchantPolicy(cards: BeamioLatestCardItem[]): BeamioLatestCardItem[] {
 	return cards.filter((c) => passDiscoverFeaturedBrandsMerchantCardPolicy(c))
 }
+
+/**
+ * Featured Brands merchandising pin (All list / `/api/latestCards` order).
+ * Visibility still goes through {@link passDiscoverFeaturedBrandsMerchantCardPolicy} first —
+ * a pinned address that fails the gate is omitted, not forced visible.
+ */
+export const DISCOVER_FEATURED_PINNED_CARD_ADDRESSES = [
+	'0x6e600DfaEa5eD006A97aF2AD080518c1d06C0A74',
+] as const
+
+export function orderLatestCardsWithDiscoverPins(cards: BeamioLatestCardItem[]): BeamioLatestCardItem[] {
+	const pinnedSet = new Set(DISCOVER_FEATURED_PINNED_CARD_ADDRESSES.map((a) => a.toLowerCase()))
+	const pinnedByLower = new Map<string, BeamioLatestCardItem>()
+	const rest: BeamioLatestCardItem[] = []
+	for (const card of cards) {
+		const lc = (card.cardAddress || '').trim().toLowerCase()
+		if (lc && pinnedSet.has(lc) && !pinnedByLower.has(lc)) {
+			pinnedByLower.set(lc, card)
+			continue
+		}
+		rest.push(card)
+	}
+	const pinnedOrdered = DISCOVER_FEATURED_PINNED_CARD_ADDRESSES.flatMap((addr) => {
+		const hit = pinnedByLower.get(addr.toLowerCase())
+		return hit ? [hit] : []
+	})
+	return [...pinnedOrdered, ...rest]
+}

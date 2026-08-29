@@ -34,7 +34,12 @@ import { BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY } from '../chainAddresses'
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { resolveAaUserOpRelayChainFromRequest } from '../aaTransferRelayChain'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
-import { filterLatestCardsByDiscoverMerchantPolicy } from './latestCardsShared'
+import {
+	DISCOVER_FEATURED_PINNED_CARD_ADDRESSES,
+	filterLatestCardsByDiscoverMerchantPolicy,
+	orderLatestCardsWithDiscoverPins,
+	passDiscoverFeaturedBrandsMerchantCardPolicy,
+} from './latestCardsShared'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
 import {
 	kickReferralRegistryRedeemRelay,
@@ -437,6 +442,33 @@ function writeLatestCardsCacheIfCurrent(
 	latestCardsCache.set(key, { items, expiry: Date.now() + LATEST_CARDS_CACHE_STALE_MS })
 }
 
+async function ensureDiscoverPinnedLatestCards(
+	visible: BeamioLatestCardItem[],
+): Promise<BeamioLatestCardItem[]> {
+	const have = new Set(visible.map((c) => (c.cardAddress || '').toLowerCase()))
+	const extra: BeamioLatestCardItem[] = []
+	for (const addr of DISCOVER_FEATURED_PINNED_CARD_ADDRESSES) {
+		if (have.has(addr.toLowerCase())) continue
+		const row = await getCardByAddress(addr)
+		if (!row) continue
+		const item: BeamioLatestCardItem = {
+			cardAddress: addr,
+			cardOwner: row.cardOwner,
+			currency: row.currency,
+			priceInCurrencyE6: row.priceInCurrencyE6,
+			uri: row.uri,
+			metadata: row.metadata,
+			txHash: row.txHash,
+			totalPointsMinted6: '0',
+			holderCount: 0,
+			createdAt: row.createdAt ?? '',
+		}
+		if (!passDiscoverFeaturedBrandsMerchantCardPolicy(item)) continue
+		extra.push(item)
+	}
+	return orderLatestCardsWithDiscoverPins([...extra, ...visible])
+}
+
 async function computeLatestCardsSuperset(): Promise<BeamioLatestCardItem[]> {
 	const gen = latestCardsCacheGeneration
 	const inflightKey = `${gen}:${LATEST_CARDS_SUPERSET_LIMIT}`
@@ -448,8 +480,9 @@ async function computeLatestCardsSuperset(): Promise<BeamioLatestCardItem[]> {
 			const raw = await getLatestCards(LATEST_CARDS_SUPERSET_LIMIT)
 			// Discover gate 先于 enrichment：exclude / cutover 外的卡不对链上打 RPC
 			const visible = filterLatestCardsByDiscoverMerchantPolicy(raw)
+			const ordered = await ensureDiscoverPinnedLatestCards(visible)
 			return enrichLatestCardsWithBaseErc1155PointsHolderCounts(
-				visible,
+				ordered,
 				providerBaseForLatestCards,
 			)
 		} finally {
