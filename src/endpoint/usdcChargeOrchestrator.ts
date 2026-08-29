@@ -54,6 +54,7 @@ import {
 	nfcTopupPreCheckBUnitFee,
 	hashContainerItems,
 	readContainerNonceFromAAStorage,
+	unpackTopupMintAmount,
 	type ContainerRelayPayload,
 } from '../MemberCard'
 import { resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
@@ -287,7 +288,7 @@ const tryParseMintPoints6 = (dataHex: string): bigint | null => {
 		const iface = new ethers.Interface(['function mintPointsByAdmin(address toEOA, uint256 amount)'])
 		const parsed = iface.parseTransaction({ data: dataHex })
 		if (!parsed || parsed.name !== 'mintPointsByAdmin') return null
-		return parsed.args[1] as bigint
+		return unpackTopupMintAmount(BigInt(parsed.args[1])).totalPoints6
 	} catch {
 		return null
 	}

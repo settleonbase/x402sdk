@@ -526,7 +526,7 @@ const clearStaleUsernameFromDb = async (accountName: string): Promise<void> => {
 			`
 			UPDATE accounts
 			SET username = ''
-			WHERE LOWER(TRIM(COALESCE(username, ''))) = LOWER($1)
+			WHERE TRIM(COALESCE(username, '')) = $1
 			`,
 			[nameNorm]
 		)
@@ -594,7 +594,7 @@ const getUserDataFromDbByUsername = async (
 			SELECT address, username, image, dark_theme, is_usdc_faucet, is_eth_faucet,
 				initial_loading, first_name, last_name, created_at
 			FROM accounts
-			WHERE LOWER(TRIM(COALESCE(username, ''))) = LOWER($1)
+			WHERE TRIM(COALESCE(username, '')) = $1
 			LIMIT 1
 			`,
 			[nameNorm]
@@ -6372,6 +6372,145 @@ export const _searchExactByAddress = async (addressLower: string) => {
 	}
 }
 
+const mergeAccountSearchRowsByAddress = (primary: any[], secondary: any[]): any[] => {
+	const seen = new Set<string>()
+	const out: any[] = []
+	for (const row of [...primary, ...secondary]) {
+		const k = String(row?.address || "").toLowerCase()
+		if (!k || seen.has(k)) continue
+		seen.add(k)
+		out.push(row)
+	}
+	return out
+}
+
+const beamioTagSearchCaseVariants = (raw: string): string[] => {
+	const t = String(raw || "").trim().replace(/^@+/, "")
+	if (!t) return []
+	const out: string[] = []
+	const seen = new Set<string>()
+	const add = (v: string) => {
+		if (!v || seen.has(v)) return
+		seen.add(v)
+		out.push(v)
+	}
+	add(t)
+	add(t.toUpperCase())
+	add(t.toLowerCase())
+	add(t.charAt(0).toUpperCase() + t.slice(1).toLowerCase())
+	// LongDHANG → Long | DHANG → LongDhang (AccountRegistry is case-sensitive)
+	const runs: string[] = []
+	let cur = t[0] ?? ""
+	for (let i = 1; i < t.length; i++) {
+		const prev = t[i - 1]
+		const ch = t[i]
+		if (/[a-z]/.test(prev) && /[A-Z]/.test(ch)) {
+			runs.push(cur)
+			cur = ch
+		} else {
+			cur += ch
+		}
+	}
+	if (cur) runs.push(cur)
+	if (runs.length > 1) {
+		add(runs.map((r) => r.charAt(0).toUpperCase() + r.slice(1).toLowerCase()).join(""))
+	}
+	return out
+}
+
+/**
+ * AccountRegistry names are case-sensitive (LONGDHANG ≠ LongDHANG ≠ LongDhang).
+ * Merge exact + UPPER + LOWER chain owners so a case-insensitive dropdown is complete
+ * even when DB usernames were wiped.
+ */
+const mergeOnchainExactAccountNameIntoSearchResults = async (
+	keyword: string,
+	results: any[],
+): Promise<any[]> => {
+	const raw = String(keyword || "").trim().replace(/^@+/, "")
+	if (!raw || (ethers.isAddress as (v: string) => boolean)(raw)) return results
+	const SC = beamio_ContractPool[0]?.constAccountRegistry
+	if (!SC) return results
+
+	const merged = [...results]
+	const seen = new Set(
+		merged.map((row) => String(row?.address || "").toLowerCase()).filter(Boolean),
+	)
+
+	for (const variant of beamioTagSearchCaseVariants(raw)) {
+		let owner = ""
+		try {
+			owner = await SC.getOwnerByAccountName(variant)
+		} catch (ex: any) {
+			if (!isOnchainEmptyResult(ex)) {
+				logger(
+					Colors.yellow(
+						`[searchUsers] getOwnerByAccountName(${variant}) failed: ${ex?.shortMessage || ex?.message || ex}`,
+					),
+				)
+			}
+			continue
+		}
+		if (!owner || owner === ethers.ZeroAddress) continue
+		const ownerLower = owner.toLowerCase()
+		let accountName = variant
+		let image = ""
+		let firstName = ""
+		let lastName = ""
+		let createdAt = 0
+		try {
+			const onchain = await SC.getAccount(owner)
+			if (onchain?.accountName) accountName = String(onchain.accountName)
+			if (onchain?.image) image = String(onchain.image)
+			if (onchain?.firstName) firstName = String(onchain.firstName)
+			if (onchain?.lastName) lastName = String(onchain.lastName)
+			if (onchain?.createdAt != null) {
+				const ca = BigInt(onchain.createdAt)
+				createdAt = Number(ca > 1_000_000_000_000n ? ca : ca * 1000n)
+			}
+		} catch (ex: any) {
+			if (!isOnchainEmptyResult(ex)) {
+				logger(
+					Colors.yellow(
+						`[searchUsers] getAccount(${ownerLower}) failed: ${ex?.shortMessage || ex?.message || ex}`,
+					),
+				)
+			}
+		}
+		enqueueSyncUserDataFromChain(accountName)
+		const existing = merged.find((row) => String(row?.address || "").toLowerCase() === ownerLower)
+		if (existing) {
+			if (!String(existing.username || "").trim()) existing.username = accountName
+			if (!String(existing.image || "").trim() && image) existing.image = image
+			if (!String(existing.first_name || "").trim() && firstName) existing.first_name = firstName
+			if (!String(existing.last_name || "").trim() && lastName) existing.last_name = lastName
+			continue
+		}
+		if (seen.has(ownerLower)) continue
+		seen.add(ownerLower)
+		merged.unshift({
+			address: ownerLower,
+			username: accountName,
+			created_at: createdAt,
+			image,
+			first_name: firstName,
+			last_name: lastName,
+			follow_count: "0",
+			follower_count: "0",
+			hit_field: "username",
+		})
+	}
+	const qLower = raw.toLowerCase()
+	merged.sort((a, b) => {
+		const ta = String(a?.username || "").trim().toLowerCase()
+		const tb = String(b?.username || "").trim().toLowerCase()
+		const ra = ta === qLower ? 0 : ta.startsWith(qLower) ? 1 : 2
+		const rb = tb === qLower ? 0 : tb.startsWith(qLower) ? 1 : 2
+		return ra - rb
+	})
+	return merged
+}
+
 /** 关键词模糊搜索（非地址检索须走 searchUsers 里对地址的分支，勿把地址传入本函数）。 */
 export const _search = async (keyward: string) => {
   const _keywork = String(keyward || "")
@@ -6408,6 +6547,28 @@ export const _search = async (keyward: string) => {
     const offset = (_page - 1) * _pageSize
     logger(`_search with keyword`)
 
+      const { rows: exactRows } = await db.query(
+        `
+        SELECT
+          a.address,
+          a.username,
+          a.created_at,
+          a.image,
+          a.first_name,
+          a.last_name,
+          COALESCE((SELECT COUNT(*) FROM follows f WHERE f.follower = a.address), 0) AS follow_count,
+          COALESCE((SELECT COUNT(*) FROM follows f2 WHERE f2.followee = a.address), 0) AS follower_count,
+          'username' AS hit_field
+        FROM accounts a
+        WHERE
+          TRIM(COALESCE(a.username, '')) <> ''
+          AND LOWER(TRIM(a.username)) = LOWER($1)
+        ORDER BY a.created_at DESC
+        LIMIT 50
+        `,
+        [raw],
+      )
+
       const { rows: r } = await db.query(
         `
         WITH q AS (
@@ -6441,6 +6602,7 @@ export const _search = async (keyward: string) => {
           OR (COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')) ILIKE q.contains_pat
         ORDER BY
           CASE
+            WHEN LOWER(TRIM(COALESCE(a.username, ''))) = LOWER(q.raw) THEN -1
             WHEN a.username ILIKE q.prefix_pat THEN 0
             WHEN COALESCE(a.first_name, '') ILIKE q.prefix_pat THEN 1
             WHEN COALESCE(a.last_name, '') ILIKE q.prefix_pat THEN 2
@@ -6459,7 +6621,7 @@ export const _search = async (keyward: string) => {
         [raw, containsPat, prefixPat, _pageSize, offset]
       )
 
-    return { results: r }
+    return { results: mergeAccountSearchRowsByAddress(exactRows, r) }
   } catch (err) {
     console.error("searchUsers error:", err)
     return { error: "internal_error" }
@@ -6488,7 +6650,11 @@ export const searchUsersResultsForKeyward = async (
 	if ("error" in ret && ret.error) {
 		return { error: String(ret.error) }
 	}
-	return { results: (ret as { results: any[] }).results ?? [] }
+	const results = await mergeOnchainExactAccountNameIntoSearchResults(
+		_keywork,
+		(ret as { results: any[] }).results ?? [],
+	)
+	return { results }
 }
 
 export const searchUsers = async (req: Request, res: Response) => {
@@ -6512,7 +6678,14 @@ export const searchUsers = async (req: Request, res: Response) => {
 	}
 
 	const ret = await _search(_keywork)
-	return res.status(200).json(ret).end()
+	if ("error" in ret && ret.error) {
+		return res.status(500).json({ error: ret.error }).end()
+	}
+	const results = await mergeOnchainExactAccountNameIntoSearchResults(
+		_keywork,
+		(ret as { results: any[] }).results ?? [],
+	)
+	return res.status(200).json({ results }).end()
 }
 
 const updateUserFollowDB = async (

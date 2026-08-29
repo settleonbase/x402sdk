@@ -3516,6 +3516,19 @@
   },
   {
     "inputs": [],
+    "name": "topupMintPacksPaidBase",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "totalActiveMemberships",
     "outputs": [
       {

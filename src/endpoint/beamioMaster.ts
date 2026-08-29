@@ -4706,10 +4706,10 @@ const routing = ( router: Router ) => {
 			await nfcLinkAppClaimWithKeyExecute(req.body ?? {}, res)
 		})
 
-		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）或 wallet（Scan QR）。 */
+		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）或 wallet（Scan QR）。Optional paidAmount = 实付本金. */
 		router.post('/nfcTopupPrepare', async (req, res) => {
 			try {
-				const { uid, wallet, amount, currency, cardAddress, membershipTierIndex, membershipFeeFiat6 } = req.body as {
+				const { uid, wallet, amount, currency, cardAddress, membershipTierIndex, membershipFeeFiat6, paidAmount } = req.body as {
 					uid?: string
 					wallet?: string
 					amount?: string
@@ -4717,6 +4717,7 @@ const routing = ( router: Router ) => {
 					cardAddress?: string
 					membershipTierIndex?: number | string
 					membershipFeeFiat6?: string | number
+					paidAmount?: string | number
 				}
 				const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0
 				const hasWallet = wallet && typeof wallet === 'string' && ethers.isAddress(wallet.trim())
@@ -4737,6 +4738,9 @@ const routing = ( router: Router ) => {
 						: {}),
 					...(membershipFeeFiat6 != null && String(membershipFeeFiat6).trim() !== ''
 						? { membershipFeeFiat6 }
+						: {}),
+					...(paidAmount != null && String(paidAmount).trim() !== ''
+						? { paidAmount: String(paidAmount).trim() }
 						: {}),
 				})
 				if ('error' in result) {

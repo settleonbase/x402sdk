@@ -2801,6 +2801,97 @@ function parseOptionalUint256String(raw: unknown): bigint | null {
 	}
 }
 
+/** Aligns with `TopupMintAmountCodec.sol` — pack total (#0) + paid (#13 base) into mintPointsByAdmin amount. */
+const TOPUP_MINT_PACKED_FLAG = 1n << 255n
+const TOPUP_MINT_MASK_128 = (1n << 128n) - 1n
+
+export function packTopupMintAmount(totalPoints6: bigint, paidPoints6: bigint): bigint {
+	if (totalPoints6 === 0n || paidPoints6 === 0n) {
+		throw new Error('TopupMintPackZero')
+	}
+	if (totalPoints6 > TOPUP_MINT_MASK_128 || paidPoints6 > TOPUP_MINT_MASK_128) {
+		throw new Error('TopupMintPackOverflow')
+	}
+	if (paidPoints6 > totalPoints6) {
+		throw new Error('TopupMintPackPaidExceedsTotal')
+	}
+	return TOPUP_MINT_PACKED_FLAG | (paidPoints6 << 128n) | totalPoints6
+}
+
+export function unpackTopupMintAmount(raw: bigint): { totalPoints6: bigint; paidPoints6: bigint } {
+	if ((raw & TOPUP_MINT_PACKED_FLAG) === 0n) {
+		return { totalPoints6: raw, paidPoints6: raw }
+	}
+	const body = raw & ~TOPUP_MINT_PACKED_FLAG
+	return {
+		totalPoints6: body & TOPUP_MINT_MASK_128,
+		paidPoints6: body >> 128n,
+	}
+}
+
+async function cardSupportsTopupMintPack(cardAddr: string, provider: ethers.Provider): Promise<boolean> {
+	const c = new ethers.Contract(
+		cardAddr,
+		['function topupMintPacksPaidBase() view returns (bool)', 'function VERSION() view returns (uint256)'],
+		provider
+	)
+	try {
+		return Boolean(await c.topupMintPacksPaidBase())
+	} catch {
+		try {
+			return BigInt(await c.VERSION()) >= 17n
+		} catch {
+			return false
+		}
+	}
+}
+
+/** Convert card-currency fiat6 → points6 (same paths as nfcTopupPreparePayload). */
+async function quotePoints6FromCardFiat6(opts: {
+	cardAddr: string
+	cardProvider: ethers.Provider
+	currencyUpper: string
+	fiat6: bigint
+}): Promise<bigint | null> {
+	const { cardAddr, cardProvider, currencyUpper, fiat6 } = opts
+	if (fiat6 <= 0n) return 0n
+	const ONE_E6 = 1_000_000n
+	const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
+	try {
+		const readCard = new ethers.Contract(
+			cardAddr,
+			['function currency() view returns (uint8)', 'function pointsUnitPriceInCurrencyE6() view returns (uint256)'],
+			cardProvider
+		)
+		const [cardCurrencyId, priceInCurrency6] = await Promise.all([
+			readCard.currency() as Promise<bigint>,
+			readCard.pointsUnitPriceInCurrencyE6() as Promise<bigint>,
+		])
+		const currencyMap: Record<number, string> = {
+			0: 'CAD',
+			1: 'USD',
+			2: 'JPY',
+			3: 'CNY',
+			4: 'USDC',
+			5: 'HKD',
+			6: 'EUR',
+			7: 'SGD',
+			8: 'TWD',
+		}
+		const cardCurrency = currencyMap[Number(cardCurrencyId)] ?? 'CAD'
+		if (cardCurrency === currencyUpper && priceInCurrency6 > 0n) {
+			return ceilDiv(fiat6 * ONE_E6, priceInCurrency6)
+		}
+	} catch {
+		/* fall through to oracle quote */
+	}
+	const human = ethers.formatUnits(fiat6, 6)
+	const usdcAmount6 = quoteCurrencyToUsdc6(human, currencyUpper)
+	if (usdcAmount6 <= 0n) return null
+	const quote = await quotePointsForUSDC_raw(cardAddr, usdcAmount6)
+	return quote.points6
+}
+
 /** POS Check Balance membership issue/upgrade: client sends tier + fee even when customer already has a card. */
 function nfcTopupExplicitMembershipFeeRequested(
 	membershipTierIndex?: number | string | null,
@@ -2815,6 +2906,12 @@ export const nfcTopupPreparePayload = async (params: {
 	uid?: string
 	wallet?: string
 	amount: string
+	/**
+	 * Optional principal / 实付 (card currency human or E6 string). When Top-up Promotion
+	 * bonus is included in `amount`, pass keypad principal here so mintPointsByAdmin can pack
+	 * total|paid and ChargeReward #13 uses paid only (TopupMintAmountCodec).
+	 */
+	paidAmount?: string
 	currency?: string
 	cardAddress: string
 	/** Optional tier for membership-fee first issue / renew. */
@@ -2979,8 +3076,69 @@ export const nfcTopupPreparePayload = async (params: {
 	}
 
 	if (points6 <= 0n) return { error: 'quotePointsForUSDC failed' }
+
+	/**
+	 * Reward PT (#13) base = 实付 (paid). Top-up Promotion bonus is included in `amount` / total
+	 * points6 but must NOT inflate #13. When card supports packing (VERSION≥17), pack total|paid
+	 * into mintPointsByAdmin amount; GatewayMintLib mints total #0, ChargeReward uses paid for #13.
+	 */
+	let mintAmountRaw = points6
+	let paidCurrency6 = amountCurrency6
+	const paidRaw = params.paidAmount != null ? String(params.paidAmount).trim() : ''
+	if (paidRaw && Number(paidRaw) > 0) {
+		try {
+			paidCurrency6 = ethers.parseUnits(paidRaw.replace(/,/g, ''), 6)
+		} catch {
+			return { error: 'Invalid paidAmount' }
+		}
+		if (paidCurrency6 <= 0n) return { error: 'Invalid paidAmount' }
+		if (paidCurrency6 > amountCurrency6) paidCurrency6 = amountCurrency6
+	}
+	const paidPointsSourceFiat6 = membershipNeedsFee
+		? paidCurrency6 > feeFiat6
+			? paidCurrency6 - feeFiat6
+			: 0n
+		: paidCurrency6
+
+	if (
+		!(membershipNeedsFee && pointsSourceFiat6 === 0n) &&
+		paidPointsSourceFiat6 < pointsSourceFiat6 &&
+		paidPointsSourceFiat6 >= 0n
+	) {
+		const supportsPack = await cardSupportsTopupMintPack(cardAddr, cardProvider)
+		if (supportsPack) {
+			let paidPoints6: bigint | null = null
+			if (paidPointsSourceFiat6 === 0n) {
+				paidPoints6 = 0n
+			} else {
+				paidPoints6 = await quotePoints6FromCardFiat6({
+					cardAddr,
+					cardProvider,
+					currencyUpper: cur,
+					fiat6: paidPointsSourceFiat6,
+				})
+			}
+			if (paidPoints6 == null) {
+				return { error: 'Oracle rate unavailable for paidAmount, please retry shortly' }
+			}
+			if (paidPoints6 > points6) paidPoints6 = points6
+			if (paidPoints6 > 0n && paidPoints6 < points6) {
+				try {
+					mintAmountRaw = packTopupMintAmount(points6, paidPoints6)
+					logger(
+						Colors.gray(
+							`[nfcTopupPreparePayload] packed mint total=${points6} paid=${paidPoints6} card=${cardAddr}`
+						)
+					)
+				} catch (packErr: any) {
+					return { error: packErr?.message ?? 'Failed to pack top-up mint amount' }
+				}
+			}
+		}
+	}
+
 	const iface = new ethers.Interface(['function mintPointsByAdmin(address toEOA, uint256 amount)'])
-	const data = iface.encodeFunctionData('mintPointsByAdmin', [recipientEOA, points6])
+	const data = iface.encodeFunctionData('mintPointsByAdmin', [recipientEOA, mintAmountRaw])
 	/** 15 分钟有效期，避免队列/网络延迟导致 UC_InvalidTimeWindow */
 	const deadline = Math.floor(Date.now() / 1000) + 900
 	const nonce = ethers.hexlify(ethers.randomBytes(32))
@@ -2993,6 +3151,7 @@ export const nfcTopupPreparePayload = async (params: {
 		factoryGateway,
 		membershipFeeMode,
 		membershipNeedsFee,
+		/** Always total #0 credit (unpacked), never the packed wire value. */
 		pointsCredit6: points6.toString(),
 		amountFiat6: amountCurrency6.toString(),
 	}
@@ -7776,13 +7935,24 @@ export const AAtoEOAPreCheckSenderHasCode = async (
 	return { success: true }
 }
 
-/** 从 mintPointsByAdmin data 解析 recipient 与 points6 */
-const tryParseMintPointsByAdminArgs = (data: string): { recipient: string; points6: bigint } | null => {
+/**
+ * Parse mintPointsByAdmin calldata.
+ * `points6` = total #0 credit (unpacked). `rawPoints6` = wire amount (may be TopupMintAmountCodec-packed).
+ */
+const tryParseMintPointsByAdminArgs = (
+	data: string
+): { recipient: string; points6: bigint; rawPoints6: bigint } | null => {
 	try {
 		const iface = new ethers.Interface(['function mintPointsByAdmin(address user, uint256 points6)'])
 		const decoded = iface.parseTransaction({ data })
 		if (decoded?.name === 'mintPointsByAdmin' && decoded.args[0] != null && decoded.args[1] != null) {
-			return { recipient: decoded.args[0] as string, points6: BigInt(decoded.args[1]) }
+			const rawPoints6 = BigInt(decoded.args[1])
+			const { totalPoints6 } = unpackTopupMintAmount(rawPoints6)
+			return {
+				recipient: decoded.args[0] as string,
+				points6: totalPoints6,
+				rawPoints6,
+			}
 		}
 	} catch { /* ignore */ }
 	return null
@@ -8115,10 +8285,11 @@ export async function nfcTopupPreCheckMintGatewaySimulation(
 		)
 		const factory = ethers.getAddress((await cardMeta.factoryGateway()) as string)
 		const iface = new ethers.Interface(['function mintPointsByAdmin(address user, uint256 points6)'])
+		/** Simulate with raw wire amount (may be packed); do not re-encode unpacked total. */
 		await provider.call({
 			from: factory,
 			to: cardNorm,
-			data: iface.encodeFunctionData('mintPointsByAdmin', [parsed.recipient, parsed.points6]),
+			data: iface.encodeFunctionData('mintPointsByAdmin', [parsed.recipient, parsed.rawPoints6]),
 		})
 		return { success: true }
 	} catch (e: any) {
