@@ -41,16 +41,14 @@ export const BASE_CARD_FACTORY = '0xF2864210577359AcaE448D2B116031a0c5EE1016'
  * createCardCollectionWithInitCode(address,uint8,uint256,bytes) — selector 0xef759095
  * createCardCollectionWithInitCodeAndTiers(..., (uint256,uint256,uint256)[]) — selector 0x9a7eb0f0
  *
- * New merchant cards: `createCardCollectionWithInitCode` then serial `appendTierForCard`
- * (4-arg: minUsdc6, attr, tierExpirySeconds, upgradeByBalance). Do not send AndTiers
- * (`0x9a7eb0f0`) or Hardhat 4-tuple AndTiers (`0x62cb913c`) on the create path.
- *
- * CoNET live Factory AndTiers is **3-tuple only** (legacy). Encode with the explicit 3-tuple
- * fragment (`encodeCreateCardCollectionWithInitCodeAndTiersCalldata` in CCSA.ts).
+ * Loyalty new cards: one tx `createCardCollectionWithInitCodeAndTiers` (live 3-tuple
+ * `0x9a7eb0f0`). Membership-fee cards: `createCardCollectionWithInitCode` only.
+ * Encode AndTiers with `encodeCreateCardCollectionWithInitCodeAndTiersCalldata` in CCSA.ts.
  * Hardhat V07 source compiles 4-tuple (`upgradeByBalance`) → selector 0x62cb913c,
  * which is **not** on the live Factory. Never send 0x62cb913c. Do not upgrade Factory
  * to add it. Calling the artifact ABI method throws
  * `missing value for component upgradeByBalance` before RPC.
+ * Do not create then serial `appendTierForCard` on the new-card path (orphan if append reverts).
  */
 export const FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_SELECTOR = '0xef759095' as const
 /** Live CoNET AndTiers (3-tuple Tier). Do not confuse with 0xef759095 or 0x62cb913c. */
@@ -312,20 +310,20 @@ export const CONET_GB_TOTAL = '0x949ed49faB0e999f685f16e09Cf5EaaF4090F290'
 /** CoNET GuardianNodesInfoV6 — DePIN 节点 IP ↔ 运营钱包；与 deployments/conet-addresses.json 同步 */
 export const CONET_GUARDIAN_NODES_INFO_V6 = '0xBC6b53065b5647261396d002bDBA0d3396E0722f'
 export const CONET_BEAMIO_USER_CARD_FORMATTING_LIB = '0x62F18eeC53B423bb36246856Fe2216A7Df270873'
-export const CONET_BEAMIO_USER_CARD_TRANSFER_LIB = '0x8A1f924d849469045C2b5562da0d0C78E62cd2f7'
-export const CONET_BEAMIO_USER_CARD_ADMIN_GATEWAY_LIB = '0xf032E451ca360467F4FDC6CdA966cd7aF53879dc'
+export const CONET_BEAMIO_USER_CARD_TRANSFER_LIB = '0x91700d6c4d6384C9515809484FC6ECfA786BeA04'
+export const CONET_BEAMIO_USER_CARD_ADMIN_GATEWAY_LIB = '0x6BD214563ba5D4b5EE17E6C7E997bAE5cdB199D9'
 export const CONET_BEAMIO_USER_CARD_FAUCET_GATEWAY_LIB = '0xE8BCc970e1C51d0F8fFDcB3beCe1DEAd4B786986'
-export const CONET_BEAMIO_USER_CARD_GATEWAY_MINT_LIB = '0xb7D0Aa2eA54FFF11f44d69683134ad84183Afc4F'
+export const CONET_BEAMIO_USER_CARD_GATEWAY_MINT_LIB = '0xDe540aB16273683771F26e5Bae094dec11947547'
 export const CONET_BEAMIO_USER_CARD_GOVERNANCE_LIB = '0x1656673561FfB970902D4e7Ec734Fcb3D5b2d286'
 export const CONET_BEAMIO_USER_CARD_ISSUED_NFT_GATEWAY_LIB = '0x2dCe8094277BD85A0f1bcd7f72ce86C56309879d'
 export const CONET_BEAMIO_USER_CARD_MODULE_ROUTER_LIB = '0x1619a3Ce48C6B45d743E0C8E4636221FfEa88Bc9'
-export const CONET_BEAMIO_USER_CARD_REDEEM_GATEWAY_LIB = '0x0fcAa7331f522BC60a25262b9023f7c961Af2529'
-export const CONET_BEAMIO_USER_CARD_REFERRER_LIB = '0x231575445aF3b543afcBA2978546e62CA6121381'
-export const CONET_BEAMIO_USER_CARD_UPDATE_LIB = '0x24ac67e299628bEAC6eC5a4Cc220407B2304A414'
+export const CONET_BEAMIO_USER_CARD_REDEEM_GATEWAY_LIB = '0x87134Bf71d87806EB28C12900276AFd4D8C45255'
+export const CONET_BEAMIO_USER_CARD_REFERRER_LIB = '0xf20524D0D08c403CF0b80cADdf7098B12AAA74c2'
+export const CONET_BEAMIO_USER_CARD_UPDATE_LIB = '0xd663B6A9fFC614C4e290F15F1B2C5227Aa5aB722'
 export const CONET_BEAMIO_USER_CARD_VIEWS_LIB = '0x1c7c122429Da18e6078d9CEbb7B5b30F0Aa2a033'
 export const CONET_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB =
   process.env.CONET_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB || '0x048fb5BdEAeF9bFb42b7Af9118f9975E9Be933F2'
-export const CONET_REFERRER_REGISTRY_LIB = '0x447582C3740972782dEa14E3151065927154e033'
+export const CONET_REFERRER_REGISTRY_LIB = '0x695b8C50c2C5F24928abdf3A061ED383AaEBDc1B'
 
 /**
  * CoNET UserCard UpgradeableBeacon (P2). Empty until deployed; createCard stays on CREATE initCode
@@ -333,7 +331,7 @@ export const CONET_REFERRER_REGISTRY_LIB = '0x447582C3740972782dEa14E31510659271
  */
 export const CONET_USER_CARD_BEACON = process.env.CONET_USER_CARD_BEACON?.trim() || '0x01716C6b755a0FBfCF4e548A6d6B7af19ADf6698'
 /** Logic implementation the beacon currently points at. Diagnostic / verify only; initCode uses the beacon. */
-export const CONET_USER_CARD_BEACON_IMPL = process.env.CONET_USER_CARD_BEACON_IMPL?.trim() || '0xcdC332f7980e0f7F3badAAC8671CA760eD178c76'
+export const CONET_USER_CARD_BEACON_IMPL = process.env.CONET_USER_CARD_BEACON_IMPL?.trim() || '0x1C05869b82d29ddBB59eACD2bfA5bFc0C3FD5D59'
 
 export function resolveConetUserCardBeaconAddress(): string | null {
 	const raw = CONET_USER_CARD_BEACON.trim()

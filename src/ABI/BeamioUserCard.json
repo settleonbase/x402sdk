@@ -1373,6 +1373,29 @@
         "internalType": "uint256",
         "name": "tierExpirySeconds",
         "type": "uint256"
+      }
+    ],
+    "name": "appendTier",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "minUsdc6",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "attr",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tierExpirySeconds",
+        "type": "uint256"
       },
       {
         "internalType": "bool",

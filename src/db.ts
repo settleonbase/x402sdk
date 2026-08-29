@@ -5164,6 +5164,15 @@ export const registerCardToDb = async (params: {
 			chargeRewardRatioE6?: string
 			rewardTokenId?: number
 		}
+		businessProfile?: {
+			channelKind?: 'physical' | 'digital' | 'app'
+			category?: string
+			storeName?: string
+			country?: string
+			city?: string
+			province?: string
+			businessType?: 'solo' | 'chain' | 'ngo'
+		}
 	}
 	tiers?: Array<{
 		index: number

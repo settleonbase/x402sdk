@@ -79,6 +79,11 @@ import {
 	kickRedeemReward13ForUsdcProcess,
 	redeemReward13ForUsdcPool,
 } from '../redeemReward13ForUsdc'
+import {
+	convertReward13ToProgramPointsPool,
+	convertReward13ToUsdcToAaPool,
+	kickConvertReward13Process,
+} from '../convertReward13'
 import { applyExcludeUserCard, warmDynamicApiExcludedUserCardsFromDb } from '../excludeUserCardApi'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback, resolveBeamioAaOnConet } from './resolveBeamioAaViaUserCardFactory'
@@ -2358,6 +2363,52 @@ const routing = ( router: Router ) => {
 				),
 			)
 			kickRedeemReward13ForUsdcProcess()
+		})
+
+		router.post('/convertReward13ToProgramPoints', (req, res) => {
+			convertReward13ToProgramPointsPool.push({
+				cardAddress: String(req.body?.cardAddress ?? ''),
+				userEOA: String(req.body?.userEOA ?? ''),
+				burn13: String(req.body?.burn13 ?? ''),
+				deadline: Number(req.body?.deadline ?? 0),
+				nonce: String(req.body?.nonce ?? ''),
+				userSignature: String(req.body?.userSignature ?? ''),
+				kind: 'toProgramPoints',
+				res,
+			})
+			logger(
+				` Master GOT /api/convertReward13ToProgramPoints…`,
+				inspect(
+					{ cardAddress: req.body?.cardAddress, userEOA: req.body?.userEOA, burn13: req.body?.burn13 },
+					false,
+					3,
+					true,
+				),
+			)
+			kickConvertReward13Process()
+		})
+
+		router.post('/convertReward13ToUsdcToAa', (req, res) => {
+			convertReward13ToUsdcToAaPool.push({
+				cardAddress: String(req.body?.cardAddress ?? ''),
+				userEOA: String(req.body?.userEOA ?? ''),
+				burn13: String(req.body?.burn13 ?? ''),
+				deadline: Number(req.body?.deadline ?? 0),
+				nonce: String(req.body?.nonce ?? ''),
+				userSignature: String(req.body?.userSignature ?? ''),
+				kind: 'toUsdcAa',
+				res,
+			})
+			logger(
+				` Master GOT /api/convertReward13ToUsdcToAa…`,
+				inspect(
+					{ cardAddress: req.body?.cardAddress, userEOA: req.body?.userEOA, burn13: req.body?.burn13 },
+					false,
+					3,
+					true,
+				),
+			)
+			kickConvertReward13Process()
 		})
 
 		/** USDC Topup（cluster 已完成完整预检）：master 直接入 purchasingCard 队列执行。 */
@@ -4851,6 +4902,10 @@ const routing = ( router: Router ) => {
 				usdcTopupSessionId,
 				posOperator,
 				membershipFeeStage,
+				chargeBurnProgramPoints,
+				chargeBurnCustomerEOA,
+				chargeBurnAmountFiat6,
+				chargeBurnCurrency,
 			} = req.body as {
 				cardAddr?: string
 				data?: string
@@ -4875,6 +4930,10 @@ const routing = ( router: Router ) => {
 					bootstrapOnChain?: boolean
 					durationKind?: number
 				}
+				chargeBurnProgramPoints?: boolean | string
+				chargeBurnCustomerEOA?: string
+				chargeBurnAmountFiat6?: string
+				chargeBurnCurrency?: string
 			}
 			/** 仅当本请求成功消费 `awaiting_beneficiary` session 时由本 handler 填入（忽略 body 里伪造的对账元数据）。 */
 			let usdcPhase2OriginatingTx: string | undefined
@@ -5060,6 +5119,9 @@ const routing = ( router: Router ) => {
 					return res.status(400).json({ success: false, error: 'Invalid membershipFeeStage amounts' }).end()
 				}
 			}
+			const wantChargeBurnMaster =
+				chargeBurnProgramPoints === true ||
+				String(chargeBurnProgramPoints ?? '').trim().toLowerCase() === 'true'
 			executeForAdminPool.push({
 				cardAddr: ethers.getAddress(cardAddr),
 				data,
@@ -5074,6 +5136,23 @@ const routing = ( router: Router ) => {
 				topupCurrencySplit,
 				...(posOpNfc ? { posOperator: posOpNfc } : {}),
 				...(membershipFeeStageParsed ? { membershipFeeStage: membershipFeeStageParsed } : {}),
+				...(wantChargeBurnMaster
+					? {
+							chargeBurnProgramPoints: true,
+							...(typeof chargeBurnCustomerEOA === 'string' &&
+							ethers.isAddress(chargeBurnCustomerEOA.trim())
+								? { chargeBurnCustomerEOA: ethers.getAddress(chargeBurnCustomerEOA.trim()) }
+								: {}),
+							...(typeof chargeBurnAmountFiat6 === 'string' &&
+							String(chargeBurnAmountFiat6).trim() !== ''
+								? { chargeBurnAmountFiat6: String(chargeBurnAmountFiat6).trim() }
+								: {}),
+							...(typeof chargeBurnCurrency === 'string' &&
+							String(chargeBurnCurrency).trim() !== ''
+								? { chargeBurnCurrency: String(chargeBurnCurrency).trim() }
+								: {}),
+						}
+					: {}),
 				...(usdcPhase2ChargeSid && usdcPhase2OriginatingTx
 					? {
 							originatingUSDCTx: usdcPhase2OriginatingTx,

@@ -16,7 +16,7 @@ import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getBeamioCardRowForMetadataSync, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getNfcCardPosAdminGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listPosTerminalCardBindingsForWallet, setActivePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, unpackTopupMintAmount, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, lookupOnChainMerchantCardRegistryIdentity, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckChargeBurnBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, unpackTopupMintAmount, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, lookupOnChainMerchantCardRegistryIdentity, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
 import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { lookupFuelPack, fuelPackFreeBUnits6, fuelPackUsdc6 } from '../fuelPackCatalog'
@@ -53,6 +53,7 @@ import {
 	aaInstitutionalV2VotePreCheck,
 } from '../aaInstitutionalV2Multisig'
 import { redeemReward13ForUsdcPreCheck } from '../redeemReward13ForUsdc'
+import { convertReward13PreCheck } from '../convertReward13'
 import {
 	kickReferralRegistryRedeemRelay,
 	referralRegistryRedeemPool,
@@ -4106,12 +4107,19 @@ const routing = ( router: Router ) => {
 		postLocalhost('/api/nfcLinkAppCancel', { uid: uidTrim, e: eTrim, c: cTrim, m: mTrim }, res)
 	})
 
-	/** POST /api/burnPointsByAdminPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。Admin 离线签字后提交 /api/nfcTopup。target 为被 burn 的地址，amount 为 "max" 表示 burn 全部。 */
+	/** POST /api/burnPointsByAdminPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。Admin 离线签字后提交 /api/nfcTopup。target 为被 burn 的地址，amount 为 "max" 表示 burn 全部。purpose=chargeCustomerProgramPoints → Charge 客户 #0 burn。 */
 	router.post('/burnPointsByAdminPrepare', async (req, res) => {
-		const { cardAddress, target, amount } = req.body as { cardAddress?: string; target?: string; amount?: string }
+		const { cardAddress, target, amount, purpose } = req.body as {
+			cardAddress?: string
+			target?: string
+			amount?: string
+			purpose?: string
+		}
 		const allow = await verifyBurnPointsByAdminPrepareAllowed({
 			cardAddress: cardAddress ?? '',
 			target: target ?? '',
+			purpose: purpose ?? '',
+			amount: amount ?? '0',
 		})
 		if (!allow.ok) {
 			logger(Colors.yellow(`[burnPointsByAdminPrepare] Cluster REJECT: ${allow.error}`))
@@ -4551,6 +4559,12 @@ const routing = ( router: Router ) => {
 			currencyAmount,
 			membershipTierIndex,
 			membershipFeeFiat6,
+			chargeBurnProgramPoints,
+			chargeBurnCustomerEOA,
+			chargeBurnAmountFiat6,
+			chargeBurnCurrency,
+			chargeBurnSkipBunitFee,
+			purpose,
 		} = req.body as {
 			cardAddr?: string
 			data?: string
@@ -4567,6 +4581,13 @@ const routing = ( router: Router ) => {
 			currencyAmount?: string
 			membershipTierIndex?: number | string
 			membershipFeeFiat6?: string | number
+			chargeBurnProgramPoints?: boolean | string
+			chargeBurnCustomerEOA?: string
+			chargeBurnAmountFiat6?: string
+			chargeBurnCurrency?: string
+			/** Hybrid Charge: USDC Container already paid the fixed Charge B-Unit fee. */
+			chargeBurnSkipBunitFee?: boolean | string
+			purpose?: string
 		}
 		const bodyForDebug = (req.body ?? {}) as Record<string, unknown>
 		const previewHex = (raw: unknown, front = 14, back = 10): string => {
@@ -4865,6 +4886,40 @@ const routing = ( router: Router ) => {
 					topupKind: 1,
 				}
 			}
+			const wantChargeBurn =
+				isBurn &&
+				(chargeBurnProgramPoints === true ||
+					String(chargeBurnProgramPoints ?? '').trim().toLowerCase() === 'true' ||
+					String(purpose ?? '').trim() === 'chargeCustomerProgramPoints')
+			if (wantChargeBurn) {
+				const burnParsed = tryParseBurnPointsByAdminArgs(data)
+				if (!burnParsed || burnParsed.points6 <= 0n) {
+					return res.status(400).json({ success: false, error: 'Invalid burnPointsByAdmin payload for charge' }).end()
+				}
+				const allowBurn = await verifyBurnPointsByAdminPrepareAllowed({
+					cardAddress,
+					target: burnParsed.target,
+					purpose: 'chargeCustomerProgramPoints',
+					amount: burnParsed.points6.toString(),
+				})
+				if (!allowBurn.ok) {
+					logger(Colors.red(`[nfcTopup] charge #0 burn pre-check FAIL: ${allowBurn.error}`))
+					return res.status(400).json({ success: false, error: allowBurn.error }).end()
+				}
+				const skipChargeBurnBunit =
+					chargeBurnSkipBunitFee === true ||
+					String(chargeBurnSkipBunitFee ?? '').trim().toLowerCase() === 'true'
+				if (skipChargeBurnBunit) {
+					// Hybrid Charge: USDC Container already paid the fixed 5 B-Unit fee.
+					bunitFeeCheck = { success: true }
+				} else {
+					bunitFeeCheck = await nfcTopupPreCheckChargeBurnBUnitFee(cardAddress)
+					if (!bunitFeeCheck.success) {
+						logger(Colors.red(`[nfcTopup] charge burn B-Unit pre-check FAIL: ${bunitFeeCheck.error}`))
+						return res.status(400).json({ success: false, error: bunitFeeCheck.error }).end()
+					}
+				}
+			}
 			if (isMint) {
 				recipientEOA = tryParseMintPointsByAdminRecipient(data)
 				if (!recipientEOA || !ethers.isAddress(recipientEOA)) {
@@ -5074,7 +5129,24 @@ const routing = ( router: Router ) => {
 					cardOwnerEOA: bunitFeeCheck.cardOwnerEOA,
 					topupFeeBUnits: bunitFeeCheck.feeAmount?.toString(),
 					topupKind: bunitFeeCheck.topupKind,
-					...(isBurnIssuedNft ? { posOperator: signer } : {}),
+					...(isBurnIssuedNft || wantChargeBurn ? { posOperator: signer } : {}),
+					...(wantChargeBurn
+						? {
+								chargeBurnProgramPoints: true,
+								...(typeof chargeBurnCustomerEOA === 'string' &&
+								ethers.isAddress(chargeBurnCustomerEOA.trim())
+									? { chargeBurnCustomerEOA: ethers.getAddress(chargeBurnCustomerEOA.trim()) }
+									: {}),
+								...(typeof chargeBurnAmountFiat6 === 'string' &&
+								String(chargeBurnAmountFiat6).trim() !== ''
+									? { chargeBurnAmountFiat6: String(chargeBurnAmountFiat6).trim() }
+									: {}),
+								...(typeof chargeBurnCurrency === 'string' &&
+								String(chargeBurnCurrency).trim() !== ''
+									? { chargeBurnCurrency: String(chargeBurnCurrency).trim() }
+									: {}),
+							}
+						: {}),
 					...splitCluster,
 					...(usdcTopupSid ? { usdcTopupSessionId: usdcTopupSid } : {}),
 					...(membershipFeeStageForward ? { membershipFeeStage: membershipFeeStageForward } : {}),
@@ -9846,6 +9918,58 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			),
 		)
 		postLocalhost('/api/redeemReward13ForUsdc', preCheck.preChecked, res)
+	})
+
+	/** convertReward13ToProgramPoints：atomic burn #13 → mint #0 on customer AA. */
+	router.post('/convertReward13ToProgramPoints', async (req, res) => {
+		const preCheck = await convertReward13PreCheck({ ...req.body, kind: 'toProgramPoints' })
+		if (!preCheck.success) {
+			logger(
+				Colors.red(`server /api/convertReward13ToProgramPoints preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/convertReward13ToProgramPoints preCheck OK, forwarding to master`),
+			inspect(
+				{
+					cardAddress: preCheck.preChecked.cardAddress,
+					userEOA: preCheck.preChecked.userEOA,
+					burn13: preCheck.preChecked.burn13,
+				},
+				false,
+				2,
+				true,
+			),
+		)
+		postLocalhost('/api/convertReward13ToProgramPoints', preCheck.preChecked, res)
+	})
+
+	/** convertReward13ToUsdcToAa：atomic burn #13 → Conet-USDC to customer AA (not EOA). */
+	router.post('/convertReward13ToUsdcToAa', async (req, res) => {
+		const preCheck = await convertReward13PreCheck({ ...req.body, kind: 'toUsdcAa' })
+		if (!preCheck.success) {
+			logger(
+				Colors.red(`server /api/convertReward13ToUsdcToAa preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/convertReward13ToUsdcToAa preCheck OK, forwarding to master`),
+			inspect(
+				{
+					cardAddress: preCheck.preChecked.cardAddress,
+					userEOA: preCheck.preChecked.userEOA,
+					burn13: preCheck.preChecked.burn13,
+				},
+				false,
+				2,
+				true,
+			),
+		)
+		postLocalhost('/api/convertReward13ToUsdcToAa', preCheck.preChecked, res)
 	})
 
 	/** cardCouponPosClaim：POS Balance 一键领取（NFC 私钥 → openClaim；QR/钱包 → cardCouponPosClaimPrepare + Submit）。 */

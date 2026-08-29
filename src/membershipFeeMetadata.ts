@@ -1,8 +1,8 @@
 /**
  * Membership-fee cards: metadata is the source of truth (not on-chain setMembershipFees).
- * New non-membership loyalty cards: createCardCollectionWithInitCode, then serial
- * Factory `appendTierForCard` (4-arg, including a single base row). Do not send AndTiers
- * (0x9a7eb0f0 / 0x62cb913c). Membership-fee cards skip Factory append entirely.
+ * New non-membership loyalty cards: one tx createCardCollectionWithInitCodeAndTiers
+ * (live 3-tuple 0x9a7eb0f0). Membership-fee cards skip Factory tiers (initCode-only).
+ * Never send Hardhat 4-tuple AndTiers (0x62cb913c).
  *
  * Product model: baseMembership = index 0 (not Add-tier); tiers[] = higher paid memberships only.
  * Membership NFT tokenId ∈ [100, 1e11). Leftover #0 is program points, not a membership NFT.
@@ -201,7 +201,7 @@ export async function readCardMembershipFeeModeFromMetadata(
 /**
  * Membership-fee cards must not pass tiers to Factory create (use initCode-only create; no append).
  * Pass optional metadata so baseMembership-only cards (no tiers[]) still skip Factory tiers.
- * Non-membership loyalty cards always append via `appendTierForCard` (including a single base row).
+ * Non-membership loyalty cards write tiers in the same AndTiers create tx (including a single base row).
  */
 export function shouldSkipFactoryTiersForCreate(
 	tiers: MembershipFeeMetadataTiers[] | undefined | null,

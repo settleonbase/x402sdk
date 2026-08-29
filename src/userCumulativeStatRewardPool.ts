@@ -39,6 +39,17 @@ export const CHARGE_REWARD_V2_IFACE = new ethers.Interface([
 	'function rewardEscrowUsdc6() view returns (uint256)',
 	'function burnSocialPointsFromUserForExchange(address userEOA, uint256 pointsCost)',
 	'function payoutSocialExchangeUsdcToUser(address userEOA, uint256 usdcReward6)',
+	// Charge path: atomic #13 → #0 / #13 → Conet-USDC (to AA) + merchant oracle spread
+	'function convertReward13ToPointsRatioE6() view returns (uint256)',
+	'function convertReward13ToUsdcRatioE6() view returns (uint256)',
+	'function merchantOracleSpreadBps() view returns (uint256)',
+	'function quoteUsdcDepositForFiat6(uint256 fiatAmount6) view returns (uint256 usdcNeeded6)',
+	'function quoteUsdcWithdrawForFiat6(uint256 fiatAmount6) view returns (uint256 usdcOut6)',
+	'function setConvertReward13ToPointsRatio(uint256 ratioE6)',
+	'function setConvertReward13ToUsdcRatio(uint256 ratioE6)',
+	'function setMerchantOracleSpreadBps(uint256 spreadBps)',
+	'function convertReward13ToProgramPoints(address userEOA, uint256 burn13) returns (uint256 minted0)',
+	'function convertReward13ToUsdcToAa(address userEOA, uint256 burn13) returns (uint256 usdcOut6)',
 ])
 
 export const INITIALIZE_CARD_USER_CUMUL_STAT_SELECTOR =

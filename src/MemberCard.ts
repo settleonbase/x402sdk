@@ -3210,6 +3210,14 @@ export const executeForAdminPool: Array<{
 	couponBurnUserEOA?: string
 	/** Optional share referrer EOA for coupon burn #13 ref mint. */
 	couponBurnRefWallet?: string
+	/** Charge: customer #0 burn via burnPointsByAdmin (not merchant #0 transfer). */
+	chargeBurnProgramPoints?: boolean
+	/** Charge burn: customer EOA (payer for Indexer; burn target may be AA). */
+	chargeBurnCustomerEOA?: string
+	/** Charge burn: bill fiat6 (6dp integer string) for Indexer display. */
+	chargeBurnAmountFiat6?: string
+	/** Charge burn: ISO currency for Indexer (card currency). */
+	chargeBurnCurrency?: string
 	/** Membership-fee first issue: stage pending purchase before mintPointsByAdmin. */
 	membershipFeeStage?: NfcTopupMembershipFeeStage
 }> = []
@@ -3519,54 +3527,51 @@ export type ChargeOwnerChildBurnPayload = {
 }
 
 /**
+ * Charge 结算：禁止 Container / OpenContainer 把客户 #0 转给商家。
+ * 积分腿须走 burnPointsByAdmin(customerAA, amount)。
+ */
+export function assertNoChargeProgramPointsTransferItems(
+	items: readonly { kind?: number; tokenId?: string | number | bigint }[] | undefined
+): { ok: true } | { ok: false; error: string } {
+	if (!Array.isArray(items) || items.length === 0) return { ok: true }
+	for (let i = 0; i < items.length; i++) {
+		const it = items[i]
+		if (!it || typeof it !== 'object') continue
+		if (Number(it.kind) !== 1) continue
+		let tid = 0n
+		try {
+			tid = BigInt(it.tokenId as string | number | bigint)
+		} catch {
+			return { ok: false, error: `items[${i}].tokenId invalid` }
+		}
+		if (tid === 0n) {
+			return {
+				ok: false,
+				error:
+					'Charge must not transfer program points (#0) to the merchant. Burn customer #0 via burnPointsByAdmin instead.',
+			}
+		}
+	}
+	return { ok: true }
+}
+
+/**
+ * @deprecated Charge no longer burns payee AA after #0 transfer. Always reject.
  * Cluster 预检：不信任 POS 对受益人层级的断言。根据 to、items、merchantCardAddress 推导卡地址与受益人 EOA，
  * 链上校验 adminParent/isAdmin 与 getCardAdminInfo（upper=owner）语义一致，且 burn.cardAddr 与推导卡一致。
  */
-export async function verifyChargeOwnerChildBurnClusterPreCheck(params: {
+export async function verifyChargeOwnerChildBurnClusterPreCheck(_params: {
 	burn: ChargeOwnerChildBurnPayload
 	payeeTo: string
 	merchantCardAddress?: string
 	items: readonly { kind: number; asset: string }[]
 }): Promise<{ ok: true } | { ok: false; error: string }> {
-	const { burn } = params
-	if (!burn?.cardAddr || !ethers.isAddress(burn.cardAddr)) {
-		return { ok: false, error: 'chargeOwnerChildBurn.cardAddr invalid' }
+	void _params
+	return {
+		ok: false,
+		error:
+			'chargeOwnerChildBurn is retired. Charge settles by burning customer program points (#0); do not transfer #0 to the merchant.',
 	}
-	if (!burn?.data || !String(burn.data).trim()) {
-		return { ok: false, error: 'chargeOwnerChildBurn.data required' }
-	}
-	if (!burn?.adminSignature || !String(burn.adminSignature).trim()) {
-		return { ok: false, error: 'chargeOwnerChildBurn.adminSignature required' }
-	}
-	if (burn.deadline == null || Number(burn.deadline) <= 0) {
-		return { ok: false, error: 'chargeOwnerChildBurn.deadline invalid' }
-	}
-	if (burn.nonce == null || !String(burn.nonce).trim()) {
-		return { ok: false, error: 'chargeOwnerChildBurn.nonce required' }
-	}
-	const cardFromRelay = resolveChargeCardAddressFromRelayItems({
-		merchantCardAddress: params.merchantCardAddress,
-		items: params.items,
-	})
-	const burnCard = ethers.getAddress(burn.cardAddr)
-	if (burnCard.toLowerCase() !== cardFromRelay.toLowerCase()) {
-		return {
-			ok: false,
-			error: 'chargeOwnerChildBurn.cardAddr must match server-derived charge card from route',
-		}
-	}
-	const payeeEOA = await resolvePayeeEoaFromChargeTo(params.payeeTo)
-	if (!payeeEOA) {
-		return { ok: false, error: 'invalid payee `to` for chargeOwnerChildBurn' }
-	}
-	const { yes } = await chargePayeeParentIsCardOwner(cardFromRelay, payeeEOA)
-	if (!yes) {
-		return {
-			ok: false,
-			error: 'chargeOwnerChildBurn not allowed: beneficiary is not owner-line admin on-chain',
-		}
-	}
-	return { ok: true }
 }
 
 /** V16 ChargeRewardModule / UpdateLib: Reward PT = #13 (not legacy #2). */
@@ -3659,16 +3664,67 @@ export async function verifyBurnChargeRewardByAdminPrepareAllowed(params: {
 	return { ok: true }
 }
 
-/** POST /api/burnPointsByAdminPrepare：POS 不可信；仅当 target（AA）对应 EOA 在该卡上为 owner 线 admin 时才发放 prepare 载荷 */
+/**
+ * POST /api/burnPointsByAdminPrepare
+ * - default / deduct-admin: target AA 对应 EOA 须为卡 owner 线 admin
+ * - purpose=chargeCustomerProgramPoints: Charge 客户 #0 burn；校验 #0 余额（不要求 admin）
+ */
 export async function verifyBurnPointsByAdminPrepareAllowed(params: {
 	cardAddress: string
 	target: string
+	/** Charge 结算：焚烧客户 AA 的 #0（非 admin Deduct） */
+	purpose?: string
+	amount?: string
 }): Promise<{ ok: true } | { ok: false; error: string }> {
 	const c = params.cardAddress?.trim()
 	const t = params.target?.trim()
 	if (!c || !ethers.isAddress(c)) return { ok: false, error: 'Missing or invalid cardAddress' }
 	if (!t || !ethers.isAddress(t)) return { ok: false, error: 'Missing or invalid target' }
 	const cardAddr = ethers.getAddress(c)
+	const purpose = String(params.purpose ?? '').trim()
+	if (purpose === 'chargeCustomerProgramPoints') {
+		const amtRaw = params.amount
+		if (amtRaw == null || String(amtRaw).trim() === '') {
+			return { ok: false, error: 'amount required for charge customer program points burn' }
+		}
+		let amount: bigint
+		try {
+			amount =
+				amtRaw === 'max' || amtRaw === 'all' ? ethers.MaxUint256 : BigInt(String(amtRaw).trim())
+		} catch {
+			return { ok: false, error: 'Invalid amount' }
+		}
+		if (amount <= 0n && amount !== ethers.MaxUint256) {
+			return { ok: false, error: 'amount must be > 0' }
+		}
+		try {
+			const account = await resolveChargeRewardAccountForBurn(cardAddr, t)
+			if (!account) return { ok: false, error: 'Could not resolve customer account for #0 burn' }
+			const chain = await resolveUserCardChain(cardAddr)
+			const provider = providerForUserCardChain(chain)
+			const card = new ethers.Contract(
+				cardAddr,
+				['function balanceOf(address account, uint256 id) view returns (uint256)'],
+				provider
+			)
+			const bal = BigInt(await card.balanceOf(account, 0n))
+			if (amount !== ethers.MaxUint256 && bal < amount) {
+				return {
+					ok: false,
+					error: `Insufficient program points (#0): have ${bal.toString()}, need ${amount.toString()}`,
+				}
+			}
+			if (amount === ethers.MaxUint256 && bal <= 0n) {
+				return { ok: false, error: 'No program points (#0) to burn' }
+			}
+			return { ok: true }
+		} catch (e: any) {
+			return {
+				ok: false,
+				error: e?.shortMessage ?? e?.message ?? 'Failed to verify customer #0 balance',
+			}
+		}
+	}
 	const payeeEOA = await resolvePayeeEoaFromChargeTo(t)
 	if (!payeeEOA) return { ok: false, error: 'Could not resolve payee EOA from target' }
 	const { yes } = await chargePayeeParentIsCardOwner(cardAddr, payeeEOA)
@@ -3688,118 +3744,16 @@ async function maybeExecuteChargeOwnerChildBurnAfterContainerRelay(params: {
 	payeeAATo: string
 	items: Array<{ kind: number; asset: string; amount: bigint; tokenId: bigint; data: string }>
 }): Promise<void> {
-	const burn = params.obj.chargeOwnerChildBurn
-	if (!burn?.data || !burn?.adminSignature || !burn?.cardAddr || burn.deadline == null || !burn.nonce) return
-
-	let payeeEOA = params.payeeAATo
-	try {
-		const toCode = await params.provider.getCode(params.payeeAATo)
-		if (toCode && toCode !== '0x' && toCode.length > 2) {
-			const aaRead = new ethers.Contract(params.payeeAATo, ['function owner() view returns (address)'], params.provider)
-			const ow = await aaRead.owner()
-			if (ow && ow !== ethers.ZeroAddress) payeeEOA = ethers.getAddress(ow)
-		}
-	} catch {
-		/* keep */
-	}
-
-	const erc1155Items = params.items.filter((it) => it.kind === 1)
-	if (erc1155Items.length === 0) return
-
-	const pointsByCard = new Map<string, bigint>()
-	for (const it of erc1155Items) {
-		const c = ethers.getAddress(it.asset)
-		pointsByCard.set(c, (pointsByCard.get(c) ?? 0n) + it.amount)
-	}
-	if (pointsByCard.size !== 1) {
-		logger(Colors.yellow(`[chargeOwnerChildBurn] skipped: multiple ERC1155 card assets in one container/open`))
-		return
-	}
-	const cardAddrPoints = [...pointsByCard.keys()][0]
-	const pointsSum = pointsByCard.get(cardAddrPoints) ?? 0n
-	if (pointsSum <= 0n) return
-
-	const { yes } = await chargePayeeParentIsCardOwner(cardAddrPoints, payeeEOA)
-	if (!yes) {
-		logger(Colors.yellow(`[chargeOwnerChildBurn] rejected: payee is not direct child of card owner on-chain`))
-		return
-	}
-
-	const cardNorm = ethers.getAddress(burn.cardAddr)
-	if (cardNorm !== cardAddrPoints) {
-		logger(Colors.yellow(`[chargeOwnerChildBurn] rejected: cardAddr mismatch burn=${cardNorm} items=${cardAddrPoints}`))
-		return
-	}
-
-	const deadlineNum = Number(burn.deadline)
-	const nonceStr = typeof burn.nonce === 'string' ? burn.nonce : String(burn.nonce)
-	const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
-		cardAddr: cardNorm,
-		data: burn.data,
-		deadline: deadlineNum,
-		nonce: nonceStr,
-		adminSignature: burn.adminSignature,
-	})
-	if (!adminCheck.ok) {
-		logger(Colors.yellow(`[chargeOwnerChildBurn] admin check failed: ${adminCheck.error}`))
-		return
-	}
-	if (adminCheck.signer.toLowerCase() !== payeeEOA.toLowerCase()) {
-		logger(Colors.yellow(`[chargeOwnerChildBurn] signer must be payee EOA`))
-		return
-	}
-
-	const ifaceBurn = new ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)'])
-	let decoded: ethers.TransactionDescription | null = null
-	try {
-		decoded = ifaceBurn.parseTransaction({ data: burn.data })
-	} catch {
-		decoded = null
-	}
-	if (!decoded || decoded.name !== 'burnPointsByAdmin') {
-		logger(Colors.yellow(`[chargeOwnerChildBurn] invalid data (expected burnPointsByAdmin)`))
-		return
-	}
-	const target = ethers.getAddress(decoded.args[0] as string)
-	const amountArg = decoded.args[1] as bigint
-	const payeeAANorm = ethers.getAddress(params.payeeAATo)
-	if (target.toLowerCase() !== payeeAANorm.toLowerCase()) {
-		logger(Colors.yellow(`[chargeOwnerChildBurn] target must be payee AA`))
-		return
-	}
-	if (amountArg !== pointsSum && amountArg !== ethers.MaxUint256) {
+	void params.SC
+	void params.provider
+	void params.payeeAATo
+	void params.items
+	if (params.obj.chargeOwnerChildBurn) {
 		logger(
 			Colors.yellow(
-				`[chargeOwnerChildBurn] amount mismatch got=${amountArg} expected=${pointsSum} (or MaxUint256)`
+				'[chargeOwnerChildBurn] skipped — retired; Charge settles via customer #0 burnPointsByAdmin'
 			)
 		)
-		return
-	}
-
-	const nonceHex = nonceStr.startsWith('0x') ? (nonceStr as `0x${string}`) : (`0x${nonceStr}` as `0x${string}`)
-	try {
-		let tx: ethers.ContractTransactionResponse
-		const factory = await contractForExecuteForAdmin(params.SC, cardNorm)
-		const factoryAddress = ethers.getAddress(await factory.getAddress())
-		const factoryIface = new ethers.Interface(['function executeForAdmin(address,bytes,uint256,bytes32,bytes)'])
-		const cardChain = await resolveUserCardChain(cardNorm)
-		tx = await relayUserCardFactoryCallViaEntryPoint({
-			SC: params.SC,
-			chain: cardChain,
-			factoryAddress,
-			factoryCallData: factoryIface.encodeFunctionData('executeForAdmin', [
-				cardNorm,
-				burn.data,
-				BigInt(deadlineNum),
-				nonceHex,
-				burn.adminSignature,
-			]),
-			logTag: 'chargeOwnerChildBurn',
-		})
-		logger(Colors.green(`[chargeOwnerChildBurn] executeForAdmin ok tx=${tx.hash}`))
-		await tx.wait().catch(() => {})
-	} catch (e: any) {
-		logger(Colors.red(`[chargeOwnerChildBurn] executeForAdmin failed: ${e?.shortMessage ?? e?.message ?? e}`))
 	}
 }
 
@@ -4819,6 +4773,127 @@ async function syncPosCouponBurnMainIndexerRow(args: {
 	logger(
 		Colors.green(
 			`[syncPosCouponBurnMainIndexerRow] indexed burn tx=${txHash} sync=${syncTx.hash} card=${cardNorm} holder=${holder} payer=${payer} pos=${posOp}`
+		)
+	)
+}
+
+const BURN_POINTS_BY_ADMIN_SELECTOR = (
+	'0x' + ethers.id('burnPointsByAdmin(address,uint256)').slice(2, 10)
+).toLowerCase()
+
+const TX_CHARGE_CUSTOMER_PROGRAM_POINTS_BURN = ethers.keccak256(
+	ethers.toUtf8Bytes('internal_transfer:confirmed')
+) as `0x${string}`
+
+const BeamioCurrencyMapForChargeBurn: Record<string, number> = {
+	CAD: 0,
+	USD: 1,
+	JPY: 2,
+	CNY: 3,
+	USDC: 4,
+	HKD: 5,
+	EUR: 6,
+	SGD: 7,
+	TWD: 8,
+	ETH: 9,
+	BNB: 10,
+	SOLANA: 11,
+	BTC: 12,
+}
+
+/** executeForAdmin `burnPointsByAdmin` Charge：客户 AA #0 焚烧主业务行（商家 #0 不增加）。 */
+async function syncChargeCustomerProgramPointsBurnIndexerRow(args: {
+	walletConet: ethers.Wallet
+	txHash: string
+	cardAddress: string
+	burnTarget: string
+	points6: bigint
+	payerEOA: string
+	posOperator: string
+	amountFiat6?: bigint
+	currency?: string
+}): Promise<void> {
+	const cardNorm = ethers.getAddress(args.cardAddress)
+	const payer = ethers.getAddress(args.payerEOA)
+	const posOp = ethers.getAddress(args.posOperator)
+	const burnTarget = ethers.getAddress(args.burnTarget)
+	const txHash = args.txHash as `0x${string}`
+	const points6 = args.points6 > 0n ? args.points6 : 0n
+	if (points6 <= 0n) return
+	const fiat6 = args.amountFiat6 != null && args.amountFiat6 > 0n ? args.amountFiat6 : points6
+	const cur = String(args.currency ?? 'USDC')
+		.trim()
+		.toUpperCase()
+	const currencyFiat = BeamioCurrencyMapForChargeBurn[cur] ?? 4
+	const cardChain = await resolveUserCardChain(cardNorm)
+	const chainId = BigInt(chainIdForUserCardChain(cardChain))
+	const operatorParentChain = await fetchOperatorParentChain(cardNorm, posOp)
+	const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(posOp, operatorParentChain)
+	const displayJson = JSON.stringify({
+		title: 'NFC Merchant Payment',
+		source: 'nfc',
+		finishedHash: txHash,
+		handle: 'Charge program points burn',
+		forText: 'Charge: customer #0 burn',
+		cardAddress: cardNorm,
+		burnTarget,
+		tokenId: '0',
+		chargeBurnProgramPoints: true,
+	})
+	const transactionInput = {
+		txId: txHash,
+		originalPaymentHash: ethers.ZeroHash as `0x${string}`,
+		chainId,
+		txCategory: TX_CHARGE_CUSTOMER_PROGRAM_POINTS_BURN,
+		displayJson,
+		timestamp: 0n,
+		payer,
+		payee: posOp,
+		finalRequestAmountFiat6: fiat6,
+		finalRequestAmountUSDC6: 0n,
+		isAAAccount: true,
+		route: [
+			{
+				asset: cardNorm,
+				amountE6: points6,
+				assetType: 1,
+				source: 1,
+				tokenId: 0n,
+				itemCurrencyType: currencyFiat,
+				offsetInRequestCurrencyE6: 0n,
+			},
+		],
+		fees: {
+			gasChainType: 0,
+			gasWei: 0n,
+			gasUSDC6: 0n,
+			serviceUSDC6: 0n,
+			bServiceUSDC6: 0n,
+			bServiceUnits6: 0n,
+			feePayer: ethers.ZeroAddress,
+		},
+		meta: {
+			requestAmountFiat6: fiat6,
+			requestAmountUSDC6: 0n,
+			currencyFiat,
+			discountAmountFiat6: 0n,
+			discountRateBps: 0,
+			taxAmountFiat6: 0n,
+			taxRateBps: 0,
+			afterNotePayer: '',
+			afterNotePayee: '',
+		},
+		operator: posOp,
+		operatorParentChain,
+		topAdmin,
+		subordinate: posOp.toLowerCase() !== payer.toLowerCase() ? posOp : subordinate,
+	}
+	const actionFacetSync = new ethers.Contract(BeamioTaskIndexerAddress, ACTION_SYNC_TOKEN_ABI, args.walletConet)
+	const syncTx = await actionFacetSync.syncTokenAction(transactionInput)
+	await syncTx.wait()
+	logger(
+		Colors.green(
+			`[syncChargeCustomerProgramPointsBurnIndexerRow] indexed burn#0 tx=${txHash} sync=${syncTx.hash} card=${cardNorm} target=${burnTarget} payer=${payer} pos=${posOp} points6=${points6}`
 		)
 	)
 }
@@ -7820,6 +7895,8 @@ export const OpenContainerRelayPreCheck = (payload: OpenContainerRelayPayload | 
 		if (it.tokenId === undefined || it.tokenId === null) return { success: false, error: `openContainerPayload.items[${i}].tokenId required` }
 		if (it.data === undefined || it.data === null) return { success: false, error: `openContainerPayload.items[${i}].data required` }
 	}
+	const noPts = assertNoChargeProgramPointsTransferItems(payload.items)
+	if (!noPts.ok) return { success: false, error: noPts.error }
 	if (typeof payload.currencyType !== 'number') return { success: false, error: 'openContainerPayload.currencyType must be number' }
 	if (payload.maxAmount === undefined || payload.maxAmount === null) return { success: false, error: 'openContainerPayload.maxAmount required' }
 	if (payload.nonce === undefined || payload.nonce === null) return { success: false, error: 'openContainerPayload.nonce required' }
@@ -7847,6 +7924,8 @@ export const ContainerRelayPreCheck = (payload: ContainerRelayPayload | undefine
 		if (it.tokenId === undefined || it.tokenId === null) return { success: false, error: `containerPayload.items[${i}].tokenId required` }
 		if (it.data === undefined || it.data === null) return { success: false, error: `containerPayload.items[${i}].data required` }
 	}
+	const noPts = assertNoChargeProgramPointsTransferItems(payload.items)
+	if (!noPts.ok) return { success: false, error: noPts.error }
 	if (payload.nonce === undefined || payload.nonce === null) return { success: false, error: 'containerPayload.nonce required' }
 	if (payload.deadline === undefined || payload.deadline === null) return { success: false, error: 'containerPayload.deadline required' }
 	if (payload.signature === undefined || payload.signature === null) return { success: false, error: 'containerPayload.signature required' }
@@ -7872,6 +7951,8 @@ export const ContainerRelayPreCheckUnsigned = (payload: ContainerRelayPayloadUns
 		if (it.tokenId === undefined || it.tokenId === null) return { success: false, error: `containerPayload.items[${i}].tokenId required` }
 		if (it.data === undefined || it.data === null) return { success: false, error: `containerPayload.items[${i}].data required` }
 	}
+	const noPts = assertNoChargeProgramPointsTransferItems(payload.items)
+	if (!noPts.ok) return { success: false, error: noPts.error }
 	if (payload.nonce === undefined || payload.nonce === null) return { success: false, error: 'containerPayload.nonce required' }
 	if (payload.deadline === undefined || payload.deadline === null) return { success: false, error: 'containerPayload.deadline required' }
 	return { success: true }
@@ -8964,6 +9045,46 @@ export const nfcTopupPreCheckBUnitFee = async (
 	}
 }
 
+/** Cluster 预检：Charge 客户 #0 burn（nfcTopup + burnPointsByAdmin）— 卡 owner 固定 **5 B-Unit**。 */
+export const nfcTopupPreCheckChargeBurnBUnitFee = async (
+	cardAddr: string
+): Promise<{ success: boolean; error?: string; cardOwnerEOA?: string; feeAmount?: bigint; topupKind?: 1 }> => {
+	const KIND_CHARGE = 1
+	try {
+		if (!cardAddr || !ethers.isAddress(cardAddr)) {
+			return { success: false, error: 'Missing or invalid cardAddress' }
+		}
+		const cardNorm = ethers.getAddress(cardAddr)
+		const cardAbi = ['function owner() view returns (address)']
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
+		const card = new ethers.Contract(cardNorm, cardAbi, cardProvider)
+		const rawOwner = await card.owner()
+		const resolveResult = await resolveCardOwnerToEOA(cardProvider, rawOwner)
+		if (!resolveResult.success) {
+			return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA' }
+		}
+		const cardOwnerEOA = resolveResult.cardOwner
+		const { bServiceUnits6: feeAmount } = calcChargeFixedBUnitFee()
+		const aaFactoryAddr = await getCardAaFactoryAddress(cardNorm)
+		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeAmount, {
+			aaFactoryAddress: aaFactoryAddr,
+			aaFactoryProvider: cardProvider,
+		})
+		if (!picked.ok) {
+			return {
+				success: false,
+				error: `Insufficient B-Units for charge (${picked.error})`,
+			}
+		}
+		return { success: true, cardOwnerEOA, feeAmount, topupKind: KIND_CHARGE }
+	} catch (e: any) {
+		return {
+			success: false,
+			error: `Charge burn B-Unit fee check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
+		}
+	}
+}
+
 /**
  * Cluster 预检：mintPointsByAdmin 是否会因 `UC_AdminAirdropLimitExceeded` 在链上回滚。
  * 与 GovernanceModule._enforceAndRecordAdminAirdropLimit 一致：自 signer（operator）沿 adminParent 上至 owner，凡非 owner 节点须满足 used + points6 <= limit。
@@ -9823,6 +9944,97 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 						Colors.yellow(
 							`[executeForAdminPostBaseProcess] coupon burn #13 enqueue non-critical: ${burnRewardErr?.shortMessage ?? burnRewardErr?.message ?? String(burnRewardErr)}`,
 						),
+					)
+				}
+			}
+		}
+		const burnPointsCalldata = obj.data.slice(0, 10).toLowerCase() === BURN_POINTS_BY_ADMIN_SELECTOR
+		if (baseTxOk && burnPointsCalldata && obj.chargeBurnProgramPoints === true) {
+			let burnTarget = ''
+			let burnPoints6 = 0n
+			try {
+				const burnIface = new ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)'])
+				const decoded = burnIface.parseTransaction({ data: obj.data })
+				if (decoded?.name === 'burnPointsByAdmin') {
+					burnTarget = ethers.getAddress(decoded.args[0] as string)
+					burnPoints6 = BigInt(decoded.args[1] as bigint)
+				}
+			} catch (burnDecodeErr: any) {
+				logger(
+					Colors.yellow(
+						`[executeForAdminPostBaseProcess] burnPointsByAdmin decode: ${burnDecodeErr?.shortMessage ?? burnDecodeErr?.message ?? String(burnDecodeErr)}`
+					)
+				)
+			}
+			const posOpRawCharge = typeof obj.posOperator === 'string' ? obj.posOperator.trim() : ''
+			const posOpForCharge =
+				posOpRawCharge && ethers.isAddress(posOpRawCharge)
+					? ethers.getAddress(posOpRawCharge)
+					: ethers.getAddress(adminCheck.signer)
+			const payerForCharge =
+				obj.chargeBurnCustomerEOA && ethers.isAddress(obj.chargeBurnCustomerEOA)
+					? ethers.getAddress(obj.chargeBurnCustomerEOA)
+					: burnTarget || posOpForCharge
+			let amountFiat6 = 0n
+			if (obj.chargeBurnAmountFiat6 != null && String(obj.chargeBurnAmountFiat6).trim() !== '') {
+				try {
+					amountFiat6 = BigInt(String(obj.chargeBurnAmountFiat6).trim())
+				} catch {
+					amountFiat6 = 0n
+				}
+			}
+			if (burnTarget && burnPoints6 > 0n) {
+				try {
+					await syncChargeCustomerProgramPointsBurnIndexerRow({
+						walletConet: SC.walletConet,
+						txHash: tx.hash,
+						cardAddress: obj.cardAddr,
+						burnTarget,
+						points6: burnPoints6,
+						payerEOA: payerForCharge,
+						posOperator: posOpForCharge,
+						amountFiat6: amountFiat6 > 0n ? amountFiat6 : burnPoints6,
+						currency: obj.chargeBurnCurrency,
+					})
+				} catch (chargeBurnIdxErr: any) {
+					logger(
+						Colors.yellow(
+							`[executeForAdminPostBaseProcess] charge #0 burn indexer non-critical: ${chargeBurnIdxErr?.shortMessage ?? chargeBurnIdxErr?.message ?? String(chargeBurnIdxErr)}`
+						)
+					)
+				}
+			}
+			if (
+				nfcTopupBunitConsumeTxHash &&
+				topupBunitFeePayerResolved &&
+				obj.topupFeeBUnits &&
+				obj.topupFeeBUnits > 0n
+			) {
+				try {
+					const operatorParentChain = await fetchOperatorParentChain(obj.cardAddr, adminCheck.signer)
+					const { topAdmin, subordinate } = deriveTopAdminAndSubordinate(adminCheck.signer, operatorParentChain)
+					await syncStandaloneBunitServiceFeeToIndexer({
+						walletConet: SC.walletConet,
+						BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
+						consumeTxHash: nfcTopupBunitConsumeTxHash,
+						basePaymentHash: tx.hash,
+						cardAddress: obj.cardAddr,
+						feePayer: topupBunitFeePayerResolved,
+						bServiceUnits6: obj.topupFeeBUnits,
+						txCategory: TX_CATEGORY_CHARGE_BUNIT_SERVICE,
+						title: 'Charge B-Unit service fee',
+						source: 'chargeBUnit',
+						operator: ethers.getAddress(adminCheck.signer),
+						operatorParentChain,
+						topAdmin,
+						subordinate: posOpForCharge,
+						logLabel: 'executeForAdminPostBaseProcess',
+					})
+				} catch (chargeBunitIdxErr: any) {
+					logger(
+						Colors.yellow(
+							`[executeForAdminPostBaseProcess] charge B-Unit standalone indexer non-critical: ${chargeBunitIdxErr?.shortMessage ?? chargeBunitIdxErr?.message ?? String(chargeBunitIdxErr)}`
+						)
 					)
 				}
 			}
@@ -13806,7 +14018,7 @@ export const createBeamioCardAdmin = async (
 
 /** 同 createBeamioCardAdmin，但返回 { cardAddress, hash } 供 createCardPoolPress 回传 tx hash。
  * @param factoryOverride 当 createCardPoolPress 传入 shift 出的 SC.baseFactoryPaymaster 时使用，确保使用正确的 signer（owner/paymaster）
- * @param tiers 可选；非会员费卡 create 后串行 Factory `appendTierForCard`（含仅基本档）。 */
+ * @param tiers 可选；非会员费卡与建卡同一笔 AndTiers（现网 3-tuple 0x9a7eb0f0，含仅基本档）。 */
 export const createBeamioCardAdminWithHash = async (
 	cardOwner: string,
 	currency: 'CAD' | 'USD' | 'JPY' | 'CNY' | 'USDC' | 'HKD' | 'EUR' | 'SGD' | 'TWD',
@@ -13888,6 +14100,7 @@ export type CreateCardPreChecked = {
 		bonusRule?: CreateCardBonusRuleNormalized
 		bonusRules?: CreateCardBonusRuleNormalized[]
 		pointSystem?: CreateCardPointSystemNormalized
+		businessProfile?: ShareTokenBusinessProfile
 	}
 	tiers?: Array<{
 		index: number
@@ -13933,6 +14146,42 @@ const CREATE_CARD_SYMBOL_MAX_LEN = 32
 const CREATE_CARD_BONUS_RULES_MAX = 32
 /** Whole-currency-ish cap for bonus rule amounts (defensive) */
 const CREATE_CARD_BONUS_AMOUNT_MAX = 1_000_000_000
+
+type ShareTokenBusinessProfile = {
+	channelKind?: 'physical' | 'digital' | 'app'
+	category?: string
+	storeName?: string
+	country?: string
+	city?: string
+	province?: string
+	businessType?: 'solo' | 'chain' | 'ngo'
+}
+
+function sanitizeShareTokenBusinessProfile(raw: unknown): ShareTokenBusinessProfile | undefined {
+	if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+	const input = raw as Record<string, unknown>
+	const out: ShareTokenBusinessProfile = {}
+	const trim = (value: unknown, max: number): string | undefined => {
+		if (typeof value !== 'string') return undefined
+		const next = value.trim().slice(0, max)
+		return next || undefined
+	}
+	if (input.channelKind === 'physical' || input.channelKind === 'digital' || input.channelKind === 'app') {
+		out.channelKind = input.channelKind
+	}
+	if (input.businessType === 'solo' || input.businessType === 'chain' || input.businessType === 'ngo') {
+		out.businessType = input.businessType
+	}
+	for (const key of ['category', 'storeName'] as const) {
+		const value = trim(input[key], 128)
+		if (value) out[key] = value
+	}
+	for (const key of ['country', 'city', 'province'] as const) {
+		const value = trim(input[key], 64)
+		if (value) out[key] = value
+	}
+	return Object.keys(out).length > 0 ? out : undefined
+}
 
 /** Normalized bonus rule persisted in shareTokenMetadata (matches biz / POS clients). */
 type CreateCardBonusRuleNormalized = {
@@ -14529,6 +14778,8 @@ export const createCardPreCheck = (body: {
 		const pointSystem = normalizeCreateCardPointSystemEntry(stm.pointSystem)
 		if (!pointSystem.success) return { success: false, error: pointSystem.error }
 		meta.pointSystem = pointSystem.pointSystem
+		const businessProfile = sanitizeShareTokenBusinessProfile(stm.businessProfile)
+		if (businessProfile) meta.businessProfile = businessProfile
 		const unifiedRewardPoints = normalizeCreateCardUnifiedRewardPoints(stm.unifiedRewardPoints)
 		if (!unifiedRewardPoints.success) return { success: false, error: unifiedRewardPoints.error }
 		if (unifiedRewardPoints.value) meta.unifiedRewardPoints = unifiedRewardPoints.value
@@ -15004,6 +15255,16 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 				)
 			)
 		)
+		if (shareTokenMetadataInput && typeof shareTokenMetadataInput === 'object') {
+			const businessProfile = sanitizeShareTokenBusinessProfile(
+				(shareTokenMetadataInput as Record<string, unknown>).businessProfile,
+			)
+			if (businessProfile) {
+				;(shareTokenMetadataInput as Record<string, unknown>).businessProfile = businessProfile
+			} else {
+				delete (shareTokenMetadataInput as Record<string, unknown>).businessProfile
+			}
+		}
 		const cardAddr = ethers.getAddress(params.cardAddress)
 		const ensured = await ensureBeamioCardRowForMetadataSync(cardAddr)
 		if (!ensured.ok) return { success: false, error: ensured.error }
