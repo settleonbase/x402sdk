@@ -48,6 +48,8 @@ export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	'0x7334a7c7fe867538018fcc4cea8b266e47600911',
 	/** LongDhang Base legacy program card — migrated to CoNET 0xc06055AEEd896F832e602a5876D2Dbe1CB365A8A */
 	'0x30d80cd71fd1ffd346737b387da11c7412363eff',
+	/** LongDhang CoNET program card — operator blacklist (hide from Discover & assets) */
+	'0xc06055aeed896f832e602a5876d2dbe1cb365a8a',
 	'0x507decd9f1c062ea02ba860e249bcebe1f062da4',
 	'0xe8f57dc92ad09c79bede29a2803af9c5b3de6fe1',
 	'0xef1140cf1376bd66b9367838f419a52d9c062309',
