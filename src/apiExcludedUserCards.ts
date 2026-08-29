@@ -79,6 +79,8 @@ export const API_EXCLUDED_USER_CARD_ADDRESSES: ReadonlySet<string> = new Set([
 	'0xddd4bb967578aeab78474c4469ee7a5ca0a8b3e8',
 	/** Merchant program card — operator blacklist (hide from Discover & assets) */
 	'0xf4ca4d1a573173bb511e6a1d9765551f80cee66f',
+	/** Merchant program card — operator blacklist (hide from Discover & assets) */
+	'0x3d5795b4af979db48e000430d1fc07946f9b6435',
 	/** @deprecated Base-era global default merchant card (CoNET-only migration; bytecode on Base only) */
 	'0xa756f2e27a332d6be2d399da543e3ce4c8455f14',
 	/** CoNET factory default card — hidden; client-visible merchants are explicit program cards only */
