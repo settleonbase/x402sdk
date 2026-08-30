@@ -54,6 +54,7 @@ import {
 } from '../aaInstitutionalV2Multisig'
 import { redeemReward13ForUsdcPreCheck } from '../redeemReward13ForUsdc'
 import { convertReward13PreCheck } from '../convertReward13'
+import { topupWithReward13ContainerPreCheck } from '../topupWithReward13Container'
 import {
 	kickReferralRegistryRedeemRelay,
 	referralRegistryRedeemPool,
@@ -9918,6 +9919,35 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			),
 		)
 		postLocalhost('/api/redeemReward13ForUsdc', preCheck.preChecked, res)
+	})
+
+	/** Atomic multi-source top-up: same-store #13→#0 + peer #13→USDC + optional cash in one UserOp. */
+	router.post('/topupWithReward13Container', async (req, res) => {
+		const preCheck = await topupWithReward13ContainerPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(
+				Colors.red(`server /api/topupWithReward13Container preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/topupWithReward13Container preCheck OK, forwarding to master`),
+			inspect(
+				{
+					targetCard: preCheck.preChecked.targetCard,
+					userEOA: preCheck.preChecked.userEOA,
+					sameStoreBurn13: preCheck.preChecked.sameStoreBurn13,
+					peerUsdcCredited6: preCheck.preChecked.peerUsdcCredited6,
+					peers: preCheck.preChecked.peers?.length ?? 0,
+					cash: Boolean(preCheck.preChecked.cash),
+				},
+				false,
+				2,
+				true,
+			),
+		)
+		postLocalhost('/api/topupWithReward13Container', preCheck.preChecked, res)
 	})
 
 	/** convertReward13ToProgramPoints：atomic burn #13 → mint #0 on customer AA. */

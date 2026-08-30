@@ -1,5 +1,6 @@
 /**
- * Charge path: atomic #13 → #0 or #13 → Conet-USDC to user AA.
+ * Charge path: atomic #13 → #0 (same-store credit) or #13 → Conet-USDC to user AA.
+ * Same-store #13 → #0 does not require USDC escrow or convertReward13ToPointsRatioE6.
  * Distinct from redeemReward13ForUsdc (pays EOA via two-step social exchange).
  * Cluster precheck + Master single-selector EntryPoint relay; HTTP waits for receipt.
  */
@@ -18,15 +19,9 @@ import { shiftSettleConet, unshiftSettleConet } from './settleContractPool'
 import { CHARGE_REWARD_V2_IFACE } from './userCumulativeStatRewardPool'
 import { resolveBeamioAaOnConet } from './endpoint/resolveBeamioAaViaUserCardFactory'
 
-const CONVERT_POINTS_SEL =
-	CHARGE_REWARD_V2_IFACE.getFunction('convertReward13ToProgramPoints')?.selector ?? '0x00000000'
-const CONVERT_USDC_SEL =
-	CHARGE_REWARD_V2_IFACE.getFunction('convertReward13ToUsdcToAa')?.selector ?? '0x00000000'
-
 const CARD_VIEW_IFACE = new ethers.Interface([
 	'function balanceOf(address account, uint256 id) view returns (uint256)',
 	'function rewardEscrowUsdc6() view returns (uint256)',
-	'function convertReward13ToPointsRatioE6() view returns (uint256)',
 	'function convertReward13ToUsdcRatioE6() view returns (uint256)',
 	'function quoteUsdcWithdrawForFiat6(uint256 fiatAmount6) view returns (uint256)',
 	'function pointsUnitPriceInCurrencyE6() view returns (uint256)',
@@ -67,13 +62,6 @@ export const convertReward13ToUsdcToAaPool: PoolItem[] = []
 
 let convertReward13InFlight = false
 
-async function bytecodeHasSelector(provider: ethers.Provider, address: string, selector: string): Promise<boolean> {
-	if (!selector || selector === '0x00000000') return false
-	const code = await provider.getCode(address)
-	if (!code || code === '0x') return false
-	return code.toLowerCase().includes(selector.slice(2).toLowerCase())
-}
-
 function nonceKey(userEOA: string, nonce: string): string {
 	return `${userEOA.toLowerCase()}:${nonce.toLowerCase()}`
 }
@@ -109,15 +97,6 @@ export async function convertReward13PreCheck(
 		const chain = await resolveUserCardChain(cardAddress)
 		if (chain !== 'conet') return { success: false, error: 'Merchant card must be on CoNET' }
 		const provider = providerForUserCardChain('conet')
-		const selector = kind === 'toUsdcAa' ? CONVERT_USDC_SEL : CONVERT_POINTS_SEL
-		const hasSel = await bytecodeHasSelector(provider, cardAddress, selector)
-		if (!hasSel) {
-			return {
-				success: false,
-				error:
-					'Card does not expose convertReward13 (upgrade ChargeReward module / use a card created after module bind)',
-			}
-		}
 
 		const aa = await resolveBeamioAaOnConet(userEOA)
 		if (!aa) return { success: false, error: 'User AA not found' }
@@ -129,8 +108,7 @@ export async function convertReward13PreCheck(
 		}
 
 		if (kind === 'toProgramPoints') {
-			const ratio = (await card.convertReward13ToPointsRatioE6()) as bigint
-			if (ratio <= 0n) return { success: false, error: '#13 → program points conversion is disabled' }
+			// Same-store #13 → #0 credit: no USDC escrow and no ratio switch.
 			const price = (await card.pointsUnitPriceInCurrencyE6()) as bigint
 			if (price <= 0n) return { success: false, error: 'pointsUnitPriceInCurrencyE6 is zero' }
 			const minted0 = (burn13 * 1_000_000n) / price
@@ -147,6 +125,20 @@ export async function convertReward13PreCheck(
 				return {
 					success: false,
 					error: `Insufficient merchant USDC escrow (need ${usdcOut6}, have ${escrow})`,
+				}
+			}
+			// Fail-closed: ERC20 balance on the card must also cover the payout (not escrow alone).
+			const { CONET_USDC } = await import('./chainAddresses.js')
+			const erc20 = new ethers.Contract(
+				CONET_USDC,
+				['function balanceOf(address) view returns (uint256)'],
+				provider,
+			)
+			const tokenBal = (await erc20.balanceOf(cardAddress)) as bigint
+			if (usdcOut6 > tokenBal) {
+				return {
+					success: false,
+					error: `Insufficient merchant CONET-USDC balance (need ${usdcOut6}, have ${tokenBal})`,
 				}
 			}
 		}

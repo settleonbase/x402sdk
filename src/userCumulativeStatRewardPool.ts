@@ -50,6 +50,9 @@ export const CHARGE_REWARD_V2_IFACE = new ethers.Interface([
 	'function setMerchantOracleSpreadBps(uint256 spreadBps)',
 	'function convertReward13ToProgramPoints(address userEOA, uint256 burn13) returns (uint256 minted0)',
 	'function convertReward13ToUsdcToAa(address userEOA, uint256 burn13) returns (uint256 usdcOut6)',
+	// Atomic multi-source top-up (peer #13 → USDC to target card + same-store #13 → #0)
+	'function peerRedeem13ForContainerTopup(address userEOA, uint256 burn13, uint256 usdcOut6, address targetCard) returns (uint256 paidUsdc6)',
+	'function topupWithReward13Container(address userEOA, uint256 sameStoreBurn13, uint256 peerUsdcCredited6, uint256 pointsFromPeerUsdc6, uint256 minTotalPointsOut0, uint256 deadline, bytes32 nonce) returns (uint256 minted0Total)',
 ])
 
 export const INITIALIZE_CARD_USER_CUMUL_STAT_SELECTOR =

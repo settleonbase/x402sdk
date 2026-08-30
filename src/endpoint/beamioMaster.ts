@@ -89,6 +89,10 @@ import {
 	convertReward13ToUsdcToAaPool,
 	kickConvertReward13Process,
 } from '../convertReward13'
+import {
+	kickTopupWithReward13ContainerProcess,
+	topupWithReward13ContainerPool,
+} from '../topupWithReward13Container'
 import { applyExcludeUserCard, warmDynamicApiExcludedUserCardsFromDb } from '../excludeUserCardApi'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import { resolveBeamioAaForEoaWithFallback, resolveBeamioAaOnConet } from './resolveBeamioAaViaUserCardFactory'
@@ -2396,6 +2400,30 @@ const routing = ( router: Router ) => {
 				),
 			)
 			kickRedeemReward13ForUsdcProcess()
+		})
+
+		router.post('/topupWithReward13Container', (req, res) => {
+			topupWithReward13ContainerPool.push({
+				...(req.body as object),
+				res,
+			} as (typeof topupWithReward13ContainerPool)[number])
+			logger(
+				` Master GOT /api/topupWithReward13Container…`,
+				inspect(
+					{
+						targetCard: req.body?.targetCard,
+						userEOA: req.body?.userEOA,
+						sameStoreBurn13: req.body?.sameStoreBurn13,
+						peerUsdcCredited6: req.body?.peerUsdcCredited6,
+						peers: Array.isArray(req.body?.peers) ? req.body.peers.length : 0,
+						cash: Boolean(req.body?.cash),
+					},
+					false,
+					3,
+					true,
+				),
+			)
+			kickTopupWithReward13ContainerProcess()
 		})
 
 		router.post('/convertReward13ToProgramPoints', (req, res) => {

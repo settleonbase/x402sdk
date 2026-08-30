@@ -3779,7 +3779,7 @@ const tryParseExecuteForAdminAaRecipient = (data: string): string | null => {
 }
 
 /** 获取 card 使用的 AA Factory 地址（card.factoryGateway()._aaFactory()），与 mintPointsByAdmin 的 _toAccount 解析逻辑一致 */
-const getCardAaFactoryAddress = async (cardAddr: string): Promise<string> => {
+export const getCardAaFactoryAddress = async (cardAddr: string): Promise<string> => {
 	const chain = await resolveUserCardChain(cardAddr)
 	const provider = providerForUserCardChain(chain)
 	const cardAbi = ['function factoryGateway() view returns (address)']
@@ -3918,7 +3918,7 @@ async function pickBUnitFeeConsumer(
 }
 
 /** @deprecated 命名保留；内部转发 preferAa=false */
-async function pickBUnitFeeConsumerPreferEoaThenAa(
+export async function pickBUnitFeeConsumerPreferEoaThenAa(
 	payerEoa: string,
 	feeBUnits6: bigint,
 	opts?: { aaFactoryAddress?: string | null; aaFactoryProvider?: ethers.Provider | null; explicitAaFallback?: string | null }
@@ -8779,7 +8779,7 @@ type SyncStandaloneBunitServiceFeeArgs = {
 }
 
 /** Merchant Transactions：B-Unit 扣款须单独 syncTokenAction（txId=consume tx；originalPaymentHash=Base 业务 tx） */
-async function syncStandaloneBunitServiceFeeToIndexer(args: SyncStandaloneBunitServiceFeeArgs): Promise<string | null> {
+export async function syncStandaloneBunitServiceFeeToIndexer(args: SyncStandaloneBunitServiceFeeArgs): Promise<string | null> {
 	const bServiceUSDC6 = args.bServiceUnits6 > 0n ? args.bServiceUnits6 / BUNIT_TO_USDC_DIVISOR : 0n
 	if (bServiceUSDC6 <= 0n || !ethers.isAddress(args.feePayer)) return null
 	const feePayer = ethers.getAddress(args.feePayer)
@@ -11346,6 +11346,7 @@ function aaFactoryForUserCardChain(chain: BeamioUserCardChainKey): string {
 
 const BeamioAccountExecuteABI = [
 	'function execute(address dest,uint256 value,bytes func)',
+	'function executeBatch(address[] dest,uint256[] value,bytes[] func)',
 ] as const
 
 const BeamioUserCardFactoryPaymasterStatusABI = [
@@ -11570,6 +11571,84 @@ export async function relayUserCardCallViaEntryPoint(params: {
 		)
 	)
 	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, { gasLimit: params.gasLimit ?? 20_000_000n })
+}
+
+/**
+ * Relayer AA `executeBatch(dest[], value[], func[])` via EntryPoint — all-or-nothing multi-call.
+ * Used for atomic multi-source top-up (peer redeem + container + optional cash USDC).
+ */
+export async function relayUserCardBatchViaEntryPoint(params: {
+	SC: SettleContractPoolEntry
+	chain: BeamioUserCardChainKey
+	/** Any merchant card on the same chain (used to resolve AA factory / paymaster allowlist). */
+	cardAddressForFactory: string
+	dest: string[]
+	value: bigint[]
+	func: string[]
+	logTag: string
+	gasLimit?: bigint
+}): Promise<ethers.ContractTransactionResponse> {
+	const dest = params.dest.map((a) => ethers.getAddress(a))
+	const value = params.value.map((v) => BigInt(v))
+	const func = params.func.map((f) => (typeof f === 'string' && f.startsWith('0x') ? f : ethers.hexlify(f)))
+	if (dest.length === 0 || dest.length !== value.length || dest.length !== func.length) {
+		throw new Error(`${params.logTag}: executeBatch length mismatch`)
+	}
+	const provider = providerForUserCardChain(params.chain)
+	let aaFactoryAddress = aaFactoryForUserCardChain(params.chain)
+	const factoryAddress = await getBeamioUserCardFactoryGateway(ethers.getAddress(params.cardAddressForFactory))
+	try {
+		const onChainAaFactory = await getAaFactoryAddressFromUserCardFactoryPaymaster(provider, factoryAddress)
+		if (onChainAaFactory) aaFactoryAddress = ethers.getAddress(onChainAaFactory)
+	} catch (e: any) {
+		logger(
+			Colors.yellow(
+				`[${params.logTag}] could not read UserCardFactory._aaFactory(), using configured AA factory: ${e?.message ?? e}`,
+			),
+		)
+	}
+	const relayer = await ensureRelayerBeamioAccountForEntryPoint(params.SC, params.chain, params.logTag, aaFactoryAddress)
+	await ensureUserCardFactoryAllowsRelayerAA({
+		factoryAddress,
+		relayerAA: relayer.aaAccount,
+		wallet: relayer.wallet,
+		logTag: params.logTag,
+	})
+	const entryPoint = new ethers.Contract(relayer.entryPointAddress, EntryPointHandleOpsABI, relayer.provider)
+	const accountIface = new ethers.Interface(BeamioAccountExecuteABI)
+	const callData = accountIface.encodeFunctionData('executeBatch', [dest, value, func])
+	const nonce = (await entryPoint.getNonce(relayer.aaAccount, 0n)) as bigint
+	const fee = await relayer.provider.getFeeData()
+	const maxFeePerGas = fee.maxFeePerGas ?? 2_000_000_000n
+	const maxPriorityFeePerGas = fee.maxPriorityFeePerGas ?? 100_000_000n
+	const opForHash: AAtoEOAUserOp = {
+		sender: relayer.aaAccount,
+		nonce,
+		initCode: '0x',
+		callData,
+		accountGasLimits: packUserOpUints128(8_000_000n, 8_000_000n),
+		preVerificationGas: 300_000n,
+		gasFees: packUserOpUints128(maxPriorityFeePerGas, maxFeePerGas),
+		paymasterAndData: buildPaymasterAndDataV07(relayer.aaFactoryAddress),
+		signature: '0x',
+	}
+	const userOpHash = (await entryPoint.getUserOpHash(opForHash)) as string
+	const signature = await relayer.wallet.signMessage(ethers.getBytes(userOpHash))
+	const txOp = {
+		...opForHash,
+		nonce: asBigInt(opForHash.nonce, 0n),
+		preVerificationGas: asBigInt(opForHash.preVerificationGas, 0n),
+		signature: ethers.getBytes(signature),
+	}
+	const beneficiary = await relayer.wallet.getAddress()
+	logger(
+		Colors.cyan(
+			`[${params.logTag}] relay executeBatch via EntryPoint=${relayer.entryPointAddress} relayerAA=${relayer.aaAccount} legs=${dest.length} userOpNonce=${nonce.toString()}`,
+		),
+	)
+	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, {
+		gasLimit: params.gasLimit ?? 30_000_000n,
+	})
 }
 
 async function buildAAAccountCreationUserOpForHash(eoa: string): Promise<AAAccountCreationPrepareResult> {
