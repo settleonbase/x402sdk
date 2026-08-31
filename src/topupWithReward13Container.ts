@@ -12,6 +12,7 @@ import {
 	checkBusinessRelayTxSuccessful,
 	getBeamioUserCardFactoryGateway,
 	quotePointsForUSDC_raw,
+	quotePoints6FromDepositUsdc6,
 	relayUserCardBatchViaEntryPoint,
 	calcTopupFixedBUnitFee,
 	resolveCardOwnerToEOA,
@@ -318,16 +319,16 @@ export async function topupWithReward13ContainerPreCheck(
 			if (to.toLowerCase() !== owner.toLowerCase()) {
 				return { success: false, error: 'cash.to must be target card owner' }
 			}
-			const quote = await quotePointsForUSDC_raw(targetCard, value)
-			const expectedPoints = BigInt(quote.points6)
+			const quote = await quotePoints6FromDepositUsdc6(targetCard, value)
+			const expectedPoints = quote.points6
 			if (expectedPoints <= 0n) {
 				return { success: false, error: 'cash.points6 quote is zero' }
 			}
-			// points6 is not in EIP-712; Cluster overwrites from quote (client may pass any positive).
+			// points6 is not in EIP-712; Cluster overwrites from fair-USDC quote (deposit USDC includes merchant spread).
 			if (points6 > 0n && points6 !== expectedPoints) {
 				logger(
 					Colors.yellow(
-						`[topupWithReward13Container] overwrite cash.points6 client=${points6} → ${expectedPoints}`,
+						`[topupWithReward13Container] overwrite cash.points6 client=${points6} → ${expectedPoints} (fairUsdc6=${quote.fairUsdc6})`,
 					),
 				)
 			}

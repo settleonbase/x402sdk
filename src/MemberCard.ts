@@ -2581,6 +2581,75 @@ export const quoteCurrencyToUsdc6 = (amount: string, currency?: string): bigint 
 	return ceilDiv(amountCurrency6 * ONE_E6, rateE6)
 }
 
+/** Merchant card deposit quote ABI (Programs → Exchange rate → merchantOracleSpreadBps). */
+const MERCHANT_DEPOSIT_QUOTE_ABI = [
+	'function currency() view returns (uint8)',
+	'function quoteUsdcDepositForFiat6(uint256 fiatAmount6) view returns (uint256)',
+	'function applyDepositSpreadUsdc6(uint256 fairUsdc6) view returns (uint256)',
+	'function applyWithdrawSpreadUsdc6(uint256 fairUsdc6) view returns (uint256)',
+] as const
+
+const CURRENCY_CODE_TO_ENUM: Record<string, number> = {
+	CAD: 0,
+	USD: 1,
+	JPY: 2,
+	CNY: 3,
+	USDC: 4,
+	HKD: 5,
+	EUR: 6,
+	SGD: 7,
+	TWD: 8,
+}
+
+/**
+ * Cash / USDC top-up settle amount for a merchant program card.
+ * Uses on-chain `quoteUsdcDepositForFiat6` (factory fair + merchantOracleSpreadBps from Programs → Exchange rate).
+ * Cardless walletDeposit / fuelPack must keep `quoteCurrencyToUsdc6`.
+ */
+export const quoteUsdcDepositForCardFiat6 = async (
+	cardAddress: string,
+	amountDec: string,
+	currency?: string,
+): Promise<bigint> => {
+	const amt = typeof amountDec === 'string' ? amountDec.trim() : ''
+	if (!amt || Number(amt) <= 0) return 0n
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return 0n
+	const curCode = (currency || 'CAD').toUpperCase()
+	const curEnum = CURRENCY_CODE_TO_ENUM[curCode]
+	if (curEnum === undefined) return 0n
+	let amountCurrency6: bigint
+	try {
+		amountCurrency6 = ethers.parseUnits(amt, 6)
+	} catch {
+		return 0n
+	}
+	if (amountCurrency6 <= 0n) return 0n
+
+	const cardAddr = ethers.getAddress(cardAddress)
+	const provider = providerForUserCardChain('conet')
+	const card = new ethers.Contract(cardAddr, MERCHANT_DEPOSIT_QUOTE_ABI, provider)
+
+	try {
+		const cardCur = Number(await card.currency())
+		if (cardCur === curEnum) {
+			const deposit = (await card.quoteUsdcDepositForFiat6(amountCurrency6)) as bigint
+			if (deposit > 0n) return deposit
+		}
+	} catch (e) {
+		logger(Colors.yellow(`[quoteUsdcDepositForCardFiat6] deposit quote failed: ${(e as Error)?.message}`))
+	}
+
+	const fair = quoteCurrencyToUsdc6(amt, curCode)
+	if (fair <= 0n) return 0n
+	try {
+		const withSpread = (await card.applyDepositSpreadUsdc6(fair)) as bigint
+		if (withSpread > 0n) return withSpread
+	} catch {
+		/* return fair */
+	}
+	return fair
+}
+
 /** NFC Topup Prepare：根据 uid 或 wallet/amount/currency 生成 executeForAdmin 所需的 data、deadline、nonce。cardAddress 为必填，指定充值的卡。 */
 /** Membership fee duration kinds — mirrors `MembershipFeeStorage.sol`. */
 export const MEMBERSHIP_FEE_DURATION = {
@@ -21964,6 +22033,44 @@ export const quotePointsForUSDC_raw = async (
 	
 		return ret;
 };
+
+/**
+ * Map deposit-spread USDC (cash leg) → program points using fair USDC.
+ * `applyWithdrawSpreadUsdc6` undoes deposit markup so mint matches remaining fiat
+ * (Programs → Exchange rate merchantOracleSpreadBps).
+ */
+export const quotePoints6FromDepositUsdc6 = async (
+	cardAddress: string,
+	depositUsdc6: bigint,
+	factoryOverride?: ethers.Contract,
+): Promise<{ points6: bigint; fairUsdc6: bigint; unitPriceUSDC6: bigint }> => {
+	if (depositUsdc6 <= 0n) {
+		return { points6: 0n, fairUsdc6: 0n, unitPriceUSDC6: 0n }
+	}
+	if (!cardAddress || !ethers.isAddress(cardAddress)) {
+		throw new Error('quotePoints6FromDepositUsdc6: invalid cardAddress')
+	}
+	const cardAddr = ethers.getAddress(cardAddress)
+	const provider = providerForUserCardChain('conet')
+	const card = new ethers.Contract(cardAddr, MERCHANT_DEPOSIT_QUOTE_ABI, provider)
+	let fairUsdc6 = depositUsdc6
+	try {
+		const undone = (await card.applyWithdrawSpreadUsdc6(depositUsdc6)) as bigint
+		if (undone > 0n) fairUsdc6 = undone
+	} catch (e) {
+		logger(
+			Colors.yellow(
+				`[quotePoints6FromDepositUsdc6] applyWithdrawSpreadUsdc6 failed: ${(e as Error)?.message}`,
+			),
+		)
+	}
+	const quote = await quotePointsForUSDC_raw(cardAddr, fairUsdc6, factoryOverride)
+	return {
+		points6: BigInt(quote.points6),
+		fairUsdc6,
+		unitPriceUSDC6: BigInt(quote.unitPriceUSDC6),
+	}
+}
 
 const BASE_CHAIN_ID = 8453
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'

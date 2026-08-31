@@ -16,7 +16,7 @@ import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getBeamioCardRowForMetadataSync, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getNfcCardPosAdminGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listPosTerminalCardBindingsForWallet, setActivePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckChargeBurnBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, nfcTopupPreparePayload, unpackTopupMintAmount, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, lookupOnChainMerchantCardRegistryIdentity, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckChargeBurnBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, quoteUsdcDepositForCardFiat6, nfcTopupPreparePayload, unpackTopupMintAmount, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, lookupOnChainMerchantCardRegistryIdentity, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
 import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
 import { lookupFuelPack, fuelPackFreeBUnits6, fuelPackUsdc6 } from '../fuelPackCatalog'
@@ -5190,6 +5190,32 @@ const routing = ( router: Router ) => {
 		return { amount6: quoteCurrencyToUsdc6(amountDec, cur), usesOracle: true }
 	}
 
+	/** Merchant cash/USDC top-up: card `quoteUsdcDepositForFiat6` (Programs → Exchange rate). Cardless keep settle oracle. */
+	const quoteCardDepositOrSettleAmount6 = async (
+		amountDec: string,
+		currency: string,
+		paymentToken: 'USDC' | 'CADD',
+		cardAddress?: string | null,
+	): Promise<{ amount6: bigint; usesOracle: boolean }> => {
+		const settle = quoteSettleAmount6(amountDec, currency, paymentToken)
+		if (!settle.usesOracle) return settle
+		const cardRaw = String(cardAddress ?? '').trim()
+		if (!cardRaw || !ethers.isAddress(cardRaw) || cardRaw === ethers.ZeroAddress) {
+			return settle
+		}
+		try {
+			const deposit = await quoteUsdcDepositForCardFiat6(cardRaw, amountDec, currency)
+			if (deposit > 0n) return { amount6: deposit, usesOracle: true }
+		} catch (e) {
+			logger(
+				Colors.yellow(
+					`[quoteCardDepositOrSettleAmount6] deposit quote failed: ${(e as Error)?.message}`,
+				),
+			)
+		}
+		return settle
+	}
+
 	/** GET /api/nfcUsdcTopupQuote
 	 * 客户端浏览器钱包页面（verra-home /usdc-topup）展示价格用：根据 currency 与 amount 用 Oracle 折算 USDC6。
 	 * Query: card, owner, amount, currency；`workflow=walletDeposit` / `fuelPack` 可省略 card/owner。
@@ -5234,7 +5260,11 @@ const routing = ( router: Router ) => {
 			let onChainOwner: string | null = null
 			if (!cardlessQuote) {
 				try {
-					const c = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase)
+					const c = new ethers.Contract(
+						cardAddr,
+						['function owner() view returns (address)'],
+						providerForUserCardChain('conet'),
+					)
 					const o = (await c.owner()) as string
 					if (o && ethers.isAddress(o)) onChainOwner = ethers.getAddress(o)
 				} catch (_) { /* tolerate transient rpc */ }
@@ -5250,7 +5280,12 @@ const routing = ( router: Router ) => {
 			if (cardlessQuote && (cur !== 'USDC' || paymentTokenNorm !== 'USDC')) {
 				return res.status(400).json({ success: false, error: `${walletDepositQuote ? 'walletDeposit' : 'fuelPack'} requires currency/paymentToken USDC` }).end()
 			}
-			const { amount6: usdc6, usesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+			const { amount6: usdc6, usesOracle } = await quoteCardDepositOrSettleAmount6(
+				amt,
+				cur,
+				paymentTokenNorm,
+				cardlessQuote ? null : cardAddr,
+			)
 			if (fuelPackQuote) {
 				const packRaw = String(pack ?? packId ?? '').trim()
 				if (packRaw) {
@@ -5880,7 +5915,8 @@ const routing = ( router: Router ) => {
 			 * Master LockMint CONET-USDC → card.owner()，再 protocol gateway mint 卡点 #0 → 用户（免 admin 空投）。
 			 */
 			if (treasuryBridgeOnly && recipientAaAddr) {
-				const { amount6: quotedTreasury, usesOracle: treasuryUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+				const { amount6: quotedTreasury, usesOracle: treasuryUsesOracle } =
+					await quoteCardDepositOrSettleAmount6(amt, cur, paymentTokenNorm, cardAddr)
 				if (quotedTreasury <= 0n) {
 					if (!treasuryUsesOracle) {
 						return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end()
@@ -6228,8 +6264,9 @@ const routing = ( router: Router ) => {
 				return res.status(400).json({ success: false, error: prepared.error }).end()
 			}
 
-			// 4. USDC 报价 - **严格 Oracle**：oracle 缺失/stale 时拒绝，不允许用固定汇率报价
-			const { amount6: quotedUsdc6, usesOracle: topupUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm)
+			// 4. USDC 报价 — merchant card uses deposit spread (Programs → Exchange rate); else settle oracle
+			const { amount6: quotedUsdc6, usesOracle: topupUsesOracle } =
+				await quoteCardDepositOrSettleAmount6(amt, cur, paymentTokenNorm, cardAddr)
 			if (quotedUsdc6 <= 0n) {
 				if (!topupUsesOracle) {
 					sessionUpdate({ state: 'error', error: 'Invalid CADD amount' })
