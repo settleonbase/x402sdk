@@ -9538,11 +9538,15 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		postLocalhost('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'purchaseRewardProgram' }, res)
 	})
 
-	/** cardFundSocialExchangeUsdcEscrow：商户 owner 向 card escrow 充值 CONET-USDC（须先 approve card）。 */
+	/** cardFundSocialExchangeUsdcEscrow：owner EOA → card #13 escrow via EIP-2612 permit + Master-sponsored CNET gas. */
 	router.post('/cardFundSocialExchangeUsdcEscrow', async (req, res) => {
 		const preCheck = await cardFundSocialExchangeUsdcEscrowPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardFundSocialExchangeUsdcEscrow preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			const { permit: _omitPermit, ...safeBody } = (req.body ?? {}) as Record<string, unknown>
+			logger(
+				Colors.red(`server /api/cardFundSocialExchangeUsdcEscrow preCheck FAIL: ${preCheck.error}`),
+				inspect(safeBody, false, 2, true),
+			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(

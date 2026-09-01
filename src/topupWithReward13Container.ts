@@ -371,6 +371,21 @@ export async function topupWithReward13ContainerPreCheck(
 			const alreadyUsed = (await usdc.authorizationState(from, cashNonce)) as boolean
 			if (alreadyUsed) return { success: false, error: 'cash authorization nonce already used' }
 
+			let eoaConetUsdc: bigint
+			try {
+				eoaConetUsdc = (await new ethers.Contract(CONET_USDC, ERC20_IFACE, provider).balanceOf(
+					from,
+				)) as bigint
+			} catch {
+				return { success: false, error: 'Cannot read CONET-USDC balance' }
+			}
+			if (eoaConetUsdc < value) {
+				return {
+					success: false,
+					error: `Insufficient CONET-USDC (have=${eoaConetUsdc.toString()}, need=${value.toString()})`,
+				}
+			}
+
 			cashUsdc6 = value
 			cash = {
 				from,

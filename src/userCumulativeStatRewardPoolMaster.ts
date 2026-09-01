@@ -21,7 +21,14 @@ import {
 	buildInitializeCardUserCumulativeStatCalldata,
 	encodeGatewayInvokeCardFactoryCalldata,
 	readCardUserCumulativeStatStatus,
+	type ConetUsdcPermitPayload,
 } from './userCumulativeStatRewardPool'
+import { CONET_USDC } from './chainAddresses'
+
+/** TreasuryCanonicalERC20V3 — `bytes signature` permit (not v,r,s). */
+const CONET_USDC_PERMIT_WRITE_ABI = [
+	'function permit(address owner, address spender, uint256 value, uint256 deadline, bytes signature)',
+] as const
 import {
 	readActiveCouponSocialRewardRule,
 	resolveRefWalletForDispatch,
@@ -76,10 +83,64 @@ export type CardGatewayRewardPoolTask = {
 	/** 链上 tx 成功后写入 beamio_card_program_*（不做历史回填）。 */
 	socialDb?: CardProgramSocialDbMeta
 	/**
+	 * Cluster-verified CONET-USDC permit. Master sponsors CNET gas via Settle_Conet
+	 * before fundSocialExchangeUsdcEscrow (no re-validation).
+	 */
+	permit?: ConetUsdcPermitPayload
+	/**
 	 * HTTP response handle. Omitted for recordUserLike / burnUserLike when Master already
 	 * returned `{ success, queued }` at enqueue (client must not wait for EntryPoint).
 	 */
 	res?: Response
+}
+
+function humanizeGatewayRewardPoolError(raw: string): string {
+	const s = String(raw ?? '')
+	if (/insufficient funds for intrinsic transaction cost/i.test(s)) {
+		return 'CoNET gas sponsorship failed. Please try again shortly.'
+	}
+	if (/permit|PERMIT|ECDSA|invalid signature/i.test(s)) {
+		return 'CONET-USDC permit could not be applied. Please try again.'
+	}
+	if (/BM_CallFailed|execution reverted/i.test(s)) {
+		return 'On-chain funding failed. Please try again.'
+	}
+	// Strip raw RPC / ethers JSON dumps from user-facing errors.
+	if (/\{[\s\S]*"code"\s*:/.test(s) || s.length > 280) {
+		return 'Funding the #13 redeem pool failed. Please try again.'
+	}
+	return s || 'Funding the #13 redeem pool failed. Please try again.'
+}
+
+/**
+ * Master trusts Cluster-verified permit: submit via Settle_Conet wallet (sponsors CNET gas).
+ */
+async function applyClusterVerifiedConetUsdcPermit(
+	SC: { walletConet: ethers.Wallet },
+	permit: ConetUsdcPermitPayload,
+	logTag: string,
+): Promise<{ ok: true; hash: string } | { ok: false; error: string }> {
+	try {
+		const usdc = new ethers.Contract(CONET_USDC, CONET_USDC_PERMIT_WRITE_ABI, SC.walletConet)
+		const tx = await usdc.permit(
+			permit.owner,
+			permit.spender,
+			BigInt(permit.value),
+			BigInt(permit.deadline),
+			permit.signature,
+		)
+		const receipt = await tx.wait()
+		if (receipt && typeof receipt.status === 'number' && receipt.status === 0) {
+			return { ok: false, error: 'CONET-USDC permit transaction reverted.' }
+		}
+		logger(Colors.green(`[${logTag}] permit ok hash=${tx.hash}`))
+		return { ok: true, hash: tx.hash as string }
+	} catch (e: unknown) {
+		const err = e as { shortMessage?: string; message?: string }
+		const msg = err?.shortMessage ?? err?.message ?? String(e)
+		logger(Colors.red(`[${logTag}] permit failed: ${msg}`))
+		return { ok: false, error: humanizeGatewayRewardPoolError(msg) }
+	}
 }
 
 export const cardGatewayRewardPool: CardGatewayRewardPoolTask[] = []
@@ -301,6 +362,13 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 				.end()
 			return
 		}
+		if (obj.permit) {
+			const permitResult = await applyClusterVerifiedConetUsdcPermit(SC, obj.permit, obj.label)
+			if (!permitResult.ok) {
+				obj.res?.status(500).json({ success: false, error: permitResult.error }).end()
+				return
+			}
+		}
 		const hasExtraSteps = (obj.extraCardCallData?.length ?? 0) > 0
 		const useDirectCard =
 			hasDirectCard &&
@@ -384,7 +452,7 @@ export async function cardGatewayRewardPoolPress(): Promise<void> {
 		const msg = err?.shortMessage ?? err?.message ?? String(e)
 		logger(Colors.red(`[${obj.label}] failed: ${msg}`))
 		if (obj.res && !obj.res.headersSent) {
-			obj.res.status(500).json({ success: false, error: msg }).end()
+			obj.res.status(500).json({ success: false, error: humanizeGatewayRewardPoolError(msg) }).end()
 		}
 	} finally {
 		unshiftSettleConet(SC)

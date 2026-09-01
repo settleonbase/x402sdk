@@ -13,7 +13,26 @@ import {
 import { cardProgramSocialBunitFeePreCheck, getBeamioUserCardFactoryGateway } from './MemberCard'
 import { getSeriesByCardAndTokenId } from './db'
 import { readCouponDisabledFromMetadata } from './couponMetadataCategory'
-import { CONET_AA_FACTORY } from './chainAddresses'
+import { CONET_AA_FACTORY, CONET_MAINNET_CHAIN_ID, CONET_USDC } from './chainAddresses'
+
+/** TreasuryCanonicalERC20V3 permit — `bytes signature`, not (v,r,s). */
+const CONET_USDC_PERMIT_ABI = [
+	'function name() view returns (string)',
+	'function nonces(address owner) view returns (uint256)',
+	'function balanceOf(address account) view returns (uint256)',
+	'function allowance(address owner, address spender) view returns (uint256)',
+	'function permit(address owner, address spender, uint256 value, uint256 deadline, bytes signature)',
+] as const
+
+const CONET_USDC_PERMIT_TYPES: Record<string, ethers.TypedDataField[]> = {
+	Permit: [
+		{ name: 'owner', type: 'address' },
+		{ name: 'spender', type: 'address' },
+		{ name: 'value', type: 'uint256' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
 
 export const USER_CUMULATIVE_STAT_IFACE = new ethers.Interface([
 	'function initializeCardUserCumulativeStatTokens()',
@@ -1569,6 +1588,17 @@ export const cardRecordUserCumulativeStatPreCheck = async (body: {
 	}
 }
 
+/** EIP-2612 permit payload for TreasuryCanonicalERC20V3 (`bytes signature`). */
+export type ConetUsdcPermitPayload = {
+	owner: string
+	spender: string
+	value: string
+	deadline: string
+	nonce: string
+	/** `0x` + 65-byte hex from `signTypedData` / `verifyTypedData`. */
+	signature: string
+}
+
 export type GatewayRewardPoolForwardBody = {
 	cardAddress: string
 	/** Plan A：relayer AA EntryPoint → card.execute（CoNET 无 gatewayInvokeCard 时使用）。 */
@@ -1577,16 +1607,23 @@ export type GatewayRewardPoolForwardBody = {
 	factoryCallData?: string
 	/** Optional follow-up direct card calls in the same worker (e.g. batch fallback or share click). */
 	extraCardCallData?: string[]
+	/**
+	 * Optional CONET-USDC permit (Cluster-verified). Master sponsors gas via Settle_Conet.
+	 * Omitted when allowance already covers the fund amount.
+	 */
+	permit?: ConetUsdcPermitPayload
 }
 
 export function buildGatewayRewardPoolForwardBody(
 	card: string,
 	cardCalldata: string,
+	permit?: ConetUsdcPermitPayload,
 ): GatewayRewardPoolForwardBody {
 	return {
 		cardAddress: card,
 		cardCallData: cardCalldata,
 		factoryCallData: encodeGatewayInvokeCardFactoryCalldata(card, cardCalldata),
+		...(permit ? { permit } : {}),
 	}
 }
 
@@ -1740,11 +1777,16 @@ export const cardPurchaseRewardProgramPreCheck = async (body: {
 	}
 }
 
-/** Cluster：gateway fundSocialExchangeUsdcEscrow（商户 owner 须先 approve CONET-USDC 给 card）。 */
+/**
+ * Cluster：gateway fundSocialExchangeUsdcEscrow.
+ * Owner funds via EIP-2612 permit (Master sponsors CNET gas) when allowance is insufficient.
+ * Does not require the merchant EOA to hold CNET.
+ */
 export const cardFundSocialExchangeUsdcEscrowPreCheck = async (body: {
 	cardAddress?: string
 	payerEOA?: string
 	amount6?: string | number
+	permit?: ConetUsdcPermitPayload
 }): Promise<{ success: true; preChecked: GatewayRewardPoolForwardBody } | { success: false; error: string }> => {
 	if (!body.cardAddress || !ethers.isAddress(body.cardAddress)) return { success: false, error: 'Invalid cardAddress' }
 	if (!body.payerEOA || !ethers.isAddress(body.payerEOA)) return { success: false, error: 'Invalid payerEOA' }
@@ -1753,15 +1795,103 @@ export const cardFundSocialExchangeUsdcEscrowPreCheck = async (body: {
 	try {
 		const base = await gatewayRewardPoolBasePreCheck(body.cardAddress)
 		if ('error' in base) return { success: false, error: base.error }
+		const chain = await resolveUserCardChain(base.card)
+		const provider = providerForUserCardChain(chain)
+		const payer = ethers.getAddress(body.payerEOA)
 		const cardOwner = (await new ethers.Contract(
 			base.card,
 			['function owner() view returns (address)'],
-			providerForUserCardChain(await resolveUserCardChain(base.card)),
+			provider,
 		).owner()) as string
-		if (ethers.getAddress(cardOwner) !== ethers.getAddress(body.payerEOA)) {
+		if (ethers.getAddress(cardOwner) !== payer) {
 			return { success: false, error: 'payerEOA must be card owner' }
 		}
-		const cardCalldata = buildFundSocialExchangeUsdcEscrowCalldata(body.payerEOA, amount6)
+
+		const usdc = new ethers.Contract(CONET_USDC, CONET_USDC_PERMIT_ABI, provider)
+		const balance = (await usdc.balanceOf(payer)) as bigint
+		if (balance < amount6) {
+			return { success: false, error: 'Insufficient CONET-USDC on the owner EOA.' }
+		}
+
+		const allowance = (await usdc.allowance(payer, base.card)) as bigint
+		let verifiedPermit: ConetUsdcPermitPayload | undefined
+		if (allowance < amount6) {
+			const raw = body.permit
+			if (!raw || typeof raw !== 'object') {
+				return { success: false, error: 'CONET-USDC permit is required.' }
+			}
+			let owner: string
+			let spender: string
+			try {
+				owner = ethers.getAddress(String(raw.owner ?? ''))
+				spender = ethers.getAddress(String(raw.spender ?? ''))
+			} catch {
+				return { success: false, error: 'Invalid CONET-USDC permit.' }
+			}
+			if (owner !== payer) {
+				return { success: false, error: 'CONET-USDC permit signer is not the card owner.' }
+			}
+			if (spender !== base.card) {
+				return { success: false, error: 'Invalid CONET-USDC permit.' }
+			}
+			let value: bigint
+			let deadline: bigint
+			let nonce: bigint
+			try {
+				value = BigInt(String(raw.value ?? ''))
+				deadline = BigInt(String(raw.deadline ?? ''))
+				nonce = BigInt(String(raw.nonce ?? ''))
+			} catch {
+				return { success: false, error: 'Invalid CONET-USDC permit.' }
+			}
+			if (value < amount6) {
+				return { success: false, error: 'Invalid CONET-USDC permit.' }
+			}
+			const nowSec = BigInt(Math.floor(Date.now() / 1000))
+			if (deadline < nowSec) {
+				return { success: false, error: 'CONET-USDC permit expired.' }
+			}
+			const onChainNonce = (await usdc.nonces(payer)) as bigint
+			if (nonce !== onChainNonce) {
+				return { success: false, error: 'CONET-USDC permit nonce mismatch.' }
+			}
+			const sig = String(raw.signature ?? '').trim()
+			if (!sig || !ethers.isHexString(sig) || ethers.getBytes(sig).length !== 65) {
+				return { success: false, error: 'Invalid CONET-USDC permit.' }
+			}
+			const tokenName = String(await usdc.name())
+			const domain = {
+				name: tokenName,
+				version: '1',
+				chainId: CONET_MAINNET_CHAIN_ID,
+				verifyingContract: CONET_USDC,
+			}
+			const message = {
+				owner,
+				spender,
+				value,
+				nonce,
+				deadline,
+			}
+			try {
+				const recovered = ethers.verifyTypedData(domain, CONET_USDC_PERMIT_TYPES, message, sig)
+				if (ethers.getAddress(recovered) !== owner) {
+					return { success: false, error: 'CONET-USDC permit signer is not the card owner.' }
+				}
+			} catch {
+				return { success: false, error: 'Invalid CONET-USDC permit.' }
+			}
+			verifiedPermit = {
+				owner,
+				spender,
+				value: value.toString(),
+				deadline: deadline.toString(),
+				nonce: nonce.toString(),
+				signature: sig,
+			}
+		}
+
+		const cardCalldata = buildFundSocialExchangeUsdcEscrowCalldata(payer, amount6)
 		const routeErr = await assertAdminStatsRoutesChargeRewardSelector(
 			base.card,
 			FUND_SOCIAL_EXCHANGE_USDC_ESCROW_SELECTOR,
@@ -1770,7 +1900,7 @@ export const cardFundSocialExchangeUsdcEscrowPreCheck = async (body: {
 		if (routeErr) return { success: false, error: routeErr }
 		return {
 			success: true,
-			preChecked: buildGatewayRewardPoolForwardBody(base.card, cardCalldata),
+			preChecked: buildGatewayRewardPoolForwardBody(base.card, cardCalldata, verifiedPermit),
 		}
 	} catch (e: unknown) {
 		const err = e as { message?: string }

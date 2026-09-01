@@ -3246,7 +3246,16 @@ const routing = ( router: Router ) => {
 		 * recordUserLike / burnUserLike：入队即返回 `{ success, queued }`（对齐 cardCouponOpenClaim），勿等 EntryPoint 确认。
 		 */
 		router.post('/cardGatewayRewardPool', async (req, res) => {
-			const { cardAddress, factoryCallData, cardCallData, extraCardCallData, label, initOnly, socialDb } = req.body as {
+			const {
+				cardAddress,
+				factoryCallData,
+				cardCallData,
+				extraCardCallData,
+				label,
+				initOnly,
+				socialDb,
+				permit,
+			} = req.body as {
 				cardAddress?: string
 				factoryCallData?: string
 				cardCallData?: string
@@ -3254,6 +3263,7 @@ const routing = ( router: Router ) => {
 				label?: string
 				initOnly?: boolean
 				socialDb?: import('../userCumulativeStatRewardPoolMaster').CardProgramSocialDbMeta
+				permit?: import('../userCumulativeStatRewardPool').ConetUsdcPermitPayload
 			}
 			if (!cardAddress || !ethers.isAddress(cardAddress)) {
 				return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' }).end()
@@ -3281,6 +3291,7 @@ const routing = ( router: Router ) => {
 				...(extraSteps && extraSteps.length > 0 ? { extraCardCallData: extraSteps } : {}),
 				...(initOnly ? { initOnly: true } : {}),
 				...(socialDb ? { socialDb } : {}),
+				...(permit ? { permit } : {}),
 				label: taskLabel,
 				...(respondOnEnqueue ? {} : { res }),
 			})
