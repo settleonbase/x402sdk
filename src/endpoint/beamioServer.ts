@@ -9592,7 +9592,11 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		)
 	})
 
-	/** Gateway-only：Discover 分享链接打开计数（无需 reward budget / active rule）。 */
+	/**
+	 * Gateway-only：Discover 分享链接打开计数。
+	 * Click stats do not require an active Social Reward rule.
+	 * 0.1 B-Unit fee is charged only when the card has active linkClick / USER_CLICK reward.
+	 */
 	router.post('/cardRecordDiscoverShareClick', async (req, res) => {
 		const preCheck = await cardRecordDiscoverShareClickPreCheck(req.body)
 		if (!preCheck.success) {

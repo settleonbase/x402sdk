@@ -34,6 +34,7 @@ import {
 	resolveRefWalletForDispatch,
 	type CouponSocialPromotionEventKey,
 } from './couponSocialPromotionReward'
+import { cardHasActiveLinkClickSocialReward } from './cardLinkClickSocialRewardGate'
 import {
 	insertCardProgramShareClick,
 	removeCardProgramLike,
@@ -276,16 +277,44 @@ function scheduleSocialBunitFeeAfterGatewaySuccess(
 		else if (label.includes('dispatchEventReward13:topup')) kind = 'topup'
 	}
 	if (!kind) return
-	void chargeCardProgramSocialBunitFeeInBackground({
-		cardAddress: task.cardAddress,
-		basePaymentHash,
-		kind,
-		baseGas,
-		logTag: `${task.label}:bunit`,
-	}).catch((e: unknown) => {
-		const err = e as { message?: string }
-		logger(Colors.yellow(`[${task.label}:bunit] unhandled: ${err?.message ?? String(e)}`))
-	})
+
+	const runCharge = () =>
+		chargeCardProgramSocialBunitFeeInBackground({
+			cardAddress: task.cardAddress,
+			basePaymentHash,
+			kind,
+			baseGas,
+			logTag: `${task.label}:bunit`,
+		}).catch((e: unknown) => {
+			const err = e as { message?: string }
+			logger(Colors.yellow(`[${task.label}:bunit] unhandled: ${err?.message ?? String(e)}`))
+		})
+
+	// Discover shareClick: bill only when card has active linkClick Social Reward.
+	if (kind === 'shareClick') {
+		const meta = task.socialDb
+		const targetKind = meta?.kind === 'shareClick' ? meta.targetKind : undefined
+		const issuedParentId = meta?.kind === 'shareClick' ? meta.issuedParentId : undefined
+		void (async () => {
+			const bill = await cardHasActiveLinkClickSocialReward({
+				cardAddress: task.cardAddress,
+				targetKind,
+				issuedParentId,
+			})
+			if (!bill) {
+				logger(
+					Colors.grey(
+						`[${task.label}:bunit] skip shareClick fee — no active linkClick Social Reward on ${task.cardAddress}`,
+					),
+				)
+				return
+			}
+			await runCharge()
+		})()
+		return
+	}
+
+	void runCharge()
 }
 
 export async function cardGatewayRewardPoolPress(): Promise<void> {

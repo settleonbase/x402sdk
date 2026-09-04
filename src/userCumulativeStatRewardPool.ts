@@ -11,6 +11,7 @@ import {
 	type BeamioUserCardChainKey,
 } from './beamioUserCardChain'
 import { cardProgramSocialBunitFeePreCheck, getBeamioUserCardFactoryGateway } from './MemberCard'
+import { cardHasActiveLinkClickSocialReward } from './cardLinkClickSocialRewardGate'
 import { getSeriesByCardAndTokenId } from './db'
 import { readCouponDisabledFromMetadata } from './couponMetadataCategory'
 import { CONET_AA_FACTORY, CONET_MAINNET_CHAIN_ID, CONET_USDC } from './chainAddresses'
@@ -2023,9 +2024,18 @@ export const cardRecordDiscoverShareClickPreCheck = async (body: {
 			}
 		}
 
-		const bunitPre = await cardProgramSocialBunitFeePreCheck(card)
-		if (!bunitPre.success) {
-			return { success: false, error: bunitPre.error }
+		// B-Unit only when merchant has active linkClick / USER_CLICK Social Reward.
+		// Click stats still record without that rule (no balance precheck / no fee).
+		const billSocialBunit = await cardHasActiveLinkClickSocialReward({
+			cardAddress: card,
+			targetKind,
+			issuedParentId,
+		})
+		if (billSocialBunit) {
+			const bunitPre = await cardProgramSocialBunitFeePreCheck(card)
+			if (!bunitPre.success) {
+				return { success: false, error: bunitPre.error }
+			}
 		}
 
 		if (hasEip712) {

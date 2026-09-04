@@ -24,7 +24,7 @@ import {
 import {
 	normalizeTopupPromotionEntry,
 	healTopupPromotionRewardType,
-	topupPromotionToBonusRule,
+	topupPromotionToBonusRules,
 	type TopupPromotionNormalized,
 } from './programTopupPromotion'
 import { ensureShareTokenProgramIconAssembled } from './shareTokenProgramIcon'
@@ -14403,9 +14403,10 @@ function normalizeCreateCardUnifiedRewardPoints(raw: unknown):
 	return { success: true, value: Object.keys(out).length > 0 ? out : undefined }
 }
 
+/** New merchant cards: all Programs promotions default off (none) until merchant configures. */
 const CREATE_CARD_DEFAULT_POINT_SYSTEM: CreateCardPointSystemNormalized = {
-	enabled: true,
-	chargeRewardRatioE6: '1000000',
+	enabled: false,
+	chargeRewardRatioE6: '0',
 	/** V16+ Charge Reward PT = #13 */
 	rewardTokenId: 13,
 }
@@ -14510,7 +14511,8 @@ function normalizeCreateCardPointSystemEntry(
 	}
 	const o = raw as Record<string, unknown>
 	const enabledRaw = o.enabled ?? o.pointSystemEnabled ?? o.pointsEnabled
-	const enabled = enabledRaw == null ? true : parseCreateCardBoolean(enabledRaw)
+	/** Omit `enabled` → treat as off (create / publish default = none). Explicit true still required to enable. */
+	const enabled = enabledRaw == null ? false : parseCreateCardBoolean(enabledRaw)
 	if (enabled == null) {
 		return { success: false, error: 'shareTokenMetadata.pointSystem.enabled must be boolean-like if provided' }
 	}
@@ -14538,7 +14540,8 @@ function normalizeCreateCardPointSystemEntry(
 		success: true,
 		pointSystem: {
 			enabled,
-			chargeRewardRatioE6: ratio ?? (enabled ? CREATE_CARD_DEFAULT_POINT_SYSTEM.chargeRewardRatioE6 : '0'),
+			/** When enabled without ratio, 100% (1e6); create default remains off with ratio 0. */
+			chargeRewardRatioE6: ratio ?? (enabled ? '1000000' : '0'),
 			rewardTokenId,
 		},
 	}
@@ -14743,8 +14746,8 @@ export const createCardPreCheck = (body: {
 					)
 				}
 			}
-			const derived = topupPromotionToBonusRule(normalizedTopupPromotion)
-			if (derived) normalizedBonusRules = [derived]
+			const derived = topupPromotionToBonusRules(normalizedTopupPromotion)
+			if (derived.length > 0) normalizedBonusRules = derived
 		} else if (stm.bonusRules != null) {
 			if (!Array.isArray(stm.bonusRules)) {
 				return { success: false, error: 'shareTokenMetadata.bonusRules must be an array if provided' }
@@ -14894,10 +14897,10 @@ export const createCardPreCheck = (body: {
 					if (legacyParsed.success) promo = healTopupPromotionRewardType(promo, legacyParsed.rule)
 				}
 				meta.topupPromotion = promo
-				const derived = topupPromotionToBonusRule(promo)
-				if (derived) {
-					meta.bonusRule = derived
-					meta.bonusRules = [derived]
+				const derived = topupPromotionToBonusRules(promo)
+				if (derived.length > 0) {
+					meta.bonusRule = derived[0]
+					meta.bonusRules = derived
 				}
 			}
 		} else if (stm.bonusRules != null && Array.isArray(stm.bonusRules)) {
@@ -20058,7 +20061,10 @@ function socialBunitIndexerMeta(kind: CardProgramSocialBunitKind): {
 	}
 }
 
-/** 社交 event：链上 tx 成功后后台扣 0.1 B-Unit + indexer（不阻塞 HTTP）。 */
+/**
+ * 社交 event：链上 tx 成功后后台扣 0.1 B-Unit + indexer（不阻塞 HTTP）。
+ * shareClick：调用方须先确认卡上有 active linkClick Social Reward（见 cardLinkClickSocialRewardGate）。
+ */
 export async function chargeCardProgramSocialBunitFeeInBackground(args: {
 	cardAddress: string
 	basePaymentHash: string
