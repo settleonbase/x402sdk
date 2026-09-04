@@ -6,6 +6,7 @@ export type FuelPackId =
 	| 'testing_waters'
 	| 'growth'
 	| 'enterprise'
+	| 'genesis_partner'
 	| 'institutional'
 
 export type FuelPackCatalogEntry = {
@@ -18,6 +19,7 @@ export type FuelPackCatalogEntry = {
 	firstTimeOnly?: boolean
 }
 
+/** Must match Merchant OS `MARKET_FUEL_PACKAGES` paid/free totals (bizSiteMerchant). */
 export const FUEL_PACK_CATALOG: FuelPackCatalogEntry[] = [
 	{
 		id: 'genesis_starter',
@@ -49,11 +51,18 @@ export const FUEL_PACK_CATALOG: FuelPackCatalogEntry[] = [
 		freeBUnits: 14985,
 	},
 	{
+		id: 'genesis_partner',
+		priceUsdc: 4000,
+		usdcAmount: '4000',
+		paidBUnits: 400000,
+		freeBUnits: 100000,
+	},
+	{
 		id: 'institutional',
 		priceUsdc: 4999,
 		usdcAmount: '4999',
 		paidBUnits: 499900,
-		freeBUnits: 0,
+		freeBUnits: 99980,
 	},
 ]
 

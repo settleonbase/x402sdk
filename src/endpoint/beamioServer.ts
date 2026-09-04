@@ -13613,6 +13613,41 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	/**
+	 * SaaS Fuel Pack Stripe — Cluster 预检后转发 Master。
+	 * body: `{ walletAddress, packId }`（packId ∈ FUEL_PACK_CATALOG）
+	 */
+	router.post('/fuelPackStripe/createSession', async (req, res) => {
+		const { walletAddress, packId } = req.body ?? {}
+		if (!walletAddress || typeof packId !== 'string') {
+			return res.status(400).json({ error: 'walletAddress and packId required' }).end()
+		}
+		if (!ethers.isAddress(walletAddress)) {
+			return res.status(400).json({ error: 'Invalid walletAddress' }).end()
+		}
+		const { isKnownFuelPackId } = await import('./fuelPackStripe.js')
+		if (!isKnownFuelPackId(packId)) {
+			return res.status(400).json({ error: 'Invalid packId' }).end()
+		}
+		if (!getStripeBeamioSecretKey()) {
+			logger(Colors.red('[fuelPackStripe] createSession cluster precheck: StripeBeamio key missing'))
+			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
+		}
+		return postLocalhost(
+			'/api/fuelPackStripe/createSession',
+			{ walletAddress: ethers.getAddress(walletAddress), packId: String(packId).trim().toLowerCase() },
+			res
+		)
+	})
+
+	router.post('/fuelPackStripe/poll', async (req, res) => {
+		const { sessionId, userClosedCheckout } = req.body ?? {}
+		if (!sessionId || typeof sessionId !== 'string') {
+			return res.status(400).json({ error: 'sessionId required' }).end()
+		}
+		return postLocalhost('/api/fuelPackStripe/poll', { sessionId, userClosedCheckout: Boolean(userClosedCheckout) }, res)
+	})
+
+	/**
 	 * Stripe Crypto Onramp → Stripe 把 Base 原生 USDC 直转用户 EOA。
 	 * Cluster 仅预检后转发 Master（会话 map 只在 Master）。禁止 Beamio 库存 transfer。
 	 * body: `{ walletAddress, amountUsdc6 }`（6 位定点；最低 1 USDC，整分，上限 10,000 USDC）

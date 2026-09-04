@@ -14,6 +14,10 @@ import {
 } from '../chainAddresses'
 import { resolveStripeMintRecipientEoaOnBase } from '../stripeWalletEoaResolve'
 import { getStripeBeamioClient, getStripeBeamioSecretKey } from './stripeBeamio'
+import {
+	extractStripeCheckoutPaymentId,
+	merchantKitStripePurchaseHash,
+} from './stripePurchaseHash'
 
 /** CoNET B-Unit / kit mint signer（与 MemberCard Settle 一致） */
 const CONET_MAINNET_RPC_HTTP = resolveBeamioConetHttpRpcUrl()
@@ -87,6 +91,8 @@ type SessionRecord = {
 	packageType: string
 	createdAt: number
 	lastEvent?: string
+	/** Stable Stripe payment code (pi_… or cs_…) for mint baseTxHash; set once. */
+	stripePaymentId?: string
 	chainFulfillment?: MerchantKitChainFulfillment
 }
 
@@ -191,12 +197,26 @@ async function fulfillMerchantKitStripeOnChain(sessionId: string): Promise<void>
 			const signer = new ethers.Wallet(pkNorm, provider)
 
 			if (!getCf().buintTxHash) {
+				let paymentId = sessions.get(sessionId)?.stripePaymentId?.trim()
+				if (!paymentId) {
+					const stripe = getStripeBeamioClient()
+					if (!stripe) {
+						logger(Colors.red('[merchantKitStripe] fulfill: Stripe client missing (need payment id)'))
+						return
+					}
+					const s = await stripe.checkout.sessions.retrieve(sessionId, {
+						expand: ['payment_intent'],
+					})
+					paymentId = extractStripeCheckoutPaymentId(s, sessionId)
+					const cur = sessions.get(sessionId)
+					if (cur) sessions.set(sessionId, { ...cur, stripePaymentId: paymentId })
+				}
 				const airdrop = new ethers.Contract(
 					CONET_BUNIT_AIRDROP_ADDRESS,
 					BUNIT_AIRDROP_MINT_FOR_USDC_PURCHASE_ABI,
 					signer
 				)
-				const refHash = ethers.keccak256(ethers.toUtf8Bytes(sessionId))
+				const refHash = merchantKitStripePurchaseHash(paymentId)
 				const tx = await airdrop.mintForUsdcPurchase(mintRecipient, usdc6Synth, refHash)
 				const receipt = await tx.wait()
 				const h = receipt?.hash ?? tx.hash
@@ -204,6 +224,7 @@ async function fulfillMerchantKitStripeOnChain(sessionId: string): Promise<void>
 				logger(
 					Colors.green('[merchantKitStripe] mintForUsdcPurchase ok (kit B-Units paid pool)'),
 					`session=${sessionId}`,
+					`stripePaymentId=${paymentId}`,
 					`pkg=${pkg}`,
 					`bunits≈${(Number(MERCHANT_KIT_INCLUDED_BUNITS_6[pkg]) / 1e6).toFixed(2)}`,
 					`tx=${h}`,
@@ -373,12 +394,15 @@ export async function refreshMerchantKitSessionFromStripe(
 			`abandonedFlag=${Boolean(options?.treatOpenUnpaidAsAbandoned)}`
 		)
 		if (s.status === 'complete' && s.payment_status === 'paid') {
+			const paymentId = extractStripeCheckoutPaymentId(s, sessionId)
 			sessions.set(sessionId, {
 				...rec_,
 				status: 'succeeded',
 				lastEvent: 'retrieve.paid',
+				stripePaymentId: rec_.stripePaymentId ?? paymentId,
 			})
 			logger(Colors.green('[merchantKitStripe] refresh → succeeded'), sessionId)
+			scheduleMerchantKitStripeChainFulfillment(sessionId)
 			return
 		}
 		if (s.status === 'expired') {
@@ -413,18 +437,33 @@ export async function refreshMerchantKitSessionFromStripe(
 function applySessionOutcome(
 	sessionId: string,
 	status: 'succeeded' | 'failed',
-	meta: { eoaAddress?: string; packageType?: string; lastEvent: string }
+	meta: {
+		eoaAddress?: string
+		packageType?: string
+		lastEvent: string
+		stripePaymentId?: string
+		session?: Stripe.Checkout.Session
+	}
 ) {
 	const prev = sessions.get(sessionId)
 	const createdAt = prev?.createdAt ?? Date.now()
 	const eoaNorm = (meta.eoaAddress ?? prev?.eoaAddress ?? '').toLowerCase()
 	const pkgNorm = meta.packageType ?? prev?.packageType ?? ''
+	let stripePaymentId = prev?.stripePaymentId ?? meta.stripePaymentId
+	if (!stripePaymentId && meta.session) {
+		try {
+			stripePaymentId = extractStripeCheckoutPaymentId(meta.session, sessionId)
+		} catch {
+			/* leave unset; fulfill will retrieve */
+		}
+	}
 	const next: SessionRecord = {
 		status,
 		eoaAddress: eoaNorm,
 		packageType: pkgNorm,
 		createdAt,
 		lastEvent: meta.lastEvent,
+		stripePaymentId,
 		chainFulfillment: prev?.chainFulfillment,
 	}
 	sessions.set(sessionId, next)
@@ -453,6 +492,7 @@ function markMerchantKitPaidSession(session: Stripe.Checkout.Session, lastEvent:
 		eoaAddress: session.metadata?.eoaAddress,
 		packageType: session.metadata?.packageType,
 		lastEvent,
+		session,
 	})
 	logger(
 		Colors.green('[merchantKitStripe:hook] → local map UPDATED succeeded'),
@@ -468,6 +508,10 @@ export function processMerchantKitStripeEvent(
 	const product = (event.data?.object as Stripe.Checkout.Session | undefined)?.metadata?.product
 	if (product === 'eoaUsdc') {
 		logger(Colors.grey('[merchantKitStripe:hook] ignore eoaUsdc product'))
+		return { ok: true }
+	}
+	if (product === 'fuelPack') {
+		logger(Colors.grey('[merchantKitStripe:hook] ignore fuelPack product'))
 		return { ok: true }
 	}
 

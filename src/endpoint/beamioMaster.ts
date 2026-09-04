@@ -24,6 +24,11 @@ import {
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
 import {
+	createFuelPackCheckoutSession,
+	getFuelPackSessionStatus,
+	refreshFuelPackSessionFromStripe,
+} from './fuelPackStripe'
+import {
 	createEoaUsdcStripeCheckoutSession,
 	getEoaUsdcStripeSessionStatus,
 	refreshEoaUsdcStripeSessionFromStripe,
@@ -6275,6 +6280,70 @@ const routing = ( router: Router ) => {
 			return res.status(200).json({
 				status: st.status,
 				packageType: st.packageType,
+				eoaAddress: st.eoaAddress,
+				lastEvent: st.lastEvent,
+				chainFulfillment: st.chainFulfillment ?? null,
+			}).end()
+		})
+
+		/**
+		 * SaaS Fuel Pack Stripe — Master 单进程持有会话 map（Cluster 预检后 postLocalhost）。
+		 * body: `{ walletAddress, packId }`
+		 */
+		router.post('/fuelPackStripe/createSession', async (req, res) => {
+			const { walletAddress, packId } = req.body ?? {}
+			if (!walletAddress || typeof packId !== 'string') {
+				return res.status(400).json({ error: 'walletAddress and packId required' }).end()
+			}
+			if (!ethers.isAddress(walletAddress)) {
+				return res.status(400).json({ error: 'Invalid walletAddress' }).end()
+			}
+			const out = await createFuelPackCheckoutSession(walletAddress, packId)
+			if ('error' in out) {
+				logger(Colors.red('[fuelPackStripe] createSession HTTP 400 (master)'), walletAddress, out.error)
+				return res.status(400).json({ error: out.error }).end()
+			}
+			return res.status(200).json({ url: out.url, sessionId: out.sessionId }).end()
+		})
+
+		router.post('/fuelPackStripe/poll', async (req, res) => {
+			const { sessionId, userClosedCheckout } = req.body ?? {}
+			if (!sessionId || typeof sessionId !== 'string') {
+				return res.status(400).json({ error: 'sessionId required' }).end()
+			}
+			const closed = Boolean(userClosedCheckout)
+			await refreshFuelPackSessionFromStripe(sessionId, {
+				treatOpenUnpaidAsAbandoned: closed,
+			})
+			const st = getFuelPackSessionStatus(sessionId)
+			if (!st) {
+				logger(Colors.yellow('[fuelPackStripe] poll 404 unknown session (master)'), sessionId)
+				return res.status(404).json({ error: 'Unknown session' }).end()
+			}
+			const pollVerbose =
+				closed ||
+				process.env.FUEL_PACK_STRIPE_DEBUG === '1' ||
+				process.env.FUEL_PACK_STRIPE_DEBUG === 'true'
+			if (pollVerbose) {
+				logger(
+					Colors.cyan('[fuelPackStripe] poll → (master)'),
+					inspect(
+						{
+							sessionId,
+							userClosedCheckout: closed,
+							status: st.status,
+							packId: st.packId,
+							lastEvent: st.lastEvent,
+						},
+						false,
+						2,
+						true
+					)
+				)
+			}
+			return res.status(200).json({
+				status: st.status,
+				packId: st.packId,
 				eoaAddress: st.eoaAddress,
 				lastEvent: st.lastEvent,
 				chainFulfillment: st.chainFulfillment ?? null,

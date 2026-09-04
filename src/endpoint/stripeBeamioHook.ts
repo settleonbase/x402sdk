@@ -1,13 +1,16 @@
 /**
  * 唯一现役 Stripe webhook：`POST /api/stripeBeamioHook`。
- * 验签一次后按 event.type 分流：Onramp → eoaUsdc；Checkout → Merchant Kit。
+ * 验签一次后按 event.type / metadata.product 分流：
+ * Onramp → eoaUsdc；Checkout fuelPack → Fuel Pack；其余 Checkout → Merchant Kit。
  * 履约禁止交叉。
  */
+import type Stripe from 'stripe'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
 import { constructStripeBeamioEvent } from './stripeBeamio'
 import { processEoaUsdcStripeEvent } from './eoaUsdcStripe'
 import { processMerchantKitStripeEvent } from './merchantKitStripe'
+import { processFuelPackStripeEvent } from './fuelPackStripe'
 
 export async function handleStripeBeamioWebhook(
 	rawBody: Buffer,
@@ -36,6 +39,10 @@ export async function handleStripeBeamioWebhook(
 		return processEoaUsdcStripeEvent(event)
 	}
 	if (event.type.startsWith('checkout.session.')) {
+		const product = (event.data?.object as Stripe.Checkout.Session | undefined)?.metadata?.product
+		if (product === 'fuelPack') {
+			return processFuelPackStripeEvent(event)
+		}
 		return processMerchantKitStripeEvent(event)
 	}
 
