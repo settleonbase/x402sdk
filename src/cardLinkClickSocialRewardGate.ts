@@ -44,7 +44,7 @@ export async function cardHasActiveLinkClickSocialReward(params: {
 		if (targetKind === UC_TARGET_ISSUED_COUPON && parentId > 0n) {
 			const rule = await readActiveCouponSocialRewardRule({
 				cardAddress: card,
-				issuedParentId: parentId,
+				issuedTokenId: parentId,
 				eventKey: 'linkClick',
 			})
 			return rule != null && (rule.actorMint13 > 0n || rule.refMint13 > 0n)
