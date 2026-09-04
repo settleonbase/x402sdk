@@ -5,7 +5,8 @@
  */
 import { ethers } from 'ethers'
 import { resolveUserCardChain, providerForUserCardChain } from './beamioUserCardChain'
-import { readActiveCouponSocialRewardRule } from './couponSocialPromotionReward'
+import { getSeriesByCardAndTokenId } from './db'
+import { readCouponDisabledFromMetadata } from './couponMetadataCategory'
 
 /** Align with UC_METRIC.USER_CLICK / UC_TARGET in userCumulativeStatRewardPool. */
 const UC_USER_CLICK = 3
@@ -42,12 +43,28 @@ export async function cardHasActiveLinkClickSocialReward(params: {
 		const parentId = parseParentId(params.issuedParentId)
 
 		if (targetKind === UC_TARGET_ISSUED_COUPON && parentId > 0n) {
-			const rule = await readActiveCouponSocialRewardRule({
-				cardAddress: card,
-				issuedTokenId: parentId,
-				eventKey: 'linkClick',
-			})
-			return rule != null && (rule.actorMint13 > 0n || rule.refMint13 > 0n)
+			const series = await getSeriesByCardAndTokenId(card, parentId.toString())
+			if (series?.metadata && readCouponDisabledFromMetadata(series.metadata)) {
+				return false
+			}
+			const provider = providerForUserCardChain(chain)
+			const reader = new ethers.Contract(card, GET_REWARD_RULE_ABI, provider)
+			const row = (await reader.getRewardRule(parentId)) as [
+				boolean,
+				number,
+				number,
+				bigint,
+				bigint,
+				bigint,
+			]
+			const [active, eventKind, tk, issuedParentId, actorMint13, refMint13] = row
+			return (
+				active &&
+				Number(eventKind) === UC_USER_CLICK &&
+				Number(tk) === UC_TARGET_ISSUED_COUPON &&
+				BigInt(issuedParentId) === parentId &&
+				(actorMint13 > 0n || refMint13 > 0n)
+			)
 		}
 
 		const provider = providerForUserCardChain(chain)
