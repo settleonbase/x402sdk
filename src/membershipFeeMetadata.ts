@@ -249,8 +249,8 @@ export function validateMembershipFeePublishShape(opts: {
 }
 
 /**
- * Lock check: once a fee+duration was published for an index, reject changes to fee or duration.
- * prev/next are full metadata objects (or extractable tiers via extractMetadataTiers).
+ * Published membership-fee tiers may change fee + duration (future joins only).
+ * Still reject: removing a published fee tier, or clearing fee to 0 after it was published.
  */
 export function membershipFeeLockViolation(
 	prevMetadata: Record<string, unknown> | null | undefined,
@@ -278,15 +278,13 @@ export function membershipFeeLockViolation(
 		const prevFee = BigInt(metadataTierMembershipFeeE6(prev))
 		if (prevFee <= 0n) continue
 		const idx = metadataTierOnChainIndex(prev, 0)
-		const prevDk = Number(prev.membershipDurationKind ?? 0)
 		const next = nextRows.find((r) => metadataTierOnChainIndex(r, -1) === idx)
 		if (!next) {
 			return `Cannot remove published membership fee tier at index ${idx}`
 		}
 		const nextFee = BigInt(metadataTierMembershipFeeE6(next))
-		const nextDk = Number(next.membershipDurationKind ?? 0)
-		if (nextFee !== prevFee || nextDk !== prevDk) {
-			return `Membership fee and duration are locked for index ${idx} after first publish`
+		if (nextFee <= 0n) {
+			return `Cannot clear membership fee for index ${idx} after first publish`
 		}
 	}
 	return null
