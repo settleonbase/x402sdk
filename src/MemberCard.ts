@@ -14249,6 +14249,8 @@ export type CreateCardPreChecked = {
 		bonusRules?: CreateCardBonusRuleNormalized[]
 		pointSystem?: CreateCardPointSystemNormalized
 		businessProfile?: ShareTokenBusinessProfile
+		/** Official Support Chat POS EOAs (checksummed). */
+		supportChat?: string[]
 	}
 	tiers?: Array<{
 		index: number
@@ -14329,6 +14331,40 @@ function sanitizeShareTokenBusinessProfile(raw: unknown): ShareTokenBusinessProf
 		if (value) out[key] = value
 	}
 	return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** Max official Support Chat POS EOAs per merchant program card. */
+const SUPPORT_CHAT_MAX_ADDRESSES = 32
+
+/**
+ * Sanitize `shareTokenMetadata.supportChat`: checksummed unique EOAs.
+ * - `null` → explicit delete (`null`)
+ * - invalid / non-array → `undefined` (do not overwrite trusted existing)
+ * - empty after filter → `null` (clear field)
+ */
+function sanitizeSupportChatAddresses(raw: unknown): string[] | null | undefined {
+	if (raw === null) return null
+	if (raw === undefined) return undefined
+	if (!Array.isArray(raw)) return undefined
+	const out: string[] = []
+	const seen = new Set<string>()
+	for (const item of raw) {
+		if (typeof item !== 'string') continue
+		const trimmed = item.trim()
+		if (!ethers.isAddress(trimmed)) continue
+		let checksum: string
+		try {
+			checksum = ethers.getAddress(trimmed)
+		} catch {
+			continue
+		}
+		const lower = checksum.toLowerCase()
+		if (seen.has(lower)) continue
+		seen.add(lower)
+		out.push(checksum)
+		if (out.length >= SUPPORT_CHAT_MAX_ADDRESSES) break
+	}
+	return out.length > 0 ? out : null
 }
 
 /** Normalized bonus rule persisted in shareTokenMetadata (matches biz / POS clients). */
@@ -14605,6 +14641,8 @@ export const createCardPreCheck = (body: {
 		pointSystem?: unknown
 		unifiedRewardPoints?: unknown
 		topupPromotion?: unknown
+		businessProfile?: unknown
+		supportChat?: unknown
 	}
 	tiers?: unknown[]
 	baseMembership?: unknown
@@ -14931,6 +14969,8 @@ export const createCardPreCheck = (body: {
 		meta.pointSystem = pointSystem.pointSystem
 		const businessProfile = sanitizeShareTokenBusinessProfile(stm.businessProfile)
 		if (businessProfile) meta.businessProfile = businessProfile
+		const supportChat = sanitizeSupportChatAddresses(stm.supportChat)
+		if (supportChat && supportChat.length > 0) meta.supportChat = supportChat
 		const unifiedRewardPoints = normalizeCreateCardUnifiedRewardPoints(stm.unifiedRewardPoints)
 		if (!unifiedRewardPoints.success) return { success: false, error: unifiedRewardPoints.error }
 		if (unifiedRewardPoints.value) meta.unifiedRewardPoints = unifiedRewardPoints.value
@@ -15407,13 +15447,20 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 			)
 		)
 		if (shareTokenMetadataInput && typeof shareTokenMetadataInput === 'object') {
-			const businessProfile = sanitizeShareTokenBusinessProfile(
-				(shareTokenMetadataInput as Record<string, unknown>).businessProfile,
-			)
+			const shareIn = shareTokenMetadataInput as Record<string, unknown>
+			const businessProfile = sanitizeShareTokenBusinessProfile(shareIn.businessProfile)
 			if (businessProfile) {
-				;(shareTokenMetadataInput as Record<string, unknown>).businessProfile = businessProfile
+				shareIn.businessProfile = businessProfile
 			} else {
-				delete (shareTokenMetadataInput as Record<string, unknown>).businessProfile
+				delete shareIn.businessProfile
+			}
+			if ('supportChat' in shareIn) {
+				const supportChat = sanitizeSupportChatAddresses(shareIn.supportChat)
+				if (supportChat === undefined) {
+					delete shareIn.supportChat
+				} else {
+					shareIn.supportChat = supportChat
+				}
 			}
 		}
 		const cardAddr = ethers.getAddress(params.cardAddress)
