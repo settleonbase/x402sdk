@@ -1096,7 +1096,7 @@
               "type": "uint256"
             }
           ],
-          "internalType": "struct BeamioUserCard.Tier[]",
+          "internalType": "struct UserCardTier[]",
           "name": "tiers",
           "type": "tuple[]"
         }
@@ -1975,7 +1975,7 @@
   "linkReferences": {},
   "deployedLinkReferences": {},
   "immutableReferences": {
-    "37680": [
+    "37611": [
       {
         "length": 32,
         "start": 1583
@@ -1997,7 +1997,7 @@
         "start": 15884
       }
     ],
-    "39994": [
+    "39923": [
       {
         "length": 32,
         "start": 3206
@@ -2009,5 +2009,5 @@
     ]
   },
   "inputSourceName": "project/src/BeamioUserCard/BeamioUserCardFactoryPaymasterV07.sol",
-  "buildInfoId": "solc-0_8_35-311c77a91000897bf34dee369f893c3bb007670b"
+  "buildInfoId": "solc-0_8_35-8b52d41e10e014cedaf3d944cd2892739e1269ca"
 }

@@ -9,6 +9,12 @@ export type BeamioUserCardInitializeParams = {
 	pointsUnitPriceInCurrencyE6: bigint
 	initialOwner: string
 	gateway: string
+	initialTierConfig: {
+		qualificationMode: number
+		tiers: Array<{ minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint; upgradeByBalance: boolean }>
+		membershipFeeE6: bigint[]
+		membershipDurationKind: number[]
+	}
 }
 
 function userCardInterface(): ethers.Interface {
@@ -25,14 +31,21 @@ function userCardInterface(): ethers.Interface {
 	return iface
 }
 
-/** EIP-1167-style proxy constructor `data` = `initialize(uri, currency, priceE6, owner, gateway)`. */
+/** Beacon proxy constructor data atomically initializes the card and all tier state. */
 export function encodeBeamioUserCardInitializeCalldata(params: BeamioUserCardInitializeParams): string {
+	const tierConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+		[
+			'tuple(uint8 qualificationMode,tuple(uint256 minUsdc6,uint256 attr,uint256 tierExpirySeconds,bool upgradeByBalance)[] tiers,uint256[] membershipFeeE6,uint8[] membershipDurationKind)',
+		],
+		[params.initialTierConfig],
+	)
 	return userCardInterface().encodeFunctionData('initialize', [
 		params.uri,
 		params.currencyEnum,
 		params.pointsUnitPriceInCurrencyE6,
 		params.initialOwner,
 		params.gateway,
+		tierConfig,
 	])
 }
 

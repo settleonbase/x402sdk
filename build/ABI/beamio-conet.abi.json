@@ -1,0 +1,1649 @@
+[
+    {
+        "inputs": [],
+        "stateMutability": "nonpayable",
+        "type": "constructor"
+    },
+    {
+        "inputs": [],
+        "name": "AlreadyFinished",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "EthTransferFailed",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "FaucetDisabled",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "InsufficientETH",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "InvalidDepositHash",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "InvalidFinishedHash",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "InvalidFrom",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "InvalidTo",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "LinkAlreadyExists",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "LinkNotFound",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "MemoAlreadyExists",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "MemoNotFound",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "NotAdmin",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "RecordExists",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "ZeroAmount",
+        "type": "error"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "bytes32",
+                "name": "codeHash",
+                "type": "bytes32"
+            },
+            {
+                "indexed": true,
+                "internalType": "bytes32",
+                "name": "depositHash",
+                "type": "bytes32"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "by",
+                "type": "address"
+            }
+        ],
+        "name": "CheckFinished",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            },
+            {
+                "indexed": true,
+                "internalType": "bytes32",
+                "name": "nonce",
+                "type": "bytes32"
+            }
+        ],
+        "name": "DepositedWithAuthorization",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "by",
+                "type": "address"
+            }
+        ],
+        "name": "ETHWithdrawn",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "balance",
+                "type": "uint256"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "fee",
+                "type": "uint256"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "erc20",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "bytes32",
+                "name": "hash",
+                "type": "bytes32"
+            }
+        ],
+        "name": "EsetHashAmount",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            }
+        ],
+        "name": "FaucetFunded",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "by",
+                "type": "address"
+            }
+        ],
+        "name": "FaucetSent",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "uint8",
+                "name": "actionType",
+                "type": "uint8"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            },
+            {
+                "indexed": false,
+                "internalType": "bytes32",
+                "name": "refHash",
+                "type": "bytes32"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "timestamp",
+                "type": "uint256"
+            }
+        ],
+        "name": "LastActionPushed",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "bytes32",
+                "name": "linkHash",
+                "type": "bytes32"
+            },
+            {
+                "indexed": true,
+                "internalType": "bytes32",
+                "name": "depositHash",
+                "type": "bytes32"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "by",
+                "type": "address"
+            }
+        ],
+        "name": "LinkFinished",
+        "type": "event"
+    },
+    {
+        "stateMutability": "payable",
+        "type": "fallback"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "CheckMemosByAddress",
+        "outputs": [
+            {
+                "internalType": "bytes32",
+                "name": "",
+                "type": "bytes32"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "LinkMemosByAddress",
+        "outputs": [
+            {
+                "internalType": "bytes32",
+                "name": "",
+                "type": "bytes32"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "TransferMemosByAddress",
+        "outputs": [
+            {
+                "internalType": "bytes32",
+                "name": "",
+                "type": "bytes32"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "_admin",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            },
+            {
+                "internalType": "bool",
+                "name": "status",
+                "type": "bool"
+            }
+        ],
+        "name": "changeAddressInAdminlist",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "",
+                "type": "bytes32"
+            }
+        ],
+        "name": "checkMemo",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "successAuthorizationHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "uint256",
+                "name": "chianID",
+                "type": "uint256"
+            },
+            {
+                "internalType": "address",
+                "name": "erc3009Address",
+                "type": "address"
+            },
+            {
+                "internalType": "string",
+                "name": "node",
+                "type": "string"
+            },
+            {
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "decimals",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "createTimestamp",
+                "type": "uint256"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "depositHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "uint256",
+                "name": "depositTimestamp",
+                "type": "uint256"
+            },
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "payHash",
+                "type": "bytes32"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "codeHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "value",
+                "type": "uint256"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "successAuthorizationHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "uint256",
+                "name": "chianID",
+                "type": "uint256"
+            },
+            {
+                "internalType": "address",
+                "name": "erc3009Address",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "decimals",
+                "type": "uint256"
+            },
+            {
+                "internalType": "string",
+                "name": "note",
+                "type": "string"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "GenerateHash",
+                "type": "bytes32"
+            }
+        ],
+        "name": "checkMemoGenerate",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "faucetAmount",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "faucetClaimed",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "finishedAmountOfCheck",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "finishedAmountOfLink",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "codeHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "depositHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            }
+        ],
+        "name": "finishedCheck",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "finishedCheckAmountPerHour",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "finishedCheckCountPerHour",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "finishedFeesPerHour",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "linkHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "depositHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "payAmount",
+                "type": "uint256"
+            }
+        ],
+        "name": "finishedLink",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "finishedLinkAmountPerHour",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "finishedLinkCountPerHour",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "finishedNumberOfCheck",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "finishedNumberOfLink",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "hash",
+                "type": "bytes32"
+            }
+        ],
+        "name": "getCheckMemo",
+        "outputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "from",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "bytes32",
+                        "name": "successAuthorizationHash",
+                        "type": "bytes32"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "chianID",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "erc3009Address",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "string",
+                        "name": "node",
+                        "type": "string"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "amount",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "decimals",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "createTimestamp",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "bytes32",
+                        "name": "depositHash",
+                        "type": "bytes32"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "depositTimestamp",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "to",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "bytes32",
+                        "name": "payHash",
+                        "type": "bytes32"
+                    }
+                ],
+                "internalType": "struct CheckMemo",
+                "name": "",
+                "type": "tuple"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            }
+        ],
+        "name": "getCheckMemosLength",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "getFinishedStatistics",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "_finishedNumberOfCheck",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_finishedNumberOfLink",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_finishedAmountOfCheck",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_finishedAmountOfLink",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_totalAmountOfFees",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            }
+        ],
+        "name": "getHistoryCounts",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "checkCount",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "linkCount",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "transferCount",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "getLast20",
+        "outputs": [
+            {
+                "internalType": "uint256[]",
+                "name": "types_",
+                "type": "uint256[]"
+            },
+            {
+                "internalType": "address[]",
+                "name": "froms",
+                "type": "address[]"
+            },
+            {
+                "internalType": "address[]",
+                "name": "tos",
+                "type": "address[]"
+            },
+            {
+                "internalType": "uint256[]",
+                "name": "amounts",
+                "type": "uint256[]"
+            },
+            {
+                "internalType": "bytes32[]",
+                "name": "hashes",
+                "type": "bytes32[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "hash",
+                "type": "bytes32"
+            }
+        ],
+        "name": "getLinkMemo",
+        "outputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "to",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "bytes32",
+                        "name": "successAuthorizationHash",
+                        "type": "bytes32"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "chianID",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "erc3009Address",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "string",
+                        "name": "node",
+                        "type": "string"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "amount",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "decimals",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "issueTimestamp",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "bytes32",
+                        "name": "payHash",
+                        "type": "bytes32"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "payTimestamp",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "from",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "payAmount",
+                        "type": "uint256"
+                    }
+                ],
+                "internalType": "struct LinkMemo",
+                "name": "",
+                "type": "tuple"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            }
+        ],
+        "name": "getLinkMemosLength",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "getStatistics",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "_totalNumberOfCheck",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_totalNumberOfLink",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_totalAmountOfCheck",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_totalAmountOfLink",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_totalAmountOfFees",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_totalUsersAddress",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_totalNumberOfTransfer",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_totalAmountOfTransfer",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_totalNewUsers",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "hash",
+                "type": "bytes32"
+            }
+        ],
+        "name": "getTransferMemo",
+        "outputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "from",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "to",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "amount",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "timestamp",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "bytes32",
+                        "name": "finisedHash",
+                        "type": "bytes32"
+                    },
+                    {
+                        "internalType": "string",
+                        "name": "node",
+                        "type": "string"
+                    }
+                ],
+                "internalType": "struct ItransferMemo",
+                "name": "",
+                "type": "tuple"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            }
+        ],
+        "name": "getTransferMemosLength",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            }
+        ],
+        "name": "isAdmin",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "last20Count",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "",
+                "type": "bytes32"
+            }
+        ],
+        "name": "linkMemo",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "successAuthorizationHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "uint256",
+                "name": "chianID",
+                "type": "uint256"
+            },
+            {
+                "internalType": "address",
+                "name": "erc3009Address",
+                "type": "address"
+            },
+            {
+                "internalType": "string",
+                "name": "node",
+                "type": "string"
+            },
+            {
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "decimals",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "issueTimestamp",
+                "type": "uint256"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "payHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "uint256",
+                "name": "payTimestamp",
+                "type": "uint256"
+            },
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "payAmount",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "linkHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "value",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "chianID",
+                "type": "uint256"
+            },
+            {
+                "internalType": "address",
+                "name": "erc3009Address",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "decimals",
+                "type": "uint256"
+            },
+            {
+                "internalType": "string",
+                "name": "note",
+                "type": "string"
+            }
+        ],
+        "name": "linkMemoGenerate",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address[]",
+                "name": "addrs",
+                "type": "address[]"
+            }
+        ],
+        "name": "newUserBetch",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "name": "newUsersPerHour",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "amountWei",
+                "type": "uint256"
+            }
+        ],
+        "name": "setFaucetAmount",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalAmountOfCheck",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalAmountOfFees",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalAmountOfLink",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalAmountOfTransfer",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "totalCheckAmount",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "totalFreAmount",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "totalLinkAmount",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalNewUsers",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalNumberOfCheck",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalNumberOfLink",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalNumberOfTransfer",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalUsersAddress",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes32",
+                "name": "",
+                "type": "bytes32"
+            }
+        ],
+        "name": "transferMemo",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "timestamp",
+                "type": "uint256"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "finisedHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "string",
+                "name": "node",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            },
+            {
+                "internalType": "bytes32",
+                "name": "finishedHash",
+                "type": "bytes32"
+            },
+            {
+                "internalType": "string",
+                "name": "note",
+                "type": "string"
+            }
+        ],
+        "name": "transferRecord",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "stateMutability": "payable",
+        "type": "receive"
+    }
+]

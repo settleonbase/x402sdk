@@ -1,0 +1,347 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.voteTypes = exports.proposeSetPolicyTypes = exports.proposeTransferTypes = exports.AA_V2_ACCOUNT_ABI = exports.AA_V2_FACTORY_ABI = exports.AA_V2_EIP712_VERSION = exports.AA_V2_EIP712_NAME = void 0;
+exports.aaV2Eip712Domain = aaV2Eip712Domain;
+exports.managersHashSorted = managersHashSorted;
+exports.aaInstitutionalV2ProposeTransferPreCheck = aaInstitutionalV2ProposeTransferPreCheck;
+exports.aaInstitutionalV2ProposeSetPolicyPreCheck = aaInstitutionalV2ProposeSetPolicyPreCheck;
+exports.aaInstitutionalV2VotePreCheck = aaInstitutionalV2VotePreCheck;
+/**
+ * Institutional AA V2 — EIP-712 propose / vote Cluster precheck + typed-data helpers.
+ * Proxy gas: Master paymaster calls FactoryInstitutionalV2.propose* / vote.
+ * See: .cursor/rules/beamio-aa-account-dev.mdc
+ */
+const ethers_1 = require("ethers");
+const chainAddresses_1 = require("./chainAddresses");
+const util_1 = require("./util");
+const JSONRPC_NO_BATCH = { batchMaxCount: 1, batchStallTime: 0 };
+const providerConet = new ethers_1.ethers.JsonRpcProvider((0, util_1.resolveBeamioConetHttpRpcUrl)(), undefined, JSONRPC_NO_BATCH);
+exports.AA_V2_EIP712_NAME = 'BeamioAccountInstitutionalV2';
+exports.AA_V2_EIP712_VERSION = '2';
+exports.AA_V2_FACTORY_ABI = [
+    'function admin() view returns (address)',
+    'function isPayMaster(address) view returns (bool)',
+    'function setPayMaster(address pm, bool enabled)',
+    'function isBeamioAccount(address) view returns (bool)',
+    'function nextIndexOfCreator(address creator) view returns (uint256)',
+    'function accountLimit() view returns (uint256)',
+    'function getAddress(address creator, uint256 index) view returns (address)',
+    'function myAccounts(address creator) view returns (address[])',
+    'function accountsOfManager(address manager) view returns (address[])',
+    'function syncAccountManagers(address account, address[] managers)',
+    'function createAccountFor(address creator) returns (address)',
+    'function proposeTransfer(address account,address token,address to,uint256 amount,uint64 deadline,bytes32 nonce,bytes signature) returns (uint256)',
+    'function proposeSetPolicy(address account,address[] managersSorted,uint256 newThreshold,uint64 deadline,bytes32 nonce,bytes signature) returns (uint256)',
+    'function vote(address account,uint256 taskId,bool approve,uint64 deadline,bytes32 nonce,bytes signature)',
+];
+exports.AA_V2_ACCOUNT_ABI = [
+    'function accountVersion() view returns (uint256)',
+    'function factory() view returns (address)',
+    'function owner() view returns (address)',
+    'function threshold() view returns (uint256)',
+    'function isThresholdManager(address) view returns (bool)',
+    'function isSoleSelfSigner() view returns (bool)',
+    'function policyLockActive() view returns (bool)',
+    'function spendable(address token) view returns (uint256)',
+    'function nextTaskId() view returns (uint256)',
+    'function pendingPolicyTaskId() view returns (uint256)',
+    'function reservedOf(address token) view returns (uint256)',
+    'function usedSigNonces(bytes32) view returns (bool)',
+    'function taskVote(uint256 taskId, address voter) view returns (uint8)',
+    'function getTask(uint256 taskId) view returns (uint8 kind,uint8 status,address proposer,address token,address to,uint256 amount,uint256 thresholdSnap,uint256 approveCount,uint256 rejectCount,uint64 deadline,bytes32 managersHash,address[] managersSnap)',
+];
+exports.proposeTransferTypes = {
+    ProposeTransfer: [
+        { name: 'account', type: 'address' },
+        { name: 'token', type: 'address' },
+        { name: 'to', type: 'address' },
+        { name: 'amount', type: 'uint256' },
+        { name: 'deadline', type: 'uint64' },
+        { name: 'nonce', type: 'bytes32' },
+    ],
+};
+exports.proposeSetPolicyTypes = {
+    ProposeSetPolicy: [
+        { name: 'account', type: 'address' },
+        { name: 'managersHash', type: 'bytes32' },
+        { name: 'newThreshold', type: 'uint256' },
+        { name: 'deadline', type: 'uint64' },
+        { name: 'nonce', type: 'bytes32' },
+    ],
+};
+exports.voteTypes = {
+    Vote: [
+        { name: 'account', type: 'address' },
+        { name: 'taskId', type: 'uint256' },
+        { name: 'approve', type: 'bool' },
+        { name: 'deadline', type: 'uint64' },
+        { name: 'nonce', type: 'bytes32' },
+    ],
+};
+function aaV2Eip712Domain(account, chainId = chainAddresses_1.CONET_MAINNET_CHAIN_ID) {
+    return {
+        name: exports.AA_V2_EIP712_NAME,
+        version: exports.AA_V2_EIP712_VERSION,
+        chainId,
+        verifyingContract: ethers_1.ethers.getAddress(account),
+    };
+}
+function managersHashSorted(managersSorted) {
+    const sorted = managersSorted.map((a) => ethers_1.ethers.getAddress(a));
+    return ethers_1.ethers.keccak256(ethers_1.ethers.AbiCoder.defaultAbiCoder().encode(['address[]'], [sorted]));
+}
+function assertSigHex(sig) {
+    if (typeof sig !== 'string' || !sig.startsWith('0x') || sig.length < 132)
+        return 'Invalid signature';
+    return null;
+}
+function assertNonce(nonce) {
+    if (typeof nonce !== 'string' || !ethers_1.ethers.isHexString(nonce) || ethers_1.ethers.dataLength(nonce) !== 32) {
+        return 'nonce must be bytes32';
+    }
+    return null;
+}
+async function assertV2Account(account) {
+    const factory = new ethers_1.ethers.Contract(chainAddresses_1.BEAMIO_AA_FACTORY_V2, exports.AA_V2_FACTORY_ABI, providerConet);
+    const ok = (await factory.isBeamioAccount(ethers_1.ethers.getAddress(account)));
+    if (!ok)
+        return 'Not a V2 institutional Smart Wallet';
+    const aa = new ethers_1.ethers.Contract(account, exports.AA_V2_ACCOUNT_ABI, providerConet);
+    try {
+        const ver = (await aa.accountVersion());
+        if (ver !== 2n)
+            return 'Smart Wallet is not accountVersion 2';
+    }
+    catch {
+        return 'Failed to read accountVersion';
+    }
+    return null;
+}
+async function aaInstitutionalV2ProposeTransferPreCheck(body) {
+    try {
+        if (!ethers_1.ethers.isAddress(body.account) || !ethers_1.ethers.isAddress(body.to) || !ethers_1.ethers.isAddress(body.signerEoa)) {
+            return { success: false, error: 'Invalid address' };
+        }
+        const token = !body.token || body.token === ethers_1.ethers.ZeroAddress || body.token === '0x'
+            ? ethers_1.ethers.ZeroAddress
+            : ethers_1.ethers.getAddress(body.token);
+        const account = ethers_1.ethers.getAddress(body.account);
+        const to = ethers_1.ethers.getAddress(body.to);
+        const signerEoa = ethers_1.ethers.getAddress(body.signerEoa);
+        const amount = BigInt(String(body.amount));
+        if (amount <= 0n)
+            return { success: false, error: 'amount must be > 0' };
+        const deadline = Number(body.deadline);
+        if (!Number.isFinite(deadline) || deadline <= Math.floor(Date.now() / 1000)) {
+            return { success: false, error: 'deadline expired or invalid' };
+        }
+        const nErr = assertNonce(body.nonce);
+        if (nErr)
+            return { success: false, error: nErr };
+        const sErr = assertSigHex(body.signature);
+        if (sErr)
+            return { success: false, error: sErr };
+        const v2Err = await assertV2Account(account);
+        if (v2Err)
+            return { success: false, error: v2Err };
+        const aa = new ethers_1.ethers.Contract(account, exports.AA_V2_ACCOUNT_ABI, providerConet);
+        if (await aa.policyLockActive()) {
+            return { success: false, error: 'Policy lock active — transfer proposals are frozen' };
+        }
+        const spendable = (await aa.spendable(token));
+        if (amount > spendable) {
+            return { success: false, error: `Insufficient spendable (need ${amount}, have ${spendable})` };
+        }
+        if (await aa.usedSigNonces(body.nonce)) {
+            return { success: false, error: 'nonce already used' };
+        }
+        const domain = aaV2Eip712Domain(account);
+        const value = {
+            account,
+            token,
+            to,
+            amount,
+            deadline,
+            nonce: body.nonce,
+        };
+        const recovered = ethers_1.ethers.verifyTypedData(domain, exports.proposeTransferTypes, value, body.signature);
+        if (recovered.toLowerCase() !== signerEoa.toLowerCase()) {
+            return { success: false, error: 'Signature does not match signerEoa' };
+        }
+        const isMgr = (await aa.isThresholdManager(signerEoa));
+        if (!isMgr)
+            return { success: false, error: 'Signer is not a threshold manager' };
+        return {
+            success: true,
+            preChecked: {
+                account,
+                token,
+                to,
+                amount: amount.toString(),
+                deadline,
+                nonce: body.nonce,
+                signature: body.signature,
+                signerEoa,
+            },
+        };
+    }
+    catch (e) {
+        const err = e;
+        return { success: false, error: err?.shortMessage ?? err?.message ?? String(e) };
+    }
+}
+async function aaInstitutionalV2ProposeSetPolicyPreCheck(body) {
+    try {
+        if (!ethers_1.ethers.isAddress(body.account) || !ethers_1.ethers.isAddress(body.signerEoa)) {
+            return { success: false, error: 'Invalid address' };
+        }
+        if (!Array.isArray(body.managersSorted) || body.managersSorted.length === 0) {
+            return { success: false, error: 'managersSorted required' };
+        }
+        const account = ethers_1.ethers.getAddress(body.account);
+        const signerEoa = ethers_1.ethers.getAddress(body.signerEoa);
+        const managersSorted = body.managersSorted.map((a) => ethers_1.ethers.getAddress(a));
+        const newThreshold = Math.floor(Number(body.newThreshold));
+        if (newThreshold < 1 || newThreshold > managersSorted.length) {
+            return { success: false, error: 'Invalid newThreshold' };
+        }
+        const deadline = Number(body.deadline);
+        if (!Number.isFinite(deadline) || deadline <= Math.floor(Date.now() / 1000)) {
+            return { success: false, error: 'deadline expired or invalid' };
+        }
+        const nErr = assertNonce(body.nonce);
+        if (nErr)
+            return { success: false, error: nErr };
+        const sErr = assertSigHex(body.signature);
+        if (sErr)
+            return { success: false, error: sErr };
+        const v2Err = await assertV2Account(account);
+        if (v2Err)
+            return { success: false, error: v2Err };
+        const aa = new ethers_1.ethers.Contract(account, exports.AA_V2_ACCOUNT_ABI, providerConet);
+        if (await aa.policyLockActive()) {
+            return { success: false, error: 'Policy lock already active' };
+        }
+        const owner = ethers_1.ethers.getAddress((await aa.owner()));
+        if (managersSorted[0].toLowerCase() !== owner.toLowerCase()) {
+            return { success: false, error: 'managersSorted[0] must be Smart Wallet owner' };
+        }
+        if (await aa.usedSigNonces(body.nonce)) {
+            return { success: false, error: 'nonce already used' };
+        }
+        const mHash = managersHashSorted(managersSorted);
+        const domain = aaV2Eip712Domain(account);
+        const value = {
+            account,
+            managersHash: mHash,
+            newThreshold,
+            deadline,
+            nonce: body.nonce,
+        };
+        const recovered = ethers_1.ethers.verifyTypedData(domain, exports.proposeSetPolicyTypes, value, body.signature);
+        if (recovered.toLowerCase() !== signerEoa.toLowerCase()) {
+            return { success: false, error: 'Signature does not match signerEoa' };
+        }
+        const isMgr = (await aa.isThresholdManager(signerEoa));
+        if (!isMgr)
+            return { success: false, error: 'Signer is not a threshold manager' };
+        return {
+            success: true,
+            preChecked: {
+                account,
+                managersSorted,
+                newThreshold,
+                deadline,
+                nonce: body.nonce,
+                signature: body.signature,
+                signerEoa,
+            },
+        };
+    }
+    catch (e) {
+        const err = e;
+        return { success: false, error: err?.shortMessage ?? err?.message ?? String(e) };
+    }
+}
+async function aaInstitutionalV2VotePreCheck(body) {
+    try {
+        if (!ethers_1.ethers.isAddress(body.account) || !ethers_1.ethers.isAddress(body.signerEoa)) {
+            return { success: false, error: 'Invalid address' };
+        }
+        const account = ethers_1.ethers.getAddress(body.account);
+        const signerEoa = ethers_1.ethers.getAddress(body.signerEoa);
+        const taskId = BigInt(String(body.taskId));
+        if (taskId <= 0n)
+            return { success: false, error: 'Invalid taskId' };
+        const approve = Boolean(body.approve);
+        const deadline = Number(body.deadline);
+        if (!Number.isFinite(deadline) || deadline <= Math.floor(Date.now() / 1000)) {
+            return { success: false, error: 'deadline expired or invalid' };
+        }
+        const nErr = assertNonce(body.nonce);
+        if (nErr)
+            return { success: false, error: nErr };
+        const sErr = assertSigHex(body.signature);
+        if (sErr)
+            return { success: false, error: sErr };
+        const v2Err = await assertV2Account(account);
+        if (v2Err)
+            return { success: false, error: v2Err };
+        const aa = new ethers_1.ethers.Contract(account, exports.AA_V2_ACCOUNT_ABI, providerConet);
+        const t = await aa.getTask(taskId);
+        // TaskStatus: None=0, Pending=1, Executed=2, Cancelled=3, Expired=4
+        const status = Number(t.status ?? t[1]);
+        if (status !== 1)
+            return { success: false, error: 'Task is not pending' };
+        // TaskKind: None=0, Transfer=1, SetPolicy=2
+        const kind = Number(t.kind ?? t[0]);
+        if (kind === 1 && (await aa.policyLockActive())) {
+            const pendingPolicyId = (await aa.pendingPolicyTaskId());
+            if (pendingPolicyId !== taskId) {
+                return { success: false, error: 'Transfer voting frozen while policy change is pending' };
+            }
+        }
+        if (await aa.usedSigNonces(body.nonce)) {
+            return { success: false, error: 'nonce already used' };
+        }
+        const priorVote = Number((await aa.taskVote(taskId, signerEoa)));
+        if (priorVote !== 0)
+            return { success: false, error: 'Already voted on this task' };
+        const managersSnap = Array.isArray(t.managersSnap)
+            ? t.managersSnap
+            : Array.isArray(t[11])
+                ? t[11]
+                : [];
+        const isVoter = managersSnap.some((m) => ethers_1.ethers.getAddress(m).toLowerCase() === signerEoa.toLowerCase());
+        if (!isVoter)
+            return { success: false, error: 'Signer is not on this task snapshot' };
+        const domain = aaV2Eip712Domain(account);
+        const value = {
+            account,
+            taskId,
+            approve,
+            deadline,
+            nonce: body.nonce,
+        };
+        const recovered = ethers_1.ethers.verifyTypedData(domain, exports.voteTypes, value, body.signature);
+        if (recovered.toLowerCase() !== signerEoa.toLowerCase()) {
+            return { success: false, error: 'Signature does not match signerEoa' };
+        }
+        return {
+            success: true,
+            preChecked: {
+                account,
+                taskId: taskId.toString(),
+                approve,
+                deadline,
+                nonce: body.nonce,
+                signature: body.signature,
+                signerEoa,
+            },
+        };
+    }
+    catch (e) {
+        const err = e;
+        return { success: false, error: err?.shortMessage ?? err?.message ?? String(e) };
+    }
+}

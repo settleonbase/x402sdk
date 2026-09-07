@@ -1,0 +1,12088 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.startServer = exports.postLocalhost = void 0;
+const express_1 = __importDefault(require("express"));
+const genai_1 = require("@google/genai");
+const util_1 = require("../util");
+const aaTransferRelayChain_1 = require("../aaTransferRelayChain");
+const node_path_1 = require("node:path");
+const node_fs_1 = __importDefault(require("node:fs"));
+const logger_1 = require("../logger");
+const node_http_1 = require("node:http");
+const node_util_1 = require("node:util");
+const safe_1 = __importDefault(require("colors/safe"));
+const ethers_1 = require("ethers");
+const db_1 = require("../db");
+const referralRegistryTree_1 = require("../referralRegistryTree");
+const db_2 = require("../db");
+const coinbase_1 = require("../coinbase");
+const baseAaCdpTokenBalances_1 = require("../baseAaCdpTokenBalances");
+const MemberCard_1 = require("../MemberCard");
+const bunitBalanceRead_1 = require("../bunitBalanceRead");
+const chainAddresses_1 = require("../chainAddresses");
+const fuelPackCatalog_1 = require("../fuelPackCatalog");
+const beamioUserCardChain_1 = require("../beamioUserCardChain");
+const loyaltyUpgradeFlags_1 = require("../loyaltyUpgradeFlags");
+const membershipFeeMetadata_1 = require("../membershipFeeMetadata");
+const cardProgramSocialDb_1 = require("../cardProgramSocialDb");
+const cardProgramSocialStats_1 = require("../cardProgramSocialStats");
+const cardProgramReferrerDb_1 = require("../cardProgramReferrerDb");
+const cardProgramReferrerChain_1 = require("../cardProgramReferrerChain");
+const aaMultisigOfflineSubmit_1 = require("../aaMultisigOfflineSubmit");
+const aaInstitutionalV2Multisig_1 = require("../aaInstitutionalV2Multisig");
+const redeemReward13ForUsdc_1 = require("../redeemReward13ForUsdc");
+const convertReward13_1 = require("../convertReward13");
+const topupWithReward13Container_1 = require("../topupWithReward13Container");
+const genesisNodeReferralIncome_1 = require("../genesisNodeReferralIncome");
+const treasuryStableSwapRelay_1 = require("../treasuryStableSwapRelay");
+const userCumulativeStatRewardPool_1 = require("../userCumulativeStatRewardPool");
+const apiExcludedUserCards_1 = require("../apiExcludedUserCards");
+const excludeUserCardApi_1 = require("../excludeUserCardApi");
+const couponDiscoverFilter_1 = require("./couponDiscoverFilter");
+const issuedCouponSeriesQueryCache_1 = require("./issuedCouponSeriesQueryCache");
+const BeamioSun_1 = require("../BeamioSun");
+const getUIDAssetsLogic_1 = require("./getUIDAssetsLogic");
+const offlineChatPush_1 = require("./offlineChatPush");
+const resolveBeamioAaViaUserCardFactory_1 = require("./resolveBeamioAaViaUserCardFactory");
+const beamioWalletIdentity_1 = require("../beamioWalletIdentity");
+const youtubeProductionVideo_1 = require("./youtubeProductionVideo");
+const validatorDepositRedeem_1 = require("./validatorDepositRedeem");
+const gbDepinAirdrop_1 = require("../gbDepinAirdrop");
+const couponMetadataCategory_1 = require("../couponMetadataCategory");
+const usdcChargeOrchestrator_1 = require("./usdcChargeOrchestrator");
+const couponClaimShare_1 = require("./couponClaimShare");
+const issuedNftClaimWallets_1 = require("./issuedNftClaimWallets");
+const conetValidatorDashboard_1 = require("./conetValidatorDashboard");
+const conetBlockscoutIncomeDaemon_1 = require("./conetBlockscoutIncomeDaemon");
+const conetUnifiedIncomeEnrichment_1 = require("./conetUnifiedIncomeEnrichment");
+const baseExplorerNftMetadataRefresh_1 = require("./baseExplorerNftMetadataRefresh");
+const beamioFragmentImageProxy_1 = require("./beamioFragmentImageProxy");
+const longDhangConetMigration_1 = require("./longDhangConetMigration");
+function posLedgerKeccakCategory(name) {
+    return ethers_1.ethers.keccak256(ethers_1.ethers.toUtf8Bytes(name)).toLowerCase();
+}
+/** Top-up `txCategory` hex → POS history payment method (aligned with `TOPUP_CATEGORIES` + split `topupPaymentLeg`). */
+const POS_LEDGER_TOPUP_METHOD_BY_CAT_HEX = (() => {
+    const m = new Map();
+    const add = (names, label) => {
+        for (const n of names)
+            m.set(posLedgerKeccakCategory(n), label);
+    };
+    add(['usdcTopupCard', 'usdcNewCard', 'usdcUpgradeNewCard'], 'USDC');
+    add([
+        'creditTopupCard',
+        'creditNewCard',
+        'creditUpgradeNewCard',
+        'newCard',
+        'topupCard',
+        'upgradeNewCard',
+        'redeemNewCard',
+        'redeemUpgradeNewCard',
+        'redeemTopupCard',
+    ], 'Card');
+    add(['cashTopupCard', 'cashNewCard', 'cashUpgradeNewCard'], 'Cash');
+    add(['bonusCard'], 'Bonus');
+    return m;
+})();
+function posLedgerTopupPaymentMethodFromCategoryHex(catHex) {
+    return POS_LEDGER_TOPUP_METHOD_BY_CAT_HEX.get((catHex || '').toLowerCase()) ?? 'Card';
+}
+function posLedgerPaymentMethodLabel(row) {
+    if (row.type === 'tip')
+        return '';
+    if (row.type === 'couponClaim' || row.type === 'couponRedeem')
+        return 'Coupon';
+    if (row.type === 'topUp') {
+        try {
+            // USDC charge orchestrator L1 rows use `TX_USDC_*` indexer categories but still carry
+            // `topupPaymentLeg: "credit"` (same split shape as NFC); category must win over leg label.
+            const fromCat = posLedgerTopupPaymentMethodFromCategoryHex(row.txCategory);
+            if (fromCat === 'USDC')
+                return 'USDC';
+            const dj = JSON.parse(row.displayJson || '{}');
+            const leg = String(dj.topupPaymentLeg || '')
+                .trim()
+                .toLowerCase();
+            if (leg === 'credit')
+                return 'Card';
+            if (leg === 'cash')
+                return 'Cash';
+            if (leg === 'bonus')
+                return 'Bonus';
+        }
+        catch {
+            /* ignore */
+        }
+        return posLedgerTopupPaymentMethodFromCategoryHex(row.txCategory);
+    }
+    try {
+        const dj = JSON.parse(row.displayJson || '{}');
+        const t = String(dj.title || '').toLowerCase();
+        if (t.includes('usdc merchant'))
+            return 'USDC';
+    }
+    catch {
+        /* ignore */
+    }
+    try {
+        const usdc6 = BigInt(row.amountUSDC6 || '0');
+        const fiat6 = BigInt(row.amountFiat6 || '0');
+        if (usdc6 > 0n && fiat6 === 0n)
+            return 'USDC';
+    }
+    catch {
+        /* ignore */
+    }
+    return 'Card';
+}
+async function enrichPosLedgerItemsForClients(items) {
+    const payerSet = new Set();
+    for (const it of items) {
+        if (it.type !== 'topUp' && it.type !== 'charge' && it.type !== 'couponClaim' && it.type !== 'couponRedeem')
+            continue;
+        const p = String(it.payer || '').trim();
+        if (!p || !ethers_1.ethers.isAddress(p))
+            continue;
+        try {
+            payerSet.add(ethers_1.ethers.getAddress(p).toLowerCase());
+        }
+        catch {
+            /* ignore */
+        }
+    }
+    const tagBy = new Map();
+    await Promise.all([...payerSet].map(async (addr) => {
+        try {
+            const tag = await (0, getUIDAssetsLogic_1.fetchBeamioTagForEoa)(addr);
+            if (tag)
+                tagBy.set(addr, tag);
+        }
+        catch {
+            /* ignore */
+        }
+    }));
+    return items.map((it) => {
+        let payerBeamioTag;
+        const p = String(it.payer || '').trim();
+        if (p && ethers_1.ethers.isAddress(p)) {
+            try {
+                payerBeamioTag = tagBy.get(ethers_1.ethers.getAddress(p).toLowerCase());
+            }
+            catch {
+                /* ignore */
+            }
+        }
+        const paymentMethodLabel = posLedgerPaymentMethodLabel(it) || undefined;
+        return {
+            ...it,
+            ...(payerBeamioTag ? { payerBeamioTag } : {}),
+            ...(paymentMethodLabel ? { paymentMethodLabel } : {}),
+        };
+    });
+}
+/** 旧 CCSA 地址 → 新地址映射，redeemStatusBatch 入口处规范化 */
+const OLD_CCSA_REDIRECTS = [
+    '0x3A578f47d68a5f2C1f2930E9548E240AB8d40048',
+    '0xb6ba88045F854B713562fb7f1332D186df3B25A8', // 曾为 infrastructure CCSA
+    '0x6870acA2f4f6aBed6B10B0C8D76C75343398fd64', // 旧工厂部署的 CCSA
+    '0xA1A9f6f942dc0ED9Aa7eF5df7337bd878c2e157b', // 旧工厂 0x86879fE3 部署的 CCSA（已迁移至新工厂）
+].map(a => a.toLowerCase());
+const util_2 = require("../util");
+const stripeBeamio_1 = require("./stripeBeamio");
+/** Public short link GET /go/verra-ndef → TestFlight (iOS) or Play Store (Android / default). */
+const VERRA_NDEF_PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.beamio.pos';
+const VERRA_NDEF_TESTFLIGHT_URL = 'https://testflight.apple.com/join/ytm1F8Aq';
+function resolveVerraNdefInstallRedirectUrl(userAgent) {
+    const ua = userAgent || '';
+    const isIOS = /iPad|iPhone|iPod/i.test(ua) ||
+        (/Macintosh/i.test(ua) && /\bMobile\b/i.test(ua));
+    if (isIOS)
+        return VERRA_NDEF_TESTFLIGHT_URL;
+    if (/Android/i.test(ua))
+        return VERRA_NDEF_PLAY_STORE_URL;
+    return VERRA_NDEF_PLAY_STORE_URL;
+}
+const BASE_CHAIN_ID = 8453;
+const MINT_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers_1.ethers.id('mintPointsByAdmin(address,uint256)').slice(2, 10);
+const BURN_POINTS_BY_ADMIN_SELECTOR = '0x' + ethers_1.ethers.id('burnPointsByAdmin(address,uint256)').slice(2, 10);
+const BURN_CHARGE_REWARD_BY_ADMIN_SELECTOR = '0x' + ethers_1.ethers.id('burnChargeRewardByAdmin(address,uint256)').slice(2, 10);
+const BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR = '0x' + ethers_1.ethers.id('burnIssuedNftByGateway(address,uint256,uint256)').slice(2, 10);
+const ISSUED_NFT_START_ID = 100000000000n;
+/** Fungible / catalog ERC-1155 ids 0–99; membership NFTs start at 100 (BeamioERC1155Logic). */
+const MEMBERSHIP_NFT_START_ID = 100n;
+/** 仅 issued NFT 读函数，避免依赖完整 ABI 同步 */
+const BEAMIO_USER_CARD_ISSUED_NFT_ABI = [
+    'function issuedNftIndex() view returns (uint256)',
+    'function issuedNftTitle(uint256) view returns (bytes32)',
+    'function issuedNftSharedMetadataHash(uint256) view returns (bytes32)',
+    'function issuedNftValidAfter(uint256) view returns (uint64)',
+    'function issuedNftValidBefore(uint256) view returns (uint64)',
+    'function issuedNftMaxSupply(uint256) view returns (uint256)',
+    'function issuedNftMintedCount(uint256) view returns (uint256)',
+    'function issuedNftPriceInCurrency6(uint256) view returns (uint256)',
+    'function isIssuedNftValid(uint256 tokenId) view returns (bool)',
+    'function owner() view returns (address)',
+];
+/** Base RPC：与 util.resolveBeamioBaseHttpRpcUrl 一致（默认 https://base-rpc.conet.network） */
+const BASE_RPC_URL = (0, util_2.resolveBeamioBaseHttpRpcUrl)();
+const providerBase = new ethers_1.ethers.JsonRpcProvider(BASE_RPC_URL);
+/** 从 mintPointsByAdmin(data) 解析 recipient EOA */
+const tryParseMintPointsByAdminRecipient = (data) => {
+    try {
+        const iface = new ethers_1.ethers.Interface(['function mintPointsByAdmin(address user, uint256 points6)']);
+        const decoded = iface.parseTransaction({ data });
+        if (decoded?.name === 'mintPointsByAdmin' && decoded.args[0])
+            return decoded.args[0];
+    }
+    catch { /* ignore */ }
+    return null;
+};
+/** 从 mintPointsByAdmin(data) 解析 recipient 与 points6 */
+const tryParseMintPointsByAdminArgs = (data) => {
+    try {
+        const iface = new ethers_1.ethers.Interface(['function mintPointsByAdmin(address user, uint256 points6)']);
+        const decoded = iface.parseTransaction({ data });
+        if (decoded?.name === 'mintPointsByAdmin' && decoded.args[0] != null && decoded.args[1] != null) {
+            const { totalPoints6 } = (0, MemberCard_1.unpackTopupMintAmount)(BigInt(decoded.args[1]));
+            return { recipient: decoded.args[0], points6: totalPoints6 };
+        }
+    }
+    catch { /* ignore */ }
+    return null;
+};
+const tryParseBurnPointsByAdminArgs = (data) => {
+    try {
+        const iface = new ethers_1.ethers.Interface(['function burnPointsByAdmin(address target, uint256 amount)']);
+        const decoded = iface.parseTransaction({ data });
+        if (decoded?.name === 'burnPointsByAdmin' && decoded.args[0] != null && decoded.args[1] != null) {
+            return { target: decoded.args[0], points6: BigInt(decoded.args[1]) };
+        }
+    }
+    catch { /* ignore */ }
+    return null;
+};
+const tryParseBurnChargeRewardByAdminArgs = (data) => {
+    try {
+        const iface = new ethers_1.ethers.Interface(['function burnChargeRewardByAdmin(address target, uint256 amount)']);
+        const decoded = iface.parseTransaction({ data });
+        if (decoded?.name === 'burnChargeRewardByAdmin' && decoded.args[0] != null && decoded.args[1] != null) {
+            return { target: decoded.args[0], points6: BigInt(decoded.args[1]) };
+        }
+    }
+    catch { /* ignore */ }
+    return null;
+};
+/** 解析 EOA 对应的 AA：仅 UserCardFactoryPaymaster._aaFactory() 路径（与发卡工厂绑定；无回退旧 AA 工厂） */
+const resolveBeamioAccountOf = async (eoa) => (0, resolveBeamioAaViaUserCardFactory_1.resolveBeamioAaForEoaWithFallback)(providerBase, eoa);
+/**
+ * QR / beamioTag Check Balance：若 EOA 已 Link 到 API 托管私钥的 NFC，附加 nfcApiHostedSigning + uid/tagIdHex。
+ * 查找失败不伪造「未 Link」——省略字段，客户端保持纯 QR workflow。
+ * 不返回 private_key。物理 NFC 已有 SUN uid/tagIdHex 时不覆盖，仍可标 nfcApiHostedSigning。
+ */
+async function enrichAssetsWithLinkedNfcHostedSigning(eoa, base) {
+    try {
+        const linked = await (0, db_2.listLinkedNfcCardsByOwnerEoa)(eoa);
+        if (!linked.length)
+            return base;
+        const pick = linked.find((row) => row.linkState === 'active') ?? linked[0];
+        if (!pick)
+            return base;
+        const existingUid = typeof base.uid === 'string' ? base.uid.trim() : '';
+        const existingTag = typeof base.tagIdHex === 'string' ? base.tagIdHex.trim() : '';
+        return {
+            ...base,
+            nfcApiHostedSigning: true,
+            ...(existingUid ? {} : pick.uid ? { uid: pick.uid } : {}),
+            ...(existingTag ? {} : pick.tagId ? { tagIdHex: pick.tagId } : {}),
+            linkedNfcCards: linked,
+        };
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        (0, logger_1.logger)(safe_1.default.yellow(`[enrichAssetsWithLinkedNfcHostedSigning] skip eoa=${eoa.slice(0, 10)}…: ${msg}`));
+        return base;
+    }
+}
+/**
+ * cardAddAdmin：Master ensureAAForEOA 成功后，Cluster 必须能用同一解析路径在链上看到已部署 AA。
+ * 避免 Master 失败却仍转发、或 body.adminEOA 与真实商户不一致时难以排查。
+ */
+async function assertAdminEoaHasVisibleAaAfterEnsure(adminEoaNorm, ensureBody, logTag) {
+    let masterAa = null;
+    try {
+        const j = JSON.parse(ensureBody);
+        if (j?.aa && ethers_1.ethers.isAddress(j.aa))
+            masterAa = ethers_1.ethers.getAddress(j.aa);
+    }
+    catch {
+        /* ignore */
+    }
+    let canonicalAa = null;
+    for (let attempt = 0; attempt < 2 && !canonicalAa; attempt++) {
+        if (attempt > 0)
+            await new Promise((r) => setTimeout(r, 1500));
+        try {
+            canonicalAa = await (0, resolveBeamioAaViaUserCardFactory_1.resolveBeamioAaForEoaWithFallback)(providerBase, adminEoaNorm);
+        }
+        catch {
+            canonicalAa = null;
+        }
+    }
+    if (!canonicalAa) {
+        (0, logger_1.logger)(safe_1.default.red(`[${logTag}] No AA visible on Base for body adminEOA=${adminEoaNorm} after ensureAAForEOA (master aa=${masterAa ?? 'N/A'}). ` +
+            'Use the merchant real EOA in both body.adminEOA and adminManager.to (must match, EOA with no code).'));
+        return {
+            ok: false,
+            error: 'Admin EOA has no AA visible onchain after ensureAAForEOA. Use the merchant’s real EOA in body.adminEOA and adminManager.to; do not use a placeholder address.',
+        };
+    }
+    if (masterAa && masterAa.toLowerCase() !== canonicalAa.toLowerCase()) {
+        (0, logger_1.logger)(safe_1.default.yellow(`[${logTag}] Master ensure aa ${masterAa} != cluster canonical ${canonicalAa} for adminEOA=${adminEoaNorm} (gate uses cluster read)`));
+    }
+    return { ok: true, canonicalAa };
+}
+const JSONRPC_NO_BATCH = { batchMaxCount: 1 };
+const providerConet = new ethers_1.ethers.JsonRpcProvider((0, util_1.resolveBeamioConetHttpRpcUrl)(), undefined, JSONRPC_NO_BATCH);
+const REFERRAL_REDEEM_READ_ABI = [
+    'function admins(address) view returns (bool)',
+    'function members(address) view returns (uint8 role,address parentAdmin,address parentL0,uint256 rebateBps,uint256 ratioBps,bool active)',
+    'function merchantQuotas(address) view returns (uint256 starterKetRemaining,uint256 paidBunitRemaining,uint256 issuedCodeCount,uint256 claimedCodeCount)',
+    'function userCardFactory() view returns (address)',
+    'function claimedMerchantL0(address) view returns (address)',
+    'function redeemActionNonces(address) view returns (uint256)',
+    'function referralClaimNonces(address) view returns (uint256)',
+    'function l0RedeemCodes(bytes32) view returns (address issuerAdmin,uint256 rebateBps,uint64 validAfter,uint64 validBefore,bool active,bool claimed,bool cancelled)',
+    'function l1RedeemCodes(bytes32) view returns (address issuerL0,uint256 rebateBps,uint256 ratioBps,uint64 validAfter,uint64 validBefore,bool active,bool claimed,bool cancelled)',
+    'function merchantCodeCount() view returns (uint256)',
+    'function merchantCodeHashAt(uint256) view returns (bytes32)',
+    'function merchantCodes(bytes32) view returns (address issuerL0,uint256 paidBunitAmount,uint64 validAfter,uint64 validBefore,bool active,bool claimed)',
+    'function merchantCodeCancelled(bytes32) view returns (bool)',
+    'function adminMerchantPackageCodes(bytes32) view returns (address issuerAdmin,address optionalL0,uint256 bunitAmount,bool isPaid,bool includeStartKet,uint8 paymentMethod,string description,uint64 validAfter,uint64 validBefore,bool active,bool claimed,bool cancelled)',
+];
+const REFERRAL_REDEEM_DOMAIN = {
+    name: 'ReferralRegistryVaultV1',
+    version: '1',
+    chainId: 224422,
+    verifyingContract: chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1,
+};
+const REFERRAL_ADMIN_MANAGEMENT_TYPES = {
+    setL0Rate: {
+        SetL0Rate: [
+            { name: 'admin', type: 'address' },
+            { name: 'l0', type: 'address' },
+            { name: 'rebateBps', type: 'uint256' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    setL0Quota: {
+        SetL0Quota: [
+            { name: 'admin', type: 'address' },
+            { name: 'l0', type: 'address' },
+            { name: 'starterKetRemaining', type: 'uint256' },
+            { name: 'paidBunitRemaining', type: 'uint256' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    setL0StarterQuota: {
+        SetL0StarterKetQuota: [
+            { name: 'admin', type: 'address' },
+            { name: 'l0', type: 'address' },
+            { name: 'starterKetRemaining', type: 'uint256' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    assignMerchant: {
+        AssignMerchantToL0: [
+            { name: 'admin', type: 'address' },
+            { name: 'l0', type: 'address' },
+            { name: 'merchant', type: 'address' },
+            { name: 'card', type: 'address' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+};
+const REFERRAL_CLAIM_TYPES = {
+    claimL0: {
+        ClaimL0RedeemCode: [
+            { name: 'claimer', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    claimL1: {
+        ClaimL1RedeemCode: [
+            { name: 'claimer', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    claimMerchant: {
+        ClaimMerchantRedeemCode: [
+            { name: 'claimer', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    claimAdminMerchantPackage: {
+        ClaimAdminMerchantPackageCode: [
+            { name: 'claimer', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+};
+/** Decode vault / PackageClaimLib / OZ ECDSA custom errors for Cluster + Master user messages. */
+const REFERRAL_CLAIM_ERROR_IFACE = new ethers_1.ethers.Interface([
+    'error InvalidSignature()',
+    'error InvalidCode()',
+    'error InvalidAmount()',
+    'error AlreadyRegistered()',
+    'error CodeUnavailable()',
+    'error CodeExpired()',
+    'error NonceUsed()',
+    'error SignatureExpired()',
+    'error Unauthorized()',
+    'error ClaimPaused()',
+    'error ECDSAInvalidSignature()',
+    'error ECDSAInvalidSignatureS(bytes32 s)',
+    'error ECDSAInvalidSignatureLength(uint256 length)',
+]);
+function humanizeReferralClaimRevert(error) {
+    const err = error;
+    const data = err?.data ?? err?.info?.error?.data ?? err?.error?.data;
+    if (typeof data === 'string' && data.startsWith('0x') && data.length >= 10) {
+        try {
+            const parsed = REFERRAL_CLAIM_ERROR_IFACE.parseError(data);
+            switch (parsed?.name) {
+                case 'InvalidSignature':
+                case 'ECDSAInvalidSignature':
+                case 'ECDSAInvalidSignatureS':
+                case 'ECDSAInvalidSignatureLength':
+                    return 'Invalid claim signature';
+                case 'InvalidCode':
+                    return 'Redeem code does not match hash';
+                case 'InvalidAmount':
+                    return 'This unpaid package requires free B-Unit eligibility; this wallet already claimed free B-Units';
+                case 'AlreadyRegistered':
+                    return 'Wallet already claimed a Start Kit or holds Start Ket #0';
+                case 'CodeUnavailable':
+                    return 'Admin package redeem code is not active';
+                case 'CodeExpired':
+                    return 'Outside valid time window';
+                case 'NonceUsed':
+                    return 'Stale referral claim nonce';
+                case 'SignatureExpired':
+                    return 'Invalid or expired claim signature';
+                case 'ClaimPaused':
+                    return 'Referral claims are paused';
+                case 'Unauthorized':
+                    return 'Unauthorized referral claim';
+                default:
+                    if (parsed?.name)
+                        return `Claim reverted: ${parsed.name}`;
+            }
+        }
+        catch {
+            /* fall through */
+        }
+    }
+    const msg = err?.shortMessage ?? err?.message ?? 'Invalid referral claim request';
+    if (/unknown custom error/i.test(msg)) {
+        return 'Claim simulation failed (on-chain custom error). Check free B-Unit eligibility, Start Ket ownership, and claim signature.';
+    }
+    return msg;
+}
+const REFERRAL_CLAIM_STATIC_ABI = [
+    'function claimL0RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+    'function claimL1RedeemCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+    'function claimMerchantCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+    'function claimAdminMerchantPackageCodeFor(address claimer,bytes secret,bytes32 redeemHash,uint256 nonce,uint256 deadline,bytes signature)',
+];
+const REFERRAL_REDEEM_TYPES = {
+    issueL0: {
+        IssueL0RedeemCode: [
+            { name: 'admin', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'rebateBps', type: 'uint256' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    issueL1: {
+        IssueL1RedeemCode: [
+            { name: 'l0', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'rebateBps', type: 'uint256' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    issueMerchant: {
+        IssueMerchantRedeemCode: [
+            { name: 'l0', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    cancelL0: {
+        CancelL0RedeemCode: [
+            { name: 'admin', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    cancelL1: {
+        CancelL1RedeemCode: [
+            { name: 'l0', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    cancelMerchant: {
+        CancelMerchantRedeemCode: [
+            { name: 'l0', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    setMerchantAirdrop: {
+        SetMerchantRedeemBunitAirdrop: [
+            { name: 'admin', type: 'address' },
+            { name: 'amount', type: 'uint256' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    issueAdminMerchantPackage: {
+        IssueAdminMerchantPackageCode: [
+            { name: 'admin', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'optionalL0', type: 'address' },
+            { name: 'bunitAmount', type: 'uint256' },
+            { name: 'isPaid', type: 'bool' },
+            { name: 'includeStartKet', type: 'bool' },
+            { name: 'paymentMethod', type: 'uint8' },
+            { name: 'description', type: 'string' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+    cancelAdminMerchantPackage: {
+        CancelAdminMerchantPackageCode: [
+            { name: 'admin', type: 'address' },
+            { name: 'redeemHash', type: 'bytes32' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ],
+    },
+};
+async function referralRedeemRelayPreCheck(body) {
+    try {
+        const action = String(body?.action ?? '');
+        if (![
+            'issueL0',
+            'issueL1',
+            'issueMerchant',
+            'cancelL0',
+            'cancelL1',
+            'cancelMerchant',
+            'setMerchantAirdrop',
+            'issueAdminMerchantPackage',
+            'cancelAdminMerchantPackage',
+        ].includes(action)) {
+            return { success: false, error: 'Invalid referral redeem action' };
+        }
+        const account = ethers_1.ethers.getAddress(String(body?.account ?? ''));
+        const redeemHash = String(body?.redeemHash ?? '');
+        if (action !== 'setMerchantAirdrop' && !ethers_1.ethers.isHexString(redeemHash, 32))
+            return { success: false, error: 'redeemHash must be bytes32' };
+        const nonce = BigInt(String(body?.nonce ?? ''));
+        const deadline = BigInt(String(body?.deadline ?? ''));
+        const signature = String(body?.signature ?? '');
+        if (!ethers_1.ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000)))
+            return { success: false, error: 'Invalid or expired signature request' };
+        const amount = action === 'setMerchantAirdrop' ? BigInt(String(body?.amount ?? '')) : 0n;
+        if (action === 'setMerchantAirdrop' && amount <= 0n)
+            return { success: false, error: 'Airdrop amount must be greater than zero' };
+        const rebateBps = action === 'issueL0' || action === 'issueL1' ? BigInt(String(body?.rebateBps ?? '')) : 0n;
+        if (rebateBps < 0n || rebateBps > 10000n)
+            return { success: false, error: 'rebateBps must be between 0 and 10000' };
+        const optionalL0Raw = String(body?.optionalL0 ?? ethers_1.ethers.ZeroAddress);
+        const optionalL0 = ethers_1.ethers.isAddress(optionalL0Raw) ? ethers_1.ethers.getAddress(optionalL0Raw) : ethers_1.ethers.ZeroAddress;
+        const bunitAmount = action === 'issueAdminMerchantPackage' ? BigInt(String(body?.bunitAmount ?? '')) : 0n;
+        const isPaid = Boolean(body?.isPaid);
+        const includeStartKet = Boolean(body?.includeStartKet);
+        const paymentMethod = Number(body?.paymentMethod ?? 0);
+        const description = String(body?.description ?? '');
+        if (action === 'issueAdminMerchantPackage') {
+            if (bunitAmount <= 0n)
+                return { success: false, error: 'B-Unit amount must be greater than zero' };
+            if (paymentMethod < 0 || paymentMethod > 3)
+                return { success: false, error: 'Invalid payment method' };
+            if (description.length > 512)
+                return { success: false, error: 'Description exceeds 512 characters' };
+        }
+        const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+        const expectedNonce = BigInt((await registry.redeemActionNonces(account)).toString());
+        if (nonce !== expectedNonce)
+            return { success: false, error: 'Stale referral redeem nonce' };
+        const isAdmin = Boolean(await registry.admins(account));
+        const member = await registry.members(account);
+        const isL0 = Number(member[0]) === 1 && Boolean(member[5]);
+        if (action === 'issueL0' ||
+            action === 'cancelL0' ||
+            action === 'setMerchantAirdrop' ||
+            action === 'issueAdminMerchantPackage' ||
+            action === 'cancelAdminMerchantPackage') {
+            if (!isAdmin)
+                return { success: false, error: 'Account is not a ReferralRegistry admin' };
+        }
+        else if (action === 'issueL1' || action === 'cancelL1' || action === 'issueMerchant' || action === 'cancelMerchant') {
+            if (!isL0)
+                return { success: false, error: 'Account is not an active L0' };
+        }
+        if (action === 'issueAdminMerchantPackage' && optionalL0 !== ethers_1.ethers.ZeroAddress) {
+            const l0Member = await registry.members(optionalL0);
+            if (Number(l0Member[0]) !== 1 || !Boolean(l0Member[5])) {
+                return { success: false, error: 'optionalL0 is not an active L0' };
+            }
+        }
+        const types = REFERRAL_REDEEM_TYPES[action];
+        const message = action === 'setMerchantAirdrop'
+            ? { admin: account, amount, nonce, deadline }
+            : action === 'issueAdminMerchantPackage'
+                ? {
+                    admin: account,
+                    redeemHash,
+                    optionalL0,
+                    bunitAmount,
+                    isPaid,
+                    includeStartKet,
+                    paymentMethod,
+                    description,
+                    nonce,
+                    deadline,
+                }
+                : action === 'cancelAdminMerchantPackage' || action === 'issueL0' || action === 'cancelL0'
+                    ? {
+                        admin: account,
+                        redeemHash,
+                        ...(action === 'issueL0' ? { rebateBps } : {}),
+                        nonce,
+                        deadline,
+                    }
+                    : {
+                        l0: account,
+                        redeemHash,
+                        ...(action === 'issueL1' ? { rebateBps } : {}),
+                        nonce,
+                        deadline,
+                    };
+        const digest = ethers_1.ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types, message);
+        if (ethers_1.ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase()) {
+            return { success: false, error: 'Referral redeem signature does not match account' };
+        }
+        return {
+            success: true,
+            preChecked: {
+                action,
+                contract: chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1,
+                account,
+                redeemHash,
+                rebateBps: rebateBps.toString(),
+                amount: amount.toString(),
+                optionalL0,
+                bunitAmount: bunitAmount.toString(),
+                isPaid,
+                includeStartKet,
+                paymentMethod: String(paymentMethod),
+                description,
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+            },
+        };
+    }
+    catch (error) {
+        return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid referral redeem request' };
+    }
+}
+async function referralRegistryAdminManagementPreCheck(body) {
+    try {
+        const action = String(body?.action ?? '');
+        if (action !== 'setL0Rate' && action !== 'setL0Quota' && action !== 'setL0StarterQuota' && action !== 'assignMerchant') {
+            return { success: false, error: 'Invalid Referral Admin management action' };
+        }
+        const admin = ethers_1.ethers.getAddress(String(body?.admin ?? ''));
+        const l0 = ethers_1.ethers.getAddress(String(body?.l0 ?? ''));
+        const nonce = BigInt(String(body?.nonce ?? ''));
+        const deadline = BigInt(String(body?.deadline ?? ''));
+        const signature = String(body?.signature ?? '');
+        if (!ethers_1.ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+            return { success: false, error: 'Invalid or expired Referral Admin signature request' };
+        }
+        const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+        if (!Boolean(await registry.admins(admin)))
+            return { success: false, error: 'Account is not a ReferralRegistry admin' };
+        const expectedNonce = BigInt((await registry.redeemActionNonces(admin)).toString());
+        if (nonce !== expectedNonce)
+            return { success: false, error: 'Stale Referral Admin management nonce' };
+        const l0Member = await registry.members(l0);
+        if (Number(l0Member[0]) !== 1 || !Boolean(l0Member[5]))
+            return { success: false, error: 'L0 is not active' };
+        let message;
+        let preChecked;
+        if (action === 'setL0Rate') {
+            const rebateBps = BigInt(String(body?.rebateBps ?? ''));
+            if (rebateBps > 10000n)
+                return { success: false, error: 'rebateBps must be between 0 and 10000' };
+            message = { admin, l0, rebateBps, nonce, deadline };
+            preChecked = {
+                action,
+                contract: chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1,
+                admin,
+                l0,
+                rebateBps: rebateBps.toString(),
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+            };
+        }
+        else if (action === 'setL0StarterQuota') {
+            const starterKetRemaining = BigInt(String(body?.starterKetRemaining ?? ''));
+            if (starterKetRemaining < 0n)
+                return { success: false, error: 'Start Kit limit cannot be negative' };
+            message = { admin, l0, starterKetRemaining, nonce, deadline };
+            preChecked = {
+                action,
+                contract: chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1,
+                admin,
+                l0,
+                starterKetRemaining: starterKetRemaining.toString(),
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+            };
+        }
+        else if (action === 'setL0Quota') {
+            const starterKetRemaining = BigInt(String(body?.starterKetRemaining ?? ''));
+            const paidBunitRemaining = BigInt(String(body?.paidBunitRemaining ?? ''));
+            if (starterKetRemaining < 0n || paidBunitRemaining < 0n)
+                return { success: false, error: 'Quota values cannot be negative' };
+            message = { admin, l0, starterKetRemaining, paidBunitRemaining, nonce, deadline };
+            preChecked = {
+                action,
+                contract: chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1,
+                admin,
+                l0,
+                starterKetRemaining: starterKetRemaining.toString(),
+                paidBunitRemaining: paidBunitRemaining.toString(),
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+            };
+        }
+        else {
+            const merchant = ethers_1.ethers.getAddress(String(body?.merchant ?? ''));
+            const card = ethers_1.ethers.getAddress(String(body?.card ?? ''));
+            const merchantMember = await registry.members(merchant);
+            if (Number(merchantMember[0]) !== 0)
+                return { success: false, error: 'Merchant wallet is already registered' };
+            if ((0, apiExcludedUserCards_1.isApiExcludedUserCard)(card))
+                return { success: false, error: 'Selected merchant card is not eligible for referral assignment' };
+            const factoryAddress = ethers_1.ethers.getAddress(await registry.userCardFactory());
+            const factory = new ethers_1.ethers.Contract(factoryAddress, ['function isBeamioUserCard(address) view returns (bool)'], providerConet);
+            const cardContract = new ethers_1.ethers.Contract(card, ['function owner() view returns (address)'], providerConet);
+            if (!Boolean(await factory.isBeamioUserCard(card)))
+                return { success: false, error: 'Selected card is not a BeamioUserCard' };
+            if (ethers_1.ethers.getAddress(await cardContract.owner()) !== merchant)
+                return { success: false, error: 'Selected card is not owned by the merchant' };
+            message = { admin, l0, merchant, card, nonce, deadline };
+            preChecked = {
+                action,
+                contract: chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1,
+                admin,
+                l0,
+                merchant,
+                card,
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+            };
+        }
+        const types = REFERRAL_ADMIN_MANAGEMENT_TYPES[action];
+        const digest = ethers_1.ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types, message);
+        if (ethers_1.ethers.recoverAddress(digest, signature).toLowerCase() !== admin.toLowerCase()) {
+            return { success: false, error: 'Referral Admin signature does not match account' };
+        }
+        return { success: true, preChecked };
+    }
+    catch (error) {
+        return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid Referral Admin management request' };
+    }
+}
+async function referralRegistryMerchantSharePreCheck(body) {
+    try {
+        if (!chainAddresses_1.CONET_REFERRAL_MERCHANT_SHARE_MODULE || chainAddresses_1.CONET_REFERRAL_MERCHANT_SHARE_MODULE === ethers_1.ethers.ZeroAddress) {
+            return { success: false, error: 'Merchant share module is not configured' };
+        }
+        const l0 = ethers_1.ethers.getAddress(String(body?.l0 ?? body?.account ?? ''));
+        const merchant = ethers_1.ethers.getAddress(String(body?.merchant ?? ''));
+        const l1 = ethers_1.ethers.getAddress(String(body?.l1 ?? ''));
+        const shareBps = BigInt(String(body?.shareBps ?? ''));
+        const nonce = BigInt(String(body?.nonce ?? ''));
+        const deadline = BigInt(String(body?.deadline ?? ''));
+        const signature = String(body?.signature ?? '');
+        if (shareBps < 0n || shareBps > 10000n)
+            return { success: false, error: 'shareBps must be between 0 and 10000' };
+        if (!ethers_1.ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+            return { success: false, error: 'Invalid or expired signature request' };
+        }
+        const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+        const shareModule = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_MERCHANT_SHARE_MODULE, ['function shareActionNonces(address) view returns (uint256)'], providerConet);
+        const expectedNonce = BigInt((await shareModule.shareActionNonces(l0)).toString());
+        if (nonce !== expectedNonce)
+            return { success: false, error: 'Stale merchant share nonce' };
+        const l0Member = await registry.members(l0);
+        if (Number(l0Member[0]) !== 1 || !Boolean(l0Member[5]))
+            return { success: false, error: 'Account is not an active L0' };
+        const merchantMember = await registry.members(merchant);
+        if (Number(merchantMember[0]) !== 3 || !Boolean(merchantMember[5]) || ethers_1.ethers.getAddress(merchantMember[2]) !== l0) {
+            return { success: false, error: 'Merchant is not an active member under this L0' };
+        }
+        const l1Member = await registry.members(l1);
+        if (Number(l1Member[0]) !== 2 || !Boolean(l1Member[5]) || ethers_1.ethers.getAddress(l1Member[2]) !== l0) {
+            return { success: false, error: 'L1 is not an active member under this L0' };
+        }
+        const types = {
+            SetMerchantL1Share: [
+                { name: 'l0', type: 'address' },
+                { name: 'merchant', type: 'address' },
+                { name: 'l1', type: 'address' },
+                { name: 'shareBps', type: 'uint256' },
+                { name: 'nonce', type: 'uint256' },
+                { name: 'deadline', type: 'uint256' },
+            ],
+        };
+        const domain = {
+            name: 'ReferralMerchantShareModuleV1',
+            version: '1',
+            chainId: 224422,
+            verifyingContract: chainAddresses_1.CONET_REFERRAL_MERCHANT_SHARE_MODULE,
+        };
+        const message = { l0, merchant, l1, shareBps, nonce, deadline };
+        const digest = ethers_1.ethers.TypedDataEncoder.hash(domain, types, message);
+        if (ethers_1.ethers.recoverAddress(digest, signature).toLowerCase() !== l0.toLowerCase()) {
+            return { success: false, error: 'L0 signature does not match account' };
+        }
+        return {
+            success: true,
+            preChecked: {
+                contract: chainAddresses_1.CONET_REFERRAL_MERCHANT_SHARE_MODULE,
+                l0,
+                merchant,
+                l1,
+                shareBps: shareBps.toString(),
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+            },
+        };
+    }
+    catch (error) {
+        return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid merchant L1 share request' };
+    }
+}
+const REFERRAL_PURCHASE_SPLIT_READ_ABI = [
+    'function actionNonces(address) view returns (uint256)',
+    'function immediateSplit() view returns (address payout,uint256 payoutBps,address[] wallets,uint256[] bps)',
+];
+const REFERRAL_PURCHASE_SPLIT_DOMAIN_NAME = 'ReferralPurchaseSplitV1';
+const REFERRAL_PURCHASE_SPLIT_TYPES = {
+    SetImmediateSplit: [
+        { name: 'admin', type: 'address' },
+        { name: 'adminPayout', type: 'address' },
+        { name: 'adminBps', type: 'uint256' },
+        { name: 'wallets', type: 'address[]' },
+        { name: 'bps', type: 'uint256[]' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+    ],
+};
+async function referralPurchaseSplitPreCheck(body) {
+    try {
+        if (!chainAddresses_1.CONET_REFERRAL_PURCHASE_SPLIT_V1 || chainAddresses_1.CONET_REFERRAL_PURCHASE_SPLIT_V1 === ethers_1.ethers.ZeroAddress) {
+            return { success: false, error: 'Purchase split contract is not configured' };
+        }
+        const admin = ethers_1.ethers.getAddress(String(body?.admin ?? ''));
+        const adminPayout = ethers_1.ethers.getAddress(String(body?.adminPayout ?? ''));
+        const adminBps = BigInt(String(body?.adminBps ?? ''));
+        const walletsRaw = Array.isArray(body?.wallets) ? body.wallets : [];
+        const bpsRaw = Array.isArray(body?.bps) ? body.bps : [];
+        const nonce = BigInt(String(body?.nonce ?? ''));
+        const deadline = BigInt(String(body?.deadline ?? ''));
+        const signature = String(body?.signature ?? '');
+        if (!ethers_1.ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+            return { success: false, error: 'Invalid or expired purchase split signature' };
+        }
+        if (walletsRaw.length !== bpsRaw.length || walletsRaw.length > 16) {
+            return { success: false, error: 'Project wallets and bps length mismatch' };
+        }
+        const wallets = [];
+        const bps = [];
+        let sum = adminBps;
+        for (let i = 0; i < walletsRaw.length; i++) {
+            const wallet = ethers_1.ethers.getAddress(String(walletsRaw[i] ?? ''));
+            const share = BigInt(String(bpsRaw[i] ?? ''));
+            if (wallet === ethers_1.ethers.ZeroAddress || share <= 0n) {
+                return { success: false, error: 'Project wallets must be non-zero with positive bps' };
+            }
+            wallets.push(wallet);
+            bps.push(share);
+            sum += share;
+        }
+        if (adminPayout === ethers_1.ethers.ZeroAddress)
+            return { success: false, error: 'Admin payout cannot be zero' };
+        if (sum !== 6000n)
+            return { success: false, error: 'Admin + project wallets must total 6000 bps (60%)' };
+        const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+        if (!Boolean(await registry.admins(admin)))
+            return { success: false, error: 'Account is not a ReferralRegistry admin' };
+        const split = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_PURCHASE_SPLIT_V1, REFERRAL_PURCHASE_SPLIT_READ_ABI, providerConet);
+        const expectedNonce = BigInt((await split.actionNonces(admin)).toString());
+        if (nonce !== expectedNonce)
+            return { success: false, error: 'Stale purchase split nonce' };
+        const domain = {
+            name: REFERRAL_PURCHASE_SPLIT_DOMAIN_NAME,
+            version: '1',
+            chainId: 224422,
+            verifyingContract: chainAddresses_1.CONET_REFERRAL_PURCHASE_SPLIT_V1,
+        };
+        const message = { admin, adminPayout, adminBps, wallets, bps, nonce, deadline };
+        const digest = ethers_1.ethers.TypedDataEncoder.hash(domain, REFERRAL_PURCHASE_SPLIT_TYPES, message);
+        if (ethers_1.ethers.recoverAddress(digest, signature).toLowerCase() !== admin.toLowerCase()) {
+            return { success: false, error: 'Purchase split signature does not match admin' };
+        }
+        return {
+            success: true,
+            preChecked: {
+                contract: chainAddresses_1.CONET_REFERRAL_PURCHASE_SPLIT_V1,
+                admin,
+                adminPayout,
+                adminBps: adminBps.toString(),
+                wallets,
+                bps: bps.map((v) => v.toString()),
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+            },
+        };
+    }
+    catch (error) {
+        return { success: false, error: error?.shortMessage ?? error?.message ?? 'Invalid purchase split request' };
+    }
+}
+async function tryPreCheckLinkedValidatorClaim(secret, linkedRaw) {
+    const probe = await (0, validatorDepositRedeem_1.probeLinkedValidatorDepositRedeemByCode)(secret);
+    if (!probe.redeemable) {
+        return { linkedValidatorRedeemable: false };
+    }
+    const linked = linkedRaw && typeof linkedRaw === 'object' ? linkedRaw : null;
+    if (!linked) {
+        return { linkedValidatorRedeemable: true };
+    }
+    const pre = await (0, validatorDepositRedeem_1.validatorDepositRedeemClaimClusterPreCheck)({
+        claimer: typeof linked.claimer === 'string' ? linked.claimer : undefined,
+        beneficiary: typeof linked.beneficiary === 'string' ? linked.beneficiary : undefined,
+        code: secret,
+        deadline: linked.deadline,
+        signature: linked.signature,
+    });
+    if (!pre.success) {
+        (0, logger_1.logger)(safe_1.default.yellow(`[linkedValidatorClaim] preCheck skipped (kit claim continues): ${pre.error}`));
+        return { linkedValidatorRedeemable: true };
+    }
+    const p = pre.preChecked;
+    return {
+        linkedValidatorRedeemable: true,
+        linkedValidatorClaim: {
+            contract: p.contract,
+            claimer: p.claimer,
+            beneficiary: p.beneficiary,
+            referrer: p.referrer,
+            code: p.code,
+            deadline: p.deadline.toString(),
+            signature: p.signature,
+            gasLimit: String(p.gasLimit),
+        },
+    };
+}
+async function referralClaimRelayPreCheck(body) {
+    try {
+        const kind = String(body?.kind ?? '');
+        const action = kind === 'l0'
+            ? 'claimL0'
+            : kind === 'l1'
+                ? 'claimL1'
+                : kind === 'merchant'
+                    ? 'claimMerchant'
+                    : kind === 'adminPackage'
+                        ? 'claimAdminMerchantPackage'
+                        : '';
+        if (!action)
+            return { success: false, error: 'Invalid referral claim kind' };
+        const account = ethers_1.ethers.getAddress(String(body?.account ?? body?.claimer ?? ''));
+        const secret = String(body?.secret ?? '');
+        const redeemHash = String(body?.redeemHash ?? '');
+        if (!secret || !ethers_1.ethers.isHexString(redeemHash, 32) || ethers_1.ethers.keccak256(ethers_1.ethers.toUtf8Bytes(secret)).toLowerCase() !== redeemHash.toLowerCase()) {
+            return { success: false, error: 'Invalid referral claim secret or hash' };
+        }
+        const nonce = BigInt(String(body?.nonce ?? ''));
+        const deadline = BigInt(String(body?.deadline ?? ''));
+        const signature = String(body?.signature ?? '');
+        if (!ethers_1.ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000)))
+            return { success: false, error: 'Invalid or expired claim signature' };
+        const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+        const expectedNonce = BigInt((await registry.referralClaimNonces(account)).toString());
+        if (nonce !== expectedNonce)
+            return { success: false, error: 'Stale referral claim nonce' };
+        if (kind === 'merchant') {
+            const raw = await registry.merchantCodes(redeemHash);
+            const cancelled = Boolean(await registry.merchantCodeCancelled(redeemHash).catch(() => false));
+            if (!raw.active || raw.claimed || cancelled)
+                return { success: false, error: 'Start Kit redeem code is not active' };
+            const member = await registry.members(account);
+            if (Number(member[0]) !== 0 || (await registry.claimedMerchantL0(account)) !== ethers_1.ethers.ZeroAddress) {
+                return { success: false, error: 'Wallet already claimed a Start Kit or is registered' };
+            }
+        }
+        else if (kind === 'adminPackage') {
+            const raw = await registry.adminMerchantPackageCodes(redeemHash);
+            if (!raw.active || raw.claimed || raw.cancelled) {
+                return { success: false, error: 'Admin package redeem code is not active' };
+            }
+            const now = BigInt(Math.floor(Date.now() / 1000));
+            const validAfter = BigInt(raw.validAfter ?? 0n);
+            const validBefore = BigInt(raw.validBefore ?? 0n);
+            if ((validAfter > 0n && now < validAfter) || (validBefore > 0n && now > validBefore)) {
+                return { success: false, error: 'Outside valid time window' };
+            }
+            if (Boolean(raw.includeStartKet)) {
+                const member = await registry.members(account);
+                if (Number(member[0]) !== 0 || (await registry.claimedMerchantL0(account)) !== ethers_1.ethers.ZeroAddress) {
+                    return { success: false, error: 'Wallet already claimed a Start Kit or is registered' };
+                }
+                const startKet = new ethers_1.ethers.Contract(chainAddresses_1.CONET_BUSINESS_START_KET, ['function balanceOf(address account, uint256 id) view returns (uint256)'], providerConet);
+                const ketBal = BigInt((await startKet.balanceOf(account, 0n)).toString());
+                if (ketBal > 0n) {
+                    return { success: false, error: 'Wallet already holds a Start Ket' };
+                }
+            }
+            // Unpaid Institutional Pack mints via mintFreeForReferralSettlement — alreadyClaimedFree blocks.
+            if (!Boolean(raw.isPaid)) {
+                const freeElig = await (0, MemberCard_1.resolveBUnitFreeClaimEligibility)(providerConet, account);
+                if (!freeElig.canClaim && freeElig.reason === 'already_claimed') {
+                    return {
+                        success: false,
+                        error: 'This unpaid package requires free B-Unit eligibility; this wallet already claimed free B-Units',
+                    };
+                }
+            }
+        }
+        else {
+            const raw = kind === 'l0' ? await registry.l0RedeemCodes(redeemHash) : await registry.l1RedeemCodes(redeemHash);
+            if (!raw.active || raw.claimed || raw.cancelled)
+                return { success: false, error: 'Referral redeem code is not active' };
+            const member = await registry.members(account);
+            if (Boolean(await registry.admins(account)) || Number(member[0]) !== 0)
+                return { success: false, error: 'Wallet is already registered' };
+        }
+        const types = REFERRAL_CLAIM_TYPES[action];
+        const message = { claimer: account, redeemHash, nonce, deadline };
+        const digest = ethers_1.ethers.TypedDataEncoder.hash(REFERRAL_REDEEM_DOMAIN, types, message);
+        if (ethers_1.ethers.recoverAddress(digest, signature).toLowerCase() !== account.toLowerCase())
+            return { success: false, error: 'Claim signature does not match wallet' };
+        // Simulate the exact Master relay call so users get decoded English errors (not opaque "unknown custom error").
+        try {
+            const claimSim = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_CLAIM_STATIC_ABI, providerConet);
+            const claimArgs = [
+                account,
+                ethers_1.ethers.toUtf8Bytes(secret),
+                redeemHash,
+                nonce,
+                deadline,
+                signature,
+            ];
+            if (action === 'claimL0') {
+                await claimSim.claimL0RedeemCodeFor.staticCall(...claimArgs, { from: account });
+            }
+            else if (action === 'claimL1') {
+                await claimSim.claimL1RedeemCodeFor.staticCall(...claimArgs, { from: account });
+            }
+            else if (action === 'claimAdminMerchantPackage') {
+                await claimSim.claimAdminMerchantPackageCodeFor.staticCall(...claimArgs, { from: account });
+            }
+            else {
+                await claimSim.claimMerchantCodeFor.staticCall(...claimArgs, { from: account });
+            }
+        }
+        catch (simErr) {
+            return { success: false, error: humanizeReferralClaimRevert(simErr) };
+        }
+        const linked = kind === 'merchant' || kind === 'adminPackage'
+            ? await tryPreCheckLinkedValidatorClaim(secret, body?.linkedValidatorClaim)
+            : { linkedValidatorRedeemable: false };
+        return {
+            success: true,
+            preChecked: {
+                action,
+                contract: chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1,
+                account,
+                redeemHash,
+                rebateBps: '0',
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+                secret,
+                linkedValidatorRedeemable: linked.linkedValidatorRedeemable,
+                linkedValidatorClaim: linked.linkedValidatorClaim,
+            },
+        };
+    }
+    catch (error) {
+        return { success: false, error: humanizeReferralClaimRevert(error) };
+    }
+}
+const masterServerPort = 1111;
+const serverPort = 2222;
+/** Cluster 本地缓存 oracle，监听 CoNET 出块（约 6s/块），每 10 块（约 1 分钟）从 master 拉取 */
+const defaultOracle = { bnb: '', eth: '', usdc: '1', timestamp: 0, usdcad: '1', usdjpy: '150', usdcny: '7.2', usdhkd: '7.8', usdeur: '0.92', usdsgd: '1.35', usdtwd: '31' };
+let clusterOracleCache = { ...defaultOracle };
+const fetchOracleFromMaster = () => {
+    const opts = { hostname: 'localhost', path: '/api/oracleForCluster', port: masterServerPort, method: 'GET' };
+    const req = (0, node_http_1.request)(opts, (res) => {
+        let buf = '';
+        res.on('data', (c) => { buf += c; });
+        res.on('end', () => {
+            try {
+                const data = JSON.parse(buf);
+                if (data && typeof data === 'object') {
+                    clusterOracleCache = { ...defaultOracle, ...data };
+                    // 同步到 util.ts 全局 oracle，保证 quoteCurrencyToUsdc6 / nfcTopupPreparePayload 在
+                    // cluster 进程内也能读到 master 的真实链上汇率，而不是悄悄退回到任何 fallback 常量。
+                    (0, util_1.setOracleSnapshot)(data);
+                }
+            }
+            catch (_) { }
+        });
+    });
+    req.on('error', () => { });
+    req.end();
+};
+const startClusterOracleSync = () => {
+    const conetRpc = new ethers_1.ethers.JsonRpcProvider((0, util_1.resolveBeamioConetHttpRpcUrl)());
+    conetRpc.on('block', (blockNumber) => {
+        const n = typeof blockNumber === 'bigint' ? Number(blockNumber) : blockNumber;
+        if (n % 10 !== 0)
+            return;
+        fetchOracleFromMaster();
+    });
+    fetchOracleFromMaster();
+};
+/** JSON 序列化时把 BigInt 转为 string，避免 "Do not know how to serialize a BigInt" */
+function jsonStringifyWithBigInt(obj) {
+    return JSON.stringify(obj, (_key, value) => typeof value === 'bigint' ? value.toString() : value);
+}
+/** 递归将对象中所有 BigInt 转为 string，避免下游 RPC / JSON 序列化出错 */
+function convertBigIntToString(obj) {
+    if (obj === null || obj === undefined)
+        return obj;
+    if (typeof obj === 'bigint')
+        return obj.toString();
+    if (Array.isArray(obj))
+        return obj.map(convertBigIntToString);
+    if (typeof obj === 'object') {
+        const out = {};
+        for (const k of Object.keys(obj)) {
+            out[k] = convertBigIntToString(obj[k]);
+        }
+        return out;
+    }
+    return obj;
+}
+const postLocalhost = async (path, obj, _res) => {
+    const option = {
+        hostname: 'localhost',
+        path,
+        port: masterServerPort,
+        method: 'POST',
+        protocol: 'http:',
+        headers: {
+            'Content-Type': 'application/json'
+        }
+    };
+    const req = await (0, node_http_1.request)(option, res => {
+        res.pipe(_res);
+    });
+    req.once('error', (e) => {
+        (0, logger_1.logger)(safe_1.default.red(`[DEBUG] postLocalhost ${path} FAIL: ${e.message}`));
+        _res.status(502).json({ success: false, error: `Forward to master failed: ${e.message}` }).end();
+    });
+    req.write(jsonStringifyWithBigInt(obj));
+    req.end();
+};
+exports.postLocalhost = postLocalhost;
+/** 将 Stripe webhook 等 raw body POST 原样转发到 Master（签名头必须透传） */
+const postLocalhostRaw = (path, body, stripeSignature, _res) => {
+    const headers = {
+        'Content-Type': 'application/json',
+        'Content-Length': String(body.length),
+    };
+    if (stripeSignature) {
+        headers['stripe-signature'] = Array.isArray(stripeSignature) ? stripeSignature[0] : stripeSignature;
+    }
+    const option = {
+        hostname: 'localhost',
+        path,
+        port: masterServerPort,
+        method: 'POST',
+        protocol: 'http:',
+        headers,
+    };
+    const reqOut = (0, node_http_1.request)(option, (mres) => {
+        _res.status(mres.statusCode || 502);
+        mres.pipe(_res);
+    });
+    reqOut.once('error', (e) => {
+        (0, logger_1.logger)(safe_1.default.red(`[DEBUG] postLocalhostRaw ${path} FAIL: ${e.message}`));
+        _res.status(502).json({ success: false, error: `Forward to master failed: ${e.message}` }).end();
+    });
+    reqOut.write(body);
+    reqOut.end();
+};
+/** GET 请求转发到 master */
+const getLocalhost = (path, res) => {
+    const opts = { hostname: 'localhost', path, port: masterServerPort, method: 'GET' };
+    const req = (0, node_http_1.request)(opts, (masterRes) => { masterRes.pipe(res); });
+    req.on('error', (e) => { (0, logger_1.logger)(safe_1.default.red(`getLocalhost ${path} error:`), e.message); res.status(502).end(); });
+    req.end();
+};
+/** POST 请求转发到 master 并返回 body（用于需修改响应的场景） */
+const postLocalhostBuffer = (path, obj) => new Promise((resolve, reject) => {
+    const opts = {
+        hostname: 'localhost',
+        path,
+        port: masterServerPort,
+        method: 'POST',
+        protocol: 'http:',
+        headers: { 'Content-Type': 'application/json' }
+    };
+    const req = (0, node_http_1.request)(opts, (masterRes) => {
+        let buf = '';
+        masterRes.on('data', (c) => { buf += c; });
+        masterRes.on('end', () => resolve({ statusCode: masterRes.statusCode ?? 500, body: buf }));
+    });
+    req.on('error', (e) => reject(e));
+    req.write(jsonStringifyWithBigInt(obj));
+    req.end();
+});
+/** SUN 校验通过后 tag 未绑定时，同步转发 Master getUIDAssetsProvision（provision EOA + ensure AA）。 */
+const ensureNfcTagProvisionedViaMaster = async (params) => {
+    const prefix = params.logPrefix ?? '[ensureNfcTagProvision]';
+    (0, logger_1.logger)(safe_1.default.cyan(`${prefix} tagId=${params.tagIdHex.slice(0, 8)}... 未绑定，转发 Master 创建`));
+    const { statusCode, body } = await postLocalhostBuffer('/api/getUIDAssetsProvision', {
+        uid: params.uid,
+        tagIdHex: params.tagIdHex,
+        e: params.e,
+        c: params.c,
+        m: params.m,
+    });
+    let parsed;
+    try {
+        parsed = JSON.parse(body);
+    }
+    catch {
+        return { ok: false, statusCode: statusCode >= 400 ? statusCode : 500, error: 'Invalid provision response' };
+    }
+    if (statusCode !== 200 || !parsed.address || !ethers_1.ethers.isAddress(parsed.address)) {
+        return {
+            ok: false,
+            statusCode: statusCode >= 400 ? statusCode : 500,
+            error: parsed.error ?? 'Failed to provision NFC wallet',
+        };
+    }
+    const eoa = ethers_1.ethers.getAddress(parsed.address);
+    (0, logger_1.logger)(safe_1.default.green(`${prefix} tagId=${params.tagIdHex.slice(0, 8)}... provisioned EOA=${eoa.slice(0, 10)}...`));
+    return { ok: true, eoa };
+};
+/** GET 请求转发到 master 并返回 body（用于缓存） */
+const getLocalhostBuffer = (path) => new Promise((resolve, reject) => {
+    const opts = { hostname: 'localhost', path, port: masterServerPort, method: 'GET' };
+    const req = (0, node_http_1.request)(opts, (masterRes) => {
+        let buf = '';
+        masterRes.on('data', (c) => { buf += c; });
+        masterRes.on('end', () => resolve({ statusCode: masterRes.statusCode ?? 500, body: buf }));
+    });
+    req.on('error', (e) => reject(e));
+    req.end();
+});
+/** Cluster 预检：若有 requestHash，调用 checkRequestStatus，过期或已支付则返回 { ok: false }，否则 { ok: true } */
+const runRequestHashPreCheck = async (requestHash, validDays, payee) => {
+    if (!requestHash || !ethers_1.ethers.isHexString(requestHash) || ethers_1.ethers.dataLength(requestHash) !== 32)
+        return { ok: true };
+    if (!payee || !ethers_1.ethers.isAddress(payee))
+        return { ok: true };
+    try {
+        const qs = new URLSearchParams({ requestHash, validDays: String(Math.max(1, Math.floor(validDays))), payee }).toString();
+        const { statusCode, body } = await getLocalhostBuffer('/api/checkRequestStatus?' + qs);
+        if (statusCode !== 200)
+            return { ok: true };
+        const data = JSON.parse(body);
+        if (data.expired)
+            return { ok: false, error: 'Request expired' };
+        if (data.fulfilled)
+            return { ok: false, error: 'Request already paid' };
+        return { ok: true };
+    }
+    catch {
+        return { ok: true };
+    }
+};
+/** myCards 缓存：30 秒内相同查询直接返回，减轻 master 负荷 */
+const MY_CARDS_CACHE_TTL_MS = 30 * 1000;
+const myCardsCache = new Map();
+/** getAAAccount 缓存：30 秒 */
+const GET_AA_CACHE_TTL_MS = 30 * 1000;
+const getAAAccountCache = new Map();
+/** getBalance 缓存：30 秒 */
+const GET_BALANCE_CACHE_TTL_MS = 30 * 1000;
+const getBalanceCache = new Map();
+const GET_BUNIT_CACHE_TTL_MS = 30 * 1000;
+const getBUnitBalanceCache = new Map();
+const BASE_AA_SMART_WALLET_BALANCES_CACHE_TTL_MS = 30 * 1000;
+const baseAaSmartWalletBalancesCache = new Map();
+const getBUnitLedgerCache = new Map();
+/** 通用查询缓存：30 秒协议 */
+const QUERY_CACHE_TTL_MS = 30 * 1000;
+const redeemStatusBatchCache = new Map();
+const searchHelpCache = new Map();
+const getNFTMetadataCache = new Map();
+const ownerNftSeriesCache = new Map();
+const recentIssuedCouponSeriesCache = new Map();
+const cardActiveIssuedCouponSeriesCache = new Map();
+const cardActiveIssuedProductionSeriesCache = new Map();
+const seriesSharedMetadataCache = new Map();
+const mintMetadataCache = new Map();
+const issuedNftClaimWalletsCache = new Map();
+const getFollowStatusCache = new Map();
+(0, issuedCouponSeriesQueryCache_1.registerIssuedCouponSeriesQueryCacheInvalidator)((cardLo, issuedTokenId) => {
+    const prefix = `${cardLo}:`;
+    for (const k of cardActiveIssuedCouponSeriesCache.keys()) {
+        if (k.startsWith(prefix)) {
+            cardActiveIssuedCouponSeriesCache.delete(k);
+        }
+    }
+    for (const k of cardActiveIssuedProductionSeriesCache.keys()) {
+        if (k.startsWith(prefix)) {
+            cardActiveIssuedProductionSeriesCache.delete(k);
+        }
+    }
+    recentIssuedCouponSeriesCache.clear();
+    if (issuedTokenId) {
+        try {
+            const tk = String(BigInt(issuedTokenId.trim()));
+            seriesSharedMetadataCache.delete(`${cardLo}:${tk}`);
+        }
+        catch {
+            /* ignore */
+        }
+    }
+});
+function summarizeIssuedCouponIconForClusterLog(icon) {
+    const s = String(icon ?? '').trim();
+    if (!s)
+        return '(empty)';
+    const m = s.match(/hash=(0x[a-fA-F0-9]+)/i);
+    if (m)
+        return `hash=${m[1]} len=${s.length}`;
+    return `len=${s.length} head=${s.slice(0, 80)}`;
+}
+const getMyFollowStatusCache = new Map();
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function isValidSid(sid) {
+    return typeof sid === 'string' && UUID_V4_RE.test(sid);
+}
+/** PR #4 v3：cluster 是 N-worker 多进程，session store 改在 Master（单进程，唯一信源），cluster 全部 HTTP 代理。
+ *  详见 `beamioMaster.ts` 顶部 `MasterChargeSession` block 注释。
+ *
+ *  这里只暴露三个 helper：
+ *   - `masterSessionUpsert(sid, patch)` ← cluster sessionUpdate(...) 的实际承载（fire-and-forget，不阻塞热路径）
+ *   - `masterSessionGet(sid)`           ← GET /api/nfcUsdcChargeSession 透传 + orchestrator 内部 polling 用（如 awaitTopupSignature 走专用 consume 端点）
+ *   - `masterSessionConsumePosSig(sid)` ← orchestrator awaitTopupSignature 闭环原子消耗 POS 签名 */
+const masterSessionUpsert = async (sid, patch) => {
+    try {
+        const r = await postLocalhostBuffer('/api/chargeSessionUpsert', { sid, patch });
+        if (r.statusCode !== 200) {
+            (0, logger_1.logger)(safe_1.default.red(`[masterSessionUpsert] sid=${sid.slice(0, 8)}… HTTP ${r.statusCode} body=${r.body.slice(0, 200)}`));
+        }
+    }
+    catch (err) {
+        (0, logger_1.logger)(safe_1.default.red(`[masterSessionUpsert] sid=${sid.slice(0, 8)}… error: ${err?.message ?? err}`));
+    }
+};
+const masterSessionGet = async (sid) => {
+    const sidEnc = encodeURIComponent(sid);
+    return getLocalhostBuffer(`/api/chargeSessionGet?sid=${sidEnc}`);
+};
+const masterSessionConsumePosSig = async (sid) => {
+    try {
+        const r = await postLocalhostBuffer('/api/chargeSessionConsumePosSig', { sid });
+        const parsed = JSON.parse(r.body);
+        if (parsed.ok && typeof parsed.signature === 'string' && typeof parsed.signer === 'string') {
+            return { ok: true, signature: parsed.signature, signer: parsed.signer };
+        }
+        return { ok: false, error: parsed.error ?? 'no signature yet' };
+    }
+    catch (err) {
+        return { ok: false, error: err?.message ?? String(err) };
+    }
+};
+const ERC1155_METADATA_PATH_RE = /^(?:0x)?([0-9a-fA-F]{40})([0-9a-fA-F]{64})\.json$/;
+/** BusinessStartKet NFT metadata image（Beamio logo PNG → IPFS fragment） */
+const BUSINESS_START_KET_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x3e94721678833790ab22c27fd80d2206c90847094c7a7331513aff361f0c83e5';
+/** Fallback when series/card has no renderable image (ipfs hash; explorers get proxy via token #0 rewrite). */
+const DEFAULT_METADATA_IMAGE_URL = 'https://ipfs.conet.network/api/getFragment?hash=0x6022e4efb44990767d1faa1642f570ed8a49ab0417b370aaae35f84884061c97';
+/** EIP-1155 metadata schema `decimals` for token #0 (matches BeamioUserCard `POINTS_DECIMALS`). */
+const BEAMIO_POINTS_METADATA_DECIMALS = 6;
+/** Coupon / catalog issued-NFT: map banner + icon into OpenSea `image` (BaseScan only reads `image`). */
+const resolveBeamioSeriesExplorerImage = (meta) => {
+    const props = isJsonObject(meta.properties) ? meta.properties : {};
+    const couponNest = isJsonObject(props.beamioCoupon)
+        ? props.beamioCoupon
+        : isJsonObject(meta.beamioCoupon)
+            ? meta.beamioCoupon
+            : null;
+    const productionNest = isJsonObject(props.beamioProduction)
+        ? props.beamioProduction
+        : isJsonObject(meta.beamioProduction)
+            ? meta.beamioProduction
+            : null;
+    const fromCoupon = couponNest
+        ? firstNonEmptyString(couponNest.image, couponNest.couponImage, couponNest.coupon_image, couponNest.icon)
+        : undefined;
+    const fromProduction = productionNest
+        ? firstNonEmptyString(productionNest.image, productionNest.productionImage, productionNest.production_image, productionNest.icon)
+        : undefined;
+    return firstNonEmptyString(meta.image, meta.image_url, meta.imageUrl, meta.couponImage, meta.coupon_image, meta.productionImage, meta.production_image, meta.icon, fromCoupon, fromProduction, props.image, props.couponImage, props.coupon_image, props.productionImage, props.production_image, props.icon);
+};
+const isJsonObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+const firstNonEmptyString = (...values) => {
+    for (const value of values) {
+        if (typeof value !== 'string')
+            continue;
+        const trimmed = value.trim();
+        if (trimmed)
+            return trimmed;
+    }
+    return undefined;
+};
+const mergeMetadataObjects = (...sources) => {
+    const out = {};
+    for (const source of sources) {
+        if (!isJsonObject(source))
+            continue;
+        Object.assign(out, source);
+    }
+    return out;
+};
+const ensureMetadataImage = (meta) => {
+    const props = isJsonObject(meta.properties) ? meta.properties : {};
+    const image = firstNonEmptyString(resolveBeamioSeriesExplorerImage(meta), meta.image, meta.image_url, meta.imageUrl, props.image, DEFAULT_METADATA_IMAGE_URL);
+    if (image)
+        meta.image = image;
+    return meta;
+};
+const normalizeExplorerMetadata = (meta, defaults) => {
+    const props = isJsonObject(meta.properties) ? meta.properties : {};
+    const out = {
+        name: firstNonEmptyString(meta.name, meta.title, defaults.name) ?? defaults.name,
+        description: firstNonEmptyString(meta.description, defaults.description) ?? defaults.description,
+    };
+    const image = firstNonEmptyString(meta.image, meta.image_url, meta.imageUrl, props.image, defaults.image);
+    if (image)
+        out.image = image;
+    const externalUrl = firstNonEmptyString(meta.external_url, meta.externalUrl, defaults.externalUrl);
+    if (externalUrl)
+        out.external_url = externalUrl;
+    const attrs = Array.isArray(meta.attributes) ? meta.attributes : defaults.attributes;
+    if (attrs && attrs.length > 0)
+        out.attributes = attrs;
+    const backgroundColor = firstNonEmptyString(meta.background_color, props.background_color);
+    if (backgroundColor)
+        out.background_color = backgroundColor;
+    if (Object.keys(props).length > 0)
+        out.properties = props;
+    if (defaults.extra)
+        Object.assign(out, defaults.extra);
+    for (const [key, value] of Object.entries(meta)) {
+        if (out[key] === undefined)
+            out[key] = value;
+    }
+    if (defaults.decimals !== undefined)
+        out.decimals = defaults.decimals;
+    return out;
+};
+/** CoNET BusinessStartKet ERC-1155：Blockscout / 钱包读 uri(id) 后拉取的 JSON（须含 `name`）。 */
+function buildBusinessStartKetExplorerMetadata(tokenIdBigInt) {
+    const tokenId = tokenIdBigInt.toString();
+    const baseName = 'BusinessStartKet NFT';
+    const name = tokenIdBigInt === 0n ? baseName : `${baseName} #${tokenId}`;
+    const description = tokenIdBigInt === 0n
+        ? 'Business Starter Kit certificate on CoNET. Required to issue a merchant program card on Beamio.'
+        : `BusinessStartKet ERC-1155 token #${tokenId} on CoNET.`;
+    return normalizeExplorerMetadata({}, {
+        name,
+        description,
+        image: BUSINESS_START_KET_METADATA_IMAGE_URL,
+        externalUrl: 'https://beamio.app/app/',
+        decimals: 0,
+        attributes: [
+            { trait_type: 'asset_type', value: 'BUSINESS_START_KET' },
+            { trait_type: 'token_id', value: tokenId },
+            { trait_type: 'contract', value: chainAddresses_1.CONET_BUSINESS_START_KET },
+        ],
+    });
+}
+/** CoNET BusinessStartKet 合约级 metadata（`contractURI()` → Blockscout 集合名称） */
+function buildBusinessStartKetContractMetadata() {
+    return normalizeExplorerMetadata({}, {
+        name: 'BusinessStartKet NFT',
+        description: 'Business Starter Kit ERC-1155 on CoNET. Token #0 is the merchant card issuance certificate on Beamio.',
+        image: BUSINESS_START_KET_METADATA_IMAGE_URL,
+        externalUrl: 'https://beamio.app/app/',
+        attributes: [
+            { trait_type: 'asset_type', value: 'BUSINESS_START_KET' },
+            { trait_type: 'contract', value: chainAddresses_1.CONET_BUSINESS_START_KET },
+            { trait_type: 'symbol', value: 'BSK' },
+        ],
+    });
+}
+const SC = db_2.beamio_ContractPool[0].constAccountRegistry;
+const userOwnershipCheck = async (accountName, wallet) => {
+    try {
+        const accountWallet = await SC.getOwnerByAccountName(accountName);
+        if (accountWallet !== ethers_1.ethers.ZeroAddress && accountWallet.toLowerCase() !== wallet.toLowerCase()) {
+            return false;
+        }
+    }
+    catch (ex) {
+        // 新 registry 对未注册名字返回 0x（BAD_DATA），等价于「名字未占用」→ 当作通过。
+        // 真正的 RPC/合约错误才记日志，避免日常注册流程被误报为 ownership 失败。
+        if (!(0, db_2.isOnchainEmptyResult)(ex)) {
+            (0, logger_1.logger)(`userOwnershipCheck Error! ${ex.message}`);
+        }
+    }
+    return true;
+};
+const getFollowCheck = async (wallet, followAddress) => {
+    try {
+        const isFollowing = await SC.isFollowingAddress(wallet, followAddress);
+        return isFollowing;
+    }
+    catch (ex) {
+        (0, logger_1.logger)(`getFollowCheck Error! ${ex.message}`);
+    }
+    return null;
+};
+const DEBUG_INBOUND = process.env.DEBUG_INBOUND === '1' ||
+    process.env.DEBUG_INBOUND === 'true' ||
+    process.env.NODE_ENV !== 'production';
+const truncateValue = (value, maxLen = 600) => {
+    if (value == null)
+        return value;
+    if (typeof value === 'string') {
+        return value.length > maxLen ? `${value.slice(0, maxLen)}...<truncated ${value.length - maxLen} chars>` : value;
+    }
+    if (typeof value === 'bigint')
+        return value.toString();
+    if (Array.isArray(value)) {
+        const maxItems = 20;
+        const mapped = value.slice(0, maxItems).map((v) => truncateValue(v, maxLen));
+        if (value.length > maxItems)
+            mapped.push(`...<truncated ${value.length - maxItems} items>`);
+        return mapped;
+    }
+    if (typeof value === 'object') {
+        const obj = value;
+        const out = {};
+        for (const [k, v] of Object.entries(obj))
+            out[k] = truncateValue(v, maxLen);
+        return out;
+    }
+    return value;
+};
+const logInboundDebug = (req) => {
+    if (!DEBUG_INBOUND)
+        return;
+    const body = truncateValue(req.body);
+    const query = truncateValue(req.query);
+    (0, logger_1.logger)(safe_1.default.gray(`[INBOUND][Cluster] ${req.method} ${req.originalUrl} ip=${(0, util_1.getClientIp)(req)}`), (0, node_util_1.inspect)({ query, body }, false, 4, true));
+};
+/** 与 Master `couponWorkflowDebugEnabled` 对齐：设为 1 时 Cluster 对本 workflow 多打一行脱敏摘要。勿记录 redeem 明文。 */
+const CLUSTER_COUPON_WORKFLOW_DEBUG = process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === '1' ||
+    process.env.BEAMIO_WORKFLOW_COUPON_DEBUG === 'true';
+function redactSignatureForCouponLog(sig) {
+    if (typeof sig !== 'string' || !sig.startsWith('0x'))
+        return `(nonHex:${String(sig ?? '').slice(0, 24)})`;
+    if (sig.length <= 26)
+        return '0x(short)';
+    return `${sig.slice(0, 12)}…${sig.slice(-8)}`;
+}
+function metadataExtraKeysForCouponLog(extra) {
+    if (extra == null)
+        return undefined;
+    if (typeof extra === 'string') {
+        const s = extra.trim();
+        if (!s)
+            return undefined;
+        try {
+            const p = JSON.parse(s);
+            return p != null && typeof p === 'object' && !Array.isArray(p) ? Object.keys(p) : ['<non-object json>'];
+        }
+        catch {
+            return ['<invalid json>'];
+        }
+    }
+    if (typeof extra === 'object' && !Array.isArray(extra))
+        return Object.keys(extra);
+    return undefined;
+}
+/** `/api/cardCreateIssuedNft` / `/api/executeForOwner` 等请求体摘要（无主密钥、不含 codes）。 */
+function sanitizeExecuteForOwnerCouponWorkflowBody(body) {
+    if (!body || typeof body !== 'object')
+        return {};
+    const data = typeof body.data === 'string' ? body.data : '';
+    const sel = data.length >= 10 ? data.slice(0, 10) : '(no-calldata)';
+    return {
+        cardAddress: body.cardAddress,
+        selector: sel,
+        dataByteLen: typeof data === 'string' && data.startsWith('0x') ? Math.floor((data.length - 2) / 2) : 0,
+        deadline: body.deadline,
+        nonceSnippet: typeof body.nonce === 'string' ? `${body.nonce.slice(0, 14)}…` : body.nonce,
+        ownerSignature: redactSignatureForCouponLog(body.ownerSignature),
+        descriptionLen: typeof body.description === 'string' ? body.description.length : undefined,
+        hasImageUrl: !!(typeof body.image === 'string' && body.image.trim()),
+        background_color: typeof body.background_color === 'string' ? String(body.background_color).slice(0, 42) : undefined,
+        metadata_extra_properties_keys: metadataExtraKeysForCouponLog(body.metadata_extra_properties),
+    };
+}
+/** `cardCreateRedeem`：**禁止**序列化 codes（服务端亦不得存明文；日志只计数）。 */
+function sanitizeCardCreateRedeemWorkflowBody(body) {
+    if (!body || typeof body !== 'object')
+        return {};
+    const data = typeof body.data === 'string' ? body.data : '';
+    const sel = data.length >= 10 ? data.slice(0, 10) : '(no-calldata)';
+    const codes = body.codes;
+    const codeCount = Array.isArray(codes) ? codes.length : codes != null ? 1 : 0;
+    return {
+        cardAddress: body.cardAddress,
+        selector: sel,
+        dataByteLen: typeof data === 'string' && data.startsWith('0x') ? Math.floor((data.length - 2) / 2) : 0,
+        clientCodesCount_reportOnlyNotLogged: codeCount,
+        points6: body.points6,
+        validAfter: body.validAfter,
+        validBefore: body.validBefore,
+        tokenIds: body.tokenIds,
+        amounts: body.amounts,
+        attr: body.attr,
+        deadline: body.deadline,
+        nonceSnippet: typeof body.nonce === 'string' ? `${body.nonce.slice(0, 14)}…` : body.nonce,
+        ownerSignature: redactSignatureForCouponLog(body.ownerSignature),
+    };
+}
+const routing = (router) => {
+    router.use((req, _res, next) => {
+        logInboundDebug(req);
+        next();
+    });
+    /** GET /api/sun - 校验 Beamio SUN 动态 URL。valid 时：若 tagID 已绑定则返回 eoa/aa；未绑定则转发 Master 创建钱包并返回 eoa/aa。 */
+    router.get('/sun', async (req, res) => {
+        try {
+            const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+            const result = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(url);
+            const shortHex = (v, k = 8) => !v ? null : v.length <= k * 2 ? v : `${v.slice(0, k)}...${v.slice(-k)}`;
+            (0, BeamioSun_1.logSunDebug)(result.valid ? 'verify_ok' : 'verify_fail', req, {
+                uidHex: result.uidHex,
+                counterHex: result.counterHex,
+                lastCounterHex: result.counterState?.lastCounterHex ?? null,
+                tagIdHex: result.tagIdHex,
+                version: result.version,
+                macLayout: result.macLayout,
+                payloadLayout: result.payloadLayout,
+                macValid: result.macValid,
+                counterFresh: result.counterFresh,
+                embeddedUidMatchesInput: result.embeddedUidMatchesInput,
+                embeddedCounterMatchesInput: result.embeddedCounterMatchesInput,
+                valid: result.valid,
+                eHex: shortHex(result.eHex),
+                mHex: result.mHex,
+                expectedMacHex: result.expectedMacHex,
+                macInputAscii: result.macInputAscii,
+            });
+            if (!result.valid) {
+                return res.status(403).json(result).end();
+            }
+            const eoa = await (0, db_2.getNfcRecipientAddressByTagId)(result.tagIdHex);
+            if (eoa) {
+                const eoaAddr = ethers_1.ethers.getAddress(eoa);
+                const aaAddr = await resolveBeamioAccountOf(eoaAddr);
+                let hasDeployedAA = false;
+                if (aaAddr && aaAddr !== ethers_1.ethers.ZeroAddress) {
+                    const code = await providerBase.getCode(aaAddr);
+                    hasDeployedAA = !!(code && code !== '0x' && code.length > 2);
+                }
+                if (hasDeployedAA) {
+                    (0, getUIDAssetsLogic_1.scheduleEnsureNfcBeamioTagForEoa)(eoaAddr, result.uidHex, result.tagIdHex, null);
+                }
+                return res.status(200).json({ ...result, eoa: eoaAddr, aa: aaAddr ?? undefined }).end();
+            }
+            (0, logger_1.logger)(safe_1.default.cyan(`[sun] tagId=${result.tagIdHex.slice(0, 8)}... 未绑定钱包，转发 Master 创建`));
+            (0, exports.postLocalhost)('/api/sunProvision', { uid: result.uidHex, tagIdHex: result.tagIdHex, sunResult: result }, res);
+        }
+        catch (e) {
+            (0, BeamioSun_1.logSunDebug)('verify_fail', req, { error: e?.message ?? String(e), uidHex: req.query?.uid ?? null });
+            return res.status(403).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    /** GET /api/manifest.json - 动态 manifest，cluster 独自处理，无需 master。支持 ?start_url= 或从 Referer 获取 */
+    router.get('/manifest.json', (req, res) => {
+        const startUrl = req.query.start_url || req.get('Referer') || '';
+        const protocol = req.get('X-Forwarded-Proto') || req.protocol || 'https';
+        const host = req.get('Host') || 'beamio.app';
+        const origin = `${protocol}://${host}`;
+        const fallbackStartUrl = `${origin}/app/`;
+        const url = startUrl && startUrl.startsWith('http') ? startUrl : fallbackStartUrl;
+        const manifest = {
+            id: '/app/',
+            short_name: 'Beamio',
+            name: 'Beamio APP',
+            start_url: url,
+            scope: '/app/',
+            display: 'standalone',
+            theme_color: '#0d0d0d',
+            background_color: '#0d0d0d',
+            icons: [
+                { src: `${origin}/app/logo192.png`, sizes: '192x192', type: 'image/png', purpose: 'any' },
+                { src: `${origin}/app/logo512.png`, sizes: '512x512', type: 'image/png', purpose: 'any' },
+                { src: `${origin}/app/logo512-maskable.png`, sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+            ],
+            shortcuts: [{ name: 'Open Beamio', short_name: 'Beamio', url: '/app/', icons: [{ src: `${origin}/app/logo192.png`, sizes: '192x192' }] }],
+        };
+        res.setHeader('Content-Type', 'application/manifest+json');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+        res.json(manifest);
+    });
+    router.get('/search-users', (req, res) => {
+        (0, db_2.searchUsers)(req, res);
+    });
+    const DISTINCT_CARD_OWNERS_CACHE_TTL_MS = 60_000;
+    let distinctCardOwnersCache = null;
+    const getCachedDistinctBeamioCardOwnerSet = async () => {
+        const now = Date.now();
+        if (distinctCardOwnersCache && distinctCardOwnersCache.expiry > now) {
+            return distinctCardOwnersCache.addrs;
+        }
+        const list = await (0, db_2.getDistinctBeamioCardOwnerAddressesLower)();
+        const addrs = new Set(list.map((x) => x.toLowerCase()));
+        distinctCardOwnersCache = { addrs, expiry: now + DISTINCT_CARD_OWNERS_CACHE_TTL_MS };
+        return addrs;
+    };
+    const FACTORY_CARDS_OF_OWNER_ABI = ['function cardsOfOwner(address owner) view returns (address[])'];
+    const CARD_ADMIN_ABI_OWNER_AND_LIST = [
+        'function owner() view returns (address)',
+        'function getAdminListWithMetadata() view returns (address[] admins, string[] metadatas, address[] parents)',
+    ];
+    const collectWalletRelatedCardAddresses = async (walletRaw, extraCardAddressesCsv) => {
+        const out = new Set();
+        if (extraCardAddressesCsv?.trim()) {
+            for (const part of extraCardAddressesCsv.split(',')) {
+                const t = part.trim();
+                if (t && ethers_1.ethers.isAddress(t))
+                    out.add(ethers_1.ethers.getAddress(t));
+            }
+        }
+        const wTrim = walletRaw?.trim();
+        if (!wTrim || !ethers_1.ethers.isAddress(wTrim)) {
+            return Array.from(out);
+        }
+        const wallet = ethers_1.ethers.getAddress(wTrim);
+        let eoa = wallet;
+        try {
+            const code = await providerBase.getCode(wallet);
+            if (code && code !== '0x' && code.length > 2) {
+                const aa = new ethers_1.ethers.Contract(wallet, ['function owner() view returns (address)'], providerBase);
+                const owner = await aa.owner();
+                if (owner && owner !== ethers_1.ethers.ZeroAddress)
+                    eoa = ethers_1.ethers.getAddress(owner);
+            }
+        }
+        catch {
+            /* treat as EOA */
+        }
+        try {
+            const pos = await (0, db_2.getPosTerminalCardAddressForWallet)(eoa);
+            if (pos)
+                out.add(ethers_1.ethers.getAddress(pos));
+        }
+        catch {
+            /* ignore */
+        }
+        try {
+            const fac = new ethers_1.ethers.Contract(chainAddresses_1.CONET_CARD_FACTORY, FACTORY_CARDS_OF_OWNER_ABI, (0, beamioUserCardChain_1.providerForUserCardChain)('conet'));
+            const cards = (await fac.cardsOfOwner(eoa));
+            const cap = 48;
+            for (const c of (cards ?? []).slice(0, cap)) {
+                if (c && ethers_1.ethers.isAddress(c) && c !== ethers_1.ethers.ZeroAddress)
+                    out.add(ethers_1.ethers.getAddress(c));
+            }
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.gray(`[search-users-by-card-owner-or-admin] cardsOfOwner failed: ${e?.message ?? e}`));
+        }
+        return Array.from(out);
+    };
+    const buildOwnerOrAdminAllowSetForCards = async (cardAddrs) => {
+        const allow = new Set();
+        const unique = [...new Set(cardAddrs.map((c) => ethers_1.ethers.getAddress(c)))];
+        await Promise.all(unique.map(async (cardAddr) => {
+            try {
+                const card = new ethers_1.ethers.Contract(cardAddr, CARD_ADMIN_ABI_OWNER_AND_LIST, (0, beamioUserCardChain_1.providerForUserCardChain)('conet'));
+                const [owner, adminResult] = await Promise.all([
+                    card.owner(),
+                    card.getAdminListWithMetadata(),
+                ]);
+                const [admins] = adminResult;
+                if (owner && owner !== ethers_1.ethers.ZeroAddress)
+                    allow.add(ethers_1.ethers.getAddress(owner).toLowerCase());
+                for (const a of admins ?? []) {
+                    if (a && ethers_1.ethers.isAddress(a) && a !== ethers_1.ethers.ZeroAddress)
+                        allow.add(ethers_1.ethers.getAddress(a).toLowerCase());
+                }
+            }
+            catch (e) {
+                (0, logger_1.logger)(safe_1.default.gray(`[search-users-by-card-owner-or-admin] card ${cardAddr} admin fetch failed: ${e?.message ?? e}`));
+            }
+        }));
+        return allow;
+    };
+    /**
+     * GET /api/search-users-by-card-owner-or-admin?keyward=...&wallet=0x...&extraCardAddresses=0x...,0x...
+     * 先按 search-users 逻辑查 BeamioTag，再过滤：accounts.address 在 beamio_cards 登记过的发卡 owner，或与 wallet 关联卡（POS 绑定卡 + CoNET factory.cardsOfOwner + extra）链上 owner/admin 集合命中。
+     * 无 wallet 时仅保留「DB 登记发卡 owner」命中项（链上 admin 需传 wallet 或 extraCardAddresses）。
+     */
+    router.get('/search-users-by-card-owner-or-admin', async (req, res) => {
+        const { keyward, wallet, extraCardAddresses } = req.query;
+        const _keywork = String(keyward || '').trim().replace(/^@+/, '');
+        if (!_keywork) {
+            return res.status(404).end();
+        }
+        try {
+            const raw = await (0, db_2.searchUsersResultsForKeyward)(_keywork);
+            if ('error' in raw) {
+                return res.status(500).json({ ok: false, error: raw.error }).end();
+            }
+            const results = raw.results ?? [];
+            const ownerSet = await getCachedDistinctBeamioCardOwnerSet();
+            let chainAllow = new Set();
+            const walletTrim = wallet?.trim();
+            const extraTrim = extraCardAddresses?.trim();
+            if ((walletTrim && ethers_1.ethers.isAddress(walletTrim)) || extraTrim) {
+                const cards = await collectWalletRelatedCardAddresses(walletTrim && ethers_1.ethers.isAddress(walletTrim) ? walletTrim : undefined, extraTrim);
+                if (cards.length > 0) {
+                    chainAllow = await buildOwnerOrAdminAllowSetForCards(cards);
+                }
+            }
+            const filtered = results.filter((row) => {
+                const addr = typeof row?.address === 'string' ? row.address.toLowerCase() : '';
+                if (!addr)
+                    return false;
+                if (ownerSet.has(addr))
+                    return true;
+                if (chainAllow.has(addr))
+                    return true;
+                return false;
+            });
+            return res.status(200).json({ results: filtered }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[search-users-by-card-owner-or-admin] ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.message ?? 'Internal error' }).end();
+        }
+    });
+    /** GET /api/getTerminalProfile - 终端首页用：返回当前钱包的 beamio profile 及上层 admin（merchant）的 profile。供 Android NdefScreen 头部展示。 */
+    router.get('/getTerminalProfile', async (req, res) => {
+        const { wallet } = req.query;
+        if (!wallet || typeof wallet !== 'string' || !wallet.trim() || !ethers_1.ethers.isAddress(wallet.trim())) {
+            return res.status(400).json({ ok: false, error: 'Missing or invalid wallet' }).end();
+        }
+        try {
+            const addr = ethers_1.ethers.getAddress(wallet.trim());
+            // Resolve AA to EOA (accounts table stores EOA)
+            let eoa = addr;
+            try {
+                const code = await providerBase.getCode(addr);
+                if (code && code !== '0x' && code.length > 2) {
+                    const aa = new ethers_1.ethers.Contract(addr, ['function owner() view returns (address)'], providerBase);
+                    const owner = await aa.owner();
+                    if (owner && owner !== ethers_1.ethers.ZeroAddress)
+                        eoa = ethers_1.ethers.getAddress(owner);
+                }
+            }
+            catch (_) { /* not AA, use as-is */ }
+            const profileRet = await (0, db_2._searchExactByAddress)(eoa.toLowerCase());
+            const profileRow = profileRet?.results?.[0];
+            const profile = profileRow ? {
+                accountName: profileRow.username ?? profileRow.accountName,
+                first_name: profileRow.first_name,
+                last_name: profileRow.last_name,
+                image: profileRow.image,
+                address: profileRow.address,
+            } : null;
+            let adminProfile = null;
+            try {
+                const posMgmt = new ethers_1.ethers.Contract(chainAddresses_1.MERCHANT_POS_MANAGEMENT_CONET, ['function getPOSMerchant(address) view returns (address)'], providerConet);
+                const merchant = await posMgmt.getPOSMerchant(eoa);
+                if (merchant && merchant !== ethers_1.ethers.ZeroAddress) {
+                    const adminRet = await (0, db_2._searchExactByAddress)(ethers_1.ethers.getAddress(merchant).toLowerCase());
+                    const adminRow = adminRet?.results?.[0];
+                    if (adminRow) {
+                        adminProfile = {
+                            accountName: adminRow.username ?? adminRow.accountName,
+                            first_name: adminRow.first_name,
+                            last_name: adminRow.last_name,
+                            image: adminRow.image,
+                            address: adminRow.address,
+                        };
+                    }
+                }
+            }
+            catch (e) {
+                (0, logger_1.logger)(safe_1.default.gray(`[getTerminalProfile] getPOSMerchant failed: ${e?.message ?? e}`));
+            }
+            return res.status(200).json({ ok: true, profile, adminProfile }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[getTerminalProfile] error: ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.message ?? 'Internal error' }).end();
+        }
+    });
+    /** GET /api/getCardAdminInfo?cardAddress=0x...&wallet=0x... - 从 BeamioUserCard 卡合约获取 owner 与 admin 列表。cardAddress 必填（终端登记的商户程序卡）。wallet 可选：若提供则返回该终端的上层 admin（upperAdmin）。 */
+    const CARD_ADMIN_ABI = [
+        'function owner() view returns (address)',
+        'function getAdminListWithMetadata() view returns (address[] admins, string[] metadatas, address[] parents)',
+        'function getAdminSubordinatesWithMetadata(address admin) view returns (address[] subordinates, string[] metadatas, address[] parents)',
+    ];
+    router.get('/getCardAdminInfo', async (req, res) => {
+        const { cardAddress: cardAddrQ, wallet: walletQ } = req.query;
+        const cardAddrRaw = cardAddrQ?.trim() ?? '';
+        if (!cardAddrRaw || !ethers_1.ethers.isAddress(cardAddrRaw)) {
+            return res.status(400).json({ ok: false, error: 'cardAddress is required' }).end();
+        }
+        if ((0, apiExcludedUserCards_1.isApiExcludedUserCard)(cardAddrRaw)) {
+            return res.status(404).json({ ok: false, error: 'Card not found' }).end();
+        }
+        const cardAddr = ethers_1.ethers.getAddress(cardAddrRaw);
+        try {
+            const cardChain = await (0, beamioUserCardChain_1.resolveUserCardChain)(cardAddr);
+            const cardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(cardChain);
+            const card = new ethers_1.ethers.Contract(ethers_1.ethers.getAddress(cardAddr), CARD_ADMIN_ABI, cardProvider);
+            const [owner, adminResult] = await Promise.all([
+                card.owner(),
+                card.getAdminListWithMetadata(),
+            ]);
+            const [admins, metadatas, parents] = adminResult;
+            const ownerAddr = owner && owner !== ethers_1.ethers.ZeroAddress ? ethers_1.ethers.getAddress(owner) : null;
+            const result = {
+                ok: true,
+                owner: ownerAddr,
+                admins: (admins ?? []).map((a) => ethers_1.ethers.getAddress(a)),
+                metadatas: metadatas ?? [],
+                parents: (parents ?? []).map((p) => ethers_1.ethers.getAddress(p)),
+            };
+            if (walletQ?.trim() && ethers_1.ethers.isAddress(walletQ.trim()) && ownerAddr) {
+                const terminal = ethers_1.ethers.getAddress(walletQ.trim());
+                const adminsNorm = (admins ?? []).map((a) => ethers_1.ethers.getAddress(a).toLowerCase());
+                const idx = adminsNorm.indexOf(terminal.toLowerCase());
+                if (idx >= 0) {
+                    const p = (parents ?? [])[idx];
+                    result.upperAdmin = p && p !== ethers_1.ethers.ZeroAddress ? ethers_1.ethers.getAddress(p) : ownerAddr;
+                }
+                else {
+                    const [subsOwner] = await card.getAdminSubordinatesWithMetadata(ownerAddr);
+                    const subsOwnerNorm = (subsOwner ?? []).map((s) => ethers_1.ethers.getAddress(s).toLowerCase());
+                    if (subsOwnerNorm.includes(terminal.toLowerCase())) {
+                        result.upperAdmin = ownerAddr;
+                    }
+                    else {
+                        for (let i = 0; i < (admins ?? []).length; i++) {
+                            const adminAddr = ethers_1.ethers.getAddress((admins ?? [])[i]);
+                            const [subs] = await card.getAdminSubordinatesWithMetadata(adminAddr);
+                            const subsNorm = (subs ?? []).map((s) => ethers_1.ethers.getAddress(s).toLowerCase());
+                            if (subsNorm.includes(terminal.toLowerCase())) {
+                                result.upperAdmin = adminAddr;
+                                break;
+                            }
+                        }
+                        if (result.upperAdmin === undefined)
+                            result.upperAdmin = null;
+                    }
+                }
+            }
+            return res.status(200).json(result).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[getCardAdminInfo] error: ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.message ?? 'Internal error' }).end();
+        }
+    });
+    /**
+     * GET /api/myPosAddress?wallet=0x... 或 POST JSON { "wallet"|"posEOA"|"address": "0x..." }
+     * — POS 终端 EOA 已通过 Registration Device（cardAddAdmin）登记后，返回该终端绑定的 BeamioUserCard 地址。
+     * Cluster 直读 DB，不转发 Master。
+     */
+    const parseMyPosWallet = (req) => {
+        const q = req.query;
+        const fromQuery = q.wallet?.trim() || q.posEOA?.trim() || q.address?.trim();
+        if (fromQuery)
+            return fromQuery;
+        const b = req.body && typeof req.body === 'object' ? req.body : {};
+        const fromBody = (typeof b.wallet === 'string' && b.wallet.trim()) ||
+            (typeof b.posEOA === 'string' && b.posEOA.trim()) ||
+            (typeof b.address === 'string' && b.address.trim()) ||
+            '';
+        return fromBody || null;
+    };
+    const myPosAddressHandler = async (req, res) => {
+        const raw = parseMyPosWallet(req);
+        if (!raw || !ethers_1.ethers.isAddress(raw)) {
+            return res.status(400).json({ ok: false, error: 'wallet or posEOA (address) required' }).end();
+        }
+        try {
+            const posEoa = ethers_1.ethers.getAddress(raw);
+            const row = await (0, db_2.getPosTerminalCardBindingRow)(posEoa);
+            if (!row?.cardAddress) {
+                return res
+                    .status(404)
+                    .json({ ok: false, error: 'No merchant card registered for this terminal in DB' })
+                    .end();
+            }
+            const { cardAddress, terminalMetadata, txHash } = row;
+            const rejectStaleBinding = async (reason, error, extra) => {
+                // Multi-merchant: only clear this card row — never wipe all bindings for the POS.
+                await (0, db_2.deletePosTerminalCardBinding)(posEoa, cardAddress);
+                (0, logger_1.logger)(safe_1.default.yellow(`[myPosAddress] cleared stale binding pos=${posEoa} card=${cardAddress} reason=${reason}`));
+                return res
+                    .status(404)
+                    .json({
+                    ok: false,
+                    error,
+                    requiresPermissionReRequest: true,
+                    reason,
+                    staleCardAddress: cardAddress,
+                    ...extra,
+                })
+                    .end();
+            };
+            // Blacklisted / API-excluded merchant cards must not keep POS bound — force re-request.
+            if ((0, apiExcludedUserCards_1.isApiExcludedUserCard)(cardAddress)) {
+                return rejectStaleBinding('blacklisted', 'Bound merchant card is excluded; re-request POS permission on the current program card');
+            }
+            // Bound card must be the owner's newest non-excluded merchant program card.
+            const cardRow = await (0, db_2.getCardByAddress)(cardAddress);
+            const ownerRaw = cardRow?.cardOwner?.trim();
+            if (ownerRaw && ethers_1.ethers.isAddress(ownerRaw)) {
+                const ownerCards = await (0, db_2.listMerchantCardAddressesForOwnerNewestFirst)(ownerRaw);
+                const latestUsable = ownerCards.find((c) => !(0, apiExcludedUserCards_1.isApiExcludedUserCard)(c.cardAddress));
+                if (latestUsable &&
+                    latestUsable.cardAddress.toLowerCase() !== cardAddress.toLowerCase()) {
+                    return rejectStaleBinding('stale_owner_card', 'Bound merchant card is not the owner latest program card; re-request POS permission', {
+                        latestCardAddress: latestUsable.cardAddress,
+                        cardOwner: ethers_1.ethers.getAddress(ownerRaw),
+                    });
+                }
+            }
+            return res
+                .status(200)
+                .json({
+                ok: true,
+                cardAddress,
+                myPosAddress: cardAddress,
+                terminalMetadata: terminalMetadata ?? undefined,
+                bindingTxHash: txHash ?? undefined,
+            })
+                .end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[myPosAddress] error: ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.message ?? 'Internal error' }).end();
+        }
+    };
+    router.get('/myPosAddress', myPosAddressHandler);
+    router.post('/myPosAddress', myPosAddressHandler);
+    /** GET /api/myPosAddresses?wallet=0x… — all merchant card bindings for this POS (multi-workspace). */
+    router.get('/myPosAddresses', async (req, res) => {
+        const raw = parseMyPosWallet(req);
+        if (!raw || !ethers_1.ethers.isAddress(raw)) {
+            return res.status(400).json({ ok: false, error: 'wallet or posEOA (address) required' }).end();
+        }
+        try {
+            const posEoa = ethers_1.ethers.getAddress(raw);
+            const items = await (0, db_2.listPosTerminalCardBindingsForWallet)(posEoa);
+            return res.status(200).json({ ok: true, wallet: posEoa, items }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[myPosAddresses] error: ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.message ?? 'Internal error' }).end();
+        }
+    });
+    /**
+     * POST /api/setActivePosAddress — set which bound merchant card is active for Charge/Top-up/myPosAddress.
+     * Body: { wallet, cardAddress }. Card must already be a binding row.
+     */
+    router.post('/setActivePosAddress', async (req, res) => {
+        const b = req.body && typeof req.body === 'object' ? req.body : {};
+        const walletRaw = (typeof b.wallet === 'string' && b.wallet.trim()) ||
+            (typeof b.posEOA === 'string' && b.posEOA.trim()) ||
+            '';
+        const cardRaw = typeof b.cardAddress === 'string' ? b.cardAddress.trim() : '';
+        if (!walletRaw || !ethers_1.ethers.isAddress(walletRaw)) {
+            return res.status(400).json({ ok: false, error: 'wallet (address) required' }).end();
+        }
+        if (!cardRaw || !ethers_1.ethers.isAddress(cardRaw)) {
+            return res.status(400).json({ ok: false, error: 'cardAddress required' }).end();
+        }
+        try {
+            const result = await (0, db_2.setActivePosTerminalCardBinding)(walletRaw, cardRaw);
+            if (!result.ok) {
+                return res
+                    .status(404)
+                    .json({ ok: false, error: result.error })
+                    .end();
+            }
+            const active = await (0, db_2.getPosTerminalCardBindingRow)(walletRaw);
+            return res
+                .status(200)
+                .json({
+                ok: true,
+                wallet: ethers_1.ethers.getAddress(walletRaw),
+                cardAddress: active?.cardAddress ?? ethers_1.ethers.getAddress(cardRaw),
+                myPosAddress: active?.cardAddress ?? ethers_1.ethers.getAddress(cardRaw),
+            })
+                .end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[setActivePosAddress] error: ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.message ?? 'Internal error' }).end();
+        }
+    });
+    /** GET /api/getCardStats?cardAddress=0x...&admin=0x... - 从 BeamioUserCard 获取 periodTransferAmount（Charge，当天数据）与 redeemMintCounterFromClear（Top-Up）。periodType=PERIOD_DAY、anchorTs=0 即当天。admin 为终端 EOA，默认用 owner。 */
+    const CARD_STATS_ABI = [
+        'function getAdminStatsFull(address admin, uint8 periodType, uint256 anchorTs, uint256 cumulativeStartTs) view returns (uint256 cumulativeMint, uint256 cumulativeBurn, uint256 cumulativeTransfer, uint256 cumulativeTransferAmount, uint256 cumulativeRedeemMint, uint256 cumulativeUSDCMint, uint256 cumulativeIssued, uint256 cumulativeUpgraded, uint256 periodMint, uint256 periodBurn, uint256 periodTransfer, uint256 periodTransferAmount, uint256 periodRedeemMint, uint256 periodUSDCMint, uint256 periodIssued, uint256 periodUpgraded, uint256 mintCounterFromClear, uint256 burnCounterFromClear, uint256 transferCounterFromClear, uint256 transferAmountFromClear, uint256 redeemMintCounterFromClear, uint256 usdcMintCounterFromClear, address[] subordinates)',
+        'function getGlobalStatsFull(uint8 periodType, uint256 anchorTs, uint256 cumulativeStartTs) view returns (uint256 cumulativeMint, uint256 cumulativeBurn, uint256 cumulativeTransfer, uint256 cumulativeTransferAmount, uint256 cumulativeRedeemMint, uint256 cumulativeUSDCMint, uint256 cumulativeIssued, uint256 cumulativeUpgraded, uint256 periodMint, uint256 periodBurn, uint256 periodTransfer, uint256 periodTransferAmount, uint256 periodRedeemMint, uint256 periodUSDCMint, uint256 periodIssued, uint256 periodUpgraded, uint256 adminCount)',
+    ];
+    const PERIOD_DAY = 1;
+    router.get('/getCardStats', async (req, res) => {
+        const { cardAddress: cardAddrQ, admin: adminQ } = req.query;
+        const cardAddrRaw = cardAddrQ?.trim() ?? '';
+        if (!cardAddrRaw || !ethers_1.ethers.isAddress(cardAddrRaw)) {
+            return res.status(400).json({ ok: false, error: 'cardAddress is required' }).end();
+        }
+        if ((0, apiExcludedUserCards_1.isApiExcludedUserCard)(cardAddrRaw)) {
+            return res.status(404).json({ ok: false, error: 'Card not found' }).end();
+        }
+        const cardAddr = ethers_1.ethers.getAddress(cardAddrRaw);
+        try {
+            const cardChain = await (0, beamioUserCardChain_1.resolveUserCardChain)(cardAddr);
+            const cardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(cardChain);
+            const card = new ethers_1.ethers.Contract(ethers_1.ethers.getAddress(cardAddr), CARD_STATS_ABI, cardProvider);
+            let adminAddr = adminQ?.trim() && ethers_1.ethers.isAddress(adminQ.trim()) ? ethers_1.ethers.getAddress(adminQ.trim()) : null;
+            if (!adminAddr) {
+                const ownerAbi = ['function owner() view returns (address)'];
+                const ownerCard = new ethers_1.ethers.Contract(ethers_1.ethers.getAddress(cardAddr), ownerAbi, cardProvider);
+                const owner = await ownerCard.owner();
+                adminAddr = owner && owner !== ethers_1.ethers.ZeroAddress ? ethers_1.ethers.getAddress(owner) : null;
+            }
+            if (!adminAddr) {
+                return res.status(200).json({ ok: true, charge: 0, topUp: 0 }).end();
+            }
+            const resAdmin = await card.getAdminStatsFull(adminAddr, PERIOD_DAY, 0, 0);
+            const charge = Number(resAdmin.periodTransferAmount) / 1_000_000;
+            const topUp = Number(resAdmin.redeemMintCounterFromClear) / 1_000_000;
+            return res.status(200).json({ ok: true, charge, topUp }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[getCardStats] error: ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.message ?? 'Internal error' }).end();
+        }
+    });
+    /** GET /api/cardTransactions - 代理 BeamioIndexerDiamond 记账数据（asset + account 合并），供 bizSite 前端绕过 CORS 拉取。 */
+    router.get('/cardTransactions', async (req, res) => {
+        const { cardAddress, adminAddress, aaAddress } = req.query;
+        const cardAddrRaw = cardAddress?.trim() ?? '';
+        if (!cardAddrRaw || !ethers_1.ethers.isAddress(cardAddrRaw)) {
+            return res.status(400).json({ error: 'cardAddress is required' }).end();
+        }
+        if ((0, apiExcludedUserCards_1.isApiExcludedUserCard)(cardAddrRaw)) {
+            return res.status(404).json({ error: 'Card not found' }).end();
+        }
+        const cardAddr = ethers_1.ethers.getAddress(cardAddrRaw);
+        const adminAddr = adminAddress?.trim() && ethers_1.ethers.isAddress(adminAddress.trim()) ? ethers_1.ethers.getAddress(adminAddress.trim()) : null;
+        const aaAddr = aaAddress?.trim() && ethers_1.ethers.isAddress(aaAddress.trim()) ? ethers_1.ethers.getAddress(aaAddress.trim()) : null;
+        const INDEXER_ASSET_ABI = ['function getAssetTransactionsByCurrentPeriodOffsetAndAccountModePaged(address asset, address account, uint8 periodType, uint256 periodOffset, uint256 pageOffset, uint256 pageLimit, bytes32 txCategoryFilter, uint8 accountMode, uint256 chainIdFilter) view returns (uint256 total, uint256 periodStart, uint256 periodEnd, tuple(bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, tuple(uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, tuple(uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)'];
+        const INDEXER_ACCOUNT_ABI = ['function getAccountTransactionsByCurrentPeriodOffsetAndAccountModePaged(address account, uint8 periodType, uint256 periodOffset, uint256 pageOffset, uint256 pageLimit, bytes32 txCategoryFilter, uint8 accountMode) view returns (uint256 total, uint256 periodStart, uint256 periodEnd, tuple(bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, tuple(uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, tuple(uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)'];
+        const PERIOD_DAY = 1;
+        const CHAIN_ID_FILTER_ALL = ethers_1.ethers.MaxUint256;
+        const TX_CATEGORY_ZERO = ethers_1.ethers.ZeroHash;
+        const ACCOUNT_MODE_ALL = 0;
+        const serializeTx = (tx) => ({
+            id: String(tx.id),
+            txCategory: String(tx.txCategory),
+            displayJson: tx.displayJson ?? '',
+            timestamp: String(tx.timestamp),
+            payer: tx.payer,
+            payee: tx.payee,
+            finalRequestAmountFiat6: String(tx.finalRequestAmountFiat6 ?? 0n),
+            finalRequestAmountUSDC6: String(tx.finalRequestAmountUSDC6 ?? 0n),
+            meta: tx.meta ?? {},
+        });
+        try {
+            const indexerAsset = new ethers_1.ethers.Contract(chainAddresses_1.BEAMIO_INDEXER_DIAMOND, INDEXER_ASSET_ABI, providerConet);
+            const indexerAccount = new ethers_1.ethers.Contract(chainAddresses_1.BEAMIO_INDEXER_DIAMOND, INDEXER_ACCOUNT_ABI, providerConet);
+            const seen = new Set();
+            const all = [];
+            const addPage = (page) => {
+                for (const tx of page ?? []) {
+                    if (!tx?.exists || !tx?.id)
+                        continue;
+                    const id = String(tx.id);
+                    if (seen.has(id))
+                        continue;
+                    seen.add(id);
+                    all.push(tx);
+                }
+            };
+            const queryAccount = async (account) => {
+                for (let periodOffset = 0; periodOffset < 3; periodOffset++) {
+                    try {
+                        const [total, , , page] = await indexerAccount.getAccountTransactionsByCurrentPeriodOffsetAndAccountModePaged(account, PERIOD_DAY, periodOffset, 0, 100, TX_CATEGORY_ZERO, ACCOUNT_MODE_ALL);
+                        addPage(page);
+                        if (Number(total) <= 100)
+                            return;
+                    }
+                    catch {
+                        return;
+                    }
+                }
+            };
+            if (adminAddr)
+                await queryAccount(adminAddr);
+            if (aaAddr && aaAddr.toLowerCase() !== adminAddr?.toLowerCase())
+                await queryAccount(aaAddr);
+            for (let periodOffset = 0; periodOffset < 3; periodOffset++) {
+                const [total, , , page] = await indexerAsset.getAssetTransactionsByCurrentPeriodOffsetAndAccountModePaged(ethers_1.ethers.getAddress(cardAddr), ethers_1.ethers.ZeroAddress, PERIOD_DAY, periodOffset, 0, 100, TX_CATEGORY_ZERO, ACCOUNT_MODE_ALL, CHAIN_ID_FILTER_ALL);
+                addPage(page);
+                if (Number(total) <= 100)
+                    break;
+            }
+            const sorted = all.sort((a, b) => Number(b.timestamp - a.timestamp)).slice(0, 50);
+            return res.status(200).json({ ok: true, transactions: sorted.map(serializeTx) }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[cardTransactions] error: ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.message ?? 'Internal error' }).end();
+        }
+    });
+    /**
+     * GET /api/posLedger - POS 终端 EOA 维度的 Top-Up + Charge 流水（newest first），同时回送
+     * 该 admin 在指定 BeamioUserCard 上的「上次 clear 起累计」(`mintCounterFromClear` /
+     * `transferAmountFromClear`)。
+     *
+     * **TX_Terminal_RESET**：若 indexer 中存在 `payee`=本 POS EOA 的最新一条 `TX_Terminal_RESET`，
+     * `items` **仅保留**该行 `timestamp` **之后**的业务流水（该行本身不回传），并把该标点放在
+     * `lastTerminalReset` 供客户端持久化到下一标点到来。
+     *
+     * 列表另使用「running cumulative bound」裁剪：从最新一条开始累加 USDC6（fiat6 兜底），
+     * 一旦 topUpSum6 ≥ topUpFromClear6 且 chargeSum6 ≥ chargeFromClear6 即停止——确保
+     * **items 的 topUp/charge 总和等于 admin/owner 清零后的金额**（与 `*FromClear` 对账）。
+     *
+     * Query: `eoa`（必填，POS 终端 EOA）；`infraCard`（必填，POS 注册的基础设施 BeamioUserCard）。
+     * 返回 `{ ok, fromClear: { topUp6, charge6 }, lastTerminalReset, items }` —— `items` 为简化后的行集，
+     * iOS 直接渲染、按时间倒序（最新在最上方）。
+     */
+    router.get('/posLedger', async (req, res) => {
+        const { eoa, infraCard } = req.query;
+        const eoaTrim = typeof eoa === 'string' ? eoa.trim() : '';
+        const cardTrim = typeof infraCard === 'string' ? infraCard.trim() : '';
+        if (!eoaTrim || !ethers_1.ethers.isAddress(eoaTrim)) {
+            return res.status(400).json({ ok: false, error: 'Invalid eoa' }).end();
+        }
+        if (!cardTrim || !ethers_1.ethers.isAddress(cardTrim)) {
+            return res.status(400).json({ ok: false, error: 'Invalid infraCard' }).end();
+        }
+        const adminAddr = ethers_1.ethers.getAddress(eoaTrim);
+        const cardAddr = ethers_1.ethers.getAddress(cardTrim);
+        const TX_PAGE_TUPLE = 'tuple(bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, tuple(uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, tuple(uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists, address topAdmin, address subordinate)';
+        const POS_LEDGER_INDEXER_ABI = [
+            'function getAccountActionCount(address account) view returns (uint256)',
+            `function getAccountTransactionsPaged(address account, uint256 offset, uint256 limit) view returns (${TX_PAGE_TUPLE}[] page)`,
+        ];
+        const ADMIN_STATS_FULL_ABI = [
+            'function getAdminStatsFull(address admin, uint8 periodType, uint256 anchorTs, uint256 cumulativeStartTs) view returns (tuple(uint256 cumulativeMint, uint256 cumulativeBurn, uint256 cumulativeTransfer, uint256 cumulativeTransferAmount, uint256 cumulativeRedeemMint, uint256 cumulativeUSDCMint, uint256 cumulativeIssued, uint256 cumulativeUpgraded, uint256 periodMint, uint256 periodBurn, uint256 periodTransfer, uint256 periodTransferAmount, uint256 periodRedeemMint, uint256 periodUSDCMint, uint256 periodIssued, uint256 periodUpgraded, uint256 mintCounterFromClear, uint256 burnCounterFromClear, uint256 transferCounterFromClear, uint256 transferAmountFromClear, uint256 redeemMintCounterFromClear, uint256 usdcMintCounterFromClear, address[] subordinates))',
+        ];
+        // keccak256 of the categorized topup hashes (mirror biz `INDEXER_TX_TOPUP_CATEGORIES`).
+        const hk = (s) => ethers_1.ethers.keccak256(ethers_1.ethers.toUtf8Bytes(s)).toLowerCase();
+        const TOPUP_CATEGORIES_LOWER = new Set([
+            hk('usdcTopupCard'),
+            hk('usdcNewCard'),
+            hk('usdcUpgradeNewCard'),
+            hk('newCard'),
+            hk('upgradeNewCard'),
+            hk('topupCard'),
+            hk('redeemNewCard'),
+            hk('redeemUpgradeNewCard'),
+            hk('redeemTopupCard'),
+            hk('creditTopupCard'),
+            hk('cashTopupCard'),
+            hk('creditUpgradeNewCard'),
+            hk('cashUpgradeNewCard'),
+            hk('creditNewCard'),
+            hk('cashNewCard'),
+            hk('bonusCard'),
+        ]);
+        const TIP_CATEGORIES_LOWER = new Set([
+            hk('merchant_pay:tip_updated'),
+            hk('TX_TIP'),
+        ]);
+        const SKIP_CATEGORIES_LOWER = new Set([
+            hk('buintClaim'),
+            hk('buintUSDC'),
+            hk('buintBurn'),
+            hk('requestAccounting'),
+            hk('sendUSDC'),
+            hk('x402Send'),
+            // Top-up B-Unit service fee legs are internal settlement of the parent
+            // top-up (same `originalPaymentHash` → topup tx hash). biz hides them
+            // via `mergeTopupBunitFeeRowsIntoTopups`; the POS Transactions screen
+            // has no place for the fee chip, so emit them as if they didn't exist
+            // (otherwise they surface as a spurious "Charge -$0.15" row alongside
+            // the actual top-up).
+            hk('nfcTopup:bunitService'),
+            hk('usdcTopup:bunitService'),
+            hk('charge:bunitService'),
+            hk('cardRedeem:bunitService'),
+            hk('posCouponBurn:bunitService'),
+        ]);
+        const VOUCHER_BURN_LOWER = hk('voucher_burn:confirmed');
+        const classifyPosLedgerCouponType = (catHex, displayJson) => {
+            let src = '';
+            let title = '';
+            let handle = '';
+            try {
+                const d = JSON.parse(displayJson || '{}');
+                src = String(d.source ?? '').trim().toLowerCase();
+                title = String(d.title ?? '').trim().toLowerCase();
+                handle = String(d.handle ?? d.forText ?? '').trim().toLowerCase();
+            }
+            catch {
+                /* ignore */
+            }
+            if (src === 'poscouponsurrender' ||
+                handle === 'pos coupon surrender' ||
+                title === 'in-store coupon redeem' ||
+                catHex === VOUCHER_BURN_LOWER) {
+                return 'couponRedeem';
+            }
+            if (title.includes('claim coupon') || title.includes('claim catalog')) {
+                return 'couponClaim';
+            }
+            return null;
+        };
+        const normalizeCatHex = (cat) => {
+            if (cat == null)
+                return '';
+            if (typeof cat === 'string') {
+                const s = cat.trim();
+                if (!s)
+                    return '';
+                if (s.startsWith('0x'))
+                    return s.toLowerCase();
+                try {
+                    return ethers_1.ethers.hexlify(s).toLowerCase();
+                }
+                catch {
+                    try {
+                        return (`0x${BigInt(s).toString(16).padStart(64, '0')}`).toLowerCase();
+                    }
+                    catch {
+                        return '';
+                    }
+                }
+            }
+            try {
+                return ethers_1.ethers.hexlify(cat).toLowerCase();
+            }
+            catch {
+                return '';
+            }
+        };
+        const TERMINAL_RESET_LOWER = util_1.TX_CATEGORY_TERMINAL_RESET.toLowerCase();
+        try {
+            const cardChain = await (0, beamioUserCardChain_1.resolveUserCardChain)(cardAddr);
+            const cardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(cardChain);
+            const stats = new ethers_1.ethers.Contract(cardAddr, ADMIN_STATS_FULL_ABI, cardProvider);
+            let topUpFromClear6 = 0n;
+            let chargeFromClear6 = 0n;
+            try {
+                const v = await stats.getAdminStatsFull(adminAddr, PERIOD_DAY, 0, 0);
+                const mintFromClear = v?.mintCounterFromClear ?? v?.[16];
+                const xferAmtFromClear = v?.transferAmountFromClear ?? v?.[19];
+                if (mintFromClear != null)
+                    topUpFromClear6 = BigInt(mintFromClear);
+                if (xferAmtFromClear != null)
+                    chargeFromClear6 = BigInt(xferAmtFromClear);
+            }
+            catch (e) {
+                // `getAdminStatsFull` 可能 revert（如 admin 未登记到 card）；此时 fallback 0/0 → 不裁剪上限，仅按可获取的 items 返回。
+                // Keep this path quiet: POS polls frequently and indexer-only ledger is the intended fallback.
+            }
+            const indexer = new ethers_1.ethers.Contract(chainAddresses_1.BEAMIO_INDEXER_DIAMOND, POS_LEDGER_INDEXER_ABI, providerConet);
+            let total = 0n;
+            try {
+                total = await indexer.getAccountActionCount(adminAddr);
+            }
+            catch {
+                total = 0n;
+            }
+            const totalNum = Number(total);
+            let lastTerminalResetMarker = null;
+            if (!Number.isFinite(totalNum) || totalNum <= 0) {
+                return res.status(200).json({
+                    ok: true,
+                    fromClear: { topUp6: topUpFromClear6.toString(), charge6: chargeFromClear6.toString() },
+                    lastTerminalReset: null,
+                    items: [],
+                }).end();
+            }
+            const PAGE_SIZE = 50;
+            const HARD_PAGE_CAP = 20; // ≤ 1000 rows scanned (safety bound)
+            let topUpSum6 = 0n;
+            let chargeSum6 = 0n;
+            const items = [];
+            let nextOffset = 0;
+            let pages = 0;
+            let stop = false;
+            const adminLower = adminAddr.toLowerCase();
+            while (!stop && pages < HARD_PAGE_CAP && nextOffset < totalNum) {
+                const lim = Math.min(PAGE_SIZE, totalNum - nextOffset);
+                let page;
+                try {
+                    page = await indexer.getAccountTransactionsPaged(adminAddr, nextOffset, lim);
+                }
+                catch (e) {
+                    (0, logger_1.logger)(safe_1.default.yellow(`[posLedger] getAccountTransactionsPaged failed off=${nextOffset} lim=${lim}: ${e?.message ?? e}`));
+                    break;
+                }
+                nextOffset += lim;
+                pages += 1;
+                for (const tx of page ?? []) {
+                    if (!tx?.exists || !tx?.id)
+                        continue;
+                    const catHex = normalizeCatHex(tx.txCategory);
+                    if (catHex === TERMINAL_RESET_LOWER && tx.payee) {
+                        const payeeLc = ethers_1.ethers.getAddress(tx.payee).toLowerCase();
+                        if (payeeLc === adminLower && !lastTerminalResetMarker) {
+                            const tid = typeof tx.id === 'string'
+                                ? (tx.id.startsWith('0x') ? tx.id : `0x${BigInt(tx.id).toString(16).padStart(64, '0')}`).toLowerCase()
+                                : (`0x${BigInt(tx.id).toString(16).padStart(64, '0')}`).toLowerCase();
+                            const markerTs = Number(tx.timestamp ?? 0n);
+                            const payerLc = tx.payer ? ethers_1.ethers.getAddress(tx.payer).toLowerCase() : '';
+                            lastTerminalResetMarker = { txId: tid, timestamp: markerTs, payer: payerLc };
+                        }
+                        continue;
+                    }
+                    const fenceTs = lastTerminalResetMarker?.timestamp;
+                    if (fenceTs !== undefined && Number(tx.timestamp ?? 0n) <= fenceTs)
+                        continue;
+                    if (catHex === '' || SKIP_CATEGORIES_LOWER.has(catHex))
+                        continue;
+                    const isTopUp = TOPUP_CATEGORIES_LOWER.has(catHex);
+                    const isTip = TIP_CATEGORIES_LOWER.has(catHex);
+                    const couponType = classifyPosLedgerCouponType(catHex, tx.displayJson ?? '');
+                    const itemType = isTip
+                        ? 'tip'
+                        : couponType
+                            ? couponType
+                            : isTopUp
+                                ? 'topUp'
+                                : 'charge';
+                    const usdc6 = BigInt(tx.finalRequestAmountUSDC6 ?? 0n);
+                    const fiat6 = BigInt(tx.finalRequestAmountFiat6 ?? 0n);
+                    const measure6 = usdc6 > 0n ? usdc6 : fiat6;
+                    if (itemType === 'topUp') {
+                        const targetReached = topUpFromClear6 > 0n && topUpSum6 >= topUpFromClear6;
+                        if (targetReached)
+                            continue;
+                        if (topUpFromClear6 > 0n && topUpSum6 + measure6 > topUpFromClear6 + (topUpFromClear6 / 1000n)) {
+                            // 越界（超过目标 +0.1%）→ 该笔属于上一次 clear 之前；丢弃并视作 topUp 已完成。
+                            topUpSum6 = topUpFromClear6;
+                            continue;
+                        }
+                        topUpSum6 += measure6;
+                    }
+                    else if (itemType === 'charge') {
+                        const targetReached = chargeFromClear6 > 0n && chargeSum6 >= chargeFromClear6;
+                        if (targetReached)
+                            continue;
+                        if (chargeFromClear6 > 0n && chargeSum6 + measure6 > chargeFromClear6 + (chargeFromClear6 / 1000n)) {
+                            chargeSum6 = chargeFromClear6;
+                            continue;
+                        }
+                        chargeSum6 += measure6;
+                    }
+                    const idStr = typeof tx.id === 'string' ? tx.id : ('0x' + BigInt(tx.id).toString(16).padStart(64, '0'));
+                    const ophRaw = tx.originalPaymentHash;
+                    const ophStr = ophRaw == null
+                        ? undefined
+                        : typeof ophRaw === 'string'
+                            ? (ophRaw === ethers_1.ethers.ZeroHash ? undefined : ophRaw.toLowerCase())
+                            : ('0x' + BigInt(ophRaw).toString(16).padStart(64, '0'));
+                    const note = (tx.meta?.afterNotePayee || tx.meta?.afterNotePayer || '').toString();
+                    items.push({
+                        id: idStr.toLowerCase(),
+                        originalPaymentHash: ophStr,
+                        type: itemType,
+                        txCategory: catHex,
+                        timestamp: Number(tx.timestamp ?? 0n),
+                        payer: tx.payer ? ethers_1.ethers.getAddress(tx.payer).toLowerCase() : '',
+                        payee: tx.payee ? ethers_1.ethers.getAddress(tx.payee).toLowerCase() : '',
+                        amountUSDC6: usdc6.toString(),
+                        amountFiat6: fiat6.toString(),
+                        currencyFiat: Number(tx.meta?.currencyFiat ?? 0n),
+                        displayJson: tx.displayJson ?? '',
+                        topAdmin: tx.topAdmin && tx.topAdmin !== ethers_1.ethers.ZeroAddress ? ethers_1.ethers.getAddress(tx.topAdmin).toLowerCase() : undefined,
+                        subordinate: tx.subordinate && tx.subordinate !== ethers_1.ethers.ZeroAddress ? ethers_1.ethers.getAddress(tx.subordinate).toLowerCase() : undefined,
+                        note: note || undefined,
+                    });
+                    // 只有当 *FromClear 给出了非 0 目标且双方均已达到，才能提前 break；
+                    // 否则（POS EOA 不在 infraCard admin 列表导致 getAdminStatsFull 返回 0/0，或
+                    // 旧 Diamond 时期 subordinate 未被纳入 accountActionIds 导致目标不可达）继续翻页，
+                    // 由 HARD_PAGE_CAP 与 totalNum 自然兜底，避免「fromClear=0 时只回 1 条」。
+                    if (topUpFromClear6 > 0n && chargeFromClear6 > 0n) {
+                        const topUpDone = topUpSum6 >= topUpFromClear6;
+                        const chargeDone = chargeSum6 >= chargeFromClear6;
+                        if (topUpDone && chargeDone) {
+                            stop = true;
+                            break;
+                        }
+                    }
+                }
+                // `getAccountTransactionsPaged` returns offset 0 = newest（与 biz `pullAccountPagedWithLocalStopRule` 对齐）。
+                // 当 fromClear=0/0（如 POS EOA 不在 infraCard admin 列表时 `getAdminStatsFull` revert）
+                // 不再立即 break——继续翻页让 HARD_PAGE_CAP / totalNum 兜底，覆盖 ActionFacet 升级后
+                // `subordinate` 也并入 accountActionIds 的全部经手记录。
+            }
+            items.sort((a, b) => b.timestamp - a.timestamp);
+            const itemsOut = await enrichPosLedgerItemsForClients(items);
+            return res.status(200).json({
+                ok: true,
+                fromClear: { topUp6: topUpFromClear6.toString(), charge6: chargeFromClear6.toString() },
+                lastTerminalReset: lastTerminalResetMarker,
+                items: itemsOut,
+            }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[posLedger] error: ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.message ?? 'Internal error' }).end();
+        }
+    });
+    /** POST /api/nfcCardStatus - 查询 NTAG 424 DNA 卡状态（读操作，Cluster 直接处理） */
+    router.post('/nfcCardStatus', async (req, res) => {
+        const { uid } = req.body;
+        if (!uid || typeof uid !== 'string') {
+            return res.status(400).json({ error: 'Missing uid' });
+        }
+        const result = await (0, db_2.getNfcCardByUid)(uid);
+        return res.status(200).json(result).end();
+    });
+    /** 解析 POS 可选字段：携带 `merchantInfraCard` 的 POS 余额/支付查询默认只返回该程序卡，避免展示其它商家的 BeamioUserCard。 */
+    const parseMerchantInfraFetchOptions = (body) => {
+        const b = body;
+        const raw = typeof b?.merchantInfraCard === 'string' && b.merchantInfraCard.trim()
+            ? b.merchantInfraCard.trim()
+            : typeof b?.infrastructureCardAddress === 'string'
+                ? b.infrastructureCardAddress.trim()
+                : '';
+        const resolved = raw !== '' && ethers_1.ethers.isAddress(raw)
+            ? ethers_1.ethers.getAddress(raw)
+            : undefined;
+        const scopeRaw = typeof b?.cardsScope === 'string' ? b.cardsScope.trim().toLowerCase() : '';
+        let cardsScope = undefined;
+        if (scopeRaw === 'all') {
+            cardsScope = 'all';
+        }
+        else if ((resolved && scopeRaw === '') || (b?.merchantInfraOnly === true && !!resolved)) {
+            cardsScope = 'merchantInfraOnly';
+        }
+        else if (scopeRaw === 'infrastructureonly' || scopeRaw === 'infraonly') {
+            cardsScope = 'infrastructureOnly';
+        }
+        return {
+            ...(resolved ? { infrastructureCardAddress: resolved } : {}),
+            ...(cardsScope ? { cardsScope } : {}),
+            ...(b?.includeZeroBalanceCards === true ? { includeZeroBalanceCards: true } : {}),
+        };
+    };
+    const upsertNfcHoldingsFromTrustedAssets = async (tagIdHex, uid, ownerEoa, result) => {
+        await (0, db_2.upsertNfcBeamioUserCardHoldingsFromTrustedCards)({
+            tagIdHex,
+            uid,
+            ownerEoa,
+            aaAddress: result.aaAddress ?? null,
+            cards: result.cards,
+        });
+    };
+    /** POST /api/getUIDAssets - 查询卡资产。卡的唯一 ID 为 TagID。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 解密得到 TagID，用 TagID 查 EOA/AA。beamioTab 仍按 AccountRegistry 解析。 */
+    router.post('/getUIDAssets', async (req, res) => {
+        const { uid, e, c, m } = req.body;
+        let uidAssetsOpts = parseMerchantInfraFetchOptions(req.body);
+        (0, logger_1.logger)(safe_1.default.cyan(`[getUIDAssets] 收到请求 uid=${uid ?? '(undefined)'}`));
+        if (!uid || typeof uid !== 'string' || !uid.trim()) {
+            const err = { ok: false, error: 'Missing uid' };
+            (0, logger_1.logger)(safe_1.default.yellow(`[getUIDAssets] 返回 400: ${JSON.stringify(err)}`));
+            return res.status(400).json(err).end();
+        }
+        const uidTrim = uid.trim();
+        const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim);
+        let nfcSunTagIdHex = null;
+        let sunResult = null;
+        if (isNfcUid) {
+            const eTrim = typeof e === 'string' ? e.trim() : '';
+            const cTrim = typeof c === 'string' ? c.trim() : '';
+            const mTrim = typeof m === 'string' ? m.trim() : '';
+            if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+                const err = { ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' };
+                (0, logger_1.logger)(safe_1.default.yellow(`[getUIDAssets] uid=${uidTrim} 缺少 SUN 参数 返回 403: ${JSON.stringify(err)}`));
+                return res.status(403).json(err).end();
+            }
+            try {
+                const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`;
+                sunResult = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(sunUrl);
+                if (!sunResult.valid) {
+                    const err = { ok: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh };
+                    (0, logger_1.logger)(safe_1.default.yellow(`[getUIDAssets] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid} macValid=${sunResult.macValid} counterFresh=${sunResult.counterFresh}`));
+                    return res.status(403).json(err).end();
+                }
+                nfcSunTagIdHex = sunResult.tagIdHex;
+                (0, logger_1.logger)(safe_1.default.gray(`[getUIDAssets] uid=${uidTrim} tagId=${nfcSunTagIdHex} SUN 校验通过 counter=${sunResult.counterHex}`));
+            }
+            catch (sunErr) {
+                const msg = sunErr?.message ?? String(sunErr);
+                const err = { ok: false, error: `SUN verification error: ${msg}` };
+                (0, logger_1.logger)(safe_1.default.yellow(`[getUIDAssets] uid=${uidTrim} SUN 校验异常: ${msg}`));
+                return res.status(403).json(err).end();
+            }
+        }
+        try {
+            let eoaRaw;
+            if (nfcSunTagIdHex) {
+                eoaRaw = await (0, db_2.getNfcRecipientAddressByTagId)(nfcSunTagIdHex);
+                if (!eoaRaw) {
+                    (0, logger_1.logger)(safe_1.default.cyan(`[getUIDAssets] tagId=${nfcSunTagIdHex} 未绑定钱包，转发 Master 排队创建`));
+                    (0, exports.postLocalhost)('/api/getUIDAssetsProvision', { uid: uidTrim, tagIdHex: nfcSunTagIdHex, e: req.body?.e, c: req.body?.c, m: req.body?.m, ...uidAssetsOpts }, res);
+                    return;
+                }
+                // EOA 已绑定但可能无 AA（如 DeployingSmartAccount 曾失败），getOwnershipByEOA 会 revert UC_ResolveAccountFailed，需转发 Master 确保 AA
+                const aaAddr = await resolveBeamioAccountOf(eoaRaw);
+                let hasDeployedAA = false;
+                if (aaAddr && aaAddr !== ethers_1.ethers.ZeroAddress) {
+                    const code = await providerBase.getCode(aaAddr);
+                    hasDeployedAA = !!(code && code !== '0x' && code.length > 2);
+                }
+                if (!hasDeployedAA) {
+                    (0, logger_1.logger)(safe_1.default.cyan(`[getUIDAssets] tagId=${nfcSunTagIdHex} EOA 无已部署 AA，转发 Master 确保 AA 后拉取`));
+                    (0, exports.postLocalhost)('/api/getUIDAssetsProvision', { uid: uidTrim, tagIdHex: nfcSunTagIdHex, e: req.body?.e, c: req.body?.c, m: req.body?.m, ...uidAssetsOpts }, res);
+                    return;
+                }
+            }
+            else {
+                eoaRaw = await (0, db_2.getNfcRecipientAddressByUid)(uidTrim);
+            }
+            if (!eoaRaw) {
+                // beamioTab：Scan QR 的 beamio 参数，按 AccountRegistry 账户名解析 EOA
+                try {
+                    const owner = await SC.getOwnerByAccountName(uidTrim);
+                    if (owner && owner !== ethers_1.ethers.ZeroAddress) {
+                        eoaRaw = owner;
+                        (0, logger_1.logger)(safe_1.default.gray(`[getUIDAssets] uid=${uidTrim} 按 beamioTab 解析到 EOA=${owner.slice(0, 10)}...`));
+                    }
+                }
+                catch (_) { /* 非账户名，忽略 */ }
+            }
+            if (!eoaRaw) {
+                const err = { ok: false, error: 'This card is not registered' };
+                (0, logger_1.logger)(safe_1.default.yellow(`[getUIDAssets] uid=${uidTrim} 卡未登记 返回 404: ${JSON.stringify(err)}`));
+                return res.status(404).json(err).end();
+            }
+            const eoa = ethers_1.ethers.getAddress(eoaRaw);
+            if (nfcSunTagIdHex) {
+                const known = await (0, db_2.listNfcBeamioUserCardHoldingsByTagId)(nfcSunTagIdHex);
+                if (known.length > 0) {
+                    uidAssetsOpts = {
+                        ...uidAssetsOpts,
+                        extraCardAddresses: [
+                            ...(uidAssetsOpts.extraCardAddresses ?? []),
+                            ...known.map((row) => row.cardAddress),
+                        ],
+                    };
+                }
+            }
+            const result = await (0, getUIDAssetsLogic_1.fetchUIDAssetsForEOA)(eoa, uidAssetsOpts);
+            const nfcExtras = nfcSunTagIdHex && sunResult ? {
+                uid: uidTrim,
+                tagIdHex: nfcSunTagIdHex,
+                counterHex: sunResult.counterHex,
+                counter: sunResult.counterValue,
+            } : null;
+            if (nfcExtras) {
+                (0, logger_1.logger)(safe_1.default.gray(`[getUIDAssets] debug 推算 tagIdHex=${nfcExtras.tagIdHex} counter=${nfcExtras.counter} counterHex=${nfcExtras.counterHex}`));
+            }
+            const mergedBase = {
+                ...result,
+                ...(nfcExtras ?? {}),
+            };
+            const merged = await enrichAssetsWithLinkedNfcHostedSigning(eoa, mergedBase);
+            if (nfcSunTagIdHex) {
+                await upsertNfcHoldingsFromTrustedAssets(nfcSunTagIdHex, uidTrim, eoa, result);
+                (0, getUIDAssetsLogic_1.scheduleEnsureNfcBeamioTagForEoa)(eoa, uidTrim, nfcSunTagIdHex, result.cards);
+            }
+            const resultJson = JSON.stringify(merged, null, 2);
+            (0, logger_1.logger)(safe_1.default.cyan(`[getUIDAssets] 返回客户端 JSON (uid=${uidTrim}):\n${resultJson}`));
+            (0, logger_1.logger)(safe_1.default.green(`[getUIDAssets] uid=${uidTrim} 成功 cards=${result.cards.length}`));
+            return res.status(200).json(merged).end();
+        }
+        catch (e) {
+            const msg = e?.shortMessage ?? e?.message ?? '';
+            const isRevert = /execution reverted|CALL_EXCEPTION|revert/i.test(String(msg));
+            if (isRevert) {
+                const err = { ok: false, error: 'This card is not registered' };
+                (0, logger_1.logger)(safe_1.default.yellow(`[getUIDAssets] uid=${uidTrim} 链上查询 revert 返回 404: ${JSON.stringify(err)}`));
+                return res.status(404).json(err).end();
+            }
+            const err = { ok: false, error: msg || 'Query failed' };
+            (0, logger_1.logger)(safe_1.default.red(`[getUIDAssets] uid=${uidTrim} failed: ${msg} 返回 500: ${JSON.stringify(err)}`));
+            return res.status(500).json(err).end();
+        }
+    });
+    /** GET /api/nfcBeamioUserCards - SUN 验证后返回 DB 中该 NFC 已可信确认持有的 BeamioUserCard 一览。 */
+    router.get('/nfcBeamioUserCards', async (req, res) => {
+        const { uid, e, c, m, tagIdHex } = req.query;
+        let tag = String(tagIdHex ?? '').trim().replace(/^0x/i, '').toUpperCase();
+        const uidTrim = String(uid ?? '').trim();
+        if (!tag) {
+            if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+                return res.status(400).json({ ok: false, error: 'Missing tagIdHex or valid uid.' }).end();
+            }
+            const eTrim = String(e ?? '').trim();
+            const cTrim = String(c ?? '').trim();
+            const mTrim = String(m ?? '').trim();
+            if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+                return res.status(403).json({ ok: false, error: 'NFC UID requires SUN params (e, c, m).' }).end();
+            }
+            try {
+                const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`;
+                const sunResult = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(sunUrl);
+                if (!sunResult.valid) {
+                    return res.status(403).json({ ok: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end();
+                }
+                tag = sunResult.tagIdHex;
+            }
+            catch (e) {
+                return res.status(403).json({ ok: false, error: `SUN verification error: ${e?.message ?? e}` }).end();
+            }
+        }
+        if (!/^[0-9A-F]{16}$/.test(tag)) {
+            return res.status(400).json({ ok: false, error: 'Invalid tagIdHex.' }).end();
+        }
+        const cards = await (0, db_2.listNfcBeamioUserCardHoldingsByTagId)(tag);
+        return res.status(200).json({ ok: true, tagIdHex: tag, cards }).end();
+    });
+    /** POST /api/getWalletAssets - 根据 wallet 查询资产。先确定是 AA 或 EOA：若 EOA 则推算 AA，检查 AA 存在后显示该 AA 资产。用于 Scan QR 获得的 beamio URL */
+    router.post('/getWalletAssets', async (req, res) => {
+        const { wallet, for: forLabel } = req.body;
+        const walletAssetsOpts = parseMerchantInfraFetchOptions(req.body);
+        const isPostPayment = forLabel === 'postPaymentBalance';
+        (0, logger_1.logger)(safe_1.default.cyan(`[getWalletAssets] 收到请求 wallet=${wallet ?? '(undefined)'}${isPostPayment ? ' [扣款后拉取余额]' : ''}`));
+        if (!wallet || typeof wallet !== 'string' || !wallet.trim()) {
+            const err = { ok: false, error: 'Missing wallet' };
+            (0, logger_1.logger)(safe_1.default.yellow(`[getWalletAssets] 返回 400: ${JSON.stringify(err)}`));
+            return res.status(400).json(err).end();
+        }
+        if (!ethers_1.ethers.isAddress(wallet)) {
+            const err = { ok: false, error: 'Invalid wallet address' };
+            return res.status(400).json(err).end();
+        }
+        try {
+            const addr = ethers_1.ethers.getAddress(wallet.trim());
+            const identity = await (0, beamioWalletIdentity_1.resolveBeamioWalletIdentityFromAddress)(addr, {
+                conetProvider: providerConet,
+                baseProvider: providerBase,
+            });
+            if (!identity) {
+                const err = { ok: false, error: 'Could not resolve wallet identity' };
+                (0, logger_1.logger)(safe_1.default.yellow(`[getWalletAssets] 返回 400: ${JSON.stringify(err)}`));
+                return res.status(400).json(err).end();
+            }
+            const eoa = identity.eoa;
+            let aaAddr;
+            if (identity.aaAccount) {
+                aaAddr = ethers_1.ethers.getAddress(identity.aaAccount);
+                if (aaAddr.toLowerCase() !== addr.toLowerCase() && identity.inputKind === 'aa') {
+                    (0, logger_1.logger)(safe_1.default.gray(`[getWalletAssets] wallet 传入 AA ${addr} → true EOA ${eoa} canonical AA ${aaAddr}（unwrap nested / factory primary）`));
+                }
+            }
+            else {
+                const primary = await (0, resolveBeamioAaViaUserCardFactory_1.resolveBeamioAaForEoaWithFallback)(providerBase, eoa);
+                if (!primary) {
+                    const err = { ok: false, error: 'No active Beamio account for this wallet' };
+                    (0, logger_1.logger)(safe_1.default.yellow(`[getWalletAssets] EOA 无 AA 返回 404: ${JSON.stringify(err)}`));
+                    return res.status(404).json(err).end();
+                }
+                aaAddr = primary;
+            }
+            const base = await (0, getUIDAssetsLogic_1.fetchUIDAssetsForEOA)(eoa, { ...walletAssetsOpts, includeZeroBalanceCards: true });
+            let unitPriceUSDC6 = '0';
+            let beamioUserCard = '';
+            try {
+                const factoryAbi = ['function quoteUnitPointInUSDC6(address) view returns (uint256)'];
+                const factory = new ethers_1.ethers.Contract(chainAddresses_1.CONET_CARD_FACTORY, factoryAbi, (0, beamioUserCardChain_1.providerForUserCardChain)('conet'));
+                const up = await factory.quoteUnitPointInUSDC6(chainAddresses_1.CONET_BEAMIO_USER_CARD_DEFAULT);
+                unitPriceUSDC6 = String(up);
+            }
+            catch (_) { /* ignore */ }
+            try {
+                const aaFacAddr = await (0, resolveBeamioAaViaUserCardFactory_1.getAaFactoryAddressFromUserCardFactoryPaymaster)((0, beamioUserCardChain_1.providerForUserCardChain)('conet'), chainAddresses_1.CONET_CARD_FACTORY);
+                if (aaFacAddr) {
+                    const aaFactoryAbi = ['function beamioUserCard() view returns (address)'];
+                    const aaFactory = new ethers_1.ethers.Contract(aaFacAddr, aaFactoryAbi, (0, beamioUserCardChain_1.providerForUserCardChain)('conet'));
+                    const uc = await aaFactory.beamioUserCard();
+                    if (uc && uc !== ethers_1.ethers.ZeroAddress)
+                        beamioUserCard = ethers_1.ethers.getAddress(uc);
+                }
+            }
+            catch (_) { /* ignore */ }
+            const cards = base.cards;
+            const firstCard = cards[0];
+            const legacyCardFallback = firstCard?.cardAddress ??
+                walletAssetsOpts.infrastructureCardAddress ??
+                chainAddresses_1.CONET_BEAMIO_USER_CARD_DEFAULT;
+            const beamioTag = base.beamioTag ?? (await (0, getUIDAssetsLogic_1.fetchBeamioTagForEoa)(eoa));
+            const resultBase = {
+                ok: true,
+                address: base.address,
+                aaAddress: aaAddr,
+                cardAddress: legacyCardFallback,
+                points: firstCard?.points ?? '0',
+                points6: firstCard?.points6 ?? '0',
+                chargeRewardPoints: firstCard?.chargeRewardPoints ?? '0',
+                chargeRewardPoints6: firstCard?.chargeRewardPoints6 ?? '0',
+                socialRewardPoints: firstCard?.socialRewardPoints ?? '0',
+                socialRewardPoints6: firstCard?.socialRewardPoints6 ?? '0',
+                usdcBalance: base.usdcBalance,
+                caddBalance: base.caddBalance,
+                cardCurrency: firstCard?.cardCurrency ?? 'CAD',
+                cards,
+                nfts: firstCard?.nfts ?? [],
+                unitPriceUSDC6,
+                beamioUserCard: beamioUserCard || undefined,
+                merchantCouponBalances: base.merchantCouponBalances,
+                merchantClaimableCoupons: base.merchantClaimableCoupons,
+                ...(beamioTag != null && beamioTag !== '' ? { beamioTag } : {}),
+            };
+            const result = await enrichAssetsWithLinkedNfcHostedSigning(eoa, resultBase);
+            const resultJson = JSON.stringify(result, null, 2);
+            (0, logger_1.logger)(safe_1.default.cyan(`[getWalletAssets] 返回客户端 JSON (wallet=${eoa}):\n${resultJson}`));
+            (0, logger_1.logger)(safe_1.default.green(`[getWalletAssets] wallet=${eoa} aa=${aaAddr} 成功 cards=${cards.length}`));
+            return res.status(200).json(result).end();
+        }
+        catch (e) {
+            const msg = e?.shortMessage ?? e?.message ?? '';
+            const isRevert = /execution reverted|CALL_EXCEPTION|revert/i.test(String(msg));
+            if (isRevert) {
+                const err = { ok: false, error: 'No active Beamio account for this wallet' };
+                (0, logger_1.logger)(safe_1.default.yellow(`[getWalletAssets] 链上查询 revert 返回 404: ${JSON.stringify(err)}`));
+                return res.status(404).json(err).end();
+            }
+            const err = { ok: false, error: msg || 'Query failed' };
+            (0, logger_1.logger)(safe_1.default.red(`[getWalletAssets] failed: ${msg} 返回 500: ${JSON.stringify(err)}`));
+            return res.status(500).json(err).end();
+        }
+    });
+    /**
+     * POST /api/nfcCardLinkState — 用户-linked 卡：active / deactive / remove（仅 remove 会删除 DB 私钥与绑定）。
+     * Body: { message, signature } — message 为 canonical JSON UTF-8 字符串（与 wallet.signMessage(message) 一致），见 db.buildNfcCardLinkStateSignMessage。
+     */
+    router.post('/nfcCardLinkState', async (req, res) => {
+        const { message, signature } = req.body;
+        (0, logger_1.logger)(safe_1.default.cyan(`[nfcCardLinkState] messageLen=${message != null ? String(message).length : 0}`));
+        if (!message || typeof message !== 'string' || !signature || typeof signature !== 'string') {
+            return res.status(400).json({ ok: false, error: 'Missing message or signature.' }).end();
+        }
+        try {
+            const out = await (0, db_2.applyNfcCardLinkStateChange)({ message: message.trim(), signature: signature.trim() });
+            if (!out.ok) {
+                return res.status(400).json({ ok: false, error: out.error, errorCode: out.errorCode }).end();
+            }
+            return res.status(200).json({ ok: true, action: out.action, tagId: out.tagId }).end();
+        }
+        catch (e) {
+            const msg = e?.shortMessage ?? e?.message ?? 'Request failed.';
+            (0, logger_1.logger)(safe_1.default.red(`[nfcCardLinkState] ${msg}`));
+            return res.status(500).json({ ok: false, error: msg }).end();
+        }
+    });
+    /** POST /api/listLinkedNfcCards — 传入 AA 或 EOA，返回该钱包（认领时记录的 EOA）下已通过 Link App 绑定的 NFC：uid、tagId。纯 DB 读，Cluster 直出。 */
+    router.post('/listLinkedNfcCards', async (req, res) => {
+        const { wallet } = req.body;
+        (0, logger_1.logger)(safe_1.default.cyan(`[listLinkedNfcCards] wallet=${wallet ?? '(undefined)'}`));
+        if (!wallet || typeof wallet !== 'string' || !wallet.trim()) {
+            return res.status(400).json({ ok: false, error: 'Missing wallet' }).end();
+        }
+        if (!ethers_1.ethers.isAddress(wallet)) {
+            return res.status(400).json({ ok: false, error: 'Invalid wallet address' }).end();
+        }
+        try {
+            const addr = ethers_1.ethers.getAddress(wallet.trim());
+            const code = await providerBase.getCode(addr);
+            const isAA = Boolean(code && code !== '0x' && code.length > 2);
+            let ownerEoa;
+            if (isAA) {
+                const aaContract = new ethers_1.ethers.Contract(addr, ['function owner() view returns (address)'], providerBase);
+                const owner = await aaContract.owner();
+                if (!owner || owner === ethers_1.ethers.ZeroAddress) {
+                    return res.status(400).json({ ok: false, error: 'Cannot resolve AA owner' }).end();
+                }
+                ownerEoa = ethers_1.ethers.getAddress(owner);
+            }
+            else {
+                ownerEoa = addr;
+            }
+            const cards = await (0, db_2.listLinkedNfcCardsByOwnerEoa)(ownerEoa);
+            return res.status(200).json({
+                ok: true,
+                ownerEoa,
+                inputWasSmartAccount: isAA,
+                count: cards.length,
+                cards,
+            }).end();
+        }
+        catch (e) {
+            const msg = e?.shortMessage ?? e?.message ?? 'Query failed';
+            (0, logger_1.logger)(safe_1.default.red(`[listLinkedNfcCards] failed: ${msg}`));
+            return res.status(500).json({ ok: false, error: msg }).end();
+        }
+    });
+    /** POST /api/registerNfcCard - 登记 NFC 卡，Cluster 预检后转发 Master。tagId 可选，SUN 解密得到的 TagID（16 hex），用于合法性校验。 */
+    router.post('/registerNfcCard', async (req, res) => {
+        const { uid, privateKey, tagId } = req.body;
+        if (!uid || typeof uid !== 'string' || !privateKey || typeof privateKey !== 'string') {
+            return res.status(400).json({ ok: false, error: 'Missing uid or privateKey' });
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/registerNfcCard preCheck OK, forwarding to master'));
+        (0, exports.postLocalhost)('/api/registerNfcCard', { uid: uid.trim(), privateKey: privateKey.trim(), ...(tagId && typeof tagId === 'string' && { tagId: tagId.trim() }) }, res);
+    });
+    /** POST /api/payByNfcUidPrepare - Android/iOS 构建 container 前的准备（读操作，Cluster 可直处理或转发 Master）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。
+     *  fiat6-only 协议（推荐）：传 `amountFiat6` + `currency`（卡币种）。`amountUsdc6` 已 deprecated，仅在 `amountFiat6` 缺失时作为向后兼容回退；同时存在则忽略 `amountUsdc6` 并打 deprecation 日志。 */
+    router.post('/payByNfcUidPrepare', async (req, res) => {
+        const { uid, payee, amountUsdc6, amountFiat6, currency, merchantInfraCard, e, c, m } = req.body;
+        if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+            return res.status(400).json({ ok: false, error: 'Missing uid' });
+        }
+        if (!payee || !ethers_1.ethers.isAddress(payee)) {
+            return res.status(400).json({ ok: false, error: 'Invalid payee' });
+        }
+        const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : '';
+        const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : '';
+        const fiat6Ok = fiat6Trim !== '' && /^[0-9]+$/.test(fiat6Trim) && BigInt(fiat6Trim) > 0n && currencyTrim !== '';
+        const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(String(amountUsdc6).trim()) && BigInt(String(amountUsdc6).trim()) > 0n;
+        if (!fiat6Ok && !usdc6Ok) {
+            return res.status(400).json({ ok: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' });
+        }
+        if (fiat6Ok && usdc6Ok) {
+            (0, logger_1.logger)(safe_1.default.yellow(`[payByNfcUidPrepare][deprecation] both amountFiat6 and amountUsdc6 provided — using amountFiat6 (fiat6-only protocol). amountUsdc6 will be ignored.`));
+        }
+        else if (!fiat6Ok && usdc6Ok) {
+            (0, logger_1.logger)(safe_1.default.yellow(`[payByNfcUidPrepare][deprecation] amountUsdc6-only client; please upgrade to amountFiat6+currency (see beamio-charge-fiat-only-protocol.mdc). uid=${uid.trim().slice(0, 12)}...`));
+        }
+        const uidTrim = uid.trim();
+        const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim);
+        if (isNfcUid) {
+            const eTrim = typeof e === 'string' ? e.trim() : '';
+            const cTrim = typeof c === 'string' ? c.trim() : '';
+            const mTrim = typeof m === 'string' ? m.trim() : '';
+            if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+                return res.status(403).json({ ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' });
+            }
+        }
+        const merchantInfraForPrepare = typeof merchantInfraCard === 'string' && merchantInfraCard.trim() && ethers_1.ethers.isAddress(merchantInfraCard.trim())
+            ? ethers_1.ethers.getAddress(merchantInfraCard.trim())
+            : '';
+        (0, logger_1.logger)(safe_1.default.green(`[payByNfcUidPrepare] Cluster preCheck OK forwarding to master (fiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} usdc6=${usdc6Ok ? amountUsdc6 : 'none'} merchantInfraCard=${merchantInfraForPrepare || 'none'})`));
+        (0, exports.postLocalhost)('/api/payByNfcUidPrepare', {
+            uid: uidTrim,
+            payee: ethers_1.ethers.getAddress(payee),
+            ...(fiat6Ok ? { amountFiat6: fiat6Trim, currency: currencyTrim } : {}),
+            ...(usdc6Ok ? { amountUsdc6 } : {}),
+            ...(merchantInfraForPrepare ? { merchantInfraCard: merchantInfraForPrepare } : {}),
+            ...(isNfcUid && { e, c, m }),
+        }, res);
+    });
+    /** POS USDC checkout — Beamio NFC：请求体与 `/api/payByNfcUidPrepare` 相同；独立路径便于观测 AA USDC + points 扣款巷道。 */
+    router.post('/nfcUsdcChargeNfcPrepare', async (req, res) => {
+        (0, logger_1.logger)(safe_1.default.cyan(`[nfcUsdcChargeNfcPrepare] cluster alias (same precheck as payByNfcUidPrepare)`));
+        const { uid, payee, amountUsdc6, amountFiat6, currency, merchantInfraCard, e, c, m } = req.body;
+        if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+            return res.status(400).json({ ok: false, error: 'Missing uid' });
+        }
+        if (!payee || !ethers_1.ethers.isAddress(payee)) {
+            return res.status(400).json({ ok: false, error: 'Invalid payee' });
+        }
+        const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : '';
+        const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : '';
+        const fiat6Ok = fiat6Trim !== '' && /^[0-9]+$/.test(fiat6Trim) && BigInt(fiat6Trim) > 0n && currencyTrim !== '';
+        const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(String(amountUsdc6).trim()) && BigInt(String(amountUsdc6).trim()) > 0n;
+        if (!fiat6Ok && !usdc6Ok) {
+            return res.status(400).json({ ok: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' });
+        }
+        const uidTrim = uid.trim();
+        const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim);
+        if (isNfcUid) {
+            const eTrim = typeof e === 'string' ? e.trim() : '';
+            const cTrim = typeof c === 'string' ? c.trim() : '';
+            const mTrim = typeof m === 'string' ? m.trim() : '';
+            if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+                return res.status(403).json({ ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' });
+            }
+        }
+        const merchantInfraForPrepare = typeof merchantInfraCard === 'string' && merchantInfraCard.trim() && ethers_1.ethers.isAddress(merchantInfraCard.trim())
+            ? ethers_1.ethers.getAddress(merchantInfraCard.trim())
+            : '';
+        (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcChargeNfcPrepare] Cluster preCheck OK forwarding to master (fiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} usdc6=${usdc6Ok ? amountUsdc6 : 'none'} merchantInfraCard=${merchantInfraForPrepare || 'none'})`));
+        (0, exports.postLocalhost)('/api/payByNfcUidPrepare', {
+            uid: uidTrim,
+            payee: ethers_1.ethers.getAddress(payee),
+            ...(fiat6Ok ? { amountFiat6: fiat6Trim, currency: currencyTrim } : {}),
+            ...(usdc6Ok ? { amountUsdc6 } : {}),
+            ...(merchantInfraForPrepare ? { merchantInfraCard: merchantInfraForPrepare } : {}),
+            ...(isNfcUid && { e, c, m }),
+        }, res);
+    });
+    const clusterPayByNfcUidSignContainer = async (req, res) => {
+        const { uid, containerPayload, amountUsdc6, amountFiat6, currency, merchantInfraCard, e, c, m, nfcSubtotalCurrencyAmount, nfcTipCurrencyAmount, nfcTipRateBps, nfcRequestCurrency, nfcDiscountAmountFiat6, nfcDiscountRateBps, nfcTaxAmountFiat6, nfcTaxRateBps, chargeOwnerChildBurn, } = req.body;
+        if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+            return res.status(400).json({ success: false, error: 'Missing uid' });
+        }
+        if (!containerPayload || typeof containerPayload !== 'object') {
+            return res.status(400).json({ success: false, error: 'Missing containerPayload' });
+        }
+        const uidTrim = uid.trim();
+        const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim);
+        if (isNfcUid) {
+            const eTrim = typeof e === 'string' ? e.trim() : '';
+            const cTrim = typeof c === 'string' ? c.trim() : '';
+            const mTrim = typeof m === 'string' ? m.trim() : '';
+            if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+                return res.status(403).json({ success: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' });
+            }
+        }
+        const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : '';
+        const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : '';
+        const fiat6Ok = fiat6Trim !== '' && /^[0-9]+$/.test(fiat6Trim) && BigInt(fiat6Trim) > 0n && currencyTrim !== '';
+        const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(String(amountUsdc6).trim()) && BigInt(String(amountUsdc6).trim()) > 0n;
+        const merchantInfraForContainer = typeof merchantInfraCard === 'string' && merchantInfraCard.trim() && ethers_1.ethers.isAddress(merchantInfraCard.trim())
+            ? ethers_1.ethers.getAddress(merchantInfraCard.trim())
+            : undefined;
+        (0, logger_1.logger)(safe_1.default.cyan(`[payByNfcUidSignContainer] container uid=${uidTrim.slice(0, 16)}... amountFiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} amountUsdc6=${usdc6Ok ? amountUsdc6 : 'none'} merchantInfraCard=${merchantInfraForContainer ?? 'none'}\n` + (0, node_util_1.inspect)(containerPayload, false, 4, true)));
+        if (fiat6Ok && usdc6Ok) {
+            (0, logger_1.logger)(safe_1.default.yellow(`[payByNfcUidSignContainer][deprecation] both amountFiat6 and amountUsdc6 provided — using amountFiat6 (fiat6-only protocol). amountUsdc6 retained for accounting fallback.`));
+        }
+        else if (!fiat6Ok && usdc6Ok) {
+            (0, logger_1.logger)(safe_1.default.yellow(`[payByNfcUidSignContainer][deprecation] amountUsdc6-only client; upgrade to amountFiat6+currency. uid=${uidTrim.slice(0, 12)}...`));
+        }
+        const preCheck = (0, MemberCard_1.ContainerRelayPreCheckUnsigned)(containerPayload);
+        if (!preCheck.success) {
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        if (!fiat6Ok && !usdc6Ok) {
+            return res.status(400).json({ success: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' });
+        }
+        if (isNfcUid) {
+            try {
+                const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${String(c ?? '').trim()}&e=${String(e ?? '').trim()}&m=${String(m ?? '').trim()}`;
+                const sunResult = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(sunUrl);
+                if (!sunResult.valid) {
+                    return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end();
+                }
+                let eoaFromTag = await (0, db_2.getNfcRecipientAddressByTagId)(sunResult.tagIdHex);
+                if (!eoaFromTag || !ethers_1.ethers.isAddress(eoaFromTag)) {
+                    const prov = await ensureNfcTagProvisionedViaMaster({
+                        uid: uidTrim,
+                        tagIdHex: sunResult.tagIdHex,
+                        e: String(e ?? '').trim(),
+                        c: String(c ?? '').trim(),
+                        m: String(m ?? '').trim(),
+                        logPrefix: '[payByNfcUidSignContainer]',
+                    });
+                    if (!prov.ok) {
+                        return res.status(prov.statusCode).json({ success: false, error: prov.error }).end();
+                    }
+                }
+            }
+            catch (e) {
+                return res.status(403).json({ success: false, error: `SUN verification error: ${e?.message ?? e}` }).end();
+            }
+        }
+        // Cluster 预检：扣款是否在余额内，不足则返回错误，不转发 Master
+        const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+        const usdcAbi = ['function balanceOf(address) view returns (uint256)'];
+        const cardAbi = ['function getOwnership(address) view returns (uint256 pt, (uint256 tokenId, uint256 attribute, uint256 tierIndexOrMax, uint256 expiry, bool isExpired)[])'];
+        try {
+            const account = ethers_1.ethers.getAddress(containerPayload.account);
+            const usdc = new ethers_1.ethers.Contract(USDC_BASE, usdcAbi, providerBase);
+            let usdcRequired = 0n;
+            const cardRequired = new Map();
+            for (const it of containerPayload.items) {
+                const amount = BigInt(it.amount);
+                if (it.kind === 0 && ethers_1.ethers.getAddress(it.asset).toLowerCase() === USDC_BASE.toLowerCase()) {
+                    usdcRequired += amount;
+                }
+                else if (it.kind === 1) {
+                    const cardAddr = ethers_1.ethers.getAddress(it.asset);
+                    cardRequired.set(cardAddr, (cardRequired.get(cardAddr) ?? 0n) + amount);
+                }
+            }
+            const usdcPromise = usdcRequired > 0n ? usdc.balanceOf(account) : Promise.resolve(0n);
+            const cardPromises = Array.from(cardRequired.entries()).map(async ([cardAddr, required]) => {
+                const cardChain = await (0, beamioUserCardChain_1.resolveUserCardChain)(cardAddr);
+                const cardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(cardChain);
+                const code = await cardProvider.getCode(cardAddr);
+                if (!code || code === '0x' || code.length <= 2) {
+                    throw new Error(`BeamioUserCard ${cardAddr} has no contract code on ${cardChain}`);
+                }
+                const card = new ethers_1.ethers.Contract(cardAddr, cardAbi, cardProvider);
+                const res = await card.getOwnership(account);
+                const points = res[0];
+                return { cardAddr, chain: cardChain, required, points };
+            });
+            const results = await Promise.all([usdcPromise, ...cardPromises]);
+            const usdcBalance = results[0];
+            const cardBalances = results.slice(1);
+            if (usdcRequired > 0n && usdcBalance < usdcRequired) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[payByNfcUidSignContainer] Cluster 预检失败: USDC 余额不足 需=${usdcRequired} 有=${usdcBalance}`));
+                return res.status(400).json({ success: false, error: 'Insufficient balance' }).end();
+            }
+            for (const { cardAddr, chain, required, points } of cardBalances) {
+                if (points < required) {
+                    (0, logger_1.logger)(safe_1.default.yellow(`[payByNfcUidSignContainer] Cluster 预检失败: 卡内点数不足 card=${cardAddr} chain=${chain}（container account）需=${required} 有=${points}。若与 getUIDAssets 不一致，请确认 payByNfcUidPrepare 使用 UserCard 绑定 AA。`));
+                    return res.status(400).json({ success: false, error: 'Insufficient balance' }).end();
+                }
+            }
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[payByNfcUidSignContainer] Cluster 余额预检异常: ${e?.message ?? e}`));
+            return res.status(500).json({ success: false, error: 'Balance pre-check failed' }).end();
+        }
+        const nfcFwd = {
+            nfcSubtotalCurrencyAmount: nfcSubtotalCurrencyAmount ?? null,
+            nfcTipCurrencyAmount: nfcTipCurrencyAmount ?? null,
+            nfcTipRateBps: nfcTipRateBps ?? null,
+            nfcRequestCurrency: nfcRequestCurrency ?? null,
+            types: {
+                sub: typeof nfcSubtotalCurrencyAmount,
+                tip: typeof nfcTipCurrencyAmount,
+                tipBps: typeof nfcTipRateBps,
+                cur: typeof nfcRequestCurrency,
+            },
+        };
+        (0, logger_1.logger)(safe_1.default.gray(`[payByNfcUidSignContainer] Cluster NFC forward snapshot: ${JSON.stringify(nfcFwd)}`));
+        const strOrUndef = (v) => v != null && String(v).trim() !== '' ? String(v).trim() : undefined;
+        const fwdSub = strOrUndef(nfcSubtotalCurrencyAmount);
+        const fwdTip = strOrUndef(nfcTipCurrencyAmount);
+        const fwdCur = strOrUndef(nfcRequestCurrency);
+        const fwdDisc = strOrUndef(nfcDiscountAmountFiat6);
+        const fwdTax = strOrUndef(nfcTaxAmountFiat6);
+        if (chargeOwnerChildBurn && typeof chargeOwnerChildBurn === 'object') {
+            const burnPre = await (0, MemberCard_1.verifyChargeOwnerChildBurnClusterPreCheck)({
+                burn: chargeOwnerChildBurn,
+                payeeTo: containerPayload.to,
+                merchantCardAddress: merchantInfraForContainer,
+                items: containerPayload.items ?? [],
+            });
+            if (!burnPre.ok) {
+                (0, logger_1.logger)(safe_1.default.red(`[payByNfcUidSignContainer] chargeOwnerChildBurn Cluster REJECT: ${burnPre.error}`));
+                return res.status(400).json({ success: false, error: burnPre.error }).end();
+            }
+        }
+        (0, logger_1.logger)(safe_1.default.green(`[payByNfcUidSignContainer] Cluster preCheck OK uid=${uidTrim.slice(0, 16)}... forwarding to master`));
+        (0, exports.postLocalhost)('/api/payByNfcUidSignContainer', {
+            uid: uidTrim,
+            containerPayload,
+            ...(fiat6Ok ? { amountFiat6: fiat6Trim, currency: currencyTrim } : {}),
+            ...(usdc6Ok ? { amountUsdc6 } : {}),
+            ...(merchantInfraForContainer ? { merchantInfraCard: merchantInfraForContainer } : {}),
+            ...(isNfcUid && { e, c, m }),
+            ...(fwdSub != null ? { nfcSubtotalCurrencyAmount: fwdSub } : {}),
+            ...(fwdTip != null ? { nfcTipCurrencyAmount: fwdTip } : {}),
+            ...(nfcTipRateBps != null && Number.isFinite(Number(nfcTipRateBps))
+                ? { nfcTipRateBps: Math.max(0, Math.min(10000, Math.trunc(Number(nfcTipRateBps)))) }
+                : {}),
+            ...(fwdCur != null ? { nfcRequestCurrency: fwdCur } : {}),
+            ...(fwdDisc != null ? { nfcDiscountAmountFiat6: fwdDisc } : {}),
+            ...(nfcDiscountRateBps != null ? { nfcDiscountRateBps } : {}),
+            ...(fwdTax != null ? { nfcTaxAmountFiat6: fwdTax } : {}),
+            ...(nfcTaxRateBps != null ? { nfcTaxRateBps } : {}),
+            ...(chargeOwnerChildBurn && typeof chargeOwnerChildBurn === 'object' ? { chargeOwnerChildBurn } : {}),
+        }, res);
+    };
+    router.post('/payByNfcUidSignContainer', clusterPayByNfcUidSignContainer);
+    /** POS USDC checkout — Beamio NFC lane；请求体与 `/api/payByNfcUidSignContainer` 相同。 */
+    router.post('/nfcUsdcChargeNfcSign', async (req, res) => {
+        (0, logger_1.logger)(safe_1.default.cyan(`[nfcUsdcChargeNfcSign] alias handler == payByNfcUidSignContainer`));
+        return clusterPayByNfcUidSignContainer(req, res);
+    });
+    /** POST /api/payByNfcUid - 以 UID 支付（写操作，Cluster 预检后转发 Master）。
+     *  fiat6-only 协议：传 `amountFiat6` + `currency`；`amountUsdc6` 已 deprecated，仅作回退。 */
+    router.post('/payByNfcUid', async (req, res) => {
+        const { uid, amountUsdc6, amountFiat6, currency, payee } = req.body;
+        if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
+            return res.status(400).json({ success: false, error: 'Missing uid' });
+        }
+        const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : '';
+        const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : '';
+        const fiat6Ok = fiat6Trim !== '' && /^[0-9]+$/.test(fiat6Trim) && BigInt(fiat6Trim) > 0n && currencyTrim !== '';
+        const usdc6Ok = !!amountUsdc6 && /^[0-9]+$/.test(String(amountUsdc6).trim()) && BigInt(String(amountUsdc6).trim()) > 0n;
+        if (!fiat6Ok && !usdc6Ok) {
+            return res.status(400).json({ success: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' });
+        }
+        if (fiat6Ok && usdc6Ok) {
+            (0, logger_1.logger)(safe_1.default.yellow(`[payByNfcUid][deprecation] both amountFiat6 and amountUsdc6 provided — using amountFiat6 (fiat6-only protocol).`));
+        }
+        else if (!fiat6Ok && usdc6Ok) {
+            (0, logger_1.logger)(safe_1.default.yellow(`[payByNfcUid][deprecation] amountUsdc6-only client; please upgrade to amountFiat6+currency. uid=${uid.trim().slice(0, 12)}...`));
+        }
+        const amountBig = usdc6Ok ? BigInt(String(amountUsdc6).trim()) : 0n;
+        if (!payee || !ethers_1.ethers.isAddress(payee)) {
+            return res.status(400).json({ success: false, error: 'Invalid payee address' });
+        }
+        // 不在此做卡登记检测，直接转发 Master；Master 会从 DB 或 mnemonic 派生私钥
+        (0, logger_1.logger)(safe_1.default.green(`[payByNfcUid] Cluster preCheck OK uid=${uid.trim().slice(0, 16)}... amountFiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} amountUsdc6=${usdc6Ok ? amountUsdc6 : 'none'} payee=${ethers_1.ethers.getAddress(payee)} forwarding to master`));
+        (0, exports.postLocalhost)('/api/payByNfcUid', {
+            uid: uid.trim(),
+            ...(fiat6Ok ? { amountFiat6: fiat6Trim, currency: currencyTrim } : {}),
+            ...(usdc6Ok ? { amountUsdc6 } : {}),
+            payee: ethers_1.ethers.getAddress(payee),
+        }, res);
+    });
+    /** POST /api/nfcLinkApp - POS Link App：SUN 预检 + DB 会话冲突检查，再转发 Master 登记 redeem / 写会话 */
+    router.post('/nfcLinkApp', async (req, res) => {
+        const body = req.body;
+        const uidTrim = body.uid?.trim() ?? '';
+        const eTrim = body.e?.trim() ?? '';
+        const cTrim = body.c?.trim() ?? '';
+        const mTrim = body.m?.trim() ?? '';
+        const cardRaw = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : '';
+        if (cardRaw && !ethers_1.ethers.isAddress(cardRaw)) {
+            return res.status(400).json({ success: false, error: 'Invalid cardAddress.' }).end();
+        }
+        if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+            return res.status(400).json({ success: false, error: 'Invalid uid' }).end();
+        }
+        if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+            return res.status(403).json({ success: false, error: 'SUN params (e, c, m) required.' }).end();
+        }
+        try {
+            const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`;
+            const sunResult = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(sunUrl);
+            if (!sunResult.valid) {
+                return res.status(403).json({ success: false, error: 'SUN verification failed.' }).end();
+            }
+            const nfcTxGateLink = await (0, db_2.getNfcCardSignedTxGateByTagId)(sunResult.tagIdHex);
+            if (!nfcTxGateLink.ok) {
+                return res.status(403).json({ success: false, error: nfcTxGateLink.message, errorCode: nfcTxGateLink.code }).end();
+            }
+            const blockedDetail = await (0, MemberCard_1.nfcLinkAppNewLinkBlockedDetail)(sunResult.tagIdHex);
+            if (blockedDetail) {
+                return res
+                    .status(409)
+                    .json({
+                    success: false,
+                    error: MemberCard_1.NFC_LINK_APP_CARD_LOCKED_MESSAGE,
+                    errorCode: MemberCard_1.NFC_LINK_APP_CARD_LOCKED_ERROR_CODE,
+                    redeemOnChain: blockedDetail.redeemOnChain,
+                })
+                    .end();
+            }
+        }
+        catch (e) {
+            return res.status(403).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+        (0, exports.postLocalhost)('/api/nfcLinkApp', {
+            uid: uidTrim,
+            e: eTrim,
+            c: cTrim,
+            m: mTrim,
+            ...(cardRaw ? { cardAddress: ethers_1.ethers.getAddress(cardRaw) } : {}),
+        }, res);
+    });
+    /** POST /api/nfcLinkAppClaimWithKey - SilentPassUI 扫 Link 深链：校验参数与私钥格式后转 Master（全量资产迁移 + 换绑 nfc_cards 私钥） */
+    router.post('/nfcLinkAppClaimWithKey', async (req, res) => {
+        const body = req.body;
+        const code = typeof body.nftRedeemcode === 'string' ? body.nftRedeemcode.trim() : '';
+        const tagid = typeof body.tagid === 'string' ? body.tagid.trim().replace(/^0x/i, '') : '';
+        const uid = typeof body.uid === 'string' ? body.uid.trim().replace(/^0x/i, '').toLowerCase() : '';
+        const pk = typeof body.privateKey === 'string' ? body.privateKey.trim() : '';
+        const ctr = body.counter;
+        if (!code || code.toLowerCase() === 'null') {
+            return res.status(400).json({ success: false, error: 'Missing nftRedeemcode.' }).end();
+        }
+        if (!/^[0-9a-f]{16}$/i.test(tagid)) {
+            return res.status(400).json({ success: false, error: 'Invalid tagid.' }).end();
+        }
+        if (!/^[0-9a-f]{14}$/i.test(uid)) {
+            return res.status(400).json({ success: false, error: 'Invalid uid.' }).end();
+        }
+        const ctrNum = typeof ctr === 'number' && Number.isFinite(ctr) ? ctr : parseInt(String(ctr ?? ''), 10);
+        if (!Number.isFinite(ctrNum)) {
+            return res.status(400).json({ success: false, error: 'Invalid counter.' }).end();
+        }
+        const pkHex = pk.startsWith('0x') ? pk : `0x${pk}`;
+        if (!/^0x[0-9a-fA-F]{64}$/.test(pkHex)) {
+            return res.status(400).json({ success: false, error: 'Invalid private key.' }).end();
+        }
+        try {
+            new ethers_1.ethers.Wallet(pkHex);
+        }
+        catch {
+            return res.status(400).json({ success: false, error: 'Invalid private key.' }).end();
+        }
+        const claimClusterGate = await (0, db_2.getNfcCardSignedTxGateByTagId)(tagid.toUpperCase());
+        if (!claimClusterGate.ok) {
+            return res.status(403).json({ success: false, error: claimClusterGate.message, errorCode: claimClusterGate.code }).end();
+        }
+        const linkSession = await (0, MemberCard_1.nfcLinkAppValidateParams)({
+            nftRedeemcode: code,
+            tagid,
+            uid,
+            counter: ctrNum,
+        });
+        if (!linkSession.ok) {
+            return res.status(400).json({ success: false, error: linkSession.error }).end();
+        }
+        if (linkSession.migrateViaContainer) {
+            const claimUserEoa = ethers_1.ethers.getAddress(new ethers_1.ethers.Wallet(pkHex).address);
+            const bUnitPre = await (0, MemberCard_1.nfcLinkAppMigrationBUnitClusterPreCheck)(claimUserEoa);
+            if (!bUnitPre.success) {
+                return res
+                    .status(403)
+                    .json({
+                    success: false,
+                    error: bUnitPre.error ?? 'Insufficient B-Units for link migration.',
+                    errorCode: 'NFC_LINK_MIGRATION_INSUFFICIENT_BUNITS',
+                })
+                    .end();
+            }
+        }
+        (0, exports.postLocalhost)('/api/nfcLinkAppClaimWithKey', req.body ?? {}, res);
+    });
+    /** POST /api/nfcLinkAppValidate - 校验深链参数与当前 Link App 会话一致（Cluster 直出，读共享 PG） */
+    router.post('/nfcLinkAppValidate', async (req, res) => {
+        const v = await (0, MemberCard_1.nfcLinkAppValidateParams)(req.body ?? {});
+        if (!v.ok)
+            return res.status(400).json({ success: false, error: v.error }).end();
+        return res
+            .status(200)
+            .json({
+            success: true,
+            redeemOnChain: v.redeemOnChain,
+            migrateViaContainer: v.migrateViaContainer,
+        })
+            .end();
+    });
+    /** POST /api/nfcLinkAppRelease - App 完成 Link（尤其 redeem=null 会话）后释放 DB 会话，恢复 topup/charge */
+    router.post('/nfcLinkAppRelease', async (req, res) => {
+        const r = await (0, MemberCard_1.releaseNfcLinkAppLockIfSessionMatches)(req.body ?? {});
+        if (!r.ok)
+            return res.status(400).json({ success: false, error: r.error }).end();
+        return res.status(200).json({ success: true }).end();
+    });
+    /** POST /api/nfcLinkAppCancel - SUN 预检后转发 Master：链上 cancelRedeem（若有）+ 释放 DB 会话 */
+    router.post('/nfcLinkAppCancel', async (req, res) => {
+        const body = req.body;
+        const uidTrim = body.uid?.trim() ?? '';
+        const eTrim = body.e?.trim() ?? '';
+        const cTrim = body.c?.trim() ?? '';
+        const mTrim = body.m?.trim() ?? '';
+        if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+            return res.status(400).json({ success: false, error: 'Invalid uid' }).end();
+        }
+        if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+            return res.status(403).json({ success: false, error: 'SUN params (e, c, m) required.' }).end();
+        }
+        try {
+            const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`;
+            const sunResult = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(sunUrl);
+            if (!sunResult.valid) {
+                return res.status(403).json({ success: false, error: 'SUN verification failed.' }).end();
+            }
+        }
+        catch (e) {
+            return res.status(403).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+        (0, exports.postLocalhost)('/api/nfcLinkAppCancel', { uid: uidTrim, e: eTrim, c: cTrim, m: mTrim }, res);
+    });
+    /** POST /api/burnPointsByAdminPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。Admin 离线签字后提交 /api/nfcTopup。target 为被 burn 的地址，amount 为 "max" 表示 burn 全部。purpose=chargeCustomerProgramPoints → Charge 客户 #0 burn。 */
+    router.post('/burnPointsByAdminPrepare', async (req, res) => {
+        const { cardAddress, target, amount, purpose } = req.body;
+        const allow = await (0, MemberCard_1.verifyBurnPointsByAdminPrepareAllowed)({
+            cardAddress: cardAddress ?? '',
+            target: target ?? '',
+            purpose: purpose ?? '',
+            amount: amount ?? '0',
+        });
+        if (!allow.ok) {
+            (0, logger_1.logger)(safe_1.default.yellow(`[burnPointsByAdminPrepare] Cluster REJECT: ${allow.error}`));
+            return res.status(400).json({ success: false, error: allow.error }).end();
+        }
+        const result = await (0, MemberCard_1.burnPointsByAdminPreparePayload)({ cardAddress: cardAddress ?? '', target: target ?? '', amount: amount ?? '0' });
+        if ('error' in result)
+            return res.status(400).json({ success: false, error: result.error });
+        res.status(200).json(result).end();
+    });
+    /** POST /api/burnChargeRewardByAdminPrepare - POS 扣 Reward PT（token #13）；Admin 签字后 /api/nfcTopup。 */
+    router.post('/burnChargeRewardByAdminPrepare', async (req, res) => {
+        const { cardAddress, target, amount } = req.body;
+        const allow = await (0, MemberCard_1.verifyBurnChargeRewardByAdminPrepareAllowed)({
+            cardAddress: cardAddress ?? '',
+            target: target ?? '',
+            amount: amount ?? '0',
+        });
+        if (!allow.ok) {
+            (0, logger_1.logger)(safe_1.default.yellow(`[burnChargeRewardByAdminPrepare] Cluster REJECT: ${allow.error}`));
+            return res.status(400).json({ success: false, error: allow.error }).end();
+        }
+        const result = await (0, MemberCard_1.burnChargeRewardByAdminPreparePayload)({
+            cardAddress: cardAddress ?? '',
+            target: target ?? '',
+            amount: amount ?? '0',
+        });
+        if ('error' in result)
+            return res.status(400).json({ success: false, error: result.error });
+        res.status(200).json(result).end();
+    });
+    /** POS 余额页 open coupon 领取 prepare：返回 mintIssuedNftByOwner ExecuteForAdmin 载荷（仅作 POS admin 授权证明；submit 不执行 Owner mint）。 */
+    router.post('/cardCouponPosClaimPrepare', async (req, res) => {
+        const pre = await (0, MemberCard_1.cardCouponPosClaimPreparePreCheck)(req.body);
+        if (!pre.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCouponPosClaimPrepare preCheck FAIL: ${pre.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        const out = pre.preChecked;
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCouponPosClaimPrepare preCheck OK`), (0, node_util_1.inspect)({
+            cardAddress: out.cardAddress,
+            couponId: out.couponId,
+            userEOA: out.userEOA,
+            tokenId: out.tokenId,
+        }, false, 2, true));
+        return res.status(200).json({
+            success: true,
+            cardAddress: out.cardAddress,
+            couponId: out.couponId,
+            userEOA: out.userEOA,
+            tokenId: out.tokenId,
+            data: out.data,
+            deadline: out.deadline,
+            nonce: out.nonce,
+            factoryGateway: out.factoryGateway,
+        }).end();
+    });
+    /** POS 余额页 open coupon 领取 submit：验 POS admin 签名后转发 Master claimIssuedNftForUserByPosAdmin（写 once-claim 标志，非 Owner mint）。 */
+    router.post('/cardCouponPosClaimSubmit', async (req, res) => {
+        const pre = await (0, MemberCard_1.cardCouponPosClaimSubmitPreCheck)(req.body);
+        if (!pre.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCouponPosClaimSubmit preCheck FAIL: ${pre.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        const out = pre.preChecked;
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCouponPosClaimSubmit preCheck OK, forwarding to master cardCouponPosClaimWallet`), (0, node_util_1.inspect)({
+            cardAddress: out.cardAddress,
+            couponId: out.couponId,
+            userEOA: out.userEOA,
+            tokenId: out.tokenId,
+            posAdminEOA: out.posAdminEOA,
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardCouponPosClaimWallet', {
+            cardAddress: out.cardAddress,
+            couponId: out.couponId,
+            userEOA: out.userEOA,
+            tokenId: out.tokenId,
+            posAdminEOA: out.posAdminEOA,
+        }, res);
+    });
+    /** POS 余额页消费券：预检 couponId/tokenId 与用户余额，返回 executeForAdmin 载荷（POS admin 签字）。 */
+    router.get('/merchantCardCouponBurnSupported', async (req, res) => {
+        const cardAddress = String(req.query.cardAddress ?? '').trim();
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end();
+        }
+        try {
+            const supportsBurn = await (0, MemberCard_1.merchantCardSupportsCouponBurn)(cardAddress);
+            return res.status(200).json({ success: true, supportsBurn }).end();
+        }
+        catch (e) {
+            return res
+                .status(500)
+                .json({ success: false, error: e?.message ?? String(e) })
+                .end();
+        }
+    });
+    router.post('/cardCouponPosConsumePrepare', async (req, res) => {
+        const pre = await (0, MemberCard_1.cardCouponPosConsumePreparePreCheck)(req.body);
+        if (!pre.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCouponPosConsumePrepare preCheck FAIL: ${pre.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        const out = pre.preChecked;
+        if (pre.mode === 'openContainerSurrender') {
+            // Legacy merchant card: no cardSelfBurn — transfer coupon via OpenContainer to POS/admin/owner.
+            const transferRecipient = 'transferRecipient' in out && typeof out.transferRecipient === 'string'
+                ? out.transferRecipient
+                : out.cardOwnerEOA;
+            (0, logger_1.logger)(safe_1.default.yellow(`server /api/cardCouponPosConsumePrepare openContainerSurrender (legacy transfer)`), (0, node_util_1.inspect)({
+                cardAddress: out.cardAddress,
+                couponId: out.couponId,
+                userEOA: out.userEOA,
+                userAccount: out.userAccount,
+                tokenId: out.tokenId,
+                amount: out.amount,
+                transferRecipient,
+            }, false, 2, true));
+            return res
+                .status(200)
+                .json({
+                success: true,
+                mode: 'transfer',
+                useOpenContainerSurrender: true,
+                /** Client may finish via NFC hosted key (/cardCouponPosConsumeNfcSign) or Scan-to-Pay OpenContainer signature + /api/AAtoEOA. */
+                requiresCustomerAuth: true,
+                cardAddress: out.cardAddress,
+                couponId: out.couponId,
+                userEOA: out.userEOA,
+                userAccount: out.userAccount,
+                tokenId: out.tokenId,
+                amount: out.amount,
+                cardOwnerEOA: out.cardOwnerEOA,
+                transferRecipient,
+                targetAddress: out.userAccount,
+            })
+                .end();
+        }
+        if (pre.mode !== 'burn') {
+            return res.status(500).json({ success: false, error: 'Unexpected prepare mode' }).end();
+        }
+        const burnOut = pre.preChecked;
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCouponPosConsumePrepare preCheck OK`), (0, node_util_1.inspect)({
+            cardAddress: burnOut.cardAddress,
+            couponId: burnOut.couponId,
+            userEOA: burnOut.userEOA,
+            userAccount: burnOut.userAccount,
+            tokenId: burnOut.tokenId,
+            amount: burnOut.amount,
+        }, false, 2, true));
+        return res
+            .status(200)
+            .json({
+            success: true,
+            mode: 'burn',
+            cardAddress: burnOut.cardAddress,
+            data: burnOut.data,
+            deadline: burnOut.deadline,
+            nonce: burnOut.nonce,
+            factoryGateway: burnOut.factoryGateway,
+            tokenId: burnOut.tokenId,
+            amount: burnOut.amount,
+            targetAddress: burnOut.userAccount,
+        })
+            .end();
+    });
+    /** POS 余额页消费券提交：admin 对 prepare 返回的 payload 做 ExecuteForAdmin 签字后提交。 */
+    router.post('/cardCouponPosConsumeSubmit', async (req, res) => {
+        const pre = await (0, MemberCard_1.cardCouponPosConsumeSubmitPreCheck)(req.body);
+        if (!pre.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCouponPosConsumeSubmit preCheck FAIL: ${pre.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        const out = pre.preChecked;
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCouponPosConsumeSubmit preCheck OK, forwarding to master executeForAdmin`), (0, node_util_1.inspect)({ cardAddress: out.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForAdmin', {
+            cardAddr: out.cardAddress,
+            data: out.data,
+            deadline: out.deadline,
+            nonce: out.nonce,
+            adminSignature: out.adminSignature,
+            cardOwnerEOA: out.cardOwnerEOA,
+            topupFeeBUnits: out.topupFeeBUnits,
+            topupKind: out.topupKind,
+            posOperator: out.posOperator,
+            ...(out.couponBurnUserEOA ? { couponBurnUserEOA: out.couponBurnUserEOA } : {}),
+            ...(out.couponBurnRefWallet ? { couponBurnRefWallet: out.couponBurnRefWallet } : {}),
+        }, res);
+    });
+    /**
+     * Legacy card coupon consume via Check Balance NFC / Linked NFC hosted key:
+     * signs OpenContainer with API-hosted NFC private key (fresh openRelayedNonce), returns payload
+     * for client `/api/AAtoEOA` — no second NFC tap / Customer Pay QR.
+     */
+    router.post('/cardCouponPosConsumeNfcSign', async (req, res) => {
+        const pre = await (0, MemberCard_1.cardCouponPosConsumeNfcSignPreCheck)(req.body);
+        if (!pre.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCouponPosConsumeNfcSign preCheck FAIL: ${pre.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        const out = pre.preChecked;
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCouponPosConsumeNfcSign OK`), (0, node_util_1.inspect)({
+            cardAddress: out.cardAddress,
+            couponId: out.couponId,
+            userEOA: out.userEOA,
+            tokenId: out.tokenId,
+            posOperator: out.posOperator,
+        }, false, 2, true));
+        return res
+            .status(200)
+            .json({
+            success: true,
+            openContainerPayload: out.openContainerPayload,
+            cardAddress: out.cardAddress,
+            couponId: out.couponId,
+            userEOA: out.userEOA,
+            userAccount: out.userAccount,
+            tokenId: out.tokenId,
+            amount: out.amount,
+            posOperator: out.posOperator,
+        })
+            .end();
+    });
+    /** POST /api/nfcTopupPrepare - 转发到 Master，返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）、wallet（Scan QR）或 beamioTag（Scan QR 的 beamio 参数，按 AccountRegistry 解析 EOA）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查 EOA，无法推导 tagID 的不予受理。 Optional membershipTierIndex / membershipFeeFiat6 for membership-fee mode. Optional paidAmount = 实付本金（不含 Top-up Promotion bonus）；amount 可为本金+bonus 合计。 */
+    router.post('/nfcTopupPrepare', async (req, res) => {
+        const { uid, wallet, beamioTag, amount, currency, cardAddress, e, c, m, membershipTierIndex, membershipFeeFiat6, paidAmount } = req.body;
+        const hasUid = uid && typeof uid === 'string' && uid.trim().length > 0;
+        const uidTrim = hasUid ? uid.trim() : '';
+        const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim);
+        let resolvedWallet = wallet && typeof wallet === 'string' && ethers_1.ethers.isAddress(wallet.trim()) ? ethers_1.ethers.getAddress(wallet.trim()) : undefined;
+        const hasBeamioTag = beamioTag && typeof beamioTag === 'string' && beamioTag.trim().length > 0;
+        let nfcSunTagForEnsure = null;
+        if (hasBeamioTag && !resolvedWallet) {
+            try {
+                const owner = await SC.getOwnerByAccountName(beamioTag.trim());
+                if (owner && owner !== ethers_1.ethers.ZeroAddress) {
+                    resolvedWallet = ethers_1.ethers.getAddress(owner);
+                    (0, logger_1.logger)(safe_1.default.gray(`[nfcTopupPrepare] beamioTag=${beamioTag.trim()} 解析到 wallet=${resolvedWallet.slice(0, 10)}...`));
+                }
+            }
+            catch (_) { /* 非账户名，忽略 */ }
+        }
+        const hasWallet = !!resolvedWallet;
+        if (!hasUid && !hasWallet) {
+            return res.status(400).json({ success: false, error: hasBeamioTag ? 'Could not resolve beamioTag to a valid wallet' : 'Missing uid or wallet' });
+        }
+        if (!cardAddress || typeof cardAddress !== 'string' || !ethers_1.ethers.isAddress(cardAddress.trim())) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' });
+        }
+        // NFC 格式 uid：必须提供 e/c/m，SUN 校验，用 tagIdHex 查 EOA；不符合 SUN 或无法推导 tagID 的不予受理
+        if (hasUid && isNfcUid) {
+            const eTrim = typeof e === 'string' ? e.trim() : '';
+            const cTrim = typeof c === 'string' ? c.trim() : '';
+            const mTrim = typeof m === 'string' ? m.trim() : '';
+            if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+                const err = { success: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' };
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcTopupPrepare] uid=${uidTrim} 缺少 SUN 参数 返回 403: ${JSON.stringify(err)}`));
+                return res.status(403).json(err).end();
+            }
+            try {
+                const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`;
+                const sunResult = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(sunUrl);
+                if (!sunResult.valid) {
+                    const err = { success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh };
+                    (0, logger_1.logger)(safe_1.default.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid}`));
+                    return res.status(403).json(err).end();
+                }
+                let eoaFromTag = await (0, db_2.getNfcRecipientAddressByTagId)(sunResult.tagIdHex);
+                if (!eoaFromTag || !ethers_1.ethers.isAddress(eoaFromTag)) {
+                    const prov = await ensureNfcTagProvisionedViaMaster({
+                        uid: uidTrim,
+                        tagIdHex: sunResult.tagIdHex,
+                        e: eTrim,
+                        c: cTrim,
+                        m: mTrim,
+                        logPrefix: '[nfcTopupPrepare]',
+                    });
+                    if (!prov.ok) {
+                        const err = { success: false, error: prov.error };
+                        (0, logger_1.logger)(safe_1.default.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} provision 失败 返回 ${prov.statusCode}: ${prov.error}`));
+                        return res.status(prov.statusCode).json(err).end();
+                    }
+                    eoaFromTag = prov.eoa;
+                }
+                const topPrepGate = await (0, db_2.getNfcCardPosAdminGateByTagId)(sunResult.tagIdHex);
+                if (!topPrepGate.ok) {
+                    return res.status(403).json({ success: false, error: topPrepGate.message, errorCode: topPrepGate.code }).end();
+                }
+                resolvedWallet = ethers_1.ethers.getAddress(eoaFromTag);
+                nfcSunTagForEnsure = sunResult.tagIdHex;
+                (0, logger_1.logger)(safe_1.default.gray(`[nfcTopupPrepare] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}... wallet=${resolvedWallet.slice(0, 10)}...`));
+            }
+            catch (sunErr) {
+                const msg = sunErr?.message ?? String(sunErr);
+                const err = { success: false, error: `SUN verification error: ${msg}` };
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcTopupPrepare] uid=${uidTrim} SUN 校验异常: ${msg}`));
+                return res.status(403).json(err).end();
+            }
+        }
+        const forwardCardAddress = ethers_1.ethers.getAddress(cardAddress.trim());
+        const forwardBody = {
+            uid: hasUid && !resolvedWallet ? uid.trim() : undefined,
+            wallet: resolvedWallet,
+            amount: String(amount ?? ''),
+            currency: (currency || 'CAD').trim(),
+            cardAddress: forwardCardAddress,
+        };
+        if (membershipTierIndex != null && String(membershipTierIndex).trim() !== '') {
+            forwardBody.membershipTierIndex = membershipTierIndex;
+        }
+        if (membershipFeeFiat6 != null && String(membershipFeeFiat6).trim() !== '') {
+            forwardBody.membershipFeeFiat6 = membershipFeeFiat6;
+        }
+        if (paidAmount != null && String(paidAmount).trim() !== '') {
+            forwardBody.paidAmount = String(paidAmount).trim();
+        }
+        try {
+            let prepareCardOwner = '';
+            try {
+                const prepCardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(await (0, beamioUserCardChain_1.resolveUserCardChain)(forwardCardAddress));
+                const cprep = new ethers_1.ethers.Contract(forwardCardAddress, ['function owner() view returns (address)'], prepCardProvider);
+                const ow = await cprep.owner();
+                if (ow && ethers_1.ethers.isAddress(ow))
+                    prepareCardOwner = ethers_1.ethers.getAddress(ow);
+            }
+            catch { /* ignore */ }
+            const walletLabel = forwardBody.wallet ?? (forwardBody.uid ? `(uid=${forwardBody.uid})` : 'N/A');
+            (0, logger_1.logger)(safe_1.default.cyan(`[nfcTopupPrepare] POS prepare summary | cardAddr=${forwardCardAddress} | cardOwner=${prepareCardOwner || 'N/A'} | amount=${forwardBody.amount} | currency=${forwardBody.currency} | payeeWallet=${walletLabel}`));
+            const { statusCode, body } = await postLocalhostBuffer('/api/nfcTopupPrepare', forwardBody);
+            const parsed = JSON.parse(body);
+            if (resolvedWallet && (hasBeamioTag || (hasUid && isNfcUid)) && parsed.cardAddr && !parsed.error) {
+                parsed.wallet = resolvedWallet;
+            }
+            if (resolvedWallet && hasUid && isNfcUid && nfcSunTagForEnsure && parsed.cardAddr && !parsed.error) {
+                try {
+                    const aa = await resolveBeamioAccountOf(ethers_1.ethers.getAddress(resolvedWallet));
+                    if (aa && aa !== ethers_1.ethers.ZeroAddress) {
+                        const code = await providerBase.getCode(aa);
+                        if (code && code !== '0x' && code.length > 2) {
+                            (0, getUIDAssetsLogic_1.scheduleEnsureNfcBeamioTagForEoa)(ethers_1.ethers.getAddress(resolvedWallet), uidTrim, nfcSunTagForEnsure, null);
+                        }
+                    }
+                }
+                catch (_) {
+                    /* non-fatal */
+                }
+            }
+            res.status(statusCode).json(parsed).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcTopupPrepare] forward failed: ${e?.message ?? e}`));
+            res.status(502).json({ success: false, error: `Forward to master failed: ${e?.message ?? e}` }).end();
+        }
+    });
+    /** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Cluster 预检签名与 isAdmin 后转发 Master。当 uid 为 NFC 格式（14 位 hex）时：必须提供 e/c/m，SUN 校验通过才转发，不符合 SUN 或无法推导 tagID 的不予受理。 */
+    router.post('/nfcTopup', async (req, res) => {
+        const { cardAddr, data, deadline, nonce, adminSignature, uid, e, c, m, cardCurrencyAmount, cashCurrencyAmount, bonusCurrencyAmount, currencyAmount, membershipTierIndex, membershipFeeFiat6, chargeBurnProgramPoints, chargeBurnCustomerEOA, chargeBurnAmountFiat6, chargeBurnCurrency, chargeBurnSkipBunitFee, purpose, } = req.body;
+        const bodyForDebug = (req.body ?? {});
+        const previewHex = (raw, front = 14, back = 10) => {
+            const s = typeof raw === 'string' ? raw.trim() : '';
+            if (!s)
+                return '';
+            return s.length > front + back + 3 ? `${s.slice(0, front)}...${s.slice(-back)}` : s;
+        };
+        (0, logger_1.logger)(safe_1.default.cyan(`[nfcTopup][received] ip=${(0, util_1.getClientIp)(req)} cardAddr=${String(cardAddr ?? '') || '(missing)'} uid=${String(uid ?? '') || '(none)'} wallet=${String(bodyForDebug.wallet ?? '') || '(none)'} beamioTag=${String(bodyForDebug.beamioTag ?? '') || '(none)'} source=${String(bodyForDebug.topupSourceOverride ?? bodyForDebug.source ?? '') || '(default)'} usdcSid=${String(bodyForDebug.usdcTopupSessionId ?? '') || '(none)'} split={currency:${String(currencyAmount ?? '') || '(empty)'}, card:${String(cardCurrencyAmount ?? '') || '(empty)'}, cash:${String(cashCurrencyAmount ?? '') || '(empty)'}, bonus:${String(bonusCurrencyAmount ?? '') || '(empty)'}} deadline=${String(deadline ?? '') || '(missing)'} nonce=${previewHex(nonce)} dataSel=${typeof data === 'string' ? data.slice(0, 10) : '(missing)'} dataLen=${typeof data === 'string' ? data.length : 0} sig=${previewHex(adminSignature)}`));
+        let nfcTagIdHex = null;
+        let nfcLinkedEOA = null;
+        const uidTrim = uid && typeof uid === 'string' ? uid.trim() : '';
+        const isNfcUid = uidTrim.length > 0 && /^[0-9A-Fa-f]{14}$/.test(uidTrim);
+        if (isNfcUid) {
+            const eTrim = typeof e === 'string' ? e.trim() : '';
+            const cTrim = typeof c === 'string' ? c.trim() : '';
+            const mTrim = typeof m === 'string' ? m.trim() : '';
+            if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+                const err = { success: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' };
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcTopup] uid=${uidTrim} 缺少 SUN 参数 返回 403: ${JSON.stringify(err)}`));
+                return res.status(403).json(err).end();
+            }
+            try {
+                const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`;
+                const sunResult = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(sunUrl);
+                if (!sunResult.valid) {
+                    const err = { success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh };
+                    (0, logger_1.logger)(safe_1.default.yellow(`[nfcTopup] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid}`));
+                    return res.status(403).json(err).end();
+                }
+                nfcTagIdHex = sunResult.tagIdHex;
+                nfcLinkedEOA = await (0, db_2.getNfcRecipientAddressByTagId)(nfcTagIdHex);
+                if (!nfcLinkedEOA || !ethers_1.ethers.isAddress(nfcLinkedEOA)) {
+                    const prov = await ensureNfcTagProvisionedViaMaster({
+                        uid: uidTrim,
+                        tagIdHex: nfcTagIdHex,
+                        e: eTrim,
+                        c: cTrim,
+                        m: mTrim,
+                        logPrefix: '[nfcTopup]',
+                    });
+                    if (!prov.ok) {
+                        const err = { success: false, error: prov.error };
+                        (0, logger_1.logger)(safe_1.default.yellow(`[nfcTopup] uid=${uidTrim} tagId=${nfcTagIdHex} provision 失败 返回 ${prov.statusCode}: ${prov.error}`));
+                        return res.status(prov.statusCode).json(err).end();
+                    }
+                    nfcLinkedEOA = prov.eoa;
+                }
+                const topGate = await (0, db_2.getNfcCardPosAdminGateByTagId)(nfcTagIdHex);
+                if (!topGate.ok) {
+                    const err = { success: false, error: topGate.message, errorCode: topGate.code };
+                    (0, logger_1.logger)(safe_1.default.yellow(`[nfcTopup] uid=${uidTrim} NFC POS admin gate: ${topGate.code}`));
+                    return res.status(403).json(err).end();
+                }
+                (0, logger_1.logger)(safe_1.default.gray(`[nfcTopup] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}...`));
+            }
+            catch (sunErr) {
+                const msg = sunErr?.message ?? String(sunErr);
+                const err = { success: false, error: `SUN verification error: ${msg}` };
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcTopup] uid=${uidTrim} SUN 校验异常: ${msg}`));
+                return res.status(403).json(err).end();
+            }
+        }
+        if (!cardAddr || !ethers_1.ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' });
+        }
+        if (typeof deadline !== 'number' || deadline <= 0 || !nonce || typeof nonce !== 'string' || !adminSignature || typeof adminSignature !== 'string') {
+            return res.status(400).json({ success: false, error: 'Missing or invalid deadline/nonce/adminSignature' });
+        }
+        try {
+            const adminManagerIface4 = new ethers_1.ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)']);
+            const adminManagerIface5 = new ethers_1.ethers.Interface([
+                'function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)',
+            ]);
+            const adminManagerSel4 = (adminManagerIface4.getFunction('adminManager')?.selector ?? '').toLowerCase();
+            const adminManagerSel5 = (adminManagerIface5.getFunction('adminManager')?.selector ?? '').toLowerCase();
+            const dataSel = data.slice(0, 10).toLowerCase();
+            const isMint = data.startsWith(MINT_POINTS_BY_ADMIN_SELECTOR);
+            const isBurn = data.startsWith(BURN_POINTS_BY_ADMIN_SELECTOR);
+            const isBurnChargeReward = data.startsWith(BURN_CHARGE_REWARD_BY_ADMIN_SELECTOR);
+            const isBurnIssuedNft = data.startsWith(BURN_ISSUED_NFT_BY_GATEWAY_SELECTOR);
+            const isAdminManager = dataSel === adminManagerSel4 || dataSel === adminManagerSel5;
+            if (!isMint && !isBurn && !isBurnChargeReward && !isBurnIssuedNft && !isAdminManager) {
+                return res.status(400).json({ success: false, error: 'executeForAdmin only supports mintPointsByAdmin, burnPointsByAdmin, burnChargeRewardByAdmin, burnIssuedNftByGateway, or adminManager' });
+            }
+            const now = Math.floor(Date.now() / 1000);
+            if (now > deadline) {
+                return res.status(400).json({ success: false, error: 'Deadline expired' });
+            }
+            const cardAddress = ethers_1.ethers.getAddress(cardAddr);
+            const cardChain = await (0, beamioUserCardChain_1.resolveUserCardChain)(cardAddress);
+            const cardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(cardChain);
+            const verifyingContractGw = await (0, MemberCard_1.getBeamioUserCardFactoryGateway)(cardAddress);
+            const dataHash = ethers_1.ethers.keccak256(data);
+            const domain = {
+                name: 'BeamioUserCardFactory',
+                version: '1',
+                chainId: (0, beamioUserCardChain_1.chainIdForUserCardChain)(cardChain),
+                verifyingContract: verifyingContractGw
+            };
+            const types = {
+                ExecuteForAdmin: [
+                    { name: 'cardAddress', type: 'address' },
+                    { name: 'dataHash', type: 'bytes32' },
+                    { name: 'deadline', type: 'uint256' },
+                    { name: 'nonce', type: 'bytes32' }
+                ]
+            };
+            const message = {
+                cardAddress,
+                dataHash,
+                deadline: BigInt(deadline),
+                nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce
+            };
+            const digest = ethers_1.ethers.TypedDataEncoder.hash(domain, types, message);
+            const signer = ethers_1.ethers.recoverAddress(digest, adminSignature);
+            const sigPreview = adminSignature && typeof adminSignature === 'string' && adminSignature.length > 24
+                ? `${adminSignature.slice(0, 14)}...${adminSignature.slice(-10)}`
+                : String(adminSignature ?? '');
+            (0, logger_1.logger)(safe_1.default.gray(`[nfcTopup][eip712] card=${cardAddress} verifyingContract=${verifyingContractGw} chainConfiguredFactory=${(0, beamioUserCardChain_1.cardFactoryForUserCardChain)(cardChain)} chainId=${(0, beamioUserCardChain_1.chainIdForUserCardChain)(cardChain)} dataHash=${dataHash} deadline=${deadline} nonce=${message.nonce} digest=${digest} recovered=${signer} sig=${sigPreview}`));
+            const cardAbi = ['function isAdmin(address) view returns (bool)', 'function owner() view returns (address)', 'function adminParent(address) view returns (address)'];
+            const card = new ethers_1.ethers.Contract(cardAddress, cardAbi, cardProvider);
+            const isAdmin = await card.isAdmin(signer);
+            if (!isAdmin) {
+                const mintParsed = tryParseMintPointsByAdminArgs(data);
+                const recipientTo = mintParsed?.recipient ?? tryParseMintPointsByAdminRecipient(data);
+                const points6 = mintParsed?.points6 ?? 0n;
+                let cardOwner = '';
+                let signerAdminParent = '';
+                let signerDbBoundCard = 'N/A';
+                let signerDbBoundCardMatch = false;
+                try {
+                    cardOwner = await card.owner();
+                    signerAdminParent = await card.adminParent(signer);
+                    const binding = await (0, db_2.getPosTerminalCardBindingRow)(signer);
+                    if (binding?.cardAddress) {
+                        signerDbBoundCard = binding.cardAddress;
+                        signerDbBoundCardMatch = binding.cardAddress.toLowerCase() === cardAddress.toLowerCase();
+                    }
+                }
+                catch (_) { /* ignore */ }
+                const nfcLinkedAA = nfcLinkedEOA ? await resolveBeamioAccountOf(nfcLinkedEOA) : null;
+                const expectedChainId = (0, beamioUserCardChain_1.chainIdForUserCardChain)(cardChain);
+                /** POS may send the wallet it believes signed — used to distinguish domain bugs from true non-admin. */
+                const expectedSignerRaw = String(bodyForDebug.signerEOA ?? bodyForDebug.expectedSigner ?? bodyForDebug.posOperator ?? '').trim();
+                let expectedSigner;
+                if (expectedSignerRaw && ethers_1.ethers.isAddress(expectedSignerRaw)) {
+                    try {
+                        expectedSigner = ethers_1.ethers.getAddress(expectedSignerRaw);
+                    }
+                    catch {
+                        expectedSigner = undefined;
+                    }
+                }
+                /** Legacy POS bug: signed EIP-712 with Base 8453 while Cluster recovers with CoNET 224422. */
+                let recoveredUnderBase8453;
+                let recoveredBaseIsAdmin = false;
+                try {
+                    const digestBase = ethers_1.ethers.TypedDataEncoder.hash({ ...domain, chainId: 8453 }, types, message);
+                    recoveredUnderBase8453 = ethers_1.ethers.recoverAddress(digestBase, adminSignature);
+                    recoveredBaseIsAdmin = Boolean(await card.isAdmin(recoveredUnderBase8453));
+                }
+                catch {
+                    /* ignore */
+                }
+                let errorCode = 'SIGNER_NOT_CARD_ADMIN';
+                let error = `Terminal wallet ${signer} is not an admin on this merchant card. Ask Staff to approve this POS, then retry.`;
+                if (recoveredUnderBase8453 &&
+                    recoveredBaseIsAdmin &&
+                    recoveredUnderBase8453.toLowerCase() !== signer.toLowerCase()) {
+                    errorCode = 'EIP712_CHAIN_ID_MISMATCH';
+                    error =
+                        `ExecuteForAdmin EIP-712 chainId mismatch: signature recovers to admin ${recoveredUnderBase8453} under Base (8453), but recovers to non-admin ${signer} under CoNET (${expectedChainId}). POS must sign with chainId ${expectedChainId}.`;
+                }
+                else if (expectedSigner &&
+                    expectedSigner.toLowerCase() !== signer.toLowerCase()) {
+                    errorCode = 'EIP712_SIGNATURE_RECOVERY_MISMATCH';
+                    error =
+                        `ExecuteForAdmin signature does not recover to the POS wallet. Expected ${expectedSigner}, recovered ${signer}. Usually wrong EIP-712 domain (chainId or verifyingContract).`;
+                }
+                (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] ${errorCode} - DEBUG: cardAddr=${cardAddress} | verifyingContract=${verifyingContractGw} | expectedChainId=${expectedChainId} | tagIdHex=${nfcTagIdHex ?? '(not NFC)'} | tagIdLinkedEOA=${nfcLinkedEOA ?? 'N/A'} | tagIdLinkedAA=${nfcLinkedAA ?? 'N/A'} | toRecipient=${recipientTo ?? 'N/A'} | amountPoints6=${points6.toString()} | cardOwner=${cardOwner || 'N/A'} | recovered=${signer} | expectedSigner=${expectedSigner ?? 'N/A'} | recoveredUnderBase8453=${recoveredUnderBase8453 ?? 'N/A'} | recoveredBaseIsAdmin=${recoveredBaseIsAdmin} | signerAdminParent=${signerAdminParent || 'N/A'} | signerDbBoundCard=${signerDbBoundCard} | signerDbBoundCardMatch=${signerDbBoundCardMatch} | digest=${digest} | nonce=${message.nonce} | dataHash=${dataHash}`));
+                return res.status(403).json({
+                    success: false,
+                    errorCode,
+                    error,
+                    signer,
+                    expectedSigner,
+                    recoveredUnderBase8453,
+                    expectedChainId,
+                    cardOwner: cardOwner || undefined,
+                    cardAddr: cardAddress,
+                });
+            }
+            /** adminManager(add) 经 nfcTopup 时须与 cardAddAdminByAdmin 一致：禁止同一终端 EOA 已绑定其他商户卡后再加为 admin（此前仅此路径未做 DB 预检）。 */
+            if (isAdminManager) {
+                const iface = dataSel === adminManagerSel5 ? adminManagerIface5 : adminManagerIface4;
+                try {
+                    const decoded = iface.parseTransaction({ data });
+                    if (decoded?.name === 'adminManager' && decoded.args[1] === true) {
+                        const toRaw = decoded.args[0];
+                        if (!toRaw || !ethers_1.ethers.isAddress(toRaw)) {
+                            return res.status(400).json({ success: false, error: 'Invalid adminManager to address' }).end();
+                        }
+                        const toCandidate = ethers_1.ethers.getAddress(toRaw);
+                        const codeAtTo = await providerBase.getCode(toCandidate);
+                        if (codeAtTo && codeAtTo !== '0x' && codeAtTo.length > 2) {
+                            return res
+                                .status(400)
+                                .json({ success: false, error: 'Adding AA as admin via nfcTopup is not allowed. Encode adminManager with the terminal EOA as to.' })
+                                .end();
+                        }
+                        const bindCheck = await (0, db_2.assertPosEoaAvailableForCardBinding)(toCandidate, cardAddress);
+                        if (!bindCheck.ok) {
+                            return res.status(400).json({ success: false, error: bindCheck.error }).end();
+                        }
+                    }
+                }
+                catch (e) {
+                    return res
+                        .status(400)
+                        .json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid adminManager calldata' })
+                        .end();
+                }
+            }
+            let cardOwnerForLog = '';
+            try {
+                const ow = await card.owner();
+                if (ow && ethers_1.ethers.isAddress(ow))
+                    cardOwnerForLog = ethers_1.ethers.getAddress(ow);
+            }
+            catch { /* ignore */ }
+            let topupSummaryOp = 'adminManager';
+            let topupSummaryPoints6 = '';
+            let topupSummaryRecipient = 'N/A';
+            if (isMint) {
+                const mp = tryParseMintPointsByAdminArgs(data);
+                topupSummaryOp = 'mintPointsByAdmin';
+                topupSummaryPoints6 = mp?.points6 !== undefined ? mp.points6.toString() : '';
+                topupSummaryRecipient = mp?.recipient ?? tryParseMintPointsByAdminRecipient(data) ?? 'N/A';
+            }
+            else if (isBurn) {
+                const bp = tryParseBurnPointsByAdminArgs(data);
+                topupSummaryOp = 'burnPointsByAdmin';
+                if (bp) {
+                    topupSummaryPoints6 = bp.points6.toString();
+                    topupSummaryRecipient = bp.target;
+                }
+            }
+            else if (isBurnChargeReward) {
+                const bp = tryParseBurnChargeRewardByAdminArgs(data);
+                topupSummaryOp = 'burnChargeRewardByAdmin';
+                if (bp) {
+                    topupSummaryPoints6 = bp.points6.toString();
+                    topupSummaryRecipient = bp.target;
+                }
+            }
+            else if (isBurnIssuedNft) {
+                topupSummaryOp = 'burnIssuedNftByGateway';
+            }
+            (0, logger_1.logger)(safe_1.default.cyan(`[nfcTopup] POS topup summary | cardAddr=${cardAddress} | cardOwner=${cardOwnerForLog || 'N/A'} | posEOA=${signer} | op=${topupSummaryOp} | points6=${topupSummaryPoints6 || 'N/A'} | recipient=${topupSummaryRecipient} | uid=${uidTrim || '(none)'}`));
+            let recipientEOA = null;
+            let aaAddr = null;
+            let bunitFeeCheck = { success: true };
+            let membershipFeeStageForward;
+            if (isBurnIssuedNft) {
+                const burnBunit = await (0, MemberCard_1.cardRedeemPreCheckBUnitBalance)(cardAddress);
+                if (!burnBunit.success || !burnBunit.cardOwnerEOA || !burnBunit.feeBUnits6) {
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] coupon burn B-Unit pre-check FAIL: ${burnBunit.error}`));
+                    return res.status(400).json({ success: false, error: burnBunit.error ?? 'Insufficient B-Units for coupon consume' }).end();
+                }
+                bunitFeeCheck = {
+                    success: true,
+                    cardOwnerEOA: burnBunit.cardOwnerEOA,
+                    feeAmount: burnBunit.feeBUnits6,
+                    topupKind: 1,
+                };
+            }
+            const wantChargeBurn = isBurn &&
+                (chargeBurnProgramPoints === true ||
+                    String(chargeBurnProgramPoints ?? '').trim().toLowerCase() === 'true' ||
+                    String(purpose ?? '').trim() === 'chargeCustomerProgramPoints');
+            if (wantChargeBurn) {
+                const burnParsed = tryParseBurnPointsByAdminArgs(data);
+                if (!burnParsed || burnParsed.points6 <= 0n) {
+                    return res.status(400).json({ success: false, error: 'Invalid burnPointsByAdmin payload for charge' }).end();
+                }
+                const allowBurn = await (0, MemberCard_1.verifyBurnPointsByAdminPrepareAllowed)({
+                    cardAddress,
+                    target: burnParsed.target,
+                    purpose: 'chargeCustomerProgramPoints',
+                    amount: burnParsed.points6.toString(),
+                });
+                if (!allowBurn.ok) {
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] charge #0 burn pre-check FAIL: ${allowBurn.error}`));
+                    return res.status(400).json({ success: false, error: allowBurn.error }).end();
+                }
+                const skipChargeBurnBunit = chargeBurnSkipBunitFee === true ||
+                    String(chargeBurnSkipBunitFee ?? '').trim().toLowerCase() === 'true';
+                if (skipChargeBurnBunit) {
+                    // Hybrid Charge: USDC Container already paid the fixed 5 B-Unit fee.
+                    bunitFeeCheck = { success: true };
+                }
+                else {
+                    bunitFeeCheck = await (0, MemberCard_1.nfcTopupPreCheckChargeBurnBUnitFee)(cardAddress);
+                    if (!bunitFeeCheck.success) {
+                        (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] charge burn B-Unit pre-check FAIL: ${bunitFeeCheck.error}`));
+                        return res.status(400).json({ success: false, error: bunitFeeCheck.error }).end();
+                    }
+                }
+            }
+            if (isMint) {
+                recipientEOA = tryParseMintPointsByAdminRecipient(data);
+                if (!recipientEOA || !ethers_1.ethers.isAddress(recipientEOA)) {
+                    return res.status(400).json({ success: false, error: 'Invalid mintPointsByAdmin payload' });
+                }
+                const mintAmt = tryParseMintPointsByAdminArgs(data);
+                if (!mintAmt || mintAmt.points6 <= 0n) {
+                    return res.status(400).json({ success: false, error: 'Invalid mintPointsByAdmin amount' });
+                }
+                const airdropLimitCheck = await (0, MemberCard_1.nfcTopupPreCheckAdminAirdropLimit)(cardAddress, signer, mintAmt.points6);
+                if (!airdropLimitCheck.success) {
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] admin airdrop limit pre-check FAIL: ${airdropLimitCheck.error}`));
+                    return res.status(400).json({ success: false, error: airdropLimitCheck.error }).end();
+                }
+                /** Fee mode: replace min-tier first-membership gate; metadata min/max top-up quotas are not applied on this path. */
+                const feeMembershipChk = await (0, MemberCard_1.nfcTopupPreCheckMembershipFeeFirstIssue)({
+                    cardAddrRaw: cardAddress,
+                    mintRecipientAddrRaw: recipientEOA,
+                    points6Mint: mintAmt.points6,
+                    membershipTierIndex,
+                    membershipFeeFiat6,
+                    amountFiat6: currencyAmount,
+                });
+                if (!feeMembershipChk.success) {
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] membership fee first-issue FAIL: ${feeMembershipChk.error}`));
+                    return res.status(400).json({ success: false, error: feeMembershipChk.error }).end();
+                }
+                if (feeMembershipChk.membershipFeeMode && feeMembershipChk.membershipNeedsFee && feeMembershipChk.stage) {
+                    membershipFeeStageForward = {
+                        recipientEOA: feeMembershipChk.stage.recipientEOA,
+                        tierIndex: feeMembershipChk.stage.tierIndex,
+                        feePaid6: feeMembershipChk.stage.feePaid6.toString(),
+                        pointsCredit6: feeMembershipChk.stage.pointsCredit6.toString(),
+                        ...(feeMembershipChk.stage.bootstrapOnChain
+                            ? {
+                                bootstrapOnChain: true,
+                                durationKind: feeMembershipChk.stage.durationKind,
+                            }
+                            : {}),
+                    };
+                }
+                else if (!feeMembershipChk.membershipFeeMode) {
+                    const minTierChk = await (0, MemberCard_1.nfcTopupPreCheckMintMinTierFirstMembership)(cardAddress, recipientEOA, mintAmt.points6);
+                    if (!minTierChk.success) {
+                        (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] first-membership minimum tier FAIL: ${minTierChk.error}`));
+                        return res.status(400).json({ success: false, error: minTierChk.error }).end();
+                    }
+                }
+                /**
+                 * Membership-fee first issue / upgrade: Master `stageMembershipFeePurchase*` then mint.
+                 * A bare `mintPointsByAdmin` eth_call reverts `UC_MembershipFeePendingRequired` (0xece3c3b6)
+                 * even though the real UserOp path is valid — skip simulation when staging is queued.
+                 */
+                if (membershipFeeStageForward) {
+                    (0, logger_1.logger)(safe_1.default.gray(`[nfcTopup] skip mint gateway simulation | membershipFeeStage tier=${membershipFeeStageForward.tierIndex} (pending required on-chain until Master stages)`));
+                }
+                else {
+                    const mintSimChk = await (0, MemberCard_1.nfcTopupPreCheckMintGatewaySimulation)(cardAddress, data);
+                    if (!mintSimChk.success) {
+                        (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] mint gateway simulation FAIL: ${mintSimChk.error}`));
+                        return res.status(400).json({ success: false, error: mintSimChk.error }).end();
+                    }
+                }
+                aaAddr = recipientEOA ? await resolveBeamioAccountOf(recipientEOA) : null;
+                bunitFeeCheck = await (0, MemberCard_1.nfcTopupPreCheckBUnitFee)(cardAddress, data);
+                if (!bunitFeeCheck.success) {
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] B-Unit fee pre-check FAIL: ${bunitFeeCheck.error}`));
+                    return res.status(400).json({ success: false, error: bunitFeeCheck.error }).end();
+                }
+            }
+            (0, logger_1.logger)(safe_1.default.green(`server /api/nfcTopup preCheck OK | uid=${uid ?? '(not provided)'} | wallet=${recipientEOA ?? 'N/A'} | AA=${aaAddr ?? 'N/A'} | fee=${Number(bunitFeeCheck.feeAmount ?? 0) / 1e6} B-Units | forwarding to master`));
+            const parseTopupCurrencyE6Cluster = (raw) => {
+                const t = String(raw ?? '')
+                    .trim()
+                    .replace(/,/g, '');
+                if (!t)
+                    return 0n;
+                try {
+                    return ethers_1.ethers.parseUnits(t, 6);
+                }
+                catch {
+                    return -1n;
+                }
+            };
+            const splitCluster = {};
+            if (isMint) {
+                const anySplitField = (cardCurrencyAmount != null && String(cardCurrencyAmount).trim() !== '') ||
+                    (cashCurrencyAmount != null && String(cashCurrencyAmount).trim() !== '') ||
+                    (bonusCurrencyAmount != null && String(bonusCurrencyAmount).trim() !== '') ||
+                    (currencyAmount != null && String(currencyAmount).trim() !== '');
+                if (anySplitField) {
+                    const cE = parseTopupCurrencyE6Cluster(cardCurrencyAmount);
+                    const cashE = parseTopupCurrencyE6Cluster(cashCurrencyAmount);
+                    const bE = parseTopupCurrencyE6Cluster(bonusCurrencyAmount);
+                    const totE = parseTopupCurrencyE6Cluster(currencyAmount);
+                    if (cE < 0n || cashE < 0n || bE < 0n || totE < 0n) {
+                        return res.status(400).json({ success: false, error: 'Invalid top-up currency split amounts' }).end();
+                    }
+                    if (totE <= 0n || cE + cashE + bE !== totE) {
+                        return res
+                            .status(400)
+                            .json({
+                            success: false,
+                            error: 'cardCurrencyAmount + cashCurrencyAmount + bonusCurrencyAmount must equal currencyAmount (6 decimal places)',
+                        })
+                            .end();
+                    }
+                    splitCluster.cardCurrencyAmount = ethers_1.ethers.formatUnits(cE, 6);
+                    splitCluster.cashCurrencyAmount = ethers_1.ethers.formatUnits(cashE, 6);
+                    splitCluster.bonusCurrencyAmount = ethers_1.ethers.formatUnits(bE, 6);
+                    splitCluster.currencyAmount = ethers_1.ethers.formatUnits(totE, 6);
+                    (0, logger_1.logger)(safe_1.default.cyan(`[nfcTopup][split-ok] card=${cardAddress} recipient=${recipientEOA ?? 'N/A'} totalE6=${totE.toString()} cardE6=${cE.toString()} cashE6=${cashE.toString()} bonusE6=${bE.toString()} rawTotal=${String(currencyAmount ?? '') || '(empty)'} rawCard=${String(cardCurrencyAmount ?? '') || '(empty)'} rawCash=${String(cashCurrencyAmount ?? '') || '(empty)'} rawBonus=${String(bonusCurrencyAmount ?? '') || '(empty)'}`));
+                }
+            }
+            const usdcTopupSid = typeof req.body.usdcTopupSessionId === 'string'
+                ? req.body.usdcTopupSessionId.trim().toLowerCase()
+                : '';
+            if (usdcTopupSid) {
+                if (!isMint) {
+                    return res.status(400).json({ success: false, error: 'usdcTopupSessionId is only valid for mint top-up' }).end();
+                }
+                if (!isValidSid(usdcTopupSid)) {
+                    return res.status(400).json({ success: false, error: 'Invalid usdcTopupSessionId' }).end();
+                }
+                const sg = await masterSessionGet(usdcTopupSid);
+                if (sg.statusCode !== 200) {
+                    return res.status(502).json({ success: false, error: 'Could not verify USDC top-up session' }).end();
+                }
+                let sess;
+                try {
+                    sess = JSON.parse(sg.body);
+                }
+                catch {
+                    return res.status(502).json({ success: false, error: 'Session parse error' }).end();
+                }
+                if (!sess.ok || sess.state !== 'awaiting_beneficiary' || !sess.USDC_tx) {
+                    return res
+                        .status(400)
+                        .json({ success: false, error: 'Invalid or expired USDC top-up payment session' })
+                        .end();
+                }
+                if (!sess.cardAddr || ethers_1.ethers.getAddress(sess.cardAddr) !== cardAddress) {
+                    return res.status(400).json({ success: false, error: 'USDC session card mismatch' }).end();
+                }
+                const parseSessTot = (raw) => {
+                    const t = String(raw ?? '')
+                        .trim()
+                        .replace(/,/g, '');
+                    if (!t)
+                        return -1n;
+                    try {
+                        return ethers_1.ethers.parseUnits(t, 6);
+                    }
+                    catch {
+                        return -1n;
+                    }
+                };
+                let totE6Body;
+                if (splitCluster.currencyAmount) {
+                    totE6Body = parseTopupCurrencyE6Cluster(splitCluster.currencyAmount);
+                }
+                else {
+                    totE6Body = parseTopupCurrencyE6Cluster(currencyAmount);
+                }
+                if (totE6Body <= 0n) {
+                    return res.status(400).json({ success: false, error: 'currencyAmount required for USDC phase-2 top-up' }).end();
+                }
+                const sessTot = parseSessTot(sess.total);
+                if (sessTot < 0n || totE6Body !== sessTot) {
+                    return res.status(400).json({ success: false, error: 'USDC session amount mismatch' }).end();
+                }
+            }
+            if (isNfcUid && nfcLinkedEOA && nfcTagIdHex && ethers_1.ethers.isAddress(nfcLinkedEOA)) {
+                try {
+                    const aaNfc = await resolveBeamioAccountOf(ethers_1.ethers.getAddress(nfcLinkedEOA));
+                    if (aaNfc && aaNfc !== ethers_1.ethers.ZeroAddress) {
+                        const codeNfc = await providerBase.getCode(aaNfc);
+                        if (codeNfc && codeNfc !== '0x' && codeNfc.length > 2) {
+                            (0, getUIDAssetsLogic_1.scheduleEnsureNfcBeamioTagForEoa)(ethers_1.ethers.getAddress(nfcLinkedEOA), uidTrim, nfcTagIdHex, null);
+                        }
+                    }
+                }
+                catch (_) {
+                    /* non-fatal */
+                }
+            }
+            (0, exports.postLocalhost)('/api/nfcTopup', {
+                cardAddr: cardAddress,
+                data,
+                deadline,
+                nonce,
+                adminSignature,
+                uid: typeof uid === 'string' ? uid : undefined,
+                cardOwnerEOA: bunitFeeCheck.cardOwnerEOA,
+                topupFeeBUnits: bunitFeeCheck.feeAmount?.toString(),
+                topupKind: bunitFeeCheck.topupKind,
+                ...(isBurnIssuedNft || wantChargeBurn ? { posOperator: signer } : {}),
+                ...(wantChargeBurn
+                    ? {
+                        chargeBurnProgramPoints: true,
+                        ...(typeof chargeBurnCustomerEOA === 'string' &&
+                            ethers_1.ethers.isAddress(chargeBurnCustomerEOA.trim())
+                            ? { chargeBurnCustomerEOA: ethers_1.ethers.getAddress(chargeBurnCustomerEOA.trim()) }
+                            : {}),
+                        ...(typeof chargeBurnAmountFiat6 === 'string' &&
+                            String(chargeBurnAmountFiat6).trim() !== ''
+                            ? { chargeBurnAmountFiat6: String(chargeBurnAmountFiat6).trim() }
+                            : {}),
+                        ...(typeof chargeBurnCurrency === 'string' &&
+                            String(chargeBurnCurrency).trim() !== ''
+                            ? { chargeBurnCurrency: String(chargeBurnCurrency).trim() }
+                            : {}),
+                    }
+                    : {}),
+                ...splitCluster,
+                ...(usdcTopupSid ? { usdcTopupSessionId: usdcTopupSid } : {}),
+                ...(membershipFeeStageForward ? { membershipFeeStage: membershipFeeStageForward } : {}),
+                ...(membershipTierIndex != null && String(membershipTierIndex).trim() !== ''
+                    ? { membershipTierIndex }
+                    : {}),
+                ...(membershipFeeFiat6 != null && String(membershipFeeFiat6).trim() !== ''
+                    ? { membershipFeeFiat6 }
+                    : {}),
+            }, res);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcTopup] preCheck failed: ${e?.message ?? e}`));
+            return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'PreCheck failed' });
+        }
+    });
+    const decimalToAtomic6 = (raw) => {
+        const s = String(raw ?? '').trim();
+        if (!/^\d+(?:\.\d+)?$/.test(s))
+            return 0n;
+        const [intPart, fracPart = ''] = s.split('.');
+        const frac6 = `${fracPart}000000`.slice(0, 6);
+        try {
+            return BigInt(intPart) * 1000000n + BigInt(frac6);
+        }
+        catch {
+            return 0n;
+        }
+    };
+    const quoteSettleAmount6 = (amountDec, currency, paymentToken) => {
+        const cur = String(currency ?? '').trim().toUpperCase();
+        if (paymentToken === 'CADD' && (cur === 'CAD' || cur === 'CADD')) {
+            return { amount6: decimalToAtomic6(amountDec), usesOracle: false };
+        }
+        return { amount6: (0, MemberCard_1.quoteCurrencyToUsdc6)(amountDec, cur), usesOracle: true };
+    };
+    /** GET /api/nfcUsdcTopupQuote
+     * 客户端浏览器钱包页面（verra-home /usdc-topup）展示价格用：根据 currency 与 amount 用 Oracle 折算 USDC6。
+     * Query: card, owner, amount, currency；`workflow=walletDeposit` / `fuelPack` 可省略 card/owner。
+     * 同步校验 card.owner() 是否与 owner 一致，避免任意 payTo 注入误用。 */
+    router.get('/nfcUsdcTopupQuote', async (req, res) => {
+        try {
+            const { card, owner, amount, currency, paymentToken, workflow, beneficiary, pack, packId } = req.query;
+            const workflowNorm = String(workflow ?? '').trim().toLowerCase();
+            const walletDepositQuote = workflowNorm === 'walletdeposit';
+            const fuelPackQuote = workflowNorm === 'fuelpack';
+            const cardlessQuote = walletDepositQuote || fuelPackQuote;
+            if (cardlessQuote) {
+                const beneficiaryStr = String(beneficiary ?? '').trim();
+                if (!beneficiaryStr || !ethers_1.ethers.isAddress(beneficiaryStr)) {
+                    return res.status(400).json({ success: false, error: 'Invalid beneficiary' }).end();
+                }
+            }
+            else {
+                if (!card || !ethers_1.ethers.isAddress(String(card).trim())) {
+                    return res.status(400).json({ success: false, error: 'Invalid card' }).end();
+                }
+                if (!owner || !ethers_1.ethers.isAddress(String(owner).trim())) {
+                    return res.status(400).json({ success: false, error: 'Invalid owner' }).end();
+                }
+            }
+            const cur = (currency || 'CAD').toString().trim().toUpperCase();
+            const amt = String(amount ?? '').trim();
+            if (!amt || !(Number(amt) > 0)) {
+                return res.status(400).json({ success: false, error: 'Invalid amount' }).end();
+            }
+            const cardAddr = cardlessQuote ? ethers_1.ethers.ZeroAddress : ethers_1.ethers.getAddress(String(card).trim());
+            const ownerAddr = cardlessQuote ? ethers_1.ethers.ZeroAddress : ethers_1.ethers.getAddress(String(owner).trim());
+            let onChainOwner = null;
+            if (!cardlessQuote) {
+                try {
+                    const c = new ethers_1.ethers.Contract(cardAddr, ['function owner() view returns (address)'], providerBase);
+                    const o = (await c.owner());
+                    if (o && ethers_1.ethers.isAddress(o))
+                        onChainOwner = ethers_1.ethers.getAddress(o);
+                }
+                catch (_) { /* tolerate transient rpc */ }
+                if (onChainOwner && onChainOwner !== ownerAddr) {
+                    return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end();
+                }
+            }
+            const paymentTokenNorm = (() => {
+                const t = String(paymentToken ?? '').trim().toUpperCase();
+                if (t === 'USDC' || t === 'CADD')
+                    return t;
+                return cur === 'CADD' ? 'CADD' : 'USDC';
+            })();
+            if (cardlessQuote && (cur !== 'USDC' || paymentTokenNorm !== 'USDC')) {
+                return res.status(400).json({ success: false, error: `${walletDepositQuote ? 'walletDeposit' : 'fuelPack'} requires currency/paymentToken USDC` }).end();
+            }
+            const { amount6: usdc6, usesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm);
+            if (fuelPackQuote) {
+                const packRaw = String(pack ?? packId ?? '').trim();
+                if (packRaw) {
+                    const catalogPack = (0, fuelPackCatalog_1.lookupFuelPack)(packRaw);
+                    if (!catalogPack) {
+                        return res.status(400).json({ success: false, error: 'Unknown fuel pack' }).end();
+                    }
+                    if (usdc6 !== (0, fuelPackCatalog_1.fuelPackUsdc6)(catalogPack)) {
+                        return res.status(400).json({ success: false, error: `fuelPack amount must be ${catalogPack.usdcAmount} USDC` }).end();
+                    }
+                }
+            }
+            if (usdc6 <= 0n) {
+                if (!usesOracle) {
+                    return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end();
+                }
+                const fresh = (0, util_1.isOracleFresh)();
+                const oracleTs = (clusterOracleCache?.timestamp ?? 0);
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcTopupQuote] oracle quote=0 cur=${cur} amt=${amt} fresh=${fresh} oracleTs=${oracleTs}`));
+                return res.status(503).json({
+                    success: false,
+                    error: fresh
+                        ? `Oracle rate not available for ${cur}, please retry shortly`
+                        : `Oracle rate stale, please retry shortly`,
+                }).end();
+            }
+            const permitSpender = (() => {
+                try {
+                    const pk = util_2.masterSetup.settle_contractAdmin?.[0];
+                    return pk ? ethers_1.ethers.getAddress(new ethers_1.ethers.Wallet(pk).address) : null;
+                }
+                catch {
+                    return null;
+                }
+            })();
+            return res.status(200).json({
+                success: true,
+                cardAddress: cardAddr,
+                cardOwner: onChainOwner ?? ownerAddr,
+                currency: cur,
+                amount: amt,
+                quotedUsdc6: usdc6.toString(),
+                quotedUsdc: ethers_1.ethers.formatUnits(usdc6, 6),
+                oracleTimestamp: Number(clusterOracleCache?.timestamp ?? 0),
+                ...(paymentTokenNorm === 'CADD' && permitSpender ? { permitSpender } : {}),
+            }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopupQuote] error: ${e?.message ?? e}`));
+            return res.status(500).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    /** POST /api/nfcUsdcTopup
+     * x402（EIP-3009）：客户用任意外部钱包浏览器（MetaMask 等）为 NFC POS topup 付 USDC。
+     * 流程：
+     *   1. 校验 body 参数（cardAddress、cardOwner、uid+SUN e/c/m、amount、currency；可选 sid+pos 供 POS 轮询）
+     *   2. SUN 校验 + recipientEOA；card.owner() 一致性
+     *   3. nfcTopupPreparePayload（mint → recipientEOA）
+     *   4. x402 settle（USDC → cardOwner）
+     *   5a. **sid+pos**（POS admin 与卡绑定）：立刻 200 给顾客；后台 `runUsdcNfcTopupPosOrchestrator` 推 session
+     *       `awaiting_topup_auth` → POS 签 `/api/nfcUsdcChargeTopupAuth` → Master `nfcUsdcTopup`（preSigned）
+     *   5b. **无 sid+pos**（历史浏览器 NFC）：cluster 直接 `postLocalhost` Master，由 service-admin 签 ExecuteForAdmin
+     *   5c. **workflow=clientTopup + beneficiary**（遗留）：仅 x402 结算 USDC → beneficiary EOA；卡内 topup 由客户端 `/api/usdcTopup`
+     *   5d. **workflow=treasuryBridge + aa**：Discover 国库桥 — settle USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+     *       Master `treasuryBridgeFulfill` LockMint CONET-USDC → owner + protocol gateway mint → user AA
+     *   5e. **workflow=genesisNodeSeat + beneficiary + qty**：Discover Genesis Seat — settle USDC → GENESIS_NODE_SEAT_PAYTO；
+     *       Master `genesisNodeSeatFulfill` 自动 createRedeemFor + claimRedeemFor（listener 部署节点）
+     *   5f. **workflow=walletDeposit + beneficiary**：Wallet USDC 入金 — settle USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+     *       Master `walletDepositFulfill` initiateLockMint CONET-USDC → beneficiary（EOA 或 AA，无卡）
+     *   5g. **workflow=fuelPack + beneficiary**：Custom Fuel pack — settle USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+     *       Master `fuelPackFulfill` mint B-Units (+ Genesis Ket #0) → merchant beneficiary
+     */
+    router.post('/nfcUsdcTopup', async (req, res) => {
+        const { cardAddress, cardOwner, uid, e, c, m, amount, currency, sid, pos, beneficiary, workflow, aa, recipientAA, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, qty, test, referrerL0, pack, packId, membershipTierIndex, membershipFeeFiat6 } = req.body;
+        const sidNorm = isValidSid(sid) ? sid.trim().toLowerCase() : null;
+        const posStr = (pos ?? '').toString().trim();
+        const posAddr = posStr && ethers_1.ethers.isAddress(posStr) ? ethers_1.ethers.getAddress(posStr) : null;
+        const sessionUpdate = (patch) => {
+            if (!sidNorm || !posAddr)
+                return;
+            void masterSessionUpsert(sidNorm, patch);
+        };
+        const sessionPath = !!(sidNorm && posAddr);
+        try {
+            if (sidNorm && !posAddr) {
+                return res
+                    .status(400)
+                    .json({ success: false, error: 'Invalid or missing `pos` (POS EOA required when `sid` is set)' })
+                    .end();
+            }
+            const earlyWorkflowNorm = String(workflow ?? '').trim().toLowerCase();
+            const walletDepositEarly = earlyWorkflowNorm === 'walletdeposit' &&
+                !!String(beneficiary ?? '').trim() &&
+                ethers_1.ethers.isAddress(String(beneficiary).trim());
+            const fuelPackEarly = earlyWorkflowNorm === 'fuelpack' &&
+                !!String(beneficiary ?? '').trim() &&
+                ethers_1.ethers.isAddress(String(beneficiary).trim());
+            const cardlessEarly = walletDepositEarly || fuelPackEarly;
+            if (!cardlessEarly) {
+                if (!cardAddress || !ethers_1.ethers.isAddress(String(cardAddress).trim())) {
+                    sessionUpdate({ state: 'error', error: 'Invalid cardAddress' });
+                    return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end();
+                }
+                if (!cardOwner || !ethers_1.ethers.isAddress(String(cardOwner).trim())) {
+                    sessionUpdate({ state: 'error', error: 'Invalid cardOwner' });
+                    return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end();
+                }
+            }
+            const uidTrim = (uid ?? '').trim();
+            const eTrim = (e ?? '').trim();
+            const cTrim = (c ?? '').trim();
+            const mTrim = (m ?? '').trim();
+            const hasFullNfc = /^[0-9A-Fa-f]{14}$/.test(uidTrim) && eTrim.length === 64 && cTrim.length === 6 && mTrim.length === 16;
+            const cur = (currency || 'CAD').trim().toUpperCase();
+            const paymentTokenNorm = (() => {
+                const t = String(paymentToken ?? '').trim().toUpperCase();
+                if (t === 'USDC' || t === 'CADD')
+                    return t;
+                return cur === 'CADD' ? 'CADD' : 'USDC';
+            })();
+            const amt = String(amount ?? '').trim();
+            if (!amt || !(Number(amt) > 0)) {
+                sessionUpdate({ state: 'error', error: 'Invalid amount' });
+                return res.status(400).json({ success: false, error: 'Invalid amount' }).end();
+            }
+            const cardAddr = cardlessEarly
+                ? ethers_1.ethers.ZeroAddress
+                : ethers_1.ethers.getAddress(String(cardAddress).trim());
+            const ownerAddr = cardlessEarly
+                ? ethers_1.ethers.ZeroAddress
+                : ethers_1.ethers.getAddress(String(cardOwner).trim());
+            const settleWithRawSigIfNeeded = async (expectedAmount6, description, payToOverride) => {
+                if (paymentTokenNorm !== 'CADD')
+                    return undefined;
+                const payToAddr = payToOverride && ethers_1.ethers.isAddress(payToOverride)
+                    ? ethers_1.ethers.getAddress(payToOverride)
+                    : payToOwner;
+                const payerAddrRaw = String(payer ?? '').trim();
+                const valueRaw = String(value ?? '').trim();
+                const permitDeadlineRaw = String(permitDeadline ?? '').trim();
+                const permitNonceRaw = String(permitNonce ?? '').trim();
+                const sigRaw = String(signature ?? '').trim();
+                if (!payerAddrRaw || !ethers_1.ethers.isAddress(payerAddrRaw)) {
+                    if (!res.headersSent)
+                        res.status(400).json({ success: false, error: 'CADD settle requires valid `payer` address' }).end();
+                    return null;
+                }
+                if (!valueRaw || !/^\d+$/.test(valueRaw) || BigInt(valueRaw) <= 0n) {
+                    if (!res.headersSent)
+                        res.status(400).json({ success: false, error: 'CADD settle requires positive `value` (atomic 6-decimals)' }).end();
+                    return null;
+                }
+                if (BigInt(valueRaw) < expectedAmount6) {
+                    if (!res.headersSent) {
+                        res.status(400).json({ success: false, error: `CADD value too small: ${valueRaw} < quoted ${expectedAmount6.toString()}` }).end();
+                    }
+                    return null;
+                }
+                if (!/^\d+$/.test(permitDeadlineRaw) || !/^\d+$/.test(permitNonceRaw) || !/^0x[0-9a-fA-F]{130}$/.test(sigRaw)) {
+                    if (!res.headersSent)
+                        res.status(400).json({ success: false, error: 'CADD settle requires permitDeadline/permitNonce/signature' }).end();
+                    return null;
+                }
+                const r = await postLocalhostBuffer('/api/tokenTransferRawSig', {
+                    paymentToken: 'CADD',
+                    cardOwner: payToAddr,
+                    payer: payerAddrRaw,
+                    value: valueRaw,
+                    permitDeadline: permitDeadlineRaw,
+                    permitNonce: permitNonceRaw,
+                    signature: sigRaw,
+                });
+                let j = {};
+                try {
+                    j = JSON.parse(r.body || '{}');
+                }
+                catch {
+                    j = {};
+                }
+                if (r.statusCode !== 200 || j?.success === false || !j?.txHash) {
+                    const errMsg = j?.error ?? `CADD settle failed (HTTP ${r.statusCode})`;
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup] ${description} cadd raw-sig settle failed: ${errMsg}`));
+                    if (!res.headersSent)
+                        res.status(502).json({ success: false, error: errMsg }).end();
+                    return null;
+                }
+                const payerNorm = ethers_1.ethers.getAddress(String(j.payer ?? payerAddrRaw));
+                const txHash = String(j.txHash).trim();
+                return { payer: payerNorm, USDC_tx: txHash, usdcAmount6: BigInt(valueRaw) };
+            };
+            const beneficiaryStr = String(beneficiary ?? '').trim();
+            const beneficiaryAddr = beneficiaryStr && ethers_1.ethers.isAddress(beneficiaryStr) ? ethers_1.ethers.getAddress(beneficiaryStr) : null;
+            const workflowNorm = String(workflow ?? '').trim().toLowerCase();
+            const aaRaw = String(aa ?? recipientAA ?? '').trim();
+            const recipientAaAddr = aaRaw && ethers_1.ethers.isAddress(aaRaw) ? ethers_1.ethers.getAddress(aaRaw) : null;
+            const treasuryBridgeOnly = workflowNorm === 'treasurybridge' && !!recipientAaAddr && !sessionPath && !hasFullNfc;
+            const clientTopupOnly = workflowNorm === 'clienttopup' && !!beneficiaryAddr && !sessionPath && !hasFullNfc;
+            const genesisNodeSeatOnly = workflowNorm === 'genesisnodeseat' && !!beneficiaryAddr && !sessionPath && !hasFullNfc;
+            const walletDepositOnly = workflowNorm === 'walletdeposit' && !!beneficiaryAddr && !sessionPath && !hasFullNfc;
+            const fuelPackOnly = workflowNorm === 'fuelpack' && !!beneficiaryAddr && !sessionPath && !hasFullNfc;
+            if ((clientTopupOnly || treasuryBridgeOnly || genesisNodeSeatOnly || walletDepositOnly || fuelPackOnly) && (sidNorm || posAddr)) {
+                return res
+                    .status(400)
+                    .json({
+                    success: false,
+                    error: `${treasuryBridgeOnly
+                        ? 'treasuryBridge'
+                        : genesisNodeSeatOnly
+                            ? 'genesisNodeSeat'
+                            : walletDepositOnly
+                                ? 'walletDeposit'
+                                : fuelPackOnly
+                                    ? 'fuelPack'
+                                    : 'clientTopup'} workflow must not include sid/pos (use POS admin QR for terminal top-up)`,
+                })
+                    .end();
+            }
+            if (!hasFullNfc && !sessionPath && !clientTopupOnly && !treasuryBridgeOnly && !genesisNodeSeatOnly && !walletDepositOnly && !fuelPackOnly) {
+                sessionUpdate({ state: 'error', error: 'Invalid uid' });
+                return res
+                    .status(400)
+                    .json({
+                    success: false,
+                    error: 'Invalid uid (expect 14-hex NFC UID); without NFC use POS QR (sid+pos admin), treasuryBridge (aa+workflow), clientTopup (beneficiary+workflow), genesisNodeSeat (beneficiary+qty+workflow), walletDeposit (beneficiary+workflow), or fuelPack (beneficiary+pack+workflow).',
+                })
+                    .end();
+            }
+            // 1. 校验 card.owner() + POS session verifying（先于 SUN，阶段 1 无 SUN）
+            let onChainOwner = null;
+            if (!walletDepositOnly && !fuelPackOnly) {
+                try {
+                    const cardChain = await (0, beamioUserCardChain_1.resolveUserCardChain)(cardAddr);
+                    const cardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(cardChain);
+                    const cprep = new ethers_1.ethers.Contract(cardAddr, ['function owner() view returns (address)', 'function isAdmin(address) view returns (bool)'], cardProvider);
+                    const o = (await cprep.owner());
+                    if (o && ethers_1.ethers.isAddress(o))
+                        onChainOwner = ethers_1.ethers.getAddress(o);
+                }
+                catch (_) { /* tolerate */ }
+                if (onChainOwner && onChainOwner !== ownerAddr) {
+                    sessionUpdate({ state: 'error', error: 'cardOwner mismatch' });
+                    return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end();
+                }
+            }
+            const payToOwner = onChainOwner ?? ownerAddr;
+            /**
+             * Wallet USDC 入金：x402 settle Base USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+             * Master initiateLockMint CONET-USDC → beneficiary（EOA 或 AA，无卡 / 无 vault）。
+             */
+            if (walletDepositOnly && beneficiaryAddr) {
+                if (cur !== 'USDC' || paymentTokenNorm !== 'USDC') {
+                    return res.status(400).json({ success: false, error: 'walletDeposit requires currency/paymentToken USDC' }).end();
+                }
+                const { amount6: quotedDeposit, usesOracle: depositUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm);
+                if (quotedDeposit <= 0n) {
+                    if (!depositUsesOracle) {
+                        return res.status(400).json({ success: false, error: 'Invalid USDC amount' }).end();
+                    }
+                    const fresh = (0, util_1.isOracleFresh)();
+                    const omsg = fresh
+                        ? `Oracle rate not available for ${cur}, please retry shortly`
+                        : `Oracle rate stale, please retry shortly`;
+                    return res.status(503).json({ success: false, error: omsg }).end();
+                }
+                const settlePayTo = chainAddresses_1.GENESIS_NODE_BRIDGE_INITIATOR;
+                const settleDesc = `Beamio USDC walletDeposit (${amt} USDC → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`;
+                const settledDeposit = await (0, util_1.settleBeamioX402ToCardOwner)(req, res, {
+                    cardOwner: settlePayTo,
+                    quotedUsdc6: quotedDeposit,
+                    description: settleDesc,
+                });
+                if (!settledDeposit) {
+                    return;
+                }
+                (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/walletDeposit] settle OK payTo=${settlePayTo} beneficiary=${beneficiaryAddr} payer=${settledDeposit.payer} usdc6=${settledDeposit.usdcAmount6} USDC_tx=${settledDeposit.USDC_tx}`));
+                if (!res.headersSent) {
+                    res
+                        .status(200)
+                        .json({
+                        success: true,
+                        workflow: 'walletDeposit',
+                        USDC_tx: settledDeposit.USDC_tx,
+                        payer: settledDeposit.payer,
+                        usdcAmount6: settledDeposit.usdcAmount6.toString(),
+                        beneficiary: beneficiaryAddr,
+                        fulfillPending: true,
+                    })
+                        .end();
+                }
+                void postLocalhostBuffer('/api/walletDepositFulfill', {
+                    beneficiary: beneficiaryAddr,
+                    payer: settledDeposit.payer,
+                    USDC_tx: settledDeposit.USDC_tx,
+                    usdcAmount6: settledDeposit.usdcAmount6.toString(),
+                })
+                    .then((r) => {
+                    if (r.statusCode >= 400) {
+                        (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/walletDeposit] background fulfill HTTP ${r.statusCode}: ${r.body.slice(0, 400)}`));
+                    }
+                    else {
+                        (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/walletDeposit] background fulfill OK USDC_tx=${settledDeposit.USDC_tx?.slice(0, 12)}…`));
+                    }
+                })
+                    .catch((e) => {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/walletDeposit] background fulfill error: ${msg}`));
+                });
+                return;
+            }
+            /**
+             * Custom Fuel pack：x402 settle Base USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+             * Master mint B-Units (+ Genesis Ket #0) → merchant beneficiary（非付款人）。
+             */
+            if (fuelPackOnly && beneficiaryAddr) {
+                if (cur !== 'USDC' || paymentTokenNorm !== 'USDC') {
+                    return res.status(400).json({ success: false, error: 'fuelPack requires currency/paymentToken USDC' }).end();
+                }
+                const packRaw = String(pack ?? packId ?? '').trim();
+                const catalogPack = packRaw ? (0, fuelPackCatalog_1.lookupFuelPack)(packRaw) : null;
+                if (packRaw && !catalogPack) {
+                    return res.status(400).json({ success: false, error: 'Unknown fuel pack' }).end();
+                }
+                const { amount6: quotedFuel, usesOracle: fuelUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm);
+                if (quotedFuel <= 0n) {
+                    if (!fuelUsesOracle) {
+                        return res.status(400).json({ success: false, error: 'Invalid USDC amount' }).end();
+                    }
+                    const fresh = (0, util_1.isOracleFresh)();
+                    const omsg = fresh
+                        ? `Oracle rate not available for ${cur}, please retry shortly`
+                        : `Oracle rate stale, please retry shortly`;
+                    return res.status(503).json({ success: false, error: omsg }).end();
+                }
+                if (catalogPack && quotedFuel !== (0, fuelPackCatalog_1.fuelPackUsdc6)(catalogPack)) {
+                    return res.status(400).json({ success: false, error: `fuelPack amount must be ${catalogPack.usdcAmount} USDC` }).end();
+                }
+                if (quotedFuel < 1000000n) {
+                    return res.status(400).json({ success: false, error: 'Minimum purchase is 1 USDC' }).end();
+                }
+                const settlePayTo = chainAddresses_1.GENESIS_NODE_BRIDGE_INITIATOR;
+                const settleDesc = `Beamio USDC fuelPack (${amt} USDC pack=${catalogPack?.id ?? 'custom'} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`;
+                const settledFuel = await (0, util_1.settleBeamioX402ToCardOwner)(req, res, {
+                    cardOwner: settlePayTo,
+                    quotedUsdc6: quotedFuel,
+                    description: settleDesc,
+                });
+                if (!settledFuel) {
+                    return;
+                }
+                (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/fuelPack] settle OK payTo=${settlePayTo} beneficiary=${beneficiaryAddr} payer=${settledFuel.payer} usdc6=${settledFuel.usdcAmount6} pack=${catalogPack?.id ?? 'custom'} USDC_tx=${settledFuel.USDC_tx}`));
+                if (!res.headersSent) {
+                    res
+                        .status(200)
+                        .json({
+                        success: true,
+                        workflow: 'fuelPack',
+                        USDC_tx: settledFuel.USDC_tx,
+                        payer: settledFuel.payer,
+                        usdcAmount6: settledFuel.usdcAmount6.toString(),
+                        beneficiary: beneficiaryAddr,
+                        packId: catalogPack?.id,
+                        fulfillPending: true,
+                    })
+                        .end();
+                }
+                void postLocalhostBuffer('/api/fuelPackFulfill', {
+                    beneficiary: beneficiaryAddr,
+                    payer: settledFuel.payer,
+                    USDC_tx: settledFuel.USDC_tx,
+                    usdcAmount6: settledFuel.usdcAmount6.toString(),
+                    packId: catalogPack?.id ?? '',
+                    mintKet: catalogPack?.firstTimeOnly === true,
+                    freeBUnits6: catalogPack ? (0, fuelPackCatalog_1.fuelPackFreeBUnits6)(catalogPack).toString() : '0',
+                })
+                    .then((r) => {
+                    if (r.statusCode >= 400) {
+                        (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/fuelPack] background fulfill HTTP ${r.statusCode}: ${r.body.slice(0, 400)}`));
+                    }
+                    else {
+                        (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/fuelPack] background fulfill OK USDC_tx=${settledFuel.USDC_tx?.slice(0, 12)}…`));
+                    }
+                })
+                    .catch((e) => {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/fuelPack] background fulfill error: ${msg}`));
+                });
+                return;
+            }
+            /**
+             * Discover Genesis Node Seat：x402 settle Base USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+             * Master bindSale + LockMint → vault onBridgeMint 分账，再 createRedeemFor + claimRedeemFor。
+             */
+            if (genesisNodeSeatOnly && beneficiaryAddr) {
+                const genesisCard = ethers_1.ethers.getAddress(chainAddresses_1.GENESIS_NODE_SEAT_CARD_ADDRESS);
+                if (cardAddr.toLowerCase() !== genesisCard.toLowerCase()) {
+                    return res
+                        .status(400)
+                        .json({
+                        success: false,
+                        error: `genesisNodeSeat requires card ${genesisCard}`,
+                    })
+                        .end();
+                }
+                if (cur !== 'USDC' || paymentTokenNorm !== 'USDC') {
+                    return res.status(400).json({ success: false, error: 'genesisNodeSeat requires currency/paymentToken USDC' }).end();
+                }
+                const qtyRaw = String(qty ?? '').trim();
+                if (!/^\d+$/.test(qtyRaw) || BigInt(qtyRaw) <= 0n) {
+                    return res.status(400).json({ success: false, error: 'Invalid qty (expect positive integer)' }).end();
+                }
+                const qtyBn = BigInt(qtyRaw);
+                if (qtyBn > 100n) {
+                    return res.status(400).json({ success: false, error: 'qty too large (max 100)' }).end();
+                }
+                const genesisTestMode = String(test ?? '').trim() === chainAddresses_1.GENESIS_NODE_SEAT_TEST_CODE;
+                if (genesisTestMode && qtyBn !== 1n) {
+                    return res
+                        .status(400)
+                        .json({ success: false, error: 'genesisNodeSeat test mode allows qty=1 only' })
+                        .end();
+                }
+                const expectedUsdc6 = qtyBn * chainAddresses_1.GENESIS_NODE_SEAT_USDC_PER_NODE6;
+                const settleUsdc6 = genesisTestMode ? chainAddresses_1.GENESIS_NODE_SEAT_TEST_USDC6 : expectedUsdc6;
+                if (!genesisTestMode) {
+                    const { amount6: quotedGenesis } = quoteSettleAmount6(amt, cur, paymentTokenNorm);
+                    if (quotedGenesis !== expectedUsdc6) {
+                        return res
+                            .status(400)
+                            .json({
+                            success: false,
+                            error: `genesisNodeSeat amount mismatch: quoted ${quotedGenesis.toString()} != qty*4000e6 (${expectedUsdc6.toString()})`,
+                        })
+                            .end();
+                    }
+                }
+                let referrerAddr = '';
+                const refRaw = String(req.body.referrerL1
+                    ?? req.body.referrer
+                    ?? referrerL0
+                    ?? '').trim();
+                if (refRaw) {
+                    if (!ethers_1.ethers.isAddress(refRaw)) {
+                        return res.status(400).json({ success: false, error: 'Invalid referrer' }).end();
+                    }
+                    referrerAddr = ethers_1.ethers.getAddress(refRaw);
+                    try {
+                        const genesisVault = new ethers_1.ethers.Contract(chainAddresses_1.CONET_GENESIS_NODE_REFERRAL_VAULT, [
+                            'function isActiveL1(address) view returns (bool)',
+                            'function isActiveL0(address) view returns (bool)',
+                            'function admins(address) view returns (bool)',
+                        ], providerConet);
+                        const [isL1, isL0, isAdmin] = await Promise.all([
+                            genesisVault.isActiveL1(referrerAddr),
+                            genesisVault.isActiveL0(referrerAddr),
+                            genesisVault.admins(referrerAddr),
+                        ]);
+                        if (!Boolean(isL1) && !Boolean(isL0) && !Boolean(isAdmin)) {
+                            return res
+                                .status(400)
+                                .json({
+                                success: false,
+                                error: 'referrer must be a Genesis Admin, active L0, or active L1 Evangelist',
+                            })
+                                .end();
+                        }
+                    }
+                    catch (e) {
+                        return res
+                            .status(400)
+                            .json({
+                            success: false,
+                            error: e?.shortMessage ?? e?.message ?? 'Could not verify Genesis referrer',
+                        })
+                            .end();
+                    }
+                }
+                const settlePayTo = chainAddresses_1.GENESIS_NODE_BRIDGE_INITIATOR;
+                const settleDesc = genesisTestMode
+                    ? `Beamio USDC genesisNodeSeat TEST (pay 4.00 USDC; LockMint → vault; fulfill qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
+                    : `Beamio USDC genesisNodeSeat (qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… LockMint vault; beneficiary=${beneficiaryAddr.slice(0, 10)}…)`;
+                const settledGenesis = await (0, util_1.settleBeamioX402ToCardOwner)(req, res, {
+                    cardOwner: settlePayTo,
+                    quotedUsdc6: settleUsdc6,
+                    description: settleDesc,
+                });
+                if (!settledGenesis) {
+                    return;
+                }
+                (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/genesisNodeSeat] settle OK${genesisTestMode ? ' TEST' : ''} card=${cardAddr} payTo=${settlePayTo} beneficiary=${beneficiaryAddr} qty=${qtyRaw} referrer=${referrerAddr || '0x0'} payer=${settledGenesis.payer} usdc6=${settledGenesis.usdcAmount6} USDC_tx=${settledGenesis.USDC_tx}`));
+                // Return immediately after USDC settle — do not block the client (esp. mobile
+                // in-app browsers) on bindSale + LockMint + createRedeemFor + claimRedeemFor.
+                if (!res.headersSent) {
+                    res
+                        .status(200)
+                        .json({
+                        success: true,
+                        workflow: 'genesisNodeSeat',
+                        USDC_tx: settledGenesis.USDC_tx,
+                        payer: settledGenesis.payer,
+                        usdcAmount6: settledGenesis.usdcAmount6.toString(),
+                        beneficiary: beneficiaryAddr,
+                        qty: qtyRaw,
+                        referrer: referrerAddr || null,
+                        referrerL1: referrerAddr || null,
+                        referrerL0: referrerAddr || null,
+                        fulfillPending: true,
+                        testMode: genesisTestMode,
+                    })
+                        .end();
+                }
+                void postLocalhostBuffer('/api/genesisNodeSeatFulfill', {
+                    beneficiary: beneficiaryAddr,
+                    qty: qtyRaw,
+                    payer: settledGenesis.payer,
+                    USDC_tx: settledGenesis.USDC_tx,
+                    usdcAmount6: settledGenesis.usdcAmount6.toString(),
+                    testMode: genesisTestMode,
+                    ...(referrerAddr
+                        ? { referrer: referrerAddr, referrerL1: referrerAddr, referrerL0: referrerAddr }
+                        : {}),
+                })
+                    .then((r) => {
+                    if (r.statusCode >= 400) {
+                        (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/genesisNodeSeat] background fulfill HTTP ${r.statusCode}: ${r.body.slice(0, 400)}`));
+                    }
+                    else {
+                        (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/genesisNodeSeat] background fulfill OK USDC_tx=${settledGenesis.USDC_tx?.slice(0, 12)}…`));
+                    }
+                })
+                    .catch((e) => {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/genesisNodeSeat] background fulfill error: ${msg}`));
+                });
+                return;
+            }
+            /**
+             * Discover treasuryBridge：x402 settle Base USDC → GENESIS_NODE_BRIDGE_INITIATOR；
+             * Master LockMint CONET-USDC → card.owner()，再 protocol gateway mint 卡点 #0 → 用户（免 admin 空投）。
+             */
+            if (treasuryBridgeOnly && recipientAaAddr) {
+                const { amount6: quotedTreasury, usesOracle: treasuryUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm);
+                if (quotedTreasury <= 0n) {
+                    if (!treasuryUsesOracle) {
+                        return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end();
+                    }
+                    const fresh = (0, util_1.isOracleFresh)();
+                    const omsg = fresh
+                        ? `Oracle rate not available for ${cur}, please retry shortly`
+                        : `Oracle rate stale, please retry shortly`;
+                    return res.status(503).json({ success: false, error: omsg }).end();
+                }
+                const preparedTreasury = await (0, MemberCard_1.nfcTopupPreparePayload)({
+                    wallet: recipientAaAddr,
+                    amount: amt,
+                    currency: cur,
+                    cardAddress: cardAddr,
+                    membershipTierIndex,
+                    membershipFeeFiat6,
+                });
+                if ('error' in preparedTreasury) {
+                    return res.status(400).json({ success: false, error: preparedTreasury.error }).end();
+                }
+                const mintArgs = tryParseMintPointsByAdminArgs(preparedTreasury.data);
+                if (!mintArgs || mintArgs.points6 <= 0n) {
+                    return res.status(400).json({ success: false, error: 'Failed to quote points for treasuryBridge' }).end();
+                }
+                /** Must match `mintPointsByAdmin` calldata (prepare unwraps Smart Wallet → true EOA). */
+                const mintRecipientTrueEoa = mintArgs.recipient;
+                const membershipFeeIssue = await (0, MemberCard_1.nfcTopupPreCheckMembershipFeeFirstIssue)({
+                    cardAddrRaw: cardAddr,
+                    mintRecipientAddrRaw: mintRecipientTrueEoa,
+                    points6Mint: mintArgs.points6,
+                    membershipTierIndex,
+                    membershipFeeFiat6,
+                    amountFiat6: preparedTreasury.amountFiat6,
+                });
+                if (!membershipFeeIssue.success) {
+                    return res.status(400).json({ success: false, error: membershipFeeIssue.error }).end();
+                }
+                const membershipFeeStageForward = membershipFeeIssue.stage
+                    ? {
+                        recipientEOA: membershipFeeIssue.stage.recipientEOA,
+                        tierIndex: membershipFeeIssue.stage.tierIndex,
+                        feePaid6: membershipFeeIssue.stage.feePaid6.toString(),
+                        pointsCredit6: membershipFeeIssue.stage.pointsCredit6.toString(),
+                        ...(membershipFeeIssue.stage.bootstrapOnChain
+                            ? {
+                                bootstrapOnChain: true,
+                                durationKind: membershipFeeIssue.stage.durationKind ?? 0,
+                            }
+                            : {}),
+                    }
+                    : undefined;
+                const bunitPre = await (0, MemberCard_1.nfcTopupPreCheckBUnitFee)(cardAddr, preparedTreasury.data);
+                if (!bunitPre.success) {
+                    return res.status(400).json({ success: false, error: bunitPre.error ?? 'B-Unit precheck failed' }).end();
+                }
+                const settlePayTo = chainAddresses_1.GENESIS_NODE_BRIDGE_INITIATOR;
+                const settleDesc = `Beamio USDC treasuryBridge (${cur} ${amt} → initiator ${settlePayTo.slice(0, 10)}… owner=${payToOwner.slice(0, 10)}… aa=${recipientAaAddr.slice(0, 10)}…)`;
+                const settledByRawSigTreasury = await settleWithRawSigIfNeeded(quotedTreasury, settleDesc, settlePayTo);
+                if (settledByRawSigTreasury === null) {
+                    return;
+                }
+                const settledTreasury = settledByRawSigTreasury ??
+                    (await (0, util_1.settleBeamioX402ToCardOwner)(req, res, {
+                        cardOwner: settlePayTo,
+                        quotedUsdc6: quotedTreasury,
+                        description: settleDesc,
+                    }));
+                if (!settledTreasury) {
+                    return;
+                }
+                (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/treasuryBridge] settle OK card=${cardAddr} payTo=${settlePayTo} owner=${payToOwner} aa=${recipientAaAddr} payer=${settledTreasury.payer} usdc6=${settledTreasury.usdcAmount6} points6=${mintArgs.points6} USDC_tx=${settledTreasury.USDC_tx}`));
+                if (!res.headersSent) {
+                    res
+                        .status(200)
+                        .json({
+                        success: true,
+                        workflow: 'treasuryBridge',
+                        USDC_tx: settledTreasury.USDC_tx,
+                        payer: settledTreasury.payer,
+                        usdcAmount6: settledTreasury.usdcAmount6.toString(),
+                        cardAddress: cardAddr,
+                        cardOwner: payToOwner,
+                        recipientEOA: mintRecipientTrueEoa,
+                        points6: mintArgs.points6.toString(),
+                        fulfillPending: true,
+                    })
+                        .end();
+                }
+                void postLocalhostBuffer('/api/treasuryBridgeFulfill', {
+                    cardAddress: cardAddr,
+                    cardOwner: payToOwner,
+                    recipientEOA: mintRecipientTrueEoa,
+                    points6: mintArgs.points6.toString(),
+                    payer: settledTreasury.payer,
+                    USDC_tx: settledTreasury.USDC_tx,
+                    usdcAmount6: settledTreasury.usdcAmount6.toString(),
+                    currency: cur,
+                    currencyAmount: amt,
+                    ...(membershipFeeStageForward ? { membershipFeeStage: membershipFeeStageForward } : {}),
+                })
+                    .then((r) => {
+                    if (r.statusCode >= 400) {
+                        (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/treasuryBridge] background fulfill HTTP ${r.statusCode}: ${r.body.slice(0, 400)}`));
+                    }
+                    else {
+                        (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/treasuryBridge] background fulfill OK USDC_tx=${settledTreasury.USDC_tx?.slice(0, 12)}…`));
+                    }
+                })
+                    .catch((e) => {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/treasuryBridge] background fulfill error: ${msg}`));
+                });
+                return;
+            }
+            /** Discover / consumer 遗留：非卡 admin 受益人 — 仅 x402 把 USDC 结算到 beneficiary EOA；卡内入账由客户端 `/api/usdcTopup` 完成。 */
+            if (clientTopupOnly && beneficiaryAddr) {
+                const { amount6: quotedClient, usesOracle: clientUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm);
+                if (quotedClient <= 0n) {
+                    if (!clientUsesOracle) {
+                        return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end();
+                    }
+                    const fresh = (0, util_1.isOracleFresh)();
+                    const omsg = fresh
+                        ? `Oracle rate not available for ${cur}, please retry shortly`
+                        : `Oracle rate stale, please retry shortly`;
+                    return res.status(503).json({ success: false, error: omsg }).end();
+                }
+                const settledByRawSigClient = await settleWithRawSigIfNeeded(quotedClient, `Beamio ${paymentTokenNorm} clientTopup (${cur} ${amt} → beneficiary ${beneficiaryAddr.slice(0, 8)}…)`);
+                if (settledByRawSigClient === null) {
+                    return;
+                }
+                const settledClient = settledByRawSigClient ??
+                    (await (0, util_1.settleBeamioX402ToCardOwner)(req, res, {
+                        cardOwner: beneficiaryAddr,
+                        quotedUsdc6: quotedClient,
+                        description: `Beamio USDC clientTopup (${cur} ${amt} → ${beneficiaryAddr.slice(0, 8)}…)`,
+                    }));
+                if (!settledClient) {
+                    return;
+                }
+                (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/clientTopup] settle OK card=${cardAddr} beneficiary=${beneficiaryAddr} payer=${settledClient.payer} usdc6=${settledClient.usdcAmount6} USDC_tx=${settledClient.USDC_tx}`));
+                if (!res.headersSent) {
+                    res
+                        .status(200)
+                        .json({
+                        success: true,
+                        clientTopupOnly: true,
+                        beneficiary: beneficiaryAddr,
+                        USDC_tx: settledClient.USDC_tx,
+                        usdcAmount6: settledClient.usdcAmount6.toString(),
+                        payer: settledClient.payer,
+                    })
+                        .end();
+                }
+                return;
+            }
+            let isAdminPos = false;
+            if (posAddr && sessionPath) {
+                try {
+                    const cAdm = new ethers_1.ethers.Contract(cardAddr, ['function isAdmin(address) view returns (bool)'], providerBase);
+                    isAdminPos = !!(await cAdm.isAdmin(posAddr));
+                }
+                catch {
+                    isAdminPos = false;
+                }
+                if (!isAdminPos && posAddr.toLowerCase() !== payToOwner.toLowerCase()) {
+                    sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'pos not admin/owner of card' });
+                    return res
+                        .status(400)
+                        .json({
+                        success: false,
+                        error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…`,
+                    })
+                        .end();
+                }
+                sessionUpdate({
+                    state: 'verifying',
+                    cardAddr,
+                    pos: posAddr,
+                    cardOwner: payToOwner,
+                    currency: cur,
+                    subtotal: amt,
+                    discount: '0',
+                    tax: '0',
+                    tip: '0',
+                    total: amt,
+                    discountBps: 0,
+                    taxBps: 0,
+                    tipBps: 0,
+                    error: null,
+                });
+            }
+            /** POS 两阶段 topup 阶段 1：QR 无 NFC/SUN，仅 USDC settle + `awaiting_beneficiary`。 */
+            if (!hasFullNfc && sessionPath) {
+                const { amount6: quotedPhase1, usesOracle: phase1UsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm);
+                if (quotedPhase1 <= 0n) {
+                    if (!phase1UsesOracle) {
+                        sessionUpdate({ state: 'error', error: 'Invalid CADD amount' });
+                        return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end();
+                    }
+                    const fresh = (0, util_1.isOracleFresh)();
+                    (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcTopup/phase1] oracle quote=0 cur=${cur} amt=${amt} fresh=${fresh}`));
+                    const omsg = fresh
+                        ? `Oracle rate not available for ${cur}, please retry shortly`
+                        : `Oracle rate stale, please retry shortly`;
+                    sessionUpdate({ state: 'error', error: omsg });
+                    return res.status(503).json({ success: false, error: omsg }).end();
+                }
+                sessionUpdate({ state: 'settling' });
+                const settledByRawSig1 = await settleWithRawSigIfNeeded(quotedPhase1, `Beamio ${paymentTokenNorm} Topup phase-1 (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`);
+                if (settledByRawSig1 === null) {
+                    sessionUpdate({ state: 'error', error: `${paymentTokenNorm} settle failed` });
+                    return;
+                }
+                const settled1 = settledByRawSig1 ??
+                    (await (0, util_1.settleBeamioX402ToCardOwner)(req, res, {
+                        cardOwner: payToOwner,
+                        quotedUsdc6: quotedPhase1,
+                        description: `Beamio USDC Topup phase-1 (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`,
+                    }));
+                if (!settled1) {
+                    const sc = res.statusCode;
+                    const reason = sc === 402
+                        ? 'USDC payment verification failed'
+                        : sc === 503
+                            ? 'USDC settle unavailable, please retry'
+                            : `USDC settle failed (HTTP ${sc})`;
+                    sessionUpdate({ state: 'error', error: reason });
+                    return;
+                }
+                (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup/phase1] settle OK card=${cardAddr} payer=${settled1.payer} usdc6=${settled1.usdcAmount6} USDC_tx=${settled1.USDC_tx} sid=${sidNorm}`));
+                sessionUpdate({
+                    state: 'awaiting_beneficiary',
+                    usdcAmount6: settled1.usdcAmount6.toString(),
+                    USDC_tx: settled1.USDC_tx,
+                    payer: settled1.payer,
+                    error: null,
+                });
+                if (!res.headersSent) {
+                    res
+                        .status(200)
+                        .json({
+                        success: true,
+                        USDC_tx: settled1.USDC_tx,
+                        usdcAmount6: settled1.usdcAmount6.toString(),
+                        payer: settled1.payer,
+                        sid: sidNorm,
+                        awaitingBeneficiaryTap: true,
+                    })
+                        .end();
+                }
+                return;
+            }
+            if (!hasFullNfc) {
+                (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup] internal: !hasFullNfc without sessionPath`));
+                if (!res.headersSent) {
+                    res.status(500).json({ success: false, error: 'Internal session error' }).end();
+                }
+                return;
+            }
+            // 2. SUN + beneficiary（QR 含完整 NFC 参数时）
+            let recipientEOA = null;
+            let tagIdHex = null;
+            try {
+                const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`;
+                const sunResult = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(sunUrl);
+                if (!sunResult.valid) {
+                    (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcTopup] uid=${uidTrim} SUN 校验失败 valid=${sunResult.valid}`));
+                    sessionUpdate({ state: 'error', error: 'SUN verification failed' });
+                    return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end();
+                }
+                tagIdHex = sunResult.tagIdHex;
+                let eoaFromTag = await (0, db_2.getNfcRecipientAddressByTagId)(tagIdHex);
+                if (!eoaFromTag || !ethers_1.ethers.isAddress(eoaFromTag)) {
+                    const prov = await ensureNfcTagProvisionedViaMaster({
+                        uid: uidTrim,
+                        tagIdHex,
+                        e: eTrim,
+                        c: cTrim,
+                        m: mTrim,
+                        logPrefix: '[nfcUsdcTopup]',
+                    });
+                    if (!prov.ok) {
+                        sessionUpdate({ state: 'error', error: prov.error });
+                        return res.status(prov.statusCode).json({ success: false, error: prov.error }).end();
+                    }
+                    eoaFromTag = prov.eoa;
+                }
+                const topGate = await (0, db_2.getNfcCardPosAdminGateByTagId)(tagIdHex);
+                if (!topGate.ok) {
+                    sessionUpdate({ state: 'error', error: topGate.message });
+                    return res.status(403).json({ success: false, error: topGate.message, errorCode: topGate.code }).end();
+                }
+                recipientEOA = ethers_1.ethers.getAddress(eoaFromTag);
+            }
+            catch (sunErr) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcTopup] uid=${uidTrim} SUN 校验异常: ${sunErr?.message ?? sunErr}`));
+                sessionUpdate({ state: 'error', error: `SUN verification error: ${sunErr?.message ?? sunErr}` });
+                return res.status(403).json({ success: false, error: `SUN verification error: ${sunErr?.message ?? sunErr}` }).end();
+            }
+            // 3. 准备 ExecuteForAdmin payload（mintPointsByAdmin → recipientEOA, points6）。
+            const prepared = await (0, MemberCard_1.nfcTopupPreparePayload)({
+                wallet: recipientEOA,
+                amount: amt,
+                currency: cur,
+                cardAddress: cardAddr,
+            });
+            if ('error' in prepared) {
+                sessionUpdate({ state: 'error', error: prepared.error });
+                return res.status(400).json({ success: false, error: prepared.error }).end();
+            }
+            // 4. USDC 报价 - **严格 Oracle**：oracle 缺失/stale 时拒绝，不允许用固定汇率报价
+            const { amount6: quotedUsdc6, usesOracle: topupUsesOracle } = quoteSettleAmount6(amt, cur, paymentTokenNorm);
+            if (quotedUsdc6 <= 0n) {
+                if (!topupUsesOracle) {
+                    sessionUpdate({ state: 'error', error: 'Invalid CADD amount' });
+                    return res.status(400).json({
+                        success: false,
+                        error: 'Invalid CADD amount',
+                    }).end();
+                }
+                const fresh = (0, util_1.isOracleFresh)();
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcTopup] oracle quote=0 cur=${cur} amt=${amt} fresh=${fresh}`));
+                const omsg = fresh
+                    ? `Oracle rate not available for ${cur}, please retry shortly`
+                    : `Oracle rate stale, please retry shortly`;
+                sessionUpdate({ state: 'error', error: omsg });
+                return res.status(503).json({
+                    success: false,
+                    error: omsg,
+                }).end();
+            }
+            // 5. x402 verify + settle（verifyPaymentNew 内部已处理 402 / 余额 / 时效）
+            if (sessionPath)
+                sessionUpdate({ state: 'settling' });
+            const settledByRawSig = await settleWithRawSigIfNeeded(quotedUsdc6, `Beamio NFC ${paymentTokenNorm} Topup (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`);
+            if (settledByRawSig === null) {
+                sessionUpdate({ state: 'error', error: `${paymentTokenNorm} settle failed` });
+                return;
+            }
+            const settled = settledByRawSig ??
+                (await (0, util_1.settleBeamioX402ToCardOwner)(req, res, {
+                    cardOwner: payToOwner,
+                    quotedUsdc6,
+                    description: `Beamio NFC USDC Topup (${cur} ${amt} → card ${cardAddr.slice(0, 8)}…)`,
+                }));
+            if (!settled) {
+                const sc = res.statusCode;
+                const reason = sc === 402
+                    ? 'USDC payment verification failed'
+                    : sc === 503
+                        ? 'USDC settle unavailable, please retry'
+                        : `USDC settle failed (HTTP ${sc})`;
+                sessionUpdate({ state: 'error', error: reason });
+                return;
+            }
+            (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcTopup] settle OK card=${cardAddr} payer=${settled.payer} usdc6=${settled.usdcAmount6} USDC_tx=${settled.USDC_tx} ` +
+                `recipient=${recipientEOA} sessionPath=${sessionPath}`));
+            if (sessionPath) {
+                sessionUpdate({
+                    state: 'topup_pending',
+                    usdcAmount6: settled.usdcAmount6.toString(),
+                    USDC_tx: settled.USDC_tx,
+                    payer: settled.payer,
+                    error: null,
+                });
+                if (!res.headersSent) {
+                    res
+                        .status(200)
+                        .json({
+                        success: true,
+                        USDC_tx: settled.USDC_tx,
+                        usdcAmount6: settled.usdcAmount6.toString(),
+                        payer: settled.payer,
+                        sid: sidNorm,
+                        awaitingPosAuthorization: true,
+                    })
+                        .end();
+                }
+                if (!settled.USDC_tx || !/^0x[0-9a-fA-F]{64}$/.test(settled.USDC_tx)) {
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/orchestrator] sid=${sidNorm ?? 'n/a'} invalid USDC_tx; abort`));
+                    sessionUpdate({ state: 'error', error: 'USDC settle returned invalid tx hash' });
+                    return;
+                }
+                const sidForAwait = sidNorm ?? '';
+                void (0, usdcChargeOrchestrator_1.runUsdcNfcTopupPosOrchestrator)({
+                    sid: sidForAwait,
+                    cardAddr,
+                    cardOwner: payToOwner,
+                    currency: cur,
+                    currencyAmount: amt,
+                    recipientEOA,
+                    prepared: {
+                        cardAddr: prepared.cardAddr,
+                        data: prepared.data,
+                        deadline: prepared.deadline,
+                        nonce: prepared.nonce,
+                        factoryGateway: prepared.factoryGateway,
+                    },
+                    originatingUSDCTx: settled.USDC_tx,
+                    usdcAmount6: settled.usdcAmount6.toString(),
+                    payer: settled.payer,
+                    posOperator: posAddr,
+                    nfcUid: uidTrim,
+                    nfcTagIdHex: tagIdHex,
+                    provider: providerBase,
+                    updateSession: (patch) => {
+                        sessionUpdate(patch);
+                    },
+                    awaitTopupSignature: async (timeoutMs) => {
+                        if (!sidForAwait)
+                            return { ok: false, error: 'sid missing' };
+                        const deadline = Date.now() + Math.max(1_000, timeoutMs);
+                        while (Date.now() < deadline) {
+                            const got = await masterSessionConsumePosSig(sidForAwait);
+                            if (got.ok)
+                                return { ok: true, signature: got.signature, signer: got.signer };
+                            if (got.error === 'session not found') {
+                                /* upsert lag */
+                            }
+                            else if (got.error.startsWith('session in error') || got.error === 'session moved to error') {
+                                return { ok: false, error: got.error };
+                            }
+                            await new Promise((r) => setTimeout(r, 500));
+                        }
+                        return { ok: false, error: `timeout ${timeoutMs}ms waiting POS topup auth` };
+                    },
+                }).catch((err) => {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup/orchestrator] sid=${sidForAwait.slice(0, 8)}… ${msg}`));
+                    sessionUpdate({ state: 'error', error: `USDC topup orchestrator: ${msg}` });
+                });
+                return;
+            }
+            // 6. 历史路径：转发 Master（service-admin 签）
+            (0, exports.postLocalhost)('/api/nfcUsdcTopup', {
+                cardAddr: prepared.cardAddr,
+                data: prepared.data,
+                deadline: prepared.deadline,
+                nonce: prepared.nonce,
+                recipientEOA,
+                cardOwner: payToOwner,
+                currency: cur,
+                currencyAmount: amt,
+                payer: settled.payer,
+                USDC_tx: settled.USDC_tx,
+                usdcAmount6: settled.usdcAmount6.toString(),
+                nfcUid: uidTrim,
+                nfcTagIdHex: tagIdHex,
+            }, res);
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcTopup] error: ${err?.message ?? err}`));
+            sessionUpdate({ state: 'error', error: err?.message ?? String(err) });
+            if (!res.headersSent) {
+                res.status(500).json({ success: false, error: err?.message ?? String(err) }).end();
+            }
+        }
+    });
+    /**
+     * Charge breakdown 归一化（与 NFC charge `nfcBill` 字段对齐：subtotal/discount/tax/tip + 可选 bps）。
+     * total = subtotal - discount + tax + tip（任一负数视为 0；total 为最小可报价基数）。
+     * 返回 currency-amount 文本（保留两位小数；total 用 ceil 处理误差）+ atomic E6（用于审计/记账）。
+     */
+    const normalizeChargeBreakdown = (raw) => {
+        const num = (v) => {
+            if (v === undefined || v === null)
+                return 0;
+            const n = Number(String(v).replace(/,/g, '').trim());
+            return Number.isFinite(n) && n > 0 ? n : 0;
+        };
+        const intBps = (v) => {
+            if (v === undefined || v === null)
+                return 0;
+            const n = Math.round(Number(v));
+            if (!Number.isFinite(n) || n < 0)
+                return 0;
+            return Math.min(10000, n);
+        };
+        const subtotal = num(raw.subtotal);
+        const discountBps = intBps(raw.discountBps);
+        const taxBps = intBps(raw.taxBps);
+        const tipBps = intBps(raw.tipBps);
+        let discount = num(raw.discount);
+        if (discount <= 0 && discountBps > 0) {
+            discount = (subtotal * discountBps) / 10000;
+        }
+        const afterDiscount = Math.max(0, subtotal - discount);
+        let tax = num(raw.tax);
+        if (tax <= 0 && taxBps > 0) {
+            tax = (afterDiscount * taxBps) / 10000;
+        }
+        let tip = num(raw.tip);
+        /** 与 POS `tipBps` / MemberCard NFC 展示一致：小费按小计比例，基数为 subtotal（非税后） */
+        if (tip <= 0 && tipBps > 0) {
+            tip = (subtotal * tipBps) / 10000;
+        }
+        const total = Math.max(0, afterDiscount + tax + tip);
+        return {
+            subtotal,
+            discount,
+            tax,
+            tip,
+            total,
+            discountBps,
+            taxBps,
+            tipBps,
+        };
+    };
+    /** GET /api/nfcUsdcChargeQuote
+     * 客户端浏览器钱包页面（verra-home /usdc-charge）展示价格用：根据 charge breakdown + currency 用 Oracle 折算 USDC6。
+     * Query: card, owner, subtotal, discount, tax, tip, discountBps, taxBps, tipBps, currency。
+     * 同步校验 card.owner() 是否与 owner 一致（与 topup 一致），避免任意 payTo 注入误用。 */
+    router.get('/nfcUsdcChargeQuote', async (req, res) => {
+        try {
+            const { card, owner, currency, pos, paymentToken } = req.query;
+            if (!card || !ethers_1.ethers.isAddress(String(card).trim())) {
+                return res.status(400).json({ success: false, error: 'Invalid card' }).end();
+            }
+            const breakdown = normalizeChargeBreakdown(req.query);
+            if (breakdown.total <= 0) {
+                return res.status(400).json({ success: false, error: 'Invalid charge breakdown (total must be > 0)' }).end();
+            }
+            const cardAddr = ethers_1.ethers.getAddress(String(card).trim());
+            const posAddr = pos && ethers_1.ethers.isAddress(String(pos).trim()) ? ethers_1.ethers.getAddress(String(pos).trim()) : null;
+            // 链上一次性读取 owner / currency / isAdmin(pos)，让 owner/currency 在 URL 中变可选
+            let onChainOwner = null;
+            let onChainCurrency = null;
+            let isAdminPos = posAddr === null;
+            try {
+                const c = new ethers_1.ethers.Contract(cardAddr, [
+                    'function owner() view returns (address)',
+                    'function currency() view returns (uint8)',
+                    'function isAdmin(address) view returns (bool)',
+                ], providerBase);
+                const ownerP = c.owner();
+                const curEnumP = c.currency();
+                const adminP = posAddr ? c.isAdmin(posAddr) : Promise.resolve(true);
+                const [o, ce, ad] = await Promise.all([ownerP, curEnumP, adminP]);
+                if (o && ethers_1.ethers.isAddress(o))
+                    onChainOwner = ethers_1.ethers.getAddress(o);
+                const currencyMap = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' };
+                onChainCurrency = currencyMap[Number(ce)] ?? null;
+                isAdminPos = !!ad;
+            }
+            catch (_) { /* tolerate transient rpc */ }
+            // owner 字段处理：URL 提供 ⇒ 与链上一致校验；URL 缺省 ⇒ 直接用链上 owner（新 schema）。
+            const ownerStr = (owner ?? '').toString().trim();
+            let resolvedOwner = onChainOwner;
+            if (ownerStr !== '') {
+                if (!ethers_1.ethers.isAddress(ownerStr)) {
+                    return res.status(400).json({ success: false, error: 'Invalid owner' }).end();
+                }
+                const ownerAddr = ethers_1.ethers.getAddress(ownerStr);
+                if (onChainOwner && onChainOwner !== ownerAddr) {
+                    return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end();
+                }
+                resolvedOwner = onChainOwner ?? ownerAddr;
+            }
+            if (!resolvedOwner) {
+                return res.status(400).json({ success: false, error: 'Cannot resolve card.owner() on-chain' }).end();
+            }
+            if (posAddr && !isAdminPos && posAddr !== resolvedOwner) {
+                return res
+                    .status(400)
+                    .json({ success: false, error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…` })
+                    .end();
+            }
+            // currency: URL 提供 ⇒ 必须与链上一致；URL 缺省 ⇒ 用链上 (新 schema)；链上读不到 ⇒ 回退 CAD
+            const cur = (currency ?? '').toString().trim().toUpperCase() || onChainCurrency || 'CAD';
+            if (currency && onChainCurrency && cur !== onChainCurrency.toUpperCase()) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcChargeQuote] currency mismatch client=${cur} card=${onChainCurrency} card=${cardAddr.slice(0, 10)}… (using card chain currency)`));
+            }
+            const effectiveCurrency = onChainCurrency ?? cur;
+            const paymentTokenNorm = (() => {
+                const t = String(paymentToken ?? '').trim().toUpperCase();
+                if (t === 'USDC' || t === 'CADD')
+                    return t;
+                return effectiveCurrency === 'CADD' ? 'CADD' : 'USDC';
+            })();
+            const totalStr = breakdown.total.toFixed(6);
+            const { amount6: usdc6, usesOracle } = quoteSettleAmount6(totalStr, effectiveCurrency, paymentTokenNorm);
+            if (usdc6 <= 0n) {
+                if (!usesOracle) {
+                    return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end();
+                }
+                const fresh = (0, util_1.isOracleFresh)();
+                const oracleTs = (clusterOracleCache?.timestamp ?? 0);
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcChargeQuote] oracle quote=0 cur=${effectiveCurrency} total=${totalStr} fresh=${fresh} oracleTs=${oracleTs}`));
+                return res.status(503).json({
+                    success: false,
+                    error: fresh
+                        ? `Oracle rate not available for ${effectiveCurrency}, please retry shortly`
+                        : `Oracle rate stale, please retry shortly`,
+                }).end();
+            }
+            const permitSpender = (() => {
+                try {
+                    const pk = util_2.masterSetup.settle_contractAdmin?.[0];
+                    return pk ? ethers_1.ethers.getAddress(new ethers_1.ethers.Wallet(pk).address) : null;
+                }
+                catch {
+                    return null;
+                }
+            })();
+            return res.status(200).json({
+                success: true,
+                cardAddress: cardAddr,
+                cardOwner: resolvedOwner,
+                pos: posAddr,
+                currency: effectiveCurrency,
+                subtotal: breakdown.subtotal.toFixed(2),
+                discount: breakdown.discount.toFixed(2),
+                tax: breakdown.tax.toFixed(2),
+                tip: breakdown.tip.toFixed(2),
+                total: breakdown.total.toFixed(2),
+                discountBps: breakdown.discountBps,
+                taxBps: breakdown.taxBps,
+                tipBps: breakdown.tipBps,
+                quotedUsdc6: usdc6.toString(),
+                quotedUsdc: ethers_1.ethers.formatUnits(usdc6, 6),
+                oracleTimestamp: Number(clusterOracleCache?.timestamp ?? 0),
+                ...(paymentTokenNorm === 'CADD' && permitSpender ? { permitSpender } : {}),
+            }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcChargeQuote] error: ${e?.message ?? e}`));
+            return res.status(500).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    /** GET /api/nfcUsdcChargePreCheck
+     * iOS POS 在生成 USDC charge QR **之前** 的 fast-fail 预检：cardOwner 是否有足够 B-Unit 覆盖 topup 腿手续费？
+     * 失败 ⇒ POS 不出 QR，弹 toast；成功 ⇒ POS 渲染 QR 等顾客扫码。
+     *
+     * 这是 PR #2 的范围，仅做 BUnit 余额预检；后续 PR #4（双腿 orchestrator）会真正消费 BUnit。
+     *
+     * Query:
+     *   - card        必填  BeamioUserCard 地址
+     *   - pos         可选（推荐）POS 终端 admin EOA；提供 ⇒ 校验 pos∈card.adminList()/owner，杜绝 misconfig
+     *   - subtotal    必填  小计（人类可读，按 card.currency() 隐含币种）
+     *   - tipBps,taxBps,discountBps  可选，默认 0
+     *   - currency    可选，仅作日志/兼容；后端以链上 card.currency() 为准
+     */
+    router.get('/nfcUsdcChargePreCheck', async (req, res) => {
+        try {
+            const { card, pos, subtotal, currency } = req.query;
+            if (!card || !ethers_1.ethers.isAddress(String(card).trim())) {
+                return res.status(400).json({ ok: false, error: 'Invalid card' }).end();
+            }
+            const subtotalStr = String(subtotal ?? '').trim();
+            if (!subtotalStr || !(Number(subtotalStr) > 0)) {
+                return res.status(400).json({ ok: false, error: 'Invalid subtotal' }).end();
+            }
+            const cardAddr = ethers_1.ethers.getAddress(String(card).trim());
+            const posAddr = pos && ethers_1.ethers.isAddress(String(pos).trim()) ? ethers_1.ethers.getAddress(String(pos).trim()) : null;
+            // 1. 链上读 card.owner / card.isAdmin(pos) / card.currency
+            const cardC = new ethers_1.ethers.Contract(cardAddr, [
+                'function owner() view returns (address)',
+                'function isAdmin(address) view returns (bool)',
+                'function currency() view returns (uint8)',
+            ], providerBase);
+            const ownerPromise = cardC.owner();
+            const isAdminPromise = posAddr ? cardC.isAdmin(posAddr) : Promise.resolve(true);
+            const currencyEnumPromise = cardC.currency();
+            const [ownerRaw, isAdminPos, currencyEnum] = await Promise.all([ownerPromise, isAdminPromise, currencyEnumPromise]);
+            const onChainOwner = ethers_1.ethers.isAddress(ownerRaw) ? ethers_1.ethers.getAddress(ownerRaw) : null;
+            if (!onChainOwner) {
+                return res.status(400).json({ ok: false, error: 'Cannot resolve card.owner() on-chain' }).end();
+            }
+            if (posAddr && !isAdminPos && posAddr !== onChainOwner) {
+                return res
+                    .status(400)
+                    .json({ ok: false, error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…` })
+                    .end();
+            }
+            const currencyMap = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' };
+            const cardCurrency = currencyMap[Number(currencyEnum)] ?? 'CAD';
+            if (currency && String(currency).trim().toUpperCase() !== cardCurrency.toUpperCase()) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcChargePreCheck] currency mismatch client=${String(currency).trim().toUpperCase()} card=${cardCurrency} card=${cardAddr.slice(0, 10)}… (using card chain currency)`));
+            }
+            // 2. 重算 total fiat — 与 normalizeChargeBreakdown 同源（显式金额优先，否则 Bps：折扣/税/小费）
+            const breakdown = normalizeChargeBreakdown({
+                subtotal: subtotalStr,
+                tipBps: String(req.query.tipBps ?? '0'),
+                taxBps: String(req.query.taxBps ?? '0'),
+                discountBps: String(req.query.discountBps ?? '0'),
+            });
+            if (breakdown.total <= 0) {
+                return res.status(400).json({ ok: false, error: 'Invalid charge breakdown (total must be > 0)' }).end();
+            }
+            const totalStr = breakdown.total.toFixed(6);
+            // 3. quote total fiat → USDC6
+            const usdc6 = (0, MemberCard_1.quoteCurrencyToUsdc6)(totalStr, cardCurrency);
+            if (usdc6 <= 0n) {
+                return res.status(503).json({ ok: false, error: `Oracle rate not available for ${cardCurrency}, please retry shortly` }).end();
+            }
+            // 4. USDC6 → points6 via card-specific gateway.quoteUnitPointInUSDC6
+            let points6;
+            try {
+                const gw = new ethers_1.ethers.Contract(cardAddr, ['function factoryGateway() view returns (address)'], providerBase);
+                const gatewayAddr = (await gw.factoryGateway());
+                const gateway = new ethers_1.ethers.Contract(gatewayAddr, ['function quoteUnitPointInUSDC6(address) view returns (uint256)'], providerBase);
+                const unitPriceUSDC6 = (await gateway.quoteUnitPointInUSDC6(cardAddr));
+                if (unitPriceUSDC6 <= 0n) {
+                    return res.status(503).json({ ok: false, error: 'Card unit price unavailable (UC_PriceZero)' }).end();
+                }
+                // ceil(usdc6 * 1e6 / unitPriceUSDC6) — 与 nfcTopupPreCheckBUnitFee 反算口径一致
+                points6 = (usdc6 * 1000000n + unitPriceUSDC6 - 1n) / unitPriceUSDC6;
+            }
+            catch (e) {
+                return res.status(503).json({ ok: false, error: `Cannot read card price: ${e?.shortMessage ?? e?.message ?? String(e)}` }).end();
+            }
+            if (points6 <= 0n) {
+                return res.status(400).json({ ok: false, error: 'Computed points6 is zero (subtotal too small)' }).end();
+            }
+            // 5. 用 mock mintPointsByAdmin(dummy, points6) calldata 复用现有 BUnit fee 预检
+            const dummyRecipient = '0x000000000000000000000000000000000000dEaD';
+            const mintIface = new ethers_1.ethers.Interface(['function mintPointsByAdmin(address,uint256)']);
+            const mockData = mintIface.encodeFunctionData('mintPointsByAdmin', [dummyRecipient, points6]);
+            const bunit = await (0, MemberCard_1.nfcTopupPreCheckBUnitFee)(cardAddr, mockData);
+            if (!bunit.success) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcChargePreCheck] BUnit fee FAIL card=${cardAddr.slice(0, 10)}… owner=${(bunit.cardOwnerEOA ?? onChainOwner).slice(0, 10)}… err=${bunit.error}`));
+                return res
+                    .status(400)
+                    .json({
+                    ok: false,
+                    error: bunit.error ?? 'B-Unit pre-check failed',
+                    cardOwner: bunit.cardOwnerEOA ?? onChainOwner,
+                    requiredBUnits6: bunit.feeAmount?.toString(),
+                })
+                    .end();
+            }
+            // 6. POS 作为 subordinate admin 的 airdrop 额度链路预检
+            //    USDC charge orchestrator 用 POS 的 admin sig 走 executeForAdmin → mintPointsByAdminWithOperator(operator=POS)，
+            //    GovernanceModule._enforceAndRecordAdminAirdropLimit 会沿 POS→…→cardOwner 沿途检查每一级
+            //    `adminAirdropLimit - adminAirdropUsed >= points6`（cardOwner 不受限）。POS 限额不够就在出 QR 前 fast-fail，
+            //    避免顾客 USDC 已结算给 cardOwner 但 loyalty mint 链上 revert 留下 reconcile_pending。
+            //    posAddr 缺省（向后兼容老 client）⇒ 用 cardOwner 自身做兜底（cardOwner 永远通过）。
+            const limitSignerForCheck = posAddr ?? onChainOwner;
+            const airdropCheck = await (0, MemberCard_1.nfcTopupPreCheckAdminAirdropLimit)(cardAddr, limitSignerForCheck, points6);
+            if (!airdropCheck.success) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcChargePreCheck] admin airdrop limit FAIL card=${cardAddr.slice(0, 10)}… signer=${limitSignerForCheck.slice(0, 10)}… points6=${points6} err=${airdropCheck.error}`));
+                return res
+                    .status(400)
+                    .json({
+                    ok: false,
+                    error: airdropCheck.error ?? 'Admin airdrop limit pre-check failed',
+                    cardOwner: bunit.cardOwnerEOA ?? onChainOwner,
+                    pos: posAddr,
+                    estPoints6: points6.toString(),
+                })
+                    .end();
+            }
+            (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcChargePreCheck] OK card=${cardAddr.slice(0, 10)}… pos=${posAddr ? posAddr.slice(0, 10) + '…' : '(none)'} subtotal=${subtotalStr} ${cardCurrency} total=${breakdown.total.toFixed(2)} usdc6=${usdc6} points6=${points6} fee=${bunit.feeAmount} BUnits6`));
+            return res
+                .status(200)
+                .json({
+                ok: true,
+                cardAddr,
+                cardOwner: bunit.cardOwnerEOA ?? onChainOwner,
+                pos: posAddr,
+                currency: cardCurrency,
+                subtotal: breakdown.subtotal.toFixed(2),
+                discount: breakdown.discount.toFixed(2),
+                tax: breakdown.tax.toFixed(2),
+                tip: breakdown.tip.toFixed(2),
+                total: breakdown.total.toFixed(2),
+                discountBps: breakdown.discountBps,
+                taxBps: breakdown.taxBps,
+                tipBps: breakdown.tipBps,
+                quotedUsdc6: usdc6.toString(),
+                estPoints6: points6.toString(),
+                requiredBUnits6: bunit.feeAmount?.toString() ?? '0',
+            })
+                .end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcChargePreCheck] error: ${e?.message ?? e}`));
+            return res.status(500).json({ ok: false, error: e?.shortMessage ?? e?.message ?? String(e) }).end();
+        }
+    });
+    /** POST /api/nfcUsdcCharge
+     * x402（EIP-3009）：客户用任意外部钱包浏览器（MetaMask 等）为 POS charge 付 USDC。
+     * 与 nfcUsdcTopup 区别：
+     *   - charge 是顾客付钱给商家，**不需要** mintPointsByAdmin / ExecuteForAdmin
+     *   - body 携带 charge breakdown（subtotal/discount/tax/tip + currency），与 NFC charge `nfcBill` 字段对齐
+     *
+     * NFC 模式（兼容旧链路）：携带 `uid + e + c + m` ⇒ SUN 校验 + best-effort 解析 recipientEOA（未来 loyalty 入账）。
+     * 第三方钱包模式（iOS POS USDC charge no-NFC）：`uid` 未提供 ⇒ 跳过 SUN 校验（`recipientEOA = null`），收款仍走
+     *   `card.owner()` 一致性校验后的 cardOwner，确保不会误把 USDC 转到任意 payTo。
+     */
+    router.post('/nfcUsdcCharge', async (req, res) => {
+        const { card, cardAddress, cardOwner, pos, sid, uid, e, c, m, currency, subtotal, discount, tax, tip, discountBps, taxBps, tipBps, paymentToken, payer, value, validAfter, validBefore, nonce, permitDeadline, permitNonce, signature, } = req.body;
+        // PR #3 sid 仅用于 POS ↔ cluster 内部状态跟踪，不影响 verra-home POST/x402 流程；
+        // sid 缺省/无效 ⇒ 跳过 session 写入但仍正常处理 charge（向下兼容老 verra-home build）。
+        // PR #4 v3：session 实际存储在 Master，cluster 这里只是 fire-and-forget 转发，多 worker 共享一份信源。
+        const sidNorm = isValidSid(sid) ? sid.toLowerCase() : null;
+        const sessionUpdate = (patch) => {
+            if (!sidNorm)
+                return;
+            void masterSessionUpsert(sidNorm, patch);
+        };
+        try {
+            // 新 schema 用 `card`；老 schema 用 `cardAddress`。两者择一即可，都没有则 400。
+            const cardField = (card ?? cardAddress ?? '').toString().trim();
+            if (!cardField || !ethers_1.ethers.isAddress(cardField)) {
+                sessionUpdate({ state: 'error', error: 'Invalid card' });
+                return res.status(400).json({ success: false, error: 'Invalid card' }).end();
+            }
+            const cardAddr = ethers_1.ethers.getAddress(cardField);
+            const posStr = (pos ?? '').toString().trim();
+            const posAddr = posStr && ethers_1.ethers.isAddress(posStr) ? ethers_1.ethers.getAddress(posStr) : null;
+            const ownerStrRaw = (cardOwner ?? '').toString().trim();
+            const uidTrim = (uid ?? '').trim();
+            const eTrim = (e ?? '').trim();
+            const cTrim = (c ?? '').trim();
+            const mTrim = (m ?? '').trim();
+            // uid 提供与否决定走 NFC SUN 校验路径还是第三方钱包 no-NFC 路径。
+            const hasNfcSun = uidTrim.length > 0 || eTrim.length > 0 || cTrim.length > 0 || mTrim.length > 0;
+            if (hasNfcSun) {
+                if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+                    sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid uid' });
+                    return res.status(400).json({ success: false, error: 'Invalid uid (expect 14-hex NFC UID)' }).end();
+                }
+                if (eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
+                    sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid NFC SUN params' });
+                    return res.status(400).json({ success: false, error: 'NFC UID requires SUN params (e=64 hex, c=6 hex, m=16 hex)' }).end();
+                }
+            }
+            const breakdown = normalizeChargeBreakdown({ subtotal, discount, tax, tip, discountBps, taxBps, tipBps });
+            if (breakdown.total <= 0) {
+                sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid charge breakdown' });
+                return res.status(400).json({ success: false, error: 'Invalid charge breakdown (total must be > 0)' }).end();
+            }
+            // 进入 verifying 阶段：把 breakdown + cardAddr/pos 写入 session（POS 拉取后能立即知道客户已经到达 POST 阶段）
+            sessionUpdate({
+                state: 'verifying',
+                cardAddr,
+                pos: posAddr,
+                subtotal: breakdown.subtotal.toFixed(2),
+                discount: breakdown.discount.toFixed(2),
+                tax: breakdown.tax.toFixed(2),
+                tip: breakdown.tip.toFixed(2),
+                total: breakdown.total.toFixed(2),
+                discountBps: breakdown.discountBps,
+                taxBps: breakdown.taxBps,
+                tipBps: breakdown.tipBps,
+            });
+            // 1. SUN 校验仅在 NFC 模式触发；no-NFC 第三方钱包路径直接跳过（`card.owner()` 一致性 + x402 verify 仍是强约束）。
+            let recipientEOA = null;
+            let tagIdHex = null;
+            if (hasNfcSun) {
+                try {
+                    const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`;
+                    const sunResult = await (0, BeamioSun_1.verifyAndPersistBeamioSunUrl)(sunUrl);
+                    if (!sunResult.valid) {
+                        (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验失败 valid=${sunResult.valid}`));
+                        sessionUpdate({ state: 'error', error: 'SUN verification failed' });
+                        return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end();
+                    }
+                    tagIdHex = sunResult.tagIdHex;
+                    let eoaFromTag = null;
+                    try {
+                        const raw = await (0, db_2.getNfcRecipientAddressByTagId)(tagIdHex);
+                        if (raw && ethers_1.ethers.isAddress(raw)) {
+                            eoaFromTag = ethers_1.ethers.getAddress(raw);
+                        }
+                    }
+                    catch (_) { /* charge: best-effort */ }
+                    if (!eoaFromTag) {
+                        const prov = await ensureNfcTagProvisionedViaMaster({
+                            uid: uidTrim,
+                            tagIdHex,
+                            e: eTrim,
+                            c: cTrim,
+                            m: mTrim,
+                            logPrefix: '[nfcUsdcCharge]',
+                        });
+                        if (!prov.ok) {
+                            sessionUpdate({ state: 'error', error: prov.error });
+                            return res.status(prov.statusCode).json({ success: false, error: prov.error }).end();
+                        }
+                        eoaFromTag = prov.eoa;
+                    }
+                    recipientEOA = eoaFromTag;
+                }
+                catch (sunErr) {
+                    (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验异常: ${sunErr?.message ?? sunErr}`));
+                    sessionUpdate({ state: 'error', error: `SUN verification error: ${sunErr?.message ?? sunErr}` });
+                    return res.status(403).json({ success: false, error: `SUN verification error: ${sunErr?.message ?? sunErr}` }).end();
+                }
+                if (!tagIdHex || !recipientEOA) {
+                    sessionUpdate({ state: 'error', error: 'NFC card is not linked to a wallet' });
+                    return res.status(403).json({ success: false, error: 'NFC card is not linked to a wallet' }).end();
+                }
+            }
+            else {
+                (0, logger_1.logger)(safe_1.default.cyan(`[nfcUsdcCharge] no-NFC mode card=${cardAddr.slice(0, 8)}… total=${breakdown.total.toFixed(2)} (third-party wallet, SUN bypass; currency resolved on-chain)`));
+            }
+            // 2. 链上一次性读 owner / currency / isAdmin(pos)：新 schema 下 owner/currency 不在 URL 里，必须链上权威。
+            let onChainOwner = null;
+            let onChainCurrency = null;
+            let isAdminPos = posAddr === null;
+            try {
+                const cprep = new ethers_1.ethers.Contract(cardAddr, [
+                    'function owner() view returns (address)',
+                    'function currency() view returns (uint8)',
+                    'function isAdmin(address) view returns (bool)',
+                ], providerBase);
+                const ownerP = cprep.owner();
+                const curP = cprep.currency();
+                const adminP = posAddr ? cprep.isAdmin(posAddr) : Promise.resolve(true);
+                const [o, ce, ad] = await Promise.all([ownerP, curP, adminP]);
+                if (o && ethers_1.ethers.isAddress(o))
+                    onChainOwner = ethers_1.ethers.getAddress(o);
+                const currencyMap = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' };
+                onChainCurrency = currencyMap[Number(ce)] ?? null;
+                isAdminPos = !!ad;
+            }
+            catch (_) { /* tolerate transient rpc */ }
+            if (!onChainOwner) {
+                sessionUpdate({ state: 'error', error: 'Cannot resolve card.owner() on-chain' });
+                return res.status(400).json({ success: false, error: 'Cannot resolve card.owner() on-chain' }).end();
+            }
+            // 老 schema 显式传 cardOwner ⇒ 必须与链上一致；新 schema 不传 ⇒ 直接用链上值
+            if (ownerStrRaw !== '') {
+                if (!ethers_1.ethers.isAddress(ownerStrRaw)) {
+                    sessionUpdate({ state: 'error', cardOwner: onChainOwner, error: 'Invalid cardOwner' });
+                    return res.status(400).json({ success: false, error: 'Invalid cardOwner' }).end();
+                }
+                const ownerAddr = ethers_1.ethers.getAddress(ownerStrRaw);
+                if (ownerAddr !== onChainOwner) {
+                    sessionUpdate({ state: 'error', cardOwner: onChainOwner, error: 'cardOwner mismatch' });
+                    return res.status(400).json({ success: false, error: `cardOwner mismatch (on-chain ${onChainOwner.slice(0, 10)}…)` }).end();
+                }
+            }
+            if (posAddr && !isAdminPos && posAddr !== onChainOwner) {
+                sessionUpdate({ state: 'error', cardOwner: onChainOwner, error: 'pos not admin/owner of card' });
+                return res
+                    .status(400)
+                    .json({ success: false, error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…` })
+                    .end();
+            }
+            const payToOwner = onChainOwner;
+            // currency: 新 schema 缺省 ⇒ 用链上；老 schema 显式 ⇒ warn-only mismatch（不阻断，避免老 QR 被 reject）
+            const cur = ((currency ?? '').toString().trim().toUpperCase() || onChainCurrency || 'CAD');
+            const paymentTokenNorm = (() => {
+                const t = String(paymentToken ?? '').trim().toUpperCase();
+                if (t === 'USDC' || t === 'CADD')
+                    return t;
+                return cur === 'CADD' ? 'CADD' : 'USDC';
+            })();
+            if (currency && onChainCurrency && cur !== onChainCurrency.toUpperCase()) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcCharge] currency mismatch client=${cur} card=${onChainCurrency} card=${cardAddr.slice(0, 10)}… (using card chain currency)`));
+            }
+            const effectiveCurrency = onChainCurrency ?? cur;
+            // 资料齐了，把 owner/currency 也补进 session（POS 可以提前看到 verifying 阶段的明细）
+            sessionUpdate({ cardOwner: payToOwner, currency: effectiveCurrency });
+            // 3. USDC 报价 - 严格 Oracle（与 topup 同策略）
+            const totalStr = breakdown.total.toFixed(6);
+            const { amount6: quotedUsdc6, usesOracle: chargeUsesOracle } = quoteSettleAmount6(totalStr, effectiveCurrency, paymentTokenNorm);
+            if (quotedUsdc6 <= 0n) {
+                if (!chargeUsesOracle) {
+                    sessionUpdate({ state: 'error', error: 'Invalid CADD amount' });
+                    return res.status(400).json({ success: false, error: 'Invalid CADD amount' }).end();
+                }
+                const fresh = (0, util_1.isOracleFresh)();
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcCharge] oracle quote=0 cur=${effectiveCurrency} total=${totalStr} fresh=${fresh}`));
+                const errMsg = fresh
+                    ? `Oracle rate not available for ${effectiveCurrency}, please retry shortly`
+                    : `Oracle rate stale, please retry shortly`;
+                sessionUpdate({ state: 'error', error: errMsg });
+                return res.status(503).json({ success: false, error: errMsg }).end();
+            }
+            const quotedSubtotalUsdc6 = quoteSettleAmount6(breakdown.subtotal.toFixed(6), effectiveCurrency, paymentTokenNorm).amount6;
+            const settleWithRawSigIfNeeded = async () => {
+                if (paymentTokenNorm !== 'CADD')
+                    return undefined;
+                const payerAddrRaw = String(payer ?? '').trim();
+                const valueRaw = String(value ?? '').trim();
+                const permitDeadlineRaw = String(permitDeadline ?? '').trim();
+                const permitNonceRaw = String(permitNonce ?? '').trim();
+                const sigRaw = String(signature ?? '').trim();
+                if (!payerAddrRaw || !ethers_1.ethers.isAddress(payerAddrRaw)) {
+                    if (!res.headersSent)
+                        res.status(400).json({ success: false, error: 'CADD settle requires valid `payer` address' }).end();
+                    return null;
+                }
+                if (!valueRaw || !/^\d+$/.test(valueRaw) || BigInt(valueRaw) <= 0n) {
+                    if (!res.headersSent)
+                        res.status(400).json({ success: false, error: 'CADD settle requires positive `value` (atomic 6-decimals)' }).end();
+                    return null;
+                }
+                if (BigInt(valueRaw) < quotedUsdc6) {
+                    if (!res.headersSent) {
+                        res.status(400).json({ success: false, error: `CADD value too small: ${valueRaw} < quoted ${quotedUsdc6.toString()}` }).end();
+                    }
+                    return null;
+                }
+                if (!/^\d+$/.test(permitDeadlineRaw) || !/^\d+$/.test(permitNonceRaw) || !/^0x[0-9a-fA-F]{130}$/.test(sigRaw)) {
+                    if (!res.headersSent)
+                        res.status(400).json({ success: false, error: 'CADD settle requires permitDeadline/permitNonce/signature' }).end();
+                    return null;
+                }
+                const r = await postLocalhostBuffer('/api/tokenTransferRawSig', {
+                    paymentToken: 'CADD',
+                    cardOwner: payToOwner,
+                    payer: payerAddrRaw,
+                    value: valueRaw,
+                    permitDeadline: permitDeadlineRaw,
+                    permitNonce: permitNonceRaw,
+                    signature: sigRaw,
+                });
+                let j = {};
+                try {
+                    j = JSON.parse(r.body || '{}');
+                }
+                catch {
+                    j = {};
+                }
+                if (r.statusCode !== 200 || j?.success === false || !j?.txHash) {
+                    const errMsg = j?.error ?? `CADD settle failed (HTTP ${r.statusCode})`;
+                    if (!res.headersSent)
+                        res.status(502).json({ success: false, error: errMsg }).end();
+                    return null;
+                }
+                return {
+                    payer: ethers_1.ethers.getAddress(String(j.payer ?? payerAddrRaw)),
+                    USDC_tx: String(j.txHash).trim(),
+                    usdcAmount6: BigInt(valueRaw),
+                };
+            };
+            // 4. x402 verify + settle（USDC → cardOwner）
+            sessionUpdate({ state: 'settling' });
+            const settledByRawSig = await settleWithRawSigIfNeeded();
+            if (settledByRawSig === null) {
+                sessionUpdate({ state: 'error', error: `${paymentTokenNorm} settle failed` });
+                return;
+            }
+            const settled = settledByRawSig ??
+                (await (0, util_1.settleBeamioX402ToCardOwner)(req, res, {
+                    cardOwner: payToOwner,
+                    quotedUsdc6,
+                    description: `Beamio NFC USDC Charge (${effectiveCurrency} ${breakdown.total.toFixed(2)} → card ${cardAddr.slice(0, 8)}…)`,
+                }));
+            if (!settled) {
+                // helper 已经把错误响应写到 res；session 用 status code 推断粗粒度原因（具体错文已写到 res 给 verra-home）
+                const sc = res.statusCode;
+                const reason = sc === 402
+                    ? 'USDC payment verification failed'
+                    : sc === 503
+                        ? 'USDC settle unavailable, please retry'
+                        : `USDC settle failed (HTTP ${sc})`;
+                sessionUpdate({ state: 'error', error: reason });
+                return;
+            }
+            const fiat6 = (n) => BigInt(Math.max(0, Math.round(n * 1_000_000))).toString();
+            (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcCharge] settle OK card=${cardAddr} pos=${posAddr ? posAddr.slice(0, 10) + '…' : '(none)'} payer=${settled.payer} ` +
+                `USDC_tx=${settled.USDC_tx} usdc6=${settled.usdcAmount6} sid=${sidNorm ?? '(none)'} ` +
+                `mode=${hasNfcSun ? 'NFC' : 'no-NFC orchestrator'}`));
+            // PR (USDC settle 独立记账)：USDC `transferWithAuthorization` 一旦 settle 成功（payer→cardOwner@Base），
+            // 立刻向 BeamioIndexerDiamond 推一行**独立** ledger（`TX_CATEGORY_USDC_CHARGE_SETTLE`），不依赖 L1 topup
+            // 主单的 `originating_usdc_tx` 反查；NFC + no-NFC orchestrator 两条 charge 路径共用此入口。
+            // fire-and-forget：失败仅 logger，不阻塞 200 响应 / orchestrator 启动 / NFC 模式 postLocalhost。
+            if (settled.USDC_tx) {
+                void (0, util_1.submitUsdcChargeSettleIndexer)({
+                    payer: settled.payer,
+                    cardOwner: payToOwner,
+                    cardAddress: cardAddr,
+                    posOperator: posAddr ?? null,
+                    sid: sidNorm ?? null,
+                    currency: effectiveCurrency,
+                    subtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
+                    totalCurrencyAmount: breakdown.total.toFixed(2),
+                    discountAmountFiat6: fiat6(breakdown.discount),
+                    discountRateBps: breakdown.discountBps,
+                    taxAmountFiat6: fiat6(breakdown.tax),
+                    taxRateBps: breakdown.taxBps,
+                    tipCurrencyAmount: breakdown.tip.toFixed(2),
+                    tipRateBps: breakdown.tipBps,
+                    usdcTxHash: settled.USDC_tx,
+                    usdcAmount6: settled.usdcAmount6,
+                }).catch((err) => {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcCharge] USDC settle indexer enqueue failed (non-critical): ${msg}`));
+                });
+            }
+            // 5. 分流：
+            //    - NFC 模式 ⇒ 顾客是 BeamioTag 持卡人，沿用既有 Master `/api/nfcUsdcCharge` 仅做日志记账（PR #4 之前行为）；
+            //                 settle 成功即视为终态，session 直接进 success（顾客的 NFC tag 已绑定，无需 orchestrator）。
+            //    - no-NFC 模式 ⇒ PR #4 编排器：立刻 200 给 verra-home（USDC 已到 cardOwner，对客户已完成支付），
+            //                     后台启动 ephemeral 钱包 topup → charge 闭环；POS 通过 sid 轮询 session 状态机推进 UI。
+            if (hasNfcSun) {
+                sessionUpdate({
+                    state: 'success',
+                    usdcAmount6: settled.usdcAmount6.toString(),
+                    USDC_tx: settled.USDC_tx,
+                    payer: settled.payer,
+                    error: null,
+                });
+                (0, exports.postLocalhost)('/api/nfcUsdcCharge', {
+                    cardAddr,
+                    cardOwner: payToOwner,
+                    pos: posAddr,
+                    nfcUid: uidTrim,
+                    nfcTagIdHex: tagIdHex,
+                    nfcRecipientEOA: recipientEOA,
+                    currency: effectiveCurrency,
+                    subtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
+                    discountAmountFiat6: fiat6(breakdown.discount),
+                    discountRateBps: breakdown.discountBps,
+                    taxAmountFiat6: fiat6(breakdown.tax),
+                    taxRateBps: breakdown.taxBps,
+                    tipCurrencyAmount: breakdown.tip.toFixed(2),
+                    tipRateBps: breakdown.tipBps,
+                    totalCurrencyAmount: breakdown.total.toFixed(2),
+                    usdcAmount6: settled.usdcAmount6.toString(),
+                    USDC_tx: settled.USDC_tx,
+                    payer: settled.payer,
+                }, res);
+                return;
+            }
+            // no-NFC orchestrator path (PR #4)
+            // 立即把 USDC settle 成功告诉 verra-home（用户在小狐狸里看到 ✓ 不需要等到 L1/L2 链上确认）
+            sessionUpdate({
+                state: 'topup_pending',
+                usdcAmount6: settled.usdcAmount6.toString(),
+                USDC_tx: settled.USDC_tx,
+                payer: settled.payer,
+                error: null,
+            });
+            if (!res.headersSent) {
+                res.status(200).json({
+                    success: true,
+                    cardAddress: cardAddr,
+                    cardOwner: payToOwner,
+                    currency: effectiveCurrency,
+                    totalCurrencyAmount: breakdown.total.toFixed(2),
+                    usdcAmount6: settled.usdcAmount6.toString(),
+                    USDC_tx: settled.USDC_tx,
+                    payer: settled.payer,
+                    sid: sidNorm,
+                }).end();
+            }
+            // 后台编排（fire-and-forget）；orchestrator 内部做 try/catch + session 状态推进；
+            // 任何 unhandled 异常都会被外层 .catch 捕获写到 session.error，不会冒泡为 unhandledRejection 把 cluster worker 拖垮。
+            // settle 在极少数情况下没有 transaction 字段（responseData.transaction undefined）；这种 USDC 等于没 settle，跳过编排并把 session 标记 error。
+            if (!settled.USDC_tx || !/^0x[0-9a-fA-F]{64}$/.test(settled.USDC_tx)) {
+                (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcCharge/orchestrator] sid=${sidNorm ?? 'n/a'} settle returned invalid USDC_tx; abort orchestrator`));
+                sessionUpdate({ state: 'error', error: 'USDC settle returned invalid tx hash; orchestrator aborted' });
+                return;
+            }
+            const sidForAwait = sidNorm ?? '';
+            const orchestratorCtx = {
+                sid: sidForAwait,
+                cardAddr,
+                cardOwner: payToOwner,
+                currency: effectiveCurrency,
+                totalCurrencyAmount: breakdown.total.toFixed(2),
+                nfcSubtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
+                nfcRequestCurrency: effectiveCurrency,
+                ...(breakdown.tip > 0 ? { nfcTipCurrencyAmount: breakdown.tip.toFixed(2) } : {}),
+                ...(breakdown.tipBps > 0 ? { nfcTipRateBps: breakdown.tipBps } : {}),
+                ...(breakdown.discount > 0
+                    ? { nfcDiscountAmountFiat6: String(Math.round(breakdown.discount * 1_000_000)) }
+                    : {}),
+                ...(breakdown.discountBps > 0 ? { nfcDiscountRateBps: breakdown.discountBps } : {}),
+                ...(breakdown.tax > 0 ? { nfcTaxAmountFiat6: String(Math.round(breakdown.tax * 1_000_000)) } : {}),
+                ...(breakdown.taxBps > 0 ? { nfcTaxRateBps: breakdown.taxBps } : {}),
+                originatingUSDCTx: settled.USDC_tx,
+                usdcAmount6: settled.usdcAmount6.toString(),
+                ...(quotedSubtotalUsdc6 > 0n ? { ledgerMainChargeUsdc6: quotedSubtotalUsdc6.toString() } : {}),
+                payer: settled.payer,
+                posOperator: posAddr,
+                provider: providerBase,
+                updateSession: (patch) => {
+                    // orchestrator 不持有 sid（避免循环依赖），无 sid 时 sessionUpdate 内部 no-op，恰好兜住「sid 缺省」场景
+                    sessionUpdate(patch);
+                },
+                /** PR #4 v3：跨 worker session 轮询 ⇒ 走 Master 的 `/api/chargeSessionConsumePosSig` 原子消耗端点。
+                 *  POS POST `/api/nfcUsdcChargeTopupAuth` 命中 cluster ⇒ proxy 到 Master ⇒ Master verify 后写 posTopupSignature；
+                 *  本闭包每 500ms 探一次 Master，签名一旦出现即原子消耗（Master 同时清掉 pendingTopup* 字段，避免重放）。 */
+                awaitTopupSignature: async (timeoutMs) => {
+                    if (!sidForAwait)
+                        return { ok: false, error: 'sid missing; orchestrator cannot solicit POS signature' };
+                    const deadline = Date.now() + Math.max(1_000, timeoutMs);
+                    while (Date.now() < deadline) {
+                        const got = await masterSessionConsumePosSig(sidForAwait);
+                        if (got.ok)
+                            return { ok: true, signature: got.signature, signer: got.signer };
+                        // got.error in {'no signature yet', 'session not found', 'session in error', ...}
+                        if (got.error === 'session not found') {
+                            // upsert 还没飘到 Master（fire-and-forget 没回执），继续等
+                        }
+                        else if (got.error.startsWith('session in error') || got.error === 'session moved to error') {
+                            return { ok: false, error: got.error };
+                        }
+                        await new Promise((r) => setTimeout(r, 500));
+                    }
+                    return { ok: false, error: `timeout ${timeoutMs}ms waiting POS topup auth` };
+                },
+            };
+            void (0, usdcChargeOrchestrator_1.runUsdcChargeOrchestrator)(orchestratorCtx).catch((err) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcCharge/orchestrator] sid=${sidNorm ?? 'n/a'} unhandled: ${msg}`));
+                sessionUpdate({ state: 'error', error: `Orchestrator unhandled: ${msg}` });
+            });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcCharge] error: ${err?.message ?? err}`));
+            sessionUpdate({ state: 'error', error: err?.message ?? String(err) });
+            if (!res.headersSent) {
+                res.status(500).json({ success: false, error: err?.message ?? String(err) }).end();
+            }
+        }
+    });
+    /** GET /api/nfcUsdcChargeSession?sid=<uuid v4>
+     * PR #3 iOS POS 轮询入口；PR #4 v3 改为 cluster→Master 透传：session 唯一信源在 Master，
+     * cluster 任何 worker 都能拿到一致状态（修复 LB 派到非创建者 worker 时的 "Session not found"）。
+     * - sid 非法 ⇒ 400 由 cluster 自己拦
+     * - sid 不存在 ⇒ Master 返 awaiting_payment shell；POS 继续轮询不当 error
+     * - sid 存在 ⇒ 返完整 record（含 USDC_tx/payer/breakdown/pendingTopup*） */
+    router.get('/nfcUsdcChargeSession', async (req, res) => {
+        const sidQ = (req.query?.sid ?? '').toString().trim();
+        if (!isValidSid(sidQ)) {
+            return res.status(400).json({ ok: false, error: 'Invalid sid (expect UUID v4)' }).end();
+        }
+        try {
+            const r = await masterSessionGet(sidQ.toLowerCase());
+            res.status(r.statusCode === 200 ? 200 : r.statusCode).setHeader('Content-Type', 'application/json').send(r.body).end();
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcChargeSession proxy] sid=${sidQ.slice(0, 8)}… ${err?.message ?? err}`));
+            res.status(502).json({ ok: false, error: 'Master unreachable' }).end();
+        }
+    });
+    /** POST /api/nfcUsdcChargeTopupAuth
+     * PR #4 v2 POS-signed admin path；PR #4 v3：cluster→Master 透传，所有验签 + session 写入都在 Master 完成。
+     * 这样不论 POS 的请求被 LB 派到哪个 cluster worker，都能命中正确 session。
+     * cluster 端只透传请求体，不再持本地 state。 */
+    router.post('/nfcUsdcChargeTopupAuth', async (req, res) => {
+        try {
+            const r = await postLocalhostBuffer('/api/nfcUsdcChargeTopupAuth', req.body ?? {});
+            res.status(r.statusCode).setHeader('Content-Type', 'application/json').send(r.body).end();
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcChargeTopupAuth proxy] ${err?.message ?? err}`));
+            if (!res.headersSent) {
+                res.status(502).json({ success: false, error: 'Master unreachable' }).end();
+            }
+        }
+    });
+    /** POST /api/nfcUsdcChargeRawSig
+     *
+     * WC v2 / 任意第三方钱包路径：POS 在本地通过 WC 会话拿到顾客钱包对 EIP-3009 USDC.transferWithAuthorization 的离线签名后，
+     * 直接 POST 这里把 raw sig 提交给 backend。**不走 x402** 包装（x402 facilitator 走 settle 需要 X-PAYMENT header）。
+     *
+     * 与 `/api/nfcUsdcCharge`（x402 路径）的拓扑差别：
+     *   - x402 路径：verra-home 浏览器内 wrapFetchWithPayment 注入 X-PAYMENT 头 → cluster `settleBeamioX402ToCardOwner` →
+     *     x402 facilitator 提交 USDC tx；session 状态机走 verifying → settling → topup_pending → … → success。
+     *   - raw-sig 路径：POS 拿签名直接 POST raw 字段；cluster 校验 sid/card/breakdown/quote → 转发 Master 直接提交 USDC tx；
+     *     **跳过 orchestrator 双腿**（第三方钱包顾客没有 BeamioTag/loyalty card，硬塞 mint points 会撞 first-membership tier
+     *     阈值）；session 直接 verifying → settling → success。
+     *
+     * Body:
+     *   { sid, card, pos, currency?, subtotal, discountBps?, taxBps?, tipBps?,
+     *     payer (EIP-3009 from), value (USDC6 expected), validAfter, validBefore, nonce, signature }
+     */
+    router.post('/nfcUsdcChargeRawSig', async (req, res) => {
+        const { card, pos, sid, currency, subtotal, discount, tax, tip, discountBps, taxBps, tipBps, payer, value, validAfter, validBefore, nonce, signature, } = req.body;
+        const sidNorm = isValidSid(sid) ? sid.toLowerCase() : null;
+        const sessionUpdate = (patch) => {
+            if (!sidNorm)
+                return;
+            void masterSessionUpsert(sidNorm, patch);
+        };
+        try {
+            const cardField = (card ?? '').toString().trim();
+            if (!cardField || !ethers_1.ethers.isAddress(cardField)) {
+                sessionUpdate({ state: 'error', error: 'Invalid card' });
+                return res.status(400).json({ success: false, error: 'Invalid card' }).end();
+            }
+            const cardAddr = ethers_1.ethers.getAddress(cardField);
+            const posStr = (pos ?? '').toString().trim();
+            const posAddr = posStr && ethers_1.ethers.isAddress(posStr) ? ethers_1.ethers.getAddress(posStr) : null;
+            const payerStr = (payer ?? '').toString().trim();
+            if (!payerStr || !ethers_1.ethers.isAddress(payerStr)) {
+                sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid payer (EIP-3009 from)' });
+                return res.status(400).json({ success: false, error: 'Invalid payer (EIP-3009 from)' }).end();
+            }
+            const payerAddr = ethers_1.ethers.getAddress(payerStr);
+            const valueStr = (value ?? '').toString().trim();
+            if (!valueStr || !/^\d+$/.test(valueStr) || BigInt(valueStr) <= 0n) {
+                sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid value (expect positive uint256 decimal)' });
+                return res.status(400).json({ success: false, error: 'Invalid value (expect positive uint256 decimal)' }).end();
+            }
+            const nonceStr = (nonce ?? '').toString().trim();
+            if (!/^0x[0-9a-fA-F]{64}$/.test(nonceStr)) {
+                sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid nonce (expect 32-byte hex)' });
+                return res.status(400).json({ success: false, error: 'Invalid nonce (expect 0x-prefixed 32-byte hex)' }).end();
+            }
+            const sigStr = (signature ?? '').toString().trim();
+            if (!/^0x[0-9a-fA-F]{130}$/.test(sigStr)) {
+                sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid signature (expect 65-byte hex)' });
+                return res.status(400).json({ success: false, error: 'Invalid signature (expect 0x-prefixed 65-byte hex)' }).end();
+            }
+            const validAfterStr = (validAfter ?? '0').toString().trim();
+            const validBeforeStr = (validBefore ?? '0').toString().trim();
+            if (!/^\d+$/.test(validAfterStr) || !/^\d+$/.test(validBeforeStr)) {
+                sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid validAfter/validBefore (expect uint256 decimal)' });
+                return res.status(400).json({ success: false, error: 'Invalid validAfter/validBefore (expect uint256 decimal)' }).end();
+            }
+            const breakdown = normalizeChargeBreakdown({ subtotal, discount, tax, tip, discountBps, taxBps, tipBps });
+            if (breakdown.total <= 0) {
+                sessionUpdate({ state: 'error', cardAddr, pos: posAddr, error: 'Invalid charge breakdown' });
+                return res.status(400).json({ success: false, error: 'Invalid charge breakdown (total must be > 0)' }).end();
+            }
+            sessionUpdate({
+                state: 'verifying',
+                cardAddr,
+                pos: posAddr,
+                subtotal: breakdown.subtotal.toFixed(2),
+                discount: breakdown.discount.toFixed(2),
+                tax: breakdown.tax.toFixed(2),
+                tip: breakdown.tip.toFixed(2),
+                total: breakdown.total.toFixed(2),
+                discountBps: breakdown.discountBps,
+                taxBps: breakdown.taxBps,
+                tipBps: breakdown.tipBps,
+            });
+            // 链上权威读 owner / currency / isAdmin(pos) —— 与 /api/nfcUsdcCharge 同口径，cardOwner 永远以链上为准（防伪 URL）。
+            let onChainOwner = null;
+            let onChainCurrency = null;
+            let isAdminPos = posAddr === null;
+            try {
+                const cprep = new ethers_1.ethers.Contract(cardAddr, [
+                    'function owner() view returns (address)',
+                    'function currency() view returns (uint8)',
+                    'function isAdmin(address) view returns (bool)',
+                ], providerBase);
+                const ownerP = cprep.owner();
+                const curP = cprep.currency();
+                const adminP = posAddr ? cprep.isAdmin(posAddr) : Promise.resolve(true);
+                const [o, ce, ad] = await Promise.all([ownerP, curP, adminP]);
+                if (o && ethers_1.ethers.isAddress(o))
+                    onChainOwner = ethers_1.ethers.getAddress(o);
+                const currencyMap = { 0: 'CAD', 1: 'USD', 2: 'JPY', 3: 'CNY', 4: 'USDC', 5: 'HKD', 6: 'EUR', 7: 'SGD', 8: 'TWD' };
+                onChainCurrency = currencyMap[Number(ce)] ?? null;
+                isAdminPos = !!ad;
+            }
+            catch (_) { /* tolerate transient rpc */ }
+            if (!onChainOwner) {
+                sessionUpdate({ state: 'error', error: 'Cannot resolve card.owner() on-chain' });
+                return res.status(400).json({ success: false, error: 'Cannot resolve card.owner() on-chain' }).end();
+            }
+            if (posAddr && !isAdminPos && posAddr !== onChainOwner) {
+                sessionUpdate({ state: 'error', cardOwner: onChainOwner, error: 'pos not admin/owner of card' });
+                return res
+                    .status(400)
+                    .json({ success: false, error: `pos ${posAddr.slice(0, 10)}… is not an admin/owner of card ${cardAddr.slice(0, 10)}…` })
+                    .end();
+            }
+            const payToOwner = onChainOwner;
+            const cur = ((currency ?? '').toString().trim().toUpperCase() || onChainCurrency || 'CAD');
+            const effectiveCurrency = onChainCurrency ?? cur;
+            sessionUpdate({ cardOwner: payToOwner, currency: effectiveCurrency });
+            // USDC 报价：与 NFC charge 同 Oracle 路径；report payload value 必须 ≥ 报价（容许多支付）。
+            const totalStr = breakdown.total.toFixed(6);
+            const quotedUsdc6 = (0, MemberCard_1.quoteCurrencyToUsdc6)(totalStr, effectiveCurrency);
+            if (quotedUsdc6 <= 0n) {
+                const fresh = (0, util_1.isOracleFresh)();
+                (0, logger_1.logger)(safe_1.default.yellow(`[nfcUsdcChargeRawSig] oracle quote=0 cur=${effectiveCurrency} total=${totalStr} fresh=${fresh}`));
+                const errMsg = fresh
+                    ? `Oracle rate not available for ${effectiveCurrency}, please retry shortly`
+                    : `Oracle rate stale, please retry shortly`;
+                sessionUpdate({ state: 'error', error: errMsg });
+                return res.status(503).json({ success: false, error: errMsg }).end();
+            }
+            const valueBig = BigInt(valueStr);
+            if (valueBig < quotedUsdc6) {
+                const errMsg = `Authorization value < quote (auth=${valueBig} < quote=${quotedUsdc6})`;
+                sessionUpdate({ state: 'error', error: errMsg });
+                return res.status(400).json({ success: false, error: errMsg }).end();
+            }
+            sessionUpdate({ state: 'settling' });
+            const fiat6 = (n) => BigInt(Math.max(0, Math.round(n * 1_000_000))).toString();
+            const masterPayload = {
+                cardAddress: cardAddr,
+                cardOwner: payToOwner,
+                pos: posAddr,
+                sid: sidNorm,
+                currency: effectiveCurrency,
+                totalCurrencyAmount: breakdown.total.toFixed(2),
+                subtotalCurrencyAmount: breakdown.subtotal.toFixed(2),
+                discountAmountFiat6: fiat6(breakdown.discount),
+                discountRateBps: breakdown.discountBps,
+                taxAmountFiat6: fiat6(breakdown.tax),
+                taxRateBps: breakdown.taxBps,
+                tipCurrencyAmount: breakdown.tip.toFixed(2),
+                tipRateBps: breakdown.tipBps,
+                usdcAmount6: valueBig.toString(),
+                payer: payerAddr,
+                validAfter: validAfterStr,
+                validBefore: validBeforeStr,
+                nonce: nonceStr,
+                signature: sigStr,
+            };
+            let masterResp;
+            try {
+                masterResp = await postLocalhostBuffer('/api/usdcChargeRawSig', masterPayload);
+            }
+            catch (proxyErr) {
+                const msg = proxyErr?.message ?? String(proxyErr);
+                (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcChargeRawSig] master proxy: ${msg}`));
+                sessionUpdate({ state: 'error', error: `Master unreachable: ${msg}` });
+                return res.status(502).json({ success: false, error: `Master unreachable: ${msg}` }).end();
+            }
+            let masterJson = {};
+            try {
+                masterJson = JSON.parse(masterResp.body);
+            }
+            catch { /* keep empty */ }
+            if (masterResp.statusCode !== 200 || !masterJson.success) {
+                const errMsg = masterJson.error ?? `Master submit failed (HTTP ${masterResp.statusCode})`;
+                sessionUpdate({ state: 'error', error: errMsg });
+                return res.status(masterResp.statusCode === 200 ? 502 : masterResp.statusCode).setHeader('Content-Type', 'application/json').send(masterResp.body).end();
+            }
+            (0, logger_1.logger)(safe_1.default.green(`[nfcUsdcChargeRawSig] settle OK card=${cardAddr} pos=${posAddr ? posAddr.slice(0, 10) + '…' : '(none)'} ` +
+                `payer=${payerAddr} USDC_tx=${masterJson.USDC_tx} usdc6=${valueBig.toString()} sid=${sidNorm ?? '(none)'} ` +
+                `mode=raw-sig (no orchestrator)`));
+            sessionUpdate({
+                state: 'success',
+                usdcAmount6: valueBig.toString(),
+                USDC_tx: masterJson.USDC_tx ?? null,
+                payer: payerAddr,
+                error: null,
+            });
+            return res.status(200).json({
+                success: true,
+                cardAddress: cardAddr,
+                cardOwner: payToOwner,
+                pos: posAddr,
+                currency: effectiveCurrency,
+                totalCurrencyAmount: breakdown.total.toFixed(2),
+                usdcAmount6: valueBig.toString(),
+                USDC_tx: masterJson.USDC_tx ?? null,
+                blockNumber: masterJson.blockNumber ?? null,
+                payer: payerAddr,
+                sid: sidNorm,
+            }).end();
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red(`[nfcUsdcChargeRawSig] error: ${err?.message ?? err}`));
+            sessionUpdate({ state: 'error', error: err?.message ?? String(err) });
+            if (!res.headersSent) {
+                res.status(500).json({ success: false, error: err?.message ?? String(err) }).end();
+            }
+        }
+    });
+    /** GET /api/excludedUserCards — BeamioUserCard 展示层 filter list（单一事实来源：apiExcludedUserCards.ts） */
+    router.get('/excludedUserCards', (_req, res) => {
+        res.status(200).json({
+            ok: true,
+            addresses: (0, apiExcludedUserCards_1.listApiExcludedUserCardAddressesChecksum)(),
+        });
+    });
+    /** POST /api/excludeUserCard — merchant owner blacklists program card (hide assets / Discover / coupons). */
+    router.post('/excludeUserCard', async (req, res) => {
+        const body = req.body;
+        const pre = await (0, excludeUserCardApi_1.excludeUserCardPreCheck)({
+            cardAddress: String(body.cardAddress ?? ''),
+            ownerEOA: String(body.ownerEOA ?? ''),
+            deadline: Number(body.deadline),
+            nonce: String(body.nonce ?? ''),
+            ownerSignature: String(body.ownerSignature ?? ''),
+        });
+        if (!pre.success) {
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        try {
+            const r = await postLocalhostBuffer('/api/excludeUserCard', {
+                cardAddress: ethers_1.ethers.getAddress(String(body.cardAddress).trim()),
+                excludedBy: ethers_1.ethers.getAddress(String(body.ownerEOA).trim()),
+            });
+            if (r.statusCode >= 200 && r.statusCode < 300) {
+                myCardsCache.clear();
+            }
+            res.status(r.statusCode).setHeader('Content-Type', 'application/json').send(r.body);
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            (0, logger_1.logger)(safe_1.default.red('[excludeUserCard] forward error:'), msg);
+            res.status(502).json({ success: false, error: `Forward to master failed: ${msg}` }).end();
+        }
+    });
+    /** 最新发行的前 N 张卡明细：透传 Master（含 token0TotalSupply6、token0CumulativeMint6、holderCount；与 Master 同排除集）。limit 上限 300。 */
+    router.get('/latestCards', (req, res) => {
+        const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
+        getLocalhost(`/api/latestCards${qs}`, res);
+    });
+    /** GET /api/searchHelp?card=0x... - 返回该卡已定义的全部 issued NFT 列表。30 秒缓存 */
+    router.get('/searchHelp', async (req, res) => {
+        const { card } = req.query;
+        if (!card || !ethers_1.ethers.isAddress(card)) {
+            return res.status(400).json({ error: 'Invalid card address' });
+        }
+        const cacheKey = ethers_1.ethers.getAddress(card).toLowerCase();
+        const cached = searchHelpCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const cardContract = new ethers_1.ethers.Contract(card, BEAMIO_USER_CARD_ISSUED_NFT_ABI, providerBase);
+            const nextIdx = await cardContract.issuedNftIndex();
+            const nextIdxN = Number(nextIdx);
+            const startN = Number(ISSUED_NFT_START_ID);
+            if (nextIdxN <= startN) {
+                return res.status(200).json({ items: [] });
+            }
+            const items = [];
+            for (let tid = startN; tid < nextIdxN; tid++) {
+                const [title, sharedMetadataHash, validAfter, validBefore, maxSupply, mintedCount, priceInCurrency6] = await Promise.all([
+                    cardContract.issuedNftTitle(tid),
+                    cardContract.issuedNftSharedMetadataHash(tid),
+                    cardContract.issuedNftValidAfter(tid),
+                    cardContract.issuedNftValidBefore(tid),
+                    cardContract.issuedNftMaxSupply(tid),
+                    cardContract.issuedNftMintedCount(tid),
+                    cardContract.issuedNftPriceInCurrency6(tid),
+                ]);
+                let titleStr = '';
+                try {
+                    titleStr = ethers_1.ethers.toUtf8String(title).replace(/\0/g, '').trim();
+                }
+                catch {
+                    titleStr = '0x' + ethers_1.ethers.hexlify(title).slice(2);
+                }
+                if (!titleStr)
+                    titleStr = '0x' + ethers_1.ethers.hexlify(title).slice(2);
+                items.push({
+                    tokenId: String(tid),
+                    title: titleStr,
+                    sharedMetadataHash: sharedMetadataHash !== ethers_1.ethers.ZeroHash ? ethers_1.ethers.hexlify(sharedMetadataHash) : null,
+                    validAfter: String(validAfter),
+                    validBefore: String(validBefore),
+                    maxSupply: String(maxSupply),
+                    mintedCount: String(mintedCount),
+                    priceInCurrency6: String(priceInCurrency6),
+                });
+            }
+            const body = JSON.stringify({ items });
+            searchHelpCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            res.status(200).json({ items });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[searchHelp] error:'), err?.message ?? err);
+            return res.status(500).json({ error: err?.message ?? 'Failed to fetch issued NFTs' });
+        }
+    });
+    (0, beamioFragmentImageProxy_1.registerBeamioFragmentProxyRoute)(router);
+    /** GET /api/metadata/business-start-ket/contract.json — BusinessStartKet `contractURI()` */
+    router.get('/metadata/business-start-ket/contract.json', async (_req, res) => {
+        const out = buildBusinessStartKetContractMetadata();
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Cache-Control', 'public, max-age=300');
+        return res.status(200).json(out);
+    });
+    /** GET /api/metadata/business-start-ket/{64hex}.json — BusinessStartKet ERC-1155（与合约 uri 模板一致） */
+    router.get('/metadata/business-start-ket/:tokenIdFile', async (req, res) => {
+        const tokenIdFile = typeof req.params.tokenIdFile === 'string' ? req.params.tokenIdFile.trim() : '';
+        const hexMatch = /^([0-9a-fA-F]{64})\.json$/i.exec(tokenIdFile);
+        if (!hexMatch) {
+            return res.status(404).json({ error: 'Invalid BusinessStartKet metadata path' });
+        }
+        const tokenIdBigInt = BigInt(`0x${hexMatch[1].toLowerCase()}`);
+        const out = buildBusinessStartKetExplorerMetadata(tokenIdBigInt);
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Cache-Control', 'public, max-age=300');
+        return res.status(200).json(out);
+    });
+    /** GET /api/metadata/0x{contract}{64hexTokenId}.json - BaseScan/ERC-1155 兼容元数据路由 */
+    router.get('/metadata/:resource', async (req, res) => {
+        const resource = typeof req.params.resource === 'string' ? req.params.resource : '';
+        const match = ERC1155_METADATA_PATH_RE.exec(resource);
+        if (!match) {
+            return res.status(404).json({ error: 'Invalid metadata path' });
+        }
+        const cardAddress = ethers_1.ethers.getAddress(`0x${match[1]}`);
+        const tokenIdHex = match[2].toLowerCase();
+        const tokenIdBigInt = BigInt(`0x${tokenIdHex}`);
+        const tokenId = tokenIdBigInt.toString();
+        try {
+            const cardRow = await (0, db_2.getCardByAddress)(cardAddress);
+            const cardMeta = isJsonObject(cardRow?.metadata) ? cardRow.metadata : {};
+            const cardProps = isJsonObject(cardMeta.properties) ? cardMeta.properties : {};
+            const cardName = firstNonEmptyString(cardMeta.name, cardMeta.title, 'Beamio User Card') ?? 'Beamio User Card';
+            const defaultImage = firstNonEmptyString(cardMeta.image, cardMeta.image_url, cardMeta.imageUrl, cardProps.image, DEFAULT_METADATA_IMAGE_URL);
+            let tokenMeta = {};
+            let sharedSeriesMetadata = null;
+            let sharedMetadataHash = null;
+            let ipfsCid = null;
+            if (tokenIdBigInt >= ISSUED_NFT_START_ID) {
+                const series = await (0, db_2.getSeriesByCardAndTokenId)(cardAddress, tokenId);
+                sharedMetadataHash = series?.sharedMetadataHash ?? null;
+                ipfsCid = series?.ipfsCid ?? null;
+                if (series?.ipfsCid && String(series.ipfsCid).trim() !== '') {
+                    try {
+                        const ipfsRes = await fetch(`https://ipfs.io/ipfs/${series.ipfsCid}`);
+                        if (ipfsRes.ok) {
+                            const ipfsJson = await ipfsRes.json();
+                            if (isJsonObject(ipfsJson))
+                                sharedSeriesMetadata = ipfsJson;
+                        }
+                    }
+                    catch (ipfsErr) {
+                        (0, logger_1.logger)(safe_1.default.yellow('[metadata route] IPFS fetch failed:'), ipfsErr?.message ?? ipfsErr);
+                    }
+                }
+                if (!sharedSeriesMetadata && series?.metadata && typeof series.metadata === 'object') {
+                    sharedSeriesMetadata = series.metadata;
+                }
+                tokenMeta = mergeMetadataObjects(series?.metadata, sharedSeriesMetadata);
+            }
+            else if (tokenIdBigInt >= MEMBERSHIP_NFT_START_ID && tokenIdBigInt < ISSUED_NFT_START_ID) {
+                const tierMetaByOwner = cardRow?.cardOwner
+                    ? await (0, db_2.getNftTierMetadataByOwnerAndToken)(cardRow.cardOwner, tokenIdBigInt)
+                    : null;
+                const tierMetaByCard = await (0, db_2.getNftTierMetadataByCardAndToken)(cardAddress, tokenIdBigInt);
+                tokenMeta = mergeMetadataObjects(tierMetaByOwner, tierMetaByCard);
+            }
+            else if (tokenIdBigInt > 0n) {
+                tokenMeta = mergeMetadataObjects(cardMeta.pointsMetadata, cardProps.pointsMetadata);
+            }
+            else {
+                tokenMeta = mergeMetadataObjects(cardMeta.pointsMetadata, cardProps.pointsMetadata);
+            }
+            const merged = ensureMetadataImage(mergeMetadataObjects(cardMeta, tokenMeta));
+            const baseExtra = {
+                card_address: cardAddress,
+                token_id: tokenId,
+            };
+            const catalogPointsImage = (0, beamioFragmentImageProxy_1.resolveCatalogPointsExplorerImageUrl)(defaultImage);
+            let out;
+            if (tokenIdBigInt === 0n) {
+                out = normalizeExplorerMetadata(merged, {
+                    name: `${cardName} Points`,
+                    description: `${cardName} ERC-1155 points balance token on Beamio. On-chain quantity uses ${BEAMIO_POINTS_METADATA_DECIMALS} decimal places (divide by 1,000,000 for display).`,
+                    image: catalogPointsImage,
+                    decimals: BEAMIO_POINTS_METADATA_DECIMALS,
+                    attributes: [
+                        { trait_type: 'asset_type', value: 'POINTS' },
+                        { trait_type: 'token_id', value: tokenId },
+                        {
+                            trait_type: 'display_decimals',
+                            value: String(BEAMIO_POINTS_METADATA_DECIMALS),
+                        },
+                    ],
+                    extra: baseExtra,
+                });
+                out.image = catalogPointsImage;
+            }
+            else if (tokenIdBigInt < MEMBERSHIP_NFT_START_ID) {
+                const mergedCatalog = { ...merged };
+                delete mergedCatalog.image;
+                delete mergedCatalog.image_url;
+                delete mergedCatalog.imageUrl;
+                out = normalizeExplorerMetadata(mergedCatalog, {
+                    name: `${cardName} #${tokenId}`,
+                    description: `${cardName} program token #${tokenId} on Beamio.`,
+                    image: catalogPointsImage,
+                    attributes: [
+                        { trait_type: 'asset_type', value: 'CATALOG' },
+                        { trait_type: 'token_id', value: tokenId },
+                    ],
+                    extra: baseExtra,
+                });
+                out.image = catalogPointsImage;
+            }
+            else if (tokenIdBigInt < ISSUED_NFT_START_ID) {
+                const membershipImage = (0, beamioFragmentImageProxy_1.explorerProxyImageUrl)(defaultImage) ?? beamioFragmentImageProxy_1.DEFAULT_METADATA_IMAGE_PROXY_URL;
+                out = normalizeExplorerMetadata(merged, {
+                    name: `${cardName} Membership #${tokenId}`,
+                    description: `${cardName} membership NFT #${tokenId}.`,
+                    image: membershipImage,
+                    attributes: [
+                        { trait_type: 'asset_type', value: 'MEMBERSHIP' },
+                        { trait_type: 'token_id', value: tokenId },
+                    ],
+                    extra: baseExtra,
+                });
+                const proxiedMembershipImage = (0, beamioFragmentImageProxy_1.explorerProxyImageUrl)(typeof out.image === 'string' ? out.image : undefined);
+                if (proxiedMembershipImage)
+                    out.image = proxiedMembershipImage;
+            }
+            else {
+                const seriesMetaForRev = mergeMetadataObjects(tokenMeta, sharedSeriesMetadata);
+                const metaRev = (0, couponClaimShare_1.computeIssuedSeriesMetadataRevision)(seriesMetaForRev);
+                const explorerPreviewImage = (0, couponClaimShare_1.buildIssuedNftExplorerImageUrl)(cardAddress, tokenId, metaRev);
+                void (0, couponClaimShare_1.warmIssuedNftExplorerOgJpeg)(cardAddress, tokenId).catch((warmErr) => {
+                    (0, logger_1.logger)(safe_1.default.yellow('[metadata route] issued-nft OG warm failed:'), warmErr instanceof Error ? warmErr.message : warmErr);
+                });
+                const issuedName = firstNonEmptyString(tokenMeta.name, tokenMeta.title) ??
+                    `${cardName} Issued NFT #${tokenId}`;
+                const issuedDescription = firstNonEmptyString(tokenMeta.description) ?? `${cardName} issued NFT #${tokenId}.`;
+                // Coupon Preview OG must win over series icon/banner fragment URLs in merged metadata.
+                const mergedForIssuedExplorer = { ...merged };
+                delete mergedForIssuedExplorer.image;
+                delete mergedForIssuedExplorer.image_url;
+                delete mergedForIssuedExplorer.imageUrl;
+                if (isJsonObject(mergedForIssuedExplorer.properties)) {
+                    const propsWithoutImage = { ...mergedForIssuedExplorer.properties };
+                    delete propsWithoutImage.image;
+                    mergedForIssuedExplorer.properties = propsWithoutImage;
+                }
+                out = normalizeExplorerMetadata(mergedForIssuedExplorer, {
+                    name: issuedName,
+                    description: issuedDescription,
+                    image: explorerPreviewImage,
+                    attributes: [
+                        { trait_type: 'asset_type', value: 'ISSUED_NFT' },
+                        { trait_type: 'token_id', value: tokenId },
+                    ],
+                    extra: baseExtra,
+                });
+                if (sharedSeriesMetadata)
+                    out.sharedSeriesMetadata = sharedSeriesMetadata;
+                if (sharedMetadataHash)
+                    out.sharedMetadataHash = sharedMetadataHash;
+                if (ipfsCid)
+                    out.ipfsCid = ipfsCid;
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.setHeader('Cache-Control', 'public, max-age=300');
+            return res.status(200).json(out);
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[metadata route] error:'), err?.message ?? err);
+            return res.status(500).json({ error: err?.message ?? 'Failed to fetch metadata' });
+        }
+    });
+    /** POST /api/ai/learningFeedback - 保存 AI 学习反馈（满意/纠正），共享给所有用户。correctedAction：Beamio 提供的期望 UI/action */
+    router.post('/ai/learningFeedback', async (req, res) => {
+        (0, logger_1.logger)(safe_1.default.cyan('[ai/learningFeedback] DEBUG body:'), JSON.stringify(req.body, null, 2));
+        const { kind, userInput, action, customRule, correctedAction } = req.body;
+        if (!kind || !['approved', 'corrected'].includes(kind)) {
+            return res.status(400).json({ error: 'Invalid kind, use approved or corrected' });
+        }
+        if (!userInput || typeof userInput !== 'string' || !userInput.trim()) {
+            return res.status(400).json({ error: 'Missing or invalid userInput' });
+        }
+        if (!action || typeof action !== 'object') {
+            return res.status(400).json({ error: 'Missing or invalid action' });
+        }
+        const ok = await (0, db_2.insertAiLearningFeedback)(kind, userInput, action, customRule, correctedAction);
+        if (!ok) {
+            (0, logger_1.logger)(safe_1.default.red('[ai/learningFeedback] Failed to save'));
+            return res.status(500).json({ error: 'Failed to save feedback' });
+        }
+        (0, logger_1.logger)(safe_1.default.green('[ai/learningFeedback] Saved:'), kind, userInput?.slice(0, 50));
+        return res.status(200).json({ ok: true });
+    });
+    /** GET /api/ai/learningFeedback - 获取 AI 学习反馈（供 beamioAction 注入 prompt） */
+    router.get('/ai/learningFeedback', async (_req, res) => {
+        const rows = await (0, db_2.getAiLearningFeedback)();
+        return res.status(200).json({ items: rows });
+    });
+    /** GET /api/ai/generateImage?prompt=... - Proxy Pollinations 图片生成，避免客户端 403/CORS。使用 gen.pollinations.ai，需配置 masterSetup.POLLINATIONS_API_KEY（免費 key 見 enter.pollinations.ai） */
+    router.get('/ai/generateImage', async (req, res) => {
+        const prompt = typeof req.query?.prompt === 'string' ? req.query.prompt.trim() : '';
+        const text = prompt || 'a cute avatar';
+        const apiKey = util_2.masterSetup?.POLLINATIONS_API_KEY;
+        const key = apiKey && typeof apiKey === 'string' ? apiKey.trim() : '';
+        const baseUrl = `https://gen.pollinations.ai/image/${encodeURIComponent(text)}`;
+        const params = new URLSearchParams({ model: 'flux' });
+        if (key)
+            params.set('key', key);
+        const url = `${baseUrl}?${params.toString()}`;
+        const headers = { 'User-Agent': 'Beamio/1.0 (https://beamio.app)' };
+        if (key)
+            headers['Authorization'] = `Bearer ${key}`;
+        try {
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 90_000);
+            try {
+                const upstream = await fetch(url, {
+                    headers,
+                    signal: ctrl.signal,
+                });
+                clearTimeout(t);
+                if (!upstream.ok) {
+                    (0, logger_1.logger)(safe_1.default.yellow('[ai/generateImage] upstream'), upstream.status, baseUrl);
+                    if ((upstream.status === 401 || upstream.status === 403) && !key) {
+                        return res.status(503).json({ error: 'Image service requires POLLINATIONS_API_KEY. Add it to ~/.master.json (free key at enter.pollinations.ai)' });
+                    }
+                    if (upstream.status === 403 && key) {
+                        return res.status(503).json({ error: 'POLLINATIONS_API_KEY rejected (403). Check key validity and image scope at enter.pollinations.ai' });
+                    }
+                    return res.status(upstream.status).json({ error: `Image service returned ${upstream.status}` });
+                }
+                const ct = upstream.headers.get('content-type') || 'image/png';
+                res.setHeader('Content-Type', ct);
+                res.setHeader('Cache-Control', 'public, max-age=86400');
+                const buf = await upstream.arrayBuffer();
+                res.send(Buffer.from(buf));
+            }
+            finally {
+                clearTimeout(t);
+            }
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[ai/generateImage]'), e?.message ?? e, baseUrl);
+            return res.status(502).json({ error: 'Failed to generate image' });
+        }
+    });
+    /** POST /api/ai/beamioAction - Cluster 直接调用 Gemini 2.5 Flash，根据用户意图返回 BeamioAction（读操作，无需 Master） */
+    router.post('/ai/beamioAction', async (req, res) => {
+        // Debug: 显示 UI 传入的原始数据
+        (0, logger_1.logger)(safe_1.default.cyan('[ai/beamioAction] DEBUG body:'), JSON.stringify(req.body, null, 2));
+        const apiKey = util_2.masterSetup?.GEMINI_API_KEY;
+        if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) {
+            (0, logger_1.logger)(safe_1.default.yellow('[ai/beamioAction] masterSetup.GEMINI_API_KEY not configured'));
+            return res.status(503).json({ error: 'AI service unavailable: GEMINI_API_KEY not configured' });
+        }
+        const { messages, userText } = req.body;
+        if (!userText || typeof userText !== 'string' || !userText.trim()) {
+            return res.status(400).json({ error: 'Missing or invalid userText' });
+        }
+        const feedbackItems = await (0, db_2.getAiLearningFeedback)();
+        let feedbackPrompt = '';
+        if (feedbackItems.length > 0) {
+            feedbackPrompt = '\n\nLearned from user feedback (apply when relevant):\n';
+            for (const f of feedbackItems.slice(0, 20)) {
+                if (f.kind === 'approved') {
+                    feedbackPrompt += `- User said "${f.user_input}" -> action: ${JSON.stringify(f.action_json)}\n`;
+                }
+                else if (f.kind === 'corrected') {
+                    if (f.custom_rule) {
+                        try {
+                            const parsed = JSON.parse(f.custom_rule);
+                            if (parsed._correctedAction) {
+                                feedbackPrompt += `- User corrected "${f.user_input}" -> use this action instead: ${JSON.stringify(parsed._correctedAction)}\n`;
+                            }
+                            else {
+                                feedbackPrompt += `- Rule: ${f.custom_rule}\n`;
+                            }
+                        }
+                        catch {
+                            feedbackPrompt += `- Rule: ${f.custom_rule}\n`;
+                        }
+                    }
+                    else {
+                        feedbackPrompt += `- User corrected "${f.user_input}" -> action: ${JSON.stringify(f.action_json)}\n`;
+                    }
+                }
+            }
+        }
+        const BEAMIO_ACTION_SCHEMA = {
+            type: 'object',
+            properties: {
+                type: {
+                    type: 'string',
+                    enum: ['pay', 'request', 'cashcode', 'fuel', 'balance', 'history', 'contact', 'add-usdc', 'card-topup', 'text', 'custom-ui', 'edit-profile', 'send-chat', 'generate-avatar-image'],
+                },
+                params: {
+                    type: 'object',
+                    properties: {
+                        to: { type: 'string' },
+                        amount: { type: 'number' },
+                        currency: { type: 'string', enum: ['USD', 'USDC', 'CAD', 'JPY', 'CNY', 'HKD', 'EUR', 'SGD', 'TWD'] },
+                        note: { type: 'string' },
+                        content: { type: 'string' },
+                        text: { type: 'string' },
+                        firstName: { type: 'string' },
+                        lastName: { type: 'string' },
+                        avatarSeed: { type: 'string' },
+                        mode: { type: 'string', enum: ['create', 'redeem'] },
+                        query: { type: 'string' },
+                        action: { type: 'string', enum: ['view', 'pay', 'chat'] },
+                        cardId: { type: 'string' },
+                        limit: { type: 'number' },
+                        prompt: { type: 'string' },
+                        ui: {
+                            type: 'object',
+                            properties: {
+                                schema: { type: 'string' },
+                                root: { type: 'object' },
+                            },
+                            required: ['schema', 'root'],
+                        },
+                    },
+                    additionalProperties: true,
+                },
+            },
+            required: ['type', 'params'],
+        };
+        const BEAMIO_INFRA_PROMPT = `
+Beamio balance infrastructure (for your understanding when answering):
+- EOA = user's wallet address (e.g. MetaMask). Holds USDC directly on Base.
+- AA = Beamio Account (smart contract), resolved via beamioAccountOf(EOA). Activated when user first uses Beamio. Also holds USDC on Base.
+- User total USDC = EOA balance + AA balance. B-Units = CoNET chain credits for gas/fees, separate from USDC.
+- APIs: GET /api/getBalance?address=0x... returns {eth, usdc} for that address. GET /api/getWalletAssets?wallet=0x...&isAA=false returns AA balance + cards. getUIDAssets (NFC) returns EOA+AA combined.
+- When user asks "balance", "how much", "my USDC", "check balance", "餘額", "有多少" -> return balance or custom-ui with BalanceDisplay.`;
+        const CONET_CHAT_PROMPT = `
+CoNET chat infrastructure (for your understanding when answering):
+- Chat uses CoNET P2P: messages encrypted with PGP, posted to CoNET nodes (https://{node}.conet.network/post). Recipient fetches via gossip.
+- User PGP keys: stored on CoNET chain (AddressPGP). regiestChatRoute registers keys so others can find them. getAllNodes (GuardianNodesInfoV6) returns entry nodes.
+- When user asks "chat", "message", "open contacts", "和某人聊天", "發訊息給" -> return contact with action: "chat".
+- If user specifies a person (e.g. "chat with @Simon", "message John") -> include query: "Simon" or "John" in params. { type: "contact", params: { action: "chat", query: "Simon" } }.
+- contact with action: chat opens the Chat/contacts page where user can select or start a conversation.`;
+        const PROFILE_EDIT_PROMPT = `
+Profile edit (edit-profile): Update user's Beamio profile via addUser API.
+- firstName, lastName: display name. When user says "change name to X", "my name is John Smith" -> { type: "edit-profile", params: { firstName: "John", lastName: "Smith" } }.
+- avatarSeed: DiceBear emoji avatar (seed only). When user says "change avatar to emoji", "use DiceBear seed" -> { type: "edit-profile", params: { avatarSeed: "beamio-123" } }.
+- IMPORTANT: When user says "生成小貓頭像", "generate cat avatar", "為我生成貓咪圖片", "get a cat image" -> use generate-avatar-image (returns actual image), NOT edit-profile.
+- currency: USD|USDC|CAD|JPY|CNY|HKD|EUR|SGD|TWD. When user says "set currency to CAD", "use JPY" -> { type: "edit-profile", params: { currency: "CAD" } }.
+- Can combine: { type: "edit-profile", params: { firstName: "John", lastName: "Doe", avatarSeed: "beamio-john", currency: "CAD" } }.
+- Triggers: "change name", "update profile", "set currency", "修改名字", "設置貨幣".`;
+        const GENERATE_AVATAR_PROMPT = `
+generate-avatar-image: AI generates any image from text prompt (via Pollinations). User can download or set as profile avatar.
+- When user says "生成小貓頭像", "generate cat avatar", "為我生成貓咪圖片" -> { type: "generate-avatar-image", params: { prompt: "a cute kitten avatar" } }.
+- When user says "生成星空圖", "畫一隻龍", "create a dragon", "sunset over ocean", "a robot" -> { type: "generate-avatar-image", params: { prompt: "user's description in English" } }.
+- Always put the prompt in English for best results. Use generate-avatar-image when user wants to CREATE/GET any image. Use edit-profile only for changing name/currency/DiceBear seed.`;
+        const HISTORY_PROMPT = `
+history: Transaction history from BeamioIndexerDiamond. UI fetches via getAccountTransactionsByMonthOffsetPaged and displays inline.
+- When user says "顯示前N條 歷史", "show last N transactions", "前5筆記錄", "顯示歷史" (with or without N) -> { type: "history", params: { limit: N } }. Use N from user (e.g. 5); if no number, use limit: 5.
+- When user says "history", "交易記錄", "open history" (no count, wants full page) -> { type: "history", params: {} } opens History page.`;
+        const BEAMIO_SERVICE_CATALOG = `
+Service catalog (actions that invoke backend/client services):
+- send-chat: Send a CoNET P2P message directly. params: { to: string (BeamioTag, e.g. "Simon"), text: string }.
+  When user says "send hello to @Simon", "message John with hi", "發送訊息給 Simon 說 hello" -> { type: "send-chat", params: { to: "Simon", text: "hello" } }.
+  Use send-chat when user explicitly wants to SEND a message. Use contact with action: chat when user wants to open chat/contacts without sending.`;
+        const UI_CATALOG_PROMPT = `
+custom-ui: For composite or custom layouts, use type "custom-ui" with params.ui = { schema: "beamio-ui-v1", root: UINode }.
+UINode: { type, props?, children? }. root MUST have type (e.g. "Card") and valid structure. NEVER return root: {}.
+Allowed types: Card, Text, Button, Row, Column, Spacer, Divider, BalanceDisplay, AddUsdcHint, ActionButton.
+- Card: props.title?, props.subtitle?, children
+- Text: props.content, props.size? (xs|sm|base|lg)
+- Button: props.label, props.action? (pay|fuel|balance|add-usdc|contact|history|cashcode|request|card-topup), props.href? (external link)
+- ActionButton: props.label, props.actionType, props.actionParams? - opens Beamio action
+- Row/Column: props.gap?, children
+- Spacer: props.height? (px)
+- BalanceDisplay: shows USDC + B-Units (no props)
+- AddUsdcHint: hint for adding USDC (no props)
+Example: User says "balance" -> { type: "custom-ui", params: { ui: { schema: "beamio-ui-v1", root: { type: "Card", props: { title: "Balance" }, children: [{ type: "BalanceDisplay" }, { type: "ActionButton", props: { label: "Add USDC", actionType: "add-usdc" } }] } } } }
+PREFER custom-ui to display AI-generated composite UI. For "balance", "add usdc", "how much" -> return custom-ui with Card + BalanceDisplay + ActionButton. Single actions (balance, add-usdc) only when user explicitly wants minimal.`;
+        const systemPrompt = `You are the Beamio wallet assistant. Return JSON action based on user intent.
+Supported: pay, request, balance, fuel, add-usdc, history, contact, cashcode, card-topup, text, custom-ui, edit-profile, send-chat, generate-avatar-image.
+pay needs to (@BeamioTag or address) and amount; request needs amount; text needs content. Return valid JSON only, no markdown.
+${BEAMIO_INFRA_PROMPT}
+${HISTORY_PROMPT}
+${CONET_CHAT_PROMPT}
+${PROFILE_EDIT_PROMPT}
+${GENERATE_AVATAR_PROMPT}
+${BEAMIO_SERVICE_CATALOG}
+${UI_CATALOG_PROMPT}
+IMPORTANT: Reply in the SAME language as the user. If user asks in English, use English for text content. If user asks in 中文, use 中文. Match the user's language for all text responses.${feedbackPrompt}`;
+        try {
+            const ai = new genai_1.GoogleGenAI({ apiKey });
+            const history = Array.isArray(messages) ? messages : [];
+            const contents = [
+                { role: 'user', parts: [{ text: systemPrompt }] },
+                ...history.slice(-10).map((m) => ({
+                    role: (m.role === 'assistant' ? 'model' : 'user'),
+                    parts: [{ text: m.content }],
+                })),
+                { role: 'user', parts: [{ text: userText.trim() }] },
+            ];
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents,
+                config: {
+                    responseMimeType: 'application/json',
+                    responseSchema: BEAMIO_ACTION_SCHEMA,
+                },
+            });
+            const text = response?.text?.trim();
+            if (!text) {
+                return res.status(502).json({ error: 'Empty response from AI' });
+            }
+            let action;
+            try {
+                action = JSON.parse(text);
+            }
+            catch {
+                (0, logger_1.logger)(safe_1.default.yellow('[ai/beamioAction] Invalid JSON from AI:'), text?.slice(0, 200));
+                return res.status(502).json({ error: 'Invalid JSON from AI' });
+            }
+            if (!action || typeof action.type !== 'string' || typeof action.params !== 'object') {
+                return res.status(502).json({ error: 'Invalid action structure from AI' });
+            }
+            // Sanitize custom-ui with empty/invalid root (AI sometimes returns root: {})
+            if (action.type === 'custom-ui' && action.params && typeof action.params === 'object') {
+                const params = action.params;
+                const ui = params.ui;
+                const root = ui?.root;
+                const isEmptyRoot = !root || (typeof root === 'object' && !('type' in root));
+                if (ui && isEmptyRoot) {
+                    ui.root = { type: 'Card', props: { title: 'Balance' }, children: [{ type: 'BalanceDisplay' }, { type: 'ActionButton', props: { label: 'Add USDC', actionType: 'add-usdc' } }] };
+                }
+            }
+            // Debug: 显示返回给 UI 的 action
+            (0, logger_1.logger)(safe_1.default.cyan('[ai/beamioAction] DEBUG response action:'), JSON.stringify(action, null, 2));
+            return res.status(200).json({ action });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[ai/beamioAction] error:'), err?.message ?? err);
+            return res.status(502).json({ error: err?.message ?? 'AI request failed' });
+        }
+    });
+    /** GET /api/getNFTMetadata?card=0x&tokenId=...&nftSpecialMetadata=... - 返回指定 #NFT 的 metadata。30 秒缓存 */
+    router.get('/getNFTMetadata', async (req, res) => {
+        const { card, tokenId, nftSpecialMetadata } = req.query;
+        if (!card || !ethers_1.ethers.isAddress(card) || !tokenId) {
+            return res.status(400).json({ error: 'Invalid card or tokenId' });
+        }
+        const cacheKey = `${ethers_1.ethers.getAddress(card).toLowerCase()}:${tokenId}:${nftSpecialMetadata ?? ''}`;
+        const cached = getNFTMetadataCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        const tid = BigInt(tokenId);
+        if (tid < ISSUED_NFT_START_ID) {
+            return res.status(400).json({ error: 'tokenId must be >= ISSUED_NFT_START_ID (100000000000)' });
+        }
+        try {
+            const cardContract = new ethers_1.ethers.Contract(card, BEAMIO_USER_CARD_ISSUED_NFT_ABI, providerBase);
+            const [title, sharedMetadataHash, validAfter, validBefore, maxSupply, mintedCount, priceInCurrency6] = await Promise.all([
+                cardContract.issuedNftTitle(tid),
+                cardContract.issuedNftSharedMetadataHash(tid),
+                cardContract.issuedNftValidAfter(tid),
+                cardContract.issuedNftValidBefore(tid),
+                cardContract.issuedNftMaxSupply(tid),
+                cardContract.issuedNftMintedCount(tid),
+                cardContract.issuedNftPriceInCurrency6(tid),
+            ]);
+            if (maxSupply === 0n || maxSupply === 0) {
+                return res.status(404).json({ error: 'Issued NFT not defined' });
+            }
+            let titleStr = '';
+            try {
+                titleStr = ethers_1.ethers.toUtf8String(title).replace(/\0/g, '').trim();
+            }
+            catch {
+                titleStr = '0x' + ethers_1.ethers.hexlify(title).slice(2);
+            }
+            if (!titleStr)
+                titleStr = '0x' + ethers_1.ethers.hexlify(title).slice(2);
+            const out = {
+                tokenId: String(tid),
+                title: titleStr,
+                sharedMetadataHash: sharedMetadataHash !== ethers_1.ethers.ZeroHash ? ethers_1.ethers.hexlify(sharedMetadataHash) : null,
+                validAfter: String(validAfter),
+                validBefore: String(validBefore),
+                maxSupply: String(maxSupply),
+                mintedCount: String(mintedCount),
+                priceInCurrency6: String(priceInCurrency6),
+            };
+            // 若 DB 有系列且 ipfsCid 有效，拉取 sharedSeriesMetadata 并与 nftSpecialMetadata 组装
+            const series = await (0, db_2.getSeriesByCardAndTokenId)(card, tokenId);
+            if (series?.ipfsCid) {
+                try {
+                    const ipfsUrl = `https://ipfs.io/ipfs/${series.ipfsCid}`;
+                    const ipfsRes = await fetch(ipfsUrl);
+                    if (ipfsRes.ok) {
+                        const sharedJson = await ipfsRes.json();
+                        out.sharedSeriesMetadata = sharedJson;
+                        if (nftSpecialMetadata && typeof nftSpecialMetadata === 'string') {
+                            try {
+                                const special = JSON.parse(nftSpecialMetadata);
+                                const base = (typeof sharedJson === 'object' && sharedJson !== null) ? sharedJson : {};
+                                out.assembled = { ...base, ...special };
+                            }
+                            catch {
+                                out.nftSpecialMetadata = nftSpecialMetadata;
+                            }
+                        }
+                    }
+                }
+                catch (ipfsErr) {
+                    (0, logger_1.logger)(safe_1.default.yellow('[getNFTMetadata] IPFS fetch failed:'), ipfsErr?.message ?? ipfsErr);
+                }
+            }
+            const image = firstNonEmptyString(out.assembled?.image, out.assembled?.image_url, out.assembled?.imageUrl, out.sharedSeriesMetadata?.image, out.sharedSeriesMetadata?.image_url, out.sharedSeriesMetadata?.imageUrl, DEFAULT_METADATA_IMAGE_URL);
+            if (image)
+                out.image = image;
+            const body = JSON.stringify(out);
+            getNFTMetadataCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            res.status(200).json(out);
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[getNFTMetadata] error:'), err?.message ?? err);
+            return res.status(500).json({ error: err?.message ?? 'Failed to fetch NFT metadata' });
+        }
+    });
+    /** GET /api/ownerNftSeries?owner=0x... - 返回 owner 钱包所有的 NFT 系列（含 sharedMetadataHash、ipfsCid） */
+    router.get('/ownerNftSeries', async (req, res) => {
+        const { owner } = req.query;
+        if (!owner || !ethers_1.ethers.isAddress(owner)) {
+            return res.status(400).json({ error: 'Invalid owner address' });
+        }
+        const cacheKey = ethers_1.ethers.getAddress(owner).toLowerCase();
+        const cached = ownerNftSeriesCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const items = await (0, db_2.getOwnerNftSeries)(owner, 100);
+            const body = JSON.stringify({ items });
+            ownerNftSeriesCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            res.status(200).json({ items });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[ownerNftSeries] error:'), err?.message ?? err);
+            return res.status(500).json({ error: err?.message ?? 'Failed to fetch owner NFT series' });
+        }
+    });
+    /** GET /api/recentIssuedCouponSeries?limit=20 — Program 优惠券 issued NFT 系列，按登记时间倒序；默认 20，最大 50 */
+    router.get('/recentIssuedCouponSeries', async (req, res) => {
+        let limit = Number(req.query.limit ?? 20);
+        if (!Number.isFinite(limit))
+            limit = 20;
+        limit = Math.floor(limit);
+        limit = Math.min(Math.max(limit, 1), 50);
+        const cacheKey = String(limit);
+        const cached = recentIssuedCouponSeriesCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const scanLimit = Math.min(100, Math.max(limit, limit * 8));
+            const rawItems = await (0, db_2.listRecentBeamioIssuedCouponSeries)(scanLimit);
+            const afterDiscover = await (0, couponDiscoverFilter_1.filterCouponSeriesRowsByDiscoverMerchantPolicy)(rawItems);
+            const afterListed = (0, couponMetadataCategory_1.filterListedClientCouponSeriesRows)(afterDiscover);
+            const items = afterListed.slice(0, limit);
+            const body = JSON.stringify({ items, limit });
+            recentIssuedCouponSeriesCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            res.status(200).json({ items, limit });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[recentIssuedCouponSeries] error:'), err?.message ?? err);
+            return res.status(500).json({ error: err?.message ?? 'Failed to fetch recent issued coupon series' });
+        }
+    });
+    /** GET /api/cardActiveIssuedCouponSeries?card=0x&limit=20 — 单卡 Program 优惠券（DB created_at 倒序），过滤链上 isIssuedNftValid && maxSupply>0；默认 20，最大 50 */
+    router.get('/cardActiveIssuedCouponSeries', async (req, res) => {
+        const { card } = req.query;
+        if (!card || !ethers_1.ethers.isAddress(card)) {
+            return res.status(400).json({ error: 'Invalid card address' });
+        }
+        let limit = Number(req.query.limit ?? 20);
+        if (!Number.isFinite(limit))
+            limit = 20;
+        limit = Math.floor(limit);
+        limit = Math.min(Math.max(limit, 1), 50);
+        const checksum = ethers_1.ethers.getAddress(card);
+        if (!(await (0, couponDiscoverFilter_1.isCouponCardDiscoverVisible)(checksum))) {
+            return res.status(200).json({ cardAddress: checksum, limit, items: [] });
+        }
+        const cacheKey = `${checksum.toLowerCase()}:${limit}`;
+        const cached = cardActiveIssuedCouponSeriesCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const scanLimit = Math.min(400, Math.max(60, limit * 25));
+            const candidates = await (0, db_2.listCouponIssuedNftSeriesForCardDescending)(checksum, scanLimit);
+            const seenToken = new Set();
+            const ordered = [];
+            for (const row of candidates) {
+                if (seenToken.has(row.tokenId))
+                    continue;
+                seenToken.add(row.tokenId);
+                ordered.push(row);
+            }
+            const chain = await (0, beamioUserCardChain_1.resolveUserCardChain)(checksum);
+            const cardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(chain);
+            const cardContract = new ethers_1.ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, cardProvider);
+            const items = [];
+            for (const row of ordered) {
+                if (items.length >= limit)
+                    break;
+                if (!(0, couponMetadataCategory_1.metadataMatchesClientCouponCategoryFilter)(row.metadata))
+                    continue;
+                if (!(0, couponMetadataCategory_1.metadataMatchesListedClientCouponFilter)(row.metadata))
+                    continue;
+                let tid;
+                try {
+                    tid = BigInt(row.tokenId);
+                }
+                catch {
+                    continue;
+                }
+                if (tid < ISSUED_NFT_START_ID)
+                    continue;
+                let valid = false;
+                try {
+                    valid = await cardContract.isIssuedNftValid(tid);
+                }
+                catch {
+                    continue;
+                }
+                if (!valid)
+                    continue;
+                let maxSupply = null;
+                let mintedCount = null;
+                // Some cards may expose `isIssuedNftValid` but revert on optional
+                // series getters. Keep valid rows instead of dropping the icon.
+                try {
+                    const ms = await cardContract.issuedNftMaxSupply(tid);
+                    if (ms === 0n)
+                        continue;
+                    maxSupply = ms;
+                    try {
+                        mintedCount = await cardContract.issuedNftMintedCount(tid);
+                    }
+                    catch {
+                        mintedCount = null;
+                    }
+                }
+                catch {
+                    // treat maxSupply as unknown; keep row when `valid` is true
+                }
+                let va = 0n;
+                let vb = 0n;
+                try {
+                    va = await cardContract.issuedNftValidAfter(tid);
+                }
+                catch {
+                    va = 0n;
+                }
+                try {
+                    vb = await cardContract.issuedNftValidBefore(tid);
+                }
+                catch {
+                    vb = 0n;
+                }
+                const remainingSupply = maxSupply != null && mintedCount != null
+                    ? (maxSupply > mintedCount ? maxSupply - mintedCount : 0n)
+                    : null;
+                items.push({
+                    cardAddress: row.cardAddress,
+                    tokenId: row.tokenId,
+                    sharedMetadataHash: row.sharedMetadataHash,
+                    ipfsCid: row.ipfsCid,
+                    cardOwner: row.cardOwner,
+                    metadata: row.metadata,
+                    createdAt: row.createdAt,
+                    issuedNftValidAfter: String(va),
+                    issuedNftValidBefore: String(vb),
+                    ...(maxSupply != null ? { issuedNftMaxSupply: String(maxSupply) } : {}),
+                    ...(mintedCount != null ? { issuedNftMintedCount: String(mintedCount) } : {}),
+                    ...(remainingSupply != null ? { issuedNftRemainingSupply: String(remainingSupply) } : {}),
+                });
+            }
+            const body = JSON.stringify({ cardAddress: checksum, limit, items });
+            cardActiveIssuedCouponSeriesCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            res.status(200).json({ cardAddress: checksum, limit, items });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[cardActiveIssuedCouponSeries] error:'), err?.message ?? err);
+            return res.status(500).json({ error: err?.message ?? 'Failed to fetch active issued coupons for card' });
+        }
+    });
+    /** GET /api/cardActiveIssuedProductionSeries?card=0x&limit=20 — Program productions / services (category=productions). */
+    router.get('/cardActiveIssuedProductionSeries', async (req, res) => {
+        const { card } = req.query;
+        if (!card || !ethers_1.ethers.isAddress(card)) {
+            return res.status(400).json({ error: 'Invalid card address' });
+        }
+        let limit = Number(req.query.limit ?? 20);
+        if (!Number.isFinite(limit))
+            limit = 20;
+        limit = Math.floor(limit);
+        limit = Math.min(Math.max(limit, 1), 50);
+        const checksum = ethers_1.ethers.getAddress(card);
+        const cacheKey = `${checksum.toLowerCase()}:${limit}`;
+        const cached = cardActiveIssuedProductionSeriesCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const scanLimit = Math.min(400, Math.max(60, limit * 25));
+            const candidates = await (0, db_2.listProductionIssuedNftSeriesForCardDescending)(checksum, scanLimit);
+            const seenToken = new Set();
+            const ordered = [];
+            for (const row of candidates) {
+                if (seenToken.has(row.tokenId))
+                    continue;
+                seenToken.add(row.tokenId);
+                ordered.push(row);
+            }
+            const chain = await (0, beamioUserCardChain_1.resolveUserCardChain)(checksum);
+            const cardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(chain);
+            const cardContract = new ethers_1.ethers.Contract(checksum, BEAMIO_USER_CARD_ISSUED_NFT_ABI, cardProvider);
+            const items = [];
+            for (const row of ordered) {
+                if (items.length >= limit)
+                    break;
+                if (!(0, couponMetadataCategory_1.metadataMatchesClientProductionCategoryFilter)(row.metadata))
+                    continue;
+                let tid;
+                try {
+                    tid = BigInt(row.tokenId);
+                }
+                catch {
+                    continue;
+                }
+                if (tid < ISSUED_NFT_START_ID)
+                    continue;
+                let valid = false;
+                try {
+                    valid = await cardContract.isIssuedNftValid(tid);
+                }
+                catch {
+                    continue;
+                }
+                if (!valid)
+                    continue;
+                let maxSupply = null;
+                let mintedCount = null;
+                try {
+                    const ms = await cardContract.issuedNftMaxSupply(tid);
+                    if (ms === 0n)
+                        continue;
+                    maxSupply = ms;
+                    try {
+                        mintedCount = await cardContract.issuedNftMintedCount(tid);
+                    }
+                    catch {
+                        mintedCount = null;
+                    }
+                }
+                catch {
+                    /* keep valid rows */
+                }
+                let va = 0n;
+                let vb = 0n;
+                try {
+                    va = await cardContract.issuedNftValidAfter(tid);
+                }
+                catch {
+                    va = 0n;
+                }
+                try {
+                    vb = await cardContract.issuedNftValidBefore(tid);
+                }
+                catch {
+                    vb = 0n;
+                }
+                const remainingSupply = maxSupply != null && mintedCount != null
+                    ? (maxSupply > mintedCount ? maxSupply - mintedCount : 0n)
+                    : null;
+                items.push({
+                    cardAddress: row.cardAddress,
+                    tokenId: row.tokenId,
+                    sharedMetadataHash: row.sharedMetadataHash,
+                    ipfsCid: row.ipfsCid,
+                    cardOwner: row.cardOwner,
+                    metadata: row.metadata,
+                    createdAt: row.createdAt,
+                    issuedNftValidAfter: String(va),
+                    issuedNftValidBefore: String(vb),
+                    ...(maxSupply != null ? { issuedNftMaxSupply: String(maxSupply) } : {}),
+                    ...(mintedCount != null ? { issuedNftMintedCount: String(mintedCount) } : {}),
+                    ...(remainingSupply != null ? { issuedNftRemainingSupply: String(remainingSupply) } : {}),
+                });
+            }
+            const body = JSON.stringify({ cardAddress: checksum, limit, items });
+            cardActiveIssuedProductionSeriesCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            res.status(200).json({ cardAddress: checksum, limit, items });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[cardActiveIssuedProductionSeries] error:'), err?.message ?? err);
+            return res.status(500).json({ error: err?.message ?? 'Failed to fetch active issued productions for card' });
+        }
+    });
+    /** GET /api/seriesSharedMetadata?card=0x&tokenId=... - 返回该系列的 sharedSeriesMetadata（IPFS 或自定义 metadata）。30 秒缓存 */
+    router.get('/seriesSharedMetadata', async (req, res) => {
+        const { card, tokenId } = req.query;
+        if (!card || !ethers_1.ethers.isAddress(card) || !tokenId) {
+            return res.status(400).json({ error: 'Invalid card or tokenId' });
+        }
+        const cacheKey = `${ethers_1.ethers.getAddress(card).toLowerCase()}:${tokenId}`;
+        const cached = seriesSharedMetadataCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        const tid = BigInt(tokenId);
+        if (tid < ISSUED_NFT_START_ID) {
+            return res.status(400).json({ error: 'tokenId must be >= ISSUED_NFT_START_ID' });
+        }
+        try {
+            const series = await (0, db_2.getSeriesByCardAndTokenId)(card, tokenId);
+            if (!series) {
+                return res.status(404).json({ error: 'Series not registered' });
+            }
+            let sharedJson = null;
+            if (series.ipfsCid && series.ipfsCid.trim() !== '') {
+                const ipfsUrl = `https://ipfs.io/ipfs/${series.ipfsCid}`;
+                const ipfsRes = await fetch(ipfsUrl);
+                if (ipfsRes.ok) {
+                    const parsed = await ipfsRes.json();
+                    if (parsed && typeof parsed === 'object')
+                        sharedJson = parsed;
+                }
+            }
+            if (!sharedJson && series.metadata && typeof series.metadata === 'object') {
+                sharedJson = series.metadata;
+            }
+            const rawShared = (sharedJson ?? {});
+            const sharedWithImage = ensureMetadataImage({ ...rawShared });
+            const out = {
+                cardAddress: series.cardAddress,
+                tokenId: series.tokenId,
+                sharedMetadataHash: series.sharedMetadataHash,
+                ipfsCid: series.ipfsCid || null,
+                metadata: series.metadata ?? null,
+                sharedSeriesMetadata: sharedWithImage,
+            };
+            const body = JSON.stringify(out);
+            seriesSharedMetadataCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            res.status(200).json(out);
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[seriesSharedMetadata] error:'), err?.message ?? err);
+            return res.status(500).json({ error: err?.message ?? 'Failed to fetch shared metadata' });
+        }
+    });
+    /** registerSeries：cluster 预检格式，合格转发 master。
+     *  tokenId 必须来自合约 createIssuedNft 的返回值（合约自动递增，不可自定）。
+     *  sharedMetadata：支持 ipfsCid（从 IPFS 拉取）或 metadata 自定义 JSON（扩展用），至少提供一个。 */
+    router.post('/registerSeries', async (req, res) => {
+        const { cardAddress, tokenId, sharedMetadataHash, ipfsCid, metadata } = req.body;
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress) || !tokenId || !sharedMetadataHash) {
+            return res.status(400).json({ error: 'Missing cardAddress, tokenId, or sharedMetadataHash' });
+        }
+        const hasIpfs = ipfsCid != null && String(ipfsCid).trim() !== '';
+        const hasMetadata = metadata != null && typeof metadata === 'object';
+        if (!hasIpfs && !hasMetadata) {
+            return res.status(400).json({ error: 'Provide ipfsCid or metadata (custom JSON object) for shared metadata' });
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/registerSeries preCheck OK, forwarding to master`));
+        if (CLUSTER_COUPON_WORKFLOW_DEBUG) {
+            const md = metadata;
+            (0, logger_1.logger)(safe_1.default.magenta(`[couponWorkflow][Cluster] registerSeries card=${ethers_1.ethers.getAddress(cardAddress)} tokenId=${String(tokenId)} metadataKeys=${md != null ? Object.keys(md).join(',') : 'none'} ipfs=${hasIpfs}`));
+        }
+        const forwardBody = {
+            ...req.body,
+            ...(hasMetadata && metadata
+                ? {
+                    metadata: (0, couponMetadataCategory_1.seriesMetadataLooksLikeProduction)(metadata)
+                        ? (0, couponMetadataCategory_1.normalizeProductionSeriesMetadataJson)(metadata)
+                        : (0, couponMetadataCategory_1.normalizeCouponSeriesMetadataJson)(metadata),
+                }
+                : {}),
+        };
+        (0, exports.postLocalhost)('/api/registerSeries', forwardBody, res);
+    });
+    /** registerMintMetadata：cluster 预检格式，合格转发 master。tokenId 必须来自 createIssuedNft 返回值。metadata 为自定义 JSON（如座位、序列号等）。 */
+    router.post('/registerMintMetadata', async (req, res) => {
+        const { cardAddress, tokenId, ownerAddress, metadata } = req.body;
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress) || !tokenId || !ownerAddress || !ethers_1.ethers.isAddress(ownerAddress) || !metadata || typeof metadata !== 'object') {
+            return res.status(400).json({ error: 'Missing cardAddress, tokenId, ownerAddress, or metadata (object)' });
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/registerMintMetadata preCheck OK, forwarding to master'));
+        (0, exports.postLocalhost)('/api/registerMintMetadata', req.body, res);
+    });
+    /** GET /api/mintMetadata?card=0x&tokenId=...&owner=0x... - cluster 直接处理读请求。30 秒缓存 */
+    router.get('/mintMetadata', async (req, res) => {
+        const { card, tokenId, owner } = req.query;
+        if (!card || !ethers_1.ethers.isAddress(card) || !tokenId || !owner || !ethers_1.ethers.isAddress(owner)) {
+            return res.status(400).json({ error: 'Invalid card, tokenId, or owner' });
+        }
+        const cacheKey = `${ethers_1.ethers.getAddress(card).toLowerCase()}:${tokenId}:${ethers_1.ethers.getAddress(owner).toLowerCase()}`;
+        const cached = mintMetadataCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const items = await (0, db_2.getMintMetadataForOwner)(card, tokenId, owner);
+            const body = JSON.stringify({ items });
+            mintMetadataCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            res.status(200).json({ items });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[mintMetadata] error:'), err?.message ?? err);
+            return res.status(500).json({ error: err?.message ?? 'Failed to fetch mint metadata' });
+        }
+    });
+    /** GET /api/issuedNftClaimWallets?card=&tokenId=&page=&pageSize= — wallets that minted/claimed this issued NFT. */
+    router.get('/issuedNftClaimWallets', async (req, res) => {
+        const { card, tokenId, page, pageSize } = req.query;
+        if (!card || !ethers_1.ethers.isAddress(card) || !tokenId?.trim()) {
+            return res.status(400).json({ ok: false, error: 'Invalid card or tokenId' });
+        }
+        const pageN = Math.max(1, Math.floor(Number(page ?? 1) || 1));
+        const pageSizeN = Math.min(50, Math.max(1, Math.floor(Number(pageSize ?? 10) || 10)));
+        const cacheKey = `${ethers_1.ethers.getAddress(card).toLowerCase()}:${tokenId.trim()}:${pageN}:${pageSizeN}`;
+        const cached = issuedNftClaimWalletsCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const data = await (0, issuedNftClaimWallets_1.listIssuedNftClaimWallets)({
+                cardAddress: card,
+                tokenId: tokenId.trim(),
+                page: pageN,
+                pageSize: pageSizeN,
+            });
+            const body = JSON.stringify(data);
+            issuedNftClaimWalletsCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            res.status(200).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[issuedNftClaimWallets] error:'), err?.message ?? err);
+            return res.status(500).json({ ok: false, error: err?.message ?? 'Failed to list claim wallets' });
+        }
+    });
+    router.post('/addUser', async (req, res) => {
+        const { accountName, wallet, recover, image, isUSDCFaucet, darkTheme, isETHFaucet, firstName, lastName, pgpKeyID, pgpKey, signMessage } = req.body;
+        const trimmed = accountName?.trim().replace('@', '');
+        if (!trimmed || !/^[a-zA-Z0-9_\.]{3,26}$/.test(trimmed) || !ethers_1.ethers.isAddress(wallet) || wallet === ethers_1.ethers.ZeroAddress || !signMessage || signMessage?.trim() === '') {
+            return res.status(400).json({ error: "Invalid data format" });
+        }
+        const isValid = (0, util_1.checkSign)(wallet, signMessage, wallet);
+        if (!isValid) {
+            return res.status(400).json({ error: "Signature verification failed!" });
+        }
+        const ownship = await userOwnershipCheck(trimmed, wallet);
+        if (!ownship) {
+            return res.status(400).json({ error: "Wallet & accountName ownership Error!" });
+        }
+        const obj = {
+            accountName: trimmed,
+            wallet: wallet.toLowerCase(),
+            recover: recover || [],
+            image: image?.trim() || '',
+            isUSDCFaucet: typeof isUSDCFaucet === 'boolean' ? isUSDCFaucet : false,
+            darkTheme: typeof darkTheme === 'boolean' ? darkTheme : false,
+            isETHFaucet: typeof isETHFaucet === 'boolean' ? isETHFaucet : false,
+            firstName: firstName?.trim() || '',
+            lastName: lastName?.trim() || '',
+            pgpKeyID: typeof pgpKeyID === 'string' ? pgpKeyID.trim() : '',
+            pgpKey: typeof pgpKey === 'string' ? pgpKey.trim() : ''
+        };
+        (0, exports.postLocalhost)('/api/addUser', obj, res);
+    });
+    router.post('/addFollow', async (req, res) => {
+        const { wallet, signMessage, followAddress } = req.body;
+        if (!ethers_1.ethers.isAddress(wallet) || wallet === ethers_1.ethers.ZeroAddress || !signMessage || signMessage?.trim() === '' || !ethers_1.ethers.isAddress(followAddress) || followAddress === ethers_1.ethers.ZeroAddress) {
+            return res.status(400).json({ error: "Invalid data format" });
+        }
+        const isValid = (0, util_1.checkSign)(wallet, signMessage, wallet);
+        if (!isValid || isValid === followAddress.toLowerCase()) {
+            return res.status(400).json({ error: "Signature verification failed!" });
+        }
+        const followCheck = await getFollowCheck(wallet, followAddress);
+        if (followCheck === null) {
+            return res.status(400).json({ error: "Follow check Error!" });
+        }
+        if (followCheck) {
+            return res.status(200).json({ message: "Already following!" }).end();
+        }
+        const obj = {
+            wallet: wallet.toLowerCase(),
+            followAddress: followAddress.toLowerCase()
+        };
+        (0, exports.postLocalhost)('/api/addFollow', obj, res);
+    });
+    /** GET /api/getFollowStatus?wallet=0x&followAddress=0x... 30 秒缓存 */
+    router.get('/getFollowStatus', async (req, res) => {
+        const { wallet, followAddress } = req.query;
+        if (!ethers_1.ethers.isAddress(wallet) || wallet === ethers_1.ethers.ZeroAddress || !ethers_1.ethers.isAddress(followAddress) || followAddress === ethers_1.ethers.ZeroAddress) {
+            return res.status(400).json({ error: "Invalid data format" });
+        }
+        const cacheKey = `${ethers_1.ethers.getAddress(wallet).toLowerCase()}:${ethers_1.ethers.getAddress(followAddress).toLowerCase()}`;
+        const cached = getFollowStatusCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        const followStatus = await (0, db_2.FollowerStatus)(wallet, followAddress);
+        if (followStatus === null) {
+            return res.status(400).json({ error: "Follow status check Error!" });
+        }
+        const body = JSON.stringify(followStatus);
+        getFollowStatusCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+        return res.status(200).json(followStatus).end();
+    });
+    router.get('/coinbase-token', (req, res) => {
+        return (0, coinbase_1.coinbaseToken)(req, res);
+    });
+    router.get('/coinbase-offramp', (req, res) => {
+        return (0, coinbase_1.coinbaseOfframp)(req, res);
+    });
+    router.post('/removeFollow', async (req, res) => {
+        const { wallet, signMessage, followAddress } = req.body;
+        if (!ethers_1.ethers.isAddress(wallet) || wallet === ethers_1.ethers.ZeroAddress || !signMessage || signMessage?.trim() === '' || !ethers_1.ethers.isAddress(followAddress) || followAddress === ethers_1.ethers.ZeroAddress) {
+            return res.status(400).json({ error: "Invalid data format" });
+        }
+        const isValid = (0, util_1.checkSign)(wallet, signMessage, wallet);
+        if (!isValid || isValid === followAddress.toLowerCase()) {
+            return res.status(400).json({ error: "Signature verification failed!" });
+        }
+        const followCheck = await getFollowCheck(wallet, followAddress);
+        if (followCheck === null) {
+            return res.status(400).json({ error: "Follow check Error!" });
+        }
+        if (!followCheck) {
+            return res.status(200).json({ message: "Have not following!" }).end();
+        }
+        const obj = {
+            wallet: wallet.toLowerCase(),
+            followAddress: followAddress.toLowerCase()
+        };
+        (0, exports.postLocalhost)('/api/removeFollow', obj, res);
+    });
+    router.get('/debug/ip', (req, res) => {
+        console.log('CF-Connecting-IP:', req.headers['cf-connecting-ip']);
+        console.log('X-Real-IP:', req.headers['x-real-ip']);
+        console.log('X-Forwarded-For:', req.headers['x-forwarded-for']);
+        console.log('Remote Address:', req.socket.remoteAddress);
+        res.json({
+            realIp: (0, util_1.getClientIp)(req),
+            headers: {
+                'x-real-ip': req.headers['x-real-ip'],
+                'cf-connecting-ip': req.headers['cf-connecting-ip'],
+                'x-forwarded-for': req.headers['x-forwarded-for'],
+                'Remote Address:': req.socket.remoteAddress
+            },
+        });
+    });
+    /** Cluster 直接返回本地缓存的 oracle（每 1 分钟从 master 更新），不再读链 */
+    router.get('/getOracle', (_req, res) => {
+        res.status(200).json(clusterOracleCache).end();
+    });
+    /** GET /api/BeamioTransfer - x402 EOA 转账。Cluster 直接处理（含预检 currency/currencyAmount 必填），不转发 master */
+    router.get('/BeamioTransfer', (req, res) => (0, util_1.BeamioTransfer)(req, res));
+    router.post('/purchasingCard', async (req, res) => {
+        const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, recommender } = req.body;
+        if (!cardAddress || !userSignature || !nonce || !usdcAmount || !from || !validBefore) {
+            (0, logger_1.logger)(`server /api/purchasingCard Invalid data format!`, (0, node_util_1.inspect)(req.body, false, 3, true));
+            return res.status(400).json({ error: "Invalid data format" });
+        }
+        const recommenderCheck = await (0, MemberCard_1.validateRecommenderForTopup)(cardAddress, recommender);
+        if (!recommenderCheck.ok) {
+            return res.status(400).json({ success: false, error: recommenderCheck.error }).end();
+        }
+        const ret = await (0, MemberCard_1.purchasingCard)(cardAddress, userSignature, nonce, usdcAmount, from, validAfter || '0', validBefore);
+        if (!ret || !ret.success) {
+            (0, logger_1.logger)(`server /api/purchasingCard failed!`, (0, node_util_1.inspect)(ret, false, 3, true));
+            return res.status(400).json(ret).end();
+        }
+        // 集群侧数据预检：链上只读校验，通过后把 preChecked 带给 master。若预检失败（如 Oracle 未配置）则回退：不带 preChecked 转发，由 master 自行校验
+        const preCheck = await (0, MemberCard_1.purchasingCardPreCheck)(cardAddress, usdcAmount, from);
+        const isOracleOrQuoteError = preCheck.success ? false : /unitPriceUSDC6|oracle not configured|quotePointsForUSDC|QuoteHelper/i.test(preCheck.error);
+        if (!preCheck.success) {
+            if (isOracleOrQuoteError) {
+                (0, logger_1.logger)(safe_1.default.yellow(`server /api/purchasingCard preCheck skipped (oracle/quote): ${preCheck.error} -> forward to master without preChecked`));
+                // 集群链上 Oracle/报价未配置时，仍转发给 master，master 用自身配置完成校验与发交易
+            }
+            else {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/purchasingCard preCheck FAIL: ${preCheck.error}`));
+                return res.status(400).json({ success: false, error: preCheck.error }).end();
+            }
+        }
+        (0, exports.postLocalhost)('/api/purchasingCard', {
+            cardAddress,
+            userSignature,
+            nonce,
+            usdcAmount,
+            from,
+            validAfter,
+            validBefore,
+            ...(preCheck.success && preCheck.preChecked && { preChecked: preCheck.preChecked }),
+            ...(recommender != null && recommender !== '' && { recommender })
+        }, res);
+        (0, logger_1.logger)(preCheck.success ? `server /api/purchasingCard preCheck OK, forwarded to master` : `server /api/purchasingCard forwarded to master (no preChecked)`, (0, node_util_1.inspect)({ cardAddress, from, usdcAmount, hasPreChecked: !!preCheck.success }, false, 3, true));
+    });
+    /** USDC Topup：Cluster 完整预检后转发 Master。CoNET 卡走 conet-USDC EIP-3009 + mintPointsByAdmin；Base 卡仍 buyPointsForUser。 */
+    router.post('/usdcTopup', async (req, res) => {
+        const { cardAddress, userSignature, nonce, usdcAmount, from, validAfter, validBefore, intent, recommender } = req.body;
+        if (!cardAddress || !userSignature || !nonce || !usdcAmount || !from || !validBefore) {
+            return res.status(400).json({ success: false, error: 'Invalid data format' }).end();
+        }
+        const recommenderCheck = await (0, MemberCard_1.validateRecommenderForTopup)(cardAddress, recommender);
+        if (!recommenderCheck.ok) {
+            return res.status(400).json({ success: false, error: recommenderCheck.error }).end();
+        }
+        const shapeCheck = await (0, MemberCard_1.purchasingCard)(cardAddress, userSignature, nonce, usdcAmount, from, validAfter || '0', validBefore);
+        if (!shapeCheck || !shapeCheck.success) {
+            return res.status(400).json(shapeCheck).end();
+        }
+        const preCheck = await (0, MemberCard_1.usdcTopupPreCheck)(cardAddress, usdcAmount, from, 'auto');
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/usdcTopup preCheck FAIL: ${preCheck.error}`));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/usdcTopup preCheck OK intent=${preCheck.ruleCheck.intent}, forwarding to master`), (0, node_util_1.inspect)({
+            cardAddress,
+            from,
+            usdcAmount,
+            requiredMinUsdc6: preCheck.ruleCheck.requiredMinUsdc6,
+            hasMembership: preCheck.ruleCheck.hasMembership,
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/usdcTopup', {
+            cardAddress,
+            userSignature,
+            nonce,
+            usdcAmount,
+            from,
+            validAfter,
+            validBefore,
+            intent: preCheck.ruleCheck.intent,
+            preChecked: preCheck.preChecked,
+            ...(recommender != null && recommender !== '' && { recommender })
+        }, res);
+    });
+    /** USDC Topup 预览（只读）：签名前返回首购/升级最低要求与下一档信息。 */
+    router.post('/usdcTopupPreview', async (req, res) => {
+        const { cardAddress, from, intent, usdcAmount } = req.body;
+        if (!cardAddress || !from) {
+            return res.status(400).json({ success: false, error: 'cardAddress and from are required' }).end();
+        }
+        const preview = await (0, MemberCard_1.usdcTopupPreview)(cardAddress, from, 'auto', usdcAmount);
+        if (!preview.success) {
+            return res.status(400).json({ success: false, error: preview.error }).end();
+        }
+        return res.status(200).json(preview).end();
+    });
+    /** createCard：集群预检 JSON + AA→EOA 替换，不合格 400，合格转发 master。master 不预检，直接推 createCardPool。*/
+    router.post('/createCard', async (req, res) => {
+        const body = req.body;
+        const preCheck = (0, MemberCard_1.createCardPreCheck)(body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/createCard preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        const originalCardOwner = preCheck.preChecked.cardOwner;
+        const resolveResult = await (0, MemberCard_1.resolveCardOwnerToEOA)(providerBase, originalCardOwner);
+        if (!resolveResult.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/createCard AA→EOA resolve FAIL: ${resolveResult.error}`));
+            return res.status(400).json({ success: false, error: resolveResult.error }).end();
+        }
+        const ketGate = await (0, MemberCard_1.createCardBusinessStartKetClusterPreCheck)(originalCardOwner, resolveResult.cardOwner);
+        if (!ketGate.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/createCard BusinessStartKet preCheck FAIL: ${ketGate.error}`), (0, node_util_1.inspect)(body, false, 2, true));
+            return res.status(400).json({ success: false, error: ketGate.error }).end();
+        }
+        preCheck.preChecked.cardOwner = resolveResult.cardOwner;
+        preCheck.preChecked.createCardOwnerAsRequested = ethers_1.ethers.getAddress(originalCardOwner);
+        if (ketGate.burnFrom) {
+            preCheck.preChecked.businessStartKetBurnFrom = ethers_1.ethers.getAddress(ketGate.burnFrom);
+        }
+        if (ethers_1.ethers.getAddress(resolveResult.cardOwner) !== ethers_1.ethers.getAddress(originalCardOwner)) {
+            (0, logger_1.logger)(safe_1.default.cyan(`server /api/createCard cardOwner was AA, replaced with EOA: ${resolveResult.cardOwner}`));
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/createCard preCheck OK, forwarding to master`), (0, node_util_1.inspect)({ cardOwner: preCheck.preChecked.cardOwner, currency: preCheck.preChecked.currency }, false, 2, true));
+        (0, exports.postLocalhost)('/api/createCard', preCheck.preChecked, res);
+    });
+    router.get('/longDhangMigrationConfig', (_req, res) => {
+        const frozenHolders = (0, longDhangConetMigration_1.isLongDhangFrozenSnapshotEnabled)()
+            ? longDhangConetMigration_1.LONGDHANG_FROZEN_HOLDERS.map((h) => ({
+                eoa: ethers_1.ethers.getAddress(h.eoa),
+                oldBaseAA: ethers_1.ethers.getAddress(h.oldBaseAA),
+                balanceE6: String(h.balanceE6),
+            }))
+            : [];
+        return res.status(200).json({
+            success: true,
+            version: longDhangConetMigration_1.LONGDHANG_MIGRATION_VERSION,
+            frozenSnapshot: (0, longDhangConetMigration_1.isLongDhangFrozenSnapshotEnabled)(),
+            frozenMemberCount: longDhangConetMigration_1.LONGDHANG_FROZEN_HOLDERS.length,
+            frozenTerminalCount: longDhangConetMigration_1.LONGDHANG_FROZEN_TERMINALS.length,
+            frozenHolders,
+            oldBaseCard: longDhangConetMigration_1.LONGDHANG_OLD_BASE_CARD,
+            oldBaseCardOwner: longDhangConetMigration_1.LONGDHANG_OLD_CARD_OWNER,
+            authorizedOwnerEoa: [...longDhangConetMigration_1.LONGDHANG_MIGRATION_AUTHORIZED_OWNER_EOAS],
+            migrationAdmin: (0, longDhangConetMigration_1.getLongDhangMigrationAdminAddress)(),
+            baseFromBlockDefault: longDhangConetMigration_1.LONGDHANG_OLD_BASE_CARD_DEPLOY_BLOCK,
+        }).end();
+    });
+    router.post('/longDhangMigrationPreview', async (req, res) => {
+        try {
+            const force = Boolean(req.body?.force);
+            const snapshot = await (0, longDhangConetMigration_1.previewLongDhangConetMigrationSnapshot)({ force });
+            return res.status(200).json({ success: true, snapshot }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[longDhangMigrationPreview] failed: ${e?.message ?? e}`));
+            return res.status(500).json({ success: false, error: e?.message ?? 'Snapshot preview failed.' }).end();
+        }
+    });
+    router.post('/longDhangMigrationCreateCard', async (req, res) => {
+        const body = req.body;
+        if (!body.ownerEoa || !body.snapshotHash || !body.ownerSignature) {
+            return res.status(400).json({ success: false, error: 'Missing ownerEoa, snapshotHash, or ownerSignature.' }).end();
+        }
+        const verified = (0, longDhangConetMigration_1.verifyLongDhangOwnerAuthorization)({
+            action: 'create-card',
+            ownerEoa: body.ownerEoa,
+            snapshotHash: body.snapshotHash,
+            signature: body.ownerSignature,
+        });
+        if (!verified.ok) {
+            return res.status(403).json({ success: false, error: verified.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/longDhangMigrationCreateCard', {
+            ownerEoa: ethers_1.ethers.getAddress(body.ownerEoa),
+            snapshotHash: body.snapshotHash,
+            ownerSignature: body.ownerSignature,
+        }, res);
+    });
+    router.post('/longDhangMigrationRun', async (req, res) => {
+        const body = req.body;
+        if (!body.newCardAddress || !ethers_1.ethers.isAddress(body.newCardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid newCardAddress.' }).end();
+        }
+        if (!body.ownerEoa || !body.snapshotHash || !body.ownerSignature) {
+            return res.status(400).json({ success: false, error: 'Missing ownerEoa, snapshotHash, or ownerSignature.' }).end();
+        }
+        const verified = (0, longDhangConetMigration_1.verifyLongDhangOwnerAuthorization)({
+            action: 'run-migration',
+            ownerEoa: body.ownerEoa,
+            snapshotHash: body.snapshotHash,
+            signature: body.ownerSignature,
+            newCardAddress: body.newCardAddress,
+        });
+        if (!verified.ok) {
+            return res.status(403).json({ success: false, error: verified.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/longDhangMigrationRun', {
+            newCardAddress: ethers_1.ethers.getAddress(body.newCardAddress),
+            ownerEoa: ethers_1.ethers.getAddress(body.ownerEoa),
+            snapshotHash: body.snapshotHash,
+            ownerSignature: body.ownerSignature,
+            limit: Number.isFinite(Number(body.limit)) ? Math.max(1, Math.floor(Number(body.limit))) : undefined,
+        }, res);
+    });
+    router.post('/longDhangMigrationVerify', async (req, res) => {
+        const body = req.body;
+        if (!body.newCardAddress || !ethers_1.ethers.isAddress(body.newCardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid newCardAddress.' }).end();
+        }
+        try {
+            const result = await (0, longDhangConetMigration_1.verifyLongDhangConetMigration)(body.newCardAddress);
+            return res.status(200).json(result).end();
+        }
+        catch (e) {
+            return res.status(500).json({ success: false, error: e?.message ?? 'Migration verification failed.' }).end();
+        }
+    });
+    router.post('/longDhangMigrationExecuteAuto', async (req, res) => {
+        const body = req.body;
+        if (!body.ownerEoa || !body.snapshotHash || !body.ownerSignature) {
+            return res.status(400).json({ success: false, error: 'Missing ownerEoa, snapshotHash, or ownerSignature.' }).end();
+        }
+        const verified = (0, longDhangConetMigration_1.verifyLongDhangOwnerAuthorization)({
+            action: 'start-migration',
+            ownerEoa: body.ownerEoa,
+            snapshotHash: body.snapshotHash,
+            signature: body.ownerSignature,
+            newCardAddress: body.existingNewCardAddress,
+        });
+        if (!verified.ok) {
+            return res.status(403).json({ success: false, error: verified.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/longDhangMigrationExecuteAuto', {
+            ownerEoa: ethers_1.ethers.getAddress(body.ownerEoa),
+            snapshotHash: body.snapshotHash,
+            ownerSignature: body.ownerSignature,
+            ...(body.existingNewCardAddress && ethers_1.ethers.isAddress(body.existingNewCardAddress)
+                ? { existingNewCardAddress: ethers_1.ethers.getAddress(body.existingNewCardAddress) }
+                : {}),
+        }, res);
+    });
+    router.post('/longDhangMigrationRepairTerminals', async (req, res) => {
+        const body = req.body;
+        if (!body.newCardAddress || !ethers_1.ethers.isAddress(body.newCardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid newCardAddress.' }).end();
+        }
+        if (!body.ownerEoa || !body.snapshotHash || !body.ownerSignature) {
+            return res.status(400).json({ success: false, error: 'Missing ownerEoa, snapshotHash, or ownerSignature.' }).end();
+        }
+        const verified = (0, longDhangConetMigration_1.verifyLongDhangOwnerAuthorization)({
+            action: 'repair-terminals',
+            ownerEoa: body.ownerEoa,
+            snapshotHash: body.snapshotHash,
+            signature: body.ownerSignature,
+            newCardAddress: body.newCardAddress,
+        });
+        if (!verified.ok) {
+            return res.status(403).json({ success: false, error: verified.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/longDhangMigrationRepairTerminals', {
+            newCardAddress: ethers_1.ethers.getAddress(body.newCardAddress),
+            ownerEoa: ethers_1.ethers.getAddress(body.ownerEoa),
+            snapshotHash: body.snapshotHash,
+        }, res);
+    });
+    /** cardCreateRedeem：集群预检，合格转发 master。master 使用 executeForOwnerPool + Settle_ContractPool 排队处理。默认 createRedeemBatch（多 hash array）*/
+    router.post('/cardCreateRedeem', async (req, res) => {
+        const rawBody = req.body;
+        const preCheck = await (0, MemberCard_1.cardCreateRedeemPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCreateRedeem preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(sanitizeCardCreateRedeemWorkflowBody(rawBody), false, 3, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCreateRedeem preCheck OK, forwarding to master`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        if (CLUSTER_COUPON_WORKFLOW_DEBUG) {
+            (0, logger_1.logger)(safe_1.default.magenta(`[couponWorkflow][Cluster] cardCreateRedeem → Master`), (0, node_util_1.inspect)(sanitizeCardCreateRedeemWorkflowBody({ ...rawBody, data: preCheck.preChecked.data }), false, 3, true));
+        }
+        (0, exports.postLocalhost)('/api/cardCreateRedeem', preCheck.preChecked, res);
+    });
+    /** cardCreateRedeemAdmin：owner 离线签字创建 redeem-admin，Cluster 预检 data 为 createRedeemAdmin，合格转发 master executeForOwner */
+    router.post('/cardCreateRedeemAdmin', async (req, res) => {
+        const preCheck = await (0, MemberCard_1.cardCreateRedeemAdminPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCreateRedeemAdmin preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCreateRedeemAdmin preCheck OK, forwarding to master executeForOwner`), (0, node_util_1.inspect)({ cardAddress: req.body?.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForOwner', req.body, res);
+    });
+    /** cardAddAdmin：owner 管理 admin（添加/移除）。添加时 body.adminEOA 须与 calldata adminManager.to 同为商户 EOA；admin 本身是 EOA，不在此路径创建 AA。移除时无需 adminEOA。 */
+    router.post('/cardAddAdmin', async (req, res) => {
+        const data = req.body?.data;
+        let isAddingAdmin = false;
+        if (data && typeof data === 'string' && data.length >= 10) {
+            const sel = data.slice(0, 10).toLowerCase();
+            const iface4 = new ethers_1.ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)']);
+            const iface5 = new ethers_1.ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)']);
+            const is5 = sel === (iface5.getFunction('adminManager')?.selector ?? '').toLowerCase();
+            try {
+                const decoded = (is5 ? iface5 : iface4).parseTransaction({ data });
+                if (decoded?.name === 'adminManager')
+                    isAddingAdmin = decoded.args[1] === true;
+            }
+            catch (_) { /* ignore */ }
+        }
+        const preCheck = await (0, MemberCard_1.cardAddAdminPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardAddAdmin preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        // Debug: 一行打印：签字钱包、卡地址、想登记的admin的EOA/AA、离线签字指定的登记地址
+        try {
+            const { cardAddress, data, deadline, nonce, ownerSignature } = req.body;
+            let signerAddr = null;
+            /** adminManager(to=...) 的 to；预检要求为 EOA，与 body.adminEOA 同址 */
+            let calldataTo = null;
+            /** 若 calldata to 曾为合约，则 owner(to)；正常 EOA 路径下多为 N/A */
+            let ownerOfCalldataToIfContract = null;
+            if (cardAddress && data && deadline != null && nonce && ownerSignature) {
+                const vc = await (0, MemberCard_1.getBeamioUserCardFactoryGateway)(ethers_1.ethers.getAddress(String(cardAddress)));
+                const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: BASE_CHAIN_ID, verifyingContract: vc };
+                const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] };
+                const dataHash = ethers_1.ethers.keccak256(data);
+                const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers_1.ethers.keccak256(ethers_1.ethers.toUtf8Bytes(nonce)));
+                const value = { cardAddress: ethers_1.ethers.getAddress(cardAddress), dataHash, deadline: Number(deadline), nonce: nonceBytes };
+                signerAddr = ethers_1.ethers.recoverAddress(ethers_1.ethers.TypedDataEncoder.hash(domain, types, value), ownerSignature);
+            }
+            if (data && typeof data === 'string' && data.length >= 10) {
+                const iface4 = new ethers_1.ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)']);
+                const iface5 = new ethers_1.ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)']);
+                const iface = data.slice(0, 10).toLowerCase() === (iface5.getFunction('adminManager')?.selector ?? '').toLowerCase() ? iface5 : iface4;
+                const decoded = iface.parseTransaction({ data });
+                if (decoded?.name === 'adminManager' && decoded.args[0]) {
+                    calldataTo = ethers_1.ethers.getAddress(String(decoded.args[0]));
+                    try {
+                        const ownerResult = await providerBase.call({ to: calldataTo, data: '0x8da5cb5b' });
+                        if (ownerResult && ownerResult !== '0x') {
+                            const [owner] = new ethers_1.ethers.Interface(['function owner() view returns (address)']).decodeFunctionResult('owner', ownerResult);
+                            if (owner && owner !== ethers_1.ethers.ZeroAddress)
+                                ownerOfCalldataToIfContract = ethers_1.ethers.getAddress(String(owner));
+                        }
+                    }
+                    catch (_) { /* ignore */ }
+                }
+            }
+            let canonicalAAForSignerEOA = null;
+            let canonicalAAForBodyAdminEOA = null;
+            const bodyAdminRaw = req.body?.adminEOA?.trim();
+            const bodyAdminEOA = bodyAdminRaw && ethers_1.ethers.isAddress(bodyAdminRaw) ? ethers_1.ethers.getAddress(bodyAdminRaw) : null;
+            if (signerAddr && ethers_1.ethers.isAddress(signerAddr)) {
+                try {
+                    canonicalAAForSignerEOA = await (0, resolveBeamioAaViaUserCardFactory_1.resolveBeamioAaForEoaWithFallback)(providerBase, signerAddr);
+                }
+                catch (_) { /* ignore */ }
+            }
+            if (isAddingAdmin && bodyAdminEOA) {
+                try {
+                    canonicalAAForBodyAdminEOA = await (0, resolveBeamioAaViaUserCardFactory_1.resolveBeamioAaForEoaWithFallback)(providerBase, bodyAdminEOA);
+                }
+                catch (_) { /* ignore */ }
+            }
+            const fmtAa = (a) => (a && ethers_1.ethers.isAddress(a) ? a : 'N/A');
+            (0, logger_1.logger)(safe_1.default.cyan(`[cardAddAdmin] signer=${signerAddr ?? 'N/A'} cardAddress=${cardAddress ?? 'N/A'} bodyAdminEOA=${bodyAdminEOA ?? 'N/A'} ` +
+                `calldataTo=${calldataTo ?? 'N/A'} ownerOfCalldataTo(ifContract)=${ownerOfCalldataToIfContract ?? 'N/A'} ` +
+                `canonicalAAForSignerEOA=${fmtAa(canonicalAAForSignerEOA)} canonicalAAForBodyAdminEOA=${fmtAa(canonicalAAForBodyAdminEOA)} ` +
+                `(on-card admin identity is EOA=calldataTo; AA is for Beamio spend paths)`));
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.yellow(`[cardAddAdmin] debug log failed: ${e?.message ?? e}`));
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardAddAdmin preCheck OK, forwarding to master executeForOwner`), (0, node_util_1.inspect)({ cardAddress: req.body?.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForOwner', req.body, res);
+    });
+    /** cardAddAdminByAdmin：admin 为自己下层登记 admin。添加时：仅允许 EOA，body 必须含 adminEOA；不在此路径创建 AA。移除时无需 adminEOA。 */
+    router.post('/cardAddAdminByAdmin', async (req, res) => {
+        const data = req.body?.data;
+        let isAddingAdmin = false;
+        if (data && typeof data === 'string' && data.length >= 10) {
+            const sel = data.slice(0, 10).toLowerCase();
+            const iface4 = new ethers_1.ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)']);
+            const iface5 = new ethers_1.ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)']);
+            const is5 = sel === (iface5.getFunction('adminManager')?.selector ?? '').toLowerCase();
+            try {
+                const decoded = (is5 ? iface5 : iface4).parseTransaction({ data });
+                if (decoded?.name === 'adminManager')
+                    isAddingAdmin = decoded.args[1] === true;
+            }
+            catch (_) { /* ignore */ }
+        }
+        const preCheck = await (0, MemberCard_1.cardAddAdminByAdminPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardAddAdminByAdmin preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardAddAdminByAdmin preCheck OK, forwarding to master executeForAdmin`), (0, node_util_1.inspect)({ cardAddress: req.body?.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForAdmin', req.body, res);
+    });
+    /** GET /api/cardAdmins：查询 card 的 admin 列表，连同 metadata、parent、mintCounter 一起回送 */
+    router.get('/cardAdmins', async (req, res) => {
+        const cardAddress = req.query?.cardAddress?.trim();
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress query' }).end();
+        }
+        const result = await (0, MemberCard_1.getCardAdminsWithMintCounter)(cardAddress);
+        if (!result.success) {
+            return res.status(400).json(result).end();
+        }
+        return res.status(200).json({ success: true, admins: result.admins }).end();
+    });
+    /** cardClearAdminMintCounter：parent admin 签字清零 subordinate 的 mint 计数。Cluster 预检 signer==adminParent(subordinate)，合格转发 master */
+    router.post('/cardClearAdminMintCounter', async (req, res) => {
+        const preCheck = await (0, MemberCard_1.cardClearAdminMintCounterPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardClearAdminMintCounter preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardClearAdminMintCounter preCheck OK, forwarding to master`), (0, node_util_1.inspect)({ cardAddress: req.body?.cardAddress, subordinate: req.body?.subordinate }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardClearAdminMintCounter', req.body, res);
+    });
+    /** cardTerminalSettlementClear：parent admin 签 TerminalSettlementClear；仅 indexer 标点，不与 Reset Terminal Limit（mint）混用。Cluster 预检后转发 Master */
+    router.post('/cardTerminalSettlementClear', async (req, res) => {
+        const preCheck = await (0, MemberCard_1.cardTerminalSettlementClearPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardTerminalSettlementClear preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardTerminalSettlementClear preCheck OK, forwarding to master`), (0, node_util_1.inspect)({ cardAddress: req.body?.cardAddress, subordinate: req.body?.subordinate }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardTerminalSettlementClear', req.body, res);
+    });
+    /** cardCreateIssuedNft：owner 定义新发行 NFT 类型。Cluster 预检含 createIssuedNft 合法性 + 卡主（owner）至少 100 B-Unit；Master EntryPoint 确认后返回，B-Unit 扣款与 indexer 后台执行。 */
+    router.post('/cardCreateIssuedNft', async (req, res) => {
+        const rawBody = req.body;
+        const preCheck = await (0, MemberCard_1.cardCreateIssuedNftPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCreateIssuedNft preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(sanitizeExecuteForOwnerCouponWorkflowBody(rawBody), false, 3, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCreateIssuedNft preCheck OK, forwarding to master executeForOwner`), (0, node_util_1.inspect)({ cardAddress: req.body?.cardAddress }, false, 2, true));
+        if (CLUSTER_COUPON_WORKFLOW_DEBUG) {
+            (0, logger_1.logger)(safe_1.default.magenta(`[couponWorkflow][Cluster] cardCreateIssuedNft → executeForOwner`), (0, node_util_1.inspect)(sanitizeExecuteForOwnerCouponWorkflowBody(rawBody), false, 3, true));
+        }
+        const forwardBody = {
+            ...rawBody,
+            ...(rawBody.metadata_extra_properties != null
+                ? {
+                    metadata_extra_properties: (0, couponMetadataCategory_1.normalizeIssuedNftMetadataExtraProperties)(rawBody.metadata_extra_properties),
+                }
+                : {}),
+        };
+        (0, exports.postLocalhost)('/api/executeForOwner', forwardBody, res);
+    });
+    /** GET /api/cardUserCumulativeStatStatus?cardAddress=0x… — 读卡级累计统计 token 是否已 initialize（Cluster 直读链）。 */
+    router.get('/cardUserCumulativeStatStatus', async (req, res) => {
+        const cardAddress = String(req.query?.cardAddress ?? '').trim();
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' }).end();
+        }
+        try {
+            const status = await (0, userCumulativeStatRewardPool_1.readCardUserCumulativeStatStatus)(ethers_1.ethers.getAddress(cardAddress));
+            return res.status(200).json({ success: true, ...status }).end();
+        }
+        catch (e) {
+            const err = e;
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardUserCumulativeStatStatus FAIL: ${err?.message ?? e}`));
+            return res.status(400).json({ success: false, error: err?.message ?? String(e) }).end();
+        }
+    });
+    /** cardInitializeUserCumulativeStat：卡主 executeForOwner → initializeCardUserCumulativeStatTokens（每张卡一次，幂等）。 */
+    router.post('/cardInitializeUserCumulativeStat', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardInitializeUserCumulativeStatPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardInitializeUserCumulativeStat preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardInitializeUserCumulativeStat preCheck OK → executeForOwner`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForOwner', preCheck.preChecked, res);
+    });
+    /** cardBootstrapIssuedNftV2Stat：旧 issued 系列补建 V2 per-coupon stat tokens。 */
+    router.post('/cardBootstrapIssuedNftV2Stat', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardBootstrapIssuedNftV2StatPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardBootstrapIssuedNftV2Stat preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardBootstrapIssuedNftV2Stat preCheck OK → executeForOwner`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForOwner', preCheck.preChecked, res);
+    });
+    /** cardConfigureEventRewardRule：owner 配置 #13 奖励规则（ChargeReward V2）。 */
+    router.post('/cardConfigureEventRewardRule', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardConfigureEventRewardRulePreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardConfigureEventRewardRule preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardConfigureEventRewardRule preCheck OK → executeForOwner`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForOwner', preCheck.preChecked, res);
+    });
+    /** cardConfigureEventRewardRulesBatch：owner 一次签名批量配置 #13 奖励规则。 */
+    router.post('/cardConfigureEventRewardRulesBatch', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardConfigureEventRewardRulesBatchPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardConfigureEventRewardRulesBatch preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardConfigureEventRewardRulesBatch preCheck OK → executeForOwner`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress, ruleCount: req.body?.rules?.length }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForOwner', preCheck.preChecked, res);
+    });
+    /** Gateway-only：批量 configureEventRewardRule（单 tx batch 或 extraCardCallData 回退）。 */
+    router.post('/cardConfigureEventRewardRulesBatchGateway', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardConfigureEventRewardRulesBatchGatewayPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardConfigureEventRewardRulesBatchGateway preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardConfigureEventRewardRulesBatchGateway preCheck OK → cardGatewayRewardPool`), (0, node_util_1.inspect)({
+            cardAddress: preCheck.preChecked.cardAddress,
+            ruleCount: req.body?.rules?.length,
+            extraSteps: preCheck.preChecked.extraCardCallData?.length ?? 0,
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'configureEventRewardRulesBatch' }, res);
+    });
+    /** Gateway-only：configureEventRewardRule（Social Promotion 保存；与 link click 发奖同 gateway 队列，无需 owner/admin 签名）。 */
+    router.post('/cardConfigureEventRewardRuleGateway', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardConfigureEventRewardRuleGatewayPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardConfigureEventRewardRuleGateway preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardConfigureEventRewardRuleGateway preCheck OK → cardGatewayRewardPool`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress, ruleId: req.body?.ruleId }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'configureEventRewardRule' }, res);
+    });
+    /** Gateway-only：purchaseRewardProgram（Master gatewayInvokeCard 队列）。 */
+    router.post('/cardPurchaseRewardProgram', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardPurchaseRewardProgramPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardPurchaseRewardProgram preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardPurchaseRewardProgram preCheck OK → cardGatewayRewardPool`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'purchaseRewardProgram' }, res);
+    });
+    /** cardFundSocialExchangeUsdcEscrow：商户 owner 向 card escrow 充值 CONET-USDC（须先 approve card）。 */
+    router.post('/cardFundSocialExchangeUsdcEscrow', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardFundSocialExchangeUsdcEscrowPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardFundSocialExchangeUsdcEscrow preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardFundSocialExchangeUsdcEscrow preCheck OK → cardGatewayRewardPool`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'fundSocialExchangeUsdcEscrow' }, res);
+    });
+    /** Gateway-only：dispatchEventReward13（Master gatewayInvokeCard 队列）。 */
+    router.post('/cardDispatchEventReward13', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardDispatchEventReward13PreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardDispatchEventReward13 preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardDispatchEventReward13 preCheck OK → cardGatewayRewardPool`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        const cumulativeDelta = BigInt(req.body?.cumulativeDelta ?? 0);
+        (0, exports.postLocalhost)('/api/cardGatewayRewardPool', {
+            ...preCheck.preChecked,
+            label: 'dispatchEventReward13',
+            ...(cumulativeDelta > 0n
+                ? {
+                    socialDb: {
+                        kind: 'shareClick',
+                        actorEOA: String(req.body?.actorWallet ?? ''),
+                        referrerEOA: req.body?.refWallet && ethers_1.ethers.isAddress(String(req.body.refWallet))
+                            ? ethers_1.ethers.getAddress(String(req.body.refWallet))
+                            : null,
+                        targetKind: Number(req.body?.cumulativeTargetKind ?? 1),
+                        issuedParentId: String(req.body?.cumulativeIssuedParentId ?? '0'),
+                    },
+                }
+                : {}),
+        }, res);
+    });
+    /** Gateway-only：Discover 分享链接打开计数（无需 reward budget / active rule）。 */
+    router.post('/cardRecordDiscoverShareClick', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardRecordDiscoverShareClickPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardRecordDiscoverShareClick preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardRecordDiscoverShareClick preCheck OK → cardGatewayRewardPool`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardGatewayRewardPool', {
+            cardAddress: preCheck.preChecked.cardAddress,
+            cardCallData: preCheck.preChecked.cardCallData,
+            factoryCallData: preCheck.preChecked.factoryCallData,
+            extraCardCallData: preCheck.preChecked.extraCardCallData,
+            label: 'recordDiscoverShareClick',
+            socialDb: {
+                kind: 'shareClick',
+                actorEOA: String(req.body?.actorWallet ?? ''),
+                referrerEOA: req.body?.refWallet && ethers_1.ethers.isAddress(String(req.body.refWallet))
+                    ? ethers_1.ethers.getAddress(String(req.body.refWallet))
+                    : null,
+                targetKind: Number(req.body?.cumulativeTargetKind ?? 1),
+                issuedParentId: String(req.body?.cumulativeIssuedParentId ?? '0'),
+            },
+        }, res);
+    });
+    /** Plan A：分享落地绑定 referee（EOA downline → referee EOA；链上写 AA）。 */
+    router.post('/cardBindShareReferee', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardBindShareRefereePreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardBindShareReferee preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)({
+                cardAddress: req.body?.cardAddress,
+                downlineEOA: req.body?.downlineEOA,
+                refereeEOA: req.body?.refereeEOA,
+                deadline: req.body?.deadline,
+                hasNonce: Boolean(req.body?.nonce),
+                hasUserSignature: Boolean(req.body?.userSignature),
+            }, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardBindShareReferee preCheck OK → cardGatewayRewardPool`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardGatewayRewardPool', {
+            cardAddress: preCheck.preChecked.cardAddress,
+            cardCallData: preCheck.preChecked.cardCallData,
+            factoryCallData: preCheck.preChecked.factoryCallData,
+            extraCardCallData: preCheck.preChecked.extraCardCallData,
+            label: 'bindShareReferee',
+        }, res);
+    });
+    /** AA Smart Wallet 离线签字提交：Cluster 预检 sign 包 + B-Unit ≥ 0.1 → Master 扣款 + indexer。 */
+    router.post('/aaMultisigOfflineSubmit', async (req, res) => {
+        const preCheck = await (0, aaMultisigOfflineSubmit_1.aaMultisigOfflineSubmitPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/aaMultisigOfflineSubmit preCheck FAIL: ${preCheck.error}`));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/aaMultisigOfflineSubmit preCheck OK task=${preCheck.preChecked.inner.taskId} signer=${preCheck.preChecked.submitterEoa}`));
+        (0, exports.postLocalhost)('/api/aaMultisigOfflineSubmit', preCheck.preChecked, res);
+    });
+    /** Institutional AA V2 — EIP-712 propose transfer (Cluster precheck → Master paymaster). */
+    router.post('/aaInstitutionalV2ProposeTransfer', async (req, res) => {
+        const preCheck = await (0, aaInstitutionalV2Multisig_1.aaInstitutionalV2ProposeTransferPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/aaInstitutionalV2ProposeTransfer FAIL: ${preCheck.error}`));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/aaInstitutionalV2ProposeTransfer', preCheck.preChecked, res);
+    });
+    router.post('/aaInstitutionalV2ProposeSetPolicy', async (req, res) => {
+        const preCheck = await (0, aaInstitutionalV2Multisig_1.aaInstitutionalV2ProposeSetPolicyPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/aaInstitutionalV2ProposeSetPolicy FAIL: ${preCheck.error}`));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/aaInstitutionalV2ProposeSetPolicy', preCheck.preChecked, res);
+    });
+    router.post('/aaInstitutionalV2Vote', async (req, res) => {
+        const preCheck = await (0, aaInstitutionalV2Multisig_1.aaInstitutionalV2VotePreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/aaInstitutionalV2Vote FAIL: ${preCheck.error}`));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/aaInstitutionalV2Vote', preCheck.preChecked, res);
+    });
+    /** Owner executeForOwner：recordUserCumulativeStat。 */
+    router.post('/cardRecordUserCumulativeStat', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardRecordUserCumulativeStatPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardRecordUserCumulativeStat preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardRecordUserCumulativeStat preCheck OK → executeForOwner`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForOwner', preCheck.preChecked, res);
+    });
+    /** Gateway-only：recordTopupCumulativeStat（Master gatewayInvokeCard 队列；NFC top-up 亦内部挂钩）。 */
+    router.post('/cardRecordTopupCumulativeStat', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardRecordTopupCumulativeStatPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardRecordTopupCumulativeStat preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardRecordTopupCumulativeStat preCheck OK → cardGatewayRewardPool`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardGatewayRewardPool', { ...preCheck.preChecked, label: 'recordTopupCumulativeStat' }, res);
+    });
+    /** Gateway-only：initializeCardUserCumulativeStatTokens（无需卡主签名；relayer 经 gatewayInvokeCard 代付）。 */
+    router.post('/cardGatewayInitializeUserCumulativeStat', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardGatewayInitializeUserCumulativeStatPreCheck)(req.body);
+        if (!preCheck.success) {
+            if (preCheck.alreadyInitialized) {
+                return res
+                    .status(200)
+                    .json({
+                    success: true,
+                    skipped: true,
+                    initialized: true,
+                    reason: preCheck.error,
+                })
+                    .end();
+            }
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardGatewayInitializeUserCumulativeStat preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardGatewayInitializeUserCumulativeStat preCheck OK → cardGatewayRewardPool initOnly`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardGatewayInitializeUserCumulativeStat', preCheck.preChecked, res);
+    });
+    /** Gateway-only：用户 EIP-712 点赞 / 解除点赞。Cluster 预检后转发；Master 对 like/unlike 入队即返回 queued（链上后台执行）。 */
+    router.post('/cardRecordUserLike', async (req, res) => {
+        const preCheck = await (0, userCumulativeStatRewardPool_1.cardRecordUserLikePreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardRecordUserLike preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        const liked = Boolean(req.body?.liked);
+        const targetKind = Number(req.body?.targetKind ?? 1);
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardRecordUserLike preCheck OK → cardGatewayRewardPool liked=${liked} targetKind=${targetKind} (enqueue→queued)`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardGatewayRewardPool', {
+            ...preCheck.preChecked,
+            label: liked ? 'recordUserLike' : 'burnUserLike',
+            socialDb: {
+                kind: liked ? 'like' : 'unlike',
+                userEOA: ethers_1.ethers.getAddress(String(req.body?.userEOA ?? '')),
+                targetKind,
+                issuedParentId: preCheck.preChecked.issuedParentId,
+            },
+        }, res);
+    });
+    /** cardMintIssuedNftToAddress：owner 离线签字发行 issued NFT 到指定地址。Cluster 预检 targetAddress 为 EOA、签名有效，编码 data 后转发 master executeForOwner */
+    router.post('/cardMintIssuedNftToAddress', async (req, res) => {
+        const preCheck = await (0, MemberCard_1.cardMintIssuedNftToAddressPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardMintIssuedNftToAddress preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardMintIssuedNftToAddress preCheck OK, forwarding to master executeForOwner`), (0, node_util_1.inspect)({ cardAddress: preCheck.preChecked.cardAddress, targetAddress: req.body?.targetAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForOwner', { ...preCheck.preChecked, targetAddress: req.body?.targetAddress }, res);
+    });
+    /** cardRedeemPreCheck：客户端兑换前预检（链上 redeem 是否仍可用）。Cluster 直读链，不转发 Master。 */
+    router.post('/cardRedeemPreCheck', async (req, res) => {
+        const { cardAddress, redeemCode, toUserEOA } = req.body || {};
+        if (!cardAddress || !redeemCode || !toUserEOA || !ethers_1.ethers.isAddress(cardAddress) || !ethers_1.ethers.isAddress(toUserEOA)) {
+            return res.status(400).json({ success: false, redeemable: false, error: 'Missing or invalid: cardAddress, redeemCode, toUserEOA' });
+        }
+        const resolvedCard = OLD_CCSA_REDIRECTS.includes(cardAddress.toLowerCase()) ? chainAddresses_1.BASE_CCSA_CARD_ADDRESS : cardAddress;
+        const preCheck = await (0, MemberCard_1.cardRedeemPreCheck)({ cardAddress: resolvedCard, redeemCode, toUserEOA });
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardRedeemPreCheck FAIL: ${preCheck.error}`), { cardAddress: resolvedCard, toUserEOA });
+            return res.status(403).json(preCheck).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardRedeemPreCheck OK`), { cardAddress: resolvedCard, toUserEOA });
+        return res.status(200).json(preCheck).end();
+    });
+    /** cardOpenTransferPreCheck：Gift 点数 OpenTransfer 预检（签名 + B-Unit + staticCall） */
+    router.post('/cardOpenTransferPreCheck', async (req, res) => {
+        const body = req.body;
+        const required = ['cardAddress', 'fromEOA', 'to', 'id', 'amount', 'maxAmount', 'validAfter', 'validBefore', 'nonce', 'signature'];
+        for (const k of required) {
+            if (body[k] == null || String(body[k]).trim() === '') {
+                return res.status(400).json({ success: false, error: `Missing ${k}` });
+            }
+        }
+        if (!ethers_1.ethers.isAddress(String(body.cardAddress)) || !ethers_1.ethers.isAddress(String(body.fromEOA)) || !ethers_1.ethers.isAddress(String(body.to))) {
+            return res.status(400).json({ success: false, error: 'Invalid cardAddress, fromEOA, or to' });
+        }
+        const preCheck = await (0, MemberCard_1.cardOpenTransferPreCheck)({
+            cardAddress: ethers_1.ethers.getAddress(String(body.cardAddress)),
+            fromEOA: ethers_1.ethers.getAddress(String(body.fromEOA)),
+            to: ethers_1.ethers.getAddress(String(body.to)),
+            id: String(body.id),
+            amount: String(body.amount),
+            maxAmount: String(body.maxAmount),
+            validAfter: String(body.validAfter),
+            validBefore: String(body.validBefore),
+            nonce: String(body.nonce),
+            signature: String(body.signature),
+        });
+        if (!preCheck.success) {
+            return res.status(403).json(preCheck).end();
+        }
+        return res.status(200).json(preCheck).end();
+    });
+    /** cardOpenTransfer：Gift 商户点数，Cluster 预检后转发 Master */
+    router.post('/cardOpenTransfer', async (req, res) => {
+        const body = req.body;
+        const required = ['cardAddress', 'fromEOA', 'to', 'id', 'amount', 'maxAmount', 'validAfter', 'validBefore', 'nonce', 'signature'];
+        for (const k of required) {
+            if (body[k] == null || String(body[k]).trim() === '') {
+                return res.status(400).json({ success: false, error: `Missing ${k}` });
+            }
+        }
+        if (!ethers_1.ethers.isAddress(String(body.cardAddress)) || !ethers_1.ethers.isAddress(String(body.fromEOA)) || !ethers_1.ethers.isAddress(String(body.to))) {
+            return res.status(400).json({ success: false, error: 'Invalid cardAddress, fromEOA, or to' });
+        }
+        const payload = {
+            cardAddress: ethers_1.ethers.getAddress(String(body.cardAddress)),
+            fromEOA: ethers_1.ethers.getAddress(String(body.fromEOA)),
+            to: ethers_1.ethers.getAddress(String(body.to)),
+            id: String(body.id),
+            amount: String(body.amount),
+            maxAmount: String(body.maxAmount),
+            validAfter: String(body.validAfter),
+            validBefore: String(body.validBefore),
+            nonce: String(body.nonce),
+            signature: String(body.signature),
+        };
+        const preCheck = await (0, MemberCard_1.cardOpenTransferPreCheck)(payload);
+        if (!preCheck.success) {
+            return res.status(403).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/cardOpenTransfer', payload, res);
+    });
+    /** cardRedeem：用户兑换 redeem 码，Cluster 预检后转发 master */
+    router.post('/cardRedeem', async (req, res) => {
+        const { cardAddress, redeemCode, toUserEOA, posOperator } = req.body || {};
+        if (!cardAddress || !redeemCode || !toUserEOA || !ethers_1.ethers.isAddress(cardAddress) || !ethers_1.ethers.isAddress(toUserEOA)) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, toUserEOA' });
+        }
+        if (posOperator != null && posOperator !== '' && !ethers_1.ethers.isAddress(posOperator)) {
+            return res.status(400).json({ success: false, error: 'Invalid posOperator address' });
+        }
+        const resolvedCard = OLD_CCSA_REDIRECTS.includes(cardAddress.toLowerCase()) ? chainAddresses_1.BASE_CCSA_CARD_ADDRESS : cardAddress;
+        const preCheck = await (0, MemberCard_1.cardRedeemPreCheck)({ cardAddress: resolvedCard, redeemCode, toUserEOA });
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardRedeem preCheck FAIL: ${preCheck.error}`), { cardAddress: resolvedCard, toUserEOA });
+            return res.status(403).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardRedeem preCheck OK, forwarding to master`), { cardAddress: resolvedCard, toUserEOA });
+        (0, exports.postLocalhost)('/api/cardRedeem', {
+            cardAddress: resolvedCard,
+            redeemCode: String(redeemCode).trim(),
+            toUserEOA: ethers_1.ethers.getAddress(toUserEOA),
+            ...(posOperator && ethers_1.ethers.isAddress(posOperator) ? { posOperator: ethers_1.ethers.getAddress(posOperator) } : {}),
+        }, res);
+    });
+    /** cardCouponOpenClaim：无 redeemcode 的 coupon open-claim。Cluster 预检用户签名 + couponId/tokenId 映射 + requiresRedeemCode=false 后转发 Master。 */
+    router.post('/cardCouponOpenClaim', async (req, res) => {
+        const preCheck = await (0, MemberCard_1.cardCouponOpenClaimPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCouponOpenClaim preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCouponOpenClaim preCheck OK, forwarding to master`), (0, node_util_1.inspect)({
+            cardAddress: preCheck.preChecked.cardAddress,
+            couponId: preCheck.preChecked.couponId,
+            userEOA: preCheck.preChecked.userEOA,
+            tokenId: preCheck.preChecked.tokenId,
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardCouponOpenClaim', preCheck.preChecked, res);
+    });
+    /** redeemReward13ForUsdc：burn AA #13 then pay CONET-USDC to EOA. Cluster precheck, Master waits both receipts. */
+    router.post('/redeemReward13ForUsdc', async (req, res) => {
+        const preCheck = await (0, redeemReward13ForUsdc_1.redeemReward13ForUsdcPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/redeemReward13ForUsdc preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/redeemReward13ForUsdc preCheck OK, forwarding to master`), (0, node_util_1.inspect)({
+            cardAddress: preCheck.preChecked.cardAddress,
+            userEOA: preCheck.preChecked.userEOA,
+            pointsCost: preCheck.preChecked.pointsCost,
+            usdcReward6: preCheck.preChecked.usdcReward6,
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/redeemReward13ForUsdc', preCheck.preChecked, res);
+    });
+    /** Atomic multi-source top-up: same-store #13→#0 + peer #13→USDC + optional cash in one UserOp. */
+    router.post('/topupWithReward13Container', async (req, res) => {
+        const preCheck = await (0, topupWithReward13Container_1.topupWithReward13ContainerPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/topupWithReward13Container preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/topupWithReward13Container preCheck OK, forwarding to master`), (0, node_util_1.inspect)({
+            targetCard: preCheck.preChecked.targetCard,
+            userEOA: preCheck.preChecked.userEOA,
+            sameStoreBurn13: preCheck.preChecked.sameStoreBurn13,
+            peerUsdcCredited6: preCheck.preChecked.peerUsdcCredited6,
+            peers: preCheck.preChecked.peers?.length ?? 0,
+            cash: Boolean(preCheck.preChecked.cash),
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/topupWithReward13Container', preCheck.preChecked, res);
+    });
+    /** convertReward13ToProgramPoints：atomic burn #13 → mint #0 on customer AA. */
+    router.post('/convertReward13ToProgramPoints', async (req, res) => {
+        const preCheck = await (0, convertReward13_1.convertReward13PreCheck)({ ...req.body, kind: 'toProgramPoints' });
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/convertReward13ToProgramPoints preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/convertReward13ToProgramPoints preCheck OK, forwarding to master`), (0, node_util_1.inspect)({
+            cardAddress: preCheck.preChecked.cardAddress,
+            userEOA: preCheck.preChecked.userEOA,
+            burn13: preCheck.preChecked.burn13,
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/convertReward13ToProgramPoints', preCheck.preChecked, res);
+    });
+    /** convertReward13ToUsdcToAa：atomic burn #13 → Conet-USDC to customer AA (not EOA). */
+    router.post('/convertReward13ToUsdcToAa', async (req, res) => {
+        const preCheck = await (0, convertReward13_1.convertReward13PreCheck)({ ...req.body, kind: 'toUsdcAa' });
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/convertReward13ToUsdcToAa preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/convertReward13ToUsdcToAa preCheck OK, forwarding to master`), (0, node_util_1.inspect)({
+            cardAddress: preCheck.preChecked.cardAddress,
+            userEOA: preCheck.preChecked.userEOA,
+            burn13: preCheck.preChecked.burn13,
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/convertReward13ToUsdcToAa', preCheck.preChecked, res);
+    });
+    /** cardCouponPosClaim：POS Balance 一键领取（NFC 私钥 → openClaim；QR/钱包 → cardCouponPosClaimPrepare + Submit）。 */
+    router.post('/cardCouponPosClaim', async (req, res) => {
+        const preCheck = await (0, MemberCard_1.cardCouponPosClaimPreCheck)(req.body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardCouponPosClaim preCheck FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        if (preCheck.route !== 'openClaim') {
+            return res.status(400).json({ success: false, error: 'Unexpected claim route' }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardCouponPosClaim preCheck OK (openClaim), forwarding to master`), (0, node_util_1.inspect)({
+            cardAddress: preCheck.preChecked.cardAddress,
+            couponId: preCheck.preChecked.couponId,
+            userEOA: preCheck.preChecked.userEOA,
+            tokenId: preCheck.preChecked.tokenId,
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardCouponOpenClaim', preCheck.preChecked, res);
+    });
+    /** cardRedeemAdmin：用户兑换 redeem-admin 码，将 EOA 用户登记为指定卡的 admin。Cluster 预检链上 redeem code 有效后转发 master */
+    router.post('/cardRedeemAdmin', async (req, res) => {
+        const { cardAddress, redeemCode, to } = req.body || {};
+        if (!cardAddress || !redeemCode || !to || !ethers_1.ethers.isAddress(cardAddress) || !ethers_1.ethers.isAddress(to)) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, to' });
+        }
+        const resolvedCard = OLD_CCSA_REDIRECTS.includes(cardAddress.toLowerCase()) ? chainAddresses_1.BASE_CCSA_CARD_ADDRESS : cardAddress;
+        const preCheck = await (0, MemberCard_1.cardRedeemAdminPreCheck)({ cardAddress: resolvedCard, redeemCode, to });
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/cardRedeemAdmin preCheck FAIL: ${preCheck.error}`), { cardAddress: resolvedCard, to });
+            return res.status(403).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardRedeemAdmin preCheck OK, forwarding to master`), { cardAddress: resolvedCard, to });
+        (0, exports.postLocalhost)('/api/cardRedeemAdmin', { ...req.body, cardAddress: resolvedCard }, res);
+    });
+    /** redeemSeries：用户使用 redeem code 兑换 NFT（与 cardRedeem 相同逻辑，用于特别设置 NFT 兑换） */
+    router.post('/redeemSeries', async (req, res) => {
+        const { cardAddress, redeemCode, toUserEOA } = req.body || {};
+        if (!cardAddress || !redeemCode || !toUserEOA || !ethers_1.ethers.isAddress(cardAddress) || !ethers_1.ethers.isAddress(toUserEOA)) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid: cardAddress, redeemCode, toUserEOA' });
+        }
+        const resolvedCard = OLD_CCSA_REDIRECTS.includes(cardAddress.toLowerCase()) ? chainAddresses_1.BASE_CCSA_CARD_ADDRESS : cardAddress;
+        const preCheck = await (0, MemberCard_1.cardRedeemPreCheck)({ cardAddress: resolvedCard, redeemCode, toUserEOA });
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/redeemSeries preCheck FAIL: ${preCheck.error}`), { cardAddress: resolvedCard, toUserEOA });
+            return res.status(403).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/redeemSeries preCheck OK, forwarding to master`), { cardAddress: resolvedCard, toUserEOA });
+        (0, exports.postLocalhost)('/api/cardRedeem', {
+            cardAddress: resolvedCard,
+            redeemCode: String(redeemCode).trim(),
+            toUserEOA: ethers_1.ethers.getAddress(toUserEOA),
+        }, res);
+    });
+    /** redeemStatusBatch：批量查询 redeem 状态（只支持批量）。30 秒缓存。兼容旧 CCSA 地址自动映射到新地址。 */
+    router.post('/redeemStatusBatch', async (req, res) => {
+        const { items } = req.body || {};
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ success: false, error: 'items required (non-empty array of { cardAddress, hash })' });
+        }
+        const valid = items
+            .filter((it) => it && it.cardAddress && it.hash)
+            .map((it) => ({
+            cardAddress: OLD_CCSA_REDIRECTS.includes(it.cardAddress?.toLowerCase()) ? chainAddresses_1.BASE_CCSA_CARD_ADDRESS : it.cardAddress,
+            hash: it.hash
+        }));
+        if (valid.length === 0) {
+            return res.status(400).json({ success: false, error: 'Each item must have cardAddress and hash' });
+        }
+        const cacheKey = JSON.stringify(valid.map((it) => ({ c: it.cardAddress.toLowerCase(), h: it.hash })).sort((a, b) => (a.c + a.h).localeCompare(b.c + b.h)));
+        const cached = redeemStatusBatchCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const statuses = await (0, MemberCard_1.getRedeemStatusBatchApi)(valid);
+            const body = JSON.stringify({ success: true, statuses });
+            redeemStatusBatchCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+            return res.status(200).json({ success: true, statuses }).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[redeemStatusBatch] error:`), e?.message ?? e);
+            return res.status(500).json({ success: false, error: e?.message ?? 'Redeem status query failed' }).end();
+        }
+    });
+    router.post('/executeForOwner', async (req, res) => {
+        const { cardAddress, data, deadline, nonce, ownerSignature } = req.body;
+        if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/executeForOwner Invalid data`), (0, node_util_1.inspect)(sanitizeExecuteForOwnerCouponWorkflowBody(req.body), false, 3, true));
+            return res.status(400).json({ success: false, error: 'Missing required fields' });
+        }
+        if (!ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid cardAddress' });
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/executeForOwner forwarding to master`), (0, node_util_1.inspect)({ cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/executeForOwner', req.body, res);
+    });
+    /**
+     * 已发卡仅更新链下 card metadata（shareTokenMetadata / tiers 等）。
+     * Cluster 做格式预检后转发 Master；Master 负责写 metadata 文件与 beamio_cards.metadata_json。
+     */
+    router.post('/updateCardShareMetadata', async (req, res) => {
+        const body = req.body;
+        const cardAddress = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : '';
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end();
+        }
+        if (!body.shareTokenMetadata || typeof body.shareTokenMetadata !== 'object' || Array.isArray(body.shareTokenMetadata)) {
+            return res.status(400).json({ success: false, error: 'shareTokenMetadata object is required' }).end();
+        }
+        if (body.tiers != null && !Array.isArray(body.tiers)) {
+            return res.status(400).json({ success: false, error: 'tiers must be an array if provided' }).end();
+        }
+        if (body.baseMembership != null &&
+            (typeof body.baseMembership !== 'object' || Array.isArray(body.baseMembership))) {
+            return res.status(400).json({ success: false, error: 'baseMembership must be an object if provided' }).end();
+        }
+        if (body.upgradeType != null) {
+            const ut = Number(body.upgradeType);
+            if (!Number.isInteger(ut) || ut < 0 || ut > 2) {
+                return res.status(400).json({ success: false, error: 'upgradeType must be 0, 1, or 2 if provided' }).end();
+            }
+        }
+        if (body.transferWhitelistEnabled != null && typeof body.transferWhitelistEnabled !== 'boolean') {
+            return res
+                .status(400)
+                .json({ success: false, error: 'transferWhitelistEnabled must be boolean if provided' })
+                .end();
+        }
+        if ((0, apiExcludedUserCards_1.isApiExcludedUserCard)(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Selected merchant card is not eligible.' }).end();
+        }
+        const existingRow = await (0, db_2.getBeamioCardRowForMetadataSync)(cardAddress);
+        if (!existingRow) {
+            const onChain = await (0, MemberCard_1.lookupOnChainMerchantCardRegistryIdentity)(cardAddress);
+            if (onChain.status === 'missing') {
+                return res
+                    .status(400)
+                    .json({ success: false, error: 'Card not found on CoNET. Publish a new card first.' })
+                    .end();
+            }
+            // found: Master will register. untrusted: do not treat as unpublished.
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/updateCardShareMetadata preCheck OK, forwarding to master'), (0, node_util_1.inspect)({
+            cardAddress,
+            shareTokenMetadataKeys: Object.keys(body.shareTokenMetadata),
+            hasPointSystem: !!body.shareTokenMetadata.pointSystem,
+        }, false, 2, true));
+        (0, exports.postLocalhost)('/api/updateCardShareMetadata', req.body, res);
+    });
+    /** 已发行 coupon metadata 更新：icon / description / backgroundColor / couponImage（宽屏背景 https URL 或空清除）。 */
+    router.post('/updateIssuedCouponMetadata', async (req, res) => {
+        const body = req.body;
+        const cardAddress = body.cardAddress?.trim();
+        const couponId = body.couponId?.trim() ?? '';
+        const issuedTokenId = body.issuedTokenId?.trim() ?? '';
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end();
+        }
+        if (!couponId) {
+            return res.status(400).json({ success: false, error: 'couponId is required' }).end();
+        }
+        try {
+            // 仅验证是否为整数；具体匹配由 Master 基于当前 metadata 处理
+            void BigInt(issuedTokenId);
+        }
+        catch {
+            return res.status(400).json({ success: false, error: 'issuedTokenId must be an integer string' }).end();
+        }
+        if (typeof body.icon !== 'string' || typeof body.backgroundColor !== 'string' || typeof body.description !== 'string') {
+            return res.status(400).json({ success: false, error: 'icon/backgroundColor/description must be strings' }).end();
+        }
+        if (body.couponImage != null && typeof body.couponImage !== 'string') {
+            return res.status(400).json({ success: false, error: 'couponImage must be a string if provided' }).end();
+        }
+        if (body.disable != null && typeof body.disable !== 'boolean') {
+            return res.status(400).json({ success: false, error: 'disable must be a boolean if provided' }).end();
+        }
+        const couponImageTrim = typeof body.couponImage === 'string' ? body.couponImage.trim() : '';
+        if (couponImageTrim && !(0, MemberCard_1.isAllowedMerchantImageHttpsUrl)(couponImageTrim)) {
+            return res
+                .status(400)
+                .json({ success: false, error: 'couponImage must be a non-localhost https URL (max 2048 characters).' })
+                .end();
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/updateIssuedCouponMetadata preCheck OK, forwarding to master'), (0, node_util_1.inspect)({
+            cardAddress,
+            couponId,
+            issuedTokenId,
+            icon: summarizeIssuedCouponIconForClusterLog(body.icon),
+            couponImageLen: couponImageTrim.length,
+        }, false, 2, true));
+        try {
+            const { statusCode, body: buf } = await postLocalhostBuffer('/api/updateIssuedCouponMetadata', req.body);
+            if (statusCode >= 200 && statusCode < 300) {
+                try {
+                    const parsed = JSON.parse(buf);
+                    if (parsed?.success === true) {
+                        const cardNorm = ethers_1.ethers.getAddress(cardAddress);
+                        (0, issuedCouponSeriesQueryCache_1.invalidateIssuedCouponSeriesQueryCachesForCard)(cardNorm, issuedTokenId);
+                        void (0, baseExplorerNftMetadataRefresh_1.requestExplorerNftMetadataRefresh)({
+                            contractAddress: cardNorm,
+                            tokenId: issuedTokenId,
+                        }).catch((refreshErr) => {
+                            (0, logger_1.logger)(safe_1.default.yellow('[updateIssuedCouponMetadata] explorer refresh failed:'), refreshErr instanceof Error ? refreshErr.message : refreshErr);
+                        });
+                        (0, logger_1.logger)(safe_1.default.cyan(`[updateIssuedCouponMetadata] cluster invalidated issued-coupon GET caches for card=${cardNorm}`));
+                    }
+                }
+                catch {
+                    /* ignore JSON parse — still pipe body */
+                }
+            }
+            else {
+                (0, logger_1.logger)(safe_1.default.yellow(`[updateIssuedCouponMetadata] cluster master status=${statusCode} bodyHead=${buf.slice(0, 240)}`));
+            }
+            res.status(statusCode).type('application/json').send(buf);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[updateIssuedCouponMetadata] cluster forward error:`), e?.message ?? e);
+            return res.status(502).json({ success: false, error: `Forward to master failed: ${e?.message ?? 'error'}` }).end();
+        }
+    });
+    /** Sync issued coupon socialPromotion into beamio_nft_series + tier metadata (Cluster precheck → Master). */
+    router.post('/updateIssuedCouponSocialPromotion', async (req, res) => {
+        const body = req.body;
+        const cardAddress = body.cardAddress?.trim();
+        const couponId = body.couponId?.trim() ?? '';
+        const issuedTokenId = body.issuedTokenId?.trim() ?? '';
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end();
+        }
+        if (!couponId) {
+            return res.status(400).json({ success: false, error: 'couponId is required' }).end();
+        }
+        try {
+            void BigInt(issuedTokenId);
+        }
+        catch {
+            return res.status(400).json({ success: false, error: 'issuedTokenId must be an integer string' }).end();
+        }
+        if (body.socialPromotion != null &&
+            (typeof body.socialPromotion !== 'object' || Array.isArray(body.socialPromotion))) {
+            return res.status(400).json({ success: false, error: 'socialPromotion must be an object or null' }).end();
+        }
+        try {
+            const { statusCode, body: buf } = await postLocalhostBuffer('/api/updateIssuedCouponSocialPromotion', req.body);
+            if (statusCode >= 200 && statusCode < 300) {
+                try {
+                    const parsed = JSON.parse(buf);
+                    if (parsed?.success === true) {
+                        const cardNorm = ethers_1.ethers.getAddress(cardAddress);
+                        (0, issuedCouponSeriesQueryCache_1.invalidateIssuedCouponSeriesQueryCachesForCard)(cardNorm, issuedTokenId);
+                        void (0, baseExplorerNftMetadataRefresh_1.requestExplorerNftMetadataRefresh)({
+                            contractAddress: cardNorm,
+                            tokenId: issuedTokenId,
+                        }).catch((refreshErr) => {
+                            (0, logger_1.logger)(safe_1.default.yellow('[updateIssuedCouponSocialPromotion] explorer refresh failed:'), refreshErr instanceof Error ? refreshErr.message : refreshErr);
+                        });
+                    }
+                }
+                catch {
+                    /* ignore JSON parse */
+                }
+            }
+            res.status(statusCode).type('application/json').send(buf);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[updateIssuedCouponSocialPromotion] cluster forward error:`), e?.message ?? e);
+            return res.status(502).json({ success: false, error: `Forward to master failed: ${e?.message ?? 'error'}` }).end();
+        }
+    });
+    /** 仅更新 program `merchantImage` URL（或清除）；Cluster 预检后转发 Master。 */
+    router.post('/updateCardMerchantImage', async (req, res) => {
+        const body = req.body;
+        const cardAddress = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : '';
+        const merchantImage = typeof body.merchantImage === 'string' ? body.merchantImage : '';
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/updateCardMerchantImage preCheck OK, forwarding to master'), (0, node_util_1.inspect)({ cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/updateCardMerchantImage', { cardAddress, merchantImage }, res);
+    });
+    /** 仅更新 program square `image` URL（或清除）；Cluster 预检后转发 Master。 */
+    router.post('/updateCardProgramImage', async (req, res) => {
+        const body = req.body;
+        const cardAddress = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : '';
+        const image = typeof body.image === 'string' ? body.image : '';
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid or missing cardAddress' }).end();
+        }
+        const imageTrim = image.trim();
+        if (imageTrim && !(0, MemberCard_1.isAllowedMerchantImageHttpsUrl)(imageTrim)) {
+            return res
+                .status(400)
+                .json({
+                success: false,
+                error: 'image must be a non-localhost https URL (max 2048 characters).',
+            })
+                .end();
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/updateCardProgramImage preCheck OK, forwarding to master'), (0, node_util_1.inspect)({ cardAddress }, false, 2, true));
+        (0, exports.postLocalhost)('/api/updateCardProgramImage', { cardAddress, image }, res);
+    });
+    /** cardUpdateTiers：owner 离线签字整体替换 BeamioUserCard.tiers，并同步 card metadata。 */
+    router.post('/cardUpdateTiers', async (req, res) => {
+        const body = req.body;
+        const { cardAddress, data, deadline, nonce, ownerSignature } = body;
+        if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
+            return res.status(400).json({ success: false, error: 'Missing required fields' }).end();
+        }
+        if (!ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid cardAddress' }).end();
+        }
+        if (!ethers_1.ethers.isHexString(data)) {
+            return res.status(400).json({ success: false, error: 'Invalid calldata' }).end();
+        }
+        if (!ethers_1.ethers.isHexString(nonce, 32)) {
+            return res.status(400).json({ success: false, error: 'Invalid nonce' }).end();
+        }
+        if (!/^0x[0-9a-fA-F]{130}$/.test(String(ownerSignature))) {
+            return res.status(400).json({ success: false, error: 'Invalid ownerSignature' }).end();
+        }
+        const now = Math.floor(Date.now() / 1000);
+        if (!Number.isInteger(deadline) || deadline <= now) {
+            return res.status(400).json({ success: false, error: 'Deadline expired' }).end();
+        }
+        if (!body.shareTokenMetadata || typeof body.shareTokenMetadata !== 'object' || Array.isArray(body.shareTokenMetadata)) {
+            return res.status(400).json({ success: false, error: 'shareTokenMetadata object is required' }).end();
+        }
+        if (!Array.isArray(body.tiers) || body.tiers.length === 0) {
+            return res.status(400).json({ success: false, error: 'tiers array is required' }).end();
+        }
+        if (body.baseMembership != null &&
+            (typeof body.baseMembership !== 'object' || Array.isArray(body.baseMembership))) {
+            return res.status(400).json({ success: false, error: 'baseMembership must be an object if provided' }).end();
+        }
+        if (body.upgradeType != null) {
+            const ut = Number(body.upgradeType);
+            if (!Number.isInteger(ut) || ut < 0 || ut > 2) {
+                return res.status(400).json({ success: false, error: 'upgradeType must be 0, 1, or 2 if provided' }).end();
+            }
+        }
+        const setTiersIface = new ethers_1.ethers.Interface([
+            'function setTiers(tuple(uint256 minUsdc6,uint256 attr,uint256 tierExpirySeconds,bool upgradeByBalance)[] newTiers)',
+            'function owner() view returns (address)',
+        ]);
+        let decoded;
+        try {
+            decoded = setTiersIface.parseTransaction({ data });
+        }
+        catch {
+            return res.status(400).json({ success: false, error: 'data must call setTiers' }).end();
+        }
+        if (!decoded || decoded.name !== 'setTiers') {
+            return res.status(400).json({ success: false, error: 'data must call setTiers' }).end();
+        }
+        const chainTiers = Array.from(decoded.args[0]).map((t) => ({
+            minUsdc6: BigInt(t.minUsdc6 ?? t[0]).toString(),
+            attr: Number(t.attr ?? t[1]),
+            tierExpirySeconds: BigInt(t.tierExpirySeconds ?? t[2]).toString(),
+            upgradeByBalance: Boolean(t.upgradeByBalance ?? t[3]),
+        }));
+        if (chainTiers.length === 0) {
+            return res.status(400).json({ success: false, error: 'setTiers requires at least one tier' }).end();
+        }
+        if (body.tiers.length !== chainTiers.length) {
+            return res.status(400).json({ success: false, error: 'metadata tiers length must match setTiers calldata' }).end();
+        }
+        for (let i = 0; i < chainTiers.length; i++) {
+            if (BigInt(chainTiers[i].minUsdc6) <= 0n) {
+                return res.status(400).json({ success: false, error: `tiers[${i}].minUsdc6 must be > 0` }).end();
+            }
+            if (!Number.isInteger(chainTiers[i].attr) || chainTiers[i].attr < 0) {
+                return res.status(400).json({ success: false, error: `tiers[${i}].attr must be a non-negative integer` }).end();
+            }
+        }
+        for (let i = 0; i < body.tiers.length; i++) {
+            const meta = body.tiers[i];
+            if (!meta || typeof meta !== 'object') {
+                return res.status(400).json({ success: false, error: `tiers[${i}] must be an object` }).end();
+            }
+            const chain = chainTiers[i];
+            if (!chain ||
+                String(meta.minUsdc6) !== chain.minUsdc6 ||
+                Number(meta.attr) !== chain.attr) {
+                return res.status(400).json({ success: false, error: `tiers[${i}] metadata does not match setTiers calldata` }).end();
+            }
+        }
+        try {
+            const cardAddrNorm = ethers_1.ethers.getAddress(cardAddress);
+            const chain = await (0, beamioUserCardChain_1.resolveUserCardChain)(cardAddrNorm);
+            const cardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(chain);
+            const card = new ethers_1.ethers.Contract(cardAddrNorm, ['function owner() view returns (address)'], cardProvider);
+            const owner = ethers_1.ethers.getAddress(await card.owner());
+            const vc = await (0, MemberCard_1.getBeamioUserCardFactoryGateway)(cardAddrNorm);
+            const digest = ethers_1.ethers.TypedDataEncoder.hash({
+                name: 'BeamioUserCardFactory',
+                version: '1',
+                chainId: (0, beamioUserCardChain_1.chainIdForUserCardChain)(chain),
+                verifyingContract: vc,
+            }, {
+                ExecuteForOwner: [
+                    { name: 'cardAddress', type: 'address' },
+                    { name: 'dataHash', type: 'bytes32' },
+                    { name: 'deadline', type: 'uint256' },
+                    { name: 'nonce', type: 'bytes32' },
+                ],
+            }, {
+                cardAddress: ethers_1.ethers.getAddress(cardAddress),
+                dataHash: ethers_1.ethers.keccak256(data),
+                deadline,
+                nonce,
+            });
+            const recovered = ethers_1.ethers.getAddress(ethers_1.ethers.recoverAddress(digest, ownerSignature));
+            if (recovered !== owner) {
+                return res.status(403).json({ success: false, error: 'Signer is not card owner' }).end();
+            }
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? 'Failed to verify owner signature' }).end();
+        }
+        const membershipFee = (0, membershipFeeMetadata_1.shouldSkipFactoryTiersForCreate)(body.tiers, {
+            ...(body.baseMembership && { baseMembership: body.baseMembership }),
+            tiers: body.tiers,
+        });
+        let stampedType;
+        if (membershipFee) {
+            stampedType = 0;
+        }
+        else if (body.upgradeType != null) {
+            stampedType = (0, loyaltyUpgradeFlags_1.inferLoyaltyUpgradeType)(body.upgradeType, false, body.tiers);
+        }
+        else if (body.tiers.some((t) => t.upgradeByCharge === true)) {
+            stampedType = 2;
+        }
+        else if (body.tiers.some((t) => t.upgradeByBalance === true)) {
+            stampedType = 1;
+        }
+        else {
+            return res
+                .status(400)
+                .json({
+                success: false,
+                error: 'upgradeType is required to distinguish Charge vs Top-up (0=Top-up, 1=Balance, 2=Charge)',
+            })
+                .end();
+        }
+        const stampedTiers = (0, loyaltyUpgradeFlags_1.stampLoyaltyUpgradeFlagsOnTiers)(body.tiers, stampedType, membershipFee) ?? body.tiers;
+        const flags = (0, loyaltyUpgradeFlags_1.loyaltyUpgradeFlagsFromType)(stampedType, membershipFee);
+        for (let i = 0; i < chainTiers.length; i++) {
+            if (flags.upgradeByBalance !== chainTiers[i].upgradeByBalance) {
+                return res
+                    .status(400)
+                    .json({
+                    success: false,
+                    error: `tiers[${i}] upgradeByBalance does not match loyalty upgradeType (0=Top-up, 1=Balance, 2=Charge)`,
+                })
+                    .end();
+            }
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/cardUpdateTiers preCheck OK, forwarding to master`), (0, node_util_1.inspect)({ cardAddress, tierCount: chainTiers.length, upgradeType: stampedType }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cardUpdateTiers', {
+            ...req.body,
+            upgradeType: stampedType,
+            tiers: stampedTiers,
+        }, res);
+    });
+    /** AA→EOA：支持三种提交。(1) packedUserOp；(2) openContainerPayload；(3) containerPayload（绑定 to）*/
+    router.post('/AAtoEOA', async (req, res) => {
+        // 入口数据检测：将 BigInt 转为 string，避免 downstream RPC / JSON 序列化错误
+        const body = convertBigIntToString(req.body);
+        (0, logger_1.logger)(`[AAtoEOA] [DEBUG] Cluster received bodyKeys=${Object.keys(req.body || {}).join(',')} openContainer=${!!body?.openContainerPayload} requestHash=${body?.requestHash ?? 'n/a'} forText=${body?.forText ? `"${String(body.forText).slice(0, 50)}…"` : 'n/a'}`);
+        (0, logger_1.logger)(`[AAtoEOA] server received POST /api/AAtoEOA`, (0, node_util_1.inspect)({ bodyKeys: Object.keys(req.body || {}), toEOA: body?.toEOA, amountUSDC6: body?.amountUSDC6, sender: body?.packedUserOp?.sender, openContainer: !!body?.openContainerPayload, container: !!body?.containerPayload, requestHash: body?.requestHash ?? 'n/a' }, false, 3, true));
+        if (body?.openContainerPayload) {
+            (0, logger_1.logger)(safe_1.default.cyan(`[AAtoEOA] [DEBUG] openContainerPayload JSON (for debug): ${JSON.stringify(body.openContainerPayload)}`));
+        }
+        if (body.containerPayload) {
+            const preCheck = (0, MemberCard_1.ContainerRelayPreCheck)(body.containerPayload);
+            if (!preCheck.success) {
+                (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server Container pre-check FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+                return res.status(400).json({ success: false, error: preCheck.error }).end();
+            }
+            const bunitCheck = await (0, MemberCard_1.ContainerRelayPreCheckBUnitBalance)(body.containerPayload, body.currency ?? 'USDC', body.currencyAmount ?? '0');
+            if (!bunitCheck.success) {
+                (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server Container B-Unit pre-check FAIL: ${bunitCheck.error}`));
+                return res.status(400).json({ success: false, error: bunitCheck.error }).end();
+            }
+            const closedPayerAa = body.containerPayload?.account;
+            if (closedPayerAa && ethers_1.ethers.isAddress(closedPayerAa)) {
+                const lbCc = await (0, MemberCard_1.nfcLinkAppPaymentBlockedIfAny)({ aaAddress: closedPayerAa });
+                if (lbCc) {
+                    return res.status(403).json({ success: false, error: lbCc }).end();
+                }
+            }
+            // Cluster 预检：currency/currencyAmount 必填（显式参数，不再依赖 payMe JSON）
+            if (!body.currency || !String(body.currency).trim()) {
+                (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server Container REJECT: currency is required`));
+                return res.status(400).json({ success: false, error: 'currency is required for accounting' }).end();
+            }
+            if (!body.currencyAmount || (Array.isArray(body.currencyAmount) ? body.currencyAmount.length === 0 : !String(body.currencyAmount).trim())) {
+                (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server Container REJECT: currencyAmount is required`));
+                return res.status(400).json({ success: false, error: 'currencyAmount is required for accounting' }).end();
+            }
+            const reqHashValid = body.requestHash && ethers_1.ethers.isHexString(body.requestHash) && ethers_1.ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined;
+            if (reqHashValid && body.containerPayload?.to && ethers_1.ethers.isAddress(body.containerPayload.to)) {
+                const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1;
+                const reqCheck = await runRequestHashPreCheck(reqHashValid, vd, body.containerPayload.to);
+                if (!reqCheck.ok) {
+                    (0, logger_1.logger)(safe_1.default.yellow(`[AAtoEOA] Cluster requestHash pre-check FAIL: ${reqCheck.error}`));
+                    return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end();
+                }
+            }
+            if (body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object') {
+                const burnPre = await (0, MemberCard_1.verifyChargeOwnerChildBurnClusterPreCheck)({
+                    burn: body.chargeOwnerChildBurn,
+                    payeeTo: body.containerPayload.to,
+                    merchantCardAddress: typeof body.merchantCardAddress === 'string' ? body.merchantCardAddress : undefined,
+                    items: body.containerPayload.items ?? [],
+                });
+                if (!burnPre.ok) {
+                    (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] chargeOwnerChildBurn Cluster REJECT (container): ${burnPre.error}`));
+                    return res.status(400).json({ success: false, error: burnPre.error }).end();
+                }
+            }
+            (0, logger_1.logger)(safe_1.default.green(`[AAtoEOA] server Container pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`));
+            (0, exports.postLocalhost)('/api/AAtoEOA', {
+                containerPayload: body.containerPayload,
+                currency: body.currency,
+                currencyAmount: body.currencyAmount,
+                currencyDiscount: body.currencyDiscount,
+                currencyDiscountAmount: body.currencyDiscountAmount,
+                forText: body.forText,
+                requestHash: body.requestHash,
+                validDays: body.validDays,
+                merchantCardAddress: body.merchantCardAddress,
+                nfcSubtotalCurrencyAmount: body.nfcSubtotalCurrencyAmount,
+                nfcTipCurrencyAmount: body.nfcTipCurrencyAmount,
+                nfcTipRateBps: body.nfcTipRateBps,
+                nfcRequestCurrency: body.nfcRequestCurrency,
+                nfcDiscountAmountFiat6: body.nfcDiscountAmountFiat6,
+                nfcDiscountRateBps: body.nfcDiscountRateBps,
+                nfcTaxAmountFiat6: body.nfcTaxAmountFiat6,
+                nfcTaxRateBps: body.nfcTaxRateBps,
+                posOperator: body.posOperator,
+                originatingUSDCTx: body.originatingUSDCTx,
+                chargeSessionId: body.chargeSessionId,
+                ...(typeof body.chargeLedgerMainUsdc6 === 'string' && body.chargeLedgerMainUsdc6.trim() !== ''
+                    ? { chargeLedgerMainUsdc6: body.chargeLedgerMainUsdc6.trim() }
+                    : {}),
+                ...(body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object'
+                    ? { chargeOwnerChildBurn: body.chargeOwnerChildBurn }
+                    : {}),
+            }, res);
+            return;
+        }
+        if (body.openContainerPayload) {
+            const preCheck = (0, MemberCard_1.OpenContainerRelayPreCheck)(body.openContainerPayload);
+            if (!preCheck.success) {
+                (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server OpenContainer pre-check FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+                return res.status(400).json({ success: false, error: preCheck.error }).end();
+            }
+            /** 付款 AA 必须与本次收款卡所在链的 UserCard 工厂链路 canonical 一致，否则链上会在 CoNET/Base 不同 owner 间恢复出错。 */
+            try {
+                const acc = ethers_1.ethers.getAddress(body.openContainerPayload.account);
+                const openContainerItems = body.openContainerPayload.items ?? [];
+                const merchantCardRaw = typeof body.merchantCardAddress === 'string' && ethers_1.ethers.isAddress(body.merchantCardAddress.trim())
+                    ? ethers_1.ethers.getAddress(body.merchantCardAddress.trim())
+                    : (0, MemberCard_1.resolveChargeFeePayerCardFromOpenContainerItems)(openContainerItems.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') })));
+                const merchantCardChain = await (0, beamioUserCardChain_1.resolveUserCardChain)(merchantCardRaw);
+                const merchantCardProvider = (0, beamioUserCardChain_1.providerForUserCardChain)(merchantCardChain);
+                const merchantCardFactory = (0, beamioUserCardChain_1.cardFactoryForUserCardChain)(merchantCardChain);
+                const aaOwnerAbi = ['function owner() view returns (address)'];
+                const aaContract = new ethers_1.ethers.Contract(acc, aaOwnerAbi, merchantCardProvider);
+                const ownerRaw = await aaContract.owner();
+                if (!ownerRaw || ownerRaw === ethers_1.ethers.ZeroAddress) {
+                    (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server OpenContainer REJECT: invalid AA owner for ${acc}`));
+                    return res
+                        .status(400)
+                        .json({ success: false, error: 'openContainerPayload.account is not a valid Beamio AA' })
+                        .end();
+                }
+                const eoa = ethers_1.ethers.getAddress(ownerRaw);
+                const canonical = await (0, resolveBeamioAaViaUserCardFactory_1.resolveBeamioAaForEoaViaUserCardFactory)(merchantCardProvider, eoa, merchantCardFactory);
+                if (canonical && canonical.toLowerCase() !== acc.toLowerCase()) {
+                    const msg = `openContainer account ${acc} does not match canonical AA ${canonical} for owner ${eoa}. Refresh aaAddress from getWalletAssets or getAAAccount and re-sign.`;
+                    (0, logger_1.logger)(safe_1.default.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`));
+                    return res.status(400).json({ success: false, error: msg }).end();
+                }
+                const payloadNonce = BigInt(String(body.openContainerPayload.nonce ?? '0'));
+                const chainOpenRelayedNonce = await (0, MemberCard_1.readContainerNonceFromAAStorage)(merchantCardProvider, acc, 'openRelayed');
+                if (payloadNonce !== chainOpenRelayedNonce) {
+                    const msg = `OpenContainer nonce mismatch on ${merchantCardChain}: payload nonce=${payloadNonce} but chain openRelayedNonce=${chainOpenRelayedNonce}. Refresh the payer wallet QR and re-sign.`;
+                    (0, logger_1.logger)(safe_1.default.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`));
+                    return res.status(400).json({ success: false, error: msg }).end();
+                }
+                const openPayloadCompat = body.openContainerPayload;
+                const payloadDeadline = BigInt(String(body.openContainerPayload.deadline ?? openPayloadCompat.validBefore ?? '0'));
+                const payloadCurrencyType = Number(body.openContainerPayload.currencyType);
+                const payloadMaxAmount = BigInt(String(body.openContainerPayload.maxAmount ?? '0'));
+                const signer = ethers_1.ethers.verifyTypedData({
+                    name: 'BeamioAccount',
+                    version: '1',
+                    chainId: (0, beamioUserCardChain_1.chainIdForUserCardChain)(merchantCardChain),
+                    verifyingContract: acc,
+                }, {
+                    OpenContainerMain: [
+                        { name: 'account', type: 'address' },
+                        { name: 'currencyType', type: 'uint8' },
+                        { name: 'maxAmount', type: 'uint256' },
+                        { name: 'nonce', type: 'uint256' },
+                        { name: 'deadline', type: 'uint256' },
+                    ],
+                }, {
+                    account: acc,
+                    currencyType: payloadCurrencyType,
+                    maxAmount: payloadMaxAmount,
+                    nonce: payloadNonce,
+                    deadline: payloadDeadline,
+                }, body.openContainerPayload.signature);
+                if (ethers_1.ethers.getAddress(signer).toLowerCase() !== eoa.toLowerCase()) {
+                    const msg = `OpenContainer signature/account check failed on ${merchantCardChain}: signer ${ethers_1.ethers.getAddress(signer)} is not AA owner ${eoa}. Refresh the payer wallet QR and re-sign.`;
+                    (0, logger_1.logger)(safe_1.default.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`));
+                    return res.status(400).json({ success: false, error: msg }).end();
+                }
+                const simulateAbi = [
+                    'function simulateOpenContainer(address to, tuple(uint8 kind,address asset,uint256 amount,uint256 tokenId,bytes data)[] items, uint8 currencyType, uint256 maxAmount, uint256 nonce_, uint256 deadline_, bytes sig) view returns (bool ok, string reason)',
+                ];
+                const sim = new ethers_1.ethers.Contract(acc, simulateAbi, merchantCardProvider);
+                const [simOk, simReason] = (await sim.simulateOpenContainer(body.openContainerPayload.to, openContainerItems, payloadCurrencyType, payloadMaxAmount, payloadNonce, payloadDeadline, body.openContainerPayload.signature));
+                if (!simOk) {
+                    const reason = simReason || 'simulation failed';
+                    if (reason.toLowerCase().includes('nonce')) {
+                        (0, logger_1.logger)(safe_1.default.yellow(`[AAtoEOA] server OpenContainer simulate stale nonce on ${merchantCardChain}: payload nonce=${payloadNonce}, storage openRelayedNonce=${chainOpenRelayedNonce}, simulate returned "${reason}". Continuing after storage nonce + owner signature pre-check.`));
+                    }
+                    else {
+                        const msg = `OpenContainer signature/account check failed on ${merchantCardChain}: ${reason}. Refresh the payer wallet QR and re-sign.`;
+                        (0, logger_1.logger)(safe_1.default.yellow(`[AAtoEOA] server OpenContainer REJECT: ${msg}`));
+                        return res.status(400).json({ success: false, error: msg }).end();
+                    }
+                }
+            }
+            catch (e) {
+                const m = e?.shortMessage ?? e?.message ?? String(e);
+                (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server OpenContainer canonical AA check FAIL: ${m}`));
+                return res
+                    .status(400)
+                    .json({ success: false, error: 'Failed to validate openContainerPayload.account against canonical AA' })
+                    .end();
+            }
+            const itemsLength = body.openContainerPayload.items?.length ?? 0;
+            // Cluster 预检：currency/currencyAmount 必填（显式参数）
+            if (itemsLength <= 1) {
+                if (!body.currency || !String(Array.isArray(body.currency) ? body.currency[0] : body.currency).trim()) {
+                    (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server OpenContainer REJECT: currency is required`));
+                    return res.status(400).json({ success: false, error: 'currency is required for accounting' }).end();
+                }
+                if (!body.currencyAmount || (Array.isArray(body.currencyAmount) ? !String(body.currencyAmount[0]).trim() : !String(body.currencyAmount).trim())) {
+                    (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server OpenContainer REJECT: currencyAmount is required`));
+                    return res.status(400).json({ success: false, error: 'currencyAmount is required for accounting' }).end();
+                }
+            }
+            if (itemsLength > 1) {
+                if (!body.currency || !body.currencyAmount) {
+                    const error = `When items.length > 1, currency and currencyAmount are required`;
+                    (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server OpenContainer currency validation FAIL: ${error}`));
+                    return res.status(400).json({ success: false, error }).end();
+                }
+                const currencyIsArray = Array.isArray(body.currency);
+                const currencyAmountIsArray = Array.isArray(body.currencyAmount);
+                if (!currencyIsArray || !currencyAmountIsArray) {
+                    const error = `When items.length > 1, currency and currencyAmount must be arrays with the same length. Got items.length=${itemsLength}, currency is array=${currencyIsArray}, currencyAmount is array=${currencyAmountIsArray}`;
+                    (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server OpenContainer currency validation FAIL: ${error}`));
+                    return res.status(400).json({ success: false, error }).end();
+                }
+                const currencyArray = body.currency;
+                const currencyAmountArray = body.currencyAmount;
+                if (currencyArray.length !== itemsLength || currencyAmountArray.length !== itemsLength) {
+                    const error = `currency and currencyAmount arrays must have the same length as items. Got items.length=${itemsLength}, currency.length=${currencyArray.length}, currencyAmount.length=${currencyAmountArray.length}`;
+                    (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server OpenContainer currency length validation FAIL: ${error}`));
+                    return res.status(400).json({ success: false, error }).end();
+                }
+            }
+            const bunitCheck = await (0, MemberCard_1.OpenContainerRelayPreCheckBUnitFee)(body.openContainerPayload, body.currency ?? [], body.currencyAmount ?? []);
+            if (!bunitCheck.success) {
+                (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server OpenContainer B-Unit pre-check FAIL: ${bunitCheck.error}`));
+                return res.status(400).json({ success: false, error: bunitCheck.error }).end();
+            }
+            const payerAa = body.openContainerPayload?.account;
+            if (payerAa && ethers_1.ethers.isAddress(payerAa)) {
+                const lbOc = await (0, MemberCard_1.nfcLinkAppPaymentBlockedIfAny)({ aaAddress: payerAa });
+                if (lbOc) {
+                    return res.status(403).json({ success: false, error: lbOc }).end();
+                }
+            }
+            const reqHashValid = body.requestHash && ethers_1.ethers.isHexString(body.requestHash) && ethers_1.ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined;
+            if (reqHashValid && body.openContainerPayload?.to && ethers_1.ethers.isAddress(body.openContainerPayload.to)) {
+                const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1;
+                const reqCheck = await runRequestHashPreCheck(reqHashValid, vd, body.openContainerPayload.to);
+                if (!reqCheck.ok) {
+                    (0, logger_1.logger)(safe_1.default.yellow(`[AAtoEOA] Cluster requestHash pre-check FAIL: ${reqCheck.error}`));
+                    return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end();
+                }
+            }
+            if (body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object') {
+                const burnPre = await (0, MemberCard_1.verifyChargeOwnerChildBurnClusterPreCheck)({
+                    burn: body.chargeOwnerChildBurn,
+                    payeeTo: body.openContainerPayload.to,
+                    merchantCardAddress: typeof body.merchantCardAddress === 'string' ? body.merchantCardAddress : undefined,
+                    items: body.openContainerPayload.items ?? [],
+                });
+                if (!burnPre.ok) {
+                    (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] chargeOwnerChildBurn Cluster REJECT (openContainer): ${burnPre.error}`));
+                    return res.status(400).json({ success: false, error: burnPre.error }).end();
+                }
+            }
+            (0, logger_1.logger)(safe_1.default.green(`[AAtoEOA] server OpenContainer pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`));
+            (0, exports.postLocalhost)('/api/AAtoEOA', {
+                openContainerPayload: body.openContainerPayload,
+                currency: body.currency,
+                currencyAmount: body.currencyAmount,
+                currencyDiscount: body.currencyDiscount,
+                currencyDiscountAmount: body.currencyDiscountAmount,
+                forText: body.forText,
+                requestHash: body.requestHash,
+                validDays: body.validDays,
+                merchantCardAddress: body.merchantCardAddress,
+                nfcSubtotalCurrencyAmount: body.nfcSubtotalCurrencyAmount,
+                nfcTipCurrencyAmount: body.nfcTipCurrencyAmount,
+                nfcTipRateBps: body.nfcTipRateBps,
+                nfcRequestCurrency: body.nfcRequestCurrency,
+                nfcDiscountAmountFiat6: body.nfcDiscountAmountFiat6,
+                nfcDiscountRateBps: body.nfcDiscountRateBps,
+                nfcTaxAmountFiat6: body.nfcTaxAmountFiat6,
+                nfcTaxRateBps: body.nfcTaxRateBps,
+                posOperator: body.posOperator,
+                originatingUSDCTx: body.originatingUSDCTx,
+                chargeSessionId: body.chargeSessionId,
+                ...(typeof body.chargeLedgerMainUsdc6 === 'string' && body.chargeLedgerMainUsdc6.trim() !== ''
+                    ? { chargeLedgerMainUsdc6: body.chargeLedgerMainUsdc6.trim() }
+                    : {}),
+                ...(body.chargeOwnerChildBurn && typeof body.chargeOwnerChildBurn === 'object'
+                    ? { chargeOwnerChildBurn: body.chargeOwnerChildBurn }
+                    : {}),
+                ...(body.couponOpenContainerSurrender === true ? { couponOpenContainerSurrender: true } : {}),
+                ...(typeof body.couponBurnUserEOA === 'string' && ethers_1.ethers.isAddress(body.couponBurnUserEOA.trim())
+                    ? { couponBurnUserEOA: ethers_1.ethers.getAddress(body.couponBurnUserEOA.trim()) }
+                    : {}),
+                ...(typeof body.couponBurnRefWallet === 'string' && ethers_1.ethers.isAddress(body.couponBurnRefWallet.trim())
+                    ? { couponBurnRefWallet: ethers_1.ethers.getAddress(body.couponBurnRefWallet.trim()) }
+                    : {}),
+            }, res);
+            return;
+        }
+        const { toEOA, amountUSDC6, packedUserOp } = body;
+        const preCheck = (0, MemberCard_1.AAtoEOAPreCheck)(toEOA ?? '', amountUSDC6 ?? '', packedUserOp);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server pre-check FAIL: ${preCheck.error}`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        const relayResolved = (0, aaTransferRelayChain_1.resolveAaUserOpRelayChainFromRequest)({
+            transferAsset: body.transferAsset,
+            relayChain: body.relayChain,
+        });
+        if (!relayResolved.ok) {
+            (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server relay chain FAIL: ${relayResolved.error}`));
+            return res.status(400).json({ success: false, error: relayResolved.error }).end();
+        }
+        const senderCheck = await (0, MemberCard_1.AAtoEOAPreCheckSenderHasCode)(packedUserOp, relayResolved.chain);
+        if (!senderCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server sender pre-check FAIL: ${senderCheck.error}`));
+            return res.status(400).json({ success: false, error: senderCheck.error }).end();
+        }
+        const bunitCheck = await (0, MemberCard_1.AAtoEOAPreCheckBUnitBalance)(packedUserOp, relayResolved.chain);
+        if (!bunitCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`[AAtoEOA] server B-Unit balance pre-check FAIL: ${bunitCheck.error}`));
+            return res.status(400).json({ success: false, error: bunitCheck.error }).end();
+        }
+        if (body.requestHash && ethers_1.ethers.isHexString(body.requestHash) && ethers_1.ethers.dataLength(body.requestHash) === 32 && toEOA && ethers_1.ethers.isAddress(toEOA)) {
+            const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1;
+            const reqCheck = await runRequestHashPreCheck(body.requestHash, vd, toEOA);
+            if (!reqCheck.ok) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[AAtoEOA] Cluster requestHash pre-check FAIL: ${reqCheck.error}`));
+                return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end();
+            }
+        }
+        (0, logger_1.logger)(safe_1.default.green(`[AAtoEOA] server pre-check OK, forwarding to localhost:${masterServerPort}/api/AAtoEOA`));
+        (0, exports.postLocalhost)('/api/AAtoEOA', {
+            toEOA,
+            amountUSDC6,
+            packedUserOp,
+            relayChain: relayResolved.chain,
+            ...(relayResolved.transferAsset ? { transferAsset: relayResolved.transferAsset } : {}),
+            requestHash: body.requestHash,
+            validDays: body.validDays,
+        }, res);
+    });
+    /** regiestChatRoute：集群预检格式，合格转发 master。master 使用 beamio_ContractPool 排队并发处理。*/
+    router.post('/regiestChatRoute', async (req, res) => {
+        const { wallet, keyID, publicKeyArmored, encrypKeyArmored, routeKeyID } = req.body;
+        if (!ethers_1.ethers.isAddress(wallet) || wallet === ethers_1.ethers.ZeroAddress) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/regiestChatRoute Invalid wallet`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ ok: false, error: 'Invalid wallet' }).end();
+        }
+        if (!keyID || typeof keyID !== 'string' || keyID.trim() === '') {
+            return res.status(400).json({ ok: false, error: 'Missing or invalid keyID' }).end();
+        }
+        if (!publicKeyArmored || typeof publicKeyArmored !== 'string' || publicKeyArmored.trim() === '') {
+            return res.status(400).json({ ok: false, error: 'Missing or invalid publicKeyArmored' }).end();
+        }
+        if (!encrypKeyArmored || typeof encrypKeyArmored !== 'string' || encrypKeyArmored.trim() === '') {
+            return res.status(400).json({ ok: false, error: 'Missing or invalid encrypKeyArmored' }).end();
+        }
+        if (!routeKeyID || typeof routeKeyID !== 'string' || routeKeyID.trim() === '') {
+            return res.status(400).json({ ok: false, error: 'Missing or invalid routeKeyID' }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/regiestChatRoute preCheck OK, forwarding to master`), (0, node_util_1.inspect)({ wallet, keyID: keyID.slice(0, 16), routeKeyID }, false, 2, true));
+        (0, exports.postLocalhost)('/api/regiestChatRoute', {
+            wallet: wallet.toLowerCase(),
+            keyID: keyID.trim(),
+            publicKeyArmored: publicKeyArmored.trim(),
+            encrypKeyArmored: encrypKeyArmored.trim(),
+            routeKeyID: routeKeyID.trim()
+        }, res);
+    });
+    /** Offline chat APNs: register device token (EOA personal_sign precheck → Master). */
+    router.post('/registerPushDevice', (req, res) => {
+        const checked = (0, offlineChatPush_1.registerPushDevicePreCheck)(req.body);
+        if (!checked.ok) {
+            return res.status(checked.status).json({ success: false, error: checked.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/registerPushDevice', checked.payload, res);
+    });
+    /**
+     * Cluster read: whether this EOA already has push device row(s).
+     * POS PWA calls on /home; if registered=false → re-bind + registerPushDevice.
+     */
+    router.post('/pushDeviceStatus', async (req, res) => {
+        const checked = (0, offlineChatPush_1.pushDeviceStatusPreCheck)(req.body);
+        if (!checked.ok) {
+            return res.status(checked.status).json({ success: false, error: checked.error }).end();
+        }
+        try {
+            const out = await (0, offlineChatPush_1.pushDeviceStatusProcess)({
+                eoa: String(checked.payload.eoa),
+                scope: checked.payload.scope === 'pos' ? 'pos' : 'any',
+            });
+            return res.status(200).json(out).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[pushDeviceStatus] ${e?.message ?? e}`));
+            return res.status(500).json({ success: false, error: 'Internal error' }).end();
+        }
+    });
+    /** Sync app icon / chat unread badge after local messageCount changes. */
+    router.post('/syncChatBadge', (req, res) => {
+        const checked = (0, offlineChatPush_1.syncChatBadgePreCheck)(req.body);
+        if (!checked.ok) {
+            return res.status(checked.status).json({ success: false, error: checked.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/syncChatBadge', checked.payload, res);
+    });
+    /** CoNET-SI only: offline mailbox save → increment unread + APNs badge. */
+    router.post('/notifyOfflineChat', async (req, res) => {
+        const checked = await (0, offlineChatPush_1.notifyOfflineChatPreCheck)(req.body);
+        if (!checked.ok) {
+            return res.status(checked.status).json({ success: false, error: checked.error }).end();
+        }
+        (0, exports.postLocalhost)('/api/notifyOfflineChat', checked.payload, res);
+    });
+    /** GET /api/transferPreCheckBUnit - UI 自检转账前 B-Unit 是否 >= 2。account=EOA 或 aaAddress=AA（解析 owner 后检查） */
+    router.get('/transferPreCheckBUnit', async (req, res) => {
+        const account = req.query.account;
+        const aaAddress = req.query.aaAddress;
+        if (!account && !aaAddress) {
+            return res.status(400).json({ success: false, error: 'Missing account or aaAddress' }).end();
+        }
+        if (account && !ethers_1.ethers.isAddress(account)) {
+            return res.status(400).json({ success: false, error: 'Invalid account address' }).end();
+        }
+        if (aaAddress && !ethers_1.ethers.isAddress(aaAddress)) {
+            return res.status(400).json({ success: false, error: 'Invalid aaAddress' }).end();
+        }
+        const check = await (0, MemberCard_1.transferPreCheckBUnit)({ account: account || undefined, aaAddress: aaAddress || undefined });
+        if (!check.success) {
+            return res.status(200).json({ success: false, error: check.error }).end();
+        }
+        return res.status(200).json({ success: true }).end();
+    });
+    /** GET /api/vouchersReceivePreCheck - 第三方钱包 URL 收款预检（校验收款 EOA 地址、金额格式、B-Unit >= 2）。 */
+    router.get('/vouchersReceivePreCheck', async (req, res) => {
+        const toRaw = String(req.query.to ?? '').trim();
+        const amountRaw = String(req.query.amount ?? req.query.Amount ?? '').trim();
+        const currencyRaw = String(req.query.currency ?? 'USDC').trim().toUpperCase();
+        const acceptTokensRaw = String(req.query.acceptTokens ?? req.query.accepttokens ?? 'USDC').trim().toUpperCase();
+        if (!toRaw || !ethers_1.ethers.isAddress(toRaw)) {
+            return res.status(400).json({ success: false, error: 'Invalid `to` address' }).end();
+        }
+        if (!/^\d+(?:\.\d{1,6})?$/.test(amountRaw) || !(Number(amountRaw) > 0)) {
+            return res.status(400).json({ success: false, error: 'Invalid `amount` (supports up to 6 decimals)' }).end();
+        }
+        if (currencyRaw !== 'USDC') {
+            return res.status(400).json({ success: false, error: 'Only USDC is supported for vouchers receive URL' }).end();
+        }
+        if (!acceptTokensRaw.split(',').map((s) => s.trim()).filter(Boolean).includes('USDC')) {
+            return res.status(400).json({ success: false, error: '`acceptTokens` must include USDC' }).end();
+        }
+        const to = ethers_1.ethers.getAddress(toRaw);
+        const bunit = await (0, MemberCard_1.transferPreCheckBUnit)({ account: to });
+        if (!bunit.success) {
+            return res.status(200).json({
+                success: false,
+                error: bunit.error ?? 'B-Unit balance is not enough',
+                payee: to,
+                amount: amountRaw,
+                currency: currencyRaw,
+            }).end();
+        }
+        return res.status(200).json({
+            success: true,
+            payee: to,
+            amount: amountRaw,
+            currency: currencyRaw,
+            acceptTokens: 'USDC',
+            paymentUrl: `https://beamio.app/Vouchers?Amount=${encodeURIComponent(amountRaw)}&currency=USDC&acceptTokens=USDC&to=${encodeURIComponent(to)}`,
+        }).end();
+    });
+    /** GET /api/requestAccountingPreCheck - UI 自检 B-Unit 是否足够，不写链。用于创建 payment request 前预检 */
+    router.get('/requestAccountingPreCheck', async (req, res) => {
+        const payee = req.query.payee;
+        const amount = req.query.amount;
+        const currency = req.query.currency || 'USD';
+        if (!payee || !amount) {
+            return res.status(400).json({ success: false, error: 'Missing payee or amount' }).end();
+        }
+        if (!ethers_1.ethers.isAddress(payee)) {
+            return res.status(400).json({ success: false, error: 'Invalid payee address' }).end();
+        }
+        const amt = parseFloat(String(amount));
+        if (!Number.isFinite(amt) || amt <= 0) {
+            return res.status(400).json({ success: false, error: 'amount must be > 0' }).end();
+        }
+        const bunitFeeCheck = await (0, MemberCard_1.requestAccountingPreCheckBUnitFee)(payee, amount, currency);
+        if (!bunitFeeCheck.success) {
+            return res.status(200).json({ success: false, error: bunitFeeCheck.error }).end();
+        }
+        return res.status(200).json({ success: true, feeAmount: bunitFeeCheck.feeAmount?.toString() }).end();
+    });
+    /** Beamio Pay Me 生成 request 记账：预检后转发 master（txCategory=request_create:confirmed） */
+    router.post('/requestAccounting', async (req, res) => {
+        const { requestHash, payee, amount, currency, forText, validDays } = req.body;
+        if (!requestHash || !payee || !amount || validDays == null) {
+            (0, logger_1.logger)(safe_1.default.red(`[requestAccounting] server pre-check: missing required fields`), (0, node_util_1.inspect)(req.body, false, 2, true));
+            return res.status(400).json({ success: false, error: 'Missing required: requestHash, payee, amount, validDays' }).end();
+        }
+        if (!ethers_1.ethers.isHexString(requestHash) || ethers_1.ethers.dataLength(requestHash) !== 32) {
+            return res.status(400).json({ success: false, error: 'requestHash must be bytes32' }).end();
+        }
+        if (!ethers_1.ethers.isAddress(payee)) {
+            return res.status(400).json({ success: false, error: 'Invalid payee address' }).end();
+        }
+        const amt = parseFloat(String(amount));
+        if (!Number.isFinite(amt) || amt <= 0) {
+            return res.status(400).json({ success: false, error: 'amount must be > 0' }).end();
+        }
+        const vd = Math.floor(Number(validDays));
+        if (vd < 1) {
+            return res.status(400).json({ success: false, error: 'validDays must be >= 1' }).end();
+        }
+        const bunitFeeCheck = await (0, MemberCard_1.requestAccountingPreCheckBUnitFee)(String(payee), String(amount), currency ? String(currency) : 'USD');
+        if (!bunitFeeCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`[requestAccounting] B-Unit fee pre-check FAIL: ${bunitFeeCheck.error}`));
+            return res.status(400).json({ success: false, error: bunitFeeCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`[requestAccounting] server pre-check OK, forwarding to master | fee=${Number(bunitFeeCheck.feeAmount ?? 0) / 1e6} B-Units`), (0, node_util_1.inspect)({ requestHash, payee, amount, validDays }, false, 2, true));
+        (0, exports.postLocalhost)('/api/requestAccounting', {
+            requestHash: String(requestHash),
+            payee: String(payee),
+            amount: String(amount),
+            currency: currency ? String(currency) : 'USD',
+            forText: forText ? String(forText) : undefined,
+            validDays: vd,
+            feeBUnits: bunitFeeCheck.feeAmount?.toString(),
+            payerEOA: bunitFeeCheck.payerEOA,
+        }, res);
+    });
+    /** POST /api/cancelRequest - Payee 取消 Request。预检：格式 + 验签必须为原 request (Transaction) 的 payee，非 payee 不得 cancel */
+    router.post('/cancelRequest', async (req, res) => {
+        const { originalPaymentHash, payeeSignature } = req.body;
+        if (!originalPaymentHash || !payeeSignature) {
+            (0, logger_1.logger)(safe_1.default.red(`[cancelRequest] server pre-check: missing originalPaymentHash or payeeSignature`));
+            return res.status(400).json({ success: false, error: 'Missing originalPaymentHash or payeeSignature' }).end();
+        }
+        const preCheck = await (0, MemberCard_1.cancelRequestPreCheck)(String(originalPaymentHash), String(payeeSignature));
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`[cancelRequest] server pre-check FAIL: ${preCheck.error}`));
+            return res.status(403).json({ success: false, error: preCheck.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`[cancelRequest] server pre-check OK (signature from payee), forwarding to master`), (0, node_util_1.inspect)({ originalPaymentHash: originalPaymentHash.slice(0, 10) + '…' }, false, 2, true));
+        (0, exports.postLocalhost)('/api/cancelRequest', { originalPaymentHash: String(originalPaymentHash), payeeSignature: String(payeeSignature) }, res);
+    });
+    /** beamioTransferIndexerAccounting：x402/AAtoEOA 成功后记账到 BeamioIndexerDiamond，预检后转发 master */
+    router.post('/beamioTransferIndexerAccounting', async (req, res) => {
+        const body = convertBigIntToString(req.body);
+        if (!ethers_1.ethers.isAddress(body?.from) || !ethers_1.ethers.isAddress(body?.to)) {
+            (0, logger_1.logger)(safe_1.default.red(`[beamioTransferIndexerAccounting] server pre-check FAIL: invalid from/to`));
+            return res.status(400).json({ success: false, error: 'Invalid from or to address' }).end();
+        }
+        if (String(body.from).toLowerCase() === String(body.to).toLowerCase()) {
+            (0, logger_1.logger)(safe_1.default.red(`[beamioTransferIndexerAccounting] server pre-check FAIL: from=to (payer=payee)`));
+            return res.status(400).json({ success: false, error: 'from and to must be different (payer≠payee)' }).end();
+        }
+        if (!body?.amountUSDC6 || BigInt(body.amountUSDC6) <= 0n) {
+            return res.status(400).json({ success: false, error: 'amountUSDC6 must be > 0' }).end();
+        }
+        if (!body?.finishedHash || !ethers_1.ethers.isHexString(body.finishedHash) || ethers_1.ethers.dataLength(body.finishedHash) !== 32) {
+            return res.status(400).json({ success: false, error: 'finishedHash must be bytes32 tx hash' }).end();
+        }
+        const tipLedgerRow = (0, MemberCard_1.isChargeLedgerTxTipRow)(body.ledgerTxCategory);
+        const reqHashValid = body.requestHash && ethers_1.ethers.isHexString(body.requestHash) && ethers_1.ethers.dataLength(body.requestHash) === 32 ? body.requestHash : undefined;
+        // TX_TIP 为同一笔 Base relay 的附属行：不得再按 Bill requestHash 做「已履约」拦截，否则第二条记账会被 Cluster 403
+        if (!tipLedgerRow && reqHashValid && body.to && ethers_1.ethers.isAddress(body.to)) {
+            const vd = body.validDays != null ? Math.max(1, Math.floor(Number(body.validDays))) : 1;
+            const reqCheck = await runRequestHashPreCheck(reqHashValid, vd, body.to);
+            if (!reqCheck.ok) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[beamioTransferIndexerAccounting] Cluster requestHash pre-check FAIL: ${reqCheck.error}`));
+                return res.status(403).json({ success: false, error: reqCheck.error, rejected: true }).end();
+            }
+        }
+        // Cluster 预检：currency/currencyAmount 必填（显式参数，不再依赖 payMe JSON）
+        if (!body.currency || !String(body.currency).trim()) {
+            (0, logger_1.logger)(safe_1.default.red(`[beamioTransferIndexerAccounting] REJECT: currency is required`));
+            return res.status(400).json({ success: false, error: 'currency is required for accounting' }).end();
+        }
+        if (!body.currencyAmount || !String(body.currencyAmount).trim()) {
+            (0, logger_1.logger)(safe_1.default.red(`[beamioTransferIndexerAccounting] REJECT: currencyAmount is required`));
+            return res.status(400).json({ success: false, error: 'currencyAmount is required for accounting' }).end();
+        }
+        if (tipLedgerRow) {
+            const lid = body.ledgerTxId != null ? String(body.ledgerTxId).trim() : '';
+            const lorig = body.ledgerOriginalPaymentHash != null ? String(body.ledgerOriginalPaymentHash).trim() : '';
+            const fh = String(body.finishedHash).trim();
+            if (!lid || !ethers_1.ethers.isHexString(lid) || ethers_1.ethers.dataLength(lid) !== 32) {
+                return res.status(400).json({ success: false, error: 'TX_TIP accounting requires ledgerTxId (random bytes32, distinct from main tx id)' }).end();
+            }
+            if (!lorig || !ethers_1.ethers.isHexString(lorig) || ethers_1.ethers.dataLength(lorig) !== 32) {
+                return res.status(400).json({ success: false, error: 'TX_TIP accounting requires ledgerOriginalPaymentHash (parent main Transaction.id / Base relay tx hash)' }).end();
+            }
+            if (lorig.toLowerCase() !== fh.toLowerCase()) {
+                return res.status(400).json({ success: false, error: 'TX_TIP ledgerOriginalPaymentHash must equal finishedHash (main relay tx hash)' }).end();
+            }
+            if (lid.toLowerCase() === fh.toLowerCase()) {
+                return res.status(400).json({ success: false, error: 'TX_TIP ledgerTxId must not equal finishedHash; use a new random bytes32 for tip row id' }).end();
+            }
+            (0, logger_1.logger)(safe_1.default.cyan(`[beamioTransferIndexerAccounting] TX_TIP charge ledger Transaction preview (readme) = ${(0, node_util_1.inspect)((0, MemberCard_1.buildChargeLedgerTransactionPreviewFromIndexerBody)(body), false, 4, true)}`));
+        }
+        (0, logger_1.logger)(safe_1.default.green(`[beamioTransferIndexerAccounting] server pre-check OK, forwarding to master from=${body.from?.slice(0, 10)}… to=${body.to?.slice(0, 10)}… requestHash=${body.requestHash ?? 'n/a'}${tipLedgerRow ? ' (TX_TIP row)' : ''}`));
+        (0, logger_1.logger)(safe_1.default.gray(`[DEBUG] postLocalhost /api/beamioTransferIndexerAccounting`));
+        (0, exports.postLocalhost)('/api/beamioTransferIndexerAccounting', body, res);
+    });
+    /** GET /api/checkBUnitClaimEligibility?address=0x... - 检查是否可领取 BeamioBUnits，cluster 直接读 CoNET BUnitAirdrop */
+    router.get('/checkBUnitClaimEligibility', async (req, res) => {
+        const { address } = req.query;
+        if (!address || !ethers_1.ethers.isAddress(address)) {
+            return res.status(400).json({ canClaim: false, error: 'Invalid address' });
+        }
+        try {
+            const { canClaim, nonce, reason } = await (0, MemberCard_1.resolveBUnitFreeClaimEligibility)(providerConet, address);
+            const deadline = Math.floor(Date.now() / 1000) + 3600; // 1h from now
+            res.status(200).json({ canClaim, nonce, deadline, reason: reason ?? null });
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[checkBUnitClaimEligibility] error:'), e?.message ?? e);
+            res.status(500).json({ canClaim: false, error: e?.message ?? 'Failed to check eligibility' });
+        }
+    });
+    /** POST /api/claimBUnits - 领取 BeamioBUnits；Cluster 链上预检通过后才转发 Master */
+    router.post('/claimBUnits', async (req, res) => {
+        const body = req.body;
+        const preCheck = await (0, MemberCard_1.claimBUnitsClusterPreCheck)(providerConet, body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/claimBUnits cluster preCheck FAIL (${preCheck.code}): ${preCheck.error}`));
+            return res.status(400).json({ success: false, error: preCheck.error, code: preCheck.code }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/claimBUnits cluster preCheck OK, forwarding to master'));
+        (0, exports.postLocalhost)('/api/claimBUnits', preCheck.preChecked, res);
+    });
+    /** POST /api/buintRedeemAirdropPreCheck - 读 CoNET 合约，校验兑换码是否可领（Cluster 直出） */
+    router.post('/buintRedeemAirdropPreCheck', async (req, res) => {
+        const code = typeof req.body?.code === 'string' ? req.body.code : '';
+        try {
+            const out = await (0, MemberCard_1.buintRedeemAirdropQueryOnChain)(code);
+            return res.status(200).json(out).end();
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[buintRedeemAirdropPreCheck] error:'), e?.message ?? e);
+            return res.status(400).json({ valid: false, redeemable: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    /** POST /api/buintRedeemAirdropRedeem - admin 代付：Master 先 ensureAAForEOA(Base)，再 redeemWithCodeAsAdmin（recipient=该 EOA 的 AA）；cluster 完整预检后转 master */
+    router.post('/buintRedeemAirdropRedeem', async (req, res) => {
+        const body = req.body;
+        const pre = (0, MemberCard_1.buintRedeemAirdropRedeemClusterPreCheck)(body);
+        if (!pre.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/buintRedeemAirdropRedeem preCheck FAIL: ${pre.error}`));
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        const chain = await (0, MemberCard_1.buintRedeemAirdropQueryOnChain)(pre.code);
+        if (!chain.redeemable) {
+            const err = chain.error ?? 'Redeem not available';
+            (0, logger_1.logger)(safe_1.default.red(`server /api/buintRedeemAirdropRedeem not redeemable: ${err}`));
+            return res.status(400).json({ success: false, error: err }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/buintRedeemAirdropRedeem preCheck OK, forwarding to master'));
+        (0, exports.postLocalhost)('/api/buintRedeemAirdropRedeem', { eoa: pre.eoa, code: pre.code }, res);
+    });
+    /** POST /api/businessStartKetRedeemRedeem — BusinessStartKetRedeem：Cluster 读链预检后代付 redeemWithCodeAsAdmin（Ket + B-Unit → 用户 EOA，CoNET） */
+    router.post('/businessStartKetRedeemRedeem', async (req, res) => {
+        const body = req.body;
+        const pre = (0, MemberCard_1.businessStartKetRedeemRedeemClusterPreCheck)(body);
+        if (!pre.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/businessStartKetRedeemRedeem preCheck FAIL: ${pre.error}`));
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        try {
+            const chain = await (0, MemberCard_1.businessStartKetRedeemQueryOnChain)(pre.code);
+            if (!chain.redeemable) {
+                const err = chain.error ?? 'Redeem not available';
+                (0, logger_1.logger)(safe_1.default.red(`server /api/businessStartKetRedeemRedeem not redeemable: ${err}`));
+                return res.status(400).json({ success: false, error: err }).end();
+            }
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[businessStartKetRedeemRedeem] query error:'), e?.message ?? e);
+            return res.status(400).json({ success: false, error: e?.message ?? 'Query failed' }).end();
+        }
+        const linked = await tryPreCheckLinkedValidatorClaim(pre.code, body.linkedValidatorClaim);
+        (0, logger_1.logger)(safe_1.default.green('server /api/businessStartKetRedeemRedeem preCheck OK, forwarding to master'));
+        (0, exports.postLocalhost)('/api/businessStartKetRedeemRedeem', {
+            eoa: pre.eoa,
+            code: pre.code,
+            linkedValidatorRedeemable: linked.linkedValidatorRedeemable,
+            linkedValidatorClaim: linked.linkedValidatorClaim,
+        }, res);
+    });
+    /** GET /api/businessStartKetRedeemAdminNonce?admin=0x… — Cluster 直读 CoNET redeemAdminNonces（供签名前） */
+    router.get('/businessStartKetRedeemAdminNonce', async (req, res) => {
+        const admin = typeof req.query.admin === 'string' ? req.query.admin.trim() : '';
+        const out = await (0, MemberCard_1.businessStartKetRedeemReadAdminNonce)(admin);
+        if (!out.ok) {
+            return res.status(400).json({ success: false, error: out.error }).end();
+        }
+        return res.status(200).json({ success: true, nonce: out.nonce }).end();
+    });
+    /** POST /api/businessStartKetRedeemAdminCreate — redeem admin EIP-712 授权；Cluster 完整预检后转发 Master，Settle 代付 gas 调 createRedeemFor（Ket #0 ×1 + 指定 B-Unit） */
+    router.post('/businessStartKetRedeemAdminCreate', async (req, res) => {
+        const pre = await (0, MemberCard_1.businessStartKetRedeemCreateClusterPreCheck)(req.body);
+        if (!pre.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/businessStartKetRedeemAdminCreate preCheck FAIL: ${pre.error}`));
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/businessStartKetRedeemAdminCreate preCheck OK, forwarding to master'));
+        const p = pre.preChecked;
+        (0, exports.postLocalhost)('/api/businessStartKetRedeemAdminCreate', {
+            contract: p.contract,
+            admin: p.admin,
+            codeHash: p.codeHash,
+            tokenId: p.tokenId.toString(),
+            ketAmount: p.ketAmount.toString(),
+            buintAmount: p.buintAmount.toString(),
+            validAfter: p.validAfter.toString(),
+            validBefore: p.validBefore.toString(),
+            nonce: p.nonce.toString(),
+            deadline: p.deadline.toString(),
+            signature: p.signature,
+        }, res);
+    });
+    /** POST /api/businessStartKetRedeemAdminCancel — redeem admin EIP-712 授权取消兑换 */
+    router.post('/businessStartKetRedeemAdminCancel', async (req, res) => {
+        const pre = await (0, MemberCard_1.businessStartKetRedeemCancelClusterPreCheck)(req.body);
+        if (!pre.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/businessStartKetRedeemAdminCancel preCheck FAIL: ${pre.error}`));
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green('server /api/businessStartKetRedeemAdminCancel preCheck OK, forwarding to master'));
+        const cp = pre.preChecked;
+        (0, exports.postLocalhost)('/api/businessStartKetRedeemAdminCancel', {
+            contract: cp.contract,
+            admin: cp.admin,
+            codeHash: cp.codeHash,
+            nonce: cp.nonce.toString(),
+            deadline: cp.deadline.toString(),
+            signature: cp.signature,
+        }, res);
+    });
+    /** GenesisNodeReferralVaultV1: per-account redeemActionNonces / claimNonces. */
+    router.get('/genesisNodeReferralRedeemNonce', async (req, res) => {
+        try {
+            const account = ethers_1.ethers.getAddress(String(req.query.account ?? ''));
+            const kind = String(req.query.kind ?? 'action').toLowerCase();
+            const vault = new ethers_1.ethers.Contract(chainAddresses_1.CONET_GENESIS_NODE_REFERRAL_VAULT, [
+                'function redeemActionNonces(address) view returns (uint256)',
+                'function claimNonces(address) view returns (uint256)',
+            ], providerConet);
+            const nonce = kind === 'claim' ? await vault.claimNonces(account) : await vault.redeemActionNonces(account);
+            return res.status(200).json({ success: true, nonce: nonce.toString() }).end();
+        }
+        catch (error) {
+            return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Nonce read failed' }).end();
+        }
+    });
+    /**
+     * Genesis Partnership Income details — purchase hashes credited to this wallet.
+     * Source: Master ledger written on each genesisNodeSeat fulfill (x402 + in-app gas sponsored).
+     *
+     * Query:
+     * - `account` (required)
+     * - `sinceMs` — incremental: only purchases after this timestamp (daemon)
+     * - `beforeMs` — older page: purchases before this timestamp
+     * - `limit` — purchase-row page size (default 50, max 200)
+     */
+    router.get('/genesisNodeReferralIncome', async (req, res) => {
+        try {
+            const account = ethers_1.ethers.getAddress(String(req.query.account ?? ''));
+            const sinceRaw = Number(req.query.sinceMs);
+            const beforeRaw = Number(req.query.beforeMs);
+            const limitRaw = Number(req.query.limit);
+            const sinceMs = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : undefined;
+            const beforeMs = Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : undefined;
+            const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : undefined;
+            const page = await (0, genesisNodeReferralIncome_1.loadGenesisNodeReferralIncomeForAccount)(account, {
+                sinceMs,
+                beforeMs,
+                limit,
+                skipBackfill: Boolean(sinceMs),
+            });
+            return res
+                .status(200)
+                .json({
+                success: true,
+                account,
+                items: page.items,
+                hasMore: page.hasMore,
+                newestTimestampMs: page.newestTimestampMs,
+                oldestTimestampMs: page.oldestTimestampMs,
+            })
+                .end();
+        }
+        catch (error) {
+            return res
+                .status(400)
+                .json({
+                success: false,
+                error: error?.shortMessage ?? error?.message ?? 'Could not load Genesis income details',
+            })
+                .end();
+        }
+    });
+    router.post('/genesisNodeReferralRedeem', async (req, res) => {
+        try {
+            const action = String(req.body?.action ?? '');
+            const allowed = [
+                'issueL0',
+                'cancelL0',
+                'claimL0',
+                'issueL1',
+                'cancelL1',
+                'claimL1',
+                'setFoundation',
+                'setDefaultAdminPayout',
+            ];
+            if (!allowed.includes(action)) {
+                return res.status(400).json({ success: false, error: 'Invalid genesis referral redeem action' }).end();
+            }
+            const account = ethers_1.ethers.getAddress(String(req.body?.account ?? ''));
+            const nonce = BigInt(String(req.body?.nonce ?? ''));
+            const deadline = BigInt(String(req.body?.deadline ?? ''));
+            const signature = String(req.body?.signature ?? '');
+            if (!ethers_1.ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+                return res.status(400).json({ success: false, error: 'Invalid or expired signature request' }).end();
+            }
+            const eip712Domain = {
+                name: 'GenesisNodeReferralVaultV1',
+                version: '1',
+                chainId: 224422,
+                verifyingContract: chainAddresses_1.CONET_GENESIS_NODE_REFERRAL_VAULT,
+            };
+            const vault = new ethers_1.ethers.Contract(chainAddresses_1.CONET_GENESIS_NODE_REFERRAL_VAULT, [
+                'function admins(address) view returns (bool)',
+                'function isActiveL0(address) view returns (bool)',
+                'function redeemActionNonces(address) view returns (uint256)',
+                'function claimNonces(address) view returns (uint256)',
+                'function members(address) view returns (uint8 role,address parentAdmin,bool active,address parentL0,uint256 ratioBps)',
+            ], providerConet);
+            const isPayoutAction = action === 'setFoundation' || action === 'setDefaultAdminPayout';
+            const forwardBody = {
+                action,
+                account,
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+            };
+            if (isPayoutAction) {
+                const payoutRaw = String(req.body?.payoutAddress ?? '');
+                if (!ethers_1.ethers.isAddress(payoutRaw) || payoutRaw === ethers_1.ethers.ZeroAddress) {
+                    return res.status(400).json({ success: false, error: 'payoutAddress must be a non-zero address' }).end();
+                }
+                const payoutAddress = ethers_1.ethers.getAddress(payoutRaw);
+                const isAdmin = Boolean(await vault.admins(account));
+                if (!isAdmin) {
+                    return res.status(403).json({ success: false, error: 'Account is not a Genesis referral admin' }).end();
+                }
+                const expectedNonce = BigInt((await vault.redeemActionNonces(account)).toString());
+                if (nonce !== expectedNonce) {
+                    return res.status(400).json({ success: false, error: 'Stale redeem nonce' }).end();
+                }
+                const typeName = action === 'setFoundation' ? 'SetFoundation' : 'SetDefaultAdminPayout';
+                const fieldName = action === 'setFoundation' ? 'foundation' : 'payout';
+                const digest = ethers_1.ethers.TypedDataEncoder.hash(eip712Domain, {
+                    [typeName]: [
+                        { name: 'admin', type: 'address' },
+                        { name: fieldName, type: 'address' },
+                        { name: 'nonce', type: 'uint256' },
+                        { name: 'deadline', type: 'uint256' },
+                    ],
+                }, { admin: account, [fieldName]: payoutAddress, nonce, deadline });
+                const recovered = ethers_1.ethers.recoverAddress(digest, signature);
+                if (recovered.toLowerCase() !== account.toLowerCase()) {
+                    return res.status(403).json({ success: false, error: 'Invalid signature' }).end();
+                }
+                forwardBody.payoutAddress = payoutAddress;
+                return (0, exports.postLocalhost)('/api/genesisNodeReferralRedeem', forwardBody, res);
+            }
+            const redeemHash = String(req.body?.redeemHash ?? '');
+            if (!ethers_1.ethers.isHexString(redeemHash, 32)) {
+                return res.status(400).json({ success: false, error: 'redeemHash must be bytes32' }).end();
+            }
+            forwardBody.redeemHash = redeemHash;
+            if (action === 'issueL0' || action === 'cancelL0') {
+                const isAdmin = Boolean(await vault.admins(account));
+                if (!isAdmin) {
+                    return res.status(403).json({ success: false, error: 'Account is not a Genesis referral admin' }).end();
+                }
+                const expectedNonce = BigInt((await vault.redeemActionNonces(account)).toString());
+                if (nonce !== expectedNonce) {
+                    return res.status(400).json({ success: false, error: 'Stale redeem nonce' }).end();
+                }
+                const typeName = action === 'issueL0' ? 'IssueL0RedeemCode' : 'CancelL0RedeemCode';
+                const digest = ethers_1.ethers.TypedDataEncoder.hash(eip712Domain, {
+                    [typeName]: [
+                        { name: 'admin', type: 'address' },
+                        { name: 'redeemHash', type: 'bytes32' },
+                        { name: 'nonce', type: 'uint256' },
+                        { name: 'deadline', type: 'uint256' },
+                    ],
+                }, { admin: account, redeemHash, nonce, deadline });
+                const recovered = ethers_1.ethers.recoverAddress(digest, signature);
+                if (recovered.toLowerCase() !== account.toLowerCase()) {
+                    return res.status(403).json({ success: false, error: 'Invalid signature' }).end();
+                }
+            }
+            else if (action === 'issueL1' || action === 'cancelL1') {
+                const isL0 = Boolean(await vault.isActiveL0(account));
+                if (!isL0) {
+                    return res.status(403).json({ success: false, error: 'Account is not an active Genesis L0' }).end();
+                }
+                const expectedNonce = BigInt((await vault.redeemActionNonces(account)).toString());
+                if (nonce !== expectedNonce) {
+                    return res.status(400).json({ success: false, error: 'Stale redeem nonce' }).end();
+                }
+                if (action === 'issueL1') {
+                    const ratioBpsRaw = String(req.body?.ratioBps ?? '');
+                    if (!/^\d+$/.test(ratioBpsRaw)) {
+                        return res.status(400).json({ success: false, error: 'ratioBps required for issueL1' }).end();
+                    }
+                    const ratioBps = BigInt(ratioBpsRaw);
+                    if (ratioBps > 10000n) {
+                        return res.status(400).json({ success: false, error: 'ratioBps must be 0–10000' }).end();
+                    }
+                    const digest = ethers_1.ethers.TypedDataEncoder.hash(eip712Domain, {
+                        IssueL1RedeemCode: [
+                            { name: 'l0', type: 'address' },
+                            { name: 'redeemHash', type: 'bytes32' },
+                            { name: 'ratioBps', type: 'uint256' },
+                            { name: 'nonce', type: 'uint256' },
+                            { name: 'deadline', type: 'uint256' },
+                        ],
+                    }, { l0: account, redeemHash, ratioBps, nonce, deadline });
+                    const recovered = ethers_1.ethers.recoverAddress(digest, signature);
+                    if (recovered.toLowerCase() !== account.toLowerCase()) {
+                        return res.status(403).json({ success: false, error: 'Invalid signature' }).end();
+                    }
+                    forwardBody.ratioBps = ratioBps.toString();
+                }
+                else {
+                    const digest = ethers_1.ethers.TypedDataEncoder.hash(eip712Domain, {
+                        CancelL1RedeemCode: [
+                            { name: 'l0', type: 'address' },
+                            { name: 'redeemHash', type: 'bytes32' },
+                            { name: 'nonce', type: 'uint256' },
+                            { name: 'deadline', type: 'uint256' },
+                        ],
+                    }, { l0: account, redeemHash, nonce, deadline });
+                    const recovered = ethers_1.ethers.recoverAddress(digest, signature);
+                    if (recovered.toLowerCase() !== account.toLowerCase()) {
+                        return res.status(403).json({ success: false, error: 'Invalid signature' }).end();
+                    }
+                }
+            }
+            else {
+                // claimL0 | claimL1
+                const expectedNonce = BigInt((await vault.claimNonces(account)).toString());
+                if (nonce !== expectedNonce) {
+                    return res.status(400).json({ success: false, error: 'Stale claim nonce' }).end();
+                }
+                const secret = String(req.body?.secret ?? '');
+                if (!secret) {
+                    return res.status(400).json({ success: false, error: 'Missing secret' }).end();
+                }
+                const typeName = action === 'claimL0' ? 'ClaimL0RedeemCode' : 'ClaimL1RedeemCode';
+                const digest = ethers_1.ethers.TypedDataEncoder.hash(eip712Domain, {
+                    [typeName]: [
+                        { name: 'claimer', type: 'address' },
+                        { name: 'redeemHash', type: 'bytes32' },
+                        { name: 'nonce', type: 'uint256' },
+                        { name: 'deadline', type: 'uint256' },
+                    ],
+                }, { claimer: account, redeemHash, nonce, deadline });
+                const recovered = ethers_1.ethers.recoverAddress(digest, signature);
+                if (recovered.toLowerCase() !== account.toLowerCase()) {
+                    return res.status(403).json({ success: false, error: 'Invalid signature' }).end();
+                }
+                forwardBody.secret = secret;
+            }
+            (0, exports.postLocalhost)('/api/genesisNodeReferralRedeem', forwardBody, res);
+        }
+        catch (error) {
+            return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' }).end();
+        }
+    });
+    /**
+     * ChatIndexRegistry — read a wallet's current head pointer + EIP-712 nonce.
+     * Client uses `nonce` to build the next SetPointer signature; `indexHash`/`ts`/`seq`
+     * are the last-recorded encrypted-history index for recovery.
+     */
+    router.get('/chatIndexPointer', async (req, res) => {
+        try {
+            const owner = ethers_1.ethers.getAddress(String(req.query.owner ?? req.query.account ?? ''));
+            const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_CHAT_INDEX_REGISTRY, [
+                'function getPointer(address) view returns (bytes32 indexHash,uint64 ts,uint64 seq,uint64 updatedAt)',
+                'function nonceOf(address) view returns (uint256)',
+            ], providerConet);
+            const [ptr, nonce] = await Promise.all([registry.getPointer(owner), registry.nonceOf(owner)]);
+            return res
+                .status(200)
+                .json({
+                success: true,
+                owner,
+                indexHash: ptr[0],
+                ts: ptr[1].toString(),
+                seq: ptr[2].toString(),
+                updatedAt: ptr[3].toString(),
+                nonce: nonce.toString(),
+                registry: chainAddresses_1.CONET_CHAT_INDEX_REGISTRY,
+                domain: {
+                    name: 'ChatIndexRegistry',
+                    version: '1',
+                    chainId: 224422,
+                    verifyingContract: chainAddresses_1.CONET_CHAT_INDEX_REGISTRY,
+                },
+            })
+                .end();
+        }
+        catch (error) {
+            return res
+                .status(400)
+                .json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Pointer read failed' })
+                .end();
+        }
+    });
+    /**
+     * ChatIndexRegistry — gasless head-pointer update. Cluster verifies the offline
+     * EIP-712 signature + nonce + monotonic ts/seq, then forwards to Master relayer (pays gas).
+     */
+    router.post('/setChatIndexPointer', async (req, res) => {
+        try {
+            const owner = ethers_1.ethers.getAddress(String(req.body?.owner ?? ''));
+            const indexHash = String(req.body?.indexHash ?? '');
+            if (!ethers_1.ethers.isHexString(indexHash, 32) || indexHash === ethers_1.ethers.ZeroHash) {
+                return res.status(400).json({ success: false, error: 'indexHash must be a non-zero bytes32' }).end();
+            }
+            const ts = BigInt(String(req.body?.ts ?? '0'));
+            const seq = BigInt(String(req.body?.seq ?? '0'));
+            const nonce = BigInt(String(req.body?.nonce ?? ''));
+            const signature = String(req.body?.signature ?? '');
+            if (!ethers_1.ethers.isHexString(signature)) {
+                return res.status(400).json({ success: false, error: 'Invalid signature' }).end();
+            }
+            if (ts >= 1n << 64n || seq >= 1n << 64n) {
+                return res.status(400).json({ success: false, error: 'ts/seq out of uint64 range' }).end();
+            }
+            const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_CHAT_INDEX_REGISTRY, [
+                'function getPointer(address) view returns (bytes32 indexHash,uint64 ts,uint64 seq,uint64 updatedAt)',
+                'function nonceOf(address) view returns (uint256)',
+            ], providerConet);
+            const [cur, expectedNonce] = await Promise.all([
+                registry.getPointer(owner),
+                registry.nonceOf(owner),
+            ]);
+            if (nonce !== BigInt(expectedNonce.toString())) {
+                return res.status(400).json({ success: false, error: 'Stale pointer nonce' }).end();
+            }
+            if (ts < BigInt(cur[1].toString())) {
+                return res.status(400).json({ success: false, error: 'Stale ts (must be non-decreasing)' }).end();
+            }
+            if (seq < BigInt(cur[2].toString())) {
+                return res.status(400).json({ success: false, error: 'Stale seq (must be non-decreasing)' }).end();
+            }
+            const digest = ethers_1.ethers.TypedDataEncoder.hash({
+                name: 'ChatIndexRegistry',
+                version: '1',
+                chainId: 224422,
+                verifyingContract: chainAddresses_1.CONET_CHAT_INDEX_REGISTRY,
+            }, {
+                SetPointer: [
+                    { name: 'owner', type: 'address' },
+                    { name: 'indexHash', type: 'bytes32' },
+                    { name: 'ts', type: 'uint64' },
+                    { name: 'seq', type: 'uint64' },
+                    { name: 'nonce', type: 'uint256' },
+                ],
+            }, { owner, indexHash, ts, seq, nonce });
+            const recovered = ethers_1.ethers.recoverAddress(digest, signature);
+            if (recovered.toLowerCase() !== owner.toLowerCase()) {
+                return res.status(403).json({ success: false, error: 'Invalid signature' }).end();
+            }
+            return (0, exports.postLocalhost)('/api/setChatIndexPointer', {
+                owner,
+                indexHash,
+                ts: ts.toString(),
+                seq: seq.toString(),
+                nonce: nonce.toString(),
+                signature,
+            }, res);
+        }
+        catch (error) {
+            return res
+                .status(400)
+                .json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' })
+                .end();
+        }
+    });
+    /**
+     * CoNET 本链离线签字 StableSwap（USDC ↔ paid GB / USDC ↔ paid B-Unit）。
+     * Cluster 预检 → Master Settle_ContractPool → Offline.bridgeStableSwapWithSignature。
+     */
+    router.get('/treasuryStableSwapNonce', async (req, res) => {
+        try {
+            const user = ethers_1.ethers.getAddress(String(req.query.user ?? req.query.account ?? ''));
+            const offline = new ethers_1.ethers.Contract(chainAddresses_1.CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, ['function stableSwapNonces(address) view returns (uint256)'], providerConet);
+            const nonce = await offline.stableSwapNonces(user);
+            return res
+                .status(200)
+                .json({
+                success: true,
+                nonce: nonce.toString(),
+                peer: chainAddresses_1.CONET_TREASURY_PEER,
+                offline: chainAddresses_1.CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE,
+                domain: (0, treasuryStableSwapRelay_1.treasuryStableSwapEip712Domain)(),
+            })
+                .end();
+        }
+        catch (error) {
+            return res
+                .status(400)
+                .json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Nonce read failed' })
+                .end();
+        }
+    });
+    router.post('/treasuryStableSwap', async (req, res) => {
+        try {
+            const user = ethers_1.ethers.getAddress(String(req.body?.user ?? ''));
+            const burnAssetKind = Number(req.body?.burnAssetKind);
+            const creditAssetKind = Number(req.body?.creditAssetKind);
+            const amount = BigInt(String(req.body?.amount ?? '0'));
+            const destinationChainId = BigInt(String(req.body?.destinationChainId ?? '0'));
+            const recipientRaw = String(req.body?.recipient ?? user);
+            const recipient = ethers_1.ethers.getAddress(recipientRaw || user);
+            const minCreditAmount = BigInt(String(req.body?.minCreditAmount ?? '0'));
+            const nonce = BigInt(String(req.body?.nonce ?? ''));
+            const deadline = BigInt(String(req.body?.deadline ?? ''));
+            const signature = String(req.body?.signature ?? '');
+            if (!Number.isInteger(burnAssetKind) || !Number.isInteger(creditAssetKind)) {
+                return res.status(400).json({ success: false, error: 'Invalid asset kind' }).end();
+            }
+            if (amount <= 0n) {
+                return res.status(400).json({ success: false, error: 'amount must be > 0' }).end();
+            }
+            if (destinationChainId !== treasuryStableSwapRelay_1.CONET_STABLE_SWAP_CHAIN_ID) {
+                return res.status(400).json({ success: false, error: 'destinationChainId must be 224422 (local only)' }).end();
+            }
+            if (!(0, treasuryStableSwapRelay_1.isLocalUsdcStableSwapPair)(burnAssetKind, creditAssetKind)) {
+                return res
+                    .status(400)
+                    .json({ success: false, error: 'Local swap requires USDC on one side (no GB↔B-Unit)' })
+                    .end();
+            }
+            if (!ethers_1.ethers.isHexString(signature) || deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+                return res.status(400).json({ success: false, error: 'Invalid or expired signature request' }).end();
+            }
+            const peer = new ethers_1.ethers.Contract(chainAddresses_1.CONET_TREASURY_PEER, [
+                'function quoteStableSwap(uint8,uint256,uint8) view returns (uint256)',
+                'function usdc6PerFullGb() view returns (uint256)',
+                'function usdcErc20() view returns (address)',
+                'function gbTokenErc20() view returns (address)',
+                'function buint() view returns (address)',
+            ], providerConet);
+            const offline = new ethers_1.ethers.Contract(chainAddresses_1.CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, ['function stableSwapNonces(address) view returns (uint256)'], providerConet);
+            const expectedNonce = BigInt((await offline.stableSwapNonces(user)).toString());
+            if (nonce !== expectedNonce) {
+                return res.status(400).json({ success: false, error: 'Stale stableSwap nonce' }).end();
+            }
+            if (burnAssetKind === treasuryStableSwapRelay_1.CANONICAL_GB_ERC20 ||
+                creditAssetKind === treasuryStableSwapRelay_1.CANONICAL_GB_ERC20) {
+                const rate = BigInt((await peer.usdc6PerFullGb()).toString());
+                if (rate === 0n) {
+                    return res.status(400).json({ success: false, error: 'usdc6PerFullGb is not set' }).end();
+                }
+            }
+            const quote = BigInt((await peer.quoteStableSwap(burnAssetKind, amount, creditAssetKind)).toString());
+            if (quote < minCreditAmount) {
+                return res.status(400).json({ success: false, error: 'quote below minCreditAmount' }).end();
+            }
+            const digest = ethers_1.ethers.TypedDataEncoder.hash((0, treasuryStableSwapRelay_1.treasuryStableSwapEip712Domain)(), treasuryStableSwapRelay_1.TREASURY_STABLE_SWAP_TYPES, {
+                user,
+                burnAssetKind,
+                amount,
+                destinationChainId,
+                recipient,
+                creditAssetKind,
+                minCreditAmount,
+                nonce,
+                deadline,
+            });
+            const recovered = ethers_1.ethers.recoverAddress(digest, signature);
+            if (recovered.toLowerCase() !== user.toLowerCase()) {
+                return res.status(403).json({ success: false, error: 'Invalid signature' }).end();
+            }
+            const usdcAddr = ethers_1.ethers.getAddress(await peer.usdcErc20());
+            const gbAddr = ethers_1.ethers.getAddress(await peer.gbTokenErc20());
+            const buintAddr = ethers_1.ethers.getAddress(await peer.buint());
+            const erc20 = (addr) => new ethers_1.ethers.Contract(addr, [
+                'function balanceOf(address) view returns (uint256)',
+                'function allowance(address,address) view returns (uint256)',
+                'function bridgeableBalanceOf(address) view returns (uint256)',
+            ], providerConet);
+            if (burnAssetKind === treasuryStableSwapRelay_1.CANONICAL_USDC_ERC20) {
+                const token = erc20(usdcAddr || chainAddresses_1.CONET_USDC);
+                const bal = BigInt((await token.balanceOf(user)).toString());
+                if (bal < amount) {
+                    return res.status(400).json({ success: false, error: 'Insufficient USDC balance' }).end();
+                }
+                // FactoryERC20 burnFrom(minter) 不需 approve；若客户端附带 permit 则 Master 先提交。
+            }
+            else if (burnAssetKind === treasuryStableSwapRelay_1.CANONICAL_GB_ERC20) {
+                const token = erc20(gbAddr);
+                let paid = 0n;
+                try {
+                    paid = BigInt((await token.bridgeableBalanceOf(user)).toString());
+                }
+                catch {
+                    paid = BigInt((await token.balanceOf(user)).toString());
+                }
+                if (paid < amount) {
+                    return res.status(400).json({ success: false, error: 'Insufficient paid GB' }).end();
+                }
+            }
+            else if (burnAssetKind === treasuryStableSwapRelay_1.CANONICAL_BUINT_ERC20) {
+                const token = erc20(buintAddr || chainAddresses_1.CONET_BUINT);
+                let paid = 0n;
+                try {
+                    paid = BigInt((await token.bridgeableBalanceOf(user)).toString());
+                }
+                catch {
+                    paid = BigInt((await token.balanceOf(user)).toString());
+                }
+                if (paid < amount) {
+                    return res.status(400).json({ success: false, error: 'Insufficient paid B-Unit' }).end();
+                }
+            }
+            const permitBody = req.body?.permit;
+            const forwardBody = {
+                user,
+                burnAssetKind,
+                amount: amount.toString(),
+                destinationChainId: destinationChainId.toString(),
+                recipient,
+                creditAssetKind,
+                minCreditAmount: minCreditAmount.toString(),
+                nonce: nonce.toString(),
+                deadline: deadline.toString(),
+                signature,
+                quote: quote.toString(),
+                treasury: chainAddresses_1.CONET_TREASURY_CREATE2,
+            };
+            if (permitBody &&
+                permitBody.r &&
+                permitBody.s &&
+                permitBody.v != null &&
+                permitBody.value != null &&
+                permitBody.deadline != null) {
+                forwardBody.permit = {
+                    value: String(permitBody.value),
+                    deadline: String(permitBody.deadline),
+                    v: Number(permitBody.v),
+                    r: String(permitBody.r),
+                    s: String(permitBody.s),
+                };
+            }
+            return (0, exports.postLocalhost)('/api/treasuryStableSwap', forwardBody, res);
+        }
+        catch (error) {
+            return res
+                .status(400)
+                .json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' })
+                .end();
+        }
+    });
+    /** ReferralRegistryVaultV1: read the per-account meta-transaction nonce. */
+    router.get('/referralRegistryRedeemNonce', async (req, res) => {
+        try {
+            const account = ethers_1.ethers.getAddress(String(req.query.account ?? ''));
+            const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+            const nonce = await registry.redeemActionNonces(account);
+            return res.status(200).json({ success: true, nonce: nonce.toString() }).end();
+        }
+        catch (error) {
+            return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Nonce read failed' }).end();
+        }
+    });
+    router.get('/referralRegistryAdminNonce', async (req, res) => {
+        try {
+            const account = ethers_1.ethers.getAddress(String(req.query.account ?? ''));
+            const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+            const nonce = await registry.redeemActionNonces(account);
+            return res.status(200).json({ success: true, nonce: nonce.toString() }).end();
+        }
+        catch (error) {
+            return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Admin nonce read failed' }).end();
+        }
+    });
+    router.get('/referralRegistryL0Quota', async (req, res) => {
+        try {
+            const l0 = ethers_1.ethers.getAddress(String(req.query.l0 ?? ''));
+            const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+            const member = await registry.members(l0);
+            if (Number(member[0]) !== 1 || !Boolean(member[5])) {
+                return res.status(400).json({ success: false, error: 'L0 is not active' }).end();
+            }
+            const quota = await registry.merchantQuotas(l0);
+            return res.status(200).json({
+                success: true,
+                starterKetRemaining: quota.starterKetRemaining.toString(),
+                paidBunitRemaining: quota.paidBunitRemaining.toString(),
+            }).end();
+        }
+        catch (error) {
+            return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'L0 quota read failed' }).end();
+        }
+    });
+    router.get('/referralRegistryMerchantCandidates', async (req, res) => {
+        try {
+            const admin = ethers_1.ethers.getAddress(String(req.query.admin ?? ''));
+            const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+            if (!Boolean(await registry.admins(admin))) {
+                return res.status(403).json({ success: false, error: 'Account is not a ReferralRegistry admin' }).end();
+            }
+            const candidates = await (0, db_1.listReferralMerchantCandidates)();
+            const available = [];
+            for (const candidate of candidates) {
+                if (candidate.merchant.toLowerCase() === admin.toLowerCase())
+                    continue;
+                if ((0, apiExcludedUserCards_1.isApiExcludedUserCard)(candidate.cardAddress))
+                    continue;
+                const member = await registry.members(candidate.merchant);
+                if (Number(member[0]) !== 0)
+                    continue;
+                if ((await registry.claimedMerchantL0(candidate.merchant)) !== ethers_1.ethers.ZeroAddress)
+                    continue;
+                available.push(candidate);
+            }
+            return res.status(200).json({ success: true, candidates: available }).end();
+        }
+        catch (error) {
+            return res.status(400).json({ success: false, error: error?.message ?? 'Merchant candidates unavailable' }).end();
+        }
+    });
+    router.post('/referralRegistryAdminManagement', async (req, res) => {
+        const pre = await referralRegistryAdminManagementPreCheck(req.body);
+        if (!pre.success)
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        (0, exports.postLocalhost)('/api/referralRegistryAdminManagement', pre.preChecked, res);
+    });
+    router.post('/referralPurchaseSplit', async (req, res) => {
+        const pre = await referralPurchaseSplitPreCheck(req.body);
+        if (!pre.success)
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        (0, exports.postLocalhost)('/api/referralPurchaseSplit', pre.preChecked, res);
+    });
+    router.post('/referralRegistryMerchantShare', async (req, res) => {
+        const pre = await referralRegistryMerchantSharePreCheck(req.body);
+        if (!pre.success)
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        (0, exports.postLocalhost)('/api/referralRegistryMerchantShare', pre.preChecked, res);
+    });
+    router.get('/referralRegistryClaimNonce', async (req, res) => {
+        try {
+            const account = ethers_1.ethers.getAddress(String(req.query.account ?? ''));
+            const registry = new ethers_1.ethers.Contract(chainAddresses_1.CONET_REFERRAL_REGISTRY_VAULT_V1, REFERRAL_REDEEM_READ_ABI, providerConet);
+            const nonce = await registry.referralClaimNonces(account);
+            return res.status(200).json({ success: true, nonce: nonce.toString() }).end();
+        }
+        catch (error) {
+            return res.status(400).json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Claim nonce read failed' }).end();
+        }
+    });
+    /** ReferralRegistryVaultV1: verify the offline EIP-712 authorization, then relay through Master. */
+    router.post('/referralRegistryRedeem', async (req, res) => {
+        const pre = await referralRedeemRelayPreCheck(req.body);
+        if (!pre.success)
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        (0, exports.postLocalhost)('/api/referralRegistryRedeem', pre.preChecked, res);
+    });
+    router.get('/referralRegistryClaims', async (req, res) => {
+        try {
+            const parent = ethers_1.ethers.getAddress(String(req.query.parent ?? ''));
+            const claims = await (0, db_1.listReferralRegistryClaimsByParent)(parent);
+            return res.status(200).json({ success: true, claims }).end();
+        }
+        catch (error) {
+            return res.status(400).json({ success: false, error: error?.message ?? 'Referral claim history unavailable' }).end();
+        }
+    });
+    router.get('/referralRegistryTree', async (req, res) => {
+        try {
+            const account = ethers_1.ethers.getAddress(String(req.query.account ?? ''));
+            await (0, referralRegistryTree_1.ensureReferralRegistryTreeReady)();
+            const sync = await (0, db_1.getReferralRegistryTreeSync)();
+            const members = await (0, db_1.listReferralRegistryTreeByAccount)(account);
+            const normalized = account.toLowerCase();
+            const directChildren = members.filter((member) => member.parentAdmin?.toLowerCase() === normalized ||
+                member.parentL0?.toLowerCase() === normalized);
+            const self = members.find((member) => member.account.toLowerCase() === normalized) ?? null;
+            return res.status(200).json({
+                success: true,
+                account,
+                self,
+                directChildren,
+                sync: {
+                    deploymentBlock: sync.deploymentBlock,
+                    syncedThroughBlock: sync.syncedThroughBlock,
+                    rebuilding: sync.rebuilding,
+                },
+            }).end();
+        }
+        catch (error) {
+            return res.status(400).json({ success: false, error: error?.message ?? 'Referral registry tree unavailable' }).end();
+        }
+    });
+    router.post('/referralRegistryClaim', async (req, res) => {
+        const pre = await referralClaimRelayPreCheck(req.body);
+        if (!pre.success)
+            return res.status(400).json({ success: false, error: pre.error }).end();
+        (0, exports.postLocalhost)('/api/referralRegistryClaim', pre.preChecked, res);
+    });
+    router.get('/validatorDepositRedeemConfig', (_req, res) => {
+        return res.status(200).json((0, validatorDepositRedeem_1.validatorDepositRedeemConfig)()).end();
+    });
+    router.get('/v2/conet/validators/:pubkey', async (req, res) => {
+        const result = await (0, conetValidatorDashboard_1.getConetValidatorDashboard)(req.params.pubkey);
+        return res.status(result.status).json(result.body).end();
+    });
+    router.get('/v2/conet/beneficiary-income/:wallet', async (req, res) => {
+        const wallet = String(req.params.wallet ?? '').trim();
+        if (!ethers_1.ethers.isAddress(wallet)) {
+            return res.status(400).json({ success: false, error: 'Invalid wallet address' }).end();
+        }
+        const anchorTs = Number(req.query.anchorTs ?? 0);
+        const base = await (0, validatorDepositRedeem_1.validatorDepositRedeemReadUnifiedIncomeStats)(ethers_1.ethers.getAddress(wallet), anchorTs);
+        if (!base.ok) {
+            return res.status(503).json({ success: false, error: base.error }).end();
+        }
+        const enriched = (0, conetUnifiedIncomeEnrichment_1.formatEnrichedIncomeDisplay)(await (0, conetUnifiedIncomeEnrichment_1.enrichUnifiedIncomeStats)(base.stats, { beneficiary: ethers_1.ethers.getAddress(wallet) }));
+        return res
+            .status(200)
+            .json({
+            success: true,
+            wallet: ethers_1.ethers.getAddress(wallet),
+            stats: enriched,
+            meta: (0, conetBlockscoutIncomeDaemon_1.getConetBlockscoutIncomeDaemonStatus)(),
+        })
+            .end();
+    });
+    router.get('/v2/conet/blockscout-income-daemon/status', (_req, res) => {
+        return res.status(200).json({ success: true, ...(0, conetBlockscoutIncomeDaemon_1.getConetBlockscoutIncomeDaemonStatus)() }).end();
+    });
+    router.get('/validatorDepositRedeemAdminNonce', async (req, res) => {
+        const admin = typeof req.query.admin === 'string' ? req.query.admin.trim() : '';
+        const out = await (0, validatorDepositRedeem_1.validatorDepositRedeemReadAdminNonce)(admin);
+        if (!out.ok)
+            return res.status(400).json({ success: false, error: out.error }).end();
+        return res.status(200).json({ success: true, nonce: out.nonce }).end();
+    });
+    router.post('/validatorDepositRedeemAdminCreate', async (req, res) => {
+        try {
+            const pre = await (0, validatorDepositRedeem_1.validatorDepositRedeemCreateClusterPreCheck)(req.body);
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/validatorDepositRedeemAdminCreate preCheck FAIL: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            const p = pre.preChecked;
+            (0, exports.postLocalhost)('/api/validatorDepositRedeemAdminCreate', {
+                contract: p.contract,
+                admin: p.admin,
+                codeHash: p.codeHash,
+                allowedClaimer: p.allowedClaimer,
+                referrer: p.referrer,
+                validatorCount: p.validatorCount.toString(),
+                targetNodeIp: p.targetNodeIp,
+                gbMiningNodeCount: p.gbMiningNodeCount.toString(),
+                airdrop: p.airdrop,
+                validAfter: p.validAfter.toString(),
+                validBefore: p.validBefore.toString(),
+                nonce: p.nonce.toString(),
+                deadline: p.deadline.toString(),
+                signature: p.signature,
+            }, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.post('/validatorDepositRedeemAdminCancel', async (req, res) => {
+        try {
+            const pre = await (0, validatorDepositRedeem_1.validatorDepositRedeemCancelClusterPreCheck)(req.body);
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/validatorDepositRedeemAdminCancel preCheck FAIL: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            const p = pre.preChecked;
+            (0, exports.postLocalhost)('/api/validatorDepositRedeemAdminCancel', {
+                contract: p.contract,
+                admin: p.admin,
+                codeHash: p.codeHash,
+                nonce: p.nonce.toString(),
+                deadline: p.deadline.toString(),
+                signature: p.signature,
+            }, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.post('/validatorDepositRedeemClaim', async (req, res) => {
+        try {
+            const pre = await (0, validatorDepositRedeem_1.validatorDepositRedeemClaimClusterPreCheck)(req.body);
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/validatorDepositRedeemClaim preCheck FAIL: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            const p = pre.preChecked;
+            (0, exports.postLocalhost)('/api/validatorDepositRedeemClaim', {
+                contract: p.contract,
+                claimer: p.claimer,
+                beneficiary: p.beneficiary,
+                code: p.code,
+                deadline: p.deadline.toString(),
+                signature: p.signature,
+                gasLimit: String(p.gasLimit),
+            }, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.post('/validatorDepositRedeemClaimAirdrop', async (req, res) => {
+        try {
+            const pre = await (0, validatorDepositRedeem_1.validatorDepositRedeemClaimAirdropClusterPreCheck)(req.body);
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/validatorDepositRedeemClaimAirdrop preCheck FAIL: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            const p = pre.preChecked;
+            (0, exports.postLocalhost)('/api/validatorDepositRedeemClaimAirdrop', {
+                contract: p.contract,
+                beneficiary: p.beneficiary,
+                amount: p.amount.toString(),
+                nonce: p.nonce.toString(),
+                deadline: p.deadline.toString(),
+                signature: p.signature,
+            }, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.post('/gbDepinChargeUserGb', async (req, res) => {
+        try {
+            const pre = await (0, gbDepinAirdrop_1.gbDepinChargeUserClusterPreCheck)(req.body);
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/gbDepinChargeUserGb preCheck FAIL: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            const p = pre.preChecked;
+            (0, exports.postLocalhost)('/api/gbDepinChargeUserGb', {
+                guardianNodeId: p.guardianNodeId.toString(),
+                user: p.user,
+                amount: p.amount.toString(),
+            }, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.post('/gbDepinAirdropPaidAll', async (req, res) => {
+        try {
+            const pre = await (0, gbDepinAirdrop_1.gbDepinAirdropAllClusterPreCheck)();
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.yellow(`server /api/gbDepinAirdropPaidAll preCheck skip: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            (0, exports.postLocalhost)('/api/gbDepinAirdropPaidAll', {}, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.post('/validatorDepositRedeemTransfer', async (req, res) => {
+        try {
+            const pre = await (0, validatorDepositRedeem_1.validatorDepositRedeemTransferClusterPreCheck)(req.body);
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/validatorDepositRedeemTransfer preCheck FAIL: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            const p = pre.preChecked;
+            (0, exports.postLocalhost)('/api/validatorDepositRedeemTransfer', {
+                contract: p.contract,
+                fromBeneficiary: p.fromBeneficiary,
+                toBeneficiary: p.toBeneficiary,
+                guardianIds: p.guardianIds.map((g) => g.toString()),
+                nonce: p.nonce.toString(),
+                deadline: p.deadline.toString(),
+                signature: p.signature,
+            }, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.post('/validatorCreateTransferOrder', async (req, res) => {
+        try {
+            const pre = await (0, validatorDepositRedeem_1.createTransferOrderClusterPreCheck)(req.body);
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/validatorCreateTransferOrder preCheck FAIL: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            const p = pre.preChecked;
+            (0, exports.postLocalhost)('/api/validatorCreateTransferOrder', {
+                contract: p.contract,
+                seller: p.seller,
+                guardianIds: p.guardianIds.map((g) => g.toString()),
+                priceUsdc6: p.priceUsdc6.toString(),
+                nonce: p.nonce.toString(),
+                deadline: p.deadline.toString(),
+                signature: p.signature,
+            }, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.post('/validatorCancelTransferOrder', async (req, res) => {
+        try {
+            const pre = await (0, validatorDepositRedeem_1.cancelTransferOrderClusterPreCheck)(req.body);
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/validatorCancelTransferOrder preCheck FAIL: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            const p = pre.preChecked;
+            (0, exports.postLocalhost)('/api/validatorCancelTransferOrder', {
+                contract: p.contract,
+                orderId: p.orderId.toString(),
+                seller: p.seller,
+                nonce: p.nonce.toString(),
+                deadline: p.deadline.toString(),
+                signature: p.signature,
+            }, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.post('/validatorFulfillTransferOrder', async (req, res) => {
+        try {
+            const pre = await (0, validatorDepositRedeem_1.fulfillTransferOrderClusterPreCheck)(req.body);
+            if (!pre.success) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/validatorFulfillTransferOrder preCheck FAIL: ${pre.error}`));
+                return res.status(400).json({ success: false, error: pre.error }).end();
+            }
+            const p = pre.preChecked;
+            (0, exports.postLocalhost)('/api/validatorFulfillTransferOrder', {
+                contract: p.contract,
+                orderId: p.orderId.toString(),
+                buyer: p.buyer,
+                nonce: p.nonce.toString(),
+                deadline: p.deadline.toString(),
+                signature: p.signature,
+                payValidAfter: p.payValidAfter.toString(),
+                payValidBefore: p.payValidBefore.toString(),
+                payNonce: p.payNonce,
+                paySignature: p.paySignature,
+            }, res);
+        }
+        catch (e) {
+            return res.status(400).json({ success: false, error: e?.message ?? String(e) }).end();
+        }
+    });
+    router.get('/validatorDepositRedeemStatus', (req, res) => {
+        const requestId = typeof req.query.requestId === 'string' ? req.query.requestId.trim() : '';
+        const status = (0, validatorDepositRedeem_1.getValidatorDepositRedeemStatus)(requestId);
+        if (!status)
+            return res.status(404).json({ success: false, error: 'requestId not found' }).end();
+        return res.status(200).json({ success: true, status }).end();
+    });
+    /** POST /api/purchaseBUnitFromBase - Refuel B-Unit：UI 离线签 EIP-3009，Cluster 预检后转发 Master，Master 提交 BaseTreasury.purchaseBUnitWith3009Authorization */
+    router.post('/purchaseBUnitFromBase', async (req, res) => {
+        const body = req.body;
+        const preCheck = (0, MemberCard_1.purchaseBUnitFromBasePreCheck)(body);
+        if (!preCheck.success) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/purchaseBUnitFromBase preCheck FAIL: ${preCheck.error}`));
+            return res.status(400).json({ success: false, error: preCheck.error }).end();
+        }
+        // Cluster 预检：Base 链上 USDC 余额
+        try {
+            const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+            const usdc = new ethers_1.ethers.Contract(USDC_BASE, ['function balanceOf(address) view returns (uint256)'], providerBase);
+            const balance = await usdc.balanceOf(preCheck.preChecked.from);
+            const amount = BigInt(preCheck.preChecked.amount);
+            if (balance < amount) {
+                (0, logger_1.logger)(safe_1.default.red(`server /api/purchaseBUnitFromBase balance FAIL: from=${preCheck.preChecked.from.slice(0, 10)}... balance=${balance} < amount=${amount}`));
+                return res.status(400).json({ success: false, error: 'Insufficient USDC balance on Base' }).end();
+            }
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`server /api/purchaseBUnitFromBase balance check error: ${e?.message ?? e}`));
+            return res.status(502).json({ success: false, error: 'Failed to verify USDC balance' }).end();
+        }
+        (0, logger_1.logger)(safe_1.default.green(`server /api/purchaseBUnitFromBase preCheck OK from=${preCheck.preChecked.from.slice(0, 10)}... forwarding to master`));
+        (0, exports.postLocalhost)('/api/purchaseBUnitFromBase', preCheck.preChecked, res);
+    });
+    /** POST /api/removePOS - 商家 manager 离线签字删除 POS，Cluster 预检后转发 Master 代付 Gas */
+    router.post('/removePOS', async (req, res) => {
+        const { merchant, pos, deadline, nonce, signature } = req.body;
+        if (!merchant || !ethers_1.ethers.isAddress(merchant.trim())) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid merchant address' });
+        }
+        if (!pos || !ethers_1.ethers.isAddress(pos.trim())) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid pos address' });
+        }
+        const now = Math.floor(Date.now() / 1000);
+        if (typeof deadline !== 'number' || deadline <= now) {
+            return res.status(400).json({ success: false, error: 'Deadline must be in the future' });
+        }
+        if (!nonce || typeof nonce !== 'string' || nonce.trim().length === 0) {
+            return res.status(400).json({ success: false, error: 'Missing nonce' });
+        }
+        const sigHex = (signature || '').trim();
+        if (!sigHex || !ethers_1.ethers.isHexString(sigHex)) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid signature (must be hex)' });
+        }
+        const sigLen = ethers_1.ethers.getBytes(sigHex).length;
+        if (sigLen !== 65 && sigLen !== 64) {
+            return res.status(400).json({ success: false, error: `Invalid signature length: expected 64 or 65 bytes, got ${sigLen}` });
+        }
+        try {
+            const domain = {
+                name: 'MerchantPOSManagement',
+                version: '1',
+                chainId: 224422,
+                verifyingContract: chainAddresses_1.MERCHANT_POS_MANAGEMENT_CONET,
+            };
+            const types = {
+                RemovePOS: [
+                    { name: 'merchant', type: 'address' },
+                    { name: 'pos', type: 'address' },
+                    { name: 'deadline', type: 'uint256' },
+                    { name: 'nonce', type: 'bytes32' },
+                ],
+            };
+            const message = {
+                merchant: ethers_1.ethers.getAddress(merchant.trim()),
+                pos: ethers_1.ethers.getAddress(pos.trim()),
+                deadline: BigInt(deadline),
+                nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+            };
+            const digest = ethers_1.ethers.TypedDataEncoder.hash(domain, types, message);
+            const signer = ethers_1.ethers.recoverAddress(digest, sigHex);
+            if (signer.toLowerCase() !== ethers_1.ethers.getAddress(merchant.trim()).toLowerCase()) {
+                return res.status(403).json({ success: false, error: 'Signature does not recover to merchant' });
+            }
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[removePOS] signature verify failed: ${e?.message ?? e}`));
+            return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid signature' });
+        }
+        (0, logger_1.logger)(safe_1.default.green(`[removePOS] Cluster preCheck OK merchant=${merchant.slice(0, 10)}... pos=${pos.slice(0, 10)}... forwarding to master`));
+        (0, exports.postLocalhost)('/api/removePOS', {
+            merchant: ethers_1.ethers.getAddress(merchant.trim()),
+            pos: ethers_1.ethers.getAddress(pos.trim()),
+            deadline,
+            nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+            signature: sigHex,
+        }, res);
+    });
+    /** POST /api/registerPOS - merchant EIP-712 RegisterPOS，Cluster 验签后转发 Master 代付 CoNET Gas */
+    router.post('/registerPOS', async (req, res) => {
+        const { merchant, pos, deadline, nonce, signature } = req.body;
+        if (!merchant || !ethers_1.ethers.isAddress(merchant.trim())) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid merchant address' });
+        }
+        if (!pos || !ethers_1.ethers.isAddress(pos.trim())) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid pos address' });
+        }
+        const now = Math.floor(Date.now() / 1000);
+        if (typeof deadline !== 'number' || deadline <= now) {
+            return res.status(400).json({ success: false, error: 'Deadline must be in the future' });
+        }
+        if (!nonce || typeof nonce !== 'string' || nonce.trim().length === 0) {
+            return res.status(400).json({ success: false, error: 'Missing nonce' });
+        }
+        const sigHex = (signature || '').trim();
+        if (!sigHex || !ethers_1.ethers.isHexString(sigHex)) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid signature (must be hex)' });
+        }
+        const sigLen = ethers_1.ethers.getBytes(sigHex).length;
+        if (sigLen !== 65 && sigLen !== 64) {
+            return res.status(400).json({ success: false, error: `Invalid signature length: expected 64 or 65 bytes, got ${sigLen}` });
+        }
+        try {
+            const domain = {
+                name: 'MerchantPOSManagement',
+                version: '1',
+                chainId: 224422,
+                verifyingContract: chainAddresses_1.MERCHANT_POS_MANAGEMENT_CONET,
+            };
+            const types = {
+                RegisterPOS: [
+                    { name: 'merchant', type: 'address' },
+                    { name: 'pos', type: 'address' },
+                    { name: 'deadline', type: 'uint256' },
+                    { name: 'nonce', type: 'bytes32' },
+                ],
+            };
+            const message = {
+                merchant: ethers_1.ethers.getAddress(merchant.trim()),
+                pos: ethers_1.ethers.getAddress(pos.trim()),
+                deadline: BigInt(deadline),
+                nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+            };
+            const digest = ethers_1.ethers.TypedDataEncoder.hash(domain, types, message);
+            const signer = ethers_1.ethers.recoverAddress(digest, sigHex);
+            if (signer.toLowerCase() !== ethers_1.ethers.getAddress(merchant.trim()).toLowerCase()) {
+                return res.status(403).json({ success: false, error: 'Signature does not recover to merchant' });
+            }
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red(`[registerPOS] signature verify failed: ${e?.message ?? e}`));
+            return res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'Invalid signature' });
+        }
+        (0, logger_1.logger)(safe_1.default.green(`[registerPOS] Cluster preCheck OK merchant=${merchant.slice(0, 10)}... pos=${pos.slice(0, 10)}... forwarding to master`));
+        (0, exports.postLocalhost)('/api/registerPOS', {
+            merchant: ethers_1.ethers.getAddress(merchant.trim()),
+            pos: ethers_1.ethers.getAddress(pos.trim()),
+            deadline,
+            nonce: nonce.startsWith('0x') ? nonce : '0x' + nonce,
+            signature: sigHex,
+        }, res);
+    });
+    /** GET /api/checkRequestStatus - 校验 Voucher 支付请求是否过期或已支付，转发 master */
+    router.get('/checkRequestStatus', async (req, res) => {
+        const { requestHash, validDays, payee } = req.query;
+        if (!requestHash || validDays == null || validDays === '' || !payee) {
+            return res.status(400).json({ error: 'Missing required: requestHash, validDays, payee' });
+        }
+        try {
+            const qs = new URLSearchParams({ requestHash, validDays, payee }).toString();
+            const path = '/api/checkRequestStatus?' + qs;
+            const { statusCode, body } = await getLocalhostBuffer(path);
+            res.status(statusCode).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[checkRequestStatus] forward error:'), e?.message ?? e);
+            res.status(502).json({ error: e?.message ?? 'Failed to check request status' });
+        }
+    });
+    /** GET /api/myCards?owner=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */
+    router.get('/myCards', async (req, res) => {
+        const { owner, owners } = req.query;
+        const addrs = [];
+        if (owner && ethers_1.ethers.isAddress(owner))
+            addrs.push(ethers_1.ethers.getAddress(owner).toLowerCase());
+        if (owners && typeof owners === 'string') {
+            for (const a of owners.split(',').map((s) => s.trim())) {
+                if (a && ethers_1.ethers.isAddress(a))
+                    addrs.push(ethers_1.ethers.getAddress(a).toLowerCase());
+            }
+        }
+        addrs.sort();
+        const cacheKey = addrs.length === 0 ? '' : addrs.join(',');
+        if (cacheKey) {
+            const cached = myCardsCache.get(cacheKey);
+            if (cached && Date.now() < cached.expiry) {
+                res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body);
+                return;
+            }
+        }
+        const qs = Object.keys(req.query || {}).length ? '?' + new URLSearchParams(req.query).toString() : '';
+        const path = '/api/myCards' + qs;
+        try {
+            const { statusCode, body } = await getLocalhostBuffer(path);
+            if (cacheKey && statusCode === 200) {
+                myCardsCache.set(cacheKey, { body, statusCode, expiry: Date.now() + MY_CARDS_CACHE_TTL_MS });
+            }
+            res.status(statusCode).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[myCards] forward error:'), e?.message ?? e);
+            res.status(502).json({ error: e?.message ?? 'Failed to fetch my cards' });
+        }
+    });
+    /** GET /api/ensureAAForEOA?eoa=0x... - 转发 Master；返回 { aa }。cardAddAdmin 须用真实商户 EOA，adminManager.to 须与同 body.adminEOA 一致。 */
+    router.get('/ensureAAForEOA', async (req, res) => {
+        const { eoa } = req.query;
+        if (!eoa || !ethers_1.ethers.isAddress(eoa)) {
+            return res.status(400).json({ error: 'Invalid eoa: require valid 0x address' });
+        }
+        try {
+            const path = '/api/ensureAAForEOA?eoa=' + encodeURIComponent(eoa);
+            const { statusCode, body } = await getLocalhostBuffer(path);
+            res.status(statusCode).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[ensureAAForEOA] forward error:'), e?.message ?? e);
+            res.status(502).json({ error: e?.message ?? 'Failed to ensure AA for EOA' });
+        }
+    });
+    /** GET /api/ensureAAForEOAOnConet?eoa=0x... - 转发 Master；在 CoNET 链上 ensure AA。 */
+    router.get('/ensureAAForEOAOnConet', async (req, res) => {
+        const { eoa } = req.query;
+        if (!eoa || !ethers_1.ethers.isAddress(eoa)) {
+            return res.status(400).json({ error: 'Invalid eoa: require valid 0x address' });
+        }
+        try {
+            const path = '/api/ensureAAForEOAOnConet?eoa=' + encodeURIComponent(eoa);
+            const { statusCode, body } = await getLocalhostBuffer(path);
+            res.status(statusCode).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[ensureAAForEOAOnConet] forward error:'), e?.message ?? e);
+            res.status(502).json({ error: e?.message ?? 'Failed to ensure CoNET AA for EOA' });
+        }
+    });
+    /**
+     * GET|POST /api/createInstitutionalAa — Cluster 校验 eoa + optional BeamioTag 后转发 Master。
+     */
+    const forwardCreateInstitutionalAa = async (req, res) => {
+        const body = (req.body ?? {});
+        const eoaRaw = req.query.eoa ?? body.eoa;
+        const accountNameRaw = req.query.accountName ?? body.accountName;
+        if (!eoaRaw || !ethers_1.ethers.isAddress(eoaRaw)) {
+            return res.status(400).json({ success: false, error: 'Invalid eoa: require valid 0x address' });
+        }
+        const eoa = ethers_1.ethers.getAddress(eoaRaw);
+        let accountName = '';
+        if (accountNameRaw != null && String(accountNameRaw).trim() !== '') {
+            const trimmed = String(accountNameRaw).trim().replace(/^@+/, '');
+            if (!/^[a-zA-Z0-9_.]{3,26}$/.test(trimmed)) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Invalid BeamioTag: use 3–26 letters, numbers, _ or .',
+                });
+            }
+            const ownship = await userOwnershipCheck(trimmed, ethers_1.ethers.ZeroAddress);
+            // Name must be completely free (not owned by anyone, including caller EOA).
+            if (!ownship) {
+                return res.status(400).json({
+                    success: false,
+                    error: `BeamioTag @${trimmed} is already taken`,
+                });
+            }
+            // Double-check: ZeroAddress ownership check treats taken-by-anyone as false only when
+            // owner !== ZeroAddress. userOwnershipCheck(name, ZeroAddress) returns false if taken.
+            accountName = trimmed;
+        }
+        try {
+            if (req.method === 'POST') {
+                const payload = { eoa };
+                if (accountName)
+                    payload.accountName = accountName;
+                const { statusCode, body: responseBody } = await postLocalhostBuffer('/api/createInstitutionalAa', payload);
+                return res.status(statusCode).setHeader('Content-Type', 'application/json').send(responseBody);
+            }
+            let path = '/api/createInstitutionalAa?eoa=' + encodeURIComponent(eoa);
+            if (accountName)
+                path += '&accountName=' + encodeURIComponent(accountName);
+            const { statusCode, body: responseBody } = await getLocalhostBuffer(path);
+            return res.status(statusCode).setHeader('Content-Type', 'application/json').send(responseBody);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[createInstitutionalAa] forward error:'), e?.message ?? e);
+            return res
+                .status(502)
+                .json({ success: false, error: e?.message ?? 'Failed to create institutional AA' });
+        }
+    };
+    router.get('/createInstitutionalAa', forwardCreateInstitutionalAa);
+    router.post('/createInstitutionalAa', forwardCreateInstitutionalAa);
+    /** POST /api/aaCreateViaEntryPointPrepare - 生成 CoNET AA 创建 UserOp，客户端须用 EOA 对 userOpHash 做 signMessage。 */
+    router.post('/aaCreateViaEntryPointPrepare', async (req, res) => {
+        const { eoa } = (req.body ?? {});
+        if (!eoa || !ethers_1.ethers.isAddress(eoa)) {
+            return res.status(400).json({ success: false, error: 'Invalid eoa: require valid 0x address' });
+        }
+        try {
+            const out = await (0, MemberCard_1.prepareAAAccountCreationViaEntryPoint)(ethers_1.ethers.getAddress(eoa));
+            return res.status(200).json(convertBigIntToString({ success: true, ...out }));
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[aaCreateViaEntryPointPrepare] error:'), e?.message ?? e);
+            return res.status(500).json({ success: false, error: e?.message ?? 'Failed to prepare AA creation UserOp' });
+        }
+    });
+    /** POST /api/aaCreateViaEntryPointSubmit - 用户签名后转发 Master，由 paymaster/admin 调 Factory.relayHandleOps。 */
+    router.post('/aaCreateViaEntryPointSubmit', async (req, res) => {
+        const body = convertBigIntToString(req.body ?? {});
+        if (!body.eoa || !ethers_1.ethers.isAddress(body.eoa)) {
+            return res.status(400).json({ success: false, error: 'Invalid eoa: require valid 0x address' });
+        }
+        if (!body.signature || typeof body.signature !== 'string') {
+            return res.status(400).json({ success: false, error: 'signature required' });
+        }
+        if (!body.packedUserOp || typeof body.packedUserOp !== 'object') {
+            return res.status(400).json({ success: false, error: 'packedUserOp required' });
+        }
+        try {
+            const { statusCode, body: responseBody } = await postLocalhostBuffer('/api/aaCreateViaEntryPointSubmit', body);
+            return res.status(statusCode).setHeader('Content-Type', 'application/json').send(responseBody);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[aaCreateViaEntryPointSubmit] forward error:'), e?.message ?? e);
+            return res.status(502).json({ success: false, error: e?.message ?? 'Failed to submit AA creation UserOp' });
+        }
+    });
+    /** GET /api/getAAAccount?eoa=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */
+    router.get('/getAAAccount', async (req, res) => {
+        const { eoa } = req.query;
+        if (!eoa || !ethers_1.ethers.isAddress(eoa)) {
+            return res.status(400).json({ error: 'Invalid eoa: require valid 0x address' });
+        }
+        const cacheKey = ethers_1.ethers.getAddress(eoa).toLowerCase();
+        const cached = getAAAccountCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const path = '/api/getAAAccount?eoa=' + encodeURIComponent(eoa);
+            const { statusCode, body } = await getLocalhostBuffer(path);
+            getAAAccountCache.set(cacheKey, { body, statusCode, expiry: Date.now() + GET_AA_CACHE_TTL_MS });
+            res.status(statusCode).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[getAAAccount] forward error:'), e?.message ?? e);
+            res.status(502).json({ error: e?.message ?? 'Failed to fetch AA account' });
+        }
+    });
+    /** GET /api/getBalance?address=0x... - 30 秒内相同查询返回缓存，否则转发 master 并缓存 */
+    router.get('/getBalance', async (req, res) => {
+        const { address } = req.query;
+        if (!address || !ethers_1.ethers.isAddress(address)) {
+            return res.status(400).json({ error: 'Invalid address: require valid 0x address' });
+        }
+        const cacheKey = ethers_1.ethers.getAddress(address).toLowerCase();
+        const cached = getBalanceCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const path = '/api/getBalance?address=' + encodeURIComponent(address);
+            const { statusCode, body } = await getLocalhostBuffer(path);
+            getBalanceCache.set(cacheKey, { body, statusCode, expiry: Date.now() + GET_BALANCE_CACHE_TTL_MS });
+            res.status(statusCode).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[getBalance] forward error:'), e?.message ?? e);
+            res.status(502).json({ error: e?.message ?? 'Failed to fetch balance' });
+        }
+    });
+    /** GET /api/getBUnitBalance?address=0x... - CoNET B-Unit 余额（fee-usable + free/paid + legacy），30 秒缓存。 */
+    router.get('/getBUnitBalance', async (req, res) => {
+        const { address } = req.query;
+        if (!address || !ethers_1.ethers.isAddress(address)) {
+            return res.status(400).json({ error: 'Invalid address: require valid 0x address' });
+        }
+        const cacheKey = ethers_1.ethers.getAddress(address).toLowerCase();
+        const cached = getBUnitBalanceCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const snap = await (0, bunitBalanceRead_1.readBUnitBalanceSnapshot)(providerConet, address);
+            const data = {
+                total: snap.total,
+                feeUsable: snap.feeUsable,
+                free: snap.free,
+                paid: snap.paid,
+                legacyDeprecatedTotal: snap.legacyDeprecatedTotal,
+                legacyDeprecatedByContract: snap.legacyDeprecatedByContract,
+                ...(snap.legacyDeprecatedTotal > 0
+                    ? {
+                        legacyNote: 'Legacy B-Unit on deprecated contracts cannot pay network fees. Run migration or redeem on the updated Business Kit redeem contract.',
+                    }
+                    : {}),
+            };
+            const body = JSON.stringify(data);
+            getBUnitBalanceCache.set(cacheKey, { body, statusCode: 200, expiry: Date.now() + GET_BUNIT_CACHE_TTL_MS });
+            res.status(200).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[getBUnitBalance] error:'), e?.message ?? e);
+            res.status(502).json({ error: e?.message ?? 'Failed to fetch B-Unit balance' });
+        }
+    });
+    /**
+     * GET /api/baseAaSmartWalletBalances?address=0x...
+     * Base Smart Wallet (AA) must have code; then CDP aggregates token balances (ETH, USDC).
+     */
+    router.get('/baseAaSmartWalletBalances', async (req, res) => {
+        const { address } = req.query;
+        if (!address || !ethers_1.ethers.isAddress(address)) {
+            return res.status(400).json({ ok: false, error: 'Invalid address: require valid 0x address' });
+        }
+        const cacheKey = ethers_1.ethers.getAddress(address).toLowerCase();
+        const cached = baseAaSmartWalletBalancesCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const result = await (0, baseAaCdpTokenBalances_1.fetchBaseAaSmartWalletBalancesViaCdp)(address, providerBase);
+            const payload = { ok: true, ...result };
+            const body = JSON.stringify(payload);
+            baseAaSmartWalletBalancesCache.set(cacheKey, {
+                body,
+                statusCode: 200,
+                expiry: Date.now() + BASE_AA_SMART_WALLET_BALANCES_CACHE_TTL_MS,
+            });
+            res.status(200).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[baseAaSmartWalletBalances] error:'), e?.message ?? e);
+            res.status(502).json({ ok: false, error: e?.message ?? 'Failed to fetch Base AA balances via CDP' });
+        }
+    });
+    /** GET /api/getBUnitLedger?address=0x... - CoNET B-Unit 记账明细，30 秒缓存。供前端绕过 CORS 获取。?_nocache=1 跳过缓存。 */
+    router.get('/getBUnitLedger', async (req, res) => {
+        const { address, _nocache } = req.query;
+        if (!address || !ethers_1.ethers.isAddress(address)) {
+            return res.status(400).json({ error: 'Invalid address: require valid 0x address' });
+        }
+        const cacheKey = ethers_1.ethers.getAddress(address).toLowerCase();
+        const skipCache = _nocache === '1' || _nocache === 'true';
+        const cached = !skipCache ? getBUnitLedgerCache.get(cacheKey) : undefined;
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(cached.statusCode).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        try {
+            const INDEXER_ABI = ['function getAccountTransactionsPaged(address account, uint256 offset, uint256 limit) view returns ((bytes32 id, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, bool exists)[] page)'];
+            const TX_BUINT_CLAIM = ethers_1.ethers.keccak256(ethers_1.ethers.toUtf8Bytes('buintClaim'));
+            const TX_BUINT_USDC = ethers_1.ethers.keccak256(ethers_1.ethers.toUtf8Bytes('buintUSDC'));
+            const TX_REQUEST_ACCOUNTING = ethers_1.ethers.keccak256(ethers_1.ethers.toUtf8Bytes('requestAccounting'));
+            const TX_SEND_USDC = ethers_1.ethers.keccak256(ethers_1.ethers.toUtf8Bytes('sendUSDC'));
+            const TX_X402_SEND = ethers_1.ethers.keccak256(ethers_1.ethers.toUtf8Bytes('x402Send'));
+            const indexer = new ethers_1.ethers.Contract(chainAddresses_1.BEAMIO_INDEXER_DIAMOND, INDEXER_ABI, providerConet);
+            const page = await indexer.getAccountTransactionsPaged(address, 0, 100);
+            const accountLower = address.toLowerCase();
+            const buintLower = chainAddresses_1.CONET_BUINT.toLowerCase();
+            const decimals = 6;
+            const serializeJsonSafe = (value) => {
+                if (typeof value === 'bigint')
+                    return value.toString();
+                if (Array.isArray(value))
+                    return value.map((item) => serializeJsonSafe(item));
+                if (value && typeof value === 'object') {
+                    const out = {};
+                    for (const [k, v] of Object.entries(value)) {
+                        out[k] = serializeJsonSafe(v);
+                    }
+                    return out;
+                }
+                return value;
+            };
+            const serializeRawTx = (tx) => {
+                if (tx == null || typeof tx !== 'object')
+                    return {};
+                const t = tx;
+                return {
+                    id: serializeJsonSafe(t.id),
+                    originalPaymentHash: serializeJsonSafe(t.originalPaymentHash),
+                    chainId: serializeJsonSafe(t.chainId),
+                    txCategory: serializeJsonSafe(t.txCategory),
+                    displayJson: serializeJsonSafe(t.displayJson),
+                    timestamp: serializeJsonSafe(t.timestamp),
+                    payer: serializeJsonSafe(t.payer),
+                    payee: serializeJsonSafe(t.payee),
+                    finalRequestAmountFiat6: serializeJsonSafe(t.finalRequestAmountFiat6),
+                    finalRequestAmountUSDC6: serializeJsonSafe(t.finalRequestAmountUSDC6),
+                    isAAAccount: serializeJsonSafe(t.isAAAccount),
+                    fees: serializeJsonSafe(t.fees),
+                    meta: serializeJsonSafe(t.meta),
+                    exists: serializeJsonSafe(t.exists),
+                };
+            };
+            const entries = [];
+            const formatTime = (ts) => {
+                const d = new Date(ts * 1000);
+                const now = Date.now();
+                const diff = now - ts * 1000;
+                if (diff < 60 * 60 * 1000)
+                    return `${Math.floor(diff / 60000)}m ago`;
+                if (diff < 24 * 60 * 60 * 1000)
+                    return `${Math.floor(diff / 3600000)}h ago`;
+                if (diff < 48 * 60 * 60 * 1000)
+                    return 'Yesterday';
+                return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            };
+            for (const tx of page) {
+                if (!tx?.exists)
+                    continue;
+                const txCategory = String(tx.txCategory);
+                const payer = String(tx.payer).toLowerCase();
+                const payee = String(tx.payee).toLowerCase();
+                const amountFiat6 = Number(tx.finalRequestAmountFiat6 ?? 0);
+                const amountUSDC6 = Number(tx.finalRequestAmountUSDC6 ?? 0);
+                const amountBUnits = Math.round(amountFiat6 / 10 ** decimals);
+                const ts = Number(tx.timestamp ?? 0);
+                const timeStr = ts ? formatTime(ts) : '—';
+                const rawId = tx.id;
+                const txIdHex = typeof rawId === 'string' ? rawId : rawId != null ? '0x' + BigInt(rawId).toString(16).padStart(64, '0') : '0x';
+                const txHashShort = txIdHex.length > 10 ? `${txIdHex.slice(0, 6)}...${txIdHex.slice(-4)}` : txIdHex;
+                const baseEntry = { time: timeStr, timestamp: ts, txHash: txHashShort, network: 'CoNET L1', status: 'Completed' };
+                if (txCategory === TX_BUINT_CLAIM && payee === accountLower) {
+                    entries.push({ ...baseEntry, id: txIdHex, title: 'BUnit Claim', subtitle: 'Free claim', amount: amountBUnits, type: 'reward', linkedUsdc: 'N/A', rawTx: serializeRawTx(tx) });
+                }
+                else if (txCategory === TX_BUINT_USDC && payee === accountLower) {
+                    const usdcAmount = amountUSDC6 > 0 ? amountUSDC6 / 10 ** decimals : amountBUnits / 100;
+                    const usdcStr = usdcAmount > 0 ? `-${usdcAmount.toFixed(2)} USDC` : 'N/A';
+                    const rawOph = tx.originalPaymentHash;
+                    const baseTxHash = rawOph && rawOph !== ethers_1.ethers.ZeroHash && ethers_1.ethers.isHexString(rawOph) && ethers_1.ethers.dataLength(rawOph) === 32 ? rawOph : undefined;
+                    entries.push({ ...baseEntry, id: txIdHex, title: 'Fuel Yield (1:100)', subtitle: 'System Top-up', amount: amountBUnits, type: 'refuel', linkedUsdc: usdcStr, baseTxHash, rawTx: serializeRawTx(tx) });
+                }
+                else if (payee === buintLower && payer === accountLower) {
+                    const rawOphVal = tx.originalPaymentHash;
+                    const rawOph = rawOphVal != null
+                        ? (typeof rawOphVal === 'string' ? rawOphVal : '0x' + BigInt(rawOphVal).toString(16).padStart(64, '0'))
+                        : undefined;
+                    const txCatNorm = (typeof txCategory === 'string' ? txCategory : txCategory != null ? '0x' + BigInt(txCategory).toString(16).padStart(64, '0') : '').toLowerCase();
+                    const isRequestAccounting = txCatNorm === TX_REQUEST_ACCOUNTING.toLowerCase();
+                    const isSendUSDC = txCatNorm === TX_SEND_USDC.toLowerCase();
+                    const isX402Send = txCatNorm === TX_X402_SEND.toLowerCase();
+                    // requestAccounting 的 originalPaymentHash 是 requestHash，用 CoNET 链接；其他用 Base 链接
+                    const ophHex = rawOph && rawOph !== ethers_1.ethers.ZeroHash && ethers_1.ethers.isHexString(rawOph) && ethers_1.ethers.dataLength(rawOph) === 32 ? (rawOph.startsWith('0x') ? rawOph : '0x' + rawOph) : '';
+                    const baseTxHash = !isRequestAccounting && ophHex && ethers_1.ethers.dataLength(ophHex) === 32 ? ophHex : undefined;
+                    const originalPaymentHash = isRequestAccounting && ophHex && ethers_1.ethers.dataLength(ophHex) === 32 ? ophHex : undefined;
+                    const title = isRequestAccounting
+                        ? 'Service Fee (0.8%)'
+                        : isSendUSDC || isX402Send
+                            ? 'Service Fee'
+                            : 'B-Unit Burn';
+                    const subtitle = isRequestAccounting
+                        ? `Payment Request ${ophHex ? ophHex.slice(-3) : '—'}`
+                        : (isSendUSDC || isX402Send)
+                            ? ''
+                            : (amountUSDC6 > 0 ? `Paid ${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'Gas / Fee');
+                    const isServiceFee = amountUSDC6 > 0 || isRequestAccounting || isSendUSDC || isX402Send;
+                    entries.push({
+                        ...baseEntry,
+                        id: txIdHex,
+                        title,
+                        subtitle,
+                        amount: -amountBUnits,
+                        type: isServiceFee ? 'fee' : 'gas',
+                        linkedUsdc: amountUSDC6 > 0 ? `${(amountUSDC6 / 10 ** decimals).toFixed(2)} USDC` : 'N/A',
+                        baseTxHash,
+                        originalPaymentHash,
+                        rawTx: serializeRawTx(tx),
+                    });
+                }
+            }
+            entries.sort((a, b) => b.timestamp - a.timestamp);
+            const body = JSON.stringify(entries);
+            getBUnitLedgerCache.set(cacheKey, { body, statusCode: 200, expiry: Date.now() + GET_BUNIT_CACHE_TTL_MS });
+            res.status(200).setHeader('Content-Type', 'application/json').send(body);
+        }
+        catch (e) {
+            (0, logger_1.logger)(safe_1.default.red('[getBUnitLedger] error:'), e?.message ?? e);
+            res.status(502).json({ error: e?.message ?? 'Failed to fetch B-Unit ledger' });
+        }
+    });
+    /** GET /api/cardMetadata?cardAddress=0x... - 返回该卡的 card_owner + metadata_json（DB beamio_cards），供前端 beamioApi 拉取用于 Passes 展示 */
+    router.get('/cardMetadata', async (req, res) => {
+        const { cardAddress } = req.query;
+        (0, logger_1.logger)(safe_1.default.cyan(`[cardMetadata] GET cardAddress=${cardAddress ?? '(missing)'}`));
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            (0, logger_1.logger)(safe_1.default.yellow('[cardMetadata] 400: invalid or missing cardAddress'));
+            return res.status(400).json({ error: 'Invalid cardAddress: require valid 0x address' });
+        }
+        const normalizedAddr = ethers_1.ethers.getAddress(cardAddress).toLowerCase();
+        (0, logger_1.logger)(safe_1.default.cyan(`[cardMetadata] normalized card_address=${normalizedAddr}, querying DB...`));
+        try {
+            const row = await (0, db_2.getCardByAddress)(cardAddress);
+            if (!row) {
+                (0, logger_1.logger)(safe_1.default.yellow(`[cardMetadata] 404: no row in beamio_cards for card_address=${normalizedAddr}`));
+                return res.status(404).json({ error: 'Card not found' });
+            }
+            const topupStats = await (0, db_2.getCardTopupRollup)(cardAddress);
+            (0, logger_1.logger)(safe_1.default.green(`[cardMetadata] 200: card_owner=${row.cardOwner}`));
+            res.setHeader('Content-Type', 'application/json');
+            res.json({
+                cardOwner: row.cardOwner,
+                currency: row.currency,
+                cardCurrency: row.currency,
+                priceInCurrencyE6: row.priceInCurrencyE6,
+                uri: row.uri,
+                txHash: row.txHash,
+                createdAt: row.createdAt,
+                metadata: row.metadata,
+                topupStats: {
+                    totalTopupCount: topupStats.totalTopupCount,
+                    totalRepeatTopupCount: topupStats.totalRepeatTopupCount,
+                    nfcActivationCount: topupStats.nfcActivationCount,
+                    appActivationCount: topupStats.appActivationCount,
+                },
+            });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[cardMetadata] 500 error:'), err?.message ?? err);
+            return res.status(500).json({ error: 'Failed to fetch card metadata' });
+        }
+    });
+    /**
+     * GET /api/cardMemberTopups?cardAddress=0x…&mode=events|members|directory|card&limit=&offset=&page=
+     * card：仅返回该卡 totalTopupCount、totalRepeatTopupCount（全站成功 top-up 次数与 repeat 次数）。
+     * events / members 含义同前。
+     * directory：同 members 分页，但每行含 usedNfc、usedApp、firstTopupSource、firstTopupAt（由 beamio_member_topup_events 聚合）。
+     * page 为 1 基页码（与 limit 联用：offset=(page-1)*limit）；若同时传 offset，以 offset 为准。
+     */
+    router.get('/cardMemberTopups', async (req, res) => {
+        const q = req.query;
+        const { cardAddress, mode, limit: limitQ, offset: offsetQ, page: pageQ } = q;
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ error: 'Invalid cardAddress: require valid 0x address' });
+        }
+        const m = String(mode || 'events').toLowerCase();
+        const parsedLimit = limitQ != null && String(limitQ).trim() !== '' ? Number(limitQ) : 20;
+        const limit = Math.min(Math.max(Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : 20, 1), 2000);
+        let offset = 0;
+        if (offsetQ != null && String(offsetQ).trim() !== '') {
+            const o = Number(offsetQ);
+            offset = Number.isFinite(o) && o > 0 ? Math.floor(o) : 0;
+        }
+        else if (pageQ != null && String(pageQ).trim() !== '') {
+            const p = Number(pageQ);
+            const page = Number.isFinite(p) && p >= 1 ? Math.floor(p) : 1;
+            offset = (page - 1) * limit;
+        }
+        const addrNorm = ethers_1.ethers.getAddress(cardAddress);
+        try {
+            if (m === 'card') {
+                const rollup = await (0, db_2.getCardTopupRollup)(cardAddress);
+                return res.status(200).json({
+                    mode: 'card',
+                    cardAddress: addrNorm,
+                    totalTopupCount: rollup.totalTopupCount,
+                    totalRepeatTopupCount: rollup.totalRepeatTopupCount,
+                    nfcActivationCount: rollup.nfcActivationCount,
+                    appActivationCount: rollup.appActivationCount,
+                });
+            }
+            if (m === 'members') {
+                const { items, total } = await (0, db_2.listDistinctCardMemberTopupMembers)(cardAddress, { limit, offset });
+                const pageNum = limit > 0 ? Math.floor(offset / limit) + 1 : 1;
+                return res.status(200).json({
+                    mode: 'members',
+                    cardAddress: addrNorm,
+                    total,
+                    limit,
+                    offset,
+                    page: pageNum,
+                    members: items,
+                });
+            }
+            if (m === 'directory') {
+                const { items, total } = await (0, db_2.listCardMemberDirectory)(cardAddress, { limit, offset });
+                const pageNum = limit > 0 ? Math.floor(offset / limit) + 1 : 1;
+                return res.status(200).json({
+                    mode: 'directory',
+                    cardAddress: addrNorm,
+                    total,
+                    limit,
+                    offset,
+                    page: pageNum,
+                    members: items,
+                });
+            }
+            const { items, total } = await (0, db_2.listCardMemberTopupEvents)(cardAddress, { limit, offset });
+            const pageNum = limit > 0 ? Math.floor(offset / limit) + 1 : 1;
+            return res.status(200).json({
+                mode: 'events',
+                cardAddress: addrNorm,
+                total,
+                limit,
+                offset,
+                page: pageNum,
+                events: items,
+            });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[cardMemberTopups] error:'), err?.message ?? err);
+            return res.status(500).json({ error: 'Failed to fetch card member top-ups' });
+        }
+    });
+    /**
+     * GET /api/cardProgramSocial?cardAddress=0x…&mode=summary|likes|shareClicks&limit=&offset=
+     * summary：链上 totalSupply(19/21) 与 Discover 客户端一致；likes/shareClicks 仅返回 DB 自启用后记录（不做历史回填）。
+     */
+    router.get('/cardProgramSocial', async (req, res) => {
+        const q = req.query;
+        const { cardAddress, mode, limit: limitQ, offset: offsetQ, targetKind: targetKindQ, issuedParentId: issuedParentIdQ } = q;
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ error: 'Invalid cardAddress: require valid 0x address' });
+        }
+        const m = String(mode || 'summary').toLowerCase();
+        const parsedLimit = limitQ != null && String(limitQ).trim() !== '' ? Number(limitQ) : 20;
+        const limit = Math.min(Math.max(Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : 20, 1), 2000);
+        const parsedOffset = offsetQ != null && String(offsetQ).trim() !== '' ? Number(offsetQ) : 0;
+        const offset = Number.isFinite(parsedOffset) && parsedOffset > 0 ? Math.floor(parsedOffset) : 0;
+        const targetKind = targetKindQ != null && String(targetKindQ).trim() !== '' ? Number(targetKindQ) : 1;
+        const issuedParentId = String(issuedParentIdQ ?? '0');
+        const addrNorm = ethers_1.ethers.getAddress(cardAddress);
+        try {
+            if (m === 'likes') {
+                const { items, total } = await (0, cardProgramSocialDb_1.listCardProgramLikes)(cardAddress, { limit, offset, targetKind, issuedParentId });
+                return res.status(200).json({
+                    mode: 'likes',
+                    cardAddress: addrNorm,
+                    targetKind,
+                    issuedParentId,
+                    total,
+                    limit,
+                    offset,
+                    likes: items,
+                });
+            }
+            if (m === 'shareclicks') {
+                const { items, total } = await (0, cardProgramSocialDb_1.listCardProgramShareClicks)(cardAddress, { limit, offset, targetKind, issuedParentId });
+                return res.status(200).json({
+                    mode: 'shareClicks',
+                    cardAddress: addrNorm,
+                    targetKind,
+                    issuedParentId,
+                    total,
+                    limit,
+                    offset,
+                    shareClicks: items,
+                });
+            }
+            const chainTotals = await (0, cardProgramSocialStats_1.readCardProgramSocialChainTotals)(cardAddress);
+            const [likesPage, sharePage] = await Promise.all([
+                (0, cardProgramSocialDb_1.listCardProgramLikes)(cardAddress, { limit, offset, targetKind, issuedParentId }),
+                (0, cardProgramSocialDb_1.listCardProgramShareClicks)(cardAddress, { limit, offset, targetKind, issuedParentId }),
+            ]);
+            return res.status(200).json({
+                mode: 'summary',
+                cardAddress: addrNorm,
+                targetKind,
+                issuedParentId,
+                likeCount: chainTotals.likeCount,
+                shareClickCount: (0, cardProgramSocialStats_1.resolveProgramSocialShareClickCount)(chainTotals.shareClickCount, sharePage.total),
+                chainShareClickCount: chainTotals.shareClickCount,
+                dbLikeTotal: likesPage.total,
+                dbShareClickTotal: sharePage.total,
+                limit,
+                offset,
+                likes: likesPage.items,
+                shareClicks: sharePage.items,
+            });
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            (0, logger_1.logger)(safe_1.default.red('[cardProgramSocial] error:'), msg);
+            return res.status(500).json({ error: 'Failed to fetch card program social stats' });
+        }
+    });
+    /**
+     * GET /api/cardProgramReferrers?cardAddress=0x…&mode=summary|referrers|refereesByReferrer|registeredReferees&referrerAA=&limit=&offset=
+     * SoT：链上 get*Page / *TotalCount；DB 仅作 optional mirror（链上失败时不覆盖可信链上值）。
+     */
+    router.get('/cardProgramReferrers', async (req, res) => {
+        const q = req.query;
+        const { cardAddress, mode, referrerAA, limit: limitQ, offset: offsetQ } = q;
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress)) {
+            return res.status(400).json({ error: 'Invalid cardAddress: require valid 0x address' });
+        }
+        const m = String(mode || 'summary').toLowerCase();
+        const parsedLimit = limitQ != null && String(limitQ).trim() !== '' ? Number(limitQ) : 20;
+        const limit = Math.min(Math.max(Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : 20, 1), 100);
+        const parsedOffset = offsetQ != null && String(offsetQ).trim() !== '' ? Number(offsetQ) : 0;
+        const offset = Number.isFinite(parsedOffset) && parsedOffset > 0 ? Math.floor(parsedOffset) : 0;
+        const addrNorm = ethers_1.ethers.getAddress(cardAddress);
+        try {
+            if (m === 'summary') {
+                const [chainTotals, dbTotals] = await Promise.all([
+                    (0, cardProgramReferrerChain_1.readCardProgramReferrerChainSummary)(cardAddress),
+                    (0, cardProgramReferrerDb_1.readCardProgramReferrerDbSummary)(cardAddress),
+                ]);
+                return res.status(200).json({
+                    mode: 'summary',
+                    cardAddress: addrNorm,
+                    chainReferrerTotalCount: chainTotals.referrerTotalCount,
+                    chainRegisteredRefereeTotalCount: chainTotals.registeredRefereeTotalCount,
+                    /** DB mirror — use when chain* is null (AdminStats registry views unavailable). */
+                    dbReferrerTotal: dbTotals.dbReferrerTotal,
+                    dbRegisteredRefereeTotal: dbTotals.dbRegisteredRefereeTotal,
+                    /** @deprecated alias — UI should prefer chain* then db* */
+                    referrerTotalCount: chainTotals.referrerTotalCount ?? dbTotals.dbReferrerTotal,
+                    registeredRefereeTotalCount: chainTotals.registeredRefereeTotalCount ?? dbTotals.dbRegisteredRefereeTotal,
+                });
+            }
+            if (m === 'referrers') {
+                const chainPage = await (0, cardProgramReferrerChain_1.readReferrersPageFromChain)(cardAddress, offset, limit);
+                if (chainPage.ok) {
+                    return res.status(200).json({
+                        mode: 'referrers',
+                        cardAddress: addrNorm,
+                        source: 'chain',
+                        total: chainPage.total,
+                        limit,
+                        offset,
+                        nextOffset: chainPage.nextOffset,
+                        /** referrerAa fields are login EOAs (AA resolved via owner()). */
+                        referrers: chainPage.referrers,
+                    });
+                }
+                const page = await (0, cardProgramReferrerDb_1.listCardProgramReferees)(cardAddress, { limit, offset });
+                const chain = await (0, beamioUserCardChain_1.resolveUserCardChain)(addrNorm);
+                const provider = (0, beamioUserCardChain_1.providerForUserCardChain)(chain);
+                const referrers = await Promise.all(page.items.map(async (row) => {
+                    const referrerEoa = await (0, cardProgramReferrerChain_1.resolveReferrerRegistryAaToEoa)(provider, row.referrerAa);
+                    return {
+                        referrerAa: referrerEoa,
+                        refereeCount: row.refereeCount,
+                        chainRefereeCount: await (0, cardProgramReferrerChain_1.readRefereeCountByReferrer)(cardAddress, row.referrerAa),
+                        referrerRewardBalance: await (0, cardProgramReferrerChain_1.readReferrerRewardBalance)(cardAddress, row.referrerAa),
+                    };
+                }));
+                return res.status(200).json({
+                    mode: 'referrers',
+                    cardAddress: addrNorm,
+                    source: 'db_fallback',
+                    total: page.total,
+                    limit,
+                    offset,
+                    referrers,
+                });
+            }
+            if (m === 'refereesbyreferrer') {
+                if (!referrerAA || !ethers_1.ethers.isAddress(referrerAA)) {
+                    return res.status(400).json({ error: 'referrerAA required for mode=refereesByReferrer (EOA preferred)' });
+                }
+                const referrerNorm = ethers_1.ethers.getAddress(referrerAA);
+                const chainPage = await (0, cardProgramReferrerChain_1.readRefereesByReferrerPageFromChain)(cardAddress, referrerNorm, offset, limit);
+                if (chainPage.ok) {
+                    return res.status(200).json({
+                        mode: 'refereesByReferrer',
+                        cardAddress: addrNorm,
+                        /** Product: login EOA (not AA). */
+                        referrerAA: chainPage.referrerEoa,
+                        source: 'chain',
+                        total: chainPage.total,
+                        limit,
+                        offset,
+                        nextOffset: chainPage.nextOffset,
+                        referees: chainPage.referees,
+                    });
+                }
+                const page = await (0, cardProgramReferrerDb_1.listCardProgramRefereesByReferrer)(cardAddress, referrerNorm, { limit, offset });
+                const chain = await (0, beamioUserCardChain_1.resolveUserCardChain)(addrNorm);
+                const provider = (0, beamioUserCardChain_1.providerForUserCardChain)(chain);
+                const referrerEoa = await (0, cardProgramReferrerChain_1.resolveReferrerRegistryAaToEoa)(provider, referrerNorm);
+                const lookupAa = await (0, cardProgramReferrerChain_1.resolveReferrerRegistryLookupAa)(provider, referrerNorm);
+                const referees = await Promise.all(page.items.map(async (row) => {
+                    const refereeEoa = await (0, cardProgramReferrerChain_1.resolveReferrerRegistryAaToEoa)(provider, row.refereeAa);
+                    const uplinkEoa = row.referrerAa
+                        ? await (0, cardProgramReferrerChain_1.resolveReferrerRegistryAaToEoa)(provider, row.referrerAa)
+                        : null;
+                    return {
+                        ...row,
+                        refereeAa: refereeEoa,
+                        referrerAa: uplinkEoa,
+                        refereeChargePointsTotal6: await (0, cardProgramReferrerChain_1.readRefereeChargePointsTotal6)(cardAddress, row.refereeAa || lookupAa),
+                    };
+                }));
+                return res.status(200).json({
+                    mode: 'refereesByReferrer',
+                    cardAddress: addrNorm,
+                    referrerAA: referrerEoa,
+                    source: 'db_fallback',
+                    total: page.total,
+                    limit,
+                    offset,
+                    referees,
+                });
+            }
+            if (m === 'registeredreferees') {
+                const chainPage = await (0, cardProgramReferrerChain_1.readRegisteredRefereesPageFromChain)(cardAddress, offset, limit);
+                if (chainPage.ok) {
+                    return res.status(200).json({
+                        mode: 'registeredReferees',
+                        cardAddress: addrNorm,
+                        source: 'chain',
+                        total: chainPage.total,
+                        limit,
+                        offset,
+                        nextOffset: chainPage.nextOffset,
+                        /** refereeAa / referrerAa are login EOAs. */
+                        referees: chainPage.referees,
+                    });
+                }
+                const page = await (0, cardProgramReferrerDb_1.listCardProgramRegisteredReferees)(cardAddress, { limit, offset });
+                const chain = await (0, beamioUserCardChain_1.resolveUserCardChain)(addrNorm);
+                const provider = (0, beamioUserCardChain_1.providerForUserCardChain)(chain);
+                const referees = await Promise.all(page.items.map(async (row) => ({
+                    ...row,
+                    refereeAa: await (0, cardProgramReferrerChain_1.resolveReferrerRegistryAaToEoa)(provider, row.refereeAa),
+                    referrerAa: row.referrerAa
+                        ? await (0, cardProgramReferrerChain_1.resolveReferrerRegistryAaToEoa)(provider, row.referrerAa)
+                        : null,
+                })));
+                return res.status(200).json({
+                    mode: 'registeredReferees',
+                    cardAddress: addrNorm,
+                    source: 'db_fallback',
+                    total: page.total,
+                    limit,
+                    offset,
+                    referees,
+                });
+            }
+            return res.status(400).json({ error: 'Invalid mode: use summary|referrers|refereesByReferrer|registeredReferees' });
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            (0, logger_1.logger)(safe_1.default.red('[cardProgramReferrers] error:'), msg);
+            return res.status(500).json({ error: 'Failed to fetch card program referrer registry' });
+        }
+    });
+    router.get('/deploySmartAccount', async (req, res) => {
+        const { wallet, signMessage } = req.body;
+        if (!ethers_1.ethers.isAddress(wallet) || wallet === ethers_1.ethers.ZeroAddress || !signMessage || signMessage?.trim() === '') {
+            return res.status(400).json({ error: "Invalid data format" });
+        }
+        const isValid = (0, util_1.checkSign)(wallet, signMessage, wallet);
+        if (!isValid) {
+            return res.status(400).json({ error: "Signature verification failed!" });
+        }
+        return res.status(200).json({ message: "Smart account deployed!" }).end();
+        // const aaAccount = await checkSmartAccount(wallet)
+    });
+    /** GET /api/getMyFollowStatus?wallet=0x... 30 秒缓存 */
+    router.get('/getMyFollowStatus', async (req, res) => {
+        const { wallet } = req.query;
+        if (!ethers_1.ethers.isAddress(wallet) || wallet === ethers_1.ethers.ZeroAddress) {
+            return res.status(400).json({ error: "Invalid data format" });
+        }
+        const cacheKey = ethers_1.ethers.getAddress(wallet).toLowerCase();
+        const cached = getMyFollowStatusCache.get(cacheKey);
+        if (cached && Date.now() < cached.expiry) {
+            return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body);
+        }
+        const followStatus = await (0, db_2.getMyFollowStatus)(wallet);
+        if (followStatus === null) {
+            return res.status(400).json({ error: "Follow status check Error!" });
+        }
+        const body = JSON.stringify(followStatus);
+        getMyFollowStatusCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS });
+        return res.status(200).json(followStatus).end();
+    });
+    router.post('/coinbase-hooks', express_1.default.raw({ type: '*/*' }), async (req, res) => {
+        const ret = await (0, coinbase_1.coinbaseHooks)(req, res);
+        if (!ret) {
+            return (0, logger_1.logger)(`/coinbase-hooks Error!`);
+        }
+    });
+    /**
+     * Merchant Programs — Cluster 仅预检后转发 Master（会话状态仅在 Master 单进程，避免多 worker 内存分裂）。
+     * body: `{ walletAddress, packageType: 'lite_kit' | 'standard_kit' | 'custom_kit' }`
+     */
+    router.post('/merchantKitStripe/createSession', async (req, res) => {
+        const { walletAddress, packageType } = req.body ?? {};
+        if (!walletAddress || typeof packageType !== 'string') {
+            return res.status(400).json({ error: 'walletAddress and packageType required' }).end();
+        }
+        if (!ethers_1.ethers.isAddress(walletAddress)) {
+            return res.status(400).json({ error: 'Invalid walletAddress' }).end();
+        }
+        if (packageType !== 'lite_kit' &&
+            packageType !== 'standard_kit' &&
+            packageType !== 'custom_kit') {
+            return res.status(400).json({ error: 'Invalid packageType' }).end();
+        }
+        if (!(0, stripeBeamio_1.getStripeBeamioSecretKey)()) {
+            (0, logger_1.logger)(safe_1.default.red('[merchantKitStripe] createSession cluster precheck: StripeBeamio key missing'));
+            return res.status(503).json({ error: 'Stripe is not configured on server' }).end();
+        }
+        return (0, exports.postLocalhost)('/api/merchantKitStripe/createSession', { walletAddress: ethers_1.ethers.getAddress(walletAddress), packageType }, res);
+    });
+    router.post('/merchantKitStripe/poll', async (req, res) => {
+        const { sessionId, userClosedCheckout } = req.body ?? {};
+        if (!sessionId || typeof sessionId !== 'string') {
+            return res.status(400).json({ error: 'sessionId required' }).end();
+        }
+        return (0, exports.postLocalhost)('/api/merchantKitStripe/poll', { sessionId, userClosedCheckout: Boolean(userClosedCheckout) }, res);
+    });
+    /**
+     * Stripe Crypto Onramp → Stripe 把 Base 原生 USDC 直转用户 EOA。
+     * Cluster 仅预检后转发 Master（会话 map 只在 Master）。禁止 Beamio 库存 transfer。
+     * body: `{ walletAddress, amountUsdc6 }`（6 位定点；最低 1 USDC，整分，上限 10,000 USDC）
+     */
+    router.post('/eoaUsdcStripe/createSession', async (req, res) => {
+        const { walletAddress, amountUsdc6 } = req.body ?? {};
+        if (!walletAddress) {
+            return res.status(400).json({ error: 'walletAddress required' }).end();
+        }
+        if (!ethers_1.ethers.isAddress(walletAddress)) {
+            return res.status(400).json({ error: 'Invalid walletAddress' }).end();
+        }
+        const amountStr = typeof amountUsdc6 === 'number' && Number.isFinite(amountUsdc6)
+            ? String(Math.trunc(amountUsdc6))
+            : typeof amountUsdc6 === 'string'
+                ? amountUsdc6.trim()
+                : '';
+        if (!/^\d+$/.test(amountStr)) {
+            return res.status(400).json({ error: 'amountUsdc6 must be a positive integer string' }).end();
+        }
+        const amount = BigInt(amountStr);
+        if (amount < 1000000n) {
+            return res.status(400).json({ error: 'Minimum deposit is 1 USDC' }).end();
+        }
+        if (amount > 10000000000n) {
+            return res.status(400).json({ error: 'Maximum deposit is 10,000 USDC' }).end();
+        }
+        if (amount % 10000n !== 0n) {
+            return res.status(400).json({ error: 'amountUsdc6 must be a whole USD cent (multiple of 10000)' }).end();
+        }
+        if (!(0, stripeBeamio_1.getStripeBeamioSecretKey)()) {
+            (0, logger_1.logger)(safe_1.default.red('[eoaUsdcStripe] createSession cluster precheck: StripeBeamio key missing'));
+            return res.status(503).json({ error: 'Stripe is not configured on server' }).end();
+        }
+        return (0, exports.postLocalhost)('/api/eoaUsdcStripe/createSession', { walletAddress: ethers_1.ethers.getAddress(walletAddress), amountUsdc6: amountStr }, res);
+    });
+    router.post('/eoaUsdcStripe/poll', async (req, res) => {
+        const { sessionId, userClosedCheckout } = req.body ?? {};
+        if (!sessionId || typeof sessionId !== 'string') {
+            return res.status(400).json({ error: 'sessionId required' }).end();
+        }
+        return (0, exports.postLocalhost)('/api/eoaUsdcStripe/poll', { sessionId, userClosedCheckout: Boolean(userClosedCheckout) }, res);
+    });
+    /** GET /api/share/coupon-claim-meta?target= — JSON for homepage client meta + preview */
+    router.get('/share/coupon-claim-meta', async (req, res) => {
+        const parsed = (0, couponClaimShare_1.parseCouponClaimShareRequest)(req.query);
+        if (!parsed) {
+            return res.status(400).json({ ok: false, error: 'Invalid coupon claim target' });
+        }
+        try {
+            const meta = (await (0, couponClaimShare_1.resolveCouponClaimShareMeta)(parsed.params, parsed.shareUrl)) ??
+                (0, couponClaimShare_1.buildFallbackCouponClaimShareMeta)(parsed.params, parsed.shareUrl);
+            return res.status(200).json({ ok: true, meta });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[share/coupon-claim-meta] error:'), err?.message ?? err);
+            return res.status(500).json({ ok: false, error: 'Failed to resolve coupon share metadata' });
+        }
+    });
+    /** GET /api/share/coupon-claim-html?target= — crawler HTML shell with dynamic Open Graph tags */
+    router.get('/share/coupon-claim-html', async (req, res) => {
+        const q = req.query;
+        const targetRaw = typeof q.target === 'string' ? q.target.trim() : '';
+        const hasBust = Boolean(String(q.v ?? q.iiis ?? '').trim());
+        // WhatsApp/Meta cache by the pasted URL. Links without `v=` that once failed to fetch
+        // `/og/s/` stick as title-only forever — 302 onto a layout-stable `v=` forces re-key.
+        if (targetRaw && !hasBust) {
+            const redirect = new URL('https://beamio.app/app-download');
+            redirect.searchParams.set('target', targetRaw);
+            redirect.searchParams.set('v', (0, couponClaimShare_1.layoutAppDownloadCacheBust)());
+            res.setHeader('Cache-Control', 'no-store');
+            return res.redirect(302, redirect.pathname + redirect.search);
+        }
+        const parsed = (0, couponClaimShare_1.parseCouponClaimShareRequest)(q);
+        if (!parsed) {
+            return res.status(400).type('html').send('<!DOCTYPE html><html><body><p>Invalid coupon claim link.</p></body></html>');
+        }
+        try {
+            const meta = (await (0, couponClaimShare_1.resolveCouponClaimShareMeta)(parsed.params, parsed.shareUrl)) ??
+                (0, couponClaimShare_1.buildFallbackCouponClaimShareMeta)(parsed.params, parsed.shareUrl);
+            // Pre-render OG JPEG before HTML so WhatsApp (~1s image timeout) hits warm disk cache.
+            await (0, couponClaimShare_1.warmCouponClaimOgJpeg)(meta);
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+            return res.status(200).send((0, couponClaimShare_1.renderCouponClaimShareHtml)(meta));
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[share/coupon-claim-html] error:'), err?.message ?? err);
+            return res.status(500).type('html').send('<!DOCTYPE html><html><body><p>Coupon share preview unavailable.</p></body></html>');
+        }
+    });
+    /** GET /api/og/s/:token.jpg — short path OG image (WeChat-friendly, no query string) */
+    router.get('/og/s/:token', async (req, res) => {
+        const decoded = (0, couponClaimShare_1.decodeOgShareTokenPayload)(String(req.params.token ?? ''));
+        if (!decoded) {
+            return res.status(400).json({ error: 'Invalid coupon share image token' });
+        }
+        try {
+            const shareUrl = (0, couponClaimShare_1.buildShareUrlForOgToken)(decoded.params, decoded.cacheBust);
+            const meta = (await (0, couponClaimShare_1.resolveCouponClaimShareMeta)(decoded.params, shareUrl)) ??
+                (0, couponClaimShare_1.buildFallbackCouponClaimShareMeta)(decoded.params, shareUrl);
+            const jpeg = await (0, couponClaimShare_1.warmCouponClaimOgJpeg)(meta);
+            res.setHeader('Content-Type', 'image/jpeg');
+            res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+            res.removeHeader('X-Powered-By');
+            return res.status(200).send(jpeg);
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[og/s/:token] error:'), err?.message ?? err);
+            return res.status(500).json({ error: 'Failed to render coupon share image' });
+        }
+    });
+    /** GET /api/og/coupon-claim.png?target= — 1200×630 social preview image (coupon capsule + QR) */
+    router.get('/og/coupon-claim.png', async (req, res) => {
+        const parsed = (0, couponClaimShare_1.parseCouponClaimShareRequest)(req.query);
+        if (!parsed) {
+            return res.status(400).json({ error: 'Invalid coupon claim target' });
+        }
+        try {
+            const meta = (await (0, couponClaimShare_1.resolveCouponClaimShareMeta)(parsed.params, parsed.shareUrl)) ??
+                (0, couponClaimShare_1.buildFallbackCouponClaimShareMeta)(parsed.params, parsed.shareUrl);
+            const png = await (0, couponClaimShare_1.renderCouponClaimOgPng)(meta);
+            res.setHeader('Content-Type', 'image/png');
+            res.setHeader('Cache-Control', 'public, max-age=600, stale-while-revalidate=1800');
+            return res.status(200).send(png);
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[og/coupon-claim.png] error:'), err?.message ?? err);
+            return res.status(500).json({ error: 'Failed to render coupon share image' });
+        }
+    });
+    /** GET /api/og/issued-nft.jpg?card=0x&tokenId=100…&v=rev — Coupon Preview OG for BaseScan ERC-1155 `image`. */
+    router.get('/og/issued-nft.jpg', async (req, res) => {
+        const card = typeof req.query.card === 'string' ? req.query.card.trim() : '';
+        const tokenId = typeof req.query.tokenId === 'string' ? req.query.tokenId.trim() : '';
+        if (!card || !ethers_1.ethers.isAddress(card) || !tokenId || !/^\d+$/.test(tokenId)) {
+            return res.status(400).json({ error: 'Invalid card or tokenId' });
+        }
+        try {
+            if (BigInt(tokenId) < ISSUED_NFT_START_ID) {
+                return res.status(400).json({ error: 'tokenId must be an issued NFT series id' });
+            }
+        }
+        catch {
+            return res.status(400).json({ error: 'Invalid tokenId' });
+        }
+        try {
+            const meta = await (0, couponClaimShare_1.resolveIssuedNftExplorerShareMeta)(card, tokenId);
+            if (!meta) {
+                return res.status(404).json({ error: 'Issued NFT series not found' });
+            }
+            const jpeg = await (0, couponClaimShare_1.warmIssuedNftExplorerOgJpeg)(card, tokenId, meta);
+            res.setHeader('Content-Type', 'image/jpeg');
+            res.setHeader('Cache-Control', 'public, max-age=600, stale-while-revalidate=1800');
+            res.removeHeader('X-Powered-By');
+            return res.status(200).send(jpeg);
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[og/issued-nft.jpg] error:'), err?.message ?? err);
+            return res.status(500).json({ error: 'Failed to render issued NFT explorer image' });
+        }
+    });
+    /** POST /api/requestExplorerNftMetadataRefresh — after biz edits; warms OG + optional OpenSea refresh. */
+    router.post('/requestExplorerNftMetadataRefresh', async (req, res) => {
+        const body = req.body;
+        const cardAddress = body.cardAddress?.trim() ?? '';
+        const tokenId = body.tokenId?.trim() ?? '';
+        if (!cardAddress || !ethers_1.ethers.isAddress(cardAddress) || !tokenId) {
+            return res.status(400).json({ success: false, error: 'Invalid cardAddress or tokenId' });
+        }
+        try {
+            const result = await (0, baseExplorerNftMetadataRefresh_1.requestExplorerNftMetadataRefresh)({
+                contractAddress: ethers_1.ethers.getAddress(cardAddress),
+                tokenId,
+            });
+            return res.status(200).json({ success: result.ok, ...result });
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[requestExplorerNftMetadataRefresh] error:'), err?.message ?? err);
+            return res.status(500).json({ success: false, error: err?.message ?? 'Refresh failed' });
+        }
+    });
+    /** GET /api/og/coupon-claim.jpg — JPEG variant for WeChat / Meta link previews */
+    router.get('/og/coupon-claim.jpg', async (req, res) => {
+        const parsed = (0, couponClaimShare_1.parseCouponClaimShareRequest)(req.query);
+        if (!parsed) {
+            return res.status(400).json({ error: 'Invalid coupon claim target' });
+        }
+        try {
+            const meta = (await (0, couponClaimShare_1.resolveCouponClaimShareMeta)(parsed.params, parsed.shareUrl)) ??
+                (0, couponClaimShare_1.buildFallbackCouponClaimShareMeta)(parsed.params, parsed.shareUrl);
+            const jpeg = await (0, couponClaimShare_1.renderCouponClaimOgJpeg)(meta);
+            res.setHeader('Content-Type', 'image/jpeg');
+            res.setHeader('Cache-Control', 'public, max-age=600, stale-while-revalidate=1800');
+            return res.status(200).send(jpeg);
+        }
+        catch (err) {
+            (0, logger_1.logger)(safe_1.default.red('[og/coupon-claim.jpg] error:'), err?.message ?? err);
+            return res.status(500).json({ error: 'Failed to render coupon share image' });
+        }
+    });
+};
+const initialize = async (reactBuildFolder, PORT) => {
+    console.log('🔧 Initialize called with PORT:', PORT, 'reactBuildFolder:', reactBuildFolder);
+    (0, util_1.oracleBackoud)(false);
+    setTimeout(startClusterOracleSync, 3000);
+    const defaultPath = (0, node_path_1.join)(__dirname, 'workers');
+    const userDataPath = reactBuildFolder;
+    const updatedPath = (0, node_path_1.join)(userDataPath, 'workers');
+    let staticFolder = node_fs_1.default.existsSync(updatedPath) ? updatedPath : defaultPath;
+    const isProd = process.env.NODE_ENV === "production";
+    const app = (0, express_1.default)();
+    app.set("trust proxy", true);
+    const forwardStripeBeamioHook = (req, res, routeTag) => {
+        const ip = (0, util_1.getClientIp)(req);
+        const ua = String(req.headers['user-agent'] ?? '').slice(0, 80);
+        (0, logger_1.logger)(safe_1.default.cyan(`[${routeTag}] POST → master /api/stripeBeamioHook`), `ip=${ip || '(none)'}`, `ua=${ua || '(none)'}`);
+        return postLocalhostRaw('/api/stripeBeamioHook', req.body, req.headers['stripe-signature'], res);
+    };
+    /** 唯一现役 Stripe webhook。旧 path 兼容转发到同一 Master handler。 */
+    app.post('/api/stripeBeamioHook', express_1.default.raw({ type: 'application/json' }), (req, res) => forwardStripeBeamioHook(req, res, 'stripeBeamioHook'));
+    app.post('/api/merchant-kit-stripe-webhook', express_1.default.raw({ type: 'application/json' }), (req, res) => forwardStripeBeamioHook(req, res, 'merchant-kit-stripe-webhook'));
+    app.post('/api/eoa-usdc-stripe-webhook', express_1.default.raw({ type: 'application/json' }), (req, res) => forwardStripeBeamioHook(req, res, 'eoa-usdc-stripe-webhook'));
+    if (!isProd) {
+        app.use((req, res, next) => {
+            res.setHeader('Access-Control-Allow-Origin', '*'); // 或你的白名单 Origin
+            res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+            res.setHeader('Access-Control-Allow-Headers', 
+            // 允许二跳自定义头；顺手加 Access-Control-Expose-Headers 兜底某些客户端误发到预检
+            'Content-Type, Authorization, X-Requested-With, X-PAYMENT, Access-Control-Expose-Headers');
+            // 暴露自定义响应头，便于浏览器读取
+            res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, X-PAYMENT-RESPONSE');
+            if (req.method === 'OPTIONS')
+                return res.sendStatus(204);
+            next();
+        });
+    }
+    else {
+        app.use((req, _res, next) => {
+            if (!req.get('x-forwarded-proto')) {
+                req.headers['x-forwarded-proto'] = 'https';
+            }
+            next();
+        });
+        // 生产环境只把所有 CORS 预检透传给 nginx 处理，但这里加一行轻量日志，
+        // 用于排查 x402 客户端"Failed to fetch"问题：如果浏览器第二跳带着 X-PAYMENT 的预检
+        // 实际打到了 Node，会在这里看到 `acrh=...,x-payment`；如果完全看不到 OPTIONS log，
+        // 就说明 nginx 自己回的 OPTIONS（可能没把 X-PAYMENT 列入 Access-Control-Allow-Headers）。
+        app.use((req, _res, next) => {
+            if (req.method === 'OPTIONS') {
+                const acrm = req.header('access-control-request-method') ?? '(none)';
+                const acrh = req.header('access-control-request-headers') ?? '(none)';
+                const origin = req.header('origin') ?? '(no-origin)';
+                (0, logger_1.logger)(`[CORS preflight] path=${req.originalUrl} origin=${origin} acrm=${acrm} acrh=${acrh}`);
+            }
+            next();
+        });
+    }
+    // app.use ( express.static ( staticFolder ))
+    app.use(express_1.default.json({ limit: '5mb' }));
+    const cors = require('cors');
+    if (!isProd) {
+        // 本地开发才由 Node 处理 CORS（例如直连 http://localhost:4088）
+        app.use(/.*/, cors({
+            origin: ['http://localhost:4088'],
+            methods: ['GET', 'POST', 'OPTIONS'],
+            allowedHeaders: [
+                'Content-Type',
+                'Authorization',
+                'X-Requested-With',
+                'X-PAYMENT',
+                'Access-Control-Expose-Headers',
+            ],
+            exposedHeaders: ['X-PAYMENT-RESPONSE'],
+            credentials: false,
+            optionsSuccessStatus: 204,
+            maxAge: 600,
+        }));
+    }
+    const router = express_1.default.Router();
+    app.use('/api', router);
+    routing(router);
+    /** Short link for Verra NDEF / SoftPOS: UA-based redirect to TestFlight or Play Store. */
+    app.get('/go/verra-ndef', (req, res) => {
+        const ua = String(req.headers['user-agent'] ?? '');
+        const loc = resolveVerraNdefInstallRedirectUrl(ua);
+        (0, logger_1.logger)(safe_1.default.cyan('[go/verra-ndef] redirect'), `→ ${loc}`, `ua=${ua.slice(0, 120)}`);
+        res.redirect(302, loc);
+    });
+    app.use((err, req, res, next) => {
+        // Guard noisy body-parser JSON syntax errors (e.g. multipart/form-data sent as application/json).
+        if (err?.type === 'entity.parse.failed' && err instanceof SyntaxError) {
+            const ct = String(req.headers['content-type'] ?? '');
+            (0, logger_1.logger)(safe_1.default.yellow(`[json-parse] ${req.method} ${req.originalUrl} invalid JSON body; content-type=${ct || '(none)'}`));
+            if (!res.headersSent) {
+                return res.status(400).json({ success: false, error: 'Invalid JSON body' }).end();
+            }
+            return;
+        }
+        next(err);
+    });
+    (0, logger_1.logger)('Router stack:', router.stack.map(r => r.route?.path));
+    (0, logger_1.logger)(`🧭 public router after serverRoute(router)`);
+    /** GET /metadata/:filename - 唯一统一约定（Base Explorer / EIP-1155）：
+     *  仅支持 0x{40hex}{suffix}.json，40hex = ERC-1155 合约（卡）地址，suffix = tokenId（十进制或 64 位十六进制）。
+     *  tokenId=0 返回卡级 metadata（getCardByAddress），否则返回该 NFT tier metadata（getNftTierMetadataByCardAndToken）。
+     */
+    app.get('/metadata/:filename', async (req, res) => {
+        const filename = req.params.filename;
+        const nftMetaMatch = filename.match(/^(0x[0-9a-fA-F]{40})([0-9a-fA-F]+)\.json$/);
+        if (nftMetaMatch) {
+            const cardAddress = nftMetaMatch[1];
+            const suffix = nftMetaMatch[2];
+            let tokenId;
+            if (suffix.length === 64 && /^[0-9a-fA-F]{64}$/.test(suffix)) {
+                // EIP-1155 标准：64 位十六进制 tokenId（小写/无 0x 前缀）
+                tokenId = Number(BigInt('0x' + suffix));
+                if (!Number.isSafeInteger(tokenId) || tokenId < 0) {
+                    return res.status(400).json({ error: 'Token ID from 64-hex out of safe range' });
+                }
+            }
+            else if (/^[0-9]+$/.test(suffix)) {
+                // 十进制 NFT#（如 101）
+                tokenId = parseInt(suffix, 10);
+                if (!Number.isInteger(tokenId) || tokenId < 0) {
+                    return res.status(400).json({ error: 'Invalid NFT number in filename' });
+                }
+            }
+            else {
+                return res.status(400).json({ error: 'Invalid NFT suffix (use 64 hex chars or decimal digits)' });
+            }
+            (0, logger_1.logger)(safe_1.default.cyan(`[metadata] GET filename=${filename} → cardAddress=${cardAddress} tokenId=${tokenId}`));
+            try {
+                if (tokenId === 0) {
+                    // tokenId 0 = 卡级 metadata（Base Explorer 约定，与 uri(0) 一致）
+                    const row = await (0, db_2.getCardByAddress)(cardAddress);
+                    if (!row?.metadata) {
+                        (0, logger_1.logger)(safe_1.default.yellow(`[metadata] tokenId=0: no card metadata for cardAddress=${cardAddress}`));
+                        return res.status(404).json({ error: 'Card metadata not found' });
+                    }
+                    const data = row.metadata;
+                    const base = data?.shareTokenMetadata && typeof data.shareTokenMetadata === 'object' ? data.shareTokenMetadata : {};
+                    const out = { ...base };
+                    if (data?.tiers && Array.isArray(data.tiers) && data.tiers.length > 0)
+                        out.tiers = data.tiers;
+                    const body = JSON.stringify(out);
+                    (0, logger_1.logger)(safe_1.default.green(`[metadata] tokenId=0 返回给 UI 的 JSON 长度=${body.length} 内容:`), body);
+                    res.setHeader('Content-Type', 'application/json');
+                    res.send(body);
+                    return;
+                }
+                const payload = await (0, db_2.getNftTierMetadataByCardAndToken)(cardAddress, tokenId);
+                if (!payload) {
+                    (0, logger_1.logger)(safe_1.default.yellow(`[metadata] tokenId=${tokenId}: DB 无记录 cardAddress=${cardAddress}`));
+                    return res.status(404).json({ error: 'NFT tier metadata not found' });
+                }
+                const body = JSON.stringify(payload);
+                (0, logger_1.logger)(safe_1.default.green(`[metadata] tokenId=${tokenId} 返回给 UI 的 JSON 长度=${body.length} 内容:`), body);
+                res.setHeader('Content-Type', 'application/json');
+                res.send(body);
+            }
+            catch (err) {
+                (0, logger_1.logger)(safe_1.default.red('[metadata] NFT tier read error:'), err?.message ?? err);
+                return res.status(500).json({ error: 'Failed to read NFT tier metadata' });
+            }
+            return;
+        }
+        return res.status(400).json({ error: 'Invalid metadata filename format (expected 0x{40hex}{suffix}.json, suffix = tokenId decimal or 64 hex)' });
+    });
+    router.post('/youtubeProductionVideo/validate', async (req, res) => {
+        try {
+            const url = String(req.body?.url ?? '').trim();
+            if (!url) {
+                return res.status(400).json({ ok: false, error: 'YouTube URL is required.' });
+            }
+            const result = await (0, youtubeProductionVideo_1.validateYoutubeProductionVideoUrl)(url);
+            if (!result.ok) {
+                return res.status(400).json(result);
+            }
+            return res.json(result);
+        }
+        catch (err) {
+            const message = err instanceof Error ? err.message : 'Could not validate YouTube video.';
+            return res.status(500).json({ ok: false, error: message });
+        }
+    });
+    app.get('/_debug', (req, res) => {
+        res.json({
+            protocol: req.protocol,
+            secure: req.secure,
+            host: req.get('host'),
+            xfp: req.get('x-forwarded-proto'),
+        });
+    });
+    app.once('error', (err) => {
+        (0, logger_1.logger)(err);
+        (0, logger_1.logger)(`Local server on ERROR, try restart!`);
+        return;
+    });
+    app.all('/', (req, res) => {
+        return res.status(404).end();
+    });
+    const server = app.listen(PORT, () => {
+        console.log('✅ Server started successfully!');
+        console.table([
+            { 'x402 Server': `http://localhost:${PORT}`, 'Serving files from': staticFolder }
+        ]);
+        void (0, excludeUserCardApi_1.warmDynamicApiExcludedUserCardsFromDb)().catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            (0, logger_1.logger)(safe_1.default.red('[initialize] warmDynamicApiExcludedUserCardsFromDb error:'), msg);
+        });
+    });
+    server.on('error', (err) => {
+        console.error('❌ Server error:', err);
+    });
+    return server;
+};
+const startServer = async () => {
+    initialize('', serverPort);
+};
+exports.startServer = startServer;

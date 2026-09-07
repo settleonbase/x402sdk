@@ -128,6 +128,16 @@ export type CreateBeamioCardInitCodeOptions = {
   /** true：创建时即开启 points 转账白名单（须配置 whitelist 地址）；默认 false（不限制） */
   transferWhitelistEnabled?: boolean
   /**
+   * Complete tier state installed by the card constructor/Beacon initializer.
+   * New cards must not rely on post-create appendTier or fee bootstrap calls.
+   */
+  initialTierConfig?: {
+    qualificationMode: 0 | 1 | 2
+    tiers?: CreateCardTier[]
+    membershipFeeE6?: Array<bigint | string | number>
+    membershipDurationKind?: number[]
+  }
+  /**
    * 链上已部署且与当前 BeamioUserCardArtifact 版本一致的库地址（Formatting + Transfer）。
    * 由 initCode 选项生成部署数据时必传；或直接传入完整 initCode 十六进制字符串可省略。
    */
@@ -333,6 +343,7 @@ export async function buildBeamioUserCardInitCode(
   gateway: string,
   upgradeType: 0 | 1 | 2 = 0,
   initialTransferWhitelistEnabled = false,
+  initialTierConfig?: CreateBeamioCardInitCodeOptions['initialTierConfig'],
   libraryAddresses?: BeamioUserCardLibraryAddresses,
   contractName = ''
 ): Promise<string> {
@@ -360,16 +371,18 @@ export async function buildBeamioUserCardInitCode(
   }
 
   const factory = new ethers.ContractFactory(artifact.abi, bytecode)
-  // BeamioUserCard constructor is (uri, currency, priceE6, initialOwner, gateway) only.
+  // Initial tier state is constructor data, so no post-create initialization is needed.
   void upgradeType
   void initialTransferWhitelistEnabled
   void contractName
+  const tierConfig = normalizeInitialTierConfig(initialTierConfig)
   const deployTx = await factory.getDeployTransaction(
     uri,
     currencyEnum,
     pointsUnitPriceInCurrencyE6,
     initialOwner,
-    gateway
+    gateway,
+    tierConfig
   )
   const initCode = deployTx?.data
   if (!initCode) throw new Error('Failed to build BeamioUserCard initCode')
@@ -385,6 +398,7 @@ async function buildBeamioUserCardInitCodeFromParams(
   gateway: string,
   upgradeType: 0 | 1 | 2,
   initialTransferWhitelistEnabled = false,
+  initialTierConfig?: CreateBeamioCardInitCodeOptions['initialTierConfig'],
   libraryAddresses?: BeamioUserCardLibraryAddresses,
   contractName = ''
 ): Promise<string> {
@@ -395,48 +409,23 @@ async function buildBeamioUserCardInitCodeFromParams(
   }
   if (!artifact?.bytecode) throw new Error('BeamioUserCard artifact missing bytecode')
 
-  // P2: when the CoNET UpgradeableBeacon is configured, Factory CREATE deploys BeaconProxy
-  // (card address stays stable). Until then keep the existing UserCard constructor CREATE path.
+  // New merchant cards are always BeaconProxy cards. Only that initializer can
+  // atomically install the complete tier configuration in one create receipt.
   void upgradeType
   void initialTransferWhitelistEnabled
   void contractName
-  if (isConetUserCardBeaconConfigured()) {
-    return buildBeamioUserCardBeaconProxyInitCode({
-      uri,
-      currencyEnum,
-      pointsUnitPriceInCurrencyE6,
-      initialOwner,
-      gateway,
-    })
+  const tierConfig = normalizeInitialTierConfig(initialTierConfig)
+  if (!isConetUserCardBeaconConfigured()) {
+    throw new Error('Merchant card creation requires the configured CoNET UserCard beacon')
   }
-
-  let bytecode = artifact.bytecode
-  const lr = artifact.linkReferences
-  if (lr && Object.keys(lr).length > 0) {
-    const libs = resolveBeamioUserCardLibraryAddresses(libraryAddresses)
-    if (!libs) {
-      throw new Error(
-        'BeamioUserCard requires linked libraries. Pass libraryAddresses in CreateBeamioCardInitCodeOptions, ' +
-          'or set BEAMIO_USER_CARD_FORMATTING_LIB / BEAMIO_USER_CARD_TRANSFER_LIB, ' +
-          'or configure BASE_BEAMIO_USER_CARD_*_LIB in chainAddresses.ts (see BeamioContract scripts/beamioUserCardLibraries.ts). ' +
-          'Alternatively supply a pre-linked initCode hex string.'
-      )
-    }
-    bytecode = linkBeamioUserCardBytecode(bytecode, lr, libs)
-    assertBeamioUserCardLinkedDeployedBytecodeFitsEip170(libraryAddresses)
-  }
-
-  const factory = new ethers.ContractFactory(artifact.abi, bytecode)
-  const deployTx = await factory.getDeployTransaction(
+  return buildBeamioUserCardBeaconProxyInitCode({
     uri,
     currencyEnum,
     pointsUnitPriceInCurrencyE6,
     initialOwner,
-    gateway
-  )
-  const initCode = deployTx?.data
-  if (!initCode) throw new Error('Failed to build BeamioUserCard initCode')
-  return initCode
+    gateway,
+    initialTierConfig: tierConfig,
+  })
 }
 
 /**
@@ -498,6 +487,7 @@ export async function createBeamioCardWithFactory(
       gateway,
       upgradeType,
       wlOn,
+      initCodeOrOptions.initialTierConfig,
       initCodeOrOptions.libraryAddresses,
       initCodeOrOptions.contractName?.trim() ?? ''
     )
@@ -677,6 +667,53 @@ export type CreateCardTier = {
   upgradeByCharge?: boolean
   membershipFeeE6?: string
   membershipDurationKind?: number
+}
+
+type EncodedInitialTierConfig = {
+  qualificationMode: number
+  tiers: Array<{ minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint; upgradeByBalance: boolean }>
+  membershipFeeE6: bigint[]
+  membershipDurationKind: number[]
+}
+
+/**
+ * All new cards carry their complete tier configuration in initCode. A bare
+ * caller is still given one explicit base top-up tier rather than a metadata-
+ * only card; production creation supplies the merchant-selected config.
+ */
+function normalizeInitialTierConfig(
+  config: CreateBeamioCardInitCodeOptions['initialTierConfig'] | undefined,
+): EncodedInitialTierConfig {
+  const mode = config?.qualificationMode ?? 0
+  if (mode !== 0 && mode !== 1 && mode !== 2) throw new Error('qualificationMode must be 0, 1, or 2')
+  const tiers = (config?.tiers ?? []).map((tier) => ({
+    minUsdc6: BigInt(tier.minUsdc6),
+    attr: BigInt(tier.attr),
+    tierExpirySeconds: BigInt(tier.tierExpirySeconds ?? 0),
+    upgradeByBalance: false,
+  }))
+  const membershipFeeE6 = (config?.membershipFeeE6 ?? []).map((fee) => BigInt(fee))
+  const membershipDurationKind = config?.membershipDurationKind ?? []
+  if (!config) {
+    return {
+      qualificationMode: 0,
+      tiers: [{ minUsdc6: 1n, attr: 0n, tierExpirySeconds: 0n, upgradeByBalance: false }],
+      membershipFeeE6: [],
+      membershipDurationKind: [],
+    }
+  }
+  if (
+    mode === 1 &&
+    (tiers.length === 0 ||
+      tiers.length !== membershipFeeE6.length ||
+      membershipFeeE6.length !== membershipDurationKind.length)
+  ) {
+    throw new Error('Direct membership needs matching on-chain tiers, fees, and durations')
+  }
+  if (mode !== 1 && (tiers.length === 0 || membershipFeeE6.length > 0 || membershipDurationKind.length > 0)) {
+    throw new Error('Top-up or charge cards need one or more threshold tiers and no membership fee schedule')
+  }
+  return { qualificationMode: mode, tiers, membershipFeeE6, membershipDurationKind }
 }
 
 /**
@@ -986,8 +1023,8 @@ function appendSnapshotToErrorMessage(base: string, snapshot: CreateCardChainDeb
 }
 
 /** Same as createBeamioCardWithFactory, plus `{ cardAddress, hash }`.
- * Loyalty (top-up / charge / balance): one tx `createCardCollectionWithInitCodeAndTiers`
- * (live 3-tuple, selector 0x9a7eb0f0). Membership-fee / no valid tiers: initCode-only create.
+ * New cards configure every tier inside initCode and use the simple Factory create
+ * selector. The old AndTiers path remains only to create compatible legacy cards.
  * Do not create then `appendTierForCard` on the new-card path (orphan if append reverts).
  * Keep `sendAppendTierForCard` for recover only. */
 export async function createBeamioCardWithFactoryReturningHash(
@@ -1045,6 +1082,7 @@ export async function createBeamioCardWithFactoryReturningHash(
       gateway,
       upgradeType2,
       wlOn,
+      initCodeOrOptions.initialTierConfig,
       initCodeOrOptions.libraryAddresses,
       initCodeOrOptions.contractName?.trim() ?? ''
     )
@@ -1094,7 +1132,9 @@ export async function createBeamioCardWithFactoryReturningHash(
         ? initCodeOrOptions.upgradeType
         : 0
       : undefined
-  const tiersToAppend = skipMembershipTiers ? [] : normalizeTiersForCreateCard(tiers, cardUpgradeType)
+  const tiersToAppend = initCodeOrOptions && typeof initCodeOrOptions === 'object' && initCodeOrOptions.initialTierConfig
+    ? []
+    : (skipMembershipTiers ? [] : normalizeTiersForCreateCard(tiers, cardUpgradeType))
   emitCreateCardTiersJson(
     'CCSA.createBeamioCardWithFactoryReturningHash.normalizedTiersForChain',
     tiersToAppend.map((t) => ({

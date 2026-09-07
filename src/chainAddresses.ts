@@ -324,6 +324,10 @@ export const CONET_BEAMIO_USER_CARD_VIEWS_LIB = '0x1c7c122429Da18e6078d9CEbb7B5b
 export const CONET_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB =
   process.env.CONET_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB || '0x048fb5BdEAeF9bFb42b7Af9118f9975E9Be933F2'
 export const CONET_REFERRER_REGISTRY_LIB = '0xE7A4287be0f6e3BDB217d72648E71312757Dd837'
+/** Updated by upgradeUserCardBeaconConet.ts before V20 cards are created. */
+export const CONET_BEAMIO_USER_CARD_TIER_OPS_LIB = ''
+/** Nested link for TierOps; retained in the deployment snapshot for verification. */
+export const CONET_MEMBERSHIP_FEE_OPS_LIB = ''
 
 /**
  * CoNET UserCard UpgradeableBeacon (P2). Empty until deployed; createCard stays on CREATE initCode

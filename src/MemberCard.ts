@@ -2899,19 +2899,11 @@ export function unpackTopupMintAmount(raw: bigint): { totalPoints6: bigint; paid
 }
 
 async function cardSupportsTopupMintPack(cardAddr: string, provider: ethers.Provider): Promise<boolean> {
-	const c = new ethers.Contract(
-		cardAddr,
-		['function topupMintPacksPaidBase() view returns (bool)', 'function VERSION() view returns (uint256)'],
-		provider
-	)
 	try {
-		return Boolean(await c.topupMintPacksPaidBase())
+		const c = new ethers.Contract(cardAddr, ['function VERSION() view returns (uint256)'], provider)
+		return BigInt(await c.VERSION()) >= 17n
 	} catch {
-		try {
-			return BigInt(await c.VERSION()) >= 17n
-		} catch {
-			return false
-		}
+		return false
 	}
 }
 
@@ -3085,22 +3077,28 @@ export const nfcTopupPreparePayload = async (params: {
 		if (amountCurrency6 < feeFiat6) {
 			return { error: 'Top-up amount must be at least the membership fee' }
 		}
+		if (amountCurrency6 !== feeFiat6) {
+			return {
+				error:
+					'Direct membership purchase must equal the selected membership fee. Use a separate top-up after membership is issued.',
+			}
+		}
 	}
 
 	/**
-	 * Leftover after fee becomes `#0` program points (not the membership NFT).
-	 * POS / Discover send amount = locked fee only (2dp). When leftover is 0,
-	 * mint MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6 so mintPointsByAdmin does not revert.
+	 * Direct membership purchase never becomes #0 program credit.  The card
+	 * consumes the staged fee and its zero-point gateway call issues only the
+	 * membership NFT.  Ordinary top-up cards retain their points quote path.
 	 */
-	const pointsSourceFiat6 = membershipNeedsFee ? amountCurrency6 - feeFiat6 : amountCurrency6
+	const pointsSourceFiat6 = membershipNeedsFee ? 0n : amountCurrency6
 	if (pointsSourceFiat6 < 0n) {
 		return { error: 'Top-up amount must be at least the membership fee' }
 	}
 
 	// 优先使用“卡币种直算 points6”，避免 currency->USDC->points 的双重向下截断造成 49.999993 这类漏档误差
 	let points6: bigint | null = null
-	if (membershipNeedsFee && pointsSourceFiat6 === 0n) {
-		points6 = MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6
+	if (membershipNeedsFee) {
+		points6 = 0n
 	} else {
 	try {
 		const readCard = new ethers.Contract(
@@ -3144,7 +3142,9 @@ export const nfcTopupPreparePayload = async (params: {
 	}
 	}
 
-	if (points6 <= 0n) return { error: 'quotePointsForUSDC failed' }
+	if (points6 == null || (!membershipNeedsFee && points6 <= 0n)) {
+		return { error: 'quotePointsForUSDC failed' }
+	}
 
 	/**
 	 * Reward PT (#13) base = 实付 (paid). Top-up Promotion bonus is included in `amount` / total
@@ -3220,7 +3220,7 @@ export const nfcTopupPreparePayload = async (params: {
 		factoryGateway,
 		membershipFeeMode,
 		membershipNeedsFee,
-		/** Always total #0 credit (unpacked), never the packed wire value. */
+		/** Direct membership = zero #0 credit; ordinary top-up is the minted amount. */
 		pointsCredit6: points6.toString(),
 		amountFiat6: amountCurrency6.toString(),
 	}
@@ -8263,36 +8263,18 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 	}
 	const amountFiat6 = parseOptionalUint256String(params.amountFiat6)
 	if (amountFiat6 != null) {
-		if (amountFiat6 < expectedFee) {
-			return { success: false, error: 'Top-up amount must be at least the membership fee' }
-		}
-		const pointsSourceFiat6 = amountFiat6 - expectedFee
-		if (pointsSourceFiat6 < 0n) {
-			return { success: false, error: 'Top-up amount must be at least the membership fee' }
-		}
-		try {
-			const provider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
-			const readCard = new ethers.Contract(
-				cardNorm,
-				['function pointsUnitPriceInCurrencyE6() view returns (uint256)'],
-				provider
-			)
-			const priceInCurrency6 = (await readCard.pointsUnitPriceInCurrencyE6()) as bigint
-			if (priceInCurrency6 > 0n) {
-				const ONE_E6 = 1_000_000n
-				const expectedPoints =
-					pointsSourceFiat6 === 0n
-						? MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6
-						: (pointsSourceFiat6 * ONE_E6 + priceInCurrency6 - 1n) / priceInCurrency6
-				if (expectedPoints !== params.points6Mint) {
-					return {
-						success: false,
-						error: 'mintPointsByAdmin amount does not match points credited after membership fee',
-					}
-				}
+		if (amountFiat6 !== expectedFee) {
+			return {
+				success: false,
+				error:
+					'Direct membership purchase must equal the selected membership fee. Use a separate top-up after membership is issued.',
 			}
-		} catch {
-			/* pricing read failed — still stage with client mint amount */
+		}
+	}
+	if (params.points6Mint !== 0n) {
+		return {
+			success: false,
+			error: 'Direct membership purchase must not mint program points',
 		}
 	}
 	return {
@@ -14143,6 +14125,16 @@ export const createBeamioCardAdmin = async (
 		contractName?: string
 		transferWhitelistEnabled?: boolean
 		upgradeType?: 0 | 1 | 2
+		initialTierConfig?: {
+			qualificationMode: 0 | 1 | 2
+			tiers?: Array<{
+				minUsdc6: string
+				attr: number
+				tierExpirySeconds?: number
+			}>
+			membershipFeeE6?: Array<string | number | bigint>
+			membershipDurationKind?: number[]
+		}
 		libraryAddresses?: BeamioUserCardLibraryAddresses
 	}
 ): Promise<string> => {
@@ -14154,6 +14146,7 @@ export const createBeamioCardAdmin = async (
 	if (opts?.uri) initOpts.uri = opts.uri
 	if (opts?.contractName?.trim()) initOpts.contractName = opts.contractName.trim()
 	if (opts?.transferWhitelistEnabled === true) initOpts.transferWhitelistEnabled = true
+	if (opts?.initialTierConfig) initOpts.initialTierConfig = opts.initialTierConfig
 	if (opts?.upgradeType === 1 || opts?.upgradeType === 2) initOpts.upgradeType = opts.upgradeType
 	return createBeamioCardWithFactory(
 		SC.baseFactoryPaymaster,
@@ -14184,6 +14177,16 @@ export const createBeamioCardAdminWithHash = async (
 		}>
 		transferWhitelistEnabled?: boolean
 		upgradeType?: 0 | 1 | 2
+		initialTierConfig?: {
+			qualificationMode: 0 | 1 | 2
+			tiers?: Array<{
+				minUsdc6: string
+				attr: number
+				tierExpirySeconds?: number
+			}>
+			membershipFeeE6?: Array<string | number | bigint>
+			membershipDurationKind?: number[]
+		}
 		libraryAddresses?: BeamioUserCardLibraryAddresses
 	},
 	factoryOverride?: ethers.Contract
@@ -14202,6 +14205,7 @@ export const createBeamioCardAdminWithHash = async (
 	if (opts?.uri) initOpts.uri = opts.uri
 	if (opts?.contractName?.trim()) initOpts.contractName = opts.contractName.trim()
 	if (opts?.transferWhitelistEnabled === true) initOpts.transferWhitelistEnabled = true
+	if (opts?.initialTierConfig) initOpts.initialTierConfig = opts.initialTierConfig
 	if (opts?.upgradeType === 0 || opts?.upgradeType === 1 || opts?.upgradeType === 2) {
 		initOpts.upgradeType = opts.upgradeType
 	}
@@ -14844,6 +14848,7 @@ export const createCardPreCheck = (body: {
 		if (!Array.isArray(body.tiers)) {
 			return { success: false, error: 'tiers must be an array if provided' }
 		}
+		let previousTierMinUsdc6: bigint | undefined
 		for (let i = 0; i < body.tiers.length; i++) {
 			const t = body.tiers[i]
 			if (!t || typeof t !== 'object') {
@@ -14858,7 +14863,11 @@ export const createCardPreCheck = (body: {
 			}
 			try {
 				const minUsdc6 = BigInt(o.minUsdc6)
-				if (minUsdc6 < 0n) return { success: false, error: `tiers[${i}].minUsdc6 must be >= 0` }
+				if (minUsdc6 <= 0n) return { success: false, error: `tiers[${i}].minUsdc6 must be greater than 0` }
+				if (previousTierMinUsdc6 != null && minUsdc6 <= previousTierMinUsdc6) {
+					return { success: false, error: 'tiers must be strictly increasing by minUsdc6' }
+				}
+				previousTierMinUsdc6 = minUsdc6
 			} catch {
 				return { success: false, error: `tiers[${i}].minUsdc6 must be an integer string` }
 			}
@@ -15937,7 +15946,62 @@ export const createCardPoolPress = async () => {
 						upgradeByBalance: resolveCreateCardTierUpgradeByBalance(t, stampedUpgradeType),
 					}))
 				: undefined
-		const tiersForCreate = skipMembershipTiers ? undefined : mappedTiers
+		// New cards must leave Factory with their complete tier state.  The
+		// Factory create call remains one transaction; the proxy initializer
+		// installs this config before the card becomes observable.
+		const initialTierConfig = skipMembershipTiers
+			? (() => {
+					const base = parseBaseMembership(baseMembership)
+					if (!base || BigInt(metadataTierMembershipFeeE6(base)) <= 0n) {
+						throw new Error('Paid membership creation requires a base membership fee')
+					}
+					const paidRows = [base, ...(stampedTiers ?? [])]
+					const fees = paidRows.map((row) => {
+						const fee = BigInt(metadataTierMembershipFeeE6(row))
+						if (fee <= 0n) throw new Error('Every paid membership tier requires a positive fee')
+						return fee
+					})
+					const durations = paidRows.map((row) => Number(row.membershipDurationKind ?? 0))
+					return {
+						qualificationMode: 1 as const,
+						// Every card, including direct-paid membership cards,
+						// starts with its complete canonical tier[0..n] state.
+						// For fee schedules the threshold is only an ordered
+						// on-chain descriptor; it cannot turn a fee purchase
+						// into top-up credit or a points-based upgrade.
+						tiers: paidRows.map((row, index) => ({
+							minUsdc6: String(index + 1),
+							// Base membership is card-level metadata and has no
+							// loyalty attributes. Direct-fee tiers only need a
+							// stable ordered descriptor on-chain.
+							attr: index,
+							tierExpirySeconds: 0,
+						})),
+						membershipFeeE6: fees,
+						membershipDurationKind: durations,
+					}
+				})()
+			: {
+					qualificationMode: (stampedUpgradeType === 2 ? 2 : 0) as 0 | 2,
+					// Every new card needs an on-chain base tier. Cards without
+					// explicit higher tiers get the semantic base at their unit
+					// price, rather than relying on a later appendTier call.
+					tiers: (mappedTiers?.length
+						? mappedTiers
+						: [
+								{
+									minUsdc6: priceInCurrencyE6,
+									attr: 0,
+									tierExpirySeconds: 0,
+									upgradeByBalance: false,
+								},
+							]
+					).map((tier) => ({
+						minUsdc6: String(tier.minUsdc6),
+						attr: Number(tier.attr),
+						tierExpirySeconds: Number(tier.tierExpirySeconds),
+					})),
+				}
 		// 0 = top-up (explicit for membership-fee cards); 1 = balance; 2 = cumulative
 		const ut =
 			stampedUpgradeType === 0 || stampedUpgradeType === 1 || stampedUpgradeType === 2
@@ -15952,7 +16016,7 @@ export const createCardPoolPress = async () => {
 				contractName: resolveBeamioUserCardContractNameFromShareMetadata(
 					shareTokenMetadata as Record<string, unknown> | undefined
 				),
-				...(tiersForCreate && { tiers: tiersForCreate }),
+				initialTierConfig,
 				...(transferWhitelistEnabled === true && { transferWhitelistEnabled: true }),
 				...(ut != null && { upgradeType: ut }),
 				libraryAddresses: beamioUserCardLibrariesForChain(merchantChain),

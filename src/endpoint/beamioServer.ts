@@ -10468,7 +10468,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!body.shareTokenMetadata || typeof body.shareTokenMetadata !== 'object' || Array.isArray(body.shareTokenMetadata)) {
 			return res.status(400).json({ success: false, error: 'shareTokenMetadata object is required' }).end()
 		}
-		if (!Array.isArray(body.tiers) || body.tiers.length === 0) {
+		if (!Array.isArray(body.tiers)) {
 			return res.status(400).json({ success: false, error: 'tiers array is required' }).end()
 		}
 		if (
@@ -10505,19 +10505,40 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (chainTiers.length === 0) {
 			return res.status(400).json({ success: false, error: 'setTiers requires at least one tier' }).end()
 		}
-		if (body.tiers.length !== chainTiers.length) {
-			return res.status(400).json({ success: false, error: 'metadata tiers length must match setTiers calldata' }).end()
+		// A paid card stores its base plan separately in metadata, but it is
+		// always tier 0 in the contract. body.tiers contains only higher plans.
+		const metadataTiersForChain = body.baseMembership
+			? [
+					{
+						...body.baseMembership,
+						minUsdc6: '1',
+						attr: 0,
+					},
+					...body.tiers,
+				]
+			: body.tiers
+		if (metadataTiersForChain.length === 0 || metadataTiersForChain.length !== chainTiers.length) {
+			return res
+				.status(400)
+				.json({ success: false, error: 'canonical metadata tier schedule must match setTiers calldata' })
+				.end()
 		}
 		for (let i = 0; i < chainTiers.length; i++) {
 			if (BigInt(chainTiers[i].minUsdc6) <= 0n) {
 				return res.status(400).json({ success: false, error: `tiers[${i}].minUsdc6 must be > 0` }).end()
 			}
+			if (i > 0 && BigInt(chainTiers[i].minUsdc6) <= BigInt(chainTiers[i - 1].minUsdc6)) {
+				return res
+					.status(400)
+					.json({ success: false, error: 'tiers must be strictly increasing by minUsdc6' })
+					.end()
+			}
 			if (!Number.isInteger(chainTiers[i].attr) || chainTiers[i].attr < 0) {
 				return res.status(400).json({ success: false, error: `tiers[${i}].attr must be a non-negative integer` }).end()
 			}
 		}
-		for (let i = 0; i < body.tiers.length; i++) {
-			const meta = body.tiers[i]
+		for (let i = 0; i < metadataTiersForChain.length; i++) {
+			const meta = metadataTiersForChain[i]
 			if (!meta || typeof meta !== 'object') {
 				return res.status(400).json({ success: false, error: `tiers[${i}] must be an object` }).end()
 			}
