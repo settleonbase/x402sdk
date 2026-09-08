@@ -21180,10 +21180,14 @@ export const cardRedeemPreCheck = async (body: {
 	try {
 		const cardNorm = ethers.getAddress(cardAddress)
 		const hash = ethers.keccak256(ethers.toUtf8Bytes(redeemCode.trim()))
-		const card = new ethers.Contract(cardNorm, CARD_REDEEM_PRECHECK_ABI, providerBaseBackup)
+		// Merchant cards live on CoNET only — never precheck redeem status via Base RPC
+		// (empty bytecode → BAD_DATA on getRedeemStatus, surfaced as "Unable to read merchant card on CoNET").
+		const cardChain = await resolveUserCardChain(cardNorm)
+		const cardProvider = providerForUserCardChain(cardChain)
+		const card = new ethers.Contract(cardNorm, CARD_REDEEM_PRECHECK_ABI, cardProvider)
 		let claimer: string = ethers.ZeroAddress
 		try {
-			const aa = await resolveBeamioAaForEoaWithFallback(providerBaseBackup, ethers.getAddress(toUserEOA))
+			const aa = await resolveBeamioAaForEoaWithFallback(cardProvider, ethers.getAddress(toUserEOA))
 			if (aa && ethers.isAddress(aa)) claimer = ethers.getAddress(aa)
 		} catch {
 			claimer = ethers.ZeroAddress
