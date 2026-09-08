@@ -1,7 +1,14 @@
 /**
- * Discover Gifting: gifter pays CoNET-USDC (EIP-3009 offline sign, zero gas) →
- * Master collects to card.owner() → EntryPoint relay createGiftRedeemForPayer (no owner signature).
- * Plaintext redeem code is returned once to the gifter only; chain stores keccak256(utf8(code)).
+ * Discover Gifting (two pay rails — keep separate from Home P2P #0 Gift):
+ *
+ * 1) payWith=usdc (default): EIP-3009 CoNET-USDC → card.owner() → createGiftRedeemForPayer.
+ *    May apply Top-up Promotion Multiplier on principal. Merchant owner pays 20 B-Unit protocol fee.
+ *
+ * 2) payWith=credit: burn buyer AA #0 face G + optional merchant fee F → createGiftRedeemWithCreditBurn.
+ *    Stores split of G only (F never minted). No Top-up Promotion / no #13. Requires metadata giftCreditPurchase.enabled.
+ *    Merchant owner pays 20 B-Unit protocol fee.
+ *
+ * Plaintext redeem code returned once; chain stores keccak256(utf8(code)).
  */
 import type { Response } from 'express'
 import { ethers } from 'ethers'
@@ -9,14 +16,20 @@ import Colors from 'colors/safe'
 import { logger } from './logger'
 import {
 	BEAMIO_INDEXER_DIAMOND,
+	CONET_BUNIT_AIRDROP_ADDRESS,
 	CONET_CARD_FACTORY,
 	CONET_MAINNET_CHAIN_ID,
 	CONET_USDC,
 } from './chainAddresses'
 import { providerForUserCardChain, resolveUserCardChain } from './beamioUserCardChain'
 import {
+	calcTopupFixedBUnitFee,
 	checkBusinessRelayTxSuccessful,
+	getCardAaFactoryAddress,
+	pickBUnitFeeConsumerPreferEoaThenAa,
 	relayUserCardCallViaEntryPoint,
+	resolveCardOwnerToEOA,
+	syncStandaloneBunitServiceFeeToIndexer,
 } from './MemberCard'
 import { shiftSettleConet, unshiftSettleConet } from './settleContractPool'
 import { getCardByAddress } from './db'
@@ -30,6 +43,12 @@ import {
 	topupPromotionToBonusRules,
 	type CreateCardBonusRuleNormalized,
 } from './programTopupPromotion'
+import { buildCouponRedeemAppDownloadUrl } from './endpoint/couponClaimShare'
+import {
+	computeGiftCreditBurnAmountE6,
+	parseGiftCreditPurchaseConfig,
+} from './giftCreditPurchaseMetadata'
+import { resolveBeamioAaForEoaWithFallback } from './endpoint/resolveBeamioAaViaUserCardFactory'
 
 const CONET_USDC_EIP3009_ABI = [
 	'function name() view returns (string)',
@@ -54,7 +73,7 @@ const CARD_VIEW_ABI = [
 	'function currency() view returns (uint8)',
 	'function pointsUnitPriceInCurrencyE6() view returns (uint256)',
 	'function getRedeemStatus(bytes32 hash) view returns (bool active, uint256 totalPoints6)',
-	'function getGiftRedeemSplit(bytes32 hash) view returns (bool isGift, uint256 membershipFeeE6, uint256 topupCreditE6)',
+	'function balanceOf(address account, uint256 id) view returns (uint256)',
 ] as const
 
 const FACTORY_QUOTE_ABI = [
@@ -66,12 +85,56 @@ const CARD_VERSION_ABI = ['function VERSION() view returns (uint256)'] as const
 
 const CREATE_GIFT_REDEEM_IFACE = new ethers.Interface([
 	'function createGiftRedeemForPayer(bytes32 hash, uint256 membershipFeeE6, uint256 topupCreditE6, uint64 validAfter, uint64 validBefore)',
+	'function createGiftRedeemWithCreditBurn(bytes32 hash, uint256 membershipFeeE6, uint256 topupCreditE6, uint256 burnAmountE6, address payerAccount, uint64 validAfter, uint64 validBefore)',
 ])
 
 const CREATE_GIFT_REDEEM_SEL =
 	CREATE_GIFT_REDEEM_IFACE.getFunction('createGiftRedeemForPayer')?.selector ?? '0x00000000'
+const CREATE_GIFT_CREDIT_SEL =
+	CREATE_GIFT_REDEEM_IFACE.getFunction('createGiftRedeemWithCreditBurn')?.selector ?? '0x00000000'
+
+/** consumeFromUser kind — same family as NFC/USDC top-up (20 B-Unit). */
+const BUNIT_KIND_TOPUP_FAMILY = 2n
+
+export const GIFT_CREDIT_EIP712_TYPES: Record<string, { name: string; type: string }[]> = {
+	GiftCreditPurchase: [
+		{ name: 'card', type: 'address' },
+		{ name: 'from', type: 'address' },
+		{ name: 'payerAccount', type: 'address' },
+		{ name: 'membershipFeeE6', type: 'uint256' },
+		{ name: 'topupCreditE6', type: 'uint256' },
+		{ name: 'burnAmountE6', type: 'uint256' },
+		{ name: 'redeemHash', type: 'bytes32' },
+		{ name: 'validAfter', type: 'uint64' },
+		{ name: 'validBefore', type: 'uint64' },
+		{ name: 'nonce', type: 'bytes32' },
+	],
+}
+
+export type MerchantGiftPayWith = 'usdc' | 'credit'
 
 export type PurchaseMerchantGiftRedeemBody = {
+	cardAddress: string
+	from: string
+	userSignature: string
+	nonce: string
+	validAfter: string
+	validBefore: string
+	redeemCode: string
+	/** Default usdc. credit = burn #0 G+F from buyer AA. */
+	payWith?: MerchantGiftPayWith | string
+	/** Required for usdc rail. */
+	usdcAmount?: string
+	membershipFeeE6?: string
+	topupPrincipalE6?: string
+	redeemValidAfter?: string
+	redeemValidBefore?: string
+	/** Optional client hint for credit rail AA; Cluster resolves from EOA. */
+	payerAccount?: string
+}
+
+export type PurchaseMerchantGiftRedeemPreChecked = {
+	payWith: MerchantGiftPayWith
 	cardAddress: string
 	from: string
 	usdcAmount: string
@@ -80,22 +143,22 @@ export type PurchaseMerchantGiftRedeemBody = {
 	validAfter: string
 	validBefore: string
 	redeemCode: string
-	/** Optional client hint; Cluster overrides from metadata for fee cards. */
-	membershipFeeE6?: string
-	/** Top-up principal in card-currency E6 (before Multiplier bonus). */
-	topupPrincipalE6?: string
-	redeemValidAfter?: string
-	redeemValidBefore?: string
-}
-
-export type PurchaseMerchantGiftRedeemPreChecked = PurchaseMerchantGiftRedeemBody & {
-	cardOwner: string
 	membershipFeeE6: string
 	topupPrincipalE6: string
 	topupCreditE6: string
 	redeemHash: string
+	cardOwner: string
 	cardCurrency: number
 	quotedUsdc6: string
+	redeemValidAfter: string
+	redeemValidBefore: string
+	/** Credit rail only */
+	payerAccount: string
+	burnAmountE6: string
+	merchantFeeE6: string
+	cardOwnerEOA: string
+	bunitFeeConsumer: string
+	bunitFeeUnits6: string
 }
 
 type PoolItem = PurchaseMerchantGiftRedeemPreChecked & { res: Response }
@@ -123,7 +186,12 @@ function e6FromHuman(n: number): bigint {
 	return BigInt(Math.round(n * 1e6))
 }
 
-/** Multiplier / top-up promotion bonus on principal (card-currency human units → E6 credit). */
+export function normalizePayWith(raw: unknown): MerchantGiftPayWith {
+	const s = String(raw ?? 'usdc').toLowerCase().trim()
+	return s === 'credit' || s === 'points' || s === 'program' ? 'credit' : 'usdc'
+}
+
+/** Multiplier / top-up promotion bonus on principal — USDC rail only. */
 function computeTopupBonusE6(
 	metadata: Record<string, unknown> | null,
 	principalE6: bigint,
@@ -147,7 +215,7 @@ function computeTopupBonusE6(
 			const rules = topupPromotionToBonusRules(promo)
 			let picked: CreateCardBonusRuleNormalized | null = null
 			for (const rule of rules) {
-				if (amount >= rule.paymentAmount) picked = rule
+				if (amount >= rule.minimumTopupAmount || amount >= rule.paymentAmount) picked = rule
 			}
 			if (!picked) return 0n
 			if (picked.bonusProportional && picked.paymentAmount > 0) {
@@ -191,6 +259,38 @@ async function bytecodeHasSelector(provider: ethers.Provider, address: string, s
 	return code.toLowerCase().includes(selector.slice(2).toLowerCase())
 }
 
+async function precheckMerchantGiftBUnitFee(
+	cardAddress: string,
+	provider: ethers.Provider,
+): Promise<
+	| { success: true; cardOwnerEOA: string; bunitFeeConsumer: string; bunitFeeUnits6: bigint }
+	| { success: false; error: string }
+> {
+	const { feeBUnits6 } = calcTopupFixedBUnitFee()
+	const card = new ethers.Contract(cardAddress, ['function owner() view returns (address)'], provider)
+	const rawOwner = (await card.owner()) as string
+	const resolveResult = await resolveCardOwnerToEOA(provider, rawOwner)
+	if (!resolveResult.success) {
+		return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA for B-Unit fee' }
+	}
+	const aaFac = await getCardAaFactoryAddress(cardAddress)
+	const picked = await pickBUnitFeeConsumerPreferEoaThenAa(resolveResult.cardOwner, feeBUnits6, {
+		aaFactoryAddress: aaFac,
+	})
+	if (!picked.ok) {
+		return {
+			success: false,
+			error: `Insufficient B-Units for gift purchase protocol fee (20 B-Units): ${picked.error}`,
+		}
+	}
+	return {
+		success: true,
+		cardOwnerEOA: resolveResult.cardOwner,
+		bunitFeeConsumer: picked.consumer,
+		bunitFeeUnits6: feeBUnits6,
+	}
+}
+
 export async function purchaseMerchantGiftRedeemPreCheck(
 	body: PurchaseMerchantGiftRedeemBody,
 ): Promise<
@@ -212,24 +312,8 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 		if (body.redeemCode.length > 128) {
 			return { success: false, error: 'redeemCode too long' }
 		}
-		const usdcAmount = BigInt(body.usdcAmount)
-		if (usdcAmount <= 0n) {
-			return { success: false, error: 'usdcAmount must be > 0' }
-		}
-		const validBefore = BigInt(body.validBefore || '0')
-		const validAfter = BigInt(body.validAfter || '0')
-		const now = BigInt(Math.floor(Date.now() / 1000))
-		if (validBefore <= now) {
-			return { success: false, error: 'USDC authorization expired (validBefore)' }
-		}
-		if (validAfter > now + 60n) {
-			return { success: false, error: 'USDC authorization not yet valid (validAfter)' }
-		}
-		const nonce = body.nonce
-		if (typeof nonce !== 'string' || !nonce.startsWith('0x') || (nonce.length !== 66 && nonce.length < 3)) {
-			return { success: false, error: 'Invalid EIP-3009 nonce' }
-		}
 
+		const payWith = normalizePayWith(body.payWith)
 		const cardAddress = ethers.getAddress(body.cardAddress)
 		const from = ethers.getAddress(body.from)
 		const chain = await resolveUserCardChain(cardAddress)
@@ -239,11 +323,15 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 		const provider = providerForUserCardChain('conet')
 		const factoryRead = new ethers.Contract(CONET_CARD_FACTORY, FACTORY_QUOTE_ABI, provider)
 		const redeemModuleAddr = (await factoryRead.defaultRedeemModule()) as string
-		const hasGiftModule = await bytecodeHasSelector(provider, redeemModuleAddr, CREATE_GIFT_REDEEM_SEL)
+		const needSel = payWith === 'credit' ? CREATE_GIFT_CREDIT_SEL : CREATE_GIFT_REDEEM_SEL
+		const hasGiftModule = await bytecodeHasSelector(provider, redeemModuleAddr, needSel)
 		if (!hasGiftModule) {
 			return {
 				success: false,
-				error: 'Discover Gifting RedeemModule is not bound on Factory yet',
+				error:
+					payWith === 'credit'
+						? 'Credit Gift RedeemModule is not bound on Factory yet'
+						: 'Discover Gifting RedeemModule is not bound on Factory yet',
 			}
 		}
 		try {
@@ -305,10 +393,152 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 			return { success: false, error: 'Gift amount must cover at least the base membership fee' }
 		}
 
+		const now = BigInt(Math.floor(Date.now() / 1000))
+		const redeemCode = body.redeemCode.trim()
+		const redeemHash = redeemHashFromCode(redeemCode)
+		const [active] = (await card.getRedeemStatus(redeemHash)) as [boolean, bigint]
+		if (active) {
+			return { success: false, error: 'redeemCode already exists on-chain' }
+		}
+
+		const redeemValidAfter = BigInt(body.redeemValidAfter ?? '0')
+		const redeemValidBefore = BigInt(
+			body.redeemValidBefore ?? String(Math.floor(Date.now() / 1000) + 365 * 24 * 3600),
+		)
+		if (redeemValidBefore <= now) {
+			return { success: false, error: 'redeemValidBefore must be in the future' }
+		}
+
+		const bunitPre = await precheckMerchantGiftBUnitFee(cardAddress, provider)
+		if (!bunitPre.success) return bunitPre
+
+		if (payWith === 'credit') {
+			const giftCfg = parseGiftCreditPurchaseConfig(metadata as Record<string, unknown> | null)
+			if (!giftCfg.enabled) {
+				return { success: false, error: 'Credit Gift is not enabled for this program card' }
+			}
+			// Credit rail: G = membership + principal; NO Top-up Promotion bonus
+			const topupCreditE6 = topupPrincipalE6
+			const giftFaceE6 = membershipFeeE6 + topupCreditE6
+			if (giftFaceE6 <= 0n) {
+				return { success: false, error: 'Gift credit total must be > 0' }
+			}
+			const { merchantFeeE6, burnAmountE6 } = computeGiftCreditBurnAmountE6(giftCfg, giftFaceE6)
+
+			const payerAccount =
+				(await resolveBeamioAaForEoaWithFallback(provider, from)) ??
+				(body.payerAccount && ethers.isAddress(body.payerAccount)
+					? ethers.getAddress(body.payerAccount)
+					: null)
+			if (!payerAccount || payerAccount === ethers.ZeroAddress) {
+				return { success: false, error: 'Buyer Smart Wallet (AA) required for Credit Gift' }
+			}
+			const aaBal = (await card.balanceOf(payerAccount, 0n)) as bigint
+			if (aaBal < burnAmountE6) {
+				return {
+					success: false,
+					error: `Insufficient program points (#0) on Smart Wallet (need ${burnAmountE6}, have ${aaBal})`,
+				}
+			}
+
+			const validBefore = BigInt(body.validBefore || '0')
+			const validAfter = BigInt(body.validAfter || '0')
+			if (validBefore <= now) {
+				return { success: false, error: 'Credit Gift authorization expired (validBefore)' }
+			}
+			if (validAfter > now + 60n) {
+				return { success: false, error: 'Credit Gift authorization not yet valid (validAfter)' }
+			}
+			const nonce = body.nonce
+			if (typeof nonce !== 'string' || !nonce.startsWith('0x') || nonce.length !== 66) {
+				return { success: false, error: 'Invalid Credit Gift EIP-712 nonce (bytes32)' }
+			}
+			const nonceBytes32 = padNonceBytes32(nonce)
+			const domain = {
+				name: 'BeamioMerchantGiftCredit',
+				version: '1',
+				chainId: CONET_MAINNET_CHAIN_ID,
+				verifyingContract: cardAddress,
+			}
+			let recovered: string
+			try {
+				recovered = ethers.verifyTypedData(
+					domain,
+					GIFT_CREDIT_EIP712_TYPES,
+					{
+						card: cardAddress,
+						from,
+						payerAccount,
+						membershipFeeE6,
+						topupCreditE6,
+						burnAmountE6,
+						redeemHash,
+						validAfter,
+						validBefore,
+						nonce: nonceBytes32,
+					},
+					body.userSignature,
+				)
+			} catch (sigErr: unknown) {
+				const msg = sigErr instanceof Error ? sigErr.message : String(sigErr)
+				return { success: false, error: `Invalid Credit Gift EIP-712 signature: ${msg}` }
+			}
+			if (recovered.toLowerCase() !== from.toLowerCase()) {
+				return { success: false, error: `Credit Gift signer mismatch: recovered=${recovered}` }
+			}
+
+			return {
+				success: true,
+				preChecked: {
+					payWith: 'credit',
+					cardAddress,
+					from,
+					usdcAmount: '0',
+					userSignature: body.userSignature,
+					nonce: nonceBytes32,
+					validAfter: validAfter.toString(),
+					validBefore: validBefore.toString(),
+					redeemCode,
+					membershipFeeE6: membershipFeeE6.toString(),
+					topupPrincipalE6: topupPrincipalE6.toString(),
+					topupCreditE6: topupCreditE6.toString(),
+					redeemHash,
+					cardOwner,
+					cardCurrency,
+					quotedUsdc6: '0',
+					redeemValidAfter: redeemValidAfter.toString(),
+					redeemValidBefore: redeemValidBefore.toString(),
+					payerAccount,
+					burnAmountE6: burnAmountE6.toString(),
+					merchantFeeE6: merchantFeeE6.toString(),
+					cardOwnerEOA: bunitPre.cardOwnerEOA,
+					bunitFeeConsumer: bunitPre.bunitFeeConsumer,
+					bunitFeeUnits6: bunitPre.bunitFeeUnits6.toString(),
+				},
+			}
+		}
+
+		// —— USDC rail ——
+		const usdcAmount = BigInt(body.usdcAmount ?? '0')
+		if (usdcAmount <= 0n) {
+			return { success: false, error: 'usdcAmount must be > 0' }
+		}
+		const validBefore = BigInt(body.validBefore || '0')
+		const validAfter = BigInt(body.validAfter || '0')
+		if (validBefore <= now) {
+			return { success: false, error: 'USDC authorization expired (validBefore)' }
+		}
+		if (validAfter > now + 60n) {
+			return { success: false, error: 'USDC authorization not yet valid (validAfter)' }
+		}
+		const nonce = body.nonce
+		if (typeof nonce !== 'string' || !nonce.startsWith('0x') || (nonce.length !== 66 && nonce.length < 3)) {
+			return { success: false, error: 'Invalid EIP-3009 nonce' }
+		}
+
 		const totalFiat6 = membershipFeeE6 + topupPrincipalE6
 		let quotedUsdc6: bigint
 		if (cardCurrency === 4) {
-			// USDC card currency: 1:1 with payment USDC when unit price is 1e6
 			quotedUsdc6 = priceE6 === 1_000_000n ? totalFiat6 : (totalFiat6 * priceE6) / 1_000_000n
 		} else {
 			quotedUsdc6 = (await factoryRead.quoteCurrencyAmountInUSDC6(cardCurrency, totalFiat6)) as bigint
@@ -324,17 +554,10 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 			}
 		}
 
-		const bonusE6 = computeTopupBonusE6(metadata, topupPrincipalE6)
+		const bonusE6 = computeTopupBonusE6(metadata as Record<string, unknown> | null, topupPrincipalE6)
 		const topupCreditE6 = topupPrincipalE6 + bonusE6
 		if (membershipFeeE6 + topupCreditE6 <= 0n) {
 			return { success: false, error: 'Gift credit total must be > 0' }
-		}
-
-		const redeemCode = body.redeemCode.trim()
-		const redeemHash = redeemHashFromCode(redeemCode)
-		const [active] = (await card.getRedeemStatus(redeemHash)) as [boolean, bigint]
-		if (active) {
-			return { success: false, error: 'redeemCode already exists on-chain' }
 		}
 
 		const nonceBytes32 = padNonceBytes32(nonce)
@@ -383,17 +606,10 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 			return { success: false, error: 'Insufficient CoNET-USDC balance' }
 		}
 
-		const redeemValidAfter = BigInt(body.redeemValidAfter ?? '0')
-		const redeemValidBefore = BigInt(
-			body.redeemValidBefore ?? String(Math.floor(Date.now() / 1000) + 365 * 24 * 3600),
-		)
-		if (redeemValidBefore <= now) {
-			return { success: false, error: 'redeemValidBefore must be in the future' }
-		}
-
 		return {
 			success: true,
 			preChecked: {
+				payWith: 'usdc',
 				cardAddress,
 				from,
 				usdcAmount: usdcAmount.toString(),
@@ -411,6 +627,12 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 				quotedUsdc6: quotedUsdc6.toString(),
 				redeemValidAfter: redeemValidAfter.toString(),
 				redeemValidBefore: redeemValidBefore.toString(),
+				payerAccount: ethers.ZeroAddress,
+				burnAmountE6: '0',
+				merchantFeeE6: '0',
+				cardOwnerEOA: bunitPre.cardOwnerEOA,
+				bunitFeeConsumer: bunitPre.bunitFeeConsumer,
+				bunitFeeUnits6: bunitPre.bunitFeeUnits6.toString(),
 			},
 		}
 	} catch (e: unknown) {
@@ -422,6 +644,65 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 export function kickPurchaseMerchantGiftRedeemProcess(): void {
 	if (purchaseGiftInFlight) return
 	void purchaseMerchantGiftRedeemProcess()
+}
+
+async function consumeMerchantGiftPurchaseBunitInBackground(args: {
+	walletConet: ethers.Wallet
+	cardAddress: string
+	createTxHash: string
+	cardOwnerEOA: string
+	bunitFeeConsumer: string
+	bunitFeeUnits6: bigint
+	payWith: MerchantGiftPayWith
+}): Promise<void> {
+	if (args.bunitFeeUnits6 <= 0n) return
+	try {
+		const bunitWrite = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+			args.walletConet,
+		)
+		const consumeTx = await bunitWrite.consumeFromUser(
+			args.bunitFeeConsumer,
+			args.bunitFeeUnits6,
+			args.createTxHash as `0x${string}`,
+			0n,
+			BUNIT_KIND_TOPUP_FAMILY,
+			{ gasLimit: 2_500_000 },
+		)
+		await consumeTx.wait()
+		await syncStandaloneBunitServiceFeeToIndexer({
+			walletConet: args.walletConet,
+			BeamioTaskDiamondAction: BEAMIO_INDEXER_DIAMOND,
+			consumeTxHash: consumeTx.hash,
+			basePaymentHash: args.createTxHash,
+			cardAddress: args.cardAddress,
+			bServiceUnits6: args.bunitFeeUnits6,
+			feePayer: args.bunitFeeConsumer,
+			txCategory: ethers.keccak256(ethers.toUtf8Bytes('merchantGiftPurchase:bunitService')),
+			title: 'Gift Purchase B-Unit Fee',
+			source: 'purchaseMerchantGiftRedeem',
+			operator: ethers.ZeroAddress,
+			operatorParentChain: [],
+			topAdmin: ethers.ZeroAddress,
+			subordinate: ethers.ZeroAddress,
+			extraDisplay: { payWith: args.payWith, cardOwnerEOA: args.cardOwnerEOA },
+			logLabel: 'purchaseMerchantGiftRedeem.bunit',
+		})
+		logger(
+			Colors.cyan(
+				`[purchaseMerchantGiftRedeem] B-Unit 20 consumed ${consumeTx.hash} consumer=${args.bunitFeeConsumer}`,
+			),
+		)
+	} catch (e: unknown) {
+		logger(
+			Colors.yellow(
+				`[purchaseMerchantGiftRedeem] B-Unit consume non-fatal: ${
+					e instanceof Error ? e.message : String(e)
+				}`,
+			),
+		)
+	}
 }
 
 async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
@@ -437,132 +718,154 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 			}
 			return
 		}
+		const payWith = normalizePayWith(item.payWith)
 		const cardAddress = ethers.getAddress(item.cardAddress)
 		const from = ethers.getAddress(item.from)
 		const cardOwner = ethers.getAddress(item.cardOwner)
-		const usdcAmount = BigInt(item.usdcAmount)
-		const nonceBytes32 = padNonceBytes32(item.nonce)
-		const provider = providerForUserCardChain('conet')
-
-		const conetUsdcWrite = new ethers.Contract(CONET_USDC, CONET_USDC_EIP3009_ABI, SC.walletConet)
-		logger(
-			Colors.gray(
-				`[purchaseMerchantGiftRedeem] USDC transferWithAuthorization from=${from} to=${cardOwner} value=${usdcAmount}`,
-			),
-		)
-		const usdcTx = await conetUsdcWrite.transferWithAuthorization(
-			from,
-			cardOwner,
-			usdcAmount,
-			BigInt(item.validAfter || '0'),
-			BigInt(item.validBefore),
-			nonceBytes32,
-			item.userSignature,
-		)
-		const usdcReceipt = await usdcTx.wait().catch((waitErr: unknown) => {
-			logger(
-				Colors.yellow(
-					`[purchaseMerchantGiftRedeem] USDC tx.wait failed: ${
-						waitErr instanceof Error ? waitErr.message : String(waitErr)
-					}`,
-				),
-			)
-			return null
-		})
-		const usdcOk = checkBusinessRelayTxSuccessful(usdcReceipt ?? undefined, {
-			logTag: 'purchaseMerchantGiftRedeem.usdc',
-		})
-		if (!usdcOk.ok) {
-			throw new Error(`CoNET-USDC transfer failed: ${usdcTx.hash} (${usdcOk.reason})`)
-		}
-
 		const membershipFeeE6 = BigInt(item.membershipFeeE6)
 		const topupCreditE6 = BigInt(item.topupCreditE6)
-		const cardCallData = CREATE_GIFT_REDEEM_IFACE.encodeFunctionData('createGiftRedeemForPayer', [
-			item.redeemHash,
-			membershipFeeE6,
-			topupCreditE6,
-			BigInt(item.redeemValidAfter || '0'),
-			BigInt(item.redeemValidBefore || '0'),
-		])
-		const createTx = await relayUserCardCallViaEntryPoint({
-			SC,
-			chain: 'conet',
-			cardAddress,
-			cardCallData,
-			logTag: 'purchaseMerchantGiftRedeem:createGift',
-		})
-		const createReceipt = await createTx.wait().catch((waitErr: unknown) => {
+		const topupPrincipalE6 = BigInt(item.topupPrincipalE6)
+		const redeemHash = item.redeemHash
+		const redeemValidAfter = BigInt(item.redeemValidAfter || '0')
+		const redeemValidBefore = BigInt(item.redeemValidBefore)
+		const bunitFeeUnits6 = BigInt(item.bunitFeeUnits6 || '0')
+		const bunitFeeConsumer = item.bunitFeeConsumer
+			? ethers.getAddress(item.bunitFeeConsumer)
+			: ethers.ZeroAddress
+		const cardOwnerEOA = item.cardOwnerEOA
+			? ethers.getAddress(item.cardOwnerEOA)
+			: cardOwner
+
+		let paymentTxHash = ethers.ZeroHash
+		let createCalldata: string
+
+		if (payWith === 'credit') {
+			const burnAmountE6 = BigInt(item.burnAmountE6)
+			const payerAccount = ethers.getAddress(item.payerAccount)
+			createCalldata = CREATE_GIFT_REDEEM_IFACE.encodeFunctionData('createGiftRedeemWithCreditBurn', [
+				redeemHash,
+				membershipFeeE6,
+				topupCreditE6,
+				burnAmountE6,
+				payerAccount,
+				redeemValidAfter,
+				redeemValidBefore,
+			])
 			logger(
-				Colors.yellow(
-					`[purchaseMerchantGiftRedeem] create tx.wait failed: ${
-						waitErr instanceof Error ? waitErr.message : String(waitErr)
-					}`,
+				Colors.gray(
+					`[purchaseMerchantGiftRedeem] credit burn+create payerAA=${payerAccount} burn=${burnAmountE6} G=${
+						membershipFeeE6 + topupCreditE6
+					} F=${item.merchantFeeE6}`,
 				),
 			)
-			return null
-		})
-		const createOk = checkBusinessRelayTxSuccessful(createReceipt ?? undefined, {
-			logTag: 'purchaseMerchantGiftRedeem:createGift',
-		})
-		if (!createOk.ok) {
-			throw new Error(`createGiftRedeemForPayer failed: ${createTx.hash} (${createOk.reason})`)
-		}
-
-		// Confirm gift split on-chain (best-effort)
-		try {
-			const card = new ethers.Contract(cardAddress, CARD_VIEW_ABI, provider)
-			const [isGift] = (await card.getGiftRedeemSplit(item.redeemHash)) as [boolean, bigint, bigint]
-			if (!isGift) {
-				logger(Colors.yellow(`[purchaseMerchantGiftRedeem] getGiftRedeemSplit not yet visible hash=${item.redeemHash}`))
+		} else {
+			const usdcAmount = BigInt(item.usdcAmount)
+			const nonceBytes32 = padNonceBytes32(item.nonce)
+			const conetUsdcWrite = new ethers.Contract(CONET_USDC, CONET_USDC_EIP3009_ABI, SC.walletConet)
+			logger(
+				Colors.gray(
+					`[purchaseMerchantGiftRedeem] USDC transferWithAuthorization from=${from} to=${cardOwner} value=${usdcAmount}`,
+				),
+			)
+			const usdcTx = await conetUsdcWrite.transferWithAuthorization(
+				from,
+				cardOwner,
+				usdcAmount,
+				BigInt(item.validAfter || '0'),
+				BigInt(item.validBefore),
+				nonceBytes32,
+				item.userSignature,
+			)
+			const usdcReceipt = await usdcTx.wait().catch((waitErr: unknown) => {
+				logger(
+					Colors.yellow(
+						`[purchaseMerchantGiftRedeem] USDC tx.wait failed: ${
+							waitErr instanceof Error ? waitErr.message : String(waitErr)
+						}`,
+					),
+				)
+				return null
+			})
+			const usdcOk = checkBusinessRelayTxSuccessful(usdcReceipt ?? undefined, {
+				logTag: 'purchaseMerchantGiftRedeem.usdc',
+			})
+			if (!usdcOk) {
+				throw new Error('CoNET-USDC transferWithAuthorization failed')
 			}
-		} catch {
-			/* optional */
+			paymentTxHash = usdcTx.hash
+			createCalldata = CREATE_GIFT_REDEEM_IFACE.encodeFunctionData('createGiftRedeemForPayer', [
+				redeemHash,
+				membershipFeeE6,
+				topupCreditE6,
+				redeemValidAfter,
+				redeemValidBefore,
+			])
 		}
 
-		logger(
-			Colors.green(
-				`[purchaseMerchantGiftRedeem] ok card=${cardAddress} from=${from} usdc=${usdcTx.hash} create=${createTx.hash} fee=${membershipFeeE6} topupCredit=${topupCreditE6}`,
-			),
-		)
+		const relay = await relayUserCardCallViaEntryPoint({
+			cardAddress,
+			callData: createCalldata,
+			walletConet: SC.walletConet,
+			logTag: 'purchaseMerchantGiftRedeem.create',
+		})
+		if (!relay.success || !relay.txHash) {
+			throw new Error(relay.error ?? 'createGiftRedeem relay failed')
+		}
+		const createTxHash = relay.txHash
+		const redeemUrl = buildCouponRedeemAppDownloadUrl(item.redeemCode)
 
 		if (item.res && !item.res.headersSent) {
 			item.res
 				.status(200)
 				.json({
 					success: true,
-					cardAddress,
-					from,
-					usdcTxHash: usdcTx.hash,
-					createTxHash: createTx.hash,
-					redeemHash: item.redeemHash,
+					payWith,
 					redeemCode: item.redeemCode,
+					redeemHash,
+					redeemUrl,
+					usdcTxHash: paymentTxHash !== ethers.ZeroHash ? paymentTxHash : undefined,
+					createTxHash,
 					membershipFeeE6: item.membershipFeeE6,
 					topupPrincipalE6: item.topupPrincipalE6,
 					topupCreditE6: item.topupCreditE6,
-					shareUrl: `https://beamio.app/app/?beamiocard=${encodeURIComponent(cardAddress)}&redeemcode=${encodeURIComponent(item.redeemCode)}`,
+					burnAmountE6: payWith === 'credit' ? item.burnAmountE6 : undefined,
+					merchantFeeE6: payWith === 'credit' ? item.merchantFeeE6 : undefined,
+					cardOwner,
 				})
 				.end()
 		}
 
-		// Indexer: fire-and-forget (do not block HTTP — already returned)
+		void consumeMerchantGiftPurchaseBunitInBackground({
+			walletConet: SC.walletConet,
+			cardAddress,
+			createTxHash,
+			cardOwnerEOA,
+			bunitFeeConsumer,
+			bunitFeeUnits6,
+			payWith,
+		})
+
 		void syncMerchantGiftRedeemIndexer({
 			walletConet: SC.walletConet,
-			usdcTxHash: usdcTx.hash,
-			createTxHash: createTx.hash,
+			usdcTxHash: paymentTxHash !== ethers.ZeroHash ? paymentTxHash : createTxHash,
+			createTxHash,
 			cardAddress,
 			from,
 			cardOwner,
-			usdcAmount,
+			usdcAmount: payWith === 'usdc' ? BigInt(item.usdcAmount) : 0n,
 			membershipFeeE6,
-			topupCreditE6: topupCreditE6,
-			topupPrincipalE6: BigInt(item.topupPrincipalE6),
-			redeemHash: item.redeemHash,
+			topupCreditE6,
+			topupPrincipalE6,
+			redeemHash,
 			cardCurrency: item.cardCurrency,
+			payWith,
+			merchantFeeE6: payWith === 'credit' ? BigInt(item.merchantFeeE6 || '0') : 0n,
 		}).catch((e: unknown) => {
 			logger(
 				Colors.yellow(
-					`[purchaseMerchantGiftRedeem] indexer non-critical: ${e instanceof Error ? e.message : String(e)}`,
+					`[purchaseMerchantGiftRedeem] indexer non-critical: ${
+						e instanceof Error ? e.message : String(e)
+					}`,
 				),
 			)
 		})
@@ -596,6 +899,8 @@ async function syncMerchantGiftRedeemIndexer(args: {
 	topupPrincipalE6: bigint
 	redeemHash: string
 	cardCurrency: number
+	payWith: MerchantGiftPayWith
+	merchantFeeE6: bigint
 }): Promise<void> {
 	const ACTION_SYNC_TOKEN_ABI = [
 		'function syncTokenAction((bytes32 txId, bytes32 originalPaymentHash, uint256 chainId, bytes32 txCategory, string displayJson, uint64 timestamp, address payer, address payee, uint256 finalRequestAmountFiat6, uint256 finalRequestAmountUSDC6, bool isAAAccount, (address asset, uint256 amountE6, uint8 assetType, uint8 source, uint256 tokenId, uint8 itemCurrencyType, uint256 offsetInRequestCurrencyE6)[] route, (uint16 gasChainType, uint256 gasWei, uint256 gasUSDC6, uint256 serviceUSDC6, uint256 bServiceUSDC6, uint256 bServiceUnits6, address feePayer) fees, (uint256 requestAmountFiat6, uint256 requestAmountUSDC6, uint8 currencyFiat, uint256 discountAmountFiat6, uint16 discountRateBps, uint256 taxAmountFiat6, uint16 taxRateBps, string afterNotePayer, string afterNotePayee) meta, address operator, address[] operatorParentChain, address topAdmin, address subordinate) in_) returns (uint256 actionId)',
@@ -603,15 +908,17 @@ async function syncMerchantGiftRedeemIndexer(args: {
 	const TX_CAT = ethers.keccak256(ethers.toUtf8Bytes('merchantGiftRedeem'))
 	const fiat6 = args.membershipFeeE6 + args.topupPrincipalE6
 	const displayJson = JSON.stringify({
-		title: 'Discover Gift Redeem',
+		title: args.payWith === 'credit' ? 'Discover Credit Gift' : 'Discover Gift Redeem',
 		handle: `Gift from ${args.from.slice(0, 10)}…`,
 		finishedHash: args.createTxHash,
 		source: 'purchaseMerchantGiftRedeem',
+		payWith: args.payWith,
 		usdcTxHash: args.usdcTxHash,
 		redeemHash: args.redeemHash,
 		membershipFeeE6: args.membershipFeeE6.toString(),
 		topupPrincipalE6: args.topupPrincipalE6.toString(),
 		topupCreditE6: args.topupCreditE6.toString(),
+		merchantFeeE6: args.merchantFeeE6.toString(),
 	})
 	const input = {
 		txId: args.createTxHash as `0x${string}`,
@@ -623,8 +930,8 @@ async function syncMerchantGiftRedeemIndexer(args: {
 		payer: args.from,
 		payee: args.cardOwner,
 		finalRequestAmountFiat6: fiat6 > 0n ? fiat6 : 1n,
-		finalRequestAmountUSDC6: args.usdcAmount,
-		isAAAccount: false,
+		finalRequestAmountUSDC6: args.usdcAmount > 0n ? args.usdcAmount : fiat6 > 0n ? fiat6 : 1n,
+		isAAAccount: args.payWith === 'credit',
 		route: [
 			{
 				asset: args.cardAddress,
@@ -647,7 +954,7 @@ async function syncMerchantGiftRedeemIndexer(args: {
 		},
 		meta: {
 			requestAmountFiat6: fiat6 > 0n ? fiat6 : 1n,
-			requestAmountUSDC6: args.usdcAmount,
+			requestAmountUSDC6: args.usdcAmount > 0n ? args.usdcAmount : fiat6 > 0n ? fiat6 : 1n,
 			currencyFiat: args.cardCurrency,
 			discountAmountFiat6: 0n,
 			discountRateBps: 0,

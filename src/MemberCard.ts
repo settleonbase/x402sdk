@@ -27,6 +27,11 @@ import {
 	topupPromotionToBonusRules,
 	type TopupPromotionNormalized,
 } from './programTopupPromotion'
+import {
+	parseGiftCreditPurchaseConfig,
+	serializeGiftCreditPurchaseConfig,
+	type GiftCreditPurchaseConfigSerialized,
+} from './giftCreditPurchaseMetadata'
 import { ensureShareTokenProgramIconAssembled } from './shareTokenProgramIcon'
 import {
 	MEMBERSHIP_FEE_CHECK_BALANCE_HINT,
@@ -7674,7 +7679,43 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 			finalRequestAmountUSDC6 = currencyFiatNum === 4 ? finalRequestAmountFiat6 : 0n
 		}
 		if (finalRequestAmountUSDC6 <= 0n) finalRequestAmountUSDC6 = 1n
-		const { bServiceUnits6, bServiceUSDC6 } = calcChargeFixedBUnitFee()
+		/** Discover Gift redeem: detect before B-Unit consume so gift claims charge 20 (not Charge 5). */
+		let giftRedeemSplit: {
+			membershipFeeE6: string
+			topupCreditE6: string
+			redeemHash: string
+		} | null = null
+		const redeemCodeRaw = typeof obj.redeemCode === 'string' ? obj.redeemCode.trim() : ''
+		if (redeemCodeRaw && ethers.isAddress(obj.cardAddress)) {
+			try {
+				const redeemHash = ethers.keccak256(ethers.toUtf8Bytes(redeemCodeRaw))
+				const giftView = new ethers.Contract(
+					obj.cardAddress,
+					['function getGiftRedeemSplit(bytes32 hash) view returns (bool isGift, uint256 membershipFeeE6, uint256 topupCreditE6)'],
+					redeemCardProvider,
+				)
+				const [isGift, feeE6, topupE6] = (await giftView.getGiftRedeemSplit(redeemHash)) as [
+					boolean,
+					bigint,
+					bigint,
+				]
+				if (isGift) {
+					giftRedeemSplit = {
+						membershipFeeE6: feeE6.toString(),
+						topupCreditE6: topupE6.toString(),
+						redeemHash,
+					}
+				}
+			} catch (_) {
+				/* V21+ only; keep legacy claim display */
+			}
+		}
+		const { feeBUnits6: giftClaimBUnits6 } = calcTopupFixedBUnitFee()
+		const { bServiceUnits6: chargeClaimBUnits6, bServiceUSDC6: chargeClaimUsdc6 } = calcChargeFixedBUnitFee()
+		const bServiceUnits6 = giftRedeemSplit ? giftClaimBUnits6 : chargeClaimBUnits6
+		const bServiceUSDC6 = giftRedeemSplit
+			? giftClaimBUnits6 / BUNIT_TO_USDC_DIVISOR
+			: chargeClaimUsdc6
 		const aaFactoryRedeem = await getCardAaFactoryAddress(obj.cardAddress)
 		const feePayerPick = obj.skipBunit
 			? { ok: false as const, error: 'skipBunit' }
@@ -7704,14 +7745,14 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 					bServiceUnits6,
 					txHash as `0x${string}`,
 					baseGas,
-					1n,
+					giftRedeemSplit ? 2n : 1n,
 					{ gasLimit: 2_500_000 }
 				)
 				await consumeTx.wait()
 				redeemBunitConsumeTxHash = consumeTx.hash
 				logger(
 					Colors.cyan(
-						`[cardRedeemIndexerAccountingProcess] consumeFromUser ok: ${Number(bServiceUnits6) / 1e6} B-Units from ${feePayerForLedger} baseHash=${txHash}`
+						`[cardRedeemIndexerAccountingProcess] consumeFromUser ok: ${Number(bServiceUnits6) / 1e6} B-Units from ${feePayerForLedger} baseHash=${txHash}${giftRedeemSplit ? ' (giftClaim)' : ''}`
 					)
 				)
 			} catch (consumeErr: any) {
@@ -7771,37 +7812,6 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 		const openClaimKind =
 			distributionFields?.distributionKind ??
 			(obj.issuedNftOpenClaim?.couponId && tokenIdForRoute >= ISSUED_NFT_START_ID_MEMBER ? 'coupon' : undefined)
-		/** Discover Gift redeem: optional plaintext code → getGiftRedeemSplit for fee/topup display (never persist code). */
-		let giftRedeemSplit: {
-			membershipFeeE6: string
-			topupCreditE6: string
-			redeemHash: string
-		} | null = null
-		const redeemCodeRaw = typeof obj.redeemCode === 'string' ? obj.redeemCode.trim() : ''
-		if (redeemCodeRaw && ethers.isAddress(obj.cardAddress)) {
-			try {
-				const redeemHash = ethers.keccak256(ethers.toUtf8Bytes(redeemCodeRaw))
-				const giftView = new ethers.Contract(
-					obj.cardAddress,
-					['function getGiftRedeemSplit(bytes32 hash) view returns (bool isGift, uint256 membershipFeeE6, uint256 topupCreditE6)'],
-					redeemCardProvider,
-				)
-				const [isGift, feeE6, topupE6] = (await giftView.getGiftRedeemSplit(redeemHash)) as [
-					boolean,
-					bigint,
-					bigint,
-				]
-				if (isGift) {
-					giftRedeemSplit = {
-						membershipFeeE6: feeE6.toString(),
-						topupCreditE6: topupE6.toString(),
-						redeemHash,
-					}
-				}
-			} catch (_) {
-				/* V21+ only; keep legacy claim display */
-			}
-		}
 		const displayJson = JSON.stringify({
 			title: isIssuedNftOpenClaim
 				? (openClaimKind === 'catalog' ? 'Claim Catalog' : 'Claim Coupon')
@@ -14312,6 +14322,8 @@ export type CreateCardPreChecked = {
 		Symbol?: string
 		topupPromotion?: TopupPromotionNormalized
 		unifiedRewardPoints?: CreateCardUnifiedRewardPointsNormalized
+		/** Discover Credit Gift — burn #0 purchase fee (default OFF). */
+		giftCreditPurchase?: GiftCreditPurchaseConfigSerialized
 		bonusRule?: CreateCardBonusRuleNormalized
 		bonusRules?: CreateCardBonusRuleNormalized[]
 		pointSystem?: CreateCardPointSystemNormalized
@@ -14709,6 +14721,7 @@ export const createCardPreCheck = (body: {
 		pointSystem?: unknown
 		unifiedRewardPoints?: unknown
 		topupPromotion?: unknown
+		giftCreditPurchase?: unknown
 		businessProfile?: unknown
 		supportChat?: unknown
 	}
@@ -15047,6 +15060,11 @@ export const createCardPreCheck = (body: {
 		const unifiedRewardPoints = normalizeCreateCardUnifiedRewardPoints(stm.unifiedRewardPoints)
 		if (!unifiedRewardPoints.success) return { success: false, error: unifiedRewardPoints.error }
 		if (unifiedRewardPoints.value) meta.unifiedRewardPoints = unifiedRewardPoints.value
+		if (stm.giftCreditPurchase != null) {
+			meta.giftCreditPurchase = serializeGiftCreditPurchaseConfig(
+				parseGiftCreditPurchaseConfig({ giftCreditPurchase: stm.giftCreditPurchase }),
+			)
+		}
 		if (Object.keys(meta).length > 0) {
 			normalizedShareTokenMetadata = meta
 		}
@@ -21067,10 +21085,13 @@ export function buildBeamioUserCardRedeemShareUrl(cardAddress: string, redeemCod
 }
 
 /**
- * Cluster 预检：Claim（cardRedeem / Coupon·Catalog redeem code）由 BeamioUserCard owner 承担 B-Unit，每笔固定 5 B-Units（与 Charge 一致）。
+ * Cluster 预检：Claim（cardRedeem）由 BeamioUserCard owner 承担 B-Unit。
+ * - Discover Gift redeem（`getGiftRedeemSplit.isGift`）：固定 **20** B-Unit（与 Top-up / gift purchase 一致）
+ * - 其它 redeem / coupon burn：固定 **5** B-Unit（与 Charge 一致）
  */
 export const cardRedeemPreCheckBUnitBalance = async (
-	cardAddress: string
+	cardAddress: string,
+	opts?: { redeemCode?: string; redeemHash?: string },
 ): Promise<{
 	success: boolean
 	error?: string
@@ -21078,11 +21099,19 @@ export const cardRedeemPreCheckBUnitBalance = async (
 	feePayerEOA?: string
 	/** 卡 issuer owner（EOA），供 executeForAdmin / indexer 记账 */
 	cardOwnerEOA?: string
+	isGiftRedeem?: boolean
 }> => {
 	try {
 		const cardNorm = ethers.getAddress(cardAddress)
 		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
-		const card = new ethers.Contract(cardNorm, ['function owner() view returns (address)'], cardProvider)
+		const card = new ethers.Contract(
+			cardNorm,
+			[
+				'function owner() view returns (address)',
+				'function getGiftRedeemSplit(bytes32 hash) view returns (bool isGift, uint256 membershipFeeE6, uint256 topupCreditE6)',
+			],
+			cardProvider,
+		)
 		const owner = (await card.owner()) as string
 		if (!owner || owner === ethers.ZeroAddress) {
 			return { success: false, error: 'Card owner not found for B-Unit fee' }
@@ -21092,7 +21121,26 @@ export const cardRedeemPreCheckBUnitBalance = async (
 			return { success: false, error: resolveResult.error ?? 'Cannot resolve card owner to EOA for B-Unit fee' }
 		}
 		const cardOwnerEOA = resolveResult.cardOwner
-		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
+		let isGiftRedeem = false
+		const codeRaw = typeof opts?.redeemCode === 'string' ? opts.redeemCode.trim() : ''
+		const hashRaw = typeof opts?.redeemHash === 'string' ? opts.redeemHash.trim() : ''
+		const giftHash =
+			hashRaw && /^0x[0-9a-fA-F]{64}$/.test(hashRaw)
+				? hashRaw
+				: codeRaw
+					? ethers.keccak256(ethers.toUtf8Bytes(codeRaw))
+					: ''
+		if (giftHash) {
+			try {
+				const [isGift] = (await card.getGiftRedeemSplit(giftHash)) as [boolean, bigint, bigint]
+				isGiftRedeem = Boolean(isGift)
+			} catch {
+				isGiftRedeem = false
+			}
+		}
+		const { feeBUnits6: topupFee } = calcTopupFixedBUnitFee()
+		const { bServiceUnits6: chargeFee } = calcChargeFixedBUnitFee()
+		const feeBUnits6 = isGiftRedeem ? topupFee : chargeFee
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardNorm)
 		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeBUnits6, {
 			aaFactoryAddress: aaFactoryAddr,
@@ -21101,7 +21149,7 @@ export const cardRedeemPreCheckBUnitBalance = async (
 		if (!picked.ok) {
 			return { success: false, error: `Insufficient B-Units for redeem (${picked.error})` }
 		}
-		return { success: true, feeBUnits6, feePayerEOA: picked.consumer, cardOwnerEOA }
+		return { success: true, feeBUnits6, feePayerEOA: picked.consumer, cardOwnerEOA, isGiftRedeem }
 	} catch (e: any) {
 		return {
 			success: false,
@@ -21156,7 +21204,7 @@ export const cardRedeemPreCheck = async (body: {
 				: 'Redeem code is invalid or already used.'
 			return { success: false, redeemable: false, error: msg }
 		}
-		const bunit = await cardRedeemPreCheckBUnitBalance(cardNorm)
+		const bunit = await cardRedeemPreCheckBUnitBalance(cardNorm, { redeemCode: redeemCode.trim() })
 		if (!bunit.success) {
 			return { success: false, redeemable: false, error: bunit.error ?? 'Insufficient B-Units for redeem' }
 		}

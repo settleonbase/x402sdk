@@ -91,6 +91,7 @@ import {
 } from '../redeemReward13ForUsdc'
 import {
 	kickPurchaseMerchantGiftRedeemProcess,
+	normalizePayWith,
 	purchaseMerchantGiftRedeemPool,
 } from '../purchaseMerchantGiftRedeem'
 import {
@@ -2416,9 +2417,10 @@ const routing = ( router: Router ) => {
 		router.post('/purchaseMerchantGiftRedeem', (req, res) => {
 			const b = req.body ?? {}
 			purchaseMerchantGiftRedeemPool.push({
+				payWith: normalizePayWith(b.payWith),
 				cardAddress: String(b.cardAddress ?? ''),
 				from: String(b.from ?? ''),
-				usdcAmount: String(b.usdcAmount ?? ''),
+				usdcAmount: String(b.usdcAmount ?? '0'),
 				userSignature: String(b.userSignature ?? ''),
 				nonce: String(b.nonce ?? ''),
 				validAfter: String(b.validAfter ?? '0'),
@@ -2433,15 +2435,23 @@ const routing = ( router: Router ) => {
 				quotedUsdc6: String(b.quotedUsdc6 ?? '0'),
 				redeemValidAfter: String(b.redeemValidAfter ?? '0'),
 				redeemValidBefore: String(b.redeemValidBefore ?? ''),
+				payerAccount: String(b.payerAccount ?? ethers.ZeroAddress),
+				burnAmountE6: String(b.burnAmountE6 ?? '0'),
+				merchantFeeE6: String(b.merchantFeeE6 ?? '0'),
+				cardOwnerEOA: String(b.cardOwnerEOA ?? ''),
+				bunitFeeConsumer: String(b.bunitFeeConsumer ?? ''),
+				bunitFeeUnits6: String(b.bunitFeeUnits6 ?? '0'),
 				res,
 			})
 			logger(
 				` Master GOT /api/purchaseMerchantGiftRedeem…`,
 				inspect(
 					{
+						payWith: b.payWith ?? 'usdc',
 						cardAddress: b.cardAddress,
 						from: b.from,
 						usdcAmount: b.usdcAmount,
+						burnAmountE6: b.burnAmountE6,
 						membershipFeeE6: b.membershipFeeE6,
 						topupCreditE6: b.topupCreditE6,
 						redeemHash: b.redeemHash,
