@@ -431,6 +431,28 @@ function isSameApexHost(a: string, b: string): boolean {
 	return apexHost(a) === apexHost(b)
 }
 
+function withWwwHost(u: URL): URL | null {
+	const host = u.hostname.toLowerCase()
+	if (host.startsWith('www.')) return null
+	const next = new URL(u.toString())
+	next.hostname = `www.${host}`
+	return parsePublicHttpUrl(next.toString())
+}
+
+function websiteFetchStarts(start: URL): URL[] {
+	const www = withWwwHost(start)
+	return www ? [www, start] : [start]
+}
+
+function sameApexClaimedUrl(claimed: string, fetchedUrl: string): string {
+	const c = parsePublicHttpUrl(claimed)
+	const p = parsePublicHttpUrl(fetchedUrl)
+	if (!p) return fetchedUrl
+	if (!c) return fetchedUrl
+	if (apexHost(c.hostname) !== apexHost(p.hostname)) return fetchedUrl
+	return c.toString()
+}
+
 function urlKey(u: URL): string {
 	const path = u.pathname.replace(/\/+$/, '') || '/'
 	return `${apexHost(u.hostname)}${path}${u.search}`
@@ -1068,9 +1090,11 @@ async function scrapeWebsiteBranding(website: string): Promise<{
 }> {
 	const start = parsePublicHttpUrl(website)
 	if (!start || start.protocol !== 'https:') return { images: [], themeColors: [] }
-	const fetched = await fetchHtmlSafe(start, MAX_REDIRECTS)
-	if (!fetched) return { images: [], themeColors: [] }
-	return extractPageBranding(fetched.html, fetched.url)
+	for (const u of websiteFetchStarts(start)) {
+		const fetched = await fetchHtmlSafe(u, MAX_REDIRECTS, apexHost(u.hostname))
+		if (fetched) return extractPageBranding(fetched.html, fetched.url)
+	}
+	return { images: [], themeColors: [] }
 }
 
 function parseHtmlMeta(html: string, pageUrl: string): ScrapeMeta {
@@ -1136,7 +1160,7 @@ function htmlToPageSource(
 ): PageSource {
 	const meta = parseHtmlMeta(html, pageUrl)
 	return {
-		url: meta.finalUrl || pageUrl,
+		url: sameApexClaimedUrl(meta.finalUrl, pageUrl),
 		lang: htmlLang(html, headerLang),
 		title: meta.title,
 		description: meta.description,
@@ -1156,8 +1180,10 @@ function htmlToPageSource(
 async function fetchHtmlSafe(
 	start: URL,
 	hopsLeft: number,
+	stayApex = '',
 ): Promise<{ url: string; html: string; contentLang: string } | null> {
 	if (hopsLeft < 0) return null
+	const apex = stayApex || apexHost(start.hostname)
 	if (!(await assertPublicHost(start))) return null
 	const ac = new AbortController()
 	const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS)
@@ -1177,7 +1203,8 @@ async function fetchHtmlSafe(
 			if (!loc) return null
 			const next = parsePublicHttpUrl(new URL(loc, start).toString())
 			if (!next) return null
-			return fetchHtmlSafe(next, hopsLeft - 1)
+			if (apexHost(next.hostname) !== apex) return null
+			return fetchHtmlSafe(next, hopsLeft - 1, apex)
 		}
 		if (!res.ok) return null
 		const ctype = (res.headers.get('content-type') || '').toLowerCase()
@@ -1197,7 +1224,8 @@ async function fetchHtmlSafe(
 }
 
 async function collectPageSources(start: URL, maxExtraLang: number): Promise<PageSource[]> {
-	const fetched = await fetchHtmlSafe(start, MAX_REDIRECTS)
+	const stay = apexHost(start.hostname)
+	const fetched = await fetchHtmlSafe(start, MAX_REDIRECTS, stay)
 	if (!fetched) return []
 	const primary = htmlToPageSource(
 		fetched.html,
@@ -1206,7 +1234,7 @@ async function collectPageSources(start: URL, maxExtraLang: number): Promise<Pag
 		fetched.contentLang,
 	)
 	const extras = pickAlternateLangUrls(fetched.html, fetched.url, maxExtraLang)
-	const extraPages = await Promise.all(extras.map((u) => fetchHtmlSafe(u, MAX_REDIRECTS)))
+	const extraPages = await Promise.all(extras.map((u) => fetchHtmlSafe(u, MAX_REDIRECTS, stay)))
 	const sources = [primary]
 	let used = primary.visibleText.length
 	for (const extra of extraPages) {
@@ -1218,6 +1246,14 @@ async function collectPageSources(start: URL, maxExtraLang: number): Promise<Pag
 		used += page.visibleText.length
 	}
 	return sources
+}
+
+async function collectWebsitePageSources(start: URL, maxExtraLang: number): Promise<PageSource[]> {
+	for (const u of websiteFetchStarts(start)) {
+		const pages = await collectPageSources(u, maxExtraLang)
+		if (pages.length) return pages
+	}
+	return []
 }
 
 export function normalizeCountry(raw: string): string {
@@ -1790,13 +1826,34 @@ function stripTitleSiteSuffix(title: string): string {
 	return clip(title, 120)
 }
 
+function isGenericPageTitle(name: string): boolean {
+	return /^(home|homepage|welcome|index)$/i.test(name.trim())
+}
+
+function displayNameFromScrape(src: PageSource): string {
+	const city = src.city.trim()
+	const stripCity = (raw: string): string => {
+		let s = clip(raw, 120)
+		if (city) {
+			const escaped = city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+			s = s.replace(new RegExp(`\\s*[-|–—]\\s*${escaped}\\s*$`, 'i'), '').trim()
+		}
+		return s
+	}
+	if (src.jsonLdName && !isGenericPageTitle(src.jsonLdName)) return stripCity(src.jsonLdName)
+	if (src.siteName && !isGenericPageTitle(src.siteName)) return stripCity(src.siteName)
+	const fromTitle = stripTitleSiteSuffix(src.title)
+	if (fromTitle && !isGenericPageTitle(fromTitle)) return stripCity(fromTitle)
+	return stripCity(src.siteName || src.jsonLdName || src.title)
+}
+
 function candidateFromScrapedHomepage(
 	sources: PageSource[],
 	fallbackWebsite: string,
 ): OnboardingBusinessLookupCandidate | null {
 	const src = sources[0]
 	if (!src) return null
-	const name = clip(src.jsonLdName || src.siteName || stripTitleSiteSuffix(src.title) || '', 120)
+	const name = displayNameFromScrape(src)
 	if (name.length < 2) return null
 	const website = sanitizeWebsite(src.url) || fallbackWebsite
 	const country = normalizeCountry(src.country)
@@ -1837,12 +1894,36 @@ function attachScrapedContact(
 		if (!src) return { ...c, ...emptyContact() }
 		return {
 			...c,
+			city: src.city || c.city,
+			province: src.province || c.province,
+			country: src.country || c.country,
 			street: src.street,
 			phone: src.phone,
 			email: src.email,
 			postalCode: src.postalCode,
 		}
 	})
+}
+
+function overlayScrapedVenueForWebsiteQuery(
+	query: string,
+	sources: PageSource[],
+	candidates: OnboardingBusinessLookupCandidate[],
+): OnboardingBusinessLookupCandidate[] {
+	if (!looksLikeWebsiteQuery(query) || !sources.length) return candidates
+	const home = candidateFromScrapedHomepage(sources, sanitizeWebsite(sources[0].url) || '')
+	if (!home) return candidates
+	if (!candidates.length) return [home]
+	return candidates.map((c) => ({
+		...c,
+		name: home.name.length >= 2 ? home.name : c.name,
+		website: home.website || c.website,
+		city: home.city || c.city,
+		province: home.province || c.province,
+		country: home.country || c.country,
+		snippet: home.snippet || c.snippet,
+		publicBio: home.publicBio || c.publicBio,
+	}))
 }
 
 export async function onboardingBusinessLookupHandler(req: Request, res: Response): Promise<void> {
@@ -1866,7 +1947,7 @@ export async function onboardingBusinessLookupHandler(req: Request, res: Respons
 	if (looksLikeWebsiteQuery(query)) {
 		const start = parsePublicHttpUrl(query)
 		if (start) {
-			sources = await collectPageSources(start, MAX_EXTRA_LANG_URL)
+			sources = await collectWebsitePageSources(start, MAX_EXTRA_LANG_URL)
 		}
 	} else {
 		try {
@@ -1881,7 +1962,7 @@ export async function onboardingBusinessLookupHandler(req: Request, res: Respons
 			discovered.map((d) => d.website).filter(Boolean),
 			MAX_NAME_SITES,
 		)
-		const batches = await Promise.all(urls.map((u) => collectPageSources(u, MAX_EXTRA_LANG_NAME)))
+		const batches = await Promise.all(urls.map((u) => collectWebsitePageSources(u, MAX_EXTRA_LANG_NAME)))
 		sources = batches.flat()
 	}
 	const sites = uniqueSourceWebsites(sources)
@@ -1903,6 +1984,8 @@ export async function onboardingBusinessLookupHandler(req: Request, res: Respons
 		analyzeFailed = true
 		logger(Colors.yellow('[onboardingBusinessLookup] Gemini analyze:'), (e as Error)?.message ?? e)
 	}
+
+	analyzed = overlayScrapedVenueForWebsiteQuery(query, sources, analyzed)
 
 	if (analyzed.length) {
 		res.json({
