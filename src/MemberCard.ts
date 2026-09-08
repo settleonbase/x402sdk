@@ -4533,6 +4533,8 @@ export const cardRedeemIndexerAccountingPool: {
 	creator?: string
 	/** In-store redeem: POS terminal EOA for ActionFacet accountActionIds[subordinate]. */
 	posOperator?: string
+	/** Plain redeem code (Discover Gift / merchant codes) — used to read getGiftRedeemSplit for displayJson. */
+	redeemCode?: string
 	/**
 	 * App / POS open-claim issued NFT（无 redeem code）。
 	 * Cluster 未预检 B-Unit；记账主行仍写 Indexer，但跳过 consumeFromUser。
@@ -7769,18 +7771,59 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 		const openClaimKind =
 			distributionFields?.distributionKind ??
 			(obj.issuedNftOpenClaim?.couponId && tokenIdForRoute >= ISSUED_NFT_START_ID_MEMBER ? 'coupon' : undefined)
+		/** Discover Gift redeem: optional plaintext code → getGiftRedeemSplit for fee/topup display (never persist code). */
+		let giftRedeemSplit: {
+			membershipFeeE6: string
+			topupCreditE6: string
+			redeemHash: string
+		} | null = null
+		const redeemCodeRaw = typeof obj.redeemCode === 'string' ? obj.redeemCode.trim() : ''
+		if (redeemCodeRaw && ethers.isAddress(obj.cardAddress)) {
+			try {
+				const redeemHash = ethers.keccak256(ethers.toUtf8Bytes(redeemCodeRaw))
+				const giftView = new ethers.Contract(
+					obj.cardAddress,
+					['function getGiftRedeemSplit(bytes32 hash) view returns (bool isGift, uint256 membershipFeeE6, uint256 topupCreditE6)'],
+					redeemCardProvider,
+				)
+				const [isGift, feeE6, topupE6] = (await giftView.getGiftRedeemSplit(redeemHash)) as [
+					boolean,
+					bigint,
+					bigint,
+				]
+				if (isGift) {
+					giftRedeemSplit = {
+						membershipFeeE6: feeE6.toString(),
+						topupCreditE6: topupE6.toString(),
+						redeemHash,
+					}
+				}
+			} catch (_) {
+				/* V21+ only; keep legacy claim display */
+			}
+		}
 		const displayJson = JSON.stringify({
 			title: isIssuedNftOpenClaim
 				? (openClaimKind === 'catalog' ? 'Claim Catalog' : 'Claim Coupon')
-				: redeemCategoryRaw === 'redeemNewCard'
-					? 'Redeem New Card'
-					: (redeemCategoryRaw === 'redeemUpgradeNewCard' ? 'Redeem Upgrade Card' : 'Redeem Top Up'),
+				: giftRedeemSplit
+					? 'Claim Gift'
+					: redeemCategoryRaw === 'redeemNewCard'
+						? 'Redeem New Card'
+						: (redeemCategoryRaw === 'redeemUpgradeNewCard' ? 'Redeem Upgrade Card' : 'Redeem Top Up'),
 			handle: isIssuedNftOpenClaim
 				? `Claim to ${obj.aaAddress.slice(0, 10)}…`
 				: `Redeem to ${obj.aaAddress.slice(0, 10)}…`,
 			finishedHash: txHash,
-			source: 'cardRedeem',
+			source: giftRedeemSplit ? 'merchantGiftRedeem' : 'cardRedeem',
 			topupCategory: redeemCategoryRaw,
+			...(giftRedeemSplit
+				? {
+						giftRedeem: true,
+						membershipFeeE6: giftRedeemSplit.membershipFeeE6,
+						topupCreditE6: giftRedeemSplit.topupCreditE6,
+						redeemCodeHash: giftRedeemSplit.redeemHash,
+					}
+				: {}),
 			...(openClaimKind ? { distributionKind: openClaimKind } : {}),
 			...(distributionFields?.distributionKind ? { distributionKind: distributionFields.distributionKind } : {}),
 			...(distributionFields?.globalCategory ? { globalCategory: distributionFields.globalCategory } : {}),
@@ -21243,6 +21286,7 @@ export const cardRedeemPoolPress = async () => {
 				txHash,
 				beforeNfts,
 				creator: creator ? ethers.getAddress(creator) : undefined,
+				redeemCode: typeof obj.redeemCode === 'string' ? obj.redeemCode : undefined,
 				...(obj.posOperator && ethers.isAddress(obj.posOperator)
 					? { posOperator: ethers.getAddress(obj.posOperator) }
 					: {}),

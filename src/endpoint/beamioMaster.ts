@@ -90,6 +90,10 @@ import {
 	redeemReward13ForUsdcPool,
 } from '../redeemReward13ForUsdc'
 import {
+	kickPurchaseMerchantGiftRedeemProcess,
+	purchaseMerchantGiftRedeemPool,
+} from '../purchaseMerchantGiftRedeem'
+import {
 	convertReward13ToProgramPointsPool,
 	convertReward13ToUsdcToAaPool,
 	kickConvertReward13Process,
@@ -2407,6 +2411,47 @@ const routing = ( router: Router ) => {
 				),
 			)
 			kickRedeemReward13ForUsdcProcess()
+		})
+
+		router.post('/purchaseMerchantGiftRedeem', (req, res) => {
+			const b = req.body ?? {}
+			purchaseMerchantGiftRedeemPool.push({
+				cardAddress: String(b.cardAddress ?? ''),
+				from: String(b.from ?? ''),
+				usdcAmount: String(b.usdcAmount ?? ''),
+				userSignature: String(b.userSignature ?? ''),
+				nonce: String(b.nonce ?? ''),
+				validAfter: String(b.validAfter ?? '0'),
+				validBefore: String(b.validBefore ?? ''),
+				redeemCode: String(b.redeemCode ?? ''),
+				membershipFeeE6: String(b.membershipFeeE6 ?? '0'),
+				topupPrincipalE6: String(b.topupPrincipalE6 ?? '0'),
+				topupCreditE6: String(b.topupCreditE6 ?? '0'),
+				redeemHash: String(b.redeemHash ?? ''),
+				cardOwner: String(b.cardOwner ?? ''),
+				cardCurrency: Number(b.cardCurrency ?? 0),
+				quotedUsdc6: String(b.quotedUsdc6 ?? '0'),
+				redeemValidAfter: String(b.redeemValidAfter ?? '0'),
+				redeemValidBefore: String(b.redeemValidBefore ?? ''),
+				res,
+			})
+			logger(
+				` Master GOT /api/purchaseMerchantGiftRedeem…`,
+				inspect(
+					{
+						cardAddress: b.cardAddress,
+						from: b.from,
+						usdcAmount: b.usdcAmount,
+						membershipFeeE6: b.membershipFeeE6,
+						topupCreditE6: b.topupCreditE6,
+						redeemHash: b.redeemHash,
+					},
+					false,
+					3,
+					true,
+				),
+			)
+			kickPurchaseMerchantGiftRedeemProcess()
 		})
 
 		router.post('/topupWithReward13Container', (req, res) => {

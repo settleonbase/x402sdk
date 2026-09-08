@@ -53,6 +53,7 @@ import {
 	aaInstitutionalV2VotePreCheck,
 } from '../aaInstitutionalV2Multisig'
 import { redeemReward13ForUsdcPreCheck } from '../redeemReward13ForUsdc'
+import { purchaseMerchantGiftRedeemPreCheck } from '../purchaseMerchantGiftRedeem'
 import { convertReward13PreCheck } from '../convertReward13'
 import { topupWithReward13ContainerPreCheck } from '../topupWithReward13Container'
 import {
@@ -9983,6 +9984,39 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			),
 		)
 		postLocalhost('/api/redeemReward13ForUsdc', preCheck.preChecked, res)
+	})
+
+	/**
+	 * Discover Gifting: gifter EIP-3009 CoNET-USDC offline sign (zero gas) → Master collects to card.owner()
+	 * then Paymaster createGiftRedeemForPayer (no merchant owner signature). Plaintext code returned once.
+	 */
+	router.post('/purchaseMerchantGiftRedeem', async (req, res) => {
+		const preCheck = await purchaseMerchantGiftRedeemPreCheck(req.body)
+		if (!preCheck.success) {
+			logger(
+				Colors.red(`server /api/purchaseMerchantGiftRedeem preCheck FAIL: ${preCheck.error}`),
+				inspect(req.body, false, 2, true),
+			)
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		logger(
+			Colors.green(`server /api/purchaseMerchantGiftRedeem preCheck OK, forwarding to master`),
+			inspect(
+				{
+					cardAddress: preCheck.preChecked.cardAddress,
+					from: preCheck.preChecked.from,
+					usdcAmount: preCheck.preChecked.usdcAmount,
+					membershipFeeE6: preCheck.preChecked.membershipFeeE6,
+					topupPrincipalE6: preCheck.preChecked.topupPrincipalE6,
+					topupCreditE6: preCheck.preChecked.topupCreditE6,
+					redeemHash: preCheck.preChecked.redeemHash,
+				},
+				false,
+				2,
+				true,
+			),
+		)
+		postLocalhost('/api/purchaseMerchantGiftRedeem', preCheck.preChecked, res)
 	})
 
 	/** Atomic multi-source top-up: same-store #13→#0 + peer #13→USDC + optional cash in one UserOp. */
