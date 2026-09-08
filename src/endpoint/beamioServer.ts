@@ -106,7 +106,7 @@ import {
 } from '../apiExcludedUserCards'
 import { excludeUserCardPreCheck, warmDynamicApiExcludedUserCardsFromDb } from '../excludeUserCardApi'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
-import { onboardingBusinessLookupHandler } from './onboardingBusinessLookup'
+import { onboardingBusinessLookupHandler, onboardingBusinessCardSetupHandler } from './onboardingBusinessLookup'
 import {
 	invalidateIssuedCouponSeriesQueryCachesForCard,
 	registerIssuedCouponSeriesQueryCacheInvalidator,
@@ -2217,6 +2217,11 @@ const routing = ( router: Router ) => {
 	/** POST /api/onboardingBusinessLookup — Cluster read: scrape public pages (any language, same-apex hreflang) then Gemini English onboarding fields. */
 	router.post('/onboardingBusinessLookup', (req, res) => {
 		void onboardingBusinessLookupHandler(req, res)
+	})
+
+	/** POST /api/onboardingBusinessCardSetup — Cluster read: after lookup pick, scrape homepage branding + Gemini Card Setup assets. */
+	router.post('/onboardingBusinessCardSetup', (req, res) => {
+		void onboardingBusinessCardSetupHandler(req, res)
 	})
 
 	/** GET /api/sun - 校验 Beamio SUN 动态 URL。valid 时：若 tagID 已绑定则返回 eoa/aa；未绑定则转发 Master 创建钱包并返回 eoa/aa。 */
