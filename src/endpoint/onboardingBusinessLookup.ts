@@ -899,11 +899,60 @@ function pickStrongLogoUrl(images: ScrapedBrandingImage[], name = '', website = 
 	return strong[0].url
 }
 
+/** `Place` is omitted: it matches English “this place” in reviews. `Pl` still covers “Main Pl,”. */
 const STREET_RE =
-	/(?:\d+\s*\/\s*[A-Za-z]\s*,\s*)?\d{2,6}\s+(?:[A-Za-z][\w.'-]*\s+){0,5}(?:Rd|Road|St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Way|Lane|Ln|Crt|Court|Pl|Place|Cres|Crescent|Hwy|Highway)\b(?:\s*,\s*[A-Za-z][\w.'-]+(?:\s+[A-Za-z][\w.'-]*){0,2}\s*,\s*[A-Z]{2}(?:\s*,?\s*[A-Z]\d[A-Z]\s?\d[A-Z]\d)?)?/i
-const PHONE_RE = /(?:\+1[\s.-]*)?(?:\(?\d{3}\)?[\s.-]*)\d{3}[\s.-]*\d{4}\b/
-const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i
-const POSTAL_RE = /\b[A-Z]\d[A-Z]\s?\d[A-Z]\d\b/i
+	/(?:\d+\s*\/\s*[A-Za-z]\s*,\s*)?\d{2,6}\s+(?:[A-Za-z][\w.'-]*\s+){0,5}(?:Rd|Road|St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Way|Lane|Ln|Crt|Court|Pl|Cres|Crescent|Hwy|Highway)\b(?:\s*,\s*[A-Za-z][\w.'-]+(?:\s+[A-Za-z][\w.'-]*){0,2}\s*,\s*[A-Z]{2}(?:\s*,?\s*[A-Z]\d[A-Z]\s?\d[A-Z]\d)?)?/gi
+const PHONE_RE = /(?:\+?1[\s.-]*)?(?:\(?\d{3}\)?[\s.-]*)\d{3}[\s.-]*\d{4}\b/g
+const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi
+const POSTAL_RE = /\b[A-Z]\d[A-Z]\s?\d[A-Z]\d\b/gi
+const CONTACT_VISIBLE_MAX = 80_000
+
+function streetLookalikeScore(raw: string): number {
+	const s = raw.replace(/\s+/g, ' ').trim()
+	if (!s) return -1
+	if (/\b(this|best|love|our|the)\s+place\b/i.test(s)) return -1
+	let n = 0
+	if (POSTAL_RE.test(s)) n += 5
+	POSTAL_RE.lastIndex = 0
+	if (/,\s*[A-Z]{2}\b/.test(s)) n += 3
+	if (/^\d+\s*\/\s*[A-Za-z]\s*,/.test(s)) n += 2
+	if (/\b(?:Rd|Road|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive)\b/i.test(s)) n += 2
+	if (/,/.test(s)) n += 1
+	return n
+}
+
+function pickBestStreet(text: string): { street: string; index: number } {
+	let best = { street: '', index: -1, score: -1 }
+	for (const m of text.matchAll(STREET_RE)) {
+		const raw = (m[0] || '').replace(/\s+/g, ' ').trim()
+		const score = streetLookalikeScore(raw)
+		if (score < 0) continue
+		const idx = m.index ?? -1
+		if (score > best.score || (score === best.score && idx > best.index)) {
+			best = { street: raw, index: idx, score }
+		}
+	}
+	STREET_RE.lastIndex = 0
+	return { street: best.street, index: best.index }
+}
+
+function pickNearestPhone(text: string, around: number): string {
+	const hits = [...text.matchAll(PHONE_RE)]
+	PHONE_RE.lastIndex = 0
+	if (!hits.length) return ''
+	if (around < 0) return normalizePhone(hits[0][0] || '')
+	let best = hits[0]
+	let bestDist = Infinity
+	for (const m of hits) {
+		const idx = m.index ?? 0
+		const dist = Math.abs(idx - around)
+		if (dist < bestDist) {
+			best = m
+			bestDist = dist
+		}
+	}
+	return normalizePhone(best[0] || '')
+}
 
 function normalizePhone(raw: string): string {
 	return clip(raw.trim().replace(/^tel:/i, '').replace(/\s+/g, ' '), 40)
@@ -939,14 +988,17 @@ function extractVisibleContact(html: string): {
 	email: string
 	postalCode: string
 } {
-	const text = extractVisibleText(html, 8_000)
-	const streetM = text.match(STREET_RE)
-	const phoneM = text.match(PHONE_RE)
+	const text = extractVisibleText(html, CONTACT_VISIBLE_MAX)
+	const { street, index } = pickBestStreet(text)
 	const emailM = text.match(EMAIL_RE)
-	const postalM = text.match(POSTAL_RE)
+	EMAIL_RE.lastIndex = 0
+	const postalFromStreet = street.match(POSTAL_RE)
+	POSTAL_RE.lastIndex = 0
+	const postalM = postalFromStreet || text.match(POSTAL_RE)
+	POSTAL_RE.lastIndex = 0
 	return {
-		street: clip((streetM?.[0] || '').replace(/\s+/g, ' ').trim(), 160),
-		phone: phoneM ? normalizePhone(phoneM[0]) : '',
+		street: clip(street, 160),
+		phone: pickNearestPhone(text, index),
 		email: emailM ? normalizeEmail(emailM[0]) : '',
 		postalCode: clip((postalM?.[0] || '').toUpperCase().replace(/\s+/g, ' '), 12),
 	}
