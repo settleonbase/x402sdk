@@ -39,10 +39,14 @@ import {
 	parseBaseMembership,
 	readCardMembershipFeeModeFromMetadata,
 	readMembershipFeesFromCardMetadata,
+	TIER_QUALIFICATION_MODE,
+	normalizeTierQualificationMode,
+	validateTierQualificationModeShape,
 	shouldSkipFactoryTiersForCreate,
 	validateMembershipFeePublishShape,
 	type MembershipFeeMetadataBase,
 	type MembershipFeeMetadataTiers,
+	type TierQualificationMode,
 } from './membershipFeeMetadata'
 import { readSocialExchangeFromMetadata, REWARD_VOUCHER_TOKEN_ID } from './socialExchangeMetadata'
 import { syncCardProgramReferrerEventsFromReceipt } from './cardProgramReferrerDb'
@@ -2663,12 +2667,11 @@ export const MEMBERSHIP_FEE_DURATION = {
 } as const
 
 /**
- * Join / upgrade may charge **fee only**. Card `mintPointsByAdmin(0)` reverts `UC_AmountZero`,
- * so Cluster still mints this 1 min-unit as **`#0` program points** (displays as 0.00).
- * That leftover `#0` is **not** the membership NFT. Issue must mint `tokenId ∈ [100, 1e11)`.
- * POS Check Balance sends `amount = feeE6 + 1` so leftover after fee is `1e0` currency units.
+ * @deprecated Direct membership purchase mints **`mintPointsByAdmin(0)`** (Beacon V20+ /
+ * GatewayMintLib fee-mode zero path). Do not mint leftover `#0`. Kept only so old clients
+ * that still import the symbol do not break at compile time.
  */
-export const MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6 = 1n
+export const MEMBERSHIP_FEE_ONLY_ISSUE_POINTS6 = 0n
 
 export type MembershipFeeDurationKind =
 	(typeof MEMBERSHIP_FEE_DURATION)[keyof typeof MEMBERSHIP_FEE_DURATION]
@@ -8201,7 +8204,8 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 	if (hasValid && !explicitMembershipFee) {
 		return { success: true, membershipFeeMode: true, membershipNeedsFee: false }
 	}
-	if (params.points6Mint <= 0n) {
+	/** Direct membership purchase: fee only → `mintPointsByAdmin(0)` (no leftover #0). */
+	if (params.points6Mint < 0n) {
 		return { success: false, error: 'Invalid mintPointsByAdmin amount for membership fee purchase' }
 	}
 	const tierRaw = params.membershipTierIndex
@@ -8234,14 +8238,14 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 			bootstrapOnChain = true
 			stageDurationKind = metaDurationKind
 		} else {
-			expectedFee = onChainFee
 			if (onChainFee !== metaFee) {
-				logger(
-					Colors.yellow(
-						`[nfcTopupPreCheckMembershipFeeFirstIssue] on-chain fee ${onChainFee} differs from metadata ${metaFee} tier=${tierIndex} card=${cardNorm}; using on-chain`
-					)
-				)
+				return {
+					success: false,
+					error:
+						'Card membership fee metadata does not match on-chain fee for this tier. Sync membership fees before purchase.',
+				}
 			}
+			expectedFee = onChainFee
 			if (!isValidMembershipFeeDurationKind(onChainDurationKind)) {
 				return { success: false, error: 'Invalid membership fee duration for selected tier' }
 			}
@@ -9063,7 +9067,8 @@ export const nfcTopupPreCheckBUnitFee = async (
 		if (!parsed || !ethers.isAddress(parsed.recipient)) {
 			return { success: false, error: 'Invalid mintPointsByAdmin payload' }
 		}
-		if (parsed.points6 <= 0n) {
+		/** Allow `points6 === 0` for direct membership purchase (fee-only mint). */
+		if (parsed.points6 < 0n) {
 			return { success: false, error: 'Invalid mintPointsByAdmin amount' }
 		}
 		const cardAbi = ['function owner() view returns (address)']
@@ -10090,7 +10095,13 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				}
 			}
 		}
-		if (baseTxOk && recipientEOA && mintParsed && mintParsed.points6 > 0n && ethers.isAddress(obj.cardAddr)) {
+		if (
+			baseTxOk &&
+			recipientEOA &&
+			mintParsed &&
+			ethers.isAddress(obj.cardAddr) &&
+			(mintParsed.points6 > 0n || Boolean(obj.membershipFeeStage))
+		) {
 			try {
 				const cardRead = new ethers.Contract(
 					obj.cardAddr,
@@ -11544,7 +11555,8 @@ export async function mintPointsForProtocolUsdcSettlementViaEntryPoint(params: {
 }): Promise<{ mintTx: ethers.ContractTransactionResponse; aaAccount: string }> {
 	const cardAddress = ethers.getAddress(params.cardAddress)
 	const recipientEOA = ethers.getAddress(params.recipientEOA)
-	if (params.points6 <= 0n) throw new Error(`${params.logTag}: points6 must be > 0`)
+	if (params.points6 < 0n) throw new Error(`${params.logTag}: points6 must be >= 0`)
+	// points6 === 0: fee-mode direct-purchase issue (IssuedNftModuleV2); caller must have staged first.
 	const aaAccount = await ensureAAForEOAOnCard(cardAddress, recipientEOA, params.SC)
 	const iface = new ethers.Interface([
 		'function mintPointsForProtocolUsdcSettlement(address userEOA, uint256 points6)',
@@ -14125,8 +14137,10 @@ export const createBeamioCardAdmin = async (
 		contractName?: string
 		transferWhitelistEnabled?: boolean
 		upgradeType?: 0 | 1 | 2
+		tierQualificationMode?: TierQualificationMode
 		initialTierConfig?: {
-			qualificationMode: 0 | 1 | 2
+			tierQualificationMode?: 0 | 1 | 2
+			qualificationMode?: 0 | 1 | 2
 			tiers?: Array<{
 				minUsdc6: string
 				attr: number
@@ -14146,6 +14160,7 @@ export const createBeamioCardAdmin = async (
 	if (opts?.uri) initOpts.uri = opts.uri
 	if (opts?.contractName?.trim()) initOpts.contractName = opts.contractName.trim()
 	if (opts?.transferWhitelistEnabled === true) initOpts.transferWhitelistEnabled = true
+	if (opts?.tierQualificationMode != null) initOpts.tierQualificationMode = opts.tierQualificationMode
 	if (opts?.initialTierConfig) initOpts.initialTierConfig = opts.initialTierConfig
 	if (opts?.upgradeType === 1 || opts?.upgradeType === 2) initOpts.upgradeType = opts.upgradeType
 	return createBeamioCardWithFactory(
@@ -14177,8 +14192,10 @@ export const createBeamioCardAdminWithHash = async (
 		}>
 		transferWhitelistEnabled?: boolean
 		upgradeType?: 0 | 1 | 2
+		tierQualificationMode?: TierQualificationMode
 		initialTierConfig?: {
-			qualificationMode: 0 | 1 | 2
+			tierQualificationMode?: 0 | 1 | 2
+			qualificationMode?: 0 | 1 | 2
 			tiers?: Array<{
 				minUsdc6: string
 				attr: number
@@ -14205,6 +14222,7 @@ export const createBeamioCardAdminWithHash = async (
 	if (opts?.uri) initOpts.uri = opts.uri
 	if (opts?.contractName?.trim()) initOpts.contractName = opts.contractName.trim()
 	if (opts?.transferWhitelistEnabled === true) initOpts.transferWhitelistEnabled = true
+	if (opts?.tierQualificationMode != null) initOpts.tierQualificationMode = opts.tierQualificationMode
 	if (opts?.initialTierConfig) initOpts.initialTierConfig = opts.initialTierConfig
 	if (opts?.upgradeType === 0 || opts?.upgradeType === 1 || opts?.upgradeType === 2) {
 		initOpts.upgradeType = opts.upgradeType
@@ -14229,6 +14247,8 @@ export type CreateCardPreChecked = {
 	transferWhitelistEnabled?: boolean
 	/** 0=topup delta; 1=points balance; 2=cumulative points to admin */
 	upgradeType?: 0 | 1 | 2
+	/** Canonical card-level acquisition mode: 0 top-up, 1 direct purchase, 2 charge. */
+	tierQualificationMode?: TierQualificationMode
 	shareTokenMetadata?: {
 		name?: string
 		description?: string
@@ -14629,6 +14649,7 @@ export const createCardPreCheck = (body: {
 	uri?: string
 	transferWhitelistEnabled?: unknown
 	upgradeType?: unknown
+	tierQualificationMode?: unknown
 	shareTokenMetadata?: {
 		name?: string
 		description?: string
@@ -15065,6 +15086,27 @@ export const createCardPreCheck = (body: {
 		}
 	}
 
+	const normalizedTierQualificationMode =
+		body.tierQualificationMode == null
+			? (normalizedBaseMembership || (preChecked.tiers ?? []).some((row) => {
+					return BigInt(metadataTierMembershipFeeE6(row as MembershipFeeMetadataTiers)) > 0n
+				})
+					? TIER_QUALIFICATION_MODE.directPurchase
+					: body.upgradeType === 2
+						? TIER_QUALIFICATION_MODE.charge
+						: TIER_QUALIFICATION_MODE.topup)
+			: normalizeTierQualificationMode(body.tierQualificationMode)
+	if (normalizedTierQualificationMode == null) {
+		return { success: false, error: 'tierQualificationMode must be 0, 1, or 2' }
+	}
+	const tierModeError = validateTierQualificationModeShape({
+		mode: normalizedTierQualificationMode,
+		tiers: (preChecked.tiers as MembershipFeeMetadataTiers[] | undefined) ?? null,
+		baseMembership: normalizedBaseMembership ?? null,
+	})
+	if (tierModeError) return { success: false, error: tierModeError }
+	preChecked.tierQualificationMode = normalizedTierQualificationMode
+
 	const shapeErr = validateMembershipFeePublishShape({
 		baseMembership: normalizedBaseMembership ?? null,
 		tiers: (preChecked.tiers as MembershipFeeMetadataTiers[] | undefined) ?? null,
@@ -15130,6 +15172,7 @@ export function buildBeamioErc1155Card0MetadataFileContent(opts: {
 	tiers?: Array<Record<string, unknown>>
 	baseMembership?: Record<string, unknown> | null
 	upgradeType?: number
+	tierQualificationMode?: TierQualificationMode
 	transferWhitelistEnabled?: boolean
 }): string {
 	const stm = opts.shareTokenMetadata
@@ -15151,6 +15194,7 @@ export function buildBeamioErc1155Card0MetadataFileContent(opts: {
 			...(baseMembership && Object.keys(baseMembership).length > 0 && { baseMembership }),
 			...(opts.tiers && opts.tiers.length > 0 && { tiers: opts.tiers }),
 			...(opts.upgradeType != null && { upgradeType: opts.upgradeType }),
+			...(opts.tierQualificationMode != null && { tierQualificationMode: opts.tierQualificationMode }),
 			...(typeof opts.transferWhitelistEnabled === 'boolean' && {
 				transferWhitelistEnabled: opts.transferWhitelistEnabled,
 			}),
@@ -15445,6 +15489,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 	tiers?: Array<Record<string, unknown>>
 	baseMembership?: Record<string, unknown> | null
 	upgradeType?: number
+	tierQualificationMode?: TierQualificationMode
 	transferWhitelistEnabled?: boolean
 }): Promise<{ success: boolean; error?: string }> {
 	try {
@@ -15482,6 +15527,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 		}
 
 		let upgradeType = params.upgradeType
+		let tierQualificationMode = params.tierQualificationMode
 		let transferWhitelistEnabled = params.transferWhitelistEnabled
 		let tiersForFile = params.tiers
 		let baseMembershipForFile: Record<string, unknown> | undefined =
@@ -15499,6 +15545,9 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 				if (upgradeType === undefined && prev.upgradeType != null) {
 					const u = Number(prev.upgradeType)
 					if (u === 0 || u === 1 || u === 2) upgradeType = u
+				}
+				if (tierQualificationMode === undefined) {
+					tierQualificationMode = normalizeTierQualificationMode(prev.tierQualificationMode) ?? undefined
 				}
 				if (transferWhitelistEnabled === undefined && typeof prev.transferWhitelistEnabled === 'boolean') {
 					transferWhitelistEnabled = prev.transferWhitelistEnabled
@@ -15570,6 +15619,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 			tiers: tiersForFile,
 			baseMembership: baseMembershipForFile,
 			upgradeType,
+			tierQualificationMode,
 			transferWhitelistEnabled,
 		})
 		if (!fs.existsSync(metaDir)) fs.mkdirSync(metaDir, { recursive: true })
@@ -15911,6 +15961,7 @@ export const createCardPoolPress = async () => {
 		shareTokenMetadata,
 		tiers,
 		baseMembership,
+		tierQualificationMode,
 		businessStartKetBurnFrom,
 		createCardOwnerAsRequested,
 	} = payload
@@ -15963,7 +16014,7 @@ export const createCardPoolPress = async () => {
 					})
 					const durations = paidRows.map((row) => Number(row.membershipDurationKind ?? 0))
 					return {
-						qualificationMode: 1 as const,
+						tierQualificationMode: TIER_QUALIFICATION_MODE.directPurchase,
 						// Every card, including direct-paid membership cards,
 						// starts with its complete canonical tier[0..n] state.
 						// For fee schedules the threshold is only an ordered
@@ -15982,7 +16033,9 @@ export const createCardPoolPress = async () => {
 					}
 				})()
 			: {
-					qualificationMode: (stampedUpgradeType === 2 ? 2 : 0) as 0 | 2,
+					tierQualificationMode: (stampedUpgradeType === 2
+						? TIER_QUALIFICATION_MODE.charge
+						: TIER_QUALIFICATION_MODE.topup) as 0 | 2,
 					// Every new card needs an on-chain base tier. Cards without
 					// explicit higher tiers get the semantic base at their unit
 					// price, rather than relying on a later appendTier call.
@@ -16017,6 +16070,7 @@ export const createCardPoolPress = async () => {
 					shareTokenMetadata as Record<string, unknown> | undefined
 				),
 				initialTierConfig,
+				tierQualificationMode,
 				...(transferWhitelistEnabled === true && { transferWhitelistEnabled: true }),
 				...(ut != null && { upgradeType: ut }),
 				libraryAddresses: beamioUserCardLibrariesForChain(merchantChain),
@@ -16082,6 +16136,7 @@ export const createCardPoolPress = async () => {
 				tiers: stampedTiers as Array<Record<string, unknown>> | undefined,
 				baseMembership: baseMembership as Record<string, unknown> | undefined,
 				upgradeType: stampedUpgradeType,
+				tierQualificationMode,
 				transferWhitelistEnabled,
 			})
 			const metaPath = resolve(METADATA_BASE, metaFilename)

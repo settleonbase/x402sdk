@@ -210,7 +210,10 @@ export const treasuryBridgeFulfillProcess = async () => {
 		const lockAmount = BigInt(String(obj.usdcAmount6 ?? '0'))
 		if (lockAmount <= 0n) throw new Error('Invalid usdcAmount6')
 		const points6 = BigInt(String(obj.points6 ?? '0'))
-		if (points6 <= 0n) throw new Error('Invalid points6')
+		if (points6 < 0n) throw new Error('Invalid points6')
+		if (points6 === 0n && !obj.membershipFeeStage) {
+			throw new Error('Invalid points6: zero only allowed with membershipFeeStage')
+		}
 
 		const cardAddress = ethers.getAddress(obj.cardAddress)
 		const cardOwner = ethers.getAddress(obj.cardOwner)

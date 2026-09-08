@@ -1892,6 +1892,7 @@ const routing = ( router: Router ) => {
 				tiers?: Array<Record<string, unknown>>
 				baseMembership?: Record<string, unknown> | null
 				upgradeType?: number
+				tierQualificationMode?: number
 				transferWhitelistEnabled?: boolean
 			}
 			const cardAddress = body.cardAddress?.trim()
@@ -1920,6 +1921,7 @@ const routing = ( router: Router ) => {
 					...(body.tiers != null && { tiers: body.tiers }),
 					...(body.baseMembership !== undefined && { baseMembership: body.baseMembership }),
 					...(body.upgradeType != null && { upgradeType: body.upgradeType }),
+					...(body.tierQualificationMode != null && { tierQualificationMode: body.tierQualificationMode as 0 | 1 | 2 }),
 					...(typeof body.transferWhitelistEnabled === 'boolean' && {
 						transferWhitelistEnabled: body.transferWhitelistEnabled,
 					}),
@@ -4053,7 +4055,7 @@ const routing = ( router: Router ) => {
 			if (!/^\d+$/.test(usdcAmount6) || BigInt(usdcAmount6) <= 0n) {
 				return res.status(400).json({ success: false, error: 'Invalid usdcAmount6' }).end()
 			}
-			if (!/^\d+$/.test(points6) || BigInt(points6) <= 0n) {
+			if (!/^\d+$/.test(points6) || BigInt(points6) < 0n) {
 				return res.status(400).json({ success: false, error: 'Invalid points6' }).end()
 			}
 			let membershipFeeStage: {
@@ -4077,7 +4079,7 @@ const routing = ( router: Router ) => {
 					/^\d+$/.test(feePaid6) &&
 					/^\d+$/.test(pointsCredit6) &&
 					BigInt(feePaid6) > 0n &&
-					BigInt(pointsCredit6) > 0n
+					BigInt(pointsCredit6) >= 0n
 				) {
 					membershipFeeStage = {
 						recipientEOA: ethers.getAddress(stageRecipient),
@@ -4092,6 +4094,9 @@ const routing = ( router: Router ) => {
 							: {}),
 					}
 				}
+			}
+			if (BigInt(points6) === 0n && !membershipFeeStage) {
+				return res.status(400).json({ success: false, error: 'Invalid points6' }).end()
 			}
 			treasuryBridgeFulfillPool.push({
 				cardAddress: ethers.getAddress(cardAddress),
@@ -5179,7 +5184,7 @@ const routing = ( router: Router ) => {
 						Number.isInteger(t) &&
 						t >= 0 &&
 						feePaid6 > 0n &&
-						pointsCredit6 > 0n &&
+						pointsCredit6 >= 0n &&
 						(!bootstrapOnChain || (Number.isInteger(durationKind) && (durationKind ?? 0) >= 1))
 					) {
 						membershipFeeStageParsed = {

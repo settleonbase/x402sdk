@@ -9,6 +9,45 @@
  */
 import { getCardByAddress } from './db'
 
+/** One acquisition mode is allowed per merchant card. */
+export const TIER_QUALIFICATION_MODE = {
+	topup: 0,
+	directPurchase: 1,
+	charge: 2,
+} as const
+
+export type TierQualificationMode =
+	(typeof TIER_QUALIFICATION_MODE)[keyof typeof TIER_QUALIFICATION_MODE]
+
+export type CanonicalTierId = 'base' | `higher-${number}`
+
+export type CanonicalTier = MembershipFeeMetadataTiers & {
+	tierId?: CanonicalTierId
+	/** Physical on-chain slot; never infer this from array position for legacy cards. */
+	chainTierIndex?: number
+}
+
+export function normalizeTierQualificationMode(raw: unknown): TierQualificationMode | null {
+	const value =
+		typeof raw === 'number'
+			? raw
+			: typeof raw === 'string' && raw.trim() !== ''
+				? Number(raw)
+				: NaN
+	if (
+		value === TIER_QUALIFICATION_MODE.topup ||
+		value === TIER_QUALIFICATION_MODE.directPurchase ||
+		value === TIER_QUALIFICATION_MODE.charge
+	) {
+		return value
+	}
+	return null
+}
+
+export function canonicalTierIdForIndex(index: number): CanonicalTierId {
+	return index === 0 ? 'base' : `higher-${index}` as CanonicalTierId
+}
+
 /** Membership NFT tokenId lower bound (inclusive). */
 export const MEMBERSHIP_NFT_MIN_ID = 100n
 /** Membership NFT tokenId upper bound (exclusive); issued NFT / coupon ids start here. */
@@ -45,6 +84,32 @@ export type MembershipFeeMetadataBase = {
 	membershipFeeE6?: string
 	membershipFee?: string | number
 	membershipDurationKind?: number
+}
+
+export function readTierQualificationMode(metadata: Record<string, unknown> | null | undefined): TierQualificationMode | null {
+	if (!metadata) return null
+	return normalizeTierQualificationMode(metadata.tierQualificationMode)
+}
+
+export function validateTierQualificationModeShape(opts: {
+	mode: TierQualificationMode
+	tiers?: MembershipFeeMetadataTiers[] | null
+	baseMembership?: MembershipFeeMetadataBase | null
+}): string | null {
+	const tiers = opts.tiers ?? []
+	const hasFees =
+		(opts.baseMembership ? BigInt(metadataTierMembershipFeeE6(opts.baseMembership)) > 0n : false) ||
+		tiers.some((row) => BigInt(metadataTierMembershipFeeE6(row)) > 0n)
+	if (opts.mode === TIER_QUALIFICATION_MODE.directPurchase) {
+		if (!hasFees) return 'directPurchase cards require a membership fee schedule'
+		if (tiers.some((row) => BigInt(metadataTierMembershipFeeE6(row)) <= 0n)) {
+			return 'directPurchase cards cannot mix fee and threshold-only tiers'
+		}
+		return null
+	}
+	if (hasFees) return 'topup and charge cards cannot include a membership fee schedule'
+	if (tiers.length === 0) return 'topup and charge cards require at least one threshold tier'
+	return null
 }
 
 /** Human fee → E6 string; empty/invalid → "0". */

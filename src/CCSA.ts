@@ -125,6 +125,8 @@ export type CreateBeamioCardInitCodeOptions = {
   gateway?: string
   /** 0=按单次 topup/redeem 金额升级；1=按 points 余额；2=按累计向 admin 转账 points。constructor 固定，默认 0 */
   upgradeType?: 0 | 1 | 2
+  /** Canonical card-level acquisition mode: 0 top-up, 1 direct purchase, 2 charge. */
+  tierQualificationMode?: 0 | 1 | 2
   /** true：创建时即开启 points 转账白名单（须配置 whitelist 地址）；默认 false（不限制） */
   transferWhitelistEnabled?: boolean
   /**
@@ -132,7 +134,9 @@ export type CreateBeamioCardInitCodeOptions = {
    * New cards must not rely on post-create appendTier or fee bootstrap calls.
    */
   initialTierConfig?: {
-    qualificationMode: 0 | 1 | 2
+    /** Canonical API name. `qualificationMode` remains wire-compatible for old callers. */
+    tierQualificationMode?: 0 | 1 | 2
+    qualificationMode?: 0 | 1 | 2
     tiers?: CreateCardTier[]
     membershipFeeE6?: Array<bigint | string | number>
     membershipDurationKind?: number[]
@@ -684,7 +688,7 @@ type EncodedInitialTierConfig = {
 function normalizeInitialTierConfig(
   config: CreateBeamioCardInitCodeOptions['initialTierConfig'] | undefined,
 ): EncodedInitialTierConfig {
-  const mode = config?.qualificationMode ?? 0
+  const mode = config?.tierQualificationMode ?? config?.qualificationMode ?? 0
   if (mode !== 0 && mode !== 1 && mode !== 2) throw new Error('qualificationMode must be 0, 1, or 2')
   const tiers = (config?.tiers ?? []).map((tier) => ({
     minUsdc6: BigInt(tier.minUsdc6),

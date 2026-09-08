@@ -105,6 +105,7 @@ import {
 } from '../apiExcludedUserCards'
 import { excludeUserCardPreCheck, warmDynamicApiExcludedUserCardsFromDb } from '../excludeUserCardApi'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
+import { onboardingBusinessLookupHandler } from './onboardingBusinessLookup'
 import {
 	invalidateIssuedCouponSeriesQueryCachesForCard,
 	registerIssuedCouponSeriesQueryCacheInvalidator,
@@ -2210,6 +2211,11 @@ const routing = ( router: Router ) => {
 	router.use((req, _res, next) => {
 		logInboundDebug(req)
 		next()
+	})
+
+	/** POST /api/onboardingBusinessLookup — Cluster read: scrape public pages (any language, same-apex hreflang) then Gemini English onboarding fields. */
+	router.post('/onboardingBusinessLookup', (req, res) => {
+		void onboardingBusinessLookupHandler(req, res)
 	})
 
 	/** GET /api/sun - 校验 Beamio SUN 动态 URL。valid 时：若 tagID 已绑定则返回 eoa/aa；未绑定则转发 Master 创建钱包并返回 eoa/aa。 */
@@ -4927,13 +4933,8 @@ const routing = ( router: Router ) => {
 					return res.status(400).json({ success: false, error: 'Invalid mintPointsByAdmin payload' })
 				}
 				const mintAmt = tryParseMintPointsByAdminArgs(data)
-				if (!mintAmt || mintAmt.points6 <= 0n) {
+				if (!mintAmt || mintAmt.points6 < 0n) {
 					return res.status(400).json({ success: false, error: 'Invalid mintPointsByAdmin amount' })
-				}
-				const airdropLimitCheck = await nfcTopupPreCheckAdminAirdropLimit(cardAddress, signer, mintAmt.points6)
-				if (!airdropLimitCheck.success) {
-					logger(Colors.red(`[nfcTopup] admin airdrop limit pre-check FAIL: ${airdropLimitCheck.error}`))
-					return res.status(400).json({ success: false, error: airdropLimitCheck.error }).end()
 				}
 				/** Fee mode: replace min-tier first-membership gate; metadata min/max top-up quotas are not applied on this path. */
 				const feeMembershipChk = await nfcTopupPreCheckMembershipFeeFirstIssue({
@@ -4947,6 +4948,20 @@ const routing = ( router: Router ) => {
 				if (!feeMembershipChk.success) {
 					logger(Colors.red(`[nfcTopup] membership fee first-issue FAIL: ${feeMembershipChk.error}`))
 					return res.status(400).json({ success: false, error: feeMembershipChk.error }).end()
+				}
+				/** Direct membership purchase: `mintPointsByAdmin(0)` + stage. Plain top-up still requires points6 > 0. */
+				if (
+					mintAmt.points6 === 0n &&
+					!(feeMembershipChk.membershipFeeMode && feeMembershipChk.membershipNeedsFee && feeMembershipChk.stage)
+				) {
+					return res.status(400).json({ success: false, error: 'Invalid mintPointsByAdmin amount' })
+				}
+				if (mintAmt.points6 > 0n) {
+					const airdropLimitCheck = await nfcTopupPreCheckAdminAirdropLimit(cardAddress, signer, mintAmt.points6)
+					if (!airdropLimitCheck.success) {
+						logger(Colors.red(`[nfcTopup] admin airdrop limit pre-check FAIL: ${airdropLimitCheck.error}`))
+						return res.status(400).json({ success: false, error: airdropLimitCheck.error }).end()
+					}
 				}
 				if (feeMembershipChk.membershipFeeMode && feeMembershipChk.membershipNeedsFee && feeMembershipChk.stage) {
 					membershipFeeStageForward = {
@@ -5939,7 +5954,7 @@ const routing = ( router: Router ) => {
 					return res.status(400).json({ success: false, error: preparedTreasury.error }).end()
 				}
 				const mintArgs = tryParseMintPointsByAdminArgs(preparedTreasury.data)
-				if (!mintArgs || mintArgs.points6 <= 0n) {
+				if (!mintArgs || mintArgs.points6 < 0n) {
 					return res.status(400).json({ success: false, error: 'Failed to quote points for treasuryBridge' }).end()
 				}
 				/** Must match `mintPointsByAdmin` calldata (prepare unwraps Smart Wallet → true EOA). */
@@ -5954,6 +5969,9 @@ const routing = ( router: Router ) => {
 				})
 				if (!membershipFeeIssue.success) {
 					return res.status(400).json({ success: false, error: membershipFeeIssue.error }).end()
+				}
+				if (mintArgs.points6 === 0n && !membershipFeeIssue.stage) {
+					return res.status(400).json({ success: false, error: 'Failed to quote points for treasuryBridge' }).end()
 				}
 				const membershipFeeStageForward = membershipFeeIssue.stage
 					? {
@@ -8995,6 +9013,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			shareTokenMetadata?: Record<string, unknown>
 			tiers?: Array<{ index: number; minUsdc6: string; attr: number; tierExpirySeconds?: number; name?: string; description?: string; image?: string; backgroundColor?: string; upgradeByBalance?: boolean; upgradeByCharge?: boolean }>
 			upgradeType?: 0 | 1 | 2
+			tierQualificationMode?: 0 | 1 | 2
 		}
 		const preCheck = createCardPreCheck(body)
 		if (!preCheck.success) {
@@ -10175,6 +10194,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			tiers?: unknown
 			baseMembership?: unknown
 			upgradeType?: unknown
+			tierQualificationMode?: unknown
 			transferWhitelistEnabled?: unknown
 		}
 		const cardAddress = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : ''
@@ -10197,6 +10217,12 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const ut = Number(body.upgradeType)
 			if (!Number.isInteger(ut) || ut < 0 || ut > 2) {
 				return res.status(400).json({ success: false, error: 'upgradeType must be 0, 1, or 2 if provided' }).end()
+			}
+		}
+		if (body.tierQualificationMode != null) {
+			const mode = Number(body.tierQualificationMode)
+			if (!Number.isInteger(mode) || mode < 0 || mode > 2) {
+				return res.status(400).json({ success: false, error: 'tierQualificationMode must be 0, 1, or 2 if provided' }).end()
 			}
 		}
 		if (body.transferWhitelistEnabled != null && typeof body.transferWhitelistEnabled !== 'boolean') {

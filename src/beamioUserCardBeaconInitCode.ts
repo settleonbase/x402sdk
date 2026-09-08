@@ -10,7 +10,9 @@ export type BeamioUserCardInitializeParams = {
 	initialOwner: string
 	gateway: string
 	initialTierConfig: {
-		qualificationMode: number
+		/** Canonical semantic name; the ABI wire field remains qualificationMode for V20 compatibility. */
+		tierQualificationMode?: number
+		qualificationMode?: number
 		tiers: Array<{ minUsdc6: bigint; attr: bigint; tierExpirySeconds: bigint; upgradeByBalance: boolean }>
 		membershipFeeE6: bigint[]
 		membershipDurationKind: number[]
