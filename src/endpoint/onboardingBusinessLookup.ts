@@ -852,19 +852,33 @@ function logoMatchesBusiness(url: string, tokens: string[]): boolean {
 	return tokens.some((t) => hay.includes(t))
 }
 
+function demoteUnmatchedLogos(
+	images: ScrapedBrandingImage[],
+	name: string,
+	website: string,
+): ScrapedBrandingImage[] {
+	const tokens = brandingNameTokens(name, website)
+	if (!tokens.length) return images
+	return images.map((i) => {
+		if (i.kind === 'logo' && !i.weak && !logoMatchesBusiness(i.url, tokens)) {
+			return { ...i, kind: 'other' as const }
+		}
+		return i
+	})
+}
+
 function pickStrongLogoUrl(images: ScrapedBrandingImage[], name = '', website = ''): string {
 	const strong = images.filter((i) => i.kind === 'logo' && !i.weak)
 	if (!strong.length) return ''
 	const tokens = brandingNameTokens(name, website)
 	if (tokens.length) {
-		const matched = strong.find((i) => logoMatchesBusiness(i.url, tokens))
-		if (matched) return matched.url
+		return strong.find((i) => logoMatchesBusiness(i.url, tokens))?.url || ''
 	}
 	return strong[0].url
 }
 
 const STREET_RE =
-	/(?:\d+\s*\/\s*[A-Za-z]\s*,\s*)?\d{2,6}\s+[A-Za-z][\w.'-]*(?:\s+[A-Za-z][\w.'-]*){0,5}\s+(?:Rd|Road|St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Way|Lane|Ln|Crt|Court|Pl|Place|Cres|Crescent|Hwy|Highway)\b(?:\s*,\s*[A-Za-z][\w.'-]+(?:\s+[A-Za-z][\w.'-]*){0,2}\s*,\s*[A-Z]{2}(?:\s*,?\s*[A-Z]\d[A-Z]\s?\d[A-Z]\d)?)?/i
+	/(?:\d+\s*\/\s*[A-Za-z]\s*,\s*)?\d{2,6}\s+(?:[A-Za-z][\w.'-]*\s+){0,5}(?:Rd|Road|St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Way|Lane|Ln|Crt|Court|Pl|Place|Cres|Crescent|Hwy|Highway)\b(?:\s*,\s*[A-Za-z][\w.'-]+(?:\s+[A-Za-z][\w.'-]*){0,2}\s*,\s*[A-Z]{2}(?:\s*,?\s*[A-Z]\d[A-Z]\s?\d[A-Z]\d)?)?/i
 const PHONE_RE = /(?:\+1[\s.-]*)?(?:\(?\d{3}\)?[\s.-]*)\d{3}[\s.-]*\d{4}\b/
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i
 const POSTAL_RE = /\b[A-Z]\d[A-Z]\s?\d[A-Z]\d\b/i
@@ -1088,20 +1102,30 @@ function parseHtmlMeta(html: string, pageUrl: string): ScrapeMeta {
 	const ogUrl = metaContent(html, 'og:url')
 	const ogSite = metaContent(html, 'og:site_name')
 	const title = acc.name || ogTitle || titleTag(html) || ogSite
+	const street = clip(acc.street || vis.street, 160)
+	const fromStreet = locationFromStreet(street)
 	return {
 		finalUrl: acc.url || ogUrl || pageUrl,
 		title: clip(title, 120),
 		description: clip(acc.desc || ogDesc, 280),
 		siteName: clip(ogSite, 80),
 		jsonLdName: clip(acc.name, 120),
-		city: clip(acc.city, 80),
-		province: clip(acc.region, 80),
+		city: clip(acc.city || fromStreet.city, 80),
+		province: clip(acc.region || fromStreet.province, 80),
 		country: clip(acc.country, 40),
-		street: clip(acc.street || vis.street, 160),
+		street,
 		phone: clip(acc.phone || href.phone || vis.phone, 40),
 		email: clip(acc.email || href.email || vis.email, 80),
 		postalCode: clip(acc.postalCode || vis.postalCode, 12),
 	}
+}
+
+function locationFromStreet(street: string): { city: string; province: string } {
+	const m = street.match(
+		/,\s*([A-Za-z][\w.'-]+(?:\s+[A-Za-z][\w.'-]*){0,2})\s*,\s*([A-Z]{2})\b/,
+	)
+	if (!m) return { city: '', province: '' }
+	return { city: clip(m[1], 80), province: m[2] }
 }
 
 function htmlToPageSource(
@@ -1436,6 +1460,10 @@ function compactSources(sources: PageSource[]): unknown[] {
 		city: s.city,
 		province: s.province,
 		country: s.country,
+		street: s.street,
+		phone: s.phone,
+		email: s.email,
+		postalCode: s.postalCode,
 		visibleText: s.visibleText,
 	}))
 }
@@ -1568,7 +1596,7 @@ ${allowLines || '(none — logoUrl and backgroundUrl MUST be empty strings)'}
 Scraped theme colors: ${input.themeColors.join(', ') || '(none)'}
 
 Rules:
-- logoUrl: prefer THIS business’s own wordmark (path/filename matching the business name). Skip partner, supplier, or product-brand logos. Never pick a weak favicon. Empty if nothing fits.
+- logoUrl: prefer THIS business’s own wordmark. The URL path or filename MUST contain a token from the business name. Skip partner, supplier, or product-brand logos even if they appear first. Never pick a weak favicon. Empty if nothing fits.
 - backgroundUrl: prefer a wide banner / hero / og image, and it MUST differ from logoUrl when possible. Empty if nothing fits.
 - NEVER invent, rewrite hosts, or guess image URLs that are not in the scraped list.
 - brandColor: #RRGGBB. If scraped theme colors are listed, you MUST copy one of those exact values. If none were scraped, you may infer a public brand color for THIS named venue.
@@ -1630,6 +1658,8 @@ Rules:
 - app categories: ${APP_CATS.join(', ')}
 - orgType: sme | franchise | ngo, or "unknown"
 - website must be an https URL that appears in the sources or the query. Use "" if unknown. Never invent a different website.
+- Use the scraped street, city, province, and country for THIS page’s venue. Do not replace them with another location of a similar brand (for example do not change Richmond to Burnaby).
+- For a website query, the candidate MUST be the business that owns the scraped homepage, not a sister shop.
 - Never use an empty string for channelKind, orgType, or country. Use "unknown" instead.`
 
 	const result = await geminiJson(prompt, LOOKUP_SCHEMA)
@@ -1751,6 +1781,41 @@ function discoveredToCandidates(list: DiscoveredBusiness[]): OnboardingBusinessL
 	}))
 }
 
+function stripTitleSiteSuffix(title: string): string {
+	const parts = title.split(/\s+[|\-–—]\s+/)
+	if (parts.length >= 2) {
+		const left = parts[0].trim()
+		if (left.length >= 2) return clip(left, 120)
+	}
+	return clip(title, 120)
+}
+
+function candidateFromScrapedHomepage(
+	sources: PageSource[],
+	fallbackWebsite: string,
+): OnboardingBusinessLookupCandidate | null {
+	const src = sources[0]
+	if (!src) return null
+	const name = clip(src.jsonLdName || src.siteName || stripTitleSiteSuffix(src.title) || '', 120)
+	if (name.length < 2) return null
+	const website = sanitizeWebsite(src.url) || fallbackWebsite
+	const country = normalizeCountry(src.country)
+	return {
+		id: 'homepage-1',
+		name,
+		website,
+		snippet: clip(src.description || src.visibleText.slice(0, 200), 200),
+		channelKind: '',
+		category: '',
+		orgType: '',
+		country,
+		city: clip(src.city, 80),
+		province: country ? normalizeProvince(country, src.province) : clip(src.province, 80),
+		publicBio: clip(src.description, 280),
+		...emptyContact(),
+	}
+}
+
 function sourceApex(url: string): string {
 	try {
 		return apexHost(new URL(url).hostname)
@@ -1847,6 +1912,17 @@ export async function onboardingBusinessLookupHandler(req: Request, res: Respons
 		return
 	}
 
+	const homepage = looksLikeWebsiteQuery(query)
+		? candidateFromScrapedHomepage(sources, singleSiteFallback)
+		: null
+	if (homepage) {
+		res.json({
+			ok: true,
+			candidates: attachScrapedContact([enrichCandidateFromPublicName(homepage)], sources),
+		})
+		return
+	}
+
 	let known: OnboardingBusinessLookupCandidate[] = []
 	let knownFailed = false
 	if (discovered.length) {
@@ -1929,6 +2005,10 @@ export async function onboardingBusinessCardSetupHandler(req: Request, res: Resp
 		} catch (e) {
 			logger(Colors.yellow('[onboardingBusinessCardSetup] scrape:'), (e as Error)?.message ?? e)
 		}
+		scraped = {
+			images: demoteUnmatchedLogos(scraped.images, name, website),
+			themeColors: scraped.themeColors,
+		}
 	}
 
 	const allow = scraped.images.map((i) => ({ url: i.url, key: urlKey(new URL(i.url)) }))
@@ -1975,6 +2055,9 @@ export async function onboardingBusinessCardSetupHandler(req: Request, res: Resp
 			isWeakLogoUrl(logoUrl, scraped.images) ||
 			(logoMatchesBusiness(strongLogo, logoTokens) && !logoMatchesBusiness(logoUrl, logoTokens)))
 	) {
+		logoUrl = strongLogo
+	}
+	if (logoTokens.length && logoUrl && !logoMatchesBusiness(logoUrl, logoTokens)) {
 		logoUrl = strongLogo
 	}
 	let backgroundUrl = geminiBg || fallback.backgroundUrl
