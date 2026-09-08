@@ -1,0 +1,25 @@
+[Unit]
+Description=Beamio stealth Chromium sidecar (localhost HTML fetch for bot-gated sites)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=/home/peter/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=BEAMIO_STEALTH_BROWSER_PORT=17331
+Environment=BEAMIO_STEALTH_BROWSER_CHANNEL=chrome
+Environment=PLAYWRIGHT_BROWSERS_PATH=/home/peter/.cache/ms-playwright
+ExecStart=/usr/bin/node /home/peter/x402sdk/dist/endpoint/stealthBrowserDaemon.js
+Restart=always
+RestartSec=10
+WorkingDirectory=/home/peter/x402sdk
+User=peter
+Group=peter
+MemoryMax=1536M
+LimitNOFILE=65536
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=conet-beamio-stealth-browser
+
+[Install]
+WantedBy=multi-user.target

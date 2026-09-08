@@ -11,6 +11,8 @@ import {
 	summarizeOnboardingLookupFiles,
 	type ParsedOnboardingLookupFile,
 } from './onboardingLookupFiles'
+import { isStealthChallengeHtml, STEALTH_BROWSER_UA } from './stealthBrowserChallenge'
+import { fetchHtmlViaStealthBrowser } from './stealthBrowserClient'
 
 const CHANNELS = ['physical', 'digital', 'app'] as const
 const PHYSICAL_CATS = [
@@ -89,7 +91,7 @@ const CARD_SETUP_RATE_MAX = 10
 const CARD_SETUP_DISCOVER_COPY_MAX = 200
 const MAX_BRANDING_IMAGES = 24
 const MAX_RAW_BRANDING = 40
-const USER_AGENT = 'BeamioOnboardingLookup/1.0'
+const USER_AGENT = STEALTH_BROWSER_UA
 const ACCEPT_LANGUAGE = 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7,ja;q=0.6,de;q=0.5,fr;q=0.4'
 const VISIBLE_PER_PAGE = 4_000
 const VISIBLE_TOTAL = 12_000
@@ -430,6 +432,188 @@ function parsePublicHttpUrl(raw: string): URL | null {
 
 function apexHost(host: string): string {
 	return host.trim().toLowerCase().replace(/\.+$/, '').replace(/^www\./, '')
+}
+
+/** Delivery / review platforms — never treat as a merchant homepage. Not google.com. */
+const MARKETPLACE_APEX_HOSTS = new Set([
+	'ubereats.com',
+	'doordash.com',
+	'grubhub.com',
+	'skipthedishes.com',
+	'yelp.com',
+	'tripadvisor.com',
+	'opentable.com',
+	'deliveroo.com',
+	'just-eat.com',
+	'justeat.com',
+	'postmates.com',
+	'seamless.com',
+	'foodpanda.com',
+	'wolt.com',
+	'glovoapp.com',
+	'menulog.com.au',
+	'takeaway.com',
+	'hungrypanda.co',
+	'fantuanorder.com',
+])
+
+const MARKETPLACE_PLATFORM_LABEL: Record<string, string> = {
+	'ubereats.com': 'Uber Eats',
+	'doordash.com': 'DoorDash',
+	'grubhub.com': 'Grubhub',
+	'skipthedishes.com': 'SkipTheDishes',
+	'yelp.com': 'Yelp',
+	'tripadvisor.com': 'Tripadvisor',
+	'opentable.com': 'OpenTable',
+	'deliveroo.com': 'Deliveroo',
+	'just-eat.com': 'Just Eat',
+	'justeat.com': 'Just Eat',
+	'postmates.com': 'Postmates',
+	'seamless.com': 'Seamless',
+	'foodpanda.com': 'foodpanda',
+	'wolt.com': 'Wolt',
+	'glovoapp.com': 'Glovo',
+	'menulog.com.au': 'Menulog',
+	'takeaway.com': 'Takeaway',
+	'hungrypanda.co': 'HungryPanda',
+	'fantuanorder.com': 'Fantuan',
+}
+
+export function isBlockedInterstitialHtml(html: string): boolean {
+	return isStealthChallengeHtml(html)
+}
+
+function marketplacePlatformApex(host: string): string | null {
+	const h = apexHost(host)
+	for (const apex of MARKETPLACE_APEX_HOSTS) {
+		if (h === apex || h.endsWith(`.${apex}`)) return apex
+	}
+	return null
+}
+
+export function isGoogleMapsListingUrl(u: URL): boolean {
+	const h = apexHost(u.hostname)
+	if (h === 'maps.app.goo.gl' || h === 'goo.gl' || h.endsWith('.app.goo.gl')) return true
+	if (h === 'maps.google.com' || h.startsWith('maps.google.')) return true
+	if (h === 'google.com' || /^google\.(ca|com|co\.uk|com\.au|de|fr|co\.jp)$/.test(h) || h.startsWith('google.')) {
+		return /\/maps\/(place|search|dir)\b/i.test(u.pathname) || /\/place\//i.test(u.pathname)
+	}
+	return false
+}
+
+export function isMarketplaceListingUrl(raw: string | URL): boolean {
+	const u = typeof raw === 'string' ? parsePublicHttpUrl(raw) : raw
+	if (!u) return false
+	if (isGoogleMapsListingUrl(u)) return true
+	return marketplacePlatformApex(u.hostname) !== null
+}
+
+function titleCaseMarketplaceToken(token: string): string {
+	if (token === '&' || token === '+') return token
+	if (/^[a-z0-9]&[a-z0-9]$/i.test(token)) {
+		return token
+			.split('&')
+			.map((p) => p.toUpperCase())
+			.join('&')
+	}
+	return token.replace(/[A-Za-zÀ-ÿ]+/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+}
+
+/** Decode listing slugs. Keep `&` and `+` in names such as A&S / Restro + Bar. */
+export function humanizeMarketplaceSlug(raw: string): string {
+	let s = raw.trim()
+	try {
+		s = decodeURIComponent(s)
+	} catch {
+		/* keep encoded */
+	}
+	s = s.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim()
+	if (!s) return ''
+	return s.split(' ').map(titleCaseMarketplaceToken).join(' ')
+}
+
+function humanizeGoogleMapsPlace(raw: string): string {
+	let s = raw.trim()
+	try {
+		s = decodeURIComponent(s)
+	} catch {
+		/* keep */
+	}
+	s = s.replace(/\+/g, ' ').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim()
+	if (!s) return ''
+	return s.split(' ').map(titleCaseMarketplaceToken).join(' ')
+}
+
+function marketplaceSlugParts(u: URL): { slug: string; plusIsSpace: boolean } | null {
+	const path = u.pathname
+	if (isGoogleMapsListingUrl(u)) {
+		const m = path.match(/\/place\/([^/]+)/i) || path.match(/\/search\/([^/]+)/i)
+		const slug = m?.[1] ? m[1] : ''
+		return slug ? { slug, plusIsSpace: true } : null
+	}
+	const apex = marketplacePlatformApex(u.hostname)
+	if (!apex) return null
+	let slug = ''
+	if (apex === 'ubereats.com') {
+		slug = path.match(/\/store\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'doordash.com') {
+		slug = path.match(/\/store\/([^/]+)(?:\/|$)/i)?.[1] || path.match(/\/food-delivery\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'grubhub.com' || apex === 'seamless.com') {
+		slug = path.match(/\/restaurant\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'skipthedishes.com') {
+		slug = path.match(/\/restaurant\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'yelp.com') {
+		slug = path.match(/\/biz\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'opentable.com') {
+		slug = path.match(/\/r\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'deliveroo.com') {
+		slug = path.match(/\/menu\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'just-eat.com' || apex === 'justeat.com' || apex === 'takeaway.com' || apex === 'menulog.com.au') {
+		slug = path.match(/\/restaurants\/([^/]+)(?:\/|$)/i)?.[1] || path.match(/\/restaurant\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'foodpanda.com' || apex === 'wolt.com' || apex === 'glovoapp.com') {
+		slug = path.match(/\/restaurant\/([^/]+)(?:\/|$)/i)?.[1] || path.match(/\/venue\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'tripadvisor.com') {
+		const m = path.match(/Reviews-([A-Za-z0-9_]+)-/i)
+		slug = m?.[1] || ''
+	}
+	if (!slug) {
+		const parts = path.split('/').filter(Boolean)
+		slug = [...parts].reverse().find((p) => /[a-z].*-.*[a-z]/i.test(p) && p.length >= 4) || ''
+	}
+	return slug ? { slug, plusIsSpace: false } : null
+}
+
+export function marketplaceVenueName(raw: string | URL): string {
+	const u = typeof raw === 'string' ? parsePublicHttpUrl(raw) : raw
+	if (!u) return ''
+	const parts = marketplaceSlugParts(u)
+	if (!parts) return ''
+	const name = parts.plusIsSpace ? humanizeGoogleMapsPlace(parts.slug) : humanizeMarketplaceSlug(parts.slug)
+	return name.length >= 2 ? name : ''
+}
+
+export function marketplaceVenueSearchQuery(raw: string | URL): string {
+	const u = typeof raw === 'string' ? parsePublicHttpUrl(raw) : raw
+	if (!u) return ''
+	const name = marketplaceVenueName(u)
+	if (!name) return ''
+	const apex = marketplacePlatformApex(u.hostname)
+	const platform = apex ? MARKETPLACE_PLATFORM_LABEL[apex] : isGoogleMapsListingUrl(u) ? 'Google Maps' : ''
+	return platform ? `${name} listed on ${platform}` : name
+}
+
+export function discoverQueryFromWebsiteUrl(start: URL, originalQuery: string): string {
+	if (isMarketplaceListingUrl(start)) {
+		return marketplaceVenueSearchQuery(start) || originalQuery
+	}
+	return originalQuery
+}
+
+function marketplaceCountryHint(u: URL): string {
+	if (marketplacePlatformApex(u.hostname) !== 'ubereats.com') return ''
+	const m = u.pathname.match(/^\/([a-z]{2})(?:\/|$)/i)
+	if (!m) return ''
+	return normalizeCountry(m[1])
 }
 
 function isSameApexHost(a: string, b: string): boolean {
@@ -1234,16 +1418,55 @@ function htmlToPageSource(
 	}
 }
 
+export function isUnusableScrapeSource(src: Pick<PageSource, 'url' | 'title' | 'siteName' | 'visibleText'>): boolean {
+	if (isBlockedInterstitialHtml(`${src.title}\n${src.siteName}\n${src.visibleText.slice(0, 800)}`)) return true
+	if (/just a moment/i.test(src.title)) return true
+	return false
+}
+
+function shouldEscalateHttpStatus(status: number): boolean {
+	if (status === 400 || status === 404 || status === 410) return false
+	if (status === 401 || status === 403 || status === 407 || status === 429) return true
+	if (status >= 500 && status <= 599) return true
+	return false
+}
+
+async function fetchViaStealthIfAllowed(
+	start: URL,
+	stayApex: string,
+	allowStealth: boolean,
+): Promise<{ url: string; html: string; contentLang: string } | null> {
+	if (!allowStealth) return null
+	const got = await fetchHtmlViaStealthBrowser(start.toString())
+	if (!got?.html) return null
+	let final: URL
+	try {
+		final = new URL(got.url)
+	} catch {
+		return null
+	}
+	if (stayApex && apexHost(final.hostname) !== stayApex) return null
+	if (isBlockedInterstitialHtml(got.html)) return null
+	return {
+		url: got.url,
+		html: got.html,
+		contentLang: got.contentLang || '',
+	}
+}
+
 async function fetchHtmlSafe(
 	start: URL,
 	hopsLeft: number,
 	stayApex = '',
+	opts?: { allowStealth?: boolean },
 ): Promise<{ url: string; html: string; contentLang: string } | null> {
 	if (hopsLeft < 0) return null
 	const apex = stayApex || apexHost(start.hostname)
 	if (!(await assertPublicHost(start))) return null
+	const allowStealth = opts?.allowStealth !== false
 	const ac = new AbortController()
 	const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS)
+	let escalate = false
 	try {
 		const res = await fetch(start.toString(), {
 			method: 'GET',
@@ -1261,23 +1484,34 @@ async function fetchHtmlSafe(
 			const next = parsePublicHttpUrl(new URL(loc, start).toString())
 			if (!next) return null
 			if (apexHost(next.hostname) !== apex) return null
-			return fetchHtmlSafe(next, hopsLeft - 1, apex)
+			return fetchHtmlSafe(next, hopsLeft - 1, apex, opts)
 		}
-		if (!res.ok) return null
-		const ctype = (res.headers.get('content-type') || '').toLowerCase()
-		if (ctype && !/text\/html|application\/xhtml|text\/plain/.test(ctype)) return null
-		const buf = Buffer.from(await res.arrayBuffer())
-		if (buf.length > MAX_HTML_BYTES) return null
-		return {
-			url: start.toString(),
-			html: decodeHtmlBytes(buf, ctype),
-			contentLang: (res.headers.get('content-language') || '').trim(),
+		if (!res.ok) {
+			escalate = shouldEscalateHttpStatus(res.status)
+			if (!escalate) return null
+		} else {
+			const ctype = (res.headers.get('content-type') || '').toLowerCase()
+			if (ctype && !/text\/html|application\/xhtml|text\/plain/.test(ctype)) return null
+			const buf = Buffer.from(await res.arrayBuffer())
+			if (buf.length > MAX_HTML_BYTES) return null
+			const html = decodeHtmlBytes(buf, ctype)
+			if (isBlockedInterstitialHtml(html)) {
+				escalate = true
+			} else {
+				return {
+					url: start.toString(),
+					html,
+					contentLang: (res.headers.get('content-language') || '').trim(),
+				}
+			}
 		}
 	} catch {
-		return null
+		escalate = true
 	} finally {
 		clearTimeout(timer)
 	}
+	if (!escalate) return null
+	return fetchViaStealthIfAllowed(start, apex, allowStealth)
 }
 
 async function collectPageSources(start: URL, maxExtraLang: number): Promise<PageSource[]> {
@@ -1290,8 +1524,11 @@ async function collectPageSources(start: URL, maxExtraLang: number): Promise<Pag
 		Math.min(VISIBLE_PER_PAGE, VISIBLE_TOTAL),
 		fetched.contentLang,
 	)
+	if (isUnusableScrapeSource(primary)) return []
 	const extras = pickAlternateLangUrls(fetched.html, fetched.url, maxExtraLang)
-	const extraPages = await Promise.all(extras.map((u) => fetchHtmlSafe(u, MAX_REDIRECTS, stay)))
+	const extraPages = await Promise.all(
+		extras.map((u) => fetchHtmlSafe(u, MAX_REDIRECTS, stay, { allowStealth: false })),
+	)
 	const sources = [primary]
 	let used = primary.visibleText.length
 	for (const extra of extraPages) {
@@ -1299,6 +1536,7 @@ async function collectPageSources(start: URL, maxExtraLang: number): Promise<Pag
 		const budget = Math.min(VISIBLE_PER_PAGE, VISIBLE_TOTAL - used)
 		if (budget < 200) break
 		const page = htmlToPageSource(extra.html, extra.url, budget, extra.contentLang)
+		if (isUnusableScrapeSource(page)) continue
 		sources.push(page)
 		used += page.visibleText.length
 	}
@@ -1308,9 +1546,32 @@ async function collectPageSources(start: URL, maxExtraLang: number): Promise<Pag
 async function collectWebsitePageSources(start: URL, maxExtraLang: number): Promise<PageSource[]> {
 	for (const u of websiteFetchStarts(start)) {
 		const pages = await collectPageSources(u, maxExtraLang)
-		if (pages.length) return pages
+		if (pages.length) return pages.filter((s) => !isUnusableScrapeSource(s))
 	}
 	return []
+}
+
+async function discoverOfficialSitesFromQuery(
+	query: string,
+	extraLang: number,
+): Promise<{ discovered: DiscoveredBusiness[]; discoverFailed: boolean; sources: PageSource[] }> {
+	let discovered: DiscoveredBusiness[] = []
+	let discoverFailed = false
+	try {
+		const discover = await askGeminiDiscover(query)
+		discoverFailed = discover.failed
+		discovered = discover.list
+	} catch (e) {
+		discoverFailed = true
+		logger(Colors.yellow('[onboardingBusinessLookup] Gemini discover:'), (e as Error)?.message ?? e)
+	}
+	const urls = uniquePublicWebsites(
+		discovered.map((d) => d.website).filter(Boolean),
+		MAX_NAME_SITES,
+	)
+	const batches = await Promise.all(urls.map((u) => collectWebsitePageSources(u, extraLang)))
+	const sources = batches.flat().filter((s) => !isUnusableScrapeSource(s))
+	return { discovered, discoverFailed, sources }
 }
 
 export function normalizeCountry(raw: string): string {
@@ -1432,7 +1693,7 @@ function channelForCategory(cat: string): ChannelKind | '' {
 }
 
 const FOOD_NAME_RE =
-	/restaurant|noodle|cuisine|cafe|coffee|bakery|bistro|diner|eatery|\bbar\b|\bpub\b|grill|kitchen|面馆|麵館|餐厅|餐廳|饭店|飯店|餐馆|餐館|酒楼|酒樓|咖啡|茶馆|茶館|烧烤|燒烤|火锅|火鍋|餐饮|餐飲|弄堂|小吃|料理|食堂|食府|菜馆|菜館|夜宵|本帮|本幫/
+	/restaurant|restro|noodle|cuisine|cafe|coffee|bakery|bistro|diner|eatery|\bbar\b|\bpub\b|grill|kitchen|面馆|麵館|餐厅|餐廳|饭店|飯店|餐馆|餐館|酒楼|酒樓|咖啡|茶馆|茶館|烧烤|燒烤|火锅|火鍋|餐饮|餐飲|弄堂|小吃|料理|食堂|食府|菜馆|菜館|夜宵|本帮|本幫/
 
 function parseDiscoveredBusiness(raw: unknown): DiscoveredBusiness | null {
 	if (!raw || typeof raw !== 'object') return null
@@ -1454,6 +1715,7 @@ function sanitizeWebsite(raw: string): string {
 	const u = parsePublicHttpUrl(raw)
 	if (!u) return ''
 	if (u.protocol !== 'https:') return ''
+	if (isMarketplaceListingUrl(u)) return ''
 	return u.toString()
 }
 
@@ -1477,6 +1739,7 @@ function uniquePublicWebsites(raws: string[], max: number): URL[] {
 	for (const r of raws) {
 		const u = parsePublicHttpUrl(r)
 		if (!u || u.protocol !== 'https:') continue
+		if (isMarketplaceListingUrl(u)) continue
 		const k = apexHost(u.hostname)
 		if (seen.has(k)) continue
 		seen.add(k)
@@ -1713,6 +1976,8 @@ Return up to ${MAX_CANDIDATES} real public businesses that match this query.
 - city / country / province: only if you know THAT named venue’s public listing address.
 - country: ISO 3166-1 alpha-2, or empty if unknown.
 - ${CUISINE_NOT_LOCATION_RULE}
+- If the query is a delivery or review marketplace listing (Uber Eats, DoorDash, Grubhub, Yelp, SkipTheDishes, Google Maps place, …), return the named restaurant or shop on that listing, not the marketplace company.
+- Prefer the merchant's own official https website. Never use ubereats.com, doordash.com, grubhub.com, yelp.com, or similar marketplace hosts as website.
 Do not invent private IPs, localhost, or non-https websites. Do not invent a website you are not reasonably sure of.`
 	const result = await geminiJson(prompt, DISCOVER_SCHEMA)
 	if (result.status !== 'ok') return { failed: true, list: [] }
@@ -1937,7 +2202,10 @@ function stripTitleSiteSuffix(title: string): string {
 }
 
 function isGenericPageTitle(name: string): boolean {
-	return /^(home|homepage|welcome|index)$/i.test(name.trim())
+	const n = name.trim()
+	if (/^(home|homepage|welcome|index)$/i.test(n)) return true
+	if (/^(uber eats|doordash|grubhub|skip.?the.?dishes|yelp|google maps|tripadvisor)$/i.test(n)) return true
+	return false
 }
 
 function displayNameFromScrape(src: PageSource): string {
@@ -1962,7 +2230,7 @@ function candidateFromScrapedHomepage(
 	fallbackWebsite: string,
 ): OnboardingBusinessLookupCandidate | null {
 	const src = sources[0]
-	if (!src) return null
+	if (!src || isUnusableScrapeSource(src)) return null
 	const name = displayNameFromScrape(src)
 	if (name.length < 2) return null
 	const website = sanitizeWebsite(src.url) || fallbackWebsite
@@ -2015,12 +2283,42 @@ function attachScrapedContact(
 	})
 }
 
+function candidateFromMarketplaceListing(query: string): OnboardingBusinessLookupCandidate | null {
+	if (!looksLikeWebsiteQuery(query)) return null
+	const start = parsePublicHttpUrl(query)
+	if (!start || !isMarketplaceListingUrl(start)) return null
+	const name = marketplaceVenueName(start)
+	if (name.length < 2) return null
+	const apex = marketplacePlatformApex(start.hostname)
+	const platform = apex
+		? MARKETPLACE_PLATFORM_LABEL[apex] || 'a listing'
+		: isGoogleMapsListingUrl(start)
+			? 'Google Maps'
+			: 'a listing'
+	const country = marketplaceCountryHint(start)
+	return {
+		id: 'listing-1',
+		name,
+		website: '',
+		snippet: clip(`Listed on ${platform}.`, 200),
+		channelKind: '',
+		category: '',
+		orgType: '',
+		country,
+		city: '',
+		province: '',
+		publicBio: '',
+		...emptyContact(),
+	}
+}
+
 function overlayScrapedVenueForWebsiteQuery(
 	query: string,
 	sources: PageSource[],
 	candidates: OnboardingBusinessLookupCandidate[],
 ): OnboardingBusinessLookupCandidate[] {
 	if (!looksLikeWebsiteQuery(query) || !sources.length) return candidates
+	if (sources[0] && isUnusableScrapeSource(sources[0])) return candidates
 	const home = candidateFromScrapedHomepage(sources, sanitizeWebsite(sources[0].url) || '')
 	if (!home) return candidates
 	if (!candidates.length) return [home]
@@ -2045,6 +2343,11 @@ async function handleAttachmentLookup(
 	if (query && looksLikeWebsiteQuery(query)) {
 		const start = parsePublicHttpUrl(query)
 		if (start) sources = await collectWebsitePageSources(start, MAX_EXTRA_LANG_URL)
+		if (!sources.length) {
+			const dq = start ? discoverQueryFromWebsiteUrl(start, query) : query
+			const hop = await discoverOfficialSitesFromQuery(dq, MAX_EXTRA_LANG_NAME)
+			sources = hop.sources
+		}
 	}
 
 	let analyzed: OnboardingBusinessLookupCandidate[] = []
@@ -2105,6 +2408,15 @@ async function handleAttachmentLookup(
 		return
 	}
 
+	const listing = candidateFromMarketplaceListing(query)
+	if (listing) {
+		res.json({
+			ok: true,
+			candidates: attachScrapedContact([enrichCandidateFromPublicName(listing)], sources),
+		})
+		return
+	}
+
 	if (analyzeFailed) {
 		logger(Colors.yellow('[onboardingBusinessLookup] ai_unavailable attachments'))
 		res.json({ ok: false, error: 'ai_unavailable' })
@@ -2146,21 +2458,18 @@ export async function onboardingBusinessLookupHandler(req: Request, res: Respons
 		if (start) {
 			sources = await collectWebsitePageSources(start, MAX_EXTRA_LANG_URL)
 		}
-	} else {
-		try {
-			const discover = await askGeminiDiscover(query)
-			discoverFailed = discover.failed
-			discovered = discover.list
-		} catch (e) {
-			discoverFailed = true
-			logger(Colors.yellow('[onboardingBusinessLookup] Gemini discover:'), (e as Error)?.message ?? e)
+		if (!sources.length) {
+			const dq = start ? discoverQueryFromWebsiteUrl(start, query) : query
+			const hop = await discoverOfficialSitesFromQuery(dq, MAX_EXTRA_LANG_NAME)
+			discoverFailed = hop.discoverFailed
+			discovered = hop.discovered
+			sources = hop.sources
 		}
-		const urls = uniquePublicWebsites(
-			discovered.map((d) => d.website).filter(Boolean),
-			MAX_NAME_SITES,
-		)
-		const batches = await Promise.all(urls.map((u) => collectWebsitePageSources(u, MAX_EXTRA_LANG_NAME)))
-		sources = batches.flat()
+	} else {
+		const hop = await discoverOfficialSitesFromQuery(query, MAX_EXTRA_LANG_NAME)
+		discoverFailed = hop.discoverFailed
+		discovered = hop.discovered
+		sources = hop.sources
 	}
 	const sites = uniqueSourceWebsites(sources)
 	singleSiteFallback = sites.length === 1 ? sites[0] : ''
@@ -2233,6 +2542,14 @@ export async function onboardingBusinessLookupHandler(req: Request, res: Respons
 	const fallback = discoveredToCandidates(discovered).map(enrichCandidateFromPublicName)
 	if (fallback.length) {
 		res.json({ ok: true, candidates: attachScrapedContact(dedupe(fallback), sources) })
+		return
+	}
+	const listing = candidateFromMarketplaceListing(query)
+	if (listing) {
+		res.json({
+			ok: true,
+			candidates: attachScrapedContact([enrichCandidateFromPublicName(listing)], sources),
+		})
 		return
 	}
 	if (discoverFailed || analyzeFailed || knownFailed) {
