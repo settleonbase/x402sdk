@@ -6,6 +6,11 @@ import Colors from 'colors/safe'
 import { getClientIp, masterSetup } from '../util'
 import { logger } from '../logger'
 import { normalizeOnboardingCountryCode } from '../onboardingCountries'
+import {
+	parseOnboardingLookupFiles,
+	summarizeOnboardingLookupFiles,
+	type ParsedOnboardingLookupFile,
+} from './onboardingLookupFiles'
 
 const CHANNELS = ['physical', 'digital', 'app'] as const
 const PHYSICAL_CATS = [
@@ -1560,6 +1565,8 @@ const GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-2.5-flash'] as const
 
 type GeminiJsonResult = { status: 'no_key' } | { status: 'failed' } | { status: 'ok'; items: unknown[] }
 
+type GeminiUserPart = { text: string } | { inlineData: { mimeType: string; data: string } }
+
 function geminiErrorText(e: unknown): string {
 	const msg = e instanceof Error ? e.message : String(e)
 	return clip(msg.replace(/AIza[0-9A-Za-z_\-]+/g, '[redacted]'), 280)
@@ -1572,6 +1579,7 @@ function isGeminiQuotaExhausted(text: string): boolean {
 async function geminiJson(
 	prompt: string,
 	schema: typeof LOOKUP_SCHEMA | typeof DISCOVER_SCHEMA,
+	extraParts: GeminiUserPart[] = [],
 ): Promise<GeminiJsonResult> {
 	const apiKey = masterSetup?.GEMINI_API_KEY
 	if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) return { status: 'no_key' }
@@ -1581,7 +1589,7 @@ async function geminiJson(
 		try {
 			const response = await ai.models.generateContent({
 				model,
-				contents: [{ role: 'user', parts: [{ text: prompt }] }],
+				contents: [{ role: 'user', parts: [{ text: prompt }, ...extraParts] }],
 				config: {
 					responseMimeType: 'application/json' as const,
 					responseSchema: schema,
@@ -1751,6 +1759,56 @@ Rules:
 - Never use an empty string for channelKind, orgType, or country. Use "unknown" instead.`
 
 	const result = await geminiJson(prompt, LOOKUP_SCHEMA)
+	if (result.status !== 'ok') return { failed: true, list: [] }
+	const out: OnboardingBusinessLookupCandidate[] = []
+	for (let i = 0; i < result.items.length; i++) {
+		const c = sanitizeCandidate(result.items[i], i, fallbackWebsite)
+		if (c) out.push(c)
+	}
+	return { failed: false, list: out }
+}
+
+async function askGeminiAnalyzeAttachments(
+	query: string,
+	files: ParsedOnboardingLookupFile[],
+	sources: PageSource[],
+	fallbackWebsite: string,
+): Promise<{ failed: boolean; list: OnboardingBusinessLookupCandidate[] }> {
+	const extraParts: GeminiUserPart[] = []
+	for (const f of files) {
+		if (f.kind === 'docx' && f.text) {
+			extraParts.push({ text: `Attached Word file ${f.filename}:\n${f.text}` })
+		} else {
+			extraParts.push({ inlineData: { mimeType: f.geminiMime, data: f.base64 } })
+			extraParts.push({ text: `Attached file: ${f.filename} (${f.geminiMime})` })
+		}
+	}
+	const prompt = `You help Beamio Merchant OS onboarding. The merchant attached files (menu, flyer, PDF, photo of a storefront or business card) and may have typed a query. Extract real businesses from the attachments and any scraped pages.
+
+Query: ${JSON.stringify(query || '(none)')}
+Scraped sources (may be empty):
+${JSON.stringify(compactSources(sources))}
+
+Rules:
+- Return at most ${MAX_CANDIDATES} candidates.
+- Prefer facts from the attached files. Use scraped sources to confirm website, address, and contact when they match.
+- Every user-visible string must be English: name, snippet, publicBio, city.
+- name: official English name if shown; otherwise a reasonable English name or transliteration.
+- snippet: one English sentence about the business.
+- publicBio: short English Discover bio (1–2 sentences).
+- city: English (Vancouver, not 溫哥華).
+- country: ISO 3166-1 alpha-2 (CN, CA, US, JP, …). Use "unknown" if missing. Do not invent Canada.
+- ${CUISINE_NOT_LOCATION_RULE}
+- province: for ${CODED_PROVINCE_COUNTRIES.join(', ')} use the region CODE (BC, ON, CA, NY, ENG, NSW, BY). For other countries use the English province/state/region name, or "" if unknown.
+- channelKind: physical | digital | app, or "unknown"
+- physical categories: ${PHYSICAL_CATS.join(', ')}
+- digital categories: ${DIGITAL_CATS.join(', ')}
+- app categories: ${APP_CATS.join(', ')}
+- orgType: sme | franchise | ngo, or "unknown"
+- website must be an https URL that appears in the files, sources, or query. Use "" if unknown. Never invent a website.
+- Never use an empty string for channelKind, orgType, or country. Use "unknown" instead.`
+
+	const result = await geminiJson(prompt, LOOKUP_SCHEMA, extraParts)
 	if (result.status !== 'ok') return { failed: true, list: [] }
 	const out: OnboardingBusinessLookupCandidate[] = []
 	for (let i = 0; i < result.items.length; i++) {
@@ -1978,18 +2036,105 @@ function overlayScrapedVenueForWebsiteQuery(
 	}))
 }
 
+async function handleAttachmentLookup(
+	query: string,
+	files: ParsedOnboardingLookupFile[],
+	res: Response,
+): Promise<void> {
+	let sources: PageSource[] = []
+	if (query && looksLikeWebsiteQuery(query)) {
+		const start = parsePublicHttpUrl(query)
+		if (start) sources = await collectWebsitePageSources(start, MAX_EXTRA_LANG_URL)
+	}
+
+	let analyzed: OnboardingBusinessLookupCandidate[] = []
+	let analyzeFailed = false
+	let sites = uniqueSourceWebsites(sources)
+	let singleSiteFallback = sites.length === 1 ? sites[0] : ''
+	try {
+		const analyze = await askGeminiAnalyzeAttachments(query, files, sources, singleSiteFallback)
+		analyzeFailed = analyze.failed
+		analyzed = analyze.list
+	} catch (e) {
+		analyzeFailed = true
+		logger(Colors.yellow('[onboardingBusinessLookup] Gemini attachments:'), (e as Error)?.message ?? e)
+	}
+
+	const extraWebsites = analyzed.map((c) => c.website).filter(Boolean)
+	if (extraWebsites.length) {
+		const urls = uniquePublicWebsites(extraWebsites, MAX_NAME_SITES)
+		const have = new Set(sources.map((s) => sourceApex(s.url)).filter(Boolean))
+		const missing = urls.filter((u) => !have.has(apexHost(u.hostname)))
+		if (missing.length) {
+			const batches = await Promise.all(missing.map((u) => collectWebsitePageSources(u, MAX_EXTRA_LANG_NAME)))
+			sources = [...sources, ...batches.flat()]
+		}
+	}
+	sites = uniqueSourceWebsites(sources)
+	singleSiteFallback = sites.length === 1 ? sites[0] : singleSiteFallback
+
+	const overlayQuery = looksLikeWebsiteQuery(query) ? query : analyzed[0]?.website || ''
+	if (overlayQuery) {
+		analyzed = overlayScrapedVenueForWebsiteQuery(overlayQuery, sources, analyzed)
+	}
+
+	logger(
+		Colors.cyan('[onboardingBusinessLookup] attach sources='),
+		String(sources.length),
+		sources.map((s) => `${clip(s.lang || '?', 12)} ${clip(s.title, 40)}`).join(' | '),
+	)
+
+	if (analyzed.length) {
+		res.json({
+			ok: true,
+			candidates: attachScrapedContact(dedupe(analyzed.map(enrichCandidateFromPublicName)), sources),
+		})
+		return
+	}
+
+	const homepage = looksLikeWebsiteQuery(query)
+		? candidateFromScrapedHomepage(sources, singleSiteFallback)
+		: extraWebsites[0]
+			? candidateFromScrapedHomepage(sources, extraWebsites[0])
+			: null
+	if (homepage) {
+		res.json({
+			ok: true,
+			candidates: attachScrapedContact([enrichCandidateFromPublicName(homepage)], sources),
+		})
+		return
+	}
+
+	if (analyzeFailed) {
+		logger(Colors.yellow('[onboardingBusinessLookup] ai_unavailable attachments'))
+		res.json({ ok: false, error: 'ai_unavailable' })
+		return
+	}
+	res.json({ ok: true, candidates: [] })
+}
+
 export async function onboardingBusinessLookupHandler(req: Request, res: Response): Promise<void> {
 	const ip = getClientIp(req) || req.ip || 'unknown'
 	if (!takeRate(ip)) {
 		res.status(429).json({ ok: false, error: 'rate_limited' })
 		return
 	}
+	const parsedFiles = parseOnboardingLookupFiles((req.body as { files?: unknown })?.files)
+	if ('error' in parsedFiles) {
+		res.status(400).json({ ok: false, error: parsedFiles.error })
+		return
+	}
+	const files = parsedFiles.files
 	const query = clip(String((req.body as { query?: unknown })?.query ?? ''), MAX_QUERY)
-	if (query.length < 2) {
+	if (!files.length && query.length < 2) {
 		res.status(400).json({ ok: false, error: 'query_required' })
 		return
 	}
-	logger(Colors.cyan('[onboardingBusinessLookup]'), clip(query, 80), ip)
+	logger(Colors.cyan('[onboardingBusinessLookup]'), clip(query, 80), summarizeOnboardingLookupFiles(files), ip)
+	if (files.length) {
+		await handleAttachmentLookup(query, files, res)
+		return
+	}
 
 	let sources: PageSource[] = []
 	let discovered: DiscoveredBusiness[] = []

@@ -2214,7 +2214,7 @@ const routing = ( router: Router ) => {
 		next()
 	})
 
-	/** POST /api/onboardingBusinessLookup — Cluster read: scrape public pages (any language, same-apex hreflang) then Gemini English onboarding fields. */
+	/** POST /api/onboardingBusinessLookup — Cluster read: optional attachments (PDF/DOCX/image) + scrape public pages then Gemini English onboarding fields. */
 	router.post('/onboardingBusinessLookup', (req, res) => {
 		void onboardingBusinessLookupHandler(req, res)
 	})
@@ -14038,7 +14038,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 
 	// app.use ( express.static ( staticFolder ))
-	app.use ( express.json({ limit: '5mb' }) )
+	app.use ( express.json({ limit: '8mb' }) )
 
 	const cors = require('cors')
 	
