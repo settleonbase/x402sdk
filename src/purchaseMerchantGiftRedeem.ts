@@ -215,7 +215,7 @@ function computeTopupBonusE6(
 			const rules = topupPromotionToBonusRules(promo)
 			let picked: CreateCardBonusRuleNormalized | null = null
 			for (const rule of rules) {
-				if (amount >= rule.minimumTopupAmount || amount >= rule.paymentAmount) picked = rule
+				if (amount >= rule.paymentAmount) picked = rule
 			}
 			if (!picked) return 0n
 			if (picked.bonusProportional && picked.paymentAmount > 0) {
@@ -647,7 +647,6 @@ export function kickPurchaseMerchantGiftRedeemProcess(): void {
 }
 
 async function consumeMerchantGiftPurchaseBunitInBackground(args: {
-	walletConet: ethers.Wallet
 	cardAddress: string
 	createTxHash: string
 	cardOwnerEOA: string
@@ -656,11 +655,16 @@ async function consumeMerchantGiftPurchaseBunitInBackground(args: {
 	payWith: MerchantGiftPayWith
 }): Promise<void> {
 	if (args.bunitFeeUnits6 <= 0n) return
+	const SC = shiftSettleConet()
+	if (!SC) {
+		logger(Colors.yellow('[purchaseMerchantGiftRedeem] B-Unit consume skipped: CoNET settle pool busy'))
+		return
+	}
 	try {
 		const bunitWrite = new ethers.Contract(
 			CONET_BUNIT_AIRDROP_ADDRESS,
 			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
-			args.walletConet,
+			SC.walletConet,
 		)
 		const consumeTx = await bunitWrite.consumeFromUser(
 			args.bunitFeeConsumer,
@@ -672,14 +676,16 @@ async function consumeMerchantGiftPurchaseBunitInBackground(args: {
 		)
 		await consumeTx.wait()
 		await syncStandaloneBunitServiceFeeToIndexer({
-			walletConet: args.walletConet,
-			BeamioTaskDiamondAction: BEAMIO_INDEXER_DIAMOND,
+			walletConet: SC.walletConet,
+			BeamioTaskDiamondAction: SC.BeamioTaskDiamondAction,
 			consumeTxHash: consumeTx.hash,
 			basePaymentHash: args.createTxHash,
 			cardAddress: args.cardAddress,
 			bServiceUnits6: args.bunitFeeUnits6,
 			feePayer: args.bunitFeeConsumer,
-			txCategory: ethers.keccak256(ethers.toUtf8Bytes('merchantGiftPurchase:bunitService')),
+			txCategory: ethers.keccak256(
+				ethers.toUtf8Bytes('merchantGiftPurchase:bunitService'),
+			) as `0x${string}`,
 			title: 'Gift Purchase B-Unit Fee',
 			source: 'purchaseMerchantGiftRedeem',
 			operator: ethers.ZeroAddress,
@@ -702,6 +708,8 @@ async function consumeMerchantGiftPurchaseBunitInBackground(args: {
 				}`,
 			),
 		)
+	} finally {
+		unshiftSettleConet(SC)
 	}
 }
 
@@ -789,8 +797,8 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 			const usdcOk = checkBusinessRelayTxSuccessful(usdcReceipt ?? undefined, {
 				logTag: 'purchaseMerchantGiftRedeem.usdc',
 			})
-			if (!usdcOk) {
-				throw new Error('CoNET-USDC transferWithAuthorization failed')
+			if (!usdcOk.ok) {
+				throw new Error(usdcOk.reason ?? 'CoNET-USDC transferWithAuthorization failed')
 			}
 			paymentTxHash = usdcTx.hash
 			createCalldata = CREATE_GIFT_REDEEM_IFACE.encodeFunctionData('createGiftRedeemForPayer', [
@@ -802,17 +810,31 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 			])
 		}
 
-		const relay = await relayUserCardCallViaEntryPoint({
+		const createTx = await relayUserCardCallViaEntryPoint({
+			SC,
+			chain: 'conet',
 			cardAddress,
-			callData: createCalldata,
-			walletConet: SC.walletConet,
+			cardCallData: createCalldata,
 			logTag: 'purchaseMerchantGiftRedeem.create',
 		})
-		if (!relay.success || !relay.txHash) {
-			throw new Error(relay.error ?? 'createGiftRedeem relay failed')
+		const createReceipt = await createTx.wait().catch((waitErr: unknown) => {
+			logger(
+				Colors.yellow(
+					`[purchaseMerchantGiftRedeem] create tx.wait failed: ${
+						waitErr instanceof Error ? waitErr.message : String(waitErr)
+					}`,
+				),
+			)
+			return null
+		})
+		const createOk = checkBusinessRelayTxSuccessful(createReceipt ?? undefined, {
+			logTag: 'purchaseMerchantGiftRedeem.create',
+		})
+		if (!createOk.ok) {
+			throw new Error(createOk.reason ?? 'createGiftRedeem relay failed')
 		}
-		const createTxHash = relay.txHash
-		const redeemUrl = buildCouponRedeemAppDownloadUrl(item.redeemCode)
+		const createTxHash = createTx.hash
+		const redeemUrl = buildCouponRedeemAppDownloadUrl(cardAddress, item.redeemCode)
 
 		if (item.res && !item.res.headersSent) {
 			item.res
@@ -836,7 +858,6 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 		}
 
 		void consumeMerchantGiftPurchaseBunitInBackground({
-			walletConet: SC.walletConet,
 			cardAddress,
 			createTxHash,
 			cardOwnerEOA,
