@@ -20042,21 +20042,23 @@ export const cardRedeemAdminPreCheck = async (body: {
 	if (!redeemCode || typeof redeemCode !== 'string' || !redeemCode.trim()) return { success: false, error: 'Missing or invalid redeemCode' }
 	if (!to || !ethers.isAddress(to)) return { success: false, error: 'Invalid to address' }
 	try {
+		const cardNorm = ethers.getAddress(cardAddress)
 		const hash = ethers.keccak256(ethers.toUtf8Bytes(redeemCode.trim()))
+		// Merchant cards are CoNET-only — do not read redeem-admin status via Base RPC.
+		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardNorm))
 		const cardAbi = ['function getRedeemAdminStatus(bytes32 hash) view returns (bool active)']
-		const card = new ethers.Contract(cardAddress, cardAbi, providerBaseBackup)
+		const card = new ethers.Contract(cardNorm, cardAbi, cardProvider)
 		const active = await card.getRedeemAdminStatus(hash)
 		if (!active) {
 			return { success: false, error: 'Redeem admin code is invalid or expired' }
 		}
-		const cardNorm = ethers.getAddress(cardAddress)
 		const toAddr = ethers.getAddress(to)
-		const codeAtTo = await providerBaseBackup.getCode(toAddr)
+		const codeAtTo = await cardProvider.getCode(toAddr)
 		let posBindEoa: string
 		if (!codeAtTo || codeAtTo === '0x' || codeAtTo.length <= 2) {
 			posBindEoa = toAddr
 		} else {
-			const aa = new ethers.Contract(toAddr, ['function owner() view returns (address)'], providerBaseBackup)
+			const aa = new ethers.Contract(toAddr, ['function owner() view returns (address)'], cardProvider)
 			const ow = (await aa.owner()) as string
 			if (!ow || ow === ethers.ZeroAddress || !ethers.isAddress(ow)) {
 				return { success: false, error: 'Invalid to: cannot resolve owner EOA for terminal binding check' }
