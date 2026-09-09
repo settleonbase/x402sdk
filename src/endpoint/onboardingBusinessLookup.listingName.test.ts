@@ -16,6 +16,7 @@ import {
 	scrapeLooksLikeListingChrome,
 	shopListingSlug,
 	venueNameFromReviewsForPhrase,
+	extractVisibleContact,
 	type OnboardingBusinessLookupCandidate,
 } from './onboardingBusinessLookup.js'
 
@@ -289,5 +290,22 @@ describe('discover hop merge + Aliyun WAF interstitial', () => {
 			true,
 		)
 		assert.equal(isStealthChallengeHtml('<html><title>CoCo Richmond Center</title></html>'), false)
+	})
+})
+
+describe('generic footer contact extraction', () => {
+	it('finds a footer address after a large storefront body', () => {
+		const html = `<main>${'<p>Product content </p>'.repeat(7_000)}</main>
+			<footer>
+				<h3>Contact</h3>
+				<p>10551 Shellbridge Way, Suite#149<br/>Richmond, BC, V6X 2W9, Canada</p>
+				<p>support@maysense.com</p>
+			</footer>`
+		const contact = extractVisibleContact(html)
+		assert.match(contact.street, /10551 Shellbridge Way/i)
+		assert.match(contact.street, /Suite#149/i)
+		assert.match(contact.street, /Richmond, BC/i)
+		assert.equal(contact.postalCode, 'V6X 2W9')
+		assert.equal(contact.email, 'support@maysense.com')
 	})
 })

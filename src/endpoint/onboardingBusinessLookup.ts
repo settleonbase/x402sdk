@@ -87,7 +87,10 @@ type PageSource = {
 const MAX_QUERY = 200
 const DISCOVER_QUERY_MAX = 400
 const MAX_CANDIDATES = 5
-const MAX_HTML_BYTES = 512 * 1024
+// Modern storefronts (especially Shopify) often place app/configuration markup
+// before the footer. Keep a bounded page budget, but do not reject a valid
+// document merely because its footer pushes it slightly past 512 KiB.
+const MAX_HTML_BYTES = 1024 * 1024
 const FETCH_TIMEOUT_MS = 8_000
 const MAX_REDIRECTS = 3
 const RATE_WINDOW_MS = 60_000
@@ -1330,11 +1333,11 @@ function pickStrongLogoUrl(images: ScrapedBrandingImage[], name = '', website = 
 
 /** `Place` is omitted: it matches English “this place” in reviews. `Pl` still covers “Main Pl,”. */
 const STREET_RE =
-	/(?:\d+\s*\/\s*[A-Za-z]\s*,\s*)?\d{2,6}\s+(?:[A-Za-z][\w.'-]*\s+){0,5}(?:Rd|Road|St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Way|Lane|Ln|Crt|Court|Pl|Cres|Crescent|Hwy|Highway)\b(?:\s*,\s*[A-Za-z][\w.'-]+(?:\s+[A-Za-z][\w.'-]*){0,2}\s*,\s*[A-Z]{2}(?:\s*,?\s*[A-Z]\d[A-Z]\s?\d[A-Z]\d)?)?/gi
+	/(?:\d+\s*\/\s*[A-Za-z]\s*,\s*)?\d{2,6}\s+(?:[A-Za-z][\w.'-]*\s+){0,5}(?:Rd|Road|St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Way|Lane|Ln|Crt|Court|Pl|Cres|Crescent|Hwy|Highway)\b(?:\s*,?\s*(?:Suite|Ste|Unit|#)\s*#?\s*[A-Za-z0-9-]+)?(?:\s*,\s*[A-Za-z][\w.'-]+(?:\s+[A-Za-z][\w.'-]*){0,2}\s*,\s*[A-Z]{2}(?:\s*,?\s*[A-Z]\d[A-Z]\s?\d[A-Z]\d)?)?/gi
 const PHONE_RE = /(?:\+?1[\s.-]*)?(?:\(?\d{3}\)?[\s.-]*)\d{3}[\s.-]*\d{4}\b/g
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi
 const POSTAL_RE = /\b[A-Z]\d[A-Z]\s?\d[A-Z]\d\b/gi
-const CONTACT_VISIBLE_MAX = 80_000
+const CONTACT_VISIBLE_MAX = 120_000
 
 function streetLookalikeScore(raw: string): number {
 	const s = raw.replace(/\s+/g, ' ').trim()
@@ -1411,13 +1414,32 @@ function extractHrefContacts(html: string): { phone: string; email: string } {
 	}
 }
 
-function extractVisibleContact(html: string): {
+function extractVisibleContactText(html: string, max: number): string {
+	// Contact blocks are commonly rendered in the footer, after a large
+	// product/app markup section. Preserve both ends of the visible document
+	// instead of clipping only the beginning.
+	const withBreaks = html.replace(/<br\s*\/?>/gi, ', ')
+	const stripped = withBreaks
+		.replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+		.replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
+		.replace(/<noscript\b[\s\S]*?<\/noscript>/gi, ' ')
+		.replace(/<svg\b[\s\S]*?<\/svg>/gi, ' ')
+		.replace(/<!--[\s\S]*?-->/g, ' ')
+		.replace(/<[^>]+>/g, ' ')
+	const text = decodeEntities(stripped).replace(/\s+/g, ' ').trim()
+	if (text.length <= max) return text
+	const tailBudget = Math.floor(max * 0.65)
+	const headBudget = max - tailBudget
+	return `${text.slice(0, headBudget)} ${text.slice(-tailBudget)}`
+}
+
+export function extractVisibleContact(html: string): {
 	street: string
 	phone: string
 	email: string
 	postalCode: string
 } {
-	const text = extractVisibleText(html, CONTACT_VISIBLE_MAX)
+	const text = extractVisibleContactText(html, CONTACT_VISIBLE_MAX)
 	const { street, index } = pickBestStreet(text)
 	const emailM = text.match(EMAIL_RE)
 	EMAIL_RE.lastIndex = 0
