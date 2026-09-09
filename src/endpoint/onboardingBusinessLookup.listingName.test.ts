@@ -9,6 +9,7 @@ import {
 	looksLikeNonVenueListingLabel,
 	looksLikeOpaqueListingId,
 	looksLikeOpaqueListingPageUrl,
+	looksLikeWebsiteQuery,
 	marketplaceVenueName,
 	mergeDiscoverHopSources,
 	overlayScrapedVenueForWebsiteQuery,
@@ -89,6 +90,9 @@ describe('zomi.menu shop listing name', () => {
 const FANTUAN_OPAQUE =
 	'https://order.fantuan.ca/zh-CN/store/Restaurant/ca-1725834231'
 
+const ALIBABA_TRACKING_URL =
+	'https://detail.1688.com/offer/1032130276764.html?spm=a26352.13672862.offerlist.4.30771e62DeUUMZ&offerId=1032130276764&sortType=&pageId=&abBizDataType=cbuOffer&hotSaleSkuId=6246554422850&trace_log=normal&uuid=23aa3ee30337414fb55c2a3a40d7f07b&forcePC=1788987455998'
+
 function emptyPage(partial: Record<string, string>) {
 	return {
 		url: '',
@@ -133,6 +137,11 @@ function emptyCand(
 }
 
 describe('host-agnostic listing chrome', () => {
+	it('accepts marketplace URLs with tracking parameters', () => {
+		assert.equal(ALIBABA_TRACKING_URL.length > 200, true)
+		assert.equal(looksLikeWebsiteQuery(ALIBABA_TRACKING_URL), true)
+	})
+
 	it('treats ca-1725834231 as an opaque listing id', () => {
 		assert.equal(looksLikeOpaqueListingId('ca-1725834231'), true)
 		assert.equal(looksLikeOpaqueListingId('longdhang'), false)

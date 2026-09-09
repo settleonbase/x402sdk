@@ -84,7 +84,10 @@ type PageSource = {
 	visibleText: string
 }
 
-const MAX_QUERY = 200
+// URLs copied from marketplaces often include tracking parameters. Keep the
+// full URL intact so parsing/fetching does not receive a query truncated in
+// the middle of a parameter value.
+const MAX_QUERY = 2_048
 const DISCOVER_QUERY_MAX = 400
 const MAX_CANDIDATES = 5
 // Modern storefronts (especially Shopify) often place app/configuration markup
