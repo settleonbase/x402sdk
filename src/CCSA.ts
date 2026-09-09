@@ -17,6 +17,8 @@ import {
   BASE_BEAMIO_USER_CARD_VIEWS_LIB,
   BASE_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB,
   BASE_CARD_FACTORY,
+  CONET_BEAMIO_USER_CARD_TIER_OPS_LIB,
+  CONET_REFERRER_REGISTRY_LIB,
   FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_4TUPLE_SELECTOR,
   FACTORY_CREATE_CARD_COLLECTION_WITH_INIT_CODE_AND_TIERS_SELECTOR,
   isConetUserCardBeaconConfigured,
@@ -205,9 +207,15 @@ export function resolveBeamioUserCardLibraryAddresses(
     BeamioUserCardUpdateLib: BASE_BEAMIO_USER_CARD_UPDATE_LIB,
     BeamioUserCardViewsLib: BASE_BEAMIO_USER_CARD_VIEWS_LIB,
     BeamioUserCardMembershipGateLib: BASE_BEAMIO_USER_CARD_MEMBERSHIP_GATE_LIB,
+    // Merchant cards are CoNET-only. These names exist on the current UserCard
+    // artifact / CoNET override map; iterating only BASE_* keys dropped them and
+    // Cluster createCard precheck threw "missing address for BeamioUserCardTierOpsLib".
+    BeamioUserCardTierOpsLib: CONET_BEAMIO_USER_CARD_TIER_OPS_LIB,
+    ReferrerRegistryLib: CONET_REFERRER_REGISTRY_LIB,
   }
   const out: BeamioUserCardLibraryAddresses = {}
-  for (const libName of Object.keys(defaults)) {
+  const names = new Set([...Object.keys(defaults), ...Object.keys(override ?? {})])
+  for (const libName of names) {
     const envName = `BEAMIO_USER_CARD_${libName.replace(/^BeamioUserCard/, '').replace(/Lib$/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}_LIB`
     const raw =
       override?.[libName]?.trim() ||
@@ -367,8 +375,8 @@ export async function buildBeamioUserCardInitCode(
     if (!libs) {
       throw new Error(
         'BeamioUserCard artifact has linkReferences; pass libraryAddresses to buildBeamioUserCardInitCode, ' +
-          'or set BEAMIO_USER_CARD_FORMATTING_LIB / BEAMIO_USER_CARD_TRANSFER_LIB, ' +
-          'or configure BASE_BEAMIO_USER_CARD_*_LIB in chainAddresses.ts'
+          'or set BEAMIO_USER_CARD_*_LIB env, ' +
+          'or configure CONET_BEAMIO_USER_CARD_*_LIB / CONET_BEAMIO_USER_CARD_TIER_OPS_LIB in chainAddresses.ts'
       )
     }
     bytecode = linkBeamioUserCardBytecode(bytecode, lr, libs)
