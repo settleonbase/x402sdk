@@ -293,6 +293,13 @@ describe('overlay does not copy listing chrome over Gemini', () => {
 		assert.equal(marketplaceVenueName(zbj), '')
 		assert.equal(looksLikeNonVenueListingLabel('猪八戒网', zbj), true)
 		assert.equal(looksLikeNonVenueListingLabel('Zhubajie', zbj), true)
+		assert.equal(
+			looksLikeNonVenueListingLabel(
+				'猪八戒网(ZBJ.COM)企业外包服务-中国领先的灵活用工平台',
+				zbj,
+			),
+			true,
+		)
 	})
 })
 

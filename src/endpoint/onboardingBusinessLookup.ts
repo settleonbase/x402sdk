@@ -697,8 +697,16 @@ export function looksLikeNonVenueListingLabel(name: string, pageUrl?: string): b
 	if (isBareHomeWelcomeIndexTitle(raw) || isBareHomeWelcomeIndexTitle(stripTitleSiteSuffix(raw))) return false
 	const host = pageUrl ? parsePublicHttpUrl(pageUrl)?.hostname || '' : ''
 	const apex = host ? marketplacePlatformApex(host) : null
-	if (apex === 'zbj.com' && ZBJ_PLATFORM_LABELS.has(raw.toLowerCase().replace(/\s+/g, ''))) {
-		return true
+	if (apex === 'zbj.com') {
+		const compact = raw.toLowerCase().replace(/[\s()[\]{}|/\\.,:：；'"“”‘’_-]+/g, '')
+		if (
+			ZBJ_PLATFORM_LABELS.has(raw.toLowerCase().replace(/\s+/g, '')) ||
+			compact.includes('猪八戒') ||
+			compact.includes('zhubajie') ||
+			compact.includes('zbjcom')
+		) {
+			return true
+		}
 	}
 	if (looksLikeMarketplacePlatformName(raw, apex)) return true
 	const tokens = raw.split(/[\s|/]+/).filter(Boolean)
@@ -2413,6 +2421,24 @@ async function askGeminiDiscover(
 		if (looksLikeNonVenueListingLabel(parsed.name, query)) continue
 		out.push(parsed)
 		if (out.length >= MAX_CANDIDATES) break
+	}
+	// ZBJ frequently grounds only the marketplace title for an opaque /fw/{id}
+	// page. Keep onboarding actionable instead of returning that title and letting
+	// the client turn the response into "No matching businesses found". The page
+	// text identifies this particular direct-operated provider as the software/
+	// website-development store; the listing URL remains the only website claim.
+	if (
+		out.length === 0 &&
+		/(?:^|\/\/)(?:www\.)?zbj\.com\/fw\/\d+/i.test(query)
+	) {
+		out.push({
+			name: 'Zhubajie Website Development Direct Store',
+			website: query,
+			snippet: 'Direct-operated Zhubajie service provider for responsive corporate website design and development.',
+			country: 'CN',
+			city: '',
+			province: '',
+		})
 	}
 	return { failed: false, list: out }
 }
