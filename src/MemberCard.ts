@@ -10,6 +10,12 @@ import { homedir } from 'node:os'
 import cluster from 'cluster'
 import { logger } from './logger'
 import {
+	acquireStripeCardFulfillmentSigner,
+	getStripeCardFulfillmentAdminAddresses as getStripePoolAdminAddresses,
+	releaseStripeCardFulfillmentSigner,
+	type StripeCardFulfillmentSigner,
+} from './stripeCardFulfillmentAdminPool'
+import {
 	BEAMIO_COUPON_NFT_CATEGORY,
 	normalizeCouponCategoryOnTierProperties,
 	normalizeProductionCategoryOnTierProperties,
@@ -3268,7 +3274,9 @@ export const executeForAdminPool: Array<{
 	data: string
 	deadline: number
 	nonce: string
-	adminSignature: string
+	adminSignature?: string
+	/** Stripe fulfillment tasks sign only after a Master worker acquires a pool signer. */
+	stripeFulfillment?: boolean
 	uid?: string
 	cardOwnerEOA?: string
 	topupFeeBUnits?: bigint
@@ -3361,20 +3369,18 @@ export const signExecuteForAdminWithServiceAdmin = async (obj: {
 	}
 }
 
-/** Sign merchant-card Stripe fulfillment calls with the dedicated fulfillment admin.
+/** Sign merchant-card Stripe fulfillment calls with the selected fulfillment admin.
  * This key must already be registered as an admin on the merchant card.
  * It is intentionally separate from settle_contractAdmin[0], which is the
  * gas/settlement pool identity for unrelated server operations. */
-export const signExecuteForAdminWithStripeFulfillmentAdmin = async (obj: {
+export const signExecuteForAdminWithStripeFulfillmentSigner = async (obj: {
 	cardAddr: string
 	data: string
 	deadline: number
 	nonce: string
-}): Promise<{ adminSignature: string; signer: string } | { error: string }> => {
+}, signer: StripeCardFulfillmentSigner): Promise<{ adminSignature: string; signer: string } | { error: string }> => {
 	try {
-		const pk = (masterSetup as { StripeCardFulfillmentAdmin?: string }).StripeCardFulfillmentAdmin
-		if (!pk) return { error: 'Stripe card fulfillment admin private key not configured (masterSetup.StripeCardFulfillmentAdmin)' }
-		const wallet = new ethers.Wallet(pk)
+		const wallet = new ethers.Wallet(signer.privateKey)
 		const dataHash = ethers.keccak256(obj.data)
 		const cardAddrNorm = ethers.getAddress(obj.cardAddr)
 		const cardChain = await resolveUserCardChain(cardAddrNorm)
@@ -3406,14 +3412,30 @@ export const signExecuteForAdminWithStripeFulfillmentAdmin = async (obj: {
 	}
 }
 
-/** Public identity of the dedicated Stripe fulfillment signer (never returns its private key). */
-export const getStripeCardFulfillmentAdminAddress = (): string | null => {
+/** Compatibility helper for one-off callers; queued Stripe work should use the pool worker. */
+export const signExecuteForAdminWithStripeFulfillmentAdmin = async (obj: {
+	cardAddr: string
+	data: string
+	deadline: number
+	nonce: string
+}): Promise<{ adminSignature: string; signer: string } | { error: string }> => {
+	const signer = acquireStripeCardFulfillmentSigner()
+	if (!signer) return { error: 'No Stripe card fulfillment admin is currently available' }
 	try {
-		const pk = (masterSetup as { StripeCardFulfillmentAdmin?: string }).StripeCardFulfillmentAdmin?.trim()
-		return pk ? ethers.getAddress(new ethers.Wallet(pk).address) : null
-	} catch {
-		return null
+		return await signExecuteForAdminWithStripeFulfillmentSigner(obj, signer)
+	} catch (e: any) {
+		return { error: e?.message ?? String(e) }
+	} finally {
+		releaseStripeCardFulfillmentSigner(signer)
 	}
+}
+
+/** Public identities of the configured Stripe fulfillment signer pool. */
+export const getStripeCardFulfillmentAdminAddresses = (): string[] => getStripePoolAdminAddresses()
+
+/** Backwards-compatible primary identity. */
+export const getStripeCardFulfillmentAdminAddress = (): string | null => {
+	return getStripePoolAdminAddresses()[0] ?? null
 }
 
 /** 校验 ExecuteForAdmin 签字的 signer 是否为 card 的 admin，与 Cluster 预检一致。Master 执行前二次校验。 */
@@ -4069,9 +4091,28 @@ export const executeForAdminProcess = async () => {
 		executeForAdminPool.unshift(obj)
 		return setTimeout(() => executeForAdminProcess(), 3000)
 	}
+	let stripeSigner: StripeCardFulfillmentSigner | null = null
 	try {
+		if (obj.stripeFulfillment && !obj.adminSignature) {
+			stripeSigner = acquireStripeCardFulfillmentSigner()
+			if (!stripeSigner) {
+				// Keep the task queued until another parallel worker releases a signer.
+				executeForAdminPool.unshift(obj)
+				return
+			}
+			const signed = await signExecuteForAdminWithStripeFulfillmentSigner(obj, stripeSigner)
+			if ('error' in signed) throw new Error(signed.error)
+			obj.adminSignature = signed.adminSignature
+		}
+		if (!obj.adminSignature) throw new Error('ExecuteForAdmin admin signature is missing')
 		// 二次校验：签字账户必须为 card admin（Cluster 已预检，Master 防御性再检）
-		const adminCheck = await verifyExecuteForAdminSignerIsAdmin(obj)
+		const adminCheck = await verifyExecuteForAdminSignerIsAdmin({
+			cardAddr: obj.cardAddr,
+			data: obj.data,
+			deadline: obj.deadline,
+			nonce: obj.nonce,
+			adminSignature: obj.adminSignature,
+		})
 		if (!adminCheck.ok) {
 			let gwHint = BASE_CARD_FACTORY
 			try {
@@ -4083,6 +4124,7 @@ export const executeForAdminProcess = async () => {
 				)
 			)
 			if (obj.res && !obj.res.headersSent) obj.res.status(403).json({ success: false, error: adminCheck.error }).end()
+			if (obj.stripeFulfillment) throw new Error(adminCheck.error)
 			return
 		}
 		// adminManager(add admin)：当前协议仅允许把 EOA 登记为 admin（Cluster 已拒绝 AA）。
@@ -4157,6 +4199,7 @@ export const executeForAdminProcess = async () => {
 			aaAddr = await ensureAAForEOAOnCard(obj.cardAddr, recipientEOA, SC)
 			if (!aaAddr) {
 				logger(Colors.red(`[executeForAdminProcess] DeployingSmartAccount failed for recipient=${recipientEOA}`))
+				if (obj.stripeFulfillment) throw new Error('Recipient has no Beamio account. Please activate the Beamio app first.')
 				if (obj.res && !obj.res.headersSent) obj.res.status(400).json({ success: false, error: 'Recipient has no Beamio account. Please activate the Beamio app first.' }).end()
 				return
 			}
@@ -4314,10 +4357,20 @@ export const executeForAdminProcess = async () => {
 		}
 	} catch (e: any) {
 		logger(Colors.red(`[executeForAdminProcess] failed: ${e?.message ?? e}`))
+		if (obj.stripeSessionId) {
+			void updateMerchantCardStripeSession({
+				sessionId: obj.stripeSessionId,
+				status: 'failed',
+				lastError: e?.shortMessage ?? e?.message ?? 'Stripe fulfillment failed',
+			}).catch((statusErr: any) =>
+				logger(Colors.yellow(`[merchantCardStripe] failed status update failed: ${statusErr?.message ?? statusErr}`)),
+			)
+		}
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, error: e?.shortMessage ?? e?.message ?? 'executeForAdmin failed' }).end()
 		}
 	} finally {
+		if (stripeSigner) releaseStripeCardFulfillmentSigner(stripeSigner)
 		unshiftSettleConet(SC)
 		setTimeout(() => executeForAdminProcess(), 1000)
 	}

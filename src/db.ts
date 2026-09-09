@@ -1640,6 +1640,7 @@ export async function ensureMerchantCardStripeSchema(db: Client): Promise<void> 
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_charges_enabled BOOLEAN')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_details_submitted BOOLEAN')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_fulfillment_admin TEXT')
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_fulfillment_admins JSONB')
 	await db.query(MERCHANT_CARD_STRIPE_SESSIONS_TABLE)
 	await db.query('ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS fulfillment_started_at TIMESTAMPTZ')
 	await db.query(
@@ -1656,6 +1657,7 @@ export type MerchantCardStripeStatusRow = {
 	chargesEnabled: boolean
 	detailsSubmitted: boolean
 	stripeFulfillmentAdmin: string | null
+	stripeFulfillmentAdmins: string[]
 }
 
 export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Promise<MerchantCardStripeStatusRow | null> {
@@ -1665,7 +1667,7 @@ export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Pr
 		await ensureMerchantCardStripeSchema(db)
 		const result = await db.query(
 			`SELECT card_address, stripe_account_id, stripe_charges_enabled,
-				stripe_details_submitted, stripe_fulfillment_admin
+				stripe_details_submitted, stripe_fulfillment_admin, stripe_fulfillment_admins
 			 FROM beamio_cards WHERE LOWER(card_address) = LOWER($1) LIMIT 1`,
 			[ethers.getAddress(cardAddress)],
 		)
@@ -1677,6 +1679,9 @@ export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Pr
 			chargesEnabled: row.stripe_charges_enabled === true,
 			detailsSubmitted: row.stripe_details_submitted === true,
 			stripeFulfillmentAdmin: row.stripe_fulfillment_admin ?? null,
+			stripeFulfillmentAdmins: Array.isArray(row.stripe_fulfillment_admins)
+				? row.stripe_fulfillment_admins.filter((address: unknown): address is string => typeof address === 'string')
+				: row.stripe_fulfillment_admin ? [row.stripe_fulfillment_admin] : [],
 		}
 	} finally {
 		await db.end().catch(() => {})
@@ -1689,6 +1694,7 @@ export async function updateMerchantCardStripeAccount(params: {
 	chargesEnabled?: boolean
 	detailsSubmitted?: boolean
 	stripeFulfillmentAdmin?: string | null
+	stripeFulfillmentAdmins?: string[]
 }): Promise<void> {
 	const db = new Client({ connectionString: DB_URL })
 	try {
@@ -1699,7 +1705,8 @@ export async function updateMerchantCardStripeAccount(params: {
 				stripe_account_id = $2,
 				stripe_charges_enabled = COALESCE($3, stripe_charges_enabled),
 				stripe_details_submitted = COALESCE($4, stripe_details_submitted),
-				stripe_fulfillment_admin = COALESCE($5, stripe_fulfillment_admin)
+				stripe_fulfillment_admin = COALESCE($5, stripe_fulfillment_admin),
+				stripe_fulfillment_admins = COALESCE($6, stripe_fulfillment_admins)
 			 WHERE LOWER(card_address) = LOWER($1)`,
 			[
 				ethers.getAddress(params.cardAddress),
@@ -1707,6 +1714,7 @@ export async function updateMerchantCardStripeAccount(params: {
 				params.chargesEnabled ?? null,
 				params.detailsSubmitted ?? null,
 				params.stripeFulfillmentAdmin ?? null,
+				params.stripeFulfillmentAdmins ? JSON.stringify(params.stripeFulfillmentAdmins) : null,
 			],
 		)
 	} finally {

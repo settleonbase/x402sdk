@@ -12,9 +12,9 @@ import {
 import {
     executeForAdminPool,
     executeForAdminProcess,
+    getStripeCardFulfillmentAdminAddresses,
     getStripeCardFulfillmentAdminAddress,
     nfcTopupPreparePayload,
-    signExecuteForAdminWithStripeFulfillmentAdmin,
     type NfcTopupMembershipFeeStage,
 } from '../MemberCard'
 import { CONET_RPC_URL } from '../chainAddresses'
@@ -58,10 +58,12 @@ export async function createMerchantCardStripeAccountLink(cardAddressRaw: string
 	stripeAccountId: string
 	url: string
 	fulfillmentAdmin: string
+	fulfillmentAdmins: string[]
 }> {
 	const cardAddress = normalizeCardAddress(cardAddressRaw)
-	const fulfillmentAdmin = getStripeCardFulfillmentAdminAddress()
-	if (!fulfillmentAdmin) throw new Error('Stripe card fulfillment admin is not configured')
+	const fulfillmentAdmins = getStripeCardFulfillmentAdminAddresses()
+	const fulfillmentAdmin = fulfillmentAdmins[0] ?? null
+	if (!fulfillmentAdmin) throw new Error('Stripe card fulfillment admin pool is not configured')
 	const existing = await getMerchantCardStripeStatusFromDb(cardAddress)
 	const stripe = stripeClient()
 	const accountId =
@@ -72,11 +74,12 @@ export async function createMerchantCardStripeAccountLink(cardAddressRaw: string
 			metadata: { product: 'merchantCardStripe', card_address: cardAddress },
 		})).id
 
-	if (accountId !== existing?.stripeAccountId) {
-		await updateMerchantCardStripeAccount({ cardAddress, stripeAccountId: accountId, stripeFulfillmentAdmin: fulfillmentAdmin })
-	} else if (existing?.stripeFulfillmentAdmin !== fulfillmentAdmin) {
-		await updateMerchantCardStripeAccount({ cardAddress, stripeAccountId: accountId, stripeFulfillmentAdmin: fulfillmentAdmin })
-	}
+	await updateMerchantCardStripeAccount({
+		cardAddress,
+		stripeAccountId: accountId,
+		stripeFulfillmentAdmin: fulfillmentAdmin,
+		stripeFulfillmentAdmins: fulfillmentAdmins,
+	})
 	const link = await stripe.accountLinks.create({
 		account: accountId,
 		type: 'account_onboarding',
@@ -84,20 +87,21 @@ export async function createMerchantCardStripeAccountLink(cardAddressRaw: string
 		return_url: `${APP_BASE_URL}/app/merchant-card-stripe?cardAddress=${encodeURIComponent(cardAddress)}&connected=1`,
 		collect: 'eventually_due',
 	})
-	return { stripeAccountId: accountId, url: link.url, fulfillmentAdmin }
+	return { stripeAccountId: accountId, url: link.url, fulfillmentAdmin, fulfillmentAdmins }
 }
 
 export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 	const cardAddress = normalizeCardAddress(cardAddressRaw)
 	const local = await getMerchantCardStripeStatusFromDb(cardAddress)
-	const fulfillmentAdmin = getStripeCardFulfillmentAdminAddress()
-	if (!fulfillmentAdmin) throw new Error('Stripe card fulfillment admin is not configured')
+	const fulfillmentAdmins = getStripeCardFulfillmentAdminAddresses()
+	const fulfillmentAdmin = fulfillmentAdmins[0] ?? null
+	if (!fulfillmentAdmin) throw new Error('Stripe card fulfillment admin pool is not configured')
 	if (!local?.stripeAccountId) {
-		return { linked: false, cardAddress, fulfillmentAdmin }
+		return { linked: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
 	}
 	const account = await stripeClient().accounts.retrieve(local.stripeAccountId)
 	if ('deleted' in account && account.deleted) {
-		return { linked: false, cardAddress, fulfillmentAdmin }
+		return { linked: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
 	}
 	const chargesEnabled = account.charges_enabled === true
 	const detailsSubmitted = account.details_submitted === true
@@ -107,14 +111,20 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 		chargesEnabled,
 		detailsSubmitted,
 		stripeFulfillmentAdmin: fulfillmentAdmin,
+		stripeFulfillmentAdmins: fulfillmentAdmins,
 	})
 	return {
-		linked: chargesEnabled && detailsSubmitted,
+		linked: chargesEnabled && detailsSubmitted && fulfillmentAdmins.every(
+			(address) => local.stripeFulfillmentAdmins.some(
+				(bound) => bound.toLowerCase() === address.toLowerCase(),
+			),
+		),
 		cardAddress,
 		stripeAccountId: account.id,
 		chargesEnabled,
 		detailsSubmitted,
 		fulfillmentAdmin,
+		fulfillmentAdmins,
 	}
 }
 
@@ -133,9 +143,17 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 	if (!local?.stripeAccountId || !local.chargesEnabled || !local.detailsSubmitted) {
 		throw new Error('Merchant Stripe account is not ready')
 	}
-	const fulfillmentAdmin = getStripeCardFulfillmentAdminAddress()
-	if (!fulfillmentAdmin || local.stripeFulfillmentAdmin?.toLowerCase() !== fulfillmentAdmin.toLowerCase()) {
-		throw new Error('Merchant card Stripe fulfillment admin is not linked')
+	const fulfillmentAdmins = getStripeCardFulfillmentAdminAddresses()
+	const fulfillmentAdmin = fulfillmentAdmins[0] ?? null
+	const boundFulfillmentAdmins = local.stripeFulfillmentAdmins.length > 0
+		? local.stripeFulfillmentAdmins
+		: local.stripeFulfillmentAdmin
+			? [local.stripeFulfillmentAdmin]
+			: []
+	if (!fulfillmentAdmin || fulfillmentAdmins.some(
+		(address) => !boundFulfillmentAdmins.some((bound) => bound.toLowerCase() === address.toLowerCase()),
+	)) {
+		throw new Error('Merchant card Stripe fulfillment admin pool is not linked')
 	}
 	const amount = stripeAmountFromFiat6(params.amountFiat6)
 	const currency = normalizeStripeCurrency(params.currency)
@@ -228,13 +246,6 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
             ...(meta.membership_fee_fiat6 ? { membershipFeeFiat6: meta.membership_fee_fiat6 } : {}),
         })
         if ('error' in prepared) throw new Error(prepared.error)
-        const signed = await signExecuteForAdminWithStripeFulfillmentAdmin({
-            cardAddr: prepared.cardAddr,
-            data: prepared.data,
-            deadline: prepared.deadline,
-            nonce: prepared.nonce,
-        })
-        if ('error' in signed) throw new Error(signed.error)
         let membershipFeeStage: NfcTopupMembershipFeeStage | undefined
         if (prepared.membershipNeedsFee && prepared.membershipTierIndex != null && prepared.membershipFeeFiat6) {
             const preparedFeeFiat6 = prepared.membershipFeeFiat6
@@ -252,7 +263,7 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
             data: prepared.data,
             deadline: prepared.deadline,
             nonce: prepared.nonce,
-            adminSignature: signed.adminSignature,
+			stripeFulfillment: true,
             topupKind: 2,
             topupFeeBUnits: 20_000_000n,
             stripeSessionId: sessionId,
