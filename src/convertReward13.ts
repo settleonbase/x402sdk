@@ -1,6 +1,7 @@
 /**
  * Charge path: atomic #13 → #0 (same-store credit) or #13 → Conet-USDC to user AA.
- * Same-store #13 → #0 does not require USDC escrow or convertReward13ToPointsRatioE6.
+ * Same-store #13 → #0 does not require USDC escrow. Merchant allow is
+ * convertReward13ToPointsRatioE6 > 0 (soft-open if getter missing).
  * Distinct from redeemReward13ForUsdc (pays EOA via two-step social exchange).
  * Cluster precheck + Master single-selector EntryPoint relay; HTTP waits for receipt.
  */
@@ -23,6 +24,7 @@ const CARD_VIEW_IFACE = new ethers.Interface([
 	'function balanceOf(address account, uint256 id) view returns (uint256)',
 	'function rewardEscrowUsdc6() view returns (uint256)',
 	'function convertReward13ToUsdcRatioE6() view returns (uint256)',
+	'function convertReward13ToPointsRatioE6() view returns (uint256)',
 	'function quoteUsdcWithdrawForFiat6(uint256 fiatAmount6) view returns (uint256)',
 	'function pointsUnitPriceInCurrencyE6() view returns (uint256)',
 ])
@@ -108,9 +110,17 @@ export async function convertReward13PreCheck(
 		}
 
 		if (kind === 'toProgramPoints') {
-			// Same-store #13 → #0 credit: no USDC escrow and no ratio switch.
+			// Same-store #13 → #0 credit: no USDC escrow. Allow gate = points ratio > 0.
 			const price = (await card.pointsUnitPriceInCurrencyE6()) as bigint
 			if (price <= 0n) return { success: false, error: 'pointsUnitPriceInCurrencyE6 is zero' }
+			try {
+				const allowRatio = (await card.convertReward13ToPointsRatioE6()) as bigint
+				if (allowRatio <= 0n) {
+					return { success: false, error: 'Same-store #13 → #0 conversion is disabled on this card' }
+				}
+			} catch {
+				/* soft-open for legacy modules without getter */
+			}
 			const minted0 = (burn13 * 1_000_000n) / price
 			if (minted0 <= 0n) return { success: false, error: 'Conversion would mint zero #0' }
 		} else {

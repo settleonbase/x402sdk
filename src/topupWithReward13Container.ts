@@ -28,6 +28,7 @@ const CARD_VIEW_IFACE = new ethers.Interface([
 	'function balanceOf(address account, uint256 id) view returns (uint256)',
 	'function rewardEscrowUsdc6() view returns (uint256)',
 	'function convertReward13ToUsdcRatioE6() view returns (uint256)',
+	'function convertReward13ToPointsRatioE6() view returns (uint256)',
 	'function quoteUsdcWithdrawForFiat6(uint256 fiatAmount6) view returns (uint256)',
 	'function pointsUnitPriceInCurrencyE6() view returns (uint256)',
 	'function owner() view returns (address)',
@@ -279,6 +280,15 @@ export async function topupWithReward13ContainerPreCheck(
 				target.balanceOf(aa, 13n) as Promise<bigint>,
 			])
 			if (price === 0n) return { success: false, error: 'Target card points unit price is zero' }
+			// Merchant allow PT→#0 (Programs). Soft-fail open if getter missing (legacy modules).
+			try {
+				const allowRatio = (await target.convertReward13ToPointsRatioE6()) as bigint
+				if (allowRatio <= 0n) {
+					return { success: false, error: 'Same-store #13 → #0 top-up is disabled on this card' }
+				}
+			} catch {
+				/* allow */
+			}
 			if (sameStoreBurn13 > bal13) {
 				return { success: false, error: 'Insufficient same-store #13 balance' }
 			}
