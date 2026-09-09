@@ -24,6 +24,12 @@ import {
 	refreshMerchantKitSessionFromStripe,
 } from './merchantKitStripe'
 import {
+	createMerchantCardStripeAccountLink,
+	getMerchantCardStripeStatus,
+	createMerchantCardStripeCheckoutSession,
+	pollMerchantCardStripeSession,
+} from './merchantCardStripe'
+import {
 	createFuelPackCheckoutSession,
 	getFuelPackSessionStatus,
 	refreshFuelPackSessionFromStripe,
@@ -6570,6 +6576,47 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			return
 		}
 		next(err)
+	})
+
+	router.post('/merchantCardStripe/createAccountLink', async (req, res) => {
+		try {
+			const cardAddress = req.body?.cardAddress
+			if (typeof cardAddress !== 'string') return res.status(400).json({ error: 'cardAddress required' }).end()
+			return res.json(await createMerchantCardStripeAccountLink(cardAddress)).end()
+		} catch (e: any) {
+			logger(Colors.red('[merchantCardStripe] createAccountLink failed'), e?.message ?? e)
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/merchantCardStripe/status', async (req, res) => {
+		try {
+			const cardAddress = req.body?.cardAddress
+			if (typeof cardAddress !== 'string') return res.status(400).json({ error: 'cardAddress required' }).end()
+			return res.json(await getMerchantCardStripeStatus(cardAddress)).end()
+		} catch (e: any) {
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/merchantCardStripe/createCheckout', async (req, res) => {
+		try {
+			const body = req.body ?? {}
+			if (!['topup', 'membership'].includes(body.kind)) throw new Error('kind must be topup or membership')
+			return res.json(await createMerchantCardStripeCheckoutSession(body)).end()
+		} catch (e: any) {
+			logger(Colors.red('[merchantCardStripe] createCheckout failed'), e?.message ?? e)
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/merchantCardStripe/poll', async (req, res) => {
+		try {
+			if (typeof req.body?.sessionId !== 'string') return res.status(400).json({ error: 'sessionId required' }).end()
+			return res.json(await pollMerchantCardStripeSession(req.body.sessionId)).end()
+		} catch (e: any) {
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
 	})
 
 	logger('Router stack:', router.stack.map(r => r.route?.path))

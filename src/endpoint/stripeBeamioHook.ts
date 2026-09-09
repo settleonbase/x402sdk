@@ -11,6 +11,7 @@ import { constructStripeBeamioEvent } from './stripeBeamio'
 import { processEoaUsdcStripeEvent } from './eoaUsdcStripe'
 import { processMerchantKitStripeEvent } from './merchantKitStripe'
 import { processFuelPackStripeEvent } from './fuelPackStripe'
+import { processMerchantCardStripeEvent } from './merchantCardStripe'
 
 export async function handleStripeBeamioWebhook(
 	rawBody: Buffer,
@@ -35,11 +36,19 @@ export async function handleStripeBeamioWebhook(
 		`livemode=${event.livemode}`
 	)
 
+	// Connect account lifecycle belongs to merchant-card Stripe. It must not
+	// fall through to any Checkout product handler.
+	if (event.type.startsWith('account.')) {
+		return processMerchantCardStripeEvent(event)
+	}
 	if (event.type.startsWith('crypto.onramp_session')) {
 		return processEoaUsdcStripeEvent(event)
 	}
 	if (event.type.startsWith('checkout.session.')) {
 		const product = (event.data?.object as Stripe.Checkout.Session | undefined)?.metadata?.product
+		if (product === 'merchantCardStripe') {
+			return processMerchantCardStripeEvent(event)
+		}
 		if (product === 'fuelPack') {
 			return processFuelPackStripeEvent(event)
 		}

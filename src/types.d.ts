@@ -43,6 +43,12 @@ type IMasterSetup = {
 	 */
 	StripeBeamio?: string
 	/**
+	 * Dedicated EOA private key for merchant-card Stripe fulfillment.
+	 * This key is separate from settle_contractAdmin[0] and is used only
+	 * for ExecuteForAdmin signatures and merchant-card admin binding.
+	 */
+	StripeCardFulfillmentAdmin?: string
+	/**
 	 * @deprecated 旧 Merchant Kit 账号 key。新代码禁止读取；须迁到 `StripeBeamio`。
 	 */
 	stripe_SecretKey?: string

@@ -1616,6 +1616,206 @@ const BEAMIO_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_cards (
 	holder_count INT DEFAULT 0,
 	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
+const MERCHANT_CARD_STRIPE_SESSIONS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_stripe_card_sessions (
+	session_id TEXT PRIMARY KEY,
+	card_address TEXT NOT NULL,
+	buyer_eoa TEXT NOT NULL,
+	amount_fiat6 TEXT NOT NULL,
+	currency TEXT NOT NULL,
+	kind TEXT NOT NULL CHECK (kind IN ('topup', 'membership')),
+	membership_tier_index INT,
+	membership_fee_fiat6 TEXT,
+	status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'succeeded', 'failed')),
+	tx_hash TEXT,
+	last_error TEXT,
+			fulfillment_started_at TIMESTAMPTZ,
+	created_at TIMESTAMPTZ DEFAULT NOW(),
+	updated_at TIMESTAMPTZ DEFAULT NOW()
+)`
+
+/** Additive schema for Stripe Connect merchant-card payments. Safe on the historical database. */
+export async function ensureMerchantCardStripeSchema(db: Client): Promise<void> {
+	await db.query(BEAMIO_CARDS_TABLE)
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_account_id TEXT')
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_charges_enabled BOOLEAN')
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_details_submitted BOOLEAN')
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_fulfillment_admin TEXT')
+	await db.query(MERCHANT_CARD_STRIPE_SESSIONS_TABLE)
+	await db.query('ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS fulfillment_started_at TIMESTAMPTZ')
+	await db.query(
+		'CREATE INDEX IF NOT EXISTS idx_beamio_cards_stripe_account_id ON beamio_cards (stripe_account_id)',
+	)
+	await db.query(
+		'CREATE INDEX IF NOT EXISTS idx_beamio_stripe_card_sessions_card ON beamio_stripe_card_sessions (LOWER(card_address))',
+	)
+}
+
+export type MerchantCardStripeStatusRow = {
+	cardAddress: string
+	stripeAccountId: string | null
+	chargesEnabled: boolean
+	detailsSubmitted: boolean
+	stripeFulfillmentAdmin: string | null
+}
+
+export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Promise<MerchantCardStripeStatusRow | null> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		const result = await db.query(
+			`SELECT card_address, stripe_account_id, stripe_charges_enabled,
+				stripe_details_submitted, stripe_fulfillment_admin
+			 FROM beamio_cards WHERE LOWER(card_address) = LOWER($1) LIMIT 1`,
+			[ethers.getAddress(cardAddress)],
+		)
+		const row = result.rows[0]
+		if (!row) return null
+		return {
+			cardAddress: ethers.getAddress(row.card_address),
+			stripeAccountId: row.stripe_account_id ?? null,
+			chargesEnabled: row.stripe_charges_enabled === true,
+			detailsSubmitted: row.stripe_details_submitted === true,
+			stripeFulfillmentAdmin: row.stripe_fulfillment_admin ?? null,
+		}
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function updateMerchantCardStripeAccount(params: {
+	cardAddress: string
+	stripeAccountId: string
+	chargesEnabled?: boolean
+	detailsSubmitted?: boolean
+	stripeFulfillmentAdmin?: string | null
+}): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		await db.query(
+			`UPDATE beamio_cards SET
+				stripe_account_id = $2,
+				stripe_charges_enabled = COALESCE($3, stripe_charges_enabled),
+				stripe_details_submitted = COALESCE($4, stripe_details_submitted),
+				stripe_fulfillment_admin = COALESCE($5, stripe_fulfillment_admin)
+			 WHERE LOWER(card_address) = LOWER($1)`,
+			[
+				ethers.getAddress(params.cardAddress),
+				params.stripeAccountId,
+				params.chargesEnabled ?? null,
+				params.detailsSubmitted ?? null,
+				params.stripeFulfillmentAdmin ?? null,
+			],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function updateMerchantCardStripeAccountById(params: {
+	stripeAccountId: string
+	chargesEnabled: boolean
+	detailsSubmitted: boolean
+}): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		await db.query(
+			`UPDATE beamio_cards SET stripe_charges_enabled = $2,
+				stripe_details_submitted = $3 WHERE stripe_account_id = $1`,
+			[params.stripeAccountId, params.chargesEnabled, params.detailsSubmitted],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export type MerchantCardStripeSessionInput = {
+	sessionId: string
+	cardAddress: string
+	buyerEoa: string
+	amountFiat6: string
+	currency: string
+	kind: 'topup' | 'membership'
+	membershipTierIndex?: number | null
+	membershipFeeFiat6?: string | null
+}
+
+export async function createMerchantCardStripeSession(params: MerchantCardStripeSessionInput): Promise<boolean> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		const result = await db.query(
+			`INSERT INTO beamio_stripe_card_sessions
+				(session_id, card_address, buyer_eoa, amount_fiat6, currency, kind,
+				 membership_tier_index, membership_fee_fiat6)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			 ON CONFLICT (session_id) DO NOTHING`,
+			[
+				params.sessionId,
+				ethers.getAddress(params.cardAddress),
+				ethers.getAddress(params.buyerEoa),
+				params.amountFiat6,
+				params.currency.toUpperCase(),
+				params.kind,
+				params.membershipTierIndex ?? null,
+				params.membershipFeeFiat6 ?? null,
+			],
+		)
+		return result.rowCount === 1
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function updateMerchantCardStripeSession(params: {
+	sessionId: string
+	status?: 'pending' | 'succeeded' | 'failed'
+	txHash?: string | null
+	lastError?: string | null
+}): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		await db.query(
+			`UPDATE beamio_stripe_card_sessions SET
+				status = COALESCE($2, status),
+				tx_hash = COALESCE($3, tx_hash),
+				last_error = $4,
+				fulfillment_started_at = CASE WHEN $2 = 'failed' THEN NULL ELSE fulfillment_started_at END,
+				updated_at = NOW()
+			 WHERE session_id = $1`,
+			[params.sessionId, params.status ?? null, params.txHash ?? null, params.lastError ?? null],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** Atomically claims a paid Stripe session for on-chain fulfillment. */
+export async function claimMerchantCardStripeSession(sessionId: string): Promise<boolean> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		const result = await db.query(
+			`UPDATE beamio_stripe_card_sessions
+			    SET fulfillment_started_at = NOW(), updated_at = NOW()
+			  WHERE session_id = $1
+			    AND status <> 'failed'
+			    AND fulfillment_started_at IS NULL`,
+			[sessionId],
+		)
+		return result.rowCount === 1
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
 
 const REFERRAL_REGISTRY_CLAIMS_TABLE = `CREATE TABLE IF NOT EXISTS referral_registry_claims (
 	claim_tx_hash TEXT PRIMARY KEY,

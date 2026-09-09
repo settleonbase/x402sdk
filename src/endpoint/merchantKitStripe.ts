@@ -506,6 +506,10 @@ export function processMerchantKitStripeEvent(
 	event: Stripe.Event
 ): { ok: true } | { ok: false; error: string } {
 	const product = (event.data?.object as Stripe.Checkout.Session | undefined)?.metadata?.product
+	if (product === 'merchantCardStripe') {
+		logger(Colors.grey('[merchantKitStripe:hook] ignore merchantCardStripe product'))
+		return { ok: true }
+	}
 	if (product === 'eoaUsdc') {
 		logger(Colors.grey('[merchantKitStripe:hook] ignore eoaUsdc product'))
 		return { ok: true }

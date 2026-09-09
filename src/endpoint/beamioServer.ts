@@ -371,6 +371,7 @@ const OLD_CCSA_REDIRECTS = [
 ].map(a => a.toLowerCase())
 import { masterSetup, resolveBeamioBaseHttpRpcUrl } from '../util'
 import { getStripeBeamioSecretKey } from './stripeBeamio'
+import { merchantCardStripeConfigured } from './merchantCardStripe'
 
 /** Public short link GET /go/verra-ndef → TestFlight (iOS) or Play Store (Android / default). */
 const VERRA_NDEF_PLAY_STORE_URL =
@@ -13700,6 +13701,55 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(400).json({ error: 'sessionId required' }).end()
 		}
 		return postLocalhost('/api/merchantKitStripe/poll', { sessionId, userClosedCheckout: Boolean(userClosedCheckout) }, res)
+	})
+
+	/** Merchant program-card Stripe Connect / Checkout — Cluster validates shape, Master owns Stripe and DB writes. */
+	router.post('/merchantCardStripe/createAccountLink', async (req, res) => {
+		const { cardAddress } = req.body ?? {}
+		if (typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ error: 'Valid cardAddress required' }).end()
+		}
+		if (!merchantCardStripeConfigured()) {
+			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/createAccountLink', { cardAddress: ethers.getAddress(cardAddress) }, res)
+	})
+
+	router.post('/merchantCardStripe/status', async (req, res) => {
+		const { cardAddress } = req.body ?? {}
+		if (typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ error: 'Valid cardAddress required' }).end()
+		}
+		if (!merchantCardStripeConfigured()) {
+			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/status', { cardAddress: ethers.getAddress(cardAddress) }, res)
+	})
+
+	router.post('/merchantCardStripe/createCheckout', async (req, res) => {
+		const body = req.body ?? {}
+		if (typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
+			typeof body.buyerEoa !== 'string' || !ethers.isAddress(body.buyerEoa) ||
+			typeof body.amountFiat6 !== 'string' || !/^[0-9]+$/.test(body.amountFiat6) ||
+			!['topup', 'membership'].includes(body.kind) || typeof body.currency !== 'string') {
+			return res.status(400).json({ error: 'cardAddress, buyerEoa, amountFiat6, currency and kind are required' }).end()
+		}
+		if (!merchantCardStripeConfigured()) {
+			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/createCheckout', {
+			...body,
+			cardAddress: ethers.getAddress(body.cardAddress),
+			buyerEoa: ethers.getAddress(body.buyerEoa),
+		}, res)
+	})
+
+	router.post('/merchantCardStripe/poll', async (req, res) => {
+		const { sessionId } = req.body ?? {}
+		if (typeof sessionId !== 'string' || !/^cs_[A-Za-z0-9_]+$/.test(sessionId)) {
+			return res.status(400).json({ error: 'Valid sessionId required' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/poll', { sessionId }, res)
 	})
 
 	/**

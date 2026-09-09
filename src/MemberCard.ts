@@ -205,6 +205,7 @@ import {
 	upsertReferralRegistryClaim,
 	upsertReferralRegistryTreeMember,
 	type NfcLinkAppSessionDb,
+	updateMerchantCardStripeSession,
 } from './db'
 import { invalidateIssuedCouponSeriesQueryCachesForCard } from './endpoint/issuedCouponSeriesQueryCache'
 import { syncAllIssuedCouponSocialPromotionFromShareMetadata } from './endpoint/issuedCouponSocialPromotionMetadataSync'
@@ -3297,6 +3298,8 @@ export const executeForAdminPool: Array<{
 	chargeBurnCurrency?: string
 	/** Membership-fee first issue: stage pending purchase before mintPointsByAdmin. */
 	membershipFeeStage?: NfcTopupMembershipFeeStage
+	/** Stripe Checkout session id for post-receipt idempotency bookkeeping. */
+	stripeSessionId?: string
 }> = []
 
 /** Base `executeForAdmin` 已返回 txHash 且 HTTP 已 200 之后的后台任务（BUint / indexer / metadata），不占用 Settle_ContractPool 主槽位 */
@@ -3355,6 +3358,61 @@ export const signExecuteForAdminWithServiceAdmin = async (obj: {
 		return { adminSignature, signer: ethers.getAddress(wallet.address) }
 	} catch (e: any) {
 		return { error: e?.message ?? String(e) }
+	}
+}
+
+/** Sign merchant-card Stripe fulfillment calls with the dedicated fulfillment admin.
+ * This key must already be registered as an admin on the merchant card.
+ * It is intentionally separate from settle_contractAdmin[0], which is the
+ * gas/settlement pool identity for unrelated server operations. */
+export const signExecuteForAdminWithStripeFulfillmentAdmin = async (obj: {
+	cardAddr: string
+	data: string
+	deadline: number
+	nonce: string
+}): Promise<{ adminSignature: string; signer: string } | { error: string }> => {
+	try {
+		const pk = (masterSetup as { StripeCardFulfillmentAdmin?: string }).StripeCardFulfillmentAdmin
+		if (!pk) return { error: 'Stripe card fulfillment admin private key not configured (masterSetup.StripeCardFulfillmentAdmin)' }
+		const wallet = new ethers.Wallet(pk)
+		const dataHash = ethers.keccak256(obj.data)
+		const cardAddrNorm = ethers.getAddress(obj.cardAddr)
+		const cardChain = await resolveUserCardChain(cardAddrNorm)
+		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddrNorm)
+		const domain = {
+			name: 'BeamioUserCardFactory',
+			version: '1',
+			chainId: chainIdForUserCardChain(cardChain),
+			verifyingContract,
+		}
+		const types = {
+			ExecuteForAdmin: [
+				{ name: 'cardAddress', type: 'address' },
+				{ name: 'dataHash', type: 'bytes32' },
+				{ name: 'deadline', type: 'uint256' },
+				{ name: 'nonce', type: 'bytes32' },
+			],
+		}
+		const message = {
+			cardAddress: cardAddrNorm,
+			dataHash,
+			deadline: BigInt(obj.deadline),
+			nonce: obj.nonce.startsWith('0x') ? obj.nonce : (`0x${obj.nonce}` as `0x${string}`),
+		}
+		const adminSignature = await wallet.signTypedData(domain, types, message)
+		return { adminSignature, signer: ethers.getAddress(wallet.address) }
+	} catch (e: any) {
+		return { error: e?.message ?? String(e) }
+	}
+}
+
+/** Public identity of the dedicated Stripe fulfillment signer (never returns its private key). */
+export const getStripeCardFulfillmentAdminAddress = (): string | null => {
+	try {
+		const pk = (masterSetup as { StripeCardFulfillmentAdmin?: string }).StripeCardFulfillmentAdmin?.trim()
+		return pk ? ethers.getAddress(new ethers.Wallet(pk).address) : null
+	} catch {
+		return null
 	}
 }
 
@@ -4216,6 +4274,15 @@ export const executeForAdminProcess = async () => {
 			if (!adminRelayCheck.ok) {
 				throw new Error(
 					`executeForAdmin transaction failed on-chain: ${tx.hash} (${adminRelayCheck.reason}) userOpHash=${adminRelayCheck.userOpHash ?? 'n/a'}`
+				)
+			}
+			if (obj.stripeSessionId) {
+				void updateMerchantCardStripeSession({
+					sessionId: obj.stripeSessionId,
+					status: 'succeeded',
+					txHash: tx.hash,
+				}).catch((e) =>
+					logger(Colors.yellow(`[merchantCardStripe] session status update failed: ${e?.message ?? e}`)),
 				)
 			}
 		}
