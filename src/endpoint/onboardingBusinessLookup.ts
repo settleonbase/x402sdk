@@ -455,6 +455,7 @@ const MARKETPLACE_APEX_HOSTS = new Set([
 	'takeaway.com',
 	'hungrypanda.co',
 	'fantuanorder.com',
+	'zomi.menu',
 ])
 
 const MARKETPLACE_PLATFORM_LABEL: Record<string, string> = {
@@ -477,7 +478,26 @@ const MARKETPLACE_PLATFORM_LABEL: Record<string, string> = {
 	'takeaway.com': 'Takeaway',
 	'hungrypanda.co': 'HungryPanda',
 	'fantuanorder.com': 'Fantuan',
+	'zomi.menu': 'Zomi',
 }
+
+/** Path segments that are platform chrome, not a venue slug. */
+const MARKETPLACE_GENERIC_PATH_SLUGS = new Set([
+	'menu',
+	'shop',
+	'cart',
+	'checkout',
+	'search',
+	'about',
+	'login',
+	'signup',
+	'stores',
+	'restaurants',
+	'food',
+	'delivery',
+	'home',
+	'index',
+])
 
 export function isBlockedInterstitialHtml(html: string): boolean {
 	return isStealthChallengeHtml(html)
@@ -575,12 +595,32 @@ function marketplaceSlugParts(u: URL): { slug: string; plusIsSpace: boolean } | 
 	} else if (apex === 'tripadvisor.com') {
 		const m = path.match(/Reviews-([A-Za-z0-9_]+)-/i)
 		slug = m?.[1] || ''
+	} else if (apex === 'zomi.menu') {
+		slug = path.match(/\/shop\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	}
+	if (!slug) {
+		slug = path.match(/\/shop\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	}
+	if (slug && MARKETPLACE_GENERIC_PATH_SLUGS.has(slug.toLowerCase())) {
+		slug = ''
 	}
 	if (!slug) {
 		const parts = path.split('/').filter(Boolean)
-		slug = [...parts].reverse().find((p) => /[a-z].*-.*[a-z]/i.test(p) && p.length >= 4) || ''
+		slug =
+			[...parts].reverse().find((p) => /[a-z].*-.*[a-z]/i.test(p) && p.length >= 4 && !MARKETPLACE_GENERIC_PATH_SLUGS.has(p.toLowerCase())) ||
+			''
 	}
 	return slug ? { slug, plusIsSpace: false } : null
+}
+
+export function shopListingSlug(raw: string | URL): string {
+	const u = typeof raw === 'string' ? parsePublicHttpUrl(raw) : raw
+	if (!u) return ''
+	const parts = marketplaceSlugParts(u)
+	if (!parts?.slug) return ''
+	const slug = parts.slug.split(/[?#]/)[0]?.toLowerCase() || ''
+	if (!slug || MARKETPLACE_GENERIC_PATH_SLUGS.has(slug)) return ''
+	return slug
 }
 
 export function marketplaceVenueName(raw: string | URL): string {
@@ -1977,7 +2017,7 @@ Return up to ${MAX_CANDIDATES} real public businesses that match this query.
 - country: ISO 3166-1 alpha-2, or empty if unknown.
 - ${CUISINE_NOT_LOCATION_RULE}
 - If the query is a delivery or review marketplace listing (Uber Eats, DoorDash, Grubhub, Yelp, SkipTheDishes, Google Maps place, …), return the named restaurant or shop on that listing, not the marketplace company.
-- Prefer the merchant's own official https website. Never use ubereats.com, doordash.com, grubhub.com, yelp.com, or similar marketplace hosts as website.
+- Prefer the merchant's own official https website. Never use ubereats.com, doordash.com, grubhub.com, yelp.com, zomi.menu, or similar marketplace hosts as website.
 Do not invent private IPs, localhost, or non-https websites. Do not invent a website you are not reasonably sure of.`
 	const result = await geminiJson(prompt, DISCOVER_SCHEMA)
 	if (result.status !== 'ok') return { failed: true, list: [] }
@@ -2020,7 +2060,8 @@ Rules:
 - orgType: sme | franchise | ngo, or "unknown"
 - website must be an https URL that appears in the sources or the query. Use "" if unknown. Never invent a different website.
 - Use the scraped street, city, province, and country for THIS page’s venue. Do not replace them with another location of a similar brand (for example do not change Richmond to Burnaby).
-- For a website query, the candidate MUST be the business that owns the scraped homepage, not a sister shop.
+- For a website query, the candidate MUST be the venue at that URL. If the URL is a multi-store platform listing (for example https://www.zomi.menu/shop/longdhang), name the restaurant/shop (LONGDHANG), never the platform brand (ZOMI / og:site_name).
+- For a merchant’s own homepage URL, the candidate MUST be the business that owns that homepage, not a sister shop.
 - Never use an empty string for channelKind, orgType, or country. Use "unknown" instead.`
 
 	const result = await geminiJson(prompt, LOOKUP_SCHEMA)
@@ -2204,8 +2245,60 @@ function stripTitleSiteSuffix(title: string): string {
 function isGenericPageTitle(name: string): boolean {
 	const n = name.trim()
 	if (/^(home|homepage|welcome|index)$/i.test(n)) return true
-	if (/^(uber eats|doordash|grubhub|skip.?the.?dishes|yelp|google maps|tripadvisor)$/i.test(n)) return true
+	if (/^(uber eats|doordash|grubhub|skip.?the.?dishes|yelp|google maps|tripadvisor|zomi|zomi menu)$/i.test(n)) {
+		return true
+	}
 	return false
+}
+
+function looksLikeMarketplacePlatformName(name: string, apex?: string | null): boolean {
+	if (isGenericPageTitle(name)) return true
+	const n = foldKey(name)
+	if (!n) return false
+	if (apex) {
+		const label = MARKETPLACE_PLATFORM_LABEL[apex]
+		if (label && foldKey(label) === n) return true
+		const apexBrand = foldKey(apex.replace(/\.(com|co|menu|app|net|org|au)$/i, '').split('.').join(''))
+		if (apexBrand && n === apexBrand) return true
+	}
+	for (const label of Object.values(MARKETPLACE_PLATFORM_LABEL)) {
+		if (foldKey(label) === n) return true
+	}
+	return false
+}
+
+/** “See reviews … for LONGDHANG in Richmond” — venue, not the platform. */
+export function venueNameFromReviewsForPhrase(description: string): string {
+	const m = description.match(/\bfor\s+([A-Z][A-Z0-9 .&'+-]{1,80}?)\s+in\s+[A-Z]/)
+	if (!m?.[1]) return ''
+	const name = m[1].replace(/\s+/g, ' ').trim()
+	if (name.length < 2) return ''
+	if (looksLikeMarketplacePlatformName(name)) return ''
+	return clip(name, 120)
+}
+
+/** Listing-page venue name. Never prefer og:site_name / jsonLd platform brand. */
+export function listingVenueDisplayName(src: {
+	url: string
+	title: string
+	description: string
+	siteName: string
+	jsonLdName: string
+}): string {
+	const u = parsePublicHttpUrl(src.url)
+	const apex = u ? marketplacePlatformApex(u.hostname) : null
+	const slug = u ? shopListingSlug(u) : ''
+	if (!slug && !apex) return ''
+	if (!slug) return ''
+	const reject = (name: string) => !name.trim() || looksLikeMarketplacePlatformName(name, apex)
+	const fromDesc = venueNameFromReviewsForPhrase(src.description)
+	if (fromDesc && !reject(fromDesc)) return fromDesc
+	if (src.jsonLdName && !reject(src.jsonLdName)) return clip(src.jsonLdName, 120)
+	const fromTitle = stripTitleSiteSuffix(src.title)
+	if (fromTitle && !reject(fromTitle)) return clip(fromTitle, 120)
+	const fromSlug = u ? marketplaceVenueName(u) : ''
+	if (fromSlug && !reject(fromSlug)) return clip(fromSlug, 120)
+	return fromDesc
 }
 
 function displayNameFromScrape(src: PageSource): string {
@@ -2218,11 +2311,17 @@ function displayNameFromScrape(src: PageSource): string {
 		}
 		return s
 	}
-	if (src.jsonLdName && !isGenericPageTitle(src.jsonLdName)) return stripCity(src.jsonLdName)
-	if (src.siteName && !isGenericPageTitle(src.siteName)) return stripCity(src.siteName)
+	const listed = listingVenueDisplayName(src)
+	if (listed.length >= 2) return stripCity(listed)
+	const u = parsePublicHttpUrl(src.url)
+	const apex = u ? marketplacePlatformApex(u.hostname) : null
+	const reject = (name: string) => !name.trim() || looksLikeMarketplacePlatformName(name, apex)
+	if (src.jsonLdName && !reject(src.jsonLdName)) return stripCity(src.jsonLdName)
+	if (src.siteName && !reject(src.siteName)) return stripCity(src.siteName)
 	const fromTitle = stripTitleSiteSuffix(src.title)
-	if (fromTitle && !isGenericPageTitle(fromTitle)) return stripCity(fromTitle)
-	return stripCity(src.siteName || src.jsonLdName || src.title)
+	if (fromTitle && !reject(fromTitle)) return stripCity(fromTitle)
+	const fallback = [src.title, src.jsonLdName, src.siteName].find((n) => n && !reject(n)) || ''
+	return stripCity(fallback)
 }
 
 function candidateFromScrapedHomepage(
@@ -2322,9 +2421,19 @@ function overlayScrapedVenueForWebsiteQuery(
 	const home = candidateFromScrapedHomepage(sources, sanitizeWebsite(sources[0].url) || '')
 	if (!home) return candidates
 	if (!candidates.length) return [home]
+	const queryUrl = parsePublicHttpUrl(query)
+	const platformApex = queryUrl ? marketplacePlatformApex(queryUrl.hostname) : null
+	const scrapeIsPlatform = looksLikeMarketplacePlatformName(home.name, platformApex)
+	const listingName = listingVenueDisplayName(sources[0]) || marketplaceVenueName(query)
 	return candidates.map((c) => ({
 		...c,
-		name: home.name.length >= 2 ? home.name : c.name,
+		name: scrapeIsPlatform
+			? listingName.length >= 2
+				? listingName
+				: c.name
+			: home.name.length >= 2
+				? home.name
+				: c.name,
 		website: home.website || c.website,
 		city: home.city || c.city,
 		province: home.province || c.province,
