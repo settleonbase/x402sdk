@@ -2994,6 +2994,8 @@ export const nfcTopupPreparePayload = async (params: {
 	membershipTierIndex?: number | string
 	/** Optional fee in card currency E6 (must match on-chain membershipFeeE6(tier)). */
 	membershipFeeFiat6?: string | number
+	/** Stable replay nonce for server-side payment fulfillment. */
+	idempotencyKey?: string
 }): Promise<NfcTopupPrepareSuccess | { error: string }> => {
 	const { uid, wallet, amount, currency = 'CAD', cardAddress: clientCardAddress } = params
 	const amt = typeof amount === 'string' ? amount : String(amount ?? '')
@@ -3225,7 +3227,9 @@ export const nfcTopupPreparePayload = async (params: {
 	const data = iface.encodeFunctionData('mintPointsByAdmin', [recipientEOA, mintAmountRaw])
 	/** 15 分钟有效期，避免队列/网络延迟导致 UC_InvalidTimeWindow */
 	const deadline = Math.floor(Date.now() / 1000) + 900
-	const nonce = ethers.hexlify(ethers.randomBytes(32))
+	const nonce = params.idempotencyKey
+		? ethers.keccak256(ethers.toUtf8Bytes(`beamio-nfc-topup:${params.idempotencyKey}`))
+		: ethers.hexlify(ethers.randomBytes(32))
 	const factoryGateway = await getBeamioUserCardFactoryGateway(cardAddr)
 	const result: NfcTopupPrepareSuccess = {
 		cardAddr,
@@ -4323,6 +4327,7 @@ export const executeForAdminProcess = async () => {
 				void updateMerchantCardStripeSession({
 					sessionId: obj.stripeSessionId,
 					status: 'succeeded',
+					fulfillmentStatus: 'fulfillment_succeeded',
 					txHash: tx.hash,
 				}).catch((e) =>
 					logger(Colors.yellow(`[merchantCardStripe] session status update failed: ${e?.message ?? e}`)),
@@ -4361,6 +4366,7 @@ export const executeForAdminProcess = async () => {
 			void updateMerchantCardStripeSession({
 				sessionId: obj.stripeSessionId,
 				status: 'failed',
+				fulfillmentStatus: 'fulfillment_failed',
 				lastError: e?.shortMessage ?? e?.message ?? 'Stripe fulfillment failed',
 			}).catch((statusErr: any) =>
 				logger(Colors.yellow(`[merchantCardStripe] failed status update failed: ${statusErr?.message ?? statusErr}`)),

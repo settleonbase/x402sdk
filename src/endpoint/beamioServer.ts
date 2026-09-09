@@ -371,7 +371,9 @@ const OLD_CCSA_REDIRECTS = [
 ].map(a => a.toLowerCase())
 import { masterSetup, resolveBeamioBaseHttpRpcUrl } from '../util'
 import { getStripeBeamioSecretKey } from './stripeBeamio'
-import { merchantCardStripeConfigured } from './merchantCardStripe'
+	import {
+		merchantCardStripeConfigured,
+	} from './merchantCardStripe'
 
 /** Public short link GET /go/verra-ndef → TestFlight (iOS) or Play Store (Android / default). */
 const VERRA_NDEF_PLAY_STORE_URL =
@@ -13705,14 +13707,51 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 
 	/** Merchant program-card Stripe Connect / Checkout — Cluster validates shape, Master owns Stripe and DB writes. */
 	router.post('/merchantCardStripe/createAccountLink', async (req, res) => {
-		const { cardAddress } = req.body ?? {}
-		if (typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress)) {
-			return res.status(400).json({ error: 'Valid cardAddress required' }).end()
+		return res.status(410).json({
+			error: 'Express Account Link is deprecated. Use Stripe OAuth Connect.',
+		}).end()
+	})
+
+	router.post('/merchantCardStripe/oauth/start', async (req, res) => {
+		const { cardAddress, merchantEoa } = req.body ?? {}
+		if (
+			typeof cardAddress !== 'string' ||
+			!ethers.isAddress(cardAddress) ||
+			typeof merchantEoa !== 'string' ||
+			!ethers.isAddress(merchantEoa)
+		) {
+			return res.status(400).json({ error: 'Valid cardAddress and merchantEoa required' }).end()
 		}
 		if (!merchantCardStripeConfigured()) {
-			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
+			return res.status(503).json({ error: 'Stripe OAuth is not configured on server' }).end()
 		}
-		return postLocalhost('/api/merchantCardStripe/createAccountLink', { cardAddress: ethers.getAddress(cardAddress) }, res)
+		return postLocalhost('/api/merchantCardStripe/oauth/start', {
+			cardAddress: ethers.getAddress(cardAddress),
+			merchantEoa: ethers.getAddress(merchantEoa),
+		}, res)
+	})
+
+	router.get('/merchantCardStripe/oauth/callback', async (req, res) => {
+		const code = typeof req.query.code === 'string' ? req.query.code : ''
+		const state = typeof req.query.state === 'string' ? req.query.state : ''
+		const error = typeof req.query.error === 'string' ? req.query.error : ''
+		if (error) {
+			return res.status(400).send(`Stripe authorization was declined: ${error}`)
+		}
+		if (!code || !state) return res.status(400).send('Missing Stripe OAuth callback parameters')
+		try {
+			const forwarded = await postLocalhostBuffer('/api/merchantCardStripe/oauth/callback', { code, state })
+			if (forwarded.statusCode < 200 || forwarded.statusCode >= 300) {
+				throw new Error(forwarded.body || 'Stripe OAuth callback failed')
+			}
+			let result: any = {}
+			try { result = JSON.parse(forwarded.body) } catch {}
+			const cardAddress = result?.cardAddress ? encodeURIComponent(result.cardAddress) : ''
+			return res.redirect(`https://biz.beamio.app/biz/#/wallet?stripe_oauth=success&cardAddress=${cardAddress}`)
+		} catch (e: any) {
+			const message = encodeURIComponent(e?.message ?? String(e))
+			return res.redirect(`https://biz.beamio.app/biz/#/wallet?stripe_oauth=error&message=${message}`)
+		}
 	})
 
 	router.post('/merchantCardStripe/status', async (req, res) => {
@@ -13731,7 +13770,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
 			typeof body.buyerEoa !== 'string' || !ethers.isAddress(body.buyerEoa) ||
 			typeof body.amountFiat6 !== 'string' || !/^[0-9]+$/.test(body.amountFiat6) ||
-			!['topup', 'membership'].includes(body.kind) || typeof body.currency !== 'string') {
+			!['topup', 'membership'].includes(body.kind) || typeof body.currency !== 'string' ||
+			typeof body.businessIdempotencyKey !== 'string' ||
+			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey)) {
 			return res.status(400).json({ error: 'cardAddress, buyerEoa, amountFiat6, currency and kind are required' }).end()
 		}
 		if (!merchantCardStripeConfigured()) {
@@ -13741,6 +13782,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			...body,
 			cardAddress: ethers.getAddress(body.cardAddress),
 			buyerEoa: ethers.getAddress(body.buyerEoa),
+			businessIdempotencyKey: body.businessIdempotencyKey,
 		}, res)
 	})
 

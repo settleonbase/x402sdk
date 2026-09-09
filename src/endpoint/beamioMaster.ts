@@ -25,6 +25,8 @@ import {
 } from './merchantKitStripe'
 import {
 	createMerchantCardStripeAccountLink,
+	createMerchantCardStripeOAuthUrl,
+	completeMerchantCardStripeOAuth,
 	getMerchantCardStripeStatus,
 	createMerchantCardStripeCheckoutSession,
 	pollMerchantCardStripeSession,
@@ -6579,12 +6581,28 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	})
 
 	router.post('/merchantCardStripe/createAccountLink', async (req, res) => {
+		return res.status(410).json({
+			error: 'Express Account Link is deprecated. Use Stripe OAuth Connect.',
+		}).end()
+	})
+
+	router.post('/merchantCardStripe/oauth/start', async (req, res) => {
 		try {
-			const cardAddress = req.body?.cardAddress
-			if (typeof cardAddress !== 'string') return res.status(400).json({ error: 'cardAddress required' }).end()
-			return res.json(await createMerchantCardStripeAccountLink(cardAddress)).end()
+			const { cardAddress, merchantEoa } = req.body ?? {}
+			return res.json(await createMerchantCardStripeOAuthUrl({ cardAddress, merchantEoa })).end()
 		} catch (e: any) {
-			logger(Colors.red('[merchantCardStripe] createAccountLink failed'), e?.message ?? e)
+			logger(Colors.red('[merchantCardStripe] oauth/start failed'), e?.message ?? e)
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/merchantCardStripe/oauth/callback', async (req, res) => {
+		try {
+			const { state, code } = req.body ?? {}
+			const result = await completeMerchantCardStripeOAuth({ state, code })
+			return res.json(result).end()
+		} catch (e: any) {
+			logger(Colors.red('[merchantCardStripe] oauth/callback failed'), e?.message ?? e)
 			return res.status(400).json({ error: e?.message ?? String(e) }).end()
 		}
 	})

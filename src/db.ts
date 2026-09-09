@@ -1626,11 +1626,29 @@ const MERCHANT_CARD_STRIPE_SESSIONS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_s
 	membership_tier_index INT,
 	membership_fee_fiat6 TEXT,
 	status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'succeeded', 'failed')),
+	fulfillment_status TEXT NOT NULL DEFAULT 'payment_pending'
+		CHECK (fulfillment_status IN ('payment_pending', 'payment_succeeded', 'fulfillment_processing', 'fulfillment_succeeded', 'fulfillment_failed')),
+	business_idempotency_key TEXT,
+	payment_intent_id TEXT,
 	tx_hash TEXT,
 	last_error TEXT,
 			fulfillment_started_at TIMESTAMPTZ,
 	created_at TIMESTAMPTZ DEFAULT NOW(),
 	updated_at TIMESTAMPTZ DEFAULT NOW()
+)`
+const MERCHANT_CARD_STRIPE_OAUTH_STATES_TABLE = `CREATE TABLE IF NOT EXISTS beamio_stripe_card_oauth_states (
+	state TEXT PRIMARY KEY,
+	card_address TEXT NOT NULL,
+	merchant_eoa TEXT NOT NULL,
+	expires_at TIMESTAMPTZ NOT NULL,
+	used_at TIMESTAMPTZ,
+	created_at TIMESTAMPTZ DEFAULT NOW()
+)`
+const MERCHANT_CARD_STRIPE_EVENTS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_stripe_card_events (
+	event_id TEXT PRIMARY KEY,
+	event_type TEXT NOT NULL,
+	session_id TEXT,
+	created_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
 /** Additive schema for Stripe Connect merchant-card payments. Safe on the historical database. */
@@ -1641,8 +1659,21 @@ export async function ensureMerchantCardStripeSchema(db: Client): Promise<void> 
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_details_submitted BOOLEAN')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_fulfillment_admin TEXT')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_fulfillment_admins JSONB')
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_access_token TEXT')
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_refresh_token TEXT')
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_oauth_scope TEXT')
 	await db.query(MERCHANT_CARD_STRIPE_SESSIONS_TABLE)
+	await db.query(MERCHANT_CARD_STRIPE_OAUTH_STATES_TABLE)
+	await db.query(MERCHANT_CARD_STRIPE_EVENTS_TABLE)
 	await db.query('ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS fulfillment_started_at TIMESTAMPTZ')
+	await db.query(`ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS fulfillment_status TEXT NOT NULL DEFAULT 'payment_pending'`)
+	await db.query('ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS business_idempotency_key TEXT')
+	await db.query('ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS payment_intent_id TEXT')
+	await db.query(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_beamio_stripe_card_sessions_business_key
+		 ON beamio_stripe_card_sessions (business_idempotency_key)
+		 WHERE business_idempotency_key IS NOT NULL`,
+	)
 	await db.query(
 		'CREATE INDEX IF NOT EXISTS idx_beamio_cards_stripe_account_id ON beamio_cards (stripe_account_id)',
 	)
@@ -1658,6 +1689,15 @@ export type MerchantCardStripeStatusRow = {
 	detailsSubmitted: boolean
 	stripeFulfillmentAdmin: string | null
 	stripeFulfillmentAdmins: string[]
+	stripeOauthScope?: string | null
+}
+
+export type MerchantCardStripeOAuthStateRow = {
+	state: string
+	cardAddress: string
+	merchantEoa: string
+	expiresAt: Date
+	usedAt: Date | null
 }
 
 export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Promise<MerchantCardStripeStatusRow | null> {
@@ -1667,7 +1707,8 @@ export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Pr
 		await ensureMerchantCardStripeSchema(db)
 		const result = await db.query(
 			`SELECT card_address, stripe_account_id, stripe_charges_enabled,
-				stripe_details_submitted, stripe_fulfillment_admin, stripe_fulfillment_admins
+				stripe_details_submitted, stripe_fulfillment_admin, stripe_fulfillment_admins,
+				stripe_oauth_scope
 			 FROM beamio_cards WHERE LOWER(card_address) = LOWER($1) LIMIT 1`,
 			[ethers.getAddress(cardAddress)],
 		)
@@ -1682,6 +1723,7 @@ export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Pr
 			stripeFulfillmentAdmins: Array.isArray(row.stripe_fulfillment_admins)
 				? row.stripe_fulfillment_admins.filter((address: unknown): address is string => typeof address === 'string')
 				: row.stripe_fulfillment_admin ? [row.stripe_fulfillment_admin] : [],
+			stripeOauthScope: row.stripe_oauth_scope ?? null,
 		}
 	} finally {
 		await db.end().catch(() => {})
@@ -1695,6 +1737,9 @@ export async function updateMerchantCardStripeAccount(params: {
 	detailsSubmitted?: boolean
 	stripeFulfillmentAdmin?: string | null
 	stripeFulfillmentAdmins?: string[]
+	stripeAccessToken?: string | null
+	stripeRefreshToken?: string | null
+	stripeOauthScope?: string | null
 }): Promise<void> {
 	const db = new Client({ connectionString: DB_URL })
 	try {
@@ -1706,7 +1751,10 @@ export async function updateMerchantCardStripeAccount(params: {
 				stripe_charges_enabled = COALESCE($3, stripe_charges_enabled),
 				stripe_details_submitted = COALESCE($4, stripe_details_submitted),
 				stripe_fulfillment_admin = COALESCE($5, stripe_fulfillment_admin),
-				stripe_fulfillment_admins = COALESCE($6, stripe_fulfillment_admins)
+				stripe_fulfillment_admins = COALESCE($6, stripe_fulfillment_admins),
+				stripe_access_token = COALESCE($7, stripe_access_token),
+				stripe_refresh_token = COALESCE($8, stripe_refresh_token),
+				stripe_oauth_scope = COALESCE($9, stripe_oauth_scope)
 			 WHERE LOWER(card_address) = LOWER($1)`,
 			[
 				ethers.getAddress(params.cardAddress),
@@ -1715,6 +1763,9 @@ export async function updateMerchantCardStripeAccount(params: {
 				params.detailsSubmitted ?? null,
 				params.stripeFulfillmentAdmin ?? null,
 				params.stripeFulfillmentAdmins ? JSON.stringify(params.stripeFulfillmentAdmins) : null,
+				params.stripeAccessToken ?? null,
+				params.stripeRefreshToken ?? null,
+				params.stripeOauthScope ?? null,
 			],
 		)
 	} finally {
@@ -1741,6 +1792,63 @@ export async function updateMerchantCardStripeAccountById(params: {
 	}
 }
 
+export async function createMerchantCardStripeOAuthState(params: {
+	state: string
+	cardAddress: string
+	merchantEoa: string
+	expiresAt: Date
+}): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		await db.query(
+			`INSERT INTO beamio_stripe_card_oauth_states
+				(state, card_address, merchant_eoa, expires_at)
+			 VALUES ($1, $2, $3, $4)`,
+			[
+				params.state,
+				ethers.getAddress(params.cardAddress),
+				ethers.getAddress(params.merchantEoa),
+				params.expiresAt,
+			],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** Atomically consume a short-lived OAuth state. */
+export async function consumeMerchantCardStripeOAuthState(
+	state: string,
+): Promise<MerchantCardStripeOAuthStateRow | null> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		const result = await db.query(
+			`UPDATE beamio_stripe_card_oauth_states
+			    SET used_at = NOW()
+			  WHERE state = $1
+			    AND used_at IS NULL
+			    AND expires_at > NOW()
+		  RETURNING state, card_address, merchant_eoa, expires_at, used_at`,
+			[state],
+		)
+		const row = result.rows[0]
+		if (!row) return null
+		return {
+			state: row.state,
+			cardAddress: ethers.getAddress(row.card_address),
+			merchantEoa: ethers.getAddress(row.merchant_eoa),
+			expiresAt: new Date(row.expires_at),
+			usedAt: row.used_at ? new Date(row.used_at) : null,
+		}
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 export type MerchantCardStripeSessionInput = {
 	sessionId: string
 	cardAddress: string
@@ -1750,6 +1858,8 @@ export type MerchantCardStripeSessionInput = {
 	kind: 'topup' | 'membership'
 	membershipTierIndex?: number | null
 	membershipFeeFiat6?: string | null
+	businessIdempotencyKey?: string | null
+	paymentIntentId?: string | null
 }
 
 export async function createMerchantCardStripeSession(params: MerchantCardStripeSessionInput): Promise<boolean> {
@@ -1760,9 +1870,10 @@ export async function createMerchantCardStripeSession(params: MerchantCardStripe
 		const result = await db.query(
 			`INSERT INTO beamio_stripe_card_sessions
 				(session_id, card_address, buyer_eoa, amount_fiat6, currency, kind,
-				 membership_tier_index, membership_fee_fiat6)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-			 ON CONFLICT (session_id) DO NOTHING`,
+				 membership_tier_index, membership_fee_fiat6, business_idempotency_key,
+				 payment_intent_id, fulfillment_status)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'payment_pending')
+			 ON CONFLICT DO NOTHING`,
 			[
 				params.sessionId,
 				ethers.getAddress(params.cardAddress),
@@ -1772,6 +1883,8 @@ export async function createMerchantCardStripeSession(params: MerchantCardStripe
 				params.kind,
 				params.membershipTierIndex ?? null,
 				params.membershipFeeFiat6 ?? null,
+				params.businessIdempotencyKey ?? null,
+				params.paymentIntentId ?? null,
 			],
 		)
 		return result.rowCount === 1
@@ -1780,10 +1893,65 @@ export async function createMerchantCardStripeSession(params: MerchantCardStripe
 	}
 }
 
+export async function getMerchantCardStripeSessionByBusinessKey(
+	businessIdempotencyKey: string,
+): Promise<{ sessionId: string; fulfillmentStatus: string } | null> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		const result = await db.query(
+			`SELECT session_id, fulfillment_status
+			   FROM beamio_stripe_card_sessions
+			  WHERE business_idempotency_key = $1
+			  LIMIT 1`,
+			[businessIdempotencyKey],
+		)
+		const row = result.rows[0]
+		return row
+			? { sessionId: row.session_id, fulfillmentStatus: row.fulfillment_status }
+			: null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function getMerchantCardStripeSessionStatus(sessionId: string): Promise<{
+	status: string
+	fulfillmentStatus: string
+	txHash: string | null
+	lastError: string | null
+} | null> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		const result = await db.query(
+			`SELECT status, fulfillment_status, tx_hash, last_error
+			   FROM beamio_stripe_card_sessions
+			  WHERE session_id = $1`,
+			[sessionId],
+		)
+		const row = result.rows[0]
+		return row
+			? {
+				status: row.status,
+				fulfillmentStatus: row.fulfillment_status,
+				txHash: row.tx_hash ?? null,
+				lastError: row.last_error ?? null,
+			}
+			: null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 export async function updateMerchantCardStripeSession(params: {
 	sessionId: string
 	status?: 'pending' | 'succeeded' | 'failed'
+	fulfillmentStatus?: 'payment_pending' | 'payment_succeeded' | 'fulfillment_processing' | 'fulfillment_succeeded' | 'fulfillment_failed'
 	txHash?: string | null
+	paymentIntentId?: string | null
 	lastError?: string | null
 }): Promise<void> {
 	const db = new Client({ connectionString: DB_URL })
@@ -1793,12 +1961,21 @@ export async function updateMerchantCardStripeSession(params: {
 		await db.query(
 			`UPDATE beamio_stripe_card_sessions SET
 				status = COALESCE($2, status),
-				tx_hash = COALESCE($3, tx_hash),
-				last_error = $4,
-				fulfillment_started_at = CASE WHEN $2 = 'failed' THEN NULL ELSE fulfillment_started_at END,
+				fulfillment_status = COALESCE($3, fulfillment_status),
+				tx_hash = COALESCE($4, tx_hash),
+				payment_intent_id = COALESCE($5, payment_intent_id),
+				last_error = $6,
+				fulfillment_started_at = CASE WHEN $3 IN ('fulfillment_failed', 'payment_pending') THEN NULL ELSE fulfillment_started_at END,
 				updated_at = NOW()
 			 WHERE session_id = $1`,
-			[params.sessionId, params.status ?? null, params.txHash ?? null, params.lastError ?? null],
+			[
+				params.sessionId,
+				params.status ?? null,
+				params.fulfillmentStatus ?? null,
+				params.txHash ?? null,
+				params.paymentIntentId ?? null,
+				params.lastError ?? null,
+			],
 		)
 	} finally {
 		await db.end().catch(() => {})
@@ -1813,11 +1990,39 @@ export async function claimMerchantCardStripeSession(sessionId: string): Promise
 		await ensureMerchantCardStripeSchema(db)
 		const result = await db.query(
 			`UPDATE beamio_stripe_card_sessions
-			    SET fulfillment_started_at = NOW(), updated_at = NOW()
+			    SET fulfillment_started_at = NOW(),
+			        fulfillment_status = 'fulfillment_processing',
+			        updated_at = NOW()
 			  WHERE session_id = $1
-			    AND status <> 'failed'
-			    AND fulfillment_started_at IS NULL`,
+			    AND fulfillment_status <> 'fulfillment_succeeded'
+			    AND (
+					fulfillment_status <> 'fulfillment_processing'
+					OR fulfillment_started_at IS NULL
+					OR fulfillment_started_at < NOW() - INTERVAL '10 minutes'
+				)`,
 			[sessionId],
+		)
+		return result.rowCount === 1
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** Returns false for duplicate Stripe events; event IDs are the first idempotency boundary. */
+export async function claimMerchantCardStripeEvent(params: {
+	eventId: string
+	eventType: string
+	sessionId?: string | null
+}): Promise<boolean> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		const result = await db.query(
+			`INSERT INTO beamio_stripe_card_events (event_id, event_type, session_id)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT (event_id) DO NOTHING`,
+			[params.eventId, params.eventType, params.sessionId ?? null],
 		)
 		return result.rowCount === 1
 	} finally {

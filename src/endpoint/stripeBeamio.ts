@@ -24,10 +24,38 @@ export function getStripeBeamioWebhookSecret(): string {
 	)
 }
 
+export function getStripeConnectClientId(): string {
+	const setup = masterSetup as { StripeConnectClientId?: string; stripeConnectClientId?: string }
+	return (
+		(typeof process !== 'undefined' && process.env?.STRIPE_CONNECT_CLIENT_ID?.trim()) ||
+		setup.StripeConnectClientId?.trim() ||
+		setup.stripeConnectClientId?.trim() ||
+		''
+	)
+}
+
+export function getStripeConnectRedirectUri(): string {
+	const setup = masterSetup as { StripeConnectRedirectUri?: string; stripeConnectRedirectUri?: string }
+	return (
+		(typeof process !== 'undefined' && process.env?.STRIPE_CONNECT_REDIRECT_URI?.trim()) ||
+		setup.StripeConnectRedirectUri?.trim() ||
+		'https://beamio.app/api/merchantCardStripe/oauth/callback'
+	)
+}
+
 export function getStripeBeamioClient(): Stripe | null {
 	const key = getStripeBeamioSecretKey()
 	if (!key) return null
 	return new Stripe(key)
+}
+
+export async function exchangeStripeConnectOAuthCode(code: string): Promise<Stripe.OAuthToken> {
+	const stripe = getStripeBeamioClient()
+	if (!stripe || !getStripeConnectClientId()) throw new Error('Stripe Connect OAuth is not configured on server')
+	return stripe.oauth.token({
+		grant_type: 'authorization_code',
+		code,
+	})
 }
 
 export function constructStripeBeamioEvent(
