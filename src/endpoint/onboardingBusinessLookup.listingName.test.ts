@@ -9,6 +9,7 @@ import {
 	looksLikeNonVenueListingLabel,
 	looksLikeOpaqueListingId,
 	looksLikeOpaqueListingPageUrl,
+	looksLikeLocalePathSegment,
 	looksLikeWebsiteQuery,
 	marketplaceVenueName,
 	mergeDiscoverHopSources,
@@ -153,6 +154,14 @@ describe('host-agnostic listing chrome', () => {
 		assert.equal(looksLikeOpaqueListingPageUrl(ZOMI_LONGDHANG), false)
 	})
 
+	it('does not treat locale path segments as shop slugs (Fantuan /zh-CN/…)', () => {
+		assert.equal(looksLikeLocalePathSegment('zh-CN'), true)
+		assert.equal(looksLikeLocalePathSegment('en_US'), true)
+		assert.equal(looksLikeLocalePathSegment('coco-fresh-tea-juice'), false)
+		assert.equal(shopListingSlug(FANTUAN_OPAQUE), '')
+		assert.equal(marketplaceVenueName(FANTUAN_OPAQUE), '')
+	})
+
 	it('does not treat a real storefront name as listing chrome', () => {
 		assert.equal(looksLikeNonVenueListingLabel('CoCo Richmond Center'), false)
 		assert.equal(looksLikeNonVenueListingLabel('LONGDHANG'), false)
@@ -273,6 +282,17 @@ describe('overlay does not copy listing chrome over Gemini', () => {
 			FANTUAN_OPAQUE,
 		)
 		assert.equal(none.length, 0)
+	})
+
+	it('treats zbj.com /fw/{id}.html as an opaque marketplace listing', () => {
+		const zbj = 'https://www.zbj.com/fw/1924081.html'
+		assert.equal(isMarketplaceListingUrl(zbj), true)
+		assert.equal(looksLikeOpaqueListingId('1924081.html'), true)
+		assert.equal(looksLikeOpaqueListingId('1924081'), true)
+		assert.equal(looksLikeOpaqueListingPageUrl(zbj), true)
+		assert.equal(marketplaceVenueName(zbj), '')
+		assert.equal(looksLikeNonVenueListingLabel('猪八戒网', zbj), true)
+		assert.equal(looksLikeNonVenueListingLabel('Zhubajie', zbj), true)
 	})
 })
 

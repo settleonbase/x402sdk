@@ -67,6 +67,10 @@ const CUISINE_NOT_LOCATION_RULE =
 const GEMINI_VENUE_NAME_RULE =
 	'name must be the merchant venue (storefront) name, not a delivery/review platform brand, not a URL category segment such as Restaurant or Store, and not an opaque store id (for example “Restaurant ca-1725834231” or a UUID). If the scrape title or path is only a platform id, use visible page text or public knowledge of THAT listing to recover the real shop name, or leave name empty so another source can fill it. Do not copy generic marketplace template blurbs such as “available for online delivery and pickup on {Platform}” into snippet or publicBio.'
 
+/** Discover hop: listing URL → named merchant, never the marketplace company or homepage. */
+const DISCOVER_MARKETPLACE_RULE =
+	'If the query is a delivery, review, freelance, or B2B marketplace listing (Uber Eats, DoorDash, Grubhub, Yelp, SkipTheDishes, Google Maps place, Zhubajie/zbj.com /fw/… service pages, 1688.com offer pages, Fantuan, Zomi, …), return the named merchant or seller on that listing — never the marketplace company brand and never the marketplace homepage (for example never https://www.zbj.com/ as website for a /fw/{id} page). Prefer the merchant’s own official https website when known. Never use marketplace hosts as website.'
+
 type PageSource = {
 	url: string
 	lang: string
@@ -445,6 +449,43 @@ function apexHost(host: string): string {
 	return host.trim().toLowerCase().replace(/\.+$/, '').replace(/^www\./, '')
 }
 
+/**
+ * Small dependency-free registrable-domain approximation for redirect safety.
+ * The lookup service must allow `www.zbj.com → verify.zbj.com`, but must not
+ * turn an arbitrary cross-site redirect into a trusted page. Common ccTLD
+ * second-level suffixes need one extra label (`example.co.uk`).
+ */
+function registrableHost(host: string): string {
+	const h = apexHost(host)
+	const labels = h.split('.').filter(Boolean)
+	if (labels.length < 2) return h
+	const secondLevelSuffixes = new Set([
+		'co.uk',
+		'org.uk',
+		'ac.uk',
+		'gov.uk',
+		'com.au',
+		'net.au',
+		'org.au',
+		'com.cn',
+		'net.cn',
+		'org.cn',
+		'com.hk',
+		'com.sg',
+		'com.tw',
+		'co.jp',
+		'co.kr',
+		'co.nz',
+		'com.br',
+		'com.mx',
+		'com.tr',
+	])
+	const suffix = labels.slice(-2).join('.')
+	return secondLevelSuffixes.has(suffix) && labels.length >= 3
+		? labels.slice(-3).join('.')
+		: labels.slice(-2).join('.')
+}
+
 /** Delivery / review platforms — never treat as a merchant homepage. Not google.com. */
 const MARKETPLACE_APEX_HOSTS = new Set([
 	'ubereats.com',
@@ -466,7 +507,10 @@ const MARKETPLACE_APEX_HOSTS = new Set([
 	'takeaway.com',
 	'hungrypanda.co',
 	'fantuanorder.com',
+	'fantuan.ca',
 	'zomi.menu',
+	'zbj.com',
+	'1688.com',
 ])
 
 const MARKETPLACE_PLATFORM_LABEL: Record<string, string> = {
@@ -489,8 +533,20 @@ const MARKETPLACE_PLATFORM_LABEL: Record<string, string> = {
 	'takeaway.com': 'Takeaway',
 	'hungrypanda.co': 'HungryPanda',
 	'fantuanorder.com': 'Fantuan',
+	'fantuan.ca': 'Fantuan',
 	'zomi.menu': 'Zomi',
+	'zbj.com': 'Zhubajie',
+	'1688.com': '1688',
 }
+
+const ZBJ_PLATFORM_LABELS = new Set([
+	'猪八戒',
+	'猪八戒网',
+	'zhubajie',
+	'zhubajie.com',
+	'zbj',
+	'zbj.com',
+])
 
 /** Path segments that are platform chrome, not a venue slug. Host-agnostic category tokens. */
 const MARKETPLACE_GENERIC_PATH_SLUGS = new Set([
@@ -518,6 +574,11 @@ const MARKETPLACE_GENERIC_PATH_SLUGS = new Set([
 	'delivery',
 	'home',
 	'index',
+	'fw',
+	'service',
+	'services',
+	'offer',
+	'offers',
 ])
 
 const LISTING_CATEGORY_CHROME = new Set([
@@ -535,6 +596,11 @@ const LISTING_CATEGORY_CHROME = new Set([
 	'pickup',
 	'eatery',
 	'bistro',
+	'fw',
+	'service',
+	'services',
+	'offer',
+	'offers',
 ])
 
 /**
@@ -545,8 +611,10 @@ const LISTING_CATEGORY_CHROME = new Set([
 export function looksLikeOpaqueListingId(token: string): boolean {
 	const t = token.trim().split(/[?#]/)[0] || ''
 	if (!t) return false
-	const raw = t.toLowerCase()
-	if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t)) return true
+	/** Strip CMS extensions so `/fw/1924081.html` counts as opaque `1924081`. */
+	const raw = t.toLowerCase().replace(/\.(html?|php|aspx?|jsp)$/i, '')
+	if (!raw) return false
+	if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) return true
 	if (/^\d{6,}$/.test(raw)) return true
 	if (/^(id|store|shop|venue|merchant|listing|item|place|loc|biz)[-_]?\d{3,}$/i.test(raw)) return true
 	if (/^[a-z]{1,3}[-_]\d{6,}$/i.test(raw)) return true
@@ -554,6 +622,28 @@ export function looksLikeOpaqueListingId(token: string): boolean {
 	const digits = (raw.match(/\d/g) || []).length
 	if (digits >= 8 && letters <= 4) return true
 	return false
+}
+
+/**
+ * Locale path segments such as `zh-CN` / `en_US` look like hyphenated slugs
+ * (`/[a-z].*-.*[a-z]/`) but are never venue names (Fantuan
+ * `/zh-CN/store/Restaurant/ca-…` must not humanize to "Zh Cn").
+ */
+export function looksLikeLocalePathSegment(token: string): boolean {
+	const raw = token.trim().split(/[?#]/)[0] || ''
+	if (!raw) return false
+	return /^[a-z]{2}[-_][a-z]{2}$/i.test(raw)
+}
+
+function isUnusableMarketplaceSlugToken(token: string): boolean {
+	const raw = token.trim().split(/[?#]/)[0] || ''
+	if (!raw) return true
+	const lower = raw.toLowerCase()
+	return (
+		MARKETPLACE_GENERIC_PATH_SLUGS.has(lower) ||
+		looksLikeOpaqueListingId(raw) ||
+		looksLikeLocalePathSegment(raw)
+	)
 }
 
 /** Generic delivery-platform template blurbs, not a venue bio. */
@@ -607,6 +697,9 @@ export function looksLikeNonVenueListingLabel(name: string, pageUrl?: string): b
 	if (isBareHomeWelcomeIndexTitle(raw) || isBareHomeWelcomeIndexTitle(stripTitleSiteSuffix(raw))) return false
 	const host = pageUrl ? parsePublicHttpUrl(pageUrl)?.hostname || '' : ''
 	const apex = host ? marketplacePlatformApex(host) : null
+	if (apex === 'zbj.com' && ZBJ_PLATFORM_LABELS.has(raw.toLowerCase().replace(/\s+/g, ''))) {
+		return true
+	}
 	if (looksLikeMarketplacePlatformName(raw, apex)) return true
 	const tokens = raw.split(/[\s|/]+/).filter(Boolean)
 	if (tokens.length >= 2) {
@@ -779,11 +872,14 @@ function marketplaceSlugParts(u: URL): { slug: string; plusIsSpace: boolean } | 
 		slug = m?.[1] || ''
 	} else if (apex === 'zomi.menu') {
 		slug = path.match(/\/shop\/([^/]+)(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'fantuan.ca' || apex === 'fantuanorder.com') {
+		/** `/zh-CN/store/Restaurant/ca-1725834231` — last segment is the listing id. */
+		slug = path.match(/\/store\/(?:[^/]+\/)?([^/]+)(?:\/|$)/i)?.[1] || ''
 	}
 	if (!slug) {
 		slug = path.match(/\/shop\/([^/]+)(?:\/|$)/i)?.[1] || ''
 	}
-	if (slug && (MARKETPLACE_GENERIC_PATH_SLUGS.has(slug.toLowerCase()) || looksLikeOpaqueListingId(slug))) {
+	if (slug && isUnusableMarketplaceSlugToken(slug)) {
 		slug = ''
 	}
 	if (!slug) {
@@ -795,11 +891,10 @@ function marketplaceSlugParts(u: URL): { slug: string; plusIsSpace: boolean } | 
 					(p) =>
 						/[a-z].*-.*[a-z]/i.test(p) &&
 						p.length >= 4 &&
-						!MARKETPLACE_GENERIC_PATH_SLUGS.has(p.toLowerCase()) &&
-						!looksLikeOpaqueListingId(p),
+						!isUnusableMarketplaceSlugToken(p),
 				) || ''
 	}
-	if (slug && looksLikeOpaqueListingId(slug.split(/[?#]/)[0] || '')) slug = ''
+	if (slug && isUnusableMarketplaceSlugToken(slug)) slug = ''
 	return slug ? { slug, plusIsSpace: false } : null
 }
 
@@ -809,7 +904,7 @@ export function shopListingSlug(raw: string | URL): string {
 	const parts = marketplaceSlugParts(u)
 	if (!parts?.slug) return ''
 	const slug = parts.slug.split(/[?#]/)[0]?.toLowerCase() || ''
-	if (!slug || MARKETPLACE_GENERIC_PATH_SLUGS.has(slug) || looksLikeOpaqueListingId(slug)) return ''
+	if (!slug || isUnusableMarketplaceSlugToken(slug)) return ''
 	return slug
 }
 
@@ -863,7 +958,7 @@ function marketplaceCountryHint(u: URL): string {
 }
 
 function isSameApexHost(a: string, b: string): boolean {
-	return apexHost(a) === apexHost(b)
+	return registrableHost(a) === registrableHost(b)
 }
 
 function withWwwHost(u: URL): URL | null {
@@ -884,7 +979,7 @@ function sameApexClaimedUrl(claimed: string, fetchedUrl: string): string {
 	const p = parsePublicHttpUrl(fetchedUrl)
 	if (!p) return fetchedUrl
 	if (!c) return fetchedUrl
-	if (apexHost(c.hostname) !== apexHost(p.hostname)) return fetchedUrl
+	if (registrableHost(c.hostname) !== registrableHost(p.hostname)) return fetchedUrl
 	return c.toString()
 }
 
@@ -1710,7 +1805,7 @@ async function fetchViaStealthIfAllowed(
 	} catch {
 		return null
 	}
-	if (stayApex && apexHost(final.hostname) !== stayApex) return null
+	if (stayApex && registrableHost(final.hostname) !== registrableHost(stayApex)) return null
 	if (isBlockedInterstitialHtml(got.html)) return null
 	return {
 		url: got.url,
@@ -1748,7 +1843,13 @@ async function fetchHtmlSafe(
 			if (!loc) return null
 			const next = parsePublicHttpUrl(new URL(loc, start).toString())
 			if (!next) return null
-			if (apexHost(next.hostname) !== apex) return null
+			// Same registrable domain, or same marketplace platform
+			// (www.zbj.com → verify.zbj.com).
+			if (registrableHost(next.hostname) !== registrableHost(apex)) {
+				const platStay = marketplacePlatformApex(apex)
+				const platNext = marketplacePlatformApex(next.hostname)
+				if (!platStay || platStay !== platNext) return null
+			}
 			return fetchHtmlSafe(next, hopsLeft - 1, apex, opts)
 		}
 		if (!res.ok) {
@@ -1821,15 +1922,16 @@ async function discoverOfficialSitesFromQuery(
 	extraLang: number,
 ): Promise<{ discovered: DiscoveredBusiness[]; discoverFailed: boolean; sources: PageSource[] }> {
 	let discovered: DiscoveredBusiness[] = []
-	let discoverFailed = false
+	let geminiFailed = false
 	try {
-		const discover = await askGeminiDiscover(query)
-		discoverFailed = discover.failed
-		discovered = discover.list
+		const gemini = await askGeminiDiscover(query)
+		geminiFailed = gemini.failed
+		discovered = gemini.list
 	} catch (e) {
-		discoverFailed = true
-		logger(Colors.yellow('[onboardingBusinessLookup] Gemini discover:'), (e as Error)?.message ?? e)
+		geminiFailed = true
+		logger(Colors.yellow('[onboardingBusinessLookup] Gemini grounded discover:'), (e as Error)?.message ?? e)
 	}
+	const discoverFailed = discovered.length === 0 && geminiFailed
 	const urls = uniquePublicWebsites(
 		discovered.map((d) => d.website).filter(Boolean),
 		MAX_NAME_SITES,
@@ -2154,6 +2256,7 @@ async function geminiJson(
 	prompt: string,
 	schema: typeof LOOKUP_SCHEMA | typeof DISCOVER_SCHEMA,
 	extraParts: GeminiUserPart[] = [],
+	useGoogleSearch = false,
 ): Promise<GeminiJsonResult> {
 	const apiKey = masterSetup?.GEMINI_API_KEY
 	if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) return { status: 'no_key' }
@@ -2167,6 +2270,7 @@ async function geminiJson(
 				config: {
 					responseMimeType: 'application/json' as const,
 					responseSchema: schema,
+					...(useGoogleSearch ? { tools: [{ googleSearch: {} }] } : {}),
 				},
 			})
 			const text = (response as { text?: string })?.text?.trim()
@@ -2275,23 +2379,27 @@ Rules:
 	return geminiJsonObject(prompt, CARD_SETUP_SCHEMA)
 }
 
-async function askGeminiDiscover(
-	query: string,
-): Promise<{ failed: boolean; list: DiscoveredBusiness[] }> {
-	const prompt = `You help Beamio Merchant OS find public businesses from a name query.
+function discoverBusinessesPrompt(query: string): string {
+	const core = `You help Beamio Merchant OS find public businesses from a name or listing URL query.
 Query: ${JSON.stringify(query)}
 Return up to ${MAX_CANDIDATES} real public businesses that match this query.
 - name must be English (official English name, or a reasonable English transliteration).
-- website must be the official https URL if you know it from public knowledge, otherwise empty.
+- website must be the official https URL if you know it from public knowledge or web search, otherwise empty.
 - snippet: one English sentence that helps tell similar names apart (what the venue is, neighborhood if known).
 - city / country / province: only if you know THAT named venue’s public listing address.
 - country: ISO 3166-1 alpha-2, or empty if unknown.
 - ${CUISINE_NOT_LOCATION_RULE}
 - ${GEMINI_VENUE_NAME_RULE}
-- If the query is a delivery or review marketplace listing (Uber Eats, DoorDash, Grubhub, Yelp, SkipTheDishes, Google Maps place, …), return the named restaurant or shop on that listing, not the marketplace company.
-- Prefer the merchant's own official https website. Never use ubereats.com, doordash.com, grubhub.com, yelp.com, zomi.menu, or similar marketplace hosts as website.
-Do not invent private IPs, localhost, or non-https websites. Do not invent a website you are not reasonably sure of.`
-	const result = await geminiJson(prompt, DISCOVER_SCHEMA)
+- ${DISCOVER_MARKETPLACE_RULE}
+Do not invent private IPs, localhost, or non-https websites. Do not invent a website you are not reasonably sure of.
+Use web search when needed to identify the merchant behind a marketplace listing URL.`
+	return core
+}
+
+async function askGeminiDiscover(
+	query: string,
+): Promise<{ failed: boolean; list: DiscoveredBusiness[] }> {
+	const result = await geminiJson(discoverBusinessesPrompt(query), DISCOVER_SCHEMA, [], true)
 	if (result.status !== 'ok') return { failed: true, list: [] }
 	const out: DiscoveredBusiness[] = []
 	for (const item of result.items) {
