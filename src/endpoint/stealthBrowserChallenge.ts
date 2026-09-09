@@ -6,7 +6,7 @@ export const STEALTH_BROWSER_UA =
  * "cloudflare" string — real pages after a passed challenge still load CF scripts.
  */
 export function isStealthChallengeHtml(html: string): boolean {
-	return /just a moment|attention required|cf-browser-verification|challenge-platform|cdn-cgi\/challenge|checking your browser|enable javascript and cookies to continue|sorry, you have been blocked|cf-mitigated:\s*challenge/i.test(
+	return /just a moment|attention required|cf-browser-verification|challenge-platform|cdn-cgi\/challenge|checking your browser|enable javascript and cookies to continue|sorry, you have been blocked|cf-mitigated:\s*challenge|aliyun_waf|x5secdata|acw_sc__v2|AliyunWAF/i.test(
 		html,
 	)
 }

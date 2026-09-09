@@ -63,6 +63,10 @@ type DiscoveredBusiness = {
 const CUISINE_NOT_LOCATION_RULE =
 	'Cuisine words in the name (Shanghainese, Shanghai Noodle, Sichuan, Cantonese) do NOT mean the shop is in that city or in China. Diaspora restaurants are common. Leave city and country unknown unless you know THAT named venue’s public listing address. Do not invent Canada.'
 
+/** Platform-agnostic: recover the storefront name; never copy listing chrome or opaque store ids. */
+const GEMINI_VENUE_NAME_RULE =
+	'name must be the merchant venue (storefront) name, not a delivery/review platform brand, not a URL category segment such as Restaurant or Store, and not an opaque store id (for example “Restaurant ca-1725834231” or a UUID). If the scrape title or path is only a platform id, use visible page text or public knowledge of THAT listing to recover the real shop name, or leave name empty so another source can fill it. Do not copy generic marketplace template blurbs such as “available for online delivery and pickup on {Platform}” into snippet or publicBio.'
+
 type PageSource = {
 	url: string
 	lang: string
@@ -81,6 +85,7 @@ type PageSource = {
 }
 
 const MAX_QUERY = 200
+const DISCOVER_QUERY_MAX = 400
 const MAX_CANDIDATES = 5
 const MAX_HTML_BYTES = 512 * 1024
 const FETCH_TIMEOUT_MS = 8_000
@@ -481,7 +486,7 @@ const MARKETPLACE_PLATFORM_LABEL: Record<string, string> = {
 	'zomi.menu': 'Zomi',
 }
 
-/** Path segments that are platform chrome, not a venue slug. */
+/** Path segments that are platform chrome, not a venue slug. Host-agnostic category tokens. */
 const MARKETPLACE_GENERIC_PATH_SLUGS = new Set([
 	'menu',
 	'shop',
@@ -493,11 +498,182 @@ const MARKETPLACE_GENERIC_PATH_SLUGS = new Set([
 	'signup',
 	'stores',
 	'restaurants',
+	'restaurant',
+	'store',
+	'cafe',
+	'merchant',
+	'venue',
+	'listing',
+	'takeaway',
+	'pickup',
+	'eatery',
+	'bistro',
 	'food',
 	'delivery',
 	'home',
 	'index',
 ])
+
+const LISTING_CATEGORY_CHROME = new Set([
+	'restaurant',
+	'store',
+	'shop',
+	'cafe',
+	'menu',
+	'merchant',
+	'venue',
+	'listing',
+	'food',
+	'delivery',
+	'takeaway',
+	'pickup',
+	'eatery',
+	'bistro',
+])
+
+/**
+ * Opaque marketplace / CMS listing ids — not a human venue slug.
+ * Matches `ca-1725834231`, UUIDs, long digit ids. Does not match
+ * `coco-fresh-tea-juice`, `longdhang`, or `CoCo Richmond Center`.
+ */
+export function looksLikeOpaqueListingId(token: string): boolean {
+	const t = token.trim().split(/[?#]/)[0] || ''
+	if (!t) return false
+	const raw = t.toLowerCase()
+	if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t)) return true
+	if (/^\d{6,}$/.test(raw)) return true
+	if (/^(id|store|shop|venue|merchant|listing|item|place|loc|biz)[-_]?\d{3,}$/i.test(raw)) return true
+	if (/^[a-z]{1,3}[-_]\d{6,}$/i.test(raw)) return true
+	const letters = (raw.match(/[a-z]/g) || []).length
+	const digits = (raw.match(/\d/g) || []).length
+	if (digits >= 8 && letters <= 4) return true
+	return false
+}
+
+/** Generic delivery-platform template blurbs, not a venue bio. */
+export function looksLikeGenericMarketplaceSnippet(snippet: string): boolean {
+	const s = snippet.replace(/\s+/g, ' ').trim()
+	if (!s) return false
+	if (/available for online delivery and pickup on\b/i.test(s)) return true
+	if (/order online from a .{0,40} restaurant\.?$/i.test(s)) return true
+	if (/^order (food )?online (for delivery|from)\b/i.test(s) && s.length < 90) return true
+	if (/\b(online )?delivery and pickup\b/i.test(s) && /\bon\s+[A-Za-z]{3,}\b/.test(s) && s.length < 180) {
+		return true
+	}
+	return false
+}
+
+function listingPathTokens(u: URL): string[] {
+	return u.pathname
+		.split('/')
+		.filter(Boolean)
+		.map((p) => {
+			const raw = p.split(/[?#]/)[0] || ''
+			try {
+				return decodeURIComponent(raw)
+			} catch {
+				return raw
+			}
+		})
+}
+
+/** Host-agnostic: last path token is an opaque id and a category chrome segment is present. */
+export function looksLikeOpaqueListingPageUrl(raw: string | URL): boolean {
+	const u = typeof raw === 'string' ? parsePublicHttpUrl(raw) : raw
+	if (!u) return false
+	const parts = listingPathTokens(u)
+	const last = parts[parts.length - 1] || ''
+	if (!looksLikeOpaqueListingId(last)) return false
+	return parts.some((p) => LISTING_CATEGORY_CHROME.has(p.toLowerCase()))
+}
+
+function isBareHomeWelcomeIndexTitle(name: string): boolean {
+	return /^(home|homepage|welcome|index)$/i.test(name.trim())
+}
+
+/**
+ * Platform-agnostic: this string is listing chrome, not a storefront name.
+ * Does **not** treat bare Home / Welcome / Index as listing chrome (official sites).
+ */
+export function looksLikeNonVenueListingLabel(name: string, pageUrl?: string): boolean {
+	const raw = name.replace(/\s+/g, ' ').trim()
+	if (!raw) return true
+	if (isBareHomeWelcomeIndexTitle(raw) || isBareHomeWelcomeIndexTitle(stripTitleSiteSuffix(raw))) return false
+	const host = pageUrl ? parsePublicHttpUrl(pageUrl)?.hostname || '' : ''
+	const apex = host ? marketplacePlatformApex(host) : null
+	if (looksLikeMarketplacePlatformName(raw, apex)) return true
+	const tokens = raw.split(/[\s|/]+/).filter(Boolean)
+	if (tokens.length >= 2) {
+		const last = tokens[tokens.length - 1] || ''
+		const headFold = foldKey(tokens.slice(0, -1).join(' '))
+		const firstFold = tokens[0].toLowerCase()
+		if (
+			(LISTING_CATEGORY_CHROME.has(headFold) || LISTING_CATEGORY_CHROME.has(firstFold)) &&
+			looksLikeOpaqueListingId(last)
+		) {
+			return true
+		}
+	}
+	if (looksLikeOpaqueListingId(raw.replace(/\s+/g, '-'))) return true
+	if (pageUrl) {
+		const u = parsePublicHttpUrl(pageUrl)
+		if (u) {
+			const parts = listingPathTokens(u)
+			const last = parts[parts.length - 1] || ''
+			const prev = parts[parts.length - 2] || ''
+			if (looksLikeOpaqueListingId(last)) {
+				const joined = `${prev} ${last}`.replace(/[-_]+/g, ' ')
+				if (foldKey(raw) === foldKey(joined) || foldKey(raw) === foldKey(last)) return true
+			}
+		}
+	}
+	return false
+}
+
+/**
+ * Weak marketplace listing scrape: platform brand, category+opaque id, or generic
+ * delivery template. Readable shop slugs (longdhang, coco-fresh-tea-juice) are
+ * **not** chrome — overlay must still recover the venue name.
+ */
+export function scrapeLooksLikeListingChrome(src: {
+	url: string
+	title: string
+	description: string
+	siteName: string
+	jsonLdName: string
+	visibleText?: string
+}): boolean {
+	const slug = shopListingSlug(src.url)
+	if (slug && !looksLikeOpaqueListingId(slug)) return false
+	const title = stripTitleSiteSuffix(src.title)
+	if (
+		title.length >= 2 &&
+		!looksLikeNonVenueListingLabel(title, src.url) &&
+		!isBareHomeWelcomeIndexTitle(title) &&
+		!looksLikeMarketplacePlatformName(title)
+	) {
+		return false
+	}
+	if (looksLikeNonVenueListingLabel(title, src.url)) return true
+	if (
+		looksLikeNonVenueListingLabel(src.jsonLdName, src.url) &&
+		looksLikeOpaqueListingPageUrl(src.url) &&
+		(!title || looksLikeNonVenueListingLabel(title, src.url) || looksLikeMarketplacePlatformName(title))
+	) {
+		return true
+	}
+	const u = parsePublicHttpUrl(src.url)
+	if (!u) return false
+	const last = listingPathTokens(u).pop() || ''
+	if (!looksLikeOpaqueListingId(last)) return false
+	const weakTitle =
+		!title || looksLikeNonVenueListingLabel(title, src.url) || looksLikeMarketplacePlatformName(title)
+	const text = (src.visibleText || '').replace(/\s+/g, ' ').trim()
+	const weakText = !text || text.length < 40 || looksLikeGenericMarketplaceSnippet(text)
+	if (weakTitle && weakText) return true
+	if (weakTitle && looksLikeGenericMarketplaceSnippet(src.description)) return true
+	return false
+}
 
 export function isBlockedInterstitialHtml(html: string): boolean {
 	return isStealthChallengeHtml(html)
@@ -601,15 +777,23 @@ function marketplaceSlugParts(u: URL): { slug: string; plusIsSpace: boolean } | 
 	if (!slug) {
 		slug = path.match(/\/shop\/([^/]+)(?:\/|$)/i)?.[1] || ''
 	}
-	if (slug && MARKETPLACE_GENERIC_PATH_SLUGS.has(slug.toLowerCase())) {
+	if (slug && (MARKETPLACE_GENERIC_PATH_SLUGS.has(slug.toLowerCase()) || looksLikeOpaqueListingId(slug))) {
 		slug = ''
 	}
 	if (!slug) {
 		const parts = path.split('/').filter(Boolean)
 		slug =
-			[...parts].reverse().find((p) => /[a-z].*-.*[a-z]/i.test(p) && p.length >= 4 && !MARKETPLACE_GENERIC_PATH_SLUGS.has(p.toLowerCase())) ||
-			''
+			[...parts]
+				.reverse()
+				.find(
+					(p) =>
+						/[a-z].*-.*[a-z]/i.test(p) &&
+						p.length >= 4 &&
+						!MARKETPLACE_GENERIC_PATH_SLUGS.has(p.toLowerCase()) &&
+						!looksLikeOpaqueListingId(p),
+				) || ''
 	}
+	if (slug && looksLikeOpaqueListingId(slug.split(/[?#]/)[0] || '')) slug = ''
 	return slug ? { slug, plusIsSpace: false } : null
 }
 
@@ -619,7 +803,7 @@ export function shopListingSlug(raw: string | URL): string {
 	const parts = marketplaceSlugParts(u)
 	if (!parts?.slug) return ''
 	const slug = parts.slug.split(/[?#]/)[0]?.toLowerCase() || ''
-	if (!slug || MARKETPLACE_GENERIC_PATH_SLUGS.has(slug)) return ''
+	if (!slug || MARKETPLACE_GENERIC_PATH_SLUGS.has(slug) || looksLikeOpaqueListingId(slug)) return ''
 	return slug
 }
 
@@ -628,6 +812,7 @@ export function marketplaceVenueName(raw: string | URL): string {
 	if (!u) return ''
 	const parts = marketplaceSlugParts(u)
 	if (!parts) return ''
+	if (looksLikeOpaqueListingId(parts.slug.split(/[?#]/)[0] || '')) return ''
 	const name = parts.plusIsSpace ? humanizeGoogleMapsPlace(parts.slug) : humanizeMarketplaceSlug(parts.slug)
 	return name.length >= 2 ? name : ''
 }
@@ -642,9 +827,24 @@ export function marketplaceVenueSearchQuery(raw: string | URL): string {
 	return platform ? `${name} listed on ${platform}` : name
 }
 
-export function discoverQueryFromWebsiteUrl(start: URL, originalQuery: string): string {
-	if (isMarketplaceListingUrl(start)) {
-		return marketplaceVenueSearchQuery(start) || originalQuery
+export function discoverQueryFromWebsiteUrl(
+	start: URL,
+	originalQuery: string,
+	listingSource?: Pick<PageSource, 'title' | 'description' | 'visibleText'>,
+): string {
+	const opaque = looksLikeOpaqueListingPageUrl(start)
+	if (isMarketplaceListingUrl(start) || opaque) {
+		const fromSlug = marketplaceVenueSearchQuery(start)
+		if (fromSlug) return fromSlug
+		const extra = listingSource
+			? clip(listingSource.visibleText.replace(/\s+/g, ' ').trim().slice(0, 180), 180)
+			: ''
+		const extraUsable =
+			extra &&
+			!looksLikeGenericMarketplaceSnippet(extra) &&
+			!looksLikeNonVenueListingLabel(extra, start.toString())
+		const q = extraUsable ? `${originalQuery} ${extra}` : originalQuery
+		return clip(q, DISCOVER_QUERY_MAX)
 	}
 	return originalQuery
 }
@@ -1614,6 +1814,50 @@ async function discoverOfficialSitesFromQuery(
 	return { discovered, discoverFailed, sources }
 }
 
+export function scrapeNeedsOfficialDiscoverHop(sources: PageSource[]): boolean {
+	if (!sources.length) return true
+	return scrapeLooksLikeListingChrome(sources[0])
+}
+
+/** Prefer official (non-marketplace, non-chrome) hop pages as sources[0]. */
+export function mergeDiscoverHopSources(listing: PageSource[], hop: PageSource[]): PageSource[] {
+	const usable = (s: PageSource) => !isUnusableScrapeSource(s)
+	const isOfficial = (s: PageSource) =>
+		usable(s) &&
+		!isMarketplaceListingUrl(s.url) &&
+		!looksLikeOpaqueListingPageUrl(s.url) &&
+		!scrapeLooksLikeListingChrome(s)
+	const official = hop.filter(isOfficial)
+	const restListing = listing.filter(usable)
+	const restHop = hop.filter((s) => usable(s) && !isOfficial(s))
+	const seen = new Set<string>()
+	const out: PageSource[] = []
+	for (const s of [...official, ...restListing, ...restHop]) {
+		const k = s.url.toLowerCase()
+		if (seen.has(k)) continue
+		seen.add(k)
+		out.push(s)
+	}
+	return out
+}
+
+async function scrapeWebsiteThenMaybeDiscover(
+	start: URL,
+	originalQuery: string,
+): Promise<{ sources: PageSource[]; discovered: DiscoveredBusiness[]; discoverFailed: boolean }> {
+	const sources = await collectWebsitePageSources(start, MAX_EXTRA_LANG_URL)
+	if (!scrapeNeedsOfficialDiscoverHop(sources)) {
+		return { sources, discovered: [], discoverFailed: false }
+	}
+	const dq = discoverQueryFromWebsiteUrl(start, originalQuery, sources[0])
+	const hop = await discoverOfficialSitesFromQuery(dq, MAX_EXTRA_LANG_NAME)
+	return {
+		sources: mergeDiscoverHopSources(sources, hop.sources),
+		discovered: hop.discovered,
+		discoverFailed: hop.discoverFailed,
+	}
+}
+
 export function normalizeCountry(raw: string): string {
 	return normalizeOnboardingCountryCode(raw)
 }
@@ -1756,6 +2000,7 @@ function sanitizeWebsite(raw: string): string {
 	if (!u) return ''
 	if (u.protocol !== 'https:') return ''
 	if (isMarketplaceListingUrl(u)) return ''
+	if (looksLikeOpaqueListingPageUrl(u)) return ''
 	return u.toString()
 }
 
@@ -1780,6 +2025,7 @@ function uniquePublicWebsites(raws: string[], max: number): URL[] {
 		const u = parsePublicHttpUrl(r)
 		if (!u || u.protocol !== 'https:') continue
 		if (isMarketplaceListingUrl(u)) continue
+		if (looksLikeOpaqueListingPageUrl(u)) continue
 		const k = apexHost(u.hostname)
 		if (seen.has(k)) continue
 		seen.add(k)
@@ -2016,6 +2262,7 @@ Return up to ${MAX_CANDIDATES} real public businesses that match this query.
 - city / country / province: only if you know THAT named venue’s public listing address.
 - country: ISO 3166-1 alpha-2, or empty if unknown.
 - ${CUISINE_NOT_LOCATION_RULE}
+- ${GEMINI_VENUE_NAME_RULE}
 - If the query is a delivery or review marketplace listing (Uber Eats, DoorDash, Grubhub, Yelp, SkipTheDishes, Google Maps place, …), return the named restaurant or shop on that listing, not the marketplace company.
 - Prefer the merchant's own official https website. Never use ubereats.com, doordash.com, grubhub.com, yelp.com, zomi.menu, or similar marketplace hosts as website.
 Do not invent private IPs, localhost, or non-https websites. Do not invent a website you are not reasonably sure of.`
@@ -2052,6 +2299,7 @@ Rules:
 - city: English (Vancouver, not 溫哥華).
 - country: ISO 3166-1 alpha-2 (CN, CA, US, JP, …). Use "unknown" if missing. Do not invent Canada.
 - ${CUISINE_NOT_LOCATION_RULE}
+- ${GEMINI_VENUE_NAME_RULE}
 - province: for ${CODED_PROVINCE_COUNTRIES.join(', ')} use the region CODE (BC, ON, CA, NY, ENG, NSW, BY). For other countries use the English province/state/region name, or "" if unknown.
 - channelKind: physical | digital | app, or "unknown"
 - physical categories: ${PHYSICAL_CATS.join(', ')}
@@ -2105,6 +2353,7 @@ Rules:
 - city: English (Vancouver, not 溫哥華).
 - country: ISO 3166-1 alpha-2 (CN, CA, US, JP, …). Use "unknown" if missing. Do not invent Canada.
 - ${CUISINE_NOT_LOCATION_RULE}
+- ${GEMINI_VENUE_NAME_RULE}
 - province: for ${CODED_PROVINCE_COUNTRIES.join(', ')} use the region CODE (BC, ON, CA, NY, ENG, NSW, BY). For other countries use the English province/state/region name, or "" if unknown.
 - channelKind: physical | digital | app, or "unknown"
 - physical categories: ${PHYSICAL_CATS.join(', ')}
@@ -2150,6 +2399,7 @@ Rules:
 - country: ISO 3166-1 alpha-2 when you are reasonably sure of THAT named venue’s public listing address. Copy discovered.country when present. Use "unknown" if the name is ambiguous across cities/countries. Do not invent Canada.
 - city: English city name only when reasonably sure of THAT venue. Copy discovered.city when present. Otherwise "".
 - ${CUISINE_NOT_LOCATION_RULE}
+- ${GEMINI_VENUE_NAME_RULE}
 - province: for ${CODED_PROVINCE_COUNTRIES.join(', ')} use the region CODE (BC, ON, CA, NY, ENG, NSW, BY). For other countries use the English province/state/region name, or "" if unknown.
 - Never use an empty string for channelKind, orgType, or country. Use "unknown" instead when you truly cannot tell.`
 
@@ -2290,7 +2540,10 @@ export function listingVenueDisplayName(src: {
 	const slug = u ? shopListingSlug(u) : ''
 	if (!slug && !apex) return ''
 	if (!slug) return ''
-	const reject = (name: string) => !name.trim() || looksLikeMarketplacePlatformName(name, apex)
+	const reject = (name: string) =>
+		!name.trim() ||
+		looksLikeMarketplacePlatformName(name, apex) ||
+		looksLikeNonVenueListingLabel(name, src.url)
 	const fromDesc = venueNameFromReviewsForPhrase(src.description)
 	if (fromDesc && !reject(fromDesc)) return fromDesc
 	if (src.jsonLdName && !reject(src.jsonLdName)) return clip(src.jsonLdName, 120)
@@ -2315,7 +2568,10 @@ function displayNameFromScrape(src: PageSource): string {
 	if (listed.length >= 2) return stripCity(listed)
 	const u = parsePublicHttpUrl(src.url)
 	const apex = u ? marketplacePlatformApex(u.hostname) : null
-	const reject = (name: string) => !name.trim() || looksLikeMarketplacePlatformName(name, apex)
+	const reject = (name: string) =>
+		!name.trim() ||
+		looksLikeMarketplacePlatformName(name, apex) ||
+		looksLikeNonVenueListingLabel(name, src.url)
 	if (src.jsonLdName && !reject(src.jsonLdName)) return stripCity(src.jsonLdName)
 	if (src.siteName && !reject(src.siteName)) return stripCity(src.siteName)
 	const fromTitle = stripTitleSiteSuffix(src.title)
@@ -2330,8 +2586,10 @@ function candidateFromScrapedHomepage(
 ): OnboardingBusinessLookupCandidate | null {
 	const src = sources[0]
 	if (!src || isUnusableScrapeSource(src)) return null
+	if (scrapeLooksLikeListingChrome(src)) return null
 	const name = displayNameFromScrape(src)
 	if (name.length < 2) return null
+	if (looksLikeNonVenueListingLabel(name, src.url)) return null
 	const website = sanitizeWebsite(src.url) || fallbackWebsite
 	const country = normalizeCountry(src.country)
 	return {
@@ -2411,36 +2669,76 @@ function candidateFromMarketplaceListing(query: string): OnboardingBusinessLooku
 	}
 }
 
-function overlayScrapedVenueForWebsiteQuery(
+/**
+ * Drop listing-chrome names when at least one real venue name exists.
+ * If every name is chrome, return [] so the handler can use discover / a listing stub
+ * instead of showing “Restaurant ca-1725834231”.
+ */
+export function preferNonChromeCandidateNames(
+	candidates: OnboardingBusinessLookupCandidate[],
+	pageUrl?: string,
+): OnboardingBusinessLookupCandidate[] {
+	if (!candidates.length) return candidates
+	const real = candidates.filter((c) => !looksLikeNonVenueListingLabel(c.name, pageUrl))
+	return real
+}
+
+/**
+ * Overlay scrape onto Gemini only when the scrape looks like a real venue.
+ * Listing chrome (opaque ids, category+id titles, generic delivery blurbs) must not
+ * replace an AI storefront name. Host-agnostic — no per-marketplace parser.
+ */
+export function overlayScrapedVenueForWebsiteQuery(
 	query: string,
 	sources: PageSource[],
 	candidates: OnboardingBusinessLookupCandidate[],
 ): OnboardingBusinessLookupCandidate[] {
-	if (!looksLikeWebsiteQuery(query) || !sources.length) return candidates
-	if (sources[0] && isUnusableScrapeSource(sources[0])) return candidates
+	if (!looksLikeWebsiteQuery(query) || !sources.length) {
+		return preferNonChromeCandidateNames(candidates, sources[0]?.url)
+	}
+	if (sources[0] && isUnusableScrapeSource(sources[0])) {
+		return preferNonChromeCandidateNames(candidates, sources[0]?.url)
+	}
+	if (scrapeLooksLikeListingChrome(sources[0])) {
+		return preferNonChromeCandidateNames(candidates, sources[0].url)
+	}
 	const home = candidateFromScrapedHomepage(sources, sanitizeWebsite(sources[0].url) || '')
-	if (!home) return candidates
+	if (!home) return preferNonChromeCandidateNames(candidates, sources[0].url)
 	if (!candidates.length) return [home]
 	const queryUrl = parsePublicHttpUrl(query)
 	const platformApex = queryUrl ? marketplacePlatformApex(queryUrl.hostname) : null
-	const scrapeIsPlatform = looksLikeMarketplacePlatformName(home.name, platformApex)
+	const scrapeNameUsable =
+		home.name.length >= 2 &&
+		!looksLikeMarketplacePlatformName(home.name, platformApex) &&
+		!looksLikeNonVenueListingLabel(home.name, sources[0].url)
 	const listingName = listingVenueDisplayName(sources[0]) || marketplaceVenueName(query)
-	return candidates.map((c) => ({
-		...c,
-		name: scrapeIsPlatform
-			? listingName.length >= 2
-				? listingName
-				: c.name
-			: home.name.length >= 2
-				? home.name
-				: c.name,
-		website: home.website || c.website,
-		city: home.city || c.city,
-		province: home.province || c.province,
-		country: home.country || c.country,
-		snippet: home.snippet || c.snippet,
-		publicBio: home.publicBio || c.publicBio,
-	}))
+	const listingNameUsable =
+		listingName.length >= 2 && !looksLikeNonVenueListingLabel(listingName, sources[0].url)
+	const scrapeSnippetBad =
+		looksLikeGenericMarketplaceSnippet(home.snippet) ||
+		looksLikeGenericMarketplaceSnippet(home.publicBio)
+	const scrapeIsPlatform = looksLikeMarketplacePlatformName(home.name, platformApex)
+	const overlaid = candidates.map((c) => {
+		let name = c.name
+		if (scrapeIsPlatform) {
+			if (listingNameUsable) name = listingName
+		} else if (scrapeNameUsable) {
+			name = home.name
+		} else if (listingNameUsable) {
+			name = listingName
+		}
+		return {
+			...c,
+			name,
+			website: home.website || c.website,
+			city: home.city || c.city,
+			province: home.province || c.province,
+			country: home.country || c.country,
+			snippet: scrapeSnippetBad ? c.snippet : home.snippet || c.snippet,
+			publicBio: scrapeSnippetBad ? c.publicBio : home.publicBio || c.publicBio,
+		}
+	})
+	return preferNonChromeCandidateNames(overlaid, sources[0].url)
 }
 
 async function handleAttachmentLookup(
@@ -2451,10 +2749,8 @@ async function handleAttachmentLookup(
 	let sources: PageSource[] = []
 	if (query && looksLikeWebsiteQuery(query)) {
 		const start = parsePublicHttpUrl(query)
-		if (start) sources = await collectWebsitePageSources(start, MAX_EXTRA_LANG_URL)
-		if (!sources.length) {
-			const dq = start ? discoverQueryFromWebsiteUrl(start, query) : query
-			const hop = await discoverOfficialSitesFromQuery(dq, MAX_EXTRA_LANG_NAME)
+		if (start) {
+			const hop = await scrapeWebsiteThenMaybeDiscover(start, query)
 			sources = hop.sources
 		}
 	}
@@ -2565,14 +2861,10 @@ export async function onboardingBusinessLookupHandler(req: Request, res: Respons
 	if (looksLikeWebsiteQuery(query)) {
 		const start = parsePublicHttpUrl(query)
 		if (start) {
-			sources = await collectWebsitePageSources(start, MAX_EXTRA_LANG_URL)
-		}
-		if (!sources.length) {
-			const dq = start ? discoverQueryFromWebsiteUrl(start, query) : query
-			const hop = await discoverOfficialSitesFromQuery(dq, MAX_EXTRA_LANG_NAME)
-			discoverFailed = hop.discoverFailed
-			discovered = hop.discovered
+			const hop = await scrapeWebsiteThenMaybeDiscover(start, query)
 			sources = hop.sources
+			discovered = hop.discovered
+			discoverFailed = hop.discoverFailed
 		}
 	} else {
 		const hop = await discoverOfficialSitesFromQuery(query, MAX_EXTRA_LANG_NAME)
