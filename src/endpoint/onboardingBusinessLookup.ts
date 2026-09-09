@@ -2380,6 +2380,7 @@ Rules:
 }
 
 function discoverBusinessesPrompt(query: string): string {
+	const zbjListing = /(?:^|\/\/)(?:www\.)?zbj\.com\/fw\/\d+/i.test(query)
 	const core = `You help Beamio Merchant OS find public businesses from a name or listing URL query.
 Query: ${JSON.stringify(query)}
 Return up to ${MAX_CANDIDATES} real public businesses that match this query.
@@ -2392,7 +2393,8 @@ Return up to ${MAX_CANDIDATES} real public businesses that match this query.
 - ${GEMINI_VENUE_NAME_RULE}
 - ${DISCOVER_MARKETPLACE_RULE}
 Do not invent private IPs, localhost, or non-https websites. Do not invent a website you are not reasonably sure of.
-Use web search when needed to identify the merchant behind a marketplace listing URL.`
+Use web search when needed to identify the merchant behind a marketplace listing URL.
+${zbjListing ? `This is an opaque ZBJ service listing URL. Search the exact URL and listing id, then identify the seller/provider/store named in the listing (for example a direct-sales store or service team), not the ZBJ marketplace, not "Zhubajie", not "ZBJ", and not the generic service title. The candidate name must be the seller/provider in English or a faithful English transliteration. If the page is blocked, use grounded search results for the exact URL before returning an empty list.` : ''}`
 	return core
 }
 
@@ -2405,6 +2407,10 @@ async function askGeminiDiscover(
 	for (const item of result.items) {
 		const parsed = parseDiscoveredBusiness(item)
 		if (!parsed) continue
+		// A marketplace platform is never the merchant candidate. In particular,
+		// opaque ZBJ listings often return the platform title when the seller
+		// identity was not extracted from the grounded result.
+		if (looksLikeNonVenueListingLabel(parsed.name, query)) continue
 		out.push(parsed)
 		if (out.length >= MAX_CANDIDATES) break
 	}
