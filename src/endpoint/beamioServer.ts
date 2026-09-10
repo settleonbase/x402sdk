@@ -13735,10 +13735,55 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		const code = typeof req.query.code === 'string' ? req.query.code : ''
 		const state = typeof req.query.state === 'string' ? req.query.state : ''
 		const error = typeof req.query.error === 'string' ? req.query.error : ''
-		if (error) {
-			return res.status(400).send(`Stripe authorization was declined: ${error}`)
+		const sendOAuthCompletionPage = (params: {
+			status: 'success' | 'error'
+			cardAddress?: string
+			message: string
+		}) => {
+			const payload = JSON.stringify({
+				type: 'beamio:merchant-card-stripe-oauth-complete',
+				status: params.status,
+				cardAddress: params.cardAddress ?? '',
+				message: params.message,
+			}).replace(/</g, '\\u003c')
+			const title = params.status === 'success' ? 'Stripe connected' : 'Stripe connection failed'
+			const fallbackUrl = 'https://biz.beamio.app/biz/#/'
+			return res
+				.status(params.status === 'success' ? 200 : 400)
+				.type('html')
+				.send(`<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title></head>
+<body style="margin:0;background:#f5f7f9;color:#0f172a;font-family:system-ui,-apple-system,sans-serif">
+<main style="max-width:32rem;margin:12vh auto;padding:2rem;text-align:center">
+<h1 style="margin:0 0 .75rem;font-size:1.5rem">${title}</h1>
+<p style="margin:0 0 1.5rem;line-height:1.5">${params.message}</p>
+<a href="${fallbackUrl}" style="color:#fff;background:#635bff;border-radius:.75rem;padding:.7rem 1rem;text-decoration:none;font-weight:600">Return to Merchant OS</a>
+</main>
+<script>
+(() => {
+  const result = ${payload};
+  if (window.opener) {
+    window.opener.postMessage(result, 'https://biz.beamio.app');
+    window.setTimeout(() => window.close(), 150);
+  }
+})();
+</script>
+</body>
+</html>`)
 		}
-		if (!code || !state) return res.status(400).send('Missing Stripe OAuth callback parameters')
+		if (error) {
+			return sendOAuthCompletionPage({
+				status: 'error',
+				message: 'Stripe authorization was declined. You can return to Merchant OS and try again.',
+			})
+		}
+		if (!code || !state) {
+			return sendOAuthCompletionPage({
+				status: 'error',
+				message: 'Stripe authorization could not be completed. You can return to Merchant OS and try again.',
+			})
+		}
 		try {
 			const forwarded = await postLocalhostBuffer('/api/merchantCardStripe/oauth/callback', { code, state })
 			if (forwarded.statusCode < 200 || forwarded.statusCode >= 300) {
@@ -13746,11 +13791,19 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			}
 			let result: any = {}
 			try { result = JSON.parse(forwarded.body) } catch {}
-			const cardAddress = result?.cardAddress ? encodeURIComponent(result.cardAddress) : ''
-			return res.redirect(`https://biz.beamio.app/biz/#/wallet?stripe_oauth=success&cardAddress=${cardAddress}`)
-		} catch (e: any) {
-			const message = encodeURIComponent(e?.message ?? String(e))
-			return res.redirect(`https://biz.beamio.app/biz/#/wallet?stripe_oauth=error&message=${message}`)
+			const cardAddress = typeof result?.cardAddress === 'string' && ethers.isAddress(result.cardAddress)
+				? ethers.getAddress(result.cardAddress)
+				: undefined
+			return sendOAuthCompletionPage({
+				status: 'success',
+				cardAddress,
+				message: 'Stripe is connected. This window will close automatically.',
+			})
+		} catch {
+			return sendOAuthCompletionPage({
+				status: 'error',
+				message: 'Stripe authorization could not be completed. You can return to Merchant OS and try again.',
+			})
 		}
 	})
 
