@@ -12,6 +12,7 @@ import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import { listReferralRegistryClaimsByParent, listReferralRegistryTreeByAccount, getReferralRegistryTreeSync, listReferralMerchantCandidates } from '../db'
+import { getMerchantCardStripeStatusFromDb } from '../db'
 import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
 import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getBeamioCardRowForMetadataSync, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getNfcCardPosAdminGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listPosTerminalCardBindingsForWallet, setActivePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
@@ -372,6 +373,8 @@ const OLD_CCSA_REDIRECTS = [
 import { masterSetup, resolveBeamioBaseHttpRpcUrl } from '../util'
 import { getStripeBeamioSecretKey } from './stripeBeamio'
 	import {
+		buildMerchantCardStripeDisconnectMessage,
+		buildMerchantCardStripeOAuthConnectMessage,
 		merchantCardStripeConfigured,
 	} from './merchantCardStripe'
 
@@ -13713,21 +13716,60 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	router.post('/merchantCardStripe/oauth/start', async (req, res) => {
-		const { cardAddress, merchantEoa } = req.body ?? {}
+		const { cardAddress, merchantEoa, deadline, nonce, signature } = req.body ?? {}
+		const now = Math.floor(Date.now() / 1000)
 		if (
 			typeof cardAddress !== 'string' ||
 			!ethers.isAddress(cardAddress) ||
 			typeof merchantEoa !== 'string' ||
-			!ethers.isAddress(merchantEoa)
+			!ethers.isAddress(merchantEoa) ||
+			!Number.isSafeInteger(deadline) ||
+			deadline <= now ||
+			deadline > now + 10 * 60 ||
+			typeof nonce !== 'string' ||
+			!/^0x[0-9a-fA-F]{64}$/.test(nonce) ||
+			typeof signature !== 'string' ||
+			!ethers.isHexString(signature, 65)
 		) {
-			return res.status(400).json({ error: 'Valid cardAddress and merchantEoa required' }).end()
+			return res.status(400).json({ error: 'Invalid Stripe connection authorization' }).end()
 		}
 		if (!merchantCardStripeConfigured()) {
 			return res.status(503).json({ error: 'Stripe OAuth is not configured on server' }).end()
 		}
+		const normalizedCardAddress = ethers.getAddress(cardAddress)
+		const normalizedMerchantEoa = ethers.getAddress(merchantEoa)
+		try {
+			const signedMessage = buildMerchantCardStripeOAuthConnectMessage({
+				cardAddress: normalizedCardAddress,
+				merchantEoa: normalizedMerchantEoa,
+				deadline,
+				nonce,
+			})
+			if (ethers.getAddress(ethers.verifyMessage(signedMessage, signature)) !== normalizedMerchantEoa) {
+				return res.status(403).json({ error: 'Stripe connection signature does not match the merchant wallet' }).end()
+			}
+			const cardChain = await resolveUserCardChain(normalizedCardAddress)
+			const card = new ethers.Contract(
+				normalizedCardAddress,
+				['function owner() view returns (address)'],
+				providerForUserCardChain(cardChain),
+			)
+			if (ethers.getAddress(await card.owner()) !== normalizedMerchantEoa) {
+				return res.status(403).json({ error: 'Only the merchant card owner can connect Stripe' }).end()
+			}
+			const stripeStatus = await getMerchantCardStripeStatusFromDb(normalizedCardAddress)
+			if (stripeStatus?.stripeAccountId) {
+				return res.status(409).json({ error: 'Merchant Stripe account is already connected' }).end()
+			}
+		} catch (error: any) {
+			logger(Colors.red('[merchantCardStripe] oauth/start cluster precheck failed'), error?.message ?? error)
+			return res.status(400).json({ error: 'Unable to verify merchant card ownership for Stripe connection' }).end()
+		}
 		return postLocalhost('/api/merchantCardStripe/oauth/start', {
-			cardAddress: ethers.getAddress(cardAddress),
-			merchantEoa: ethers.getAddress(merchantEoa),
+			cardAddress: normalizedCardAddress,
+			merchantEoa: normalizedMerchantEoa,
+			deadline,
+			nonce: nonce.toLowerCase(),
 		}, res)
 	})
 
@@ -13816,6 +13858,63 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
 		}
 		return postLocalhost('/api/merchantCardStripe/status', { cardAddress: ethers.getAddress(cardAddress) }, res)
+	})
+
+	/** A card owner may remove only this card's local Stripe Connect mapping. */
+	router.post('/merchantCardStripe/disconnect', async (req, res) => {
+		const { cardAddress, merchantEoa, deadline, nonce, signature } = req.body ?? {}
+		const now = Math.floor(Date.now() / 1000)
+		if (
+			typeof cardAddress !== 'string' ||
+			!ethers.isAddress(cardAddress) ||
+			typeof merchantEoa !== 'string' ||
+			!ethers.isAddress(merchantEoa) ||
+			!Number.isSafeInteger(deadline) ||
+			deadline <= now ||
+			deadline > now + 10 * 60 ||
+			typeof nonce !== 'string' ||
+			!/^0x[0-9a-fA-F]{64}$/.test(nonce) ||
+			typeof signature !== 'string' ||
+			!ethers.isHexString(signature, 65)
+		) {
+			return res.status(400).json({ error: 'Invalid Stripe disconnect authorization' }).end()
+		}
+		const normalizedCardAddress = ethers.getAddress(cardAddress)
+		const normalizedMerchantEoa = ethers.getAddress(merchantEoa)
+		try {
+			const signedMessage = buildMerchantCardStripeDisconnectMessage({
+				cardAddress: normalizedCardAddress,
+				merchantEoa: normalizedMerchantEoa,
+				deadline,
+				nonce,
+			})
+			if (ethers.getAddress(ethers.verifyMessage(signedMessage, signature)) !== normalizedMerchantEoa) {
+				return res.status(403).json({ error: 'Stripe disconnect signature does not match the merchant wallet' }).end()
+			}
+			const cardChain = await resolveUserCardChain(normalizedCardAddress)
+			const card = new ethers.Contract(
+				normalizedCardAddress,
+				['function owner() view returns (address)'],
+				providerForUserCardChain(cardChain),
+			)
+			if (ethers.getAddress(await card.owner()) !== normalizedMerchantEoa) {
+				return res.status(403).json({ error: 'Only the merchant card owner can disconnect Stripe' }).end()
+			}
+			const stripeStatus = await getMerchantCardStripeStatusFromDb(normalizedCardAddress)
+			if (!stripeStatus?.stripeAccountId) {
+				return res.status(409).json({ error: 'No Stripe account is connected to this merchant card' }).end()
+			}
+		} catch (error: any) {
+			logger(Colors.red('[merchantCardStripe] disconnect cluster precheck failed'), error?.message ?? error)
+			return res.status(400).json({ error: 'Unable to verify merchant card ownership for Stripe disconnect' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/disconnect', {
+			cardAddress: normalizedCardAddress,
+			merchantEoa: normalizedMerchantEoa,
+			deadline,
+			nonce: nonce.toLowerCase(),
+			signature,
+		}, res)
 	})
 
 	router.post('/merchantCardStripe/createCheckout', async (req, res) => {

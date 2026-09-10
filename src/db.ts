@@ -1640,6 +1640,7 @@ const MERCHANT_CARD_STRIPE_OAUTH_STATES_TABLE = `CREATE TABLE IF NOT EXISTS beam
 	state TEXT PRIMARY KEY,
 	card_address TEXT NOT NULL,
 	merchant_eoa TEXT NOT NULL,
+	authorization_nonce TEXT,
 	expires_at TIMESTAMPTZ NOT NULL,
 	used_at TIMESTAMPTZ,
 	created_at TIMESTAMPTZ DEFAULT NOW()
@@ -1649,6 +1650,13 @@ const MERCHANT_CARD_STRIPE_EVENTS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_str
 	event_type TEXT NOT NULL,
 	session_id TEXT,
 	created_at TIMESTAMPTZ DEFAULT NOW()
+)`
+const MERCHANT_CARD_STRIPE_DISCONNECT_AUTHORIZATIONS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_stripe_card_disconnect_authorizations (
+	nonce TEXT PRIMARY KEY,
+	card_address TEXT NOT NULL,
+	merchant_eoa TEXT NOT NULL,
+	expires_at TIMESTAMPTZ NOT NULL,
+	consumed_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
 /** Additive schema for Stripe Connect merchant-card payments. Safe on the historical database. */
@@ -1665,6 +1673,11 @@ export async function ensureMerchantCardStripeSchema(db: Client): Promise<void> 
 	await db.query(MERCHANT_CARD_STRIPE_SESSIONS_TABLE)
 	await db.query(MERCHANT_CARD_STRIPE_OAUTH_STATES_TABLE)
 	await db.query(MERCHANT_CARD_STRIPE_EVENTS_TABLE)
+	await db.query(MERCHANT_CARD_STRIPE_DISCONNECT_AUTHORIZATIONS_TABLE)
+	await db.query('ALTER TABLE beamio_stripe_card_oauth_states ADD COLUMN IF NOT EXISTS authorization_nonce TEXT')
+	await db.query(
+		'CREATE UNIQUE INDEX IF NOT EXISTS idx_beamio_stripe_card_oauth_states_authorization_nonce ON beamio_stripe_card_oauth_states (authorization_nonce) WHERE authorization_nonce IS NOT NULL',
+	)
 	await db.query('ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS fulfillment_started_at TIMESTAMPTZ')
 	await db.query(`ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS fulfillment_status TEXT NOT NULL DEFAULT 'payment_pending'`)
 	await db.query('ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS business_idempotency_key TEXT')
@@ -1792,27 +1805,129 @@ export async function updateMerchantCardStripeAccountById(params: {
 	}
 }
 
-export async function createMerchantCardStripeOAuthState(params: {
-	state: string
+/** Clears only Beamio's card-to-Connected-Account association; it never deletes the Stripe account. */
+export async function disconnectMerchantCardStripeAccount(cardAddress: string): Promise<{
 	cardAddress: string
-	merchantEoa: string
-	expiresAt: Date
-}): Promise<void> {
+} | null> {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		await ensureMerchantCardStripeSchema(db)
-		await db.query(
+		const result = await db.query(
+			`UPDATE beamio_cards SET
+				stripe_account_id = NULL,
+				stripe_charges_enabled = NULL,
+				stripe_details_submitted = NULL,
+				stripe_fulfillment_admin = NULL,
+				stripe_fulfillment_admins = NULL,
+				stripe_access_token = NULL,
+				stripe_refresh_token = NULL,
+				stripe_oauth_scope = NULL
+			 WHERE LOWER(card_address) = LOWER($1)
+			   AND stripe_account_id IS NOT NULL
+			 RETURNING card_address`,
+			[ethers.getAddress(cardAddress)],
+		)
+		const row = result.rows[0]
+		if (!row) return null
+		return {
+			cardAddress: ethers.getAddress(row.card_address),
+		}
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/**
+ * Atomically records an owner authorization and clears the local Stripe
+ * association, preventing a signed disconnect from being replayed after a
+ * later reconnect.
+ */
+export async function disconnectMerchantCardStripeAccountWithAuthorization(params: {
+	nonce: string
+	cardAddress: string
+	merchantEoa: string
+	expiresAt: Date
+}): Promise<'disconnected' | 'authorization_used' | 'not_connected'> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		await db.query('BEGIN')
+		try {
+			const authorization = await db.query(
+				`INSERT INTO beamio_stripe_card_disconnect_authorizations
+					(nonce, card_address, merchant_eoa, expires_at)
+				 VALUES ($1, $2, $3, $4)
+				 ON CONFLICT (nonce) DO NOTHING
+				 RETURNING nonce`,
+				[
+					params.nonce.toLowerCase(),
+					ethers.getAddress(params.cardAddress),
+					ethers.getAddress(params.merchantEoa),
+					params.expiresAt,
+				],
+			)
+			if (authorization.rowCount !== 1) {
+				await db.query('ROLLBACK')
+				return 'authorization_used'
+			}
+			const disconnected = await db.query(
+				`UPDATE beamio_cards SET
+					stripe_account_id = NULL,
+					stripe_charges_enabled = NULL,
+					stripe_details_submitted = NULL,
+					stripe_fulfillment_admin = NULL,
+					stripe_fulfillment_admins = NULL,
+					stripe_access_token = NULL,
+					stripe_refresh_token = NULL,
+					stripe_oauth_scope = NULL
+				 WHERE LOWER(card_address) = LOWER($1)
+				   AND stripe_account_id IS NOT NULL
+				 RETURNING card_address`,
+				[ethers.getAddress(params.cardAddress)],
+			)
+			if (disconnected.rowCount !== 1) {
+				await db.query('ROLLBACK')
+				return 'not_connected'
+			}
+			await db.query('COMMIT')
+			return 'disconnected'
+		} catch (error) {
+			await db.query('ROLLBACK').catch(() => {})
+			throw error
+		}
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+export async function createMerchantCardStripeOAuthState(params: {
+	state: string
+	cardAddress: string
+	merchantEoa: string
+	authorizationNonce: string
+	expiresAt: Date
+}): Promise<boolean> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		const result = await db.query(
 			`INSERT INTO beamio_stripe_card_oauth_states
-				(state, card_address, merchant_eoa, expires_at)
-			 VALUES ($1, $2, $3, $4)`,
+				(state, card_address, merchant_eoa, authorization_nonce, expires_at)
+			 VALUES ($1, $2, $3, $4, $5)
+			 ON CONFLICT (authorization_nonce) WHERE authorization_nonce IS NOT NULL DO NOTHING
+			 RETURNING state`,
 			[
 				params.state,
 				ethers.getAddress(params.cardAddress),
 				ethers.getAddress(params.merchantEoa),
+				params.authorizationNonce.toLowerCase(),
 				params.expiresAt,
 			],
 		)
+		return result.rowCount === 1
 	} finally {
 		await db.end().catch(() => {})
 	}

@@ -27,6 +27,7 @@ import {
 	createMerchantCardStripeAccountLink,
 	createMerchantCardStripeOAuthUrl,
 	completeMerchantCardStripeOAuth,
+	disconnectMerchantCardStripeAccountForOwner,
 	getMerchantCardStripeStatus,
 	createMerchantCardStripeCheckoutSession,
 	pollMerchantCardStripeSession,
@@ -6588,8 +6589,13 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 	router.post('/merchantCardStripe/oauth/start', async (req, res) => {
 		try {
-			const { cardAddress, merchantEoa } = req.body ?? {}
-			return res.json(await createMerchantCardStripeOAuthUrl({ cardAddress, merchantEoa })).end()
+			const { cardAddress, merchantEoa, deadline, nonce } = req.body ?? {}
+			return res.json(await createMerchantCardStripeOAuthUrl({
+				cardAddress,
+				merchantEoa,
+				deadline,
+				nonce,
+			})).end()
 		} catch (e: any) {
 			logger(Colors.red('[merchantCardStripe] oauth/start failed'), e?.message ?? e)
 			return res.status(400).json({ error: e?.message ?? String(e) }).end()
@@ -6613,6 +6619,17 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			if (typeof cardAddress !== 'string') return res.status(400).json({ error: 'cardAddress required' }).end()
 			return res.json(await getMerchantCardStripeStatus(cardAddress)).end()
 		} catch (e: any) {
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/merchantCardStripe/disconnect', async (req, res) => {
+		try {
+			// Cluster has already verified the signed card-owner authorization.
+			// Master only claims the nonce and clears the local association.
+			return res.json(await disconnectMerchantCardStripeAccountForOwner(req.body)).end()
+		} catch (e: any) {
+			logger(Colors.red('[merchantCardStripe] disconnect failed'), e?.message ?? e)
 			return res.status(400).json({ error: e?.message ?? String(e) }).end()
 		}
 	})

@@ -10,6 +10,8 @@ import {
 	getMerchantCardStripeSessionByBusinessKey,
 	getMerchantCardStripeSessionStatus,
 	getMerchantCardStripeStatusFromDb,
+	disconnectMerchantCardStripeAccount,
+	disconnectMerchantCardStripeAccountWithAuthorization,
     updateMerchantCardStripeAccount,
 	updateMerchantCardStripeAccountById,
 	updateMerchantCardStripeSession,
@@ -64,6 +66,62 @@ function normalizeStripeCurrency(raw: string): string {
 	return currency
 }
 
+export function buildMerchantCardStripeDisconnectMessage(params: {
+	cardAddress: string
+	merchantEoa: string
+	deadline: number
+	nonce: string
+}): string {
+	return [
+		'Beamio Merchant Card Stripe Disconnect',
+		`Card: ${normalizeCardAddress(params.cardAddress).toLowerCase()}`,
+		`Merchant: ${normalizeEoa(params.merchantEoa).toLowerCase()}`,
+		`Deadline: ${params.deadline}`,
+		`Nonce: ${params.nonce.toLowerCase()}`,
+	].join('\n')
+}
+
+export function buildMerchantCardStripeOAuthConnectMessage(params: {
+	cardAddress: string
+	merchantEoa: string
+	deadline: number
+	nonce: string
+}): string {
+	return [
+		'Beamio Merchant Card Stripe OAuth Connect',
+		`Card: ${normalizeCardAddress(params.cardAddress).toLowerCase()}`,
+		`Merchant: ${normalizeEoa(params.merchantEoa).toLowerCase()}`,
+		`Deadline: ${params.deadline}`,
+		`Nonce: ${params.nonce.toLowerCase()}`,
+	].join('\n')
+}
+
+/**
+ * Runs only after Cluster verifies the owner signature. This removes Beamio's
+ * local mapping and OAuth credentials; it does not close or delete the
+ * merchant's Stripe Connected Account.
+ */
+export async function disconnectMerchantCardStripeAccountForOwner(params: {
+	cardAddress: string
+	merchantEoa: string
+	deadline: number
+	nonce: string
+}): Promise<{ cardAddress: string; disconnected: true }> {
+	const outcome = await disconnectMerchantCardStripeAccountWithAuthorization({
+		nonce: params.nonce,
+		cardAddress: params.cardAddress,
+		merchantEoa: params.merchantEoa,
+		expiresAt: new Date(params.deadline * 1000),
+	})
+	if (outcome === 'authorization_used') {
+		throw new Error('This Stripe disconnect authorization has already been used')
+	}
+	if (outcome === 'not_connected') {
+		throw new Error('No Stripe account is currently connected to this merchant card')
+	}
+	return { cardAddress: normalizeCardAddress(params.cardAddress), disconnected: true }
+}
+
 export async function createMerchantCardStripeAccountLink(cardAddressRaw: string): Promise<{
 	stripeAccountId: string
 	url: string
@@ -86,6 +144,8 @@ export async function createMerchantCardStripeAccountLink(cardAddressRaw: string
 export async function createMerchantCardStripeOAuthUrl(params: {
 	cardAddress: string
 	merchantEoa: string
+	deadline: number
+	nonce: string
 }): Promise<{ url: string; state: string; fulfillmentAdmin: string; fulfillmentAdmins: string[] }> {
 	const cardAddress = normalizeCardAddress(params.cardAddress)
 	const merchantEoa = normalizeEoa(params.merchantEoa)
@@ -101,12 +161,14 @@ export async function createMerchantCardStripeOAuthUrl(params: {
 		throw new Error('Merchant Stripe account is already connected')
 	}
 	const state = ethers.hexlify(ethers.randomBytes(32))
-	await createMerchantCardStripeOAuthState({
+	const authorizationStored = await createMerchantCardStripeOAuthState({
 		state,
 		cardAddress,
 		merchantEoa,
+		authorizationNonce: params.nonce,
 		expiresAt: new Date(Date.now() + 10 * 60 * 1000),
 	})
+	if (!authorizationStored) throw new Error('This Stripe connection authorization has already been used')
 	const query = new URLSearchParams({
 		response_type: 'code',
 		client_id: clientId,
@@ -161,11 +223,14 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 	const fulfillmentAdmin = fulfillmentAdmins[0] ?? null
 	if (!fulfillmentAdmin) throw new Error('Stripe card fulfillment admin pool is not configured')
 	if (!local?.stripeAccountId) {
-		return { linked: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
+		return { connected: false, linked: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
 	}
 	const account = await stripeClient().accounts.retrieve(local.stripeAccountId)
 	if ('deleted' in account && account.deleted) {
-		return { linked: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
+		// Stripe has authoritatively removed this Connected Account, so clear
+		// the stale local mapping and let the merchant start a new OAuth flow.
+		await disconnectMerchantCardStripeAccount(cardAddress)
+		return { connected: false, linked: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
 	}
 	const chargesEnabled = account.charges_enabled === true
 	const detailsSubmitted = account.details_submitted === true
@@ -178,6 +243,7 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 		stripeFulfillmentAdmins: fulfillmentAdmins,
 	})
 	return {
+		connected: true,
 		linked: chargesEnabled && detailsSubmitted && fulfillmentAdmins.every(
 			(address) => local.stripeFulfillmentAdmins.some(
 				(bound) => bound.toLowerCase() === address.toLowerCase(),
