@@ -2071,13 +2071,13 @@ export async function createMerchantCardStripeSession(params: MerchantCardStripe
 
 export async function getMerchantCardStripeSessionByBusinessKey(
 	businessIdempotencyKey: string,
-): Promise<{ sessionId: string; fulfillmentStatus: string } | null> {
+): Promise<{ sessionId: string; fulfillmentStatus: string; paymentIntentId: string | null } | null> {
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
 		await ensureMerchantCardStripeSchema(db)
 		const result = await db.query(
-			`SELECT session_id, fulfillment_status
+			`SELECT session_id, fulfillment_status, payment_intent_id
 			   FROM beamio_stripe_card_sessions
 			  WHERE business_idempotency_key = $1
 			  LIMIT 1`,
@@ -2085,7 +2085,11 @@ export async function getMerchantCardStripeSessionByBusinessKey(
 		)
 		const row = result.rows[0]
 		return row
-			? { sessionId: row.session_id, fulfillmentStatus: row.fulfillment_status }
+			? {
+				sessionId: row.session_id,
+				fulfillmentStatus: row.fulfillment_status,
+				paymentIntentId: row.payment_intent_id ?? null,
+			}
 			: null
 	} finally {
 		await db.end().catch(() => {})

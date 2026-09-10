@@ -30,6 +30,7 @@ import {
 	exchangeStripeConnectOAuthCode,
 	getStripeConnectClientId,
 	getStripeConnectRedirectUri,
+	getStripeBeamioPublishableKey,
 } from './stripeBeamio'
 
 const APP_BASE_URL = 'https://beamio.app'
@@ -407,7 +408,111 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 	return { sessionId: session.id, url: session.url ?? '' }
 }
 
+/** Creates a PaymentIntent for the browser Payment Element.
+ * No receipt email is supplied: email remains optional in the client UI.
+ */
+export async function createMerchantCardStripePaymentIntent(params: {
+	cardAddress: string
+	buyerEoa: string
+	amountFiat6: string
+	currency: string
+	kind: 'topup' | 'membership'
+	membershipTierIndex?: number
+	membershipFeeFiat6?: string
+	businessIdempotencyKey?: string
+}): Promise<{ paymentIntentId: string; clientSecret: string; publishableKey: string }> {
+	const cardAddress = normalizeCardAddress(params.cardAddress)
+	const buyerEoa = normalizeEoa(params.buyerEoa)
+	const local = await getMerchantCardStripeStatusFromDb(cardAddress)
+	if (!local?.stripeAccountId || !local.chargesEnabled || !local.detailsSubmitted) {
+		throw new Error('Merchant Stripe account is not ready')
+	}
+	if (params.kind === 'topup' && !local.stripeTopupEnabled) {
+		throw new Error('This merchant is not accepting Stripe top-ups')
+	}
+	const fulfillmentAdmins = getStripeCardFulfillmentAdminAddresses()
+	const fulfillmentAdmin = fulfillmentAdmins[0] ?? null
+	const boundFulfillmentAdmins = local.stripeFulfillmentAdmins.length > 0
+		? local.stripeFulfillmentAdmins
+		: local.stripeFulfillmentAdmin ? [local.stripeFulfillmentAdmin] : []
+	if (!fulfillmentAdmin || fulfillmentAdmins.some(
+		(address) => !boundFulfillmentAdmins.some((bound) => bound.toLowerCase() === address.toLowerCase()),
+	)) {
+		throw new Error('Merchant card Stripe fulfillment admin pool is not linked')
+	}
+	const amount = stripeAmountFromFiat6(params.amountFiat6)
+	const currency = normalizeStripeCurrency(params.currency)
+	const businessIdempotencyKey = params.businessIdempotencyKey?.trim()
+	if (!businessIdempotencyKey || !/^[A-Za-z0-9:_-]{16,128}$/.test(businessIdempotencyKey)) {
+		throw new Error('businessIdempotencyKey is required')
+	}
+	const publishableKey = getStripeBeamioPublishableKey()
+	if (!publishableKey) throw new Error('Stripe publishable key is not configured on server')
+	const existingByKey = await getMerchantCardStripeSessionByBusinessKey(businessIdempotencyKey)
+	if (existingByKey?.paymentIntentId) {
+		const existingIntent = await stripeClient().paymentIntents.retrieve(existingByKey.paymentIntentId)
+		if (!existingIntent.client_secret) throw new Error('Stripe PaymentIntent has no client secret')
+		return { paymentIntentId: existingIntent.id, clientSecret: existingIntent.client_secret, publishableKey }
+	}
+	const metadata: Stripe.MetadataParam = {
+		product: 'merchantCardStripe',
+		card_address: cardAddress,
+		buyer_eoa: buyerEoa,
+		amount_fiat6: params.amountFiat6,
+		currency: params.currency.toUpperCase(),
+		kind: params.kind,
+		...(params.membershipTierIndex == null ? {} : { membership_tier_index: String(params.membershipTierIndex) }),
+		...(params.membershipFeeFiat6 == null ? {} : { membership_fee_fiat6: params.membershipFeeFiat6 }),
+	}
+	const paymentIntent = await stripeClient().paymentIntents.create({
+		amount,
+		currency,
+		automatic_payment_methods: { enabled: true },
+		description: params.kind === 'membership' ? 'Membership fee' : 'Program card top-up',
+		transfer_data: { destination: local.stripeAccountId },
+		metadata,
+	}, { idempotencyKey: businessIdempotencyKey })
+	if (!paymentIntent.client_secret) throw new Error('Stripe PaymentIntent has no client secret')
+	const inserted = await createMerchantCardStripeSession({
+		sessionId: paymentIntent.id,
+		cardAddress,
+		buyerEoa,
+		amountFiat6: params.amountFiat6,
+		currency: params.currency,
+		kind: params.kind,
+		membershipTierIndex: params.membershipTierIndex,
+		membershipFeeFiat6: params.membershipFeeFiat6,
+		businessIdempotencyKey,
+		paymentIntentId: paymentIntent.id,
+	})
+	if (!inserted) {
+		const duplicate = await getMerchantCardStripeSessionByBusinessKey(businessIdempotencyKey)
+		if (duplicate?.paymentIntentId) {
+			const duplicateIntent = await stripeClient().paymentIntents.retrieve(duplicate.paymentIntentId)
+			if (!duplicateIntent.client_secret) throw new Error('Stripe PaymentIntent has no client secret')
+			return { paymentIntentId: duplicateIntent.id, clientSecret: duplicateIntent.client_secret, publishableKey }
+		}
+		throw new Error('Stripe PaymentIntent already exists')
+	}
+	return { paymentIntentId: paymentIntent.id, clientSecret: paymentIntent.client_secret, publishableKey }
+}
+
 export async function pollMerchantCardStripeSession(sessionId: string) {
+	if (/^pi_[A-Za-z0-9_]+$/.test(sessionId)) {
+		const intent = await stripeClient().paymentIntents.retrieve(sessionId)
+		const local = await getMerchantCardStripeSessionStatus(sessionId)
+		return {
+			sessionId: intent.id,
+			status: intent.status === 'succeeded'
+				? 'succeeded'
+				: ['canceled', 'requires_payment_method'].includes(intent.status) ? 'failed' : 'pending',
+			paymentStatus: intent.status,
+			fulfillmentStatus: local?.fulfillmentStatus ?? (intent.status === 'succeeded' ? 'payment_succeeded' : 'payment_pending'),
+			txHash: local?.txHash ?? null,
+			error: local?.lastError ?? null,
+			url: null,
+		}
+	}
 	if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) throw new Error('Invalid sessionId')
 	const session = await stripeClient().checkout.sessions.retrieve(sessionId)
 	const paid = session.payment_status === 'paid'
@@ -508,10 +613,89 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
     }
 }
 
+/** Fulfill a paid PaymentIntent created by the Payment Element. */
+export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: string): Promise<void> {
+	const paymentIntent = await stripeClient().paymentIntents.retrieve(paymentIntentId)
+	if (paymentIntent.status !== 'succeeded') return
+	const meta = paymentIntent.metadata ?? {}
+	if (meta.product !== 'merchantCardStripe') return
+	if (!['topup', 'membership'].includes(meta.kind ?? '')) throw new Error('Invalid merchantCardStripe kind')
+	if (!meta.card_address || !meta.buyer_eoa || !meta.amount_fiat6 || !meta.currency) {
+		throw new Error('Stripe PaymentIntent is missing fulfillment metadata')
+	}
+	const expectedAmount = stripeAmountFromFiat6(meta.amount_fiat6)
+	if (paymentIntent.amount !== expectedAmount) {
+		throw new Error('Stripe amount does not match the fulfillment snapshot')
+	}
+	if (paymentIntent.currency.toLowerCase() !== normalizeStripeCurrency(meta.currency)) {
+		throw new Error('Stripe currency does not match the fulfillment snapshot')
+	}
+	if (!(await claimMerchantCardStripeSession(paymentIntentId))) return
+	await updateMerchantCardStripeSession({
+		sessionId: paymentIntentId,
+		status: 'succeeded',
+		fulfillmentStatus: 'payment_succeeded',
+		paymentIntentId,
+	})
+	try {
+		const tierIndex = meta.membership_tier_index == null ? undefined : Number(meta.membership_tier_index)
+		const prepared = await nfcTopupPreparePayload({
+			cardAddress: meta.card_address,
+			wallet: meta.buyer_eoa,
+			amount: ethers.formatUnits(BigInt(meta.amount_fiat6), 6),
+			currency: meta.currency,
+			idempotencyKey: `stripe-payment-intent:${paymentIntentId}`,
+			...(tierIndex == null ? {} : { membershipTierIndex: tierIndex }),
+			...(meta.membership_fee_fiat6 ? { membershipFeeFiat6: meta.membership_fee_fiat6 } : {}),
+		})
+		if ('error' in prepared) throw new Error(prepared.error)
+		let membershipFeeStage: NfcTopupMembershipFeeStage | undefined
+		if (prepared.membershipNeedsFee && prepared.membershipTierIndex != null && prepared.membershipFeeFiat6) {
+			membershipFeeStage = {
+				recipientEOA: meta.buyer_eoa,
+				tierIndex: prepared.membershipTierIndex,
+				feePaid6: BigInt(prepared.membershipFeeFiat6),
+				pointsCredit6: BigInt(prepared.pointsCredit6 ?? '0'),
+				durationKind: prepared.membershipDurationKind ?? 0,
+				bootstrapOnChain: false,
+			}
+		}
+		executeForAdminPool.push({
+			cardAddr: prepared.cardAddr,
+			data: prepared.data,
+			deadline: prepared.deadline,
+			nonce: prepared.nonce,
+			stripeFulfillment: true,
+			topupKind: 2,
+			topupFeeBUnits: 20_000_000n,
+			stripeSessionId: paymentIntentId,
+			...(membershipFeeStage ? { membershipFeeStage } : {}),
+		})
+		void executeForAdminProcess().catch((error) => {
+			void updateMerchantCardStripeSession({
+				sessionId: paymentIntentId,
+				status: 'failed',
+				fulfillmentStatus: 'fulfillment_failed',
+				lastError: error?.message ?? String(error),
+			})
+		})
+	} catch (error: any) {
+		await updateMerchantCardStripeSession({
+			sessionId: paymentIntentId,
+			status: 'failed',
+			fulfillmentStatus: 'fulfillment_failed',
+			lastError: error?.message ?? String(error),
+		})
+		throw error
+	}
+}
+
 /** Webhook dispatch target. On-chain fulfillment is intentionally a separate idempotent worker step. */
 export async function processMerchantCardStripeEvent(event: Stripe.Event): Promise<{ ok: true }> {
 	const eventObject = event.data?.object as { id?: string; metadata?: { product?: string } } | undefined
-	const sessionId = event.type.startsWith('checkout.session.') ? eventObject?.id ?? null : null
+	const sessionId = (event.type.startsWith('checkout.session.') || event.type.startsWith('payment_intent.'))
+		? eventObject?.id ?? null
+		: null
 	const isNewEvent = await claimMerchantCardStripeEvent({
 		eventId: event.id,
 		eventType: event.type,
@@ -525,6 +709,20 @@ export async function processMerchantCardStripeEvent(event: Stripe.Event): Promi
 			chargesEnabled: account.charges_enabled === true,
 			detailsSubmitted: account.details_submitted === true,
 		})
+		return { ok: true }
+	}
+	if (event.type === 'payment_intent.succeeded') {
+		await fulfillMerchantCardStripePaymentIntent(eventObject?.id ?? '')
+		return { ok: true }
+	}
+	if (event.type === 'payment_intent.payment_failed' || event.type === 'payment_intent.canceled') {
+		if (eventObject?.id) {
+			await updateMerchantCardStripeSession({
+				sessionId: eventObject.id,
+				status: 'failed',
+				lastError: `Stripe event ${event.type}`,
+			})
+		}
 		return { ok: true }
 	}
 	if (!event.type.startsWith('checkout.session.')) return { ok: true }

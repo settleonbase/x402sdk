@@ -41,6 +41,16 @@ export function getStripeConnectClientId(): string {
 	)
 }
 
+/** Publishable key is safe to return to the browser; never expose StripeBeamio. */
+export function getStripeBeamioPublishableKey(): string {
+	const setup = masterSetup as { StripePublishableKey?: string }
+	return (
+		(typeof process !== 'undefined' && process.env?.STRIPE_PUBLISHABLE_KEY?.trim()) ||
+		setup.StripePublishableKey?.trim() ||
+		''
+	)
+}
+
 export function getStripeConnectRedirectUri(): string {
 	const setup = masterSetup as { StripeConnectRedirectUri?: string; stripeConnectRedirectUri?: string }
 	return (

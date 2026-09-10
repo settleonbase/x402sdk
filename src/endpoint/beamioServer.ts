@@ -371,7 +371,7 @@ const OLD_CCSA_REDIRECTS = [
 	'0xA1A9f6f942dc0ED9Aa7eF5df7337bd878c2e157b', // 旧工厂 0x86879fE3 部署的 CCSA（已迁移至新工厂）
 ].map(a => a.toLowerCase())
 import { masterSetup, resolveBeamioBaseHttpRpcUrl } from '../util'
-import { getStripeBeamioSecretKey } from './stripeBeamio'
+import { getStripeBeamioPublishableKey, getStripeBeamioSecretKey } from './stripeBeamio'
 	import {
 		buildMerchantCardStripeDisconnectMessage,
 		buildMerchantCardStripeOAuthConnectMessage,
@@ -13991,6 +13991,30 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
 		}
 		return postLocalhost('/api/merchantCardStripe/createCheckout', {
+			...body,
+			cardAddress: ethers.getAddress(body.cardAddress),
+			buyerEoa: ethers.getAddress(body.buyerEoa),
+			businessIdempotencyKey: body.businessIdempotencyKey,
+		}, res)
+	})
+
+	router.post('/merchantCardStripe/createPaymentIntent', async (req, res) => {
+		const body = req.body ?? {}
+		if (typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
+			typeof body.buyerEoa !== 'string' || !ethers.isAddress(body.buyerEoa) ||
+			typeof body.amountFiat6 !== 'string' || !/^[0-9]+$/.test(body.amountFiat6) ||
+			!['topup', 'membership'].includes(body.kind) || typeof body.currency !== 'string' ||
+			typeof body.businessIdempotencyKey !== 'string' ||
+			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey)) {
+			return res.status(400).json({ error: 'cardAddress, buyerEoa, amountFiat6, currency and kind are required' }).end()
+		}
+		if (!merchantCardStripeConfigured()) {
+			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
+		}
+		if (!getStripeBeamioPublishableKey()) {
+			return res.status(503).json({ error: 'Stripe publishable key is not configured on server' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/createPaymentIntent', {
 			...body,
 			cardAddress: ethers.getAddress(body.cardAddress),
 			buyerEoa: ethers.getAddress(body.buyerEoa),
