@@ -32,6 +32,8 @@ import {
 	getMerchantCardStripeStatus,
 	createMerchantCardStripeCheckoutSession,
 	createMerchantCardStripePaymentIntent,
+	createMerchantCardStripeTerminalPaymentIntent,
+	createMerchantCardStripeTerminalConnectionToken,
 	pollMerchantCardStripeSession,
 	cancelMerchantCardStripeSession,
 } from './merchantCardStripe'
@@ -6666,6 +6668,29 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			return res.json(await createMerchantCardStripePaymentIntent(body)).end()
 		} catch (e: any) {
 			logger(Colors.red('[merchantCardStripe] createPaymentIntent failed'), e?.message ?? e)
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/merchantCardStripe/createTerminalPaymentIntent', async (req, res) => {
+		try {
+			const body = req.body ?? {}
+			if (!['topup', 'membership'].includes(body.kind)) throw new Error('kind must be topup or membership')
+			return res.json(await createMerchantCardStripeTerminalPaymentIntent(body)).end()
+		} catch (e: any) {
+			logger(Colors.red('[merchantCardStripe] createTerminalPaymentIntent failed'), e?.message ?? e)
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/merchantCardStripe/connectionToken', async (req, res) => {
+		try {
+			if (typeof req.body?.cardAddress !== 'string') return res.status(400).json({ error: 'cardAddress required' }).end()
+			return res.json(await createMerchantCardStripeTerminalConnectionToken({
+				cardAddress: req.body.cardAddress,
+			})).end()
+		} catch (e: any) {
+			logger(Colors.red('[merchantCardStripe] connectionToken failed'), e?.message ?? e)
 			return res.status(400).json({ error: e?.message ?? String(e) }).end()
 		}
 	})

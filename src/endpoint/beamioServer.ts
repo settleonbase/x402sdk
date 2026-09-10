@@ -376,6 +376,7 @@ import { getStripeBeamioPublishableKey, getStripeBeamioSecretKey } from './strip
 		buildMerchantCardStripeDisconnectMessage,
 		buildMerchantCardStripeOAuthConnectMessage,
 		buildMerchantCardStripeTopupEnabledMessage,
+		getMerchantCardStripeAdminLimitStatus,
 		merchantCardStripeConfigured,
 	} from './merchantCardStripe'
 
@@ -13964,6 +13965,23 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			if (!stripeStatus?.stripeAccountId) {
 				return res.status(409).json({ error: 'No Stripe account is connected to this merchant card' }).end()
 			}
+			if (topupEnabled) {
+				const adminLimitStatus = await getMerchantCardStripeAdminLimitStatus({
+					cardAddress: normalizedCardAddress,
+				})
+				if (adminLimitStatus.zeroLimitAdmins.length > 0 || adminLimitStatus.nonCardAdmins.length > 0) {
+					return res.status(409).json({
+						error: 'Stripe top-ups cannot be enabled until every Stripe fulfillment admin is on the merchant card and has an owner-authorized mint allowance.',
+						code: adminLimitStatus.nonCardAdmins.length > 0
+							? 'STRIPE_FULFILLMENT_ADMIN_NOT_ON_CARD'
+							: 'STRIPE_FULFILLMENT_ADMIN_LIMIT_AUTHORIZATION_REQUIRED',
+						cardAddress: normalizedCardAddress,
+						admins: adminLimitStatus.admins,
+						adminLimitAuthorizationRequired: adminLimitStatus.zeroLimitAdmins,
+						adminNotOnCard: adminLimitStatus.nonCardAdmins,
+					}).end()
+				}
+			}
 		} catch (error: any) {
 			logger(Colors.red('[merchantCardStripe] topupEnabled cluster precheck failed'), error?.message ?? error)
 			return res.status(400).json({ error: 'Unable to verify merchant card ownership for Stripe top-ups' }).end()
@@ -14022,9 +14040,46 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}, res)
 	})
 
+	router.post('/merchantCardStripe/createTerminalPaymentIntent', async (req, res) => {
+		const body = req.body ?? {}
+		if (
+			typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
+			typeof body.buyerEoa !== 'string' || !ethers.isAddress(body.buyerEoa) ||
+			typeof body.amountFiat6 !== 'string' || !/^[0-9]+$/.test(body.amountFiat6) ||
+			!['topup', 'membership'].includes(body.kind) ||
+			typeof body.currency !== 'string' ||
+			typeof body.businessIdempotencyKey !== 'string' ||
+			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey)
+		) {
+			return res.status(400).json({ error: 'cardAddress, buyerEoa, amountFiat6, currency, kind and businessIdempotencyKey are required' }).end()
+		}
+		if (!merchantCardStripeConfigured() || !getStripeBeamioPublishableKey()) {
+			return res.status(503).json({ error: 'Stripe Terminal is not configured on server' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/createTerminalPaymentIntent', {
+			...body,
+			cardAddress: ethers.getAddress(body.cardAddress),
+			buyerEoa: ethers.getAddress(body.buyerEoa),
+			paymentMethod: 'card_present',
+		}, res)
+	})
+
+	router.post('/merchantCardStripe/connectionToken', async (req, res) => {
+		const { cardAddress } = req.body ?? {}
+		if (typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress)) {
+			return res.status(400).json({ error: 'Valid cardAddress required' }).end()
+		}
+		if (!merchantCardStripeConfigured()) {
+			return res.status(503).json({ error: 'Stripe Terminal is not configured on server' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/connectionToken', {
+			cardAddress: ethers.getAddress(cardAddress),
+		}, res)
+	})
+
 	router.post('/merchantCardStripe/poll', async (req, res) => {
 		const { sessionId } = req.body ?? {}
-		if (typeof sessionId !== 'string' || !/^cs_[A-Za-z0-9_]+$/.test(sessionId)) {
+		if (typeof sessionId !== 'string' || !/^(?:cs|pi)_[A-Za-z0-9_]+$/.test(sessionId)) {
 			return res.status(400).json({ error: 'Valid sessionId required' }).end()
 		}
 		return postLocalhost('/api/merchantCardStripe/poll', { sessionId }, res)

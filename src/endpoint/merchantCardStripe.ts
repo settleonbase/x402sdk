@@ -1,5 +1,7 @@
 import Stripe from 'stripe'
 import { ethers } from 'ethers'
+import Colors from 'colors/safe'
+import { logger } from '../logger'
 import { getStripeBeamioClient, getStripeBeamioSecretKey } from './stripeBeamio'
 import {
     claimMerchantCardStripeSession,
@@ -25,6 +27,7 @@ import {
     nfcTopupPreparePayload,
     type NfcTopupMembershipFeeStage,
 } from '../MemberCard'
+import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { CONET_RPC_URL } from '../chainAddresses'
 import {
 	exchangeStripeConnectOAuthCode,
@@ -234,7 +237,14 @@ export async function createMerchantCardStripeOAuthUrl(params: {
 export async function completeMerchantCardStripeOAuth(params: {
 	state: string
 	code: string
-}): Promise<{ cardAddress: string; stripeAccountId: string; merchantEoa: string }> {
+}): Promise<{
+	cardAddress: string
+	stripeAccountId: string
+	merchantEoa: string
+	topupEnabled: boolean
+	adminLimitAuthorizationRequired: string[]
+	adminNotOnCard: string[]
+}> {
 	if (!/^0x[0-9a-fA-F]{64}$/.test(params.state)) throw new Error('Invalid OAuth state')
 	if (!params.code || params.code.length > 2048) throw new Error('Invalid OAuth code')
 	const state = await consumeMerchantCardStripeOAuthState(params.state)
@@ -244,6 +254,23 @@ export async function completeMerchantCardStripeOAuth(params: {
 	const account = await stripeClient().accounts.retrieve(token.stripe_user_id)
 	if ('deleted' in account && account.deleted) throw new Error('Connected Stripe account was deleted')
 	const fulfillmentAdmins = getStripeCardFulfillmentAdminAddresses()
+	let adminLimitStatus: Awaited<ReturnType<typeof getMerchantCardStripeAdminLimitStatus>>
+	try {
+		adminLimitStatus = await getMerchantCardStripeAdminLimitStatus({
+			cardAddress: state.cardAddress,
+			adminAddresses: fulfillmentAdmins,
+		})
+	} catch (error: any) {
+		logger(Colors.yellow(`[merchantCardStripe] unable to verify fulfillment admin allowances after OAuth: ${error?.message ?? error}`))
+		// Keep Stripe top-up disabled until the owner explicitly repairs the
+		// allowances and the status endpoint can verify them.
+		adminLimitStatus = {
+			cardAddress: state.cardAddress,
+			admins: [],
+			zeroLimitAdmins: fulfillmentAdmins,
+			nonCardAdmins: [],
+		}
+	}
 	await updateMerchantCardStripeAccount({
 		cardAddress: state.cardAddress,
 		stripeAccountId: token.stripe_user_id,
@@ -254,12 +281,78 @@ export async function completeMerchantCardStripeOAuth(params: {
 		stripeAccessToken: token.access_token ?? null,
 		stripeRefreshToken: token.refresh_token ?? null,
 		stripeOauthScope: token.scope ?? null,
-		stripeTopupEnabled: true,
+		// Do not enable checkout until every configured Beamio fulfillment admin
+		// has a non-zero on-chain allowance. Changing that allowance requires a
+		// separate card-owner executeForOwner authorization.
+		stripeTopupEnabled: adminLimitStatus.zeroLimitAdmins.length === 0 && adminLimitStatus.nonCardAdmins.length === 0,
 	})
 	return {
 		cardAddress: state.cardAddress,
 		stripeAccountId: token.stripe_user_id,
 		merchantEoa: state.merchantEoa,
+		topupEnabled: adminLimitStatus.zeroLimitAdmins.length === 0 && adminLimitStatus.nonCardAdmins.length === 0,
+		adminLimitAuthorizationRequired: adminLimitStatus.zeroLimitAdmins,
+		adminNotOnCard: adminLimitStatus.nonCardAdmins,
+	}
+}
+
+export type MerchantCardStripeAdminLimitStatus = {
+	admin: string
+	isCardAdmin: boolean
+	limit: string
+	usedFromClear: string
+	unlimited: boolean
+	requiresOwnerAuthorization: boolean
+}
+
+/**
+ * Reads the current CoNET card governance state for the server's Stripe
+ * fulfillment admins. This is deliberately read-only: only the card owner
+ * may authorize setAdminAirdropLimit through executeForOwner.
+ */
+export async function getMerchantCardStripeAdminLimitStatus(params: {
+	cardAddress: string
+	adminAddresses?: string[]
+}): Promise<{
+	cardAddress: string
+	admins: MerchantCardStripeAdminLimitStatus[]
+	zeroLimitAdmins: string[]
+	nonCardAdmins: string[]
+}> {
+	const cardAddress = normalizeCardAddress(params.cardAddress)
+	const addresses = (params.adminAddresses ?? getStripeCardFulfillmentAdminAddresses())
+		.map(normalizeEoa)
+		.filter((address, index, all) => all.findIndex((candidate) => candidate.toLowerCase() === address.toLowerCase()) === index)
+	const provider = providerForUserCardChain(await resolveUserCardChain(cardAddress))
+	const card = new ethers.Contract(cardAddress, [
+		'function getAdminAirdropLimit(address) view returns (tuple(address admin, address parent, uint256 limit, uint256 usedFromClear, uint256 remainingAvailable, bool unlimited))',
+	], provider)
+	const admins: MerchantCardStripeAdminLimitStatus[] = []
+	for (const adminAddress of addresses) {
+		const row = await card.getAdminAirdropLimit(adminAddress)
+		const admin = ethers.getAddress(String(row.admin))
+		const limit = BigInt(row.limit)
+		const usedFromClear = BigInt(row.usedFromClear)
+		const unlimited = Boolean(row.unlimited)
+		const isCardAdmin = admin !== ethers.ZeroAddress
+		admins.push({
+			admin: adminAddress,
+			isCardAdmin,
+			limit: limit.toString(),
+			usedFromClear: usedFromClear.toString(),
+			unlimited,
+			requiresOwnerAuthorization: isCardAdmin && !unlimited && limit === 0n,
+		})
+	}
+	return {
+		cardAddress,
+		admins,
+		zeroLimitAdmins: admins
+			.filter((entry) => entry.requiresOwnerAuthorization)
+			.map((entry) => entry.admin),
+		nonCardAdmins: admins
+			.filter((entry) => !entry.isCardAdmin)
+			.map((entry) => entry.admin),
 	}
 }
 
@@ -289,6 +382,10 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 		stripeFulfillmentAdmin: fulfillmentAdmin,
 		stripeFulfillmentAdmins: fulfillmentAdmins,
 	})
+	const adminLimitStatus = await getMerchantCardStripeAdminLimitStatus({
+		cardAddress,
+		adminAddresses: fulfillmentAdmins,
+	})
 	return {
 		connected: true,
 		linked: chargesEnabled && detailsSubmitted && fulfillmentAdmins.every(
@@ -303,6 +400,9 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 		fulfillmentAdmin,
 		fulfillmentAdmins,
 		topupEnabled: local.stripeTopupEnabled,
+		adminLimitStatus: adminLimitStatus.admins,
+		adminLimitAuthorizationRequired: adminLimitStatus.zeroLimitAdmins,
+		adminNotOnCard: adminLimitStatus.nonCardAdmins,
 	}
 }
 
@@ -500,9 +600,183 @@ export async function createMerchantCardStripePaymentIntent(params: {
 	return { paymentIntentId: paymentIntent.id, clientSecret: paymentIntent.client_secret, publishableKey }
 }
 
+type MerchantCardStripeTerminalPaymentParams = {
+	cardAddress: string
+	buyerEoa: string
+	amountFiat6: string
+	currency: string
+	kind: 'topup' | 'membership'
+	membershipTierIndex?: number
+	membershipFeeFiat6?: string
+	businessIdempotencyKey: string
+}
+
+async function ensureMerchantStripeTerminalLocation(
+	stripe: Stripe,
+	stripeAccountId: string,
+	existingLocationId: string | null,
+): Promise<string> {
+	if (existingLocationId?.trim()) return existingLocationId.trim()
+	const locations = await stripe.terminal.locations.list(
+		{ limit: 1 },
+		{ stripeAccount: stripeAccountId },
+	)
+	const existing = locations.data[0]
+	if (existing?.id) return existing.id
+	const created = await stripe.terminal.locations.create(
+		{
+			display_name: 'Beamio POS',
+			address: { country: 'CA' },
+		},
+		{ stripeAccount: stripeAccountId },
+	)
+	if (!created.id) throw new Error('Stripe Terminal location was not created')
+	return created.id
+}
+
+/**
+ * Creates the server-side objects needed by the native Stripe Terminal SDK.
+ * The card-present PaymentIntent is still fulfilled by the existing webhook /
+ * idempotent merchant-card Stripe fulfillment path after confirmation.
+ */
+export async function createMerchantCardStripeTerminalPaymentIntent(
+	params: MerchantCardStripeTerminalPaymentParams,
+): Promise<{
+	paymentIntentId: string
+	clientSecret: string
+	publishableKey: string
+	locationId: string
+}> {
+	const cardAddress = normalizeCardAddress(params.cardAddress)
+	const buyerEoa = normalizeEoa(params.buyerEoa)
+	const local = await getMerchantCardStripeStatusFromDb(cardAddress)
+	if (!local?.stripeAccountId || !local.chargesEnabled || !local.detailsSubmitted) {
+		throw new Error('Merchant Stripe account is not ready')
+	}
+	if (params.kind === 'topup' && !local.stripeTopupEnabled) {
+		throw new Error('This merchant is not accepting Stripe top-ups')
+	}
+	const fulfillmentAdmins = getStripeCardFulfillmentAdminAddresses()
+	const boundAdmins = local.stripeFulfillmentAdmins.length > 0
+		? local.stripeFulfillmentAdmins
+		: local.stripeFulfillmentAdmin ? [local.stripeFulfillmentAdmin] : []
+	if (
+		fulfillmentAdmins.length === 0 ||
+		fulfillmentAdmins.some((address) => !boundAdmins.some((bound) => bound.toLowerCase() === address.toLowerCase()))
+	) {
+		throw new Error('Merchant card Stripe fulfillment admin pool is not linked')
+	}
+	const amount = stripeAmountFromFiat6(params.amountFiat6)
+	const currency = normalizeStripeCurrency(params.currency)
+	if (!/^[A-Za-z0-9:_-]{16,128}$/.test(params.businessIdempotencyKey.trim())) {
+		throw new Error('businessIdempotencyKey is required')
+	}
+	const publishableKey = getStripeBeamioPublishableKey()
+	if (!publishableKey) throw new Error('Stripe publishable key is not configured on server')
+	const stripe = stripeClient()
+	const existingByKey = await getMerchantCardStripeSessionByBusinessKey(params.businessIdempotencyKey.trim())
+	if (existingByKey?.paymentIntentId) {
+		const existingIntent = await stripe.paymentIntents.retrieve(existingByKey.paymentIntentId)
+		if (!existingIntent.client_secret) throw new Error('Stripe PaymentIntent has no client secret')
+		const locationId = await ensureMerchantStripeTerminalLocation(
+			stripe,
+			local.stripeAccountId,
+			local.stripeTerminalLocationId,
+		)
+		if (local.stripeTerminalLocationId !== locationId) {
+			await updateMerchantCardStripeAccount({
+				cardAddress,
+				stripeAccountId: local.stripeAccountId,
+				stripeTerminalLocationId: locationId,
+			})
+		}
+		return { paymentIntentId: existingIntent.id, clientSecret: existingIntent.client_secret, publishableKey, locationId }
+	}
+	const metadata: Stripe.MetadataParam = {
+		product: 'merchantCardStripe',
+		payment_mode: 'terminal',
+		card_address: cardAddress,
+		buyer_eoa: buyerEoa,
+		amount_fiat6: params.amountFiat6,
+		currency: params.currency.toUpperCase(),
+		kind: params.kind,
+		...(params.membershipTierIndex == null ? {} : { membership_tier_index: String(params.membershipTierIndex) }),
+		...(params.membershipFeeFiat6 == null ? {} : { membership_fee_fiat6: params.membershipFeeFiat6 }),
+	}
+	const paymentIntent = await stripe.paymentIntents.create({
+		amount,
+		currency,
+		payment_method_types: ['card_present'],
+		description: params.kind === 'membership' ? 'Membership fee' : 'Program card top-up',
+		on_behalf_of: local.stripeAccountId,
+		transfer_data: { destination: local.stripeAccountId },
+		metadata,
+	}, { idempotencyKey: params.businessIdempotencyKey.trim() })
+	if (!paymentIntent.client_secret) throw new Error('Stripe PaymentIntent has no client secret')
+	const inserted = await createMerchantCardStripeSession({
+		sessionId: paymentIntent.id,
+		cardAddress,
+		buyerEoa,
+		amountFiat6: params.amountFiat6,
+		currency: params.currency,
+		kind: params.kind,
+		membershipTierIndex: params.membershipTierIndex,
+		membershipFeeFiat6: params.membershipFeeFiat6,
+		businessIdempotencyKey: params.businessIdempotencyKey.trim(),
+		paymentIntentId: paymentIntent.id,
+	})
+	if (!inserted) throw new Error('Stripe Terminal payment already exists')
+	const locationId = await ensureMerchantStripeTerminalLocation(
+		stripe,
+		local.stripeAccountId,
+		local.stripeTerminalLocationId,
+	)
+	if (local.stripeTerminalLocationId !== locationId) {
+		await updateMerchantCardStripeAccount({
+			cardAddress,
+			stripeAccountId: local.stripeAccountId,
+			stripeTerminalLocationId: locationId,
+		})
+	}
+	return { paymentIntentId: paymentIntent.id, clientSecret: paymentIntent.client_secret, publishableKey, locationId }
+}
+
+export async function createMerchantCardStripeTerminalConnectionToken(params: {
+	cardAddress: string
+}): Promise<{ secret: string; locationId: string }> {
+	const cardAddress = normalizeCardAddress(params.cardAddress)
+	const local = await getMerchantCardStripeStatusFromDb(cardAddress)
+	if (!local?.stripeAccountId || !local.chargesEnabled || !local.detailsSubmitted) {
+		throw new Error('Merchant Stripe account is not ready')
+	}
+	const stripe = stripeClient()
+	const locationId = await ensureMerchantStripeTerminalLocation(
+		stripe,
+		local.stripeAccountId,
+		local.stripeTerminalLocationId,
+	)
+	if (local.stripeTerminalLocationId !== locationId) {
+		await updateMerchantCardStripeAccount({
+			cardAddress,
+			stripeAccountId: local.stripeAccountId,
+			stripeTerminalLocationId: locationId,
+		})
+	}
+	const token = await stripe.terminal.connectionTokens.create(
+		{ location: locationId },
+		{ stripeAccount: local.stripeAccountId },
+	)
+	return { secret: token.secret, locationId }
+}
+
 export async function pollMerchantCardStripeSession(sessionId: string) {
 	if (/^pi_[A-Za-z0-9_]+$/.test(sessionId)) {
 		const intent = await stripeClient().paymentIntents.retrieve(sessionId)
+		if (intent.status === 'succeeded') {
+			await fulfillMerchantCardStripePaymentIntent(sessionId).catch((error: any) => {
+				logger(Colors.yellow(`[merchantCardStripe] terminal fulfillment retry failed: ${error?.message ?? error}`))
+			})
+		}
 		const local = await getMerchantCardStripeSessionStatus(sessionId)
 		return {
 			sessionId: intent.id,
