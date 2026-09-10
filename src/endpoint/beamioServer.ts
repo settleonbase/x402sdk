@@ -14030,6 +14030,14 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		return postLocalhost('/api/merchantCardStripe/poll', { sessionId }, res)
 	})
 
+	router.post('/merchantCardStripe/cancel', async (req, res) => {
+		const { sessionId } = req.body ?? {}
+		if (typeof sessionId !== 'string' || !/^cs_[A-Za-z0-9_]+$/.test(sessionId)) {
+			return res.status(400).json({ error: 'Valid sessionId required' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/cancel', { sessionId }, res)
+	})
+
 	/**
 	 * SaaS Fuel Pack Stripe — Cluster 预检后转发 Master。
 	 * body: `{ walletAddress, packId }`（packId ∈ FUEL_PACK_CATALOG）

@@ -351,6 +351,7 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 	const stripe = stripeClient()
 	const session = await stripe.checkout.sessions.create({
 		mode: 'payment',
+		customer_creation: 'if_required',
 		line_items: [{
 			price_data: {
 				currency,
@@ -383,7 +384,7 @@ export async function createMerchantCardStripeCheckoutSession(params: {
                     ...(params.membershipFeeFiat6 == null ? {} : { membership_fee_fiat6: params.membershipFeeFiat6 }),
 		},
 		success_url: `${APP_BASE_URL}/app/stripe-payment-return?session_id={CHECKOUT_SESSION_ID}`,
-		cancel_url: `${APP_BASE_URL}/app/stripe-payment-return?cancelled=1`,
+		cancel_url: `${APP_BASE_URL}/app/stripe-payment-return?cancelled=1&session_id={CHECKOUT_SESSION_ID}`,
 	}, { idempotencyKey: businessIdempotencyKey })
 	const inserted = await createMerchantCardStripeSession({
 		sessionId: session.id,
@@ -529,6 +530,19 @@ export async function pollMerchantCardStripeSession(sessionId: string) {
 		error: local?.lastError ?? null,
 		url: session.url ?? null,
 	}
+}
+
+export async function cancelMerchantCardStripeSession(sessionId: string) {
+	if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) throw new Error('Invalid sessionId')
+	const session = await stripeClient().checkout.sessions.retrieve(sessionId)
+	if (session.payment_status !== 'paid' && session.status !== 'complete') {
+		await updateMerchantCardStripeSession({
+			sessionId,
+			status: 'failed',
+			lastError: 'Stripe Checkout canceled by customer',
+		})
+	}
+	return { sessionId, cancelled: true }
 }
 
 /** Fulfill one paid Checkout session exactly once through ExecuteForAdmin. */

@@ -33,6 +33,7 @@ import {
 	createMerchantCardStripeCheckoutSession,
 	createMerchantCardStripePaymentIntent,
 	pollMerchantCardStripeSession,
+	cancelMerchantCardStripeSession,
 } from './merchantCardStripe'
 import {
 	createFuelPackCheckoutSession,
@@ -6673,6 +6674,15 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		try {
 			if (typeof req.body?.sessionId !== 'string') return res.status(400).json({ error: 'sessionId required' }).end()
 			return res.json(await pollMerchantCardStripeSession(req.body.sessionId)).end()
+		} catch (e: any) {
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/merchantCardStripe/cancel', async (req, res) => {
+		try {
+			if (typeof req.body?.sessionId !== 'string') return res.status(400).json({ error: 'sessionId required' }).end()
+			return res.json(await cancelMerchantCardStripeSession(req.body.sessionId)).end()
 		} catch (e: any) {
 			return res.status(400).json({ error: e?.message ?? String(e) }).end()
 		}
