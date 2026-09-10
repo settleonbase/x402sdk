@@ -23,6 +23,8 @@ import {
 } from './onboardingBusinessLookup.js'
 
 const ZOMI_LONGDHANG = 'https://www.zomi.menu/shop/longdhang'
+const AMAZON_PROTEAR =
+	'https://www.amazon.ca/stores/PROTEAR/page/982EFF4B-8533-447D-B482-533338ED3C9E?lp_asin=B0HGD4BYDX'
 
 const longdhangDescription =
 	'See reviews, hours and location for LONGDHANG in Richmond, plus popular picks curated from the most-ordered and most-talked-about dishes across the web – starting with favourites like Chinese Rice'
@@ -85,6 +87,51 @@ describe('zomi.menu shop listing name', () => {
 			jsonLdName: 'ZOMI',
 		})
 		assert.equal(name, '')
+	})
+})
+
+describe('Amazon Brand Store listing name', () => {
+	it('recognizes Amazon Brand Store URLs and extracts the brand slug', () => {
+		assert.equal(isMarketplaceListingUrl(AMAZON_PROTEAR), true)
+		assert.equal(shopListingSlug(AMAZON_PROTEAR), 'protear')
+		assert.equal(marketplaceVenueName(AMAZON_PROTEAR), 'PROTEAR')
+	})
+
+	it('does not treat Amazon platform chrome as the merchant', () => {
+		assert.equal(looksLikeNonVenueListingLabel('Amazon.ca', AMAZON_PROTEAR), true)
+		assert.equal(
+			scrapeLooksLikeListingChrome({
+				url: AMAZON_PROTEAR,
+				title: 'Amazon.ca: PROTEAR Store',
+				description: 'PROTEAR HEARING PROTECTION WITH ENTERTAINMENT',
+				siteName: 'Amazon.ca',
+				jsonLdName: 'Amazon.ca',
+				visibleText: 'PROTEAR HEARING PROTECTION WITH ENTERTAINMENT',
+			}),
+			true,
+		)
+	})
+
+	it('keeps the Amazon brand and removes the marketplace URL', () => {
+		const out = overlayScrapedVenueForWebsiteQuery(AMAZON_PROTEAR, [
+			emptyPage({
+				url: AMAZON_PROTEAR,
+				title: 'Amazon.ca: PROTEAR Store',
+				description: 'PROTEAR HEARING PROTECTION WITH ENTERTAINMENT',
+				siteName: 'Amazon.ca',
+				jsonLdName: 'Amazon.ca',
+				visibleText: 'PROTEAR HEARING PROTECTION WITH ENTERTAINMENT',
+			}),
+		], [
+			emptyCand({
+				name: 'PROTEAR',
+				website: AMAZON_PROTEAR,
+				snippet: 'Hearing protection products.',
+			}),
+		])
+		assert.equal(out.length, 1)
+		assert.equal(out[0].name, 'PROTEAR')
+		assert.equal(out[0].website, '')
 	})
 })
 

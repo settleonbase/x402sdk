@@ -511,6 +511,18 @@ const MARKETPLACE_APEX_HOSTS = new Set([
 	'zomi.menu',
 	'zbj.com',
 	'1688.com',
+	'amazon.com',
+	'amazon.ca',
+	'amazon.co.uk',
+	'amazon.de',
+	'amazon.fr',
+	'amazon.it',
+	'amazon.es',
+	'amazon.co.jp',
+	'amazon.in',
+	'amazon.com.au',
+	'amazon.com.mx',
+	'amazon.com.br',
 ])
 
 const MARKETPLACE_PLATFORM_LABEL: Record<string, string> = {
@@ -537,6 +549,18 @@ const MARKETPLACE_PLATFORM_LABEL: Record<string, string> = {
 	'zomi.menu': 'Zomi',
 	'zbj.com': 'Zhubajie',
 	'1688.com': '1688',
+	'amazon.com': 'Amazon',
+	'amazon.ca': 'Amazon',
+	'amazon.co.uk': 'Amazon',
+	'amazon.de': 'Amazon',
+	'amazon.fr': 'Amazon',
+	'amazon.it': 'Amazon',
+	'amazon.es': 'Amazon',
+	'amazon.co.jp': 'Amazon',
+	'amazon.in': 'Amazon',
+	'amazon.com.au': 'Amazon',
+	'amazon.com.mx': 'Amazon',
+	'amazon.com.br': 'Amazon',
 }
 
 const ZBJ_PLATFORM_LABELS = new Set([
@@ -750,6 +774,18 @@ export function scrapeLooksLikeListingChrome(src: {
 	jsonLdName: string
 	visibleText?: string
 }): boolean {
+	const sourceUrl = parsePublicHttpUrl(src.url)
+	if (
+		sourceUrl &&
+		marketplacePlatformApex(sourceUrl.hostname)?.startsWith('amazon.') &&
+		/^\/stores\/[^/]+\/page(?:\/|$)/i.test(sourceUrl.pathname)
+	) {
+		/**
+		 * An Amazon Brand Store is a marketplace listing even when its brand
+		 * slug is readable. Do not let Amazon's page chrome become the merchant.
+		 */
+		return true
+	}
 	const slug = shopListingSlug(src.url)
 	if (slug && !looksLikeOpaqueListingId(slug)) return false
 	const title = stripTitleSiteSuffix(src.title)
@@ -857,7 +893,10 @@ function marketplaceSlugParts(u: URL): { slug: string; plusIsSpace: boolean } | 
 	const apex = marketplacePlatformApex(u.hostname)
 	if (!apex) return null
 	let slug = ''
-	if (apex === 'ubereats.com') {
+	if (apex.startsWith('amazon.')) {
+		/** Amazon Brand Store pages use `/stores/{brand}/page/{uuid}`. */
+		slug = path.match(/^\/stores\/([^/]+)\/page(?:\/|$)/i)?.[1] || ''
+	} else if (apex === 'ubereats.com') {
 		slug = path.match(/\/store\/([^/]+)(?:\/|$)/i)?.[1] || ''
 	} else if (apex === 'doordash.com') {
 		slug = path.match(/\/store\/([^/]+)(?:\/|$)/i)?.[1] || path.match(/\/food-delivery\/([^/]+)(?:\/|$)/i)?.[1] || ''
@@ -922,6 +961,10 @@ export function marketplaceVenueName(raw: string | URL): string {
 	const parts = marketplaceSlugParts(u)
 	if (!parts) return ''
 	if (looksLikeOpaqueListingId(parts.slug.split(/[?#]/)[0] || '')) return ''
+	if (marketplacePlatformApex(u.hostname)?.startsWith('amazon.')) {
+		const rawBrand = parts.slug.trim()
+		if (/^[A-Z0-9][A-Z0-9 &+'-]{1,79}$/.test(rawBrand)) return clip(rawBrand, 120)
+	}
 	const name = parts.plusIsSpace ? humanizeGoogleMapsPlace(parts.slug) : humanizeMarketplaceSlug(parts.slug)
 	return name.length >= 2 ? name : ''
 }
@@ -2885,7 +2928,18 @@ export function preferNonChromeCandidateNames(
 	pageUrl?: string,
 ): OnboardingBusinessLookupCandidate[] {
 	if (!candidates.length) return candidates
-	const real = candidates.filter((c) => !looksLikeNonVenueListingLabel(c.name, pageUrl))
+	const normalized = candidates.map((c) => {
+		const website = sanitizeWebsite(c.website)
+		const next = website === c.website ? c : { ...c, website }
+		const trustedWebsite =
+			website && !isMarketplaceListingUrl(website) && !looksLikeOpaqueListingPageUrl(website)
+		if (pageUrl && isMarketplaceListingUrl(pageUrl) && !trustedWebsite) {
+			// Do not leak marketplace contact chrome (e.g. Amazon corporate address/phone).
+			return { ...next, ...emptyContact(), city: '', province: '' }
+		}
+		return next
+	})
+	const real = normalized.filter((c) => !looksLikeNonVenueListingLabel(c.name, pageUrl))
 	return real
 }
 
