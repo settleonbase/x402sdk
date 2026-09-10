@@ -43,6 +43,11 @@ type IMasterSetup = {
 	 */
 	StripeBeamio?: string
 	/**
+	 * Stripe Connect OAuth Client ID (`ca_…`) for merchant account authorization.
+	 * This API-host field is consumed by `getStripeConnectClientId`.
+	 */
+	StripeOAuthClient?: string
+	/**
 	 * Dedicated EOA private key for merchant-card Stripe fulfillment.
 	 * When omitted, the Stripe fulfillment signer is resolved from initManager[
 	 * StripeCardFulfillmentAdminIndex ?? 0]. This key is separate from

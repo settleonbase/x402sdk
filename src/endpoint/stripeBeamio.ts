@@ -25,9 +25,16 @@ export function getStripeBeamioWebhookSecret(): string {
 }
 
 export function getStripeConnectClientId(): string {
-	const setup = masterSetup as { StripeConnectClientId?: string; stripeConnectClientId?: string }
+	const setup = masterSetup as {
+		/** Canonical API-host field for the Stripe Connect OAuth Client ID (`ca_…`). */
+		StripeOAuthClient?: string
+		/** Legacy aliases accepted while existing API-host configurations migrate. */
+		StripeConnectClientId?: string
+		stripeConnectClientId?: string
+	}
 	return (
 		(typeof process !== 'undefined' && process.env?.STRIPE_CONNECT_CLIENT_ID?.trim()) ||
+		setup.StripeOAuthClient?.trim() ||
 		setup.StripeConnectClientId?.trim() ||
 		setup.stripeConnectClientId?.trim() ||
 		''
