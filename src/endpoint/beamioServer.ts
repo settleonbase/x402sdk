@@ -375,6 +375,7 @@ import { getStripeBeamioSecretKey } from './stripeBeamio'
 	import {
 		buildMerchantCardStripeDisconnectMessage,
 		buildMerchantCardStripeOAuthConnectMessage,
+		buildMerchantCardStripeTopupEnabledMessage,
 		merchantCardStripeConfigured,
 	} from './merchantCardStripe'
 
@@ -13914,6 +13915,65 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			deadline,
 			nonce: nonce.toLowerCase(),
 			signature,
+		}, res)
+	})
+
+	/** A card owner may pause or resume only Stripe top-up Checkout for this card. */
+	router.post('/merchantCardStripe/topupEnabled', async (req, res) => {
+		const { cardAddress, merchantEoa, deadline, nonce, signature, topupEnabled } = req.body ?? {}
+		const now = Math.floor(Date.now() / 1000)
+		if (
+			typeof cardAddress !== 'string' ||
+			!ethers.isAddress(cardAddress) ||
+			typeof merchantEoa !== 'string' ||
+			!ethers.isAddress(merchantEoa) ||
+			!Number.isSafeInteger(deadline) ||
+			deadline <= now ||
+			deadline > now + 10 * 60 ||
+			typeof nonce !== 'string' ||
+			!/^0x[0-9a-fA-F]{64}$/.test(nonce) ||
+			typeof signature !== 'string' ||
+			!ethers.isHexString(signature, 65) ||
+			typeof topupEnabled !== 'boolean'
+		) {
+			return res.status(400).json({ error: 'Invalid Stripe top-up authorization' }).end()
+		}
+		const normalizedCardAddress = ethers.getAddress(cardAddress)
+		const normalizedMerchantEoa = ethers.getAddress(merchantEoa)
+		try {
+			const signedMessage = buildMerchantCardStripeTopupEnabledMessage({
+				cardAddress: normalizedCardAddress,
+				merchantEoa: normalizedMerchantEoa,
+				deadline,
+				nonce,
+				topupEnabled,
+			})
+			if (ethers.getAddress(ethers.verifyMessage(signedMessage, signature)) !== normalizedMerchantEoa) {
+				return res.status(403).json({ error: 'Stripe top-up signature does not match the merchant wallet' }).end()
+			}
+			const cardChain = await resolveUserCardChain(normalizedCardAddress)
+			const card = new ethers.Contract(
+				normalizedCardAddress,
+				['function owner() view returns (address)'],
+				providerForUserCardChain(cardChain),
+			)
+			if (ethers.getAddress(await card.owner()) !== normalizedMerchantEoa) {
+				return res.status(403).json({ error: 'Only the merchant card owner can change Stripe top-ups' }).end()
+			}
+			const stripeStatus = await getMerchantCardStripeStatusFromDb(normalizedCardAddress)
+			if (!stripeStatus?.stripeAccountId) {
+				return res.status(409).json({ error: 'No Stripe account is connected to this merchant card' }).end()
+			}
+		} catch (error: any) {
+			logger(Colors.red('[merchantCardStripe] topupEnabled cluster precheck failed'), error?.message ?? error)
+			return res.status(400).json({ error: 'Unable to verify merchant card ownership for Stripe top-ups' }).end()
+		}
+		return postLocalhost('/api/merchantCardStripe/topupEnabled', {
+			cardAddress: normalizedCardAddress,
+			merchantEoa: normalizedMerchantEoa,
+			deadline,
+			nonce: nonce.toLowerCase(),
+			topupEnabled,
 		}, res)
 	})
 

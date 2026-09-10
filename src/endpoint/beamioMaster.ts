@@ -28,6 +28,7 @@ import {
 	createMerchantCardStripeOAuthUrl,
 	completeMerchantCardStripeOAuth,
 	disconnectMerchantCardStripeAccountForOwner,
+	setMerchantCardStripeTopupEnabledForOwner,
 	getMerchantCardStripeStatus,
 	createMerchantCardStripeCheckoutSession,
 	pollMerchantCardStripeSession,
@@ -6630,6 +6631,17 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 			return res.json(await disconnectMerchantCardStripeAccountForOwner(req.body)).end()
 		} catch (e: any) {
 			logger(Colors.red('[merchantCardStripe] disconnect failed'), e?.message ?? e)
+			return res.status(400).json({ error: e?.message ?? String(e) }).end()
+		}
+	})
+
+	router.post('/merchantCardStripe/topupEnabled', async (req, res) => {
+		try {
+			// Cluster has already verified the signed card-owner authorization.
+			// Master only claims the nonce and persists the availability flag.
+			return res.json(await setMerchantCardStripeTopupEnabledForOwner(req.body)).end()
+		} catch (e: any) {
+			logger(Colors.red('[merchantCardStripe] topupEnabled failed'), e?.message ?? e)
 			return res.status(400).json({ error: e?.message ?? String(e) }).end()
 		}
 	})

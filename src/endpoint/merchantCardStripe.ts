@@ -12,6 +12,7 @@ import {
 	getMerchantCardStripeStatusFromDb,
 	disconnectMerchantCardStripeAccount,
 	disconnectMerchantCardStripeAccountWithAuthorization,
+	setMerchantCardStripeTopupEnabledWithAuthorization,
     updateMerchantCardStripeAccount,
 	updateMerchantCardStripeAccountById,
 	updateMerchantCardStripeSession,
@@ -81,6 +82,23 @@ export function buildMerchantCardStripeDisconnectMessage(params: {
 	].join('\n')
 }
 
+export function buildMerchantCardStripeTopupEnabledMessage(params: {
+	cardAddress: string
+	merchantEoa: string
+	deadline: number
+	nonce: string
+	topupEnabled: boolean
+}): string {
+	return [
+		'Beamio Merchant Card Stripe Top-up Availability',
+		`Card: ${normalizeCardAddress(params.cardAddress).toLowerCase()}`,
+		`Merchant: ${normalizeEoa(params.merchantEoa).toLowerCase()}`,
+		`Top-up enabled: ${params.topupEnabled ? 'true' : 'false'}`,
+		`Deadline: ${params.deadline}`,
+		`Nonce: ${params.nonce.toLowerCase()}`,
+	].join('\n')
+}
+
 export function buildMerchantCardStripeOAuthConnectMessage(params: {
 	cardAddress: string
 	merchantEoa: string
@@ -120,6 +138,33 @@ export async function disconnectMerchantCardStripeAccountForOwner(params: {
 		throw new Error('No Stripe account is currently connected to this merchant card')
 	}
 	return { cardAddress: normalizeCardAddress(params.cardAddress), disconnected: true }
+}
+
+/** Runs only after Cluster verifies the signed owner authorization. */
+export async function setMerchantCardStripeTopupEnabledForOwner(params: {
+	cardAddress: string
+	merchantEoa: string
+	deadline: number
+	nonce: string
+	topupEnabled: boolean
+}): Promise<{ cardAddress: string; topupEnabled: boolean }> {
+	const outcome = await setMerchantCardStripeTopupEnabledWithAuthorization({
+		nonce: params.nonce,
+		cardAddress: params.cardAddress,
+		merchantEoa: params.merchantEoa,
+		expiresAt: new Date(params.deadline * 1000),
+		topupEnabled: params.topupEnabled,
+	})
+	if (outcome === 'authorization_used') {
+		throw new Error('This Stripe top-up authorization has already been used')
+	}
+	if (outcome === 'not_connected') {
+		throw new Error('No Stripe account is currently connected to this merchant card')
+	}
+	return {
+		cardAddress: normalizeCardAddress(params.cardAddress),
+		topupEnabled: params.topupEnabled,
+	}
 }
 
 export async function createMerchantCardStripeAccountLink(cardAddressRaw: string): Promise<{
@@ -208,6 +253,7 @@ export async function completeMerchantCardStripeOAuth(params: {
 		stripeAccessToken: token.access_token ?? null,
 		stripeRefreshToken: token.refresh_token ?? null,
 		stripeOauthScope: token.scope ?? null,
+		stripeTopupEnabled: true,
 	})
 	return {
 		cardAddress: state.cardAddress,
@@ -223,14 +269,14 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 	const fulfillmentAdmin = fulfillmentAdmins[0] ?? null
 	if (!fulfillmentAdmin) throw new Error('Stripe card fulfillment admin pool is not configured')
 	if (!local?.stripeAccountId) {
-		return { connected: false, linked: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
+		return { connected: false, linked: false, topupEnabled: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
 	}
 	const account = await stripeClient().accounts.retrieve(local.stripeAccountId)
 	if ('deleted' in account && account.deleted) {
 		// Stripe has authoritatively removed this Connected Account, so clear
 		// the stale local mapping and let the merchant start a new OAuth flow.
 		await disconnectMerchantCardStripeAccount(cardAddress)
-		return { connected: false, linked: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
+		return { connected: false, linked: false, topupEnabled: false, cardAddress, fulfillmentAdmin, fulfillmentAdmins }
 	}
 	const chargesEnabled = account.charges_enabled === true
 	const detailsSubmitted = account.details_submitted === true
@@ -255,6 +301,7 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 		detailsSubmitted,
 		fulfillmentAdmin,
 		fulfillmentAdmins,
+		topupEnabled: local.stripeTopupEnabled,
 	}
 }
 
@@ -273,6 +320,9 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 	const local = await getMerchantCardStripeStatusFromDb(cardAddress)
 	if (!local?.stripeAccountId || !local.chargesEnabled || !local.detailsSubmitted) {
 		throw new Error('Merchant Stripe account is not ready')
+	}
+	if (params.kind === 'topup' && !local.stripeTopupEnabled) {
+		throw new Error('This merchant is not accepting Stripe top-ups')
 	}
 	const fulfillmentAdmins = getStripeCardFulfillmentAdminAddresses()
 	const fulfillmentAdmin = fulfillmentAdmins[0] ?? null

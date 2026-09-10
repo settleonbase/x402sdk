@@ -1665,6 +1665,7 @@ export async function ensureMerchantCardStripeSchema(db: Client): Promise<void> 
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_account_id TEXT')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_charges_enabled BOOLEAN')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_details_submitted BOOLEAN')
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_topup_enabled BOOLEAN NOT NULL DEFAULT TRUE')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_fulfillment_admin TEXT')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_fulfillment_admins JSONB')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_access_token TEXT')
@@ -1700,6 +1701,7 @@ export type MerchantCardStripeStatusRow = {
 	stripeAccountId: string | null
 	chargesEnabled: boolean
 	detailsSubmitted: boolean
+	stripeTopupEnabled: boolean
 	stripeFulfillmentAdmin: string | null
 	stripeFulfillmentAdmins: string[]
 	stripeOauthScope?: string | null
@@ -1720,7 +1722,8 @@ export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Pr
 		await ensureMerchantCardStripeSchema(db)
 		const result = await db.query(
 			`SELECT card_address, stripe_account_id, stripe_charges_enabled,
-				stripe_details_submitted, stripe_fulfillment_admin, stripe_fulfillment_admins,
+				stripe_details_submitted, stripe_topup_enabled,
+				stripe_fulfillment_admin, stripe_fulfillment_admins,
 				stripe_oauth_scope
 			 FROM beamio_cards WHERE LOWER(card_address) = LOWER($1) LIMIT 1`,
 			[ethers.getAddress(cardAddress)],
@@ -1732,6 +1735,7 @@ export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Pr
 			stripeAccountId: row.stripe_account_id ?? null,
 			chargesEnabled: row.stripe_charges_enabled === true,
 			detailsSubmitted: row.stripe_details_submitted === true,
+			stripeTopupEnabled: row.stripe_topup_enabled !== false,
 			stripeFulfillmentAdmin: row.stripe_fulfillment_admin ?? null,
 			stripeFulfillmentAdmins: Array.isArray(row.stripe_fulfillment_admins)
 				? row.stripe_fulfillment_admins.filter((address: unknown): address is string => typeof address === 'string')
@@ -1748,6 +1752,7 @@ export async function updateMerchantCardStripeAccount(params: {
 	stripeAccountId: string
 	chargesEnabled?: boolean
 	detailsSubmitted?: boolean
+	stripeTopupEnabled?: boolean
 	stripeFulfillmentAdmin?: string | null
 	stripeFulfillmentAdmins?: string[]
 	stripeAccessToken?: string | null
@@ -1767,7 +1772,8 @@ export async function updateMerchantCardStripeAccount(params: {
 				stripe_fulfillment_admins = COALESCE($6, stripe_fulfillment_admins),
 				stripe_access_token = COALESCE($7, stripe_access_token),
 				stripe_refresh_token = COALESCE($8, stripe_refresh_token),
-				stripe_oauth_scope = COALESCE($9, stripe_oauth_scope)
+				stripe_oauth_scope = COALESCE($9, stripe_oauth_scope),
+				stripe_topup_enabled = COALESCE($10, stripe_topup_enabled)
 			 WHERE LOWER(card_address) = LOWER($1)`,
 			[
 				ethers.getAddress(params.cardAddress),
@@ -1779,6 +1785,7 @@ export async function updateMerchantCardStripeAccount(params: {
 				params.stripeAccessToken ?? null,
 				params.stripeRefreshToken ?? null,
 				params.stripeOauthScope ?? null,
+				params.stripeTopupEnabled ?? null,
 			],
 		)
 	} finally {
@@ -1893,6 +1900,60 @@ export async function disconnectMerchantCardStripeAccountWithAuthorization(param
 			}
 			await db.query('COMMIT')
 			return 'disconnected'
+		} catch (error) {
+			await db.query('ROLLBACK').catch(() => {})
+			throw error
+		}
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+/** Atomically records an owner authorization and changes only Stripe top-up availability. */
+export async function setMerchantCardStripeTopupEnabledWithAuthorization(params: {
+	nonce: string
+	cardAddress: string
+	merchantEoa: string
+	expiresAt: Date
+	topupEnabled: boolean
+}): Promise<'updated' | 'authorization_used' | 'not_connected'> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		await db.query('BEGIN')
+		try {
+			const authorization = await db.query(
+				`INSERT INTO beamio_stripe_card_disconnect_authorizations
+					(nonce, card_address, merchant_eoa, expires_at)
+				 VALUES ($1, $2, $3, $4)
+				 ON CONFLICT (nonce) DO NOTHING
+				 RETURNING nonce`,
+				[
+					params.nonce.toLowerCase(),
+					ethers.getAddress(params.cardAddress),
+					ethers.getAddress(params.merchantEoa),
+					params.expiresAt,
+				],
+			)
+			if (authorization.rowCount !== 1) {
+				await db.query('ROLLBACK')
+				return 'authorization_used'
+			}
+			const result = await db.query(
+				`UPDATE beamio_cards
+				 SET stripe_topup_enabled = $2
+				 WHERE LOWER(card_address) = LOWER($1)
+				   AND stripe_account_id IS NOT NULL
+				 RETURNING card_address`,
+				[ethers.getAddress(params.cardAddress), params.topupEnabled],
+			)
+			if (result.rowCount !== 1) {
+				await db.query('ROLLBACK')
+				return 'not_connected'
+			}
+			await db.query('COMMIT')
+			return 'updated'
 		} catch (error) {
 			await db.query('ROLLBACK').catch(() => {})
 			throw error
