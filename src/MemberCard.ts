@@ -4097,12 +4097,25 @@ export const executeForAdminProcess = async () => {
 	}
 	let stripeSigner: StripeCardFulfillmentSigner | null = null
 	try {
+		const mintParsed = tryParseMintPointsByAdminArgs(obj.data)
 		if (obj.stripeFulfillment && !obj.adminSignature) {
 			stripeSigner = acquireStripeCardFulfillmentSigner()
 			if (!stripeSigner) {
 				// Keep the task queued until another parallel worker releases a signer.
 				executeForAdminPool.unshift(obj)
 				return
+			}
+			if (mintParsed && mintParsed.points6 > 0n) {
+				const limitCheck = await nfcTopupPreCheckAdminAirdropLimit(
+					obj.cardAddr,
+					stripeSigner.address,
+					mintParsed.points6,
+				)
+				if (!limitCheck.success) {
+					throw new Error(
+						`Stripe fulfillment signer ${stripeSigner.address} is not authorized for this top-up: ${limitCheck.error ?? 'admin airdrop limit check failed'}`,
+					)
+				}
 			}
 			const signed = await signExecuteForAdminWithStripeFulfillmentSigner(obj, stripeSigner)
 			if ('error' in signed) throw new Error(signed.error)
@@ -4138,7 +4151,6 @@ export const executeForAdminProcess = async () => {
 		// NFC Topup：mintPointsByAdmin 要求 recipient 已有 AA 账户，否则 _toAccount 会 revert UC_ResolveAccountFailed
 		// 必须使用 card 的 factoryGateway()._aaFactory()，与合约内 _resolveAccount 一致；若用配置的 AA Factory 可能不匹配导致 UC_ResolveAccountFailed
 		const recipientEOA = tryParseExecuteForAdminAaRecipient(obj.data)
-		const mintParsed = tryParseMintPointsByAdminArgs(obj.data)
 		let burnParsedForLog: { target: string; amount: bigint } | null = null
 		let burnIssuedNftParsed: { holder: string; tokenId: bigint; amount: bigint } | null = null
 		if (!mintParsed) {

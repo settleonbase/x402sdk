@@ -25,6 +25,7 @@ import {
     getStripeCardFulfillmentAdminAddresses,
     getStripeCardFulfillmentAdminAddress,
     nfcTopupPreparePayload,
+    nfcTopupPreCheckAdminAirdropLimit,
     type NfcTopupMembershipFeeStage,
 } from '../MemberCard'
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
@@ -69,6 +70,31 @@ function normalizeStripeCurrency(raw: string): string {
 	const currency = raw.trim().toLowerCase()
 	if (!/^[a-z]{3}$/.test(currency)) throw new Error('Invalid currency')
 	return currency
+}
+
+/**
+ * Stripe payment success must never enqueue a mint that is guaranteed to
+ * revert with UC_AdminAirdropLimitExceeded. This check intentionally covers
+ * every configured signer: the worker may acquire any currently-free signer.
+ */
+async function assertStripeFulfillmentAdminLimits(
+	cardAddress: string,
+	pointsCredit6: string,
+): Promise<void> {
+	const points6 = BigInt(pointsCredit6)
+	if (points6 <= 0n) return
+	const admins = getStripeCardFulfillmentAdminAddresses()
+	if (admins.length === 0) {
+		throw new Error('Stripe fulfillment admin pool is empty')
+	}
+	for (const admin of admins) {
+		const check = await nfcTopupPreCheckAdminAirdropLimit(cardAddress, admin, points6)
+		if (!check.success) {
+			throw new Error(
+				`Stripe fulfillment admin ${admin} is not authorized for this top-up: ${check.error ?? 'admin airdrop limit check failed'}`,
+			)
+		}
+	}
 }
 
 export function buildMerchantCardStripeDisconnectMessage(params: {
@@ -839,16 +865,6 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
 	if ((session.currency ?? '').toLowerCase() !== normalizeStripeCurrency(meta.currency)) {
 		throw new Error('Stripe currency does not match the fulfillment snapshot')
 	}
-	// Claim before changing any status. A duplicate webhook must observe
-	// fulfillment_succeeded/processing and stop here; otherwise updating the
-	// row to payment_succeeded first could reopen an already minted payment.
-	if (!(await claimMerchantCardStripeSession(sessionId))) return
-	await updateMerchantCardStripeSession({
-		sessionId,
-		status: 'succeeded',
-		fulfillmentStatus: 'payment_succeeded',
-		paymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
-	})
     try {
         const tierIndex = meta.membership_tier_index == null ? undefined : Number(meta.membership_tier_index)
         const prepared = await nfcTopupPreparePayload({
@@ -873,6 +889,16 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
                 bootstrapOnChain: false,
             }
         }
+		await assertStripeFulfillmentAdminLimits(prepared.cardAddr, prepared.pointsCredit6 ?? '0')
+		// Claim only after all deterministic preflights pass. A failed preflight
+		// therefore remains retryable after the merchant repairs authorization.
+		if (!(await claimMerchantCardStripeSession(sessionId))) return
+		await updateMerchantCardStripeSession({
+			sessionId,
+			status: 'succeeded',
+			fulfillmentStatus: 'payment_succeeded',
+			paymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
+		})
         executeForAdminPool.push({
             cardAddr: prepared.cardAddr,
             data: prepared.data,
@@ -920,13 +946,6 @@ export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: st
 	if (paymentIntent.currency.toLowerCase() !== normalizeStripeCurrency(meta.currency)) {
 		throw new Error('Stripe currency does not match the fulfillment snapshot')
 	}
-	if (!(await claimMerchantCardStripeSession(paymentIntentId))) return
-	await updateMerchantCardStripeSession({
-		sessionId: paymentIntentId,
-		status: 'succeeded',
-		fulfillmentStatus: 'payment_succeeded',
-		paymentIntentId,
-	})
 	try {
 		const tierIndex = meta.membership_tier_index == null ? undefined : Number(meta.membership_tier_index)
 		const prepared = await nfcTopupPreparePayload({
@@ -950,6 +969,14 @@ export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: st
 				bootstrapOnChain: false,
 			}
 		}
+		await assertStripeFulfillmentAdminLimits(prepared.cardAddr, prepared.pointsCredit6 ?? '0')
+		if (!(await claimMerchantCardStripeSession(paymentIntentId))) return
+		await updateMerchantCardStripeSession({
+			sessionId: paymentIntentId,
+			status: 'succeeded',
+			fulfillmentStatus: 'payment_succeeded',
+			paymentIntentId,
+		})
 		executeForAdminPool.push({
 			cardAddr: prepared.cardAddr,
 			data: prepared.data,

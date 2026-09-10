@@ -13976,23 +13976,12 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			if (!stripeStatus?.stripeAccountId) {
 				return res.status(409).json({ error: 'No Stripe account is connected to this merchant card' }).end()
 			}
-			if (topupEnabled) {
-				const adminLimitStatus = await getMerchantCardStripeAdminLimitStatus({
-					cardAddress: normalizedCardAddress,
-				})
-				if (adminLimitStatus.zeroLimitAdmins.length > 0 || adminLimitStatus.nonCardAdmins.length > 0) {
-					return res.status(409).json({
-						error: 'Stripe top-ups cannot be enabled until every Stripe fulfillment admin is on the merchant card and has an owner-authorized mint allowance.',
-						code: adminLimitStatus.nonCardAdmins.length > 0
-							? 'STRIPE_FULFILLMENT_ADMIN_NOT_ON_CARD'
-							: 'STRIPE_FULFILLMENT_ADMIN_LIMIT_AUTHORIZATION_REQUIRED',
-						cardAddress: normalizedCardAddress,
-						admins: adminLimitStatus.admins,
-						adminLimitAuthorizationRequired: adminLimitStatus.zeroLimitAdmins,
-						adminNotOnCard: adminLimitStatus.nonCardAdmins,
-					}).end()
-				}
-			}
+			// The ON flow replays the complete owner-signed Stripe admin batch before
+			// reaching this endpoint. Do not reject here based on a potentially stale
+			// allowance snapshot: doing so would prevent an OFF -> ON repair from
+			// re-authorizing admins whose previous limit was zero. The batch relay
+			// itself remains the required transaction boundary and failures are
+			// returned by /api/cardAddAdminBatch.
 		} catch (error: any) {
 			logger(Colors.red('[merchantCardStripe] topupEnabled cluster precheck failed'), error?.message ?? error)
 			return res.status(400).json({ error: 'Unable to verify merchant card ownership for Stripe top-ups' }).end()
