@@ -17788,8 +17788,10 @@ export const getRedeemStatusBatchApi = async (
 
 const adminManager4ArgIface = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata)'])
 const adminManager5ArgIface = new ethers.Interface(['function adminManager(address to, bool admin, uint256 newThreshold, string metadata, uint256 mintLimit)'])
+const adminManagerBatchIface = new ethers.Interface(['function adminManagerBatch(address[] tos, uint256 newThreshold, string metadata, uint256 mintLimit)'])
 const ADMIN_MANAGER_4_SELECTOR = adminManager4ArgIface.getFunction('adminManager')?.selector ?? ''
 const ADMIN_MANAGER_5_SELECTOR = adminManager5ArgIface.getFunction('adminManager')?.selector ?? ''
+const ADMIN_MANAGER_BATCH_SELECTOR = adminManagerBatchIface.getFunction('adminManagerBatch')?.selector ?? ''
 
 /**
  * POS terminal cross-card binding check should only run for terminal-link metadata.
@@ -17990,6 +17992,61 @@ export const cardAddAdminPreCheck = async (body: {
 			}
 		}
 		if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+		return { success: true }
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? String(e) }
+	}
+}
+
+/** Cluster precheck for the owner-signed one-transaction Stripe admin batch. */
+export const cardAddAdminBatchPreCheck = async (body: {
+	cardAddress?: string
+	data?: string
+	deadline?: number
+	nonce?: string
+	ownerSignature?: string
+	adminEOAs?: string[]
+}): Promise<{ success: true } | { success: false; error: string }> => {
+	const { cardAddress, data, deadline, nonce, ownerSignature, adminEOAs } = body
+	if (!cardAddress || !ethers.isAddress(cardAddress)) return { success: false, error: 'Invalid cardAddress' }
+	if (!data || typeof data !== 'string' || data.length < 10) return { success: false, error: 'Missing or invalid data' }
+	if (data.slice(0, 10).toLowerCase() !== ADMIN_MANAGER_BATCH_SELECTOR.toLowerCase()) {
+		return { success: false, error: 'Data must be adminManagerBatch(address[],uint256,string,uint256) calldata' }
+	}
+	if (deadline == null || !nonce || !ownerSignature) return { success: false, error: 'Missing deadline, nonce, or ownerSignature' }
+	try {
+		const decoded = adminManagerBatchIface.parseTransaction({ data })
+		if (!decoded || decoded.name !== 'adminManagerBatch') return { success: false, error: 'Invalid adminManagerBatch calldata' }
+		const tos = (decoded.args[0] as string[]).map((value) => ethers.getAddress(value))
+		if (tos.length === 0 || tos.length > 64) return { success: false, error: 'Stripe admin batch must contain 1 to 64 EOA addresses' }
+		const seen = new Set<string>()
+		for (const to of tos) {
+			const lower = to.toLowerCase()
+			if (seen.has(lower)) return { success: false, error: 'Duplicate Stripe fulfillment admin in batch' }
+			seen.add(lower)
+		}
+		if (adminEOAs && adminEOAs.length !== tos.length) return { success: false, error: 'adminEOAs does not match calldata batch length' }
+		const cardProbe = await requireBeamioUserCardBytecode(cardAddress)
+		if (!cardProbe.ok) return { success: false, error: cardProbe.error }
+		for (const to of tos) {
+			if ((await cardProbe.provider.getCode(to)) !== '0x') {
+				return { success: false, error: 'Adding AA or contract addresses as Stripe admins is not allowed' }
+			}
+		}
+		const verifyingContract = await getBeamioUserCardFactoryGateway(cardAddress)
+		const domain = { name: 'BeamioUserCardFactory', version: '1', chainId: chainIdForUserCardChain(cardProbe.chain), verifyingContract }
+		const types = { ExecuteForOwner: [{ name: 'cardAddress', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'deadline', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }
+		const dataHash = ethers.keccak256(data)
+		const nonceBytes = (nonce.length === 66 && nonce.startsWith('0x') ? nonce : ethers.keccak256(ethers.toUtf8Bytes(nonce))) as `0x${string}`
+		ethers.recoverAddress(
+			ethers.TypedDataEncoder.hash(domain, types, {
+				cardAddress: ethers.getAddress(cardAddress),
+				dataHash,
+				deadline: Number(deadline),
+				nonce: nonceBytes,
+			}),
+			ownerSignature,
+		)
 		return { success: true }
 	} catch (e: any) {
 		return { success: false, error: e?.message ?? String(e) }
@@ -20612,7 +20669,10 @@ export const executeForOwnerProcess = async () => {
 	try {
 		const factory = await contractForExecuteForOwner(SC, obj.cardAddress)
 		const dataSelector = obj.data?.slice(0, 10).toLowerCase() ?? ''
-		const isAdminManager = dataSelector === ADMIN_MANAGER_4_SELECTOR.toLowerCase() || dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase()
+		const isAdminManager =
+			dataSelector === ADMIN_MANAGER_4_SELECTOR.toLowerCase() ||
+			dataSelector === ADMIN_MANAGER_5_SELECTOR.toLowerCase() ||
+			dataSelector === ADMIN_MANAGER_BATCH_SELECTOR.toLowerCase()
 		// adminManager(add admin)：当前协议仅允许把 EOA 登记为 admin（Cluster 已拒绝 AA）。
 		// Do not create AA before executing owner/admin management calldata.
 		// [cardAddAdmin] debug: 写入链上的数据详情
@@ -20650,7 +20710,9 @@ export const executeForOwnerProcess = async () => {
 		if (isAdminManager) {
 			const receipt = await tx.wait()
 			const adminMgrCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
-				logTag: 'executeForOwnerProcess:adminManager',
+				logTag: dataSelector === ADMIN_MANAGER_BATCH_SELECTOR.toLowerCase()
+					? 'executeForOwnerProcess:adminManagerBatch'
+					: 'executeForOwnerProcess:adminManager',
 			})
 			if (!adminMgrCheck.ok) {
 				throw new Error(
