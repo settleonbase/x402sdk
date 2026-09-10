@@ -819,6 +819,11 @@ export async function pollMerchantCardStripeSession(sessionId: string) {
 	if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) throw new Error('Invalid sessionId')
 	const session = await stripeClient().checkout.sessions.retrieve(sessionId)
 	const paid = session.payment_status === 'paid'
+	if (paid) {
+		await fulfillMerchantCardStripeSession(sessionId).catch((error: any) => {
+			logger(Colors.yellow(`[merchantCardStripe] Checkout fulfillment retry failed: ${error?.message ?? error}`))
+		})
+	}
 	const local = await getMerchantCardStripeSessionStatus(sessionId)
     if (session.status === 'expired') {
         await updateMerchantCardStripeSession({ sessionId, status: 'failed', lastError: 'Stripe Checkout session expired' })
