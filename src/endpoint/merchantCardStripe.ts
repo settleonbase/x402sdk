@@ -28,6 +28,7 @@ import {
     getStripeCardFulfillmentAdminAddress,
     nfcTopupPreparePayload,
     nfcTopupPreCheckAdminAirdropLimit,
+    quoteUsdcDepositForCardFiat6,
     type NfcTopupMembershipFeeStage,
 } from '../MemberCard'
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
@@ -76,6 +77,18 @@ function normalizeStripeCurrency(raw: string): string {
 	const currency = raw.trim().toLowerCase()
 	if (!/^[a-z]{3}$/.test(currency)) throw new Error('Invalid currency')
 	return currency
+}
+
+const STRIPE_COUNTRY_CURRENCY: Record<string, string> = {
+	AU: 'aud', AT: 'eur', BE: 'eur', CA: 'cad', CH: 'chf', DE: 'eur',
+	DK: 'dkk', ES: 'eur', FI: 'eur', FR: 'eur', GB: 'gbp', HK: 'hkd',
+	IE: 'eur', IT: 'eur', JP: 'jpy', LU: 'eur', MX: 'mxn', NL: 'eur',
+	NO: 'nok', NZ: 'nzd', PL: 'pln', PT: 'eur', SE: 'sek', SG: 'sgd',
+	US: 'usd',
+}
+
+function stripeTerminalCurrencyForCountry(country: string | null | undefined): string | null {
+	return country ? STRIPE_COUNTRY_CURRENCY[country.trim().toUpperCase()] ?? null : null
 }
 
 /**
@@ -641,6 +654,9 @@ type MerchantCardStripeTerminalPaymentParams = {
 	membershipTierIndex?: number
 	membershipFeeFiat6?: string
 	businessIdempotencyKey: string
+	/** Cluster-resolved Stripe Terminal charge snapshot. Master trusts this snapshot. */
+	chargeAmountFiat6?: string
+	chargeCurrency?: string
 }
 
 async function ensureMerchantStripeTerminalLocation(
@@ -648,7 +664,22 @@ async function ensureMerchantStripeTerminalLocation(
 	stripeAccountId: string,
 	existingLocationId: string | null,
 ): Promise<string> {
-	if (existingLocationId?.trim()) return existingLocationId.trim()
+	const account = await stripe.accounts.retrieve(stripeAccountId)
+	if ('deleted' in account && account.deleted) throw new Error('Connected Stripe account was deleted')
+	if (!account.country) throw new Error('Connected Stripe account country is unavailable')
+	if (existingLocationId?.trim()) {
+		const locationId = existingLocationId.trim()
+		const location = await stripe.terminal.locations.retrieve(locationId, { stripeAccount: stripeAccountId })
+		if ('deleted' in location && location.deleted) throw new Error('Stripe Terminal location was deleted')
+		if (location.address?.country?.toUpperCase() !== account.country.toUpperCase()) {
+			await stripe.terminal.locations.update(
+				locationId,
+				{ address: { country: account.country } },
+				{ stripeAccount: stripeAccountId },
+			)
+		}
+		return locationId
+	}
 	const locations = await stripe.terminal.locations.list(
 		{ limit: 1 },
 		{ stripeAccount: stripeAccountId },
@@ -658,12 +689,51 @@ async function ensureMerchantStripeTerminalLocation(
 	const created = await stripe.terminal.locations.create(
 		{
 			display_name: 'Beamio POS',
-			address: { country: 'CA' },
+			address: { country: account.country },
 		},
 		{ stripeAccount: stripeAccountId },
 	)
 	if (!created.id) throw new Error('Stripe Terminal location was not created')
 	return created.id
+}
+
+export async function resolveMerchantCardStripeTerminalCharge(params: {
+	cardAddress: string
+	amountFiat6: string
+	currency: string
+}): Promise<{
+	accountCountry: string
+	chargeAmountFiat6: string
+	chargeCurrency: string
+}> {
+	const cardAddress = normalizeCardAddress(params.cardAddress)
+	const local = await getMerchantCardStripeStatusFromDb(cardAddress)
+	if (!local?.stripeAccountId) throw new Error('Merchant Stripe account is not connected')
+	const account = await stripeClient().accounts.retrieve(local.stripeAccountId)
+	if ('deleted' in account && account.deleted) throw new Error('Connected Stripe account was deleted')
+	const originalCurrency = normalizeStripeCurrency(params.currency)
+	const localCurrency = stripeTerminalCurrencyForCountry(account.country)
+	if (originalCurrency === 'usd' || originalCurrency === localCurrency) {
+		return {
+			accountCountry: account.country?.toUpperCase() ?? 'US',
+			chargeAmountFiat6: params.amountFiat6,
+			chargeCurrency: originalCurrency,
+		}
+	}
+	const quotedUsd6 = await quoteUsdcDepositForCardFiat6(
+		cardAddress,
+		ethers.formatUnits(BigInt(params.amountFiat6), 6),
+		originalCurrency.toUpperCase(),
+	)
+	const chargeAmountFiat6 = ((quotedUsd6 + 5_000n) / 10_000n) * 10_000n
+	if (chargeAmountFiat6 <= 0n) {
+		throw new Error(`Stripe Terminal cannot charge ${originalCurrency.toUpperCase()} for this merchant and USD conversion is unavailable`)
+	}
+	return {
+		accountCountry: account.country?.toUpperCase() ?? 'US',
+		chargeAmountFiat6: chargeAmountFiat6.toString(),
+		chargeCurrency: 'usd',
+	}
 }
 
 /**
@@ -698,8 +768,19 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 	) {
 		throw new Error('Merchant card Stripe fulfillment admin pool is not linked')
 	}
-	const amount = stripeAmountFromFiat6(params.amountFiat6)
 	const currency = normalizeStripeCurrency(params.currency)
+	const terminalCharge = params.chargeAmountFiat6 && params.chargeCurrency
+		? {
+			accountCountry: '',
+			chargeAmountFiat6: params.chargeAmountFiat6,
+			chargeCurrency: normalizeStripeCurrency(params.chargeCurrency),
+		}
+		: await resolveMerchantCardStripeTerminalCharge({
+			cardAddress,
+			amountFiat6: params.amountFiat6,
+			currency,
+		})
+	const amount = stripeAmountFromFiat6(terminalCharge.chargeAmountFiat6)
 	if (!/^[A-Za-z0-9:_-]{16,128}$/.test(params.businessIdempotencyKey.trim())) {
 		throw new Error('businessIdempotencyKey is required')
 	}
@@ -730,7 +811,9 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 		card_address: cardAddress,
 		buyer_eoa: buyerEoa,
 		amount_fiat6: params.amountFiat6,
-		currency: params.currency.toUpperCase(),
+		currency: currency.toUpperCase(),
+		charge_amount_fiat6: terminalCharge.chargeAmountFiat6,
+		charge_currency: terminalCharge.chargeCurrency.toUpperCase(),
 		kind: params.kind,
 		...(params.membershipTierIndex == null ? {} : { membership_tier_index: String(params.membershipTierIndex) }),
 		...(params.membershipFeeFiat6 == null ? {} : { membership_fee_fiat6: params.membershipFeeFiat6 }),
@@ -750,7 +833,7 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 		cardAddress,
 		buyerEoa,
 		amountFiat6: params.amountFiat6,
-		currency: params.currency,
+		currency,
 		kind: params.kind,
 		membershipTierIndex: params.membershipTierIndex,
 		membershipFeeFiat6: params.membershipFeeFiat6,
@@ -969,11 +1052,13 @@ export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: st
 	if (!meta.card_address || !meta.buyer_eoa || !meta.amount_fiat6 || !meta.currency) {
 		throw new Error('Stripe PaymentIntent is missing fulfillment metadata')
 	}
-	const expectedAmount = stripeAmountFromFiat6(meta.amount_fiat6)
+	const chargeAmountFiat6 = meta.charge_amount_fiat6 || meta.amount_fiat6
+	const chargeCurrency = meta.charge_currency || meta.currency
+	const expectedAmount = stripeAmountFromFiat6(chargeAmountFiat6)
 	if (paymentIntent.amount !== expectedAmount) {
 		throw new Error('Stripe amount does not match the fulfillment snapshot')
 	}
-	if (paymentIntent.currency.toLowerCase() !== normalizeStripeCurrency(meta.currency)) {
+	if (paymentIntent.currency.toLowerCase() !== normalizeStripeCurrency(chargeCurrency)) {
 		throw new Error('Stripe currency does not match the fulfillment snapshot')
 	}
 	try {

@@ -377,6 +377,7 @@ import { getStripeBeamioPublishableKey, getStripeBeamioSecretKey } from './strip
 		buildMerchantCardStripeOAuthConnectMessage,
 		buildMerchantCardStripeTopupEnabledMessage,
 		getMerchantCardStripeAdminLimitStatus,
+		resolveMerchantCardStripeTerminalCharge,
 		merchantCardStripeConfigured,
 	} from './merchantCardStripe'
 
@@ -14055,6 +14056,18 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		if (!merchantCardStripeConfigured() || !getStripeBeamioPublishableKey()) {
 			return res.status(503).json({ error: 'Stripe Terminal is not configured on server' }).end()
+		}
+		try {
+			const terminalCharge = await resolveMerchantCardStripeTerminalCharge({
+				cardAddress: body.cardAddress,
+				amountFiat6: body.amountFiat6,
+				currency: body.currency,
+			})
+			body.chargeAmountFiat6 = terminalCharge.chargeAmountFiat6
+			body.chargeCurrency = terminalCharge.chargeCurrency
+		} catch (error: any) {
+			logger(Colors.red('[merchantCardStripe] terminal currency precheck failed'), error?.message ?? error)
+			return res.status(400).json({ error: error?.message ?? 'Stripe Terminal currency is not supported for this merchant' }).end()
 		}
 		return postLocalhost('/api/merchantCardStripe/createTerminalPaymentIntent', {
 			...body,
