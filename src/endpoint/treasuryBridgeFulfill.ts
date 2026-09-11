@@ -38,7 +38,7 @@ import {
 	type NfcTopupMembershipFeeStage,
 } from '../MemberCard'
 import { resolveUserCardChain } from '../beamioUserCardChain'
-import { insertMemberTopupEvent } from '../db'
+import { claimPaymentLedger, insertMemberTopupEvent, updatePaymentLedger } from '../db'
 
 ensureSettleContractPoolInitialized()
 
@@ -202,6 +202,7 @@ export const treasuryBridgeFulfillProcess = async () => {
 	}
 
 	const usdcTx = String(obj.USDC_tx ?? '').trim()
+	let paymentRef: string | undefined
 	try {
 		if (!/^0x[0-9a-fA-F]{64}$/.test(usdcTx)) throw new Error('Invalid USDC_tx')
 		if (!ethers.isAddress(obj.cardAddress)) throw new Error('Invalid cardAddress')
@@ -218,6 +219,30 @@ export const treasuryBridgeFulfillProcess = async () => {
 		const cardAddress = ethers.getAddress(obj.cardAddress)
 		const cardOwner = ethers.getAddress(obj.cardOwner)
 		const recipientEOA = ethers.getAddress(obj.recipientEOA)
+		paymentRef = ethers.keccak256(ethers.toUtf8Bytes(`beamio-treasury-bridge:v1|${usdcTx.toLowerCase()}`))
+		const ledgerClaim = await claimPaymentLedger({
+			paymentRef,
+			providerRef: usdcTx.toLowerCase(),
+			requestHash: null,
+			chain: 'base',
+			tokenAddress: USDC_BASE,
+			payer: ethers.isAddress(obj.payer) ? obj.payer : null,
+			recipient: cardOwner,
+			amount6: lockAmount,
+		})
+		if (!ledgerClaim.claimed) {
+			if (ledgerClaim.status === 'succeeded' && obj.res && !obj.res.headersSent) {
+				obj.res.status(200).json({
+					success: true,
+					idempotent: true,
+					paymentRef,
+					USDC_tx: usdcTx,
+					lockMintTxHash: ledgerClaim.sourceTxHash,
+					mintTxHash: ledgerClaim.fulfillmentTxHash,
+				}).end()
+			}
+			return
+		}
 
 		const existing = lookupFulfill(usdcTx)
 		if (existing?.mintTxHash) {
@@ -439,11 +464,17 @@ export const treasuryBridgeFulfillProcess = async () => {
 			logger(Colors.yellow(`[treasuryBridgeFulfill] insertMemberTopupEvent: ${msg}`))
 		})
 
+		await updatePaymentLedger(paymentRef, {
+			status: 'succeeded',
+			sourceTxHash: lockMintTxHash,
+			fulfillmentTxHash: mintTxHash,
+		})
 		if (obj.res && !obj.res.headersSent) {
 			obj.res
 				.status(200)
 				.json({
 					success: true,
+					paymentRef,
 					USDC_tx: usdcTx,
 					operationId,
 					lockMintTxHash,
@@ -461,6 +492,12 @@ export const treasuryBridgeFulfillProcess = async () => {
 			return
 		}
 		logger(Colors.red('[treasuryBridgeFulfillProcess] failed:'), msg)
+		if (paymentRef) {
+			await updatePaymentLedger(paymentRef, {
+				status: 'failed',
+				lastError: msg,
+			}).catch(() => {})
+		}
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, error: msg }).end()
 		}

@@ -11,6 +11,8 @@ import {addUser, addFollow, removeFollow, regiestChatRoute, ipfsDataPool, ipfsDa
 	registerBeamioTagForAddress,
 	normalizeBeamioAccountName,
 	isBeamioAccountNameAvailable} from '../db'
+import { claimPaymentLedger, updatePaymentLedger } from '../db'
+import { buildUsdcPaymentRef, confirmUsdcTransfer } from '../usdcPaymentRecord'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
 import {
@@ -49,7 +51,7 @@ import {
 } from './eoaUsdcStripe'
 import { handleStripeBeamioWebhook } from './stripeBeamioHook'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, relocateBUnitsToSmartWalletPool, relocateBUnitsToSmartWalletProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, settlePoolIdleSummary, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, createInstitutionalAaForEoa, CreateInstitutionalAaHttpError, submitAAAccountCreationViaEntryPoint, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, aaMultisigOfflineSubmitPool, kickAaMultisigOfflineSubmitProcess, aaInstitutionalV2RelayPool, kickAaInstitutionalV2RelayProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
-import { BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY } from '../chainAddresses'
+import { BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY, USDC_BASE } from '../chainAddresses'
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { resolveAaUserOpRelayChainFromRequest } from '../aaTransferRelayChain'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
@@ -5804,6 +5806,8 @@ const routing = ( router: Router ) => {
 				permitDeadline,
 				permitNonce,
 				signature,
+				paymentRef: suppliedPaymentRef,
+				requestHash,
 			} = (req.body ?? {}) as {
 				paymentToken?: string
 				cardOwner?: string
@@ -5815,7 +5819,10 @@ const routing = ( router: Router ) => {
 				permitDeadline?: string | number
 				permitNonce?: string | number
 				signature?: string
+				paymentRef?: string
+				requestHash?: string
 			}
+			let claimedPaymentRef: string | undefined
 			try {
 				const tokenSym = String(paymentToken ?? 'USDC').trim().toUpperCase()
 				const tokenMap: Record<string, string> = {
@@ -5842,6 +5849,44 @@ const routing = ( router: Router ) => {
 				const payerNorm = ethers.getAddress(payer)
 				const cardOwnerNorm = ethers.getAddress(cardOwner)
 				const valueBig = BigInt(String(value))
+				const payment = buildUsdcPaymentRef({
+					chain: 'base',
+					token: tokenAddress,
+					payer: payerNorm,
+					recipient: cardOwnerNorm,
+					amount6: valueBig,
+					authorizationNonce: nonce ?? (permitNonce == null ? null : `0x${BigInt(permitNonce).toString(16).padStart(64, '0')}`),
+					signature,
+					requestHash,
+				})
+				claimedPaymentRef = payment.paymentRef
+				if (suppliedPaymentRef && suppliedPaymentRef !== payment.paymentRef) {
+					return res.status(400).json({ success: false, error: 'paymentRef does not match payment authorization' }).end()
+				}
+				const claim = await claimPaymentLedger({
+					...payment,
+					providerRef: requestHash ?? null,
+				})
+				if (!claim.claimed) {
+					if (claim.status === 'succeeded') {
+						return res.status(200).json({
+							success: true,
+							duplicate: true,
+							paymentRef: payment.paymentRef,
+							paymentToken: tokenSym,
+							payer: payerNorm,
+							txHash: claim.sourceTxHash,
+							transaction: claim.sourceTxHash,
+							USDC_tx: claim.sourceTxHash,
+							usdcAmount6: valueBig.toString(),
+						}).end()
+					}
+					return res.status(409).json({
+						success: false,
+						error: 'This payment is already being processed',
+						paymentRef: payment.paymentRef,
+					}).end()
+				}
 
 				const pk = (masterSetup as { settle_contractAdmin?: string[] }).settle_contractAdmin?.[0]
 				if (!pk) {
@@ -5945,6 +5990,14 @@ const routing = ( router: Router ) => {
 						if (!rcpt || rcpt.status !== 1) {
 							return res.status(502).json({ success: false, error: `CADD transferFrom reverted on-chain (tx=${txHash})`, txHash }).end()
 						}
+						await confirmUsdcTransfer({
+							chain: 'base',
+							txHash: txTransfer.hash,
+							expectedToken: tokenAddress,
+							expectedFrom: payerNorm,
+							expectedTo: cardOwnerNorm,
+							expectedAmount6: valueBig,
+						})
 					} catch (txErr: any) {
 						const msg = txErr?.shortMessage ?? txErr?.message ?? String(txErr)
 						return res.status(502).json({ success: false, error: `CADD permit/transferFrom failed: ${msg}` }).end()
@@ -6005,14 +6058,27 @@ const routing = ( router: Router ) => {
 						if (!rcpt || rcpt.status !== 1) {
 							return res.status(502).json({ success: false, error: `${tokenSym} transferWithAuthorization reverted on-chain (tx=${txHash})`, txHash }).end()
 						}
+						await confirmUsdcTransfer({
+							chain: 'base',
+							txHash: tx.hash,
+							expectedToken: tokenAddress,
+							expectedFrom: payerNorm,
+							expectedTo: cardOwnerNorm,
+							expectedAmount6: valueBig,
+						})
 					} catch (txErr: any) {
 						const msg = txErr?.shortMessage ?? txErr?.message ?? String(txErr)
 						return res.status(502).json({ success: false, error: `${tokenSym} transferWithAuthorization failed: ${msg}` }).end()
 					}
 				}
 
+				await updatePaymentLedger(payment.paymentRef, {
+					status: 'succeeded',
+					sourceTxHash: txHash,
+				})
 				return res.status(200).json({
 					success: true,
+					paymentRef: payment.paymentRef,
 					paymentToken: tokenSym,
 					payer: payerNorm,
 					txHash,
@@ -6022,6 +6088,12 @@ const routing = ( router: Router ) => {
 				}).end()
 			} catch (err: any) {
 				logger(Colors.red(`[tokenTransferRawSig] ${err?.message ?? err}`))
+				if (claimedPaymentRef) {
+					await updatePaymentLedger(claimedPaymentRef, {
+						status: 'failed',
+						lastError: err?.message ?? String(err),
+					}).catch(() => {})
+				}
 				return res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
 			}
 		})
@@ -6062,6 +6134,8 @@ const routing = ( router: Router ) => {
 				validBefore,
 				nonce,
 				signature,
+				paymentRef: suppliedPaymentRef,
+				requestHash,
 			} = (req.body ?? {}) as {
 				cardAddress?: string
 				cardOwner?: string
@@ -6083,7 +6157,10 @@ const routing = ( router: Router ) => {
 				validBefore?: string | number
 				nonce?: string
 				signature?: string
+				paymentRef?: string
+				requestHash?: string
 			}
+			let claimedPaymentRef: string | undefined
 			try {
 				if (!cardAddress || !ethers.isAddress(cardAddress)) {
 					return res.status(400).json({ success: false, error: 'Missing or invalid cardAddress' }).end()
@@ -6126,6 +6203,43 @@ const routing = ( router: Router ) => {
 				})()
 				const sidNorm = typeof sid === 'string' && sid.trim().length > 0 ? sid.trim() : null
 				const posNorm = typeof pos === 'string' && ethers.isAddress(pos) ? ethers.getAddress(pos) : null
+				const payment = buildUsdcPaymentRef({
+					chain: 'base',
+					token: paymentTokenNorm === 'USDC'
+						? USDC_BASE
+						: '0x16F93eBC5320C89EfC8701577efe49d14A276a06',
+					payer: payerNorm,
+					recipient: cardOwnerNorm,
+					amount6: valueBig,
+					authorizationNonce: nonce,
+					signature,
+					requestHash: requestHash ?? sidNorm,
+				})
+				claimedPaymentRef = payment.paymentRef
+				if (suppliedPaymentRef && suppliedPaymentRef !== payment.paymentRef) {
+					return res.status(400).json({ success: false, error: 'paymentRef does not match payment authorization' }).end()
+				}
+				const claim = await claimPaymentLedger({
+					...payment,
+					providerRef: sidNorm ?? requestHash ?? null,
+				})
+				if (!claim.claimed) {
+					if (claim.status === 'succeeded') {
+						return res.status(200).json({
+							success: true,
+							duplicate: true,
+							paymentRef: payment.paymentRef,
+							USDC_tx: claim.sourceTxHash,
+							usdcAmount6: valueBig.toString(),
+							sid: sidNorm,
+						}).end()
+					}
+					return res.status(409).json({
+						success: false,
+						error: 'This payment is already being processed',
+						paymentRef: payment.paymentRef,
+					}).end()
+				}
 
 				// fast-fail：本地 ECDSA 复算 EIP-712 TransferWithAuthorization；与支付 token 合约同 domain/types。
 				// 复算失败 ⇒ 不烧 gas、直接 400；复算通过 ⇒ 链上 USDC 合约会再校验一次（nonce 防重放只能在链上做）。
@@ -6228,6 +6342,14 @@ const routing = ( router: Router ) => {
 						logger(Colors.red(`[usdcChargeRawSig] tx reverted on-chain status=${rcpt?.status} hash=${txHash}`))
 						return res.status(502).json({ success: false, error: `USDC transferWithAuthorization reverted on-chain (tx=${txHash})`, USDC_tx: txHash }).end()
 					}
+					await confirmUsdcTransfer({
+						chain: 'base',
+						txHash: tx.hash,
+						expectedToken: tokenAddress,
+						expectedFrom: payerNorm,
+						expectedTo: cardOwnerNorm,
+						expectedAmount6: valueBig,
+					})
 				} catch (txErr: any) {
 					const msg = txErr?.shortMessage ?? txErr?.message ?? String(txErr)
 					logger(Colors.red(`[usdcChargeRawSig] submit tx failed: ${msg}`))
@@ -6274,9 +6396,14 @@ const routing = ( router: Router ) => {
 						logger(Colors.yellow(`[usdcChargeRawSig] USDC settle indexer enqueue failed (non-critical): ${msg}`))
 					})
 				}
+				await updatePaymentLedger(payment.paymentRef, {
+					status: 'succeeded',
+					sourceTxHash: txHash,
+				})
 
 				return res.status(200).json({
 					success: true,
+					paymentRef: payment.paymentRef,
 					cardAddress: cardAddressNorm,
 					cardOwner: cardOwnerNorm,
 					pos: posNorm,
@@ -6290,6 +6417,12 @@ const routing = ( router: Router ) => {
 				}).end()
 			} catch (err: any) {
 				logger(Colors.red(`[usdcChargeRawSig] master error: ${err?.message ?? err}`))
+				if (claimedPaymentRef) {
+					await updatePaymentLedger(claimedPaymentRef, {
+						status: 'failed',
+						lastError: err?.message ?? String(err),
+					}).catch(() => {})
+				}
 				if (!res.headersSent) {
 					res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
 				}

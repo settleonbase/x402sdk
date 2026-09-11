@@ -7,6 +7,7 @@ import path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
+import { claimPaymentLedger, updatePaymentLedger } from '../db'
 import { masterSetup, resolveBeamioConetHttpRpcUrl, resolveBeamioBaseHttpRpcUrl } from '../util'
 import {
 	CONET_DEPOSIT_CONTRACT,
@@ -4160,6 +4161,7 @@ export const walletDepositFulfillProcess = async () => {
 	}
 
 	const usdcTx = String(obj.USDC_tx ?? '').trim()
+	let paymentRef: string | undefined
 	try {
 		if (!/^0x[0-9a-fA-F]{64}$/.test(usdcTx)) {
 			throw new Error('Invalid USDC_tx')
@@ -4197,6 +4199,29 @@ export const walletDepositFulfillProcess = async () => {
 
 		const treasury = ethers.getAddress(CONET_TREASURY)
 		const beneficiary = ethers.getAddress(obj.beneficiary)
+		paymentRef = ethers.keccak256(ethers.toUtf8Bytes(`beamio-wallet-deposit:v1|${usdcTx.toLowerCase()}|${beneficiary.toLowerCase()}`))
+		const ledgerClaim = await claimPaymentLedger({
+			paymentRef,
+			providerRef: usdcTx.toLowerCase(),
+			chain: 'base',
+			tokenAddress: USDC_BASE,
+			payer: ethers.isAddress(obj.payer) ? obj.payer : null,
+			recipient: beneficiary,
+			amount6: lockAmount,
+		})
+		if (!ledgerClaim.claimed) {
+			if (ledgerClaim.status === 'succeeded' && obj.res && !obj.res.headersSent) {
+				obj.res.status(200).json({
+					success: true,
+					idempotent: true,
+					paymentRef,
+					beneficiary,
+					USDC_tx: usdcTx,
+					lockMintTxHash: ledgerClaim.sourceTxHash,
+				}).end()
+			}
+			return
+		}
 		const sourceTxHash = usdcTx as `0x${string}`
 		const nonce = BigInt(ethers.hexlify(ethers.randomBytes(16)))
 
@@ -4273,11 +4298,16 @@ export const walletDepositFulfillProcess = async () => {
 				`[walletDepositFulfill] OK USDC_tx=${usdcTx.slice(0, 12)}… beneficiary=${beneficiary.slice(0, 10)}… op=${bridgeResult.operationId.slice(0, 12)}… lockMint=${bridgeResult.lockMintTxHash.slice(0, 12)}…`,
 			),
 		)
+		await updatePaymentLedger(paymentRef, {
+			status: 'succeeded',
+			sourceTxHash: bridgeResult.lockMintTxHash,
+		})
 		if (obj.res && !obj.res.headersSent) {
 			obj.res
 				.status(200)
 				.json({
 					success: true,
+					paymentRef,
 					beneficiary,
 					USDC_tx: usdcTx,
 					operationId: bridgeResult.operationId,
@@ -4292,6 +4322,12 @@ export const walletDepositFulfillProcess = async () => {
 			return
 		}
 		logger(Colors.red('[walletDepositFulfillProcess] failed:'), msg)
+		if (paymentRef) {
+			await updatePaymentLedger(paymentRef, {
+				status: 'failed',
+				lastError: msg,
+			}).catch(() => {})
+		}
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(400).json({ success: false, error: msg }).end()
 		}

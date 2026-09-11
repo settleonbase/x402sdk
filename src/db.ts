@@ -1602,6 +1602,166 @@ export const regiestChatRoute = async (req: Request, res: Response) => {
 
 const DB_URL = "postgres://postgres:your_password@127.0.0.1:5432/postgres"
 
+/**
+ * Durable payment idempotency ledger.  A paymentRef is derived from the
+ * provider/authorization identity and is claimed before any mint, gift,
+ * top-up, bridge or reward side effect.  This is intentionally additive so
+ * historical accounting tables remain readable.
+ */
+const BEAMIO_PAYMENT_LEDGER_TABLE = `CREATE TABLE IF NOT EXISTS beamio_payment_ledger (
+	payment_ref TEXT PRIMARY KEY,
+	provider_ref TEXT,
+	request_hash TEXT,
+	chain TEXT,
+	token_address TEXT,
+	payer TEXT,
+	recipient TEXT,
+	amount6 NUMERIC(48,0),
+	authorization_nonce TEXT,
+	signature_hash TEXT,
+	source_tx_hash TEXT,
+	fulfillment_tx_hash TEXT,
+	status TEXT NOT NULL DEFAULT 'claimed'
+		CHECK (status IN ('claimed', 'processing', 'succeeded', 'failed')),
+	lease_until TIMESTAMPTZ,
+	last_error TEXT,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`
+const BEAMIO_PAYMENT_LEDGER_PROVIDER_IDX =
+	'CREATE UNIQUE INDEX IF NOT EXISTS idx_beamio_payment_ledger_provider_ref ON beamio_payment_ledger(provider_ref) WHERE provider_ref IS NOT NULL'
+const BEAMIO_PAYMENT_LEDGER_SOURCE_TX_IDX =
+	'CREATE UNIQUE INDEX IF NOT EXISTS idx_beamio_payment_ledger_source_tx ON beamio_payment_ledger(source_tx_hash) WHERE source_tx_hash IS NOT NULL'
+
+export type PaymentLedgerClaim = {
+	paymentRef: string
+	providerRef?: string | null
+	requestHash?: string | null
+	chain?: string | null
+	tokenAddress?: string | null
+	payer?: string | null
+	recipient?: string | null
+	amount6?: string | bigint | null
+	authorizationNonce?: string | null
+	signatureHash?: string | null
+	leaseSeconds?: number
+}
+
+export type PaymentLedgerClaimResult = {
+	claimed: boolean
+	status: 'claimed' | 'processing' | 'succeeded' | 'failed'
+	sourceTxHash: string | null
+	fulfillmentTxHash: string | null
+	lastError: string | null
+}
+
+async function ensurePaymentLedgerSchema(db: Client): Promise<void> {
+	await db.query(BEAMIO_PAYMENT_LEDGER_TABLE)
+	await db.query(BEAMIO_PAYMENT_LEDGER_PROVIDER_IDX)
+	await db.query(BEAMIO_PAYMENT_LEDGER_SOURCE_TX_IDX)
+}
+
+/**
+ * Atomically claim a payment.  Concurrent requests receive claimed=false
+ * instead of both entering the mint/fulfillment path.
+ */
+export async function claimPaymentLedger(input: PaymentLedgerClaim): Promise<PaymentLedgerClaimResult> {
+	const db = new Client({ connectionString: DB_URL })
+	const leaseSeconds = Math.max(60, Math.min(3600, input.leaseSeconds ?? 900))
+	try {
+		await db.connect()
+		await ensurePaymentLedgerSchema(db)
+		await db.query('BEGIN')
+		const inserted = await db.query(
+			`INSERT INTO beamio_payment_ledger (
+				payment_ref, provider_ref, request_hash, chain, token_address, payer,
+				recipient, amount6, authorization_nonce, signature_hash, status, lease_until
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'processing',NOW() + ($11 * INTERVAL '1 second'))
+			ON CONFLICT (payment_ref) DO NOTHING
+			RETURNING status, source_tx_hash, fulfillment_tx_hash, last_error`,
+			[
+				input.paymentRef,
+				input.providerRef ?? null,
+				input.requestHash ?? null,
+				input.chain ?? null,
+				input.tokenAddress ?? null,
+				input.payer ?? null,
+				input.recipient ?? null,
+				input.amount6 == null ? null : BigInt(input.amount6).toString(),
+				input.authorizationNonce ?? null,
+				input.signatureHash ?? null,
+				leaseSeconds,
+			],
+		)
+		if (inserted.rows.length) {
+			await db.query('COMMIT')
+			return { claimed: true, ...mapPaymentLedgerResult(inserted.rows[0]) }
+		}
+		const existing = await db.query(
+			`SELECT status, source_tx_hash, fulfillment_tx_hash, last_error, lease_until
+			 FROM beamio_payment_ledger WHERE payment_ref = $1 FOR UPDATE`,
+			[input.paymentRef],
+		)
+		if (!existing.rows.length) throw new Error(`Payment ledger claim disappeared: ${input.paymentRef}`)
+		const row = existing.rows[0]
+		const reclaimable =
+			(row.status === 'failed' || row.status === 'claimed') ||
+			(row.status === 'processing' && row.lease_until && new Date(row.lease_until).getTime() < Date.now())
+		if (reclaimable) {
+			const updated = await db.query(
+				`UPDATE beamio_payment_ledger
+				 SET status='processing', lease_until=NOW() + ($2 * INTERVAL '1 second'),
+				     last_error=NULL, updated_at=NOW()
+				 WHERE payment_ref=$1
+				 RETURNING status, source_tx_hash, fulfillment_tx_hash, last_error`,
+				[input.paymentRef, leaseSeconds],
+			)
+			await db.query('COMMIT')
+			return { claimed: true, ...mapPaymentLedgerResult(updated.rows[0]) }
+		}
+		await db.query('COMMIT')
+		return { claimed: false, ...mapPaymentLedgerResult(row) }
+	} catch (error) {
+		await db.query('ROLLBACK').catch(() => {})
+		throw error
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+function mapPaymentLedgerResult(row: any): Omit<PaymentLedgerClaimResult, 'claimed'> {
+	return {
+		status: row.status,
+		sourceTxHash: row.source_tx_hash ?? null,
+		fulfillmentTxHash: row.fulfillment_tx_hash ?? null,
+		lastError: row.last_error ?? null,
+	}
+}
+
+export async function updatePaymentLedger(
+	paymentRef: string,
+	update: {
+		status: 'claimed' | 'processing' | 'succeeded' | 'failed'
+		sourceTxHash?: string | null
+		fulfillmentTxHash?: string | null
+		lastError?: string | null
+	},
+): Promise<void> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensurePaymentLedgerSchema(db)
+		await db.query(
+			`UPDATE beamio_payment_ledger SET status=$2, source_tx_hash=COALESCE($3, source_tx_hash),
+			 fulfillment_tx_hash=COALESCE($4, fulfillment_tx_hash), last_error=$5,
+			 lease_until=NULL, updated_at=NOW() WHERE payment_ref=$1`,
+			[paymentRef, update.status, update.sourceTxHash ?? null, update.fulfillmentTxHash ?? null, update.lastError ?? null],
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** beamio_cards 表：存储 createCard 创建的卡，供最新发行卡列表等查询。total_points_minted_6、holder_count 初始为 0，可由 indexer 后续更新。 */
 const BEAMIO_CARDS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_cards (
 	id SERIAL PRIMARY KEY,

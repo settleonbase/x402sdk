@@ -18,6 +18,8 @@ import {
     updateMerchantCardStripeAccount,
 	updateMerchantCardStripeAccountById,
 	updateMerchantCardStripeSession,
+	claimPaymentLedger,
+	updatePaymentLedger,
 } from '../db'
 import {
     executeForAdminPool,
@@ -38,6 +40,10 @@ import {
 } from './stripeBeamio'
 
 const APP_BASE_URL = 'https://beamio.app'
+
+function stripePaymentRef(providerRef: string): string {
+	return ethers.keccak256(ethers.toUtf8Bytes(`beamio-stripe-payment:v1|${providerRef}`))
+}
 
 function stripeClient(): Stripe {
 	const client = getStripeBeamioClient()
@@ -895,6 +901,16 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
             }
         }
 		await assertStripeFulfillmentAdminLimits(prepared.cardAddr, prepared.pointsCredit6 ?? '0')
+		const paymentRef = stripePaymentRef(sessionId)
+		const ledgerClaim = await claimPaymentLedger({
+			paymentRef,
+			providerRef: sessionId,
+			chain: 'stripe',
+			payer: meta.buyer_eoa,
+			recipient: prepared.cardAddr,
+			amount6: meta.amount_fiat6,
+		})
+		if (!ledgerClaim.claimed) return
 		// Claim only after all deterministic preflights pass. A failed preflight
 		// therefore remains retryable after the merchant repairs authorization.
 		if (!(await claimMerchantCardStripeSession(sessionId))) return
@@ -916,6 +932,10 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
             ...(membershipFeeStage ? { membershipFeeStage } : {}),
         })
         void executeForAdminProcess().catch((error) => {
+			void updatePaymentLedger(paymentRef, {
+				status: 'failed',
+				lastError: error?.message ?? String(error),
+			}).catch(() => {})
             void updateMerchantCardStripeSession({
                 sessionId,
                 status: 'failed',
@@ -923,7 +943,12 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
                 lastError: error?.message ?? String(error),
             })
         })
+		await updatePaymentLedger(paymentRef, { status: 'succeeded' })
     } catch (error: any) {
+		await updatePaymentLedger(stripePaymentRef(sessionId), {
+			status: 'failed',
+			lastError: error?.message ?? String(error),
+		}).catch(() => {})
         await updateMerchantCardStripeSession({
             sessionId,
             status: 'failed',
@@ -975,6 +1000,16 @@ export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: st
 			}
 		}
 		await assertStripeFulfillmentAdminLimits(prepared.cardAddr, prepared.pointsCredit6 ?? '0')
+		const paymentRef = stripePaymentRef(paymentIntentId)
+		const ledgerClaim = await claimPaymentLedger({
+			paymentRef,
+			providerRef: paymentIntentId,
+			chain: 'stripe',
+			payer: meta.buyer_eoa,
+			recipient: prepared.cardAddr,
+			amount6: meta.amount_fiat6,
+		})
+		if (!ledgerClaim.claimed) return
 		if (!(await claimMerchantCardStripeSession(paymentIntentId))) return
 		await updateMerchantCardStripeSession({
 			sessionId: paymentIntentId,
@@ -994,6 +1029,10 @@ export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: st
 			...(membershipFeeStage ? { membershipFeeStage } : {}),
 		})
 		void executeForAdminProcess().catch((error) => {
+			void updatePaymentLedger(paymentRef, {
+				status: 'failed',
+				lastError: error?.message ?? String(error),
+			}).catch(() => {})
 			void updateMerchantCardStripeSession({
 				sessionId: paymentIntentId,
 				status: 'failed',
@@ -1001,7 +1040,12 @@ export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: st
 				lastError: error?.message ?? String(error),
 			})
 		})
+		await updatePaymentLedger(paymentRef, { status: 'succeeded' })
 	} catch (error: any) {
+		await updatePaymentLedger(stripePaymentRef(paymentIntentId), {
+			status: 'failed',
+			lastError: error?.message ?? String(error),
+		}).catch(() => {})
 		await updateMerchantCardStripeSession({
 			sessionId: paymentIntentId,
 			status: 'failed',
