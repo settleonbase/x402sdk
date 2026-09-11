@@ -281,7 +281,37 @@ export async function resolveMergedCardOwnership(input: {
 
 	const holders = Array.from(new Set([eoa, aa].filter(Boolean)))
 	const snaps = await Promise.all(holders.map((h) => readOwnershipSnapshot(card, h)))
-	let merged = mergeOwnershipSnapshots(...snaps)
+	/*
+	 * `getOwnership(address)` is not a raw ERC-1155 balance query on all
+	 * deployed card versions.  Some versions resolve an EOA to its Consumer
+	 * AA internally.  Therefore summing `getOwnership(eoa).pt` and
+	 * `getOwnership(aa).pt` can count the same #0 Store Credit twice.
+	 *
+	 * Keep the NFT inventory merge (it is de-duplicated by token id), but
+	 * calculate #0 points from the AA snapshot plus the EOA's direct #0
+	 * balance when both addresses are present.  This preserves legacy EOA
+	 * balances without treating the EOA-resolved AA balance as a second
+	 * wallet balance.
+	 */
+	let merged: OwnershipSnapshot
+	if (eoa && aa && eoa.toLowerCase() !== aa.toLowerCase()) {
+		const aaIndex = holders.findIndex((holder) => holder.toLowerCase() === aa.toLowerCase())
+		const eoaIndex = holders.findIndex((holder) => holder.toLowerCase() === eoa.toLowerCase())
+		const aaSnapshot = aaIndex >= 0 ? snaps[aaIndex] : null
+		const eoaSnapshot = eoaIndex >= 0 ? snaps[eoaIndex] : null
+		let directEoaPoints: bigint | null = null
+		try {
+			directEoaPoints = BigInt(await card.balanceOf(eoa, 0))
+		} catch {
+			/* Preserve the AA snapshot if the direct legacy EOA probe is unavailable. */
+		}
+		merged = {
+			points: (aaSnapshot?.points ?? 0n) + (directEoaPoints ?? 0n),
+			nfts: mergeOwnershipSnapshots(eoaSnapshot, aaSnapshot).nfts,
+		}
+	} else {
+		merged = mergeOwnershipSnapshots(...snaps)
+	}
 
 	// Prefer ERC-1155 #0 balances when inventory points are 0 but either wallet holds points.
 	if (merged.points === 0n && holders.length) {
