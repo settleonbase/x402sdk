@@ -10409,6 +10409,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 					originatingUsdcTx: obj.originatingUSDCTx ?? null,
 					chargeSessionId: obj.chargeSessionId ?? null,
 					posOperator: obj.posOperator ?? null,
+					stripeSessionId: obj.stripeSessionId ?? null,
 				}).catch((dbErr: any) =>
 					logger(Colors.yellow(`[executeForAdminPostBaseProcess] insertMemberTopupEvent: ${dbErr?.message ?? dbErr}`))
 				)

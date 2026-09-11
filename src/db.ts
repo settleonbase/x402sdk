@@ -2154,7 +2154,7 @@ export async function updateMerchantCardStripeSession(params: {
 				last_error = $6,
 				fulfillment_started_at = CASE WHEN $3 IN ('fulfillment_failed', 'payment_pending') THEN NULL ELSE fulfillment_started_at END,
 				updated_at = NOW()
-			 WHERE session_id = $1`,
+			 WHERE session_id = $1 OR payment_intent_id = $1`,
 			[
 				params.sessionId,
 				params.status ?? null,
@@ -2180,12 +2180,12 @@ export async function claimMerchantCardStripeSession(sessionId: string): Promise
 			    SET fulfillment_started_at = NOW(),
 			        fulfillment_status = 'fulfillment_processing',
 			        updated_at = NOW()
-			  WHERE session_id = $1
+			  WHERE (session_id = $1 OR payment_intent_id = $1)
 			    AND fulfillment_status <> 'fulfillment_succeeded'
 			    AND (
 					fulfillment_status <> 'fulfillment_processing'
 					OR fulfillment_started_at IS NULL
-					OR fulfillment_started_at < NOW() - INTERVAL '10 minutes'
+					OR fulfillment_started_at < NOW() - INTERVAL '30 minutes'
 				)`,
 			[sessionId],
 		)
@@ -3471,6 +3471,9 @@ const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_USDC = `ALTER TABLE beamio_member_topup_eve
 const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_ORIG_USDC_TX = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS originating_usdc_tx TEXT`
 const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_CHARGE_SID = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS charge_session_id TEXT`
 const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_POS_OPERATOR = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS pos_operator TEXT`
+/** Stable Stripe checkout/payment id used to prevent duplicate fulfillment accounting. */
+const BEAMIO_MEMBER_TOPUP_EVENTS_ADD_STRIPE_SESSION = `ALTER TABLE beamio_member_topup_events ADD COLUMN IF NOT EXISTS stripe_session_id TEXT`
+const BEAMIO_MEMBER_TOPUP_EVENTS_STRIPE_SESSION_IDX = `CREATE UNIQUE INDEX IF NOT EXISTS idx_beamio_member_topup_events_stripe_session ON beamio_member_topup_events (stripe_session_id) WHERE stripe_session_id IS NOT NULL`
 
 /** 每卡每 EOA 聚合：top-up 次数、累计 points(6) / USDC(6)、仅保留最后一次 top-up 时间戳。 */
 const BEAMIO_CARD_MEMBER_TOPUP_STATS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_card_member_topup_stats (
@@ -3580,6 +3583,8 @@ async function ensureBeamioMemberTopupEventsSchema(db: Client): Promise<void> {
 	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_ORIG_USDC_TX)
 	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_CHARGE_SID)
 	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_POS_OPERATOR)
+	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_ADD_STRIPE_SESSION)
+	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_STRIPE_SESSION_IDX)
 	await db.query(BEAMIO_MEMBER_TOPUP_EVENTS_IDX_CARD)
 }
 
@@ -3650,6 +3655,8 @@ export const insertMemberTopupEvent = async (params: {
 	originatingUsdcTx?: string | null
 	chargeSessionId?: string | null
 	posOperator?: string | null
+	/** Stripe Checkout session or PaymentIntent id; one payment may create one event only. */
+	stripeSessionId?: string | null
 }): Promise<void> => {
 	const db = new Client({ connectionString: DB_URL })
 	const pointsStr = topupAmountToNumericString(params.pointsE6)
@@ -3680,16 +3687,20 @@ export const insertMemberTopupEvent = async (params: {
 			typeof params.posOperator === 'string' && ethers.isAddress(params.posOperator.trim())
 				? ethers.getAddress(params.posOperator.trim()).toLowerCase()
 				: null
+		const stripeSessionNorm =
+			typeof params.stripeSessionId === 'string' && params.stripeSessionId.trim().length > 0
+				? params.stripeSessionId.trim()
+				: null
 		await db.query('BEGIN')
 		try {
 			const ins = await db.query<{ id: number }>(
 				`
-				INSERT INTO beamio_member_topup_events (card_address, base_tx_hash, member_eoa, member_aa, tier_token_id, topup_source, topup_category, points_e6, usdc_e6, originating_usdc_tx, charge_session_id, pos_operator)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-				ON CONFLICT (base_tx_hash) DO NOTHING
+				INSERT INTO beamio_member_topup_events (card_address, base_tx_hash, member_eoa, member_aa, tier_token_id, topup_source, topup_category, points_e6, usdc_e6, originating_usdc_tx, charge_session_id, pos_operator, stripe_session_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+				ON CONFLICT DO NOTHING
 				RETURNING id
 				`,
-				[card, hash, eoa, aa, String(params.tierTokenId), params.topupSource, params.topupCategory ?? null, pointsStr, usdcStr, origUsdcTxNorm, chargeSidNorm, posOpNorm]
+				[card, hash, eoa, aa, String(params.tierTokenId), params.topupSource, params.topupCategory ?? null, pointsStr, usdcStr, origUsdcTxNorm, chargeSidNorm, posOpNorm, stripeSessionNorm]
 			)
 			if (!ins.rows?.length) {
 				await db.query('COMMIT')
