@@ -1,7 +1,8 @@
 /**
  * 唯一现役 Stripe webhook：`POST /api/stripeBeamioHook`。
  * 验签一次后按 event.type / metadata.product 分流：
- * Onramp → eoaUsdc；Checkout fuelPack → Fuel Pack；其余 Checkout → Merchant Kit。
+ * Onramp → eoaUsdc；Checkout fuelPack → Fuel Pack；merchantCardStripe
+ * Checkout/PaymentIntent → merchant-card fulfillment；其余 Checkout → Merchant Kit。
  * 履约禁止交叉。
  */
 import type Stripe from 'stripe'
@@ -53,6 +54,12 @@ export async function handleStripeBeamioWebhook(
 			return processFuelPackStripeEvent(event)
 		}
 		return processMerchantKitStripeEvent(event)
+	}
+	if (event.type.startsWith('payment_intent.')) {
+		const product = (event.data?.object as Stripe.PaymentIntent | undefined)?.metadata?.product
+		if (product === 'merchantCardStripe') {
+			return processMerchantCardStripeEvent(event)
+		}
 	}
 
 	logger(Colors.grey(`[stripeBeamioHook] unhandled event type (ignored): ${event.type}`))

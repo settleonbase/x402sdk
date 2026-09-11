@@ -917,28 +917,74 @@ export async function pollMerchantCardStripeSession(sessionId: string) {
     if (session.status === 'expired') {
         await updateMerchantCardStripeSession({ sessionId, status: 'failed', lastError: 'Stripe Checkout session expired' })
     }
+	const reconciledLocal = session.status === 'expired'
+		? await getMerchantCardStripeSessionStatus(sessionId)
+		: local
 	return {
 		sessionId: session.id,
 		status: paid ? 'succeeded' : session.status === 'expired' ? 'failed' : 'pending',
 		paymentStatus: session.payment_status,
-		fulfillmentStatus: local?.fulfillmentStatus ?? (paid ? 'payment_succeeded' : 'payment_pending'),
-		txHash: local?.txHash ?? null,
-		error: local?.lastError ?? null,
+		fulfillmentStatus: reconciledLocal?.fulfillmentStatus ?? (paid ? 'payment_succeeded' : 'payment_pending'),
+		txHash: reconciledLocal?.txHash ?? null,
+		error: reconciledLocal?.lastError ?? null,
 		url: session.url ?? null,
 	}
 }
 
 export async function cancelMerchantCardStripeSession(sessionId: string) {
 	if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) throw new Error('Invalid sessionId')
-	const session = await stripeClient().checkout.sessions.retrieve(sessionId)
-	if (session.payment_status !== 'paid' && session.status !== 'complete') {
+	const stripe = stripeClient()
+	const session = await stripe.checkout.sessions.retrieve(sessionId)
+	if (session.payment_status === 'paid' || session.status === 'complete') {
+		// A close/cancel request must never roll back a payment that has already
+		// completed. The webhook or the next poll remains responsible for
+		// idempotent fulfillment.
+		return {
+			sessionId,
+			cancelled: false,
+			status: session.status,
+			paymentStatus: session.payment_status,
+			fulfillmentStatus: (await getMerchantCardStripeSessionStatus(sessionId))?.fulfillmentStatus ?? 'payment_succeeded',
+		}
+	}
+	let reconciled = session
+	if (session.status === 'open') {
+		// Closing the browser is not a Stripe event. Explicitly expire the
+		// unpaid Checkout Session so a later reopen cannot keep polling it.
+		try {
+			reconciled = await stripe.checkout.sessions.expire(sessionId)
+		} catch (error) {
+			// Payment and expire can race. Re-read before reporting cancellation;
+			// a winning payment must remain successful and retryable for fulfillment.
+			const latest = await stripe.checkout.sessions.retrieve(sessionId)
+			if (latest.payment_status === 'paid' || latest.status === 'complete') {
+				return {
+					sessionId,
+					cancelled: false,
+					status: latest.status,
+					paymentStatus: latest.payment_status,
+					fulfillmentStatus: (await getMerchantCardStripeSessionStatus(sessionId))?.fulfillmentStatus ?? 'payment_succeeded',
+				}
+			}
+			throw error
+		}
+	}
+	if (reconciled.status === 'expired' && reconciled.payment_status !== 'paid') {
 		await updateMerchantCardStripeSession({
 			sessionId,
 			status: 'failed',
-			lastError: 'Stripe Checkout canceled by customer',
+			lastError: 'Stripe Checkout session expired before payment',
 		})
 	}
-	return { sessionId, cancelled: true }
+	const local = await getMerchantCardStripeSessionStatus(sessionId)
+	return {
+		sessionId,
+		cancelled: reconciled.status === 'expired',
+		status: reconciled.status,
+		paymentStatus: reconciled.payment_status,
+		fulfillmentStatus: local?.fulfillmentStatus ?? 'payment_pending',
+		error: local?.lastError ?? null,
+	}
 }
 
 /** Fulfill one paid Checkout session exactly once through ExecuteForAdmin. */
