@@ -1782,9 +1782,11 @@ const MERCHANT_CARD_STRIPE_SESSIONS_TABLE = `CREATE TABLE IF NOT EXISTS beamio_s
 	buyer_eoa TEXT NOT NULL,
 	amount_fiat6 TEXT NOT NULL,
 	currency TEXT NOT NULL,
-	kind TEXT NOT NULL CHECK (kind IN ('topup', 'membership')),
+	kind TEXT NOT NULL CHECK (kind IN ('topup', 'membership', 'gift')),
 	membership_tier_index INT,
 	membership_fee_fiat6 TEXT,
+	redeem_hash TEXT,
+	fulfillment_payload JSONB,
 	status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'succeeded', 'failed')),
 	fulfillment_status TEXT NOT NULL DEFAULT 'payment_pending'
 		CHECK (fulfillment_status IN ('payment_pending', 'payment_succeeded', 'fulfillment_processing', 'fulfillment_succeeded', 'fulfillment_failed')),
@@ -1833,6 +1835,31 @@ export async function ensureMerchantCardStripeSchema(db: Client): Promise<void> 
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_refresh_token TEXT')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_oauth_scope TEXT')
 	await db.query(MERCHANT_CARD_STRIPE_SESSIONS_TABLE)
+	// Historical installs created the narrower topup/membership constraint.
+	// Replace it additively so Connected Stripe Gift sessions can be reconciled.
+	await db.query(`SELECT pg_advisory_lock(hashtext('beamio_stripe_card_sessions_gift_kind_migration'))`)
+	try {
+		await db.query(`DO $$
+			DECLARE constraint_def TEXT;
+			BEGIN
+				SELECT pg_get_constraintdef(oid) INTO constraint_def
+				  FROM pg_constraint
+				 WHERE conname = 'beamio_stripe_card_sessions_kind_check';
+				IF constraint_def IS NOT NULL AND constraint_def NOT LIKE '%gift%' THEN
+					ALTER TABLE beamio_stripe_card_sessions DROP CONSTRAINT beamio_stripe_card_sessions_kind_check;
+					constraint_def := NULL;
+				END IF;
+				IF constraint_def IS NULL THEN
+					ALTER TABLE beamio_stripe_card_sessions
+					ADD CONSTRAINT beamio_stripe_card_sessions_kind_check
+					CHECK (kind IN ('topup', 'membership', 'gift'));
+				END IF;
+			END $$`)
+	} finally {
+		await db.query(`SELECT pg_advisory_unlock(hashtext('beamio_stripe_card_sessions_gift_kind_migration'))`).catch(() => {})
+	}
+	await db.query('ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS redeem_hash TEXT')
+	await db.query('ALTER TABLE beamio_stripe_card_sessions ADD COLUMN IF NOT EXISTS fulfillment_payload JSONB')
 	await db.query(MERCHANT_CARD_STRIPE_OAUTH_STATES_TABLE)
 	await db.query(MERCHANT_CARD_STRIPE_EVENTS_TABLE)
 	await db.query(MERCHANT_CARD_STRIPE_DISCONNECT_AUTHORIZATIONS_TABLE)
@@ -2198,9 +2225,11 @@ export type MerchantCardStripeSessionInput = {
 	buyerEoa: string
 	amountFiat6: string
 	currency: string
-	kind: 'topup' | 'membership'
+	kind: 'topup' | 'membership' | 'gift'
 	membershipTierIndex?: number | null
 	membershipFeeFiat6?: string | null
+	redeemHash?: string | null
+	fulfillmentPayload?: Record<string, unknown> | null
 	businessIdempotencyKey?: string | null
 	paymentIntentId?: string | null
 }
@@ -2213,9 +2242,9 @@ export async function createMerchantCardStripeSession(params: MerchantCardStripe
 		const result = await db.query(
 			`INSERT INTO beamio_stripe_card_sessions
 				(session_id, card_address, buyer_eoa, amount_fiat6, currency, kind,
-				 membership_tier_index, membership_fee_fiat6, business_idempotency_key,
+				 membership_tier_index, membership_fee_fiat6, redeem_hash, fulfillment_payload, business_idempotency_key,
 				 payment_intent_id, fulfillment_status)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'payment_pending')
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'payment_pending')
 			 ON CONFLICT DO NOTHING`,
 			[
 				params.sessionId,
@@ -2226,6 +2255,8 @@ export async function createMerchantCardStripeSession(params: MerchantCardStripe
 				params.kind,
 				params.membershipTierIndex ?? null,
 				params.membershipFeeFiat6 ?? null,
+				params.redeemHash ?? null,
+				params.fulfillmentPayload ? JSON.stringify(params.fulfillmentPayload) : null,
 				params.businessIdempotencyKey ?? null,
 				params.paymentIntentId ?? null,
 			],

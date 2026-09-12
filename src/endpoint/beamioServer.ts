@@ -14001,10 +14001,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
 			typeof body.buyerEoa !== 'string' || !ethers.isAddress(body.buyerEoa) ||
 			typeof body.amountFiat6 !== 'string' || !/^[0-9]+$/.test(body.amountFiat6) ||
-			!['topup', 'membership'].includes(body.kind) || typeof body.currency !== 'string' ||
+			!['topup', 'membership', 'gift'].includes(body.kind) || typeof body.currency !== 'string' ||
 			typeof body.businessIdempotencyKey !== 'string' ||
 			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey)) {
 			return res.status(400).json({ error: 'cardAddress, buyerEoa, amountFiat6, currency and kind are required' }).end()
+		}
+		if (body.kind === 'gift' && (
+			typeof body.redeemHash !== 'string' ||
+			!ethers.isHexString(body.redeemHash, 32) ||
+			typeof body.ptUserSignature !== 'string' ||
+			typeof body.ptNonce !== 'string' ||
+			typeof body.ptPayerAccount !== 'string' ||
+			!ethers.isAddress(body.ptPayerAccount)
+		)) {
+			return res.status(400).json({ error: 'Gift Stripe requires redeemHash and Reward PT authorization' }).end()
 		}
 		if (!merchantCardStripeConfigured()) {
 			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
@@ -14022,10 +14032,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
 			typeof body.buyerEoa !== 'string' || !ethers.isAddress(body.buyerEoa) ||
 			typeof body.amountFiat6 !== 'string' || !/^[0-9]+$/.test(body.amountFiat6) ||
-			!['topup', 'membership'].includes(body.kind) || typeof body.currency !== 'string' ||
+			!['topup', 'membership', 'gift'].includes(body.kind) || typeof body.currency !== 'string' ||
 			typeof body.businessIdempotencyKey !== 'string' ||
 			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey)) {
 			return res.status(400).json({ error: 'cardAddress, buyerEoa, amountFiat6, currency and kind are required' }).end()
+		}
+		if (body.kind === 'gift' && (
+			typeof body.redeemHash !== 'string' ||
+			!ethers.isHexString(body.redeemHash, 32) ||
+			typeof body.ptUserSignature !== 'string' ||
+			typeof body.ptNonce !== 'string' ||
+			typeof body.ptPayerAccount !== 'string' ||
+			!ethers.isAddress(body.ptPayerAccount)
+		)) {
+			return res.status(400).json({ error: 'Gift Stripe requires redeemHash and Reward PT authorization' }).end()
 		}
 		if (!merchantCardStripeConfigured()) {
 			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()

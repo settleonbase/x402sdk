@@ -28,9 +28,11 @@ import {
 	getCardAaFactoryAddress,
 	pickBUnitFeeConsumerPreferEoaThenAa,
 	relayUserCardCallViaEntryPoint,
+	relayUserCardBatchViaEntryPoint,
 	resolveCardOwnerToEOA,
 	syncStandaloneBunitServiceFeeToIndexer,
 } from './MemberCard'
+import { CHARGE_REWARD_V2_IFACE } from './userCumulativeStatRewardPool'
 import { shiftSettleConet, unshiftSettleConet } from './settleContractPool'
 import { getCardByAddress } from './db'
 import {
@@ -86,12 +88,15 @@ const CARD_VERSION_ABI = ['function VERSION() view returns (uint256)'] as const
 const CREATE_GIFT_REDEEM_IFACE = new ethers.Interface([
 	'function createGiftRedeemForPayer(bytes32 hash, uint256 membershipFeeE6, uint256 topupCreditE6, uint64 validAfter, uint64 validBefore)',
 	'function createGiftRedeemWithCreditBurn(bytes32 hash, uint256 membershipFeeE6, uint256 topupCreditE6, uint256 burnAmountE6, address payerAccount, uint64 validAfter, uint64 validBefore)',
+	'function createGiftRedeemWithReward13Payment(bytes32 hash, uint256 membershipFeeE6, uint256 topupCreditE6, uint256 sameStoreBurn13, uint256 peerUsdcCredited6, address payerAccount, address userEOA, uint64 validAfter, uint64 validBefore, uint256 deadline, bytes32 nonce, bytes32 legsHash)',
 ])
 
 const CREATE_GIFT_REDEEM_SEL =
 	CREATE_GIFT_REDEEM_IFACE.getFunction('createGiftRedeemForPayer')?.selector ?? '0x00000000'
 const CREATE_GIFT_CREDIT_SEL =
 	CREATE_GIFT_REDEEM_IFACE.getFunction('createGiftRedeemWithCreditBurn')?.selector ?? '0x00000000'
+const CREATE_GIFT_REWARD13_SEL =
+	CREATE_GIFT_REDEEM_IFACE.getFunction('createGiftRedeemWithReward13Payment')?.selector ?? '0x00000000'
 
 /** consumeFromUser kind — same family as NFC/USDC top-up (20 B-Unit). */
 const BUNIT_KIND_TOPUP_FAMILY = 2n
@@ -111,7 +116,29 @@ export const GIFT_CREDIT_EIP712_TYPES: Record<string, { name: string; type: stri
 	],
 }
 
-export type MerchantGiftPayWith = 'usdc' | 'credit'
+export const GIFT_REWARD13_EIP712_TYPES: Record<string, { name: string; type: string }[]> = {
+	GiftReward13Payment: [
+		{ name: 'card', type: 'address' },
+		{ name: 'from', type: 'address' },
+		{ name: 'payerAccount', type: 'address' },
+		{ name: 'membershipFeeE6', type: 'uint256' },
+		{ name: 'topupCreditE6', type: 'uint256' },
+		{ name: 'sameStoreBurn13', type: 'uint256' },
+		{ name: 'peerLegsHash', type: 'bytes32' },
+		{ name: 'redeemHash', type: 'bytes32' },
+		{ name: 'validAfter', type: 'uint64' },
+		{ name: 'validBefore', type: 'uint64' },
+		{ name: 'nonce', type: 'bytes32' },
+	],
+}
+
+export type MerchantGiftPayWith = 'usdc' | 'credit' | 'reward13'
+
+export type MerchantGiftReward13PeerLeg = {
+	cardAddress: string
+	burn13: string
+	usdcOut6: string
+}
 
 export type PurchaseMerchantGiftRedeemBody = {
 	cardAddress: string
@@ -120,7 +147,9 @@ export type PurchaseMerchantGiftRedeemBody = {
 	nonce: string
 	validAfter: string
 	validBefore: string
-	redeemCode: string
+	/** Client-only secret. Stripe fulfillment uses redeemHash instead. */
+	redeemCode?: string
+	redeemHash?: string
 	/** Default usdc. credit = burn #0 G+F from buyer AA. */
 	payWith?: MerchantGiftPayWith | string
 	/** Required for usdc rail. */
@@ -131,6 +160,14 @@ export type PurchaseMerchantGiftRedeemBody = {
 	redeemValidBefore?: string
 	/** Optional client hint for credit rail AA; Cluster resolves from EOA. */
 	payerAccount?: string
+	sameStoreBurn13?: string
+	peerLegs?: MerchantGiftReward13PeerLeg[]
+	peerLegsHash?: string
+	cashUsdcAmount?: string
+	cashSignature?: string
+	cashNonce?: string
+	cashValidAfter?: string
+	cashValidBefore?: string
 }
 
 export type PurchaseMerchantGiftRedeemPreChecked = {
@@ -159,9 +196,21 @@ export type PurchaseMerchantGiftRedeemPreChecked = {
 	cardOwnerEOA: string
 	bunitFeeConsumer: string
 	bunitFeeUnits6: string
+	sameStoreBurn13?: string
+	peerLegs?: MerchantGiftReward13PeerLeg[]
+	peerLegsHash?: string
+	cashUsdcAmount?: string
+	cashSignature?: string
+	cashNonce?: string
+	cashValidAfter?: string
+	cashValidBefore?: string
 }
 
-type PoolItem = PurchaseMerchantGiftRedeemPreChecked & { res: Response }
+type PoolItem = PurchaseMerchantGiftRedeemPreChecked & {
+	res?: Response
+	onSuccess?: (createTxHash: string) => Promise<void> | void
+	onFailure?: (error: string) => Promise<void> | void
+}
 
 export const purchaseMerchantGiftRedeemPool: PoolItem[] = []
 
@@ -178,6 +227,28 @@ function redeemHashFromCode(code: string): string {
 	return ethers.keccak256(ethers.toUtf8Bytes(code.trim()))
 }
 
+function hashReward13PeerLegs(legs: MerchantGiftReward13PeerLeg[]): string {
+	if (legs.length === 0) return ethers.ZeroHash
+	const sorted = [...legs]
+		.map((leg) => ({
+			cardAddress: ethers.getAddress(leg.cardAddress),
+			burn13: BigInt(leg.burn13),
+			usdcOut6: BigInt(leg.usdcOut6),
+		}))
+		.sort((a, b) => a.cardAddress.toLowerCase().localeCompare(b.cardAddress.toLowerCase()))
+	return ethers.keccak256(
+		ethers.concat(
+			sorted.map((leg) =>
+				ethers.solidityPacked(['address', 'uint256', 'uint256'], [
+					leg.cardAddress,
+					leg.burn13,
+					leg.usdcOut6,
+				]),
+			),
+		),
+	)
+}
+
 function humanFromE6(e6: bigint): number {
 	return Number(e6) / 1e6
 }
@@ -188,6 +259,7 @@ function e6FromHuman(n: number): bigint {
 
 export function normalizePayWith(raw: unknown): MerchantGiftPayWith {
 	const s = String(raw ?? 'usdc').toLowerCase().trim()
+	if (s === 'reward13' || s === 'pt' || s === 'reward-pt') return 'reward13'
 	return s === 'credit' || s === 'points' || s === 'program' ? 'credit' : 'usdc'
 }
 
@@ -306,11 +378,13 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 		if (!body?.userSignature || typeof body.userSignature !== 'string') {
 			return { success: false, error: 'Missing userSignature' }
 		}
-		if (!body?.redeemCode || typeof body.redeemCode !== 'string' || body.redeemCode.trim().length < 8) {
-			return { success: false, error: 'redeemCode must be at least 8 characters' }
+		const suppliedRedeemCode = typeof body.redeemCode === 'string' ? body.redeemCode.trim() : ''
+		const suppliedRedeemHash = typeof body.redeemHash === 'string' ? body.redeemHash.trim() : ''
+		if (!suppliedRedeemCode && !ethers.isHexString(suppliedRedeemHash, 32)) {
+			return { success: false, error: 'redeemCode or redeemHash is required' }
 		}
-		if (body.redeemCode.length > 128) {
-			return { success: false, error: 'redeemCode too long' }
+		if (suppliedRedeemCode && (suppliedRedeemCode.length < 8 || suppliedRedeemCode.length > 128)) {
+			return { success: false, error: 'redeemCode must be between 8 and 128 characters' }
 		}
 
 		const payWith = normalizePayWith(body.payWith)
@@ -323,7 +397,12 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 		const provider = providerForUserCardChain('conet')
 		const factoryRead = new ethers.Contract(CONET_CARD_FACTORY, FACTORY_QUOTE_ABI, provider)
 		const redeemModuleAddr = (await factoryRead.defaultRedeemModule()) as string
-		const needSel = payWith === 'credit' ? CREATE_GIFT_CREDIT_SEL : CREATE_GIFT_REDEEM_SEL
+		const needSel =
+			payWith === 'credit'
+				? CREATE_GIFT_CREDIT_SEL
+				: payWith === 'reward13'
+					? CREATE_GIFT_REWARD13_SEL
+					: CREATE_GIFT_REDEEM_SEL
 		const hasGiftModule = await bytecodeHasSelector(provider, redeemModuleAddr, needSel)
 		if (!hasGiftModule) {
 			return {
@@ -394,8 +473,10 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 		}
 
 		const now = BigInt(Math.floor(Date.now() / 1000))
-		const redeemCode = body.redeemCode.trim()
-		const redeemHash = redeemHashFromCode(redeemCode)
+		const redeemCode = suppliedRedeemCode
+		const redeemHash = suppliedRedeemCode
+			? redeemHashFromCode(suppliedRedeemCode)
+			: ethers.hexlify(suppliedRedeemHash)
 		const [active] = (await card.getRedeemStatus(redeemHash)) as [boolean, bigint]
 		if (active) {
 			return { success: false, error: 'redeemCode already exists on-chain' }
@@ -411,6 +492,139 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 
 		const bunitPre = await precheckMerchantGiftBUnitFee(cardAddress, provider)
 		if (!bunitPre.success) return bunitPre
+
+		if (payWith === 'reward13') {
+			const payerAccount =
+				(await resolveBeamioAaForEoaWithFallback(provider, from)) ??
+				(body.payerAccount && ethers.isAddress(body.payerAccount)
+					? ethers.getAddress(body.payerAccount)
+					: null)
+			if (!payerAccount || payerAccount === ethers.ZeroAddress) {
+				return { success: false, error: 'Buyer Smart Wallet (AA) required for Reward PT Gift' }
+			}
+			const sameStoreBurn13 = BigInt(body.sameStoreBurn13 ?? '0')
+			const peerLegs = Array.isArray(body.peerLegs) ? body.peerLegs : []
+			if (sameStoreBurn13 <= 0n && peerLegs.length === 0) {
+				return { success: false, error: 'Reward PT payment requires at least one #13 leg' }
+			}
+			const targetBal = (await card.balanceOf(payerAccount, 13n)) as bigint
+			if (targetBal < sameStoreBurn13) {
+				return { success: false, error: 'Insufficient target merchant #13 Reward PT balance' }
+			}
+			let peerUsdcCredited6 = 0n
+			for (const raw of peerLegs) {
+				if (!raw || !ethers.isAddress(raw.cardAddress) || ethers.getAddress(raw.cardAddress) === cardAddress) {
+					return { success: false, error: 'Invalid Reward PT peer card' }
+				}
+				const peerCardAddress = ethers.getAddress(raw.cardAddress)
+				const burn13 = BigInt(raw.burn13)
+				const usdcOut6 = BigInt(raw.usdcOut6)
+				if (burn13 <= 0n || usdcOut6 <= 0n) {
+					return { success: false, error: 'Reward PT peer legs must be positive' }
+				}
+				const peerCard = new ethers.Contract(peerCardAddress, CARD_VIEW_ABI, provider)
+				const [ratio, quoted, balance] = await Promise.all([
+					peerCard.convertReward13ToUsdcRatioE6() as Promise<bigint>,
+					peerCard.quoteUsdcWithdrawForFiat6(burn13) as Promise<bigint>,
+					peerCard.balanceOf(payerAccount, 13n) as Promise<bigint>,
+				])
+				if (ratio <= 0n || quoted !== usdcOut6 || balance < burn13) {
+					return { success: false, error: 'Reward PT peer quote or balance changed; retry' }
+				}
+				peerUsdcCredited6 += usdcOut6
+			}
+			const peerLegsHash = hashReward13PeerLegs(peerLegs)
+			const cashUsdcAmount = BigInt(body.cashUsdcAmount ?? '0')
+			const cashSignature = String(body.cashSignature ?? '')
+			const cashNonce = cashUsdcAmount > 0n ? padNonceBytes32(String(body.cashNonce ?? '')) : ethers.ZeroHash
+			const cashValidAfter = BigInt(body.cashValidAfter ?? '0')
+			const cashValidBefore = BigInt(body.cashValidBefore ?? '0')
+			if (cashUsdcAmount > 0n) {
+				if (!cashSignature || cashValidBefore <= now || cashValidAfter > now + 60n) {
+					return { success: false, error: 'Reward PT cash authorization window invalid' }
+				}
+				const token = new ethers.Contract(CONET_USDC, CONET_USDC_EIP3009_ABI, provider)
+				const tokenName = String((await token.name()) || 'CoNET USD Coin')
+				const recoveredCash = ethers.verifyTypedData(
+					{ name: tokenName, version: '1', chainId: CONET_MAINNET_CHAIN_ID, verifyingContract: ethers.getAddress(CONET_USDC) },
+					CONET_USDC_TRANSFER_WITH_AUTHORIZATION_TYPES,
+					{ from, to: cardOwner, value: cashUsdcAmount, validAfter: cashValidAfter, validBefore: cashValidBefore, nonce: cashNonce },
+					cashSignature,
+				)
+				if (recoveredCash.toLowerCase() !== from.toLowerCase()) return { success: false, error: 'Reward PT cash signer mismatch' }
+				if ((await token.authorizationState(from, cashNonce)) as boolean) return { success: false, error: 'Reward PT cash nonce already used' }
+				if ((await token.balanceOf(from)) as bigint < cashUsdcAmount) return { success: false, error: 'Insufficient USDC for Reward PT remainder' }
+			}
+			const validBefore = BigInt(body.validBefore || '0')
+			const validAfter = BigInt(body.validAfter || '0')
+			if (validBefore <= now || validAfter > now + 60n) {
+				return { success: false, error: 'Reward PT authorization window invalid' }
+			}
+			if (!ethers.isHexString(body.nonce, 32)) return { success: false, error: 'Invalid Reward PT nonce' }
+			const nonceBytes32 = padNonceBytes32(body.nonce)
+			const domain = {
+				name: 'BeamioMerchantGiftReward13',
+				version: '1',
+				chainId: CONET_MAINNET_CHAIN_ID,
+				verifyingContract: cardAddress,
+			}
+			const recovered = ethers.verifyTypedData(domain, GIFT_REWARD13_EIP712_TYPES, {
+				card: cardAddress,
+				from,
+				payerAccount,
+				membershipFeeE6,
+				topupCreditE6: topupPrincipalE6,
+				sameStoreBurn13,
+				peerLegsHash,
+				redeemHash,
+				validAfter,
+				validBefore,
+				nonce: nonceBytes32,
+			}, body.userSignature)
+			if (recovered.toLowerCase() !== from.toLowerCase()) {
+				return { success: false, error: 'Reward PT signer mismatch' }
+			}
+			if (!(await bytecodeHasSelector(provider, redeemModuleAddr, CREATE_GIFT_REWARD13_SEL))) {
+				return { success: false, error: 'Reward PT Gift relay is not deployed on Factory yet' }
+			}
+			return {
+				success: true,
+				preChecked: {
+					payWith: 'reward13',
+					cardAddress,
+					from,
+					usdcAmount: '0',
+					userSignature: body.userSignature,
+					nonce: nonceBytes32,
+					validAfter: validAfter.toString(),
+					validBefore: validBefore.toString(),
+					redeemCode,
+					membershipFeeE6: membershipFeeE6.toString(),
+					topupPrincipalE6: topupPrincipalE6.toString(),
+					topupCreditE6: topupPrincipalE6.toString(),
+					redeemHash,
+					cardOwner,
+					cardCurrency,
+					quotedUsdc6: peerUsdcCredited6.toString(),
+					redeemValidAfter: redeemValidAfter.toString(),
+					redeemValidBefore: redeemValidBefore.toString(),
+					payerAccount,
+					burnAmountE6: '0',
+					merchantFeeE6: '0',
+					cardOwnerEOA: bunitPre.cardOwnerEOA,
+					bunitFeeConsumer: bunitPre.bunitFeeConsumer,
+					bunitFeeUnits6: bunitPre.bunitFeeUnits6.toString(),
+					sameStoreBurn13: sameStoreBurn13.toString(),
+					peerLegs,
+					peerLegsHash,
+					cashUsdcAmount: cashUsdcAmount.toString(),
+					cashSignature,
+					cashNonce: cashNonce === ethers.ZeroHash ? '' : cashNonce,
+					cashValidAfter: cashValidAfter.toString(),
+					cashValidBefore: cashValidBefore.toString(),
+				},
+			}
+		}
 
 		if (payWith === 'credit') {
 			const giftCfg = parseGiftCreditPurchaseConfig(metadata as Record<string, unknown> | null)
@@ -721,9 +935,8 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 	const SC = shiftSettleConet()
 	try {
 		if (!SC) {
-			if (item.res && !item.res.headersSent) {
-				item.res.status(503).json({ success: false, error: 'CoNET settle pool busy' }).end()
-			}
+			purchaseMerchantGiftRedeemPool.unshift(item)
+			setTimeout(() => kickPurchaseMerchantGiftRedeemProcess(), 3000)
 			return
 		}
 		const payWith = normalizePayWith(item.payWith)
@@ -746,6 +959,105 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 
 		let paymentTxHash = ethers.ZeroHash
 		let createCalldata: string
+
+		if (payWith === 'reward13') {
+			const peers = item.peerLegs ?? []
+			const peerUsdcCredited6 = BigInt(item.quotedUsdc6 || '0')
+			const sameStoreBurn13 = BigInt(item.sameStoreBurn13 || '0')
+			const payerAccount = ethers.getAddress(item.payerAccount)
+			const legsHash = item.peerLegsHash ?? ethers.ZeroHash
+			const dest: string[] = []
+			const value: bigint[] = []
+			const func: string[] = []
+			for (const peer of peers) {
+				dest.push(ethers.getAddress(peer.cardAddress))
+				value.push(0n)
+				func.push(
+					CHARGE_REWARD_V2_IFACE.encodeFunctionData('peerRedeem13ForContainerTopup', [
+						from,
+						BigInt(peer.burn13),
+						BigInt(peer.usdcOut6),
+						cardAddress,
+					]),
+				)
+			}
+			if (BigInt(item.cashUsdcAmount || '0') > 0n) {
+				dest.push(ethers.getAddress(CONET_USDC))
+				value.push(0n)
+				func.push(
+					new ethers.Interface([
+						'function transferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce,bytes signature)',
+					]).encodeFunctionData('transferWithAuthorization', [
+						from,
+						cardOwner,
+						BigInt(item.cashUsdcAmount ?? '0'),
+						BigInt(item.cashValidAfter || '0'),
+						BigInt(item.cashValidBefore || '0'),
+						item.cashNonce ?? ethers.ZeroHash,
+						item.cashSignature ?? '0x',
+					]),
+				)
+			}
+			dest.push(cardAddress)
+			value.push(0n)
+			func.push(
+				CREATE_GIFT_REDEEM_IFACE.encodeFunctionData('createGiftRedeemWithReward13Payment', [
+					redeemHash,
+					membershipFeeE6,
+					topupCreditE6,
+					sameStoreBurn13,
+					peerUsdcCredited6,
+					payerAccount,
+					from,
+					redeemValidAfter,
+					redeemValidBefore,
+					BigInt(item.validBefore),
+					item.nonce,
+					legsHash,
+				]),
+			)
+			const createTx = await relayUserCardBatchViaEntryPoint({
+				SC,
+				chain: 'conet',
+				cardAddressForFactory: cardAddress,
+				dest,
+				value,
+				func,
+				logTag: 'purchaseMerchantGiftRedeem.reward13',
+				gasLimit: 30_000_000n,
+			})
+			const receipt = await createTx.wait()
+			const ok = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+				logTag: 'purchaseMerchantGiftRedeem.reward13',
+			})
+			if (!ok.ok) throw new Error(ok.reason ?? 'Reward PT Gift relay failed')
+			const redeemUrl = item.redeemCode
+				? buildCouponRedeemAppDownloadUrl(cardAddress, item.redeemCode)
+				: undefined
+			if (item.res && !item.res.headersSent) {
+				item.res.status(200).json({
+					success: true,
+					payWith,
+					...(item.redeemCode ? { redeemCode: item.redeemCode } : {}),
+					redeemHash,
+					...(redeemUrl ? { redeemUrl } : {}),
+					createTxHash: createTx.hash,
+					membershipFeeE6: item.membershipFeeE6,
+					topupCreditE6: item.topupCreditE6,
+					peerUsdcCredited6: peerUsdcCredited6.toString(),
+				}).end()
+			}
+			await item.onSuccess?.(createTx.hash)
+			await consumeMerchantGiftPurchaseBunitInBackground({
+				cardAddress,
+				cardOwnerEOA,
+				bunitFeeConsumer,
+				bunitFeeUnits6,
+				createTxHash: createTx.hash,
+				payWith,
+			})
+			return
+		}
 
 		if (payWith === 'credit') {
 			const burnAmountE6 = BigInt(item.burnAmountE6)
@@ -834,7 +1146,9 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 			throw new Error(createOk.reason ?? 'createGiftRedeem relay failed')
 		}
 		const createTxHash = createTx.hash
-		const redeemUrl = buildCouponRedeemAppDownloadUrl(cardAddress, item.redeemCode)
+		const redeemUrl = item.redeemCode
+			? buildCouponRedeemAppDownloadUrl(cardAddress, item.redeemCode)
+			: undefined
 
 		if (item.res && !item.res.headersSent) {
 			item.res
@@ -842,9 +1156,9 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 				.json({
 					success: true,
 					payWith,
-					redeemCode: item.redeemCode,
+					...(item.redeemCode ? { redeemCode: item.redeemCode } : {}),
 					redeemHash,
-					redeemUrl,
+					...(redeemUrl ? { redeemUrl } : {}),
 					usdcTxHash: paymentTxHash !== ethers.ZeroHash ? paymentTxHash : undefined,
 					createTxHash,
 					membershipFeeE6: item.membershipFeeE6,
@@ -856,6 +1170,7 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 				})
 				.end()
 		}
+		await item.onSuccess?.(createTxHash)
 
 		void consumeMerchantGiftPurchaseBunitInBackground({
 			cardAddress,
@@ -896,6 +1211,7 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 		if (item.res && !item.res.headersSent) {
 			item.res.status(400).json({ success: false, error: msg }).end()
 		}
+		await item.onFailure?.(msg)
 	} finally {
 		if (SC) unshiftSettleConet(SC)
 		purchaseGiftInFlight = false

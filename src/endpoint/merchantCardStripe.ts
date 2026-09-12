@@ -34,6 +34,12 @@ import {
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { CONET_RPC_URL } from '../chainAddresses'
 import {
+	purchaseMerchantGiftRedeemPreCheck,
+	purchaseMerchantGiftRedeemPool,
+	kickPurchaseMerchantGiftRedeemProcess,
+	type PurchaseMerchantGiftRedeemBody,
+} from '../purchaseMerchantGiftRedeem'
+import {
 	exchangeStripeConnectOAuthCode,
 	getStripeConnectClientId,
 	getStripeConnectRedirectUri,
@@ -89,6 +95,40 @@ const STRIPE_COUNTRY_CURRENCY: Record<string, string> = {
 
 function stripeTerminalCurrencyForCountry(country: string | null | undefined): string | null {
 	return country ? STRIPE_COUNTRY_CURRENCY[country.trim().toUpperCase()] ?? null : null
+}
+
+function giftStripeMetadata(params: {
+	kind: string
+	redeemHash?: string
+	ptUserSignature?: string
+	ptNonce?: string
+	ptValidAfter?: string
+	ptValidBefore?: string
+	ptPayerAccount?: string
+	ptMembershipFeeE6?: string
+	ptTopupPrincipalE6?: string
+	ptSameStoreBurn13?: string
+	ptPeerLegs?: unknown
+}): Stripe.MetadataParam {
+	if (params.kind !== 'gift') return {}
+	if (!params.redeemHash || !ethers.isHexString(params.redeemHash, 32)) {
+		throw new Error('Gift Stripe checkout requires redeemHash')
+	}
+	if (!params.ptUserSignature || !params.ptNonce || !params.ptPayerAccount) {
+		throw new Error('Gift Stripe checkout requires Reward PT authorization')
+	}
+	return {
+		redeem_hash: params.redeemHash,
+		pt_user_signature: params.ptUserSignature,
+		pt_nonce: params.ptNonce,
+		pt_valid_after: params.ptValidAfter ?? '0',
+		pt_valid_before: params.ptValidBefore ?? '0',
+		pt_payer_account: params.ptPayerAccount,
+		pt_membership_fee_e6: params.ptMembershipFeeE6 ?? '0',
+		pt_topup_principal_e6: params.ptTopupPrincipalE6 ?? '0',
+		pt_same_store_burn13: params.ptSameStoreBurn13 ?? '0',
+		pt_peer_legs_json: JSON.stringify(params.ptPeerLegs ?? []),
+	}
 }
 
 /**
@@ -456,9 +496,19 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 	buyerEoa: string
 	amountFiat6: string
 	currency: string
-	kind: 'topup' | 'membership'
+	kind: 'topup' | 'membership' | 'gift'
 	membershipTierIndex?: number
 	membershipFeeFiat6?: string
+	redeemHash?: string
+	ptUserSignature?: string
+	ptNonce?: string
+	ptValidAfter?: string
+	ptValidBefore?: string
+	ptPayerAccount?: string
+	ptMembershipFeeE6?: string
+	ptTopupPrincipalE6?: string
+	ptSameStoreBurn13?: string
+	ptPeerLegs?: unknown
 	businessIdempotencyKey?: string
 }): Promise<{ sessionId: string; url: string }> {
 	const cardAddress = normalizeCardAddress(params.cardAddress)
@@ -494,6 +544,7 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 		return { sessionId: existingByKey.sessionId, url: existingSession.url ?? '' }
 	}
 	const stripe = stripeClient()
+	const giftMetadata = giftStripeMetadata(params)
 	const session = await stripe.checkout.sessions.create({
 		mode: 'payment',
 		customer_creation: 'if_required',
@@ -516,6 +567,7 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 				kind: params.kind,
 				...(params.membershipTierIndex == null ? {} : { membership_tier_index: String(params.membershipTierIndex) }),
 				...(params.membershipFeeFiat6 == null ? {} : { membership_fee_fiat6: params.membershipFeeFiat6 }),
+				...giftMetadata,
 			},
 		},
 		metadata: {
@@ -527,6 +579,7 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 			kind: params.kind,
                     ...(params.membershipTierIndex == null ? {} : { membership_tier_index: String(params.membershipTierIndex) }),
                     ...(params.membershipFeeFiat6 == null ? {} : { membership_fee_fiat6: params.membershipFeeFiat6 }),
+                    ...giftMetadata,
 		},
 		// SilentPassUI uses HashRouter. Keep the session query inside the hash so
 		// Stripe returns to a URL that the PWA router can actually match.
@@ -542,6 +595,8 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 		kind: params.kind,
 		membershipTierIndex: params.membershipTierIndex,
 		membershipFeeFiat6: params.membershipFeeFiat6,
+		redeemHash: params.redeemHash,
+		fulfillmentPayload: params.kind === 'gift' ? giftMetadata : null,
 		businessIdempotencyKey,
 		paymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
 	})
@@ -564,9 +619,19 @@ export async function createMerchantCardStripePaymentIntent(params: {
 	buyerEoa: string
 	amountFiat6: string
 	currency: string
-	kind: 'topup' | 'membership'
+	kind: 'topup' | 'membership' | 'gift'
 	membershipTierIndex?: number
 	membershipFeeFiat6?: string
+	redeemHash?: string
+	ptUserSignature?: string
+	ptNonce?: string
+	ptValidAfter?: string
+	ptValidBefore?: string
+	ptPayerAccount?: string
+	ptMembershipFeeE6?: string
+	ptTopupPrincipalE6?: string
+	ptSameStoreBurn13?: string
+	ptPeerLegs?: unknown
 	businessIdempotencyKey?: string
 }): Promise<{ paymentIntentId: string; clientSecret: string; publishableKey: string }> {
 	const cardAddress = normalizeCardAddress(params.cardAddress)
@@ -611,12 +676,15 @@ export async function createMerchantCardStripePaymentIntent(params: {
 		kind: params.kind,
 		...(params.membershipTierIndex == null ? {} : { membership_tier_index: String(params.membershipTierIndex) }),
 		...(params.membershipFeeFiat6 == null ? {} : { membership_fee_fiat6: params.membershipFeeFiat6 }),
+		...giftStripeMetadata(params),
 	}
 	const paymentIntent = await stripeClient().paymentIntents.create({
 		amount,
 		currency,
 		automatic_payment_methods: { enabled: true },
-		description: params.kind === 'membership' ? 'Membership fee' : 'Program card top-up',
+		description: params.kind === 'membership'
+			? 'Membership fee'
+			: params.kind === 'gift' ? 'Dining gift payment' : 'Program card top-up',
 		transfer_data: { destination: local.stripeAccountId },
 		metadata,
 	}, { idempotencyKey: businessIdempotencyKey })
@@ -630,6 +698,8 @@ export async function createMerchantCardStripePaymentIntent(params: {
 		kind: params.kind,
 		membershipTierIndex: params.membershipTierIndex,
 		membershipFeeFiat6: params.membershipFeeFiat6,
+		redeemHash: params.redeemHash,
+		fulfillmentPayload: params.kind === 'gift' ? giftStripeMetadata(params) : null,
 		businessIdempotencyKey,
 		paymentIntentId: paymentIntent.id,
 	})
@@ -650,7 +720,7 @@ type MerchantCardStripeTerminalPaymentParams = {
 	buyerEoa: string
 	amountFiat6: string
 	currency: string
-	kind: 'topup' | 'membership'
+	kind: 'topup' | 'membership' | 'gift'
 	membershipTierIndex?: number
 	membershipFeeFiat6?: string
 	businessIdempotencyKey: string
@@ -987,6 +1057,68 @@ export async function cancelMerchantCardStripeSession(sessionId: string) {
 	}
 }
 
+async function fulfillMerchantCardStripeGift(params: {
+	sessionId: string
+	metadata: Stripe.Metadata
+	paidAmount: number
+	paidCurrency: string
+}): Promise<void> {
+	const meta = params.metadata
+	if (!meta.card_address || !meta.buyer_eoa || !meta.redeem_hash ||
+		!meta.pt_user_signature || !meta.pt_nonce || !meta.pt_payer_account) {
+		throw new Error('Gift Stripe payment is missing Reward PT fulfillment metadata')
+	}
+	if (!meta.amount_fiat6 || !meta.currency ||
+		params.paidAmount !== stripeAmountFromFiat6(meta.amount_fiat6) ||
+		params.paidCurrency.toLowerCase() !== normalizeStripeCurrency(meta.currency)) {
+		throw new Error('Gift Stripe amount does not match the fulfillment snapshot')
+	}
+	let peerLegs: unknown
+	try {
+		peerLegs = JSON.parse(meta.pt_peer_legs_json || '[]')
+	} catch {
+		throw new Error('Gift Stripe peer legs metadata is invalid')
+	}
+	const pre = await purchaseMerchantGiftRedeemPreCheck({
+		cardAddress: meta.card_address,
+		from: meta.buyer_eoa,
+		redeemHash: meta.redeem_hash,
+		userSignature: meta.pt_user_signature,
+		nonce: meta.pt_nonce,
+		validAfter: meta.pt_valid_after || '0',
+		validBefore: meta.pt_valid_before || '0',
+		payWith: 'reward13',
+		payerAccount: meta.pt_payer_account,
+		membershipFeeE6: meta.pt_membership_fee_e6 || '0',
+		topupPrincipalE6: meta.pt_topup_principal_e6 || '0',
+		sameStoreBurn13: meta.pt_same_store_burn13 || '0',
+		peerLegs: peerLegs as PurchaseMerchantGiftRedeemBody['peerLegs'],
+	})
+	if (!pre.success) throw new Error(pre.error)
+	if (!(await claimMerchantCardStripeSession(params.sessionId))) return
+	await updateMerchantCardStripeSession({
+		sessionId: params.sessionId,
+		status: 'succeeded',
+		fulfillmentStatus: 'payment_succeeded',
+	})
+	purchaseMerchantGiftRedeemPool.push({
+		...pre.preChecked,
+		res: undefined,
+		onSuccess: (createTxHash) => updateMerchantCardStripeSession({
+			sessionId: params.sessionId,
+			fulfillmentStatus: 'fulfillment_succeeded',
+			txHash: createTxHash,
+		}),
+		onFailure: (error) => updateMerchantCardStripeSession({
+			sessionId: params.sessionId,
+			status: 'failed',
+			fulfillmentStatus: 'fulfillment_failed',
+			lastError: error,
+		}),
+	})
+	kickPurchaseMerchantGiftRedeemProcess()
+}
+
 /** Fulfill one paid Checkout session exactly once through ExecuteForAdmin. */
 export async function fulfillMerchantCardStripeSession(sessionId: string): Promise<void> {
     const stripe = stripeClient()
@@ -994,7 +1126,16 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
     if (session.payment_status !== 'paid') return
     const meta = session.metadata ?? {}
     if (meta.product !== 'merchantCardStripe') return
-    if (!['topup', 'membership'].includes(meta.kind ?? '')) throw new Error('Invalid merchantCardStripe kind')
+    if (!['topup', 'membership', 'gift'].includes(meta.kind ?? '')) throw new Error('Invalid merchantCardStripe kind')
+	if (meta.kind === 'gift') {
+		await fulfillMerchantCardStripeGift({
+			sessionId,
+			metadata: meta,
+			paidAmount: session.amount_total ?? 0,
+			paidCurrency: session.currency ?? '',
+		})
+		return
+	}
     if (!meta.card_address || !meta.buyer_eoa || !meta.amount_fiat6 || !meta.currency) {
         throw new Error('Stripe session is missing fulfillment metadata')
     }
@@ -1094,7 +1235,16 @@ export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: st
 	if (paymentIntent.status !== 'succeeded') return
 	const meta = paymentIntent.metadata ?? {}
 	if (meta.product !== 'merchantCardStripe') return
-	if (!['topup', 'membership'].includes(meta.kind ?? '')) throw new Error('Invalid merchantCardStripe kind')
+	if (!['topup', 'membership', 'gift'].includes(meta.kind ?? '')) throw new Error('Invalid merchantCardStripe kind')
+	if (meta.kind === 'gift') {
+		await fulfillMerchantCardStripeGift({
+			sessionId: paymentIntentId,
+			metadata: meta,
+			paidAmount: paymentIntent.amount,
+			paidCurrency: paymentIntent.currency,
+		})
+		return
+	}
 	if (!meta.card_address || !meta.buyer_eoa || !meta.amount_fiat6 || !meta.currency) {
 		throw new Error('Stripe PaymentIntent is missing fulfillment metadata')
 	}
