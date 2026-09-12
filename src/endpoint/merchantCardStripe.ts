@@ -418,7 +418,10 @@ export async function getMerchantCardStripeAdminLimitStatus(params: {
 		const admin = ethers.getAddress(String(row.admin))
 		const limit = BigInt(row.limit)
 		const usedFromClear = BigInt(row.usedFromClear)
-		const unlimited = Boolean(row.unlimited)
+		// The governance view marks only the card owner as `unlimited=true`.
+		// Delegated Beamio fulfillment admins receive the effective unlimited
+		// allowance as the uint256 max sentinel via adminManagerBatch.
+		const unlimited = Boolean(row.unlimited) || limit === ethers.MaxUint256
 		const isCardAdmin = admin !== ethers.ZeroAddress
 		admins.push({
 			admin: adminAddress,
