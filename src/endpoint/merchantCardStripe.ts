@@ -471,6 +471,10 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 		cardAddress,
 		adminAddresses: fulfillmentAdmins,
 	})
+	const topupEnabled =
+		local.stripeTopupEnabled &&
+		adminLimitStatus.zeroLimitAdmins.length === 0 &&
+		adminLimitStatus.nonCardAdmins.length === 0
 	return {
 		connected: true,
 		linked: chargesEnabled && detailsSubmitted && fulfillmentAdmins.every(
@@ -484,7 +488,10 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 		detailsSubmitted,
 		fulfillmentAdmin,
 		fulfillmentAdmins,
-		topupEnabled: local.stripeTopupEnabled,
+		// A persisted flag cannot override the current on-chain allowance.
+		// Keep top-ups off until every configured Beamio fulfillment admin is
+		// an actual card admin with an unlimited allowance.
+		topupEnabled,
 		adminLimitStatus: adminLimitStatus.admins,
 		adminLimitAuthorizationRequired: adminLimitStatus.zeroLimitAdmins,
 		adminNotOnCard: adminLimitStatus.nonCardAdmins,
