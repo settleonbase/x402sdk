@@ -5999,6 +5999,8 @@ export const registerCardToDb = async (params: {
 		membershipFeeE6: string
 		membershipFee?: string | number
 		membershipDurationKind?: number
+		image?: string
+		imageFit?: 'width' | 'height'
 	}
 	txHash?: string
 	/**

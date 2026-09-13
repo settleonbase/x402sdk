@@ -77,6 +77,8 @@ export type MembershipFeeMetadataTiers = {
 	minUsdc6?: string | number
 	attr?: number
 	name?: string
+	image?: string
+	imageFit?: 'width' | 'height'
 }
 
 /** Card-level base membership (index 0); not an Add-tier row. */
@@ -84,6 +86,9 @@ export type MembershipFeeMetadataBase = {
 	membershipFeeE6?: string
 	membershipFee?: string | number
 	membershipDurationKind?: number
+	/** Base-tier visual chrome when the canonical tier is not in `tiers[]`. */
+	image?: string
+	imageFit?: 'width' | 'height'
 }
 
 export function readTierQualificationMode(metadata: Record<string, unknown> | null | undefined): TierQualificationMode | null {
@@ -151,6 +156,8 @@ export function parseBaseMembership(
 		membershipFeeE6: feeE6,
 		...(o.membershipFee != null && { membershipFee: o.membershipFee as string | number }),
 		membershipDurationKind: Number.isFinite(dk) ? Math.trunc(dk) : 0,
+		...(typeof o.image === 'string' && o.image.trim() ? { image: o.image } : {}),
+		...(o.imageFit === 'width' || o.imageFit === 'height' ? { imageFit: o.imageFit } : {}),
 	}
 }
 

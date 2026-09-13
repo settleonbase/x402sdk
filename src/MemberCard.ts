@@ -14495,6 +14495,8 @@ export type CreateCardPreChecked = {
 		membershipFeeE6: string
 		membershipFee?: string | number
 		membershipDurationKind?: number
+		image?: string
+		imageFit?: 'width' | 'height'
 	}
 	/** CoNET BusinessStartKet #0 burn source; set by Cluster after balance precheck (omit when BEAMIO_SKIP_BUSINESS_START_KET_GATE) */
 	businessStartKetBurnFrom?: string
@@ -15283,6 +15285,8 @@ export const createCardPreCheck = (body: {
 			membershipFeeE6: metadataTierMembershipFeeE6(parsed),
 			membershipDurationKind: Math.trunc(dk),
 			...(parsed.membershipFee != null && { membershipFee: parsed.membershipFee }),
+			...(parsed.image ? { image: parsed.image } : {}),
+			...(parsed.imageFit ? { imageFit: parsed.imageFit } : {}),
 		}
 	}
 
