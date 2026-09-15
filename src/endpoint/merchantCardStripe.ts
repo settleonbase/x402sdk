@@ -10,6 +10,7 @@ import {
 	consumeMerchantCardStripeOAuthState,
 	claimMerchantCardStripeEvent,
 	getMerchantCardStripeSessionByBusinessKey,
+	getMerchantCardStripeSessionCardAddress,
 	getMerchantCardStripeSessionStatus,
 	getMerchantCardStripeStatusFromDb,
 	disconnectMerchantCardStripeAccount,
@@ -56,6 +57,23 @@ function stripeClient(): Stripe {
 	const client = getStripeBeamioClient()
 	if (!client) throw new Error('Stripe is not configured on server')
 	return client
+}
+
+async function retrievePaymentIntentForMerchant(
+	paymentIntentId: string,
+): Promise<Stripe.PaymentIntent> {
+	const stripe = stripeClient()
+	try {
+		return await stripe.paymentIntents.retrieve(paymentIntentId)
+	} catch (platformError) {
+		const cardAddress = await getMerchantCardStripeSessionCardAddress(paymentIntentId)
+		if (!cardAddress) throw platformError
+		const local = await getMerchantCardStripeStatusFromDb(cardAddress)
+		if (!local?.stripeAccountId) throw platformError
+		return stripe.paymentIntents.retrieve(paymentIntentId, {
+			stripeAccount: local.stripeAccountId,
+		})
+	}
 }
 
 function normalizeCardAddress(raw: string): string {
@@ -942,7 +960,9 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 	const stripe = stripeClient()
 	const existingByKey = await getMerchantCardStripeSessionByBusinessKey(params.businessIdempotencyKey.trim())
 	if (existingByKey?.paymentIntentId) {
-		const existingIntent = await stripe.paymentIntents.retrieve(existingByKey.paymentIntentId)
+		const existingIntent = await stripe.paymentIntents.retrieve(existingByKey.paymentIntentId, {
+			stripeAccount: local.stripeAccountId,
+		})
 		if (!existingIntent.client_secret) throw new Error('Stripe PaymentIntent has no client secret')
 		const locationId = await ensureMerchantStripeTerminalLocation(
 			stripe,
@@ -981,10 +1001,11 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 		currency: terminalCharge.chargeCurrency,
 		payment_method_types: ['card_present'],
 		description: params.kind === 'membership' ? 'Membership fee' : 'Program card top-up',
-		on_behalf_of: local.stripeAccountId,
-		transfer_data: { destination: local.stripeAccountId },
 		metadata,
-	}, { idempotencyKey: params.businessIdempotencyKey.trim() })
+	}, {
+		idempotencyKey: params.businessIdempotencyKey.trim(),
+		stripeAccount: local.stripeAccountId,
+	})
 	if (!paymentIntent.client_secret) throw new Error('Stripe PaymentIntent has no client secret')
 	const inserted = await createMerchantCardStripeSession({
 		sessionId: paymentIntent.id,
@@ -1046,7 +1067,7 @@ export async function createMerchantCardStripeTerminalConnectionToken(params: {
 
 export async function pollMerchantCardStripeSession(sessionId: string) {
 	if (/^pi_[A-Za-z0-9_]+$/.test(sessionId)) {
-		const intent = await stripeClient().paymentIntents.retrieve(sessionId)
+		const intent = await retrievePaymentIntentForMerchant(sessionId)
 		if (intent.status === 'succeeded') {
 			await fulfillMerchantCardStripePaymentIntent(sessionId).catch((error: any) => {
 				logger(Colors.yellow(`[merchantCardStripe] terminal fulfillment retry failed: ${error?.message ?? error}`))
@@ -1321,7 +1342,7 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
 
 /** Fulfill a paid PaymentIntent created by the Payment Element. */
 export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: string): Promise<void> {
-	const paymentIntent = await stripeClient().paymentIntents.retrieve(paymentIntentId)
+	const paymentIntent = await retrievePaymentIntentForMerchant(paymentIntentId)
 	if (paymentIntent.status !== 'succeeded') return
 	const meta = paymentIntent.metadata ?? {}
 	if (meta.product !== 'merchantCardStripe') return

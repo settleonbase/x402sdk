@@ -2338,6 +2338,26 @@ export async function getMerchantCardStripeSessionStatus(sessionId: string): Pro
 	}
 }
 
+export async function getMerchantCardStripeSessionCardAddress(
+	sessionId: string,
+): Promise<string | null> {
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureMerchantCardStripeSchema(db)
+		const result = await db.query(
+			`SELECT card_address
+			   FROM beamio_stripe_card_sessions
+			  WHERE session_id = $1`,
+			[sessionId],
+		)
+		const cardAddress = result.rows[0]?.card_address
+		return typeof cardAddress === 'string' ? cardAddress : null
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 export async function updateMerchantCardStripeSession(params: {
 	sessionId: string
 	status?: 'pending' | 'succeeded' | 'failed'
