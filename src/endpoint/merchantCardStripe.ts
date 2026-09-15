@@ -747,16 +747,44 @@ async function ensureMerchantStripeTerminalLocation(
 	const account = await stripe.accounts.retrieve(stripeAccountId)
 	if ('deleted' in account && account.deleted) throw new Error('Connected Stripe account was deleted')
 	if (!account.country) throw new Error('Connected Stripe account country is unavailable')
+	const accountCountry = account.country.toUpperCase()
+	const accountAddress =
+		account.company?.address ??
+		account.individual?.address ??
+		account.business_profile?.support_address ??
+		null
+	const locationAddress = accountAddress?.line1
+		? {
+			line1: accountAddress.line1,
+			...(accountAddress.line2 ? { line2: accountAddress.line2 } : {}),
+			...(accountAddress.city ? { city: accountAddress.city } : {}),
+			...(accountAddress.state ? { state: accountAddress.state } : {}),
+			...(accountAddress.postal_code ? { postal_code: accountAddress.postal_code } : {}),
+			country: accountCountry,
+		}
+		: null
+	if (!locationAddress && !existingLocationId?.trim()) {
+		throw new Error('Stripe Connected Account address is required before starting Tap to Pay.')
+	}
 	if (existingLocationId?.trim()) {
 		const locationId = existingLocationId.trim()
 		const location = await stripe.terminal.locations.retrieve(locationId, { stripeAccount: stripeAccountId })
 		if ('deleted' in location && location.deleted) throw new Error('Stripe Terminal location was deleted')
-		if (location.address?.country?.toUpperCase() !== account.country.toUpperCase()) {
+		if (
+			locationAddress &&
+			(
+				location.address?.country?.toUpperCase() !== accountCountry ||
+				location.address?.line1 !== locationAddress.line1
+			)
+		) {
 			await stripe.terminal.locations.update(
 				locationId,
-				{ address: { country: account.country } },
+				{ address: locationAddress },
 				{ stripeAccount: stripeAccountId },
 			)
+		}
+		if (!location.address?.line1 && !locationAddress) {
+			throw new Error('Stripe Terminal location requires a complete business address.')
 		}
 		return locationId
 	}
@@ -769,7 +797,7 @@ async function ensureMerchantStripeTerminalLocation(
 	const created = await stripe.terminal.locations.create(
 		{
 			display_name: 'Beamio POS',
-			address: { country: account.country },
+			address: locationAddress!,
 		},
 		{ stripeAccount: stripeAccountId },
 	)
