@@ -900,7 +900,11 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 	}
 	const paymentIntent = await stripe.paymentIntents.create({
 		amount,
-		currency,
+		// Stripe Terminal card-present payments must use the resolved
+		// merchant-account currency (for example USD for a US account).
+		// The original merchant-card currency remains in metadata and is
+		// used by fulfillment to settle the card in its own currency.
+		currency: terminalCharge.chargeCurrency,
 		payment_method_types: ['card_present'],
 		description: params.kind === 'membership' ? 'Membership fee' : 'Program card top-up',
 		on_behalf_of: local.stripeAccountId,
