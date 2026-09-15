@@ -13998,6 +13998,70 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}, res)
 	})
 
+	const stripeTerminalAuthorizationDomain = {
+		name: 'Beamio Stripe Terminal',
+		version: '1',
+		chainId: 224422,
+	}
+	const stripeTerminalAuthorizationTypes = {
+		StripeTerminalAuthorization: [
+			{ name: 'cardAddress', type: 'address' },
+			{ name: 'buyerEoa', type: 'address' },
+			{ name: 'amountFiat6', type: 'uint256' },
+			{ name: 'currency', type: 'string' },
+			{ name: 'kind', type: 'string' },
+			{ name: 'businessIdempotencyKey', type: 'string' },
+			{ name: 'deadline', type: 'uint256' },
+			{ name: 'nonce', type: 'bytes32' },
+		],
+	}
+	const verifyStripeTerminalAdminAuthorization = async (body: any) => {
+		if (
+			typeof body.posAdmin !== 'string' || !ethers.isAddress(body.posAdmin) ||
+			typeof body.authorizationSignature !== 'string' ||
+			typeof body.authorizationDeadline !== 'number' ||
+			typeof body.authorizationNonce !== 'string' ||
+			!ethers.isHexString(body.authorizationNonce, 32)
+		) {
+			throw new Error('POS admin authorization is required')
+		}
+		const now = Math.floor(Date.now() / 1000)
+		if (body.authorizationDeadline < now || body.authorizationDeadline > now + 600) {
+			throw new Error('POS admin authorization has expired')
+		}
+		const cardAddress = ethers.getAddress(body.cardAddress)
+		const posAdmin = ethers.getAddress(body.posAdmin)
+		const value = {
+			cardAddress,
+			buyerEoa: ethers.getAddress(body.buyerEoa),
+			amountFiat6: body.amountFiat6,
+			currency: body.currency,
+			kind: body.kind,
+			businessIdempotencyKey: body.businessIdempotencyKey,
+			deadline: body.authorizationDeadline,
+			nonce: body.authorizationNonce,
+		}
+		const recovered = ethers.verifyTypedData(
+			stripeTerminalAuthorizationDomain,
+			stripeTerminalAuthorizationTypes,
+			value,
+			body.authorizationSignature,
+		)
+		if (recovered.toLowerCase() !== posAdmin.toLowerCase()) {
+			throw new Error('POS admin signature does not match posAdmin')
+		}
+		const provider = providerForUserCardChain(resolveUserCardChain(cardAddress))
+		const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], provider)
+		if (!(await card.isAdmin(posAdmin))) {
+			throw new Error('POS admin is not an admin of this merchant card')
+		}
+		const stripeStatus = await getMerchantCardStripeStatusFromDb(cardAddress)
+		if (!stripeStatus?.stripeAccountId) {
+			throw new Error('Merchant Stripe Connected Account is not configured')
+		}
+		return { cardAddress, posAdmin }
+	}
+
 	router.post('/merchantCardStripe/createTerminalPaymentIntent', async (req, res) => {
 		const body = req.body ?? {}
 		if (
@@ -14007,14 +14071,17 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			!['topup', 'membership'].includes(body.kind) ||
 			typeof body.currency !== 'string' ||
 			typeof body.businessIdempotencyKey !== 'string' ||
-			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey)
+			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey) ||
+			typeof body.posAdmin !== 'string' ||
+			typeof body.authorizationSignature !== 'string'
 		) {
-			return res.status(400).json({ error: 'cardAddress, buyerEoa, amountFiat6, currency, kind and businessIdempotencyKey are required' }).end()
+			return res.status(400).json({ error: 'POS admin signature and payment fields are required' }).end()
 		}
 		if (!merchantCardStripeConfigured() || !getStripeBeamioPublishableKey()) {
 			return res.status(503).json({ error: 'Stripe Terminal is not configured on server' }).end()
 		}
 		try {
+			await verifyStripeTerminalAdminAuthorization(body)
 			const terminalCharge = await resolveMerchantCardStripeTerminalCharge({
 				cardAddress: body.cardAddress,
 				amountFiat6: body.amountFiat6,
@@ -14035,14 +14102,21 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	router.post('/merchantCardStripe/connectionToken', async (req, res) => {
-		const { cardAddress } = req.body ?? {}
+		const body = req.body ?? {}
+		const { cardAddress } = body
 		if (typeof cardAddress !== 'string' || !ethers.isAddress(cardAddress)) {
 			return res.status(400).json({ error: 'Valid cardAddress required' }).end()
 		}
 		if (!merchantCardStripeConfigured()) {
 			return res.status(503).json({ error: 'Stripe Terminal is not configured on server' }).end()
 		}
+		try {
+			await verifyStripeTerminalAdminAuthorization(body)
+		} catch (error: any) {
+			return res.status(403).json({ error: error?.message ?? String(error) }).end()
+		}
 		return postLocalhost('/api/merchantCardStripe/connectionToken', {
+			...body,
 			cardAddress: ethers.getAddress(cardAddress),
 		}, res)
 	})

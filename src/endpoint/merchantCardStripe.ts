@@ -794,6 +794,10 @@ export async function createMerchantCardStripePaymentIntent(params: {
 type MerchantCardStripeTerminalPaymentParams = {
 	cardAddress: string
 	buyerEoa: string
+	posAdmin: string
+	authorizationSignature?: string
+	authorizationDeadline?: number
+	authorizationNonce?: string
 	amountFiat6: string
 	currency: string
 	kind: 'topup' | 'membership' | 'gift'
@@ -984,6 +988,7 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 		payment_mode: 'terminal',
 		card_address: cardAddress,
 		buyer_eoa: buyerEoa,
+		pos_admin_eoa: params.posAdmin,
 		amount_fiat6: params.amountFiat6,
 		currency: currency.toUpperCase(),
 		charge_amount_fiat6: terminalCharge.chargeAmountFiat6,
