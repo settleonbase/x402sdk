@@ -276,6 +276,26 @@ export async function setMerchantCardStripeTopupEnabledForOwner(params: {
 	if (outcome === 'not_connected') {
 		throw new Error('No Stripe account is currently connected to this merchant card')
 	}
+	if (params.topupEnabled) {
+		const local = await getMerchantCardStripeStatusFromDb(params.cardAddress)
+		if (local?.stripeAccountId) {
+			const account = await stripeClient().accounts.retrieve(local.stripeAccountId)
+			if ('deleted' in account && account.deleted) {
+				throw new Error('Connected Stripe account was deleted')
+			}
+			const address = readStripeBusinessAddress(account)
+			if (!address) {
+				throw new Error('Stripe Connected Account address is required before enabling Tap to Pay.')
+			}
+			await updateMerchantCardStripeAccount({
+				cardAddress: params.cardAddress,
+				stripeAccountId: local.stripeAccountId,
+				chargesEnabled: account.charges_enabled === true,
+				detailsSubmitted: account.details_submitted === true,
+				stripeBusinessAddress: address,
+			})
+		}
+	}
 	return {
 		cardAddress: normalizeCardAddress(params.cardAddress),
 		topupEnabled: params.topupEnabled,
