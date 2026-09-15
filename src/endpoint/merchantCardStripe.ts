@@ -97,6 +97,32 @@ function stripeTerminalCurrencyForCountry(country: string | null | undefined): s
 	return country ? STRIPE_COUNTRY_CURRENCY[country.trim().toUpperCase()] ?? null : null
 }
 
+type StripeBusinessAddress = {
+	line1: string
+	line2?: string
+	city?: string
+	state?: string
+	postal_code?: string
+	country: string
+}
+
+function readStripeBusinessAddress(account: Stripe.Account): StripeBusinessAddress | null {
+	const address =
+		account.company?.address ??
+		account.individual?.address ??
+		account.business_profile?.support_address ??
+		null
+	if (!address?.line1 || !account.country) return null
+	return {
+		line1: address.line1,
+		...(address.line2 ? { line2: address.line2 } : {}),
+		...(address.city ? { city: address.city } : {}),
+		...(address.state ? { state: address.state } : {}),
+		...(address.postal_code ? { postal_code: address.postal_code } : {}),
+		country: account.country.toUpperCase(),
+	}
+}
+
 function giftStripeMetadata(params: {
 	kind: string
 	redeemHash?: string
@@ -366,6 +392,7 @@ export async function completeMerchantCardStripeOAuth(params: {
 		stripeAccessToken: token.access_token ?? null,
 		stripeRefreshToken: token.refresh_token ?? null,
 		stripeOauthScope: token.scope ?? null,
+		stripeBusinessAddress: readStripeBusinessAddress(account),
 		// Do not enable checkout until every configured Beamio fulfillment admin
 		// has a non-zero on-chain allowance. Changing that allowance requires a
 		// separate card-owner executeForOwner authorization.
@@ -469,6 +496,7 @@ export async function getMerchantCardStripeStatus(cardAddressRaw: string) {
 		detailsSubmitted,
 		stripeFulfillmentAdmin: fulfillmentAdmin,
 		stripeFulfillmentAdmins: fulfillmentAdmins,
+		stripeBusinessAddress: readStripeBusinessAddress(account),
 	})
 	const adminLimitStatus = await getMerchantCardStripeAdminLimitStatus({
 		cardAddress,
@@ -743,16 +771,13 @@ async function ensureMerchantStripeTerminalLocation(
 	stripe: Stripe,
 	stripeAccountId: string,
 	existingLocationId: string | null,
+	savedBusinessAddress: StripeBusinessAddress | null = null,
 ): Promise<string> {
 	const account = await stripe.accounts.retrieve(stripeAccountId)
 	if ('deleted' in account && account.deleted) throw new Error('Connected Stripe account was deleted')
 	if (!account.country) throw new Error('Connected Stripe account country is unavailable')
 	const accountCountry = account.country.toUpperCase()
-	const accountAddress =
-		account.company?.address ??
-		account.individual?.address ??
-		account.business_profile?.support_address ??
-		null
+	const accountAddress = readStripeBusinessAddress(account) ?? savedBusinessAddress
 	const locationAddress = accountAddress?.line1
 		? {
 			line1: accountAddress.line1,
@@ -903,6 +928,7 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 			stripe,
 			local.stripeAccountId,
 			local.stripeTerminalLocationId,
+			local.stripeBusinessAddress,
 		)
 		if (local.stripeTerminalLocationId !== locationId) {
 			await updateMerchantCardStripeAccount({
@@ -957,6 +983,7 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 		stripe,
 		local.stripeAccountId,
 		local.stripeTerminalLocationId,
+		local.stripeBusinessAddress,
 	)
 	if (local.stripeTerminalLocationId !== locationId) {
 		await updateMerchantCardStripeAccount({
@@ -981,6 +1008,7 @@ export async function createMerchantCardStripeTerminalConnectionToken(params: {
 		stripe,
 		local.stripeAccountId,
 		local.stripeTerminalLocationId,
+		local.stripeBusinessAddress,
 	)
 	if (local.stripeTerminalLocationId !== locationId) {
 		await updateMerchantCardStripeAccount({

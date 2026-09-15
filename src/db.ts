@@ -1829,6 +1829,7 @@ export async function ensureMerchantCardStripeSchema(db: Client): Promise<void> 
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_details_submitted BOOLEAN')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_topup_enabled BOOLEAN NOT NULL DEFAULT TRUE')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_terminal_location_id TEXT')
+	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_business_address JSONB')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_fulfillment_admin TEXT')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_fulfillment_admins JSONB')
 	await db.query('ALTER TABLE beamio_cards ADD COLUMN IF NOT EXISTS stripe_access_token TEXT')
@@ -1891,6 +1892,14 @@ export type MerchantCardStripeStatusRow = {
 	detailsSubmitted: boolean
 	stripeTopupEnabled: boolean
 	stripeTerminalLocationId: string | null
+	stripeBusinessAddress: {
+		line1: string
+		line2?: string
+		city?: string
+		state?: string
+		postal_code?: string
+		country: string
+	} | null
 	stripeFulfillmentAdmin: string | null
 	stripeFulfillmentAdmins: string[]
 	stripeOauthScope?: string | null
@@ -1913,6 +1922,7 @@ export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Pr
 			`SELECT card_address, stripe_account_id, stripe_charges_enabled,
 				stripe_details_submitted, stripe_topup_enabled,
 				stripe_terminal_location_id,
+				stripe_business_address,
 				stripe_fulfillment_admin, stripe_fulfillment_admins,
 				stripe_oauth_scope
 			 FROM beamio_cards WHERE LOWER(card_address) = LOWER($1) LIMIT 1`,
@@ -1927,6 +1937,7 @@ export async function getMerchantCardStripeStatusFromDb(cardAddress: string): Pr
 			detailsSubmitted: row.stripe_details_submitted === true,
 			stripeTopupEnabled: row.stripe_topup_enabled !== false,
 			stripeTerminalLocationId: row.stripe_terminal_location_id ?? null,
+			stripeBusinessAddress: row.stripe_business_address ?? null,
 			stripeFulfillmentAdmin: row.stripe_fulfillment_admin ?? null,
 			stripeFulfillmentAdmins: Array.isArray(row.stripe_fulfillment_admins)
 				? row.stripe_fulfillment_admins.filter((address: unknown): address is string => typeof address === 'string')
@@ -1945,6 +1956,7 @@ export async function updateMerchantCardStripeAccount(params: {
 	detailsSubmitted?: boolean
 	stripeTopupEnabled?: boolean
 	stripeTerminalLocationId?: string | null
+	stripeBusinessAddress?: object | null
 	stripeFulfillmentAdmin?: string | null
 	stripeFulfillmentAdmins?: string[]
 	stripeAccessToken?: string | null
@@ -1967,6 +1979,7 @@ export async function updateMerchantCardStripeAccount(params: {
 				stripe_oauth_scope = COALESCE($9, stripe_oauth_scope),
 				stripe_topup_enabled = COALESCE($10, stripe_topup_enabled)
 				, stripe_terminal_location_id = COALESCE($11, stripe_terminal_location_id)
+				, stripe_business_address = COALESCE($12, stripe_business_address)
 			 WHERE LOWER(card_address) = LOWER($1)`,
 			[
 				ethers.getAddress(params.cardAddress),
@@ -1980,6 +1993,7 @@ export async function updateMerchantCardStripeAccount(params: {
 				params.stripeOauthScope ?? null,
 				params.stripeTopupEnabled ?? null,
 				params.stripeTerminalLocationId ?? null,
+				params.stripeBusinessAddress ? JSON.stringify(params.stripeBusinessAddress) : null,
 			],
 		)
 	} finally {
