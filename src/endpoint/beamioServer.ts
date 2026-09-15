@@ -113,6 +113,7 @@ import {
 	registerIssuedCouponSeriesQueryCacheInvalidator,
 } from './issuedCouponSeriesQueryCache'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
+import { verifyNfcSecurityGate } from '../nfcSecurityGate'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import {
 	registerPushDevicePreCheck,
@@ -3251,30 +3252,19 @@ const routing = ( router: Router ) => {
 		let nfcSunTagIdHex: string | null = null
 		let sunResult: import('../BeamioSun').VerifyBeamioSunResult | null = null
 		if (isNfcUid) {
-			const eTrim = typeof e === 'string' ? e.trim() : ''
-			const cTrim = typeof c === 'string' ? c.trim() : ''
-			const mTrim = typeof m === 'string' ? m.trim() : ''
-			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
-				const err = { ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' }
-				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} 缺少 SUN 参数 返回 403: ${JSON.stringify(err)}`))
-				return res.status(403).json(err).end()
+			const gate = await verifyNfcSecurityGate(
+				{ uid: uidTrim, e, c, m },
+				{ allowUnlinked: true },
+			)
+			if (!gate.ok) {
+				return res.status(gate.statusCode).json({
+					...gate,
+					ok: false,
+				}).end()
 			}
-			try {
-				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-				sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-				if (!sunResult.valid) {
-					const err = { ok: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }
-					logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid} macValid=${sunResult.macValid} counterFresh=${sunResult.counterFresh}`))
-					return res.status(403).json(err).end()
-				}
-				nfcSunTagIdHex = sunResult.tagIdHex
-				logger(Colors.gray(`[getUIDAssets] uid=${uidTrim} tagId=${nfcSunTagIdHex} SUN 校验通过 counter=${sunResult.counterHex}`))
-			} catch (sunErr: any) {
-				const msg = sunErr?.message ?? String(sunErr)
-				const err = { ok: false, error: `SUN verification error: ${msg}` }
-				logger(Colors.yellow(`[getUIDAssets] uid=${uidTrim} SUN 校验异常: ${msg}`))
-				return res.status(403).json(err).end()
-			}
+			sunResult = gate.sun
+			nfcSunTagIdHex = gate.tagIdHex
+			logger(Colors.gray(`[getUIDAssets] uid=${uidTrim} tagId=${nfcSunTagIdHex} SUN 校验通过 counter=${sunResult.counterHex}`))
 		}
 		try {
 			let eoaRaw: string | null
@@ -3380,22 +3370,12 @@ const routing = ( router: Router ) => {
 			if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
 				return res.status(400).json({ ok: false, error: 'Missing tagIdHex or valid uid.' }).end()
 			}
-			const eTrim = String(e ?? '').trim()
-			const cTrim = String(c ?? '').trim()
-			const mTrim = String(m ?? '').trim()
-			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
-				return res.status(403).json({ ok: false, error: 'NFC UID requires SUN params (e, c, m).' }).end()
-			}
-			try {
-				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-				if (!sunResult.valid) {
-					return res.status(403).json({ ok: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
-				}
-				tag = sunResult.tagIdHex
-			} catch (e: any) {
-				return res.status(403).json({ ok: false, error: `SUN verification error: ${e?.message ?? e}` }).end()
-			}
+			const gate = await verifyNfcSecurityGate(
+				{ uid: uidTrim, e, c, m },
+				{ allowUnlinked: true },
+			)
+			if (!gate.ok) return res.status(gate.statusCode).json(gate).end()
+			tag = gate.tagIdHex
 		}
 		if (!/^[0-9A-F]{16}$/.test(tag)) {
 			return res.status(400).json({ ok: false, error: 'Invalid tagIdHex.' }).end()
@@ -3626,11 +3606,9 @@ const routing = ( router: Router ) => {
 		const uidTrim = uid.trim()
 		const isNfcUid = /^[0-9A-Fa-f]{14}$/.test(uidTrim)
 		if (isNfcUid) {
-			const eTrim = typeof e === 'string' ? e.trim() : ''
-			const cTrim = typeof c === 'string' ? c.trim() : ''
-			const mTrim = typeof m === 'string' ? m.trim() : ''
-			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
-				return res.status(403).json({ ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' })
+			const gate = await verifyNfcSecurityGate({ uid: uidTrim, e, c, m })
+			if (!gate.ok) {
+				return res.status(gate.statusCode).json(gate).end()
 			}
 		}
 		const merchantInfraForPrepare =
@@ -3681,6 +3659,10 @@ const routing = ( router: Router ) => {
 			const mTrim = typeof m === 'string' ? m.trim() : ''
 			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
 				return res.status(403).json({ ok: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' })
+			}
+			const gate = await verifyNfcSecurityGate({ uid: uidTrim, e: eTrim, c: cTrim, m: mTrim })
+			if (!gate.ok) {
+				return res.status(gate.statusCode).json({ ok: false, error: gate.error, errorCode: gate.errorCode }).end()
 			}
 		}
 		const merchantInfraForPrepare =
@@ -3761,6 +3743,10 @@ const routing = ( router: Router ) => {
 			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
 				return res.status(403).json({ success: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' })
 			}
+			const gate = await verifyNfcSecurityGate({ uid: uidTrim, e: eTrim, c: cTrim, m: mTrim })
+			if (!gate.ok) {
+				return res.status(gate.statusCode).json({ success: false, error: gate.error, errorCode: gate.errorCode }).end()
+			}
 		}
 		const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : ''
 		const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : ''
@@ -3782,31 +3768,6 @@ const routing = ( router: Router ) => {
 		}
 		if (!fiat6Ok && !usdc6Ok) {
 			return res.status(400).json({ success: false, error: 'Missing amountFiat6+currency (preferred) or amountUsdc6 (deprecated)' })
-		}
-		if (isNfcUid) {
-			try {
-				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${String(c ?? '').trim()}&e=${String(e ?? '').trim()}&m=${String(m ?? '').trim()}`
-				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-				if (!sunResult.valid) {
-					return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
-				}
-				let eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
-				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
-					const prov = await ensureNfcTagProvisionedViaMaster({
-						uid: uidTrim,
-						tagIdHex: sunResult.tagIdHex,
-						e: String(e ?? '').trim(),
-						c: String(c ?? '').trim(),
-						m: String(m ?? '').trim(),
-						logPrefix: '[payByNfcUidSignContainer]',
-					})
-					if (!prov.ok) {
-						return res.status(prov.statusCode).json({ success: false, error: prov.error }).end()
-					}
-				}
-			} catch (e: any) {
-				return res.status(403).json({ success: false, error: `SUN verification error: ${e?.message ?? e}` }).end()
-			}
 		}
 		// Cluster 预检：扣款是否在余额内，不足则返回错误，不转发 Master
 		const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
@@ -3928,9 +3889,25 @@ const routing = ( router: Router ) => {
 	/** POST /api/payByNfcUid - 以 UID 支付（写操作，Cluster 预检后转发 Master）。
 	 *  fiat6-only 协议：传 `amountFiat6` + `currency`；`amountUsdc6` 已 deprecated，仅作回退。 */
 	router.post('/payByNfcUid', async (req, res) => {
-		const { uid, amountUsdc6, amountFiat6, currency, payee } = req.body as { uid?: string; amountUsdc6?: string; amountFiat6?: string; currency?: string; payee?: string }
+		const { uid, amountUsdc6, amountFiat6, currency, payee, e, c, m } = req.body as { uid?: string; amountUsdc6?: string; amountFiat6?: string; currency?: string; payee?: string; e?: string; c?: string; m?: string }
 		if (!uid || typeof uid !== 'string' || uid.trim().length === 0) {
 			return res.status(400).json({ success: false, error: 'Missing uid' })
+		}
+		const uidTrim = uid.trim()
+		if (/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
+			const gate = await verifyNfcSecurityGate(
+				{ uid: uidTrim, e, c, m },
+				{ requirePosAdmin: true },
+			)
+			if (!gate.ok) {
+				return res.status(gate.statusCode).json({
+					success: false,
+					error: gate.error,
+					...(gate.errorCode ? { errorCode: gate.errorCode } : {}),
+					...(gate.macValid !== undefined ? { macValid: gate.macValid } : {}),
+					...(gate.counterFresh !== undefined ? { counterFresh: gate.counterFresh } : {}),
+				}).end()
+			}
 		}
 		const fiat6Trim = typeof amountFiat6 === 'string' ? amountFiat6.trim() : ''
 		const currencyTrim = typeof currency === 'string' ? currency.trim().toUpperCase() : ''
@@ -3942,21 +3919,24 @@ const routing = ( router: Router ) => {
 		if (fiat6Ok && usdc6Ok) {
 			logger(Colors.yellow(`[payByNfcUid][deprecation] both amountFiat6 and amountUsdc6 provided — using amountFiat6 (fiat6-only protocol).`))
 		} else if (!fiat6Ok && usdc6Ok) {
-			logger(Colors.yellow(`[payByNfcUid][deprecation] amountUsdc6-only client; please upgrade to amountFiat6+currency. uid=${uid.trim().slice(0, 12)}...`))
+			logger(Colors.yellow(`[payByNfcUid][deprecation] amountUsdc6-only client; please upgrade to amountFiat6+currency. uid=${uidTrim.slice(0, 12)}...`))
 		}
 		const amountBig = usdc6Ok ? BigInt(String(amountUsdc6).trim()) : 0n
 		if (!payee || !ethers.isAddress(payee)) {
 			return res.status(400).json({ success: false, error: 'Invalid payee address' })
 		}
 		// 不在此做卡登记检测，直接转发 Master；Master 会从 DB 或 mnemonic 派生私钥
-		logger(Colors.green(`[payByNfcUid] Cluster preCheck OK uid=${uid.trim().slice(0, 16)}... amountFiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} amountUsdc6=${usdc6Ok ? amountUsdc6 : 'none'} payee=${ethers.getAddress(payee)} forwarding to master`))
+		logger(Colors.green(`[payByNfcUid] Cluster preCheck OK uid=${uidTrim.slice(0, 16)}... amountFiat6=${fiat6Ok ? `${fiat6Trim} ${currencyTrim}` : 'none'} amountUsdc6=${usdc6Ok ? amountUsdc6 : 'none'} payee=${ethers.getAddress(payee)} forwarding to master`))
 		postLocalhost(
 			'/api/payByNfcUid',
 			{
-				uid: uid.trim(),
+				uid: uidTrim,
 				...(fiat6Ok ? { amountFiat6: fiat6Trim, currency: currencyTrim } : {}),
 				...(usdc6Ok ? { amountUsdc6 } : {}),
 				payee: ethers.getAddress(payee),
+				...(e ? { e } : {}),
+				...(c ? { c } : {}),
+				...(m ? { m } : {}),
 			},
 			res
 		)
@@ -3980,16 +3960,16 @@ const routing = ( router: Router ) => {
 			return res.status(403).json({ success: false, error: 'SUN params (e, c, m) required.' }).end()
 		}
 		try {
-			const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-			const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-			if (!sunResult.valid) {
-				return res.status(403).json({ success: false, error: 'SUN verification failed.' }).end()
-			}
-			const nfcTxGateLink = await getNfcCardSignedTxGateByTagId(sunResult.tagIdHex)
+			const securityGate = await verifyNfcSecurityGate(
+				{ uid: uidTrim, e: eTrim, c: cTrim, m: mTrim },
+				{ allowUnlinked: true },
+			)
+			if (!securityGate.ok) return res.status(securityGate.statusCode).json(securityGate).end()
+			const nfcTxGateLink = await getNfcCardSignedTxGateByTagId(securityGate.tagIdHex)
 			if (!nfcTxGateLink.ok) {
 				return res.status(403).json({ success: false, error: nfcTxGateLink.message, errorCode: nfcTxGateLink.code }).end()
 			}
-			const blockedDetail = await nfcLinkAppNewLinkBlockedDetail(sunResult.tagIdHex)
+			const blockedDetail = await nfcLinkAppNewLinkBlockedDetail(securityGate.tagIdHex)
 			if (blockedDetail) {
 				return res
 					.status(409)
@@ -4117,15 +4097,11 @@ const routing = ( router: Router ) => {
 		if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
 			return res.status(403).json({ success: false, error: 'SUN params (e, c, m) required.' }).end()
 		}
-		try {
-			const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-			const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-			if (!sunResult.valid) {
-				return res.status(403).json({ success: false, error: 'SUN verification failed.' }).end()
-			}
-		} catch (e: any) {
-			return res.status(403).json({ success: false, error: e?.message ?? String(e) }).end()
-		}
+		const gate = await verifyNfcSecurityGate(
+			{ uid: uidTrim, e: eTrim, c: cTrim, m: mTrim },
+			{ allowUnlinked: true },
+		)
+		if (!gate.ok) return res.status(gate.statusCode).json(gate).end()
 		postLocalhost('/api/nfcLinkAppCancel', { uid: uidTrim, e: eTrim, c: cTrim, m: mTrim }, res)
 	})
 
@@ -4455,51 +4431,38 @@ const routing = ( router: Router ) => {
 		}
 		// NFC 格式 uid：必须提供 e/c/m，SUN 校验，用 tagIdHex 查 EOA；不符合 SUN 或无法推导 tagID 的不予受理
 		if (hasUid && isNfcUid) {
-			const eTrim = typeof e === 'string' ? e.trim() : ''
-			const cTrim = typeof c === 'string' ? c.trim() : ''
-			const mTrim = typeof m === 'string' ? m.trim() : ''
-			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
-				const err = { success: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' }
-				logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} 缺少 SUN 参数 返回 403: ${JSON.stringify(err)}`))
-				return res.status(403).json(err).end()
+			const gate = await verifyNfcSecurityGate({ uid: uidTrim, e, c, m }, { allowUnlinked: true })
+			if (!gate.ok) {
+				return res.status(gate.statusCode).json({
+					success: false,
+					error: gate.error,
+					...(gate.errorCode ? { errorCode: gate.errorCode } : {}),
+					...(gate.macValid !== undefined ? { macValid: gate.macValid } : {}),
+					...(gate.counterFresh !== undefined ? { counterFresh: gate.counterFresh } : {}),
+				}).end()
 			}
 			try {
-				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-				if (!sunResult.valid) {
-					const err = { success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }
-					logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid}`))
-					return res.status(403).json(err).end()
-				}
-				let eoaFromTag = await getNfcRecipientAddressByTagId(sunResult.tagIdHex)
-				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
+				let eoaFromTag = gate.linkedEOA
+				if (!eoaFromTag) {
 					const prov = await ensureNfcTagProvisionedViaMaster({
 						uid: uidTrim,
-						tagIdHex: sunResult.tagIdHex,
-						e: eTrim,
-						c: cTrim,
-						m: mTrim,
+						tagIdHex: gate.tagIdHex,
+						e: String(e ?? '').trim(),
+						c: String(c ?? '').trim(),
+						m: String(m ?? '').trim(),
 						logPrefix: '[nfcTopupPrepare]',
 					})
 					if (!prov.ok) {
-						const err = { success: false, error: prov.error }
-						logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} tagId=${sunResult.tagIdHex} provision 失败 返回 ${prov.statusCode}: ${prov.error}`))
-						return res.status(prov.statusCode).json(err).end()
+						return res.status(prov.statusCode).json({ success: false, error: prov.error }).end()
 					}
 					eoaFromTag = prov.eoa
 				}
-				const topPrepGate = await getNfcCardPosAdminGateByTagId(sunResult.tagIdHex)
-				if (!topPrepGate.ok) {
-					return res.status(403).json({ success: false, error: topPrepGate.message, errorCode: topPrepGate.code }).end()
-				}
 				resolvedWallet = ethers.getAddress(eoaFromTag)
-				nfcSunTagForEnsure = sunResult.tagIdHex
-				logger(Colors.gray(`[nfcTopupPrepare] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}... wallet=${resolvedWallet.slice(0, 10)}...`))
+				nfcSunTagForEnsure = gate.tagIdHex
+				logger(Colors.gray(`[nfcTopupPrepare] uid=${uidTrim} SUN 校验通过 tagId=${gate.tagIdHex.slice(0, 8)}... wallet=${resolvedWallet.slice(0, 10)}...`))
 			} catch (sunErr: any) {
 				const msg = sunErr?.message ?? String(sunErr)
-				const err = { success: false, error: `SUN verification error: ${msg}` }
-				logger(Colors.yellow(`[nfcTopupPrepare] uid=${uidTrim} SUN 校验异常: ${msg}`))
-				return res.status(403).json(err).end()
+				return res.status(403).json({ success: false, error: `SUN verification error: ${msg}` }).end()
 			}
 		}
 		const forwardCardAddress = ethers.getAddress(cardAddress.trim())
@@ -4627,53 +4590,21 @@ const routing = ( router: Router ) => {
 		const uidTrim = uid && typeof uid === 'string' ? uid.trim() : ''
 		const isNfcUid = uidTrim.length > 0 && /^[0-9A-Fa-f]{14}$/.test(uidTrim)
 		if (isNfcUid) {
-			const eTrim = typeof e === 'string' ? e.trim() : ''
-			const cTrim = typeof c === 'string' ? c.trim() : ''
-			const mTrim = typeof m === 'string' ? m.trim() : ''
-			if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
-				const err = { success: false, error: 'NFC UID requires SUN params (e, c, m) for verification. e=64 hex, c=6 hex, m=16 hex.' }
-				logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} 缺少 SUN 参数 返回 403: ${JSON.stringify(err)}`))
-				return res.status(403).json(err).end()
+			const gate = await verifyNfcSecurityGate(
+				{ uid: uidTrim, e, c, m },
+				{ requirePosAdmin: true },
+			)
+			if (!gate.ok) {
+				return res.status(gate.statusCode).json({
+					success: false,
+					error: gate.error,
+					...(gate.errorCode ? { errorCode: gate.errorCode } : {}),
+					...(gate.macValid !== undefined ? { macValid: gate.macValid } : {}),
+					...(gate.counterFresh !== undefined ? { counterFresh: gate.counterFresh } : {}),
+				}).end()
 			}
-			try {
-				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-				if (!sunResult.valid) {
-					const err = { success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }
-					logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} tagId=${sunResult.tagIdHex} SUN 校验失败: valid=${sunResult.valid}`))
-					return res.status(403).json(err).end()
-				}
-				nfcTagIdHex = sunResult.tagIdHex
-				nfcLinkedEOA = await getNfcRecipientAddressByTagId(nfcTagIdHex)
-				if (!nfcLinkedEOA || !ethers.isAddress(nfcLinkedEOA)) {
-					const prov = await ensureNfcTagProvisionedViaMaster({
-						uid: uidTrim,
-						tagIdHex: nfcTagIdHex,
-						e: eTrim,
-						c: cTrim,
-						m: mTrim,
-						logPrefix: '[nfcTopup]',
-					})
-					if (!prov.ok) {
-						const err = { success: false, error: prov.error }
-						logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} tagId=${nfcTagIdHex} provision 失败 返回 ${prov.statusCode}: ${prov.error}`))
-						return res.status(prov.statusCode).json(err).end()
-					}
-					nfcLinkedEOA = prov.eoa
-				}
-				const topGate = await getNfcCardPosAdminGateByTagId(nfcTagIdHex)
-				if (!topGate.ok) {
-					const err = { success: false, error: topGate.message, errorCode: topGate.code }
-					logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} NFC POS admin gate: ${topGate.code}`))
-					return res.status(403).json(err).end()
-				}
-				logger(Colors.gray(`[nfcTopup] uid=${uidTrim} SUN 校验通过 tagId=${sunResult.tagIdHex.slice(0, 8)}...`))
-			} catch (sunErr: any) {
-				const msg = sunErr?.message ?? String(sunErr)
-				const err = { success: false, error: `SUN verification error: ${msg}` }
-				logger(Colors.yellow(`[nfcTopup] uid=${uidTrim} SUN 校验异常: ${msg}`))
-				return res.status(403).json(err).end()
-			}
+			nfcTagIdHex = gate.tagIdHex
+			nfcLinkedEOA = gate.linkedEOA
 		}
 		if (!cardAddr || !ethers.isAddress(cardAddr) || !data || typeof data !== 'string' || data.length === 0) {
 			return res.status(400).json({ success: false, error: 'Missing or invalid cardAddr/data' })
@@ -6249,15 +6180,16 @@ const routing = ( router: Router ) => {
 			let recipientEOA: string | null = null
 			let tagIdHex: string | null = null
 			try {
-				const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-				const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-				if (!sunResult.valid) {
-					logger(Colors.yellow(`[nfcUsdcTopup] uid=${uidTrim} SUN 校验失败 valid=${sunResult.valid}`))
-					sessionUpdate({ state: 'error', error: 'SUN verification failed' })
-					return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
+				const securityGate = await verifyNfcSecurityGate(
+					{ uid: uidTrim, e: eTrim, c: cTrim, m: mTrim },
+					{ allowUnlinked: true },
+				)
+				if (!securityGate.ok) {
+					sessionUpdate({ state: 'error', error: securityGate.error })
+					return res.status(securityGate.statusCode).json(securityGate).end()
 				}
-				tagIdHex = sunResult.tagIdHex
-				let eoaFromTag = await getNfcRecipientAddressByTagId(tagIdHex)
+				tagIdHex = securityGate.tagIdHex
+				let eoaFromTag = securityGate.linkedEOA
 				if (!eoaFromTag || !ethers.isAddress(eoaFromTag)) {
 					const prov = await ensureNfcTagProvisionedViaMaster({
 						uid: uidTrim,
@@ -6966,21 +6898,16 @@ const routing = ( router: Router ) => {
 			let tagIdHex: string | null = null
 			if (hasNfcSun) {
 				try {
-					const sunUrl = `https://beamio.app/api/sun?uid=${uidTrim}&c=${cTrim}&e=${eTrim}&m=${mTrim}`
-					const sunResult = await verifyAndPersistBeamioSunUrl(sunUrl)
-					if (!sunResult.valid) {
-						logger(Colors.yellow(`[nfcUsdcCharge] uid=${uidTrim} SUN 校验失败 valid=${sunResult.valid}`))
-						sessionUpdate({ state: 'error', error: 'SUN verification failed' })
-						return res.status(403).json({ success: false, error: 'SUN verification failed', macValid: sunResult.macValid, counterFresh: sunResult.counterFresh }).end()
+					const securityGate = await verifyNfcSecurityGate(
+						{ uid: uidTrim, e: eTrim, c: cTrim, m: mTrim },
+						{ allowUnlinked: true },
+					)
+					if (!securityGate.ok) {
+						sessionUpdate({ state: 'error', error: securityGate.error })
+						return res.status(securityGate.statusCode).json(securityGate).end()
 					}
-					tagIdHex = sunResult.tagIdHex
-					let eoaFromTag: string | null = null
-					try {
-						const raw = await getNfcRecipientAddressByTagId(tagIdHex)
-						if (raw && ethers.isAddress(raw)) {
-							eoaFromTag = ethers.getAddress(raw)
-						}
-					} catch (_) { /* charge: best-effort */ }
+					tagIdHex = securityGate.tagIdHex
+					let eoaFromTag: string | null = securityGate.linkedEOA
 					if (!eoaFromTag) {
 						const prov = await ensureNfcTagProvisionedViaMaster({
 							uid: uidTrim,
@@ -10070,6 +9997,16 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				true,
 			),
 		)
+		postLocalhost('/api/topupWithReward13Container', preCheck.preChecked, res)
+	})
+
+	/** POS terminal-authorized variant; the customer does not sign the top-up. */
+	router.post('/posRewardPtTopup', async (req, res) => {
+		const body = { ...(req.body ?? {}), terminalAuthorized: true }
+		const preCheck = await topupWithReward13ContainerPreCheck(body)
+		if (!preCheck.success) {
+			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
 		postLocalhost('/api/topupWithReward13Container', preCheck.preChecked, res)
 	})
 

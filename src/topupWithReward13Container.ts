@@ -101,9 +101,11 @@ export type TopupWithReward13ContainerBody = {
 	minTotalPointsOut0: string
 	deadline: number
 	nonce: string
-	userSignature: string
+	userSignature?: string
 	peers: TopupPeerLeg[]
 	cash?: TopupCashAuth | null
+	terminalOperator?: string
+	terminalCard?: string
 	/** Cluster-computed; Master may use for B-Unit fee path when cash present. */
 	cardOwnerEOA?: string
 	topupFeeBUnits?: string
@@ -175,7 +177,14 @@ export async function topupWithReward13ContainerPreCheck(
 		const peersRaw = Array.isArray(body.peers) ? body.peers : []
 
 		if (!ethers.isHexString(nonce, 32)) return { success: false, error: 'Invalid nonce' }
-		if (!body.userSignature || typeof body.userSignature !== 'string') {
+		const terminalOperator = body.terminalOperator
+			? ethers.getAddress(String(body.terminalOperator))
+			: ''
+		const terminalCard = body.terminalCard
+			? ethers.getAddress(String(body.terminalCard))
+			: ''
+		const terminalAuthorized = Boolean(terminalOperator && terminalCard)
+		if (!terminalAuthorized && (!body.userSignature || typeof body.userSignature !== 'string')) {
 			return { success: false, error: 'userSignature required' }
 		}
 		if (!Number.isFinite(deadline) || deadline <= Math.floor(Date.now() / 1000)) {
@@ -187,6 +196,32 @@ export async function topupWithReward13ContainerPreCheck(
 		const chain = await resolveUserCardChain(targetCard)
 		if (chain !== 'conet') return { success: false, error: 'Merchant card must be on CoNET' }
 		const provider = providerForUserCardChain('conet')
+		if (terminalAuthorized) {
+			if (terminalCard.toLowerCase() !== targetCard.toLowerCase()) {
+				return { success: false, error: 'terminalCard must equal targetCard' }
+			}
+			if (terminalOperator.toLowerCase() === userEOA.toLowerCase()) {
+				return { success: false, error: 'terminalOperator must not equal userEOA' }
+			}
+			const target = new ethers.Contract(
+				targetCard,
+				new ethers.Interface([
+					'function owner() view returns (address)',
+					'function isAdmin(address) view returns (bool)',
+				]),
+				provider,
+			)
+			const owner = ethers.getAddress(String(await target.owner()))
+			let isAdmin = false
+			try {
+				isAdmin = Boolean(await target.isAdmin(terminalOperator))
+			} catch {
+				// Owner-only legacy cards remain supported.
+			}
+			if (owner.toLowerCase() !== terminalOperator.toLowerCase() && !isAdmin) {
+				return { success: false, error: 'POS terminal is not authorized for target card' }
+			}
+		}
 
 		const aa = await resolveBeamioAaOnConet(userEOA)
 		if (!aa) return { success: false, error: 'Smart Wallet (AA) required' }
@@ -257,8 +292,9 @@ export async function topupWithReward13ContainerPreCheck(
 			if (pointsFromPeerUsdc6 <= 0n) {
 				return { success: false, error: 'pointsFromPeerUsdc6 quote is zero' }
 			}
-			// In EIP-712 — client must sign Cluster-matching quote (no silent overwrite).
-			if (pointsFromPeerUsdc6Client !== pointsFromPeerUsdc6) {
+			// Terminal-authorized POS requests do not carry a customer signature;
+			// the Cluster quote is authoritative for this relay path.
+			if (!terminalAuthorized && pointsFromPeerUsdc6Client !== pointsFromPeerUsdc6) {
 				return {
 					success: false,
 					error: `pointsFromPeerUsdc6 mismatch (client=${pointsFromPeerUsdc6Client.toString()}, expected=${pointsFromPeerUsdc6.toString()})`,
@@ -299,7 +335,10 @@ export async function topupWithReward13ContainerPreCheck(
 		}
 
 		const expectedMinTotal = sameStoreMinted0 + pointsFromPeerUsdc6
-		if (minTotalPointsOut0 !== expectedMinTotal) {
+		if (
+			(!terminalAuthorized && minTotalPointsOut0 !== expectedMinTotal) ||
+			(terminalAuthorized && (minTotalPointsOut0 <= 0n || minTotalPointsOut0 > expectedMinTotal))
+		) {
 			return {
 				success: false,
 				error: `minTotalPointsOut0 mismatch (client=${minTotalPointsOut0.toString()}, expected=${expectedMinTotal.toString()})`,
@@ -417,25 +456,27 @@ export async function topupWithReward13ContainerPreCheck(
 			chainId: CONET_MAINNET_CHAIN_ID,
 			verifyingContract: verifying,
 		}
-		const recovered = ethers.verifyTypedData(
-			domain,
-			TOPUP_WITH_REWARD13_CONTAINER_EIP712_TYPES,
-			{
-				targetCard,
-				userEOA,
-				sameStoreBurn13,
-				peerUsdcCredited6: peerUsdcSum,
-				pointsFromPeerUsdc6,
-				minTotalPointsOut0,
-				peersHash,
-				cashUsdc6,
-				deadline: BigInt(deadline),
-				nonce,
-			},
-			body.userSignature,
-		)
-		if (recovered.toLowerCase() !== userEOA.toLowerCase()) {
-			return { success: false, error: 'Signature does not match userEOA' }
+		if (!terminalAuthorized) {
+			const recovered = ethers.verifyTypedData(
+				domain,
+				TOPUP_WITH_REWARD13_CONTAINER_EIP712_TYPES,
+				{
+					targetCard,
+					userEOA,
+					sameStoreBurn13,
+					peerUsdcCredited6: peerUsdcSum,
+					pointsFromPeerUsdc6,
+					minTotalPointsOut0,
+					peersHash,
+					cashUsdc6,
+					deadline: BigInt(deadline),
+					nonce,
+				},
+				body.userSignature!,
+			)
+			if (recovered.toLowerCase() !== userEOA.toLowerCase()) {
+				return { success: false, error: 'Signature does not match userEOA' }
+			}
 		}
 
 		let cardOwnerEOA: string | undefined
@@ -472,7 +513,8 @@ export async function topupWithReward13ContainerPreCheck(
 				minTotalPointsOut0: minTotalPointsOut0.toString(),
 				deadline,
 				nonce,
-				userSignature: body.userSignature,
+				...(body.userSignature ? { userSignature: body.userSignature } : {}),
+				...(terminalAuthorized ? { terminalOperator, terminalCard } : {}),
 				peers: peers.map((p) => ({
 					cardAddress: p.cardAddress,
 					burn13: p.burn13.toString(),
