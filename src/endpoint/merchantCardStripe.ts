@@ -143,7 +143,12 @@ function readStripeBusinessAddress(account: Stripe.Account): StripeBusinessAddre
 
 function giftStripeMetadata(params: {
 	kind: string
+	giftPaymentMode?: string
 	redeemHash?: string
+	giftMembershipFeeE6?: string
+	giftTopupPrincipalE6?: string
+	giftRedeemValidAfter?: string
+	giftRedeemValidBefore?: string
 	ptUserSignature?: string
 	ptNonce?: string
 	ptValidAfter?: string
@@ -157,6 +162,16 @@ function giftStripeMetadata(params: {
 	if (params.kind !== 'gift') return {}
 	if (!params.redeemHash || !ethers.isHexString(params.redeemHash, 32)) {
 		throw new Error('Gift Stripe checkout requires redeemHash')
+	}
+	if (params.giftPaymentMode === 'stripe') {
+		return {
+			gift_payment_mode: 'stripe',
+			redeem_hash: params.redeemHash,
+			gift_membership_fee_e6: params.giftMembershipFeeE6 ?? '0',
+			gift_topup_principal_e6: params.giftTopupPrincipalE6 ?? '0',
+			gift_redeem_valid_after: params.giftRedeemValidAfter ?? '0',
+			gift_redeem_valid_before: params.giftRedeemValidBefore ?? String(Math.floor(Date.now() / 1000) + 365 * 24 * 3600),
+		}
 	}
 	if (!params.ptUserSignature || !params.ptNonce || !params.ptPayerAccount) {
 		throw new Error('Gift Stripe checkout requires Reward PT authorization')
@@ -575,7 +590,12 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 	kind: 'topup' | 'membership' | 'gift'
 	membershipTierIndex?: number
 	membershipFeeFiat6?: string
+	giftPaymentMode?: string
 	redeemHash?: string
+	giftMembershipFeeE6?: string
+	giftTopupPrincipalE6?: string
+	giftRedeemValidAfter?: string
+	giftRedeemValidBefore?: string
 	ptUserSignature?: string
 	ptNonce?: string
 	ptValidAfter?: string
@@ -659,8 +679,12 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 		},
 		// SilentPassUI uses HashRouter. Keep the session query inside the hash so
 		// Stripe returns to a URL that the PWA router can actually match.
-		success_url: `${APP_BASE_URL}/app/#/stripe-payment-return?session_id={CHECKOUT_SESSION_ID}`,
-		cancel_url: `${APP_BASE_URL}/app/#/stripe-payment-return?cancelled=1&session_id={CHECKOUT_SESSION_ID}`,
+		success_url: params.kind === 'gift'
+			? `${APP_BASE_URL}/gift/${cardAddress}?session_id={CHECKOUT_SESSION_ID}`
+			: `${APP_BASE_URL}/app/#/stripe-payment-return?session_id={CHECKOUT_SESSION_ID}`,
+		cancel_url: params.kind === 'gift'
+			? `${APP_BASE_URL}/gift/${cardAddress}?cancelled=1&session_id={CHECKOUT_SESSION_ID}`
+			: `${APP_BASE_URL}/app/#/stripe-payment-return?cancelled=1&session_id={CHECKOUT_SESSION_ID}`,
 	}, { idempotencyKey: businessIdempotencyKey })
 	const inserted = await createMerchantCardStripeSession({
 		sessionId: session.id,
@@ -698,7 +722,12 @@ export async function createMerchantCardStripePaymentIntent(params: {
 	kind: 'topup' | 'membership' | 'gift'
 	membershipTierIndex?: number
 	membershipFeeFiat6?: string
+	giftPaymentMode?: string
 	redeemHash?: string
+	giftMembershipFeeE6?: string
+	giftTopupPrincipalE6?: string
+	giftRedeemValidAfter?: string
+	giftRedeemValidBefore?: string
 	ptUserSignature?: string
 	ptNonce?: string
 	ptValidAfter?: string
@@ -1180,6 +1209,54 @@ async function fulfillMerchantCardStripeGift(params: {
 	paidCurrency: string
 }): Promise<void> {
 	const meta = params.metadata
+	if (meta.gift_payment_mode === 'stripe') {
+		if (!meta.card_address || !meta.buyer_eoa || !meta.redeem_hash) {
+			throw new Error('Gift Stripe payment is missing hash-only fulfillment metadata')
+		}
+		if (!meta.amount_fiat6 || !meta.currency ||
+			params.paidAmount !== stripeAmountFromFiat6(meta.amount_fiat6) ||
+			params.paidCurrency.toLowerCase() !== normalizeStripeCurrency(meta.currency)) {
+			throw new Error('Stripe Gift amount does not match the fulfillment snapshot')
+		}
+		const pre = await purchaseMerchantGiftRedeemPreCheck({
+			cardAddress: meta.card_address,
+			from: meta.buyer_eoa,
+			redeemHash: meta.redeem_hash,
+			userSignature: '',
+			nonce: ethers.ZeroHash,
+			validAfter: '0',
+			validBefore: '0',
+			payWith: 'stripe',
+			membershipFeeE6: meta.gift_membership_fee_e6 || '0',
+			topupPrincipalE6: meta.gift_topup_principal_e6 || '0',
+			redeemValidAfter: meta.gift_redeem_valid_after || '0',
+			redeemValidBefore: meta.gift_redeem_valid_before || '0',
+		})
+		if (!pre.success) throw new Error(pre.error)
+		if (!(await claimMerchantCardStripeSession(params.sessionId))) return
+		await updateMerchantCardStripeSession({
+			sessionId: params.sessionId,
+			status: 'succeeded',
+			fulfillmentStatus: 'payment_succeeded',
+		})
+		purchaseMerchantGiftRedeemPool.push({
+			...pre.preChecked,
+			res: undefined,
+			onSuccess: (createTxHash) => updateMerchantCardStripeSession({
+				sessionId: params.sessionId,
+				fulfillmentStatus: 'fulfillment_succeeded',
+				txHash: createTxHash,
+			}),
+			onFailure: (error) => updateMerchantCardStripeSession({
+				sessionId: params.sessionId,
+				status: 'failed',
+				fulfillmentStatus: 'fulfillment_failed',
+				lastError: error,
+			}),
+		})
+		kickPurchaseMerchantGiftRedeemProcess()
+		return
+	}
 	if (!meta.card_address || !meta.buyer_eoa || !meta.redeem_hash ||
 		!meta.pt_user_signature || !meta.pt_nonce || !meta.pt_payer_account) {
 		throw new Error('Gift Stripe payment is missing Reward PT fulfillment metadata')

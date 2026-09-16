@@ -132,7 +132,7 @@ export const GIFT_REWARD13_EIP712_TYPES: Record<string, { name: string; type: st
 	],
 }
 
-export type MerchantGiftPayWith = 'usdc' | 'credit' | 'reward13'
+export type MerchantGiftPayWith = 'usdc' | 'credit' | 'reward13' | 'stripe'
 
 export type MerchantGiftReward13PeerLeg = {
 	cardAddress: string
@@ -150,7 +150,7 @@ export type PurchaseMerchantGiftRedeemBody = {
 	/** Client-only secret. Stripe fulfillment uses redeemHash instead. */
 	redeemCode?: string
 	redeemHash?: string
-	/** Default usdc. credit = burn #0 G+F from buyer AA. */
+	/** Default usdc. credit = burn #0 G+F from buyer AA. stripe = paid Stripe card. */
 	payWith?: MerchantGiftPayWith | string
 	/** Required for usdc rail. */
 	usdcAmount?: string
@@ -212,6 +212,34 @@ type PoolItem = PurchaseMerchantGiftRedeemPreChecked & {
 	onFailure?: (error: string) => Promise<void> | void
 }
 
+export async function quoteMerchantGiftAmount(params: {
+	cardAddress: string
+	amountFiat6: string
+}): Promise<{ cardAddress: string; cardCurrency: number; quotedUsdc6: string; owner: string }> {
+	if (!ethers.isAddress(params.cardAddress)) throw new Error('Invalid cardAddress')
+	const amountFiat6 = BigInt(params.amountFiat6)
+	if (amountFiat6 <= 0n) throw new Error('amountFiat6 must be greater than zero')
+	const cardAddress = ethers.getAddress(params.cardAddress)
+	const provider = providerForUserCardChain('conet')
+	const card = new ethers.Contract(cardAddress, CARD_VIEW_ABI, provider)
+	const [ownerRaw, currencyRaw, priceRaw] = await Promise.all([
+		card.owner() as Promise<string>,
+		card.currency() as Promise<bigint>,
+		card.pointsUnitPriceInCurrencyE6() as Promise<bigint>,
+	])
+	const cardCurrency = Number(currencyRaw)
+	const factory = new ethers.Contract(CONET_CARD_FACTORY, FACTORY_QUOTE_ABI, provider)
+	const quotedUsdc6 = cardCurrency === 4
+		? amountFiat6 * priceRaw / 1_000_000n
+		: await factory.quoteCurrencyAmountInUSDC6(cardCurrency, amountFiat6) as bigint
+	return {
+		cardAddress,
+		cardCurrency,
+		quotedUsdc6: quotedUsdc6.toString(),
+		owner: ethers.getAddress(ownerRaw),
+	}
+}
+
 export const purchaseMerchantGiftRedeemPool: PoolItem[] = []
 
 let purchaseGiftInFlight = false
@@ -260,6 +288,7 @@ function e6FromHuman(n: number): bigint {
 export function normalizePayWith(raw: unknown): MerchantGiftPayWith {
 	const s = String(raw ?? 'usdc').toLowerCase().trim()
 	if (s === 'reward13' || s === 'pt' || s === 'reward-pt') return 'reward13'
+	if (s === 'stripe' || s === 'card') return 'stripe'
 	return s === 'credit' || s === 'points' || s === 'program' ? 'credit' : 'usdc'
 }
 
@@ -375,7 +404,8 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 		if (!body?.from || !ethers.isAddress(body.from)) {
 			return { success: false, error: 'Invalid from' }
 		}
-		if (!body?.userSignature || typeof body.userSignature !== 'string') {
+		const requestedPayWith = normalizePayWith(body?.payWith)
+		if (requestedPayWith !== 'stripe' && (!body?.userSignature || typeof body.userSignature !== 'string')) {
 			return { success: false, error: 'Missing userSignature' }
 		}
 		const suppliedRedeemCode = typeof body.redeemCode === 'string' ? body.redeemCode.trim() : ''
@@ -492,6 +522,48 @@ export async function purchaseMerchantGiftRedeemPreCheck(
 
 		const bunitPre = await precheckMerchantGiftBUnitFee(cardAddress, provider)
 		if (!bunitPre.success) return bunitPre
+
+		if (payWith === 'stripe') {
+			const totalGiftE6 = membershipFeeE6 + topupPrincipalE6
+			if (totalGiftE6 <= 0n) {
+				return { success: false, error: 'Gift amount must be greater than zero' }
+			}
+			if (!ethers.isHexString(suppliedRedeemHash, 32) || suppliedRedeemCode) {
+				return {
+					success: false,
+					error: 'Stripe Gift requires redeemHash only; plaintext redeemCode must remain in the browser',
+				}
+			}
+			return {
+				success: true,
+				preChecked: {
+					payWith: 'stripe',
+					cardAddress,
+					from,
+					usdcAmount: '0',
+					userSignature: '',
+					nonce: ethers.ZeroHash,
+					validAfter: '0',
+					validBefore: '0',
+					redeemCode: '',
+					membershipFeeE6: membershipFeeE6.toString(),
+					topupPrincipalE6: topupPrincipalE6.toString(),
+					topupCreditE6: topupPrincipalE6.toString(),
+					redeemHash,
+					cardOwner,
+					cardCurrency,
+					quotedUsdc6: '0',
+					redeemValidAfter: redeemValidAfter.toString(),
+					redeemValidBefore: redeemValidBefore.toString(),
+					payerAccount: ethers.ZeroAddress,
+					burnAmountE6: '0',
+					merchantFeeE6: '0',
+					cardOwnerEOA: bunitPre.cardOwnerEOA,
+					bunitFeeConsumer: bunitPre.bunitFeeConsumer,
+					bunitFeeUnits6: bunitPre.bunitFeeUnits6.toString(),
+				},
+			}
+		}
 
 		if (payWith === 'reward13') {
 			const payerAccount =
@@ -958,7 +1030,17 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 			: cardOwner
 
 		let paymentTxHash = ethers.ZeroHash
-		let createCalldata: string
+		let createCalldata = ''
+
+		if (payWith === 'stripe') {
+			createCalldata = CREATE_GIFT_REDEEM_IFACE.encodeFunctionData('createGiftRedeemForPayer', [
+				redeemHash,
+				membershipFeeE6,
+				topupCreditE6,
+				redeemValidAfter,
+				redeemValidBefore,
+			])
+		}
 
 		if (payWith === 'reward13') {
 			const peers = item.peerLegs ?? []
@@ -1078,7 +1160,7 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 					} F=${item.merchantFeeE6}`,
 				),
 			)
-		} else {
+		} else if (payWith !== 'stripe') {
 			const usdcAmount = BigInt(item.usdcAmount)
 			const nonceBytes32 = padNonceBytes32(item.nonce)
 			const conetUsdcWrite = new ethers.Contract(CONET_USDC, CONET_USDC_EIP3009_ABI, SC.walletConet)

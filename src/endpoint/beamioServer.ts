@@ -54,7 +54,7 @@ import {
 	aaInstitutionalV2VotePreCheck,
 } from '../aaInstitutionalV2Multisig'
 import { redeemReward13ForUsdcPreCheck } from '../redeemReward13ForUsdc'
-import { purchaseMerchantGiftRedeemPreCheck } from '../purchaseMerchantGiftRedeem'
+import { purchaseMerchantGiftRedeemPreCheck, quoteMerchantGiftAmount } from '../purchaseMerchantGiftRedeem'
 import { convertReward13PreCheck } from '../convertReward13'
 import { topupWithReward13ContainerPreCheck } from '../topupWithReward13Container'
 import {
@@ -9942,6 +9942,17 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	 * Discover Gifting: gifter EIP-3009 CoNET-USDC offline sign (zero gas) → Master collects to card.owner()
 	 * then Paymaster createGiftRedeemForPayer (no merchant owner signature). Plaintext code returned once.
 	 */
+	router.post('/giftQuote', async (req, res) => {
+		try {
+			if (typeof req.body?.cardAddress !== 'string' || typeof req.body?.amountFiat6 !== 'string') {
+				return res.status(400).json({ success: false, error: 'cardAddress and amountFiat6 are required' }).end()
+			}
+			return res.json({ success: true, ...(await quoteMerchantGiftAmount(req.body)) }).end()
+		} catch (error: any) {
+			return res.status(400).json({ success: false, error: error?.message ?? String(error) }).end()
+		}
+	})
+
 	router.post('/purchaseMerchantGiftRedeem', async (req, res) => {
 		const preCheck = await purchaseMerchantGiftRedeemPreCheck(req.body)
 		if (!preCheck.success) {
@@ -13943,15 +13954,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey)) {
 			return res.status(400).json({ error: 'cardAddress, buyerEoa, amountFiat6, currency and kind are required' }).end()
 		}
-		if (body.kind === 'gift' && (
-			typeof body.redeemHash !== 'string' ||
-			!ethers.isHexString(body.redeemHash, 32) ||
-			typeof body.ptUserSignature !== 'string' ||
-			typeof body.ptNonce !== 'string' ||
-			typeof body.ptPayerAccount !== 'string' ||
-			!ethers.isAddress(body.ptPayerAccount)
-		)) {
-			return res.status(400).json({ error: 'Gift Stripe requires redeemHash and Reward PT authorization' }).end()
+		if (body.kind === 'gift') {
+			const directCardPayment = body.giftPaymentMode === 'stripe'
+			const validHash = typeof body.redeemHash === 'string' && ethers.isHexString(body.redeemHash, 32)
+			const validPt = typeof body.ptUserSignature === 'string' &&
+				typeof body.ptNonce === 'string' &&
+				typeof body.ptPayerAccount === 'string' &&
+				ethers.isAddress(body.ptPayerAccount)
+			if (!validHash || (!directCardPayment && !validPt)) {
+				return res.status(400).json({
+					error: directCardPayment
+						? 'Gift Stripe requires redeemHash and gift amount metadata'
+						: 'Gift Stripe requires redeemHash and Reward PT authorization',
+				}).end()
+			}
 		}
 		if (!merchantCardStripeConfigured()) {
 			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
@@ -13974,15 +13990,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey)) {
 			return res.status(400).json({ error: 'cardAddress, buyerEoa, amountFiat6, currency and kind are required' }).end()
 		}
-		if (body.kind === 'gift' && (
-			typeof body.redeemHash !== 'string' ||
-			!ethers.isHexString(body.redeemHash, 32) ||
-			typeof body.ptUserSignature !== 'string' ||
-			typeof body.ptNonce !== 'string' ||
-			typeof body.ptPayerAccount !== 'string' ||
-			!ethers.isAddress(body.ptPayerAccount)
-		)) {
-			return res.status(400).json({ error: 'Gift Stripe requires redeemHash and Reward PT authorization' }).end()
+		if (body.kind === 'gift') {
+			const directCardPayment = body.giftPaymentMode === 'stripe'
+			const validHash = typeof body.redeemHash === 'string' && ethers.isHexString(body.redeemHash, 32)
+			const validPt = typeof body.ptUserSignature === 'string' &&
+				typeof body.ptNonce === 'string' &&
+				typeof body.ptPayerAccount === 'string' &&
+				ethers.isAddress(body.ptPayerAccount)
+			if (!validHash || (!directCardPayment && !validPt)) {
+				return res.status(400).json({
+					error: directCardPayment
+						? 'Gift Stripe requires redeemHash and gift amount metadata'
+						: 'Gift Stripe requires redeemHash and Reward PT authorization',
+				}).end()
+			}
 		}
 		if (!merchantCardStripeConfigured()) {
 			return res.status(503).json({ error: 'Stripe is not configured on server' }).end()
@@ -14050,7 +14071,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (recovered.toLowerCase() !== posAdmin.toLowerCase()) {
 			throw new Error('POS admin signature does not match posAdmin')
 		}
-		const provider = providerForUserCardChain(resolveUserCardChain(cardAddress))
+		const provider = providerForUserCardChain(await resolveUserCardChain(cardAddress))
 		const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], provider)
 		if (!(await card.isAdmin(posAdmin))) {
 			throw new Error('POS admin is not an admin of this merchant card')
