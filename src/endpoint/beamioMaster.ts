@@ -72,7 +72,7 @@ import {
 	genesisNodeReferralRedeemPool,
 	type GenesisNodeReferralRedeemAction,
 } from '../genesisNodeReferralRedeem'
-import { kickChatIndexPointerRelay, chatIndexPointerPool } from '../chatIndexPointer'
+import { enqueueChatIndexPointerRelay } from '../chatIndexPointer'
 import {
 	gbDepinChargeUserPool,
 	kickGbDepinChargeUserPoolPress,
@@ -4302,7 +4302,7 @@ const routing = ( router: Router ) => {
 			if (!b.owner || !b.indexHash || b.ts == null || b.seq == null || b.nonce == null || !b.signature) {
 				return res.status(400).json({ success: false, error: 'Missing chat index pointer fields' }).end()
 			}
-			chatIndexPointerPool.push({
+			enqueueChatIndexPointerRelay({
 				owner: b.owner,
 				indexHash: b.indexHash,
 				ts: b.ts,
@@ -4311,7 +4311,6 @@ const routing = ( router: Router ) => {
 				signature: b.signature,
 				res,
 			})
-			kickChatIndexPointerRelay()
 		})
 
 		router.post('/validatorDepositRedeemAdminCancel', (req, res) => {
