@@ -14478,6 +14478,7 @@ export type CreateCardPreChecked = {
 		name?: string
 		description?: string
 		image?: string
+		images?: string[]
 		imageFit?: 'width' | 'height'
 		backgroundColor?: string
 		logoDisplayScale?: string
@@ -15250,6 +15251,13 @@ export const createCardPreCheck = (body: {
 					...(o.name != null && { name: String(o.name) }),
 					...(o.description != null && { description: String(o.description) }),
 					...(o.image != null && typeof o.image === 'string' && { image: o.image }),
+					...(Array.isArray(o.images)
+						? {
+								images: o.images
+									.filter((image): image is string => typeof image === 'string' && image.trim() !== '')
+									.map((image) => image.trim()),
+							}
+						: {}),
 					...(o.imageFit === 'width' || o.imageFit === 'height' ? { imageFit: o.imageFit } : {}),
 					...(o.backgroundColor != null && typeof o.backgroundColor === 'string' && { backgroundColor: o.backgroundColor }),
 					...(o.logoDisplayScale != null && typeof o.logoDisplayScale === 'string' && { logoDisplayScale: o.logoDisplayScale }),
