@@ -119,6 +119,7 @@ import {
 	registerPushDevicePreCheck,
 	syncChatBadgePreCheck,
 	notifyOfflineChatPreCheck,
+	voiceCallPushPreCheck,
 	pushDeviceStatusPreCheck,
 	pushDeviceStatusProcess,
 } from './offlineChatPush'
@@ -11147,6 +11148,15 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res.status(checked.status).json({ success: false, error: checked.error }).end()
 		}
 		postLocalhost('/api/notifyOfflineChat', checked.payload, res)
+	})
+
+	/** Signed voice-call wake-up push. Push payload contains identity metadata only. */
+	router.post('/voiceCallPush', async (req, res) => {
+		const checked = voiceCallPushPreCheck(req.body)
+		if (!checked.ok) {
+			return res.status(checked.status).json({ success: false, error: checked.error }).end()
+		}
+		postLocalhost('/api/voiceCallPush', checked.payload, res)
 	})
 
 	/** GET /api/transferPreCheckBUnit - UI 自检转账前 B-Unit 是否 >= 2。account=EOA 或 aaAddress=AA（解析 owner 后检查） */

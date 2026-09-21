@@ -19,6 +19,7 @@ import {
 	handleRegisterPushDeviceMaster,
 	handleSyncChatBadgeMaster,
 	handleNotifyOfflineChatMaster,
+	handleVoiceCallPushMaster,
 } from './offlineChatPush'
 import {
 	createMerchantKitCheckoutSession,
@@ -680,6 +681,9 @@ const routing = ( router: Router ) => {
 
 	router.post('/notifyOfflineChat', (req, res) => {
 		return handleNotifyOfflineChatMaster(req, res)
+	})
+	router.post('/voiceCallPush', (req, res) => {
+		return handleVoiceCallPushMaster(req, res)
 	})
 
 	/** Cluster 每 1 分钟从此接口拉取 oracle，供 UI getOracle 直接响应 */

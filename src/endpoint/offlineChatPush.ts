@@ -479,6 +479,126 @@ async function sendFcmBadge(
 	}
 }
 
+type VoiceCallPushPayload = {
+	callId: string
+	sessionId: string
+	callerEoa: string
+	calleeEoa: string
+	expiresAt: number
+}
+
+function sendApnsVoiceCall(
+	cfg: ApnsConfig,
+	deviceToken: string,
+	payload: VoiceCallPushPayload,
+	topic: string,
+): Promise<{ ok: boolean; status?: number }> {
+	return new Promise(resolve => {
+		const host = cfg.production ? 'api.push.apple.com' : 'api.sandbox.push.apple.com'
+		const client = http2.connect(`https://${host}`)
+		const finish = (ok: boolean, status = 0) => {
+			try { client.close() } catch {}
+			resolve({ ok, status })
+		}
+		client.on('error', () => finish(false))
+		const req = client.request({
+			':method': 'POST',
+			':path': `/3/device/${deviceToken}`,
+			authorization: `bearer ${createApnsJwt(cfg)}`,
+			'apns-topic': topic,
+			'apns-push-type': 'voip',
+			'apns-priority': '10',
+			'apns-id': randomUUID(),
+			'content-type': 'application/json',
+		})
+		let status = 0
+		req.on('response', headers => { status = Number(headers[':status'] || 0) })
+		req.on('end', () => finish(status >= 200 && status < 300, status))
+		req.on('error', () => finish(false, status))
+		req.end(JSON.stringify({
+			aps: { 'content-available': 1 },
+			type: 'voiceCall',
+			callId: payload.callId,
+			sessionId: payload.sessionId,
+			callerEoa: payload.callerEoa,
+			calleeEoa: payload.calleeEoa,
+			expiresAt: payload.expiresAt,
+		}))
+	})
+}
+
+async function sendFcmVoiceCall(cfg: FcmConfig, deviceToken: string, payload: VoiceCallPushPayload): Promise<{ ok: boolean; status?: number }> {
+	const access = await getFcmAccessToken(cfg)
+	if (!access) return { ok: false }
+	const url = `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(cfg.projectId)}/messages:send`
+	const res = await fetch(url, {
+		method: 'POST',
+		headers: { Authorization: `Bearer ${access}`, 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			message: {
+				token: deviceToken,
+				data: {
+					type: 'voiceCall',
+					callId: payload.callId,
+					sessionId: payload.sessionId,
+					callerEoa: payload.callerEoa,
+					calleeEoa: payload.calleeEoa,
+					expiresAt: String(payload.expiresAt),
+				},
+				android: { priority: 'HIGH' },
+			},
+		}),
+	})
+	if (!res.ok) {
+		if (res.status === 404 || res.status === 410) void deleteDeviceToken(deviceToken)
+		logger(Colors.yellow(`[FCM] voiceCall HTTP ${res.status}`))
+	}
+	return { ok: res.ok, status: res.status }
+}
+
+export function voiceCallPushPreCheck(body: any): { ok: true; payload: VoiceCallPushPayload } | { ok: false; error: string; status: number } {
+	const callId = String(body?.callId || '').trim()
+	const sessionId = String(body?.sessionId || '').trim()
+	const callerEoa = String(body?.callerEoa || '').trim()
+	const calleeEoa = String(body?.calleeEoa || '').trim()
+	const expiresAt = Number(body?.expiresAt)
+	const timestamp = parseTimestamp(body?.timestamp)
+	const signature = String(body?.signature || '').trim()
+	if (!callId || callId.length > 128 || !sessionId || sessionId.length > 128) return { ok: false, error: 'Invalid call identity', status: 400 }
+	if (!ethers.isAddress(callerEoa) || !ethers.isAddress(calleeEoa)) return { ok: false, error: 'Invalid caller/callee', status: 400 }
+	if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() || expiresAt > Date.now() + 10 * 60_000) return { ok: false, error: 'Invalid expiresAt', status: 400 }
+	if (!signature || timestamp == null || Math.abs(Date.now() - timestamp) > SIGN_MAX_SKEW_MS) return { ok: false, error: 'Missing or expired signature', status: 400 }
+	const caller = ethers.getAddress(callerEoa)
+	const message = [
+		'Beamio voiceCallPush',
+		`callId:${callId}`,
+		`sessionId:${sessionId}`,
+		`callerEoa:${caller.toLowerCase()}`,
+		`calleeEoa:${ethers.getAddress(calleeEoa).toLowerCase()}`,
+		`expiresAt:${expiresAt}`,
+		`timestamp:${Math.floor(timestamp / 1000)}`,
+	].join('\n')
+	const messageMs = message.replace(`timestamp:${Math.floor(timestamp / 1000)}`, `timestamp:${timestamp}`)
+	if (!verifyPersonalSign(message, signature, caller) && !verifyPersonalSign(messageMs, signature, caller)) {
+		return { ok: false, error: 'Invalid signature', status: 403 }
+	}
+	return { ok: true, payload: { callId, sessionId, callerEoa: ethers.getAddress(callerEoa), calleeEoa: ethers.getAddress(calleeEoa), expiresAt } }
+}
+
+export async function voiceCallPushProcess(payload: VoiceCallPushPayload): Promise<{ success: true; delivered: number }> {
+	const devices = await listDevicesForEoa(payload.calleeEoa)
+	const apnsCfg = readApnsConfig()
+	const fcmCfg = readFcmConfig()
+	let delivered = 0
+	await Promise.all(devices.map(async device => {
+		const result = device.platform === 'android'
+			? (fcmCfg ? await sendFcmVoiceCall(fcmCfg, device.deviceToken, payload) : { ok: false })
+			: (apnsCfg ? await sendApnsVoiceCall(apnsCfg, device.deviceToken, payload, device.bundleId || apnsCfg.bundleId) : { ok: false })
+		if (result.ok) delivered += 1
+	}))
+	return { success: true, delivered }
+}
+
 export async function pushBadgeToEoa(eoa: string, badge: number): Promise<void> {
 	const devices = await listDevicesForEoa(eoa)
 	if (!devices.length) {
@@ -518,7 +638,7 @@ export async function pushBadgeToEoa(eoa: string, badge: number): Promise<void> 
 }
 
 function isValidPushToken(platform: string, token: string): boolean {
-	if (platform === 'ios') return /^[0-9a-f]{64}$/.test(token)
+	if (platform === 'ios' || platform === 'ios_voip') return /^[0-9a-f]{64}$/.test(token)
 	if (platform === 'android') {
 		if (token.length < 80 || token.length > 4096) return false
 		return /^[A-Za-z0-9_.:\-]+$/.test(token)
@@ -584,7 +704,7 @@ export function registerPushDevicePreCheck(body: any): { ok: true; payload: any 
 	const eoa = String(body?.eoa || '').trim()
 	const platform = String(body?.platform || 'ios').trim().toLowerCase()
 	const deviceTokenRaw = String(body?.deviceToken || '').trim()
-	const deviceToken = platform === 'ios' ? deviceTokenRaw.toLowerCase() : deviceTokenRaw
+	const deviceToken = platform === 'ios' || platform === 'ios_voip' ? deviceTokenRaw.toLowerCase() : deviceTokenRaw
 	const bundleId = String(
 		body?.bundleId || (platform === 'android' ? 'com.beamio.app' : 'com.beamio.beamio'),
 	).trim()
@@ -592,7 +712,7 @@ export function registerPushDevicePreCheck(body: any): { ok: true; payload: any 
 	const pgpKeyId = body?.pgpKeyId != null ? String(body.pgpKeyId).trim() : ''
 	const ts = parseTimestamp(body?.timestamp)
 	if (!ethers.isAddress(eoa) || eoa === ethers.ZeroAddress) return { ok: false, error: 'Invalid eoa', status: 400 }
-	if (platform !== 'ios' && platform !== 'android') return { ok: false, error: 'Unsupported platform', status: 400 }
+	if (platform !== 'ios' && platform !== 'ios_voip' && platform !== 'android') return { ok: false, error: 'Unsupported platform', status: 400 }
 	if (!isValidPushToken(platform, deviceToken)) return { ok: false, error: 'Invalid deviceToken', status: 400 }
 	if (!ALLOWED_BUNDLE_IDS.has(bundleId)) return { ok: false, error: 'Invalid bundleId', status: 400 }
 	if (!signature) return { ok: false, error: 'Missing signature', status: 400 }
@@ -869,6 +989,23 @@ export async function handleNotifyOfflineChatMaster(req: Request, res: Response)
 		res.status(200).json(out).end()
 	} catch (e: any) {
 		logger(Colors.red(`[notifyOfflineChat] ${e?.message ?? e}`))
+		res.status(500).json({ success: false, error: 'Internal error' }).end()
+	}
+}
+
+export async function handleVoiceCallPushMaster(req: Request, res: Response): Promise<void> {
+	try {
+		const body = req.body || {}
+		const out = await voiceCallPushProcess({
+			callId: String(body.callId),
+			sessionId: String(body.sessionId),
+			callerEoa: String(body.callerEoa),
+			calleeEoa: String(body.calleeEoa),
+			expiresAt: Number(body.expiresAt),
+		})
+		res.status(200).json(out).end()
+	} catch (e: any) {
+		logger(Colors.red(`[voiceCallPush] ${e?.message ?? e}`))
 		res.status(500).json({ success: false, error: 'Internal error' }).end()
 	}
 }
