@@ -18548,14 +18548,37 @@ export const cardCouponPosClaimPreCheck = async (body: {
 				ethers.toUtf8Bytes(`pos-open-claim:${cardNorm}:${couponId}:${userNorm}:${String(tokenIdN)}:${randomUUID()}`)
 			)
 			const domain = await eip712DomainForClaimIssuedNftWithUserSig(cardNorm)
-			const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
-				cardAddress: cardNorm,
-				tokenId: tokenIdN,
-				deadline,
-				nonce,
-			})
 			const signingKey = new ethers.SigningKey(pk as `0x${string}`)
-			const userSignature = ethers.Signature.from(signingKey.sign(digest)).serialized
+			const seriesRows = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
+			const matchedSeries = seriesRows.find((row) =>
+				String(row.tokenId) === String(tokenIdN) &&
+				readCouponIdFromSeriesMetadata(row.metadata ?? null) === couponId
+			)
+			const socialExchange = readSocialExchangeFromMetadata(matchedSeries?.metadata ?? null)
+			let userSignature: string
+			let socialFields: { pointsCost?: string; usdcReward6?: string } = {}
+			if (socialExchange?.kind === 'coupon' || socialExchange?.kind === 'usdc') {
+				const pointsCost = BigInt(socialExchange.pointsCost)
+				const usdcReward6 = socialExchange.kind === 'usdc' ? BigInt(socialExchange.usdcReward6 ?? 0) : 0n
+				const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_SOCIAL_EXCHANGE_WITH_USER_SIG_TYPE, {
+					cardAddress: cardNorm,
+					tokenId: tokenIdN,
+					pointsCost,
+					usdcReward6,
+					deadline,
+					nonce,
+				})
+				userSignature = ethers.Signature.from(signingKey.sign(digest)).serialized
+				socialFields = { pointsCost: String(pointsCost), usdcReward6: String(usdcReward6) }
+			} else {
+				const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_ISSUED_NFT_WITH_USER_SIG_TYPE, {
+					cardAddress: cardNorm,
+					tokenId: tokenIdN,
+					deadline,
+					nonce,
+				})
+				userSignature = ethers.Signature.from(signingKey.sign(digest)).serialized
+			}
 
 			const openPre = await cardCouponOpenClaimPreCheck({
 				cardAddress: cardNorm,
@@ -18573,6 +18596,7 @@ export const cardCouponPosClaimPreCheck = async (body: {
 				route: 'openClaim',
 				preChecked: {
 					...openPre.preChecked,
+					...socialFields,
 					...(posOpRaw && ethers.isAddress(posOpRaw)
 						? { posOperator: ethers.getAddress(posOpRaw) }
 						: {}),
@@ -18586,6 +18610,17 @@ export const cardCouponPosClaimPreCheck = async (body: {
 		return {
 			success: false,
 			error: 'POS terminal admin signature required for wallet/QR claim.',
+		}
+	}
+	const couponRows = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
+	const couponRow = couponRows.find((row) =>
+		String(row.tokenId) === String(tokenIdN) &&
+		readCouponIdFromSeriesMetadata(row.metadata ?? null) === couponId
+	)
+	if (readSocialExchangeFromMetadata(couponRow?.metadata ?? null)) {
+		return {
+			success: false,
+			error: 'Reward PT coupon claims require the member wallet signature; QR/wallet POS claim is unavailable.',
 		}
 	}
 	const walletOk = await validatePosWalletCouponOpenClaim({
@@ -18646,6 +18681,17 @@ export const cardCouponPosClaimPreparePreCheck = async (body: {
 	const tokenResolved = await resolvePosCouponTokenId(cardNorm, couponId, body.tokenId)
 	if (!tokenResolved.ok) return { success: false, error: tokenResolved.error }
 	const tokenIdN = tokenResolved.tokenIdN
+	const couponRows = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
+	const couponRow = couponRows.find((row) =>
+		String(row.tokenId) === String(tokenIdN) &&
+		readCouponIdFromSeriesMetadata(row.metadata ?? null) === couponId
+	)
+	if (readSocialExchangeFromMetadata(couponRow?.metadata ?? null)) {
+		return {
+			success: false,
+			error: 'Reward PT coupon claims require the member wallet signature; QR/wallet POS claim is unavailable.',
+		}
+	}
 
 	const walletOk = await validatePosWalletCouponOpenClaim({
 		cardNorm,

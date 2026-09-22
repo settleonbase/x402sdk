@@ -10280,6 +10280,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			backgroundColor?: string
 			description?: string
 			couponImage?: string
+			socialExchange?: unknown
 			disable?: boolean
 		}
 		const cardAddress = body.cardAddress?.trim()
@@ -10302,6 +10303,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		if (body.couponImage != null && typeof body.couponImage !== 'string') {
 			return res.status(400).json({ success: false, error: 'couponImage must be a string if provided' }).end()
+		}
+		if (body.socialExchange != null && (typeof body.socialExchange !== 'object' || Array.isArray(body.socialExchange))) {
+			return res.status(400).json({ success: false, error: 'socialExchange must be an object if provided' }).end()
 		}
 		if (body.disable != null && typeof body.disable !== 'boolean') {
 			return res.status(400).json({ success: false, error: 'disable must be a boolean if provided' }).end()

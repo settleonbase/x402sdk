@@ -2061,6 +2061,7 @@ const routing = ( router: Router ) => {
 					backgroundColor?: string
 					description?: string
 					couponImage?: string
+					socialExchange?: Record<string, unknown>
 					/** When true, hide from client discover/claim; existing holders may still POS burn. */
 					disable?: boolean
 				}
@@ -2144,6 +2145,7 @@ const routing = ( router: Router ) => {
 					setOrDeleteStringField(coupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(coupon, 'description', String(body.description ?? ''))
 					setOrDeleteStringField(coupon, 'couponImage', couponImageTrim)
+					if (body.socialExchange != null) coupon.socialExchange = { ...body.socialExchange }
 					if (typeof body.disable === 'boolean') {
 						setOrDeleteBooleanField(coupon, 'disable', body.disable)
 					}
@@ -2194,6 +2196,7 @@ const routing = ( router: Router ) => {
 					setOrDeleteStringField(nextSeriesMeta, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'description', String(body.description ?? ''))
 					setOrDeleteStringField(nextSeriesMeta, 'couponImage', couponImageTrim)
+					if (body.socialExchange != null) nextSeriesMeta.socialExchange = { ...body.socialExchange }
 					if (typeof body.disable === 'boolean') {
 						setOrDeleteBooleanField(nextSeriesMeta, 'disable', body.disable)
 					}
@@ -2208,6 +2211,7 @@ const routing = ( router: Router ) => {
 							setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 							setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
 							setOrDeleteStringField(beamioCoupon, 'couponImage', couponImageTrim)
+							if (body.socialExchange != null) beamioCoupon.socialExchange = { ...body.socialExchange }
 							if (typeof body.disable === 'boolean') {
 								setOrDeleteBooleanField(beamioCoupon, 'disable', body.disable)
 							}
@@ -2264,6 +2268,7 @@ const routing = ( router: Router ) => {
 					setOrDeleteStringField(beamioCoupon, 'backgroundColor', String(body.backgroundColor ?? ''))
 					setOrDeleteStringField(beamioCoupon, 'description', String(body.description ?? ''))
 					setOrDeleteStringField(beamioCoupon, 'couponImage', couponImageTrim)
+					if (body.socialExchange != null) beamioCoupon.socialExchange = { ...body.socialExchange }
 					if (typeof body.disable === 'boolean') {
 						setOrDeleteBooleanField(beamioCoupon, 'disable', body.disable)
 					}
