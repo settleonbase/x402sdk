@@ -19355,15 +19355,33 @@ async function readUserRewardVoucher13BalanceOnCard(
 ): Promise<bigint | null> {
 	try {
 		const gateway = await getBeamioUserCardFactoryGateway(cardNorm)
-		const fac = new ethers.Contract(gateway, ['function beamioAccountOf(address) view returns (address)'], cardProvider)
+		const gatewayReader = new ethers.Contract(
+			gateway,
+			['function _aaFactory() view returns (address)'],
+			cardProvider,
+		)
+		const aaFactory = (await gatewayReader._aaFactory()) as string
+		if (!aaFactory || aaFactory === ethers.ZeroAddress) return 0n
+		const fac = new ethers.Contract(
+			aaFactory,
+			[
+				'function beamioAccountOf(address) view returns (address)',
+				'function primaryAccountOf(address) view returns (address)',
+			],
+			cardProvider,
+		)
 		const aa = (await fac.beamioAccountOf(userNorm)) as string
-		if (!aa || aa === ethers.ZeroAddress) return 0n
+		const resolvedAa =
+			aa && aa !== ethers.ZeroAddress
+				? aa
+				: ((await fac.primaryAccountOf(userNorm)) as string)
+		if (!resolvedAa || resolvedAa === ethers.ZeroAddress) return 0n
 		const card = new ethers.Contract(
 			cardNorm,
 			['function balanceOf(address account, uint256 id) view returns (uint256)'],
 			cardProvider,
 		)
-		return (await card.balanceOf(aa, REWARD_VOUCHER_TOKEN_ID)) as bigint
+		return (await card.balanceOf(resolvedAa, REWARD_VOUCHER_TOKEN_ID)) as bigint
 	} catch {
 		return null
 	}
@@ -19527,7 +19545,7 @@ export const cardCouponOpenClaimPreCheck = async (body: {
 			if (pointsBal < pointsCostN) {
 				return {
 					success: false,
-					error: `Insufficient social points. Need ${pointsCostN.toString()}, available ${pointsBal.toString()}.`,
+					error: `Insufficient Reward PT. Need ${(Number(pointsCostN) / 1_000_000).toFixed(2)} PT, available ${(Number(pointsBal) / 1_000_000).toFixed(2)} PT.`,
 				}
 			}
 			const digest = ethers.TypedDataEncoder.hash(domain, CLAIM_SOCIAL_EXCHANGE_WITH_USER_SIG_TYPE, {
