@@ -36,6 +36,9 @@ const PUSH_DEVICES_TABLE = `CREATE TABLE IF NOT EXISTS beamio_push_devices (
 	platform TEXT NOT NULL DEFAULT 'ios',
 	bundle_id TEXT NOT NULL,
 	pgp_key_id TEXT,
+	native_call_ui BOOLEAN NOT NULL DEFAULT FALSE,
+	full_screen_intent BOOLEAN NOT NULL DEFAULT FALSE,
+	call_kit BOOLEAN NOT NULL DEFAULT FALSE,
 	updated_at TIMESTAMPTZ DEFAULT NOW(),
 	UNIQUE (device_token)
 )`
@@ -182,6 +185,9 @@ function createApnsJwt(cfg: ApnsConfig): string {
 
 async function ensurePushSchema(db: Client): Promise<void> {
 	await db.query(PUSH_DEVICES_TABLE)
+	await db.query(`ALTER TABLE beamio_push_devices ADD COLUMN IF NOT EXISTS native_call_ui BOOLEAN NOT NULL DEFAULT FALSE`)
+	await db.query(`ALTER TABLE beamio_push_devices ADD COLUMN IF NOT EXISTS full_screen_intent BOOLEAN NOT NULL DEFAULT FALSE`)
+	await db.query(`ALTER TABLE beamio_push_devices ADD COLUMN IF NOT EXISTS call_kit BOOLEAN NOT NULL DEFAULT FALSE`)
 	await db.query(PUSH_DEVICES_EOA_IDX)
 	await db.query(PUSH_UNREAD_TABLE)
 }
@@ -192,6 +198,11 @@ export async function upsertPushDevice(params: {
 	platform: string
 	bundleId: string
 	pgpKeyId?: string | null
+	capabilities?: {
+		nativeCallUi?: boolean
+		fullScreenIntent?: boolean
+		callKit?: boolean
+	}
 }): Promise<void> {
 	const db = new Client({ connectionString: DB_URL })
 	try {
@@ -199,15 +210,28 @@ export async function upsertPushDevice(params: {
 		await ensurePushSchema(db)
 		const eoa = ethers.getAddress(params.eoa).toLowerCase()
 		await db.query(
-			`INSERT INTO beamio_push_devices (eoa, device_token, platform, bundle_id, pgp_key_id, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, NOW())
+			`INSERT INTO beamio_push_devices
+				(eoa, device_token, platform, bundle_id, pgp_key_id, native_call_ui, full_screen_intent, call_kit, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 			 ON CONFLICT (device_token) DO UPDATE SET
 			   eoa = EXCLUDED.eoa,
 			   platform = EXCLUDED.platform,
 			   bundle_id = EXCLUDED.bundle_id,
 			   pgp_key_id = EXCLUDED.pgp_key_id,
+			   native_call_ui = EXCLUDED.native_call_ui,
+			   full_screen_intent = EXCLUDED.full_screen_intent,
+			   call_kit = EXCLUDED.call_kit,
 			   updated_at = NOW()`,
-			[eoa, params.deviceToken, params.platform, params.bundleId, params.pgpKeyId || null],
+			[
+				eoa,
+				params.deviceToken,
+				params.platform,
+				params.bundleId,
+				params.pgpKeyId || null,
+				params.capabilities?.nativeCallUi === true,
+				params.capabilities?.fullScreenIntent === true,
+				params.capabilities?.callKit === true,
+			],
 		)
 	} finally {
 		await db.end().catch(() => {})
@@ -652,15 +676,28 @@ function buildRegisterMessage(params: {
 	platform: string
 	bundleId: string
 	timestamp: number
+	capabilities?: {
+		nativeCallUi?: boolean
+		fullScreenIntent?: boolean
+		callKit?: boolean
+	}
 }): string {
-	return [
+	const lines = [
 		'Beamio registerPushDevice',
 		`eoa:${params.eoa.toLowerCase()}`,
 		`deviceToken:${params.deviceToken}`,
 		`platform:${params.platform}`,
 		`bundleId:${params.bundleId}`,
-		`timestamp:${params.timestamp}`,
-	].join('\n')
+	]
+	if (params.capabilities !== undefined) {
+		lines.push(`capabilities:${JSON.stringify({
+			nativeCallUi: params.capabilities.nativeCallUi === true,
+			fullScreenIntent: params.capabilities.fullScreenIntent === true,
+			callKit: params.capabilities.callKit === true,
+		})}`)
+	}
+	lines.push(`timestamp:${params.timestamp}`)
+	return lines.join('\n')
 }
 
 function buildSyncBadgeMessage(params: { eoa: string; unread: number; timestamp: number }): string {
@@ -710,6 +747,14 @@ export function registerPushDevicePreCheck(body: any): { ok: true; payload: any 
 	).trim()
 	const signature = String(body?.signature || '').trim()
 	const pgpKeyId = body?.pgpKeyId != null ? String(body.pgpKeyId).trim() : ''
+	const capabilitiesRaw = body?.capabilities
+	const capabilities = capabilitiesRaw && typeof capabilitiesRaw === 'object'
+		? {
+			nativeCallUi: capabilitiesRaw.nativeCallUi === true,
+			fullScreenIntent: capabilitiesRaw.fullScreenIntent === true,
+			callKit: capabilitiesRaw.callKit === true,
+		}
+		: undefined
 	const ts = parseTimestamp(body?.timestamp)
 	if (!ethers.isAddress(eoa) || eoa === ethers.ZeroAddress) return { ok: false, error: 'Invalid eoa', status: 400 }
 	if (platform !== 'ios' && platform !== 'ios_voip' && platform !== 'android') return { ok: false, error: 'Unsupported platform', status: 400 }
@@ -724,6 +769,7 @@ export function registerPushDevicePreCheck(body: any): { ok: true; payload: any 
 		platform,
 		bundleId,
 		timestamp: Math.floor(ts / 1000),
+		capabilities,
 	})
 	// Accept either seconds or ms in signed message
 	const messageMs = buildRegisterMessage({
@@ -732,8 +778,28 @@ export function registerPushDevicePreCheck(body: any): { ok: true; payload: any 
 		platform,
 		bundleId,
 		timestamp: ts,
+		capabilities,
 	})
-	if (!verifyPersonalSign(message, signature, checksum) && !verifyPersonalSign(messageMs, signature, checksum)) {
+	const legacyMessage = buildRegisterMessage({
+		eoa: checksum,
+		deviceToken,
+		platform,
+		bundleId,
+		timestamp: Math.floor(ts / 1000),
+	})
+	const legacyMessageMs = buildRegisterMessage({
+		eoa: checksum,
+		deviceToken,
+		platform,
+		bundleId,
+		timestamp: ts,
+	})
+	if (
+		!verifyPersonalSign(message, signature, checksum) &&
+		!verifyPersonalSign(messageMs, signature, checksum) &&
+		!verifyPersonalSign(legacyMessage, signature, checksum) &&
+		!verifyPersonalSign(legacyMessageMs, signature, checksum)
+	) {
 		return { ok: false, error: 'Invalid signature', status: 403 }
 	}
 	return {
@@ -746,6 +812,7 @@ export function registerPushDevicePreCheck(body: any): { ok: true; payload: any 
 			pgpKeyId: pgpKeyId || undefined,
 			timestamp: ts,
 			signature,
+			capabilities,
 		},
 	}
 }
@@ -894,6 +961,11 @@ export async function registerPushDeviceProcess(payload: {
 	platform: string
 	bundleId: string
 	pgpKeyId?: string
+	capabilities?: {
+		nativeCallUi?: boolean
+		fullScreenIntent?: boolean
+		callKit?: boolean
+	}
 }): Promise<{ success: true }> {
 	await upsertPushDevice(payload)
 	return { success: true }
@@ -956,6 +1028,13 @@ export async function handleRegisterPushDeviceMaster(req: Request, res: Response
 			platform: String(body.platform || 'ios'),
 			bundleId: String(body.bundleId || 'com.beamio.beamio'),
 			pgpKeyId: body.pgpKeyId ? String(body.pgpKeyId) : undefined,
+			capabilities: body.capabilities && typeof body.capabilities === 'object'
+				? {
+					nativeCallUi: body.capabilities.nativeCallUi === true,
+					fullScreenIntent: body.capabilities.fullScreenIntent === true,
+					callKit: body.capabilities.callKit === true,
+				}
+				: undefined,
 		})
 		res.status(200).json({ success: true }).end()
 	} catch (e: any) {
