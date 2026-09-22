@@ -3229,12 +3229,14 @@ const routing = ( router: Router ) => {
 
 		/** cardCouponPosClaimWallet：POS Balance / QR 代领（终端 admin，无 NFC 私钥）。 */
 		router.post('/cardCouponPosClaimWallet', (req, res) => {
-			const { cardAddress, couponId, userEOA, tokenId, posAdminEOA } = req.body as {
+			const { cardAddress, couponId, userEOA, tokenId, posAdminEOA, rewardPtAmount, rewardPtOpenContainer } = req.body as {
 				cardAddress?: string
 				couponId?: string
 				userEOA?: string
 				tokenId?: string
 				posAdminEOA?: string
+				rewardPtAmount?: string
+				rewardPtOpenContainer?: OpenContainerRelayPayload
 			}
 			if (!cardAddress || !couponId || !userEOA || !tokenId || !posAdminEOA) {
 				return res.status(400).json({ success: false, error: 'Missing required fields for cardCouponPosClaimWallet' }).end()
@@ -3245,6 +3247,7 @@ const routing = ( router: Router ) => {
 				userEOA,
 				tokenId,
 				posAdminEOA,
+				...(rewardPtAmount && rewardPtOpenContainer ? { rewardPtAmount, rewardPtOpenContainer } : {}),
 				res,
 			})
 			logger(

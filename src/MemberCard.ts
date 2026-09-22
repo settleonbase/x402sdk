@@ -4662,6 +4662,10 @@ export const cardCouponPosClaimWalletPool: {
 	userEOA: string
 	tokenId: string
 	posAdminEOA: string
+	rewardPtAmount?: string
+	rewardPtOpenContainer?: OpenContainerRelayPayload
+	/** Set after the #13 OpenContainer receipt succeeds so a later nonce-race retry does not transfer PT again. */
+	rewardPtDebited?: boolean
 	res: Response
 }[] = []
 
@@ -18354,6 +18358,244 @@ function readCouponRequiresRedeemCode(meta: Record<string, unknown> | null | und
 	return toBool(nested.requiresRedeemCode) || toBool(nested.redeemCodeRequired)
 }
 
+/** Points-only social exchange (kind coupon, usdcReward6 = 0) is paid by an OpenContainer #13 transfer. USDC-kind stays on the member-wallet social-exchange signature. */
+type PosCouponRewardPtCost = { kind: 'pt'; amount: bigint } | { kind: 'usdc' } | null
+
+function posCouponRewardPtContainerCost(metadata: unknown): PosCouponRewardPtCost {
+	const social = readSocialExchangeFromMetadata(
+		metadata && typeof metadata === 'object' ? (metadata as Record<string, unknown>) : null,
+	)
+	if (!social) return null
+	const usdcReward6 = BigInt(social.usdcReward6 ?? 0)
+	if (social.kind === 'usdc' && usdcReward6 > 0n) return { kind: 'usdc' }
+	if (social.kind === 'coupon' && usdcReward6 === 0n) {
+		const amount = BigInt(social.pointsCost)
+		if (amount > 0n) return { kind: 'pt', amount }
+	}
+	return null
+}
+
+function formatRewardPtUnits6(units: bigint): string {
+	const whole = units / 1_000_000n
+	const frac = (units % 1_000_000n) / 10_000n
+	return `${whole.toString()}.${frac.toString().padStart(2, '0')}`
+}
+
+const POS_REWARD_PT_MEMBER_WALLET_ERROR =
+	'Reward PT coupon claims require the member wallet signature; QR/wallet POS claim is unavailable.'
+
+const POS_REWARD_PT_OPEN_CONTAINER_TYPES = {
+	OpenContainerMain: [
+		{ name: 'account', type: 'address' },
+		{ name: 'currencyType', type: 'uint8' },
+		{ name: 'maxAmount', type: 'uint256' },
+		{ name: 'nonce', type: 'uint256' },
+		{ name: 'deadline', type: 'uint256' },
+	],
+}
+
+function normalizePosRewardPtOpenContainer(raw: unknown): OpenContainerRelayPayload | null {
+	if (!raw || typeof raw !== 'object') return null
+	const o = raw as Record<string, unknown>
+	const account = typeof o.account === 'string' ? o.account.trim() : ''
+	const to = typeof o.to === 'string' ? o.to.trim() : ''
+	const signature = typeof o.signature === 'string' ? o.signature.trim() : ''
+	const nonce = o.nonce == null ? '' : String(o.nonce).trim()
+	const deadline = o.deadline == null ? '' : String(o.deadline).trim()
+	const maxAmount = o.maxAmount == null ? '' : String(o.maxAmount).trim()
+	const currencyType = typeof o.currencyType === 'number' ? o.currencyType : Number(o.currencyType)
+	if (!Array.isArray(o.items) || o.items.length !== 1) return null
+	const it = o.items[0] as Record<string, unknown>
+	if (!it || typeof it !== 'object') return null
+	const kind = typeof it.kind === 'number' ? it.kind : Number(it.kind)
+	const asset = typeof it.asset === 'string' ? it.asset.trim() : ''
+	const amount = it.amount == null ? '' : String(it.amount).trim()
+	const tokenId = it.tokenId == null ? '' : String(it.tokenId).trim()
+	const data = typeof it.data === 'string' && it.data.trim() ? it.data.trim() : '0x'
+	if (!Number.isInteger(currencyType)) return null
+	return {
+		account,
+		to,
+		items: [{ kind, asset, amount, tokenId, data }],
+		currencyType,
+		maxAmount,
+		nonce,
+		deadline,
+		signature,
+	}
+}
+
+async function verifyPosRewardPtOpenContainer(params: {
+	cardNorm: string
+	userEOA: string
+	amount: bigint
+	raw: unknown
+}): Promise<{ ok: true; payload: OpenContainerRelayPayload } | { ok: false; error: string }> {
+	const payload = normalizePosRewardPtOpenContainer(params.raw)
+	if (!payload) {
+		return { ok: false, error: 'Scan to Pay signature is required to claim this Reward PT coupon.' }
+	}
+	const fmt = OpenContainerRelayPreCheck(payload)
+	if (!fmt.success) {
+		return { ok: false, error: 'Scan to Pay signature is required to claim this Reward PT coupon.' }
+	}
+	let maxAmount: bigint
+	let nonce: bigint
+	let deadline: bigint
+	let itemAmount: bigint
+	let itemTokenId: bigint
+	try {
+		maxAmount = BigInt(payload.maxAmount)
+		nonce = BigInt(payload.nonce)
+		deadline = BigInt(payload.deadline)
+		itemAmount = BigInt(payload.items[0]!.amount)
+		itemTokenId = BigInt(payload.items[0]!.tokenId)
+	} catch {
+		return { ok: false, error: 'Scan to Pay signature is incomplete. Ask the customer to show a fresh payment QR.' }
+	}
+	if (maxAmount !== 0n) {
+		return {
+			ok: false,
+			error: 'This payment QR cannot authorize Reward PT. Ask the customer to show a Scan to Pay QR.',
+		}
+	}
+	if (deadline <= BigInt(Math.floor(Date.now() / 1000))) {
+		return { ok: false, error: 'Scan to Pay signature expired. Ask the customer to show a fresh payment QR.' }
+	}
+	const item = payload.items[0]!
+	if (
+		item.kind !== 1 ||
+		ethers.getAddress(item.asset) !== params.cardNorm ||
+		itemTokenId !== REWARD_VOUCHER_TOKEN_ID ||
+		itemAmount !== params.amount
+	) {
+		return { ok: false, error: 'Scan to Pay authorization does not match this Reward PT coupon.' }
+	}
+	const chain = await resolveUserCardChain(params.cardNorm)
+	const cardProvider = providerForUserCardChain(chain)
+	const account = ethers.getAddress(payload.account)
+	const code = await cardProvider.getCode(account)
+	if (!code || code === '0x') {
+		return { ok: false, error: 'Scan to Pay account is not a Smart Wallet.' }
+	}
+	const aa = new ethers.Contract(account, ['function owner() view returns (address)'], cardProvider)
+	const owner = ethers.getAddress((await aa.owner()) as string)
+	if (owner !== ethers.getAddress(params.userEOA)) {
+		return { ok: false, error: 'Scan to Pay signature does not match this member.' }
+	}
+	const domain = {
+		name: 'BeamioAccount',
+		version: '1',
+		chainId: chainIdForUserCardChain(chain),
+		verifyingContract: account,
+	}
+	let recovered: string
+	try {
+		recovered = ethers.verifyTypedData(
+			domain,
+			POS_REWARD_PT_OPEN_CONTAINER_TYPES,
+			{
+				account,
+				currencyType: payload.currencyType,
+				maxAmount,
+				nonce,
+				deadline,
+			},
+			payload.signature,
+		)
+	} catch {
+		return { ok: false, error: 'Scan to Pay signature does not match this member.' }
+	}
+	if (ethers.getAddress(recovered) !== ethers.getAddress(params.userEOA)) {
+		return { ok: false, error: 'Scan to Pay signature does not match this member.' }
+	}
+	const chainNonce = await readContainerNonceFromAAStorage(cardProvider, account, 'openRelayed')
+	if (chainNonce !== nonce) {
+		return {
+			ok: false,
+			error: 'This payment QR was already used. Ask the customer to show a fresh Scan to Pay QR.',
+		}
+	}
+	const card = new ethers.Contract(
+		params.cardNorm,
+		['function balanceOf(address account, uint256 id) view returns (uint256)'],
+		cardProvider,
+	)
+	const bal = (await card.balanceOf(account, REWARD_VOUCHER_TOKEN_ID)) as bigint
+	if (bal < params.amount) {
+		return {
+			ok: false,
+			error: `Insufficient Reward PT. Need ${formatRewardPtUnits6(params.amount)} PT, available ${formatRewardPtUnits6(bal)} PT.`,
+		}
+	}
+	return { ok: true, payload: { ...payload, account, to: ethers.getAddress(payload.to) } }
+}
+
+async function signPosRewardPtOpenContainer(params: {
+	cardNorm: string
+	userEOA: string
+	privateKey: string
+	amount: bigint
+	to: string
+}): Promise<{ ok: true; payload: OpenContainerRelayPayload } | { ok: false; error: string }> {
+	const chain = await resolveUserCardChain(params.cardNorm)
+	const cardProvider = providerForUserCardChain(chain)
+	const aa = await resolveBeamioAaForEoaWithFallback(cardProvider, params.userEOA)
+	if (!aa) {
+		return { ok: false, error: 'This member has no Smart Wallet to pay Reward PT.' }
+	}
+	const account = ethers.getAddress(aa)
+	const chainNonce = await readContainerNonceFromAAStorage(cardProvider, account, 'openRelayed')
+	const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
+	const wallet = new ethers.Wallet(params.privateKey)
+	if (ethers.getAddress(wallet.address) !== ethers.getAddress(params.userEOA)) {
+		return { ok: false, error: 'NFC signer does not match userEOA' }
+	}
+	const currencyType = 4
+	const maxAmount = 0n
+	const signature = await wallet.signTypedData(
+		{
+			name: 'BeamioAccount',
+			version: '1',
+			chainId: chainIdForUserCardChain(chain),
+			verifyingContract: account,
+		},
+		POS_REWARD_PT_OPEN_CONTAINER_TYPES,
+		{ account, currencyType, maxAmount, nonce: chainNonce, deadline },
+	)
+	const card = new ethers.Contract(
+		params.cardNorm,
+		['function balanceOf(address account, uint256 id) view returns (uint256)'],
+		cardProvider,
+	)
+	const bal = (await card.balanceOf(account, REWARD_VOUCHER_TOKEN_ID)) as bigint
+	if (bal < params.amount) {
+		return {
+			ok: false,
+			error: `Insufficient Reward PT. Need ${formatRewardPtUnits6(params.amount)} PT, available ${formatRewardPtUnits6(bal)} PT.`,
+		}
+	}
+	return {
+		ok: true,
+		payload: {
+			account,
+			to: ethers.getAddress(params.to),
+			items: [{
+				kind: 1,
+				asset: params.cardNorm,
+				amount: params.amount.toString(),
+				tokenId: REWARD_VOUCHER_TOKEN_ID.toString(),
+				data: '0x',
+			}],
+			currencyType,
+			maxAmount: '0',
+			nonce: chainNonce.toString(),
+			deadline: deadline.toString(),
+			signature,
+		},
+	}
+}
+
 export type CardCouponPosClaimPreCheckResult =
 	| {
 		success: true
@@ -18371,6 +18613,19 @@ export type CardCouponPosClaimPreCheckResult =
 			usdcReward6?: string
 			refWallet?: string
 			posOperator?: string
+		}
+	}
+	| {
+		success: true
+		route: 'ptContainer'
+		preChecked: {
+			cardAddress: string
+			couponId: string
+			userEOA: string
+			tokenId: string
+			posAdminEOA: string
+			rewardPtAmount: string
+			rewardPtOpenContainer: OpenContainerRelayPayload
 		}
 	}
 	| { success: false; error: string }
@@ -18554,6 +18809,42 @@ export const cardCouponPosClaimPreCheck = async (body: {
 				String(row.tokenId) === String(tokenIdN) &&
 				readCouponIdFromSeriesMetadata(row.metadata ?? null) === couponId
 			)
+			const ptCost = posCouponRewardPtContainerCost(matchedSeries?.metadata ?? null)
+			if (ptCost?.kind === 'pt') {
+				const posAdminRaw = String(body.signerEOA ?? '').trim()
+				if (!posAdminRaw || !ethers.isAddress(posAdminRaw)) {
+					return { success: false, error: 'POS terminal admin is required to claim this coupon.' }
+				}
+				const walletOk = await validatePosWalletCouponOpenClaim({
+					cardNorm,
+					userNorm,
+					couponId,
+					tokenIdN,
+					posAdminEOA: posAdminRaw,
+				})
+				if (!walletOk.ok) return { success: false, error: walletOk.error }
+				const signed = await signPosRewardPtOpenContainer({
+					cardNorm,
+					userEOA: userNorm,
+					privateKey: pk,
+					amount: ptCost.amount,
+					to: ethers.getAddress(posAdminRaw),
+				})
+				if (!signed.ok) return { success: false, error: signed.error }
+				return {
+					success: true,
+					route: 'ptContainer',
+					preChecked: {
+						cardAddress: cardNorm,
+						couponId,
+						userEOA: userNorm,
+						tokenId: String(tokenIdN),
+						posAdminEOA: ethers.getAddress(posAdminRaw),
+						rewardPtAmount: ptCost.amount.toString(),
+						rewardPtOpenContainer: signed.payload,
+					},
+				}
+			}
 			const socialExchange = readSocialExchangeFromMetadata(matchedSeries?.metadata ?? null)
 			let userSignature: string
 			let socialFields: { pointsCost?: string; usdcReward6?: string } = {}
@@ -18617,11 +18908,8 @@ export const cardCouponPosClaimPreCheck = async (body: {
 		String(row.tokenId) === String(tokenIdN) &&
 		readCouponIdFromSeriesMetadata(row.metadata ?? null) === couponId
 	)
-	if (readSocialExchangeFromMetadata(couponRow?.metadata ?? null)) {
-		return {
-			success: false,
-			error: 'Reward PT coupon claims require the member wallet signature; QR/wallet POS claim is unavailable.',
-		}
+	if (posCouponRewardPtContainerCost(couponRow?.metadata ?? null)?.kind === 'usdc') {
+		return { success: false, error: POS_REWARD_PT_MEMBER_WALLET_ERROR }
 	}
 	const walletOk = await validatePosWalletCouponOpenClaim({
 		cardNorm,
@@ -18661,6 +18949,8 @@ export const cardCouponPosClaimPreparePreCheck = async (body: {
 			deadline: number
 			nonce: string
 			factoryGateway: string
+			rewardPtAmount?: string
+			rewardPtTokenId?: string
 		}
 	}
 	| { success: false; error: string }
@@ -18686,11 +18976,9 @@ export const cardCouponPosClaimPreparePreCheck = async (body: {
 		String(row.tokenId) === String(tokenIdN) &&
 		readCouponIdFromSeriesMetadata(row.metadata ?? null) === couponId
 	)
-	if (readSocialExchangeFromMetadata(couponRow?.metadata ?? null)) {
-		return {
-			success: false,
-			error: 'Reward PT coupon claims require the member wallet signature; QR/wallet POS claim is unavailable.',
-		}
+	const ptCost = posCouponRewardPtContainerCost(couponRow?.metadata ?? null)
+	if (ptCost?.kind === 'usdc') {
+		return { success: false, error: POS_REWARD_PT_MEMBER_WALLET_ERROR }
 	}
 
 	const walletOk = await validatePosWalletCouponOpenClaim({
@@ -18720,6 +19008,9 @@ export const cardCouponPosClaimPreparePreCheck = async (body: {
 			deadline,
 			nonce,
 			factoryGateway,
+			...(ptCost?.kind === 'pt'
+				? { rewardPtAmount: ptCost.amount.toString(), rewardPtTokenId: REWARD_VOUCHER_TOKEN_ID.toString() }
+				: {}),
 		},
 	}
 }
@@ -18737,6 +19028,7 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 	nonce?: string
 	adminSignature?: string
 	signerEOA?: string
+	rewardPtOpenContainer?: unknown
 }): Promise<
 	| {
 		success: true
@@ -18746,6 +19038,8 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 			userEOA: string
 			tokenId: string
 			posAdminEOA: string
+			rewardPtAmount?: string
+			rewardPtOpenContainer?: OpenContainerRelayPayload
 		}
 	}
 	| { success: false; error: string }
@@ -18814,6 +19108,29 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 		})
 		if (!walletOk.ok) return { success: false, error: walletOk.error }
 
+		const seriesRows = await listCouponIssuedNftSeriesForCardDescending(cardNorm, 300)
+		const seriesRow = seriesRows.find((row) =>
+			String(row.tokenId) === String(tokenId) &&
+			readCouponIdFromSeriesMetadata(row.metadata ?? null) === couponId
+		)
+		const ptCost = posCouponRewardPtContainerCost(seriesRow?.metadata ?? null)
+		if (ptCost?.kind === 'usdc') {
+			return { success: false, error: POS_REWARD_PT_MEMBER_WALLET_ERROR }
+		}
+		let rewardPtOpenContainer: OpenContainerRelayPayload | undefined
+		let rewardPtAmount: string | undefined
+		if (ptCost?.kind === 'pt') {
+			const verified = await verifyPosRewardPtOpenContainer({
+				cardNorm,
+				userEOA: userNorm,
+				amount: ptCost.amount,
+				raw: body.rewardPtOpenContainer,
+			})
+			if (!verified.ok) return { success: false, error: verified.error }
+			rewardPtOpenContainer = verified.payload
+			rewardPtAmount = ptCost.amount.toString()
+		}
+
 		return {
 			success: true,
 			preChecked: {
@@ -18822,6 +19139,9 @@ export const cardCouponPosClaimSubmitPreCheck = async (body: {
 				userEOA: userNorm,
 				tokenId: String(tokenId),
 				posAdminEOA,
+				...(rewardPtOpenContainer && rewardPtAmount
+					? { rewardPtAmount, rewardPtOpenContainer }
+					: {}),
 			},
 		}
 	} catch (e: any) {
@@ -21889,6 +22209,114 @@ export const cardCouponOpenClaimProcess = async () => {
 /**
  * cardCouponPosClaimWalletProcess：POS Balance / QR 代领（终端 admin + member wallet，无 NFC 私钥）。
  */
+/**
+ * Relay a Cluster-verified OpenContainer that moves Reward PT (token 13) to the merchant card owner's Smart Wallet.
+ * Uses the settle entry already held by the caller. Does not write the HTTP response.
+ */
+async function relaySignedRewardPtOpenContainer(params: {
+	SC: SettleContractPoolEntry
+	payload: OpenContainerRelayPayload
+	merchantCardAddress: string
+}): Promise<{ ok: true; txHash: string } | { ok: false; error: string }> {
+	const { SC, payload, merchantCardAddress } = params
+	const account = ethers.getAddress(payload.account)
+	const relayCtx = await merchantCardRelayContext(SC, merchantCardAddress)
+	const relayProvider = relayCtx.provider
+	const relayWallet = relayCtx.wallet
+	let relayAaFactoryAddr = await getCardAaFactoryAddress(merchantCardAddress)
+	if (!relayAaFactoryAddr) {
+		return { ok: false, error: 'Unable to resolve the Smart Wallet factory for this merchant card.' }
+	}
+	relayAaFactoryAddr = ethers.getAddress(relayAaFactoryAddr)
+	const FactoryWithRelay = new ethers.Contract(
+		relayAaFactoryAddr,
+		[...(BeamioAAAccountFactoryPaymasterABI as ethers.InterfaceAbi), RELAY_OPEN_ABI],
+		relayWallet,
+	)
+	let to: string
+	try {
+		const payeeCard = new ethers.Contract(
+			ethers.getAddress(merchantCardAddress),
+			['function owner() view returns (address)'],
+			relayProvider,
+		)
+		const merchantOwner = (await payeeCard.owner()) as string
+		if (!merchantOwner || merchantOwner === ethers.ZeroAddress) {
+			return { ok: false, error: 'Merchant card has no owner to receive Reward PT.' }
+		}
+		const merchantOwnerAa = await ensureAAForEOAOnCard(
+			ethers.getAddress(merchantCardAddress),
+			ethers.getAddress(merchantOwner),
+			SC,
+		)
+		to = ethers.getAddress(merchantOwnerAa)
+		if (to.toLowerCase() === account.toLowerCase()) {
+			return { ok: false, error: 'Beneficiary and sender cannot be the same.' }
+		}
+	} catch (e: any) {
+		return {
+			ok: false,
+			error: `Unable to resolve the merchant Smart Wallet for Reward PT. ${e?.shortMessage ?? e?.message ?? ''}`.trim(),
+		}
+	}
+	const nonce_ = BigInt(payload.nonce)
+	const chainNonce = await readContainerNonceFromAAStorage(relayProvider, account, 'openRelayed')
+	if (chainNonce !== nonce_) {
+		return {
+			ok: false,
+			error: 'This payment QR was already used. Ask the customer to show a fresh Scan to Pay QR.',
+		}
+	}
+	const sigHex = payload.signature.startsWith('0x') ? payload.signature : `0x${payload.signature}`
+	const sigBytes = ethers.getBytes(sigHex)
+	const entryPointAddress = ethers.getAddress((await FactoryWithRelay.ENTRY_POINT()) as string)
+	const entryPointRead = new ethers.Contract(entryPointAddress, EntryPointHandleOpsABI, relayProvider)
+	const accountIface = new ethers.Interface([
+		'function containerMainRelayedOpenFromEntryPoint(address to,(uint8 kind,address asset,uint256 amount,uint256 tokenId,bytes data)[] items,uint8 currencyType,uint256 maxAmount,uint256 nonce_,uint256 deadline_,bytes sig)',
+	])
+	const callData = accountIface.encodeFunctionData('containerMainRelayedOpenFromEntryPoint', [
+		to,
+		payload.items,
+		payload.currencyType,
+		BigInt(payload.maxAmount),
+		nonce_,
+		BigInt(payload.deadline),
+		sigBytes,
+	])
+	const userOpNonce = (await entryPointRead.getNonce(account, 0n)) as bigint
+	const feeDataOpen = await relayProvider.getFeeData()
+	const maxFeePerGasOpen = feeDataOpen.maxFeePerGas ?? 2_000_000_000n
+	const maxPriorityFeePerGasOpen = feeDataOpen.maxPriorityFeePerGas ?? 100_000_000n
+	const packedOpenOp: AAtoEOAUserOp = {
+		sender: account,
+		nonce: userOpNonce,
+		initCode: '0x',
+		callData,
+		accountGasLimits: packUserOpUints128(8_000_000n, 8_000_000n),
+		preVerificationGas: 300_000n,
+		gasFees: packUserOpUints128(maxPriorityFeePerGasOpen, maxFeePerGasOpen),
+		paymasterAndData: buildPaymasterAndDataV07(relayAaFactoryAddr),
+		signature: sigHex,
+	}
+	const txOp = {
+		...packedOpenOp,
+		nonce: asBigInt(packedOpenOp.nonce, 0n),
+		preVerificationGas: asBigInt(packedOpenOp.preVerificationGas, 0n),
+		signature: sigBytes,
+	}
+	const beneficiary = await relayWallet.getAddress()
+	const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+	const receipt = await tx.wait().catch(() => null)
+	const checked = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+		expectedSender: account,
+		logTag: 'cardCouponPosClaimWallet/rewardPt',
+	})
+	if (!checked.ok) {
+		return { ok: false, error: `Reward PT payment failed on-chain: ${checked.reason}` }
+	}
+	return { ok: true, txHash: tx.hash }
+}
+
 export const cardCouponPosClaimWalletProcess = async () => {
 	const obj = cardCouponPosClaimWalletPool.shift()
 	if (!obj) return
@@ -21909,6 +22337,21 @@ export const cardCouponPosClaimWalletProcess = async () => {
 			throw new Error('insufficient funds for intrinsic transaction cost')
 		}
 		SC = picked.SC
+
+		if (obj.rewardPtOpenContainer && !obj.rewardPtDebited) {
+			const relayed = await relaySignedRewardPtOpenContainer({
+				SC,
+				payload: obj.rewardPtOpenContainer,
+				merchantCardAddress: obj.cardAddress,
+			})
+			if (!relayed.ok) {
+				if (obj.res && !obj.res.headersSent) {
+					obj.res.status(400).json({ success: false, error: relayed.error }).end()
+				}
+				return
+			}
+			obj.rewardPtDebited = true
+		}
 
 		const userNorm = ethers.getAddress(obj.userEOA)
 		const posAdminNorm = ethers.getAddress(obj.posAdminEOA)
@@ -21951,6 +22394,7 @@ export const cardCouponPosClaimWalletProcess = async () => {
 				cardAddress: obj.cardAddress,
 				couponId: obj.couponId,
 				tokenId: obj.tokenId,
+				...(obj.rewardPtAmount ? { rewardPtAmount: obj.rewardPtAmount } : {}),
 			}).end()
 		}
 		logger(Colors.green(`[cardCouponPosClaimWalletProcess] success tx=${tx.hash} posAdmin=${posAdminNorm}`))
@@ -21998,6 +22442,9 @@ export const cardCouponPosClaimWalletProcess = async () => {
 			clientError = 'Failed to create Smart Account on Base. Please try again shortly.'
 		} else if (/insufficient funds for intrinsic transaction cost/i.test(errMsg)) {
 			clientError = 'Network relay wallet is low on gas. Please try again shortly.'
+		}
+		if (obj.rewardPtDebited) {
+			clientError = `Reward PT was deducted, but the coupon claim failed. ${clientError}`
 		}
 		logger(Colors.red(`[cardCouponPosClaimWalletProcess] failed: ${clientError} (raw: ${errMsg})`))
 		if (obj.res && !obj.res.headersSent) {

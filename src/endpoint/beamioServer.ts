@@ -4182,6 +4182,9 @@ const routing = ( router: Router ) => {
 			deadline: out.deadline,
 			nonce: out.nonce,
 			factoryGateway: out.factoryGateway,
+			...(out.rewardPtAmount
+				? { rewardPtAmount: out.rewardPtAmount, rewardPtTokenId: out.rewardPtTokenId ?? '13' }
+				: {}),
 		}).end()
 	})
 
@@ -4214,6 +4217,9 @@ const routing = ( router: Router ) => {
 			userEOA: out.userEOA,
 			tokenId: out.tokenId,
 			posAdminEOA: out.posAdminEOA,
+			...(out.rewardPtOpenContainer && out.rewardPtAmount
+				? { rewardPtAmount: out.rewardPtAmount, rewardPtOpenContainer: out.rewardPtOpenContainer }
+				: {}),
 		}, res)
 	})
 
@@ -10080,6 +10086,33 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(Colors.red(`server /api/cardCouponPosClaim preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
+		}
+		if (preCheck.route === 'ptContainer') {
+			logger(
+				Colors.green(`server /api/cardCouponPosClaim preCheck OK (ptContainer), forwarding to master`),
+				inspect(
+					{
+						cardAddress: preCheck.preChecked.cardAddress,
+						couponId: preCheck.preChecked.couponId,
+						userEOA: preCheck.preChecked.userEOA,
+						tokenId: preCheck.preChecked.tokenId,
+						rewardPtAmount: preCheck.preChecked.rewardPtAmount,
+					},
+					false,
+					2,
+					true,
+				),
+			)
+			postLocalhost('/api/cardCouponPosClaimWallet', {
+				cardAddress: preCheck.preChecked.cardAddress,
+				couponId: preCheck.preChecked.couponId,
+				userEOA: preCheck.preChecked.userEOA,
+				tokenId: preCheck.preChecked.tokenId,
+				posAdminEOA: preCheck.preChecked.posAdminEOA,
+				rewardPtAmount: preCheck.preChecked.rewardPtAmount,
+				rewardPtOpenContainer: preCheck.preChecked.rewardPtOpenContainer,
+			}, res)
+			return
 		}
 		if (preCheck.route !== 'openClaim') {
 			return res.status(400).json({ success: false, error: 'Unexpected claim route' }).end()
