@@ -22384,8 +22384,12 @@ export const cardCouponPosClaimWalletProcess = async () => {
 			logTag: 'cardCouponPosClaimWalletProcess',
 		})
 		const receipt = await tx.wait()
-		if (!receipt || receipt.status !== 1) {
-			throw new Error('Coupon POS wallet claim transaction failed')
+		const claimCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
+			expectedSender: aaAddress,
+			logTag: 'cardCouponPosClaimWalletProcess',
+		})
+		if (!claimCheck.ok) {
+			throw new Error(`${claimCheck.reason} userOpHash=${claimCheck.userOpHash ?? 'n/a'}`)
 		}
 		if (obj.res && !obj.res.headersSent) {
 			obj.res.status(200).json({
