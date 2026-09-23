@@ -22385,7 +22385,6 @@ export const cardCouponPosClaimWalletProcess = async () => {
 		})
 		const receipt = await tx.wait()
 		const claimCheck = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
-			expectedSender: aaAddress,
 			logTag: 'cardCouponPosClaimWalletProcess',
 		})
 		if (!claimCheck.ok) {
