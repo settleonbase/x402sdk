@@ -19308,24 +19308,6 @@ export const cardCouponPosConsumePreparePreCheck = async (body: {
 		posOpRaw && ethers.isAddress(posOpRaw)
 			? ethers.getAddress(posOpRaw)
 			: cardOwnerResolved
-	const supportsBurn = await merchantCardSupportsCouponBurn(cardNorm)
-	if (!supportsBurn) {
-		return {
-			success: true,
-			mode: 'openContainerSurrender',
-			preChecked: {
-				cardAddress: cardNorm,
-				couponId,
-				userEOA: userNorm,
-				userAccount: holderAccount,
-				tokenId: String(tokenIdN),
-				amount: String(amountN),
-				cardOwnerEOA: cardOwnerResolved,
-				transferRecipient,
-			},
-		}
-	}
-
 	const data = burnIssuedNftByGatewayIface.encodeFunctionData('burnIssuedNftByGateway', [holderAccount, tokenIdN, amountN])
 	const deadline = Math.floor(Date.now() / 1000) + 15 * 60
 	const nonce = ethers.keccak256(
