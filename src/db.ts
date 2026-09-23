@@ -2239,7 +2239,7 @@ export type MerchantCardStripeSessionInput = {
 	buyerEoa: string
 	amountFiat6: string
 	currency: string
-	kind: 'topup' | 'membership' | 'gift'
+	kind: 'topup' | 'membership' | 'gift' | 'charge'
 	membershipTierIndex?: number | null
 	membershipFeeFiat6?: string | null
 	redeemHash?: string | null

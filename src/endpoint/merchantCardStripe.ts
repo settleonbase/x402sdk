@@ -587,7 +587,7 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 	buyerEoa: string
 	amountFiat6: string
 	currency: string
-	kind: 'topup' | 'membership' | 'gift'
+	kind: 'topup' | 'membership' | 'gift' | 'charge'
 	membershipTierIndex?: number
 	membershipFeeFiat6?: string
 	giftPaymentMode?: string
@@ -719,7 +719,7 @@ export async function createMerchantCardStripePaymentIntent(params: {
 	buyerEoa: string
 	amountFiat6: string
 	currency: string
-	kind: 'topup' | 'membership' | 'gift'
+	kind: 'topup' | 'membership' | 'gift' | 'charge'
 	membershipTierIndex?: number
 	membershipFeeFiat6?: string
 	giftPaymentMode?: string
@@ -829,7 +829,7 @@ type MerchantCardStripeTerminalPaymentParams = {
 	authorizationNonce?: string
 	amountFiat6: string
 	currency: string
-	kind: 'topup' | 'membership' | 'gift'
+	kind: 'topup' | 'membership' | 'gift' | 'charge'
 	membershipTierIndex?: number
 	membershipFeeFiat6?: string
 	businessIdempotencyKey: string
@@ -966,10 +966,10 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 	const boundAdmins = local.stripeFulfillmentAdmins.length > 0
 		? local.stripeFulfillmentAdmins
 		: local.stripeFulfillmentAdmin ? [local.stripeFulfillmentAdmin] : []
-	if (
+	if (params.kind !== 'charge' && (
 		fulfillmentAdmins.length === 0 ||
 		fulfillmentAdmins.some((address) => !boundAdmins.some((bound) => bound.toLowerCase() === address.toLowerCase()))
-	) {
+	)) {
 		throw new Error('Merchant card Stripe fulfillment admin pool is not linked')
 	}
 	const currency = normalizeStripeCurrency(params.currency)
@@ -1034,7 +1034,9 @@ export async function createMerchantCardStripeTerminalPaymentIntent(
 		// used by fulfillment to settle the card in its own currency.
 		currency: terminalCharge.chargeCurrency,
 		payment_method_types: ['card_present'],
-		description: params.kind === 'membership' ? 'Membership fee' : 'Program card top-up',
+		description: params.kind === 'charge'
+			? 'POS charge'
+			: params.kind === 'membership' ? 'Membership fee' : 'Program card top-up',
 		metadata,
 	}, {
 		idempotencyKey: params.businessIdempotencyKey.trim(),
@@ -1319,7 +1321,17 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
     if (session.payment_status !== 'paid') return
     const meta = session.metadata ?? {}
     if (meta.product !== 'merchantCardStripe') return
-    if (!['topup', 'membership', 'gift'].includes(meta.kind ?? '')) throw new Error('Invalid merchantCardStripe kind')
+    if (!['topup', 'membership', 'gift', 'charge'].includes(meta.kind ?? '')) throw new Error('Invalid merchantCardStripe kind')
+	if (meta.kind === 'charge') {
+		if (!(await claimMerchantCardStripeSession(sessionId))) return
+		await updateMerchantCardStripeSession({
+			sessionId,
+			status: 'succeeded',
+			fulfillmentStatus: 'fulfillment_succeeded',
+			paymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
+		})
+		return
+	}
 	if (meta.kind === 'gift') {
 		await fulfillMerchantCardStripeGift({
 			sessionId,
@@ -1428,7 +1440,17 @@ export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: st
 	if (paymentIntent.status !== 'succeeded') return
 	const meta = paymentIntent.metadata ?? {}
 	if (meta.product !== 'merchantCardStripe') return
-	if (!['topup', 'membership', 'gift'].includes(meta.kind ?? '')) throw new Error('Invalid merchantCardStripe kind')
+	if (!['topup', 'membership', 'gift', 'charge'].includes(meta.kind ?? '')) throw new Error('Invalid merchantCardStripe kind')
+	if (meta.kind === 'charge') {
+		if (!(await claimMerchantCardStripeSession(paymentIntentId))) return
+		await updateMerchantCardStripeSession({
+			sessionId: paymentIntentId,
+			status: 'succeeded',
+			fulfillmentStatus: 'fulfillment_succeeded',
+			paymentIntentId,
+		})
+		return
+	}
 	if (meta.kind === 'gift') {
 		await fulfillMerchantCardStripeGift({
 			sessionId: paymentIntentId,

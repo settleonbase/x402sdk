@@ -6797,7 +6797,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	router.post('/merchantCardStripe/createCheckout', async (req, res) => {
 		try {
 			const body = req.body ?? {}
-			if (!['topup', 'membership', 'gift'].includes(body.kind)) throw new Error('kind must be topup, membership, or gift')
+			if (!['topup', 'membership', 'gift', 'charge'].includes(body.kind)) throw new Error('kind must be topup, membership, gift, or charge')
 			return res.json(await createMerchantCardStripeCheckoutSession(body)).end()
 		} catch (e: any) {
 			logger(Colors.red('[merchantCardStripe] createCheckout failed'), e?.message ?? e)
@@ -6808,7 +6808,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	router.post('/merchantCardStripe/createPaymentIntent', async (req, res) => {
 		try {
 			const body = req.body ?? {}
-			if (!['topup', 'membership', 'gift'].includes(body.kind)) throw new Error('kind must be topup, membership, or gift')
+			if (!['topup', 'membership', 'gift', 'charge'].includes(body.kind)) throw new Error('kind must be topup, membership, gift, or charge')
 			return res.json(await createMerchantCardStripePaymentIntent(body)).end()
 		} catch (e: any) {
 			logger(Colors.red('[merchantCardStripe] createPaymentIntent failed'), e?.message ?? e)
@@ -6819,7 +6819,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	router.post('/merchantCardStripe/createTerminalPaymentIntent', async (req, res) => {
 		try {
 			const body = req.body ?? {}
-			if (!['topup', 'membership'].includes(body.kind)) throw new Error('kind must be topup or membership')
+			if (!['topup', 'membership', 'charge'].includes(body.kind)) throw new Error('kind must be topup, membership, or charge')
 			return res.json(await createMerchantCardStripeTerminalPaymentIntent(body)).end()
 		} catch (e: any) {
 			logger(Colors.red('[merchantCardStripe] createTerminalPaymentIntent failed'), e?.message ?? e)

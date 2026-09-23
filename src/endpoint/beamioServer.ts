@@ -14140,7 +14140,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
 			typeof body.buyerEoa !== 'string' || !ethers.isAddress(body.buyerEoa) ||
 			typeof body.amountFiat6 !== 'string' || !/^[0-9]+$/.test(body.amountFiat6) ||
-			!['topup', 'membership'].includes(body.kind) ||
+			!['topup', 'membership', 'charge'].includes(body.kind) ||
 			typeof body.currency !== 'string' ||
 			typeof body.businessIdempotencyKey !== 'string' ||
 			!/^[A-Za-z0-9:_-]{16,128}$/.test(body.businessIdempotencyKey) ||
