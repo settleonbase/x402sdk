@@ -6489,6 +6489,7 @@ const routing = ( router: Router ) => {
 			}
 			const cardAddr = ethers.getAddress(String(card).trim())
 			const posAddr = pos && ethers.isAddress(String(pos).trim()) ? ethers.getAddress(String(pos).trim()) : null
+			const cardProvider = providerForUserCardChain('conet')
 
 			// 链上一次性读取 owner / currency / isAdmin(pos)，让 owner/currency 在 URL 中变可选
 			let onChainOwner: string | null = null
@@ -6502,7 +6503,7 @@ const routing = ( router: Router ) => {
 						'function currency() view returns (uint8)',
 						'function isAdmin(address) view returns (bool)',
 					],
-					providerBase
+					cardProvider
 				)
 				const ownerP = c.owner() as Promise<string>
 				const curEnumP = c.currency() as Promise<bigint | number>
@@ -6627,8 +6628,9 @@ const routing = ( router: Router ) => {
 			}
 			const cardAddr = ethers.getAddress(String(card).trim())
 			const posAddr = pos && ethers.isAddress(String(pos).trim()) ? ethers.getAddress(String(pos).trim()) : null
+			const cardProvider = providerForUserCardChain('conet')
 
-			// 1. 链上读 card.owner / card.isAdmin(pos) / card.currency
+			// 1. 链上读 card.owner / card.isAdmin(pos) / card.currency（商户卡仅 CoNET）
 			const cardC = new ethers.Contract(
 				cardAddr,
 				[
@@ -6636,7 +6638,7 @@ const routing = ( router: Router ) => {
 					'function isAdmin(address) view returns (bool)',
 					'function currency() view returns (uint8)',
 				],
-				providerBase
+				cardProvider
 			)
 			const ownerPromise = cardC.owner() as Promise<string>
 			const isAdminPromise: Promise<boolean> = posAddr ? cardC.isAdmin(posAddr) : Promise.resolve(true)
@@ -6683,9 +6685,9 @@ const routing = ( router: Router ) => {
 			// 4. USDC6 → points6 via card-specific gateway.quoteUnitPointInUSDC6
 			let points6: bigint
 			try {
-				const gw = new ethers.Contract(cardAddr, ['function factoryGateway() view returns (address)'], providerBase)
+				const gw = new ethers.Contract(cardAddr, ['function factoryGateway() view returns (address)'], cardProvider)
 				const gatewayAddr = (await gw.factoryGateway()) as string
-				const gateway = new ethers.Contract(gatewayAddr, ['function quoteUnitPointInUSDC6(address) view returns (uint256)'], providerBase)
+				const gateway = new ethers.Contract(gatewayAddr, ['function quoteUnitPointInUSDC6(address) view returns (uint256)'], cardProvider)
 				const unitPriceUSDC6 = (await gateway.quoteUnitPointInUSDC6(cardAddr)) as bigint
 				if (unitPriceUSDC6 <= 0n) {
 					return res.status(503).json({ ok: false, error: 'Card unit price unavailable (UC_PriceZero)' }).end()
@@ -6944,10 +6946,11 @@ const routing = ( router: Router ) => {
 				logger(Colors.cyan(`[nfcUsdcCharge] no-NFC mode card=${cardAddr.slice(0, 8)}… total=${breakdown.total.toFixed(2)} (third-party wallet, SUN bypass; currency resolved on-chain)`))
 			}
 
-			// 2. 链上一次性读 owner / currency / isAdmin(pos)：新 schema 下 owner/currency 不在 URL 里，必须链上权威。
+			// 2. 链上一次性读 owner / currency / isAdmin(pos)：商户卡仅 CoNET。
 			let onChainOwner: string | null = null
 			let onChainCurrency: string | null = null
 			let isAdminPos: boolean = posAddr === null
+			const cardProvider = providerForUserCardChain('conet')
 			try {
 				const cprep = new ethers.Contract(
 					cardAddr,
@@ -6956,7 +6959,7 @@ const routing = ( router: Router ) => {
 						'function currency() view returns (uint8)',
 						'function isAdmin(address) view returns (bool)',
 					],
-					providerBase
+					cardProvider
 				)
 				const ownerP = cprep.owner() as Promise<string>
 				const curP = cprep.currency() as Promise<bigint | number>
@@ -7241,7 +7244,7 @@ const routing = ( router: Router ) => {
 				...(quotedSubtotalUsdc6 > 0n ? { ledgerMainChargeUsdc6: quotedSubtotalUsdc6.toString() } : {}),
 				payer: settled.payer,
 				posOperator: posAddr,
-				provider: providerBase,
+				provider: cardProvider,
 				updateSession: (patch: OrchestratorSessionPatch) => {
 					// orchestrator 不持有 sid（避免循环依赖），无 sid 时 sessionUpdate 内部 no-op，恰好兜住「sid 缺省」场景
 					sessionUpdate(patch as Partial<ChargeSession>)
@@ -7431,10 +7434,11 @@ const routing = ( router: Router ) => {
 				tipBps: breakdown.tipBps,
 			})
 
-			// 链上权威读 owner / currency / isAdmin(pos) —— 与 /api/nfcUsdcCharge 同口径，cardOwner 永远以链上为准（防伪 URL）。
+			// 链上权威读 owner / currency / isAdmin(pos) —— 商户卡仅 CoNET，cardOwner 以链上为准。
 			let onChainOwner: string | null = null
 			let onChainCurrency: string | null = null
 			let isAdminPos: boolean = posAddr === null
+			const cardProvider = providerForUserCardChain('conet')
 			try {
 				const cprep = new ethers.Contract(
 					cardAddr,
@@ -7443,7 +7447,7 @@ const routing = ( router: Router ) => {
 						'function currency() view returns (uint8)',
 						'function isAdmin(address) view returns (bool)',
 					],
-					providerBase
+					cardProvider
 				)
 				const ownerP = cprep.owner() as Promise<string>
 				const curP = cprep.currency() as Promise<bigint | number>
