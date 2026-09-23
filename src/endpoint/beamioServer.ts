@@ -14102,7 +14102,6 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			throw new Error('POS admin authorization has expired')
 		}
 		const cardAddress = ethers.getAddress(body.cardAddress)
-		const posAdmin = ethers.getAddress(body.posAdmin)
 		const value = {
 			cardAddress,
 			buyerEoa: ethers.getAddress(body.buyerEoa),
@@ -14119,19 +14118,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			value,
 			body.authorizationSignature,
 		)
-		if (recovered.toLowerCase() !== posAdmin.toLowerCase()) {
-			throw new Error('POS admin signature does not match posAdmin')
-		}
+		/* posAdmin is an unsigned transport hint. The recovered EIP-712 signer
+		 * is the canonical admin identity, so native bridge retries cannot fail
+		 * because that text field is stale. */
+		const recoveredAdmin = ethers.getAddress(recovered)
 		const provider = providerForUserCardChain(await resolveUserCardChain(cardAddress))
 		const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], provider)
-		if (!(await card.isAdmin(posAdmin))) {
-			throw new Error('POS admin is not an admin of this merchant card')
+		if (!(await card.isAdmin(recoveredAdmin))) {
+			throw new Error('Recovered POS signer is not an admin of this merchant card')
 		}
 		const stripeStatus = await getMerchantCardStripeStatusFromDb(cardAddress)
 		if (!stripeStatus?.stripeAccountId) {
 			throw new Error('Merchant Stripe Connected Account is not configured')
 		}
-		return { cardAddress, posAdmin }
+		return { cardAddress, posAdmin: recoveredAdmin }
 	}
 
 	router.post('/merchantCardStripe/createTerminalPaymentIntent', async (req, res) => {
