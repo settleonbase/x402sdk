@@ -506,7 +506,6 @@ async function sendFcmBadge(
 type VoiceCallPushPayload = {
 	callId: string
 	sessionId: string
-	callerEoa: string
 	calleeEoa: string
 	expiresAt: number
 }
@@ -544,7 +543,6 @@ function sendApnsVoiceCall(
 			type: 'voiceCall',
 			callId: payload.callId,
 			sessionId: payload.sessionId,
-			callerEoa: payload.callerEoa,
 			calleeEoa: payload.calleeEoa,
 			expiresAt: payload.expiresAt,
 		}))
@@ -565,7 +563,6 @@ async function sendFcmVoiceCall(cfg: FcmConfig, deviceToken: string, payload: Vo
 					type: 'voiceCall',
 					callId: payload.callId,
 					sessionId: payload.sessionId,
-					callerEoa: payload.callerEoa,
 					calleeEoa: payload.calleeEoa,
 					expiresAt: String(payload.expiresAt),
 				},
@@ -583,30 +580,30 @@ async function sendFcmVoiceCall(cfg: FcmConfig, deviceToken: string, payload: Vo
 export function voiceCallPushPreCheck(body: any): { ok: true; payload: VoiceCallPushPayload } | { ok: false; error: string; status: number } {
 	const callId = String(body?.callId || '').trim()
 	const sessionId = String(body?.sessionId || '').trim()
-	const callerEoa = String(body?.callerEoa || '').trim()
 	const calleeEoa = String(body?.calleeEoa || '').trim()
+	const nodeWallet = String(body?.nodeWallet || '').trim()
 	const expiresAt = Number(body?.expiresAt)
+	const rawTimestamp = Number(body?.timestamp)
 	const timestamp = parseTimestamp(body?.timestamp)
 	const signature = String(body?.signature || '').trim()
 	if (!callId || callId.length > 128 || !sessionId || sessionId.length > 128) return { ok: false, error: 'Invalid call identity', status: 400 }
-	if (!ethers.isAddress(callerEoa) || !ethers.isAddress(calleeEoa)) return { ok: false, error: 'Invalid caller/callee', status: 400 }
+	if (!ethers.isAddress(calleeEoa)) return { ok: false, error: 'Invalid callee', status: 400 }
+	if (!ethers.isAddress(nodeWallet)) return { ok: false, error: 'Invalid relay node', status: 400 }
 	if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() || expiresAt > Date.now() + 10 * 60_000) return { ok: false, error: 'Invalid expiresAt', status: 400 }
-	if (!signature || timestamp == null || Math.abs(Date.now() - timestamp) > SIGN_MAX_SKEW_MS) return { ok: false, error: 'Missing or expired signature', status: 400 }
-	const caller = ethers.getAddress(callerEoa)
+	if (!signature || timestamp == null || Math.abs(Date.now() - timestamp) > SIGN_MAX_SKEW_MS) return { ok: false, error: 'Missing or expired relay signature', status: 400 }
 	const message = [
-		'Beamio voiceCallPush',
+		'CoNET voiceCallPush relay',
 		`callId:${callId}`,
 		`sessionId:${sessionId}`,
-		`callerEoa:${caller.toLowerCase()}`,
 		`calleeEoa:${ethers.getAddress(calleeEoa).toLowerCase()}`,
 		`expiresAt:${expiresAt}`,
-		`timestamp:${Math.floor(timestamp / 1000)}`,
+		`timestamp:${rawTimestamp}`,
+		`nodeWallet:${ethers.getAddress(nodeWallet).toLowerCase()}`,
 	].join('\n')
-	const messageMs = message.replace(`timestamp:${Math.floor(timestamp / 1000)}`, `timestamp:${timestamp}`)
-	if (!verifyPersonalSign(message, signature, caller) && !verifyPersonalSign(messageMs, signature, caller)) {
-		return { ok: false, error: 'Invalid signature', status: 403 }
+	if (!verifyPersonalSign(message, signature, ethers.getAddress(nodeWallet))) {
+		return { ok: false, error: 'Invalid relay signature', status: 403 }
 	}
-	return { ok: true, payload: { callId, sessionId, callerEoa: ethers.getAddress(callerEoa), calleeEoa: ethers.getAddress(calleeEoa), expiresAt } }
+	return { ok: true, payload: { callId, sessionId, calleeEoa: ethers.getAddress(calleeEoa), expiresAt } }
 }
 
 export async function voiceCallPushProcess(payload: VoiceCallPushPayload): Promise<{ success: true; delivered: number }> {
@@ -1078,7 +1075,6 @@ export async function handleVoiceCallPushMaster(req: Request, res: Response): Pr
 		const out = await voiceCallPushProcess({
 			callId: String(body.callId),
 			sessionId: String(body.sessionId),
-			callerEoa: String(body.callerEoa),
 			calleeEoa: String(body.calleeEoa),
 			expiresAt: Number(body.expiresAt),
 		})
