@@ -14125,7 +14125,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		const provider = providerForUserCardChain(await resolveUserCardChain(cardAddress))
 		const card = new ethers.Contract(cardAddress, ['function isAdmin(address) view returns (bool)'], provider)
 		if (!(await card.isAdmin(recoveredAdmin))) {
-			throw new Error('Recovered POS signer is not an admin of this merchant card')
+			throw new Error(
+				`Recovered POS signer ${recoveredAdmin} is not an admin of merchant card ${cardAddress}`,
+			)
 		}
 		const stripeStatus = await getMerchantCardStripeStatusFromDb(cardAddress)
 		if (!stripeStatus?.stripeAccountId) {
