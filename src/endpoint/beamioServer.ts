@@ -122,6 +122,8 @@ import {
 	voiceCallPushPreCheck,
 	pushDeviceStatusPreCheck,
 	pushDeviceStatusProcess,
+	nativeWakeablePreCheck,
+	nativeWakeableProcess,
 } from './offlineChatPush'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaViaUserCardFactory, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
@@ -11156,6 +11158,25 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	 * Cluster read: whether this EOA already has push device row(s).
 	 * POS PWA calls on /home; if registered=false → re-bind + registerPushDevice.
 	 */
+	/**
+	 * Cluster read for the contact's mailbox node.
+	 * Returns only whether a registered iOS / Android / Windows / Linux / macOS
+	 * device can be woken. Device tokens stay in the database.
+	 */
+	router.post('/nativeWakeable', async (req, res) => {
+		const checked = await nativeWakeablePreCheck(req.body)
+		if (!checked.ok) {
+			return res.status(checked.status).json({ success: false, error: checked.error }).end()
+		}
+		try {
+			const out = await nativeWakeableProcess({ eoa: checked.payload.eoa })
+			return res.status(200).json(out).end()
+		} catch (e: any) {
+			logger(Colors.red(`[nativeWakeable] ${e?.message ?? e}`))
+			return res.status(500).json({ success: false, error: 'Internal error' }).end()
+		}
+	})
+
 	router.post('/pushDeviceStatus', async (req, res) => {
 		const checked = pushDeviceStatusPreCheck(req.body)
 		if (!checked.ok) {

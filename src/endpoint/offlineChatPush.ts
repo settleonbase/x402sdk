@@ -278,6 +278,83 @@ export async function incrementPushUnread(eoaRaw: string, delta = 1): Promise<nu
 	}
 }
 
+const NATIVE_WAKE_PLATFORMS = new Set([
+	'ios',
+	'ios_voip',
+	'android',
+	'windows',
+	'linux',
+	'macos',
+	'mac',
+	'darwin',
+])
+
+/** True when this EOA has a registered native shell that push can wake. Never returns tokens. */
+export async function nativeWakeableForEoa(eoaRaw: string): Promise<boolean> {
+	const eoa = ethers.getAddress(eoaRaw).toLowerCase()
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensurePushSchema(db)
+		const r = await db.query<{ platform: string }>(
+			`SELECT LOWER(platform) AS platform FROM beamio_push_devices WHERE LOWER(eoa) = $1`,
+			[eoa],
+		)
+		return r.rows.some((row) => NATIVE_WAKE_PLATFORMS.has(String(row.platform || '').toLowerCase()))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
+function buildNativeWakeableMessage(params: { eoa: string; timestamp: number }): string {
+	return [
+		'Beamio nativeWakeable',
+		`eoa:${params.eoa.toLowerCase()}`,
+		`timestamp:${params.timestamp}`,
+	].join('\n')
+}
+
+/**
+ * Cluster read for a Guardian mailbox node.
+ * Signer is the node wallet (same family as notifyOfflineChat), not the queried user.
+ */
+export async function nativeWakeablePreCheck(
+	body: any,
+): Promise<{ ok: true; payload: { eoa: string } } | { ok: false; error: string; status: number }> {
+	const eoaRaw = String(body?.eoa || '').trim()
+	if (!ethers.isAddress(eoaRaw) || eoaRaw === ethers.ZeroAddress) {
+		return { ok: false, error: 'Invalid eoa', status: 400 }
+	}
+	const signature = String(body?.signature || '').trim()
+	if (!signature) return { ok: false, error: 'Missing node signature', status: 401 }
+	const ts = parseTimestamp(body?.timestamp)
+	if (ts == null || Math.abs(Date.now() - ts) > SIGN_MAX_SKEW_MS) {
+		return { ok: false, error: 'Invalid or expired timestamp', status: 400 }
+	}
+	const eoa = ethers.getAddress(eoaRaw).toLowerCase()
+	const msgSec = buildNativeWakeableMessage({ eoa, timestamp: Math.floor(ts / 1000) })
+	const msgMs = buildNativeWakeableMessage({ eoa, timestamp: ts })
+	let recovered = ''
+	try {
+		recovered = ethers.verifyMessage(msgSec, signature)
+	} catch {
+		try {
+			recovered = ethers.verifyMessage(msgMs, signature)
+		} catch {
+			return { ok: false, error: 'Invalid signature', status: 403 }
+		}
+	}
+	const okNode = await isRegisteredGuardianNodeWallet(recovered)
+	if (!okNode) return { ok: false, error: 'Signer is not a registered Guardian node', status: 403 }
+	return { ok: true, payload: { eoa } }
+}
+
+export async function nativeWakeableProcess(payload: { eoa: string }): Promise<{ success: true; nativeWakeable: boolean }> {
+	const nativeWakeable = await nativeWakeableForEoa(payload.eoa)
+	logger(Colors.gray(`[nativeWakeable] eoa=${payload.eoa} wake=${nativeWakeable}`))
+	return { success: true, nativeWakeable }
+}
+
 async function listDevicesForEoa(
 	eoaRaw: string,
 ): Promise<Array<{ deviceToken: string; bundleId: string; platform: string }>> {
@@ -603,7 +680,15 @@ export function voiceCallPushPreCheck(body: any): { ok: true; payload: VoiceCall
 	if (!verifyPersonalSign(message, signature, ethers.getAddress(nodeWallet))) {
 		return { ok: false, error: 'Invalid relay signature', status: 403 }
 	}
-	return { ok: true, payload: { callId, sessionId, calleeEoa: ethers.getAddress(calleeEoa), expiresAt } }
+	return {
+		ok: true,
+		payload: {
+			callId,
+			sessionId,
+			calleeEoa: ethers.getAddress(calleeEoa),
+			expiresAt,
+		},
+	}
 }
 
 export async function voiceCallPushProcess(payload: VoiceCallPushPayload): Promise<{ success: true; delivered: number }> {
