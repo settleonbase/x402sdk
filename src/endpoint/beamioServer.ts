@@ -2,6 +2,7 @@ import express, { Request, Response, Router} from 'express'
 import { GoogleGenAI } from '@google/genai'
 import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh, submitUsdcChargeSettleIndexer, resolveBeamioConetHttpRpcUrl, TX_CATEGORY_TERMINAL_RESET } from '../util'
 import { checkSmartAccount } from '../MemberCard'
+import { linkMembershipKycPreCheck } from '../membershipKycLink'
 import { resolveAaUserOpRelayChainFromRequest } from '../aaTransferRelayChain'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
@@ -9754,6 +9755,15 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			inspect({ cardAddress: preCheck.preChecked.cardAddress }, false, 2, true),
 		)
 		postLocalhost('/api/cardGatewayInitializeUserCumulativeStat', preCheck.preChecked, res)
+	})
+
+	/** Membership KYC ciphertext hash. Waits for the card receipt before the client continues to payment. */
+	router.post('/linkMembershipKyc', async (req, res) => {
+		const preCheck = await linkMembershipKycPreCheck(req.body ?? {})
+		if (!preCheck.success || !preCheck.preChecked) {
+			return res.status(400).json({ success: false, error: preCheck.error || 'Membership information was not accepted.' }).end()
+		}
+		postLocalhost('/api/cardGatewayRewardPool', preCheck.preChecked, res)
 	})
 
 	/** Gateway-only：用户 EIP-712 点赞 / 解除点赞。Cluster 预检后转发；Master 对 like/unlike 入队即返回 queued（链上后台执行）。 */

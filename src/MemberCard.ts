@@ -1,4 +1,5 @@
 import { ethers, type TransactionReceipt } from 'ethers'
+import { assertMembershipKycLinked } from './membershipKycLink'
 import { randomUUID } from 'node:crypto'
 import BeamioFactoryPaymasterArtifact from './ABI/BeamioUserCardFactoryPaymaster.json'
 const BeamioFactoryPaymasterABI = (Array.isArray(BeamioFactoryPaymasterArtifact) ? BeamioFactoryPaymasterArtifact : (BeamioFactoryPaymasterArtifact as { abi?: unknown[] }).abi ?? []) as ethers.InterfaceAbi
@@ -8399,6 +8400,8 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 	if (hasValid && !explicitMembershipFee) {
 		return { success: true, membershipFeeMode: true, membershipNeedsFee: false }
 	}
+	const kycLinked = await assertMembershipKycLinked(cardNorm, membershipLookupUser)
+	if (!kycLinked.success) return kycLinked
 	/** Direct membership purchase: fee only → `mintPointsByAdmin(0)` (no leftover #0). */
 	if (params.points6Mint < 0n) {
 		return { success: false, error: 'Invalid mintPointsByAdmin amount for membership fee purchase' }
@@ -8533,6 +8536,8 @@ export async function nfcTopupPreCheckMintMinTierFirstMembership(
 		const hasValid = await resolveCustomerHasValidMembership(cardNorm, membershipLookupUser)
 
 		if (hasValid) return { success: true }
+		const kycLinked = await assertMembershipKycLinked(cardNorm, membershipLookupUser)
+		if (!kycLinked.success) return kycLinked
 		if (points6Mint >= minVal) return { success: true }
 
 		const currencyMap: Record<number, string> = {
