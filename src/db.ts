@@ -6001,7 +6001,7 @@ export const registerCardToDb = async (params: {
 			rewardTokenId?: number
 		}
 		businessProfile?: {
-			channelKind?: 'physical' | 'digital' | 'app'
+			channelKind?: 'physical' | 'digital' | 'app' | 'government' | 'ngo'
 			category?: string
 			storeName?: string
 			country?: string

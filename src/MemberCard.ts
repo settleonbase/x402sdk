@@ -14528,7 +14528,7 @@ const CREATE_CARD_BONUS_RULES_MAX = 32
 const CREATE_CARD_BONUS_AMOUNT_MAX = 1_000_000_000
 
 type ShareTokenBusinessProfile = {
-	channelKind?: 'physical' | 'digital' | 'app'
+	channelKind?: 'physical' | 'digital' | 'app' | 'government' | 'ngo'
 	category?: string
 	storeName?: string
 	country?: string
@@ -14546,7 +14546,13 @@ function sanitizeShareTokenBusinessProfile(raw: unknown): ShareTokenBusinessProf
 		const next = value.trim().slice(0, max)
 		return next || undefined
 	}
-	if (input.channelKind === 'physical' || input.channelKind === 'digital' || input.channelKind === 'app') {
+	if (
+		input.channelKind === 'physical' ||
+		input.channelKind === 'digital' ||
+		input.channelKind === 'app' ||
+		input.channelKind === 'government' ||
+		input.channelKind === 'ngo'
+	) {
 		out.channelKind = input.channelKind
 	}
 	if (input.businessType === 'solo' || input.businessType === 'chain' || input.businessType === 'ngo') {
