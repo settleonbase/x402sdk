@@ -8700,11 +8700,18 @@ export async function claimFreeMembershipProcess(body: {
 		const stageReceipt = await stageTx.wait()
 		const stageOk = checkBusinessRelayTxSuccessful(stageReceipt, { logTag: 'claimFreeMembership:stage' })
 		if (!stageOk.ok) throw new Error(stageOk.reason)
+		// mintPointsByAdmin requires the card owner or factory gateway. The
+		// relayer is only a paymaster, so that call reverts BM_NotAuthorized.
+		// finishFreeMembershipClaim is routed to AdminStats and checks the paymaster.
+		const finishIface = new ethers.Interface(['function finishFreeMembershipClaim(address user)'])
+		const finishData = finishIface.encodeFunctionData('finishFreeMembershipClaim', [
+			ethers.getAddress(stage.recipientEOA),
+		])
 		const mintTx = await relayUserCardCallViaEntryPoint({
 			SC,
 			chain,
 			cardAddress,
-			cardCallData: preparedData,
+			cardCallData: finishData,
 			logTag: 'claimFreeMembership:mint',
 		})
 		const mintReceipt = await mintTx.wait()
