@@ -2976,7 +2976,7 @@ function nfcTopupExplicitMembershipFeeRequested(
 ): boolean {
 	if (membershipTierIndex == null || String(membershipTierIndex).trim() === '') return false
 	const fee = parseOptionalUint256String(membershipFeeFiat6)
-	return fee != null && fee > 0n
+	return fee != null && fee >= 0n
 }
 
 export const nfcTopupPreparePayload = async (params: {
@@ -3000,7 +3000,17 @@ export const nfcTopupPreparePayload = async (params: {
 }): Promise<NfcTopupPrepareSuccess | { error: string }> => {
 	const { uid, wallet, amount, currency = 'CAD', cardAddress: clientCardAddress } = params
 	const amt = typeof amount === 'string' ? amount : String(amount ?? '')
-	if (!amt || Number(amt) <= 0) return { error: 'Invalid amount' }
+	const explicitFreeMembershipClaim =
+		nfcTopupExplicitMembershipFeeRequested(params.membershipTierIndex, params.membershipFeeFiat6) &&
+		parseOptionalUint256String(params.membershipFeeFiat6) === 0n
+	if (
+		!amt ||
+		!Number.isFinite(Number(amt)) ||
+		Number(amt) < 0 ||
+		(Number(amt) === 0 && !explicitFreeMembershipClaim)
+	) {
+		return { error: 'Invalid amount' }
+	}
 	if (!clientCardAddress || typeof clientCardAddress !== 'string' || !ethers.isAddress(clientCardAddress.trim())) {
 		return { error: 'Missing or invalid cardAddress' }
 	}
@@ -3050,7 +3060,9 @@ export const nfcTopupPreparePayload = async (params: {
 	const ONE_E6 = 1_000_000n
 	const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
 	const amountCurrency6 = ethers.parseUnits(amt, 6)
-	if (amountCurrency6 <= 0n) return { error: 'Invalid amount' }
+	if (amountCurrency6 < 0n || (amountCurrency6 === 0n && !explicitFreeMembershipClaim)) {
+		return { error: 'Invalid amount' }
+	}
 
 	const membershipFeeMode = await readCardMembershipFeeMode(cardAddr)
 	const hasValidMembership = membershipFeeMode
@@ -3079,9 +3091,6 @@ export const nfcTopupPreparePayload = async (params: {
 			return { error: 'membershipTierIndex out of range' }
 		}
 		const expectedFee = fees.feeE6[tierIndex] ?? 0n
-		if (expectedFee <= 0n) {
-			return { error: 'Selected membership tier has no membership fee configured' }
-		}
 		const clientFee = parseOptionalUint256String(params.membershipFeeFiat6)
 		if (clientFee != null && clientFee !== expectedFee) {
 			return { error: 'membershipFeeFiat6 does not match card membership fee for this tier' }
@@ -8454,7 +8463,16 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 			return { success: false, error: 'Invalid membership fee duration for selected tier' }
 		}
 	} else {
-		return { success: false, error: 'Selected membership tier has no membership fee configured' }
+		const freeKind = isValidMembershipFeeDurationKind(metaDurationKind)
+			? metaDurationKind
+			: isValidMembershipFeeDurationKind(onChainDurationKind)
+				? onChainDurationKind
+				: 0
+		if (!isValidMembershipFeeDurationKind(freeKind)) {
+			return { success: false, error: 'Selected membership tier has no membership fee configured' }
+		}
+		expectedFee = 0n
+		stageDurationKind = freeKind
 	}
 	const clientFee = parseOptionalUint256String(params.membershipFeeFiat6)
 	if (clientFee == null) {
@@ -15300,14 +15318,14 @@ export const createCardPreCheck = (body: {
 		if (!parsed) {
 			return {
 				success: false,
-				error: 'baseMembership must include membershipFeeE6 > 0 (or membershipFee > 0)',
+				error: 'baseMembership must include a membership fee (0 is a free claim) and membershipDurationKind 1–6',
 			}
 		}
 		const dk = Number(parsed.membershipDurationKind ?? 0)
 		if (dk < 1 || dk > 6) {
 			return {
 				success: false,
-				error: 'baseMembership.membershipDurationKind must be 1–6 when membershipFeeE6 > 0',
+				error: 'baseMembership.membershipDurationKind must be 1–6. A fee of 0 is a free claim.',
 			}
 		}
 		normalizedBaseMembership = {
@@ -16236,13 +16254,21 @@ export const createCardPoolPress = async () => {
 		const initialTierConfig = skipMembershipTiers
 			? (() => {
 					const base = parseBaseMembership(baseMembership)
-					if (!base || BigInt(metadataTierMembershipFeeE6(base)) <= 0n) {
-						throw new Error('Paid membership creation requires a base membership fee')
+					if (!base) {
+						throw new Error('Paid membership creation requires a base membership. A fee of 0 is a free claim and still needs a duration.')
 					}
 					const paidRows = [base, ...(stampedTiers ?? [])]
-					const fees = paidRows.map((row) => {
+					let previousFee = -1n
+					const fees = paidRows.map((row, index) => {
 						const fee = BigInt(metadataTierMembershipFeeE6(row))
-						if (fee <= 0n) throw new Error('Every paid membership tier requires a positive fee')
+						const kind = Number(row.membershipDurationKind ?? 0)
+						if (kind < 1 || kind > 6) {
+							throw new Error('Every membership tier requires membershipDurationKind 1–6. A fee of 0 is a free claim.')
+						}
+						if (fee < 0n || (index > 0 && fee <= previousFee)) {
+							throw new Error('Membership fees must be strictly increasing. Only the base membership may be 0.')
+						}
+						previousFee = fee
 						return fee
 					})
 					const durations = paidRows.map((row) => Number(row.membershipDurationKind ?? 0))

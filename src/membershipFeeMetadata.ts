@@ -91,6 +91,16 @@ export type MembershipFeeMetadataBase = {
 	imageFit?: 'width' | 'height'
 }
 
+export function isValidMembershipFeeDurationKind(kind: number): boolean {
+	return Number.isInteger(kind) && kind >= 1 && kind <= 6
+}
+
+/** Positive price, or an explicit 0 with a validity period (free membership claim). */
+export function membershipScheduleActive(feeE6: bigint, durationKind: number): boolean {
+	if (feeE6 > 0n) return true
+	return feeE6 === 0n && isValidMembershipFeeDurationKind(durationKind)
+}
+
 export function readTierQualificationMode(metadata: Record<string, unknown> | null | undefined): TierQualificationMode | null {
 	if (!metadata) return null
 	return normalizeTierQualificationMode(metadata.tierQualificationMode)
@@ -102,12 +112,21 @@ export function validateTierQualificationModeShape(opts: {
 	baseMembership?: MembershipFeeMetadataBase | null
 }): string | null {
 	const tiers = opts.tiers ?? []
+	const scheduleActive = (row: {
+		membershipFeeE6?: string
+		membershipFee?: string | number
+		membershipDurationKind?: number
+	}) =>
+		membershipScheduleActive(
+			BigInt(metadataTierMembershipFeeE6(row)),
+			Number(row.membershipDurationKind ?? 0),
+		)
 	const hasFees =
-		(opts.baseMembership ? BigInt(metadataTierMembershipFeeE6(opts.baseMembership)) > 0n : false) ||
-		tiers.some((row) => BigInt(metadataTierMembershipFeeE6(row)) > 0n)
+		(opts.baseMembership ? scheduleActive(opts.baseMembership) : false) ||
+		tiers.some((row) => scheduleActive(row))
 	if (opts.mode === TIER_QUALIFICATION_MODE.directPurchase) {
 		if (!hasFees) return 'directPurchase cards require a membership fee schedule'
-		if (tiers.some((row) => BigInt(metadataTierMembershipFeeE6(row)) <= 0n)) {
+		if (tiers.some((row) => !scheduleActive(row))) {
 			return 'directPurchase cards cannot mix fee and threshold-only tiers'
 		}
 		return null
@@ -128,7 +147,14 @@ export function membershipFeeHumanToE6(raw: string | number | undefined | null):
 }
 
 export function metadataTierMembershipFeeE6(row: MembershipFeeMetadataTiers | MembershipFeeMetadataBase): string {
-	if (row.membershipFeeE6 && BigInt(row.membershipFeeE6) > 0n) return row.membershipFeeE6
+	if (row.membershipFeeE6 != null && String(row.membershipFeeE6).trim() !== '') {
+		try {
+			const n = BigInt(String(row.membershipFeeE6).replace(/,/g, '').trim() || '0')
+			if (n >= 0n) return n.toString()
+		} catch {
+			/* fall through to the human amount */
+		}
+	}
 	return membershipFeeHumanToE6(row.membershipFee)
 }
 
@@ -149,9 +175,12 @@ export function parseBaseMembership(
 		membershipFeeE6: o.membershipFeeE6 != null ? String(o.membershipFeeE6) : undefined,
 		membershipFee: o.membershipFee as string | number | undefined,
 	})
-	if (BigInt(feeE6) <= 0n) return null
 	const dkRaw = o.membershipDurationKind
 	const dk = dkRaw == null ? 0 : Number(dkRaw)
+	const fee = BigInt(feeE6)
+	if (fee < 0n) return null
+	// Fee 0 is a free claim only when a validity period is set. Otherwise this is not a membership.
+	if (fee === 0n && !isValidMembershipFeeDurationKind(Number.isFinite(dk) ? Math.trunc(dk) : 0)) return null
 	return {
 		membershipFeeE6: feeE6,
 		...(o.membershipFee != null && { membershipFee: o.membershipFee as string | number }),
@@ -173,7 +202,12 @@ export function tiersPayloadHaveMembershipFee(
 	tiers: MembershipFeeMetadataTiers[] | undefined | null,
 ): boolean {
 	if (!tiers?.length) return false
-	return tiers.some((t) => BigInt(metadataTierMembershipFeeE6(t)) > 0n)
+	return tiers.some((t) =>
+		membershipScheduleActive(
+			BigInt(metadataTierMembershipFeeE6(t)),
+			Number(t.membershipDurationKind ?? 0),
+		),
+	)
 }
 
 /** Build fee arrays indexed by on-chain tier index from metadata tiers payload (incl. synthesized base at 0). */
@@ -256,12 +290,16 @@ export async function readCardMembershipFeeModeFromMetadata(
 	cardAddrRaw: string,
 ): Promise<boolean | null> {
 	const fees = await readMembershipFeesFromCardMetadata(cardAddrRaw)
-	if (fees != null) return fees.feeE6.some((f) => f > 0n)
+	if (fees != null) {
+		return fees.feeE6.some(
+			(f, i) => f > 0n || isValidMembershipFeeDurationKind(fees.durationKind[i] ?? 0),
+		)
+	}
 	try {
 		const row = await getCardByAddress(cardAddrRaw.trim())
 		if (!row?.metadata) return null
 		const meta = row.metadata as Record<string, unknown>
-		if (BigInt(baseMembershipFeeE6(meta)) > 0n) return true
+		if (parseBaseMembership(meta.baseMembership)) return true
 		const tiers = extractMetadataTiers(meta)
 		if (tiers.length > 0) return false
 	} catch {
@@ -280,7 +318,7 @@ export function shouldSkipFactoryTiersForCreate(
 	metadata?: Record<string, unknown> | null,
 ): boolean {
 	if (tiersPayloadHaveMembershipFee(tiers ?? [])) return true
-	if (metadata && BigInt(baseMembershipFeeE6(metadata)) > 0n) return true
+	if (metadata && parseBaseMembership(metadata.baseMembership)) return true
 	return false
 }
 
@@ -295,34 +333,37 @@ export function validateMembershipFeePublishShape(opts: {
 	const base = opts.baseMembership ? parseBaseMembership(opts.baseMembership) : null
 	const higher = (opts.tiers ?? []).filter((t) => t != null && typeof t === 'object')
 	let prevFee = 0n
+	let hasPrev = false
 	if (base) {
 		const fee = BigInt(metadataTierMembershipFeeE6(base))
 		const dk = Number(base.membershipDurationKind ?? 0)
-		if (fee > 0n && (dk < 1 || dk > 6)) {
-			return 'baseMembership.membershipDurationKind must be 1–6 when membershipFeeE6 > 0'
+		if ((fee > 0n || membershipScheduleActive(fee, dk)) && (dk < 1 || dk > 6)) {
+			return 'baseMembership.membershipDurationKind must be 1–6 for a membership tier. A fee of 0 is a free claim.'
 		}
 		prevFee = fee
+		hasPrev = true
 	}
 	for (let i = 0; i < higher.length; i++) {
 		const fee = BigInt(metadataTierMembershipFeeE6(higher[i]!))
-		if (fee <= 0n) continue
 		const dk = Number(higher[i]!.membershipDurationKind ?? 0)
+		if (!membershipScheduleActive(fee, dk)) continue
 		if (dk < 1 || dk > 6) {
-			return `tiers[${i}].membershipDurationKind must be 1–6 when membershipFeeE6 > 0`
+			return `tiers[${i}].membershipDurationKind must be 1–6 for a membership tier. A fee of 0 is a free claim.`
 		}
-		if (prevFee > 0n && fee <= prevFee) {
+		if (hasPrev && fee <= prevFee) {
 			return base
 				? `tiers[${i}].membershipFeeE6 must be strictly greater than baseMembership and previous higher tier`
 				: `tiers[${i}].membershipFeeE6 must be strictly greater than previous fee tier`
 		}
 		prevFee = fee
+		hasPrev = true
 	}
 	return null
 }
 
 /**
  * Published membership-fee tiers may change fee + duration (future joins only).
- * Still reject: removing a published fee tier, or clearing fee to 0 after it was published.
+ * A fee of 0 keeps the tier as a free claim. Still reject removing a published tier.
  */
 export function membershipFeeLockViolation(
 	prevMetadata: Record<string, unknown> | null | undefined,
@@ -348,15 +389,17 @@ export function membershipFeeLockViolation(
 
 	for (const prev of prevRows) {
 		const prevFee = BigInt(metadataTierMembershipFeeE6(prev))
-		if (prevFee <= 0n) continue
+		const prevKind = Number(prev.membershipDurationKind ?? 0)
+		if (!membershipScheduleActive(prevFee, prevKind)) continue
 		const idx = metadataTierOnChainIndex(prev, 0)
 		const next = nextRows.find((r) => metadataTierOnChainIndex(r, -1) === idx)
 		if (!next) {
 			return `Cannot remove published membership fee tier at index ${idx}`
 		}
 		const nextFee = BigInt(metadataTierMembershipFeeE6(next))
-		if (nextFee <= 0n) {
-			return `Cannot clear membership fee for index ${idx} after first publish`
+		const nextKind = Number(next.membershipDurationKind ?? 0)
+		if (nextFee < 0n || !membershipScheduleActive(nextFee, nextKind)) {
+			return `Cannot remove published membership fee tier at index ${idx}. A fee of 0 keeps it as a free claim.`
 		}
 	}
 	return null
