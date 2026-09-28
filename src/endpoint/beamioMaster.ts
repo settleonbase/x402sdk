@@ -50,6 +50,7 @@ import {
 	getEoaUsdcStripeSessionStatus,
 	refreshEoaUsdcStripeSessionFromStripe,
 } from './eoaUsdcStripe'
+import { claimFreeMembershipProcess } from '../MemberCard'
 import { handleStripeBeamioWebhook } from './stripeBeamioHook'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, relocateBUnitsToSmartWalletPool, relocateBUnitsToSmartWalletProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, settlePoolIdleSummary, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, createInstitutionalAaForEoa, CreateInstitutionalAaHttpError, submitAAAccountCreationViaEntryPoint, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, aaMultisigOfflineSubmitPool, kickAaMultisigOfflineSubmitProcess, aaInstitutionalV2RelayPool, kickAaInstitutionalV2RelayProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY, USDC_BASE } from '../chainAddresses'
@@ -5045,6 +5046,15 @@ const routing = ( router: Router ) => {
 			executeForAdminProcess().catch((err: any) => {
 				logger(Colors.red('[executeForAdminProcess] unhandled error:'), err?.message ?? err)
 			})
+		})
+
+		router.post('/claimFreeMembership', async (req, res) => {
+			try {
+				const result = await claimFreeMembershipProcess(req.body ?? {})
+				res.json({ success: true, hash: result.hash })
+			} catch (e: any) {
+				res.status(400).json({ success: false, error: e?.message ?? 'Free membership claim failed' })
+			}
 		})
 
 		/** POST /api/nfcTopup - NFC 卡向 CCSA 充值：读取方 UI 用户用 profile 私钥签 ExecuteForAdmin，Master 调用 factory.executeForAdmin */

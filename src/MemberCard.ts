@@ -3104,27 +3104,25 @@ export const nfcTopupPreparePayload = async (params: {
 		if (amountCurrency6 < feeFiat6) {
 			return { error: 'Top-up amount must be at least the membership fee' }
 		}
-		if (amountCurrency6 !== feeFiat6) {
-			return {
-				error:
-					'Direct membership purchase must equal the selected membership fee. Use a separate top-up after membership is issued.',
-			}
-		}
 	}
 
 	/**
-	 * Direct membership purchase never becomes #0 program credit.  The card
-	 * consumes the staged fee and its zero-point gateway call issues only the
-	 * membership NFT.  Ordinary top-up cards retain their points quote path.
+	 * One payment issues membership and store credit together.
+	 * Program points come only from the amount above the membership fee.
+	 * A zero fee still stages membership; the whole payment is store credit.
 	 */
-	const pointsSourceFiat6 = membershipNeedsFee ? 0n : amountCurrency6
+	const pointsSourceFiat6 = membershipNeedsFee
+		? amountCurrency6 > feeFiat6
+			? amountCurrency6 - feeFiat6
+			: 0n
+		: amountCurrency6
 	if (pointsSourceFiat6 < 0n) {
 		return { error: 'Top-up amount must be at least the membership fee' }
 	}
 
 	// 优先使用“卡币种直算 points6”，避免 currency->USDC->points 的双重向下截断造成 49.999993 这类漏档误差
 	let points6: bigint | null = null
-	if (membershipNeedsFee) {
+	if (pointsSourceFiat6 === 0n) {
 		points6 = 0n
 	} else {
 	try {
@@ -8482,19 +8480,14 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 		return { success: false, error: 'membershipFeeFiat6 does not match card membership fee for this tier' }
 	}
 	const amountFiat6 = parseOptionalUint256String(params.amountFiat6)
-	if (amountFiat6 != null) {
-		if (amountFiat6 !== expectedFee) {
-			return {
-				success: false,
-				error:
-					'Direct membership purchase must equal the selected membership fee. Use a separate top-up after membership is issued.',
-			}
-		}
+	if (amountFiat6 != null && amountFiat6 < expectedFee) {
+		return { success: false, error: 'Top-up amount must be at least the membership fee' }
 	}
-	if (params.points6Mint !== 0n) {
+	const mintedTotal = unpackTopupMintAmount(params.points6Mint).totalPoints6
+	if (amountFiat6 != null && amountFiat6 === expectedFee && mintedTotal !== 0n) {
 		return {
 			success: false,
-			error: 'Direct membership purchase must not mint program points',
+			error: 'Payment equal to the membership fee must not mint program points',
 		}
 	}
 	return {
@@ -8506,9 +8499,234 @@ export async function nfcTopupPreCheckMembershipFeeFirstIssue(params: {
 			recipientEOA: membershipLookupUser,
 			tierIndex,
 			feePaid6: expectedFee,
-			pointsCredit6: params.points6Mint,
+			pointsCredit6: mintedTotal,
 			...(bootstrapOnChain ? { bootstrapOnChain: true, durationKind: stageDurationKind } : {}),
 		},
+	}
+}
+
+function buildFreeMembershipClaimMessage(params: {
+	cardAddress: string
+	tierIndex: number
+	wallet: string
+	deadline: number
+}): string {
+	return [
+		'Beamio free membership claim',
+		`card:${ethers.getAddress(params.cardAddress)}`,
+		`tier:${params.tierIndex}`,
+		'feeE6:0',
+		`wallet:${ethers.getAddress(params.wallet)}`,
+		`deadline:${params.deadline}`,
+	].join('\n')
+}
+
+export async function claimFreeMembershipPreCheck(body: {
+	cardAddress?: string
+	tierIndex?: number | string
+	wallet?: string
+	deadline?: number | string
+	signature?: string
+}): Promise<
+	| {
+			success: true
+			forward: {
+				cardAddress: string
+				preparedData: string
+				stage: { recipientEOA: string; tierIndex: number; feePaid6: string; pointsCredit6: string }
+				cardOwnerEOA: string
+				feeAmount: string
+			}
+	  }
+	| { success: false; error: string }
+> {
+	try {
+		const cardAddress = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : ''
+		const wallet = typeof body.wallet === 'string' ? body.wallet.trim() : ''
+		const signature = typeof body.signature === 'string' ? body.signature.trim() : ''
+		if (!ethers.isAddress(cardAddress) || !ethers.isAddress(wallet) || !signature) {
+			return { success: false, error: 'Missing membership claim fields.' }
+		}
+		const tierIndex = Number(body.tierIndex)
+		const deadline = Number(body.deadline)
+		if (!Number.isInteger(tierIndex) || tierIndex < 0) {
+			return { success: false, error: 'Invalid membership tier.' }
+		}
+		if (!Number.isFinite(deadline)) {
+			return { success: false, error: 'Invalid membership claim deadline.' }
+		}
+		const now = Math.floor(Date.now() / 1000)
+		if (deadline < now || deadline > now + 15 * 60) {
+			return { success: false, error: 'Membership claim signature expired.' }
+		}
+		const card = ethers.getAddress(cardAddress)
+		const eoa = ethers.getAddress(wallet)
+		const message = buildFreeMembershipClaimMessage({ cardAddress: card, tierIndex, wallet: eoa, deadline })
+		const recovered = ethers.verifyMessage(message, signature)
+		if (ethers.getAddress(recovered) !== eoa) {
+			return { success: false, error: 'Membership claim signature does not match this wallet.' }
+		}
+		if (await resolveCustomerHasValidMembership(card, eoa)) {
+			return { success: false, error: 'You already have a membership on this card.' }
+		}
+		const prepared = await nfcTopupPreparePayload({
+			wallet: eoa,
+			amount: '0',
+			cardAddress: card,
+			membershipTierIndex: tierIndex,
+			membershipFeeFiat6: '0',
+		})
+		if ('error' in prepared) {
+			return { success: false, error: prepared.error }
+		}
+		const feeCheck = await nfcTopupPreCheckMembershipFeeFirstIssue({
+			cardAddrRaw: card,
+			mintRecipientAddrRaw: eoa,
+			points6Mint: 0n,
+			membershipTierIndex: tierIndex,
+			membershipFeeFiat6: '0',
+			amountFiat6: '0',
+		})
+		if (!feeCheck.success) return { success: false, error: feeCheck.error }
+		const stage = feeCheck.stage
+		if (!stage || stage.feePaid6 !== 0n || stage.pointsCredit6 !== 0n || stage.bootstrapOnChain) {
+			return { success: false, error: 'This membership is not a free claim.' }
+		}
+		const bunit = await nfcTopupPreCheckBUnitFee(card, prepared.data)
+		if (!bunit.success || !bunit.cardOwnerEOA || bunit.feeAmount == null) {
+			return { success: false, error: bunit.error || 'Membership claim fee check failed.' }
+		}
+		return {
+			success: true,
+			forward: {
+				cardAddress: card,
+				preparedData: prepared.data,
+				stage: {
+					recipientEOA: stage.recipientEOA,
+					tierIndex: stage.tierIndex,
+					feePaid6: stage.feePaid6.toString(),
+					pointsCredit6: stage.pointsCredit6.toString(),
+				},
+				cardOwnerEOA: bunit.cardOwnerEOA,
+				feeAmount: bunit.feeAmount.toString(),
+			},
+		}
+	} catch (e: any) {
+		return { success: false, error: e?.message ?? 'Membership claim failed.' }
+	}
+}
+
+async function consumeFreeMembershipBUnitInBackground(params: {
+	cardAddress: string
+	cardOwnerEOA: string
+	feeAmount: bigint
+	baseHash: string
+	baseGas: bigint
+}): Promise<void> {
+	if (params.feeAmount <= 0n) return
+	const SC = await shiftSettleContractForWrite('claimFreeMembership:bunit')
+	try {
+		let payer = ethers.getAddress(params.cardOwnerEOA)
+		try {
+			const aaFac = await getCardAaFactoryAddress(params.cardAddress)
+			const picked = await pickBUnitFeeConsumerPreferEoaThenAa(payer, params.feeAmount, { aaFactoryAddress: aaFac })
+			if (picked.ok) payer = picked.consumer
+		} catch {
+			/* keep issuer EOA */
+		}
+		const writer = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
+			SC.walletConet,
+		)
+		const tx = await writer.consumeFromUser(
+			payer,
+			params.feeAmount,
+			params.baseHash,
+			params.baseGas,
+			2n,
+			{ gasLimit: 2_500_000 },
+		)
+		await tx.wait()
+	} catch (e: any) {
+		logger(Colors.yellow(`[claimFreeMembership] B-Unit consume failed: ${e?.message ?? e}`))
+	} finally {
+		unshiftSettleConet(SC)
+	}
+}
+
+export async function claimFreeMembershipProcess(body: {
+	cardAddress?: string
+	preparedData?: string
+	stage?: { recipientEOA?: string; tierIndex?: number; feePaid6?: string; pointsCredit6?: string }
+	cardOwnerEOA?: string
+	feeAmount?: string
+}): Promise<{ hash: string }> {
+	const cardAddress = typeof body.cardAddress === 'string' ? body.cardAddress : ''
+	const preparedData = typeof body.preparedData === 'string' ? body.preparedData : ''
+	const stage = body.stage
+	if (!ethers.isAddress(cardAddress) || !preparedData.startsWith('0x') || !stage?.recipientEOA) {
+		throw new Error('Invalid free membership claim.')
+	}
+	if (BigInt(stage.feePaid6 ?? '1') !== 0n || BigInt(stage.pointsCredit6 ?? '1') !== 0n) {
+		throw new Error('Free membership claim requires a zero fee.')
+	}
+	const SC = await shiftSettleContractForWrite('claimFreeMembership')
+	let released = false
+	const release = () => {
+		if (released) return
+		released = true
+		unshiftSettleConet(SC)
+	}
+	try {
+		const chain = await resolveUserCardChain(cardAddress)
+		await ensureAAForEOAOnCard(cardAddress, stage.recipientEOA, SC)
+		const stageIface = new ethers.Interface([
+			'function stageMembershipFeePurchase(address user, uint256 tierIndex, uint256 feePaid6, uint256 pointsCredit6)',
+		])
+		const stageData = stageIface.encodeFunctionData('stageMembershipFeePurchase', [
+			ethers.getAddress(stage.recipientEOA),
+			stage.tierIndex ?? 0,
+			0n,
+			0n,
+		])
+		const stageTx = await relayUserCardCallViaEntryPoint({
+			SC,
+			chain,
+			cardAddress,
+			cardCallData: stageData,
+			logTag: 'claimFreeMembership:stage',
+		})
+		const stageReceipt = await stageTx.wait()
+		const stageOk = checkBusinessRelayTxSuccessful(stageReceipt, { logTag: 'claimFreeMembership:stage' })
+		if (!stageOk.ok) throw new Error(stageOk.reason)
+		const mintTx = await relayUserCardCallViaEntryPoint({
+			SC,
+			chain,
+			cardAddress,
+			cardCallData: preparedData,
+			logTag: 'claimFreeMembership:mint',
+		})
+		const mintReceipt = await mintTx.wait()
+		const mintOk = checkBusinessRelayTxSuccessful(mintReceipt, { logTag: 'claimFreeMembership:mint' })
+		if (!mintOk.ok) throw new Error(mintOk.reason)
+		const hash = mintTx.hash
+		const owner = body.cardOwnerEOA
+		const fee = BigInt(body.feeAmount ?? '0')
+		const baseGas = mintReceipt?.gasUsed ?? 0n
+		release()
+		if (owner && ethers.isAddress(owner) && fee > 0n) {
+			void consumeFreeMembershipBUnitInBackground({
+				cardAddress,
+				cardOwnerEOA: owner,
+				feeAmount: fee,
+				baseHash: hash,
+				baseGas,
+			})
+		}
+		return { hash }
+	} finally {
+		release()
 	}
 }
 
