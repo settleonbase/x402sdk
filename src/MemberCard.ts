@@ -14534,7 +14534,7 @@ type ShareTokenBusinessProfile = {
 	country?: string
 	city?: string
 	province?: string
-	businessType?: 'solo' | 'chain' | 'ngo'
+	businessType?: 'solo' | 'chain' | 'ngo' | 'government' | 'other'
 }
 
 function sanitizeShareTokenBusinessProfile(raw: unknown): ShareTokenBusinessProfile | undefined {
@@ -14555,7 +14555,13 @@ function sanitizeShareTokenBusinessProfile(raw: unknown): ShareTokenBusinessProf
 	) {
 		out.channelKind = input.channelKind
 	}
-	if (input.businessType === 'solo' || input.businessType === 'chain' || input.businessType === 'ngo') {
+	if (
+		input.businessType === 'solo' ||
+		input.businessType === 'chain' ||
+		input.businessType === 'ngo' ||
+		input.businessType === 'government' ||
+		input.businessType === 'other'
+	) {
 		out.businessType = input.businessType
 	}
 	for (const key of ['category', 'storeName'] as const) {

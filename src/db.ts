@@ -6007,7 +6007,7 @@ export const registerCardToDb = async (params: {
 			country?: string
 			city?: string
 			province?: string
-			businessType?: 'solo' | 'chain' | 'ngo'
+			businessType?: 'solo' | 'chain' | 'ngo' | 'government' | 'other'
 		}
 	}
 	tiers?: Array<{
