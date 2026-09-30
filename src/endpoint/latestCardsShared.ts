@@ -50,6 +50,7 @@ export function filterLatestCardsByDiscoverMerchantPolicy(cards: BeamioLatestCar
  */
 export const DISCOVER_FEATURED_PINNED_CARD_ADDRESSES = [
 	'0x6e600DfaEa5eD006A97aF2AD080518c1d06C0A74',
+	'0xA87Ba4441Cf2E9DbBB1903C3aD1ED10a6f0dFEaF',
 ] as const
 
 export function orderLatestCardsWithDiscoverPins(cards: BeamioLatestCardItem[]): BeamioLatestCardItem[] {
