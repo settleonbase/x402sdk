@@ -1517,7 +1517,10 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	// portion for readable copy.
 	if (isDiscoverMerchant) {
 		const merchantImageDataUrl = meta.backgroundImage.trim()
-			? await fetchBannerFitHeightPngDataUrl(meta.backgroundImage, OG_WIDTH * imgPrep, OG_HEIGHT * imgPrep)
+			// This image is embedded into the final 1200×630 SVG. Upscaling it
+			// by the general raster prep factor makes the SVG unnecessarily huge
+			// and can exceed libvips' XML input limit for large merchant images.
+			? await fetchBannerFitHeightPngDataUrl(meta.backgroundImage, OG_WIDTH, OG_HEIGHT)
 			: null
 		const title = meta.title.trim() || meta.merchantName.trim() || 'Beamio'
 		const subtitle = meta.subtitle.trim()
