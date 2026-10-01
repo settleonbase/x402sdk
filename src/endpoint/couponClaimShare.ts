@@ -48,7 +48,7 @@ const OG_BANNER_HEADLINE_VISUAL_TOP_GAP = Math.round(OG_BANNER_HEADLINE_BOX_TOP_
 const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-export const OG_LAYOUT_REV = 30
+export const OG_LAYOUT_REV = 31
 /** Stable `v=` when crawlers hit a share URL that omitted cache-bust (forces Meta/WhatsApp re-key). */
 export function layoutAppDownloadCacheBust(): string {
 	return `l${OG_LAYOUT_REV}`
@@ -427,6 +427,53 @@ const readMetadataIconUrl = (meta: Record<string, unknown> | null): string => {
 		readString(imageObj?.url) ||
 		readString(meta.image)
 	)
+}
+
+const readTierBackgroundImage = (
+	tier: Record<string, unknown> | null,
+): string => {
+	if (!tier) return ''
+	const properties = asRecord(tier.properties)
+	const image = asRecord(tier.image) ?? asRecord(properties?.image)
+	return (
+		readString(tier.backgroundImage) ||
+		readString(tier.backgroundImageUrl) ||
+		readString(tier.imageUrl) ||
+		readString(tier.background) ||
+		readString(properties?.backgroundImage) ||
+		readString(properties?.backgroundImageUrl) ||
+		readString(properties?.imageUrl) ||
+		readString(properties?.background) ||
+		readString(image?.url) ||
+		readString(image?.uri) ||
+		readString(tier.image) ||
+		readString(properties?.image)
+	)
+}
+
+/**
+ * Discover merchant artwork follows the membership tier mapping:
+ * index 0 = baseMembership, index 1+ = tiers[index - 1].
+ *
+ * The merchant landing/OG URL has no selected higher-tier context, so the
+ * base membership artwork is preferred, then the first higher tier artwork.
+ * Generic shareTokenMetadata images are intentionally not fallbacks here:
+ * they are logos/merchant artwork, not tier backgrounds.
+ */
+const readDiscoverTierBackgroundImage = (
+	meta: Record<string, unknown> | null,
+): string => {
+	if (!meta) return ''
+	const baseMembership = asRecord(meta.baseMembership)
+	const baseImage = readTierBackgroundImage(baseMembership)
+	if (baseImage) return baseImage
+
+	const tiers = Array.isArray(meta.tiers) ? meta.tiers : []
+	for (const item of tiers) {
+		const image = readTierBackgroundImage(asRecord(item))
+		if (image) return image
+	}
+	return ''
 }
 
 const COUPON_BACKGROUND_IMAGE_KEYS = [
@@ -1295,14 +1342,7 @@ async function readCardDiscoverSharePresentation(cardNorm: string): Promise<{
 		readString(meta?.programDescription) ||
 		''
 	const subtitle = truncateText(rawDescription || `${title} on Beamio`, 120)
-	const backgroundImage =
-		readString(share?.merchantImage) ||
-		readString(share?.background) ||
-		readString(share?.backgroundImage) ||
-		readString(share?.backgroundImageUrl) ||
-		readString(meta?.programBackgroundImage) ||
-		readMetadataStringFromKeys(meta, COUPON_BACKGROUND_IMAGE_KEYS) ||
-		readMetadataStringFromKeys(share, COUPON_BACKGROUND_IMAGE_KEYS)
+	const backgroundImage = readDiscoverTierBackgroundImage(meta)
 	const iconUrl =
 		readString(share?.image) ||
 		readString(share?.icon) ||
