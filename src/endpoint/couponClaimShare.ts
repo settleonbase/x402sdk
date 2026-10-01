@@ -48,7 +48,7 @@ const OG_BANNER_HEADLINE_VISUAL_TOP_GAP = Math.round(OG_BANNER_HEADLINE_BOX_TOP_
 const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-export const OG_LAYOUT_REV = 29
+export const OG_LAYOUT_REV = 30
 /** Stable `v=` when crawlers hit a share URL that omitted cache-bust (forces Meta/WhatsApp re-key). */
 export function layoutAppDownloadCacheBust(): string {
 	return `l${OG_LAYOUT_REV}`
@@ -1512,6 +1512,58 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const punchBg = '#f9f9fe'
 	const isDiscoverMerchant =
 		meta.shareKind === 'discover_merchant' || meta.distributionKind === 'merchant'
+	// Merchant share previews are social cards, not coupon tickets. Keep the
+	// entire 1200×630 canvas as the merchant visual and reserve the lower
+	// portion for readable copy.
+	if (isDiscoverMerchant) {
+		const merchantImageDataUrl = meta.backgroundImage.trim()
+			? await fetchBannerFitHeightPngDataUrl(meta.backgroundImage, OG_WIDTH * imgPrep, OG_HEIGHT * imgPrep)
+			: null
+		const title = meta.title.trim() || meta.merchantName.trim() || 'Beamio'
+		const subtitle = meta.subtitle.trim()
+		const backgroundLayer = merchantImageDataUrl
+			? `<image href="${merchantImageDataUrl}" x="0" y="0" width="${OG_WIDTH}" height="${OG_HEIGHT}" preserveAspectRatio="xMidYMid slice" />`
+			: `<rect x="0" y="0" width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="${escapeXml(meta.backgroundColorHex)}" />`
+		const textLayers: OgTextLayer[] = [
+			{
+				text: title,
+				x: 72,
+				y: subtitle ? 540 : 570,
+				fontSize: 54,
+				fontWeight: 800,
+				color: '#ffffff',
+				align: 'left',
+				maxWidth: 1056,
+			},
+		]
+		if (subtitle) {
+			textLayers.push({
+				text: subtitle,
+				x: 72,
+				y: 592,
+				fontSize: 24,
+				fontWeight: 600,
+				color: 'rgba(255,255,255,0.92)',
+				align: 'left',
+				maxWidth: 1056,
+			})
+		}
+		return {
+			svg: `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${OG_WIDTH}" height="${OG_HEIGHT}" viewBox="0 0 ${OG_WIDTH} ${OG_HEIGHT}">
+  <defs>
+    <linearGradient id="merchantShareShade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0" />
+      <stop offset="58%" stop-color="#000000" stop-opacity="0.08" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.82" />
+    </linearGradient>
+  </defs>
+  ${backgroundLayer}
+  <rect x="0" y="0" width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="url(#merchantShareShade)" />
+</svg>`,
+			textLayers,
+		}
+	}
 	const isVideoOgLayout = meta.catalogLayout === 'videoOg'
 	const isCatalogVideoOg = isVideoOgLayout && !isDiscoverMerchant
 	const isMerchantVideoOg = isVideoOgLayout && isDiscoverMerchant

@@ -14747,6 +14747,7 @@ export type CreateCardPreChecked = {
 	baseMembership?: {
 		membershipFeeE6: string
 		membershipFee?: string | number
+		name?: string
 		membershipDurationKind?: number
 		image?: string
 		imageFit?: 'width' | 'height'
@@ -15557,8 +15558,11 @@ export const createCardPreCheck = (body: {
 			membershipFeeE6: metadataTierMembershipFeeE6(parsed),
 			membershipDurationKind: Math.trunc(dk),
 			...(parsed.membershipFee != null && { membershipFee: parsed.membershipFee }),
+			...(parsed.name ? { name: parsed.name } : {}),
+			...(parsed.backgroundColor ? { backgroundColor: parsed.backgroundColor } : {}),
 			...(parsed.image ? { image: parsed.image } : {}),
 			...(parsed.imageFit ? { imageFit: parsed.imageFit } : {}),
+			...(parsed.logoDisplayScale ? { logoDisplayScale: parsed.logoDisplayScale } : {}),
 		}
 	}
 

@@ -86,9 +86,12 @@ export type MembershipFeeMetadataBase = {
 	membershipFeeE6?: string
 	membershipFee?: string | number
 	membershipDurationKind?: number
+	name?: string
 	/** Base-tier visual chrome when the canonical tier is not in `tiers[]`. */
 	image?: string
 	imageFit?: 'width' | 'height'
+	backgroundColor?: string
+	logoDisplayScale?: '2x' | '4x' | '6x' | '8x' | 'hidden'
 }
 
 export function isValidMembershipFeeDurationKind(kind: number): boolean {
@@ -185,8 +188,19 @@ export function parseBaseMembership(
 		membershipFeeE6: feeE6,
 		...(o.membershipFee != null && { membershipFee: o.membershipFee as string | number }),
 		membershipDurationKind: Number.isFinite(dk) ? Math.trunc(dk) : 0,
+		...(typeof o.name === 'string' && o.name.trim() ? { name: o.name.trim() } : {}),
+		...(typeof o.backgroundColor === 'string' && o.backgroundColor.trim()
+			? { backgroundColor: o.backgroundColor.trim() }
+			: {}),
 		...(typeof o.image === 'string' && o.image.trim() ? { image: o.image } : {}),
 		...(o.imageFit === 'width' || o.imageFit === 'height' ? { imageFit: o.imageFit } : {}),
+		...(o.logoDisplayScale === '2x' ||
+		o.logoDisplayScale === '4x' ||
+		o.logoDisplayScale === '6x' ||
+		o.logoDisplayScale === '8x' ||
+		o.logoDisplayScale === 'hidden'
+			? { logoDisplayScale: o.logoDisplayScale }
+			: {}),
 	}
 }
 
