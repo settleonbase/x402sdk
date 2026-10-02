@@ -1,6 +1,7 @@
 import type { Request, Response, Router } from 'express'
 import { Readable } from 'stream'
 import Colors from 'colors/safe'
+import sharp from 'sharp'
 import { logger } from '../logger'
 
 /** Default program-card (#0) fragment — must return image/* for explorers. */
@@ -92,12 +93,105 @@ const UPSTREAM_PASS_HEADERS = [
 	'last-modified',
 ] as const
 
+/** Optional `w` query: resize to this width (px) and re-encode as WebP. */
+const RESIZE_MIN_WIDTH = 64
+const RESIZE_MAX_WIDTH = 1600
+const RESIZE_MAX_SOURCE_BYTES = 12 * 1024 * 1024
+const RESIZE_CACHE_MAX_ENTRIES = 48
+
+type ResizedEntry = { body: Buffer; contentType: string }
+/** Fragment content is addressed by hash, so resized output is immutable. LRU by insertion order. */
+const resizedCache = new Map<string, ResizedEntry>()
+const resizeInFlight = new Map<string, Promise<ResizedEntry | null>>()
+
+function parseResizeWidth(raw: unknown): number | null {
+	if (typeof raw !== 'string' || !raw.trim()) return null
+	const n = Math.floor(Number(raw))
+	if (!Number.isFinite(n)) return null
+	return Math.min(RESIZE_MAX_WIDTH, Math.max(RESIZE_MIN_WIDTH, n))
+}
+
+async function buildResizedFragment(hash: string, width: number, t: string): Promise<ResizedEntry | null> {
+	const upstream = new URL(`${ipfsFragmentOrigin()}/api/getFragment`)
+	upstream.searchParams.set('hash', hash)
+	if (t) upstream.searchParams.set('t', t)
+	const upstreamRes = await fetch(upstream.toString(), {
+		headers: { 'User-Agent': 'Beamio/1.0 (https://beamio.app)' },
+		redirect: 'follow',
+	})
+	if (!upstreamRes.ok) return null
+	const type = (upstreamRes.headers.get('content-type') || '').toLowerCase()
+	if (!type.startsWith('image/') || type.includes('svg') || type.includes('gif')) return null
+	const declared = Number(upstreamRes.headers.get('content-length') || 0)
+	if (declared > RESIZE_MAX_SOURCE_BYTES) return null
+	const source = Buffer.from(await upstreamRes.arrayBuffer())
+	if (source.length > RESIZE_MAX_SOURCE_BYTES) return null
+	const body = await sharp(source)
+		.rotate()
+		.resize({ width, withoutEnlargement: true })
+		.webp({ quality: 82, effort: 4 })
+		.toBuffer()
+	// A resized copy that is not smaller than the source is not an optimisation.
+	if (body.length >= source.length) return null
+	return { body, contentType: 'image/webp' }
+}
+
+async function resizedFragment(hash: string, width: number, t: string): Promise<ResizedEntry | null> {
+	const key = `${hash}:${width}`
+	const hit = resizedCache.get(key)
+	if (hit) {
+		resizedCache.delete(key)
+		resizedCache.set(key, hit)
+		return hit
+	}
+	let pending = resizeInFlight.get(key)
+	if (!pending) {
+		pending = buildResizedFragment(hash, width, t)
+			.then((entry) => {
+				if (entry) {
+					resizedCache.set(key, entry)
+					while (resizedCache.size > RESIZE_CACHE_MAX_ENTRIES) {
+						const oldest = resizedCache.keys().next().value
+						if (oldest === undefined) break
+						resizedCache.delete(oldest)
+					}
+				}
+				return entry
+			})
+			.finally(() => {
+				resizeInFlight.delete(key)
+			})
+		resizeInFlight.set(key, pending)
+	}
+	return pending
+}
+
 async function proxyFragmentToResponse(req: Request, res: Response): Promise<void> {
 	const hashRaw = typeof req.query.hash === 'string' ? req.query.hash.trim() : ''
 	const hash = normalizeFragmentHash(hashRaw)
 	if (!hash || !FRAGMENT_HASH_RE.test(hash)) {
 		res.status(400).json({ error: 'Invalid or missing hash' })
 		return
+	}
+
+	const resizeWidth = parseResizeWidth(req.query.w)
+	if (resizeWidth !== null && !req.headers.range) {
+		const tParam = typeof req.query.t === 'string' ? req.query.t.trim() : ''
+		try {
+			const entry = await resizedFragment(hash, resizeWidth, tParam)
+			if (entry) {
+				res.status(200)
+				res.setHeader('Content-Type', entry.contentType)
+				res.setHeader('Content-Length', String(entry.body.length))
+				res.setHeader('Cache-Control', 'public, max-age=86400, immutable')
+				res.setHeader('Access-Control-Allow-Origin', '*')
+				res.end(entry.body)
+				return
+			}
+		} catch (e: unknown) {
+			logger(Colors.yellow('[fragment proxy] resize failed, serving original'), e instanceof Error ? e.message : e)
+		}
+		// Resize unavailable (not an image / not smaller / error): fall through to the original bytes.
 	}
 
 	const upstream = new URL(`${ipfsFragmentOrigin()}/api/getFragment`)
