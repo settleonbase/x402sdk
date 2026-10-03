@@ -8290,11 +8290,13 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	/**
 	 * GET /api/rewardPtUsdcMerchants
 	 * Discover-visible merchants with Reward PT → USDC convert on
-	 * (`convertReward13ToUsdcRatioE6` > 0) and Top-up or Charge actor
-	 * Reward PT already on (`topupActorRewardRatioE6` or `chargeRewardRatioE6` > 0).
+	 * (`convertReward13ToUsdcRatioE6` > 0) and Reward PT already awarded on
+	 * Top-up/Charge for the actor (`topupActorRewardRatioE6` /
+	 * `chargeRewardRatioE6`) or Referrer (`referrerTopupAmountRatioE6` /
+	 * `referrerChargeAmountRatioE6`).
 	 */
 	router.get('/rewardPtUsdcMerchants', async (_req, res) => {
-		const cacheKey = 'ratios-v3'
+		const cacheKey = 'ratios-v4'
 		const cached = rewardPtUsdcMerchantsCache.get(cacheKey)
 		if (cached && Date.now() < cached.expiry) {
 			return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body)
