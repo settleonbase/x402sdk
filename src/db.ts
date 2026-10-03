@@ -6891,6 +6891,63 @@ export const listRecentBeamioIssuedCouponSeries = async (
 	}
 }
 
+/**
+ * Newest issued-coupon series whose metadata says socialExchange.kind is usdc.
+ * JS must still confirm with readSocialExchangeFromMetadata (enabled, points, usdcReward6).
+ * Throws on DB failure so a caller can treat [] as trusted-empty only after a successful query.
+ */
+export const listRewardPtUsdcExchangeSeries = async (
+	scanLimit = 8000
+): Promise<Array<{
+	cardAddress: string
+	tokenId: string
+	sharedMetadataHash: string
+	ipfsCid: string
+	cardOwner: string
+	metadata: Record<string, unknown> | null
+	createdAt: string
+}>> => {
+	const lim = Number.isFinite(scanLimit) ? Math.floor(Number(scanLimit)) : 8000
+	const cap = Math.min(Math.max(lim, 1), 8000)
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await db.query(BEAMIO_NFT_SERIES_TABLE)
+		const { rows } = await db.query(
+			`
+			SELECT card_address, token_id, shared_metadata_hash, ipfs_cid, card_owner, metadata_json, created_at
+			FROM beamio_nft_series
+			WHERE metadata_json IS NOT NULL
+			AND ${COUPON_ISSUED_SERIES_METADATA_WHERE}
+			AND token_id ~ '^[0-9]+$'
+			AND LENGTH(token_id) <= 40
+			AND (token_id::bigint >= $2::bigint)
+			AND (
+				lower(btrim(coalesce(metadata_json #>> '{socialExchange,kind}', ''))) = 'usdc'
+				OR lower(btrim(coalesce(metadata_json #>> '{beamioCoupon,socialExchange,kind}', ''))) = 'usdc'
+				OR lower(btrim(coalesce(metadata_json #>> '{properties,beamioCoupon,socialExchange,kind}', ''))) = 'usdc'
+			)
+			ORDER BY created_at DESC NULLS LAST
+			LIMIT $1
+			`,
+			[cap, ISSUED_NFT_START_ID_SERIES_FILTER]
+		)
+		return filterClientCouponSeriesRows(
+			rows.map((r: any) => ({
+				cardAddress: r.card_address,
+				tokenId: r.token_id,
+				sharedMetadataHash: r.shared_metadata_hash,
+				ipfsCid: r.ipfs_cid,
+				cardOwner: r.card_owner,
+				metadata: r.metadata_json,
+				createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+			}))
+		)
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** 指定卡下登记的 Program 优惠券 issued 系列（与 listRecentBeamioIssuedCouponSeries 同 coupon 语义），按 created_at 倒序；供链上 `isIssuedNftValid` 过滤前取候选集。 */
 export const listCouponIssuedNftSeriesForCardDescending = async (
 	cardAddress: string,
