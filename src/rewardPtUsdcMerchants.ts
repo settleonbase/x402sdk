@@ -1,7 +1,9 @@
 /**
- * Merchants whose Reward PT → USDC convert switch is on.
- * The flag is the card's CoNET view `convertReward13ToUsdcRatioE6`, not coupon metadata.
- * Top-up and Charge Reward PT ratios are reported, and they do not decide inclusion.
+ * Discover-visible merchants that both exchange Reward PT for USDC and already
+ * award Reward PT on Top-up or Charge.
+ * Chain views on the card: `convertReward13ToUsdcRatioE6` > 0, and
+ * `topupActorRewardRatioE6` > 0 or `chargeRewardRatioE6` > 0.
+ * Referrer-only ratios, `getRewardRule(2)`, and coupon metadata do not qualify a card.
  */
 import { ethers } from 'ethers'
 import { CONET_MULTICALL3 } from './chainAddresses'
@@ -73,6 +75,7 @@ async function readRatios(
 			const charge = decodeRatio(raw[i * 3 + 1].success, raw[i * 3 + 1].returnData)
 			const convert = decodeRatio(raw[i * 3 + 2].success, raw[i * 3 + 2].returnData)
 			if (convert == null || convert <= 0n) continue
+			if ((topup ?? 0n) <= 0n && (charge ?? 0n) <= 0n) continue
 			out.push({
 				cardAddress: slice[i].cardAddress,
 				cardOwner: slice[i].cardOwner,
@@ -85,7 +88,7 @@ async function readRatios(
 	return out
 }
 
-/** Discover-visible cards with Reward PT → USDC convert on. */
+/** Discover-visible cards with USDC convert on and Top-up or Charge Reward PT on. */
 export async function listRewardPtUsdcMerchants(): Promise<RewardPtUsdcMerchantRow[]> {
 	const rows = await listBeamioCardsCreatedSince(DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_ISO, 2000)
 	const cards: Array<{ cardAddress: string; cardOwner: string }> = []
