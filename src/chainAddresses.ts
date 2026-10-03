@@ -9,6 +9,9 @@ export const BASE_MAINNET_CHAIN_ID = 8453
 /** CoNET PoS HTTP RPC；与 deployments/conet-addresses.json `rpcUrl` 同步 */
 export const CONET_RPC_URL = 'https://publicrpc.conet.network'
 
+/** CoNET Multicall3. One `aggregate3` eth_call batches card views. */
+export const CONET_MULTICALL3 = '0x4e73d76E7fC6b6Aa471dca7238107246BF4c8145'
+
 /**
  * BeamioFactoryPaymasterV07（Nick CREATE2 跨链同址 Base + CoNET）。
  * 与 deployments/beamioAAFactory-create2-meta.json、`UserCardFactory._aaFactory()` 同步。

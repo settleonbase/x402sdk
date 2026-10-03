@@ -15,7 +15,7 @@ import { ethers } from "ethers"
 import { listReferralRegistryClaimsByParent, listReferralRegistryTreeByAccount, getReferralRegistryTreeSync, listReferralMerchantCandidates } from '../db'
 import { getMerchantCardStripeStatusFromDb } from '../db'
 import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
-import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listRewardPtUsdcExchangeSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getBeamioCardRowForMetadataSync, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getNfcCardPosAdminGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listPosTerminalCardBindingsForWallet, setActivePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
+import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDistinctBeamioCardOwnerAddressesLower, _searchExactByAddress, FollowerStatus, getMyFollowStatus, getOwnerNftSeries, listRecentBeamioIssuedCouponSeries, listCouponIssuedNftSeriesForCardDescending, listProductionIssuedNftSeriesForCardDescending, getSeriesByCardAndTokenId, getMintMetadataForOwner, getNfcCardByUid, getNfcRecipientAddressByUid, getNfcRecipientAddressByTagId, getCardByAddress, getBeamioCardRowForMetadataSync, getNftTierMetadataByCardAndToken, getNftTierMetadataByOwnerAndToken, insertAiLearningFeedback, getAiLearningFeedback, listLinkedNfcCardsByOwnerEoa, applyNfcCardLinkStateChange, getNfcCardSignedTxGateByTagId, getNfcCardPosAdminGateByTagId, getPosTerminalCardAddressForWallet, getPosTerminalCardBindingRow, deletePosTerminalCardBinding, listPosTerminalCardBindingsForWallet, setActivePosTerminalCardBinding, listMerchantCardAddressesForOwnerNewestFirst, assertPosEoaAvailableForCardBinding, listCardMemberTopupEvents, listDistinctCardMemberTopupMembers, listCardMemberDirectory, getCardTopupRollup, isOnchainEmptyResult, listNfcBeamioUserCardHoldingsByTagId, upsertNfcBeamioUserCardHoldingsFromTrustedCards} from '../db'
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { claimFreeMembershipPreCheck } from '../MemberCard'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
@@ -109,7 +109,7 @@ import {
 } from '../apiExcludedUserCards'
 import { excludeUserCardPreCheck, warmDynamicApiExcludedUserCardsFromDb } from '../excludeUserCardApi'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
-import { readSocialExchangeFromMetadata } from '../socialExchangeMetadata'
+import { listRewardPtUsdcMerchants } from '../rewardPtUsdcMerchants'
 import { onboardingBusinessLookupHandler, onboardingBusinessCardSetupHandler } from './onboardingBusinessLookup'
 import {
 	invalidateIssuedCouponSeriesQueryCachesForCard,
@@ -1752,34 +1752,6 @@ const ownerNftSeriesCache = new Map<string, { body: string; expiry: number }>()
 const recentIssuedCouponSeriesCache = new Map<string, { body: string; expiry: number }>()
 const rewardPtUsdcMerchantsCache = new Map<string, { body: string; expiry: number }>()
 
-function rewardPtUsdcOfferTitle(meta: unknown): string {
-	if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return ''
-	const rec = meta as Record<string, unknown>
-	const props = rec.properties
-	const beamioCoupon = rec.beamioCoupon
-	const nested =
-		props && typeof props === 'object' && !Array.isArray(props)
-			? (props as Record<string, unknown>).beamioCoupon
-			: null
-	const candidates = [
-		rec.name,
-		rec.title,
-		beamioCoupon && typeof beamioCoupon === 'object' && !Array.isArray(beamioCoupon)
-			? (beamioCoupon as Record<string, unknown>).name
-			: '',
-		beamioCoupon && typeof beamioCoupon === 'object' && !Array.isArray(beamioCoupon)
-			? (beamioCoupon as Record<string, unknown>).title
-			: '',
-		nested && typeof nested === 'object' && !Array.isArray(nested)
-			? (nested as Record<string, unknown>).name
-			: '',
-	]
-	for (const candidate of candidates) {
-		const title = String(candidate ?? '').trim()
-		if (title) return title.slice(0, 120)
-	}
-	return ''
-}
 const cardActiveIssuedCouponSeriesCache = new Map<string, { body: string; expiry: number }>()
 const cardActiveIssuedProductionSeriesCache = new Map<string, { body: string; expiry: number }>()
 const seriesSharedMetadataCache = new Map<string, { body: string; expiry: number }>()
@@ -8315,50 +8287,20 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 	})
 
-	/** GET /api/rewardPtUsdcMerchants — Discover-visible merchants with a listed coupon that exchanges Reward PT for USDC. */
+	/**
+	 * GET /api/rewardPtUsdcMerchants
+	 * Discover-visible merchants with Top-up or Charge Reward PT on,
+	 * and Reward PT → USDC convert on (`convertReward13ToUsdcRatioE6` > 0).
+	 */
 	router.get('/rewardPtUsdcMerchants', async (_req, res) => {
-		const cacheKey = 'all'
+		const cacheKey = 'ratios-v2'
 		const cached = rewardPtUsdcMerchantsCache.get(cacheKey)
 		if (cached && Date.now() < cached.expiry) {
 			return res.status(200).setHeader('Content-Type', 'application/json').send(cached.body)
 		}
 		try {
-			const rawItems = await listRewardPtUsdcExchangeSeries(8000)
-			const afterDiscover = await filterCouponSeriesRowsByDiscoverMerchantPolicy(rawItems)
-			const afterListed = filterListedClientCouponSeriesRows(afterDiscover)
-			const byCard = new Map<string, {
-				cardAddress: string
-				cardOwner: string
-				offers: Array<{ tokenId: string; title: string; pointsCost: number; usdcReward6: string }>
-			}>()
-			for (const row of afterListed) {
-				const exchange = readSocialExchangeFromMetadata(row.metadata)
-				if (!exchange || exchange.kind !== 'usdc' || exchange.usdcReward6 <= 0n) continue
-				let cardAddress = String(row.cardAddress ?? '').trim()
-				try {
-					cardAddress = ethers.getAddress(cardAddress)
-				} catch {
-					continue
-				}
-				const key = cardAddress.toLowerCase()
-				let bucket = byCard.get(key)
-				if (!bucket) {
-					bucket = {
-						cardAddress,
-						cardOwner: String(row.cardOwner ?? ''),
-						offers: [],
-					}
-					byCard.set(key, bucket)
-				}
-				if (bucket.offers.length >= 8) continue
-				bucket.offers.push({
-					tokenId: String(row.tokenId),
-					title: rewardPtUsdcOfferTitle(row.metadata),
-					pointsCost: exchange.pointsCost,
-					usdcReward6: exchange.usdcReward6.toString(),
-				})
-			}
-			const body = JSON.stringify({ items: [...byCard.values()] })
+			const items = await listRewardPtUsdcMerchants()
+			const body = JSON.stringify({ items })
 			rewardPtUsdcMerchantsCache.set(cacheKey, { body, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 			return res.status(200).setHeader('Content-Type', 'application/json').send(body)
 		} catch (err: any) {

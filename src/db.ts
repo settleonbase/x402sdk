@@ -6570,6 +6570,35 @@ export const getLatestCards = async (limit = 20): Promise<BeamioLatestCardItem[]
 	}
 }
 
+/** Card rows created at or after `sinceIso`, newest first. Throws on DB failure. */
+export const listBeamioCardsCreatedSince = async (
+	sinceIso: string,
+	limit = 2000,
+): Promise<Array<{ cardAddress: string; cardOwner: string; createdAt: string }>> => {
+	const cap = Math.min(Math.max(Math.floor(limit) || 1, 1), 2000)
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const { rows } = await db.query(
+			`
+			SELECT card_address, card_owner, created_at
+			FROM beamio_cards
+			WHERE created_at >= $1::timestamptz
+			ORDER BY created_at DESC
+			LIMIT $2
+			`,
+			[sinceIso, cap],
+		)
+		return (rows as Array<{ card_address: string; card_owner: string; created_at: Date | string }>).map((row) => ({
+			cardAddress: row.card_address,
+			cardOwner: row.card_owner,
+			createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+		}))
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /**
  * 从 beamio_cards 拉取「含 shareTokenMetadata.categories 非空」的最近若干张卡（按 created_at 降序）。
  * createCard → registerCardToDb 已将 categories 写入 metadata_json，用于分类登记与聚合。
