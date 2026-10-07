@@ -35,6 +35,7 @@ export function isErc6492SignatureHex(hex: string): boolean {
 /**
  * Unwrap `abi.encode(address factory, bytes factoryCalldata, bytes signature) || magic`.
  * Returns inner signature hex, or null if not ERC-6492 / malformed.
+ * Coinbase Smart Wallet often uses factory=address(0) + empty calldata (leading 0x0000…).
  */
 export function unwrapErc6492Signature(hex: string): string | null {
 	const body = hex.replace(/^0x/i, '').toLowerCase()
@@ -55,23 +56,44 @@ export function unwrapErc6492Signature(hex: string): string | null {
 	return `0x${inner}`
 }
 
-function normalizeEcdsaBody(hex: string): string | null {
+/**
+ * ECDSA candidates from an ERC-6492 wrap (standard unwrap + trailing r||s||v before magic).
+ * Coinbase sometimes nests a 65-byte ECDSA inside a longer inner blob.
+ */
+export function ecdsaCandidatesFromErc6492(hex: string): string[] {
+	const body = hex.replace(/^0x/i, '').toLowerCase()
+	if (!body.endsWith(ERC6492_MAGIC_SUFFIX) || body.length < 192 + 64) return []
+	const out: string[] = []
+	const seen = new Set<string>()
+	const push = (c: string | null) => {
+		if (!c) return
+		const n = c.toLowerCase()
+		if (seen.has(n)) return
+		seen.add(n)
+		out.push(c.startsWith('0x') ? c : `0x${c}`)
+	}
+	push(unwrapErc6492Signature(hex))
+	const encoded = body.slice(0, -64)
+	if (encoded.length >= 130) {
+		push(`0x${encoded.slice(-130)}`)
+		push(`0x${encoded.slice(-128)}`)
+	}
+	const inner = unwrapErc6492Signature(hex)
+	if (inner) {
+		const ib = inner.replace(/^0x/i, '')
+		if (ib.length > 130) {
+			push(`0x${ib.slice(-130)}`)
+			push(`0x${ib.slice(-128)}`)
+		}
+	}
+	return out
+}
+
+function normalizePlainEcdsaBody(hex: string): string | null {
 	let candidate = hex.trim()
 	if (!candidate) return null
 	if (!candidate.startsWith('0x') && !candidate.startsWith('0X')) candidate = `0x${candidate}`
 	if (!/^0x[0-9a-fA-F]+$/.test(candidate)) return null
-	/* Peel ERC-6492 once (nested wraps are not expected for USDC EIP-3009). */
-	if (isErc6492SignatureHex(candidate)) {
-		const inner = unwrapErc6492Signature(candidate)
-		if (!inner) return null
-		candidate = inner
-		/* Nested 6492 (rare) */
-		if (isErc6492SignatureHex(candidate)) {
-			const nested = unwrapErc6492Signature(candidate)
-			if (!nested) return null
-			candidate = nested
-		}
-	}
 	const body = candidate.slice(2)
 	let rHex: string
 	let sBig: bigint
@@ -105,6 +127,22 @@ function normalizeEcdsaBody(hex: string): string | null {
 	const sHex = padHex64(sBig.toString(16))
 	if (!sHex) return null
 	return `0x${rHex.toLowerCase()}${sHex}${vNum === 28 ? '1c' : '1b'}`
+}
+
+function normalizeEcdsaBody(hex: string): string | null {
+	let candidate = hex.trim()
+	if (!candidate) return null
+	if (!candidate.startsWith('0x') && !candidate.startsWith('0X')) candidate = `0x${candidate}`
+	if (!/^0x[0-9a-fA-F]+$/.test(candidate)) return null
+	/* Peel ERC-6492 (Coinbase Smart Wallet ≈1218 hex, often leading 0x0000…). */
+	if (isErc6492SignatureHex(candidate)) {
+		for (const c of ecdsaCandidatesFromErc6492(candidate)) {
+			const n = normalizePlainEcdsaBody(c)
+			if (n) return n
+		}
+		return null
+	}
+	return normalizePlainEcdsaBody(candidate)
 }
 
 /**
