@@ -1,106 +1,82 @@
 /**
- * Normalize wallet EIP-3009 / ECDSA signatures for Coinbase / WalletLink quirks:
- * - object wrappers ({ result }, { signature }, { r,s,v })
- * - Uint8Array / Buffer-like byte arrays
- * - missing 0x
- * - EIP-2098 compact (64 bytes)
- * - EIP-155 v with chainId (Base → 132+ hex: r||s||0x422d / 0x422e)
- * - high-s (ethers v6 verifyTypedData throws "non-canonical s")
- *
- * Returns 0x + 130 hex (r||s||v) with low-s and v ∈ {27,28}, or null.
+ * Normalize wallet EIP-3009 signatures for Base USDC `transferWithAuthorization`.
+ * Coinbase Smart Wallet often returns ERC-6492 wraps (≈600+ bytes, leading
+ * zero-padded factory address) — unwrap to the inner ECDSA before ecrecover.
  */
-const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n
+
+const SECP256K1_N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141')
 const SECP256K1_HALF_N = SECP256K1_N / 2n
 
+/** ERC-6492 magic suffix (32 bytes). */
+export const ERC6492_MAGIC_SUFFIX =
+	'6492649264926492649264926492649264926492649264926492649264926492'
+
 function padHex64(hexNo0x: string): string | null {
-	let h = hexNo0x.replace(/^0x/i, '').toLowerCase()
+	const h = hexNo0x.replace(/^0x/i, '').toLowerCase()
 	if (!/^[0-9a-f]+$/.test(h) || h.length > 64) return null
-	while (h.length < 64) h = '0' + h
-	return h
+	return h.padStart(64, '0')
 }
 
-function bytesToHex(bytes: ArrayLike<number>): string {
-	let out = '0x'
-	for (let i = 0; i < bytes.length; i++) {
-		out += (bytes[i]! & 0xff).toString(16).padStart(2, '0')
-	}
-	return out
-}
-
-/** Map wallet v (0/1, 27/28, or EIP-155) → 27 | 28. */
-function recoverV27(vNum: number): number | null {
-	if (!Number.isFinite(vNum) || vNum < 0) return null
-	const n = Math.trunc(vNum)
-	if (n === 0 || n === 1) return 27 + n
-	if (n === 27 || n === 28) return n
-	if (n >= 35) {
-		/* EIP-155: v = chainId * 2 + 35 + yParity */
-		return 27 + ((n - 35) % 2)
-	}
+function recoverV27(vRaw: number): number | null {
+	if (!Number.isFinite(vRaw) || vRaw < 0) return null
+	if (vRaw === 0 || vRaw === 27) return 27
+	if (vRaw === 1 || vRaw === 28) return 28
+	/* EIP-155: v = chainId*2 + 35 + yParity → yParity = (v - 35) % 2 */
+	if (vRaw >= 35) return (vRaw - 35) % 2 === 0 ? 27 : 28
 	return null
 }
 
-export function normalizeEip3009WalletSignature(raw: unknown): string | null {
-	let candidate: unknown = raw
+/** True when hex ends with ERC-6492 magic (Coinbase Smart Wallet wraps). */
+export function isErc6492SignatureHex(hex: string): boolean {
+	const body = hex.replace(/^0x/i, '').toLowerCase()
+	return body.length >= 192 + 64 && body.endsWith(ERC6492_MAGIC_SUFFIX)
+}
 
-	if (candidate instanceof Uint8Array) {
-		candidate = bytesToHex(candidate)
-	} else if (ArrayBuffer.isView(candidate) && (candidate as ArrayBufferView).byteLength > 0) {
-		const view = candidate as ArrayBufferView
-		candidate = bytesToHex(new Uint8Array(view.buffer, view.byteOffset, view.byteLength))
-	} else if (candidate instanceof ArrayBuffer) {
-		candidate = bytesToHex(new Uint8Array(candidate))
-	}
+/**
+ * Unwrap `abi.encode(address factory, bytes factoryCalldata, bytes signature) || magic`.
+ * Returns inner signature hex, or null if not ERC-6492 / malformed.
+ */
+export function unwrapErc6492Signature(hex: string): string | null {
+	const body = hex.replace(/^0x/i, '').toLowerCase()
+	if (!isErc6492SignatureHex(`0x${body}`)) return null
+	const encoded = body.slice(0, -64)
+	if (encoded.length < 192 || encoded.length % 2 !== 0) return null
+	const sigOffset = Number.parseInt(encoded.slice(128, 192), 16)
+	if (!Number.isFinite(sigOffset) || sigOffset < 96) return null
+	const sigOffsetHex = sigOffset * 2
+	if (sigOffsetHex + 64 > encoded.length) return null
+	const sigLen = Number.parseInt(encoded.slice(sigOffsetHex, sigOffsetHex + 64), 16)
+	if (!Number.isFinite(sigLen) || sigLen <= 0 || sigLen > 2048) return null
+	const sigStart = sigOffsetHex + 64
+	const sigEnd = sigStart + sigLen * 2
+	if (sigEnd > encoded.length) return null
+	const inner = encoded.slice(sigStart, sigEnd)
+	if (inner.length !== sigLen * 2 || !/^[0-9a-f]+$/.test(inner)) return null
+	return `0x${inner}`
+}
 
-	if (candidate && typeof candidate === 'object') {
-		const obj = candidate as Record<string, unknown>
-		if (typeof obj.result === 'string') candidate = obj.result
-		else if (typeof obj.signature === 'string') candidate = obj.signature
-		else if (typeof obj.data === 'string') candidate = obj.data
-		else if (
-			obj.type === 'Buffer' &&
-			Array.isArray(obj.data) &&
-			obj.data.every((x) => typeof x === 'number')
-		) {
-			candidate = bytesToHex(obj.data as number[])
-		} else if (Array.isArray(candidate) && typeof candidate[0] === 'string') {
-			candidate = candidate[0]
-		} else if (
-			Array.isArray(candidate) &&
-			candidate.length >= 65 &&
-			candidate.every((x) => typeof x === 'number')
-		) {
-			candidate = bytesToHex(candidate as number[])
-		} else if (
-			typeof obj.r === 'string' &&
-			typeof obj.s === 'string' &&
-			(obj.v !== undefined || obj.yParity !== undefined)
-		) {
-			const vr = padHex64(obj.r)
-			const vs = padHex64(obj.s)
-			if (!vr || !vs) return null
-			let vv = Number(obj.v !== undefined ? obj.v : Number(obj.yParity) + 27)
-			const recovered = recoverV27(vv)
-			if (recovered == null) return null
-			candidate = `0x${vr}${vs}${recovered === 28 ? '1c' : '1b'}`
-		} else {
-			return null
+function normalizeEcdsaBody(hex: string): string | null {
+	let candidate = hex.trim()
+	if (!candidate) return null
+	if (!candidate.startsWith('0x') && !candidate.startsWith('0X')) candidate = `0x${candidate}`
+	if (!/^0x[0-9a-fA-F]+$/.test(candidate)) return null
+	/* Peel ERC-6492 once (nested wraps are not expected for USDC EIP-3009). */
+	if (isErc6492SignatureHex(candidate)) {
+		const inner = unwrapErc6492Signature(candidate)
+		if (!inner) return null
+		candidate = inner
+		/* Nested 6492 (rare) */
+		if (isErc6492SignatureHex(candidate)) {
+			const nested = unwrapErc6492Signature(candidate)
+			if (!nested) return null
+			candidate = nested
 		}
 	}
-
-	if (typeof candidate !== 'string') return null
-	let hex = candidate.trim()
-	if (!hex) return null
-	if (!hex.startsWith('0x') && !hex.startsWith('0X')) hex = `0x${hex}`
-	if (!/^0x[0-9a-fA-F]+$/.test(hex)) return null
-	const body = hex.slice(2)
-
+	const body = candidate.slice(2)
 	let rHex: string
 	let sBig: bigint
 	let vNum: number
-
 	if (body.length === 128) {
-		/* EIP-2098 compact: r || yParityAndS */
 		rHex = body.slice(0, 64)
 		const yParityAndS = BigInt(`0x${body.slice(64, 128)}`)
 		const yParity = Number((yParityAndS >> 255n) & 1n)
@@ -111,25 +87,17 @@ export function normalizeEip3009WalletSignature(raw: unknown): string | null {
 		sBig = BigInt(`0x${body.slice(64, 128)}`)
 		vNum = parseInt(body.slice(128, 130), 16)
 	} else if (body.length >= 132 && body.length <= 194 && body.length % 2 === 0) {
-		/*
-		 * Coinbase / some WalletLink builds return EIP-155 v (Base chainId → 2+ hex digits),
-		 * so the total body is 132+ hex. Leading zeros in r are normal — not an empty sig.
-		 */
 		rHex = body.slice(0, 64)
 		sBig = BigInt(`0x${body.slice(64, 128)}`)
 		vNum = parseInt(body.slice(128), 16)
 	} else {
 		return null
 	}
-
 	const v27 = recoverV27(vNum)
 	if (v27 == null) return null
 	vNum = v27
-
 	if (sBig <= 0n || sBig >= SECP256K1_N) return null
-	/* Reject all-zero r (not a valid secp256k1 signature component). */
 	if (BigInt(`0x${rHex}`) === 0n) return null
-
 	if (sBig > SECP256K1_HALF_N) {
 		sBig = SECP256K1_N - sBig
 		vNum = vNum === 27 ? 28 : 27
@@ -138,3 +106,46 @@ export function normalizeEip3009WalletSignature(raw: unknown): string | null {
 	if (!sHex) return null
 	return `0x${rHex.toLowerCase()}${sHex}${vNum === 28 ? '1c' : '1b'}`
 }
+
+/**
+ * Accept hex string, {r,s,v}, or {signature}. Return canonical 65-byte hex
+ * `0x` + r(32) + s(32) + v(1b|1c), or null.
+ */
+export function normalizeEip3009WalletSignature(raw: unknown): string | null {
+	if (raw == null) return null
+	let candidate: unknown = raw
+	if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)) {
+		const o = candidate as Record<string, unknown>
+		if (typeof o.signature === 'string') candidate = o.signature
+		else if (typeof o.r === 'string' && typeof o.s === 'string') {
+			const r = padHex64(o.r)
+			const s = padHex64(o.s)
+			if (!r || !s) return null
+			let vNum: number
+			if (typeof o.v === 'number') vNum = o.v
+			else if (typeof o.v === 'string') vNum = parseInt(o.v.replace(/^0x/i, ''), 16)
+			else if (typeof o.yParity === 'number') vNum = 27 + (o.yParity & 1)
+			else if (typeof o.yParity === 'string') vNum = 27 + (parseInt(o.yParity, 10) & 1)
+			else return null
+			const v27 = recoverV27(vNum)
+			if (v27 == null) return null
+			let sBig = BigInt(`0x${s}`)
+			if (sBig <= 0n || sBig >= SECP256K1_N) return null
+			if (BigInt(`0x${r}`) === 0n) return null
+			let vOut = v27
+			if (sBig > SECP256K1_HALF_N) {
+				sBig = SECP256K1_N - sBig
+				vOut = vOut === 27 ? 28 : 27
+			}
+			const sNorm = padHex64(sBig.toString(16))
+			if (!sNorm) return null
+			return `0x${r}${sNorm}${vOut === 28 ? '1c' : '1b'}`
+		} else return null
+	}
+	if (typeof candidate !== 'string') return null
+	return normalizeEcdsaBody(candidate)
+}
+
+/** User-facing hint when wallet returned ERC-6492 / contract sig USDC cannot verify. */
+export const EIP3009_SMART_WALLET_SIG_HINT =
+	'This wallet returned a Smart Wallet signature. Gasless USDC receive needs an EOA. Open Coinbase → switch to your private key wallet, or send USDC directly to your Beamio address.'
