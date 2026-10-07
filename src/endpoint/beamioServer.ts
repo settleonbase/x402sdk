@@ -21,7 +21,7 @@ import { claimFreeMembershipPreCheck } from '../MemberCard'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckChargeBurnBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminBatchPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, quoteUsdcDepositForCardFiat6, nfcTopupPreparePayload, unpackTopupMintAmount, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, lookupOnChainMerchantCardRegistryIdentity, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET, USDC_BASE } from '../chainAddresses'
 import { lookupFuelPack, fuelPackFreeBUnits6, fuelPackUsdc6 } from '../fuelPackCatalog'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import {
@@ -7574,6 +7574,149 @@ const routing = ( router: Router ) => {
 		} catch (err: any) {
 			logger(Colors.red(`[nfcUsdcChargeRawSig] error: ${err?.message ?? err}`))
 			sessionUpdate({ state: 'error', error: err?.message ?? String(err) })
+			if (!res.headersSent) {
+				res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+			}
+		}
+	})
+
+	/**
+	 * Fund → Receive from a wallet: EIP-3009 TransferWithAuthorization → Base USDC
+	 * (to = Beamio EOA). Full Cluster precheck then postLocalhost Master.
+	 */
+	router.post('/receiveUsdc3009', async (req, res) => {
+		try {
+			const {
+				from,
+				to,
+				value,
+				validAfter,
+				validBefore,
+				nonce,
+				signature,
+				paymentRef,
+			} = (req.body ?? {}) as {
+				from?: string
+				to?: string
+				value?: string
+				validAfter?: string
+				validBefore?: string
+				nonce?: string
+				signature?: string
+				paymentRef?: string
+				token?: string
+			}
+			if (!from || !ethers.isAddress(from)) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid from' }).end()
+			}
+			if (!to || !ethers.isAddress(to)) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid to' }).end()
+			}
+			if (!value || !/^\d+$/.test(value) || BigInt(value) <= 0n) {
+				return res.status(400).json({ success: false, error: 'Missing or invalid value' }).end()
+			}
+			if (!nonce || !/^0x[0-9a-fA-F]{64}$/.test(nonce)) {
+				return res.status(400).json({
+					success: false,
+					error: 'Invalid nonce (expect 0x-prefixed 32-byte hex)',
+				}).end()
+			}
+			if (!signature || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+				return res.status(400).json({
+					success: false,
+					error: 'Invalid signature (expect 0x-prefixed 65-byte hex)',
+				}).end()
+			}
+			const fromNorm = ethers.getAddress(from)
+			const toNorm = ethers.getAddress(to)
+			const valueBig = BigInt(value)
+			const validAfterBig = BigInt(validAfter ?? '0')
+			const validBeforeBig = BigInt(validBefore ?? '0')
+			const nowSec = BigInt(Math.floor(Date.now() / 1000))
+			if (validBeforeBig <= nowSec) {
+				return res.status(400).json({
+					success: false,
+					error: `Authorization expired (validBefore=${validBeforeBig} <= now=${nowSec})`,
+				}).end()
+			}
+			if (validAfterBig > nowSec + 300n) {
+				return res.status(400).json({
+					success: false,
+					error: `Authorization not yet valid (validAfter=${validAfterBig} > now=${nowSec})`,
+				}).end()
+			}
+
+			const eip712Read = new ethers.Contract(
+				USDC_BASE,
+				['function name() view returns (string)', 'function version() view returns (string)'],
+				providerBase,
+			)
+			let domainName = 'USD Coin'
+			let domainVersion = '2'
+			try {
+				const n = await eip712Read.name() as string
+				if (typeof n === 'string' && n.trim()) domainName = n.trim()
+			} catch { /* fallback */ }
+			try {
+				const v = await eip712Read.version() as string
+				if (typeof v === 'string' && v.trim()) domainVersion = v.trim()
+			} catch { /* fallback */ }
+
+			const TRANSFER_WITH_AUTH_TYPES: Record<string, ethers.TypedDataField[]> = {
+				TransferWithAuthorization: [
+					{ name: 'from', type: 'address' },
+					{ name: 'to', type: 'address' },
+					{ name: 'value', type: 'uint256' },
+					{ name: 'validAfter', type: 'uint256' },
+					{ name: 'validBefore', type: 'uint256' },
+					{ name: 'nonce', type: 'bytes32' },
+				],
+			}
+			const message = {
+				from: fromNorm,
+				to: toNorm,
+				value: valueBig,
+				validAfter: validAfterBig,
+				validBefore: validBeforeBig,
+				nonce: nonce as `0x${string}`,
+			}
+			const domain = {
+				name: domainName,
+				version: domainVersion,
+				chainId: BASE_CHAIN_ID,
+				verifyingContract: ethers.getAddress(USDC_BASE),
+			}
+			let recovered: string
+			try {
+				recovered = ethers.verifyTypedData(domain, TRANSFER_WITH_AUTH_TYPES, message, signature)
+			} catch (sigErr: any) {
+				logger(Colors.yellow(`[receiveUsdc3009] cluster sig recover threw: ${sigErr?.message ?? sigErr}`))
+				return res.status(400).json({ success: false, error: 'Signature recovery failed (malformed sig)' }).end()
+			}
+			if (ethers.getAddress(recovered) !== fromNorm) {
+				return res.status(400).json({
+					success: false,
+					error: `EIP-3009 signer mismatch (recovered=${recovered}, from=${fromNorm})`,
+				}).end()
+			}
+
+			return postLocalhost(
+				'/api/receiveUsdc3009',
+				{
+					from: fromNorm,
+					to: toNorm,
+					value: valueBig.toString(),
+					validAfter: validAfterBig.toString(),
+					validBefore: validBeforeBig.toString(),
+					nonce,
+					signature,
+					...(typeof paymentRef === 'string' && paymentRef ? { paymentRef } : {}),
+					token: USDC_BASE,
+				},
+				res,
+			)
+		} catch (err: any) {
+			logger(Colors.red(`[receiveUsdc3009] cluster error: ${err?.message ?? err}`))
 			if (!res.headersSent) {
 				res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
 			}

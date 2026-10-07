@@ -54,6 +54,7 @@ import { claimFreeMembershipProcess } from '../MemberCard'
 import { handleStripeBeamioWebhook } from './stripeBeamioHook'
 import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, relocateBUnitsToSmartWalletPool, relocateBUnitsToSmartWalletProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, settlePoolIdleSummary, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, createInstitutionalAaForEoa, CreateInstitutionalAaHttpError, submitAAAccountCreationViaEntryPoint, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, aaMultisigOfflineSubmitPool, kickAaMultisigOfflineSubmitProcess, aaInstitutionalV2RelayPool, kickAaInstitutionalV2RelayProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY, USDC_BASE } from '../chainAddresses'
+import { shiftSettleBase, unshiftSettleBase } from '../settleContractPool'
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import { resolveAaUserOpRelayChainFromRequest } from '../aaTransferRelayChain'
 import { enrichLatestCardsWithBaseErc1155PointsHolderCounts } from './enrichLatestCardsHolderCounts'
@@ -6446,6 +6447,278 @@ const routing = ( router: Router ) => {
 				}
 				if (!res.headersSent) {
 					res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+				}
+			}
+		})
+
+		/**
+		 * Fund → Receive from a wallet: EIP-3009 TransferWithAuthorization → Base USDC
+		 * (to = Beamio EOA). Cluster prechecks; Master settles via Settle_BasePool.
+		 * No card top-up / mint / POS indexer.
+		 */
+		router.post('/receiveUsdc3009', async (req: any, res: any) => {
+			let claimedPaymentRef: string | undefined
+			let settleSc: ReturnType<typeof shiftSettleBase> | undefined
+			try {
+				const {
+					from,
+					to,
+					value,
+					validAfter,
+					validBefore,
+					nonce,
+					signature,
+					paymentRef: suppliedPaymentRef,
+				} = req.body as {
+					from?: string
+					to?: string
+					value?: string
+					validAfter?: string
+					validBefore?: string
+					nonce?: string
+					signature?: string
+					paymentRef?: string
+					token?: string
+				}
+				if (!from || !ethers.isAddress(from)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid from' }).end()
+				}
+				if (!to || !ethers.isAddress(to)) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid to' }).end()
+				}
+				if (!value || !/^\d+$/.test(value) || BigInt(value) <= 0n) {
+					return res.status(400).json({ success: false, error: 'Missing or invalid value' }).end()
+				}
+				if (!nonce || !/^0x[0-9a-fA-F]{64}$/.test(nonce)) {
+					return res.status(400).json({ success: false, error: 'Invalid nonce (expect 0x-prefixed 32-byte hex)' }).end()
+				}
+				if (!signature || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+					return res.status(400).json({ success: false, error: 'Invalid signature (expect 0x-prefixed 65-byte hex)' }).end()
+				}
+				const fromNorm = ethers.getAddress(from)
+				const toNorm = ethers.getAddress(to)
+				const valueBig = BigInt(value)
+				const validAfterBig = BigInt(validAfter ?? '0')
+				const validBeforeBig = BigInt(validBefore ?? '0')
+				const nowSec = BigInt(Math.floor(Date.now() / 1000))
+				if (validBeforeBig <= nowSec) {
+					return res.status(400).json({
+						success: false,
+						error: `Authorization expired (validBefore=${validBeforeBig} <= now=${nowSec})`,
+					}).end()
+				}
+				if (validAfterBig > nowSec + 300n) {
+					return res.status(400).json({
+						success: false,
+						error: `Authorization not yet valid (validAfter=${validAfterBig} > now=${nowSec})`,
+					}).end()
+				}
+
+				const payment = buildUsdcPaymentRef({
+					chain: 'base',
+					token: USDC_BASE,
+					payer: fromNorm,
+					recipient: toNorm,
+					amount6: valueBig,
+					authorizationNonce: nonce,
+					signature,
+				})
+				claimedPaymentRef = payment.paymentRef
+				if (suppliedPaymentRef && suppliedPaymentRef !== payment.paymentRef) {
+					return res.status(400).json({ success: false, error: 'paymentRef does not match payment authorization' }).end()
+				}
+				const claim = await claimPaymentLedger({
+					...payment,
+					providerRef: `receiveUsdc3009:${fromNorm.slice(0, 10)}`,
+				})
+				if (!claim.claimed) {
+					if (claim.status === 'succeeded') {
+						return res.status(200).json({
+							success: true,
+							duplicate: true,
+							paymentRef: payment.paymentRef,
+							txHash: claim.sourceTxHash,
+							hash: claim.sourceTxHash,
+							USDC_tx: claim.sourceTxHash,
+							usdcAmount6: valueBig.toString(),
+						}).end()
+					}
+					return res.status(409).json({
+						success: false,
+						error: 'This payment is already being processed',
+						paymentRef: payment.paymentRef,
+					}).end()
+				}
+
+				const provider = new ethers.JsonRpcProvider(BASE_RPC_URL)
+				const eip712Read = new ethers.Contract(
+					USDC_BASE,
+					['function name() view returns (string)', 'function version() view returns (string)'],
+					provider,
+				)
+				let domainName = 'USD Coin'
+				let domainVersion = '2'
+				try {
+					const n = await eip712Read.name() as string
+					if (typeof n === 'string' && n.trim()) domainName = n.trim()
+				} catch { /* fallback */ }
+				try {
+					const v = await eip712Read.version() as string
+					if (typeof v === 'string' && v.trim()) domainVersion = v.trim()
+				} catch { /* fallback */ }
+				const TRANSFER_WITH_AUTH_TYPES: Record<string, ethers.TypedDataField[]> = {
+					TransferWithAuthorization: [
+						{ name: 'from', type: 'address' },
+						{ name: 'to', type: 'address' },
+						{ name: 'value', type: 'uint256' },
+						{ name: 'validAfter', type: 'uint256' },
+						{ name: 'validBefore', type: 'uint256' },
+						{ name: 'nonce', type: 'bytes32' },
+					],
+				}
+				const message = {
+					from: fromNorm,
+					to: toNorm,
+					value: valueBig,
+					validAfter: validAfterBig,
+					validBefore: validBeforeBig,
+					nonce: nonce as `0x${string}`,
+				}
+				const domain = {
+					name: domainName,
+					version: domainVersion,
+					chainId: MASTER_BASE_CHAIN_ID,
+					verifyingContract: ethers.getAddress(USDC_BASE),
+				}
+				let recovered: string
+				try {
+					recovered = ethers.verifyTypedData(domain, TRANSFER_WITH_AUTH_TYPES, message, signature)
+				} catch (sigErr: any) {
+					logger(Colors.yellow(`[receiveUsdc3009] sig recover threw: ${sigErr?.message ?? sigErr}`))
+					await updatePaymentLedger(payment.paymentRef, {
+						status: 'failed',
+						lastError: 'Signature recovery failed',
+					}).catch(() => {})
+					return res.status(400).json({ success: false, error: 'Signature recovery failed (malformed sig)' }).end()
+				}
+				if (ethers.getAddress(recovered) !== fromNorm) {
+					await updatePaymentLedger(payment.paymentRef, {
+						status: 'failed',
+						lastError: 'EIP-3009 signer mismatch',
+					}).catch(() => {})
+					return res.status(400).json({
+						success: false,
+						error: `EIP-3009 signer mismatch (recovered=${recovered}, from=${fromNorm})`,
+					}).end()
+				}
+
+				settleSc = shiftSettleBase()
+				if (!settleSc) {
+					await updatePaymentLedger(payment.paymentRef, {
+						status: 'failed',
+						lastError: 'Settle_BasePool busy',
+					}).catch(() => {})
+					return res.status(503).json({
+						success: false,
+						error: 'Base settle pool busy; retry shortly',
+					}).end()
+				}
+				const wallet = settleSc.walletBase.connect(provider)
+				const usdc = new ethers.Contract(
+					USDC_BASE,
+					[
+						'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature)',
+					],
+					wallet,
+				)
+
+				let txHash: string | null = null
+				let blockNumber: number | null = null
+				try {
+					const tx = await usdc.transferWithAuthorization(
+						fromNorm,
+						toNorm,
+						valueBig,
+						validAfterBig,
+						validBeforeBig,
+						nonce,
+						signature,
+					)
+					txHash = tx.hash
+					logger(Colors.cyan(
+						`[receiveUsdc3009] submit tx=${txHash} from=${fromNorm.slice(0, 10)}… to=${toNorm.slice(0, 10)}… ` +
+						`value6=${valueBig.toString()}`,
+					))
+					const rcpt = await tx.wait(1)
+					blockNumber = rcpt?.blockNumber ?? null
+					if (!rcpt || rcpt.status !== 1) {
+						logger(Colors.red(`[receiveUsdc3009] tx reverted on-chain status=${rcpt?.status} hash=${txHash}`))
+						await updatePaymentLedger(payment.paymentRef, {
+							status: 'failed',
+							lastError: `reverted tx=${txHash}`,
+							sourceTxHash: txHash ?? undefined,
+						}).catch(() => {})
+						return res.status(502).json({
+							success: false,
+							error: `USDC transferWithAuthorization reverted on-chain (tx=${txHash})`,
+							txHash,
+						}).end()
+					}
+					await confirmUsdcTransfer({
+						chain: 'base',
+						txHash: tx.hash,
+						expectedToken: USDC_BASE,
+						expectedFrom: fromNorm,
+						expectedTo: toNorm,
+						expectedAmount6: valueBig,
+					})
+				} catch (txErr: any) {
+					const msg = txErr?.shortMessage ?? txErr?.message ?? String(txErr)
+					logger(Colors.red(`[receiveUsdc3009] submit tx failed: ${msg}`))
+					await updatePaymentLedger(payment.paymentRef, {
+						status: 'failed',
+						lastError: msg,
+						sourceTxHash: txHash ?? undefined,
+					}).catch(() => {})
+					return res.status(502).json({
+						success: false,
+						error: `USDC transferWithAuthorization failed: ${msg}`,
+					}).end()
+				}
+
+				await updatePaymentLedger(payment.paymentRef, {
+					status: 'succeeded',
+					sourceTxHash: txHash,
+				})
+				logger(Colors.green(
+					`[receiveUsdc3009] OK from=${fromNorm} to=${toNorm} tx=${txHash} usdc6=${valueBig.toString()} block=${blockNumber}`,
+				))
+				return res.status(200).json({
+					success: true,
+					paymentRef: payment.paymentRef,
+					txHash,
+					hash: txHash,
+					USDC_tx: txHash,
+					usdcAmount6: valueBig.toString(),
+					from: fromNorm,
+					to: toNorm,
+					blockNumber,
+				}).end()
+			} catch (err: any) {
+				logger(Colors.red(`[receiveUsdc3009] master error: ${err?.message ?? err}`))
+				if (claimedPaymentRef) {
+					await updatePaymentLedger(claimedPaymentRef, {
+						status: 'failed',
+						lastError: err?.message ?? String(err),
+					}).catch(() => {})
+				}
+				if (!res.headersSent) {
+					res.status(500).json({ success: false, error: err?.message ?? String(err) }).end()
+				}
+			} finally {
+				if (settleSc) {
+					unshiftSettleBase(settleSc)
+					settleSc = undefined
 				}
 			}
 		})
