@@ -12,6 +12,7 @@ import {request} from 'node:http'
 import { inspect } from 'node:util'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
+import { normalizeEip3009WalletSignature } from '../eip3009SignatureNormalize'
 import { listReferralRegistryClaimsByParent, listReferralRegistryTreeByAccount, getReferralRegistryTreeSync, listReferralMerchantCandidates } from '../db'
 import { getMerchantCardStripeStatusFromDb } from '../db'
 import { ensureReferralRegistryTreeReady } from '../referralRegistryTree'
@@ -7621,10 +7622,11 @@ const routing = ( router: Router ) => {
 					error: 'Invalid nonce (expect 0x-prefixed 32-byte hex)',
 				}).end()
 			}
-			if (!signature || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+			const signatureNorm = normalizeEip3009WalletSignature(signature)
+			if (!signatureNorm) {
 				return res.status(400).json({
 					success: false,
-					error: 'Invalid signature (expect 0x-prefixed 65-byte hex)',
+					error: 'Invalid signature (expect 65-byte ECDSA or EIP-2098 compact; high-s normalized)',
 				}).end()
 			}
 			const fromNorm = ethers.getAddress(from)
@@ -7688,7 +7690,7 @@ const routing = ( router: Router ) => {
 			}
 			let recovered: string
 			try {
-				recovered = ethers.verifyTypedData(domain, TRANSFER_WITH_AUTH_TYPES, message, signature)
+				recovered = ethers.verifyTypedData(domain, TRANSFER_WITH_AUTH_TYPES, message, signatureNorm)
 			} catch (sigErr: any) {
 				logger(Colors.yellow(`[receiveUsdc3009] cluster sig recover threw: ${sigErr?.message ?? sigErr}`))
 				return res.status(400).json({ success: false, error: 'Signature recovery failed (malformed sig)' }).end()
@@ -7709,7 +7711,7 @@ const routing = ( router: Router ) => {
 					validAfter: validAfterBig.toString(),
 					validBefore: validBeforeBig.toString(),
 					nonce,
-					signature,
+					signature: signatureNorm,
 					...(typeof paymentRef === 'string' && paymentRef ? { paymentRef } : {}),
 					token: USDC_BASE,
 				},

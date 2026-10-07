@@ -15,6 +15,7 @@ import { claimPaymentLedger, updatePaymentLedger } from '../db'
 import { buildUsdcPaymentRef, confirmUsdcTransfer } from '../usdcPaymentRecord'
 import {coinbaseHooks, coinbaseToken, coinbaseOfframp} from '../coinbase'
 import { ethers } from 'ethers'
+import { normalizeEip3009WalletSignature } from '../eip3009SignatureNormalize'
 import {
 	handleRegisterPushDeviceMaster,
 	handleSyncChatBadgeMaster,
@@ -6492,8 +6493,12 @@ const routing = ( router: Router ) => {
 				if (!nonce || !/^0x[0-9a-fA-F]{64}$/.test(nonce)) {
 					return res.status(400).json({ success: false, error: 'Invalid nonce (expect 0x-prefixed 32-byte hex)' }).end()
 				}
-				if (!signature || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
-					return res.status(400).json({ success: false, error: 'Invalid signature (expect 0x-prefixed 65-byte hex)' }).end()
+				const signatureNorm = normalizeEip3009WalletSignature(signature)
+				if (!signatureNorm) {
+					return res.status(400).json({
+						success: false,
+						error: 'Invalid signature (expect 65-byte ECDSA or EIP-2098 compact; high-s normalized)',
+					}).end()
 				}
 				const fromNorm = ethers.getAddress(from)
 				const toNorm = ethers.getAddress(to)
@@ -6521,7 +6526,7 @@ const routing = ( router: Router ) => {
 					recipient: toNorm,
 					amount6: valueBig,
 					authorizationNonce: nonce,
-					signature,
+					signature: signatureNorm,
 				})
 				claimedPaymentRef = payment.paymentRef
 				if (suppliedPaymentRef && suppliedPaymentRef !== payment.paymentRef) {
@@ -6592,7 +6597,7 @@ const routing = ( router: Router ) => {
 				}
 				let recovered: string
 				try {
-					recovered = ethers.verifyTypedData(domain, TRANSFER_WITH_AUTH_TYPES, message, signature)
+					recovered = ethers.verifyTypedData(domain, TRANSFER_WITH_AUTH_TYPES, message, signatureNorm)
 				} catch (sigErr: any) {
 					logger(Colors.yellow(`[receiveUsdc3009] sig recover threw: ${sigErr?.message ?? sigErr}`))
 					await updatePaymentLedger(payment.paymentRef, {
@@ -6642,7 +6647,7 @@ const routing = ( router: Router ) => {
 						validAfterBig,
 						validBeforeBig,
 						nonce,
-						signature,
+						signatureNorm,
 					)
 					txHash = tx.hash
 					logger(Colors.cyan(
