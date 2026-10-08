@@ -7702,6 +7702,18 @@ const routing = ( router: Router ) => {
 				}).end()
 			}
 
+			try {
+				const authState = new ethers.Contract(
+					USDC_BASE,
+					['function authorizationState(address,bytes32) view returns (bool)'],
+					providerBase,
+				)
+				const used = await authState.authorizationState(fromNorm, nonce) as boolean
+				if (used) {
+					return res.status(200).json({ success: true, alreadyUsed: true }).end()
+				}
+			} catch { /* RPC failure is untrusted; let Master submit */ }
+
 			return postLocalhost(
 				'/api/receiveUsdc3009',
 				{
