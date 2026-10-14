@@ -22,7 +22,11 @@ import { claimFreeMembershipPreCheck } from '../MemberCard'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckChargeBurnBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminBatchPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, quoteUsdcDepositForCardFiat6, nfcTopupPreparePayload, unpackTopupMintAmount, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, lookupOnChainMerchantCardRegistryIdentity, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET, USDC_BASE } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_AGENT_REFERRER_REGISTRY, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET, USDC_BASE } from '../chainAddresses'
+import {
+	AGENT_REFERRER_EIP712_DOMAIN,
+	AGENT_REFERRER_TYPES,
+} from '../agentReferrerRegistry'
 import { lookupFuelPack, fuelPackFreeBUnits6, fuelPackUsdc6 } from '../fuelPackCatalog'
 import { cardFactoryForUserCardChain, chainIdForUserCardChain, providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
 import {
@@ -12221,6 +12225,199 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					seq: seq.toString(),
 					nonce: nonce.toString(),
 					signature,
+				},
+				res,
+			)
+		} catch (error: any) {
+			return res
+				.status(400)
+				.json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' })
+				.end()
+		}
+	})
+
+	/**
+	 * Agent / Temp / Merchant / Referrer registry (CoNET EIP-712 + Master settle).
+	 * GET nonce + role views; POST gasless WithSig ops after Cluster precheck.
+	 */
+	router.get('/agentReferrerRegistry', async (req, res) => {
+		try {
+			const registry = new ethers.Contract(
+				CONET_AGENT_REFERRER_REGISTRY,
+				[
+					'function nonces(address) view returns (uint256)',
+					'function isAgent(address) view returns (bool)',
+					'function agentOfTemp(address) view returns (address)',
+					'function agentOfMerchant(address) view returns (address)',
+					'function introducerOf(address) view returns (address)',
+					'function agents(address) view returns (bool active, uint64 registeredAt)',
+					'function temps(address) view returns (address agent, uint64 registeredAt)',
+					'function merchants(address) view returns (address agent, address temp, uint64 registeredAt)',
+					'function referrers(address) view returns (address introducer, uint64 registeredAt)',
+				],
+				providerConet,
+			)
+			const addressRaw = String(req.query.address ?? req.query.wallet ?? req.query.owner ?? '').trim()
+			if (!addressRaw || !ethers.isAddress(addressRaw)) {
+				return res.status(400).json({ success: false, error: 'address required' }).end()
+			}
+			const address = ethers.getAddress(addressRaw)
+			const [nonce, agentActive, agentOfTemp, agentOfMerchant, introducer] = await Promise.all([
+				registry.nonces!(address),
+				registry.isAgent!(address),
+				registry.agentOfTemp!(address),
+				registry.agentOfMerchant!(address),
+				registry.introducerOf!(address),
+			])
+			return res
+				.status(200)
+				.json({
+					success: true,
+					registry: CONET_AGENT_REFERRER_REGISTRY,
+					address,
+					nonce: nonce.toString(),
+					isAgent: Boolean(agentActive),
+					agentOfTemp: String(agentOfTemp),
+					agentOfMerchant: String(agentOfMerchant),
+					introducerOf: String(introducer),
+					domain: AGENT_REFERRER_EIP712_DOMAIN,
+					types: AGENT_REFERRER_TYPES,
+					chainId: 224422,
+				})
+				.end()
+		} catch (error: any) {
+			return res
+				.status(500)
+				.json({ success: false, error: error?.shortMessage ?? error?.message ?? 'agentReferrerRegistry read failed' })
+				.end()
+		}
+	})
+
+	router.post('/agentReferrerRegister', async (req, res) => {
+		try {
+			const b = req.body as {
+				op?: string
+				agent?: string
+				temp?: string
+				merchant?: string
+				introducer?: string
+				referee?: string
+				nonce?: string | number
+				deadline?: string | number
+				signature?: string
+			}
+			const op = String(b.op ?? '').trim()
+			if (!['registerAgent', 'registerTemp', 'registerMerchant', 'registerReferrer'].includes(op)) {
+				return res.status(400).json({ success: false, error: 'Invalid op' }).end()
+			}
+			if (b.nonce == null || b.deadline == null || !b.signature) {
+				return res.status(400).json({ success: false, error: 'Missing nonce/deadline/signature' }).end()
+			}
+			const nonce = BigInt(b.nonce)
+			const deadline = BigInt(b.deadline)
+			const now = BigInt(Math.floor(Date.now() / 1000))
+			if (deadline < now) {
+				return res.status(400).json({ success: false, error: 'Signature expired' }).end()
+			}
+
+			const registry = new ethers.Contract(
+				CONET_AGENT_REFERRER_REGISTRY,
+				[
+					'function nonces(address) view returns (uint256)',
+					'function isAgent(address) view returns (bool)',
+					'function agentOfTemp(address) view returns (address)',
+					'function agentOfMerchant(address) view returns (address)',
+					'function introducerOf(address) view returns (address)',
+				],
+				providerConet,
+			)
+
+			let signerAddress = ''
+			let value: Record<string, string | bigint> = {}
+			let primaryTypes: (typeof AGENT_REFERRER_TYPES)[keyof typeof AGENT_REFERRER_TYPES] =
+				AGENT_REFERRER_TYPES.RegisterAgent
+			let typeName: keyof typeof AGENT_REFERRER_TYPES = 'RegisterAgent'
+
+			if (op === 'registerAgent') {
+				const agent = ethers.getAddress(String(b.agent ?? ''))
+				value = { agent, nonce, deadline }
+				primaryTypes = AGENT_REFERRER_TYPES.RegisterAgent
+				typeName = 'RegisterAgent'
+				signerAddress = agent
+				if (await registry.isAgent!(agent)) {
+					return res.status(400).json({ success: false, error: 'AlreadyAgent' }).end()
+				}
+			} else if (op === 'registerTemp') {
+				const agent = ethers.getAddress(String(b.agent ?? ''))
+				const temp = ethers.getAddress(String(b.temp ?? ''))
+				value = { agent, temp, nonce, deadline }
+				primaryTypes = AGENT_REFERRER_TYPES.RegisterTemp
+				typeName = 'RegisterTemp'
+				signerAddress = agent
+				if (!(await registry.isAgent!(agent))) {
+					return res.status(400).json({ success: false, error: 'NotAgent' }).end()
+				}
+				const existing = await registry.agentOfTemp!(temp)
+				if (existing && existing !== ethers.ZeroAddress) {
+					return res.status(400).json({ success: false, error: 'TempAlreadyBound' }).end()
+				}
+			} else if (op === 'registerMerchant') {
+				const agent = ethers.getAddress(String(b.agent ?? ''))
+				const merchant = ethers.getAddress(String(b.merchant ?? ''))
+				const temp = ethers.getAddress(String(b.temp ?? ethers.ZeroAddress))
+				value = { agent, merchant, temp, nonce, deadline }
+				primaryTypes = AGENT_REFERRER_TYPES.RegisterMerchant
+				typeName = 'RegisterMerchant'
+				signerAddress = agent
+				if (!(await registry.isAgent!(agent))) {
+					return res.status(400).json({ success: false, error: 'NotAgent' }).end()
+				}
+				const existing = await registry.agentOfMerchant!(merchant)
+				if (existing && existing !== ethers.ZeroAddress) {
+					return res.status(400).json({ success: false, error: 'MerchantAlreadyBound' }).end()
+				}
+				if (temp !== ethers.ZeroAddress) {
+					const tempAgent = await registry.agentOfTemp!(temp)
+					if (String(tempAgent).toLowerCase() !== agent.toLowerCase()) {
+						return res.status(400).json({ success: false, error: 'TempNotUnderAgent' }).end()
+					}
+				}
+			} else {
+				const introducer = ethers.getAddress(String(b.introducer ?? ''))
+				const referee = ethers.getAddress(String(b.referee ?? ''))
+				value = { introducer, referee, nonce, deadline }
+				primaryTypes = AGENT_REFERRER_TYPES.RegisterReferrer
+				typeName = 'RegisterReferrer'
+				signerAddress = referee
+				const existing = await registry.introducerOf!(referee)
+				if (existing && existing !== ethers.ZeroAddress) {
+					return res.status(400).json({ success: false, error: 'AlreadyReferred' }).end()
+				}
+			}
+
+			const onChainNonce = await registry.nonces!(signerAddress)
+			if (BigInt(onChainNonce) !== nonce) {
+				return res.status(400).json({ success: false, error: `Nonce mismatch (want ${onChainNonce})` }).end()
+			}
+
+			const digest = ethers.TypedDataEncoder.hash(AGENT_REFERRER_EIP712_DOMAIN, { [typeName]: primaryTypes }, value)
+			const recovered = ethers.recoverAddress(digest, b.signature)
+			if (recovered.toLowerCase() !== signerAddress.toLowerCase()) {
+				return res.status(400).json({ success: false, error: 'Invalid signature' }).end()
+			}
+
+			return postLocalhost(
+				'/api/agentReferrerRegister',
+				{
+					op,
+					agent: b.agent,
+					temp: b.temp,
+					merchant: b.merchant,
+					introducer: b.introducer,
+					referee: b.referee,
+					nonce: nonce.toString(),
+					deadline: deadline.toString(),
+					signature: b.signature,
 				},
 				res,
 			)

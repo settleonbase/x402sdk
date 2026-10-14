@@ -77,6 +77,7 @@ import {
 	type GenesisNodeReferralRedeemAction,
 } from '../genesisNodeReferralRedeem'
 import { enqueueChatIndexPointerRelay } from '../chatIndexPointer'
+import { enqueueAgentReferrerRelay } from '../agentReferrerRegistry'
 import {
 	gbDepinChargeUserPool,
 	kickGbDepinChargeUserPoolPress,
@@ -4323,6 +4324,47 @@ const routing = ( router: Router ) => {
 				ts: b.ts,
 				seq: b.seq,
 				nonce: b.nonce,
+				signature: b.signature,
+				res,
+			})
+		})
+
+		router.post('/agentReferrerRegister', (req, res) => {
+			const b = req.body as {
+				op?: string
+				agent?: string
+				temp?: string
+				merchant?: string
+				introducer?: string
+				referee?: string
+				nonce?: string
+				deadline?: string
+				signature?: string
+			}
+			const op = b.op as
+				| 'registerAgent'
+				| 'registerTemp'
+				| 'registerMerchant'
+				| 'registerReferrer'
+				| undefined
+			if (
+				!op ||
+				!['registerAgent', 'registerTemp', 'registerMerchant', 'registerReferrer'].includes(op) ||
+				b.nonce == null ||
+				b.deadline == null ||
+				!b.signature
+			) {
+				return res.status(400).json({ success: false, error: 'Missing agent referrer fields' }).end()
+			}
+			enqueueAgentReferrerRelay({
+				op,
+				agent: b.agent,
+				temp: b.temp,
+				merchant: b.merchant,
+				introducer: b.introducer,
+				referee: b.referee,
+				nonce: String(b.nonce),
+				deadline: String(b.deadline),
 				signature: b.signature,
 				res,
 			})

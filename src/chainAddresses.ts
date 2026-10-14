@@ -150,6 +150,15 @@ export const CONET_GENESIS_NODE_REFERRAL_VAULT_DEPLOY_BLOCK = 594820
 export const CONET_CHAT_INDEX_REGISTRY = '0x1511Caa71081C84d8a591490D1b83879088EED72'
 /** Current UUPS impl. Proxy address above is canonical. */
 export const CONET_CHAT_INDEX_REGISTRY_IMPL = '0xF94299760E07E62eC33A8e91fA585f0b40d137Ee'
+/**
+ * CoNET BeamioAgentReferrerRegistry ERC1967 proxy — agent / temp EOA / merchant /
+ * invite-referrer registry with EIP-712 offline signatures (gasless Cluster→Master).
+ * Canonical address for Merchant OS Agent login (`isAgent`) and Temp EOA management.
+ */
+export const CONET_AGENT_REFERRER_REGISTRY = '0x40f1B57280f9195AfEf2B4433CEc8f79d4b58b9A'
+/** Current UUPS impl. Proxy address above is canonical. */
+export const CONET_AGENT_REFERRER_REGISTRY_IMPL = '0xb3535499aBAA9369681e092eAA8d84555eB3fbDe'
+export const CONET_AGENT_REFERRER_REGISTRY_DEPLOY_BLOCK = 1705690
 /** 每节点应收 USDC（6 位精度）= NODE_SALE_NODE_PRICE + NODE_SALE_SERVER_FEE */
 export const GENESIS_NODE_SEAT_USDC_PER_NODE6 = NODE_SALE_NODE_PRICE_USDC6 + NODE_SALE_SERVER_FEE_USDC6
 /** Discover Genesis 商家卡（SilentPassUI /discover 明细） */
