@@ -282,6 +282,8 @@ export const CONET_BEAMIO_USER_CARD_DEFAULT = '0xA5C727d11d04BeBC095bd814c6530c4
  * 收费 B-Unit 焚烧 mint、钱包展示、Referral claimable 均指向此地址。
  */
 export const CONET_USDC = '0x5209865D404aA5646eDe5B91CD4218909eA72eDA'
+/** CoNET wCNET：TreasuryCanonicalERC20V3，1:1 包裹原生 CNET。Base 表示是另一地址且不能解包。 */
+export const CONET_WCNET = '0x5a2D096968fC85861d8FDC7CE9A747Fe4bcb87D5'
 /** TreasuryBridgeV3 proxy — 与 {@link CONET_TREASURY} 同址 */
 export const CONET_TREASURY_BRIDGE_V3 = CONET_TREASURY
 /** @deprecated 工厂版 USDC（旧 ConetTreasury.createERC20）；停增发，仅存量 */

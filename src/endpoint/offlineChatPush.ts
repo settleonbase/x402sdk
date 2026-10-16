@@ -391,18 +391,32 @@ async function deleteDeviceToken(token: string): Promise<void> {
  * iOS icon badge must use `apns-push-type: alert`.
  * Badge-only `background` + content-available is accepted by APNs (HTTP 200)
  * but iOS often never applies the badge when the app is killed / suspended.
+ *
+ * Debug installs (aps-environment=development) mint sandbox tokens. Sending
+ * them to production returns BadDeviceToken (400). That is an **env mismatch**,
+ * not an unregistered token — never DELETE on 400 alone or voiceCallPush loses
+ * the only working alert path before CallKit can wake.
  */
-function sendApnsBadge(cfg: ApnsConfig, deviceToken: string, badge: number, topic: string): Promise<{ ok: boolean; status?: number }> {
+function sendApnsBadgeOnce(
+	cfg: ApnsConfig,
+	deviceToken: string,
+	badge: number,
+	topic: string,
+	productionHost: boolean,
+): Promise<{ ok: boolean; status?: number; reason?: string; host: string }> {
+	const host = productionHost ? 'api.push.apple.com' : 'api.sandbox.push.apple.com'
+	const jwt = createApnsJwt(cfg)
 	return new Promise((resolve) => {
-		const host = cfg.production ? 'api.push.apple.com' : 'api.sandbox.push.apple.com'
-		const jwt = createApnsJwt(cfg)
 		const client = http2.connect(`https://${host}`)
-		client.on('error', (err) => {
-			logger(Colors.yellow(`[APNs] connect error: ${(err as Error).message}`))
+		const finish = (ok: boolean, status = 0, reason = '') => {
 			try {
 				client.close()
 			} catch {}
-			resolve({ ok: false })
+			resolve({ ok, status, reason, host })
+		}
+		client.on('error', (err) => {
+			logger(Colors.yellow(`[APNs] connect error: ${(err as Error).message}`))
+			finish(false)
 		})
 		const req = client.request({
 			':method': 'POST',
@@ -424,23 +438,18 @@ function sendApnsBadge(cfg: ApnsConfig, deviceToken: string, badge: number, topi
 			body += chunk
 		})
 		req.on('end', () => {
+			let reason = ''
 			try {
-				client.close()
-			} catch {}
-			if (status === 410 || status === 400) {
-				if (body) logger(Colors.yellow(`[APNs] fail body=${body.slice(0, 200)}`))
-				void deleteDeviceToken(deviceToken)
-			} else if (status < 200 || status >= 300) {
-				if (body) logger(Colors.yellow(`[APNs] HTTP ${status} body=${body.slice(0, 200)}`))
+				reason = body ? String(JSON.parse(body)?.reason || '') : ''
+			} catch {
+				reason = body.slice(0, 80)
 			}
-			resolve({ ok: status >= 200 && status < 300, status })
+			if (!reason && body) logger(Colors.yellow(`[APNs] fail body=${body.slice(0, 200)}`))
+			finish(status >= 200 && status < 300, status, reason)
 		})
 		req.on('error', (err) => {
 			logger(Colors.yellow(`[APNs] request error: ${(err as Error).message}`))
-			try {
-				client.close()
-			} catch {}
-			resolve({ ok: false, status })
+			finish(false, status)
 		})
 		const unreadLabel = badge <= 0 ? 'Messages' : badge === 1 ? '1 new message' : `${badge} new messages`
 		req.end(
@@ -456,6 +465,44 @@ function sendApnsBadge(cfg: ApnsConfig, deviceToken: string, badge: number, topi
 			}),
 		)
 	})
+}
+
+async function sendApnsBadge(
+	cfg: ApnsConfig,
+	deviceToken: string,
+	badge: number,
+	topic: string,
+): Promise<{ ok: boolean; status?: number }> {
+	const primary = await sendApnsBadgeOnce(cfg, deviceToken, badge, topic, cfg.production)
+	if (primary.ok) return { ok: true, status: primary.status }
+	if (shouldRetryApnsAlternateHost(primary.status, primary.reason)) {
+		logger(Colors.yellow(
+			`[APNs] badge ${primary.reason || primary.status} on ${primary.host}; retrying alternate host topic=${topic} token=${deviceToken.slice(0, 8)}…`,
+		))
+		const alt = await sendApnsBadgeOnce(cfg, deviceToken, badge, topic, !cfg.production)
+		if (alt.ok) {
+			logger(Colors.green(
+				`[APNs] badge ok via ${alt.host} topic=${topic} token=${deviceToken.slice(0, 8)}…`,
+			))
+			return { ok: true, status: alt.status }
+		}
+		// Only drop tokens that Apple says are gone on **both** hosts (410),
+		// never on BadDeviceToken env mismatch (400).
+		if (primary.status === 410 && alt.status === 410) {
+			void deleteDeviceToken(deviceToken)
+		}
+		logger(Colors.yellow(
+			`[APNs] badge fail status=${alt.status} host=${alt.host} topic=${topic} token=${deviceToken.slice(0, 8)}… ${alt.reason || ''}`,
+		))
+		return { ok: false, status: alt.status }
+	}
+	if (primary.status === 410) {
+		void deleteDeviceToken(deviceToken)
+	}
+	logger(Colors.yellow(
+		`[APNs] badge fail status=${primary.status} host=${primary.host} topic=${topic} token=${deviceToken.slice(0, 8)}… ${primary.reason || ''}`,
+	))
+	return { ok: false, status: primary.status }
 }
 
 let cachedFcmAccess: { token: string; exp: number } | null = null
@@ -587,18 +634,37 @@ type VoiceCallPushPayload = {
 	expiresAt: number
 }
 
-function sendApnsVoiceCall(
+/** PushKit VoIP topic is always `{bundleId}.voip` (never the bare app bundle id). */
+function apnsVoipTopic(bundleId: string): string {
+	const base = (bundleId || '').trim() || 'com.beamio.beamio'
+	return base.endsWith('.voip') ? base : `${base}.voip`
+}
+
+/**
+ * Dev-signed installs mint sandbox device tokens; App Store / TestFlight mint
+ * production tokens. Prefer `apns_production`, then retry the other host on
+ * BadDeviceToken so CallKit VoIP works for both install channels.
+ */
+function sendApnsVoiceCallOnce(
 	cfg: ApnsConfig,
 	deviceToken: string,
 	payload: VoiceCallPushPayload,
 	topic: string,
-): Promise<{ ok: boolean; status?: number }> {
+	productionHost: boolean,
+): Promise<{ ok: boolean; status?: number; reason?: string; host: string }> {
+	const host = productionHost ? 'api.push.apple.com' : 'api.sandbox.push.apple.com'
 	return new Promise(resolve => {
-		const host = cfg.production ? 'api.push.apple.com' : 'api.sandbox.push.apple.com'
 		const client = http2.connect(`https://${host}`)
+		let body = ''
 		const finish = (ok: boolean, status = 0) => {
 			try { client.close() } catch {}
-			resolve({ ok, status })
+			let reason = ''
+			try {
+				reason = body ? String(JSON.parse(body)?.reason || '') : ''
+			} catch {
+				reason = body.slice(0, 80)
+			}
+			resolve({ ok, status, reason, host })
 		}
 		client.on('error', () => finish(false))
 		const req = client.request({
@@ -613,6 +679,7 @@ function sendApnsVoiceCall(
 		})
 		let status = 0
 		req.on('response', headers => { status = Number(headers[':status'] || 0) })
+		req.on('data', (chunk: Buffer) => { body += chunk.toString('utf8') })
 		req.on('end', () => finish(status >= 200 && status < 300, status))
 		req.on('error', () => finish(false, status))
 		req.end(JSON.stringify({
@@ -624,6 +691,169 @@ function sendApnsVoiceCall(
 			expiresAt: payload.expiresAt,
 		}))
 	})
+}
+
+function shouldRetryApnsAlternateHost(status?: number, reason?: string): boolean {
+	if (status === 400 && /BadDeviceToken/i.test(reason || '')) return true
+	if (status === 403 && /BadEnvironmentKeyInToken/i.test(reason || '')) return true
+	return false
+}
+
+/**
+ * Only Unregistered (410) on **both** hosts is safe to DELETE.
+ * BadEnvironmentKeyInToken + BadDeviceToken is the classic install-over
+ * sandbox/production mismatch — deleting empties the DB and blocks CallKit
+ * until the user re-binds; keep the rows and let a clean install refresh.
+ */
+function isPermanentApnsDualHostReject(
+	primary: { status?: number; reason?: string },
+	alt: { status?: number; reason?: string },
+): boolean {
+	return primary.status === 410 && alt.status === 410
+}
+
+async function sendApnsVoiceCall(
+	cfg: ApnsConfig,
+	deviceToken: string,
+	payload: VoiceCallPushPayload,
+	bundleId: string,
+): Promise<{ ok: boolean; status?: number }> {
+	const topic = apnsVoipTopic(bundleId || cfg.bundleId)
+	const primary = await sendApnsVoiceCallOnce(cfg, deviceToken, payload, topic, cfg.production)
+	if (primary.ok) return { ok: true, status: primary.status }
+	if (shouldRetryApnsAlternateHost(primary.status, primary.reason)) {
+		logger(Colors.yellow(
+			`[APNs] voiceCall ${primary.reason || primary.status} on ${primary.host}; retrying alternate APNs host topic=${topic} token=${deviceToken.slice(0, 8)}…`,
+		))
+		const alt = await sendApnsVoiceCallOnce(cfg, deviceToken, payload, topic, !cfg.production)
+		if (alt.ok) {
+			logger(Colors.green(
+				`[APNs] voiceCall ok via ${alt.host} topic=${topic} token=${deviceToken.slice(0, 8)}…`,
+			))
+			return { ok: true, status: alt.status }
+		}
+		if (isPermanentApnsDualHostReject(primary, alt)) {
+			logger(Colors.yellow(
+				`[APNs] voiceCall dual-host permanent reject — DELETE token=${deviceToken.slice(0, 8)}… primary=${primary.reason || primary.status} alt=${alt.reason || alt.status}`,
+			))
+			void deleteDeviceToken(deviceToken)
+		}
+		logger(Colors.yellow(
+			`[APNs] voiceCall fail status=${alt.status} host=${alt.host} topic=${topic} token=${deviceToken.slice(0, 8)}… ${alt.reason || ''}`,
+		))
+		return { ok: false, status: alt.status }
+	}
+	if (primary.status === 410) {
+		void deleteDeviceToken(deviceToken)
+	}
+	logger(Colors.yellow(
+		`[APNs] voiceCall fail status=${primary.status} host=${primary.host} topic=${topic} token=${deviceToken.slice(0, 8)}… ${primary.reason || ''}`,
+	))
+	return { ok: false, status: primary.status }
+}
+
+/**
+ * Regular `ios` alert tokens: wake CallKit via AppDelegate when PushKit VoIP
+ * tokens are rejected (Dev AuthKey / BadEnvironmentKeyInToken). Topic is the
+ * bare bundle id; push-type must be `alert` (never `voip`).
+ */
+function sendApnsVoiceCallAlertOnce(
+	cfg: ApnsConfig,
+	deviceToken: string,
+	payload: VoiceCallPushPayload,
+	topic: string,
+	productionHost: boolean,
+): Promise<{ ok: boolean; status?: number; reason?: string; host: string }> {
+	const host = productionHost ? 'api.push.apple.com' : 'api.sandbox.push.apple.com'
+	return new Promise(resolve => {
+		const client = http2.connect(`https://${host}`)
+		let body = ''
+		const finish = (ok: boolean, status = 0) => {
+			try { client.close() } catch {}
+			let reason = ''
+			try {
+				reason = body ? String(JSON.parse(body)?.reason || '') : ''
+			} catch {
+				reason = body.slice(0, 80)
+			}
+			resolve({ ok, status, reason, host })
+		}
+		client.on('error', () => finish(false))
+		const req = client.request({
+			':method': 'POST',
+			':path': `/3/device/${deviceToken}`,
+			authorization: `bearer ${createApnsJwt(cfg)}`,
+			'apns-topic': topic,
+			'apns-push-type': 'alert',
+			'apns-priority': '10',
+			'apns-id': randomUUID(),
+			'content-type': 'application/json',
+		})
+		let status = 0
+		req.on('response', headers => { status = Number(headers[':status'] || 0) })
+		req.on('data', (chunk: Buffer) => { body += chunk.toString('utf8') })
+		req.on('end', () => finish(status >= 200 && status < 300, status))
+		req.on('error', () => finish(false, status))
+		req.end(JSON.stringify({
+			aps: {
+				alert: {
+					title: 'Incoming call',
+					body: 'Beamio voice call',
+				},
+				sound: 'default',
+				badge: 1,
+				'content-available': 1,
+				'interruption-level': 'time-sensitive',
+			},
+			type: 'voiceCall',
+			callId: payload.callId,
+			sessionId: payload.sessionId,
+			calleeEoa: payload.calleeEoa,
+			expiresAt: payload.expiresAt,
+			displayName: 'Beamio call',
+		}))
+	})
+}
+
+async function sendApnsVoiceCallAlert(
+	cfg: ApnsConfig,
+	deviceToken: string,
+	payload: VoiceCallPushPayload,
+	bundleId: string,
+): Promise<{ ok: boolean; status?: number }> {
+	const base = (bundleId || cfg.bundleId || 'com.beamio.beamio').trim()
+	const topic = base.endsWith('.voip') ? base.slice(0, -'.voip'.length) : base
+	const primary = await sendApnsVoiceCallAlertOnce(cfg, deviceToken, payload, topic, cfg.production)
+	if (primary.ok) return { ok: true, status: primary.status }
+	if (shouldRetryApnsAlternateHost(primary.status, primary.reason)) {
+		logger(Colors.yellow(
+			`[APNs] voiceCallAlert ${primary.reason || primary.status} on ${primary.host}; retrying alternate host topic=${topic} token=${deviceToken.slice(0, 8)}…`,
+		))
+		const alt = await sendApnsVoiceCallAlertOnce(cfg, deviceToken, payload, topic, !cfg.production)
+		if (alt.ok) {
+			logger(Colors.green(
+				`[APNs] voiceCallAlert ok via ${alt.host} topic=${topic} token=${deviceToken.slice(0, 8)}…`,
+			))
+			return { ok: true, status: alt.status }
+		}
+		if (isPermanentApnsDualHostReject(primary, alt)) {
+			logger(Colors.yellow(
+				`[APNs] voiceCallAlert dual-host permanent reject — DELETE token=${deviceToken.slice(0, 8)}… primary=${primary.reason || primary.status} alt=${alt.reason || alt.status}`,
+			))
+			void deleteDeviceToken(deviceToken)
+		}
+		logger(Colors.yellow(
+			`[APNs] voiceCallAlert fail status=${alt.status} host=${alt.host} topic=${topic} token=${deviceToken.slice(0, 8)}… ${alt.reason || ''}`,
+		))
+		return { ok: false, status: alt.status }
+	}
+	if (primary.status === 410) {
+		void deleteDeviceToken(deviceToken)
+	}
+	logger(Colors.yellow(
+		`[APNs] voiceCallAlert fail status=${primary.status} host=${primary.host} topic=${topic} token=${deviceToken.slice(0, 8)}… ${primary.reason || ''}`,
+	))
+	return { ok: false, status: primary.status }
 }
 
 async function sendFcmVoiceCall(cfg: FcmConfig, deviceToken: string, payload: VoiceCallPushPayload): Promise<{ ok: boolean; status?: number }> {
@@ -696,12 +926,47 @@ export async function voiceCallPushProcess(payload: VoiceCallPushPayload): Promi
 	const apnsCfg = readApnsConfig()
 	const fcmCfg = readFcmConfig()
 	let delivered = 0
-	await Promise.all(devices.map(async device => {
-		const result = device.platform === 'android'
-			? (fcmCfg ? await sendFcmVoiceCall(fcmCfg, device.deviceToken, payload) : { ok: false })
-			: (apnsCfg ? await sendApnsVoiceCall(apnsCfg, device.deviceToken, payload, device.bundleId || apnsCfg.bundleId) : { ok: false })
-		if (result.ok) delivered += 1
-	}))
+	// Prefer PushKit ios_voip + Android FCM. Also fan out regular `ios` alert
+	// (never push-type voip) so Dev installs whose VoIP tokens get
+	// BadEnvironmentKeyInToken still wake CallKit via AppDelegate.
+	const voipOrAndroid = devices.filter((d) => d.platform === 'android' || d.platform === 'ios_voip')
+	const iosAlert = devices.filter((d) => d.platform === 'ios')
+	if (!voipOrAndroid.length && !iosAlert.length) {
+		logger(Colors.yellow(
+			`[voiceCallPush] no wakeable devices for ${payload.calleeEoa.slice(0, 10)}… (need ios_voip, ios, or android)`,
+		))
+		return { success: true, delivered: 0 }
+	}
+	await Promise.all([
+		...voipOrAndroid.map(async device => {
+			const result = device.platform === 'android'
+				? (fcmCfg ? await sendFcmVoiceCall(fcmCfg, device.deviceToken, payload) : { ok: false })
+				: (apnsCfg
+					? await sendApnsVoiceCall(apnsCfg, device.deviceToken, payload, device.bundleId || apnsCfg.bundleId)
+					: { ok: false })
+			if (result.ok) {
+				delivered += 1
+				logger(Colors.green(
+					`[voiceCallPush] delivered platform=${device.platform} token=${device.deviceToken.slice(0, 8)}… callId=${payload.callId.slice(0, 12)}`,
+				))
+			}
+		}),
+		...iosAlert.map(async device => {
+			if (!apnsCfg) return
+			const result = await sendApnsVoiceCallAlert(
+				apnsCfg,
+				device.deviceToken,
+				payload,
+				device.bundleId || apnsCfg.bundleId,
+			)
+			if (result.ok) {
+				delivered += 1
+				logger(Colors.green(
+					`[voiceCallPush] delivered platform=ios(alert) token=${device.deviceToken.slice(0, 8)}… callId=${payload.callId.slice(0, 12)}`,
+				))
+			}
+		}),
+	])
 	return { success: true, delivered }
 }
 
@@ -728,6 +993,8 @@ export async function pushBadgeToEoa(eoa: string, badge: number): Promise<void> 
 				)
 				return
 			}
+			// VoIP PushKit tokens only accept apns-push-type:voip — never badge/alert.
+			if (d.platform === 'ios_voip') return
 			if (!apnsCfg) {
 				logger(Colors.yellow('[APNs] skip send — credentials not configured (apns_key_id / apns_team_id / apns_p8)'))
 				return
