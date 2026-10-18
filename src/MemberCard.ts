@@ -1177,24 +1177,10 @@ const BUSINESS_START_KET_ADMIN_ABI = [
 	'function addAdmin(address account) external',
 ] as const
 
-/** CoNET：读余额 + adminBurn（发卡前销毁 #0） */
-const BUSINESS_START_KET_BALANCE_BURN_ABI = [
-	'function balanceOf(address account, uint256 id) view returns (uint256)',
-	'function adminBurn(address from, uint256 id, uint256 value) external',
-] as const
-
-const BUSINESS_START_KET_ISSUANCE_TOKEN_ID = 0n
-
 const AA_FACTORY_RESOLVE_FOR_KET_ABI = [
 	'function beamioAccountOf(address) view returns (address)',
 	'function primaryAccountOf(address) view returns (address)',
 ] as const
-
-function businessStartKetCreateCardGateSkipped(): boolean {
-	const v =
-		(typeof process !== 'undefined' && process.env?.BEAMIO_SKIP_BUSINESS_START_KET_GATE?.trim()?.toLowerCase()) || ''
-	return v === '1' || v === 'true' || v === 'yes'
-}
 
 function resolveConetBusinessStartKetAddressForCreateCardGate(): string | null {
 	const raw =
@@ -1275,95 +1261,15 @@ export type CreateCardBusinessStartKetClusterPreCheckResult =
 	| { success: false; error: string }
 
 /**
- * Cluster：发卡前只读预检 — 是否在 CoNET 上持有 BusinessStartKet #0（≥1）。
- * 在 AA→EOA 解析之后调用，同时用原始 cardOwner 与解析后 EOA 及 mint 语义候选地址查余额。
- * `BEAMIO_SKIP_BUSINESS_START_KET_GATE=1` 时跳过（本地/工具）。
+ * Merchant program cards no longer require BusinessStartKet #0.
+ * Factory create does not check or burn that certificate. This precheck stays
+ * so older Cluster callers keep a success result and never set `burnFrom`.
  */
 export async function createCardBusinessStartKetClusterPreCheck(
-	originalCardOwner: string,
-	resolvedCardOwnerEoa: string
+	_originalCardOwner: string,
+	_resolvedCardOwnerEoa: string
 ): Promise<CreateCardBusinessStartKetClusterPreCheckResult> {
-	if (businessStartKetCreateCardGateSkipped()) {
-		return { success: true }
-	}
-	const ketAddr = resolveConetBusinessStartKetAddressForCreateCardGate()
-	if (!ketAddr) {
-		return {
-			success: false,
-			error:
-				'Business starter certificate is not configured on this server (BusinessStartKet). Cannot issue card.',
-		}
-	}
-	const ketRead = new ethers.Contract(ketAddr, BUSINESS_START_KET_BALANCE_BURN_ABI, providerConet)
-	const orig = ethers.getAddress(originalCardOwner)
-	const resolved = ethers.getAddress(resolvedCardOwnerEoa)
-	const candidates: string[] = []
-	const seen = new Set<string>()
-	const push = (a: string) => {
-		const x = ethers.getAddress(a)
-		const k = x.toLowerCase()
-		if (!seen.has(k)) {
-			seen.add(k)
-			candidates.push(x)
-		}
-	}
-	push(orig)
-	push(resolved)
-	for (const candidate of [orig, resolved]) {
-		try {
-			push(await resolveBusinessStartKetMintRecipientEoaOnBase(candidate))
-		} catch {
-			/* ignore */
-		}
-		try {
-			push(await resolveBusinessStartKetMintRecipientEoaOnConet(candidate))
-		} catch {
-			/* ignore */
-		}
-	}
-	for (const holder of candidates) {
-		let bal: bigint
-		try {
-			bal = await ketRead.balanceOf(holder, BUSINESS_START_KET_ISSUANCE_TOKEN_ID)
-		} catch (e: any) {
-			return {
-				success: false,
-				error: `Failed to verify BusinessStartKet balance: ${e?.message ?? e}`,
-			}
-		}
-		if (bal >= 1n) {
-			return { success: true, burnFrom: holder }
-		}
-	}
-	return {
-		success: false,
-		error:
-			'Issuing a merchant card requires one Business Starter Kit certificate on CoNET (BusinessStartKet #0). None found for this wallet.',
-	}
-}
-
-async function burnOneBusinessStartKet0ForCreateCardPool(
-	SC: (typeof Settle_ContractPool)[0],
-	burnFrom: string
-): Promise<{ txHash: string }> {
-	const ketAddr = resolveConetBusinessStartKetAddressForCreateCardGate()
-	if (!ketAddr) {
-		throw new Error('CONET_BUSINESS_START_KET not configured')
-	}
-	const ket = new ethers.Contract(ketAddr, BUSINESS_START_KET_BALANCE_BURN_ABI, SC.walletConet)
-	const from = ethers.getAddress(burnFrom)
-	const bal = await ket.balanceOf(from, BUSINESS_START_KET_ISSUANCE_TOKEN_ID)
-	if (bal < 1n) {
-		throw new Error(
-			'BusinessStartKet #0 balance is insufficient (possible race). Card issuance was aborted.'
-		)
-	}
-	const tx = await ket.adminBurn(from, BUSINESS_START_KET_ISSUANCE_TOKEN_ID, 1n)
-	const receipt = await tx.wait()
-	if (!receipt || Number(receipt.status) !== 1) {
-		throw new Error('BusinessStartKet adminBurn failed or reverted')
-	}
-	return { txHash: receipt.hash }
+	return { success: true }
 }
 
 /**
@@ -14752,9 +14658,9 @@ export type CreateCardPreChecked = {
 		image?: string
 		imageFit?: 'width' | 'height'
 	}
-	/** CoNET BusinessStartKet #0 burn source; set by Cluster after balance precheck (omit when BEAMIO_SKIP_BUSINESS_START_KET_GATE) */
+	/** Legacy field. Card create no longer burns BusinessStartKet #0. */
 	businessStartKetBurnFrom?: string
-	/** Client-supplied cardOwner before Cluster AA→EOA normalization; Master re-verifies burn target */
+	/** Client-supplied cardOwner before Cluster AA→EOA normalization. */
 	createCardOwnerAsRequested?: string
 }
 
@@ -16442,8 +16348,6 @@ export const createCardPoolPress = async () => {
 		tiers,
 		baseMembership,
 		tierQualificationMode,
-		businessStartKetBurnFrom,
-		createCardOwnerAsRequested,
 	} = payload
 
 	// Settle_ContractPool = factory 登记的 owner 列表，shift 取一 admin 用于 RPC，支持多 request 并行（多 admin 同时送上链）
@@ -16566,37 +16470,6 @@ export const createCardPoolPress = async () => {
 			factory
 		)
 		logger(Colors.green(`[createCardPoolPress] card created: ${cardAddress} hash=${hash}`))
-		if (!businessStartKetCreateCardGateSkipped() && businessStartKetBurnFrom) {
-			const burnAddr = ethers.getAddress(businessStartKetBurnFrom)
-			const reVerify = await createCardBusinessStartKetClusterPreCheck(
-				createCardOwnerAsRequested ?? cardOwner,
-				ethers.getAddress(cardOwner)
-			)
-			if (
-				!reVerify.success ||
-				!reVerify.burnFrom ||
-				ethers.getAddress(reVerify.burnFrom) !== burnAddr
-			) {
-				logger(
-					Colors.red(
-						`[createCardPoolPress] BusinessStartKet burn skipped after card create: re-verify failed card=${cardAddress} expected=${burnAddr}`
-					)
-				)
-			} else {
-				logger(Colors.cyan(`[createCardPoolPress] BusinessStartKet adminBurn tokenId=0 amount=1 from=${burnAddr}`))
-				try {
-					const { txHash: ketBurnTxHash } = await burnOneBusinessStartKet0ForCreateCardPool(SC, burnAddr)
-					logger(Colors.green(`[createCardPoolPress] BusinessStartKet burn ok tx=${ketBurnTxHash}`))
-				} catch (burnErr: unknown) {
-					const burnMsg = burnErr instanceof Error ? burnErr.message : String(burnErr)
-					logger(
-						Colors.red(
-							`[createCardPoolPress] card created but BusinessStartKet burn failed card=${cardAddress}: ${burnMsg}`
-						)
-					)
-				}
-			}
-		}
 		await registerCreatedMerchantCardForDiscover({
 			cardAddress,
 			cardOwner,
