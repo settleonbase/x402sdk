@@ -10,6 +10,7 @@ import { ethers } from 'ethers'
 import { CONET_MULTICALL3 } from './chainAddresses'
 import { providerForUserCardChain } from './beamioUserCardChain'
 import { listBeamioCardsCreatedSince } from './db'
+import { omitCardsOwnedByUnhandedAgentTemp } from './endpoint/agentTempDiscoverVisibility'
 import {
 	DISCOVER_NEW_MERCHANT_CARD_ALLOW_AFTER_ISO,
 	passDiscoverFeaturedBrandsMerchantCardPolicy,
@@ -124,5 +125,6 @@ export async function listRewardPtUsdcMerchants(): Promise<RewardPtUsdcMerchantR
 		seen.add(key)
 		cards.push({ cardAddress, cardOwner: String(row.cardOwner ?? '') })
 	}
-	return readRatios(cards)
+	const handed = await omitCardsOwnedByUnhandedAgentTemp(cards)
+	return readRatios(handed)
 }

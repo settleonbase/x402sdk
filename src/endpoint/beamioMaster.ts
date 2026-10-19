@@ -66,6 +66,7 @@ import {
 	passDiscoverFeaturedBrandsMerchantCardPolicy,
 } from './latestCardsShared'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
+import { omitCardsOwnedByUnhandedAgentTemp } from './agentTempDiscoverVisibility'
 import {
 	kickReferralRegistryRedeemRelay,
 	referralRegistryRedeemPool,
@@ -516,8 +517,9 @@ async function computeLatestCardsSuperset(): Promise<BeamioLatestCardItem[]> {
 			// Discover gate 先于 enrichment：exclude / cutover 外的卡不对链上打 RPC
 			const visible = filterLatestCardsByDiscoverMerchantPolicy(raw)
 			const ordered = await ensureDiscoverPinnedLatestCards(visible)
+			const handed = await omitCardsOwnedByUnhandedAgentTemp(ordered)
 			return enrichLatestCardsWithBaseErc1155PointsHolderCounts(
-				ordered,
+				handed,
 				providerBaseForLatestCards,
 			)
 		} finally {

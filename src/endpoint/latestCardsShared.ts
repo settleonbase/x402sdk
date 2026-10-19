@@ -6,6 +6,7 @@ import { isApiExcludedUserCard } from '../apiExcludedUserCards'
  * Featured Brands / Discover 商户可见性 — **全项目唯一标准**（见 `.cursor/rules/beamio-discover-merchant-visibility-single-standard.mdc`）。
  *
  * Gate 第一步：`isApiExcludedUserCard`（含废弃 infrastructure 卡 `0xBCcfA50…`、CCSA 卡 `0x2032A363…` 及 `apiExcludedUserCards.ts` 全集）。
+ * 公开列表在 cutover 之后再去掉 owner 仍是未移交 agent temp 的卡（`agentTempDiscoverVisibility.ts`）。
  * 适用：Featured Brands、`/api/latestCards`、公开优惠券列表等 **对外 Discover 展示**。
  * 不适用：用户已持有资产、POS 终端绑定卡、必填 `cardAddress` 的写操作预检（仍可用 `isApiExcludedUserCard` 硬拒绝废弃地址）。
  */
