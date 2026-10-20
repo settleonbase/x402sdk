@@ -173,20 +173,26 @@ function tryNormalizeLibAddress(s: string | undefined): string | undefined {
  * 解析 BeamioUserCard 链接库地址：显式 override → 环境变量 → chainAddresses 常量。
  * SI / Master 可不传 libraryAddresses，只要已发布版本的 chainAddresses 或进程 env 已配置。
  */
+/** CoNET L1 tx gas hard cap (2^24). Env overrides must not exceed this. */
+const CONET_TX_GAS_LIMIT_CAP = 16_777_216n
 /** 与 Master 失败笔对齐：gas 上限需覆盖 ~25KB initCode 的 CREATE；可用 BEAMIO_CREATE_CARD_GAS_LIMIT 覆盖 */
 const DEFAULT_CREATE_CARD_GAS_LIMIT = 8_500_000n
 /** Factory appendTierForCard after create; available via BEAMIO_APPEND_TIER_GAS_LIMIT */
 const DEFAULT_APPEND_TIER_GAS_LIMIT = 1_000_000n
 
+function clampConetTxGasLimit(n: bigint): bigint {
+  return n > CONET_TX_GAS_LIMIT_CAP ? CONET_TX_GAS_LIMIT_CAP : n
+}
+
 function getCreateCardGasLimit(): bigint {
   const raw = typeof process !== 'undefined' ? process.env?.BEAMIO_CREATE_CARD_GAS_LIMIT?.trim() : undefined
-  if (raw && /^\d+$/.test(raw)) return BigInt(raw)
+  if (raw && /^\d+$/.test(raw)) return clampConetTxGasLimit(BigInt(raw))
   return DEFAULT_CREATE_CARD_GAS_LIMIT
 }
 
 function getAppendTierForCardGasLimit(): bigint {
   const raw = typeof process !== 'undefined' ? process.env?.BEAMIO_APPEND_TIER_GAS_LIMIT?.trim() : undefined
-  if (raw && /^\d+$/.test(raw)) return BigInt(raw)
+  if (raw && /^\d+$/.test(raw)) return clampConetTxGasLimit(BigInt(raw))
   return DEFAULT_APPEND_TIER_GAS_LIMIT
 }
 

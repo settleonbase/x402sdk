@@ -4337,6 +4337,7 @@ const routing = ( router: Router ) => {
 				agent?: string
 				temp?: string
 				merchant?: string
+				card?: string
 				introducer?: string
 				referee?: string
 				nonce?: string
@@ -4358,11 +4359,15 @@ const routing = ( router: Router ) => {
 			) {
 				return res.status(400).json({ success: false, error: 'Missing agent referrer fields' }).end()
 			}
+			if (op === 'registerMerchant' && !b.card) {
+				return res.status(400).json({ success: false, error: 'Missing card for registerMerchant' }).end()
+			}
 			enqueueAgentReferrerRelay({
 				op,
 				agent: b.agent,
 				temp: b.temp,
 				merchant: b.merchant,
+				card: b.card,
 				introducer: b.introducer,
 				referee: b.referee,
 				nonce: String(b.nonce),

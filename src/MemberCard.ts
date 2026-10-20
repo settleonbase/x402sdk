@@ -62,6 +62,7 @@ import {
 } from './membershipFeeMetadata'
 import { readSocialExchangeFromMetadata, REWARD_VOUCHER_TOKEN_ID } from './socialExchangeMetadata'
 import { syncCardProgramReferrerEventsFromReceipt } from './cardProgramReferrerDb'
+import { airdropAgentCreateCardFreeBunit } from './agentReferrerRegistry'
 import { inspect } from 'util'
 import Colors from 'colors/safe'
 import BeamioUserCardABI from './ABI/BeamioUserCard.json'
@@ -403,6 +404,19 @@ async function shiftSettleContractForBaseWrite(logTag: string): Promise<SettleCo
 
 /** CoNET EntryPoint relay（claim / handleOps）预估 gas 上限偏大，中继 EOA 须有足够原生 CNET。 */
 const SETTLE_CONET_RELAY_MIN_WEI = ethers.parseEther('0.05')
+
+/**
+ * CoNET EL hard cap on transaction gasLimit (2^24). Requests above this are rejected by RPC
+ * before broadcast (`transaction gas limit too high`) — surfaces as ethers "could not coalesce error".
+ */
+const CONET_TX_GAS_LIMIT_CAP = 16_777_216n
+/** Default outer gas for Factory.relayHandleOps on CoNET (must be ≤ CONET_TX_GAS_LIMIT_CAP). */
+const DEFAULT_RELAY_HANDLE_OPS_GAS_LIMIT = 16_000_000n
+
+function resolveRelayHandleOpsGasLimit(requested?: bigint): bigint {
+	const n = requested != null && requested > 0n ? requested : DEFAULT_RELAY_HANDLE_OPS_GAS_LIMIT
+	return n > CONET_TX_GAS_LIMIT_CAP ? CONET_TX_GAS_LIMIT_CAP : n
+}
 
 type ShiftSettleConetRelayResult =
 	| { ok: true; SC: SettleContractPoolEntry }
@@ -3999,6 +4013,53 @@ export async function pickBUnitFeeConsumerPreferEoaThenAa(
 	opts?: { aaFactoryAddress?: string | null; aaFactoryProvider?: ethers.Provider | null; explicitAaFallback?: string | null }
 ): Promise<{ ok: true; consumer: string; usedAaFallback: boolean } | { ok: false; error: string }> {
 	return pickBUnitFeeConsumer(payerEoa, feeBUnits6, { ...opts, preferAa: false })
+}
+
+/**
+ * Merchant B-Unit service fees: prefer the merchant program card address first.
+ * On-chain `consumeFuel` burns free pool then paid pool on that address.
+ * If the card balance is insufficient, fall back to owner EOA then owner AA
+ * (`pickBUnitFeeConsumerPreferEoaThenAa`).
+ */
+export async function pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+	merchantCardAddress: string | null | undefined,
+	ownerEoa: string,
+	feeBUnits6: bigint,
+	opts?: {
+		aaFactoryAddress?: string | null
+		aaFactoryProvider?: ethers.Provider | null
+		explicitAaFallback?: string | null
+	}
+): Promise<
+	| { ok: true; consumer: string; usedAaFallback: boolean; usedMerchantCard: boolean }
+	| { ok: false; error: string }
+> {
+	if (feeBUnits6 <= 0n) {
+		return { ok: false, error: 'B-Unit fee amount must be > 0' }
+	}
+	let cardBalHint = ''
+	if (merchantCardAddress && ethers.isAddress(merchantCardAddress)) {
+		const cardN = ethers.getAddress(merchantCardAddress)
+		const bunitAirdropRead = new ethers.Contract(
+			CONET_BUNIT_AIRDROP_ADDRESS,
+			['function getBUnitBalance(address) view returns (uint256)'],
+			providerConet
+		)
+		try {
+			const balCard = (await bunitAirdropRead.getBUnitBalance(cardN)) as bigint
+			cardBalHint = `, merchant card balance ${Number(balCard) / 1e6}`
+			if (balCard >= feeBUnits6) {
+				return { ok: true, consumer: cardN, usedAaFallback: false, usedMerchantCard: true }
+			}
+		} catch {
+			cardBalHint = ', merchant card balance unreadable'
+		}
+	}
+	const ownerPick = await pickBUnitFeeConsumerPreferEoaThenAa(ownerEoa, feeBUnits6, opts)
+	if (!ownerPick.ok) {
+		return { ok: false, error: `${ownerPick.error}${cardBalHint}` }
+	}
+	return { ...ownerPick, usedMerchantCard: false }
 }
 
 export const executeForAdminProcess = async () => {
@@ -9368,7 +9429,7 @@ export function calcTopupBUnitFeeFromUsdcNotional(_amountUSDC6: bigint): { feeUS
 	return calcTopupFixedBUnitFee()
 }
 
-/** Cluster 阻塞预检：卡 owner 在 BUnitAirdrop 账本须 ≥ 社交费（0.1 B-Unit）。不足则不得使用 Like / Share Click 等网络能力。 */
+/** Cluster 阻塞预检：商家卡（free→paid）再 owner EOA/AA 须 ≥ 社交费（0.1 B-Unit）。不足则不得使用 Like / Share Click 等网络能力。 */
 export const cardProgramSocialBunitFeePreCheck = async (
 	cardAddr: string
 ): Promise<{ success: true; cardOwnerEOA: string; feeAmount: bigint } | { success: false; error: string }> => {
@@ -9384,9 +9445,12 @@ export const cardProgramSocialBunitFeePreCheck = async (
 		}
 		const { bServiceUnits6: feeAmount } = calcSocialEngagementBUnitFee()
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddress)
-		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(resolveResult.cardOwner, feeAmount, {
-			aaFactoryAddress: aaFactoryAddr,
-		})
+		const picked = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+			cardAddress,
+			resolveResult.cardOwner,
+			feeAmount,
+			{ aaFactoryAddress: aaFactoryAddr }
+		)
 		if (!picked.ok) {
 			return {
 				success: false,
@@ -9403,7 +9467,7 @@ export const cardProgramSocialBunitFeePreCheck = async (
 	}
 }
 
-/** Cluster 预检（mintPointsByAdmin / NFC 与 QR 同路径）：卡发行方 owner 的 B-Units 是否足够。
+/** Cluster 预检（mintPointsByAdmin / NFC 与 QR 同路径）：商家卡再 owner 的 B-Units 是否足够。
  * 规则：每笔 topup 固定 **20 B-Unit**（与 topup 金额无关）。不再区分是否首次发卡。
  */
 export const nfcTopupPreCheckBUnitFee = async (
@@ -9432,7 +9496,7 @@ export const nfcTopupPreCheckBUnitFee = async (
 		const { feeBUnits6: feeAmount } = calcTopupFixedBUnitFee()
 		const topupKind = KIND_CARD_TOPUP as 2 | 3
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
-		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeAmount, {
+		const picked = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(cardAddr, cardOwnerEOA, feeAmount, {
 			aaFactoryAddress: aaFactoryAddr,
 		})
 		if (!picked.ok) {
@@ -9450,7 +9514,7 @@ export const nfcTopupPreCheckBUnitFee = async (
 	}
 }
 
-/** Cluster 预检：Charge 客户 #0 burn（nfcTopup + burnPointsByAdmin）— 卡 owner 固定 **5 B-Unit**。 */
+/** Cluster 预检：Charge 客户 #0 burn（nfcTopup + burnPointsByAdmin）— 商家卡再 owner 固定 **5 B-Unit**。 */
 export const nfcTopupPreCheckChargeBurnBUnitFee = async (
 	cardAddr: string
 ): Promise<{ success: boolean; error?: string; cardOwnerEOA?: string; feeAmount?: bigint; topupKind?: 1 }> => {
@@ -9471,7 +9535,7 @@ export const nfcTopupPreCheckChargeBurnBUnitFee = async (
 		const cardOwnerEOA = resolveResult.cardOwner
 		const { bServiceUnits6: feeAmount } = calcChargeFixedBUnitFee()
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardNorm)
-		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeAmount, {
+		const picked = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(cardNorm, cardOwnerEOA, feeAmount, {
 			aaFactoryAddress: aaFactoryAddr,
 			aaFactoryProvider: cardProvider,
 		})
@@ -9696,8 +9760,9 @@ export const resolveChargeFeePayerCardFromOpenContainerItems = (items: { kind: n
 }
 
 /**
- * Charge 路径 B-Unit 扣费地址：收款侧 BeamioUserCard（与 resolveChargeFeePayerCardFromOpenContainerItems 同源）的 owner()，
- * 不再按 admin 层级由 upperAdmin/subordinate 承担。
+ * Charge 路径 B-Unit：解析收款侧 BeamioUserCard 的 owner()（EOA）。
+ * 实际扣款优先走商家卡合约余额（free→paid），不足再扣 owner EOA/AA —
+ * 见 `pickBUnitFeeConsumerPreferMerchantCardThenOwner`。
  */
 export const resolveChargeBUnitFeePayerCardOwner = async (
 	provider: ethers.Provider,
@@ -9755,7 +9820,7 @@ export const resolveChargeFeePayer = async (
 	return { feePayerEOA, payeeEOA }
 }
 
-/** Cluster 预检：Charge（OpenContainer）由收款侧卡 owner 承担 B-Unit，每笔固定 5 B-Units。 */
+/** Cluster 预检：Charge（OpenContainer）先扣商家卡再扣 owner，每笔固定 5 B-Units。 */
 export const OpenContainerRelayPreCheckBUnitFee = async (
 	payload: OpenContainerRelayPayload,
 	_currency: string | string[],
@@ -9770,7 +9835,7 @@ export const OpenContainerRelayPreCheckBUnitFee = async (
 		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
 		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(cardProvider, itemSlice)
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
-		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
+		const picked = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(cardAddr, feePayerOwnerEoa, feeBUnits6, {
 			aaFactoryAddress: aaFactoryAddr,
 			aaFactoryProvider: cardProvider,
 		})
@@ -9789,7 +9854,7 @@ export const OpenContainerRelayPreCheckBUnitFee = async (
 	}
 }
 
-/** Cluster 预检：Container 路径下由收款侧卡 owner 承担 B-Unit，每笔固定 5 B-Units。currency/currencyAmount 仅用于校验存在正金额（与转账语义一致）。 */
+/** Cluster 预检：Container 路径先扣商家卡再扣 owner，每笔固定 5 B-Units。currency/currencyAmount 仅用于校验存在正金额（与转账语义一致）。 */
 export const ContainerRelayPreCheckBUnitBalance = async (
 	containerPayload: ContainerRelayPayload,
 	currency?: string | string[],
@@ -9812,7 +9877,7 @@ export const ContainerRelayPreCheckBUnitBalance = async (
 		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
 		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(cardProvider, itemSlice)
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
-		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
+		const picked = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(cardAddr, feePayerOwnerEoa, feeBUnits6, {
 			aaFactoryAddress: aaFactoryAddr,
 			aaFactoryProvider: cardProvider,
 		})
@@ -10188,16 +10253,19 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 			)
 		}
 		let nfcTopupBunitConsumeTxHash: string | null = null
-		/** 与预检一致：优先卡 issuer EOA，不足则扣其 Beamio AA */
+		/** 与预检一致：先扣商家卡（free→paid），不足再扣 owner EOA→AA */
 		let topupBunitFeePayerResolved: string | null = null
 		if (baseTxOk && obj.cardOwnerEOA && obj.topupFeeBUnits && obj.topupFeeBUnits > 0n) {
 			let topupFeeConsumer = ethers.getAddress(obj.cardOwnerEOA)
 			try {
 				if (ethers.isAddress(obj.cardAddr)) {
 					const aaFacTop = await getCardAaFactoryAddress(obj.cardAddr)
-					const pickedTop = await pickBUnitFeeConsumerPreferEoaThenAa(topupFeeConsumer, obj.topupFeeBUnits, {
-						aaFactoryAddress: aaFacTop,
-					})
+					const pickedTop = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+						obj.cardAddr,
+						topupFeeConsumer,
+						obj.topupFeeBUnits,
+						{ aaFactoryAddress: aaFacTop }
+					)
 					if (pickedTop.ok) {
 						topupFeeConsumer = pickedTop.consumer
 					} else {
@@ -11418,9 +11486,12 @@ export const purchasingCardProcess = async () => {
 			let topupFeeConsumer = cardOwnerEOAForBunit
 			try {
 				const aaFacTop = await getCardAaFactoryAddress(cardAddress)
-				const pickedTop = await pickBUnitFeeConsumerPreferEoaThenAa(topupFeeConsumer, topupFeeBUnitsForJob, {
-					aaFactoryAddress: aaFacTop,
-				})
+				const pickedTop = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+					cardAddress,
+					topupFeeConsumer,
+					topupFeeBUnitsForJob,
+					{ aaFactoryAddress: aaFacTop }
+				)
 				if (pickedTop.ok) {
 					topupFeeConsumer = pickedTop.consumer
 				} else {
@@ -11889,7 +11960,9 @@ export async function relayUserCardFactoryCallViaEntryPoint(params: {
 			`[${params.logTag}] relay via EntryPoint=${relayer.entryPointAddress} aaFactory=${relayer.aaFactoryAddress} relayerAA=${relayer.aaAccount} target=${factoryAddress} userOpNonce=${nonce.toString()}`
 		)
 	)
-	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, { gasLimit: params.gasLimit ?? 20_000_000n })
+	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, {
+		gasLimit: resolveRelayHandleOpsGasLimit(params.gasLimit),
+	})
 }
 
 /**
@@ -11983,7 +12056,9 @@ export async function relayUserCardCallViaEntryPoint(params: {
 			`[${params.logTag}] relay card direct via EntryPoint=${relayer.entryPointAddress} relayerAA=${relayer.aaAccount} card=${cardAddress} userOpNonce=${nonce.toString()}`
 		)
 	)
-	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, { gasLimit: params.gasLimit ?? 20_000_000n })
+	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, {
+		gasLimit: resolveRelayHandleOpsGasLimit(params.gasLimit),
+	})
 }
 
 /**
@@ -12060,7 +12135,7 @@ export async function relayUserCardBatchViaEntryPoint(params: {
 		),
 	)
 	return relayer.aaFactory.relayHandleOps([txOp], beneficiary, {
-		gasLimit: params.gasLimit ?? 30_000_000n,
+		gasLimit: resolveRelayHandleOpsGasLimit(params.gasLimit),
 	})
 }
 
@@ -12174,7 +12249,9 @@ export async function submitAAAccountCreationViaEntryPoint(params: {
 			preVerificationGas: asBigInt(submitted.preVerificationGas, 0n),
 			signature: ethers.getBytes(signature),
 		}
-		const tx = await relayFactory.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+		const tx = await relayFactory.relayHandleOps([txOp], beneficiary, {
+			gasLimit: resolveRelayHandleOpsGasLimit(),
+		})
 		logger(Colors.cyan(`[aaCreateViaEntryPoint] relayHandleOps submitted tx=${tx.hash} aa=${prepared.aa}`))
 		const receipt = await tx.wait()
 		if (!receipt) throw new Error('relayHandleOps tx.wait() returned null')
@@ -12800,7 +12877,9 @@ export const AAtoEOAProcess = async () => {
     if (relayChain === 'conet') {
       const relayFactory = new ethers.Contract(pmFromOp, BeamioAAAccountFactoryPaymasterABI, relayWallet)
       const txOp = { ...packedOp, signature: sigBytes }
-      tx = await relayFactory.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+      tx = await relayFactory.relayHandleOps([txOp], beneficiary, {
+        gasLimit: resolveRelayHandleOpsGasLimit(),
+      })
       logger(`[AAtoEOA] CoNET relayHandleOps tx submitted hash=${tx.hash}`)
     } else {
       tx = await entryPoint.handleOps([packedOp], beneficiary)
@@ -13201,7 +13280,9 @@ export const OpenContainerRelayProcess = async () => {
       signature: sigBytes,
     }
     const beneficiary = await relayWallet.getAddress()
-    const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+    const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, {
+      gasLimit: resolveRelayHandleOpsGasLimit(),
+    })
     logger(`[AAtoEOA/OpenContainer] EntryPoint relayHandleOps tx submitted hash=${tx.hash}`)
     const openRelayReceipt = await tx.wait().catch((waitErr: any) => {
       try {
@@ -13392,10 +13473,15 @@ export const OpenContainerRelayProcess = async () => {
       const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcChargeFixedBUnitFee()
       const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(relayProvider, feePayerItems)
       const aaFactoryOpen = await getCardAaFactoryAddress(feePayerCard)
-      const feePayerPickOpen = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoa, feeBUnits6, {
-        aaFactoryAddress: aaFactoryOpen,
-        aaFactoryProvider: relayProvider,
-      })
+      const feePayerPickOpen = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+        feePayerCard,
+        feePayerOwnerEoa,
+        feeBUnits6,
+        {
+          aaFactoryAddress: aaFactoryOpen,
+          aaFactoryProvider: relayProvider,
+        }
+      )
       const feePayerEOA = feePayerPickOpen.ok ? feePayerPickOpen.consumer : feePayerOwnerEoa
       if (!feePayerPickOpen.ok) {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] B-Unit payer pick failed at master, fallback EOA for consume: ${feePayerPickOpen.error}`))
@@ -13902,7 +13988,9 @@ export const ContainerRelayProcess = async () => {
           `[AAtoEOA/Container] relayHandleOps via EntryPoint=${entryPointAddress} userOpNonce=${userOpNonce.toString()} callDataBytes=${hexBytesLen(callData)} chain=${relayCtxC.chain}`
         )
       )
-      tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+      tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, {
+        gasLimit: resolveRelayHandleOpsGasLimit(),
+      })
       logger(`[AAtoEOA/Container] EntryPoint relayHandleOps tx submitted hash=${tx.hash}`)
     } else {
       logger(Colors.yellow('[AAtoEOA/Container] legacy direct relay path used for non-NFC container payload'))
@@ -13961,10 +14049,15 @@ export const ContainerRelayProcess = async () => {
     const feePayerCardContainer = resolveChargeFeePayerCardFromOpenContainerItems(feePayerItems)
     const { bServiceUnits6: feeBUnits6, bServiceUSDC6: containerBUsdc6 } = calcChargeFixedBUnitFee()
     const aaFactoryContainer = await getCardAaFactoryAddress(feePayerCardContainer)
-    const feePayerPickContainer = await pickBUnitFeeConsumerPreferEoaThenAa(feePayerOwnerEoaContainer, feeBUnits6, {
-      aaFactoryAddress: aaFactoryContainer,
-      aaFactoryProvider: relayProviderC,
-    })
+    const feePayerPickContainer = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+      feePayerCardContainer,
+      feePayerOwnerEoaContainer,
+      feeBUnits6,
+      {
+        aaFactoryAddress: aaFactoryContainer,
+        aaFactoryProvider: relayProviderC,
+      }
+    )
     const feePayerEOA = feePayerPickContainer.ok ? feePayerPickContainer.consumer : feePayerOwnerEoaContainer
     if (!feePayerPickContainer.ok) {
       logger(Colors.yellow(`[AAtoEOA/Container] B-Unit payer pick failed at master, fallback EOA: ${feePayerPickContainer.error}`))
@@ -16485,6 +16578,8 @@ export const createCardPoolPress = async () => {
 			txHash: hash,
 		})
 		if (res && !res.headersSent) res.status(200).json({ success: true, cardAddress, hash }).end()
+		// Agent/temp create: airdrop 200 free B-Unit to the merchant card (background; non-blocking).
+		airdropAgentCreateCardFreeBunit(cardAddress, cardOwner)
 		// Always write card0 after create so Loyalty Rule Type (upgradeType 0/1/2 + Charge flags)
 		// survives beacon upgradeType() often stuck at 0. Do not gate on share/tiers/base alone.
 		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
@@ -20204,14 +20299,18 @@ export const cardCreateIssuedNftPreCheck = async (body: {
 			const rawOwn = await cardForOwnerProbe.owner()
 			const ro = await resolveCardOwnerToEOA(cardProvider, rawOwn as string)
 			if (!ro.success) return { success: false, error: ro.error ?? 'Cannot resolve card owner for B-Unit fee' }
-			const aaFc = await getCardAaFactoryAddress(ethers.getAddress(cardAddress))
-			const pickBu = await pickBUnitFeeConsumerPreferEoaThenAa(ro.cardOwner, CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6, {
-				aaFactoryAddress: aaFc,
-			})
+			const cardAddrN = ethers.getAddress(cardAddress)
+			const aaFc = await getCardAaFactoryAddress(cardAddrN)
+			const pickBu = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+				cardAddrN,
+				ro.cardOwner,
+				CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6,
+				{ aaFactoryAddress: aaFc }
+			)
 			if (!pickBu.ok) {
 				return {
 					success: false,
-					error: `Insufficient B-Units for createIssuedNft: merchant (card owner) must have at least ${Number(CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6) / 1e6} B-Units. ${pickBu.error}`,
+					error: `Insufficient B-Units for createIssuedNft: merchant card (then owner) must have at least ${Number(CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6) / 1e6} B-Units. ${pickBu.error}`,
 				}
 			}
 		} catch (eBu: any) {
@@ -21040,9 +21139,12 @@ export async function chargeCardProgramSocialBunitFeeInBackground(args: {
 		}
 		const { bServiceUnits6 } = calcSocialEngagementBUnitFee()
 		const aaFac = await getCardAaFactoryAddress(cardAddrN)
-		const pickedFee = await pickBUnitFeeConsumerPreferEoaThenAa(resolveResult.cardOwner, bServiceUnits6, {
-			aaFactoryAddress: aaFac,
-		})
+		const pickedFee = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+			cardAddrN,
+			resolveResult.cardOwner,
+			bServiceUnits6,
+			{ aaFactoryAddress: aaFac }
+		)
 		if (!pickedFee.ok) {
 			logger(Colors.yellow(`[${args.logTag}] skip social B-Unit: ${pickedFee.error}`))
 			return
@@ -21119,7 +21221,8 @@ async function consumeCreateIssuedNftBunitFeeInBackground(
 		}
 		const cardOwnerEOA = resolveResult.cardOwner
 		const aaFac = await getCardAaFactoryAddress(cardAddrN)
-		const pickedFee = await pickBUnitFeeConsumerPreferEoaThenAa(
+		const pickedFee = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+			cardAddrN,
 			cardOwnerEOA,
 			CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6,
 			{ aaFactoryAddress: aaFac }
@@ -21868,7 +21971,7 @@ export const cardRedeemPreCheckBUnitBalance = async (
 		const { bServiceUnits6: chargeFee } = calcChargeFixedBUnitFee()
 		const feeBUnits6 = isGiftRedeem ? topupFee : chargeFee
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardNorm)
-		const picked = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOA, feeBUnits6, {
+		const picked = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(cardNorm, cardOwnerEOA, feeBUnits6, {
 			aaFactoryAddress: aaFactoryAddr,
 			aaFactoryProvider: cardProvider,
 		})
@@ -22432,7 +22535,9 @@ async function relaySignedRewardPtOpenContainer(params: {
 		signature: sigBytes,
 	}
 	const beneficiary = await relayWallet.getAddress()
-	const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, { gasLimit: 20_000_000n })
+	const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, {
+		gasLimit: resolveRelayHandleOpsGasLimit(),
+	})
 	const receipt = await tx.wait().catch(() => null)
 	const checked = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
 		expectedSender: account,
@@ -22708,9 +22813,12 @@ export const purchasingCardPreCheck = async (
 		}
 		const cardOwnerEOABunit = resolveOwnerForBunit.cardOwner
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddress)
-		const pickedBunit = await pickBUnitFeeConsumerPreferEoaThenAa(cardOwnerEOABunit, feeBUnits6, {
-			aaFactoryAddress: aaFactoryAddr,
-		})
+		const pickedBunit = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
+			cardAddress,
+			cardOwnerEOABunit,
+			feeBUnits6,
+			{ aaFactoryAddress: aaFactoryAddr }
+		)
 		if (!pickedBunit.ok) {
 			return { success: false, error: `Insufficient B-Units for topup (${pickedBunit.error})` }
 		}

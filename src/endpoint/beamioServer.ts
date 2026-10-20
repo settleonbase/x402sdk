@@ -12250,6 +12250,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					'function agentOfTemp(address) view returns (address)',
 					'function agentOfMerchant(address) view returns (address)',
 					'function introducerOf(address) view returns (address)',
+					'function activeTempCountOf(address) view returns (uint256)',
+					'function MAX_ACTIVE_TEMPS_PER_AGENT() view returns (uint256)',
 					'function agents(address) view returns (bool active, uint64 registeredAt)',
 					'function temps(address) view returns (address agent, uint64 registeredAt)',
 					'function merchants(address) view returns (address agent, address temp, uint64 registeredAt)',
@@ -12262,13 +12264,16 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				return res.status(400).json({ success: false, error: 'address required' }).end()
 			}
 			const address = ethers.getAddress(addressRaw)
-			const [nonce, agentActive, agentOfTemp, agentOfMerchant, introducer] = await Promise.all([
-				registry.nonces!(address),
-				registry.isAgent!(address),
-				registry.agentOfTemp!(address),
-				registry.agentOfMerchant!(address),
-				registry.introducerOf!(address),
-			])
+			const [nonce, agentActive, agentOfTemp, agentOfMerchant, introducer, activeTempCount, maxActiveTemps] =
+				await Promise.all([
+					registry.nonces!(address),
+					registry.isAgent!(address),
+					registry.agentOfTemp!(address),
+					registry.agentOfMerchant!(address),
+					registry.introducerOf!(address),
+					registry.activeTempCountOf!(address).catch(() => null),
+					registry.MAX_ACTIVE_TEMPS_PER_AGENT!().catch(() => null),
+				])
 			return res
 				.status(200)
 				.json({
@@ -12280,6 +12285,8 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					agentOfTemp: String(agentOfTemp),
 					agentOfMerchant: String(agentOfMerchant),
 					introducerOf: String(introducer),
+					activeTempCount: activeTempCount == null ? null : activeTempCount.toString(),
+					maxActiveTemps: maxActiveTemps == null ? null : maxActiveTemps.toString(),
 					domain: AGENT_REFERRER_EIP712_DOMAIN,
 					types: AGENT_REFERRER_TYPES,
 					chainId: 224422,
@@ -12300,6 +12307,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				agent?: string
 				temp?: string
 				merchant?: string
+				card?: string
 				introducer?: string
 				referee?: string
 				nonce?: string | number
@@ -12327,7 +12335,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					'function isAgent(address) view returns (bool)',
 					'function agentOfTemp(address) view returns (address)',
 					'function agentOfMerchant(address) view returns (address)',
+					'function agentReferrerOfCard(address) view returns (address)',
 					'function introducerOf(address) view returns (address)',
+					'function activeTempCountOf(address) view returns (uint256)',
+					'function MAX_ACTIVE_TEMPS_PER_AGENT() view returns (uint256)',
 				],
 				providerConet,
 			)
@@ -12361,11 +12372,27 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				if (existing && existing !== ethers.ZeroAddress) {
 					return res.status(400).json({ success: false, error: 'TempAlreadyBound' }).end()
 				}
+				const [activeCount, maxActive] = await Promise.all([
+					registry.activeTempCountOf!(agent),
+					registry.MAX_ACTIVE_TEMPS_PER_AGENT!(),
+				])
+				if (BigInt(activeCount) >= BigInt(maxActive)) {
+					return res
+						.status(400)
+						.json({
+							success: false,
+							error: 'TooManyActiveTemps',
+							activeTempCount: activeCount.toString(),
+							maxActiveTemps: maxActive.toString(),
+						})
+						.end()
+				}
 			} else if (op === 'registerMerchant') {
 				const agent = ethers.getAddress(String(b.agent ?? ''))
 				const merchant = ethers.getAddress(String(b.merchant ?? ''))
 				const temp = ethers.getAddress(String(b.temp ?? ethers.ZeroAddress))
-				value = { agent, merchant, temp, nonce, deadline }
+				const card = ethers.getAddress(String(b.card ?? ''))
+				value = { agent, merchant, temp, card, nonce, deadline }
 				primaryTypes = AGENT_REFERRER_TYPES.RegisterMerchant
 				typeName = 'RegisterMerchant'
 				signerAddress = agent
@@ -12375,6 +12402,10 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				const existing = await registry.agentOfMerchant!(merchant)
 				if (existing && existing !== ethers.ZeroAddress) {
 					return res.status(400).json({ success: false, error: 'MerchantAlreadyBound' }).end()
+				}
+				const existingCardReferrer = await registry.agentReferrerOfCard!(card)
+				if (existingCardReferrer && existingCardReferrer !== ethers.ZeroAddress) {
+					return res.status(400).json({ success: false, error: 'CardAlreadyHasAgentReferrer' }).end()
 				}
 				if (temp !== ethers.ZeroAddress) {
 					const tempAgent = await registry.agentOfTemp!(temp)
@@ -12413,6 +12444,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					agent: b.agent,
 					temp: b.temp,
 					merchant: b.merchant,
+					card: b.card,
 					introducer: b.introducer,
 					referee: b.referee,
 					nonce: nonce.toString(),

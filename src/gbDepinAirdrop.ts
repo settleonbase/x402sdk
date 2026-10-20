@@ -317,9 +317,14 @@ function resolveGbDepinAirdropPageSize(): number {
 	return Number.isFinite(raw) && raw >= 1 ? Math.min(Math.floor(raw), 500) : 10
 }
 
+/** CoNET EL tx gas hard cap (2^24); higher → RPC reject before broadcast. */
+const CONET_TX_GAS_LIMIT_CAP = 16_777_216n
+
 function resolveGbDepinAirdropMaxGasLimit(): bigint {
-	const raw = Number(process.env.CONET_GB_DEPIN_AIRDROP_MAX_GAS_LIMIT ?? 18_000_000)
-	return Number.isFinite(raw) && raw >= 500_000 ? BigInt(Math.floor(raw)) : 18_000_000n
+	const raw = Number(process.env.CONET_GB_DEPIN_AIRDROP_MAX_GAS_LIMIT ?? 16_000_000)
+	const n =
+		Number.isFinite(raw) && raw >= 500_000 ? BigInt(Math.floor(raw)) : 16_000_000n
+	return n > CONET_TX_GAS_LIMIT_CAP ? CONET_TX_GAS_LIMIT_CAP : n
 }
 
 /** Only submit when eth_gasPrice ≤ this many gwei (default 2). CONET often sits at exactly 2.0 gwei — use ≤. */

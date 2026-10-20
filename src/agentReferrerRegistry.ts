@@ -8,13 +8,18 @@ import { ethers } from 'ethers'
 import type { Response } from 'express'
 import Colors from 'colors/safe'
 import { logger } from './logger'
-import { CONET_AGENT_REFERRER_REGISTRY } from './chainAddresses'
+import { CONET_AGENT_REFERRER_REGISTRY, CONET_BUINT } from './chainAddresses'
 import {
 	ensureSettleContractPoolInitialized,
 	hasIdleSettleConet,
 	shiftSettleConet,
 	unshiftSettleConet,
 } from './settleContractPool'
+
+/** Free B-Unit airdrop when an agent temp creates a merchant card (1 B-Unit = 1e6). */
+export const AGENT_CREATE_CARD_FREE_BUNIT_UNITS6 = 200_000_000n // 200 free B-Unit → merchant card contract
+/** Free B-Unit airdrop when agent hands off a merchant card (1 B-Unit = 1e6). */
+export const AGENT_HANDOFF_FREE_BUNIT_UNITS6 = 1_000_000_000n // 1000 free B-Unit → agent EOA
 
 ensureSettleContractPoolInitialized()
 
@@ -42,6 +47,7 @@ export const AGENT_REFERRER_TYPES: Record<string, Array<{ name: string; type: st
 		{ name: 'agent', type: 'address' },
 		{ name: 'merchant', type: 'address' },
 		{ name: 'temp', type: 'address' },
+		{ name: 'card', type: 'address' },
 		{ name: 'nonce', type: 'uint256' },
 		{ name: 'deadline', type: 'uint256' },
 	],
@@ -56,9 +62,11 @@ export const AGENT_REFERRER_TYPES: Record<string, Array<{ name: string; type: st
 const REGISTRY_WRITE_ABI = [
 	'function registerAgentWithSig(address agent,uint256 nonce,uint256 deadline,bytes signature)',
 	'function registerTempWithSig(address agent,address temp,uint256 nonce,uint256 deadline,bytes signature)',
-	'function registerMerchantWithSig(address agent,address merchant,address temp,uint256 nonce,uint256 deadline,bytes signature)',
+	'function registerMerchantWithSig(address agent,address merchant,address temp,address card,uint256 nonce,uint256 deadline,bytes signature)',
 	'function registerReferrerWithSig(address introducer,address referee,uint256 nonce,uint256 deadline,bytes signature)',
 ] as const
+
+const BUNIT_REWARD_ABI = ['function mintReward(address to, uint256 amount)'] as const
 
 export type AgentReferrerOp = 'registerAgent' | 'registerTemp' | 'registerMerchant' | 'registerReferrer'
 
@@ -67,6 +75,7 @@ type AgentReferrerJob = {
 	agent?: string
 	temp?: string
 	merchant?: string
+	card?: string
 	introducer?: string
 	referee?: string
 	nonce: string
@@ -159,11 +168,88 @@ export function kickAgentReferrerRelay(): void {
 	drainAgentReferrerRelay()
 }
 
+/**
+ * Background: 200 free B-Unit to the merchant card contract after temp/agent create succeeds.
+ * Call after HTTP create response; failure must not affect create success.
+ * Only runs when `agentOfTemp(cardOwner) != 0` (card created under an agent temp).
+ */
+export function airdropAgentCreateCardFreeBunit(cardAddress: string, cardOwner: string): void {
+	void (async () => {
+		const card = ethers.getAddress(cardAddress)
+		const owner = ethers.getAddress(cardOwner)
+		const SC = shiftSettleConet()
+		if (!SC) {
+			logger(
+				Colors.yellow(
+					`[agentReferrerRelay] create-card free B-Unit skipped (settle busy) card=${card} owner=${owner}`,
+				),
+			)
+			return
+		}
+		try {
+			const registry = new ethers.Contract(
+				CONET_AGENT_REFERRER_REGISTRY,
+				['function agentOfTemp(address) view returns (address)'],
+				SC.walletConet,
+			)
+			const agent = (await registry.agentOfTemp!(owner)) as string
+			if (!agent || agent === ethers.ZeroAddress) return
+
+			const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
+			const tx = await bunit.mintReward!(card, AGENT_CREATE_CARD_FREE_BUNIT_UNITS6)
+			const receipt = await tx.wait()
+			if (receipt?.status !== 1) throw new Error('mintReward reverted')
+			logger(
+				Colors.green(
+					`[agentReferrerRelay] create-card free B-Unit ok card=${card} agent=${agent} units=200 tx=${tx.hash}`,
+				),
+			)
+		} catch (e: unknown) {
+			const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e)
+			logger(Colors.yellow(`[agentReferrerRelay] create-card free B-Unit failed: ${msg}`))
+		} finally {
+			unshiftSettleConet(SC)
+		}
+	})()
+}
+
+/** Background: 1000 free B-Unit to agent after merchant handoff is confirmed on-chain. */
+function airdropAgentHandoffFreeBunit(agentEoa: string, cardAddress: string): void {
+	void (async () => {
+		const SC = shiftSettleConet()
+		if (!SC) {
+			logger(
+				Colors.yellow(
+					`[agentReferrerRelay] handoff free B-Unit skipped (settle busy) agent=${agentEoa} card=${cardAddress}`,
+				),
+			)
+			return
+		}
+		try {
+			const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
+			const tx = await bunit.mintReward!(ethers.getAddress(agentEoa), AGENT_HANDOFF_FREE_BUNIT_UNITS6)
+			const receipt = await tx.wait()
+			if (receipt?.status !== 1) throw new Error('mintReward reverted')
+			logger(
+				Colors.green(
+					`[agentReferrerRelay] handoff free B-Unit ok agent=${agentEoa} card=${cardAddress} units=1000 tx=${tx.hash}`,
+				),
+			)
+		} catch (e: unknown) {
+			const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e)
+			logger(Colors.yellow(`[agentReferrerRelay] handoff free B-Unit failed: ${msg}`))
+		} finally {
+			unshiftSettleConet(SC)
+		}
+	})()
+}
+
 export function enqueueAgentReferrerRelay(input: {
 	op: AgentReferrerOp
 	agent?: string
 	temp?: string
 	merchant?: string
+	card?: string
 	introducer?: string
 	referee?: string
 	nonce: string
@@ -203,6 +289,7 @@ export function enqueueAgentReferrerRelay(input: {
 		agent: input.agent,
 		temp: input.temp,
 		merchant: input.merchant,
+		card: input.card,
 		introducer: input.introducer,
 		referee: input.referee,
 		nonce: input.nonce,
@@ -255,10 +342,11 @@ async function relayJob(
 				ethers.getAddress(job.agent!),
 				ethers.getAddress(job.merchant!),
 				ethers.getAddress(job.temp || ethers.ZeroAddress),
+				ethers.getAddress(job.card!),
 				BigInt(job.nonce),
 				BigInt(job.deadline),
 				job.signature,
-				gas,
+				{ gasLimit: 320_000 },
 			)
 		} else {
 			tx = await registry.registerReferrerWithSig!(
@@ -277,6 +365,9 @@ async function relayJob(
 			state.txHash = tx.hash
 			respondToWaiters(state.waiters, 200, { success: true, txHash: tx.hash, op: job.op })
 			forgetStateLater(job.requestKey, state)
+		}
+		if (job.op === 'registerMerchant' && job.agent && job.card) {
+			airdropAgentHandoffFreeBunit(job.agent, job.card)
 		}
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e)

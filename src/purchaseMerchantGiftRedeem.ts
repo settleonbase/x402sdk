@@ -1106,7 +1106,6 @@ async function purchaseMerchantGiftRedeemProcess(): Promise<void> {
 				value,
 				func,
 				logTag: 'purchaseMerchantGiftRedeem.reward13',
-				gasLimit: 30_000_000n,
 			})
 			const receipt = await createTx.wait()
 			const ok = checkBusinessRelayTxSuccessful(receipt ?? undefined, {
