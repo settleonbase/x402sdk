@@ -78,7 +78,11 @@ import {
 	type GenesisNodeReferralRedeemAction,
 } from '../genesisNodeReferralRedeem'
 import { enqueueChatIndexPointerRelay } from '../chatIndexPointer'
-import { enqueueAgentReferrerRelay } from '../agentReferrerRegistry'
+import {
+	agentCardClaimCompleteProcess,
+	agentCardClaimFundTempProcess,
+	enqueueAgentReferrerRelay,
+} from '../agentReferrerRegistry'
 import {
 	gbDepinChargeUserPool,
 	kickGbDepinChargeUserPoolPress,
@@ -4375,6 +4379,19 @@ const routing = ( router: Router ) => {
 				signature: b.signature,
 				res,
 			})
+		})
+
+		/** Agent card claim: fund temp CNET gas (Cluster pre-checked). */
+		router.post('/agentCardClaimFundTemp', (req, res) => {
+			void agentCardClaimFundTempProcess(req.body as { temp: string; agent?: string; card?: string }, res)
+		})
+
+		/** Agent card claim: mint 1000 free B-Unit to merchant after ownership transfer. */
+		router.post('/agentCardClaimComplete', (req, res) => {
+			void agentCardClaimCompleteProcess(
+				req.body as { merchant: string; card: string; agent?: string; temp?: string },
+				res,
+			)
 		})
 
 		router.post('/validatorDepositRedeemAdminCancel', (req, res) => {

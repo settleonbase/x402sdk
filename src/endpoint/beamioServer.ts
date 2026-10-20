@@ -12462,6 +12462,88 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	/**
+	 * Agent card claim: fund temp CNET so client can Ownable.transferOwnership.
+	 * Precheck: agentOfTemp(temp)==agent; card.owner()==temp.
+	 */
+	router.post('/agentCardClaimFundTemp', async (req, res) => {
+		try {
+			const b = req.body as { temp?: string; agent?: string; card?: string }
+			if (!b.temp || !ethers.isAddress(b.temp) || !b.agent || !ethers.isAddress(b.agent) || !b.card || !ethers.isAddress(b.card)) {
+				return res.status(400).json({ success: false, error: 'temp, agent, and card required' }).end()
+			}
+			const temp = ethers.getAddress(b.temp)
+			const agent = ethers.getAddress(b.agent)
+			const card = ethers.getAddress(b.card)
+			const registry = new ethers.Contract(
+				CONET_AGENT_REFERRER_REGISTRY,
+				['function agentOfTemp(address) view returns (address)'],
+				providerConet,
+			)
+			const tempAgent = await registry.agentOfTemp!(temp)
+			if (String(tempAgent).toLowerCase() !== agent.toLowerCase()) {
+				return res.status(400).json({ success: false, error: 'TempNotUnderAgent' }).end()
+			}
+			const cardC = new ethers.Contract(card, ['function owner() view returns (address)'], providerConet)
+			const owner = await cardC.owner!()
+			if (String(owner).toLowerCase() !== temp.toLowerCase()) {
+				return res.status(400).json({ success: false, error: 'CardOwnerNotTemp' }).end()
+			}
+			return postLocalhost('/api/agentCardClaimFundTemp', { temp, agent, card }, res)
+		} catch (error: any) {
+			return res
+				.status(400)
+				.json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' })
+				.end()
+		}
+	})
+
+	/**
+	 * Agent card claim: mint 1000 free B-Unit to merchant after ownership transfer.
+	 * Precheck: agentOfTemp(temp)==agent; card.owner()==merchant.
+	 */
+	router.post('/agentCardClaimComplete', async (req, res) => {
+		try {
+			const b = req.body as { merchant?: string; card?: string; agent?: string; temp?: string }
+			if (
+				!b.merchant ||
+				!ethers.isAddress(b.merchant) ||
+				!b.card ||
+				!ethers.isAddress(b.card) ||
+				!b.agent ||
+				!ethers.isAddress(b.agent) ||
+				!b.temp ||
+				!ethers.isAddress(b.temp)
+			) {
+				return res.status(400).json({ success: false, error: 'merchant, card, agent, and temp required' }).end()
+			}
+			const merchant = ethers.getAddress(b.merchant)
+			const card = ethers.getAddress(b.card)
+			const agent = ethers.getAddress(b.agent)
+			const temp = ethers.getAddress(b.temp)
+			const registry = new ethers.Contract(
+				CONET_AGENT_REFERRER_REGISTRY,
+				['function agentOfTemp(address) view returns (address)'],
+				providerConet,
+			)
+			const tempAgent = await registry.agentOfTemp!(temp)
+			if (String(tempAgent).toLowerCase() !== agent.toLowerCase()) {
+				return res.status(400).json({ success: false, error: 'TempNotUnderAgent' }).end()
+			}
+			const cardC = new ethers.Contract(card, ['function owner() view returns (address)'], providerConet)
+			const owner = await cardC.owner!()
+			if (String(owner).toLowerCase() !== merchant.toLowerCase()) {
+				return res.status(400).json({ success: false, error: 'CardOwnerNotMerchant' }).end()
+			}
+			return postLocalhost('/api/agentCardClaimComplete', { merchant, card, agent, temp }, res)
+		} catch (error: any) {
+			return res
+				.status(400)
+				.json({ success: false, error: error?.shortMessage ?? error?.message ?? 'Precheck failed' })
+				.end()
+		}
+	})
+
+	/**
 	 * CoNET 本链离线签字 StableSwap（USDC ↔ paid GB / USDC ↔ paid B-Unit）。
 	 * Cluster 预检 → Master Settle_ContractPool → Offline.bridgeStableSwapWithSignature。
 	 */

@@ -19,9 +19,26 @@ import {
 /** Free B-Unit airdrop when an agent temp creates a merchant card (1 B-Unit = 1e6). */
 export const AGENT_CREATE_CARD_FREE_BUNIT_UNITS6 = 200_000_000n // 200 free B-Unit → merchant card contract
 /** Free B-Unit airdrop when agent hands off a merchant card (1 B-Unit = 1e6). */
-export const AGENT_HANDOFF_FREE_BUNIT_UNITS6 = 1_000_000_000n // 1000 free B-Unit → agent EOA
+export const AGENT_HANDOFF_FREE_BUNIT_UNITS6 = 1_000_000_000n // 1000 free B-Unit → merchant EOA
+/** CNET gas for temp wallet to call Ownable.transferOwnership during agent card claim. */
+export const AGENT_CARD_CLAIM_FUND_WEI = ethers.parseEther('0.01')
 
 ensureSettleContractPoolInitialized()
+
+/** In-process idempotency: card already received handoff 1000 free B-Unit this process. */
+const handoffBunitMintedCards = new Set<string>()
+
+export function wasHandoffBunitMinted(cardAddress: string): boolean {
+	try {
+		return handoffBunitMintedCards.has(ethers.getAddress(cardAddress).toLowerCase())
+	} catch {
+		return false
+	}
+}
+
+function markHandoffBunitMinted(cardAddress: string): void {
+	handoffBunitMintedCards.add(ethers.getAddress(cardAddress).toLowerCase())
+}
 
 export const AGENT_REFERRER_EIP712_DOMAIN = {
 	name: 'BeamioAgentReferrerRegistry',
@@ -213,26 +230,41 @@ export function airdropAgentCreateCardFreeBunit(cardAddress: string, cardOwner: 
 	})()
 }
 
-/** Background: 1000 free B-Unit to agent after merchant handoff is confirmed on-chain. */
-function airdropAgentHandoffFreeBunit(agentEoa: string, cardAddress: string): void {
+/**
+ * Background: 1000 free B-Unit to the **merchant** EOA after handoff is confirmed.
+ * Skips if this process already minted for the same card (claimComplete + registerMerchant race).
+ */
+function airdropAgentHandoffFreeBunit(merchantEoa: string, cardAddress: string): void {
 	void (async () => {
+		const merchant = ethers.getAddress(merchantEoa)
+		const card = ethers.getAddress(cardAddress)
+		const cardKey = card.toLowerCase()
+		if (handoffBunitMintedCards.has(cardKey)) {
+			logger(
+				Colors.cyan(
+					`[agentReferrerRelay] handoff free B-Unit skipped (already minted) merchant=${merchant} card=${card}`,
+				),
+			)
+			return
+		}
 		const SC = shiftSettleConet()
 		if (!SC) {
 			logger(
 				Colors.yellow(
-					`[agentReferrerRelay] handoff free B-Unit skipped (settle busy) agent=${agentEoa} card=${cardAddress}`,
+					`[agentReferrerRelay] handoff free B-Unit skipped (settle busy) merchant=${merchant} card=${card}`,
 				),
 			)
 			return
 		}
 		try {
 			const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
-			const tx = await bunit.mintReward!(ethers.getAddress(agentEoa), AGENT_HANDOFF_FREE_BUNIT_UNITS6)
+			const tx = await bunit.mintReward!(merchant, AGENT_HANDOFF_FREE_BUNIT_UNITS6)
 			const receipt = await tx.wait()
 			if (receipt?.status !== 1) throw new Error('mintReward reverted')
+			markHandoffBunitMinted(card)
 			logger(
 				Colors.green(
-					`[agentReferrerRelay] handoff free B-Unit ok agent=${agentEoa} card=${cardAddress} units=1000 tx=${tx.hash}`,
+					`[agentReferrerRelay] handoff free B-Unit ok merchant=${merchant} card=${card} units=1000 tx=${tx.hash}`,
 				),
 			)
 		} catch (e: unknown) {
@@ -242,6 +274,97 @@ function airdropAgentHandoffFreeBunit(agentEoa: string, cardAddress: string): vo
 			unshiftSettleConet(SC)
 		}
 	})()
+}
+
+/**
+ * Sync mint 1000 free B-Unit to merchant (claimComplete path). Returns txHash or null if skipped/busy/failed.
+ */
+async function mintHandoffFreeBunitToMerchantSync(
+	merchantEoa: string,
+	cardAddress: string,
+): Promise<{ txHash?: string; skipped?: boolean; error?: string }> {
+	const merchant = ethers.getAddress(merchantEoa)
+	const card = ethers.getAddress(cardAddress)
+	const cardKey = card.toLowerCase()
+	if (handoffBunitMintedCards.has(cardKey)) {
+		return { skipped: true }
+	}
+	const SC = shiftSettleConet()
+	if (!SC) {
+		return { error: 'Settle pool busy' }
+	}
+	try {
+		const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
+		const tx = await bunit.mintReward!(merchant, AGENT_HANDOFF_FREE_BUNIT_UNITS6)
+		const receipt = await tx.wait()
+		if (receipt?.status !== 1) throw new Error('mintReward reverted')
+		markHandoffBunitMinted(card)
+		logger(
+			Colors.green(
+				`[agentCardClaim] handoff free B-Unit ok merchant=${merchant} card=${card} units=1000 tx=${tx.hash}`,
+			),
+		)
+		return { txHash: tx.hash }
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e)
+		logger(Colors.yellow(`[agentCardClaim] handoff free B-Unit failed: ${msg}`))
+		return { error: msg }
+	} finally {
+		unshiftSettleConet(SC)
+	}
+}
+
+/** Master: send CNET gas to temp so it can transferOwnership. Body pre-checked by Cluster. */
+export async function agentCardClaimFundTempProcess(
+	body: { temp: string; agent?: string; card?: string },
+	res: Response,
+): Promise<void> {
+	const temp = ethers.getAddress(String(body.temp ?? ''))
+	const SC = shiftSettleConet()
+	if (!SC) {
+		respond(res, 503, { success: false, error: 'Settle pool busy' })
+		return
+	}
+	try {
+		const bal = await SC.walletConet.provider!.getBalance(temp)
+		if (bal >= AGENT_CARD_CLAIM_FUND_WEI / 2n) {
+			respond(res, 200, { success: true, alreadyFunded: true, balance: bal.toString() })
+			return
+		}
+		const tx = await SC.walletConet.sendTransaction({
+			to: temp,
+			value: AGENT_CARD_CLAIM_FUND_WEI,
+		})
+		const receipt = await tx.wait()
+		if (receipt?.status !== 1) throw new Error('fund temp reverted')
+		logger(Colors.green(`[agentCardClaim] fundTemp ok temp=${temp} wei=${AGENT_CARD_CLAIM_FUND_WEI} tx=${tx.hash}`))
+		respond(res, 200, { success: true, txHash: tx.hash })
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e)
+		logger(Colors.red(`[agentCardClaim] fundTemp failed:`), msg)
+		respond(res, 400, { success: false, error: msg })
+	} finally {
+		unshiftSettleConet(SC)
+	}
+}
+
+/** Master: mint 1000 free B-Unit to merchant after ownership transfer. Body pre-checked by Cluster. */
+export async function agentCardClaimCompleteProcess(
+	body: { merchant: string; card: string; agent?: string; temp?: string },
+	res: Response,
+): Promise<void> {
+	const merchant = ethers.getAddress(String(body.merchant ?? ''))
+	const card = ethers.getAddress(String(body.card ?? ''))
+	const result = await mintHandoffFreeBunitToMerchantSync(merchant, card)
+	if (result.skipped) {
+		respond(res, 200, { success: true, duplicate: true })
+		return
+	}
+	if (result.error) {
+		respond(res, 400, { success: false, error: result.error })
+		return
+	}
+	respond(res, 200, { success: true, txHash: result.txHash })
 }
 
 export function enqueueAgentReferrerRelay(input: {
@@ -366,8 +489,8 @@ async function relayJob(
 			respondToWaiters(state.waiters, 200, { success: true, txHash: tx.hash, op: job.op })
 			forgetStateLater(job.requestKey, state)
 		}
-		if (job.op === 'registerMerchant' && job.agent && job.card) {
-			airdropAgentHandoffFreeBunit(job.agent, job.card)
+		if (job.op === 'registerMerchant' && job.merchant && job.card) {
+			airdropAgentHandoffFreeBunit(job.merchant, job.card)
 		}
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e)
