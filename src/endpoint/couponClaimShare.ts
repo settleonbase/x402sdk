@@ -48,7 +48,7 @@ const OG_BANNER_HEADLINE_VISUAL_TOP_GAP = Math.round(OG_BANNER_HEADLINE_BOX_TOP_
 const OG_BANNER_BOTTOM_EXTRA_GAP = OG_BANNER_HEADLINE_VISUAL_TOP_GAP * 4
 const OG_JPEG_QUALITY = 93
 /** Bump when OG layout/quality changes; embedded in `/og/s/` token JSON to bust social platform caches. */
-export const OG_LAYOUT_REV = 31
+export const OG_LAYOUT_REV = 32
 /** Stable `v=` when crawlers hit a share URL that omitted cache-bust (forces Meta/WhatsApp re-key). */
 export function layoutAppDownloadCacheBust(): string {
 	return `l${OG_LAYOUT_REV}`
@@ -58,7 +58,14 @@ const DISCOVER_MERCHANT_OG_BANNER_H = 360
 /** Cross-worker OG JPEG cache (Cluster forks do not share in-memory ogImageCache). */
 const OG_DISK_CACHE_DIR = path.join(os.tmpdir(), 'beamio-og-share-cache', `v${OG_LAYOUT_REV}`)
 
-export type CouponShareKind = 'open_claim' | 'redeem' | 'discover_merchant'
+/** Personal invitation link preview (WhatsApp / Telegram / iMessage / WeChat). */
+export const PERSONAL_INVITE_OG_TITLE = 'Pay. Top up. Earn. Connect.'
+export const PERSONAL_INVITE_OG_DESCRIPTION =
+	'Store cards and Reward PT, across participating merchants.'
+/** Static 1200×630 banner — also served from homepage `public/og-invitation.jpg`. */
+export const PERSONAL_INVITE_OG_IMAGE_URL = `${BEAMIO_APP_ORIGIN}/og-invitation.jpg`
+
+export type CouponShareKind = 'open_claim' | 'redeem' | 'discover_merchant' | 'personal_invite'
 
 export type CouponOpenClaimShareParams = {
 	kind: 'open_claim'
@@ -79,6 +86,12 @@ export type DiscoverMerchantShareParams = {
 	cardAddress: string
 }
 
+export type PersonalInviteShareParams = {
+	kind: 'personal_invite'
+	/** Introducer EOA from `?invite=0x…`. */
+	introducerEoa: string
+}
+
 /** @deprecated alias — prefer BeamioShareParams */
 export type CouponClaimShareParams = CouponOpenClaimShareParams
 
@@ -86,6 +99,7 @@ export type BeamioCouponShareParams =
 	| CouponOpenClaimShareParams
 	| CouponRedeemShareParams
 	| DiscoverMerchantShareParams
+	| PersonalInviteShareParams
 
 /** @deprecated alias — prefer BeamioShareParams */
 export type BeamioShareParams = BeamioCouponShareParams
@@ -98,6 +112,8 @@ export type CouponClaimShareMeta = {
 	distributionKind?: CouponClaimDistributionKind
 	cardAddress: string
 	couponId?: string
+	/** Personal invite — introducer EOA from `?invite=0x…`. */
+	introducerEoa?: string
 	/** Program / merchant display name for share headline (e.g. "CoNET Labs Inc."). */
 	merchantName: string
 	/** e.g. "Claim a CoNET Labs Inc. Coupon" — matches OG image headline. */
@@ -245,6 +261,46 @@ export function buildDiscoverMerchantAppDownloadUrl(
 		discoverUrl += `&ref=${encodeURIComponent(ethers.getAddress(refRaw))}`
 	}
 	return `${BEAMIO_APP_ORIGIN}/app-download?target=${encodeURIComponent(discoverUrl)}`
+}
+
+/** Personal invitation — `app-download?target=/app/?invite=0x…`. */
+export function buildPersonalInviteAppDownloadUrl(introducerEoa: string): string {
+	const addr = ethers.getAddress(introducerEoa)
+	const appUrl = `${BEAMIO_APP_ORIGIN}/app/?invite=${encodeURIComponent(addr)}`
+	return `${BEAMIO_APP_ORIGIN}/app-download?target=${encodeURIComponent(appUrl)}`
+}
+
+export function parsePersonalInviteFromBeamioAppUrl(raw: string): PersonalInviteShareParams | null {
+	const input = raw?.trim() ?? ''
+	if (!input) return null
+	try {
+		const url = new URL(input)
+		if (url.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isAllowedBeamioAppPath(url.pathname)) return null
+		const inviteRaw = (url.searchParams.get('invite') ?? url.searchParams.get('Invite') ?? '').trim()
+		if (!inviteRaw || !ethers.isAddress(inviteRaw)) return null
+		// Coupon / discover / redeem take precedence when mixed into the same URL.
+		const cardAddress = (url.searchParams.get('beamiocard') ?? url.searchParams.get('Beamiocard') ?? '').trim()
+		const redeemCode = (url.searchParams.get('redeemcode') ?? url.searchParams.get('Redeemcode') ?? '').trim()
+		const couponId = (url.searchParams.get('couponId') ?? url.searchParams.get('couponid') ?? '').trim()
+		if (cardAddress || redeemCode || couponId) return null
+		return { kind: 'personal_invite', introducerEoa: ethers.getAddress(inviteRaw) }
+	} catch {
+		return null
+	}
+}
+
+export function parsePersonalInviteFromAppDownloadTarget(target: string): PersonalInviteShareParams | null {
+	const trimmed = target?.trim() ?? ''
+	if (!trimmed) return null
+	try {
+		const wrapper = new URL(trimmed)
+		if (wrapper.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isAllowedBeamioAppPath(wrapper.pathname)) return null
+		return parsePersonalInviteFromBeamioAppUrl(trimmed)
+	} catch {
+		return null
+	}
 }
 
 export const buildCatalogShareHeadline = (merchantName: string): string => {
@@ -709,16 +765,20 @@ export function parseCouponClaimFromAppDownloadTarget(target: string): CouponOpe
 	}
 }
 
-/** Social crawlers may request `/app/?beamiocard=…&discover=open` without an app-download wrapper. */
+/** Social crawlers may request `/app/?beamiocard=…&discover=open` (or `?invite=`) without an app-download wrapper. */
 export function buildBeamioAppDeeplinkUrlFromShareQuery(query: Record<string, unknown>): string | null {
+	const inviteRaw = readString(query.invite ?? query.Invite)
 	const cardRaw = readString(query.beamiocard ?? query.Beamiocard ?? query.card)
-	if (!cardRaw || !ethers.isAddress(cardRaw)) return null
-	const card = ethers.getAddress(cardRaw)
-	const discover = readString(query.discover).toLowerCase()
 	const couponId = decodeURIComponent(readString(query.couponId ?? query.couponid))
 	const redeemCode = decodeURIComponent(
 		readString(query.redeemcode ?? query.Redeemcode ?? query.redeemCode)
 	)
+	if (inviteRaw && ethers.isAddress(inviteRaw) && !cardRaw && !couponId && !redeemCode) {
+		return `${BEAMIO_APP_ORIGIN}/app/?invite=${encodeURIComponent(ethers.getAddress(inviteRaw))}`
+	}
+	if (!cardRaw || !ethers.isAddress(cardRaw)) return null
+	const card = ethers.getAddress(cardRaw)
+	const discover = readString(query.discover).toLowerCase()
 	const claim = readString(query.claim).toLowerCase()
 	const hasShareIntent =
 		discover === 'open' ||
@@ -742,6 +802,13 @@ function parseDirectAppDeeplinkShareRequest(
 ): { params: BeamioCouponShareParams; shareUrl: string } | null {
 	const appUrl = buildBeamioAppDeeplinkUrlFromShareQuery(query)
 	if (!appUrl) return null
+	const personalInvite = parsePersonalInviteFromBeamioAppUrl(appUrl)
+	if (personalInvite) {
+		return {
+			params: personalInvite,
+			shareUrl: withCacheBust(appUrl),
+		}
+	}
 	const redeem = parseRedeemShareFromBeamioAppUrl(appUrl)
 	if (redeem) {
 		return {
@@ -800,6 +867,7 @@ export function parseCouponClaimShareRequest(query: {
 		const openClaim = parseCouponClaimFromAppDownloadTarget(innerTarget)
 		const redeem = parseRedeemShareFromAppDownloadTarget(innerTarget)
 		const discoverMerchant = parseDiscoverMerchantFromAppDownloadTarget(innerTarget)
+		const personalInvite = parsePersonalInviteFromAppDownloadTarget(innerTarget)
 		if (redeem) {
 			if (!shareUrl) {
 				shareUrl = buildCouponRedeemAppDownloadUrl(redeem.cardAddress, redeem.redeemCode, redeem.couponId)
@@ -813,6 +881,10 @@ export function parseCouponClaimShareRequest(query: {
 		if (openClaim) {
 			if (!shareUrl) shareUrl = buildCouponClaimAppDownloadUrl(openClaim.cardAddress, openClaim.couponId)
 			return { params: openClaim, shareUrl: withCacheBust(shareUrl) }
+		}
+		if (personalInvite) {
+			if (!shareUrl) shareUrl = buildPersonalInviteAppDownloadUrl(personalInvite.introducerEoa)
+			return { params: personalInvite, shareUrl: withCacheBust(shareUrl) }
 		}
 		return null
 	}
@@ -864,13 +936,20 @@ function encodeOgShareToken(params: BeamioCouponShareParams, shareUrl?: string):
 						v: OG_LAYOUT_REV,
 						...(cacheBust ? { b: cacheBust } : {}),
 					}
-				: {
-						k: 'o' as const,
-						c: params.cardAddress,
-						i: params.couponId,
-						v: OG_LAYOUT_REV,
-						...(cacheBust ? { b: cacheBust } : {}),
-					}
+				: params.kind === 'personal_invite'
+					? {
+							k: 'i' as const,
+							e: params.introducerEoa,
+							v: OG_LAYOUT_REV,
+							...(cacheBust ? { b: cacheBust } : {}),
+						}
+					: {
+							k: 'o' as const,
+							c: params.cardAddress,
+							i: params.couponId,
+							v: OG_LAYOUT_REV,
+							...(cacheBust ? { b: cacheBust } : {}),
+						}
 	return Buffer.from(JSON.stringify(payload)).toString('base64url')
 }
 
@@ -887,6 +966,7 @@ export function decodeOgShareTokenPayload(
 			c?: string
 			r?: string
 			i?: string
+			e?: string
 			b?: string
 		}
 		const cacheBust = readString(raw.b)
@@ -904,6 +984,12 @@ export function decodeOgShareTokenPayload(
 		if (raw.k === 'd' && raw.c && ethers.isAddress(raw.c)) {
 			return {
 				params: { kind: 'discover_merchant', cardAddress: ethers.getAddress(raw.c) },
+				...(cacheBust ? { cacheBust } : {}),
+			}
+		}
+		if (raw.k === 'i' && raw.e && ethers.isAddress(raw.e)) {
+			return {
+				params: { kind: 'personal_invite', introducerEoa: ethers.getAddress(raw.e) },
 				...(cacheBust ? { cacheBust } : {}),
 			}
 		}
@@ -929,7 +1015,9 @@ export function buildShareUrlForOgToken(params: BeamioCouponShareParams, cacheBu
 			? buildCouponRedeemAppDownloadUrl(params.cardAddress, params.redeemCode, params.couponId)
 			: params.kind === 'discover_merchant'
 				? buildDiscoverMerchantAppDownloadUrl(params.cardAddress)
-				: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId)
+				: params.kind === 'personal_invite'
+					? buildPersonalInviteAppDownloadUrl(params.introducerEoa)
+					: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId)
 	return cacheBust ? appendAppDownloadCacheBust(base, cacheBust) : base
 }
 
@@ -972,10 +1060,34 @@ function ogShareMemoryCacheKey(format: 'png' | 'jpeg', token: string): string {
 }
 
 function buildOgImageUrl(_shareUrl: string, params?: BeamioCouponShareParams): string {
+	if (params?.kind === 'personal_invite') {
+		// Static 1200×630 invitation banner (homepage `public/og-invitation.jpg`).
+		return `${PERSONAL_INVITE_OG_IMAGE_URL}?v=${layoutAppDownloadCacheBust()}`
+	}
 	if (params) {
 		return `${BEAMIO_APP_ORIGIN}/og/s/${encodeOgShareToken(params, _shareUrl)}.jpg`
 	}
 	return `${BEAMIO_APP_ORIGIN}/og.png`
+}
+
+/** Load `assets/og-invitation.jpg` for personal-invite OG warm (tsc does not copy assets into dist). */
+async function loadPersonalInviteOgJpegFromDisk(): Promise<Buffer> {
+	const candidates = [
+		path.join(process.cwd(), 'assets', 'og-invitation.jpg'),
+		path.join(process.cwd(), 'src', 'x402sdk', 'assets', 'og-invitation.jpg'),
+		path.join(__dirname, '..', '..', 'assets', 'og-invitation.jpg'),
+		path.join(__dirname, '..', 'assets', 'og-invitation.jpg'),
+	]
+	for (const candidate of candidates) {
+		try {
+			if (!fsSync.existsSync(candidate)) continue
+			const buf = await fs.readFile(candidate)
+			if (buf.length > 0) return buf
+		} catch {
+			/* try next */
+		}
+	}
+	throw new Error('personal invite OG image missing (assets/og-invitation.jpg)')
 }
 
 function escapeXml(text: string): string {
@@ -1305,10 +1417,35 @@ async function resolveRedeemShareMeta(
 	}
 }
 
+function resolvePersonalInviteShareMeta(
+	params: PersonalInviteShareParams,
+	shareUrl: string
+): CouponClaimShareMeta {
+	const introducerEoa = ethers.getAddress(params.introducerEoa)
+	return {
+		shareKind: 'personal_invite',
+		introducerEoa,
+		cardAddress: introducerEoa,
+		couponId: '',
+		merchantName: 'Beamio',
+		shareHeadline: PERSONAL_INVITE_OG_TITLE,
+		title: PERSONAL_INVITE_OG_TITLE,
+		subtitle: PERSONAL_INVITE_OG_DESCRIPTION,
+		iconUrl: '',
+		backgroundImage: '',
+		backgroundColorHex: '#0a1628',
+		validBeforeSec: null,
+		expiresLabel: '',
+		shareUrl,
+		ogImageUrl: buildOgImageUrl(shareUrl, params),
+	}
+}
+
 export async function resolveCouponClaimShareMeta(
 	params: BeamioCouponShareParams,
 	shareUrl: string
 ): Promise<CouponClaimShareMeta | null> {
+	if (params.kind === 'personal_invite') return resolvePersonalInviteShareMeta(params, shareUrl)
 	if (params.kind === 'discover_merchant') return resolveDiscoverMerchantShareMeta(params, shareUrl)
 	if (params.kind === 'redeem') return resolveRedeemShareMeta(params, shareUrl)
 	return resolveOpenClaimShareMeta(params, shareUrl)
@@ -1498,6 +1635,9 @@ export function buildFallbackCouponClaimShareMeta(
 	params: BeamioCouponShareParams,
 	shareUrl: string
 ): CouponClaimShareMeta {
+	if (params.kind === 'personal_invite') {
+		return resolvePersonalInviteShareMeta(params, shareUrl)
+	}
 	if (params.kind === 'discover_merchant') {
 		const merchantName = 'Beamio'
 		return {
@@ -1551,7 +1691,8 @@ async function buildCouponClaimOgRasterParts(meta: CouponClaimShareMeta): Promis
 	const imgPrep = OG_IMAGE_PREP_SCALE
 	const punchBg = '#f9f9fe'
 	const isDiscoverMerchant =
-		meta.shareKind === 'discover_merchant' || meta.distributionKind === 'merchant'
+		meta.shareKind !== 'personal_invite' &&
+		(meta.shareKind === 'discover_merchant' || meta.distributionKind === 'merchant')
 	// Merchant share previews are social cards, not coupon tickets. Keep the
 	// entire 1200×630 canvas as the merchant visual and reserve the lower
 	// portion for readable copy.
@@ -1956,6 +2097,15 @@ export async function renderCouponClaimOgPng(meta: CouponClaimShareMeta): Promis
 }
 
 export async function warmCouponClaimOgJpeg(meta: CouponClaimShareMeta): Promise<Buffer> {
+	if (meta.shareKind === 'personal_invite') {
+		const memKey = ogShareMemoryCacheKey('jpeg', `personal_invite:${layoutAppDownloadCacheBust()}`)
+		const hit = ogImageCache.get(memKey)
+		if (hit && hit.expiry > Date.now()) return hit.buf
+		const buf = await loadPersonalInviteOgJpegFromDisk()
+		ogImageCache.set(memKey, { buf, expiry: Date.now() + OG_IMAGE_CACHE_TTL_MS })
+		return buf
+	}
+
 	const token = ogShareTokenFromImageUrl(meta.ogImageUrl)
 	if (token) {
 		const diskCached = await readOgShareDiskCache(token)
@@ -2012,10 +2162,13 @@ export async function warmIssuedNftExplorerOgJpeg(
 }
 
 export function renderCouponClaimShareHtml(meta: CouponClaimShareMeta): string {
+	const isPersonalInvite = meta.shareKind === 'personal_invite'
 	const isDiscoverMerchant =
-		meta.shareKind === 'discover_merchant' || meta.distributionKind === 'merchant'
-	const headline =
-		meta.distributionKind === 'catalog'
+		!isPersonalInvite &&
+		(meta.shareKind === 'discover_merchant' || meta.distributionKind === 'merchant')
+	const headline = isPersonalInvite
+		? escapeXml(meta.shareHeadline || meta.title || PERSONAL_INVITE_OG_TITLE)
+		: meta.distributionKind === 'catalog'
 			? escapeXml(meta.title)
 			: isDiscoverMerchant
 				? escapeXml(meta.shareHeadline || buildDiscoverMerchantShareHeadline(meta.merchantName))
@@ -2027,14 +2180,18 @@ export function renderCouponClaimShareHtml(meta: CouponClaimShareMeta): string {
 							)
 					)
 	const title = escapeXml(meta.title)
-	const description = escapeXml(meta.subtitle)
+	const description = escapeXml(
+		isPersonalInvite ? meta.subtitle || PERSONAL_INVITE_OG_DESCRIPTION : meta.subtitle
+	)
 	const shareUrl = escapeXml(meta.shareUrl)
 	const ogImage = escapeXml(meta.ogImageUrl)
-	const actionHint = isDiscoverMerchant
-		? 'Open this link on your phone to explore this brand in Beamio.'
-		: meta.shareKind === 'redeem'
-			? 'Open this link on your phone to redeem in Beamio.'
-			: 'Open this link on your phone to claim in Beamio.'
+	const actionHint = isPersonalInvite
+		? 'Open this link on your phone to join Beamio with this invitation.'
+		: isDiscoverMerchant
+			? 'Open this link on your phone to explore this brand in Beamio.'
+			: meta.shareKind === 'redeem'
+				? 'Open this link on your phone to redeem in Beamio.'
+				: 'Open this link on your phone to claim in Beamio.'
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
