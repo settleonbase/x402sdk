@@ -44,6 +44,10 @@ import {
 	readCardProgramReferrerDbSummary,
 } from '../cardProgramReferrerDb'
 import {
+	listAgentInviteReferees,
+	upsertAgentInviteRefereesBatch,
+} from '../agentInviteReferrerDb'
+import {
 	readCardProgramReferrerChainSummary,
 	readRefereeChargePointsTotal6,
 	readRefereeCountByReferrer,
@@ -568,6 +572,67 @@ async function assertAdminEoaHasVisibleAaAfterEnsure(
 }
 const JSONRPC_NO_BATCH = { batchMaxCount: 1 as const }
 const providerConet = new ethers.JsonRpcProvider(resolveBeamioConetHttpRpcUrl(), undefined, JSONRPC_NO_BATCH)
+
+/** In-flight chain→DB sync for agent invite referees (dedupe concurrent GETs). */
+const agentInviteRefereesChainSyncInFlight = new Map<string, Promise<number>>()
+
+/**
+ * Pull `refereesOf(introducer)` from AgentReferrerRegistry and upsert into
+ * `beamio_agent_invite_referees`. Best-effort; failures leave prior DB rows intact.
+ */
+function syncAgentInviteRefereesFromChain(introducer: string): Promise<number> {
+	const key = ethers.getAddress(introducer).toLowerCase()
+	const existing = agentInviteRefereesChainSyncInFlight.get(key)
+	if (existing) return existing
+	const work = (async (): Promise<number> => {
+		try {
+			const registry = new ethers.Contract(
+				CONET_AGENT_REFERRER_REGISTRY,
+				[
+					'function refereesOfLength(address) view returns (uint256)',
+					'function refereesOf(address) view returns (address[])',
+				],
+				providerConet,
+			)
+			const [lenBn, onChain] = await Promise.all([
+				registry.refereesOfLength!(introducer),
+				registry.refereesOf!(introducer),
+			])
+			const len = Number(lenBn)
+			const addrs = Array.isArray(onChain)
+				? onChain
+						.map((a: string) => {
+							try {
+								return ethers.getAddress(String(a))
+							} catch {
+								return ''
+							}
+						})
+						.filter((a: string) => !!a && a !== ethers.ZeroAddress)
+				: []
+			if (!Number.isFinite(len) || len <= 0 || addrs.length === 0) return 0
+			const n = await upsertAgentInviteRefereesBatch(introducer, addrs)
+			logger(
+				Colors.gray(
+					`[agentInviteReferees] chain sync introducer=${key} onChain=${addrs.length} upserted=${n}`,
+				),
+			)
+			return n
+		} catch (e: unknown) {
+			const err = e as { shortMessage?: string; message?: string }
+			logger(
+				Colors.yellow(
+					`[agentInviteReferees] chain sync failed introducer=${key}: ${err?.shortMessage ?? err?.message ?? e}`,
+				),
+			)
+			return 0
+		} finally {
+			agentInviteRefereesChainSyncInFlight.delete(key)
+		}
+	})()
+	agentInviteRefereesChainSyncInFlight.set(key, work)
+	return work
+}
 
 const REFERRAL_REDEEM_READ_ABI = [
 	'function admins(address) view returns (bool)',
@@ -12296,6 +12361,61 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			return res
 				.status(500)
 				.json({ success: false, error: error?.shortMessage ?? error?.message ?? 'agentReferrerRegistry read failed' })
+				.end()
+		}
+	})
+
+	/**
+	 * Agent invite downline: EOAs that registered under this introducer's link.
+	 * Primary: DB rows (written after successful registerReferrer, or prior chain sync).
+	 * Compat: if DB empty on first page, await one chain backfill before reply.
+	 * After every successful reply: re-pull chain `refereesOf` and upsert so the next
+	 * GET reflects legacy / newly confirmed on-chain referees.
+	 */
+	router.get('/agentInviteReferees', async (req, res) => {
+		try {
+			const introducerRaw = String(
+				req.query.introducer ?? req.query.address ?? req.query.wallet ?? '',
+			).trim()
+			if (!introducerRaw || !ethers.isAddress(introducerRaw)) {
+				return res.status(400).json({ success: false, error: 'introducer required' }).end()
+			}
+			const introducer = ethers.getAddress(introducerRaw)
+			const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 100)
+			const offset = Math.max(Number(req.query.offset ?? 0) || 0, 0)
+
+			let page = await listAgentInviteReferees(introducer, { limit, offset })
+			if (page.total === 0 && offset === 0) {
+				await syncAgentInviteRefereesFromChain(introducer).catch(() => {})
+				page = await listAgentInviteReferees(introducer, { limit, offset })
+			}
+
+			res
+				.status(200)
+				.json({
+					success: true,
+					introducer,
+					total: page.total,
+					limit,
+					offset,
+					referees: page.items.map((r) => ({
+						referee: r.refereeEoa,
+						txHash: r.txHash,
+						registeredAt: r.registeredAt,
+					})),
+				})
+				.end()
+
+			// After reply: refresh DB from chain for the next GET (legacy + catch-up).
+			void syncAgentInviteRefereesFromChain(introducer)
+			return
+		} catch (error: any) {
+			return res
+				.status(500)
+				.json({
+					success: false,
+					error: error?.shortMessage ?? error?.message ?? 'agentInviteReferees failed',
+				})
 				.end()
 		}
 	})

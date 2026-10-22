@@ -15,6 +15,7 @@ import {
 	shiftSettleConet,
 	unshiftSettleConet,
 } from './settleContractPool'
+import { upsertAgentInviteReferee } from './agentInviteReferrerDb'
 
 /** Free B-Unit airdrop when an agent temp creates a merchant card (1 B-Unit = 1e6). */
 export const AGENT_CREATE_CARD_FREE_BUNIT_UNITS6 = 200_000_000n // 200 free B-Unit → merchant card contract
@@ -488,6 +489,13 @@ async function relayJob(
 			state.txHash = tx.hash
 			respondToWaiters(state.waiters, 200, { success: true, txHash: tx.hash, op: job.op })
 			forgetStateLater(job.requestKey, state)
+		}
+		if (job.op === 'registerReferrer' && job.introducer && job.referee) {
+			void upsertAgentInviteReferee({
+				introducer: job.introducer,
+				referee: job.referee,
+				txHash: tx.hash,
+			}).catch(() => {})
 		}
 		if (job.op === 'registerMerchant' && job.merchant && job.card) {
 			airdropAgentHandoffFreeBunit(job.merchant, job.card)
