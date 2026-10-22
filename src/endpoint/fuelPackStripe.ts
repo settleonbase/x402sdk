@@ -26,6 +26,7 @@ import {
 	type FuelPackId,
 	fuelPackFreeBUnits6,
 	fuelPackUsdc6,
+	isCatalogFuelPackId,
 	lookupFuelPack,
 } from '../fuelPackCatalog'
 
@@ -49,29 +50,21 @@ const FUEL_PACK_STRIPE_COPY: Record<
 	FuelPackId,
 	{ name: string; description: string }
 > = {
-	genesis_starter: {
-		name: 'Newcomer Genesis Pack',
-		description: '2,000 B-Units total — first-time ice-breaker + Business Start Ket',
-	},
-	testing_waters: {
-		name: 'Testing the Waters Pack',
-		description: '5,145 B-Units total — SaaS fuel for digital transactions',
+	starter: {
+		name: 'Starter',
+		description: '5,145 B-Units total — everyday business transactions',
 	},
 	growth: {
-		name: 'Growth Pack',
-		description: '21,890 B-Units total — high-frequency clearing fuel',
+		name: 'Growth',
+		description: '21,890 B-Units total — keep a growing store running smoothly',
 	},
-	enterprise: {
-		name: 'Enterprise Pack',
-		description: '114,885 B-Units total — Best Value SaaS fuel',
+	business: {
+		name: 'Business',
+		description: '114,885 B-Units total — busy teams and multiple locations',
 	},
-	institutional: {
-		name: 'Institutional Pack',
-		description: '599,880 B-Units total — super-node / regional fuel',
-	},
-	genesis_partner: {
-		name: 'Genesis Partner Pack',
-		description: '500,000 B-Units total — lock multi-year clearing fuel',
+	scale: {
+		name: 'Scale',
+		description: '599,880 B-Units total — high-volume operations',
 	},
 }
 
@@ -327,12 +320,12 @@ export function fuelPackStripeCancelUrl(): string {
 }
 
 export function isKnownFuelPackId(raw: unknown): raw is FuelPackId {
-	return lookupFuelPack(raw) != null
+	return isCatalogFuelPackId(raw)
 }
 
 /** Cluster precheck helper — pack must exist in FUEL_PACK_CATALOG. */
 export function listFuelPackIdsForApi(): FuelPackId[] {
-	return FUEL_PACK_CATALOG.map((p) => p.id)
+	return FUEL_PACK_CATALOG.map((p) => p.id as FuelPackId)
 }
 
 export async function createFuelPackCheckoutSession(
@@ -346,7 +339,7 @@ export async function createFuelPackCheckoutSession(
 		return { error: 'Invalid wallet address' }
 	}
 	const pack = lookupFuelPack(packIdRaw)
-	if (!pack) {
+	if (!pack || !isCatalogFuelPackId(pack.id)) {
 		return { error: 'Invalid fuel pack' }
 	}
 	const stripe = getStripeClient()
@@ -354,13 +347,17 @@ export async function createFuelPackCheckoutSession(
 		return { error: 'Stripe is not configured' }
 	}
 	const eoaLower = eoa.toLowerCase()
-	const copy = FUEL_PACK_STRIPE_COPY[pack.id]
+	const packId = pack.id as FuelPackId
+	const copy = FUEL_PACK_STRIPE_COPY[packId]
+	if (!copy) {
+		return { error: 'Invalid fuel pack' }
+	}
 	const unitAmount = usdCentsFromPack(pack)
 	if (!Number.isFinite(unitAmount) || unitAmount < 50) {
 		return { error: 'Invalid pack price' }
 	}
 
-	const idempotencyKey = `fuel-pack-${eoaLower}-${pack.id}-${randomUUID()}`
+	const idempotencyKey = `fuel-pack-${eoaLower}-${packId}-${randomUUID()}`
 
 	const session = await stripe.checkout.sessions.create(
 		{
@@ -368,7 +365,7 @@ export async function createFuelPackCheckoutSession(
 			metadata: {
 				product: 'fuelPack',
 				eoaAddress: eoaLower,
-				packId: pack.id,
+				packId,
 			},
 			line_items: [
 				{
@@ -387,7 +384,7 @@ export async function createFuelPackCheckoutSession(
 				metadata: {
 					product: 'fuelPack',
 					eoaAddress: eoaLower,
-					packId: pack.id,
+					packId,
 				},
 			},
 			success_url: fuelPackStripeSuccessUrl(),
@@ -403,14 +400,14 @@ export async function createFuelPackCheckoutSession(
 	sessions.set(session.id, {
 		status: 'pending',
 		eoaAddress: eoaLower,
-		packId: pack.id,
+		packId,
 		createdAt: Date.now(),
 	})
 
 	logger(
 		Colors.green('[fuelPackStripe] createSession ok'),
 		`session=${session.id}`,
-		`pack=${pack.id}`,
+		`pack=${packId}`,
 		`usdCents=${unitAmount}`,
 		`eoa=${eoaLower.slice(0, 10)}…`
 	)
@@ -502,7 +499,7 @@ function applySessionOutcome(
 	const eoaNorm = (meta.eoaAddress ?? prev?.eoaAddress ?? '').toLowerCase()
 	const packRaw = meta.packId ?? prev?.packId ?? ''
 	const pack = lookupFuelPack(packRaw)
-	const packId = (pack?.id ?? prev?.packId ?? 'genesis_starter') as FuelPackId
+	const packId = (pack?.id ?? prev?.packId ?? 'starter') as FuelPackId
 	let stripePaymentId = prev?.stripePaymentId ?? meta.stripePaymentId
 	if (!stripePaymentId && meta.session) {
 		try {

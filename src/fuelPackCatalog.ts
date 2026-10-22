@@ -1,36 +1,26 @@
-import { ethers } from 'ethers'
-
-/** Merchant OS Custom Fuel packs — Cluster source of truth (copy independently in homepage / bizSite). */
-export type FuelPackId =
-	| 'genesis_starter'
-	| 'testing_waters'
-	| 'growth'
-	| 'enterprise'
-	| 'genesis_partner'
-	| 'institutional'
+/**
+ * SaaS Fuel Pack catalog — single source for Stripe Checkout + mint amounts.
+ * Mirror in Merchant OS `MARKET_FUEL_PACKAGES` and homepage `fuelPackCatalog.ts`.
+ * User UI: price + total B-Units only (see beamio-fuel-pack-display-no-paid-free).
+ */
+export type FuelPackId = 'starter' | 'growth' | 'business' | 'scale'
 
 export type FuelPackCatalogEntry = {
-	id: FuelPackId
+	id: string
+	/** Whole USDC for Stripe Checkout `unit_amount` (dollars). */
 	priceUsdc: number
+	/** Same as priceUsdc, string form for API bodies. */
 	usdcAmount: string
-	/** Dual-pool allocation only — never expose Paid/Free split in pack merchandising UI. */
+	/** Checkout allocation only — UI must show paid+free as a single B-Units total. */
 	paidBUnits: number
 	freeBUnits: number
 	firstTimeOnly?: boolean
 }
 
-/** Must match Merchant OS `MARKET_FUEL_PACKAGES` paid/free totals (bizSiteMerchant). */
+/** Current packs offered for new Checkout (Starter / Growth / Business / Scale). */
 export const FUEL_PACK_CATALOG: FuelPackCatalogEntry[] = [
 	{
-		id: 'genesis_starter',
-		priceUsdc: 15,
-		usdcAmount: '15',
-		paidBUnits: 1500,
-		freeBUnits: 500,
-		firstTimeOnly: true,
-	},
-	{
-		id: 'testing_waters',
+		id: 'starter',
 		priceUsdc: 49,
 		usdcAmount: '49',
 		paidBUnits: 4900,
@@ -44,11 +34,40 @@ export const FUEL_PACK_CATALOG: FuelPackCatalogEntry[] = [
 		freeBUnits: 1990,
 	},
 	{
-		id: 'enterprise',
+		id: 'business',
 		priceUsdc: 999,
 		usdcAmount: '999',
 		paidBUnits: 99900,
 		freeBUnits: 14985,
+	},
+	{
+		id: 'scale',
+		priceUsdc: 4999,
+		usdcAmount: '4999',
+		paidBUnits: 499900,
+		freeBUnits: 99980,
+	},
+]
+
+/** Legacy pack ids → current catalog id (new Checkout + open-session remapping). */
+const FUEL_PACK_ID_ALIASES: Record<string, FuelPackId> = {
+	testing_waters: 'starter',
+	enterprise: 'business',
+	institutional: 'scale',
+}
+
+/**
+ * Open Stripe sessions only — not offered for new Checkout.
+ * Kept so webhook fulfill can still mint for in-flight checkouts.
+ */
+const LEGACY_FUEL_PACK_FULFILL: FuelPackCatalogEntry[] = [
+	{
+		id: 'genesis_starter',
+		priceUsdc: 15,
+		usdcAmount: '15',
+		paidBUnits: 1500,
+		freeBUnits: 500,
+		firstTimeOnly: true,
 	},
 	{
 		id: 'genesis_partner',
@@ -57,27 +76,41 @@ export const FUEL_PACK_CATALOG: FuelPackCatalogEntry[] = [
 		paidBUnits: 400000,
 		freeBUnits: 100000,
 	},
-	{
-		id: 'institutional',
-		priceUsdc: 4999,
-		usdcAmount: '4999',
-		paidBUnits: 499900,
-		freeBUnits: 99980,
-	},
 ]
 
-export function lookupFuelPack(raw: unknown): FuelPackCatalogEntry | null {
-	const id = String(raw ?? '')
+function normalizeFuelPackId(raw: unknown): string {
+	return String(raw ?? '')
 		.trim()
 		.toLowerCase()
+}
+
+export function lookupFuelPack(raw: unknown): FuelPackCatalogEntry | null {
+	let id = normalizeFuelPackId(raw)
 	if (!id) return null
-	return FUEL_PACK_CATALOG.find((p) => p.id === id) ?? null
+	id = FUEL_PACK_ID_ALIASES[id] ?? id
+	return (
+		FUEL_PACK_CATALOG.find((p) => p.id === id) ??
+		LEGACY_FUEL_PACK_FULFILL.find((p) => p.id === id) ??
+		null
+	)
+}
+
+/** True when `raw` is (or aliases to) a currently offered pack — for new Checkout. */
+export function isCatalogFuelPackId(raw: unknown): raw is FuelPackId {
+	const id = normalizeFuelPackId(raw)
+	if (!id) return false
+	const resolved = FUEL_PACK_ID_ALIASES[id] ?? id
+	return FUEL_PACK_CATALOG.some((p) => p.id === resolved)
 }
 
 export function fuelPackUsdc6(pack: FuelPackCatalogEntry): bigint {
-	return ethers.parseUnits(pack.usdcAmount, 6)
+	return BigInt(Math.round(pack.priceUsdc * 1e6))
 }
 
 export function fuelPackFreeBUnits6(pack: FuelPackCatalogEntry): bigint {
 	return BigInt(pack.freeBUnits) * 1_000_000n
+}
+
+export function fuelPackPaidBUnits6(pack: FuelPackCatalogEntry): bigint {
+	return BigInt(pack.paidBUnits) * 1_000_000n
 }
