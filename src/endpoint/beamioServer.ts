@@ -12618,7 +12618,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	/**
-	 * Agent card claim: mint 1000 free B-Unit to merchant after ownership transfer.
+	 * Agent card claim: mint 1000 free B-Unit to the merchant card after ownership transfer.
 	 * Precheck: agentOfTemp(temp)==agent; card.owner()==merchant.
 	 */
 	router.post('/agentCardClaimComplete', async (req, res) => {

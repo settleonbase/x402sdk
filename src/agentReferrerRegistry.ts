@@ -10,17 +10,21 @@ import Colors from 'colors/safe'
 import { logger } from './logger'
 import { CONET_AGENT_REFERRER_REGISTRY, CONET_BUINT } from './chainAddresses'
 import {
+	Settle_ConetPool,
+	Settle_ContractRoster,
 	ensureSettleContractPoolInitialized,
 	hasIdleSettleConet,
 	shiftSettleConet,
+	takeIdleSettleConetByAddress,
 	unshiftSettleConet,
+	type SettleContractPoolEntry,
 } from './settleContractPool'
 import { upsertAgentInviteReferee } from './agentInviteReferrerDb'
 
 /** Free B-Unit airdrop when an agent temp creates a merchant card (1 B-Unit = 1e6). */
 export const AGENT_CREATE_CARD_FREE_BUNIT_UNITS6 = 200_000_000n // 200 free B-Unit → merchant card contract
 /** Free B-Unit airdrop when agent hands off a merchant card (1 B-Unit = 1e6). */
-export const AGENT_HANDOFF_FREE_BUNIT_UNITS6 = 1_000_000_000n // 1000 free B-Unit → merchant EOA
+export const AGENT_HANDOFF_FREE_BUNIT_UNITS6 = 1_000_000_000n // 1000 free B-Unit → merchant card contract
 /** CNET gas for temp wallet to call Ownable.transferOwnership during agent card claim. */
 export const AGENT_CARD_CLAIM_FUND_WEI = ethers.parseEther('0.01')
 
@@ -28,6 +32,8 @@ ensureSettleContractPoolInitialized()
 
 /** In-process idempotency: card already received handoff 1000 free B-Unit this process. */
 const handoffBunitMintedCards = new Set<string>()
+/** Card whose handoff mint is in flight, so create/claim paths do not double-mint. */
+const handoffBunitInflightCards = new Set<string>()
 
 export function wasHandoffBunitMinted(cardAddress: string): boolean {
 	try {
@@ -84,7 +90,13 @@ const REGISTRY_WRITE_ABI = [
 	'function registerReferrerWithSig(address introducer,address referee,uint256 nonce,uint256 deadline,bytes signature)',
 ] as const
 
-const BUNIT_REWARD_ABI = ['function mintReward(address to, uint256 amount)'] as const
+const BUNIT_REWARD_ABI = [
+	'function admins(address) view returns (bool)',
+	'function mintReward(address to, uint256 amount)',
+] as const
+
+const AIRDROP_RETRY_MS = 3_000
+const AIRDROP_RETRY_MAX = 8
 
 export type AgentReferrerOp = 'registerAgent' | 'registerTemp' | 'registerMerchant' | 'registerReferrer'
 
@@ -186,99 +198,195 @@ export function kickAgentReferrerRelay(): void {
 	drainAgentReferrerRelay()
 }
 
+function bunitReader(): ethers.Contract | null {
+	const provider = Settle_ContractRoster[0]?.walletConet.provider
+	if (!provider) return null
+	return new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, provider)
+}
+
+async function addressIsBunitAdmin(read: ethers.Contract, address: string): Promise<boolean> {
+	try {
+		return Boolean(await read.admins!(address))
+	} catch {
+		return false
+	}
+}
+
+/**
+ * Occupy one idle CoNET settle wallet that is `admins` on live CONET_BUINT.
+ * A random `shiftSettleConet()` wallet is often not a B-Unit admin; `mintReward`
+ * from it reverts with empty data and the airdrop is dropped.
+ */
+async function shiftIdleBunitAdmin(): Promise<SettleContractPoolEntry | undefined> {
+	const read = bunitReader()
+	if (!read) return undefined
+	const idle = Settle_ConetPool.map((sc) => sc.walletConet.address)
+	for (const addr of idle) {
+		if (!(await addressIsBunitAdmin(read, addr))) continue
+		const sc = takeIdleSettleConetByAddress(addr)
+		if (sc) return sc
+	}
+	return undefined
+}
+
+async function rosterHasBunitAdmin(): Promise<boolean> {
+	const read = bunitReader()
+	if (!read) return false
+	for (const sc of Settle_ContractRoster) {
+		if (await addressIsBunitAdmin(read, sc.walletConet.address)) return true
+	}
+	return false
+}
+
+function airdropErrorText(e: unknown): string {
+	if (e instanceof Error) return (e as { shortMessage?: string }).shortMessage ?? e.message
+	return String(e)
+}
+
+function sleepMs(ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		setTimeout(resolve, ms)
+	})
+}
+
 /**
  * Background: 200 free B-Unit to the merchant card contract after temp/agent create succeeds.
  * Call after HTTP create response; failure must not affect create success.
  * Only runs when `agentOfTemp(cardOwner) != 0` (card created under an agent temp).
  */
 export function airdropAgentCreateCardFreeBunit(cardAddress: string, cardOwner: string): void {
-	void (async () => {
-		const card = ethers.getAddress(cardAddress)
-		const owner = ethers.getAddress(cardOwner)
-		const SC = shiftSettleConet()
-		if (!SC) {
+	void runCreateCardFreeBunit(cardAddress, cardOwner, 0)
+}
+
+async function runCreateCardFreeBunit(cardAddress: string, cardOwner: string, attempt: number): Promise<void> {
+	const card = ethers.getAddress(cardAddress)
+	const owner = ethers.getAddress(cardOwner)
+	const SC = await shiftIdleBunitAdmin()
+	if (!SC) {
+		const detail = `card=${card} owner=${owner}`
+		if (await rosterHasBunitAdmin()) {
+			if (attempt + 1 >= AIRDROP_RETRY_MAX) {
+				logger(Colors.yellow(`[agentReferrerRelay] create-card free B-Unit gave up (B-Unit admin settle busy) ${detail}`))
+				return
+			}
+			setTimeout(() => {
+				void runCreateCardFreeBunit(cardAddress, cardOwner, attempt + 1)
+			}, AIRDROP_RETRY_MS)
+			return
+		}
+		logger(Colors.yellow(`[agentReferrerRelay] create-card free B-Unit skipped (no B-Unit admin in settle roster) ${detail}`))
+		return
+	}
+	const signer = SC.walletConet.address
+	try {
+		const registry = new ethers.Contract(
+			CONET_AGENT_REFERRER_REGISTRY,
+			['function agentOfTemp(address) view returns (address)'],
+			SC.walletConet,
+		)
+		const agent = (await registry.agentOfTemp!(owner)) as string
+		if (!agent || agent === ethers.ZeroAddress) {
 			logger(
 				Colors.yellow(
-					`[agentReferrerRelay] create-card free B-Unit skipped (settle busy) card=${card} owner=${owner}`,
+					`[agentReferrerRelay] create-card free B-Unit skipped (agentOfTemp is zero) card=${card} owner=${owner}`,
 				),
 			)
 			return
 		}
-		try {
-			const registry = new ethers.Contract(
-				CONET_AGENT_REFERRER_REGISTRY,
-				['function agentOfTemp(address) view returns (address)'],
-				SC.walletConet,
-			)
-			const agent = (await registry.agentOfTemp!(owner)) as string
-			if (!agent || agent === ethers.ZeroAddress) return
 
-			const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
-			const tx = await bunit.mintReward!(card, AGENT_CREATE_CARD_FREE_BUNIT_UNITS6)
-			const receipt = await tx.wait()
-			if (receipt?.status !== 1) throw new Error('mintReward reverted')
-			logger(
-				Colors.green(
-					`[agentReferrerRelay] create-card free B-Unit ok card=${card} agent=${agent} units=200 tx=${tx.hash}`,
-				),
-			)
-		} catch (e: unknown) {
-			const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e)
-			logger(Colors.yellow(`[agentReferrerRelay] create-card free B-Unit failed: ${msg}`))
-		} finally {
-			unshiftSettleConet(SC)
-		}
-	})()
+		const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
+		const tx = await bunit.mintReward!(card, AGENT_CREATE_CARD_FREE_BUNIT_UNITS6)
+		const receipt = await tx.wait()
+		if (receipt?.status !== 1) throw new Error('mintReward reverted')
+		logger(
+			Colors.green(
+				`[agentReferrerRelay] create-card free B-Unit ok card=${card} agent=${agent} units=200 signer=${signer} tx=${tx.hash}`,
+			),
+		)
+	} catch (e: unknown) {
+		logger(
+			Colors.yellow(
+				`[agentReferrerRelay] create-card free B-Unit failed signer=${signer} card=${card}: ${airdropErrorText(e)}`,
+			),
+		)
+	} finally {
+		unshiftSettleConet(SC)
+	}
 }
 
 /**
- * Background: 1000 free B-Unit to the **merchant** EOA after handoff is confirmed.
+ * Background: 1000 free B-Unit to the merchant card contract after handoff is confirmed.
  * Skips if this process already minted for the same card (claimComplete + registerMerchant race).
  */
 function airdropAgentHandoffFreeBunit(merchantEoa: string, cardAddress: string): void {
-	void (async () => {
-		const merchant = ethers.getAddress(merchantEoa)
-		const card = ethers.getAddress(cardAddress)
-		const cardKey = card.toLowerCase()
-		if (handoffBunitMintedCards.has(cardKey)) {
-			logger(
-				Colors.cyan(
-					`[agentReferrerRelay] handoff free B-Unit skipped (already minted) merchant=${merchant} card=${card}`,
-				),
-			)
-			return
-		}
-		const SC = shiftSettleConet()
+	void runHandoffFreeBunit(merchantEoa, cardAddress, 0)
+}
+
+async function runHandoffFreeBunit(merchantEoa: string, cardAddress: string, attempt: number): Promise<void> {
+	const merchant = ethers.getAddress(merchantEoa)
+	const card = ethers.getAddress(cardAddress)
+	const cardKey = card.toLowerCase()
+	if (handoffBunitMintedCards.has(cardKey)) {
+		logger(
+			Colors.cyan(
+				`[agentReferrerRelay] handoff free B-Unit skipped (already minted) merchant=${merchant} card=${card}`,
+			),
+		)
+		return
+	}
+	if (handoffBunitInflightCards.has(cardKey)) {
+		if (attempt + 1 >= AIRDROP_RETRY_MAX) return
+		setTimeout(() => {
+			void runHandoffFreeBunit(merchantEoa, cardAddress, attempt + 1)
+		}, AIRDROP_RETRY_MS)
+		return
+	}
+	handoffBunitInflightCards.add(cardKey)
+	let SC: SettleContractPoolEntry | undefined
+	try {
+		SC = await shiftIdleBunitAdmin()
 		if (!SC) {
-			logger(
-				Colors.yellow(
-					`[agentReferrerRelay] handoff free B-Unit skipped (settle busy) merchant=${merchant} card=${card}`,
-				),
-			)
+			const detail = `merchant=${merchant} card=${card}`
+			if (await rosterHasBunitAdmin()) {
+				if (attempt + 1 >= AIRDROP_RETRY_MAX) {
+					logger(Colors.yellow(`[agentReferrerRelay] handoff free B-Unit gave up (B-Unit admin settle busy) ${detail}`))
+					return
+				}
+				setTimeout(() => {
+					void runHandoffFreeBunit(merchantEoa, cardAddress, attempt + 1)
+				}, AIRDROP_RETRY_MS)
+				return
+			}
+			logger(Colors.yellow(`[agentReferrerRelay] handoff free B-Unit skipped (no B-Unit admin in settle roster) ${detail}`))
 			return
 		}
-		try {
-			const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
-			const tx = await bunit.mintReward!(merchant, AGENT_HANDOFF_FREE_BUNIT_UNITS6)
-			const receipt = await tx.wait()
-			if (receipt?.status !== 1) throw new Error('mintReward reverted')
-			markHandoffBunitMinted(card)
-			logger(
-				Colors.green(
-					`[agentReferrerRelay] handoff free B-Unit ok merchant=${merchant} card=${card} units=1000 tx=${tx.hash}`,
-				),
-			)
-		} catch (e: unknown) {
-			const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e)
-			logger(Colors.yellow(`[agentReferrerRelay] handoff free B-Unit failed: ${msg}`))
-		} finally {
-			unshiftSettleConet(SC)
-		}
-	})()
+		if (handoffBunitMintedCards.has(cardKey)) return
+		const signer = SC.walletConet.address
+		const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
+		const tx = await bunit.mintReward!(card, AGENT_HANDOFF_FREE_BUNIT_UNITS6)
+		const receipt = await tx.wait()
+		if (receipt?.status !== 1) throw new Error('mintReward reverted')
+		markHandoffBunitMinted(card)
+		logger(
+			Colors.green(
+				`[agentReferrerRelay] handoff free B-Unit ok card=${card} merchant=${merchant} units=1000 signer=${signer} tx=${tx.hash}`,
+			),
+		)
+	} catch (e: unknown) {
+		const signer = SC?.walletConet.address ?? 'none'
+		logger(
+			Colors.yellow(
+				`[agentReferrerRelay] handoff free B-Unit failed signer=${signer} card=${card}: ${airdropErrorText(e)}`,
+			),
+		)
+	} finally {
+		handoffBunitInflightCards.delete(cardKey)
+		if (SC) unshiftSettleConet(SC)
+	}
 }
 
 /**
- * Sync mint 1000 free B-Unit to merchant (claimComplete path). Returns txHash or null if skipped/busy/failed.
+ * Sync mint 1000 free B-Unit to the merchant card (claimComplete path).
  */
 async function mintHandoffFreeBunitToMerchantSync(
 	merchantEoa: string,
@@ -287,32 +395,49 @@ async function mintHandoffFreeBunitToMerchantSync(
 	const merchant = ethers.getAddress(merchantEoa)
 	const card = ethers.getAddress(cardAddress)
 	const cardKey = card.toLowerCase()
-	if (handoffBunitMintedCards.has(cardKey)) {
-		return { skipped: true }
+	if (handoffBunitMintedCards.has(cardKey)) return { skipped: true }
+
+	for (let attempt = 0; attempt < 3; attempt++) {
+		if (handoffBunitMintedCards.has(cardKey)) return { skipped: true }
+		if (handoffBunitInflightCards.has(cardKey)) {
+			await sleepMs(AIRDROP_RETRY_MS)
+			continue
+		}
+		handoffBunitInflightCards.add(cardKey)
+		let SC: SettleContractPoolEntry | undefined
+		try {
+			SC = await shiftIdleBunitAdmin()
+			if (!SC) {
+				if (!(await rosterHasBunitAdmin())) return { error: 'No B-Unit admin in settle roster' }
+			} else if (handoffBunitMintedCards.has(cardKey)) {
+				return { skipped: true }
+			} else {
+				const signer = SC.walletConet.address
+				const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
+				const tx = await bunit.mintReward!(card, AGENT_HANDOFF_FREE_BUNIT_UNITS6)
+				const receipt = await tx.wait()
+				if (receipt?.status !== 1) throw new Error('mintReward reverted')
+				markHandoffBunitMinted(card)
+				logger(
+					Colors.green(
+						`[agentCardClaim] handoff free B-Unit ok card=${card} merchant=${merchant} units=1000 signer=${signer} tx=${tx.hash}`,
+					),
+				)
+				return { txHash: tx.hash }
+			}
+		} catch (e: unknown) {
+			const msg = airdropErrorText(e)
+			const signer = SC?.walletConet.address ?? 'none'
+			logger(Colors.yellow(`[agentCardClaim] handoff free B-Unit failed signer=${signer} card=${card}: ${msg}`))
+			return { error: msg }
+		} finally {
+			handoffBunitInflightCards.delete(cardKey)
+			if (SC) unshiftSettleConet(SC)
+		}
+		await sleepMs(AIRDROP_RETRY_MS)
 	}
-	const SC = shiftSettleConet()
-	if (!SC) {
-		return { error: 'Settle pool busy' }
-	}
-	try {
-		const bunit = new ethers.Contract(CONET_BUINT, BUNIT_REWARD_ABI, SC.walletConet)
-		const tx = await bunit.mintReward!(merchant, AGENT_HANDOFF_FREE_BUNIT_UNITS6)
-		const receipt = await tx.wait()
-		if (receipt?.status !== 1) throw new Error('mintReward reverted')
-		markHandoffBunitMinted(card)
-		logger(
-			Colors.green(
-				`[agentCardClaim] handoff free B-Unit ok merchant=${merchant} card=${card} units=1000 tx=${tx.hash}`,
-			),
-		)
-		return { txHash: tx.hash }
-	} catch (e: unknown) {
-		const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e)
-		logger(Colors.yellow(`[agentCardClaim] handoff free B-Unit failed: ${msg}`))
-		return { error: msg }
-	} finally {
-		unshiftSettleConet(SC)
-	}
+	if (handoffBunitMintedCards.has(cardKey)) return { skipped: true }
+	return { error: 'B-Unit admin settle busy' }
 }
 
 /** Master: send CNET gas to temp so it can transferOwnership. Body pre-checked by Cluster. */
@@ -349,7 +474,7 @@ export async function agentCardClaimFundTempProcess(
 	}
 }
 
-/** Master: mint 1000 free B-Unit to merchant after ownership transfer. Body pre-checked by Cluster. */
+/** Master: mint 1000 free B-Unit to the merchant card after ownership transfer. Body pre-checked by Cluster. */
 export async function agentCardClaimCompleteProcess(
 	body: { merchant: string; card: string; agent?: string; temp?: string },
 	res: Response,

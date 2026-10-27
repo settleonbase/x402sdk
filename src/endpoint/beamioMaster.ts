@@ -4386,7 +4386,7 @@ const routing = ( router: Router ) => {
 			void agentCardClaimFundTempProcess(req.body as { temp: string; agent?: string; card?: string }, res)
 		})
 
-		/** Agent card claim: mint 1000 free B-Unit to merchant after ownership transfer. */
+		/** Agent card claim: mint 1000 free B-Unit to the merchant card after ownership transfer. */
 		router.post('/agentCardClaimComplete', (req, res) => {
 			void agentCardClaimCompleteProcess(
 				req.body as { merchant: string; card: string; agent?: string; temp?: string },

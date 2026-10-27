@@ -168,6 +168,15 @@ export function shiftSettleConet(): SettleContractPoolEntry | undefined {
 	return Settle_ConetPool.shift()
 }
 
+/** Take one idle CoNET settle wallet by address. Roster stays read-only. */
+export function takeIdleSettleConetByAddress(address: string): SettleContractPoolEntry | undefined {
+	const want = address.toLowerCase()
+	const idx = Settle_ConetPool.findIndex((sc) => sc.walletConet.address.toLowerCase() === want)
+	if (idx < 0) return undefined
+	const [sc] = Settle_ConetPool.splice(idx, 1)
+	return sc
+}
+
 export function shiftSettleBoth(): SettleContractPoolEntry | undefined {
 	const conetIdx = new Map(Settle_ConetPool.map((sc, i) => [scAddr(sc), i]))
 	for (let i = 0; i < Settle_BasePool.length; i++) {
