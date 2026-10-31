@@ -21,6 +21,7 @@ import {
 	updateMerchantCardStripeSession,
 	claimPaymentLedger,
 	updatePaymentLedger,
+	getCardByAddress,
 } from '../db'
 import {
     executeForAdminPool,
@@ -46,6 +47,12 @@ import {
 	getStripeConnectRedirectUri,
 	getStripeBeamioPublishableKey,
 } from './stripeBeamio'
+import {
+	buildMerchantCardStripeDisplayText,
+	merchantNameFromCardMetadata,
+	merchantNameFromStripeAccount,
+	normalizeMerchantDisplayName,
+} from './merchantCardStripeDisplay'
 
 const APP_BASE_URL = 'https://beamio.app'
 
@@ -74,6 +81,34 @@ async function retrievePaymentIntentForMerchant(
 			stripeAccount: local.stripeAccountId,
 		})
 	}
+}
+
+/**
+ * Merchant name for the payer-facing Stripe page. Card metadata comes first
+ * because it is the name the payer saw in Beamio; the connected Stripe
+ * account's public name is the fallback. Returns '' when neither is set, and
+ * never throws: a missing name must not block a payment.
+ */
+async function resolveMerchantCardStripeMerchantName(
+	cardAddress: string,
+	stripeAccountId: string,
+): Promise<string> {
+	try {
+		const card = await getCardByAddress(cardAddress)
+		const fromCard = normalizeMerchantDisplayName(merchantNameFromCardMetadata(card?.metadata))
+		if (fromCard) return fromCard
+	} catch (error: any) {
+		logger(Colors.yellow(`[merchantCardStripe] card metadata name lookup failed for ${cardAddress}: ${error?.message ?? error}`))
+	}
+	try {
+		const account = await stripeClient().accounts.retrieve(stripeAccountId)
+		if (!('deleted' in account && account.deleted)) {
+			return normalizeMerchantDisplayName(merchantNameFromStripeAccount(account))
+		}
+	} catch (error: any) {
+		logger(Colors.yellow(`[merchantCardStripe] Stripe account name lookup failed for ${stripeAccountId}: ${error?.message ?? error}`))
+	}
+	return ''
 }
 
 function normalizeCardAddress(raw: string): string {
@@ -606,7 +641,7 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 	ptSameStoreBurn13?: string
 	ptPeerLegs?: unknown
 	businessIdempotencyKey?: string
-}): Promise<{ sessionId: string; url: string }> {
+}): Promise<{ sessionId: string; url: string; merchantName: string }> {
 	const cardAddress = normalizeCardAddress(params.cardAddress)
 	const buyerEoa = normalizeEoa(params.buyerEoa)
 	const local = await getMerchantCardStripeStatusFromDb(cardAddress)
@@ -634,25 +669,34 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 	if (!businessIdempotencyKey || !/^[A-Za-z0-9:_-]{16,128}$/.test(businessIdempotencyKey)) {
 		throw new Error('businessIdempotencyKey is required')
 	}
+	const merchantName = await resolveMerchantCardStripeMerchantName(cardAddress, local.stripeAccountId)
 	const existingByKey = await getMerchantCardStripeSessionByBusinessKey(businessIdempotencyKey)
 	if (existingByKey) {
 		const existingSession = await stripeClient().checkout.sessions.retrieve(existingByKey.sessionId)
-		return { sessionId: existingByKey.sessionId, url: existingSession.url ?? '' }
+		return { sessionId: existingByKey.sessionId, url: existingSession.url ?? '', merchantName }
 	}
 	const stripe = stripeClient()
 	const giftMetadata = giftStripeMetadata(params)
+	const display = buildMerchantCardStripeDisplayText({ kind: params.kind, merchantName, surface: 'checkout' })
 	const session = await stripe.checkout.sessions.create({
 		mode: 'payment',
 		customer_creation: 'if_required',
 		line_items: [{
 			price_data: {
 				currency,
-				product_data: { name: params.kind === 'membership' ? 'Membership fee' : 'Program card top-up' },
+				product_data: {
+					name: display.productName,
+					...(display.productDescription ? { description: display.productDescription } : {}),
+				},
 				unit_amount: amount,
 			},
 			quantity: 1,
 		}],
+		...(display.submitMessage ? { custom_text: { submit: { message: display.submitMessage } } } : {}),
 		payment_intent_data: {
+			description: display.paymentDescription,
+			// Display text only. Funds still settle on the platform and
+			// transfer to the merchant's connected account, as before.
 			transfer_data: { destination: local.stripeAccountId },
 			metadata: {
 				product: 'merchantCardStripe',
@@ -704,11 +748,11 @@ export async function createMerchantCardStripeCheckoutSession(params: {
 		const duplicate = await getMerchantCardStripeSessionByBusinessKey(businessIdempotencyKey)
 		if (duplicate) {
 			const duplicateSession = await stripe.checkout.sessions.retrieve(duplicate.sessionId)
-			return { sessionId: duplicate.sessionId, url: duplicateSession.url ?? '' }
+			return { sessionId: duplicate.sessionId, url: duplicateSession.url ?? '', merchantName }
 		}
 		throw new Error('Stripe session already exists')
 	}
-	return { sessionId: session.id, url: session.url ?? '' }
+	return { sessionId: session.id, url: session.url ?? '', merchantName }
 }
 
 /** Creates a PaymentIntent for the browser Payment Element.
@@ -738,7 +782,7 @@ export async function createMerchantCardStripePaymentIntent(params: {
 	ptSameStoreBurn13?: string
 	ptPeerLegs?: unknown
 	businessIdempotencyKey?: string
-}): Promise<{ paymentIntentId: string; clientSecret: string; publishableKey: string }> {
+}): Promise<{ paymentIntentId: string; clientSecret: string; publishableKey: string; merchantName: string }> {
 	const cardAddress = normalizeCardAddress(params.cardAddress)
 	const buyerEoa = normalizeEoa(params.buyerEoa)
 	const local = await getMerchantCardStripeStatusFromDb(cardAddress)
@@ -766,11 +810,13 @@ export async function createMerchantCardStripePaymentIntent(params: {
 	}
 	const publishableKey = getStripeBeamioPublishableKey()
 	if (!publishableKey) throw new Error('Stripe publishable key is not configured on server')
+	// A Payment Element page should show this name as "Pay to <merchant>".
+	const merchantName = await resolveMerchantCardStripeMerchantName(cardAddress, local.stripeAccountId)
 	const existingByKey = await getMerchantCardStripeSessionByBusinessKey(businessIdempotencyKey)
 	if (existingByKey?.paymentIntentId) {
 		const existingIntent = await stripeClient().paymentIntents.retrieve(existingByKey.paymentIntentId)
 		if (!existingIntent.client_secret) throw new Error('Stripe PaymentIntent has no client secret')
-		return { paymentIntentId: existingIntent.id, clientSecret: existingIntent.client_secret, publishableKey }
+		return { paymentIntentId: existingIntent.id, clientSecret: existingIntent.client_secret, publishableKey, merchantName }
 	}
 	const metadata: Stripe.MetadataParam = {
 		product: 'merchantCardStripe',
@@ -787,9 +833,7 @@ export async function createMerchantCardStripePaymentIntent(params: {
 		amount,
 		currency,
 		automatic_payment_methods: { enabled: true },
-		description: params.kind === 'membership'
-			? 'Membership fee'
-			: params.kind === 'gift' ? 'Dining gift payment' : 'Program card top-up',
+		description: buildMerchantCardStripeDisplayText({ kind: params.kind, merchantName, surface: 'paymentIntent' }).paymentDescription,
 		transfer_data: { destination: local.stripeAccountId },
 		metadata,
 	}, { idempotencyKey: businessIdempotencyKey })
@@ -813,11 +857,11 @@ export async function createMerchantCardStripePaymentIntent(params: {
 		if (duplicate?.paymentIntentId) {
 			const duplicateIntent = await stripeClient().paymentIntents.retrieve(duplicate.paymentIntentId)
 			if (!duplicateIntent.client_secret) throw new Error('Stripe PaymentIntent has no client secret')
-			return { paymentIntentId: duplicateIntent.id, clientSecret: duplicateIntent.client_secret, publishableKey }
+			return { paymentIntentId: duplicateIntent.id, clientSecret: duplicateIntent.client_secret, publishableKey, merchantName }
 		}
 		throw new Error('Stripe PaymentIntent already exists')
 	}
-	return { paymentIntentId: paymentIntent.id, clientSecret: paymentIntent.client_secret, publishableKey }
+	return { paymentIntentId: paymentIntent.id, clientSecret: paymentIntent.client_secret, publishableKey, merchantName }
 }
 
 type MerchantCardStripeTerminalPaymentParams = {
