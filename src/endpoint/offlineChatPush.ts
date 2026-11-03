@@ -572,12 +572,15 @@ async function sendFcmBadge(
 		badge: String(safeBadge),
 		unread: String(safeBadge),
 	}
+	// Fixed label for the FCM Data API delivery report (droppedAppForceStopped per kind). No identity.
+	const fcmOptions = { analytics_label: safeBadge > 0 ? 'chat' : 'chat_clear' }
 	// badge=0: data-only clear attempt (foreground/alive). Background clear relies on
 	// the next open / syncChatBadge; FCM cannot cancel a prior notification via data-only.
 	const message: Record<string, unknown> =
 		safeBadge > 0
 			? {
 					token: deviceToken,
+					fcm_options: fcmOptions,
 					notification: {
 						title: 'Beamio',
 						body: unreadLabel,
@@ -598,6 +601,7 @@ async function sendFcmBadge(
 				}
 			: {
 					token: deviceToken,
+					fcm_options: fcmOptions,
 					data,
 					android: {
 						priority: 'HIGH',
@@ -866,6 +870,8 @@ async function sendFcmVoiceCall(cfg: FcmConfig, deviceToken: string, payload: Vo
 		body: JSON.stringify({
 			message: {
 				token: deviceToken,
+				// Fixed label for the FCM Data API delivery report. No identity.
+				fcm_options: { analytics_label: 'call' },
 				data: {
 					type: 'voiceCall',
 					callId: payload.callId,
