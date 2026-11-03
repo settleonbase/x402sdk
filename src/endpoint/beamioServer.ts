@@ -126,6 +126,7 @@ import {
 } from './issuedCouponSeriesQueryCache'
 import { verifyAndPersistBeamioSunUrl, logSunDebug } from '../BeamioSun'
 import { verifyNfcSecurityGate } from '../nfcSecurityGate'
+import { regiestChatRoutePreCheck } from '../chatRouteAuth'
 import { fetchUIDAssetsForEOA, fetchBeamioTagForEoa, scheduleEnsureNfcBeamioTagForEoa, type FetchUIDAssetsOptions } from './getUIDAssetsLogic'
 import {
 	registerPushDevicePreCheck,
@@ -11390,39 +11391,19 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		)
 	})
 
-	/** regiestChatRoute：集群预检格式，合格转发 master。master 使用 beamio_ContractPool 排队并发处理。*/
+	/**
+	 * regiestChatRoute：集群预检格式 + 钱包 EIP-191 签名（见 chatRouteAuth.ts），合格转发 master。
+	 * master 会再验一次签名并拒绝重复 nonce，然后用 beamio_ContractPool 排队写链。
+	 */
 	router.post('/regiestChatRoute', async (req, res) => {
-		const { wallet, keyID, publicKeyArmored, encrypKeyArmored, routeKeyID } = req.body as {
-			wallet?: string
-			keyID?: string
-			publicKeyArmored?: string
-			encrypKeyArmored?: string
-			routeKeyID?: string
+		const checked = regiestChatRoutePreCheck(req.body)
+		if (!checked.ok) {
+			logger(Colors.red(`server /api/regiestChatRoute rejected: ${checked.error}`), inspect({ wallet: req.body?.wallet, routeKeyID: req.body?.routeKeyID }, false, 2, true))
+			return res.status(checked.status).json({ ok: false, error: checked.error }).end()
 		}
-		if (!ethers.isAddress(wallet) || wallet === ethers.ZeroAddress) {
-			logger(Colors.red(`server /api/regiestChatRoute Invalid wallet`), inspect(req.body, false, 2, true))
-			return res.status(400).json({ ok: false, error: 'Invalid wallet' }).end()
-		}
-		if (!keyID || typeof keyID !== 'string' || keyID.trim() === '') {
-			return res.status(400).json({ ok: false, error: 'Missing or invalid keyID' }).end()
-		}
-		if (!publicKeyArmored || typeof publicKeyArmored !== 'string' || publicKeyArmored.trim() === '') {
-			return res.status(400).json({ ok: false, error: 'Missing or invalid publicKeyArmored' }).end()
-		}
-		if (!encrypKeyArmored || typeof encrypKeyArmored !== 'string' || encrypKeyArmored.trim() === '') {
-			return res.status(400).json({ ok: false, error: 'Missing or invalid encrypKeyArmored' }).end()
-		}
-		if (!routeKeyID || typeof routeKeyID !== 'string' || routeKeyID.trim() === '') {
-			return res.status(400).json({ ok: false, error: 'Missing or invalid routeKeyID' }).end()
-		}
-		logger(Colors.green(`server /api/regiestChatRoute preCheck OK, forwarding to master`), inspect({ wallet, keyID: keyID.slice(0, 16), routeKeyID }, false, 2, true))
-		postLocalhost('/api/regiestChatRoute', {
-			wallet: wallet.toLowerCase(),
-			keyID: keyID.trim(),
-			publicKeyArmored: publicKeyArmored.trim(),
-			encrypKeyArmored: encrypKeyArmored.trim(),
-			routeKeyID: routeKeyID.trim()
-		}, res)
+		const p = checked.payload
+		logger(Colors.green(`server /api/regiestChatRoute preCheck OK, forwarding to master`), inspect({ wallet: p.wallet, keyID: p.keyID.slice(0, 16), routeKeyID: p.routeKeyID }, false, 2, true))
+		postLocalhost('/api/regiestChatRoute', p, res)
 	})
 
 	/** Offline chat APNs: register device token (EOA personal_sign precheck → Master). */

@@ -12,6 +12,7 @@ import AccountRegistryABI from './ABI/beamio-AccountRegistry.json'
 import IPFSAbi from './ABI/Ipfs.abi.json'
 import conetPGPABI from './ABI/conetPGP.json'
 import { CONET_RPC_URL } from './chainAddresses'
+import { ChatRouteReplayGuard, regiestChatRoutePreCheck } from './chatRouteAuth'
 import {
 	normalizeCouponSeriesMetadataJson,
 	normalizeProductionSeriesMetadataJson,
@@ -774,6 +775,8 @@ const regiestChatRoutePool: {
 	publicKeyArmored: string
 	encrypKeyArmored: string
 	routeKeyID: string
+	/** Signed request nonce; released if the chain write is never sent. */
+	nonce: string
 	res: Response
 }[] = []
 
@@ -1565,33 +1568,41 @@ const regiestChatRouteProcess = async () => {
 	} catch (err: any) {
 		const msg = err?.shortMessage || err?.message || 'Unknown error'
 		logger('regiestChatRouteProcess Error:', msg)
+		// Nothing was written: let the owner retry the same signed request.
+		regiestChatRouteReplayGuard.release(obj.wallet, obj.nonce)
 		respond(500, { ok: false, error: msg })
 	}
 	beamio_ContractPool.unshift(SC)
 	setTimeout(regiestChatRouteProcess, 2000)
 }
 
-/** 登记 chat route：由 cluster 预检后转发。push regiestChatRoutePool，daemon 排队调用 addPublicPGPByAdmin。*/
+/**
+ * 登记 chat route：cluster 已做签名预检；master 再验一次签名（防止绕过 cluster 直连），
+ * 并拒绝已用过的 nonce（防重放），然后 push regiestChatRoutePool，daemon 排队调用 addPublicPGPByAdmin。
+ */
+const regiestChatRouteReplayGuard = new ChatRouteReplayGuard()
+
 export const regiestChatRoute = async (req: Request, res: Response) => {
-	const { wallet, keyID, publicKeyArmored, encrypKeyArmored, routeKeyID } = req.body as {
-		wallet?: string
-		keyID?: string
-		publicKeyArmored?: string
-		encrypKeyArmored?: string
-		routeKeyID?: string
+	const checked = regiestChatRoutePreCheck(req.body)
+	if (!checked.ok) {
+		logger(Colors.red(`[regiestChatRoute] master rejected: ${checked.error}`))
+		return res.status(checked.status).json({ ok: false, error: checked.error })
 	}
-	if (!ethers.isAddress(wallet) || !keyID || !publicKeyArmored || !encrypKeyArmored || !routeKeyID) {
-		return res.status(400).json({ ok: false, error: 'Missing or invalid: wallet, keyID, publicKeyArmored, encrypKeyArmored, routeKeyID' })
-	}
+	const { wallet, keyID, publicKeyArmored, encrypKeyArmored, routeKeyID, nonce, timestamp } = checked.payload
 	if (!beamio_ContractPool[0]?.constPgpManager) {
 		return res.status(500).json({ ok: false, error: 'Service unavailable' })
 	}
+	if (!regiestChatRouteReplayGuard.claim(wallet, nonce, timestamp)) {
+		logger(Colors.red(`[regiestChatRoute] master rejected replay wallet=${wallet} nonce=${nonce}`))
+		return res.status(409).json({ ok: false, error: 'Replayed request' })
+	}
 	regiestChatRoutePool.push({
-		wallet: wallet.toLowerCase(),
-		keyID: String(keyID).trim(),
-		publicKeyArmored: String(publicKeyArmored),
-		encrypKeyArmored: String(encrypKeyArmored),
-		routeKeyID: String(routeKeyID).trim(),
+		wallet,
+		keyID,
+		publicKeyArmored,
+		encrypKeyArmored,
+		routeKeyID,
+		nonce,
 		res
 	})
 	logger(Colors.cyan(`[regiestChatRoute] pushed to pool, wallet=${wallet} routeKeyID=${routeKeyID}`))
