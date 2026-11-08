@@ -10,6 +10,7 @@ import fs from 'node:fs'
 import { homedir } from 'node:os'
 import cluster from 'cluster'
 import { logger } from './logger'
+import { guardBUnitConsume } from './paymentIntakePause'
 import {
 	acquireStripeCardFulfillmentSigner,
 	getStripeCardFulfillmentAdminAddresses as getStripePoolAdminAddresses,
@@ -5710,7 +5711,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				SC.walletConet
 			)
 			try {
-				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+				const consumeTx = await guardBUnitConsume(bunitAirdropWrite, 'MemberCard:5713').consumeFromUser(
 					feePayer,
 					BUNIT_FEE_AMOUNT,
 					baseHashBytes32,
@@ -5746,7 +5747,7 @@ export const beamioTransferIndexerAccountingProcess = async () => {
 				SC.walletConet
 			)
 			try {
-				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+				const consumeTx = await guardBUnitConsume(bunitAirdropWrite, 'MemberCard:5749').consumeFromUser(
 					feePayer,
 					bunitFeeAmount,
 					baseHashBytes32,
@@ -6055,7 +6056,7 @@ export const requestAccountingProcess = async () => {
 				['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
 				SC.walletConet
 			)
-			bunitAirdropWrite
+			guardBUnitConsume(bunitAirdropWrite, 'MemberCard:6058')
 				.consumeFromUser(
 					obj.payerEOA,
 					obj.feeBUnits,
@@ -7857,7 +7858,7 @@ export const cardRedeemIndexerAccountingProcess = async () => {
 				SC.walletConet
 			)
 			try {
-				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+				const consumeTx = await guardBUnitConsume(bunitAirdropWrite, 'MemberCard:7860').consumeFromUser(
 					feePayerForLedger,
 					bServiceUnits6,
 					txHash as `0x${string}`,
@@ -8606,7 +8607,7 @@ async function consumeFreeMembershipBUnitInBackground(params: {
 			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
 			SC.walletConet,
 		)
-		const tx = await writer.consumeFromUser(
+		const tx = await guardBUnitConsume(writer, 'MemberCard:8609').consumeFromUser(
 			payer,
 			params.feeAmount,
 			params.baseHash,
@@ -8983,7 +8984,7 @@ export const aaMultisigOfflineSubmitProcess = async () => {
 			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
 			SC.walletConet
 		)
-		const consumeTx = await bunitWrite.consumeFromUser(
+		const consumeTx = await guardBUnitConsume(bunitWrite, 'MemberCard:8986').consumeFromUser(
 			obj.feePayer,
 			feeAmount,
 			basePaymentHash as `0x${string}`,
@@ -10289,7 +10290,7 @@ async function executeForAdminPostBaseProcess(): Promise<void> {
 				SC.walletConet
 			)
 			try {
-				const consumeTx = await bunitAirdropWrite.consumeFromUser(
+				const consumeTx = await guardBUnitConsume(bunitAirdropWrite, 'MemberCard:10292').consumeFromUser(
 					topupFeeConsumer,
 					obj.topupFeeBUnits,
 					baseHash,
@@ -11509,7 +11510,7 @@ export const purchasingCardProcess = async () => {
 				SC.walletConet
 			)
 			try {
-				const consumeTxPurch = await bunitAirdropWritePurch.consumeFromUser(
+				const consumeTxPurch = await guardBUnitConsume(bunitAirdropWritePurch, 'MemberCard:11512').consumeFromUser(
 					topupFeeConsumer,
 					topupFeeBUnitsForJob,
 					baseHashPurch,
@@ -12927,7 +12928,7 @@ export const AAtoEOAProcess = async () => {
       ['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
       SC.walletConet
     )
-    void bunitAirdropWrite
+    void guardBUnitConsume(bunitAirdropWrite, 'MemberCard:12930')
       .consumeFromUser(
         feePayer,
         BUNIT_FEE_AMOUNT,
@@ -14072,7 +14073,7 @@ export const ContainerRelayProcess = async () => {
         SC.walletConet
       )
       try {
-        const consumeTx = await bunitAirdropWrite.consumeFromUser(
+        const consumeTx = await guardBUnitConsume(bunitAirdropWrite, 'MemberCard:14075').consumeFromUser(
           feePayerEOA,
           feeBUnits6,
           baseHashBytes32,
@@ -17621,7 +17622,7 @@ async function consumeNfcLinkMigrationBUnitFeeNonFatal(params: {
 			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
 			params.walletConet
 		)
-		await bunitAirdropWrite.consumeFromUser(
+		await guardBUnitConsume(bunitAirdropWrite, 'MemberCard:17624').consumeFromUser(
 			params.feePayer,
 			NFC_LINK_CLAIM_CONTAINER_MIGRATE_BUNITS6,
 			params.feeTxHash as `0x${string}`,
@@ -21154,7 +21155,7 @@ export async function chargeCardProgramSocialBunitFeeInBackground(args: {
 			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
 			SC.walletConet
 		)
-		const consumeTx = await bunitWrite.consumeFromUser(
+		const consumeTx = await guardBUnitConsume(bunitWrite, 'MemberCard:21157').consumeFromUser(
 			pickedFee.consumer,
 			bServiceUnits6,
 			baseHash as `0x${string}`,
@@ -21236,7 +21237,7 @@ async function consumeCreateIssuedNftBunitFeeInBackground(
 			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
 			SC.walletConet
 		)
-		const consumeTxFee = await bunitWrite.consumeFromUser(
+		const consumeTxFee = await guardBUnitConsume(bunitWrite, 'MemberCard:21239').consumeFromUser(
 			pickedFee.consumer,
 			CREATE_COUPON_ISSUED_NFT_BUNIT_UNITS6,
 			ethers.ZeroHash,

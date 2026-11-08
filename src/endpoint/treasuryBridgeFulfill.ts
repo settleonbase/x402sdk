@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
+import { guardBUnitConsume } from '../paymentIntakePause'
 import {
 	CONET_BUNIT_AIRDROP_ADDRESS,
 	CONET_MAINNET_CHAIN_ID,
@@ -525,7 +526,7 @@ async function consumeTreasuryBridgeBunitInBackground(args: {
 			SC.walletConet,
 		)
 		const baseHash = args.USDC_tx as `0x${string}`
-		const consumeTx = await bunit.consumeFromUser(feePayer, feeBUnits6, baseHash, 0n, 2n, {
+		const consumeTx = await guardBUnitConsume(bunit, 'treasuryBridgeFulfill:528').consumeFromUser(feePayer, feeBUnits6, baseHash, 0n, 2n, {
 			gasLimit: 2_500_000,
 		})
 		await consumeTx.wait()

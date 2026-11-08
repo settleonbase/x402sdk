@@ -23,6 +23,7 @@ import {
 	unshiftSettleConet,
 } from '../settleContractPool'
 import { lookupFuelPack, fuelPackFreeBUnits6 } from '../fuelPackCatalog'
+import { isPaymentIntakePaused, recordPausedIntake, PAYMENT_INTAKE_PAUSED_CODE } from '../paymentIntakePause'
 
 ensureSettleContractPoolInitialized()
 
@@ -111,6 +112,18 @@ function scheduleFuelPackFulfillPoolPress(): void {
 export const fuelPackFulfillProcess = async () => {
 	const obj = fuelPackFulfillPool.shift()
 	if (!obj) return
+	if (isPaymentIntakePaused()) {
+		// Paid in flight: keep the record, no mint. Re-issue later with the same USDC_tx (on-chain dedupe).
+		const { res: heldRes, ...held } = obj
+		try {
+			recordPausedIntake('fuelPackFulfill', held)
+			if (heldRes && !heldRes.headersSent) heldRes.status(202).json({ success: true, held: true, code: PAYMENT_INTAKE_PAUSED_CODE, USDC_tx: obj.USDC_tx }).end()
+		} catch (e: unknown) {
+			if (heldRes && !heldRes.headersSent) heldRes.status(500).json({ success: false, error: 'hold journal write failed' }).end()
+		}
+		scheduleFuelPackFulfillPoolPress()
+		return
+	}
 	if (!hasIdleSettleConet()) {
 		fuelPackFulfillPool.unshift(obj)
 		return setTimeout(() => void fuelPackFulfillProcess(), 3000)

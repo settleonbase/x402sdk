@@ -6,6 +6,7 @@ import type { Response } from 'express'
 import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from './logger'
+import { guardBUnitConsume } from './paymentIntakePause'
 import { CONET_BUNIT_AIRDROP_ADDRESS, CONET_MAINNET_CHAIN_ID, CONET_USDC } from './chainAddresses'
 import { providerForUserCardChain, resolveUserCardChain } from './beamioUserCardChain'
 import {
@@ -675,7 +676,7 @@ async function topupWithReward13ContainerProcess(): Promise<void> {
 					SC.walletConet,
 				)
 				const gasUsed = receipt?.gasUsed ?? 0n
-				const consumeTx = await bunit.consumeFromUser(
+				const consumeTx = await guardBUnitConsume(bunit, 'topupWithReward13Container:678').consumeFromUser(
 					consumer,
 					feeBUnits6,
 					tx.hash as `0x${string}`,

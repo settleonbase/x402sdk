@@ -2,6 +2,7 @@ import Stripe from 'stripe'
 import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
+import { isPaymentIntakePaused, recordPausedIntake } from '../paymentIntakePause'
 import { getStripeBeamioClient, getStripeBeamioSecretKey } from './stripeBeamio'
 import {
     claimMerchantCardStripeSession,
@@ -1359,6 +1360,50 @@ async function fulfillMerchantCardStripeGift(params: {
 }
 
 /** Fulfill one paid Checkout session exactly once through ExecuteForAdmin. */
+/**
+ * P-A T2 intake pause: a paid merchant-card Stripe payment that arrives while paused is kept
+ * (session row -> succeeded / payment_succeeded, plus a journal line) and no chain write runs.
+ * The row stays claimable, so a later re-run of the fulfil function picks it up once.
+ */
+async function holdMerchantCardStripeFulfillment(params: {
+	sessionId: string
+	meta: Stripe.Metadata
+	paymentIntentId: string | null
+	amountMinor: number | null
+	currency: string | null
+}): Promise<void> {
+	// Never move a row that is already fulfilled (or being fulfilled) back to payment_succeeded:
+	// that would make it claimable again and could credit it twice on resume.
+	const current = await getMerchantCardStripeSessionStatus(params.sessionId)
+	const alreadyFulfilling =
+		current?.fulfillmentStatus === 'fulfillment_succeeded' || current?.fulfillmentStatus === 'fulfillment_processing'
+	if (!alreadyFulfilling) {
+		await updateMerchantCardStripeSession({
+			sessionId: params.sessionId,
+			status: 'succeeded',
+			fulfillmentStatus: 'payment_succeeded',
+			paymentIntentId: params.paymentIntentId,
+			lastError: 'held: payment intake paused',
+		})
+	}
+	try {
+		recordPausedIntake('merchantCardStripe', {
+			sessionId: params.sessionId,
+			rowStatusBefore: current?.fulfillmentStatus ?? null,
+			paymentIntentId: params.paymentIntentId,
+			kind: params.meta.kind,
+			card_address: params.meta.card_address,
+			buyer_eoa: params.meta.buyer_eoa,
+			amount_fiat6: params.meta.amount_fiat6,
+			currency: params.meta.currency,
+			amountMinor: params.amountMinor,
+			paidCurrency: params.currency,
+		})
+	} catch {
+		/* the DB row above is the durable record; journal failure is logged */
+	}
+}
+
 export async function fulfillMerchantCardStripeSession(sessionId: string): Promise<void> {
     const stripe = stripeClient()
     const session = await stripe.checkout.sessions.retrieve(sessionId)
@@ -1374,6 +1419,10 @@ export async function fulfillMerchantCardStripeSession(sessionId: string): Promi
 			fulfillmentStatus: 'fulfillment_succeeded',
 			paymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
 		})
+		return
+	}
+	if (isPaymentIntakePaused()) {
+		await holdMerchantCardStripeFulfillment({ sessionId, meta, paymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null, amountMinor: session.amount_total ?? null, currency: session.currency ?? null })
 		return
 	}
 	if (meta.kind === 'gift') {
@@ -1493,6 +1542,10 @@ export async function fulfillMerchantCardStripePaymentIntent(paymentIntentId: st
 			fulfillmentStatus: 'fulfillment_succeeded',
 			paymentIntentId,
 		})
+		return
+	}
+	if (isPaymentIntakePaused()) {
+		await holdMerchantCardStripeFulfillment({ sessionId: paymentIntentId, meta, paymentIntentId, amountMinor: paymentIntent.amount ?? null, currency: paymentIntent.currency ?? null })
 		return
 	}
 	if (meta.kind === 'gift') {

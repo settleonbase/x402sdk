@@ -7,6 +7,7 @@ import { resolveAaUserOpRelayChainFromRequest } from '../aaTransferRelayChain'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
+import { isPaymentIntakePaused, paymentIntakePausedBody } from '../paymentIntakePause'
 import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
@@ -1706,6 +1707,8 @@ const getLocalhost = (path: string, res: Response) => {
 	req.end()
 }
 
+/** P-A T2 intake pause: workflows whose x402 settle pays the retired bridge initiator. Refused before settle while BEAMIO_PAYMENT_INTAKE_PAUSE is on. */
+const PAUSED_USDC_TOPUP_WORKFLOWS: ReadonlySet<string> = new Set(['fuelpack', 'walletdeposit', 'treasurybridge', 'genesisnodeseat'])
 /** POST 请求转发到 master 并返回 body（用于需修改响应的场景） */
 const postLocalhostBuffer = (path: string, obj: any): Promise<{ statusCode: number; body: string }> =>
 	new Promise((resolve, reject) => {
@@ -5283,6 +5286,9 @@ const routing = ( router: Router ) => {
 			const walletDepositQuote = workflowNorm === 'walletdeposit'
 			const fuelPackQuote = workflowNorm === 'fuelpack'
 			const cardlessQuote = walletDepositQuote || fuelPackQuote
+			if (isPaymentIntakePaused() && PAUSED_USDC_TOPUP_WORKFLOWS.has(workflowNorm)) {
+				return res.status(503).json(paymentIntakePausedBody({ workflow: workflowNorm })).end()
+			}
 			if (cardlessQuote) {
 				const beneficiaryStr = String(beneficiary ?? '').trim()
 				if (!beneficiaryStr || !ethers.isAddress(beneficiaryStr)) {
@@ -5450,6 +5456,10 @@ const routing = ( router: Router ) => {
 			void masterSessionUpsert(sidNorm, patch as Record<string, unknown>)
 		}
 		const sessionPath = !!(sidNorm && posAddr)
+		if (isPaymentIntakePaused() && PAUSED_USDC_TOPUP_WORKFLOWS.has(String(workflow ?? '').trim().toLowerCase())) {
+			// Refused before any x402 settle: no USDC is taken.
+			return res.status(503).json(paymentIntakePausedBody({ workflow: String(workflow ?? '') })).end()
+		}
 		try {
 			if (sidNorm && !posAddr) {
 				return res
@@ -14351,6 +14361,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	 * body: `{ walletAddress, packageType: 'lite_kit' | 'standard_kit' | 'custom_kit' }`
 	 */
 	router.post('/merchantKitStripe/createSession', async (req, res) => {
+		if (isPaymentIntakePaused()) {
+			return res.status(503).json(paymentIntakePausedBody()).end()
+		}
 		const { walletAddress, packageType } = req.body ?? {}
 		if (!walletAddress || typeof packageType !== 'string') {
 			return res.status(400).json({ error: 'walletAddress and packageType required' }).end()
@@ -14659,6 +14672,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	router.post('/merchantCardStripe/createCheckout', async (req, res) => {
+		if (isPaymentIntakePaused()) {
+			return res.status(503).json(paymentIntakePausedBody()).end()
+		}
 		const body = req.body ?? {}
 		if (typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
 			typeof body.buyerEoa !== 'string' || !ethers.isAddress(body.buyerEoa) ||
@@ -14695,6 +14711,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	})
 
 	router.post('/merchantCardStripe/createPaymentIntent', async (req, res) => {
+		if (isPaymentIntakePaused()) {
+			return res.status(503).json(paymentIntakePausedBody()).end()
+		}
 		const body = req.body ?? {}
 		if (typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
 			typeof body.buyerEoa !== 'string' || !ethers.isAddress(body.buyerEoa) ||
@@ -14800,6 +14819,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	}
 
 	router.post('/merchantCardStripe/createTerminalPaymentIntent', async (req, res) => {
+		if (isPaymentIntakePaused()) {
+			return res.status(503).json(paymentIntakePausedBody()).end()
+		}
 		const body = req.body ?? {}
 		if (
 			typeof body.cardAddress !== 'string' || !ethers.isAddress(body.cardAddress) ||
@@ -14879,6 +14901,9 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	 * body: `{ walletAddress, packId }`（packId ∈ FUEL_PACK_CATALOG）
 	 */
 	router.post('/fuelPackStripe/createSession', async (req, res) => {
+		if (isPaymentIntakePaused()) {
+			return res.status(503).json(paymentIntakePausedBody()).end()
+		}
 		const { walletAddress, packId } = req.body ?? {}
 		if (!walletAddress || typeof packId !== 'string') {
 			return res.status(400).json({ error: 'walletAddress and packId required' }).end()

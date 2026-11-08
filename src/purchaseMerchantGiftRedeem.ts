@@ -14,6 +14,7 @@ import type { Response } from 'express'
 import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from './logger'
+import { guardBUnitConsume } from './paymentIntakePause'
 import {
 	BEAMIO_INDEXER_DIAMOND,
 	CONET_BUNIT_AIRDROP_ADDRESS,
@@ -952,7 +953,7 @@ async function consumeMerchantGiftPurchaseBunitInBackground(args: {
 			['function consumeFromUser(address,uint256,bytes32,uint256,uint256)'],
 			SC.walletConet,
 		)
-		const consumeTx = await bunitWrite.consumeFromUser(
+		const consumeTx = await guardBUnitConsume(bunitWrite, 'purchaseMerchantGiftRedeem:955').consumeFromUser(
 			args.bunitFeeConsumer,
 			args.bunitFeeUnits6,
 			args.createTxHash as `0x${string}`,

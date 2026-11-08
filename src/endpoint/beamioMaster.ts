@@ -3,6 +3,7 @@ import {getClientIp, oracleBackoud, getOracleRequest, masterSetup, resolveBeamio
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
 import {logger} from '../logger'
+import { isPaymentIntakePaused, recordPausedIntake, PAYMENT_INTAKE_PAUSED_CODE } from '../paymentIntakePause'
 import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
@@ -4002,6 +4003,15 @@ const routing = ( router: Router ) => {
 
 		/** After Genesis Seat x402 settle: bindSale + LockMint, then createRedeemFor + claimRedeemFor. */
 		router.post('/genesisNodeSeatFulfill', (req, res) => {
+			if (isPaymentIntakePaused()) {
+				// Paid in flight (x402 already settled): keep the payload, no bridge / mint chain write.
+				try {
+					recordPausedIntake('genesisNodeSeatFulfill', { body: req.body ?? null })
+					return res.status(202).json({ success: true, held: true, code: PAYMENT_INTAKE_PAUSED_CODE }).end()
+				} catch {
+					return res.status(500).json({ success: false, error: 'hold journal write failed' }).end()
+				}
+			}
 			const b = req.body as {
 				beneficiary?: string
 				qty?: string | number
@@ -4042,6 +4052,15 @@ const routing = ( router: Router ) => {
 
 		/** After wallet USDC x402 settle: LockMint CONET-USDC → beneficiary (EOA or AA). */
 		router.post('/walletDepositFulfill', (req, res) => {
+			if (isPaymentIntakePaused()) {
+				// Paid in flight (x402 already settled): keep the payload, no bridge / mint chain write.
+				try {
+					recordPausedIntake('walletDepositFulfill', { body: req.body ?? null })
+					return res.status(202).json({ success: true, held: true, code: PAYMENT_INTAKE_PAUSED_CODE }).end()
+				} catch {
+					return res.status(500).json({ success: false, error: 'hold journal write failed' }).end()
+				}
+			}
 			const b = req.body as {
 				beneficiary?: string
 				payer?: string
@@ -4108,6 +4127,15 @@ const routing = ( router: Router ) => {
 
 		/** After Discover treasuryBridge settle: LockMint CONET-USDC → card.owner + protocol gateway mint. */
 		router.post('/treasuryBridgeFulfill', (req, res) => {
+			if (isPaymentIntakePaused()) {
+				// Paid in flight (x402 already settled): keep the payload, no bridge / mint chain write.
+				try {
+					recordPausedIntake('treasuryBridgeFulfill', { body: req.body ?? null })
+					return res.status(202).json({ success: true, held: true, code: PAYMENT_INTAKE_PAUSED_CODE }).end()
+				} catch {
+					return res.status(500).json({ success: false, error: 'hold journal write failed' }).end()
+				}
+			}
 			const b = req.body as {
 				cardAddress?: string
 				cardOwner?: string

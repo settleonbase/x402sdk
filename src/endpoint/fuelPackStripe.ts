@@ -9,6 +9,7 @@ import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { masterSetup, resolveBeamioConetHttpRpcUrl } from '../util'
 import { logger } from '../logger'
+import { isPaymentIntakePaused, recordPausedIntake } from '../paymentIntakePause'
 import {
 	CONET_BUINT,
 	CONET_BUNIT_AIRDROP_ADDRESS,
@@ -296,6 +297,17 @@ async function fulfillFuelPackStripeOnChain(sessionId: string): Promise<void> {
 }
 
 export function scheduleFuelPackStripeChainFulfillment(sessionId: string): void {
+	if (isPaymentIntakePaused()) {
+		// Paid in flight: keep the session record (Stripe holds the payment), no mint.
+		const rec = sessions.get(sessionId)
+		try {
+			recordPausedIntake('fuelPackStripe', { sessionId, status: rec?.status, eoaAddress: rec?.eoaAddress, packId: rec?.packId, stripePaymentId: rec?.stripePaymentId, lastEvent: rec?.lastEvent })
+		} catch {
+			/* logged by recordPausedIntake */
+		}
+		if (rec) sessions.set(sessionId, { ...rec, chainFulfillment: { ...rec.chainFulfillment, lastError: 'held: payment intake paused' } })
+		return
+	}
 	void fulfillFuelPackStripeOnChain(sessionId)
 }
 
