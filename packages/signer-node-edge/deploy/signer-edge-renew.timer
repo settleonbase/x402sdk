@@ -1,0 +1,15 @@
+# The only scheduler for this lineage. Do not enable certbot.timer or a
+# certbot cron job beside this timer. Do not enable this timer now.
+
+[Unit]
+Description=Signer edge certificate renewal timer
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=3600
+AccuracySec=1min
+Unit=signer-edge-renew.service
+
+[Install]
+WantedBy=timers.target

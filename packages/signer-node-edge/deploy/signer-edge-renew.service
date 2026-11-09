@@ -1,0 +1,31 @@
+# Certificate renewal on a future ops host. Do not install this on dle.
+# Do not enable it now. The default profile is staging.
+# A failure retries once inside the start limit and does not move current.
+
+[Unit]
+Description=Signer edge certificate renewal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+Environment=SIGNER_EDGE_DNS01_PROFILE=staging
+Environment=SIGNER_EDGE_DNS01_DIRECTORY=https://acme-staging-v02.api.letsencrypt.org/directory
+# Production is not selected here. A later approval would set both of these
+# and SIGNER_EDGE_RENEW_APPROVED=1. Do not do that in this file.
+# Environment=SIGNER_EDGE_DNS01_PROFILE=production
+# Environment=SIGNER_EDGE_DNS01_DIRECTORY=https://acme-v02.api.letsencrypt.org/directory
+ExecStart=/opt/signer-node-edge/deploy/signer-edge-renew.sh
+ExecStopPost=/bin/sh -c 'if [ "$$SERVICE_RESULT" != success ]; then install -d -o root -g root -m 755 /var/lib/signer-edge-renew; printf "failed %s result=%s\n" "$$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$$SERVICE_RESULT" > /var/lib/signer-edge-renew/failed; chmod 644 /var/lib/signer-edge-renew/failed; echo renew-failed result="$$SERVICE_RESULT"; fi'
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
