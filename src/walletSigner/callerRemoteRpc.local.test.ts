@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { Transaction, Wallet, type Provider, type TransactionReceipt } from 'ethers'
 import { writeIsolatedChatPointerResponse, type ChatPointerHttpSink } from './chatPointerHttpRoute.ts'
+import { resetChatWriteStopForTests } from './chatWriteStopGate.ts'
 import { setIsolatedChatRelayIdle } from './isolatedChatRelayPool.ts'
 import { RemoteSigner, WalletSignerClient, WalletSignerError } from './remoteSigner.ts'
 import { loadSettleRelayRoster } from './settleRemoteRelay.ts'
@@ -132,12 +133,33 @@ function httpSink(): { sink: ChatPointerHttpSink; done: Promise<{ status: number
 	return { sink, done }
 }
 
-test('settle roster and setChatIndexPointer entry reach the mock RPC', async () => {
+type CallerMock = {
+	dir: string
+	seen: Seen[]
+	sender: Wallet
+	rawHash: string
+	legacyReads: string[]
+}
+
+function pointerBody(owner: string, nonce = '1') {
+	return {
+		owner,
+		indexHash: `0x${'11'.repeat(32)}`,
+		ts: '1',
+		seq: '1',
+		nonce,
+		signature: `0x${'22'.repeat(65)}`,
+	}
+}
+
+/** One mock signer. Restores any ledger env from outside this file so the two cases stay isolated. */
+async function withCallerMock(run: (ctx: CallerMock) => Promise<void>): Promise<void> {
+	const prevLedger = process.env.WALLET_SIGNER_CHAT_TOKEN_LEDGER
 	const dir = mkdtempSync(join(tmpdir(), 'caller-entry-'))
 	const seen: Seen[] = []
+	const legacyReads: string[] = []
 	let server: Server | undefined
 	let restore: (() => void) | undefined
-	const legacyReads: string[] = []
 	try {
 		writeCerts(dir)
 		const sender = Wallet.createRandom()
@@ -151,8 +173,47 @@ test('settle roster and setChatIndexPointer entry reach the mock RPC', async () 
 		})
 		const rawHash = Transaction.from(raw).hash!
 		server = await listen(dir, seen, sender.address, raw, rawHash)
-		const port = (server.address() as { port: number }).port
-		restore = useEnv(port, dir)
+		restore = useEnv((server.address() as { port: number }).port, dir)
+		await run({ dir, seen, sender, rawHash, legacyReads })
+	} finally {
+		setIsolatedChatRelayIdle([])
+		delete process.env.WALLET_SIGNER_CHAT_TOKEN_LEDGER
+		resetChatWriteStopForTests()
+		if (prevLedger !== undefined) process.env.WALLET_SIGNER_CHAT_TOKEN_LEDGER = prevLedger
+		restore?.()
+		server?.close()
+		rmSync(dir, { recursive: true, force: true })
+	}
+}
+
+test('unset chat ledger refuses setChatIndexPointer and does not reach the mock send', async () => {
+	await withCallerMock(async ({ seen, sender }) => {
+		// Fail closed: an unpersisted token could be resent by the legacy pool after restart.
+		// There is no silent temp-file default, so a missing ledger must refuse before broadcast.
+		delete process.env.WALLET_SIGNER_CHAT_TOKEN_LEDGER
+		resetChatWriteStopForTests()
+		const provider = {
+			getTransactionReceipt: async (): Promise<TransactionReceipt> => ({ status: 1, to: CONTRACT, from: sender.address } as TransactionReceipt),
+		} as Provider
+		setIsolatedChatRelayIdle([
+			new RemoteSigner(WalletSignerClient.fromEnv(), { keyArray: CHAT_ARRAY, chainId: 224422, address: sender.address }, provider),
+		])
+		const refused = httpSink()
+		writeIsolatedChatPointerResponse(pointerBody(sender.address), refused.sink)
+		const result = await refused.done
+		assert.equal(result.status, 400)
+		assert.equal(result.json.success, false)
+		assert.equal(result.json.retryable, false)
+		assert.equal(result.json.error, 'chat_token_ledger_unconfigured')
+		assert.equal(seen.some((row) => row.method === 'signer_sendTransaction'), false)
+	})
+})
+
+test('settle roster and setChatIndexPointer entry reach the mock RPC', async () => {
+	await withCallerMock(async ({ dir, seen, sender, rawHash, legacyReads }) => {
+		// Own file under this test's temp directory. Not the process temp root and not the old default name.
+		process.env.WALLET_SIGNER_CHAT_TOKEN_LEDGER = join(dir, 'chat-token-ledger.json')
+		resetChatWriteStopForTests()
 		const roster = await loadSettleRelayRoster({
 			remote: true,
 			keyArray: SETTLE_ARRAY,
@@ -182,14 +243,7 @@ test('settle roster and setChatIndexPointer entry reach the mock RPC', async () 
 		setIsolatedChatRelayIdle([
 			new RemoteSigner(WalletSignerClient.fromEnv(), { keyArray: CHAT_ARRAY, chainId: 224422, address: sender.address }, provider),
 		])
-		const body = {
-			owner: sender.address,
-			indexHash: `0x${'11'.repeat(32)}`,
-			ts: '1',
-			seq: '1',
-			nonce: '1',
-			signature: `0x${'22'.repeat(65)}`,
-		}
+		const body = pointerBody(sender.address)
 		const allow = httpSink()
 		writeIsolatedChatPointerResponse(body, allow.sink)
 		const allowed = await allow.done
@@ -203,18 +257,14 @@ test('settle roster and setChatIndexPointer entry reach the mock RPC', async () 
 		assert.equal(send?.params.idempotencyKey, `chat:${sender.address.toLowerCase()}:1`)
 
 		const deny = httpSink()
-		writeIsolatedChatPointerResponse({ ...body, nonce: '99' }, deny.sink)
+		writeIsolatedChatPointerResponse(pointerBody(sender.address, '99'), deny.sink)
 		const denied = await deny.done
 		assert.equal(denied.status, 400)
 		assert.equal(denied.json.success, false)
+		assert.notEqual(denied.json.error, 'chat_token_ledger_unconfigured')
 		assert.equal(seen.filter((row) => row.method === 'signer_sendTransaction' && String(row.params.idempotencyKey).endsWith(':99')).length, 1)
 		assert.equal(legacyReads.length, 0)
-	} finally {
-		setIsolatedChatRelayIdle([])
-		restore?.()
-		server?.close()
-		rmSync(dir, { recursive: true, force: true })
-	}
+	})
 })
 
 test('settle roster does not read legacy keys when the mock RPC refuses', async () => {
