@@ -1,0 +1,2 @@
+# Not installed in this round. signer-edge must not join signer, wsadmin, or www-data.
+u signer-edge - "Signer HTTPS edge" /nonexistent /usr/sbin/nologin

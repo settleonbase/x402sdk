@@ -1,0 +1,18 @@
+{
+	"name": "@conet/signer-node-edge",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Unprivileged HTTPS edge for the signer host. Static pages and health only. No signature proxy.",
+	"license": "UNLICENSED",
+	"type": "module",
+	"bin": {
+		"signer-node-edge": "src/edge.mjs"
+	},
+	"scripts": {
+		"start": "node src/edge.mjs",
+		"test": "node --test --test-concurrency=1 test/edge.test.mjs"
+	},
+	"engines": {
+		"node": ">=22.14"
+	}
+}
