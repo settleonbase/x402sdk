@@ -1,8 +1,11 @@
 import http from 'node:http'
 
-const CHALLENGE_NAME = '_acme-challenge.dle-dns01-staging.conet.network'
+const STAGING_NAME = '_acme-challenge.dle-dns01-staging.conet.network'
+const PRODUCTION_NAME = '_acme-challenge.dle.conet.network'
+const ALLOWED_NAMES = new Set([STAGING_NAME, PRODUCTION_NAME])
+const CHALLENGE_NAME = STAGING_NAME
 const records = new Map([['preexisting', { type: 'TXT', name: CHALLENGE_NAME, preexisting: true }]])
-const trace = { posts: 0, deletes: 0, lists: 0, rejected: 0, authSeen: 0 }
+const trace = { posts: 0, deletes: 0, lists: 0, rejected: 0, authSeen: 0, stagingPosts: 0, productionPosts: 0 }
 let nextId = 1
 
 function send(res, status, body) {
@@ -20,6 +23,8 @@ const server = http.createServer((req, res) => {
 			lists: trace.lists,
 			rejected: trace.rejected,
 			authSeen: trace.authSeen,
+			stagingPosts: trace.stagingPosts,
+			productionPosts: trace.productionPosts,
 			remaining: records.size,
 			preexisting: records.has('preexisting'),
 		})
@@ -50,16 +55,18 @@ const server = http.createServer((req, res) => {
 				send(res, 400, { success: false })
 				return
 			}
-			if (body.type !== 'TXT' || body.name !== CHALLENGE_NAME || body.ttl !== 60 || !body.content) {
+			if (body.type !== 'TXT' || !ALLOWED_NAMES.has(body.name) || body.ttl !== 60 || !body.content) {
 				trace.rejected += 1
 				send(res, 400, { success: false })
 				return
 			}
 			const id = `rec-${nextId}`
 			nextId += 1
-			records.set(id, { type: 'TXT', name: CHALLENGE_NAME, preexisting: false })
+			records.set(id, { type: 'TXT', name: body.name, preexisting: false })
 			trace.posts += 1
-			send(res, 200, { success: true, result: { id, type: 'TXT', name: CHALLENGE_NAME } })
+			if (body.name === PRODUCTION_NAME) trace.productionPosts += 1
+			if (body.name === STAGING_NAME) trace.stagingPosts += 1
+			send(res, 200, { success: true, result: { id, type: 'TXT', name: body.name } })
 		})
 		return
 	}

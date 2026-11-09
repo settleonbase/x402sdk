@@ -5,7 +5,13 @@
 set -eu
 lineage=${RENEWED_LINEAGE:-}
 store=${SIGNER_EDGE_CERT_STORE:-/var/lib/signer-node-edge}
-expected=${SIGNER_EDGE_RENEW_LINEAGE:-/etc/letsencrypt/live/dle.conet.network}
+profile=${SIGNER_EDGE_DNS01_PROFILE:-staging}
+case "$profile" in
+	staging) default_lineage=/etc/letsencrypt/live/dle-dns01-staging.conet.network ;;
+	production) default_lineage=/etc/letsencrypt/live/dle.conet.network ;;
+	*) echo "publish-refused reason=profile" >&2; exit 1 ;;
+esac
+expected=${SIGNER_EDGE_RENEW_LINEAGE:-$default_lineage}
 if [ "$lineage" != "$expected" ]; then
 	exit 0
 fi
@@ -25,5 +31,9 @@ chmod 644 "$dest/fullchain.pem"
 chmod 640 "$dest/privkey.pem"
 chown root:root "$dest" "$dest/fullchain.pem" "$store" "$store/versions"
 chown root:signer-edge "$dest/privkey.pem"
+dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+SIGNER_EDGE_PUBLISH_CERT="$dest/fullchain.pem" \
+SIGNER_EDGE_PUBLISH_KEY="$dest/privkey.pem" \
+	python3 "$dir/dns01_publish.py"
 ln -s "versions/$stamp" "$store/current.next"
 mv -Tf "$store/current.next" "$store/current"
