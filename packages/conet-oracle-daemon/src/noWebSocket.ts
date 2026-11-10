@@ -81,6 +81,25 @@ function isWsRequest(request: string): boolean {
 	return request === 'ws' || request.startsWith('ws/')
 }
 
+function resolvedFilename(request: string, parent: unknown): string | undefined {
+	try {
+		const resolved = (Module as unknown as { _resolveFilename: (req: string, parent: unknown, isMain: boolean) => string })._resolveFilename(request, parent, false)
+		return typeof resolved === 'string' ? resolved : undefined
+	} catch {
+		return undefined
+	}
+}
+
+function wsPackageKind(filename: string): 'client' | 'server' | 'stream' | 'bundle' | undefined {
+	const norm = filename.replace(/\\/g, '/')
+	if (!/\/node_modules\/ws\//.test(norm)) return undefined
+	if (norm.endsWith('/ws/lib/websocket-server.js')) return 'server'
+	if (norm.endsWith('/ws/lib/websocket.js')) return 'client'
+	if (norm.endsWith('/ws/lib/stream.js')) return 'stream'
+	if (norm.endsWith('/ws/index.js') || norm.endsWith('/ws/browser.js')) return 'bundle'
+	return undefined
+}
+
 function isEthersWebsocketModule(request: string): boolean {
 	return request.includes('provider-websocket') || request.includes('provider-infura') || request === 'ethers' || /(^|\/)ethers(\.js)?$/.test(request)
 }
@@ -241,13 +260,67 @@ function installGlobalWebSocket(): void {
 	}
 }
 
+function stubSource(kind: 'client' | 'server' | 'stream' | 'bundle'): string {
+	const label = kind === 'server' ? 'WebSocketServer' : kind === 'stream' ? 'createWebSocketStream' : 'WebSocket'
+	if (kind === 'bundle') {
+		return `'use strict';
+function deny(kind) {
+	function Disabled() {
+		const error = new Error('WebSocket functionality is disabled: ' + kind);
+		error.name = 'WebSocketDisabled';
+		throw error;
+	}
+	Disabled.__conetWsWrapped = true;
+	return Disabled;
+}
+const WebSocket = deny('WebSocket');
+const WebSocketServer = deny('WebSocketServer');
+WebSocket.WebSocket = WebSocket;
+WebSocket.Server = WebSocketServer;
+WebSocket.WebSocketServer = WebSocketServer;
+WebSocket.createWebSocketStream = deny('createWebSocketStream');
+module.exports = WebSocket;
+`
+	}
+	return `'use strict';
+function Disabled() {
+	const error = new Error('WebSocket functionality is disabled: ${label}');
+	error.name = 'WebSocketDisabled';
+	throw error;
+}
+Disabled.__conetWsWrapped = true;
+module.exports = Disabled;
+`
+}
+
+function installCompileHook(): void {
+	const proto = (Module as unknown as { prototype: { _compile?: (this: unknown, content: string, filename: string) => unknown } }).prototype
+	const orig = proto._compile
+	if (!orig || (orig as { __conetWsWrapped?: boolean }).__conetWsWrapped) return
+	const wrapped = function compile(this: unknown, content: string, filename: string) {
+		const kind = wsPackageKind(filename)
+		if (kind) return orig.call(this, stubSource(kind), filename)
+		return orig.call(this, content, filename)
+	}
+	;(wrapped as { __conetWsWrapped?: boolean }).__conetWsWrapped = true
+	proto._compile = wrapped
+}
+
 function installModuleHook(): void {
 	if ((hooks._load as { __conetWsWrapped?: boolean }).__conetWsWrapped) return
 	const orig = hooks._load
 	const wrapped: LoadFn = function load(this: unknown, request, parent, isMain) {
+		const filename = resolvedFilename(request, parent)
+		const kind = filename ? wsPackageKind(filename) : undefined
 		const loaded = orig.call(this, request, parent, isMain)
-		if (isWsRequest(request)) {
+		if (kind === 'bundle' || isWsRequest(request)) {
 			const next = wrapWsExport(loaded)
+			if (next !== loaded) replaceCached(loaded, next)
+			return next
+		}
+		if (kind === 'client' || kind === 'server' || kind === 'stream') {
+			if (typeof loaded === 'function' && (loaded as DisabledCtor).__conetWsWrapped) return loaded
+			const next = disabledCtor(kind === 'server' ? 'WebSocketServer' : kind === 'stream' ? 'createWebSocketStream' : 'WebSocket')
 			if (next !== loaded) replaceCached(loaded, next)
 			return next
 		}
@@ -263,6 +336,7 @@ export function installWebSocketBan(): void {
 	if (flag.__conetWebSocketBan) return
 	flag.__conetWebSocketBan = true
 	installGlobalWebSocket()
+	installCompileHook()
 	installModuleHook()
 	installRequestGuard(http)
 	installRequestGuard(https)
