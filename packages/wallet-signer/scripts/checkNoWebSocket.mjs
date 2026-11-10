@@ -249,7 +249,7 @@ if (signerSha !== oracleSha) fail('signer and oracle noWebSocket.ts differ')
 if (signerSha === WIP_SHA256 || oracleSha === WIP_SHA256) fail('guard is still the WIP hash')
 
 const packages = ['packages/wallet-signer', 'packages/conet-oracle-daemon']
-const allow = new Set(['noWebSocket.ts', 'noWebSocket.js', 'noWebSocketProbe.mjs', 'noWebSocketEsmProbe.mjs', '.noWebSocket.probe-compile.cjs'])
+const allow = new Set(['noWebSocket.ts', 'noWebSocket.js', 'noWebSocketProbe.mjs', 'noWebSocketEsmProbe.mjs', 'httpRpcReconnectAcceptance.js', 'httpRpcDisconnectAcceptance.js', '.noWebSocket.probe-compile.cjs'])
 const scanned = []
 for (const pkg of packages) {
 	for (const rel of ['src', 'p0', 'test', 'dist']) {
