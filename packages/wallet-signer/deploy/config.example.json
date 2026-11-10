@@ -27,7 +27,7 @@
 		"intervalMs": 60000,
 		"chains": {
 			"224422": {
-				"wallets": ["0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008"],
+				"wallets": ["0xccB259772944c1c8Ff9b3F877cD81519c33063EE"],
 				"budgetWei": "600004200000",
 				"minWei": "200001400000",
 				"targetWei": "200001400000",

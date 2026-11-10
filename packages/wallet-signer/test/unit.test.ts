@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, w
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { Interface, Transaction, Wallet, getAddress } from 'ethers'
+import { Interface, Transaction, Wallet, getAddress, zeroPadValue } from 'ethers'
 import { AuditLog, verifyAuditFile } from '../src/audit'
 import { HdRoot, mnemonicToEntropyBytes, newMnemonic } from '../src/hd'
 import { Keyring } from '../src/keyring'
@@ -13,7 +13,8 @@ import { RateLimiter } from '../src/rateLimit'
 import { redactText } from '../src/redact'
 import { addArray, emptyRegistry, growArray, rotateArray, signRegistry, verifyRegistry } from '../src/registry'
 import { resolveTypedDataNonce } from '../src/typedDataReplay'
-import { GasKeeper, ORACLE_DAEMON_CLIENT, ORACLE_GAS_WALLET, adminGasRunRefusal, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
+import { BEAMIO_ORACLE_CONTRACT, GAS_KEEPER_CHAIN_ID, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_DAEMON_CLIENT, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, adminGasRunRefusal, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
+import type { KeyArray } from '../src/registry'
 import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } from '../src/txManager'
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
 import { createVaultJson, openVault } from '../src/vault'
@@ -746,22 +747,23 @@ test('gas keeper config stays disabled and an empty whitelist tops up nobody', (
 	}, /wallets\[0\]/)
 })
 
-test('gas keeper refuses the oracle address unless it is on the business-wallet whitelist', async () => {
-	const other = getAddress(Wallet.createRandom().address)
+test('gas keeper refuses the oracle contract even when the whitelist names it', async () => {
 	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
-		wallets: [other],
-		registryAddresses: [other, ORACLE_GAS_WALLET],
+		extraWallets: [BEAMIO_ORACLE_CONTRACT],
+		codes: { [BEAMIO_ORACLE_CONTRACT]: '0x' },
 	})
 	try {
 		fx.balances.set(fx.pm, 5_000_000n)
-		fx.balances.set(other, 0n)
-		fx.balances.set(ORACLE_GAS_WALLET, 0n)
 		fx.balances.set(fx.addr, 0n)
+		fx.balances.set(BEAMIO_ORACLE_CONTRACT, 0n)
 		await fx.gk.runOnce()
 		assert.equal(fx.sends.length, 1)
-		assert.equal(getAddress(fx.sends[0]!.to), other)
-		assert.equal(fx.sends.some((row) => getAddress(row.to) === getAddress(ORACLE_GAS_WALLET)), false)
-		assert.equal(fx.sends.some((row) => getAddress(row.to) === fx.addr), false)
+		assert.equal(getAddress(fx.sends[0]!.to), fx.addr)
+		assert.equal(fx.sends.some((row) => getAddress(row.to) === getAddress(BEAMIO_ORACLE_CONTRACT)), false)
+		assert.ok(fx.alerts.some((code) => code.startsWith(`topup-refused:224422:contract:${BEAMIO_ORACLE_CONTRACT.toLowerCase()}`)))
+		const audit = readFileSync(fx.auditPath, 'utf8')
+		assert.equal(audit.includes(BEAMIO_ORACLE_CONTRACT), true)
+		assert.equal(audit.includes('"reason":"contract"'), true)
 	} finally {
 		fx.cleanup()
 	}
@@ -769,14 +771,13 @@ test('gas keeper refuses the oracle address unless it is on the business-wallet 
 
 test('gas keeper refuses a top-up that exceeds the explicit budget', async () => {
 	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
-		wallets: [ORACLE_GAS_WALLET],
 		budgetWei: '10',
 		perAddressDailyWei: '500000',
 		globalDailyWei: '500000',
 	})
 	try {
 		fx.balances.set(fx.pm, 5_000_000n)
-		fx.balances.set(ORACLE_GAS_WALLET, 0n)
+		fx.balances.set(fx.addr, 0n)
 		await fx.gk.runOnce()
 		assert.equal(fx.sends.length, 0)
 		assert.ok(fx.alerts.includes('topup-budget:224422'))
@@ -786,10 +787,10 @@ test('gas keeper refuses a top-up that exceeds the explicit budget', async () =>
 })
 
 test('gas keeper does not sign while locked even when the oracle wallet is whitelisted', async () => {
-	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { wallets: [ORACLE_GAS_WALLET], unlocked: false })
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { unlocked: false })
 	try {
 		fx.balances.set(fx.pm, 5_000_000n)
-		fx.balances.set(ORACLE_GAS_WALLET, 0n)
+		fx.balances.set(fx.addr, 0n)
 		await fx.gk.runOnce()
 		assert.equal(fx.sends.length, 0)
 		assert.equal(fx.providerCalls, 0)
@@ -798,22 +799,25 @@ test('gas keeper does not sign while locked even when the oracle wallet is white
 	}
 })
 
-test('gas keeper tops up a whitelisted oracle from the PM on a local mock', async () => {
+test('gas keeper tops up only the intersection from the PM on a local mock', async () => {
 	const bystander = getAddress(Wallet.createRandom().address)
 	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
-		wallets: [ORACLE_GAS_WALLET],
-		registryAddresses: [bystander],
+		extraWallets: [bystander, BEAMIO_ORACLE_CONTRACT],
+		extraArrays: [keyArray('settle_contractAdmin', [bystander])],
 		budgetWei: '1000000',
 	})
 	try {
 		const amount = 1000n
 		fx.balances.set(fx.pm, amount + 21_000n)
-		fx.balances.set(ORACLE_GAS_WALLET, 0n)
+		fx.balances.set(fx.addr, 0n)
 		fx.balances.set(bystander, 0n)
+		fx.balances.set(BEAMIO_ORACLE_CONTRACT, 0n)
 		await fx.gk.runOnce()
 		assert.equal(fx.sends.length, 1)
 		const sent = fx.sends[0]!
-		assert.equal(getAddress(sent.to), getAddress(ORACLE_GAS_WALLET))
+		assert.equal(getAddress(sent.to), fx.addr)
+		assert.notEqual(getAddress(sent.to), getAddress(BEAMIO_ORACLE_CONTRACT))
+		assert.notEqual(getAddress(sent.to), getAddress(ORACLE_OWNER_WALLET_EXAMPLE))
 		assert.equal(sent.value, amount)
 		assert.equal(sent.client, 'gas-keeper')
 		assert.notEqual(sent.client, ORACLE_DAEMON_CLIENT)
@@ -825,28 +829,176 @@ test('gas keeper tops up a whitelisted oracle from the PM on a local mock', asyn
 	}
 })
 
+test('gas keeper does not pay the example owner unless the intersection matches', async () => {
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		wallets: [ORACLE_OWNER_WALLET_EXAMPLE],
+		registryAddresses: [ORACLE_OWNER_WALLET_EXAMPLE],
+	})
+	try {
+		fx.balances.set(fx.pm, 5_000_000n)
+		fx.balances.set(ORACLE_OWNER_WALLET_EXAMPLE, 0n)
+		await fx.gk.runOnce()
+		assert.equal(fx.sends.length, 0)
+		assert.ok(fx.alerts.some((code) => code.includes(`:not-owner:${ORACLE_OWNER_WALLET_EXAMPLE.toLowerCase()}`)))
+	} finally {
+		fx.cleanup()
+	}
+})
+
+test('gas keeper refuses other arrays, unregistered addresses, retired rows, the leaked owner, and nonempty code', async () => {
+	const coded = getAddress(Wallet.createRandom().address)
+	const other = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { arrayName: 'settle_contractAdmin' })
+	const missing = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		wallets: [ORACLE_OWNER_WALLET_EXAMPLE],
+		registryAddresses: [ORACLE_OWNER_WALLET_EXAMPLE],
+		arrayName: 'settle_contractAdmin',
+		owner: ORACLE_OWNER_WALLET_EXAMPLE,
+	})
+	const retired = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { arrayStatus: 'retired' })
+	const leaked = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		wallets: [LEAKED_ORACLE_OWNER],
+		registryAddresses: [LEAKED_ORACLE_OWNER],
+		owner: LEAKED_ORACLE_OWNER,
+	})
+	const code = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		wallets: [coded],
+		registryAddresses: [coded],
+		owner: coded,
+		codes: { [coded]: '0x6000' },
+	})
+	try {
+		for (const fx of [other, missing, retired, leaked, code]) {
+			fx.balances.set(fx.pm, 5_000_000n)
+			fx.balances.set(fx.addr, 0n)
+			await fx.gk.runOnce()
+			assert.equal(fx.sends.length, 0)
+		}
+		assert.ok(other.alerts.some((item) => item.includes(':other-array:')))
+		assert.ok(missing.alerts.some((item) => item.includes(':other-array:')))
+		assert.ok(retired.alerts.some((item) => item.includes(':inactive:')))
+		assert.ok(leaked.alerts.some((item) => item.includes(':leaked:')))
+		assert.ok(code.alerts.some((item) => item.includes(':code:')))
+		const unregistered = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+			wallets: [ORACLE_OWNER_WALLET_EXAMPLE],
+			registryAddresses: [],
+			owner: ORACLE_OWNER_WALLET_EXAMPLE,
+		})
+		try {
+			unregistered.balances.set(unregistered.pm, 5_000_000n)
+			await unregistered.gk.runOnce()
+			assert.equal(unregistered.sends.length, 0)
+			assert.ok(unregistered.alerts.some((item) => item.includes(':unregistered:')))
+		} finally {
+			unregistered.cleanup()
+		}
+	} finally {
+		for (const fx of [other, missing, retired, leaked, code]) fx.cleanup()
+	}
+})
+
+test('gas keeper does not resume a saved top-up to the oracle contract', async () => {
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null })
+	try {
+		const row: SpendRow = {
+			idempotencyKey: `topup:224422:${BEAMIO_ORACLE_CONTRACT.toLowerCase()}:1`,
+			chainId: '224422',
+			address: BEAMIO_ORACLE_CONTRACT.toLowerCase(),
+			amountWei: '1000',
+			recordedAt: new Date().toISOString(),
+			status: 'pending',
+			attempt: 1,
+		}
+		writeFileSync(fx.statePath, JSON.stringify({ version: 2, spend: [row] }))
+		fx.balances.set(fx.pm, 5_000_000n)
+		fx.balances.set(fx.addr, 0n)
+		await fx.gk.runOnce()
+		assert.equal(fx.sends.some((sent) => getAddress(sent.to) === getAddress(BEAMIO_ORACLE_CONTRACT)), false)
+		const disk = JSON.parse(readFileSync(fx.statePath, 'utf8')) as { spend: SpendRow[] }
+		assert.equal(disk.spend.find((item) => item.address === BEAMIO_ORACLE_CONTRACT.toLowerCase())?.status, 'released')
+	} finally {
+		fx.cleanup()
+	}
+})
+
+test('gas keeper does not read a provider for Base', async () => {
+	const dir = mkdtempSync(join(tmpdir(), 'ws-gas-base-'))
+	const alerts: string[] = []
+	let calls = 0
+	const gk = new GasKeeper(
+		{
+			'8453': {
+				minWei: '1',
+				targetWei: '2',
+				perAddressDailyWei: '3',
+				globalDailyWei: '4',
+				pmWarnWei: '5',
+				pmCriticalWei: '6',
+				budgetWei: '9',
+				wallets: [ORACLE_OWNER_WALLET_EXAMPLE],
+			},
+		},
+		60_000,
+		{ provider() { calls += 1; throw new Error('base provider') } } as unknown as TxManager,
+		{ unlocked: true } as unknown as Keyring,
+		() => ({ version: 1, pm: ORACLE_OWNER_WALLET_EXAMPLE, attestor: ORACLE_OWNER_WALLET_EXAMPLE, arrays: [keyArray(ORACLE_OWNER_ARRAY, [ORACLE_OWNER_WALLET_EXAMPLE])], updatedAt: '2026-01-01T00:00:00.000Z' }),
+		() => new Set<string>(),
+		{ send(_level: string, code: string) { alerts.push(code) } },
+		new AuditLog(join(dir, 'audit.jsonl')),
+		join(dir, 'gas.json'),
+	)
+	try {
+		await gk.runOnce()
+		assert.equal(calls, 0)
+		assert.ok(alerts.includes('topup-chain-refused:8453'))
+	} finally {
+		rmSync(dir, { recursive: true, force: true })
+	}
+})
+
 test('oracle-daemon cannot reach the gas keeper through client RPC or an admin-socket argument', () => {
 	assert.equal(gasTopupRpcRefusal('signer_sendTransaction', ORACLE_DAEMON_CLIENT), null)
 	assert.equal(gasTopupRpcRefusal('signer_topup', ORACLE_DAEMON_CLIENT), 'oracle-daemon')
 	assert.equal(gasTopupRpcRefusal('gas.run', 'conet-beamio-api'), 'client-rpc')
 	assert.equal(adminGasRunRefusal({}), null)
 	assert.equal(adminGasRunRefusal({ client: ORACLE_DAEMON_CLIENT }), 'oracle-daemon')
-	assert.equal(adminGasRunRefusal({ address: ORACLE_GAS_WALLET }), 'caller-or-target')
+	assert.equal(adminGasRunRefusal({ address: BEAMIO_ORACLE_CONTRACT }), 'caller-or-target')
+	assert.equal(GAS_KEEPER_CHAIN_ID, 224422)
+	assert.equal(ORACLE_OWNER_ARRAY, 'beamio_oracle_owner')
 })
+
+function keyArray(name: string, addresses: string[], status: 'active' | 'retired' = 'active', account = 10): KeyArray {
+	return {
+		name,
+		account,
+		count: addresses.length,
+		chains: [224422],
+		status,
+		addresses,
+		createdAt: '2026-11-09T09:49:58.152Z',
+	}
+}
 
 function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null }, opts: {
 	wallets?: string[]
+	extraWallets?: string[]
 	budgetWei?: string
+	omitBudget?: boolean
 	perAddressDailyWei?: string
 	globalDailyWei?: string
 	unlocked?: boolean
 	registryAddresses?: string[]
+	arrayName?: string
+	arrayStatus?: 'active' | 'retired'
+	extraArrays?: KeyArray[]
+	owner?: string
+	codes?: Record<string, string>
 } = {}): {
 	gk: GasKeeper
 	restart: () => GasKeeper
 	pm: string
 	addr: string
 	statePath: string
+	auditPath: string
 	sends: Array<{ idempotencyKey?: string; value: bigint; gasLimit?: bigint; hash: string; to: string; client?: string; array?: string; candidates: string[] }>
 	alerts: string[]
 	balances: Map<string, bigint>
@@ -857,8 +1009,11 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 } {
 	const dir = mkdtempSync(join(tmpdir(), 'ws-gas-keeper-'))
 	const statePath = join(dir, 'gaskeeper-state.json')
+	const auditPath = join(dir, 'audit.jsonl')
 	const pm = getAddress(Wallet.createRandom().address)
 	const addr = getAddress(Wallet.createRandom().address)
+	const owner = getAddress(opts.owner ?? addr)
+	const codes = new Map(Object.entries(opts.codes ?? {}).map(([who, code]) => [getAddress(who).toLowerCase(), code]))
 	const balances = new Map<string, bigint>()
 	const alerts: string[] = []
 	const sends: Array<{ idempotencyKey?: string; value: bigint; gasLimit?: bigint; hash: string; to: string; client?: string; array?: string; candidates: string[] }> = []
@@ -880,6 +1035,13 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 				},
 				async getFeeData() {
 					return fee
+				},
+				async getCode(who: string) {
+					return codes.get(getAddress(who).toLowerCase()) ?? '0x'
+				},
+				async call(tx: { to?: string; data?: string }) {
+					if (tx.data !== '0x8da5cb5b') throw new Error('unexpected owner call')
+					return zeroPadValue(owner, 32)
 				},
 			}
 		},
@@ -920,26 +1082,22 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 			targetWei: '1000',
 			perAddressDailyWei: opts.perAddressDailyWei ?? '1000',
 			globalDailyWei: opts.globalDailyWei ?? '5000',
-			budgetWei: opts.budgetWei ?? '1000000',
+			budgetWei: opts.omitBudget ? undefined : opts.budgetWei ?? '1000000',
 			pmWarnWei: '1',
 			pmCriticalWei: '1',
-			wallets: opts.wallets ?? [addr],
+			wallets: [...(opts.wallets ?? [addr]), ...(opts.extraWallets ?? [])],
 		},
 	}
+	const registered = opts.registryAddresses ?? [addr]
 	const registry = () => ({
 		version: 1 as const,
 		pm,
 		attestor: pm,
 		updatedAt: '2026-01-01T00:00:00.000Z',
-		arrays: [{
-			name: 'settle',
-			account: 10,
-			count: 1,
-			chains: [224422],
-			status: 'active' as const,
-			addresses: opts.registryAddresses ?? [addr],
-			createdAt: '2026-01-01T00:00:00.000Z',
-		}],
+		arrays: [
+			keyArray(opts.arrayName ?? ORACLE_OWNER_ARRAY, registered, opts.arrayStatus ?? 'active'),
+			...(opts.extraArrays ?? []),
+		],
 	})
 	const make = () => new GasKeeper(
 		chain,
@@ -949,7 +1107,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 		registry,
 		() => new Set<string>(),
 		{ send(_level: string, code: string) { alerts.push(code) } },
-		new AuditLog(join(dir, 'audit.jsonl')),
+		new AuditLog(auditPath),
 		statePath,
 	)
 	return {
@@ -958,6 +1116,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 		pm,
 		addr,
 		statePath,
+		auditPath,
 		sends,
 		alerts,
 		balances,

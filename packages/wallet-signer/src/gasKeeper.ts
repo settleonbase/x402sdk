@@ -17,11 +17,26 @@ export const GAS_KEEPER_CLIENT = 'gas-keeper'
 /** Quote daemon. It may use its own RPC socket. It cannot open the gas-keeper path. */
 export const ORACLE_DAEMON_CLIENT = 'oracle-daemon'
 
+/** BeamioOracle on CoNET. Native value must never be sent here. */
+export const BEAMIO_ORACLE_CONTRACT = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008'
+
 /**
- * BeamioOracle on CoNET. A phase-2 top-up reaches this address only when that
- * chain's business-wallet whitelist lists it. Wide pool sweeps are not this phase.
+ * Quote-signing owner wallet. Tests and the install example may name this address.
+ * It is not a funding bypass: a top-up still requires the whitelist, the active
+ * `beamio_oracle_owner` registration, and `owner()`.
  */
-export const ORACLE_GAS_WALLET = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008'
+export const ORACLE_OWNER_WALLET_EXAMPLE = '0xccB259772944c1c8Ff9b3F877cD81519c33063EE'
+
+/** Leaked former oracle owner. Never import it and never top it up. */
+export const LEAKED_ORACLE_OWNER = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
+
+/** Only this registry array may receive a top-up in this phase. */
+export const ORACLE_OWNER_ARRAY = 'beamio_oracle_owner'
+
+/** CoNET. Base (8453) and every other chain are refused. */
+export const GAS_KEEPER_CHAIN_ID = 224422
+
+const OWNER_CALL = '0x8da5cb5b'
 
 const GAS_TOPUP_RPC_METHODS = new Set(['gas.run', 'gas_run', 'signer_gasRun', 'signer_topup', 'signer_gasStatus'])
 
@@ -52,6 +67,115 @@ export function explicitBusinessWallets(cfg: GasKeeperChain): string[] {
 	return out
 }
 
+export type TopupRefusalReason = 'contract' | 'code' | 'leaked' | 'other-array' | 'unregistered' | 'inactive' | 'not-owner' | 'ineligible-pending'
+
+export type TopupRefusal = { address: string; reason: TopupRefusalReason }
+
+export type OwnerReader = {
+	getCode(address: string): Promise<string>
+	call(tx: { to: string; data: string }): Promise<string>
+}
+
+/** Empty runtime code. A missing or failed read is not empty. */
+export function isEmptyRuntimeCode(code: string | null | undefined): boolean {
+	if (typeof code !== 'string') return false
+	const body = code.trim().toLowerCase().replace(/^0x/, '')
+	if (!/^[0-9a-f]*$/.test(body)) return false
+	return body.length === 0 || /^0+$/.test(body)
+}
+
+function decodeAddressWord(raw: string): string | null {
+	if (typeof raw !== 'string') return null
+	const hex = raw.toLowerCase().startsWith('0x') ? raw.slice(2) : raw
+	if (!/^[0-9a-f]+$/.test(hex) || hex.length < 40) return null
+	try {
+		return getAddress(`0x${hex.slice(-40)}`)
+	} catch {
+		return null
+	}
+}
+
+/**
+ * Whitelist ∩ active `beamio_oracle_owner` on this chain ∩ `BeamioOracle.owner()`.
+ * The oracle contract and any address with runtime code are refused even when the
+ * other two sets name them. The example owner constant is not consulted.
+ */
+export async function selectOracleOwnerRecipients(
+	chainId: number,
+	whitelist: readonly string[],
+	registry: RegistryBody,
+	compromised: ReadonlySet<string>,
+	reader: OwnerReader,
+): Promise<{ owner: string | null; fund: string[]; refused: TopupRefusal[] }> {
+	const refused: TopupRefusal[] = []
+	const fund: string[] = []
+	let owner: string | null = null
+	try {
+		owner = decodeAddressWord(await reader.call({ to: BEAMIO_ORACLE_CONTRACT, data: OWNER_CALL }))
+	} catch {
+		owner = null
+	}
+	const active = new Set<string>()
+	const retiredOracle = new Set<string>()
+	const other = new Set<string>()
+	for (const arr of registry.arrays) {
+		if (!arr.chains.includes(chainId)) continue
+		const addrs: string[] = []
+		for (const raw of arr.addresses) {
+			try {
+				addrs.push(getAddress(raw).toLowerCase())
+			} catch {
+				// A malformed registry row cannot enter the intersection.
+			}
+		}
+		if (arr.name === ORACLE_OWNER_ARRAY && arr.status === 'active') {
+			for (const addr of addrs) active.add(addr)
+		} else if (arr.name === ORACLE_OWNER_ARRAY) {
+			for (const addr of addrs) retiredOracle.add(addr)
+		} else {
+			for (const addr of addrs) other.add(addr)
+		}
+	}
+	const seen = new Set<string>()
+	for (const raw of whitelist) {
+		const addr = getAddress(raw)
+		const key = addr.toLowerCase()
+		if (seen.has(key)) continue
+		seen.add(key)
+		if (key === BEAMIO_ORACLE_CONTRACT.toLowerCase()) {
+			refused.push({ address: addr, reason: 'contract' })
+			continue
+		}
+		if (key === LEAKED_ORACLE_OWNER.toLowerCase() || compromised.has(key)) {
+			refused.push({ address: addr, reason: 'leaked' })
+			continue
+		}
+		let code = ''
+		try {
+			code = await reader.getCode(addr)
+		} catch {
+			refused.push({ address: addr, reason: 'code' })
+			continue
+		}
+		if (!isEmptyRuntimeCode(code)) {
+			refused.push({ address: addr, reason: 'code' })
+			continue
+		}
+		if (!active.has(key)) {
+			if (other.has(key)) refused.push({ address: addr, reason: 'other-array' })
+			else if (retiredOracle.has(key)) refused.push({ address: addr, reason: 'inactive' })
+			else refused.push({ address: addr, reason: 'unregistered' })
+			continue
+		}
+		if (!owner || owner.toLowerCase() !== key) {
+			refused.push({ address: addr, reason: 'not-owner' })
+			continue
+		}
+		fund.push(addr)
+	}
+	return { owner, fund, refused }
+}
+
 export type SpendStatus = 'pending' | 'settled' | 'released'
 
 export type SpendRow = {
@@ -70,11 +194,12 @@ type KeeperState = { version: 2; spend: SpendRow[] }
 type TopupReceipt = { hash?: string; status?: string; duplicate?: boolean }
 
 /**
- * Tops up explicit business wallets from the PM key only.
- * An empty whitelist tops up nobody. Active registry arrays are not a funding list.
- * Hard rules: whitelist, explicit budget, never a compromised address, one open top-up per address,
- * per-address daily cap, and a chain total that is not refilled by rewriting the UTC day.
- * Locked signers do not sign. oracle-daemon cannot invoke this over RPC or the admin socket.
+ * Tops up the oracle owner wallet from the PM key only.
+ * An address is funded only when it is on the explicit whitelist, in the active
+ * `beamio_oracle_owner` array, and equal to `BeamioOracle.owner()`.
+ * An empty whitelist tops up nobody. Other arrays are not scanned.
+ * The oracle contract is never a recipient. Locked signers do not sign.
+ * oracle-daemon cannot invoke this over RPC or the admin socket.
  */
 export class GasKeeper {
 	private timer?: ReturnType<typeof setTimeout>
@@ -147,7 +272,7 @@ export class GasKeeper {
 
 	private async runChain(chainId: number, cfg: GasKeeperChain, reg: RegistryBody): Promise<void> {
 		// The oracle contract address is the same on Base. This phase funds CoNET only.
-		if (chainId === 8453) {
+		if (chainId !== GAS_KEEPER_CHAIN_ID) {
 			this.alerter.send('warn', `topup-chain-refused:${chainId}`, `gas keeper does not top up chain ${chainId}`)
 			return
 		}
@@ -156,12 +281,21 @@ export class GasKeeper {
 			this.alerter.send('warn', `topup-whitelist-empty:${chainId}`, `gas keeper chain ${chainId} has no business-wallet whitelist`)
 			return
 		}
+		const p = this.txm.provider(chainId)
+		const bad = this.compromised()
+		const picked = await selectOracleOwnerRecipients(chainId, wallets, reg, bad, p)
+		if (picked.owner === null) {
+			this.alerter.send('warn', `topup-owner-unread:${chainId}`, `gas keeper could not read BeamioOracle.owner on chain ${chainId}`)
+		}
+		for (const row of picked.refused) {
+			this.audit.write({ event: 'gas.topup-refused', chainId, address: row.address, reason: row.reason })
+			this.alerter.send('warn', `topup-refused:${chainId}:${row.reason}:${row.address.toLowerCase()}`, `${row.address} refused (${row.reason})`)
+		}
 		if (cfg.budgetWei === undefined) {
 			this.alerter.send('warn', `topup-budget-unset:${chainId}`, `gas keeper chain ${chainId} has no explicit budget`)
 			return
 		}
 		const budget = BigInt(cfg.budgetWei)
-		const p = this.txm.provider(chainId)
 		const pm = getAddress(reg.pm)
 		let pmBal = await p.getBalance(pm)
 		if (pmBal < BigInt(cfg.pmCriticalWei)) this.alerter.send('critical', `pm-low:${chainId}`, `PM ${pm} balance ${formatEther(pmBal)} on chain ${chainId}`)
@@ -169,6 +303,18 @@ export class GasKeeper {
 
 		const state = this.loadState()
 		if (!state) return
+		const chainKey = String(chainId)
+		const allowed = new Set(picked.fund.map((addr) => addr.toLowerCase()))
+		let dropped = false
+		for (const row of state.spend) {
+			if (row.chainId !== chainKey || row.status !== 'pending' || allowed.has(row.address) || row.hash) continue
+			row.status = 'released'
+			dropped = true
+			this.audit.write({ event: 'gas.topup-refused', chainId, address: row.address, reason: 'ineligible-pending' })
+		}
+		if (dropped) this.saveState(state)
+		if (picked.fund.length === 0) return
+
 		let gasReserve: bigint
 		try {
 			const fee = await p.getFeeData()
@@ -183,12 +329,10 @@ export class GasKeeper {
 			return
 		}
 
-		const bad = this.compromised()
 		const min = BigInt(cfg.minWei)
 		const target = BigInt(cfg.targetWei)
-		const chainKey = String(chainId)
 		const nowIso = new Date().toISOString()
-		const targets = wallets
+		const targets = picked.fund
 			.filter((addr) => addr.toLowerCase() !== pm.toLowerCase())
 			.sort((x, y) => this.txm.inflightCount(chainId, y) - this.txm.inflightCount(chainId, x))
 
