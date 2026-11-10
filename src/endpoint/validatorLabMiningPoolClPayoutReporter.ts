@@ -10,19 +10,23 @@
  *     OR pubkey not in manifest with active beneficiary (redeem stack on 85.33 handles those)
  *   - on-chain consumedRewardEventKey is false (guardian settleNodeRewards already paid)
  *
- * Payout: Redeem.withdrawNative(miningPool, batchTotal) via contract admin (onlyAdmin).
- * Idempotency: off-chain state consumedEventKeys + principal ceiling before each tx.
+ * Payout (LIMITED-EXECUTOR + dual-cursor H):
+ *   dedicated unix socket → LabMiningPoolPayoutExecutor.payoutBatch(batchId, eventKeys, amount)
+ *   Env: CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_SOCKET + KEY_ARRAY + PAYOUT_EXECUTOR
+ *   FORBIDDEN: private-key → VDR.withdrawNative; forbidden VDR sock /run/wallet-signer-vdr/vdr-payout.sock
+ *
+ * Idempotency:
+ *   on-chain consumedBatchId + consumedEventKey; durable signer idempotencyKey + request fingerprint
+ *   (ACK-lost recovery via signer_getTransaction — original batch hash, not RPC mock).
+ *
+ * Dual-cursor H (PM-LAB-DUAL-CURSOR-H-2026-11-10):
+ *   freeze H at start; history = continuousCoverage+1→H; realtime = H+1→tip (fill tip jumps).
+ *   Same source eventKey namespace; A2 realtime reserved quota; history keeps advancing.
  *
  * Pending pool + gas gate (aligned with validatorClRewardPayoutReporter):
  *   - Scanned skim entries merge into a persisted pending pool; scan checkpoint advances without settle.
  *   - Flush when eth_gasPrice ≤ max (default 2 gwei); failed batches stay in pending.
  *   - If gas stays above max longer than force-wait (default 3 min), flush at live gasPrice anyway.
- *
- * Scan (parallel every tick / every process start):
- *   • listening — always scan current liveHead; when backfill has reached liveHead-1, persist lastListeningEndBlock=liveHead
- *   • backfill   — [sessionBackfillFloor .. liveHead-1] where sessionBackfillFloor = lastListeningEndBlock+1 | pool deploy block
- *
- * Next restart: backfill lower bound = persisted lastListeningEndBlock+1; upper bound = new liveHead-1 (dynamic).
  */
 
 import fs from 'node:fs'
@@ -36,7 +40,27 @@ import {
 	CONET_RPC_URL,
 	CONET_VALIDATOR_DEPOSIT_REDEEM,
 } from '../chainAddresses'
-import { enqueueOnchainTxWork, onchainTxLaneForSigner } from '../onchainTxSerialQueue'
+import { enqueueOnchainTxWork } from '../onchainTxSerialQueue'
+import {
+	classifyPendingLine,
+	ensureFreezeH,
+	formatHistoryProgress,
+	formatRealtimeLatency,
+	nextHistoryWindow,
+	nextRealtimeWindow,
+	scheduleFlushBatches,
+	seedCursorsFromLegacy,
+	type LabFreezeH,
+	type LabScanLine,
+} from './labMiningPoolDualCursor'
+import {
+	labBatchIdFromEventKeys,
+	readLabPayoutSignerConfig,
+	sendConfiguredLabExecutorPayoutBatch,
+} from './labMiningPoolPayoutSigner'
+
+/** Fixed lane for Lab executor payouts (signer EOA is opaque behind socket). */
+const LAB_MINING_POOL_ONCHAIN_LANE = 'lab-mining-pool-executor-payout'
 
 function resolveLabRpcUrl(): string {
 	return (
@@ -44,6 +68,66 @@ function resolveLabRpcUrl(): string {
 		process.env.CONET_RPC_URL?.trim() ||
 		CONET_RPC_URL
 	)
+}
+
+/** Per-HTTP RPC timeout (ethers FetchRequest). Env existed in systemd but was previously unused. */
+function resolveRpcHttpTimeoutMs(): number {
+	const n = Number(process.env.CONET_RPC_HTTP_TIMEOUT_MS || 30_000)
+	return Number.isFinite(n) && n >= 5_000 ? Math.min(300_000, Math.floor(n)) : 30_000
+}
+
+/** Max wait for a single executor.payout receipt after signer broadcast. */
+function resolveTxWaitTimeoutMs(): number {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_TX_WAIT_MS || 120_000)
+	return Number.isFinite(n) && n >= 15_000 ? Math.min(600_000, Math.floor(n)) : 120_000
+}
+
+function createLabRpcProvider(): ethers.JsonRpcProvider {
+	const url = resolveLabRpcUrl()
+	const req = new ethers.FetchRequest(url)
+	req.timeout = resolveRpcHttpTimeoutMs()
+	// Avoid HTTP batching quirks on local geth; one method per request.
+	return new ethers.JsonRpcProvider(req, undefined, { staticNetwork: true, batchMaxCount: 1 })
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+		promise.then(
+			(value) => {
+				clearTimeout(timer)
+				resolve(value)
+			},
+			(error) => {
+				clearTimeout(timer)
+				reject(error)
+			}
+		)
+	})
+}
+
+/**
+ * Wait for a signer-broadcast hash with a hard deadline.
+ * On timeout leave entries in pending (caller must not mark consumed).
+ * NOTE: VDR consumedRewardEventKey only flips if settleNodeRewards was used.
+ * Lab path uses executor.payoutBatch (on-chain batchId + eventKeys) + local consumedEventKeys.
+ */
+async function waitForSignerReceiptByHash(
+	provider: ethers.JsonRpcProvider,
+	hash: string,
+	timeoutMs: number
+): Promise<ethers.TransactionReceipt> {
+	const started = Date.now()
+	while (Date.now() - started < timeoutMs) {
+		try {
+			const receipt = await provider.getTransactionReceipt(hash)
+			if (receipt) return receipt
+		} catch {
+			/* retry */
+		}
+		await new Promise((resolve) => setTimeout(resolve, 1_500))
+	}
+	throw new Error(`signer tx receipt timed out hash=${hash}`)
 }
 
 function resolveLabRedeemAddress(): string {
@@ -68,11 +152,6 @@ const READ_ABI = [
 	'function guardianIdBeneficiary(uint256 guardianId) view returns (address)',
 	'function consumedRewardEventKey(bytes32 key) view returns (bool)',
 	'function totalStakedValidatorCount() view returns (uint256)',
-] as const
-
-const WRITE_ABI = [
-	'function withdrawNative(address to, uint256 amount) external',
-	'function admins(address) view returns (bool)',
 ] as const
 
 type BlockWithdrawal = {
@@ -109,6 +188,12 @@ type LabClPayoutState = {
 	lastListeningEndBlock?: number
 	/** Last liveHead block scanned by listening pass (tip tracking; may run ahead of backfill). */
 	lastLiveHeadScanned?: number
+	/** Dual-cursor freeze H (height + hash); set once, never moves. */
+	freezeH?: LabFreezeH | null
+	/** Inclusive last fully scanned history block (next = historyCursor + 1). */
+	historyCursor?: number
+	/** Inclusive last fully scanned realtime block (next = realtimeCursor + 1). */
+	realtimeCursor?: number
 	/** Unsettled skim entries (persisted); flushed when gas ≤ max or force-wait expires. */
 	pending?: LabPendingEntryJson[]
 	/**
@@ -189,9 +274,69 @@ function resolveGasWaitForceMs(): number {
 	return Number.isFinite(n) && n >= 30_000 ? Math.floor(n) : 180_000
 }
 
-function resolveWithdrawGasLimit(): number {
-	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_GAS_LIMIT || 800_000)
-	return Number.isFinite(n) && n >= 100_000 ? Math.min(8_000_000, Math.floor(n)) : 800_000
+/** Gas limit for LabMiningPoolPayoutExecutor.payoutBatch(...). */
+function resolvePayoutGasLimit(): number {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_GAS_LIMIT || 250_000)
+	return Number.isFinite(n) && n >= 50_000 ? Math.min(2_000_000, Math.floor(n)) : 250_000
+}
+
+/** A2: reserved realtime batches per flush tick (history still advances after). */
+function resolveRealtimeReservedBatches(): number {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_REALTIME_RESERVED || 1)
+	return Number.isFinite(n) && n >= 0 ? Math.min(16, Math.floor(n)) : 1
+}
+
+function ensureDualCursors(state: LabClPayoutState, tipHeight: number, tipHash: string): LabFreezeH {
+	const freeze = ensureFreezeH(state.freezeH ?? null, tipHeight, tipHash)
+	state.freezeH = freeze
+	if (state.historyCursor == null || state.realtimeCursor == null) {
+		const seeded = seedCursorsFromLegacy({
+			freezeH: freeze,
+			lastListeningEndBlock: state.lastListeningEndBlock,
+			lastBackfillProcessedBlock: state.lastBackfillProcessedBlock,
+			scanFloor: resolveLabScanFloorBlock(),
+		})
+		if (state.historyCursor == null) state.historyCursor = seeded.historyCursor
+		if (state.realtimeCursor == null) state.realtimeCursor = seeded.realtimeCursor
+	}
+	return freeze
+}
+
+/** Cap of oldest pending entries inspected per tick (sequential on-chain consumed checks). */
+function resolveFlushMaxEntries(): number {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_MAX_ENTRIES || 200)
+	return Number.isFinite(n) && n >= 1 ? Math.min(50_000, Math.floor(n)) : 200
+}
+
+function resolveFlushBatchEntries(): number {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES || 100)
+	return Number.isFinite(n) && n >= 1 ? Math.min(20_000, Math.floor(n)) : 100
+}
+
+function resolveFlushMaxBatches(): number {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_MAX_BATCHES || 2)
+	return Number.isFinite(n) && n >= 1 ? Math.min(32, Math.floor(n)) : 2
+}
+
+/**
+ * Soft cap for persisted consumedEventKeys. On-chain `consumedRewardEventKey` remains
+ * source of truth; oversized maps make JSON.stringify hit V8 max string length (~512MiB).
+ */
+function resolveConsumedKeysPersistMax(): number {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_CONSUMED_KEYS_MAX || 200_000)
+	return Number.isFinite(n) && n >= 10_000 ? Math.min(2_000_000, Math.floor(n)) : 200_000
+}
+
+function pruneConsumedEventKeys(state: LabClPayoutState): number {
+	const max = resolveConsumedKeysPersistMax()
+	const keys = Object.keys(state.consumedEventKeys || {})
+	if (keys.length <= max) return 0
+	// Insertion order: keep the newest tail.
+	const keep = keys.slice(-max)
+	const next: Record<string, true> = {}
+	for (const k of keep) next[k] = true
+	state.consumedEventKeys = next
+	return keys.length - keep.length
 }
 
 function clearGasWait(state: LabClPayoutState): boolean {
@@ -421,8 +566,23 @@ function writeState(state: LabClPayoutState): void {
 	const file = resolveStateFile()
 	state.updatedAt = new Date().toISOString()
 	if (!Array.isArray(state.pending)) state.pending = []
+	if (!state.consumedEventKeys || typeof state.consumedEventKeys !== 'object') state.consumedEventKeys = {}
+	if (!state.exitedPubkeys || typeof state.exitedPubkeys !== 'object') state.exitedPubkeys = {}
+	const pruned = pruneConsumedEventKeys(state)
+	// Cap hits every flush; avoid journal spam (log only large prunes).
+	if (pruned >= 1_000) {
+		logger(
+			Colors.yellow(
+				`[labMiningPoolClPayout] pruned ${pruned} oldest consumedEventKeys (persistMax=${resolveConsumedKeysPersistMax()})`
+			)
+		)
+	}
 	fs.mkdirSync(path.dirname(file), { recursive: true })
-	fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+	// Compact JSON (no pretty-print): pretty form of a multi‑million key map exceeds V8 string limits.
+	const body = `${JSON.stringify(state)}\n`
+	const tmp = `${file}.tmp.${process.pid}`
+	fs.writeFileSync(tmp, body, 'utf8')
+	fs.renameSync(tmp, file)
 }
 
 function loadManifestIfNeeded(force = false): boolean {
@@ -507,35 +667,6 @@ function withdrawalEventKey(blockNumber: number, withdrawalIndex: number): strin
 	)
 }
 
-function resolveAdminPrivateKey(): string | undefined {
-	const file = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_ADMIN_PRIVATE_KEY_FILE?.trim()
-	if (file && fs.existsSync(file)) {
-		const pk = fs.readFileSync(file, 'utf8').trim()
-		return pk.startsWith('0x') ? pk : `0x${pk}`
-	}
-	const inline = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_ADMIN_PRIVATE_KEY?.trim()
-	if (inline) return inline.startsWith('0x') ? inline : `0x${inline}`
-
-	const masterPath = path.join(homedir(), '.master.json')
-	if (!fs.existsSync(masterPath)) return undefined
-	try {
-		const m = JSON.parse(fs.readFileSync(masterPath, 'utf8')) as Record<string, unknown>
-		const pools = [
-			...(Array.isArray(m.settle_contractAdmin) ? m.settle_contractAdmin : []),
-			...(Array.isArray(m.beamio_Admins) ? m.beamio_Admins : []),
-			...(Array.isArray(m.admin) ? m.admin : []),
-		]
-		for (const k of pools) {
-			if (typeof k === 'string' && k.length > 0) {
-				return k.startsWith('0x') ? k : `0x${k}`
-			}
-		}
-	} catch {
-		return undefined
-	}
-	return undefined
-}
-
 async function resolveMaxSkimPayoutWei(
 	provider: ethers.JsonRpcProvider,
 	redeemAddr: string,
@@ -558,7 +689,8 @@ async function collectLabSkimEntriesForBlock(
 	proxyLower: string,
 	blockNumber: number,
 	block: RpcBlock,
-	state: LabClPayoutState
+	state: LabClPayoutState,
+	pending: Map<string, SkimEntry>
 ): Promise<SkimEntry[]> {
 	const floorWei = resolveFullExitFloorWei()
 	const entries: SkimEntry[] = []
@@ -575,9 +707,7 @@ async function collectLabSkimEntriesForBlock(
 
 		const eventKey = withdrawalEventKey(blockNumber, withdrawalIndex)
 		if (state.consumedEventKeys[eventKey]) continue
-		if ((state.pending ?? []).some((p) => String(p.eventKey || '').toLowerCase() === eventKey.toLowerCase())) {
-			continue
-		}
+		if (pending.has(eventKey.toLowerCase())) continue
 
 		try {
 			const consumedOnChain = await readContract.consumedRewardEventKey!(eventKey)
@@ -635,7 +765,8 @@ async function submitLabSkimBatch(
 	redeemAddr: string,
 	entries: SkimEntry[],
 	state: LabClPayoutState,
-	gasPriceWei: bigint
+	gasPriceWei: bigint,
+	line: LabScanLine
 ): Promise<boolean> {
 	if (!entries.length) return true
 	const total = entries.reduce((a, e) => a + e.amount, 0n)
@@ -651,56 +782,64 @@ async function submitLabSkimBatch(
 		return false
 	}
 
+	const eventKeys = entries.map((e) => e.eventKey.toLowerCase())
+	const batchId = labBatchIdFromEventKeys(eventKeys)
+
 	if (labDryRun()) {
 		logger(
 			Colors.cyan(
-				`[labMiningPoolClPayout] dry-run withdrawNative(${labMiningPool}, ${ethers.formatEther(total)} CNET) n=${entries.length}`
+				`[labMiningPoolClPayout] dry-run executor.payoutBatch(${ethers.formatEther(total)} CNET) line=${line} → ${labMiningPool} n=${entries.length} batchId=${batchId.slice(0, 14)}…`
 			)
 		)
 		for (const e of entries) state.consumedEventKeys[e.eventKey] = true
 		return true
 	}
 
-	const pk = resolveAdminPrivateKey()
-	if (!pk) {
-		logger(Colors.red('[labMiningPoolClPayout] missing contract admin key'))
+	let signerCfg
+	try {
+		signerCfg = readLabPayoutSignerConfig()
+	} catch (e: unknown) {
+		logger(Colors.red(`[labMiningPoolClPayout] signer config refused: ${(e as Error)?.message ?? e}`))
 		return false
 	}
-
-	const admin = new ethers.Wallet(pk, provider)
-	const redeemWrite = new ethers.Contract(redeemAddr, WRITE_ABI, admin)
-	if (!(await redeemWrite.admins!(admin.address))) {
-		logger(Colors.red(`[labMiningPoolClPayout] signer ${admin.address} is not Redeem contract admin`))
-		return false
-	}
-
-	const gasLimit = resolveWithdrawGasLimit()
-	const intrinsicCost = BigInt(gasLimit) * gasPriceWei
-	const bal = await provider.getBalance(admin.address)
-	if (bal < intrinsicCost) {
+	if (!signerCfg) {
 		logger(
-			Colors.yellow(
-				`[labMiningPoolClPayout] skip flush: admin ${admin.address} balance=${ethers.formatEther(bal)} < intrinsic=${ethers.formatEther(intrinsicCost)} CNET`
+			Colors.red(
+				'[labMiningPoolClPayout] refuse payout: set CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_SOCKET + KEY_ARRAY + PAYOUT_EXECUTOR (no pk fallback)'
 			)
 		)
 		return false
 	}
 
-	const lane = onchainTxLaneForSigner(admin.address)
+	const gasLimit = resolvePayoutGasLimit()
+
 	try {
 		await enqueueOnchainTxWork(
-			lane,
-			`labClSkim→pool n=${entries.length}`,
+			LAB_MINING_POOL_ONCHAIN_LANE,
+			`labExecutor.payoutBatch n=${entries.length} line=${line}`,
 			async () => {
-				// Legacy gasPrice: EIP-1559 tip=0 rejected on some CONET nodes; tip=1 can stall in mempool.
-				const tx = await redeemWrite.withdrawNative!(labMiningPool, total, {
+				const sent = await sendConfiguredLabExecutorPayoutBatch({
+					batchId,
+					eventKeys,
+					amount: total,
 					gasLimit,
-					gasPrice: gasPriceWei,
+					preferRecoverFirst: true,
 				})
-				await tx.wait()
+				logger(
+					Colors.cyan(
+						`[labMiningPoolClPayout] executor.payoutBatch sent via signer tx=${sent.hash} executor=${sent.executor} ` +
+							`line=${line} recovered=${sent.recoveredFromJournal ? 1 : 0} ` +
+							`waiting≤${resolveTxWaitTimeoutMs()}ms n=${entries.length} gasPrice=${ethers.formatUnits(gasPriceWei, 'gwei')}gwei`
+					)
+				)
+				const receipt = await waitForSignerReceiptByHash(provider, sent.hash, resolveTxWaitTimeoutMs())
+				if (receipt.status !== 1) {
+					throw new Error(`executor.payoutBatch reverted status=${receipt.status} hash=${sent.hash}`)
+				}
 				logger(
 					Colors.green(
-						`[labMiningPoolClPayout] withdrawNative ok tx=${tx.hash} total=${ethers.formatEther(total)} CNET n=${entries.length}`
+						`[labMiningPoolClPayout] executor.payoutBatch ok tx=${sent.hash} total=${ethers.formatEther(total)} CNET → ${labMiningPool} ` +
+							`n=${entries.length} line=${line} batchId=${batchId.slice(0, 14)}…`
 					)
 				)
 				for (const e of entries) state.consumedEventKeys[e.eventKey] = true
@@ -709,7 +848,7 @@ async function submitLabSkimBatch(
 		)
 		return true
 	} catch (e: unknown) {
-		logger(Colors.red(`[labMiningPoolClPayout] withdrawNative failed: ${(e as Error)?.message ?? e}`))
+		logger(Colors.red(`[labMiningPoolClPayout] executor.payoutBatch failed: ${(e as Error)?.message ?? e}`))
 		return false
 	}
 }
@@ -760,16 +899,21 @@ async function flushPendingLabBatches(
 		persistPending(state, pending)
 	}
 
-	const ordered = [...pending.values()].sort(
-		(a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex
-	)
+	const flushMax = resolveFlushMaxEntries()
+	const batchEntries = resolveFlushBatchEntries()
+	const maxBatches = resolveFlushMaxBatches()
+	const ordered = [...pending.values()]
+		.sort((a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex)
+		.slice(0, flushMax)
 	const live: SkimEntry[] = []
+	let droppedConsumed = 0
 	for (const e of ordered) {
 		try {
 			const consumed = Boolean(await readContract.consumedRewardEventKey!(e.eventKey))
 			if (consumed) {
 				state.consumedEventKeys[e.eventKey] = true
 				pending.delete(e.eventKey)
+				droppedConsumed++
 				continue
 			}
 		} catch {
@@ -777,11 +921,11 @@ async function flushPendingLabBatches(
 		}
 		live.push(e)
 	}
-	if (live.length !== ordered.length) {
+	if (droppedConsumed > 0) {
 		persistPending(state, pending)
 		logger(
 			Colors.cyan(
-				`[labMiningPoolClPayout] dropped ${ordered.length - live.length} already-consumed eventKeys; pending=${pending.size}`
+				`[labMiningPoolClPayout] dropped ${droppedConsumed} already-consumed eventKeys; pending=${pending.size}`
 			)
 		)
 	}
@@ -800,49 +944,83 @@ async function flushPendingLabBatches(
 		return
 	}
 
-	// Pack prefix batches that fit under maxSkim (one withdrawNative per batch).
-	const batches: SkimEntry[][] = []
-	let cur: SkimEntry[] = []
-	let curTotal = 0n
-	for (const e of live) {
-		if (e.amount > maxPayout) {
-			logger(
-				Colors.red(
-					`[labMiningPoolClPayout] entry ${e.eventKey.slice(0, 14)}… amount=${ethers.formatEther(e.amount)} > maxSkim; leaving in pending`
-				)
-			)
-			continue
-		}
-		if (cur.length && curTotal + e.amount > maxPayout) {
-			batches.push(cur)
-			cur = []
-			curTotal = 0n
-		}
-		cur.push(e)
-		curTotal += e.amount
+	const freezeH = state.freezeH?.height
+	if (freezeH == null) {
+		logger(Colors.yellow('[labMiningPoolClPayout] skip flush: freezeH not set yet'))
+		return
 	}
-	if (cur.length) batches.push(cur)
+
+	// Pack per-line batches that fit under maxSkim (one executor.payoutBatch per batch).
+	type LinedBatch = { line: LabScanLine; entries: SkimEntry[] }
+	const packLine = (line: LabScanLine, entries: SkimEntry[]): LinedBatch[] => {
+		const out: LinedBatch[] = []
+		let cur: SkimEntry[] = []
+		let curTotal = 0n
+		for (const e of entries) {
+			if (e.amount > maxPayout) {
+				logger(
+					Colors.red(
+						`[labMiningPoolClPayout] entry ${e.eventKey.slice(0, 14)}… amount=${ethers.formatEther(e.amount)} > maxSkim; leaving in pending`
+					)
+				)
+				continue
+			}
+			if (cur.length && (cur.length >= batchEntries || curTotal + e.amount > maxPayout)) {
+				out.push({ line, entries: cur })
+				cur = []
+				curTotal = 0n
+			}
+			cur.push(e)
+			curTotal += e.amount
+		}
+		if (cur.length) out.push({ line, entries: cur })
+		return out
+	}
+
+	const historyLive = live.filter((e) => classifyPendingLine(e.blockNumber, freezeH) === 'history')
+	const realtimeLive = live.filter((e) => classifyPendingLine(e.blockNumber, freezeH) === 'realtime')
+	const packed = [...packLine('realtime', realtimeLive), ...packLine('history', historyLive)]
+	const reserved = resolveRealtimeReservedBatches()
+	const scheduled = scheduleFlushBatches(packed, reserved)
+	const batches = scheduled.ordered.slice(0, maxBatches)
 	if (!batches.length) return
 
+	const tipBlock = Number(await provider.getBlockNumber().catch(() => freezeH))
+	const oldestRt = realtimeLive.length
+		? Math.min(...realtimeLive.map((e) => e.blockNumber))
+		: null
+	const lat = formatRealtimeLatency({ tipBlock, oldestRealtimePendingBlock: oldestRt })
+	const histCursor = state.historyCursor ?? freezeH
+	const prog = formatHistoryProgress(histCursor, freezeH)
 	logger(
 		Colors.cyan(
-			`[labMiningPoolClPayout] flush pending=${live.length} → ${batches.length} batch(es) ` +
+			`[labMiningPoolClPayout] flush inspect=${ordered.length}/${pending.size} live=${live.length} → ${batches.length} batch(es) ` +
+				`A2 rtFirst=${scheduled.realtimeFirst} hist=${scheduled.historyCount} reserved=${reserved} ` +
+				`rtLatency tipGap=${lat.tipGapBlocks} histProgress remaining=${prog.remaining} pct=${prog.pct}% ` +
+				`(maxEntries=${flushMax} batchEntries=${batchEntries} maxBatches=${maxBatches}) ` +
 				`gasPrice=${ethers.formatUnits(gasPrice, 'gwei')}gwei${forceFlush ? ' force=1' : ''}`
 		)
 	)
 
 	for (const batch of batches) {
-		const ok = await submitLabSkimBatch(provider, redeemAddr, batch, state, gasPrice)
+		const ok = await submitLabSkimBatch(
+			provider,
+			redeemAddr,
+			batch.entries,
+			state,
+			gasPrice,
+			batch.line
+		)
 		if (!ok) {
 			logger(
 				Colors.yellow(
-					`[labMiningPoolClPayout] batch failed n=${batch.length}; remaining stay in pending pool (pending=${pending.size})`
+					`[labMiningPoolClPayout] batch failed line=${batch.line} n=${batch.entries.length}; remaining stay in pending pool (pending=${pending.size})`
 				)
 			)
 			persistPending(state, pending)
 			return
 		}
-		for (const e of batch) pending.delete(e.eventKey)
+		for (const e of batch.entries) pending.delete(e.eventKey)
 		persistPending(state, pending)
 	}
 
@@ -866,24 +1044,77 @@ async function processBlockRange(
 		if (!block) {
 			return { okThrough, added, fetchFailed: true }
 		}
-		// Keep pending mirror on state so collectLabSkimEntriesForBlock can dedupe.
-		state.pending = [...pending.values()].map(skimEntryToJson)
-		const entries = await collectLabSkimEntriesForBlock(readContract, proxyLower, bn, block, state)
+		const entries = await collectLabSkimEntriesForBlock(
+			readContract,
+			proxyLower,
+			bn,
+			block,
+			state,
+			pending
+		)
 		added += mergeIntoPending(pending, entries)
 		okThrough = bn
 	}
 	return { okThrough, added, fetchFailed: false }
 }
 
-function logSessionStartIfNeeded(state: LabClPayoutState, liveHead: number): void {
+function logSessionStartIfNeeded(state: LabClPayoutState, liveHead: number, freeze: LabFreezeH): void {
 	if (labPhaseLogged) return
 	labPhaseLogged = true
 	const floor = sessionBackfillFloor ?? resolveSessionBackfillFloor(state)
 	logger(
 		Colors.cyan(
-			`[labMiningPoolClPayout] parallel listen+backfill floor=${floor} backfill→${resolveBackfillUpperBound(liveHead)} (liveHead-1) listenHead=${liveHead} lastListen=${state.lastListeningEndBlock ?? 'none'} backfillCursor=${state.lastBackfillProcessedBlock}`
+			`[labMiningPoolClPayout] dual-cursor H=${freeze.height} frozenAt=${freeze.frozenAt} ` +
+				`historyCursor=${state.historyCursor} realtimeCursor=${state.realtimeCursor} ` +
+				`floor=${floor} liveHead=${liveHead} (legacy listen=${state.lastListeningEndBlock ?? 'none'} backfill=${state.lastBackfillProcessedBlock})`
 		)
 	)
+}
+
+async function scanWindowAndAdvance(
+	provider: ethers.JsonRpcProvider,
+	readContract: ethers.Contract,
+	redeemAddr: string,
+	from: number,
+	to: number,
+	state: LabClPayoutState,
+	pending: Map<string, SkimEntry>,
+	line: LabScanLine
+): Promise<{ okThrough: number | null; added: number }> {
+	const { okThrough, added, fetchFailed } = await processBlockRange(
+		provider,
+		readContract,
+		redeemAddr,
+		from,
+		to,
+		state,
+		pending
+	)
+	if (okThrough != null) {
+		// Cursor + enqueue are persisted together (anti-power-loss).
+		if (line === 'history') {
+			state.historyCursor = okThrough
+			state.lastBackfillProcessedBlock = Math.max(state.lastBackfillProcessedBlock, okThrough)
+		} else {
+			state.realtimeCursor = okThrough
+			state.lastLiveHeadScanned = Math.max(state.lastLiveHeadScanned ?? 0, okThrough)
+		}
+		persistPending(state, pending)
+		const label = line === 'history' ? 'history' : 'realtime'
+		if (added > 0) {
+			logger(
+				Colors.cyan(
+					`[labMiningPoolClPayout] ${label} queued +${added} (pending=${pending.size}) ${from}-${okThrough}`
+				)
+			)
+		} else {
+			logger(Colors.gray(`[labMiningPoolClPayout] ${label} ${from}-${okThrough}`))
+		}
+	}
+	if (fetchFailed) {
+		logger(Colors.yellow(`[labMiningPoolClPayout] ${line} fetch failed at ${from}-${to}; cursor not advanced past okThrough=${okThrough}`))
+	}
+	return { okThrough, added }
 }
 
 async function labPayoutTick(): Promise<void> {
@@ -893,7 +1124,7 @@ async function labPayoutTick(): Promise<void> {
 		if (!loadManifestIfNeeded()) return
 
 		const redeemAddr = resolveLabRedeemAddress()
-		const provider = new ethers.JsonRpcProvider(resolveLabRpcUrl())
+		const provider = createLabRpcProvider()
 		const readContract = new ethers.Contract(redeemAddr, READ_ABI, provider)
 
 		const state = getLabSessionState()
@@ -902,77 +1133,74 @@ async function labPayoutTick(): Promise<void> {
 		const floor = resolveLabScanFloorBlock()
 		if (!Number.isFinite(liveHead) || liveHead < floor) return
 
-		const backfillFloor = sessionBackfillFloor ?? resolveSessionBackfillFloor(state)
-		const backfillUpper = resolveBackfillUpperBound(liveHead)
-
-		logSessionStartIfNeeded(state, liveHead)
-
-		// 1) Listening — always scan current chain head (does not wait for backfill).
-		if (state.lastLiveHeadScanned !== liveHead) {
-			const { okThrough, added, fetchFailed } = await processBlockRange(
-				provider,
-				readContract,
-				redeemAddr,
-				liveHead,
-				liveHead,
-				state,
-				pending
-			)
-			if (!fetchFailed && okThrough === liveHead) {
-				state.lastLiveHeadScanned = liveHead
-				if (added > 0) {
-					logger(
-						Colors.cyan(
-							`[labMiningPoolClPayout] listening queued +${added} (pending=${pending.size}) liveHead=${liveHead}`
-						)
-					)
-				} else {
-					logger(Colors.gray(`[labMiningPoolClPayout] listening liveHead=${liveHead}`))
-				}
-				persistPending(state, pending)
-			}
+		const tipBlock = await provider.getBlock(liveHead)
+		const tipHash = tipBlock?.hash
+		if (!tipHash || !/^0x[0-9a-fA-F]{64}$/.test(tipHash)) {
+			logger(Colors.yellow(`[labMiningPoolClPayout] skip tick: tip hash missing at ${liveHead}`))
+			return
 		}
+		const freeze = ensureDualCursors(state, liveHead, tipHash)
+		persistPending(state, pending)
+		logSessionStartIfNeeded(state, liveHead, freeze)
 
-		// 2) Backfill — [sessionBackfillFloor .. liveHead-1] in chunks (parallel with listening).
-		let backfillFrom = state.lastBackfillProcessedBlock + 1
-		if (backfillFrom < backfillFloor) backfillFrom = backfillFloor
-		if (backfillFrom <= backfillUpper) {
-			const chunk = resolveChunkBlocks()
-			const chunksPerTick = resolveChunksPerTick()
-			const tickEnd = Math.min(backfillFrom + chunk * chunksPerTick - 1, backfillUpper)
-			let from = backfillFrom
-			while (from <= tickEnd) {
-				const to = Math.min(from + chunk - 1, tickEnd)
-				const { okThrough, added, fetchFailed } = await processBlockRange(
+		const chunk = resolveChunkBlocks()
+		const chunksPerTick = resolveChunksPerTick()
+
+		// 1) Realtime line first (tip-fill) — reserved capacity for latency.
+		{
+			let windows = 0
+			while (windows < chunksPerTick) {
+				const w = nextRealtimeWindow(state.realtimeCursor ?? freeze.height, freeze.height, liveHead, chunk)
+				if (!w) break
+				await scanWindowAndAdvance(
 					provider,
 					readContract,
 					redeemAddr,
-					from,
-					to,
+					w.from,
+					w.to,
 					state,
-					pending
+					pending,
+					'realtime'
 				)
-				if (okThrough != null) {
-					state.lastBackfillProcessedBlock = okThrough
-					persistPending(state, pending)
-					if (added > 0) {
-						logger(
-							Colors.cyan(
-								`[labMiningPoolClPayout] backfill queued +${added} (pending=${pending.size}) ${from}-${okThrough} gap→head-1=${Math.max(0, backfillUpper - okThrough)}`
-							)
-						)
-					} else {
-						logger(
-							Colors.gray(
-								`[labMiningPoolClPayout] backfill ${from}-${okThrough} cursor=${okThrough} gap→head-1=${Math.max(0, backfillUpper - okThrough)}`
-							)
-						)
-					}
-				}
-				if (fetchFailed || okThrough == null || okThrough < to) break
-				from = to + 1
+				windows++
+				if ((state.realtimeCursor ?? 0) < w.to) break
 			}
 		}
+
+		// 2) History line keeps advancing toward H (must not stall forever behind realtime).
+		{
+			let windows = 0
+			while (windows < chunksPerTick) {
+				const w = nextHistoryWindow(state.historyCursor ?? floor - 1, freeze.height, chunk)
+				if (!w) break
+				await scanWindowAndAdvance(
+					provider,
+					readContract,
+					redeemAddr,
+					w.from,
+					w.to,
+					state,
+					pending,
+					'history'
+				)
+				windows++
+				if ((state.historyCursor ?? 0) < w.to) break
+			}
+		}
+
+		const prog = formatHistoryProgress(state.historyCursor ?? freeze.height, freeze.height)
+		const lat = formatRealtimeLatency({
+			tipBlock: liveHead,
+			oldestRealtimePendingBlock: [...pending.values()]
+				.filter((e) => classifyPendingLine(e.blockNumber, freeze.height) === 'realtime')
+				.reduce<number | null>((m, e) => (m == null ? e.blockNumber : Math.min(m, e.blockNumber)), null),
+		})
+		logger(
+			Colors.gray(
+				`[labMiningPoolClPayout] progress hist remaining=${prog.remaining} pct=${prog.pct}% ` +
+					`rt tipGap=${lat.tipGapBlocks} pending=${pending.size}`
+			)
+		)
 
 		await flushPendingLabBatches(provider, readContract, redeemAddr, state, pending)
 		tryPersistListeningCheckpoint(state, liveHead)
@@ -1003,8 +1231,10 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	labStarted = true
 	logger(
 		Colors.cyan(
-			`[labMiningPoolClPayout] starting pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
-				`maxGasGwei=${ethers.formatUnits(resolveMaxGasPriceWei(), 'gwei')} gasWaitForceMs=${resolveGasWaitForceMs()} pendingPool=on`
+			`[labMiningPoolClPayout] starting dual-cursor+payoutBatch pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
+				`maxGasGwei=${ethers.formatUnits(resolveMaxGasPriceWei(), 'gwei')} gasWaitForceMs=${resolveGasWaitForceMs()} ` +
+				`realtimeReserved=${resolveRealtimeReservedBatches()} ` +
+				`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on`
 		)
 	)
 	void labPayoutTick().finally(() => scheduleNextLabTick())
@@ -1025,7 +1255,7 @@ export function stopValidatorLabMiningPoolClPayoutReporter(): void {
 export async function flushLabMiningPoolListeningCheckpoint(): Promise<void> {
 	try {
 		const state = labSessionState ?? readStateFromDisk()
-		const provider = new ethers.JsonRpcProvider(resolveLabRpcUrl())
+		const provider = createLabRpcProvider()
 		const liveHead = Number(await provider.getBlockNumber())
 		if (Number.isFinite(liveHead)) {
 			tryPersistListeningCheckpoint(state, liveHead)
@@ -1036,8 +1266,18 @@ export async function flushLabMiningPoolListeningCheckpoint(): Promise<void> {
 	}
 }
 
-export async function waitForLabMiningPoolClPayoutIdle(): Promise<void> {
+/** Bounded idle wait so SIGTERM cannot hang forever behind a stuck tx.wait. */
+export async function waitForLabMiningPoolClPayoutIdle(maxWaitMs = 90_000): Promise<void> {
+	const started = Date.now()
 	while (labInFlight) {
+		if (Date.now() - started >= maxWaitMs) {
+			logger(
+				Colors.red(
+					`[labMiningPoolClPayout] idle wait timeout ${maxWaitMs}ms (labInFlight still true); continuing shutdown`
+				)
+			)
+			return
+		}
 		await new Promise((r) => setTimeout(r, 250))
 	}
 }

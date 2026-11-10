@@ -1,13 +1,15 @@
 [Unit]
-Description=CoNET Lab staking CL skim payout to ConetLabMiningPool
+Description=CoNET Lab staking CL skim payout via LabMiningPoolPayoutExecutor (dedicated socket)
 After=network-online.target
 Wants=network-online.target
+# Prefer After=wallet-signer-lab-mining-pool.service when that unit exists on the host.
 
 [Service]
 Type=simple
-User=peter
-Group=peter
-WorkingDirectory=/home/peter/x402sdk
+# Dedicated unix user — must NOT be the VDR PAY signer user.
+User=lab-mining-pool
+Group=lab-mining-pool
+WorkingDirectory=/home/lab-mining-pool/x402sdk
 EnvironmentFile=-/etc/default/conet-lab-mining-pool-cl-payout
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/node dist/endpoint/labMiningPoolClPayoutDaemon.js
@@ -17,6 +19,7 @@ TimeoutStopSec=120
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=conet-lab-mining-pool-cl-payout
+# Socket access: group-readable lab-payout.sock under /run/wallet-signer-lab-mining-pool/
 
 [Install]
 WantedBy=multi-user.target
