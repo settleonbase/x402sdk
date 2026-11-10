@@ -11,6 +11,47 @@ import type { TxManager } from './txManager'
 /** Plain native transfer gas. The PM must keep at least this times the worst fee. */
 export const NATIVE_TOPUP_GAS_LIMIT = 21_000n
 
+/** Internal role that signs PM top-ups. Not a daemon client and not an admin-socket identity. */
+export const GAS_KEEPER_CLIENT = 'gas-keeper'
+
+/** Quote daemon. It may use its own RPC socket. It cannot open the gas-keeper path. */
+export const ORACLE_DAEMON_CLIENT = 'oracle-daemon'
+
+/**
+ * BeamioOracle on CoNET. A phase-2 top-up reaches this address only when that
+ * chain's business-wallet whitelist lists it. Wide pool sweeps are not this phase.
+ */
+export const ORACLE_GAS_WALLET = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008'
+
+const GAS_TOPUP_RPC_METHODS = new Set(['gas.run', 'gas_run', 'signer_gasRun', 'signer_topup', 'signer_gasStatus'])
+
+/** Client RPC has no gas-keeper method. oracle-daemon is refused by name. */
+export function gasTopupRpcRefusal(method: string, client: string): 'oracle-daemon' | 'client-rpc' | null {
+	if (!GAS_TOPUP_RPC_METHODS.has(method)) return null
+	if (client === ORACLE_DAEMON_CLIENT) return 'oracle-daemon'
+	return 'client-rpc'
+}
+
+/** Admin `gas run` takes no caller and no target. It cannot be aimed by oracle-daemon. */
+export function adminGasRunRefusal(args: Record<string, unknown>): 'oracle-daemon' | 'caller-or-target' | null {
+	if (args.client === ORACLE_DAEMON_CLIENT) return 'oracle-daemon'
+	if ('client' in args || 'address' in args || 'to' in args || 'wallets' in args) return 'caller-or-target'
+	return null
+}
+
+export function explicitBusinessWallets(cfg: GasKeeperChain): string[] {
+	const out: string[] = []
+	const seen = new Set<string>()
+	for (const raw of cfg.wallets ?? []) {
+		const addr = getAddress(raw)
+		const key = addr.toLowerCase()
+		if (seen.has(key)) continue
+		seen.add(key)
+		out.push(addr)
+	}
+	return out
+}
+
 export type SpendStatus = 'pending' | 'settled' | 'released'
 
 export type SpendRow = {
@@ -29,12 +70,15 @@ type KeeperState = { version: 2; spend: SpendRow[] }
 type TopupReceipt = { hash?: string; status?: string; duplicate?: boolean }
 
 /**
- * Tops up every active registry address from the PM key.
- * Hard rules: only registry addresses, never a compromised address, one open top-up per address,
+ * Tops up explicit business wallets from the PM key only.
+ * An empty whitelist tops up nobody. Active registry arrays are not a funding list.
+ * Hard rules: whitelist, explicit budget, never a compromised address, one open top-up per address,
  * per-address daily cap, and a chain total that is not refilled by rewriting the UTC day.
+ * Locked signers do not sign. oracle-daemon cannot invoke this over RPC or the admin socket.
  */
 export class GasKeeper {
-	private timer?: ReturnType<typeof setInterval>
+	private timer?: ReturnType<typeof setTimeout>
+	private stopped = true
 	private running = false
 
 	constructor(
@@ -50,13 +94,22 @@ export class GasKeeper {
 	) {}
 
 	start(): void {
-		if (this.timer || !this.keyring.unlocked) return
-		this.timer = setInterval(() => void this.runOnce(), this.intervalMs)
+		if (this.timer !== undefined || !this.keyring.unlocked) return
+		this.stopped = false
+		const schedule = (): void => {
+			if (this.stopped || !this.keyring.unlocked) return
+			this.timer = setTimeout(() => {
+				this.timer = undefined
+				void this.runOnce().finally(() => schedule())
+			}, this.intervalMs)
+		}
+		schedule()
 		void this.runOnce()
 	}
 
 	stop(): void {
-		if (this.timer) clearInterval(this.timer)
+		this.stopped = true
+		if (this.timer !== undefined) clearTimeout(this.timer)
 		this.timer = undefined
 	}
 
@@ -93,6 +146,21 @@ export class GasKeeper {
 	}
 
 	private async runChain(chainId: number, cfg: GasKeeperChain, reg: RegistryBody): Promise<void> {
+		// The oracle contract address is the same on Base. This phase funds CoNET only.
+		if (chainId === 8453) {
+			this.alerter.send('warn', `topup-chain-refused:${chainId}`, `gas keeper does not top up chain ${chainId}`)
+			return
+		}
+		const wallets = explicitBusinessWallets(cfg)
+		if (wallets.length === 0) {
+			this.alerter.send('warn', `topup-whitelist-empty:${chainId}`, `gas keeper chain ${chainId} has no business-wallet whitelist`)
+			return
+		}
+		if (cfg.budgetWei === undefined) {
+			this.alerter.send('warn', `topup-budget-unset:${chainId}`, `gas keeper chain ${chainId} has no explicit budget`)
+			return
+		}
+		const budget = BigInt(cfg.budgetWei)
 		const p = this.txm.provider(chainId)
 		const pm = getAddress(reg.pm)
 		let pmBal = await p.getBalance(pm)
@@ -120,13 +188,12 @@ export class GasKeeper {
 		const target = BigInt(cfg.targetWei)
 		const chainKey = String(chainId)
 		const nowIso = new Date().toISOString()
-		const targets = reg.arrays
-			.filter((a) => a.status === 'active' && a.chains.includes(chainId))
-			.flatMap((a) => a.addresses.map((addr) => ({ array: a.name, addr: getAddress(addr) })))
-			// Busy keys first: they are the ones about to run dry.
-			.sort((x, y) => this.txm.inflightCount(chainId, y.addr) - this.txm.inflightCount(chainId, x.addr))
+		const targets = wallets
+			.filter((addr) => addr.toLowerCase() !== pm.toLowerCase())
+			.sort((x, y) => this.txm.inflightCount(chainId, y) - this.txm.inflightCount(chainId, x))
 
-		for (const { array, addr } of targets) {
+		for (const addr of targets) {
+			if (!this.keyring.unlocked) return
 			const address = addr.toLowerCase()
 			const open = openRow(state, chainKey, address)
 			if (open) {
@@ -135,22 +202,25 @@ export class GasKeeper {
 				if (gate === 'busy') continue
 				if (gate === 'resume') {
 					if (pmBal < BigInt(open.amountWei) + gasReserve) {
-						this.alerter.send('critical', `pm-empty:${chainId}`, `PM cannot cover top-up of ${array} ${addr} plus gas`)
+						this.alerter.send('critical', `pm-empty:${chainId}`, `PM cannot cover top-up of ${addr} plus gas`)
 						return
 					}
-					const sent = await this.broadcast(state, chainId, array, addr, open)
+					const sent = await this.broadcast(state, chainId, pm, addr, open)
 					if (sent) pmBal -= BigInt(open.amountWei) + gasReserve
 					continue
 				}
 			}
-			if (bad.has(address)) continue
+			if (bad.has(address)) {
+				this.alerter.send('warn', `topup-rejected:${chainKey}:${address}`, `${addr} is compromised`)
+				continue
+			}
 			const bal = await p.getBalance(addr)
 			if (bal >= min) continue
 			const amount = target - bal
 			if (amount <= 0n) continue
 			const used = gasKeeperUsage(state.spend, chainKey, address, nowIso)
 			if (used.addressDaily + amount > BigInt(cfg.perAddressDailyWei)) {
-				this.alerter.send('warn', `topup-cap:${chainKey}:${address}`, `${array} ${addr} hit its daily top-up cap`)
+				this.alerter.send('warn', `topup-cap:${chainKey}:${address}`, `${addr} hit its daily top-up cap`)
 				continue
 			}
 			if (used.globalDaily + amount > BigInt(cfg.globalDailyWei)) {
@@ -162,8 +232,12 @@ export class GasKeeper {
 				this.alerter.send('warn', `topup-total-cap:${chainId}`, `total top-up budget reached on chain ${chainId}`)
 				return
 			}
+			if (used.globalTotal + amount > budget) {
+				this.alerter.send('warn', `topup-budget:${chainId}`, `explicit top-up budget reached on chain ${chainId}`)
+				return
+			}
 			if (pmBal < amount + gasReserve) {
-				this.alerter.send('critical', `pm-empty:${chainId}`, `PM cannot cover top-up of ${array} ${addr} plus gas`)
+				this.alerter.send('critical', `pm-empty:${chainId}`, `PM cannot cover top-up of ${addr} plus gas`)
 				return
 			}
 			const attempt = nextAttempt(state, chainKey, address)
@@ -179,7 +253,7 @@ export class GasKeeper {
 			state.spend.push(row)
 			// Durable before broadcast so a restart cannot mint a second attempt.
 			this.saveState(state)
-			const sent = await this.broadcast(state, chainId, array, addr, row)
+			const sent = await this.broadcast(state, chainId, pm, addr, row)
 			if (sent) pmBal -= amount + gasReserve
 		}
 	}
@@ -205,20 +279,21 @@ export class GasKeeper {
 	}
 
 	private lookup(row: SpendRow): TopupReceipt | undefined {
-		const byKey = this.txm.get({ idempotencyKey: row.idempotencyKey, client: 'gas-keeper' })
+		const byKey = this.txm.get({ idempotencyKey: row.idempotencyKey, client: GAS_KEEPER_CLIENT })
 		if (byKey) return byKey
 		if (!row.hash) return undefined
 		return this.txm.get({ hash: row.hash })
 	}
 
-	private async broadcast(state: KeeperState, chainId: number, array: string, addr: string, row: SpendRow): Promise<boolean> {
-		const pm = getAddress(this.registry()!.pm)
+	private async broadcast(state: KeeperState, chainId: number, pm: string, addr: string, row: SpendRow): Promise<boolean> {
+		if (!this.keyring.unlocked) return false
+		const source = getAddress(pm)
 		try {
 			const res = await this.txm.send({
-				client: 'gas-keeper',
+				client: GAS_KEEPER_CLIENT,
 				array: 'PM',
 				chainId,
-				candidates: [pm],
+				candidates: [source],
 				to: addr,
 				data: '0x',
 				value: BigInt(row.amountWei),
@@ -235,7 +310,7 @@ export class GasKeeper {
 			this.saveState(state)
 			if (row.status === 'released') return false
 			if (!res.duplicate) {
-				this.audit.write({ event: 'gas.topup', chainId, array, to: addr, amountWei: row.amountWei, hash: res.hash, idempotencyKey: row.idempotencyKey })
+				this.audit.write({ event: 'gas.topup', chainId, array: 'PM', to: addr, amountWei: row.amountWei, hash: res.hash, idempotencyKey: row.idempotencyKey })
 			}
 			return true
 		} catch (e) {
@@ -244,14 +319,14 @@ export class GasKeeper {
 				row.hash = rec.hash
 				row.status = 'pending'
 				this.saveState(state)
-				this.alerter.send('warn', `topup-unconfirmed:${row.chainId}:${row.address}`, `top-up of ${array} ${addr} is still unconfirmed`)
+				this.alerter.send('warn', `topup-unconfirmed:${row.chainId}:${row.address}`, `top-up of ${addr} is still unconfirmed`)
 				return true
 			}
 			if (!rec && !row.hash) {
 				row.status = 'released'
 				this.saveState(state)
 			}
-			this.alerter.send('warn', `topup-fail:${row.chainId}:${row.address}`, `top-up of ${array} ${addr} failed: ${errorMessage(e)}`)
+			this.alerter.send('warn', `topup-fail:${row.chainId}:${row.address}`, `top-up of ${addr} failed: ${errorMessage(e)}`)
 			return false
 		}
 	}

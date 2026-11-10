@@ -6,6 +6,7 @@ import type { TLSSocket } from 'node:tls'
 import { bigintReplacer } from './audit'
 import type { ProxiedListen, TlsListen, UnixListen } from './config'
 import { ErrorCode, SignerError } from './errors'
+import { gasTopupRpcRefusal } from './gasKeeper'
 import { errorMessage } from './redact'
 import type { SignerService } from './service'
 
@@ -181,6 +182,9 @@ function checkToken(svc: SignerService, client: string, req: IncomingMessage): v
 }
 
 async function dispatch(svc: SignerService, client: string, r: RpcRequest): Promise<unknown> {
+	const refusal = gasTopupRpcRefusal(String(r.method ?? ''), client)
+	if (refusal === 'oracle-daemon') throw new SignerError(ErrorCode.UNAUTHORIZED, 'oracle-daemon cannot call the gas keeper')
+	if (refusal === 'client-rpc') throw new SignerError(ErrorCode.METHOD_NOT_FOUND, 'gas top-up is not a client RPC method')
 	const p = r.params
 	const obj = (Array.isArray(p) ? p[0] : p) as Record<string, unknown> | undefined
 	switch (r.method) {

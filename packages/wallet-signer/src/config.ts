@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { getAddress, isAddress } from 'ethers'
 
 export type ChainConfig = {
 	rpcUrls: string[]
@@ -17,6 +18,13 @@ export type GasKeeperChain = {
 	globalDailyWei: string
 	pmWarnWei: string
 	pmCriticalWei: string
+	/**
+	 * Business wallets this chain may top up. Missing or empty tops up nobody.
+	 * Registry arrays are not an implicit list. Wide pool management is a later phase.
+	 */
+	wallets?: string[]
+	/** Explicit total budget in wei. Missing refuses every top-up on this chain. */
+	budgetWei?: string
 }
 
 export type TlsListen = { host: string; port: number; cert: string; key: string; ca: string }
@@ -82,12 +90,40 @@ export function loadConfig(path: string): Config {
 		compromisedFile: raw.compromisedFile ?? join(raw.dataDir, 'compromised.json'),
 		rpc: raw.rpc ?? {},
 		chains: raw.chains,
-		gasKeeper: raw.gasKeeper ?? { enabled: false, intervalMs: 60_000, chains: {} },
+		gasKeeper: normalizeGasKeeper(raw.gasKeeper),
 		alerts: raw.alerts ?? {},
 		scryptN: raw.scryptN ?? 2 ** 18,
 		keyWaitMs: raw.keyWaitMs ?? 30_000,
 		allowUnsafeTestInit: raw.allowUnsafeTestInit === true,
 	}
+}
+
+function normalizeGasKeeper(raw: Config['gasKeeper'] | undefined): Config['gasKeeper'] {
+	const gk = raw ?? { enabled: false, intervalMs: 60_000, chains: {} }
+	const chains: Record<string, GasKeeperChain> = {}
+	for (const [id, chain] of Object.entries(gk.chains ?? {})) chains[id] = normalizeGasKeeperChain(id, chain)
+	return {
+		enabled: gk.enabled === true,
+		intervalMs: gk.intervalMs ?? 60_000,
+		chains,
+	}
+}
+
+function normalizeGasKeeperChain(id: string, chain: GasKeeperChain): GasKeeperChain {
+	const wallets: string[] = []
+	const seen = new Set<string>()
+	for (const [index, raw] of (chain.wallets ?? []).entries()) {
+		if (typeof raw !== 'string' || !isAddress(raw)) throw new Error(`config: gasKeeper.chains.${id}.wallets[${index}] is not an address`)
+		const addr = getAddress(raw)
+		const key = addr.toLowerCase()
+		if (seen.has(key)) throw new Error(`config: gasKeeper.chains.${id}.wallets repeats ${addr}`)
+		seen.add(key)
+		wallets.push(addr)
+	}
+	if (chain.budgetWei !== undefined && !/^\d+$/.test(chain.budgetWei)) {
+		throw new Error(`config: gasKeeper.chains.${id}.budgetWei must be a wei integer`)
+	}
+	return { ...chain, wallets }
 }
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost'])

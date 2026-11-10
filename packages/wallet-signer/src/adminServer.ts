@@ -2,6 +2,7 @@ import { chmodSync, existsSync, unlinkSync } from 'node:fs'
 import { createServer, type Server, type Socket } from 'node:net'
 import { bigintReplacer } from './audit'
 import { ErrorCode, SignerError } from './errors'
+import { adminGasRunRefusal } from './gasKeeper'
 import { errorMessage } from './redact'
 import type { SignerService } from './service'
 
@@ -83,9 +84,13 @@ async function exec(svc: SignerService, cmd: string, a: Record<string, unknown>)
 			return svc.setClientDisabled(String(a.name), false)
 		case 'gas.status':
 			return svc.gasKeeper.status()
-		case 'gas.run':
+		case 'gas.run': {
+			const refusal = adminGasRunRefusal(a)
+			if (refusal) throw new SignerError(ErrorCode.INVALID_PARAMS, 'gas run does not accept a caller or a target')
+			if (svc.config.gasKeeper.enabled !== true) throw new SignerError(ErrorCode.POLICY_DENIED, 'gas keeper is disabled')
 			await svc.gasKeeper.runOnce()
 			return svc.gasKeeper.status()
+		}
 		case 'tx.list':
 			return svc.txm.recent(Number(a.limit ?? 20)).map(({ raw: _r, data: _d, ...rest }) => rest)
 		case 'compromised.list':

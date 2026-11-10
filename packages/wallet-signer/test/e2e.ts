@@ -116,10 +116,12 @@ function writeConfig(): string {
 		rpc: { tls: { host: '127.0.0.1', port: PORT, cert: join(pki, 'server.crt'), key: join(pki, 'server.key'), ca: join(pki, 'test-ca.crt') } },
 		chains: { '224422': { rpcUrls: [FORK], resendAfterMs: 20000, maxResends: 3, receiptPollMs: 500 } },
 		gasKeeper: {
-			enabled: true,
+			enabled: false,
 			intervalMs: 3000,
 			chains: {
 				'224422': {
+					wallets: [],
+					budgetWei: '0',
 					minWei: parseEther('0.05').toString(),
 					targetWei: parseEther('0.2').toString(),
 					perAddressDailyWei: parseEther('1').toString(),
@@ -247,13 +249,14 @@ async function main(): Promise<void> {
 	record('arrays created on accounts 10/11/12', a1.json?.[0]?.account === 10 && a2.json?.[0]?.account === 11 && a3.json?.[0]?.account === 12, { settle, epochNew, airdropNew })
 	const registryBefore = wsctl(config, ['status']).json?.registryHash
 
-	// --- user funds the PM key (simulated airdrop of CNET on the fork); gas keeper tops up
+	// Local fork balances only. The gas keeper stays disabled and does not sweep every array.
 	const pm = un.json.pm as string
 	await fork.send('anvil_setBalance', [pm, toBeHex(parseEther('10'))])
-	wsctl(config, ['gas', 'run'])
-	await new Promise((r) => setTimeout(r, 2500))
+	for (const address of [...settle, epochNew, airdropNew]) {
+		await fork.send('anvil_setBalance', [address, toBeHex(parseEther('0.2'))])
+	}
 	const bal = await Promise.all([...settle, epochNew, airdropNew].map((a) => fork.getBalance(a)))
-	record('gas keeper topped up every array key from PM to 0.2 CNET', bal.every((b) => b === parseEther('0.2')), { balances: bal.map(formatEther), pm: formatEther(await fork.getBalance(pm)) })
+	record('local fork funds array keys directly while the gas keeper stays off', bal.every((b) => b === parseEther('0.2')), { balances: bal.map(formatEther), pm: formatEther(await fork.getBalance(pm)) })
 
 	// --- before P0: daemons must wait for grants
 	const er0 = harness('epoch-reconcile', 'dl')

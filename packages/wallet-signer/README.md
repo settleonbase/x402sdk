@@ -5,8 +5,9 @@ derived per **key array name** (the field names of `master.json`) and remembered
 registry, so a reboot gives the same addresses. Daemons never see private keys: they ask the
 service, over mTLS JSON-RPC, to sign or send a transaction with "a key of array X", and the
 service checks a per-client whitelist (contract × method × arguments), rate limits, manages
-nonces, broadcasts, and writes a hash-chained audit log. A gas keeper tops up every array key
-from the PM key.
+nonces, broadcasts, and writes a hash-chained audit log. A gas keeper can top up an explicit
+business-wallet whitelist from the PM key. It is off unless `gasKeeper.enabled` is true, and an
+empty whitelist tops up nobody.
 
 Design: `wallet-signer-design-v0.1.md` (PM notes). This README covers build, operation and
 integration. Host names, IPs and SSH details live in the private ops notes, not here.
@@ -21,7 +22,7 @@ integration. Host names, IPs and SSH details live in the private ops notes, not 
 | `src/registry.ts` | key arrays → accounts → addresses, EIP-712 attestation |
 | `src/policy.ts` | client whitelist |
 | `src/txManager.ts` | nonce, fees, simulation, broadcast, re-price, idempotency journal |
-| `src/gasKeeper.ts` | PM → array keys top-up with daily caps |
+| `src/gasKeeper.ts` | PM → explicit business-wallet whitelist, with a budget. Off by default |
 | `src/rpcServer.ts` | listeners: behind nginx (trusted identity headers), direct TLS with client certificate, local unix sockets |
 | `p0/p0Plan.ts` | role-replacement plan for every contract role held by a leaked key, CoNET and Base (plan / unsigned / fork-run) |
 | `deploy/` | systemd unit, nginx front (`nginx-dle.conf`), example config / policy / compromised list |

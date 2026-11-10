@@ -13,7 +13,7 @@ import { RateLimiter } from '../src/rateLimit'
 import { redactText } from '../src/redact'
 import { addArray, emptyRegistry, growArray, rotateArray, signRegistry, verifyRegistry } from '../src/registry'
 import { resolveTypedDataNonce } from '../src/typedDataReplay'
-import { GasKeeper, gasKeeperTopupIdempotencyKey, gasKeeperUsage, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
+import { GasKeeper, ORACLE_DAEMON_CLIENT, ORACLE_GAS_WALLET, adminGasRunRefusal, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
 import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } from '../src/txManager'
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
 import { createVaultJson, openVault } from '../src/vault'
@@ -712,15 +712,145 @@ test('gas keeper per-address daily window still opens on a new UTC day while the
 	}
 })
 
-function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null }): {
+test('gas keeper config stays disabled and an empty whitelist tops up nobody', () => {
+	const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+	const { loadConfig } = require('../src/config') as typeof import('../src/config')
+	const dir = mkdtempSync(join(tmpdir(), 'ws-gas-cfg-'))
+	const p = join(dir, 'c.json')
+	writeFileSync(p, JSON.stringify({
+		dataDir: dir,
+		adminSocket: join(dir, 'a.sock'),
+		policyFile: join(dir, 'p.json'),
+		chains: { '224422': { rpcUrls: ['http://127.0.0.1:9'] } },
+		gasKeeper: {
+			enabled: false,
+			intervalMs: 60_000,
+			chains: { '224422': { minWei: '1', targetWei: '2', perAddressDailyWei: '3', globalDailyWei: '4', pmWarnWei: '5', pmCriticalWei: '6' } },
+		},
+	}))
+	const cfg = loadConfig(p)
+	assert.equal(cfg.gasKeeper.enabled, false)
+	assert.deepEqual(cfg.gasKeeper.chains['224422']!.wallets, [])
+	const omitted = join(dir, 'omitted.json')
+	writeFileSync(omitted, JSON.stringify({ dataDir: dir, adminSocket: join(dir, 'a.sock'), policyFile: join(dir, 'p.json'), chains: { '224422': { rpcUrls: ['http://127.0.0.1:9'] } } }))
+	assert.equal(loadConfig(omitted).gasKeeper.enabled, false)
+	assert.throws(() => {
+		writeFileSync(p, JSON.stringify({
+			dataDir: dir,
+			adminSocket: join(dir, 'a.sock'),
+			policyFile: join(dir, 'p.json'),
+			chains: { '224422': { rpcUrls: ['http://127.0.0.1:9'] } },
+			gasKeeper: { enabled: false, chains: { '224422': { wallets: ['not-an-address'], budgetWei: '1', minWei: '1', targetWei: '1', perAddressDailyWei: '1', globalDailyWei: '1', pmWarnWei: '1', pmCriticalWei: '1' } } },
+		}))
+		loadConfig(p)
+	}, /wallets\[0\]/)
+})
+
+test('gas keeper refuses the oracle address unless it is on the business-wallet whitelist', async () => {
+	const other = getAddress(Wallet.createRandom().address)
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		wallets: [other],
+		registryAddresses: [other, ORACLE_GAS_WALLET],
+	})
+	try {
+		fx.balances.set(fx.pm, 5_000_000n)
+		fx.balances.set(other, 0n)
+		fx.balances.set(ORACLE_GAS_WALLET, 0n)
+		fx.balances.set(fx.addr, 0n)
+		await fx.gk.runOnce()
+		assert.equal(fx.sends.length, 1)
+		assert.equal(getAddress(fx.sends[0]!.to), other)
+		assert.equal(fx.sends.some((row) => getAddress(row.to) === getAddress(ORACLE_GAS_WALLET)), false)
+		assert.equal(fx.sends.some((row) => getAddress(row.to) === fx.addr), false)
+	} finally {
+		fx.cleanup()
+	}
+})
+
+test('gas keeper refuses a top-up that exceeds the explicit budget', async () => {
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		wallets: [ORACLE_GAS_WALLET],
+		budgetWei: '10',
+		perAddressDailyWei: '500000',
+		globalDailyWei: '500000',
+	})
+	try {
+		fx.balances.set(fx.pm, 5_000_000n)
+		fx.balances.set(ORACLE_GAS_WALLET, 0n)
+		await fx.gk.runOnce()
+		assert.equal(fx.sends.length, 0)
+		assert.ok(fx.alerts.includes('topup-budget:224422'))
+	} finally {
+		fx.cleanup()
+	}
+})
+
+test('gas keeper does not sign while locked even when the oracle wallet is whitelisted', async () => {
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { wallets: [ORACLE_GAS_WALLET], unlocked: false })
+	try {
+		fx.balances.set(fx.pm, 5_000_000n)
+		fx.balances.set(ORACLE_GAS_WALLET, 0n)
+		await fx.gk.runOnce()
+		assert.equal(fx.sends.length, 0)
+		assert.equal(fx.providerCalls, 0)
+	} finally {
+		fx.cleanup()
+	}
+})
+
+test('gas keeper tops up a whitelisted oracle from the PM on a local mock', async () => {
+	const bystander = getAddress(Wallet.createRandom().address)
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		wallets: [ORACLE_GAS_WALLET],
+		registryAddresses: [bystander],
+		budgetWei: '1000000',
+	})
+	try {
+		const amount = 1000n
+		fx.balances.set(fx.pm, amount + 21_000n)
+		fx.balances.set(ORACLE_GAS_WALLET, 0n)
+		fx.balances.set(bystander, 0n)
+		await fx.gk.runOnce()
+		assert.equal(fx.sends.length, 1)
+		const sent = fx.sends[0]!
+		assert.equal(getAddress(sent.to), getAddress(ORACLE_GAS_WALLET))
+		assert.equal(sent.value, amount)
+		assert.equal(sent.client, 'gas-keeper')
+		assert.notEqual(sent.client, ORACLE_DAEMON_CLIENT)
+		assert.equal(sent.array, 'PM')
+		assert.deepEqual(sent.candidates.map((addr) => getAddress(addr)), [fx.pm])
+		assert.equal(sent.candidates.includes(bystander), false)
+	} finally {
+		fx.cleanup()
+	}
+})
+
+test('oracle-daemon cannot reach the gas keeper through client RPC or an admin-socket argument', () => {
+	assert.equal(gasTopupRpcRefusal('signer_sendTransaction', ORACLE_DAEMON_CLIENT), null)
+	assert.equal(gasTopupRpcRefusal('signer_topup', ORACLE_DAEMON_CLIENT), 'oracle-daemon')
+	assert.equal(gasTopupRpcRefusal('gas.run', 'conet-beamio-api'), 'client-rpc')
+	assert.equal(adminGasRunRefusal({}), null)
+	assert.equal(adminGasRunRefusal({ client: ORACLE_DAEMON_CLIENT }), 'oracle-daemon')
+	assert.equal(adminGasRunRefusal({ address: ORACLE_GAS_WALLET }), 'caller-or-target')
+})
+
+function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null }, opts: {
+	wallets?: string[]
+	budgetWei?: string
+	perAddressDailyWei?: string
+	globalDailyWei?: string
+	unlocked?: boolean
+	registryAddresses?: string[]
+} = {}): {
 	gk: GasKeeper
 	restart: () => GasKeeper
 	pm: string
 	addr: string
 	statePath: string
-	sends: Array<{ idempotencyKey?: string; value: bigint; gasLimit?: bigint; hash: string }>
+	sends: Array<{ idempotencyKey?: string; value: bigint; gasLimit?: bigint; hash: string; to: string; client?: string; array?: string; candidates: string[] }>
 	alerts: string[]
 	balances: Map<string, bigint>
+	providerCalls: number
 	remember: (rec: { hash?: string; status?: string; idempotencyKey?: string }) => void
 	failSend: boolean
 	cleanup: () => void
@@ -731,7 +861,8 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 	const addr = getAddress(Wallet.createRandom().address)
 	const balances = new Map<string, bigint>()
 	const alerts: string[] = []
-	const sends: Array<{ idempotencyKey?: string; value: bigint; gasLimit?: bigint; hash: string }> = []
+	const sends: Array<{ idempotencyKey?: string; value: bigint; gasLimit?: bigint; hash: string; to: string; client?: string; array?: string; candidates: string[] }> = []
+	let providerCallsSeen = 0
 	const records = new Map<string, { hash?: string; status?: string; idempotencyKey?: string }>()
 	const fx = {
 		failSend: false,
@@ -742,6 +873,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 	}
 	const txm = {
 		provider() {
+			providerCallsSeen += 1
 			return {
 				async getBalance(who: string) {
 					return balances.get(getAddress(who)) ?? 0n
@@ -759,7 +891,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 			if (query.hash) return records.get(query.hash)
 			return undefined
 		},
-		async send(req: { idempotencyKey?: string; value: bigint; gasLimit?: bigint; to: string }) {
+		async send(req: { idempotencyKey?: string; value: bigint; gasLimit?: bigint; to: string; client?: string; array?: string; candidates?: string[] }) {
 			if (fx.failSend) throw new Error('restart must not broadcast')
 			const disk = JSON.parse(readFileSync(statePath, 'utf8')) as { spend: SpendRow[] }
 			const pending = disk.spend.find((row) => row.idempotencyKey === req.idempotencyKey)
@@ -767,7 +899,16 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 			assert.equal(pending?.hash, undefined)
 			const hash = `0x${(sends.length + 1).toString(16).padStart(64, '0')}`
 			const rec = { hash, status: 'sent', idempotencyKey: req.idempotencyKey }
-			sends.push({ idempotencyKey: req.idempotencyKey, value: req.value, gasLimit: req.gasLimit, hash })
+			sends.push({
+				idempotencyKey: req.idempotencyKey,
+				value: req.value,
+				gasLimit: req.gasLimit,
+				hash,
+				to: req.to,
+				client: req.client,
+				array: req.array,
+				candidates: req.candidates ?? [],
+			})
 			if (req.idempotencyKey) records.set(req.idempotencyKey, rec)
 			records.set(hash, rec)
 			return rec
@@ -777,10 +918,12 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 		'224422': {
 			minWei: '100',
 			targetWei: '1000',
-			perAddressDailyWei: '1000',
-			globalDailyWei: '5000',
+			perAddressDailyWei: opts.perAddressDailyWei ?? '1000',
+			globalDailyWei: opts.globalDailyWei ?? '5000',
+			budgetWei: opts.budgetWei ?? '1000000',
 			pmWarnWei: '1',
 			pmCriticalWei: '1',
+			wallets: opts.wallets ?? [addr],
 		},
 	}
 	const registry = () => ({
@@ -794,7 +937,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 			count: 1,
 			chains: [224422],
 			status: 'active' as const,
-			addresses: [addr],
+			addresses: opts.registryAddresses ?? [addr],
 			createdAt: '2026-01-01T00:00:00.000Z',
 		}],
 	})
@@ -802,7 +945,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 		chain,
 		60_000,
 		txm as unknown as TxManager,
-		{ unlocked: true } as unknown as Keyring,
+		{ unlocked: opts.unlocked !== false } as unknown as Keyring,
 		registry,
 		() => new Set<string>(),
 		{ send(_level: string, code: string) { alerts.push(code) } },
@@ -818,6 +961,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 		sends,
 		alerts,
 		balances,
+		get providerCalls() { return providerCallsSeen },
 		remember: fx.remember,
 		get failSend() { return fx.failSend },
 		set failSend(value: boolean) { fx.failSend = value },
