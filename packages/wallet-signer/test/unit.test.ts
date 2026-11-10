@@ -1358,6 +1358,83 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 	}
 }
 
+const VDR_PROXY = '0xc71e246DD78B37C2fABc905D340932F28F503433'
+const settleIface = new Interface(['function settleNodeRewards(uint256[] ids, uint256[] amounts, bytes32[] roots)'])
+
+function settleData(ids: number, amounts = ids, roots = ids): string {
+	const word = '0x' + '11'.repeat(32)
+	return settleIface.encodeFunctionData('settleNodeRewards', [
+		Array.from({ length: ids }, (_, i) => i + 1),
+		Array.from({ length: amounts }, (_, i) => (i + 1) * 10),
+		Array.from({ length: roots }, () => word),
+	])
+}
+
+function vdrPolicy(): Policy {
+	return new Policy({
+		version: 1,
+		clients: {
+			'vdr-payout': {
+				arrays: {
+					beamio_vdr_payout: {
+						chains: [224422],
+						allow: [{
+							to: VDR_PROXY,
+							selectors: ['settleNodeRewards(uint256[],uint256[],bytes32[])'],
+							maxValueWei: '0',
+							maxGas: 2000000,
+							equalArrays: [0, 1, 2],
+							args: {
+								'0': { minItems: 1, maxItems: 29 },
+								'1': { minItems: 1, maxItems: 29 },
+								'2': { minItems: 1, maxItems: 29 },
+							},
+						}],
+					},
+				},
+			},
+			other: {
+				arrays: {
+					epochManagre: {
+						chains: [224422],
+						allow: [{
+							to: '0x648f1a17269627C3d465fEa40b3C229f7CacE5cA',
+							selectors: ['updateInfo(uint256,uint256,uint256)'],
+							maxValueWei: '0',
+						}],
+					},
+				},
+			},
+		},
+	})
+}
+
+test('policy: signer enforces VDR settle length; caller checks are not the whitelist', () => {
+	const p = vdrPolicy()
+	const lists = { compromised: new Set<string>(), registry: new Set<string>() }
+	const base = { client: 'vdr-payout', array: 'beamio_vdr_payout', chainId: 224422, to: VDR_PROXY, value: 0n }
+	assert.equal(p.checkCall({ ...base, data: settleData(1) }, lists).method, 'settleNodeRewards(uint256[],uint256[],bytes32[])')
+	assert.doesNotThrow(() => p.checkCall({ ...base, data: settleData(29) }, lists))
+	assert.throws(() => p.checkCall({ ...base, data: settleData(0) }, lists), /length 0 is below 1/)
+	assert.throws(() => p.checkCall({ ...base, data: settleData(30) }, lists), /length 30 is above 29/)
+	assert.throws(() => p.checkCall({ ...base, data: settleData(1, 2, 1) }, lists), /same length/)
+	assert.throws(() => p.checkCall({ ...base, value: 1n, data: settleData(1) }, lists), /value above 0/)
+	assert.throws(() => p.checkCall({ ...base, to: Wallet.createRandom().address, data: settleData(1) }, lists), /not in policy/)
+	assert.throws(() => p.checkCall({ ...base, data: '0xdeadbeef' }, lists), /not in policy/)
+	assert.throws(() => p.checkCall({ ...base, data: settleIface.getFunction('settleNodeRewards')!.selector + '00' }, lists), /does not decode/)
+	const grant = p.grant('vdr-payout', 'beamio_vdr_payout')
+	assert.equal(grant.allowSignOnly, undefined)
+	assert.equal(grant.allowPersonalSign, undefined)
+	assert.equal(grant.typedData, undefined)
+	const other = new Interface(['function updateInfo(uint256,uint256,uint256)'])
+	assert.doesNotThrow(() => p.checkCall({
+		client: 'other', array: 'epochManagre', chainId: 224422,
+		to: '0x648f1a17269627C3d465fEa40b3C229f7CacE5cA', value: 0n,
+		data: other.encodeFunctionData('updateInfo', [1, 2, 3]),
+	}, lists))
+	assert.throws(() => new Policy(JSON.parse(`{"version":1,"clients":{"vdr-payout":{"arrays":{"beamio_vdr_payout":{"chains":[224422],"allow":[{"to":"${VDR_PROXY}","selectors":["settleNodeRewards(uint256[],uint256[],bytes32[])"],"args":{"0":{"minLength":1}}}]}}}}}`)), /unknown field minLength/)
+})
+
 function reply(res: ServerResponse, id: number, result: string | null): void {
 	res.setHeader('content-type', 'application/json')
 	res.end(JSON.stringify({ jsonrpc: '2.0', id, result }))

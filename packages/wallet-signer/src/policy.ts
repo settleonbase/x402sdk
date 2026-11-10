@@ -12,6 +12,9 @@ export type ArgRule = {
 	eq?: string | number | boolean
 	/** '@compromised' = leaked-address list; '@registry' = any address the signer derived. */
 	in?: '@compromised' | '@registry' | string[]
+	/** Inclusive length bounds. Only ABI arrays can satisfy them. */
+	minItems?: number
+	maxItems?: number
 }
 
 export type CallRule = {
@@ -22,6 +25,8 @@ export type CallRule = {
 	maxValueWei?: string
 	/** Constraints by argument index ("0", "1", ...). */
 	args?: Record<string, ArgRule>
+	/** These ABI array arguments must decode to the same length. */
+	equalArrays?: number[]
 }
 
 /**
@@ -140,6 +145,7 @@ export class Policy {
 			for (const [idx, ar] of Object.entries(rule.args ?? {})) {
 				checkArg(frag, Number(idx), decoded[Number(idx)], ar, lists)
 			}
+			if (rule.equalArrays) enforceEqualArrays(frag, decoded, rule.equalArrays)
 			return { grant: g, method: frag.format('sighash'), args: decoded.map((v) => summarize(v)), maxGas: rule.maxGas }
 		}
 		throw denied(`call ${selector} to ${req.to} not in policy for ${req.client}/${req.array}`)
@@ -265,7 +271,7 @@ function canonicalTypes(types: Record<string, TypedDataField[]>): string {
 
 function compileRule(client: string, array: string, r: CallRule): CompiledRule {
 	const where = `${client}/${array}`
-	assertKnown(`${where}.allow`, r, ['to', 'selectors', 'maxGas', 'maxValueWei', 'args'])
+	assertKnown(`${where}.allow`, r, ['to', 'selectors', 'maxGas', 'maxValueWei', 'args', 'equalArrays'])
 	if (!isAddress(r.to)) throw new Error(`policy ${where}: bad to ${r.to}`)
 	const fragments = new Map<string, FunctionFragment>()
 	for (const sig of r.selectors ?? []) {
@@ -276,15 +282,20 @@ function compileRule(client: string, array: string, r: CallRule): CompiledRule {
 	}
 	if (fragments.size === 0) throw new Error(`policy ${where}: rule for ${r.to} has no selectors`)
 	for (const [idx, ar] of Object.entries(r.args ?? {})) {
-		assertKnown(`${where}.args.${idx}`, ar, ['eq', 'in'])
+		assertKnown(`${where}.args.${idx}`, ar, ['eq', 'in', 'minItems', 'maxItems'])
 		if (!/^\d+$/.test(idx)) throw new Error(`policy ${where}: arg index ${idx} is not an integer`)
 		const n = Number(idx)
+		assertItemBounds(where, idx, ar)
 		for (const frag of fragments.values()) {
 			if (n >= frag.inputs.length) {
 				throw new Error(`policy ${where}: arg index ${idx} out of range for ${frag.format('sighash')}`)
 			}
+			if ((ar.minItems !== undefined || ar.maxItems !== undefined) && !isArrayInput(frag, n)) {
+				throw new Error(`policy ${where}: arg ${idx} length rule is not an array in ${frag.format('sighash')}`)
+			}
 		}
 	}
+	if (r.equalArrays !== undefined) assertEqualArrays(where, r.equalArrays, fragments)
 	return { ...r, to: getAddress(r.to), toLc: r.to.toLowerCase(), fragments }
 }
 
@@ -309,6 +320,57 @@ function checkArg(
 					? lists.registry
 					: new Set(rule.in.map((x) => x.toLowerCase()))
 		if (!set.has(v)) throw denied(`${name} not in ${Array.isArray(rule.in) ? 'allowed list' : rule.in}`)
+	}
+	if (rule.minItems !== undefined || rule.maxItems !== undefined) {
+		const count = arrayItemCount(value)
+		if (count === undefined) throw denied(`${name} must be an array`)
+		if (rule.minItems !== undefined && count < rule.minItems) throw denied(`${name} length ${count} is below ${rule.minItems}`)
+		if (rule.maxItems !== undefined && count > rule.maxItems) throw denied(`${name} length ${count} is above ${rule.maxItems}`)
+	}
+}
+
+function arrayItemCount(value: unknown): number | undefined {
+	if (typeof value === 'string' || value == null) return undefined
+	if (Array.isArray(value)) return value.length
+	if (typeof value === 'object' && typeof (value as { length?: unknown }).length === 'number') {
+		return (value as { length: number }).length
+	}
+	return undefined
+}
+
+function enforceEqualArrays(frag: FunctionFragment, decoded: readonly unknown[], indexes: readonly number[]): void {
+	const counts = indexes.map((idx) => {
+		const count = arrayItemCount(decoded[idx])
+		if (count === undefined) throw denied(`${frag.name} arg ${idx} must be an array`)
+		return count
+	})
+	if (new Set(counts).size !== 1) throw denied(`${frag.name} array arguments must have the same length`)
+}
+
+function assertItemBounds(where: string, idx: string, rule: ArgRule): void {
+	for (const [name, value] of [['minItems', rule.minItems], ['maxItems', rule.maxItems]] as const) {
+		if (value === undefined) continue
+		if (!Number.isSafeInteger(value) || value < 0) throw new Error(`policy ${where}: arg ${idx} ${name} must be a non-negative integer`)
+	}
+	if (rule.minItems !== undefined && rule.maxItems !== undefined && rule.minItems > rule.maxItems) {
+		throw new Error(`policy ${where}: arg ${idx} minItems is above maxItems`)
+	}
+}
+
+function isArrayInput(frag: FunctionFragment, idx: number): boolean {
+	return frag.inputs[idx]?.baseType === 'array'
+}
+
+function assertEqualArrays(where: string, indexes: number[], fragments: Map<string, FunctionFragment>): void {
+	if (!Array.isArray(indexes) || indexes.length < 2) throw new Error(`policy ${where}: equalArrays needs at least two indexes`)
+	if (new Set(indexes).size !== indexes.length) throw new Error(`policy ${where}: equalArrays indexes must be unique`)
+	for (const idx of indexes) {
+		if (!Number.isSafeInteger(idx) || idx < 0) throw new Error(`policy ${where}: equalArrays index ${idx} is not an integer`)
+		for (const frag of fragments.values()) {
+			if (idx >= frag.inputs.length || !isArrayInput(frag, idx)) {
+				throw new Error(`policy ${where}: equalArrays index ${idx} is not an array in ${frag.format('sighash')}`)
+			}
+		}
 	}
 }
 
