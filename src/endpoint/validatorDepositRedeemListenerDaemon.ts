@@ -34,9 +34,10 @@ async function shutdown(signal: string): Promise<void> {
 	stopValidatorRewardHourlyReporter()
 	stopValidatorClRewardPayoutReporter()
 	stopValidatorDepositRedeemListener()
-	await waitForListenerSerialQueue()
-	await waitForOnchainTxQueue(CONET_VALIDATOR_CL_PAYOUT_ONCHAIN_LANE)
-	await waitForRunCommandChildren()
+	// Bound waits so stuck tx.wait cannot exceed systemd TimeoutStopSec.
+	await waitForListenerSerialQueue(90_000)
+	await waitForOnchainTxQueue(CONET_VALIDATOR_CL_PAYOUT_ONCHAIN_LANE, 90_000)
+	await waitForRunCommandChildren(90_000)
 	process.exit(0)
 }
 
