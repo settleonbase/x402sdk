@@ -1,0 +1,14 @@
+[Unit]
+Description=Trigger one CoNET oracle quote every 10 minutes
+Documentation=file:/opt/conet-oracle-daemon/INSTALL.txt
+# Do not start conetOracle.service.
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+AccuracySec=1s
+Persistent=false
+Unit=conet-oracle-quote.service
+
+[Install]
+WantedBy=timers.target

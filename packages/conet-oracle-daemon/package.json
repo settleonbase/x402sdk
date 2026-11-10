@@ -1,0 +1,25 @@
+{
+	"name": "@conet/conet-oracle-daemon",
+	"version": "0.1.0",
+	"private": true,
+	"description": "One-shot CoNET BeamioOracle quote. Signs only through the oracle-daemon unix socket.",
+	"license": "UNLICENSED",
+	"main": "dist/src/main.js",
+	"bin": {
+		"conet-oracle-quote": "dist/src/main.js"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.json",
+		"test": "npm run build && node --test dist/test/oracleDaemon.test.js"
+	},
+	"engines": {
+		"node": ">=22.14"
+	},
+	"dependencies": {
+		"ethers": "6.16.0"
+	},
+	"devDependencies": {
+		"@types/node": "^24.9.2",
+		"typescript": "5.8.3"
+	}
+}
