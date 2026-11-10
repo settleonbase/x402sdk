@@ -13,8 +13,9 @@
  * Pending pool + cross-block batching:
  * - Scanned withdrawals are merged into a persisted pending pool (dedupe by eventKey).
  * - Checkpoint advances after a block is successfully scanned into the pool (settle may lag).
- * - Flush submits settleNodeRewards in split batches when gasPrice ≤ max and settle wallet
- *   has enough balance for gasLimit × gasPrice.
+ * - Flush submits settleNodeRewards through the dedicated signer socket
+ *   (signer_sendTransaction). Missing socket or keyArray fails closed.
+ *   There is no Settle_ConetPool / withSettleWallet fallback.
  * - If estimateGas / submit fails for n>1, auto-bisect and retry both halves (never stall the
  *   whole pending pool on one oversized batch). A singleton that still fails is skipped for this
  *   flush round and retried later; remaining batches continue.
@@ -29,21 +30,13 @@ import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
 import { masterSetup, resolveBeamioConetHttpRpcUrl } from '../util'
-import {
-	Settle_ContractPool,
-	ensureSettleContractPoolInitialized,
-	hasIdleSettleConet,
-	shiftSettleConet,
-	unshiftSettleConet,
-} from '../settleContractPool'
 import { CONET_VALIDATOR_NODE_ONCHAIN_LANE, enqueueOnchainTxWork } from '../onchainTxSerialQueue'
 import {
 	CONET_VALIDATOR_DEPOSIT_REDEEM,
 	CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK,
 } from '../chainAddresses'
 import { resolveValidatorDepositRedeemAddress } from './validatorDepositRedeem'
-
-ensureSettleContractPoolInitialized()
+import { readVdrSignerConfig, sendConfiguredSettle } from './vdrPayoutSigner'
 
 const PAYOUT_ABI = [
 	'function settleNodeRewards(uint256[] guardianIds, uint256[] amounts, bytes32[] eventKeys) external',
@@ -51,6 +44,30 @@ const PAYOUT_ABI = [
 	'function guardianIdBeneficiary(uint256 guardianId) view returns (address)',
 	'function consumedRewardEventKey(bytes32 key) view returns (bool)',
 ] as const
+
+function resolveClaimRpcUrl(): string {
+	return (
+		process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL?.trim() ||
+		masterSetup.validatorDeposit?.rpcUrl ||
+		resolveBeamioConetHttpRpcUrl()
+	)
+}
+
+function resolveClaimRpcHttpTimeoutMs(): number {
+	const n = Number(process.env.CONET_RPC_HTTP_TIMEOUT_MS || 60_000)
+	return Number.isFinite(n) && n >= 5_000 ? Math.min(300_000, Math.floor(n)) : 60_000
+}
+
+function resolveClaimTxWaitTimeoutMs(): number {
+	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_TX_WAIT_MS || 120_000)
+	return Number.isFinite(n) && n >= 15_000 ? Math.min(600_000, Math.floor(n)) : 120_000
+}
+
+function createClaimRpcProvider(): ethers.JsonRpcProvider {
+	const req = new ethers.FetchRequest(resolveClaimRpcUrl())
+	req.timeout = resolveClaimRpcHttpTimeoutMs()
+	return new ethers.JsonRpcProvider(req, undefined, { staticNetwork: true, batchMaxCount: 1 })
+}
 
 type PendingEntryJson = {
 	guardianId: string
@@ -463,24 +480,18 @@ async function collectPayoutEntriesForBlock(
 	return entries
 }
 
-async function withSettleWallet<T>(label: string, fn: (wallet: (typeof Settle_ContractPool)[number]) => Promise<T>): Promise<T | undefined> {
-	if (!hasIdleSettleConet()) return undefined
-	const sc = shiftSettleConet()
-	if (!sc) return undefined
-	try {
-		return await fn(sc)
-	} catch (e: unknown) {
-		logger(Colors.red(`[validatorClRewardPayout] ${label} failed: ${(e as Error)?.message ?? e}`))
-		return undefined
-	} finally {
-		unshiftSettleConet(sc)
+async function waitForSignerReceipt(
+	provider: ethers.JsonRpcProvider,
+	hash: string,
+	timeoutMs: number
+): Promise<ethers.TransactionReceipt> {
+	const started = Date.now()
+	while (Date.now() - started < timeoutMs) {
+		const receipt = await provider.getTransactionReceipt(hash)
+		if (receipt) return receipt
+		await new Promise((resolve) => setTimeout(resolve, 1_500))
 	}
-}
-
-function peekSettleWalletAddress(): string | null {
-	const sc = Settle_ContractPool[0]
-	const addr = sc?.walletConet?.address
-	return addr ? ethers.getAddress(addr) : null
+	throw new Error(`signer tx receipt timed out hash=${hash}`)
 }
 
 async function readGasPriceWei(provider: ethers.JsonRpcProvider): Promise<bigint> {
@@ -515,8 +526,6 @@ async function filterUnconsumed(
 /** Outcome of one on-chain settle attempt (before auto-bisect). */
 type SubmitOutcome = 'ok' | 'needs_split' | 'failed'
 
-const NEEDS_SPLIT_MARKER = Symbol('validatorClRewardPayout.needs_split')
-
 async function submitPayoutBatchOnchain(
 	contractAddr: string,
 	entries: PayoutEntry[],
@@ -538,34 +547,50 @@ async function submitPayoutBatchOnchain(
 		return 'ok'
 	}
 
-	const result = await withSettleWallet('settleNodeRewards', async (sc) => {
-		const c = new ethers.Contract(contractAddr, PAYOUT_ABI, sc.walletConet)
-		const gasLimit = await resolveSubmitGasLimit(c, guardianIds, amounts, eventKeys)
-		if (gasLimit == null) {
-			logger(
-				Colors.yellow(
-					`[validatorClRewardPayout] estimateGas+20% exceeds gasLimit=${resolveGasLimit()} for n=${entries.length} — will auto-split`
-				)
+	if (!readVdrSignerConfig()) {
+		logger(
+			Colors.red(
+				'[validatorClRewardPayout] refuse settleNodeRewards: signer socket or keyArray is not configured'
 			)
-			return NEEDS_SPLIT_MARKER
-		}
-		// Prefer legacy gasPrice: EIP-1559 tip=0 is rejected by some CONET nodes
-		// ("tip cap 0, minimum needed 1"); tip=1 wei can enter mempool but never mine
-		// while eth_gasPrice stays ~2 gwei. Legacy gasPrice matches the network quote.
-		const tx = await c.settleNodeRewards!(guardianIds, amounts, eventKeys, {
-			gasLimit,
-			gasPrice: gasPriceWei,
-		})
-		await tx.wait()
-		return tx.hash as string
-	})
-
-	if (result === NEEDS_SPLIT_MARKER) return 'needs_split'
-	if (typeof result === 'string' && result.length > 0) {
-		logger(Colors.green(`[validatorClRewardPayout] settleNodeRewards ok tx=${result} n=${entries.length}`))
-		return 'ok'
+		)
+		return 'failed'
 	}
-	return 'failed'
+
+	const provider = createClaimRpcProvider()
+	const readContract = new ethers.Contract(contractAddr, PAYOUT_ABI, provider)
+	const gasLimit = await resolveSubmitGasLimit(readContract, guardianIds, amounts, eventKeys)
+	if (gasLimit == null) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] estimateGas+20% exceeds gasLimit=${resolveGasLimit()} for n=${entries.length} — will auto-split`
+			)
+		)
+		return 'needs_split'
+	}
+
+	try {
+		const { hash } = await sendConfiguredSettle({
+			to: contractAddr,
+			guardianIds,
+			amounts,
+			eventKeys,
+			gasLimit,
+		})
+		logger(
+			Colors.cyan(
+				`[validatorClRewardPayout] settleNodeRewards sent via signer tx=${hash} waiting≤${resolveClaimTxWaitTimeoutMs()}ms n=${entries.length} gasPrice=${ethers.formatUnits(gasPriceWei, 'gwei')}gwei`
+			)
+		)
+		const receipt = await waitForSignerReceipt(provider, hash, resolveClaimTxWaitTimeoutMs())
+		if (receipt.status !== 1) {
+			throw new Error(`settleNodeRewards reverted status=${receipt.status} hash=${hash}`)
+		}
+		logger(Colors.green(`[validatorClRewardPayout] settleNodeRewards ok tx=${hash} n=${entries.length}`))
+		return 'ok'
+	} catch (e: unknown) {
+		logger(Colors.red(`[validatorClRewardPayout] settleNodeRewards signer failed: ${(e as Error)?.message ?? e}`))
+		return 'failed'
+	}
 }
 
 async function submitPayoutBatch(
@@ -592,28 +617,15 @@ async function submitPayoutBatchAutoSplit(
 	entries: PayoutEntry[],
 	gasPriceWei: bigint,
 	state: ClPayoutState,
-	pending: Map<string, PayoutEntry>,
-	provider: ethers.JsonRpcProvider,
-	settleAddr: string,
-	intrinsicCost: bigint
-): Promise<'continue' | 'stop_balance'> {
-	if (!entries.length) return 'continue'
-
-	const balNow = await provider.getBalance(settleAddr)
-	if (balNow < intrinsicCost) {
-		logger(
-			Colors.yellow(
-				`[validatorClRewardPayout] stop flush mid-way: balance=${ethers.formatEther(balNow)} < intrinsic=${ethers.formatEther(intrinsicCost)} (pending=${pending.size})`
-			)
-		)
-		return 'stop_balance'
-	}
+	pending: Map<string, PayoutEntry>
+): Promise<void> {
+	if (!entries.length) return
 
 	const outcome = await submitPayoutBatch(contractAddr, entries, gasPriceWei)
 	if (outcome === 'ok') {
 		for (const e of entries) pending.delete(e.eventKey)
 		persistPending(state, pending)
-		return 'continue'
+		return
 	}
 
 	if (entries.length === 1) {
@@ -622,7 +634,7 @@ async function submitPayoutBatchAutoSplit(
 				`[validatorClRewardPayout] singleton settle failed (${outcome}); leave in pending and continue (eventKey=${entries[0]!.eventKey.slice(0, 18)}…)`
 			)
 		)
-		return 'continue'
+		return
 	}
 
 	const mid = Math.max(1, Math.floor(entries.length / 2))
@@ -633,28 +645,8 @@ async function submitPayoutBatchAutoSplit(
 			`[validatorClRewardPayout] auto-split n=${entries.length} → ${left.length}+${right.length} (reason=${outcome})`
 		)
 	)
-
-	const leftResult = await submitPayoutBatchAutoSplit(
-		contractAddr,
-		left,
-		gasPriceWei,
-		state,
-		pending,
-		provider,
-		settleAddr,
-		intrinsicCost
-	)
-	if (leftResult === 'stop_balance') return 'stop_balance'
-	return submitPayoutBatchAutoSplit(
-		contractAddr,
-		right,
-		gasPriceWei,
-		state,
-		pending,
-		provider,
-		settleAddr,
-		intrinsicCost
-	)
+	await submitPayoutBatchAutoSplit(contractAddr, left, gasPriceWei, state, pending)
+	await submitPayoutBatchAutoSplit(contractAddr, right, gasPriceWei, state, pending)
 }
 
 /**
@@ -732,23 +724,6 @@ async function flushPendingBatches(
 		persistPending(state, pending)
 	}
 
-	const gasLimit = BigInt(resolveGasLimit())
-	const intrinsicCost = gasLimit * gasPrice
-	const settleAddr = peekSettleWalletAddress()
-	if (!settleAddr) {
-		logger(Colors.yellow(`[validatorClRewardPayout] skip flush: no settle wallet in pool (pending=${pending.size})`))
-		return
-	}
-	const balance = await provider.getBalance(settleAddr)
-	if (balance < intrinsicCost) {
-		logger(
-			Colors.yellow(
-				`[validatorClRewardPayout] skip flush: settle ${settleAddr} balance=${ethers.formatEther(balance)} < intrinsic=${ethers.formatEther(intrinsicCost)} CNET (gasLimit=${gasLimit}×${ethers.formatUnits(gasPrice, 'gwei')}gwei, pending=${pending.size})`
-			)
-		)
-		return
-	}
-
 	const ordered = [...pending.values()].sort(
 		(a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex
 	)
@@ -782,20 +757,7 @@ async function flushPendingBatches(
 	for (const batch of batches) {
 		// Heuristic pre-split is a first cut; real estimateGas may still exceed gasLimit.
 		// Always go through auto-split so oversized / reverted batches bisect instead of stalling.
-		const result = await submitPayoutBatchAutoSplit(
-			contractAddr,
-			batch,
-			gasPrice,
-			state,
-			pending,
-			provider,
-			settleAddr,
-			intrinsicCost
-		)
-		if (result === 'stop_balance') {
-			persistPending(state, pending)
-			return
-		}
+		await submitPayoutBatchAutoSplit(contractAddr, batch, gasPrice, state, pending)
 	}
 
 	if (!pending.size && clearGasWait(state)) persistPending(state, pending)
@@ -811,11 +773,7 @@ async function payoutTick(): Promise<void> {
 			return
 		}
 
-		const provider = new ethers.JsonRpcProvider(
-			process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL?.trim() ||
-				masterSetup.validatorDeposit?.rpcUrl ||
-				resolveBeamioConetHttpRpcUrl()
-		)
+		const provider = createClaimRpcProvider()
 		const readContract = new ethers.Contract(proxyAddr, PAYOUT_ABI, provider)
 
 		const floor = resolveDeployBlockFloor()
