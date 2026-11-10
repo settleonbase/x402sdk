@@ -24,7 +24,8 @@ Environment=NODE_OPTIONS=
 # Socket directory for nginx: walletsigner:www-data 2750, so the socket gets group www-data and
 # only nginx (and root) can connect. Not a RuntimeDirectory: that would make its group wsadmin.
 ExecStartPre=+/usr/bin/install -d -o walletsigner -g www-data -m 2750 /run/wallet-signer-rpc
-ExecStart=/usr/bin/node --disable-sigusr1 --disallow-code-generation-from-strings /opt/wallet-signer/dist/src/main.js --config /etc/wallet-signer/config.json
+# --require loads the WebSocket ban before main.js. NODE_OPTIONS is cleared above and is not the preload.
+ExecStart=/usr/bin/node --disable-sigusr1 --disallow-code-generation-from-strings --require /opt/wallet-signer/dist/src/noWebSocket.js /opt/wallet-signer/dist/src/main.js --config /etc/wallet-signer/config.json
 Restart=on-failure
 RestartSec=5
 

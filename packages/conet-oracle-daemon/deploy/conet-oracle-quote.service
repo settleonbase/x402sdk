@@ -9,7 +9,8 @@ User=oracle-daemon
 Group=oracle-daemon
 RuntimeDirectory=conet-oracle-quote
 StateDirectory=conet-oracle-quote
-ExecStart=/usr/bin/node /opt/conet-oracle-daemon/dist/src/main.js --lock-file /run/conet-oracle-quote/lock --socket /run/wallet-signer-oracle/oracle-daemon.sock
+# --require loads the WebSocket ban before main.js. Do not rely on NODE_OPTIONS.
+ExecStart=/usr/bin/node --require /opt/conet-oracle-daemon/dist/src/noWebSocket.js /opt/conet-oracle-daemon/dist/src/main.js --lock-file /run/conet-oracle-quote/lock --socket /run/wallet-signer-oracle/oracle-daemon.sock
 # A restart would submit the same quote again. Do not change this to on-failure or always.
 Restart=no
 NoNewPrivileges=true

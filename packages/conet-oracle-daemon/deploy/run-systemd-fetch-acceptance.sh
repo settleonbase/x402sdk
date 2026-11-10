@@ -56,7 +56,7 @@ Description=Temporary CoNET oracle fetch acceptance
 Type=oneshot
 User=$(id -un)
 Restart=no
-ExecStart=$(command -v node) $ROOT/dist/src/main.js --lock-file $LAB/lock --socket $LAB/signer.sock --fx-url https://127.0.0.1:$PORT/fx --eth-url https://127.0.0.1:$PORT/eth --ca-file $LAB/cert.pem
+ExecStart=$(command -v node) --require $ROOT/dist/src/noWebSocket.js $ROOT/dist/src/main.js --lock-file $LAB/lock --socket $LAB/signer.sock --fx-url https://127.0.0.1:$PORT/fx --eth-url https://127.0.0.1:$PORT/eth --ca-file $LAB/cert.pem
 EOF
 
 cat > "$LAB/$UNIT.timer" << EOF

@@ -11,6 +11,7 @@
 	},
 	"scripts": {
 		"build": "tsc -p tsconfig.json",
+		"check:no-websocket": "node scripts/checkNoWebSocket.mjs",
 		"test:unit": "node --test dist/test/unit.test.js",
 		"test:e2e": "node dist/test/e2e.js",
 		"test:proxy": "node dist/test/proxy.js"

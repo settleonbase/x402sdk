@@ -4,6 +4,7 @@
  * wsadmin group. Passwords and mnemonic words are read from /dev/tty with echo off: never from
  * argv or environment. `--password-stdin` exists for automation/tests only.
  */
+import './noWebSocket'
 import { openSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { connect } from 'node:net'
 import { ReadStream, WriteStream } from 'node:tty'

@@ -13,6 +13,7 @@
  *      [--through p0|p4|p5] [--out file.json]
  * fork-run needs --chain: it runs that chain's steps against a local anvil fork given by --rpc.
  */
+import '../src/noWebSocket'
 import { writeFileSync } from 'node:fs'
 import { Contract, Interface, JsonRpcProvider, formatEther, getAddress, parseUnits, toBeHex } from 'ethers'
 

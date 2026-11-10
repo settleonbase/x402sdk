@@ -1,3 +1,4 @@
+import './noWebSocket'
 import { readFileSync } from 'node:fs'
 import { ORACLE_SOCKET_PATH } from './constants'
 import { fetchPublicQuote, nodeHttpGet, type HttpGet } from './publicQuotes'

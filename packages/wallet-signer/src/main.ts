@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './noWebSocket'
 import { mkdirSync } from 'node:fs'
 import { startAdminServer } from './adminServer'
 import { assertDataMount, loadConfig, type Config } from './config'
