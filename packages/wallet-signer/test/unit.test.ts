@@ -670,6 +670,50 @@ test('gas keeper does not broadcast when a pending top-up is only on disk', asyn
 	}
 })
 
+test('an unconfirmed pending from yesterday still reserves today and the persistent budget', async () => {
+	const yesterday = new Date(Date.now() - 86_400_000).toISOString()
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		globalDailyWei: '1500',
+		perAddressDailyWei: '5000',
+		budgetWei: '1500',
+	})
+	try {
+		const key = gasKeeperTopupIdempotencyKey(224422, fx.addr, 1)
+		const hash = `0x${'cd'.repeat(32)}`
+		const row: SpendRow = {
+			idempotencyKey: key,
+			chainId: '224422',
+			address: fx.addr.toLowerCase(),
+			amountWei: '1000',
+			recordedAt: yesterday,
+			status: 'pending',
+			attempt: 1,
+			hash,
+		}
+		writeFileSync(fx.statePath, JSON.stringify({ version: 2, spend: [row] }))
+		fx.remember({ hash, status: 'sent', idempotencyKey: key })
+		fx.balances.set(fx.pm, 5_000_000n)
+		fx.balances.set(fx.addr, 0n)
+		await fx.gk.runOnce()
+		assert.equal(fx.sends.length, 0)
+		assert.equal(fx.alerts.includes('topup-global-cap:224422'), false)
+		assert.equal(fx.alerts.some((code) => code.includes('ineligible-pending')), false)
+		const disk = JSON.parse(readFileSync(fx.statePath, 'utf8')) as { version: number; spend: SpendRow[] }
+		assert.equal(disk.spend.length, 1)
+		assert.equal(disk.spend[0]!.status, 'pending')
+		assert.equal(disk.spend[0]!.hash, hash)
+		assert.equal(disk.spend[0]!.recordedAt, yesterday)
+		const used = gasKeeperUsage(disk.spend, '224422', fx.addr.toLowerCase(), new Date().toISOString())
+		assert.equal(used.globalDaily, 1000n)
+		assert.equal(used.addressDaily, 1000n)
+		assert.equal(used.globalTotal, 1000n)
+		assert.equal(used.globalDaily + 1000n > 1500n, true)
+		assert.equal(used.globalTotal + 1000n > 1500n, true)
+	} finally {
+		fx.cleanup()
+	}
+})
+
 test('a full UTC day does not keep blocking, and the persistent budget does not refill', async () => {
 	const yesterday = new Date(Date.now() - 86_400_000).toISOString()
 	const earlier = new Date(Date.now() - 2 * 86_400_000).toISOString()

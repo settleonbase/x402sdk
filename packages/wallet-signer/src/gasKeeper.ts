@@ -371,7 +371,8 @@ export class GasKeeper {
 				this.alerter.send('warn', `topup-cap:${chainKey}:${address}`, `${addr} hit its daily top-up cap`)
 				continue
 			}
-			// Today's window only. Yesterday's spend does not consume globalDailyWei.
+			// Today's window only. Settled spend from yesterday does not consume globalDailyWei.
+			// An unconfirmed pending row still does, including one recorded before UTC midnight.
 			if (used.globalDaily + amount > BigInt(cfg.globalDailyWei)) {
 				this.alerter.send('warn', `topup-global-cap:${chainId}`, `global daily top-up cap reached on chain ${chainId}`)
 				return
@@ -523,6 +524,7 @@ export function gasKeeperUsage(rows: readonly SpendRow[], chainId: string, addre
 		const amount = BigInt(row.amountWei)
 		globalTotal += amount
 		const onToday = row.recordedAt.slice(0, 10) === today
+		// Pending stays reserved after the UTC day changes. It is not a release.
 		const reserved = row.status === 'pending'
 		if (onToday || reserved) globalDaily += amount
 		if (row.address === address && (onToday || reserved)) addressDaily += amount

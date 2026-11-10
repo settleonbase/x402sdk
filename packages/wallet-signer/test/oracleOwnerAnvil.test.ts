@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { JsonRpcProvider, Wallet, getAddress, hexlify, toBeHex } from 'ethers'
 import { AuditLog } from '../src/audit'
-import { BEAMIO_ORACLE_CONTRACT, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE } from '../src/gasKeeper'
+import { BEAMIO_ORACLE_CONTRACT, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, gasKeeperUsage, type SpendRow } from '../src/gasKeeper'
 import { HdRoot, PM_ACCOUNT, mnemonicToEntropyBytes, newMnemonic } from '../src/hd'
 import type { Keyring } from '../src/keyring'
 import type { KeyArray, RegistryBody } from '../src/registry'
@@ -442,6 +442,46 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			assert.equal(await provider.getBalance(OWNER), 0n)
 			assert.ok(closed.alerts.includes('topup-budget:224422'))
 			assert.equal(closed.alerts.includes('topup-global-cap:224422'), false)
+		})
+
+		await t.test('yesterday pending still reserves both caps and is not broadcast again', async () => {
+			const yesterday = new Date(Date.now() - 86_400_000).toISOString()
+			const hash = `0x${'cd'.repeat(32)}`
+			await provider.send('anvil_setBalance', [OWNER, '0x0'])
+			const fx = make('pending-day', {
+				wallets: [OWNER],
+				arrays: [keyArray(ORACLE_OWNER_ARRAY, [OWNER])],
+				globalDailyWei: '1500',
+				perAddressDailyWei: '5000',
+				budgetWei: '1500',
+			})
+			writeFileSync(fx.statePath, JSON.stringify({
+				version: 2,
+				spend: [{
+					idempotencyKey: `topup:224422:${OWNER.toLowerCase()}:1`,
+					chainId: '224422',
+					address: OWNER.toLowerCase(),
+					amountWei: '1000',
+					recordedAt: yesterday,
+					status: 'pending',
+					attempt: 1,
+					hash,
+				}],
+			}))
+			const before = await pmTransfers(provider, pm.address)
+			await fx.gk.runOnce()
+			assert.equal((await pmTransfers(provider, pm.address)).length, before.length)
+			assert.equal(await provider.getBalance(OWNER), 0n)
+			const disk = JSON.parse(readFileSync(fx.statePath, 'utf8')) as { spend: SpendRow[] }
+			assert.equal(disk.spend.length, 1)
+			assert.equal(disk.spend[0]!.status, 'pending')
+			assert.equal(disk.spend[0]!.hash, hash)
+			assert.equal(disk.spend[0]!.recordedAt, yesterday)
+			const used = gasKeeperUsage(disk.spend, '224422', OWNER.toLowerCase(), new Date().toISOString())
+			assert.equal(used.globalDaily, 1000n)
+			assert.equal(used.globalTotal, 1000n)
+			assert.equal(used.globalDaily + 1000n > 1500n, true)
+			assert.equal(used.globalTotal + 1000n > 1500n, true)
 		})
 
 		const all = await pmTransfers(provider, pm.address)
