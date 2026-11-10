@@ -84,6 +84,11 @@ type ClPayoutState = {
 	/** Unsettled payout entries keyed by eventKey (persisted across restarts). */
 	pending?: PendingEntryJson[]
 	/**
+	 * Withdrawals whose validator index could not be mapped to a pubkey.
+	 * The scan cursor stays before their block so the next tick retries them.
+	 */
+	retryQueue?: UnresolvedWithdrawal[]
+	/**
 	 * ISO timestamp when pending first hit a gasPrice > max gate (persisted).
 	 * Cleared when pending is empty or gas drops back under the cap.
 	 */
@@ -109,6 +114,17 @@ type PayoutEntry = {
 	eventKey: string
 	blockNumber: number
 	withdrawalIndex: number
+}
+
+export type UnresolvedWithdrawal = {
+	blockNumber: number
+	withdrawalIndex: number
+	validatorIndex: number
+}
+
+type BlockScan = {
+	entries: PayoutEntry[]
+	unresolved: UnresolvedWithdrawal[]
 }
 
 let payoutStarted = false
@@ -206,6 +222,23 @@ function formatWaitCountdown(elapsedMs: number, forceMs: number): string {
 	const leftSec = Math.ceil(leftMs / 1000)
 	const forceSec = Math.floor(forceMs / 1000)
 	return `${elapsedSec}s/${forceSec}s (force in ${leftSec}s)`
+}
+
+function normalizeRetryQueue(raw: unknown): UnresolvedWithdrawal[] | undefined {
+	if (!Array.isArray(raw)) return undefined
+	const out: UnresolvedWithdrawal[] = []
+	for (const item of raw) {
+		if (!item || typeof item !== 'object') continue
+		const row = item as UnresolvedWithdrawal
+		const blockNumber = Number(row.blockNumber)
+		const withdrawalIndex = Number(row.withdrawalIndex)
+		const validatorIndex = Number(row.validatorIndex)
+		if (!Number.isInteger(blockNumber) || blockNumber < 0) continue
+		if (!Number.isInteger(withdrawalIndex) || withdrawalIndex < 0) continue
+		if (!Number.isInteger(validatorIndex) || validatorIndex < 0) continue
+		out.push({ blockNumber, withdrawalIndex, validatorIndex })
+	}
+	return out
 }
 
 function normalizeScanTargetBlock(raw: unknown): number | undefined {
@@ -354,6 +387,7 @@ function readState(): ClPayoutState {
 		}
 		const scanTargetBlock = normalizeScanTargetBlock(raw.scanTargetBlock)
 		const pending = Array.isArray(raw.pending) ? raw.pending : []
+		const retryQueue = normalizeRetryQueue(raw.retryQueue)
 		const gasWaitStartedAt =
 			typeof raw.gasWaitStartedAt === 'string' && raw.gasWaitStartedAt.trim()
 				? raw.gasWaitStartedAt.trim()
@@ -362,6 +396,7 @@ function readState(): ClPayoutState {
 			lastProcessedBlock: Math.max(floor - 1, Math.floor(last)),
 			scanTargetBlock,
 			pending,
+			retryQueue,
 			gasWaitStartedAt,
 			updatedAt: raw.updatedAt ?? new Date().toISOString(),
 		}
@@ -382,23 +417,16 @@ function writeState(state: ClPayoutState): void {
 const validatorPubkeyCache = new Map<number, string | null>()
 
 async function fetchValidatorPubkeyByIndex(validatorIndex: number): Promise<string | null> {
-	if (validatorPubkeyCache.has(validatorIndex)) {
-		return validatorPubkeyCache.get(validatorIndex) ?? null
-	}
+	const cached = validatorPubkeyCache.get(validatorIndex)
+	if (cached) return cached
 	const base = resolveBeaconRestUrl()
 	const url = `${base}/eth/v1/beacon/states/head/validators/${validatorIndex}`
 	try {
 		const res = await fetch(url, { signal: AbortSignal.timeout(20_000) })
-		if (!res.ok) {
-			validatorPubkeyCache.set(validatorIndex, null)
-			return null
-		}
+		if (!res.ok) return null
 		const json = (await res.json()) as { data?: { validator?: { pubkey?: string } } }
 		const pk = json?.data?.validator?.pubkey?.trim()
-		if (!pk) {
-			validatorPubkeyCache.set(validatorIndex, null)
-			return null
-		}
+		if (!pk) return null
 		const normalized = ethers.hexlify(ethers.getBytes(pk.startsWith('0x') ? pk : `0x${pk}`)).toLowerCase()
 		validatorPubkeyCache.set(validatorIndex, normalized)
 		return normalized
@@ -426,13 +454,10 @@ function withdrawalEventKey(blockNumber: number, withdrawalIndex: number): strin
 	)
 }
 
-async function resolveGuardianIdForWithdrawal(
+async function resolvePayableGuardianId(
 	contract: ethers.Contract,
-	validatorIndex: number
-): Promise<bigint | null> {
-	const pubkey = await fetchValidatorPubkeyByIndex(validatorIndex)
-	if (!pubkey) return null
-
+	pubkey: string
+): Promise<bigint | null | 'unresolved'> {
 	const pkHash = ethers.keccak256(pubkey)
 	try {
 		const guardianId = await contract.getNodeByValidatorPubkeyHash!(pkHash)
@@ -443,7 +468,7 @@ async function resolveGuardianIdForWithdrawal(
 		if (beneficiary === ethers.ZeroAddress) return null
 		return gid
 	} catch {
-		return null
+		return 'unresolved'
 	}
 }
 
@@ -451,10 +476,12 @@ async function collectPayoutEntriesForBlock(
 	contract: ethers.Contract,
 	proxyLower: string,
 	blockNumber: number,
-	block: RpcBlock
-): Promise<PayoutEntry[]> {
+	block: RpcBlock,
+	lookupPubkey: (validatorIndex: number) => Promise<string | null>
+): Promise<BlockScan> {
 	const withdrawals = block.withdrawals ?? []
 	const entries: PayoutEntry[] = []
+	const unresolved: UnresolvedWithdrawal[] = []
 	for (const w of withdrawals) {
 		const addr = String(w.address ?? '').toLowerCase()
 		if (addr !== proxyLower) continue
@@ -466,7 +493,16 @@ async function collectPayoutEntriesForBlock(
 		const withdrawalIndex = Number(w.index)
 		if (!Number.isFinite(withdrawalIndex) || withdrawalIndex < 0) continue
 
-		const guardianId = await resolveGuardianIdForWithdrawal(contract, validatorIndex)
+		const pubkey = await lookupPubkey(validatorIndex)
+		if (!pubkey) {
+			unresolved.push({ blockNumber, withdrawalIndex, validatorIndex })
+			continue
+		}
+		const guardianId = await resolvePayableGuardianId(contract, pubkey)
+		if (guardianId === 'unresolved') {
+			unresolved.push({ blockNumber, withdrawalIndex, validatorIndex })
+			continue
+		}
 		if (guardianId == null) continue
 
 		entries.push({
@@ -477,7 +513,7 @@ async function collectPayoutEntriesForBlock(
 			withdrawalIndex,
 		})
 	}
-	return entries
+	return { entries, unresolved }
 }
 
 async function waitForSignerReceipt(
@@ -651,30 +687,37 @@ async function submitPayoutBatchAutoSplit(
 
 /**
  * Scan [fromBlock, toBlock] into the pending pool. Advances through contiguous
- * successfully-fetched blocks; stops (without advancing past) the first fetch failure.
+ * blocks whose VDR withdrawals are fully mapped. A missing pubkey stops the
+ * cursor before that block and returns the withdrawal on the retry queue.
  * Does not submit on-chain — flushPendingBatches does that.
  */
-async function scanBlocksIntoPending(
+export async function scanBlocksIntoPending(
 	provider: ethers.JsonRpcProvider,
 	readContract: ethers.Contract,
 	proxyAddr: string,
 	fromBlock: number,
 	toBlock: number,
-	pending: Map<string, PayoutEntry>
-): Promise<{ okThrough: number | null; added: number; fetchFailed: boolean }> {
+	pending: Map<string, PayoutEntry>,
+	lookupPubkey: (validatorIndex: number) => Promise<string | null> = fetchValidatorPubkeyByIndex
+): Promise<{ okThrough: number | null; added: number; fetchFailed: boolean; unresolved: UnresolvedWithdrawal[] }> {
 	const proxyLower = proxyAddr.toLowerCase()
 	let okThrough: number | null = null
 	let added = 0
+	const unresolved: UnresolvedWithdrawal[] = []
 	for (let bn = fromBlock; bn <= toBlock; bn++) {
 		const block = await fetchBlockWithWithdrawals(provider, bn)
 		if (!block) {
-			return { okThrough, added, fetchFailed: true }
+			return { okThrough, added, fetchFailed: true, unresolved }
 		}
-		const entries = await collectPayoutEntriesForBlock(readContract, proxyLower, bn, block)
-		added += mergeIntoPending(pending, entries)
+		const scanned = await collectPayoutEntriesForBlock(readContract, proxyLower, bn, block, lookupPubkey)
+		added += mergeIntoPending(pending, scanned.entries)
+		if (scanned.unresolved.length) {
+			unresolved.push(...scanned.unresolved)
+			return { okThrough, added, fetchFailed: false, unresolved }
+		}
 		okThrough = bn
 	}
-	return { okThrough, added, fetchFailed: false }
+	return { okThrough, added, fetchFailed: false, unresolved }
 }
 
 async function flushPendingBatches(
@@ -817,7 +860,7 @@ async function payoutTick(): Promise<void> {
 
 			while (from <= tickEnd) {
 				const to = Math.min(from + chunk - 1, tickEnd)
-				const { okThrough, added, fetchFailed } = await scanBlocksIntoPending(
+				const { okThrough, added, fetchFailed, unresolved } = await scanBlocksIntoPending(
 					provider,
 					readContract,
 					proxyAddr,
@@ -825,16 +868,25 @@ async function payoutTick(): Promise<void> {
 					to,
 					pending
 				)
-				if (okThrough != null) {
-					state.lastProcessedBlock = okThrough
+				if (okThrough != null) state.lastProcessedBlock = okThrough
+				state.retryQueue = unresolved
+				if (okThrough != null || added > 0 || unresolved.length > 0) {
 					persistPending(state, pending)
 					if (added > 0) {
 						logger(
 							Colors.cyan(
-								`[validatorClRewardPayout] queued +${added} into pending (pending=${pending.size}) through ${from}..${okThrough}`
+								`[validatorClRewardPayout] queued +${added} into pending (pending=${pending.size}) through ${from}..${okThrough ?? from - 1}`
 							)
 						)
 					}
+				}
+				if (unresolved.length > 0) {
+					logger(
+						Colors.yellow(
+							`[validatorClRewardPayout] scan stop before block ${unresolved[0]!.blockNumber}: ${unresolved.length} pubkey mapping(s) unresolved; will retry next tick`
+						)
+					)
+					break
 				}
 				if (fetchFailed || okThrough == null || okThrough < to) {
 					logger(
