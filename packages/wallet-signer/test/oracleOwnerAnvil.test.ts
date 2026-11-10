@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -213,6 +213,7 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 				restart: build,
 				alerts,
 				auditPath,
+				statePath,
 				armThrow() { throwBeforeSend = true },
 				clearThrow() { throwBeforeSend = false },
 				reportUnconfirmed() { reportSent = true },
@@ -393,6 +394,54 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			assert.equal(await provider.getTransactionCount(pm.address), nonce)
 			assert.equal((await pmTransfers(provider, pm.address)).length, before.length + 1)
 			assert.equal(await provider.getBalance(OWNER), 0n)
+		})
+
+		await t.test('a spent UTC day does not block the next day before the persistent budget is gone', async () => {
+			const yesterday = new Date(Date.now() - 86_400_000).toISOString()
+			const earlier = new Date(Date.now() - 2 * 86_400_000).toISOString()
+			const row = (when: string, key: string) => ({
+				idempotencyKey: key,
+				chainId: '224422',
+				address: OWNER.toLowerCase(),
+				amountWei: '1000',
+				recordedAt: when,
+				status: 'settled',
+				attempt: 0,
+			})
+			await provider.send('anvil_setBalance', [OWNER, '0x0'])
+			const opened = make('day-open', {
+				wallets: [OWNER],
+				arrays: [keyArray(ORACLE_OWNER_ARRAY, [OWNER])],
+				globalDailyWei: '1000',
+				perAddressDailyWei: '5000',
+				budgetWei: '2000',
+			})
+			writeFileSync(opened.statePath, JSON.stringify({ version: 2, spend: [row(yesterday, 'anvil-day-1')] }))
+			const before = await pmTransfers(provider, pm.address)
+			await opened.gk.runOnce()
+			assert.equal((await pmTransfers(provider, pm.address)).length, before.length + 1)
+			assert.equal(await provider.getBalance(OWNER), 1000n)
+			assert.equal(opened.alerts.includes('topup-budget:224422'), false)
+			assert.equal(opened.alerts.includes('topup-global-cap:224422'), false)
+
+			await provider.send('anvil_setBalance', [OWNER, '0x0'])
+			const closed = make('day-closed', {
+				wallets: [OWNER],
+				arrays: [keyArray(ORACLE_OWNER_ARRAY, [OWNER])],
+				globalDailyWei: '1000',
+				perAddressDailyWei: '5000',
+				budgetWei: '2000',
+			})
+			writeFileSync(closed.statePath, JSON.stringify({
+				version: 2,
+				spend: [row(earlier, 'anvil-day-0'), row(yesterday, 'anvil-day-1b')],
+			}))
+			const mid = await pmTransfers(provider, pm.address)
+			await closed.gk.runOnce()
+			assert.equal((await pmTransfers(provider, pm.address)).length, mid.length)
+			assert.equal(await provider.getBalance(OWNER), 0n)
+			assert.ok(closed.alerts.includes('topup-budget:224422'))
+			assert.equal(closed.alerts.includes('topup-global-cap:224422'), false)
 		})
 
 		const all = await pmTransfers(provider, pm.address)

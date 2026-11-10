@@ -670,22 +670,63 @@ test('gas keeper does not broadcast when a pending top-up is only on disk', asyn
 	}
 })
 
-test('gas keeper total budget does not refill when the UTC day field changes', async () => {
-	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null })
+test('a full UTC day does not keep blocking, and the persistent budget does not refill', async () => {
+	const yesterday = new Date(Date.now() - 86_400_000).toISOString()
+	const earlier = new Date(Date.now() - 2 * 86_400_000).toISOString()
+	const spent = (when: string, amount: string, key: string): SpendRow => ({
+		idempotencyKey: key,
+		chainId: '224422',
+		address: '',
+		amountWei: amount,
+		recordedAt: when,
+		status: 'settled',
+		attempt: 0,
+	})
+	const opened = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		globalDailyWei: '1000',
+		perAddressDailyWei: '5000',
+		budgetWei: '2000',
+	})
+	const exhausted = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		globalDailyWei: '1000',
+		perAddressDailyWei: '5000',
+		budgetWei: '2000',
+	})
 	try {
-		const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
-		writeFileSync(fx.statePath, JSON.stringify({
-			day: yesterday,
-			global: { '224422': '5000' },
-			perAddress: { [`224422:${fx.addr.toLowerCase()}`]: '5000' },
+		writeFileSync(opened.statePath, JSON.stringify({
+			version: 2,
+			spend: [{ ...spent(yesterday, '1000', 'day-1'), address: opened.addr.toLowerCase() }],
 		}))
-		fx.balances.set(fx.pm, 5_000_000n)
-		fx.balances.set(fx.addr, 0n)
-		await fx.gk.runOnce()
-		assert.equal(fx.sends.length, 0)
-		assert.ok(fx.alerts.includes('topup-total-cap:224422'))
+		opened.balances.set(opened.pm, 5_000_000n)
+		opened.balances.set(opened.addr, 0n)
+		await opened.gk.runOnce()
+		assert.equal(opened.sends.length, 1)
+		assert.equal(opened.alerts.includes('topup-global-cap:224422'), false)
+		assert.equal(opened.alerts.includes('topup-budget:224422'), false)
+		const disk = JSON.parse(readFileSync(opened.statePath, 'utf8')) as { version: number; spend: SpendRow[] }
+		for (const row of disk.spend) if (row.status === 'pending') row.status = 'settled'
+		writeFileSync(opened.statePath, JSON.stringify(disk))
+		opened.balances.set(opened.addr, 0n)
+		await opened.gk.runOnce()
+		assert.equal(opened.sends.length, 1)
+		assert.ok(opened.alerts.includes('topup-global-cap:224422'))
+
+		writeFileSync(exhausted.statePath, JSON.stringify({
+			version: 2,
+			spend: [
+				{ ...spent(earlier, '1000', 'day-0'), address: exhausted.addr.toLowerCase() },
+				{ ...spent(yesterday, '1000', 'day-1b'), address: exhausted.addr.toLowerCase() },
+			],
+		}))
+		exhausted.balances.set(exhausted.pm, 5_000_000n)
+		exhausted.balances.set(exhausted.addr, 0n)
+		await exhausted.gk.runOnce()
+		assert.equal(exhausted.sends.length, 0)
+		assert.ok(exhausted.alerts.includes('topup-budget:224422'))
+		assert.equal(exhausted.alerts.includes('topup-global-cap:224422'), false)
 	} finally {
-		fx.cleanup()
+		opened.cleanup()
+		exhausted.cleanup()
 	}
 })
 

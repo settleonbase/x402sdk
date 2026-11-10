@@ -371,15 +371,12 @@ export class GasKeeper {
 				this.alerter.send('warn', `topup-cap:${chainKey}:${address}`, `${addr} hit its daily top-up cap`)
 				continue
 			}
+			// Today's window only. Yesterday's spend does not consume globalDailyWei.
 			if (used.globalDaily + amount > BigInt(cfg.globalDailyWei)) {
 				this.alerter.send('warn', `topup-global-cap:${chainId}`, `global daily top-up cap reached on chain ${chainId}`)
 				return
 			}
-			// Prior days stay in the total. A new UTC date does not mint another globalDailyWei.
-			if (used.globalTotal + amount > BigInt(cfg.globalDailyWei)) {
-				this.alerter.send('warn', `topup-total-cap:${chainId}`, `total top-up budget reached on chain ${chainId}`)
-				return
-			}
+			// All-time total. A new UTC day does not refill budgetWei.
 			if (used.globalTotal + amount > budget) {
 				this.alerter.send('warn', `topup-budget:${chainId}`, `explicit top-up budget reached on chain ${chainId}`)
 				return

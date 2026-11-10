@@ -15,6 +15,7 @@ export type GasKeeperChain = {
 	minWei: string
 	targetWei: string
 	perAddressDailyWei: string
+	/** UTC-day ceiling. Not a lifetime cap. */
 	globalDailyWei: string
 	pmWarnWei: string
 	pmCriticalWei: string
@@ -23,7 +24,7 @@ export type GasKeeperChain = {
 	 * Registry arrays are not an implicit list. Wide pool management is a later phase.
 	 */
 	wallets?: string[]
-	/** Explicit total budget in wei. Missing refuses every top-up on this chain. */
+	/** Persistent total in wei. A new UTC day does not refill it. Missing refuses every top-up. */
 	budgetWei?: string
 }
 
