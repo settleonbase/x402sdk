@@ -356,6 +356,27 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			assert.equal(fx.alerts.length, 0)
 		})
 
+		await t.test('0x00 bytecode is refused even when owner, registry, and whitelist match', async () => {
+			const coded = getAddress(Wallet.createRandom().address)
+			await provider.send('anvil_setCode', [coded, '0x00'])
+			await provider.send('anvil_setCode', [CONTRACT, ownerRuntime(coded)])
+			assert.equal((await provider.getCode(coded)).toLowerCase(), '0x00')
+			const before = await pmTransfers(provider, coded)
+			const pmBefore = await pmTransfers(provider, pm.address)
+			const fx = make('zero-byte', {
+				wallets: [coded],
+				arrays: [keyArray(ORACLE_OWNER_ARRAY, [coded])],
+			})
+			await fx.gk.runOnce()
+			await provider.send('anvil_setCode', [CONTRACT, ownerRuntime(OWNER)])
+			const after = await pmTransfers(provider, pm.address)
+			assert.equal(after.length, pmBefore.length)
+			assert.equal((await pmTransfers(provider, coded)).length, before.length)
+			assertNoValueTo(after, coded)
+			assert.equal(await provider.getBalance(coded), 0n)
+			assert.ok(fx.alerts.some((code) => code.includes(`:code:${coded.toLowerCase()}`)))
+		})
+
 		await t.test('restart does not broadcast an unconfirmed top-up again', async () => {
 			await provider.send('anvil_setBalance', [OWNER, '0x0'])
 			const fx = make('restart', {

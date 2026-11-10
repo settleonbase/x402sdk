@@ -13,7 +13,7 @@ import { RateLimiter } from '../src/rateLimit'
 import { redactText } from '../src/redact'
 import { addArray, emptyRegistry, growArray, rotateArray, signRegistry, verifyRegistry } from '../src/registry'
 import { resolveTypedDataNonce } from '../src/typedDataReplay'
-import { BEAMIO_ORACLE_CONTRACT, GAS_KEEPER_CHAIN_ID, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_DAEMON_CLIENT, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, adminGasRunRefusal, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
+import { BEAMIO_ORACLE_CONTRACT, GAS_KEEPER_CHAIN_ID, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_DAEMON_CLIENT, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, adminGasRunRefusal, decodeAddressWord, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, isEmptyRuntimeCode, selectOracleOwnerRecipients, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
 import type { KeyArray } from '../src/registry'
 import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } from '../src/txManager'
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
@@ -953,6 +953,67 @@ test('gas keeper does not read a provider for Base', async () => {
 	} finally {
 		rmSync(dir, { recursive: true, force: true })
 	}
+})
+
+test('empty runtime code is only the bare 0x word', () => {
+	assert.equal(isEmptyRuntimeCode('0x'), true)
+	assert.equal(isEmptyRuntimeCode('  0X  '), true)
+	assert.equal(isEmptyRuntimeCode('0x00'), false)
+	assert.equal(isEmptyRuntimeCode('0x0000'), false)
+	assert.equal(isEmptyRuntimeCode('0x0'), false)
+	assert.equal(isEmptyRuntimeCode('0x000'), false)
+	assert.equal(isEmptyRuntimeCode(''), false)
+	assert.equal(isEmptyRuntimeCode('0xzz'), false)
+	assert.equal(isEmptyRuntimeCode('not-hex'), false)
+	assert.equal(isEmptyRuntimeCode(undefined), false)
+	assert.equal(isEmptyRuntimeCode(null), false)
+})
+
+test('owner() accepts only a 32-byte ABI address and a dirty word funds nobody', async () => {
+	const wallet = getAddress(Wallet.createRandom().address)
+	const body = `${'0'.repeat(24)}${wallet.slice(2).toLowerCase()}`
+	const word = `0x${body}`
+	assert.equal(body.length, 64)
+	assert.equal(decodeAddressWord(word), wallet)
+	assert.equal(decodeAddressWord(body), wallet)
+	assert.equal(decodeAddressWord(`0x${wallet.slice(2)}`), null)
+	assert.equal(decodeAddressWord(`0x${'0'.repeat(62)}`), null)
+	assert.equal(decodeAddressWord(`0x${'01'}${'0'.repeat(22)}${wallet.slice(2).toLowerCase()}`), null)
+	assert.equal(decodeAddressWord(`${word}00`), null)
+	assert.equal(decodeAddressWord(`0x${'0'.repeat(64)}${body}`), null)
+	assert.equal(decodeAddressWord(''), null)
+	assert.equal(decodeAddressWord('0xgg' + '0'.repeat(62)), null)
+
+	const registry = {
+		version: 1 as const,
+		pm: wallet,
+		attestor: wallet,
+		updatedAt: '2026-11-09T00:00:00.000Z',
+		arrays: [keyArray(ORACLE_OWNER_ARRAY, [wallet])],
+	}
+	const dirty = [`0x${wallet.slice(2)}`, `0x${'01'}${'0'.repeat(22)}${wallet.slice(2).toLowerCase()}`, `${word}00`]
+	for (const callResult of dirty) {
+		const picked = await selectOracleOwnerRecipients(224422, [wallet], registry, new Set(), {
+			async getCode() { return '0x' },
+			async call() { return callResult },
+		})
+		assert.equal(picked.owner, null)
+		assert.deepEqual(picked.fund, [])
+	}
+	for (const code of ['0x00', '0x0000', '0x0', '']) {
+		const picked = await selectOracleOwnerRecipients(224422, [wallet], registry, new Set(), {
+			async getCode() { return code },
+			async call() { return word },
+		})
+		assert.equal(picked.owner, wallet)
+		assert.deepEqual(picked.fund, [])
+		assert.equal(picked.refused.some((row) => row.reason === 'code'), true)
+	}
+	const funded = await selectOracleOwnerRecipients(224422, [wallet], registry, new Set(), {
+		async getCode() { return '0x' },
+		async call() { return word },
+	})
+	assert.deepEqual(funded.fund, [wallet])
 })
 
 test('oracle-daemon cannot reach the gas keeper through client RPC or an admin-socket argument', () => {

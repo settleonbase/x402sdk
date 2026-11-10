@@ -76,20 +76,24 @@ export type OwnerReader = {
 	call(tx: { to: string; data: string }): Promise<string>
 }
 
-/** Empty runtime code. A missing or failed read is not empty. */
+/**
+ * Standard empty code is exactly `0x` after trimming. `0x00` and `0x0000` are
+ * bytecode. A missing, non-hex, or odd-length value is not empty.
+ */
 export function isEmptyRuntimeCode(code: string | null | undefined): boolean {
 	if (typeof code !== 'string') return false
-	const body = code.trim().toLowerCase().replace(/^0x/, '')
-	if (!/^[0-9a-f]*$/.test(body)) return false
-	return body.length === 0 || /^0+$/.test(body)
+	return code.trim().toLowerCase() === '0x'
 }
 
-function decodeAddressWord(raw: string): string | null {
+/** ABI address word: exactly 32 bytes, high 12 bytes zero. Anything else is unreadable. */
+export function decodeAddressWord(raw: string): string | null {
 	if (typeof raw !== 'string') return null
-	const hex = raw.toLowerCase().startsWith('0x') ? raw.slice(2) : raw
-	if (!/^[0-9a-f]+$/.test(hex) || hex.length < 40) return null
+	const trimmed = raw.trim().toLowerCase()
+	const hex = trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed
+	if (!/^[0-9a-f]{64}$/.test(hex)) return null
+	if (!/^0{24}/.test(hex)) return null
 	try {
-		return getAddress(`0x${hex.slice(-40)}`)
+		return getAddress(`0x${hex.slice(24)}`)
 	} catch {
 		return null
 	}
