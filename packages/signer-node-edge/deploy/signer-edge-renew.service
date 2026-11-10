@@ -6,9 +6,11 @@
 Description=Signer edge certificate renewal
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=2
 
 [Service]
-Type=oneshot
+Type=exec
 User=root
 Group=root
 UMask=0077
@@ -22,8 +24,6 @@ ExecStart=/opt/signer-node-edge/deploy/signer-edge-renew.sh
 ExecStopPost=/bin/sh -c 'if [ "$$SERVICE_RESULT" != success ]; then install -d -o root -g root -m 755 /var/lib/signer-edge-renew; printf "failed %s result=%s\n" "$$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$$SERVICE_RESULT" > /var/lib/signer-edge-renew/failed; chmod 644 /var/lib/signer-edge-renew/failed; echo renew-failed result="$$SERVICE_RESULT"; fi'
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=600
-StartLimitBurst=2
 NoNewPrivileges=yes
 PrivateTmp=yes
 

@@ -29,7 +29,8 @@ dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 cert_name=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from dns01_profile import selected_profile, assert_profile_domain; _name, spec = selected_profile(); assert_profile_domain(spec["cert_name"]); print(spec["cert_name"])' "$dir")
 marker_dir=/var/lib/signer-edge-renew
 set +e
-certbot renew --cert-name "$cert_name" --deploy-hook "$dir/certbot-deploy-refresh.sh" --quiet
+certbot_bin=${SIGNER_EDGE_CERTBOT:-certbot}
+"$certbot_bin" renew --cert-name "$cert_name" --deploy-hook "$dir/certbot-deploy-refresh.sh" --quiet
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
