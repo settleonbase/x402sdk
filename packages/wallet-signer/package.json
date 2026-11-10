@@ -1,0 +1,30 @@
+{
+	"name": "@conet/wallet-signer",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Sign-only wallet service: password-protected mnemonic, named key arrays, mTLS JSON-RPC, nonce manager, gas keeper",
+	"license": "UNLICENSED",
+	"main": "dist/src/main.js",
+	"bin": {
+		"wallet-signer": "dist/src/main.js",
+		"wsctl": "dist/src/wsctl.js"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.json",
+		"test:unit": "node --test dist/test/unit.test.js",
+		"test:e2e": "node dist/test/e2e.js",
+		"test:proxy": "node dist/test/proxy.js"
+	},
+	"engines": {
+		"node": ">=22.14"
+	},
+	"dependencies": {
+		"@scure/bip32": "1.7.0",
+		"@scure/bip39": "1.6.0",
+		"ethers": "6.16.0"
+	},
+	"devDependencies": {
+		"@types/node": "^24.9.2",
+		"typescript": "5.8.3"
+	}
+}

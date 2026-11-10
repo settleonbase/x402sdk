@@ -1,0 +1,67 @@
+# /etc/systemd/system/wallet-signer.service
+# Starts LOCKED after every boot; an admin unlocks with `wsctl unlock` over SSH.
+#
+# Default: behind nginx (deploy/nginx-dle.conf). wallet-signer listens only on the local socket
+# /run/wallet-signer-rpc/rpc.sock, so it needs no capabilities and no inbound network.
+# State lives on the encrypted volume at /srv/secure/wallet-signer.
+# secure-unlock mounts /dev/mapper/securedata on /srv/secure by hand. There is no .mount unit,
+# so a directory that merely exists on the root disk must not start this service.
+[Unit]
+Description=wallet-signer (sign-only key service)
+After=network-online.target
+Wants=network-online.target
+# RequiresMountsFor alone does not fail when /srv/secure is a plain directory.
+# The source check below and config requireMountSource=/dev/mapper/securedata both must pass.
+RequiresMountsFor=/srv/secure
+ExecStartPre=+/bin/sh -c 'src=$$(findmnt -n -o SOURCE --target /srv/secure); test "$$src" = /dev/mapper/securedata'
+
+[Service]
+Type=simple
+User=walletsigner
+# Members of wsadmin can reach /run/wallet-signer/admin.sock (0660).
+Group=wsadmin
+Environment=NODE_OPTIONS=
+# Socket directory for nginx: walletsigner:www-data 2750, so the socket gets group www-data and
+# only nginx (and root) can connect. Not a RuntimeDirectory: that would make its group wsadmin.
+ExecStartPre=+/usr/bin/install -d -o walletsigner -g www-data -m 2750 /run/wallet-signer-rpc
+ExecStart=/usr/bin/node --disable-sigusr1 --disallow-code-generation-from-strings /opt/wallet-signer/dist/src/main.js --config /etc/wallet-signer/config.json
+Restart=on-failure
+RestartSec=5
+
+RuntimeDirectory=wallet-signer
+RuntimeDirectoryMode=0750
+UMask=0027
+ReadWritePaths=/srv/secure/wallet-signer /run/wallet-signer-rpc
+
+# Hardening (design §5)
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug @mount @reboot @swap @module @raw-io
+# AF_INET/6 for outbound chain RPC only.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Direct-TLS mode instead (rpc.tls on :443, no nginx): replace the two lines above with
+#   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

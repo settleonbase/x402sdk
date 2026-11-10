@@ -1,0 +1,45 @@
+{
+	"requireMountPoint": "/srv/secure",
+	"requireMountSource": "/dev/mapper/securedata",
+	"dataDir": "/srv/secure/wallet-signer/state",
+	"logDir": "/srv/secure/wallet-signer/log",
+	"adminSocket": "/run/wallet-signer/admin.sock",
+	"policyFile": "/etc/wallet-signer/policy.json",
+	"compromisedFile": "/etc/wallet-signer/compromised.json",
+	"rpc": {
+		"proxied": {
+			"path": "/run/wallet-signer-rpc/rpc.sock",
+			"mode": 432
+		}
+	},
+	"chains": {
+		"224422": {
+			"rpcUrls": [
+				"https://publicrpc.conet.network"
+			],
+			"resendAfterMs": 60000,
+			"maxResends": 3,
+			"receiptPollMs": 2000
+		}
+	},
+	"gasKeeper": {
+		"enabled": false,
+		"intervalMs": 60000,
+		"chains": {
+			"224422": {
+				"minWei": "50000000000000000",
+				"targetWei": "200000000000000000",
+				"perAddressDailyWei": "1000000000000000000",
+				"globalDailyWei": "5000000000000000000",
+				"pmWarnWei": "5000000000000000000",
+				"pmCriticalWei": "1000000000000000000"
+			}
+		}
+	},
+	"alerts": {
+		"host": "wallet-signer",
+		"webhookUrl": null
+	},
+	"scryptN": 262144,
+	"keyWaitMs": 30000
+}

@@ -1,0 +1,173 @@
+{
+	"version": 1,
+	"clients": {
+		"conet-beamio-api": {
+			"arrays": {
+				"chat_index_pointer": {
+					"chains": [224422],
+					"allow": [
+						{
+							"to": "0x1511Caa71081C84d8a591490D1b83879088EED72",
+							"selectors": ["setPointerWithSig(address,bytes32,uint64,uint64,uint256,bytes)"],
+							"maxGas": 300000,
+							"maxValueWei": "0"
+						}
+					],
+					"rate": { "perMinute": 120, "perDay": 50000 },
+					"maxGasPriceGwei": { "224422": 2 },
+					"dailyGasBudgetWei": { "224422": "500000000000000000" }
+				},
+				"settle_contractAdmin": {
+					"chains": [224422],
+					"allow": [
+						{
+							"to": "0x869B31C87ABd9bFB858F5183Ef6021b28ED225E2",
+							"selectors": [
+								"createAccountFor(address)",
+								"relayHandleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)"
+							],
+							"maxGas": 16000000,
+							"maxValueWei": "0"
+						},
+						{
+							"to": "0xfA52a0CcC96C19cF4b6Ea864615F6d52BD0774FB",
+							"selectors": ["createCardCollectionWithInitCode(address,uint8,uint256,bytes)"],
+							"maxGas": 8000000,
+							"maxValueWei": "0"
+						},
+						{
+							"to": "0x305f90A7f38289219BA1b4be98CB5b47e7b15Ac2",
+							"selectors": [
+								"claimFor(address,uint256,uint256,bytes)",
+								"claimForWithBeneficiary(address,address,uint256,uint256,bytes)",
+								"claimForV2(address,uint256,uint256,address,uint256,address,bytes)"
+							],
+							"maxGas": 900000,
+							"maxValueWei": "0"
+						},
+						{
+							"to": "0xBC6b53065b5647261396d002bDBA0d3396E0722f",
+							"selectors": [
+								"addNode(uint256,string,string,string,string,address)",
+								"removeNode(string)"
+							],
+							"maxGas": 500000,
+							"maxValueWei": "0"
+						},
+						{
+							"to": "0x6113fE738489c0aB64B4606Ce333aD29b44ED0C4",
+							"selectors": [
+								"syncTokenAction((bytes32,bytes32,uint256,bytes32,string,uint64,address,address,uint256,uint256,bool,(address,uint256,uint8,uint8,uint256,uint8,uint256)[],(uint16,uint256,uint256,uint256,uint256,uint256,address),(uint256,uint256,uint8,uint256,uint16,uint256,uint16,string,string),address,address[],address,address))",
+								"setAfterTatchNoteByCardOwner(uint256,string)",
+								"setAfterTatchNoteByFrom(uint256,string)",
+								"setAfterTatchNoteByTo(uint256,string)",
+								"setAfterTatchNotes(uint256,string,string,string)"
+							],
+							"maxGas": 8000000,
+							"maxValueWei": "0"
+						},
+						{
+							"to": "0x6113fE738489c0aB64B4606Ce333aD29b44ED0C4",
+							"selectors": [
+								"syncCreateTask(address[],address,uint256,bytes4,address,uint256,uint256,uint256,uint256,uint256)",
+								"syncUpdateStatus(uint256,uint256,bool,address)",
+								"addCardWhitelist(address,address)",
+								"addCardWhitelistBatch(address,address[])",
+								"removeCardWhitelist(address,address)",
+								"removeCardWhitelistBatch(address,address[])"
+							],
+							"maxGas": 2000000,
+							"maxValueWei": "0"
+						},
+						{
+							"to": "0x6113fE738489c0aB64B4606Ce333aD29b44ED0C4",
+							"selectors": [
+								"recordDetailedActivity(address,address,uint256,uint256,uint256,uint256)",
+								"recordDetailedActivityAt(uint256,address,address,uint256,uint256,uint256,uint256)",
+								"clearAdminMintCounterForSubordinate(address,address)"
+							],
+							"maxGas": 2000000,
+							"maxValueWei": "0"
+						},
+						{
+							"to": "0x6113fE738489c0aB64B4606Ce333aD29b44ED0C4",
+							"selectors": [
+								"registerCard((address,address,string,string,string,uint8,uint256,uint8,uint64,uint64,uint256))",
+								"setCardActive((address,bool,uint256))",
+								"updateCardMeta((address,string,string,string,uint8,uint256,uint8,uint64,uint64,uint256))"
+							],
+							"maxGas": 2000000,
+							"maxValueWei": "0"
+						}
+					],
+					"rate": { "perMinute": 120, "perDay": 50000 },
+					"maxGasPriceGwei": { "224422": 2 },
+					"dailyGasBudgetWei": { "224422": "500000000000000000" }
+				},
+				"registrationAdmin": {
+					"chains": [224422],
+					"allow": [
+						{
+							"to": "0x684b0ac760cEE9c9b85de36d69746420648Cf9e2",
+							"selectors": [
+								"addPublicPGPByAdmin(address,string,string,string,string)",
+								"changeAddressInAdminlist(address,bool)"
+							],
+							"maxGas": 500000,
+							"maxValueWei": "0"
+						},
+						{
+							"to": "0xfFDc8d2021A41F4638Cb3eCf58B5155383EE9f6d",
+							"selectors": [
+								"setAccountByAdmin(address,(string,string,bool,bool,bool,bool,string,string,string,string))",
+								"setBase64NameByAdmin(bytes32,string,string,address)",
+								"changeAddressInAdminlist(address,bool)"
+							],
+							"maxGas": 500000,
+							"maxValueWei": "0"
+						}
+					],
+					"rate": { "perMinute": 60, "perDay": 20000 },
+					"maxGasPriceGwei": { "224422": 2 },
+					"dailyGasBudgetWei": { "224422": "200000000000000000" }
+				},
+				"gbDepinAirdropAdmin": {
+					"chains": [224422],
+					"allow": [
+						{
+							"to": "0x62bcc59cC36C737E8AfBb0914F840d12cd33025f",
+							"selectors": ["airdropDepinPaidPage(uint256,uint256,bool)", "airdropDepinPaidAll()"],
+							"maxGas": 16000000
+						}
+					],
+					"rate": { "perMinute": 6, "perDay": 3000 },
+					"maxGasPriceGwei": { "224422": 3 },
+					"dailyGasBudgetWei": { "224422": "1000000000000000000" }
+				}
+			}
+		},
+		"conetapiv4Local": {
+			"arrays": {
+				"epochManagre": {
+					"chains": [224422],
+					"allow": [
+						{
+							"to": "0x648f1a17269627C3d465fEa40b3C229f7CacE5cA",
+							"selectors": ["updateInfo(uint256,uint256,uint256)"],
+							"maxGas": 300000
+						},
+						{
+							"to": "0x648f1a17269627C3d465fEa40b3C229f7CacE5cA",
+							"selectors": ["changeAddressInAdminlist(address,bool)"],
+							"maxGas": 150000,
+							"args": { "0": { "in": "@compromised" }, "1": { "eq": false } }
+						}
+					],
+					"rate": { "perMinute": 20, "perDay": 20000 },
+					"maxGasPriceGwei": { "224422": 2 },
+					"dailyGasBudgetWei": { "224422": "500000000000000000" }
+				}
+			}
+		}
+	}
+}
