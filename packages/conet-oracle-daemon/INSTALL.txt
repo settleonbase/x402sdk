@@ -8,8 +8,12 @@ conetOracle.service is the retired daemon. It writes the same rates to Base and
 to CoNET. Leave that unit inactive and disabled. This package does not replace
 that unit file and does not start it.
 
+Commit 9677e7b254ba2f37d3209431a2d9a6f06743ec58 only sent an external quote
+file. It is not a service that can quote on its own. This package fetches
+public rates on every run.
+
 This tarball is a review artifact. It has not been installed on 70.35.205.77
-or 38.102.126.50.
+or 38.102.126.50. The timer in deploy/ is not enabled by installing the files.
 
 What a later, separately approved install would do
 --------------------------------------------------
@@ -17,19 +21,20 @@ What a later, separately approved install would do
 2. Copy this directory to /opt/conet-oracle-daemon without node_modules from another host's home.
 3. Install deploy/conet-oracle-quote.service and deploy/conet-oracle-quote.timer
    under /etc/systemd/system/. Do not enable them until a later approval.
-4. The oneshot runs as user oracle-daemon. It signs only by calling
-   signer_sendTransaction on /run/wallet-signer-oracle/oracle-daemon.sock.
-   The socket's client name is oracle-daemon. This program does not open the
-   admin socket and does not call the gas keeper.
-5. The only chain is CoNET 224422. The only contract is BeamioOracle
+4. The oneshot runs as user oracle-daemon. Each run GETs
+   https://api.coinbase.com/v2/exchange-rates?currency=USD and
+   https://api.coinbase.com/v2/prices/ETH-USD/spot. It does not read a quote
+   file and does not keep the previous prices. The source time is the HTTP
+   Date header. A missing, non-numeric, non-2xx, or older-than-20-minute
+   response is not signed. Fetch retries at most 3 times per run.
+5. It signs only by calling signer_sendTransaction on
+   /run/wallet-signer-oracle/oracle-daemon.sock. The socket client name is
+   oracle-daemon. keyArray is beamio_oracle_owner. A locked signer exits
+   non-zero and is not retried in that process. The next timer run fetches
+   again.
+6. The only chain is CoNET 224422. The only contract is BeamioOracle
    0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008. value is 0.
    calldata is updateRatesBatch (0x0936c703) or updateRate (0x3c766394).
-6. The quote file must contain observedAt. A source older than 20 minutes is
-   refused and is not signed. A locked signer exits non-zero. The process does
-   not retry until the vault unlocks.
 7. The timer fires every 10 minutes. Type=oneshot and Restart=no. If a previous
    oneshot is still running, the new process takes the lock, sends nothing, and
-   exits.
-
-The example quote file is dated 2020 and will be refused. Do not point the
-service at it.
+   exits. Do not set Restart=always.

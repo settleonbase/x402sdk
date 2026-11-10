@@ -9,7 +9,7 @@ User=oracle-daemon
 Group=oracle-daemon
 RuntimeDirectory=conet-oracle-quote
 StateDirectory=conet-oracle-quote
-ExecStart=/usr/bin/node /opt/conet-oracle-daemon/dist/src/main.js --quote-file /var/lib/conet-oracle-quote/quote.json --lock-file /run/conet-oracle-quote/lock --socket /run/wallet-signer-oracle/oracle-daemon.sock
+ExecStart=/usr/bin/node /opt/conet-oracle-daemon/dist/src/main.js --lock-file /run/conet-oracle-quote/lock --socket /run/wallet-signer-oracle/oracle-daemon.sock
 # A restart would submit the same quote again. Do not change this to on-failure or always.
 Restart=no
 NoNewPrivileges=true

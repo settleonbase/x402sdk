@@ -19,8 +19,19 @@ export const ORACLE_SOCKET_PATH = '/run/wallet-signer-oracle/oracle-daemon.sock'
 
 export const ORACLE_KEY_ARRAY = 'beamio_oracle_owner'
 
-/** Two 10-minute timer intervals. Older sources are not signed. */
+/** Two 10-minute timer intervals. Older HTTP Date headers are not signed. */
 export const MAX_SOURCE_AGE_MS = 20 * 60 * 1000
+
+/** Public Coinbase FX. No API key. USD per foreign unit is 1 / data.rates[CCY]. */
+export const COINBASE_FX_URL = 'https://api.coinbase.com/v2/exchange-rates?currency=USD'
+
+/** Public Coinbase ETH-USD spot. data.amount is USD per 1 ETH. */
+export const COINBASE_ETH_USD_SPOT_URL = 'https://api.coinbase.com/v2/prices/ETH-USD/spot'
+
+/** Fresh HTTP attempts per oneshot. A locked signer is not retried inside this bound. */
+export const MAX_FETCH_ATTEMPTS = 3
+
+export const FETCH_TIMEOUT_MS = 10_000
 
 export const UPDATE_RATES_BATCH_SELECTOR = '0x0936c703'
 

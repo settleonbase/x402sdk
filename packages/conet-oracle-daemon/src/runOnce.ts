@@ -1,26 +1,27 @@
 import { CONET_CHAIN_ID, BEAMIO_ORACLE } from './constants'
 import { acquireQuoteLock } from './lock'
 import { buildOracleTx, type OracleTx, type TargetInput } from './plan'
-import { readQuoteDocument } from './quoteSource'
+import type { FreshQuote } from './quoteSource'
 import { QuoteRefusal, SignerCallError } from './refusal'
 
 export type QuoteSender = (tx: OracleTx) => Promise<{ hash: string }>
+
+export type QuoteLoader = () => Promise<FreshQuote>
 
 export type RunOutcome =
 	| { ok: true; sent: true; hash: string }
 	| { ok: false; sent: false; reason: string; message?: string; code?: number }
 
 export type RunOnceInput = {
-	document: unknown
-	nowMs: number
+	loadQuote: QuoteLoader
 	lockPath: string
 	send: QuoteSender
 	target?: TargetInput
 }
 
 /**
- * One quote attempt. Overlap, a stale source, Base, and a signer refusal all
- * leave `ok` false. The signer function is not called again after it rejects.
+ * One quote attempt. The previous process still holding the lock causes an
+ * immediate exit before a fetch or a signature. A signer error is not retried.
  */
 export async function runOnce(input: RunOnceInput): Promise<RunOutcome> {
 	const lock = acquireQuoteLock(input.lockPath)
@@ -28,8 +29,8 @@ export async function runOnce(input: RunOnceInput): Promise<RunOutcome> {
 		return { ok: false, sent: false, reason: 'overlap', message: 'previous quote still running' }
 	}
 	try {
-		const quote = readQuoteDocument(input.document, input.nowMs)
-		const tx = buildOracleTx(input.target ? { ...quote } : quote, input.target ?? {
+		const quote = await input.loadQuote()
+		const tx = buildOracleTx(quote, input.target ?? {
 			chainId: CONET_CHAIN_ID,
 			to: BEAMIO_ORACLE,
 			value: 0n,
