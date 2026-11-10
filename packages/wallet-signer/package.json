@@ -12,7 +12,8 @@
 	"scripts": {
 		"build": "tsc -p tsconfig.json",
 		"check:no-websocket": "node scripts/checkNoWebSocket.mjs",
-		"test:unit": "node --test dist/test/unit.test.js",
+		"test:unit": "node --require ./dist/src/noWebSocket.js --test dist/test/unit.test.js",
+		"test:anvil": "node --require ./dist/src/noWebSocket.js --test dist/test/oracleOwnerAnvil.test.js",
 		"test:e2e": "node dist/test/e2e.js",
 		"test:proxy": "node dist/test/proxy.js"
 	},
@@ -22,7 +23,7 @@
 	"dependencies": {
 		"@scure/bip32": "1.7.0",
 		"@scure/bip39": "1.6.0",
-		"ethers": "6.16.0"
+		"ethers": "6.17.0"
 	},
 	"devDependencies": {
 		"@types/node": "^24.9.2",
