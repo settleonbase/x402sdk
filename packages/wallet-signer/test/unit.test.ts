@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer, type ServerResponse } from 'node:http'
-import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -13,7 +13,7 @@ import { RateLimiter } from '../src/rateLimit'
 import { redactText } from '../src/redact'
 import { addArray, emptyRegistry, growArray, rotateArray, signRegistry, verifyRegistry } from '../src/registry'
 import { resolveTypedDataNonce } from '../src/typedDataReplay'
-import { BEAMIO_ORACLE_CONTRACT, GAS_KEEPER_CHAIN_ID, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_DAEMON_CLIENT, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, adminGasRunRefusal, decodeAddressWord, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, isEmptyRuntimeCode, selectOracleOwnerRecipients, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
+import { BEAMIO_ORACLE_CONTRACT, GAS_KEEPER_CHAIN_ID, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_DAEMON_CLIENT, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, adminGasRunRefusal, decodeAddressWord, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, isEmptyRuntimeCode, oracleQuoteNeedWei, selectOracleOwnerRecipients, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
 import type { KeyArray } from '../src/registry'
 import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } from '../src/txManager'
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
@@ -854,6 +854,66 @@ test('gas keeper refuses the oracle contract even when the whitelist names it', 
 	}
 })
 
+test('a higher quote fee cannot hide below the old minWei', async () => {
+	const oldMin = 200_001_400_000n
+	const worst = 2_000_014n
+	const quoteNeed = oracleQuoteNeedWei(null, worst)
+	assert.equal(quoteNeed, 200_000n * worst)
+	assert.ok(quoteNeed !== undefined && quoteNeed > oldMin)
+	const balance = oldMin + 1n
+	assert.ok(balance < quoteNeed!)
+	const blocked = gasFixture({ gasPrice: 1n, maxFeePerGas: worst }, {
+		targetWei: oldMin.toString(),
+		perAddressDailyWei: quoteNeed!.toString(),
+		globalDailyWei: quoteNeed!.toString(),
+		budgetWei: quoteNeed!.toString(),
+	})
+	const funded = gasFixture({ gasPrice: 1n, maxFeePerGas: worst }, {
+		targetWei: quoteNeed!.toString(),
+		perAddressDailyWei: quoteNeed!.toString(),
+		globalDailyWei: quoteNeed!.toString(),
+		budgetWei: (quoteNeed! - balance).toString(),
+	})
+	const capped = gasFixture({ gasPrice: 1n, maxFeePerGas: worst }, {
+		targetWei: quoteNeed!.toString(),
+		perAddressDailyWei: quoteNeed!.toString(),
+		globalDailyWei: quoteNeed!.toString(),
+		budgetWei: quoteNeed!.toString(),
+		maxFeePerGasWei: '1000007',
+	})
+	try {
+		blocked.balances.set(blocked.pm, 10n ** 18n)
+		blocked.balances.set(blocked.addr, balance)
+		await blocked.gk.runOnce()
+		assert.equal(blocked.sends.length, 0)
+		assert.ok(blocked.alerts.includes(`topup-deferred:224422:target-short:${blocked.addr.toLowerCase()}`))
+		const blockedAudit = readFileSync(blocked.auditPath, 'utf8')
+		assert.equal(blockedAudit.includes('"event":"gas.topup-deferred"'), true)
+		assert.equal(blockedAudit.includes('"reason":"target-short"'), true)
+		assert.equal(existsSync(blocked.statePath), false)
+
+		const gap = quoteNeed! - balance
+		funded.balances.set(funded.pm, 10n ** 18n)
+		funded.balances.set(funded.addr, balance)
+		await funded.gk.runOnce()
+		assert.equal(funded.sends.length, 1)
+		assert.equal(funded.sends[0]!.value, gap)
+		assert.ok(funded.sends[0]!.value <= gap)
+
+		capped.balances.set(capped.pm, 10n ** 18n)
+		capped.balances.set(capped.addr, balance)
+		await capped.gk.runOnce()
+		assert.equal(capped.sends.length, 0)
+		assert.ok(capped.alerts.includes(`topup-deferred:224422:fee-cap:${capped.addr.toLowerCase()}`))
+		const cappedAudit = readFileSync(capped.auditPath, 'utf8')
+		assert.equal(cappedAudit.includes('"reason":"fee-cap"'), true)
+	} finally {
+		blocked.cleanup()
+		funded.cleanup()
+		capped.cleanup()
+	}
+})
+
 test('gas keeper refuses a top-up that exceeds the explicit budget', async () => {
 	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
 		budgetWei: '10',
@@ -1129,6 +1189,8 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 	extraWallets?: string[]
 	budgetWei?: string
 	omitBudget?: boolean
+	targetWei?: string
+	maxFeePerGasWei?: string
 	perAddressDailyWei?: string
 	globalDailyWei?: string
 	unlocked?: boolean
@@ -1225,10 +1287,11 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 	const chain = {
 		'224422': {
 			minWei: '100',
-			targetWei: '1000',
+			targetWei: opts.targetWei ?? '1000',
 			perAddressDailyWei: opts.perAddressDailyWei ?? '1000',
 			globalDailyWei: opts.globalDailyWei ?? '5000',
 			budgetWei: opts.omitBudget ? undefined : opts.budgetWei ?? '1000000',
+			...(opts.maxFeePerGasWei !== undefined ? { maxFeePerGasWei: opts.maxFeePerGasWei } : {}),
 			pmWarnWei: '1',
 			pmCriticalWei: '1',
 			wallets: [...(opts.wallets ?? [addr]), ...(opts.extraWallets ?? [])],

@@ -26,6 +26,12 @@ export type GasKeeperChain = {
 	wallets?: string[]
 	/** Persistent total in wei. A new UTC day does not refill it. Missing refuses every top-up. */
 	budgetWei?: string
+	/**
+	 * Optional oracle-only ceiling, in wei per gas. Absent means this authorization
+	 * has no fee cap: fees() does not reject a high market price. A live fee above
+	 * the ceiling blocks the top-up and leaves the shortfall visible.
+	 */
+	maxFeePerGasWei?: string
 }
 
 export type TlsListen = { host: string; port: number; cert: string; key: string; ca: string }
@@ -123,6 +129,9 @@ function normalizeGasKeeperChain(id: string, chain: GasKeeperChain): GasKeeperCh
 	}
 	if (chain.budgetWei !== undefined && !/^\d+$/.test(chain.budgetWei)) {
 		throw new Error(`config: gasKeeper.chains.${id}.budgetWei must be a wei integer`)
+	}
+	if (chain.maxFeePerGasWei !== undefined && !/^\d+$/.test(chain.maxFeePerGasWei)) {
+		throw new Error(`config: gasKeeper.chains.${id}.maxFeePerGasWei must be a wei integer`)
 	}
 	return { ...chain, wallets }
 }

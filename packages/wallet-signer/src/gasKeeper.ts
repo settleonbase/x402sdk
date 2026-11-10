@@ -11,6 +11,13 @@ import type { TxManager } from './txManager'
 /** Plain native transfer gas. The PM must keep at least this times the worst fee. */
 export const NATIVE_TOPUP_GAS_LIMIT = 21_000n
 
+/**
+ * Oracle quote authorization gas. Production policy maxGas is 200000 and has
+ * no maxGasPriceGwei, so the live fee ceiling is whatever the network asks.
+ * The keeper must not raise this number; a higher fee only raises quoteNeed.
+ */
+export const ORACLE_QUOTE_GAS_LIMIT = 200_000n
+
 /** Internal role that signs PM top-ups. Not a daemon client and not an admin-socket identity. */
 export const GAS_KEEPER_CLIENT = 'gas-keeper'
 
@@ -320,21 +327,25 @@ export class GasKeeper {
 		if (picked.fund.length === 0) return
 
 		let gasReserve: bigint
+		let quoteNeed: bigint
+		let worstFee: bigint
 		try {
 			const fee = await p.getFeeData()
-			const reserve = worstCaseNativeTransferGasWei(fee.gasPrice, fee.maxFeePerGas)
-			if (reserve === undefined) {
+			const worst = worstFeeWei(fee.gasPrice, fee.maxFeePerGas)
+			if (worst === undefined) {
 				this.alerter.send('critical', `pm-gas-unknown:${chainId}`, `PM top-up on chain ${chainId} needs a gas price before it can reserve gas`)
 				return
 			}
-			gasReserve = reserve
+			worstFee = worst
+			quoteNeed = ORACLE_QUOTE_GAS_LIMIT * worst
+			gasReserve = NATIVE_TOPUP_GAS_LIMIT * worst
 		} catch (e) {
 			this.alerter.send('critical', `pm-gas-unknown:${chainId}`, `PM top-up on chain ${chainId} could not read the gas price: ${errorMessage(e)}`)
 			return
 		}
 
-		const min = BigInt(cfg.minWei)
 		const target = BigInt(cfg.targetWei)
+		const feeCap = cfg.maxFeePerGasWei !== undefined ? BigInt(cfg.maxFeePerGasWei) : undefined
 		const nowIso = new Date().toISOString()
 		const targets = picked.fund
 			.filter((addr) => addr.toLowerCase() !== pm.toLowerCase())
@@ -363,23 +374,31 @@ export class GasKeeper {
 				continue
 			}
 			const bal = await p.getBalance(addr)
-			if (bal >= min) continue
-			const amount = target - bal
-			if (amount <= 0n) continue
+			// Absent maxFeePerGasWei means the oracle grant has no fee ceiling.
+			if (feeCap !== undefined && worstFee > feeCap) {
+				if (bal < quoteNeed) this.deferTopup(chainId, chainKey, addr, 'fee-cap', { quoteNeedWei: quoteNeed.toString(), balanceWei: bal.toString(), worstFeeWei: worstFee.toString() })
+				continue
+			}
+			if (bal >= quoteNeed) continue
+			const amount = target > bal ? target - bal : 0n
+			if (amount <= 0n) {
+				this.deferTopup(chainId, chainKey, addr, 'target-short', { quoteNeedWei: quoteNeed.toString(), balanceWei: bal.toString(), targetWei: target.toString() })
+				continue
+			}
 			const used = gasKeeperUsage(state.spend, chainKey, address, nowIso)
 			if (used.addressDaily + amount > BigInt(cfg.perAddressDailyWei)) {
-				this.alerter.send('warn', `topup-cap:${chainKey}:${address}`, `${addr} hit its daily top-up cap`)
+				this.deferTopup(chainId, chainKey, addr, 'address-cap', { amountWei: amount.toString() })
 				continue
 			}
 			// Today's window only. Settled spend from yesterday does not consume globalDailyWei.
 			// An unconfirmed pending row still does, including one recorded before UTC midnight.
 			if (used.globalDaily + amount > BigInt(cfg.globalDailyWei)) {
-				this.alerter.send('warn', `topup-global-cap:${chainId}`, `global daily top-up cap reached on chain ${chainId}`)
+				this.deferTopup(chainId, chainKey, addr, 'daily-cap', { amountWei: amount.toString() })
 				return
 			}
-			// All-time total. A new UTC day does not refill budgetWei.
+			// All-time total. A new UTC day does not refill budgetWei. A higher fee cannot raise it.
 			if (used.globalTotal + amount > budget) {
-				this.alerter.send('warn', `topup-budget:${chainId}`, `explicit top-up budget reached on chain ${chainId}`)
+				this.deferTopup(chainId, chainKey, addr, 'budget', { amountWei: amount.toString() })
 				return
 			}
 			if (pmBal < amount + gasReserve) {
@@ -402,6 +421,20 @@ export class GasKeeper {
 			const sent = await this.broadcast(state, chainId, pm, addr, row)
 			if (sent) pmBal -= amount + gasReserve
 		}
+	}
+
+	/** Shortfall stays visible in the audit log. It does not reserve or raise an approved budget. */
+	private deferTopup(chainId: number, chainKey: string, addr: string, reason: 'fee-cap' | 'target-short' | 'address-cap' | 'daily-cap' | 'budget', detail: Record<string, string>): void {
+		const address = addr.toLowerCase()
+		this.audit.write({ event: 'gas.topup-deferred', chainId, address, reason, ...detail })
+		const code = reason === 'address-cap'
+			? `topup-cap:${chainKey}:${address}`
+			: reason === 'daily-cap'
+				? `topup-global-cap:${chainId}`
+				: reason === 'budget'
+					? `topup-budget:${chainId}`
+					: `topup-deferred:${chainId}:${reason}:${address}`
+		this.alerter.send('warn', code, `top-up of ${addr} deferred (${reason})`)
 	}
 
 	/** 'busy' = unconfirmed, do not send. 'resume' = intent was saved but not broadcast. 'clear' = terminal. */
@@ -500,12 +533,23 @@ export class GasKeeper {
 	}
 }
 
-/** Highest known fee, at least the legacy gas price, times the native transfer limit. */
-export function worstCaseNativeTransferGasWei(gasPrice?: bigint | null, maxFeePerGas?: bigint | null): bigint | undefined {
+/** Higher of maxFeePerGas and gasPrice. Zero or missing prices are ignored. */
+export function worstFeeWei(gasPrice?: bigint | null, maxFeePerGas?: bigint | null): bigint | undefined {
 	const prices = [gasPrice, maxFeePerGas].filter((price): price is bigint => typeof price === 'bigint' && price > 0n)
 	if (prices.length === 0) return undefined
-	const worst = prices.reduce((highest, price) => (price > highest ? price : highest))
-	return NATIVE_TOPUP_GAS_LIMIT * worst
+	return prices.reduce((highest, price) => (price > highest ? price : highest))
+}
+
+/** Native transfer reserve: 21000 times the current worst fee. */
+export function worstCaseNativeTransferGasWei(gasPrice?: bigint | null, maxFeePerGas?: bigint | null): bigint | undefined {
+	const worst = worstFeeWei(gasPrice, maxFeePerGas)
+	return worst === undefined ? undefined : NATIVE_TOPUP_GAS_LIMIT * worst
+}
+
+/** Gas the oracle quote must be able to pay at the current worst fee. Does not raise approved spend. */
+export function oracleQuoteNeedWei(gasPrice?: bigint | null, maxFeePerGas?: bigint | null): bigint | undefined {
+	const worst = worstFeeWei(gasPrice, maxFeePerGas)
+	return worst === undefined ? undefined : ORACLE_QUOTE_GAS_LIMIT * worst
 }
 
 /** Stable across restarts. The attempt number changes only after the previous top-up is terminal. */
