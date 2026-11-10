@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { JsonRpcProvider, Wallet, getAddress, hexlify, toBeHex } from 'ethers'
 import { AuditLog } from '../src/audit'
-import { BEAMIO_ORACLE_CONTRACT, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, gasKeeperUsage, type SpendRow } from '../src/gasKeeper'
+import { BEAMIO_ORACLE_CONTRACT, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, gasKeeperUsage, oracleQuoteNeedWei, type SpendRow } from '../src/gasKeeper'
 import { HdRoot, PM_ACCOUNT, mnemonicToEntropyBytes, newMnemonic } from '../src/hd'
 import type { Keyring } from '../src/keyring'
 import type { KeyArray, RegistryBody } from '../src/registry'
@@ -83,6 +83,7 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 		'--host', '127.0.0.1',
 		'--port', String(port),
 		'--chain-id', '224422',
+		'--hardfork', 'berlin',
 		'--silent',
 		'--gas-price', '1',
 	], { stdio: 'ignore' })
@@ -124,6 +125,9 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 		assert.equal(getAddress(`0x${ownerWord.slice(-40)}`), OWNER)
 		const contractCode = await provider.getCode(CONTRACT)
 		assert.equal(contractCode === '0x' || contractCode === '0x0', false)
+		const liveFee = await provider.getFeeData()
+		const quoteNeed = oracleQuoteNeedWei(liveFee.gasPrice, liveFee.maxFeePerGas)
+		if (quoteNeed === undefined) throw new Error('anvil fee missing')
 
 		const make = (label: string, opts: {
 			wallets: string[]
@@ -131,6 +135,7 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			budgetWei?: string
 			perAddressDailyWei?: string
 			globalDailyWei?: string
+			targetWei?: string
 			unlocked?: boolean
 		}) => {
 			const dir = mkdtempSync(join(tmpdir(), `ws-anvil-${label}-`))
@@ -188,10 +193,10 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			const chain = {
 				'224422': {
 					minWei: '100',
-					targetWei: '1000',
-					perAddressDailyWei: opts.perAddressDailyWei ?? '100000',
-					globalDailyWei: opts.globalDailyWei ?? '100000',
-					budgetWei: opts.budgetWei ?? '1000000',
+					targetWei: opts.targetWei ?? quoteNeed.toString(),
+					perAddressDailyWei: opts.perAddressDailyWei ?? (quoteNeed * 5n).toString(),
+					globalDailyWei: opts.globalDailyWei ?? (quoteNeed * 5n).toString(),
+					budgetWei: opts.budgetWei ?? (quoteNeed * 5n).toString(),
 					pmWarnWei: '1',
 					pmCriticalWei: '1',
 					wallets: opts.wallets,
@@ -233,10 +238,10 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			const fresh = after.slice(before.length)
 			assert.equal(fresh.length, 1, fx.alerts.join(' | '))
 			assert.equal(getAddress(fresh[0]!.to!), OWNER)
-			assert.equal(fresh[0]!.value, 1000n)
+			assert.equal(fresh[0]!.value, quoteNeed)
 			assertNoValueTo(after, CONTRACT)
 			assert.equal(await provider.getBalance(CONTRACT), 0n)
-			assert.equal(await provider.getBalance(OWNER), 1000n)
+			assert.equal(await provider.getBalance(OWNER), quoteNeed)
 			const audit = readFileSync(fx.auditPath, 'utf8')
 			assert.equal(audit.includes('"event":"gas.topup-refused"'), true)
 			assert.equal(audit.includes('"reason":"contract"'), true)
@@ -311,12 +316,12 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			const fx = make('budget', {
 				wallets: [OWNER],
 				arrays: [keyArray(ORACLE_OWNER_ARRAY, [OWNER])],
-				budgetWei: '1000',
-				perAddressDailyWei: '100000',
-				globalDailyWei: '100000',
+				budgetWei: quoteNeed.toString(),
+				perAddressDailyWei: (quoteNeed * 5n).toString(),
+				globalDailyWei: (quoteNeed * 5n).toString(),
 			})
 			await fx.gk.runOnce()
-			assert.equal(await provider.getBalance(OWNER), 1000n)
+			assert.equal(await provider.getBalance(OWNER), quoteNeed)
 			await provider.send('anvil_setBalance', [OWNER, '0x0'])
 			await fx.gk.runOnce()
 			const after = await pmTransfers(provider, pm.address)
@@ -340,7 +345,7 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			const after = await pmTransfers(provider, pm.address)
 			assert.equal(after.length, before.length + 1)
 			assert.equal(getAddress(after.at(-1)!.to!), OWNER)
-			assert.equal(await provider.getBalance(OWNER), 1000n)
+			assert.equal(await provider.getBalance(OWNER), quoteNeed)
 		})
 
 		await t.test('locked keeper does not sign', async () => {
@@ -403,7 +408,7 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 				idempotencyKey: key,
 				chainId: '224422',
 				address: OWNER.toLowerCase(),
-				amountWei: '1000',
+				amountWei: quoteNeed.toString(),
 				recordedAt: when,
 				status: 'settled',
 				attempt: 0,
@@ -412,15 +417,15 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			const opened = make('day-open', {
 				wallets: [OWNER],
 				arrays: [keyArray(ORACLE_OWNER_ARRAY, [OWNER])],
-				globalDailyWei: '1000',
-				perAddressDailyWei: '5000',
-				budgetWei: '2000',
+				globalDailyWei: quoteNeed.toString(),
+				perAddressDailyWei: (quoteNeed * 5n).toString(),
+				budgetWei: (quoteNeed * 2n).toString(),
 			})
 			writeFileSync(opened.statePath, JSON.stringify({ version: 2, spend: [row(yesterday, 'anvil-day-1')] }))
 			const before = await pmTransfers(provider, pm.address)
 			await opened.gk.runOnce()
 			assert.equal((await pmTransfers(provider, pm.address)).length, before.length + 1)
-			assert.equal(await provider.getBalance(OWNER), 1000n)
+			assert.equal(await provider.getBalance(OWNER), quoteNeed)
 			assert.equal(opened.alerts.includes('topup-budget:224422'), false)
 			assert.equal(opened.alerts.includes('topup-global-cap:224422'), false)
 
@@ -428,9 +433,9 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			const closed = make('day-closed', {
 				wallets: [OWNER],
 				arrays: [keyArray(ORACLE_OWNER_ARRAY, [OWNER])],
-				globalDailyWei: '1000',
-				perAddressDailyWei: '5000',
-				budgetWei: '2000',
+				globalDailyWei: quoteNeed.toString(),
+				perAddressDailyWei: (quoteNeed * 5n).toString(),
+				budgetWei: (quoteNeed * 2n).toString(),
 			})
 			writeFileSync(closed.statePath, JSON.stringify({
 				version: 2,
@@ -489,7 +494,7 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 		assertNoValueTo(all, LEAKED)
 		assert.equal(await provider.getBalance(CONTRACT), 0n)
 		assert.equal(await provider.getBalance(LEAKED), 0n)
-		assert.ok(all.some((tx) => tx.to && getAddress(tx.to) === OWNER && tx.value === 1000n))
+		assert.ok(all.some((tx) => tx.to && getAddress(tx.to) === OWNER && tx.value === quoteNeed))
 	} finally {
 		await stop()
 	}

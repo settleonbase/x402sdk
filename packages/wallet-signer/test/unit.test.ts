@@ -603,7 +603,7 @@ test('gas keeper total counts settled history after the UTC day changes', () => 
 test('gas keeper reserves worst-case gas on the PM and refuses a balance that only covers the top-up', async () => {
 	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: 10n })
 	try {
-		const amount = 1000n
+		const amount = oracleQuoteNeedWei(1n, 10n)!
 		fx.balances.set(fx.pm, amount + 21_000n)
 		fx.balances.set(fx.addr, 0n)
 		await fx.gk.runOnce()
@@ -623,7 +623,7 @@ test('gas keeper reserves worst-case gas on the PM and refuses a balance that on
 test('gas keeper idempotency key is stable and an unconfirmed top-up is not sent again after restart', async () => {
 	const fx = gasFixture({ gasPrice: 2n, maxFeePerGas: null })
 	try {
-		const amount = 1000n
+		const amount = oracleQuoteNeedWei(2n, null)!
 		fx.balances.set(fx.pm, amount + 21_000n * 2n)
 		fx.balances.set(fx.addr, 0n)
 		await fx.gk.runOnce()
@@ -727,14 +727,14 @@ test('a full UTC day does not keep blocking, and the persistent budget does not 
 		attempt: 0,
 	})
 	const opened = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
-		globalDailyWei: '1000',
-		perAddressDailyWei: '5000',
-		budgetWei: '2000',
+		globalDailyWei: '200000',
+		perAddressDailyWei: '1000000',
+		budgetWei: '400000',
 	})
 	const exhausted = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
-		globalDailyWei: '1000',
-		perAddressDailyWei: '5000',
-		budgetWei: '2000',
+		globalDailyWei: '200000',
+		perAddressDailyWei: '1000000',
+		budgetWei: '400000',
 	})
 	try {
 		writeFileSync(opened.statePath, JSON.stringify({
@@ -758,8 +758,8 @@ test('a full UTC day does not keep blocking, and the persistent budget does not 
 		writeFileSync(exhausted.statePath, JSON.stringify({
 			version: 2,
 			spend: [
-				{ ...spent(earlier, '1000', 'day-0'), address: exhausted.addr.toLowerCase() },
-				{ ...spent(yesterday, '1000', 'day-1b'), address: exhausted.addr.toLowerCase() },
+				{ ...spent(earlier, '200000', 'day-0'), address: exhausted.addr.toLowerCase() },
+				{ ...spent(yesterday, '200000', 'day-1b'), address: exhausted.addr.toLowerCase() },
 			],
 		}))
 		exhausted.balances.set(exhausted.pm, 5_000_000n)
@@ -788,7 +788,7 @@ test('gas keeper per-address daily window still opens on a new UTC day while the
 			attempt: 0,
 		}
 		writeFileSync(fx.statePath, JSON.stringify({ version: 2, day: new Date().toISOString().slice(0, 10), spend: [row] }))
-		fx.balances.set(fx.pm, 1000n + 21_000n)
+		fx.balances.set(fx.pm, 200_000n + 21_000n)
 		fx.balances.set(fx.addr, 0n)
 		await fx.gk.runOnce()
 		assert.equal(fx.sends.length, 1)
@@ -862,6 +862,15 @@ test('a higher quote fee cannot hide below the old minWei', async () => {
 	assert.ok(quoteNeed !== undefined && quoteNeed > oldMin)
 	const balance = oldMin + 1n
 	assert.ok(balance < quoteNeed!)
+	const partialTarget = quoteNeed! / 2n
+	const partialBalance = partialTarget / 2n
+	assert.ok(partialBalance < partialTarget && partialTarget < quoteNeed!)
+	const partial = gasFixture({ gasPrice: 1n, maxFeePerGas: worst }, {
+		targetWei: partialTarget.toString(),
+		perAddressDailyWei: quoteNeed!.toString(),
+		globalDailyWei: quoteNeed!.toString(),
+		budgetWei: quoteNeed!.toString(),
+	})
 	const blocked = gasFixture({ gasPrice: 1n, maxFeePerGas: worst }, {
 		targetWei: oldMin.toString(),
 		perAddressDailyWei: quoteNeed!.toString(),
@@ -892,6 +901,16 @@ test('a higher quote fee cannot hide below the old minWei', async () => {
 		assert.equal(blockedAudit.includes('"reason":"target-short"'), true)
 		assert.equal(existsSync(blocked.statePath), false)
 
+		partial.balances.set(partial.pm, 10n ** 18n)
+		partial.balances.set(partial.addr, partialBalance)
+		await partial.gk.runOnce()
+		assert.equal(partial.sends.length, 0)
+		assert.ok(partial.alerts.includes(`topup-deferred:224422:target-short:${partial.addr.toLowerCase()}`))
+		const partialAudit = readFileSync(partial.auditPath, 'utf8')
+		assert.equal(partialAudit.includes('"event":"gas.topup-deferred"'), true)
+		assert.equal(partialAudit.includes('"reason":"target-short"'), true)
+		assert.equal(existsSync(partial.statePath), false)
+
 		const gap = quoteNeed! - balance
 		funded.balances.set(funded.pm, 10n ** 18n)
 		funded.balances.set(funded.addr, balance)
@@ -911,6 +930,7 @@ test('a higher quote fee cannot hide below the old minWei', async () => {
 		blocked.cleanup()
 		funded.cleanup()
 		capped.cleanup()
+		partial.cleanup()
 	}
 })
 
@@ -952,7 +972,7 @@ test('gas keeper tops up only the intersection from the PM on a local mock', asy
 		budgetWei: '1000000',
 	})
 	try {
-		const amount = 1000n
+		const amount = oracleQuoteNeedWei(1n, null)!
 		fx.balances.set(fx.pm, amount + 21_000n)
 		fx.balances.set(fx.addr, 0n)
 		fx.balances.set(bystander, 0n)
@@ -1284,13 +1304,14 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 			return rec
 		},
 	}
+	const need = oracleQuoteNeedWei(fee.gasPrice, fee.maxFeePerGas) ?? 200_000n
 	const chain = {
 		'224422': {
 			minWei: '100',
-			targetWei: opts.targetWei ?? '1000',
-			perAddressDailyWei: opts.perAddressDailyWei ?? '1000',
-			globalDailyWei: opts.globalDailyWei ?? '5000',
-			budgetWei: opts.omitBudget ? undefined : opts.budgetWei ?? '1000000',
+			targetWei: opts.targetWei ?? need.toString(),
+			perAddressDailyWei: opts.perAddressDailyWei ?? need.toString(),
+			globalDailyWei: opts.globalDailyWei ?? (need * 5n).toString(),
+			budgetWei: opts.omitBudget ? undefined : opts.budgetWei ?? (need * 10n).toString(),
 			...(opts.maxFeePerGasWei !== undefined ? { maxFeePerGasWei: opts.maxFeePerGasWei } : {}),
 			pmWarnWei: '1',
 			pmCriticalWei: '1',

@@ -380,11 +380,12 @@ export class GasKeeper {
 				continue
 			}
 			if (bal >= quoteNeed) continue
-			const amount = target > bal ? target - bal : 0n
-			if (amount <= 0n) {
+			// A target below one quote cannot be topped up into a payable balance.
+			if (target < quoteNeed) {
 				this.deferTopup(chainId, chainKey, addr, 'target-short', { quoteNeedWei: quoteNeed.toString(), balanceWei: bal.toString(), targetWei: target.toString() })
 				continue
 			}
+			const amount = target - bal
 			const used = gasKeeperUsage(state.spend, chainKey, address, nowIso)
 			if (used.addressDaily + amount > BigInt(cfg.perAddressDailyWei)) {
 				this.deferTopup(chainId, chainKey, addr, 'address-cap', { amountWei: amount.toString() })
