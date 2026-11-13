@@ -53,7 +53,7 @@ import {
 } from './eoaUsdcStripe'
 import { claimFreeMembershipProcess } from '../MemberCard'
 import { handleStripeBeamioWebhook } from './stripeBeamioHook'
-import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, relocateBUnitsToSmartWalletPool, relocateBUnitsToSmartWalletProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, settlePoolIdleSummary, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, createInstitutionalAaForEoa, CreateInstitutionalAaHttpError, submitAAAccountCreationViaEntryPoint, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppClaimWithKeyExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, aaMultisigOfflineSubmitPool, kickAaMultisigOfflineSubmitProcess, aaInstitutionalV2RelayPool, kickAaInstitutionalV2RelayProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
+import { purchasingCardPool, purchasingCardProcess, purchasingCardPreCheck, createCardPool, createCardPoolPress, applyBeamioCardShareMetadataUpdate, applyBeamioCardMerchantImageUrlUpdate, applyBeamioCardProgramImageUrlUpdate, isAllowedMerchantImageHttpsUrl, executeForOwnerPool, executeForOwnerProcess, executeForAdminPool, executeForAdminProcess, cardRedeemPool, kickCardRedeemPoolPress, cardOpenTransferPool, kickCardOpenTransferPoolPress, cardCouponOpenClaimPool, cardCouponOpenClaimProcess, cardCouponPosClaimWalletPool, cardCouponPosClaimWalletProcess, cardRedeemAdminPool, cardRedeemAdminProcess, cardClearAdminMintCounterProcess, cardTerminalSettlementClearProcess, AAtoEOAPool, AAtoEOAProcess, OpenContainerRelayPool, OpenContainerRelayProcess, OpenContainerRelayPreCheck, ContainerRelayPool, ContainerRelayProcess, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, beamioTransferIndexerAccountingPool, beamioTransferIndexerAccountingProcess, requestAccountingPool, requestAccountingProcess, cancelRequestAccountingPool, cancelRequestAccountingProcess, claimBUnitsPool, claimBUnitsProcess, relocateBUnitsToSmartWalletPool, relocateBUnitsToSmartWalletProcess, buintRedeemAirdropPool, buintRedeemAirdropProcess, businessStartKetRedeemUserRedeemPool, businessStartKetRedeemUserRedeemProcess, businessStartKetRedeemCreatePool, businessStartKetRedeemCreateProcess, businessStartKetRedeemCancelPool, businessStartKetRedeemCancelProcess, removePOSPool, removePOSProcess, registerPOSPool, registerPOSProcess, purchaseBUnitFromBasePool, purchaseBUnitFromBaseProcess, Settle_ContractPool, settlePoolIdleSummary, ensureAAForMintTarget, ensureAAForEOA, ensureAAForEOAOnConet, createInstitutionalAaForEoa, CreateInstitutionalAaHttpError, submitAAAccountCreationViaEntryPoint, signUSDC3009ForNfcTopup, nfcTopupPreparePayload, payByNfcUidOpenContainer, payByNfcUidPrepare, payByNfcUidSignContainer, nfcLinkAppExecute, nfcLinkAppCancelExecute, nfcLinkAppPaymentBlockedForMintCalldata, startNfcLinkAppAutoCancelSweeper, signExecuteForAdminWithServiceAdmin, getBeamioUserCardFactoryGateway, couponWorkflowDebugEnabled, aaMultisigOfflineSubmitPool, kickAaMultisigOfflineSubmitProcess, aaInstitutionalV2RelayPool, kickAaInstitutionalV2RelayProcess, type AAtoEOAUserOp, type OpenContainerRelayPayload, type ContainerRelayPayload, type ContainerRelayPayloadUnsigned, type BeamioTransferRouteItem } from '../MemberCard'
 import { BEAMIO_INDEXER_DIAMOND, CONET_CARD_FACTORY, USDC_BASE } from '../chainAddresses'
 import { shiftSettleBase, unshiftSettleBase } from '../settleContractPool'
 import { providerForUserCardChain, resolveUserCardChain } from '../beamioUserCardChain'
@@ -4985,9 +4985,9 @@ const routing = ( router: Router ) => {
 			await nfcLinkAppCancelExecute(req.body ?? {}, res)
 		})
 
-		/** POST /api/nfcLinkAppClaimWithKey - App 完成 Link：redeem（若有）+ 将 nfc_cards 私钥换为用户密钥 + 释放会话 */
-		router.post('/nfcLinkAppClaimWithKey', async (req, res) => {
-			await nfcLinkAppClaimWithKeyExecute(req.body ?? {}, res)
+		/** POST /api/nfcLinkAppClaimWithKey - 2026-11-13 GAP-17 已移除（路由仍保留为 410，不解析 body、不写库、不转发）。 */
+		router.post('/nfcLinkAppClaimWithKey', (_req, res) => {
+			return res.status(410).json({ success: false, errorCode: 'NFC_CONSUMER_CLAIM_REMOVED', error: 'Consumer NFC card claim has been removed.' }).end()
 		})
 
 		/** POST /api/nfcTopupPrepare - 返回 executeForAdmin 所需的 cardAddr、data、deadline、nonce。cardAddress 必填；支持 uid（NFC）或 wallet（Scan QR）。Optional paidAmount = 实付本金. */
@@ -7042,6 +7042,12 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 
 	// app.use ( express.static ( staticFolder ))
+	/** 2026-11-13 GAP-17：消费者 NFC 绑定/认领接口已移除。须在 express.json 之前拒绝，请求体（可能含私钥）不被解析、不被记录、不被转发。 */
+	app.post('/api/nfcLinkAppClaimWithKey', (_req: Request, res: Response) => {
+		logger(Colors.yellow('[GAP-17] POST /api/nfcLinkAppClaimWithKey rejected: removed (body not read)'))
+		return res.status(410).json({ success: false, errorCode: 'NFC_CONSUMER_CLAIM_REMOVED', error: 'Consumer NFC card claim has been removed.' }).end()
+	})
+
 	app.use ( express.json({ limit: '5mb' }) )
 
 	const cors = require('cors')

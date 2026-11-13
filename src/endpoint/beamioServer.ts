@@ -4077,70 +4077,9 @@ const routing = ( router: Router ) => {
 		)
 	})
 
-	/** POST /api/nfcLinkAppClaimWithKey - SilentPassUI 扫 Link 深链：校验参数与私钥格式后转 Master（全量资产迁移 + 换绑 nfc_cards 私钥） */
-	router.post('/nfcLinkAppClaimWithKey', async (req, res) => {
-		const body = req.body as {
-			nftRedeemcode?: string
-			tagid?: string
-			uid?: string
-			counter?: string | number
-			privateKey?: string
-		}
-		const code = typeof body.nftRedeemcode === 'string' ? body.nftRedeemcode.trim() : ''
-		const tagid = typeof body.tagid === 'string' ? body.tagid.trim().replace(/^0x/i, '') : ''
-		const uid = typeof body.uid === 'string' ? body.uid.trim().replace(/^0x/i, '').toLowerCase() : ''
-		const pk = typeof body.privateKey === 'string' ? body.privateKey.trim() : ''
-		const ctr = body.counter
-		if (!code || code.toLowerCase() === 'null') {
-			return res.status(400).json({ success: false, error: 'Missing nftRedeemcode.' }).end()
-		}
-		if (!/^[0-9a-f]{16}$/i.test(tagid)) {
-			return res.status(400).json({ success: false, error: 'Invalid tagid.' }).end()
-		}
-		if (!/^[0-9a-f]{14}$/i.test(uid)) {
-			return res.status(400).json({ success: false, error: 'Invalid uid.' }).end()
-		}
-		const ctrNum = typeof ctr === 'number' && Number.isFinite(ctr) ? ctr : parseInt(String(ctr ?? ''), 10)
-		if (!Number.isFinite(ctrNum)) {
-			return res.status(400).json({ success: false, error: 'Invalid counter.' }).end()
-		}
-		const pkHex = pk.startsWith('0x') ? pk : `0x${pk}`
-		if (!/^0x[0-9a-fA-F]{64}$/.test(pkHex)) {
-			return res.status(400).json({ success: false, error: 'Invalid private key.' }).end()
-		}
-		try {
-			new ethers.Wallet(pkHex)
-		} catch {
-			return res.status(400).json({ success: false, error: 'Invalid private key.' }).end()
-		}
-		const claimClusterGate = await getNfcCardSignedTxGateByTagId(tagid.toUpperCase())
-		if (!claimClusterGate.ok) {
-			return res.status(403).json({ success: false, error: claimClusterGate.message, errorCode: claimClusterGate.code }).end()
-		}
-		const linkSession = await nfcLinkAppValidateParams({
-			nftRedeemcode: code,
-			tagid,
-			uid,
-			counter: ctrNum,
-		})
-		if (!linkSession.ok) {
-			return res.status(400).json({ success: false, error: linkSession.error }).end()
-		}
-		if (linkSession.migrateViaContainer) {
-			const claimUserEoa = ethers.getAddress(new ethers.Wallet(pkHex).address)
-			const bUnitPre = await nfcLinkAppMigrationBUnitClusterPreCheck(claimUserEoa)
-			if (!bUnitPre.success) {
-				return res
-					.status(403)
-					.json({
-						success: false,
-						error: bUnitPre.error ?? 'Insufficient B-Units for link migration.',
-						errorCode: 'NFC_LINK_MIGRATION_INSUFFICIENT_BUNITS',
-					})
-					.end()
-			}
-		}
-		postLocalhost('/api/nfcLinkAppClaimWithKey', req.body ?? {}, res)
+	/** POST /api/nfcLinkAppClaimWithKey - 2026-11-13 GAP-17 已移除（路由仍保留为 410，不解析 body、不写库、不转发）。 */
+	router.post('/nfcLinkAppClaimWithKey', (_req, res) => {
+		return res.status(410).json({ success: false, errorCode: 'NFC_CONSUMER_CLAIM_REMOVED', error: 'Consumer NFC card claim has been removed.' }).end()
 	})
 
 	/** POST /api/nfcLinkAppValidate - 校验深链参数与当前 Link App 会话一致（Cluster 直出，读共享 PG） */
@@ -15191,6 +15130,12 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 
 
 	// app.use ( express.static ( staticFolder ))
+	/** 2026-11-13 GAP-17：消费者 NFC 绑定/认领接口已移除。须在 express.json 之前拒绝，请求体（可能含私钥）不被解析、不被记录、不被转发。 */
+	app.post('/api/nfcLinkAppClaimWithKey', (_req: Request, res: Response) => {
+		logger(Colors.yellow('[GAP-17] POST /api/nfcLinkAppClaimWithKey rejected: removed (body not read)'))
+		return res.status(410).json({ success: false, errorCode: 'NFC_CONSUMER_CLAIM_REMOVED', error: 'Consumer NFC card claim has been removed.' }).end()
+	})
+
 	app.use ( express.json({ limit: '8mb' }) )
 
 	const cors = require('cors')
