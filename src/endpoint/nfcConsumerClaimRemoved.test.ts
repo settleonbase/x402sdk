@@ -109,8 +109,38 @@ test('positive regression: NFC payment / top-up / link-app routes still register
 	}
 })
 
-test('positive regression: merchant-side NFC card issuance executors still exported', () => {
-	for (const name of ['nfcLinkAppExecute', 'nfcLinkAppCancelExecute', 'payByNfcUidPrepare', 'nfcTopupPreparePayload', 'signUSDC3009ForNfcTopup']) {
-		assert.ok(new RegExp(`export (const|async function|function) ${name}\\b`).test(memberSrc), `missing export ${name}`)
+const dbSrc = read('db.ts')
+
+test('GAP-18: consumer card link-state route answers 410 and does not read body or DB', () => {
+	const at = serverSrc.indexOf("router.post('/nfcCardLinkState'")
+	assert.ok(at > 0, 'route must still be registered (as 410)')
+	const block = serverSrc.slice(at, serverSrc.indexOf('\n\t})\n', at) + 5)
+	assert.ok(block.includes('410') && block.includes('NFC_CONSUMER_CARD_LINK_REMOVED'))
+	assert.ok(!block.includes('applyNfcCardLinkStateChange('))
+	assert.ok(!block.includes('req.body'))
+})
+
+test('positive regression A (merchant card issuance): server-generated card key path intact', () => {
+	assert.ok(/export const provisionOrGetNfcWalletByTagId\b/.test(dbSrc), 'provisionOrGetNfcWalletByTagId must exist')
+	assert.ok(dbSrc.includes('ethers.Wallet.createRandom()') && dbSrc.includes('registerNfcCardToDb({'), 'server-side random card key + registration must remain')
+	assert.ok(memberSrc.includes('await provisionOrGetNfcWalletByTagId(tagIdHex, uidTrim)'), 'nfcLinkAppExecute must still provision via server')
+	assert.ok(masterSrc.includes("router.post('/getUIDAssetsProvision'") || masterSrc.includes("'/getUIDAssetsProvision'"), 'getUIDAssetsProvision route must remain')
+	assert.ok(/export const nfcLinkAppExecute\b/.test(memberSrc), 'nfcLinkAppExecute export must remain')
+})
+
+test('positive regression B (managed signing): signing routes and executors intact', () => {
+	assert.ok(masterSrc.includes("router.post('/payByNfcUidSignContainer'"))
+	assert.ok(serverSrc.includes("router.post('/nfcUsdcChargeNfcSign'") && serverSrc.includes("router.post('/nfcUsdcChargeRawSig'"))
+	assert.ok(/export const signUSDC3009ForNfcTopup\b/.test(memberSrc), 'signUSDC3009ForNfcTopup export must remain')
+	assert.ok(/export const payByNfcUidSignContainer\b/.test(memberSrc) || /payByNfcUidSignContainer\b/.test(memberSrc), 'payByNfcUidSignContainer executor must remain')
+})
+
+test('positive regression C (NFC payment / top-up): prepare, pay, top-up routes intact', () => {
+	for (const p of ['/payByNfcUid', '/payByNfcUidPrepare', '/nfcTopupPrepare', '/nfcTopup', '/nfcUsdcTopup']) {
+		assert.ok(serverSrc.includes(`router.post('${p}'`) || serverSrc.includes(`router.get('${p}'`), `missing ${p} (Cluster)`)
 	}
+	for (const p of ['/payByNfcUid', '/payByNfcUidPrepare', '/nfcTopupPrepare', '/nfcTopup', '/nfcUsdcTopup']) {
+		assert.ok(masterSrc.includes(`router.post('${p}'`), `missing ${p} (Master)`)
+	}
+	assert.ok(/export const nfcTopupPreparePayload\b|export async function nfcTopupPreparePayload\b/.test(memberSrc), 'nfcTopupPreparePayload export must remain')
 })
