@@ -187,3 +187,10 @@ test('R-1: registerNfcCardToDb and the server-side provisioning chain are kept',
 	assert.ok(dbSrc.includes('ethers.Wallet.createRandom()') && /export const provisionOrGetNfcWalletByTagId\b/.test(dbSrc))
 	assert.ok(masterSrc.includes("router.get('/getUIDAssetsProvision'") || masterSrc.includes("'/getUIDAssetsProvision'"))
 })
+
+test('log hygiene: inbound debug logger redacts private-key-like fields in both services', () => {
+	for (const src of [serverSrc, masterSrc]) {
+		assert.ok(src.includes('const redactSecretsForLog'), 'redaction helper must exist')
+		assert.ok(/const body = truncateValue\(redactSecretsForLog\(req\.body\)\)/.test(src), 'inbound logger must redact body')
+	}
+})

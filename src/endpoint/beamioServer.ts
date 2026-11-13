@@ -2216,9 +2216,23 @@ const truncateValue = (value: unknown, maxLen = 600): unknown => {
 	return value
 }
 
+/** 2026-11-13 日志脱敏：入站调试日志不得输出私钥或助记词类字段（金丝雀测试发现 nfcLinkApp 路由会打印 privateKey）。 */
+const redactSecretsForLog = (value: unknown, depth = 0): unknown => {
+	if (value == null || depth > 6) return value
+	if (Array.isArray(value)) return value.map((v) => redactSecretsForLog(v, depth + 1))
+	if (typeof value === 'object') {
+		const out: Record<string, unknown> = {}
+		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+			out[k] = /private|secret|mnemonic|seed|passphrase|signature_?key/i.test(k) ? '<redacted>' : redactSecretsForLog(v, depth + 1)
+		}
+		return out
+	}
+	return value
+}
+
 const logInboundDebug = (req: Request) => {
 	if (!DEBUG_INBOUND) return
-	const body = truncateValue(req.body)
+	const body = truncateValue(redactSecretsForLog(req.body))
 	const query = truncateValue(req.query)
 	logger(
 		Colors.gray(
