@@ -4008,59 +4008,9 @@ const routing = ( router: Router ) => {
 		)
 	})
 
-	/** POST /api/nfcLinkApp - POS Link App：SUN 预检 + DB 会话冲突检查，再转发 Master 登记 redeem / 写会话 */
-	router.post('/nfcLinkApp', async (req, res) => {
-		const body = req.body as { uid?: string; e?: string; c?: string; m?: string; cardAddress?: string }
-		const uidTrim = body.uid?.trim() ?? ''
-		const eTrim = body.e?.trim() ?? ''
-		const cTrim = body.c?.trim() ?? ''
-		const mTrim = body.m?.trim() ?? ''
-		const cardRaw = typeof body.cardAddress === 'string' ? body.cardAddress.trim() : ''
-		if (cardRaw && !ethers.isAddress(cardRaw)) {
-			return res.status(400).json({ success: false, error: 'Invalid cardAddress.' }).end()
-		}
-		if (!/^[0-9A-Fa-f]{14}$/.test(uidTrim)) {
-			return res.status(400).json({ success: false, error: 'Invalid uid' }).end()
-		}
-		if (!eTrim || !cTrim || !mTrim || eTrim.length !== 64 || cTrim.length !== 6 || mTrim.length !== 16) {
-			return res.status(403).json({ success: false, error: 'SUN params (e, c, m) required.' }).end()
-		}
-		try {
-			const securityGate = await verifyNfcSecurityGate(
-				{ uid: uidTrim, e: eTrim, c: cTrim, m: mTrim },
-				{ allowUnlinked: true },
-			)
-			if (!securityGate.ok) return res.status(securityGate.statusCode).json(securityGate).end()
-			const nfcTxGateLink = await getNfcCardSignedTxGateByTagId(securityGate.tagIdHex)
-			if (!nfcTxGateLink.ok) {
-				return res.status(403).json({ success: false, error: nfcTxGateLink.message, errorCode: nfcTxGateLink.code }).end()
-			}
-			const blockedDetail = await nfcLinkAppNewLinkBlockedDetail(securityGate.tagIdHex)
-			if (blockedDetail) {
-				return res
-					.status(409)
-					.json({
-						success: false,
-						error: NFC_LINK_APP_CARD_LOCKED_MESSAGE,
-						errorCode: NFC_LINK_APP_CARD_LOCKED_ERROR_CODE,
-						redeemOnChain: blockedDetail.redeemOnChain,
-					})
-					.end()
-			}
-		} catch (e: any) {
-			return res.status(403).json({ success: false, error: e?.message ?? String(e) }).end()
-		}
-		postLocalhost(
-			'/api/nfcLinkApp',
-			{
-				uid: uidTrim,
-				e: eTrim,
-				c: cTrim,
-				m: mTrim,
-				...(cardRaw ? { cardAddress: ethers.getAddress(cardRaw) } : {}),
-			},
-			res
-		)
+	/** POST /api/nfcLinkApp - 2026-11-13 已停用（GAP-17 随消费者绑卡）。仅消费者实体卡绑定流程使用，返回 410，不做 SUN 校验、不写会话、不转发。 */
+	router.post('/nfcLinkApp', (_req, res) => {
+		return res.status(410).json({ success: false, errorCode: 'NFC_CONSUMER_CLAIM_REMOVED', error: 'Consumer NFC card claim has been removed.' }).end()
 	})
 
 	/** POST /api/nfcLinkAppClaimWithKey - 2026-11-13 GAP-17 已移除（路由仍保留为 410，不解析 body、不写库、不转发）。 */

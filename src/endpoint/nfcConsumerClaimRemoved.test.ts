@@ -144,3 +144,17 @@ test('positive regression C (NFC payment / top-up): prepare, pay, top-up routes 
 	}
 	assert.ok(/export const nfcTopupPreparePayload\b|export async function nfcTopupPreparePayload\b/.test(memberSrc), 'nfcTopupPreparePayload export must remain')
 })
+
+test('GAP-17 follow-up: /api/nfcLinkApp (bind session creation) answers 410 on Cluster and Master, no forwarding', () => {
+	const sAt = serverSrc.indexOf("router.post('/nfcLinkApp', (_req, res)")
+	assert.ok(sAt > 0, 'Cluster /nfcLinkApp must be a 410 handler')
+	const sBlock = serverSrc.slice(sAt, serverSrc.indexOf('\n\t})\n', sAt) + 5)
+	assert.ok(sBlock.includes('410') && sBlock.includes(GUARD_CODE))
+	assert.ok(!sBlock.includes('postLocalhost'), 'Cluster /nfcLinkApp must not forward')
+	assert.ok(!sBlock.includes('req.body'))
+	const mAt = masterSrc.indexOf("router.post('/nfcLinkApp', (_req, res)")
+	assert.ok(mAt > 0, 'Master /nfcLinkApp must be a 410 handler')
+	const mBlock = masterSrc.slice(mAt, masterSrc.indexOf('\n\t\t})\n', mAt) + 6)
+	assert.ok(mBlock.includes('410') && mBlock.includes(GUARD_CODE))
+	assert.ok(!mBlock.includes('nfcLinkAppExecute'), 'Master /nfcLinkApp must not run the executor')
+})
