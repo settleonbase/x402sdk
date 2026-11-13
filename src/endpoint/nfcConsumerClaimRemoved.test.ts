@@ -159,3 +159,31 @@ test('GAP-17 follow-up: /api/nfcLinkApp (bind session creation) answers 410 on C
 	assert.ok(mBlock.includes('410') && mBlock.includes(GUARD_CODE))
 	assert.ok(!mBlock.includes('nfcLinkAppExecute'), 'Master /nfcLinkApp must not run the executor')
 })
+
+test('R-1: legacy HTTP /api/registerNfcCard answers 410 on Cluster and Master before body parsing; no forward, no DB write', () => {
+	const guardAt = serverSrc.indexOf("app.post('/api/registerNfcCard'")
+	const jsonAt = serverSrc.indexOf("app.use ( express.json({ limit: '8mb' }) )")
+	assert.ok(guardAt > 0 && guardAt < jsonAt, 'Cluster guard must sit before express.json')
+	const gBlock = serverSrc.slice(guardAt, serverSrc.indexOf('\n\t})\n', guardAt) + 5)
+	assert.ok(gBlock.includes('410') && gBlock.includes('NFC_REGISTER_HTTP_REMOVED'))
+	assert.ok(!gBlock.includes('req.body') && !gBlock.includes('postLocalhost'))
+	const rAt = serverSrc.indexOf("router.post('/registerNfcCard'")
+	const rBlock = serverSrc.slice(rAt, serverSrc.indexOf('\n\t})\n', rAt) + 5)
+	assert.ok(rBlock.includes('410') && !rBlock.includes('postLocalhost') && !rBlock.includes('req.body'))
+
+	const mGuard = masterSrc.indexOf("app.post('/api/registerNfcCard'")
+	const mJson = masterSrc.indexOf("app.use ( express.json({ limit: '5mb' }) )")
+	assert.ok(mGuard > 0 && mGuard < mJson, 'Master guard must sit before express.json')
+	const mgBlock = masterSrc.slice(mGuard, masterSrc.indexOf('\n\t})\n', mGuard) + 5)
+	assert.ok(mgBlock.includes('410') && mgBlock.includes('NFC_REGISTER_HTTP_REMOVED') && !mgBlock.includes('req.body'))
+	const mrAt = masterSrc.indexOf("router.post('/registerNfcCard'")
+	const mrBlock = masterSrc.slice(mrAt, masterSrc.indexOf('\n\t\t})\n', mrAt) + 6)
+	assert.ok(mrBlock.includes('410') && !mrBlock.includes('registerNfcCardToDb') && !mrBlock.includes('req.body'))
+})
+
+test('R-1: registerNfcCardToDb and the server-side provisioning chain are kept', () => {
+	const dbSrc = read('db.ts')
+	assert.ok(/export const registerNfcCardToDb\b/.test(dbSrc), 'registerNfcCardToDb must remain')
+	assert.ok(dbSrc.includes('ethers.Wallet.createRandom()') && /export const provisionOrGetNfcWalletByTagId\b/.test(dbSrc))
+	assert.ok(masterSrc.includes("router.get('/getUIDAssetsProvision'") || masterSrc.includes("'/getUIDAssetsProvision'"))
+})

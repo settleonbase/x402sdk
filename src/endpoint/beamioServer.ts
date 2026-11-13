@@ -3641,14 +3641,9 @@ const routing = ( router: Router ) => {
 		}
 	})
 
-	/** POST /api/registerNfcCard - 登记 NFC 卡，Cluster 预检后转发 Master。tagId 可选，SUN 解密得到的 TagID（16 hex），用于合法性校验。 */
-	router.post('/registerNfcCard', async (req, res) => {
-		const { uid, privateKey, tagId } = req.body as { uid?: string; privateKey?: string; tagId?: string }
-		if (!uid || typeof uid !== 'string' || !privateKey || typeof privateKey !== 'string') {
-			return res.status(400).json({ ok: false, error: 'Missing uid or privateKey' })
-		}
-		logger(Colors.green('server /api/registerNfcCard preCheck OK, forwarding to master'))
-		postLocalhost('/api/registerNfcCard', { uid: uid.trim(), privateKey: privateKey.trim(), ...(tagId && typeof tagId === 'string' && { tagId: tagId.trim() }) }, res)
+	/** POST /api/registerNfcCard - 2026-11-13 R-1 已废弃（路由保留为 410，不解析 body、不转发、不写库）。 */
+	router.post('/registerNfcCard', (_req, res) => {
+		return res.status(410).json({ success: false, errorCode: 'NFC_REGISTER_HTTP_REMOVED', error: 'NFC card HTTP registration has been removed.' }).end()
 	})
 
 	/** POST /api/payByNfcUidPrepare - Android/iOS 构建 container 前的准备（读操作，Cluster 可直处理或转发 Master）。NFC 格式（14 位 hex uid）时：必须提供 e/c/m，SUN 校验通过后以 tagIdHex 查卡，无法推导 tagID 的不予受理。
@@ -15084,6 +15079,12 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 	app.post('/api/nfcLinkAppClaimWithKey', (_req: Request, res: Response) => {
 		logger(Colors.yellow('[GAP-17] POST /api/nfcLinkAppClaimWithKey rejected: removed (body not read)'))
 		return res.status(410).json({ success: false, errorCode: 'NFC_CONSUMER_CLAIM_REMOVED', error: 'Consumer NFC card claim has been removed.' }).end()
+	})
+
+	/** 2026-11-13 R-1 定案：废弃旧 HTTP POST /api/registerNfcCard。须在 express.json 之前拒绝，请求体（可能含私钥）不被解析、不被记录、不被转发、不写库。 */
+	app.post('/api/registerNfcCard', (_req: Request, res: Response) => {
+		logger(Colors.yellow('[R-1] POST /api/registerNfcCard rejected: removed (body not read)'))
+		return res.status(410).json({ success: false, errorCode: 'NFC_REGISTER_HTTP_REMOVED', error: 'NFC card HTTP registration has been removed.' }).end()
 	})
 
 	app.use ( express.json({ limit: '8mb' }) )
