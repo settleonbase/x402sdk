@@ -11,7 +11,10 @@ if (!buildDir || !home || !mod) throw new Error('usage: synth-master-config.cjs 
 const realHome = guard.initTestHome(home)
 const cfgFile = path.join(realHome, '.master.json')
 guard.assertCanWriteSynthConfig(cfgFile)
+if (!fs.existsSync(cfgFile)) { fs.writeFileSync(cfgFile, '{}', { mode: 0o600 }); guard.recordSynthConfig(cfgFile) }
 const cfg = fs.existsSync(cfgFile) ? JSON.parse(fs.readFileSync(cfgFile, 'utf8')) : {}
+// 固定的合成 SUN 密钥与 settle 管理键格式（与生产配置的格式约定一致，值为随机合成）
+if (!cfg.beamio_nfc) cfg.beamio_nfc = { key2Hex: randomBytes(16).toString('hex').toUpperCase(), key0Hex: randomBytes(16).toString('hex').toUpperCase(), debugSun: false }
 const synthKey = () => Wallet.createRandom().privateKey // 每次随机，仅测试用
 const synthHex32 = () => randomBytes(32).toString('hex')
 const synthBase64 = () => randomBytes(32).toString('base64')
@@ -54,7 +57,10 @@ for (let i = 0; i < 80; i++) {
   const missingPath = parts.join('.')
   const existing = parts.reduce((o, p) => (o ? o[p] : undefined), cfg)
   if (existing !== undefined && !reading) break
-  setPath(cfg, parts, guess(parts[parts.length - 1], usage))
+  const v = guess(parts[parts.length - 1], usage)
+  // settle_contractAdmin 的条目按 viem 约定为不带 0x 的十六进制
+  const fixed = parts[parts.length - 1] === 'settle_contractAdmin' ? v.map((x) => x.replace(/^0x/, '')) : v
+  setPath(cfg, parts, fixed)
   fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2))
   guard.recordSynthConfig(cfgFile)
   console.log(JSON.stringify({ added: missingPath, usage, iteration: i }))

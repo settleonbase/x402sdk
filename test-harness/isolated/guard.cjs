@@ -57,6 +57,7 @@ const assertServiceLaunchAllowed = () => {
 /** 子进程最小环境。 */
 const minimalChildEnv = (home, extra = {}) => ({
   PATH: process.env.PATH || '/usr/bin:/bin',
+  TMPDIR: process.env.TMPDIR || '',
   HOME: home,
   BASE_RPC_URL: 'http://127.0.0.1:9',
   CONET_RPC_URL: 'http://127.0.0.1:9',
