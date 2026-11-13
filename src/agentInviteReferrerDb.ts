@@ -3,12 +3,13 @@
  * Persist (introducer EOA → referee EOA) after successful offline-signed bind
  * so introducers can list who registered through their link.
  */
+import { resolveDbUrl } from './testMode'
 import { ethers } from 'ethers'
 import { Client } from 'pg'
 import Colors from 'colors/safe'
 import { logger } from './logger'
 
-const DB_URL = 'postgres://postgres:your_password@127.0.0.1:5432/postgres'
+const DB_URL = resolveDbUrl('postgres://postgres:your_password@127.0.0.1:5432/postgres')
 
 const BEAMIO_AGENT_INVITE_REFEREES_TABLE = `
 CREATE TABLE IF NOT EXISTS beamio_agent_invite_referees (

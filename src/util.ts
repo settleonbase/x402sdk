@@ -1,4 +1,5 @@
 import {join} from 'node:path'
+import { resolveTestPort } from './testMode'
 import {homedir} from 'node:os'
 import {ethers} from 'ethers'
 import Colors from 'colors/safe'
@@ -95,7 +96,7 @@ const conetEndpoint = resolveBeamioConetHttpRpcUrl()
 const CashCodeBaseAddr = '0x3977f35c531895CeD50fAf5e02bd9e7EB890D2D1'
 const USDCContract_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const USDC_Base_DECIMALS = 6
-const masterServerPort = 1111
+const masterServerPort = resolveTestPort('BEAMIO_TEST_MASTER_PORT', 1111)
 
 const SETTLEContract = '0x20c84933F3fFAcFF1C0b4D713b059377a9EF5fD1'
 export const MINT_RATE = ethers.parseUnits('7000', 18)

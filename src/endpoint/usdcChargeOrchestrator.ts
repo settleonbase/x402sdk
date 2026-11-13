@@ -45,6 +45,7 @@
  *   - 「USDC settle 成功 + L1 + L2 全部成功」是 happy path，单 sid 在 in-memory `chargeSessions` 推进至 `success`。
  *   - 中间任一段失败均不会让 USDC 退回（USDC 已实打实到 cardOwner，符合用户语义：USDC 直接付给商户是商业结算，loyalty topup/charge 闭环只是商户内部入账记录）。
  */
+import { resolveTestPort } from '../testMode'
 import { ethers } from 'ethers'
 import { request, type RequestOptions } from 'node:http'
 import Colors from 'colors/safe'
@@ -63,7 +64,7 @@ const BASE_CHAIN_ID = 8453
 const POINTS_ID = 0n
 
 /** Master 端口与 `postLocalhost` 一致 */
-const MASTER_PORT = 1111
+const MASTER_PORT = resolveTestPort('BEAMIO_TEST_MASTER_PORT', 1111)
 
 /** 「使用既存 QR topup/charge 机制」的渠道标签：写入 `beamio_member_topup_events.topup_source = 'webPosNfcTopup'`，
  *  与 Android NFC topup 渠道在统计上区分明显，对账更友好。 */

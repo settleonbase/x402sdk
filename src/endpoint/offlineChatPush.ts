@@ -3,6 +3,7 @@
  * Credentials from ~/.master.json / env — never commit .p8 or FCM service-account keys.
  */
 
+import { resolveDbUrl } from '../testMode'
 import { createPrivateKey, createSign, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import http2 from 'node:http2'
@@ -14,7 +15,7 @@ import { masterSetup } from '../util'
 import { CONET_RPC_URL } from '../chainAddresses'
 import type { Request, Response } from 'express'
 
-const DB_URL = 'postgres://postgres:your_password@127.0.0.1:5432/postgres'
+const DB_URL = resolveDbUrl('postgres://postgres:your_password@127.0.0.1:5432/postgres')
 
 const ALLOWED_BUNDLE_IDS = new Set([
 	'com.beamio.beamio',

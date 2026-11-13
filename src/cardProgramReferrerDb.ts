@@ -1,9 +1,10 @@
 import { ethers } from 'ethers'
+import { resolveDbUrl } from './testMode'
 import { Client } from 'pg'
 import Colors from 'colors/safe'
 import { logger } from './logger'
 
-const DB_URL = 'postgres://postgres:your_password@127.0.0.1:5432/postgres'
+const DB_URL = resolveDbUrl('postgres://postgres:your_password@127.0.0.1:5432/postgres')
 
 const BEAMIO_CARD_PROGRAM_REFEREES_TABLE = `
 CREATE TABLE IF NOT EXISTS beamio_card_program_referees (

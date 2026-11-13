@@ -206,12 +206,16 @@ test('log hygiene: request-body log sites use shared redaction (no raw req.body 
 	}
 })
 
-test('test-mode overrides: DB_URL and ports change only when BEAMIO_TEST_MODE=1; defaults unchanged', () => {
+test('test-mode: one resolver decides DB URL and master/cluster ports; defaults unchanged', () => {
 	const dbSrc = read('db.ts')
-	assert.ok(dbSrc.includes("process.env.BEAMIO_TEST_MODE === '1'") && dbSrc.includes('BEAMIO_TEST_DB_URL'), 'DB_URL override must be gated')
-	assert.ok(dbSrc.includes('"postgres://postgres:your_password@127.0.0.1:5432/postgres"'), 'default DB_URL unchanged')
-	for (const src of [serverSrc, masterSrc]) {
-		assert.ok(src.includes("testModePort('BEAMIO_TEST_MASTER_PORT', 1111)"), 'master port default 1111 gated')
+	assert.ok(/const DB_URL = resolveDbUrl\('postgres:\/\/postgres:your_password@127\.0\.0\.1:5432\/postgres'\)/.test(dbSrc), 'db.ts DB_URL must use resolver with unchanged default')
+	for (const rel of ['agentInviteReferrerDb.ts', 'cardProgramReferrerDb.ts', 'cardProgramSocialDb.ts']) {
+		assert.ok(read(rel).includes("const DB_URL = resolveDbUrl('postgres://postgres:your_password@127.0.0.1:5432/postgres')"), rel + ' must use resolver')
 	}
-	assert.ok(serverSrc.includes("testModePort('BEAMIO_TEST_CLUSTER_PORT', 2222)"), 'cluster port default 2222 gated')
+	assert.ok(read('endpoint/offlineChatPush.ts').includes("const DB_URL = resolveDbUrl('postgres://postgres:your_password@127.0.0.1:5432/postgres')"))
+	assert.ok(read('util.ts').includes("resolveTestPort('BEAMIO_TEST_MASTER_PORT', 1111)"))
+	assert.ok(read('endpoint/usdcChargeOrchestrator.ts').includes("resolveTestPort('BEAMIO_TEST_MASTER_PORT', 1111)"))
+	assert.ok(serverSrc.includes("resolveTestPort('BEAMIO_TEST_CLUSTER_PORT', 2222)") && serverSrc.includes("resolveTestPort('BEAMIO_TEST_MASTER_PORT', 1111)"))
+	assert.ok(masterSrc.includes("resolveTestPort('BEAMIO_TEST_MASTER_PORT', 1111)"))
+	assert.ok(!/postgres:\/\/[^'"\n]*5432/.test(read('agentInviteReferrerDb.ts').replace(/resolveDbUrl\('[^']*'\)/, '')), 'no bare DB literal left')
 })
