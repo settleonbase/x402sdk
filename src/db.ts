@@ -1611,7 +1611,10 @@ export const regiestChatRoute = async (req: Request, res: Response) => {
 	})
 }
 
-const DB_URL = "postgres://postgres:your_password@127.0.0.1:5432/postgres"
+/** 测试模式（BEAMIO_TEST_MODE=1）且设置 BEAMIO_TEST_DB_URL 时才改用测试库；默认行为不变。 */
+const DB_URL = (process.env.BEAMIO_TEST_MODE === '1' && process.env.BEAMIO_TEST_DB_URL?.trim())
+	? process.env.BEAMIO_TEST_DB_URL.trim()
+	: "postgres://postgres:your_password@127.0.0.1:5432/postgres"
 
 /**
  * Durable payment idempotency ledger.  A paymentRef is derived from the

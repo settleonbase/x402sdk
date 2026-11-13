@@ -1576,8 +1576,15 @@ async function referralClaimRelayPreCheck(body: any): Promise<
 	}
 }
 
-const masterServerPort = 1111
-const serverPort = 2222
+/** 测试模式（BEAMIO_TEST_MODE=1）下可用环境变量覆盖端口；默认端口不变。 */
+const testModePort = (envName: string, fallback: number): number => {
+	const raw = process.env[envName]
+	if (process.env.BEAMIO_TEST_MODE !== '1' || !raw) return fallback
+	const n = Number(raw)
+	return Number.isInteger(n) && n > 0 && n < 65536 ? n : fallback
+}
+const masterServerPort = testModePort('BEAMIO_TEST_MASTER_PORT', 1111)
+const serverPort = testModePort('BEAMIO_TEST_CLUSTER_PORT', 2222)
 
 /** Cluster 本地缓存 oracle，监听 CoNET 出块（约 6s/块），每 10 块（约 1 分钟）从 master 拉取 */
 const defaultOracle = { bnb: '', eth: '', usdc: '1', timestamp: 0, usdcad: '1', usdjpy: '150', usdcny: '7.2', usdhkd: '7.8', usdeur: '0.92', usdsgd: '1.35', usdtwd: '31' }

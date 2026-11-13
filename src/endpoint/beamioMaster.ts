@@ -177,7 +177,14 @@ import {
 	kickFuelPackFulfillPoolPress,
 } from './fuelPackFulfill'
 
-const masterServerPort = 1111
+/** 测试模式（BEAMIO_TEST_MODE=1）下可用环境变量覆盖端口；默认端口不变。 */
+const testModePort = (envName: string, fallback: number): number => {
+	const raw = process.env[envName]
+	if (process.env.BEAMIO_TEST_MODE !== '1' || !raw) return fallback
+	const n = Number(raw)
+	return Number.isInteger(n) && n > 0 && n < 65536 ? n : fallback
+}
+const masterServerPort = testModePort('BEAMIO_TEST_MASTER_PORT', 1111)
 
 /** HTTP 记账 body 中的 routeItems 归一化（与 MemberCard 内存路径一致） */
 function normalizeBeamioRouteItemsFromBody(raw: unknown): BeamioTransferRouteItem[] | undefined {

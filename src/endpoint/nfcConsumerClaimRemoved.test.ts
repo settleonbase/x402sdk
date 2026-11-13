@@ -194,3 +194,13 @@ test('log hygiene: inbound debug logger redacts private-key-like fields in both 
 		assert.ok(/const body = truncateValue\(redactSecretsForLog\(req\.body\)\)/.test(src), 'inbound logger must redact body')
 	}
 })
+
+test('test-mode overrides: DB_URL and ports change only when BEAMIO_TEST_MODE=1; defaults unchanged', () => {
+	const dbSrc = read('db.ts')
+	assert.ok(dbSrc.includes("process.env.BEAMIO_TEST_MODE === '1'") && dbSrc.includes('BEAMIO_TEST_DB_URL'), 'DB_URL override must be gated')
+	assert.ok(dbSrc.includes('"postgres://postgres:your_password@127.0.0.1:5432/postgres"'), 'default DB_URL unchanged')
+	for (const src of [serverSrc, masterSrc]) {
+		assert.ok(src.includes("testModePort('BEAMIO_TEST_MASTER_PORT', 1111)"), 'master port default 1111 gated')
+	}
+	assert.ok(serverSrc.includes("testModePort('BEAMIO_TEST_CLUSTER_PORT', 2222)"), 'cluster port default 2222 gated')
+})
