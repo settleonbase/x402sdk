@@ -4,9 +4,13 @@
 const { execFileSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
+const guard = require('./guard.cjs')
 const { Wallet, randomBytes } = { Wallet: require('ethers').Wallet, randomBytes: require('node:crypto').randomBytes }
 const [buildDir, home, mod] = process.argv.slice(2)
-const cfgFile = path.join(home, '.master.json')
+if (!buildDir || !home || !mod) throw new Error('usage: synth-master-config.cjs <build-out> <HOME> <module>')
+const realHome = guard.initTestHome(home)
+const cfgFile = path.join(realHome, '.master.json')
+guard.assertCanWriteSynthConfig(cfgFile)
 const cfg = fs.existsSync(cfgFile) ? JSON.parse(fs.readFileSync(cfgFile, 'utf8')) : {}
 const synthKey = () => Wallet.createRandom().privateKey // 每次随机，仅测试用
 const synthHex32 = () => randomBytes(32).toString('hex')
@@ -29,7 +33,7 @@ for (let i = 0; i < 80; i++) {
       ? [path.join(__dirname, 'run-isolated-service.cjs'), buildDir, process.env.SYNTH_START]
       : ['-e', `require('./${path.basename(buildDir)}/${mod}')`]
     out = execFileSync('node', runArgs, {
-      cwd: path.dirname(buildDir), env: { ...process.env, HOME: home, BASE_RPC_URL: 'http://127.0.0.1:9', CONET_RPC_URL: 'http://127.0.0.1:9' },
+      cwd: path.dirname(buildDir), env: guard.minimalChildEnv(realHome),
       stdio: ['ignore', 'pipe', 'pipe'], timeout: Number(process.env.SYNTH_TIMEOUT_MS || 25000), encoding: 'utf8',
     })
     console.log(JSON.stringify({ loaded: true, iterations: i, module: mod }))
@@ -52,5 +56,6 @@ for (let i = 0; i < 80; i++) {
   if (existing !== undefined && !reading) break
   setPath(cfg, parts, guess(parts[parts.length - 1], usage))
   fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2))
+  guard.recordSynthConfig(cfgFile)
   console.log(JSON.stringify({ added: missingPath, usage, iteration: i }))
 }

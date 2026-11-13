@@ -136,3 +136,28 @@ export const buildVectorSet = ({ key2Hex, uidHex, tagIdHex, lastCounter }) => {
     ],
   }
 }
+
+/**
+ * UID 分支向量：MAC 有效，但 URL 中的 uid 与密文内嵌 UID 不一致。
+ * 会话密钥由 URL 中的 uid 派生（与服务端校验一致），密文内嵌的是原始 UID。
+ * 因此 macValid=true，embeddedUidMatchesInput=false。
+ */
+export const buildUidMismatchMacValidUrl = ({ key2Hex, embeddedUidHex, claimedUidHex, counter, tagIdHex, version = 1, baseUrl = 'https://example.invalid/nfc' }) => {
+  const key2 = hexToBytes(key2Hex)
+  const claimed = hexToBytes(claimedUidHex)
+  const cMsb = Buffer.alloc(3)
+  cMsb.writeUIntBE(counter, 0, 3)
+  const cHex = bytesToHex(cMsb)
+  const counterLsb = Buffer.from(cMsb).reverse()
+  const { enc, mac } = sessionKeys(key2, claimed, counterLsb)
+  const plain = Buffer.alloc(32, 0)
+  hexToBytes(embeddedUidHex).copy(plain, 0)
+  counterLsb.copy(plain, 7)
+  hexToBytes(tagIdHex).copy(plain, 10)
+  plain[18] = version
+  const e = aesCbcEncryptNoPadding(plain, enc, deriveSdmEncIv(enc, counterLsb))
+  const eHex = bytesToHex(e)
+  const uidHex = bytesToHex(claimed)
+  const mHex = bytesToHex(truncateMac16To8(aesCmac(mac, Buffer.from(`${uidHex}&c=${cHex}&e=${eHex}&m=`, 'ascii'))))
+  return { url: `${baseUrl}?uid=${uidHex}&c=${cHex}&e=${eHex}&m=${mHex}`, uidHex, cHex, eHex, mHex }
+}
