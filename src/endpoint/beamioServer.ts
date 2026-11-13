@@ -1,4 +1,5 @@
 import express, { Request, Response, Router} from 'express'
+import { redactForLog, redactQueryForLog, redactUrlForLog, safeLogJson } from '../logRedact'
 import { GoogleGenAI } from '@google/genai'
 import { getClientIp, oracleBackoud, checkSign, BeamioTransfer, settleBeamioX402ToCardOwner, setOracleSnapshot, isOracleFresh, submitUsdcChargeSettleIndexer, resolveBeamioConetHttpRpcUrl, TX_CATEGORY_TERMINAL_RESET } from '../util'
 import { checkSmartAccount } from '../MemberCard'
@@ -2223,27 +2224,13 @@ const truncateValue = (value: unknown, maxLen = 600): unknown => {
 	return value
 }
 
-/** 2026-11-13 日志脱敏：入站调试日志不得输出私钥或助记词类字段（金丝雀测试发现 nfcLinkApp 路由会打印 privateKey）。 */
-const redactSecretsForLog = (value: unknown, depth = 0): unknown => {
-	if (value == null || depth > 6) return value
-	if (Array.isArray(value)) return value.map((v) => redactSecretsForLog(v, depth + 1))
-	if (typeof value === 'object') {
-		const out: Record<string, unknown> = {}
-		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-			out[k] = /private|secret|mnemonic|seed|passphrase|signature_?key/i.test(k) ? '<redacted>' : redactSecretsForLog(v, depth + 1)
-		}
-		return out
-	}
-	return value
-}
-
 const logInboundDebug = (req: Request) => {
 	if (!DEBUG_INBOUND) return
-	const body = truncateValue(redactSecretsForLog(req.body))
-	const query = truncateValue(req.query)
+	const body = truncateValue(redactForLog(req.body))
+	const query = truncateValue(redactQueryForLog(req.query))
 	logger(
 		Colors.gray(
-			`[INBOUND][Cluster] ${req.method} ${req.originalUrl} ip=${getClientIp(req)}`
+			`[INBOUND][Cluster] ${req.method} ${redactUrlForLog(req.originalUrl)} ip=${getClientIp(req)}`
 		),
 		inspect({ query, body }, false, 4, true)
 	)
@@ -4138,7 +4125,7 @@ const routing = ( router: Router ) => {
 	router.post('/cardCouponPosClaimPrepare', async (req, res) => {
 		const pre = await cardCouponPosClaimPreparePreCheck(req.body)
 		if (!pre.success) {
-			logger(Colors.red(`server /api/cardCouponPosClaimPrepare preCheck FAIL: ${pre.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardCouponPosClaimPrepare preCheck FAIL: ${pre.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: pre.error }).end()
 		}
 		const out = pre.preChecked
@@ -4176,7 +4163,7 @@ const routing = ( router: Router ) => {
 	router.post('/cardCouponPosClaimSubmit', async (req, res) => {
 		const pre = await cardCouponPosClaimSubmitPreCheck(req.body)
 		if (!pre.success) {
-			logger(Colors.red(`server /api/cardCouponPosClaimSubmit preCheck FAIL: ${pre.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardCouponPosClaimSubmit preCheck FAIL: ${pre.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: pre.error }).end()
 		}
 		const out = pre.preChecked
@@ -4227,7 +4214,7 @@ const routing = ( router: Router ) => {
 	router.post('/cardCouponPosConsumePrepare', async (req, res) => {
 		const pre = await cardCouponPosConsumePreparePreCheck(req.body)
 		if (!pre.success) {
-			logger(Colors.red(`server /api/cardCouponPosConsumePrepare preCheck FAIL: ${pre.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardCouponPosConsumePrepare preCheck FAIL: ${pre.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: pre.error }).end()
 		}
 		const out = pre.preChecked
@@ -4315,7 +4302,7 @@ const routing = ( router: Router ) => {
 	router.post('/cardCouponPosConsumeSubmit', async (req, res) => {
 		const pre = await cardCouponPosConsumeSubmitPreCheck(req.body)
 		if (!pre.success) {
-			logger(Colors.red(`server /api/cardCouponPosConsumeSubmit preCheck FAIL: ${pre.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardCouponPosConsumeSubmit preCheck FAIL: ${pre.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: pre.error }).end()
 		}
 		const out = pre.preChecked
@@ -4346,7 +4333,7 @@ const routing = ( router: Router ) => {
 	router.post('/cardCouponPosConsumeNfcSign', async (req, res) => {
 		const pre = await cardCouponPosConsumeNfcSignPreCheck(req.body)
 		if (!pre.success) {
-			logger(Colors.red(`server /api/cardCouponPosConsumeNfcSign preCheck FAIL: ${pre.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardCouponPosConsumeNfcSign preCheck FAIL: ${pre.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: pre.error }).end()
 		}
 		const out = pre.preChecked
@@ -8017,7 +8004,7 @@ const routing = ( router: Router ) => {
 
 	/** POST /api/ai/learningFeedback - 保存 AI 学习反馈（满意/纠正），共享给所有用户。correctedAction：Beamio 提供的期望 UI/action */
 	router.post('/ai/learningFeedback', async (req, res) => {
-		logger(Colors.cyan('[ai/learningFeedback] DEBUG body:'), JSON.stringify(req.body, null, 2))
+		logger(Colors.cyan('[ai/learningFeedback] DEBUG body:'), safeLogJson(req.body))
 		const { kind, userInput, action, customRule, correctedAction } = req.body as {
 			kind?: string
 			userInput?: string
@@ -8097,7 +8084,7 @@ const routing = ( router: Router ) => {
 	/** POST /api/ai/beamioAction - Cluster 直接调用 Gemini 2.5 Flash，根据用户意图返回 BeamioAction（读操作，无需 Master） */
 	router.post('/ai/beamioAction', async (req, res) => {
 		// Debug: 显示 UI 传入的原始数据
-		logger(Colors.cyan('[ai/beamioAction] DEBUG body:'), JSON.stringify(req.body, null, 2))
+		logger(Colors.cyan('[ai/beamioAction] DEBUG body:'), safeLogJson(req.body))
 		const apiKey = masterSetup?.GEMINI_API_KEY
 		if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) {
 			logger(Colors.yellow('[ai/beamioAction] masterSetup.GEMINI_API_KEY not configured'))
@@ -9008,7 +8995,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 
 		if (!cardAddress || !userSignature || !nonce  || !usdcAmount || !from || !validBefore) {
-			logger(`server /api/purchasingCard Invalid data format!`, inspect(req.body, false, 3, true))
+			logger(`server /api/purchasingCard Invalid data format!`, inspect(redactForLog(req.body), false, 3, true))
 			return res.status(400).json({ error: "Invalid data format" })
 		}
 
@@ -9357,7 +9344,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardCreateRedeemAdmin', async (req, res) => {
 		const preCheck = await cardCreateRedeemAdminPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardCreateRedeemAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardCreateRedeemAdmin preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardCreateRedeemAdmin preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
@@ -9380,7 +9367,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		const preCheck = await cardAddAdminPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardAddAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardAddAdmin preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		// Debug: 一行打印：签字钱包、卡地址、想登记的admin的EOA/AA、离线签字指定的登记地址
@@ -9450,7 +9437,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardAddAdminBatch', async (req, res) => {
 		const preCheck = await cardAddAdminBatchPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardAddAdminBatch preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardAddAdminBatch preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardAddAdminBatch preCheck OK, forwarding one batch transaction`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
@@ -9473,7 +9460,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		}
 		const preCheck = await cardAddAdminByAdminPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardAddAdminByAdmin preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardAddAdminByAdmin preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardAddAdminByAdmin preCheck OK, forwarding to master executeForAdmin`), inspect({ cardAddress: req.body?.cardAddress }, false, 2, true))
@@ -9497,7 +9484,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardClearAdminMintCounter', async (req, res) => {
 		const preCheck = await cardClearAdminMintCounterPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardClearAdminMintCounter preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardClearAdminMintCounter preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardClearAdminMintCounter preCheck OK, forwarding to master`), inspect({ cardAddress: req.body?.cardAddress, subordinate: req.body?.subordinate }, false, 2, true))
@@ -9508,7 +9495,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardTerminalSettlementClear', async (req, res) => {
 		const preCheck = await cardTerminalSettlementClearPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardTerminalSettlementClear preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardTerminalSettlementClear preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardTerminalSettlementClear preCheck OK, forwarding to master`), inspect({ cardAddress: req.body?.cardAddress, subordinate: req.body?.subordinate }, false, 2, true))
@@ -9566,7 +9553,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardInitializeUserCumulativeStat', async (req, res) => {
 		const preCheck = await cardInitializeUserCumulativeStatPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardInitializeUserCumulativeStat preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardInitializeUserCumulativeStat preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(
@@ -9580,7 +9567,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardBootstrapIssuedNftV2Stat', async (req, res) => {
 		const preCheck = await cardBootstrapIssuedNftV2StatPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardBootstrapIssuedNftV2Stat preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardBootstrapIssuedNftV2Stat preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(
@@ -9594,7 +9581,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardConfigureEventRewardRule', async (req, res) => {
 		const preCheck = await cardConfigureEventRewardRulePreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardConfigureEventRewardRule preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardConfigureEventRewardRule preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(
@@ -9610,7 +9597,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(
 				Colors.red(`server /api/cardConfigureEventRewardRulesBatch preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(redactForLog(req.body), false, 2, true),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
@@ -9627,7 +9614,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(
 				Colors.red(`server /api/cardConfigureEventRewardRulesBatchGateway preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(redactForLog(req.body), false, 2, true),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
@@ -9657,7 +9644,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(
 				Colors.red(`server /api/cardConfigureEventRewardRuleGateway preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(redactForLog(req.body), false, 2, true),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
@@ -9676,7 +9663,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardPurchaseRewardProgram', async (req, res) => {
 		const preCheck = await cardPurchaseRewardProgramPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardPurchaseRewardProgram preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardPurchaseRewardProgram preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(
@@ -9708,7 +9695,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardDispatchEventReward13', async (req, res) => {
 		const preCheck = await cardDispatchEventReward13PreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardDispatchEventReward13 preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardDispatchEventReward13 preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(
@@ -9750,7 +9737,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(
 				Colors.red(`server /api/cardRecordDiscoverShareClick preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(redactForLog(req.body), false, 2, true),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
@@ -9867,7 +9854,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardRecordUserCumulativeStat', async (req, res) => {
 		const preCheck = await cardRecordUserCumulativeStatPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardRecordUserCumulativeStat preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardRecordUserCumulativeStat preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(
@@ -9881,7 +9868,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardRecordTopupCumulativeStat', async (req, res) => {
 		const preCheck = await cardRecordTopupCumulativeStatPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardRecordTopupCumulativeStat preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardRecordTopupCumulativeStat preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(
@@ -9908,7 +9895,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			}
 			logger(
 				Colors.red(`server /api/cardGatewayInitializeUserCumulativeStat preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(redactForLog(req.body), false, 2, true),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
@@ -9946,7 +9933,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardRecordUserLike', async (req, res) => {
 		const preCheck = await cardRecordUserLikePreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardRecordUserLike preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardRecordUserLike preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		const liked = Boolean(req.body?.liked)
@@ -9977,7 +9964,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardMintIssuedNftToAddress', async (req, res) => {
 		const preCheck = await cardMintIssuedNftToAddressPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardMintIssuedNftToAddress preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardMintIssuedNftToAddress preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(Colors.green(`server /api/cardMintIssuedNftToAddress preCheck OK, forwarding to master executeForOwner`), inspect({ cardAddress: preCheck.preChecked.cardAddress, targetAddress: req.body?.targetAddress }, false, 2, true))
@@ -10093,7 +10080,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardCouponOpenClaim', async (req, res) => {
 		const preCheck = await cardCouponOpenClaimPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardCouponOpenClaim preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardCouponOpenClaim preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(
@@ -10117,7 +10104,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/redeemReward13ForUsdc', async (req, res) => {
 		const preCheck = await redeemReward13ForUsdcPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/redeemReward13ForUsdc preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/redeemReward13ForUsdc preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		logger(
@@ -10157,7 +10144,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(
 				Colors.red(`server /api/purchaseMerchantGiftRedeem preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(redactForLog(req.body), false, 2, true),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
@@ -10187,7 +10174,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(
 				Colors.red(`server /api/topupWithReward13Container preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(redactForLog(req.body), false, 2, true),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
@@ -10226,7 +10213,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(
 				Colors.red(`server /api/convertReward13ToProgramPoints preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(redactForLog(req.body), false, 2, true),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
@@ -10252,7 +10239,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (!preCheck.success) {
 			logger(
 				Colors.red(`server /api/convertReward13ToUsdcToAa preCheck FAIL: ${preCheck.error}`),
-				inspect(req.body, false, 2, true),
+				inspect(redactForLog(req.body), false, 2, true),
 			)
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
@@ -10276,7 +10263,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 	router.post('/cardCouponPosClaim', async (req, res) => {
 		const preCheck = await cardCouponPosClaimPreCheck(req.body)
 		if (!preCheck.success) {
-			logger(Colors.red(`server /api/cardCouponPosClaim preCheck FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`server /api/cardCouponPosClaim preCheck FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		if (preCheck.route === 'ptContainer') {
@@ -10406,7 +10393,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			ownerSignature?: string
 		}
 		if (!cardAddress || !data || deadline == null || !nonce || !ownerSignature) {
-			logger(Colors.red(`server /api/executeForOwner Invalid data`), inspect(sanitizeExecuteForOwnerCouponWorkflowBody(req.body as Record<string, unknown>), false, 3, true))
+			logger(Colors.red(`server /api/executeForOwner Invalid data`), inspect(redactForLog(sanitizeExecuteForOwnerCouponWorkflowBody(req.body as Record<string, unknown>)), false, 3, true))
 			return res.status(400).json({ success: false, error: 'Missing required fields' })
 		}
 		if (!ethers.isAddress(cardAddress)) {
@@ -10954,7 +10941,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (body.containerPayload) {
 			const preCheck = ContainerRelayPreCheck(body.containerPayload)
 			if (!preCheck.success) {
-				logger(Colors.red(`[AAtoEOA] server Container pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+				logger(Colors.red(`[AAtoEOA] server Container pre-check FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
 			const bunitCheck = await ContainerRelayPreCheckBUnitBalance(body.containerPayload, body.currency ?? 'USDC', body.currencyAmount ?? '0')
@@ -11034,7 +11021,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		if (body.openContainerPayload) {
 			const preCheck = OpenContainerRelayPreCheck(body.openContainerPayload)
 			if (!preCheck.success) {
-				logger(Colors.red(`[AAtoEOA] server OpenContainer pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+				logger(Colors.red(`[AAtoEOA] server OpenContainer pre-check FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
 			/** 付款 AA 必须与本次收款卡所在链的 UserCard 工厂链路 canonical 一致，否则链上会在 CoNET/Base 不同 owner 间恢复出错。 */
@@ -11251,7 +11238,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 		const { toEOA, amountUSDC6, packedUserOp } = body
 		const preCheck = AAtoEOAPreCheck(toEOA ?? '', amountUSDC6 ?? '', packedUserOp)
 		if (!preCheck.success) {
-			logger(Colors.red(`[AAtoEOA] server pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`[AAtoEOA] server pre-check FAIL: ${preCheck.error}`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: preCheck.error }).end()
 		}
 		const relayResolved = resolveAaUserOpRelayChainFromRequest({
@@ -11479,7 +11466,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			validDays?: number
 		}
 		if (!requestHash || !payee || !amount || validDays == null) {
-			logger(Colors.red(`[requestAccounting] server pre-check: missing required fields`), inspect(req.body, false, 2, true))
+			logger(Colors.red(`[requestAccounting] server pre-check: missing required fields`), inspect(redactForLog(req.body), false, 2, true))
 			return res.status(400).json({ success: false, error: 'Missing required: requestHash, payee, amount, validDays' }).end()
 		}
 		if (!ethers.isHexString(requestHash) || ethers.dataLength(requestHash) !== 32) {
@@ -15088,7 +15075,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 				const acrm = req.header('access-control-request-method') ?? '(none)'
 				const acrh = req.header('access-control-request-headers') ?? '(none)'
 				const origin = req.header('origin') ?? '(no-origin)'
-				logger(`[CORS preflight] path=${req.originalUrl} origin=${origin} acrm=${acrm} acrh=${acrh}`)
+				logger(`[CORS preflight] path=${redactUrlForLog(req.originalUrl)} origin=${origin} acrm=${acrm} acrh=${acrh}`)
 			}
 			next();
 		});
@@ -15154,7 +15141,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		// Guard noisy body-parser JSON syntax errors (e.g. multipart/form-data sent as application/json).
 		if (err?.type === 'entity.parse.failed' && err instanceof SyntaxError) {
 			const ct = String(req.headers['content-type'] ?? '')
-			logger(Colors.yellow(`[json-parse] ${req.method} ${req.originalUrl} invalid JSON body; content-type=${ct || '(none)'}`))
+			logger(Colors.yellow(`[json-parse] ${req.method} ${redactUrlForLog(req.originalUrl)} invalid JSON body; content-type=${ct || '(none)'}`))
 			if (!res.headersSent) {
 				return res.status(400).json({ success: false, error: 'Invalid JSON body' }).end()
 			}

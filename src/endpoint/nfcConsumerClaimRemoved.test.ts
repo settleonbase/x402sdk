@@ -188,10 +188,21 @@ test('R-1: registerNfcCardToDb and the server-side provisioning chain are kept',
 	assert.ok(masterSrc.includes("router.get('/getUIDAssetsProvision'") || masterSrc.includes("'/getUIDAssetsProvision'"))
 })
 
-test('log hygiene: inbound debug logger redacts private-key-like fields in both services', () => {
+test('log hygiene: request-body log sites use shared redaction (no raw req.body / req.query / req.originalUrl in logs)', () => {
 	for (const src of [serverSrc, masterSrc]) {
-		assert.ok(src.includes('const redactSecretsForLog'), 'redaction helper must exist')
-		assert.ok(/const body = truncateValue\(redactSecretsForLog\(req\.body\)\)/.test(src), 'inbound logger must redact body')
+		assert.ok(src.includes("from '../logRedact'"), 'shared logRedact must be imported')
+		assert.ok(src.includes('const body = truncateValue(redactForLog(req.body))'), 'inbound logger must redact body')
+		assert.ok(src.includes('redactQueryForLog(req.query)') && src.includes('redactUrlForLog(req.originalUrl)'), 'inbound logger must redact query and url')
+	}
+	assert.equal((serverSrc.match(/inspect\(req\.body/g) || []).length, 0, 'no raw inspect(req.body)')
+	assert.equal((serverSrc.match(/JSON\.stringify\(req\.body/g) || []).length, 0, 'no raw JSON.stringify(req.body)')
+	for (const src of [serverSrc, masterSrc]) {
+		const logLines = src.split('\n').filter((l) => /logger\(/.test(l) && /req\.(body|query|originalUrl)\b/.test(l))
+		for (const l of logLines) {
+			const raw = /req\.(body|query|originalUrl)\b/.exec(l)![0]
+			const wrapped = /redactForLog\(req\.body\)|redactForLog\(sanitize|redactQueryForLog\(req\.query\)|redactUrlForLog\(req\.originalUrl\)|safeLogJson\(req\.body\)|Object\.keys\(req\.body|req\.body\?\.[a-zA-Z]+/.test(l)
+			assert.ok(wrapped, `unwrapped ${raw} in log line: ${l.trim().slice(0, 120)}`)
+		}
 	}
 })
 

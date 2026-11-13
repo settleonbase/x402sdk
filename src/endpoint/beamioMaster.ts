@@ -1,4 +1,5 @@
 import express, { Request, Response, Router} from 'express'
+import { redactForLog, redactQueryForLog, redactUrlForLog, safeLogJson } from '../logRedact'
 import {getClientIp, oracleBackoud, getOracleRequest, masterSetup, resolveBeamioBaseHttpRpcUrl, resolveBeamioConetHttpRpcUrl, submitUsdcChargeSettleIndexer} from '../util'
 import { join, resolve } from 'node:path'
 import fs from 'node:fs'
@@ -627,26 +628,12 @@ const truncateValue = (value: unknown, maxLen = 600): unknown => {
 	return value
 }
 
-/** 2026-11-13 日志脱敏：入站调试日志不得输出私钥或助记词类字段（金丝雀测试发现 nfcLinkApp 路由会打印 privateKey）。 */
-const redactSecretsForLog = (value: unknown, depth = 0): unknown => {
-	if (value == null || depth > 6) return value
-	if (Array.isArray(value)) return value.map((v) => redactSecretsForLog(v, depth + 1))
-	if (typeof value === 'object') {
-		const out: Record<string, unknown> = {}
-		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-			out[k] = /private|secret|mnemonic|seed|passphrase|signature_?key/i.test(k) ? '<redacted>' : redactSecretsForLog(v, depth + 1)
-		}
-		return out
-	}
-	return value
-}
-
 const logInboundDebug = (req: Request) => {
 	if (!DEBUG_INBOUND) return
-	const body = truncateValue(redactSecretsForLog(req.body))
-	const query = truncateValue(req.query)
+	const body = truncateValue(redactForLog(req.body))
+	const query = truncateValue(redactQueryForLog(req.query))
 	logger(
-		Colors.gray(`[INBOUND][Master] ${req.method} ${req.originalUrl} ip=${getClientIp(req)}`),
+		Colors.gray(`[INBOUND][Master] ${req.method} ${redactUrlForLog(req.originalUrl)} ip=${getClientIp(req)}`),
 		inspect({ query, body }, false, 4, true)
 	)
 }
@@ -7104,7 +7091,7 @@ const initialize = async (reactBuildFolder: string, PORT: number) => {
 		// Guard noisy body-parser JSON syntax errors (e.g. multipart/form-data sent as application/json).
 		if (err?.type === 'entity.parse.failed' && err instanceof SyntaxError) {
 			const ct = String(req.headers['content-type'] ?? '')
-			logger(Colors.yellow(`[json-parse] ${req.method} ${req.originalUrl} invalid JSON body; content-type=${ct || '(none)'}`))
+			logger(Colors.yellow(`[json-parse] ${req.method} ${redactUrlForLog(req.originalUrl)} invalid JSON body; content-type=${ct || '(none)'}`))
 			if (!res.headersSent) {
 				return res.status(400).json({ success: false, error: 'Invalid JSON body' }).end()
 			}
