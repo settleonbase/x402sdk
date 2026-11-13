@@ -111,13 +111,14 @@ test('positive regression: NFC payment / top-up / link-app routes still register
 
 const dbSrc = read('db.ts')
 
-test('GAP-18: consumer card link-state route answers 410 and does not read body or DB', () => {
+test('nfcCardLinkState restored (not in the removal scope): signed-message route, no private key input', () => {
 	const at = serverSrc.indexOf("router.post('/nfcCardLinkState'")
-	assert.ok(at > 0, 'route must still be registered (as 410)')
+	assert.ok(at > 0, 'route must be registered')
 	const block = serverSrc.slice(at, serverSrc.indexOf('\n\t})\n', at) + 5)
-	assert.ok(block.includes('410') && block.includes('NFC_CONSUMER_CARD_LINK_REMOVED'))
-	assert.ok(!block.includes('applyNfcCardLinkStateChange('))
-	assert.ok(!block.includes('req.body'))
+	assert.ok(block.includes('applyNfcCardLinkStateChange({ message'), 'route must call the signed-message handler')
+	assert.ok(!block.includes('410'), 'route must not be stopped (pending project decision)')
+	assert.ok(!/privateKey|private_key/.test(block), 'route must not accept or log private keys')
+	assert.ok(!block.includes('req.body') || block.includes('const { message, signature } = req.body'), 'body is read only for message/signature')
 })
 
 test('positive regression A (merchant card issuance): server-generated card key path intact', () => {

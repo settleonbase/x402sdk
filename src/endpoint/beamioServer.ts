@@ -3579,12 +3579,26 @@ const routing = ( router: Router ) => {
 	})
 
 	/**
-	 * POST /api/nfcCardLinkState — 2026-11-13 GAP-18 已停用（消费者绑卡状态接口）。
-	 * 仅服务于消费者绑定卡（linked_owner_eoa），其签名流程要求客户端持有用户钱包私钥，违反"私钥不进 WebView/不经桥"。
-	 * 本处只返回 410，不读取 body、不查库、不改 nfc_cards。applyNfcCardLinkStateChange（db.ts）保留但无调用方。
+	 * POST /api/nfcCardLinkState — 用户-linked 卡：active / deactive / remove（仅 remove 会删除 DB 私钥与绑定）。
+	 * Body: { message, signature } — message 为 canonical JSON UTF-8 字符串（与 wallet.signMessage(message) 一致），见 db.buildNfcCardLinkStateSignMessage。
 	 */
-	router.post('/nfcCardLinkState', (_req, res) => {
-		return res.status(410).json({ ok: false, errorCode: 'NFC_CONSUMER_CARD_LINK_REMOVED', error: 'Consumer NFC card link-state API has been removed.' }).end()
+	router.post('/nfcCardLinkState', async (req, res) => {
+		const { message, signature } = req.body as { message?: string; signature?: string }
+		logger(Colors.cyan(`[nfcCardLinkState] messageLen=${message != null ? String(message).length : 0}`))
+		if (!message || typeof message !== 'string' || !signature || typeof signature !== 'string') {
+			return res.status(400).json({ ok: false, error: 'Missing message or signature.' }).end()
+		}
+		try {
+			const out = await applyNfcCardLinkStateChange({ message: message.trim(), signature: signature.trim() })
+			if (!out.ok) {
+				return res.status(400).json({ ok: false, error: out.error, errorCode: out.errorCode }).end()
+			}
+			return res.status(200).json({ ok: true, action: out.action, tagId: out.tagId }).end()
+		} catch (e: any) {
+			const msg = e?.shortMessage ?? e?.message ?? 'Request failed.'
+			logger(Colors.red(`[nfcCardLinkState] ${msg}`))
+			return res.status(500).json({ ok: false, error: msg }).end()
+		}
 	})
 
 	/** POST /api/listLinkedNfcCards — 传入 AA 或 EOA，返回该钱包（认领时记录的 EOA）下已通过 Link App 绑定的 NFC：uid、tagId。纯 DB 读，Cluster 直出。 */
