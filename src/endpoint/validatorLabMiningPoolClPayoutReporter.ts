@@ -8,7 +8,8 @@
  *   - single withdrawal amount below exit floor (default 1 CNET; CL skim ≪ 1 CNET, exit principal ~32 CNET)
  *   - no active redeem beneficiary (guardianId==0 OR guardianIdBeneficiary==0 after adminRelease)
  *     OR pubkey not in manifest with active beneficiary (redeem stack on 85.33 handles those)
- *   - on-chain consumedRewardEventKey is false (guardian settleNodeRewards already paid)
+ *   - on-chain consumedRewardEventKey is false (a prior settleNodeRewards already took this key)
+ *   - the key is not already in the local consumedEventKeys map
  *
  * Payout (same call as the running .50 daemon, signer instead of a hot key):
  *   Redeem.withdrawNative(miningPool, batchTotal) via dedicated unix socket.
@@ -17,8 +18,11 @@
  *   FORBIDDEN: import the .50 hot key; beamio_vdr_payout; /run/wallet-signer-vdr/vdr-payout.sock.
  *
  * Idempotency:
- *   on-chain consumedBatchId + consumedEventKey; durable signer idempotencyKey + request fingerprint
- *   (ACK-lost recovery via signer_getTransaction — original batch hash, not RPC mock).
+ *   local consumedEventKeys after a confirmed withdrawNative receipt; signer idempotencyKey
+ *   plus request fingerprint (ACK-lost recovery via signer_getTransaction).
+ *   withdrawNative does not set consumedRewardEventKey. A consumed map at the 200000 cap
+ *   holds history lines pending (CONET_LAB_MINING_POOL_CL_PAYOUT_RELEASE_HISTORY is not set).
+ *   CONET_LAB_MINING_POOL_CL_PAYOUT_REVIEW_HOLD_BEFORE_BLOCK, when set, holds that block and earlier.
  *
  * Dual-cursor H (PM-LAB-DUAL-CURSOR-H-2026-11-10):
  *   freeze H at start; history = continuousCoverage+1→H; realtime = H+1→tip (fill tip jumps).
@@ -77,7 +81,7 @@ function resolveRpcHttpTimeoutMs(): number {
 	return Number.isFinite(n) && n >= 5_000 ? Math.min(300_000, Math.floor(n)) : 30_000
 }
 
-/** Max wait for a single executor.payout receipt after signer broadcast. */
+/** Max wait for a single withdrawNative receipt after signer broadcast. */
 function resolveTxWaitTimeoutMs(): number {
 	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_TX_WAIT_MS || 120_000)
 	return Number.isFinite(n) && n >= 15_000 ? Math.min(600_000, Math.floor(n)) : 120_000
@@ -110,8 +114,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 /**
  * Wait for a signer-broadcast hash with a hard deadline.
  * On timeout leave entries in pending (caller must not mark consumed).
- * NOTE: VDR consumedRewardEventKey only flips if settleNodeRewards was used.
- * Lab path uses executor.payoutBatch (on-chain batchId + eventKeys) + local consumedEventKeys.
+ * NOTE: withdrawNative does not set consumedRewardEventKey.
+ * Lab consumption is the local consumedEventKeys map plus a confirmed signer receipt.
  */
 async function waitForSignerReceiptByHash(
 	provider: ethers.JsonRpcProvider,
@@ -142,7 +146,6 @@ function resolveLabRedeemAddress(): string {
 	}
 }
 
-const VALIDATOR_STAKE_WEI = 32n * 10n ** 18n
 /** Per-withdrawal skim ceiling: CL rewards are ≪ 1 CNET; anything ≥ floor is principal/exit, not skim. */
 const DEFAULT_SKIM_MAX_WITHDRAWAL_WEI = 10n ** 18n
 
@@ -152,7 +155,6 @@ const READ_ABI = [
 	'function getNodeByValidatorPubkeyHash(bytes32 pubkeyHash) view returns (uint256 guardianId)',
 	'function guardianIdBeneficiary(uint256 guardianId) view returns (address)',
 	'function consumedRewardEventKey(bytes32 key) view returns (bool)',
-	'function totalStakedValidatorCount() view returns (uint256)',
 ] as const
 
 type BlockWithdrawal = {
@@ -320,12 +322,36 @@ function resolveFlushMaxBatches(): number {
 }
 
 /**
- * Soft cap for persisted consumedEventKeys. On-chain `consumedRewardEventKey` remains
- * source of truth; oversized maps make JSON.stringify hit V8 max string length (~512MiB).
+ * Soft cap for persisted consumedEventKeys. withdrawNative does not set
+ * consumedRewardEventKey. Keys still in the map were locally consumed.
+ * Keys dropped by the cap are unknown and stay itemized in pending.
+ * The cap exists so JSON.stringify does not hit V8's max string length (~512MiB).
  */
 function resolveConsumedKeysPersistMax(): number {
 	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_CONSUMED_KEYS_MAX || 200_000)
 	return Number.isFinite(n) && n >= 10_000 ? Math.min(2_000_000, Math.floor(n)) : 200_000
+}
+
+/** Inclusive block watermark. Unset means no extra block hold. Not a stake-count gate. */
+function resolveReviewHoldBeforeBlock(): number | null {
+	const raw = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_REVIEW_HOLD_BEFORE_BLOCK?.trim()
+	if (!raw) return null
+	const n = Number(raw)
+	if (!Number.isFinite(n) || n < 0) return null
+	return Math.floor(n)
+}
+
+function consumedSetAtCap(state: LabClPayoutState): boolean {
+	return Object.keys(state.consumedEventKeys || {}).length >= resolveConsumedKeysPersistMax()
+}
+
+/**
+ * A full consumed map may have dropped older keys. Those history lines stay
+ * pending unless an explicit release is set. Realtime lines are not held here.
+ */
+function historyReviewHeld(state: LabClPayoutState): boolean {
+	if (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_RELEASE_HISTORY === '1') return false
+	return consumedSetAtCap(state)
 }
 
 function pruneConsumedEventKeys(state: LabClPayoutState): number {
@@ -669,23 +695,6 @@ function withdrawalEventKey(blockNumber: number, withdrawalIndex: number): strin
 	)
 }
 
-async function resolveMaxSkimPayoutWei(
-	provider: ethers.JsonRpcProvider,
-	redeemAddr: string,
-	state: LabClPayoutState
-): Promise<bigint> {
-	const redeem = new ethers.Contract(redeemAddr, READ_ABI, provider)
-	const stakedCount = BigInt(String(await redeem.totalStakedValidatorCount!()))
-	const onChainReserve = VALIDATOR_STAKE_WEI * stakedCount
-	const balance = await provider.getBalance(redeemAddr)
-	const exitedCount = Object.keys(state.exitedPubkeys).length
-	const labActive = Math.max(0, labPubkeySet.size - exitedCount)
-	const localReserve = VALIDATOR_STAKE_WEI * BigInt(labActive)
-	const effectiveReserve = onChainReserve > localReserve ? onChainReserve : localReserve
-	if (balance <= effectiveReserve) return 0n
-	return balance - effectiveReserve
-}
-
 async function collectLabSkimEntriesForBlock(
 	readContract: ethers.Contract,
 	proxyLower: string,
@@ -791,11 +800,11 @@ async function submitLabSkimBatch(
 	const total = entries.reduce((a, e) => a + e.amount, 0n)
 	if (total <= 0n) return true
 
-	const maxPayout = await resolveMaxSkimPayoutWei(provider, redeemAddr, state)
-	if (total > maxPayout) {
+	const balance = await provider.getBalance(redeemAddr)
+	if (total > balance) {
 		logger(
 			Colors.red(
-				`[labMiningPoolClPayout] refuse batch total=${ethers.formatEther(total)} > maxSkim=${ethers.formatEther(maxPayout)}`
+				`[labMiningPoolClPayout] refuse batch total=${ethers.formatEther(total)} > balance=${ethers.formatEther(balance)}`
 			)
 		)
 		return false
@@ -946,51 +955,48 @@ async function flushPendingLabBatches(
 		return
 	}
 
-	const maxPayout = await resolveMaxSkimPayoutWei(provider, redeemAddr, state)
-	if (maxPayout <= 0n) {
-		logger(
-			Colors.yellow(
-				`[labMiningPoolClPayout] skip flush: maxSkim=0 (principal reserve) pending=${pending.size}`
-			)
-		)
-		return
-	}
-
 	const freezeH = state.freezeH?.height
 	if (freezeH == null) {
 		logger(Colors.yellow('[labMiningPoolClPayout] skip flush: freezeH not set yet'))
 		return
 	}
 
-	// Pack per-line batches that fit under maxSkim (one executor.payoutBatch per batch).
+	const holdBefore = resolveReviewHoldBeforeBlock()
+	const holdHistory = historyReviewHeld(state)
+	const signable = live.filter((e) => {
+		if (holdBefore != null && e.blockNumber <= holdBefore) return false
+		if (holdHistory && classifyPendingLine(e.blockNumber, freezeH) === 'history') return false
+		return true
+	})
+	const held = live.length - signable.length
+	if (held > 0) {
+		logger(
+			Colors.yellow(
+				`[labMiningPoolClPayout] review-hold n=${held} pending=${pending.size} historyAtCap=${holdHistory} holdBefore=${holdBefore ?? 'unset'}; left pending, not signed`
+			)
+		)
+	}
+	if (!signable.length) return
+
+	// Pack per-line batches. withdrawNative has no 32×count floor. A batch larger than
+	// the contract balance is refused inside submit and left pending.
 	type LinedBatch = { line: LabScanLine; entries: SkimEntry[] }
 	const packLine = (line: LabScanLine, entries: SkimEntry[]): LinedBatch[] => {
 		const out: LinedBatch[] = []
 		let cur: SkimEntry[] = []
-		let curTotal = 0n
 		for (const e of entries) {
-			if (e.amount > maxPayout) {
-				logger(
-					Colors.red(
-						`[labMiningPoolClPayout] entry ${e.eventKey.slice(0, 14)}… amount=${ethers.formatEther(e.amount)} > maxSkim; leaving in pending`
-					)
-				)
-				continue
-			}
-			if (cur.length && (cur.length >= batchEntries || curTotal + e.amount > maxPayout)) {
+			if (cur.length >= batchEntries) {
 				out.push({ line, entries: cur })
 				cur = []
-				curTotal = 0n
 			}
 			cur.push(e)
-			curTotal += e.amount
 		}
 		if (cur.length) out.push({ line, entries: cur })
 		return out
 	}
 
-	const historyLive = live.filter((e) => classifyPendingLine(e.blockNumber, freezeH) === 'history')
-	const realtimeLive = live.filter((e) => classifyPendingLine(e.blockNumber, freezeH) === 'realtime')
+	const historyLive = signable.filter((e) => classifyPendingLine(e.blockNumber, freezeH) === 'history')
+	const realtimeLive = signable.filter((e) => classifyPendingLine(e.blockNumber, freezeH) === 'realtime')
 	const packed = [...packLine('realtime', realtimeLive), ...packLine('history', historyLive)]
 	const reserved = resolveRealtimeReservedBatches()
 	const scheduled = scheduleFlushBatches(packed, reserved)
@@ -1256,7 +1262,7 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	labStarted = true
 	logger(
 		Colors.cyan(
-			`[labMiningPoolClPayout] starting dual-cursor+payoutBatch pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
+			`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
 				`maxGasGwei=${ethers.formatUnits(resolveMaxGasPriceWei(), 'gwei')} gasWaitForceMs=${resolveGasWaitForceMs()} ` +
 				`realtimeReserved=${resolveRealtimeReservedBatches()} ` +
 				`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on`
