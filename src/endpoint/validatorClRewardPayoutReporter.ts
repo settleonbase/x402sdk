@@ -289,21 +289,23 @@ function resolveMaxEntriesPerTx(): number {
 }
 
 /**
- * Running .22 unit sets GAS_LIMIT=2500000. The previous 800000 ceiling was a
- * signer note, not that unit and not the current settleNodeRewards grant (2000000).
- * Ceiling matches the running Lab withdraw helper (8_000_000), not a VDR quota.
+ * Running .22 unit sets CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_LIMIT=2500000.
+ * The signer grant is maxGas=2000000, so this request stays refused until that
+ * grant is raised to 2500000. Do not add a higher ceiling.
  */
-const VDR_PAYOUT_GAS_LIMIT_DEFAULT = 2_500_000
-const VDR_PAYOUT_GAS_LIMIT_HARD_CAP = 8_000_000
+const VDR_PAYOUT_GAS_LIMIT = 2_500_000
 
 /** CAP_B — first-batch executable amount hard gate (wei). */
 const VDR_PAYOUT_MAX_AMOUNT_WEI_DEFAULT = 44_885_338_300_000_000n
 
 function resolveGasLimit(): number {
-	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_LIMIT || VDR_PAYOUT_GAS_LIMIT_DEFAULT)
-	return Number.isFinite(n) && n >= 100_000
-		? Math.min(VDR_PAYOUT_GAS_LIMIT_HARD_CAP, Math.floor(n))
-		: VDR_PAYOUT_GAS_LIMIT_DEFAULT
+	const raw = process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_LIMIT?.trim()
+	if (raw && raw !== String(VDR_PAYOUT_GAS_LIMIT)) {
+		throw new Error(
+			`CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_LIMIT must be ${VDR_PAYOUT_GAS_LIMIT} (running unit); refusing a different limit`
+		)
+	}
+	return VDR_PAYOUT_GAS_LIMIT
 }
 
 /**

@@ -629,6 +629,9 @@ async function fetchValidatorByIndex(validatorIndex: number): Promise<{ pubkey: 
 	try {
 		const res = await fetch(url, { signal: AbortSignal.timeout(25_000) })
 		if (!res.ok) {
+			if (res.status === 429 || res.status >= 500) {
+				throw new Error(`validator index ${validatorIndex} beacon HTTP ${res.status}`)
+			}
 			validatorPubkeyCache.set(validatorIndex, null)
 			validatorStatusCache.set(validatorIndex, null)
 			return { pubkey: null, status: null }
@@ -645,8 +648,11 @@ async function fetchValidatorByIndex(validatorIndex: number): Promise<{ pubkey: 
 		validatorPubkeyCache.set(validatorIndex, pubkey)
 		validatorStatusCache.set(validatorIndex, status)
 		return { pubkey, status }
-	} catch {
-		return { pubkey: null, status: null }
+	} catch (err: unknown) {
+		if (err instanceof Error && err.message.startsWith('validator index ')) throw err
+		throw new Error(
+			`validator index ${validatorIndex} beacon read failed: ${err instanceof Error ? err.message : String(err)}`
+		)
 	}
 }
 
@@ -723,7 +729,18 @@ async function collectLabSkimEntriesForBlock(
 			)
 		}
 
-		const { pubkey, status } = await fetchValidatorByIndex(validatorIndex)
+		let pubkey: string | null
+		let status: string | null
+		try {
+			const fetched = await fetchValidatorByIndex(validatorIndex)
+			pubkey = fetched.pubkey
+			status = fetched.status
+		} catch (err: unknown) {
+			throw new PaidKeyViewUnconfirmed(
+				eventKey,
+				err instanceof Error ? err.message : String(err)
+			)
+		}
 		if (!pubkey || !labPubkeySet.has(pubkey)) continue
 
 		if (isNonSkimWithdrawal(amountWei, floorWei)) {
@@ -898,6 +915,7 @@ async function flushPendingLabBatches(
 		.slice(0, flushMax)
 	const live: SkimEntry[] = []
 	let droppedConsumed = 0
+	let unconfirmed = 0
 	for (const e of ordered) {
 		try {
 			const consumed = Boolean(await readContract.consumedRewardEventKey!(e.eventKey))
@@ -907,16 +925,24 @@ async function flushPendingLabBatches(
 				droppedConsumed++
 				continue
 			}
-		} catch {
-			/* keep entry */
+		} catch (err: unknown) {
+			unconfirmed++
+			logger(
+				Colors.yellow(
+					`[labMiningPoolClPayout] flush paid-key view unconfirmed eventKey=${e.eventKey} ${
+						err instanceof Error ? err.message : String(err)
+					}; left pending, not signed`
+				)
+			)
+			continue
 		}
 		live.push(e)
 	}
-	if (droppedConsumed > 0) {
+	if (droppedConsumed > 0 || unconfirmed > 0) {
 		persistPending(state, pending)
 		logger(
 			Colors.cyan(
-				`[labMiningPoolClPayout] dropped ${droppedConsumed} already-consumed eventKeys; pending=${pending.size}`
+				`[labMiningPoolClPayout] flush paid-key dropped=${droppedConsumed} unconfirmed=${unconfirmed} pending=${pending.size}`
 			)
 		)
 	}

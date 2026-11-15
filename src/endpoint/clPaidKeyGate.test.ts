@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { cursorIfBlockConfirmed, partitionByPaidKey } from './clPaidKeyGate.ts'
 
@@ -33,6 +34,13 @@ test('after the view recovers, the same key is payable once, then paid', async (
 	const third = await partitionByPaidKey(second.payable, async () => consumed)
 	assert.equal(third.payable.length, 0)
 	assert.deepEqual(third.alreadyPaid.map((e) => e.eventKey), [unpaid.eventKey])
+})
+
+test('claim gas limit stays the running 2500000 and adds no higher ceiling', () => {
+	const src = readFileSync(new URL('./validatorClRewardPayoutReporter.ts', import.meta.url), 'utf8')
+	assert.equal(src.includes('8_000_000'), false)
+	assert.match(src, /const VDR_PAYOUT_GAS_LIMIT = 2_500_000/)
+	assert.match(src, /must be \$\{VDR_PAYOUT_GAS_LIMIT\}/)
 })
 
 test('a failed paid-key view does not move the old cursor', () => {
