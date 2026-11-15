@@ -9,8 +9,30 @@
  * - Enqueue+cursor and settle intents persist via atomic fsync rename.
  * - ACK-lost recovery reuses signer idempotencyKey + request fingerprint (no blind resend).
  *
- * Gas max + force-wait policy unchanged. Live cutover is NOT performed here —
- * enablement remains env-gated for project-owner approval.
+ * Gas: default 2500000 matches the running .22 unit. Do not clamp to the old 800000 note.
+ * Amount: FORCE_BLOCK before settle broadcast — CONET_VDR_PAYOUT_MAX_AMOUNT_WEI
+ * defaults to CAP_B 44885338300000000 (0.0448853383 CNET). An entry with
+ * amount > CAP is held pending (pre-sign, signer never sees that eventKey,
+ * no calldata). Sibling entries each ≤ CAP are packed so every settle tx
+ * sum ≤ CAP and count ≤ maxEntries (default 29). A single over-CAP amount
+ * is never split into under-CAP txs.
+ *
+ * First-batch cumulative wei budget (default = CAP_B): selectEntriesUnderFirstBatchBudget
+ * takes only rows that fit remainingFirstBatchBudgetWei (settled + in-flight reserve).
+ * Deferred rows stay pending (no pool wipe). CONET_VDR_FIRST_BATCH_BUDGET_WEI=0 disables
+ * the cumulative gate (per-pack CAP + peel still apply). Per-tx n ≤ resolveMaxEntriesPerTx.
+ *
+ * Live cutover NOT performed here — enablement remains env-gated for
+ * project-owner approval.
+ *
+ * Observe/enqueue (no sign, no broadcast):
+ *   CONET_VALIDATOR_CL_REWARD_PAYOUT_OBSERVE_ENQUEUE=1
+ *   CONET_VALIDATOR_CL_REWARD_PAYOUT_OBSERVE_STATE_FILE=<path>
+ * Scan, event dedupe, and this mode's own dual cursors still advance.
+ * recoverOpenIntents resend and flushPendingBatches are disabled.
+ * The signer socket is never loaded. The production state file is not written.
+ * This mode starts even when CONET_VALIDATOR_CL_REWARD_PAYOUT=0, and it wins
+ * over DRY_RUN (pending is not cleared; uncertain intents are not resent).
  */
 
 import fs from 'node:fs'
@@ -19,13 +41,13 @@ import path from 'node:path'
 import { ethers } from 'ethers'
 import Colors from 'colors/safe'
 import { logger } from '../logger'
-import { masterSetup, resolveBeamioConetHttpRpcUrl } from '../util'
 import { CONET_VALIDATOR_NODE_ONCHAIN_LANE, enqueueOnchainTxWork } from '../onchainTxSerialQueue'
 import {
+	CONET_RPC_URL,
 	CONET_VALIDATOR_DEPOSIT_REDEEM,
 	CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK,
 } from '../chainAddresses'
-import { resolveValidatorDepositRedeemAddress } from './validatorDepositRedeem'
+import { partitionByPaidKey } from './clPaidKeyGate'
 import {
 	buildVdrSignerTx,
 	readVdrSignerConfig,
@@ -45,6 +67,7 @@ import {
 	isHistoricalComplete,
 	markIntentBroadcast,
 	markIntentConfirmed,
+	markIntentFailed,
 	markIntentUncertain,
 	migrateLegacyToDualCursor,
 	planFlushOrder,
@@ -53,6 +76,7 @@ import {
 	rebuildSignerTxFromIntent,
 	reconcileAckLostIntent,
 	recordRealtimeLatency,
+	remainingFirstBatchBudgetWei,
 	removePendingKeys,
 	resolveConfirmationDepth,
 	resolveHistoricalFlushFloor,
@@ -67,11 +91,23 @@ const PAYOUT_ABI = [
 	'function consumedRewardEventKey(bytes32 key) view returns (bool)',
 ] as const
 
+/** Local copy so this module does not import validatorDepositRedeem (settle-pool init). */
+function resolveValidatorDepositRedeemAddress(): string | null {
+	const raw = (process.env.CONET_VALIDATOR_DEPOSIT_REDEEM || CONET_VALIDATOR_DEPOSIT_REDEEM || '').trim()
+	if (!raw) return null
+	try {
+		const addr = ethers.getAddress(raw)
+		return addr === ethers.ZeroAddress ? null : addr
+	} catch {
+		return null
+	}
+}
+
 function resolveClaimRpcUrl(): string {
 	return (
 		process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL?.trim() ||
-		masterSetup.validatorDeposit?.rpcUrl ||
-		resolveBeamioConetHttpRpcUrl()
+		process.env.CONET_RPC_URL?.trim() ||
+		CONET_RPC_URL
 	)
 }
 
@@ -114,17 +150,118 @@ type PayoutEntry = {
 	enqueuedAtMs?: number
 }
 
+function batchSumWei(entries: PayoutEntry[]): bigint {
+	return entries.reduce((a, e) => a + e.amount, 0n)
+}
+
+/** Below/equal CAP → ok; above → amount_cap_block (caller must not sign/broadcast/split). */
+function assertAmountCapOrAbort(entries: PayoutEntry[]): {
+	ok: true
+	batchSumWei: string
+	capWei: string
+} | {
+	ok: false
+	reason: 'amount_cap_block'
+	batchSumWei: string
+	capWei: string
+} {
+	const capWei = resolveMaxAmountWei()
+	const sum = batchSumWei(entries)
+	if (sum > capWei) {
+		return {
+			ok: false,
+			reason: 'amount_cap_block',
+			batchSumWei: sum.toString(),
+			capWei: capWei.toString(),
+		}
+	}
+	return { ok: true, batchSumWei: sum.toString(), capWei: capWei.toString() }
+}
+
 let payoutStarted = false
 let payoutTimer: ReturnType<typeof setTimeout> | undefined
 let payoutInFlight = false
 /** Mutable dual-cursor working copy for the current tick (persisted after mutations). */
 let workingState: DualCursorState | null = null
 
-function resolveStateFile(): string {
+/**
+ * Scan + durable enqueue only. No recover resend, no flush, no signer socket.
+ * Independent state file; production cursors stay byte-stable.
+ */
+function payoutObserveEnqueue(): boolean {
+	const v = (process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_OBSERVE_ENQUEUE || '').trim().toLowerCase()
+	return v === '1' || v === 'true' || v === 'yes'
+}
+
+function resolveProductionStateFile(): string {
 	return (
 		process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_STATE_FILE?.trim() ||
 		path.join(homedir(), '.conet-validator-cl-reward-payout-state.json')
 	)
+}
+
+let observeProductionStatePath: string | null = null
+let observeProductionStateBytes: Buffer | null = null
+let observeProductionStateMissing = false
+
+function assertObserveEnqueueConfig(): void {
+	const observeFile = process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_OBSERVE_STATE_FILE?.trim()
+	if (!observeFile) {
+		throw new Error(
+			'[validatorClRewardPayout] observe/enqueue requires CONET_VALIDATOR_CL_REWARD_PAYOUT_OBSERVE_STATE_FILE'
+		)
+	}
+	const prod = resolveProductionStateFile()
+	if (path.resolve(observeFile) === path.resolve(prod)) {
+		throw new Error(
+			'[validatorClRewardPayout] observe state file must not be the production payout state file'
+		)
+	}
+	observeProductionStatePath = prod
+	if (fs.existsSync(prod)) {
+		observeProductionStateBytes = fs.readFileSync(prod)
+		observeProductionStateMissing = false
+	} else {
+		observeProductionStateBytes = null
+		observeProductionStateMissing = true
+	}
+	logger(
+		Colors.cyan(
+			'[validatorClRewardPayout] observe/enqueue startup: recover resend OFF, flush OFF, signer NOT loaded, production cursors protected'
+		)
+	)
+}
+
+function assertProductionCursorsUntouched(): void {
+	if (!payoutObserveEnqueue() || !observeProductionStatePath) return
+	const prod = observeProductionStatePath
+	if (observeProductionStateMissing) {
+		if (fs.existsSync(prod)) {
+			throw new Error('[validatorClRewardPayout] observe/enqueue created the production payout state file')
+		}
+		return
+	}
+	const now = fs.readFileSync(prod)
+	if (!observeProductionStateBytes || !now.equals(observeProductionStateBytes)) {
+		throw new Error('[validatorClRewardPayout] observe/enqueue mutated production payout cursors')
+	}
+}
+
+function resolveStateFile(): string {
+	if (payoutObserveEnqueue()) {
+		const observeFile = process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_OBSERVE_STATE_FILE?.trim()
+		if (!observeFile) {
+			throw new Error(
+				'[validatorClRewardPayout] observe/enqueue requires CONET_VALIDATOR_CL_REWARD_PAYOUT_OBSERVE_STATE_FILE'
+			)
+		}
+		const prod = resolveProductionStateFile()
+		if (path.resolve(observeFile) === path.resolve(prod)) {
+			throw new Error('[validatorClRewardPayout] observe state file collides with production payout state')
+		}
+		return observeFile
+	}
+	return resolveProductionStateFile()
 }
 
 function resolveBeaconRestUrl(): string {
@@ -151,9 +288,76 @@ function resolveMaxEntriesPerTx(): number {
 	return Number.isFinite(n) && n >= 1 ? Math.min(256, Math.floor(n)) : 29
 }
 
+/**
+ * Running .22 unit sets GAS_LIMIT=2500000. The previous 800000 ceiling was a
+ * signer note, not that unit and not the current settleNodeRewards grant (2000000).
+ * Ceiling matches the running Lab withdraw helper (8_000_000), not a VDR quota.
+ */
+const VDR_PAYOUT_GAS_LIMIT_DEFAULT = 2_500_000
+const VDR_PAYOUT_GAS_LIMIT_HARD_CAP = 8_000_000
+
+/** CAP_B — first-batch executable amount hard gate (wei). */
+const VDR_PAYOUT_MAX_AMOUNT_WEI_DEFAULT = 44_885_338_300_000_000n
+
 function resolveGasLimit(): number {
-	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_LIMIT || 2_000_000)
-	return Number.isFinite(n) && n >= 100_000 ? Math.min(8_000_000, Math.floor(n)) : 2_000_000
+	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_LIMIT || VDR_PAYOUT_GAS_LIMIT_DEFAULT)
+	return Number.isFinite(n) && n >= 100_000
+		? Math.min(VDR_PAYOUT_GAS_LIMIT_HARD_CAP, Math.floor(n))
+		: VDR_PAYOUT_GAS_LIMIT_DEFAULT
+}
+
+/**
+ * Max CNET (wei) allowed in one settleNodeRewards broadcast.
+ * Unset / invalid / 0 → CAP_B (gate cannot be disabled by accident).
+ */
+function resolveMaxAmountWei(): bigint {
+	const raw = process.env.CONET_VDR_PAYOUT_MAX_AMOUNT_WEI?.trim()
+	if (!raw) return VDR_PAYOUT_MAX_AMOUNT_WEI_DEFAULT
+	try {
+		const v = BigInt(raw)
+		return v > 0n ? v : VDR_PAYOUT_MAX_AMOUNT_WEI_DEFAULT
+	} catch {
+		return VDR_PAYOUT_MAX_AMOUNT_WEI_DEFAULT
+	}
+}
+
+/**
+ * First-batch cumulative wei budget (settled + in-flight reserve).
+ * Unset → CAP_B. Explicit `0` disables cumulative select (peel/pack still enforce per-pack CAP).
+ */
+function resolveFirstBatchBudgetWei(): bigint | null {
+	const raw = process.env.CONET_VDR_FIRST_BATCH_BUDGET_WEI?.trim()
+	if (raw === undefined || raw === '') return resolveMaxAmountWei()
+	try {
+		const v = BigInt(raw)
+		if (v === 0n) return null
+		return v > 0n ? v : resolveMaxAmountWei()
+	} catch {
+		return resolveMaxAmountWei()
+	}
+}
+
+/**
+ * Take payable rows that fit remaining first-batch budget; deferred stay in pending.
+ * Does not wipe the pool. Empty selected when budget exhausted.
+ */
+function selectEntriesUnderFirstBatchBudget(
+	entries: PayoutEntry[],
+	state: DualCursorState,
+	budgetWei: bigint
+): { selected: PayoutEntry[]; deferred: PayoutEntry[]; remainingWei: string } {
+	let remaining = remainingFirstBatchBudgetWei(state, budgetWei)
+	const selected: PayoutEntry[] = []
+	const deferred: PayoutEntry[] = []
+	for (const e of entries) {
+		if (e.amount <= remaining) {
+			selected.push(e)
+			remaining -= e.amount
+		} else {
+			deferred.push(e)
+		}
+	}
+	return { selected, deferred, remainingWei: remaining.toString() }
 }
 
 function resolveGasBase(): number {
@@ -176,15 +380,32 @@ function resolveCalldataBytesPerEntry(): number {
 	return Number.isFinite(n) && n >= 64 ? Math.floor(n) : 128
 }
 
+/**
+ * Default pause line: 30_000_000 wei (0.03 Gwei). High gas is strict `> max`
+ * (equal is not high). Prefer WEI env; GWEI remains a compatibility override.
+ * See `.cursor/rules/conet-vdr-cl-reward-gas-threshold-300s.mdc`.
+ */
 function resolveMaxGasPriceWei(): bigint {
-	const gwei = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_MAX_GAS_PRICE_GWEI || 2)
-	const safe = Number.isFinite(gwei) && gwei > 0 ? gwei : 2
-	return ethers.parseUnits(String(safe), 'gwei')
+	const weiRaw = process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_MAX_GAS_PRICE_WEI?.trim()
+	if (weiRaw) {
+		try {
+			const w = BigInt(weiRaw)
+			if (w > 0n) return w
+		} catch {
+			/* fall through */
+		}
+	}
+	const gweiRaw = process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_MAX_GAS_PRICE_GWEI?.trim()
+	if (gweiRaw) {
+		const gwei = Number(gweiRaw)
+		if (Number.isFinite(gwei) && gwei > 0) return ethers.parseUnits(String(gwei), 'gwei')
+	}
+	return 30_000_000n
 }
 
 function resolveGasWaitForceMs(): number {
-	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_WAIT_FORCE_MS || 180_000)
-	return Number.isFinite(n) && n >= 30_000 ? Math.floor(n) : 180_000
+	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_WAIT_FORCE_MS || 300_000)
+	return Number.isFinite(n) && n >= 30_000 ? Math.floor(n) : 300_000
 }
 
 function clearGasWait(state: DualCursorState): boolean {
@@ -277,8 +498,16 @@ function loadState(): DualCursorState {
 }
 
 function persistState(state: DualCursorState): void {
+	const target = resolveStateFile()
+	if (payoutObserveEnqueue()) {
+		const prod = resolveProductionStateFile()
+		if (path.resolve(target) === path.resolve(prod)) {
+			throw new Error('[validatorClRewardPayout] observe/enqueue refuses to write production payout state')
+		}
+	}
 	workingState = state
-	atomicWriteState(resolveStateFile(), state)
+	atomicWriteState(target, state)
+	if (payoutObserveEnqueue()) assertProductionCursorsUntouched()
 }
 
 function syncPendingOntoState(state: DualCursorState, pending: Map<string, PayoutEntry>): DualCursorState {
@@ -464,6 +693,16 @@ async function waitForSignerReceipt(
 }
 
 async function readGasPriceWei(provider: ethers.JsonRpcProvider): Promise<bigint> {
+	// Isolate-only override. Production must not set TEST_GAS_PRICE_WEI.
+	const testRaw = process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_TEST_GAS_PRICE_WEI?.trim()
+	if (testRaw) {
+		try {
+			const w = BigInt(testRaw)
+			if (w > 0n) return w
+		} catch {
+			/* fall through to live fee */
+		}
+	}
 	try {
 		const fee = await provider.getFeeData()
 		if (fee.gasPrice != null && fee.gasPrice > 0n) return fee.gasPrice
@@ -475,24 +714,53 @@ async function readGasPriceWei(provider: ethers.JsonRpcProvider): Promise<bigint
 	return BigInt(hex)
 }
 
-async function filterUnconsumed(
+/**
+ * Force-path: pick one beneficiary wallet's unpaid entries (earliest block/index),
+ * capped by existing maxEntries / amount CAP gates at submit time.
+ * Does NOT implement one internal transfer — still settleNodeRewards per-index calls.
+ */
+async function pickSameWalletForceEntries(
 	readContract: ethers.Contract,
-	entries: PayoutEntry[]
+	pending: Map<string, PayoutEntry>
 ): Promise<PayoutEntry[]> {
-	const out: PayoutEntry[] = []
-	for (const e of entries) {
+	const sorted = [...pending.values()].sort(
+		(a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex
+	)
+	type Row = { entry: PayoutEntry; beneficiary: string }
+	const rows: Row[] = []
+	for (const e of sorted) {
 		try {
-			const consumed = Boolean(await readContract.consumedRewardEventKey!(e.eventKey))
-			if (consumed) continue
+			const beneficiary = String(await readContract.guardianIdBeneficiary!(e.guardianId)).toLowerCase()
+			if (!beneficiary || beneficiary === ethers.ZeroAddress.toLowerCase()) continue
+			rows.push({ entry: e, beneficiary })
 		} catch {
-			// Keep entry; chain rejects duplicates.
+			continue
 		}
-		out.push(e)
 	}
-	return out
+	if (!rows.length) return []
+	const firstBen = rows[0]!.beneficiary
+	const maxN = resolveMaxEntriesPerTx()
+	return rows
+		.filter((r) => r.beneficiary === firstBen)
+		.slice(0, maxN)
+		.map((r) => r.entry)
 }
 
-type SubmitOutcome = 'ok' | 'needs_split' | 'failed' | 'uncertain'
+async function filterUnconsumed(readContract: ethers.Contract, entries: PayoutEntry[]) {
+	const split = await partitionByPaidKey(entries, async (eventKey) =>
+		Boolean(await readContract.consumedRewardEventKey!(eventKey))
+	)
+	for (const err of split.errors) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] paid-key view unconfirmed eventKey=${err.eventKey} ${err.message}; left pending, not signed`
+			)
+		)
+	}
+	return split
+}
+
+type SubmitOutcome = 'ok' | 'needs_split' | 'failed' | 'uncertain' | 'amount_blocked'
 
 function intentCoversPending(intent: SettleIntent, pending: Map<string, PayoutEntry>): boolean {
 	return intent.eventKeys.every((k) => pending.has(k.toLowerCase()))
@@ -513,6 +781,15 @@ async function submitPayoutBatchOnchain(
 	const eventKeys = entries.map((e) => e.eventKey)
 	const scanLines = entries.map((e) => e.scanLine ?? 'historical') as ScanLine[]
 
+	if (payoutObserveEnqueue()) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] observe/enqueue refuse sign/broadcast n=${entries.length} — pending retained, signer not loaded`
+			)
+		)
+		return 'failed'
+	}
+
 	if (payoutDryRun()) {
 		logger(
 			Colors.cyan(
@@ -522,6 +799,16 @@ async function submitPayoutBatchOnchain(
 			)
 		)
 		return 'ok'
+	}
+
+	const amountGate = assertAmountCapOrAbort(entries)
+	if (!amountGate.ok) {
+		logger(
+			Colors.red(
+				`[validatorClRewardPayout] FORCE_BLOCK amount_cap_block n=${entries.length} batchSumWei=${amountGate.batchSumWei} capWei=${amountGate.capWei} — no sign/broadcast`
+			)
+		)
+		return 'amount_blocked'
 	}
 
 	const config = readVdrSignerConfig()
@@ -561,13 +848,19 @@ async function submitPayoutBatchOnchain(
 
 	const tx: VdrSignerTx = rebuildSignerTxFromIntent(intent, config.keyArray)
 
+	logger(
+		Colors.cyan(
+			`[validatorClRewardPayout] PRE_SIGN ACCEPT eventKeys=${eventKeys.join(',')} batchSumWei=${amountGate.batchSumWei} capWei=${amountGate.capWei} n=${entries.length}`
+		)
+	)
+
 	try {
 		const { hash } = await signerSendOnce(tx, config.socketPath)
 		state = markIntentBroadcast(workingState ?? state, intent.idempotencyKey, hash)
 		persistState(state)
 		logger(
 			Colors.cyan(
-				`[validatorClRewardPayout] settleNodeRewards sent via signer tx=${hash} waiting≤${resolveClaimTxWaitTimeoutMs()}ms n=${entries.length} gasPrice=${ethers.formatUnits(gasPriceWei, 'gwei')}gwei idem=${intent.idempotencyKey.slice(0, 24)}…`
+				`[validatorClRewardPayout] settleNodeRewards sent via signer tx=${hash} waiting≤${resolveClaimTxWaitTimeoutMs()}ms n=${entries.length} eventKeys=${eventKeys.join(',')} gasPrice=${ethers.formatUnits(gasPriceWei, 'gwei')}gwei idem=${intent.idempotencyKey.slice(0, 24)}…`
 			)
 		)
 		const receipt = await waitForSignerReceipt(provider, hash, resolveClaimTxWaitTimeoutMs())
@@ -595,6 +888,12 @@ async function submitPayoutBatchOnchain(
 			)
 			return 'uncertain'
 		}
+		state = markIntentFailed(
+			workingState ?? state,
+			intent.idempotencyKey,
+			`signer_failed:${msg.slice(0, 120)}`
+		)
+		persistState(state)
 		logger(Colors.red(`[validatorClRewardPayout] settleNodeRewards signer failed: ${msg}`))
 		return 'failed'
 	}
@@ -615,13 +914,71 @@ async function submitPayoutBatch(
 	return outcome ?? 'failed'
 }
 
-async function submitPayoutBatchAutoSplit(
+/**
+ * Drop individually over-cap rows out of the signer path. They stay in `pending`.
+ * Does not split one row's amount.
+ */
+function peelIndividuallyOverCap(entries: PayoutEntry[]): { payable: PayoutEntry[]; blocked: PayoutEntry[] } {
+	const capWei = resolveMaxAmountWei()
+	const payable: PayoutEntry[] = []
+	const blocked: PayoutEntry[] = []
+	for (const e of entries) {
+		if (e.amount > capWei) blocked.push(e)
+		else payable.push(e)
+	}
+	return { payable, blocked }
+}
+
+/**
+ * Pack already-under-cap rows so each broadcast sum ≤ CAP and count ≤ max entries
+ * (default 29). Never splits a single amount.
+ */
+function packEntriesUnderAmountCap(entries: PayoutEntry[]): PayoutEntry[][] {
+	const capWei = resolveMaxAmountWei()
+	const maxN = resolveMaxEntriesPerTx()
+	const packs: PayoutEntry[][] = []
+	let cur: PayoutEntry[] = []
+	let sum = 0n
+	for (const e of entries) {
+		if (cur.length > 0 && (cur.length >= maxN || sum + e.amount > capWei)) {
+			packs.push(cur)
+			cur = []
+			sum = 0n
+		}
+		cur.push(e)
+		sum += e.amount
+	}
+	if (cur.length) packs.push(cur)
+	return packs
+}
+
+async function submitPayableBatch(
 	contractAddr: string,
 	entries: PayoutEntry[],
 	gasPriceWei: bigint,
 	pending: Map<string, PayoutEntry>
 ): Promise<void> {
 	if (!entries.length) return
+	if (payoutObserveEnqueue()) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] observe/enqueue skip payable submit n=${entries.length} — pending retained, signer not loaded`
+			)
+		)
+		return
+	}
+
+	// Defense in depth: a pack that still exceeds CAP is not signed and is not
+	// amount-bisected (that would be an over-cap bypass).
+	const preGate = assertAmountCapOrAbort(entries)
+	if (!preGate.ok) {
+		logger(
+			Colors.red(
+				`[validatorClRewardPayout] FORCE_BLOCK amount_cap_block (pre-sign pack) n=${entries.length} batchSumWei=${preGate.batchSumWei} capWei=${preGate.capWei} — leave pending, no broadcast`
+			)
+		)
+		return
+	}
 
 	const outcome = await submitPayoutBatch(contractAddr, entries, gasPriceWei)
 	if (outcome === 'ok') {
@@ -641,6 +998,15 @@ async function submitPayoutBatchAutoSplit(
 		return
 	}
 
+	if (outcome === 'amount_blocked') {
+		logger(
+			Colors.red(
+				`[validatorClRewardPayout] leave batch in pending after amount_cap_block; no amount auto-split n=${entries.length}`
+			)
+		)
+		return
+	}
+
 	if (entries.length === 1) {
 		logger(
 			Colors.yellow(
@@ -655,11 +1021,55 @@ async function submitPayoutBatchAutoSplit(
 	const right = entries.slice(mid)
 	logger(
 		Colors.yellow(
-			`[validatorClRewardPayout] auto-split n=${entries.length} → ${left.length}+${right.length} (reason=${outcome})`
+			`[validatorClRewardPayout] gas/calldata auto-split n=${entries.length} → ${left.length}+${right.length} (reason=${outcome})`
 		)
 	)
 	await submitPayoutBatchAutoSplit(contractAddr, left, gasPriceWei, pending)
 	await submitPayoutBatchAutoSplit(contractAddr, right, gasPriceWei, pending)
+}
+
+async function submitPayoutBatchAutoSplit(
+	contractAddr: string,
+	entries: PayoutEntry[],
+	gasPriceWei: bigint,
+	pending: Map<string, PayoutEntry>
+): Promise<void> {
+	if (!entries.length) return
+
+	const { payable, blocked } = peelIndividuallyOverCap(entries)
+	for (const e of blocked) {
+		logger(
+			Colors.red(
+				`[validatorClRewardPayout] FORCE_BLOCK amount_cap_block (pre-sign) eventKey=${e.eventKey} amountWei=${e.amount} capWei=${resolveMaxAmountWei()} — leave this key pending, no sign, no broadcast`
+			)
+		)
+	}
+	if (!payable.length) return
+
+	const budgetWei = resolveFirstBatchBudgetWei()
+	let toPack = payable
+	if (budgetWei != null) {
+		const state = workingState ?? loadState()
+		const { selected, deferred, remainingWei } = selectEntriesUnderFirstBatchBudget(
+			payable,
+			state,
+			budgetWei
+		)
+		if (deferred.length) {
+			logger(
+				Colors.magenta(
+					`[validatorClRewardPayout] first_batch_budget_hold deferred=${deferred.length} selected=${selected.length} ` +
+						`budgetWei=${budgetWei} remainingWei=${remainingWei} — deferred stay pending (no pool wipe)`
+				)
+			)
+		}
+		if (!selected.length) return
+		toPack = selected
+	}
+
+	for (const pack of packEntriesUnderAmountCap(toPack)) {
+		await submitPayableBatch(contractAddr, pack, gasPriceWei, pending)
+	}
 }
 
 async function scanBlocksIntoPending(
@@ -696,6 +1106,14 @@ async function recoverOpenIntents(
 	provider: ethers.JsonRpcProvider,
 	pending: Map<string, PayoutEntry>
 ): Promise<void> {
+	if (payoutObserveEnqueue()) {
+		logger(
+			Colors.yellow(
+				'[validatorClRewardPayout] observe/enqueue skip recoverOpenIntents resend — intents retained, signer not loaded'
+			)
+		)
+		return
+	}
 	let state = workingState ?? loadState()
 	const open = state.settleIntents.filter((i) => i.status === 'broadcast' || i.status === 'uncertain' || i.status === 'prepared')
 	if (!open.length) return
@@ -785,6 +1203,14 @@ async function flushPendingBatches(
 	contractAddr: string,
 	pending: Map<string, PayoutEntry>
 ): Promise<void> {
+	if (payoutObserveEnqueue()) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] observe/enqueue skip flushPendingBatches pending=${pending.size} — no signer, events retained`
+			)
+		)
+		return
+	}
 	let state = workingState ?? loadState()
 	if (!pending.size) {
 		if (clearGasWait(state)) state = syncPendingOntoState(state, pending)
@@ -792,12 +1218,13 @@ async function flushPendingBatches(
 	}
 
 	const maxGas = resolveMaxGasPriceWei()
-	const gasDustWei = 50_000_000n
 	const gasPrice = await readGasPriceWei(provider)
 	const forceMs = resolveGasWaitForceMs()
+	// Strict `>` only — equal to maxGas is NOT high gas (no +50_000_000 dust).
+	const gasHigh = gasPrice > maxGas
 	let forceFlush = false
 
-	if (gasPrice > maxGas + gasDustWei) {
+	if (gasHigh) {
 		const now = Date.now()
 		if (!state.gasWaitStartedAt) {
 			state = { ...state, gasWaitStartedAt: new Date(now).toISOString() }
@@ -808,7 +1235,7 @@ async function flushPendingBatches(
 		if (elapsedMs < forceMs) {
 			logger(
 				Colors.yellow(
-					`[validatorClRewardPayout] skip flush: gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei > max=${ethers.formatUnits(maxGas, 'gwei')} gwei ` +
+					`[validatorClRewardPayout] pause auto-pay: gasPrice=${gasPrice.toString()} wei > max=${maxGas.toString()} wei ` +
 						`wait ${formatWaitCountdown(elapsedMs, forceMs)} pending=${pending.size}`
 				)
 			)
@@ -817,24 +1244,30 @@ async function flushPendingBatches(
 		forceFlush = true
 		logger(
 			Colors.yellow(
-				`[validatorClRewardPayout] force flush: gas wait ${Math.floor(elapsedMs / 1000)}s ≥ ${Math.floor(forceMs / 1000)}s; ` +
-					`ignoring max=${ethers.formatUnits(maxGas, 'gwei')} gwei, using live gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei (pending=${pending.size})`
+				`[validatorClRewardPayout] force same-wallet merge: gas wait ${Math.floor(elapsedMs / 1000)}s ≥ ${Math.floor(forceMs / 1000)}s; ` +
+					`live gasPrice=${gasPrice.toString()} wei pending=${pending.size} (one settleNodeRewards; multi internal call{value})`
 			)
 		)
 	} else if (clearGasWait(state)) {
+		// Dropped to ≤ maxGas → resume ordinary auto-pay immediately (no 300s wait).
 		state = syncPendingOntoState(state, pending)
+		logger(
+			Colors.cyan(
+				`[validatorClRewardPayout] gas ≤ max (${gasPrice.toString()} ≤ ${maxGas.toString()} wei) — resume ordinary auto-pay`
+			)
+		)
 	}
 
 	// Sync map → state so planFlushOrder sees scanLine tags.
 	state = syncPendingOntoState(workingState ?? state, pending)
 
-	const live = await filterUnconsumed(
+	const split = await filterUnconsumed(
 		readContract,
 		[...pending.values()].sort((a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex)
 	)
-	if (live.length !== pending.size) {
-		const liveKeys = new Set(live.map((e) => e.eventKey))
-		const dropped = [...pending.keys()].filter((k) => !liveKeys.has(k))
+	const blocked = new Set(split.unconfirmed.map((e) => e.eventKey.toLowerCase()))
+	if (split.alreadyPaid.length) {
+		const dropped = split.alreadyPaid.map((e) => e.eventKey)
 		for (const k of dropped) pending.delete(k)
 		state = removePendingKeys(workingState ?? state, dropped)
 		state = syncPendingOntoState(state, pending)
@@ -844,12 +1277,48 @@ async function flushPendingBatches(
 			)
 		)
 	}
+	if (blocked.size) {
+		state = syncPendingOntoState(workingState ?? state, pending)
+		persistState(state)
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] ${blocked.size} pending kept unsigned until paid-key view succeeds`
+			)
+		)
+	}
 	if (!pending.size) {
 		if (clearGasWait(state)) state = syncPendingOntoState(workingState ?? state, pending)
 		return
 	}
 
 	state = syncPendingOntoState(workingState ?? state, pending)
+
+	if (forceFlush) {
+		const forceBatch = (await pickSameWalletForceEntries(readContract, pending)).filter(
+			(e) => !blocked.has(e.eventKey.toLowerCase())
+		)
+		if (!forceBatch.length) {
+			logger(Colors.yellow(`[validatorClRewardPayout] force flush: no resolvable beneficiary — skip`))
+			return
+		}
+		// Reset 300s window so a second force cannot fire in the same window (persist across restart via state).
+		state = { ...state, gasWaitStartedAt: new Date().toISOString() }
+		state = syncPendingOntoState(state, pending)
+		persistState(state)
+		logger(
+			Colors.cyan(
+				`[validatorClRewardPayout] force plan n=${forceBatch.length} eventKeys=${forceBatch.map((e) => e.eventKey).join(',')} ` +
+					`gasPrice=${gasPrice.toString()}wei (contract still per-index call{value}; see CONTRACT-DIFF-SETTLE-AGGREGATE-TRANSFER)`
+			)
+		)
+		for (const sub of splitEntriesForOnchain(forceBatch)) {
+			await submitPayoutBatchAutoSplit(contractAddr, sub, gasPrice, pending)
+		}
+		state = workingState ?? state
+		persistState(state)
+		return
+	}
+
 	const flushPlan = planFlushOrder(state, {
 		maxEntriesPerTx: resolveMaxEntriesPerTx(),
 		realtimeQuota: resolveRealtimeFlushQuota(),
@@ -867,7 +1336,7 @@ async function flushPendingBatches(
 			`[validatorClRewardPayout] flush plan rtBatches=${flushPlan.realtimeBatchCount} histBatches=${flushPlan.historicalBatchCount} ` +
 				`historyProgressing=${flushPlan.historyStillProgressing ? 1 : 0} rtLatencyAvgMs=${latencyAvg} ` +
 				`pending=${pending.size} histCursor=${state.historicalCursor} rtCursor=${state.realtimeCursor} ` +
-				`gasPrice=${ethers.formatUnits(gasPrice, 'gwei')}gwei${forceFlush ? ' force=1' : ''}`
+				`gasPrice=${gasPrice.toString()}wei`
 		)
 	)
 
@@ -875,7 +1344,7 @@ async function flushPendingBatches(
 		const batch: PayoutEntry[] = []
 		for (const j of batchJson) {
 			const e = entryFromJson(j)
-			if (e && pending.has(e.eventKey)) batch.push(e)
+			if (e && pending.has(e.eventKey) && !blocked.has(e.eventKey.toLowerCase())) batch.push(e)
 		}
 		if (!batch.length) continue
 		// Further split by gas/calldata heuristics, then auto-bisect on estimate failure.
@@ -910,7 +1379,11 @@ async function payoutTick(): Promise<void> {
 		const liveHead = Number(await provider.getBlockNumber())
 		if (!Number.isFinite(liveHead) || liveHead < floor) return
 
-		await recoverOpenIntents(provider, pending)
+		if (payoutObserveEnqueue()) {
+			logger(Colors.yellow('[validatorClRewardPayout] observe/enqueue outer-skip recoverOpenIntents'))
+		} else {
+			await recoverOpenIntents(provider, pending)
+		}
 		state = workingState ?? loadState()
 
 		const depth = resolveConfirmationDepth()
@@ -1078,7 +1551,20 @@ async function payoutTick(): Promise<void> {
 			}
 		}
 
-		await flushPendingBatches(provider, readContract, proxyAddr, pending)
+		if (payoutObserveEnqueue()) {
+			logger(
+				Colors.yellow(
+					`[validatorClRewardPayout] observe/enqueue outer-skip flushPendingBatches pending=${pending.size}`
+				)
+			)
+			logger(
+				Colors.cyan(
+					`[validatorClRewardPayout] observe/enqueue tick-done pending=${pending.size} recoverSkipped=1 flushSkipped=1 signerLoaded=0`
+				)
+			)
+		} else {
+			await flushPendingBatches(provider, readContract, proxyAddr, pending)
+		}
 	} catch (e: unknown) {
 		logger(Colors.red(`[validatorClRewardPayout] tick error: ${(e as Error)?.message ?? e}`))
 	} finally {
@@ -1096,7 +1582,9 @@ function scheduleNextPayoutTick(): void {
 
 export function startValidatorClRewardPayoutReporter(): void {
 	if (payoutStarted) return
-	if (!payoutEnabled()) {
+	if (payoutObserveEnqueue()) {
+		assertObserveEnqueueConfig()
+	} else if (!payoutEnabled()) {
 		logger(Colors.yellow('[validatorClRewardPayout] disabled (set CONET_VALIDATOR_CL_REWARD_PAYOUT=1)'))
 		return
 	}

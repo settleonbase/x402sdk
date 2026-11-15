@@ -10,10 +10,11 @@
  *     OR pubkey not in manifest with active beneficiary (redeem stack on 85.33 handles those)
  *   - on-chain consumedRewardEventKey is false (guardian settleNodeRewards already paid)
  *
- * Payout (LIMITED-EXECUTOR + dual-cursor H):
- *   dedicated unix socket → LabMiningPoolPayoutExecutor.payoutBatch(batchId, eventKeys, amount)
- *   Env: CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_SOCKET + KEY_ARRAY + PAYOUT_EXECUTOR
- *   FORBIDDEN: private-key → VDR.withdrawNative; forbidden VDR sock /run/wallet-signer-vdr/vdr-payout.sock
+ * Payout (same call as the running .50 daemon, signer instead of a hot key):
+ *   Redeem.withdrawNative(miningPool, batchTotal) via dedicated unix socket.
+ *   Env: CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_SOCKET + KEY_ARRAY.
+ *   Not LabMiningPoolPayoutExecutor.payoutBatch — that call is not on the running daemon.
+ *   FORBIDDEN: import the .50 hot key; beamio_vdr_payout; /run/wallet-signer-vdr/vdr-payout.sock.
  *
  * Idempotency:
  *   on-chain consumedBatchId + consumedEventKey; durable signer idempotencyKey + request fingerprint
@@ -55,9 +56,9 @@ import {
 } from './labMiningPoolDualCursor'
 import {
 	labBatchIdFromEventKeys,
-	readLabPayoutSignerConfig,
-	sendConfiguredLabExecutorPayoutBatch,
+	sendConfiguredLabWithdrawNative,
 } from './labMiningPoolPayoutSigner'
+import { PaidKeyViewUnconfirmed } from './clPaidKeyGate'
 
 /** Fixed lane for Lab executor payouts (signer EOA is opaque behind socket). */
 const LAB_MINING_POOL_ONCHAIN_LANE = 'lab-mining-pool-executor-payout'
@@ -274,10 +275,10 @@ function resolveGasWaitForceMs(): number {
 	return Number.isFinite(n) && n >= 30_000 ? Math.floor(n) : 180_000
 }
 
-/** Gas limit for LabMiningPoolPayoutExecutor.payoutBatch(...). */
+/** Same default and ceiling as the running .50 resolveWithdrawGasLimit. */
 function resolvePayoutGasLimit(): number {
-	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_GAS_LIMIT || 250_000)
-	return Number.isFinite(n) && n >= 50_000 ? Math.min(2_000_000, Math.floor(n)) : 250_000
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_GAS_LIMIT || 800_000)
+	return Number.isFinite(n) && n >= 100_000 ? Math.min(8_000_000, Math.floor(n)) : 800_000
 }
 
 /** A2: reserved realtime batches per flush tick (history still advances after). */
@@ -715,8 +716,11 @@ async function collectLabSkimEntriesForBlock(
 				state.consumedEventKeys[eventKey] = true
 				continue
 			}
-		} catch {
-			continue
+		} catch (err: unknown) {
+			throw new PaidKeyViewUnconfirmed(
+				eventKey,
+				err instanceof Error ? err.message : String(err)
+			)
 		}
 
 		const { pubkey, status } = await fetchValidatorByIndex(validatorIndex)
@@ -751,8 +755,11 @@ async function collectLabSkimEntriesForBlock(
 				// Active redeem guardian (beneficiary set) → validatorClRewardPayoutReporter on redeem listener host.
 				if (beneficiary !== ethers.ZeroAddress) continue
 			}
-		} catch {
-			continue
+		} catch (err: unknown) {
+			throw new PaidKeyViewUnconfirmed(
+				eventKey,
+				err instanceof Error ? err.message : String(err)
+			)
 		}
 
 		entries.push({ eventKey, amount: amountWei, blockNumber, withdrawalIndex, pubkey })
@@ -787,25 +794,8 @@ async function submitLabSkimBatch(
 
 	if (labDryRun()) {
 		logger(
-			Colors.cyan(
-				`[labMiningPoolClPayout] dry-run executor.payoutBatch(${ethers.formatEther(total)} CNET) line=${line} → ${labMiningPool} n=${entries.length} batchId=${batchId.slice(0, 14)}…`
-			)
-		)
-		for (const e of entries) state.consumedEventKeys[e.eventKey] = true
-		return true
-	}
-
-	let signerCfg
-	try {
-		signerCfg = readLabPayoutSignerConfig()
-	} catch (e: unknown) {
-		logger(Colors.red(`[labMiningPoolClPayout] signer config refused: ${(e as Error)?.message ?? e}`))
-		return false
-	}
-	if (!signerCfg) {
-		logger(
-			Colors.red(
-				'[labMiningPoolClPayout] refuse payout: set CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_SOCKET + KEY_ARRAY + PAYOUT_EXECUTOR (no pk fallback)'
+			Colors.yellow(
+				`[labMiningPoolClPayout] DRY_RUN set; not broadcasting and not marking consumed n=${entries.length} line=${line}`
 			)
 		)
 		return false
@@ -816,29 +806,30 @@ async function submitLabSkimBatch(
 	try {
 		await enqueueOnchainTxWork(
 			LAB_MINING_POOL_ONCHAIN_LANE,
-			`labExecutor.payoutBatch n=${entries.length} line=${line}`,
+			`lab withdrawNative n=${entries.length} line=${line}`,
 			async () => {
-				const sent = await sendConfiguredLabExecutorPayoutBatch({
-					batchId,
-					eventKeys,
+				const sent = await sendConfiguredLabWithdrawNative({
+					redeem: redeemAddr,
+					pool: labMiningPool,
 					amount: total,
+					eventKeys,
 					gasLimit,
 					preferRecoverFirst: true,
 				})
 				logger(
 					Colors.cyan(
-						`[labMiningPoolClPayout] executor.payoutBatch sent via signer tx=${sent.hash} executor=${sent.executor} ` +
+						`[labMiningPoolClPayout] withdrawNative sent via signer tx=${sent.hash} ` +
 							`line=${line} recovered=${sent.recoveredFromJournal ? 1 : 0} ` +
 							`waiting≤${resolveTxWaitTimeoutMs()}ms n=${entries.length} gasPrice=${ethers.formatUnits(gasPriceWei, 'gwei')}gwei`
 					)
 				)
 				const receipt = await waitForSignerReceiptByHash(provider, sent.hash, resolveTxWaitTimeoutMs())
 				if (receipt.status !== 1) {
-					throw new Error(`executor.payoutBatch reverted status=${receipt.status} hash=${sent.hash}`)
+					throw new Error(`withdrawNative reverted status=${receipt.status} hash=${sent.hash}`)
 				}
 				logger(
 					Colors.green(
-						`[labMiningPoolClPayout] executor.payoutBatch ok tx=${sent.hash} total=${ethers.formatEther(total)} CNET → ${labMiningPool} ` +
+						`[labMiningPoolClPayout] withdrawNative ok tx=${sent.hash} total=${ethers.formatEther(total)} CNET → ${labMiningPool} ` +
 							`n=${entries.length} line=${line} batchId=${batchId.slice(0, 14)}…`
 					)
 				)
@@ -848,7 +839,7 @@ async function submitLabSkimBatch(
 		)
 		return true
 	} catch (e: unknown) {
-		logger(Colors.red(`[labMiningPoolClPayout] executor.payoutBatch failed: ${(e as Error)?.message ?? e}`))
+		logger(Colors.red(`[labMiningPoolClPayout] withdrawNative failed: ${(e as Error)?.message ?? e}`))
 		return false
 	}
 }
@@ -1044,14 +1035,27 @@ async function processBlockRange(
 		if (!block) {
 			return { okThrough, added, fetchFailed: true }
 		}
-		const entries = await collectLabSkimEntriesForBlock(
-			readContract,
-			proxyLower,
-			bn,
-			block,
-			state,
-			pending
-		)
+		let entries: SkimEntry[]
+		try {
+			entries = await collectLabSkimEntriesForBlock(
+				readContract,
+				proxyLower,
+				bn,
+				block,
+				state,
+				pending
+			)
+		} catch (err: unknown) {
+			if (err instanceof PaidKeyViewUnconfirmed) {
+				logger(
+					Colors.yellow(
+						`[labMiningPoolClPayout] paid-key view unconfirmed block=${bn} eventKey=${err.eventKey} ${err.message}; cursor stays ${okThrough ?? 'unset'}`
+					)
+				)
+				return { okThrough, added, fetchFailed: false }
+			}
+			throw err
+		}
 		added += mergeIntoPending(pending, entries)
 		okThrough = bn
 	}

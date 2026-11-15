@@ -89,6 +89,11 @@ export type DualCursorState = {
 	pending: PendingEntryJson[]
 	settleIntents: SettleIntent[]
 	gasWaitStartedAt?: string
+	/**
+	 * Cumulative wei successfully settled under first-batch CAP_B (persists across restart).
+	 * Combined with in-flight settleIntent reserves so peel/pack cannot bypass CAP by multi-pack flush.
+	 */
+	firstBatchSettledWei?: string
 	metrics: DualCursorMetrics
 	updatedAt: string
 	/**
@@ -105,6 +110,7 @@ export type LegacyClPayoutState = {
 	scanTargetBlock?: number
 	pending?: PendingEntryJson[]
 	gasWaitStartedAt?: string
+	firstBatchSettledWei?: string
 	updatedAt?: string
 	version?: number
 	boundaryH?: BoundaryH | null
@@ -200,6 +206,8 @@ export function migrateLegacyToDualCursor(
 		return createInitialDualCursorState(deployFloor)
 	}
 
+	const firstBatchSettledWei = normalizeFirstBatchSettledWei(raw.firstBatchSettledWei)
+
 	if (Number(raw.version) === VDR_DUAL_CURSOR_VERSION && raw.boundaryH != null) {
 		const hist = Number(raw.historicalCursor)
 		const rt = Number(raw.realtimeCursor)
@@ -215,6 +223,7 @@ export function migrateLegacyToDualCursor(
 				typeof raw.gasWaitStartedAt === 'string' && raw.gasWaitStartedAt.trim()
 					? raw.gasWaitStartedAt.trim()
 					: undefined,
+			firstBatchSettledWei,
 			metrics: raw.metrics ?? emptyMetrics(floorCursor),
 			updatedAt: raw.updatedAt ?? new Date().toISOString(),
 			lastProcessedBlock: Number.isFinite(hist) ? Math.floor(hist) : floorCursor,
@@ -236,10 +245,21 @@ export function migrateLegacyToDualCursor(
 			typeof raw.gasWaitStartedAt === 'string' && raw.gasWaitStartedAt.trim()
 				? raw.gasWaitStartedAt.trim()
 				: undefined,
+		firstBatchSettledWei,
 		metrics: emptyMetrics(historicalCursor),
 		updatedAt: new Date().toISOString(),
 		lastProcessedBlock: historicalCursor,
 		scanTargetBlock: normalizeScanTarget(raw.scanTargetBlock),
+	}
+}
+
+function normalizeFirstBatchSettledWei(raw: unknown): string | undefined {
+	if (raw == null || raw === '') return undefined
+	try {
+		const v = BigInt(String(raw).trim())
+		return v > 0n ? v.toString() : undefined
+	} catch {
+		return undefined
 	}
 }
 
@@ -637,6 +657,8 @@ export function markIntentUncertain(state: DualCursorState, idempotencyKey: stri
 }
 
 export function markIntentConfirmed(state: DualCursorState, idempotencyKey: string, receiptStatus: number): DualCursorState {
+	const prior = state.settleIntents.find((i) => i.idempotencyKey === idempotencyKey)
+	const alreadyConfirmed = prior?.status === 'confirmed'
 	const settleIntents = state.settleIntents.map((i) => {
 		if (i.idempotencyKey !== idempotencyKey) return i
 		return {
@@ -646,7 +668,72 @@ export function markIntentConfirmed(state: DualCursorState, idempotencyKey: stri
 			updatedAt: new Date().toISOString(),
 		}
 	})
+	let firstBatchSettledWei = state.firstBatchSettledWei
+	if (receiptStatus === 1 && prior && !alreadyConfirmed) {
+		let add = 0n
+		for (const a of prior.amounts) {
+			try {
+				add += BigInt(a)
+			} catch {
+				/* skip bad amount */
+			}
+		}
+		if (add > 0n) {
+			let prev = 0n
+			try {
+				prev = BigInt(state.firstBatchSettledWei ?? '0')
+			} catch {
+				prev = 0n
+			}
+			firstBatchSettledWei = (prev + add).toString()
+		}
+	}
+	return { ...state, settleIntents, firstBatchSettledWei, updatedAt: new Date().toISOString() }
+}
+
+/** Drop a prepared intent that never broadcast (signer/config fail) so it does not reserve first-batch budget. */
+export function markIntentFailed(state: DualCursorState, idempotencyKey: string, note?: string): DualCursorState {
+	const settleIntents = state.settleIntents.map((i) => {
+		if (i.idempotencyKey !== idempotencyKey) return i
+		if (i.status === 'confirmed' || i.status === 'broadcast' || i.status === 'uncertain') return i
+		return {
+			...i,
+			status: 'failed' as const,
+			note: note ?? i.note,
+			updatedAt: new Date().toISOString(),
+		}
+	})
 	return { ...state, settleIntents, updatedAt: new Date().toISOString() }
+}
+
+/** Wei already successfully settled under first-batch CAP_B (durable). */
+export function firstBatchSettledWeiOf(state: DualCursorState): bigint {
+	try {
+		return BigInt(state.firstBatchSettledWei ?? '0')
+	} catch {
+		return 0n
+	}
+}
+
+/** Open settle intents reserve budget until confirmed/failed (survives restart). */
+export function inFlightFirstBatchReserveWei(state: DualCursorState): bigint {
+	let sum = 0n
+	for (const i of state.settleIntents) {
+		if (i.status !== 'prepared' && i.status !== 'broadcast' && i.status !== 'uncertain') continue
+		for (const a of i.amounts) {
+			try {
+				sum += BigInt(a)
+			} catch {
+				/* skip */
+			}
+		}
+	}
+	return sum
+}
+
+export function remainingFirstBatchBudgetWei(state: DualCursorState, capWei: bigint): bigint {
+	const used = firstBatchSettledWeiOf(state) + inFlightFirstBatchReserveWei(state)
+	return used >= capWei ? 0n : capWei - used
 }
 
 /**
@@ -777,6 +864,7 @@ export function dualCursorToLegacyRollback(state: DualCursorState): LegacyClPayo
 		scanTargetBlock: state.boundaryH?.blockNumber ?? state.scanTargetBlock,
 		pending: state.pending.map(({ scanLine: _s, enqueuedAtMs: _e, ...rest }) => rest),
 		gasWaitStartedAt: state.gasWaitStartedAt,
+		firstBatchSettledWei: state.firstBatchSettledWei,
 		updatedAt: new Date().toISOString(),
 	}
 }
