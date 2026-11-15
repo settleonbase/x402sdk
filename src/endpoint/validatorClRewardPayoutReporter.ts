@@ -10,17 +10,8 @@
  * - ACK-lost recovery reuses signer idempotencyKey + request fingerprint (no blind resend).
  *
  * Gas: default 2500000 matches the running .22 unit. Do not clamp to the old 800000 note.
- * Amount: FORCE_BLOCK before settle broadcast — CONET_VDR_PAYOUT_MAX_AMOUNT_WEI
- * defaults to CAP_B 44885338300000000 (0.0448853383 CNET). An entry with
- * amount > CAP is held pending (pre-sign, signer never sees that eventKey,
- * no calldata). Sibling entries each ≤ CAP are packed so every settle tx
- * sum ≤ CAP and count ≤ maxEntries (default 29). A single over-CAP amount
- * is never split into under-CAP txs.
- *
- * First-batch cumulative wei budget (default = CAP_B): selectEntriesUnderFirstBatchBudget
- * takes only rows that fit remainingFirstBatchBudgetWei (settled + in-flight reserve).
- * Deferred rows stay pending (no pool wipe). CONET_VDR_FIRST_BATCH_BUDGET_WEI=0 disables
- * the cumulative gate (per-pack CAP + peel still apply). Per-tx n ≤ resolveMaxEntriesPerTx.
+ * Batch size follows the old .22 archive split (max entries, gas model, calldata).
+ * There is no per-entry or cumulative wei ceiling on this path.
  *
  * Live cutover NOT performed here — enablement remains env-gated for
  * project-owner approval.
@@ -76,7 +67,6 @@ import {
 	rebuildSignerTxFromIntent,
 	reconcileAckLostIntent,
 	recordRealtimeLatency,
-	remainingFirstBatchBudgetWei,
 	removePendingKeys,
 	resolveConfirmationDepth,
 	resolveHistoricalFlushFloor,
@@ -148,34 +138,6 @@ type PayoutEntry = {
 	withdrawalIndex: number
 	scanLine?: ScanLine
 	enqueuedAtMs?: number
-}
-
-function batchSumWei(entries: PayoutEntry[]): bigint {
-	return entries.reduce((a, e) => a + e.amount, 0n)
-}
-
-/** Below/equal CAP → ok; above → amount_cap_block (caller must not sign/broadcast/split). */
-function assertAmountCapOrAbort(entries: PayoutEntry[]): {
-	ok: true
-	batchSumWei: string
-	capWei: string
-} | {
-	ok: false
-	reason: 'amount_cap_block'
-	batchSumWei: string
-	capWei: string
-} {
-	const capWei = resolveMaxAmountWei()
-	const sum = batchSumWei(entries)
-	if (sum > capWei) {
-		return {
-			ok: false,
-			reason: 'amount_cap_block',
-			batchSumWei: sum.toString(),
-			capWei: capWei.toString(),
-		}
-	}
-	return { ok: true, batchSumWei: sum.toString(), capWei: capWei.toString() }
 }
 
 let payoutStarted = false
@@ -283,6 +245,11 @@ function resolveChunksPerTick(): number {
 	return Number.isFinite(n) && n >= 1 ? Math.min(64, Math.floor(n)) : 1
 }
 
+/**
+ * Hard cap on entries per settleNodeRewards tx (before gas/calldata split).
+ * Old .22 archive reporter lines 201–206: default 29.
+ * File: src/archive/x402sdk-22-claim-oct30-sparse-20261115/src/endpoint/validatorClRewardPayoutReporter.ts
+ */
 function resolveMaxEntriesPerTx(): number {
 	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_MAX_ENTRIES || 29)
 	return Number.isFinite(n) && n >= 1 ? Math.min(256, Math.floor(n)) : 29
@@ -295,9 +262,6 @@ function resolveMaxEntriesPerTx(): number {
  */
 const VDR_PAYOUT_GAS_LIMIT = 2_500_000
 
-/** CAP_B — first-batch executable amount hard gate (wei). */
-const VDR_PAYOUT_MAX_AMOUNT_WEI_DEFAULT = 44_885_338_300_000_000n
-
 function resolveGasLimit(): number {
 	const raw = process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_LIMIT?.trim()
 	if (raw && raw !== String(VDR_PAYOUT_GAS_LIMIT)) {
@@ -309,59 +273,9 @@ function resolveGasLimit(): number {
 }
 
 /**
- * Max CNET (wei) allowed in one settleNodeRewards broadcast.
- * Unset / invalid / 0 → CAP_B (gate cannot be disabled by accident).
+ * Gas model and calldata split from the old .22 archive reporter lines 214–235.
+ * File: src/archive/x402sdk-22-claim-oct30-sparse-20261115/src/endpoint/validatorClRewardPayoutReporter.ts
  */
-function resolveMaxAmountWei(): bigint {
-	const raw = process.env.CONET_VDR_PAYOUT_MAX_AMOUNT_WEI?.trim()
-	if (!raw) return VDR_PAYOUT_MAX_AMOUNT_WEI_DEFAULT
-	try {
-		const v = BigInt(raw)
-		return v > 0n ? v : VDR_PAYOUT_MAX_AMOUNT_WEI_DEFAULT
-	} catch {
-		return VDR_PAYOUT_MAX_AMOUNT_WEI_DEFAULT
-	}
-}
-
-/**
- * First-batch cumulative wei budget (settled + in-flight reserve).
- * Unset → CAP_B. Explicit `0` disables cumulative select (peel/pack still enforce per-pack CAP).
- */
-function resolveFirstBatchBudgetWei(): bigint | null {
-	const raw = process.env.CONET_VDR_FIRST_BATCH_BUDGET_WEI?.trim()
-	if (raw === undefined || raw === '') return resolveMaxAmountWei()
-	try {
-		const v = BigInt(raw)
-		if (v === 0n) return null
-		return v > 0n ? v : resolveMaxAmountWei()
-	} catch {
-		return resolveMaxAmountWei()
-	}
-}
-
-/**
- * Take payable rows that fit remaining first-batch budget; deferred stay in pending.
- * Does not wipe the pool. Empty selected when budget exhausted.
- */
-function selectEntriesUnderFirstBatchBudget(
-	entries: PayoutEntry[],
-	state: DualCursorState,
-	budgetWei: bigint
-): { selected: PayoutEntry[]; deferred: PayoutEntry[]; remainingWei: string } {
-	let remaining = remainingFirstBatchBudgetWei(state, budgetWei)
-	const selected: PayoutEntry[] = []
-	const deferred: PayoutEntry[] = []
-	for (const e of entries) {
-		if (e.amount <= remaining) {
-			selected.push(e)
-			remaining -= e.amount
-		} else {
-			deferred.push(e)
-		}
-	}
-	return { selected, deferred, remainingWei: remaining.toString() }
-}
-
 function resolveGasBase(): number {
 	const n = Number(process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_GAS_BASE || 100_000)
 	return Number.isFinite(n) && n >= 21_000 ? Math.floor(n) : 100_000
@@ -546,6 +460,11 @@ function mergeIntoPending(pending: Map<string, PayoutEntry>, entries: PayoutEntr
 	return added
 }
 
+/**
+ * Split entries so each batch respects max entries, estimated gas, and calldata size.
+ * Old .22 archive reporter lines 201–206, 214–234, and 356–378.
+ * File: src/archive/x402sdk-22-claim-oct30-sparse-20261115/src/endpoint/validatorClRewardPayoutReporter.ts
+ */
 function splitEntriesForOnchain(entries: PayoutEntry[]): PayoutEntry[][] {
 	if (!entries.length) return []
 	const maxEntries = resolveMaxEntriesPerTx()
@@ -762,7 +681,7 @@ async function filterUnconsumed(readContract: ethers.Contract, entries: PayoutEn
 	return split
 }
 
-type SubmitOutcome = 'ok' | 'needs_split' | 'failed' | 'uncertain' | 'amount_blocked'
+type SubmitOutcome = 'ok' | 'needs_split' | 'failed' | 'uncertain'
 
 function intentCoversPending(intent: SettleIntent, pending: Map<string, PayoutEntry>): boolean {
 	return intent.eventKeys.every((k) => pending.has(k.toLowerCase()))
@@ -801,16 +720,6 @@ async function submitPayoutBatchOnchain(
 			)
 		)
 		return 'ok'
-	}
-
-	const amountGate = assertAmountCapOrAbort(entries)
-	if (!amountGate.ok) {
-		logger(
-			Colors.red(
-				`[validatorClRewardPayout] FORCE_BLOCK amount_cap_block n=${entries.length} batchSumWei=${amountGate.batchSumWei} capWei=${amountGate.capWei} — no sign/broadcast`
-			)
-		)
-		return 'amount_blocked'
 	}
 
 	const config = readVdrSignerConfig()
@@ -852,7 +761,7 @@ async function submitPayoutBatchOnchain(
 
 	logger(
 		Colors.cyan(
-			`[validatorClRewardPayout] PRE_SIGN ACCEPT eventKeys=${eventKeys.join(',')} batchSumWei=${amountGate.batchSumWei} capWei=${amountGate.capWei} n=${entries.length}`
+			`[validatorClRewardPayout] PRE_SIGN ACCEPT eventKeys=${eventKeys.join(',')} n=${entries.length}`
 		)
 	)
 
@@ -916,44 +825,6 @@ async function submitPayoutBatch(
 	return outcome ?? 'failed'
 }
 
-/**
- * Drop individually over-cap rows out of the signer path. They stay in `pending`.
- * Does not split one row's amount.
- */
-function peelIndividuallyOverCap(entries: PayoutEntry[]): { payable: PayoutEntry[]; blocked: PayoutEntry[] } {
-	const capWei = resolveMaxAmountWei()
-	const payable: PayoutEntry[] = []
-	const blocked: PayoutEntry[] = []
-	for (const e of entries) {
-		if (e.amount > capWei) blocked.push(e)
-		else payable.push(e)
-	}
-	return { payable, blocked }
-}
-
-/**
- * Pack already-under-cap rows so each broadcast sum ≤ CAP and count ≤ max entries
- * (default 29). Never splits a single amount.
- */
-function packEntriesUnderAmountCap(entries: PayoutEntry[]): PayoutEntry[][] {
-	const capWei = resolveMaxAmountWei()
-	const maxN = resolveMaxEntriesPerTx()
-	const packs: PayoutEntry[][] = []
-	let cur: PayoutEntry[] = []
-	let sum = 0n
-	for (const e of entries) {
-		if (cur.length > 0 && (cur.length >= maxN || sum + e.amount > capWei)) {
-			packs.push(cur)
-			cur = []
-			sum = 0n
-		}
-		cur.push(e)
-		sum += e.amount
-	}
-	if (cur.length) packs.push(cur)
-	return packs
-}
-
 async function submitPayableBatch(
 	contractAddr: string,
 	entries: PayoutEntry[],
@@ -965,18 +836,6 @@ async function submitPayableBatch(
 		logger(
 			Colors.yellow(
 				`[validatorClRewardPayout] observe/enqueue skip payable submit n=${entries.length} — pending retained, signer not loaded`
-			)
-		)
-		return
-	}
-
-	// Defense in depth: a pack that still exceeds CAP is not signed and is not
-	// amount-bisected (that would be an over-cap bypass).
-	const preGate = assertAmountCapOrAbort(entries)
-	if (!preGate.ok) {
-		logger(
-			Colors.red(
-				`[validatorClRewardPayout] FORCE_BLOCK amount_cap_block (pre-sign pack) n=${entries.length} batchSumWei=${preGate.batchSumWei} capWei=${preGate.capWei} — leave pending, no broadcast`
 			)
 		)
 		return
@@ -995,15 +854,6 @@ async function submitPayableBatch(
 		logger(
 			Colors.yellow(
 				`[validatorClRewardPayout] leave batch in pending (ACK uncertain); will recover via idempotencyKey next tick n=${entries.length}`
-			)
-		)
-		return
-	}
-
-	if (outcome === 'amount_blocked') {
-		logger(
-			Colors.red(
-				`[validatorClRewardPayout] leave batch in pending after amount_cap_block; no amount auto-split n=${entries.length}`
 			)
 		)
 		return
@@ -1037,39 +887,7 @@ async function submitPayoutBatchAutoSplit(
 	pending: Map<string, PayoutEntry>
 ): Promise<void> {
 	if (!entries.length) return
-
-	const { payable, blocked } = peelIndividuallyOverCap(entries)
-	for (const e of blocked) {
-		logger(
-			Colors.red(
-				`[validatorClRewardPayout] FORCE_BLOCK amount_cap_block (pre-sign) eventKey=${e.eventKey} amountWei=${e.amount} capWei=${resolveMaxAmountWei()} — leave this key pending, no sign, no broadcast`
-			)
-		)
-	}
-	if (!payable.length) return
-
-	const budgetWei = resolveFirstBatchBudgetWei()
-	let toPack = payable
-	if (budgetWei != null) {
-		const state = workingState ?? loadState()
-		const { selected, deferred, remainingWei } = selectEntriesUnderFirstBatchBudget(
-			payable,
-			state,
-			budgetWei
-		)
-		if (deferred.length) {
-			logger(
-				Colors.magenta(
-					`[validatorClRewardPayout] first_batch_budget_hold deferred=${deferred.length} selected=${selected.length} ` +
-						`budgetWei=${budgetWei} remainingWei=${remainingWei} — deferred stay pending (no pool wipe)`
-				)
-			)
-		}
-		if (!selected.length) return
-		toPack = selected
-	}
-
-	for (const pack of packEntriesUnderAmountCap(toPack)) {
+	for (const pack of splitEntriesForOnchain(entries)) {
 		await submitPayableBatch(contractAddr, pack, gasPriceWei, pending)
 	}
 }
