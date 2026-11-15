@@ -43,6 +43,15 @@ export async function partitionByPaidKey<T extends { eventKey: string }>(
 	return { payable, alreadyPaid, unconfirmed, errors }
 }
 
+/**
+ * A definite beacon HTTP status outside 200–299 is unconfirmed.
+ * It is not an empty validator and must not be cached or used to move a cursor.
+ * 200 is a completed read. A pubkey that is simply absent from the lab set is a separate, confirmed miss.
+ */
+export function beaconHttpIsUnconfirmed(status: number): boolean {
+	return !Number.isInteger(status) || status < 200 || status >= 300
+}
+
 /** Last confirmed block stays put when this block's paid-key view failed. */
 export function cursorIfBlockConfirmed(
 	previousOk: number | null,

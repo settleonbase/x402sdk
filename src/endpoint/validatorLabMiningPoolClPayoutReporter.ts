@@ -58,7 +58,7 @@ import {
 	labBatchIdFromEventKeys,
 	sendConfiguredLabWithdrawNative,
 } from './labMiningPoolPayoutSigner'
-import { PaidKeyViewUnconfirmed } from './clPaidKeyGate'
+import { beaconHttpIsUnconfirmed, PaidKeyViewUnconfirmed } from './clPaidKeyGate'
 
 /** Fixed lane for Lab executor payouts (signer EOA is opaque behind socket). */
 const LAB_MINING_POOL_ONCHAIN_LANE = 'lab-mining-pool-executor-payout'
@@ -628,13 +628,8 @@ async function fetchValidatorByIndex(validatorIndex: number): Promise<{ pubkey: 
 	const url = `${base}/eth/v1/beacon/states/head/validators/${validatorIndex}`
 	try {
 		const res = await fetch(url, { signal: AbortSignal.timeout(25_000) })
-		if (!res.ok) {
-			if (res.status === 429 || res.status >= 500) {
-				throw new Error(`validator index ${validatorIndex} beacon HTTP ${res.status}`)
-			}
-			validatorPubkeyCache.set(validatorIndex, null)
-			validatorStatusCache.set(validatorIndex, null)
-			return { pubkey: null, status: null }
+		if (!res.ok || beaconHttpIsUnconfirmed(res.status)) {
+			throw new Error(`validator index ${validatorIndex} beacon HTTP ${res.status}`)
 		}
 		const json = (await res.json()) as {
 			data?: { validator?: { pubkey?: string }; status?: string }
