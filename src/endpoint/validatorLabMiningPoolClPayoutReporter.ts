@@ -30,8 +30,9 @@
  *
  * Pending pool + gas gate (aligned with validatorClRewardPayoutReporter):
  *   - Scanned skim entries merge into a persisted pending pool; scan checkpoint advances without settle.
- *   - Flush when eth_gasPrice ≤ max (default 2 gwei); failed batches stay in pending.
- *   - If gas stays above max longer than force-wait (default 3 min), flush at live gasPrice anyway.
+ *   - Pause only while eth_gasPrice **>** max (default 0.03 Gwei); == max continues ordinary pay (no dust pad).
+ *   - If gas stays high ≥ force-wait (default 300s), force **one** same-pool coalesce:
+ *     all currently signable pending for this Lab signer/pool → **one** withdrawNative (no flushMax/batchEntries pre-slice).
  */
 
 import fs from 'node:fs'
@@ -262,19 +263,35 @@ function resolveChunksPerTick(): number {
 }
 
 /**
- * Only submit when eth_gasPrice ≤ this many gwei (default 2).
- * CONET often sits at exactly 2.0 gwei — use ≤ not <.
+ * Pause auto pay only while gasPrice **>** maxGas (default **0.03 Gwei**).
+ * Equal to maxGas must not pause / hard-reject. No +0.05 Gwei dust pad.
+ * Prefer WEI env; GWEI env remains an override. Do not inherit isolation 50 Gwei.
  */
 function resolveMaxGasPriceWei(): bigint {
-	const gwei = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_MAX_GAS_PRICE_GWEI || 2)
-	const safe = Number.isFinite(gwei) && gwei > 0 ? gwei : 2
-	return ethers.parseUnits(String(safe), 'gwei')
+	const weiRaw = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_MAX_GAS_PRICE_WEI?.trim()
+	if (weiRaw) {
+		try {
+			const w = BigInt(weiRaw)
+			if (w > 0n) return w
+		} catch {
+			/* fall through */
+		}
+	}
+	const gweiRaw = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_MAX_GAS_PRICE_GWEI?.trim()
+	if (gweiRaw) {
+		const gwei = Number(gweiRaw)
+		if (Number.isFinite(gwei) && gwei > 0) return ethers.parseUnits(String(gwei), 'gwei')
+	}
+	return 30_000_000n
 }
 
-/** After this many ms waiting on high gas, force flush at live gasPrice (default 3 min). */
+/**
+ * After this many ms waiting on high gas, force one same-pool coalesce (default 300s):
+ * sum all currently signable pending for this Lab from/signer into one withdrawNative.
+ */
 function resolveGasWaitForceMs(): number {
-	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_GAS_WAIT_FORCE_MS || 180_000)
-	return Number.isFinite(n) && n >= 30_000 ? Math.floor(n) : 180_000
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_GAS_WAIT_FORCE_MS || 300_000)
+	return Number.isFinite(n) && n >= 30_000 ? Math.floor(n) : 300_000
 }
 
 /** Same default and ceiling as the running .50 resolveWithdrawGasLimit. */
@@ -878,12 +895,12 @@ async function flushPendingLabBatches(
 	}
 
 	const maxGas = resolveMaxGasPriceWei()
-	const gasDustWei = 50_000_000n // 0.05 gwei
 	const gasPrice = await readGasPriceWei(provider)
 	const forceMs = resolveGasWaitForceMs()
 	let forceFlush = false
 
-	if (gasPrice > maxGas + gasDustWei) {
+	// Strict > only — gasPrice == maxGas must continue ordinary pay.
+	if (gasPrice > maxGas) {
 		const now = Date.now()
 		if (!state.gasWaitStartedAt) {
 			state.gasWaitStartedAt = new Date(now).toISOString()
@@ -903,7 +920,7 @@ async function flushPendingLabBatches(
 		forceFlush = true
 		logger(
 			Colors.yellow(
-				`[labMiningPoolClPayout] force flush: gas wait ${Math.floor(elapsedMs / 1000)}s ≥ ${Math.floor(forceMs / 1000)}s; ` +
+				`[labMiningPoolClPayout] force one same-pool coalesce: gas wait ${Math.floor(elapsedMs / 1000)}s ≥ ${Math.floor(forceMs / 1000)}s; ` +
 					`ignoring max=${ethers.formatUnits(maxGas, 'gwei')} gwei, using live gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei (pending=${pending.size})`
 			)
 		)
@@ -914,13 +931,14 @@ async function flushPendingLabBatches(
 	const flushMax = resolveFlushMaxEntries()
 	const batchEntries = resolveFlushBatchEntries()
 	const maxBatches = resolveFlushMaxBatches()
+	// Force: inspect **all** pending. Ordinary: only oldest flushMax for paid-key checks.
 	const ordered = [...pending.values()]
 		.sort((a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex)
-		.slice(0, flushMax)
+	const inspect = forceFlush ? ordered : ordered.slice(0, flushMax)
 	const live: SkimEntry[] = []
 	let droppedConsumed = 0
 	let unconfirmed = 0
-	for (const e of ordered) {
+	for (const e of inspect) {
 		try {
 			const consumed = Boolean(await readContract.consumedRewardEventKey!(e.eventKey))
 			if (consumed) {
@@ -978,29 +996,40 @@ async function flushPendingLabBatches(
 	}
 	if (!signable.length) return
 
-	// Pack per-line batches. withdrawNative has no 32×count floor. A batch larger than
-	// the contract balance is refused inside submit and left pending.
 	type LinedBatch = { line: LabScanLine; entries: SkimEntry[] }
-	const packLine = (line: LabScanLine, entries: SkimEntry[]): LinedBatch[] => {
-		const out: LinedBatch[] = []
-		let cur: SkimEntry[] = []
-		for (const e of entries) {
-			if (cur.length >= batchEntries) {
-				out.push({ line, entries: cur })
-				cur = []
-			}
-			cur.push(e)
-		}
-		if (cur.length) out.push({ line, entries: cur })
-		return out
-	}
-
 	const historyLive = signable.filter((e) => classifyPendingLine(e.blockNumber, freezeH) === 'history')
 	const realtimeLive = signable.filter((e) => classifyPendingLine(e.blockNumber, freezeH) === 'realtime')
-	const packed = [...packLine('realtime', realtimeLive), ...packLine('history', historyLive)]
+
+	let batches: LinedBatch[]
+	let scheduledMeta = { realtimeFirst: 0, historyCount: 0 }
 	const reserved = resolveRealtimeReservedBatches()
-	const scheduled = scheduleFlushBatches(packed, reserved)
-	const batches = scheduled.ordered.slice(0, maxBatches)
+
+	if (forceFlush) {
+		// Same Lab signer + mining-pool destination: sum **all** currently signable pending
+		// into one withdrawNative. Do NOT flushMax / batchEntries / scheduleFlushBatches first.
+		const forceLine: LabScanLine = realtimeLive.length ? 'realtime' : 'history'
+		batches = [{ line: forceLine, entries: signable }]
+		scheduledMeta = { realtimeFirst: realtimeLive.length ? 1 : 0, historyCount: historyLive.length ? 1 : 0 }
+	} else {
+		// Ordinary path: keep flushMax inspect + batchEntries + A2 schedule caps.
+		const packLine = (line: LabScanLine, entries: SkimEntry[]): LinedBatch[] => {
+			const out: LinedBatch[] = []
+			let cur: SkimEntry[] = []
+			for (const e of entries) {
+				if (cur.length >= batchEntries) {
+					out.push({ line, entries: cur })
+					cur = []
+				}
+				cur.push(e)
+			}
+			if (cur.length) out.push({ line, entries: cur })
+			return out
+		}
+		const packed = [...packLine('realtime', realtimeLive), ...packLine('history', historyLive)]
+		const scheduled = scheduleFlushBatches(packed, reserved)
+		scheduledMeta = { realtimeFirst: scheduled.realtimeFirst, historyCount: scheduled.historyCount }
+		batches = scheduled.ordered.slice(0, maxBatches)
+	}
 	if (!batches.length) return
 
 	const tipBlock = Number(await provider.getBlockNumber().catch(() => freezeH))
@@ -1010,13 +1039,14 @@ async function flushPendingLabBatches(
 	const lat = formatRealtimeLatency({ tipBlock, oldestRealtimePendingBlock: oldestRt })
 	const histCursor = state.historyCursor ?? freezeH
 	const prog = formatHistoryProgress(histCursor, freezeH)
+	const forceN = forceFlush ? signable.length : 0
 	logger(
 		Colors.cyan(
-			`[labMiningPoolClPayout] flush inspect=${ordered.length}/${pending.size} live=${live.length} → ${batches.length} batch(es) ` +
-				`A2 rtFirst=${scheduled.realtimeFirst} hist=${scheduled.historyCount} reserved=${reserved} ` +
+			`[labMiningPoolClPayout] flush inspect=${inspect.length}/${pending.size} live=${live.length} → ${batches.length} batch(es) ` +
+				`A2 rtFirst=${scheduledMeta.realtimeFirst} hist=${scheduledMeta.historyCount} reserved=${reserved} ` +
 				`rtLatency tipGap=${lat.tipGapBlocks} histProgress remaining=${prog.remaining} pct=${prog.pct}% ` +
-				`(maxEntries=${flushMax} batchEntries=${batchEntries} maxBatches=${maxBatches}) ` +
-				`gasPrice=${ethers.formatUnits(gasPrice, 'gwei')}gwei${forceFlush ? ' force=1' : ''}`
+				`(maxEntries=${forceFlush ? 'all' : flushMax} batchEntries=${forceFlush ? forceN : batchEntries} maxBatches=${forceFlush ? 1 : maxBatches}) ` +
+				`gasPrice=${ethers.formatUnits(gasPrice, 'gwei')}gwei${forceFlush ? ` force=1 coalesceN=${forceN}` : ''}`
 		)
 	)
 
@@ -1040,6 +1070,15 @@ async function flushPendingLabBatches(
 		}
 		for (const e of batch.entries) pending.delete(e.eventKey)
 		persistPending(state, pending)
+		if (forceFlush) {
+			if (clearGasWait(state)) persistPending(state, pending)
+			logger(
+				Colors.cyan(
+					`[labMiningPoolClPayout] force coalesce done n=${batch.entries.length} (all signable same-pool); remaining pending=${pending.size}`
+				)
+			)
+			return
+		}
 	}
 
 	if (!pending.size && clearGasWait(state)) persistPending(state, pending)
