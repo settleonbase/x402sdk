@@ -62,7 +62,7 @@ type Env = {
 	sent: Array<{ eventKeys?: string[]; idem: string }>
 }
 
-type ChainInfo = { tx?: { from: string; nonce: number } | null; latest?: number }
+type ChainInfo = { tx?: { from: string; nonce: number } | null; latest?: number; estimate?: (n: number) => bigint }
 
 function install(file: string, consumed: (key: string) => unknown, chain: ChainInfo = {}): Env {
 	process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_STATE_FILE = file
@@ -89,7 +89,7 @@ function install(file: string, consumed: (key: string) => unknown, chain: ChainI
 	}
 	const contract = {
 		consumedRewardEventKey: async (k: string) => consumed(k),
-		settleNodeRewards: { estimateGas: async () => 100000n },
+		settleNodeRewards: { estimateGas: async (g: unknown[]) => (chain.estimate ?? (() => 100000n))(g.length) },
 	}
 	__setFlushTestHooks({
 		provider,
@@ -284,4 +284,22 @@ test('B2 wait: tx lookup missing (cannot read nonce) => wait', async () => {
 	inflightBroadcast(file, 'A')
 	const env = await runRecover(file, () => false, { tx: null, latest: 9 })
 	assert.equal(env.sent.length, 0)
+})
+
+test('over_cap: a 4-entry batch whose estimate exceeds the gas cap is split and both halves are signed', async () => {
+	const file = path.join(freshDir(), 'state.json')
+	writeLedger(file, ['A', 'B', 'C', 'D'].map((l, i) => pendingJson(seed(l, i + 1))))
+	// Estimate scales with batch size: 4 entries => buffered gas above the 800000 ceiling; 2 entries => fine.
+	const env = install(file, () => false, { estimate: (n) => (n > 2 ? 900000n : 100000n) })
+	process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_MAX_ENTRIES = '4'
+	try {
+		await __engHarnessFlushPendingOnce({ contractAddr: PROXY, resumeFromState: true })
+	} finally {
+		__setFlushTestHooks(null)
+		process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_MAX_ENTRIES = '2'
+	}
+	assert.equal(env.sent.length, 2, 'the over-cap 4-entry settle is not signed; two 2-entry halves are')
+	const s = peekValidatorClRewardPayoutState()
+	assert.equal(s.pending.length, 0)
+	assert.equal(s.settleIntents.filter((i) => i.status === 'confirmed').length, 2)
 })
