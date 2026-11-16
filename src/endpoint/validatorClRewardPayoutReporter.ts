@@ -197,8 +197,13 @@ function assertAmountCapOrAbort(entries: PayoutEntry[]): {
 let payoutStarted = false
 let payoutTimer: ReturnType<typeof setTimeout> | undefined
 let payoutInFlight = false
-/** Mutable dual-cursor working copy for the current tick (persisted after mutations). */
-let workingState: DualCursorState | null = null
+/**
+ * Committed-state cache: the last state written by mutateState, or the ledger file loaded once.
+ * It is never rebuilt from the in-memory pending Map; pending lives only in state.pending.
+ */
+let stateCache: { file: string; state: DualCursorState } | null = null
+/** Merge queue: every ledger write runs one at a time, each on the latest committed state. */
+let stateQueue: Promise<unknown> = Promise.resolve()
 
 function resolveStateFile(): string {
 	return (
@@ -421,10 +426,11 @@ function resolveGasWaitForceMs(): number {
 	return Number.isFinite(n) && n >= 30_000 ? Math.floor(n) : 180_000
 }
 
-function clearGasWait(state: DualCursorState): boolean {
-	if (!state.gasWaitStartedAt) return false
-	delete state.gasWaitStartedAt
-	return true
+/** Pure: the same state without gasWaitStartedAt; returns the input object when there is nothing to clear. */
+function withGasWaitCleared(state: DualCursorState): DualCursorState {
+	if (!state.gasWaitStartedAt) return state
+	const { gasWaitStartedAt: _cleared, ...rest } = state
+	return rest
 }
 
 function formatWaitCountdown(elapsedMs: number, forceMs: number): string {
@@ -743,24 +749,57 @@ function loadState(): DualCursorState {
 	return migrateLegacyToDualCursor(raw as LegacyClPayoutState, floor)
 }
 
-function persistState(state: DualCursorState): void {
-	workingState = state
-	atomicWriteState(resolveStateFile(), state)
+/** Latest committed state. Synchronous: never hold the returned object across an await. */
+function latestStateSync(): DualCursorState {
+	const file = resolveStateFile()
+	if (!stateCache || stateCache.file !== file) stateCache = { file, state: loadState() }
+	return stateCache.state
 }
 
-function syncPendingOntoState(state: DualCursorState, pending: Map<string, PayoutEntry>): DualCursorState {
-	const next: DualCursorState = {
-		...state,
-		pending: [...pending.values()]
-			.sort((a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex)
-			.map(entryToJson),
-		updatedAt: new Date().toISOString(),
-		lastProcessedBlock: state.historicalCursor,
-	}
-	persistState(next)
-	return next
+/** Synchronous read of the latest committed state, for decisions with no await before their use. */
+export function peekLatestState(): DualCursorState {
+	return latestStateSync()
 }
 
+/** Run one job after every earlier job has settled; a rejected job does not block the queue. */
+function enqueueStateJob<T>(job: () => T): Promise<T> {
+	const run = stateQueue.then(job)
+	stateQueue = run.catch(() => undefined)
+	return run
+}
+
+/**
+ * Serial state merge: the only writer of the ledger file.
+ * `fn` is synchronous (no await, no RPC): it receives the latest committed state and returns the next one.
+ * Returning the same object means "no change" and skips the write. Callers do RPC / sign / broadcast
+ * outside and merge the result here, so no state is held across an await.
+ */
+export function mutateState(fn: (latest: DualCursorState) => DualCursorState): Promise<DualCursorState> {
+	return enqueueStateJob(() => {
+		const base = latestStateSync()
+		const next = fn(base)
+		if (next === base) return base
+		const file = resolveStateFile()
+		const committed: DualCursorState = {
+			...next,
+			lastProcessedBlock: next.historicalCursor,
+			updatedAt: new Date().toISOString(),
+		}
+		atomicWriteState(file, committed)
+		stateCache = { file, state: committed }
+		return committed
+	})
+}
+
+/** Re-read the ledger file inside the queue (tick start, harness). Fail-closed: loadState throws on any problem. */
+function refreshStateFromDisk(): Promise<DualCursorState> {
+	return enqueueStateJob(() => {
+		stateCache = null
+		return latestStateSync()
+	})
+}
+
+/** Derived view of state.pending keyed by eventKey. Read-only: it is never written back. */
 function pendingMapFromState(state: DualCursorState): Map<string, PayoutEntry> {
 	const map = new Map<string, PayoutEntry>()
 	for (const raw of state.pending) {
@@ -771,16 +810,18 @@ function pendingMapFromState(state: DualCursorState): Map<string, PayoutEntry> {
 	return map
 }
 
-function mergeIntoPending(pending: Map<string, PayoutEntry>, entries: PayoutEntry[]): number {
-	let added = 0
-	for (const e of entries) {
-		const key = e.eventKey.toLowerCase()
-		if (pending.has(key)) continue
-		pending.set(key, { ...e, eventKey: key })
-		added++
-	}
-	return added
+const OPEN_INTENT_STATUSES: ReadonlySet<string> = new Set(['prepared', 'broadcast', 'uncertain'])
+
+/** Keys that may be issued now: pending in the latest state and not owned by an open intent. */
+function signableKeySet(state: DualCursorState): Set<string> {
+	const inflight = new Set(
+		state.settleIntents
+			.filter((i) => OPEN_INTENT_STATUSES.has(i.status))
+			.flatMap((i) => i.eventKeys.map((k) => k.toLowerCase()))
+	)
+	return new Set(state.pending.map((p) => p.eventKey.toLowerCase()).filter((k) => !inflight.has(k)))
 }
+
 
 function splitEntriesForOnchain(entries: PayoutEntry[]): PayoutEntry[][] {
 	if (!entries.length) return []
@@ -1027,21 +1068,15 @@ async function intentConsumedOnChain(
 	return allConsumed ? 'consumed' : 'open'
 }
 
-/** Credit firstBatchSettledWei once + clear pending keys for a settled intent. */
-function creditConfirmedIntentAndClearPending(
-	state: DualCursorState,
-	pending: Map<string, PayoutEntry>,
-	intent: SettleIntent
-): DualCursorState {
-	let next = markIntentConfirmed(state, intent.idempotencyKey, 1)
-	for (const k of intent.eventKeys) pending.delete(k.toLowerCase())
-	next = removePendingKeys(next, intent.eventKeys)
-	return syncPendingOntoState(next, pending)
+/** Pure: credit an intent confirmed with receipt status 1 once, and clear its pending keys. */
+function creditConfirmedIntent(state: DualCursorState, intent: SettleIntent): DualCursorState {
+	return removePendingKeys(markIntentConfirmed(state, intent.idempotencyKey, 1), intent.eventKeys)
 }
 
 /**
  * Persist settle intent BEFORE broadcast. On ACK loss, rebuild the same
  * idempotencyKey + fingerprint — never invent a new batch.
+ * Every state change is its own serial merge; signer and receipt awaits run outside the queue.
  */
 async function submitPayoutBatchOnchain(
 	contractAddr: string,
@@ -1114,7 +1149,6 @@ async function submitPayoutBatchOnchain(
 	}
 	const gasLimit = gasResolve.gasLimit
 
-	let state = workingState ?? loadState()
 	const intent = prepareSettleIntent({
 		to: contractAddr,
 		guardianIds,
@@ -1124,8 +1158,8 @@ async function submitPayoutBatchOnchain(
 		keyArray: config.keyArray,
 		scanLines,
 	})
-	state = attachIntentToState(state, intent)
-	persistState(state)
+	// Durable before broadcast: merge the prepared intent into the latest state, then sign.
+	await mutateState((s) => attachIntentToState(s, intent))
 
 	const tx: VdrSignerTx = rebuildSignerTxFromIntent(intent, config.keyArray)
 
@@ -1137,17 +1171,14 @@ async function submitPayoutBatchOnchain(
 
 	try {
 		const { hash } = await sendSignerTx(tx, config.socketPath)
-		// Chain local `state` after each mutation — never re-take stale workingState snapshot.
-		state = markIntentBroadcast(state, intent.idempotencyKey, hash)
-		persistState(state)
+		await mutateState((s) => markIntentBroadcast(s, intent.idempotencyKey, hash))
 		logger(
 			Colors.cyan(
 				`[validatorClRewardPayout] settleNodeRewards sent via signer tx=${hash} waiting≤${resolveClaimTxWaitTimeoutMs()}ms n=${entries.length} eventKeys=${eventKeys.join(',')} gasPrice=${ethers.formatUnits(gasPriceWei, 'gwei')}gwei idem=${intent.idempotencyKey.slice(0, 24)}…`
 			)
 		)
 		const receipt = await waitForSignerReceipt(provider, hash, resolveClaimTxWaitTimeoutMs())
-		state = markIntentConfirmed(state, intent.idempotencyKey, receipt.status ?? 0)
-		persistState(state)
+		await mutateState((s) => markIntentConfirmed(s, intent.idempotencyKey, receipt.status ?? 0))
 		if (receipt.status !== 1) {
 			throw new Error(`settleNodeRewards reverted status=${receipt.status} hash=${hash}`)
 		}
@@ -1157,12 +1188,9 @@ async function submitPayoutBatchOnchain(
 		const msg = (e as Error)?.message ?? String(e)
 		const ackLost = /timed out|ECONNRESET|socket|ACK|no transaction hash/i.test(msg)
 		if (ackLost) {
-			state = markIntentUncertain(
-				state,
-				intent.idempotencyKey,
-				`ack_lost_after_broadcast:${msg.slice(0, 120)}`
+			await mutateState((s) =>
+				markIntentUncertain(s, intent.idempotencyKey, `ack_lost_after_broadcast:${msg.slice(0, 120)}`)
 			)
-			persistState(state)
 			logger(
 				Colors.yellow(
 					`[validatorClRewardPayout] ACK uncertain after broadcast; preserving intent idem=${intent.idempotencyKey.slice(0, 24)}… fp=${intent.requestFingerprint.slice(0, 18)}…`
@@ -1170,8 +1198,7 @@ async function submitPayoutBatchOnchain(
 			)
 			return 'uncertain'
 		}
-		state = markIntentFailed(state, intent.idempotencyKey, `signer_failed:${msg.slice(0, 120)}`)
-		persistState(state)
+		await mutateState((s) => markIntentFailed(s, intent.idempotencyKey, `signer_failed:${msg.slice(0, 120)}`))
 		logger(Colors.red(`[validatorClRewardPayout] settleNodeRewards signer failed: ${msg}`))
 		return 'failed'
 	}
@@ -1233,8 +1260,7 @@ function packEntriesUnderAmountCap(entries: PayoutEntry[]): PayoutEntry[][] {
 async function submitPayableBatch(
 	contractAddr: string,
 	entries: PayoutEntry[],
-	gasPriceWei: bigint,
-	pending: Map<string, PayoutEntry>
+	gasPriceWei: bigint
 ): Promise<void> {
 	if (!entries.length) return
 
@@ -1252,10 +1278,9 @@ async function submitPayableBatch(
 
 	const outcome = await submitPayoutBatch(contractAddr, entries, gasPriceWei)
 	if (outcome === 'ok') {
-		for (const e of entries) pending.delete(e.eventKey)
-		let state = workingState ?? loadState()
-		state = removePendingKeys(state, entries.map((e) => e.eventKey))
-		state = syncPendingOntoState(state, pending)
+		// Merge into the latest state; a key that is already gone is a no-op.
+		const settledKeys = entries.map((e) => e.eventKey)
+		await mutateState((s) => removePendingKeys(s, settledKeys))
 		// 1712Z Anvil mid-restart: optional abort after N successful settles.
 		if (engAbortAfterSuccessfulSettles != null) {
 			engSuccessfulSettles += 1
@@ -1313,15 +1338,14 @@ async function submitPayableBatch(
 			`[validatorClRewardPayout] gas/calldata auto-split n=${entries.length} → ${left.length}+${right.length} (reason=${outcome})`
 		)
 	)
-	await submitPayoutBatchAutoSplit(contractAddr, left, gasPriceWei, pending)
-	await submitPayoutBatchAutoSplit(contractAddr, right, gasPriceWei, pending)
+	await submitPayoutBatchAutoSplit(contractAddr, left, gasPriceWei)
+	await submitPayoutBatchAutoSplit(contractAddr, right, gasPriceWei)
 }
 
 async function submitPayoutBatchAutoSplit(
 	contractAddr: string,
 	entries: PayoutEntry[],
-	gasPriceWei: bigint,
-	pending: Map<string, PayoutEntry>
+	gasPriceWei: bigint
 ): Promise<void> {
 	if (!entries.length) return
 
@@ -1338,10 +1362,10 @@ async function submitPayoutBatchAutoSplit(
 	const budgetWei = resolveFirstBatchBudgetWei()
 	let toPack = payable
 	if (budgetWei != null) {
-		const state = workingState ?? loadState()
+		// Synchronous read of the latest committed state; the decision is taken before any await.
 		const { selected, deferred, remainingWei } = selectEntriesUnderFirstBatchBudget(
 			payable,
-			state,
+			peekLatestState(),
 			budgetWei
 		)
 		if (deferred.length) {
@@ -1357,34 +1381,37 @@ async function submitPayoutBatchAutoSplit(
 	}
 
 	for (const pack of packEntriesUnderAmountCap(toPack)) {
-		await submitPayableBatch(contractAddr, pack, gasPriceWei, pending)
+		await submitPayableBatch(contractAddr, pack, gasPriceWei)
 	}
 }
 
+/**
+ * Fetch and collect payout rows for a block range. Read-only: returns rows instead of touching state.
+ * The caller merges rows through commitScanRange, which is the only path that moves a cursor.
+ */
 async function scanBlocksIntoPending(
 	provider: ethers.JsonRpcProvider,
 	readContract: ethers.Contract,
 	proxyAddr: string,
 	fromBlock: number,
 	toBlock: number,
-	scanLine: ScanLine,
-	pending: Map<string, PayoutEntry>
-): Promise<{ okThrough: number | null; okThroughHash?: string; added: number; fetchFailed: boolean }> {
+	scanLine: ScanLine
+): Promise<{ okThrough: number | null; okThroughHash?: string; scanned: PayoutEntry[]; fetchFailed: boolean }> {
 	const proxyLower = proxyAddr.toLowerCase()
 	let okThrough: number | null = null
 	let okThroughHash: string | undefined
-	let added = 0
+	const scanned: PayoutEntry[] = []
 	for (let bn = fromBlock; bn <= toBlock; bn++) {
 		const block = await fetchBlockWithWithdrawals(provider, bn)
 		if (!block) {
-			return { okThrough, okThroughHash, added, fetchFailed: true }
+			return { okThrough, okThroughHash, scanned, fetchFailed: true }
 		}
 		const entries = await collectPayoutEntriesForBlock(readContract, proxyLower, bn, block, scanLine)
-		added += mergeIntoPending(pending, entries)
+		scanned.push(...entries)
 		okThrough = bn
 		okThroughHash = typeof block.hash === 'string' ? block.hash.toLowerCase() : undefined
 	}
-	return { okThrough, okThroughHash, added, fetchFailed: false }
+	return { okThrough, okThroughHash, scanned, fetchFailed: false }
 }
 
 /**
@@ -1440,17 +1467,19 @@ function noteIntentWaiting(intent: Pick<SettleIntent, 'idempotencyKey'>): void {
 	}
 }
 
-async function recoverOpenIntents(
-	provider: ethers.JsonRpcProvider,
-	pending: Map<string, PayoutEntry>
-): Promise<void> {
-	let state = workingState ?? loadState()
-	const open = state.settleIntents.filter((i) => i.status === 'broadcast' || i.status === 'uncertain' || i.status === 'prepared')
+async function recoverOpenIntents(provider: ethers.JsonRpcProvider): Promise<void> {
+	const open = peekLatestState().settleIntents.filter(
+		(i) => i.status === 'broadcast' || i.status === 'uncertain' || i.status === 'prepared'
+	)
 	if (!open.length) return
 
 	const config = flushTestHooks.signerConfig ?? readVdrSignerConfig()
-	for (const intent of open) {
-		if (!intentCoversPending(intent, pending) && intent.status === 'prepared') {
+	for (const snapshot of open) {
+		// Re-read this intent from the latest state: an earlier step may already have settled it.
+		const intent = peekLatestState().settleIntents.find((i) => i.idempotencyKey === snapshot.idempotencyKey)
+		if (!intent || !OPEN_INTENT_STATUSES.has(intent.status)) continue
+
+		if (!intentCoversPending(intent, pendingMapFromState(peekLatestState())) && intent.status === 'prepared') {
 			// Pending keys gone — credit if chain already consumed; else drop stale intent.
 			const onChainPrep = await intentConsumedOnChain(provider, intent.to, intent.eventKeys)
 			if (onChainPrep === 'unknown') {
@@ -1458,8 +1487,7 @@ async function recoverOpenIntents(
 				continue
 			}
 			if (onChainPrep === 'consumed') {
-				state = creditConfirmedIntentAndClearPending(state, pending, intent)
-				persistState(state)
+				await mutateState((s) => creditConfirmedIntent(s, intent))
 				logger(
 					Colors.green(
 						`[validatorClRewardPayout] prepared intent credited via on-chain consumed (pending cleared) idem=${intent.idempotencyKey.slice(0, 24)}…`
@@ -1467,12 +1495,14 @@ async function recoverOpenIntents(
 				)
 				continue
 			}
-			state = {
-				...state,
-				settleIntents: state.settleIntents.filter((i) => i.idempotencyKey !== intent.idempotencyKey),
+			// Drop only while the intent is still prepared in the latest state.
+			await mutateState((s) => ({
+				...s,
+				settleIntents: s.settleIntents.filter(
+					(i) => !(i.idempotencyKey === intent.idempotencyKey && i.status === 'prepared')
+				),
 				updatedAt: new Date().toISOString(),
-			}
-			persistState(state)
+			}))
 			continue
 		}
 
@@ -1480,14 +1510,12 @@ async function recoverOpenIntents(
 			try {
 				const receipt = await provider.getTransactionReceipt(intent.txHash)
 				if (receipt) {
-					// Same local `state` → credit + clear pending (never re-take workingState).
-					if (receipt.status === 1) {
-						state = creditConfirmedIntentAndClearPending(state, pending, intent)
-					} else {
-						state = markIntentConfirmed(state, intent.idempotencyKey, receipt.status ?? 0)
-						state = syncPendingOntoState(state, pending)
-					}
-					persistState(state)
+					// Status 1 credits once and clears pending; a reverted receipt keeps pending keys.
+					await mutateState((s) =>
+						receipt.status === 1
+							? creditConfirmedIntent(s, intent)
+							: markIntentConfirmed(s, intent.idempotencyKey, receipt.status ?? 0)
+					)
 					logger(
 						Colors.green(
 							`[validatorClRewardPayout] recovered intent via txHash receipt status=${receipt.status} idem=${intent.idempotencyKey.slice(0, 24)}…`
@@ -1516,8 +1544,7 @@ async function recoverOpenIntents(
 			continue
 		}
 		if (onChainAck === 'consumed') {
-			state = creditConfirmedIntentAndClearPending(state, pending, intent)
-			persistState(state)
+			await mutateState((s) => creditConfirmedIntent(s, intent))
 			logger(
 				Colors.green(
 					`[validatorClRewardPayout] ACK-lost intent credited via on-chain consumed; skip resend idem=${intent.idempotencyKey.slice(0, 24)}…`
@@ -1528,9 +1555,7 @@ async function recoverOpenIntents(
 
 		// ACK lost: rebuild original batch from fingerprint; only resend same idempotencyKey.
 		if (!config) {
-			const r = reconcileAckLostIntent(state, intent.idempotencyKey, { safeToResend: false })
-			state = r.state
-			persistState(state)
+			await mutateState((s) => reconcileAckLostIntent(s, intent.idempotencyKey, { safeToResend: false }).state)
 			logger(
 				Colors.yellow(
 					`[validatorClRewardPayout] ACK-lost intent held (no signer); refuse blind resend idem=${intent.idempotencyKey.slice(0, 24)}…`
@@ -1542,27 +1567,20 @@ async function recoverOpenIntents(
 		try {
 			const tx = rebuildSignerTxFromIntent(intent, config.keyArray)
 			const { hash } = await sendSignerTx(tx, config.socketPath)
-			const r = reconcileAckLostIntent(state, intent.idempotencyKey, { txHash: hash, safeToResend: true })
-			state = r.state
-			persistState(state)
+			await mutateState((s) => reconcileAckLostIntent(s, intent.idempotencyKey, { txHash: hash, safeToResend: true }).state)
 			const receipt = await waitForSignerReceipt(provider, hash, resolveClaimTxWaitTimeoutMs())
-			// Chain local `state` — never re-take workingState after confirm.
-			if (receipt.status === 1) {
-				state = creditConfirmedIntentAndClearPending(state, pending, intent)
-			} else {
-				state = markIntentConfirmed(state, intent.idempotencyKey, receipt.status ?? 0)
-				state = syncPendingOntoState(state, pending)
-			}
-			persistState(state)
+			await mutateState((s) =>
+				receipt.status === 1
+					? creditConfirmedIntent(s, intent)
+					: markIntentConfirmed(s, intent.idempotencyKey, receipt.status ?? 0)
+			)
 			logger(
 				Colors.green(
 					`[validatorClRewardPayout] ACK-lost recovered ORIGINAL batch tx=${hash} idem=${intent.idempotencyKey.slice(0, 24)}… fp=${intent.requestFingerprint.slice(0, 18)}…`
 				)
 			)
 		} catch (e: unknown) {
-			const r = reconcileAckLostIntent(state, intent.idempotencyKey, { safeToResend: false })
-			state = r.state
-			persistState(state)
+			await mutateState((s) => reconcileAckLostIntent(s, intent.idempotencyKey, { safeToResend: false }).state)
 			logger(
 				Colors.yellow(
 					`[validatorClRewardPayout] ACK-lost recovery deferred: ${(e as Error)?.message ?? e}`
@@ -1575,12 +1593,10 @@ async function recoverOpenIntents(
 async function flushPendingBatches(
 	provider: ethers.JsonRpcProvider,
 	readContract: ethers.Contract,
-	contractAddr: string,
-	pending: Map<string, PayoutEntry>
+	contractAddr: string
 ): Promise<void> {
-	let state = workingState ?? loadState()
-	if (!pending.size) {
-		if (clearGasWait(state)) state = syncPendingOntoState(state, pending)
+	if (!peekLatestState().pending.length) {
+		await mutateState((s) => withGasWaitCleared(s))
 		return
 	}
 
@@ -1592,17 +1608,16 @@ async function flushPendingBatches(
 
 	if (gasPrice > maxGas + gasDustWei) {
 		const now = Date.now()
-		if (!state.gasWaitStartedAt) {
-			state = { ...state, gasWaitStartedAt: new Date(now).toISOString() }
-			state = syncPendingOntoState(state, pending)
-		}
-		const startedMs = Date.parse(state.gasWaitStartedAt!)
+		const waited = await mutateState((s) =>
+			s.gasWaitStartedAt ? s : { ...s, gasWaitStartedAt: new Date(now).toISOString() }
+		)
+		const startedMs = Date.parse(waited.gasWaitStartedAt!)
 		const elapsedMs = Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : forceMs
 		if (elapsedMs < forceMs) {
 			logger(
 				Colors.yellow(
 					`[validatorClRewardPayout] skip flush: gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei > max=${ethers.formatUnits(maxGas, 'gwei')} gwei ` +
-						`wait ${formatWaitCountdown(elapsedMs, forceMs)} pending=${pending.size}`
+						`wait ${formatWaitCountdown(elapsedMs, forceMs)} pending=${waited.pending.length}`
 				)
 			)
 			return
@@ -1611,18 +1626,15 @@ async function flushPendingBatches(
 		logger(
 			Colors.yellow(
 				`[validatorClRewardPayout] force flush: gas wait ${Math.floor(elapsedMs / 1000)}s ≥ ${Math.floor(forceMs / 1000)}s; ` +
-					`ignoring max=${ethers.formatUnits(maxGas, 'gwei')} gwei, using live gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei (pending=${pending.size})`
+					`ignoring max=${ethers.formatUnits(maxGas, 'gwei')} gwei, using live gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei (pending=${waited.pending.length})`
 			)
 		)
-	} else if (clearGasWait(state)) {
-		state = syncPendingOntoState(state, pending)
+	} else {
+		await mutateState((s) => withGasWaitCleared(s))
 	}
 
-	// Sync map → state so planFlushOrder sees scanLine tags.
-	state = syncPendingOntoState(state, pending)
-
-	if (!pending.size) {
-		if (clearGasWait(state)) state = syncPendingOntoState(state, pending)
+	if (!peekLatestState().pending.length) {
+		await mutateState((s) => withGasWaitCleared(s))
 		return
 	}
 
@@ -1640,7 +1652,9 @@ async function flushPendingBatches(
 		}
 		if ('allowSet' in allowGate) {
 			issueAllowSet = allowGate.allowSet
-			const outOfList = [...pending.keys()].filter((k) => !issueAllowSet!.has(k.toLowerCase()))
+			const outOfList = [...pendingMapFromState(peekLatestState()).keys()].filter(
+				(k) => !issueAllowSet!.has(k.toLowerCase())
+			)
 			if (outOfList.length) {
 				logger(
 					Colors.yellow(
@@ -1651,14 +1665,12 @@ async function flushPendingBatches(
 		}
 	}
 
-	state = syncPendingOntoState(state, pending)
-	const flushPlan = planFlushOrder(state, {
+	const flushPlan = planFlushOrder(peekLatestState(), {
 		maxEntriesPerTx: resolveMaxEntriesPerTx(),
 		realtimeQuota: resolveRealtimeFlushQuota(),
 		historicalFloor: resolveHistoricalFlushFloor(),
 	})
-	state = recordRealtimeLatency(state, flushPlan.realtimeLatencyMs)
-	persistState(state)
+	const recorded = await mutateState((s) => recordRealtimeLatency(s, flushPlan.realtimeLatencyMs))
 
 	const latencyAvg =
 		flushPlan.realtimeLatencyMs.length > 0
@@ -1668,23 +1680,18 @@ async function flushPendingBatches(
 		Colors.cyan(
 			`[validatorClRewardPayout] flush plan rtBatches=${flushPlan.realtimeBatchCount} histBatches=${flushPlan.historicalBatchCount} ` +
 				`historyProgressing=${flushPlan.historyStillProgressing ? 1 : 0} rtLatencyAvgMs=${latencyAvg} ` +
-				`pending=${pending.size} histCursor=${state.historicalCursor} rtCursor=${state.realtimeCursor} ` +
+				`pending=${recorded.pending.length} histCursor=${recorded.historicalCursor} rtCursor=${recorded.realtimeCursor} ` +
 				`gasPrice=${ethers.formatUnits(gasPrice, 'gwei')}gwei${forceFlush ? ' force=1' : ''}`
 		)
 	)
 
-	// Keys owned by an open intent (prepared / broadcast / uncertain) are recovered by recoverOpenIntents, not re-issued here.
-	const inflightKeys = new Set(
-		(workingState ?? loadState()).settleIntents
-			.filter((i) => i.status === 'broadcast' || i.status === 'uncertain' || i.status === 'prepared')
-			.flatMap((i) => i.eventKeys.map((k) => k.toLowerCase()))
-	)
 	for (const batchJson of flushPlan.batches) {
+		// Latest view before each batch: keys settled or owned by an open intent since the plan was made are skipped.
+		const live = signableKeySet(peekLatestState())
 		const batch: PayoutEntry[] = []
 		for (const j of batchJson) {
 			const e = entryFromJson(j)
-			if (!e || !pending.has(e.eventKey)) continue
-			if (inflightKeys.has(e.eventKey)) continue
+			if (!e || !live.has(e.eventKey)) continue
 			if (issueAllowSet && !issueAllowSet.has(e.eventKey.toLowerCase())) continue
 			batch.push(e)
 		}
@@ -1694,29 +1701,44 @@ async function flushPendingBatches(
 			const chk = await checkBatchUnconsumed(readContract, sub)
 			if (chk.consumed.length) {
 				const ck = chk.consumed.map((e) => e.eventKey)
-				for (const k of ck) pending.delete(k)
-				// Re-read the latest state before every merge: earlier sub-batches may have written intents/totals (R4 B1).
-				state = workingState ?? loadState()
-				state = removePendingKeys(state, ck)
-				state = syncPendingOntoState(state, pending)
-				workingState = state
-				persistState(state)
+				await mutateState((s) => removePendingKeys(s, ck))
 				logger(Colors.cyan(`[validatorClRewardPayout] batch pre-check: ${ck.length} already consumed; removed from pending`))
 			}
 			if (chk.unknown.length) {
 				logger(Colors.yellow(`[validatorClRewardPayout] batch pre-check: ${chk.unknown.length} unknown (RPC error); not signed this tick`))
 			}
 			if (chk.payable.length) {
-				await submitPayoutBatchAutoSplit(contractAddr, chk.payable, gasPrice, pending)
+				// The RPC await above may have let a merge remove a key or own it: re-check against the latest state.
+				const liveNow = signableKeySet(peekLatestState())
+				const payable = chk.payable.filter((e) => liveNow.has(e.eventKey))
+				if (payable.length) await submitPayoutBatchAutoSplit(contractAddr, payable, gasPrice)
 			}
 		}
 	}
 
-	// Submits persist via workingState — re-take after batches so settledWei is not lost.
-	state = workingState ?? loadState()
-	if (!pending.size && clearGasWait(state)) {
-		state = syncPendingOntoState(state, pending)
+	if (!peekLatestState().pending.length) {
+		await mutateState((s) => withGasWaitCleared(s))
 	}
+}
+
+/** Merge one scanned range into the latest state (cursor advance plus new rows). Returns the count of rows newly added. */
+async function commitScanRange(
+	line: ScanLine,
+	from: number,
+	okThrough: number,
+	okThroughHash: string | undefined,
+	scanned: PayoutEntry[]
+): Promise<number> {
+	const rows = scanned
+		.filter((e) => e.scanLine === line && e.blockNumber >= from && e.blockNumber <= okThrough)
+		.map(entryToJson)
+	let added = 0
+	await mutateState((s) => {
+		const next = commitScanProgress(s, { line, okThrough, entries: rows, okThroughHash })
+		added = next.pending.length - s.pending.length
+		return next
+	})
+	return added
 }
 
 async function payoutTick(): Promise<void> {
@@ -1733,14 +1755,12 @@ async function payoutTick(): Promise<void> {
 		const readContract = makeReadContract(proxyAddr, provider)
 
 		const floor = resolveDeployBlockFloor()
-		let state = loadState()
-		workingState = state
-		const pending = pendingMapFromState(state)
+		// Tick start: reload the committed state from the ledger file (fail-closed), inside the queue.
+		await refreshStateFromDisk()
 		const liveHead = Number(await provider.getBlockNumber())
 		if (!Number.isFinite(liveHead) || liveHead < floor) return
 
-		await recoverOpenIntents(provider, pending)
-		state = workingState ?? loadState()
+		await recoverOpenIntents(provider)
 
 		const depth = resolveConfirmationDepth()
 		const tipBlock = await fetchBlockWithWithdrawals(provider, liveHead)
@@ -1750,30 +1770,29 @@ async function payoutTick(): Promise<void> {
 		}
 
 		// Reorg check on locked H / realtime tip when hash mismatches.
-		if (state.boundaryH) {
-			const hBlock = await fetchBlockWithWithdrawals(provider, state.boundaryH.blockNumber)
+		const boundary = peekLatestState().boundaryH
+		if (boundary) {
+			const hBlock = await fetchBlockWithWithdrawals(provider, boundary.blockNumber)
 			const hHash = typeof hBlock?.hash === 'string' ? hBlock.hash.toLowerCase() : ''
-			if (hHash && hHash !== state.boundaryH.blockHash) {
+			if (hHash && hHash !== boundary.blockHash) {
 				logger(
 					Colors.yellow(
-						`[validatorClRewardPayout] reorg vs H=${state.boundaryH.blockNumber}: stored=${state.boundaryH.blockHash.slice(0, 12)}… live=${hHash.slice(0, 12)}…`
+						`[validatorClRewardPayout] reorg vs H=${boundary.blockNumber}: stored=${boundary.blockHash.slice(0, 12)}… live=${hHash.slice(0, 12)}…`
 					)
 				)
-				state = applyReorgRollback(
-					state,
-					state.boundaryH.blockNumber,
-					state.boundaryH.blockHash,
-					hHash
+				// Roll back only the boundary this mismatch was detected on; otherwise leave the latest state alone.
+				await mutateState((s) =>
+					s.boundaryH &&
+					s.boundaryH.blockNumber === boundary.blockNumber &&
+					s.boundaryH.blockHash === boundary.blockHash
+						? applyReorgRollback(s, boundary.blockNumber, boundary.blockHash, hHash)
+						: s
 				)
-				state = syncPendingOntoState(state, pendingMapFromState(state))
-				// Refresh pending after reorg drop.
-				pending.clear()
-				for (const [k, v] of pendingMapFromState(state)) pending.set(k, v)
 			}
 		}
 
 		// H locks at confirmed tip (liveHead - depth); persist that block's own hash.
-		const prospectiveH = Math.max(0, liveHead - depth, state.historicalCursor)
+		const prospectiveH = Math.max(0, liveHead - depth, peekLatestState().historicalCursor)
 		const hLockBlock = await fetchBlockWithWithdrawals(provider, prospectiveH)
 		const hLockHash =
 			typeof hLockBlock?.hash === 'string' ? hLockBlock.hash.toLowerCase() : String(tipBlock.hash).toLowerCase()
@@ -1781,14 +1800,18 @@ async function payoutTick(): Promise<void> {
 			logger(Colors.yellow(`[validatorClRewardPayout] H block ${prospectiveH} hash unavailable; skip tick`))
 			return
 		}
-		const locked = ensureBoundaryH(state, liveHead, hLockHash, depth)
-		state = locked.state
-		if (locked.lockedNow) {
-			persistState(state)
+		let lockedNow = false
+		await mutateState((s) => {
+			const locked = ensureBoundaryH(s, liveHead, hLockHash, depth)
+			lockedNow = locked.lockedNow
+			return locked.state
+		})
+		if (lockedNow) {
+			const locked = peekLatestState()
 			logger(
 				Colors.cyan(
-					`[validatorClRewardPayout] locked H=${state.boundaryH!.blockNumber} hash=${state.boundaryH!.blockHash.slice(0, 14)}… ` +
-						`histCursor=${state.historicalCursor} rtCursor=${state.realtimeCursor} depth=${depth}`
+					`[validatorClRewardPayout] locked H=${locked.boundaryH!.blockNumber} hash=${locked.boundaryH!.blockHash.slice(0, 14)}… ` +
+						`histCursor=${locked.historicalCursor} rtCursor=${locked.realtimeCursor} depth=${depth}`
 				)
 			)
 		}
@@ -1797,6 +1820,7 @@ async function payoutTick(): Promise<void> {
 		const chunksPerTick = resolveChunksPerTick()
 		const histBudget = chunk * chunksPerTick
 		const rtBudget = chunk * chunksPerTick
+		const state = peekLatestState()
 		const plan = planScanRanges(state, liveHead, {
 			confirmationDepth: depth,
 			historicalChunk: histBudget,
@@ -1808,47 +1832,27 @@ async function payoutTick(): Promise<void> {
 				`[validatorClRewardPayout] dual-scan H=${state.boundaryH?.blockNumber ?? 'n/a'} ` +
 					`hist=${plan.historical ? `${plan.historical.from}..${plan.historical.to}` : 'done'} ` +
 					`rt=${plan.realtime ? `${plan.realtime.from}..${plan.realtime.to}` : 'caught-up'} ` +
-					`safeTip=${plan.tipForPlan} liveHead=${liveHead} pending=${pending.size} ` +
+					`safeTip=${plan.tipForPlan} liveHead=${liveHead} pending=${state.pending.length} ` +
 					`histComplete=${isHistoricalComplete(state) ? 1 : 0}`
 			)
 		)
 
 		if (plan.historical) {
 			const { from, to } = plan.historical
-			const { okThrough, okThroughHash, added, fetchFailed } = await scanBlocksIntoPending(
+			const { okThrough, okThroughHash, scanned, fetchFailed } = await scanBlocksIntoPending(
 				provider,
 				readContract,
 				proxyAddr,
 				from,
 				to,
-				'historical',
-				pending
+				'historical'
 			)
 			if (okThrough != null) {
-				const jsonEntries = [...pending.values()]
-					.filter((e) => e.blockNumber >= from && e.blockNumber <= okThrough && e.scanLine === 'historical')
-					.filter((e) => e.blockNumber >= from) // already in map; commit uses entries list for merge
-					.map(entryToJson)
-				// Only newly scanned range entries for this commit — use ones with matching blocks.
-				const commitEntries = jsonEntries.filter((e) => e.blockNumber >= from && e.blockNumber <= okThrough)
-				state = commitScanProgress(state, {
-					line: 'historical',
-					okThrough,
-					entries: commitEntries,
-					okThroughHash,
-				})
-				// Re-sync pending from commit (dedupe) then overlay live map extras.
-				const after = pendingMapFromState(state)
-				for (const [k, v] of pending) {
-					if (!after.has(k)) after.set(k, v)
-				}
-				pending.clear()
-				for (const [k, v] of after) pending.set(k, v)
-				state = syncPendingOntoState(state, pending)
+				const added = await commitScanRange('historical', from, okThrough, okThroughHash, scanned)
 				if (added > 0) {
 					logger(
 						Colors.cyan(
-							`[validatorClRewardPayout] historical +${added} pending=${pending.size} through ${from}..${okThrough}`
+							`[validatorClRewardPayout] historical +${added} pending=${peekLatestState().pending.length} through ${from}..${okThrough}`
 						)
 					)
 				}
@@ -1864,36 +1868,20 @@ async function payoutTick(): Promise<void> {
 
 		if (plan.realtime) {
 			const { from, to } = plan.realtime
-			const { okThrough, okThroughHash, added, fetchFailed } = await scanBlocksIntoPending(
+			const { okThrough, okThroughHash, scanned, fetchFailed } = await scanBlocksIntoPending(
 				provider,
 				readContract,
 				proxyAddr,
 				from,
 				to,
-				'realtime',
-				pending
+				'realtime'
 			)
 			if (okThrough != null) {
-				const commitEntries = [...pending.values()]
-					.filter((e) => e.scanLine === 'realtime' && e.blockNumber >= from && e.blockNumber <= okThrough)
-					.map(entryToJson)
-				state = commitScanProgress(state, {
-					line: 'realtime',
-					okThrough,
-					entries: commitEntries,
-					okThroughHash,
-				})
-				const after = pendingMapFromState(state)
-				for (const [k, v] of pending) {
-					if (!after.has(k)) after.set(k, v)
-				}
-				pending.clear()
-				for (const [k, v] of after) pending.set(k, v)
-				state = syncPendingOntoState(state, pending)
+				const added = await commitScanRange('realtime', from, okThrough, okThroughHash, scanned)
 				if (added > 0) {
 					logger(
 						Colors.cyan(
-							`[validatorClRewardPayout] realtime +${added} pending=${pending.size} through ${from}..${okThrough}`
+							`[validatorClRewardPayout] realtime +${added} pending=${peekLatestState().pending.length} through ${from}..${okThrough}`
 						)
 					)
 				}
@@ -1907,13 +1895,14 @@ async function payoutTick(): Promise<void> {
 			}
 		}
 
-		await flushPendingBatches(provider, readContract, proxyAddr, pending)
+		await flushPendingBatches(provider, readContract, proxyAddr)
 	} catch (e: unknown) {
 		logger(Colors.red(`[validatorClRewardPayout] tick error: ${(e as Error)?.message ?? e}`))
 	} finally {
 		payoutInFlight = false
 	}
 }
+
 
 function scheduleNextPayoutTick(): void {
 	if (!payoutStarted) return
@@ -2011,15 +2000,12 @@ export async function __engHarnessFlushPendingOnce(opts: {
 	aborted: boolean
 	firstBatchSettledWei: string
 }> {
-	// Harness always reloads from the ledger file (no cross-run cached working copy).
-	workingState = null
-	let pending: Map<string, PayoutEntry>
 	let aborted = false
 	if (opts.resumeFromState) {
-		const state = loadState()
-		pending = pendingMapFromState(state)
+		await refreshStateFromDisk()
 	} else {
-		pending = new Map<string, PayoutEntry>()
+		// Seeds replace the ledger's pending rows and intents (harness only); rows are kept in ledger order.
+		const seeded = new Map<string, PayoutEntry>()
 		for (const s of opts.seeds ?? []) {
 			const e = entryFromJson({
 				guardianId: s.guardianId,
@@ -2031,8 +2017,11 @@ export async function __engHarnessFlushPendingOnce(opts: {
 				enqueuedAtMs: Date.now(),
 			})
 			if (!e) continue
-			pending.set(e.eventKey, e)
+			seeded.set(e.eventKey, e)
 		}
+		const rows = [...seeded.values()]
+			.sort((a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex)
+			.map(entryToJson)
 		const initialSettled = opts.initialFirstBatchSettledWei?.trim() ?? ''
 		const settledPatch =
 			initialSettled.length > 0
@@ -2040,32 +2029,28 @@ export async function __engHarnessFlushPendingOnce(opts: {
 				: opts.resetFirstBatchSettled !== false
 					? { firstBatchSettledWei: '0' }
 					: {}
-		let state = loadState()
-		state = {
-			...state,
-			pending: [],
+		await refreshStateFromDisk()
+		await mutateState((s) => ({
+			...s,
+			pending: rows,
 			settleIntents: [],
 			...settledPatch,
 			updatedAt: new Date().toISOString(),
-		}
-		state = syncPendingOntoState(state, pending)
+		}))
 	}
 	const provider = createClaimRpcProvider()
 	if (opts.resumeFromState) {
 		// Mid-restart / ACK-loss path: rebuild original idempotencyKey batches before flush.
-		await recoverOpenIntents(provider, pending)
+		await recoverOpenIntents(provider)
 	}
 	const readContract = makeReadContract(opts.contractAddr, provider)
 	try {
-		await flushPendingBatches(provider, readContract, opts.contractAddr, pending)
+		await flushPendingBatches(provider, readContract, opts.contractAddr)
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? e.message : String(e)
 		if (!msg.includes('ENG_ABORT_AFTER_SUCCESSFUL_SETTLES')) throw e
 		aborted = true
 		logger(Colors.yellow(`[validatorClRewardPayout] eng harness power-cut: ${msg}`))
-		// Keep SAME local state: assign sync result (never discard workingState ?? loadState()).
-		workingState = syncPendingOntoState(workingState ?? loadState(), pending)
-		persistState(workingState)
 	}
 	// Always re-read after flush/recover so firstBatchSettledWei reflects confirm credits.
 	const after = peekValidatorClRewardPayoutState()
