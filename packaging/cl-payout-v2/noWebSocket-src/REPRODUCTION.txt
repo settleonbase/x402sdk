@@ -1,0 +1,7 @@
+noWebSocket.js 从源码复现（2026-11-16，仓库外，本机 Mac）
+源：signer-gas-keeper-2026-11-09 commit fa7bcf0 的 packages/wallet-signer/src/noWebSocket.ts 与 packages/wallet-signer/tsconfig.json（见 PROVENANCE.txt）。
+编译器：typescript 5.8.3（x402sdk 锁文件）。
+命令：tsc -p packaging/cl-payout-v2/noWebSocket-src/tsconfig.json --outDir <输出目录>
+期望：<输出目录>/src/noWebSocket.js 的 sha256 = 3b87a2d17956b26608e638902080de82e7b2742ca3604eb53c355747132f47d3，与 vendor/noWebSocket.js 逐字节一致。
+本机结果：sha256 3b87a2d1…47d3；与 signer-gas-keeper 已安装 dist 字节一致。
+未闭合：fa7bcf0 未见于远端分支（signer-gas-keeper 本地跟踪分支中无包含它的分支）；其远端来源仍待其维护方推送确认。

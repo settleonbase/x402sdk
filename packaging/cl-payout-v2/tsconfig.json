@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "moduleResolution": "nodenext",
+    "module": "nodenext",
+    "rootDir": "../../src",
+    "allowJs": true,
+    "strict": true,
+    "strictPropertyInitialization": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": ["ES2022"],
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "files": [
+    "../../src/endpoint/validatorClRewardPayoutReporter.ts",
+    "../../src/endpoint/vdrDualCursor.ts",
+    "../../src/endpoint/vdrPayoutSigner.ts",
+    "../../src/chainAddresses.ts",
+    "../../src/logger.ts",
+    "../../src/onchainTxSerialQueue.ts"
+  ]
+}

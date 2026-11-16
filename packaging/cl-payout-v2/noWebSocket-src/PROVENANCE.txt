@@ -1,0 +1,1 @@
+source: signer-gas-keeper-2026-11-09 commit fa7bcf0, file packages/wallet-signer/src/noWebSocket.ts; tsconfig: same commit packages/wallet-signer/tsconfig.json; compiler typescript 5.8.3 (lock). Reproduced byte-identical to 3b87a2d1 outside that repo.
