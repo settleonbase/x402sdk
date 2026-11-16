@@ -40,7 +40,12 @@ registerHooks({
 
 const { ethers } = await import('ethers')
 const { filterCardsByCategoryGroupsForDiscover } = await import('./cardsByCategoryDiscover.ts')
-const { omitCardsOwnedByUnhandedAgentTemp } = await import('./agentTempDiscoverVisibility.ts')
+const {
+	omitCardsOwnedByUnhandedAgentTemp,
+	omitCardsOwnedByUnhandedAgentTempFailClosed,
+	clearAgentTempVisibleVerdictCache,
+	AGENT_TEMP_VISIBLE_VERDICT_TTL_MS,
+} = await import('./agentTempDiscoverVisibility.ts')
 
 // ---- 注册表 RPC 桩（替代 CONET 链上读取）----
 const REGISTRY_IFACE = new ethers.Interface([
@@ -52,9 +57,11 @@ const MULTICALL_IFACE = new ethers.Interface([
 ])
 const rpc = {
 	calls: 0,
-	/** fail：多次 multicall 直接抛错（注册表读取失败）；answer：按 hiddenOwners 返回结果。 */
+	/** fail：multicall 直接抛错（整批读取失败）；answer：按 hiddenOwners 返回结果。 */
 	mode: 'answer' as 'fail' | 'answer',
 	hiddenOwners: new Set<string>(),
+	/** 这些 owner 的 agentOfTemp 子调用返回 success=false（单个子调用失败）。 */
+	failAgentOf: new Set<string>(),
 }
 const AGENT_OF_TEMP_SELECTOR = REGISTRY_IFACE.getFunction('agentOfTemp')!.selector
 globalThis.__cardsByCategoryRpc = {
@@ -65,6 +72,7 @@ globalThis.__cardsByCategoryRpc = {
 		const results = calls.map((c: { callData: string }) => {
 			if (c.callData.slice(0, 10) === AGENT_OF_TEMP_SELECTOR) {
 				const owner = REGISTRY_IFACE.decodeFunctionData('agentOfTemp', c.callData)[0] as string
+				if (rpc.failAgentOf.has(owner.toLowerCase())) return [false, '0x']
 				const agent = rpc.hiddenOwners.has(owner.toLowerCase()) ? '0x0000000000000000000000000000000000000001' : ethers.ZeroAddress
 				return [true, REGISTRY_IFACE.encodeFunctionResult('agentOfTemp', [agent])]
 			}
@@ -108,6 +116,8 @@ test.beforeEach(() => {
 	rpc.calls = 0
 	rpc.mode = 'answer'
 	rpc.hiddenOwners.clear()
+	rpc.failAgentOf.clear()
+	clearAgentTempVisibleVerdictCache()
 })
 
 test('excluded card never appears, and a group that becomes empty is dropped', async () => {
@@ -165,7 +175,7 @@ test('identity omit stub: the filter keeps whatever the injected omit keeps (con
 	assert.deepEqual(out, groups)
 })
 
-test('real agent temp omit: registry read fails -> every card is kept (fail-open, as latestCards)', async () => {
+test('latestCards omit (legacy, fail-open): registry read fails -> every card is kept', async () => {
 	rpc.mode = 'fail'
 	const cards = [card(NORMAL, NEW, TEMP_OWNER), card(NORMAL_2, NEW, OWNER)]
 	const out = await omitCardsOwnedByUnhandedAgentTemp(cards)
@@ -178,7 +188,7 @@ test('real agent temp omit: registry read fails -> every card is kept (fail-open
 	assert.deepEqual(viaFilter, groups)
 })
 
-test('real agent temp omit: registry reports an unhanded agent temp owner -> that owner cards are hidden', async () => {
+test('latestCards omit (legacy): registry reports an unhanded agent temp owner -> that owner cards are hidden', async () => {
 	rpc.hiddenOwners.add(TEMP_OWNER.toLowerCase())
 	const cards = [card(NORMAL, NEW, TEMP_OWNER), card(NORMAL_2, NEW, OWNER)]
 	const out = await omitCardsOwnedByUnhandedAgentTemp(cards)
@@ -190,22 +200,78 @@ test('empty input returns empty output', async () => {
 	assert.deepEqual(await filterCardsByCategoryGroupsForDiscover([], { omitUnhandedAgentTemp: noAgentTempHidden }), [])
 })
 
+// ---- fail-closed（cardsByCategory）：读取失败不等于"已确认可展示" ----
+test('fail-closed: registry read fails and nothing was verified -> every card is hidden', async () => {
+	rpc.mode = 'fail'
+	const cards = [card(NORMAL, NEW, TEMP_OWNER), card(NORMAL_2, NEW, OWNER)]
+	const out = await omitCardsOwnedByUnhandedAgentTempFailClosed(cards)
+	assert.equal(rpc.calls > 0, true, 'the registry read path must actually run')
+	assert.deepEqual(out, [])
+})
+
+test('fail-closed: an owner verified visible stays visible within the TTL when a later read fails, then expires', async () => {
+	let clock = 1_000_000
+	const now = () => clock
+	const cards = [card(NORMAL, NEW, OWNER)]
+	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), cards)
+	rpc.mode = 'fail'
+	clock += AGENT_TEMP_VISIBLE_VERDICT_TTL_MS - 1
+	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), cards, 'within TTL: shown')
+	clock += 2
+	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), [], 'after TTL: unknown, hidden')
+})
+
+test('fail-closed: a hidden verdict clears an earlier visible verification', async () => {
+	let clock = 2_000_000
+	const now = () => clock
+	const cards = [card(NORMAL, NEW, TEMP_OWNER)]
+	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), cards)
+	rpc.hiddenOwners.add(TEMP_OWNER.toLowerCase())
+	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), [])
+	rpc.hiddenOwners.clear()
+	rpc.mode = 'fail'
+	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), [], 'hidden verdict dropped the cache')
+})
+
+test('fail-closed: a single owner whose state call fails is unknown and hidden; other owners are decided normally', async () => {
+	rpc.failAgentOf.add(TEMP_OWNER.toLowerCase())
+	const cards = [card(NORMAL, NEW, TEMP_OWNER), card(NORMAL_2, NEW, OWNER)]
+	const out = await omitCardsOwnedByUnhandedAgentTempFailClosed(cards)
+	assert.equal(rpc.calls > 0, true)
+	assert.deepEqual(out.map((c) => c.cardAddress), [NORMAL_2])
+})
+
+test('fail-closed: a card whose owner is not a valid address is hidden', async () => {
+	const out = await omitCardsOwnedByUnhandedAgentTempFailClosed([card(NORMAL, NEW, 'not-an-address')])
+	assert.deepEqual(out, [])
+})
+
+test('fail-closed through the Discover filter: failed read removes the card and the empty group', async () => {
+	rpc.mode = 'fail'
+	const groups = [{ categoryId: 'food', items: [card(NORMAL, NEW, OWNER)] }]
+	const out = await filterCardsByCategoryGroupsForDiscover(groups, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed })
+	assert.deepEqual(out, [])
+})
+
 // Master 接线静态守卫（beamioMaster.ts 依赖链重，无法在单元测试中加载）。
-// 只检查源码文本：过滤调用的参数（含真实 omit）、缓存写入的是过滤后的 groups、响应同样使用过滤后的 groups，以及顺序。
-// 这不能替代运行时测试。
-test('Master /cardsByCategory wiring: real omit, filtered result is cached and returned', () => {
+// 只检查源码文本：过滤调用使用 fail-closed omit、缓存写入的是过滤后的 groups、响应使用过滤后的 groups、
+// 冷路径经 single-flight 计算。这不能替代运行时测试。
+test('Master /cardsByCategory wiring: fail-closed omit, filtered result cached, single-flight', () => {
 	const src = readFileSync(new URL('./beamioMaster.ts', import.meta.url), 'utf8')
-	assert.match(src, /import \{ omitCardsOwnedByUnhandedAgentTemp \} from '\.\/agentTempDiscoverVisibility'/)
+	assert.match(src, /import \{ omitCardsOwnedByUnhandedAgentTemp, omitCardsOwnedByUnhandedAgentTempFailClosed \} from '\.\/agentTempDiscoverVisibility'/)
 	assert.match(src, /import \{ filterCardsByCategoryGroupsForDiscover \} from '\.\/cardsByCategoryDiscover'/)
+	assert.match(src, /import \{ createSingleFlight \} from '\.\/singleFlight'/)
+	assert.match(src, /const cardsByCategorySingleFlight = createSingleFlight</)
 	const start = src.indexOf("router.get('/cardsByCategory'")
 	assert.ok(start > 0, 'route not found')
 	const body = src.slice(start, src.indexOf('\n\t\t})', start))
+	assert.match(body, /cardsByCategorySingleFlight\.run\(/)
 	assert.match(body, /const rawGroups = await getLatestCardsGroupedByCategory\(/)
 	assert.match(
 		body,
-		/const groups = await filterCardsByCategoryGroupsForDiscover\(rawGroups, \{ omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTemp \}\)/,
+		/const filtered = await filterCardsByCategoryGroupsForDiscover\(rawGroups, \{ omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed \}\)/,
 	)
-	assert.match(body, /cardsByCategoryCache\.set\(cacheKey, \{ groups, /)
+	assert.match(body, /cardsByCategoryCache\.set\(cacheKey, \{ groups: filtered, /)
 	assert.match(body, /res\.status\(200\)\.json\(\{ groups \}\)/)
 	const filterAt = body.indexOf('filterCardsByCategoryGroupsForDiscover(rawGroups')
 	assert.ok(filterAt < body.indexOf('cardsByCategoryCache.set'), 'filter must run before the cache write')

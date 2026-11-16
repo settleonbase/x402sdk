@@ -67,7 +67,8 @@ import {
 	passDiscoverFeaturedBrandsMerchantCardPolicy,
 } from './latestCardsShared'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
-import { omitCardsOwnedByUnhandedAgentTemp } from './agentTempDiscoverVisibility'
+import { omitCardsOwnedByUnhandedAgentTemp, omitCardsOwnedByUnhandedAgentTempFailClosed } from './agentTempDiscoverVisibility'
+import { createSingleFlight } from './singleFlight'
 import { filterCardsByCategoryGroupsForDiscover } from './cardsByCategoryDiscover'
 import {
 	kickReferralRegistryRedeemRelay,
@@ -424,6 +425,7 @@ const searchHelpCache = new Map<string, { items: unknown[]; expiry: number }>()
 const getNFTMetadataCache = new Map<string, { out: Record<string, unknown>; expiry: number }>()
 const latestCardsCache = new Map<string, { items: unknown[]; expiry: number }>()
 const cardsByCategoryCache = new Map<string, { groups: unknown[]; expiry: number }>()
+const cardsByCategorySingleFlight = createSingleFlight<unknown[]>()
 const getFollowStatusCache = new Map<string, { data: unknown; expiry: number }>()
 const getMyFollowStatusCache = new Map<string, { data: unknown; expiry: number }>()
 const ownerNftSeriesCache = new Map<string, { items: unknown[]; expiry: number }>()
@@ -940,7 +942,8 @@ const routing = ( router: Router ) => {
 		})
 
 		/** 按 shareTokenMetadata.categories 聚合已登记发卡（Cluster GET /api/cardsByCategory 透传至此）。
-		 *  返回前套用与 latestCards 相同的 Discover 过滤（exclude + cutover + agent temp），缓存的是过滤后的结果。 */
+		 *  返回前套用 Discover 过滤（exclude + cutover + agent temp，agent temp 为 fail-closed），缓存的是过滤后的结果。
+		 *  同一组参数的并发冷请求共享一次计算（single-flight），计算完成后移除，缓存写入受 generation 保护。 */
 		router.get('/cardsByCategory', async (_req, res) => {
 			const scanLimit = Math.min(parseInt(String(_req.query.scanLimit || 800), 10) || 800, 3000)
 			const limitPerCategory = Math.min(parseInt(String(_req.query.limitPerCategory || 80), 10) || 80, 500)
@@ -949,10 +952,21 @@ const routing = ( router: Router ) => {
 			if (cached && Date.now() < cached.expiry) {
 				return res.status(200).json({ groups: cached.groups })
 			}
-			const rawGroups = await getLatestCardsGroupedByCategory({ scanLimit, limitPerCategory })
-			const groups = await filterCardsByCategoryGroupsForDiscover(rawGroups, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTemp })
-			cardsByCategoryCache.set(cacheKey, { groups, expiry: Date.now() + QUERY_CACHE_TTL_MS })
-			res.status(200).json({ groups })
+			try {
+				const gen = latestCardsCacheGeneration
+				const groups = await cardsByCategorySingleFlight.run(`${gen}:${cacheKey}`, async () => {
+					const rawGroups = await getLatestCardsGroupedByCategory({ scanLimit, limitPerCategory })
+					const filtered = await filterCardsByCategoryGroupsForDiscover(rawGroups, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed })
+					if (gen === latestCardsCacheGeneration) {
+						cardsByCategoryCache.set(cacheKey, { groups: filtered, expiry: Date.now() + QUERY_CACHE_TTL_MS })
+					}
+					return filtered
+				})
+				res.status(200).json({ groups })
+			} catch (e: any) {
+				logger(Colors.red('[cardsByCategory] error:'), e?.message ?? e)
+				res.status(503).json({ error: e?.message ?? 'cardsByCategory failed' })
+			}
 		})
 
 		/** GET /api/myCards?owner=0x... 或 ?owners=0x1,0x2 - 客户端 RPC 失败时可由此 API 获取。30 秒缓存。

@@ -4,8 +4,12 @@ import { request } from 'node:http'
 /** 原样转发给 Master GET /api/cardsByCategory 的查询参数。其他参数一律丢弃。 */
 export const CARDS_BY_CATEGORY_QUERY_KEYS: readonly string[] = ['scanLimit', 'limitPerCategory']
 
-/** 上游（Master）总耗时默认上限。缓存未命中时 Master 需扫描 DB 并读取链上 agent temp 注册表。 */
-export const CARDS_BY_CATEGORY_DEFAULT_UPSTREAM_TIMEOUT_MS = 20_000
+/**
+ * 上游（Master）总耗时默认上限，**候选值 45 秒，待项目方确认**。
+ * 缓存未命中时 Master 要扫描 DB 并顺序读取链上 agent temp 注册表（每批 80 个 owner）；
+ * 1200 个 owner、单次 RPC 2 秒时链上段约 30 秒（见待审单第 11 节）。线上 nginx /api/ 的 proxy_read_timeout 须大于该值。
+ */
+export const CARDS_BY_CATEGORY_DEFAULT_UPSTREAM_TIMEOUT_MS = 45_000
 /** 环境变量可配置的上限，防止误配成极大值使请求长期挂起。 */
 export const CARDS_BY_CATEGORY_MAX_UPSTREAM_TIMEOUT_MS = 120_000
 
