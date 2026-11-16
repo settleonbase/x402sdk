@@ -3,6 +3,7 @@
  * (b) A restart between scan steps leaves no gap: H is fixed once and persisted; history resumes at its last
  *     contiguous block + 1 up to H; realtime starts at H + 1.
  * (c) A hung historical RPC does not block realtime scanning, queueing or payment.
+ * (d) The first batch reads only its own keys (no full-queue scan) and signing runs through one serial lane.
  */
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
@@ -86,6 +87,7 @@ function writeLedger(file: string, boundaryH: number | null, historicalCursor: n
 type InstallOpts = {
 	signer?: NonNullable<FlushTestHooks['signerSend']>
 	workerTimeoutMs?: number
+	onConsumedRead?: () => void
 }
 
 function install(file: string, chain: Chain, opts: InstallOpts = {}): void {
@@ -97,7 +99,10 @@ function install(file: string, chain: Chain, opts: InstallOpts = {}): void {
 	process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_ESTIMATE_FROM = '0x' + '11'.repeat(20)
 	delete process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_PACK_HASH
 	const contract = {
-		consumedRewardEventKey: async (_k: string) => false,
+		consumedRewardEventKey: async (_k: string) => {
+			opts.onConsumedRead?.()
+			return false
+		},
 		settleNodeRewards: { estimateGas: async () => 100000n },
 		getNodeByValidatorPubkeyHash: async (_h: string) => 1n,
 		guardianIdBeneficiary: async (_g: bigint) => BENEFICIARY,
@@ -186,4 +191,63 @@ test('c: a hung historical RPC does not block realtime scanning, queueing or pay
 		__setFlushTestHooks(null)
 		globalThis.fetch = realFetch
 	}
+})
+
+test('d: the first batch reads only its own keys and signing is serial through one lane', async () => {
+	const file = freshFile()
+	const rows = Array.from({ length: 300 }, (_, i) => ({
+		guardianId: '1',
+		amount: '1000000000000000',
+		eventKey: ethers.id(`d-row:${i}`).toLowerCase(),
+		blockNumber: 1 + i,
+		withdrawalIndex: 0,
+		scanLine: 'historical',
+	}))
+	writeFileSync(
+		file,
+		JSON.stringify({
+			version: 2,
+			boundaryH: { blockNumber: 98, blockHash: hashOf(98) },
+			historicalCursor: 98,
+			realtimeCursor: 98,
+			pending: rows,
+			settleIntents: [],
+			firstBatchSettledWei: '0',
+			updatedAt: new Date().toISOString(),
+		})
+	)
+	const chain = newChain(110)
+	let reads = 0
+	let readsAtFirstSign = -1
+	let signs = 0
+	let inflight = 0
+	let maxInflight = 0
+	install(file, chain, {
+		onConsumedRead: () => {
+			reads += 1
+		},
+		signer: async () => {
+			if (signs === 0) readsAtFirstSign = reads
+			inflight += 1
+			maxInflight = Math.max(maxInflight, inflight)
+			await new Promise((resolve) => setImmediate(resolve))
+			inflight -= 1
+			signs += 1
+			const hash = ethers.id(`d-tx:${signs}`)
+			chain.receipts.set(hash, { status: 1 })
+			return { hash }
+		},
+	})
+	try {
+		// Two flush steps at once: one lane only; the second is refused while the first is busy.
+		const outcomes = await Promise.all([__engHarnessRunWorkerOnce('flush'), __engHarnessRunWorkerOnce('flush')])
+		assert.deepEqual([...outcomes].sort(), ['busy', 'done'])
+	} finally {
+		__setFlushTestHooks(null)
+	}
+	assert.equal(readsAtFirstSign, 2, 'before the first signature only the batch keys (2) were read, not the 300-row queue')
+	assert.equal(reads, 2, 'the step read consumed status only for the keys of the batch it signed')
+	assert.equal(signs, 1)
+	assert.equal(maxInflight, 1, 'signing is serial through one lane')
+	assert.equal(peekValidatorClRewardPayoutState().pending.length, 298, 'the rest of the queue is untouched')
 })
