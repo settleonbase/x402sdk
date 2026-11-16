@@ -220,15 +220,16 @@ test('latestCards omit (legacy): registry reports an unhanded agent temp owner -
 })
 
 test('batch reads are bounded: at most AGENT_TEMP_READ_CONCURRENCY multicalls in flight, results complete', async () => {
-	const owners = Array.from({ length: 320 }, (_, i) => '0x' + String(i + 1).padStart(40, '0'))
+	// 800 个 owner = 10 批；若不设上限，同时在途数会达到 10，而非 AGENT_TEMP_READ_CONCURRENCY。
+	const owners = Array.from({ length: 800 }, (_, i) => '0x' + String(i + 1).padStart(40, '0'))
 	rpc.hiddenOwners.add(owners[5].toLowerCase())
 	rpc.delayMs = 15
 	const cards = owners.map((o, i) => card('0x' + String(i + 1).padStart(40, '0'), NEW, o))
 	const out = await omitCardsOwnedByUnhandedAgentTempFailClosed(cards)
-	assert.equal(rpc.calls, 4, 'four batches of 80 owners')
+	assert.equal(rpc.calls, 10, 'ten batches of 80 owners')
 	assert.equal(rpc.maxInFlight <= AGENT_TEMP_READ_CONCURRENCY, true, `max in flight ${rpc.maxInFlight}`)
 	assert.equal(rpc.maxInFlight >= 2, true, 'batches must overlap')
-	assert.equal(out.length, 319)
+	assert.equal(out.length, 799)
 	assert.equal(out.some((c) => c.cardOwner === owners[5]), false)
 })
 
