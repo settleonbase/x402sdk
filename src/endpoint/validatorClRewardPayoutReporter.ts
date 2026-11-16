@@ -126,6 +126,8 @@ export type FlushTestHooks = {
 	signerConfig?: { socketPath: string; keyArray: string }
 	signerSend?: (tx: VdrSignerTx) => Promise<{ hash: string }>
 	workerTimeoutMs?: number
+	/** Flush job watchdog cap in ms (test only; production reads CONET_VALIDATOR_CL_FLUSH_JOB_WATCHDOG_MS). */
+	flushJobWatchdogMs?: number
 	/** Observe every committed scan window (test only). */
 	onScanCommit?: (rec: { line: ScanLine; from: number; okThrough: number }) => void
 	/** Observe a history skip over a realtime span (test only). */
@@ -1874,6 +1876,62 @@ function resolveWorkerRpcTimeoutMs(): number {
 	return flushTestHooks.workerTimeoutMs ?? resolveClaimRpcHttpTimeoutMs()
 }
 
+/**
+ * Flush job watchdog. A flush job that is still unsettled after the cap is ALERTed and counted, and the ALERT repeats
+ * every cap while the job stays open. The watchdog only observes: it never releases the signing lane and never starts
+ * a new job or re-signs a batch (a second signature for the same keys could pay twice). Manual handling only.
+ * Default cap = 1 200 000 ms = 5 x one batch budget (flush 60 s + sign 60 s + receipt 120 s). A normal job takes seconds.
+ */
+const FLUSH_JOB_WATCHDOG_DEFAULT_MS = 1_200_000
+type FlushJobWatch = {
+	startedAt: number
+	capMs: number
+	alerts: number
+	settled: boolean
+	timer?: ReturnType<typeof setTimeout>
+}
+/** At most one flush job exists at a time (the flush lane), so one record is enough. */
+let flushJobWatch: FlushJobWatch | null = null
+/** ALERTs raised since process start (in memory; the ledger format is not changed). */
+let flushWatchdogAlerts = 0
+
+function resolveFlushJobWatchdogMs(): number {
+	if (flushTestHooks.flushJobWatchdogMs !== undefined) return flushTestHooks.flushJobWatchdogMs
+	const n = Number(process.env.CONET_VALIDATOR_CL_FLUSH_JOB_WATCHDOG_MS || FLUSH_JOB_WATCHDOG_DEFAULT_MS)
+	return Number.isFinite(n) && n >= 60_000 ? Math.min(86_400_000, Math.floor(n)) : FLUSH_JOB_WATCHDOG_DEFAULT_MS
+}
+
+function formatWatchMs(ms: number): string {
+	return ms < 1_000 ? `${Math.floor(ms)}ms` : `${Math.floor(ms / 1_000)}s`
+}
+
+function armFlushJobWatch(w: FlushJobWatch): void {
+	w.timer = setTimeout(() => {
+		if (w.settled) return
+		w.alerts += 1
+		flushWatchdogAlerts += 1
+		logger(
+			Colors.red(
+				`[validatorClRewardPayout] ALERT flush job unsettled for ${formatWatchMs(Date.now() - w.startedAt)} ` +
+					`(cap ${formatWatchMs(w.capMs)}; alert #${w.alerts}, total ${flushWatchdogAlerts}). ` +
+					'Signing lane stays busy: not released, not re-signed. Manual check required.'
+			)
+		)
+		armFlushJobWatch(w)
+	}, w.capMs)
+	w.timer.unref()
+}
+
+/** Read-only status for ops and tests: ALERT count since process start, and whether a flush job is open. */
+export function flushWatchdogStatus(): { alerts: number; jobOpen: boolean; jobAgeMs: number; capMs: number | null } {
+	return {
+		alerts: flushWatchdogAlerts,
+		jobOpen: flushJobWatch !== null,
+		jobAgeMs: flushJobWatch ? Date.now() - flushJobWatch.startedAt : 0,
+		capMs: flushJobWatch ? flushJobWatch.capMs : null,
+	}
+}
+
 /** H is fixed once per process start. A restart (or a test restart via __engHarnessResetStateCache) starts a new generation. */
 let bootFixed = false
 let bootFixing: Promise<boolean> | null = null
@@ -2069,6 +2127,13 @@ async function runWorkerStep(kind: WorkerKind): Promise<'done' | 'busy' | 'timeo
 	if (workerBusy[kind]) return 'busy'
 	workerBusy[kind] = true
 	const run = ++workerRun[kind]
+	// The flush job is watched from its start. The watchdog observes only (see armFlushJobWatch).
+	const watch: FlushJobWatch | null =
+		kind === 'flush' ? { startedAt: Date.now(), capMs: resolveFlushJobWatchdogMs(), alerts: 0, settled: false } : null
+	if (watch) {
+		flushJobWatch = watch
+		armFlushJobWatch(watch)
+	}
 	const job = (async () => {
 		const proxyAddr = resolveValidatorDepositRedeemAddress()
 		if (!proxyAddr) {
@@ -2086,6 +2151,20 @@ async function runWorkerStep(kind: WorkerKind): Promise<'done' | 'busy' | 'timeo
 	})().catch((e: unknown) => {
 		logger(Colors.red(`[validatorClRewardPayout] ${kind} worker error: ${(e as Error)?.message ?? e}`))
 	})
+	if (watch) {
+		void job.then(() => {
+			watch.settled = true
+			if (watch.timer !== undefined) clearTimeout(watch.timer)
+			if (flushJobWatch === watch) flushJobWatch = null
+			if (watch.alerts > 0) {
+				logger(
+					Colors.cyan(
+						`[validatorClRewardPayout] flush job settled after ${formatWatchMs(Date.now() - watch.startedAt)} (ALERTed ${watch.alerts} time(s) before settling)`
+					)
+				)
+			}
+		})
+	}
 	const timeoutMs = resolveWorkerRpcTimeoutMs()
 	let timer: ReturnType<typeof setTimeout> | undefined
 	const outcome = await Promise.race<'done' | 'timeout'>([

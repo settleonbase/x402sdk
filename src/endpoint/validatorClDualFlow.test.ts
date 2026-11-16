@@ -10,6 +10,7 @@
  * (e)  The same key arriving from both lines is paid once.
  * (f)  An H candidate with no readable hash, or another height, is UNKNOWN: no lock and no tip-hash fallback.
  * (g)  An unreadable or wrong-height block in the reorg check is UNKNOWN, not a reorg: no rollback.
+ * (h)  A flush job that never settles is ALERTed by the watchdog; the lane stays busy and nothing is re-signed.
  */
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
@@ -23,6 +24,7 @@ import {
 	__engHarnessRunTickOnce,
 	__engHarnessRunWorkerOnce,
 	__setFlushTestHooks,
+	flushWatchdogStatus,
 	mutateState,
 	peekValidatorClRewardPayoutState,
 	type FlushTestHooks,
@@ -124,6 +126,7 @@ function writeLedger(
 type InstallOpts = {
 	signer?: NonNullable<FlushTestHooks['signerSend']>
 	workerTimeoutMs?: number
+	flushJobWatchdogMs?: number
 	onConsumedRead?: () => void
 	chunkBlocks?: number
 }
@@ -159,6 +162,7 @@ function install(file: string, chain: Chain, opts: InstallOpts = {}): void {
 				throw new Error('signer must not be called in this test')
 			}),
 		workerTimeoutMs: opts.workerTimeoutMs ?? 5_000,
+		flushJobWatchdogMs: opts.flushJobWatchdogMs,
 		onScanCommit: (rec) => {
 			scanLog.push(rec)
 		},
@@ -726,4 +730,90 @@ test('reorg: a reorg of a fixed H rolls back to a safe point; the ledger reloads
 	)
 	assert.ok(s.pending.some((p) => p.eventKey.toLowerCase() === kO), 'the open intent key is still owned in pending (not lost)')
 	assert.equal(new Set(signedKeys).size, signedKeys.length, 'no key is signed twice')
+})
+
+test('h: a flush job that never settles is ALERTed by the watchdog; the lane stays busy and nothing is re-signed', async () => {
+	const file = freshFile()
+	writeFileSync(
+		file,
+		JSON.stringify({
+			version: 2,
+			boundaryH: { blockNumber: 98, blockHash: hashOf(98) },
+			historicalCursor: 98,
+			realtimeCursor: 98,
+			pending: [1, 2, 3, 4].map(pendingRow),
+			settleIntents: [],
+			firstBatchSettledWei: '0',
+			updatedAt: new Date().toISOString(),
+		})
+	)
+	const iface = new ethers.Interface(['function settleNodeRewards(uint256[] guardianIds, uint256[] amounts, bytes32[] eventKeys)'])
+	const chain = newChain(110)
+	const sent: { idem: string; data: string }[] = []
+	let inflight = 0
+	let maxInflight = 0
+	// Simulated permanent hang: the signer answers only when the test opens this gate.
+	let openGate: () => void = () => {}
+	const gate = new Promise<void>((resolve) => {
+		openGate = resolve
+	})
+	install(file, chain, {
+		workerTimeoutMs: 100, // the flush step is released by its timeout; the job itself stays open
+		flushJobWatchdogMs: 150, // watchdog cap for this test
+		signer: async (tx) => {
+			sent.push({ idem: tx.idempotencyKey, data: tx.data })
+			inflight += 1
+			maxInflight = Math.max(maxInflight, inflight)
+			await gate
+			inflight -= 1
+			const hash = ethers.id(`watchdog-tx:${sent.length}`)
+			chain.receipts.set(hash, { status: 1 })
+			return { hash }
+		},
+	})
+	const alertLines: string[] = []
+	const realLog = console.log
+	console.log = (...args: unknown[]) => {
+		const line = args.map((a) => String(a)).join(' ')
+		if (line.includes('ALERT')) alertLines.push(line)
+		realLog(...args)
+	}
+	try {
+		const first = await __engHarnessRunWorkerOnce('flush')
+		assert.equal(first, 'timeout', 'the flush step is released by its timeout while the job is still in the signer')
+		await waitFor(() => flushWatchdogStatus().alerts >= 2, 5_000)
+		const status = flushWatchdogStatus()
+		assert.ok(status.alerts >= 2, 'the watchdog ALERTs and counts while the job never settles')
+		assert.equal(status.jobOpen, true, 'the watchdog still sees the flush job as open')
+		assert.ok(
+			alertLines.some((l) => l.includes('ALERT flush job unsettled')),
+			'an ALERT line is written to the log'
+		)
+		assert.equal(await __engHarnessRunWorkerOnce('flush'), 'busy', 'the watchdog does not release the signing lane')
+		assert.equal(sent.length, 1, 'the watchdog does not start a new batch or re-sign the batch in the signer')
+		assert.equal(maxInflight, 1, 'one outstanding signature at a time')
+
+		openGate()
+		await waitFor(() => !flushWatchdogStatus().jobOpen, 10_000)
+		let third: 'done' | 'busy' | 'timeout' = 'busy'
+		for (let i = 0; i < 200 && third !== 'done'; i++) {
+			third = await __engHarnessRunWorkerOnce('flush')
+			if (third !== 'done') await sleepMs(20)
+		}
+		__setFlushTestHooks(null)
+		const signedKeys = sent.flatMap((s) =>
+			(iface.decodeFunctionData('settleNodeRewards', s.data)[2] as string[]).map((k) => k.toLowerCase())
+		)
+		assert.equal(sent.length, 2, 'the two batches (MAX_ENTRIES=2) are each sent once after the job is released')
+		assert.equal(new Set(sent.map((s) => s.idem)).size, sent.length, 'each batch is sent once under its own idempotencyKey')
+		assert.equal(new Set(signedKeys).size, signedKeys.length, 'no key is signed twice (no double payment)')
+		assert.equal(signedKeys.length, 4, 'every pending row is signed exactly once')
+		assert.equal(st().pending.length, 0, 'all rows are paid once the job settles')
+		assert.equal(third, 'done', 'the lane is released only after the job has settled')
+		assert.equal(flushWatchdogStatus().jobOpen, false, 'no watched job is left open')
+	} finally {
+		openGate() // never leave the lane held by a failing test
+		console.log = realLog
+		__setFlushTestHooks(null)
+	}
 })
