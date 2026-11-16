@@ -27,6 +27,9 @@ const MULTICALL_IFACE = new ethers.Interface([
 
 const OWNERS_PER_CALL = 80
 
+/** 链上段最多同时在途的 multicall 批数（有界并发，取值为候选，待项目方确认）。 */
+export const AGENT_TEMP_READ_CONCURRENCY = 4
+
 /** 每个 owner 的链上判定：visible 可展示；hidden 未移交 agent temp；unknown 读取失败或无法解码。 */
 export type AgentTempVerdict = 'visible' | 'hidden' | 'unknown'
 
@@ -77,11 +80,20 @@ async function readAgentTempVerdicts(owners: string[]): Promise<Map<string, Agen
 	const verdicts = new Map<string, AgentTempVerdict>()
 	if (unique.length === 0) return verdicts
 
+	let multicall: ethers.Contract
 	try {
-		const provider = providerForUserCardChain('conet')
-		const multicall = new ethers.Contract(CONET_MULTICALL3, MULTICALL_IFACE, provider)
-		for (let offset = 0; offset < unique.length; offset += OWNERS_PER_CALL) {
-			const slice = unique.slice(offset, offset + OWNERS_PER_CALL)
+		multicall = new ethers.Contract(CONET_MULTICALL3, MULTICALL_IFACE, providerForUserCardChain('conet'))
+	} catch {
+		return null
+	}
+	const slices: string[][] = []
+	for (let offset = 0; offset < unique.length; offset += OWNERS_PER_CALL) {
+		slices.push(unique.slice(offset, offset + OWNERS_PER_CALL))
+	}
+
+	/** 单批读取：整批失败（异常、返回长度不符）返回 null。 */
+	const readSlice = async (slice: string[]): Promise<Map<string, AgentTempVerdict> | null> => {
+		try {
 			const calls = slice.flatMap((owner) => [
 				{
 					target: CONET_AGENT_REFERRER_REGISTRY,
@@ -98,28 +110,43 @@ async function readAgentTempVerdicts(owners: string[]): Promise<Map<string, Agen
 				success: boolean
 				returnData: string
 			}>
-			if (!Array.isArray(raw) || raw.length !== calls.length) {
-				return null
-			}
+			if (!Array.isArray(raw) || raw.length !== calls.length) return null
+			const part = new Map<string, AgentTempVerdict>()
 			for (let i = 0; i < slice.length; i++) {
 				const key = slice[i].toLowerCase()
 				const agent = decodeAddress(raw[i * 2].success, raw[i * 2].returnData)
 				const handedOff = decodeBool(raw[i * 2 + 1].success, raw[i * 2 + 1].returnData)
 				if (agent === null) {
-					verdicts.set(key, 'unknown')
+					part.set(key, 'unknown')
 				} else if (agent === ethers.ZeroAddress) {
-					verdicts.set(key, 'visible')
+					part.set(key, 'visible')
 				} else if (handedOff === null) {
-					verdicts.set(key, 'unknown')
+					part.set(key, 'unknown')
 				} else {
-					verdicts.set(key, handedOff ? 'visible' : 'hidden')
+					part.set(key, handedOff ? 'visible' : 'hidden')
 				}
 			}
+			return part
+		} catch {
+			return null
 		}
-		return verdicts
-	} catch {
-		return null
 	}
+
+	// 有界并发：最多 AGENT_TEMP_READ_CONCURRENCY 批同时在途，结果按批次号归位。任一批整体失败则整体返回 null。
+	const results: Array<Map<string, AgentTempVerdict> | null> = new Array(slices.length)
+	let next = 0
+	const worker = async (): Promise<void> => {
+		while (next < slices.length) {
+			const i = next++
+			results[i] = await readSlice(slices[i])
+		}
+	}
+	await Promise.all(Array.from({ length: Math.min(AGENT_TEMP_READ_CONCURRENCY, slices.length) }, () => worker()))
+	for (const part of results) {
+		if (!part) return null
+		for (const [key, verdict] of part) verdicts.set(key, verdict)
+	}
+	return verdicts
 }
 
 /**

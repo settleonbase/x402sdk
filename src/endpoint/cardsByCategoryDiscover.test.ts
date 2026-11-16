@@ -45,6 +45,7 @@ const {
 	omitCardsOwnedByUnhandedAgentTempFailClosed,
 	clearAgentTempVisibleVerdictCache,
 	AGENT_TEMP_VISIBLE_VERDICT_TTL_MS,
+	AGENT_TEMP_READ_CONCURRENCY,
 } = await import('./agentTempDiscoverVisibility.ts')
 
 // ---- 注册表 RPC 桩（替代 CONET 链上读取）----
@@ -57,6 +58,12 @@ const MULTICALL_IFACE = new ethers.Interface([
 ])
 const rpc = {
 	calls: 0,
+	/** 每次 multicall 的延迟（毫秒），用于观察并发。 */
+	delayMs: 0,
+	inFlight: 0,
+	maxInFlight: 0,
+	/** 这些序号（从 1 开始）的 multicall 直接抛错。 */
+	failCalls: new Set<number>(),
 	/** fail：multicall 直接抛错（整批读取失败）；answer：按 hiddenOwners 返回结果。 */
 	mode: 'answer' as 'fail' | 'answer',
 	hiddenOwners: new Set<string>(),
@@ -67,7 +74,20 @@ const AGENT_OF_TEMP_SELECTOR = REGISTRY_IFACE.getFunction('agentOfTemp')!.select
 globalThis.__cardsByCategoryRpc = {
 	call: async (tx: { data: string }) => {
 		rpc.calls += 1
-		if (rpc.mode === 'fail') throw new Error('rpc unavailable (test stub)')
+		const ordinal = rpc.calls
+		rpc.inFlight += 1
+		rpc.maxInFlight = Math.max(rpc.maxInFlight, rpc.inFlight)
+		try {
+			if (rpc.delayMs > 0) await new Promise((r) => setTimeout(r, rpc.delayMs))
+			if (rpc.mode === 'fail' || rpc.failCalls.has(ordinal)) throw new Error('rpc unavailable (test stub)')
+			return answer(tx)
+		} finally {
+			rpc.inFlight -= 1
+		}
+	},
+}
+const answer = (tx: { data: string }): string => {
+	{
 		const [calls] = MULTICALL_IFACE.decodeFunctionData('aggregate3', tx.data)
 		const results = calls.map((c: { callData: string }) => {
 			if (c.callData.slice(0, 10) === AGENT_OF_TEMP_SELECTOR) {
@@ -79,7 +99,7 @@ globalThis.__cardsByCategoryRpc = {
 			return [true, REGISTRY_IFACE.encodeFunctionResult('tempHandedOff', [false])]
 		})
 		return MULTICALL_IFACE.encodeFunctionResult('aggregate3', [results])
-	},
+	}
 }
 
 const OWNER = '0x00000000000000000000000000000000000000aa'
@@ -117,6 +137,9 @@ test.beforeEach(() => {
 	rpc.mode = 'answer'
 	rpc.hiddenOwners.clear()
 	rpc.failAgentOf.clear()
+	rpc.failCalls.clear()
+	rpc.delayMs = 0
+	rpc.maxInFlight = 0
 	clearAgentTempVisibleVerdictCache()
 })
 
@@ -194,6 +217,27 @@ test('latestCards omit (legacy): registry reports an unhanded agent temp owner -
 	const out = await omitCardsOwnedByUnhandedAgentTemp(cards)
 	assert.equal(rpc.calls > 0, true, 'the registry read path must actually run')
 	assert.deepEqual(out.map((c) => c.cardAddress), [NORMAL_2])
+})
+
+test('batch reads are bounded: at most AGENT_TEMP_READ_CONCURRENCY multicalls in flight, results complete', async () => {
+	const owners = Array.from({ length: 320 }, (_, i) => '0x' + String(i + 1).padStart(40, '0'))
+	rpc.hiddenOwners.add(owners[5].toLowerCase())
+	rpc.delayMs = 15
+	const cards = owners.map((o, i) => card('0x' + String(i + 1).padStart(40, '0'), NEW, o))
+	const out = await omitCardsOwnedByUnhandedAgentTempFailClosed(cards)
+	assert.equal(rpc.calls, 4, 'four batches of 80 owners')
+	assert.equal(rpc.maxInFlight <= AGENT_TEMP_READ_CONCURRENCY, true, `max in flight ${rpc.maxInFlight}`)
+	assert.equal(rpc.maxInFlight >= 2, true, 'batches must overlap')
+	assert.equal(out.length, 319)
+	assert.equal(out.some((c) => c.cardOwner === owners[5]), false)
+})
+
+test('one failing batch makes the whole read unknown: fail-closed hides every card', async () => {
+	const owners = Array.from({ length: 200 }, (_, i) => '0x' + String(i + 1).padStart(40, '0'))
+	rpc.failCalls.add(2)
+	const cards = owners.map((o, i) => card('0x' + String(i + 1).padStart(40, '0'), NEW, o))
+	const out = await omitCardsOwnedByUnhandedAgentTempFailClosed(cards)
+	assert.equal(out.length, 0)
 })
 
 test('empty input returns empty output', async () => {
