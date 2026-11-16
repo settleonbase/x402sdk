@@ -76,10 +76,13 @@ import {
 	markIntentBroadcast,
 	markIntentConfirmed,
 	markIntentFailed,
+	markIntentReplacedFailed,
 	markIntentUncertain,
 	migrateLegacyToDualCursor,
 	planFlushOrder,
 	planScanRanges,
+	nextRebuildSeq,
+	prepareRebuiltSettleIntent,
 	prepareSettleIntent,
 	rebuildSignerTxFromIntent,
 	reconcileAckLostIntent,
@@ -1043,10 +1046,11 @@ async function intentConsumedOnChain(
 	provider: ethers.JsonRpcProvider,
 	to: string,
 	eventKeys: string[]
-): Promise<'consumed' | 'open' | 'unknown'> {
+): Promise<'consumed' | 'open' | 'partial' | 'unknown'> {
 	if (!eventKeys.length) return 'unknown'
 	const c = makeReadContract(to, provider)
 	let allConsumed = true
+	let anyConsumed = false
 	let sawUnknown = false
 	for (const k of eventKeys) {
 		let raw: unknown
@@ -1061,10 +1065,13 @@ async function intentConsumedOnChain(
 			continue
 		}
 		if (!raw) allConsumed = false
+		else anyConsumed = true
 	}
 	// Any read failure or non-boolean result is UNKNOWN: never treated as unconsumed (R4 B2).
 	if (sawUnknown) return 'unknown'
-	return allConsumed ? 'consumed' : 'open'
+	if (allConsumed) return 'consumed'
+	// Some but not all keys consumed: a rebuild would re-include consumed keys, so hold (partial).
+	return anyConsumed ? 'partial' : 'open'
 }
 
 /** Pure: credit an intent confirmed with receipt status 1 once, and clear its pending keys. */
@@ -1466,6 +1473,60 @@ function noteIntentWaiting(intent: Pick<SettleIntent, 'idempotencyKey'>): void {
 	}
 }
 
+const intentReplaceAlerted = new Set<string>()
+
+/** One ALERT per replaced intent (txHash without receipt, signer nonce consumed). It is never re-sent under the old key. */
+function alertReplacedOnce(intent: Pick<SettleIntent, 'idempotencyKey' | 'txHash'>): void {
+	if (intentReplaceAlerted.has(intent.idempotencyKey)) return
+	intentReplaceAlerted.add(intent.idempotencyKey)
+	logger(
+		Colors.red(
+			`[validatorClRewardPayout] ALERT intent replaced/dropped: txHash=${intent.txHash} has no receipt and its nonce was consumed; rebuilding under a new idempotencyKey idem=${intent.idempotencyKey.slice(0, 24)}…`
+		)
+	)
+}
+
+/**
+ * Rebuild a replaced batch under a NEW idempotencyKey. The old record stays as failed (audit, no budget reserve);
+ * the new intent is persisted before it is signed. A failed send leaves the new intent uncertain.
+ */
+async function rebuildReplacedIntent(
+	provider: ethers.JsonRpcProvider,
+	prev: SettleIntent,
+	config: { socketPath: string; keyArray: string } | null
+): Promise<void> {
+	if (!config) {
+		logger(Colors.yellow(`[validatorClRewardPayout] replaced intent rebuild held: no signer configured idem=${prev.idempotencyKey.slice(0, 24)}…`))
+		return
+	}
+	const seq = nextRebuildSeq(prev.intentId)
+	const fresh = prepareRebuiltSettleIntent(prev, seq, config.keyArray)
+	await mutateState((s) =>
+		attachIntentToState(markIntentReplacedFailed(s, prev.idempotencyKey, `replaced_or_dropped:rebuilt_r${seq}`), fresh)
+	)
+	logger(
+		Colors.yellow(
+			`[validatorClRewardPayout] REBUILD replaced batch as r${seq} oldIdem=${prev.idempotencyKey.slice(0, 24)}… newIdem=${fresh.idempotencyKey.slice(0, 24)}…`
+		)
+	)
+	try {
+		const tx = rebuildSignerTxFromIntent(fresh, config.keyArray)
+		const { hash } = await sendSignerTx(tx, config.socketPath)
+		await mutateState((s) => markIntentBroadcast(s, fresh.idempotencyKey, hash))
+		const receipt = await waitForSignerReceipt(provider, hash, resolveClaimTxWaitTimeoutMs())
+		await mutateState((s) =>
+			receipt.status === 1
+				? creditConfirmedIntent(s, fresh)
+				: markIntentConfirmed(s, fresh.idempotencyKey, receipt.status ?? 0)
+		)
+		logger(Colors.green(`[validatorClRewardPayout] rebuilt batch r${seq} settled tx=${hash}`))
+	} catch (e: unknown) {
+		const msg = (e as Error)?.message ?? String(e)
+		await mutateState((s) => markIntentUncertain(s, fresh.idempotencyKey, `rebuild_unconfirmed:${msg.slice(0, 120)}`))
+		logger(Colors.yellow(`[validatorClRewardPayout] rebuilt batch r${seq} deferred: ${msg}`))
+	}
+}
+
 async function recoverOpenIntents(provider: ethers.JsonRpcProvider): Promise<void> {
 	const open = peekLatestState().settleIntents.filter(
 		(i) => i.status === 'broadcast' || i.status === 'uncertain' || i.status === 'prepared'
@@ -1481,7 +1542,7 @@ async function recoverOpenIntents(provider: ethers.JsonRpcProvider): Promise<voi
 		if (!intentCoversPending(intent, pendingMapFromState(peekLatestState())) && intent.status === 'prepared') {
 			// Pending keys gone — credit if chain already consumed; else drop stale intent.
 			const onChainPrep = await intentConsumedOnChain(provider, intent.to, intent.eventKeys)
-			if (onChainPrep === 'unknown') {
+			if (onChainPrep === 'unknown' || onChainPrep === 'partial') {
 				logger(Colors.yellow(`[validatorClRewardPayout] prepared intent on-chain status unknown; hold (no resend, no drop) idem=${intent.idempotencyKey.slice(0, 24)}…`))
 				continue
 			}
@@ -1532,13 +1593,25 @@ async function recoverOpenIntents(provider: ethers.JsonRpcProvider): Promise<voi
 				logger(Colors.yellow(`[validatorClRewardPayout] intent txHash has no receipt; wait (no rebuild, no resend) idem=${intent.idempotencyKey.slice(0, 24)}…`))
 				continue
 			}
-			logger(Colors.yellow(`[validatorClRewardPayout] intent txHash replaced/dropped (signer nonce consumed without receipt); verifying on-chain before rebuild idem=${intent.idempotencyKey.slice(0, 24)}…`))
-			// Falls through: rebuild only if intentConsumedOnChain === 'open' (below).
+			alertReplacedOnce(intent)
+			const onChainR = await intentConsumedOnChain(provider, intent.to, intent.eventKeys)
+			if (onChainR === 'unknown' || onChainR === 'partial') {
+				logger(Colors.yellow(`[validatorClRewardPayout] replaced intent on-chain status ${onChainR}; hold (no rebuild, no resend) idem=${intent.idempotencyKey.slice(0, 24)}…`))
+				continue
+			}
+			if (onChainR === 'consumed') {
+				await mutateState((s) => creditConfirmedIntent(s, intent))
+				logger(Colors.green(`[validatorClRewardPayout] replaced intent credited via on-chain consumed; no rebuild idem=${intent.idempotencyKey.slice(0, 24)}…`))
+				continue
+			}
+			// Open: the dead tx can never mine (its nonce is taken). Rebuild the batch under a NEW idempotencyKey.
+			await rebuildReplacedIntent(provider, intent, config)
+			continue
 		}
 
 		// Chain already settled this intent (ACK lost / SIGKILL before broadcast mark) — credit once, do not resend.
 		const onChainAck = await intentConsumedOnChain(provider, intent.to, intent.eventKeys)
-		if (onChainAck === 'unknown') {
+		if (onChainAck === 'unknown' || onChainAck === 'partial') {
 			logger(Colors.yellow(`[validatorClRewardPayout] ACK-lost on-chain status unknown; hold (no resend) idem=${intent.idempotencyKey.slice(0, 24)}…`))
 			continue
 		}

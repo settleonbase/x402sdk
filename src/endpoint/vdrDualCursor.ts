@@ -620,9 +620,8 @@ export function prepareSettleIntent(input: {
 }
 
 export function attachIntentToState(state: DualCursorState, intent: SettleIntent): DualCursorState {
-	const others = state.settleIntents.filter(
-		(i) => i.idempotencyKey !== intent.idempotencyKey && i.requestFingerprint !== intent.requestFingerprint
-	)
+	// Same key only: a replaced intent with the same fingerprint stays as an audit record (see markIntentReplacedFailed).
+	const others = state.settleIntents.filter((i) => i.idempotencyKey !== intent.idempotencyKey)
 	return {
 		...state,
 		settleIntents: [...others, intent],
@@ -760,7 +759,7 @@ export function rebuildSignerTxFromIntent(intent: SettleIntent, keyArray: string
 		eventKeys: intent.eventKeys,
 		gasLimit: intent.gasLimit,
 	})
-	if (tx.idempotencyKey !== intent.idempotencyKey) {
+	if (expectedIdempotencyKey(intent, tx.data) !== intent.idempotencyKey) {
 		throw new Error('rebuilt idempotencyKey drifted from persisted intent')
 	}
 	const fp = buildSettleRequestFingerprint(tx)
@@ -770,7 +769,8 @@ export function rebuildSignerTxFromIntent(intent: SettleIntent, keyArray: string
 	if (tx.data.toLowerCase() !== intent.data.toLowerCase()) {
 		throw new Error('rebuilt calldata drifted from persisted intent')
 	}
-	return tx
+	// A rebuilt intent carries its own key; the signer tx uses the persisted key, never a silently recomputed one.
+	return { ...tx, idempotencyKey: intent.idempotencyKey }
 }
 
 /**
@@ -873,4 +873,65 @@ export function dualCursorToLegacyRollback(state: DualCursorState): LegacyClPayo
 		firstBatchSettledWei: state.firstBatchSettledWei,
 		updatedAt: new Date().toISOString(),
 	}
+}
+
+/** Key for rebuild n >= 1 of a batch: keccak of (calldata | rebuild:n). Distinct from the plain key keccak(calldata). */
+export function rebuildIdempotencyKey(data: string, rebuildSeq: number): string {
+	return `vdr-settle:${ethers.keccak256(ethers.toUtf8Bytes(`${data.toLowerCase()}|rebuild:${rebuildSeq}`))}`
+}
+
+/** The idempotencyKey a persisted intent must carry for its calldata. Rebuilt intents carry an `.r<n>` suffix in intentId. */
+export function expectedIdempotencyKey(intent: Pick<SettleIntent, 'intentId'>, data: string): string {
+	const m = /\.r(\d+)$/.exec(intent.intentId)
+	if (!m) return `vdr-settle:${ethers.keccak256(data)}`
+	return rebuildIdempotencyKey(data, Number(m[1]))
+}
+
+/** Next rebuild number for a replaced intent (its intentId suffix, if any, is the last rebuild). */
+export function nextRebuildSeq(intentId: string): number {
+	const m = /\.r(\d+)$/.exec(intentId)
+	return m ? Number(m[1]) + 1 : 1
+}
+
+/**
+ * Same batch under a NEW idempotencyKey. Used only after a provable replace/drop (nonce consumed, no receipt):
+ * the signer keeps the original key reserved and would return the dead hash with duplicate:true.
+ */
+export function prepareRebuiltSettleIntent(
+	prev: SettleIntent,
+	rebuildSeq: number,
+	keyArray: string,
+	now?: Date
+): SettleIntent {
+	const base = prepareSettleIntent({
+		to: prev.to,
+		guardianIds: prev.guardianIds.map((g) => BigInt(g)),
+		amounts: prev.amounts.map((a) => BigInt(a)),
+		eventKeys: prev.eventKeys,
+		gasLimit: prev.gasLimit,
+		keyArray,
+		scanLines: prev.scanLines,
+		now,
+	})
+	if (base.data.toLowerCase() !== prev.data.toLowerCase()) {
+		throw new Error('rebuilt calldata drifted from replaced intent')
+	}
+	if (base.requestFingerprint !== prev.requestFingerprint) {
+		throw new Error('rebuilt requestFingerprint drifted from replaced intent')
+	}
+	return {
+		...base,
+		intentId: `${prev.intentId.replace(/\.r\d+$/, '')}.r${rebuildSeq}`,
+		idempotencyKey: rebuildIdempotencyKey(base.data, rebuildSeq),
+	}
+}
+
+/** Replaced/dropped intent (nonce consumed, no receipt): marked failed so it no longer reserves budget; kept as audit. */
+export function markIntentReplacedFailed(state: DualCursorState, idempotencyKey: string, note: string): DualCursorState {
+	const now = new Date().toISOString()
+	const settleIntents = state.settleIntents.map((i) => {
+		if (i.idempotencyKey !== idempotencyKey || i.status === 'confirmed') return i
+		return { ...i, status: 'failed' as const, note, updatedAt: now }
+	})
+	return { ...state, settleIntents, updatedAt: now }
 }
