@@ -931,21 +931,31 @@ async function readGasPriceWei(provider: ethers.JsonRpcProvider): Promise<bigint
 	return BigInt(hex)
 }
 
-async function filterUnconsumed(
+/**
+ * Per-batch pre-sign check (replaces the former whole-queue serial sweep).
+ * Only the keys of the batch about to be signed are read. A read that throws is
+ * UNKNOWN: the key is never treated as unconsumed, is not signed this tick, and stays pending.
+ * The on-chain consumedRewardEventKey guard in ValidatorDepositRedeemRewardLib is unchanged.
+ */
+export async function checkBatchUnconsumed(
 	readContract: ethers.Contract,
 	entries: PayoutEntry[]
-): Promise<PayoutEntry[]> {
-	const out: PayoutEntry[] = []
+): Promise<{ payable: PayoutEntry[]; consumed: PayoutEntry[]; unknown: PayoutEntry[] }> {
+	const payable: PayoutEntry[] = []
+	const consumed: PayoutEntry[] = []
+	const unknown: PayoutEntry[] = []
 	for (const e of entries) {
+		let flag: boolean
 		try {
-			const consumed = Boolean(await readContract.consumedRewardEventKey!(e.eventKey))
-			if (consumed) continue
+			flag = Boolean(await readContract.consumedRewardEventKey!(e.eventKey))
 		} catch {
-			// Keep entry; chain rejects duplicates.
+			unknown.push(e)
+			continue
 		}
-		out.push(e)
+		if (flag) consumed.push(e)
+		else payable.push(e)
 	}
-	return out
+	return { payable, consumed, unknown }
 }
 
 type SubmitOutcome =
@@ -1504,37 +1514,6 @@ async function flushPendingBatches(
 	// Sync map → state so planFlushOrder sees scanLine tags.
 	state = syncPendingOntoState(state, pending)
 
-	const live = await filterUnconsumed(
-		readContract,
-		[...pending.values()].sort((a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex)
-	)
-	if (live.length !== pending.size) {
-		const liveKeys = new Set(live.map((e) => e.eventKey.toLowerCase()))
-		const dropped = [...pending.keys()].filter((k) => !liveKeys.has(k.toLowerCase()))
-		const dropSet = new Set(dropped.map((k) => k.toLowerCase()))
-		for (const k of dropped) pending.delete(k)
-		state = removePendingKeys(state, dropped)
-		// Credit open intents whose entire key set was already consumed on-chain (SIGKILL / ACK-lost).
-		// Must use creditConfirmedIntentAndClearPending on the SAME local `state` (not bare markIntentConfirmed).
-		for (const intent of state.settleIntents) {
-			if (intent.status !== 'prepared' && intent.status !== 'broadcast' && intent.status !== 'uncertain') continue
-			const keys = intent.eventKeys.map((k) => k.toLowerCase())
-			if (!keys.length || !keys.every((k) => dropSet.has(k))) continue
-			state = creditConfirmedIntentAndClearPending(state, pending, intent)
-			logger(
-				Colors.green(
-					`[validatorClRewardPayout] credited open intent after drop-consumed idem=${intent.idempotencyKey.slice(0, 24)}…`
-				)
-			)
-		}
-		state = syncPendingOntoState(state, pending)
-		persistState(state)
-		logger(
-			Colors.cyan(
-				`[validatorClRewardPayout] dropped already-consumed eventKeys; pending=${pending.size}`
-			)
-		)
-	}
 	if (!pending.size) {
 		if (clearGasWait(state)) state = syncPendingOntoState(state, pending)
 		return
@@ -1598,7 +1577,22 @@ async function flushPendingBatches(
 		if (!batch.length) continue
 		// Further split by gas/calldata heuristics; over_cap may auto-bisect; estimate_failed does not.
 		for (const sub of splitEntriesForOnchain(batch)) {
-			await submitPayoutBatchAutoSplit(contractAddr, sub, gasPrice, pending)
+			const chk = await checkBatchUnconsumed(readContract, sub)
+			if (chk.consumed.length) {
+				const ck = chk.consumed.map((e) => e.eventKey)
+				for (const k of ck) pending.delete(k)
+				state = removePendingKeys(state, ck)
+				state = syncPendingOntoState(state, pending)
+				workingState = state
+				persistState(state)
+				logger(Colors.cyan(`[validatorClRewardPayout] batch pre-check: ${ck.length} already consumed; removed from pending`))
+			}
+			if (chk.unknown.length) {
+				logger(Colors.yellow(`[validatorClRewardPayout] batch pre-check: ${chk.unknown.length} unknown (RPC error); not signed this tick`))
+			}
+			if (chk.payable.length) {
+				await submitPayoutBatchAutoSplit(contractAddr, chk.payable, gasPrice, pending)
+			}
 		}
 	}
 
