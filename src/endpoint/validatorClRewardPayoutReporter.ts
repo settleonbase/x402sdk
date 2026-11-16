@@ -71,8 +71,10 @@ import {
 	attachIntentToState,
 	atomicWriteState,
 	commitScanProgress,
-	ensureBoundaryH,
+	fixBoundaryAtStart,
 	isHistoricalComplete,
+	needsSpanSkip,
+	skipHistoricalOverSpans,
 	markIntentBroadcast,
 	markIntentConfirmed,
 	markIntentFailed,
@@ -124,6 +126,10 @@ export type FlushTestHooks = {
 	signerConfig?: { socketPath: string; keyArray: string }
 	signerSend?: (tx: VdrSignerTx) => Promise<{ hash: string }>
 	workerTimeoutMs?: number
+	/** Observe every committed scan window (test only). */
+	onScanCommit?: (rec: { line: ScanLine; from: number; okThrough: number }) => void
+	/** Observe a history skip over a realtime span (test only). */
+	onSpanSkip?: (rec: { from: number; to: number }) => void
 }
 let flushTestHooks: FlushTestHooks = {}
 export function __setFlushTestHooks(h: FlushTestHooks | null): void {
@@ -655,6 +661,48 @@ function checkIntentRows(rows: unknown[]): void {
 }
 
 /**
+ * Span and retired-boundary bookkeeping lives inside metrics (unknown metrics fields are tolerated by older loaders).
+ * Spans must be sorted, disjoint, non-empty and at or below the current boundary; a span needs a boundary.
+ */
+function checkSpanMetrics(raw: Record<string, unknown>, boundaryH: number | null): void {
+	const m = raw.metrics
+	if (!isPlainRecord(m)) return
+	if (m.realtimeSpans !== undefined) {
+		if (!Array.isArray(m.realtimeSpans)) stateRefuse('STATE_SPAN_INVALID', 'metrics.realtimeSpans must be an array')
+		let prevTo = -1
+		m.realtimeSpans.forEach((s: unknown, i: number) => {
+			const at = `metrics.realtimeSpans[${i}]`
+			if (!isPlainRecord(s)) stateRefuse('STATE_SPAN_INVALID', `${at} is not an object`)
+			checkUnknownKeys(s, new Set(['from', 'to']), 'STATE_SPAN_INVALID', at)
+			const from = s.from
+			const to = s.to
+			if (!isIntAtLeast(from, 0) || !isIntAtLeast(to, 0) || from > to || from <= prevTo) {
+				stateRefuse('STATE_SPAN_INVALID', `${at} invalid, unsorted or overlapping`)
+			}
+			if (boundaryH === null || to > boundaryH) stateRefuse('STATE_SPAN_INVALID', `${at} is above boundaryH or no boundaryH`)
+			prevTo = to
+		})
+	}
+	if (m.retiredBoundaries !== undefined) {
+		if (!Array.isArray(m.retiredBoundaries)) stateRefuse('STATE_SPAN_INVALID', 'metrics.retiredBoundaries must be an array')
+		m.retiredBoundaries.forEach((r: unknown, i: number) => {
+			const at = `metrics.retiredBoundaries[${i}]`
+			if (!isPlainRecord(r)) stateRefuse('STATE_SPAN_INVALID', `${at} is not an object`)
+			if (
+				!isIntAtLeast(r.blockNumber, 0) ||
+				typeof r.blockHash !== 'string' ||
+				!STATE_HEX32_RE.test(r.blockHash) ||
+				!isIntAtLeast(r.historicalCursor, -1) ||
+				!isIntAtLeast(r.realtimeCursor, -1) ||
+				typeof r.retiredAt !== 'string'
+			) {
+				stateRefuse('STATE_SPAN_INVALID', `${at} invalid`)
+			}
+		})
+	}
+}
+
+/**
  * Pure, fail-closed schema check run before any migration. Throws `[reason=CODE] ...` on the first problem.
  * cursorMin = deploy floor − 1 (never below −1); cursors below it are refused, not clamped.
  * Legacy single-cursor shape is accepted only when it has no version and only recognised fields.
@@ -708,6 +756,7 @@ export function assertLoadableState(raw: unknown, cursorMin = -1): void {
 	checkPendingRows(raw.pending)
 	if (!Array.isArray(raw.settleIntents)) stateRefuse('STATE_INTENT_INVALID', 'settleIntents must be an array')
 	checkIntentRows(raw.settleIntents)
+	checkSpanMetrics(raw, raw.boundaryH === null ? null : (raw.boundaryH as { blockNumber: number }).blockNumber)
 	if (raw.firstBatchSettledWei !== undefined && !(typeof raw.firstBatchSettledWei === 'string' && STATE_DEC_RE.test(raw.firstBatchSettledWei))) {
 		stateRefuse('STATE_SCHEMA_INVALID', 'firstBatchSettledWei invalid')
 	}
@@ -1810,6 +1859,7 @@ async function commitScanRange(
 		added = next.pending.length - s.pending.length
 		return next
 	})
+	flushTestHooks.onScanCommit?.({ line, from, okThrough })
 	return added
 }
 
@@ -1824,18 +1874,89 @@ function resolveWorkerRpcTimeoutMs(): number {
 	return flushTestHooks.workerTimeoutMs ?? resolveClaimRpcHttpTimeoutMs()
 }
 
-/** Check the locked H against the chain and lock it once (idempotent). Returns false when no H hash is available. */
-async function checkAndLockBoundary(
+/** H is fixed once per process start. A restart (or a test restart via __engHarnessResetStateCache) starts a new generation. */
+let bootFixed = false
+let bootFixing: Promise<boolean> | null = null
+let bootGen = 0
+
+/** Hash of the block at height `n`, or '' when the block is missing, has another height, or its hash is malformed. */
+function blockHashAtHeight(block: RpcBlock | null, n: number): string {
+	if (!block || typeof block.number !== 'string' || typeof block.hash !== 'string') return ''
+	let height: bigint
+	try {
+		height = BigInt(block.number)
+	} catch {
+		return ''
+	}
+	if (height !== BigInt(n)) return ''
+	const hash = block.hash.toLowerCase()
+	return /^0x[0-9a-f]{64}$/.test(hash) ? hash : ''
+}
+
+/**
+ * Fix H for this process start from the live confirmed block (candidate = liveHead − depth). The block number and its
+ * hash come from the same block. If that block cannot be read, or reports another height, the result is UNKNOWN:
+ * nothing changes and nothing falls back to the tip hash.
+ */
+async function fixBoundaryFromLiveHead(
 	provider: ethers.JsonRpcProvider,
 	liveHead: number,
-	tipHash: string,
-	depth: number
+	depth: number,
+	gen: number
 ): Promise<boolean> {
+	const n = Math.max(0, liveHead - depth)
+	const block = await fetchBlockWithWithdrawals(provider, n)
+	const hash = blockHashAtHeight(block, n)
+	if (!hash) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] H candidate ${n}: hash unavailable or height mismatch; UNKNOWN, boundary unchanged this step`
+			)
+		)
+		return false
+	}
+	let held = false
+	await mutateState((s) => {
+		const fixed = fixBoundaryAtStart(s, { blockNumber: n, blockHash: hash })
+		held = fixed.held
+		return fixed.state
+	})
+	if (held) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] H candidate ${n} is below a ledger cursor; held until the head moves past it (H never goes backward)`
+			)
+		)
+		return false
+	}
+	const after = peekLatestState()
+	if (gen === bootGen) bootFixed = true
+	logger(
+		Colors.cyan(
+			`[validatorClRewardPayout] fixed H=${n} hash=${hash.slice(0, 14)}… histCursor=${after.historicalCursor} ` +
+				`rtCursor=${after.realtimeCursor} spans=${(after.metrics.realtimeSpans ?? []).length} depth=${depth}`
+		)
+	)
+	return true
+}
+
+/**
+ * Every scan step: (1) reorg check of the current boundary H. An unreadable block or a wrong height is UNKNOWN, never a
+ * reorg. (2) Fix H once per process start, single-flight, so no line scans before H is fixed.
+ * Returns false when H is not fixed yet; the step then does nothing.
+ */
+async function checkAndLockBoundary(provider: ethers.JsonRpcProvider, liveHead: number, depth: number): Promise<boolean> {
 	const boundary = peekLatestState().boundaryH
 	if (boundary) {
 		const hBlock = await fetchBlockWithWithdrawals(provider, boundary.blockNumber)
-		const hHash = typeof hBlock?.hash === 'string' ? hBlock.hash.toLowerCase() : ''
-		if (hHash && hHash !== boundary.blockHash) {
+		const hHash = blockHashAtHeight(hBlock, boundary.blockNumber)
+		if (!hHash) {
+			logger(
+				Colors.yellow(
+					`[validatorClRewardPayout] reorg check H=${boundary.blockNumber}: hash unavailable or height mismatch; UNKNOWN, not a reorg`
+				)
+			)
+		} else if (hHash !== boundary.blockHash) {
 			logger(
 				Colors.yellow(
 					`[validatorClRewardPayout] reorg vs H=${boundary.blockNumber}: stored=${boundary.blockHash.slice(0, 12)}… live=${hHash.slice(0, 12)}…`
@@ -1851,30 +1972,14 @@ async function checkAndLockBoundary(
 			)
 		}
 	}
-	// H locks at confirmed tip (liveHead - depth); persist that block's own hash.
-	const prospectiveH = Math.max(0, liveHead - depth, peekLatestState().historicalCursor)
-	const hLockBlock = await fetchBlockWithWithdrawals(provider, prospectiveH)
-	const hLockHash = typeof hLockBlock?.hash === 'string' ? hLockBlock.hash.toLowerCase() : tipHash.toLowerCase()
-	if (!/^0x[0-9a-f]{64}$/.test(hLockHash)) {
-		logger(Colors.yellow(`[validatorClRewardPayout] H block ${prospectiveH} hash unavailable; skip scan step`))
-		return false
+	if (bootFixed) return true
+	if (!bootFixing) {
+		const gen = bootGen
+		bootFixing = fixBoundaryFromLiveHead(provider, liveHead, depth, gen).finally(() => {
+			bootFixing = null
+		})
 	}
-	let lockedNow = false
-	await mutateState((s) => {
-		const locked = ensureBoundaryH(s, liveHead, hLockHash, depth)
-		lockedNow = locked.lockedNow
-		return locked.state
-	})
-	if (lockedNow) {
-		const locked = peekLatestState()
-		logger(
-			Colors.cyan(
-				`[validatorClRewardPayout] locked H=${locked.boundaryH!.blockNumber} hash=${locked.boundaryH!.blockHash.slice(0, 14)}… ` +
-					`histCursor=${locked.historicalCursor} rtCursor=${locked.realtimeCursor} depth=${depth}`
-			)
-		)
-	}
-	return true
+	return bootFixing
 }
 
 /** One scan step of one line. Its RPC reads run outside the queue; the result is merged as one serial commit. */
@@ -1888,12 +1993,19 @@ async function scanLineStep(
 	const liveHead = Number(await provider.getBlockNumber())
 	if (!Number.isFinite(liveHead) || liveHead < floor) return
 	const depth = resolveConfirmationDepth()
-	const tipBlock = await fetchBlockWithWithdrawals(provider, liveHead)
-	if (!tipBlock?.hash) {
-		logger(Colors.yellow(`[validatorClRewardPayout] tip hash unavailable at ${liveHead}; skip ${kind} step`))
-		return
+	if (!(await checkAndLockBoundary(provider, liveHead, depth))) return
+
+	// History never scans a block a realtime span already completed: it jumps the cursor over the span (no RPC, no rows).
+	if (kind === 'historical' && needsSpanSkip(peekLatestState())) {
+		const before = peekLatestState()
+		const after = await mutateState((s) => skipHistoricalOverSpans(s))
+		flushTestHooks.onSpanSkip?.({ from: before.historicalCursor + 1, to: after.historicalCursor })
+		logger(
+			Colors.cyan(
+				`[validatorClRewardPayout] history skipped realtime-complete span ${before.historicalCursor + 1}..${after.historicalCursor} (not rescanned)`
+			)
+		)
 	}
-	if (!(await checkAndLockBoundary(provider, liveHead, String(tipBlock.hash), depth))) return
 
 	const chunk = resolveChunkBlocks() * resolveChunksPerTick()
 	const plan = planScanRanges(peekLatestState(), liveHead, {
@@ -2159,7 +2271,13 @@ export async function __engHarnessRunTickOnce(): Promise<void> {
 	await payoutTick()
 }
 
-/** Test harness: simulate a process restart by dropping the committed-state cache; the next read reloads the ledger file. */
+/**
+ * Test harness: simulate a process restart by dropping the committed-state cache; the next read reloads the ledger file.
+ * A restart also starts a new generation, so the next scan step fixes H again (as a new process does).
+ */
 export function __engHarnessResetStateCache(): void {
 	stateCache = null
+	bootGen += 1
+	bootFixed = false
+	bootFixing = null
 }

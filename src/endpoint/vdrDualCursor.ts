@@ -63,6 +63,18 @@ export type SettleIntent = {
 	note?: string
 }
 
+/** Inclusive block range [from, to] that the realtime line already scanned and committed under an earlier boundary. */
+export type RealtimeSpan = { from: number; to: number }
+
+/** A boundary H replaced by a later process start. Kept for reconciliation only; it never moves a cursor. */
+export type RetiredBoundary = {
+	blockNumber: number
+	blockHash: string
+	historicalCursor: number
+	realtimeCursor: number
+	retiredAt: string
+}
+
 export type DualCursorMetrics = {
 	/** Last measured realtime enqueue→flush-ready delay samples (ms). */
 	realtimeLatencyMsSamples: number[]
@@ -73,6 +85,14 @@ export type DualCursorMetrics = {
 	lastHistoryCursor: number
 	lastRealtimeCursor: number
 	updatedAt: string
+	/**
+	 * Realtime-completed ranges left behind by earlier starts. Sorted, disjoint, all ≤ boundaryH.blockNumber.
+	 * The history line skips them (their rows are already in pending or settled), so no block is scanned twice.
+	 * Kept inside metrics on purpose: the frozen 88cdc832 loader accepts unknown metrics fields, not new top-level keys.
+	 */
+	realtimeSpans?: RealtimeSpan[]
+	/** Boundaries replaced by a later start, in order (old H, its hash, and both cursors at replacement). */
+	retiredBoundaries?: RetiredBoundary[]
 }
 
 export type DualCursorState = {
@@ -194,7 +214,7 @@ export function createInitialDualCursorState(deployFloor: number): DualCursorSta
 }
 
 /**
- * Import old single-cursor state. H is NOT invented here — set on next start via ensureBoundaryH.
+ * Import old single-cursor state. H is NOT invented here — set on the first scan step of each process start (fixBoundaryAtStart).
  * historicalCursor = lastProcessedBlock; realtimeCursor starts at same until H is locked.
  */
 export function migrateLegacyToDualCursor(
@@ -209,7 +229,7 @@ export function migrateLegacyToDualCursor(
 	const firstBatchSettledWei = normalizeFirstBatchSettledWei(raw.firstBatchSettledWei)
 
 	// Dual-cursor v2 must preserve settleIntents + pending even when boundaryH is still null
-	// (harness mid-restart / ACK-lost freeze before ensureBoundaryH). Requiring boundaryH
+	// (harness mid-restart / ACK-lost freeze before fixBoundaryAtStart). Requiring boundaryH
 	// previously routed v2 files through the legacy branch and wiped settleIntents → pack1 gap.
 	if (Number(raw.version) === VDR_DUAL_CURSOR_VERSION) {
 		const hist = Number(raw.historicalCursor)
@@ -310,36 +330,106 @@ function normalizePendingEntry(raw: PendingEntryJson): PendingEntryJson | null {
 	}
 }
 
+function spansOf(state: DualCursorState): RealtimeSpan[] {
+	return state.metrics.realtimeSpans ?? []
+}
+
+/** The realtime-completed span that contains `block`, or null. */
+export function realtimeSpanContaining(state: DualCursorState, block: number): RealtimeSpan | null {
+	return spansOf(state).find((s) => s.from <= block && block <= s.to) ?? null
+}
+
+/** True when the history line's next block is already covered by a realtime span (skip it, do not scan it). */
+export function needsSpanSkip(state: DualCursorState): boolean {
+	return realtimeSpanContaining(state, state.historicalCursor + 1) !== null
+}
+
 /**
- * Lock H once at start from chosen tip (usually tip − confirmationDepth).
- * Never rewrite H while historical catch-up is incomplete.
+ * Advance the historical cursor over realtime-completed spans without scanning anything. Spans that the cursor has
+ * passed are dropped. Returns the same object when no span starts at historicalCursor + 1.
  */
-export function ensureBoundaryH(
-	state: DualCursorState,
-	tipBlockNumber: number,
-	tipBlockHash: string,
-	confirmationDepth = 2
-): { state: DualCursorState; lockedNow: boolean } {
-	if (state.boundaryH) {
-		return { state, lockedNow: false }
+export function skipHistoricalOverSpans(state: DualCursorState): DualCursorState {
+	if (!needsSpanSkip(state)) return state
+	let h = state.historicalCursor
+	let span = realtimeSpanContaining(state, h + 1)
+	while (span) {
+		h = span.to
+		span = realtimeSpanContaining(state, h + 1)
 	}
-	const safeTip = Math.max(0, Math.floor(tipBlockNumber) - Math.max(0, confirmationDepth))
-	const hash = String(tipBlockHash || '').toLowerCase()
-	if (!/^0x[0-9a-f]{64}$/.test(hash)) {
-		throw new Error('ensureBoundaryH requires tip block hash')
+	if (state.boundaryH && h > state.boundaryH.blockNumber) {
+		throw new Error(`skipHistoricalOverSpans would pass boundaryH ${state.boundaryH.blockNumber}`)
 	}
-	// If operator already scanned past safeTip, clamp H upward to cursor so history is empty/no-op.
-	const hNumber = Math.max(safeTip, state.historicalCursor)
-	const next: DualCursorState = {
+	const now = new Date().toISOString()
+	return {
 		...state,
-		boundaryH: { blockNumber: hNumber, blockHash: hash },
-		// Realtime starts at H; first realtime block is H+1.
-		realtimeCursor: Math.max(state.realtimeCursor, hNumber),
-		scanTargetBlock: hNumber,
-		lastProcessedBlock: state.historicalCursor,
-		updatedAt: new Date().toISOString(),
+		historicalCursor: h,
+		lastProcessedBlock: h,
+		updatedAt: now,
+		metrics: {
+			...state.metrics,
+			lastHistoryCursor: h,
+			realtimeSpans: spansOf(state).filter((s) => s.to > h),
+			updatedAt: now,
+		},
 	}
-	return { state: next, lockedNow: true }
+}
+
+export type BoundaryFixResult = { state: DualCursorState; held: boolean }
+
+/**
+ * Fix H anew on every process start. `candidate` is the live confirmed block: its number and hash come from the same
+ * block (the caller verifies the height before calling).
+ *
+ * - Held (state returned unchanged) when the candidate is below either cursor. H never moves backward, and realtime
+ *   never restarts below a block it already completed.
+ * - Otherwise the previous H is retired, not discarded: when realtime had run past it, (oldH, realtimeCursor] becomes a
+ *   realtime span that history skips; the old H is logged with both cursors; the realtime cursor is reset to the new H
+ *   (realtime starts at newH + 1). The historical cursor is not touched, so history resumes at its last contiguous
+ *   block + 1 and fills up to the new H, except for spans.
+ */
+export function fixBoundaryAtStart(state: DualCursorState, candidate: BoundaryH): BoundaryFixResult {
+	const n = candidate.blockNumber
+	if (n < state.historicalCursor || n < state.realtimeCursor) {
+		return { state, held: true }
+	}
+	const now = new Date().toISOString()
+	const spans = [...spansOf(state)]
+	const retired = [...(state.metrics.retiredBoundaries ?? [])]
+	if (state.boundaryH) {
+		const old = state.boundaryH
+		if (state.realtimeCursor > old.blockNumber) {
+			const from = old.blockNumber + 1
+			const prev = spans[spans.length - 1]
+			if (prev && prev.to >= from) throw new Error('realtime span would overlap an earlier span')
+			spans.push({ from, to: state.realtimeCursor })
+		}
+		retired.push({
+			blockNumber: old.blockNumber,
+			blockHash: old.blockHash,
+			historicalCursor: state.historicalCursor,
+			realtimeCursor: state.realtimeCursor,
+			retiredAt: now,
+		})
+	}
+	return {
+		held: false,
+		state: {
+			...state,
+			boundaryH: { blockNumber: n, blockHash: candidate.blockHash },
+			// Realtime starts at the new H; first realtime block is H+1.
+			realtimeCursor: n,
+			scanTargetBlock: n,
+			lastProcessedBlock: state.historicalCursor,
+			updatedAt: now,
+			metrics: {
+				...state.metrics,
+				realtimeSpans: spans,
+				retiredBoundaries: retired,
+				lastRealtimeCursor: n,
+				updatedAt: now,
+			},
+		},
+	}
 }
 
 export function isHistoricalComplete(state: DualCursorState): boolean {
@@ -349,7 +439,8 @@ export function isHistoricalComplete(state: DualCursorState): boolean {
 
 /**
  * Plan contiguous scan windows for this tick.
- * History: historicalCursor+1 … min(H, from+chunk-1)
+ * History: historicalCursor+1 … min(H, from+chunk-1, nextSpan.from-1); no window starts inside a realtime span
+ *          (call skipHistoricalOverSpans first).
  * Realtime: max(H+1, realtimeCursor+1) … min(safeTip, from+chunk-1)
  * Tip jumps: caller passes current tip; planner fills every missing block via from=cursor+1.
  */
@@ -369,9 +460,11 @@ export function planScanRanges(
 
 	const H = state.boundaryH.blockNumber
 	let historical: ScanPlan['historical'] = null
-	if (state.historicalCursor < H) {
+	if (state.historicalCursor < H && !realtimeSpanContaining(state, state.historicalCursor + 1)) {
 		const from = state.historicalCursor + 1
-		const to = Math.min(H, from + histChunk - 1)
+		let to = Math.min(H, from + histChunk - 1)
+		const nextSpan = spansOf(state).find((s) => s.from > from)
+		if (nextSpan) to = Math.min(to, nextSpan.from - 1)
 		if (from <= to) historical = { from, to }
 	}
 
@@ -488,6 +581,14 @@ export function applyReorgRollback(
 		historicalCursor = state.boundaryH.blockNumber
 	}
 
+	// Spans above the cut are no longer realtime-complete (their rows were dropped), so history must scan them again.
+	const spanRollback = state.metrics.realtimeSpans
+		? {
+				realtimeSpans: spansOf(state)
+					.filter((s) => s.from <= cut)
+					.map((s) => ({ from: s.from, to: Math.min(s.to, cut) })),
+			}
+		: {}
 	return {
 		...state,
 		historicalCursor,
@@ -498,6 +599,7 @@ export function applyReorgRollback(
 		updatedAt: new Date().toISOString(),
 		metrics: {
 			...state.metrics,
+			...spanRollback,
 			lastHistoryCursor: historicalCursor,
 			lastRealtimeCursor: realtimeCursor,
 			updatedAt: new Date().toISOString(),
