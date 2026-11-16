@@ -2062,3 +2062,13 @@ export async function __engHarnessFlushPendingOnce(opts: {
 		firstBatchSettledWei: String(after.firstBatchSettledWei ?? '0'),
 	}
 }
+
+/** Test/ops harness: run one full tick (scan + flush) without the background timer. */
+export async function __engHarnessRunTickOnce(): Promise<void> {
+	await payoutTick()
+}
+
+/** Test harness: simulate a process restart by dropping the committed-state cache; the next read reloads the ledger file. */
+export function __engHarnessResetStateCache(): void {
+	stateCache = null
+}
