@@ -114,7 +114,30 @@ function resolveClaimTxWaitTimeoutMs(): number {
 	return Number.isFinite(n) && n >= 15_000 ? Math.min(600_000, Math.floor(n)) : 120_000
 }
 
+/** Test-only seams (unit/integration tests inject stub provider, read contract and signer). Empty in production. */
+export type FlushTestHooks = {
+	provider?: unknown
+	contract?: (addr: string) => unknown
+	signerConfig?: { socketPath: string; keyArray: string }
+	signerSend?: (tx: VdrSignerTx) => Promise<{ hash: string }>
+}
+let flushTestHooks: FlushTestHooks = {}
+export function __setFlushTestHooks(h: FlushTestHooks | null): void {
+	flushTestHooks = h ?? {}
+}
+
+async function sendSignerTx(tx: VdrSignerTx, socketPath: string): Promise<{ hash: string }> {
+	if (flushTestHooks.signerSend) return flushTestHooks.signerSend(tx)
+	return signerSendOnce(tx, socketPath)
+}
+
+function makeReadContract(addr: string, provider: ethers.JsonRpcProvider): ethers.Contract {
+	if (flushTestHooks.contract) return flushTestHooks.contract(addr) as ethers.Contract
+	return new ethers.Contract(addr, PAYOUT_ABI, provider)
+}
+
 function createClaimRpcProvider(): ethers.JsonRpcProvider {
+	if (flushTestHooks.provider) return flushTestHooks.provider as ethers.JsonRpcProvider
 	const req = new ethers.FetchRequest(resolveClaimRpcUrl())
 	req.timeout = resolveClaimRpcHttpTimeoutMs()
 	return new ethers.JsonRpcProvider(req, undefined, { staticNetwork: true, batchMaxCount: 1 })
@@ -945,14 +968,19 @@ export async function checkBatchUnconsumed(
 	const consumed: PayoutEntry[] = []
 	const unknown: PayoutEntry[] = []
 	for (const e of entries) {
-		let flag: boolean
+		let raw: unknown
 		try {
-			flag = Boolean(await readContract.consumedRewardEventKey!(e.eventKey))
+			raw = await readContract.consumedRewardEventKey!(e.eventKey)
 		} catch {
 			unknown.push(e)
 			continue
 		}
-		if (flag) consumed.push(e)
+		// Only a real boolean may enter the consumed / unconsumed branches (R4 B3).
+		if (typeof raw !== 'boolean') {
+			unknown.push(e)
+			continue
+		}
+		if (raw) consumed.push(e)
 		else payable.push(e)
 	}
 	return { payable, consumed, unknown }
@@ -971,21 +999,32 @@ function intentCoversPending(intent: SettleIntent, pending: Map<string, PayoutEn
 }
 
 /** True when every intent eventKey is already consumed on-chain (ACK-lost / SIGKILL before local confirm). */
-async function allIntentEventKeysConsumedOnChain(
+async function intentConsumedOnChain(
 	provider: ethers.JsonRpcProvider,
 	to: string,
 	eventKeys: string[]
-): Promise<boolean> {
-	if (!eventKeys.length) return false
-	const c = new ethers.Contract(to, PAYOUT_ABI, provider)
+): Promise<'consumed' | 'open' | 'unknown'> {
+	if (!eventKeys.length) return 'unknown'
+	const c = makeReadContract(to, provider)
+	let allConsumed = true
+	let sawUnknown = false
 	for (const k of eventKeys) {
+		let raw: unknown
 		try {
-			if (!Boolean(await c.consumedRewardEventKey!(k))) return false
+			raw = await c.consumedRewardEventKey!(k)
 		} catch {
-			return false
+			sawUnknown = true
+			continue
 		}
+		if (typeof raw !== 'boolean') {
+			sawUnknown = true
+			continue
+		}
+		if (!raw) allConsumed = false
 	}
-	return true
+	// Any read failure or non-boolean result is UNKNOWN: never treated as unconsumed (R4 B2).
+	if (sawUnknown) return 'unknown'
+	return allConsumed ? 'consumed' : 'open'
 }
 
 /** Credit firstBatchSettledWei once + clear pending keys for a settled intent. */
@@ -1036,7 +1075,7 @@ async function submitPayoutBatchOnchain(
 		return 'amount_blocked'
 	}
 
-	const config = readVdrSignerConfig()
+	const config = flushTestHooks.signerConfig ?? readVdrSignerConfig()
 	if (!config) {
 		logger(
 			Colors.red(
@@ -1047,7 +1086,7 @@ async function submitPayoutBatchOnchain(
 	}
 
 	const provider = createClaimRpcProvider()
-	const readContract = new ethers.Contract(contractAddr, PAYOUT_ABI, provider)
+	const readContract = makeReadContract(contractAddr, provider)
 	const gasResolve = await resolveSubmitGasLimit(readContract, guardianIds, amounts, eventKeys)
 	if (!gasResolve.ok) {
 		if (gasResolve.reason === 'over_cap') {
@@ -1097,7 +1136,7 @@ async function submitPayoutBatchOnchain(
 	)
 
 	try {
-		const { hash } = await signerSendOnce(tx, config.socketPath)
+		const { hash } = await sendSignerTx(tx, config.socketPath)
 		// Chain local `state` after each mutation — never re-take stale workingState snapshot.
 		state = markIntentBroadcast(state, intent.idempotencyKey, hash)
 		persistState(state)
@@ -1360,11 +1399,16 @@ async function recoverOpenIntents(
 	const open = state.settleIntents.filter((i) => i.status === 'broadcast' || i.status === 'uncertain' || i.status === 'prepared')
 	if (!open.length) return
 
-	const config = readVdrSignerConfig()
+	const config = flushTestHooks.signerConfig ?? readVdrSignerConfig()
 	for (const intent of open) {
 		if (!intentCoversPending(intent, pending) && intent.status === 'prepared') {
 			// Pending keys gone — credit if chain already consumed; else drop stale intent.
-			if (await allIntentEventKeysConsumedOnChain(provider, intent.to, intent.eventKeys)) {
+			const onChainPrep = await intentConsumedOnChain(provider, intent.to, intent.eventKeys)
+			if (onChainPrep === 'unknown') {
+				logger(Colors.yellow(`[validatorClRewardPayout] prepared intent on-chain status unknown; hold (no resend, no drop) idem=${intent.idempotencyKey.slice(0, 24)}…`))
+				continue
+			}
+			if (onChainPrep === 'consumed') {
 				state = creditConfirmedIntentAndClearPending(state, pending, intent)
 				persistState(state)
 				logger(
@@ -1403,12 +1447,20 @@ async function recoverOpenIntents(
 					continue
 				}
 			} catch {
-				/* keep trying */
+				/* receipt query failed: unknown, hold below */
 			}
+			// txHash present without a receipt: WAIT. Never rebuild or resend this batch here (R4 B2).
+			logger(Colors.yellow(`[validatorClRewardPayout] intent txHash has no receipt; hold (no rebuild, no resend) idem=${intent.idempotencyKey.slice(0, 24)}…`))
+			continue
 		}
 
 		// Chain already settled this intent (ACK lost / SIGKILL before broadcast mark) — credit once, do not resend.
-		if (await allIntentEventKeysConsumedOnChain(provider, intent.to, intent.eventKeys)) {
+		const onChainAck = await intentConsumedOnChain(provider, intent.to, intent.eventKeys)
+		if (onChainAck === 'unknown') {
+			logger(Colors.yellow(`[validatorClRewardPayout] ACK-lost on-chain status unknown; hold (no resend) idem=${intent.idempotencyKey.slice(0, 24)}…`))
+			continue
+		}
+		if (onChainAck === 'consumed') {
 			state = creditConfirmedIntentAndClearPending(state, pending, intent)
 			persistState(state)
 			logger(
@@ -1434,7 +1486,7 @@ async function recoverOpenIntents(
 
 		try {
 			const tx = rebuildSignerTxFromIntent(intent, config.keyArray)
-			const { hash } = await signerSendOnce(tx, config.socketPath)
+			const { hash } = await sendSignerTx(tx, config.socketPath)
 			const r = reconcileAckLostIntent(state, intent.idempotencyKey, { txHash: hash, safeToResend: true })
 			state = r.state
 			persistState(state)
@@ -1566,11 +1618,18 @@ async function flushPendingBatches(
 		)
 	)
 
+	// Keys owned by an open intent (prepared / broadcast / uncertain) are recovered by recoverOpenIntents, not re-issued here.
+	const inflightKeys = new Set(
+		(workingState ?? loadState()).settleIntents
+			.filter((i) => i.status === 'broadcast' || i.status === 'uncertain' || i.status === 'prepared')
+			.flatMap((i) => i.eventKeys.map((k) => k.toLowerCase()))
+	)
 	for (const batchJson of flushPlan.batches) {
 		const batch: PayoutEntry[] = []
 		for (const j of batchJson) {
 			const e = entryFromJson(j)
 			if (!e || !pending.has(e.eventKey)) continue
+			if (inflightKeys.has(e.eventKey)) continue
 			if (issueAllowSet && !issueAllowSet.has(e.eventKey.toLowerCase())) continue
 			batch.push(e)
 		}
@@ -1581,6 +1640,8 @@ async function flushPendingBatches(
 			if (chk.consumed.length) {
 				const ck = chk.consumed.map((e) => e.eventKey)
 				for (const k of ck) pending.delete(k)
+				// Re-read the latest state before every merge: earlier sub-batches may have written intents/totals (R4 B1).
+				state = workingState ?? loadState()
 				state = removePendingKeys(state, ck)
 				state = syncPendingOntoState(state, pending)
 				workingState = state
@@ -1614,7 +1675,7 @@ async function payoutTick(): Promise<void> {
 		}
 
 		const provider = createClaimRpcProvider()
-		const readContract = new ethers.Contract(proxyAddr, PAYOUT_ABI, provider)
+		const readContract = makeReadContract(proxyAddr, provider)
 
 		const floor = resolveDeployBlockFloor()
 		let state = loadState()
@@ -1895,6 +1956,8 @@ export async function __engHarnessFlushPendingOnce(opts: {
 	aborted: boolean
 	firstBatchSettledWei: string
 }> {
+	// Harness always reloads from the ledger file (no cross-run cached working copy).
+	workingState = null
 	let pending: Map<string, PayoutEntry>
 	let aborted = false
 	if (opts.resumeFromState) {
@@ -1937,7 +2000,7 @@ export async function __engHarnessFlushPendingOnce(opts: {
 		// Mid-restart / ACK-loss path: rebuild original idempotencyKey batches before flush.
 		await recoverOpenIntents(provider, pending)
 	}
-	const readContract = new ethers.Contract(opts.contractAddr, PAYOUT_ABI, provider)
+	const readContract = makeReadContract(opts.contractAddr, provider)
 	try {
 		await flushPendingBatches(provider, readContract, opts.contractAddr, pending)
 	} catch (e: unknown) {
