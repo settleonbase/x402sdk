@@ -1,0 +1,18 @@
+[Unit]
+Description=Read-only alert check for the CONET VDR claim v2c daemon (flush watchdog and intents without receipt)
+OnFailure=claim-alert-notify.service
+
+[Service]
+Type=oneshot
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+SupplementaryGroups=systemd-journal
+StateDirectory=claim-alert-watch
+StateDirectoryMode=0700
+UMask=0077
+Environment="CLAIM_ALERT_UNIT=@UNIT@"
+Environment="CLAIM_ALERT_WINDOW=-24 hours"
+Environment="CLAIM_ALERT_SCRIPT=@OPS_DIR@/alert-watch.sh"
+ExecStart=/bin/sh @OPS_DIR@/claim-alert-check.sh
+NoNewPrivileges=yes
+PrivateTmp=yes

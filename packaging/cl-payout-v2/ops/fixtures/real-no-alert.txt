@@ -1,0 +1,58 @@
+TAP version 13
+# Subtest: fixBoundaryAtStart: a candidate below the realtime cursor is held and changes nothing
+ok 1 - fixBoundaryAtStart: a candidate below the realtime cursor is held and changes nothing
+  ---
+  duration_ms: 1.135708
+  type: 'test'
+  ...
+# Subtest: fixBoundaryAtStart: realtime past the old H leaves a span (oldH, realtime] and retires the old H
+ok 2 - fixBoundaryAtStart: realtime past the old H leaves a span (oldH, realtime] and retires the old H
+  ---
+  duration_ms: 0.78025
+  type: 'test'
+  ...
+# Subtest: fixBoundaryAtStart: realtime exactly at the old H leaves no span; the old H is still retired
+ok 3 - fixBoundaryAtStart: realtime exactly at the old H leaves no span; the old H is still retired
+  ---
+  duration_ms: 0.318041
+  type: 'test'
+  ...
+# Subtest: fixBoundaryAtStart: successive starts append spans in order, never overlapping
+ok 4 - fixBoundaryAtStart: successive starts append spans in order, never overlapping
+  ---
+  duration_ms: 0.487875
+  type: 'test'
+  ...
+# Subtest: planScanRanges: history windows never cross a realtime span and never start inside one
+ok 5 - planScanRanges: history windows never cross a realtime span and never start inside one
+  ---
+  duration_ms: 0.302584
+  type: 'test'
+  ...
+# Subtest: skipHistoricalOverSpans: adjacent spans are crossed in one step; spans not yet reached stay
+ok 6 - skipHistoricalOverSpans: adjacent spans are crossed in one step; spans not yet reached stay
+  ---
+  duration_ms: 0.194125
+  type: 'test'
+  ...
+# Subtest: applyReorgRollback: spans above the cut are trimmed so history scans them again
+ok 7 - applyReorgRollback: spans above the cut are trimmed so history scans them again
+  ---
+  duration_ms: 0.479167
+  type: 'test'
+  ...
+# Subtest: assertLoadableState accepts valid spans and refuses overlapping, unsorted, or above-H spans
+ok 8 - assertLoadableState accepts valid spans and refuses overlapping, unsorted, or above-H spans
+  ---
+  duration_ms: 0.754209
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 78.274959

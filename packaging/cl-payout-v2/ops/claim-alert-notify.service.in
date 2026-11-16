@@ -1,0 +1,13 @@
+[Unit]
+Description=Record an unresolved or failed claim alert as a crit journal entry (tag claim-alert); external channel not configured
+
+[Service]
+Type=oneshot
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+StateDirectory=claim-alert-watch
+StateDirectoryMode=0700
+UMask=0077
+Environment="CLAIM_ALERT_LOGGER=/usr/bin/logger"
+ExecStart=/bin/sh @OPS_DIR@/alert-notify.sh
+NoNewPrivileges=yes

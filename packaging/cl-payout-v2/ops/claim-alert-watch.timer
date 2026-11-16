@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the read-only claim alert check every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+Unit=claim-alert-watch.service
+
+[Install]
+WantedBy=timers.target
