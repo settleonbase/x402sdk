@@ -555,3 +555,68 @@ test('g: an unreadable or wrong-height H block in the reorg check is UNKNOWN, no
 		}
 	}
 })
+
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+async function waitFor(cond: () => boolean, ms = 10_000): Promise<void> {
+	const until = Date.now() + ms
+	while (!cond() && Date.now() < until) await sleepMs(20)
+}
+function pendingRow(i: number) {
+	return {
+		guardianId: '1',
+		amount: '1000000000000000',
+		eventKey: ethers.id(`lane-row:${i}`).toLowerCase(),
+		blockNumber: 1 + i,
+		withdrawalIndex: 0,
+		scanLine: 'historical',
+	}
+}
+
+test('lane: a flush step that exceeds its timeout keeps the signing lane busy; a second batch never signs in parallel', async () => {
+	const file = freshFile()
+	writeFileSync(
+		file,
+		JSON.stringify({
+			version: 2,
+			boundaryH: { blockNumber: 98, blockHash: hashOf(98) },
+			historicalCursor: 98,
+			realtimeCursor: 98,
+			pending: [1, 2, 3, 4].map(pendingRow),
+			settleIntents: [],
+			firstBatchSettledWei: '0',
+			updatedAt: new Date().toISOString(),
+		})
+	)
+	const chain = newChain(110)
+	let inflight = 0
+	let maxInflight = 0
+	let signed = 0
+	install(file, chain, {
+		workerTimeoutMs: 100, // the flush step is released by its timeout while the batch is still in the signer
+		signer: async () => {
+			inflight += 1
+			maxInflight = Math.max(maxInflight, inflight)
+			await sleepMs(400)
+			inflight -= 1
+			signed += 1
+			const hash = ethers.id(`lane-tx:${signed}`)
+			chain.receipts.set(hash, { status: 1 })
+			return { hash }
+		},
+	})
+	const first = await __engHarnessRunWorkerOnce('flush')
+	const second = await __engHarnessRunWorkerOnce('flush') // must not start another flush job while the first still signs
+	await waitFor(() => st().pending.length === 0 && inflight === 0)
+	let third = 'busy'
+	for (let i = 0; i < 100 && third !== 'done'; i++) {
+		third = await __engHarnessRunWorkerOnce('flush')
+		if (third !== 'done') await sleepMs(20)
+	}
+	__setFlushTestHooks(null)
+	assert.equal(maxInflight, 1, 'never two batches in the signer at once (one outstanding signature, one nonce at a time)')
+	assert.equal(first, 'timeout', 'the first step is released by its timeout')
+	assert.equal(second, 'busy', 'the lane stays busy while its signing job is still in flight')
+	assert.equal(signed, 2, 'the two batches (MAX_ENTRIES=2) are each signed once')
+	assert.equal(st().pending.length, 0, 'all rows are paid once the lane settles')
+	assert.equal(third, 'done', 'the lane is released once the signing job has settled')
+})

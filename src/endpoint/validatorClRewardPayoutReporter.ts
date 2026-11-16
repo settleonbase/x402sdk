@@ -2078,7 +2078,20 @@ async function runWorkerStep(kind: WorkerKind): Promise<'done' | 'busy' | 'timeo
 		}),
 	])
 	if (timer !== undefined) clearTimeout(timer)
-	if (outcome === 'timeout') {
+	if (outcome === 'timeout' && kind === 'flush') {
+		// The signing lane is never released while a batch may still be in the signer: the next flush step waits
+		// for this job to settle (a timed-out batch is still signing or waiting for its receipt, so a second batch
+		// must not start and must not take another nonce).
+		void job.then(() => {
+			workerBusy[kind] = false
+			logger(Colors.cyan(`[validatorClRewardPayout] flush job settled after timeout; signing lane released`))
+		})
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] flush step exceeded ${timeoutMs}ms: signing lane stays busy until the job settles (no overlapping batch)`
+			)
+		)
+	} else if (outcome === 'timeout') {
 		workerRun[kind]++
 		workerBusy[kind] = false
 		logger(
