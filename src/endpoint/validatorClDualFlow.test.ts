@@ -4,6 +4,7 @@
  *     contiguous block + 1 up to H; realtime starts at H + 1.
  * (c) A hung historical RPC does not block realtime scanning, queueing or payment.
  * (d) The first batch reads only its own keys (no full-queue scan) and signing runs through one serial lane.
+ * (e) The same key arriving from both lines is paid once.
  */
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
@@ -11,11 +12,13 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { ethers } from 'ethers'
+import { commitScanProgress } from './vdrDualCursor.js'
 import {
 	__engHarnessResetStateCache,
 	__engHarnessRunTickOnce,
 	__engHarnessRunWorkerOnce,
 	__setFlushTestHooks,
+	mutateState,
 	peekValidatorClRewardPayoutState,
 	type FlushTestHooks,
 } from './validatorClRewardPayoutReporter.js'
@@ -250,4 +253,40 @@ test('d: the first batch reads only its own keys and signing is serial through o
 	assert.equal(signs, 1)
 	assert.equal(maxInflight, 1, 'signing is serial through one lane')
 	assert.equal(peekValidatorClRewardPayoutState().pending.length, 298, 'the rest of the queue is untouched')
+})
+
+test('e: the same key arriving from both lines is paid once', async () => {
+	const file = freshFile()
+	writeLedger(file, 98, 0, 98)
+	const chain = newChain(110)
+	let signed = 0
+	install(file, chain, {
+		signer: async () => {
+			signed += 1
+			const hash = ethers.id(`e-tx:${signed}`)
+			chain.receipts.set(hash, { status: 1 })
+			return { hash }
+		},
+	})
+	const row = {
+		guardianId: '1',
+		amount: '1000000000000000',
+		eventKey: ethers.id('e-row').toLowerCase(),
+		blockNumber: 99,
+		withdrawalIndex: 7,
+		scanLine: 'historical' as const,
+	}
+	try {
+		// The historical line commits the row first; the realtime line then reports the same key.
+		await mutateState((s) => commitScanProgress(s, { line: 'historical', okThrough: 98, entries: [row] }))
+		await mutateState((s) => commitScanProgress(s, { line: 'realtime', okThrough: 108, entries: [{ ...row, scanLine: 'realtime' }] }))
+		assert.equal(peekValidatorClRewardPayoutState().pending.length, 1, 'one row for the key, not two')
+		// Two flush steps at once: one signs, the other is busy; a later step finds nothing left to pay.
+		await Promise.all([__engHarnessRunWorkerOnce('flush'), __engHarnessRunWorkerOnce('flush')])
+		await __engHarnessRunWorkerOnce('flush')
+	} finally {
+		__setFlushTestHooks(null)
+	}
+	assert.equal(signed, 1, 'the key is paid exactly once')
+	assert.equal(peekValidatorClRewardPayoutState().pending.length, 0)
 })
