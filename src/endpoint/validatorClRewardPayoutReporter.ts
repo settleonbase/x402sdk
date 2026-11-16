@@ -1391,6 +1391,55 @@ async function scanBlocksIntoPending(
  * Recover open intents after power-loss / ACK loss using persisted idempotencyKey + fingerprint.
  * Does NOT invent a new batch; rebuilds the original signer tx.
  */
+/**
+ * Replace/drop judgment for an intent whose txHash has no receipt (R4 B2 follow-up).
+ * Provable only when the signer account's on-chain nonce has moved past the tx nonce while
+ * our hash still has no receipt: then another tx consumed that nonce (replacement) or ours was
+ * dropped. A same-nonce tx mined elsewhere implies latest > nonce, so this single check covers both.
+ * Any missing data or RPC error => 'wait'. Rebuild still requires intentConsumedOnChain === 'open'.
+ */
+export async function judgeTxReplacedOrDropped(
+	provider: ethers.JsonRpcProvider,
+	intent: Pick<SettleIntent, 'txHash'>
+): Promise<'replaced_or_dropped' | 'wait'> {
+	if (!intent.txHash) return 'wait'
+	let tx: { from?: string | null; nonce?: number | null } | null
+	try {
+		tx = (await provider.getTransaction(intent.txHash)) as { from?: string | null; nonce?: number | null } | null
+	} catch {
+		return 'wait'
+	}
+	if (!tx || !tx.from || typeof tx.nonce !== 'number' || !Number.isSafeInteger(tx.nonce)) return 'wait'
+	let latest: number
+	try {
+		latest = Number(await provider.getTransactionCount(tx.from, 'latest'))
+	} catch {
+		return 'wait'
+	}
+	if (!Number.isSafeInteger(latest)) return 'wait'
+	return latest > tx.nonce ? 'replaced_or_dropped' : 'wait'
+}
+
+const intentWaitSince = new Map<string, number>()
+const intentWaitAlerted = new Set<string>()
+
+/** Record waiting time for an intent; alert once past the limit. Never resends. */
+function noteIntentWaiting(intent: Pick<SettleIntent, 'idempotencyKey'>): void {
+	const now = Date.now()
+	const first = intentWaitSince.get(intent.idempotencyKey) ?? now
+	intentWaitSince.set(intent.idempotencyKey, first)
+	const limitRaw = Number(process.env.CONET_VALIDATOR_CL_INTENT_WAIT_ALERT_MS || 1_800_000)
+	const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 1_800_000
+	if (now - first >= limit && !intentWaitAlerted.has(intent.idempotencyKey)) {
+		intentWaitAlerted.add(intent.idempotencyKey)
+		logger(
+			Colors.red(
+				`[validatorClRewardPayout] ALERT intent still without receipt after ${Math.floor((now - first) / 1000)}s; not resending idem=${intent.idempotencyKey.slice(0, 24)}…`
+			)
+		)
+	}
+}
+
 async function recoverOpenIntents(
 	provider: ethers.JsonRpcProvider,
 	pending: Map<string, PayoutEntry>
@@ -1449,9 +1498,15 @@ async function recoverOpenIntents(
 			} catch {
 				/* receipt query failed: unknown, hold below */
 			}
-			// txHash present without a receipt: WAIT. Never rebuild or resend this batch here (R4 B2).
-			logger(Colors.yellow(`[validatorClRewardPayout] intent txHash has no receipt; hold (no rebuild, no resend) idem=${intent.idempotencyKey.slice(0, 24)}…`))
-			continue
+			// txHash present without a receipt: only a provable replace/drop may proceed to rebuild (checked below).
+			const verdict = await judgeTxReplacedOrDropped(provider, intent)
+			if (verdict !== 'replaced_or_dropped') {
+				noteIntentWaiting(intent)
+				logger(Colors.yellow(`[validatorClRewardPayout] intent txHash has no receipt; wait (no rebuild, no resend) idem=${intent.idempotencyKey.slice(0, 24)}…`))
+				continue
+			}
+			logger(Colors.yellow(`[validatorClRewardPayout] intent txHash replaced/dropped (signer nonce consumed without receipt); verifying on-chain before rebuild idem=${intent.idempotencyKey.slice(0, 24)}…`))
+			// Falls through: rebuild only if intentConsumedOnChain === 'open' (below).
 		}
 
 		// Chain already settled this intent (ACK lost / SIGKILL before broadcast mark) — credit once, do not resend.

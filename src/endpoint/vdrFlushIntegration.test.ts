@@ -62,7 +62,9 @@ type Env = {
 	sent: Array<{ eventKeys?: string[]; idem: string }>
 }
 
-function install(file: string, consumed: (key: string) => unknown): Env {
+type ChainInfo = { tx?: { from: string; nonce: number } | null; latest?: number }
+
+function install(file: string, consumed: (key: string) => unknown, chain: ChainInfo = {}): Env {
 	process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_STATE_FILE = file
 	process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_DEPLOY_BLOCK = '0'
 	process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_ESTIMATE_FROM = '0x' + '11'.repeat(20)
@@ -77,6 +79,12 @@ function install(file: string, consumed: (key: string) => unknown): Env {
 		},
 		async getTransactionReceipt(hash: string) {
 			return receipts.get(hash) ?? null
+		},
+		async getTransaction(_hash: string) {
+			return chain.tx ?? null
+		},
+		async getTransactionCount(_addr: string, _tag: string) {
+			return chain.latest ?? 0
 		},
 	}
 	const contract = {
@@ -204,4 +212,76 @@ test('B2: prepared intent whose consumed status is UNKNOWN is held, not resent',
 	}
 	assert.equal(env.sent.length, 0, 'unknown on-chain status must not sign')
 	assert.equal(peekValidatorClRewardPayoutState().pending.length, 1)
+})
+
+const SIGNER_ADDR = ethers.getAddress('0x' + '22'.repeat(20))
+
+function inflightBroadcast(file: string, label: string): void {
+	const intent = prepareSettleIntent({
+		to: PROXY,
+		guardianIds: [1n],
+		amounts: [AMT],
+		eventKeys: [keyOf(label)],
+		gasLimit: 170000,
+		keyArray: 'test-key-array',
+		scanLines: ['historical'],
+	})
+	writeLedger(file, [pendingJson(seed(label, 1))], [{ ...intent, status: 'broadcast', txHash: ethers.id('old-tx') }])
+}
+
+async function runRecover(file: string, consumed: (key: string) => unknown, chain: ChainInfo): Promise<Env> {
+	const env = install(file, consumed, chain)
+	try {
+		await __engHarnessFlushPendingOnce({ contractAddr: PROXY, resumeFromState: true })
+	} finally {
+		__setFlushTestHooks(null)
+	}
+	return env
+}
+
+test('B2 replace: nonce consumed without receipt and key still open => rebuild once, then confirmed', async () => {
+	const file = path.join(freshDir(), 'state.json')
+	inflightBroadcast(file, 'A')
+	const env = await runRecover(file, () => false, { tx: { from: SIGNER_ADDR, nonce: 5 }, latest: 6 })
+	assert.equal(env.sent.length, 1, 'one rebuilt settle after provable replace/drop')
+	const s = peekValidatorClRewardPayoutState()
+	assert.equal(s.pending.length, 0)
+	assert.equal(s.settleIntents.find((i) => i.status === 'confirmed')?.eventKeys[0], keyOf('A'))
+})
+
+test('B2 wait: nonce not yet consumed => no rebuild, no resend', async () => {
+	const file = path.join(freshDir(), 'state.json')
+	inflightBroadcast(file, 'A')
+	const env = await runRecover(file, () => false, { tx: { from: SIGNER_ADDR, nonce: 5 }, latest: 5 })
+	assert.equal(env.sent.length, 0)
+	assert.equal(peekValidatorClRewardPayoutState().pending.length, 1)
+})
+
+test('B2 replace but key consumed on chain => credited, not rebuilt', async () => {
+	const file = path.join(freshDir(), 'state.json')
+	inflightBroadcast(file, 'A')
+	const env = await runRecover(file, (k) => k === keyOf('A'), { tx: { from: SIGNER_ADDR, nonce: 5 }, latest: 6 })
+	assert.equal(env.sent.length, 0)
+	assert.equal(peekValidatorClRewardPayoutState().pending.length, 0)
+})
+
+test('B2 replace but consumed status UNKNOWN => hold, not rebuilt', async () => {
+	const file = path.join(freshDir(), 'state.json')
+	inflightBroadcast(file, 'A')
+	const env = await runRecover(
+		file,
+		() => {
+			throw new Error('simulated RPC failure')
+		},
+		{ tx: { from: SIGNER_ADDR, nonce: 5 }, latest: 6 }
+	)
+	assert.equal(env.sent.length, 0)
+	assert.equal(peekValidatorClRewardPayoutState().pending.length, 1)
+})
+
+test('B2 wait: tx lookup missing (cannot read nonce) => wait', async () => {
+	const file = path.join(freshDir(), 'state.json')
+	inflightBroadcast(file, 'A')
+	const env = await runRecover(file, () => false, { tx: null, latest: 9 })
+	assert.equal(env.sent.length, 0)
 })
