@@ -311,6 +311,15 @@ test('Master /cardsByCategory wiring: fail-closed omit, filtered result cached, 
 	assert.ok(start > 0, 'route not found')
 	const body = src.slice(start, src.indexOf('\n\t\t})', start))
 	assert.match(body, /cardsByCategorySingleFlight\.run\(/)
+	// F7：缓存写入必须受 generation 守卫。generation 在计算开始前捕获，并进入 single-flight 键；写缓存前必须核对未变。
+	const genAt = body.indexOf('const gen = latestCardsCacheGeneration')
+	assert.ok(genAt > 0, 'generation must be captured in the route')
+	assert.match(body, /cardsByCategorySingleFlight\.run\(`\$\{gen\}:\$\{cacheKey\}`/)
+	assert.ok(genAt < body.indexOf('const rawGroups = await getLatestCardsGroupedByCategory('), 'generation must be captured before the computation starts')
+	assert.match(
+		body,
+		/if \(gen === latestCardsCacheGeneration\) \{\s*cardsByCategoryCache\.set\(cacheKey, \{ groups: filtered, expiry: Date\.now\(\) \+ QUERY_CACHE_TTL_MS \}\)\s*\}/,
+	)
 	assert.match(body, /const rawGroups = await getLatestCardsGroupedByCategory\(/)
 	assert.match(
 		body,
