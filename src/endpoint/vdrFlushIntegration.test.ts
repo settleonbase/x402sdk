@@ -62,7 +62,13 @@ type Env = {
 	sent: Array<{ eventKeys?: string[]; idem: string }>
 }
 
-type ChainInfo = { tx?: { from: string; nonce: number } | null; latest?: number; estimate?: (n: number) => bigint }
+type ChainInfo = {
+	tx?: { from: string; nonce: number } | null
+	latest?: number
+	estimate?: (n: number) => bigint
+	/** The signer records the call, then the reply is lost: the daemon gets an error and no txHash (ACK lost). */
+	signerFail?: string
+}
 
 function install(file: string, consumed: (key: string) => unknown, chain: ChainInfo = {}): Env {
 	process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_STATE_FILE = file
@@ -98,6 +104,7 @@ function install(file: string, consumed: (key: string) => unknown, chain: ChainI
 		signerSend: async (tx) => {
 			const hash = ethers.id(`flush-it-tx:${sent.length + 1}`)
 			sent.push({ idem: tx.idempotencyKey })
+			if (chain.signerFail) throw new Error(chain.signerFail)
 			receipts.set(hash, { status: 1 })
 			return { hash }
 		},
@@ -161,6 +168,42 @@ test('B3: a non-boolean consumed result (1, "yes", undefined) is UNKNOWN: not si
 		}
 		assert.equal(env.sent.length, 0, `non-boolean ${String(bad)} must not sign`)
 		assert.equal(peekValidatorClRewardPayoutState().pending.length, 1)
+	}
+})
+
+test('B4: ACK lost without a txHash is held: the same key is never resent; credited once the chain consumes the keys', async () => {
+	const file = path.join(freshDir(), 'state.json')
+	writeLedger(file, [pendingJson(seed('A', 1)), pendingJson(seed('B', 1))])
+	const onChain = new Set<string>()
+	const env = install(file, (k) => onChain.has(k.toLowerCase()), { signerFail: 'signer socket timed out' })
+	try {
+		// First send: the signer records it, the reply is lost. The daemon holds an uncertain intent with no hash.
+		await __engHarnessFlushPendingOnce({ contractAddr: PROXY, resumeFromState: true })
+		assert.equal(env.sent.length, 1, 'the batch is sent once')
+		let s = peekValidatorClRewardPayoutState()
+		assert.equal(s.settleIntents.length, 1)
+		assert.equal(s.settleIntents[0]!.status, 'uncertain')
+		assert.equal(s.settleIntents[0]!.txHash, undefined, 'no hash was received')
+		assert.equal(s.pending.length, 2)
+		// Later recovery passes must not resend under the same idempotencyKey, nor issue a new key for owned rows.
+		for (let i = 0; i < 3; i++) {
+			await __engHarnessFlushPendingOnce({ contractAddr: PROXY, resumeFromState: true })
+		}
+		assert.equal(env.sent.length, 1, 'no resend under the same key and no new key for owned keys')
+		s = peekValidatorClRewardPayoutState()
+		assert.equal(s.pending.length, 2, 'the keys stay pending and owned')
+		assert.equal(s.settleIntents[0]!.status, 'uncertain', 'the intent is held, not dropped')
+		// The first tx may have mined: the chain shows the keys consumed. The daemon credits once and sends nothing.
+		onChain.add(keyOf('A'))
+		onChain.add(keyOf('B'))
+		await __engHarnessFlushPendingOnce({ contractAddr: PROXY, resumeFromState: true })
+		s = peekValidatorClRewardPayoutState()
+		assert.equal(env.sent.length, 1, 'credited from the chain state, no second send')
+		assert.equal(s.pending.length, 0, 'both keys are cleared as settled')
+		assert.equal(s.settleIntents[0]!.status, 'confirmed')
+		assert.equal(s.firstBatchSettledWei, (AMT * 2n).toString(), 'the settled total is credited once')
+	} finally {
+		__setFlushTestHooks(null)
 	}
 })
 

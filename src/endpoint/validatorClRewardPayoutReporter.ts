@@ -87,7 +87,6 @@ import {
 	prepareRebuiltSettleIntent,
 	prepareSettleIntent,
 	rebuildSignerTxFromIntent,
-	reconcileAckLostIntent,
 	recordRealtimeLatency,
 	remainingFirstBatchBudgetWei,
 	removePendingKeys,
@@ -1353,7 +1352,7 @@ async function submitPayableBatch(
 	if (outcome === 'uncertain') {
 		logger(
 			Colors.yellow(
-				`[validatorClRewardPayout] leave batch in pending (ACK uncertain); will recover via idempotencyKey next tick n=${entries.length}`
+				`[validatorClRewardPayout] leave batch in pending (ACK uncertain); keys stay owned by the open intent, held with no resend n=${entries.length}`
 			)
 		)
 		return
@@ -1676,40 +1675,16 @@ async function recoverOpenIntents(provider: ethers.JsonRpcProvider): Promise<voi
 			continue
 		}
 
-		// ACK lost: rebuild original batch from fingerprint; only resend same idempotencyKey.
-		if (!config) {
-			await mutateState((s) => reconcileAckLostIntent(s, intent.idempotencyKey, { safeToResend: false }).state)
-			logger(
-				Colors.yellow(
-					`[validatorClRewardPayout] ACK-lost intent held (no signer); refuse blind resend idem=${intent.idempotencyKey.slice(0, 24)}…`
-				)
+		// ACK lost and no txHash in hand: the daemon cannot tell whether the signer already signed this batch, and it
+		// does not rely on the signer to dedupe a repeated idempotencyKey. Resending here could sign a second tx, so
+		// the intent is HELD: no send, its keys stay owned, and the on-chain check above credits it once consumed.
+		// A hold that lasts past the wait limit is reported once by noteIntentWaiting (ALERT). Manual handling only.
+		noteIntentWaiting(intent)
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] ACK-lost intent without txHash: hold (no resend; keys stay owned) idem=${intent.idempotencyKey.slice(0, 24)}… status=${intent.status}`
 			)
-			continue
-		}
-
-		try {
-			const tx = rebuildSignerTxFromIntent(intent, config.keyArray)
-			const { hash } = await sendSignerTx(tx, config.socketPath)
-			await mutateState((s) => reconcileAckLostIntent(s, intent.idempotencyKey, { txHash: hash, safeToResend: true }).state)
-			const receipt = await waitForSignerReceipt(provider, hash, resolveClaimTxWaitTimeoutMs())
-			await mutateState((s) =>
-				receipt.status === 1
-					? creditConfirmedIntent(s, intent)
-					: markIntentConfirmed(s, intent.idempotencyKey, receipt.status ?? 0)
-			)
-			logger(
-				Colors.green(
-					`[validatorClRewardPayout] ACK-lost recovered ORIGINAL batch tx=${hash} idem=${intent.idempotencyKey.slice(0, 24)}… fp=${intent.requestFingerprint.slice(0, 18)}…`
-				)
-			)
-		} catch (e: unknown) {
-			await mutateState((s) => reconcileAckLostIntent(s, intent.idempotencyKey, { safeToResend: false }).state)
-			logger(
-				Colors.yellow(
-					`[validatorClRewardPayout] ACK-lost recovery deferred: ${(e as Error)?.message ?? e}`
-				)
-			)
-		}
+		)
 	}
 }
 
