@@ -120,6 +120,7 @@ export type FlushTestHooks = {
 	contract?: (addr: string) => unknown
 	signerConfig?: { socketPath: string; keyArray: string }
 	signerSend?: (tx: VdrSignerTx) => Promise<{ hash: string }>
+	workerTimeoutMs?: number
 }
 let flushTestHooks: FlushTestHooks = {}
 export function __setFlushTestHooks(h: FlushTestHooks | null): void {
@@ -195,8 +196,6 @@ function assertAmountCapOrAbort(entries: PayoutEntry[]): {
 }
 
 let payoutStarted = false
-let payoutTimer: ReturnType<typeof setTimeout> | undefined
-let payoutInFlight = false
 /**
  * Committed-state cache: the last state written by mutateState, or the ledger file loaded once.
  * It is never rebuilt from the in-memory pending Map; pending lives only in state.pending.
@@ -1741,175 +1740,191 @@ async function commitScanRange(
 	return added
 }
 
-async function payoutTick(): Promise<void> {
-	if (payoutInFlight) return
-	payoutInFlight = true
-	try {
+type WorkerKind = 'historical' | 'realtime' | 'flush'
+const WORKER_KINDS: readonly WorkerKind[] = ['historical', 'realtime', 'flush']
+/** Independent workers: historical scan line, realtime scan line, and one flush (signing) lane. */
+const workerBusy: Record<WorkerKind, boolean> = { historical: false, realtime: false, flush: false }
+const workerRun: Record<WorkerKind, number> = { historical: 0, realtime: 0, flush: 0 }
+const workerTimers: Partial<Record<WorkerKind, ReturnType<typeof setTimeout>>> = {}
+
+function resolveWorkerRpcTimeoutMs(): number {
+	return flushTestHooks.workerTimeoutMs ?? resolveClaimRpcHttpTimeoutMs()
+}
+
+/** Check the locked H against the chain and lock it once (idempotent). Returns false when no H hash is available. */
+async function checkAndLockBoundary(
+	provider: ethers.JsonRpcProvider,
+	liveHead: number,
+	tipHash: string,
+	depth: number
+): Promise<boolean> {
+	const boundary = peekLatestState().boundaryH
+	if (boundary) {
+		const hBlock = await fetchBlockWithWithdrawals(provider, boundary.blockNumber)
+		const hHash = typeof hBlock?.hash === 'string' ? hBlock.hash.toLowerCase() : ''
+		if (hHash && hHash !== boundary.blockHash) {
+			logger(
+				Colors.yellow(
+					`[validatorClRewardPayout] reorg vs H=${boundary.blockNumber}: stored=${boundary.blockHash.slice(0, 12)}… live=${hHash.slice(0, 12)}…`
+				)
+			)
+			// Roll back only the boundary this mismatch was detected on; otherwise leave the latest state alone.
+			await mutateState((s) =>
+				s.boundaryH &&
+				s.boundaryH.blockNumber === boundary.blockNumber &&
+				s.boundaryH.blockHash === boundary.blockHash
+					? applyReorgRollback(s, boundary.blockNumber, boundary.blockHash, hHash)
+					: s
+			)
+		}
+	}
+	// H locks at confirmed tip (liveHead - depth); persist that block's own hash.
+	const prospectiveH = Math.max(0, liveHead - depth, peekLatestState().historicalCursor)
+	const hLockBlock = await fetchBlockWithWithdrawals(provider, prospectiveH)
+	const hLockHash = typeof hLockBlock?.hash === 'string' ? hLockBlock.hash.toLowerCase() : tipHash.toLowerCase()
+	if (!/^0x[0-9a-f]{64}$/.test(hLockHash)) {
+		logger(Colors.yellow(`[validatorClRewardPayout] H block ${prospectiveH} hash unavailable; skip scan step`))
+		return false
+	}
+	let lockedNow = false
+	await mutateState((s) => {
+		const locked = ensureBoundaryH(s, liveHead, hLockHash, depth)
+		lockedNow = locked.lockedNow
+		return locked.state
+	})
+	if (lockedNow) {
+		const locked = peekLatestState()
+		logger(
+			Colors.cyan(
+				`[validatorClRewardPayout] locked H=${locked.boundaryH!.blockNumber} hash=${locked.boundaryH!.blockHash.slice(0, 14)}… ` +
+					`histCursor=${locked.historicalCursor} rtCursor=${locked.realtimeCursor} depth=${depth}`
+			)
+		)
+	}
+	return true
+}
+
+/** One scan step of one line. Its RPC reads run outside the queue; the result is merged as one serial commit. */
+async function scanLineStep(
+	kind: 'historical' | 'realtime',
+	provider: ethers.JsonRpcProvider,
+	readContract: ethers.Contract,
+	proxyAddr: string
+): Promise<void> {
+	const floor = resolveDeployBlockFloor()
+	const liveHead = Number(await provider.getBlockNumber())
+	if (!Number.isFinite(liveHead) || liveHead < floor) return
+	const depth = resolveConfirmationDepth()
+	const tipBlock = await fetchBlockWithWithdrawals(provider, liveHead)
+	if (!tipBlock?.hash) {
+		logger(Colors.yellow(`[validatorClRewardPayout] tip hash unavailable at ${liveHead}; skip ${kind} step`))
+		return
+	}
+	if (!(await checkAndLockBoundary(provider, liveHead, String(tipBlock.hash), depth))) return
+
+	const chunk = resolveChunkBlocks() * resolveChunksPerTick()
+	const plan = planScanRanges(peekLatestState(), liveHead, {
+		confirmationDepth: depth,
+		historicalChunk: chunk,
+		realtimeChunk: chunk,
+	})
+	const range = kind === 'historical' ? plan.historical : plan.realtime
+	if (!range) return
+	const { from, to } = range
+	const { okThrough, okThroughHash, scanned, fetchFailed } = await scanBlocksIntoPending(
+		provider,
+		readContract,
+		proxyAddr,
+		from,
+		to,
+		kind
+	)
+	if (okThrough != null) {
+		const added = await commitScanRange(kind, from, okThrough, okThroughHash, scanned)
+		if (added > 0) {
+			logger(
+				Colors.cyan(
+					`[validatorClRewardPayout] ${kind} +${added} pending=${peekLatestState().pending.length} through ${from}..${okThrough}`
+				)
+			)
+		}
+	}
+	if (fetchFailed || okThrough == null || okThrough < to) {
+		logger(
+			Colors.yellow(
+				`[validatorClRewardPayout] ${kind} scan stop at ${okThrough ?? from - 1}; retry next step`
+			)
+		)
+	}
+}
+
+/**
+ * Run one step of one worker under its own RPC timeout. A step that exceeds the timeout is logged as UNKNOWN
+ * and released at once, so the worker retries on its next schedule; the other workers never wait for it.
+ * A stale step that finishes later merges through the same serial queue, and cursors never move backward.
+ */
+async function runWorkerStep(kind: WorkerKind): Promise<'done' | 'busy' | 'timeout'> {
+	if (workerBusy[kind]) return 'busy'
+	workerBusy[kind] = true
+	const run = ++workerRun[kind]
+	const job = (async () => {
 		const proxyAddr = resolveValidatorDepositRedeemAddress()
 		if (!proxyAddr) {
 			logger(Colors.yellow('[validatorClRewardPayout] CONET_VALIDATOR_DEPOSIT_REDEEM not configured — skip'))
 			return
 		}
-
 		const provider = createClaimRpcProvider()
 		const readContract = makeReadContract(proxyAddr, provider)
-
-		const floor = resolveDeployBlockFloor()
-		// Tick start: reload the committed state from the ledger file (fail-closed), inside the queue.
-		await refreshStateFromDisk()
-		const liveHead = Number(await provider.getBlockNumber())
-		if (!Number.isFinite(liveHead) || liveHead < floor) return
-
-		await recoverOpenIntents(provider)
-
-		const depth = resolveConfirmationDepth()
-		const tipBlock = await fetchBlockWithWithdrawals(provider, liveHead)
-		if (!tipBlock?.hash) {
-			logger(Colors.yellow(`[validatorClRewardPayout] tip hash unavailable at ${liveHead}; skip tick`))
-			return
+		if (kind === 'flush') {
+			await recoverOpenIntents(provider)
+			await flushPendingBatches(provider, readContract, proxyAddr)
+		} else {
+			await scanLineStep(kind, provider, readContract, proxyAddr)
 		}
-
-		// Reorg check on locked H / realtime tip when hash mismatches.
-		const boundary = peekLatestState().boundaryH
-		if (boundary) {
-			const hBlock = await fetchBlockWithWithdrawals(provider, boundary.blockNumber)
-			const hHash = typeof hBlock?.hash === 'string' ? hBlock.hash.toLowerCase() : ''
-			if (hHash && hHash !== boundary.blockHash) {
-				logger(
-					Colors.yellow(
-						`[validatorClRewardPayout] reorg vs H=${boundary.blockNumber}: stored=${boundary.blockHash.slice(0, 12)}… live=${hHash.slice(0, 12)}…`
-					)
-				)
-				// Roll back only the boundary this mismatch was detected on; otherwise leave the latest state alone.
-				await mutateState((s) =>
-					s.boundaryH &&
-					s.boundaryH.blockNumber === boundary.blockNumber &&
-					s.boundaryH.blockHash === boundary.blockHash
-						? applyReorgRollback(s, boundary.blockNumber, boundary.blockHash, hHash)
-						: s
-				)
-			}
-		}
-
-		// H locks at confirmed tip (liveHead - depth); persist that block's own hash.
-		const prospectiveH = Math.max(0, liveHead - depth, peekLatestState().historicalCursor)
-		const hLockBlock = await fetchBlockWithWithdrawals(provider, prospectiveH)
-		const hLockHash =
-			typeof hLockBlock?.hash === 'string' ? hLockBlock.hash.toLowerCase() : String(tipBlock.hash).toLowerCase()
-		if (!/^0x[0-9a-f]{64}$/.test(hLockHash)) {
-			logger(Colors.yellow(`[validatorClRewardPayout] H block ${prospectiveH} hash unavailable; skip tick`))
-			return
-		}
-		let lockedNow = false
-		await mutateState((s) => {
-			const locked = ensureBoundaryH(s, liveHead, hLockHash, depth)
-			lockedNow = locked.lockedNow
-			return locked.state
-		})
-		if (lockedNow) {
-			const locked = peekLatestState()
-			logger(
-				Colors.cyan(
-					`[validatorClRewardPayout] locked H=${locked.boundaryH!.blockNumber} hash=${locked.boundaryH!.blockHash.slice(0, 14)}… ` +
-						`histCursor=${locked.historicalCursor} rtCursor=${locked.realtimeCursor} depth=${depth}`
-				)
-			)
-		}
-
-		const chunk = resolveChunkBlocks()
-		const chunksPerTick = resolveChunksPerTick()
-		const histBudget = chunk * chunksPerTick
-		const rtBudget = chunk * chunksPerTick
-		const state = peekLatestState()
-		const plan = planScanRanges(state, liveHead, {
-			confirmationDepth: depth,
-			historicalChunk: histBudget,
-			realtimeChunk: rtBudget,
-		})
-
+	})().catch((e: unknown) => {
+		logger(Colors.red(`[validatorClRewardPayout] ${kind} worker error: ${(e as Error)?.message ?? e}`))
+	})
+	const timeoutMs = resolveWorkerRpcTimeoutMs()
+	let timer: ReturnType<typeof setTimeout> | undefined
+	const outcome = await Promise.race<'done' | 'timeout'>([
+		job.then(() => 'done' as const),
+		new Promise<'timeout'>((resolve) => {
+			timer = setTimeout(() => resolve('timeout'), timeoutMs)
+		}),
+	])
+	if (timer !== undefined) clearTimeout(timer)
+	if (outcome === 'timeout') {
+		workerRun[kind]++
+		workerBusy[kind] = false
 		logger(
-			Colors.cyan(
-				`[validatorClRewardPayout] dual-scan H=${state.boundaryH?.blockNumber ?? 'n/a'} ` +
-					`hist=${plan.historical ? `${plan.historical.from}..${plan.historical.to}` : 'done'} ` +
-					`rt=${plan.realtime ? `${plan.realtime.from}..${plan.realtime.to}` : 'caught-up'} ` +
-					`safeTip=${plan.tipForPlan} liveHead=${liveHead} pending=${state.pending.length} ` +
-					`histComplete=${isHistoricalComplete(state) ? 1 : 0}`
+			Colors.yellow(
+				`[validatorClRewardPayout] ${kind} step exceeded ${timeoutMs}ms: UNKNOWN, deferred to next step (other workers unaffected)`
 			)
 		)
-
-		if (plan.historical) {
-			const { from, to } = plan.historical
-			const { okThrough, okThroughHash, scanned, fetchFailed } = await scanBlocksIntoPending(
-				provider,
-				readContract,
-				proxyAddr,
-				from,
-				to,
-				'historical'
-			)
-			if (okThrough != null) {
-				const added = await commitScanRange('historical', from, okThrough, okThroughHash, scanned)
-				if (added > 0) {
-					logger(
-						Colors.cyan(
-							`[validatorClRewardPayout] historical +${added} pending=${peekLatestState().pending.length} through ${from}..${okThrough}`
-						)
-					)
-				}
-			}
-			if (fetchFailed || okThrough == null || (okThrough != null && okThrough < to)) {
-				logger(
-					Colors.yellow(
-						`[validatorClRewardPayout] historical scan stop at ${okThrough ?? from - 1}; retry next tick`
-					)
-				)
-			}
-		}
-
-		if (plan.realtime) {
-			const { from, to } = plan.realtime
-			const { okThrough, okThroughHash, scanned, fetchFailed } = await scanBlocksIntoPending(
-				provider,
-				readContract,
-				proxyAddr,
-				from,
-				to,
-				'realtime'
-			)
-			if (okThrough != null) {
-				const added = await commitScanRange('realtime', from, okThrough, okThroughHash, scanned)
-				if (added > 0) {
-					logger(
-						Colors.cyan(
-							`[validatorClRewardPayout] realtime +${added} pending=${peekLatestState().pending.length} through ${from}..${okThrough}`
-						)
-					)
-				}
-			}
-			if (fetchFailed || okThrough == null || (okThrough != null && okThrough < to)) {
-				logger(
-					Colors.yellow(
-						`[validatorClRewardPayout] realtime scan stop at ${okThrough ?? from - 1}; retry next tick`
-					)
-				)
-			}
-		}
-
-		await flushPendingBatches(provider, readContract, proxyAddr)
-	} catch (e: unknown) {
-		logger(Colors.red(`[validatorClRewardPayout] tick error: ${(e as Error)?.message ?? e}`))
-	} finally {
-		payoutInFlight = false
+	} else if (workerRun[kind] === run) {
+		workerBusy[kind] = false
 	}
+	return outcome
 }
 
+/** Sequential runner (harness / tests): one step of each worker in order. The timers never use it. */
+async function payoutTick(): Promise<void> {
+	await runWorkerStep('historical')
+	await runWorkerStep('realtime')
+	await runWorkerStep('flush')
+}
 
-function scheduleNextPayoutTick(): void {
+function scheduleWorker(kind: WorkerKind): void {
 	if (!payoutStarted) return
-	payoutTimer = setTimeout(async () => {
-		await payoutTick()
-		scheduleNextPayoutTick()
+	workerTimers[kind] = setTimeout(async () => {
+		await runWorkerStep(kind)
+		scheduleWorker(kind)
 	}, resolveTickMs())
+}
+
+/** Test/ops harness: run one step of a single worker (used to drive workers concurrently in tests). */
+export function __engHarnessRunWorkerOnce(kind: WorkerKind): Promise<'done' | 'busy' | 'timeout'> {
+	return runWorkerStep(kind)
 }
 
 export function startValidatorClRewardPayoutReporter(): void {
@@ -1943,14 +1958,17 @@ export function startValidatorClRewardPayoutReporter(): void {
 				`confirmDepth=${resolveConfirmationDepth()} pendingPool=on`
 		)
 	)
-	void payoutTick().finally(() => scheduleNextPayoutTick())
+	for (const kind of WORKER_KINDS) {
+		void runWorkerStep(kind).finally(() => scheduleWorker(kind))
+	}
 }
 
 export function stopValidatorClRewardPayoutReporter(): void {
 	payoutStarted = false
-	if (payoutTimer !== undefined) {
-		clearTimeout(payoutTimer)
-		payoutTimer = undefined
+	for (const kind of WORKER_KINDS) {
+		const t = workerTimers[kind]
+		if (t !== undefined) clearTimeout(t)
+		delete workerTimers[kind]
 	}
 }
 
