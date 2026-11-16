@@ -11,6 +11,7 @@ import { isPaymentIntakePaused, paymentIntakePausedBody } from '../paymentIntake
 import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
+import { createCardsByCategoryHandler } from './cardsByCategoryProxy'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import { normalizeEip3009WalletSignature } from '../eip3009SignatureNormalize'
@@ -7864,6 +7865,9 @@ const routing = ( router: Router ) => {
 		const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''
 		getLocalhost(`/api/latestCards${qs}`, res)
 	})
+
+	/** GET /api/cardsByCategory：透传 Master（同状态码、同响应体；仅原样转发 scanLimit／limitPerCategory）。 */
+	router.get('/cardsByCategory', createCardsByCategoryHandler({ masterPort: masterServerPort, log: (line) => logger(Colors.red(line)) }))
 
 	/** GET /api/searchHelp?card=0x... - 返回该卡已定义的全部 issued NFT 列表。30 秒缓存 */
 	router.get('/searchHelp', async (req, res) => {
