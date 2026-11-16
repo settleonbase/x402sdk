@@ -1,7 +1,12 @@
-# cl-payout-v2 运维说明：flush 作业看门狗与 ACK 丢失挂起
+# cl-payout-v2 运维说明：flush 作业看门狗、告警检查与无 txHash 挂起
 
 本文件不在包内（`build.sh` 不复制它，清单不变）。原因：`STARTUP.txt` 随包冻结，不能为新增运维项改动它，所以另写本说明。
 适用候选：`c7cddf4` 及之后（含 `529f727` 的挂起行为）。
+
+## 0. 状态声明
+
+- 告警检查脚本已写成可执行文件（`ops/alert-watch.sh`），并用真实测试日志和合成日志验证（见待审单）。
+- **现场监控未接入**：本说明和脚本都不连接任何现场单元、通知渠道或主机。现场接入需要项目方批准，不属于本次交付。
 
 ## 1. 环境变量
 
@@ -13,7 +18,7 @@
 
 看门狗只告警和计数，不影响付款路径：不释放车道，不另起作业，不重签。
 
-## 2. ALERT 含义与处理
+## 2. 日志文本与含义
 
 看门狗日志（每个上限周期重复一次，每次计数）：
 
@@ -22,51 +27,50 @@ ALERT flush job unsettled for <N>s (cap <M>s; alert #<k>, total <t>). Signing la
 ```
 
 - 含义：一个签发作业超过上限仍未结束。签发车道保持忙，之后的 flush 步全部返回 `busy`，因此签发付款停止。扫描线不受影响。
-- 作业结束后出现：`flush job settled after <N> (ALERTed <k> time(s) before settling)`，表示车道已释放。
-- 处理顺序：先确认签字机是否仍在处理该请求，以及 RPC 是否挂起；不要在未核对前重启后直接重签；不要删除在途意图或改 pending；按第 4 节核对。
+- 作业结束后出现：`flush job settled after <N> (ALERTed <k> time(s) before settling)`，或超时分支的 `flush job settled after timeout; signing lane released`，表示车道已释放。
 
-## 3. 日志监控样例（占位符，未部署）
+无 txHash 挂起的日志：`ACK-lost intent without txHash: hold (no resend; keys stay owned) idem=… status=…`。这一行只表示该键被挂起，不表示已恢复。
 
-以下样例只说明规则，单元名和通知命令由运维替换。不包含主机、路径或账户信息。
+## 3. 告警检查脚本（可执行，未接入现场）
+
+脚本：`ops/alert-watch.sh`，只读，不改账本、不签名、不重发。
 
 ```sh
-#!/bin/sh
-# 样例，未部署。UNIT 与 NOTIFY 为占位符。
-UNIT="<claim-unit>"
-NOTIFY="<notify-command>"
-# 1) 签发作业挂起：每次出现都通知（同一上限周期内会重复出现）。
-journalctl -u "$UNIT" --since "-10min" -o cat | grep -F 'ALERT flush job unsettled' | tail -n 1 | "$NOTIFY" "claim flush lane busy"
-# 2) 挂起的在途意图（无 txHash）：超过等待上限后告警一次。
-journalctl -u "$UNIT" --since "-10min" -o cat | grep -F 'ALERT intent still without receipt' | tail -n 1 | "$NOTIFY" "claim intent without receipt"
-# 3) 无 txHash 的 ACK 丢失挂起：每个 flush 步都会记录，出现即表示有键被挂起。
-journalctl -u "$UNIT" --since "-10min" -o cat | grep -F 'ACK-lost intent without txHash: hold' | tail -n 1 | "$NOTIFY" "claim keys held (no txHash)"
-# 4) 解除：看到 settled 行说明车道已释放，应撤销第 1 条告警。
-journalctl -u "$UNIT" --since "-10min" -o cat | grep -F 'flush job settled after' | tail -n 1 | "$NOTIFY" "claim flush lane released"
+# 现场接入时由运维填写单元名；脚本本身不含主机或单元名。
+journalctl -u <claim-unit> -o cat | sh ops/alert-watch.sh -
+# 离线检查日志文件：
+sh ops/alert-watch.sh <日志文件>
 ```
 
-建议：告警系统对第 1 条做“持续未解除”判断（最后一条 ALERT 之后没有 settled 行）。日志行含 ANSI 颜色码时，`grep -F` 仍可匹配，因为颜色码包住了整行。
+退出码：`0` 表示没有未解除的看门狗告警（或告警之后已有 settled 行）；`1` 表示最后一条 `ALERT flush job unsettled` 之后没有 settled 行，即未解除；`2` 表示用法或输入错误。
 
-## 4. ACK 丢失后的恢复（intent 没有 txHash）
+- 可选：`NOTIFY_CMD=<命令>` 时，未解除告警的摘要作为最后一个参数传给该命令。通知方式由运维决定，本脚本不规定。
+- 脚本对挂起的无 txHash 键只输出 `INFO ... (manual check, not auto-resolved)`，不判定是否解除。
+- 已用真实测试日志验证：`dev2-suite.log` 判定为已解除（exit 0）；合成的未解除日志判定为未解除（exit 1）；先解除后又出现新告警的日志判定为未解除（exit 1）。
 
-适用情形：intent 为 `prepared`（进程在收到签字机回复前中断），或 `uncertain`（回执丢失，错误信息含 `timed out`、`ECONNRESET`、`socket`、`ACK` 或 `no transaction hash`），且没有 txHash。
+建议接入规则：`exit 1` 触发持续告警；告警解除以后续 settled 行为准。现场接入前需项目方批准。
 
-daemon 的核对顺序（`recoverOpenIntents`）：
+## 4. 无 txHash 挂起的人工核查（不是自动恢复）
 
-1. 读取该 intent 的 `eventKeys`（与原始 `requestFingerprint`）。
-2. 链上查询每个键的 `consumedRewardEventKey`：
-   - 全部已消耗：记入结算，不发送（`credited`）。
-   - 部分已消耗，或任一读取失败：UNKNOWN，挂起，不发送。
-   - 全部未消耗：挂起，不发送。
-3. 挂起期间：键留在该 intent 名下，不会被新 intent 再签；超过等待上限后告警一次。
+适用：intent 为 `prepared` 或 `uncertain`，没有 txHash，链上键未消耗。
 
-何时重发（daemon 的规则，不以原 idempotencyKey 重发）：
+daemon 在这种情况下的全部动作：读取原意图和链上消耗状态；**链上已消耗则记入结算（自动，不发送）；否则挂起（不发送，键留在 intent 名下，超时后告警一次）。** daemon 不会在挂起状态下自动重发、自动重建、自动删除 intent。
 
-- 不以原 idempotencyKey 重发，任何情况下都不做。
-- 只有 intent 有 txHash、无回执，且 nonce 已被推进（`judgeTxReplacedOrDropped` 为 `replaced_or_dropped`），且键仍未消耗（`intentConsumedOnChain` 为 `open`），才会以新 key 重建（`.rN`）。无 txHash 的挂起单不会自动重建。
+人工核查步骤（只读，由运维和签字机负责人执行，结果写入回执）：
 
-何时挂起：第 2 步中出现 UNKNOWN、部分消耗、或全部未消耗（无 txHash）时挂起。当前没有自动解除路径。
+1. 记录 intent 标识（idempotencyKey 前 24 个字符足够定位）、`eventKeys`、状态与 note、首次出现时间。只读取快照，不改任何文件。
+2. 链上核对：对每个 `eventKey` 查询 `consumedRewardEventKey`。用两个 RPC 交叉核对。
+   - 全部为 true：应已由 daemon 自动记入结算，核对是否已记入，然后结束。
+   - 部分为 true，或任一读取失败：不处理，升级给项目方。
+3. 签字机侧查询（只读，属于签字机的查询接口，不是 Claim 的去重）：查询该 idempotencyKey 是否有记录。
+   - 有记录并给出 hash：记录该 hash，等待其回执。是否据此改写 intent，需项目方批准。
+   - 无记录：仍然不能确定，继续挂起，升级。
+   - 查询失败：挂起，升级。
+4. 只有同时满足以下三项，才能进入项目方批准的人工操作（具体操作不在本说明内）：链上 `consumedRewardEventKey` 仍为 false；签字机侧证据证明该 idempotencyKey 从未签名，或其签名已确认失效且不会被广播；项目方书面批准。
+5. 在第 4 条满足之前，禁止：删除 intent；改写 pending；以原 idempotencyKey 重发；以新 key 重签。
+6. 每次核查结果都写入回执，包括没有处理的结论。
 
-人工解除的前提（需项目方批准，本说明不规定操作细节）：链上 `consumedRewardEventKey` 仍为 false，且签字机侧审计能证明该 idempotencyKey 从未签名。满足前不得删除 intent、不得改 pending、不得重签。
+已知残余风险（未修，待项目方裁定）：`prepared` 且 pending 已不再覆盖时，daemon 走丢弃分支（不发送）。如果原请求已被签字机签名并广播，链上仍可能核销这些键，daemon 不会计入结算额（只会少计，不会双付）。
 
 ## 5. 与冻结版 88cdc832 的关系
 
