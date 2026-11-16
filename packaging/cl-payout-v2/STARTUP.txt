@@ -1,0 +1,9 @@
+
+六、v2 账本语义校验（v2c 新增，迁移前执行，失败即拒启）
+  - version 必须为 2（旧版单游标仅接受无 version 且字段明确识别的结构）。
+  - historicalCursor / realtimeCursor 为不低于底线（部署块 − 1）的安全整数。
+  - boundaryH 为 null 或 {blockNumber 非负整数, blockHash 0x+64 hex}；历史游标 ≤ H ≤ 实时游标；H 为 null 时历史游标 = 实时游标。
+  - pending 与 settleIntents 逐项校验结构与格式（eventKey、txHash、guardianId、amount、data 选择器、数组长度等），
+    不合法项直接拒启（不丢弃、不回退到空状态）。
+  - 未知顶层字段一律拒启。
+  - 生产不得设置 CONET_VALIDATOR_CL_REWARD_PAYOUT_ALLOW_FRESH_STATE。
