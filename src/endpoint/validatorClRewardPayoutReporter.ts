@@ -1963,13 +1963,30 @@ async function checkAndLockBoundary(provider: ethers.JsonRpcProvider, liveHead: 
 				)
 			)
 			// Roll back only the boundary this mismatch was detected on; otherwise leave the latest state alone.
-			await mutateState((s) =>
-				s.boundaryH &&
-				s.boundaryH.blockNumber === boundary.blockNumber &&
-				s.boundaryH.blockHash === boundary.blockHash
-					? applyReorgRollback(s, boundary.blockNumber, boundary.blockHash, hHash)
-					: s
-			)
+			// Roll back to the safe point H-1: its hash is read from the live chain now. Unreadable => UNKNOWN, no rollback.
+			const cut = boundary.blockNumber - 1
+			const cutBlock = cut >= 0 ? await fetchBlockWithWithdrawals(provider, cut) : null
+			const cutHash = cut >= 0 ? blockHashAtHeight(cutBlock, cut) : ''
+			if (!cutHash) {
+				logger(
+					Colors.yellow(
+						`[validatorClRewardPayout] reorg safe point ${cut}: hash unavailable or height mismatch; UNKNOWN, rollback deferred`
+					)
+				)
+			} else {
+				await mutateState((s) =>
+					s.boundaryH &&
+					s.boundaryH.blockNumber === boundary.blockNumber &&
+					s.boundaryH.blockHash === boundary.blockHash
+						? applyReorgRollback(s, boundary.blockNumber, { blockNumber: cut, blockHash: cutHash })
+						: s
+				)
+				logger(
+					Colors.yellow(
+						`[validatorClRewardPayout] rolled back to safe point H=${cut} hash=${cutHash.slice(0, 14)}…; rows above it are rescanned`
+					)
+				)
+			}
 		}
 	}
 	if (bootFixed) return true

@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { ethers } from 'ethers'
-import { commitScanProgress, type DualCursorState } from './vdrDualCursor.js'
+import { commitScanProgress, prepareSettleIntent, withdrawalEventKey, type DualCursorState } from './vdrDualCursor.js'
 import {
 	__engHarnessResetStateCache,
 	__engHarnessRunTickOnce,
@@ -43,6 +43,10 @@ type Chain = {
 	fetched: number[]
 	withdrawals: Map<number, unknown[]>
 	receipts: Map<string, { status: number }>
+	/** Per-height block hashes (a reorg overrides them). */
+	hashAt: Map<number, string>
+	/** Keys the stub contract reports as consumed on chain. */
+	consumed: Set<string>
 }
 
 type Commit = { line: string; from: number; okThrough: number }
@@ -69,7 +73,7 @@ function makeProvider(chain: Chain) {
 			const reported = chain.wrongHeight.has(n) ? n + 1 : n
 			return {
 				number: ethers.toQuantity(reported),
-				hash: hashOf(n),
+				hash: chain.hashAt.get(n) ?? hashOf(n),
 				withdrawals: chain.withdrawals.get(n) ?? [],
 			}
 		},
@@ -134,9 +138,9 @@ function install(file: string, chain: Chain, opts: InstallOpts = {}): void {
 	process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_ESTIMATE_FROM = '0x' + '11'.repeat(20)
 	delete process.env.CONET_VALIDATOR_CL_REWARD_PAYOUT_PACK_HASH
 	const contract = {
-		consumedRewardEventKey: async (_k: string) => {
+		consumedRewardEventKey: async (k: string) => {
 			opts.onConsumedRead?.()
-			return false
+			return chain.consumed.has(k.toLowerCase())
 		},
 		settleNodeRewards: { estimateGas: async () => 100000n },
 		getNodeByValidatorPubkeyHash: async (_h: string) => 1n,
@@ -173,6 +177,8 @@ function newChain(head: number, hangAtOrBelow = -1): Chain {
 		fetched: [],
 		withdrawals: new Map(),
 		receipts: new Map(),
+		hashAt: new Map(),
+		consumed: new Set(),
 	}
 }
 
@@ -619,4 +625,105 @@ test('lane: a flush step that exceeds its timeout keeps the signing lane busy; a
 	assert.equal(signed, 2, 'the two batches (MAX_ENTRIES=2) are each signed once')
 	assert.equal(st().pending.length, 0, 'all rows are paid once the lane settles')
 	assert.equal(third, 'done', 'the lane is released once the signing job has settled')
+})
+
+test('reorg: a reorg of a fixed H rolls back to a safe point; the ledger reloads after restart; no key lost, none paid twice', async () => {
+	const file = freshFile()
+	const kA = withdrawalEventKey(105, 1).toLowerCase() // pending, not yet paid; re-included after the reorg
+	const kM = withdrawalEventKey(105, 2).toLowerCase() // already paid on chain before the reorg
+	const kO = withdrawalEventKey(105, 3).toLowerCase() // owned by an open broadcast intent whose tx is not found
+	const realtimeRow = (index: number, key: string) => ({
+		guardianId: '1',
+		amount: '1000000000000000',
+		eventKey: key,
+		blockNumber: 105,
+		withdrawalIndex: index,
+		scanLine: 'realtime',
+	})
+	const openIntent = {
+		...prepareSettleIntent({
+			to: PROXY,
+			guardianIds: [1n],
+			amounts: [1_000_000_000_000_000n],
+			eventKeys: [kO],
+			gasLimit: 800000,
+			keyArray: 'test-key-array',
+			scanLines: ['realtime'],
+			now: new Date('2026-11-16T00:00:00.000Z'),
+		}),
+		status: 'broadcast' as const,
+		txHash: ethers.id('reorg-open-tx'),
+	}
+	writeFileSync(
+		file,
+		JSON.stringify({
+			version: 2,
+			boundaryH: { blockNumber: 98, blockHash: hashOf(98) },
+			historicalCursor: 40,
+			realtimeCursor: 105,
+			pending: [realtimeRow(1, kA), realtimeRow(3, kO)],
+			settleIntents: [openIntent],
+			firstBatchSettledWei: '0',
+			updatedAt: new Date().toISOString(),
+		})
+	)
+	const chain = newChain(107)
+	// All three withdrawals live in block 105 (one set call, not one per entry).
+	chain.withdrawals.set(
+		105,
+		[1, 2, 3].map((index) => ({ index: String(index), validatorIndex: '5', address: PROXY, amount: '1000000' }))
+	)
+	chain.consumed.add(kM)
+	const iface = new ethers.Interface(['function settleNodeRewards(uint256[] guardianIds, uint256[] amounts, bytes32[] eventKeys)'])
+	const signedKeys: string[] = []
+	let signed = 0
+	install(file, chain, {
+		signer: async (tx) => {
+			const keys = iface.decodeFunctionData('settleNodeRewards', tx.data)[2].map((k: string) => k.toLowerCase())
+			signedKeys.push(...keys)
+			signed += 1
+			const hash = ethers.id(`reorg-tx:${signed}`)
+			chain.receipts.set(hash, { status: 1 })
+			for (const k of keys) chain.consumed.add(k)
+			return { hash }
+		},
+	})
+	const realFetch = globalThis.fetch
+	globalThis.fetch = (async () => ({
+		ok: true,
+		json: async () => ({ data: { validator: { pubkey: PUBKEY } } }),
+	})) as unknown as typeof fetch
+	let reloadError: unknown = null
+	try {
+		// Fix H at 105 first (the process is already running with a fixed boundary when the reorg happens).
+		await __engHarnessRunWorkerOnce('historical')
+		await __engHarnessRunWorkerOnce('realtime')
+		assert.equal(st().boundaryH?.blockNumber, 105, 'H is fixed at 105 before the reorg')
+		for (let n = 105; n <= 107; n++) chain.hashAt.set(n, ethers.id(`reorged:${n}`).toLowerCase())
+		await __engHarnessRunTickOnce() // H=105 reads a new hash: roll back to the safe point 104, rescan from 105, pay
+		__engHarnessResetStateCache() // restart: the persisted ledger must load
+		try {
+			peekValidatorClRewardPayoutState()
+		} catch (e) {
+			reloadError = e
+		}
+		await __engHarnessRunTickOnce()
+		await __engHarnessRunTickOnce()
+	} finally {
+		__setFlushTestHooks(null)
+		globalThis.fetch = realFetch
+	}
+	assert.equal(reloadError, null, `the rolled-back ledger reloads after restart (got ${String(reloadError)})`)
+	const s = st()
+	assert.ok(s.boundaryH !== null && s.historicalCursor <= s.boundaryH.blockNumber, 'the reloaded ledger is consistent')
+	assert.equal(signedKeys.filter((k) => k === kA).length, 1, 'the re-included pending key is paid exactly once')
+	assert.equal(signedKeys.includes(kM), false, 'a key already paid on chain is not paid again after the reorg')
+	assert.equal(signedKeys.includes(kO), false, 'a key owned by an open intent is not re-signed while that intent is open')
+	assert.equal(
+		s.settleIntents.find((i) => i.idempotencyKey === openIntent.idempotencyKey)?.status,
+		'broadcast',
+		'the open intent survives the rollback until recovery judges it'
+	)
+	assert.ok(s.pending.some((p) => p.eventKey.toLowerCase() === kO), 'the open intent key is still owned in pending (not lost)')
+	assert.equal(new Set(signedKeys).size, signedKeys.length, 'no key is signed twice')
 })

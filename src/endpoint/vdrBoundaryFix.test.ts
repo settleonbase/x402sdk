@@ -105,8 +105,12 @@ test('applyReorgRollback: spans above the cut are trimmed so history scans them 
 		realtimeCursor: 108,
 		metrics: { ...createInitialDualCursorState(1).metrics, realtimeSpans: [{ from: 99, to: 108 }] },
 	})
-	const r = applyReorgRollback(s, 103, hashOf(103), hashOf(1))
+	const r = applyReorgRollback(s, 103, { blockNumber: 102, blockHash: hashOf(102) })
+	assert.deepEqual(r.boundaryH, { blockNumber: 102, blockHash: hashOf(102) }, 'the boundary moves to the safe point')
+	assert.equal(r.realtimeCursor, 102, 'realtime is not below the boundary')
+	assert.equal(r.historicalCursor, 40)
 	assert.deepEqual(r.metrics.realtimeSpans, [{ from: 99, to: 102 }])
+	assert.equal(r.metrics.retiredBoundaries?.at(-1)?.blockNumber, 108, 'the replaced H is retired')
 })
 
 test('assertLoadableState accepts valid spans and refuses overlapping, unsorted, or above-H spans', () => {

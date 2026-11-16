@@ -553,56 +553,53 @@ export function commitScanProgress(state: DualCursorState, input: ScanCommitInpu
  * Reorg within confirmation depth: if stored hash for cursor tip mismatches,
  * roll both cursors back to parentBlock and drop pending / intents at/after that height.
  */
-export function applyReorgRollback(
-	state: DualCursorState,
-	mismatchBlock: number,
-	_expectedHash: string,
-	_actualHash: string
-): DualCursorState {
-	const cut = Math.max(-1, Math.floor(mismatchBlock) - 1)
+/**
+ * Reorg of the boundary H: its hash no longer matches the chain. Roll back to a safe point below the mismatch.
+ * - The boundary becomes the safe point block (number and hash read from the live chain, see the caller); both cursors
+ *   move to it (realtime cannot sit below the boundary, so the ledger loads after restart).
+ * - Rows above the safe point are dropped and rescanned from the live chain.
+ * - Every settle intent is kept. An open intent keeps its keys owned until recovery judges its tx: dropping it would
+ *   release the keys for re-signing while the original tx may still mine (double payment).
+ * - Realtime spans are trimmed to the safe point; the replaced H and its cursors are retired (kept for reconciliation).
+ */
+export function applyReorgRollback(state: DualCursorState, mismatchBlock: number, safePoint: BoundaryH): DualCursorState {
+	const cut = safePoint.blockNumber
+	if (cut !== Math.floor(mismatchBlock) - 1) throw new Error('reorg safe point must be the block below the mismatch')
+	const now = new Date().toISOString()
 	const pending = state.pending.filter((p) => p.blockNumber <= cut)
-	const settleIntents = state.settleIntents.filter((intent) => {
-		const maxBn = intent.eventKeys.length
-			? Math.max(
-					...state.pending
-						.filter((p) => intent.eventKeys.includes(p.eventKey))
-						.map((p) => p.blockNumber),
-					-1
-				)
-			: -1
-		// Keep intents that only reference blocks ≤ cut, or already confirmed.
-		if (intent.status === 'confirmed') return true
-		return maxBn <= cut
-	})
-
-	let historicalCursor = Math.min(state.historicalCursor, cut)
-	let realtimeCursor = Math.min(state.realtimeCursor, cut)
-	if (state.boundaryH && historicalCursor > state.boundaryH.blockNumber) {
-		historicalCursor = state.boundaryH.blockNumber
+	const historicalCursor = Math.min(state.historicalCursor, cut)
+	const realtimeCursor = cut
+	const spans = spansOf(state)
+		.filter((s) => s.from <= cut)
+		.map((s) => ({ from: s.from, to: Math.min(s.to, cut) }))
+		.filter((s) => s.to > historicalCursor)
+	const retired = [...(state.metrics.retiredBoundaries ?? [])]
+	if (state.boundaryH) {
+		retired.push({
+			blockNumber: state.boundaryH.blockNumber,
+			blockHash: state.boundaryH.blockHash,
+			historicalCursor: state.historicalCursor,
+			realtimeCursor: state.realtimeCursor,
+			retiredAt: now,
+		})
 	}
-
-	// Spans above the cut are no longer realtime-complete (their rows were dropped), so history must scan them again.
-	const spanRollback = state.metrics.realtimeSpans
-		? {
-				realtimeSpans: spansOf(state)
-					.filter((s) => s.from <= cut)
-					.map((s) => ({ from: s.from, to: Math.min(s.to, cut) })),
-			}
-		: {}
 	return {
 		...state,
+		boundaryH: { blockNumber: cut, blockHash: safePoint.blockHash },
 		historicalCursor,
 		realtimeCursor,
 		pending,
-		settleIntents,
+		settleIntents: state.settleIntents,
+		scanTargetBlock: cut,
 		lastProcessedBlock: historicalCursor,
-		updatedAt: new Date().toISOString(),
+		updatedAt: now,
 		metrics: {
 			...state.metrics,
-			...spanRollback,
+			realtimeSpans: spans,
+			retiredBoundaries: retired,
 			lastHistoryCursor: historicalCursor,
 			lastRealtimeCursor: realtimeCursor,
-			updatedAt: new Date().toISOString(),
+			updatedAt: now,
 		},
 	}
 }
