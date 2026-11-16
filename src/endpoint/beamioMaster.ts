@@ -68,6 +68,7 @@ import {
 } from './latestCardsShared'
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
 import { omitCardsOwnedByUnhandedAgentTemp } from './agentTempDiscoverVisibility'
+import { filterCardsByCategoryGroupsForDiscover } from './cardsByCategoryDiscover'
 import {
 	kickReferralRegistryRedeemRelay,
 	referralRegistryRedeemPool,
@@ -938,7 +939,8 @@ const routing = ( router: Router ) => {
 			}
 		})
 
-		/** 按 shareTokenMetadata.categories 聚合已登记发卡（与 Cluster GET /api/cardsByCategory 一致） */
+		/** 按 shareTokenMetadata.categories 聚合已登记发卡（Cluster GET /api/cardsByCategory 透传至此）。
+		 *  返回前套用与 latestCards 相同的 Discover 过滤（exclude + cutover + agent temp），缓存的是过滤后的结果。 */
 		router.get('/cardsByCategory', async (_req, res) => {
 			const scanLimit = Math.min(parseInt(String(_req.query.scanLimit || 800), 10) || 800, 3000)
 			const limitPerCategory = Math.min(parseInt(String(_req.query.limitPerCategory || 80), 10) || 80, 500)
@@ -947,7 +949,8 @@ const routing = ( router: Router ) => {
 			if (cached && Date.now() < cached.expiry) {
 				return res.status(200).json({ groups: cached.groups })
 			}
-			const groups = await getLatestCardsGroupedByCategory({ scanLimit, limitPerCategory })
+			const rawGroups = await getLatestCardsGroupedByCategory({ scanLimit, limitPerCategory })
+			const groups = await filterCardsByCategoryGroupsForDiscover(rawGroups, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTemp })
 			cardsByCategoryCache.set(cacheKey, { groups, expiry: Date.now() + QUERY_CACHE_TTL_MS })
 			res.status(200).json({ groups })
 		})
