@@ -240,15 +240,26 @@ function checkExec(file, text) {
 assertRecognizer()
 
 const signerGuard = path.join(worktree, 'packages/wallet-signer/src/noWebSocket.ts')
-const oracleGuard = path.join(worktree, 'packages/conet-oracle-daemon/src/noWebSocket.ts')
+// Oracle checks run only when the oracle package exists on this branch. When absent they are
+// reported as SKIPPED (never silently passed) and listed in checks_skipped at the end.
+const ORACLE_PKG = 'packages/conet-oracle-daemon'
+const oraclePresent = fs.existsSync(path.join(worktree, ORACLE_PKG, 'package.json'))
+const checksSkipped = []
+if (!oraclePresent) checksSkipped.push('oracle:all (packages/conet-oracle-daemon absent on this branch)')
 const signerSha = sha256(signerGuard)
-const oracleSha = sha256(oracleGuard)
 console.log(`signer_sha256=${signerSha}`)
-console.log(`oracle_sha256=${oracleSha}`)
-if (signerSha !== oracleSha) fail('signer and oracle noWebSocket.ts differ')
-if (signerSha === WIP_SHA256 || oracleSha === WIP_SHA256) fail('guard is still the WIP hash')
+if (oraclePresent) {
+	const oracleSha = sha256(path.join(worktree, ORACLE_PKG, 'src/noWebSocket.ts'))
+	console.log(`oracle_sha256=${oracleSha}`)
+	if (signerSha !== oracleSha) fail('signer and oracle noWebSocket.ts differ')
+	if (signerSha === WIP_SHA256 || oracleSha === WIP_SHA256) fail('guard is still the WIP hash')
+} else {
+	console.log('SKIPPED oracle_guard_sha_compare: packages/conet-oracle-daemon absent')
+	if (signerSha === WIP_SHA256) fail('guard is still the WIP hash')
+}
 
-const packages = ['packages/wallet-signer', 'packages/conet-oracle-daemon']
+const packages = ['packages/wallet-signer', ...(oraclePresent ? [ORACLE_PKG] : [])]
+if (!oraclePresent) console.log('SKIPPED oracle_package_scan: packages/conet-oracle-daemon absent')
 const allow = new Set(['noWebSocket.ts', 'noWebSocket.js', 'noWebSocketProbe.mjs', 'noWebSocketEsmProbe.mjs', 'noWebSocketCjsProbe.mjs', 'httpRpcReconnectAcceptance.js', 'httpRpcDisconnectAcceptance.js', '.noWebSocket.probe-compile.cjs'])
 const scanned = []
 for (const pkg of packages) {
@@ -273,8 +284,9 @@ const entries = [
 	['packages/wallet-signer/src/main.ts', './noWebSocket', 'packages/wallet-signer/dist/src/main.js'],
 	['packages/wallet-signer/src/wsctl.ts', './noWebSocket', 'packages/wallet-signer/dist/src/wsctl.js'],
 	['packages/wallet-signer/p0/p0Plan.ts', '../src/noWebSocket', 'packages/wallet-signer/dist/p0/p0Plan.js'],
-	['packages/conet-oracle-daemon/src/main.ts', './noWebSocket', 'packages/conet-oracle-daemon/dist/src/main.js'],
 ]
+if (oraclePresent) entries.push(['packages/conet-oracle-daemon/src/main.ts', './noWebSocket', 'packages/conet-oracle-daemon/dist/src/main.js'])
+else console.log('SKIPPED oracle_entry: packages/conet-oracle-daemon/src/main.ts absent')
 console.log('covered_entries:')
 for (const [src, spec, dist] of entries) {
 	console.log(`- ${src} -> ${dist}`)
@@ -287,9 +299,9 @@ for (const [src, spec, dist] of entries) {
 const startups = [
 	'packages/wallet-signer/deploy/wallet-signer.service',
 	'packages/wallet-signer/deploy/lab-mining-pool/wallet-signer-lab.service',
-	'packages/conet-oracle-daemon/deploy/conet-oracle-quote.service',
-	'packages/conet-oracle-daemon/deploy/run-systemd-fetch-acceptance.sh',
 ]
+if (oraclePresent) startups.push('packages/conet-oracle-daemon/deploy/conet-oracle-quote.service', 'packages/conet-oracle-daemon/deploy/run-systemd-fetch-acceptance.sh')
+else console.log('SKIPPED oracle_startups: conet-oracle-quote.service, run-systemd-fetch-acceptance.sh (oracle package absent)')
 console.log('covered_startups:')
 for (const rel of startups) {
 	console.log(`- ${rel}`)
@@ -311,7 +323,8 @@ function walkService(dir) {
 walkService(path.join(worktree, 'service'))
 console.log(`scanned_business_files=${scanned.length}`)
 console.log('not_business_use=node_modules/ethers WebSocketProvider export; transitive load of ws; noWebSocket.ts guard; noWebSocketProbe.mjs')
-console.log('covered=wallet-signer main, wsctl, p0Plan, oracle main, wallet-signer.service, wallet-signer-lab.service, conet-oracle-quote.service, run-systemd-fetch-acceptance.sh')
+console.log(`covered=wallet-signer main, wsctl, p0Plan, ${oraclePresent ? 'oracle main, conet-oracle-quote.service, run-systemd-fetch-acceptance.sh, ' : ''}wallet-signer.service, wallet-signer-lab.service`)
+console.log(`checks_skipped=${checksSkipped.length ? checksSkipped.join('; ') : 'none'}`)
 console.log('not_covered=rest-of-repository, browsers, chain-nodes, http2')
 console.log('not_globally_safe=yes')
 console.log('service_remediation_not_modified:')
