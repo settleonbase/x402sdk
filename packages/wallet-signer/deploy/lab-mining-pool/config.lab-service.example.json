@@ -1,0 +1,22 @@
+{
+	"requireMountPoint": "/srv/secure",
+	"requireMountSource": "/dev/mapper/securedata",
+	"dataDir": "/srv/secure/wallet-signer-lab/state",
+	"logDir": "/srv/secure/wallet-signer-lab/log",
+	"adminSocket": "/run/wallet-signer-lab/admin.sock",
+	"adminSocketMode": 384,
+	"policyFile": "/etc/wallet-signer-lab/policy.json",
+	"compromisedFile": "/srv/secure/wallet-signer-lab/state/compromised.json",
+	"rpc": {
+		"unix": [
+			{ "path": "/run/wallet-signer-lab-mining-pool/lab-payout.sock", "client": "lab-mining-pool", "mode": 432 }
+		]
+	},
+	"chains": {
+		"224422": { "rpcUrls": ["https://publicrpc.conet.network"], "resendAfterMs": 60000, "maxResends": 3, "receiptPollMs": 2000 }
+	},
+	"gasKeeper": { "enabled": false, "intervalMs": 60000, "chains": {} },
+	"alerts": { "host": "wallet-signer-lab", "webhookUrl": null },
+	"scryptN": 262144,
+	"keyWaitMs": 30000
+}

@@ -1,0 +1,21 @@
+[Unit]
+Description=Beamio Lab payout signer (isolated from the Claim signer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=walletsigner-lab
+Group=wslab
+UMask=0027
+ExecStart=/usr/bin/node --disable-sigusr1 --disallow-code-generation-from-strings --require /opt/wallet-signer-lab/dist/src/noWebSocket.js /opt/wallet-signer-lab/dist/src/main.js --config /etc/wallet-signer-lab/config.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/srv/secure/wallet-signer-lab /run/wallet-signer-lab /run/wallet-signer-lab-mining-pool
+
+[Install]
+WantedBy=multi-user.target

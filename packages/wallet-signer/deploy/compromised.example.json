@@ -1,0 +1,10 @@
+{
+	"note": "Public addresses that held roles on the pilot contracts as of 2026-10-28. Addresses only, never keys. The signer never sends value to these, and the epoch policy may only remove them.",
+	"addresses": [
+		"0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1",
+		"0x678F3570F9173373bB75e7544fcF383153aDAF4C",
+		"0x24103Ea5eA17aBFfDA8b2904acCA679C798b3695",
+		"0x66BAb8A64764e659Fa7FF41D19aDFbb7b956CED2",
+		"0x4A3AAd1Ddf82aFF2B3969D45B157D34c72B2Efc8"
+	]
+}

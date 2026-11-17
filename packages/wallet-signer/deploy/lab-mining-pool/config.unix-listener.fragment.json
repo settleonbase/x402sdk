@@ -1,0 +1,8 @@
+{
+	"_note": "Fragment only. Add this entry to rpc.unix in /etc/wallet-signer/config.json; keep rpc.proxied as it is. The directory /run/wallet-signer-lab-mining-pool must be created by tmpfiles (owner walletsigner, group per Codex plan) before reload.",
+	"rpc": {
+		"unix": [
+			{ "path": "/run/wallet-signer-lab-mining-pool/lab-payout.sock", "client": "lab-mining-pool", "mode": 432 }
+		]
+	}
+}

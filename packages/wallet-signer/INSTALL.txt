@@ -1,0 +1,42 @@
+Beamio wallet-signer install notes
+
+This package is a compiled dist plus package metadata. It is not a production
+config and it does not contain a key.
+
+Node.js
+  22.14 or newer (package.json engines). This build was produced with the
+  Node.js 22 used on the acceptance machine. Do not run it on an older Node.
+
+Runtime dependencies
+  @scure/bip32 1.7.0
+  @scure/bip39 1.6.0
+  ethers 6.16.0
+  Versions are pinned by package-lock.json.
+
+npm ci
+  Run `npm ci --omit=dev` only on an isolated acceptance machine, after this
+  archive is unpacked there. That installs the three runtime dependencies
+  from the lockfile and does not install TypeScript.
+  Do not run npm ci on the signer host. Do not run it inside /opt/wallet-signer.
+
+What to copy
+  The signer process is dist/src/main.js, but that file alone is not the
+  install. Copy the whole dist/ tree. dist/src/gasKeeper.js and
+  dist/src/config.js are part of the same build and must be replaced together
+  with every other file under dist/.
+
+Live files that must stay
+  Replacing /opt/wallet-signer/dist must not overwrite
+  /etc/wallet-signer/config.json.
+  Do not copy a config, vault, keystore, or cloudflare.env from this archive.
+  This archive has none of those. Do not use rsync --delete against
+  /opt/wallet-signer or /etc/wallet-signer.
+  Leave the running wallet-signer process alone until a separate, explicit
+  approval says to restart it. gasKeeper.enabled in the live config stays
+  false until that same approval.
+
+Suggested copy, on the acceptance machine only
+  COPYFILE_DISABLE=1 tar -xf <this-archive>
+  npm ci --omit=dev
+  # then copy dist/ to the signer by a path that does not touch
+  # /etc/wallet-signer/config.json
