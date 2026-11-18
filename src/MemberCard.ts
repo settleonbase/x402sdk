@@ -9778,6 +9778,42 @@ export const resolveChargeBUnitFeePayerCardOwner = async (
 	return ethers.getAddress(owner)
 }
 
+/** 同上，但卡地址由调用方给定（已经过 selectChargeCard 与绑定核验的卡）。不回退 items/默认卡。 */
+export const resolveChargeBUnitFeePayerCardOwnerForCard = async (
+	provider: ethers.Provider,
+	cardAddr: string
+): Promise<string> => {
+	const card = new ethers.Contract(cardAddr, ['function owner() view returns (address)'], provider)
+	const owner = (await card.owner()) as string
+	if (!owner || owner === ethers.ZeroAddress) {
+		throw new Error(`Charge B-Unit fee: card ${cardAddr} has no owner`)
+	}
+	return ethers.getAddress(owner)
+}
+
+/**
+ * 收费准入的只读 owner / AA 解析（不发交易）。任一读取失败均抛出（调用方映射为 503）。
+ * 不使用 resolveBeamioAaForEoaViaUserCardFactory：其内部吞掉读取错误并返回 null，会把故障误判为“无 AA”。
+ */
+export const resolveChargeCardOwnerForAdmission = async (
+	cardAddress: string
+): Promise<{ eoa: string; aa: string | null }> => {
+	const cardN = ethers.getAddress(cardAddress)
+	const provider = providerForUserCardChain(await resolveUserCardChain(cardN))
+	const card = new ethers.Contract(cardN, ['function owner() view returns (address)'], provider)
+	const ownerRaw = (await card.owner()) as string
+	if (!ownerRaw || ownerRaw === ethers.ZeroAddress) {
+		throw new Error(`card ${cardN} has no owner`)
+	}
+	const eoa = ethers.getAddress(ownerRaw)
+	const aaFactory = ethers.getAddress(await getCardAaFactoryAddress(cardN))
+	const factory = new ethers.Contract(aaFactory, ['function beamioAccountOf(address) view returns (address)'], provider)
+	const primary = (await factory.beamioAccountOf(eoa)) as string
+	if (!primary || primary === ethers.ZeroAddress) return { eoa, aa: null }
+	const code = await provider.getCode(primary)
+	return { eoa, aa: code && code !== '0x' && code.length > 2 ? ethers.getAddress(primary) : null }
+}
+
 /** Charge 费用承担方：检测 to（收款方）的上层 admin。若上层是卡的 owner 或 adminParent==0，则 BUint 费用由 to 负担；否则由 upperAdmin 负担。返回 feePayer 的 EOA。 */
 export const resolveChargeFeePayer = async (
 	to: string,
@@ -9825,16 +9861,17 @@ export const resolveChargeFeePayer = async (
 export const OpenContainerRelayPreCheckBUnitFee = async (
 	payload: OpenContainerRelayPayload,
 	_currency: string | string[],
-	_currencyAmount: string | string[]
+	_currencyAmount: string | string[],
+	/** 由 selectChargeCard + 绑定核验给出的卡（checksum）。费用卡只能来自它。 */
+	verifiedCardAddress: string
 ): Promise<{ success: boolean; error?: string; feeBUnits6?: bigint; feePayerEOA?: string }> => {
 	try {
 		const items = payload.items ?? []
 		if (items.length === 0) return { success: false, error: 'items required for charge fee check' }
-		const itemSlice = items.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
 		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
-		const cardAddr = resolveChargeFeePayerCardFromOpenContainerItems(itemSlice)
+		const cardAddr = ethers.getAddress(verifiedCardAddress)
 		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
-		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(cardProvider, itemSlice)
+		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwnerForCard(cardProvider, cardAddr)
 		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
 		const picked = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(cardAddr, feePayerOwnerEoa, feeBUnits6, {
 			aaFactoryAddress: aaFactoryAddr,

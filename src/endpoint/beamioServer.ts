@@ -23,7 +23,7 @@ import {beamio_ContractPool, searchUsers, searchUsersResultsForKeyward, getDisti
 import {coinbaseToken, coinbaseOfframp, coinbaseHooks} from '../coinbase'
 import { claimFreeMembershipPreCheck } from '../MemberCard'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
-import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckChargeBurnBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminBatchPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, quoteUsdcDepositForCardFiat6, nfcTopupPreparePayload, unpackTopupMintAmount, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, lookupOnChainMerchantCardRegistryIdentity, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
+import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckChargeBurnBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminBatchPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, quoteUsdcDepositForCardFiat6, nfcTopupPreparePayload, unpackTopupMintAmount, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, resolveChargeCardOwnerForAdmission, isAllowedMerchantImageHttpsUrl, lookupOnChainMerchantCardRegistryIdentity, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
 import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_AGENT_REFERRER_REGISTRY, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET, USDC_BASE } from '../chainAddresses'
 import {
@@ -142,6 +142,8 @@ import {
 } from './offlineChatPush'
 import { pickBestMembershipNftByMinUsdc6 } from './membershipTierPick'
 import { getAaFactoryAddressFromUserCardFactoryPaymaster, resolveBeamioAaForEoaViaUserCardFactory, resolveBeamioAaForEoaWithFallback } from './resolveBeamioAaViaUserCardFactory'
+import { admitChargeRequest } from './chargeRelayGate'
+import { readActivePosTerminalBindingForCharge } from '../db'
 import { resolveBeamioWalletIdentityFromAddress } from '../beamioWalletIdentity'
 import { validateYoutubeProductionVideoUrl } from './youtubeProductionVideo'
 import {
@@ -11146,16 +11148,28 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				logger(Colors.red(`[AAtoEOA] server OpenContainer pre-check FAIL: ${preCheck.error}`), inspect(req.body, false, 2, true))
 				return res.status(400).json({ success: false, error: preCheck.error }).end()
 			}
+			/** 收费准入（先于任何排队、签发、广播）：selectChargeCard → 绑定核验 → 纯 USDC 收款方核验。之后只使用返回的规范化卡地址。 */
+			const chargeAdmission = await admitChargeRequest(
+				{
+					merchantCardAddress: body.merchantCardAddress,
+					items: (body.openContainerPayload.items ?? []).map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') })),
+					to: body.openContainerPayload.to,
+					ccsaAddress: BASE_CCSA_CARD_ADDRESS,
+				},
+				{
+					lookupBinding: readActivePosTerminalBindingForCharge,
+					resolveOwner: resolveChargeCardOwnerForAdmission,
+				}
+			)
+			if (!chargeAdmission.ok) {
+				logger(Colors.red(`[AAtoEOA] server OpenContainer charge admission REJECT (${chargeAdmission.code}): ${chargeAdmission.error}`))
+				return res.status(chargeAdmission.status).json({ success: false, error: chargeAdmission.error, code: chargeAdmission.code }).end()
+			}
 			/** 付款 AA 必须与本次收款卡所在链的 UserCard 工厂链路 canonical 一致，否则链上会在 CoNET/Base 不同 owner 间恢复出错。 */
 			try {
 				const acc = ethers.getAddress(body.openContainerPayload.account)
 				const openContainerItems = body.openContainerPayload.items ?? []
-				const merchantCardRaw =
-					typeof body.merchantCardAddress === 'string' && ethers.isAddress(body.merchantCardAddress.trim())
-						? ethers.getAddress(body.merchantCardAddress.trim())
-						: resolveChargeFeePayerCardFromOpenContainerItems(
-								openContainerItems.map((it) => ({ kind: Number(it.kind), asset: String(it.asset ?? '') }))
-						  )
+				const merchantCardRaw = chargeAdmission.cardAddress
 				const merchantCardChain = await resolveUserCardChain(merchantCardRaw)
 				const merchantCardProvider = providerForUserCardChain(merchantCardChain)
 				const merchantCardFactory = cardFactoryForUserCardChain(merchantCardChain)
@@ -11285,7 +11299,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 					return res.status(400).json({ success: false, error }).end()
 				}
 			}
-			const bunitCheck = await OpenContainerRelayPreCheckBUnitFee(body.openContainerPayload, body.currency ?? [], body.currencyAmount ?? [])
+			const bunitCheck = await OpenContainerRelayPreCheckBUnitFee(body.openContainerPayload, body.currency ?? [], body.currencyAmount ?? [], chargeAdmission.cardAddress)
 			if (!bunitCheck.success) {
 				logger(Colors.red(`[AAtoEOA] server OpenContainer B-Unit pre-check FAIL: ${bunitCheck.error}`))
 				return res.status(400).json({ success: false, error: bunitCheck.error }).end()
@@ -11310,7 +11324,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				const burnPre = await verifyChargeOwnerChildBurnClusterPreCheck({
 					burn: body.chargeOwnerChildBurn as import('../MemberCard').ChargeOwnerChildBurnPayload,
 					payeeTo: body.openContainerPayload.to,
-					merchantCardAddress: typeof body.merchantCardAddress === 'string' ? body.merchantCardAddress : undefined,
+					merchantCardAddress: chargeAdmission.cardAddress,
 					items: body.openContainerPayload.items ?? [],
 				})
 				if (!burnPre.ok) {
@@ -11328,7 +11342,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 				forText: body.forText,
 				requestHash: body.requestHash,
 				validDays: body.validDays,
-				merchantCardAddress: body.merchantCardAddress,
+				merchantCardAddress: chargeAdmission.cardAddress,
 				nfcSubtotalCurrencyAmount: body.nfcSubtotalCurrencyAmount,
 				nfcTipCurrencyAmount: body.nfcTipCurrencyAmount,
 				nfcTipRateBps: body.nfcTipRateBps,

@@ -9,7 +9,6 @@
  */
 import { ethers } from 'ethers'
 
-
 export type ChargeFeeCardVerdict =
 	| { ok: true; cardAddress: string }
 	| { ok: false; status: 400 | 503; code: 'pos_card_not_bound' | 'pos_card_binding_unavailable' | 'pos_card_invalid'; error: string }
@@ -58,9 +57,15 @@ export const verifyChargePayeeMatchesCardOwner = async (params: {
 	} catch {
 		return { ok: false, status: 503, code: 'pos_payee_resolve_unavailable', error: 'card owner is temporarily unavailable' }
 	}
+	let eoa: string
+	let aa: string | null
+	try {
+		eoa = ethers.getAddress(owner.eoa).toLowerCase()
+		aa = owner.aa && ethers.isAddress(owner.aa) ? ethers.getAddress(owner.aa).toLowerCase() : null
+	} catch {
+		return { ok: false, status: 503, code: 'pos_payee_resolve_unavailable', error: 'card owner is temporarily unavailable' }
+	}
 	const to = ethers.getAddress(params.to).toLowerCase()
-	const eoa = ethers.getAddress(owner.eoa).toLowerCase()
-	const aa = owner.aa && ethers.isAddress(owner.aa) ? ethers.getAddress(owner.aa).toLowerCase() : null
 	if (to === eoa || (aa !== null && to === aa)) return { ok: true }
 	return { ok: false, status: 400, code: 'pos_payee_card_mismatch', error: 'payee is not the owner of the bound terminal card' }
 }

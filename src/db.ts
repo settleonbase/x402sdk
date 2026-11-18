@@ -3370,11 +3370,13 @@ export const deletePosTerminalAdminCardBinding = async (posLoose: string, cardAd
 	await deletePosTerminalCardBinding(posLoose, cardAddressLoose)
 }
 
-/** POS 问询已登记商户卡地址（Registration Device 成功且链上 confirm 后即有记录）。 */
 /**
  * 收费路径专用的绑定读取（抛错版）。只有 is_active = true 且 tx_hash 非空（链上终端交易成功后由
  * syncPosTerminalAdminBindingAfterTx 写入）的行才算绑定。
  * - 返回 true：存在绑定行；返回 false：确定无绑定行；数据库异常一律抛出（调用方映射为 503）。
+ * 本函数只做一条 SELECT：不执行建表/迁移，也不写库。原因（真实 PostgreSQL 16 验证，见待审单）：
+ * ensureBeamioPosTerminalAdminCardSchema 会执行 UPDATE，把“无激活行的 POS”中最新一行重新置为 is_active=true；
+ * 若放在收费读取中，已停用且带 tx_hash 的卡会被收费请求重新激活。表结构由启动/绑定写入路径负责。
  * 现有的 getPosTerminalCardBindingRow 等读取函数语义不变，不在此处复用。
  */
 export const readActivePosTerminalBindingForCharge = async (cardAddressLoose: string): Promise<boolean> => {
@@ -3382,7 +3384,6 @@ export const readActivePosTerminalBindingForCharge = async (cardAddressLoose: st
 	const db = new Client({ connectionString: DB_URL })
 	try {
 		await db.connect()
-		await ensureBeamioPosTerminalAdminCardSchema(db)
 		const { rows } = await db.query(
 			`SELECT 1 FROM beamio_pos_terminal_admin_card
 			 WHERE LOWER(TRIM(card_address)) = $1
@@ -3397,6 +3398,7 @@ export const readActivePosTerminalBindingForCharge = async (cardAddressLoose: st
 	}
 }
 
+/** POS 问询已登记商户卡地址（Registration Device 成功且链上 confirm 后即有记录）。 */
 export const getPosTerminalCardAddressForWallet = async (walletLoose: string): Promise<string | null> => {
 	const row = await getPosTerminalCardBindingRow(walletLoose)
 	return row?.cardAddress ?? null

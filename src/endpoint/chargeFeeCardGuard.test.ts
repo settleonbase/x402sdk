@@ -84,3 +84,14 @@ test('payee: an owner read failure is 503 and never accepts the payee', async ()
 	assert.equal(!v.ok && v.status, 503)
 	assert.equal(!v.ok && v.code, 'pos_payee_resolve_unavailable')
 })
+
+test('payee: a malformed owner address from the resolver is 503 (never a 500, never accepted)', async () => {
+	const v = await verifyChargePayeeMatchesCardOwner({
+		to: OWNER_EOA,
+		cardAddress: CARD,
+		resolveOwner: async () => ({ eoa: 'not-an-address', aa: null }),
+	})
+	assert.equal(v.ok, false)
+	assert.equal(!v.ok && v.status, 503)
+	assert.equal(!v.ok && v.code, 'pos_payee_resolve_unavailable')
+})
