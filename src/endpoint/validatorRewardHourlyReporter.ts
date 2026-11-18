@@ -12,7 +12,6 @@ import {
 	validatorRewardReport,
 } from './validatorDepositRedeem'
 
-const DEFAULT_NEW_CONET_DIR = '/Users/peter/Downloads/seguro-pro/CoNET-DL-master/newCoNET'
 const DEFAULT_BEACON_REST = 'http://127.0.0.1:4100'
 const REPORTER_ABI = [
 	'function getNodeValidator(address nodeWallet) view returns (bytes pubkey, address withdrawalBeneficiary, uint64 registeredAt, uint64 exitedAt, bool active)',
@@ -42,7 +41,7 @@ let reporterTimer: ReturnType<typeof setTimeout> | undefined
 let reporterInFlight = false
 
 function resolveNewCoNETDir(): string {
-	return process.env.CONET_VALIDATOR_NEWCONET_DIR?.trim() || masterSetup.validatorDeposit?.newCoNETDir?.trim() || DEFAULT_NEW_CONET_DIR
+	return process.env.CONET_VALIDATOR_NEWCONET_DIR?.trim() || masterSetup.validatorDeposit?.newCoNETDir?.trim() || (() => { throw new Error('CONET_VALIDATOR_NEWCONET_DIR or masterSetup.validatorDeposit.newCoNETDir is required (fail closed)') })()
 }
 
 function resolveRewardReporterStateFile(): string {

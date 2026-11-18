@@ -15,8 +15,13 @@ import { ethers } from 'ethers'
 import { sendConfiguredSettle } from './vdrPayoutSigner.ts'
 import { scanBlocksIntoPending, type UnresolvedWithdrawal } from './validatorClRewardPayoutReporter.ts'
 
-const SIGNER_REPO = '/Users/peter/Downloads/BeamioContract/src/signer-gas-keeper-2026-11-09'
-const SIGNER_PKG = path.join(SIGNER_REPO, 'packages/wallet-signer')
+/** Wallet-signer checkout used by this test. Set WALLET_SIGNER_REPO; unset fails closed when the test runs. */
+function signerRepo(): string {
+	const v = process.env.WALLET_SIGNER_REPO
+	if (!v) throw new Error('WALLET_SIGNER_REPO is required for this test (fail closed)')
+	return v
+}
+function signerPkg(): string { return path.join(signerRepo(), 'packages/wallet-signer') }
 const SIGNER_REV = '18db908b1a14fccc12cc9b654290c2a72e5370fd'
 const SIGNER_DIST = path.join(tmpdir(), 'wallet-signer-18db908')
 const VDR = '0xc71e246DD78B37C2fABc905D340932F28F503433'
@@ -181,14 +186,14 @@ function listenMock(): Promise<{ url: string; close: () => Promise<void> }> {
 }
 
 async function loadSigner(): Promise<SignerModules> {
-	const rev = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: SIGNER_REPO, encoding: 'utf8' }).trim()
+	const rev = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: signerRepo(), encoding: 'utf8' }).trim()
 	assert.equal(rev, SIGNER_REV)
 	execFileSync('npx', ['tsc', '-p', 'tsconfig.json', '--outDir', SIGNER_DIST, '--pretty', 'false'], {
-		cwd: SIGNER_PKG,
+		cwd: signerPkg(),
 		stdio: 'inherit',
 	})
 	try {
-		symlinkSync(path.join(SIGNER_PKG, 'node_modules'), path.join(SIGNER_DIST, 'node_modules'))
+		symlinkSync(path.join(signerPkg(), 'node_modules'), path.join(SIGNER_DIST, 'node_modules'))
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
 	}

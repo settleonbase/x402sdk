@@ -16146,7 +16146,7 @@ export async function applyBeamioCardShareMetadataUpdate(params: {
 const MERCHANT_IMAGE_URL_MAX_LEN = 2048
 
 function beamioCard0MetadataFilePath(cardAddr: string): { metaDir: string; metaPath: string; metaFilename: string } {
-	const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
+	const METADATA_BASE = process.env.METADATA_BASE || (() => { throw new Error('METADATA_BASE is required: the metadata directory is not kept in the repository (fail closed)') })()
 	const metaFilename = `0x${ethers.getAddress(cardAddr).slice(2).toLowerCase()}0.json`
 	const metaDir = resolve(METADATA_BASE)
 	const metaPath = resolve(METADATA_BASE, metaFilename)
@@ -16582,7 +16582,7 @@ export const createCardPoolPress = async () => {
 		airdropAgentCreateCardFreeBunit(cardAddress, cardOwner)
 		// Always write card0 after create so Loyalty Rule Type (upgradeType 0/1/2 + Charge flags)
 		// survives beacon upgradeType() often stuck at 0. Do not gate on share/tiers/base alone.
-		const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
+		const METADATA_BASE = process.env.METADATA_BASE || (() => { throw new Error('METADATA_BASE is required: the metadata directory is not kept in the repository (fail closed)') })()
 		const cardAddr = ethers.getAddress(cardAddress)
 		const metaFilename = `0x${cardAddr.slice(2).toLowerCase()}0.json`
 		{

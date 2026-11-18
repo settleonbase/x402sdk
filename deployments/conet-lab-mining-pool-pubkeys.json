@@ -9,7 +9,7 @@
     "38.102.126.30": {
       "files": [
         {
-          "path": "/home/peter/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
           "n": 288
         }
       ],
@@ -18,7 +18,7 @@
     "38.102.126.50": {
       "files": [
         {
-          "path": "/home/peter/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
           "n": 288
         }
       ],
@@ -27,15 +27,15 @@
     "216.225.202.23": {
       "files": [
         {
-          "path": "/home/peter/ethereum-pos-mainnet/network/va-from-45/validatordata/proposer-settings.json",
+          "path": "<service-home>/ethereum-pos-mainnet/network/va-from-45/validatordata/proposer-settings.json",
           "n": 136
         },
         {
-          "path": "/home/peter/ethereum-pos-mainnet/network/va-from-174/validatordata/proposer-settings.json",
+          "path": "<service-home>/ethereum-pos-mainnet/network/va-from-174/validatordata/proposer-settings.json",
           "n": 136
         },
         {
-          "path": "/home/peter/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
           "n": 288
         }
       ],
@@ -44,7 +44,7 @@
     "216.225.202.22": {
       "files": [
         {
-          "path": "/home/peter/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
           "n": 288
         }
       ],
@@ -53,7 +53,7 @@
     "216.225.197.3": {
       "files": [
         {
-          "path": "/home/peter/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
           "n": 288
         }
       ],
@@ -62,7 +62,7 @@
     "216.225.202.82": {
       "files": [
         {
-          "path": "/home/peter/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
           "n": 288
         }
       ],
@@ -71,7 +71,7 @@
     "216.225.193.174": {
       "files": [
         {
-          "path": "/home/peter/ethereum-pos-mainnet/network/node-compat-v717/consensus/validatordata/proposer-settings.json",
+          "path": "<service-home>/ethereum-pos-mainnet/network/node-compat-v717/consensus/validatordata/proposer-settings.json",
           "n": 136
         }
       ],

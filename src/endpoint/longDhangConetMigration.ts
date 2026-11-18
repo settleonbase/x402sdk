@@ -398,7 +398,7 @@ async function resolveBaseAaForEoa(
 }
 
 function metadataBaseDir(): string {
-	return resolve(process.env.METADATA_BASE ?? '/home/peter/.data/metadata')
+	return resolve(process.env.METADATA_BASE || (() => { throw new Error('METADATA_BASE is required: the metadata directory is not kept in the repository (fail closed)') })())
 }
 
 function metadataFilePathForCard0(cardAddress: string): { dir: string; path: string; filename: string } {
