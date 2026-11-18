@@ -17,6 +17,7 @@ export type ChargeGateCode =
 	| 'pos_payee_resolve_unavailable'
 	| 'pos_admission_unavailable'
 	| 'pos_fee_insufficient'
+	| 'pos_items_required'
 	| 'pos_fee_unavailable'
 
 export type ChargeGateReject = { ok: false; status: 400 | 503; code: ChargeGateCode; error: string }
@@ -189,6 +190,10 @@ export const gateChargeRelay = async (
 	},
 	deps: { admission: ChargeAdmissionDeps; fee: ChargeFeeDeps }
 ): Promise<ChargeRelayVerdict> => {
+	/** Master 纵深防御：不依赖 Cluster 预检。空 items 不读取任何链上或数据库状态即拒绝。 */
+	if (!Array.isArray(input.items) || input.items.length === 0) {
+		return { ok: false, status: 400, code: 'pos_items_required', error: 'items are required for a charge' }
+	}
 	const adm = await admitChargeRequest(
 		{ merchantCardAddress: input.merchantCardAddress, items: input.items, to: input.to, ccsaAddress: input.ccsaAddress },
 		deps.admission

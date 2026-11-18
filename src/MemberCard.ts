@@ -13160,6 +13160,8 @@ export const OpenContainerRelayProcess = async () => {
       )
     )
     let payeeResolvedFromMerchantCard = false
+    /** 1155 收款方：这里只做只读解析（owner EOA；已存在的 AA 是否等于付款方）。建 AA（可能广播建账户交易）推迟到全部绑定复核之后。 */
+    let merchantOwnerEoaForPayee: string | null = null
     if (chargeGate.hasNonCcsaErc1155 && relayCardSeed) {
       try {
         const payeeCard = new ethers.Contract(
@@ -13171,20 +13173,13 @@ export const OpenContainerRelayProcess = async () => {
         if (!merchantOwner || merchantOwner === ethers.ZeroAddress) {
           throw new Error(`merchant card ${relayCardSeed} has no owner`)
         }
-        const merchantOwnerEoa = ethers.getAddress(merchantOwner)
-        const merchantOwnerAa = await ensureAAForEOAOnCard(ethers.getAddress(relayCardSeed), merchantOwnerEoa, SC)
-        const resolvedPayeeAa = ethers.getAddress(merchantOwnerAa)
-        if (resolvedPayeeAa.toLowerCase() === account.toLowerCase()) {
+        merchantOwnerEoaForPayee = ethers.getAddress(merchantOwner)
+        const existingPayeeAa = await readOwnerAaStrict(relayProvider, relayAaFactoryAddr, merchantOwnerEoaForPayee)
+        if (existingPayeeAa && existingPayeeAa.toLowerCase() === account.toLowerCase()) {
           obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same. Check merchant card owner / payer account.' }).end()
           return
         }
-        to = resolvedPayeeAa
         payeeResolvedFromMerchantCard = true
-        logger(
-          Colors.cyan(
-            `[AAtoEOA/OpenContainer] POS ERC1155 payee resolved from merchant card owner ${merchantOwnerEoa} -> AA ${to}`
-          )
-        )
       } catch (e: any) {
         const err = `OpenContainer ERC1155: cannot resolve merchant card owner AA: ${e?.shortMessage ?? e?.message ?? String(e)}`
         logger(Colors.red(`[AAtoEOA/OpenContainer] REJECT: ${err}`))
@@ -13279,15 +13274,44 @@ export const OpenContainerRelayProcess = async () => {
         return
       }
     }
-    if (to === account) {
-      obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same. Check payload.to is the recipient address.' }).end()
-      return
-    }
     const chainNonce = await readContainerNonceFromAAStorage(relayProvider, account, 'openRelayed')
     if (chainNonce !== nonce_) {
       const errMsg = `Payment code was already used or refreshed: payload nonce=${nonce_} but chain openRelayedNonce=${chainNonce}. Ask the customer to refresh Pay QR and scan the new code.`
       logger(Colors.red(`[AAtoEOA/OpenContainer] ${errMsg}`))
       obj.res.status(400).json({ success: false, error: errMsg }).end()
+      return
+    }
+    // B5：全部读取类核验之后复核绑定（准入之后的撤销在此生效）。无绑定或读取失败 → 不建账户、不签名、不广播、不入队。
+    const bindingRecheck = await recheckBindingBeforeBroadcast(chargeGate.cardAddress, readActivePosTerminalBindingForCharge)
+    if (!bindingRecheck.ok) {
+      logger(Colors.red(`[AAtoEOA/OpenContainer] binding recheck REJECT before broadcast (${bindingRecheck.code})`))
+      obj.res.status(bindingRecheck.status).json({ success: false, error: bindingRecheck.error, code: bindingRecheck.code }).end()
+      return
+    }
+    // 1155 收款方：建 AA（owner 尚无 AA 时可能广播一笔建账户交易）只在全部绑定复核之后执行，且先于任何广播。
+    if (payeeResolvedFromMerchantCard && merchantOwnerEoaForPayee) {
+      try {
+        const merchantOwnerAa = await ensureAAForEOAOnCard(chargeGate.cardAddress, merchantOwnerEoaForPayee, SC)
+        const resolvedPayeeAa = ethers.getAddress(merchantOwnerAa)
+        if (resolvedPayeeAa.toLowerCase() === account.toLowerCase()) {
+          obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same. Check merchant card owner / payer account.' }).end()
+          return
+        }
+        to = resolvedPayeeAa
+        logger(
+          Colors.cyan(
+            `[AAtoEOA/OpenContainer] POS ERC1155 payee resolved from merchant card owner ${merchantOwnerEoaForPayee} -> AA ${to}`
+          )
+        )
+      } catch (e: any) {
+        const err = `OpenContainer ERC1155: cannot resolve merchant card owner AA: ${e?.shortMessage ?? e?.message ?? String(e)}`
+        logger(Colors.red(`[AAtoEOA/OpenContainer] REJECT: ${err}`))
+        obj.res.status(500).json({ success: false, error: err }).end()
+        return
+      }
+    }
+    if (to === account) {
+      obj.res.status(400).json({ success: false, error: 'Beneficiary and sender cannot be the same. Check payload.to is the recipient address.' }).end()
       return
     }
     logger(
@@ -13334,13 +13358,6 @@ export const OpenContainerRelayProcess = async () => {
       nonce: asBigInt(packedOpenOp.nonce, 0n),
       preVerificationGas: asBigInt(packedOpenOp.preVerificationGas, 0n),
       signature: sigBytes,
-    }
-    // B5：广播前紧邻处复核绑定（准入之后的撤销在此生效）。无绑定或读取失败 → 不广播、不入队。
-    const bindingRecheck = await recheckBindingBeforeBroadcast(chargeGate.cardAddress, readActivePosTerminalBindingForCharge)
-    if (!bindingRecheck.ok) {
-      logger(Colors.red(`[AAtoEOA/OpenContainer] binding recheck REJECT before broadcast (${bindingRecheck.code})`))
-      obj.res.status(bindingRecheck.status).json({ success: false, error: bindingRecheck.error, code: bindingRecheck.code }).end()
-      return
     }
     const beneficiary = await relayWallet.getAddress()
     const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, {

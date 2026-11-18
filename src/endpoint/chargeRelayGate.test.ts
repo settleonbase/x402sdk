@@ -356,3 +356,16 @@ test('gateChargeRelay: success returns one frozen verdict carrying the verified 
 	assert.equal(Object.isFrozen(v), true)
 })
 
+test('gateChargeRelay: empty items are refused as pos_items_required before any read (Master defence, no Cluster reliance)', async () => {
+	const h = harness()
+	const fh = feeHarness({ [K(CARD)]: FEE })
+	const v = await gateChargeRelay(
+		{ merchantCardAddress: CARD, items: [], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 0n },
+		{ admission: h.deps, fee: fh.deps }
+	)
+	assert.equal(!v.ok && v.status, 400)
+	assert.equal(!v.ok && v.code, 'pos_items_required')
+	assert.deepEqual(h.trace, [])
+	assert.deepEqual(fh.trace, [])
+})
+

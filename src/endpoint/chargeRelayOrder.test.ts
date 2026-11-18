@@ -39,11 +39,13 @@ type World = {
 	balances: Record<string, Read>
 	aaThrows?: boolean
 	aa?: string | null
+	/** 1155 收款方 owner 是否已有 AA；为 false 时建 AA 会广播一笔建账户交易。 */
+	ownerHasAa?: boolean
 	factoryThrows?: boolean
 }
 
-type Counters = { forwardToMaster: number; signer: number; relayHandleOps: number; accountingPoolPush: number }
-const zero = (): Counters => ({ forwardToMaster: 0, signer: 0, relayHandleOps: 0, accountingPoolPush: 0 })
+type Counters = { forwardToMaster: number; accountCreateTx: number; signer: number; relayHandleOps: number; accountingPoolPush: number }
+const zero = (): Counters => ({ forwardToMaster: 0, accountCreateTx: 0, signer: 0, relayHandleOps: 0, accountingPoolPush: 0 })
 
 const makeDeps = (w: World, trace: string[]) => {
 	let lookupCalls = 0
@@ -110,13 +112,20 @@ const clusterSim = async (req: Req, w: World) => {
 /** Master（MemberCard.OpenContainerRelayProcess）：广播前门禁 → 广播前绑定复核 → 广播 → 回执 → 记账入队。 */
 const masterSim = async (req: Req, w: World, c: Counters, trace: string[]) => {
 	const deps = makeDeps(w, trace)
+	// 与 MemberCard.OpenContainerRelayProcess 同序：门禁（纯读取）→ 1155 收款方只读预检 → nonce 等只读核验 → 广播前绑定复核 → 建 AA（仅 1155、仅 owner 无 AA）→ 广播
 	const gate = await gateChargeRelay(
 		{ merchantCardAddress: req.card, items: req.items, to: req.to, ccsaAddress: CCSA },
 		{ admission: deps.admission, fee: deps.fee }
 	)
 	if (!gate.ok) return { status: gate.status, code: gate.code, cardAddress: null as string | null }
+	const is1155 = gate.hasNonCcsaErc1155
+	if (is1155) trace.push('payee-owner-readonly')
 	const recheck = await recheckBindingBeforeBroadcast(gate.cardAddress, deps.admission.lookupBinding)
 	if (!recheck.ok) return { status: recheck.status, code: recheck.code, cardAddress: gate.cardAddress }
+	if (is1155 && w.ownerHasAa === false) {
+		c.accountCreateTx++
+		trace.push('accountCreateTx')
+	}
 	c.signer++
 	trace.push('signer')
 	c.relayHandleOps++
@@ -130,11 +139,12 @@ const usdc = (amount: bigint) => [{ kind: 0, asset: USDC, amount }]
 const bound = () => (() => true) as World['lookup']
 const world = (over: Partial<World> = {}): World => ({ lookup: bound(), balances: { [K(CARD)]: FEE }, ...over })
 
-const rows: { scenario: string; stage: string; status: number | string; code: string; forwardToMaster: number; signer: number; relayHandleOps: number; accountingPoolPush: number; trace: string }[] = []
+const rows: { scenario: string; stage: string; status: number | string; code: string; forwardToMaster: number; accountCreateTx: number; signer: number; relayHandleOps: number; accountingPoolPush: number; trace: string }[] = []
 const record = (scenario: string, stage: string, status: number | string, code: string | undefined, c: Counters, trace: string[]) =>
 	rows.push({ scenario, stage, status, code: code ?? '-', ...c, trace: trace.join(' > ') })
 
 const expectNoBroadcast = (c: Counters) => {
+	assert.equal(c.accountCreateTx, 0)
 	assert.equal(c.signer, 0)
 	assert.equal(c.relayHandleOps, 0)
 	assert.equal(c.accountingPoolPush, 0)
@@ -244,6 +254,30 @@ test('Master reject: fee trusted zero → 400 pos_fee_insufficient; zero broadca
 	await masterReject('M4 fee insufficient (trusted zero)', { card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ balances: {} }), [400, 'pos_fee_insufficient'])
 })
 
+test('Master reject M5: empty items (no Cluster precheck) → 400 pos_items_required before any read; zero broadcast and zero account creation', async () => {
+	const r = await masterReject('M5 empty items at Master', { card: CARD, items: [], to: OWNER_EOA, maxAmount: 0n }, world(), [400, 'pos_items_required'])
+	assert.deepEqual(r.trace, [])
+})
+
+test('Master reject M7: 1155 payee owner has no AA and the binding is revoked at the recheck → no account-creation tx, no broadcast', async () => {
+	const r = await masterReject('M7 1155 owner without AA, revoked before creation', { card: CARD, items: [{ kind: 1, asset: CARD, amount: 1n }], to: STRANGER, maxAmount: 0n }, world({ ownerHasAa: false, lookup: (n) => n === 0 }), [400, 'pos_card_not_bound'])
+	assert.equal(r.c.accountCreateTx, 0)
+	assert.ok(!r.trace.includes('accountCreateTx'))
+})
+
+test('success S2: 1155 payee owner has no AA → the account is created only after the recheck and before the broadcast', async () => {
+	const c = zero()
+	const trace: string[] = []
+	const out = await masterSim({ card: CARD, items: [{ kind: 1, asset: CARD, amount: 1n }], to: STRANGER, maxAmount: 0n }, world({ ownerHasAa: false }), c, trace)
+	record('S2 success 1155 with account creation', 'master', out.status, '-', c, trace)
+	assert.equal(out.status, 200)
+	assert.equal(c.accountCreateTx, 1)
+	const iRecheck = trace.indexOf('binding#1(0c01)')
+	const iCreate = trace.indexOf('accountCreateTx')
+	const iBroadcast = trace.indexOf('relayHandleOps')
+	assert.ok(iRecheck >= 0 && iRecheck < iCreate && iCreate < iBroadcast, 'recheck < account creation < broadcast')
+})
+
 test('Master reject: missing merchantCardAddress (no Cluster) → 400 pos_card_invalid; zero broadcast', async () => {
 	await masterReject('M6 missing card at Master', { card: undefined, items: usdc(1n), to: OWNER_EOA }, world(), [400, 'pos_card_invalid'])
 })
@@ -281,8 +315,8 @@ test('the fee reads and the binding reads only ever touch the verified card (nev
 // ---- 原始回执（由环境变量触发写入）----
 
 test('receipt: write raw per-scenario counters and call order when CHARGE_RECEIPT_OUT is set', { skip: !process.env.CHARGE_RECEIPT_OUT }, () => {
-	const header = ['scenario', 'stage', 'status', 'code', 'forwardToMaster', 'signer', 'relayHandleOps', 'accountingPoolPush', 'trace'].join(' | ')
-	const body = rows.map((r) => [r.scenario, r.stage, r.status, r.code, r.forwardToMaster, r.signer, r.relayHandleOps, r.accountingPoolPush, r.trace].join(' | '))
+	const header = ['scenario', 'stage', 'status', 'code', 'forwardToMaster', 'accountCreateTx', 'signer', 'relayHandleOps', 'accountingPoolPush', 'trace'].join(' | ')
+	const body = rows.map((r) => [r.scenario, r.stage, r.status, r.code, r.forwardToMaster, r.accountCreateTx, r.signer, r.relayHandleOps, r.accountingPoolPush, r.trace].join(' | '))
 	writeFileSync(process.env.CHARGE_RECEIPT_OUT as string, [header, ...body, ''].join('\n'))
 	assert.ok(rows.length >= 15)
 })

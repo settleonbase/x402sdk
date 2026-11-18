@@ -23,21 +23,33 @@ const at = (src: string, needle: string, from = 0): number => {
 
 const master = slice(MC, 'export const OpenContainerRelayProcess = async () => {', '\n/** NFC Container 记账：字符串金额')
 
-test('Master order: gate → relay context → payee rewrite → pre-broadcast recheck → broadcast → 200 → post-broadcast fee', () => {
+test('Master order: gate → relay context → payee read-only check → nonce → pre-broadcast recheck → AA creation → to check → broadcast → 200 → post-broadcast fee', () => {
 	const iGate = at(master, 'const chargeGate = await gateChargeRelay(')
 	const iReject = at(master, 'if (!chargeGate.ok) {', iGate)
 	const iRelayCtx = at(master, 'const relayCtx = await merchantCardRelayContext(SC, relayCardSeed)', iGate)
 	const iAaFactory = at(master, 'let relayAaFactoryAddr: string | null = chargeGate.aaFactory', iGate)
-	const iRewrite = at(master, 'if (chargeGate.hasNonCcsaErc1155 && relayCardSeed) {', iGate)
+	const iPayeeRead = at(master, 'if (chargeGate.hasNonCcsaErc1155 && relayCardSeed) {', iGate)
+	const iNonce = at(master, 'const chainNonce = await readContainerNonceFromAAStorage(relayProvider, account, \'openRelayed\')', iGate)
 	const iRecheck = at(master, 'await recheckBindingBeforeBroadcast(chargeGate.cardAddress', iGate)
+	const iCreate = at(master, 'await ensureAAForEOAOnCard(chargeGate.cardAddress', iGate)
+	const iToCheck = at(master, 'if (to === account) {', iGate)
 	const iBroadcast = at(master, 'const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary', iGate)
 	const i200 = at(master, 'obj.res.status(200).json({', iBroadcast)
 	const iFee = at(master, 'const feePayerEOA = chargeGate.feeConsumer', iBroadcast)
 	const iPush = at(master, 'beamioTransferIndexerAccountingPool.push({', iBroadcast)
 	assert.ok(iGate < iReject && iReject < iRelayCtx, 'rejection returns before the relay context')
-	assert.ok(iRelayCtx < iAaFactory && iAaFactory < iRewrite && iRewrite < iRecheck, 'context and rewrite come before the recheck')
-	assert.ok(iRecheck < iBroadcast, 'recheck before broadcast')
+	assert.ok(iRelayCtx < iAaFactory && iAaFactory < iPayeeRead && iPayeeRead < iNonce, 'context and read-only payee check come before the nonce read')
+	assert.ok(iNonce < iRecheck && iRecheck < iCreate, 'nonce, then the recheck, then any account creation')
+	assert.ok(iCreate < iToCheck && iToCheck < iBroadcast, 'account creation and the to-check come before the broadcast')
 	assert.ok(iBroadcast < i200 && i200 < iFee && iFee < iPush, 'fee confirmed pre-broadcast; 200 after receipt; accounting after')
+})
+
+test('Master: an account-creation tx can only follow the recheck, never precede it', () => {
+	const iGate = at(master, 'const chargeGate = await gateChargeRelay(')
+	const iRecheck = at(master, 'await recheckBindingBeforeBroadcast(chargeGate.cardAddress', iGate)
+	assert.equal(master.slice(0, iRecheck).includes('ensureAAForEOAOnCard('), false, 'no ensureAAForEOAOnCard before the recheck')
+	const iCreate = at(master, 'await ensureAAForEOAOnCard(chargeGate.cardAddress', iRecheck)
+	assert.ok(master.indexOf('relayHandleOps([txOp]', iCreate) > iCreate, 'broadcast after creation')
 })
 
 test('Master: nothing signs, broadcasts, answers 200 or queues accounting before the gate', () => {
