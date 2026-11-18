@@ -12,11 +12,16 @@ import { loadConfig } from '../src/config'
 
 // Output must live outside every input tree: use a sibling directory.
 const outside = (dir: string, name: string) => join(dir + '-out', name)
-const PM = getAddress('0xc3d6d244c2833817210F6894C987fB129e731391')
+// Test fixture only (not a real account): stands in for the PM address.
+const PM = getAddress('0x5a1ab0000000000000000000000000000000a0a0')
 const LAB = getAddress('0x5a1ab0000000000000000000000000000000c0de')
 const LAB2 = getAddress('0x5a1ab0000000000000000000000000000000c0df')
 // Test fixture only (not a real account): stands in for the private deny list.
 const DENY = getAddress('0x5a1ab0000000000000000000000000000000d0d0')
+// Private derive config for tests: fixture values, written once outside the repository.
+const PRIV_DIR = mkdtempSync(join(tmpdir(), 'pmpriv-'))
+const PRIV = join(PRIV_DIR, 'private-derive.json')
+writeFileSync(PRIV, JSON.stringify({ labTarget: LAB, denyAddresses: [DENY] }))
 const OTHER = getAddress('0x5a1ab0000000000000000000000000000000beef')
 const IFACE = new Interface(['function admins(address) view returns (bool)', 'function addAdmin(address)'])
 const TRUE = '0x' + '0'.repeat(63) + '1'
@@ -365,7 +370,26 @@ test('gas price cap: default 0.03 Gwei reaches the send request; a config overri
 	} finally { h.cleanup() }
 })
 
-import { deriveCandidate, LAB_PINNED_TARGET } from '../src/deriveCandidate'
+import { deriveCandidate, readPrivateDerive } from '../src/deriveCandidate'
+test('derive: private config missing, malformed or without deny list fails closed', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'pmprivx-'))
+	try {
+		const frag = join(__dirname, '..', '..', 'deploy', 'lab-mining-pool', 'policy.fragment.json')
+		writeFileSync(join(dir, 'lc.json'), JSON.stringify({ dataDir: dir, logDir: dir, adminSocket: join(dir, 'a.sock'), policyFile: join(dir, 'lp.json'), rpc: { unix: [] }, chains: { '224422': { rpcUrls: ['http://127.0.0.1:1'] } }, gasKeeper: { enabled: false, intervalMs: 60000, chains: {} } }))
+		writeFileSync(join(dir, 'lp.json'), JSON.stringify({ version: 1, clients: {} }))
+		const base = { liveConfig: join(dir, 'lc.json'), livePolicy: join(dir, 'lp.json'), labPolicyFragment: frag, labGid: 4242 }
+		assert.throws(() => deriveCandidate({ ...base, outDir: outside(dir, 'n1') }), /private config required/)
+		assert.throws(() => deriveCandidate({ ...base, outDir: outside(dir, 'n2'), privateConfig: join(dir, 'absent.json') }), /not found/)
+		writeFileSync(join(dir, 'p1.json'), JSON.stringify({ labTarget: LAB, denyAddresses: [] }))
+		assert.throws(() => readPrivateDerive(join(dir, 'p1.json')), /non-empty/)
+		writeFileSync(join(dir, 'p2.json'), JSON.stringify({ labTarget: 'nope', denyAddresses: [DENY] }))
+		assert.throws(() => readPrivateDerive(join(dir, 'p2.json')), /labTarget must be an address/)
+		writeFileSync(join(dir, 'p3.json'), '{ not json')
+		assert.throws(() => readPrivateDerive(join(dir, 'p3.json')), /not valid JSON/)
+		assert.throws(() => deriveCandidate({ ...base, outDir: outside(dir, 'n3'), privateConfig: join(dir, 'p1.json') }), /non-empty/)
+	} finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('derive: minimal candidate from copies; inputs untouched; preflight passes; refusals hold', () => {
 	const dir = mkdtempSync(join(tmpdir(), 'pmder-'))
 	try {
@@ -375,21 +399,22 @@ test('derive: minimal candidate from copies; inputs untouched; preflight passes;
 		writeFileSync(join(dir, 'live-policy.json'), JSON.stringify(livePolicy))
 		const fragPath = join(__dirname, '..', '..', 'deploy', 'lab-mining-pool', 'policy.fragment.json')
 		const beforeC = readFileSync(join(dir, 'live-config.json'), 'utf8'), beforeP = readFileSync(join(dir, 'live-policy.json'), 'utf8')
-		const out = deriveCandidate({ liveConfig: join(dir, 'live-config.json'), livePolicy: join(dir, 'live-policy.json'), labPolicyFragment: fragPath, labGid: 4242, outDir: outside(dir, 'cand') })
+		const out = deriveCandidate({ privateConfig: PRIV, liveConfig: join(dir, 'live-config.json'), livePolicy: join(dir, 'live-policy.json'), labPolicyFragment: fragPath, labGid: 4242, outDir: outside(dir, 'cand') })
 		assert.equal(readFileSync(join(dir, 'live-config.json'), 'utf8'), beforeC, 'live config untouched')
 		assert.equal(readFileSync(join(dir, 'live-policy.json'), 'utf8'), beforeP, 'live policy untouched')
 		assert.ok(out.warnings.some((w) => /pmOneShot/.test(w)))
 		const cand = JSON.parse(readFileSync(out.config, 'utf8'))
 		assert.equal(cand.pmGrantAdmin.enabled, false)
-		assert.deepEqual(cand.pmGrantAdmin.targets, [LAB_PINNED_TARGET])
+		assert.deepEqual(cand.pmGrantAdmin.targets, [LAB])
+		assert.deepEqual(cand.pmGrantAdmin.denyAddresses, [DENY])
 		assert.equal(cand.rpc.unix.find((u: { client: string }) => u.client === 'lab-mining-pool').gid, 4242)
 		const pre = preflight(out.config, out.policy)
 		assert.equal(pre.ok, true, JSON.stringify(pre.problems))
 		assert.match(pre.policyHash!, /^0x[0-9a-f]{64}$/)
 		writeFileSync(join(dir, 'gk.json'), JSON.stringify({ ...live, gasKeeper: { enabled: true, intervalMs: 60000, chains: {} } }))
-		assert.throws(() => deriveCandidate({ liveConfig: join(dir, 'gk.json'), livePolicy: join(dir, 'live-policy.json'), labPolicyFragment: fragPath, labGid: 4242, outDir: outside(dir, 'c2') }), /gasKeeper/)
-		assert.throws(() => deriveCandidate({ liveConfig: join(dir, 'live-config.json'), livePolicy: join(dir, 'live-policy.json'), labPolicyFragment: fragPath, labGid: 0, outDir: outside(dir, 'c3') }), /positive integer/)
-		assert.throws(() => deriveCandidate({ liveConfig: out.config, livePolicy: out.policy, labPolicyFragment: fragPath, labGid: 4242, outDir: outside(dir, 'c4') }), /already has (a lab-mining-pool listener|pmGrantAdmin)/)
+		assert.throws(() => deriveCandidate({ privateConfig: PRIV, liveConfig: join(dir, 'gk.json'), livePolicy: join(dir, 'live-policy.json'), labPolicyFragment: fragPath, labGid: 4242, outDir: outside(dir, 'c2') }), /gasKeeper/)
+		assert.throws(() => deriveCandidate({ privateConfig: PRIV, liveConfig: join(dir, 'live-config.json'), livePolicy: join(dir, 'live-policy.json'), labPolicyFragment: fragPath, labGid: 0, outDir: outside(dir, 'c3') }), /positive integer/)
+		assert.throws(() => deriveCandidate({ privateConfig: PRIV, liveConfig: out.config, livePolicy: out.policy, labPolicyFragment: fragPath, labGid: 4242, outDir: outside(dir, 'c4') }), /already has (a lab-mining-pool listener|pmGrantAdmin)/)
 	} finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
@@ -446,8 +471,8 @@ test('derive refusals: output equal to or inside an input location, existing pmG
 		writeFileSync(join(dir, 'lp.json'), JSON.stringify({ version: 1, clients: {} }))
 		const frag = join(__dirname, '..', '..', 'deploy', 'lab-mining-pool', 'policy.fragment.json')
 		const base = { liveConfig: join(dir, 'lc.json'), livePolicy: join(dir, 'lp.json'), labPolicyFragment: frag, labGid: 4242 }
-		assert.throws(() => deriveCandidate({ ...base, outDir: join(dir, 'lc.json') }), /overlap|directory/)
-		assert.throws(() => deriveCandidate({ ...base, outDir: dir }), /directory of a live input|overlap/)
+		assert.throws(() => deriveCandidate({ privateConfig: PRIV, ...base, outDir: join(dir, 'lc.json') }), /overlap|directory/)
+		assert.throws(() => deriveCandidate({ privateConfig: PRIV, ...base, outDir: dir }), /directory of a live input|overlap/)
 	} finally { rmSync(dir, { recursive: true, force: true }) }
 })
 test('derive refusals: existing pmGrantAdmin in the live config is refused; existing output files are refused', () => {
@@ -457,12 +482,12 @@ test('derive refusals: existing pmGrantAdmin in the live config is refused; exis
 		writeFileSync(join(dir, 'lp.json'), JSON.stringify({ version: 1, clients: {} }))
 		const withGrant = { dataDir: dir, logDir: dir, adminSocket: join(dir, 'a.sock'), policyFile: join(dir, 'lp.json'), rpc: { unix: [] }, chains: { '224422': { rpcUrls: ['http://127.0.0.1:1'] } }, gasKeeper: { enabled: false, intervalMs: 60000, chains: {} }, pmGrantAdmin: { enabled: false, targets: [] } }
 		writeFileSync(join(dir, 'lc.json'), JSON.stringify(withGrant))
-		assert.throws(() => deriveCandidate({ liveConfig: join(dir, 'lc.json'), livePolicy: join(dir, 'lp.json'), labPolicyFragment: frag, labGid: 4242, outDir: outside(dir, 'out') }), /already has pmGrantAdmin/)
+		assert.throws(() => deriveCandidate({ privateConfig: PRIV, liveConfig: join(dir, 'lc.json'), livePolicy: join(dir, 'lp.json'), labPolicyFragment: frag, labGid: 4242, outDir: outside(dir, 'out') }), /already has pmGrantAdmin/)
 		const noGrant = { ...withGrant, pmGrantAdmin: undefined }
 		writeFileSync(join(dir, 'lc2.json'), JSON.stringify(noGrant))
 		mkdirSync(outside(dir, 'out2'), { recursive: true })
 		writeFileSync(join(outside(dir, 'out2'), 'config.json'), '{}')
-		assert.throws(() => deriveCandidate({ liveConfig: join(dir, 'lc2.json'), livePolicy: join(dir, 'lp.json'), labPolicyFragment: frag, labGid: 4242, outDir: outside(dir, 'out2') }), /refusing to overwrite/)
+		assert.throws(() => deriveCandidate({ privateConfig: PRIV, liveConfig: join(dir, 'lc2.json'), livePolicy: join(dir, 'lp.json'), labPolicyFragment: frag, labGid: 4242, outDir: outside(dir, 'out2') }), /refusing to overwrite/)
 	} finally { rmSync(dir, { recursive: true, force: true }) }
 })
 test('preflight: pmGrantAdmin.maxGasPriceWei above 0.03 Gwei is refused', () => {
@@ -509,7 +534,7 @@ test('preflight: lab maxGasPriceGwei above 0.03 is refused; derive refuses outpu
 		writeFileSync(join(live, 'config.json'), JSON.stringify({ dataDir: dir, logDir: dir, adminSocket: join(dir, 'a.sock'), policyFile: join(live, 'policy.json'), rpc: { unix: [] }, chains: { '224422': { rpcUrls: ['http://127.0.0.1:1'] } }, gasKeeper: { enabled: false, intervalMs: 60000, chains: {} } }))
 		writeFileSync(join(live, 'policy.json'), JSON.stringify({ version: 1, clients: {} }))
 		const frag = join(__dirname, '..', '..', 'deploy', 'lab-mining-pool', 'policy.fragment.json')
-		assert.throws(() => deriveCandidate({ liveConfig: join(live, 'config.json'), livePolicy: join(live, 'policy.json'), labPolicyFragment: frag, labGid: 4242, outDir: join(live, 'cand') }), /inside the input tree/)
-		assert.throws(() => deriveCandidate({ liveConfig: join(live, 'config.json'), livePolicy: join(live, 'policy.json'), labPolicyFragment: frag, labGid: 4242, outDir: join(dir, 'sub', '..', 'live') }), /overlap|inside/)
+		assert.throws(() => deriveCandidate({ privateConfig: PRIV, liveConfig: join(live, 'config.json'), livePolicy: join(live, 'policy.json'), labPolicyFragment: frag, labGid: 4242, outDir: join(live, 'cand') }), /inside the input tree/)
+		assert.throws(() => deriveCandidate({ privateConfig: PRIV, liveConfig: join(live, 'config.json'), livePolicy: join(live, 'policy.json'), labPolicyFragment: frag, labGid: 4242, outDir: join(dir, 'sub', '..', 'live') }), /overlap|inside/)
 	} finally { rmSync(dir, { recursive: true, force: true }) }
 })

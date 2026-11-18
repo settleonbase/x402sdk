@@ -6,9 +6,30 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { getAddress, isAddress } from 'ethers'
 
 export const LAB_LISTENER_PATH = '/run/wallet-signer-lab-mining-pool/lab-payout.sock'
-export const LAB_PINNED_TARGET = '0xcFAF85E6C1765DA01a4Dc58C81b28Cd572067135'
+/**
+ * Operational addresses (the Lab target and the deny list) are NOT in this repository. They are read from a
+ * private file supplied with --private-config. The file must hold { labTarget, denyAddresses[] }. Missing,
+ * unreadable or invalid input fails closed.
+ */
+export type PrivateDerive = { labTarget: string; denyAddresses: string[] }
+
+export function readPrivateDerive(path: string | undefined): PrivateDerive {
+	if (!path) throw new Error('private config required (--private-config): operational addresses are not kept in the repository; fail closed')
+	if (!existsSync(path)) throw new Error(`private config not found: ${path}; fail closed`)
+	let raw: unknown
+	try { raw = JSON.parse(readFileSync(path, 'utf8')) } catch { throw new Error('private config is not valid JSON; fail closed') }
+	const r = raw as { labTarget?: unknown; denyAddresses?: unknown }
+	if (typeof r.labTarget !== 'string' || !isAddress(r.labTarget)) throw new Error('private config: labTarget must be an address; fail closed')
+	if (!Array.isArray(r.denyAddresses) || r.denyAddresses.length === 0) throw new Error('private config: denyAddresses must be a non-empty array; fail closed')
+	const deny = r.denyAddresses.map((d, i) => {
+		if (typeof d !== 'string' || !isAddress(d)) throw new Error(`private config: denyAddresses[${i}] is not an address; fail closed`)
+		return getAddress(d)
+	})
+	return { labTarget: getAddress(r.labTarget), denyAddresses: deny }
+}
 
 export type DeriveOut = { config: string; policy: string; sha256: { config: string; policy: string; liveConfig: string; livePolicy: string }; warnings: string[] }
 
@@ -16,8 +37,9 @@ function sha(path: string): string {
 	return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
-export function deriveCandidate(opts: { liveConfig: string; livePolicy: string; labPolicyFragment: string; labGid: number; outDir: string; labPath?: string; enableGrant?: boolean }): DeriveOut {
+export function deriveCandidate(opts: { liveConfig: string; livePolicy: string; labPolicyFragment: string; labGid: number; outDir: string; labPath?: string; enableGrant?: boolean; privateConfig?: string }): DeriveOut {
 	const warnings: string[] = []
+	const priv = readPrivateDerive(opts.privateConfig)
 	for (const p of [opts.liveConfig, opts.livePolicy, opts.labPolicyFragment]) if (!existsSync(p)) throw new Error(`missing input: ${p}`)
 	if (!Number.isInteger(opts.labGid) || opts.labGid <= 0) throw new Error('labGid must be a positive integer (getent group wslab)')
 	// Refuse before any write: the output must not be an input location, and must not sit beside live files.
@@ -43,7 +65,7 @@ export function deriveCandidate(opts: { liveConfig: string; livePolicy: string; 
 	if (cfg.rpc.unix.some((u: { client?: string }) => u.client === 'lab-mining-pool')) throw new Error('live config already has a lab-mining-pool listener')
 	cfg.rpc.unix.push({ path: opts.labPath ?? LAB_LISTENER_PATH, client: 'lab-mining-pool', mode: 432, gid: opts.labGid })
 	if (opts.enableGrant === true) throw new Error('enableGrant is not supported by the derive tool: the deny list is private configuration')
-	cfg.pmGrantAdmin = { enabled: false, targets: [LAB_PINNED_TARGET], denyAddresses: [] }
+	cfg.pmGrantAdmin = { enabled: false, targets: [priv.labTarget], denyAddresses: priv.denyAddresses }
 	if (pol.clients['lab-mining-pool']) throw new Error('live policy already has lab-mining-pool')
 	pol.clients['lab-mining-pool'] = labClient
 	mkdirSync(opts.outDir, { recursive: true })
@@ -60,7 +82,7 @@ if (require.main === module) {
 	const get = (k: string) => { const i = a.indexOf(k); return i >= 0 ? a[i + 1] : undefined }
 	const need = (k: string) => { const v = get(k); if (!v) { console.error(`missing ${k}`); process.exit(2) } return v as string }
 	try {
-		const r = deriveCandidate({ liveConfig: need('--live-config'), livePolicy: need('--live-policy'), labPolicyFragment: need('--lab-policy'), labGid: Number(need('--lab-gid')), outDir: need('--out'), labPath: get('--lab-path'), enableGrant: a.includes('--enable-grant') })
+		const r = deriveCandidate({ liveConfig: need('--live-config'), livePolicy: need('--live-policy'), labPolicyFragment: need('--lab-policy'), labGid: Number(need('--lab-gid')), outDir: need('--out'), labPath: get('--lab-path'), enableGrant: a.includes('--enable-grant'), privateConfig: get('--private-config') })
 		process.stdout.write(JSON.stringify(r, null, 2) + '\n')
 	} catch (e) { console.error(`refused: ${(e as Error).message}`); process.exit(1) }
 }
