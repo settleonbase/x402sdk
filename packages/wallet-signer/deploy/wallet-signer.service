@@ -32,7 +32,7 @@ RestartSec=5
 RuntimeDirectory=wallet-signer
 RuntimeDirectoryMode=0750
 UMask=0027
-ReadWritePaths=/srv/secure/wallet-signer /run/wallet-signer-rpc
+ReadWritePaths=/srv/secure/wallet-signer /run/wallet-signer-rpc /run/wallet-signer-lab-mining-pool
 
 # Hardening (design §5)
 LimitCORE=0
