@@ -238,6 +238,8 @@ test('RPC failure is a read-unavailable signal (503), never a trusted empty resu
 		assert.equal(r.status, 503)
 		assert.equal(JSON.stringify(r.body).includes(NORMAL), false, 'no card reaches the client')
 		assert.equal(JSON.stringify(r.body).includes('"groups"'), false, 'no groups key on a failure')
+		assert.equal(JSON.stringify(r.body).includes('rpc unavailable'), false, 'RPC exception detail stays server-side')
+		assert.deepEqual(r.body, { error: 'cards_by_category_unavailable' })
 	} finally {
 		await s.stop()
 	}
@@ -261,6 +263,8 @@ test('a database failure in the aggregation is a failure signal (503), never a t
 		const r = await getJson(s.clusterPort, '/api/cardsByCategory?scanLimit=1200&limitPerCategory=120')
 		assert.equal(r.status, 503)
 		assert.equal(JSON.stringify(r.body).includes('"groups"'), false)
+		assert.equal(JSON.stringify(r.body).includes('database unavailable'), false, 'exception detail stays server-side')
+		assert.deepEqual(r.body, { error: 'cards_by_category_unavailable' })
 	} finally {
 		await s.stop()
 	}

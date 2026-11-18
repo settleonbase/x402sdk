@@ -320,7 +320,7 @@ test('production wiring: Cluster and Master call the registration functions; the
 	const mRoute = routes.slice(routes.indexOf('export const registerCardsByCategoryMasterRoute'))
 	assert.match(mRoute, /const groups = await deps\.filter\(rawGroups\)/)
 	assert.match(mRoute, /if \(gen === deps\.getGeneration\(\)\) \{\s*deps\.cache\.set\(cacheKey, \{ groups, expiry: Date\.now\(\) \+ deps\.ttlMs \}\)\s*\}/)
-	assert.match(mRoute, /\} catch \(e: any\) \{\s*deps\.log\('\[cardsByCategory\] error:', e\?\.message \?\? e\)\s*res\.status\(503\)\.json\(\{ error: e\?\.message \?\? 'cardsByCategory failed' \}\)/)
+	assert.match(mRoute, /\} catch \(e: any\) \{\s*deps\.log\('\[cardsByCategory\] error:', e\?\.message \?\? e\)\s*(?:\/\/[^\n]*\s*)*res\.status\(503\)\.json\(\{ error: 'cards_by_category_unavailable' \}\)/)
 	// Cluster 路由：要求过滤标记（非 200 原样透传由 proxy 保证）
 	assert.match(routes, /requiredResponseHeader: \{ name: CARDS_BY_CATEGORY_FILTER_HEADER, value: CARDS_BY_CATEGORY_FILTER_VERSION \}/)
 	// 数据库失败必须上抛，不得返回 []（可信空）

@@ -61,7 +61,8 @@ export const registerCardsByCategoryMasterRoute = (router: Router, deps: CardsBy
 			res.status(200).json({ groups })
 		} catch (e: any) {
 			deps.log('[cardsByCategory] error:', e?.message ?? e)
-			res.status(503).json({ error: e?.message ?? 'cardsByCategory failed' })
+			// 公网正文只含固定错误码；异常细节仅留服务端（上一行日志）。
+			res.status(503).json({ error: 'cards_by_category_unavailable' })
 		}
 	})
 }
