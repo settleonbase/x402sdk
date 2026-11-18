@@ -216,6 +216,8 @@ import {
 	type NfcLinkAppSessionDb,
 	updateMerchantCardStripeSession,
 } from './db'
+import { gateChargeRelay, recheckBindingBeforeBroadcast, type ChargeFeeDeps } from './endpoint/chargeRelayGate'
+import { readActivePosTerminalBindingForCharge } from './db'
 import { invalidateIssuedCouponSeriesQueryCachesForCard } from './endpoint/issuedCouponSeriesQueryCache'
 import { syncAllIssuedCouponSocialPromotionFromShareMetadata } from './endpoint/issuedCouponSocialPromotionMetadataSync'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './endpoint/getUIDAssetsLogic'
@@ -9807,11 +9809,33 @@ export const resolveChargeCardOwnerForAdmission = async (
 	}
 	const eoa = ethers.getAddress(ownerRaw)
 	const aaFactory = ethers.getAddress(await getCardAaFactoryAddress(cardN))
-	const factory = new ethers.Contract(aaFactory, ['function beamioAccountOf(address) view returns (address)'], provider)
+	return { eoa, aa: await readOwnerAaStrict(provider, aaFactory, eoa) }
+}
+
+/** 严格读取 owner 在工厂下的已部署 AA：无则 null；任何 RPC 失败均抛出（与 beamioAaFromFactory 的吞错不同）。 */
+const readOwnerAaStrict = async (provider: ethers.Provider, aaFactory: string, eoa: string): Promise<string | null> => {
+	const factory = new ethers.Contract(ethers.getAddress(aaFactory), ['function beamioAccountOf(address) view returns (address)'], provider)
 	const primary = (await factory.beamioAccountOf(eoa)) as string
-	if (!primary || primary === ethers.ZeroAddress) return { eoa, aa: null }
+	if (!primary || primary === ethers.ZeroAddress) return null
 	const code = await provider.getCode(primary)
-	return { eoa, aa: code && code !== '0x' && code.length > 2 ? ethers.getAddress(primary) : null }
+	return code && code !== '0x' && code.length > 2 ? ethers.getAddress(primary) : null
+}
+
+/** Master 广播前费用付款人的严格读取依赖（卡余额 → owner EOA → owner AA，任何读取失败抛出）。 */
+export const chargeFeeDepsForMaster = (feeBUnits6: bigint): ChargeFeeDeps => {
+	const cardProvider = async (cardAddress: string) => providerForUserCardChain(await resolveUserCardChain(ethers.getAddress(cardAddress)))
+	return {
+		feeBUnits6,
+		readAaFactory: (cardAddress) => getCardAaFactoryAddress(cardAddress),
+		readBUnit: async (consumer) => {
+			const bunit = new ethers.Contract(CONET_BUNIT_AIRDROP_ADDRESS, ['function getBUnitBalance(address) view returns (uint256)'], providerConet)
+			return (await bunit.getBUnitBalance(ethers.getAddress(consumer))) as bigint
+		},
+		readOwnerEoa: async (cardAddress) =>
+			resolveChargeBUnitFeePayerCardOwnerForCard(await cardProvider(cardAddress), ethers.getAddress(cardAddress)),
+		resolveOwnerAa: async (cardAddress, aaFactory, ownerEoa) =>
+			readOwnerAaStrict(await cardProvider(cardAddress), aaFactory, ownerEoa),
+	}
 }
 
 /** Charge 费用承担方：检测 to（收款方）的上层 admin。若上层是卡的 owner 或 adminParent==0，则 BUint 费用由 to 负担；否则由 upperAdmin 负担。返回 feePayer 的 EOA。 */
@@ -13044,6 +13068,7 @@ export const OpenContainerRelayProcess = async () => {
   logger(`[AAtoEOA/OpenContainer] received obj data: currency=${obj.currency ?? 'null'}, currencyAmount=${obj.currencyAmount ?? 'null'}, payload.currencyType=${payload.currencyType}, payload.maxAmount=${payload.maxAmount}, items.length=${payload.items.length}`)
   logger(`[AAtoEOA/OpenContainer] full obj: ${inspect({ currency: obj.currency, currencyAmount: obj.currencyAmount, hasPayload: !!obj.openContainerPayload }, false, 2, true)}`)
 
+  let broadcastPendingFeeRecord: string | null = null
   const SC = shiftSettleConet()
   if (!SC) {
     logger(Colors.yellow(`[AAtoEOA/OpenContainer] no SC available, re-queue (pool ${OpenContainerRelayPool.length})`))
@@ -13069,12 +13094,30 @@ export const OpenContainerRelayProcess = async () => {
     const sigHex = typeof payload.signature === 'string' && payload.signature.startsWith('0x') ? payload.signature : '0x' + payload.signature
     const sigBytes = ethers.getBytes(sigHex)
 
+    // B6：广播前独立完成准入（选卡/绑定/收款方）、签名 maxAmount 与严格费用付款人。
+    // 任一失败：不建立中继上下文、不签名、不广播、不入队。
+    const chargeGate = await gateChargeRelay(
+      {
+        merchantCardAddress: (obj as { merchantCardAddress?: string }).merchantCardAddress,
+        items: items.map((it) => ({ kind: it.kind, asset: it.asset, amount: it.amount })),
+        to: payload.to,
+        ccsaAddress: BASE_CCSA_CARD_ADDRESS,
+        maxAmount,
+      },
+      {
+        admission: { lookupBinding: readActivePosTerminalBindingForCharge, resolveOwner: resolveChargeCardOwnerForAdmission },
+        fee: chargeFeeDepsForMaster(calcChargeFixedBUnitFee().bServiceUnits6),
+      }
+    )
+    if (!chargeGate.ok) {
+      logger(Colors.red(`[AAtoEOA/OpenContainer] charge gate REJECT (${chargeGate.code}): ${chargeGate.error}`))
+      obj.res.status(chargeGate.status).json({ success: false, error: chargeGate.error, code: chargeGate.code }).end()
+      return
+    }
     const has1155 = items.some((it: { kind: number }) => it.kind === 1)
-    const erc1155CardAddr = items.find((it) => it.kind === 1)?.asset
-    const merchantCardRaw = (obj as { merchantCardAddress?: string }).merchantCardAddress
-    const merchantCardNorm =
-      merchantCardRaw && ethers.isAddress(merchantCardRaw) ? ethers.getAddress(merchantCardRaw) : null
-    const relayCardSeed = erc1155CardAddr ?? merchantCardNorm
+    /** B3：中继上下文、收款方改写、费用卡与 AA 工厂全部来自同一份准入结果（已 checksum、已核验）。 */
+    const merchantCardNorm = chargeGate.cardAddress
+    const relayCardSeed = merchantCardNorm
     const relayCtx = await merchantCardRelayContext(SC, relayCardSeed)
     const relayWallet = relayCtx.wallet
     const relayProvider = relayCtx.provider
@@ -13095,22 +13138,7 @@ export const OpenContainerRelayProcess = async () => {
 
     // 与 getWalletAssets / resolveBeamioAaForEoaWithFallback 一致：须用 **该笔 OpenContainer 涉及卡** 在 factoryGateway 上绑定的 _aaFactory()。
     // 勿硬编码 BASE_AA_FACTORY：卡工厂已指向新 AA 工厂时，旧工厂的 isBeamioAccount 会对真实商户 AA 恒 false，导致 Charge REJECT。
-    let relayAaFactoryAddr: string | null = null
-    try {
-      if (erc1155CardAddr) {
-        relayAaFactoryAddr = await getCardAaFactoryAddress(erc1155CardAddr)
-      } else if (merchantCardNorm) {
-        relayAaFactoryAddr = await getCardAaFactoryAddress(merchantCardNorm)
-      } else {
-        relayAaFactoryAddr = await getAaFactoryAddressFromUserCardFactoryPaymaster(
-          relayProvider,
-          relayCtx.cardFactory
-        )
-      }
-    } catch (facErr: any) {
-      logger(Colors.yellow(`[AAtoEOA/OpenContainer] resolve relay AA factory failed: ${facErr?.message ?? facErr}`))
-      relayAaFactoryAddr = null
-    }
+    let relayAaFactoryAddr: string | null = chargeGate.aaFactory
     if (!relayAaFactoryAddr) {
       logger(Colors.red(`[AAtoEOA/OpenContainer] no AA factory (card/UserCard path)`))
       obj.res
@@ -13142,7 +13170,7 @@ export const OpenContainerRelayProcess = async () => {
       )
     )
     let payeeResolvedFromMerchantCard = false
-    if (has1155 && relayCardSeed) {
+    if (chargeGate.hasNonCcsaErc1155 && relayCardSeed) {
       try {
         const payeeCard = new ethers.Contract(
           ethers.getAddress(relayCardSeed),
@@ -13317,11 +13345,19 @@ export const OpenContainerRelayProcess = async () => {
       preVerificationGas: asBigInt(packedOpenOp.preVerificationGas, 0n),
       signature: sigBytes,
     }
+    // B5：广播前紧邻处复核绑定（准入之后的撤销在此生效）。无绑定或读取失败 → 不广播、不入队。
+    const bindingRecheck = await recheckBindingBeforeBroadcast(chargeGate.cardAddress, readActivePosTerminalBindingForCharge)
+    if (!bindingRecheck.ok) {
+      logger(Colors.red(`[AAtoEOA/OpenContainer] binding recheck REJECT before broadcast (${bindingRecheck.code})`))
+      obj.res.status(bindingRecheck.status).json({ success: false, error: bindingRecheck.error, code: bindingRecheck.code }).end()
+      return
+    }
     const beneficiary = await relayWallet.getAddress()
     const tx = await FactoryWithRelay.relayHandleOps([txOp], beneficiary, {
       gasLimit: resolveRelayHandleOpsGasLimit(),
     })
     logger(`[AAtoEOA/OpenContainer] EntryPoint relayHandleOps tx submitted hash=${tx.hash}`)
+    broadcastPendingFeeRecord = `tx=${tx.hash} card=${chargeGate.cardAddress} feeConsumer=${chargeGate.feeConsumer} feeSource=${chargeGate.feeSource} feeBUnits6=${chargeGate.feeBUnits6.toString()} payer=${account} maxAmount=${chargeGate.maxAmount.toString()}`
     const openRelayReceipt = await tx.wait().catch((waitErr: any) => {
       try {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, tx submitted): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))
@@ -13504,26 +13540,11 @@ export const OpenContainerRelayProcess = async () => {
     }
 
     if (collectedRouteItems.length > 0) {
-      const feePayerCard = resolveChargeFeePayerCardFromOpenContainerItems(
-        items.map((it) => ({ kind: it.kind, asset: it.asset }))
-      )
-      const feePayerItems = items.map((it) => ({ kind: it.kind, asset: it.asset }))
-      const { bServiceUnits6: feeBUnits6, bServiceUSDC6: feeBUsdc6 } = calcChargeFixedBUnitFee()
-      const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwner(relayProvider, feePayerItems)
-      const aaFactoryOpen = await getCardAaFactoryAddress(feePayerCard)
-      const feePayerPickOpen = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(
-        feePayerCard,
-        feePayerOwnerEoa,
-        feeBUnits6,
-        {
-          aaFactoryAddress: aaFactoryOpen,
-          aaFactoryProvider: relayProvider,
-        }
-      )
-      const feePayerEOA = feePayerPickOpen.ok ? feePayerPickOpen.consumer : feePayerOwnerEoa
-      if (!feePayerPickOpen.ok) {
-        logger(Colors.yellow(`[AAtoEOA/OpenContainer] B-Unit payer pick failed at master, fallback EOA for consume: ${feePayerPickOpen.error}`))
-      }
+      /** 广播后扣费只使用广播前已核验的费用上下文（同卡、同付款人，不重新选择，不回退 EOA）。 */
+      const feePayerCard = chargeGate.cardAddress
+      const feeBUnits6 = chargeGate.feeBUnits6
+      const { bServiceUSDC6: feeBUsdc6 } = calcChargeFixedBUnitFee()
+      const feePayerEOA = chargeGate.feeConsumer
       const { payeeEOA } = await resolveChargeFeePayer(to, feePayerCard, relayProvider)
       const amountUSDC6ForFee = totalAmountUSDC6ForFee > 0n ? totalAmountUSDC6ForFee : totalAmountE6
       /** 与 ContainerRelay 一致：用 USDC6 等价总额做账本分栏与 TX_TIP 拆分（优于混加 raw item amount） */
@@ -13846,6 +13867,9 @@ export const OpenContainerRelayProcess = async () => {
       }
     } catch (_) {}
     logger(Colors.red(`❌ OpenContainerRelayProcess failed: ${msg}`))
+    if (broadcastPendingFeeRecord) {
+      logger(Colors.red(`[CHARGE_FEE_PENDING] post-broadcast step failed; payment NOT replayed; record for manual catch-up: ${broadcastPendingFeeRecord} error=${msg}`))
+    }
     const dataHex = typeof error?.data === 'string' ? error.data : ''
     const isBadNonce = dataHex.length >= 10 && dataHex.slice(0, 10).toLowerCase() === '0x74794617'
     const isInsufficientBalance = dataHex.length >= 10 && dataHex.slice(0, 10).toLowerCase() === '0xc6d837a8'

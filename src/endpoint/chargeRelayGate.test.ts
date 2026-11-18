@@ -14,7 +14,7 @@ registerHooks({
 	},
 })
 
-const { admitChargeRequest } = await import('./chargeRelayGate.ts')
+const { admitChargeRequest, verifyChargeFeePayer, assertChargeWithinMaxAmount, recheckBindingBeforeBroadcast, gateChargeRelay } = await import('./chargeRelayGate.ts')
 
 const CCSA = '0x2032A363BB2cf331142391fC0DAd21D6504922C7'
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
@@ -178,3 +178,205 @@ test('an unexpected throw inside the admission is contained as 503 (route never 
 	assert.equal(!v.ok && v.status, 503)
 	assert.equal(!v.ok && v.code, 'pos_admission_unavailable')
 })
+
+// ---------------------------------------------------------------------------
+// Master 广播前：费用付款人（严格）、签名 maxAmount、广播前绑定复核、单一准入入口。
+// ---------------------------------------------------------------------------
+
+const FEE = 5_000_000n
+const AA = '0x00000000000000000000000000000000000000a7'
+const AA_FACTORY = '0x00000000000000000000000000000000000000f1'
+
+const feeHarness = (balances: Record<string, bigint | 'throw' | 'junk'>, over: { factory?: 'throw'; owner?: 'throw'; aa?: string | null | 'throw' } = {}) => {
+	const trace: string[] = []
+	return {
+		trace,
+		deps: {
+			feeBUnits6: FEE,
+			readAaFactory: async (c: string) => {
+				trace.push('factory')
+				if (over.factory === 'throw') throw new Error('gateway read failed')
+				return AA_FACTORY
+			},
+			readBUnit: async (addr: string) => {
+				trace.push('bunit:' + addr.toLowerCase().slice(-4))
+				const v = balances[addr.toLowerCase()]
+				if (v === 'throw') throw new Error('rpc timeout')
+				if (v === 'junk') return 'not-a-bigint' as any
+				return v ?? 0n
+			},
+			readOwnerEoa: async (c: string) => {
+				trace.push('owner')
+				if (over.owner === 'throw') throw new Error('owner read failed')
+				return OWNER_EOA
+			},
+			resolveOwnerAa: async (_c: string, _f: string, _e: string) => {
+				trace.push('ownerAa')
+				if (over.aa === 'throw') throw new Error('aa read failed')
+				return over.aa === undefined ? AA : (over.aa as string | null)
+			},
+		},
+	}
+}
+const K = (a: string) => a.toLowerCase()
+
+test('fee: card balance sufficient is the consumer; no owner or AA read happens', async () => {
+	const h = feeHarness({ [K(CARD)]: FEE })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(v.ok, true)
+	assert.equal(v.ok && v.source, 'card')
+	assert.equal(v.ok && v.consumer, CARD)
+	assert.deepEqual(h.trace, ['factory', 'bunit:0c01'])
+})
+
+test('fee: card short, owner EOA sufficient is the consumer (EOA before AA)', async () => {
+	const h = feeHarness({ [K(CARD)]: 0n, [K(OWNER_EOA)]: FEE })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(v.ok && v.source, 'owner_eoa')
+	assert.equal(v.ok && v.consumer, OWNER_EOA)
+	assert.ok(!h.trace.includes('ownerAa'))
+})
+
+test('fee: card and EOA short, owner AA sufficient is the consumer', async () => {
+	const h = feeHarness({ [K(CARD)]: 0n, [K(OWNER_EOA)]: 0n, [K(AA)]: FEE })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(v.ok && v.source, 'owner_aa')
+	assert.equal(v.ok && v.consumer, AA)
+})
+
+test('fee: every balance read succeeds and is short → 400 pos_fee_insufficient (a trusted zero, not 503)', async () => {
+	const h = feeHarness({ [K(CARD)]: 1n, [K(OWNER_EOA)]: 2n, [K(AA)]: 3n })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(v.ok, false)
+	assert.equal(!v.ok && v.status, 400)
+	assert.equal(!v.ok && v.code, 'pos_fee_insufficient')
+})
+
+test('fee: no AA for the owner and every balance short → 400 pos_fee_insufficient', async () => {
+	const h = feeHarness({}, { aa: null })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(!v.ok && v.code, 'pos_fee_insufficient')
+})
+
+test('fee: a card balance read failure is 503 pos_fee_unavailable and no owner read follows', async () => {
+	const h = feeHarness({ [K(CARD)]: 'throw' })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(!v.ok && v.status, 503)
+	assert.equal(!v.ok && v.code, 'pos_fee_unavailable')
+	assert.ok(!h.trace.includes('owner'))
+})
+
+test('fee: a gateway (AA factory) read failure is 503, even when the card balance is sufficient', async () => {
+	const h = feeHarness({ [K(CARD)]: FEE }, { factory: 'throw' })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(!v.ok && v.status, 503)
+})
+
+test('fee: an owner read failure is 503 (never treated as insufficient)', async () => {
+	const h = feeHarness({ [K(CARD)]: 0n }, { owner: 'throw' })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(!v.ok && v.status, 503)
+})
+
+test('fee: an EOA balance read failure is 503 (never treated as insufficient)', async () => {
+	const h = feeHarness({ [K(CARD)]: 0n, [K(OWNER_EOA)]: 'throw' })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(!v.ok && v.status, 503)
+})
+
+test('fee: an AA read failure is 503 (never treated as insufficient)', async () => {
+	const h = feeHarness({ [K(CARD)]: 0n, [K(OWNER_EOA)]: 0n }, { aa: 'throw' })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(!v.ok && v.status, 503)
+})
+
+test('fee: a non-bigint balance is a read failure (503), never a zero', async () => {
+	const h = feeHarness({ [K(CARD)]: 'junk' })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: h.deps })
+	assert.equal(!v.ok && v.status, 503)
+})
+
+test('fee: a non-positive fee is a configuration failure (503), never a free charge', async () => {
+	const h = feeHarness({ [K(CARD)]: 10n })
+	const v = await verifyChargeFeePayer({ cardAddress: CARD, deps: { ...h.deps, feeBUnits6: 0n } })
+	assert.equal(!v.ok && v.status, 503)
+})
+
+test('maxAmount: zero is not enforced here (matches the chain); a positive cap rejects USDC spend above it', () => {
+	assert.equal(assertChargeWithinMaxAmount({ maxAmount: 0n, items: [{ kind: 0, amount: 999n }] }).ok, true)
+	assert.equal(assertChargeWithinMaxAmount({ maxAmount: 1000n, items: [{ kind: 0, amount: 1000n }] }).ok, true)
+	const over = assertChargeWithinMaxAmount({ maxAmount: 1000n, items: [{ kind: 0, amount: 600n }, { kind: 0, amount: 401n }] })
+	assert.equal(over.ok, false)
+	assert.equal(!over.ok && over.code, 'pos_amount_exceeds_max')
+})
+
+test('maxAmount: ERC1155 (kind=1) amounts are points, not USDC spend, and do not count against the cap', () => {
+	assert.equal(assertChargeWithinMaxAmount({ maxAmount: 10n, items: [{ kind: 1, amount: 9_999n }] }).ok, true)
+})
+
+test('recheck before broadcast: bound → ok; no binding → 400; lookup throw → 503; malformed card → 400 without lookup', async () => {
+	assert.equal((await recheckBindingBeforeBroadcast(CARD, async () => true)).ok, true)
+	const miss = await recheckBindingBeforeBroadcast(CARD, async () => false)
+	assert.equal(!miss.ok && miss.code, 'pos_card_not_bound')
+	const down = await recheckBindingBeforeBroadcast(CARD, async () => {
+		throw new Error('db down')
+	})
+	assert.equal(!down.ok && down.status, 503)
+	let called = 0
+	const bad = await recheckBindingBeforeBroadcast('nope', async () => {
+		called++
+		return true
+	})
+	assert.equal(!bad.ok && bad.code, 'pos_card_invalid')
+	assert.equal(called, 0)
+})
+
+test('gateChargeRelay: admission rejection stops before maxAmount and fee reads', async () => {
+	const h = harness({ bound: false })
+	const fh = feeHarness({ [K(CARD)]: FEE })
+	const v = await gateChargeRelay(
+		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 0n },
+		{ admission: h.deps, fee: fh.deps }
+	)
+	assert.equal(!v.ok && v.code, 'pos_card_not_bound')
+	assert.deepEqual(fh.trace, [])
+})
+
+test('gateChargeRelay: maxAmount rejection stops before fee reads', async () => {
+	const h = harness()
+	const fh = feeHarness({ [K(CARD)]: FEE })
+	const v = await gateChargeRelay(
+		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 50n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 10n },
+		{ admission: h.deps, fee: fh.deps }
+	)
+	assert.equal(!v.ok && v.code, 'pos_amount_exceeds_max')
+	assert.deepEqual(fh.trace, [])
+})
+
+test('gateChargeRelay: fee shortfall is a 4xx; fee read failure is 503', async () => {
+	const short = await gateChargeRelay(
+		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 0n },
+		{ admission: harness().deps, fee: feeHarness({}).deps }
+	)
+	assert.equal(!short.ok && short.status, 400)
+	assert.equal(!short.ok && short.code, 'pos_fee_insufficient')
+	const down = await gateChargeRelay(
+		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 0n },
+		{ admission: harness().deps, fee: feeHarness({ [K(CARD)]: 'throw' }).deps }
+	)
+	assert.equal(!down.ok && down.status, 503)
+})
+
+test('gateChargeRelay: success returns one frozen verdict carrying the verified card, the fee consumer and the cap', async () => {
+	const v = await gateChargeRelay(
+		{ merchantCardAddress: CARD.toLowerCase(), items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 5n },
+		{ admission: harness().deps, fee: feeHarness({ [K(CARD)]: FEE }).deps }
+	)
+	assert.equal(v.ok, true)
+	if (!v.ok) return
+	assert.equal(v.cardAddress, ethers.getAddress(CARD))
+	assert.equal(v.feeConsumer, ethers.getAddress(CARD))
+	assert.equal(v.maxAmount, 5n)
+	assert.equal(Object.isFrozen(v), true)
+})
+
