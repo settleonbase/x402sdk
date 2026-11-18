@@ -1,16 +1,18 @@
 #!/bin/bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
+: "${BEAMIO_SVC_USER:?set BEAMIO_SVC_USER (real value in the private operations guide)}"
 # 解冻完成后：组装 base 工作目录、配置 reth、启动 reth 和 op-node
 # 用法：在远程服务器执行 bash assemble-base-from-snapshot.sh
 set -e
 
-SRC=/home/peter/snapshots/mainnet/download
-OP_RETH=/home/peter/base/op-reth
+SRC=${BEAMIO_HOST_HOME}/snapshots/mainnet/download
+OP_RETH=${BEAMIO_HOST_HOME}/base/op-reth
 OP_RETH_STATIC=/media/sda/base/op-reth-static
-BASE=/home/peter/base
+BASE=${BEAMIO_HOST_HOME}/base
 
 echo "=== 1. 等待解冻结束（检测 tar -I zstd 进程）==="
 while ps aux | grep -q "[t]ar -I zstd"; do
-  echo "$(date +%H:%M:%S) 解压进行中... $(du -sh /home/peter/snapshots 2>/dev/null || echo "0")"
+  echo "$(date +%H:%M:%S) 解压进行中... $(du -sh ${BEAMIO_HOST_HOME}/snapshots 2>/dev/null || echo "0")"
   sleep 120
 done
 echo "$(date +%H:%M:%S) 解压已结束"
@@ -21,8 +23,8 @@ ls -la "$SRC"
 
 echo "=== 3. 创建目录结构 ==="
 sudo mkdir -p "$BASE"/op-reth "$BASE"/op-node "$BASE"/jwt "$BASE"/config "$OP_RETH_STATIC"
-sudo chown -R peter:peter "$BASE"
-sudo chown -R peter:peter "$OP_RETH_STATIC"
+sudo chown -R ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$BASE"
+sudo chown -R ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$OP_RETH_STATIC"
 
 echo "=== 4. mv 主数据到 op-reth ==="
 sudo rm -rf "$OP_RETH"/*
@@ -30,22 +32,22 @@ sudo mv "$SRC"/db "$SRC"/blobstore "$SRC"/reth.toml "$OP_RETH/"
 [ -f "$SRC"/known-peers.json ] && sudo mv "$SRC"/known-peers.json "$OP_RETH/" || true
 [ -d "$SRC"/etl-tmp ] && sudo mv "$SRC"/etl-tmp "$OP_RETH/" 2>/dev/null || true
 [ -d "$SRC"/invalid_block_hooks ] && sudo mv "$SRC"/invalid_block_hooks "$OP_RETH/" 2>/dev/null || true
-sudo chown -R peter:peter "$OP_RETH"
+sudo chown -R ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$OP_RETH"
 
 echo "=== 5. mv static_files 到 /media/sda/base/op-reth-static ==="
 sudo rm -rf "$OP_RETH_STATIC"/*
 sudo mv "$SRC"/static_files/* "$OP_RETH_STATIC/"
-sudo chown -R peter:peter "$OP_RETH_STATIC"
+sudo chown -R ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$OP_RETH_STATIC"
 
 echo "=== 6. jwt 和 config ==="
 [ -d /media/sda/base/jwt ] && sudo cp -a /media/sda/base/jwt/* "$BASE/jwt/" 2>/dev/null || true
 [ -d /media/sda/base/config ] && sudo cp -a /media/sda/base/config/* "$BASE/config/" 2>/dev/null || true
-[ ! -f "$BASE/jwt/jwt.hex" ] && openssl rand -hex 32 | sudo tee "$BASE/jwt/jwt.hex" > /dev/null && sudo chown peter:peter "$BASE/jwt/jwt.hex" || true
-sudo chown -R peter:peter "$BASE/jwt" "$BASE/config"
+[ ! -f "$BASE/jwt/jwt.hex" ] && openssl rand -hex 32 | sudo tee "$BASE/jwt/jwt.hex" > /dev/null && sudo chown ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$BASE/jwt/jwt.hex" || true
+sudo chown -R ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$BASE/jwt" "$BASE/config"
 
 echo "=== 7. op-node 数据 ==="
 [ -d /media/sda/base/op-node ] && sudo cp -a /media/sda/base/op-node/* "$BASE/op-node/" 2>/dev/null || true
-sudo chown -R peter:peter "$BASE/op-node"
+sudo chown -R ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$BASE/op-node"
 
 echo "=== 8. 配置 reth.toml prune ==="
 RETH_TOML="$OP_RETH/reth.toml"
@@ -68,12 +70,12 @@ if [ -f "$RETH_TOML" ]; then
       sudo sed -i "/\[stages.${section}\]/,/^\[/ s/commit_threshold = [0-9]*/commit_threshold = 2678400/" "$RETH_TOML" 2>/dev/null || true
     fi
   done
-  sudo chown peter:peter "$RETH_TOML"
+  sudo chown ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$RETH_TOML"
   echo "reth.toml 已更新"
 fi
 
 echo "=== 9. 清理解冻目录 ==="
-sudo rm -rf /home/peter/snapshots
+sudo rm -rf ${BEAMIO_HOST_HOME}/snapshots
 
 echo "=== 10. 验证 ==="
 ls -la "$OP_RETH"

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
 # Run op-reth MDBX hot backup inside tmux; append logs to db-copy.log.
 # Intended for the Linux Base node. See OP-RETH-DB-COPY-HOT-BACKUP.md
 set -euo pipefail
 
 OP_RETH_BIN="${OP_RETH_BIN:-/media/sda/bin/op-reth-v1.11.3-rc.3}"
-DATADIR="${DATADIR:-/home/peter/base/op-reth}"
+DATADIR="${DATADIR:-${BEAMIO_HOST_HOME}/base/op-reth}"
 STATIC="${STATIC:-/media/sda/base/op-reth-static}"
 CHAIN="${CHAIN:-base}"
 LOG="${LOG:-$HOME/db-copy.log}"

@@ -1,22 +1,30 @@
 [Unit]
-Description=CoNET Lab staking CL skim payout to ConetLabMiningPool
+Description=CoNET Lab staking CL skim payout via LabMiningPoolPayoutExecutor (dedicated socket)
 After=network-online.target
 Wants=network-online.target
+# Refusal at start (e.g. R1 guard) exits 1 and would restart every RestartSec. Bound the loop: 5 starts in 300 s, then the unit stops until reset-failed.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# Prefer After= the signer service unit when it exists on the host.
 
 [Service]
 Type=simple
-User=peter
-Group=peter
-WorkingDirectory=/home/peter/x402sdk
+# Dedicated unix user — must NOT be the VDR PAY signer user.
+User=<service-user>
+Group=<service-group>
+WorkingDirectory=<service-home>/x402sdk
 EnvironmentFile=-/etc/default/conet-lab-mining-pool-cl-payout
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/node dist/endpoint/labMiningPoolClPayoutDaemon.js
-Restart=always
+Restart=on-failure
+# Exit 3 (receipt status 0) and 4 (unknown receipt) are halts: do not restart.
+RestartPreventExitStatus=3 4
 RestartSec=15
-TimeoutStopSec=120
+TimeoutStopSec=240
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=conet-lab-mining-pool-cl-payout
+# Socket access: the lab payout socket is group-readable (path per the signer handover)
 
 [Install]
 WantedBy=multi-user.target

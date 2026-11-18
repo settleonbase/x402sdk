@@ -1,8 +1,9 @@
 #!/bin/bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
 # 进一步增大 commit_threshold，减少落盘频率，让出磁盘带宽给读
 # op-reth 仅支持 SafeNoSync，已是最激进模式；通过增大批次减少写次数
 
-RETH_TOML="${1:-/home/peter/base/op-reth/reth.toml}"
+RETH_TOML="${1:-${BEAMIO_HOST_HOME}/base/op-reth/reth.toml}"
 
 [ ! -f "$RETH_TOML" ] && { echo "reth.toml 不存在: $RETH_TOML"; exit 1; }
 

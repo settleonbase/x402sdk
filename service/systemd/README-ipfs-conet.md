@@ -3,11 +3,11 @@
 - **Host**: `ipfs.conet.network` (public IP `38.102.126.33` at time of setup).
 - **Binaries**: `/media/sda/bin/op-reth-v1.11.3`, `/media/sda/bin/op-node-latest` → `op-node-v1.16.9`.
 - **Paths** (aligned with `38.102.126.30` native layout, static + ETL on `/dev/sda` → `/media/sda`):
-  - Main datadir (MDBX): `/home/peter/base/op-reth`
+  - Main datadir (MDBX): `<service-home>/base/op-reth`
   - Static files: `/media/sda/base/op-reth-static`
   - ETL temp: `/media/sda/baseTemp` (see `reth.toml` `[stages.etl]`)
   - op-node P2P DB: `/media/sda/base/op-node`
-  - JWT: `/home/peter/base/jwt/jwt.hex` (must match between op-reth and op-node)
+  - JWT: `<service-home>/base/jwt/jwt.hex` (must match between op-reth and op-node)
 
 ## Install / update units
 
@@ -28,7 +28,7 @@ ssh ipfs.conet.network 'sudo systemctl enable --now base-op-node-native.service'
 
 Script: `service/assemble-base-from-unpack-ipfs.sh` (run on the server; uses `tmux` session `base-assemble` if launched remotely).
 
-- Moves `db`, `blobstore`, `reth.toml`, `known-peers.json`, `invalid_block_hooks` → `/home/peter/base/op-reth`
+- Moves `db`, `blobstore`, `reth.toml`, `known-peers.json`, `invalid_block_hooks` → `<service-home>/base/op-reth`
 - Rsyncs `static_files` → `/media/sda/base/op-reth-static`, then deletes snapshot `static_files` + `etl-tmp` and removes the unpack tree
 - Sets `reth.toml` `[stages.etl] dir = "/media/sda/baseTemp"` (ETL on HDD; op-reth has no CLI for this—only datadir `reth.toml`)
 

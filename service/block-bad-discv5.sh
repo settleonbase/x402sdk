@@ -1,4 +1,5 @@
 #!/bin/bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
 # 从 op-node 日志中提取 Bad discv5（id=全零）的 IP 并加入 iptables DROP
 # 规则含义：-s IP -j DROP = 丢弃该 IP 发出的所有报文，即全面屏蔽（本机任意端口 + 任意容器任意端口），不区分协议与端口
 # 关键：到容器的流量必须先经 DOCKER-USER 再经 Docker 的 ACCEPT，故必须把 DROP 写在 DOCKER-USER 里
@@ -16,8 +17,8 @@
 CONTAINER="${BLOCK_DISCV5_CONTAINER:-base-op-node}"
 TAIL="${BLOCK_DISCV5_TAIL:-2000}"
 RULES_FILE="${BLOCK_DISCV5_RULES:-/etc/iptables.rules}"
-LOG_FILE="${BLOCK_DISCV5_LOG:-/home/peter/base/block-bad-discv5.log}"
-LOCK_FILE="${BLOCK_DISCV5_LOCK:-/home/peter/base/block-bad-discv5.lock}"
+LOG_FILE="${BLOCK_DISCV5_LOG:-${BEAMIO_HOST_HOME}/base/block-bad-discv5.log}"
+LOCK_FILE="${BLOCK_DISCV5_LOCK:-${BEAMIO_HOST_HOME}/base/block-bad-discv5.lock}"
 
 log() { echo "$(date -Iseconds) $*" >> "$LOG_FILE"; }
 

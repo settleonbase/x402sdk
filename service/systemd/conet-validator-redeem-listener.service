@@ -1,3 +1,4 @@
+# Install-time placeholders (<service-user>, <service-group>, <service-home>) are replaced from the private operations guide.
 [Unit]
 Description=CoNET ValidatorDepositRedeem event listener (validator node)
 After=network-online.target
@@ -5,9 +6,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=peter
-Group=peter
-WorkingDirectory=/home/peter/x402sdk
+User=<service-user>
+Group=<service-group>
+WorkingDirectory=<service-home>/x402sdk
 EnvironmentFile=-/etc/default/conet-validator-redeem-listener
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/node dist/endpoint/validatorDepositRedeemListenerDaemon.js

@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Assemble /home/peter/base from Base pruned snapshot unpack on ipfs.conet.network.
-# - Move db/blobstore/reth.toml/etc. into /home/peter/base/op-reth
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
+: "${BEAMIO_SVC_USER:?set BEAMIO_SVC_USER (real value in the private operations guide)}"
+# Assemble ${BEAMIO_HOST_HOME}/base from Base pruned snapshot unpack on ipfs.conet.network.
+# - Move db/blobstore/reth.toml/etc. into ${BEAMIO_HOST_HOME}/base/op-reth
 # - Rsync static_files -> /media/sda/base/op-reth-static, then delete snapshot static + etl-tmp
 # - Set [stages.etl] dir to /media/sda/baseTemp; create that directory
-# Run on the server as user with sudo (e.g. peter).
+# Run on the server as the service user with sudo (placeholder: <service-user>).
 set -euo pipefail
 
-UNPACK="${UNPACK:-/home/peter/base-mainnet-pruned-reth-1772096746-unpack}"
+UNPACK="${UNPACK:-${BEAMIO_HOST_HOME}/base-mainnet-pruned-reth-1772096746-unpack}"
 SRC="$UNPACK/snapshots/mainnet/download"
-BASE=/home/peter/base
+BASE=${BEAMIO_HOST_HOME}/base
 OP_RETH="$BASE/op-reth"
 STATIC=/media/sda/base/op-reth-static
 TEMP=/media/sda/baseTemp
-LOG="${LOG:-/home/peter/assemble-base-$(date +%Y%m%d-%H%M%S).log}"
+LOG="${LOG:-${BEAMIO_HOST_HOME}/assemble-base-$(date +%Y%m%d-%H%M%S).log}"
 
 exec > >(tee -a "$LOG") 2>&1
 
@@ -27,14 +29,14 @@ fi
 sudo systemctl stop base-op-reth-native.service base-op-node-native.service 2>/dev/null || true
 
 sudo mkdir -p "$BASE"/{op-reth,op-node,jwt,config} "$STATIC" "$TEMP"
-sudo chown -R peter:peter "$BASE" "$STATIC" "$TEMP"
+sudo chown -R ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$BASE" "$STATIC" "$TEMP"
 
 echo "=== clear op-reth datadir (jwt untouched) ==="
 if [[ -d "$OP_RETH" ]]; then
   sudo find "$OP_RETH" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 fi
 sudo mkdir -p "$OP_RETH"
-sudo chown peter:peter "$OP_RETH"
+sudo chown ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$OP_RETH"
 
 echo "=== mv main datadir from snapshot ==="
 mv "$SRC/db" "$OP_RETH/"
@@ -45,16 +47,17 @@ mv "$SRC/reth.toml" "$OP_RETH/"
 
 echo "=== rsync static_files -> $STATIC (may take a long time) ==="
 sudo rsync -a --delete "$SRC/static_files/" "$STATIC/"
-sudo chown -R peter:peter "$STATIC"
+sudo chown -R ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$STATIC"
 
 echo "=== delete static + etl-tmp under snapshot (free /home) ==="
 rm -rf "$SRC/static_files" "$SRC/etl-tmp"
 
 echo "=== ensure reth.toml [stages.etl] dir -> $TEMP ==="
+export BEAMIO_RETH_TOML="${BEAMIO_HOST_HOME}/base/op-reth/reth.toml"
 python3 <<'PY'
-import re
+import os, re
 from pathlib import Path
-path = Path("/home/peter/base/op-reth/reth.toml")
+path = Path(os.environ["BEAMIO_RETH_TOML"])
 text = path.read_text()
 want = '"/media/sda/baseTemp"'
 # Replace existing dir = line after [stages.etl]
@@ -75,7 +78,7 @@ elif "[stages.etl]" in text and want not in text:
 else:
     print("no change needed")
 PY
-sudo chown peter:peter "$OP_RETH/reth.toml"
+sudo chown ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$OP_RETH/reth.toml"
 
 echo "=== normalize prune.segments distance: 1339200 -> 2678400 (match full-node-style window) ==="
 sed -i 's/^distance = 1339200$/distance = 2678400/' "$OP_RETH/reth.toml"
@@ -83,7 +86,7 @@ sed -i 's/^distance = 1339200$/distance = 2678400/' "$OP_RETH/reth.toml"
 if [[ ! -s "$BASE/jwt/jwt.hex" ]]; then
   echo "=== create jwt.hex ==="
   openssl rand -hex 32 | tr -d '\n' | sudo tee "$BASE/jwt/jwt.hex" >/dev/null
-  sudo chown peter:peter "$BASE/jwt/jwt.hex"
+  sudo chown ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$BASE/jwt/jwt.hex"
   sudo chmod 600 "$BASE/jwt/jwt.hex"
 fi
 

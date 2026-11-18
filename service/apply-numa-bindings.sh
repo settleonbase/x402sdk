@@ -1,4 +1,5 @@
 #!/bin/bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
 # Apply NUMA bindings to lighthouse, geth, op-reth, op-node
 # Run on remote host 38.102.126.30
 # Usage: from x402sdk/ or service/: ./apply-numa-bindings.sh
@@ -12,7 +13,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET_SYSTEMD="${TARGET_SYSTEMD:-/etc/systemd/system}"
-COMPOSE_DIR="${COMPOSE_DIR:-/home/peter/base}"
+COMPOSE_DIR="${COMPOSE_DIR:-${BEAMIO_HOST_HOME}/base}"
 
 echo "=== Applying NUMA bindings ==="
 echo "Source: $SCRIPT_DIR"

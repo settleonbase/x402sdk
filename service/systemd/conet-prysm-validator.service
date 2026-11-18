@@ -1,3 +1,4 @@
+# Install-time placeholders (<service-user>, <service-group>, <service-home>) are replaced from the private operations guide.
 [Unit]
 Description=CoNET Prysm validator client (node-0)
 After=network-online.target
@@ -5,16 +6,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=peter
-Group=peter
-WorkingDirectory=/home/peter/ethereum-pos-mainnet
+User=<service-user>
+Group=<service-group>
+WorkingDirectory=<service-home>/ethereum-pos-mainnet
 EnvironmentFile=-/etc/default/conet-validator-redeem-listener
-ExecStart=/home/peter/ethereum-pos-mainnet/10_run_prysm_validator.sh
+ExecStart=<service-home>/ethereum-pos-mainnet/10_run_prysm_validator.sh
 Restart=always
 RestartSec=10
 TimeoutStopSec=120
-StandardOutput=append:/home/peter/ethereum-pos-mainnet/network/node-0/logs/validator.log
-StandardError=append:/home/peter/ethereum-pos-mainnet/network/node-0/logs/validator.log
+StandardOutput=append:<service-home>/ethereum-pos-mainnet/network/node-0/logs/validator.log
+StandardError=append:<service-home>/ethereum-pos-mainnet/network/node-0/logs/validator.log
 SyslogIdentifier=conet-prysm-validator
 LimitNOFILE=65536
 

@@ -1,4 +1,6 @@
 #!/bin/bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
+: "${BEAMIO_SVC_USER:?set BEAMIO_SVC_USER (real value in the private operations guide)}"
 # 修复 op-node 与 reth 之间的 JWT 认证问题
 # reth 报错: "Invalid JWT: Authorization header is missing or invalid"
 #
@@ -10,7 +12,7 @@
 
 set -e
 
-JWT_DIR="${JWT_DIR:-/home/peter/base/jwt}"
+JWT_DIR="${JWT_DIR:-${BEAMIO_HOST_HOME}/base/jwt}"
 JWT_FILE="$JWT_DIR/jwt.hex"
 REGEN="${REGEN:-1}"
 
@@ -50,13 +52,13 @@ cp -a "$JWT_FILE" "$JWT_FILE.bak.$(date +%Y%m%d%H%M%S)"
 openssl rand -hex 32 | tr -d '\n' > "$JWT_FILE.tmp"
 mv "$JWT_FILE.tmp" "$JWT_FILE"
 chmod 600 "$JWT_FILE"
-chown peter:peter "$JWT_FILE" 2>/dev/null || true
+chown ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$JWT_FILE" 2>/dev/null || true
 echo "   已生成，新长度: $(wc -c < "$JWT_FILE")"
 echo ""
 
 # 4. 重启
 echo "3. 重启 op-reth 和 op-node..."
-COMPOSE_DIR="/home/peter/base"
+COMPOSE_DIR="${BEAMIO_HOST_HOME}/base"
 COMPOSE_FILE=""
 for f in "docker-compose-op-reth-home.yml" "docker-compose.yml"; do
   [ -f "$COMPOSE_DIR/$f" ] && COMPOSE_FILE="$COMPOSE_DIR/$f" && break

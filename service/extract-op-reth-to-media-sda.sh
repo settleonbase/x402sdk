@@ -1,4 +1,5 @@
 #!/bin/bash
+: "${BEAMIO_SVC_USER:?set BEAMIO_SVC_USER (real value in the private operations guide)}"
 # 从 Docker 镜像提取 op-reth 二进制到 /media/sda/bin
 # 用法: 在远程服务器执行 bash extract-op-reth-to-media-sda.sh
 set -e
@@ -10,7 +11,7 @@ IMAGE="${OP_RETH_IMAGE:-ghcr.io/paradigmxyz/op-reth:v1.11.3}"
 
 echo "=== 1. 创建目录 ==="
 sudo mkdir -p "$TARGET_DIR"
-sudo chown peter:peter "$TARGET_DIR"
+sudo chown ${BEAMIO_SVC_USER}:${BEAMIO_SVC_USER} "$TARGET_DIR"
 
 echo "=== 2. 从 Docker 镜像提取 op-reth ==="
 # op-reth 镜像的 entrypoint 通常是 op-reth

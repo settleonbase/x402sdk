@@ -9,13 +9,13 @@
 - **文件**：`src/MemberCard.ts` 中的 `createCardPoolPress`
 - **时机**：`createBeamioCardAdminWithHash` 上链成功后
 - **文件名**：`0x{owner}.json`，其中 `owner = ethers.getAddress(cardOwner)`（创建卡时传入的 cardOwner，即卡的归属地址），小写 40 位 hex：`0x${ownerAddr.slice(2).toLowerCase()}.json`
-- **目录**：`METADATA_BASE`，默认 `/home/peter/.data/metadata`，可通过环境变量 `METADATA_BASE` 覆盖
-- **路径**：`resolve(METADATA_BASE, metaFilename)` → 例如 `/home/peter/.data/metadata/0x1234...abcd.json`
+- **目录**：`METADATA_BASE`，默认 `<service-home>/.data/metadata`，可通过环境变量 `METADATA_BASE` 覆盖
+- **路径**：`resolve(METADATA_BASE, metaFilename)` → 例如 `<service-home>/.data/metadata/0x1234...abcd.json`
 - **内容**：JSON，包含顶层 `name`、`description`、`image`（供 ERC1155 / 前端），以及 `shareTokenMetadata`、`tiers`（创建卡时 cardManager 提交的 name/description 等）
 
 ```ts
 // MemberCard.ts 3322-3349
-const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
+const METADATA_BASE = process.env.METADATA_BASE ?? '<service-home>/.data/metadata'
 const metaFilename = `0x${ownerAddr.slice(2).toLowerCase()}.json`
 const metaPath = resolve(METADATA_BASE, metaFilename)
 // ...
@@ -28,7 +28,7 @@ fs.writeFileSync(metaPath, metaContent, 'utf-8')
 
 - **文件**：`src/endpoint/beamioServer.ts`
 - **路由**：`GET /metadata/:filename`（挂在 Express 的 **根** app 上，不是 `/api` 下）
-- **目录**：同一 `METADATA_BASE`（默认 `/home/peter/.data/metadata`）
+- **目录**：同一 `METADATA_BASE`（默认 `<service-home>/.data/metadata`）
 - **逻辑**：
   - 只接受 `filename` 形如 `0x[0-9a-fA-F]{40}.json` 或 `[0-9a-f]{64}.json`，防止路径穿越
   - `filePath = resolve(METADATA_BASE, filename)`，并校验 `filePath` 在 `METADATA_BASE` 下
@@ -40,7 +40,7 @@ fs.writeFileSync(metaPath, metaContent, 'utf-8')
 
 ```ts
 // beamioServer.ts 1715-1753
-const METADATA_BASE = process.env.METADATA_BASE ?? '/home/peter/.data/metadata'
+const METADATA_BASE = process.env.METADATA_BASE ?? '<service-home>/.data/metadata'
 app.get('/metadata/:filename', (req, res) => {
   const filename = req.params.filename  // 例如 "0x1234...abcd.json"
   const filePath = resolve(METADATA_BASE, filename)

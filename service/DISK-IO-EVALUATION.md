@@ -39,7 +39,7 @@
 |------|------|------|------|
 | /media/sda/eth/geth/geth | **1.5T** | HDD | geth chaindata (L1 主网) |
 | /media/sda/eth/lighthouse | **225G** | HDD | Lighthouse beacon 链数据 |
-| /home/peter/base/op-reth/db | **2.4T** | NVMe | op-reth Base L2 数据库 |
+| <service-home>/base/op-reth/db | **2.4T** | NVMe | op-reth Base L2 数据库 |
 | /media/sda/base/op-reth-static | **128G** | HDD | op-reth 静态文件 |
 | /media/sda/baseTemp | **584G** | HDD | 临时/解压工作区 |
 | /media/sda/base-mainnet-pruned-reth-*.tar.zst | **1.2T** | HDD | Base 快照压缩包（可删除） |

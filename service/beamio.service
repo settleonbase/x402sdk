@@ -1,3 +1,4 @@
+# Install-time placeholders (<service-user>, <service-group>, <service-home>) are replaced from the private operations guide.
 [Unit]
 Description=CONET SI Process
 After=network.target
@@ -12,9 +13,9 @@ RestartSec=10
 StandardOutput=syslog
 StandardError=syslog
 SyslogIdentifier=conet-si
-WorkingDirectory=/home/peter/x402sdk
-User=peter
-Group=peter
+WorkingDirectory=<service-home>/x402sdk
+User=<service-user>
+Group=<service-group>
 
 [Install]
 WantedBy=multi-user.target

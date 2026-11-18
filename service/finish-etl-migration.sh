@@ -1,9 +1,10 @@
 #!/bin/bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
 # copy 完成后执行：校验、删除原 etl-tmp、启动 op-reth
 # 在远程服务器上运行
 set -e
 
-SRC="/home/peter/base/op-reth/etl-tmp"
+SRC="${BEAMIO_HOST_HOME}/base/op-reth/etl-tmp"
 DST="/media/sda/baseTemp"
 
 echo "=== 1. 确认 copy 已完成 ==="

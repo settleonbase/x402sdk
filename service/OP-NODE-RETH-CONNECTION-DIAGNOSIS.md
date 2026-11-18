@@ -92,11 +92,11 @@ exit
 
 ```bash
 # 宿主机：检查字节数（应为 64，若为 65 通常含换行）
-wc -c /home/peter/base/jwt/jwt.hex
+wc -c <service-home>/base/jwt/jwt.hex
 
 # 修复：去除换行后重写
-JWT_HEX=$(cat /home/peter/base/jwt/jwt.hex | tr -d '\n\r ')
-printf '%s' "$JWT_HEX" > /home/peter/base/jwt/jwt.hex
+JWT_HEX=$(cat <service-home>/base/jwt/jwt.hex | tr -d '\n\r ')
+printf '%s' "$JWT_HEX" > <service-home>/base/jwt/jwt.hex
 
 # 或使用项目脚本
 ./service/fix-jwt-auth.sh

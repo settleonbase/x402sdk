@@ -1,5 +1,5 @@
 # Base RPC 使用 op-reth
-# 工作目录: /home/peter/base (op-reth 数据在 op-reth 子目录)
+# 工作目录: ${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}/base (op-reth 数据在 op-reth 子目录)
 # 沿用 docker-compose-op-reth.yml 的 reth 优化设定
 
 services:
@@ -53,9 +53,9 @@ services:
       - "30313:30313/udp"
       - "9200:9200/udp"
     volumes:
-      - /home/peter/base/op-reth:/data
-      - /home/peter/base/jwt:/jwt
-      - /home/peter/base/config:/config
+      - ${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}/base/op-reth:/data
+      - ${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}/base/jwt:/jwt
+      - ${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}/base/config:/config
     cpus: "56"
     mem_limit: 112g
     mem_reservation: 16g
@@ -108,9 +108,9 @@ services:
       - "9222:9222/tcp"
       - "9222:9222/udp"
     volumes:
-      - /home/peter/base/op-node:/data
-      - /home/peter/base/jwt:/jwt
-      - /home/peter/base/config:/config
+      - ${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}/base/op-node:/data
+      - ${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}/base/jwt:/jwt
+      - ${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}/base/config:/config
     cpus: "12"
     mem_limit: 20g
     mem_reservation: 6g

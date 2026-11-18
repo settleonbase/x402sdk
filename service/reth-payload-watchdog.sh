@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
 set -Eeuo pipefail
 
 LOG_TAG="reth-payload-watchdog"
@@ -7,7 +8,7 @@ CHECK_INTERVAL=5
 STALL_SECONDS=180
 LOOKBACK_SECONDS=240
 POST_RESTART_GRACE=15
-RESTART_RECORD="/home/peter/base/reth-payload-watchdog-restarts.log"
+RESTART_RECORD="${BEAMIO_HOST_HOME}/base/reth-payload-watchdog-restarts.log"
 
 last_num=-1
 last_change_ts=$(date +%s)

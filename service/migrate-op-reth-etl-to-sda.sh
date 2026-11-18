@@ -1,11 +1,12 @@
 #!/bin/bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
 # 将 op-reth 的 etl-tmp 迁移到 /media/sda/baseTemp
 # 前提：op-reth 已停止 (systemctl stop base-op-reth-native.service)
 set -e
 
-SRC="/home/peter/base/op-reth/etl-tmp"
+SRC="${BEAMIO_HOST_HOME}/base/op-reth/etl-tmp"
 DST="/media/sda/baseTemp"
-RETH_TOML="/home/peter/base/op-reth/reth.toml"
+RETH_TOML="${BEAMIO_HOST_HOME}/base/op-reth/reth.toml"
 
 echo "=== 1. 检查 op-reth 已停止 ==="
 if systemctl is-active base-op-reth-native.service 2>/dev/null | grep -q active; then

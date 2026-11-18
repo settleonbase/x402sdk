@@ -1,8 +1,9 @@
 #!/bin/bash
-# 解压快照到 /home/peter/base/op-reth，部署并启动 Base RPC
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
+# 解压快照到 ${BEAMIO_HOST_HOME}/base/op-reth，部署并启动 Base RPC
 set -e
 
-BASE_DIR=/home/peter/base
+BASE_DIR=${BEAMIO_HOST_HOME}/base
 SNAPSHOT=/media/sda/base-mainnet-pruned-reth-1771845718.tar.zst
 
 echo "=== $(date) 开始部署 Base RPC ==="

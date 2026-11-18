@@ -1,11 +1,12 @@
+# Install-time placeholders (<service-user>, <service-group>, <service-home>) are replaced from the private operations guide.
 [Unit]
 Description=Block Bad discv5 IPs from op-node logs
 After=docker.service network.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/peter/base/block-bad-discv5.sh
-User=peter
+ExecStart=<service-home>/base/block-bad-discv5.sh
+User=<service-user>
 
 [Install]
 WantedBy=multi-user.target

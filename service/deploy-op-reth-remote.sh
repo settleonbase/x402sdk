@@ -1,12 +1,13 @@
 #!/bin/bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
 # 远程部署脚本：移动解冻快照并启动 op-reth + op-node
 # 用法: scp 到远程后执行 sudo ./deploy-op-reth-remote.sh
 
 set -e
 cd "$(dirname "$0")"
 
-SNAPSHOT_SRC="/home/peter/snapshots"
-BASE_DIR="/home/peter/base"
+SNAPSHOT_SRC="${BEAMIO_HOST_HOME}/snapshots"
+BASE_DIR="${BEAMIO_HOST_HOME}/base"
 OP_RETH_DIR="${BASE_DIR}/op-reth"
 COMPOSE_FILE="docker-compose-op-reth-home.yml"
 
@@ -17,7 +18,7 @@ echo "=== 2. 创建 base 目录结构 ==="
 mkdir -p "$OP_RETH_DIR" "$BASE_DIR/jwt" "$BASE_DIR/config" "$BASE_DIR/op-node"
 
 echo "=== 3. 移动解冻快照到 op-reth 数据目录 ==="
-# op-reth 数据目录: /home/peter/base/op-reth
+# op-reth 数据目录: ${BEAMIO_HOST_HOME}/base/op-reth
 # 支持结构: snapshots/db, snapshots/mainnet/download/, 或整目录
 SNAPSHOT_DATADIR=""
 if [ -d "$SNAPSHOT_SRC/db" ] || [ -f "$SNAPSHOT_SRC/chain" ]; then

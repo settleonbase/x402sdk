@@ -1,8 +1,9 @@
 #!/bin/bash
+: "${BEAMIO_HOST_HOME:?set BEAMIO_HOST_HOME (real value in the private operations guide)}"
 # 增加 reth.toml 缓存/缓冲，缓解磁盘读瓶颈
-# 在服务器 /home/peter/base 目录执行
+# 在服务器 ${BEAMIO_HOST_HOME}/base 目录执行
 
-RETH_TOML="${1:-/home/peter/base/op-reth/reth.toml}"
+RETH_TOML="${1:-${BEAMIO_HOST_HOME}/base/op-reth/reth.toml}"
 
 [ ! -f "$RETH_TOML" ] && { echo "reth.toml 不存在: $RETH_TOML"; exit 1; }
 

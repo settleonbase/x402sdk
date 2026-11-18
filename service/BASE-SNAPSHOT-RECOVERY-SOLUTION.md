@@ -29,7 +29,7 @@ Base 官方快照由 **base-reth-node** 生成，而当前使用的是 **op-reth
 1. **克隆 Base 官方 node 仓库**
 
 ```bash
-cd /home/peter/base
+cd <service-home>/base
 git clone https://github.com/base-org/node.git base-node
 cd base-node
 ```
@@ -48,14 +48,14 @@ cp .env.mainnet .env
 
 ```bash
 # 数据目录需与 docker-compose 中的 HOST_DATA_DIR 一致
-export HOST_DATA_DIR=/home/peter/base/reth-data
+export HOST_DATA_DIR=<service-home>/base/reth-data
 mkdir -p $HOST_DATA_DIR
 ```
 
 4. **下载并解压快照**
 
 ```bash
-cd /home/peter/base
+cd <service-home>/base
 wget -c "https://mainnet-reth-pruned-snapshots.base.org/$(curl -s https://mainnet-reth-pruned-snapshots.base.org/latest)" -O base-reth-snapshot.tar.zst
 tar -I zstd -xvf base-reth-snapshot.tar.zst
 ```
@@ -76,7 +76,7 @@ rm -rf ./reth
 
 ```bash
 cd base-node
-CLIENT=reth HOST_DATA_DIR=/home/peter/base/reth-data docker compose up --build
+CLIENT=reth HOST_DATA_DIR=<service-home>/base/reth-data docker compose up --build
 ```
 
 > **端口冲突**：Base 官方 compose 默认 RPC 8545、WS 8546。若宿主机 8545 已被 L1 占用，需修改 `docker-compose.yml` 的端口映射，例如将 execution 的 `8545:8545` 改为 `8547:8545`。
@@ -107,7 +107,7 @@ docker compose -f docker-compose-op-reth-home.yml -f docker-compose-op-reth-home
 **正确结构**（datadir 根目录下应有）：
 
 ```
-/home/peter/base/op-reth/
+<service-home>/base/op-reth/
 ├── db/           # 或 chaindata、mainnet/db 等（视 reth 版本）
 ├── static_files/
 ├── nodes/
@@ -118,8 +118,8 @@ docker compose -f docker-compose-op-reth-home.yml -f docker-compose-op-reth-home
 若解压得到 `snapshots/mainnet/download/db`，需执行：
 
 ```bash
-mv snapshots/mainnet/download/db /home/peter/base/op-reth/
-mv snapshots/mainnet/download/static_files /home/peter/base/op-reth/
+mv snapshots/mainnet/download/db <service-home>/base/op-reth/
+mv snapshots/mainnet/download/static_files <service-home>/base/op-reth/
 # 其他子目录同理
 ```
 

@@ -56,7 +56,7 @@ LOG="$HOME/db-copy.log"
 DEST="/media/sda/baseBackup-$(date +%Y%m%d-%H%M%S)"   # unique path per run; mdbx often needs absent target
 
 /media/sda/bin/op-reth-v1.11.3-rc.3 db \
-  --datadir /home/peter/base/op-reth \
+  --datadir <service-home>/base/op-reth \
   --datadir.static-files /media/sda/base/op-reth-static \
   --chain base \
   copy -p "$DEST" \

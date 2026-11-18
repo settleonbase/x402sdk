@@ -113,7 +113,7 @@ ionice -c 2 -n 0 -p $(docker inspect -f "{{.State.Pid}}" base-op-reth)
 
 ```yaml
 volumes:
-  - /home/peter/base/op-reth:/data
+  - <service-home>/base/op-reth:/data
   - /media/sda/base/op-reth-static:/data-static  # 静态文件放 HDD
 ```
 
