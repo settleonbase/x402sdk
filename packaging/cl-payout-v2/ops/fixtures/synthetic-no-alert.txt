@@ -1,0 +1,2 @@
+flush job settled after 10ms
+synthetic line with no alert

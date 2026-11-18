@@ -1,6 +1,6 @@
 #!/bin/sh
 # claim-alert-notify.service（claim-alert-watch.service 的 OnFailure）。把当前状态写成一条 crit 记录（journald，tag claim-alert）。
-# 同一状态只写一次：与上次写入相同则不重复写。外部通知通道未配置（待项目方指定）。
+# 同一状态只写一次：与上次写入相同则不重复写。外部通知通道未配置时只写状态文件（通道由部署配置指定）。
 # 状态目录取 CLAIM_ALERT_STATE 或 STATE_DIRECTORY（systemd StateDirectory= 提供）。
 set -eu
 STATE="${CLAIM_ALERT_STATE:-${STATE_DIRECTORY:-}}"

@@ -1,0 +1,2 @@
+ALERT flush job unsettled for 152ms (cap 150ms; alert #1, total 1). Signing lane stays busy: not released, not re-signed.
+ALERT flush job unsettled for 303ms (cap 150ms; alert #2, total 2). Signing lane stays busy: not released, not re-signed.

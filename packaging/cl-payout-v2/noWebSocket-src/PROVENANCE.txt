@@ -1,1 +1,5 @@
-source: signer-gas-keeper-2026-11-09 commit fa7bcf0, file packages/wallet-signer/src/noWebSocket.ts; tsconfig: same commit packages/wallet-signer/tsconfig.json; compiler typescript 5.8.3 (lock). Reproduced byte-identical to 3b87a2d1 outside that repo.
+源文件：noWebSocket-src/src/noWebSocket.ts，sha256 1fd705359eba1b81ad115ab0c4e470dc9fdb08d4485cd318279009569dcb945e
+编译配置：noWebSocket-src/tsconfig.json，sha256 8aa9c7df965b17c13779ee7572178371171e47b319fe574ac6803d4dcb0b184e
+编译器：typescript 5.8.3（锁文件版本）
+编译产物：vendor/noWebSocket.js，sha256 3b87a2d17956b26608e638902080de82e7b2742ca3604eb53c355747132f47d3
+复现：见同目录 REPRODUCTION.txt。

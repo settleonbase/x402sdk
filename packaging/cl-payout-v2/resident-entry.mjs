@@ -1,6 +1,6 @@
 // 常驻入口（冻结包内，随包冻结）。启动方式见同目录 STARTUP.txt：
 //   node -r ./signer/dist/src/noWebSocket.js ./resident-entry.mjs
-// 只加载包内 reporter（dist/endpoint/validatorClRewardPayoutReporter.js）；不加载 ../util，不读 ~/.master.json。
+// 只加载包内 reporter（dist/endpoint/validatorClRewardPayoutReporter.js）；不加载 ../util，不读取任何私有配置文件（私有配置由部署配置指定）。
 // RPC 必须由 CONET_VALIDATOR_DEPOSIT_RPC_URL 显式给出（http(s)），否则拒绝启动（非零退出）。
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -19,7 +19,7 @@ if (globalThis.__conetWebSocketBan !== true) {
 	fail('noWebSocket preload missing: start with node -r ./signer/dist/src/noWebSocket.js');
 }
 const rpc = (process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL || '').trim();
-if (!rpc) fail('CONET_VALIDATOR_DEPOSIT_RPC_URL is required (master.json is not read)');
+if (!rpc) fail('CONET_VALIDATOR_DEPOSIT_RPC_URL is required (a deployment-configured private file is not read)');
 if (!/^https?:\/\//i.test(rpc)) fail('CONET_VALIDATOR_DEPOSIT_RPC_URL must be http(s); ws/wss refused');
 
 const reporter = require(reporterPath);

@@ -1,2 +1,0 @@
-# [master INFO 14:42:10:636] [validatorClRewardPayout] ALERT flush job unsettled for 152ms (cap 150ms; alert \#1, total 1). Signing lane stays busy: not released, not re-signed. Manual check required.
-# [master INFO 14:42:10:787] [validatorClRewardPayout] ALERT flush job unsettled for 303ms (cap 150ms; alert \#2, total 2). Signing lane stays busy: not released, not re-signed. Manual check required.

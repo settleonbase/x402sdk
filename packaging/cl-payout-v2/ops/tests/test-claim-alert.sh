@@ -1,6 +1,6 @@
 #!/bin/sh
 # 本地测试：claim-alert-check.sh -> alert-watch.sh，以及 OnFailure 时的 alert-notify.sh。
-# 使用真实格式的 fixtures（来自代码运行的日志）。journalctl 与 logger 用桩替代；不需要 systemd，不需要 .77。
+# 使用与代码输出格式一致的合成样本。journalctl 与 logger 用桩替代；不需要 systemd，不需要目标主机。
 # 每个用例：检查退出码、状态文本、crit 写入次数（OnFailure 只在退出码非 0 时运行，并运行两次以验证去重）。
 set -u
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -46,11 +46,11 @@ run_case() {
 	fi
 	unset JOURNAL_FIXTURE
 }
-run_case unresolved-flush-alert "$FIX/real-flush-unresolved.txt" 1 "UNRESOLVED flush job ALERT"
-run_case settled-after-alert "$FIX/real-flush-settled.txt" 0 "flush ALERT resolved"
-run_case no-alert "$FIX/real-no-alert.txt" 0 "OK no flush or intent ALERT"
-run_case intent-waiting-timeout "$FIX/real-b4-intent-timeout.txt" 1 "UNRESOLVED intent without receipt"
-run_case intent-resolved-by-chain-credit "$FIX/real-b4-intent-resolved.txt" 0 "all resolved"
+run_case unresolved-flush-alert "$FIX/synthetic-flush-unresolved.txt" 1 "UNRESOLVED flush job ALERT"
+run_case settled-after-alert "$FIX/synthetic-flush-settled.txt" 0 "flush ALERT resolved"
+run_case no-alert "$FIX/synthetic-no-alert.txt" 0 "OK no flush or intent ALERT"
+run_case intent-waiting-timeout "$FIX/synthetic-b4-intent-timeout.txt" 1 "UNRESOLVED intent without receipt"
+run_case intent-resolved-by-chain-credit "$FIX/synthetic-b4-intent-resolved.txt" 0 "all resolved"
 run_case empty-log "$FIX/empty.txt" 0 "OK no flush or intent ALERT"
 run_case missing-log-journal-error __FAIL__ 2 "ERROR cannot read the journal"
 echo "SUMMARY pass=$pass fail=$fail"

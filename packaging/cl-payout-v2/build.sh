@@ -1,6 +1,6 @@
 #!/bin/bash
 # 复现 cl-payout-v2 当前发布包。校验清单为 MANIFEST.expected.sha256（当前包）。
-# 冻结包 88cdc832 的原清单已移为历史文件 MANIFEST.frozen-88cdc832.sha256，不参与校验。
+# 历史清单不随仓库发布，不参与校验。
 # 编译器：packaging/cl-payout-v2/tsconfig.json（仅 reporter 闭合的 6 个文件），typescript 5.8.3。
 # 依赖：NM 须为干净依赖树，至少含 typescript@5.8.3、ethers@6.16.0、colors@1.4.0、@types/node（及 ethers 传递依赖）。
 # 用法：OUT=<仓库外输出目录> NM=<干净依赖树 node_modules> [VERIFY_NWS=1] bash packaging/cl-payout-v2/build.sh
