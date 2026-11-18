@@ -25,6 +25,7 @@ const TARGET = process.env.COUPON_SHARE_FILE
 
 const CARD = '0x6e600DfaEa5eD006A97aF2AD080518c1d06C0A74'
 const INVITER = '0x1111111111111111111111111111111111111111'
+const REF2 = '0xc31043cF04CFF17a273B33F4cb851f4399e2170E'
 
 const DB_STUB = {
 	getCardByAddress: async () => ({
@@ -152,10 +153,35 @@ test('dynamic share og:image is on beamio.ca for every share kind (coupon, redee
 	}
 })
 
-test('personal-invite og:image stays the static beamio.app banner (no beamio.ca static file verified)', () => {
-	const invite = mod.parseCouponClaimShareRequest({ target: wrapper(`https://beamio.ca/app/?invite=${INVITER}`) })
+test('personal-invite og:image is the static beamio.ca banner (owner ruling: all share og:image on beamio.ca)', () => {
+	const invite = mod.parseCouponClaimShareRequest({ target: wrapper(`https://beamio.ca/app/?invite=${INVITER}`), v: '1794978675516' })
 	const meta = mod.buildFallbackCouponClaimShareMeta(invite.params, invite.shareUrl)
-	assert.ok(meta.ogImageUrl.startsWith('https://beamio.app/og-invitation.jpg'), meta.ogImageUrl)
+	assert.match(meta.ogImageUrl, /^https:\/\/beamio\.ca\/og-invitation\.jpg\?v=/, meta.ogImageUrl)
+	assert.doesNotMatch(meta.ogImageUrl, /beamio\.app/)
+})
+
+test('direct /app/ deep link (nginx BC rewrite, no wrapper): og:url on beamio.ca keeps beamiocard, discover, ref and v', () => {
+	const parsed = mod.parseCouponClaimShareRequest({
+		beamiocard: CARD,
+		discover: 'open',
+		ref: REF2,
+		v: '1794978675516',
+	})
+	assert.ok(parsed)
+	assert.equal(parsed.params.kind, 'discover_merchant')
+	const u = new URL(parsed.shareUrl)
+	assert.equal(u.origin + u.pathname, 'https://beamio.ca/app/')
+	assert.equal(u.searchParams.get('beamiocard'), CARD)
+	assert.equal(u.searchParams.get('discover'), 'open')
+	assert.equal(u.searchParams.get('ref'), ethers.getAddress(REF2))
+	assert.equal(u.searchParams.get('v'), '1794978675516')
+})
+
+test('direct /app/ invite deep link is on beamio.ca', () => {
+	const parsed = mod.parseCouponClaimShareRequest({ invite: INVITER, v: '1' })
+	assert.ok(parsed)
+	assert.equal(parsed.params.kind, 'personal_invite')
+	assert.ok(parsed.shareUrl.startsWith('https://beamio.ca/app/?invite='), parsed.shareUrl)
 })
 
 test('www.beamio.ca and www.beamio.app wrappers parse; other www-like hosts are rejected', () => {

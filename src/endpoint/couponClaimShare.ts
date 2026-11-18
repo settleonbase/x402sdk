@@ -76,7 +76,7 @@ export const PERSONAL_INVITE_OG_TITLE = 'Pay. Top up. Earn. Connect.'
 export const PERSONAL_INVITE_OG_DESCRIPTION =
 	'Store cards and Reward PT, across participating merchants.'
 /** Static 1200×630 banner — also served from homepage `public/og-invitation.jpg`. */
-export const PERSONAL_INVITE_OG_IMAGE_URL = `${BEAMIO_APP_ORIGIN}/og-invitation.jpg`
+export const PERSONAL_INVITE_OG_IMAGE_URL = `${BEAMIO_CA_ORIGIN}/og-invitation.jpg`
 
 export type CouponShareKind = 'open_claim' | 'redeem' | 'discover_merchant' | 'personal_invite'
 
@@ -787,7 +787,7 @@ export function buildBeamioAppDeeplinkUrlFromShareQuery(query: Record<string, un
 		readString(query.redeemcode ?? query.Redeemcode ?? query.redeemCode)
 	)
 	if (inviteRaw && ethers.isAddress(inviteRaw) && !cardRaw && !couponId && !redeemCode) {
-		return `${BEAMIO_APP_ORIGIN}/app/?invite=${encodeURIComponent(ethers.getAddress(inviteRaw))}`
+		return `${BEAMIO_CA_ORIGIN}/app/?invite=${encodeURIComponent(ethers.getAddress(inviteRaw))}`
 	}
 	if (!cardRaw || !ethers.isAddress(cardRaw)) return null
 	const card = ethers.getAddress(cardRaw)
@@ -806,7 +806,10 @@ export function buildBeamioAppDeeplinkUrlFromShareQuery(query: Record<string, un
 	if (couponId) sp.set('couponId', couponId)
 	if (redeemCode) sp.set('redeemcode', redeemCode)
 	if (claim) sp.set('claim', claim)
-	return `${BEAMIO_APP_ORIGIN}/app/?${sp.toString()}`
+	// 推荐人 ref 必须保留到 og:url（否则爬虫看到的直链与粘贴的链接不一致）。
+	const refRaw = readString(query.ref ?? query.Ref)
+	if (refRaw && ethers.isAddress(refRaw)) sp.set('ref', ethers.getAddress(refRaw))
+	return `${BEAMIO_CA_ORIGIN}/app/?${sp.toString()}`
 }
 
 function parseDirectAppDeeplinkShareRequest(
@@ -851,7 +854,7 @@ function parseDirectAppDeeplinkShareRequest(
  * 粘贴的是内层 /app/ 深链（无外层 app-download）时，og:url 沿用粘贴的域与全部参数（含 ref），
  * 不改写为 BEAMIO_APP_ORIGIN，避免丢失 ref 或把 beamio.ca 链接的 og:url 改成 beamio.app。
  */
-function buildDiscoverShareUrlFromInner(innerTarget: string): string {
+function buildShareUrlFromInner(innerTarget: string): string {
 	const inner = new URL(innerTarget)
 	return `${inner.origin}/app-download?target=${encodeURIComponent(innerTarget)}`
 }
@@ -892,20 +895,20 @@ export function parseCouponClaimShareRequest(query: {
 		const personalInvite = parsePersonalInviteFromAppDownloadTarget(innerTarget)
 		if (redeem) {
 			if (!shareUrl) {
-				shareUrl = buildCouponRedeemAppDownloadUrl(redeem.cardAddress, redeem.redeemCode, redeem.couponId)
+				shareUrl = buildShareUrlFromInner(innerTarget)
 			}
 			return { params: redeem, shareUrl: withCacheBust(shareUrl) }
 		}
 		if (discoverMerchant) {
-			if (!shareUrl) shareUrl = buildDiscoverShareUrlFromInner(innerTarget)
+			if (!shareUrl) shareUrl = buildShareUrlFromInner(innerTarget)
 			return { params: discoverMerchant, shareUrl: withCacheBust(shareUrl) }
 		}
 		if (openClaim) {
-			if (!shareUrl) shareUrl = buildCouponClaimAppDownloadUrl(openClaim.cardAddress, openClaim.couponId)
+			if (!shareUrl) shareUrl = buildShareUrlFromInner(innerTarget)
 			return { params: openClaim, shareUrl: withCacheBust(shareUrl) }
 		}
 		if (personalInvite) {
-			if (!shareUrl) shareUrl = buildPersonalInviteAppDownloadUrl(personalInvite.introducerEoa)
+			if (!shareUrl) shareUrl = buildShareUrlFromInner(innerTarget)
 			return { params: personalInvite, shareUrl: withCacheBust(shareUrl) }
 		}
 		return null
