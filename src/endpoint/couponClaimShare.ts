@@ -266,21 +266,22 @@ export const buildDiscoverMerchantShareHeadline = (merchantName: string): string
 export function buildDiscoverMerchantAppDownloadUrl(
 	cardAddress: string,
 	referrerEoa?: string | null,
+	origin: string = BEAMIO_APP_ORIGIN,
 ): string {
 	const card = ethers.getAddress(cardAddress)
-	let discoverUrl = `${BEAMIO_APP_ORIGIN}/app/?beamiocard=${encodeURIComponent(card)}&discover=open`
+	let discoverUrl = `${origin}/app/?beamiocard=${encodeURIComponent(card)}&discover=open`
 	const refRaw = referrerEoa?.trim() ?? ''
 	if (refRaw && ethers.isAddress(refRaw)) {
 		discoverUrl += `&ref=${encodeURIComponent(ethers.getAddress(refRaw))}`
 	}
-	return `${BEAMIO_APP_ORIGIN}/app-download?target=${encodeURIComponent(discoverUrl)}`
+	return `${origin}/app-download?target=${encodeURIComponent(discoverUrl)}`
 }
 
 /** Personal invitation — `app-download?target=/app/?invite=0x…`. */
-export function buildPersonalInviteAppDownloadUrl(introducerEoa: string): string {
+export function buildPersonalInviteAppDownloadUrl(introducerEoa: string, origin: string = BEAMIO_APP_ORIGIN): string {
 	const addr = ethers.getAddress(introducerEoa)
-	const appUrl = `${BEAMIO_APP_ORIGIN}/app/?invite=${encodeURIComponent(addr)}`
-	return `${BEAMIO_APP_ORIGIN}/app-download?target=${encodeURIComponent(appUrl)}`
+	const appUrl = `${origin}/app/?invite=${encodeURIComponent(addr)}`
+	return `${origin}/app-download?target=${encodeURIComponent(appUrl)}`
 }
 
 export function parsePersonalInviteFromBeamioAppUrl(raw: string): PersonalInviteShareParams | null {
@@ -626,12 +627,16 @@ export const shouldShowCouponExpiryPill = (expiresLabel: string): boolean => {
 	return normalized !== 'VALID NOW' && normalized !== 'NO EXPIRY'
 }
 
-export function buildCouponClaimAppDownloadUrl(cardAddress: string, couponId: string): string {
+export function buildCouponClaimAppDownloadUrl(
+	cardAddress: string,
+	couponId: string,
+	origin: string = BEAMIO_APP_ORIGIN
+): string {
 	const card = ethers.getAddress(cardAddress)
-	const claimUrl = `${BEAMIO_APP_ORIGIN}/app/?beamiocard=${encodeURIComponent(
+	const claimUrl = `${origin}/app/?beamiocard=${encodeURIComponent(
 		card
 	)}&couponId=${encodeURIComponent(couponId.trim())}&claim=open`
-	return `${BEAMIO_APP_ORIGIN}/app-download?target=${encodeURIComponent(claimUrl)}`
+	return `${origin}/app-download?target=${encodeURIComponent(claimUrl)}`
 }
 
 function isAllowedBeamioAppPath(pathname: string): boolean {
@@ -641,7 +646,8 @@ function isAllowedBeamioAppPath(pathname: string): boolean {
 export function buildCouponRedeemAppDownloadUrl(
 	cardAddress: string,
 	redeemCode: string,
-	couponId?: string
+	couponId?: string,
+	origin: string = BEAMIO_APP_ORIGIN
 ): string {
 	const card = ethers.getAddress(cardAddress)
 	const params = new URLSearchParams()
@@ -649,8 +655,8 @@ export function buildCouponRedeemAppDownloadUrl(
 	params.set('redeemcode', redeemCode.trim())
 	const cid = couponId?.trim() ?? ''
 	if (cid) params.set('couponId', cid)
-	const redeemUrl = `${BEAMIO_APP_ORIGIN}/app/?${params.toString()}`
-	return `${BEAMIO_APP_ORIGIN}/app-download?target=${encodeURIComponent(redeemUrl)}`
+	const redeemUrl = `${origin}/app/?${params.toString()}`
+	return `${origin}/app-download?target=${encodeURIComponent(redeemUrl)}`
 }
 
 function appendAppDownloadCacheBust(appDownloadUrl: string, v?: string): string {
@@ -925,11 +931,11 @@ export function parseCouponClaimShareRequest(query: {
 			redeemCode,
 			...(couponId ? { couponId } : {}),
 		}
-		return { params, shareUrl: buildCouponRedeemAppDownloadUrl(params.cardAddress, params.redeemCode, params.couponId) }
+		return { params, shareUrl: buildCouponRedeemAppDownloadUrl(params.cardAddress, params.redeemCode, params.couponId, BEAMIO_CA_ORIGIN) }
 	}
 	if (!card || !couponId || !ethers.isAddress(card)) return null
 	const params: CouponOpenClaimShareParams = { kind: 'open_claim', cardAddress: ethers.getAddress(card), couponId }
-	return { params, shareUrl: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId) }
+	return { params, shareUrl: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId, BEAMIO_CA_ORIGIN) }
 }
 
 function readShareUrlCacheBust(shareUrl: string): string {
@@ -1037,12 +1043,12 @@ export function decodeOgShareToken(tokenRaw: string): BeamioCouponShareParams | 
 export function buildShareUrlForOgToken(params: BeamioCouponShareParams, cacheBust?: string): string {
 	const base =
 		params.kind === 'redeem'
-			? buildCouponRedeemAppDownloadUrl(params.cardAddress, params.redeemCode, params.couponId)
+			? buildCouponRedeemAppDownloadUrl(params.cardAddress, params.redeemCode, params.couponId, BEAMIO_CA_ORIGIN)
 			: params.kind === 'discover_merchant'
-				? buildDiscoverMerchantAppDownloadUrl(params.cardAddress)
+				? buildDiscoverMerchantAppDownloadUrl(params.cardAddress, null, BEAMIO_CA_ORIGIN)
 				: params.kind === 'personal_invite'
-					? buildPersonalInviteAppDownloadUrl(params.introducerEoa)
-					: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId)
+					? buildPersonalInviteAppDownloadUrl(params.introducerEoa, BEAMIO_CA_ORIGIN)
+					: buildCouponClaimAppDownloadUrl(params.cardAddress, params.couponId, BEAMIO_CA_ORIGIN)
 	return cacheBust ? appendAppDownloadCacheBust(base, cacheBust) : base
 }
 
@@ -1095,7 +1101,7 @@ function buildOgImageUrl(_shareUrl: string, params?: BeamioCouponShareParams): s
 		// 动态分享图一律使用现行域 beamio.ca（需 beamio.ca 公网路由 /og/s/ 到 Cluster，见调查报告）。
 		return `${BEAMIO_CA_ORIGIN}/og/s/${encodeOgShareToken(params, _shareUrl)}.jpg`
 	}
-	return `${BEAMIO_APP_ORIGIN}/og.png`
+	return `${BEAMIO_CA_ORIGIN}/og.png`
 }
 
 /** Load `assets/og-invitation.jpg` for personal-invite OG warm (tsc does not copy assets into dist). */
@@ -1602,7 +1608,7 @@ export async function resolveIssuedNftExplorerShareMeta(
 		const copy = buildCatalogCouponClaimShareCopy(fields)
 		const title = truncateText(copy.title, 48)
 		const subtitle = truncateText(copy.subtitle, 120)
-		const shareUrl = buildCouponClaimAppDownloadUrl(cardNorm, productionId)
+		const shareUrl = buildCouponClaimAppDownloadUrl(cardNorm, productionId, BEAMIO_CA_ORIGIN)
 		const rev = computeIssuedSeriesMetadataRevision(matchedMeta)
 		return {
 			shareKind: 'open_claim',
@@ -1631,8 +1637,8 @@ export async function resolveIssuedNftExplorerShareMeta(
 
 	const couponId = readMetadataCouponId(matchedMeta)
 	const shareUrl = couponId
-		? buildCouponClaimAppDownloadUrl(cardNorm, couponId)
-		: `${BEAMIO_APP_ORIGIN}/app/?beamiocard=${encodeURIComponent(cardNorm)}`
+		? buildCouponClaimAppDownloadUrl(cardNorm, couponId, BEAMIO_CA_ORIGIN)
+		: `${BEAMIO_CA_ORIGIN}/app/?beamiocard=${encodeURIComponent(cardNorm)}`
 	const title = truncateText(readMetadataTitle(matchedMeta) || 'Beamio Coupon', 48)
 	const rawSubtitle = readMetadataSubtitle(matchedMeta)
 	const subtitle = truncateText(

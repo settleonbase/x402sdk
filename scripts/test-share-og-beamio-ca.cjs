@@ -228,6 +228,22 @@ test('crawler path (no app-download wrapper): og:url keeps pasted origin and ref
 	assert.equal(innerOut.searchParams.get('ref'), INVITER)
 })
 
+test('non-target query share (card + couponId) and production fallbacks: page links are on beamio.ca', () => {
+	const p1 = mod.parseCouponClaimShareRequest({ card: CARD, couponId: 'abc' })
+	assert.ok(p1)
+	assert.equal(new URL(p1.shareUrl).origin, 'https://beamio.ca', p1.shareUrl)
+	const p2 = mod.parseCouponClaimShareRequest({ card: CARD, redeemcode: 'CODE123' })
+	assert.ok(p2)
+	assert.equal(new URL(p2.shareUrl).origin, 'https://beamio.ca', p2.shareUrl)
+})
+
+test('generated og:image fallback for the no-params case is beamio.ca/og.png', () => {
+	// buildOgImageUrl 无参数分支只在兜底处出现；通过 buildFallbackCouponClaimShareMeta 无法触达，
+	// 此处仅确认源码中不再有 beamio.app 的 og.png 生成（静态检查）。
+	const src = fs.readFileSync(TARGET, 'utf8')
+	assert.equal(/BEAMIO_APP_ORIGIN\}\/og\.png/.test(src), false)
+})
+
 test('social crawler UA helper recognises SNS crawlers and rejects a browser UA', () => {
 	assert.equal(mod.isSocialShareCrawlerUserAgent('facebookexternalhit/1.1'), true)
 	assert.equal(mod.isSocialShareCrawlerUserAgent('WhatsApp/2.23.20.0'), true)
