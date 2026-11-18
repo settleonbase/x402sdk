@@ -3371,6 +3371,40 @@ export const deletePosTerminalAdminCardBinding = async (posLoose: string, cardAd
 }
 
 /** POS 问询已登记商户卡地址（Registration Device 成功且链上 confirm 后即有记录）。 */
+/**
+ * 按卡地址核验终端绑定（收费路径用）。只有 is_active=true 且 tx_hash 非空（由链上终端交易成功后的
+ * syncPosTerminalAdminBindingAfterTx 写入）的行才算绑定。
+ * 结果带类型：'bound' | 'not_bound' | 'unavailable'。数据库故障返回 'unavailable'，绝不当作 'not_bound'。
+ */
+export type PosTerminalCardBindingState = 'bound' | 'not_bound' | 'unavailable'
+export const lookupActivePosTerminalBindingByCard = async (
+	cardAddressLoose: string
+): Promise<PosTerminalCardBindingState> => {
+	let card: string
+	try {
+		card = ethers.getAddress(cardAddressLoose).toLowerCase()
+	} catch {
+		return 'not_bound'
+	}
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		await ensureBeamioPosTerminalAdminCardSchema(db)
+		const { rows } = await db.query(
+			`SELECT 1 FROM beamio_pos_terminal_admin_card
+			 WHERE lower(card_address) = $1 AND is_active = true AND tx_hash IS NOT NULL AND tx_hash <> ''
+			 LIMIT 1`,
+			[card]
+		)
+		return rows.length > 0 ? 'bound' : 'not_bound'
+	} catch (e: any) {
+		logger(Colors.yellow(`[lookupActivePosTerminalBindingByCard] unavailable: ${e?.message ?? e}`))
+		return 'unavailable'
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 export const getPosTerminalCardAddressForWallet = async (walletLoose: string): Promise<string | null> => {
 	const row = await getPosTerminalCardBindingRow(walletLoose)
 	return row?.cardAddress ?? null
