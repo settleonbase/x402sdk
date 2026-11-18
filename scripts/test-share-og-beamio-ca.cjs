@@ -138,12 +138,68 @@ test('Discover og:image is on beamio.ca; og token round-trips; HTML carries beam
 	assert.ok(html.includes(`<meta name="twitter:image" content="${meta.ogImageUrl}"`), 'twitter:image present')
 })
 
-test('non-Discover og:image stays on beamio.app (no regression for coupon/invite previews)', () => {
-	const parsed = mod.parseCouponClaimShareRequest({
+test('dynamic share og:image is on beamio.ca for every share kind (coupon, redeem, discover)', () => {
+	const coupon = mod.parseCouponClaimShareRequest({
 		target: wrapper(`https://beamio.ca/app/?beamiocard=${CARD}&couponId=abc&claim=open`),
 	})
+	const redeem = mod.parseCouponClaimShareRequest({
+		target: wrapper(`https://beamio.ca/app/?beamiocard=${CARD}&redeemcode=CODE123`),
+	})
+	const discover = mod.parseCouponClaimShareRequest({ target: wrapper(discoverInner('https://beamio.ca')) })
+	for (const p of [coupon, redeem, discover]) {
+		const meta = mod.buildFallbackCouponClaimShareMeta(p.params, p.shareUrl)
+		assert.ok(meta.ogImageUrl.startsWith('https://beamio.ca/og/s/'), meta.ogImageUrl)
+	}
+})
+
+test('personal-invite og:image stays the static beamio.app banner (no beamio.ca static file verified)', () => {
+	const invite = mod.parseCouponClaimShareRequest({ target: wrapper(`https://beamio.ca/app/?invite=${INVITER}`) })
+	const meta = mod.buildFallbackCouponClaimShareMeta(invite.params, invite.shareUrl)
+	assert.ok(meta.ogImageUrl.startsWith('https://beamio.app/og-invitation.jpg'), meta.ogImageUrl)
+})
+
+test('www.beamio.ca and www.beamio.app wrappers parse; other www-like hosts are rejected', () => {
+	for (const origin of ['https://www.beamio.ca', 'https://www.beamio.app']) {
+		const parsed = mod.parseCouponClaimShareRequest({ target: wrapper(discoverInner(origin), origin) })
+		assert.ok(parsed, origin)
+		assert.equal(parsed.params.kind, 'discover_merchant')
+	}
+	for (const inner of [
+		`https://www.beamio.ca.evil.example/app/?beamiocard=${CARD}&discover=open`,
+		`https://www.beamio.com/app/?beamiocard=${CARD}&discover=open`,
+		`https://api.beamio.ca/app/?beamiocard=${CARD}&discover=open`,
+	]) {
+		assert.equal(mod.parseCouponClaimShareRequest({ target: wrapper(inner) }), null, inner)
+	}
+})
+
+test('merchant ref deep link and v cache-bust are preserved in shareUrl and og token', () => {
+	const inner = `https://beamio.ca/app/?beamiocard=${CARD}&discover=open&ref=${INVITER}`
+	const parsed = mod.parseCouponClaimShareRequest({ target: wrapper(inner), v: '1794978675516' })
+	assert.ok(parsed)
+	const u = new URL(parsed.shareUrl)
+	assert.equal(u.origin, 'https://beamio.ca')
+	assert.equal(u.searchParams.get('v'), '1794978675516')
+	const innerOut = new URL(u.searchParams.get('target'))
+	assert.equal(innerOut.searchParams.get('ref'), ethers.getAddress(INVITER))
+	assert.equal(innerOut.searchParams.get('discover'), 'open')
+	assert.equal(innerOut.searchParams.get('beamiocard'), ethers.getAddress(CARD))
 	const meta = mod.buildFallbackCouponClaimShareMeta(parsed.params, parsed.shareUrl)
-	assert.ok(meta.ogImageUrl.startsWith('https://beamio.app/og/s/'), meta.ogImageUrl)
+	const token = meta.ogImageUrl.slice('https://beamio.ca/og/s/'.length).replace(/\.jpg$/, '')
+	const payload = mod.decodeOgShareTokenPayload(token)
+	assert.equal(payload.cacheBust, '1794978675516')
+})
+
+test('crawler path (no app-download wrapper): og:url keeps pasted origin and ref; v is appended', () => {
+	const inner = `https://beamio.ca/app/?beamiocard=${CARD}&discover=open&ref=${INVITER}`
+	const parsed = mod.parseCouponClaimShareRequest({ target: inner, v: '1794978675516' })
+	assert.ok(parsed)
+	assert.equal(parsed.params.kind, 'discover_merchant')
+	const u = new URL(parsed.shareUrl)
+	assert.equal(u.origin, 'https://beamio.ca')
+	assert.equal(u.searchParams.get('v'), '1794978675516')
+	const innerOut = new URL(u.searchParams.get('target'))
+	assert.equal(innerOut.searchParams.get('ref'), INVITER)
 })
 
 test('social crawler UA helper recognises SNS crawlers and rejects a browser UA', () => {

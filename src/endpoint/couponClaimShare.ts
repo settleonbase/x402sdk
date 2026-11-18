@@ -33,7 +33,12 @@ const BEAMIO_CA_ORIGIN = 'https://beamio.ca'
  * 解析分享链接时信任的来源（精确 origin 比较）。beamio.app 保留仅为解析存量链接；
  * 若项目方决定退役，删除此处一项即可，不影响 beamio.ca。
  */
-const TRUSTED_BEAMIO_APP_ORIGINS: ReadonlySet<string> = new Set([BEAMIO_CA_ORIGIN, BEAMIO_APP_ORIGIN])
+const TRUSTED_BEAMIO_APP_ORIGINS: ReadonlySet<string> = new Set([
+	BEAMIO_CA_ORIGIN,
+	'https://www.beamio.ca',
+	BEAMIO_APP_ORIGIN,
+	'https://www.beamio.app',
+])
 const isTrustedBeamioAppOrigin = (origin: string): boolean => TRUSTED_BEAMIO_APP_ORIGINS.has(origin)
 const ISSUED_NFT_START_ID = 100_000_000_000n
 const OG_WIDTH = 1200
@@ -842,6 +847,15 @@ function parseDirectAppDeeplinkShareRequest(
 	return null
 }
 
+/**
+ * 粘贴的是内层 /app/ 深链（无外层 app-download）时，og:url 沿用粘贴的域与全部参数（含 ref），
+ * 不改写为 BEAMIO_APP_ORIGIN，避免丢失 ref 或把 beamio.ca 链接的 og:url 改成 beamio.app。
+ */
+function buildDiscoverShareUrlFromInner(innerTarget: string): string {
+	const inner = new URL(innerTarget)
+	return `${inner.origin}/app-download?target=${encodeURIComponent(innerTarget)}`
+}
+
 export function parseCouponClaimShareRequest(query: {
 	target?: string
 	card?: string
@@ -883,7 +897,7 @@ export function parseCouponClaimShareRequest(query: {
 			return { params: redeem, shareUrl: withCacheBust(shareUrl) }
 		}
 		if (discoverMerchant) {
-			if (!shareUrl) shareUrl = buildDiscoverMerchantAppDownloadUrl(discoverMerchant.cardAddress)
+			if (!shareUrl) shareUrl = buildDiscoverShareUrlFromInner(innerTarget)
 			return { params: discoverMerchant, shareUrl: withCacheBust(shareUrl) }
 		}
 		if (openClaim) {
@@ -1074,12 +1088,9 @@ function buildOgImageUrl(_shareUrl: string, params?: BeamioCouponShareParams): s
 		// Static 1200×630 invitation banner (homepage `public/og-invitation.jpg`).
 		return `${PERSONAL_INVITE_OG_IMAGE_URL}?v=${layoutAppDownloadCacheBust()}`
 	}
-	if (params?.kind === 'discover_merchant') {
-		// Discover 商家图托管在现行域 beamio.ca（需 beamio.ca 公网路由 /og/s/ 到 Cluster，见调查报告）。
-		return `${BEAMIO_CA_ORIGIN}/og/s/${encodeOgShareToken(params, _shareUrl)}.jpg`
-	}
 	if (params) {
-		return `${BEAMIO_APP_ORIGIN}/og/s/${encodeOgShareToken(params, _shareUrl)}.jpg`
+		// 动态分享图一律使用现行域 beamio.ca（需 beamio.ca 公网路由 /og/s/ 到 Cluster，见调查报告）。
+		return `${BEAMIO_CA_ORIGIN}/og/s/${encodeOgShareToken(params, _shareUrl)}.jpg`
 	}
 	return `${BEAMIO_APP_ORIGIN}/og.png`
 }
