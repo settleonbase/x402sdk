@@ -103,3 +103,10 @@ test('Cluster precheck function no longer derives the fee card from items', () =
 	assert.equal(fn.includes('resolveChargeFeePayerCardFromOpenContainerItems'), false)
 	assert.ok(fn.includes('verifyChargeFeePayer('))
 })
+
+test('payee rule is wired on both the Cluster and the Master admission, with the same terminal resolver', () => {
+	assert.ok(BS.includes('resolveTerminalPayees: resolveChargeTerminalPayeesForAdmission,'), 'Cluster admission passes the terminal resolver')
+	assert.ok(MC.includes('resolveTerminalPayees: resolveChargeTerminalPayeesForAdmission,'), 'Master gate passes the terminal resolver')
+	assert.ok(MC.includes('export const resolveChargeTerminalPayeesForAdmission'), 'resolver defined in MemberCard')
+})
+

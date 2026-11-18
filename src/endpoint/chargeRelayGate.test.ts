@@ -25,7 +25,7 @@ const OWNER_AA = '0x00000000000000000000000000000000000000a1'
 const STRANGER = '0x00000000000000000000000000000000000000f9'
 const usdcItems = [{ kind: 0, asset: USDC }]
 
-const harness = (over: { bound?: boolean | 'throw'; owner?: any; ownerThrows?: boolean } = {}) => {
+const harness = (over: { bound?: boolean | 'throw'; owner?: any; ownerThrows?: boolean; terminals?: string[] | 'throw' } = {}) => {
 	const trace: string[] = []
 	const args: Record<string, unknown[]> = { lookup: [], owner: [] }
 	return {
@@ -43,6 +43,11 @@ const harness = (over: { bound?: boolean | 'throw'; owner?: any; ownerThrows?: b
 				args.owner.push(c)
 				if (over.ownerThrows) throw new Error('rpc timeout')
 				return over.owner ?? { eoa: OWNER_EOA, aa: OWNER_AA }
+			},
+			resolveTerminalPayees: async () => {
+				trace.push('terminals')
+				if (over.terminals === 'throw') throw new Error('terminal read failed')
+				return over.terminals ?? []
 			},
 		},
 	}
@@ -98,6 +103,7 @@ test('binding lookup throws synchronously: still 503 (contained by the admission
 				throw new Error('sync failure')
 			}) as any,
 			resolveOwner: async () => ({ eoa: OWNER_EOA, aa: null }),
+			resolveTerminalPayees: async () => [],
 		}
 	)
 	assert.equal(!v.ok && v.status, 503)
@@ -161,7 +167,7 @@ test('CCSA-only kind=1 items are pure USDC for the payee path (the to-check appl
 		h.deps
 	)
 	assert.equal(!v.ok && v.code, 'pos_payee_card_mismatch')
-	assert.deepEqual(h.trace, ['lookup', 'owner'])
+	assert.deepEqual(h.trace, ['lookup', 'owner', 'terminals'])
 })
 
 test('no default-card fallback: the binding is checked only for the requested card, never for another card', async () => {
@@ -173,7 +179,7 @@ test('no default-card fallback: the binding is checked only for the requested ca
 test('an unexpected throw inside the admission is contained as 503 (route never sees a 500)', async () => {
 	const v = await admitChargeRequest(
 		{ merchantCardAddress: CARD, items: usdcItems, to: OWNER_EOA, ccsaAddress: 'not-an-address' },
-		{ lookupBinding: async () => true, resolveOwner: async () => ({ eoa: OWNER_EOA, aa: null }) }
+		{ lookupBinding: async () => true, resolveOwner: async () => ({ eoa: OWNER_EOA, aa: null }), resolveTerminalPayees: async () => [] }
 	)
 	assert.equal(!v.ok && v.status, 503)
 	assert.equal(!v.ok && v.code, 'pos_admission_unavailable')
@@ -367,5 +373,40 @@ test('gateChargeRelay: empty items are refused as pos_items_required before any 
 	assert.equal(!v.ok && v.code, 'pos_items_required')
 	assert.deepEqual(h.trace, [])
 	assert.deepEqual(fh.trace, [])
+})
+
+// ---- 纯 USDC 收款方：卡 owner，或该卡有效绑定终端（EOA 或其 AA）----
+
+test('payee: an active bound terminal EOA (not the owner) is accepted; the terminal AA is accepted too', async () => {
+	const TERM_EOA = '0x00000000000000000000000000000000000000d1'
+	const TERM_AA = '0x00000000000000000000000000000000000000d2'
+	const v1 = await admitChargeRequest({ merchantCardAddress: CARD, items: usdcItems, to: TERM_EOA, ccsaAddress: CCSA },
+		{ ...harness({ terminals: [TERM_EOA, TERM_AA] }).deps })
+	assert.equal(v1.ok, true)
+	const v2 = await admitChargeRequest({ merchantCardAddress: CARD, items: usdcItems, to: TERM_AA, ccsaAddress: CCSA },
+		{ ...harness({ terminals: [TERM_EOA, TERM_AA] }).deps })
+	assert.equal(v2.ok, true)
+})
+
+test('payee: the AA of an unbound terminal is refused as pos_payee_card_mismatch (400)', async () => {
+	const UNBOUND_AA = '0x00000000000000000000000000000000000000d9'
+	const v = await admitChargeRequest({ merchantCardAddress: CARD, items: usdcItems, to: UNBOUND_AA, ccsaAddress: CCSA },
+		{ ...harness({ terminals: ['0x00000000000000000000000000000000000000d1'] }).deps })
+	assert.equal(!v.ok && v.status, 400)
+	assert.equal(!v.ok && v.code, 'pos_payee_card_mismatch')
+})
+
+test('payee: a deactivated terminal is absent from the active set, so its AA is refused (400)', async () => {
+	const DEACTIVATED_AA = '0x00000000000000000000000000000000000000d3'
+	const v = await admitChargeRequest({ merchantCardAddress: CARD, items: usdcItems, to: DEACTIVATED_AA, ccsaAddress: CCSA },
+		{ ...harness({ terminals: [] }).deps })
+	assert.equal(!v.ok && v.code, 'pos_payee_card_mismatch')
+})
+
+test('payee: a terminal-list read failure is 503 pos_payee_resolve_unavailable, never accepted', async () => {
+	const v = await admitChargeRequest({ merchantCardAddress: CARD, items: usdcItems, to: '0x00000000000000000000000000000000000000d1', ccsaAddress: CCSA },
+		{ ...harness({ terminals: 'throw' }).deps })
+	assert.equal(!v.ok && v.status, 503)
+	assert.equal(!v.ok && v.code, 'pos_payee_resolve_unavailable')
 })
 

@@ -35,6 +35,8 @@ export type ChargeAdmissionDeps = {
 	lookupBinding: (cardAddress: string) => Promise<boolean>
 	/** 只读解析卡 owner 的 EOA 与 AA（不发交易）；读取失败抛出。 */
 	resolveOwner: (cardAddress: string) => Promise<{ eoa: string; aa: string | null }>
+	/** 只读解析该卡有效绑定终端的收款地址集合（每个终端的 EOA，及其在该卡 AA 工厂下严格推导的 AA）；读取失败抛出。 */
+	resolveTerminalPayees: (cardAddress: string) => Promise<string[]>
 }
 
 export const admitChargeRequest = async (
@@ -65,6 +67,7 @@ export const admitChargeRequest = async (
 				to: String(input.to ?? ''),
 				cardAddress: bound.cardAddress,
 				resolveOwner: deps.resolveOwner,
+				resolveTerminalPayees: deps.resolveTerminalPayees,
 			})
 			if (!payee.ok) return { ok: false, status: payee.status, code: payee.code, error: payee.error }
 		}

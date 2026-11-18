@@ -3398,6 +3398,28 @@ export const readActivePosTerminalBindingForCharge = async (cardAddressLoose: st
 	}
 }
 
+/**
+ * 收费路径专用：列出某卡的有效绑定终端 EOA（is_active=true 且 tx_hash 非空）。只做一条 SELECT，不建表、不写库。
+ * 数据库异常与存储中的非法地址均以抛错返回（调用方映射为 503），不返回空列表。
+ */
+export const listActivePosTerminalEoasForCharge = async (cardAddressLoose: string): Promise<string[]> => {
+	const card = ethers.getAddress(cardAddressLoose.trim()).toLowerCase()
+	const db = new Client({ connectionString: DB_URL })
+	try {
+		await db.connect()
+		const { rows } = await db.query<{ pos_eoa: string }>(
+			`SELECT pos_eoa FROM beamio_pos_terminal_admin_card
+			 WHERE LOWER(TRIM(card_address)) = $1
+			   AND is_active = true
+			   AND tx_hash IS NOT NULL`,
+			[card]
+		)
+		return rows.map((r) => ethers.getAddress(String(r.pos_eoa).trim()).toLowerCase())
+	} finally {
+		await db.end().catch(() => {})
+	}
+}
+
 /** POS 问询已登记商户卡地址（Registration Device 成功且链上 confirm 后即有记录）。 */
 export const getPosTerminalCardAddressForWallet = async (walletLoose: string): Promise<string | null> => {
 	const row = await getPosTerminalCardBindingRow(walletLoose)

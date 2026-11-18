@@ -217,7 +217,7 @@ import {
 	updateMerchantCardStripeSession,
 } from './db'
 import { gateChargeRelay, recheckBindingBeforeBroadcast, verifyChargeFeePayer, type ChargeFeeDeps } from './endpoint/chargeRelayGate'
-import { readActivePosTerminalBindingForCharge } from './db'
+import { readActivePosTerminalBindingForCharge, listActivePosTerminalEoasForCharge } from './db'
 import { invalidateIssuedCouponSeriesQueryCachesForCard } from './endpoint/issuedCouponSeriesQueryCache'
 import { syncAllIssuedCouponSocialPromotionFromShareMetadata } from './endpoint/issuedCouponSocialPromotionMetadataSync'
 import { fetchUIDAssetsForEOA, scheduleEnsureNfcBeamioTagForEoa } from './endpoint/getUIDAssetsLogic'
@@ -9812,6 +9812,25 @@ export const resolveChargeCardOwnerForAdmission = async (
 	return { eoa, aa: await readOwnerAaStrict(provider, aaFactory, eoa) }
 }
 
+/**
+ * 纯 USDC 收款的终端侧收款地址集合（只读）：该卡有效绑定终端的 EOA，以及每个终端在该卡 AA 工厂下严格推导的 AA。
+ * 终端列表读取失败、AA 推导读取失败均抛出（调用方映射为 503）。无绑定终端时返回空列表。
+ */
+export const resolveChargeTerminalPayeesForAdmission = async (cardAddress: string): Promise<string[]> => {
+	const cardN = ethers.getAddress(cardAddress)
+	const terminals = await listActivePosTerminalEoasForCharge(cardN)
+	if (terminals.length === 0) return []
+	const provider = providerForUserCardChain(await resolveUserCardChain(cardN))
+	const aaFactory = ethers.getAddress(await getCardAaFactoryAddress(cardN))
+	const out: string[] = []
+	for (const eoa of terminals) {
+		out.push(eoa)
+		const aa = await readOwnerAaStrict(provider, aaFactory, eoa)
+		if (aa) out.push(aa)
+	}
+	return out
+}
+
 /** 严格读取 owner 在工厂下的已部署 AA：无则 null；任何 RPC 失败均抛出（与 beamioAaFromFactory 的吞错不同）。 */
 const readOwnerAaStrict = async (provider: ethers.Provider, aaFactory: string, eoa: string): Promise<string | null> => {
 	const factory = new ethers.Contract(ethers.getAddress(aaFactory), ['function beamioAccountOf(address) view returns (address)'], provider)
@@ -13095,7 +13114,11 @@ export const OpenContainerRelayProcess = async () => {
         ccsaAddress: BASE_CCSA_CARD_ADDRESS,
       },
       {
-        admission: { lookupBinding: readActivePosTerminalBindingForCharge, resolveOwner: resolveChargeCardOwnerForAdmission },
+        admission: {
+          lookupBinding: readActivePosTerminalBindingForCharge,
+          resolveOwner: resolveChargeCardOwnerForAdmission,
+          resolveTerminalPayees: resolveChargeTerminalPayeesForAdmission,
+        },
         fee: chargeFeeDepsForMaster(calcChargeFixedBUnitFee().bServiceUnits6),
       }
     )

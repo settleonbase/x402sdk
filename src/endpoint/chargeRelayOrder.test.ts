@@ -41,6 +41,8 @@ type World = {
 	aa?: string | null
 	/** 1155 收款方 owner 是否已有 AA；为 false 时建 AA 会广播一笔建账户交易。 */
 	ownerHasAa?: boolean
+	/** 该卡有效绑定终端（EOA 与其在该卡 AA 工厂下推导的 AA）；listThrows 模拟终端列表读取故障。 */
+	terminals?: { eoas: string[]; aaByEoa?: Record<string, string | null>; listThrows?: boolean }
 	factoryThrows?: boolean
 }
 
@@ -50,6 +52,17 @@ const zero = (): Counters => ({ forwardToMaster: 0, accountCreateTx: 0, signer: 
 const makeDeps = (w: World, trace: string[]) => {
 	let lookupCalls = 0
 	const admission = {
+		resolveTerminalPayees: async (c: string) => {
+			trace.push(`terminals(${K(c).slice(-4)})`)
+			if (w.terminals?.listThrows) throw new Error('terminal list read failed')
+			const out: string[] = []
+			for (const eoa of w.terminals?.eoas ?? []) {
+				out.push(eoa)
+				const aa = w.terminals?.aaByEoa?.[eoa]
+				if (aa) out.push(aa)
+			}
+			return out
+		},
 		lookupBinding: async (c: string) => {
 			const n = lookupCalls++
 			trace.push(`binding#${n}(${K(c).slice(-4)})`)
@@ -212,6 +225,45 @@ test('Cluster reject: fee balance RPC unavailable → 503 pos_fee_unavailable (d
 	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ balances: { [K(CARD)]: 'throw' } }))
 	record('C8 fee RPC unavailable', 'cluster', r.out.status, r.out.code, r.c, r.trace)
 	assert.deepEqual([r.out.status, r.out.code], [503, 'pos_fee_unavailable'])
+	assert.equal(r.c.forwardToMaster, 0)
+	expectNoBroadcast(r.c)
+})
+
+const TERM_EOA = '0x00000000000000000000000000000000000000d1'
+const TERM_AA = '0x00000000000000000000000000000000000000d2'
+const UNBOUND_AA = '0x00000000000000000000000000000000000000d9'
+const DEACTIVATED_AA = '0x00000000000000000000000000000000000000d3'
+const termWorld = (over: Partial<NonNullable<World['terminals']>> = {}) =>
+	world({ terminals: { eoas: [TERM_EOA], aaByEoa: { [TERM_EOA]: TERM_AA }, ...over } })
+
+test('Cluster positive control C10: scan path with a terminal EOA that is not the owner, paying to the terminal AA → forwarded once', async () => {
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: TERM_AA, maxAmount: 0n }, termWorld())
+	record('C10 positive control (terminal AA payee)', 'cluster', r.out.status, '-', r.c, r.trace)
+	assert.equal(r.out.status, 200)
+	assert.equal(r.c.forwardToMaster, 1)
+	expectNoBroadcast(r.c)
+})
+
+test('Cluster reject C11: AA of an unbound terminal → 400 pos_payee_card_mismatch; zero forward and broadcast', async () => {
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: UNBOUND_AA, maxAmount: 0n }, termWorld())
+	record('C11 unbound terminal AA', 'cluster', r.out.status, r.out.code, r.c, r.trace)
+	assert.deepEqual([r.out.status, r.out.code], [400, 'pos_payee_card_mismatch'])
+	assert.equal(r.c.forwardToMaster, 0)
+	expectNoBroadcast(r.c)
+})
+
+test('Cluster reject C12: deactivated terminal (absent from the active set) → 400 pos_payee_card_mismatch; zero forward and broadcast', async () => {
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: DEACTIVATED_AA, maxAmount: 0n }, termWorld({ eoas: [] }))
+	record('C12 deactivated terminal AA', 'cluster', r.out.status, r.out.code, r.c, r.trace)
+	assert.deepEqual([r.out.status, r.out.code], [400, 'pos_payee_card_mismatch'])
+	assert.equal(r.c.forwardToMaster, 0)
+	expectNoBroadcast(r.c)
+})
+
+test('Cluster reject C13: terminal list read failure → 503 pos_payee_resolve_unavailable; zero forward and broadcast', async () => {
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: TERM_AA, maxAmount: 0n }, termWorld({ listThrows: true }))
+	record('C13 terminal list read failure', 'cluster', r.out.status, r.out.code, r.c, r.trace)
+	assert.deepEqual([r.out.status, r.out.code], [503, 'pos_payee_resolve_unavailable'])
 	assert.equal(r.c.forwardToMaster, 0)
 	expectNoBroadcast(r.c)
 })
