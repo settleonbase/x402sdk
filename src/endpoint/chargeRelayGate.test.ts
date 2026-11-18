@@ -14,7 +14,7 @@ registerHooks({
 	},
 })
 
-const { admitChargeRequest, verifyChargeFeePayer, assertChargeWithinMaxAmount, recheckBindingBeforeBroadcast, gateChargeRelay } = await import('./chargeRelayGate.ts')
+const { admitChargeRequest, verifyChargeFeePayer, recheckBindingBeforeBroadcast, gateChargeRelay } = await import('./chargeRelayGate.ts')
 
 const CCSA = '0x2032A363BB2cf331142391fC0DAd21D6504922C7'
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
@@ -180,7 +180,7 @@ test('an unexpected throw inside the admission is contained as 503 (route never 
 })
 
 // ---------------------------------------------------------------------------
-// Master 广播前：费用付款人（严格）、签名 maxAmount、广播前绑定复核、单一准入入口。
+// Master 广播前：费用付款人（严格）、广播前绑定复核、单一准入入口。
 // ---------------------------------------------------------------------------
 
 const FEE = 5_000_000n
@@ -302,18 +302,6 @@ test('fee: a non-positive fee is a configuration failure (503), never a free cha
 	assert.equal(!v.ok && v.status, 503)
 })
 
-test('maxAmount: zero is not enforced here (matches the chain); a positive cap rejects USDC spend above it', () => {
-	assert.equal(assertChargeWithinMaxAmount({ maxAmount: 0n, items: [{ kind: 0, amount: 999n }] }).ok, true)
-	assert.equal(assertChargeWithinMaxAmount({ maxAmount: 1000n, items: [{ kind: 0, amount: 1000n }] }).ok, true)
-	const over = assertChargeWithinMaxAmount({ maxAmount: 1000n, items: [{ kind: 0, amount: 600n }, { kind: 0, amount: 401n }] })
-	assert.equal(over.ok, false)
-	assert.equal(!over.ok && over.code, 'pos_amount_exceeds_max')
-})
-
-test('maxAmount: ERC1155 (kind=1) amounts are points, not USDC spend, and do not count against the cap', () => {
-	assert.equal(assertChargeWithinMaxAmount({ maxAmount: 10n, items: [{ kind: 1, amount: 9_999n }] }).ok, true)
-})
-
 test('recheck before broadcast: bound → ok; no binding → 400; lookup throw → 503; malformed card → 400 without lookup', async () => {
 	assert.equal((await recheckBindingBeforeBroadcast(CARD, async () => true)).ok, true)
 	const miss = await recheckBindingBeforeBroadcast(CARD, async () => false)
@@ -331,37 +319,26 @@ test('recheck before broadcast: bound → ok; no binding → 400; lookup throw �
 	assert.equal(called, 0)
 })
 
-test('gateChargeRelay: admission rejection stops before maxAmount and fee reads', async () => {
+test('gateChargeRelay: admission rejection stops before fee reads', async () => {
 	const h = harness({ bound: false })
 	const fh = feeHarness({ [K(CARD)]: FEE })
 	const v = await gateChargeRelay(
-		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 0n },
+		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA },
 		{ admission: h.deps, fee: fh.deps }
 	)
 	assert.equal(!v.ok && v.code, 'pos_card_not_bound')
 	assert.deepEqual(fh.trace, [])
 })
 
-test('gateChargeRelay: maxAmount rejection stops before fee reads', async () => {
-	const h = harness()
-	const fh = feeHarness({ [K(CARD)]: FEE })
-	const v = await gateChargeRelay(
-		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 50n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 10n },
-		{ admission: h.deps, fee: fh.deps }
-	)
-	assert.equal(!v.ok && v.code, 'pos_amount_exceeds_max')
-	assert.deepEqual(fh.trace, [])
-})
-
 test('gateChargeRelay: fee shortfall is a 4xx; fee read failure is 503', async () => {
 	const short = await gateChargeRelay(
-		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 0n },
+		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA },
 		{ admission: harness().deps, fee: feeHarness({}).deps }
 	)
 	assert.equal(!short.ok && short.status, 400)
 	assert.equal(!short.ok && short.code, 'pos_fee_insufficient')
 	const down = await gateChargeRelay(
-		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 0n },
+		{ merchantCardAddress: CARD, items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA },
 		{ admission: harness().deps, fee: feeHarness({ [K(CARD)]: 'throw' }).deps }
 	)
 	assert.equal(!down.ok && down.status, 503)
@@ -369,14 +346,13 @@ test('gateChargeRelay: fee shortfall is a 4xx; fee read failure is 503', async (
 
 test('gateChargeRelay: success returns one frozen verdict carrying the verified card, the fee consumer and the cap', async () => {
 	const v = await gateChargeRelay(
-		{ merchantCardAddress: CARD.toLowerCase(), items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA, maxAmount: 5n },
+		{ merchantCardAddress: CARD.toLowerCase(), items: [{ kind: 0, asset: USDC, amount: 1n }], to: OWNER_EOA, ccsaAddress: CCSA },
 		{ admission: harness().deps, fee: feeHarness({ [K(CARD)]: FEE }).deps }
 	)
 	assert.equal(v.ok, true)
 	if (!v.ok) return
 	assert.equal(v.cardAddress, ethers.getAddress(CARD))
 	assert.equal(v.feeConsumer, ethers.getAddress(CARD))
-	assert.equal(v.maxAmount, 5n)
 	assert.equal(Object.isFrozen(v), true)
 })
 

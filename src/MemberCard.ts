@@ -13085,7 +13085,7 @@ export const OpenContainerRelayProcess = async () => {
     const sigHex = typeof payload.signature === 'string' && payload.signature.startsWith('0x') ? payload.signature : '0x' + payload.signature
     const sigBytes = ethers.getBytes(sigHex)
 
-    // B6：广播前独立完成准入（选卡/绑定/收款方）、签名 maxAmount 与严格费用付款人。
+    // B6：广播前独立完成准入（选卡/绑定/收款方）与严格费用付款人。
     // 任一失败：不建立中继上下文、不签名、不广播、不入队。
     const chargeGate = await gateChargeRelay(
       {
@@ -13093,7 +13093,6 @@ export const OpenContainerRelayProcess = async () => {
         items: items.map((it) => ({ kind: it.kind, asset: it.asset, amount: it.amount })),
         to: payload.to,
         ccsaAddress: BASE_CCSA_CARD_ADDRESS,
-        maxAmount,
       },
       {
         admission: { lookupBinding: readActivePosTerminalBindingForCharge, resolveOwner: resolveChargeCardOwnerForAdmission },
@@ -13348,7 +13347,7 @@ export const OpenContainerRelayProcess = async () => {
       gasLimit: resolveRelayHandleOpsGasLimit(),
     })
     logger(`[AAtoEOA/OpenContainer] EntryPoint relayHandleOps tx submitted hash=${tx.hash}`)
-    broadcastPendingFeeRecord = `tx=${tx.hash} card=${chargeGate.cardAddress} feeConsumer=${chargeGate.feeConsumer} feeSource=${chargeGate.feeSource} feeBUnits6=${chargeGate.feeBUnits6.toString()} payer=${account} maxAmount=${chargeGate.maxAmount.toString()}`
+    broadcastPendingFeeRecord = `tx=${tx.hash} card=${chargeGate.cardAddress} feeConsumer=${chargeGate.feeConsumer} feeSource=${chargeGate.feeSource} feeBUnits6=${chargeGate.feeBUnits6.toString()} payer=${account} maxAmount=${payload.maxAmount} (existing on-chain check)`
     const openRelayReceipt = await tx.wait().catch((waitErr: any) => {
       try {
         logger(Colors.yellow(`[AAtoEOA/OpenContainer] tx.wait() failed (RPC issue, tx submitted): ${waitErr?.shortMessage ?? waitErr?.message ?? String(waitErr)}`))

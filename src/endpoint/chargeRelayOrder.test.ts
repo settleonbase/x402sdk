@@ -88,7 +88,7 @@ const makeDeps = (w: World, trace: string[]) => {
 	return { admission, fee }
 }
 
-type Req = { card: string | null | undefined; items: { kind: number; asset: string; amount: bigint }[]; to: string; maxAmount: bigint }
+type Req = { card: string | null | undefined; items: { kind: number; asset: string; amount: bigint }[]; to: string }
 
 /** Cluster（beamioServer /api/AAtoEOA，OpenContainer）：准入 → 严格费用预检 → 转发 Master。 */
 const clusterSim = async (req: Req, w: World) => {
@@ -111,7 +111,7 @@ const clusterSim = async (req: Req, w: World) => {
 const masterSim = async (req: Req, w: World, c: Counters, trace: string[]) => {
 	const deps = makeDeps(w, trace)
 	const gate = await gateChargeRelay(
-		{ merchantCardAddress: req.card, items: req.items, to: req.to, ccsaAddress: CCSA, maxAmount: req.maxAmount },
+		{ merchantCardAddress: req.card, items: req.items, to: req.to, ccsaAddress: CCSA },
 		{ admission: deps.admission, fee: deps.fee }
 	)
 	if (!gate.ok) return { status: gate.status, code: gate.code, cardAddress: null as string | null }
@@ -143,7 +143,7 @@ const expectNoBroadcast = (c: Counters) => {
 // ---- Cluster 预检拒绝：不转 Master、不签发、不广播、不入记账 ----
 
 test('Cluster reject: binding missing → 400 pos_card_not_bound; zero forward, sign, broadcast, accounting', async () => {
-	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world({ lookup: () => false }))
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ lookup: () => false }))
 	record('C1 binding missing', 'cluster', r.out.status, r.out.code, r.c, r.trace)
 	assert.deepEqual([r.out.status, r.out.code], [400, 'pos_card_not_bound'])
 	assert.equal(r.c.forwardToMaster, 0)
@@ -151,7 +151,7 @@ test('Cluster reject: binding missing → 400 pos_card_not_bound; zero forward, 
 })
 
 test('Cluster reject: binding read failure → 503 pos_card_binding_unavailable (not 400, not 500); zero forward and broadcast', async () => {
-	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world({ lookup: () => 'throw' }))
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ lookup: () => 'throw' }))
 	record('C2 binding read failure', 'cluster', r.out.status, r.out.code, r.c, r.trace)
 	assert.deepEqual([r.out.status, r.out.code], [503, 'pos_card_binding_unavailable'])
 	assert.equal(r.c.forwardToMaster, 0)
@@ -159,7 +159,7 @@ test('Cluster reject: binding read failure → 503 pos_card_binding_unavailable 
 })
 
 test('Cluster reject: card mismatch (non-CCSA ERC1155 asset != merchantCardAddress) → 400 pos_payee_card_mismatch', async () => {
-	const r = await clusterSim({ card: CARD, items: [{ kind: 1, asset: OTHER, amount: 1n }], to: OWNER_EOA, maxAmount: 0n }, world())
+	const r = await clusterSim({ card: CARD, items: [{ kind: 1, asset: OTHER, amount: 1n }], to: OWNER_EOA }, world())
 	record('C3 card mismatch', 'cluster', r.out.status, r.out.code, r.c, r.trace)
 	assert.deepEqual([r.out.status, r.out.code], [400, 'pos_payee_card_mismatch'])
 	assert.equal(r.c.forwardToMaster, 0)
@@ -167,7 +167,7 @@ test('Cluster reject: card mismatch (non-CCSA ERC1155 asset != merchantCardAddre
 })
 
 test('Cluster reject: malformed kind=1 asset → 400 pos_card_invalid; zero forward and broadcast', async () => {
-	const r = await clusterSim({ card: CARD, items: [{ kind: 1, asset: 'garbage', amount: 1n }], to: OWNER_EOA, maxAmount: 0n }, world())
+	const r = await clusterSim({ card: CARD, items: [{ kind: 1, asset: 'garbage', amount: 1n }], to: OWNER_EOA }, world())
 	record('C4 malformed asset', 'cluster', r.out.status, r.out.code, r.c, r.trace)
 	assert.deepEqual([r.out.status, r.out.code], [400, 'pos_card_invalid'])
 	assert.equal(r.c.forwardToMaster, 0)
@@ -175,7 +175,7 @@ test('Cluster reject: malformed kind=1 asset → 400 pos_card_invalid; zero forw
 })
 
 test('Cluster reject: pure-USDC payee is neither owner EOA nor AA → 400 pos_payee_card_mismatch', async () => {
-	const r = await clusterSim({ card: CARD, items: usdc(1n), to: STRANGER, maxAmount: 0n }, world())
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: STRANGER }, world())
 	record('C5 payee mismatch', 'cluster', r.out.status, r.out.code, r.c, r.trace)
 	assert.deepEqual([r.out.status, r.out.code], [400, 'pos_payee_card_mismatch'])
 	assert.equal(r.c.forwardToMaster, 0)
@@ -183,7 +183,7 @@ test('Cluster reject: pure-USDC payee is neither owner EOA nor AA → 400 pos_pa
 })
 
 test('Cluster reject: owner read failure → 503 pos_payee_resolve_unavailable; zero forward and broadcast', async () => {
-	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world({ ownerThrows: true }))
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ ownerThrows: true }))
 	record('C6 owner read failure', 'cluster', r.out.status, r.out.code, r.c, r.trace)
 	assert.deepEqual([r.out.status, r.out.code], [503, 'pos_payee_resolve_unavailable'])
 	assert.equal(r.c.forwardToMaster, 0)
@@ -191,7 +191,7 @@ test('Cluster reject: owner read failure → 503 pos_payee_resolve_unavailable; 
 })
 
 test('Cluster reject: trusted zero balances → 400 pos_fee_insufficient; zero forward and broadcast', async () => {
-	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world({ balances: {} }))
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ balances: {} }))
 	record('C7 fee insufficient (trusted zero)', 'cluster', r.out.status, r.out.code, r.c, r.trace)
 	assert.deepEqual([r.out.status, r.out.code], [400, 'pos_fee_insufficient'])
 	assert.equal(r.c.forwardToMaster, 0)
@@ -199,7 +199,7 @@ test('Cluster reject: trusted zero balances → 400 pos_fee_insufficient; zero f
 })
 
 test('Cluster reject: fee balance RPC unavailable → 503 pos_fee_unavailable (distinct from trusted zero); zero forward and broadcast', async () => {
-	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world({ balances: { [K(CARD)]: 'throw' } }))
+	const r = await clusterSim({ card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ balances: { [K(CARD)]: 'throw' } }))
 	record('C8 fee RPC unavailable', 'cluster', r.out.status, r.out.code, r.c, r.trace)
 	assert.deepEqual([r.out.status, r.out.code], [503, 'pos_fee_unavailable'])
 	assert.equal(r.c.forwardToMaster, 0)
@@ -207,7 +207,7 @@ test('Cluster reject: fee balance RPC unavailable → 503 pos_fee_unavailable (d
 })
 
 test('Cluster positive control: bound card, owner payee, fee sufficient → forwarded once, one card used throughout', async () => {
-	const r = await clusterSim({ card: CARD.toLowerCase(), items: usdc(1n), to: OWNER_AA, maxAmount: 0n }, world())
+	const r = await clusterSim({ card: CARD.toLowerCase(), items: usdc(1n), to: OWNER_AA }, world())
 	record('C9 positive control (pure USDC)', 'cluster', r.out.status, '-', r.c, r.trace)
 	assert.equal(r.out.status, 200)
 	assert.equal(r.out.status === 200 && r.out.card, ethers.getAddress(CARD))
@@ -229,35 +229,31 @@ const masterReject = async (name: string, req: Req, w: World, expect: [number, s
 
 test('Master reject: binding revoked after Cluster admission → recheck 400 pos_card_not_bound; zero broadcast', async () => {
 	// 第 0 次（门禁）为真，第 1 次（广播前复核）为假：撤销发生在准入之后
-	await masterReject('M1 revoked between gate and broadcast', { card: CARD, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world({ lookup: (n) => n === 0 }), [400, 'pos_card_not_bound'])
+	await masterReject('M1 revoked between gate and broadcast', { card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ lookup: (n) => n === 0 }), [400, 'pos_card_not_bound'])
 })
 
 test('Master reject: binding read fails at the pre-broadcast recheck → 503; zero broadcast', async () => {
-	await masterReject('M2 recheck read failure', { card: CARD, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world({ lookup: (n) => (n === 0 ? true : 'throw') }), [503, 'pos_card_binding_unavailable'])
+	await masterReject('M2 recheck read failure', { card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ lookup: (n) => (n === 0 ? true : 'throw') }), [503, 'pos_card_binding_unavailable'])
 })
 
 test('Master reject: fee RPC unavailable → 503 before any signing or broadcast; accounting not queued', async () => {
-	await masterReject('M3 fee RPC unavailable', { card: CARD, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world({ balances: { [K(CARD)]: 'throw' } }), [503, 'pos_fee_unavailable'])
+	await masterReject('M3 fee RPC unavailable', { card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ balances: { [K(CARD)]: 'throw' } }), [503, 'pos_fee_unavailable'])
 })
 
 test('Master reject: fee trusted zero → 400 pos_fee_insufficient; zero broadcast', async () => {
-	await masterReject('M4 fee insufficient (trusted zero)', { card: CARD, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world({ balances: {} }), [400, 'pos_fee_insufficient'])
-})
-
-test('Master reject: USDC spend above the signed maxAmount → 400 pos_amount_exceeds_max; zero broadcast', async () => {
-	await masterReject('M5 above maxAmount', { card: CARD, items: usdc(100n), to: OWNER_EOA, maxAmount: 99n }, world(), [400, 'pos_amount_exceeds_max'])
+	await masterReject('M4 fee insufficient (trusted zero)', { card: CARD, items: usdc(1n), to: OWNER_EOA }, world({ balances: {} }), [400, 'pos_fee_insufficient'])
 })
 
 test('Master reject: missing merchantCardAddress (no Cluster) → 400 pos_card_invalid; zero broadcast', async () => {
-	await masterReject('M6 missing card at Master', { card: undefined, items: usdc(1n), to: OWNER_EOA, maxAmount: 0n }, world(), [400, 'pos_card_invalid'])
+	await masterReject('M6 missing card at Master', { card: undefined, items: usdc(1n), to: OWNER_EOA }, world(), [400, 'pos_card_invalid'])
 })
 
-// ---- 成功路径：三处同卡，费用确认先于广播，扣款不超过 maxAmount ----
+// ---- 成功路径：三处同卡，费用确认先于广播 ----
 
-test('success path: one verified card for admission, fee and relay; fee confirmed before broadcast; spend within maxAmount', async () => {
+test('success path: one verified card for admission, fee and relay; fee confirmed before broadcast', async () => {
 	const c = zero()
 	const trace: string[] = []
-	const out = await masterSim({ card: CARD.toLowerCase(), items: usdc(40n), to: OWNER_EOA, maxAmount: 50n }, world(), c, trace)
+	const out = await masterSim({ card: CARD.toLowerCase(), items: usdc(40n), to: OWNER_EOA }, world(), c, trace)
 	record('S1 success (Master)', 'master', out.status, '-', c, trace)
 	assert.equal(out.status, 200)
 	assert.equal(out.cardAddress, ethers.getAddress(CARD))

@@ -18,7 +18,6 @@ export type ChargeGateCode =
 	| 'pos_admission_unavailable'
 	| 'pos_fee_insufficient'
 	| 'pos_fee_unavailable'
-	| 'pos_amount_exceeds_max'
 
 export type ChargeGateReject = { ok: false; status: 400 | 503; code: ChargeGateCode; error: string }
 
@@ -80,7 +79,7 @@ export const admitChargeRequest = async (
 }
 
 // ---------------------------------------------------------------------------
-// Master（广播前）：费用上下文、签名 maxAmount、广播前绑定复核。
+// Master（广播前）：费用上下文与广播前绑定复核。
 // ---------------------------------------------------------------------------
 
 export type ChargeFeeDeps = {
@@ -150,25 +149,6 @@ export const verifyChargeFeePayer = async (params: { cardAddress: string; deps: 
 	}
 }
 
-/**
- * 签名 maxAmount：maxAmount 为 0 时与链上一致（不在此处强制）；否则 USDC 类（kind=0）金额之和不得超过 maxAmount。
- * 链上 simulate/relay 仍是权威校验；本函数只新增拒绝，不放宽任何既有校验。
- */
-export const assertChargeWithinMaxAmount = (params: {
-	maxAmount: bigint
-	items: readonly { kind: number; amount: bigint }[]
-}): { ok: true } | { ok: false; status: 400; code: 'pos_amount_exceeds_max'; error: string } => {
-	if (params.maxAmount === 0n) return { ok: true }
-	let spend = 0n
-	for (const it of params.items) {
-		if (Number(it.kind) === 0) spend += it.amount
-	}
-	if (spend > params.maxAmount) {
-		return { ok: false, status: 400, code: 'pos_amount_exceeds_max', error: 'charge amount exceeds the signed maxAmount' }
-	}
-	return { ok: true }
-}
-
 /** 广播前紧邻处的绑定复核（B5）：撤销在准入之后生效。无绑定 → 4xx；读取失败 → 503。 */
 export const recheckBindingBeforeBroadcast = async (
 	cardAddress: string,
@@ -193,12 +173,11 @@ export type ChargeRelayVerdict =
 			ownerEoa: string
 			aaFactory: string
 			feeBUnits6: bigint
-			maxAmount: bigint
 	  }>
 	| ChargeGateReject
 
 /**
- * Master 广播前的唯一准入入口（B6）：准入（选卡/绑定/收款方）→ 签名 maxAmount → 严格费用付款人。
+ * Master 广播前的唯一准入入口（B6）：准入（选卡/绑定/收款方）→ 严格费用付款人。
  * 任何一步失败都在广播、签名与入队之前返回拒绝。返回值冻结，之后的广播与记账只使用它。
  */
 export const gateChargeRelay = async (
@@ -207,7 +186,6 @@ export const gateChargeRelay = async (
 		items: readonly { kind: number; asset: string; amount: bigint }[]
 		to: string | null | undefined
 		ccsaAddress: string
-		maxAmount: bigint
 	},
 	deps: { admission: ChargeAdmissionDeps; fee: ChargeFeeDeps }
 ): Promise<ChargeRelayVerdict> => {
@@ -216,8 +194,6 @@ export const gateChargeRelay = async (
 		deps.admission
 	)
 	if (!adm.ok) return adm
-	const amt = assertChargeWithinMaxAmount({ maxAmount: input.maxAmount, items: input.items })
-	if (!amt.ok) return amt
 	const fee = await verifyChargeFeePayer({ cardAddress: adm.cardAddress, deps: deps.fee })
 	if (!fee.ok) return fee
 	return Object.freeze({
@@ -229,7 +205,6 @@ export const gateChargeRelay = async (
 		ownerEoa: fee.ownerEoa,
 		aaFactory: fee.aaFactory,
 		feeBUnits6: fee.feeBUnits6,
-		maxAmount: input.maxAmount,
 	})
 }
 
