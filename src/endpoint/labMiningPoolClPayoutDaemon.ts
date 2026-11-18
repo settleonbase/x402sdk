@@ -9,7 +9,9 @@ import {
 import { waitForAllOnchainTxQueues } from '../onchainTxSerialQueue'
 
 /**
- * Standalone daemon: Lab manual staking CL skim → ConetLabMiningPool via Redeem.withdrawNative(admin).
+ * Standalone daemon: Lab manual staking CL skim → LabMiningPoolPayoutExecutor.payout
+ * via dedicated unix socket (CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_SOCKET).
+ * FORBIDDEN: private-key → VDR.withdrawNative; forbidden sock <claim-payout-socket>.
  * Run on ONE ops host with EL RPC + beacon REST (default http://127.0.0.1:4100).
  * Do not run alongside guardian CL payout for the same withdrawal keys — Lab path skips guardianId > 0.
  */
@@ -23,9 +25,10 @@ async function shutdown(signal: string): Promise<void> {
 	shuttingDown = true
 	logger(Colors.yellow(`[labMiningPoolClPayoutDaemon] ${signal}; draining payout queue…`))
 	stopValidatorLabMiningPoolClPayoutReporter()
-	await waitForLabMiningPoolClPayoutIdle()
+	// Hard bound: stuck tx.wait must not block systemd stop beyond TimeoutStopSec.
+	await waitForLabMiningPoolClPayoutIdle(90_000)
 	await flushLabMiningPoolListeningCheckpoint()
-	await waitForAllOnchainTxQueues()
+	await waitForAllOnchainTxQueues(90_000)
 	process.exit(0)
 }
 

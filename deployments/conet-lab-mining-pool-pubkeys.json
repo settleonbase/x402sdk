@@ -1,77 +1,77 @@
 {
   "generatedAt": "2026-08-14T02:09:01Z",
-  "source": "aggregate_lab_mining_pool_pubkeys.py: proposer-settings fee_recipient==pool",
+  "source": "aggregate script: proposer-settings fee recipient equals the mining pool",
   "miningPool": "0x32bE583C8e778FFfC5107BF34820c2B225336201",
   "excludeHosts": [
-    "212.227.242.207"
+    "excluded-host-1"
   ],
   "hosts": {
-    "38.102.126.30": {
+    "host-1": {
       "files": [
         {
-          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<validator-data-dir>/proposer-settings.json",
           "n": 288
         }
       ],
       "unique_pool_keys": 288
     },
-    "38.102.126.50": {
+    "host-2": {
       "files": [
         {
-          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<validator-data-dir>/proposer-settings.json",
           "n": 288
         }
       ],
       "unique_pool_keys": 288
     },
-    "216.225.202.23": {
+    "host-3": {
       "files": [
         {
-          "path": "<service-home>/ethereum-pos-mainnet/network/va-from-45/validatordata/proposer-settings.json",
+          "path": "<validator-data-dir>/proposer-settings.json",
           "n": 136
         },
         {
-          "path": "<service-home>/ethereum-pos-mainnet/network/va-from-174/validatordata/proposer-settings.json",
+          "path": "<validator-data-dir>/proposer-settings.json",
           "n": 136
         },
         {
-          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<validator-data-dir>/proposer-settings.json",
           "n": 288
         }
       ],
       "unique_pool_keys": 560
     },
-    "216.225.202.22": {
+    "host-4": {
       "files": [
         {
-          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<validator-data-dir>/proposer-settings.json",
           "n": 288
         }
       ],
       "unique_pool_keys": 288
     },
-    "216.225.197.3": {
+    "host-5": {
       "files": [
         {
-          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<validator-data-dir>/proposer-settings.json",
           "n": 288
         }
       ],
       "unique_pool_keys": 288
     },
-    "216.225.202.82": {
+    "host-6": {
       "files": [
         {
-          "path": "<service-home>/ethereum-pos-mainnet/network/node-0/consensus/validatordata/proposer-settings.json",
+          "path": "<validator-data-dir>/proposer-settings.json",
           "n": 288
         }
       ],
       "unique_pool_keys": 288
     },
-    "216.225.193.174": {
+    "host-7": {
       "files": [
         {
-          "path": "<service-home>/ethereum-pos-mainnet/network/node-compat-v717/consensus/validatordata/proposer-settings.json",
+          "path": "<validator-data-dir>/proposer-settings.json",
           "n": 136
         }
       ],

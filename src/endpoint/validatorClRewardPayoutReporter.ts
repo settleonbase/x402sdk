@@ -1,7 +1,7 @@
 /**
  * CL consensus-layer skim payout reporter (VDR production dual-cursor).
  *
- * Dual-line scan (PM-VDR-DUAL-CURSOR-H-2026-11-10):
+ * Dual-line scan:
  * - Lock H = tip−depth once (blockNumber + blockHash); history scans cursor+1…H;
  *   realtime scans H+1…safeTip filling every missing block.
  * - Shared pending + same on-chain eventKey namespace; single settler lane.
@@ -23,7 +23,7 @@
  * the cumulative gate (per-pack CAP + peel still apply). Per-tx n ≤ resolveMaxEntriesPerTx.
  *
  * Live cutover NOT performed here — enablement remains env-gated for
- * project-owner approval.
+ * approval recorded elsewhere.
  */
 
 import { createHash } from 'node:crypto'
