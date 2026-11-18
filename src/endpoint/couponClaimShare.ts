@@ -27,6 +27,14 @@ import {
 import { buildOgTextComposites, type OgTextLayer } from './couponClaimShareOgText'
 
 const BEAMIO_APP_ORIGIN = 'https://beamio.app'
+/** 现行域。Discover 等分享的 target 与 og:image 使用此域；生成新链接仍沿用 BEAMIO_APP_ORIGIN。 */
+const BEAMIO_CA_ORIGIN = 'https://beamio.ca'
+/**
+ * 解析分享链接时信任的来源（精确 origin 比较）。beamio.app 保留仅为解析存量链接；
+ * 若项目方决定退役，删除此处一项即可，不影响 beamio.ca。
+ */
+const TRUSTED_BEAMIO_APP_ORIGINS: ReadonlySet<string> = new Set([BEAMIO_CA_ORIGIN, BEAMIO_APP_ORIGIN])
+const isTrustedBeamioAppOrigin = (origin: string): boolean => TRUSTED_BEAMIO_APP_ORIGINS.has(origin)
 const ISSUED_NFT_START_ID = 100_000_000_000n
 const OG_WIDTH = 1200
 const OG_HEIGHT = 630
@@ -275,7 +283,7 @@ export function parsePersonalInviteFromBeamioAppUrl(raw: string): PersonalInvite
 	if (!input) return null
 	try {
 		const url = new URL(input)
-		if (url.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isTrustedBeamioAppOrigin(url.origin)) return null
 		if (!isAllowedBeamioAppPath(url.pathname)) return null
 		const inviteRaw = (url.searchParams.get('invite') ?? url.searchParams.get('Invite') ?? '').trim()
 		if (!inviteRaw || !ethers.isAddress(inviteRaw)) return null
@@ -295,7 +303,7 @@ export function parsePersonalInviteFromAppDownloadTarget(target: string): Person
 	if (!trimmed) return null
 	try {
 		const wrapper = new URL(trimmed)
-		if (wrapper.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isTrustedBeamioAppOrigin(wrapper.origin)) return null
 		if (!isAllowedBeamioAppPath(wrapper.pathname)) return null
 		return parsePersonalInviteFromBeamioAppUrl(trimmed)
 	} catch {
@@ -657,7 +665,7 @@ export function parseDiscoverMerchantFromBeamioAppUrl(raw: string): DiscoverMerc
 	if (!input) return null
 	try {
 		const url = new URL(input)
-		if (url.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isTrustedBeamioAppOrigin(url.origin)) return null
 		if (!isAllowedBeamioAppPath(url.pathname)) return null
 		const cardAddress = (url.searchParams.get('beamiocard') ?? url.searchParams.get('Beamiocard') ?? '').trim()
 		const redeemCode = decodeURIComponent(
@@ -681,7 +689,7 @@ export function parseDiscoverMerchantFromAppDownloadTarget(target: string): Disc
 	if (!trimmed) return null
 	try {
 		const wrapper = new URL(trimmed)
-		if (wrapper.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isTrustedBeamioAppOrigin(wrapper.origin)) return null
 		if (!isAllowedBeamioAppPath(wrapper.pathname)) return null
 		return parseDiscoverMerchantFromBeamioAppUrl(trimmed)
 	} catch {
@@ -694,7 +702,7 @@ export function parseCouponClaimFromBeamioAppUrl(raw: string): CouponOpenClaimSh
 	if (!input) return null
 	try {
 		const url = new URL(input)
-		if (url.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isTrustedBeamioAppOrigin(url.origin)) return null
 		if (!isAllowedBeamioAppPath(url.pathname)) return null
 		const cardAddress = (url.searchParams.get('beamiocard') ?? url.searchParams.get('Beamiocard') ?? '').trim()
 		const redeemCode = decodeURIComponent(
@@ -718,7 +726,7 @@ export function parseRedeemShareFromBeamioAppUrl(raw: string): CouponRedeemShare
 	if (!input) return null
 	try {
 		const url = new URL(input)
-		if (url.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isTrustedBeamioAppOrigin(url.origin)) return null
 		if (!isAllowedBeamioAppPath(url.pathname)) return null
 		const cardAddress = (url.searchParams.get('beamiocard') ?? url.searchParams.get('Beamiocard') ?? '').trim()
 		const redeemCode = decodeURIComponent(
@@ -744,7 +752,7 @@ export function parseRedeemShareFromAppDownloadTarget(target: string): CouponRed
 	if (!trimmed) return null
 	try {
 		const wrapper = new URL(trimmed)
-		if (wrapper.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isTrustedBeamioAppOrigin(wrapper.origin)) return null
 		if (!isAllowedBeamioAppPath(wrapper.pathname)) return null
 		return parseRedeemShareFromBeamioAppUrl(trimmed)
 	} catch {
@@ -757,7 +765,7 @@ export function parseCouponClaimFromAppDownloadTarget(target: string): CouponOpe
 	if (!trimmed) return null
 	try {
 		const wrapper = new URL(trimmed)
-		if (wrapper.origin !== BEAMIO_APP_ORIGIN) return null
+		if (!isTrustedBeamioAppOrigin(wrapper.origin)) return null
 		if (!isAllowedBeamioAppPath(wrapper.pathname)) return null
 		return parseCouponClaimFromBeamioAppUrl(trimmed)
 	} catch {
@@ -857,7 +865,7 @@ export function parseCouponClaimShareRequest(query: {
 		let shareUrl = ''
 		try {
 			const asUrl = new URL(target)
-			if (asUrl.origin === BEAMIO_APP_ORIGIN && (asUrl.pathname === '/app-download' || asUrl.pathname === '/app-download/')) {
+			if (isTrustedBeamioAppOrigin(asUrl.origin) && (asUrl.pathname === '/app-download' || asUrl.pathname === '/app-download/')) {
 				innerTarget = asUrl.searchParams.get('target')?.trim() ?? ''
 				shareUrl = asUrl.toString()
 			}
@@ -1023,9 +1031,11 @@ export function buildShareUrlForOgToken(params: BeamioCouponShareParams, cacheBu
 
 function ogShareTokenFromImageUrl(ogImageUrl: string): string | null {
 	const trimmed = ogImageUrl.trim()
-	const prefix = `${BEAMIO_APP_ORIGIN}/og/s/`
-	if (!trimmed.startsWith(prefix)) return null
-	return trimmed.slice(prefix.length).replace(/\.jpg$/i, '')
+	for (const origin of TRUSTED_BEAMIO_APP_ORIGINS) {
+		const prefix = `${origin}/og/s/`
+		if (trimmed.startsWith(prefix)) return trimmed.slice(prefix.length).replace(/\.jpg$/i, '')
+	}
+	return null
 }
 
 function ogShareDiskCachePath(token: string): string {
@@ -1063,6 +1073,10 @@ function buildOgImageUrl(_shareUrl: string, params?: BeamioCouponShareParams): s
 	if (params?.kind === 'personal_invite') {
 		// Static 1200×630 invitation banner (homepage `public/og-invitation.jpg`).
 		return `${PERSONAL_INVITE_OG_IMAGE_URL}?v=${layoutAppDownloadCacheBust()}`
+	}
+	if (params?.kind === 'discover_merchant') {
+		// Discover 商家图托管在现行域 beamio.ca（需 beamio.ca 公网路由 /og/s/ 到 Cluster，见调查报告）。
+		return `${BEAMIO_CA_ORIGIN}/og/s/${encodeOgShareToken(params, _shareUrl)}.jpg`
 	}
 	if (params) {
 		return `${BEAMIO_APP_ORIGIN}/og/s/${encodeOgShareToken(params, _shareUrl)}.jpg`
