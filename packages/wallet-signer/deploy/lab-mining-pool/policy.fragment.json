@@ -1,22 +1,31 @@
 {
-	"_note": "Fragment only. Merge the lab-mining-pool client into the live /etc/wallet-signer/policy.json by hand (Codex). Other clients are unchanged. Addresses here are chain constants from the repo, not production config.",
-	"lab-mining-pool": {
-		"arrays": {
-			"lab_mining_pool_payout": {
-				"chains": [224422],
-				"allow": [
-					{
-						"to": "0xc71e246DD78B37C2fABc905D340932F28F503433",
-						"selectors": ["withdrawNative(address,uint256)"],
-						"maxValueWei": "0",
-						"maxGas": 800000,
-						"args": {
-							"0": { "eq": "0x32bE583C8e778FFfC5107BF34820c2B225336201" }
-						}
-					}
-				],
-				"maxInflightPerKey": 1
-			}
-		}
-	}
+  "_note": "Fragment only. Merge the lab-mining-pool client into the live /etc/wallet-signer/policy.json by hand (Codex). Other clients are unchanged. Addresses here are chain constants from the repo, not production config.",
+  "lab-mining-pool": {
+    "arrays": {
+      "lab_mining_pool_payout": {
+        "chains": [
+          224422
+        ],
+        "allow": [
+          {
+            "to": "0xc71e246DD78B37C2fABc905D340932F28F503433",
+            "selectors": [
+              "withdrawNative(address,uint256)"
+            ],
+            "maxValueWei": "0",
+            "maxGas": 800000,
+            "args": {
+              "0": {
+                "eq": "0x32bE583C8e778FFfC5107BF34820c2B225336201"
+              }
+            }
+          }
+        ],
+        "maxInflightPerKey": 1,
+        "maxGasPriceGwei": {
+          "224422": 0.03
+        }
+      }
+    }
+  }
 }

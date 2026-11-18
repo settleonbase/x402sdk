@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { chmodSync, existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, statSync, unlinkSync } from 'node:fs'
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import type { TLSSocket } from 'node:tls'
@@ -42,7 +42,22 @@ type Identity = { client: string; via: Via; fingerprint?: string; serial?: strin
  * Any X-WS-* header arriving on tls or unix is a forgery attempt and the request is refused.
  * Optional second factor everywhere: `Authorization: Bearer <token>` against policy tokenSha256.
  */
-export function startRpcServers(svc: SignerService, cfg: { tls?: TlsListen; unix?: UnixListen[]; proxied?: ProxiedListen }): Server[] {
+/** Listener events go to stderr and to the audit log. Nothing is dropped. */
+export function makeListenerSink(svc: SignerService, write: (s: string) => void = (s) => void process.stderr.write(s)): (e: ListenerEvent) => void {
+	return (e) => {
+		write(`[listener] ${e.client} ${e.event} ${e.path}${e.detail ? ` ${e.detail}` : ''}\n`)
+		svc.audit.write({ event: `listener.${e.event}`, client: e.client, path: e.path, detail: e.detail })
+	}
+}
+
+/** Per-listener events. A failure is reported and contained to its own listener. */
+export type ListenerEvent = { client: string; path: string; event: 'listening' | 'bind_failed' | 'group_mismatch' | 'runtime_error'; detail?: string }
+
+export function startRpcServers(
+	svc: SignerService,
+	cfg: { tls?: TlsListen; unix?: UnixListen[]; proxied?: ProxiedListen },
+	onEvent: (e: ListenerEvent) => void = () => undefined,
+): Server[] {
 	const servers: Server[] = []
 	if (cfg.tls) {
 		const t = cfg.tls
@@ -81,13 +96,40 @@ export function startRpcServers(svc: SignerService, cfg: { tls?: TlsListen; unix
 		}
 		servers.push(srv)
 	}
+	// Each unix listener is isolated: its bind or runtime errors close only that listener.
+	// The group comes from the setgid directory the socket is created in; there is no chown.
+	// If a declared gid does not match after listen, only this listener is closed.
 	for (const u of cfg.unix ?? []) {
-		if (existsSync(u.path)) unlinkSync(u.path)
 		const srv = createHttpServer((req, res) => {
 			if (rejectForgedProxyHeaders(svc, req, res, 'unix')) return
-			void handle(svc, { client: u.client, via: 'unix' }, req, res)
+			handle(svc, { client: u.client, via: 'unix' }, req, res).catch((err: unknown) => {
+				onEvent({ client: u.client, path: u.path, event: 'runtime_error', detail: errorMessage(err) })
+				if (!res.headersSent) res.destroy()
+			})
 		})
-		srv.listen(u.path, () => chmodSync(u.path, u.mode ?? 0o660))
+		srv.on('error', (err: Error) => {
+			onEvent({ client: u.client, path: u.path, event: 'bind_failed', detail: err.message })
+			srv.close()
+		})
+		try {
+			if (existsSync(u.path)) unlinkSync(u.path)
+			srv.listen(u.path, () => {
+				try {
+					chmodSync(u.path, u.mode ?? 0o660)
+					if (u.gid !== undefined && statSync(u.path).gid !== u.gid) {
+						onEvent({ client: u.client, path: u.path, event: 'group_mismatch', detail: `expected gid ${u.gid}, socket gid ${statSync(u.path).gid}` })
+						srv.close()
+						return
+					}
+					onEvent({ client: u.client, path: u.path, event: 'listening' })
+				} catch (err) {
+					onEvent({ client: u.client, path: u.path, event: 'bind_failed', detail: errorMessage(err) })
+					srv.close()
+				}
+			})
+		} catch (err) {
+			onEvent({ client: u.client, path: u.path, event: 'bind_failed', detail: errorMessage(err) })
+		}
 		servers.push(srv)
 	}
 	return servers

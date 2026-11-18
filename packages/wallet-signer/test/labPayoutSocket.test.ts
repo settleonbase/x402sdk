@@ -31,6 +31,7 @@ function withdrawData(to = PAYEE, amount = 1n): string {
 	return withdraw.encodeFunctionData('withdrawNative', [to, amount])
 }
 
+let mockGasPrice = '0x989680'
 function answer(method: string, params: unknown[]): unknown {
 	switch (method) {
 		case 'eth_chainId':
@@ -38,6 +39,7 @@ function answer(method: string, params: unknown[]): unknown {
 		case 'eth_blockNumber':
 			return '0x10'
 		case 'eth_gasPrice':
+			return mockGasPrice // default 0.01 Gwei, under the 0.03 Gwei Lab cap
 		case 'eth_maxPriorityFeePerGas':
 			return '0x3b9aca00'
 		case 'eth_getBalance':
@@ -362,8 +364,10 @@ test('shipped Lab config keeps admin.sock owner-only and its runtime dir 0700', 
 	assert.equal(cfg.adminSocketMode, 0o600, 'shipped Lab config must set admin.sock 0600')
 	assert.equal(cfg.adminSocket, '/run/wallet-signer-lab/admin.sock')
 	const tmp = readFileSync(join(root, 'tmpfiles.lab-signer.conf'), 'utf8')
-	assert.match(tmp, /^d \/run\/wallet-signer-lab 0700 walletsigner-lab walletsigner-lab -$/m)
-	assert.match(tmp, /^d \/run\/wallet-signer-lab-mining-pool 2750 walletsigner-lab wslab -$/m)
+	// PM-service scheme: walletsigner owns the setgid 2750 directory, group wslab. The separate-service
+	// user (walletsigner-lab) and the /run/wallet-signer-lab 0700 line are no longer part of this file.
+	assert.match(tmp, /^d \/run\/wallet-signer-lab-mining-pool 2750 walletsigner wslab -$/m)
+	assert.doesNotMatch(tmp, /walletsigner-lab/)
 })
 
 test('main.ts wires the configured admin mode through startAdminFromConfig (MF)', async () => {
@@ -394,3 +398,18 @@ function writeCfg(dir: string, mode: number): string {
 	}))
 	return p
 }
+
+test('lab payment path: a market price above the 0.03 Gwei policy cap is refused before signing', async () => {
+	mockGasPrice = '0x2faf080' // 0.05 Gwei
+	const f = await setup()
+	try {
+		const res = await sendWithdraw(f, f.labSock, withdrawData())
+		assert.equal(res.error?.code, -32006, JSON.stringify(res))
+		assert.match(res.error?.message ?? '', /above cap 30000000/)
+		assert.equal(res.result, undefined)
+		assert.equal(f.signCalls.n, 0, 'refused before signing')
+	} finally {
+		mockGasPrice = '0x989680'
+		await teardown(f)
+	}
+})

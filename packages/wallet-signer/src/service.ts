@@ -1,3 +1,5 @@
+import { runPmGrantAdmin, reconcilePmGrant, PM_GRANT_CHAIN_ID, PM_GRANT_CLIENT, type PmGrantDeps } from './pmGrantAdmin'
+import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { Transaction, TypedDataEncoder, getAddress, isAddress, type TypedDataField } from 'ethers'
 import { DefaultAlerter, type Alerter } from './alerts'
@@ -291,6 +293,49 @@ export class SignerService {
 		const addrs = this.activeAddresses(array)
 		if (addrs.length !== 1) throw denied(`key array ${array} must hold exactly one active address`)
 		return addrs[0]!
+	}
+
+	/** Dependencies for PM grant commands. Admin-socket only. */
+	private pmGrantDeps(): PmGrantDeps {
+		const reg = this.requireUnlocked()
+		const pm = getAddress(reg.pm)
+		if (this.keyring.info(pm)?.role !== 'pm') throw denied('PM key not present in the signer')
+		const provider = this.txm.provider(PM_GRANT_CHAIN_ID)
+		return {
+			cfg: this.config.pmGrantAdmin,
+			statePath: join(this.config.dataDir, 'pm-grant-admin.json'),
+			pmAddress: pm,
+			reader: {
+				call: (to: string, data: string, from?: string) => provider.call({ to, data, from }),
+				getBalance: (a: string) => provider.getBalance(a),
+				feeData: async () => {
+					const f = await provider.getFeeData()
+					if (f.maxFeePerGas === null || f.maxPriorityFeePerGas === null) throw new SignerError(ErrorCode.UPSTREAM, 'fee data unavailable')
+					return { maxFeePerGas: f.maxFeePerGas, maxPriorityFeePerGas: f.maxPriorityFeePerGas }
+				},
+				estimateGas: (tx: { from: string; to: string; data: string }) => provider.estimateGas(tx),
+				receipt: async (hash: string) => {
+					const r = await provider.getTransactionReceipt(hash)
+					return r ? { status: r.status === null ? null : '0x' + r.status.toString(16) } : null
+				},
+			},
+			send: async (req) => {
+				const r = await this.txm.send({ ...req, from: pm })
+				return { hash: r.hash ?? null, from: r.from, status: r.status }
+			},
+			journalHash: (key: string) => this.txm.get({ idempotencyKey: key, client: PM_GRANT_CLIENT })?.hash ?? null,
+			audit: (e: Record<string, unknown>) => this.audit.write(e as never),
+		}
+	}
+
+	/** Admin-socket only. Issues the fixed addAdmin(target) from the PM key. See pmGrantAdmin.ts. */
+	async pmGrantAdmin(target: unknown): Promise<{ target: string; hash: string | null; status: string }> {
+		return runPmGrantAdmin(this.pmGrantDeps(), target)
+	}
+
+	/** Admin-socket only. Reads chain state for a target and never signs. */
+	async pmReconcile(target: unknown): Promise<{ target: string; status: string }> {
+		return reconcilePmGrant(this.pmGrantDeps(), target)
 	}
 
 	async sendTransaction(client: string, p: SendParams): Promise<SendResult> {

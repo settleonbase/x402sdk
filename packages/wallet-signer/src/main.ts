@@ -3,7 +3,7 @@ import './noWebSocket'
 import { mkdirSync } from 'node:fs'
 import { startAdminFromConfig } from './adminServer'
 import { assertDataMount, loadConfig, type Config } from './config'
-import { startRpcServers } from './rpcServer'
+import { makeListenerSink, startRpcServers } from './rpcServer'
 import { SignerService } from './service'
 
 function argValue(flag: string): string | undefined {
@@ -25,7 +25,7 @@ function main(): void {
 	mkdirSync(config.logDir, { recursive: true, mode: 0o700 })
 	const svc = new SignerService(config)
 	const admin = startAdminFromConfig(svc, config)
-	const rpc = startRpcServers(svc, config.rpc)
+	const rpc = startRpcServers(svc, config.rpc, makeListenerSink(svc))
 	svc.start()
 	process.stdout.write(`[wallet-signer] started LOCKED; admin=${config.adminSocket} tls=${config.rpc.tls ? `${config.rpc.tls.host}:${config.rpc.tls.port}` : 'off'} proxied=${describeProxied(config.rpc.proxied)}\n`)
 	const shutdown = (sig: string) => {

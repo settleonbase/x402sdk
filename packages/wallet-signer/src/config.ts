@@ -35,7 +35,8 @@ export type GasKeeperChain = {
 }
 
 export type TlsListen = { host: string; port: number; cert: string; key: string; ca: string }
-export type UnixListen = { path: string; client: string; mode?: number }
+/** gid: numeric group applied to the socket after listen. The process must already be a member of it. */
+export type UnixListen = { path: string; client: string; mode?: number; gid?: number }
 /**
  * Listener behind a local nginx that terminates TLS and checks the client certificate. Only here
  * are the X-WS-* identity headers trusted. Unix socket preferred; TCP only on loopback.
@@ -73,6 +74,8 @@ export type Config = {
 	rpc: { tls?: TlsListen; unix?: UnixListen[]; proxied?: ProxiedListen }
 	chains: Record<string, ChainConfig>
 	gasKeeper: { enabled: boolean; intervalMs: number; chains: Record<string, GasKeeperChain> }
+	/** PM-issued addAdmin for reviewed dedicated wallets. Off by default. */
+	pmGrantAdmin?: { enabled: boolean; targets: string[]; denyAddresses?: string[]; maxGasPriceWei?: string }
 	alerts: { webhookUrl?: string; host?: string }
 	/** Fresh vaults use this scrypt N. 2^18 in production. */
 	scryptN: number
@@ -101,6 +104,7 @@ export function loadConfig(path: string): Config {
 		rpc: raw.rpc ?? {},
 		chains: raw.chains,
 		gasKeeper: normalizeGasKeeper(raw.gasKeeper),
+		pmGrantAdmin: normalizePmGrant(raw.pmGrantAdmin),
 		alerts: raw.alerts ?? {},
 		scryptN: raw.scryptN ?? 2 ** 18,
 		keyWaitMs: raw.keyWaitMs ?? 30_000,
@@ -112,6 +116,27 @@ function normalizeAdminMode(raw: unknown): number {
 	if (raw === undefined) return 0o660
 	if (raw !== 0o600 && raw !== 0o660) throw new Error('config: adminSocketMode must be 384 (0600) or 432 (0660)')
 	return raw
+}
+
+function normalizePmGrant(raw: unknown): { enabled: boolean; targets: string[]; denyAddresses: string[]; maxGasPriceWei?: string } {
+	if (raw === undefined) return { enabled: false, targets: [], denyAddresses: [] }
+	const r = raw as { enabled?: unknown; targets?: unknown; denyAddresses?: unknown; maxGasPriceWei?: unknown }
+	if (r.maxGasPriceWei !== undefined && (typeof r.maxGasPriceWei !== 'string' || !/^\d+$/.test(r.maxGasPriceWei))) throw new Error('config: pmGrantAdmin.maxGasPriceWei must be a wei integer string')
+	if (typeof r.enabled !== 'boolean') throw new Error('config: pmGrantAdmin.enabled must be a boolean')
+	const targets = Array.isArray(r.targets) ? r.targets : []
+	const out: string[] = []
+	for (const [i, t] of targets.entries()) {
+		if (typeof t !== 'string' || !isAddress(t)) throw new Error(`config: pmGrantAdmin.targets[${i}] is not an address`)
+		out.push(getAddress(t))
+	}
+	const denyRaw = Array.isArray(r.denyAddresses) ? r.denyAddresses : []
+	const deny: string[] = []
+	for (const [i, d] of denyRaw.entries()) {
+		if (typeof d !== 'string' || !isAddress(d)) throw new Error(`config: pmGrantAdmin.denyAddresses[${i}] is not an address`)
+		deny.push(getAddress(d))
+	}
+	if (r.enabled === true && deny.length === 0) throw new Error('config: pmGrantAdmin.denyAddresses is required when enabled (fail closed)')
+	return { enabled: r.enabled, targets: out, denyAddresses: deny, ...(typeof r.maxGasPriceWei === 'string' ? { maxGasPriceWei: r.maxGasPriceWei } : {}) }
 }
 
 function normalizeGasKeeper(raw: Config['gasKeeper'] | undefined): Config['gasKeeper'] {

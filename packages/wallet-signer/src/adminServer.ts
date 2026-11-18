@@ -62,6 +62,10 @@ async function run(svc: SignerService, line: string): Promise<unknown> {
 
 async function exec(svc: SignerService, cmd: string, a: Record<string, unknown>): Promise<unknown> {
 	switch (cmd) {
+		case 'pm.grantAdmin':
+			return svc.pmGrantAdmin(a.target)
+		case 'pm.reconcile':
+			return svc.pmReconcile(a.target)
 		case 'status':
 			return svc.status()
 		case 'unlock': {
