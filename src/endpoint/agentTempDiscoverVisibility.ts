@@ -190,10 +190,26 @@ export type FailClosedOmitOptions = {
 }
 
 /**
+ * 读取故障信号：存在既非链上确认、也非有效期内已验证可见的 owner 时抛出。
+ * 调用方（cardsByCategory 路由）据此返回 503，不得把它当作"没有数据"。
+ */
+export class AgentTempReadUnavailableError extends Error {
+	readonly code = 'AGENT_TEMP_READ_UNAVAILABLE'
+	readonly unknownOwners: number
+	constructor(unknownOwners: number) {
+		super(`agent temp registry unavailable for ${unknownOwners} owner(s)`)
+		this.name = 'AgentTempReadUnavailableError'
+		this.unknownOwners = unknownOwners
+	}
+}
+
+/**
  * GET /api/cardsByCategory 使用（fail-closed）。每张卡的判定：
  * - 链上读到 visible：展示，并记录到已验证可见缓存（有效期 AGENT_TEMP_VISIBLE_VERDICT_TTL_MS）；
  * - 链上读到 hidden：不展示，并删除该 owner 的已验证缓存；
- * - unknown（整批读取失败、单个子调用失败、owner 地址无效）：仅当该 owner 在有效期内被本进程读为 visible 时展示，否则不展示。
+ * - unknown（整批读取失败、单个子调用失败、无法解码）：若该 owner 在有效期内被本进程读为 visible，则展示；
+ *   否则不展示，并计为读取故障，整次判定抛出 AgentTempReadUnavailableError（约定见待审单第 16 节）。
+ * - owner 地址无效：不展示，不计为读取故障（数据问题，不是链上读取失败）。
  * 读取失败本身不构成"已确认可展示"。
  */
 export async function omitCardsOwnedByUnhandedAgentTempFailClosed<T extends { cardOwner?: string | null }>(
@@ -208,6 +224,7 @@ export async function omitCardsOwnedByUnhandedAgentTempFailClosed<T extends { ca
 	}
 	const verdicts = await readAgentTempVerdicts(cards.map((card) => String(card.cardOwner ?? '')))
 	const at = now()
+	const uncovered = new Set<string>()
 	const decide = (key: string): boolean => {
 		const verdict: AgentTempVerdict = verdicts?.get(key) ?? 'unknown'
 		if (verdict === 'visible') {
@@ -219,11 +236,15 @@ export async function omitCardsOwnedByUnhandedAgentTempFailClosed<T extends { ca
 			return false
 		}
 		const until = verifiedVisibleUntil.get(key)
-		return until !== undefined && at < until
+		if (until !== undefined && at < until) return true
+		uncovered.add(key)
+		return false
 	}
-	return cards.filter((card) => {
+	const kept = cards.filter((card) => {
 		const key = keyOf(card)
 		if (!key) return false
 		return decide(key)
 	})
+	if (uncovered.size > 0) throw new AgentTempReadUnavailableError(uncovered.size)
+	return kept
 }

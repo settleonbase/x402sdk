@@ -43,6 +43,7 @@ const { filterCardsByCategoryGroupsForDiscover } = await import('./cardsByCatego
 const {
 	omitCardsOwnedByUnhandedAgentTemp,
 	omitCardsOwnedByUnhandedAgentTempFailClosed,
+	AgentTempReadUnavailableError,
 	clearAgentTempVisibleVerdictCache,
 	AGENT_TEMP_VISIBLE_VERDICT_TTL_MS,
 	AGENT_TEMP_READ_CONCURRENCY,
@@ -237,8 +238,7 @@ test('one failing batch makes the whole read unknown: fail-closed hides every ca
 	const owners = Array.from({ length: 200 }, (_, i) => '0x' + String(i + 1).padStart(40, '0'))
 	rpc.failCalls.add(2)
 	const cards = owners.map((o, i) => card('0x' + String(i + 1).padStart(40, '0'), NEW, o))
-	const out = await omitCardsOwnedByUnhandedAgentTempFailClosed(cards)
-	assert.equal(out.length, 0)
+	await assert.rejects(omitCardsOwnedByUnhandedAgentTempFailClosed(cards), AgentTempReadUnavailableError)
 })
 
 test('empty input returns empty output', async () => {
@@ -249,9 +249,8 @@ test('empty input returns empty output', async () => {
 test('fail-closed: registry read fails and nothing was verified -> every card is hidden', async () => {
 	rpc.mode = 'fail'
 	const cards = [card(NORMAL, NEW, TEMP_OWNER), card(NORMAL_2, NEW, OWNER)]
-	const out = await omitCardsOwnedByUnhandedAgentTempFailClosed(cards)
+	await assert.rejects(omitCardsOwnedByUnhandedAgentTempFailClosed(cards), AgentTempReadUnavailableError)
 	assert.equal(rpc.calls > 0, true, 'the registry read path must actually run')
-	assert.deepEqual(out, [])
 })
 
 test('fail-closed: an owner verified visible stays visible within the TTL when a later read fails, then expires', async () => {
@@ -263,7 +262,7 @@ test('fail-closed: an owner verified visible stays visible within the TTL when a
 	clock += AGENT_TEMP_VISIBLE_VERDICT_TTL_MS - 1
 	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), cards, 'within TTL: shown')
 	clock += 2
-	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), [], 'after TTL: unknown, hidden')
+	await assert.rejects(omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), AgentTempReadUnavailableError, 'after TTL: unknown and uncovered -> read unavailable, never shown')
 })
 
 test('fail-closed: a hidden verdict clears an earlier visible verification', async () => {
@@ -275,15 +274,17 @@ test('fail-closed: a hidden verdict clears an earlier visible verification', asy
 	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), [])
 	rpc.hiddenOwners.clear()
 	rpc.mode = 'fail'
-	assert.deepEqual(await omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), [], 'hidden verdict dropped the cache')
+	await assert.rejects(omitCardsOwnedByUnhandedAgentTempFailClosed(cards, { now }), AgentTempReadUnavailableError, 'hidden verdict dropped the cache')
 })
 
-test('fail-closed: a single owner whose state call fails is unknown and hidden; other owners are decided normally', async () => {
+test('fail-closed: a single owner whose state call fails is unknown -> read unavailable, the unknown card is never shown', async () => {
 	rpc.failAgentOf.add(TEMP_OWNER.toLowerCase())
 	const cards = [card(NORMAL, NEW, TEMP_OWNER), card(NORMAL_2, NEW, OWNER)]
-	const out = await omitCardsOwnedByUnhandedAgentTempFailClosed(cards)
+	await assert.rejects(
+		omitCardsOwnedByUnhandedAgentTempFailClosed(cards),
+		(e: any) => e instanceof AgentTempReadUnavailableError && e.unknownOwners === 1,
+	)
 	assert.equal(rpc.calls > 0, true)
-	assert.deepEqual(out.map((c) => c.cardAddress), [NORMAL_2])
 })
 
 test('fail-closed: a card whose owner is not a valid address is hidden', async () => {
@@ -291,42 +292,41 @@ test('fail-closed: a card whose owner is not a valid address is hidden', async (
 	assert.deepEqual(out, [])
 })
 
-test('fail-closed through the Discover filter: failed read removes the card and the empty group', async () => {
+test('fail-closed through the Discover filter: a failed read surfaces as read unavailable, not as an empty result', async () => {
 	rpc.mode = 'fail'
 	const groups = [{ categoryId: 'food', items: [card(NORMAL, NEW, OWNER)] }]
-	const out = await filterCardsByCategoryGroupsForDiscover(groups, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed })
-	assert.deepEqual(out, [])
+	await assert.rejects(
+		filterCardsByCategoryGroupsForDiscover(groups, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed }),
+		AgentTempReadUnavailableError,
+	)
 })
 
 // Master 接线静态守卫（beamioMaster.ts 依赖链重，无法在单元测试中加载）。
 // 只检查源码文本：过滤调用使用 fail-closed omit、缓存写入的是过滤后的 groups、写入前核对 generation、响应使用过滤后的 groups。
 // 这不能替代运行时测试。
-test('Master /cardsByCategory wiring: fail-closed omit, filtered result cached under generation guard', () => {
-	const src = readFileSync(new URL('./beamioMaster.ts', import.meta.url), 'utf8')
-	assert.match(src, /import \{ omitCardsOwnedByUnhandedAgentTemp, omitCardsOwnedByUnhandedAgentTempFailClosed \} from '\.\/agentTempDiscoverVisibility'/)
-	assert.match(src, /import \{ filterCardsByCategoryGroupsForDiscover \} from '\.\/cardsByCategoryDiscover'/)
-	const srv = readFileSync(new URL('./beamioServer.ts', import.meta.url), 'utf8')
-	assert.match(srv, /router\.get\('\/cardsByCategory', createCardsByCategoryHandler\(\{ masterPort: masterServerPort, [^\n]*requiredResponseHeader: \{ name: CARDS_BY_CATEGORY_FILTER_HEADER, value: CARDS_BY_CATEGORY_FILTER_VERSION \} \}\)\)/)
-	assert.doesNotMatch(src, /singleFlight/i, 'the minimal candidate carries no single-flight')
-	const start = src.indexOf("router.get('/cardsByCategory'")
-	assert.ok(start > 0, 'route not found')
-	const body = src.slice(start, src.indexOf('\n\t\t})', start))
-	const genAt = body.indexOf('const gen = latestCardsCacheGeneration')
-	assert.ok(genAt > 0, 'generation must be captured in the route')
-	assert.ok(genAt < body.indexOf('const rawGroups = await getLatestCardsGroupedByCategory('), 'generation must be captured before the computation starts')
-	assert.match(body, /const rawGroups = await getLatestCardsGroupedByCategory\(\{ scanLimit, limitPerCategory \}\)/)
-	assert.match(
-		body,
-		/const groups = await filterCardsByCategoryGroupsForDiscover\(rawGroups, \{ omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed \}\)/,
-	)
-	assert.match(
-		body,
-		/if \(gen === latestCardsCacheGeneration\) \{\s*cardsByCategoryCache\.set\(cacheKey, \{ groups, expiry: Date\.now\(\) \+ QUERY_CACHE_TTL_MS \}\)\s*\}/,
-	)
-	assert.match(body, /res\.status\(200\)\.json\(\{ groups \}\)/)
-	// 过滤标记：缓存命中与计算两条 200 路径都必须带标记，Cluster 据此拒绝未过滤的旧版 Master。
-	assert.equal(body.split('res.setHeader(CARDS_BY_CATEGORY_FILTER_HEADER, CARDS_BY_CATEGORY_FILTER_VERSION)').length - 1, 2, 'both 200 paths set the filter marker')
-	const filterAt = body.indexOf('filterCardsByCategoryGroupsForDiscover(rawGroups')
-	assert.ok(filterAt < body.indexOf('cardsByCategoryCache.set'), 'filter must run before the cache write')
-	assert.ok(filterAt < body.indexOf('res.status(200).json({ groups })'), 'filter must run before the response')
+test('production wiring: Cluster and Master call the registration functions; the route bodies and guards live in importable modules', () => {
+	const master = readFileSync(new URL('./beamioMaster.ts', import.meta.url), 'utf8')
+	const server = readFileSync(new URL('./beamioServer.ts', import.meta.url), 'utf8')
+	const routes = readFileSync(new URL('./cardsByCategoryRoutes.ts', import.meta.url), 'utf8')
+	const db = readFileSync(new URL('../db.ts', import.meta.url), 'utf8')
+	const agent = readFileSync(new URL('./agentTempDiscoverVisibility.ts', import.meta.url), 'utf8')
+	// 生产文件只调用注册函数
+	assert.match(master, /registerCardsByCategoryMasterRoute\(router, \{/)
+	assert.match(master, /computeRawGroups: \(\{ scanLimit, limitPerCategory \}\) => getLatestCardsGroupedByCategory\(\{ scanLimit, limitPerCategory \}\)/)
+	assert.match(master, /omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed/)
+	assert.match(server, /registerCardsByCategoryClusterRoute\(router, \{ masterPort: masterServerPort,/)
+	assert.doesNotMatch(master, /singleFlight/i)
+	// Master 路由体：失败 → 503；缓存只在成功后写入，且受 generation 守卫
+	const mRoute = routes.slice(routes.indexOf('export const registerCardsByCategoryMasterRoute'))
+	assert.match(mRoute, /const groups = await deps\.filter\(rawGroups\)/)
+	assert.match(mRoute, /if \(gen === deps\.getGeneration\(\)\) \{\s*deps\.cache\.set\(cacheKey, \{ groups, expiry: Date\.now\(\) \+ deps\.ttlMs \}\)\s*\}/)
+	assert.match(mRoute, /\} catch \(e: any\) \{\s*deps\.log\('\[cardsByCategory\] error:', e\?\.message \?\? e\)\s*res\.status\(503\)\.json\(\{ error: e\?\.message \?\? 'cardsByCategory failed' \}\)/)
+	// Cluster 路由：要求过滤标记（非 200 原样透传由 proxy 保证）
+	assert.match(routes, /requiredResponseHeader: \{ name: CARDS_BY_CATEGORY_FILTER_HEADER, value: CARDS_BY_CATEGORY_FILTER_VERSION \}/)
+	// 数据库失败必须上抛，不得返回 []（可信空）
+	const dbFn = db.slice(db.indexOf('export const getRecentCategorizedBeamioCards'), db.indexOf('export const getLatestCardsGroupedByCategory'))
+	assert.match(dbFn, /\[getRecentCategorizedBeamioCards\] failed[^\n]*\n\t\tthrow e\n/)
+	assert.doesNotMatch(dbFn, /return \[\]\s*\n\t\} finally/)
+	// 读取故障信号
+	assert.match(agent, /if \(uncovered\.size > 0\) throw new AgentTempReadUnavailableError\(uncovered\.size\)/)
 })

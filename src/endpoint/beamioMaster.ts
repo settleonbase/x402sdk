@@ -69,7 +69,7 @@ import {
 import { filterCouponSeriesRowsByDiscoverMerchantPolicy, isCouponCardDiscoverVisible } from './couponDiscoverFilter'
 import { omitCardsOwnedByUnhandedAgentTemp, omitCardsOwnedByUnhandedAgentTempFailClosed } from './agentTempDiscoverVisibility'
 import { filterCardsByCategoryGroupsForDiscover } from './cardsByCategoryDiscover'
-import { CARDS_BY_CATEGORY_FILTER_HEADER, CARDS_BY_CATEGORY_FILTER_VERSION } from './cardsByCategoryProxy'
+import { registerCardsByCategoryMasterRoute } from './cardsByCategoryRoutes'
 import {
 	kickReferralRegistryRedeemRelay,
 	referralRegistryRedeemPool,
@@ -941,30 +941,14 @@ const routing = ( router: Router ) => {
 		})
 
 		/** 按 shareTokenMetadata.categories 聚合已登记发卡（Cluster GET /api/cardsByCategory 透传至此）。
-		 *  返回前套用 Discover 过滤（exclude + cutover + agent temp，agent temp 为 fail-closed），缓存的是过滤后的结果。
-		 *  缓存写入前核对 generation 未变，避免缓存失效期间的旧计算覆盖新结果。 */
-		router.get('/cardsByCategory', async (_req, res) => {
-			const scanLimit = Math.min(parseInt(String(_req.query.scanLimit || 800), 10) || 800, 3000)
-			const limitPerCategory = Math.min(parseInt(String(_req.query.limitPerCategory || 80), 10) || 80, 500)
-			const cacheKey = `scan:${scanLimit}:per:${limitPerCategory}`
-			const cached = cardsByCategoryCache.get(cacheKey)
-			if (cached && Date.now() < cached.expiry) {
-				res.setHeader(CARDS_BY_CATEGORY_FILTER_HEADER, CARDS_BY_CATEGORY_FILTER_VERSION)
-				return res.status(200).json({ groups: cached.groups })
-			}
-			try {
-				const gen = latestCardsCacheGeneration
-				const rawGroups = await getLatestCardsGroupedByCategory({ scanLimit, limitPerCategory })
-				const groups = await filterCardsByCategoryGroupsForDiscover(rawGroups, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed })
-				if (gen === latestCardsCacheGeneration) {
-					cardsByCategoryCache.set(cacheKey, { groups, expiry: Date.now() + QUERY_CACHE_TTL_MS })
-				}
-				res.setHeader(CARDS_BY_CATEGORY_FILTER_HEADER, CARDS_BY_CATEGORY_FILTER_VERSION)
-				res.status(200).json({ groups })
-			} catch (e: any) {
-				logger(Colors.red('[cardsByCategory] error:'), e?.message ?? e)
-				res.status(503).json({ error: e?.message ?? 'cardsByCategory failed' })
-			}
+		 *  路由体见 cardsByCategoryRoutes.ts：过滤后返回（exclude + cutover + agent temp fail-closed），缓存的是过滤后的结果，写缓存前核对 generation。 */
+		registerCardsByCategoryMasterRoute(router, {
+			computeRawGroups: ({ scanLimit, limitPerCategory }) => getLatestCardsGroupedByCategory({ scanLimit, limitPerCategory }),
+			filter: (raw) => filterCardsByCategoryGroupsForDiscover(raw as any, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed }),
+			cache: cardsByCategoryCache,
+			ttlMs: QUERY_CACHE_TTL_MS,
+			getGeneration: () => latestCardsCacheGeneration,
+			log: (line, e) => logger(Colors.red(line), e),
 		})
 
 		/** GET /api/myCards?owner=0x... 或 ?owners=0x1,0x2 - 客户端 RPC 失败时可由此 API 获取。30 秒缓存。

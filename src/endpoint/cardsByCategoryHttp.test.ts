@@ -1,5 +1,5 @@
-// 本地 HTTP 联测（合成数据 + 桩）：真实的 Cluster 透传处理器 → Master 替身（真实的 Discover 过滤与
-// fail-closed agent temp 判定）→ 桩 RPC。
+// 本地 HTTP 联测（合成数据 + 桩）：生产文件使用的同一注册函数（cardsByCategoryRoutes.ts）→ 真实 express Router；
+// 桩：DB 聚合（合成数据）与链上 RPC。不导入 beamioServer.ts / beamioMaster.ts。
 // 不启动 beamioServer.ts / beamioMaster.ts（依赖链过重），Master 替身复刻候选路由的处理顺序，因此覆盖的是 HTTP 行为与过滤逻辑，不是整进程。
 import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
@@ -41,7 +41,7 @@ registerHooks({
 })
 
 const { ethers } = await import('ethers')
-const { createCardsByCategoryHandler, CARDS_BY_CATEGORY_FILTER_HEADER, CARDS_BY_CATEGORY_FILTER_VERSION } = await import('./cardsByCategoryProxy.ts')
+const { registerCardsByCategoryClusterRoute, registerCardsByCategoryMasterRoute } = await import('./cardsByCategoryRoutes.ts')
 const { filterCardsByCategoryGroupsForDiscover } = await import('./cardsByCategoryDiscover.ts')
 const { omitCardsOwnedByUnhandedAgentTempFailClosed, clearAgentTempVisibleVerdictCache } = await import('./agentTempDiscoverVisibility.ts')
 
@@ -57,6 +57,7 @@ const AGENT_OF_TEMP_SELECTOR = REGISTRY_IFACE.getFunction('agentOfTemp')!.select
 const rpc = {
 	mode: 'answer' as 'answer' | 'fail',
 	hiddenOwners: new Set<string>(),
+	failAgentOf: new Set<string>(),
 	calls: 0,
 }
 globalThis.__cardsByCategoryHttpRpc = {
@@ -67,6 +68,7 @@ globalThis.__cardsByCategoryHttpRpc = {
 		const results = calls.map((c: { callData: string }) => {
 			if (c.callData.slice(0, 10) === AGENT_OF_TEMP_SELECTOR) {
 				const owner = REGISTRY_IFACE.decodeFunctionData('agentOfTemp', c.callData)[0] as string
+				if (rpc.failAgentOf.has(owner.toLowerCase())) return [false, '0x']
 				const agent = rpc.hiddenOwners.has(owner.toLowerCase()) ? '0x0000000000000000000000000000000000000001' : ethers.ZeroAddress
 				return [true, REGISTRY_IFACE.encodeFunctionResult('agentOfTemp', [agent])]
 			}
@@ -118,39 +120,47 @@ const close = (server: Server): Promise<void> =>
 		server.close(() => resolve())
 	})
 
-/** 搭建一套 Cluster 替身 + Master 替身。Master 替身复用真实 resolver、过滤与 fail-closed 判定。 */
-const startStack = async (opts: { masterDelayMs?: number; clusterTimeoutMs: number; raw?: () => unknown[]; filterMarker?: boolean }) => {
+/**
+ * 搭建真实注册路径的 Cluster 与 Master（express Router，调用生产文件使用的同一注册函数）。
+ * 桩：DB 聚合（computeRawGroups，合成数据）、链上 RPC（globalThis.__cardsByCategoryHttpRpc）。
+ * filterMarker: false 时，Master 使用未过滤的旧版路由（caaa6d1 的行为：200、无标记，直接返回原始聚合）。
+ */
+const startStack = async (opts: { masterDelayMs?: number; clusterTimeoutMs: number; raw?: () => unknown[]; filterMarker?: boolean; dbFails?: boolean }) => {
 	const masterReceived: string[] = []
 	const raw = opts.raw ?? syntheticRawGroups
-	// Master 替身：与候选 beamioMaster 路由的处理顺序相同（聚合 → Discover 过滤 → 写缓存），缓存为本地 Map。
 	const cache = new Map<string, { groups: unknown[]; expiry: number }>()
-	const compute = async (): Promise<unknown[]> => {
-		if (opts.masterDelayMs) await sleep(opts.masterDelayMs)
-		return filterCardsByCategoryGroupsForDiscover(raw() as any, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed })
-	}
 	const master = express()
-	master.get('/api/cardsByCategory', async (req, res) => {
+	const masterApi = express.Router()
+	master.use((req, _res, next) => {
 		masterReceived.push(req.url.split('?')[1] ?? '')
-		const scanLimit = Math.min(parseInt(String(req.query.scanLimit || 800), 10) || 800, 3000)
-		const limitPerCategory = Math.min(parseInt(String(req.query.limitPerCategory || 80), 10) || 80, 500)
-		const cacheKey = `scan:${scanLimit}:per:${limitPerCategory}`
-		const cached = cache.get(cacheKey)
-		if (cached && Date.now() < cached.expiry) {
-			if (opts.filterMarker !== false) res.setHeader(CARDS_BY_CATEGORY_FILTER_HEADER, CARDS_BY_CATEGORY_FILTER_VERSION)
-			return res.status(200).json({ groups: cached.groups })
-		}
-		try {
-			const groups = await compute()
-			cache.set(cacheKey, { groups, expiry: Date.now() + 30_000 })
-			if (opts.filterMarker !== false) res.setHeader(CARDS_BY_CATEGORY_FILTER_HEADER, CARDS_BY_CATEGORY_FILTER_VERSION)
-			res.status(200).json({ groups })
-		} catch (e: any) {
-			res.status(503).json({ error: e?.message ?? 'cardsByCategory failed' })
-		}
+		next()
 	})
+	master.use('/api', masterApi)
+	if (opts.filterMarker === false) {
+		// 旧版（未过滤）Master：与 caaa6d1 路由等价的行为，无过滤标记。
+		masterApi.get('/cardsByCategory', async (_req, res) => {
+			if (opts.masterDelayMs) await sleep(opts.masterDelayMs)
+			res.status(200).json({ groups: raw() })
+		})
+	} else {
+		registerCardsByCategoryMasterRoute(masterApi, {
+			computeRawGroups: async () => {
+				if (opts.masterDelayMs) await sleep(opts.masterDelayMs)
+				if (opts.dbFails) throw new Error('database unavailable (test stub)')
+				return raw()
+			},
+			filter: (rawGroups) => filterCardsByCategoryGroupsForDiscover(rawGroups as any, { omitUnhandedAgentTemp: omitCardsOwnedByUnhandedAgentTempFailClosed }),
+			cache,
+			ttlMs: 30_000,
+			getGeneration: () => 0,
+			log: () => {},
+		})
+	}
 	const m = await listen(master)
 	const cluster = express()
-	cluster.get('/api/cardsByCategory', createCardsByCategoryHandler({ masterPort: m.port, timeoutMs: opts.clusterTimeoutMs, requiredResponseHeader: { name: CARDS_BY_CATEGORY_FILTER_HEADER, value: CARDS_BY_CATEGORY_FILTER_VERSION } }))
+	const clusterApi = express.Router()
+	registerCardsByCategoryClusterRoute(clusterApi, { masterPort: m.port, timeoutMs: opts.clusterTimeoutMs })
+	cluster.use('/api', clusterApi)
 	const c = await listen(cluster)
 	return {
 		clusterPort: c.port,
@@ -179,6 +189,7 @@ const ownersOf = (groups: any[]) => groups.map((g) => [g.categoryId, g.items.map
 test.beforeEach(() => {
 	rpc.mode = 'answer'
 	rpc.hiddenOwners.clear()
+	rpc.failAgentOf.clear()
 	rpc.calls = 0
 	clearAgentTempVisibleVerdictCache()
 })
@@ -219,13 +230,53 @@ test('a valid query with no qualifying cards returns 200 with an empty groups ar
 	}
 })
 
-test('RPC failure is fail-closed end to end: no verified owner means no card is shown', async () => {
+test('RPC failure is a read-unavailable signal (503), never a trusted empty result, and carries no card data', async () => {
 	rpc.mode = 'fail'
 	const s = await startStack({ clusterTimeoutMs: 5_000 })
 	try {
 		const r = await getJson(s.clusterPort, '/api/cardsByCategory?scanLimit=1200&limitPerCategory=120')
-		assert.equal(r.status, 200)
-		assert.deepEqual(r.body, { groups: [] })
+		assert.equal(r.status, 503)
+		assert.equal(JSON.stringify(r.body).includes(NORMAL), false, 'no card reaches the client')
+		assert.equal(JSON.stringify(r.body).includes('"groups"'), false, 'no groups key on a failure')
+	} finally {
+		await s.stop()
+	}
+})
+
+test('a partial read (one owner unknown, not covered by the verified cache) is a failure signal: 503, not 200', async () => {
+	rpc.failAgentOf.add(TEMP_OWNER.toLowerCase())
+	const s = await startStack({ clusterTimeoutMs: 5_000 })
+	try {
+		const r = await getJson(s.clusterPort, '/api/cardsByCategory?scanLimit=1200&limitPerCategory=120')
+		assert.equal(r.status, 503)
+		assert.equal(JSON.stringify(r.body).includes(NORMAL), false)
+	} finally {
+		await s.stop()
+	}
+})
+
+test('a database failure in the aggregation is a failure signal (503), never a trusted empty result', async () => {
+	const s = await startStack({ clusterTimeoutMs: 5_000, dbFails: true })
+	try {
+		const r = await getJson(s.clusterPort, '/api/cardsByCategory?scanLimit=1200&limitPerCategory=120')
+		assert.equal(r.status, 503)
+		assert.equal(JSON.stringify(r.body).includes('"groups"'), false)
+	} finally {
+		await s.stop()
+	}
+})
+
+test('a failure is not cached: after a failed read, the next request recomputes and returns the real result', async () => {
+	rpc.hiddenOwners.add(TEMP_OWNER.toLowerCase())
+	rpc.mode = 'fail'
+	const s = await startStack({ clusterTimeoutMs: 5_000 })
+	try {
+		const first = await getJson(s.clusterPort, '/api/cardsByCategory?scanLimit=1200&limitPerCategory=120')
+		assert.equal(first.status, 503)
+		rpc.mode = 'answer'
+		const second = await getJson(s.clusterPort, '/api/cardsByCategory?scanLimit=1200&limitPerCategory=120')
+		assert.equal(second.status, 200)
+		assert.deepEqual(ownersOf((second.body as any).groups), [['food', [NORMAL]]])
 	} finally {
 		await s.stop()
 	}
@@ -243,7 +294,9 @@ test('a Master slower than the Cluster timeout yields 504 at the Cluster', async
 
 test('an unreachable Master yields 502 at the Cluster', async () => {
 	const app = express()
-	app.get('/api/cardsByCategory', createCardsByCategoryHandler({ masterPort: 1, timeoutMs: 1_000 }))
+	const api = express.Router()
+	registerCardsByCategoryClusterRoute(api, { masterPort: 1, timeoutMs: 1_000 })
+	app.use('/api', api)
 	const c = await listen(app)
 	try {
 		const r = await getJson(c.port, '/api/cardsByCategory?scanLimit=1&limitPerCategory=1')

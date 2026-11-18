@@ -6622,8 +6622,9 @@ export const getRecentCategorizedBeamioCards = async (limit = 800): Promise<Beam
 		)
 		return (rows as any[]).map(mapBeamioCardSqlRow)
 	} catch (e: any) {
+		// 失败必须向上传：返回 [] 会被当作"没有数据"（可信空），见待审单第 16 节。
 		logger(Colors.yellow(`[getRecentCategorizedBeamioCards] failed: ${e?.message ?? e}`))
-		return []
+		throw e
 	} finally {
 		await db.end().catch(() => {})
 	}

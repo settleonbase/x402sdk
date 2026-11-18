@@ -11,7 +11,8 @@ import { isPaymentIntakePaused, paymentIntakePausedBody } from '../paymentIntake
 import type { RequestOptions } from 'node:http'
 import {request} from 'node:http'
 import { inspect } from 'node:util'
-import { CARDS_BY_CATEGORY_FILTER_HEADER, CARDS_BY_CATEGORY_FILTER_VERSION, createCardsByCategoryHandler, resolveCardsByCategoryUpstreamTimeoutMs } from './cardsByCategoryProxy'
+import { resolveCardsByCategoryUpstreamTimeoutMs } from './cardsByCategoryProxy'
+import { registerCardsByCategoryClusterRoute } from './cardsByCategoryRoutes'
 import Colors from 'colors/safe'
 import { ethers } from "ethers"
 import { normalizeEip3009WalletSignature } from '../eip3009SignatureNormalize'
@@ -7867,7 +7868,7 @@ const routing = ( router: Router ) => {
 	})
 
 	/** GET /api/cardsByCategory：透传 Master（同状态码、同响应体；仅原样转发 scanLimit／limitPerCategory；Discover 过滤在 Master 侧）。 */
-	router.get('/cardsByCategory', createCardsByCategoryHandler({ masterPort: masterServerPort, timeoutMs: resolveCardsByCategoryUpstreamTimeoutMs(process.env.CARDS_BY_CATEGORY_UPSTREAM_TIMEOUT_MS), log: (line) => logger(Colors.red(line)), requiredResponseHeader: { name: CARDS_BY_CATEGORY_FILTER_HEADER, value: CARDS_BY_CATEGORY_FILTER_VERSION } }))
+	registerCardsByCategoryClusterRoute(router, { masterPort: masterServerPort, timeoutMs: resolveCardsByCategoryUpstreamTimeoutMs(process.env.CARDS_BY_CATEGORY_UPSTREAM_TIMEOUT_MS), log: (line) => logger(Colors.red(line)) })
 
 	/** GET /api/searchHelp?card=0x... - 返回该卡已定义的全部 issued NFT 列表。30 秒缓存 */
 	router.get('/searchHelp', async (req, res) => {
