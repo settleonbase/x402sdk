@@ -9,27 +9,31 @@
  */
 import { ethers } from 'ethers'
 
-export type ChargeBindingState = 'bound' | 'not_bound' | 'unavailable'
 
 export type ChargeFeeCardVerdict =
 	| { ok: true; cardAddress: string }
 	| { ok: false; status: 400 | 503; code: 'pos_card_not_bound' | 'pos_card_binding_unavailable' | 'pos_card_invalid'; error: string }
 
+/**
+ * lookupBinding：返回 true（存在绑定行）或 false（确定无绑定行）；抛出异常 => 503（不可用，与无绑定区分）。
+ */
 export const verifyChargeFeeCardBinding = async (params: {
 	merchantCardAddress: string | null | undefined
-	lookupBinding: (cardAddress: string) => Promise<ChargeBindingState>
+	lookupBinding: (cardAddress: string) => Promise<boolean>
 }): Promise<ChargeFeeCardVerdict> => {
 	const raw = typeof params.merchantCardAddress === 'string' ? params.merchantCardAddress.trim() : ''
 	if (!raw || !ethers.isAddress(raw)) {
 		return { ok: false, status: 400, code: 'pos_card_invalid', error: 'merchantCardAddress is required and must be a valid address' }
 	}
 	const cardAddress = ethers.getAddress(raw)
-	const state = await params.lookupBinding(cardAddress)
-	if (state === 'bound') return { ok: true, cardAddress }
-	if (state === 'not_bound') {
-		return { ok: false, status: 400, code: 'pos_card_not_bound', error: 'merchantCardAddress is not bound to a terminal' }
+	let bound: boolean
+	try {
+		bound = await params.lookupBinding(cardAddress)
+	} catch {
+		return { ok: false, status: 503, code: 'pos_card_binding_unavailable', error: 'terminal binding is temporarily unavailable' }
 	}
-	return { ok: false, status: 503, code: 'pos_card_binding_unavailable', error: 'terminal binding is temporarily unavailable' }
+	if (bound) return { ok: true, cardAddress }
+	return { ok: false, status: 400, code: 'pos_card_not_bound', error: 'merchantCardAddress is not bound to a terminal' }
 }
 
 export type ChargePayeeVerdict =

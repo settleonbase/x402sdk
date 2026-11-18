@@ -1,4 +1,4 @@
-// 运行时测试：真实 db.ts 的 lookupActivePosTerminalBindingByCard（SQL 由 pg 桩按语句应答）。
+// 运行时测试：真实 db.ts 的 readActivePosTerminalBindingForCharge（SQL 由 pg 桩按语句应答）。
 // 只加载 db.ts 与其依赖桩；不加载 beamioServer / beamioMaster / MemberCard；不触达 HOME、真实数据库或网络。
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
@@ -29,7 +29,8 @@ const STUB_BY_SPECIFIER: Record<string, string> = {
 		'  constructor(_opts) {}',
 		'  async connect() {}',
 		'  async query(sql, _params) {',
-		"    if (String(sql).includes('lower(card_address)')) {",
+		"    if (globalThis.__bindingSpy) globalThis.__bindingSpy(sql, _params)",
+		"    if (String(sql).toLowerCase().includes('lower(trim(card_address))')) {",
 		"      if (globalThis.__bindingMode === 'error') throw new Error('database unavailable (test stub)')",
 		"      return { rows: globalThis.__bindingMode === 'bound' ? [{ '?column?': 1 }] : [] }",
 		'    }',
@@ -69,22 +70,30 @@ registerHooks({
 const db = await import('../db.ts')
 const CARD = '0x0000000000000000000000000000000000000c01'
 
-test('binding lookup: an active row with tx_hash is bound', async () => {
+test('charge binding read: an active row with tx_hash is a binding', async () => {
 	globalThis.__bindingMode = 'bound'
-	assert.equal(await db.lookupActivePosTerminalBindingByCard(CARD), 'bound')
+	assert.equal(await db.readActivePosTerminalBindingForCharge(CARD), true)
 })
 
-test('binding lookup: no active row is not_bound (not an error)', async () => {
+test('charge binding read: no matching row is false (a definite absence, not an error)', async () => {
 	globalThis.__bindingMode = 'none'
-	assert.equal(await db.lookupActivePosTerminalBindingByCard(CARD), 'not_bound')
+	assert.equal(await db.readActivePosTerminalBindingForCharge(CARD), false)
 })
 
-test('binding lookup: a database failure is unavailable, never not_bound', async () => {
+test('charge binding read: a database failure throws, it is never reported as absence', async () => {
 	globalThis.__bindingMode = 'error'
-	assert.equal(await db.lookupActivePosTerminalBindingByCard(CARD), 'unavailable')
+	await assert.rejects(db.readActivePosTerminalBindingForCharge(CARD), /database unavailable/)
 })
 
-test('binding lookup: an invalid card address is not_bound without touching the database', async () => {
-	globalThis.__bindingMode = 'error'
-	assert.equal(await db.lookupActivePosTerminalBindingByCard('not-an-address'), 'not_bound')
+test('charge binding read: the query filters is_active, non-null tx_hash, and LOWER(TRIM(card_address))', async () => {
+	globalThis.__bindingMode = 'none'
+	const captured = []
+	globalThis.__bindingSpy = (sql, params) => captured.push({ sql: String(sql), params })
+	await db.readActivePosTerminalBindingForCharge(CARD)
+	const q = captured.find((c) => /LOWER\(TRIM\(card_address\)\)\s*=\s*\$1/.test(c.sql))
+	assert.ok(q, 'the binding query ran')
+	assert.match(q.sql, /is_active\s*=\s*true/)
+	assert.match(q.sql, /tx_hash IS NOT NULL/)
+	assert.deepEqual(q.params, [CARD.toLowerCase()])
+	globalThis.__bindingSpy = undefined
 })

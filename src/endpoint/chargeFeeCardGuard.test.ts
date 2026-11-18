@@ -14,7 +14,7 @@ test('binding: a bound card is accepted and returned checksummed; the lookup is 
 		merchantCardAddress: CARD.toLowerCase(),
 		lookupBinding: async (c) => {
 			seen.push(c)
-			return 'bound'
+			return true
 		},
 	})
 	assert.equal(v.ok, true)
@@ -23,14 +23,19 @@ test('binding: a bound card is accepted and returned checksummed; the lookup is 
 })
 
 test('binding: a card with no active binding is a 4xx pos_card_not_bound, never a fallback card', async () => {
-	const v = await verifyChargeFeeCardBinding({ merchantCardAddress: OTHER_CARD, lookupBinding: async () => 'not_bound' })
+	const v = await verifyChargeFeeCardBinding({ merchantCardAddress: OTHER_CARD, lookupBinding: async () => false })
 	assert.equal(v.ok, false)
 	assert.equal(!v.ok && v.status, 400)
 	assert.equal(!v.ok && v.code, 'pos_card_not_bound')
 })
 
 test('binding: a lookup failure is 503 pos_card_binding_unavailable, distinct from not bound', async () => {
-	const v = await verifyChargeFeeCardBinding({ merchantCardAddress: CARD, lookupBinding: async () => 'unavailable' })
+	const v = await verifyChargeFeeCardBinding({
+		merchantCardAddress: CARD,
+		lookupBinding: async () => {
+			throw new Error('database unavailable')
+		},
+	})
 	assert.equal(v.ok, false)
 	assert.equal(!v.ok && v.status, 503)
 	assert.equal(!v.ok && v.code, 'pos_card_binding_unavailable')
@@ -40,7 +45,7 @@ test('binding: a missing or invalid merchantCardAddress is rejected without any 
 	let calls = 0
 	const lookup = async () => {
 		calls++
-		return 'bound' as const
+		return true
 	}
 	for (const bad of [undefined, null, '', 'not-an-address']) {
 		const v = await verifyChargeFeeCardBinding({ merchantCardAddress: bad as any, lookupBinding: lookup })
