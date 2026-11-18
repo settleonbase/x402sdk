@@ -5,6 +5,8 @@ import test from 'node:test'
 import express from 'express'
 import {
 	createCardsByCategoryHandler,
+	CARDS_BY_CATEGORY_FILTER_HEADER,
+	CARDS_BY_CATEGORY_FILTER_VERSION,
 	pickCardsByCategoryQuery,
 	resolveCardsByCategoryUpstreamTimeoutMs,
 	CARDS_BY_CATEGORY_DEFAULT_UPSTREAM_TIMEOUT_MS,
@@ -237,4 +239,65 @@ test('client disconnect before the response destroys the upstream request', { ti
 		await close(srv.server)
 		await close(master.server)
 	}
+})
+
+
+// ---- 过滤标记守卫：Master 未过滤（无标记）或路由未挂载（404）时，Cluster 明示 503，绝不转发正文 ----
+const markerMaster = (upstreamStatus: number, headers: Record<string, string>, body: string): Server =>
+	createServer((_req, res) => {
+		res.writeHead(upstreamStatus, { 'content-type': 'application/json', ...headers })
+		res.end(body)
+	})
+const clusterServer = (masterPort: number): Server => {
+	const app = express()
+	app.get('/api/cardsByCategory', createCardsByCategoryHandler({ masterPort, timeoutMs: 2_000, requiredResponseHeader: { name: CARDS_BY_CATEGORY_FILTER_HEADER, value: CARDS_BY_CATEGORY_FILTER_VERSION } }))
+	return createServer(app)
+}
+const withMarkerStack = async (
+	upstream: Server,
+	run: (clusterPort: number) => Promise<void>,
+): Promise<void> => {
+	const masterPort = await listen(upstream)
+	const cluster = clusterServer(masterPort)
+	const clusterPort = await listen(cluster)
+	try {
+		await run(clusterPort)
+	} finally {
+		await close(cluster)
+		await close(upstream)
+	}
+}
+const CLUSTER_PATH = '/api/cardsByCategory?scanLimit=1&limitPerCategory=1'
+
+test('filter marker: a 200 without the marker is replaced by 503 and its body is never forwarded', async () => {
+	await withMarkerStack(markerMaster(200, {}, '{"groups":[{"categoryId":"x","items":[{"cardAddress":"0xSECRETCARD"}]}]}'), async (port) => {
+		const r = await fetch(`http://localhost:${port}${CLUSTER_PATH}`)
+		const text = await r.text()
+		assert.equal(r.status, 503)
+		assert.equal(text.includes('0xSECRETCARD'), false)
+	})
+})
+
+test('filter marker: a 200 carrying the marker is forwarded unchanged', async () => {
+	const body = '{"groups":[]}'
+	await withMarkerStack(markerMaster(200, { [CARDS_BY_CATEGORY_FILTER_HEADER]: CARDS_BY_CATEGORY_FILTER_VERSION }, body), async (port) => {
+		const r = await fetch(`http://localhost:${port}${CLUSTER_PATH}`)
+		assert.equal(r.status, 200)
+		assert.equal(await r.text(), body)
+	})
+})
+
+test('filter marker: a 404 from Master (route not mounted) becomes 503', async () => {
+	await withMarkerStack(markerMaster(404, {}, 'Cannot GET /api/cardsByCategory'), async (port) => {
+		const r = await fetch(`http://localhost:${port}${CLUSTER_PATH}`)
+		assert.equal(r.status, 503)
+	})
+})
+
+test('filter marker: a non-200 from Master (its own 503) passes through unchanged', async () => {
+	await withMarkerStack(markerMaster(503, {}, '{"error":"filter failed"}'), async (port) => {
+		const r = await fetch(`http://localhost:${port}${CLUSTER_PATH}`)
+		assert.equal(r.status, 503)
+		assert.equal(await r.text(), '{"error":"filter failed"}')
+	})
 })

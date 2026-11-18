@@ -46,17 +46,27 @@ export const pickCardsByCategoryQuery = (rawUrl: string): string => {
 }
 
 /**
+ * Master 过滤后的响应带此头；Cluster 只放行带此头的 200 响应（见 requiredResponseHeader）。
+ * 作用：Master 为未过滤的旧版本（或路由未挂载）时，Cluster 不转发未过滤的结果，而是明示 503。
+ */
+export const CARDS_BY_CATEGORY_FILTER_HEADER = 'x-cards-by-category-filter'
+export const CARDS_BY_CATEGORY_FILTER_VERSION = 'discover-v1'
+
+/**
  * Cluster 侧 GET /api/cardsByCategory：透传 Master。
  * - 转发目标固定为 localhost:masterPort 的 /api/cardsByCategory，调用方只能影响允许的查询参数。
  * - 同时复制 Master 的 HTTP 状态码与 Content-Type，使错误语义与 Master 一致。
  * - Master 不可达返回 502；上游超过 timeoutMs 返回 504 并销毁上游请求。
  * - 客户端在响应完成前断开时，销毁上游请求。
  * - 不做鉴权、不做缓存；Discover 过滤在 Master 侧完成（见 cardsByCategoryDiscover.ts），本层不改写响应体。
+ * - requiredResponseHeader 设置时：Master 返回 404（路由未挂载），或返回 200 但缺少该头（未过滤的旧版本），
+ *   一律返回 503 并丢弃上游正文，绝不转发。非 200 的其他状态（例如 Master 的 503）照常透传。
  */
 export const createCardsByCategoryHandler = (opts: {
 	masterPort: number
 	log?: (line: string) => void
 	timeoutMs?: number
+	requiredResponseHeader?: { name: string; value: string }
 }): RequestHandler => {
 	const timeoutMs = opts.timeoutMs ?? CARDS_BY_CATEGORY_DEFAULT_UPSTREAM_TIMEOUT_MS
 	return (req: Request, res: Response) => {
@@ -65,7 +75,15 @@ export const createCardsByCategoryHandler = (opts: {
 		let clientGone = false
 		const upstream = request({ hostname: 'localhost', port: opts.masterPort, path, method: 'GET' }, (masterRes) => {
 			clearTimeout(timer)
-			res.status(masterRes.statusCode ?? 502)
+			const status = masterRes.statusCode ?? 502
+			const required = opts.requiredResponseHeader
+			if (required && (status === 404 || (status === 200 && masterRes.headers[required.name] !== required.value))) {
+				masterRes.resume()
+				opts.log?.(`cardsByCategory upstream rejected: status ${status}, filter marker missing or route not mounted`)
+				res.status(503).json({ error: 'cardsByCategory unavailable' })
+				return
+			}
+			res.status(status)
 			const contentType = masterRes.headers['content-type']
 			if (contentType) res.setHeader('Content-Type', contentType)
 			masterRes.on('error', () => res.destroy())
