@@ -22,7 +22,7 @@ import { claimFreeMembershipPreCheck } from '../MemberCard'
 import { fetchBaseAaSmartWalletBalancesViaCdp } from '../baseAaCdpTokenBalances'
 import { purchasingCard, purchasingCardPreCheck, usdcTopupPreCheck, usdcTopupPreview, createCardPreCheck, createCardBusinessStartKetClusterPreCheck, resolveCardOwnerToEOA, AAtoEOAPreCheck, AAtoEOAPreCheckSenderHasCode, AAtoEOAPreCheckBUnitBalance, ContainerRelayPreCheckBUnitBalance, OpenContainerRelayPreCheckBUnitFee, nfcTopupPreCheckBUnitFee, nfcTopupPreCheckChargeBurnBUnitFee, nfcTopupPreCheckAdminAirdropLimit, nfcTopupPreCheckMintMinTierFirstMembership, nfcTopupPreCheckMembershipFeeFirstIssue, nfcTopupPreCheckMintGatewaySimulation, requestAccountingPreCheckBUnitFee, transferPreCheckBUnit, OpenContainerRelayPreCheck, ContainerRelayPreCheck, ContainerRelayPreCheckUnsigned, cardCreateRedeemPreCheck, cardCreateRedeemAdminPreCheck, cardRedeemPreCheck, cardRedeemPreCheckBUnitBalance, cardRedeemAdminPreCheck, cardOpenTransferPreCheck, cardAddAdminPreCheck, cardAddAdminBatchPreCheck, cardAddAdminByAdminPreCheck, cardCreateIssuedNftPreCheck, cardMintIssuedNftToAddressPreCheck, cardCouponOpenClaimPreCheck, cardCouponPosClaimPreCheck, cardCouponPosClaimPreparePreCheck, cardCouponPosClaimSubmitPreCheck, cardCouponPosConsumePreparePreCheck, cardCouponPosConsumeSubmitPreCheck, cardCouponPosConsumeNfcSignPreCheck, merchantCardSupportsCouponBurn, getRedeemStatusBatchApi, claimBUnitsClusterPreCheck, resolveBUnitFreeClaimEligibility, buintRedeemAirdropQueryOnChain, buintRedeemAirdropRedeemClusterPreCheck, businessStartKetRedeemQueryOnChain, businessStartKetRedeemRedeemClusterPreCheck, businessStartKetRedeemReadAdminNonce, businessStartKetRedeemCreateClusterPreCheck, businessStartKetRedeemCancelClusterPreCheck, cancelRequestPreCheck, purchaseBUnitFromBasePreCheck, validateRecommenderForTopup, cardClearAdminMintCounterPreCheck, cardTerminalSettlementClearPreCheck, getCardAdminsWithMintCounter, burnPointsByAdminPreparePayload, verifyBurnPointsByAdminPrepareAllowed, burnChargeRewardByAdminPreparePayload, verifyBurnChargeRewardByAdminPrepareAllowed, verifyChargeOwnerChildBurnClusterPreCheck, isChargeLedgerTxTipRow, buildChargeLedgerTransactionPreviewFromIndexerBody, nfcLinkAppPaymentBlockedIfAny, nfcLinkAppValidateParams, nfcLinkAppMigrationBUnitClusterPreCheck, releaseNfcLinkAppLockIfSessionMatches, nfcLinkAppNewLinkBlockedDetail, NFC_LINK_APP_CARD_LOCKED_MESSAGE, NFC_LINK_APP_CARD_LOCKED_ERROR_CODE, quoteCurrencyToUsdc6, quoteUsdcDepositForCardFiat6, nfcTopupPreparePayload, unpackTopupMintAmount, getBeamioUserCardFactoryGateway, resolveChargeFeePayerCardFromOpenContainerItems, isAllowedMerchantImageHttpsUrl, lookupOnChainMerchantCardRegistryIdentity, readContainerNonceFromAAStorage, prepareAAAccountCreationViaEntryPoint } from '../MemberCard'
 import { readBUnitBalanceSnapshot } from '../bunitBalanceRead'
-import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_AGENT_REFERRER_REGISTRY, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, GENESIS_NODE_BRIDGE_INITIATOR, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_PAYTO, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET, USDC_BASE } from '../chainAddresses'
+import { BASE_CCSA_CARD_ADDRESS, BASE_TREASURY, BEAMIO_INDEXER_DIAMOND, CONET_AGENT_REFERRER_REGISTRY, CONET_BEAMIO_USER_CARD_DEFAULT, CONET_BUINT, CONET_BUNIT_AIRDROP_ADDRESS, CONET_BUSINESS_START_KET, CONET_CARD_FACTORY, CONET_CHAT_INDEX_REGISTRY, CONET_REFERRAL_MERCHANT_SHARE_MODULE, CONET_REFERRAL_REGISTRY_VAULT_V1, CONET_REFERRAL_PURCHASE_SPLIT_V1, CONET_GENESIS_NODE_REFERRAL_VAULT, CONET_TREASURY_CREATE2, CONET_TREASURY_PEER, CONET_TREASURY_PEER_STABLE_SWAP_OFFLINE, CONET_USDC, getGenesisNodeBridgeInitiator, GENESIS_NODE_SEAT_CARD_ADDRESS, GENESIS_NODE_SEAT_TEST_CODE, GENESIS_NODE_SEAT_TEST_USDC6, GENESIS_NODE_SEAT_USDC_PER_NODE6, MERCHANT_POS_MANAGEMENT_CONET, USDC_BASE } from '../chainAddresses'
 import {
 	AGENT_REFERRER_EIP712_DOMAIN,
 	AGENT_REFERRER_TYPES,
@@ -5645,7 +5645,7 @@ const routing = ( router: Router ) => {
 						: `Oracle rate stale, please retry shortly`
 					return res.status(503).json({ success: false, error: omsg }).end()
 				}
-				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
+				const settlePayTo = getGenesisNodeBridgeInitiator()
 				const settleDesc = `Beamio USDC walletDeposit (${amt} USDC → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
 				const settledDeposit = await settleBeamioX402ToCardOwner(req, res, {
 					cardOwner: settlePayTo,
@@ -5732,7 +5732,7 @@ const routing = ( router: Router ) => {
 				if (quotedFuel < 1_000_000n) {
 					return res.status(400).json({ success: false, error: 'Minimum purchase is 1 USDC' }).end()
 				}
-				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
+				const settlePayTo = getGenesisNodeBridgeInitiator()
 				const settleDesc = `Beamio USDC fuelPack (${amt} USDC pack=${catalogPack?.id ?? 'custom'} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
 				const settledFuel = await settleBeamioX402ToCardOwner(req, res, {
 					cardOwner: settlePayTo,
@@ -5886,7 +5886,7 @@ const routing = ( router: Router ) => {
 							.end()
 					}
 				}
-				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
+				const settlePayTo = getGenesisNodeBridgeInitiator()
 				const settleDesc = genesisTestMode
 					? `Beamio USDC genesisNodeSeat TEST (pay 4.00 USDC; LockMint → vault; fulfill qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
 					: `Beamio USDC genesisNodeSeat (qty=${qtyRaw} → initiator ${settlePayTo.slice(0, 10)}… LockMint vault; beneficiary=${beneficiaryAddr.slice(0, 10)}…)`
@@ -6023,7 +6023,7 @@ const routing = ( router: Router ) => {
 				if (!bunitPre.success) {
 					return res.status(400).json({ success: false, error: bunitPre.error ?? 'B-Unit precheck failed' }).end()
 				}
-				const settlePayTo = GENESIS_NODE_BRIDGE_INITIATOR
+				const settlePayTo = getGenesisNodeBridgeInitiator()
 				const settleDesc =
 					`Beamio USDC treasuryBridge (${cur} ${amt} → initiator ${settlePayTo.slice(0, 10)}… owner=${payToOwner.slice(0, 10)}… aa=${recipientAaAddr.slice(0, 10)}…)`
 				const settledByRawSigTreasury = await settleWithRawSigIfNeeded(quotedTreasury, settleDesc, settlePayTo)

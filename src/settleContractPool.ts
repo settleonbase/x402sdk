@@ -16,7 +16,7 @@ import {
 	BASE_CARD_FACTORY,
 	CONET_CARD_FACTORY,
 	BEAMIO_INDEXER_DIAMOND,
-	GENESIS_NODE_BRIDGE_INITIATOR,
+	getGenesisNodeBridgeInitiator,
 } from './chainAddresses'
 import { masterSetup, resolveBeamioBaseHttpRpcUrl, resolveBeamioConetHttpRpcUrl } from './util'
 
@@ -203,24 +203,24 @@ export function unshiftSettleBoth(sc: SettleContractPoolEntry): void {
 }
 
 export function genesisBridgeInitiatorInRoster(): boolean {
-	const want = GENESIS_NODE_BRIDGE_INITIATOR.toLowerCase()
+	const want = getGenesisNodeBridgeInitiator().toLowerCase()
 	return Settle_ContractRoster.some((sc) => scAddr(sc) === want)
 }
 
 export function hasIdleGenesisInitiatorBase(): boolean {
-	const want = GENESIS_NODE_BRIDGE_INITIATOR.toLowerCase()
+	const want = getGenesisNodeBridgeInitiator().toLowerCase()
 	return Settle_BasePool.some((sc) => scAddr(sc) === want)
 }
 
 export function hasIdleGenesisInitiatorBoth(): boolean {
-	const want = GENESIS_NODE_BRIDGE_INITIATOR.toLowerCase()
+	const want = getGenesisNodeBridgeInitiator().toLowerCase()
 	const inBase = Settle_BasePool.some((sc) => scAddr(sc) === want)
 	const inConet = Settle_ConetPool.some((sc) => scAddr(sc) === want)
 	return inBase && inConet
 }
 
 export function shiftGenesisBridgeInitiatorBase(): SettleContractPoolEntry | undefined {
-	const want = GENESIS_NODE_BRIDGE_INITIATOR.toLowerCase()
+	const want = getGenesisNodeBridgeInitiator().toLowerCase()
 	const idx = Settle_BasePool.findIndex((sc) => scAddr(sc) === want)
 	if (idx < 0) return undefined
 	const [sc] = Settle_BasePool.splice(idx, 1)
@@ -228,7 +228,7 @@ export function shiftGenesisBridgeInitiatorBase(): SettleContractPoolEntry | und
 }
 
 export function shiftGenesisBridgeInitiatorBoth(): SettleContractPoolEntry | undefined {
-	const want = GENESIS_NODE_BRIDGE_INITIATOR.toLowerCase()
+	const want = getGenesisNodeBridgeInitiator().toLowerCase()
 	const baseIdx = Settle_BasePool.findIndex((sc) => scAddr(sc) === want)
 	const conetIdx = Settle_ConetPool.findIndex((sc) => scAddr(sc) === want)
 	if (baseIdx < 0 || conetIdx < 0) return undefined
@@ -242,7 +242,7 @@ export async function withGenesisBridgeInitiatorBase<T>(
 ): Promise<T> {
 	if (!genesisBridgeInitiatorInRoster()) {
 		throw new Error(
-			`Genesis bridge initiator ${GENESIS_NODE_BRIDGE_INITIATOR} not in Settle_ContractRoster (check settle_contractAdmin)`,
+			`Genesis bridge initiator ${getGenesisNodeBridgeInitiator()} not in Settle_ContractRoster (check settle_contractAdmin)`,
 		)
 	}
 	const sc = shiftGenesisBridgeInitiatorBase()
@@ -261,7 +261,7 @@ export async function withGenesisBridgeInitiatorBoth<T>(
 ): Promise<T> {
 	if (!genesisBridgeInitiatorInRoster()) {
 		throw new Error(
-			`Genesis bridge initiator ${GENESIS_NODE_BRIDGE_INITIATOR} not in Settle_ContractRoster (check settle_contractAdmin)`,
+			`Genesis bridge initiator ${getGenesisNodeBridgeInitiator()} not in Settle_ContractRoster (check settle_contractAdmin)`,
 		)
 	}
 	const sc = shiftGenesisBridgeInitiatorBoth()

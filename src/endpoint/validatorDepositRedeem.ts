@@ -15,7 +15,7 @@ import {
 	CONET_VALIDATOR_DEPOSIT_FUNDER,
 	CONET_VALIDATOR_DEPOSIT_REDEEM,
 	CONET_VALIDATOR_DEPOSIT_REDEEM_DEPLOY_BLOCK,
-	CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN,
+	getValidatorDepositContractAdmin,
 	CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN,
 	CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN_LEGACY,
 	CONET_VALIDATOR_NODE_IP,
@@ -25,7 +25,6 @@ import {
 	CONET_GENESIS_NODE_REFERRAL_VAULT,
 	CONET_TREASURY,
 	CONET_USDC,
-	GENESIS_NODE_BRIDGE_INITIATOR,
 	GENESIS_NODE_SEAT_TEST_USDC6,
 	GENESIS_NODE_SEAT_USDC_PER_NODE6,
 	USDC_BASE,
@@ -54,7 +53,6 @@ const VALIDATOR_REDEEM_VERSION = 'validator-deposit-redeem-v1'
 const VALIDATOR_STAKE_WEI = 32n * 10n ** 18n
 const MAX_REDEEM_CODE_BYTES = 512
 const MAX_IP_BYTES = 64
-const DEFAULT_NEW_CONET_DIR = '/Users/peter/Downloads/seguro-pro/CoNET-DL-master/newCoNET'
 
 const VALIDATOR_DEPOSIT_REDEEM_ABI = [
 	'event ValidatorRedeemClaimed(bytes32 indexed requestId, bytes32 indexed codeHash, address indexed claimer, address beneficiary, uint256 validatorCount, string targetNodeIp, string[] conetDepinNodeIps, uint256 gbMiningNodeCount)',
@@ -840,7 +838,7 @@ export function resolveValidatorNodeIp(): string {
 }
 
 function resolveNewCoNETDir(): string {
-	return process.env.CONET_VALIDATOR_NEWCONET_DIR?.trim() || masterSetup.validatorDeposit?.newCoNETDir?.trim() || DEFAULT_NEW_CONET_DIR
+	return process.env.CONET_VALIDATOR_NEWCONET_DIR?.trim() || masterSetup.validatorDeposit?.newCoNETDir?.trim() || (() => { throw new Error('CONET_VALIDATOR_NEWCONET_DIR or masterSetup.validatorDeposit.newCoNETDir is required (fail closed)') })()
 }
 
 function resolveStateFile(): string {
@@ -1137,7 +1135,7 @@ export function validatorDepositRedeemConfig() {
 		nodeIp,
 		depositContract: CONET_DEPOSIT_CONTRACT,
 		depositFunder: CONET_VALIDATOR_DEPOSIT_FUNDER,
-		contractAdminAddress: CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN,
+		contractAdminAddress: getValidatorDepositContractAdmin(),
 		redeemAdminAddress: CONET_VALIDATOR_DEPOSIT_REDEEM_ADMIN,
 		depositMode: 'contract_balance_fundAndDepositValidators',
 		newCoNETDir: resolveNewCoNETDir(),

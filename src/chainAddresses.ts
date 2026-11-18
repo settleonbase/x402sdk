@@ -2,7 +2,28 @@
  * x402sdk 是独立项目，发布/构建时不能跨项目相对引用 BeamioContract 根仓配置。
  * 本文件必须保持自包含，地址由同步脚本或手工更新。
  */
+import { readFileSync } from 'node:fs'
 import { ethers } from 'ethers'
+
+/**
+ * Operator addresses are not kept in this repository. They come from the private file named by
+ * BEAMIO_OPERATOR_CONFIG (JSON keys below). Each reader fails closed only when it is called, so a
+ * process that never touches these paths still starts.
+ */
+type OperatorKey = 'genesisNodeBridgeInitiator' | 'validatorDepositContractAdmin'
+let operatorCache: { path: string; values: Record<string, unknown> } | undefined
+function operatorAddress(key: OperatorKey): string {
+	const path = process.env.BEAMIO_OPERATOR_CONFIG
+	if (!path) throw new Error(`BEAMIO_OPERATOR_CONFIG is required for ${key}: operator addresses live outside the repository (fail closed)`)
+	if (operatorCache === undefined || operatorCache.path !== path) {
+		let raw: unknown
+		try { raw = JSON.parse(readFileSync(path, 'utf8')) } catch { throw new Error('BEAMIO_OPERATOR_CONFIG is unreadable or not JSON (fail closed)') }
+		operatorCache = { path, values: (raw ?? {}) as Record<string, unknown> }
+	}
+	const v = operatorCache.values[key]
+	if (typeof v !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(v)) throw new Error(`BEAMIO_OPERATOR_CONFIG: ${key} must be an address (fail closed)`)
+	return v
+}
 
 export const BASE_MAINNET_CHAIN_ID = 8453
 
@@ -120,7 +141,7 @@ export const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 
 /**
  * NodeSaleSplitter（Base，UUPS ERC1967 代理）：节点购买 USDC 拆账。
- * 每节点 = nodePrice(3880 USDC → CONET_TREASURY_CREATE2 / BASE_TREASURY) + serverFee/OPEX(120 USDC → 0x87cA…05E1)
+ * 每节点 = nodePrice(3880 USDC → CONET_TREASURY_CREATE2 / BASE_TREASURY) + serverFee/OPEX(120 USDC → operator address from private configuration)
  * = **4000 USDC** list price (OPEX included).
  * 部署后用 deployments/base-NodeSaleSplitter.json 的 `address` 回填；环境变量 NODE_SALE_SPLITTER_BASE 可覆盖。
  */
@@ -128,19 +149,16 @@ export const NODE_SALE_SPLITTER_BASE =
   process.env.NODE_SALE_SPLITTER_BASE || '0x648D628e05DaD493dcECf8C8cDDb4E8867635d49'
 /** 每节点本金（USDC，6 位精度）→ BASE_TREASURY；list 4000 已含 OPEX 后的节点份额 */
 export const NODE_SALE_NODE_PRICE_USDC6 = 3_880_000_000n
-/** 每节点 OPEX / 服务器费（USDC，6 位精度）→ CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN(0x87cA…05E1)；含于 list 4000 */
+/** 每节点 OPEX / 服务器费（USDC，6 位精度）→ validatorDepositContractAdmin（私有配置）；含于 list 4000 */
 export const NODE_SALE_SERVER_FEE_USDC6 = 120_000_000n
 
 /**
  * Genesis Node Seat：Base USDC x402 settle → bridge initiator EOA，再 LockMint 入国库。
  * 必须与 Master `settle_contractAdmin` 中某一 `walletBase` 同址（当前 = vault.bridgeBinder）。
  */
-export const GENESIS_NODE_BRIDGE_INITIATOR = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
-/**
- * @deprecated Alias of {@link GENESIS_NODE_BRIDGE_INITIATOR}. Historical payTo `0x17FC…637A` retired —
- * settle no longer lands on that EOA; funds LockMint into {@link CONET_GENESIS_NODE_REFERRAL_VAULT}.
- */
-export const GENESIS_NODE_SEAT_PAYTO = GENESIS_NODE_BRIDGE_INITIATOR
+export function getGenesisNodeBridgeInitiator(): string {
+	return operatorAddress('genesisNodeBridgeInitiator')
+}
 /** CoNET GenesisNodeReferralVaultV1 ERC1967 proxy (LockMint beneficiary + onBridgeMint splitter). */
 export const CONET_GENESIS_NODE_REFERRAL_VAULT = '0x051b65E5711E6E74bC236Fe220dcA7021841855C'
 /** Current UUPS impl (setL1Ratio). Proxy address above is canonical. */
@@ -250,7 +268,9 @@ export const CONET_LAB_MINING_POOL_DEPLOY_BLOCK = 326705
 export const CONET_DEPOSIT_CONTRACT = '0x4242424242424242424242424242424242424242'
 export const CONET_VALIDATOR_DEPOSIT_FUNDER = '0x0981275553A41E00ec1006fe074971285E00c2A3'
 /** ValidatorDepositRedeem contract admin (withdrawNative only; not redeem admin). Sync from deployments/conet-ValidatorDepositRedeem.json */
-export const CONET_VALIDATOR_DEPOSIT_CONTRACT_ADMIN = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
+export function getValidatorDepositContractAdmin(): string {
+	return operatorAddress('validatorDepositContractAdmin')
+}
 /**
  * ValidatorDepositRedeem redeem admin used by API genesisNodeSeat fulfill
  * (`~/.master.json` `GenesisNode` private key → this address).
