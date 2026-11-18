@@ -11,7 +11,7 @@ import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Interface, JsonRpcProvider, Wallet, formatEther, parseEther, toBeHex } from 'ethers'
 import { verifyAuditFile } from '../src/audit'
-import { CONTRACTS, LEAKED, buildSteps, forkRun } from '../p0/p0Plan'
+import { CONTRACTS, ROLE_HOLDERS, PRIVATE_MASTER, buildSteps, forkRun } from '../p0/p0Plan'
 // The client is the x402sdk copy (compiled into X402_BUILD), exactly what the daemons use.
 type Client = { call<T = unknown>(m: string, p: unknown): Promise<T>; close(): void }
 const { WalletSignerClient } = require(join(process.env.X402_BUILD!, 'walletSigner', 'remoteSigner.js')) as {
@@ -97,7 +97,7 @@ function writeConfig(): string {
 						chains: [224422],
 						allow: [
 							{ to: CONTRACTS.epochMiningInfo, selectors: ['updateInfo(uint256,uint256,uint256)'], maxGas: 300000 },
-							{ to: CONTRACTS.epochMiningInfo, selectors: ['changeAddressInAdminlist(address,bool)'], maxGas: 150000, args: { '0': { in: '@compromised' }, '1': { eq: false } } },
+							{ to: CONTRACTS.epochMiningInfo, selectors: ['changeAddressInAdminlist(address,bool)'], maxGas: 150000, args: { '0': { in: '@denied' }, '1': { eq: false } } },
 						],
 						rate: { perMinute: 20 },
 						maxGasPriceGwei: { '224422': 2 },
@@ -107,12 +107,12 @@ function writeConfig(): string {
 		},
 	}
 	writeFileSync(join(etc, 'policy.json'), JSON.stringify(policy, null, 2))
-	writeFileSync(join(etc, 'compromised.json'), JSON.stringify({ note: 'partial list for tests', addresses: Object.values(LEAKED) }, null, 2))
+	writeFileSync(join(etc, 'denied-addresses.json'), JSON.stringify({ note: 'partial list for tests', addresses: [PRIVATE_MASTER, ...Object.values(ROLE_HOLDERS)] }, null, 2))
 	const cfg = {
 		dataDir: data,
 		adminSocket: join(run, 'admin.sock'),
 		policyFile: join(etc, 'policy.json'),
-		compromisedFile: join(etc, 'compromised.json'),
+		deniedAddressesFile: join(etc, 'denied-addresses.json'),
 		rpc: { tls: { host: '127.0.0.1', port: PORT, cert: join(pki, 'server.crt'), key: join(pki, 'server.key'), ca: join(pki, 'test-ca.crt') } },
 		chains: { '224422': { rpcUrls: [FORK], resendAfterMs: 20000, maxResends: 3, receiptPollMs: 500 } },
 		gasKeeper: {
@@ -266,25 +266,25 @@ async function main(): Promise<void> {
 	const ar0 = harness('airdrop-roles', 'api')
 	record('airdrop daemon before grant: MISSING_GRANT, plan for owner', ar0.state === 'MISSING_GRANT', { plan: ar0.externalPlan?.map((s: any) => `${s.signer.slice(0, 6)} ${s.call}`) })
 
-	// --- P0 rehearsal on the fork (leaked keys hand over to COLD / NEW)
+	// --- P0 rehearsal on the fork (outgoing keys hand over to COLD / NEW)
 	const cold = Wallet.createRandom().address
 	const steps = buildSteps(cold, epochNew, [airdropNew]).filter((s) => s.chainId === 224422)
 	const p0 = steps.filter((s) => s.phase === 'P0')
 	const used = await forkRun(fork, p0, () => undefined)
 	// Steps whose role the address never held are skipped by forkRun, so check every step's state.
 	const p0Done = await Promise.all(p0.map((s) => s.done(fork)))
-	record('P0 steps execute on fork (impersonated leaked keys + COLD)', p0Done.every(Boolean), { executed: Object.keys(used).length, total: p0.length, notDone: p0.filter((_, i) => !p0Done[i]).map((s) => s.id) })
+	record('P0 steps execute on fork (impersonated outgoing keys + COLD)', p0Done.every(Boolean), { executed: Object.keys(used).length, total: p0.length, notDone: p0.filter((_, i) => !p0Done[i]).map((s) => s.id) })
 
 	// --- chat relay pilot (no on-chain permission needed)
 	const c1 = harness('chat', 'api')
 	record('chatIndexPointerRelay via wallet-signer: 200 + pointer on chain', c1.http === 200 && c1.pointerMatches === true, c1.body)
 
-	// --- epoch: daemon removes leaked admins itself, then writes
+	// --- epoch: daemon removes outgoing admins itself, then writes
 	const er1 = harness('epoch-reconcile', 'dl')
 	const iface = new Interface(['function adminList(address) view returns (bool)'])
 	const isAdmin = async (a: string) => iface.decodeFunctionResult('adminList', await fork.call({ to: CONTRACTS.epochMiningInfo, data: iface.encodeFunctionData('adminList', [a]) }))[0] as boolean
-	const leakedStill = await Promise.all([LEAKED.epochManagre, LEAKED.master].map(isAdmin))
-	record('epoch reconcile: NEW removed 0x4A3A and 0x87cA itself (P3)', er1.report?.state === 'CLEAN' && leakedStill.every((x) => !x) && (await isAdmin(epochNew)), { logs: er1.logs })
+	const outgoingStill = await Promise.all([ROLE_HOLDERS.epochManagre, PRIVATE_MASTER].map(isAdmin))
+	record('epoch reconcile: NEW removed 0x4A3A and the master key (P3)', er1.report?.state === 'CLEAN' && outgoingStill.every((x) => !x) && (await isAdmin(epochNew)), { logs: er1.logs })
 	const epochNo = 2029999
 	const eu1 = harness('epoch-update', 'dl', [String(epochNo)])
 	record('updateEpochToSC via wallet-signer: tx + currentInfo updated', typeof eu1.hash === 'string' && eu1.currentInfo?.[1] === '123' && eu1.currentInfo?.[3] === '456', eu1)
@@ -297,7 +297,7 @@ async function main(): Promise<void> {
 	const s2 = await dl.call<any>('signer_sendTransaction', { keyArray: 'epochManagre', chainId: 224422, to: CONTRACTS.epochMiningInfo, data: epochData, gasLimit: '200000', idempotencyKey: 'e2e:idem' })
 	record('same idempotencyKey → same tx, not sent twice', s1.hash === s2.hash && s2.duplicate === true, { hash: s1.hash })
 
-	// --- airdrop: COLD grants NEW (P4), daemon runs a page, then COLD revokes the leaked admins
+	// --- airdrop: COLD grants NEW (P4), daemon runs a page, then COLD revokes the outgoing admins
 	const grant = steps.filter((s) => s.id.startsWith('gba.addAdmin'))
 	await forkRun(fork, grant, () => undefined)
 	await fork.send('evm_increaseTime', [3600])
@@ -318,8 +318,8 @@ async function main(): Promise<void> {
 	const setParam = new Interface(['function setMonthlyPaidGbPerNode(uint256)']).encodeFunctionData('setMonthlyPaidGbPerNode', [1])
 	await deny('airdrop key cannot call setMonthlyPaidGbPerNode (not whitelisted)', api.call('signer_sendTransaction', { keyArray: 'gbDepinAirdropAdmin', chainId: 224422, to: CONTRACTS.gbDepinAirdrop, data: setParam }), -32003)
 	const addBack = new Interface(['function changeAddressInAdminlist(address,bool)'])
-	await deny('epoch key cannot re-add a leaked admin', dl.call('signer_sendTransaction', { keyArray: 'epochManagre', chainId: 224422, to: CONTRACTS.epochMiningInfo, data: addBack.encodeFunctionData('changeAddressInAdminlist', [LEAKED.master, true]) }), -32003)
-	await deny('epoch key cannot remove a non-leaked admin', dl.call('signer_sendTransaction', { keyArray: 'epochManagre', chainId: 224422, to: CONTRACTS.epochMiningInfo, data: addBack.encodeFunctionData('changeAddressInAdminlist', [epochNew, false]) }), -32003)
+	await deny('epoch key cannot re-add an outgoing admin', dl.call('signer_sendTransaction', { keyArray: 'epochManagre', chainId: 224422, to: CONTRACTS.epochMiningInfo, data: addBack.encodeFunctionData('changeAddressInAdminlist', [PRIVATE_MASTER, true]) }), -32003)
+	await deny('epoch key cannot remove a non-outgoing admin', dl.call('signer_sendTransaction', { keyArray: 'epochManagre', chainId: 224422, to: CONTRACTS.epochMiningInfo, data: addBack.encodeFunctionData('changeAddressInAdminlist', [epochNew, false]) }), -32003)
 	await deny('plain CNET transfer from an array key refused', api.call('signer_sendTransaction', { keyArray: 'settle_contractAdmin', chainId: 224422, to: cold, data: '0x', value: '1' }), -32003)
 	await deny('eth_sign disabled', api.call('eth_sign', [settle[0], '0x00']), -32601)
 	await deny('wrong chain refused', api.call('signer_sendTransaction', { keyArray: 'settle_contractAdmin', chainId: 8453, to: CONTRACTS.chatIndexRegistry, data: '0x12345678' }), -32003)

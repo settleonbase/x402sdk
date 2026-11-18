@@ -70,10 +70,10 @@ export type Config = {
 	adminSocketMode?: number
 	/** Unix group allowed to use admin.sock (chgrp is done by systemd / tmpfiles). */
 	policyFile: string
-	compromisedFile: string
+	deniedAddressesFile: string
 	rpc: { tls?: TlsListen; unix?: UnixListen[]; proxied?: ProxiedListen }
 	chains: Record<string, ChainConfig>
-	gasKeeper: { enabled: boolean; intervalMs: number; chains: Record<string, GasKeeperChain> }
+	gasKeeper: { enabled: boolean; intervalMs: number; chains: Record<string, GasKeeperChain>; refusedOwners: string[] }
 	/** PM-issued addAdmin for reviewed dedicated wallets. Off by default. */
 	pmGrantAdmin?: { enabled: boolean; targets: string[]; denyAddresses?: string[]; maxGasPriceWei?: string }
 	alerts: { webhookUrl?: string; host?: string }
@@ -85,8 +85,18 @@ export type Config = {
 	allowUnsafeTestInit?: boolean
 }
 
+/** Top-level keys this loader consumes. Any other key is refused at load time. */
+const KNOWN_CONFIG_KEYS: ReadonlySet<string> = new Set([
+	'dataDir', 'logDir', 'requireMountPoint', 'requireMountSource', 'adminSocket', 'adminSocketMode', 'policyFile',
+	'deniedAddressesFile', 'rpc', 'chains', 'gasKeeper', 'pmGrantAdmin', 'pmOneShot', 'alerts', 'scryptN', 'keyWaitMs', 'allowUnsafeTestInit',
+])
+
 export function loadConfig(path: string): Config {
 	const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<Config>
+	// Unknown top-level keys are refused by name, so a stale key never silently changes behaviour (fail closed).
+	for (const key of Object.keys(raw)) {
+		if (!KNOWN_CONFIG_KEYS.has(key)) throw new Error(`config: unknown top-level key "${key}"; refusing to start (fail closed)`)
+	}
 	if (!raw.dataDir) throw new Error('config: dataDir required')
 	if (!raw.adminSocket) throw new Error('config: adminSocket required')
 	if (!raw.policyFile) throw new Error('config: policyFile required')
@@ -100,7 +110,7 @@ export function loadConfig(path: string): Config {
 		adminSocket: raw.adminSocket,
 		adminSocketMode: normalizeAdminMode(raw.adminSocketMode),
 		policyFile: raw.policyFile,
-		compromisedFile: raw.compromisedFile ?? join(raw.dataDir, 'compromised.json'),
+		deniedAddressesFile: raw.deniedAddressesFile ?? join(raw.dataDir, 'denied-addresses.json'),
 		rpc: raw.rpc ?? {},
 		chains: raw.chains,
 		gasKeeper: normalizeGasKeeper(raw.gasKeeper),
@@ -143,10 +153,22 @@ function normalizeGasKeeper(raw: Config['gasKeeper'] | undefined): Config['gasKe
 	const gk = raw ?? { enabled: false, intervalMs: 60_000, chains: {} }
 	const chains: Record<string, GasKeeperChain> = {}
 	for (const [id, chain] of Object.entries(gk.chains ?? {})) chains[id] = normalizeGasKeeperChain(id, chain)
+	const refusedRaw = (gk as { refusedOwners?: unknown }).refusedOwners
+	const refusedOwners: string[] = []
+	if (refusedRaw !== undefined) {
+		if (!Array.isArray(refusedRaw)) throw new Error('config: gasKeeper.refusedOwners must be an array of addresses')
+		for (const [i, a] of refusedRaw.entries()) {
+			if (typeof a !== 'string' || !isAddress(a)) throw new Error(`config: gasKeeper.refusedOwners[${i}] is not an address`)
+			refusedOwners.push(getAddress(a))
+		}
+	}
+	const enabled = gk.enabled === true
+	if (enabled && refusedOwners.length === 0) throw new Error('config: gasKeeper.refusedOwners is required when gasKeeper is enabled (fail closed)')
 	return {
-		enabled: gk.enabled === true,
+		enabled,
 		intervalMs: gk.intervalMs ?? 60_000,
 		chains,
+		refusedOwners,
 	}
 }
 

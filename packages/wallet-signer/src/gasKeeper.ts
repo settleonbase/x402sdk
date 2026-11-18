@@ -34,9 +34,6 @@ export const BEAMIO_ORACLE_CONTRACT = '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF1100
  */
 export const ORACLE_OWNER_WALLET_EXAMPLE = '0xccB259772944c1c8Ff9b3F877cD81519c33063EE'
 
-/** Leaked former oracle owner. Never import it and never top it up. */
-export const LEAKED_ORACLE_OWNER = '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1'
-
 /** Only this registry array may receive a top-up in this phase. */
 export const ORACLE_OWNER_ARRAY = 'beamio_oracle_owner'
 
@@ -74,7 +71,7 @@ export function explicitBusinessWallets(cfg: GasKeeperChain): string[] {
 	return out
 }
 
-export type TopupRefusalReason = 'contract' | 'code' | 'leaked' | 'other-array' | 'unregistered' | 'inactive' | 'not-owner' | 'ineligible-pending'
+export type TopupRefusalReason = 'contract' | 'code' | 'denied' | 'other-array' | 'unregistered' | 'inactive' | 'not-owner' | 'ineligible-pending'
 
 export type TopupRefusal = { address: string; reason: TopupRefusalReason }
 
@@ -115,7 +112,7 @@ export async function selectOracleOwnerRecipients(
 	chainId: number,
 	whitelist: readonly string[],
 	registry: RegistryBody,
-	compromised: ReadonlySet<string>,
+	denied: ReadonlySet<string>,
 	reader: OwnerReader,
 ): Promise<{ owner: string | null; fund: string[]; refused: TopupRefusal[] }> {
 	const refused: TopupRefusal[] = []
@@ -157,8 +154,8 @@ export async function selectOracleOwnerRecipients(
 			refused.push({ address: addr, reason: 'contract' })
 			continue
 		}
-		if (key === LEAKED_ORACLE_OWNER.toLowerCase() || compromised.has(key)) {
-			refused.push({ address: addr, reason: 'leaked' })
+		if (denied.has(key)) {
+			refused.push({ address: addr, reason: 'denied' })
 			continue
 		}
 		let code = ''
@@ -223,7 +220,7 @@ export class GasKeeper {
 		private readonly txm: TxManager,
 		private readonly keyring: Keyring,
 		private readonly registry: () => RegistryBody | null,
-		private readonly compromised: () => Set<string>,
+		private readonly denied: () => Set<string>,
 		private readonly alerter: Alerter,
 		private readonly audit: AuditLog,
 		private readonly statePath: string,
@@ -293,7 +290,7 @@ export class GasKeeper {
 			return
 		}
 		const p = this.txm.provider(chainId)
-		const bad = this.compromised()
+		const bad = this.denied()
 		const picked = await selectOracleOwnerRecipients(chainId, wallets, reg, bad, p)
 		if (picked.owner === null) {
 			this.alerter.send('warn', `topup-owner-unread:${chainId}`, `gas keeper could not read BeamioOracle.owner on chain ${chainId}`)
@@ -370,7 +367,7 @@ export class GasKeeper {
 				}
 			}
 			if (bad.has(address)) {
-				this.alerter.send('warn', `topup-rejected:${chainKey}:${address}`, `${addr} is compromised`)
+				this.alerter.send('warn', `topup-rejected:${chainKey}:${address}`, `${addr} is on the denied list`)
 				continue
 			}
 			const bal = await p.getBalance(addr)

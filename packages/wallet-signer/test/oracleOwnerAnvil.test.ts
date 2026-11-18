@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { JsonRpcProvider, Wallet, getAddress, hexlify, toBeHex } from 'ethers'
 import { AuditLog } from '../src/audit'
-import { BEAMIO_ORACLE_CONTRACT, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, gasKeeperUsage, oracleQuoteNeedWei, type SpendRow } from '../src/gasKeeper'
+import { BEAMIO_ORACLE_CONTRACT, GasKeeper, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, gasKeeperUsage, oracleQuoteNeedWei, type SpendRow } from '../src/gasKeeper'
 import { HdRoot, PM_ACCOUNT, mnemonicToEntropyBytes, newMnemonic } from '../src/hd'
 import type { Keyring } from '../src/keyring'
 import type { KeyArray, RegistryBody } from '../src/registry'
@@ -19,7 +19,8 @@ import type { TxManager } from '../src/txManager'
 
 const OWNER = getAddress(ORACLE_OWNER_WALLET_EXAMPLE)
 const CONTRACT = getAddress(BEAMIO_ORACLE_CONTRACT)
-const LEAKED = getAddress(LEAKED_ORACLE_OWNER)
+// Test fixture only (not a real account): stands in for the refused owner.
+const REFUSED = getAddress('0x5a1ab0000000000000000000000000000000f1f1')
 
 function ownerRuntime(addr: string): string {
 	const word = addr.toLowerCase().replace(/^0x/, '').padStart(64, '0')
@@ -119,7 +120,7 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 		await provider.send('anvil_setBalance', [pm.address, toBeHex(10n ** 18n)])
 		await provider.send('anvil_setBalance', [OWNER, '0x0'])
 		await provider.send('anvil_setBalance', [CONTRACT, '0x0'])
-		await provider.send('anvil_setBalance', [LEAKED, '0x0'])
+		await provider.send('anvil_setBalance', [REFUSED, '0x0'])
 		await provider.send('anvil_setCode', [CONTRACT, ownerRuntime(OWNER)])
 		const ownerWord = await provider.call({ to: CONTRACT, data: '0x8da5cb5b' })
 		assert.equal(getAddress(`0x${ownerWord.slice(-40)}`), OWNER)
@@ -208,7 +209,7 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 				txm as unknown as TxManager,
 				{ unlocked: opts.unlocked !== false } as unknown as Keyring,
 				registry,
-				() => new Set<string>(),
+				() => new Set<string>([REFUSED.toLowerCase()]),
 				{ send(_level: string, code: string) { alerts.push(code) } },
 				new AuditLog(auditPath),
 				statePath,
@@ -249,7 +250,7 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			assert.ok(fx.alerts.some((code) => code.startsWith(`topup-refused:224422:contract:${CONTRACT.toLowerCase()}`)))
 		})
 
-		await t.test('other array, unregistered, leaked, and nonempty code are refused', async () => {
+		await t.test('other array, unregistered, denied, and nonempty code are refused', async () => {
 			const coded = getAddress(Wallet.createRandom().address)
 			await provider.send('anvil_setCode', [coded, '0x60016000f3'])
 			await provider.send('anvil_setCode', [CONTRACT, ownerRuntime(coded)])
@@ -261,13 +262,13 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			await codedFx.gk.runOnce()
 			assert.ok(codedFx.alerts.some((code) => code.includes(':code:')))
 
-			await provider.send('anvil_setCode', [CONTRACT, ownerRuntime(LEAKED)])
-			const leakedFx = make('leaked', {
-				wallets: [LEAKED],
-				arrays: [keyArray(ORACLE_OWNER_ARRAY, [LEAKED])],
+			await provider.send('anvil_setCode', [CONTRACT, ownerRuntime(REFUSED)])
+			const deniedFx = make('denied', {
+				wallets: [REFUSED],
+				arrays: [keyArray(ORACLE_OWNER_ARRAY, [REFUSED])],
 			})
-			await leakedFx.gk.runOnce()
-			assert.ok(leakedFx.alerts.some((code) => code.includes(':leaked:')))
+			await deniedFx.gk.runOnce()
+			assert.ok(deniedFx.alerts.some((code) => code.includes(':denied:')))
 
 			await provider.send('anvil_setCode', [CONTRACT, ownerRuntime(OWNER)])
 			const otherFx = make('other', {
@@ -287,9 +288,9 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 			const after = await pmTransfers(provider, pm.address)
 			assert.equal(after.length, before.length)
 			assertNoValueTo(after, CONTRACT)
-			assertNoValueTo(after, LEAKED)
+			assertNoValueTo(after, REFUSED)
 			assertNoValueTo(after, coded)
-			assert.equal(await provider.getBalance(LEAKED), 0n)
+			assert.equal(await provider.getBalance(REFUSED), 0n)
 			assert.equal(await provider.getBalance(coded), 0n)
 		})
 
@@ -491,9 +492,9 @@ test('anvil: oracle owner intersection, refusals, budget, retry, lock, restart',
 
 		const all = await pmTransfers(provider, pm.address)
 		assertNoValueTo(all, CONTRACT)
-		assertNoValueTo(all, LEAKED)
+		assertNoValueTo(all, REFUSED)
 		assert.equal(await provider.getBalance(CONTRACT), 0n)
-		assert.equal(await provider.getBalance(LEAKED), 0n)
+		assert.equal(await provider.getBalance(REFUSED), 0n)
 		assert.ok(all.some((tx) => tx.to && getAddress(tx.to) === OWNER && tx.value === quoteNeed))
 	} finally {
 		await stop()

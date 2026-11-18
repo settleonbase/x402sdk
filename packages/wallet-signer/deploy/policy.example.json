@@ -160,7 +160,7 @@
 							"to": "0x648f1a17269627C3d465fEa40b3C229f7CacE5cA",
 							"selectors": ["changeAddressInAdminlist(address,bool)"],
 							"maxGas": 150000,
-							"args": { "0": { "in": "@compromised" }, "1": { "eq": false } }
+							"args": { "0": { "in": "@denied" }, "1": { "eq": false } }
 						}
 					],
 					"rate": { "perMinute": 20, "perDay": 20000 },

@@ -79,13 +79,13 @@ function writeConfig(rpc: Record<string, unknown>, name: string): string {
 		},
 	}
 	writeFileSync(f('etc', 'policy.json'), JSON.stringify(policy, null, 2))
-	writeFileSync(f('etc', 'compromised.json'), JSON.stringify({ addresses: [] }))
+	writeFileSync(f('etc', 'denied-addresses.json'), JSON.stringify({ addresses: [] }))
 	const cfg = {
 		dataDir: f('data'),
 		logDir: f('log'),
 		adminSocket: f('run', 'admin.sock'),
 		policyFile: f('etc', 'policy.json'),
-		compromisedFile: f('etc', 'compromised.json'),
+		deniedAddressesFile: f('etc', 'denied-addresses.json'),
 		rpc,
 		chains: { '224422': { rpcUrls: ['http://127.0.0.1:9'] } },
 		gasKeeper: { enabled: false, intervalMs: 60000, chains: {} },

@@ -10,8 +10,8 @@ import { denied } from './errors'
  */
 export type ArgRule = {
 	eq?: string | number | boolean
-	/** '@compromised' = leaked-address list; '@registry' = any address the signer derived. */
-	in?: '@compromised' | '@registry' | string[]
+	/** '@denied' = denied-address list; '@registry' = any address the signer derived. */
+	in?: '@denied' | '@registry' | string[]
 	/** Inclusive length bounds. Only ABI arrays can satisfy them. */
 	minItems?: number
 	maxItems?: number
@@ -121,7 +121,7 @@ export class Policy {
 		return g
 	}
 
-	checkCall(req: CallCheck, lists: { compromised: Set<string>; registry: Set<string> }): CallDecision {
+	checkCall(req: CallCheck, lists: { denied: Set<string>; registry: Set<string> }): CallDecision {
 		const g = this.grant(req.client, req.array, req.chainId) as CompiledGrant
 		if (!isAddress(req.to)) throw denied('to must be an address (contract creation not allowed)')
 		const toLc = req.to.toLowerCase()
@@ -304,7 +304,7 @@ function checkArg(
 	idx: number,
 	value: unknown,
 	rule: ArgRule,
-	lists: { compromised: Set<string>; registry: Set<string> },
+	lists: { denied: Set<string>; registry: Set<string> },
 ): void {
 	const name = `${frag.name} arg ${idx}`
 	if (rule.eq !== undefined) {
@@ -314,8 +314,8 @@ function checkArg(
 	if (rule.in !== undefined) {
 		const v = String(value).toLowerCase()
 		const set =
-			rule.in === '@compromised'
-				? lists.compromised
+			rule.in === '@denied'
+				? lists.denied
 				: rule.in === '@registry'
 					? lists.registry
 					: new Set(rule.in.map((x) => x.toLowerCase()))

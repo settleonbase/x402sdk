@@ -54,7 +54,7 @@ export class SignerService {
 	policy: Policy
 	private hd: HdRoot | null = null
 	private registry: RegistryFile | null = null
-	private compromised = new Set<string>()
+	private denied = new Set<string>()
 	private disabledClients = new Set<string>()
 	private rate = new RateLimiter()
 	private failedUnlocks = 0
@@ -66,20 +66,21 @@ export class SignerService {
 		this.alerter = alerter ?? new DefaultAlerter(config.alerts)
 		this.audit = new AuditLog(this.p.audit)
 		this.policy = Policy.load(config.policyFile)
-		this.loadCompromised()
+		this.loadDenied()
 		if (existsSync(this.p.clientState)) {
 			for (const c of JSON.parse(readFileSync(this.p.clientState, 'utf8')) as string[]) this.disabledClients.add(c)
 		}
 		this.registry = loadRegistry(this.p.registry)
 		this.txm = new TxManager(config.chains, this.keyring, this.audit, this.alerter, this.p.journal, config.keyWaitMs)
 		this.typedDataReplay = new TypedDataReplayLog(this.p.typedDataReplay)
+		const refusedOwners = config.gasKeeper.refusedOwners.map((a) => a.toLowerCase())
 		this.gasKeeper = new GasKeeper(
 			config.gasKeeper.chains,
 			config.gasKeeper.intervalMs,
 			this.txm,
 			this.keyring,
 			() => (this.registry ? bodyOf(this.registry) : null),
-			() => this.compromised,
+			() => new Set([...this.denied, ...refusedOwners]),
 			this.alerter,
 			this.audit,
 			this.p.gasState,
@@ -110,7 +111,7 @@ export class SignerService {
 			policyHash: this.policy.hash,
 			arrays: (this.registry?.arrays ?? []).map((a) => ({ name: a.name, account: a.account, count: a.count, chains: a.chains, status: a.status })),
 			disabledClients: [...this.disabledClients],
-			compromisedCount: this.compromised.size,
+			deniedCount: this.denied.size,
 			stuckTx: this.txm.stuck().map((r) => ({ id: r.id, hash: r.hash, array: r.array })),
 		}
 	}
@@ -196,9 +197,9 @@ export class SignerService {
 		const next = Policy.load(this.config.policyFile)
 		const prev = this.policy.hash
 		this.policy = next
-		this.loadCompromised()
+		this.loadDenied()
 		this.audit.write({ event: 'policy.reload', prev, next: next.hash, clients: next.clients() })
-		return { prev, next: next.hash, clients: next.clients(), compromised: this.compromised.size }
+		return { prev, next: next.hash, clients: next.clients(), denied: this.denied.size }
 	}
 
 	setClientDisabled(name: string, disabled: boolean): unknown {
@@ -223,16 +224,16 @@ export class SignerService {
 		return file.arrays.filter((a) => a.name === name)
 	}
 
-	private loadCompromised(): void {
-		this.compromised.clear()
-		if (!existsSync(this.config.compromisedFile)) return
-		const list = JSON.parse(readFileSync(this.config.compromisedFile, 'utf8')) as { addresses?: string[] } | string[]
+	private loadDenied(): void {
+		this.denied.clear()
+		if (!existsSync(this.config.deniedAddressesFile)) return
+		const list = JSON.parse(readFileSync(this.config.deniedAddressesFile, 'utf8')) as { addresses?: string[] } | string[]
 		const arr = Array.isArray(list) ? list : (list.addresses ?? [])
-		for (const a of arr) if (isAddress(a)) this.compromised.add(a.toLowerCase())
+		for (const a of arr) if (isAddress(a)) this.denied.add(a.toLowerCase())
 	}
 
-	compromisedList(): string[] {
-		return [...this.compromised].map((a) => getAddress(a))
+	deniedList(): string[] {
+		return [...this.denied].map((a) => getAddress(a))
 	}
 
 	// ---------- client ops ----------
@@ -349,14 +350,14 @@ export class SignerService {
 		try {
 			decision = this.policy.checkCall(
 				{ client, array: p.keyArray, chainId, to: p.to, data: p.data, value, gasLimit },
-				{ compromised: this.compromised, registry: this.registrySet() },
+				{ denied: this.denied, registry: this.registrySet() },
 			)
 		} catch (e) {
 			this.audit.write({ event: 'deny', client, array: p.keyArray, chainId, to: p.to, selector: p.data?.slice(0, 10), reason: (e as Error).message })
 			throw e
 		}
-		// Hard rule: never send value to a compromised address.
-		if (value > 0n && this.compromised.has(p.to.toLowerCase())) throw denied('value transfer to a compromised address')
+		// Hard rule: never send value to a denied address.
+		if (value > 0n && this.denied.has(p.to.toLowerCase())) throw denied('value transfer to a denied address')
 		const g = decision.grant
 		this.takeRate(client, p.keyArray, g.rate)
 		const capGwei = g.maxGasPriceGwei?.[String(chainId)]
@@ -393,7 +394,7 @@ export class SignerService {
 		if (!this.activeAddresses(info.array).includes(getAddress(from))) throw denied('key array retired')
 		this.policy.checkCall(
 			{ client, array: info.array, chainId, to: tx.to ?? '', data: tx.data, value: tx.value, gasLimit: tx.gasLimit },
-			{ compromised: this.compromised, registry: this.registrySet() },
+			{ denied: this.denied, registry: this.registrySet() },
 		)
 		this.takeRate(client, info.array, g.rate)
 		const raw = this.keyring.signTransaction(from, tx)

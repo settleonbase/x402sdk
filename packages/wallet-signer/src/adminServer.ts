@@ -102,8 +102,8 @@ async function exec(svc: SignerService, cmd: string, a: Record<string, unknown>)
 		}
 		case 'tx.list':
 			return svc.txm.recent(Number(a.limit ?? 20)).map(({ raw: _r, data: _d, ...rest }) => rest)
-		case 'compromised.list':
-			return svc.compromisedList()
+		case 'denied.list':
+			return svc.deniedList()
 		default:
 			throw new SignerError(ErrorCode.METHOD_NOT_FOUND, `unknown command ${cmd}`)
 	}

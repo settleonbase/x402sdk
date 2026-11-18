@@ -13,7 +13,7 @@ import { RateLimiter } from '../src/rateLimit'
 import { redactText } from '../src/redact'
 import { addArray, emptyRegistry, growArray, rotateArray, signRegistry, verifyRegistry } from '../src/registry'
 import { resolveTypedDataNonce } from '../src/typedDataReplay'
-import { BEAMIO_ORACLE_CONTRACT, GAS_KEEPER_CHAIN_ID, GasKeeper, LEAKED_ORACLE_OWNER, ORACLE_DAEMON_CLIENT, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, adminGasRunRefusal, decodeAddressWord, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, isEmptyRuntimeCode, oracleQuoteNeedWei, selectOracleOwnerRecipients, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
+import { BEAMIO_ORACLE_CONTRACT, GAS_KEEPER_CHAIN_ID, GasKeeper, ORACLE_DAEMON_CLIENT, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, adminGasRunRefusal, decodeAddressWord, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, isEmptyRuntimeCode, oracleQuoteNeedWei, selectOracleOwnerRecipients, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
 import type { KeyArray } from '../src/registry'
 import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } from '../src/txManager'
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
@@ -71,7 +71,8 @@ test('registry: add / grow / rotate, attestation, tamper detection', () => {
 
 test('policy: selector, target, arg rules and chain', () => {
 	const epoch = '0x648f1a17269627C3d465fEa40b3C229f7CacE5cA'
-	const leaked = '0x4a3aad1ddf82aff2b3969d45b157d34c72b2efc8'
+	// Test fixture only (not a real account).
+	const denied = '0x5a1ab0000000000000000000000000000000f4f4'
 	const p = new Policy({
 		version: 1,
 		clients: {
@@ -81,7 +82,7 @@ test('policy: selector, target, arg rules and chain', () => {
 						chains: [224422],
 						allow: [
 							{ to: epoch, selectors: ['updateInfo(uint256,uint256,uint256)'], maxGas: 300000 },
-							{ to: epoch, selectors: ['changeAddressInAdminlist(address,bool)'], args: { '0': { in: '@compromised' }, '1': { eq: false } } },
+							{ to: epoch, selectors: ['changeAddressInAdminlist(address,bool)'], args: { '0': { in: '@denied' }, '1': { eq: false } } },
 						],
 					},
 				},
@@ -89,11 +90,11 @@ test('policy: selector, target, arg rules and chain', () => {
 		},
 	})
 	const iface = new Interface(['function updateInfo(uint256,uint256,uint256)', 'function changeAddressInAdminlist(address,bool)'])
-	const lists = { compromised: new Set([leaked]), registry: new Set<string>() }
+	const lists = { denied: new Set([denied]), registry: new Set<string>() }
 	const base = { client: 'dl', array: 'epochManagre', chainId: 224422, to: epoch, value: 0n }
 	assert.equal(p.checkCall({ ...base, data: iface.encodeFunctionData('updateInfo', [1, 2, 3]) }, lists).method, 'updateInfo(uint256,uint256,uint256)')
-	assert.ok(p.checkCall({ ...base, data: iface.encodeFunctionData('changeAddressInAdminlist', [leaked, false]) }, lists))
-	assert.throws(() => p.checkCall({ ...base, data: iface.encodeFunctionData('changeAddressInAdminlist', [leaked, true]) }, lists))
+	assert.ok(p.checkCall({ ...base, data: iface.encodeFunctionData('changeAddressInAdminlist', [denied, false]) }, lists))
+	assert.throws(() => p.checkCall({ ...base, data: iface.encodeFunctionData('changeAddressInAdminlist', [denied, true]) }, lists))
 	assert.throws(() => p.checkCall({ ...base, data: iface.encodeFunctionData('changeAddressInAdminlist', [Wallet.createRandom().address, false]) }, lists))
 	assert.throws(() => p.checkCall({ ...base, chainId: 8453, data: iface.encodeFunctionData('updateInfo', [1, 2, 3]) }, lists))
 	assert.throws(() => p.checkCall({ ...base, value: 1n, data: iface.encodeFunctionData('updateInfo', [1, 2, 3]) }, lists))
@@ -123,7 +124,7 @@ test('policy: gas cap follows the matched selector, not the first rule for the t
 		},
 	})
 	const iface = new Interface(['function updateInfo(uint256,uint256,uint256)', 'function poke()', 'function touch()'])
-	const lists = { compromised: new Set<string>(), registry: new Set<string>() }
+	const lists = { denied: new Set<string>(), registry: new Set<string>() }
 	const base = { client: 'dl', array: 'settle', chainId: 224422, to: epoch, value: 0n }
 	assert.equal(p.checkCall({ ...base, data: iface.encodeFunctionData('poke', []) }, lists).maxGas, 50000)
 	assert.equal(p.checkCall({ ...base, data: iface.encodeFunctionData('updateInfo', [1, 2, 3]) }, lists).maxGas, 300000)
@@ -317,7 +318,7 @@ test('config: requireMountPoint refuses an unmounted volume and paths outside it
 	const dir = mkdtempSync(join(tmpdir(), 'ws-mnt-'))
 	writeFileSync(join(dir, 'keep'), 'unchanged')
 	const before = readdirSync(dir)
-	const base = { adminSocket: '', policyFile: '', compromisedFile: '', rpc: {}, chains: {}, gasKeeper: { enabled: false, intervalMs: 1, chains: {} }, alerts: {}, scryptN: 1, keyWaitMs: 1 }
+	const base = { adminSocket: '', policyFile: '', deniedAddressesFile: '', rpc: {}, chains: {}, gasKeeper: { enabled: false, intervalMs: 1, chains: {}, refusedOwners: [] }, alerts: {}, scryptN: 1, keyWaitMs: 1 }
 	// A plain directory is on the same filesystem as its parent: "not mounted".
 	assert.throws(() => assertDataMount({ ...base, requireMountPoint: dir, dataDir: join(dir, 's'), logDir: join(dir, 'l') }), /not mounted/)
 	assert.throws(() => assertDataMount({ ...base, requireMountPoint: join(dir, 'missing'), dataDir: join(dir, 'missing', 's'), logDir: join(dir, 'missing', 'l') }), /not mounted/)
@@ -452,7 +453,7 @@ test('settle allow accepts one listed selector and rejects an unlisted selector 
 	const aa = '0x869B31C87ABd9bFB858F5183Ef6021b28ED225E2'
 	const listed = new Interface(['function createAccountFor(address) returns (address)'])
 	const unlisted = new Interface(['function addPayMaster(address)'])
-	const lists = { compromised: new Set<string>(), registry: new Set<string>() }
+	const lists = { denied: new Set<string>(), registry: new Set<string>() }
 	const settle = { client: 'conet-beamio-api', array: 'settle_contractAdmin', chainId: 224422, to: aa, value: 0n }
 	const data = listed.encodeFunctionData('createAccountFor', [synthetic])
 	assert.equal(policy.checkCall({ ...settle, data }, lists).method, 'createAccountFor(address)')
@@ -1010,7 +1011,7 @@ test('gas keeper does not pay the example owner unless the intersection matches'
 	}
 })
 
-test('gas keeper refuses other arrays, unregistered addresses, retired rows, the leaked owner, and nonempty code', async () => {
+test('gas keeper refuses other arrays, unregistered addresses, retired rows, the denied owner, and nonempty code', async () => {
 	const coded = getAddress(Wallet.createRandom().address)
 	const other = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { arrayName: 'settle_contractAdmin' })
 	const missing = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
@@ -1020,10 +1021,11 @@ test('gas keeper refuses other arrays, unregistered addresses, retired rows, the
 		owner: ORACLE_OWNER_WALLET_EXAMPLE,
 	})
 	const retired = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { arrayStatus: 'retired' })
-	const leaked = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
-		wallets: [LEAKED_ORACLE_OWNER],
-		registryAddresses: [LEAKED_ORACLE_OWNER],
-		owner: LEAKED_ORACLE_OWNER,
+	const denied = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
+		wallets: [REFUSED_FIXTURE_OWNER],
+		registryAddresses: [REFUSED_FIXTURE_OWNER],
+		owner: REFUSED_FIXTURE_OWNER,
+		refused: [REFUSED_FIXTURE_OWNER.toLowerCase()],
 	})
 	const code = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
 		wallets: [coded],
@@ -1032,7 +1034,7 @@ test('gas keeper refuses other arrays, unregistered addresses, retired rows, the
 		codes: { [coded]: '0x6000' },
 	})
 	try {
-		for (const fx of [other, missing, retired, leaked, code]) {
+		for (const fx of [other, missing, retired, denied, code]) {
 			fx.balances.set(fx.pm, 5_000_000n)
 			fx.balances.set(fx.addr, 0n)
 			await fx.gk.runOnce()
@@ -1041,7 +1043,7 @@ test('gas keeper refuses other arrays, unregistered addresses, retired rows, the
 		assert.ok(other.alerts.some((item) => item.includes(':other-array:')))
 		assert.ok(missing.alerts.some((item) => item.includes(':other-array:')))
 		assert.ok(retired.alerts.some((item) => item.includes(':inactive:')))
-		assert.ok(leaked.alerts.some((item) => item.includes(':leaked:')))
+		assert.ok(denied.alerts.some((item) => item.includes(':denied:')))
 		assert.ok(code.alerts.some((item) => item.includes(':code:')))
 		const unregistered = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, {
 			wallets: [ORACLE_OWNER_WALLET_EXAMPLE],
@@ -1057,7 +1059,7 @@ test('gas keeper refuses other arrays, unregistered addresses, retired rows, the
 			unregistered.cleanup()
 		}
 	} finally {
-		for (const fx of [other, missing, retired, leaked, code]) fx.cleanup()
+		for (const fx of [other, missing, retired, denied, code]) fx.cleanup()
 	}
 })
 
@@ -1204,6 +1206,9 @@ function keyArray(name: string, addresses: string[], status: 'active' | 'retired
 	}
 }
 
+// Test fixture only (not a real account): an owner address the gas keeper must refuse.
+const REFUSED_FIXTURE_OWNER = '0x5a1ab0000000000000000000000000000000f1f1'
+
 function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null }, opts: {
 	wallets?: string[]
 	extraWallets?: string[]
@@ -1220,6 +1225,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 	extraArrays?: KeyArray[]
 	owner?: string
 	codes?: Record<string, string>
+	refused?: string[]
 } = {}): {
 	gk: GasKeeper
 	restart: () => GasKeeper
@@ -1335,7 +1341,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 		txm as unknown as TxManager,
 		{ unlocked: opts.unlocked !== false } as unknown as Keyring,
 		registry,
-		() => new Set<string>(),
+		() => new Set<string>(opts.refused ?? []),
 		{ send(_level: string, code: string) { alerts.push(code) } },
 		new AuditLog(auditPath),
 		statePath,
@@ -1411,7 +1417,7 @@ function vdrPolicy(): Policy {
 
 test('policy: signer enforces VDR settle length; caller checks are not the whitelist', () => {
 	const p = vdrPolicy()
-	const lists = { compromised: new Set<string>(), registry: new Set<string>() }
+	const lists = { denied: new Set<string>(), registry: new Set<string>() }
 	const base = { client: 'vdr-payout', array: 'beamio_vdr_payout', chainId: 224422, to: VDR_PROXY, value: 0n }
 	assert.equal(p.checkCall({ ...base, data: settleData(1) }, lists).method, 'settleNodeRewards(uint256[],uint256[],bytes32[])')
 	assert.doesNotThrow(() => p.checkCall({ ...base, data: settleData(29) }, lists))
@@ -1451,3 +1457,29 @@ async function waitFor(pred: () => boolean, timeoutMs: number): Promise<void> {
 		await delay(10)
 	}
 }
+
+test('config: gasKeeper enabled without refusedOwners fails closed; refusedOwners must be addresses', () => {
+	const { loadConfig } = require('../src/config') as typeof import('../src/config')
+	const dir = mkdtempSync(join(tmpdir(), 'wsgk-refused-'))
+	try {
+		const base = { dataDir: dir, logDir: dir, adminSocket: join(dir, 'a.sock'), policyFile: join(dir, 'p.json'), chains: { '224422': { rpcUrls: ['http://127.0.0.1:1'] } } }
+		writeFileSync(join(dir, 'none.json'), JSON.stringify({ ...base, gasKeeper: { enabled: true, intervalMs: 60000, chains: {} } }))
+		assert.throws(() => loadConfig(join(dir, 'none.json')), /refusedOwners is required/)
+		writeFileSync(join(dir, 'bad.json'), JSON.stringify({ ...base, gasKeeper: { enabled: true, intervalMs: 60000, chains: {}, refusedOwners: ['nope'] } }))
+		assert.throws(() => loadConfig(join(dir, 'bad.json')), /is not an address/)
+		writeFileSync(join(dir, 'ok.json'), JSON.stringify({ ...base, gasKeeper: { enabled: false, intervalMs: 60000, chains: {} } }))
+		assert.deepEqual(loadConfig(join(dir, 'ok.json')).gasKeeper.refusedOwners, [])
+	} finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('config: an unknown top-level key is refused by name (no silent empty lists)', () => {
+	const { loadConfig } = require('../src/config') as typeof import('../src/config')
+	const dir = mkdtempSync(join(tmpdir(), 'wsgk-unknown-key-'))
+	try {
+		const base = { dataDir: dir, logDir: dir, adminSocket: join(dir, 'a.sock'), policyFile: join(dir, 'p.json'), chains: { '224422': { rpcUrls: ['http://127.0.0.1:1'] } } }
+		writeFileSync(join(dir, 'unknown.json'), JSON.stringify({ ...base, unknownTestKey: 'x' }))
+		assert.throws(() => loadConfig(join(dir, 'unknown.json')), /unknown top-level key "unknownTestKey"/)
+		writeFileSync(join(dir, 'ok.json'), JSON.stringify({ ...base, deniedAddressesFile: join(dir, 'd.json') }))
+		assert.equal(loadConfig(join(dir, 'ok.json')).deniedAddressesFile, join(dir, 'd.json'))
+	} finally { rmSync(dir, { recursive: true, force: true }) }
+})

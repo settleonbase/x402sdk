@@ -6,7 +6,7 @@
 	"adminSocket": "/run/wallet-signer-lab/admin.sock",
 	"adminSocketMode": 384,
 	"policyFile": "/etc/wallet-signer-lab/policy.json",
-	"compromisedFile": "/srv/secure/wallet-signer-lab/state/compromised.json",
+	"deniedAddressesFile": "/srv/secure/wallet-signer-lab/state/denied-addresses.json",
 	"rpc": {
 		"unix": [
 			{ "path": "/run/wallet-signer-lab-mining-pool/lab-payout.sock", "client": "lab-mining-pool", "mode": 432 }

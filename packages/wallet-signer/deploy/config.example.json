@@ -5,7 +5,7 @@
 	"logDir": "/srv/secure/wallet-signer/log",
 	"adminSocket": "/run/wallet-signer/admin.sock",
 	"policyFile": "/etc/wallet-signer/policy.json",
-	"compromisedFile": "/etc/wallet-signer/compromised.json",
+	"deniedAddressesFile": "/etc/wallet-signer/denied-addresses.json",
 	"rpc": {
 		"proxied": {
 			"path": "/run/wallet-signer-rpc/rpc.sock",

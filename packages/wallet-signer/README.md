@@ -25,8 +25,8 @@ integration. Host names, IPs and SSH details live in the private ops notes, not 
 | `src/txManager.ts` | nonce, fees, simulation, broadcast, re-price, idempotency journal |
 | `src/gasKeeper.ts` | PM → oracle owner intersection, with a budget. Off by default |
 | `src/rpcServer.ts` | listeners: behind nginx (trusted identity headers), direct TLS with client certificate, local unix sockets |
-| `p0/p0Plan.ts` | role-replacement plan for every contract role held by a leaked key, CoNET and Base (plan / unsigned / fork-run) |
-| `deploy/` | systemd unit, nginx front (`nginx-dle.conf`), example config / policy / compromised list |
+| `p0/p0Plan.ts` | role-replacement plan for every contract role held by an outgoing key, CoNET and Base (plan / unsigned / fork-run) |
+| `deploy/` | systemd unit, nginx front (`nginx-dle.conf`), example config / policy / denied list |
 | `test/` | unit tests, nginx-front integration (`proxy.ts`), end-to-end on an anvil fork |
 | `../../src/walletSigner/remoteSigner.ts` | client: `RemoteSigner` (ethers v6), transport, pool |
 
@@ -72,7 +72,7 @@ disk when the encrypted volume is not open. `"mode": 432` in JSON is `0660`.
 
 | Method | Params | Notes |
 |---|---|---|
-| `signer_status` | – | state, arrays this client may use, compromised list |
+| `signer_status` | – | state, arrays this client may use, denied list |
 | `signer_accounts` | `{keyArray, chainId?}` | addresses; works while locked |
 | `signer_sendTransaction` | `{keyArray, chainId, to, data, value?, gasLimit?, from?, idempotencyKey?}` | managed: simulate, nonce, fees, sign, broadcast; returns `{hash, from, nonce, raw}` |
 | `signer_getTransaction` | `{idempotencyKey}` or `{hash}` | final hash after re-pricing, status |
@@ -87,7 +87,7 @@ sent), `-32010 REGISTRY_MISMATCH`, `-32011 UPSTREAM`. Locked / busy / rate / ups
 retryable with the same idempotency key. A key whose last attempt reverted may be retried.
 
 Hard rules (not configurable): PM key is never offered to clients; no value transfers to
-compromised addresses; value defaults to 0; contract creation refused; `eth_sign` refused.
+denied addresses; value defaults to 0; contract creation refused; `eth_sign` refused.
 
 ## Daemon integration
 
@@ -114,7 +114,7 @@ Encrypt behind nginx; server verification is always on), `WALLET_SIGNER_TOKEN_FI
 
 `chat` in signer mode answers 503 `signer_unavailable` (not cached) when the signer is locked or
 unreachable. `gbAirdrop` and `epoch` reconcile roles at start and every 10 minutes: no grant →
-`WAITING_FOR_GRANT` (no writes, the grant plan is logged); epoch removes compromised admins itself.
+`WAITING_FOR_GRANT` (no writes, the grant plan is logged); epoch removes denied admins itself.
 `settle` reads no private key: the roster is the signer's `settle_contractAdmin` addresses (Base
 calls need a Base grant for the same array); until the signer answers the pool is empty and callers
 see "busy". Its policy must list every contract and selector the settle pool calls, plus the EIP-712
@@ -129,7 +129,7 @@ wsctl status | unlock | lock
 wsctl array add settle_contractAdmin --count 4 --chains 224422
 wsctl array add epochManagre --count 1 --chains 224422
 wsctl array add gbDepinAirdropAdmin --count 1 --chains 224422
-wsctl gas status | gas run | tx list | compromised
+wsctl gas status | gas run | tx list | denied
 wsctl policy reload              # after editing /etc/wallet-signer/policy.json
 wsctl client disable <cn>        # cut one daemon off immediately
 wsctl verify-vault               # offline recovery drill
@@ -159,5 +159,5 @@ The script never holds keys and never broadcasts to a public network.
 AddressPGP (chat public-key directory, `0x684b…f9e2`) is included: it has no owner and a flat
 `adminList` where any admin can add or remove any admin. P0 adds COLD and removes the four
 settle keys; P5 (`--through p5`, the default) removes the registration wallets in the order the
-API migration allows. Until P5 is done, any remaining leaked admin can remove COLD again, so
+API migration allows. Until P5 is done, any remaining outgoing admin can remove COLD again, so
 `plan` prints the current `adminList` state of every known admin (`addressPgpAdminList`).

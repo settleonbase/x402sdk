@@ -17,13 +17,13 @@ const cfgPath = path.join(etc, 'config.json')
 const adminSock = path.join(runDir, 'admin.sock')
 const rpcSock = path.join(runDir, 'rpc.sock')
 fs.writeFileSync(path.join(etc, 'policy.json'), JSON.stringify({ version: 1, clients: { 'oracle-daemon': { arrays: {} } } }))
-fs.writeFileSync(path.join(etc, 'compromised.json'), JSON.stringify({ addresses: [] }))
+fs.writeFileSync(path.join(etc, 'denied-addresses.json'), JSON.stringify({ addresses: [] }))
 fs.writeFileSync(cfgPath, JSON.stringify({
   dataDir: data,
   logDir: data,
   adminSocket: adminSock,
   policyFile: path.join(etc, 'policy.json'),
-  compromisedFile: path.join(etc, 'compromised.json'),
+  deniedAddressesFile: path.join(etc, 'denied-addresses.json'),
   rpc: { unix: [{ path: rpcSock, client: 'oracle-daemon', mode: 384 }] },
   chains: { '224422': { rpcUrls: ['http://127.0.0.1:9'], receiptPollMs: 60000, resendAfterMs: 60000 } },
   gasKeeper: { enabled: false, intervalMs: 60000, chains: {} },

@@ -213,8 +213,8 @@ async function main(): Promise<void> {
 			return call(sub === 'run' ? 'gas.run' : 'gas.status')
 		case 'tx':
 			return call('tx.list', { limit: Number(opt('--limit') ?? 20) })
-		case 'compromised':
-			return call('compromised.list')
+		case 'denied':
+			return call('denied.list')
 		default:
 			process.stdout.write(
 				[
@@ -224,7 +224,7 @@ async function main(): Promise<void> {
 					'  status | unlock | lock',
 					'  array list | add <name> --count N --chains 224422 | grow <name> --count N | rotate <name>',
 					'  policy reload | client disable|enable <name>',
-					'  gas status | gas run | tx list [--limit N] | compromised',
+					'  gas status | gas run | tx list [--limit N] | denied',
 					'',
 				].join('\n'),
 			)
