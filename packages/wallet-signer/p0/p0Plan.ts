@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * P0 / P4 / P5 role-replacement plan: every contract role held by a leaked key (CoNET and Base).
+ * P0 / P4 / P5 role-replacement plan: every contract role held by an outgoing key (CoNET and Base).
  * Does NOT hold keys and never broadcasts to a public network.
  *
  *   plan      read chain state, print every step: signer, contract, call, calldata, gas, cost
  *   unsigned  write unsigned txs (nonce, gas, fees filled) for the user's key-rotation session
- *             to sign offline and broadcast right after topping up the leaked keys
+ *             to sign offline and broadcast right after topping up the outgoing keys
  *   fork-run  execute all steps on a LOCAL anvil fork via impersonation (rehearsal only)
  *
  * node dist/p0/p0Plan.js <mode> --cold 0x.. --epoch-new 0x.. --airdrop-new 0x..[,0x..]
@@ -14,8 +14,8 @@
  * fork-run needs --chain: it runs that chain's steps against a local anvil fork given by --rpc.
  */
 import '../src/noWebSocket'
-import { writeFileSync } from 'node:fs'
-import { Contract, Interface, JsonRpcProvider, formatEther, getAddress, parseUnits, toBeHex } from 'ethers'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { Contract, Interface, JsonRpcProvider, formatEther, getAddress, isAddress, parseUnits, toBeHex } from 'ethers'
 
 export const CONET_CHAIN_ID = 224422
 export const BASE_CHAIN_ID = 8453
@@ -24,13 +24,13 @@ export const CONTRACTS = {
 	gbDepinAirdrop: '0x62bcc59cC36C737E8AfBb0914F840d12cd33025f',
 	epochMiningInfo: '0x648f1a17269627C3d465fEa40b3C229f7CacE5cA',
 	gbToken: '0xC3EF02DaE632b4C10abB66e07d92a387c10838D8',
-	/** Chat public-key directory. Flat adminList, no owner, not upgradeable; deployed by 0x87cA. */
+	/** Chat public-key directory. Flat adminList, no owner, not upgradeable; deployed by the master key. */
 	addressPGP: '0x684b0ac760cEE9c9b85de36d69746420648Cf9e2',
 	/** DepinGbSettlement1155, UUPS proxy (upgrade = onlyAdmin); itself a GB admin. */
 	depinGbSettlement1155: '0x06cf5bF56DF3E327FB30214E001A67456aaBB287',
 	/** DeveloperTokenFxRegistry, UUPS proxy (upgrade = onlyAdmin); itself a GB admin. */
 	developerTokenFxRegistry: '0x3B00a3F7341C0449e7a3D6e466f85F6F39dFf6e0',
-	/** First GBDepinAirdrop (retired); owner and admins are leaked keys; still a GB admin. */
+	/** First GBDepinAirdrop (retired); owner and admins are outgoing keys; still a GB admin. */
 	gbDepinAirdropOld: '0xBBd504a88dB1EA143A1D3a83E331F979dD3A5e44',
 	/** AccountRegistry V1 (Beamio accounts, recovery blobs). Flat admin list like AddressPGP. */
 	accountRegistryV1: '0xfFDc8d2021A41F4638Cb3eCf58B5155383EE9f6d',
@@ -51,7 +51,7 @@ export const CONTRACTS = {
 	guardianNodes: '0xBC6b53065b5647261396d002bDBA0d3396E0722f',
 } as const
 
-/** Base contracts holding leaked roles (same addresses as on CoNET, deployed with CREATE2). */
+/** Base contracts holding outgoing roles (same addresses as on CoNET, deployed with CREATE2). */
 export const BASE_CONTRACTS = {
 	gbToken: '0xC3EF02DaE632b4C10abB66e07d92a387c10838D8',
 	beamioOracle: '0x77CB8358c5a37aB7190b0A2C7EaA7fEeDCF11008',
@@ -59,48 +59,69 @@ export const BASE_CONTRACTS = {
 	aaFactory: '0x869B31C87ABd9bFB858F5183Ef6021b28ED225E2',
 } as const
 
-/** Leaked 2026-10-28 and holding roles on these contracts (public RPC, 2026-11-05). */
-export const LEAKED = {
-	master: '0x87cAeD4e51C36a2C2ece3Aaf4ddaC9693d2405E1', // settle_contractAdmin[0], GENESIS initiator; owner/admin everywhere
-	settle1: '0x678F3570F9173373bB75e7544fcF383153aDAF4C',
-	settle2: '0x24103Ea5eA17aBFfDA8b2904acCA679C798b3695',
-	settle3: '0x66BAb8A64764e659Fa7FF41D19aDFbb7b956CED2',
-	epochManagre: getAddress('0x4a3aad1ddf82aff2b3969d45b157d34c72b2efc8'),
-	/**
-	 * SI node wallet, a DepinGbSettlement1155 admin. It holds spendable CNET, so it can act
-	 * without a top-up: treat as leaked.
-	 */
-	siNode6bF3: '0x6bF3Aa7261e21Be5Fc781Ac09F9475c8A34AfEea',
+/**
+ * Address of the outgoing master key (settle_contractAdmin[0], GENESIS initiator). It is operator data and is
+ * read from a private file named by WALLET_SIGNER_P0_PRIVATE_CONFIG, never from the repository. Missing or
+ * invalid input fails closed.
+ */
+/** Keys required in the private operator file (WALLET_SIGNER_P0_PRIVATE_CONFIG). Any missing or invalid key fails closed. */
+const PRIVATE_ROLE_KEYS = ['masterAddress', 'settle1Address', 'settle2Address', 'settle3Address', 'epochManagerAddress', 'siNodeAddress'] as const
+/** Address-list keys in the same private file (arrays of addresses). */
+const PRIVATE_ROLE_LIST_KEYS = ['registrationIdleAddresses', 'registrationActiveAddresses'] as const
+
+function loadPrivateRoles(): Record<(typeof PRIVATE_ROLE_KEYS)[number], string> & Record<(typeof PRIVATE_ROLE_LIST_KEYS)[number], string[]> {
+	const path = process.env.WALLET_SIGNER_P0_PRIVATE_CONFIG
+	if (!path) throw new Error('WALLET_SIGNER_P0_PRIVATE_CONFIG is required: operator addresses live outside the repository (fail closed)')
+	let raw: Record<string, unknown>
+	try { raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown> } catch { throw new Error('WALLET_SIGNER_P0_PRIVATE_CONFIG is unreadable or not JSON (fail closed)') }
+	const out = {} as Record<(typeof PRIVATE_ROLE_KEYS)[number], string> & Record<(typeof PRIVATE_ROLE_LIST_KEYS)[number], string[]>
+	for (const key of PRIVATE_ROLE_KEYS) {
+		const v = raw[key]
+		if (typeof v !== 'string' || !isAddress(v)) throw new Error(`private config: ${key} must be an address (fail closed)`)
+		out[key] = getAddress(v)
+	}
+	for (const key of PRIVATE_ROLE_LIST_KEYS) {
+		const list = raw[key]
+		if (!Array.isArray(list)) throw new Error(`private config: ${key} must be an array of addresses (fail closed)`)
+		out[key] = list.map((a, i) => {
+			if (typeof a !== 'string' || !isAddress(a)) throw new Error(`private config: ${key}[${i}] must be an address (fail closed)`)
+			return getAddress(a)
+		})
+	}
+	return out
+}
+
+const PRIVATE_ROLES = loadPrivateRoles()
+
+/** Address of the outgoing master key (settle_contractAdmin[0], GENESIS initiator). From the private file. */
+export const PRIVATE_MASTER = PRIVATE_ROLES.masterAddress
+
+/** Role-holding addresses being replaced (public RPC read, 2026-11-05). */
+export const ROLE_HOLDERS = {
+	settle1: PRIVATE_ROLES.settle1Address,
+	settle2: PRIVATE_ROLES.settle2Address,
+	settle3: PRIVATE_ROLES.settle3Address,
+	epochManagre: PRIVATE_ROLES.epochManagerAddress,
+	/** SI node wallet, a DepinGbSettlement1155 admin. It holds spendable CNET, so it can act without a top-up. */
+	siNode6bF3: PRIVATE_ROLES.siNodeAddress,
 } as const
 
 /** The four settle_contractAdmin keys. */
-const SETTLE4 = [LEAKED.master, LEAKED.settle1, LEAKED.settle2, LEAKED.settle3] as const
+const SETTLE4 = [PRIVATE_MASTER, ROLE_HOLDERS.settle1, ROLE_HOLDERS.settle2, ROLE_HOLDERS.settle3] as const
 
 /**
  * AddressPGP admins found on chain (2026-11-05, public RPC): every tx sender of an admin-only event
- * since deployment (block 31806) plus the leaked list, each confirmed with adminList(). All are
- * operator key-file hot wallets swept on 11-04. The contract emits no admin-change event, so an admin
+ * since deployment (block 31806) plus the outgoing list, each confirmed with adminList(). All are
+ * operator key files. The contract emits no admin-change event, so an admin
  * that never wrote anything cannot be found this way: `plan` re-checks these, nothing more.
  */
 export const PGP_ADMINS = {
 	/** settle_contractAdmin keys (deployer + 3). Not used for user registration. Removed in P0. */
-	settle: [LEAKED.master, LEAKED.settle1, LEAKED.settle2, LEAKED.settle3],
+	settle: [PRIVATE_MASTER, ROLE_HOLDERS.settle1, ROLE_HOLDERS.settle2, ROLE_HOLDERS.settle3],
 	/** Registration wallets (addPublicPGPByAdmin) idle since 2026-10-29 or earlier. */
-	registrationIdle: [
-		'0x2d1D98a96a4C7E1680e43d20F43796264bfdF9E6',
-		'0x99BcBb0f4a0BF72c2d8A2E5FDD0ad3B7dAe40302',
-		'0xee73178EE888363C84713434D1570749eaeB880d',
-		'0x4a0B9B510f0E7395745fdbB8D96b2e2576960b95',
-		'0x8AcB8D56f68F28c0Aa5Ab292513f5fAA7ec6126f',
-		'0x9D54ccb9C0a7B836aE8de49fAE1573A024a347Ab',
-		'0x4a083ae4CdE5C1A621Ef711DF4cc18cad092561d',
-	],
-	/** Registration wallets the API used last (up to 2026-11-04 11:38 UTC). Removed last. */
-	registrationActive: [
-		'0xB272bC809dd8A96294f337aDED3f9602cac0E3B0',
-		'0x068759bCfd929fb17258aF372c30eE6CD277B872',
-		'0x6add8012d4DDb7dA736Ab713FdA13ef3827a05bf',
-	],
+	registrationIdle: PRIVATE_ROLES.registrationIdleAddresses,
+	/** Registration wallets the API used last. Removed last. */
+	registrationActive: PRIVATE_ROLES.registrationActiveAddresses,
 } as const
 
 const ABI = new Interface([
@@ -146,16 +167,16 @@ export type Step = {
 const read = (p: JsonRpcProvider, to: string) => new Contract(to, ABI, p)
 
 /**
- * Steps in broadcast order. P0 is one burst per chain: the leaked keys first hand COLD a seat on
- * every contract (they need a gas top-up right before, and the attacker holds the same keys, so
- * every signed tx goes out at once), then COLD revokes every leaked seat it can. Contracts with a
+ * Steps in broadcast order. P0 is one burst per chain: the outgoing keys first hand COLD a seat on
+ * every contract (they need a gas top-up right before, and the outgoing keys still hold the same authority, so
+ * every signed tx goes out at once), then COLD revokes every outgoing seat it can. Contracts with a
  * flat admin list (AddressPGP, AccountRegistry V1) keep the registration wallets until P5, so on
  * those COLD is only one admin among many until then.
  */
 export function buildSteps(cold: string, epochNew: string, airdropNew: string[], oracleOwner: string = cold, settleNew: string[] = []): Step[] {
 	const C = CONTRACTS
 	const B = BASE_CONTRACTS
-	const L = LEAKED
+	const L = { ...ROLE_HOLDERS, master: PRIVATE_MASTER }
 	const s: Step[] = []
 	const add = (x: Omit<Step, 'data' | 'chainId'> & { chainId?: number; fn: string; args: unknown[] }) => {
 		const { fn, args, chainId, ...rest } = x
@@ -163,9 +184,9 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 	}
 	const admins = (to: string) => (p: JsonRpcProvider, a: string) => read(p, to).admins!(a) as Promise<boolean>
 	const isOwner = async (p: JsonRpcProvider, to: string, who: string) => getAddress(await read(p, to).owner!()) === getAddress(who)
-	const m = `0x87cA (leaked)`
+	const m = `master (private config)`
 
-	// ---- P0, CoNET, leaked keys: a COLD seat everywhere. Upgradeable GB admins first.
+	// ---- P0, CoNET, outgoing keys: a COLD seat everywhere. Upgradeable GB admins first.
 	add({
 		id: 'depin.addAdmin(COLD)', phase: 'P0', signer: L.master, signerLabel: `${m}; 0x6bF3 also works and already has gas`, contract: C.depinGbSettlement1155, contractLabel: 'DepinGbSettlement1155 (UUPS, GB admin)',
 		call: `addAdmin(${cold})`, fn: 'addAdmin', args: [cold], gasLimit: 80_000n,
@@ -197,7 +218,7 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 		id: 'pgp.add(COLD)', phase: 'P0', signer: L.master, signerLabel: `${m}, deployer`, contract: C.addressPGP, contractLabel: 'AddressPGP',
 		call: `changeAddressInAdminlist(${cold}, true)`, fn: 'changeAddressInAdminlist', args: [cold, true], gasLimit: 80_000n,
 		done: async (p) => Boolean(await read(p, C.addressPGP).adminList!(cold)),
-		note: 'flat admin list: until P5 is done any remaining leaked admin can remove COLD again',
+		note: 'flat admin list: until P5 is done any remaining outgoing admin can remove COLD again',
 	})
 	add({
 		id: 'v1.add(COLD)', phase: 'P0', signer: L.master, signerLabel: `${m}, deployer`, contract: C.accountRegistryV1, contractLabel: 'AccountRegistry V1',
@@ -212,13 +233,13 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 		note: 'one-step; the new owner is the only key that can call updateRatesBatch',
 	})
 	add({
-		id: 'epoch.add(NEW)', phase: 'P0', signer: L.epochManagre, signerLabel: '0x4A3A (leaked epochManagre; 0x87cA works too)', contract: C.epochMiningInfo, contractLabel: 'epoch_mining_info',
+		id: 'epoch.add(NEW)', phase: 'P0', signer: L.epochManagre, signerLabel: '0x4A3A (outgoing epochManagre; master key also works)', contract: C.epochMiningInfo, contractLabel: 'epoch_mining_info',
 		call: `changeAddressInAdminlist(${epochNew}, true)`, fn: 'changeAddressInAdminlist', args: [epochNew, true], gasLimit: 80_000n,
 		done: async (p) => Boolean(await read(p, C.epochMiningInfo).adminList!(epochNew)),
-		note: 'NEW = wallet-signer epochManagre[0]; the daemon removes the leaked admins itself afterwards (P3)',
+		note: 'NEW = wallet-signer epochManagre[0]; the daemon removes the outgoing admins itself afterwards (P3)',
 	})
 
-	// Second batch (settle-pool contracts): owner / admin seats held by 0x87cA.
+	// Second batch (settle-pool contracts): owner / admin seats held by the master key.
 	add({
 		id: 'diamond.transferOwnership', phase: 'P0', signer: L.master, signerLabel: `${m} owner`, contract: C.indexerDiamond, contractLabel: 'Indexer diamond (any admin can diamondCut)',
 		call: `transferOwnership(${cold})`, fn: 'transferOwnership', args: [cold], gasLimit: 60_000n,
@@ -251,10 +272,10 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 		id: 'guardian.add(COLD)', phase: 'P0', signer: L.master, signerLabel: m, contract: C.guardianNodes, contractLabel: 'GuardianNodesInfoV6 (node table)',
 		call: `changeAddressInAdminlist(${cold}, true)`, fn: 'changeAddressInAdminlist', args: [cold, true], gasLimit: 80_000n,
 		done: async (p) => Boolean(await read(p, C.guardianNodes).adminList!(cold)),
-		note: 'flat list: all leaked admins are removed in the same burst',
+		note: 'flat list: all outgoing admins are removed in the same burst',
 	})
 
-	// ---- P0, CoNET, COLD: revoke every leaked seat it can.
+	// ---- P0, CoNET, COLD: revoke every outgoing seat it can.
 	const revoke = (idp: string, to: string, label: string, list: readonly string[], fn: 'removeAdmin' | 'removeGbSettler', check: (p: JsonRpcProvider, a: string) => Promise<boolean>, chainId?: number) => {
 		for (const bad of list) {
 			add({
@@ -267,21 +288,21 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 	revoke('depin', C.depinGbSettlement1155, 'DepinGbSettlement1155', [...SETTLE4, L.siNode6bF3], 'removeAdmin', admins(C.depinGbSettlement1155))
 	revoke('fxreg', C.developerTokenFxRegistry, 'DeveloperTokenFxRegistry', SETTLE4, 'removeAdmin', admins(C.developerTokenFxRegistry))
 	revoke('gb', C.gbToken, 'GBToken', [L.master, C.gbDepinAirdropOld], 'removeAdmin', admins(C.gbToken))
-	// GBDepinAirdrop: owner-gated, so leaked admins cannot fight back. Airdrop is down anyway (no gas),
+	// GBDepinAirdrop: owner-gated, so outgoing admins cannot fight back. Airdrop is down anyway (no gas),
 	// so revoking now loses nothing; P4 only adds the signer's key.
 	revoke('gba', C.gbDepinAirdrop, 'GBDepinAirdrop', SETTLE4, 'removeAdmin', admins(C.gbDepinAirdrop))
 	revoke('gba', C.gbDepinAirdrop, 'GBDepinAirdrop', SETTLE4, 'removeGbSettler', (p, a) => read(p, C.gbDepinAirdrop).gbSettlers!(a) as Promise<boolean>)
 	revoke('chat', C.chatIndexRegistry, 'ChatIndexRegistry', [L.master], 'removeAdmin', admins(C.chatIndexRegistry))
-	const allLeakedRegs = [...PGP_ADMINS.registrationIdle, ...PGP_ADMINS.registrationActive]
+	const allOutgoingRegs = [...PGP_ADMINS.registrationIdle, ...PGP_ADMINS.registrationActive]
 	const diamondAdmin = (p: JsonRpcProvider, a: string) => read(p, C.indexerDiamond).isAdmin!(a) as Promise<boolean>
-	for (const bad of [...SETTLE4, ...allLeakedRegs]) {
+	for (const bad of [...SETTLE4, ...allOutgoingRegs]) {
 		add({
 			id: `diamond.setAdmin(${bad.slice(0, 6)},false)`, phase: 'P0', signer: cold, signerLabel: 'COLD', contract: C.indexerDiamond, contractLabel: 'Indexer diamond',
 			call: `setAdmin(${bad}, false)`, fn: 'setAdmin', args: [bad, false], gasLimit: 60_000n,
 			done: async (p) => !(await diamondAdmin(p, bad)),
 		})
 	}
-	revoke('bunit2', C.bunitAirdropV2, 'BUnitAirdropV2', [...SETTLE4, ...allLeakedRegs], 'removeAdmin', admins(C.bunitAirdropV2))
+	revoke('bunit2', C.bunitAirdropV2, 'BUnitAirdropV2', [...SETTLE4, ...allOutgoingRegs], 'removeAdmin', admins(C.bunitAirdropV2))
 	revoke('agentRef', C.agentReferrer, 'AgentReferrerRegistry', [L.master], 'removeAdmin', admins(C.agentReferrer))
 	const cardPm = (to: string) => (p: JsonRpcProvider, a: string) => read(p, to).isPaymaster!(a) as Promise<boolean>
 	const unpay = (idp: string, to: string, label: string, list: readonly string[], chainId?: number) => {
@@ -295,12 +316,11 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 	}
 	unpay('cardFactory', C.cardFactory, 'UserCard factory (CoNET)', SETTLE4)
 	const guardianAdmin = (p: JsonRpcProvider, a: string) => read(p, C.guardianNodes).adminList!(a) as Promise<boolean>
-	for (const bad of [...SETTLE4, ...allLeakedRegs, L.epochManagre]) {
+	for (const bad of [...SETTLE4, ...allOutgoingRegs, L.epochManagre]) {
 		add({
 			id: `guardian.remove(${bad.slice(0, 6)})`, phase: 'P0', signer: cold, signerLabel: 'COLD', contract: C.guardianNodes, contractLabel: 'GuardianNodesInfoV6',
 			call: `changeAddressInAdminlist(${bad}, false)`, fn: 'changeAddressInAdminlist', args: [bad, false], gasLimit: 60_000n,
 			done: async (p) => !(await guardianAdmin(p, bad)),
-			note: bad === '0xee73178EE888363C84713434D1570749eaeB880d' ? 'SI wallet: node-table writes stop until a signer key is granted (P5)' : undefined,
 		})
 	}
 	const flat = (idp: string, to: string, label: string, list: readonly string[], phase: 'P0' | 'P5', viewFn: 'adminList' | 'isAdmin', activeNote?: readonly string[]) => {
@@ -317,7 +337,7 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 	flat('pgp', C.addressPGP, 'AddressPGP', PGP_ADMINS.settle, 'P0', 'adminList')
 	flat('v1', C.accountRegistryV1, 'AccountRegistry V1', PGP_ADMINS.settle, 'P0', 'isAdmin')
 
-	// ---- P0, Base: 0x87cA needs a Base ETH top-up first.
+	// ---- P0, Base: the master key needs a Base ETH top-up first.
 	add({
 		id: 'base.gb.addAdmin(COLD)', phase: 'P0', chainId: BASE_CHAIN_ID, signer: L.master, signerLabel: `${m}, Base`, contract: B.gbToken, contractLabel: 'GBToken on Base (UUPS)',
 		call: `addAdmin(${cold})`, fn: 'addAdmin', args: [cold], gasLimit: 80_000n,
@@ -349,7 +369,7 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 			done: async (p) => !(await read(p, C.epochMiningInfo).adminList!(bad)),
 		})
 	}
-	// ---- P4: COLD grants the signer's airdrop key (the leaked ones are already gone in P0).
+	// ---- P4: COLD grants the signer's airdrop key (the outgoing ones are already gone in P0).
 	for (const a of airdropNew) {
 		add({
 			id: `gba.addAdmin(${a.slice(0, 6)})`, phase: 'P4', signer: cold, signerLabel: 'COLD', contract: C.gbDepinAirdrop, contractLabel: 'GBDepinAirdrop',
@@ -357,13 +377,13 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 			done: (p) => admins(C.gbDepinAirdrop)(p, a),
 		})
 	}
-	// ---- P5: registration wallets on the two flat lists, once registration runs on a non-leaked key
+	// ---- P5: registration wallets on the two flat lists, once registration runs on a non-outgoing key
 	// (signer array or addPublicPGPBySig). Idle ones first, active ones last.
 	const regs = [...PGP_ADMINS.registrationIdle, ...PGP_ADMINS.registrationActive]
 	flat('pgp', C.addressPGP, 'AddressPGP', regs, 'P5', 'adminList', PGP_ADMINS.registrationActive)
 	flat('v1', C.accountRegistryV1, 'AccountRegistry V1', regs, 'P5', 'isAdmin', PGP_ADMINS.registrationActive)
 	// ---- P5: the signer's settle_contractAdmin keys (settleNew) get the relayer seats, then the
-	// leaked payMasters go (the AA factories keep at least one payMaster at all times).
+	// outgoing payMasters go (the AA factories keep at least one payMaster at all times).
 	for (const n of settleNew) {
 		const g = (id: string, to: string, label: string, fn: string, args: unknown[], done: (p: JsonRpcProvider) => Promise<boolean>, chainId?: number) =>
 			add({ id: `${id}(${n.slice(0, 6)})`, phase: 'P5', chainId, signer: cold, signerLabel: 'COLD', contract: to, contractLabel: label, call: `${fn}(${args.join(', ')})`, fn, args, gasLimit: 80_000n, done })
@@ -386,7 +406,7 @@ export function buildSteps(cold: string, epochNew: string, airdropNew: string[],
 				done: async (p) => !(await read(p, C.aaFactoryV2).isPayMaster!(bad)),
 			})
 		}
-		for (const [idp, to, label, chainId, list] of [['aaFactory', C.aaFactory, 'AA factory (CoNET)', CONET_CHAIN_ID, [...SETTLE4, ...allLeakedRegs]], ['base.aaFactory', B.aaFactory, 'AA factory (Base)', BASE_CHAIN_ID, [...SETTLE4, ...allLeakedRegs]]] as const) {
+		for (const [idp, to, label, chainId, list] of [['aaFactory', C.aaFactory, 'AA factory (CoNET)', CONET_CHAIN_ID, [...SETTLE4, ...allOutgoingRegs]], ['base.aaFactory', B.aaFactory, 'AA factory (Base)', BASE_CHAIN_ID, [...SETTLE4, ...allOutgoingRegs]]] as const) {
 			for (const bad of list) {
 				add({
 					id: `${idp}.removePayMaster(${bad.slice(0, 6)})`, phase: 'P5', chainId, signer: cold, signerLabel: 'COLD', contract: to, contractLabel: label,
@@ -504,7 +524,7 @@ async function main(): Promise<void> {
 		return
 	}
 	if (mode === 'unsigned') {
-		// EIP-1559 with a generous tip: leaked-key txs must land in the next block (the attacker
+		// EIP-1559 with a generous tip: outgoing-key txs must land in the next block (the outgoing keys
 		// can replace a pending tx at the same nonce). Defaults per chain; override with flags.
 		const fees: Record<number, { maxFee: bigint; tip: bigint }> = {
 			[CONET_CHAIN_ID]: { maxFee: parseUnits(arg('--max-fee-gwei') ?? '5', 'gwei'), tip: parseUnits(arg('--tip-gwei') ?? '2', 'gwei') },
@@ -528,7 +548,7 @@ async function main(): Promise<void> {
 			need.set(k, (need.get(k) ?? 0n) + BigInt(t.tx.gasLimit) * BigInt(t.tx.maxFeePerGas))
 		}
 		const topup = Object.fromEntries([...need].map(([k, v]) => [k, formatEther(v)]))
-		const out = { note: 'sign with the matching key, broadcast in order; P0 leaked-key txs immediately after the top-up (key = chainId:signer)', topUpNeeded: topup, txs }
+		const out = { note: 'sign with the matching key, broadcast in order; P0 outgoing-key txs immediately after the top-up (key = chainId:signer)', topUpNeeded: topup, txs }
 		console.log(JSON.stringify(out, null, 2))
 		if (arg('--out')) writeFileSync(arg('--out')!, JSON.stringify(out, null, 2))
 		return
