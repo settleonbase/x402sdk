@@ -216,7 +216,7 @@ import {
 	type NfcLinkAppSessionDb,
 	updateMerchantCardStripeSession,
 } from './db'
-import { gateChargeRelay, recheckBindingBeforeBroadcast, type ChargeFeeDeps } from './endpoint/chargeRelayGate'
+import { gateChargeRelay, recheckBindingBeforeBroadcast, verifyChargeFeePayer, type ChargeFeeDeps } from './endpoint/chargeRelayGate'
 import { readActivePosTerminalBindingForCharge } from './db'
 import { invalidateIssuedCouponSeriesQueryCachesForCard } from './endpoint/issuedCouponSeriesQueryCache'
 import { syncAllIssuedCouponSocialPromotionFromShareMetadata } from './endpoint/issuedCouponSocialPromotionMetadataSync'
@@ -9888,29 +9888,20 @@ export const OpenContainerRelayPreCheckBUnitFee = async (
 	_currencyAmount: string | string[],
 	/** 由 selectChargeCard + 绑定核验给出的卡（checksum）。费用卡只能来自它。 */
 	verifiedCardAddress: string
-): Promise<{ success: boolean; error?: string; feeBUnits6?: bigint; feePayerEOA?: string }> => {
+): Promise<{ success: boolean; error?: string; status?: 400 | 503; feeBUnits6?: bigint; feePayerEOA?: string }> => {
 	try {
 		const items = payload.items ?? []
-		if (items.length === 0) return { success: false, error: 'items required for charge fee check' }
+		if (items.length === 0) return { success: false, status: 400, error: 'items required for charge fee check' }
 		const { bServiceUnits6: feeBUnits6 } = calcChargeFixedBUnitFee()
 		const cardAddr = ethers.getAddress(verifiedCardAddress)
-		const cardProvider = providerForUserCardChain(await resolveUserCardChain(cardAddr))
-		const feePayerOwnerEoa = await resolveChargeBUnitFeePayerCardOwnerForCard(cardProvider, cardAddr)
-		const aaFactoryAddr = await getCardAaFactoryAddress(cardAddr)
-		const picked = await pickBUnitFeeConsumerPreferMerchantCardThenOwner(cardAddr, feePayerOwnerEoa, feeBUnits6, {
-			aaFactoryAddress: aaFactoryAddr,
-			aaFactoryProvider: cardProvider,
-		})
-		if (!picked.ok) {
-			return {
-				success: false,
-				error: `Insufficient B-Units for charge (${picked.error})`,
-			}
-		}
-		return { success: true, feeBUnits6, feePayerEOA: picked.consumer }
+		/** 与 Master 广播前完全相同的严格付款人判定：读取失败 503，确定不足 400。 */
+		const verdict = await verifyChargeFeePayer({ cardAddress: cardAddr, deps: chargeFeeDepsForMaster(feeBUnits6) })
+		if (!verdict.ok) return { success: false, status: verdict.status, error: verdict.error }
+		return { success: true, feeBUnits6, feePayerEOA: verdict.consumer }
 	} catch (e: any) {
 		return {
 			success: false,
+			status: 503,
 			error: `Charge B-Unit fee check failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
 		}
 	}

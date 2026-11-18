@@ -11302,7 +11302,7 @@ IMPORTANT: Reply in the SAME language as the user. If user asks in English, use 
 			const bunitCheck = await OpenContainerRelayPreCheckBUnitFee(body.openContainerPayload, body.currency ?? [], body.currencyAmount ?? [], chargeAdmission.cardAddress)
 			if (!bunitCheck.success) {
 				logger(Colors.red(`[AAtoEOA] server OpenContainer B-Unit pre-check FAIL: ${bunitCheck.error}`))
-				return res.status(400).json({ success: false, error: bunitCheck.error }).end()
+				return res.status(bunitCheck.status ?? 400).json({ success: false, error: bunitCheck.error }).end()
 			}
 			const payerAa = body.openContainerPayload?.account
 			if (payerAa && ethers.isAddress(payerAa)) {
