@@ -520,9 +520,10 @@ export class GasKeeper {
 		if (!state) return
 		const chainKey = String(chainId)
 		const allowed = new Set(picked.fund.map((addr) => addr.toLowerCase()))
+		// Open rows of the post-sign (Lab) array belong to the post-sign path (settleOpenRow adopts the journal record); the periodic keeper must not release them.
 		let dropped = false
 		for (const row of state.spend) {
-			if (row.chainId !== chainKey || row.status !== 'pending' || allowed.has(row.address) || row.hash) continue
+			if (row.chainId !== chainKey || row.status !== 'pending' || allowed.has(row.address) || postSignOnly.has(row.address) || row.hash) continue
 			row.status = 'released'
 			dropped = true
 			this.audit.write({ event: 'gas.topup-refused', chainId, address: row.address, reason: 'ineligible-pending' })

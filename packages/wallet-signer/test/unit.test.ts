@@ -795,6 +795,23 @@ test('shared caps are untouched by Lab on the periodic path too: Lab rows are no
 		assert.equal(fx.sends[1]!.to, fx.addr)
 	} finally { fx.cleanup() }
 })
+test('periodic keeper does not release an open Lab post-sign row; a restart without the stored hash adopts the journal record instead of sending twice', async () => {
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts())
+	try {
+		fx.balances.set(fx.addr, 0n); fx.balances.set(fx.pm, 10n ** 18n)
+		await fx.gk.afterSuccessfulSignature(fx.addr)
+		assert.equal(fx.sends.length, 1)
+		const st = JSON.parse(readFileSync(fx.statePath, 'utf8')) as { spend: Array<{ hash?: string; status: string }> }
+		delete st.spend[0]!.hash; st.spend[0]!.status = 'pending' // crash right after the send: the journal has the tx, the keeper state lost the hash
+		require('node:fs').writeFileSync(fx.statePath, JSON.stringify(st))
+		const gk2 = fx.restart()
+		await gk2.runOnce()
+		const after = JSON.parse(readFileSync(fx.statePath, 'utf8')) as { spend: Array<{ status: string }> }
+		assert.equal(after.spend[0]!.status, 'pending', 'the periodic keeper leaves the Lab row to the post-sign path')
+		await gk2.afterSuccessfulSignature(fx.addr)
+		assert.equal(fx.sends.length, 1, 'no second top-up while the first is unconfirmed')
+	} finally { fx.cleanup() }
+})
 test('periodic keeper: a post-sign-only Lab wallet is neither funded nor refused-and-alerted every cycle; without the setting the refusal repeats', async () => {
 	const withSetting = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts())
 	try {
