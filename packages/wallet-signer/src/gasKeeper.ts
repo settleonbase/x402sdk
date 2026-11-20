@@ -39,6 +39,9 @@ export const ORACLE_OWNER_ARRAY = 'beamio_oracle_owner'
 
 /** CoNET. Base (8453) and every other chain are refused. */
 export const GAS_KEEPER_CHAIN_ID = 224422
+export const LAB_POSTSIGN_CHAIN_ID = GAS_KEEPER_CHAIN_ID
+export const LAB_POSTSIGN_THRESHOLD_WEI = 10_000_000_000_000_000n
+export const LAB_POSTSIGN_TARGET_WEI = 100_000_000_000_000_000n
 
 const OWNER_CALL = '0x8da5cb5b'
 
@@ -213,6 +216,8 @@ export class GasKeeper {
 	private timer?: ReturnType<typeof setTimeout>
 	private stopped = true
 	private running = false
+	private queue: Promise<void> = Promise.resolve()
+	private postSignActive = new Map<string, Promise<void>>()
 
 	constructor(
 		private readonly chains: Record<string, GasKeeperChain>,
@@ -224,6 +229,7 @@ export class GasKeeper {
 		private readonly alerter: Alerter,
 		private readonly audit: AuditLog,
 		private readonly statePath: string,
+		private readonly postSignEnabled = false,
 	) {}
 
 	start(): void {
@@ -246,6 +252,116 @@ export class GasKeeper {
 		this.timer = undefined
 	}
 
+	private serialize<T>(task: () => Promise<T>): Promise<T> {
+		const run = this.queue.then(task, task)
+		this.queue = run.then(() => undefined, () => undefined)
+		return run
+	}
+
+	/** Check every newly produced signing wallet against CoNET. Funding still uses the
+	 * existing GasKeeper whitelist, active registry/owner checks, budgets, and durable rows. */
+	async afterSuccessfulSignature(rawAddress: string): Promise<void> {
+		let address: string
+		try { address = getAddress(rawAddress) } catch { return }
+		const key = address.toLowerCase()
+		const active = this.postSignActive.get(key)
+		if (active) return active
+		const run = this.serialize(() => this.checkPostSign(address)).finally(() => this.postSignActive.delete(key))
+		this.postSignActive.set(key, run)
+		return run
+	}
+
+	private async checkPostSign(address: string): Promise<void> {
+		const chainId = LAB_POSTSIGN_CHAIN_ID
+		const chainKey = String(chainId)
+		try {
+			const provider = this.txm.provider(chainId)
+			const balance = await provider.getBalance(address)
+			if (typeof balance !== 'bigint' || balance < 0n) throw new Error('balance response is not a non-negative bigint')
+			this.audit.write({ event: 'gas.postsign.balance', chainId, address, balanceWei: balance.toString(), valid: true })
+			const cfg = this.chains[chainKey]
+			if (!this.postSignEnabled || !cfg) return
+			const whitelist = explicitBusinessWallets(cfg)
+			if (!whitelist.some((item) => item.toLowerCase() === address.toLowerCase())) {
+				this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'not-in-existing-gasKeeper-wallets' })
+				return
+			}
+			const reg = this.registry()
+			if (!reg || !this.keyring.pmAddress || getAddress(reg.pm) !== getAddress(this.keyring.pmAddress)) {
+				this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'pm-registry-binding-unavailable' })
+				return
+			}
+			const picked = await selectOracleOwnerRecipients(chainId, whitelist, reg, this.denied(), provider)
+			if (!picked.fund.some((item) => item.toLowerCase() === address.toLowerCase())) {
+				this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'not-an-active-approved-gasKeeper-target' })
+				return
+			}
+			if (balance >= LAB_POSTSIGN_THRESHOLD_WEI) return
+			if (!this.keyring.unlocked) {
+				this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'signer-locked' })
+				return
+			}
+			if (cfg.budgetWei === undefined) {
+				this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'budget-unset' })
+				return
+			}
+			const state = this.loadState()
+			if (!state) return
+			const lower = address.toLowerCase()
+			let row = openRow(state, chainKey, lower)
+			if (row) {
+				const gate = this.settleOpenRow(row)
+				this.saveState(state)
+				if (gate === 'busy') {
+					this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'pending-topup', idempotencyKey: row.idempotencyKey })
+					return
+				}
+				if (gate === 'clear') row = undefined
+				if (gate === 'resume' && row && balance >= LAB_POSTSIGN_THRESHOLD_WEI) {
+					row.status = 'released'
+					this.saveState(state)
+					return
+				}
+			}
+			if (balance >= LAB_POSTSIGN_THRESHOLD_WEI) return
+			const target = LAB_POSTSIGN_TARGET_WEI
+			if (target <= balance) return
+			const amount = row ? BigInt(row.amountWei) : target - balance
+			const fee = await provider.getFeeData()
+			const worstFee = worstFeeWei(fee.gasPrice, fee.maxFeePerGas)
+			if (worstFee === undefined) throw new Error('fee response unavailable')
+			if (cfg.maxFeePerGasWei !== undefined && worstFee > BigInt(cfg.maxFeePerGasWei)) {
+				this.deferTopup(chainId, chainKey, address, 'fee-cap', { balanceWei: balance.toString(), worstFeeWei: worstFee.toString() })
+				return
+			}
+			const pm = getAddress(reg.pm)
+			const pmBalance = await provider.getBalance(pm)
+			if (typeof pmBalance !== 'bigint' || pmBalance < 0n) throw new Error('PM balance response is invalid')
+			const gasReserve = NATIVE_TOPUP_GAS_LIMIT * worstFee
+			if (pmBalance < amount + gasReserve) {
+				this.alerter.send('critical', `pm-empty:${chainId}`, `PM cannot cover post-sign top-up of ${address} plus gas`)
+				return
+			}
+			if (!row) {
+				const nowIso = new Date().toISOString()
+				const used = gasKeeperUsage(state.spend, chainKey, lower, nowIso)
+				if (used.addressDaily + amount > BigInt(cfg.perAddressDailyWei)) return this.deferTopup(chainId, chainKey, address, 'address-cap', { amountWei: amount.toString() })
+				if (used.globalDaily + amount > BigInt(cfg.globalDailyWei)) return this.deferTopup(chainId, chainKey, address, 'daily-cap', { amountWei: amount.toString() })
+				if (used.globalTotal + amount > BigInt(cfg.budgetWei)) return this.deferTopup(chainId, chainKey, address, 'budget', { amountWei: amount.toString() })
+				const attempt = nextAttempt(state, chainKey, lower)
+				row = { idempotencyKey: gasKeeperTopupIdempotencyKey(chainId, lower, attempt), chainId: chainKey, address: lower, amountWei: amount.toString(), recordedAt: nowIso, status: 'pending', attempt }
+				state.spend.push(row)
+				this.saveState(state)
+			}
+			const sent = await this.broadcast(state, chainId, pm, address, row)
+			if (sent) this.audit.write({ event: 'gas.postsign.topup', chainId, address, amountWei: row.amountWei, idempotencyKey: row.idempotencyKey })
+		} catch (e) {
+			const message = errorMessage(e)
+			this.audit.write({ event: 'gas.postsign.unavailable', chainId, address, reason: message })
+			this.alerter.send('warn', `gas-postsign-unavailable:${address.toLowerCase()}`, `post-sign balance/top-up unavailable for ${address}`)
+		}
+	}
+
 	async status(): Promise<Record<string, unknown>> {
 		const out: Record<string, unknown> = {}
 		const reg = this.registry()
@@ -263,6 +379,10 @@ export class GasKeeper {
 	}
 
 	async runOnce(): Promise<void> {
+		return this.serialize(() => this.runOnceSerialized())
+	}
+
+	private async runOnceSerialized(): Promise<void> {
 		if (this.running || !this.keyring.unlocked) return
 		const reg = this.registry()
 		if (!reg) return

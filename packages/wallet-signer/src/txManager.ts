@@ -103,6 +103,7 @@ export class TxManager {
 	private unpriced = new Set<string>()
 	private timer?: ReturnType<typeof setInterval>
 	private ticking = false
+	private postSignHook?: (client: string, address: string) => Promise<void>
 
 	constructor(
 		chainCfg: Record<string, ChainConfig>,
@@ -124,6 +125,19 @@ export class TxManager {
 			})
 		}
 		this.loadJournal()
+	}
+
+	setPostSignHook(hook: (client: string, address: string) => Promise<void>): void {
+		this.postSignHook = hook
+	}
+
+	private async notifyPostSign(client: string, address: string): Promise<void> {
+		try {
+			await this.postSignHook?.(client, address)
+		} catch (e) {
+			// A completed signature remains valid if the follow-up balance read is unavailable.
+			process.stderr.write(`[tx] post-sign check unavailable for ${address}: ${errorMessage(e)}\n`)
+		}
 	}
 
 	provider(chainId: number): JsonRpcProvider {
@@ -333,6 +347,7 @@ export class TxManager {
 						throw err
 					}
 					budgetHeld = 0n
+					await this.notifyPostSign(req.client, from)
 					await this.broadcastOrRecover(ctx, st, signed)
 					return signed
 				})
@@ -618,6 +633,7 @@ export class TxManager {
 		})
 		const raw = this.keyring.signTransaction(rec.from, tx)
 		const hash = Transaction.from(raw).hash!
+		await this.notifyPostSign(rec.client, rec.from)
 		try {
 			await ctx.provider.broadcastTransaction(raw)
 		} catch (e) {
