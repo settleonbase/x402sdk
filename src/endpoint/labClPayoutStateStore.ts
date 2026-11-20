@@ -1067,10 +1067,26 @@ export type LegacyMigrationDryRun = {
 	refuseReason: string | null
 }
 
+function initialHistoryState(state: SegmentedState, firstBlock?: number): SegmentedState {
+	if (firstBlock === undefined) return state
+	if (!Number.isSafeInteger(firstBlock) || firstBlock < 1) {
+		throw new Error('labClPayoutStateStore: initial history block must be a positive safe integer')
+	}
+	if (state.historyCursor != null || state.realtimeCursor != null || state.freezeH != null) {
+		throw new Error('labClPayoutStateStore: refusing to replace initialized dual cursors during migration')
+	}
+	// A persisted history cursor takes precedence over the legacy backfill and listening fields at startup.
+	return { ...state, historyCursor: firstBlock - 1 }
+}
+
 /** Read-only check. Writes nothing. */
-export function dryRunLegacyMigration(legacyFile: string, targetDir: string): LegacyMigrationDryRun {
+export function dryRunLegacyMigration(
+	legacyFile: string,
+	targetDir: string,
+	initialHistoryBlock?: number
+): LegacyMigrationDryRun {
 	const load = loadLegacyStateFile(legacyFile)
-	const summary = summarizeState(load.state)
+	const summary = summarizeState(initialHistoryState(load.state, initialHistoryBlock))
 	const backupPath = legacyBackupPathFor(legacyFile, load.sha256)
 	let backupState: LegacyMigrationDryRun['legacyBackupState'] = 'absent'
 	if (pathExistsStrict(backupPath)) {
@@ -1118,13 +1134,14 @@ export type LegacyMigrationResult = {
 export function migrateLegacyToSegmented(
 	legacyFile: string,
 	targetDir: string,
-	opts: { segmentSize?: number } = {}
+	opts: { segmentSize?: number; initialHistoryBlock?: number } = {}
 ): LegacyMigrationResult {
 	if (inspectSegmentedDir(targetDir) === 'committed') {
 		throw new Error(`labClPayoutStateStore: refusing to migrate; ${targetDir} already has a committed manifest`)
 	}
 	const load = loadLegacyStateFile(legacyFile)
-	const pre = summarizeState(load.state)
+	const candidate = initialHistoryState(load.state, opts.initialHistoryBlock)
+	const pre = summarizeState(candidate)
 	if (pre.pendingConsumedOverlap > 0) {
 		throw new Error(
 			`labClPayoutStateStore: refusing to migrate; ${pre.pendingConsumedOverlap} pending entries are also in consumedEventKeys`
@@ -1134,9 +1151,9 @@ export function migrateLegacyToSegmented(
 	if (sha256File(legacyFile) !== load.sha256) {
 		throw new Error('labClPayoutStateStore: legacy state changed while migrating; nothing committed')
 	}
-	const prepared = writeGeneration(targetDir, load.state, { segmentSize: opts.segmentSize })
+	const prepared = writeGeneration(targetDir, candidate, { segmentSize: opts.segmentSize })
 	try {
-		assertSameState(load.state, readGenerationFromManifest(targetDir, prepared.manifest))
+		assertSameState(candidate, readGenerationFromManifest(targetDir, prepared.manifest))
 	} catch (e) {
 		removeGenerationDir(targetDir, prepared.genDir)
 		throw e
@@ -1145,7 +1162,7 @@ export function migrateLegacyToSegmented(
 	const manifestPath = path.join(targetDir, SEGMENTED_MANIFEST_FILE)
 	let summary: StateSummary
 	try {
-		summary = assertSameState(load.state, readSegmentedState(targetDir))
+		summary = assertSameState(candidate, readSegmentedState(targetDir))
 		if (sha256File(legacyFile) !== load.sha256) {
 			throw new Error('labClPayoutStateStore: legacy state changed during migration')
 		}

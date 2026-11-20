@@ -24,12 +24,14 @@ type CliArgs = {
 	stateFile: string
 	apply: boolean
 	segmentSize?: number
+	initialHistoryBlock?: number
 }
 
 function usage(): string {
 	return [
-		'usage: labClPayoutStateMigrate [--state-file <legacy.json>] [--dry-run | --apply] [--segment-size <n>]',
+		'usage: labClPayoutStateMigrate [--state-file <legacy.json>] [--dry-run | --apply] [--segment-size <n>] [--initial-history-block <n>]',
 		'  default is --dry-run (read and verify only, no writes).',
+		'  --initial-history-block sets the first history window for this one-time migration.',
 	].join('\n')
 }
 
@@ -38,6 +40,7 @@ export function parseArgs(argv: string[]): CliArgs {
 	let apply = false
 	let dryRun = false
 	let segmentSize: number | undefined
+	let initialHistoryBlock: number | undefined
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i]
 		if (a === '--state-file') {
@@ -50,6 +53,10 @@ export function parseArgs(argv: string[]): CliArgs {
 			dryRun = true
 		} else if (a === '--segment-size') {
 			segmentSize = Number(argv[++i])
+		} else if (a === '--initial-history-block') {
+			initialHistoryBlock = Number(argv[++i])
+		} else if (a.startsWith('--initial-history-block=')) {
+			initialHistoryBlock = Number(a.slice('--initial-history-block='.length))
 		} else if (a === '--help' || a === '-h') {
 			throw new Error(usage())
 		} else {
@@ -64,19 +71,30 @@ export function parseArgs(argv: string[]): CliArgs {
 	if (segmentSize !== undefined && (!Number.isSafeInteger(segmentSize) || segmentSize < 1)) {
 		throw new Error('--segment-size must be a positive integer')
 	}
-	return { stateFile: resolved, apply, segmentSize }
+	if (initialHistoryBlock !== undefined && (!Number.isSafeInteger(initialHistoryBlock) || initialHistoryBlock < 1)) {
+		throw new Error('--initial-history-block must be a positive safe integer')
+	}
+	return { stateFile: resolved, apply, segmentSize, initialHistoryBlock }
 }
 
 export function runMigration(args: CliArgs): unknown {
 	const targetDir = segmentedDirForLegacy(args.stateFile)
 	if (!args.apply) {
-		return { mode: 'dry-run', ...dryRunLegacyMigration(args.stateFile, targetDir), written: false }
+		return {
+			mode: 'dry-run',
+			initialHistoryBlock: args.initialHistoryBlock,
+			...dryRunLegacyMigration(args.stateFile, targetDir, args.initialHistoryBlock),
+			written: false,
+		}
 	}
 	// Apply writes the v2 dir, so it takes the same single-writer lock as the daemon.
 	const lock = acquireStateDirLock(targetDir)
 	try {
-		const result = migrateLegacyToSegmented(args.stateFile, targetDir, { segmentSize: args.segmentSize })
-		return { mode: 'apply', ...result, written: true }
+		const result = migrateLegacyToSegmented(args.stateFile, targetDir, {
+			segmentSize: args.segmentSize,
+			initialHistoryBlock: args.initialHistoryBlock,
+		})
+		return { mode: 'apply', initialHistoryBlock: args.initialHistoryBlock, ...result, written: true }
 	} finally {
 		lock.release()
 	}

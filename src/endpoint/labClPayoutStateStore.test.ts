@@ -10,7 +10,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { assertNoRemigration, pruneOrder } from './labMiningPoolDualCursor'
+import { assertNoRemigration, nextHistoryWindow, pruneOrder } from './labMiningPoolDualCursor'
+import { parseArgs, runMigration } from './labClPayoutStateMigrate'
 import {
 	canonicalJson,
 	dryRunLegacyMigration,
@@ -356,6 +357,50 @@ test('migration: legacy pretty and compact files migrate with identical counts a
 			assert.throws(() => migrateLegacyToSegmented(legacy, targetDir), /already has a committed manifest/)
 		}
 		assert.equal(summaries[0], summaries[1], 'pretty and compact legacy produce the same v2 summary')
+	})
+})
+
+test('migration: explicitly start the first history window without replacing legacy cursors or paid keys', () => {
+	withRoot((root) => {
+		const legacy = path.join(root, 'legacy.json')
+		const old = makeState({ pending: 5, consumed: 10, exited: 2 })
+		delete old.historyCursor
+		delete old.realtimeCursor
+		delete old.freezeH
+		fs.writeFileSync(legacy, JSON.stringify(old))
+		const sha = sha256File(legacy)
+		const args = ['--state-file', legacy, '--initial-history-block', '2009200']
+		const preview = runMigration(parseArgs(args)) as { summary: unknown; written: boolean }
+		assert.equal(preview.written, false)
+		const dir = segmentedDirForLegacy(legacy)
+		assert.equal(fs.existsSync(dir), false)
+		const applied = runMigration(parseArgs([...args, '--apply'])) as { summary: unknown; written: boolean }
+		assert.equal(applied.written, true)
+		assert.deepEqual(applied.summary, preview.summary)
+		const first = readSegmentedState(dir)
+		assert.deepEqual(first, { ...old, historyCursor: 2_009_199 })
+		assert.deepEqual(nextHistoryWindow(Number(first.historyCursor), 2_234_779, 32),
+			{ line: 'history', from: 2_009_200, to: 2_009_231 })
+		writeSegmentedState(dir, { ...first, historyCursor: 2_009_231, realtimeCursor: 2_234_781 })
+		const reopened = readSegmentedState(dir)
+		assert.equal(reopened.historyCursor, 2_009_231)
+		assert.equal(reopened.realtimeCursor, 2_234_781)
+		assert.deepEqual(reopened.consumedEventKeys, old.consumedEventKeys)
+		assert.throws(() => runMigration(parseArgs([...args, '--apply'])), /already has a committed manifest/)
+		assert.equal(sha256File(legacy), sha)
+	})
+})
+
+test('migration: an explicit first history block cannot overwrite initialized dual cursors', () => {
+	withRoot((root) => {
+		const legacy = path.join(root, 'legacy.json')
+		fs.writeFileSync(legacy, JSON.stringify({ ...makeState({ pending: 1, consumed: 1, exited: 0 }), realtimeCursor: 2_200_000 }))
+		const dir = segmentedDirForLegacy(legacy)
+		assert.throws(() => dryRunLegacyMigration(legacy, dir, 2_009_200), /refusing to replace initialized dual cursors/)
+		assert.throws(() => migrateLegacyToSegmented(legacy, dir, { initialHistoryBlock: 2_009_200 }),
+			/refusing to replace initialized dual cursors/)
+		assert.equal(fs.existsSync(dir), false)
+		assert.throws(() => parseArgs(['--initial-history-block', '0']), /positive safe integer/)
 	})
 })
 
