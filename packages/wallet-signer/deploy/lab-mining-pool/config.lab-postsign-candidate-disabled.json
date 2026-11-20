@@ -15,6 +15,7 @@
 		"chains": {
 			"224422": {
 				"wallets": ["0xcFAF85E6C1765DA01a4Dc58C81b28Cd572067135"],
+				"postSignArray": "lab_mining_pool_payout",
 				"minWei": "1",
 				"targetWei": "100000000000000000",
 				"perAddressDailyWei": "0",

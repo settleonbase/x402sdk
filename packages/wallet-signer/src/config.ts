@@ -25,6 +25,12 @@ export type GasKeeperChain = {
 	 * Registry arrays are not an implicit list. Wide pool management is a later phase.
 	 */
 	wallets?: string[]
+	/**
+	 * Post-sign top-up only: ONE exact registry array name whose single-array, active, plain-account members (which must also be in `wallets`)
+	 * the post-sign path may fund, in addition to the oracle-owner rule. Absent = the oracle-owner rule alone (current behaviour).
+	 * The periodic keeper never funds these wallets.
+	 */
+	postSignArray?: string
 	/** Persistent total in wei. A new UTC day does not refill it. Missing refuses every top-up. */
 	budgetWei?: string
 	/**
@@ -241,6 +247,9 @@ function normalizeGasKeeperChain(id: string, chain: GasKeeperChain): GasKeeperCh
 		if (seen.has(key)) throw new Error(`config: gasKeeper.chains.${id}.wallets repeats ${addr}`)
 		seen.add(key)
 		wallets.push(addr)
+	}
+	if (chain.postSignArray !== undefined && (typeof chain.postSignArray !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(chain.postSignArray))) {
+		throw new Error(`config: gasKeeper.chains.${id}.postSignArray must be one registry array name (1-64 of A-Za-z0-9_.-)`)
 	}
 	if (chain.budgetWei !== undefined && !/^\d+$/.test(chain.budgetWei)) {
 		throw new Error(`config: gasKeeper.chains.${id}.budgetWei must be a wei integer`)

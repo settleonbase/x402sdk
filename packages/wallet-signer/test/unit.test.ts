@@ -614,6 +614,137 @@ test('post-sign reads the signing wallet, uses the existing whitelist, and funds
 	} finally { fx.cleanup() }
 })
 
+const LAB_ARR = 'lab_mining_pool_payout'
+const labOpts = (extra: Parameters<typeof gasFixture>[1] = {}): Parameters<typeof gasFixture>[1] => {
+	const cap = '1000000000000000000'
+	return { targetWei: cap, perAddressDailyWei: cap, globalDailyWei: cap, budgetWei: cap, arrayName: LAB_ARR, postSignArray: LAB_ARR, owner: getAddress(Wallet.createRandom().address), ...extra }
+}
+async function labSign(extra: Parameters<typeof gasFixture>[1], balance: bigint, who?: string) {
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts(extra))
+	const target = who ?? fx.addr
+	fx.balances.set(target, balance)
+	fx.balances.set(fx.pm, 10n ** 18n)
+	await fx.gk.afterSuccessfulSignature(target)
+	return fx
+}
+test('post-sign (configured array): the Lab payout wallet is funded to 0.1 CNET when strictly below 0.01 CNET, and not at exactly 0.01', async () => {
+	const below = await labSign({}, LAB_POSTSIGN_THRESHOLD_WEI - 1n)
+	try {
+		assert.equal(below.sends.length, 1)
+		assert.equal(below.sends[0]!.to, below.addr)
+		assert.equal(below.sends[0]!.value, LAB_POSTSIGN_TARGET_WEI - LAB_POSTSIGN_THRESHOLD_WEI + 1n)
+	} finally { below.cleanup() }
+	const equal = await labSign({}, LAB_POSTSIGN_THRESHOLD_WEI)
+	try { assert.equal(equal.sends.length, 0) } finally { equal.cleanup() }
+	const zero = await labSign({}, 0n)
+	try { assert.equal(zero.sends[0]!.value, LAB_POSTSIGN_TARGET_WEI, 'a valid zero balance (read succeeded) is topped up to the full target') } finally { zero.cleanup() }
+})
+test('post-sign (default config): without `postSignArray` the Lab wallet is NOT funded - current behaviour unchanged', async () => {
+	const fx = await labSign({ postSignArray: undefined }, 0n)
+	try { assert.equal(fx.sends.length, 0) } finally { fx.cleanup() }
+})
+test('post-sign (configured array): Claim/VDR-style arrays, retired Lab array, off-whitelist wallets stay refused', async () => {
+	const cases: Array<[string, Parameters<typeof gasFixture>[1]]> = [
+		['claim/vdr array', { arrayName: 'beamio_vdr_payout' }],
+		['another business array', { arrayName: 'settle_contractAdmin' }],
+		['retired Lab array', { arrayStatus: 'retired' }],
+		['not on the whitelist', { wallets: [getAddress(Wallet.createRandom().address)] }],
+	]
+	for (const [name, o] of cases) {
+		const fx = await labSign(o, 0n)
+		try { assert.equal(fx.sends.length, 0, name) } finally { fx.cleanup() }
+	}
+})
+test('post-sign (configured array): an address that is ALSO in another array is refused', async () => {
+	const x = getAddress(Wallet.createRandom().address)
+	const fx = await labSign({ registryAddresses: [x], wallets: [x], extraArrays: [keyArray('beamio_vdr_payout', [x])] }, 0n, x)
+	try { assert.equal(fx.sends.length, 0) } finally { fx.cleanup() }
+	const retiredOther = await labSign({ registryAddresses: [x], wallets: [x], extraArrays: [keyArray('old_array', [x], 'retired')] }, 0n, x)
+	try { assert.equal(retiredOther.sends.length, 0, 'membership in a retired other array also refuses') } finally { retiredOther.cleanup() }
+})
+test('post-sign (configured array): denied, contract code and the oracle contract address are refused; locked signer reads but does not fund', async () => {
+	const x = getAddress(Wallet.createRandom().address)
+	const denied = await labSign({ registryAddresses: [x], wallets: [x], refused: [x.toLowerCase()] }, 0n, x)
+	try { assert.equal(denied.sends.length, 0, 'denied') } finally { denied.cleanup() }
+	const withCode = await labSign({ registryAddresses: [x], wallets: [x], codes: { [x]: '0x6080' } }, 0n, x)
+	try { assert.equal(withCode.sends.length, 0, 'runtime code') } finally { withCode.cleanup() }
+	const oracle = await labSign({ registryAddresses: [BEAMIO_ORACLE_CONTRACT], wallets: [BEAMIO_ORACLE_CONTRACT] }, 0n, BEAMIO_ORACLE_CONTRACT)
+	try { assert.equal(oracle.sends.length, 0, 'oracle contract') } finally { oracle.cleanup() }
+	const locked = await labSign({ unlocked: false }, 0n)
+	try {
+		assert.equal(locked.sends.length, 0)
+		assert.match(readFileSync(locked.auditPath, 'utf8'), /gas\.postsign\.balance/)
+		assert.match(readFileSync(locked.auditPath, 'utf8'), /signer-locked/)
+	} finally { locked.cleanup() }
+})
+test('post-sign (configured array): budget, caps, fee cap and PM balance still apply to the Lab wallet', async () => {
+	const noBudget = await labSign({ omitBudget: true }, 0n)
+	try { assert.equal(noBudget.sends.length, 0, 'budget unset') } finally { noBudget.cleanup() }
+	const zeroBudget = await labSign({ budgetWei: '0' }, 0n)
+	try { assert.equal(zeroBudget.sends.length, 0, 'zero budget') } finally { zeroBudget.cleanup() }
+	const zeroDay = await labSign({ perAddressDailyWei: '0' }, 0n)
+	try { assert.equal(zeroDay.sends.length, 0, 'zero per-address daily') } finally { zeroDay.cleanup() }
+	const feeCap = await labSign({ maxFeePerGasWei: '0' }, 0n)
+	try { assert.equal(feeCap.sends.length, 0, 'fee cap') } finally { feeCap.cleanup() }
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts())
+	try {
+		fx.balances.set(fx.addr, 0n); fx.balances.set(fx.pm, 1n)
+		await fx.gk.afterSuccessfulSignature(fx.addr)
+		assert.equal(fx.sends.length, 0, 'PM cannot cover the top-up')
+		assert.ok(fx.alerts.some((c) => c.startsWith('pm-empty')), 'critical pm-empty alert')
+	} finally { fx.cleanup() }
+})
+test('periodic keeper: a post-sign-only Lab wallet is neither funded nor refused-and-alerted every cycle; without the setting the refusal repeats', async () => {
+	const withSetting = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts())
+	try {
+		withSetting.balances.set(withSetting.addr, 0n); withSetting.balances.set(withSetting.pm, 10n ** 18n)
+		await withSetting.gk.runOnce()
+		assert.equal(withSetting.sends.length, 0, 'periodic keeper never funds the Lab wallet')
+		const audit = existsSync(withSetting.auditPath) ? readFileSync(withSetting.auditPath, 'utf8') : ''
+		assert.doesNotMatch(audit, /gas\.topup-refused/, 'no refusal audit for the post-sign-only wallet')
+		assert.ok(!withSetting.alerts.some((c) => c.startsWith('topup-refused')), 'no refused alert')
+	} finally { withSetting.cleanup() }
+	const without = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts({ postSignArray: undefined }))
+	try {
+		without.balances.set(without.addr, 0n); without.balances.set(without.pm, 10n ** 18n)
+		await without.gk.runOnce()
+		assert.ok(without.alerts.some((c) => c.startsWith('topup-refused')), 'control: without the setting the periodic keeper refuses (other-array) and alerts')
+	} finally { without.cleanup() }
+})
+test('isPostSignArrayTarget: exact-name table (active single-array plain account only)', async () => {
+	const { isPostSignArrayTarget } = require('../src/gasKeeper') as typeof import('../src/gasKeeper')
+	const lab = getAddress(Wallet.createRandom().address)
+	const reg = (arrays: Array<[string, 'active' | 'retired']>) => ({ version: 1 as const, pm: getAddress(Wallet.createRandom().address), attestor: getAddress(Wallet.createRandom().address), updatedAt: 'x', arrays: arrays.map(([n, st]) => keyArray(n, [lab], st)) })
+	const plain = { getCode: async () => '0x' }
+	const ok = await isPostSignArrayTarget(224422, lab, reg([[LAB_ARR, 'active']]), new Set(), plain, LAB_ARR)
+	assert.deepEqual(ok, { ok: true })
+	assert.deepEqual(await isPostSignArrayTarget(224422, lab, reg([[LAB_ARR, 'active']]), new Set(), plain, undefined), { ok: false, reason: 'not-configured' })
+	assert.deepEqual(await isPostSignArrayTarget(224422, lab, reg([[LAB_ARR, 'active']]), new Set(), plain, ORACLE_OWNER_ARRAY), { ok: false, reason: 'not-configured' }, 'the oracle array can never be named')
+	assert.deepEqual(await isPostSignArrayTarget(224422, lab, reg([[LAB_ARR, 'active']]), new Set([lab.toLowerCase()]), plain, LAB_ARR), { ok: false, reason: 'denied' })
+	assert.deepEqual(await isPostSignArrayTarget(224422, lab, reg([[LAB_ARR, 'active']]), new Set(), { getCode: async () => '0x6080' }, LAB_ARR), { ok: false, reason: 'code' })
+	assert.deepEqual(await isPostSignArrayTarget(224422, lab, reg([[LAB_ARR, 'active']]), new Set(), { getCode: async () => { throw new Error('rpc') } }, LAB_ARR), { ok: false, reason: 'code' }, 'a failed code read is refusal, never a pass')
+	assert.deepEqual(await isPostSignArrayTarget(224422, lab, reg([['other_array', 'active']]), new Set(), plain, LAB_ARR), { ok: false, reason: 'other-array' })
+	assert.deepEqual(await isPostSignArrayTarget(224422, lab, reg([[LAB_ARR, 'active'], ['other_array', 'active']]), new Set(), plain, LAB_ARR), { ok: false, reason: 'other-array' })
+	assert.deepEqual(await isPostSignArrayTarget(224422, lab, reg([[LAB_ARR, 'retired']]), new Set(), plain, LAB_ARR), { ok: false, reason: 'inactive' })
+	assert.deepEqual(await isPostSignArrayTarget(224422, getAddress(Wallet.createRandom().address), reg([[LAB_ARR, 'active']]), new Set(), plain, LAB_ARR), { ok: false, reason: 'unregistered' })
+	assert.deepEqual(await isPostSignArrayTarget(1, lab, reg([[LAB_ARR, 'active']]), new Set(), plain, LAB_ARR), { ok: false, reason: 'unregistered' })
+	assert.deepEqual(await isPostSignArrayTarget(224422, BEAMIO_ORACLE_CONTRACT, reg([[LAB_ARR, 'active']]), new Set(), plain, LAB_ARR), { ok: false, reason: 'contract' })
+})
+test('config: gasKeeper.chains.<id>.postSignArray is optional, one exact array name, and malformed values are rejected', () => {
+	const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+	const { loadConfig } = require('../src/config') as typeof import('../src/config')
+	const dir = mkdtempSync(join(tmpdir(), 'ws-postsignarray-'))
+	const p = join(dir, 'c.json')
+	const chain = (extra: Record<string, unknown>) => ({ dataDir: dir, adminSocket: join(dir, 'a.sock'), policyFile: join(dir, 'p.json'), chains: { '224422': { rpcUrls: ['http://127.0.0.1:9'] } }, gasKeeper: { enabled: false, postSignEnabled: false, intervalMs: 60000, refusedOwners: [], chains: { '224422': { minWei: '1', targetWei: '2', perAddressDailyWei: '0', globalDailyWei: '0', pmWarnWei: '0', pmCriticalWei: '0', ...extra } } } })
+	try {
+		writeFileSync(p, JSON.stringify(chain({}))); assert.equal(loadConfig(p).gasKeeper.chains['224422']!.postSignArray, undefined)
+		writeFileSync(p, JSON.stringify(chain({ postSignArray: LAB_ARR }))); assert.equal(loadConfig(p).gasKeeper.chains['224422']!.postSignArray, LAB_ARR)
+		for (const bad of ['', 'has space', 'x'.repeat(65), 7, ['a'], null]) {
+			writeFileSync(p, JSON.stringify(chain({ postSignArray: bad })))
+			assert.throws(() => loadConfig(p), /postSignArray must be one registry array name/, String(bad))
+		}
+	} finally { rmSync(dir, { recursive: true, force: true }) }
+})
 test('post-sign balance RPC failure stays unavailable and never falls through to a zero balance', async () => {
 	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null })
 	try {
@@ -1140,6 +1271,7 @@ test('Lab post-sign candidate is explicitly registered but fails closed by defau
 	assert.equal(cfg.gasKeeper.enabled, false)
 	assert.equal(cfg.gasKeeper.postSignEnabled, false)
 	assert.deepEqual(chain.wallets, ['0xcFAF85E6C1765DA01a4Dc58C81b28Cd572067135'])
+	assert.equal(chain.postSignArray, 'lab_mining_pool_payout')
 	assert.equal(chain.budgetWei, '0')
 	assert.equal(chain.perAddressDailyWei, '0')
 	assert.equal(chain.globalDailyWei, '0')
@@ -1843,6 +1975,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 	owner?: string
 	codes?: Record<string, string>
 	refused?: string[]
+	postSignArray?: string
 } = {}): {
 	gk: GasKeeper
 	restart: () => GasKeeper
@@ -1948,6 +2081,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 			pmWarnWei: '1',
 			pmCriticalWei: '1',
 			wallets: [...(opts.wallets ?? [addr]), ...(opts.extraWallets ?? [])],
+			...(opts.postSignArray !== undefined ? { postSignArray: opts.postSignArray } : {}),
 		},
 	}
 	const registered = opts.registryAddresses ?? [addr]

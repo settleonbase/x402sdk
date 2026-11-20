@@ -187,6 +187,52 @@ export async function selectOracleOwnerRecipients(
 	return { owner, fund, refused }
 }
 
+/**
+ * Post-sign eligibility through ONE configured registry array (config `postSignArray`), for wallets that already passed the explicit
+ * `wallets` whitelist. The address must be in exactly one array on this chain and that array must be the named, ACTIVE one; it must not be
+ * denied, not the oracle contract, and a plain account (empty runtime code). No `owner()` requirement. The oracle-owner array can never be
+ * named here. A address that is also in any other array (active or retired) is refused.
+ */
+export async function isPostSignArrayTarget(
+	chainId: number,
+	address: string,
+	registry: RegistryBody,
+	denied: ReadonlySet<string>,
+	reader: Pick<OwnerReader, 'getCode'>,
+	arrayName: string | undefined,
+): Promise<{ ok: boolean; reason?: string }> {
+	if (!arrayName || arrayName === ORACLE_OWNER_ARRAY) return { ok: false, reason: 'not-configured' }
+	const key = getAddress(address).toLowerCase()
+	if (key === BEAMIO_ORACLE_CONTRACT.toLowerCase()) return { ok: false, reason: 'contract' }
+	if (denied.has(key)) return { ok: false, reason: 'denied' }
+	let named = false
+	let namedActive = false
+	let other = false
+	for (const arr of registry.arrays) {
+		if (!arr.chains.includes(chainId)) continue
+		if (!arr.addresses.some((raw) => { try { return getAddress(raw).toLowerCase() === key } catch { return false } })) continue
+		if (arr.name === arrayName) { named = true; if (arr.status === 'active') namedActive = true } else other = true
+	}
+	if (other) return { ok: false, reason: 'other-array' }
+	if (!named) return { ok: false, reason: 'unregistered' }
+	if (!namedActive) return { ok: false, reason: 'inactive' }
+	let code = ''
+	try { code = await reader.getCode(getAddress(address)) } catch { return { ok: false, reason: 'code' } }
+	if (!isEmptyRuntimeCode(code)) return { ok: false, reason: 'code' }
+	return { ok: true }
+}
+
+/** Active members of one registry array on a chain, lowercase (used to keep the periodic keeper off post-sign-only wallets). */
+export function activeArrayAddresses(registry: RegistryBody, chainId: number, arrayName: string | undefined): Set<string> {
+	const out = new Set<string>()
+	if (!arrayName) return out
+	for (const arr of registry.arrays) {
+		if (arr.name !== arrayName || arr.status !== 'active' || !arr.chains.includes(chainId)) continue
+		for (const raw of arr.addresses) { try { out.add(getAddress(raw).toLowerCase()) } catch { /* malformed row cannot enter */ } }
+	}
+	return out
+}
+
 export type SpendStatus = 'pending' | 'settled' | 'released'
 
 export type SpendRow = {
@@ -292,7 +338,9 @@ export class GasKeeper {
 				return
 			}
 			const picked = await selectOracleOwnerRecipients(chainId, whitelist, reg, this.denied(), provider)
-			if (!picked.fund.some((item) => item.toLowerCase() === address.toLowerCase())) {
+			let eligible = picked.fund.some((item) => item.toLowerCase() === address.toLowerCase())
+			if (!eligible) eligible = (await isPostSignArrayTarget(chainId, address, reg, this.denied(), provider, cfg.postSignArray)).ok
+			if (!eligible) {
 				this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'not-an-active-approved-gasKeeper-target' })
 				return
 			}
@@ -419,7 +467,11 @@ export class GasKeeper {
 		}
 		const p = this.txm.provider(chainId)
 		const bad = this.denied()
-		const picked = await selectOracleOwnerRecipients(chainId, wallets, reg, bad, p)
+		// Post-sign-only wallets (config `postSignArray`) are not periodic targets: keep them out of the oracle-owner selection so the periodic
+		// keeper neither funds them nor writes a refusal audit and a warn alert for them every cycle.
+		const postSignOnly = activeArrayAddresses(reg, chainId, cfg.postSignArray)
+		const periodicWallets = wallets.filter((w) => !postSignOnly.has(w.toLowerCase()))
+		const picked = await selectOracleOwnerRecipients(chainId, periodicWallets, reg, bad, p)
 		if (picked.owner === null) {
 			this.alerter.send('warn', `topup-owner-unread:${chainId}`, `gas keeper could not read BeamioOracle.owner on chain ${chainId}`)
 		}
