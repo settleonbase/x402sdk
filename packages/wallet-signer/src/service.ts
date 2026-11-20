@@ -8,7 +8,7 @@ import { canonicalHash } from './canonical'
 import { paths, type Config } from './config'
 import { ErrorCode, SignerError, denied } from './errors'
 import { GasKeeper } from './gasKeeper'
-import { decodeLabInitialGasAdminStatus, encodeLabInitialGasAdminCall, PM_LAB_INITIAL_GAS_CHAIN_ID, PM_LAB_INITIAL_GAS_RECIPIENT, requireMatchingLabInitialGasSnapshots, runPmLabInitialGas } from './pmLabInitialGas'
+import { PM_LAB_INITIAL_GAS_CHAIN_ID, requireMatchingLabInitialGasSnapshots, readLabInitialGasSnapshot, runPmLabInitialGas } from './pmLabInitialGas'
 import { HdRoot } from './hd'
 import { Keyring } from './keyring'
 import { Policy } from './policy'
@@ -358,39 +358,7 @@ export class SignerService {
 			unlocked: this.keyring.unlocked,
 			reader: {
 				async snapshot() {
-					const readAtLatestHash = async (rpc: JsonRpcProvider) => {
-						const chainHex = await rpc.send('eth_chainId', [])
-						if (typeof chainHex !== 'string' || !/^0x[0-9a-fA-F]+$/.test(chainHex)) throw new Error('RPC chainId response invalid')
-						const block = await rpc.send('eth_getBlockByNumber', ['latest', false]) as { number?: unknown; hash?: unknown } | null
-						if (!block || typeof block.number !== 'string' || !/^0x[0-9a-fA-F]+$/.test(block.number) || typeof block.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(block.hash)) throw new Error('RPC latest block response invalid')
-						const blockTag = { blockHash: block.hash, requireCanonical: true }
-						const pmCall = encodeLabInitialGasAdminCall(pm)
-						const labCall = encodeLabInitialGasAdminCall(PM_LAB_INITIAL_GAS_RECIPIENT)
-						const [pmAdminRaw, labAdminRaw, pmBalanceHex, labBalanceHex, validatorCode, labCode] = await Promise.all([
-							rpc.send('eth_call', [pmCall, blockTag]),
-							rpc.send('eth_call', [labCall, blockTag]),
-							rpc.send('eth_getBalance', [pm, blockTag]),
-							rpc.send('eth_getBalance', [PM_LAB_INITIAL_GAS_RECIPIENT, blockTag]),
-							rpc.send('eth_getCode', [pmCall.to, blockTag]),
-							rpc.send('eth_getCode', [PM_LAB_INITIAL_GAS_RECIPIENT, blockTag]),
-						])
-						const parseQuantity = (value: unknown, label: string): bigint => {
-							if (typeof value !== 'string' || !/^0x[0-9a-fA-F]+$/.test(value)) throw new Error(`RPC ${label} response invalid`)
-							return BigInt(value)
-						}
-						return {
-							chainId: parseQuantity(chainHex, 'chainId'),
-							blockNumber: parseQuantity(block.number, 'block number'),
-							blockHash: block.hash,
-							pmAdmin: decodeLabInitialGasAdminStatus(String(pmAdminRaw)),
-							labAdmin: decodeLabInitialGasAdminStatus(String(labAdminRaw)),
-							pmBalance: parseQuantity(pmBalanceHex, 'PM balance'),
-							labBalance: parseQuantity(labBalanceHex, 'Lab balance'),
-							validatorContractCode: String(validatorCode),
-							labRecipientCode: String(labCode),
-						}
-					}
-					const [first, second] = await Promise.all(providers.map(readAtLatestHash))
+					const [first, second] = await Promise.all(providers.map((rpc) => readLabInitialGasSnapshot(rpc, pm)))
 					const matched = requireMatchingLabInitialGasSnapshots(first, second)
 					audit.write({ event: 'pm.labInitialGas.preflight', chainId: matched.chainId.toString(), blockNumber: matched.blockNumber.toString(), blockHash: matched.blockHash, pmAdmin: matched.pmAdmin, labAdmin: matched.labAdmin, pmBalanceWei: matched.pmBalance.toString(), labBalanceWei: matched.labBalance.toString() })
 					return matched

@@ -33,6 +33,43 @@ export type LabInitialGasSnapshot = {
 	labRecipientCode: string
 }
 
+/** Read all policy inputs from one EIP-1898 block hash on a single RPC endpoint. */
+export async function readLabInitialGasSnapshot(rpc: { send(method: string, params: unknown[]): Promise<unknown> }, pmAddress: string): Promise<LabInitialGasSnapshot> {
+	const chainHex = await rpc.send('eth_chainId', [])
+	if (typeof chainHex !== 'string' || !/^0x[0-9a-fA-F]+$/.test(chainHex)) throw new SignerError(ErrorCode.UPSTREAM, 'RPC chainId response invalid')
+	const block = await rpc.send('eth_getBlockByNumber', ['latest', false]) as { number?: unknown; hash?: unknown } | null
+	if (!block || typeof block.number !== 'string' || !/^0x[0-9a-fA-F]+$/.test(block.number) || typeof block.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(block.hash)) throw new SignerError(ErrorCode.UPSTREAM, 'RPC latest block response invalid')
+	const blockTag = { blockHash: block.hash, requireCanonical: true }
+	const pmCall = encodeLabInitialGasAdminCall(pmAddress)
+	const labCall = encodeLabInitialGasAdminCall(PM_LAB_INITIAL_GAS_RECIPIENT)
+	const [pmAdminRaw, labAdminRaw, pmBalanceHex, labBalanceHex, validatorCode, labCode] = await Promise.all([
+		rpc.send('eth_call', [pmCall, blockTag]),
+		rpc.send('eth_call', [labCall, blockTag]),
+		rpc.send('eth_getBalance', [pmAddress, blockTag]),
+		rpc.send('eth_getBalance', [PM_LAB_INITIAL_GAS_RECIPIENT, blockTag]),
+		rpc.send('eth_getCode', [pmCall.to, blockTag]),
+		rpc.send('eth_getCode', [PM_LAB_INITIAL_GAS_RECIPIENT, blockTag]),
+	])
+	const parseQuantity = (value: unknown, label: string): bigint => {
+		if (typeof value !== 'string' || !/^0x[0-9a-fA-F]+$/.test(value)) throw new SignerError(ErrorCode.UPSTREAM, `RPC ${label} response invalid`)
+		return BigInt(value)
+	}
+	if (typeof validatorCode !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(validatorCode) || typeof labCode !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(labCode)) {
+		throw new SignerError(ErrorCode.UPSTREAM, 'RPC code response invalid')
+	}
+	return {
+		chainId: parseQuantity(chainHex, 'chainId'),
+		blockNumber: parseQuantity(block.number, 'block number'),
+		blockHash: block.hash,
+		pmAdmin: decodeLabInitialGasAdminStatus(String(pmAdminRaw)),
+		labAdmin: decodeLabInitialGasAdminStatus(String(labAdminRaw)),
+		pmBalance: parseQuantity(pmBalanceHex, 'PM balance'),
+		labBalance: parseQuantity(labBalanceHex, 'Lab balance'),
+		validatorContractCode: validatorCode,
+		labRecipientCode: labCode,
+	}
+}
+
 /** Require independent readers to agree on one EIP-1898 block anchor and all decision inputs. */
 export function requireMatchingLabInitialGasSnapshots(first: LabInitialGasSnapshot, second: LabInitialGasSnapshot): LabInitialGasSnapshot {
 	if (first.chainId !== second.chainId || first.blockNumber !== second.blockNumber || first.blockHash.toLowerCase() !== second.blockHash.toLowerCase()) {

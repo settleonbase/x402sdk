@@ -20,7 +20,7 @@ import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } f
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
 import { createVaultJson, openVault } from '../src/vault'
 import { SignerService } from '../src/service'
-import { decodeLabInitialGasAdminStatus, encodeLabInitialGasAdminCall, PM_LAB_INITIAL_GAS_ADMIN_SELECTOR, PM_LAB_INITIAL_GAS_CHAIN_ID, PM_LAB_INITIAL_GAS_CLIENT, PM_LAB_INITIAL_GAS_GAS_LIMIT, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY, PM_LAB_INITIAL_GAS_MAX_FEE_WEI, PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI, PM_LAB_INITIAL_GAS_RECIPIENT, PM_LAB_INITIAL_GAS_TARGET_WEI, requireMatchingLabInitialGasSnapshots, runPmLabInitialGas, type LabInitialGasDeps, type LabInitialGasSnapshot } from '../src/pmLabInitialGas'
+import { decodeLabInitialGasAdminStatus, encodeLabInitialGasAdminCall, PM_LAB_INITIAL_GAS_ADMIN_SELECTOR, PM_LAB_INITIAL_GAS_CHAIN_ID, PM_LAB_INITIAL_GAS_CLIENT, PM_LAB_INITIAL_GAS_GAS_LIMIT, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY, PM_LAB_INITIAL_GAS_MAX_FEE_WEI, PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI, PM_LAB_INITIAL_GAS_RECIPIENT, PM_LAB_INITIAL_GAS_TARGET_WEI, readLabInitialGasSnapshot, requireMatchingLabInitialGasSnapshots, runPmLabInitialGas, type LabInitialGasDeps, type LabInitialGasSnapshot } from '../src/pmLabInitialGas'
 import { PM_GRANT_CLIENT, PM_GRANT_VDR } from '../src/pmGrantAdmin'
 
 const PW = 'unit-test-password-123'
@@ -1262,6 +1262,42 @@ test('Lab initial Gas requires independent EIP-1898 readers to agree on block an
 	assert.equal(requireMatchingLabInitialGasSnapshots(baseline, { ...baseline, blockHash: baseline.blockHash.toUpperCase().replace('0X', '0x') }), baseline)
 	assert.throws(() => requireMatchingLabInitialGasSnapshots(baseline, { ...baseline, blockNumber: baseline.blockNumber + 1n }), /block anchors differ/)
 	assert.throws(() => requireMatchingLabInitialGasSnapshots(baseline, { ...baseline, labBalance: baseline.labBalance + 1n }), /same-block reads differ/)
+})
+
+test('Lab initial Gas dual-RPC readers pin every decision read to each endpoint block hash and reject malformed values', async () => {
+	const pm = Wallet.createRandom().address
+	const hash = `0x${'66'.repeat(32)}`
+	const endpoint = () => {
+		const calls: Array<{ method: string; params: unknown[] }> = []
+		return {
+			calls,
+			rpc: {
+				async send(method: string, params: unknown[]): Promise<unknown> {
+					calls.push({ method, params })
+					if (method === 'eth_chainId') return `0x${PM_LAB_INITIAL_GAS_CHAIN_ID.toString(16)}`
+					if (method === 'eth_getBlockByNumber') return { number: '0x222', hash }
+					if (method === 'eth_call') return `0x${'0'.repeat(63)}1`
+					if (method === 'eth_getBalance') return params[0] === pm ? '0x100' : '0x20'
+					if (method === 'eth_getCode') return params[0] === PM_GRANT_VDR ? '0x6000' : '0x'
+					throw new Error(`unexpected mock RPC method ${method}`)
+				},
+			},
+		}
+	}
+	const a = endpoint()
+	const b = endpoint()
+	const [snapshotA, snapshotB] = await Promise.all([readLabInitialGasSnapshot(a.rpc, pm), readLabInitialGasSnapshot(b.rpc, pm)])
+	assert.deepEqual(requireMatchingLabInitialGasSnapshots(snapshotA, snapshotB), snapshotA)
+	for (const reader of [a, b]) {
+		assert.equal(reader.calls[0]!.method, 'eth_chainId')
+		assert.deepEqual(reader.calls[1], { method: 'eth_getBlockByNumber', params: ['latest', false] })
+		const decisionReads = reader.calls.filter(({ method }) => ['eth_call', 'eth_getBalance', 'eth_getCode'].includes(method))
+		assert.equal(decisionReads.length, 6)
+		for (const call of decisionReads) assert.deepEqual(call.params[1], { blockHash: hash, requireCanonical: true })
+	}
+	const invalid = endpoint()
+	invalid.rpc.send = async (method, params) => method === 'eth_getBalance' && params[0] === pm ? '' : endpoint().rpc.send(method, params)
+	await assert.rejects(readLabInitialGasSnapshot(invalid.rpc, pm), /RPC PM balance response invalid/)
 })
 
 test('gas keeper refuses the oracle contract even when the whitelist names it', async () => {
