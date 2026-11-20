@@ -322,7 +322,13 @@ export class GasKeeper {
 				const refreshedBalance = await provider.getBalance(address)
 				if (typeof refreshedBalance !== 'bigint' || refreshedBalance < 0n) throw new Error('balance response is not a non-negative bigint')
 				this.audit.write({ event: 'gas.postsign.balance', chainId, address, balanceWei: refreshedBalance.toString(), valid: true, refreshed: true })
-				if (refreshedBalance >= LAB_POSTSIGN_THRESHOLD_WEI) return
+				if (refreshedBalance >= LAB_POSTSIGN_THRESHOLD_WEI) {
+					if (gate === 'resume' && row) {
+						row.status = 'released'
+						this.saveState(state)
+					}
+					return
+				}
 				balance = refreshedBalance
 			}
 			if (balance >= LAB_POSTSIGN_THRESHOLD_WEI) return

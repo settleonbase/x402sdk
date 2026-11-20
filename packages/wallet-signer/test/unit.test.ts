@@ -659,6 +659,30 @@ test('post-sign refreshes a balance after a mined pending row and does not creat
 	} finally { fx.cleanup() }
 })
 
+test('post-sign releases a hashless intent when refreshed balance is sufficient and recalculates a later attempt', async () => {
+	const cap = '1000000000000000000'
+	const low = 5_000_000_000_000_000n
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { targetWei: cap, perAddressDailyWei: cap, globalDailyWei: cap, budgetWei: cap })
+	const key = gasKeeperTopupIdempotencyKey(224422, fx.addr, 1)
+	fx.balanceSequence.push(low, LAB_POSTSIGN_THRESHOLD_WEI, low)
+	fx.balances.set(fx.pm, 1_000_000_000_000_000_000n)
+	writeFileSync(fx.statePath, JSON.stringify({ version: 2, spend: [{ idempotencyKey: key, chainId: '224422', address: fx.addr.toLowerCase(), amountWei: '123', recordedAt: new Date().toISOString(), status: 'pending', attempt: 1 }] }))
+	try {
+		await fx.gk.afterSuccessfulSignature(fx.addr)
+		let state = JSON.parse(readFileSync(fx.statePath, 'utf8')) as { spend: SpendRow[] }
+		assert.equal(state.spend[0]!.status, 'released', 'unbroadcast intent is durably released once the fresh balance is sufficient')
+		assert.equal(fx.sends.length, 0)
+
+		await fx.gk.afterSuccessfulSignature(fx.addr)
+		state = JSON.parse(readFileSync(fx.statePath, 'utf8')) as { spend: SpendRow[] }
+		assert.equal(fx.sends.length, 1)
+		assert.notEqual(fx.sends[0]!.idempotencyKey, key, 'later shortfall gets a new idempotency key')
+		assert.equal(fx.sends[0]!.value, LAB_POSTSIGN_TARGET_WEI - low, 'new amount uses the new low balance, not the stale row amount')
+		assert.equal(state.spend[1]!.amountWei, (LAB_POSTSIGN_TARGET_WEI - low).toString())
+		assert.equal(state.spend[1]!.attempt, 2)
+	} finally { fx.cleanup() }
+})
+
 test('post-sign service checks each newly created signature but not typed-data replay or wait reuse', async () => {
 	const dir = mkdtempSync(join(tmpdir(), 'post-sign-service-'))
 	const wallet = Wallet.createRandom()
