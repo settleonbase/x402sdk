@@ -1,8 +1,8 @@
 {
-	"dataDir": "/tmp/lab185-postsign-candidate/state",
-	"logDir": "/tmp/lab185-postsign-candidate/log",
-	"adminSocket": "/tmp/lab185-postsign-candidate/admin.sock",
-	"policyFile": "/tmp/lab185-postsign-candidate/policy.json",
+	"dataDir": "/tmp/wallet-signer-postsign-candidate/state",
+	"logDir": "/tmp/wallet-signer-postsign-candidate/log",
+	"adminSocket": "/tmp/wallet-signer-postsign-candidate/admin.sock",
+	"policyFile": "/tmp/wallet-signer-postsign-candidate/policy.json",
 	"rpc": { "unix": [] },
 	"chains": {
 		"224422": { "rpcUrls": ["http://127.0.0.1:9"], "resendAfterMs": 60000, "maxResends": 3, "receiptPollMs": 2000 }
@@ -36,7 +36,7 @@
 		"maxPriorityFeePerGasWei": "0"
 	},
 	"pmOneShot": { "enabled": false },
-	"alerts": { "host": "lab185-postsign-candidate" },
+	"alerts": { "host": "wallet-signer-postsign-candidate" },
 	"scryptN": 262144,
 	"keyWaitMs": 30000
 }

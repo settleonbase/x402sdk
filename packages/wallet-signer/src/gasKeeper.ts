@@ -4,6 +4,7 @@ import type { Alerter } from './alerts'
 import type { AuditLog } from './audit'
 import type { GasKeeperChain } from './config'
 import type { Keyring } from './keyring'
+import { PM_LAB_INITIAL_GAS_CLIENT, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY } from './pmLabInitialGas'
 import { errorMessage } from './redact'
 import type { RegistryBody } from './registry'
 import type { TxManager } from './txManager'
@@ -42,6 +43,11 @@ export const GAS_KEEPER_CHAIN_ID = 224422
 export const LAB_POSTSIGN_CHAIN_ID = GAS_KEEPER_CHAIN_ID
 export const LAB_POSTSIGN_THRESHOLD_WEI = 10_000_000_000_000_000n
 export const LAB_POSTSIGN_TARGET_WEI = 100_000_000_000_000_000n
+/**
+ * Global Gas rule (conet-gas-policy): ordinary auto-pay pauses above 0.03 Gwei. A post-sign top-up of a `postSignArray` (Lab) wallet uses this fixed
+ * ceiling as its fee cap; it does not read the shared per-chain `maxFeePerGasWei`, which belongs to the other keeper wallets.
+ */
+export const LAB_POSTSIGN_MAX_FEE_WEI = 30_000_000n
 
 const OWNER_CALL = '0x8da5cb5b'
 
@@ -339,17 +345,33 @@ export class GasKeeper {
 			}
 			const picked = await selectOracleOwnerRecipients(chainId, whitelist, reg, this.denied(), provider)
 			let eligible = picked.fund.some((item) => item.toLowerCase() === address.toLowerCase())
-			if (!eligible) eligible = (await isPostSignArrayTarget(chainId, address, reg, this.denied(), provider, cfg.postSignArray)).ok
+			// `viaLabArray`: eligible only through the dedicated post-sign array (the Lab payout wallet). Such a wallet has no configured amount limit
+			// by design: the budget and daily caps below do not apply to it, and it is never counted against the shared caps.
+			// It is still bounded by construction: one fixed target (0.1 CNET), the balance gap, the 0.03 Gwei global fee ceiling, the PM balance,
+			// and one open row at a time. A missing or zero shared cap is not read as "unlimited" for any other wallet.
+			let viaLabArray = false
+			if (!eligible) {
+				viaLabArray = (await isPostSignArrayTarget(chainId, address, reg, this.denied(), provider, cfg.postSignArray)).ok
+				eligible = viaLabArray
+			}
 			if (!eligible) {
 				this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'not-an-active-approved-gasKeeper-target' })
 				return
 			}
 			if (balance >= LAB_POSTSIGN_THRESHOLD_WEI) return
+			// Control point between the two Lab funding paths: while the one-shot initial Gas transfer is unconfirmed, this path must not add a second top-up.
+			if (viaLabArray) {
+				const initial = this.txm.get({ idempotencyKey: PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY, client: PM_LAB_INITIAL_GAS_CLIENT })
+				if (initial && (initial.status === 'sent' || initial.status === 'stuck')) {
+					this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'initial-gas-pending', hash: initial.hash })
+					return
+				}
+			}
 			if (!this.keyring.unlocked) {
 				this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'signer-locked' })
 				return
 			}
-			if (cfg.budgetWei === undefined) {
+			if (!viaLabArray && cfg.budgetWei === undefined) {
 				this.audit.write({ event: 'gas.postsign.defer', chainId, address, reason: 'budget-unset' })
 				return
 			}
@@ -386,7 +408,8 @@ export class GasKeeper {
 			const fee = await provider.getFeeData()
 			const worstFee = worstFeeWei(fee.gasPrice, fee.maxFeePerGas)
 			if (worstFee === undefined) throw new Error('fee response unavailable')
-			if (cfg.maxFeePerGasWei !== undefined && worstFee > BigInt(cfg.maxFeePerGasWei)) {
+			const feeCap = viaLabArray ? LAB_POSTSIGN_MAX_FEE_WEI : cfg.maxFeePerGasWei === undefined ? undefined : BigInt(cfg.maxFeePerGasWei)
+			if (feeCap !== undefined && worstFee > feeCap) {
 				this.deferTopup(chainId, chainKey, address, 'fee-cap', { balanceWei: balance.toString(), worstFeeWei: worstFee.toString() })
 				return
 			}
@@ -400,10 +423,14 @@ export class GasKeeper {
 			}
 			if (!row) {
 				const nowIso = new Date().toISOString()
-				const used = gasKeeperUsage(state.spend, chainKey, lower, nowIso)
-				if (used.addressDaily + amount > BigInt(cfg.perAddressDailyWei)) return this.deferTopup(chainId, chainKey, address, 'address-cap', { amountWei: amount.toString() })
-				if (used.globalDaily + amount > BigInt(cfg.globalDailyWei)) return this.deferTopup(chainId, chainKey, address, 'daily-cap', { amountWei: amount.toString() })
-				if (used.globalTotal + amount > BigInt(cfg.budgetWei)) return this.deferTopup(chainId, chainKey, address, 'budget', { amountWei: amount.toString() })
+				if (!viaLabArray) {
+					// Shared caps: rows of the post-sign (Lab) array never count against them.
+					const labRows = activeArrayAddresses(reg, chainId, cfg.postSignArray)
+					const used = gasKeeperUsage(state.spend.filter((r) => !labRows.has(r.address)), chainKey, lower, nowIso)
+					if (used.addressDaily + amount > BigInt(cfg.perAddressDailyWei)) return this.deferTopup(chainId, chainKey, address, 'address-cap', { amountWei: amount.toString() })
+					if (used.globalDaily + amount > BigInt(cfg.globalDailyWei)) return this.deferTopup(chainId, chainKey, address, 'daily-cap', { amountWei: amount.toString() })
+					if (used.globalTotal + amount > BigInt(cfg.budgetWei as string)) return this.deferTopup(chainId, chainKey, address, 'budget', { amountWei: amount.toString() })
+				}
 				const attempt = nextAttempt(state, chainKey, lower)
 				row = { idempotencyKey: gasKeeperTopupIdempotencyKey(chainId, lower, attempt), chainId: chainKey, address: lower, amountWei: amount.toString(), recordedAt: nowIso, status: 'pending', attempt }
 				state.spend.push(row)
@@ -563,7 +590,8 @@ export class GasKeeper {
 				continue
 			}
 			const amount = target - bal
-			const used = gasKeeperUsage(state.spend, chainKey, address, nowIso)
+			// Rows of the post-sign (Lab) array are outside the shared caps: they are excluded from this usage.
+			const used = gasKeeperUsage(state.spend.filter((r) => !postSignOnly.has(r.address)), chainKey, address, nowIso)
 			if (used.addressDaily + amount > BigInt(cfg.perAddressDailyWei)) {
 				this.deferTopup(chainId, chainKey, addr, 'address-cap', { amountWei: amount.toString() })
 				continue

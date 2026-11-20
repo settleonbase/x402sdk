@@ -28,7 +28,9 @@ export type GasKeeperChain = {
 	/**
 	 * Post-sign top-up only: ONE exact registry array name whose single-array, active, plain-account members (which must also be in `wallets`)
 	 * the post-sign path may fund, in addition to the oracle-owner rule. Absent = the oracle-owner rule alone (current behaviour).
-	 * The periodic keeper never funds these wallets.
+	 * The periodic keeper never funds these wallets. Wallets funded through this array have NO configured amount limit by design:
+	 * `budgetWei`/`perAddressDailyWei`/`globalDailyWei`/`maxFeePerGasWei` are shared with the other keeper wallets and neither stop nor are consumed by them.
+	 * They stay bounded by the fixed 0.1 CNET target, the 0.03 Gwei global fee ceiling, the PM balance and one open top-up row.
 	 */
 	postSignArray?: string
 	/** Persistent total in wei. A new UTC day does not refill it. Missing refuses every top-up. */

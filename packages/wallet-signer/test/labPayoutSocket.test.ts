@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { Interface, keccak256 } from 'ethers'
+import { Interface, getAddress, keccak256 } from 'ethers'
 import { loadConfig } from '../src/config'
 import { HdRoot, mnemonicToEntropyBytes, newMnemonic } from '../src/hd'
 import { Keyring } from '../src/keyring'
@@ -32,6 +32,7 @@ function withdrawData(to = PAYEE, amount = 1n): string {
 }
 
 let mockGasPrice = '0x989680'
+let rawSends = 0 // eth_sendRawTransaction calls that reached the chain mock
 function answer(method: string, params: unknown[]): unknown {
 	switch (method) {
 		case 'eth_chainId':
@@ -57,6 +58,7 @@ function answer(method: string, params: unknown[]): unknown {
 				baseFeePerGas: '0x1', transactions: [],
 			}
 		case 'eth_sendRawTransaction':
+			rawSends++
 			return keccak256(String(params[0]))
 		default:
 			return null
@@ -224,6 +226,46 @@ test('lab socket: positive withdrawNative send to the fixed payee signs once', a
 		assert.equal(f.signCalls.n, 1)
 	} finally {
 		await teardown(f)
+	}
+})
+
+test('lab payment path: a withdrawNative to any address other than the fixed ConetLabMiningPool makes zero signatures and zero chain submissions', async () => {
+	const f = await setup()
+	try {
+		rawSends = 0
+		const ok = await sendWithdraw(f, f.labSock, withdrawData())
+		assert.equal(ok.error, undefined, JSON.stringify(ok.error))
+		assert.equal(f.signCalls.n, 1, 'control: the fixed payee signs once')
+		assert.equal(rawSends, 1, 'control: and exactly one transaction reaches the chain')
+		const flip = (hex: string, at: number) => hex.slice(0, at) + (hex[at] === '0' ? '1' : '0') + hex.slice(at + 1)
+		const wrong = [
+			OTHER,
+			ZERO,
+			f.labAddr, // the Lab signing wallet itself
+			f.vdrAddr, // the VDR payout wallet
+			VDR, // the redeem contract itself
+			getAddress(flip(PAYEE.toLowerCase(), 2)), // first nibble differs
+			getAddress(flip(PAYEE.toLowerCase(), 41)), // last nibble differs
+		]
+		for (const to of wrong) {
+			const res = await sendWithdraw(f, f.labSock, withdrawData(to, 1n))
+			assert.match(res.error?.message ?? '', /must equal/, to)
+			assert.equal(res.result, undefined, to)
+		}
+		assert.equal(f.signCalls.n, 1, 'no wrong payee reached the signer')
+		assert.equal(rawSends, 1, 'no wrong payee produced a chain submission')
+	} finally {
+		await teardown(f)
+	}
+	// The same fixed payee in another letter case is the same address and is still accepted (fresh fixture: one in-flight tx per key).
+	const g = await setup()
+	try {
+		rawSends = 0
+		const lower = await sendWithdraw(g, g.labSock, withdrawData(PAYEE.toLowerCase(), 2n))
+		assert.equal(lower.error, undefined, JSON.stringify(lower.error))
+		assert.equal(rawSends, 1)
+	} finally {
+		await teardown(g)
 	}
 })
 

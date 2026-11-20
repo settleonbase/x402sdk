@@ -677,21 +677,122 @@ test('post-sign (configured array): denied, contract code and the oracle contrac
 		assert.match(readFileSync(locked.auditPath, 'utf8'), /signer-locked/)
 	} finally { locked.cleanup() }
 })
-test('post-sign (configured array): budget, caps, fee cap and PM balance still apply to the Lab wallet', async () => {
-	const noBudget = await labSign({ omitBudget: true }, 0n)
-	try { assert.equal(noBudget.sends.length, 0, 'budget unset') } finally { noBudget.cleanup() }
-	const zeroBudget = await labSign({ budgetWei: '0' }, 0n)
-	try { assert.equal(zeroBudget.sends.length, 0, 'zero budget') } finally { zeroBudget.cleanup() }
-	const zeroDay = await labSign({ perAddressDailyWei: '0' }, 0n)
-	try { assert.equal(zeroDay.sends.length, 0, 'zero per-address daily') } finally { zeroDay.cleanup() }
-	const feeCap = await labSign({ maxFeePerGasWei: '0' }, 0n)
-	try { assert.equal(feeCap.sends.length, 0, 'fee cap') } finally { feeCap.cleanup() }
+test('post-sign (configured array): the Lab wallet has NO configured amount limit; missing or zero shared caps do not stop it', async () => {
+	const cases: Array<[string, Parameters<typeof gasFixture>[1]]> = [
+		['budget unset', { omitBudget: true }],
+		['zero budget', { budgetWei: '0' }],
+		['zero per-address daily', { perAddressDailyWei: '0' }],
+		['zero global daily', { globalDailyWei: '0' }],
+		['shared maxFeePerGasWei = 0', { maxFeePerGasWei: '0' }],
+	]
+	for (const [name, o] of cases) {
+		const fx = await labSign(o, 0n)
+		try {
+			assert.equal(fx.sends.length, 1, name)
+			assert.equal(fx.sends[0]!.to, fx.addr, name)
+			assert.equal(fx.sends[0]!.value, LAB_POSTSIGN_TARGET_WEI, `${name}: bounded by construction to the fixed 0.1 CNET target, not by config`)
+		} finally { fx.cleanup() }
+	}
+	// Control: the SAME missing or zero caps still stop every other keeper wallet (oracle owner path). Zero is never read as unlimited there.
+	const other: Array<[string, Parameters<typeof gasFixture>[1]]> = [['budget unset', { omitBudget: true }], ['zero budget', { budgetWei: '0' }], ['zero per-address daily', { perAddressDailyWei: '0' }], ['zero global daily', { globalDailyWei: '0' }]]
+	for (const [name, o] of other) {
+		const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { targetWei: '1000000000000000000', perAddressDailyWei: '1000000000000000000', globalDailyWei: '1000000000000000000', budgetWei: '1000000000000000000', ...o })
+		try {
+			fx.balances.set(fx.addr, 0n); fx.balances.set(fx.pm, 10n ** 18n)
+			await fx.gk.afterSuccessfulSignature(fx.addr)
+			assert.equal(fx.sends.length, 0, `oracle-owner wallet, ${name}: still refused`)
+		} finally { fx.cleanup() }
+	}
+})
+test('post-sign (configured array): the fixed 0.03 Gwei global ceiling, the PM balance and the open row still bound the Lab wallet', async () => {
+	const at = gasFixture({ gasPrice: 30_000_000n, maxFeePerGas: null }, labOpts())
+	try {
+		at.balances.set(at.addr, 0n); at.balances.set(at.pm, 10n ** 18n)
+		await at.gk.afterSuccessfulSignature(at.addr)
+		assert.equal(at.sends.length, 1, 'exactly 0.03 Gwei is not above the ceiling')
+		await at.gk.afterSuccessfulSignature(at.addr)
+		assert.equal(at.sends.length, 1, 'a second signature while the first top-up is unconfirmed does not send another')
+	} finally { at.cleanup() }
+	const above = gasFixture({ gasPrice: 30_000_001n, maxFeePerGas: null }, labOpts())
+	try {
+		above.balances.set(above.addr, 0n); above.balances.set(above.pm, 10n ** 18n)
+		await above.gk.afterSuccessfulSignature(above.addr)
+		assert.equal(above.sends.length, 0, 'above 0.03 Gwei the top-up is deferred, not sent')
+		assert.match(readFileSync(above.auditPath, 'utf8'), /gas\.topup-deferred[^\n]*fee-cap/)
+	} finally { above.cleanup() }
 	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts())
 	try {
 		fx.balances.set(fx.addr, 0n); fx.balances.set(fx.pm, 1n)
 		await fx.gk.afterSuccessfulSignature(fx.addr)
 		assert.equal(fx.sends.length, 0, 'PM cannot cover the top-up')
 		assert.ok(fx.alerts.some((c) => c.startsWith('pm-empty')), 'critical pm-empty alert')
+	} finally { fx.cleanup() }
+	const unread = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts())
+	try {
+		unread.balances.set(unread.pm, 10n ** 18n); unread.balanceFailure = true
+		await unread.gk.afterSuccessfulSignature(unread.addr)
+		assert.equal(unread.sends.length, 0, 'a failed balance read is unknown: no top-up, not read as zero')
+		assert.match(readFileSync(unread.auditPath, 'utf8'), /gas\.postsign\.unavailable/)
+	} finally { unread.cleanup() }
+})
+test('post-sign (configured array): control point with the one-shot initial Gas: unconfirmed initial Gas defers, a terminal one does not', async () => {
+	const { PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY } = require('../src/pmLabInitialGas') as typeof import('../src/pmLabInitialGas')
+	const HASH = '0x' + 'ab'.repeat(32)
+	for (const status of ['sent', 'stuck']) {
+		const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts())
+		try {
+			fx.remember({ hash: HASH, status, idempotencyKey: PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY })
+			fx.balances.set(fx.addr, 0n); fx.balances.set(fx.pm, 10n ** 18n)
+			await fx.gk.afterSuccessfulSignature(fx.addr)
+			assert.equal(fx.sends.length, 0, `initial Gas ${status}: no second top-up`)
+			assert.match(readFileSync(fx.auditPath, 'utf8'), /initial-gas-pending/)
+		} finally { fx.cleanup() }
+	}
+	for (const status of ['mined', 'reverted', 'rejected', undefined]) {
+		const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, labOpts())
+		try {
+			if (status) fx.remember({ hash: HASH, status, idempotencyKey: PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY })
+			fx.balances.set(fx.addr, 0n); fx.balances.set(fx.pm, 10n ** 18n)
+			await fx.gk.afterSuccessfulSignature(fx.addr)
+			assert.equal(fx.sends.length, 1, `initial Gas ${String(status)}: the post-sign rule applies as usual`)
+		} finally { fx.cleanup() }
+	}
+	// The control point is Lab-only: it does not touch the oracle-owner wallet.
+	const owner = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { targetWei: '1000000000000000000', perAddressDailyWei: '1000000000000000000', globalDailyWei: '1000000000000000000', budgetWei: '1000000000000000000' })
+	try {
+		owner.remember({ hash: HASH, status: 'sent', idempotencyKey: PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY })
+		owner.balances.set(owner.addr, 0n); owner.balances.set(owner.pm, 10n ** 18n)
+		await owner.gk.afterSuccessfulSignature(owner.addr)
+		assert.equal(owner.sends.length, 1)
+	} finally { owner.cleanup() }
+})
+test('shared caps are untouched by Lab: a Lab top-up does not consume the budget or daily caps of the oracle-owner wallet', async () => {
+	const lab = getAddress(Wallet.createRandom().address)
+	const cap = '100000000000000000' // exactly one 0.1 CNET top-up
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { targetWei: cap, perAddressDailyWei: cap, globalDailyWei: cap, budgetWei: cap, postSignArray: LAB_ARR, extraWallets: [lab], extraArrays: [keyArray(LAB_ARR, [lab])] })
+	try {
+		fx.balances.set(fx.pm, 10n ** 18n); fx.balances.set(lab, 0n); fx.balances.set(fx.addr, 0n)
+		await fx.gk.afterSuccessfulSignature(lab)
+		assert.equal(fx.sends.length, 1)
+		assert.equal(fx.sends[0]!.to, lab)
+		await fx.gk.afterSuccessfulSignature(fx.addr)
+		assert.equal(fx.sends.length, 2, 'the oracle-owner wallet still has its full shared budget and daily cap')
+		assert.equal(fx.sends[1]!.to, fx.addr)
+		await fx.gk.afterSuccessfulSignature(fx.addr)
+		assert.equal(fx.sends.length, 2, 'the oracle-owner wallet\'s own open row blocks a repeat')
+	} finally { fx.cleanup() }
+})
+test('shared caps are untouched by Lab on the periodic path too: Lab rows are not counted by the periodic keeper', async () => {
+	const lab = getAddress(Wallet.createRandom().address)
+	const cap = '100000000000000000'
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { targetWei: cap, perAddressDailyWei: cap, globalDailyWei: cap, budgetWei: cap, postSignArray: LAB_ARR, extraWallets: [lab], extraArrays: [keyArray(LAB_ARR, [lab])] })
+	try {
+		fx.balances.set(fx.pm, 10n ** 18n); fx.balances.set(lab, 0n); fx.balances.set(fx.addr, 0n)
+		await fx.gk.afterSuccessfulSignature(lab)
+		assert.equal(fx.sends.length, 1)
+		await fx.gk.runOnce()
+		assert.equal(fx.sends.length, 2, 'periodic keeper funds the oracle-owner wallet within its own unspent shared cap')
+		assert.equal(fx.sends[1]!.to, fx.addr)
 	} finally { fx.cleanup() }
 })
 test('periodic keeper: a post-sign-only Lab wallet is neither funded nor refused-and-alerted every cycle; without the setting the refusal repeats', async () => {

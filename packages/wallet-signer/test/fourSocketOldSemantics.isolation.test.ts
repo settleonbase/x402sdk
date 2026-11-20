@@ -1,6 +1,6 @@
 /**
  * Isolation only. Local unix sockets and a loopback mock RPC.
- * Does not open .77, does not broadcast, does not call pm.grantAdmin,
+ * Does not contact any remote host, does not broadcast, does not call pm.grantAdmin,
  * and does not repeat the B host member / non-member cases.
  */
 import assert from 'node:assert/strict'

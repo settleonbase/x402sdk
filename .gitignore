@@ -51,3 +51,6 @@ src/localDB.db
 
 # Local temp / scratch
 .tmp-*/
+
+# Local run output (test logs, audit output)
+/logs/
