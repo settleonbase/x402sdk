@@ -7,7 +7,7 @@ import { AuditLog } from './audit'
 import { canonicalHash } from './canonical'
 import { paths, type Config } from './config'
 import { ErrorCode, SignerError, denied } from './errors'
-import { GasKeeper, GAS_KEEPER_CLIENT } from './gasKeeper'
+import { GasKeeper } from './gasKeeper'
 import { HdRoot } from './hd'
 import { Keyring } from './keyring'
 import { Policy } from './policy'
@@ -86,8 +86,8 @@ export class SignerService {
 			this.p.gasState,
 			config.gasKeeper.postSignEnabled === true,
 		)
-		this.txm.setPostSignHook(async (client, address) => {
-			if (client !== GAS_KEEPER_CLIENT) await this.postSignBalanceCheck(address)
+		this.txm.setPostSignHook(async (_client, address, internal) => {
+			if (!internal) await this.postSignBalanceCheck(address)
 		})
 		this.audit.write({ event: 'service.start', version: VERSION, policyHash: this.policy.hash })
 	}

@@ -13,11 +13,13 @@ import { RateLimiter } from '../src/rateLimit'
 import { redactText } from '../src/redact'
 import { addArray, emptyRegistry, growArray, rotateArray, signRegistry, verifyRegistry } from '../src/registry'
 import { resolveTypedDataNonce } from '../src/typedDataReplay'
+import { TypedDataReplayLog } from '../src/typedDataReplay'
 import { BEAMIO_ORACLE_CONTRACT, GAS_KEEPER_CHAIN_ID, GasKeeper, LAB_POSTSIGN_TARGET_WEI, LAB_POSTSIGN_THRESHOLD_WEI, ORACLE_DAEMON_CLIENT, ORACLE_OWNER_ARRAY, ORACLE_OWNER_WALLET_EXAMPLE, adminGasRunRefusal, decodeAddressWord, gasKeeperTopupIdempotencyKey, gasKeeperUsage, gasTopupRpcRefusal, isEmptyRuntimeCode, oracleQuoteNeedWei, selectOracleOwnerRecipients, worstCaseNativeTransferGasWei, type SpendRow } from '../src/gasKeeper'
 import type { KeyArray } from '../src/registry'
 import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } from '../src/txManager'
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
 import { createVaultJson, openVault } from '../src/vault'
+import { SignerService } from '../src/service'
 
 const PW = 'unit-test-password-123'
 
@@ -638,6 +640,139 @@ test('post-sign concurrent checks serialize and a mined old intent gets a fresh 
 	} finally { fx.cleanup() }
 })
 
+test('post-sign refreshes a balance after a mined pending row and does not create another attempt when the top-up arrived', async () => {
+	const cap = '1000000000000000000'
+	const fx = gasFixture({ gasPrice: 1n, maxFeePerGas: null }, { targetWei: cap, perAddressDailyWei: cap, globalDailyWei: cap, budgetWei: cap })
+	const key = gasKeeperTopupIdempotencyKey(224422, fx.addr, 1)
+	const hash = `0x${'bc'.repeat(32)}`
+	fx.remember({ idempotencyKey: key, hash, status: 'mined' })
+	fx.balanceSequence.push(LAB_POSTSIGN_THRESHOLD_WEI - 1n, LAB_POSTSIGN_THRESHOLD_WEI)
+	fx.balances.set(fx.pm, 1_000_000_000_000_000_000n)
+	writeFileSync(fx.statePath, JSON.stringify({ version: 2, spend: [{ idempotencyKey: key, chainId: '224422', address: fx.addr.toLowerCase(), amountWei: '123', recordedAt: new Date().toISOString(), status: 'pending', attempt: 1, hash }] }))
+	try {
+		await fx.gk.afterSuccessfulSignature(fx.addr)
+		assert.equal(fx.sends.length, 0, 'fresh threshold-or-higher balance prevents retry payment')
+		const state = JSON.parse(readFileSync(fx.statePath, 'utf8')) as { spend: SpendRow[] }
+		assert.equal(state.spend[0]!.status, 'settled')
+		assert.equal(state.spend.length, 1)
+		assert.equal(fx.balanceReads, 2)
+	} finally { fx.cleanup() }
+})
+
+test('post-sign service checks each newly created signature but not typed-data replay or wait reuse', async () => {
+	const dir = mkdtempSync(join(tmpdir(), 'post-sign-service-'))
+	const wallet = Wallet.createRandom()
+	const address = getAddress(wallet.address)
+	const raw = await wallet.signTransaction({ chainId: 224422, nonce: 0, to: address, value: 0, gasLimit: 21_000, gasPrice: 1, data: '0x' })
+	const checks: string[] = []
+	const sends: Array<Record<string, unknown>> = []
+	const makeService = (replayPath: string): SignerService => {
+		const target = Object.create(SignerService.prototype) as SignerService
+		const mutable = target as unknown as Record<string, unknown>
+		Object.assign(mutable, {
+			state: 'unlocked',
+			registry: { version: 1, pm: Wallet.createRandom().address, attestor: Wallet.createRandom().address, arrays: [{ name: 'lab', account: 1, count: 1, chains: [224422], status: 'active', addresses: [address], createdAt: new Date(0).toISOString() }], updatedAt: new Date(0).toISOString(), attestation: '' },
+			denied: new Set<string>(),
+			keyring: {
+				info: () => ({ role: 'array', array: 'lab', address }),
+				signTransaction: () => raw,
+				signMessage: () => `0x${'11'.repeat(65)}`,
+				signTypedData: () => `0x${'22'.repeat(65)}`,
+			},
+			policy: {
+				grant: () => ({ allowSignOnly: true, allowPersonalSign: true, rate: {} }),
+				checkCall: () => ({ grant: { rate: {} }, method: 'test', args: [] }),
+				checkTypedData: () => ({ rate: {} }),
+			},
+			audit: { write() {} },
+			txm: { async send(req: Record<string, unknown>) { sends.push(req); return { hash: `0x${'66'.repeat(32)}`, from: address, nonce: 1, chainId: 224422, status: 'sent', raw: '0x' } } },
+			gasKeeper: { async afterSuccessfulSignature(who: string) { checks.push(who) } },
+			typedDataReplay: new TypedDataReplayLog(replayPath),
+			activeAddresses: () => [address],
+			registrySet: () => new Set<string>(),
+			takeRate() {},
+		})
+		return target
+	}
+	const service = makeService(join(dir, 'replay.jsonl'))
+	const typed = {
+		domain: { name: 'BeamioUserCardFactory', version: '1', chainId: 224422, verifyingContract: '0x0000000000000000000000000000000000001000' },
+		types: { ExecuteForAdmin: [
+			{ name: 'cardAddress', type: 'address' },
+			{ name: 'dataHash', type: 'bytes32' },
+			{ name: 'deadline', type: 'uint256' },
+			{ name: 'nonce', type: 'bytes32' },
+		] },
+		primaryType: 'ExecuteForAdmin',
+		message: { cardAddress: '0x0000000000000000000000000000000000002000', dataHash: `0x${'33'.repeat(32)}`, deadline: 1_900_000_000, nonce: `0x${'44'.repeat(32)}` },
+	}
+	try {
+		await service.signTransaction('client', { from: address, chainId: 224422, nonce: 0, to: address, value: '0', gasLimit: '21000', gasPrice: '1', data: '0x' })
+		await service.personalSign('client', 'message', address)
+		await service.signTypedData('client', address, typed)
+		await service.signTypedData('client', address, typed)
+		assert.deepEqual(checks, [address, address, address], 'replay reuses an existing signature without another balance check')
+		await service.sendTransaction('gas-keeper', { keyArray: 'lab', chainId: 224422, from: address, to: address, data: '0x', value: '0', skipPostSignCheck: true } as never)
+		assert.equal(sends[0]!.client, 'gas-keeper')
+		assert.equal(sends[0]!.skipPostSignCheck, undefined, 'RPC input cannot set the internal recursion marker')
+
+		const waitPath = join(dir, 'wait.jsonl')
+		const waitService = makeService(waitPath)
+		const binding = resolveTypedDataNonce(address, typed.domain, 'ExecuteForAdmin', typed.message)!
+		const replay = waitService.typedDataReplay.reserve(binding)
+		assert.equal(replay.mode, 'fresh')
+		const waiting = waitService.signTypedData('client', address, typed)
+		await delay(0)
+		if (replay.mode === 'fresh') replay.resolve(`0x${'55'.repeat(65)}`)
+		assert.equal(await waiting, `0x${'55'.repeat(65)}`)
+		assert.equal(checks.length, 3, 'wait returns an existing signature without another balance check')
+	} finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('TxManager checks new signatures regardless of client name, marks internal top-ups, and skips same-raw rebroadcast', async () => {
+	const dir = mkdtempSync(join(tmpdir(), 'post-sign-txm-'))
+	const hd = HdRoot.fromEntropy(mnemonicToEntropyBytes(newMnemonic()))
+	const keyring = new Keyring()
+	keyring.load(hd, null)
+	const from = keyring.pmAddress
+	const to = Wallet.createRandom().address
+	let price = 1n
+	let broadcasts = 0
+	const hookCalls: Array<{ client: string; address: string; internal: boolean }> = []
+	const txm = new TxManager({ '224422': { rpcUrls: ['http://127.0.0.1:1'], resendAfterMs: 0, maxResends: 1, receiptPollMs: 1000 } }, keyring, new AuditLog(join(dir, 'audit.jsonl')), { send() {} }, join(dir, 'txjournal.jsonl'), 1)
+	const internals = txm as unknown as { chains: Map<number, { provider: unknown; cfg: { resendAfterMs: number; maxResends: number } }>; track: (row: TxRecord) => Promise<void> }
+	const ctx = internals.chains.get(224422)!
+	ctx.provider = {
+		async getFeeData() { return { gasPrice: price, maxFeePerGas: null, maxPriorityFeePerGas: null } },
+		async getBalance() { return 1_000_000_000_000_000_000n },
+		async getTransactionCount() { return 0 },
+		async getTransactionReceipt() { return null },
+		async broadcastTransaction(raw: string) { broadcasts++; return { hash: Transaction.from(raw).hash } },
+	} as never
+	txm.setPostSignHook(async (client, address, internal) => { hookCalls.push({ client, address, internal }) })
+	const base = { array: 'PM', chainId: 224422, candidates: [from], from, to, data: '0x', value: 0n, gasLimit: 21_000n, maxInflightPerKey: 4, skipSimulation: true }
+	try {
+		await txm.send({ ...base, client: 'gas-keeper', idempotencyKey: 'same-name-external-client' })
+		assert.equal(hookCalls.length, 1, 'client text cannot spoof the internal bypass')
+		assert.equal(hookCalls[0]!.internal, false)
+		await txm.send({ ...base, client: 'gas-keeper', idempotencyKey: 'internal-transfer', skipPostSignCheck: true })
+		assert.equal(hookCalls.length, 2, 'hook receives the explicit internal marker')
+		assert.equal(hookCalls[1]!.internal, true, 'internal marker, not client identity text, identifies recursion')
+		const userRow = txm.recent(10).find((row) => row.idempotencyKey === 'same-name-external-client')!
+		price = 2n
+		await internals.track(userRow)
+		assert.equal(hookCalls.length, 3, 'a newly signed reprice is checked')
+		const repriced = txm.recent(10).find((row) => row.idempotencyKey === 'same-name-external-client')!
+		await internals.track({ ...repriced, lastSentAt: 0 })
+		assert.equal(hookCalls.length, 3, 'same-raw rebroadcast is not a new signature')
+		assert.equal(broadcasts, 4)
+	} finally {
+		keyring.wipe()
+		hd.wipe()
+		rmSync(dir, { recursive: true, force: true })
+	}
+})
+
 test('worst-case native gas reserve is at least 21000 times the higher fee', () => {
 	assert.equal(worstCaseNativeTransferGasWei(5n, 9n), 21_000n * 9n)
 	assert.equal(worstCaseNativeTransferGasWei(5n, null), 21_000n * 5n)
@@ -900,6 +1035,20 @@ test('gas keeper config stays disabled and an empty whitelist tops up nobody', (
 		}))
 		loadConfig(p)
 	}, /wallets\[0\]/)
+})
+
+test('Lab post-sign candidate is explicitly registered but fails closed by default and all caps are zero', () => {
+	const { loadConfig } = require('../src/config') as typeof import('../src/config')
+	const candidate = join(process.cwd(), 'deploy/lab-mining-pool/config.lab-postsign-candidate-disabled.json')
+	const cfg = loadConfig(candidate)
+	const chain = cfg.gasKeeper.chains['224422']!
+	assert.equal(cfg.gasKeeper.enabled, false)
+	assert.equal(cfg.gasKeeper.postSignEnabled, false)
+	assert.deepEqual(chain.wallets, ['0xcFAF85E6C1765DA01a4Dc58C81b28Cd572067135'])
+	assert.equal(chain.budgetWei, '0')
+	assert.equal(chain.perAddressDailyWei, '0')
+	assert.equal(chain.globalDailyWei, '0')
+	assert.equal(chain.maxFeePerGasWei, '0')
 })
 
 test('gas keeper refuses the oracle contract even when the whitelist names it', async () => {
@@ -1308,6 +1457,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 	providerCalls: number
 	balanceReads: number
 	balanceFailure: boolean
+	balanceSequence: bigint[]
 	remember: (rec: { hash?: string; status?: string; idempotencyKey?: string }) => void
 	failSend: boolean
 	cleanup: () => void
@@ -1320,6 +1470,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 	const owner = getAddress(opts.owner ?? addr)
 	const codes = new Map(Object.entries(opts.codes ?? {}).map(([who, code]) => [getAddress(who).toLowerCase(), code]))
 	const balances = new Map<string, bigint>()
+	const balanceSequence: bigint[] = []
 	const alerts: string[] = []
 	const sends: Array<{ idempotencyKey?: string; value: bigint; gasLimit?: bigint; hash: string; to: string; client?: string; array?: string; candidates: string[] }> = []
 	let providerCallsSeen = 0
@@ -1340,6 +1491,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 				async getBalance(who: string) {
 					balanceReadsSeen += 1
 					if (fx.balanceFailure) throw new Error('mock balance RPC failure')
+					if (balanceSequence.length > 0) return balanceSequence.shift()!
 					return balances.get(getAddress(who)) ?? 0n
 				},
 				async getFeeData() {
@@ -1432,6 +1584,7 @@ function gasFixture(fee: { gasPrice: bigint | null; maxFeePerGas: bigint | null 
 		sends,
 		alerts,
 		balances,
+		balanceSequence,
 		get providerCalls() { return providerCallsSeen },
 		get balanceReads() { return balanceReadsSeen },
 		get balanceFailure() { return fx.balanceFailure },

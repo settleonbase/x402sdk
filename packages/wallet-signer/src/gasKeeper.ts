@@ -276,7 +276,7 @@ export class GasKeeper {
 		const chainKey = String(chainId)
 		try {
 			const provider = this.txm.provider(chainId)
-			const balance = await provider.getBalance(address)
+			let balance = await provider.getBalance(address)
 			if (typeof balance !== 'bigint' || balance < 0n) throw new Error('balance response is not a non-negative bigint')
 			this.audit.write({ event: 'gas.postsign.balance', chainId, address, balanceWei: balance.toString(), valid: true })
 			const cfg = this.chains[chainKey]
@@ -317,11 +317,13 @@ export class GasKeeper {
 					return
 				}
 				if (gate === 'clear') row = undefined
-				if (gate === 'resume' && row && balance >= LAB_POSTSIGN_THRESHOLD_WEI) {
-					row.status = 'released'
-					this.saveState(state)
-					return
-				}
+				// Settlement can race the first balance read. Always refresh after a terminal
+				// row before deciding whether a new attempt is necessary.
+				const refreshedBalance = await provider.getBalance(address)
+				if (typeof refreshedBalance !== 'bigint' || refreshedBalance < 0n) throw new Error('balance response is not a non-negative bigint')
+				this.audit.write({ event: 'gas.postsign.balance', chainId, address, balanceWei: refreshedBalance.toString(), valid: true, refreshed: true })
+				if (refreshedBalance >= LAB_POSTSIGN_THRESHOLD_WEI) return
+				balance = refreshedBalance
 			}
 			if (balance >= LAB_POSTSIGN_THRESHOLD_WEI) return
 			const target = LAB_POSTSIGN_TARGET_WEI
@@ -597,6 +599,7 @@ export class GasKeeper {
 				gasLimit: NATIVE_TOPUP_GAS_LIMIT,
 				maxInflightPerKey: 4,
 				skipSimulation: true,
+				skipPostSignCheck: true,
 				idempotencyKey: row.idempotencyKey,
 				method: 'topup',
 			})

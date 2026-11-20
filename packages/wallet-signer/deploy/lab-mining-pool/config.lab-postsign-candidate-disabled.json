@@ -1,0 +1,32 @@
+{
+	"dataDir": "/tmp/lab185-postsign-candidate/state",
+	"logDir": "/tmp/lab185-postsign-candidate/log",
+	"adminSocket": "/tmp/lab185-postsign-candidate/admin.sock",
+	"policyFile": "/tmp/lab185-postsign-candidate/policy.json",
+	"rpc": { "unix": [] },
+	"chains": {
+		"224422": { "rpcUrls": ["http://127.0.0.1:9"], "resendAfterMs": 60000, "maxResends": 3, "receiptPollMs": 2000 }
+	},
+	"gasKeeper": {
+		"enabled": false,
+		"postSignEnabled": false,
+		"intervalMs": 60000,
+		"refusedOwners": [],
+		"chains": {
+			"224422": {
+				"wallets": ["0xcFAF85E6C1765DA01a4Dc58C81b28Cd572067135"],
+				"minWei": "1",
+				"targetWei": "100000000000000000",
+				"perAddressDailyWei": "0",
+				"globalDailyWei": "0",
+				"budgetWei": "0",
+				"maxFeePerGasWei": "0",
+				"pmWarnWei": "0",
+				"pmCriticalWei": "0"
+			}
+		}
+	},
+	"alerts": { "host": "lab185-postsign-candidate" },
+	"scryptN": 262144,
+	"keyWaitMs": 30000
+}
