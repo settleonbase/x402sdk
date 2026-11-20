@@ -163,7 +163,8 @@ function normalizePmLabInitialGas(raw: unknown): PmLabInitialGasConfig {
 	const feeCap = BigInt(maxFeePerGasWei)
 	const priorityFee = BigInt(maxPriorityFeePerGasWei)
 	if (maxSpend > 100_000_000_000_000_000n) throw new Error('config: pmLabInitialGas.maxSpendWei exceeds fixed 0.1 CNET target')
-	if (dailyCap > 100_000_000_000_630_000n) throw new Error('config: pmLabInitialGas.dailyCapWei exceeds fixed target plus hard worst-case fee')
+	// Must equal PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI (pmLabInitialGas.ts) = 1e17 + 21000 * 30,000,000 = 100_000_630_000_000_000.
+	if (dailyCap > 100_000_630_000_000_000n) throw new Error('config: pmLabInitialGas.dailyCapWei exceeds fixed target plus hard worst-case fee')
 	if (feeCap > 30_000_000n) throw new Error('config: pmLabInitialGas.maxFeePerGasWei exceeds hard 0.03 Gwei ceiling')
 	if (priorityFee > feeCap) throw new Error('config: pmLabInitialGas.maxPriorityFeePerGasWei exceeds maxFeePerGasWei')
 	if (r.enabled && !r.dryRun && (maxSpend === 0n || dailyCap === 0n || feeCap === 0n)) throw new Error('config: live pmLabInitialGas requires non-zero spend, daily, and fee caps')

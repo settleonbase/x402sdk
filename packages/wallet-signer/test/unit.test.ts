@@ -1175,6 +1175,42 @@ test('Lab initial Gas uses one existing chain RPC and rejects obsolete readRpcUr
 	} finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('Lab initial Gas dailyCapWei config ceiling equals MAX_TOTAL_WEI and passes the runtime daily-cap rule', async () => {
+	const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+	const { loadConfig } = require('../src/config') as typeof import('../src/config')
+	const dir = mkdtempSync(join(tmpdir(), 'ws-lab-initial-dailycap-'))
+	const path = join(dir, 'config.json')
+	const base = { dataDir: dir, adminSocket: join(dir, 'admin.sock'), policyFile: join(dir, 'policy.json'), chains: { '224422': { rpcUrls: ['http://127.0.0.1:9'] } } }
+	const live = (dailyCapWei: string, extra: Record<string, string> = {}) => ({ ...base, pmLabInitialGas: { enabled: true, dryRun: false, maxSpendWei: PM_LAB_INITIAL_GAS_TARGET_WEI.toString(), dailyCapWei, maxFeePerGasWei: PM_LAB_INITIAL_GAS_MAX_FEE_WEI.toString(), maxPriorityFeePerGasWei: '1000000', ...extra } })
+	const load = (cfg: unknown) => { writeFileSync(path, JSON.stringify(cfg)); return loadConfig(path) }
+	try {
+		// The config ceiling is exactly the runtime hard ceiling: 1e17 + 21000 * 30,000,000.
+		assert.equal(PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI, 100_000_630_000_000_000n)
+		// Boundary: MAX_TOTAL_WEI is accepted by loadConfig and satisfies the runtime rule amount + 21000 * maxFee <= dailyCap.
+		const atMax = load(live(PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI.toString())).pmLabInitialGas
+		assert.equal(atMax.dailyCapWei, PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI.toString())
+		assert.ok(PM_LAB_INITIAL_GAS_TARGET_WEI + PM_LAB_INITIAL_GAS_GAS_LIMIT * BigInt(atMax.maxFeePerGasWei) <= BigInt(atMax.dailyCapWei))
+		// The loadConfig result itself drives runPmLabInitialGas live (Lab balance 0, amount 1e17): the runtime daily-cap rule accepts it.
+		const fx = labInitialGasFixture({ balance: 0n, config: atMax })
+		await runPmLabInitialGas(fx.deps)
+		assert.equal(fx.sends.length, 1)
+		assert.equal(fx.sends[0].value, PM_LAB_INITIAL_GAS_TARGET_WEI)
+		// A realistic fee (1,000,007 wei/gas) with the target amount also fits under MAX_TOTAL_WEI.
+		assert.ok(PM_LAB_INITIAL_GAS_TARGET_WEI + PM_LAB_INITIAL_GAS_GAS_LIMIT * 1_000_007n <= PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI)
+		// Lower values: just below the ceiling and exactly the target are accepted.
+		assert.equal(load(live((PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI - 1n).toString())).pmLabInitialGas.dailyCapWei, (PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI - 1n).toString())
+		assert.equal(load(live(PM_LAB_INITIAL_GAS_TARGET_WEI.toString())).pmLabInitialGas.dailyCapWei, PM_LAB_INITIAL_GAS_TARGET_WEI.toString())
+		// Over the ceiling is rejected (one wei, the old 10^6-scaled literal's excess, and a large value).
+		for (const over of [PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI + 1n, PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI * 2n, 10n ** 18n]) {
+			assert.throws(() => load(live(over.toString())), /dailyCapWei exceeds fixed target plus hard worst-case fee/)
+		}
+		// Other protections are unchanged: spend above 0.1 CNET, fee above 0.03 Gwei, live with a zero daily cap.
+		assert.throws(() => load(live(PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI.toString(), { maxSpendWei: (PM_LAB_INITIAL_GAS_TARGET_WEI + 1n).toString() })), /maxSpendWei exceeds fixed 0.1 CNET target/)
+		assert.throws(() => load(live(PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI.toString(), { maxFeePerGasWei: (PM_LAB_INITIAL_GAS_MAX_FEE_WEI + 1n).toString() })), /maxFeePerGasWei exceeds hard 0.03 Gwei ceiling/)
+		assert.throws(() => load(live('0')), /live pmLabInitialGas requires non-zero/)
+	} finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 function labInitialGasFixture(opts: {
 	config?: Partial<LabInitialGasDeps['cfg']>
 	balance?: bigint
