@@ -14,6 +14,23 @@ export const PM_LAB_INITIAL_GAS_CLIENT = 'pm-lab-initial-gas'
 export const PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY = `pm-lab-initial-gas:${PM_LAB_INITIAL_GAS_CHAIN_ID}:${PM_LAB_INITIAL_GAS_RECIPIENT.toLowerCase()}`
 const ADMIN_IFACE = new Interface(['function admins(address) view returns (bool)'])
 export const PM_LAB_INITIAL_GAS_ADMIN_SELECTOR = ADMIN_IFACE.getFunction('admins')!.selector
+const ALLOWED_LAB_INITIAL_GAS_READ_METHODS = new Set(['eth_chainId', 'eth_getBlockByNumber', 'eth_call', 'eth_getBalance', 'eth_getCode'])
+
+/** Expose only the JSON-RPC read methods used by the preflight; no send/raw-send API is returned. */
+export function labInitialGasReadOnlyRpc(rpc: { send(method: string, params: unknown[]): Promise<unknown> }): { send(method: string, params: unknown[]): Promise<unknown> } {
+	return {
+		send(method, params) {
+			if (!ALLOWED_LAB_INITIAL_GAS_READ_METHODS.has(method)) throw new SignerError(ErrorCode.INVALID_PARAMS, `Lab initial Gas read RPC method is not allowed: ${method}`)
+			return rpc.send(method, params)
+		},
+	}
+}
+
+/** Construct the two read-only verifiers from their dedicated config field, never the TxManager RPC pool. */
+export function createLabInitialGasReadProviders<T extends { send(method: string, params: unknown[]): Promise<unknown> }>(readRpcUrls: string[], createProvider: (url: string) => T): Array<ReturnType<typeof labInitialGasReadOnlyRpc>> {
+	if (readRpcUrls.length !== 2 || readRpcUrls[0] === readRpcUrls[1]) throw denied('Lab initial Gas requires two distinct dedicated read-only RPC endpoints')
+	return readRpcUrls.map((url) => labInitialGasReadOnlyRpc(createProvider(url)))
+}
 
 export type LabInitialGasReader = {
 	snapshot(): Promise<LabInitialGasSnapshot>
@@ -114,7 +131,7 @@ export type LabInitialGasResult =
 	| { status: 'already-attempted'; hash: string; txStatus: string }
 	| { status: 'already-funded'; balanceWei: string }
 	| { status: 'dry-run'; amountWei: string; balanceWei: string; pmBalanceWei: string; nonce: number; worstFeePerGasWei: string }
-	| { status: 'pending'; amountWei: string; hash: string; txStatus: string }
+	| { status: 'pending' | 'mined' | 'reverted' | 'rejected'; amountWei: string; hash: string; txStatus: string }
 
 let serial: Promise<unknown> = Promise.resolve()
 function withLabInitialGasLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -130,7 +147,12 @@ export function runPmLabInitialGas(deps: LabInitialGasDeps): Promise<LabInitialG
 		const pm = getAddress(deps.registryPm)
 		if (!deps.unlocked || !deps.keyringPm || getAddress(deps.keyringPm) !== pm) throw denied('Lab initial Gas requires the unlocked registered PM key')
 		const existing = deps.txm.get({ idempotencyKey: PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY, client: PM_LAB_INITIAL_GAS_CLIENT })
-		if (existing) return { status: 'already-attempted', hash: existing.hash, txStatus: existing.status }
+		if (existing) {
+			if (typeof existing.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(existing.hash) || !['sent', 'mined', 'stuck', 'reverted', 'rejected'].includes(existing.status)) {
+				throw new SignerError(ErrorCode.UPSTREAM, 'Existing Lab initial-Gas journal record has invalid hash/status; intent requires manual reconcile and must not be retried')
+			}
+			return { status: 'already-attempted', hash: existing.hash, txStatus: existing.status }
+		}
 
 		const snapshot = await deps.reader.snapshot()
 		if (typeof snapshot.chainId !== 'bigint' || snapshot.chainId !== BigInt(PM_LAB_INITIAL_GAS_CHAIN_ID)) throw new SignerError(ErrorCode.UPSTREAM, 'Lab initial Gas RPC chainId mismatch or invalid')
@@ -198,7 +220,8 @@ export function runPmLabInitialGas(deps: LabInitialGasDeps): Promise<LabInitialG
 			throw new SignerError(ErrorCode.UPSTREAM, 'Lab initial Gas returned an unknown transaction status; intent remains journaled and requires reconcile')
 		}
 		deps.audit({ event: 'pm.labInitialGas.sent', recipient: PM_LAB_INITIAL_GAS_RECIPIENT, amountWei: amount.toString(), hash: result.hash, txStatus: result.status, idempotencyKey: PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY })
-		return { status: 'pending', amountWei: amount.toString(), hash: result.hash, txStatus: result.status }
+		const status = result.status === 'sent' || result.status === 'stuck' ? 'pending' : result.status
+		return { status, amountWei: amount.toString(), hash: result.hash, txStatus: result.status }
 	})
 }
 

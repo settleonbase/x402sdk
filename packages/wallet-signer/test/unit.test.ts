@@ -20,7 +20,7 @@ import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } f
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
 import { createVaultJson, openVault } from '../src/vault'
 import { SignerService } from '../src/service'
-import { decodeLabInitialGasAdminStatus, encodeLabInitialGasAdminCall, PM_LAB_INITIAL_GAS_ADMIN_SELECTOR, PM_LAB_INITIAL_GAS_CHAIN_ID, PM_LAB_INITIAL_GAS_CLIENT, PM_LAB_INITIAL_GAS_GAS_LIMIT, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY, PM_LAB_INITIAL_GAS_MAX_FEE_WEI, PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI, PM_LAB_INITIAL_GAS_RECIPIENT, PM_LAB_INITIAL_GAS_TARGET_WEI, readLabInitialGasSnapshot, requireMatchingLabInitialGasSnapshots, runPmLabInitialGas, type LabInitialGasDeps, type LabInitialGasSnapshot } from '../src/pmLabInitialGas'
+import { createLabInitialGasReadProviders, decodeLabInitialGasAdminStatus, encodeLabInitialGasAdminCall, labInitialGasReadOnlyRpc, PM_LAB_INITIAL_GAS_ADMIN_SELECTOR, PM_LAB_INITIAL_GAS_CHAIN_ID, PM_LAB_INITIAL_GAS_CLIENT, PM_LAB_INITIAL_GAS_GAS_LIMIT, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY, PM_LAB_INITIAL_GAS_MAX_FEE_WEI, PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI, PM_LAB_INITIAL_GAS_RECIPIENT, PM_LAB_INITIAL_GAS_TARGET_WEI, readLabInitialGasSnapshot, requireMatchingLabInitialGasSnapshots, runPmLabInitialGas, type LabInitialGasDeps, type LabInitialGasSnapshot } from '../src/pmLabInitialGas'
 import { PM_GRANT_CLIENT, PM_GRANT_VDR } from '../src/pmGrantAdmin'
 
 const PW = 'unit-test-password-123'
@@ -322,7 +322,7 @@ test('config: requireMountPoint refuses an unmounted volume and paths outside it
 	const dir = mkdtempSync(join(tmpdir(), 'ws-mnt-'))
 	writeFileSync(join(dir, 'keep'), 'unchanged')
 	const before = readdirSync(dir)
-	const base = { adminSocket: '', policyFile: '', deniedAddressesFile: '', rpc: {}, chains: {}, gasKeeper: { enabled: false, intervalMs: 1, chains: {}, refusedOwners: [] }, pmLabInitialGas: { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0' }, alerts: {}, scryptN: 1, keyWaitMs: 1 }
+	const base = { adminSocket: '', policyFile: '', deniedAddressesFile: '', rpc: {}, chains: {}, gasKeeper: { enabled: false, intervalMs: 1, chains: {}, refusedOwners: [] }, pmLabInitialGas: { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0', readRpcUrls: [] }, alerts: {}, scryptN: 1, keyWaitMs: 1 }
 	// A plain directory is on the same filesystem as its parent: "not mounted".
 	assert.throws(() => assertDataMount({ ...base, requireMountPoint: dir, dataDir: join(dir, 's'), logDir: join(dir, 'l') }), /not mounted/)
 	assert.throws(() => assertDataMount({ ...base, requireMountPoint: join(dir, 'missing'), dataDir: join(dir, 'missing', 's'), logDir: join(dir, 'missing', 'l') }), /not mounted/)
@@ -1092,6 +1092,31 @@ test('Lab post-sign candidate is explicitly registered but fails closed by defau
 	assert.equal(cfg.pmLabInitialGas.maxSpendWei, '0')
 	assert.equal(cfg.pmLabInitialGas.dailyCapWei, '0')
 	assert.equal(cfg.pmLabInitialGas.maxFeePerGasWei, '0')
+	assert.deepEqual(cfg.pmLabInitialGas.readRpcUrls, ['https://rpc1.conet.network', 'https://publicrpc.conet.network'])
+})
+
+test('Lab initial Gas read RPCs are separate HTTPS-only configuration and required when enabled', () => {
+	const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+	const { loadConfig } = require('../src/config') as typeof import('../src/config')
+	const dir = mkdtempSync(join(tmpdir(), 'ws-lab-initial-ro-'))
+	const path = join(dir, 'config.json')
+	const base = { dataDir: dir, adminSocket: join(dir, 'admin.sock'), policyFile: join(dir, 'policy.json'), chains: { '224422': { rpcUrls: ['http://127.0.0.1:9'] } } }
+	try {
+		writeFileSync(path, JSON.stringify(base))
+		const defaulted = loadConfig(path).pmLabInitialGas
+		assert.equal(defaulted.enabled, false)
+		assert.equal(defaulted.dryRun, true)
+		assert.deepEqual(defaulted.readRpcUrls, [])
+		const enabled = { enabled: true, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0', readRpcUrls: ['https://ro-a.invalid/rpc', 'https://ro-b.invalid/rpc'] }
+		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: enabled }))
+		assert.deepEqual(loadConfig(path).pmLabInitialGas.readRpcUrls, enabled.readRpcUrls)
+		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: { ...enabled, readRpcUrls: [] } }))
+		assert.throws(() => loadConfig(path), /requires two separate readRpcUrls/)
+		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: { ...enabled, readRpcUrls: ['http://ro-a.invalid', 'https://ro-b.invalid'] } }))
+		assert.throws(() => loadConfig(path), /HTTPS URLs/)
+		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: { ...enabled, readRpcUrls: ['https://ro-a.invalid', 'https://ro-a.invalid'] } }))
+		assert.throws(() => loadConfig(path), /must be distinct/)
+	} finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 function labInitialGasFixture(opts: {
@@ -1123,6 +1148,7 @@ function labInitialGasFixture(opts: {
 		maxSpendWei: PM_LAB_INITIAL_GAS_TARGET_WEI.toString(),
 		dailyCapWei: PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI.toString(),
 		maxFeePerGasWei: PM_LAB_INITIAL_GAS_MAX_FEE_WEI.toString(),
+		readRpcUrls: [],
 		...opts.config,
 	}
 	const deps: LabInitialGasDeps = {
@@ -1221,6 +1247,26 @@ test('Lab initial Gas refuses an unhashable sender result and blocks retries fro
 	assert.equal(fx.read.length, reads, 'an uncertain result blocks all retry reads and sends')
 })
 
+test('Lab initial Gas refuses unknown send status and malformed existing journal records without retry', async () => {
+	const unknown = labInitialGasFixture({ balance: 1n, config: { dryRun: false } })
+	const validSend = unknown.deps.send
+	unknown.deps.send = async (req) => ({ ...(await validSend(req)), status: 'unknown-status' } as never)
+	await assert.rejects(runPmLabInitialGas(unknown.deps), /unknown transaction status.*requires reconcile/)
+	assert.equal(unknown.sends.length, 1)
+	assert.ok(unknown.journal)
+	assert.equal((await runPmLabInitialGas(unknown.deps)).status, 'already-attempted')
+	assert.equal(unknown.sends.length, 1, 'unknown status cannot cause a retry')
+	for (const row of [
+		{ hash: 'invalid-hash', status: 'sent' },
+		{ hash: `0x${'cd'.repeat(32)}`, status: 'unknown-status' },
+	]) {
+		const existing = labInitialGasFixture({ journalRecord: { ...row } as TxRecord })
+		await assert.rejects(runPmLabInitialGas(existing.deps), /journal record has invalid hash\/status.*must not be retried/)
+		assert.deepEqual(existing.read, [])
+		assert.equal(existing.sends.length, 0)
+	}
+})
+
 test('Lab initial Gas refuses RPC, chain, PM binding, fee, nonce, max-spend, daily-cap and PM-balance failures without send', async () => {
 	const cases: Array<{ name: string; options: Parameters<typeof labInitialGasFixture>[0]; pattern: RegExp }> = [
 		{ name: 'recipient RPC failure', options: { readError: 'balance' }, pattern: /mock balance failure/ },
@@ -1284,9 +1330,22 @@ test('Lab initial Gas dual-RPC readers pin every decision read to each endpoint 
 			},
 		}
 	}
+	const { loadConfig } = require('../src/config') as typeof import('../src/config')
+	const candidate = loadConfig(join(process.cwd(), 'deploy/lab-mining-pool/config.lab-postsign-candidate-disabled.json'))
+	const readUrls = candidate.pmLabInitialGas.readRpcUrls
+	const broadcastUrls = candidate.chains['224422']!.rpcUrls
+	assert.equal(readUrls.length, 2)
+	assert.equal(broadcastUrls.length, 1)
+	assert.notDeepEqual(readUrls, broadcastUrls, 'read-only verifier URLs are separate from the TxManager broadcast pool')
 	const a = endpoint()
 	const b = endpoint()
-	const [snapshotA, snapshotB] = await Promise.all([readLabInitialGasSnapshot(a.rpc, pm), readLabInitialGasSnapshot(b.rpc, pm)])
+	const createdUrls: string[] = []
+	const readonly = createLabInitialGasReadProviders(readUrls, (url) => { createdUrls.push(url); return url === readUrls[0] ? a.rpc : b.rpc })
+	assert.deepEqual(createdUrls, readUrls, 'service provider factory receives only pmLabInitialGas.readRpcUrls')
+	const [readonlyA, readonlyB] = readonly
+	assert.equal('sendTransaction' in readonlyA, false)
+	assert.throws(() => readonlyA.send('eth_sendRawTransaction', ['0x1234']), /method is not allowed/)
+	const [snapshotA, snapshotB] = await Promise.all([readLabInitialGasSnapshot(readonlyA, pm), readLabInitialGasSnapshot(readonlyB, pm)])
 	assert.deepEqual(requireMatchingLabInitialGasSnapshots(snapshotA, snapshotB), snapshotA)
 	for (const reader of [a, b]) {
 		assert.equal(reader.calls[0]!.method, 'eth_chainId')
@@ -1295,9 +1354,11 @@ test('Lab initial Gas dual-RPC readers pin every decision read to each endpoint 
 		assert.equal(decisionReads.length, 6)
 		for (const call of decisionReads) assert.deepEqual(call.params[1], { blockHash: hash, requireCanonical: true })
 	}
+	assert.equal(a.calls.some(({ method }) => /sendTransaction|sendRawTransaction/.test(method)), false)
+	assert.equal(b.calls.some(({ method }) => /sendTransaction|sendRawTransaction/.test(method)), false)
 	const invalid = endpoint()
-	invalid.rpc.send = async (method, params) => method === 'eth_getBalance' && params[0] === pm ? '' : endpoint().rpc.send(method, params)
-	await assert.rejects(readLabInitialGasSnapshot(invalid.rpc, pm), /RPC PM balance response invalid/)
+	const invalidRpc = labInitialGasReadOnlyRpc({ async send(method, params) { return method === 'eth_getBalance' && params[0] === pm ? '' : invalid.rpc.send(method, params) } })
+	await assert.rejects(readLabInitialGasSnapshot(invalidRpc, pm), /RPC PM balance response invalid/)
 })
 
 test('gas keeper refuses the oracle contract even when the whitelist names it', async () => {

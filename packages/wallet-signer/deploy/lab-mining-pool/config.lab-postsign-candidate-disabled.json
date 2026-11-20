@@ -31,7 +31,8 @@
 		"dryRun": true,
 		"maxSpendWei": "0",
 		"dailyCapWei": "0",
-		"maxFeePerGasWei": "0"
+		"maxFeePerGasWei": "0",
+		"readRpcUrls": ["https://rpc1.conet.network", "https://publicrpc.conet.network"]
 	},
 	"alerts": { "host": "lab185-postsign-candidate" },
 	"scryptN": 262144,

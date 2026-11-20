@@ -41,6 +41,8 @@ export type PmLabInitialGasConfig = {
 	maxSpendWei: string
 	dailyCapWei: string
 	maxFeePerGasWei: string
+	/** Separate HTTPS-only read endpoints. Never shared with or used for transaction broadcast. */
+	readRpcUrls: string[]
 }
 
 export type TlsListen = { host: string; port: number; cert: string; key: string; ca: string }
@@ -134,7 +136,7 @@ export function loadConfig(path: string): Config {
 }
 
 function normalizePmLabInitialGas(raw: unknown): PmLabInitialGasConfig {
-	if (raw === undefined) return { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0' }
+	if (raw === undefined) return { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0', readRpcUrls: [] }
 	const r = raw as Partial<PmLabInitialGasConfig>
 	if (typeof r.enabled !== 'boolean' || typeof r.dryRun !== 'boolean') throw new Error('config: pmLabInitialGas.enabled and dryRun must be booleans')
 	for (const field of ['maxSpendWei', 'dailyCapWei', 'maxFeePerGasWei'] as const) {
@@ -143,6 +145,16 @@ function normalizePmLabInitialGas(raw: unknown): PmLabInitialGasConfig {
 	const maxSpendWei = r.maxSpendWei!
 	const dailyCapWei = r.dailyCapWei!
 	const maxFeePerGasWei = r.maxFeePerGasWei!
+	const readRpcUrls = r.readRpcUrls ?? []
+	if (!Array.isArray(readRpcUrls) || readRpcUrls.some((url) => typeof url !== 'string')) throw new Error('config: pmLabInitialGas.readRpcUrls must be a string array')
+	if (readRpcUrls.length !== 0 && readRpcUrls.length !== 2) throw new Error('config: pmLabInitialGas.readRpcUrls must be empty or contain exactly two endpoints')
+	for (const url of readRpcUrls) {
+		let parsed: URL
+		try { parsed = new URL(url) } catch { throw new Error('config: pmLabInitialGas.readRpcUrls entries must be valid HTTPS URLs') }
+		if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password || parsed.hash) throw new Error('config: pmLabInitialGas.readRpcUrls entries must be credential-free HTTPS URLs without fragments')
+	}
+	if (readRpcUrls.length === 2 && readRpcUrls[0] === readRpcUrls[1]) throw new Error('config: pmLabInitialGas read RPC endpoints must be distinct')
+	if (r.enabled && readRpcUrls.length !== 2) throw new Error('config: enabled pmLabInitialGas requires two separate readRpcUrls')
 	const maxSpend = BigInt(maxSpendWei)
 	const dailyCap = BigInt(dailyCapWei)
 	const feeCap = BigInt(maxFeePerGasWei)
@@ -150,7 +162,7 @@ function normalizePmLabInitialGas(raw: unknown): PmLabInitialGasConfig {
 	if (dailyCap > 100_000_000_000_630_000n) throw new Error('config: pmLabInitialGas.dailyCapWei exceeds fixed target plus hard worst-case fee')
 	if (feeCap > 30_000_000n) throw new Error('config: pmLabInitialGas.maxFeePerGasWei exceeds hard 0.03 Gwei ceiling')
 	if (r.enabled && !r.dryRun && (maxSpend === 0n || dailyCap === 0n || feeCap === 0n)) throw new Error('config: live pmLabInitialGas requires non-zero spend, daily, and fee caps')
-	return { enabled: r.enabled, dryRun: r.dryRun, maxSpendWei, dailyCapWei, maxFeePerGasWei }
+	return { enabled: r.enabled, dryRun: r.dryRun, maxSpendWei, dailyCapWei, maxFeePerGasWei, readRpcUrls }
 }
 
 function normalizeAdminMode(raw: unknown): number {

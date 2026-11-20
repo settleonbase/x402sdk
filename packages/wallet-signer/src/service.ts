@@ -8,7 +8,7 @@ import { canonicalHash } from './canonical'
 import { paths, type Config } from './config'
 import { ErrorCode, SignerError, denied } from './errors'
 import { GasKeeper } from './gasKeeper'
-import { PM_LAB_INITIAL_GAS_CHAIN_ID, requireMatchingLabInitialGasSnapshots, readLabInitialGasSnapshot, runPmLabInitialGas } from './pmLabInitialGas'
+import { createLabInitialGasReadProviders, PM_LAB_INITIAL_GAS_CHAIN_ID, requireMatchingLabInitialGasSnapshots, readLabInitialGasSnapshot, runPmLabInitialGas } from './pmLabInitialGas'
 import { HdRoot } from './hd'
 import { Keyring } from './keyring'
 import { Policy } from './policy'
@@ -345,10 +345,9 @@ export class SignerService {
 		const reg = this.requireUnlocked()
 		const pm = getAddress(reg.pm)
 		if (this.keyring.info(pm)?.role !== 'pm') throw denied('Lab initial Gas requires the registered PM key')
-		const chainCfg = this.config.chains[String(PM_LAB_INITIAL_GAS_CHAIN_ID)]
-		const urls = chainCfg?.rpcUrls ?? []
-		if (urls.length < 2 || urls[0] === urls[1]) throw denied('Lab initial Gas requires two distinct reviewed RPC endpoints for same-block preflight')
-		const providers = urls.slice(0, 2).map((url) => new JsonRpcProvider(url, Network.from(PM_LAB_INITIAL_GAS_CHAIN_ID), { staticNetwork: Network.from(PM_LAB_INITIAL_GAS_CHAIN_ID), batchMaxCount: 1 }))
+		const urls = this.config.pmLabInitialGas.readRpcUrls
+		if (urls.length !== 2 || urls[0] === urls[1]) throw denied('Lab initial Gas requires two distinct reviewed read-only RPC endpoints for same-block preflight')
+		const providers = createLabInitialGasReadProviders(urls, (url) => new JsonRpcProvider(url, Network.from(PM_LAB_INITIAL_GAS_CHAIN_ID), { staticNetwork: Network.from(PM_LAB_INITIAL_GAS_CHAIN_ID), batchMaxCount: 1 }))
 		const provider = this.txm.provider(PM_LAB_INITIAL_GAS_CHAIN_ID)
 		const audit = this.audit
 		return runPmLabInitialGas({
